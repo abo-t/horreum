@@ -1,0 +1,28 @@
+{
+  "_doc": "Równoważność międzykatalogowa (polityka NGC-wins). Messier/Caldwell/nazwy potoczne = alias-only -> rozwiązują się do klucza NGC/IC. Klucze i wartości w formie catalog_canon: M{int}, C{int} (Caldwell), NGC/IC bez zer wiodących. Rośnie PO potwierdzeniu realnych kolizji w danych — bez wpisów na zapas. Edge: M45/M24/M40 nie mają NGC -> zostają kluczem Messier (brak wpisu = brak mapowania).",
+  "messier_to_ngc": {
+    "M31": "NGC224",
+    "M42": "NGC1976",
+    "M51": "NGC5194",
+    "M81": "NGC3031",
+    "M82": "NGC3034",
+    "M92": "NGC6341",
+    "M101": "NGC5457",
+    "M106": "NGC4258"
+  },
+  "caldwell_to_ngc": {
+    "C3": "NGC4236",
+    "C4": "NGC7023",
+    "C12": "NGC6946",
+    "C23": "NGC891",
+    "C33": "NGC6992"
+  },
+  "sh2_to_ic": {
+    "Sh2-190": "IC1805"
+  },
+  "cross_to_ngc": {
+    "Sh2-184": "NGC281",
+    "UGC7772": "NGC4565",
+    "LDN1174": "NGC7023"
+  }
+}

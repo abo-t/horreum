@@ -4,12 +4,15 @@ Buduje REALNE pliki FITS przez astropy (pierwsza zależność runtime) i czyta j
 """
 import hashlib
 import json
+import struct
 
 import numpy as np
 import pytest
 from astropy.io import fits
 
-from horreum.scan import iter_fits, read_fits_header, scan_file
+from horreum.scan import (
+    iter_fits, iter_headers, read_fits_header, read_header, read_xisf_header, scan_file,
+)
 
 
 def _write_fits(path, cards=(), data=None, extra_hdus=()):
@@ -59,7 +62,7 @@ def test_iter_fits_rekursywnie_i_filtruje(tmp_path):
     _write_fits(tmp_path / "b.FIT")
     _write_fits(tmp_path / "sub" / "c.fts")
     (tmp_path / "notes.txt").write_text("nie fits")
-    (tmp_path / "img.xisf").write_bytes(b"XISF0")   # osobny moduł, nie tu
+    (tmp_path / "img.xisf").write_bytes(b"XISF0")   # XISF łapie iter_headers, nie iter_fits
     got = [p.name for p in iter_fits(tmp_path)]
     assert got == sorted(["a.fits", "b.FIT", "c.fts"])
 
@@ -101,6 +104,148 @@ def test_scan_nie_modyfikuje_pliku(tmp_path):
     """Inwariant append-only: skan to czysty odczyt — bajty i mtime pliku bez zmian."""
     f = _write_fits(tmp_path / "ro.fits", cards=[("OBJECT", "M31")],
                     data=np.zeros((4, 4), dtype=np.uint16))
+    before = f.read_bytes()
+    before_mtime = f.stat().st_mtime
+    scan_file(str(f))
+    assert f.read_bytes() == before
+    assert f.stat().st_mtime == before_mtime
+
+
+# --- XISF: czytnik nagłówka stdlib (§Etap 1) ---
+
+def _write_xisf(path, keywords=(), *, namespace=True, trailing_data=True):
+    """Zapisz minimalny monolityczny XISF z podanymi `<FITSKeyword>` (odwzorowanie tego, co
+    osadza PixInsight). `keywords` = iterable (name, value[, comment]). namespace=True → root z
+    xmlns PixInsight (realny wariant; sprawdza odporność czytnika na namespace). SYNTETYK —
+    realny output PixInsighta weryfikuje firsthand-test Zdzinia przed Etapem 3."""
+    ns = ' xmlns="http://www.pixinsight.com/xisf"' if namespace else ""
+    parts = []
+    for kw in keywords:
+        name, value = kw[0], kw[1]
+        comment = kw[2] if len(kw) > 2 else ""
+        parts.append(f'<FITSKeyword name="{name}" value="{value}" comment="{comment}"/>')
+    xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        f'<xisf version="1.0"{ns}>'
+        '<Image geometry="4:4:1" sampleFormat="UInt16" location="attachment:0:32">'
+        + "".join(parts) +
+        '</Image></xisf>'
+    ).encode("utf-8")
+    with open(path, "wb") as fh:
+        fh.write(b"XISF0100")
+        fh.write(struct.pack("<I", len(xml)))
+        fh.write(b"\x00\x00\x00\x00")           # reserved
+        fh.write(xml)
+        if trailing_data:
+            fh.write(b"\x00" * 32)              # atrapa bloku danych (czytnik go NIE tyka)
+    return path
+
+
+def test_read_xisf_header_klucze_jako_string(tmp_path):
+    """XISF: `<FITSKeyword>` wyłuskane; wartości jako STRINGI (W3 — rzut na typ to pola gorące).
+    Te same klucze co FITS (INSTRUME/XPIXSZ/...), JSON-owalne (przyszły raw_json)."""
+    f = _write_xisf(tmp_path / "m.xisf", keywords=[
+        ("INSTRUME", "ZWO ASI2600MC Pro"),
+        ("XPIXSZ", "3.76"),
+        ("FOCALLEN", "1600"),
+        ("BAYERPAT", "RGGB"),
+        ("OBJECT", "NGC 4258"),
+    ])
+    hdr = read_xisf_header(str(f))
+    assert hdr["INSTRUME"] == "ZWO ASI2600MC Pro"
+    assert hdr["XPIXSZ"] == "3.76"              # STRING (nie 3.76) — kluczowy fakt W3
+    assert isinstance(hdr["FOCALLEN"], str)
+    assert hdr["OBJECT"] == "NGC 4258"
+    json.dumps(hdr)                             # JSON-owalne → nie rzuca
+
+
+@pytest.mark.parametrize("namespace", [True, False])
+def test_read_xisf_header_odporny_na_namespace(tmp_path, namespace):
+    """Realny PixInsight osadza xmlns; czytnik dopasowuje FITSKeyword po nazwie LOKALNEJ, więc
+    działa z namespace I bez (najwyższe ryzyko Etapu 1 — parser binarny spoza Custosa/astropy)."""
+    f = _write_xisf(tmp_path / f"ns_{namespace}.xisf",
+                    keywords=[("INSTRUME", "ZWO ASI294MC Pro"), ("XPIXSZ", "4.63")],
+                    namespace=namespace)
+    hdr = read_xisf_header(str(f))
+    assert hdr["INSTRUME"] == "ZWO ASI294MC Pro"
+    assert hdr["XPIXSZ"] == "4.63"
+
+
+def test_read_xisf_klucz_malymi_literami_normalizowany(tmp_path):
+    """Nazwa FITSKeyword sprowadzona do wielkich liter (kontrakt z FITS: `header.get('INSTRUME')`)."""
+    f = _write_xisf(tmp_path / "lc.xisf", keywords=[("instrume", "ZWO ASI2600MM Pro")])
+    assert read_xisf_header(str(f))["INSTRUME"] == "ZWO ASI2600MM Pro"
+
+
+def test_read_xisf_comment_history_listy(tmp_path):
+    """Powtarzalne COMMENT/HISTORY z XISF (PixInsight zachowuje karty FITS) → listy, jak w FITS."""
+    f = _write_xisf(tmp_path / "log.xisf", keywords=[
+        ("HISTORY", "krok 1"), ("HISTORY", "krok 2"),
+        ("COMMENT", "uwaga A"), ("COMMENT", "uwaga B"),
+        ("INSTRUME", "ZWO ASI2600MM Pro"),
+    ])
+    hdr = read_xisf_header(str(f))
+    assert hdr["HISTORY"] == ["krok 1", "krok 2"]
+    assert hdr["COMMENT"] == ["uwaga A", "uwaga B"]
+    assert hdr["INSTRUME"] == "ZWO ASI2600MM Pro"
+
+
+def test_read_xisf_zla_sygnatura_rzuca(tmp_path):
+    """Zła sygnatura → wyjątek (czytnik nie zgaduje; miękkie lądowanie należy do scan_file)."""
+    bad = tmp_path / "fake.xisf"
+    bad.write_bytes(b"NOTXISF!" + b"\x00" * 20)
+    with pytest.raises(Exception):
+        read_xisf_header(str(bad))
+
+
+def test_iter_headers_lapie_fits_i_xisf(tmp_path):
+    """iter_headers zbiera 4 rozszerzenia (.fits/.fit/.fts/.xisf, case-insensitive), pomija inne,
+    posortowane. iter_fits pozostaje FITS-only (XISF łapie tylko iter_headers)."""
+    (tmp_path / "sub").mkdir()
+    _write_fits(tmp_path / "a.fits")
+    _write_fits(tmp_path / "b.FIT")
+    _write_xisf(tmp_path / "sub" / "c.xisf", keywords=[("INSTRUME", "x")])
+    _write_xisf(tmp_path / "d.XISF", keywords=[("INSTRUME", "y")])
+    (tmp_path / "notes.txt").write_text("nie nagłówek")
+    paths = iter_headers(tmp_path)
+    assert {p.name for p in paths} == {"a.fits", "b.FIT", "c.xisf", "d.XISF"}   # 4 ext, .txt pominięty, rekursja
+    assert paths == sorted(paths)                                   # deterministycznie posortowane po ścieżce
+    assert "d.XISF" not in [p.name for p in iter_fits(tmp_path)]    # FITS-only nie łapie xisf
+
+
+def test_read_header_dyspozytor_po_rozszerzeniu(tmp_path):
+    """read_header kieruje .xisf → czytnik XISF (wartość STRING), .fits → astropy (typ natywny)."""
+    xf = _write_xisf(tmp_path / "x.xisf", keywords=[("XPIXSZ", "3.76")])
+    ff = _write_fits(tmp_path / "x.fits", cards=[("XPIXSZ", 3.76)])
+    assert read_header(str(xf))["XPIXSZ"] == "3.76"        # string (XISF)
+    assert read_header(str(ff))["XPIXSZ"] == 3.76          # float (FITS)
+
+
+def test_scan_file_xisf_pelny_rekord(tmp_path):
+    """scan_file na XISF → ScanRecord z sha1/stat + nagłówkiem (string), error None."""
+    f = _write_xisf(tmp_path / "frame.xisf",
+                    keywords=[("INSTRUME", "ZWO ASI2600MC Pro"), ("XPIXSZ", "3.76")])
+    rec = scan_file(str(f))
+    assert rec.sha1 == hashlib.sha1(f.read_bytes()).hexdigest()
+    assert rec.error is None
+    assert rec.header["INSTRUME"] == "ZWO ASI2600MC Pro"
+
+
+def test_scan_file_miekkie_ladowanie_W1(tmp_path):
+    """W1: plik o rozpoznanym rozszerzeniu, ale nieczytelnym nagłówku → scan_file NIE rzuca;
+    zwraca header=None + error, a tożsamość (sha1) i namiary są wypełnione (frame/location powstaną)."""
+    bad = tmp_path / "broken.xisf"
+    bad.write_bytes(b"NOTXISF!" + b"\x00" * 20)
+    rec = scan_file(str(bad))
+    assert rec.header is None
+    assert rec.error and "XISF" in rec.error
+    assert rec.sha1 == hashlib.sha1(bad.read_bytes()).hexdigest()   # tożsamość przeżywa brak nagłówka
+    assert rec.size_bytes == bad.stat().st_size
+
+
+def test_scan_nie_modyfikuje_xisf(tmp_path):
+    """Inwariant append-only także dla XISF: skan czyta sam nagłówek — bajty i mtime bez zmian."""
+    f = _write_xisf(tmp_path / "ro.xisf", keywords=[("OBJECT", "M31")])
     before = f.read_bytes()
     before_mtime = f.stat().st_mtime
     scan_file(str(f))

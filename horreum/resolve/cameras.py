@@ -7,6 +7,7 @@
 `GAIN/OFFSET/CCD-TEMP/USBLIMIT` to USTAWIENIA akwizycji → `header` (audyt), NIGDY tożsamość.
 """
 import re
+from dataclasses import dataclass
 
 from ._text import norm
 
@@ -54,3 +55,37 @@ def is_mono(*, bayerpat=None, model_canon=None, raw_format=None):
     if raw_format:                              # DSLR raw bez BAYERPAT => kolor
         return 0, "raw_format"
     return None, "review"
+
+
+@dataclass(frozen=True)
+class CameraIdentity:
+    """Oś KAMERA wyłuskana ze zeznania nagłówka — wejście dla `repo.upsert_camera` (te same pola).
+    Czysta dana, NIE zapis: sam upsert (jedna klinga + event) należy do repo."""
+    model_canon: str
+    pixel_um: float
+    is_mono: object              # 1 mono | 0 kolor | None (review)
+    is_mono_source: str
+    raw_instrume: object         # surowy INSTRUME (audyt) | None
+
+
+def camera_identity(header):
+    """Wyłoń tożsamość kamery ze zeznania nagłówka FITS (dict ze skanu). PLAN §3.1/§3.6.
+
+    Zwraca `CameraIdentity` albo None, gdy tożsamości NIE da się złożyć — brak INSTRUME do
+    normalizacji LUB brak XPIXSZ (a `pixel_um` jest częścią klucza UNIQUE, NOT NULL). Wtedy
+    review należy do warstwy frame (§4.2): `event(camera.review)` przy braku osi.
+
+    AGNOSTYCZNA (PLAN §5.8): nieznany model NIE wywala — `ASI294` bez sufiksu i Sony-w-FITS
+    dają model_canon + pixel_um, lecz `is_mono` wpada na review (brak BAYERPAT i brak modelu
+    ZWO rozstrzygającego mono/kolor). Oś powstaje; nierozstrzygnięty jest tylko mono.
+    """
+    raw_instrume = header.get("INSTRUME")
+    model_canon = normalize_camera(raw_instrume)
+    pixel_um = header.get("XPIXSZ")
+    if not model_canon or pixel_um is None:
+        return None
+    mono, source = is_mono(bayerpat=header.get("BAYERPAT"), model_canon=model_canon)
+    return CameraIdentity(
+        model_canon=model_canon, pixel_um=pixel_um,
+        is_mono=mono, is_mono_source=source, raw_instrume=raw_instrume,
+    )

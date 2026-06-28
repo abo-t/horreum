@@ -2,6 +2,7 @@
 import json
 
 from horreum import db, repo
+from horreum.resolve.cameras import camera_identity
 
 NOW = "2026-06-28T12:00:00"
 
@@ -50,4 +51,23 @@ def test_trzy_kamery_2600_rozne_model_canon(tmp_path):
                            is_mono_source=src, raw_instrume="x", now=NOW)
     assert con.execute("SELECT count(*) FROM camera").fetchone()[0] == 3
     assert con.execute("SELECT count(*) FROM event WHERE verb='camera.upserted'").fetchone()[0] == 3
+    con.close()
+
+
+def test_camera_identity_zasila_upsert_camera(tmp_path):
+    """Wertykał §4.3 (bez warstwy frame): zeznanie nagłówka → camera_identity → upsert_camera.
+    Pola tożsamości wpadają 1:1; powstaje kamera + event."""
+    con = _fresh(tmp_path)
+    ident = camera_identity({"INSTRUME": "ZWO ASI2600MM Pro", "XPIXSZ": 3.76})
+    cam_id, created = repo.upsert_camera(
+        con, model_canon=ident.model_canon, pixel_um=ident.pixel_um,
+        is_mono=ident.is_mono, is_mono_source=ident.is_mono_source,
+        raw_instrume=ident.raw_instrume, now=NOW)
+    assert created is True
+    row = con.execute(
+        "SELECT model_canon, pixel_um, is_mono, is_mono_source FROM camera WHERE id=?",
+        (cam_id,)).fetchone()
+    assert (row["model_canon"], row["pixel_um"], row["is_mono"], row["is_mono_source"]) \
+        == ("ASI2600MM", 3.76, 1, "model")
+    assert con.execute("SELECT count(*) FROM event WHERE verb='camera.upserted'").fetchone()[0] == 1
     con.close()

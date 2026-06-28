@@ -17,3 +17,25 @@ def _to_float(value):
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _to_int(value):
+    """str/liczba → int; None / `''` / niekonwertowalny → None (W3). XISF daje stringi (`'100'`,
+    bywa `'100.0'`) — `int(float(x))` znosi oba. UWAGA: `0`/`'0'` to POPRAWNA wartość (np. OFFSET=0),
+    NIE None — rozróżniaj (nie `if value:`)."""
+    if value is None:
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_text(value):
+    """liczba/str → str; None lub pusty `''` → None. Pole TEXT „spójnie" niezależnie od formatu:
+    `GAIN` jako FITS-int `100` i XISF-string `'100'` dają jednakowo `'100'` (audyt). UWAGA W2:
+    pusty `''` (np. FILTER nieobecny) → None; ale `0` → `'0'` (zero to wartość, nie brak)."""
+    if value is None:
+        return None
+    s = str(value)
+    return s if s != "" else None

@@ -4,15 +4,20 @@ Buduje REALNE pliki FITS przez astropy (pierwsza zależność runtime) i czyta j
 """
 import hashlib
 import json
+import shutil
 import struct
 
 import numpy as np
 import pytest
 from astropy.io import fits
 
+from horreum import db
 from horreum.scan import (
     iter_fits, iter_headers, read_fits_header, read_header, read_xisf_header, scan_file,
+    scan_tree,
 )
+
+NOW = "2026-06-28T12:00:00"
 
 
 def _write_fits(path, cards=(), data=None, extra_hdus=()):
@@ -272,3 +277,125 @@ def test_scan_nie_modyfikuje_xisf(tmp_path):
     scan_file(str(f))
     assert f.read_bytes() == before
     assert f.stat().st_mtime == before_mtime
+
+
+# --- scan_tree: pętla płaska, pierwsze realne zapisy przez jedną klingę (§Etap 4) ---
+
+def _db(tmp_path):
+    return db.open_db(str(tmp_path / "h.db"))
+
+
+def test_scan_tree_fits_xisf_frame_location_header(tmp_path):
+    """Mieszane drzewo FITS+XISF → frame+location+header dla obu; kind z IMAGETYP (light + master_flat)."""
+    con = _db(tmp_path)
+    tree = tmp_path / "tree"; tree.mkdir()
+    _write_fits(tree / "light.fits",
+                cards=[("INSTRUME", "ZWO ASI2600MM Pro"), ("XPIXSZ", 3.76), ("IMAGETYP", "LIGHT")],
+                data=np.zeros((4, 4), np.uint16))
+    _write_xisf(tree / "master.xisf",
+                keywords=[("INSTRUME", "'ZWO ASI2600MC Pro'"), ("XPIXSZ", "3.76"),
+                          ("IMAGETYP", "'Master Flat'"), ("BAYERPAT", "'RGGB'")])
+    s = scan_tree(con, tree, volume="VOL1", now=NOW)
+    assert (s.files, s.frames_new, s.locations_new, s.headers) == (2, 2, 2, 2)
+    assert con.execute("SELECT count(*) FROM frame").fetchone()[0] == 2
+    assert con.execute("SELECT count(*) FROM header").fetchone()[0] == 2
+    assert {r[0] for r in con.execute("SELECT kind FROM frame")} == {"light", "master_flat"}
+    con.close()
+
+
+def test_scan_tree_W3_jedna_kamera_fits_sub_xisf_master(tmp_path):
+    """SEDNO W3: ASI2600MC z suba-FITS (XPIXSZ float 3.76) i mastera-XISF (XPIXSZ string '3.76')
+    → JEDNA kamera (nierozbita po typie). To sedno całego planu skanu."""
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    _write_fits(tree / "sub.fits",
+                cards=[("INSTRUME", "ZWO ASI2600MC Pro"), ("XPIXSZ", 3.76),
+                       ("BAYERPAT", "RGGB"), ("IMAGETYP", "LIGHT")],
+                data=np.zeros((4, 4), np.uint16))
+    _write_xisf(tree / "master.xisf",
+                keywords=[("INSTRUME", "'ZWO ASI2600MC Pro'"), ("XPIXSZ", "3.76"),
+                          ("BAYERPAT", "'RGGB'"), ("IMAGETYP", "'Master Flat'")])
+    scan_tree(con, tree, now=NOW)
+    assert con.execute("SELECT count(*) FROM camera WHERE model_canon='ASI2600MC'").fetchone()[0] == 1
+    cam_ids = {r[0] for r in con.execute("SELECT camera_id FROM frame")}
+    assert cam_ids != {None} and len(cam_ids) == 1   # oba frame'y → ta sama, niepusta kamera
+    con.close()
+
+
+def test_scan_tree_multi_location_synthetic(tmp_path):
+    """1:N location SYNTETYCZNY (0 naturalnych duplikatów sha1): ten sam plik w 2 ścieżkach →
+    JEDEN frame (sha1), DWIE location, JEDEN header (1:1)."""
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    (tree / "a").mkdir(); (tree / "b").mkdir()
+    src = _write_fits(tree / "a" / "x.fits",
+                      cards=[("INSTRUME", "ZWO ASI2600MM Pro"), ("XPIXSZ", 3.76), ("IMAGETYP", "LIGHT")],
+                      data=np.zeros((4, 4), np.uint16))
+    shutil.copy(str(src), str(tree / "b" / "x.fits"))
+    s = scan_tree(con, tree, now=NOW)
+    assert (s.files, s.frames_new, s.frames_existing, s.locations_new) == (2, 1, 1, 2)
+    assert con.execute("SELECT count(*) FROM frame").fetchone()[0] == 1
+    assert con.execute("SELECT count(*) FROM location").fetchone()[0] == 2
+    assert con.execute("SELECT count(*) FROM header").fetchone()[0] == 1
+    con.close()
+
+
+def test_scan_tree_header_none_frame_review_skip(tmp_path):
+    """W1: plik o rozpoznanym rozszerzeniu, lecz nieczytelnym nagłówku → event(frame.review),
+    frame NIE powstaje (skip)."""
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    (tree / "broken.xisf").write_bytes(b"NOTXISF!" + b"\x00" * 20)
+    s = scan_tree(con, tree, now=NOW)
+    assert (s.files, s.frame_review, s.frames_new) == (1, 1, 0)
+    assert con.execute("SELECT count(*) FROM frame").fetchone()[0] == 0
+    assert con.execute("SELECT count(*) FROM event WHERE verb='frame.review'").fetchone()[0] == 1
+    con.close()
+
+
+def test_scan_tree_camera_review_frame_jednak_powstaje(tmp_path):
+    """camera_identity=None (brak INSTRUME) → event(camera.review), ALE frame+location+header
+    powstają (tożsamość sha1 jest), camera_id=NULL."""
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    _write_fits(tree / "noinstr.fits",
+                cards=[("XPIXSZ", 3.76), ("IMAGETYP", "LIGHT")], data=np.zeros((4, 4), np.uint16))
+    s = scan_tree(con, tree, now=NOW)
+    assert (s.frames_new, s.camera_review, s.headers) == (1, 1, 1)
+    assert con.execute("SELECT camera_id FROM frame").fetchone()["camera_id"] is None
+    assert con.execute("SELECT count(*) FROM event WHERE verb='camera.review'").fetchone()[0] == 1
+    con.close()
+
+
+def test_scan_tree_kind_unmapped(tmp_path):
+    """IMAGETYP niepuste a niezmapowane → kind=unknown + event(kind.unmapped); frame i tak powstaje."""
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    _write_fits(tree / "fw.fits",
+                cards=[("INSTRUME", "ZWO ASI2600MM Pro"), ("XPIXSZ", 3.76), ("IMAGETYP", "FlatWizard")],
+                data=np.zeros((4, 4), np.uint16))
+    s = scan_tree(con, tree, now=NOW)
+    assert s.kind_unmapped == 1
+    assert con.execute("SELECT kind FROM frame").fetchone()[0] == "unknown"
+    assert con.execute("SELECT count(*) FROM event WHERE verb='kind.unmapped'").fetchone()[0] == 1
+    con.close()
+
+
+def test_scan_tree_jedna_klinga_kazdy_zapis_ma_event(tmp_path):
+    """Jedna klinga w działaniu: liczność każdej encji == liczność jej eventu (frame/location/
+    header/camera). To inwariant „baza = autorytet" zweryfikowany na realnym przebiegu."""
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    _write_fits(tree / "l.fits",
+                cards=[("INSTRUME", "ZWO ASI2600MM Pro"), ("XPIXSZ", 3.76), ("IMAGETYP", "LIGHT")],
+                data=np.zeros((4, 4), np.uint16))
+    _write_xisf(tree / "m.xisf",
+                keywords=[("INSTRUME", "'ZWO ASI2600MC Pro'"), ("XPIXSZ", "3.76"),
+                          ("BAYERPAT", "'RGGB'"), ("IMAGETYP", "'Master Flat'")])
+    scan_tree(con, tree, now=NOW)
+    for entity, verb in [("frame", "frame.observed"), ("location", "location.added"),
+                         ("header", "header.recorded"), ("camera", "camera.upserted")]:
+        n_entity = con.execute(f"SELECT count(*) FROM {entity}").fetchone()[0]
+        n_event = con.execute("SELECT count(*) FROM event WHERE verb=?", (verb,)).fetchone()[0]
+        assert n_entity == n_event, f"{entity}: {n_entity} encji vs {n_event} eventów"
+    con.close()

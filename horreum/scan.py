@@ -1,4 +1,4 @@
-"""Skan drzewa FITS + XISF — primitivy READ-ONLY fazy skanu (PLAN §4 krok 1; §Etap 1).
+"""Skan drzewa FITS + XISF — primitivy read-only + pętla płaska skanu (PLAN §4; §Etap 1/§Etap 4).
 
 Per plik produkuje TOŻSAMOŚĆ + ZEZNANIE nagłówka, niczego nie zapisując:
   - `sha1_of` (binarnie 'rb') = tożsamość frame'a (przeżywa rename/move),
@@ -9,8 +9,10 @@ Per plik produkuje TOŻSAMOŚĆ + ZEZNANIE nagłówka, niczego nie zapisując:
     warstwy upsertu (krok §4.2). UWAGA W3: XISF zwraca wartości jako STRINGI; rzut na typ robią
     dopiero pola gorące (§Etap 2), nie ten moduł.
 
-Ten moduł NIE dotyka bazy (żadnego DML — meta-tripwir AST to potwierdza) i NIE zapisuje na dysk
-usera (inwariant append-only, PLAN §6): pliki otwierane WYŁĄCZNIE do odczytu. FITS przez astropy
+Żaden zapis nie idzie z tego modułu wprost: primitywy (`iter_*`/`read_*`/`scan_file`) są read-only,
+a pętla `scan_tree` (§Etap 4) deleguje WSZYSTKIE zapisy do `repo` (jedna klinga) — scan.py nie
+wykonuje żadnego DML (meta-tripwir AST to potwierdza). Nie zapisuje też na dysk usera (inwariant
+append-only, PLAN §6): pliki otwierane WYŁĄCZNIE do odczytu. FITS przez astropy
 `memmap=False` i bez sięgania po `.data`; XISF czyta tylko nagłówek (sygnatura + XML, bez bloków
 danych) — więc na Windowsie nie zostaje uchwyt blokujący plik. `astropy` jest PIERWSZĄ zależnością
 runtime Horreum (dochodzi z czytnikiem FITS); XISF korzysta wyłącznie ze stdlib.
@@ -19,6 +21,7 @@ Miękkie lądowanie (W1): `read_*` MOGĄ rzucać dla pliku nieczytelnego/nierozp
 `scan_file` (zwraca `ScanRecord(header=None, error=...)`, tożsamość `sha1` ZACHOWANA), nie pętla
 ani użytkownik. Nierozstrzygalność trafia do `event(*.review)` w warstwie upsertu (§Etap 4).
 """
+import json
 import struct
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -27,7 +30,11 @@ from pathlib import Path
 
 from astropy.io import fits
 
+from . import repo
 from .hashing import sha1_of
+from .resolve.cameras import camera_identity
+from .resolve.frames import normalize_kind
+from .resolve.headers import extract_header
 
 # Rozszerzenia nagłówkonośne pierwszego przebiegu (PLAN §1.1: jeden mechanizm, format = opakowanie).
 # DSLR-raw (.ARW/.DNG, czytnik EXIF) to DRUGI przebieg / osobny moduł — NIE tu (PLAN §1.5).
@@ -218,3 +225,90 @@ def scan_file(path):
         path=str(p), sha1=sha1, size_bytes=st.st_size, mtime=mtime,
         header=header, error=error,
     )
+
+
+@dataclass
+class ScanSummary:
+    """Zliczenia jednego przebiegu `scan_tree` — do firsthand-weryfikacji integralności."""
+    files: int = 0
+    frames_new: int = 0
+    frames_existing: int = 0
+    locations_new: int = 0
+    headers: int = 0
+    frame_review: int = 0
+    camera_review: int = 0
+    kind_unmapped: int = 0
+
+
+def _filetype(path):
+    """Format pliku z rozszerzenia: `xisf` | `fits` (fit/fts też FITS). DSLR-raw = drugi przebieg."""
+    return "xisf" if Path(path).suffix.lower() in XISF_SUFFIXES else "fits"
+
+
+def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now):
+    """Pętla PŁASKA: każdy plik nagłówkonośny w `root` oceniany RAZ i wciągany przez jedną klingę
+    (`repo`). Jeden plik = jedno dotknięcie (§1.2). Zapis WYŁĄCZNIE przez `repo` (zero DML tutaj).
+
+    Per plik:
+      - nagłówek nieczytelny (W1) → `repo.flag_frame_review` (frame NIE powstaje), dalej;
+      - inaczej: oś KAMERA (`camera_identity`→`upsert_camera`; brak osi → `camera_id=None`);
+        `normalize_kind`; `upsert_frame` + `add_location`. NOWY frame → `record_header` (1:1) +
+        ewentualne `flag_camera_review` (brak osi) / `flag_kind_unmapped` (IMAGETYP niezmapowane).
+        ISTNIEJĄCY sha1 → tylko nowa `location` (multi-location), bez ponownego headera/flag.
+      - backstop W1: dowolny nieoczekiwany wyjątek per-plik → `frame.review`, skan leci dalej.
+
+    `volume` placeholder ('?') gdy trwały identyfikator niedostępny — NIE blokuje (to nie tożsamość
+    frame'a, §7.5). `now` jawny (ISO-8601) — deterministyczne testy. Zwraca `ScanSummary`.
+    """
+    summary = ScanSummary()
+    for path in iter_headers(root):
+        summary.files += 1
+        try:
+            rec = scan_file(str(path))
+            if rec.header is None:                         # W1: nieczytelny/nierozpoznany
+                repo.flag_frame_review(con, sha1=rec.sha1, path=rec.path, reason=rec.error, now=now)
+                summary.frame_review += 1
+                continue
+
+            ident = camera_identity(rec.header)
+            camera_id = None
+            if ident is not None:
+                camera_id, _ = repo.upsert_camera(
+                    con, model_canon=ident.model_canon, pixel_um=ident.pixel_um,
+                    is_mono=ident.is_mono, is_mono_source=ident.is_mono_source,
+                    raw_instrume=ident.raw_instrume, now=now)
+
+            kind = normalize_kind(rec.header.get("IMAGETYP"))
+            frame_id, created = repo.upsert_frame(
+                con, sha1=rec.sha1, kind=kind, filetype=_filetype(rec.path),
+                size_bytes=rec.size_bytes, camera_id=camera_id, now=now)
+            if created:
+                summary.frames_new += 1
+            else:
+                summary.frames_existing += 1
+
+            _, loc_created = repo.add_location(
+                con, frame_id=frame_id, volume=volume, drive_letter=drive_letter,
+                path=rec.path, tier=tier, mtime=rec.mtime, now=now)
+            if loc_created:
+                summary.locations_new += 1
+
+            if not created:                                # header 1:1 z frame → tylko dla nowego
+                continue                                   # istniejący sha1 = dopisana sama location
+            repo.record_header(
+                con, frame_id=frame_id, raw_json=json.dumps(rec.header, ensure_ascii=False),
+                now=now, **extract_header(rec.header))
+            summary.headers += 1
+            if ident is None:
+                repo.flag_camera_review(
+                    con, frame_id=frame_id, reason="brak osi KAMERA (INSTRUME/XPIXSZ)", now=now)
+                summary.camera_review += 1
+            imagetyp = rec.header.get("IMAGETYP")
+            if kind == "unknown" and imagetyp and str(imagetyp).strip():
+                repo.flag_kind_unmapped(con, frame_id=frame_id, imagetyp=imagetyp, now=now)
+                summary.kind_unmapped += 1
+        except Exception as exc:                           # backstop W1: pojedynczy plik nie wywala skanu
+            repo.flag_frame_review(
+                con, sha1="?", path=str(path), reason=f"{type(exc).__name__}: {exc}", now=now)
+            summary.frame_review += 1
+    return summary

@@ -88,3 +88,97 @@ def test_dwa_warianty_294_scalaja_sie_w_jedna_kamere(tmp_path):
     assert con.execute("SELECT count(*) FROM camera").fetchone()[0] == 1
     assert con.execute("SELECT count(*) FROM event WHERE verb='camera.upserted'").fetchone()[0] == 1
     con.close()
+
+
+# --- frame / location / header (§Etap 4) ---
+
+def test_upsert_frame_tworzy_i_emituje(tmp_path):
+    con = _fresh(tmp_path)
+    fid, created = repo.upsert_frame(con, sha1="abc123", kind="light", filetype="fits",
+                                     size_bytes=1000, camera_id=None, now=NOW)
+    assert created is True
+    row = con.execute("SELECT kind, filetype, size_bytes FROM frame WHERE id=?", (fid,)).fetchone()
+    assert (row["kind"], row["filetype"], row["size_bytes"]) == ("light", "fits", 1000)
+    ev = con.execute("SELECT verb, target FROM event WHERE verb='frame.observed'").fetchone()
+    assert ev["target"] == f"frame:{fid}"
+    con.close()
+
+
+def test_upsert_frame_idempotentny_po_sha1_bez_zmiany_tozsamosci(tmp_path):
+    """Drugie wystąpienie sha1 → (id, False), kind ORYGINALNY zachowany (multi-location obsłuży
+    add_location); bez drugiego eventu frame.observed."""
+    con = _fresh(tmp_path)
+    id1, c1 = repo.upsert_frame(con, sha1="abc", kind="light", filetype="fits",
+                                size_bytes=1, camera_id=None, now=NOW)
+    id2, c2 = repo.upsert_frame(con, sha1="abc", kind="flat", filetype="xisf",
+                                size_bytes=2, camera_id=None, now=NOW)
+    assert (c1, c2) == (True, False) and id1 == id2
+    assert con.execute("SELECT count(*) FROM frame").fetchone()[0] == 1
+    assert con.execute("SELECT kind FROM frame WHERE id=?", (id1,)).fetchone()["kind"] == "light"
+    assert con.execute("SELECT count(*) FROM event WHERE verb='frame.observed'").fetchone()[0] == 1
+    con.close()
+
+
+def test_add_location_multi_location_1N(tmp_path):
+    """frame 1:N location (SYNTETYCZNY — 0 naturalnych duplikatów sha1): jeden frame, dwie różne
+    ścieżki → dwie location; dwa eventy location.added."""
+    con = _fresh(tmp_path)
+    fid, _ = repo.upsert_frame(con, sha1="abc", kind="light", filetype="fits",
+                               size_bytes=1, camera_id=None, now=NOW)
+    l1, c1 = repo.add_location(con, frame_id=fid, volume="?", path="A/x.fits", mtime=NOW, now=NOW)
+    l2, c2 = repo.add_location(con, frame_id=fid, volume="?", path="B/x.fits", mtime=NOW, now=NOW)
+    assert (c1, c2) == (True, True) and l1 != l2
+    assert con.execute("SELECT count(*) FROM location WHERE frame_id=?", (fid,)).fetchone()[0] == 2
+    assert con.execute("SELECT count(*) FROM event WHERE verb='location.added'").fetchone()[0] == 2
+    con.close()
+
+
+def test_add_location_idempotentna_po_volume_path(tmp_path):
+    """Ta sama (volume, path) → (id, False), bez duplikatu i bez drugiego eventu (idempotencja skanu)."""
+    con = _fresh(tmp_path)
+    fid, _ = repo.upsert_frame(con, sha1="abc", kind="light", filetype="fits",
+                               size_bytes=1, camera_id=None, now=NOW)
+    l1, c1 = repo.add_location(con, frame_id=fid, volume="V", path="x.fits", now=NOW)
+    l2, c2 = repo.add_location(con, frame_id=fid, volume="V", path="x.fits", now=NOW)
+    assert (c1, c2) == (True, False) and l1 == l2
+    assert con.execute("SELECT count(*) FROM location").fetchone()[0] == 1
+    assert con.execute("SELECT count(*) FROM event WHERE verb='location.added'").fetchone()[0] == 1
+    con.close()
+
+
+def test_record_header_pola_gorace_raw_json_i_event(tmp_path):
+    con = _fresh(tmp_path)
+    fid, _ = repo.upsert_frame(con, sha1="abc", kind="light", filetype="fits",
+                               size_bytes=1, camera_id=None, now=NOW)
+    repo.record_header(con, frame_id=fid, raw_json='{"INSTRUME": "x"}', now=NOW,
+                       xpixsz=3.76, exptime=300.0, gain="100", offset_adu=0,
+                       instrume="ZWO ASI2600MM Pro", filter_raw=None)
+    row = con.execute("SELECT raw_json, xpixsz, exptime, gain, offset_adu, instrume, filter_raw, "
+                      "focratio_norm FROM header WHERE frame_id=?", (fid,)).fetchone()
+    assert (row["xpixsz"], row["exptime"]) == (3.76, 300.0)
+    assert (row["gain"], row["offset_adu"]) == ("100", 0)            # gain TEXT; offset 0 zachowane
+    assert row["instrume"] == "ZWO ASI2600MM Pro" and row["filter_raw"] is None
+    assert row["raw_json"] == '{"INSTRUME": "x"}' and row["focratio_norm"] is None  # backfill §Etap 5
+    assert con.execute("SELECT count(*) FROM event WHERE verb='header.recorded'").fetchone()[0] == 1
+    con.close()
+
+
+def test_flagi_review_emituja_eventy_bez_zmiany_stanu(tmp_path):
+    """Trzy kanały sygnałów: frame.review (brak frame → target sha1), camera.review i kind.unmapped
+    (frame jest → target frame:id). Żaden nie tworzy/zmienia encji — tylko event."""
+    con = _fresh(tmp_path)
+    repo.flag_frame_review(con, sha1="deadbeef", path="C/bad.fits",
+                           reason="ValueError: nie XISF monolithic", now=NOW)
+    fid, _ = repo.upsert_frame(con, sha1="abc", kind="unknown", filetype="fits",
+                               size_bytes=1, camera_id=None, now=NOW)
+    repo.flag_camera_review(con, frame_id=fid, reason="brak osi KAMERA (INSTRUME/XPIXSZ)", now=NOW)
+    repo.flag_kind_unmapped(con, frame_id=fid, imagetyp="FlatWizard", now=NOW)
+
+    fr = con.execute("SELECT target, reason FROM event WHERE verb='frame.review'").fetchone()
+    assert fr["target"] == "sha1:deadbeef" and "monolithic" in fr["reason"]
+    cr = con.execute("SELECT target FROM event WHERE verb='camera.review'").fetchone()
+    assert cr["target"] == f"frame:{fid}"
+    ku = con.execute("SELECT payload FROM event WHERE verb='kind.unmapped'").fetchone()
+    assert json.loads(ku["payload"])["imagetyp"] == "FlatWizard"
+    assert con.execute("SELECT count(*) FROM frame").fetchone()[0] == 1   # flagi nie tworzą encji
+    con.close()

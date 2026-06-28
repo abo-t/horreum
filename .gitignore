@@ -43,3 +43,5 @@ Thumbs.db
 # === Sekrety / lokalny config ===
 .env
 *.local
+# Konfiguracja Claude Code — cała lokalna (per-maszyna, prywatne ścieżki absolutne)
+.claude/

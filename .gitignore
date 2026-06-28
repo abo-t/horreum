@@ -45,3 +45,6 @@ Thumbs.db
 *.local
 # Konfiguracja Claude Code — cała lokalna (per-maszyna, prywatne ścieżki absolutne)
 .claude/
+
+# === Brief / robocze notatki sesji (prywatne, poza publicznym repo) ===
+brief/

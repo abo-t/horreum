@@ -9,6 +9,7 @@
 import re
 from dataclasses import dataclass
 
+from ._coerce import _to_float
 from ._text import norm
 
 
@@ -69,22 +70,30 @@ class CameraIdentity:
 
 
 def camera_identity(header):
-    """Wyłoń tożsamość kamery ze zeznania nagłówka FITS (dict ze skanu). PLAN §3.1/§3.6.
+    """Wyłoń tożsamość kamery ze zeznania nagłówka (dict ze skanu). PLAN §3.1/§3.6/§Etap 2.
 
     Zwraca `CameraIdentity` albo None, gdy tożsamości NIE da się złożyć — brak INSTRUME do
-    normalizacji LUB brak XPIXSZ (a `pixel_um` jest częścią klucza UNIQUE, NOT NULL). Wtedy
-    review należy do warstwy frame (§4.2): `event(camera.review)` przy braku osi.
+    normalizacji LUB brak/niefloat XPIXSZ (a `pixel_um` jest częścią klucza UNIQUE, NOT NULL).
+    Wtedy review należy do warstwy frame (§4.2): `event(camera.review)` przy braku osi.
 
-    AGNOSTYCZNA (PLAN §5.8): nieznany model NIE wywala — `ASI294` bez sufiksu i Sony-w-FITS
-    dają model_canon + pixel_um, lecz `is_mono` wpada na review (brak BAYERPAT i brak modelu
-    ZWO rozstrzygającego mono/kolor). Oś powstaje; nierozstrzygnięty jest tylko mono.
+    W3: XPIXSZ rzutowany na float (`_to_float`) — XISF podaje liczby jako STRINGI, niejednolity
+    typ rozbiłby `UNIQUE(model_canon, pixel_um)` na FITS-float vs XISF-string. `raw_json` (gdzie
+    indziej) zostaje 1:1 surowy; tu pole gorące = typ jednolity.
+
+    Reguła B (OSC): ZWO bez sufiksu (`^ASI\\d+$`) z kolorem potwierdzonym BAYERPAT (is_mono=0)
+    → domknięcie na MC (`ASI294`→`ASI294MC`). NIGDY MM/MD — brak BAYERPAT zostaje review (nie
+    zgadujemy). Idempotentne: `ASI294MC` ma sufiks nie-cyfrowy → regex nie łapie → nietykane.
+    AGNOSTYCZNA (§5.8): ASI294 bez BAYERPAT → oś powstaje, mono=review; nie-ZWO (Sony placeholder)
+    Reguła B nie tyka (regex ZWO-only); jego mapowanie na body ILCE = drugi przebieg (RAW).
     """
     raw_instrume = header.get("INSTRUME")
     model_canon = normalize_camera(raw_instrume)
-    pixel_um = header.get("XPIXSZ")
+    pixel_um = _to_float(header.get("XPIXSZ"))   # W3: XISF zwraca string → rzut na float
     if not model_canon or pixel_um is None:
         return None
     mono, source = is_mono(bayerpat=header.get("BAYERPAT"), model_canon=model_canon)
+    if mono == 0 and re.fullmatch(r"ASI\d+", model_canon):   # Reguła B: OSC ZWO + kolor → MC
+        model_canon += "MC"
     return CameraIdentity(
         model_canon=model_canon, pixel_um=pixel_um,
         is_mono=mono, is_mono_source=source, raw_instrume=raw_instrume,

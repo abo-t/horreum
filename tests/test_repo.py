@@ -71,3 +71,20 @@ def test_camera_identity_zasila_upsert_camera(tmp_path):
         == ("ASI2600MM", 3.76, 1, "model")
     assert con.execute("SELECT count(*) FROM event WHERE verb='camera.upserted'").fetchone()[0] == 1
     con.close()
+
+
+def test_dwa_warianty_294_scalaja_sie_w_jedna_kamere(tmp_path):
+    """Reguła B + upsert (§5.3): 'ASI294' (OSC bez sufiksu) i 'ZWO ASI294MC Pro' — oba 4.63 RGGB —
+    dają ten sam model_canon 'ASI294MC' → JEDNA kamera po upsercie. Odwrotność testu 3 kamer 2600:
+    dwa różne stringi wejściowe → jedna oś (a nie rozbicie ASI294/ASI294MC na dwie)."""
+    con = _fresh(tmp_path)
+    for instrume in ("ASI294", "ZWO ASI294MC Pro"):
+        ident = camera_identity({"INSTRUME": instrume, "XPIXSZ": 4.63, "BAYERPAT": "RGGB"})
+        assert ident.model_canon == "ASI294MC"
+        repo.upsert_camera(
+            con, model_canon=ident.model_canon, pixel_um=ident.pixel_um,
+            is_mono=ident.is_mono, is_mono_source=ident.is_mono_source,
+            raw_instrume=ident.raw_instrume, now=NOW)
+    assert con.execute("SELECT count(*) FROM camera").fetchone()[0] == 1
+    assert con.execute("SELECT count(*) FROM event WHERE verb='camera.upserted'").fetchone()[0] == 1
+    con.close()

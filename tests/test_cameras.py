@@ -1,5 +1,6 @@
 """Oś KAMERA: normalize_camera (1:1 z Custosa, Duo→MD, idempotencja) + is_mono (§3.2)
-+ camera_identity (wyłuskanie osi z nagłówka, §3.1/§3.6, agnostyczność §5.8)."""
++ camera_identity (wyłuskanie osi z nagłówka, §3.1/§3.6, agnostyczność §5.8,
+Reguła B OSC→MC i rzut typu W3 — §Etap 2)."""
 import pytest
 
 from horreum.resolve.cameras import camera_identity, is_mono, normalize_camera
@@ -29,9 +30,10 @@ def test_normalize_camera_idempotentne():
         assert normalize_camera(once) == once
 
 
-def test_asi294_bez_sufiksu_to_luka():
-    """'ASI294' bez MM/MC nie dostaje sufiksu — trafi w fallback/review w module nie-2600 (F10).
-    Tu sprawdzamy tylko, że normalize nie wymyśla sufiksu."""
+def test_normalize_camera_asi294_bez_sufiksu_zostaje_surowy():
+    """Separacja warstw: `normalize_camera` świadomie NIE dopisuje sufiksu (normalizer „głupi").
+    Domknięcie OSC = Reguła B w `camera_identity`, gdy BAYERPAT potwierdzi kolor (§Etap 2/§5.8
+    POPRAWIONE) — nie tutaj."""
     assert normalize_camera("ASI294") == "ASI294"
 
 
@@ -73,24 +75,37 @@ def test_camera_identity_mm_z_modelu():
 
 
 def test_camera_identity_mc_kolor_z_bayerpat():
-    """BAYERPAT obecny → kolor z najmocniejszego źródła (priorytet nad modelem)."""
+    """BAYERPAT obecny → kolor z najmocniejszego źródła (priorytet nad modelem). Reguła B nie
+    dotyka modelu z sufiksem (`^ASI\\d+$` nie łapie `ASI2600MC`) — idempotencja."""
     ident = camera_identity({"INSTRUME": "ZWO ASI2600MC Pro", "XPIXSZ": 3.76, "BAYERPAT": "RGGB"})
+    assert ident.model_canon == "ASI2600MC"
     assert (ident.is_mono, ident.is_mono_source) == (0, "bayerpat")
 
 
-def test_camera_identity_asi294_bez_sufiksu_os_powstaje_mono_review():
-    """Agnostyczność (§5.8): ASI294 bez sufiksu NIE wywala — oś powstaje (model+pixel), a is_mono
-    wpada na review (brak BAYERPAT i brak modelu rozstrzygającego mono/kolor)."""
+def test_camera_identity_asi294_z_bayerpat_regula_B_dopisuje_mc():
+    """Reguła B (§Etap 2): ZWO bez sufiksu + kolor potwierdzony BAYERPAT → `ASI294`→`ASI294MC`.
+    Firsthand: 445/445 ASI294 mają BAYERPAT (kolor, NIE review — §5.8 POPRAWIONE)."""
+    ident = camera_identity({"INSTRUME": "ASI294", "XPIXSZ": 4.63, "BAYERPAT": "RGGB"})
+    assert (ident.model_canon, ident.pixel_um) == ("ASI294MC", 4.63)
+    assert (ident.is_mono, ident.is_mono_source) == (0, "bayerpat")
+
+
+def test_camera_identity_asi294_bez_bayerpat_regula_B_nie_strzela():
+    """Agnostyczność (§5.8): ASI294 BEZ BAYERPAT → Reguła B nie strzela (nie zgadujemy MM/MD).
+    Oś powstaje (`ASI294`, pixel), is_mono=review — domknięcie tylko przy potwierdzonym kolorze."""
     ident = camera_identity({"INSTRUME": "ASI294", "XPIXSZ": 4.63})
     assert (ident.model_canon, ident.pixel_um) == ("ASI294", 4.63)
     assert (ident.is_mono, ident.is_mono_source) == (None, "review")
 
 
-def test_camera_identity_sony_fits_os_powstaje_mono_review():
-    """Sony-w-FITS z XPIXSZ: oś powstaje, ale mono nierozstrzygnięte → review (§5.8)."""
-    ident = camera_identity({"INSTRUME": "ILCE-7M3", "XPIXSZ": 4.86})
+def test_camera_identity_sony_fits_z_bayerpat_kolor_placeholder():
+    """Sony Mirrorless (konwersja DNG→FITS) z BAYERPAT → kolor; oś powstaje jako placeholder.
+    Firsthand: 100/100 mają BAYERPAT (4.86 RGGB). Reguła B go NIE tyka (regex `^ASI\\d+$` ZWO-only);
+    mapowanie na konkretne body ILCE = drugi przebieg (RAW)."""
+    ident = camera_identity({"INSTRUME": "Sony Mirrorless Camera", "XPIXSZ": 4.86, "BAYERPAT": "RGGB"})
     assert ident.pixel_um == 4.86
-    assert (ident.is_mono, ident.is_mono_source) == (None, "review")
+    assert (ident.is_mono, ident.is_mono_source) == (0, "bayerpat")
+    assert not ident.model_canon.endswith("MC")   # Reguła B nie dopisuje sufiksu nie-ZWO
 
 
 def test_camera_identity_brak_instrume_niederywowalne():
@@ -101,3 +116,17 @@ def test_camera_identity_brak_instrume_niederywowalne():
 def test_camera_identity_brak_xpixsz_niederywowalne():
     """Brak XPIXSZ → brak pixel_um (część klucza UNIQUE, NOT NULL) → None."""
     assert camera_identity({"INSTRUME": "ZWO ASI2600MM Pro"}) is None
+
+
+def test_camera_identity_xpixsz_string_z_xisf_rzutowany_na_float():
+    """W3: XISF zwraca XPIXSZ jako string (`'3.76'`); pole gorące rzutowane na float → IDENTYCZNA
+    oś co z FITS-float. Inaczej `UNIQUE(model_canon, pixel_um)` rozbiłby kamerę FITS-vs-XISF."""
+    ident = camera_identity({"INSTRUME": "ZWO ASI2600MC Pro", "XPIXSZ": "3.76", "BAYERPAT": "RGGB"})
+    assert ident.pixel_um == 3.76
+    assert isinstance(ident.pixel_um, float)
+
+
+def test_camera_identity_xpixsz_pusty_string_niederywowalne():
+    """W3 brzeg: XPIXSZ pusty (`''`, jak w ubogich nagłówkach) → `_to_float`→None → oś nie powstaje
+    (None), nie crash. Review należy do warstwy frame (§4.2)."""
+    assert camera_identity({"INSTRUME": "ZWO ASI2600MM Pro", "XPIXSZ": ""}) is None

@@ -10,10 +10,11 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "Zdzisław »Abo« Sabat" }]
-# Rdzeń plastra B jest BEZ zależności runtime (stdlib: sqlite3, hashlib, ast, json,
-# importlib.resources) — żeby bramka izolowanego clone'a (§5.11) była szybka i czysta.
-# astropy (czytnik nagłówka FITS) dochodzi z modułem skanu (kolejny krok), nie tu.
-dependencies = []
+# Rdzeń schematu/repo jest BEZ zależności (stdlib: sqlite3, hashlib, ast, json,
+# importlib.resources). Faza SKANU (horreum.scan, PLAN §4 krok 1) wnosi PIERWSZĄ zależność
+# runtime: astropy — czytnik nagłówka FITS. Bramka izolowanego clone'a (§5.11) jest odtąd
+# cięższa o astropy (sankcjonowane: skan bez czytnika FITS nie istnieje).
+dependencies = ["astropy>=5.0"]
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]

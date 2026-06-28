@@ -182,3 +182,73 @@ def test_flagi_review_emituja_eventy_bez_zmiany_stanu(tmp_path):
     assert json.loads(ku["payload"])["imagetyp"] == "FlatWizard"
     assert con.execute("SELECT count(*) FROM frame").fetchone()[0] == 1   # flagi nie tworzą encji
     con.close()
+
+
+# --- telescope / config / backfill (§Etap 5) ---
+
+def test_propose_telescope_idempotentny_i_event(tmp_path):
+    con = _fresh(tmp_path)
+    t1, c1 = repo.propose_telescope(con, f_ratio_nominal=5.6, focal_nominal=784, now=NOW)
+    t2, c2 = repo.propose_telescope(con, f_ratio_nominal=5.6, focal_nominal=784, now=NOW)
+    assert (c1, c2) == (True, False) and t1 == t2
+    row = con.execute("SELECT status, label, f_ratio_nominal, focal_nominal FROM telescope WHERE id=?",
+                      (t1,)).fetchone()
+    assert (row["status"], row["label"]) == ("proposed", None)        # czeka na etykietę usera
+    assert (row["f_ratio_nominal"], row["focal_nominal"]) == (5.6, 784)
+    assert con.execute("SELECT count(*) FROM event WHERE verb='telescope.proposed'").fetchone()[0] == 1
+    con.close()
+
+
+def test_propose_config_i_assign_link_z_inwariantem(tmp_path):
+    """propose_config idempotentny po UNIQUE(telescope,camera); assign_config linkuje frame.config_id
+    (idempotentnie) i utrzymuje INWARIANT §1: config.camera_id == frame.camera_id."""
+    con = _fresh(tmp_path)
+    cam, _ = repo.upsert_camera(con, model_canon="ASI2600MM", pixel_um=3.76, is_mono=1,
+                                is_mono_source="model", raw_instrume="x", now=NOW)
+    tel, _ = repo.propose_telescope(con, f_ratio_nominal=5.6, focal_nominal=784, now=NOW)
+    fid, _ = repo.upsert_frame(con, sha1="abc", kind="light", filetype="fits", size_bytes=1,
+                               camera_id=cam, now=NOW)
+    cfg1, cc1 = repo.propose_config(con, telescope_id=tel, camera_id=cam, now=NOW)
+    cfg2, cc2 = repo.propose_config(con, telescope_id=tel, camera_id=cam, now=NOW)
+    assert (cc1, cc2) == (True, False) and cfg1 == cfg2               # UNIQUE → jeden config
+    assert repo.assign_config(con, frame_id=fid, config_id=cfg1, now=NOW) is True
+    assert repo.assign_config(con, frame_id=fid, config_id=cfg1, now=NOW) is False   # idempotent no-op
+    inv = con.execute("SELECT f.camera_id fcam, c.camera_id ccam FROM frame f "
+                      "JOIN config c ON c.id = f.config_id WHERE f.id=?", (fid,)).fetchone()
+    assert inv["fcam"] == inv["ccam"]                                 # INWARIANT §1
+    assert con.execute("SELECT count(*) FROM event WHERE verb='config.proposed'").fetchone()[0] == 1
+    assert con.execute("SELECT count(*) FROM event WHERE verb='config.assigned'").fetchone()[0] == 1
+    con.close()
+
+
+def test_backfill_focratio_norm_bulk_jeden_event(tmp_path):
+    """Backfill pochodnej focratio_norm/src — jedna transakcja, JEDEN event zbiorczy (count+review)."""
+    con = _fresh(tmp_path)
+    f1, _ = repo.upsert_frame(con, sha1="a", kind="light", filetype="fits", size_bytes=1,
+                              camera_id=None, now=NOW)
+    f2, _ = repo.upsert_frame(con, sha1="b", kind="master_flat", filetype="xisf", size_bytes=1,
+                              camera_id=None, now=NOW)
+    repo.record_header(con, frame_id=f1, raw_json="{}", now=NOW, focratio_raw=5.6, focallen=784.0)
+    repo.record_header(con, frame_id=f2, raw_json="{}", now=NOW, focratio_raw=None)   # master bez focratio
+    repo.backfill_focratio_norm(con, [(f1, 5.6, "ok"), (f2, None, "review")], now=NOW)
+    r1 = con.execute("SELECT focratio_norm, focratio_norm_src FROM header WHERE frame_id=?", (f1,)).fetchone()
+    r2 = con.execute("SELECT focratio_norm, focratio_norm_src FROM header WHERE frame_id=?", (f2,)).fetchone()
+    assert (r1["focratio_norm"], r1["focratio_norm_src"]) == (5.6, "ok")
+    assert (r2["focratio_norm"], r2["focratio_norm_src"]) == (None, "review")
+    ev = con.execute("SELECT payload FROM event WHERE verb='header.focratio_backfilled'").fetchall()
+    assert len(ev) == 1 and json.loads(ev[0]["payload"]) == {"count": 2, "review": 1}
+    con.close()
+
+
+def test_flag_config_i_telescope_review(tmp_path):
+    con = _fresh(tmp_path)
+    fid, _ = repo.upsert_frame(con, sha1="a", kind="master_flat", filetype="xisf", size_bytes=1,
+                               camera_id=None, now=NOW)
+    repo.flag_config_review(con, frame_id=fid, reason="master bez FOCRATIO", now=NOW)
+    tel, _ = repo.propose_telescope(con, f_ratio_nominal=5.6, focal_nominal=784, now=NOW)
+    repo.flag_telescope_review(con, telescope_id=tel, reason="rozpiętość > tolerancja", now=NOW)
+    cr = con.execute("SELECT target, reason FROM event WHERE verb='config.review'").fetchone()
+    assert cr["target"] == f"frame:{fid}" and "FOCRATIO" in cr["reason"]
+    tr = con.execute("SELECT target FROM event WHERE verb='telescope.review'").fetchone()
+    assert tr["target"] == f"telescope:{tel}"
+    con.close()

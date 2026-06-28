@@ -21,6 +21,9 @@ def main(argv=None):
                         help="trwały identyfikator wolumenu (domyślnie placeholder '?')")
     p_scan.add_argument("--tier", default=None, help="cold|scratch")
 
+    p_group = sub.add_parser("group", help="grouper teleskopów + config (krok zbiorczy po skanie)")
+    p_group.add_argument("db", help="ścieżka pliku bazy")
+
     args = parser.parse_args(argv)
     if args.cmd == "init":
         con = db.open_db(args.path)
@@ -36,6 +39,14 @@ def main(argv=None):
                             drive_letter=(Path(args.root).drive or None), tier=args.tier, now=now)
         con.close()
         print(f"Horreum scan {args.root} -> {args.db}: {summary}")   # ASCII: konsola Windows = cp1250
+        return 0
+    if args.cmd == "group":
+        from .grouper import run_grouper                 # lazy: nie ładuj resolve/astropy dla init
+        now = datetime.now(timezone.utc).isoformat()
+        con = db.open_db(args.db)
+        summary = run_grouper(con, now=now)
+        con.close()
+        print(f"Horreum group {args.db}: {summary}")     # ASCII (cp1250)
         return 0
     parser.print_help()
     return 0

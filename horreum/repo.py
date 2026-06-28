@@ -152,3 +152,103 @@ def flag_kind_unmapped(con, *, frame_id, imagetyp, now, actor="scan"):
     with con:
         emit_event(con, actor=actor, verb="kind.unmapped", target=f"frame:{frame_id}", now=now,
                    payload={"imagetyp": imagetyp})
+
+
+def backfill_focratio_norm(con, items, now, actor="grouper"):
+    """Backfill kolumny POCHODNEJ `header.focratio_norm`/`_src` PO skanie (§Etap 5) — osobna faza
+    UPDATE, NIE przez ścieżkę `record_header` (nie psuje zapisu skanu). `items` = lista
+    `(frame_id, focratio_norm, focratio_norm_src)`. Jedna transakcja + JEDEN event zbiorczy
+    `header.focratio_backfilled` (operacja masowa — bez zaśmiecania logu per-wiersz)."""
+    with con:
+        for frame_id, norm, src in items:
+            con.execute(
+                "UPDATE header SET focratio_norm = ?, focratio_norm_src = ? WHERE frame_id = ?",
+                (norm, src, frame_id),
+            )
+        review = sum(1 for _, norm, _ in items if norm is None)
+        emit_event(con, actor=actor, verb="header.focratio_backfilled", target="header:*", now=now,
+                   payload={"count": len(items), "review": review})
+
+
+def propose_telescope(con, *, f_ratio_nominal, focal_nominal, telescop_hint=None,
+                      member_count=None, now, actor="grouper"):
+    """Wyłoń teleskop (oś) z klastra sygnatur — `status='proposed'`, `label=NULL` (etykieta/scalanie
+    = GUI usera, poza plastrem B). Idempotentny po centroidzie `(f_ratio_nominal, focal_nominal)`:
+    istnieje → (id, False) bez eventu; nowy → INSERT + `event(telescope.proposed)`."""
+    row = con.execute(
+        "SELECT id FROM telescope WHERE f_ratio_nominal = ? AND focal_nominal = ?",
+        (f_ratio_nominal, focal_nominal),
+    ).fetchone()
+    if row is not None:
+        return row[0], False
+
+    with con:
+        cur = con.execute(
+            "INSERT INTO telescope(label, f_ratio_nominal, focal_nominal, status, telescop_hint, "
+            "created_at) VALUES (NULL, ?, ?, 'proposed', ?, ?)",
+            (f_ratio_nominal, focal_nominal, telescop_hint, now),
+        )
+        telescope_id = cur.lastrowid
+        emit_event(
+            con, actor=actor, verb="telescope.proposed", target=f"telescope:{telescope_id}",
+            now=now,
+            payload={"f_ratio_nominal": f_ratio_nominal, "focal_nominal": focal_nominal,
+                     "member_count": member_count},
+        )
+    return telescope_id, True
+
+
+def flag_telescope_review(con, *, telescope_id, reason, now, actor="grouper"):
+    """Klaster podejrzany (rozpiętość wewnętrzna > tolerancja — chaining single-linkage) →
+    `event(telescope.review)`. Teleskop powstaje (proposed), lecz oznaczony do przejrzenia."""
+    with con:
+        emit_event(con, actor=actor, verb="telescope.review", target=f"telescope:{telescope_id}",
+                   now=now, reason=reason)
+
+
+def propose_config(con, *, telescope_id, camera_id, now, actor="grouper"):
+    """Wyłoń config (iloczyn telescope×camera) realnie występujący w skanie — `status='proposed'`.
+    Idempotentny po `UNIQUE(telescope_id, camera_id)`: istnieje → (id, False); nowy → INSERT +
+    `event(config.proposed)`."""
+    row = con.execute(
+        "SELECT id FROM config WHERE telescope_id = ? AND camera_id = ?",
+        (telescope_id, camera_id),
+    ).fetchone()
+    if row is not None:
+        return row[0], False
+
+    with con:
+        cur = con.execute(
+            "INSERT INTO config(telescope_id, camera_id, label, status, created_at) "
+            "VALUES (?, ?, NULL, 'proposed', ?)",
+            (telescope_id, camera_id, now),
+        )
+        config_id = cur.lastrowid
+        emit_event(
+            con, actor=actor, verb="config.proposed", target=f"config:{config_id}", now=now,
+            payload={"telescope_id": telescope_id, "camera_id": camera_id},
+        )
+    return config_id, True
+
+
+def assign_config(con, *, frame_id, config_id, now, actor="grouper"):
+    """Przypisz config do frame'a (`frame.config_id`). INWARIANT (DDL §1): `config.camera_id` musi
+    == `frame.camera_id` — gwarantuje grouper (config budowany z kamery tego frame'a). Idempotentny:
+    już przypisany ten sam config → False bez eventu; inaczej UPDATE + `event(config.assigned)`."""
+    row = con.execute("SELECT config_id FROM frame WHERE id = ?", (frame_id,)).fetchone()
+    if row is not None and row[0] == config_id:
+        return False
+
+    with con:
+        con.execute("UPDATE frame SET config_id = ? WHERE id = ?", (config_id, frame_id))
+        emit_event(con, actor=actor, verb="config.assigned", target=f"frame:{frame_id}", now=now,
+                   payload={"config_id": config_id})
+    return True
+
+
+def flag_config_review(con, *, frame_id, reason, now, actor="grouper"):
+    """`frame.config_id` nierozstrzygalny (brak teleskopu/kamery/focratio — np. master bez FOCRATIO,
+    W4) → `event(config.review)`. config_id zostaje NULL; ZERO cichego NULL (każdy ma powód)."""
+    with con:
+        emit_event(con, actor=actor, verb="config.review", target=f"frame:{frame_id}", now=now,
+                   reason=reason)

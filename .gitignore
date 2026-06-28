@@ -1,0 +1,45 @@
+# === Bazy i stan runtime (to jest STAN, nie kod — każdy user ma swój) ===
+*.db
+*.sqlite
+*.sqlite3
+*.db.bak*
+*.db-shm
+*.db-wal
+horreum*.db
+custos*.db
+manifest*.sqlite
+
+# === Scratch / materializacja na NVMe (jednorazowe projekcje WBPP) ===
+scratch/
+.scratch/
+*.scratch/
+
+# === Dane archiwum / recon (nie należą do repo kodu) ===
+recon/
+data/archive/
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+.tox/
+
+# === IDE / OS ===
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# === Sekrety / lokalny config ===
+.env
+*.local

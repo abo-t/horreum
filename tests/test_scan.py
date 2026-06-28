@@ -143,20 +143,41 @@ def _write_xisf(path, keywords=(), *, namespace=True, trailing_data=True):
 
 def test_read_xisf_header_klucze_jako_string(tmp_path):
     """XISF: `<FITSKeyword>` wyłuskane; wartości jako STRINGI (W3 — rzut na typ to pola gorące).
-    Te same klucze co FITS (INSTRUME/XPIXSZ/...), JSON-owalne (przyszły raw_json)."""
+    Realistyczny wzorzec PixInsighta: karty stringowe w apostrofach FITS (odcudzysławiane →
+    kontrakt 1:1 z FITS), liczby bez apostrofów. JSON-owalne (przyszły raw_json)."""
     f = _write_xisf(tmp_path / "m.xisf", keywords=[
-        ("INSTRUME", "ZWO ASI2600MC Pro"),
-        ("XPIXSZ", "3.76"),
+        ("INSTRUME", "'ZWO ASI2600MC Pro'"),    # string FITS → w apostrofach (jak realny PixInsight)
+        ("XPIXSZ", "3.76"),                      # liczba → bez apostrofów
         ("FOCALLEN", "1600"),
-        ("BAYERPAT", "RGGB"),
-        ("OBJECT", "NGC 4258"),
+        ("BAYERPAT", "'RGGB'"),
+        ("OBJECT", "'NGC 4258'"),
+    ])
+    hdr = read_xisf_header(str(f))
+    assert hdr["INSTRUME"] == "ZWO ASI2600MC Pro"   # odcudzysłowione → 1:1 z read_fits_header
+    assert hdr["XPIXSZ"] == "3.76"              # STRING (nie 3.76) — kluczowy fakt W3
+    assert isinstance(hdr["FOCALLEN"], str)
+    assert hdr["BAYERPAT"] == "RGGB"
+    assert hdr["OBJECT"] == "NGC 4258"
+    json.dumps(hdr)                             # JSON-owalne → nie rzuca
+
+
+def test_read_xisf_odcudzyslawia_wartosci_fits(tmp_path):
+    """FIRSTHAND (poprawka Etapu 1): PixInsight zapisuje karty stringowe jak FITS — w apostrofach.
+    Czytnik je zdejmuje (kontrakt 1:1 z read_fits_header): obejmujące `'` precz, `''`→`'` (escape
+    FITS), końcowy pad → rstrip. Liczby (bez apostrofów) NIETKNIĘTE — rzut robi _to_float."""
+    f = _write_xisf(tmp_path / "q.xisf", keywords=[
+        ("INSTRUME", "'ZWO ASI2600MC Pro'"),
+        ("IMAGETYP", "'FLAT'"),
+        ("XPIXSZ", "3.76"),                      # liczba — bez apostrofów
+        ("OBJECT", "'Bode''s Galaxy'"),          # escape FITS '' → '
+        ("FILTER", "'L       '"),                # nieznaczący pad FITS → rstrip
     ])
     hdr = read_xisf_header(str(f))
     assert hdr["INSTRUME"] == "ZWO ASI2600MC Pro"
-    assert hdr["XPIXSZ"] == "3.76"              # STRING (nie 3.76) — kluczowy fakt W3
-    assert isinstance(hdr["FOCALLEN"], str)
-    assert hdr["OBJECT"] == "NGC 4258"
-    json.dumps(hdr)                             # JSON-owalne → nie rzuca
+    assert hdr["IMAGETYP"] == "FLAT"
+    assert hdr["XPIXSZ"] == "3.76"               # liczba nietknięta
+    assert hdr["OBJECT"] == "Bode's Galaxy"      # '' → '
+    assert hdr["FILTER"] == "L"                  # pad zdjęty
 
 
 @pytest.mark.parametrize("namespace", [True, False])

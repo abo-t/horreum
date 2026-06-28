@@ -136,10 +136,23 @@ def _local_name(tag):
     return tag.rsplit("}", 1)[-1]
 
 
+def _unquote_fits(value):
+    """Zdejmij FITS-owe cudzysłowy z wartości stringowej XISF (firsthand: PixInsight zapisuje karty
+    stringowe jak FITS — `'ZWO ASI2600MC Pro'`). Apostrofy obejmujące zdejmowane, `''`→`'` (escape
+    FITS), końcowe spacje → rstrip (nieznaczący pad FITS). Dzięki temu dict jest 1:1 z
+    `read_fits_header` (astropy też zwraca string bez apostrofów). Liczby/bool (bez apostrofów)
+    zostają NIETKNIĘTE — rzut na typ i tak robi `_to_float` (pola gorące, W3)."""
+    if isinstance(value, str) and len(value) >= 2 and value.startswith("'") and value.endswith("'"):
+        return value[1:-1].replace("''", "'").rstrip()
+    return value
+
+
 def read_xisf_header(path):
     """Odczytaj nagłówek XISF (monolithic) jako JSON-owalny dict — TEN SAM kontrakt co
-    `read_fits_header` (klucze FITS wielkimi literami; COMMENT/HISTORY w listach), z jedną
-    różnicą: wartości są STRINGAMI (XISF tak je trzyma; rzut na typ robią pola gorące — W3/§Etap 2).
+    `read_fits_header` (klucze FITS wielkimi literami; COMMENT/HISTORY w listach), z jedną różnicą:
+    wartości są STRINGAMI (XISF tak je trzyma; rzut na typ robią pola gorące — W3/§Etap 2).
+    Wartości stringowe ODCUDZYSŁAWIANE z konwencji FITS (`_unquote_fits`, firsthand) — inaczej dict
+    NIE byłby 1:1 z `read_fits_header` (astropy zwraca string bez apostrofów).
 
     Format (XISF 1.0 monolithic): sygnatura `XISF0100` (8 B) · uint32 LE długość nagłówka XML
     (4 B) · 4 B reserved · nagłówek XML (UTF-8). Czytamy WYŁĄCZNIE nagłówek (nie dotykamy bloków
@@ -172,7 +185,7 @@ def read_xisf_header(path):
         name = elem.get("name")
         if not name:                      # FITSKeyword bez nazwy — nic do zaadresowania, pomiń
             continue
-        _put(out, name.strip().upper(), elem.get("value", ""))
+        _put(out, name.strip().upper(), _unquote_fits(elem.get("value", "")))
     return out
 
 

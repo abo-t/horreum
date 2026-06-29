@@ -14,6 +14,24 @@ Zasady:
 - `now` podawany jawnie (ISO-8601) — deterministyczne testy, jak `now_fn` w Custosie.
 """
 import json
+from contextlib import contextmanager
+
+
+@contextmanager
+def _immediate(con):
+    """Transakcja z write-lockiem OD STARTU (`BEGIN IMMEDIATE`) — guard+write atomowo wobec
+    równoległego writera (PLAN_gui §2, P1: WAL serializuje writerów, ale NIE zwalnia z atomowości
+    czytaj-sprawdź-pisz). Domyślny `with con:` bierze tylko lock przy pierwszym DML, więc SELECT
+    guardu i UPDATE mogłyby objąć cudzy commit (TOCTOU). Tu RESERVED lock blokuje innych od razu.
+    Używane przez zapisy usera (label/approve/merge/unmerge), gdzie guard MUSI trzymać do UPDATE."""
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        yield
+    except BaseException:
+        con.rollback()
+        raise
+    else:
+        con.commit()
 
 
 def emit_event(con, *, actor, verb, target, now, payload=None, reason=None):
@@ -338,3 +356,105 @@ def backfill_filter_canon(con, items, now, actor="resolver"):
             con.execute("UPDATE frame SET filter_canon = ? WHERE id = ?", (filter_canon, frame_id))
         emit_event(con, actor=actor, verb="filter.backfilled", target="frame:*", now=now,
                    payload={"count": len(items)})
+
+
+# ============================================================ oś TELESKOP — zapis usera (GUI, §PLAN_gui)
+#
+# Pierwsza warstwa, gdzie `event.actor` ma formę `user:<uid>` (składaną TU, nie po stronie wołającego —
+# prefiks `user:` niefalsyfikowalny). Zwrot: goły `bool` (nie tworzą encji). Rozróżnienie semantyki:
+# `False` = WYŁĄCZNIE idempotencja (brak realnej zmiany, brak eventu); błąd wołania → `ValueError`.
+# Guardy czytane w `_immediate` (atomowo z UPDATE — TOCTOU, P1). `uid` w v1 zawsze "local".
+
+
+def _telescope_row(con, telescope_id):
+    """Wiersz teleskopu albo `ValueError` (błąd wołania — id spoza listy GUI). Zwraca (label, status,
+    merged_into)."""
+    row = con.execute(
+        "SELECT label, status, merged_into FROM telescope WHERE id = ?", (telescope_id,)).fetchone()
+    if row is None:
+        raise ValueError(f"telescope:{telescope_id} nie istnieje")
+    return row["label"], row["status"], row["merged_into"]
+
+
+def label_telescope(con, *, telescope_id, label, now, uid="local"):
+    """Nadaj/zmień etykietę teleskopu (akcja usera). Pusty/None label (po strip) → `ValueError`
+    (kasowanie etykiety NIE wchodzi w v1 — to błąd wołania, nie no-op). Ten sam label już ustawiony →
+    `False` BEZ eventu (idempotencja). Inaczej UPDATE + `event(telescope.labeled)` z `{before, after}`."""
+    if label is None or not str(label).strip():
+        raise ValueError("label pusty — kasowanie etykiety nie wchodzi w v1")
+    label = str(label).strip()
+    with _immediate(con):
+        before, _, _ = _telescope_row(con, telescope_id)
+        if before == label:
+            return False
+        con.execute("UPDATE telescope SET label = ? WHERE id = ?", (label, telescope_id))
+        emit_event(con, actor=f"user:{uid}", verb="telescope.labeled",
+                   target=f"telescope:{telescope_id}", now=now,
+                   payload={"before": before, "after": label})
+    return True
+
+
+def approve_telescope(con, *, telescope_id, now, uid="local"):
+    """Zatwierdź teleskop (`status='approved'`). GUARD: tylko KANONICZNY (`merged_into IS NULL`) —
+    approve scalonego → `ValueError` (nie zatwierdza się czegoś złożonego w inny). Już `approved` →
+    `False`. Inaczej UPDATE + `event(telescope.approved)` z `{before, after}` statusu."""
+    with _immediate(con):
+        _, status, merged_into = _telescope_row(con, telescope_id)
+        if merged_into is not None:
+            raise ValueError(f"telescope:{telescope_id} jest scalony (merged_into={merged_into}) — "
+                             "approve tylko kanonicznego")
+        if status == "approved":
+            return False
+        con.execute("UPDATE telescope SET status = 'approved' WHERE id = ?", (telescope_id,))
+        emit_event(con, actor=f"user:{uid}", verb="telescope.approved",
+                   target=f"telescope:{telescope_id}", now=now,
+                   payload={"before": status, "after": "approved"})
+    return True
+
+
+def merge_telescope(con, *, source_id, target_id, now, uid="local"):
+    """Scal teleskop `source` w `target` (akcja usera). INWARIANT GŁĘBOKOŚĆ ≤ 1 (PLAN_gui §3a) —
+    GUARDY (`ValueError` przy naruszeniu): `source≠target`; target KANONICZNY (`merged_into IS NULL`);
+    source KANONICZNY; source NIE MA członków (`NOT EXISTS merged_into=source`) — inaczej powstałby
+    łańcuch głębokości 2. Czyni cykl/łańcuch strukturalnie niemożliwymi (widok `telescope_canonical`
+    pozostaje poprawny, ale dane nie schodzą głębiej niż 1). source już `merged_into=target` → `False`
+    (idempotencja). Inaczej UPDATE + `event(telescope.merged)`."""
+    if source_id == target_id:
+        raise ValueError("nie można scalić teleskopu w samego siebie")
+    with _immediate(con):
+        _, _, src_merged = _telescope_row(con, source_id)
+        if src_merged == target_id:
+            return False                                   # już scalony tam — idempotencja
+        if src_merged is not None:
+            raise ValueError(f"source telescope:{source_id} już scalony (merged_into={src_merged}) — "
+                             "scalać wolno tylko kanoniczny")
+        _, _, tgt_merged = _telescope_row(con, target_id)
+        if tgt_merged is not None:
+            raise ValueError(f"target telescope:{target_id} nie jest kanoniczny "
+                             f"(merged_into={tgt_merged}) — scalać wolno tylko w korzeń")
+        has_member = con.execute(
+            "SELECT 1 FROM telescope WHERE merged_into = ? LIMIT 1", (source_id,)).fetchone()
+        if has_member is not None:
+            raise ValueError(f"source telescope:{source_id} ma członków — najpierw unmerge "
+                             "(inwariant głębokość ≤ 1)")
+        con.execute("UPDATE telescope SET merged_into = ? WHERE id = ?", (target_id, source_id))
+        emit_event(con, actor=f"user:{uid}", verb="telescope.merged",
+                   target=f"telescope:{source_id}", now=now,
+                   payload={"source": source_id, "target": target_id})
+    return True
+
+
+def unmerge_telescope(con, *, telescope_id, now, uid="local"):
+    """Cofnij scalenie (`merged_into → NULL`) — append-only (nowy event, nie kasacja). Już kanoniczny
+    (`merged_into IS NULL`) → `False`. Inaczej UPDATE + `event(telescope.unmerged)` z `{before, after}`
+    (`former_target`→None). Dzięki inwariantowi głębokość ≤ 1 wiersz zawsze jest liściem — un-merge
+    nie ma „środka łańcucha" do rozplątania."""
+    with _immediate(con):
+        _, _, merged_into = _telescope_row(con, telescope_id)
+        if merged_into is None:
+            return False
+        con.execute("UPDATE telescope SET merged_into = NULL WHERE id = ?", (telescope_id,))
+        emit_event(con, actor=f"user:{uid}", verb="telescope.unmerged",
+                   target=f"telescope:{telescope_id}", now=now,
+                   payload={"before": merged_into, "after": None})
+    return True

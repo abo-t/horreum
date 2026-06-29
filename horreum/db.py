@@ -16,10 +16,17 @@ SCHEMA_VERSION = MIGRATIONS[-1][0]
 
 
 def connect(path):
-    """Otwórz bazę Horreum z FK ON i Row factory. `path` = plik albo ':memory:'."""
+    """Otwórz bazę Horreum z FK ON i Row factory. `path` = plik albo ':memory:'.
+
+    WAL + busy_timeout (PLAN_gui §5): GUI to długo żyjące połączenie RW, możliwy równoległy CLI/skan
+    na tej samej bazie. WAL pozwala czytelnikom i jednemu writerowi współistnieć; busy_timeout daje
+    czekanie zamiast natychmiastowego `database is locked`. To PRAGMA (infra), ZERO DML — meta-test
+    AST przepuszcza. (`:memory:` ignoruje WAL — wraca 'memory', nieszkodliwe.)"""
     con = sqlite3.connect(path)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA foreign_keys = ON")
+    con.execute("PRAGMA journal_mode = WAL")
+    con.execute("PRAGMA busy_timeout = 5000")
     return con
 
 

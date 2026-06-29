@@ -250,20 +250,24 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
     (`scan_tree`) i przyszłego replayu/import-legacy (rekord pochodzi z nagłówka pliku ALBO z
     cache'owanego źródła). Mutuje `summary`; zapis WYŁĄCZNIE przez `repo` (zero DML tutaj).
 
-      - nagłówek nieczytelny (W1) → `repo.flag_frame_review` (frame NIE powstaje), koniec;
-      - inaczej: oś KAMERA (`camera_identity`→`upsert_camera`; brak osi → `camera_id=None`);
-        `normalize_kind`; `upsert_frame` + `add_location`. NOWY frame → `record_header` (1:1) +
-        ewentualne `flag_camera_review` (brak osi) / `flag_kind_unmapped` (IMAGETYP niezmapowane).
-        ISTNIEJĄCY sha1 → tylko nowa `location` (multi-location), bez ponownego headera/flag.
+    INWARIANT „baza zna wszystkie pliki" (D1): każdy rekord o znanym `sha1` daje frame + location,
+    także gdy nagłówek nieczytelny (W1) → wtedy frame-SZKIELET (`kind='unknown'`, `camera_id=NULL`,
+    bez `header`) + `flag_frame_review`. Spójne z `camera_review` (brak osi → frame jednak powstaje);
+    znika dawne „W1 = brak frame'a". Re-skan idempotentny: sha1 UNIQUE jest kotwicą — istniejący
+    szkielet NIE duplikuje `frame.review` (gating na `created`). [Backstop bez sha1 — `scan_tree`.]
 
-    NIE łapie wyjątków — backstop W1 (pojedynczy rekord nie wywala całości) należy do wołającego
-    (`scan_tree` / replay), bo to on wie, jak zidentyfikować rekord do `frame.review`."""
-    if rec.header is None:                             # W1: nieczytelny/nierozpoznany
-        repo.flag_frame_review(con, sha1=rec.sha1, path=rec.path, reason=rec.error, now=now)
-        summary.frame_review += 1
-        return
+      - oś KAMERA (`camera_identity`→`upsert_camera`; brak osi → `camera_id=None`) i `normalize_kind`
+        tylko dla CZYTELNEGO nagłówka; nieczytelny (W1) → `kind='unknown'`, `camera_id=None`;
+      - `upsert_frame` + `add_location` (zawsze, idempotentnie). NOWY frame: czytelny →
+        `record_header` (1:1) + ewentualne `flag_camera_review` (brak osi) / `flag_kind_unmapped`
+        (IMAGETYP niezmapowane); nieczytelny → `flag_frame_review` (szkielet, bez headera).
+        ISTNIEJĄCY sha1 → tylko nowa `location` (multi-location), bez headera/flag (szkielet też
+        nie „awansuje" przy późniejszym udanym odczycie — jak header 1:1 nie re-rejestruje się).
 
-    ident = camera_identity(rec.header)
+    NIE łapie wyjątków — backstop bez tożsamości (sha1 nieznany → `frame.review`, sha1='?') należy
+    do wołającego (`scan_tree` / replay), bo to on wie, jak zidentyfikować rekord do review."""
+    readable = rec.header is not None
+    ident = camera_identity(rec.header) if readable else None
     camera_id = None
     if ident is not None:
         camera_id, _ = repo.upsert_camera(
@@ -271,7 +275,7 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
             is_mono=ident.is_mono, is_mono_source=ident.is_mono_source,
             raw_instrume=ident.raw_instrume, now=now)
 
-    kind = normalize_kind(rec.header.get("IMAGETYP"))
+    kind = normalize_kind(rec.header.get("IMAGETYP")) if readable else "unknown"
     frame_id, created = repo.upsert_frame(
         con, sha1=rec.sha1, kind=kind, filetype=_filetype(rec.path),
         size_bytes=rec.size_bytes, camera_id=camera_id, now=now)
@@ -288,6 +292,12 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
 
     if not created:                                    # header 1:1 z frame → tylko dla nowego
         return                                         # istniejący sha1 = dopisana sama location
+
+    if not readable:                                   # W1: frame-szkielet bez headera → review
+        repo.flag_frame_review(con, sha1=rec.sha1, path=rec.path, reason=rec.error, now=now)
+        summary.frame_review += 1
+        return
+
     repo.record_header(
         con, frame_id=frame_id, raw_json=json.dumps(rec.header, ensure_ascii=False),
         now=now, **extract_header(rec.header))

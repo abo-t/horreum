@@ -340,15 +340,32 @@ def test_scan_tree_multi_location_synthetic(tmp_path):
     con.close()
 
 
-def test_scan_tree_header_none_frame_review_skip(tmp_path):
-    """W1: plik o rozpoznanym rozszerzeniu, lecz nieczytelnym nagłówku → event(frame.review),
-    frame NIE powstaje (skip)."""
+def test_scan_tree_header_none_frame_szkielet_D1(tmp_path):
+    """D1 „baza zna wszystkie pliki": nieczytelny nagłówek (W1) → frame-SZKIELET (kind='unknown',
+    camera_id=NULL) + location + event(frame.review), ale BEZ headera (raw_json nieczytelny)."""
     con = _db(tmp_path)
     tree = tmp_path / "t"; tree.mkdir()
     (tree / "broken.xisf").write_bytes(b"NOTXISF!" + b"\x00" * 20)
     s = scan_tree(con, tree, now=NOW)
-    assert (s.files, s.frame_review, s.frames_new) == (1, 1, 0)
-    assert con.execute("SELECT count(*) FROM frame").fetchone()[0] == 0
+    assert (s.files, s.frame_review, s.frames_new, s.locations_new, s.headers) == (1, 1, 1, 1, 0)
+    row = con.execute("SELECT kind, camera_id, filetype FROM frame").fetchone()
+    assert (row["kind"], row["camera_id"], row["filetype"]) == ("unknown", None, "xisf")
+    assert con.execute("SELECT count(*) FROM location").fetchone()[0] == 1
+    assert con.execute("SELECT count(*) FROM header").fetchone()[0] == 0      # brak czytelnego headera
+    assert con.execute("SELECT count(*) FROM event WHERE verb='frame.review'").fetchone()[0] == 1
+    con.close()
+
+
+def test_scan_tree_szkielet_re_skan_idempotentny_D1(tmp_path):
+    """D1: re-skan tego samego nieczytelnego pliku NIE duplikuje frame'a ani frame.review (sha1
+    UNIQUE = kotwica idempotencji, której event-only frame.review wcześniej nie miał)."""
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    (tree / "broken.xisf").write_bytes(b"NOTXISF!" + b"\x00" * 20)
+    scan_tree(con, tree, now=NOW)
+    s2 = scan_tree(con, tree, now=NOW)                       # drugi przebieg
+    assert (s2.frames_new, s2.frames_existing, s2.frame_review) == (0, 1, 0)
+    assert con.execute("SELECT count(*) FROM frame").fetchone()[0] == 1
     assert con.execute("SELECT count(*) FROM event WHERE verb='frame.review'").fetchone()[0] == 1
     con.close()
 

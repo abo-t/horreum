@@ -130,9 +130,13 @@ def record_header(con, *, frame_id, raw_json, now, actor="scan",
 
 
 def flag_frame_review(con, *, sha1, path, reason, now, actor="scan"):
-    """Sygnał review pliku, którego nagłówka NIE dało się odczytać (miękkie lądowanie W1): frame
-    NIE powstaje (zbyt niepewny do wciągnięcia), lecz zeznanie o jego istnieniu (sha1 + ścieżka +
-    powód) trafia do `event(frame.review)`. Wejście do przyszłego import-legacy/review."""
+    """Sygnał review pliku z nieczytelnym/nierozpoznanym nagłówkiem (miękkie lądowanie W1) →
+    `event(frame.review)`, target `sha1:<sha1>`. DWA wołania (D1):
+      - skan: frame-SZKIELET powstał (`kind='unknown'`), ale headera brak — sha1 realny, target
+        joinowalny do frame'a; emitowane RAZ (gating na `created` w `ingest_record`);
+      - backstop `scan_tree`: wyjątek przed identyfikacją → sha1='?' (tożsamości brak, frame NIE
+        powstał) → może się powtórzyć przy re-skanie (brak kotwicy UNIQUE — nieuniknione).
+    Wejście do przyszłego import-legacy/review."""
     with con:
         emit_event(con, actor=actor, verb="frame.review", target=f"sha1:{sha1}", now=now,
                    reason=reason, payload={"path": path})

@@ -252,3 +252,74 @@ def test_flag_config_i_telescope_review(tmp_path):
     tr = con.execute("SELECT target FROM event WHERE verb='telescope.review'").fetchone()
     assert tr["target"] == f"telescope:{tel}"
     con.close()
+
+
+# --- obiekt / alias / filtr (§Etap 6) ---
+
+def test_upsert_object_idempotentny_i_event(tmp_path):
+    con = _fresh(tmp_path)
+    o1, c1 = repo.upsert_object(con, canon="NGC4258", catalog="NGC", kind="deep_sky", now=NOW)
+    o2, c2 = repo.upsert_object(con, canon="NGC4258", catalog="NGC", kind="deep_sky", now=NOW)
+    assert (c1, c2) == (True, False) and o1 == o2
+    assert con.execute("SELECT count(*) FROM object").fetchone()[0] == 1
+    row = con.execute("SELECT canon, catalog, kind FROM object WHERE id=?", (o1,)).fetchone()
+    assert (row["canon"], row["catalog"], row["kind"]) == ("NGC4258", "NGC", "deep_sky")
+    assert con.execute("SELECT count(*) FROM event WHERE verb='object.upserted'").fetchone()[0] == 1
+    con.close()
+
+
+def test_add_object_alias_idempotentny_i_event(tmp_path):
+    """Dwie formy surowe (NGC4258, M106) → ten sam obiekt; alias_norm UNIQUE, idempotentny."""
+    con = _fresh(tmp_path)
+    oid, _ = repo.upsert_object(con, canon="NGC4258", catalog="NGC", kind="deep_sky", now=NOW)
+    a1, ac1 = repo.add_object_alias(con, alias_norm="M106", object_id=oid, source="catalog_xref", now=NOW)
+    a2, ac2 = repo.add_object_alias(con, alias_norm="M106", object_id=oid, source="catalog_xref", now=NOW)
+    repo.add_object_alias(con, alias_norm="NGC4258", object_id=oid, source="header", now=NOW)
+    assert (ac1, ac2) == (True, False) and a1 == a2
+    assert con.execute("SELECT count(*) FROM object_alias WHERE object_id=?", (oid,)).fetchone()[0] == 2
+    assert con.execute("SELECT count(*) FROM event WHERE verb='object.aliased'").fetchone()[0] == 2
+    con.close()
+
+
+def test_assign_object_linkuje_i_idempotentny(tmp_path):
+    con = _fresh(tmp_path)
+    oid, _ = repo.upsert_object(con, canon="NGC4258", catalog="NGC", kind="deep_sky", now=NOW)
+    fid, _ = repo.upsert_frame(con, sha1="a", kind="light", filetype="fits", size_bytes=1,
+                               camera_id=None, now=NOW)
+    assert repo.assign_object(con, frame_id=fid, object_id=oid, object_source="catalog_xref", now=NOW) is True
+    assert repo.assign_object(con, frame_id=fid, object_id=oid, object_source="catalog_xref", now=NOW) is False
+    row = con.execute("SELECT object_id, object_source FROM frame WHERE id=?", (fid,)).fetchone()
+    assert (row["object_id"], row["object_source"]) == (oid, "catalog_xref")
+    assert con.execute("SELECT count(*) FROM event WHERE verb='object.assigned'").fetchone()[0] == 1
+    con.close()
+
+
+def test_flag_object_review_summary_jeden_event_z_licznoscia(tmp_path):
+    """Delta obiektu ZBIORCZO: jeden event z licznością per object_raw (nie per-frame). Pusta → no-op."""
+    con = _fresh(tmp_path)
+    repo.flag_object_review_summary(con, [], now=NOW)                      # pusto → bez eventu
+    assert con.execute("SELECT count(*) FROM event").fetchone()[0] == 0
+    repo.flag_object_review_summary(con, [("Snapshot", 189), ("Mur", 207)], now=NOW)
+    ev = con.execute("SELECT target, payload FROM event WHERE verb='object.review_summary'").fetchall()
+    assert len(ev) == 1 and ev[0]["target"] == "frame:*"
+    payload = json.loads(ev[0]["payload"])
+    assert payload["distinct"] == 2 and payload["frames"] == 396
+    assert ["Mur", 207] in payload["items"]
+    con.close()
+
+
+def test_backfill_filter_canon_bulk_jeden_event(tmp_path):
+    """Backfill pochodnej filter_canon — jedna transakcja, JEDEN event zbiorczy; pusta → no-op."""
+    con = _fresh(tmp_path)
+    f1, _ = repo.upsert_frame(con, sha1="a", kind="light", filetype="fits", size_bytes=1,
+                              camera_id=None, now=NOW)
+    f2, _ = repo.upsert_frame(con, sha1="b", kind="light", filetype="fits", size_bytes=1,
+                              camera_id=None, now=NOW)
+    repo.backfill_filter_canon(con, [], now=NOW)                           # pusto → bez eventu
+    assert con.execute("SELECT count(*) FROM event WHERE verb='filter.backfilled'").fetchone()[0] == 0
+    repo.backfill_filter_canon(con, [(f1, "Ha"), (f2, "OIII")], now=NOW)
+    assert con.execute("SELECT filter_canon FROM frame WHERE id=?", (f1,)).fetchone()[0] == "Ha"
+    assert con.execute("SELECT filter_canon FROM frame WHERE id=?", (f2,)).fetchone()[0] == "OIII"
+    ev = con.execute("SELECT payload FROM event WHERE verb='filter.backfilled'").fetchall()
+    assert len(ev) == 1 and json.loads(ev[0]["payload"]) == {"count": 2}
+    con.close()

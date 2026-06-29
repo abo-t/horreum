@@ -252,3 +252,85 @@ def flag_config_review(con, *, frame_id, reason, now, actor="grouper"):
     with con:
         emit_event(con, actor=actor, verb="config.review", target=f"frame:{frame_id}", now=now,
                    reason=reason)
+
+
+# ============================================================ oś OBIEKT + filtr (§Etap 6)
+
+def upsert_object(con, *, canon, catalog, kind, now, actor="resolver"):
+    """Wyłoń obiekt (oś) z rozwiązania `object_raw`. Tożsamość = `canon` (UNIQUE, NGC-wins).
+    Istnieje → (id, False) bez eventu; nowy → INSERT + `event(object.upserted)` w tej samej
+    transakcji; (id, True). Obiekty wyłaniają się z realnych nagłówków (jak kamery), nie a priori."""
+    row = con.execute("SELECT id FROM object WHERE canon = ?", (canon,)).fetchone()
+    if row is not None:
+        return row[0], False
+
+    with con:  # atomowo: INSERT object + INSERT event
+        cur = con.execute(
+            "INSERT INTO object(canon, catalog, kind) VALUES (?, ?, ?)", (canon, catalog, kind))
+        object_id = cur.lastrowid
+        emit_event(con, actor=actor, verb="object.upserted", target=f"object:{object_id}",
+                   now=now, payload={"canon": canon, "catalog": catalog, "kind": kind})
+    return object_id, True
+
+
+def add_object_alias(con, *, alias_norm, object_id, source, now, actor="resolver"):
+    """Zapisz równoważność `alias_norm` → obiekt (audyt „M106 ≡ NGC4258 via catalog_xref"). Po
+    `UNIQUE(alias_norm)`: znana → (id, False) bez eventu (idempotencja); nowa → INSERT +
+    `event(object.aliased)`; (id, True). `source` ∈ {header|catalog_xref|common_name|user}."""
+    row = con.execute("SELECT id FROM object_alias WHERE alias_norm = ?", (alias_norm,)).fetchone()
+    if row is not None:
+        return row[0], False
+
+    with con:  # atomowo: INSERT object_alias + INSERT event
+        cur = con.execute(
+            "INSERT INTO object_alias(alias_norm, object_id, source) VALUES (?, ?, ?)",
+            (alias_norm, object_id, source))
+        alias_id = cur.lastrowid
+        emit_event(con, actor=actor, verb="object.aliased", target=f"object:{object_id}",
+                   now=now, payload={"alias_norm": alias_norm, "source": source})
+    return alias_id, True
+
+
+def assign_object(con, *, frame_id, object_id, object_source, now, actor="resolver"):
+    """Przypisz obiekt do frame'a (`frame.object_id` + `object_source`). Idempotentny: ta sama para
+    już ustawiona → False bez eventu; inaczej UPDATE + `event(object.assigned)`; True."""
+    row = con.execute(
+        "SELECT object_id, object_source FROM frame WHERE id = ?", (frame_id,)).fetchone()
+    if row is not None and row[0] == object_id and row[1] == object_source:
+        return False
+
+    with con:
+        con.execute("UPDATE frame SET object_id = ?, object_source = ? WHERE id = ?",
+                    (object_id, object_source, frame_id))
+        emit_event(con, actor=actor, verb="object.assigned", target=f"frame:{frame_id}", now=now,
+                   payload={"object_id": object_id, "object_source": object_source})
+    return True
+
+
+def flag_object_review_summary(con, items, now, actor="resolver"):
+    """Delta obiektu ZBIORCZO — JEDEN `event(object.review_summary)` z licznością per `object_raw`
+    (analogicznie do `backfill_focratio_norm`: operacja masowa, bez per-frame zaśmiecania logu).
+    `items` = lista `(object_raw, count)` nierozpoznanych light/master_light. Stan (object_id NULL)
+    SAM jest deltą — to event audytowy, NIE zapisuje na frame. Kalibracja TU nie trafia (nie ma
+    obiektu z definicji). Pusta lista → bez eventu."""
+    items = list(items)
+    if not items:
+        return
+    with con:
+        emit_event(con, actor=actor, verb="object.review_summary", target="frame:*", now=now,
+                   payload={"distinct": len(items), "frames": sum(n for _, n in items),
+                            "items": [[raw, n] for raw, n in items]})
+
+
+def backfill_filter_canon(con, items, now, actor="resolver"):
+    """Backfill kolumny POCHODNEJ `frame.filter_canon` ZBIORCZO (jak `backfill_focratio_norm`):
+    jedna transakcja + JEDEN event `filter.backfilled`. `items` = lista `(frame_id, filter_canon)`
+    (tylko frame'y z niepustym kanonem; brak filtra zostaje NULL — W2, bez review). Pusta → no-op."""
+    items = list(items)
+    if not items:
+        return
+    with con:
+        for frame_id, filter_canon in items:
+            con.execute("UPDATE frame SET filter_canon = ? WHERE id = ?", (filter_canon, frame_id))
+        emit_event(con, actor=actor, verb="filter.backfilled", target="frame:*", now=now,
+                   payload={"count": len(items)})

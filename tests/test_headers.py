@@ -55,11 +55,35 @@ def test_extract_header_gain_offset_zero_nie_none_W2():
     assert f["offset_adu"] == 0
 
 
-def test_extract_header_focratio_norm_i_radec_nie_tu():
-    """focratio_norm/src NIE wyłuskiwane w Etapie 4 (backfill grouper §Etap 5); ra/dec poza zakresem."""
+def test_extract_header_focratio_norm_nie_tu():
+    """focratio_norm/src NIE wyłuskiwane w Etapie 4 (backfill grouper §Etap 5)."""
     f = extract_header({"FOCRATIO": "6.4"})
     assert f["focratio_raw"] == 6.4
-    assert "focratio_norm" not in f and "ra_deg" not in f
+    assert "focratio_norm" not in f
+
+
+def test_extract_header_radec_backfill_D2():
+    """RA/DEC = stopnie dziesiętne; rzut przez _to_float (XISF-string i FITS-float jednakowo, W3).
+    Bierzemy RA/DEC (decymalne), NIE sexagesimal OBJCTRA/OBJCTDEC."""
+    fits = extract_header({"RA": 162.7972981695292, "DEC": 53.50774901461591})
+    xisf = extract_header({"RA": "162.7972981695292", "DEC": "53.50774901461591"})
+    assert fits["ra_deg"] == 162.7972981695292 and isinstance(fits["ra_deg"], float)
+    assert fits["dec_deg"] == 53.50774901461591
+    assert xisf["ra_deg"] == fits["ra_deg"] and xisf["dec_deg"] == fits["dec_deg"]  # W3
+    # sexagesimal NIE jest źródłem — sam OBJCTRA/OBJCTDEC bez RA/DEC → None
+    assert extract_header({"OBJCTRA": "10 51 11.352", "OBJCTDEC": "+53 30 27.90"})["ra_deg"] is None
+
+
+def test_extract_header_radec_zero_to_wartosc_nie_none():
+    """RA=0 / DEC=0 to POPRAWNA wartość (jak gain/offset) — zapisujemy zeznanie, nie None."""
+    f = extract_header({"RA": "0", "DEC": "0"})
+    assert f["ra_deg"] == 0.0 and f["dec_deg"] == 0.0
+
+
+def test_extract_header_radec_nieobecne_to_none():
+    """Brak RA/DEC w nagłówku → None (record_header domyśli NULL)."""
+    f = extract_header({})
+    assert f["ra_deg"] is None and f["dec_deg"] is None
 
 
 def test_extract_header_smiec_numeryczny_to_none():

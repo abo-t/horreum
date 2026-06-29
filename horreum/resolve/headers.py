@@ -5,8 +5,8 @@ XISF zwraca wartości jako STRINGI — bez rzutu oś TELESKOPU rozbiłaby się F
 jak groziło kamerom (W3). Czysta funkcja (zero zapisu). Klucze zwracanego dict = nazwy kolumn
 `header` → wejście dla `repo.record_header(**fields)`.
 
-Świadomie POMIJANE tutaj: `focratio_norm`/`focratio_norm_src` (backfill grouper, §Etap 5),
-`ra_deg`/`dec_deg` (poza zakresem pierwszego przebiegu) — `record_header` domyśla je NULL.
+Świadomie POMIJANE tutaj: `focratio_norm`/`focratio_norm_src` (backfill grouper, §Etap 5)
+— `record_header` domyśla je NULL.
 """
 from ._coerce import _to_float, _to_int, _to_text
 
@@ -34,5 +34,7 @@ def extract_header(header):
         "xbinning": _to_int(g("XBINNING")),
         "ybinning": _to_int(g("YBINNING")),
         "bayerpat": _to_text(g("BAYERPAT")),
+        "ra_deg": _to_float(g("RA")),              # stopnie dziesiętne (RA, nie sexagesimal OBJCTRA)
+        "dec_deg": _to_float(g("DEC")),            # stopnie dziesiętne (DEC, nie OBJCTDEC); 0 = wartość
         "object_raw": _to_text(g("OBJECT")),       # "plotka" — resolver obiektu §Etap 6
     }

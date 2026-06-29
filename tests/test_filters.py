@@ -12,6 +12,7 @@ from horreum.resolve.filters import normalize_filter
     ("L", "L"), ("Lum", "L"), ("R", "R"), ("G", "G"), ("B", "B"),
     ("L-Pro", "L-Pro"), ("LPro", "L-Pro"), ("LPRO", "L-Pro"),   # broadband (osobna przestrzeń)
     ("L-eXtreme", "L-eXtreme"), ("L-EX", "L-eXtreme"),
+    ("LeXt", "L-eXtreme"), ("LEXT", "L-eXtreme"),               # Etap 6.x firsthand (norma obu=LEXT)
 ])
 def test_normalize_filter_kanon(raw, canon):
     assert normalize_filter(raw) == canon

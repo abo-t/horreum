@@ -47,19 +47,33 @@ _RULES = [
 ]
 
 
+def _match_rules(key):
+    """Dopasuj znormalizowany `key` do gramatyk katalogowych → kanon albo None (helper)."""
+    for rx, build in _RULES:
+        m = rx.match(key)
+        if m:
+            return build(m)
+    return None
+
+
 def catalog_canon(text):
     """Zwróć formę kanoniczną oznaczenia katalogowego LUB None, gdy tekst nim NIE jest.
 
     Normalizuje zapis: kolaps białych znaków, upper, zdjęcie zer wiodących (`NGC 4736`→`NGC4736`,
     `Sh2 131`→`Sh2-131`, `M 81`→`M81`). Apostrofy/inne znaki w nazwie potocznej → po prostu brak
-    dopasowania (None) — nazwa potoczna należy do `resolve.objects`, nie tu."""
+    dopasowania (None) — nazwa potoczna należy do `resolve.objects`, nie tu.
+
+    Zapis dwuczłonowy (`NGC4631_PGC42637`): gdy całość nie jest oznaczeniem, próbuj PIERWSZY człon
+    przed `_` (firsthand: dwa oznaczenia sklejone podkreślnikiem). Rozdzielnik to WYŁĄCZNIE `_` —
+    oznaczenia ze spacją wewnętrzną (`Sh 2-184`, `Caldwell 23`) to JEDEN człon i zostają nietknięte."""
     if not text:
         return None
     key = re.sub(r"\s+", " ", str(text).strip()).upper()
-    for rx, build in _RULES:
-        m = rx.match(key)
-        if m:
-            return build(m)
+    canon = _match_rules(key)
+    if canon:
+        return canon
+    if "_" in key:
+        return _match_rules(key.split("_", 1)[0].strip())
     return None
 
 

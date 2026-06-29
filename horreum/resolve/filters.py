@@ -23,6 +23,8 @@ _CANON = {
     "R": "R", "RED": "R", "G": "G", "GREEN": "G", "B": "B", "BLUE": "B",
     "L-PRO": "L-Pro", "LPRO": "L-Pro", "L PRO": "L-Pro",
     "L-EXTREME": "L-eXtreme", "L-EX": "L-eXtreme", "LEXTREME": "L-eXtreme", "L-EX3": "L-eXtreme",
+    "LEXT": "L-eXtreme",       # firsthand: „LeXt"/„LEXT" (norma obu = LEXT) — Optolong L-eXtreme
+
     "L-ENHANCE": "L-eNhance", "LENHANCE": "L-eNhance", "L-ENH": "L-eNhance",
     "L-ULTIMATE": "L-Ultimate", "LULTIMATE": "L-Ultimate",
     "CLS": "CLS", "CLS-CCD": "CLS",

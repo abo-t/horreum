@@ -34,6 +34,10 @@ _COMMON = {
     "NORTHAMERICA": "NGC7000",
     "ELEPHANTSTRUNK": "Sh2-131",   # firsthand: realny light w archiwum
     "BODES": "M81",                # „Bode's Galaxy" → M81 → (xref) NGC3031
+    # Etap 6.x — braki wykryte firsthand (scalają z rodzeństwem katalogowym, nie rozbijają):
+    "CIGAR": "M82",                # „Cigar Galaxy" → M82 → (xref) NGC3034 (scala z „M 82")
+    "FLAMINGSTAR": "IC405",        # „Flaming Star Nebula" (folder Sh2-229, brak rodzeństwa katalog.)
+    "BUBBLE": "NGC7635",           # „Bubble Nebula" (scala z „NGC 7635")
 }
 
 # Deskryptor na końcu nazwy potocznej (zdejmowany przed dopasowaniem) i przedrostek „the".

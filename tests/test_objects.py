@@ -30,6 +30,9 @@ def test_messier_bez_ngc_zostaje_messierem():
     ("Pelican", "IC5070", "IC"),
     ("Elephant's Trunk", "Sh2-131", "Sh2"),     # firsthand: realny light (apostrof zniesiony)
     ("North America Nebula", "NGC7000", "NGC"),
+    ("Cigar Galaxy", "NGC3034", "NGC"),         # Etap 6.x: → M82 → (xref) NGC3034 (scala z „M 82")
+    ("Flaming Star Nebula", "IC405", "IC"),     # Etap 6.x: folder Sh2-229, brak rodzeństwa katalog.
+    ("Bubble Nebula", "NGC7635", "NGC"),        # Etap 6.x: scala z „NGC 7635"
 ])
 def test_nazwy_potoczne_source_common_name(raw, canon, catalog):
     o = resolve_object(raw)

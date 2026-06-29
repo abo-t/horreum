@@ -46,6 +46,16 @@ def test_catalog_canon_nie_oznaczenie_to_none(raw):
     assert catalog_canon(raw) is None
 
 
+def test_catalog_canon_zapis_dwuczlonowy_tylko_podkreslnik():
+    """Etap 6.x firsthand: 'NGC4631_PGC42637' → pierwszy człon 'NGC4631' (scala z 'NGC4631').
+    Rozdzielnik to WYŁĄCZNIE '_'; oznaczenia ze spacją wewnętrzną = JEDEN człon, nietknięte —
+    regresja na ostrzeżonych przypadkach. Prefiks nie-oznaczenie → None (bez over-matchu)."""
+    assert catalog_canon("NGC4631_PGC42637") == "NGC4631"
+    assert catalog_canon("Sh 2-184") == "Sh2-184"       # spacja ≠ rozdzielnik (NIE 'SH'+'2-184')
+    assert catalog_canon("Caldwell 23") == "C23"         # j.w. — jeden człon ze spacją
+    assert catalog_canon("Foo_Bar") is None              # prefiks nie-oznaczenie → None
+
+
 # --- xref: równoważność międzykatalogowa (NGC-wins, DANYMI) ---
 
 def test_xref_messier_caldwell_sh2_na_ngc_ic():

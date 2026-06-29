@@ -112,5 +112,90 @@ def test_view_skan_w_watku_running_i_summary(qapp, tmp_path):
     assert view._thread is not None                    # skan ruszył w wątku (nie synchronicznie)
     loop.exec()
     assert running and running[0] is True and running[-1] is False
-    assert "Pliki: 2" in view.lbl_summary.text() and "nowe frame'y: 2" in view.lbl_summary.text()
+    assert "[skan] pliki 2" in view.lbl_summary.text() and "nowe 2" in view.lbl_summary.text()
     assert view._thread is None                        # wątek sprzątnięty
+
+
+# --- worker: etapy masowe group/resolve/delta + łańcuch „all" (synchronicznie) ---
+
+def _scanned_db(tmp_path):
+    """Baza z zeskanowanym małym drzewem (wejście dla group/resolve/delta)."""
+    from horreum.scan import scan_tree
+    db_path = _fresh_db(tmp_path)
+    con = db.open_db(db_path)
+    scan_tree(con, _tree(tmp_path, 2), volume="VOL1", now=NOW)
+    con.close()
+    return db_path
+
+
+def test_worker_group_resolve_delta_emituja_stage_done(qapp, tmp_path):
+    """Etapy masowe wołają funkcje rdzenia i niosą właściwy typ wyniku w stage_done."""
+    from horreum.grouper import GroupSummary
+    from horreum.resolver import DeltaReport, ResolveSummary
+    db_path = _scanned_db(tmp_path)
+    for stage, typ in [("group", GroupSummary), ("resolve", ResolveSummary), ("delta", DeltaReport)]:
+        w = PipelineWorker(db_path, now_fn=lambda: NOW)
+        w.configure(stage)
+        done, started = [], []
+        w.stage_started.connect(lambda n: started.append(n))
+        w.stage_done.connect(lambda n, r: done.append((n, r)))
+        w.run()
+        assert started == [stage]
+        assert done and done[0][0] == stage and isinstance(done[0][1], typ)
+
+
+def test_worker_all_lancuch_scan_group_resolve_delta(qapp, tmp_path):
+    """„Przetwórz wszystko": jeden worker emituje stage_done dla scan→group→resolve→delta w kolejności,
+    a `finished` pada raz na końcu (sygnał do quit wątku)."""
+    db_path = _fresh_db(tmp_path)
+    w = PipelineWorker(db_path, now_fn=lambda: NOW)
+    w.configure("all", root=_tree(tmp_path, 2), volume="VOL1", drive_letter=None, tier=None)
+    order, fin = [], []
+    w.stage_done.connect(lambda n, r: order.append(n))
+    w.finished.connect(lambda: fin.append(1))
+    w.run()
+    assert order == ["scan", "group", "resolve", "delta"]
+    assert len(fin) == 1
+
+
+def test_worker_all_anulowanie_przerywa_lancuch(qapp, tmp_path):
+    """Anulowanie skanu w „all" → cancelled(scan) i ŻADEN dalszy etap się nie wykonuje."""
+    db_path = _fresh_db(tmp_path)
+    w = PipelineWorker(db_path, now_fn=lambda: NOW)
+    w.configure("all", root=_tree(tmp_path, 3), volume="VOL1", drive_letter=None, tier=None)
+    done, cancelled = [], []
+    w.stage_done.connect(lambda n, r: done.append(n))
+    w.cancelled.connect(lambda n, r: cancelled.append(n))
+    w.progress.connect(lambda d, t, p, c: w.request_cancel())
+    w.run()
+    assert cancelled == ["scan"] and "group" not in done    # łańcuch przerwany
+
+
+# --- widok: bramkowanie przycisków + pełny „Przetwórz wszystko" w wątku ---
+
+def test_gating_przyciskow_wymaga_bazy_i_katalogu(qapp, tmp_path):
+    """all/scan wymagają bazy ORAZ katalogu; group/resolve/delta — samej bazy; anuluj wyłączony w spoczynku."""
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    assert not view.btn_all.isEnabled() and not view.btn_scan.isEnabled()   # brak katalogu
+    assert view.btn_group.isEnabled() and view.btn_resolve.isEnabled() and view.btn_delta.isEnabled()
+    assert not view.btn_cancel.isEnabled()
+    view._root = _tree(tmp_path, 1); view._serial = "VOL1"; view._sync_actions()
+    assert view.btn_all.isEnabled() and view.btn_scan.isEnabled()           # katalog wskazany
+
+
+def test_view_przetworz_wszystko_w_watku(qapp, tmp_path):
+    """Pełny łańcuch z okna w PRAWDZIWYM wątku: panel akumuluje 4 sekcje (skan/grupuj/rozwiąż/delta),
+    running wraca do False po sprzątnięciu."""
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    view._root = _tree(tmp_path, 2)
+    view._serial = "VOL1"
+    running = []
+    loop = QEventLoop()
+    view.running_changed.connect(running.append)
+    view.running_changed.connect(lambda r: loop.quit() if r is False else None)
+    QTimer.singleShot(20000, loop.quit)
+    view._on_all()
+    loop.exec()
+    txt = view.lbl_summary.text()
+    assert "[skan]" in txt and "[grupuj]" in txt and "[rozwiąż]" in txt and "[delta]" in txt
+    assert running[0] is True and running[-1] is False and view._thread is None

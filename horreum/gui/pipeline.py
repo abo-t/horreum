@@ -1,5 +1,6 @@
-"""Widok Pipeline + worker `QThread` (PLAN_gui_pipeline §4/§6 — warstwa widżetów, ETAP 2). User
-prowadzi pierwszy przebieg na własnych danych Z OKNA: wskaż katalog → skan (przyrostowy) → … bez CLI.
+"""Widok Pipeline + worker `QThread` (PLAN_gui_pipeline §4/§6 — warstwa widżetów). User prowadzi
+CAŁY pierwszy przebieg na własnych danych Z OKNA: wskaż katalog → skan (przyrostowy) → grupuj →
+rozwiąż → delta — bez CLI. „Przetwórz wszystko" robi cały łańcuch jednym kliknięciem.
 
 To JEDEN z plików warstwy widżetów, którym wolno importować PySide6 (test izolacji
 `test_gui_isolation.py` — `pipeline.py` na whiteliście). Logika domenowa (skan, brama, normalizacja)
@@ -23,6 +24,8 @@ from PySide6.QtWidgets import (
 
 from horreum import db
 from horreum.gui.progress import counts_snapshot, should_emit
+from horreum.grouper import run_grouper
+from horreum.resolver import delta_report, run_resolver
 from horreum.scan import scan_tree
 from horreum.volumes import volume_serial
 
@@ -40,9 +43,11 @@ class PipelineWorker(QObject):
     summary)`, `failed(name, msg)` (wyjątek → komunikat, NIE crash)."""
 
     progress = Signal(int, int, str, dict)
-    stage_done = Signal(str, object)
+    stage_started = Signal(str)            # przed każdym (pod)etapem — UI pokazuje „… w toku"
+    stage_done = Signal(str, object)       # po (pod)etapie — summary/report
     cancelled = Signal(str, object)
     failed = Signal(str, str)
+    finished = Signal()                    # run() zakończył (KAŻDĄ drogą) — sygnał do quit() wątku
 
     def __init__(self, db_path, *, now_fn=_utc_now_iso):
         super().__init__()
@@ -67,7 +72,15 @@ class PipelineWorker(QObject):
         try:
             con = db.open_db(self._db_path)
             if self._stage == "scan":
-                self._run_scan(con)
+                self._scan(con)
+            elif self._stage == "group":
+                self._bulk(con, "group")
+            elif self._stage == "resolve":
+                self._bulk(con, "resolve")
+            elif self._stage == "delta":
+                self._bulk(con, "delta")
+            elif self._stage == "all":
+                self._run_all(con)
             else:
                 self.failed.emit(self._stage or "?", f"nieznany etap: {self._stage!r}")
         except Exception as exc:                       # błąd etapu → sygnał, NIE crash apki
@@ -75,8 +88,12 @@ class PipelineWorker(QObject):
         finally:
             if con is not None:
                 con.close()
+            self.finished.emit()                       # zawsze: zwolnij wątek (quit pętli zdarzeń)
 
-    def _run_scan(self, con):
+    def _scan(self, con):
+        """Skan z progresem/anulowaniem. Zwraca summary; emituje cancelled/stage_done. `False` =
+        anulowano (wołający przerywa łańcuch „all")."""
+        self.stage_started.emit("scan")
         summary = scan_tree(
             con, self._params["root"],
             volume=self._params.get("volume", "?"),
@@ -88,8 +105,30 @@ class PipelineWorker(QObject):
         )
         if summary.cancelled:
             self.cancelled.emit("scan", summary)
-        else:
-            self.stage_done.emit("scan", summary)
+            return False
+        self.stage_done.emit("scan", summary)
+        return True
+
+    def _bulk(self, con, name):
+        """Etap masowy (group/resolve/delta) — bezobsługowy, sekundy–minuty, bez progresu per-wiersz.
+        delta jest READ-ONLY (zero DML). Emituje stage_started → stage_done."""
+        self.stage_started.emit(name)
+        if name == "group":
+            result = run_grouper(con, self._now())
+        elif name == "resolve":
+            result = run_resolver(con, self._now())
+        else:                                          # delta — read-only
+            result = delta_report(con)
+        self.stage_done.emit(name, result)
+
+    def _run_all(self, con):
+        """„Przetwórz wszystko": scan→group→resolve→delta w jednym wątku. Anulowanie skanu PRZERYWA
+        łańcuch (group/resolve/delta się nie wykonują — baza spójna, re-skan dokończy)."""
+        if not self._scan(con):
+            return
+        self._bulk(con, "group")
+        self._bulk(con, "resolve")
+        self._bulk(con, "delta")
 
     def _on_progress(self, done, total, path, summary):
         # wołane SYNCHRONICZNIE w wątku workera przez scan_tree; przerzedź i wyślij MIGAWKĘ (dict),
@@ -99,6 +138,7 @@ class PipelineWorker(QObject):
 
 
 _TIERS = [("—", None), ("cold", "cold"), ("scratch", "scratch")]
+_STAGE_LABEL = {"scan": "Skan", "group": "Grupowanie", "resolve": "Rozwiązywanie", "delta": "Delta"}
 
 
 class PipelineView(QWidget):
@@ -123,6 +163,8 @@ class PipelineView(QWidget):
         self._serial = None
         self._thread = None
         self._worker = None
+        self._cancellable = False
+        self._summary_lines = []
         self._build_ui()
         self._sync_actions()
 
@@ -154,16 +196,29 @@ class PipelineView(QWidget):
         v.addWidget(self.lbl_volume)
         v.addWidget(self._hline())
 
-        # 3. Skan: akcja + pasek + liczniki + anuluj
-        run = QHBoxLayout()
+        # 3. „Przetwórz wszystko" — DOMYŚLNA ścieżka (skan→grupuj→rozwiąż→delta jednym kliknięciem)
+        self.btn_all = QPushButton("Przetwórz wszystko  ▸  skan → grupuj → rozwiąż → delta")
+        self.btn_all.clicked.connect(self._on_all)
+        v.addWidget(self.btn_all)
+
+        # 4. Etapy pojedyncze (tryb zaawansowany) + anulowanie (tylko skan/all jest przerywalny)
+        stages = QHBoxLayout()
         self.btn_scan = QPushButton("Skanuj")
         self.btn_scan.clicked.connect(self._on_scan)
-        run.addWidget(self.btn_scan)
+        self.btn_group = QPushButton("Grupuj")
+        self.btn_group.clicked.connect(self._on_group)
+        self.btn_resolve = QPushButton("Rozwiąż")
+        self.btn_resolve.clicked.connect(self._on_resolve)
+        self.btn_delta = QPushButton("Pokaż deltę")
+        self.btn_delta.clicked.connect(self._on_delta)
         self.btn_cancel = QPushButton("Anuluj")
         self.btn_cancel.clicked.connect(self._on_cancel)
-        run.addWidget(self.btn_cancel)
-        run.addStretch(1)
-        v.addLayout(run)
+        for b in (self.btn_scan, self.btn_group, self.btn_resolve, self.btn_delta, self.btn_cancel):
+            stages.addWidget(b)
+        stages.addStretch(1)
+        v.addLayout(stages)
+
+        # 5. Pasek + liczniki (wspólne: skan = uczciwy %; etapy masowe = busy spinner)
         self.bar = QProgressBar()
         self.bar.setRange(0, 100)
         self.bar.setValue(0)
@@ -171,7 +226,7 @@ class PipelineView(QWidget):
         self.lbl_counts = QLabel("")
         v.addWidget(self.lbl_counts)
 
-        # 4. Panel podsumowania etapu
+        # 6. Panel podsumowania — akumuluje wiersz per (pod)etap (handoff delty do import-legacy)
         self.lbl_summary = QLabel("")
         self.lbl_summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.lbl_summary.setWordWrap(True)
@@ -200,21 +255,52 @@ class PipelineView(QWidget):
         self._serial = serial
         self._sync_actions()
 
-    # ---------------------------------------------------------------- skan (worker)
+    # ---------------------------------------------------------------- akcje (worker)
 
-    def _on_scan(self):
-        if self._root is None or self._db_path is None or self._thread is not None:
-            return
-        self.bar.setRange(0, 0)                          # nieokreślony do pierwszego progresu
-        self.lbl_counts.setText("Skan w toku…")
-        self.lbl_summary.setText("")
-        self._start_stage(
-            "scan",
+    def _scan_params(self):
+        return dict(
             root=self._root,
             volume=self._serial if self._serial is not None else "?",
             drive_letter=(Path(self._root).drive or None),
             tier=self.combo_tier.currentData(),
         )
+
+    def _begin_run(self):
+        """Wyzeruj panel/pasek przed nowym przebiegiem (summary akumuluje per etap, więc czyścimy)."""
+        self._summary_lines = []
+        self.lbl_summary.setText("")
+        self.bar.setRange(0, 0)
+        self.lbl_counts.setText("")
+
+    def _on_all(self):
+        if not self._can_scan() or self._thread is not None:
+            return
+        self._begin_run()
+        self._start_stage("all", **self._scan_params())
+
+    def _on_scan(self):
+        if not self._can_scan() or self._thread is not None:
+            return
+        self._begin_run()
+        self._start_stage("scan", **self._scan_params())
+
+    def _on_group(self):
+        if self._db_path is None or self._thread is not None:
+            return
+        self._begin_run()
+        self._start_stage("group")
+
+    def _on_resolve(self):
+        if self._db_path is None or self._thread is not None:
+            return
+        self._begin_run()
+        self._start_stage("resolve")
+
+    def _on_delta(self):
+        if self._db_path is None or self._thread is not None:
+            return
+        self._begin_run()
+        self._start_stage("delta")
 
     def _on_cancel(self):
         if self._worker is not None:
@@ -228,15 +314,15 @@ class PipelineView(QWidget):
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.progress.connect(self._on_progress)
+        self._worker.stage_started.connect(self._on_stage_started)
         self._worker.stage_done.connect(self._on_stage_done)
         self._worker.cancelled.connect(self._on_cancelled)
         self._worker.failed.connect(self._on_failed)
-        # po zakończeniu etapu (każdą drogą) zatrzymaj pętlę wątku → finished → sprzątanie
-        self._worker.stage_done.connect(self._thread.quit)
-        self._worker.cancelled.connect(self._thread.quit)
-        self._worker.failed.connect(self._thread.quit)
+        # quit DOPIERO gdy run() w całości wróci (`finished`) — przy „all" leci wiele stage_done,
+        # więc NIE wolno kończyć wątku na pierwszym z nich.
+        self._worker.finished.connect(self._thread.quit)
         self._thread.finished.connect(self._cleanup_thread)
-        self._set_running(True)
+        self._set_running(True, cancellable=stage in ("scan", "all"))
         self._thread.start()
 
     def _cleanup_thread(self):
@@ -259,21 +345,29 @@ class PipelineView(QWidget):
             f"Pliki {done}/{total} · nowe {counts['frames_new']} · "
             f"pominięte {counts['skipped']} · review {review} · {tail}")
 
+    @Slot(str)
+    def _on_stage_started(self, name):
+        # skan: pasek nieokreślony do 1. progresu; etap masowy: busy spinner (bez progresu per-wiersz)
+        self.bar.setRange(0, 0)
+        self.lbl_counts.setText(f"{_STAGE_LABEL.get(name, name)} w toku…")
+
     @Slot(str, object)
-    def _on_stage_done(self, name, summary):
+    def _on_stage_done(self, name, result):
         self.bar.setRange(0, 1)
         self.bar.setValue(1)
-        self.lbl_summary.setText(self._format_summary(summary))
-        self.status_message.emit(f"Skan zakończony: {summary.files} plików.")
-        self.stage_finished.emit(name)
+        self.lbl_counts.setText("")
+        self._append_summary(self._format_result(name, result))
+        self.status_message.emit(f"{_STAGE_LABEL.get(name, name)}: gotowe.")
+        self.stage_finished.emit(name)                  # gospodarz odświeża oś (WAL)
 
     @Slot(str, object)
     def _on_cancelled(self, name, summary):
         self.bar.setRange(0, 1)
         self.bar.setValue(0)
-        self.lbl_summary.setText(
-            f"Przerwano po {summary.files} plikach — baza spójna, ponowny skan dokończy.\n"
-            + self._format_summary(summary))
+        self.lbl_counts.setText("")
+        self._append_summary(
+            f"[skan] przerwano po {summary.files} plikach — baza spójna, ponowny skan dokończy.")
+        self._append_summary(self._format_result("scan", summary))
         self.status_message.emit(f"Skan przerwany po {summary.files} plikach.")
         self.stage_finished.emit(name)                  # częściowy zapis też trzeba odświeżyć
 
@@ -282,30 +376,72 @@ class PipelineView(QWidget):
         self.bar.setRange(0, 1)
         self.bar.setValue(0)
         self.lbl_counts.setText("")
-        self.lbl_summary.setText(f"Błąd etapu „{name}”: {msg}")
+        self._append_summary(f"[{name}] BŁĄD: {msg}")
         self.status_message.emit(f"Etap „{name}” nie powiódł się.")
 
-    # ---------------------------------------------------------------- pomocnicze
+    # ---------------------------------------------------------------- formatowanie / stan przycisków
 
-    def _format_summary(self, s):
+    def _append_summary(self, line):
+        self._summary_lines.append(line)
+        self.lbl_summary.setText("\n".join(self._summary_lines))
+
+    def _format_result(self, name, r):
+        if name == "scan":
+            return self._format_scan(r)
+        if name == "group":
+            return self._format_group(r)
+        if name == "resolve":
+            return self._format_resolve(r)
+        if name == "delta":
+            return self._format_delta(r)
+        return str(r)
+
+    def _format_scan(self, s):
         return (
-            f"Pliki: {s.files} · nowe frame'y: {s.frames_new} · istniejące: {s.frames_existing} · "
-            f"pominięte (brama): {s.skipped}\n"
-            f"nowe location: {s.locations_new} · nagłówki: {s.headers} · "
-            f"frame.review: {s.frame_review} · camera.review: {s.camera_review} · "
-            f"kind.unmapped: {s.kind_unmapped}")
+            f"[skan] pliki {s.files} · nowe {s.frames_new} · istniejące {s.frames_existing} · "
+            f"pominięte {s.skipped} · location {s.locations_new} · nagłówki {s.headers} · "
+            f"review f/{s.frame_review} k/{s.camera_review} kind/{s.kind_unmapped}")
 
-    def _set_running(self, running):
-        self.btn_scan.setEnabled(not running and self._can_scan())
-        self.btn_pick.setEnabled(not running)
-        self.combo_tier.setEnabled(not running)
-        self.btn_cancel.setEnabled(running)
+    def _format_group(self, s):
+        return (
+            f"[grupuj] nagłówki {s.headers} · focratio ok/odzysk/review "
+            f"{s.focratio_ok}/{s.focratio_recovered}/{s.focratio_review} · teleskopy {s.telescopes_proposed} "
+            f"(suspect {s.telescopes_suspect}) · configi {s.configs_proposed}/{s.configs_assigned} · "
+            f"config.review {s.config_review}")
+
+    def _format_resolve(self, s):
+        return (
+            f"[rozwiąż] frame'y {s.frames} · lighty {s.light_frames} · obiekty nowe {s.objects_new} · "
+            f"przypisane {s.objects_assigned} · review {s.objects_review} "
+            f"(distinct {s.objects_unresolved_distinct}) · filtry {s.filters_set}")
+
+    def _format_delta(self, r):
+        total = r.object_resolved + r.object_unresolved
+        top = ", ".join(f"{raw}×{n}" for raw, n in r.object_delta[:8]) or "—"
+        reviews = ", ".join(f"{v}:{n}" for v, n in sorted(r.review_counts.items())) or "—"
+        return (
+            f"[delta] obiekt {r.object_resolved}/{total} ({r.object_pct:.1f}%) · filtry {r.filters_canon}\n"
+            f"   nierozpoznane: {top}\n   review: {reviews}")
+
+    def _refresh_buttons(self, running, cancellable):
+        idle = not running
+        has_db = self._db_path is not None
+        self.btn_pick.setEnabled(idle)
+        self.combo_tier.setEnabled(idle)
+        self.btn_all.setEnabled(idle and self._can_scan())
+        self.btn_scan.setEnabled(idle and self._can_scan())
+        self.btn_group.setEnabled(idle and has_db)
+        self.btn_resolve.setEnabled(idle and has_db)
+        self.btn_delta.setEnabled(idle and has_db)
+        self.btn_cancel.setEnabled(running and cancellable)
+
+    def _set_running(self, running, *, cancellable=False):
+        self._cancellable = cancellable if running else False
+        self._refresh_buttons(running, self._cancellable)
         self.running_changed.emit(running)
 
     def _can_scan(self):
         return self._db_path is not None and self._root is not None
 
     def _sync_actions(self):
-        running = self._thread is not None
-        self.btn_scan.setEnabled(not running and self._can_scan())
-        self.btn_cancel.setEnabled(running)
+        self._refresh_buttons(self._thread is not None, self._cancellable)

@@ -38,7 +38,7 @@ def main(argv=None):
     p_resolve = sub.add_parser("resolve", help="resolver obiektu + filtra (krok zbiorczy po skanie)")
     p_resolve.add_argument("db", help="ścieżka pliku bazy")
 
-    p_delta = sub.add_parser("delta", help="delta do review (read-only): % obiektu + nierozstrzygnięte")
+    p_delta = sub.add_parser("delta", help="delta do review (read-only): %% obiektu + nierozstrzygnięte")
     p_delta.add_argument("db", help="ścieżka pliku bazy")
 
     args = parser.parse_args(argv)

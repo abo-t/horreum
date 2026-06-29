@@ -420,7 +420,8 @@ class PipelineView(QWidget):
     def _format_scan(self, s):
         return (
             f"[skan] pliki {s.files} · nowe {s.frames_new} · istniejące {s.frames_existing} · "
-            f"pominięte {s.skipped} · lokalizacje {s.locations_new} · nagłówki {s.headers} · "
+            f"pominięte {s.skipped} · wykluczone katalogi {s.dirs_excluded} · "
+            f"lokalizacje {s.locations_new} · nagłówki {s.headers} · "
             f"przegląd f/{s.frame_review} k/{s.camera_review} rodzaj/{s.kind_unmapped}")
 
     def _format_group(self, s):

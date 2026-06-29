@@ -22,6 +22,7 @@ Miękkie lądowanie (W1): `read_*` MOGĄ rzucać dla pliku nieczytelnego/nierozp
 ani użytkownik. Nierozstrzygalność trafia do `event(*.review)` w warstwie upsertu (§Etap 4).
 """
 import json
+import os
 import struct
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -48,6 +49,12 @@ _MULTI_KEYWORDS = ("COMMENT", "HISTORY", "")
 
 _XISF_SIGNATURE = b"XISF0100"        # monolithic XISF 1.0; po nim uint32 LE = długość nagłówka XML
 
+# Katalogi-drzewa robocze wykluczane ze skanu (doktryna README §„baza = autorytet": projekcje WBPP
+# to wyjście z bazy, nie wejście). JAWNA LISTA, nie konwencja `_*` — firsthand na realnym drzewie pokazał
+# realne `_COMETS`/`_SOLAR` pod LIGHTS\ (1197 lightów), które konwencja porzuciłaby. Dopasowanie
+# NIEWRAŻLIWE na wielkość (NTFS; realne nazwy to `_WBPP`/`_REVIEW`). Trzymamy w lowercase.
+EXCLUDED_DIR_NAMES = frozenset({"_wbpp", "_review"})
+
 
 @dataclass(frozen=True)
 class ScanRecord:
@@ -65,14 +72,35 @@ class ScanRecord:
     error: object = None              # None gdy OK; tekst "Typ: opis" gdy nagłówek nieczytelny (W1)
 
 
-def _iter_suffixes(root, suffixes):
+def _iter_suffixes(root, suffixes, excluded_out=None):
     """Przejdź drzewo `root` i wydaj POSORTOWANE ścieżki plików o danych rozszerzeniach
-    (case-insensitive). Zwraca `Path`; pomija katalogi i inne rozszerzenia. Czysty odczyt katalogu."""
+    (case-insensitive). Zwraca `Path`; pomija katalogi i inne rozszerzenia. Czysty odczyt katalogu.
+
+    WYKLUCZANIE DRZEW ROBOCZYCH (doktryna README §„baza = autorytet"): podkatalog o nazwie z JAWNEJ
+    listy `EXCLUDED_DIR_NAMES` (`_WBPP`, `_Review`; niewrażliwie na wielkość) jest ODCINANY — skaner
+    do niego NIE SCHODZI (a nie tylko filtruje pliki). To egzekwuje regułę „drzewa WBPP to jednorazowe
+    projekcje z bazy, nie wejście skanu". NIE konwencja `_*`: firsthand pokazał realne `_COMETS`/
+    `_SOLAR` (lighty), które konwencja porzuciłaby. WYJĄTEK: jawnie wskazany root (`os.walk` zaczyna
+    OD niego, filtr `dirnames` nie tyka punktu startu) — gdy user świadomie wskaże `…\\_WBPP`, skanujemy
+    go normalnie. `os.walk` domyślnie NIE podąża za symlinkami (`followlinks=False`) — drugi wektor
+    wciągania projekcji odcięty.
+
+    `excluded_out` (opcjonalna lista): jeśli podana, dopisujemy do niej ŚCIEŻKI wykluczonych
+    katalogów — nie chowamy faktu wykluczenia za samym licznikiem (diagnostyka: user widzi, czego
+    skan nie wciągnął). `os.walk` daje kolejność systemową → finalne `sorted(...)` trzyma kontrakt
+    „POSORTOWANE" (jak dawne `rglob`+`sorted`)."""
     root = Path(root)
-    return sorted(
-        p for p in root.rglob("*")
-        if p.is_file() and p.suffix.lower() in suffixes
-    )
+    out = []
+    for dirpath, dirnames, filenames in os.walk(root):     # followlinks=False (domyślnie) — bez symlinków
+        excl = [d for d in dirnames if d.lower() in EXCLUDED_DIR_NAMES]
+        if excluded_out is not None:
+            excluded_out.extend(str(Path(dirpath) / d) for d in excl)
+        dirnames[:] = sorted(d for d in dirnames if d.lower() not in EXCLUDED_DIR_NAMES)  # prune + determinizm
+        for name in filenames:
+            p = Path(dirpath) / name
+            if p.suffix.lower() in suffixes:
+                out.append(p)
+    return sorted(out)                                     # kontrakt: POSORTOWANE po ścieżce
 
 
 def iter_fits(root):
@@ -81,11 +109,12 @@ def iter_fits(root):
     return _iter_suffixes(root, FITS_SUFFIXES)
 
 
-def iter_headers(root):
+def iter_headers(root, excluded_out=None):
     """Posortowane ścieżki WSZYSTKICH plików nagłówkonośnych pierwszego przebiegu (FITS + XISF,
     case-insensitive) w drzewie `root`. Wejście pętli płaskiej skanu (§Etap 4): jeden mechanizm,
-    format = opakowanie (PLAN §1.1)."""
-    return _iter_suffixes(root, HEADER_SUFFIXES)
+    format = opakowanie (PLAN §1.1). Podkatalogi z `EXCLUDED_DIR_NAMES` odcięte (patrz
+    `_iter_suffixes`); `excluded_out` zbiera ich ścieżki do telemetrii skanu."""
+    return _iter_suffixes(root, HEADER_SUFFIXES, excluded_out=excluded_out)
 
 
 def _jsonable(value):
@@ -247,6 +276,8 @@ class ScanSummary:
     camera_review: int = 0
     kind_unmapped: int = 0
     skipped: int = 0          # pliki POMINIĘTE bramą przyrostową (NIEczytane — bez sha1/nagłówka/DML)
+    dirs_excluded: int = 0    # podkatalogi z listy odcięte (drzewa robocze: _WBPP/_Review — nie schodzone)
+    excluded_dirs: list = field(default_factory=list)   # ich ścieżki (diagnostyka — nie cichy licznik)
     cancelled: bool = False   # skan przerwany kooperatywnie (should_cancel) na granicy pliku
 
 
@@ -264,7 +295,12 @@ def _already_scanned(con, volume, path, mtime):
     nie-literału = offender poza repo.py/db.py). `UNIQUE(volume, path)` → ≤1 wiersz; `mtime`
     rozstrzyga „niezmieniony". FORWARD-GUARD: gdy dojdzie pass zniknięć (`present`), dołożyć tu
     `AND present=1` lub resetować `present=1` na trafieniu — inaczej „zmartwychwstały" plik
-    (present=0, ten sam mtime) zostałby pominięty. Dziś `present` zawsze 1 — uśpione."""
+    (present=0, ten sam mtime) zostałby pominięty. Dziś `present` zawsze 1 — uśpione.
+
+    FORWARD-GUARD (prune wykluczeń): gdy dojdzie pass zniknięć, WYKLUCZENIE katalogu (np. `_WBPP`) to
+    NIE to samo co zniknięcie pliku — plik istnieje, jest tylko poza zasięgiem skanu. Pass `present`
+    MUSI liczyć `present=0` wyłącznie z faktycznie SKANOWANEGO poddrzewa (nie z tego, co prune odciął),
+    inaczej przeniesienie danych pod wykluczony katalog fałszywie oznaczyłoby je jako znikłe (sieroty)."""
     row = con.execute(
         "SELECT 1 FROM location WHERE volume=? AND path=? AND mtime=?",
         (volume, path, mtime),
@@ -362,7 +398,10 @@ def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now,
         callbacku GUI; rdzeń woła synchronicznie.
     """
     summary = ScanSummary()
-    paths = iter_headers(root)
+    excluded = []
+    paths = iter_headers(root, excluded_out=excluded)      # drzewa robocze odcięte (EXCLUDED_DIR_NAMES: _WBPP/_Review)
+    summary.excluded_dirs = excluded
+    summary.dirs_excluded = len(excluded)
     total = len(paths)
     gate_on = volume != "?"
     for path in paths:

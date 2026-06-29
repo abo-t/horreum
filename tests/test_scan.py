@@ -6,6 +6,7 @@ import hashlib
 import json
 import shutil
 import struct
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -237,6 +238,70 @@ def test_iter_headers_lapie_fits_i_xisf(tmp_path):
     assert {p.name for p in paths} == {"a.fits", "b.FIT", "c.xisf", "d.XISF"}   # 4 ext, .txt pominięty, rekursja
     assert paths == sorted(paths)                                   # deterministycznie posortowane po ścieżce
     assert "d.XISF" not in [p.name for p in iter_fits(tmp_path)]    # FITS-only nie łapie xisf
+
+
+def test_iter_headers_prune_drzew_roboczych_z_listy(tmp_path):
+    """Katalog z JAWNEJ listy (`_WBPP`/`_Review`, niewrażliwie na wielkość) jest ODCINANY — skaner do
+    niego nie schodzi. Rodzeństwo skanowane normalnie. `excluded_out` zbiera ścieżki wykluczonych."""
+    (tmp_path / "_WBPP").mkdir()
+    (tmp_path / "_REVIEW").mkdir()                           # wielkie litery — NTFS case-insensitive
+    (tmp_path / "LIGHTS").mkdir()
+    _write_fits(tmp_path / "LIGHTS" / "keep.fits")
+    _write_fits(tmp_path / "_WBPP" / "hardlink.fits")        # treść robocza — NIE wciągamy
+    _write_fits(tmp_path / "_REVIEW" / "whatever.fits")
+    excluded = []
+    paths = iter_headers(tmp_path, excluded_out=excluded)
+    assert {p.name for p in paths} == {"keep.fits"}          # tylko poddrzewo spoza listy
+    assert {Path(d).name for d in excluded} == {"_WBPP", "_REVIEW"}   # nazwy wykluczonych, nie sam licznik
+
+
+def test_iter_headers_underscore_spoza_listy_zostaje(tmp_path):
+    """REGRESJA (firsthand realnym drzewie): katalog z prefiksem `_` ALE SPOZA listy — np. `_COMETS`/
+    `_SOLAR` (realne lighty pod LIGHTS\\) — NIE jest wykluczany. Lista, nie konwencja `_*`."""
+    (tmp_path / "LIGHTS" / "_COMETS").mkdir(parents=True)
+    (tmp_path / "LIGHTS" / "_SOLAR").mkdir()
+    _write_fits(tmp_path / "LIGHTS" / "_COMETS" / "comet.fits")
+    _write_fits(tmp_path / "LIGHTS" / "_SOLAR" / "jup.fits")
+    excluded = []
+    paths = iter_headers(tmp_path, excluded_out=excluded)
+    assert {p.name for p in paths} == {"comet.fits", "jup.fits"}   # realne dane zachowane
+    assert excluded == []
+
+
+def test_iter_headers_root_z_listy_jednak_skanowany(tmp_path):
+    """WYJĄTEK root: gdy user JAWNIE wskaże `…\\_WBPP` jako katalog startowy, skanujemy go (lista tyka
+    tylko podkatalogi odkryte w trakcie chodzenia, nie punkt startu) — inaczej „wskaż _WBPP → zero
+    plików" kłamałoby."""
+    root = tmp_path / "_WBPP"
+    root.mkdir()
+    _write_fits(root / "a.fits")
+    assert {p.name for p in iter_headers(root)} == {"a.fits"}
+
+
+def test_iter_headers_prune_zagniezdzony_i_gleboki(tmp_path):
+    """Prune odcina CAŁE poddrzewo `_WBPP` (z zawartością głębiej), ale nie tyka rodzeństwa.
+    `a/keep.fits` zostaje, `a/_WBPP/deep/c.fits` znika (odcięty na `_WBPP`)."""
+    (tmp_path / "a" / "_WBPP" / "deep").mkdir(parents=True)
+    _write_fits(tmp_path / "a" / "keep.fits")
+    _write_fits(tmp_path / "a" / "_WBPP" / "deep" / "c.fits")
+    excluded = []
+    paths = iter_headers(tmp_path, excluded_out=excluded)
+    assert {p.name for p in paths} == {"keep.fits"}
+    assert [Path(d).name for d in excluded] == ["_WBPP"]
+
+
+def test_scan_tree_telemetria_wykluczonych(tmp_path):
+    """`scan_tree` wypełnia `dirs_excluded` (licznik) i `excluded_dirs` (ścieżki) — pliki w `_`-drzewie
+    nie powstają jako frame'y (skaner tam nie schodzi)."""
+    con = db.open_db(str(tmp_path / "s.db"))
+    (tmp_path / "_WBPP").mkdir()
+    (tmp_path / "LIGHTS").mkdir()
+    _write_fits(tmp_path / "LIGHTS" / "keep.fits", cards=[("INSTRUME", "x"), ("XPIXSZ", 3.76)])
+    _write_fits(tmp_path / "_WBPP" / "skip.fits", cards=[("INSTRUME", "x"), ("XPIXSZ", 3.76)])
+    s = scan_tree(con, str(tmp_path), now=NOW)
+    assert s.files == 1 and s.frames_new == 1                # tylko keep.fits wciągnięty
+    assert s.dirs_excluded == 1
+    assert [Path(d).name for d in s.excluded_dirs] == ["_WBPP"]
 
 
 def test_read_header_dyspozytor_po_rozszerzeniu(tmp_path):

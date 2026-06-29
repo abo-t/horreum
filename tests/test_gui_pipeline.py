@@ -183,6 +183,17 @@ def test_gating_przyciskow_wymaga_bazy_i_katalogu(qapp, tmp_path):
     assert view.btn_all.isEnabled() and view.btn_scan.isEnabled()           # katalog wskazany
 
 
+def test_pasek_ukryty_w_spoczynku_blad_w_osobnym_wierszu(qapp, tmp_path):
+    """Wizytator P2: w spoczynku pasek UKRYTY (nie kłamie „0%"); błąd etapu ląduje w OSOBNYM
+    czerwonym wierszu (`lbl_error`), nie ginie w panelu summary."""
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    assert view.bar.isHidden()                           # idle: pasek schowany (intencja, nie zależy od show())
+    assert view.lbl_error.isHidden()
+    view._on_failed("scan", "PermissionError: brak dostępu")
+    assert not view.lbl_error.isHidden() and "BŁĄD" in view.lbl_error.text()
+    assert "scan" not in view.lbl_summary.text()         # błąd NIE zaśmieca panelu wyników
+
+
 def test_view_przetworz_wszystko_w_watku(qapp, tmp_path):
     """Pełny łańcuch z okna w PRAWDZIWYM wątku: panel akumuluje 4 sekcje (skan/grupuj/rozwiąż/delta),
     running wraca do False po sprzątnięciu."""

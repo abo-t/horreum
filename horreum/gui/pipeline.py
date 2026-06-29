@@ -196,8 +196,13 @@ class PipelineView(QWidget):
         v.addWidget(self.lbl_volume)
         v.addWidget(self._hline())
 
-        # 3. „Przetwórz wszystko" — DOMYŚLNA ścieżka (skan→grupuj→rozwiąż→delta jednym kliknięciem)
-        self.btn_all = QPushButton("Przetwórz wszystko  ▸  skan → grupuj → rozwiąż → delta")
+        # 3. „Przetwórz wszystko" — DOMYŚLNA ścieżka (skan→grupuj→rozwiąż→delta jednym kliknięciem).
+        # Akcja główna ma wagę WIZUALNĄ (bold + wyższy) — wizytator P2: nie może wyglądać jak reszta.
+        self.btn_all = QPushButton("Przetwórz wszystko  (skan → grupuj → rozwiąż → delta)")
+        _f = self.btn_all.font()
+        _f.setBold(True)
+        self.btn_all.setFont(_f)
+        self.btn_all.setMinimumHeight(34)
         self.btn_all.clicked.connect(self._on_all)
         v.addWidget(self.btn_all)
 
@@ -218,15 +223,25 @@ class PipelineView(QWidget):
         stages.addStretch(1)
         v.addLayout(stages)
 
-        # 5. Pasek + liczniki (wspólne: skan = uczciwy %; etapy masowe = busy spinner)
+        # 5. Pasek + liczniki (wspólne: skan = uczciwy %; etapy masowe = busy spinner). Pasek UKRYTY
+        # w spoczynku — wizytator P2: „0%" w idle kłamie, że coś ruszyło. Pojawia się w _begin_run.
         self.bar = QProgressBar()
         self.bar.setRange(0, 100)
         self.bar.setValue(0)
+        self.bar.setVisible(False)
         v.addWidget(self.bar)
         self.lbl_counts = QLabel("")
         v.addWidget(self.lbl_counts)
 
-        # 6. Panel podsumowania — akumuluje wiersz per (pod)etap (handoff delty do import-legacy)
+        # 6. Błąd etapu — OSOBNY wiersz, kolor semantyczny (wizytator P2: błąd nie może ginąć wśród
+        # czarnych wierszy panelu). Ukryty dopóki nie padnie failed.
+        self.lbl_error = QLabel("")
+        self.lbl_error.setStyleSheet("color: #b00020;")
+        self.lbl_error.setWordWrap(True)
+        self.lbl_error.setVisible(False)
+        v.addWidget(self.lbl_error)
+
+        # 7. Panel podsumowania — akumuluje wiersz per (pod)etap (handoff delty do import-legacy)
         self.lbl_summary = QLabel("")
         self.lbl_summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.lbl_summary.setWordWrap(True)
@@ -269,6 +284,9 @@ class PipelineView(QWidget):
         """Wyzeruj panel/pasek przed nowym przebiegiem (summary akumuluje per etap, więc czyścimy)."""
         self._summary_lines = []
         self.lbl_summary.setText("")
+        self.lbl_error.setVisible(False)
+        self.lbl_error.setText("")
+        self.bar.setVisible(True)
         self.bar.setRange(0, 0)
         self.lbl_counts.setText("")
 
@@ -376,7 +394,8 @@ class PipelineView(QWidget):
         self.bar.setRange(0, 1)
         self.bar.setValue(0)
         self.lbl_counts.setText("")
-        self._append_summary(f"[{name}] BŁĄD: {msg}")
+        self.lbl_error.setText(f"BŁĄD — etap „{_STAGE_LABEL.get(name, name)}”: {msg}")
+        self.lbl_error.setVisible(True)                 # czerwony, osobny wiersz — nie ginie w panelu
         self.status_message.emit(f"Etap „{name}” nie powiódł się.")
 
     # ---------------------------------------------------------------- formatowanie / stan przycisków

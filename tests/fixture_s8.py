@@ -12,6 +12,16 @@ NIE woła merge/label/approve — stan wyjściowy to czyste `proposed`/kanoniczn
 testy/wizytator, by kontrolować scenariusz. Reuż.: `python tests/fixture_s8.py <ścieżka.db>` zrzuca
 gotowy plik dla wizytatora.
 """
+import sys
+from pathlib import Path
+
+# Plik bywa uruchamiany JAKO SKRYPT (`python tests/fixture_s8.py <db>` — materializacja §8 dla
+# wizytatora 5.3): wtedy na sys.path jest tylko `tests/`, więc dołóż korzeń repo, by `import horreum`
+# działał. Pod pytest (`__name__ != "__main__"`) korzeń już jest na ścieżce (pythonpath=["."]) —
+# guard nieczynny i nie dubluje wpisu.
+if __name__ == "__main__" and __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from horreum import db, repo
 
 NOW = "2026-06-29T12:00:00"
@@ -66,3 +76,15 @@ def build(path):
     finally:
         con.close()
     return ids
+
+
+if __name__ == "__main__":
+    # CLI dla wizytatora/podglądu (5.3): `python tests/fixture_s8.py <ścieżka.db>` zrzuca gotowy
+    # plik §8 i wypisuje id-ki, by potem `python -m horreum.gui <ścieżka.db>` miał co pokazać.
+    import sys
+
+    if len(sys.argv) != 2:
+        print("Użycie: python tests/fixture_s8.py <ścieżka.db>")
+        raise SystemExit(2)
+    out_ids = build(sys.argv[1])
+    print(f"Horreum §8 -> {sys.argv[1]} : {out_ids}")

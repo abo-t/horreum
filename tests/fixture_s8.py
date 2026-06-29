@@ -67,24 +67,98 @@ def seed(con):
             "cfg_a": cfg_a, "cfg_b": cfg_b, "cfg_c": cfg_c, "frames": frames}
 
 
-def build(path):
-    """Zmaterializuj bazę §8 do pliku `path` (importowalny builder — dla `wizytator-qt`/podglądu
-    w 5.3). Zwraca dict id-ków."""
+def seed_object_axis(con):
+    """Rozszerzenie §8 pod oś OBIEKT (PLAN_gui_object §8) — woła `seed`, potem DOKŁADA nagłówki,
+    obiekty, lokalizacje i klatki review. NIE zmienia configów istniejących klatek A/B/C (telescope
+    testy widzą tę samą licznością `{A:2,B:3,C:2,D:0}` — nowe klatki są `config_id NULL` lub kalibracją,
+    czyli poza sumą canonical; nagłówki/obiekty na a1..c2 nie ruszają liczników).
+
+    Scenariusze (R#1–R#7): 2 obiekty (NGC7000 spina teleskopy A+C / kamery cam1+cam2; M42 pod B);
+    obiekt-review (FlatWizard ×2); headerless (nullcfg, BEZ headera) vs config-review (z headerem);
+    kalibracja (flat — poza biblioteką i kolejką obiektu); frame z jedyną lokalizacją present=0
+    (wciąż widoczny); a1 z DWIEMA lokalizacjami (dedup MIN(id)). Zwraca dict `seed` + klucze obiektowe."""
+    ids = seed(con)
+    fr = ids["frames"]
+    cam1, cam2 = ids["cam1"], ids["cam2"]
+
+    obj_ngc, _ = repo.upsert_object(con, canon="NGC7000", catalog="NGC", kind="deep_sky", now=NOW)
+    obj_m42, _ = repo.upsert_object(con, canon="M42", catalog="Messier", kind="deep_sky", now=NOW)
+
+    # nagłówek + przypisanie obiektu na ISTNIEJĄCYCH klatkach z configiem (liczniki teleskopu bez zmian)
+    def _hdr_obj(name, object_raw, obj_id, source, filter_canon=None):
+        fid = fr[name]
+        repo.record_header(con, frame_id=fid, raw_json="{}", object_raw=object_raw, now=NOW)
+        repo.assign_object(con, frame_id=fid, object_id=obj_id, object_source=source, now=NOW)
+        if filter_canon is not None:
+            repo.backfill_filter_canon(con, [(fid, filter_canon)], now=NOW)
+
+    _hdr_obj("a1", "NGC 7000", obj_ngc, "catalog_xref", filter_canon="Ha")
+    _hdr_obj("a2", "NGC 7000", obj_ngc, "catalog_xref", filter_canon="Ha")     # A: obj NGC7000, Ha
+    _hdr_obj("b1", "M 42", obj_m42, "catalog_xref", filter_canon="OIII")
+    _hdr_obj("b2", "M 42", obj_m42, "catalog_xref")
+    _hdr_obj("b3", "M 42", obj_m42, "catalog_xref")                            # B: obj M42
+    _hdr_obj("c1", "NGC 7000", obj_ngc, "catalog_xref")
+    _hdr_obj("c2", "NGC 7000", obj_ngc, "catalog_xref")                        # C: obj NGC7000 (cam2)
+
+    # a1 — DRUGA lokalizacja (R#3: dedup MIN(id), klatka raz mimo 1:N location); obie present=1
+    repo.add_location(con, frame_id=fr["a1"], volume="vol1", path="/astro/a1.fits",
+                      drive_letter="R:", now=NOW)
+    repo.add_location(con, frame_id=fr["a1"], volume="vol2", path="/backup/a1.fits",
+                      drive_letter="S:", now=NOW)
+
+    new = {}
+
+    def _frame(name, sha, kind, camera_id):
+        fid, _ = repo.upsert_frame(con, sha1=sha, kind=kind, filetype="fits", size_bytes=1,
+                                   camera_id=camera_id, now=NOW)
+        new[name] = fid
+        return fid
+
+    # obiekt-review: light, config NULL, header z object_raw nierozpoznanym, BEZ object_id (×2 — liczność)
+    for nm, sha in (("objrev1", "sha-objrev1"), ("objrev2", "sha-objrev2")):
+        rid = _frame(nm, sha, "light", cam1)
+        repo.record_header(con, frame_id=rid, raw_json="{}", object_raw="FlatWizard", now=NOW)
+
+    # kalibracja: flat z headerem, BEZ obiektu — NIE w bibliotece ani kolejce obiektu (R#1)
+    cal = _frame("calib_flat", "sha-calib", "flat", cam1)
+    repo.record_header(con, frame_id=cal, raw_json="{}", object_raw=None, now=NOW)
+
+    # present=0: light z obiektem NGC7000, config NULL, JEDYNA lokalizacja present=0 (R#7 — wciąż widoczny)
+    p0 = _frame("present0", "sha-present0", "light", cam1)
+    repo.record_header(con, frame_id=p0, raw_json="{}", object_raw="NGC 7000", now=NOW)
+    repo.assign_object(con, frame_id=p0, object_id=obj_ngc, object_source="catalog_xref", now=NOW)
+    loc_p0, _ = repo.add_location(con, frame_id=p0, volume="vol3", path="/astro/present0.fits", now=NOW)
+    # present=0 nie ma jeszcze funkcji `repo` (pass zniknięć poza v1) — zasiew bezpośredni w FIXTURE
+    # (tests/ jest poza zakresem meta-testu AST, który skanuje pakiet horreum/). Symuluje „plik zniknął".
+    with con:
+        con.execute("UPDATE location SET present = 0 WHERE id = ?", (loc_p0,))
+
+    # nullcfg z `seed` zostaje headerless (light, config NULL, BEZ headera) — kubełek headerless.
+    ids["objects"] = {"NGC7000": obj_ngc, "M42": obj_m42}
+    ids["frames"].update(new)
+    return ids
+
+
+def build(path, *, object_axis=False):
+    """Zmaterializuj bazę §8 do pliku `path` (importowalny builder — dla `wizytator-qt`/podglądu).
+    `object_axis=True` → rozszerzenie osi obiektu (`seed_object_axis`). Zwraca dict id-ków."""
     con = db.open_db(str(path))
     try:
-        ids = seed(con)
+        ids = seed_object_axis(con) if object_axis else seed(con)
     finally:
         con.close()
     return ids
 
 
 if __name__ == "__main__":
-    # CLI dla wizytatora/podglądu (5.3): `python tests/fixture_s8.py <ścieżka.db>` zrzuca gotowy
-    # plik §8 i wypisuje id-ki, by potem `python -m horreum.gui <ścieżka.db>` miał co pokazać.
+    # CLI dla wizytatora/podglądu: `python tests/fixture_s8.py <ścieżka.db> [--object]` zrzuca gotowy
+    # plik (§8 lub §8+oś obiektu) i wypisuje id-ki, by `python -m horreum.gui <ścieżka.db>` miał co pokazać.
     import sys
 
-    if len(sys.argv) != 2:
-        print("Użycie: python tests/fixture_s8.py <ścieżka.db>")
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    obj = "--object" in sys.argv[1:]
+    if len(args) != 1:
+        print("Użycie: python tests/fixture_s8.py <ścieżka.db> [--object]")
         raise SystemExit(2)
-    out_ids = build(sys.argv[1])
-    print(f"Horreum §8 -> {sys.argv[1]} : {out_ids}")
+    out_ids = build(args[0], object_axis=obj)
+    print(f"Horreum {'§8+obiekt' if obj else '§8'} -> {args[0]} : {out_ids}")

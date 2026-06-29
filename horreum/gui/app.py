@@ -290,6 +290,272 @@ class TelescopeAxisView(QWidget):
         self.refresh()
 
 
+# ============================================================ oś OBIEKT (PLAN_gui_object — READ-ONLY)
+
+OBJ_COL_CANON, OBJ_COL_CATALOG, OBJ_COL_FRAMES = range(3)
+OBJ_HEADERS = ["Obiekt", "Katalog", "Klatki"]
+FRAME_COL_SHA, FRAME_COL_TEL, FRAME_COL_CAM, FRAME_COL_FILTER, FRAME_COL_DATE, FRAME_COL_PRESENT, \
+    FRAME_COL_PATH = range(7)
+FRAME_HEADERS = ["sha1", "Teleskop", "Kamera", "Filtr", "Data", "Obecny", "Ścieżka"]
+
+
+def _tel_facet_label(row):
+    """Etykieta teleskopu do comba filtra: nazwa usera, a gdy brak (proposed) — sygnatura f//ogniskowa."""
+    if row["label"]:
+        return row["label"]
+    return f'f/{_fmt(row["f_ratio_nominal"])} · {_fmt(row["focal_nominal"])} mm'
+
+
+def _tel_cell(row):
+    """Etykieta teleskopu w tabeli klatek (wizytator P1 #1): nazwa usera, a gdy brak (teleskop jeszcze
+    nienazwany — realny przypadek: cała oś `proposed`) — sygnatura `f//ogniskowa` jak w combie, by
+    kolumna NIE milczała. Klatka bez teleskopu (config NULL) → '' (brak osi, nie brak danych)."""
+    if row["telescope_label"]:
+        return row["telescope_label"]
+    if row["f_ratio_nominal"] is None:
+        return ""
+    return f'f/{_fmt(row["f_ratio_nominal"])} · {_fmt(row["focal_nominal"])} mm'
+
+
+class ObjectAxisView(QWidget):
+    """Osadzalny widok osi OBIEKT (PLAN_gui_object, wariant A — READ-ONLY): biblioteka (obiekty →
+    klatki, filtr po teleskopie/kamerze/filtrze) + kolejka przeglądu (obiekt-review / config-review /
+    headerless) ze STANU. **Zero akcji zapisu** — rozwiązywanie review świadomie odłożone (import-legacy);
+    UI to jawnie deklaruje („podgląd"), żeby nie kłamać obietnicą akcji. Meta-test AST pilnuje, że ten
+    widok nie tyka SQL zapisu (sama glue Qt↔read-model).
+
+    `con` = otwarte połączenie (NIE własność widoku). `now_fn` nieużywane (brak zapisu) — przyjmowane
+    dla spójności sygnatury z `TelescopeAxisView` (montaż w `MainWindow`)."""
+
+    status_message = Signal(str)
+
+    def __init__(self, con, now_fn=_utc_now_iso, parent=None):
+        super().__init__(parent)
+        self.con = con
+        self._loading = False                 # tłumi sygnały selekcji podczas programowego wypełniania
+        self._build_ui()
+        self._load_facets()
+        self.refresh()
+
+    # ---------------------------------------------------------------- budowa UI
+
+    def _build_ui(self):
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        # --- pasek filtra + jawna nota „podgląd" (UI nie kłamie obietnicą akcji) ---
+        bar = QHBoxLayout()
+        bar.addWidget(QLabel("Teleskop:"))
+        self.combo_tel = QComboBox()
+        self.combo_tel.currentIndexChanged.connect(self._on_filter_changed)
+        bar.addWidget(self.combo_tel)
+        bar.addWidget(QLabel("Filtr:"))
+        self.combo_filter = QComboBox()
+        self.combo_filter.currentIndexChanged.connect(self._on_filter_changed)
+        bar.addWidget(self.combo_filter)
+        bar.addStretch(1)
+        bar.addWidget(QLabel("Podgląd — rozwiązywanie review w przygotowaniu"))
+        outer.addLayout(bar)
+
+        splitter = QSplitter(Qt.Horizontal)
+
+        # --- lewa: biblioteka obiektów + kolejka przeglądu pod nią ---
+        left = QWidget()
+        lv = QVBoxLayout(left)
+        lv.addWidget(QLabel("Biblioteka (obiekty)"))
+        self.objects = QTableWidget(0, len(OBJ_HEADERS))
+        self.objects.setHorizontalHeaderLabels(OBJ_HEADERS)
+        self.objects.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.objects.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.objects.setEditTriggers(QAbstractItemView.NoEditTriggers)   # read-only
+        self.objects.verticalHeader().setVisible(False)
+        self.objects.itemSelectionChanged.connect(self._on_object_selected)
+        lv.addWidget(self.objects)
+        # Nota pustego stanu W WIDOKU (wizytator P1 #2): pusty filtr nie może komunikować się tylko
+        # ulotnym flashem na statusbarze — user patrzy na pustą bibliotekę i pełną kolejkę i nie wie,
+        # czy to błąd. Nota jest odkrywalna w obszarze tabeli, chowana gdy są obiekty.
+        self.lib_empty = QLabel("Brak obiektów dla tego filtra — zmień filtr lub rozwiąż (resolve).")
+        self.lib_empty.setAlignment(Qt.AlignCenter)
+        self.lib_empty.setWordWrap(True)
+        self.lib_empty.setVisible(False)
+        lv.addWidget(self.lib_empty)
+
+        lv.addWidget(QLabel("Kolejka przeglądu"))
+        self.review = QListWidget()
+        self.review.itemSelectionChanged.connect(self._on_review_selected)
+        lv.addWidget(self.review)
+
+        # --- prawa: klatki zaznaczonego obiektu / pozycji review ---
+        right = QWidget()
+        rv = QVBoxLayout(right)
+        self.frames_label = QLabel("Klatki")
+        rv.addWidget(self.frames_label)
+        self.frames = QTableWidget(0, len(FRAME_HEADERS))
+        self.frames.setHorizontalHeaderLabels(FRAME_HEADERS)
+        self.frames.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.frames.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.frames.horizontalHeader().setStretchLastSection(True)
+        self.frames.verticalHeader().setVisible(False)
+        rv.addWidget(self.frames)
+
+        splitter.addWidget(left)
+        splitter.addWidget(right)
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 3)
+        outer.addWidget(splitter)
+
+    # ---------------------------------------------------------------- facety filtra
+
+    def _load_facets(self):
+        """Wypełnij comba filtra realnie istniejącymi osiami (kanoniczne teleskopy + filtry). Placeholder
+        „(wszystkie)" niesie `data=None` → brak filtra (wzór `(? IS NULL OR …)` w read-modelu)."""
+        self._loading = True
+        try:
+            self.combo_tel.clear()
+            self.combo_tel.addItem("(wszystkie)", None)
+            for t in queries.telescope_facets(self.con):
+                self.combo_tel.addItem(_tel_facet_label(t), t["id"])
+            self.combo_filter.clear()
+            self.combo_filter.addItem("(wszystkie)", None)
+            for f in queries.filter_facets(self.con):
+                self.combo_filter.addItem(f["filter_canon"], f["filter_canon"])
+        finally:
+            self._loading = False
+
+    def _filters(self):
+        return {"telescope_id": self.combo_tel.currentData(),
+                "filter_canon": self.combo_filter.currentData()}
+
+    def _on_filter_changed(self):
+        if not self._loading:
+            self.refresh()
+
+    # ---------------------------------------------------------------- odczyt → widok
+
+    def refresh(self):
+        """Przeładuj bibliotekę i kolejkę z read-modelu (źródło prawdy = baza; brak cache). Zachowuje
+        zaznaczenie obiektu po `object_id` (po zmianie filtra wiersze się przesuwają)."""
+        prev = self._selected_object_id()
+        flt = self._filters()
+        self._loading = True
+        try:
+            rows = queries.library_objects(
+                self.con, telescope_id=flt["telescope_id"], filter_canon=flt["filter_canon"])
+            self.objects.setRowCount(len(rows))
+            target_row = -1
+            for r, row in enumerate(rows):
+                self._set_obj_cell(r, OBJ_COL_CANON, row["canon"], data=row["id"])
+                self._set_obj_cell(r, OBJ_COL_CATALOG, row["catalog"] or "")
+                self._set_obj_cell(r, OBJ_COL_FRAMES, str(row["frame_count"]))
+                if row["id"] == prev:
+                    target_row = r
+            self._load_review()
+        finally:
+            self._loading = False
+        empty = self.objects.rowCount() == 0
+        self.lib_empty.setVisible(empty)               # nota odkrywalna w widoku (P1 #2)
+        self.objects.setVisible(not empty)
+        if target_row >= 0:
+            self.objects.selectRow(target_row)
+        elif not empty:
+            self.objects.selectRow(0)
+        else:
+            self.frames.setRowCount(0)
+            self.status_message.emit(
+                "Brak obiektów dla tego filtra — zeskanuj i rozwiąż (horreum resolve) lub zmień filtr.")
+        self._on_object_selected()
+
+    def _load_review(self):
+        """Kolejka przeglądu ze STANU: obiekt-review (drążenie do klatek), liczniki config-review /
+        headerless (informacyjne — bez drążenia, to inne osie/skan)."""
+        q = queries.review_queue(self.con)
+        self.review.clear()
+        for r in q["object_review"]:
+            it = QListWidgetItem(f'{r["object_raw"]}  ·  {r["n"]} klatek')
+            it.setData(Qt.UserRole, r["object_raw"])
+            self.review.addItem(it)
+        # liczniki innych kanałów jako pozycje informacyjne (bez UserRole → nieklikane do klatek)
+        info = QListWidgetItem(
+            f'— config-review: {q["config_review_count"]}  ·  bez nagłówka: {q["headerless_count"]}')
+        info.setFlags(Qt.ItemIsEnabled)        # nie do zaznaczenia (informacyjne)
+        self.review.addItem(info)
+
+    def _set_obj_cell(self, r, c, text, *, data=None):
+        item = QTableWidgetItem(text)
+        item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+        if data is not None:
+            item.setData(Qt.UserRole, data)
+        self.objects.setItem(r, c, item)
+
+    def _selected_object_id(self):
+        sm = self.objects.selectionModel()
+        rows = sm.selectedRows() if sm else []
+        if not rows:
+            return None
+        item = self.objects.item(rows[0].row(), OBJ_COL_CANON)
+        return item.data(Qt.UserRole) if item else None
+
+    def _on_object_selected(self):
+        """Obiekt zaznaczony → klatki tego obiektu (z bieżącym filtrem). Czyści selekcję review (wzajemnie
+        wykluczające źródła klatek: obiekt vs pozycja review)."""
+        if self._loading:
+            return
+        oid = self._selected_object_id()
+        if oid is None:
+            return
+        if self.review.selectedItems():
+            self.review.clearSelection()
+        flt = self._filters()
+        rows = queries.object_frames(
+            self.con, oid, telescope_id=flt["telescope_id"], filter_canon=flt["filter_canon"])
+        self.frames_label.setText("Klatki obiektu")
+        self._fill_frames(rows, present_col=True)
+
+    def _on_review_selected(self):
+        """Pozycja obiekt-review zaznaczona → jej nierozwiązane klatki (drążenie review). Pozycje
+        informacyjne (config/headerless) nie mają `UserRole` → ignorowane."""
+        if self._loading:
+            return
+        sel = self.review.selectedItems()
+        if not sel:
+            return
+        object_raw = sel[0].data(Qt.UserRole)
+        if object_raw is None:                 # pozycja informacyjna (liczniki) — nie drąży
+            return
+        self.objects.clearSelection()
+        rows = queries.object_review_frames(self.con, object_raw)
+        self.frames_label.setText(f"Klatki do przeglądu: {object_raw}")
+        self._fill_frames(rows, present_col=False)
+
+    def _fill_frames(self, rows, *, present_col):
+        """Wypełnij tabelę klatek. `present_col` — czy źródło niesie kolumnę `present` (biblioteka tak,
+        review nie). `present=0` pokazujemy jako „nie" (R#7 — klatka WIDOCZNA mimo zniknięcia pliku)."""
+        self.frames.setRowCount(len(rows))
+        for r, row in enumerate(rows):
+            keys = row.keys()
+            self._set_frame_cell(r, FRAME_COL_SHA, (row["sha1"] or "")[:12])
+            self._set_frame_cell(r, FRAME_COL_TEL, _tel_cell(row))
+            self._set_frame_cell(r, FRAME_COL_CAM, row["camera_model"] or "")
+            self._set_frame_cell(r, FRAME_COL_FILTER, row["filter_canon"] if "filter_canon" in keys else "")
+            self._set_frame_cell(r, FRAME_COL_DATE, row["date_obs"] or "")
+            if present_col and "present" in keys:
+                self._set_frame_cell(r, FRAME_COL_PRESENT, "tak" if row["present"] else "nie")
+            else:
+                self._set_frame_cell(r, FRAME_COL_PRESENT, "")
+            self._set_frame_cell(r, FRAME_COL_PATH, row["path"] or "")
+
+    def _set_frame_cell(self, r, c, text):
+        item = QTableWidgetItem(text)
+        item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+        self.frames.setItem(r, c, item)
+
+    def set_busy(self, busy):
+        """Spójność z gospodarzem: widok read-only nie ma akcji zapisu do wygaszenia. Realne ryzyko to
+        SELECT w trakcie zapisu workera — gospodarz odświeża DOPIERO po `stage_finished` (NIE woła tu
+        refresh w trakcie). Metoda istnieje dla jednolitego kontraktu montażu; no-op poza spójnością."""
+        # celowo no-op: brak przycisków zapisu; odświeżanie sterowane przez gospodarza po stage_finished.
+
+
 class TelescopeAxisWindow(QMainWindow):
     """Powłoka-okno osi teleskopu (zgodność wstecz — etap 1). Treść = osadzony `TelescopeAxisView`;
     okno dokłada tylko tytuł i pasek statusu (podpięty pod sygnał widoku). NIE jest właścicielem
@@ -415,12 +681,20 @@ class MainWindow(QMainWindow):
         axis.status_message.connect(self._flash)
         self.axis_view = axis
         self._add_view("Oś teleskopu", axis)
+
+        obj = ObjectAxisView(self.con, now_fn=self._now)
+        obj.status_message.connect(self._flash)
+        self.object_view = obj
+        self._add_view("Oś obiektu", obj)
         self._show_view(0)
 
     def _on_stage_finished(self, name):
-        """Etap pipeline'u zakończył zapis (worker, własne połączenie). Read-model osi w głównym
-        wątku odświeżamy DOPIERO TERAZ (nie w trakcie skanu — WAL → zapisy workera widoczne)."""
+        """Etap pipeline'u zakończył zapis (worker, własne połączenie). Read-modele osi w głównym
+        wątku odświeżamy DOPIERO TERAZ (nie w trakcie skanu — WAL → zapisy workera widoczne). Oś obiektu
+        przeładowuje też facety (skan/resolver mogły dodać teleskopy/filtry/obiekty)."""
         self.axis_view.refresh()
+        self.object_view._load_facets()
+        self.object_view.refresh()
 
     def _on_pipeline_running(self, running):
         """W trakcie etapu wyłącz akcje zapisu osi (szczery disabled). Nawigacja zostaje aktywna —

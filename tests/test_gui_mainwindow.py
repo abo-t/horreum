@@ -13,7 +13,7 @@ import pytest
 pytest.importorskip("PySide6")
 
 from horreum import db
-from horreum.gui.app import MainWindow, TelescopeAxisView
+from horreum.gui.app import MainWindow, ObjectAxisView, TelescopeAxisView
 
 from fixture_s8 import seed
 
@@ -33,13 +33,14 @@ def _seeded_db(tmp_path, name="s8.db"):
     return path
 
 
-def test_otwarte_na_bazie_montuje_oba_widoki(qapp, tmp_path):
+def test_otwarte_na_bazie_montuje_widoki(qapp, tmp_path):
     win = MainWindow(_seeded_db(tmp_path))
     try:
-        assert win.stack.count() == 2                      # etap 2: Pipeline + oś teleskopu
+        assert win.stack.count() == 3                      # Pipeline + oś teleskopu + oś obiektu
         assert isinstance(win.axis_view, TelescopeAxisView)
+        assert isinstance(win.object_view, ObjectAxisView)
         assert win.axis_view.table.rowCount() == 4         # read-model odbity w osadzonym widoku
-        assert all(not b.isHidden() for b in win._nav_buttons)   # 2 widoki → nawigacja odsłonięta
+        assert all(not b.isHidden() for b in win._nav_buttons)   # ≥2 widoki → nawigacja odsłonięta
     finally:
         win.close()                                        # closeEvent zamyka con (własność okna)
 

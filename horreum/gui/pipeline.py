@@ -137,7 +137,9 @@ class PipelineWorker(QObject):
             self.progress.emit(done, total, path, counts_snapshot(summary))
 
 
-_TIERS = [("—", None), ("cold", "cold"), ("scratch", "scratch")]
+# Etykiety widoczne dla użytkownika po polsku; wartości danych ("cold"/"scratch") to identyfikatory
+# poziomu zapisywane do bazy (rdzeń `scan_tree`) — ZOSTAJĄ niezmienione.
+_TIERS = [("—", None), ("zimny (archiwum)", "cold"), ("roboczy", "scratch")]
 _STAGE_LABEL = {"scan": "Skan", "group": "Grupowanie", "resolve": "Rozwiązywanie", "delta": "Delta"}
 
 
@@ -179,14 +181,14 @@ class PipelineView(QWidget):
         v.addWidget(self.lbl_db)
         v.addWidget(self._hline())
 
-        # 2. Źródło: katalog + tier + auto-wolumen
+        # 2. Źródło: katalog + poziom + auto-wolumen
         src = QHBoxLayout()
         self.btn_pick = QPushButton("Wskaż katalog…")
         self.btn_pick.clicked.connect(self._on_pick_dir)
         src.addWidget(self.btn_pick)
         self.lbl_root = QLabel("(nie wskazano)")
         src.addWidget(self.lbl_root, 1)
-        src.addWidget(QLabel("tier:"))
+        src.addWidget(QLabel("poziom:"))
         self.combo_tier = QComboBox()
         for label, value in _TIERS:
             self.combo_tier.addItem(label, value)
@@ -358,10 +360,10 @@ class PipelineView(QWidget):
             self.bar.setRange(0, total)
         self.bar.setValue(done)
         tail = path.rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
-        review = counts["frame_review"] + counts["camera_review"]
+        do_przegladu = counts["frame_review"] + counts["camera_review"]
         self.lbl_counts.setText(
             f"Pliki {done}/{total} · nowe {counts['frames_new']} · "
-            f"pominięte {counts['skipped']} · review {review} · {tail}")
+            f"pominięte {counts['skipped']} · przegląd {do_przegladu} · {tail}")
 
     @Slot(str)
     def _on_stage_started(self, name):
@@ -418,21 +420,21 @@ class PipelineView(QWidget):
     def _format_scan(self, s):
         return (
             f"[skan] pliki {s.files} · nowe {s.frames_new} · istniejące {s.frames_existing} · "
-            f"pominięte {s.skipped} · location {s.locations_new} · nagłówki {s.headers} · "
-            f"review f/{s.frame_review} k/{s.camera_review} kind/{s.kind_unmapped}")
+            f"pominięte {s.skipped} · lokalizacje {s.locations_new} · nagłówki {s.headers} · "
+            f"przegląd f/{s.frame_review} k/{s.camera_review} rodzaj/{s.kind_unmapped}")
 
     def _format_group(self, s):
         return (
-            f"[grupuj] nagłówki {s.headers} · focratio ok/odzysk/review "
+            f"[grupuj] nagłówki {s.headers} · f/ ok/odzysk/przegląd "
             f"{s.focratio_ok}/{s.focratio_recovered}/{s.focratio_review} · teleskopy {s.telescopes_proposed} "
-            f"(suspect {s.telescopes_suspect}) · configi {s.configs_proposed}/{s.configs_assigned} · "
-            f"config.review {s.config_review}")
+            f"(podejrzane {s.telescopes_suspect}) · konfiguracje {s.configs_proposed}/{s.configs_assigned} · "
+            f"konfig. do przeglądu {s.config_review}")
 
     def _format_resolve(self, s):
         return (
-            f"[rozwiąż] frame'y {s.frames} · lighty {s.light_frames} · obiekty nowe {s.objects_new} · "
-            f"przypisane {s.objects_assigned} · review {s.objects_review} "
-            f"(distinct {s.objects_unresolved_distinct}) · filtry {s.filters_set}")
+            f"[rozwiąż] klatki {s.frames} · klatki light {s.light_frames} · obiekty nowe {s.objects_new} · "
+            f"przypisane {s.objects_assigned} · przegląd {s.objects_review} "
+            f"(różnych {s.objects_unresolved_distinct}) · filtry {s.filters_set}")
 
     def _format_delta(self, r):
         total = r.object_resolved + r.object_unresolved
@@ -440,7 +442,7 @@ class PipelineView(QWidget):
         reviews = ", ".join(f"{v}:{n}" for v, n in sorted(r.review_counts.items())) or "—"
         return (
             f"[delta] obiekt {r.object_resolved}/{total} ({r.object_pct:.1f}%) · filtry {r.filters_canon}\n"
-            f"   nierozpoznane: {top}\n   review: {reviews}")
+            f"   nierozpoznane: {top}\n   do przeglądu: {reviews}")
 
     def _refresh_buttons(self, running, cancellable):
         idle = not running

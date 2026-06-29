@@ -77,6 +77,19 @@ def test_closeevent_zamyka_polaczenie(qapp, tmp_path):
         con.execute("SELECT 1")
 
 
+def test_zapamietuje_ostatnia_baze_przez_callback(qapp, tmp_path):
+    """Każdy wybór bazy woła wstrzyknięte `on_db_changed(path)` — to nim `main` zapisuje ostatnią
+    bazę do trwałych ustawień. Start z bazą zapamiętuje ją; późniejsze „Otwórz" nadpisuje."""
+    zapamietane = []
+    win = MainWindow(_seeded_db(tmp_path, "a.db"), on_db_changed=zapamietane.append)
+    try:
+        assert zapamietane[-1].endswith("a.db")            # start z bazą → zapamiętana
+        win._open_path(str(tmp_path / "b.db"))             # zmiana bazy → nadpisanie
+        assert zapamietane[-1].endswith("b.db")
+    finally:
+        win.close()
+
+
 def test_etap_pipeline_wylacza_akcje_osi_R5(qapp, tmp_path):
     """R5: w trakcie etapu pipeline'u (running_changed True) akcje ZAPISU osi są wyłączone (szczery
     disabled — worker pisze do bazy w tle). Po etapie (False) szczere stany wracają (proposed →

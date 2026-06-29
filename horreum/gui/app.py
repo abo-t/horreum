@@ -144,7 +144,7 @@ class TelescopeAxisView(QWidget):
             self.table.selectRow(0)
         else:
             # pusty stan ma sensowny komunikat, nie gołe nagłówki (wizytator P3)
-            self.status_message.emit("Brak teleskopów na osi — uruchom grouper (horreum group).")
+            self.status_message.emit("Brak teleskopów na osi — uruchom grupowanie (horreum group).")
         self._on_selection_changed()
 
     def _set_cell(self, r, c, text, *, editable=False, data=None):
@@ -329,11 +329,14 @@ class MainWindow(QMainWindow):
     Po etapie pipeline'u odświeża read-model osi (WAL → zapisy workera widoczne) i przywraca
     szczere stany akcji osi (`set_busy`)."""
 
-    def __init__(self, db_path=None, now_fn=_utc_now_iso, parent=None):
+    def __init__(self, db_path=None, now_fn=_utc_now_iso, on_db_changed=None, parent=None):
         super().__init__(parent)
         self.con = None
         self.db_path = None
         self._now = now_fn
+        # Wstrzykiwane wywołanie zwrotne „zmieniono bazę" (wzór jak `now_fn`): `main` podpina tu zapis
+        # ostatniej ścieżki do trwałych ustawień; testy go nie podają → brak skutków ubocznych.
+        self._on_db_changed = on_db_changed
         self._nav_buttons = []
         self.setWindowTitle("Horreum")
         self.resize(1000, 620)
@@ -406,7 +409,7 @@ class MainWindow(QMainWindow):
         pipeline.stage_finished.connect(self._on_stage_finished)
         pipeline.running_changed.connect(self._on_pipeline_running)
         self.pipeline_view = pipeline
-        self._add_view("Pipeline", pipeline)
+        self._add_view("Przetwarzanie", pipeline)
 
         axis = TelescopeAxisView(self.con, now_fn=self._now)
         axis.status_message.connect(self._flash)
@@ -449,6 +452,8 @@ class MainWindow(QMainWindow):
         self._sync_db_state()
         if old is not None:
             old.close()
+        if self._on_db_changed is not None:        # zapamiętaj ostatnią bazę (trwałe ustawienia)
+            self._on_db_changed(path)
         self._flash(f"Baza: {path}")
 
     def _sync_db_state(self):
@@ -471,10 +476,15 @@ class MainWindow(QMainWindow):
 
 
 def main(argv=None):
-    """Uruchom aplikację: `python -m horreum.gui [ścieżka.db]`. Z argumentem — otwiera bazę od razu;
-    bez argumentu — okno startuje bez bazy (user otwiera/tworzy z menu Plik). Połączeniem zarządza
-    `MainWindow` (zamyka je w `closeEvent`)."""
+    """Uruchom aplikację: `python -m horreum.gui [ścieżka.bazy]`. Z argumentem — otwiera wskazaną bazę
+    od razu; bez argumentu — odtwarza OSTATNIO używaną bazę (zapamiętaną w trwałych ustawieniach), a
+    gdy jej brak lub plik zniknął — okno startuje bez bazy (użytkownik wskazuje/tworzy z menu Plik).
+    Każdy wybór bazy (z argumentu, menu „Otwórz", „Nowa") jest zapamiętywany jako ostatnia baza.
+    Połączeniem zarządza `MainWindow` (zamyka je w `closeEvent`)."""
     import sys
+    from pathlib import Path
+
+    from PySide6.QtCore import QSettings
 
     # Konsola Windows bywa cp1250 — komunikat ma polskie znaki; przełącz stdout na UTF-8 (best-effort,
     # jak `horreum.cli`), by `print` nie wywalił się na innym kodowaniu konsoli.
@@ -486,6 +496,21 @@ def main(argv=None):
 
     argv = list(sys.argv[1:] if argv is None else argv)
     app = QApplication.instance() or QApplication([])
-    win = MainWindow(argv[0] if argv else None)
+
+    # Trwałe ustawienia (Windows: rejestr) — przechowują ścieżkę ostatnio otwartej bazy.
+    settings = QSettings("Horreum", "Horreum")
+
+    if argv:
+        start = argv[0]
+    else:
+        start = settings.value("ostatnia_baza", None)
+        # Ostatnia baza mogła zostać przeniesiona/usunięta — wtedy startujemy bez bazy (nie wybuchamy).
+        if start and not Path(start).exists():
+            start = None
+
+    def zapamietaj_baze(path):
+        settings.setValue("ostatnia_baza", path)
+
+    win = MainWindow(start, on_db_changed=zapamietaj_baze)
     win.show()
     return app.exec()

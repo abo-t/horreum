@@ -204,6 +204,14 @@ def read_header(path):
     return read_fits_header(path)
 
 
+def _mtime_iso(st):
+    """mtime ze `stat` jako ISO-8601 UTC — JEDNA derywacja dla `scan_file` (zapis do `location.mtime`)
+    i bramy przyrostowej (`_already_scanned`, porównanie). MUSI być identyczna w obu miejscach: brama
+    porównuje string znak-w-znak, więc każda rozbieżność formatu = wieczne PUDŁO (re-skan czyta
+    wszystko). Sygnał zmiany pliku = WYŁĄCZNIE mtime (rozmiar NIE jest dyskryminatorem w astro)."""
+    return datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat()
+
+
 def scan_file(path):
     """Zeskanuj jeden plik (FITS lub XISF) → `ScanRecord` (sha1 + stat + nagłówek). Czysty odczyt.
 
@@ -213,7 +221,7 @@ def scan_file(path):
     """
     p = Path(path)
     st = p.stat()
-    mtime = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat()
+    mtime = _mtime_iso(st)
     sha1 = sha1_of(str(p))
     try:
         header = read_header(str(p))
@@ -238,11 +246,30 @@ class ScanSummary:
     frame_review: int = 0
     camera_review: int = 0
     kind_unmapped: int = 0
+    skipped: int = 0          # pliki POMINIĘTE bramą przyrostową (NIEczytane — bez sha1/nagłówka/DML)
+    cancelled: bool = False   # skan przerwany kooperatywnie (should_cancel) na granicy pliku
 
 
 def _filetype(path):
     """Format pliku z rozszerzenia: `xisf` | `fits` (fit/fts też FITS). DSLR-raw = drugi przebieg."""
     return "xisf" if Path(path).suffix.lower() in XISF_SUFFIXES else "fits"
+
+
+def _already_scanned(con, volume, path, mtime):
+    """Brama przyrostowa (§3.B / PLAN_skan §7.9): czy plik pod tą `(volume, path)` i `mtime` jest już
+    w bazie — TANIA detekcja (`stat`) PRZED drogim `sha1_of` (pełny odczyt). Czysta funkcja
+    `con→bool`, testowalna bez Qt.
+
+    STAŁY literał SELECT + bind `?` (f-string wysadziłby bramkę AST §8.1 — `_first_sql_verb`=None dla
+    nie-literału = offender poza repo.py/db.py). `UNIQUE(volume, path)` → ≤1 wiersz; `mtime`
+    rozstrzyga „niezmieniony". FORWARD-GUARD: gdy dojdzie pass zniknięć (`present`), dołożyć tu
+    `AND present=1` lub resetować `present=1` na trafieniu — inaczej „zmartwychwstały" plik
+    (present=0, ten sam mtime) zostałby pominięty. Dziś `present` zawsze 1 — uśpione."""
+    row = con.execute(
+        "SELECT 1 FROM location WHERE volume=? AND path=? AND mtime=?",
+        (volume, path, mtime),
+    ).fetchone()
+    return row is not None
 
 
 def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, summary):
@@ -312,25 +339,50 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
         summary.kind_unmapped += 1
 
 
-def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now):
+def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now,
+              progress=None, should_cancel=None):
     """Pętla PŁASKA: każdy plik nagłówkonośny w `root` oceniany RAZ i wciągany przez jedną klingę
     (`repo`). Jeden plik = jedno dotknięcie (§1.2). Zapis WYŁĄCZNIE przez `repo` (zero DML tutaj).
 
-    Per plik: `scan_file` (read-only) → `ingest_record` (jądro). Backstop W1: dowolny nieoczekiwany
-    wyjątek per-plik → `frame.review`, skan leci dalej (pojedynczy plik nie wywala całości).
+    Per plik: brama przyrostowa → `scan_file` (read-only) → `ingest_record` (jądro). Backstop W1:
+    dowolny nieoczekiwany wyjątek per-plik → `frame.review`, skan leci dalej (pojedynczy plik nie
+    wywala całości). `now` jawny (ISO-8601) — deterministyczne testy. Zwraca `ScanSummary`.
 
-    `volume` placeholder ('?') gdy trwały identyfikator niedostępny — NIE blokuje (to nie tożsamość
-    frame'a, §7.5). `now` jawny (ISO-8601) — deterministyczne testy. Zwraca `ScanSummary`.
+    BRAMA PRZYROSTOWA (§3.B) — aktywna ⟺ `volume != '?'`. Gdy znamy trwały serial woluminu,
+    plik o znanym `(volume, path, mtime)` jest POMIJANY bez `sha1_of` (drogi pełny odczyt) i bez DML
+    (`summary.skipped += 1`). `volume='?'` (serial nieustalony) → brama OFF → pełny skan (zero
+    fałszywych pominięć — `volume` to nie tożsamość frame'a, §7.5).
+
+    HOOKI GUI (Qt-WOLNE; rdzeń nic nie wie o Qt):
+      - `should_cancel: ()->bool` — sprawdzane na GÓRZE pętli, PRZED plikiem; `True` ⇒ `break` +
+        `cancelled=True`. Anulowanie na GRANICY PLIKU: bieżący plik albo cały wciągnięty, albo
+        nietknięty (bezpieczeństwo z `break` przed `scan_file`, NIE z commitu per-call).
+      - `progress: (done, total, path, summary)->None` — wołane po KAŻDYM pliku (też pominiętym),
+        `total=len(paths)` (lista zmaterializowana → darmowe). Snapshot/emisja sygnału Qt to robota
+        callbacku GUI; rdzeń woła synchronicznie.
     """
     summary = ScanSummary()
-    for path in iter_headers(root):
+    paths = iter_headers(root)
+    total = len(paths)
+    gate_on = volume != "?"
+    for path in paths:
+        if should_cancel is not None and should_cancel():
+            summary.cancelled = True
+            break
         summary.files += 1
+        spath = str(path)
         try:
-            rec = scan_file(str(path))
-            ingest_record(con, rec, volume=volume, drive_letter=drive_letter, tier=tier,
-                          now=now, summary=summary)
+            skip = gate_on and _already_scanned(con, volume, spath, _mtime_iso(path.stat()))
+            if skip:
+                summary.skipped += 1
+            else:
+                rec = scan_file(spath)
+                ingest_record(con, rec, volume=volume, drive_letter=drive_letter, tier=tier,
+                              now=now, summary=summary)
         except Exception as exc:                           # backstop W1: pojedynczy plik nie wywala skanu
             repo.flag_frame_review(
-                con, sha1="?", path=str(path), reason=f"{type(exc).__name__}: {exc}", now=now)
+                con, sha1="?", path=spath, reason=f"{type(exc).__name__}: {exc}", now=now)
             summary.frame_review += 1
+        if progress is not None:
+            progress(summary.files, total, spath, summary)
     return summary

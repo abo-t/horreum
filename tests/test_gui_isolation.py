@@ -10,7 +10,10 @@ from pathlib import Path
 import horreum
 
 PKG = Path(horreum.__file__).parent
-QT_WIDGET_FILES = {"app.py", "__main__.py"}     # jedyne pliki, którym wolno importować PySide6
+# Jedyne pliki, którym wolno importować PySide6. `pipeline.py` (widok Pipeline + worker QThread —
+# PLAN_gui_pipeline §5) DOŁĄCZONY w etapie 2: to warstwa widżetów, import Qt uprawniony. Rdzeń,
+# read-model (`queries.py`) i logika progresu Qt-wolna (`progress.py`) zostają BEZ Qt.
+QT_WIDGET_FILES = {"app.py", "__main__.py", "pipeline.py"}
 
 
 def _imports_pyside6(path):
@@ -42,7 +45,9 @@ def test_widgety_realnie_importuja_qt():
 
 
 def test_readmodel_i_init_gui_qt_free():
-    """Read path (`queries.py`) i `gui/__init__.py` MUSZĄ być Qt-free — `from horreum.gui import
-    queries` nie może wciągać Qt (testy read-modelu 5.2 chodzą bez PySide6)."""
+    """Read path (`queries.py`), logika progresu (`progress.py`) i `gui/__init__.py` MUSZĄ być
+    Qt-free — `from horreum.gui import queries`/`progress` nie może wciągać Qt (testy logiki
+    Qt-wolnej chodzą bez PySide6)."""
     assert not _imports_pyside6(PKG / "gui" / "queries.py")
+    assert not _imports_pyside6(PKG / "gui" / "progress.py")
     assert not _imports_pyside6(PKG / "gui" / "__init__.py")

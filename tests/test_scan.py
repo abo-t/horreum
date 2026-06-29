@@ -13,8 +13,8 @@ from astropy.io import fits
 
 from horreum import db
 from horreum.scan import (
-    ScanRecord, ScanSummary, ingest_record, iter_fits, iter_headers, read_fits_header,
-    read_header, read_xisf_header, scan_file, scan_tree,
+    ScanRecord, ScanSummary, _already_scanned, ingest_record, iter_fits, iter_headers,
+    read_fits_header, read_header, read_xisf_header, scan_file, scan_tree,
 )
 
 NOW = "2026-06-28T12:00:00"
@@ -415,6 +415,135 @@ def test_scan_tree_jedna_klinga_kazdy_zapis_ma_event(tmp_path):
         n_entity = con.execute(f"SELECT count(*) FROM {entity}").fetchone()[0]
         n_event = con.execute("SELECT count(*) FROM event WHERE verb=?", (verb,)).fetchone()[0]
         assert n_entity == n_event, f"{entity}: {n_entity} encji vs {n_event} eventów"
+    con.close()
+
+
+# ---------------------------------------------------------------------------------------------------
+# Skan przyrostowy (brama §3.B) + hooki progresu/anulowania (PLAN_gui_pipeline §3) — R3/R6/R7.
+# FS = tmp_path (logika lookupu). Firsthand na realnym FS (USB/NAS, precyzja st_mtime) = Etap 4.
+# ---------------------------------------------------------------------------------------------------
+
+def _light(path, n=0):
+    """Czytelny light-FITS o UNIKALNEJ treści (data=n) → unikalny sha1 (różne frame'y)."""
+    return _write_fits(path, cards=[("INSTRUME", "ZWO ASI2600MM Pro"), ("XPIXSZ", 3.76),
+                                    ("IMAGETYP", "LIGHT")], data=np.full((4, 4), n, np.uint16))
+
+
+def test_already_scanned_lookup_czysta_funkcja(tmp_path):
+    """R7: czysta funkcja con→bool — trafia DOKŁADNIE po (volume, path, mtime); pudło na innym
+    mtime / ścieżce / wolumenie. Lookup jest sercem bramy, testowany bez Qt."""
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    _light(tree / "l.fits")
+    scan_tree(con, tree, volume="VOL1", now=NOW)
+    row = con.execute("SELECT path, mtime FROM location").fetchone()
+    assert _already_scanned(con, "VOL1", row["path"], row["mtime"]) is True
+    assert _already_scanned(con, "VOL1", row["path"], "2000-01-01T00:00:00+00:00") is False
+    assert _already_scanned(con, "VOL1", row["path"] + "x", row["mtime"]) is False
+    assert _already_scanned(con, "OTHER", row["path"], row["mtime"]) is False
+    con.close()
+
+
+def test_brama_re_skan_all_skip_zero_eventow(tmp_path):
+    """R7a: skan z realnym wolumenem → re-skan = WSZYSTKO skipped, 0 frames_new, 0 NOWYCH eventów."""
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    _light(tree / "a.fits", 1)
+    _write_xisf(tree / "m.xisf", keywords=[("INSTRUME", "'ZWO ASI2600MC Pro'"), ("XPIXSZ", "3.76"),
+                                           ("BAYERPAT", "'RGGB'"), ("IMAGETYP", "'Master Flat'")])
+    s1 = scan_tree(con, tree, volume="VOL1", now=NOW)
+    assert (s1.files, s1.frames_new, s1.skipped) == (2, 2, 0)
+    ev1 = con.execute("SELECT count(*) FROM event").fetchone()[0]
+    s2 = scan_tree(con, tree, volume="VOL1", now=NOW)
+    assert (s2.files, s2.skipped, s2.frames_new, s2.frames_existing) == (2, 2, 0, 0)
+    assert con.execute("SELECT count(*) FROM event").fetchone()[0] == ev1   # brama nie pisze nic
+    con.close()
+
+
+def test_brama_skan_nadrzednego_czesciowy(tmp_path):
+    """R7b: skan podfolderu, potem skan NADRZĘDNEGO → stary plik skipped, tylko nowy czytany."""
+    con = _db(tmp_path)
+    root = tmp_path / "root"; sub = root / "sub"; sub.mkdir(parents=True)
+    _light(sub / "a.fits", 1)
+    scan_tree(con, sub, volume="VOL1", now=NOW)
+    _light(root / "b.fits", 2)                                  # nowy plik wyżej w drzewie
+    s = scan_tree(con, root, volume="VOL1", now=NOW)            # skan nadrzędnego obejmuje oba
+    assert (s.files, s.skipped, s.frames_new) == (2, 1, 1)      # a skipped, b nowy
+    con.close()
+
+
+def test_brama_zmiana_mtime_re_read(tmp_path):
+    """R7c: zmiana mtime → PUDŁO → ponowny odczyt; treść ta sama → sha1 znany (frames_existing)."""
+    import os
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    f = _light(tree / "l.fits", 1)
+    scan_tree(con, tree, volume="VOL1", now=NOW)
+    st = f.stat()
+    os.utime(f, (st.st_atime, st.st_mtime + 100))              # przesuń mtime (treść bez zmian)
+    s = scan_tree(con, tree, volume="VOL1", now=NOW)
+    assert (s.skipped, s.frames_new, s.frames_existing) == (0, 0, 1)
+    con.close()
+
+
+def test_brama_move_dedup_bez_duplikatu(tmp_path):
+    """R7d: plik PRZENIESIONY → pudło (nowa ścieżka) → odczyt → sha1 znany → frames_existing+1,
+    NOWA location, BEZ duplikatu frame'a."""
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    f = _light(tree / "a.fits", 1)
+    scan_tree(con, tree, volume="VOL1", now=NOW)
+    shutil.move(str(f), str(tree / "b.fits"))                  # ta sama treść, inna ścieżka
+    s = scan_tree(con, tree, volume="VOL1", now=NOW)
+    assert (s.frames_new, s.frames_existing, s.skipped) == (0, 1, 0)
+    assert con.execute("SELECT count(*) FROM frame").fetchone()[0] == 1     # bez duplikatu
+    assert con.execute("SELECT count(*) FROM location").fetchone()[0] == 2  # a (stara) + b (nowa)
+    con.close()
+
+
+def test_brama_off_gdy_volume_placeholder(tmp_path):
+    """R7e: volume='?' (serial nieustalony) → brama OFF → pełny skan; re-skan czyta PONOWNIE
+    (frames_existing), NIC nie jest skipped (zero fałszywych pominięć)."""
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    _light(tree / "l.fits", 1)
+    scan_tree(con, tree, now=NOW)                              # volume domyślnie '?'
+    s = scan_tree(con, tree, now=NOW)
+    assert (s.skipped, s.frames_new, s.frames_existing) == (0, 0, 1)
+    con.close()
+
+
+def test_anulowanie_spojne_i_re_skan_dokancza(tmp_path):
+    """R3: should_cancel→True po 1. pliku → break + cancelled=True; w bazie TYLKO w pełni przetworzone;
+    re-skan (bez anulowania) dokańcza do sumy skanu nieprzerwanego, a 1. plik jest już skipped."""
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    for i in range(3):
+        _light(tree / f"l{i}.fits", i + 1)
+    seen = {"done": 0}
+    s = scan_tree(con, tree, volume="VOL1", now=NOW,
+                  should_cancel=lambda: seen["done"] >= 1,          # anuluj PO pierwszym pliku
+                  progress=lambda d, t, p, su: seen.__setitem__("done", d))
+    assert s.cancelled is True and s.files == 1                     # granica pliku: tylko 1 dotknięty
+    assert con.execute("SELECT count(*) FROM frame").fetchone()[0] == 1   # tylko w pełni przetworzony
+    s2 = scan_tree(con, tree, volume="VOL1", now=NOW)              # re-skan dokańcza
+    assert s2.cancelled is False
+    assert (s2.frames_new, s2.skipped) == (2, 1)                   # 2 dokończone, 1 już znany
+    assert con.execute("SELECT count(*) FROM frame").fetchone()[0] == 3
+    con.close()
+
+
+def test_progress_wolany_per_plik_z_total(tmp_path):
+    """R6: progress wołany po KAŻDYM pliku (też pominiętym), `done` rośnie 1..N, `total`=len(iter_headers)
+    stały. (Snapshot/throttle/emisja sygnału Qt = warstwa GUI, testowana osobno bez rdzenia.)"""
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    _light(tree / "a.fits", 1)
+    _light(tree / "b.fits", 2)
+    calls = []
+    scan_tree(con, tree, volume="VOL1", now=NOW,
+              progress=lambda d, t, p, su: calls.append((d, t)))
+    assert calls == [(1, 2), (2, 2)]                              # total stały, done rośnie po każdym pliku
     con.close()
 
 

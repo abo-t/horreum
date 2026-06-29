@@ -25,16 +25,21 @@ def qapp():
     yield QApplication.instance() or QApplication([])
 
 
-def test_otwarte_na_bazie_montuje_os_teleskopu(qapp, tmp_path):
-    con = db.open_db(str(tmp_path / "s8.db"))
+def _seeded_db(tmp_path, name="s8.db"):
+    path = str(tmp_path / name)
+    con = db.open_db(path)
     seed(con)
-    win = MainWindow(con)
+    con.close()                                            # MainWindow otwiera własne połączenie
+    return path
+
+
+def test_otwarte_na_bazie_montuje_oba_widoki(qapp, tmp_path):
+    win = MainWindow(_seeded_db(tmp_path))
     try:
-        assert win.stack.count() == 1                      # etap 1: tylko oś teleskopu
+        assert win.stack.count() == 2                      # etap 2: Pipeline + oś teleskopu
         assert isinstance(win.axis_view, TelescopeAxisView)
         assert win.axis_view.table.rowCount() == 4         # read-model odbity w osadzonym widoku
-        # 1 widok → pasek nawigacji ukryty (samotny przycisk to szum)
-        assert all(not b.isVisible() for b in win._nav_buttons)
+        assert all(not b.isHidden() for b in win._nav_buttons)   # 2 widoki → nawigacja odsłonięta
     finally:
         win.close()                                        # closeEvent zamyka con (własność okna)
 
@@ -49,13 +54,13 @@ def test_brak_bazy_startuje_pusto_z_podpowiedzia(qapp):
 
 
 def test_zmiana_bazy_przemontowuje_i_zamyka_stara(qapp, tmp_path):
-    con_a = db.open_db(str(tmp_path / "a.db"))
-    seed(con_a)
-    win = MainWindow(con_a)
+    win = MainWindow(_seeded_db(tmp_path, "a.db"))
+    con_a = win.con
     try:
         assert win.axis_view.table.rowCount() == 4
         win._open_path(str(tmp_path / "b.db"))             # nowa, pusta baza
         assert win.con is not con_a                        # przejęta nowa baza
+        assert win.db_path.endswith("b.db")                # ścieżka aktualna (worker jej potrzebuje)
         assert win.axis_view.table.rowCount() == 0         # pusta → 0 teleskopów
         with pytest.raises(Exception):                     # stare połączenie zamknięte
             con_a.execute("SELECT 1")
@@ -64,10 +69,26 @@ def test_zmiana_bazy_przemontowuje_i_zamyka_stara(qapp, tmp_path):
 
 
 def test_closeevent_zamyka_polaczenie(qapp, tmp_path):
-    con = db.open_db(str(tmp_path / "s8.db"))
-    seed(con)
-    win = MainWindow(con)
+    win = MainWindow(_seeded_db(tmp_path))
+    con = win.con
     win.close()
     assert win.con is None
     with pytest.raises(Exception):
         con.execute("SELECT 1")
+
+
+def test_etap_pipeline_wylacza_akcje_osi_R5(qapp, tmp_path):
+    """R5: w trakcie etapu pipeline'u (running_changed True) akcje ZAPISU osi są wyłączone (szczery
+    disabled — worker pisze do bazy w tle). Po etapie (False) szczere stany wracają (proposed →
+    approve znów aktywny)."""
+    win = MainWindow(_seeded_db(tmp_path))
+    try:
+        win.axis_view.table.selectRow(0)                   # zaznacz proposed → approve normalnie aktywny
+        win._on_pipeline_running(True)
+        assert not win.axis_view.btn_approve.isEnabled()
+        assert not win.axis_view.btn_merge.isEnabled()
+        assert not win.axis_view.btn_unmerge.isEnabled()
+        win._on_pipeline_running(False)
+        assert win.axis_view.btn_approve.isEnabled()       # szczery stan przywrócony (proposed)
+    finally:
+        win.close()

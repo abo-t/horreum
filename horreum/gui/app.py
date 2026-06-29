@@ -216,6 +216,19 @@ class TelescopeAxisView(QWidget):
     def _sync_unmerge_enabled(self):
         self.btn_unmerge.setEnabled(bool(self.members.selectedItems()))
 
+    def set_busy(self, busy):
+        """Podczas etapu pipeline'u wyłącz akcje ZAPISU osi (szczery disabled — UI nie kłamie, że
+        można pisać, gdy worker pisze do bazy w tle, §6). Po etapie gospodarz woła `set_busy(False)`,
+        co przez `_on_selection_changed` przywraca SZCZERE stany przycisków dla zaznaczenia."""
+        if busy:
+            self.btn_approve.setEnabled(False)
+            self.btn_merge.setEnabled(False)
+            self.btn_unmerge.setEnabled(False)
+            self.combo_target.setEnabled(False)
+        else:
+            self.combo_target.setEnabled(True)
+            self._on_selection_changed()
+
     # ---------------------------------------------------------------- akcje → repo (jedna klinga)
 
     def _flash(self, msg):
@@ -307,25 +320,29 @@ class TelescopeAxisWindow(QMainWindow):
 
 class MainWindow(QMainWindow):
     """Okno aplikacji (PLAN_gui_pipeline §2): menu Plik (Otwórz/Nowa baza) + nawigacja między
-    widokami w `QStackedWidget`. WŁAŚCICIEL połączenia `con` — zamyka poprzednie przy przełączeniu
-    bazy i bieżące przy zamknięciu okna (top-level apki, w odróżnieniu od osadzonych widoków).
+    widokami w `QStackedWidget` (Pipeline ↔ Oś teleskopu). WŁAŚCICIEL połączenia `con` — otwiera je
+    z `db_path`, zamyka poprzednie przy przełączeniu bazy i bieżące przy zamknięciu okna (top-level
+    apki, w odróżnieniu od osadzonych widoków).
 
-    ETAP 1: osadzony jest TYLKO widok osi teleskopu. Widok Pipeline (scan→group→resolve→delta)
-    dochodzi w etapie 2 (`gui/pipeline.py`) przez `_mount_views`; pasek nawigacji pokazuje się
-    automatycznie, gdy widoków jest ≥2."""
+    Trzyma `db_path` (nie tylko `con`): worker pipeline'u potrzebuje ŚCIEŻKI, by otworzyć WŁASNE
+    połączenie w swoim wątku (sqlite `check_same_thread` — `con` głównego wątku nie przechodzi).
+    Po etapie pipeline'u odświeża read-model osi (WAL → zapisy workera widoczne) i przywraca
+    szczere stany akcji osi (`set_busy`)."""
 
-    def __init__(self, con=None, now_fn=_utc_now_iso, parent=None):
+    def __init__(self, db_path=None, now_fn=_utc_now_iso, parent=None):
         super().__init__(parent)
-        self.con = con
+        self.con = None
+        self.db_path = None
         self._now = now_fn
         self._nav_buttons = []
         self.setWindowTitle("Horreum")
         self.resize(1000, 620)
         self._build_menu()
         self._build_central()
-        if con is not None:
-            self._mount_views()
-        self._sync_db_state()
+        if db_path is not None:
+            self._open_path(db_path)
+        else:
+            self._sync_db_state()
 
     # ---------------------------------------------------------------- budowa szkieletu
 
@@ -379,13 +396,33 @@ class MainWindow(QMainWindow):
     # ---------------------------------------------------------------- montaż widoków na bazie
 
     def _mount_views(self):
-        """(Prze)montuj widoki na bieżącym `con`. Wołane przy starcie z bazą i przy zmianie bazy."""
+        """(Prze)montuj widoki na bieżącej bazie. Wołane przy starcie z bazą i przy zmianie bazy.
+        Pipeline pierwszy (wejście usera: pierwszy przebieg); oś teleskopu jako drugi widok."""
+        from horreum.gui.pipeline import PipelineView          # lazy: Qt-import tylko gdy montujemy
+
         self._clear_views()
+        pipeline = PipelineView(self.db_path, now_fn=self._now)
+        pipeline.status_message.connect(self._flash)
+        pipeline.stage_finished.connect(self._on_stage_finished)
+        pipeline.running_changed.connect(self._on_pipeline_running)
+        self.pipeline_view = pipeline
+        self._add_view("Pipeline", pipeline)
+
         axis = TelescopeAxisView(self.con, now_fn=self._now)
         axis.status_message.connect(self._flash)
         self.axis_view = axis
         self._add_view("Oś teleskopu", axis)
         self._show_view(0)
+
+    def _on_stage_finished(self, name):
+        """Etap pipeline'u zakończył zapis (worker, własne połączenie). Read-model osi w głównym
+        wątku odświeżamy DOPIERO TERAZ (nie w trakcie skanu — WAL → zapisy workera widoczne)."""
+        self.axis_view.refresh()
+
+    def _on_pipeline_running(self, running):
+        """W trakcie etapu wyłącz akcje zapisu osi (szczery disabled). Nawigacja zostaje aktywna —
+        user może zerknąć na oś; blokujemy tylko ZAPIS (§6: aktywny tylko „Anuluj" skanu)."""
+        self.axis_view.set_busy(running)
 
     # ---------------------------------------------------------------- menu Plik: Otwórz/Nowa baza
 
@@ -407,6 +444,7 @@ class MainWindow(QMainWindow):
         new_con = db.open_db(path)
         old = self.con
         self.con = new_con
+        self.db_path = path
         self._mount_views()
         self._sync_db_state()
         if old is not None:
@@ -447,8 +485,7 @@ def main(argv=None):
             pass
 
     argv = list(sys.argv[1:] if argv is None else argv)
-    con = db.open_db(argv[0]) if argv else None
     app = QApplication.instance() or QApplication([])
-    win = MainWindow(con)
+    win = MainWindow(argv[0] if argv else None)
     win.show()
     return app.exec()

@@ -245,17 +245,69 @@ def _filetype(path):
     return "xisf" if Path(path).suffix.lower() in XISF_SUFFIXES else "fits"
 
 
-def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now):
-    """Pętla PŁASKA: każdy plik nagłówkonośny w `root` oceniany RAZ i wciągany przez jedną klingę
-    (`repo`). Jeden plik = jedno dotknięcie (§1.2). Zapis WYŁĄCZNIE przez `repo` (zero DML tutaj).
+def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, summary):
+    """Wciągnij JEDEN `ScanRecord` przez jedną klingę (`repo`) — JĄDRO wspólne dla skanu drzewa
+    (`scan_tree`) i przyszłego replayu/import-legacy (rekord pochodzi z nagłówka pliku ALBO z
+    cache'owanego źródła). Mutuje `summary`; zapis WYŁĄCZNIE przez `repo` (zero DML tutaj).
 
-    Per plik:
-      - nagłówek nieczytelny (W1) → `repo.flag_frame_review` (frame NIE powstaje), dalej;
+      - nagłówek nieczytelny (W1) → `repo.flag_frame_review` (frame NIE powstaje), koniec;
       - inaczej: oś KAMERA (`camera_identity`→`upsert_camera`; brak osi → `camera_id=None`);
         `normalize_kind`; `upsert_frame` + `add_location`. NOWY frame → `record_header` (1:1) +
         ewentualne `flag_camera_review` (brak osi) / `flag_kind_unmapped` (IMAGETYP niezmapowane).
         ISTNIEJĄCY sha1 → tylko nowa `location` (multi-location), bez ponownego headera/flag.
-      - backstop W1: dowolny nieoczekiwany wyjątek per-plik → `frame.review`, skan leci dalej.
+
+    NIE łapie wyjątków — backstop W1 (pojedynczy rekord nie wywala całości) należy do wołającego
+    (`scan_tree` / replay), bo to on wie, jak zidentyfikować rekord do `frame.review`."""
+    if rec.header is None:                             # W1: nieczytelny/nierozpoznany
+        repo.flag_frame_review(con, sha1=rec.sha1, path=rec.path, reason=rec.error, now=now)
+        summary.frame_review += 1
+        return
+
+    ident = camera_identity(rec.header)
+    camera_id = None
+    if ident is not None:
+        camera_id, _ = repo.upsert_camera(
+            con, model_canon=ident.model_canon, pixel_um=ident.pixel_um,
+            is_mono=ident.is_mono, is_mono_source=ident.is_mono_source,
+            raw_instrume=ident.raw_instrume, now=now)
+
+    kind = normalize_kind(rec.header.get("IMAGETYP"))
+    frame_id, created = repo.upsert_frame(
+        con, sha1=rec.sha1, kind=kind, filetype=_filetype(rec.path),
+        size_bytes=rec.size_bytes, camera_id=camera_id, now=now)
+    if created:
+        summary.frames_new += 1
+    else:
+        summary.frames_existing += 1
+
+    _, loc_created = repo.add_location(
+        con, frame_id=frame_id, volume=volume, drive_letter=drive_letter,
+        path=rec.path, tier=tier, mtime=rec.mtime, now=now)
+    if loc_created:
+        summary.locations_new += 1
+
+    if not created:                                    # header 1:1 z frame → tylko dla nowego
+        return                                         # istniejący sha1 = dopisana sama location
+    repo.record_header(
+        con, frame_id=frame_id, raw_json=json.dumps(rec.header, ensure_ascii=False),
+        now=now, **extract_header(rec.header))
+    summary.headers += 1
+    if ident is None:
+        repo.flag_camera_review(
+            con, frame_id=frame_id, reason="brak osi KAMERA (INSTRUME/XPIXSZ)", now=now)
+        summary.camera_review += 1
+    imagetyp = rec.header.get("IMAGETYP")
+    if kind == "unknown" and imagetyp and str(imagetyp).strip():
+        repo.flag_kind_unmapped(con, frame_id=frame_id, imagetyp=imagetyp, now=now)
+        summary.kind_unmapped += 1
+
+
+def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now):
+    """Pętla PŁASKA: każdy plik nagłówkonośny w `root` oceniany RAZ i wciągany przez jedną klingę
+    (`repo`). Jeden plik = jedno dotknięcie (§1.2). Zapis WYŁĄCZNIE przez `repo` (zero DML tutaj).
+
+    Per plik: `scan_file` (read-only) → `ingest_record` (jądro). Backstop W1: dowolny nieoczekiwany
+    wyjątek per-plik → `frame.review`, skan leci dalej (pojedynczy plik nie wywala całości).
 
     `volume` placeholder ('?') gdy trwały identyfikator niedostępny — NIE blokuje (to nie tożsamość
     frame'a, §7.5). `now` jawny (ISO-8601) — deterministyczne testy. Zwraca `ScanSummary`.
@@ -265,48 +317,8 @@ def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now):
         summary.files += 1
         try:
             rec = scan_file(str(path))
-            if rec.header is None:                         # W1: nieczytelny/nierozpoznany
-                repo.flag_frame_review(con, sha1=rec.sha1, path=rec.path, reason=rec.error, now=now)
-                summary.frame_review += 1
-                continue
-
-            ident = camera_identity(rec.header)
-            camera_id = None
-            if ident is not None:
-                camera_id, _ = repo.upsert_camera(
-                    con, model_canon=ident.model_canon, pixel_um=ident.pixel_um,
-                    is_mono=ident.is_mono, is_mono_source=ident.is_mono_source,
-                    raw_instrume=ident.raw_instrume, now=now)
-
-            kind = normalize_kind(rec.header.get("IMAGETYP"))
-            frame_id, created = repo.upsert_frame(
-                con, sha1=rec.sha1, kind=kind, filetype=_filetype(rec.path),
-                size_bytes=rec.size_bytes, camera_id=camera_id, now=now)
-            if created:
-                summary.frames_new += 1
-            else:
-                summary.frames_existing += 1
-
-            _, loc_created = repo.add_location(
-                con, frame_id=frame_id, volume=volume, drive_letter=drive_letter,
-                path=rec.path, tier=tier, mtime=rec.mtime, now=now)
-            if loc_created:
-                summary.locations_new += 1
-
-            if not created:                                # header 1:1 z frame → tylko dla nowego
-                continue                                   # istniejący sha1 = dopisana sama location
-            repo.record_header(
-                con, frame_id=frame_id, raw_json=json.dumps(rec.header, ensure_ascii=False),
-                now=now, **extract_header(rec.header))
-            summary.headers += 1
-            if ident is None:
-                repo.flag_camera_review(
-                    con, frame_id=frame_id, reason="brak osi KAMERA (INSTRUME/XPIXSZ)", now=now)
-                summary.camera_review += 1
-            imagetyp = rec.header.get("IMAGETYP")
-            if kind == "unknown" and imagetyp and str(imagetyp).strip():
-                repo.flag_kind_unmapped(con, frame_id=frame_id, imagetyp=imagetyp, now=now)
-                summary.kind_unmapped += 1
+            ingest_record(con, rec, volume=volume, drive_letter=drive_letter, tier=tier,
+                          now=now, summary=summary)
         except Exception as exc:                           # backstop W1: pojedynczy plik nie wywala skanu
             repo.flag_frame_review(
                 con, sha1="?", path=str(path), reason=f"{type(exc).__name__}: {exc}", now=now)

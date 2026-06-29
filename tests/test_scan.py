@@ -13,8 +13,8 @@ from astropy.io import fits
 
 from horreum import db
 from horreum.scan import (
-    iter_fits, iter_headers, read_fits_header, read_header, read_xisf_header, scan_file,
-    scan_tree,
+    ScanRecord, ScanSummary, ingest_record, iter_fits, iter_headers, read_fits_header,
+    read_header, read_xisf_header, scan_file, scan_tree,
 )
 
 NOW = "2026-06-28T12:00:00"
@@ -398,4 +398,27 @@ def test_scan_tree_jedna_klinga_kazdy_zapis_ma_event(tmp_path):
         n_entity = con.execute(f"SELECT count(*) FROM {entity}").fetchone()[0]
         n_event = con.execute("SELECT count(*) FROM event WHERE verb=?", (verb,)).fetchone()[0]
         assert n_entity == n_event, f"{entity}: {n_entity} encji vs {n_event} eventów"
+    con.close()
+
+
+def test_ingest_record_replay_z_cache_bez_pliku(tmp_path):
+    """`ingest_record` jako JĄDRO replayu: `ScanRecord` zbudowany z cache'owanego źródła (BEZ
+    realnego pliku — nagłówek string-only, jak z `header_json`) → frame+location+header+event przez
+    jedną klingę, pola gorące zrzutowane ze stringów (W3). To kontrakt, na którym stoi skrypt
+    akceptacji §5 (replay custos.db header_json przez REALNY pipeline, nie atrapę)."""
+    con = _db(tmp_path)
+    rec = ScanRecord(
+        path=r"X:\cache\NGC4258\sub.fits", sha1="a" * 40, size_bytes=123,
+        mtime="2026-01-01T00:00:00+00:00",
+        header={"INSTRUME": "ZWO ASI2600MM Pro", "XPIXSZ": "3.76", "IMAGETYP": "LIGHT",
+                "OBJECT": "M106", "FOCALLEN": "784", "FOCRATIO": "5.6"})
+    s = ScanSummary()
+    ingest_record(con, rec, volume="VOL", now=NOW, summary=s)
+    assert (s.frames_new, s.locations_new, s.headers) == (1, 1, 1)
+    fid = con.execute("SELECT id FROM frame WHERE sha1=?", ("a" * 40,)).fetchone()[0]
+    obj, focallen = con.execute(
+        "SELECT object_raw, focallen FROM header WHERE frame_id=?", (fid,)).fetchone()
+    assert obj == "M106" and focallen == 784.0          # string -> float (W3), jak w replayu
+    for verb in ("frame.observed", "location.added", "header.recorded", "camera.upserted"):
+        assert con.execute("SELECT count(*) FROM event WHERE verb=?", (verb,)).fetchone()[0] == 1
     con.close()

@@ -14,8 +14,9 @@ from astropy.io import fits
 
 from horreum import db
 from horreum.scan import (
-    ScanRecord, ScanSummary, _already_scanned, ingest_record, iter_fits, iter_headers,
-    read_fits_header, read_header, read_xisf_header, scan_file, scan_tree,
+    ScanRecord, ScanSummary, _already_scanned, header_dict_from_cards, ingest_record,
+    iter_fits, iter_headers, read_fits_header, read_fits_meta, read_header, read_xisf_header,
+    read_xisf_meta, scan_file, scan_tree,
 )
 
 NOW = "2026-06-28T12:00:00"
@@ -342,6 +343,235 @@ def test_scan_nie_modyfikuje_xisf(tmp_path):
     scan_file(str(f))
     assert f.read_bytes() == before
     assert f.stat().st_mtime == before_mtime
+
+
+# --- PF-1 (przejście fitsmirror): odciski + karty + synteza dict-a (brief §2/§4.2/§5) ---
+
+def _pf1_card(cards, kw, idx=0):
+    """Karta o danym keywordzie i idx z listy `Card` (pomocnik asercji)."""
+    return next(c for c in cards if c.keyword == kw and c.idx == idx)
+
+
+def test_scan_file_fits_odciski_pf1(tmp_path):
+    """FITS nieskompresowany: `sha1` (stare pole, ZOSTAJE do PF-2 — R3-d1) == `file_sha1` ==
+    hashlib całego pliku; `sha1_data` == hashlib sekcji danych [datLoc, datLoc+datSpan) — oba
+    z JEDNEGO przebiegu; `header_hash` == sha1 tekstu nagłówka (latin-1, algorytm dawcy);
+    hdu_index=0, compressed=0; `cards` wypełnione."""
+    f = _write_fits(tmp_path / "l.fits",
+                    cards=[("INSTRUME", "ZWO ASI2600MM Pro"), ("XPIXSZ", 3.76)],
+                    data=np.arange(16, dtype=np.uint16).reshape(4, 4))
+    rec = scan_file(str(f))
+    raw = f.read_bytes()
+    assert rec.file_sha1 == rec.sha1 == hashlib.sha1(raw).hexdigest()
+    meta = read_fits_meta(str(f))
+    assert rec.sha1_data == hashlib.sha1(raw[meta.datloc:meta.datloc + meta.datspan]).hexdigest()
+    with fits.open(str(f), memmap=False) as hdul:
+        expected_hh = hashlib.sha1(
+            hdul[0].header.tostring().encode("latin-1", "replace")).hexdigest()
+    assert rec.header_hash == expected_hh
+    assert (rec.hdu_index, rec.compressed) == (0, 0)
+    assert _pf1_card(rec.cards, "INSTRUME").value_raw == "ZWO ASI2600MM Pro"
+
+
+def test_sha1_data_przezywa_edycje_naglowka(tmp_path):
+    """SEDNO tożsamości przejścia (brief §2): te same PIKSELE pod innym nagłówkiem → ten sam
+    `sha1_data`, INNY `file_sha1` i `header_hash` (edycja nagłówka/writeback nie zmienia
+    tożsamości frame'a)."""
+    data = np.arange(64, dtype=np.uint16).reshape(8, 8)
+    a = _write_fits(tmp_path / "a.fits", cards=[("OBJECT", "M31")], data=data)
+    b = _write_fits(tmp_path / "b.fits", cards=[("OBJECT", "M33"), ("FILTER", "Ha")], data=data)
+    ra, rb = scan_file(str(a)), scan_file(str(b))
+    assert ra.sha1_data == rb.sha1_data
+    assert ra.file_sha1 != rb.file_sha1
+    assert ra.header_hash != rb.header_hash
+
+
+def test_fits_bez_sekcji_danych_sha1_data_none(tmp_path):
+    """HDU bez danych (NAXIS=0 wszędzie) → `sha1_data=None` (tożsamość nieobliczalna →
+    degeneracja, flagowana w PF-2); `file_sha1` liczony normalnie, error None (to nie W1)."""
+    f = tmp_path / "empty.fits"
+    fits.HDUList([fits.PrimaryHDU()]).writeto(str(f))
+    rec = scan_file(str(f))
+    assert rec.sha1_data is None
+    assert rec.file_sha1 == hashlib.sha1(f.read_bytes()).hexdigest()
+    assert rec.error is None
+
+
+def _write_master_fits(path, data, comp="RICE_1", obj=None, **comp_kw):
+    """Skompresowany master: pusty Primary + CompImageHDU (port fixture dawcy)."""
+    primary = fits.PrimaryHDU()
+    c = fits.CompImageHDU(data=data, compression_type=comp, **comp_kw)
+    if obj is not None:
+        c.header["OBJECT"] = obj
+    fits.HDUList([primary, c]).writeto(str(path), overwrite=True)
+    return path
+
+
+def test_compressed_master_sha1_data_kanoniczny(tmp_path):
+    """CompImageHDU: hdu_index=1, compressed=1; `sha1_data` = hash ZDEKOMPRESOWANYCH pikseli
+    w postaci kanonicznej — RÓWNY między RICE/GZIP tych samych pikseli (mimo innego nagłówka),
+    RÓŻNY dla innych pikseli i NIEporównywalny z sekcją nieskompresowaną (namespace compdata|)."""
+    pix = (np.arange(64 * 64).reshape(64, 64) % 500 - 200).astype(np.int16)
+    rice = _write_master_fits(tmp_path / "rice.fits", pix, comp="RICE_1", obj="A")
+    gzip = _write_master_fits(tmp_path / "gzip.fits", pix, comp="GZIP_1", obj="B")
+    other = pix.copy(); other[0, 0] += 1
+    oth = _write_master_fits(tmp_path / "other.fits", other, comp="RICE_1")
+    plain = tmp_path / "plain.fits"
+    fits.HDUList([fits.PrimaryHDU(data=pix)]).writeto(str(plain))
+    r_rice, r_gzip, r_oth, r_plain = (scan_file(str(p)) for p in (rice, gzip, oth, plain))
+    assert (r_rice.hdu_index, r_rice.compressed) == (1, 1)
+    assert r_rice.sha1_data is not None
+    assert r_rice.sha1_data == r_gzip.sha1_data          # te same piksele mimo nagłówka/algo
+    assert r_rice.sha1_data != r_oth.sha1_data           # jeden inny piksel → inny hash
+    assert r_rice.sha1_data != r_plain.sha1_data         # granica namespace compdata|
+    assert r_rice.file_sha1 == hashlib.sha1(rice.read_bytes()).hexdigest()
+
+
+def _write_xisf_attach(tmp_path, name, payload, keywords=()):
+    """XISF z REALNYM attachmentem: `location` wskazuje faktyczny offset payloadu za nagłówkiem
+    (obliczany iteracyjnie — cyfry offsetu zmieniają długość XML aż do punktu stałego)."""
+    def xml_for(start):
+        parts = "".join(f'<FITSKeyword name="{n}" value="{v}" comment=""/>' for n, v in keywords)
+        return ('<?xml version="1.0" encoding="UTF-8"?>'
+                '<xisf version="1.0" xmlns="http://www.pixinsight.com/xisf">'
+                '<Image geometry="4:4:1" sampleFormat="UInt16" '
+                f'location="attachment:{start}:{len(payload)}">'
+                + parts + '</Image></xisf>').encode("utf-8")
+    start = 0
+    for _ in range(4):
+        new_start = 16 + len(xml_for(start))
+        if new_start == start:
+            break
+        start = new_start
+    path = tmp_path / name
+    with open(path, "wb") as fh:
+        fh.write(b"XISF0100")
+        fh.write(struct.pack("<I", len(xml_for(start))))
+        fh.write(b"\x00\x00\x00\x00")
+        fh.write(xml_for(start))
+        fh.write(payload)
+    return path
+
+
+def test_scan_file_xisf_attachment_hash(tmp_path):
+    """XISF: `sha1_data` = sha1 bajtów attachmentu pierwszego `<Image>` (wzorzec `integ_hash`
+    Custosa; brief §2); `file_sha1` = cały plik; `header_hash`/`hdu_index`/`compressed`/`cards`
+    = None (R2#14; cards dla XISF dojdą w PF-4)."""
+    payload = bytes((i * 7) & 0xFF for i in range(32))
+    f = _write_xisf_attach(tmp_path, "m.xisf", payload,
+                           keywords=[("INSTRUME", "'ZWO ASI2600MC Pro'")])
+    rec = scan_file(str(f))
+    assert rec.sha1_data == hashlib.sha1(payload).hexdigest()
+    assert rec.file_sha1 == rec.sha1 == hashlib.sha1(f.read_bytes()).hexdigest()
+    assert rec.header_hash is None and rec.hdu_index is None
+    assert rec.compressed is None and rec.cards is None
+    assert rec.header["INSTRUME"] == "ZWO ASI2600MC Pro"
+
+
+def test_xisf_span_pierwszy_image_w_dokumencie(tmp_path):
+    """Master WBPP niesie kilka obrazów (integration + rejection_*); `span` bierze PIERWSZY
+    `<Image>` w porządku dokumentu = integration (kontrakt Custosa). Obraz bez attachmentu
+    (inline/brak location) nie łapie się — wtedy span None."""
+    xml = ('<?xml version="1.0" encoding="UTF-8"?>'
+           '<xisf version="1.0" xmlns="http://www.pixinsight.com/xisf">'
+           '<Image id="integration" location="attachment:1000:64"/>'
+           '<Image id="rejection_low" location="attachment:2000:64"/>'
+           '</xisf>').encode("utf-8")
+    f = tmp_path / "multi.xisf"
+    with open(f, "wb") as fh:
+        fh.write(b"XISF0100"); fh.write(struct.pack("<I", len(xml)))
+        fh.write(b"\x00" * 4); fh.write(xml)
+    _, span = read_xisf_meta(str(f))
+    assert span == (1000, 64)                            # integration, nie rejection_low
+    xml2 = ('<xisf version="1.0"><Image id="noattach"/></xisf>').encode("utf-8")
+    g = tmp_path / "noattach.xisf"
+    with open(g, "wb") as fh:
+        fh.write(b"XISF0100"); fh.write(struct.pack("<I", len(xml2)))
+        fh.write(b"\x00" * 4); fh.write(xml2)
+    hdr, span2 = read_xisf_meta(str(g))
+    assert span2 is None
+    assert scan_file(str(g)).sha1_data is None           # tożsamość nieobliczalna → None (PF-2 flaga)
+
+
+def test_scan_file_w1_odciski_none(tmp_path):
+    """W1: plik nieczytelny → wszystkie odciski sekcji None, ale `sha1`/`file_sha1` (cały plik)
+    wypełnione — tożsamość schematu v1 przeżywa, degeneracja PF-2 ma z czego startować."""
+    bad = tmp_path / "broken.xisf"
+    bad.write_bytes(b"NOTXISF!" + b"\x00" * 20)
+    rec = scan_file(str(bad))
+    assert rec.header is None and rec.error
+    assert rec.sha1 == rec.file_sha1 == hashlib.sha1(bad.read_bytes()).hexdigest()
+    assert rec.sha1_data is None and rec.header_hash is None
+    assert rec.hdu_index is None and rec.compressed is None and rec.cards is None
+
+
+def test_parse_cards_typy_wartosci_i_idx(tmp_path):
+    """Port kontraktu dawcy (`fits_io._classify`/`_parse_cards`): typy/value_raw/value_num/comment
+    wiernie; `idx` numeruje wystąpienia keyworda (COMMENT dostaje 0..n); operand 0 to WARTOŚĆ
+    (value_num=0.0, nie None); bool PRZED int."""
+    hdu = fits.PrimaryHDU()
+    hdu.header["TELESCOP"] = ("EQ6-R Pro", "mount")
+    hdu.header["FOCRATIO"] = 150.0
+    hdu.header["FOCALLEN"] = 600
+    hdu.header["GAIN"] = 0
+    hdu.header["FLAG"] = True
+    hdu.header.add_comment("uwaga A")
+    hdu.header.add_comment("uwaga B")
+    f = tmp_path / "typy.fits"
+    fits.HDUList([hdu]).writeto(str(f))
+    cards = scan_file(str(f)).cards
+    tel = _pf1_card(cards, "TELESCOP")
+    assert (tel.value_type, tel.value_raw, tel.comment) == ("str", "EQ6-R Pro", "mount")
+    foc = _pf1_card(cards, "FOCRATIO")
+    assert (foc.value_type, foc.value_num) == ("float", 150.0)
+    fl = _pf1_card(cards, "FOCALLEN")
+    assert (fl.value_type, fl.value_raw, fl.value_num) == ("int", "600", 600.0)
+    gain = _pf1_card(cards, "GAIN")
+    assert (gain.value_type, gain.value_num) == ("int", 0.0)
+    flag = _pf1_card(cards, "FLAG")
+    assert (flag.value_type, flag.value_raw) == ("bool", "T")
+    assert sorted(c.idx for c in cards if c.keyword == "COMMENT") == [0, 1]
+
+
+def test_synteza_dict_z_cards_rowna_read_fits_header(tmp_path):
+    """BRAMKA PF-1 (brief §5): `header_dict_from_cards(cards)` == `read_fits_header(path)` —
+    bogaty nagłówek: int/float/bool/str/undefined, COMMENT/HISTORY, karta pusta, WIELKI int
+    (bezstratność z value_raw, R1#8 — value_num REAL by go zgubił). Synteza jest też odporna
+    na kolejność kart (sort po idx; dict nie zależy od przeplotu keywordów)."""
+    hdu = fits.PrimaryHDU()
+    hdr = hdu.header
+    hdr["INSTRUME"] = "ZWO ASI2600MM Pro"
+    hdr["XPIXSZ"] = 3.76
+    hdr["FOCALLEN"] = 784
+    hdr["BIGINT"] = 2 ** 60 + 1                          # float(2**60+1) == 2**60 → strata
+    hdr["FLAG"] = True
+    hdr.append(fits.Card("UNDEF"))                       # karta bez wartości → undefined → None
+    hdr["HISTORY"] = "krok 1"
+    hdr["HISTORY"] = "krok 2"
+    hdr.add_comment("uwaga A")
+    hdr.add_blank("luzny tekst")
+    f = tmp_path / "rich.fits"
+    fits.HDUList([hdu]).writeto(str(f))
+    rec = scan_file(str(f))
+    synth = header_dict_from_cards(rec.cards)
+    assert synth == read_fits_header(str(f)) == rec.header
+    assert synth["BIGINT"] == 2 ** 60 + 1                # dokładnie, nie float
+    assert header_dict_from_cards(list(reversed(rec.cards))) == rec.header  # kolejność obojętna
+
+
+def test_synteza_powtorzony_keyword_nie_multi_najwyzszy_idx(tmp_path):
+    """R2#10 (celowany przypadek bramki PF-1): powtórzony keyword NIE-COMMENT → `read_fits_header`
+    daje OSTATNIE wystąpienie (kontrakt `_put`: ostatni nadpisuje), synteza z cards → NAJWYŻSZY
+    idx. Równość dictów zachowana."""
+    hdu = fits.PrimaryHDU()
+    hdu.header["GAIN"] = 100
+    hdu.header.append(fits.Card("GAIN", 200))            # duplikat nie-multi (append nie deduplikuje)
+    f = tmp_path / "dup.fits"
+    fits.HDUList([hdu]).writeto(str(f), output_verify="ignore")
+    rec = scan_file(str(f))
+    assert sorted(c.idx for c in rec.cards if c.keyword == "GAIN") == [0, 1]
+    assert rec.header["GAIN"] == 200                     # ostatni nadpisuje (kontrakt _put)
+    assert header_dict_from_cards(rec.cards) == rec.header
 
 
 # --- scan_tree: pętla płaska, pierwsze realne zapisy przez jedną klingę (§Etap 4) ---

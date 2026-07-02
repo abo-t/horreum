@@ -1,13 +1,27 @@
 """Skan drzewa FITS + XISF — primitivy read-only + pętla płaska skanu (PLAN §4; §Etap 1/§Etap 4).
 
 Per plik produkuje TOŻSAMOŚĆ + ZEZNANIE nagłówka, niczego nie zapisując:
-  - `sha1_of` (binarnie 'rb') = tożsamość frame'a (przeżywa rename/move),
+  - odciski (PF-1 przejścia fitsmirror, brief §2 — port z dawcy `fits_io.py`):
+      * `sha1_data` = sha1 sekcji DANYCH wybranego HDU (FITS) / bajtów attachmentu (XISF) —
+        przyszła tożsamość frame'a (PF-2): przeżywa edycję nagłówka/rename/move/writeback,
+      * `file_sha1` = sha1 całego pliku (fakt KOPII; do PF-2 pod starą nazwą pola `sha1` — R3-d1);
+        dla pliku nieskompresowanego OBA hasze liczone JEDNYM przebiegiem (`sha1_of_span` —
+        pozycje sekcji z nagłówków przed odczytem treści),
+      * `header_hash` = sha1 tekstu nagłówka (kontrola writeback/undo; NULL dla XISF),
+      * `cards` = pełne lustro nagłówka FITS (EAV: keyword/idx/value_raw/value_num/value_type/comment).
   - `read_header` (dyspozytor) = pełny nagłówek jako JSON-owalny dict:
       * FITS (.fits/.fit/.fts) → astropy, read-only,
       * XISF (.xisf) → lekki czytnik stdlib (`struct` + `xml.etree`), bez nowej zależności.
     To przyszłe `header.raw_json` + materiał dla pól gorących (§3.3/§3.5) — wyłuskanie należy do
     warstwy upsertu (krok §4.2). UWAGA W3: XISF zwraca wartości jako STRINGI; rzut na typ robią
     dopiero pola gorące (§Etap 2), nie ten moduł.
+  - `header_dict_from_cards` (odwrotność `_parse_cards`) = synteza dict-a zeznania z kart —
+    kontrakt IDENTYCZNY z `read_fits_header`; na niej stoi import z dawcy (PF-3, brief §4.2).
+
+DOKTRYNA `.data` (R1#14): sięgnięcie po `hdul[i].data` (dekompresja pikseli) jest dozwolone
+WYŁĄCZNIE dla CompImageHDU na potrzeby hasza tożsamości (`compressed_data_sha1`) — surowe bajty
+sekcji danych mastera to skompresowana tabela kafelkowa, nieporównywalna między ustawieniami
+kompresji. Każde inne użycie `.data` w tym module = błąd (nagłówki czytamy bez pikseli).
 
 Żaden zapis nie idzie z tego modułu wprost: primitywy (`iter_*`/`read_*`/`scan_file`) są read-only,
 a pętla `scan_tree` (§Etap 4) deleguje WSZYSTKIE zapisy do `repo` (jedna klinga) — scan.py nie
@@ -21,6 +35,7 @@ Miękkie lądowanie (W1): `read_*` MOGĄ rzucać dla pliku nieczytelnego/nierozp
 `scan_file` (zwraca `ScanRecord(header=None, error=...)`, tożsamość `sha1` ZACHOWANA), nie pętla
 ani użytkownik. Nierozstrzygalność trafia do `event(*.review)` w warstwie upsertu (§Etap 4).
 """
+import hashlib
 import json
 import os
 import struct
@@ -29,10 +44,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
 from astropy.io import fits
 
 from . import repo
-from .hashing import sha1_of
+from .hashing import sha1_of, sha1_of_span
 from .resolve.cameras import camera_identity
 from .resolve.frames import normalize_kind
 from .resolve.headers import extract_header
@@ -57,19 +73,49 @@ EXCLUDED_DIR_NAMES = frozenset({"_wbpp", "_review"})
 
 
 @dataclass(frozen=True)
+class Card:
+    """Pojedyncza karta nagłówka w postaci wierszowej (jak wiersz tabeli `cards`; port 1:1 z dawcy
+    `fits_io.Card`). `idx` = kolejność wystąpienia danego keyworda w HDU (wiernie zachowuje
+    duplikaty: COMMENT/HISTORY i powtórzone keywordy). `value_num` tylko dla int/float —
+    porównania numeryczne idą po nim, tekstowe po `value_raw`."""
+    keyword: str
+    idx: int
+    value_raw: object                 # str | None
+    value_num: object                 # float | None
+    value_type: str                   # int | float | str | bool | undefined
+    comment: object                   # str | None
+
+
+@dataclass(frozen=True)
 class ScanRecord:
     """Wynik skanu jednego pliku (read-only). Materiał wejściowy dla upsertu frame/location/header
     (krok §4.2) — sam w sobie nie jest zapisem domenowym.
 
     `header is None` + `error` ustawione = plik nieczytelny/nierozpoznany (miękkie lądowanie W1):
-    tożsamość (`sha1`) i namiary (`path`/`size`/`mtime`) są, lecz nagłówka brak → review wyżej.
+    tożsamość (`sha1`) i namiary (`path`/`size`/`mtime`) są, lecz nagłówka/odcisków sekcji brak →
+    review wyżej.
+
+    Odciski przejścia (PF-1, brief §2) — do PF-2 WSPÓŁISTNIEJĄ ze starym polem `sha1` (R3-d1:
+    `sha1` = sha1 całego pliku, dziś tożsamość frame'a w schemacie v1; znika razem ze schematem):
+      - `sha1_data`: sha1 sekcji DANYCH HDU (FITS) / bajtów attachmentu (XISF); None = nieobliczalne
+        (brak sekcji danych / zepsuty kafelek / W1) → degeneracja tożsamości, flagowana w PF-2;
+      - `file_sha1`: sha1 całego pliku (fakt KOPII; wartość identyczna ze starym `sha1`);
+      - `header_hash`/`hdu_index`/`compressed`: fakty kopii FITS (kontrola writeback/undo);
+        None dla XISF (R2#14) i przy W1;
+      - `cards`: pełne lustro nagłówka FITS (lista `Card`); None dla XISF (dojdzie w PF-4) i przy W1.
     """
     path: str                         # ścieżka bezwzględna (str — spójnie z sha1_of/repo)
-    sha1: str                         # tożsamość frame'a
+    sha1: str                         # tożsamość frame'a schematu v1 (== file_sha1; do PF-2)
     size_bytes: int
     mtime: str                        # ISO-8601 UTC (klucz przyszłego cache sha1, §7.9)
     header: dict = field(default_factory=dict)   # pełny nagłówek, JSON-owalny; None gdy error
     error: object = None              # None gdy OK; tekst "Typ: opis" gdy nagłówek nieczytelny (W1)
+    sha1_data: object = None          # przyszła tożsamość frame'a (PF-2); None = nieobliczalne
+    file_sha1: object = None          # sha1 całego pliku (fakt kopii)
+    header_hash: object = None        # sha1 tekstu nagłówka; None dla XISF/W1
+    hdu_index: object = None          # HDU naukowe; None dla XISF/W1
+    compressed: object = None         # 0/1 (CompImageHDU); None dla XISF/W1
+    cards: object = None              # list[Card] — lustro nagłówka; None dla XISF/W1
 
 
 def _iter_suffixes(root, suffixes, excluded_out=None):
@@ -136,14 +182,16 @@ def _put(out, keyword, value):
         out[keyword] = value
 
 
-def _select_header(hdul):
-    """Wybierz nagłówek niosący metadane akwizycji. Zwykle PrimaryHDU (ext 0); dla
-    skompresowanych masterów (CompImageHDU) primary bywa pusty (NAXIS=0) — wtedy pierwsze
-    HDU z obrazem. Czytamy tylko nagłówki (NAXIS), nie ładując pikseli."""
-    for hdu in hdul:
+def _select_hdu(hdul):
+    """Wybierz HDU niosące metadane akwizycji: pierwszy HDU z `NAXIS`>0 — zwykle PrimaryHDU;
+    dla skompresowanych masterów (CompImageHDU) primary bywa pusty (NAXIS=0) — wtedy pierwsze
+    HDU z obrazem; gdy żadnego (degeneracja) → Primary. Czytamy tylko nagłówki (NAXIS), nie
+    ładując pikseli. Zwraca `(index, hdu)` — index idzie do `hdu_index`/`fileinfo` (port 1:1
+    z dawcy `fits_io._select_hdu`)."""
+    for i, hdu in enumerate(hdul):
         if hdu.header.get("NAXIS", 0):
-            return hdu.header
-    return hdul[0].header             # awaryjnie: nagłówek primary, choćby bez danych
+            return i, hdu
+    return 0, hdul[0]                 # awaryjnie: primary, choćby bez danych
 
 
 def _header_to_dict(hdr):
@@ -157,12 +205,140 @@ def _header_to_dict(hdr):
     return out
 
 
-def read_fits_header(path):
-    """Odczytaj nagłówek FITS jako JSON-owalny dict. Read-only, bez ładowania pikseli, bez
-    pozostawiania uchwytu (Windows). Podnosi wyjątek dla pliku, który nie jest FITS — faza
-    skanu nie zgaduje (nierozstrzygalność trafia do `event(*.review)` w warstwie upsertu)."""
+def _classify(value):
+    """`(value_type, value_raw, value_num)` karty — port 1:1 z dawcy `fits_io._classify`.
+    bool sprawdzany PRZED int (w Pythonie bool < int). int: `value_raw=str(v)` (bezstratnie,
+    dowolna precyzja), float: `value_raw=repr(v)` (round-trip); `value_num` tylko dla liczb."""
+    if value is None or isinstance(value, fits.Undefined):
+        return "undefined", None, None
+    if isinstance(value, bool):
+        return "bool", ("T" if value else "F"), None
+    if isinstance(value, int):
+        return "int", str(value), float(value)
+    if isinstance(value, float):
+        return "float", repr(value), float(value)
+    if isinstance(value, str):
+        return "str", value, None
+    return "str", str(value), None    # complex i inne egzotyki → tekst
+
+
+def _parse_cards(hdr):
+    """Nagłówek astropy → lista `Card` (pełne lustro EAV; port 1:1 z dawcy `fits_io._parse_cards`).
+    `idx` numeruje wystąpienia KAŻDEGO keyworda od 0 — duplikaty (COMMENT/HISTORY i powtórzone
+    keywordy zwykłe) zachowane wiernie."""
+    counts = {}
+    out = []
+    for card in hdr.cards:
+        kw = card.keyword
+        idx = counts.get(kw, 0)
+        counts[kw] = idx + 1
+        vtype, vraw, vnum = _classify(card.value)
+        out.append(Card(kw, idx, vraw, vnum, vtype, card.comment or None))
+    return out
+
+
+def _card_value(card):
+    """Wartość natywna karty z postaci wierszowej — odwrotność `_classify` (brief §4.2):
+    int z `value_raw` (BEZSTRATNIE — `value_num` REAL gubi wielkie inty, R1#8), float z
+    `value_num`, bool `'T'`→True, undefined→None, str verbatim."""
+    if card.value_type == "int":
+        return int(card.value_raw)
+    if card.value_type == "float":
+        return card.value_num
+    if card.value_type == "bool":
+        return card.value_raw == "T"
+    if card.value_type == "undefined":
+        return None
+    return card.value_raw
+
+
+def header_dict_from_cards(cards):
+    """Synteza dict-a zeznania z kart (odwrotność `_parse_cards`) — kontrakt IDENTYCZNY z
+    `read_fits_header` tego samego nagłówka (na tym stoi import z dawcy, PF-3 / brief §4.2):
+    COMMENT/HISTORY/puste keywordy po `idx` w listy (`_BLANK` dla pustych — przez wspólny `_put`),
+    powtórzony keyword nie-multi → wygrywa NAJWYŻSZY idx (kontrakt `_put`: ostatni nadpisuje,
+    R2#10). Kolejność dokumentowa kart NIE jest potrzebna: sort po `idx` ustawia listy i zwycięzcę
+    per keyword, a dict nie zależy od przeplotu keywordów."""
+    out = {}
+    for c in sorted(cards, key=lambda c: c.idx):
+        value = _card_value(c)
+        _put(out, c.keyword, str(value) if c.keyword in _MULTI_KEYWORDS else value)
+    return out
+
+
+def _header_hash(hdr):
+    """sha1 tekstu nagłówka (port 1:1 z dawcy `fits_io._header_hash`). Nagłówek FITS jest ASCII
+    (wielokrotność 2880 znaków); latin-1 nigdy nie rzuca."""
+    return hashlib.sha1(hdr.tostring().encode("latin-1", "replace")).hexdigest()
+
+
+@dataclass(frozen=True)
+class FitsMeta:
+    """Komplet zeznania + odcisków nagłówka z JEDNEGO otwarcia astropy (`read_fits_meta`).
+    `datloc`/`datspan` = pozycja/rozmiar sekcji danych wybranego HDU (z `fileinfo`, bez pikseli) —
+    wejście `sha1_of_span` (hash danych i pliku jednym przebiegiem)."""
+    header: dict
+    cards: list
+    header_hash: str
+    hdu_index: int
+    compressed: int                   # 0/1 (CompImageHDU)
+    datloc: int
+    datspan: int
+
+
+def read_fits_meta(path):
+    """Odczytaj z pliku FITS komplet: dict zeznania + karty + `header_hash` + `hdu_index` +
+    `compressed` + pozycję sekcji danych — JEDNO otwarcie astropy, read-only, bez ładowania
+    pikseli, bez pozostawiania uchwytu (Windows). Podnosi wyjątek dla pliku, który nie jest
+    FITS — faza skanu nie zgaduje (nierozstrzygalność → `event(*.review)` w warstwie upsertu)."""
     with fits.open(path, mode="readonly", memmap=False) as hdul:
-        return _header_to_dict(_select_header(hdul))
+        index, hdu = _select_hdu(hdul)
+        hdr = hdu.header
+        info = hdul.fileinfo(index)
+        return FitsMeta(
+            header=_header_to_dict(hdr), cards=_parse_cards(hdr), header_hash=_header_hash(hdr),
+            hdu_index=index, compressed=1 if isinstance(hdu, fits.CompImageHDU) else 0,
+            datloc=info["datLoc"], datspan=info["datSpan"])
+
+
+def read_fits_header(path):
+    """Odczytaj nagłówek FITS jako JSON-owalny dict (kontrakt sprzed PF-1 bez zmian; dziś
+    cienka nakładka na `read_fits_meta`)."""
+    return read_fits_meta(path).header
+
+
+def compressed_data_sha1(path, hdu_index):
+    """sha1 SUROWYCH zdekompresowanych pikseli skompresowanego mastera (CompImageHDU) — port 1:1
+    z dawcy `fits_io.compressed_data_sha1`.
+
+    Po co osobno od hasza sekcji danych: sekcja danych mastera na dysku to skompresowana tabela
+    kafelkowa — różna przy różnej kompresji nawet dla identycznych pikseli. Żeby master wszedł do
+    grupowania po danych, hashujemy ZDEKOMPRESOWANĄ tablicę (jedyne sankcjonowane `.data` — patrz
+    doktryna w nagłówku modułu, R1#14).
+
+    Kontrakt postaci kanonicznej (deterministyczny między uruchomieniami i maszynami):
+    `b"compdata|" + dtype.str(big-endian) + b"|" + "x".join(shape) + b"|" + bajty`, gdzie bajty to
+    `ascontiguousarray(data.astype(big-endian))` (astype PIERW → realna zamiana bajtów, potem
+    C-order). Otwieramy z `do_not_scale_image_data=True`: hash liczony na SUROWYCH stored pikselach
+    (BZERO/BSCALE NIE stosowane) → niezależny od nagłówka i bez ryzyka MaskedArray od `BLANK`.
+    Prefiks `compdata|` namespace'uje hash mastera — strukturalnie nie zderzy się z haszem sekcji.
+
+    GRANICA: NIEporównywalny z haszem sekcji danych pliku nieskompresowanego (różne postaci) —
+    grupowanie działa master-z-masterem, cross-format poza zakresem.
+
+    Read-only, bez locków (`memmap=False`). `hdu_index` MUSI być tym wybranym przez `_select_hdu`.
+    None gdy HDU nie ma danych; wyjątek uszkodzonego kafelka propaguje (soft-landing u wołającego)."""
+    with fits.open(path, mode="readonly", memmap=False, do_not_scale_image_data=True) as hdul:
+        data = hdul[hdu_index].data   # leniwe → dostęp WYZWALA dekompresję
+        if data is None:
+            return None
+        be = np.ascontiguousarray(data.astype(data.dtype.newbyteorder(">")))
+        prefix = (
+            b"compdata|" + be.dtype.str.encode("ascii") + b"|"
+            + "x".join(map(str, be.shape)).encode("ascii") + b"|"
+        )
+        digest = hashlib.sha1(prefix + be.tobytes()).hexdigest()
+    return digest
 
 
 def _local_name(tag):
@@ -183,12 +359,18 @@ def _unquote_fits(value):
     return value
 
 
-def read_xisf_header(path):
-    """Odczytaj nagłówek XISF (monolithic) jako JSON-owalny dict — TEN SAM kontrakt co
-    `read_fits_header` (klucze FITS wielkimi literami; COMMENT/HISTORY w listach), z jedną różnicą:
-    wartości są STRINGAMI (XISF tak je trzyma; rzut na typ robią pola gorące — W3/§Etap 2).
+def read_xisf_meta(path):
+    """Odczytaj nagłówek XISF (monolithic) jako `(dict, span)`: dict zeznania — TEN SAM kontrakt
+    co `read_fits_header` (klucze FITS wielkimi literami; COMMENT/HISTORY w listach), z jedną
+    różnicą: wartości są STRINGAMI (XISF tak je trzyma; rzut na typ robią pola gorące — W3/§Etap 2).
     Wartości stringowe ODCUDZYSŁAWIANE z konwencji FITS (`_unquote_fits`, firsthand) — inaczej dict
     NIE byłby 1:1 z `read_fits_header` (astropy zwraca string bez apostrofów).
+
+    `span` = `(start, size)` bajtów attachmentu PIERWSZEGO `<Image location="attachment:s:n">`
+    w porządku dokumentu — dla masterów WBPP to obraz `integration` (właściwy stack; kolejne to
+    rejection_low/high/slope_map). Wejście `sha1_of_span` → `sha1_data` XISF = sha1 bajtów
+    attachmentu (brief §2; wzorzec `integ_hash` Custosa; postać kanoniczna przy kompresji = decyzja
+    D-B na progu PF-4). None gdy brak obrazu-attachmentu (tożsamość nieobliczalna → degeneracja).
 
     Format (XISF 1.0 monolithic): sygnatura `XISF0100` (8 B) · uint32 LE długość nagłówka XML
     (4 B) · 4 B reserved · nagłówek XML (UTF-8). Czytamy WYŁĄCZNIE nagłówek (nie dotykamy bloków
@@ -215,14 +397,26 @@ def read_xisf_header(path):
         raise ValueError(f"XISF: nagłówek XML ucięty ({len(xml_bytes)}/{header_len} B)")
     root = ET.fromstring(xml_bytes)       # ParseError przy niepoprawnym XML → łapie scan_file
     out = {}
+    span = None
     for elem in root.iter():
-        if _local_name(elem.tag) != "FITSKeyword":
+        local = _local_name(elem.tag)
+        if local == "Image" and span is None:
+            loc = (elem.get("location") or "").split(":")
+            if len(loc) == 3 and loc[0] == "attachment":
+                span = (int(loc[1]), int(loc[2]))
+        if local != "FITSKeyword":
             continue
         name = elem.get("name")
         if not name:                      # FITSKeyword bez nazwy — nic do zaadresowania, pomiń
             continue
         _put(out, name.strip().upper(), _unquote_fits(elem.get("value", "")))
-    return out
+    return out, span
+
+
+def read_xisf_header(path):
+    """Odczytaj nagłówek XISF jako JSON-owalny dict (kontrakt sprzed PF-1 bez zmian; dziś
+    cienka nakładka na `read_xisf_meta`)."""
+    return read_xisf_meta(path)[0]
 
 
 def read_header(path):
@@ -242,25 +436,49 @@ def _mtime_iso(st):
 
 
 def scan_file(path):
-    """Zeskanuj jeden plik (FITS lub XISF) → `ScanRecord` (sha1 + stat + nagłówek). Czysty odczyt.
+    """Zeskanuj jeden plik (FITS lub XISF) → `ScanRecord` (odciski + stat + nagłówek + karty).
+    Czysty odczyt.
 
-    Miękkie lądowanie (W1): nagłówek nieczytelny/nierozpoznany NIE przerywa skanu — `read_header`
-    rzuca, my łapiemy i zwracamy `ScanRecord(header=None, error="Typ: opis")`. Tożsamość (`sha1`)
-    i namiary pliku są wypełnione mimo to (frame i location powstaną; review nagłówka — wyżej).
-    """
+    Miękkie lądowanie (W1): nagłówek nieczytelny/nierozpoznany NIE przerywa skanu — czytnik meta
+    rzuca, my łapiemy i zwracamy `ScanRecord(header=None, error="Typ: opis")`; odciski sekcji
+    (`sha1_data`/`header_hash`/`cards`) wtedy None, ale tożsamość (`sha1` = sha1 całego pliku)
+    i namiary są wypełnione (frame i location powstaną; review nagłówka — wyżej).
+
+    Hasze (brief §2): plik NIEskompresowany → `file_sha1` i `sha1_data` JEDNYM przebiegiem
+    (`sha1_of_span`; pozycje sekcji z nagłówków przed odczytem treści); CompImageHDU →
+    `file_sha1` strumieniem + `sha1_data` z dekompresji (`compressed_data_sha1`); XISF →
+    `sha1_data` = sha1 bajtów attachmentu (ten sam jeden przebieg). Błąd I/O w fazie haszy
+    propaguje (jak dawne `sha1_of`) — backstop to `scan_tree`, nie W1."""
     p = Path(path)
     st = p.stat()
     mtime = _mtime_iso(st)
-    sha1 = sha1_of(str(p))
+    spath = str(p)
+    header = None
+    cards = header_hash = hdu_index = compressed = span = None
     try:
-        header = read_header(str(p))
+        if p.suffix.lower() in XISF_SUFFIXES:
+            header, span = read_xisf_meta(spath)
+        else:
+            meta = read_fits_meta(spath)
+            header, cards = meta.header, meta.cards
+            header_hash, hdu_index, compressed = meta.header_hash, meta.hdu_index, meta.compressed
+            span = (meta.datloc, meta.datspan)
         error = None
     except Exception as exc:              # W1: dowolny błąd czytnika → review, nie crash pętli
-        header = None
         error = f"{type(exc).__name__}: {exc}"
+    if compressed:
+        file_sha1 = sha1_of(spath)
+        try:
+            sha1_data = compressed_data_sha1(spath, hdu_index)
+        except Exception:                 # zepsuty kafelek → tożsamość nieobliczalna (degeneracja:
+            sha1_data = None              # sha1 pliku + flaga — flagowanie należy do PF-2)
+    else:
+        file_sha1, sha1_data = sha1_of_span(spath, span)
     return ScanRecord(
-        path=str(p), sha1=sha1, size_bytes=st.st_size, mtime=mtime,
+        path=spath, sha1=file_sha1, size_bytes=st.st_size, mtime=mtime,
         header=header, error=error,
+        sha1_data=sha1_data, file_sha1=file_sha1,
+        header_hash=header_hash, hdu_index=hdu_index, compressed=compressed, cards=cards,
     )
 
 

@@ -1,5 +1,6 @@
 """CLI Horreum — wejście plastra B: `init` (utwórz/zmigruj bazę) + `scan` (wciągnij drzewo) +
-`group` (teleskopy/config) + `resolve` (obiekt/filtr) + `delta` (read-only review)."""
+`group` (teleskopy/config) + `resolve` (obiekt/filtr) + `delta` (read-only review) +
+`import-fitsmirror` (zasilenie świeżej bazy z dawcy — PF-3, brief §4)."""
 import argparse
 import sys
 from datetime import datetime, timezone
@@ -41,6 +42,11 @@ def main(argv=None):
     p_delta = sub.add_parser("delta", help="delta do review (read-only): %% obiektu + nierozstrzygnięte")
     p_delta.add_argument("db", help="ścieżka pliku bazy")
 
+    p_imp = sub.add_parser("import-fitsmirror",
+                           help="zasil ŚWIEŻĄ bazę z bazy dawcy fitsmirror (dawca read-only)")
+    p_imp.add_argument("donor", help="ścieżka bazy dawcy (fitsmirror.db)")
+    p_imp.add_argument("db", help="ścieżka ŚWIEŻEJ bazy Horreum (utworzy ją migracja)")
+
     args = parser.parse_args(argv)
     if args.cmd == "init":
         con = db.open_db(args.path)
@@ -80,8 +86,50 @@ def main(argv=None):
         con.close()
         print(_format_delta(args.db, rep))               # ASCII (cp1250)
         return 0
+    if args.cmd == "import-fitsmirror":
+        from .import_fitsmirror import ImportAbort, import_fitsmirror   # lazy (astropy)
+        now = datetime.now(timezone.utc).isoformat()
+
+        def heartbeat(done, total, _path):               # długi przebieg — puls co 1000 plików
+            if done % 1000 == 0 or done == total:
+                print(f"  import: {done}/{total}")
+        try:
+            summary = import_fitsmirror(args.donor, args.db, now=now, progress=heartbeat)
+        except ImportAbort as exc:
+            print(f"Horreum import-fitsmirror: ABORT — {exc}")
+            if exc.summary is not None:
+                print(_format_import(args.donor, args.db, exc.summary))
+            return 1
+        print(_format_import(args.donor, args.db, summary))
+        return 0
     parser.print_help()
     return 0
+
+
+def _format_import(donor_path, db_path, s):
+    """Sformatuj ImportSummary do czytelnego ASCII (konsola Windows = cp1250)."""
+    pf = s.preflight
+    lines = [f"Horreum import-fitsmirror {donor_path} -> {db_path}:"]
+    if pf is not None:
+        lines.append(f"  pre-flight: root {pf.root} volume {pf.volume}; "
+                     f"dawca {pf.files_total} plikow; nadwyzka dysku {pf.surplus}; "
+                     f"falsyfikator OK ({len(pf.verified)} plikow)")
+        for note in pf.notes:
+            lines.append(f"    {note}")
+    lines.append(f"  import: {s.imported}/{s.files_total} (skipped {s.skipped}, "
+                 f"przeliczone z dysku {s.recomputed}); {s.scan}")
+    if s.skipped_paths:
+        lines.append("  skipped (brief 4.3):")
+        for p in s.skipped_paths:
+            lines.append(f"    {p}")
+    lines.append(f"  grouper: {s.group}")
+    lines.append(f"  resolver: {s.resolve}")
+    status = "OK" if not s.gate_failures else "FAIL"
+    gates = " ".join(f"{k}={a}" for k, (_, a) in s.gates.items())
+    lines.append(f"  bramki 4.6 {status}: {gates}")
+    for fail in s.gate_failures:
+        lines.append(f"    FAIL {fail}")
+    return "\n".join(lines)
 
 
 def _format_delta(db_path, rep):

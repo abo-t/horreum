@@ -537,32 +537,35 @@ def _already_scanned(con, volume, path, mtime):
 
 
 def _record_testimony_and_flags(con, rec, *, frame_id, sha1_data, readable, ident, kind,
-                                now, summary):
+                                now, summary, actor="scan"):
     """Zeznanie + flagi dla ŚWIEŻO powstałego frame'a (wspólne dla ścieżki nowej i przepiętej):
     czytelny → `record_header` (1:1, z cards) + ewentualne `flag_camera_review`/`flag_kind_unmapped`;
     nieczytelny → `flag_frame_review` (frame-SZKIELET bez headera)."""
     if not readable:                                   # W1: frame-szkielet bez headera → review
-        repo.flag_frame_review(con, sha1=sha1_data, path=rec.path, reason=rec.error, now=now)
+        repo.flag_frame_review(con, sha1=sha1_data, path=rec.path, reason=rec.error, now=now,
+                               actor=actor)
         summary.frame_review += 1
         return
     repo.record_header(
         con, frame_id=frame_id, raw_json=json.dumps(rec.header, ensure_ascii=False),
-        cards=rec.cards, now=now, **extract_header(rec.header))
+        cards=rec.cards, now=now, actor=actor, **extract_header(rec.header))
     summary.headers += 1
     if ident is None:
         repo.flag_camera_review(
-            con, frame_id=frame_id, reason="brak osi KAMERA (INSTRUME)", now=now)
+            con, frame_id=frame_id, reason="brak osi KAMERA (INSTRUME)", now=now, actor=actor)
         summary.camera_review += 1
     imagetyp = rec.header.get("IMAGETYP")
     if kind == "unknown" and imagetyp and str(imagetyp).strip():
-        repo.flag_kind_unmapped(con, frame_id=frame_id, imagetyp=imagetyp, now=now)
+        repo.flag_kind_unmapped(con, frame_id=frame_id, imagetyp=imagetyp, now=now, actor=actor)
         summary.kind_unmapped += 1
 
 
-def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, summary):
+def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, summary,
+                  actor="scan"):
     """Wciągnij JEDEN `ScanRecord` przez jedną klingę (`repo`) — JĄDRO wspólne dla skanu drzewa
     (`scan_tree`) i importu z dawcy (rekord pochodzi z nagłówka pliku ALBO z cache'owanego
-    źródła). Mutuje `summary`; zapis WYŁĄCZNIE przez `repo` (zero DML tutaj).
+    źródła). Mutuje `summary`; zapis WYŁĄCZNIE przez `repo` (zero DML tutaj). `actor` idzie do
+    KAŻDEGO eventu tej ścieżki (import z dawcy podaje `import:fitsmirror`, brief §4.2).
 
     TOŻSAMOŚĆ (brief §2): frame po `sha1_data` (odcisk sekcji danych); nieobliczalny →
     DEGENERACJA (sha1 całego pliku + `sha1_data_uncomputable=1`) — legalna WYŁĄCZNIE dla ścieżki
@@ -595,7 +598,7 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
         camera_id, _ = repo.upsert_camera(
             con, model_canon=ident.model_canon, pixel_um=ident.pixel_um,
             is_mono=ident.is_mono, is_mono_source=ident.is_mono_source,
-            raw_instrume=ident.raw_instrume, now=now)
+            raw_instrume=ident.raw_instrume, now=now, actor=actor)
     kind = normalize_kind(rec.header.get("IMAGETYP")) if readable else "unknown"
     if rec.sha1_data is not None:
         sha1_data, uncomputable = rec.sha1_data, 0
@@ -609,7 +612,7 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
     if loc is None:                                    # ścieżka NIEZNANA — dotychczasowy tor
         frame_id, created = repo.upsert_frame(
             con, sha1_data=sha1_data, sha1_data_uncomputable=uncomputable,
-            kind=kind, filetype=_filetype(rec.path), camera_id=camera_id, now=now)
+            kind=kind, filetype=_filetype(rec.path), camera_id=camera_id, now=now, actor=actor)
         if created:
             summary.frames_new += 1
         else:
@@ -618,13 +621,13 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
             con, frame_id=frame_id, volume=volume, drive_letter=drive_letter,
             path=rec.path, tier=tier, mtime=rec.mtime,
             file_sha1=rec.file_sha1, header_hash=rec.header_hash, hdu_index=rec.hdu_index,
-            compressed=rec.compressed, size_bytes=rec.size_bytes, now=now)
+            compressed=rec.compressed, size_bytes=rec.size_bytes, now=now, actor=actor)
         if loc_created:
             summary.locations_new += 1
         if created:                                    # header 1:1 z frame → tylko dla nowego
             _record_testimony_and_flags(
                 con, rec, frame_id=frame_id, sha1_data=sha1_data, readable=readable,
-                ident=ident, kind=kind, now=now, summary=summary)
+                ident=ident, kind=kind, now=now, summary=summary, actor=actor)
         return
 
     # ── ścieżka ZNANA: kontrakt świeżości §2 ──
@@ -640,7 +643,7 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
         if had_header or rec.mtime != loc["mtime"]:
             repo.refresh_location_unreadable(
                 con, location_id=loc["id"], sha1_data=frame_row["sha1_data"], path=rec.path,
-                mtime=rec.mtime, reason=rec.error, now=now)
+                mtime=rec.mtime, reason=rec.error, now=now, actor=actor)
             summary.frame_review += 1
         return
 
@@ -648,23 +651,24 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
     if sha1_data != frame_row["sha1_data"]:            # PODMIANA TREŚCI pod znaną ścieżką
         frame_id, created = repo.upsert_frame(
             con, sha1_data=sha1_data, sha1_data_uncomputable=uncomputable,
-            kind=kind, filetype=_filetype(rec.path), camera_id=camera_id, now=now)
+            kind=kind, filetype=_filetype(rec.path), camera_id=camera_id, now=now, actor=actor)
         if created:
             summary.frames_new += 1
         else:
             summary.frames_existing += 1
-        repo.rebind_location(con, location_id=loc["id"], frame_after=frame_id, now=now)
+        repo.rebind_location(con, location_id=loc["id"], frame_after=frame_id, now=now,
+                             actor=actor)
         summary.locations_rebound += 1
         if created:
             _record_testimony_and_flags(
                 con, rec, frame_id=frame_id, sha1_data=sha1_data, readable=readable,
-                ident=ident, kind=kind, now=now, summary=summary)
+                ident=ident, kind=kind, now=now, summary=summary, actor=actor)
         # świeże fakty kopii BEZ odświeżania zeznania (zeznanie nowego frame'a właśnie nagrane,
         # a cudzemu — istniejącemu sha1_data — nie nadpisujemy: reguła N-lokacji)
         refreshed = repo.refresh_location(
             con, location_id=loc["id"], frame_id=frame_id, mtime=rec.mtime,
             file_sha1=rec.file_sha1, header_hash=rec.header_hash, hdu_index=rec.hdu_index,
-            compressed=rec.compressed, size_bytes=rec.size_bytes, now=now)
+            compressed=rec.compressed, size_bytes=rec.size_bytes, now=now, actor=actor)
         summary.locations_refreshed += refreshed["facts"]
         return
 
@@ -673,7 +677,7 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
     refreshed = repo.refresh_location(
         con, location_id=loc["id"], frame_id=frame_id, mtime=rec.mtime,
         file_sha1=rec.file_sha1, header_hash=rec.header_hash, hdu_index=rec.hdu_index,
-        compressed=rec.compressed, size_bytes=rec.size_bytes, now=now,
+        compressed=rec.compressed, size_bytes=rec.size_bytes, now=now, actor=actor,
         raw_json=json.dumps(rec.header, ensure_ascii=False) if readable else None,
         cards=rec.cards, hot_fields=extract_header(rec.header) if readable else None,
         camera_id=camera_id, kind=kind)

@@ -12,6 +12,9 @@ from horreum.resolve.cameras import camera_identity, is_mono, normalize_camera
     ("ZWO ASI2600MM Duo", "ASI2600MD"),       # sensor MM, body Duo = osobna kamera (A1)
     ("ZWO ASI294MC Pro", "ASI294MC"),
     ("ASI2600MM", "ASI2600MM"),
+    ("Sony A7RM3", "SONYA7RM3"),               # forma akwizycji FITS (dawca)
+    ("Sony ILCE-7RM3A", "SONYA7RM3"),          # forma PixInsight XISF — TEN SAM korpus (fold PF-4)
+    ("Sony ILCE-7RM3", "SONYA7RM3"),           # wariant bez sufiksu 'A'
 ])
 def test_normalize_camera_warianty(instrume, expected):
     assert normalize_camera(instrume) == expected
@@ -25,7 +28,8 @@ def test_normalize_camera_puste():
 def test_normalize_camera_idempotentne():
     """normalize(normalize(x)) == normalize(x) — kanon nie traci tokenów przy ponownym przejściu
     (inwariant osi tożsamości; MD w alternacji łapie już-znormalizowaną formę Duo)."""
-    for instrume in ("ZWO ASI2600MM Pro", "ZWO ASI2600MM Duo", "ZWO ASI2600MC Pro", "ASI294"):
+    for instrume in ("ZWO ASI2600MM Pro", "ZWO ASI2600MM Duo", "ZWO ASI2600MC Pro", "ASI294",
+                     "Sony ILCE-7RM3A", "Sony A7RM3"):
         once = normalize_camera(instrume)
         assert normalize_camera(once) == once
 

@@ -29,6 +29,11 @@ def normalize_camera(instrume):
         if suffix == "MM" and re.search(r"\bDUO\b", s):
             suffix = "MD"                       # sensor MM, body Duo = osobna kamera
         return f"ASI{m.group(1)}{suffix}"
+    # Sony: PixInsight zapisuje kod modelu 'Sony ILCE-7RM3A', akwizycja FITS 'Sony A7RM3' — ten sam
+    # korpus alfa 7R III (firsthand PF-4: 1 masterflat XISF rozbijal kamere na 6. tozsamosc). Fold
+    # ILCE-7RM3[A] -> A7RM3, by jedna kamera fizyczna miala jedna tozsamosc (decyzja Zdzisawa PF-4;
+    # brief §3 „normalize_camera 1:1" rozszerzony o forme ILCE). Idempotentne: 'A7RM3' nie nosi ILCE.
+    s = re.sub(r"\bILCE-?7RM3A?\b", "A7RM3", s)
     cleaned = re.sub(r"\b(ZWO|PRO|CAMERA|CMOS|CCD)\b", "", s)
     cleaned = re.sub(r"[^A-Z0-9]+", "", cleaned)
     return cleaned or None

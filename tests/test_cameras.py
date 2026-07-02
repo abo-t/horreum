@@ -113,9 +113,14 @@ def test_camera_identity_brak_instrume_niederywowalne():
     assert camera_identity({"XPIXSZ": 3.76}) is None
 
 
-def test_camera_identity_brak_xpixsz_niederywowalne():
-    """Brak XPIXSZ → brak pixel_um (część klucza UNIQUE, NOT NULL) → None."""
-    assert camera_identity({"INSTRUME": "ZWO ASI2600MM Pro"}) is None
+def test_camera_identity_brak_xpixsz_os_powstaje_pixel_none():
+    """KONTRAKT ODWRÓCONY (PF-2, R1#3/R2#4): brak XPIXSZ NIE blokuje osi — tożsamość = model;
+    pixel_um=None to nieznana WŁAŚCIWOŚĆ (uzupełni ją upsert_camera z innego zeznania).
+    Rozwiązuje dziwactwo „Sony masterflat bez XPIXSZ"."""
+    ident = camera_identity({"INSTRUME": "ZWO ASI2600MM Pro"})
+    assert ident is not None
+    assert (ident.model_canon, ident.pixel_um) == ("ASI2600MM", None)
+    assert (ident.is_mono, ident.is_mono_source) == (1, "model")
 
 
 def test_camera_identity_xpixsz_string_z_xisf_rzutowany_na_float():
@@ -126,7 +131,8 @@ def test_camera_identity_xpixsz_string_z_xisf_rzutowany_na_float():
     assert isinstance(ident.pixel_um, float)
 
 
-def test_camera_identity_xpixsz_pusty_string_niederywowalne():
-    """W3 brzeg: XPIXSZ pusty (`''`, jak w ubogich nagłówkach) → `_to_float`→None → oś nie powstaje
-    (None), nie crash. Review należy do warstwy frame (§4.2)."""
-    assert camera_identity({"INSTRUME": "ZWO ASI2600MM Pro", "XPIXSZ": ""}) is None
+def test_camera_identity_xpixsz_pusty_string_pixel_none():
+    """W3 brzeg: XPIXSZ pusty (`''`, jak w ubogich nagłówkach) → `_to_float`→None → oś POWSTAJE
+    z pixel_um=None (kontrakt odwrócony PF-2), nie crash i nie blok."""
+    ident = camera_identity({"INSTRUME": "ZWO ASI2600MM Pro", "XPIXSZ": ""})
+    assert ident is not None and ident.pixel_um is None

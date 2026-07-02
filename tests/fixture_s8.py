@@ -36,10 +36,15 @@ def seed(con):
                                  is_mono_source="model", raw_instrume="ASI294MC Pro", now=NOW)
 
     # A,B dzielą cam1 (para do scalenia z kolizją kamery); C samodzielny; D bez klatek.
-    a, _ = repo.propose_telescope(con, f_ratio_nominal=5.6, focal_nominal=784, now=NOW)
-    b, _ = repo.propose_telescope(con, f_ratio_nominal=5.6, focal_nominal=794, now=NOW)
-    c, _ = repo.propose_telescope(con, f_ratio_nominal=8.0, focal_nominal=1624, now=NOW)
-    d, _ = repo.propose_telescope(con, f_ratio_nominal=4.5, focal_nominal=418, now=NOW)
+    # Tożsamość = telescop_canon (nagłówkowa nazwa); f//ogniskowa to właściwości (PF-2).
+    a, _ = repo.propose_telescope(con, telescop_canon="A140R",
+                                  f_ratio_nominal=5.6, focal_nominal=784, now=NOW)
+    b, _ = repo.propose_telescope(con, telescop_canon="A140R-bis",
+                                  f_ratio_nominal=5.6, focal_nominal=794, now=NOW)
+    c, _ = repo.propose_telescope(con, telescop_canon="RC8",
+                                  f_ratio_nominal=8.0, focal_nominal=1624, now=NOW)
+    d, _ = repo.propose_telescope(con, telescop_canon="76EDPH",
+                                  f_ratio_nominal=4.5, focal_nominal=418, now=NOW)
 
     cfg_a, _ = repo.propose_config(con, telescope_id=a, camera_id=cam1, now=NOW)
     cfg_b, _ = repo.propose_config(con, telescope_id=b, camera_id=cam1, now=NOW)   # ta sama kamera
@@ -48,7 +53,7 @@ def seed(con):
     frames = {}
 
     def _frame(name, sha, camera_id, cfg):
-        fid, _ = repo.upsert_frame(con, sha1=sha, kind="light", filetype="fits", size_bytes=1,
+        fid, _ = repo.upsert_frame(con, sha1_data=sha, kind="light", filetype="fits",
                                    camera_id=camera_id, now=NOW)
         if cfg is not None:
             repo.assign_config(con, frame_id=fid, config_id=cfg, now=NOW)
@@ -109,7 +114,7 @@ def seed_object_axis(con):
     new = {}
 
     def _frame(name, sha, kind, camera_id):
-        fid, _ = repo.upsert_frame(con, sha1=sha, kind=kind, filetype="fits", size_bytes=1,
+        fid, _ = repo.upsert_frame(con, sha1_data=sha, kind=kind, filetype="fits",
                                    camera_id=camera_id, now=NOW)
         new[name] = fid
         return fid

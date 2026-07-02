@@ -9,10 +9,13 @@ import sqlite3
 from importlib import resources
 
 # (wersja, plik migracji) — kolejność rosnąca; user_version po zastosowaniu = wersja ostatniej.
+# 0002 ZASTĘPUJE 0001 (przejście fitsmirror, D-A/R2#12): świeża baza dostaje od razu v2;
+# przedpotopowa baza v1 (sprzed przejścia) nie ma ścieżki migracji — jawny błąd w migrate().
 MIGRATIONS = [
-    (1, "0001_initial.sql"),
+    (2, "0002_initial.sql"),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
+_KNOWN_VERSIONS = frozenset({0} | {v for v, _ in MIGRATIONS})
 
 
 def connect(path):
@@ -40,8 +43,16 @@ def _migration_sql(filename):
 
 def migrate(con):
     """Zastosuj migracje > bieżącej user_version. Idempotentne (druga próba = no-op).
-    Zwraca wersję schematu po migracji."""
+    Zwraca wersję schematu po migracji.
+
+    EXPECT: baza o wersji SPOZA łańcucha (np. v1 sprzed przejścia fitsmirror) → jawny błąd,
+    nie cicha pół-migracja (0002 to pełny initial — na v1 wybuchłby w połowie skryptu).
+    Świeżą bazę tworzy migracja; konwertera starej NIE ma (brief przejścia, rama ŚWIEŻA-BAZA)."""
     current = _user_version(con)
+    if current not in _KNOWN_VERSIONS and current < SCHEMA_VERSION:
+        raise RuntimeError(
+            f"baza w wersji v{current} sprzed przejścia fitsmirror — brak ścieżki migracji; "
+            f"utwórz świeżą bazę (horreum init) i zasil ją ponownie")
     for version, filename in MIGRATIONS:
         if version > current:
             con.executescript(_migration_sql(filename))

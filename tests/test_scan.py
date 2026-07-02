@@ -33,12 +33,12 @@ def _write_fits(path, cards=(), data=None, extra_hdus=()):
 
 
 def test_scan_file_sha1_i_stat(tmp_path):
-    """sha1 == hashlib na bajtach pliku; size_bytes/mtime/path wypełnione."""
+    """file_sha1 == hashlib na bajtach pliku; size_bytes/mtime/path wypełnione."""
     f = _write_fits(tmp_path / "light.fits",
                     cards=[("INSTRUME", "ZWO ASI2600MM Pro"), ("XPIXSZ", 3.76)],
                     data=np.zeros((4, 4), dtype=np.uint16))
     rec = scan_file(str(f))
-    assert rec.sha1 == hashlib.sha1(f.read_bytes()).hexdigest()
+    assert rec.file_sha1 == hashlib.sha1(f.read_bytes()).hexdigest()
     assert rec.size_bytes == f.stat().st_size
     assert rec.path == str(f)
     assert rec.mtime and "T" in rec.mtime          # ISO-8601
@@ -314,24 +314,25 @@ def test_read_header_dyspozytor_po_rozszerzeniu(tmp_path):
 
 
 def test_scan_file_xisf_pelny_rekord(tmp_path):
-    """scan_file na XISF → ScanRecord z sha1/stat + nagłówkiem (string), error None."""
+    """scan_file na XISF → ScanRecord z file_sha1/stat + nagłówkiem (string), error None."""
     f = _write_xisf(tmp_path / "frame.xisf",
                     keywords=[("INSTRUME", "ZWO ASI2600MC Pro"), ("XPIXSZ", "3.76")])
     rec = scan_file(str(f))
-    assert rec.sha1 == hashlib.sha1(f.read_bytes()).hexdigest()
+    assert rec.file_sha1 == hashlib.sha1(f.read_bytes()).hexdigest()
     assert rec.error is None
     assert rec.header["INSTRUME"] == "ZWO ASI2600MC Pro"
 
 
 def test_scan_file_miekkie_ladowanie_W1(tmp_path):
     """W1: plik o rozpoznanym rozszerzeniu, ale nieczytelnym nagłówku → scan_file NIE rzuca;
-    zwraca header=None + error, a tożsamość (sha1) i namiary są wypełnione (frame/location powstaną)."""
+    zwraca header=None + error, a `file_sha1` (degeneracja tożsamości w ingest) i namiary są
+    wypełnione (frame/location powstaną)."""
     bad = tmp_path / "broken.xisf"
     bad.write_bytes(b"NOTXISF!" + b"\x00" * 20)
     rec = scan_file(str(bad))
     assert rec.header is None
     assert rec.error and "XISF" in rec.error
-    assert rec.sha1 == hashlib.sha1(bad.read_bytes()).hexdigest()   # tożsamość przeżywa brak nagłówka
+    assert rec.file_sha1 == hashlib.sha1(bad.read_bytes()).hexdigest()  # degeneracja ma z czego startować
     assert rec.size_bytes == bad.stat().st_size
 
 
@@ -353,16 +354,15 @@ def _pf1_card(cards, kw, idx=0):
 
 
 def test_scan_file_fits_odciski_pf1(tmp_path):
-    """FITS nieskompresowany: `sha1` (stare pole, ZOSTAJE do PF-2 — R3-d1) == `file_sha1` ==
-    hashlib całego pliku; `sha1_data` == hashlib sekcji danych [datLoc, datLoc+datSpan) — oba
-    z JEDNEGO przebiegu; `header_hash` == sha1 tekstu nagłówka (latin-1, algorytm dawcy);
-    hdu_index=0, compressed=0; `cards` wypełnione."""
+    """FITS nieskompresowany: `file_sha1` == hashlib całego pliku; `sha1_data` == hashlib sekcji
+    danych [datLoc, datLoc+datSpan) — oba z JEDNEGO przebiegu; `header_hash` == sha1 tekstu
+    nagłówka (latin-1, algorytm dawcy); hdu_index=0, compressed=0; `cards` wypełnione."""
     f = _write_fits(tmp_path / "l.fits",
                     cards=[("INSTRUME", "ZWO ASI2600MM Pro"), ("XPIXSZ", 3.76)],
                     data=np.arange(16, dtype=np.uint16).reshape(4, 4))
     rec = scan_file(str(f))
     raw = f.read_bytes()
-    assert rec.file_sha1 == rec.sha1 == hashlib.sha1(raw).hexdigest()
+    assert rec.file_sha1 == hashlib.sha1(raw).hexdigest()
     meta = read_fits_meta(str(f))
     assert rec.sha1_data == hashlib.sha1(raw[meta.datloc:meta.datloc + meta.datspan]).hexdigest()
     with fits.open(str(f), memmap=False) as hdul:
@@ -462,7 +462,7 @@ def test_scan_file_xisf_attachment_hash(tmp_path):
                            keywords=[("INSTRUME", "'ZWO ASI2600MC Pro'")])
     rec = scan_file(str(f))
     assert rec.sha1_data == hashlib.sha1(payload).hexdigest()
-    assert rec.file_sha1 == rec.sha1 == hashlib.sha1(f.read_bytes()).hexdigest()
+    assert rec.file_sha1 == hashlib.sha1(f.read_bytes()).hexdigest()
     assert rec.header_hash is None and rec.hdu_index is None
     assert rec.compressed is None and rec.cards is None
     assert rec.header["INSTRUME"] == "ZWO ASI2600MC Pro"
@@ -494,13 +494,13 @@ def test_xisf_span_pierwszy_image_w_dokumencie(tmp_path):
 
 
 def test_scan_file_w1_odciski_none(tmp_path):
-    """W1: plik nieczytelny → wszystkie odciski sekcji None, ale `sha1`/`file_sha1` (cały plik)
-    wypełnione — tożsamość schematu v1 przeżywa, degeneracja PF-2 ma z czego startować."""
+    """W1: plik nieczytelny → wszystkie odciski sekcji None, ale `file_sha1` (cały plik)
+    wypełniony — degeneracja tożsamości w ingest ma z czego startować."""
     bad = tmp_path / "broken.xisf"
     bad.write_bytes(b"NOTXISF!" + b"\x00" * 20)
     rec = scan_file(str(bad))
     assert rec.header is None and rec.error
-    assert rec.sha1 == rec.file_sha1 == hashlib.sha1(bad.read_bytes()).hexdigest()
+    assert rec.file_sha1 == hashlib.sha1(bad.read_bytes()).hexdigest()
     assert rec.sha1_data is None and rec.header_hash is None
     assert rec.hdu_index is None and rec.compressed is None and rec.cards is None
 
@@ -843,23 +843,153 @@ def test_progress_wolany_per_plik_z_total(tmp_path):
 
 
 def test_ingest_record_replay_z_cache_bez_pliku(tmp_path):
-    """`ingest_record` jako JĄDRO replayu: `ScanRecord` zbudowany z cache'owanego źródła (BEZ
-    realnego pliku — nagłówek string-only, jak z `header_json`) → frame+location+header+event przez
-    jedną klingę, pola gorące zrzutowane ze stringów (W3). To kontrakt, na którym stoi skrypt
-    akceptacji §5 (replay custos.db header_json przez REALNY pipeline, nie atrapę)."""
+    """`ingest_record` jako JĄDRO importu/replayu: `ScanRecord` zbudowany z cache'owanego źródła
+    (BEZ realnego pliku — nagłówek string-only, jak z bazy dawcy) → frame+location+header+event
+    przez jedną klingę, pola gorące zrzutowane ze stringów (W3). Na tym kontrakcie stoi import
+    z fitsmirror.db (PF-3)."""
     con = _db(tmp_path)
     rec = ScanRecord(
-        path=r"X:\cache\NGC4258\sub.fits", sha1="a" * 40, size_bytes=123,
+        path=r"X:\cache\NGC4258\sub.fits", size_bytes=123,
         mtime="2026-01-01T00:00:00+00:00",
         header={"INSTRUME": "ZWO ASI2600MM Pro", "XPIXSZ": "3.76", "IMAGETYP": "LIGHT",
-                "OBJECT": "M106", "FOCALLEN": "784", "FOCRATIO": "5.6"})
+                "OBJECT": "M106", "FOCALLEN": "784", "FOCRATIO": "5.6"},
+        sha1_data="a" * 40, file_sha1="b" * 40, header_hash="c" * 40, hdu_index=0, compressed=0)
     s = ScanSummary()
     ingest_record(con, rec, volume="VOL", now=NOW, summary=s)
     assert (s.frames_new, s.locations_new, s.headers) == (1, 1, 1)
-    fid = con.execute("SELECT id FROM frame WHERE sha1=?", ("a" * 40,)).fetchone()[0]
+    fid = con.execute("SELECT id FROM frame WHERE sha1_data=?", ("a" * 40,)).fetchone()[0]
     obj, focallen = con.execute(
         "SELECT object_raw, focallen FROM header WHERE frame_id=?", (fid,)).fetchone()
-    assert obj == "M106" and focallen == 784.0          # string -> float (W3), jak w replayu
+    assert obj == "M106" and focallen == 784.0          # string -> float (W3), jak w imporcie
+    loc = con.execute("SELECT file_sha1, header_hash, size_bytes FROM location "
+                      "WHERE frame_id=?", (fid,)).fetchone()
+    assert (loc["file_sha1"], loc["header_hash"], loc["size_bytes"]) == ("b" * 40, "c" * 40, 123)
     for verb in ("frame.observed", "location.added", "header.recorded", "camera.upserted"):
         assert con.execute("SELECT count(*) FROM event WHERE verb=?", (verb,)).fetchone()[0] == 1
+    con.close()
+
+
+# --- kontrakt świeżości §2 briefu (PF-2): refresh / rebound / degeneracja na realnych plikach ---
+
+def test_scan_tree_degeneracja_flagowana(tmp_path):
+    """FITS bez sekcji danych (sha1_data nieobliczalne) → frame powstaje z tożsamością
+    zdegenerowaną: sha1_data == sha1 CAŁEGO pliku + sha1_data_uncomputable=1."""
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    f = tree / "empty.fits"
+    fits.HDUList([fits.PrimaryHDU()]).writeto(str(f))
+    s = scan_tree(con, tree, now=NOW)
+    assert s.frames_new == 1
+    row = con.execute("SELECT sha1_data, sha1_data_uncomputable FROM frame").fetchone()
+    assert row["sha1_data"] == hashlib.sha1(f.read_bytes()).hexdigest()
+    assert row["sha1_data_uncomputable"] == 1
+    con.close()
+
+
+def test_scan_tree_kopia_fakty_na_location(tmp_path):
+    """Fakty kopii (file_sha1/header_hash/hdu_index/compressed/size_bytes) lądują NA LOCATION."""
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    f = _light(tree / "l.fits", 1)
+    scan_tree(con, tree, volume="VOL1", now=NOW)
+    rec = scan_file(str(f))
+    loc = con.execute("SELECT file_sha1, header_hash, hdu_index, compressed, size_bytes "
+                      "FROM location").fetchone()
+    assert (loc["file_sha1"], loc["header_hash"]) == (rec.file_sha1, rec.header_hash)
+    assert (loc["hdu_index"], loc["compressed"], loc["size_bytes"]) == (0, 0, rec.size_bytes)
+    con.close()
+
+
+def test_scan_tree_mtime_refresh_dlug_domkniety(tmp_path):
+    """Dług mtime DOMKNIĘTY (§2/R2#7): touch pliku (treść ta sama) → re-odczyt aktualizuje
+    location.mtime (location.refreshed), więc TRZECI skan z bramą już go pomija."""
+    import os
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    f = _light(tree / "l.fits", 1)
+    scan_tree(con, tree, volume="VOL1", now=NOW)
+    st = f.stat()
+    os.utime(f, (st.st_atime, st.st_mtime + 100))
+    s2 = scan_tree(con, tree, volume="VOL1", now=NOW)
+    assert (s2.skipped, s2.frames_existing, s2.locations_refreshed) == (0, 1, 1)
+    assert con.execute("SELECT count(*) FROM event WHERE verb='location.refreshed'").fetchone()[0] == 1
+    s3 = scan_tree(con, tree, volume="VOL1", now=NOW)          # mtime w bazie świeży → brama trafia
+    assert (s3.skipped, s3.frames_existing) == (1, 0)
+    con.close()
+
+
+def test_scan_tree_writeback_odswieza_zeznanie(tmp_path):
+    """SEDNO §2 (writeback fitsmirror): te same PIKSELE pod nowym nagłówkiem w tej samej ścieżce
+    → sha1_data BEZ zmian (jeden frame), header_hash zmieniony → zeznanie ODŚWIEŻONE
+    (raw_json/pola gorące/cards last-read-wins) + pochodne frame'a przeliczone; fakty kopii
+    (file_sha1/size) zaktualizowane."""
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    data = np.arange(64, dtype=np.uint16).reshape(8, 8)
+    f = tree / "l.fits"
+    _write_fits(f, cards=[("INSTRUME", "ZWO ASI2600MM Pro"), ("XPIXSZ", 3.76),
+                          ("IMAGETYP", "LIGHT"), ("OBJECT", "M31")], data=data)
+    scan_tree(con, tree, volume="VOL1", now=NOW)
+    f.unlink()                                                  # "writeback": nowy nagłówek, te same dane
+    _write_fits(f, cards=[("INSTRUME", "ZWO ASI2600MM Pro"), ("XPIXSZ", 3.76),
+                          ("IMAGETYP", "LIGHT"), ("OBJECT", "M33"), ("FILTER", "Ha")], data=data)
+    import os
+    st = f.stat()
+    os.utime(f, (st.st_atime, st.st_mtime + 100))               # pewna zmiana mtime (brama musi pudłować)
+    s2 = scan_tree(con, tree, volume="VOL1", now=NOW)
+    assert (s2.frames_new, s2.frames_existing) == (0, 1)        # tożsamość przeżyła edycję nagłówka
+    assert (s2.locations_refreshed, s2.headers_refreshed, s2.locations_rebound) == (1, 1, 0)
+    assert con.execute("SELECT count(*) FROM frame").fetchone()[0] == 1
+    h = con.execute("SELECT object_raw, filter_raw FROM header").fetchone()
+    assert (h["object_raw"], h["filter_raw"]) == ("M33", "Ha")  # last-read-wins
+    assert con.execute("SELECT value_raw FROM cards WHERE keyword='OBJECT'").fetchone()[0] == "M33"
+    assert con.execute("SELECT count(*) FROM event WHERE verb='header.refreshed'").fetchone()[0] == 1
+    con.close()
+
+
+def test_scan_tree_podmiana_tresci_rebound(tmp_path):
+    """PODMIANA TREŚCI pod znaną ścieżką (§2/R3-b1 — WBPP re-generuje master pod tą samą nazwą):
+    nowa tożsamość → nowy frame + location PRZEPIĘTA (location.rebound); stary frame ZOSTAJE
+    (append-only), bez lokacji."""
+    import os
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    f = _light(tree / "master.fits", 1)
+    scan_tree(con, tree, volume="VOL1", now=NOW)
+    old_frame = con.execute("SELECT id FROM frame").fetchone()[0]
+    f.unlink()
+    _light(tree / "master.fits", 2)                             # inna treść pod tą samą nazwą
+    st = f.stat()
+    os.utime(f, (st.st_atime, st.st_mtime + 100))
+    s2 = scan_tree(con, tree, volume="VOL1", now=NOW)
+    assert (s2.frames_new, s2.locations_rebound) == (1, 1)
+    assert con.execute("SELECT count(*) FROM frame").fetchone()[0] == 2      # stary żyje
+    assert con.execute("SELECT count(*) FROM location").fetchone()[0] == 1   # jedna ścieżka
+    new_frame = con.execute("SELECT frame_id FROM location").fetchone()[0]
+    assert new_frame != old_frame
+    assert con.execute("SELECT count(*) FROM location WHERE frame_id=?",
+                       (old_frame,)).fetchone()[0] == 0                      # sierota do passa zniknięć
+    assert con.execute("SELECT count(*) FROM event WHERE verb='location.rebound'").fetchone()[0] == 1
+    assert con.execute("SELECT count(*) FROM header").fetchone()[0] == 2     # nowy frame ma zeznanie
+    con.close()
+
+
+def test_ingest_znana_sciezka_nieczytelna_bajty_bez_zmian(tmp_path):
+    """R3-b1: kopia, która BYŁA czytelna, teraz nieczytelna (transient NAS) przy NIEZMIENIONYCH
+    bajtach → tylko refresh mtime + frame.review „kopia nieczytelna"; ZERO nowych frame'ów
+    (degeneracja legalna wyłącznie dla ścieżki nieznanej)."""
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    f = _light(tree / "l.fits", 1)
+    scan_tree(con, tree, volume="VOL1", now=NOW)
+    good = scan_file(str(f))
+    bad = ScanRecord(path=good.path, size_bytes=good.size_bytes, mtime="2027-01-01T00:00:00+00:00",
+                     header=None, error="OSError: NAS timeout", file_sha1=good.file_sha1)
+    s = ScanSummary()
+    ingest_record(con, bad, volume="VOL1", now=NOW, summary=s)
+    assert (s.frames_new, s.frames_existing, s.frame_review) == (0, 1, 1)
+    assert con.execute("SELECT count(*) FROM frame").fetchone()[0] == 1
+    assert con.execute("SELECT mtime FROM location").fetchone()[0] == "2027-01-01T00:00:00+00:00"
+    ev = con.execute("SELECT reason FROM event WHERE verb='frame.review'").fetchone()
+    assert "kopia nieczytelna" in ev["reason"]
     con.close()

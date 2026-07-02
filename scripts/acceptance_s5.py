@@ -1,5 +1,10 @@
 """Kryteria akceptacji §5 (PLAN_horreum_schema.md) — read-only walidacja realnego pipeline'u.
 
+>>> JAWNIE NIEOPERACYJNY do PF-5 (brief/PLAN_przejscie_fits.md §5) <<<
+PF-2 zmienił model danych (tożsamość = sha1_data, baseline custos.db OUT) — stare liczby EXP_*
+i replay z custos.db są NIEWAŻNE. PF-5 przepisze skrypt na baseline = dawca (fitsmirror.db).
+Do tego czasu skrypt odmawia startu (nie jest bramką pośrednią PF-2..PF-4).
+
 NIE test pytest (zależy od zewnętrznego źródła = custos.db, którego clean-clone NIE ma → nie wolno
 go zbierać, inaczej padłaby bramka clone'a §5.11). To CLI uruchamiane na żądanie, parametryzowane
 (zero prywatnych ścieżek w kodzie).
@@ -265,6 +270,11 @@ def main(argv=None):
             sys.stdout.reconfigure(encoding="utf-8")
         except Exception:
             pass
+    # PF-2: model danych zmieniony (sha1_data, custos-baseline OUT) — skrypt czeka na re-baseline
+    # PF-5 (baseline = dawca fitsmirror.db). Jawna odmowa zamiast po cichu falszywych liczb.
+    print("acceptance_s5: NIEOPERACYJNY do PF-5 (przejscie fitsmirror, brief par. 5) — "
+          "re-baseline na dawcy fitsmirror.db nastapi w PF-5.")
+    return 2
     ap = argparse.ArgumentParser(description="Kryteria akceptacji §5 (read-only, hybryda replay+subset)")
     ap.add_argument("--custos", required=True, help="ścieżka custos.db (źródło, otwierane read-only)")
     ap.add_argument("--subset", default=None,

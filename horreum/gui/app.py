@@ -28,8 +28,9 @@ from horreum import db, repo
 from horreum.gui import queries
 
 # Kolumny listy głównej — indeksy nazwane (czytelne handlery zamiast magicznych liczb).
-COL_ID, COL_LABEL, COL_STATUS, COL_FRATIO, COL_FOCAL, COL_FRAMES = range(6)
-HEADERS = ["ID", "Etykieta", "Status", "f/", "Ogniskowa", "Klatki"]
+# Nagłówek = telescop_canon (tożsamość osi po przejściu fitsmirror); Etykieta = nazwa usera.
+COL_ID, COL_CANON, COL_LABEL, COL_STATUS, COL_FRATIO, COL_FOCAL, COL_FRAMES = range(7)
+HEADERS = ["ID", "Nagłówek", "Etykieta", "Status", "f/", "Ogniskowa", "Klatki"]
 
 
 def _fmt(v):
@@ -129,6 +130,7 @@ class TelescopeAxisView(QWidget):
             target_row = -1
             for r, row in enumerate(rows):
                 self._set_cell(r, COL_ID, str(row["id"]), data=row["id"])
+                self._set_cell(r, COL_CANON, row["telescop_canon"])
                 self._set_cell(r, COL_LABEL, row["label"] or "", editable=True)
                 self._set_cell(r, COL_STATUS, row["status"])
                 self._set_cell(r, COL_FRATIO, _fmt(row["f_ratio_nominal"]))
@@ -180,7 +182,8 @@ class TelescopeAxisView(QWidget):
         self.members.clear()
         members = queries.merged_under(self.con, tid) if tid is not None else []
         for m in members:
-            it = QListWidgetItem(f'#{m["id"]}  {m["label"] or "(bez etykiety)"}  ·  {m["status"]}')
+            it = QListWidgetItem(
+                f'#{m["id"]}  {m["label"] or m["telescop_canon"]}  ·  {m["status"]}')
             it.setData(Qt.UserRole, m["id"])
             self.members.addItem(it)
 
@@ -197,7 +200,8 @@ class TelescopeAxisView(QWidget):
         self.combo_target.addItem("— wybierz cel —", None)
         for t in queries.active_telescopes(self.con):
             if t["id"] != tid:                # cel ≠ źródło → self-merge strukturalnie niemożliwy
-                self.combo_target.addItem(f'#{t["id"]}  {t["label"] or "(bez etykiety)"}', t["id"])
+                self.combo_target.addItem(
+                    f'#{t["id"]}  {t["label"] or t["telescop_canon"]}', t["id"])
         self.combo_target.setCurrentIndex(0)  # placeholder — użytkownik musi wybrać cel świadomie
         self.combo_target.blockSignals(False)
 
@@ -296,25 +300,20 @@ OBJ_COL_CANON, OBJ_COL_CATALOG, OBJ_COL_FRAMES = range(3)
 OBJ_HEADERS = ["Obiekt", "Katalog", "Klatki"]
 FRAME_COL_SHA, FRAME_COL_TEL, FRAME_COL_CAM, FRAME_COL_FILTER, FRAME_COL_DATE, FRAME_COL_PRESENT, \
     FRAME_COL_PATH = range(7)
-FRAME_HEADERS = ["sha1", "Teleskop", "Kamera", "Filtr", "Data", "Obecny", "Ścieżka"]
+FRAME_HEADERS = ["sha1 danych", "Teleskop", "Kamera", "Filtr", "Data", "Obecny", "Ścieżka"]
 
 
 def _tel_facet_label(row):
-    """Etykieta teleskopu do comba filtra: nazwa usera, a gdy brak (proposed) — sygnatura f//ogniskowa."""
-    if row["label"]:
-        return row["label"]
-    return f'f/{_fmt(row["f_ratio_nominal"])} · {_fmt(row["focal_nominal"])} mm'
+    """Etykieta teleskopu do comba filtra: nazwa usera, a gdy brak (proposed) — `telescop_canon`
+    (nazwa z nagłówka — po przejściu fitsmirror zawsze obecna i user-czytelna)."""
+    return row["label"] or row["telescop_canon"]
 
 
 def _tel_cell(row):
-    """Etykieta teleskopu w tabeli klatek (wizytator P1 #1): nazwa usera, a gdy brak (teleskop jeszcze
-    nienazwany — realny przypadek: cała oś `proposed`) — sygnatura `f//ogniskowa` jak w combie, by
+    """Etykieta teleskopu w tabeli klatek (wizytator P1 #1): nazwa usera, a gdy brak (teleskop
+    jeszcze nienazwany — realny przypadek: cała oś `proposed`) — `telescop_canon` z nagłówka, by
     kolumna NIE milczała. Klatka bez teleskopu (config NULL) → '' (brak osi, nie brak danych)."""
-    if row["telescope_label"]:
-        return row["telescope_label"]
-    if row["f_ratio_nominal"] is None:
-        return ""
-    return f'f/{_fmt(row["f_ratio_nominal"])} · {_fmt(row["focal_nominal"])} mm'
+    return row["telescope_label"] or row["telescop_canon"] or ""
 
 
 class ObjectAxisView(QWidget):
@@ -533,7 +532,7 @@ class ObjectAxisView(QWidget):
         self.frames.setRowCount(len(rows))
         for r, row in enumerate(rows):
             keys = row.keys()
-            self._set_frame_cell(r, FRAME_COL_SHA, (row["sha1"] or "")[:12])
+            self._set_frame_cell(r, FRAME_COL_SHA, (row["sha1_data"] or "")[:12])
             self._set_frame_cell(r, FRAME_COL_TEL, _tel_cell(row))
             self._set_frame_cell(r, FRAME_COL_CAM, row["camera_model"] or "")
             self._set_frame_cell(r, FRAME_COL_FILTER, row["filter_canon"] if "filter_canon" in keys else "")

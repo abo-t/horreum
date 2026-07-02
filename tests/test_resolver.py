@@ -13,8 +13,10 @@ from horreum.scan import scan_tree
 NOW = "2026-06-28T12:00:00"
 
 
-def _fits(path, cards):
-    hdu = fits.PrimaryHDU(data=np.zeros((4, 4), np.uint16))
+def _fits(path, cards, n=0):
+    """`n` różnicuje PIKSELE — po PF-2 tożsamość = sha1_data, więc identyczne dane zlałyby
+    osobne klatki w jeden frame (multi-location)."""
+    hdu = fits.PrimaryHDU(data=np.full((4, 4), n, np.uint16))
     for kw, val in cards:
         hdu.header[kw] = val
     fits.HDUList([hdu]).writeto(str(path))
@@ -27,11 +29,11 @@ def _scanned_tree(tmp_path):
     con = db.open_db(str(tmp_path / "h.db"))
     tree = tmp_path / "t"; tree.mkdir()
     cam = [("INSTRUME", "ZWO ASI2600MM Pro"), ("XPIXSZ", 3.76)]
-    _fits(tree / "l1.fits", cam + [("IMAGETYP", "LIGHT"), ("OBJECT", "NGC 4258"), ("FILTER", "Ha")])
-    _fits(tree / "l2.fits", cam + [("IMAGETYP", "LIGHT"), ("OBJECT", "M106"), ("FILTER", "Ha")])
-    _fits(tree / "l3.fits", cam + [("IMAGETYP", "LIGHT"), ("OBJECT", "Rosette Nebula"), ("FILTER", "OIII")])
-    _fits(tree / "l4.fits", cam + [("IMAGETYP", "LIGHT"), ("OBJECT", "Snapshot"), ("FILTER", "L")])
-    _fits(tree / "flat.fits", cam + [("IMAGETYP", "FLAT"), ("OBJECT", "FlatWizard"), ("FILTER", "Ha")])
+    _fits(tree / "l1.fits", cam + [("IMAGETYP", "LIGHT"), ("OBJECT", "NGC 4258"), ("FILTER", "Ha")], n=1)
+    _fits(tree / "l2.fits", cam + [("IMAGETYP", "LIGHT"), ("OBJECT", "M106"), ("FILTER", "Ha")], n=2)
+    _fits(tree / "l3.fits", cam + [("IMAGETYP", "LIGHT"), ("OBJECT", "Rosette Nebula"), ("FILTER", "OIII")], n=3)
+    _fits(tree / "l4.fits", cam + [("IMAGETYP", "LIGHT"), ("OBJECT", "Snapshot"), ("FILTER", "L")], n=4)
+    _fits(tree / "flat.fits", cam + [("IMAGETYP", "FLAT"), ("OBJECT", "FlatWizard"), ("FILTER", "Ha")], n=5)
     scan_tree(con, tree, now=NOW)
     return con
 

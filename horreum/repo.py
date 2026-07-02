@@ -47,64 +47,107 @@ def emit_event(con, *, actor, verb, target, now, payload=None, reason=None):
 
 def upsert_camera(con, *, model_canon, pixel_um, is_mono, is_mono_source,
                   raw_instrume, now, actor="scan"):
-    """Wyłoń kamerę (oś) ze skanu. Tożsamość = (model_canon, pixel_um) — UNIQUE.
+    """Wyłoń kamerę (oś) ze skanu. Tożsamość = `model_canon` (UNIQUE); `pixel_um` to NULLABLE
+    WŁAŚCIWOŚĆ (brief §3/R1#3 — po naprawie nagłówków model rozstrzyga tożsamość, piksel bywa
+    nieobecny, np. Sony masterflat bez XPIXSZ).
 
-    Istnieje → zwróć (id, False), bez eventu (brak zmiany stanu). Nowa → INSERT + emisja
-    `camera.upserted` W TEJ SAMEJ TRANSAKCJI; zwróć (id, True). Encje kamer wyłaniają się
-    ze skanu (PLAN §3.6), nie są wymyślane a priori.
+    Nowa → INSERT + `camera.upserted` w tej samej transakcji; (id, True). Istnieje → (id, False),
+    a piksel jest UZUPEŁNIANY/PILNOWANY (R2#4 + R3-c1):
+      - wiersz ma `pixel_um IS NULL`, przyszła wartość → **CAS jednym statementem**
+        (`UPDATE ... WHERE id=? AND pixel_um IS NULL`) + `event(camera.pixel_set)`; rowcount=0
+        (równoległy writer wygrał — WAL sankcjonuje GUI+CLI naraz) → re-SELECT i gałąź konfliktu;
+      - wiersz ma INNĄ wartość → **STAN `pixel_conflict=1`** (kolejka ze stanu, rama §0) +
+        `event(camera.pixel_conflict)` (osobny verb, target `camera:` — R3-c3); przejście stanu
+        emitowane RAZ (gating na rowcount). Zdjęcie konfliktu = przyszłe `resolve_camera_pixel` (§7).
     """
     row = con.execute(
-        "SELECT id FROM camera WHERE model_canon = ? AND pixel_um = ?",
-        (model_canon, pixel_um),
-    ).fetchone()
-    if row is not None:
-        return row[0], False
+        "SELECT id, pixel_um FROM camera WHERE model_canon = ?", (model_canon,)).fetchone()
+    if row is None:
+        with con:  # atomowo: INSERT camera + INSERT event (albo żadne — rollback)
+            cur = con.execute(
+                "INSERT INTO camera(model_canon, pixel_um, is_mono, is_mono_source, "
+                "raw_instrume, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (model_canon, pixel_um, is_mono, is_mono_source, raw_instrume, now),
+            )
+            camera_id = cur.lastrowid
+            emit_event(
+                con, actor=actor, verb="camera.upserted", target=f"camera:{camera_id}",
+                now=now,
+                payload={"model_canon": model_canon, "pixel_um": pixel_um,
+                         "is_mono": is_mono, "is_mono_source": is_mono_source},
+            )
+        return camera_id, True
 
-    with con:  # atomowo: INSERT camera + INSERT event (albo żadne — rollback)
+    camera_id, existing_px = row["id"], row["pixel_um"]
+    if pixel_um is None or existing_px == pixel_um:
+        return camera_id, False                       # nic do uzupełnienia / zgodne — no-op
+
+    if existing_px is None:
+        with con:  # CAS: uzupełnij TYLKO gdy wciąż NULL (bez lost-update między writerami)
+            cur = con.execute(
+                "UPDATE camera SET pixel_um = ? WHERE id = ? AND pixel_um IS NULL",
+                (pixel_um, camera_id))
+            if cur.rowcount:
+                emit_event(con, actor=actor, verb="camera.pixel_set",
+                           target=f"camera:{camera_id}", now=now,
+                           payload={"pixel_um": pixel_um})
+        if cur.rowcount:
+            return camera_id, False
+        existing_px = con.execute(                    # CAS przegrany — kto był szybszy?
+            "SELECT pixel_um FROM camera WHERE id = ?", (camera_id,)).fetchone()[0]
+        if existing_px == pixel_um:
+            return camera_id, False                   # równoległy writer wpisał to samo
+
+    with con:  # rozjazd wartości → STAN pixel_conflict (event raz, na przejściu 0→1)
         cur = con.execute(
-            "INSERT INTO camera(model_canon, pixel_um, is_mono, is_mono_source, "
-            "raw_instrume, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (model_canon, pixel_um, is_mono, is_mono_source, raw_instrume, now),
-        )
-        camera_id = cur.lastrowid
-        emit_event(
-            con, actor=actor, verb="camera.upserted", target=f"camera:{camera_id}",
-            now=now,
-            payload={"model_canon": model_canon, "pixel_um": pixel_um,
-                     "is_mono": is_mono, "is_mono_source": is_mono_source},
-        )
-    return camera_id, True
+            "UPDATE camera SET pixel_conflict = 1 WHERE id = ? AND pixel_conflict = 0",
+            (camera_id,))
+        if cur.rowcount:
+            emit_event(con, actor=actor, verb="camera.pixel_conflict",
+                       target=f"camera:{camera_id}", now=now,
+                       payload={"pixel_existing": existing_px, "pixel_new": pixel_um})
+    return camera_id, False
 
 
-def upsert_frame(con, *, sha1, kind, filetype, size_bytes, camera_id, now, actor="scan"):
-    """Wyłoń frame po `sha1` (tożsamość pliku, przeżywa rename/move). Istnieje → zwróć (id, False)
-    BEZ zmiany tożsamości — drugie wystąpienie tego samego sha1 to nowa LOKALIZACJA (`add_location`),
-    nie nowy frame. Nowy → INSERT frame + `event(frame.observed)` w tej samej transakcji; (id, True).
-    `camera_id` może być None (oś nierozstrzygnięta → `flag_camera_review` w warstwie skanu)."""
-    row = con.execute("SELECT id FROM frame WHERE sha1 = ?", (sha1,)).fetchone()
+def upsert_frame(con, *, sha1_data, sha1_data_uncomputable=0, kind, filetype, camera_id,
+                 now, actor="scan"):
+    """Wyłoń frame po `sha1_data` (tożsamość = odcisk sekcji DANYCH — przeżywa edycję nagłówka/
+    rename/move/writeback; brief §2). Istnieje → zwróć (id, False) BEZ zmiany tożsamości — drugie
+    wystąpienie to nowa LOKALIZACJA (`add_location`), nie nowy frame. Nowy → INSERT frame +
+    `event(frame.observed)` w tej samej transakcji; (id, True).
+
+    `sha1_data_uncomputable=1` = degeneracja: odcisk danych nieobliczalny, `sha1_data` niesie
+    sha1 CAŁEGO pliku (lekcja v3 dawcy) — legalne WYŁĄCZNIE dla ścieżki nieznanej (R3-b1).
+    `camera_id` może być None (oś nierozstrzygnięta → `flag_camera_review` w warstwie skanu).
+    Fakty kopii (rozmiar, hashe pliku) mieszkają na location, nie tu (R2#6)."""
+    row = con.execute("SELECT id FROM frame WHERE sha1_data = ?", (sha1_data,)).fetchone()
     if row is not None:
         return row[0], False
 
     with con:  # atomowo: INSERT frame + INSERT event
         cur = con.execute(
-            "INSERT INTO frame(sha1, kind, filetype, size_bytes, camera_id, first_seen_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (sha1, kind, filetype, size_bytes, camera_id, now),
+            "INSERT INTO frame(sha1_data, sha1_data_uncomputable, kind, filetype, camera_id, "
+            "first_seen_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (sha1_data, sha1_data_uncomputable, kind, filetype, camera_id, now),
         )
         frame_id = cur.lastrowid
         emit_event(
             con, actor=actor, verb="frame.observed", target=f"frame:{frame_id}", now=now,
-            payload={"sha1": sha1, "kind": kind, "filetype": filetype, "camera_id": camera_id},
+            payload={"sha1_data": sha1_data, "uncomputable": sha1_data_uncomputable,
+                     "kind": kind, "filetype": filetype, "camera_id": camera_id},
         )
     return frame_id, True
 
 
 def add_location(con, *, frame_id, volume, path, drive_letter=None, tier=None, mtime=None,
-                 now, actor="scan"):
-    """Dołóż lokalizację frame'a po `UNIQUE(volume, path)`. Już znana → (id, False) bez eventu
-    (idempotencja skanu). Nowa → INSERT + `event(location.added)`; (id, True). `volume` = trwały
-    identyfikator wolumenu; gdy niedostępny, woła się z placeholderem ('?') — NIE blokuje skanu
-    (to nie tożsamość frame'a, §7.5). `drive_letter` to efemeryczny cache wyświetlania."""
+                 file_sha1=None, header_hash=None, hdu_index=None, compressed=None,
+                 size_bytes=None, now, actor="scan"):
+    """Dołóż lokalizację frame'a po `UNIQUE(volume, path)` wraz z faktami KOPII (file_sha1/
+    header_hash/hdu_index/compressed/size_bytes — brief §2; NULL-e dla XISF/W1). Już znana →
+    (id, False) bez eventu i BEZ dotykania faktów (odświeżenie = `refresh_location`, osobny
+    kontrakt). Nowa → INSERT + `event(location.added)`; (id, True). `volume` = trwały
+    identyfikator wolumenu; placeholder '?' NIE blokuje skanu (to nie tożsamość frame'a, §7.5).
+    `drive_letter` to efemeryczny cache wyświetlania."""
     row = con.execute(
         "SELECT id FROM location WHERE volume = ? AND path = ?", (volume, path)).fetchone()
     if row is not None:
@@ -113,8 +156,10 @@ def add_location(con, *, frame_id, volume, path, drive_letter=None, tier=None, m
     with con:  # atomowo: INSERT location + INSERT event
         cur = con.execute(
             "INSERT INTO location(frame_id, volume, drive_letter, path, tier, mtime, "
-            "last_verified_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (frame_id, volume, drive_letter, path, tier, mtime, now),
+            "file_sha1, header_hash, hdu_index, compressed, size_bytes, last_verified_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (frame_id, volume, drive_letter, path, tier, mtime,
+             file_sha1, header_hash, hdu_index, compressed, size_bytes, now),
         )
         location_id = cur.lastrowid
         emit_event(
@@ -124,26 +169,166 @@ def add_location(con, *, frame_id, volume, path, drive_letter=None, tier=None, m
     return location_id, True
 
 
-def record_header(con, *, frame_id, raw_json, now, actor="scan",
+# Kolumny-fakty kopii na location — wspólna lista dla diffu w `refresh_location`.
+_LOCATION_FACTS = ("mtime", "file_sha1", "header_hash", "hdu_index", "compressed", "size_bytes")
+
+
+def rebind_location(con, *, location_id, frame_after, now, actor="scan"):
+    """PODMIANA TREŚCI pod znaną ścieżką (R3-b1): przepnij `location.frame_id` na nową tożsamość
+    + `event(location.rebound)` `{frame_before, frame_after}`. Stary frame ZOSTAJE (append-only,
+    historia w eventach) — bez lokacji podchwyci go przyszły pass zniknięć. Już przepięta → False
+    (idempotencja). Guard+UPDATE w `_immediate` (TOCTOU wobec równoległego writera)."""
+    with _immediate(con):
+        row = con.execute(
+            "SELECT frame_id FROM location WHERE id = ?", (location_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"location:{location_id} nie istnieje")
+        frame_before = row["frame_id"]
+        if frame_before == frame_after:
+            return False
+        con.execute("UPDATE location SET frame_id = ? WHERE id = ?", (frame_after, location_id))
+        emit_event(con, actor=actor, verb="location.rebound", target=f"location:{location_id}",
+                   now=now, payload={"frame_before": frame_before, "frame_after": frame_after})
+    return True
+
+
+def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_hash,
+                     hdu_index, compressed, size_bytes, now, actor="scan",
+                     raw_json=None, cards=None, hot_fields=None, camera_id=None, kind=None):
+    """Re-odczyt ZNANEJ `(volume, path)` o NIEZMIENIONEJ tożsamości frame'a — kontrakt pełny
+    brief §2 (R1#10 + R2#2/#7 + R3-b), domyka dług „mtime po re-odczycie nieaktualizowany":
+
+    - fakty kopii bez zmian → False-owy wynik, ZERO eventów (idempotentny re-skan);
+    - zmiana faktów → UPDATE + JEDEN `event(location.refreshed)` z `{before, after}` pól zmienionych;
+    - **zmiana `header_hash` ⇒ ODŚWIEŻENIE ZEZNANIA** (writeback fitsmirror — R2#2): pełny
+      re-record `header` (raw_json + WSZYSTKIE pola gorące) + WYMIANA `cards` (R3-b4) + JEDEN
+      `event(header.refreshed)` `{header_hash_before, header_hash_after}`; w TEJ SAMEJ transakcji
+      przeliczenie pochodnych frame'a (R3-b2): `frame.camera_id`/`kind` z nowego zeznania →
+      UPDATE + `event(frame.rederived)` (inaczej config budowany na stęchłej kamerze).
+      Zeznanie odświeża OSTATNI re-odczyt (last-read-wins).
+
+    `hot_fields` = dict kolumn `header` (jak `extract_header`); `camera_id`/`kind` = pochodne
+    POLICZONE przez wołającego z nowego dictu (emergencja kamery = osobny, idempotentny
+    `upsert_camera` przed wołaniem). Zwraca dict
+    `{"facts": bool, "header": bool, "rederived": bool}`. Wymiana `cards` (DELETE+INSERT) to
+    jedyna sankcjonowana kasacja: cards są LUSTREM bieżącego zeznania, nie historią —
+    historia mieszka w `event`."""
+    after = {"mtime": mtime, "file_sha1": file_sha1, "header_hash": header_hash,
+             "hdu_index": hdu_index, "compressed": compressed, "size_bytes": size_bytes}
+    result = {"facts": False, "header": False, "rederived": False}
+    with _immediate(con):
+        row = con.execute(
+            "SELECT mtime, file_sha1, header_hash, hdu_index, compressed, size_bytes "
+            "FROM location WHERE id = ?", (location_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"location:{location_id} nie istnieje")
+        changed = {k: {"before": row[k], "after": after[k]}
+                   for k in _LOCATION_FACTS if row[k] != after[k]}
+        if not changed:
+            return result
+        con.execute(
+            "UPDATE location SET mtime = ?, file_sha1 = ?, header_hash = ?, hdu_index = ?, "
+            "compressed = ?, size_bytes = ?, last_verified_at = ? WHERE id = ?",
+            (mtime, file_sha1, header_hash, hdu_index, compressed, size_bytes, now, location_id))
+        emit_event(con, actor=actor, verb="location.refreshed",
+                   target=f"location:{location_id}", now=now, payload=changed)
+        result["facts"] = True
+
+        if "header_hash" not in changed or raw_json is None:
+            return result
+        hot = dict(hot_fields or {})
+        g = hot.get
+        cur = con.execute(
+            "UPDATE header SET raw_json = ?, date_obs = ?, exptime = ?, filter_raw = ?, "
+            "instrume = ?, telescop = ?, focallen = ?, focratio_raw = ?, xpixsz = ?, ypixsz = ?, "
+            "gain = ?, offset_adu = ?, ccd_temp = ?, usblimit = ?, xbinning = ?, ybinning = ?, "
+            "bayerpat = ?, ra_deg = ?, dec_deg = ?, object_raw = ? WHERE frame_id = ?",
+            (raw_json, g("date_obs"), g("exptime"), g("filter_raw"), g("instrume"),
+             g("telescop"), g("focallen"), g("focratio_raw"), g("xpixsz"), g("ypixsz"),
+             g("gain"), g("offset_adu"), g("ccd_temp"), g("usblimit"), g("xbinning"),
+             g("ybinning"), g("bayerpat"), g("ra_deg"), g("dec_deg"), g("object_raw"),
+             frame_id))
+        if cur.rowcount == 0:                         # frame bez zeznania (brzeg) → INSERT
+            con.execute(
+                "INSERT INTO header(frame_id, raw_json, date_obs, exptime, filter_raw, "
+                "instrume, telescop, focallen, focratio_raw, xpixsz, ypixsz, gain, offset_adu, "
+                "ccd_temp, usblimit, xbinning, ybinning, bayerpat, ra_deg, dec_deg, object_raw) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (frame_id, raw_json, g("date_obs"), g("exptime"), g("filter_raw"), g("instrume"),
+                 g("telescop"), g("focallen"), g("focratio_raw"), g("xpixsz"), g("ypixsz"),
+                 g("gain"), g("offset_adu"), g("ccd_temp"), g("usblimit"), g("xbinning"),
+                 g("ybinning"), g("bayerpat"), g("ra_deg"), g("dec_deg"), g("object_raw")))
+        con.execute("DELETE FROM cards WHERE frame_id = ?", (frame_id,))
+        if cards:
+            _insert_cards(con, frame_id, cards)
+        emit_event(con, actor=actor, verb="header.refreshed", target=f"frame:{frame_id}",
+                   now=now, payload={"header_hash_before": row["header_hash"],
+                                     "header_hash_after": header_hash})
+        result["header"] = True
+
+        fr = con.execute("SELECT camera_id, kind FROM frame WHERE id = ?", (frame_id,)).fetchone()
+        if (fr["camera_id"], fr["kind"]) != (camera_id, kind):
+            con.execute("UPDATE frame SET camera_id = ?, kind = ? WHERE id = ?",
+                        (camera_id, kind, frame_id))
+            emit_event(con, actor=actor, verb="frame.rederived", target=f"frame:{frame_id}",
+                       now=now,
+                       payload={"before": {"camera_id": fr["camera_id"], "kind": fr["kind"]},
+                                "after": {"camera_id": camera_id, "kind": kind}})
+            result["rederived"] = True
+    return result
+
+
+def refresh_location_unreadable(con, *, location_id, sha1_data, path, mtime, reason,
+                                now, actor="scan"):
+    """Znana ścieżka, plik NIECZYTELNY, bajty NIEZMIENIONE (R3-b1): tylko refresh mtime +
+    `event(frame.review, „kopia nieczytelna")` — ZERO nowych frame'ów (transient NAS; degeneracja
+    tożsamości legalna wyłącznie dla ścieżki NIEZNANEJ). Target `sha1:` po tożsamości frame'a
+    lokacji (kotwica joinowalna)."""
+    with _immediate(con):
+        row = con.execute("SELECT mtime FROM location WHERE id = ?", (location_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"location:{location_id} nie istnieje")
+        if row["mtime"] != mtime:
+            con.execute("UPDATE location SET mtime = ?, last_verified_at = ? WHERE id = ?",
+                        (mtime, now, location_id))
+        emit_event(con, actor=actor, verb="frame.review", target=f"sha1:{sha1_data}", now=now,
+                   reason=f"kopia nieczytelna: {reason}", payload={"path": path})
+
+
+def _insert_cards(con, frame_id, cards):
+    """Wstaw lustro kart nagłówka (`executemany`, wewnątrz transakcji wołającego). `cards` =
+    iterowalne obiektów z polami keyword/idx/value_raw/value_num/value_type/comment
+    (`scan.Card` albo równoważne krotki nazwane importu). Wołane WYŁĄCZNIE z tego modułu."""
+    con.executemany(
+        "INSERT INTO cards(frame_id, keyword, idx, value_raw, value_num, value_type, comment) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [(frame_id, c.keyword, c.idx, c.value_raw, c.value_num, c.value_type, c.comment)
+         for c in cards])
+
+
+def record_header(con, *, frame_id, raw_json, now, actor="scan", cards=None,
                   date_obs=None, exptime=None, filter_raw=None, instrume=None, telescop=None,
-                  focallen=None, focratio_raw=None, focratio_norm=None, focratio_norm_src=None,
+                  focallen=None, focratio_raw=None,
                   xpixsz=None, ypixsz=None, gain=None, offset_adu=None, ccd_temp=None,
                   usblimit=None, xbinning=None, ybinning=None, bayerpat=None,
                   ra_deg=None, dec_deg=None, object_raw=None):
     """Zapisz zeznanie nagłówka (1:1 z frame — `header.frame_id` PRIMARY KEY, więc RAZ na frame).
     `raw_json` = surowy nagłówek 1:1; pola gorące już zrzutowane na typy (`resolve.extract_header`,
-    W2/W3). INSERT header + `event(header.recorded)` w tej samej transakcji. `focratio_norm`/`src`
-    zwykle None tutaj — backfill grouper (§Etap 5)."""
-    with con:  # atomowo: INSERT header + INSERT event
+    W2/W3); `cards` = pełne lustro EAV nagłówka (None dla XISF do PF-4 / W1). INSERT header +
+    `executemany` cards + JEDEN `event(header.recorded)` W TEJ SAMEJ transakcji (brief §4.5 —
+    jedno zeznanie = header + cards + jeden event)."""
+    with con:  # atomowo: INSERT header + INSERT cards + INSERT event
         con.execute(
             "INSERT INTO header(frame_id, raw_json, date_obs, exptime, filter_raw, instrume, "
-            "telescop, focallen, focratio_raw, focratio_norm, focratio_norm_src, xpixsz, ypixsz, "
+            "telescop, focallen, focratio_raw, xpixsz, ypixsz, "
             "gain, offset_adu, ccd_temp, usblimit, xbinning, ybinning, bayerpat, ra_deg, dec_deg, "
-            "object_raw) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "object_raw) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (frame_id, raw_json, date_obs, exptime, filter_raw, instrume, telescop, focallen,
-             focratio_raw, focratio_norm, focratio_norm_src, xpixsz, ypixsz, gain, offset_adu,
+             focratio_raw, xpixsz, ypixsz, gain, offset_adu,
              ccd_temp, usblimit, xbinning, ybinning, bayerpat, ra_deg, dec_deg, object_raw),
         )
+        if cards:
+            _insert_cards(con, frame_id, cards)
         emit_event(con, actor=actor, verb="header.recorded", target=f"frame:{frame_id}", now=now)
 
 
@@ -176,56 +361,37 @@ def flag_kind_unmapped(con, *, frame_id, imagetyp, now, actor="scan"):
                    payload={"imagetyp": imagetyp})
 
 
-def backfill_focratio_norm(con, items, now, actor="grouper"):
-    """Backfill kolumny POCHODNEJ `header.focratio_norm`/`_src` PO skanie (§Etap 5) — osobna faza
-    UPDATE, NIE przez ścieżkę `record_header` (nie psuje zapisu skanu). `items` = lista
-    `(frame_id, focratio_norm, focratio_norm_src)`. Jedna transakcja + JEDEN event zbiorczy
-    `header.focratio_backfilled` (operacja masowa — bez zaśmiecania logu per-wiersz)."""
-    with con:
-        for frame_id, norm, src in items:
-            con.execute(
-                "UPDATE header SET focratio_norm = ?, focratio_norm_src = ? WHERE frame_id = ?",
-                (norm, src, frame_id),
-            )
-        review = sum(1 for _, norm, _ in items if norm is None)
-        emit_event(con, actor=actor, verb="header.focratio_backfilled", target="header:*", now=now,
-                   payload={"count": len(items), "review": review})
-
-
-def propose_telescope(con, *, f_ratio_nominal, focal_nominal, telescop_hint=None,
+def propose_telescope(con, *, telescop_canon, f_ratio_nominal=None, focal_nominal=None,
                       member_count=None, now, actor="grouper"):
-    """Wyłoń teleskop (oś) z klastra sygnatur — `status='proposed'`, `label=NULL` (etykieta/scalanie
-    = GUI usera, poza plastrem B). Idempotentny po centroidzie `(f_ratio_nominal, focal_nominal)`:
-    istnieje → (id, False) bez eventu; nowy → INSERT + `event(telescope.proposed)`."""
+    """Wyłoń teleskop (oś) z nagłówków — `status='proposed'`, `label=NULL` (etykieta/scalanie =
+    GUI usera). Tożsamość = `telescop_canon` (TELESCOP.strip(); po naprawie nagłówków 100%,
+    8 nazw × 1 ogniskowa — brief §3). Idempotentny po canonie: SELECT po kolumnie
+    `UNIQUE COLLATE NOCASE` — to JEDYNY mechanizm foldowania wielkości liter (R2#8; grouper NIE
+    folduje w Pythonie); casing wyświetlany = pierwszego wystąpienia. `f_ratio_nominal`/
+    `focal_nominal` to nullable WŁAŚCIWOŚCI (audyt/wyświetlanie), nie klucz. Istnieje →
+    (id, False) bez eventu; nowy → INSERT + `event(telescope.proposed)`."""
+    canon = str(telescop_canon).strip()
+    if not canon:
+        raise ValueError("telescop_canon pusty — brak TELESCOP to config.review, nie oś")
     row = con.execute(
-        "SELECT id FROM telescope WHERE f_ratio_nominal = ? AND focal_nominal = ?",
-        (f_ratio_nominal, focal_nominal),
-    ).fetchone()
+        "SELECT id FROM telescope WHERE telescop_canon = ?", (canon,)).fetchone()
     if row is not None:
         return row[0], False
 
     with con:
         cur = con.execute(
-            "INSERT INTO telescope(label, f_ratio_nominal, focal_nominal, status, telescop_hint, "
-            "created_at) VALUES (NULL, ?, ?, 'proposed', ?, ?)",
-            (f_ratio_nominal, focal_nominal, telescop_hint, now),
+            "INSERT INTO telescope(telescop_canon, label, f_ratio_nominal, focal_nominal, "
+            "status, created_at) VALUES (?, NULL, ?, ?, 'proposed', ?)",
+            (canon, f_ratio_nominal, focal_nominal, now),
         )
         telescope_id = cur.lastrowid
         emit_event(
             con, actor=actor, verb="telescope.proposed", target=f"telescope:{telescope_id}",
             now=now,
-            payload={"f_ratio_nominal": f_ratio_nominal, "focal_nominal": focal_nominal,
-                     "member_count": member_count},
+            payload={"telescop_canon": canon, "f_ratio_nominal": f_ratio_nominal,
+                     "focal_nominal": focal_nominal, "member_count": member_count},
         )
     return telescope_id, True
-
-
-def flag_telescope_review(con, *, telescope_id, reason, now, actor="grouper"):
-    """Klaster podejrzany (rozpiętość wewnętrzna > tolerancja — chaining single-linkage) →
-    `event(telescope.review)`. Teleskop powstaje (proposed), lecz oznaczony do przejrzenia."""
-    with con:
-        emit_event(con, actor=actor, verb="telescope.review", target=f"telescope:{telescope_id}",
-                   now=now, reason=reason)
 
 
 def propose_config(con, *, telescope_id, camera_id, now, actor="grouper"):

@@ -1,10 +1,11 @@
 """Skan drzewa FITS + XISF — primitivy read-only + pętla płaska skanu (PLAN §4; §Etap 1/§Etap 4).
 
 Per plik produkuje TOŻSAMOŚĆ + ZEZNANIE nagłówka, niczego nie zapisując:
-  - odciski (PF-1 przejścia fitsmirror, brief §2 — port z dawcy `fits_io.py`):
+  - odciski (przejście fitsmirror, brief §2 — port z dawcy `fits_io.py`):
       * `sha1_data` = sha1 sekcji DANYCH wybranego HDU (FITS) / bajtów attachmentu (XISF) —
-        przyszła tożsamość frame'a (PF-2): przeżywa edycję nagłówka/rename/move/writeback,
-      * `file_sha1` = sha1 całego pliku (fakt KOPII; do PF-2 pod starą nazwą pola `sha1` — R3-d1);
+        TOŻSAMOŚĆ frame'a (schemat v2): przeżywa edycję nagłówka/rename/move/writeback;
+        nieobliczalny → degeneracja (sha1 całego pliku + flaga `sha1_data_uncomputable`),
+      * `file_sha1` = sha1 całego pliku (fakt KOPII na location — detekcja zmiany bajtów);
         dla pliku nieskompresowanego OBA hasze liczone JEDNYM przebiegiem (`sha1_of_span` —
         pozycje sekcji z nagłówków przed odczytem treści),
       * `header_hash` = sha1 tekstu nagłówka (kontrola writeback/undo; NULL dla XISF),
@@ -32,13 +33,20 @@ danych) — więc na Windowsie nie zostaje uchwyt blokujący plik. `astropy` jes
 runtime Horreum (dochodzi z czytnikiem FITS); XISF korzysta wyłącznie ze stdlib.
 
 Miękkie lądowanie (W1): `read_*` MOGĄ rzucać dla pliku nieczytelnego/nierozpoznanego — łapie to
-`scan_file` (zwraca `ScanRecord(header=None, error=...)`, tożsamość `sha1` ZACHOWANA), nie pętla
-ani użytkownik. Nierozstrzygalność trafia do `event(*.review)` w warstwie upsertu (§Etap 4).
+`scan_file` (zwraca `ScanRecord(header=None, error=...)`, tożsamość degeneruje do `file_sha1`),
+nie pętla ani użytkownik. Nierozstrzygalność trafia do `event(*.review)` w warstwie upsertu.
+
+TOŻSAMOŚĆ ŚCIEŻEK = FORMA LITEROWA (brief §0, ŚWIĘTE od R2): ZAKAZ `os.path.realpath`/
+`Path.resolve` w torze tożsamości — na zamapowanym `R:` rozwiązują do UNC (`\\\\NAS\\...`), co
+rozdwaja lokacje przy tym samym `volume_serial`. Kanonizacja roota = jawna sekwencja
+`canonize_root` (R3-a1); guard UNC odmawia rootów `\\\\host\\share` (R3-a2).
 """
+import ctypes
 import hashlib
 import json
 import os
 import struct
+import sys
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -92,25 +100,24 @@ class ScanRecord:
     (krok §4.2) — sam w sobie nie jest zapisem domenowym.
 
     `header is None` + `error` ustawione = plik nieczytelny/nierozpoznany (miękkie lądowanie W1):
-    tożsamość (`sha1`) i namiary (`path`/`size`/`mtime`) są, lecz nagłówka/odcisków sekcji brak →
-    review wyżej.
+    namiary (`path`/`size`/`mtime`) i `file_sha1` są, lecz nagłówka/odcisków sekcji brak →
+    degeneracja tożsamości + review wyżej.
 
-    Odciski przejścia (PF-1, brief §2) — do PF-2 WSPÓŁISTNIEJĄ ze starym polem `sha1` (R3-d1:
-    `sha1` = sha1 całego pliku, dziś tożsamość frame'a w schemacie v1; znika razem ze schematem):
-      - `sha1_data`: sha1 sekcji DANYCH HDU (FITS) / bajtów attachmentu (XISF); None = nieobliczalne
-        (brak sekcji danych / zepsuty kafelek / W1) → degeneracja tożsamości, flagowana w PF-2;
-      - `file_sha1`: sha1 całego pliku (fakt KOPII; wartość identyczna ze starym `sha1`);
+    Odciski (brief §2):
+      - `sha1_data`: sha1 sekcji DANYCH HDU (FITS) / bajtów attachmentu (XISF) — TOŻSAMOŚĆ
+        frame'a; None = nieobliczalne (brak sekcji danych / zepsuty kafelek / W1) → degeneracja
+        w `ingest_record` (sha1 pliku + flaga `sha1_data_uncomputable`);
+      - `file_sha1`: sha1 całego pliku (fakt KOPII na location — detekcja zmiany bajtów);
       - `header_hash`/`hdu_index`/`compressed`: fakty kopii FITS (kontrola writeback/undo);
         None dla XISF (R2#14) i przy W1;
       - `cards`: pełne lustro nagłówka FITS (lista `Card`); None dla XISF (dojdzie w PF-4) i przy W1.
     """
     path: str                         # ścieżka bezwzględna (str — spójnie z sha1_of/repo)
-    sha1: str                         # tożsamość frame'a schematu v1 (== file_sha1; do PF-2)
-    size_bytes: int
-    mtime: str                        # ISO-8601 UTC (klucz przyszłego cache sha1, §7.9)
+    size_bytes: int                   # fakt kopii (→ location.size_bytes; R2#6)
+    mtime: str                        # ISO-8601 UTC (brama przyrostowa)
     header: dict = field(default_factory=dict)   # pełny nagłówek, JSON-owalny; None gdy error
     error: object = None              # None gdy OK; tekst "Typ: opis" gdy nagłówek nieczytelny (W1)
-    sha1_data: object = None          # przyszła tożsamość frame'a (PF-2); None = nieobliczalne
+    sha1_data: object = None          # tożsamość frame'a; None = nieobliczalne (degeneracja wyżej)
     file_sha1: object = None          # sha1 całego pliku (fakt kopii)
     header_hash: object = None        # sha1 tekstu nagłówka; None dla XISF/W1
     hdu_index: object = None          # HDU naukowe; None dla XISF/W1
@@ -441,8 +448,8 @@ def scan_file(path):
 
     Miękkie lądowanie (W1): nagłówek nieczytelny/nierozpoznany NIE przerywa skanu — czytnik meta
     rzuca, my łapiemy i zwracamy `ScanRecord(header=None, error="Typ: opis")`; odciski sekcji
-    (`sha1_data`/`header_hash`/`cards`) wtedy None, ale tożsamość (`sha1` = sha1 całego pliku)
-    i namiary są wypełnione (frame i location powstaną; review nagłówka — wyżej).
+    (`sha1_data`/`header_hash`/`cards`) wtedy None, ale `file_sha1` i namiary są wypełnione
+    (degeneracja tożsamości + frame/location powstaną; review nagłówka — wyżej).
 
     Hasze (brief §2): plik NIEskompresowany → `file_sha1` i `sha1_data` JEDNYM przebiegiem
     (`sha1_of_span`; pozycje sekcji z nagłówków przed odczytem treści); CompImageHDU →
@@ -471,11 +478,11 @@ def scan_file(path):
         try:
             sha1_data = compressed_data_sha1(spath, hdu_index)
         except Exception:                 # zepsuty kafelek → tożsamość nieobliczalna (degeneracja:
-            sha1_data = None              # sha1 pliku + flaga — flagowanie należy do PF-2)
+            sha1_data = None              # sha1 pliku + flaga — składa ingest_record)
     else:
         file_sha1, sha1_data = sha1_of_span(spath, span)
     return ScanRecord(
-        path=spath, sha1=file_sha1, size_bytes=st.st_size, mtime=mtime,
+        path=spath, size_bytes=st.st_size, mtime=mtime,
         header=header, error=error,
         sha1_data=sha1_data, file_sha1=file_sha1,
         header_hash=header_hash, hdu_index=hdu_index, compressed=compressed, cards=cards,
@@ -489,6 +496,9 @@ class ScanSummary:
     frames_new: int = 0
     frames_existing: int = 0
     locations_new: int = 0
+    locations_refreshed: int = 0   # znana ścieżka, fakty kopii odświeżone (mtime/hash/rozmiar — §2)
+    headers_refreshed: int = 0     # zeznanie odświeżone po zmianie header_hash (writeback — §2)
+    locations_rebound: int = 0     # podmiana treści pod znaną ścieżką → location przepięta (§2)
     headers: int = 0
     frame_review: int = 0
     camera_review: int = 0
@@ -526,27 +536,58 @@ def _already_scanned(con, volume, path, mtime):
     return row is not None
 
 
+def _record_testimony_and_flags(con, rec, *, frame_id, sha1_data, readable, ident, kind,
+                                now, summary):
+    """Zeznanie + flagi dla ŚWIEŻO powstałego frame'a (wspólne dla ścieżki nowej i przepiętej):
+    czytelny → `record_header` (1:1, z cards) + ewentualne `flag_camera_review`/`flag_kind_unmapped`;
+    nieczytelny → `flag_frame_review` (frame-SZKIELET bez headera)."""
+    if not readable:                                   # W1: frame-szkielet bez headera → review
+        repo.flag_frame_review(con, sha1=sha1_data, path=rec.path, reason=rec.error, now=now)
+        summary.frame_review += 1
+        return
+    repo.record_header(
+        con, frame_id=frame_id, raw_json=json.dumps(rec.header, ensure_ascii=False),
+        cards=rec.cards, now=now, **extract_header(rec.header))
+    summary.headers += 1
+    if ident is None:
+        repo.flag_camera_review(
+            con, frame_id=frame_id, reason="brak osi KAMERA (INSTRUME)", now=now)
+        summary.camera_review += 1
+    imagetyp = rec.header.get("IMAGETYP")
+    if kind == "unknown" and imagetyp and str(imagetyp).strip():
+        repo.flag_kind_unmapped(con, frame_id=frame_id, imagetyp=imagetyp, now=now)
+        summary.kind_unmapped += 1
+
+
 def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, summary):
     """Wciągnij JEDEN `ScanRecord` przez jedną klingę (`repo`) — JĄDRO wspólne dla skanu drzewa
-    (`scan_tree`) i przyszłego replayu/import-legacy (rekord pochodzi z nagłówka pliku ALBO z
-    cache'owanego źródła). Mutuje `summary`; zapis WYŁĄCZNIE przez `repo` (zero DML tutaj).
+    (`scan_tree`) i importu z dawcy (rekord pochodzi z nagłówka pliku ALBO z cache'owanego
+    źródła). Mutuje `summary`; zapis WYŁĄCZNIE przez `repo` (zero DML tutaj).
 
-    INWARIANT „baza zna wszystkie pliki" (D1): każdy rekord o znanym `sha1` daje frame + location,
-    także gdy nagłówek nieczytelny (W1) → wtedy frame-SZKIELET (`kind='unknown'`, `camera_id=NULL`,
-    bez `header`) + `flag_frame_review`. Spójne z `camera_review` (brak osi → frame jednak powstaje);
-    znika dawne „W1 = brak frame'a". Re-skan idempotentny: sha1 UNIQUE jest kotwicą — istniejący
-    szkielet NIE duplikuje `frame.review` (gating na `created`). [Backstop bez sha1 — `scan_tree`.]
+    TOŻSAMOŚĆ (brief §2): frame po `sha1_data` (odcisk sekcji danych); nieobliczalny →
+    DEGENERACJA (sha1 całego pliku + `sha1_data_uncomputable=1`) — legalna WYŁĄCZNIE dla ścieżki
+    NIEZNANEJ (R3-b1). Fakty kopii (file_sha1/header_hash/hdu_index/compressed/size_bytes) idą
+    na location.
 
-      - oś KAMERA (`camera_identity`→`upsert_camera`; brak osi → `camera_id=None`) i `normalize_kind`
-        tylko dla CZYTELNEGO nagłówka; nieczytelny (W1) → `kind='unknown'`, `camera_id=None`;
-      - `upsert_frame` + `add_location` (zawsze, idempotentnie). NOWY frame: czytelny →
-        `record_header` (1:1) + ewentualne `flag_camera_review` (brak osi) / `flag_kind_unmapped`
-        (IMAGETYP niezmapowane); nieczytelny → `flag_frame_review` (szkielet, bez headera).
-        ISTNIEJĄCY sha1 → tylko nowa `location` (multi-location), bez headera/flag (szkielet też
-        nie „awansuje" przy późniejszym udanym odczycie — jak header 1:1 nie re-rejestruje się).
+    ŚCIEŻKA NIEZNANA (brak wiersza `location(volume,path)`):
+      - oś KAMERA (`camera_identity`→`upsert_camera`) i `normalize_kind` tylko dla CZYTELNEGO
+        nagłówka; nieczytelny (W1) → `kind='unknown'`, `camera_id=None`;
+      - `upsert_frame` + `add_location` (idempotentnie). NOWY frame → zeznanie/flagi
+        (`_record_testimony_and_flags`); ISTNIEJĄCY sha1_data → tylko nowa `location`
+        (multi-location); zeznanie z PIERWSZEGO wystąpienia (reguła N-lokacji, §2).
+
+    ŚCIEŻKA ZNANA — kontrakt świeżości §2 (domyka dług „mtime nieaktualizowany"):
+      - plik NIECZYTELNY, bajty NIEZMIENIONE → `refresh_location_unreadable` (mtime + frame.review,
+        ZERO nowych frame'ów) — chyba że nic się nie zmieniło i frame to już szkielet (czysty
+        no-op idempotentnego re-skanu);
+      - PODMIANA TREŚCI (świeża tożsamość ≠ tożsamość frame'a lokacji — WBPP re-generuje master
+        pod tą samą nazwą): `upsert_frame` (ew. degenerat) + `rebind_location` + świeże fakty
+        kopii; stary frame ZOSTAJE (append-only — pass zniknięć go podchwyci);
+      - ta sama tożsamość → `refresh_location`: fakty kopii + (przy zmianie `header_hash`)
+        odświeżenie zeznania i pochodnych frame'a (last-read-wins).
 
     NIE łapie wyjątków — backstop bez tożsamości (sha1 nieznany → `frame.review`, sha1='?') należy
-    do wołającego (`scan_tree` / replay), bo to on wie, jak zidentyfikować rekord do review."""
+    do wołającego (`scan_tree` / import), bo to on wie, jak zidentyfikować rekord do review."""
     readable = rec.header is not None
     ident = camera_identity(rec.header) if readable else None
     camera_id = None
@@ -555,42 +596,119 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
             con, model_canon=ident.model_canon, pixel_um=ident.pixel_um,
             is_mono=ident.is_mono, is_mono_source=ident.is_mono_source,
             raw_instrume=ident.raw_instrume, now=now)
-
     kind = normalize_kind(rec.header.get("IMAGETYP")) if readable else "unknown"
-    frame_id, created = repo.upsert_frame(
-        con, sha1=rec.sha1, kind=kind, filetype=_filetype(rec.path),
-        size_bytes=rec.size_bytes, camera_id=camera_id, now=now)
-    if created:
-        summary.frames_new += 1
-    else:
-        summary.frames_existing += 1
+    if rec.sha1_data is not None:
+        sha1_data, uncomputable = rec.sha1_data, 0
+    else:                                              # degeneracja: sha1 pliku + flaga
+        sha1_data, uncomputable = rec.file_sha1, 1
 
-    _, loc_created = repo.add_location(
-        con, frame_id=frame_id, volume=volume, drive_letter=drive_letter,
-        path=rec.path, tier=tier, mtime=rec.mtime, now=now)
-    if loc_created:
-        summary.locations_new += 1
+    loc = con.execute(
+        "SELECT id, frame_id, mtime, file_sha1 FROM location WHERE volume = ? AND path = ?",
+        (volume, rec.path)).fetchone()
 
-    if not created:                                    # header 1:1 z frame → tylko dla nowego
-        return                                         # istniejący sha1 = dopisana sama location
-
-    if not readable:                                   # W1: frame-szkielet bez headera → review
-        repo.flag_frame_review(con, sha1=rec.sha1, path=rec.path, reason=rec.error, now=now)
-        summary.frame_review += 1
+    if loc is None:                                    # ścieżka NIEZNANA — dotychczasowy tor
+        frame_id, created = repo.upsert_frame(
+            con, sha1_data=sha1_data, sha1_data_uncomputable=uncomputable,
+            kind=kind, filetype=_filetype(rec.path), camera_id=camera_id, now=now)
+        if created:
+            summary.frames_new += 1
+        else:
+            summary.frames_existing += 1
+        _, loc_created = repo.add_location(
+            con, frame_id=frame_id, volume=volume, drive_letter=drive_letter,
+            path=rec.path, tier=tier, mtime=rec.mtime,
+            file_sha1=rec.file_sha1, header_hash=rec.header_hash, hdu_index=rec.hdu_index,
+            compressed=rec.compressed, size_bytes=rec.size_bytes, now=now)
+        if loc_created:
+            summary.locations_new += 1
+        if created:                                    # header 1:1 z frame → tylko dla nowego
+            _record_testimony_and_flags(
+                con, rec, frame_id=frame_id, sha1_data=sha1_data, readable=readable,
+                ident=ident, kind=kind, now=now, summary=summary)
         return
 
-    repo.record_header(
-        con, frame_id=frame_id, raw_json=json.dumps(rec.header, ensure_ascii=False),
-        now=now, **extract_header(rec.header))
-    summary.headers += 1
-    if ident is None:
-        repo.flag_camera_review(
-            con, frame_id=frame_id, reason="brak osi KAMERA (INSTRUME/XPIXSZ)", now=now)
-        summary.camera_review += 1
-    imagetyp = rec.header.get("IMAGETYP")
-    if kind == "unknown" and imagetyp and str(imagetyp).strip():
-        repo.flag_kind_unmapped(con, frame_id=frame_id, imagetyp=imagetyp, now=now)
-        summary.kind_unmapped += 1
+    # ── ścieżka ZNANA: kontrakt świeżości §2 ──
+    frame_row = con.execute(
+        "SELECT sha1_data FROM frame WHERE id = ?", (loc["frame_id"],)).fetchone()
+
+    if not readable and rec.file_sha1 == loc["file_sha1"]:
+        # R3-b1: znana kopia nieczytelna, bajty bez zmian → mtime + review; ZERO nowych frame'ów.
+        # Czysty no-op dla szkieletu bez żadnej zmiany (idempotentny re-skan bez szumu review).
+        summary.frames_existing += 1
+        had_header = con.execute(
+            "SELECT 1 FROM header WHERE frame_id = ?", (loc["frame_id"],)).fetchone() is not None
+        if had_header or rec.mtime != loc["mtime"]:
+            repo.refresh_location_unreadable(
+                con, location_id=loc["id"], sha1_data=frame_row["sha1_data"], path=rec.path,
+                mtime=rec.mtime, reason=rec.error, now=now)
+            summary.frame_review += 1
+        return
+
+    frame_id = loc["frame_id"]
+    if sha1_data != frame_row["sha1_data"]:            # PODMIANA TREŚCI pod znaną ścieżką
+        frame_id, created = repo.upsert_frame(
+            con, sha1_data=sha1_data, sha1_data_uncomputable=uncomputable,
+            kind=kind, filetype=_filetype(rec.path), camera_id=camera_id, now=now)
+        if created:
+            summary.frames_new += 1
+        else:
+            summary.frames_existing += 1
+        repo.rebind_location(con, location_id=loc["id"], frame_after=frame_id, now=now)
+        summary.locations_rebound += 1
+        if created:
+            _record_testimony_and_flags(
+                con, rec, frame_id=frame_id, sha1_data=sha1_data, readable=readable,
+                ident=ident, kind=kind, now=now, summary=summary)
+        # świeże fakty kopii BEZ odświeżania zeznania (zeznanie nowego frame'a właśnie nagrane,
+        # a cudzemu — istniejącemu sha1_data — nie nadpisujemy: reguła N-lokacji)
+        refreshed = repo.refresh_location(
+            con, location_id=loc["id"], frame_id=frame_id, mtime=rec.mtime,
+            file_sha1=rec.file_sha1, header_hash=rec.header_hash, hdu_index=rec.hdu_index,
+            compressed=rec.compressed, size_bytes=rec.size_bytes, now=now)
+        summary.locations_refreshed += refreshed["facts"]
+        return
+
+    # ta sama tożsamość pod znaną ścieżką → refresh faktów (+ zeznania przy zmianie header_hash)
+    summary.frames_existing += 1
+    refreshed = repo.refresh_location(
+        con, location_id=loc["id"], frame_id=frame_id, mtime=rec.mtime,
+        file_sha1=rec.file_sha1, header_hash=rec.header_hash, hdu_index=rec.hdu_index,
+        compressed=rec.compressed, size_bytes=rec.size_bytes, now=now,
+        raw_json=json.dumps(rec.header, ensure_ascii=False) if readable else None,
+        cards=rec.cards, hot_fields=extract_header(rec.header) if readable else None,
+        camera_id=camera_id, kind=kind)
+    summary.locations_refreshed += refreshed["facts"]
+    summary.headers_refreshed += refreshed["header"]
+
+
+def canonize_root(root):
+    """Kanonizacja ROOTA skanu — jawna SEKWENCJA (brief §0, R3-a1) zamiast `realpath`/`resolve`
+    (te na zamapowanym `R:` rozwiązują do UNC — ŚWIĘTY zakaz w torze tożsamości ścieżek):
+
+      1. `str(Path(root))` — separatory `/`→`\\`, zdjęcie trailing separatora;
+      2. `os.path.abspath` — LEKSYKALNE ukotwiczenie (NIE rozwiązuje SMB/symlinków);
+      3. **guard UNC (R3-a2):** root `\\\\host\\share` → odmowa „zamapuj literę dysku"
+         (tożsamość `location.path` jest LITEROWA; UNC dublowałby lokacje przy tym samym
+         `volume_serial` i brama by pudłowała);
+      4. `GetLongPathNameW` — casing/długa forma Z DYSKU (zachowuje literę dysku — skill
+         `windows-mapped-drive-path-identity`); zwrot 0 = root nie istnieje → **abort** (EXPECT);
+      5. wielka litera dysku.
+
+    Komponenty PONIŻEJ roota niesie `os.walk` (readdir — casing z dysku, jak u dawcy).
+    Poza Windows: kroki 4–5 nieczynne (brak API i liter dysków) — zostaje 1–3."""
+    s = os.path.abspath(str(Path(root)))
+    if s.startswith("\\\\"):
+        raise ValueError(
+            f"root UNC ({s!r}) poza torem tożsamości — zamapuj literę dysku i skanuj przez nią")
+    if sys.platform == "win32":
+        buf = ctypes.create_unicode_buffer(32768)
+        n = ctypes.windll.kernel32.GetLongPathNameW(s, buf, 32768)
+        if n == 0:                        # EXPECT: root nie istnieje / niedostępny → abort
+            raise FileNotFoundError(f"root skanu nie istnieje albo niedostępny: {s}")
+        s = buf.value
+        if len(s) >= 2 and s[1] == ":":
+            s = s[0].upper() + s[1:]
+    return s
 
 
 def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now,
@@ -617,6 +735,7 @@ def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now,
     """
     summary = ScanSummary()
     excluded = []
+    root = canonize_root(root)                             # forma literowa + casing z dysku; UNC → odmowa (§0)
     paths = iter_headers(root, excluded_out=excluded)      # drzewa robocze odcięte (EXCLUDED_DIR_NAMES: _WBPP/_Review)
     summary.excluded_dirs = excluded
     summary.dirs_excluded = len(excluded)

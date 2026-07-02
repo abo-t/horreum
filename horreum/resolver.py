@@ -113,7 +113,7 @@ def delta_report(con, top=30):
         "AND h.object_raw IS NOT NULL GROUP BY h.object_raw ORDER BY n DESC, raw LIMIT ?",
         (top,)).fetchall()
     counts = {}
-    for v in ("frame.review", "camera.review", "kind.unmapped", "telescope.review", "config.review"):
+    for v in ("frame.review", "camera.review", "kind.unmapped", "config.review"):
         counts[v] = con.execute("SELECT count(*) FROM event WHERE verb = ?", (v,)).fetchone()[0]
     filters_canon = con.execute(
         "SELECT count(*) FROM frame WHERE filter_canon IS NOT NULL").fetchone()[0]

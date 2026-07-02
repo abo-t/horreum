@@ -117,14 +117,14 @@ def test_present0_widoczny_jako_nie(view):
     assert "nie" in presents                   # present0 pokazany, nie odsiany (R#7)
 
 
-def test_kolumna_teleskop_fallback_sygnatury(view):
-    """Wizytator P1 #1: teleskopy nienazwane (label=NULL) → kolumna Teleskop pokazuje sygnaturę
-    f//ogniskowa, nie pustkę. a1,a2 pod teleskopem A (5.6/784)."""
+def test_kolumna_teleskop_fallback_canon(view):
+    """Wizytator P1 #1 (po PF-2): teleskopy nienazwane (label=NULL) → kolumna Teleskop pokazuje
+    `telescop_canon` (nazwę z nagłówka), nie pustkę. a1,a2 pod teleskopem A ('A140R')."""
     v, con, ids = view
     _select_object_canon(v, "NGC7000")
     tels = {v.frames.item(r, 1).text() for r in range(v.frames.rowCount())}
-    assert "f/5.6 · 784 mm" in tels            # A (a1,a2) — sygnatura zamiast pustki
-    assert "f/8 · 1624 mm" in tels             # C (c1,c2)
+    assert "A140R" in tels                     # A (a1,a2) — canon zamiast pustki
+    assert "RC8" in tels                       # C (c1,c2)
     assert "" in tels                          # present0 (config NULL) — brak teleskopu = puste
 
 

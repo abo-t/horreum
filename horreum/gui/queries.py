@@ -21,10 +21,10 @@ def active_telescopes(con):
     klatki scalonych członków rolują się pod kanon, kolizja kamery (dwa configi tej samej kamery)
     sumuje się pod jednym kanonem. `LEFT JOIN` => teleskop bez klatek ma `frame_count=0` (nie znika).
     Frame z `config_id IS NULL` (review) NIE dołącza się do żadnego configu => poza sumą (poprawne —
-    jest w delcie, nie na osi). Zwraca wiersze: id, label, status, f_ratio_nominal, focal_nominal,
-    frame_count."""
+    jest w delcie, nie na osi). Zwraca wiersze: id, telescop_canon, label, status, f_ratio_nominal,
+    focal_nominal, frame_count."""
     return con.execute(
-        "SELECT t.id, t.label, t.status, t.f_ratio_nominal, t.focal_nominal, "
+        "SELECT t.id, t.telescop_canon, t.label, t.status, t.f_ratio_nominal, t.focal_nominal, "
         "       COUNT(fr.id) AS frame_count "
         "FROM telescope t "
         "LEFT JOIN telescope_canonical tc ON tc.canon_id = t.id "
@@ -40,9 +40,9 @@ def merged_under(con, canon_id):
     """Teleskopy scalone „pod" danym kanonem (widok szczegółu — co zwinięto w ten teleskop). Dzięki
     inwariantowi głębokość ≤ 1 (§3a) wszystkie są BEZPOŚREDNIMI członkami (`merged_into = canon_id`),
     więc prosty filtr po kolumnie wystarcza — nie ma głębszych łańcuchów do rozwijania. Zwraca wiersze:
-    id, label, status, f_ratio_nominal, focal_nominal (puste, gdy `canon_id` nic nie scala)."""
+    id, telescop_canon, label, status, f_ratio_nominal, focal_nominal (puste, gdy nic nie scala)."""
     return con.execute(
-        "SELECT id, label, status, f_ratio_nominal, focal_nominal "
+        "SELECT id, telescop_canon, label, status, f_ratio_nominal, focal_nominal "
         "FROM telescope WHERE merged_into = ? ORDER BY id",
         (canon_id,),
     ).fetchall()
@@ -103,13 +103,13 @@ def object_frames(con, object_id, *, telescope_id=None, camera_id=None, filter_c
     """Klatki danego obiektu (light/master_light) z tymi samymi filtrami co biblioteka. Location przez
     `MIN(id)` (R#3: frame 1:N location — bez tego N lokalizacji zduplikowałoby klatkę). `present` to
     KOLUMNA statusu, NIE predykat (R#7: frame, którego wszystkie lokalizacje mają present=0, MUSI być
-    widoczny — tożsamość = sha1, nie obecność; „baza=autorytet"). `telescope_label` + `f_ratio_nominal`/
-    `focal_nominal` z kanonicznego teleskopu (sygnatura = fallback etykiety, gdy teleskop nienazwany —
-    wizytator P1 #1). Zwraca: frame_id, sha1, filter_canon, telescope_label, f_ratio_nominal,
+    widoczny — tożsamość = sha1_data, nie obecność; „baza=autorytet"). `telescope_label` +
+    `telescop_canon` z kanonicznego teleskopu (canon = fallback etykiety, gdy teleskop nienazwany).
+    Zwraca: frame_id, sha1_data, filter_canon, telescope_label, telescop_canon, f_ratio_nominal,
     focal_nominal, camera_model, date_obs, exptime, path, drive_letter, present."""
     return con.execute(
-        "SELECT f.id AS frame_id, f.sha1, f.filter_canon, "
-        "       t.label AS telescope_label, t.f_ratio_nominal, t.focal_nominal, "
+        "SELECT f.id AS frame_id, f.sha1_data, f.filter_canon, "
+        "       t.label AS telescope_label, t.telescop_canon, t.f_ratio_nominal, t.focal_nominal, "
         "       cam.model_canon AS camera_model, "
         "       h.date_obs, h.exptime, loc.path, loc.drive_letter, loc.present "
         "FROM frame f "
@@ -161,11 +161,12 @@ def review_queue(con):
 
 def object_review_frames(con, object_raw):
     """Drążenie pojedynczej pozycji obiekt-review: klatki o danym `object_raw`, wciąż nierozwiązane
-    (`object_id IS NULL`). JOIN header (object_raw mieszka w header, R#3). Zwraca: frame_id, sha1,
-    telescope_label, f_ratio_nominal, focal_nominal, camera_model, date_obs, path."""
+    (`object_id IS NULL`). JOIN header (object_raw mieszka w header, R#3). Zwraca: frame_id,
+    sha1_data, telescope_label, telescop_canon, f_ratio_nominal, focal_nominal, camera_model,
+    date_obs, path."""
     return con.execute(
-        "SELECT f.id AS frame_id, f.sha1, t.label AS telescope_label, "
-        "       t.f_ratio_nominal, t.focal_nominal, "
+        "SELECT f.id AS frame_id, f.sha1_data, t.label AS telescope_label, "
+        "       t.telescop_canon, t.f_ratio_nominal, t.focal_nominal, "
         "       cam.model_canon AS camera_model, h.date_obs, loc.path "
         "FROM frame f JOIN header h ON h.frame_id = f.id "
         "LEFT JOIN config c ON c.id = f.config_id "
@@ -181,10 +182,10 @@ def object_review_frames(con, object_raw):
 
 def telescope_facets(con):
     """Distinct KANONICZNE teleskopy (`merged_into IS NULL`) do kontrolki filtra — żeby filtr pokazywał
-    realnie istniejące osie. `f_ratio_nominal`/`focal_nominal` służą za etykietę zastępczą, gdy `label`
-    pusty (teleskop jeszcze nienazwany — proposed). Zwraca: id, label, f_ratio_nominal, focal_nominal."""
+    realnie istniejące osie. `telescop_canon` służy za etykietę zastępczą, gdy `label` pusty (teleskop
+    jeszcze nienazwany — proposed). Zwraca: id, telescop_canon, label, f_ratio_nominal, focal_nominal."""
     return con.execute(
-        "SELECT id, label, f_ratio_nominal, focal_nominal FROM telescope "
+        "SELECT id, telescop_canon, label, f_ratio_nominal, focal_nominal FROM telescope "
         "WHERE merged_into IS NULL ORDER BY id"
     ).fetchall()
 

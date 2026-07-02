@@ -15,7 +15,10 @@ def _fresh(tmp_path):
 
 
 def _tel(con, f_ratio, focal):
-    tid, _ = repo.propose_telescope(con, f_ratio_nominal=f_ratio, focal_nominal=focal, now=NOW)
+    """Teleskop testowy — tożsamość po PF-2 to telescop_canon; derywujemy go z ogniskowej
+    (w testach tego pliku ogniskowa jest unikalna per teleskop)."""
+    tid, _ = repo.propose_telescope(con, telescop_canon=f"TEL-{focal}",
+                                    f_ratio_nominal=f_ratio, focal_nominal=focal, now=NOW)
     return tid
 
 
@@ -189,7 +192,7 @@ def test_R3_licznik_klatek_po_scaleniu_kolizja_kamery_i_config_null(tmp_path):
     cfg_b, _ = repo.propose_config(con, telescope_id=b, camera_id=cam, now=NOW)   # ta sama kamera
 
     def _frame(sha, cfg):
-        fid, _ = repo.upsert_frame(con, sha1=sha, kind="light", filetype="fits", size_bytes=1,
+        fid, _ = repo.upsert_frame(con, sha1_data=sha, kind="light", filetype="fits",
                                    camera_id=cam, now=NOW)
         if cfg is not None:
             repo.assign_config(con, frame_id=fid, config_id=cfg, now=NOW)

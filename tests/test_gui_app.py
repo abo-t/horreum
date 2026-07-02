@@ -17,7 +17,9 @@ pytest.importorskip("PySide6")
 
 from horreum import db
 from horreum.gui import queries
-from horreum.gui.app import COL_ID, COL_LABEL, TelescopeAxisWindow
+from horreum.gui.app import (
+    COL_CANON, COL_FRAMES, COL_ID, COL_LABEL, COL_STATUS, TelescopeAxisWindow,
+)
 
 from fixture_s8 import seed
 
@@ -74,10 +76,11 @@ def test_lista_aktywne_z_licznoscia(win):
     w, con, ids = win
     assert _active_ids(w) == {ids["A"], ids["B"], ids["C"], ids["D"]}
     r = _row_of(w, ids["A"])
-    assert w.table.item(r, 1).text() == ""           # COL_LABEL: proposed bez etykiety
-    assert w.table.item(r, 2).text() == "proposed"   # COL_STATUS
-    assert w.table.item(r, 5).text() == "2"          # COL_FRAMES (A = 2 klatki)
-    assert w.table.item(_row_of(w, ids["D"]), 5).text() == "0"   # D bez klatek nie znika
+    assert w.table.item(r, COL_CANON).text() == "A140R"          # tożsamość z nagłówka (PF-2)
+    assert w.table.item(r, COL_LABEL).text() == ""               # proposed bez etykiety
+    assert w.table.item(r, COL_STATUS).text() == "proposed"
+    assert w.table.item(r, COL_FRAMES).text() == "2"             # A = 2 klatki
+    assert w.table.item(_row_of(w, ids["D"]), COL_FRAMES).text() == "0"   # D bez klatek nie znika
 
 
 # --- label in-line → repo (jedna klinga) ---
@@ -126,7 +129,7 @@ def test_merge_combo_rolluje_i_chowa_source(win):
     w._on_merge()
     assert _events(con, "telescope.merged") == before + 1
     assert A not in _active_ids(w)                   # source zniknął z aktywnych
-    assert w.table.item(_row_of(w, B), 5).text() == "5"   # 2+3 pod kanonem B (kolizja kamery)
+    assert w.table.item(_row_of(w, B), COL_FRAMES).text() == "5"   # 2+3 pod kanonem B (kolizja kamery)
 
 
 def test_combo_nie_zawiera_zrodla_selfmerge_niemozliwy(win):

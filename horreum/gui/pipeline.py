@@ -421,14 +421,16 @@ class PipelineView(QWidget):
         return (
             f"[skan] pliki {s.files} · nowe {s.frames_new} · istniejące {s.frames_existing} · "
             f"pominięte {s.skipped} · wykluczone katalogi {s.dirs_excluded} · "
-            f"lokalizacje {s.locations_new} · nagłówki {s.headers} · "
+            f"lokalizacje {s.locations_new} · odświeżone {s.locations_refreshed} "
+            f"(zeznania {s.headers_refreshed}, przepięte {s.locations_rebound}) · "
+            f"nagłówki {s.headers} · "
             f"przegląd f/{s.frame_review} k/{s.camera_review} rodzaj/{s.kind_unmapped}")
 
     def _format_group(self, s):
         return (
-            f"[grupuj] nagłówki {s.headers} · f/ ok/odzysk/przegląd "
-            f"{s.focratio_ok}/{s.focratio_recovered}/{s.focratio_review} · teleskopy {s.telescopes_proposed} "
-            f"(podejrzane {s.telescopes_suspect}) · konfiguracje {s.configs_proposed}/{s.configs_assigned} · "
+            f"[grupuj] nagłówki {s.headers} · teleskopy {s.telescopes_proposed} · "
+            f"bez TELESCOP {s.telescop_missing} · "
+            f"konfiguracje {s.configs_proposed}/{s.configs_assigned} · "
             f"konfig. do przeglądu {s.config_review}")
 
     def _format_resolve(self, s):

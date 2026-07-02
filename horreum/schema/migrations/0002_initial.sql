@@ -1,16 +1,19 @@
--- Horreum — migracja 0001: schemat rdzenia plastra B (model osi).
--- Źródło prawdy: brief/PLAN_horreum_schema.md §1 (v2.1). Czas = ISO-8601 TEXT.
--- Wszystkie zapisy domenowe przez repository layer (horreum.repo) → event (§2).
+-- Horreum — migracja 0002: schemat rdzenia po przejściu fitsmirror (PF-2).
+-- Źródło prawdy: brief/PLAN_przejscie_fits.md §2/§3/§8 (v1.3). Czas = ISO-8601 TEXT.
+-- Wszystkie zapisy domenowe przez repository layer (horreum.repo) → event.
+-- Zastępuje 0001 (rename, D-A/R2#12): świeża baza startuje od razu w v2; przedpotopowa
+-- baza v1 dostaje jawny błąd w runnerze (db.migrate), nie cichą pół-migrację.
 
 -- ============================================================ 1.1 tożsamość i lokalizacja
 
--- frame: tożsamość pliku. Klucz logiczny = sha1. Interpretacje (config/object/filter) jako FK/pola.
+-- frame: tożsamość = odcisk sekcji DANYCH (przeżywa edycję nagłówka/rename/move/writeback).
+-- Interpretacje (config/object/filter) jako FK/pola. Fakty KOPII pliku mieszkają na location.
 CREATE TABLE frame (
     id            INTEGER PRIMARY KEY,
-    sha1          TEXT    NOT NULL UNIQUE,   -- pełny sha1 (tożsamość)
+    sha1_data     TEXT    NOT NULL UNIQUE,   -- sha1 sekcji danych HDU / attachmentu XISF
+    sha1_data_uncomputable INTEGER NOT NULL DEFAULT 0,  -- 1 = degeneracja: to sha1 CAŁEGO pliku
     kind          TEXT    NOT NULL,          -- light|flat|dark|bias|master_*|unknown
     filetype      TEXT,                      -- fits|xisf|dng|raw_sony|raw_canon
-    size_bytes    INTEGER,
     camera_id     INTEGER REFERENCES camera(id),     -- oś KAMERA (deterministyczna przy skanie)
     config_id     INTEGER REFERENCES config(id),     -- iloczyn osi (po grupowaniu; NULL => review)
     object_id     INTEGER REFERENCES object(id),     -- oś OBIEKT (NULL => review)
@@ -20,15 +23,21 @@ CREATE TABLE frame (
 );
 -- INWARIANT (test): jeśli config_id NOT NULL, to config.camera_id == frame.camera_id.
 
--- location: GDZIE plik leży. frame 1:N location.
+-- location: GDZIE plik leży + fakty KOPII (writeback `os.replace` zmienia bajty pliku,
+-- nie zmieniając tożsamości frame'a — R2#6). frame 1:N location.
 CREATE TABLE location (
     id               INTEGER PRIMARY KEY,
     frame_id         INTEGER NOT NULL REFERENCES frame(id),
-    volume           TEXT    NOT NULL,        -- TRWAŁY identyfikator wolumenu (serial/UUID/UNC; §7.5)
+    volume           TEXT    NOT NULL,        -- TRWAŁY identyfikator wolumenu (serial/UUID; §7.5)
     drive_letter     TEXT,                    -- efemeryczny cache wyświetlania (R:) — NIE tożsamość
-    path             TEXT    NOT NULL,        -- pełna ścieżka (względem wolumenu)
+    path             TEXT    NOT NULL,        -- pełna ścieżka (forma LITEROWA, nigdy UNC)
     tier             TEXT,                    -- cold|scratch
-    mtime            TEXT,                    -- (klucz przyszłego cache sha1, §7.9)
+    mtime            TEXT,                    -- brama przyrostowa (volume, path, mtime)
+    file_sha1        TEXT,                    -- sha1 całego pliku (detekcja zmiany bajtów)
+    header_hash      TEXT,                    -- sha1 tekstu nagłówka (kontrola writeback/undo; NULL dla XISF)
+    hdu_index        INTEGER,                 -- HDU naukowe (NULL dla XISF)
+    compressed       INTEGER,                 -- 0/1 CompImageHDU (NULL dla XISF)
+    size_bytes       INTEGER,                 -- fakt kopii (przeniesione z frame — R2#6)
     present          INTEGER NOT NULL DEFAULT 1,   -- 1=plik jest, 0=zniknął z tej ścieżki
     last_verified_at TEXT,
     UNIQUE(volume, path)
@@ -37,7 +46,7 @@ CREATE TABLE location (
 -- ============================================================ 1.2 nagłówek (zeznanie 1:1)
 
 -- header: warstwa faktów. raw_json = źródło prawdy nagłówkowej; pola gorące wyłuskane.
--- Trzyma nagłówek FITS (plaster B). DSLR/EXIF = osobny moduł/ścieżka (§4).
+-- Zeznanie odświeża OSTATNI re-odczyt (last-read-wins przy zmianie header_hash — brief §2).
 CREATE TABLE header (
     frame_id            INTEGER PRIMARY KEY REFERENCES frame(id),
     raw_json            TEXT NOT NULL,         -- pełny nagłówek FITS jako json
@@ -45,12 +54,10 @@ CREATE TABLE header (
     exptime             REAL,
     filter_raw          TEXT,                  -- surowy FILTER (przed normalizacją)
     instrume            TEXT,
-    telescop            TEXT,                  -- surowy (brudny: teleskop|montaż|śmieci)
-    focallen            REAL,                  -- ogniskowa (mm) — czysta optyka
-    focratio_raw        REAL,                  -- surowy FOCRATIO (bywa = apertura)
-    focratio_norm       REAL,                  -- f/ po normalizacji (§3.3)
-    focratio_norm_src   TEXT,                  -- ok|recovered|review (ślad reguły)
-    xpixsz              REAL,                  -- część tożsamości kamery (rozróżnia MODELE, §3.1)
+    telescop            TEXT,                  -- surowy TELESCOP (canon = strip w osi)
+    focallen            REAL,                  -- ogniskowa (mm)
+    focratio_raw        REAL,                  -- surowy FOCRATIO (audyt; normalizacja MARTWA po naprawie nagłówków)
+    xpixsz              REAL,                  -- właściwość kamery (uzupełnia upsert_camera)
     ypixsz              REAL,                  -- sanity: == xpixsz
     gain                TEXT,                  -- USTAWIENIE akwizycji (audyt, NIE tożsamość)
     offset_adu          INTEGER,               -- USTAWIENIE ('offset' = słowo zarezerwowane)
@@ -64,31 +71,48 @@ CREATE TABLE header (
     object_raw          TEXT                   -- nazwa obiektu jak w nagłówku ("plotka")
 );
 
+-- cards: pełne lustro nagłówka FITS (EAV, wg fitsmirror db.py:40-52). `idx` numeruje
+-- wystąpienia keyworda (duplikaty COMMENT/HISTORY i powtórzone keywordy wiernie).
+CREATE TABLE cards (
+    frame_id   INTEGER NOT NULL REFERENCES frame(id),
+    keyword    TEXT NOT NULL,
+    idx        INTEGER NOT NULL DEFAULT 0,
+    value_raw  TEXT,
+    value_num  REAL,
+    value_type TEXT,                           -- int|float|str|bool|undefined
+    comment    TEXT,
+    PRIMARY KEY (frame_id, keyword, idx)
+);
+CREATE INDEX idx_cards_kw_num ON cards(keyword, value_num);
+CREATE INDEX idx_cards_kw_raw ON cards(keyword, value_raw);
+
 -- ============================================================ 1.3 osie hardware
 
--- camera: oś KAMERA. Tożsamość = (model_canon, pixel_um).
--- pixel_um ROZRÓŻNIA MODELE (firsthand: 2600=3.76, ASI294=4.63, Sony-FITS=4.86) — realny
--- dyskryminator. model_canon rozróżnia warianty w obrębie modelu (MM/MC/MD przy 3.76).
+-- camera: oś KAMERA. Tożsamość = model_canon (po naprawie nagłówków INSTRUME 100%, 5 form).
+-- pixel_um = NULLABLE właściwość (uzupełnia upsert_camera CAS-em); rozjazd wartości = STAN
+-- pixel_conflict (kolejka ze stanu, nie z count(event)).
 CREATE TABLE camera (
     id             INTEGER PRIMARY KEY,
-    model_canon    TEXT NOT NULL,             -- ASI2600MM|ASI2600MD|ASI2600MC|ASI294MC|...
-    pixel_um       REAL NOT NULL,             -- XPIXSZ (część tożsamości)
+    model_canon    TEXT NOT NULL UNIQUE,      -- ASI2600MM|ASI2600MD|ASI2600MC|ASI294MC|SONYA7RM3
+    pixel_um       REAL,                      -- właściwość; uzupełnia upsert_camera + event
+    pixel_conflict INTEGER NOT NULL DEFAULT 0,-- 1 = rozjazd wartości piksela (review ze stanu)
     is_mono        INTEGER,                   -- 1 mono | 0 kolor | NULL nierozstrzygnięte
     is_mono_source TEXT,                       -- bayerpat|model|raw_format|review
     raw_instrume   TEXT,                       -- ostatni surowy INSTRUME (audyt)
-    created_at     TEXT NOT NULL,
-    UNIQUE(model_canon, pixel_um)
+    created_at     TEXT NOT NULL
 );
 
--- telescope: oś TELESKOP. Sygnatura = (f_ratio_nominal, focal_nominal) = centroid grupy.
+-- telescope: oś TELESKOP. Tożsamość = telescop_canon = TELESCOP.strip() (po naprawie nagłówków
+-- TELESCOP 100%, 8 nazw × 1 ogniskowa). NOCASE = bezpiecznik 'RC8 '/'rc8' (ASCII — świadome);
+-- casing wyświetlany = pierwszego wystąpienia. f/ i ogniskowa to WŁAŚCIWOŚCI (nullable), nie klucz.
 CREATE TABLE telescope (
     id               INTEGER PRIMARY KEY,
-    label            TEXT,                     -- etykieta usera (A140R|ED120|RC8...); NULL => niezatwierdzony
-    f_ratio_nominal  REAL    NOT NULL,         -- centroid f/ (po normalizacji FOCRATIO)
-    focal_nominal    INTEGER NOT NULL,         -- centroid ogniskowej (mm)
+    telescop_canon   TEXT    NOT NULL UNIQUE COLLATE NOCASE,
+    label            TEXT,                     -- etykieta usera; NULL => niezatwierdzony
+    f_ratio_nominal  REAL,                     -- właściwość (audyt/wyświetlanie)
+    focal_nominal    INTEGER,                  -- właściwość (audyt/wyświetlanie)
     status           TEXT    NOT NULL,         -- proposed|approved
     merged_into      INTEGER REFERENCES telescope(id),   -- gdy user scali; NULL => kanoniczny
-    telescop_hint    TEXT,                     -- reprezentatywny surowy TELESCOP (audyt)
     created_at       TEXT    NOT NULL
 );
 
@@ -128,9 +152,9 @@ CREATE TABLE object_alias (
 CREATE TABLE event (
     id      INTEGER PRIMARY KEY,
     ts      TEXT NOT NULL,
-    actor   TEXT NOT NULL,                      -- scan|resolver|grouper|user:<id>|import-legacy
+    actor   TEXT NOT NULL,                      -- scan|resolver|grouper|user:<id>|import:fitsmirror
     verb    TEXT NOT NULL,
-    target  TEXT NOT NULL,                      -- frame:<sha1>|telescope:<id>|object:<canon>|...
+    target  TEXT NOT NULL,                      -- frame:<id>|sha1:<sha1>|telescope:<id>|location:<id>|...
     payload TEXT,                               -- json (before/after)
     reason  TEXT
 );
@@ -142,7 +166,7 @@ CREATE TABLE saved_query (
     created_at TEXT NOT NULL
 );
 
--- ============================================================ 1.7 szkielet na przyszłość (PUSTY w plastrze B)
+-- ============================================================ 1.7 szkielet na przyszłość (PUSTY)
 
 -- calibration: light <-> master (dark/flat). Relacja JAWNA, nie z parsowania nazw.
 CREATE TABLE calibration (

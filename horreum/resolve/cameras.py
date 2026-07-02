@@ -63,22 +63,24 @@ class CameraIdentity:
     """Oś KAMERA wyłuskana ze zeznania nagłówka — wejście dla `repo.upsert_camera` (te same pola).
     Czysta dana, NIE zapis: sam upsert (jedna klinga + event) należy do repo."""
     model_canon: str
-    pixel_um: float
+    pixel_um: object             # float | None — WŁAŚCIWOŚĆ, nie klucz (brief §3/R1#3)
     is_mono: object              # 1 mono | 0 kolor | None (review)
     is_mono_source: str
     raw_instrume: object         # surowy INSTRUME (audyt) | None
 
 
 def camera_identity(header):
-    """Wyłoń tożsamość kamery ze zeznania nagłówka (dict ze skanu). PLAN §3.1/§3.6/§Etap 2.
+    """Wyłoń tożsamość kamery ze zeznania nagłówka (dict ze skanu). Brief przejścia §3.
 
-    Zwraca `CameraIdentity` albo None, gdy tożsamości NIE da się złożyć — brak INSTRUME do
-    normalizacji LUB brak/niefloat XPIXSZ (a `pixel_um` jest częścią klucza UNIQUE, NOT NULL).
-    Wtedy review należy do warstwy frame (§4.2): `event(camera.review)` przy braku osi.
+    KONTRAKT ODWRÓCONY (R1#3/R2#4): tożsamość wymaga TYLKO `model_canon` — po naprawie nagłówków
+    INSTRUME jest w 100% klatek, a model rozstrzyga oś. `pixel_um` to Optional WŁAŚCIWOŚĆ
+    (brak XPIXSZ — np. Sony masterflat — NIE blokuje osi; uzupełni ją `repo.upsert_camera`,
+    rozjazd wartości = stan `pixel_conflict`). None WYŁĄCZNIE przy braku INSTRUME — wtedy review
+    należy do warstwy frame (§4.2): `event(camera.review)`.
 
-    W3: XPIXSZ rzutowany na float (`_to_float`) — XISF podaje liczby jako STRINGI, niejednolity
-    typ rozbiłby `UNIQUE(model_canon, pixel_um)` na FITS-float vs XISF-string. `raw_json` (gdzie
-    indziej) zostaje 1:1 surowy; tu pole gorące = typ jednolity.
+    W3: XPIXSZ rzutowany na float (`_to_float`) — XISF podaje liczby jako STRINGI; właściwość
+    musi mieć typ jednolity (inaczej CAS w upsert_camera widziałby fałszywy rozjazd
+    `'3.76'` vs `3.76`). `raw_json` (gdzie indziej) zostaje 1:1 surowy.
 
     Reguła B (OSC): ZWO bez sufiksu (`^ASI\\d+$`) z kolorem potwierdzonym BAYERPAT (is_mono=0)
     → domknięcie na MC (`ASI294`→`ASI294MC`). NIGDY MM/MD — brak BAYERPAT zostaje review (nie
@@ -89,7 +91,7 @@ def camera_identity(header):
     raw_instrume = header.get("INSTRUME")
     model_canon = normalize_camera(raw_instrume)
     pixel_um = _to_float(header.get("XPIXSZ"))   # W3: XISF zwraca string → rzut na float
-    if not model_canon or pixel_um is None:
+    if not model_canon:
         return None
     mono, source = is_mono(bayerpat=header.get("BAYERPAT"), model_canon=model_canon)
     if mono == 0 and re.fullmatch(r"ASI\d+", model_canon):   # Reguła B: OSC ZWO + kolor → MC

@@ -1,10 +1,13 @@
-"""Schemat 0002 — tabele/widoki istnieją, kształt zgodny z briefem przejścia §8."""
+"""Schemat 0002 + 0003 — tabele/widoki istnieją, kształt zgodny z briefem przejścia §8
+i briefem writebacku §2 (staging krok 4)."""
 from horreum import db
 
 EXPECTED_TABLES = {
     "frame", "location", "header", "cards", "camera", "telescope", "config",
     "object", "object_alias", "event", "saved_query",
     "calibration", "integration", "integration_input",
+    # 0003 — staging writebacku (krok 4)
+    "pending_changes", "commits", "header_backups", "macros",
 }
 
 
@@ -72,5 +75,29 @@ def test_szkielet_przyszly_pusty(tmp_path):
     """calibration/integration* istnieją, ale puste (nie projektujemy pod dane, których nie ma)."""
     con = db.open_db(str(tmp_path / "h.db"))
     for t in ("calibration", "integration", "integration_input"):
+        assert con.execute(f"SELECT count(*) FROM {t}").fetchone()[0] == 0
+    con.close()
+
+
+def test_user_version_v3_po_migracji(tmp_path):
+    """0003 podnosi user_version do 3 (świeża baza leci 0002→0003 sekwencyjnie)."""
+    con = db.open_db(str(tmp_path / "h.db"))
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert db.SCHEMA_VERSION == 3
+    con.close()
+
+
+def test_staging_writeback_kluczowany_location(tmp_path):
+    """Staging krok 4 (brief writeback §2): pending_changes/header_backups kluczowane LOCATION
+    (fizyczny plik), nie frame; pending ma kotwicę expected_header_hash (R#7); header_backups
+    UNIQUE(commit_id, location_id); staging PUSTY po migracji."""
+    con = db.open_db(str(tmp_path / "h.db"))
+    pend_cols = {r[1] for r in con.execute("PRAGMA table_info(pending_changes)")}
+    assert {"location_id", "expected_header_hash", "op", "status"} <= pend_cols
+    assert "file_id" not in pend_cols and "frame_id" not in pend_cols
+    bkp_cols = {r[1] for r in con.execute("PRAGMA table_info(header_backups)")}
+    assert {"location_id", "post_hash", "header_text", "hdu_index"} <= bkp_cols
+    assert {"commit_id", "location_id"} <= _unique_cols(con, "header_backups")
+    for t in ("pending_changes", "commits", "header_backups", "macros"):
         assert con.execute(f"SELECT count(*) FROM {t}").fetchone()[0] == 0
     con.close()

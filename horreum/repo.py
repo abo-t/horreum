@@ -624,3 +624,63 @@ def unmerge_telescope(con, *, telescope_id, now, uid="local"):
                    target=f"telescope:{telescope_id}", now=now,
                    payload={"before": merged_into, "after": None})
     return True
+
+
+# ============================================================ STAGING WRITEBACKU (krok 4, transient)
+# Zapis do tabel stagingu (pending_changes/commits/header_backups) — DML, więc mieszka TU (jedna
+# klinga DB, meta-test AST). WYJĄTEK od reguły „każdy zapis emituje event": staging to TRANSIENT
+# BOOKKEEPING (nie encja domenowa, nie historia) — fakt domenowy writebacku (mutacja pliku) opisują
+# eventy `location.refreshed`/`header.refreshed`/`frame.rederived` emitowane przez `refresh_location`
+# w re-syncu po zapisie (actor="user:local"). Emisja eventu per wiersz stagingu = szum łamiący
+# append-only (R#1). Każda funkcja owija `with con:` → COMMITUJE od razu: writeback woła je między
+# `os.replace` a `ingest_record` (którego `refresh_location` bierze `BEGIN IMMEDIATE`), więc żadna
+# otwarta transakcja nie może wisieć (inaczej „transaction within a transaction").
+
+
+def stage_pending(con, *, run_id, location_id, keyword, idx, op, old_value, new_value,
+                  new_type, new_comment, expected_header_hash):
+    """Dopisz JEDEN wpis stagingu (status 'pending'). Kluczowany LOCATION (fizyczny plik). Zwraca id
+    wiersza. Transient — bez eventu. `expected_header_hash` = kotwica anty-stale (R#7)."""
+    with con:
+        cur = con.execute(
+            "INSERT INTO pending_changes(run_id, location_id, keyword, idx, op, old_value, "
+            "new_value, new_type, new_comment, expected_header_hash, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')",
+            (run_id, location_id, keyword, idx, op, old_value, new_value, new_type, new_comment,
+             expected_header_hash))
+    return cur.lastrowid
+
+
+def set_pending_status(con, *, pending_id, status, reason=None):
+    """Ustaw status wpisu stagingu ('applied'|'failed'|'skipped'|'blocked') + powód. Transient."""
+    with con:
+        con.execute("UPDATE pending_changes SET status = ?, reason = ? WHERE id = ?",
+                    (status, reason, pending_id))
+
+
+def clear_pending_for_run(con, run_id):
+    """Skasuj staging przebiegu (idempotentne ponowne uruchomienie makra / „Odrzuć" w szufladzie).
+    DELETE sankcjonowany: pending_changes to LUSTRO oczekujących zmian, nie historia (historia =
+    event). Transient — bez eventu."""
+    with con:
+        con.execute("DELETE FROM pending_changes WHERE run_id = ?", (run_id,))
+
+
+def insert_commit(con, *, run_id, now, summary=None):
+    """Utwórz wiersz `commits` (grupuje przebieg do undo). Zwraca commit_id. Transient — wskaźnik
+    grupujący, nie event (mutacje plików niosą eventy re-syncu)."""
+    with con:
+        cur = con.execute(
+            "INSERT INTO commits(run_id, applied_at, summary) VALUES (?, ?, ?)",
+            (run_id, now, summary))
+    return cur.lastrowid
+
+
+def insert_header_backup(con, *, commit_id, location_id, hdu_index, header_text, post_hash):
+    """Zapisz backup pełnego nagłówka SPRZED commitu (undo). `post_hash` = header_hash PO commicie
+    (kontrola undo). Append-only: nigdy nie kasowany. Transient — bez eventu."""
+    with con:
+        con.execute(
+            "INSERT INTO header_backups(commit_id, location_id, hdu_index, header_text, post_hash) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (commit_id, location_id, hdu_index, header_text, post_hash))

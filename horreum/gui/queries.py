@@ -272,6 +272,59 @@ def cards_pivot(con, frame_ids, keywords):
     ).fetchall()
 
 
+# ============================================================ WRITEBACK / makro (krok 4, read-model)
+# Read-model stagingu writebacku. Wszystko STAŁE LITERAŁY SELECT + `?` (bramka §7.1). Makro
+# (`horreum.macro`) woła te czytniki, sam nie dotyka DB; zapis idzie przez `repo`. Cel writebacku =
+# LOCATION (fizyczny plik), więc topologia present-location jest tu, nie na frame.
+
+
+def writeback_frame_targets(con, frame_ids):
+    """Dla zbioru frame_id: filetype (frame) + KAŻDA OBECNA (`present=1`) location z faktami kopii
+    potrzebnymi do zapisu (header_hash/hdu_index/compressed). Frame BEZ obecnej kopii → wiersz z
+    location_id NULL (makro odróżni „brak kopii" od wielu kopii licząc wiersze per frame). frame_ids
+    jako TABLICA JSON (`json_each`, jeden param). Wybór celu (D-W1: dokładnie 1 present; D-W2: nie XISF)
+    robi makro, nie ten czytnik. ORDER BY frame_id, location_id. Zwraca: frame_id, filetype,
+    location_id, path, header_hash, hdu_index, compressed."""
+    return con.execute(
+        "SELECT f.id AS frame_id, f.filetype, "
+        "       l.id AS location_id, l.path, l.header_hash, l.hdu_index, l.compressed "
+        "FROM frame f "
+        "LEFT JOIN location l ON l.frame_id = f.id AND l.present = 1 "
+        "WHERE f.id IN (SELECT value FROM json_each(?)) "
+        "ORDER BY f.id, l.id",
+        (json.dumps(list(frame_ids)),),
+    ).fetchall()
+
+
+def frame_for_location(con, location_id):
+    """frame_id stojący pod daną LOCATION — mapowanie podglądu makra (touched niesie location_id,
+    grid kluczuje frame). Zwraca int albo None."""
+    row = con.execute("SELECT frame_id FROM location WHERE id = ?", (location_id,)).fetchone()
+    return row["frame_id"] if row else None
+
+
+def frame_cards(con, frame_id):
+    """Wszystkie karty jednego frame'a (lustro EAV) do budowy `env` makra i reguł set/add. Sort po
+    (keyword, idx) — makro bierze pierwsze wystąpienie jako env, liczy kardynalność. Zwraca:
+    keyword, idx, value_raw, value_num, value_type, comment."""
+    return con.execute(
+        "SELECT keyword, idx, value_raw, value_num, value_type, comment "
+        "FROM cards WHERE frame_id = ? ORDER BY keyword, idx",
+        (frame_id,),
+    ).fetchall()
+
+
+def location_cards(con, location_id):
+    """Karty frame'a stojącego pod daną LOCATION (dla ręcznej edycji komórki gridu — grid=frame,
+    ale cel edycji = fizyczny plik = location). Zwraca jak `frame_cards`."""
+    return con.execute(
+        "SELECT c.keyword, c.idx, c.value_raw, c.value_num, c.value_type, c.comment "
+        "FROM cards c JOIN location l ON l.frame_id = c.frame_id "
+        "WHERE l.id = ? ORDER BY c.keyword, c.idx",
+        (location_id,),
+    ).fetchall()
+
+
 def base_rows(con, frame_ids):
     """Kolumny BAZOWE gridu (warstwa interpretacji NAD lustrem cards) dla zbioru frame_id. Location przez
     `MIN(id)` BEZ odsiewania po `present` — `present` to KOLUMNA, nie predykat (F3: klatka zniknięta MUSI

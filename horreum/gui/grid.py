@@ -14,15 +14,18 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
+from datetime import datetime, timezone
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, QSettings, Signal
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtGui import QColor, QFont, QGuiApplication
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
-    QListWidget, QListWidgetItem, QPushButton, QSplitter, QTableView, QVBoxLayout, QWidget,
+    QAbstractItemView, QComboBox, QFrame, QHBoxLayout, QHeaderView, QInputDialog,
+    QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QSplitter,
+    QTableView, QVBoxLayout, QWidget,
 )
 
-from horreum import filter_engine, pivot as pivot_mod
+from horreum import filter_engine, macro as macro_mod, pivot as pivot_mod, repo, writeback
 from horreum.gui import queries
 
 # Kolumny bazowe: (nagłówek, klucz). Klucze `_telescope`/`_object` = pochodne (fallback etykiety).
@@ -35,6 +38,8 @@ _MISSING_COLOR = QColor(0x99, 0x99, 0x99)
 _VANISHED_BG = QColor(0xFF, 0xE5, 0xE5)     # blady czerwony: wszystkie lokalizacje present=0
 _DUP_BG = QColor(0xE5, 0xF0, 0xFF)          # blady niebieski: >1 obecna lokalizacja (Duplikaty)
 _GROUP_BG = QColor(0xEE, 0xEE, 0xEE)        # tło nagłówka grupy
+_TOUCHED_BG = QColor(0xE3, 0xF6, 0xE3)      # blady zielony: wiersz DOTKNIĘTY makrem (podgląd widoczny bez scrolla)
+_SKIPPED_BG = QColor(0xF2, 0xF2, 0xF2)      # blady szary: wiersz POMINIĘTY przez makro (z powodem)
 
 # Operatory filtra: etykieta → op (glif+słowo dla czytelności; regex POMINIĘTY, D-F).
 OPERATORS = [
@@ -91,6 +96,17 @@ class GridTableModel(QAbstractTableModel):
         self._group_by = None
         self._sort_col = 0
         self._sort_desc = False
+        self._preview = {}       # frame_id → {'keyword','old','new'} | {'skipped': reason} (podgląd makra, KROK 4)
+
+    def set_preview(self, preview):
+        """Podgląd makra (doktryna §5: „grid = podgląd makra"): frame_id → zmiana (stara→nowa) albo
+        pominięcie z powodem. Dokłada EFEMERYCZNĄ kolumnę „makro →" na końcu; `{}`/None ją zdejmuje."""
+        self.beginResetModel()
+        self._preview = dict(preview or {})
+        self.endResetModel()
+
+    def _preview_active(self):
+        return bool(self._preview)
 
     def set_data(self, base_rows, pivot, keywords, group_by=None):
         """base_rows: list[dict] (z `_derive`); pivot: horreum.pivot.Pivot; keywords: list[str]."""
@@ -107,12 +123,20 @@ class GridTableModel(QAbstractTableModel):
         return 0 if parent.isValid() else len(self._rows)
 
     def columnCount(self, parent=QModelIndex()):
-        return 0 if parent.isValid() else len(BASE_COLS) + len(self._keywords)
+        if parent.isValid():
+            return 0
+        return len(BASE_COLS) + len(self._keywords) + (1 if self._preview_active() else 0)
+
+    def _preview_col(self):
+        """Indeks efemerycznej kolumny podglądu makra (ostatnia) albo None, gdy podgląd nieaktywny."""
+        return len(BASE_COLS) + len(self._keywords) if self._preview_active() else None
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
         if role != Qt.DisplayRole:
             return None
         if orientation == Qt.Horizontal:
+            if section == self._preview_col():
+                return "makro →"
             if section < len(BASE_COLS):
                 return BASE_COLS[section][0]
             return self._keywords[section - len(BASE_COLS)]
@@ -146,14 +170,44 @@ class GridTableModel(QAbstractTableModel):
                 f = QFont(); f.setBold(True); return f
             return None
 
+        if col == self._preview_col():
+            return self._preview_cell(row, role)
         if col < len(BASE_COLS):
             return self._base_cell(row, self._col_key(col), role)
         return self._kw_cell(row, self._kw_for_col(col), role)
+
+    def _preview_cell(self, row, role):
+        """Komórka podglądu makra: dotknięty frame → „stara → nowa" (tooltip pełny); pominięty →
+        „(pominięto)" z powodem w tooltipie; nietknięty → pusto (doktryna §5)."""
+        pv = self._preview.get(row.get("frame_id"))
+        if pv is None:
+            return None
+        if "skipped" in pv:
+            if role == Qt.DisplayRole:
+                return "(pominięto)"
+            if role == Qt.ForegroundRole:
+                return _MISSING_COLOR
+            if role == Qt.ToolTipRole:
+                return f"pominięto: {pv['skipped']}"
+            return None
+        if role == Qt.DisplayRole:
+            old = "∅" if pv.get("old") is None else str(pv["old"])
+            return f"{old} → {pv['new']}"
+        if role == Qt.ToolTipRole:
+            return f"{pv['keyword']}: {pv.get('old')!r} → {pv['new']!r} ({pv['op']})"
+        if role == Qt.FontRole:
+            f = QFont(); f.setBold(True); return f
+        return None
 
     def _base_cell(self, row, key, role):
         vanished = row.get("present") == 0 and (row.get("n_present") or 0) == 0
         dup = (row.get("n_present") or 0) > 1
         if role == Qt.BackgroundRole:
+            # Podgląd makra WYGRYWA tło (bieżący fokus): dotknięty/pominięty wiersz widoczny w
+            # kolumnach bazowych NIEZALEŻNIE od scrolla poziomego (wizytator #1/#2 — „widać zanim zapiszesz").
+            pv = self._preview.get(row.get("frame_id")) if self._preview else None
+            if pv is not None:
+                return _SKIPPED_BG if "skipped" in pv else _TOUCHED_BG
             if vanished:
                 return _VANISHED_BG
             if dup:
@@ -205,6 +259,8 @@ class GridTableModel(QAbstractTableModel):
 
     def _sort_key(self, row):
         col = self._sort_col
+        if col >= len(BASE_COLS) + len(self._keywords):   # kolumna podglądu makra → sort neutralny
+            return (0, "")
         kw = self._kw_for_col(col)
         if kw is None:
             v = row.get(self._col_key(col))
@@ -395,22 +451,157 @@ class FieldsPanel(QWidget):
             self.columnsChanged.emit(self.checked_keywords())
 
 
+class MacroBar(QWidget):
+    """Zwijany pasek makra (doktryna §5: „makro = zwijany pasek obok filtra") — sekcje Oblicz/Przypisz.
+    Emituje `preview(dict)` (policz i pokaż w gridzie, BEZ zapisu), `stage(dict)` (do szuflady),
+    `cleared()`. Makro operuje na tym, co widać w gridzie (frame_ids wołającego)."""
+
+    preview = Signal(object)
+    stage = Signal(object)
+    cleared = Signal()
+
+    def __init__(self, keywords, parent=None):
+        super().__init__(parent)
+        self._keywords = keywords
+        outer = QVBoxLayout(self); outer.setContentsMargins(0, 0, 0, 0)
+        head = QHBoxLayout()
+        self.toggle = QPushButton("▸ Makro (edycja nagłówków)")
+        self.toggle.setCheckable(True)
+        self.toggle.clicked.connect(self._on_toggle)
+        head.addWidget(self.toggle); head.addStretch(1)
+        outer.addLayout(head)
+
+        self.body = QWidget(); self.body.setVisible(False)
+        b = QVBoxLayout(self.body); b.setContentsMargins(12, 4, 0, 4)
+        # Oblicz (opcjonalny krok pośredni: nazwa = wyrażenie)
+        comp = QHBoxLayout()
+        comp.addWidget(QLabel("Oblicz:"))
+        self.comp_name = QLineEdit(); self.comp_name.setPlaceholderText("nazwa (opc.)")
+        self.comp_name.setFixedWidth(120)
+        self.comp_expr = QLineEdit(); self.comp_expr.setPlaceholderText("wyrażenie, np. FOCALLEN / FOCRATIO")
+        comp.addWidget(self.comp_name); comp.addWidget(QLabel("=")); comp.addWidget(self.comp_expr, 1)
+        b.addLayout(comp)
+        # Przypisz (keyword op wartość)
+        asg = QHBoxLayout()
+        asg.addWidget(QLabel("Przypisz:"))
+        self.asg_kw = QComboBox(); self.asg_kw.setEditable(True); self.asg_kw.addItems(keywords)
+        self.asg_kw.setFixedWidth(160)
+        self.asg_op = QComboBox(); self.asg_op.addItems(["set", "add"])
+        self.asg_expr = QLineEdit(); self.asg_expr.setPlaceholderText("wartość lub wyrażenie, np. round(new, 2)")
+        asg.addWidget(self.asg_kw); asg.addWidget(self.asg_op); asg.addWidget(QLabel("=")); asg.addWidget(self.asg_expr, 1)
+        b.addLayout(asg)
+        # akcje
+        act = QHBoxLayout()
+        self.btn_prev = QPushButton("Podgląd"); self.btn_prev.clicked.connect(self._emit_preview)
+        self.btn_stage = QPushButton("Do stagingu"); self.btn_stage.clicked.connect(self._emit_stage)
+        btn_clear = QPushButton("Wyczyść podgląd"); btn_clear.clicked.connect(lambda: self.cleared.emit())
+        act.addStretch(1); act.addWidget(self.btn_prev); act.addWidget(self.btn_stage); act.addWidget(btn_clear)
+        b.addLayout(act)
+        outer.addWidget(self.body)
+
+    def set_actions_enabled(self, on):
+        """Wyłącz Podgląd/Do stagingu, gdy nie ma widocznych klatek (szczery disabled zamiast cichego
+        no-op — wizytator #4). `Wyczyść podgląd` zostaje aktywny (zdejmuje ewentualny stary podgląd)."""
+        self.btn_prev.setEnabled(on)
+        self.btn_stage.setEnabled(on)
+
+    def set_keywords(self, keywords):
+        self._keywords = keywords
+        cur = self.asg_kw.currentText()
+        self.asg_kw.blockSignals(True)
+        self.asg_kw.clear(); self.asg_kw.addItems(keywords); self.asg_kw.setCurrentText(cur)
+        self.asg_kw.blockSignals(False)
+
+    def _on_toggle(self, checked):
+        self.body.setVisible(checked)
+        self.toggle.setText(("▾ " if checked else "▸ ") + "Makro (edycja nagłówków)")
+
+    def macro_def(self):
+        """Zbierz definicję makra z pól (None, gdy brak keyworda/wartości przypisania)."""
+        kw = self.asg_kw.currentText().strip()
+        expr = self.asg_expr.text().strip()
+        if not kw or not expr:
+            return None
+        md = {"assign": {"keyword": kw, "op": self.asg_op.currentText(), "expr": expr}}
+        cname, cexpr = self.comp_name.text().strip(), self.comp_expr.text().strip()
+        if cname and cexpr:
+            md["computes"] = [{"name": cname, "expr": cexpr}]
+        return md
+
+    def _emit_preview(self):
+        md = self.macro_def()
+        if md is not None:
+            self.preview.emit(md)
+
+    def _emit_stage(self):
+        md = self.macro_def()
+        if md is not None:
+            self.stage.emit(md)
+
+
+class StagingDrawer(QFrame):
+    """Stała szuflada dolna stagingu (doktryna §5: „N zmian oczekuje · Przejrzyj · Zatwierdź · Odrzuć").
+    Postęp i wynik commitu renderują się TU (nie w łańcuchu modali). Emituje `commit()`/`reject()`."""
+
+    commit = Signal()
+    reject = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFrameShape(QFrame.StyledPanel)
+        lay = QHBoxLayout(self); lay.setContentsMargins(8, 4, 8, 4)
+        self.dot = QLabel("○")
+        self.label = QLabel("Brak zmian oczekujących")
+        self.result = QLabel(""); self.result.setStyleSheet("color: #666;")
+        self.btn_commit = QPushButton("Zatwierdź"); self.btn_commit.clicked.connect(lambda: self.commit.emit())
+        self.btn_reject = QPushButton("Odrzuć"); self.btn_reject.clicked.connect(lambda: self.reject.emit())
+        lay.addWidget(self.dot); lay.addWidget(self.label); lay.addSpacing(8)
+        lay.addWidget(self.result, 1); lay.addWidget(self.btn_commit); lay.addWidget(self.btn_reject)
+        self.set_count(0)
+
+    def set_count(self, n, *, result=None):
+        self._n = n
+        if n > 0:
+            self.dot.setText("⬤"); self.dot.setStyleSheet("color: #d08000;")
+            self.label.setText(f"{n} zmian oczekuje")
+        else:
+            self.dot.setText("○"); self.dot.setStyleSheet("color: #999;")
+            self.label.setText("Brak zmian oczekujących")
+        self.btn_commit.setEnabled(n > 0)
+        self.btn_reject.setEnabled(n > 0)
+        # Nowy staging (n>0) chowa ewentualny stary „Cofnij"; commit/reject znów widoczne (#5).
+        if n > 0:
+            self.set_commit_actions_visible(True)
+        if result is not None:
+            self.result.setText(result)
+
+    def set_commit_actions_visible(self, on):
+        """Pokaż/ukryj Zatwierdź+Odrzuć. Po commicie chowamy je, bo jedyną sensowną akcją jest
+        „Cofnij" (wizytator #5 — nie mieszać żywego Cofnij z wyszarzonym Zatwierdź/Odrzuć)."""
+        self.btn_commit.setVisible(on)
+        self.btn_reject.setVisible(on)
+
+
 class FramesView(QWidget):
-    """Widok „Klatki": panel Pól | (perspektywa + filtr + grupowanie + grid). READ-ONLY. Kontrakt montażu
-    `MainWindow`: `__init__(con, now_fn, parent)`, sygnał `status_message`, `refresh()`. `now_fn` nieużywane
-    (brak zapisu) — dla spójności sygnatury."""
+    """Widok „Klatki": panel Pól | (perspektywa + filtr + makro + grupowanie + grid) + szuflada stagingu.
+    Kontrakt montażu `MainWindow`: `__init__(con, now_fn, parent)`, sygnał `status_message`, `refresh()`.
+    KROK 4: makro (druga klinga) — filtr→oblicz→przypisz na widocznych klatkach, staging, commit/undo."""
 
     status_message = Signal(str)
 
     def __init__(self, con, now_fn=None, parent=None):
         super().__init__(parent)
         self.con = con
+        self._now = now_fn or (lambda: datetime.now(timezone.utc).isoformat())
         self._filter_tree = None
         self._only_dups = False
         self._only_review = False
+        self._frame_ids = []      # frame_id widoczne w gridzie (cel makra) — aktualizowane w refresh()
+        self._run_id = None       # JEDEN run_id sesji makra (R#5 lifecycle: stage→commit/reject zwalnia)
         self._build_ui()
         self._load_facets()
         self.refresh()
+        self._refresh_drawer()
 
     # ---- budowa ----
     def _build_ui(self):
@@ -449,6 +640,12 @@ class FramesView(QWidget):
         self.filter_panel.filterApplied.connect(self._on_filter)
         rv.addWidget(self.filter_panel)
 
+        self.macro_bar = MacroBar([])
+        self.macro_bar.preview.connect(self._on_macro_preview)
+        self.macro_bar.stage.connect(self._on_macro_stage)
+        self.macro_bar.cleared.connect(self._on_macro_clear)
+        rv.addWidget(self.macro_bar)
+
         self.model = GridTableModel(self)
         self.table = QTableView()
         self.table.setModel(self.model)
@@ -470,6 +667,11 @@ class FramesView(QWidget):
         splitter.setStretchFactor(1, 4)
         outer.addWidget(splitter, 1)   # stretch: grid dominuje okno (doktryna §5), pasek nie zjada połowy (P2-1)
 
+        self.drawer = StagingDrawer()  # stała szuflada dolna stagingu (doktryna §5)
+        self.drawer.commit.connect(self._on_commit)
+        self.drawer.reject.connect(self._on_reject)
+        outer.addWidget(self.drawer)
+
     # ---- facety / perspektywy ----
     def _load_facets(self):
         facets = list(queries.keyword_facets(self.con))
@@ -481,6 +683,7 @@ class FramesView(QWidget):
         self.fields.load(ordered, set(default))
         self._columns = default
         self.filter_panel._keywords = self._all_keywords
+        self.macro_bar.set_keywords(self._all_keywords)
         # perspektywy: presety + zapisane w QSettings
         self.combo_persp.blockSignals(True)
         self.combo_persp.clear()
@@ -575,6 +778,7 @@ class FramesView(QWidget):
             base = [b for b in base
                     if b.get("object_canon") is None and b.get("kind") in ("light", "master_light")]
         base_ids = [b["frame_id"] for b in base]
+        self._frame_ids = base_ids     # cel makra = to, co WIDAĆ (po filtrach dups/review), doktryna §5
         keywords = list(self._columns)
         rows = queries.cards_pivot(self.con, base_ids, keywords) if (base_ids and keywords) else []
         pv = pivot_mod.build_pivot(base_ids, keywords, rows)
@@ -583,4 +787,150 @@ class FramesView(QWidget):
         self.count_label.setText(f"{n} klatek")
         self.empty.setVisible(n == 0)
         self.table.setVisible(n > 0)
+        self.macro_bar.set_actions_enabled(bool(base_ids))   # szczery disabled makra na pustym gridzie (#4)
         self.status_message.emit(f"Grid: {n} klatek, {len(keywords)} kolumn-keywordów")
+
+    # ---- makro / staging (KROK 4, druga klinga) ----
+    def _targets_fn(self, frame_ids):
+        return queries.writeback_frame_targets(self.con, frame_ids)
+
+    def _cards_fn(self, frame_id):
+        return queries.frame_cards(self.con, frame_id)
+
+    def _run(self, md, run_id=None):
+        """Uruchom makro nad widocznymi frame_ids (czysty silnik + wstrzyknięte akcesory). Błąd
+        DEFINICJI makra (skladnia/węzeł) → komunikat, None."""
+        try:
+            return macro_mod.run_macro(md, self._frame_ids, targets_fn=self._targets_fn,
+                                       cards_fn=self._cards_fn, run_id=run_id)
+        except (macro_mod.expr.ExprError, ValueError) as exc:
+            # Błąd DEFINICJI makra → sprzężenie w szufladzie + status (bez modalu — doktryna §5, #3).
+            self.drawer.set_count(self._pending_count(), result=f"Błąd makra: {exc}")
+            self.status_message.emit(f"Błąd makra: {exc}")
+            return None
+
+    def _show_preview(self, run):
+        """Wrzuć podgląd makra do modelu (stara→nowa / pominięto) i zwróć (touched, skipped).
+        Grid kluczuje FRAME, a touched niesie location_id → mapuj przez `location.frame_id`."""
+        preview = {}
+        for pv in run.touched:
+            fid = self._frame_for_location(pv.location_id)
+            if fid is not None:
+                preview[fid] = {"keyword": pv.keyword, "old": pv.old_value, "new": pv.new_value,
+                                "op": pv.op}
+        for sk in run.skipped:
+            preview[sk.frame_id] = {"skipped": sk.reason}
+        self.model.set_preview(preview)
+        return len(run.touched), len(run.skipped)
+
+    def _frame_for_location(self, location_id):
+        return queries.frame_for_location(self.con, location_id)
+
+    def _on_macro_preview(self, md):
+        if not self._frame_ids:
+            self.status_message.emit("Makro: brak widocznych klatek do policzenia")
+            return
+        run = self._run(md)
+        if run is None:
+            return
+        t, s = self._show_preview(run)
+        self.status_message.emit(f"Podgląd makra: {t} do zapisu, {s} pominięto")
+
+    def _on_macro_stage(self, md):
+        if not self._frame_ids:
+            self.status_message.emit("Makro: brak widocznych klatek")
+            return
+        if self._run_id is None:
+            self._run_id = uuid.uuid4().hex
+        repo.clear_pending_for_run(self.con, self._run_id)   # idempotentny re-stage (R#5)
+        run = self._run(md, run_id=self._run_id)
+        if run is None:
+            return
+        for p in run.touched:
+            repo.stage_pending(
+                self.con, run_id=self._run_id, location_id=p.location_id, keyword=p.keyword,
+                idx=p.idx, op=p.op, old_value=p.old_value, new_value=p.new_value,
+                new_type=p.new_type, new_comment=p.comment,
+                expected_header_hash=p.expected_header_hash)
+        self._show_preview(run)
+        self._refresh_drawer()
+        self.status_message.emit(f"Do stagingu: {len(run.touched)} zmian, {len(run.skipped)} pominięto")
+
+    def _on_macro_clear(self):
+        self.model.set_preview({})
+        self.status_message.emit("Podgląd makra wyczyszczony")
+
+    def _pending_count(self):
+        if self._run_id is None:
+            return 0
+        return sum(1 for r in writeback.pending_for_run(self.con, self._run_id)
+                   if r["status"] == "pending")
+
+    def _refresh_drawer(self):
+        self.drawer.set_count(self._pending_count())
+
+    def _on_commit(self):
+        if self._run_id is None:
+            return
+        QGuiApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            res = writeback.commit(self.con, self._run_id, now=self._now())
+        finally:
+            QGuiApplication.restoreOverrideCursor()
+        parts = [f"{len(res.applied)} zapisanych"]
+        if res.blocked:
+            parts.append(f"{len(res.blocked)} zablokowanych")
+        if res.failed:
+            parts.append(f"{len(res.failed)} błędów")
+        if res.skipped:
+            parts.append(f"{len(res.skipped)} pominiętych")
+        summary = " · ".join(parts)
+        if res.commit_id is not None and res.applied:
+            summary += f"  (commit {res.commit_id})"
+            self._last_commit_id = res.commit_id
+            self._install_undo(res.commit_id, summary)
+        else:
+            self.drawer.set_count(self._pending_count(), result=summary)
+        self._run_id = None                              # R#5: run domknięty commitem
+        self.model.set_preview({})
+        self.refresh()                                   # baza odświeżona — grid pokazuje nowe wartości
+        self._refresh_drawer()
+        self.status_message.emit(f"Writeback: {summary}")
+
+    def _install_undo(self, commit_id, summary):
+        """Po udanym commicie szuflada oferuje jednorazowe „Cofnij" (undo całego commitu). Przycisk
+        tworzony i podłączany RAZ (stabilny handler czyta `self._undo_commit_id`) — bez churnu
+        connect/disconnect (który sypał RuntimeWarning)."""
+        self.drawer.set_count(0, result=summary)
+        self.drawer.set_commit_actions_visible(False)   # jedyna sensowna akcja teraz to Cofnij (#5)
+        self._undo_commit_id = commit_id
+        if not hasattr(self, "_undo_btn"):
+            self._undo_btn = QPushButton("Cofnij")
+            self._undo_btn.clicked.connect(lambda: self._on_undo(self._undo_commit_id))
+            self.drawer.layout().addWidget(self._undo_btn)
+        self._undo_btn.setVisible(True)
+
+    def _on_undo(self, commit_id):
+        QGuiApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            res = writeback.undo(self.con, commit_id, now=self._now())
+        finally:
+            QGuiApplication.restoreOverrideCursor()
+        msg = f"{len(res.restored)} przywróconych"
+        if res.blocked:
+            msg += f" · {len(res.blocked)} zablokowanych"
+        self._undo_btn.setVisible(False)
+        self.drawer.set_commit_actions_visible(True)     # przywróć akcje po cofnięciu (#5)
+        self.drawer.set_count(0, result=msg)
+        self.refresh()
+        self.status_message.emit(f"Undo: {msg}")
+
+    def _on_reject(self):
+        if self._run_id is None:
+            return
+        n = self._pending_count()
+        repo.clear_pending_for_run(self.con, self._run_id)
+        self._run_id = None
+        self.model.set_preview({})
+        self.drawer.set_count(0, result=f"Odrzucono {n} zmian")   # trwałe sprzężenie w szufladzie (#3)
+        self.status_message.emit(f"Odrzucono {n} zmian")

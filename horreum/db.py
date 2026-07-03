@@ -11,8 +11,11 @@ from importlib import resources
 # (wersja, plik migracji) — kolejność rosnąca; user_version po zastosowaniu = wersja ostatniej.
 # 0002 ZASTĘPUJE 0001 (przejście fitsmirror, D-A/R2#12): świeża baza dostaje od razu v2;
 # przedpotopowa baza v1 (sprzed przejścia) nie ma ścieżki migracji — jawny błąd w migrate().
+# 0003 to PRZYROST (staging writebacku, KROK 4): baza v2 dostaje puste tabele stagingu, świeża
+# leci 0002→0003 sekwencyjnie. Zero zmian istniejących tabel (D3: re-skan, nie konwerter).
 MIGRATIONS = [
     (2, "0002_initial.sql"),
+    (3, "0003_writeback.sql"),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 _KNOWN_VERSIONS = frozenset({0} | {v for v, _ in MIGRATIONS})

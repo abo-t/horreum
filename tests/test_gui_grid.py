@@ -205,3 +205,78 @@ def test_view_grupowanie(view):
     view.combo_group.setCurrentIndex(idx)
     groups = [r for r in view.model._rows if "_group" in r]
     assert {g["_group"] for g in groups} == {"light", "master_flat"}
+
+
+# ---------- FramesView: makro / writeback (KROK 4) ----------
+
+@pytest.fixture
+def wb_view(qapp, tmp_path, monkeypatch):
+    """FramesView nad bazą z JEDNYM realnym plikiem FITS (writeback rusza dysk — potrzebny prawdziwy)."""
+    import numpy as np
+    from astropy.io import fits
+    from PySide6.QtCore import QSettings
+    from horreum import scan
+    from horreum.gui.grid import FramesView
+    monkeypatch.setattr(QSettings, "value", lambda self, k, d=None: d)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: None)
+    p = tmp_path / "wb.fits"
+    hdu = fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.int16))
+    hdu.header["TELESCOP"] = "RC8"; hdu.header["IMAGETYP"] = "Light"
+    hdu.writeto(str(p), overwrite=True)
+    con = db.open_db(str(tmp_path / "wb.db"))
+    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary())
+    v = FramesView(con, now_fn=lambda: NOW)
+    yield v, con, p
+    con.close()
+
+
+def test_macro_preview_populates_column(wb_view):
+    view, con, p = wb_view
+    view.macro_bar.asg_kw.setCurrentText("TELESCOP")
+    view.macro_bar.asg_op.setCurrentIndex(0)  # set
+    view.macro_bar.asg_expr.setText("SkyWatcher RC8")
+    view.macro_bar._emit_preview()
+    # kolumna „makro →" dołożona, komórka = stara→nowa
+    from horreum.gui.grid import BASE_COLS
+    pcol = len(BASE_COLS) + len(view._columns)
+    assert view.model.columnCount() == pcol + 1
+    txt = view.model.data(view.model.index(0, pcol), Qt.DisplayRole)
+    assert txt == "RC8 → SkyWatcher RC8"
+    # wizytator #1/#2: dotknięty wiersz ma TŁO w kolumnach bazowych (widoczne bez scrolla)
+    bg = view.model.data(view.model.index(0, 0), Qt.BackgroundRole)
+    from horreum.gui.grid import _TOUCHED_BG
+    assert bg == _TOUCHED_BG
+    # podgląd NIE zapisuje: staging pusty
+    assert view._pending_count() == 0
+
+
+def test_macro_stage_then_commit_edits_file(wb_view):
+    view, con, p = wb_view
+    from astropy.io import fits
+    view.macro_bar.asg_kw.setCurrentText("TELESCOP")
+    view.macro_bar.asg_op.setCurrentIndex(0)
+    view.macro_bar.asg_expr.setText("EQ6")
+    view.macro_bar._emit_stage()
+    assert view._pending_count() == 1 and view.drawer._n == 1
+
+    view._on_commit()
+    assert fits.getheader(str(p))["TELESCOP"] == "EQ6"   # plik zmieniony
+    assert view._run_id is None                          # run domknięty (R#5)
+    assert view._pending_count() == 0
+    assert hasattr(view, "_last_commit_id")
+
+    # cofnij przez szufladę
+    view._on_undo(view._last_commit_id)
+    assert fits.getheader(str(p))["TELESCOP"] == "RC8"   # przywrócone
+
+
+def test_macro_reject_clears_staging(wb_view):
+    view, con, p = wb_view
+    view.macro_bar.asg_kw.setCurrentText("TELESCOP")
+    view.macro_bar.asg_op.setCurrentIndex(0)
+    view.macro_bar.asg_expr.setText("EQ6")
+    view.macro_bar._emit_stage()
+    assert view._pending_count() == 1
+    view._on_reject()
+    assert view._run_id is None and view._pending_count() == 0
+    assert view.model._preview == {}

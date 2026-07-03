@@ -11,9 +11,10 @@ import horreum
 
 PKG = Path(horreum.__file__).parent
 # Jedyne pliki, którym wolno importować PySide6. `pipeline.py` (widok Pipeline + worker QThread —
-# PLAN_gui_pipeline §5) DOŁĄCZONY w etapie 2: to warstwa widżetów, import Qt uprawniony. Rdzeń,
-# read-model (`queries.py`) i logika progresu Qt-wolna (`progress.py`) zostają BEZ Qt.
-QT_WIDGET_FILES = {"app.py", "__main__.py", "pipeline.py"}
+# PLAN_gui_pipeline §5) DOŁĄCZONY w etapie 2; `grid.py` (widok „Klatki" + model tabeli — PLAN_gui_grid,
+# krok 3 scalenia) DOŁĄCZONY w kroku 3: warstwy widżetów, import Qt uprawniony. Rdzeń, read-model
+# (`queries.py`), silnik filtra/pivot (`filter_engine.py`/`pivot.py`) i progres (`progress.py`) zostają BEZ Qt.
+QT_WIDGET_FILES = {"app.py", "__main__.py", "pipeline.py", "grid.py"}
 
 
 def _imports_pyside6(path):

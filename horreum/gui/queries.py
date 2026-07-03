@@ -7,8 +7,11 @@ wyłącznie **`con.execute`** (bez pandas/ORM/`read_sql` — ścieżki niewidzia
 `EXEC_METHODS=execute*`). Dynamiczny SQL (f-string) w tym pliku WYSADZIŁBY bramkę §7.1, mimo że to
 czysty odczyt: `_first_sql_verb` zwraca `None` dla nie-literału, a `None` poza `repo.py`/`db.py`
 = offender. Warianty/filtry => parametry `?` w stałym literale albo OSOBNE literały w gałęziach `if`,
-NIGDY składanie stringa SQL.
+NIGDY składanie stringa SQL. Listy zmiennej długości (id/keywordy) idą jako TABLICA JSON przez
+`json_each(?)` — literał stały, jeden parametr (zamiast dynamicznych `?` — PLAN_gui_grid §3).
 """
+
+import json
 
 
 def active_telescopes(con):
@@ -194,4 +197,104 @@ def filter_facets(con):
     """Distinct realnie występujące `filter_canon` do kontrolki filtra. Zwraca: filter_canon."""
     return con.execute(
         "SELECT DISTINCT filter_canon FROM frame WHERE filter_canon IS NOT NULL ORDER BY filter_canon"
+    ).fetchall()
+
+
+# ============================================================ GRID „Klatki" (PLAN_gui_grid §3, read-only)
+# Read-model gridu nad EAV `cards`. Silnik filtra (`horreum.filter_engine`) woła `leaf_frame_ids`
+# (predykat-liść → zbiór) i `all_frame_ids` (uniwersum); pivot (`horreum.pivot`) dostaje wiersze z
+# `cards_pivot`; kolumny bazowe z `base_rows`. Każdy predykat-liść = OSOBNY literał w gałęzi `if`
+# (skill ast-write-gate-read-model-sql-literals) — NIGDY f-string. `kind` wybiera literał; wartości `?`.
+
+
+def all_frame_ids(con):
+    """UNIWERSUM filtra = WSZYSTKIE frame (w tym XISF bez cards i zniknięte present=0 — F1). Baza dla
+    `not_exists` i `filter=None`. NIGDY z `DISTINCT frame_id FROM cards` (gubiłoby XISF). Zwraca set[int]."""
+    return {int(r[0]) for r in con.execute("SELECT id FROM frame").fetchall()}
+
+
+def leaf_frame_ids(con, kind, keyword, p1=None, p2=None):
+    """Predykat-liść filtra → set[frame_id]. `kind` (z `filter_engine`) wybiera OSOBNY literał; keyword i
+    wartości wiązane `?`. Numeryczne po `value_num` (wiersze NULL wypadają same); tekstowe po `value_raw`;
+    liczbo-podobne trafiają oba; `like` po `value_raw LIKE ? ESCAPE`. Semantyka 1:1 z dawcą `query.py`."""
+    if kind == "exists":
+        cur = con.execute("SELECT frame_id FROM cards WHERE keyword = ?", (keyword,))
+    elif kind == "num_gt":
+        cur = con.execute("SELECT frame_id FROM cards WHERE keyword = ? AND value_num > ?", (keyword, p1))
+    elif kind == "num_lt":
+        cur = con.execute("SELECT frame_id FROM cards WHERE keyword = ? AND value_num < ?", (keyword, p1))
+    elif kind == "num_ge":
+        cur = con.execute("SELECT frame_id FROM cards WHERE keyword = ? AND value_num >= ?", (keyword, p1))
+    elif kind == "num_le":
+        cur = con.execute("SELECT frame_id FROM cards WHERE keyword = ? AND value_num <= ?", (keyword, p1))
+    elif kind == "eq_raw":
+        cur = con.execute("SELECT frame_id FROM cards WHERE keyword = ? AND value_raw = ?", (keyword, p1))
+    elif kind == "ne_raw":
+        cur = con.execute("SELECT frame_id FROM cards WHERE keyword = ? AND value_raw <> ?", (keyword, p1))
+    elif kind == "eq_rawnum":
+        cur = con.execute(
+            "SELECT frame_id FROM cards WHERE keyword = ? AND (value_raw = ? OR value_num = ?)",
+            (keyword, p1, p2),
+        )
+    elif kind == "ne_rawnum":
+        cur = con.execute(
+            "SELECT frame_id FROM cards "
+            "WHERE keyword = ? AND value_raw <> ? AND (value_num IS NULL OR value_num <> ?)",
+            (keyword, p1, p2),
+        )
+    elif kind == "like":
+        cur = con.execute(
+            "SELECT frame_id FROM cards WHERE keyword = ? AND value_raw LIKE ? ESCAPE '\\'", (keyword, p1)
+        )
+    else:
+        raise ValueError(f"nieznany kind liścia: {kind!r}")
+    return {int(r[0]) for r in cur.fetchall()}
+
+
+def keyword_facets(con):
+    """Distinct keywordy z `cards` + pokrycie (ile klatek ma daną kartę) do panelu Pól. Cards są FITS-only
+    (XISF bez cards — D-G). Zwraca wiersze: keyword, n (COUNT DISTINCT frame_id), malejąco po pokryciu."""
+    return con.execute(
+        "SELECT keyword, COUNT(DISTINCT frame_id) AS n FROM cards GROUP BY keyword ORDER BY n DESC, keyword"
+    ).fetchall()
+
+
+def cards_pivot(con, frame_ids, keywords):
+    """Wiersze cards dla pivota: literał `json_each` — listy id/keywordów jako TABLICE JSON (jeden param
+    każda), bez dynamicznych `?` ani chunkowania (F4: plan po indeksie PK, ~53 ms/4000 klatek). ORDER BY
+    frame_id,keyword,idx (pivot bierze pierwszy idx). Zwraca: frame_id, keyword, idx, value_raw, value_num."""
+    return con.execute(
+        "SELECT frame_id, keyword, idx, value_raw, value_num FROM cards "
+        "WHERE keyword IN (SELECT value FROM json_each(?)) "
+        "  AND frame_id IN (SELECT value FROM json_each(?)) "
+        "ORDER BY frame_id, keyword, idx",
+        (json.dumps(list(keywords)), json.dumps(list(frame_ids))),
+    ).fetchall()
+
+
+def base_rows(con, frame_ids):
+    """Kolumny BAZOWE gridu (warstwa interpretacji NAD lustrem cards) dla zbioru frame_id. Location przez
+    `MIN(id)` BEZ odsiewania po `present` — `present` to KOLUMNA, nie predykat (F3: klatka zniknięta MUSI
+    zostać w gridzie; baza=autorytet). `n_present` = liczba obecnych lokalizacji (perspektywa „Duplikaty"
+    = n_present > 1). Teleskop przez config→telescope_canonical→kanon (jak `object_frames`). frame_ids jako
+    tablica JSON (`json_each`). Zwraca: frame_id, kind, filetype, filter_canon, camera_model,
+    telescope_label, telescop_canon, object_canon, object_raw, date_obs, exptime, path, present, n_present."""
+    return con.execute(
+        "SELECT f.id AS frame_id, f.kind, f.filetype, f.filter_canon, "
+        "       cam.model_canon AS camera_model, "
+        "       t.label AS telescope_label, t.telescop_canon, "
+        "       obj.canon AS object_canon, h.object_raw, "
+        "       h.date_obs, h.exptime, loc.path, loc.present, "
+        "       (SELECT COUNT(*) FROM location lp WHERE lp.frame_id = f.id AND lp.present = 1) AS n_present "
+        "FROM frame f "
+        "LEFT JOIN header h ON h.frame_id = f.id "
+        "LEFT JOIN config c ON c.id = f.config_id "
+        "LEFT JOIN telescope_canonical tc ON tc.id = c.telescope_id "
+        "LEFT JOIN telescope t ON t.id = tc.canon_id "
+        "LEFT JOIN camera cam ON cam.id = f.camera_id "
+        "LEFT JOIN object obj ON obj.id = f.object_id "
+        "LEFT JOIN location loc ON loc.id = (SELECT MIN(id) FROM location WHERE frame_id = f.id) "
+        "WHERE f.id IN (SELECT value FROM json_each(?)) "
+        "ORDER BY f.id",
+        (json.dumps(list(frame_ids)),),
     ).fetchall()

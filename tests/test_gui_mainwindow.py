@@ -36,9 +36,10 @@ def _seeded_db(tmp_path, name="s8.db"):
 def test_otwarte_na_bazie_montuje_widoki(qapp, tmp_path):
     win = MainWindow(_seeded_db(tmp_path))
     try:
-        assert win.stack.count() == 3                      # Pipeline + oś teleskopu + oś obiektu
+        assert win.stack.count() == 4                      # Pipeline + oś teleskopu + oś obiektu + Klatki
         assert isinstance(win.axis_view, TelescopeAxisView)
         assert isinstance(win.object_view, ObjectAxisView)
+        assert win.grid_view is not None                   # widok „Klatki" (krok 3 scalenia)
         assert win.axis_view.table.rowCount() == 4         # read-model odbity w osadzonym widoku
         assert all(not b.isHidden() for b in win._nav_buttons)   # ≥2 widoki → nawigacja odsłonięta
     finally:

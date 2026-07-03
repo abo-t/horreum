@@ -143,7 +143,7 @@ CREATE TABLE object_alias (
     id         INTEGER PRIMARY KEY,
     alias_norm TEXT NOT NULL UNIQUE,            -- znormalizowana forma (bez spacji, lower)
     object_id  INTEGER NOT NULL REFERENCES object(id),
-    source     TEXT NOT NULL                    -- catalog_xref|common_name|header|review|user
+    source     TEXT NOT NULL                    -- catalog_xref|common_name|header|solar|comet|review|user
 );
 
 -- ============================================================ 1.6 audyt, kolekcje

@@ -9,8 +9,8 @@ trafienie wygrywa):
      kalibracja nie ma obiektu z definicji).
 
 KIND-AWARENESS mieszka w orkiestracji (`horreum.resolver`), nie tu: ta funkcja ocenia sam string.
-Solar/komety (Lemmon/Księżyc/planety) świadomie NIEROZWIĄZYWANE w pierwszym przebiegu (deep-sky) →
-spadają do delty (osobny moduł). `kind='deep_sky'` dla wszystkiego, co tu wychodzi.
+Solar/komety (Lemmon/Księżyc/planety) rozwiązuje `resolve.solar` (krok 5a), wołany PRZED `resolve_object`
+w orkiestracji — ta funkcja pozostaje deep-sky-only. `kind='deep_sky'` dla wszystkiego, co tu wychodzi.
 
 `_COMMON` = uniwersalia (wiedza o niebie jako KOD, jak deklaruje `resolve/__init__`) — NIE dane
 per-archiwum. Rośnie po firsthand; seed = przypadki nazwane w spec §3.5 + potwierdzone firsthand

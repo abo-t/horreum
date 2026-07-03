@@ -102,6 +102,55 @@ def test_delta_report_procent_na_lightach(tmp_path):
     con.close()
 
 
+def _solar_tree(tmp_path):
+    """3 light'y solar/kometa (Jupiter, C/2023 A3, Lemmon) + 1 light prywatny (Mur, delta) +
+    1 flat OBJECT='Moon' (kind-aware: kalibracja NIE dostaje obiektu). Wszystkie ASI2600MM."""
+    con = db.open_db(str(tmp_path / "s.db"))
+    tree = tmp_path / "t"; tree.mkdir()
+    cam = [("INSTRUME", "ZWO ASI2600MM Pro"), ("XPIXSZ", 3.76)]
+    _fits(tree / "s1.fits", cam + [("IMAGETYP", "LIGHT"), ("OBJECT", "Jupiter")], n=1)
+    _fits(tree / "s2.fits", cam + [("IMAGETYP", "LIGHT"), ("OBJECT", "C/2023 A3 (Tsuchinshan-ATLAS)")], n=2)
+    _fits(tree / "s3.fits", cam + [("IMAGETYP", "LIGHT"), ("OBJECT", "Lemmon")], n=3)
+    _fits(tree / "s4.fits", cam + [("IMAGETYP", "LIGHT"), ("OBJECT", "Mur")], n=4)
+    _fits(tree / "flat.fits", cam + [("IMAGETYP", "FLAT"), ("OBJECT", "Moon")], n=5)
+    scan_tree(con, tree, now=NOW)
+    return con
+
+
+def test_solar_komety_rozwiazane_kind_aware(tmp_path):
+    """Krok 5a: Jupiter→ciało, C/2023 A3 i Lemmon→komety (2 różne); flat 'Moon'→NULL bez review
+    (kind-aware); 'Mur' (prywatna) zostaje w delcie. 3 obiekty solar, flat NIE rozwiązany."""
+    con = _solar_tree(tmp_path)
+    s = run_resolver(con, now=NOW)
+    # 3 light'y solar/kometa przypisane; 'Mur' = delta (1 review); flat pominięty
+    assert s.objects_assigned == 3
+    objs = {r["canon"]: r["kind"] for r in con.execute("SELECT canon, kind FROM object")}
+    assert objs == {"Jupiter": "solar_system",
+                    "C/2023 A3 (Tsuchinshan-ATLAS)": "comet",
+                    "C/2025 A6 (Lemmon)": "comet"}
+    # flat OBJECT='Moon' → object_id NULL, ale NIE w review (kalibracja nie ma obiektu)
+    assert con.execute("SELECT object_id FROM frame WHERE kind='flat'").fetchone()[0] is None
+    # delta = tylko 'Mur' (prywatna); solar/komety zeszły z delty
+    rep = delta_report(con)
+    assert rep.object_delta == [("Mur", 1)]
+    assert rep.object_resolved == 3
+    # object_source niesie ścieżkę solar/comet
+    src = sorted({r[0] for r in con.execute(
+        "SELECT object_source FROM frame WHERE object_source IS NOT NULL")})
+    assert src == ["comet", "solar"]
+    con.close()
+
+
+def test_solar_idempotentny(tmp_path):
+    """Drugi przebieg nie tworzy nowych obiektów solar ani nie przepina."""
+    con = _solar_tree(tmp_path)
+    run_resolver(con, now=NOW)
+    s2 = run_resolver(con, now=NOW)
+    assert (s2.objects_new, s2.objects_assigned) == (0, 0)
+    assert con.execute("SELECT count(*) FROM object").fetchone()[0] == 3
+    con.close()
+
+
 def test_resolver_idempotentny(tmp_path):
     """Drugi przebieg nie tworzy nowych obiektów/aliasów ani nie przepina (assign idempotentny)."""
     con = _scanned_tree(tmp_path)

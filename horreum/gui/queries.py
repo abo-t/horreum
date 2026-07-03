@@ -82,7 +82,8 @@ def axis_events(con, telescope_id=None, limit=200):
 
 def library_objects(con, *, telescope_id=None, camera_id=None, filter_canon=None):
     """Biblioteka: kanoniczne obiekty z licznością klatek (light/master_light), z OPCJONALNYMI filtrami
-    osi. PREDYKAT = `frame.kind` (R#1: `object.kind` to inne pole, zawsze `deep_sky` — NIE zwracane).
+    osi. PREDYKAT = `frame.kind` (R#1: `object.kind` to inne pole — `deep_sky|solar_system|comet` po
+    kroku 5a — i NIE jest zwracane ani używane jako predykat; widok renderuje `canon`/`catalog`).
     `telescope_id` = id KANONICZNEGO teleskopu (dopasowanie przez `telescope_canonical.canon_id`, więc
     klatki spod scalonych członków rolują się pod kanon). JOIN (nie LEFT) frame→object: obiekt bez
     klatek po filtrze znika z widoku (poprawne — filtr zawęża). Zwraca: id, canon, catalog, frame_count."""

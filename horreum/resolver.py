@@ -18,6 +18,7 @@ from . import repo
 from .resolve._coerce import _to_text
 from .resolve.filters import normalize_filter
 from .resolve.objects import resolve_object
+from .resolve.solar import resolve_solar
 
 # Klatki, które MAJĄ obiekt nieba (kandydaci osi OBIEKT). Reszta (kalibracja, unknown) → object_id
 # NULL bez review. `unknown` świadomie poza — sygnalizuje go osobny kanał `kind.unmapped` (§Etap 4).
@@ -53,7 +54,8 @@ def run_resolver(con, now):
         # --- oś OBIEKT: kind-aware (kalibracja nie ma obiektu z definicji) ---
         if r["kind"] in LIGHT_KINDS:
             s.light_frames += 1
-            ident = resolve_object(r["obj"])
+            # solar/komety PRZED deep-sky: mają własne ID (nie katalogi mgławic), krok 5a.
+            ident = resolve_solar(r["obj"]) or resolve_object(r["obj"])
             if ident is not None:
                 oid, created = repo.upsert_object(
                     con, canon=ident.canon, catalog=ident.catalog, kind=ident.kind, now=now)

@@ -464,7 +464,8 @@ def upsert_object(con, *, canon, catalog, kind, now, actor="resolver"):
 def add_object_alias(con, *, alias_norm, object_id, source, now, actor="resolver"):
     """Zapisz równoważność `alias_norm` → obiekt (audyt „M106 ≡ NGC4258 via catalog_xref"). Po
     `UNIQUE(alias_norm)`: znana → (id, False) bez eventu (idempotencja); nowa → INSERT +
-    `event(object.aliased)`; (id, True). `source` ∈ {header|catalog_xref|common_name|user}."""
+    `event(object.aliased)`; (id, True). `source` ∈ {header|catalog_xref|common_name|solar|comet|user}
+    (solar/comet = oś US/komet, krok 5a)."""
     row = con.execute("SELECT id FROM object_alias WHERE alias_norm = ?", (alias_norm,)).fetchone()
     if row is not None:
         return row[0], False

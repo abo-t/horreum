@@ -13,7 +13,7 @@ import pytest
 pytest.importorskip("PySide6")
 
 from horreum import db
-from horreum.gui.app import MainWindow, ObjectAxisView, TelescopeAxisView
+from horreum.gui.app import MainWindow, ObjectAxisView, ObservatoryAxisView, TelescopeAxisView
 
 from fixture_s8 import seed
 
@@ -36,8 +36,9 @@ def _seeded_db(tmp_path, name="s8.db"):
 def test_otwarte_na_bazie_montuje_widoki(qapp, tmp_path):
     win = MainWindow(_seeded_db(tmp_path))
     try:
-        assert win.stack.count() == 4                      # Pipeline + oś teleskopu + oś obiektu + Klatki
+        assert win.stack.count() == 5                      # Pipeline + teleskop + obserwatorium + obiekt + Klatki
         assert isinstance(win.axis_view, TelescopeAxisView)
+        assert isinstance(win.observatory_view, ObservatoryAxisView)
         assert isinstance(win.object_view, ObjectAxisView)
         assert win.grid_view is not None                   # widok „Klatki" (krok 3 scalenia)
         assert win.axis_view.table.rowCount() == 4         # read-model odbity w osadzonym widoku
@@ -103,6 +104,7 @@ def test_etap_pipeline_wylacza_akcje_osi_R5(qapp, tmp_path):
         assert not win.axis_view.btn_approve.isEnabled()
         assert not win.axis_view.btn_merge.isEnabled()
         assert not win.axis_view.btn_unmerge.isEnabled()
+        assert not win.observatory_view.btn_merge.isEnabled()   # oś obserwatorium też wyciszona
         win._on_pipeline_running(False)
         assert win.axis_view.btn_approve.isEnabled()       # szczery stan przywrócony (proposed)
     finally:

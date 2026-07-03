@@ -18,6 +18,7 @@ from . import repo
 from .resolve._coerce import _to_text
 from .resolve.filters import normalize_filter
 from .resolve.objects import resolve_object
+from .resolve.observatory import site_coords
 from .resolve.solar import resolve_solar
 
 # Klatki, które MAJĄ obiekt nieba (kandydaci osi OBIEKT). Reszta (kalibracja, unknown) → object_id
@@ -35,6 +36,9 @@ class ResolveSummary:
     objects_review: int = 0               # light'y obecne-ale-nierozpoznane (delta, per-frame)
     objects_unresolved_distinct: int = 0  # distinct object_raw w delcie
     filters_set: int = 0                  # frame'y z niepustym filter_canon
+    observatories_new: int = 0            # nowe stanowiska (seed z propose_observatory, created=True)
+    observatories_assigned: int = 0       # klatki z przypisanym observatory_id
+    gps_unparseable: int = 0              # klatki z GPS OBECNYM ale nieparsowalnym (→ review_summary)
 
 
 def run_resolver(con, now):
@@ -82,7 +86,44 @@ def run_resolver(con, now):
     repo.backfill_filter_canon(con, filter_items, now=now)        # no-op gdy pusto
     repo.flag_object_review_summary(
         con, sorted(unresolved.items(), key=lambda kv: (-kv[1], kv[0])), now=now)  # no-op gdy pusto
+
+    # oś OBSERWATORIUM foldnięta tu (SPOT — jeden wjazd; callerzy bez zmian). GPS z `cards`, nie z pętli
+    # `header` powyżej (osobny SELECT — SITELAT/SITELONG nie są polami gorącymi `header`).
+    s.observatories_new, s.observatories_assigned, s.gps_unparseable = resolve_observatory(con, now)
     return s
+
+
+def resolve_observatory(con, now):
+    """Oś OBSERWATORIUM (PLAN_os_obserwatorium §2b): dla każdej klatki z GPS w `cards` (SITELAT/SITELONG,
+    `value_raw` — string dla obu formatów) wyłoń stanowisko przez `repo.propose_observatory` (kotwica
+    GEOMETRYCZNA, member-id) i przypisz. Brak GPS (oba raw None) → `observatory_id` NULL cicho (świadomy
+    brak, jak 326 XISF). GPS OBECNY-ale-nieparsowalny → NULL + zliczenie do JEDNEGO `observatory.review_
+    summary`. Iteracja `ORDER BY f.id` = pierwszy przebieg powtarzalny (§5 D4). Zwraca (new, assigned,
+    gps_unparseable). Idempotentny: re-run zwraca te same id (anchor stabilny), zero nowych eventów."""
+    rows = con.execute(
+        "SELECT f.id AS fid, "
+        "  (SELECT value_raw FROM cards WHERE frame_id = f.id AND keyword = 'SITELAT' "
+        "   ORDER BY idx LIMIT 1) AS lat_raw, "
+        "  (SELECT value_raw FROM cards WHERE frame_id = f.id AND keyword = 'SITELONG' "
+        "   ORDER BY idx LIMIT 1) AS lon_raw "
+        "FROM frame f ORDER BY f.id").fetchall()
+    new = assigned = 0
+    unparseable = {}          # (lat_raw, lon_raw) -> liczba (GPS obecny ale nieparsowalny)
+    for r in rows:
+        pt = site_coords(r["lat_raw"], r["lon_raw"])
+        if pt is None:
+            if r["lat_raw"] or r["lon_raw"]:            # raw OBECNE ale śmieciowe → delta (review)
+                key = (r["lat_raw"], r["lon_raw"])
+                unparseable[key] = unparseable.get(key, 0) + 1
+            continue                                    # oba raw None → observatory_id NULL cicho
+        obs_id, created = repo.propose_observatory(con, lat=pt[0], lon=pt[1], now=now)
+        new += created
+        if repo.assign_observatory(con, frame_id=r["fid"], observatory_id=obs_id, now=now):
+            assigned += 1
+    # klucz sortu = str(para) — pary raw mogą zawierać None (nieporównywalne z str inaczej), det.
+    repo.flag_observatory_review_summary(
+        con, sorted(unparseable.items(), key=lambda kv: (-kv[1], str(kv[0]))), now=now)  # no-op gdy pusto
+    return new, assigned, sum(unparseable.values())
 
 
 @dataclass

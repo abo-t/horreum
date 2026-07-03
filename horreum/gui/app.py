@@ -566,6 +566,267 @@ class ObjectAxisView(QWidget):
         # celowo no-op: brak przycisków zapisu; odświeżanie sterowane przez gospodarza po stage_finished.
 
 
+# ============================================================ oś OBSERWATORIUM (PLAN_os_obserwatorium §3)
+
+# Kolumny listy stanowisk. Tożsamość osi jest GEOMETRYCZNA — brak stringa-nagłówka jak `telescop_canon`;
+# to szerokość/długość identyfikują stanowisko dla oka usera (rozpoznaje swoje miejsca po współrzędnych). Nazwa
+# to etykieta usera (edytowalna in-line → `label_observatory`). Bez kolumny Status (zawsze 'proposed'
+# w v1 — brak approve) i bez Wysokości (atrybut D3, nie tożsamość — zejście na drugi plan).
+OBS_COL_ID, OBS_COL_NAME, OBS_COL_LAT, OBS_COL_LON, OBS_COL_FRAMES = range(5)
+OBS_HEADERS = ["ID", "Nazwa", "Szerokość", "Długość", "Klatki"]
+
+
+_NUM_ALIGN = Qt.AlignRight | Qt.AlignVCenter   # liczby prawo-wyrównane (skanowalność magnitud, wizytator #2)
+
+
+def _fmt_coord(v):
+    """Współrzędna do komórki/etykiety: STAŁA precyzja 4 miejsc (~11 m) — słupek lat/lon wyrównany
+    (wizytator #2: `%g` dawał zmienną liczbę miejsc, np. `7.5` vs `128.4082` → poszarpany słupek;
+    przy progu 4 km 11 m nie myli stanowisk). None → '' (defensywnie — lat/lon są NOT NULL)."""
+    return "" if v is None else f"{v:.4f}"
+
+
+def _obs_row_label(row):
+    """Etykieta stanowiska do listy combo/członków: nazwa usera, a gdy brak (nienazwane — realny
+    przypadek: cała oś świeżo `proposed`) — współrzędne z seeda, by pozycja NIE milczała."""
+    return row["name"] or f'{_fmt_coord(row["lat"])}, {_fmt_coord(row["lon"])}'
+
+
+class ObservatoryAxisView(QWidget):
+    """Osadzalny widok osi OBSERWATORIUM (lista→scal→nazwij) — mirror `TelescopeAxisView` z JEDNĄ
+    różnicą domenową: BEZ „Zatwierdź" (v1 nie ma approve; port osi = merge+unmerge+label). Lista
+    kanonicznych stanowisk (lewa) + szczegół zaznaczonego (prawa: scalone pod nim, audyt). Akcje usera
+    (`label`/`merge`/`unmerge`) idą przez `repo` (jedna klinga). Nazwa edytowalna in-line; tożsamość
+    (szer./dług.) tylko do odczytu. Ten widok NIE wykonuje `con.execute` — meta-tripwir AST pilnuje.
+
+    `con` = otwarte połączenie RW (NIE własność widoku). `now_fn` = źródło czasu (ISO-8601)."""
+
+    status_message = Signal(str)
+
+    def __init__(self, con, now_fn=_utc_now_iso, parent=None):
+        super().__init__(parent)
+        self.con = con
+        self._now = now_fn
+        self._loading = False                # tłumi itemChanged podczas programowego wypełniania
+        self._source_mergeable = False       # czy zaznaczony wiersz może być źródłem scalenia
+        self._build_ui()
+        self.refresh()
+
+    # ---------------------------------------------------------------- budowa UI
+
+    def _build_ui(self):
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        splitter = QSplitter(Qt.Horizontal)
+
+        # --- lewa: tabela aktywnych stanowisk + pasek akcji ---
+        left = QWidget()
+        lv = QVBoxLayout(left)
+        lv.addWidget(QLabel("Aktywne stanowiska (kanoniczne)"))
+        self.table = QTableWidget(0, len(OBS_HEADERS))
+        self.table.setHorizontalHeaderLabels(OBS_HEADERS)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        # Priorytet szerokości: Nazwa (etykieta usera) rośnie, reszta do treści (wizytator #3/#4 —
+        # `stretchLastSection` rozpychał Klatki i ucinał je na wąsko, a Nazwa była ciasna).
+        hdr = self.table.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(OBS_COL_NAME, QHeaderView.Stretch)
+        self.table.verticalHeader().setVisible(False)
+        self.table.itemSelectionChanged.connect(self._on_selection_changed)
+        self.table.itemChanged.connect(self._on_item_changed)
+        lv.addWidget(self.table)
+        # Nota pustego stanu W WIDOKU (wizytator #1): `status_message` bywa nadpisany flashem gospodarza
+        # (MainWindow), więc pusty stan musi być odkrywalny w obszarze tabeli — wzorzec 1:1 z
+        # `ObjectAxisView.lib_empty`. Chowana, gdy są stanowiska.
+        self.obs_empty = QLabel("Brak stanowisk — uruchom rozwiązywanie (resolve) na skanie z GPS.")
+        self.obs_empty.setAlignment(Qt.AlignCenter)
+        self.obs_empty.setWordWrap(True)
+        self.obs_empty.setVisible(False)
+        lv.addWidget(self.obs_empty)
+
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        actions.addWidget(QLabel("Scal zaznaczone w:"))
+        self.combo_target = QComboBox()
+        self.combo_target.currentIndexChanged.connect(self._sync_merge_enabled)
+        actions.addWidget(self.combo_target)
+        self.btn_merge = QPushButton("Scal")
+        self.btn_merge.clicked.connect(self._on_merge)
+        actions.addWidget(self.btn_merge)
+        lv.addLayout(actions)
+
+        # --- prawa: szczegół zaznaczonego ---
+        right = QWidget()
+        rv = QVBoxLayout(right)
+        rv.addWidget(QLabel("Scalone pod tym stanowiskiem:"))
+        self.members = QListWidget()
+        self.members.itemSelectionChanged.connect(self._sync_unmerge_enabled)
+        rv.addWidget(self.members)
+        self.btn_unmerge = QPushButton("Cofnij scalenie")
+        self.btn_unmerge.clicked.connect(self._on_unmerge)
+        rv.addWidget(self.btn_unmerge)
+        rv.addWidget(QLabel("Historia (audyt):"))
+        self.events = QListWidget()
+        rv.addWidget(self.events)
+
+        splitter.addWidget(left)
+        splitter.addWidget(right)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+        outer.addWidget(splitter, 1)
+
+    # ---------------------------------------------------------------- odczyt → widok
+
+    def refresh(self):
+        """Przeładuj listę z read-modelu (źródło prawdy = baza; brak cache). Zachowuje zaznaczenie po
+        `observatory_id` (po merge wiersze się przesuwają)."""
+        prev = self._selected_observatory_id()
+        self._loading = True
+        try:
+            rows = queries.active_observatories(self.con)
+            self.table.setRowCount(len(rows))
+            target_row = -1
+            for r, row in enumerate(rows):
+                self._set_cell(r, OBS_COL_ID, str(row["id"]), data=row["id"])
+                self._set_cell(r, OBS_COL_NAME, row["name"] or "", editable=True)
+                self._set_cell(r, OBS_COL_LAT, _fmt_coord(row["lat"]), align=_NUM_ALIGN)
+                self._set_cell(r, OBS_COL_LON, _fmt_coord(row["lon"]), align=_NUM_ALIGN)
+                self._set_cell(r, OBS_COL_FRAMES, str(row["frame_count"]), align=_NUM_ALIGN)
+                if row["id"] == prev:
+                    target_row = r
+        finally:
+            self._loading = False
+        empty = self.table.rowCount() == 0
+        self.obs_empty.setVisible(empty)              # nota odkrywalna w widoku (wizytator #1)
+        self.table.setVisible(not empty)
+        if target_row >= 0:
+            self.table.selectRow(target_row)
+        elif not empty:
+            self.table.selectRow(0)
+        else:
+            self.status_message.emit("Brak stanowisk na osi — uruchom rozwiązywanie (horreum resolve).")
+        self._on_selection_changed()
+
+    def _set_cell(self, r, c, text, *, editable=False, data=None, align=None):
+        item = QTableWidgetItem(text)
+        flags = Qt.ItemIsSelectable | Qt.ItemIsEnabled
+        if editable:                          # tylko nazwa jest edytowalna in-line
+            flags |= Qt.ItemIsEditable
+        item.setFlags(flags)
+        if align is not None:                 # liczby prawo-wyrównane (skanowalność magnitud, wizytator #2)
+            item.setTextAlignment(align)
+        if data is not None:                  # observatory_id na kolumnie ID (kotwica wiersza)
+            item.setData(Qt.UserRole, data)
+        self.table.setItem(r, c, item)
+
+    def _selected_observatory_id(self):
+        rows = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []
+        if not rows:
+            return None
+        item = self.table.item(rows[0].row(), OBS_COL_ID)
+        return item.data(Qt.UserRole) if item else None
+
+    def _on_selection_changed(self):
+        """Odśwież panel szczegółu (członkowie + audyt) i stany przycisków dla zaznaczonego wiersza.
+        Stany SZCZERE: merge bez realnego celu albo źródła z członkami jest wyłączony (UI nie kłamie)."""
+        oid = self._selected_observatory_id()
+
+        self.members.clear()
+        members = queries.merged_under_observatory(self.con, oid) if oid is not None else []
+        for m in members:
+            it = QListWidgetItem(f'#{m["id"]}  {_obs_row_label(m)}')
+            it.setData(Qt.UserRole, m["id"])
+            self.members.addItem(it)
+
+        self.events.clear()
+        if oid is not None:
+            for e in queries.observatory_axis_events(self.con, observatory_id=oid):
+                self.events.addItem(f'{e["ts"]}  ·  {e["verb"]}  ·  {e["actor"]}')
+
+        # Cel scalenia z PLACEHOLDEREM (currentData=None): merge to świadoma deklaracja „to samo
+        # stanowisko" (np. dom↔praca, gdy user uzna). `blockSignals` — przebudowa nie sypie sygnałem.
+        self.combo_target.blockSignals(True)
+        self.combo_target.clear()
+        self.combo_target.addItem("— wybierz cel —", None)
+        for o in queries.active_observatories(self.con):
+            if o["id"] != oid:                # cel ≠ źródło → self-merge strukturalnie niemożliwy
+                self.combo_target.addItem(f'#{o["id"]}  {_obs_row_label(o)}', o["id"])
+        self.combo_target.setCurrentIndex(0)
+        self.combo_target.blockSignals(False)
+
+        # źródło mergowalne tylko gdy kanoniczne BEZ członków (inwariant głębokość ≤ 1) i JEST realny cel.
+        self._source_mergeable = (oid is not None and not members and self.combo_target.count() > 1)
+        self._sync_merge_enabled()
+        self._sync_unmerge_enabled()
+
+    def _sync_merge_enabled(self):
+        """„Scal" aktywny dopiero gdy źródło jest mergowalne ORAZ wskazano REALNY cel (nie placeholder)."""
+        self.btn_merge.setEnabled(self._source_mergeable and self.combo_target.currentData() is not None)
+
+    def _sync_unmerge_enabled(self):
+        self.btn_unmerge.setEnabled(bool(self.members.selectedItems()))
+
+    def set_busy(self, busy):
+        """Podczas etapu pipeline'u wyłącz akcje ZAPISU osi (szczery disabled — worker pisze do bazy).
+        Po etapie gospodarz woła `set_busy(False)` → `_on_selection_changed` przywraca szczere stany."""
+        if busy:
+            self.btn_merge.setEnabled(False)
+            self.btn_unmerge.setEnabled(False)
+            self.combo_target.setEnabled(False)
+        else:
+            self.combo_target.setEnabled(True)
+            self._on_selection_changed()
+
+    # ---------------------------------------------------------------- akcje → repo (jedna klinga)
+
+    def _flash(self, msg):
+        self.status_message.emit(msg)
+
+    def _on_item_changed(self, item):
+        """Edycja in-line nazwy → `repo.label_observatory`. Pusta nazwa → `ValueError` (kasowanie poza
+        v1) złapany i pokazany; widok wraca do prawdy bazy (refresh)."""
+        if self._loading or item.column() != OBS_COL_NAME:
+            return
+        oid = self.table.item(item.row(), OBS_COL_ID).data(Qt.UserRole)
+        try:
+            changed = repo.label_observatory(
+                self.con, observatory_id=oid, name=item.text(), now=self._now())
+        except ValueError as e:
+            self._flash(f"Nazwa odrzucona: {e}")
+            self.refresh()
+            return
+        self._flash("Nazwa zapisana." if changed else "Nazwa bez zmian.")
+        self.refresh()
+
+    def _on_merge(self):
+        src = self._selected_observatory_id()
+        tgt = self.combo_target.currentData()
+        if src is None or tgt is None:        # brak źródła albo placeholder zamiast celu
+            return
+        try:
+            changed = repo.merge_observatory(
+                self.con, source_id=src, target_id=tgt, now=self._now())
+        except ValueError as e:
+            self._flash(f"Nie scalono: {e}")
+            return
+        self._flash(f"Scalono #{src} → #{tgt}." if changed else "Już scalone.")
+        self.refresh()
+
+    def _on_unmerge(self):
+        sel = self.members.selectedItems()
+        if not sel:
+            return
+        mid = sel[0].data(Qt.UserRole)
+        try:
+            changed = repo.unmerge_observatory(self.con, observatory_id=mid, now=self._now())
+        except ValueError as e:
+            self._flash(f"Nie cofnięto: {e}")
+            return
+        self._flash(f"Cofnięto scalenie #{mid}." if changed else "Już kanoniczne.")
+        self.refresh()
+
+
 class TelescopeAxisWindow(QMainWindow):
     """Powłoka-okno osi teleskopu (zgodność wstecz — etap 1). Treść = osadzony `TelescopeAxisView`;
     okno dokłada tylko tytuł i pasek statusu (podpięty pod sygnał widoku). NIE jest właścicielem
@@ -692,6 +953,11 @@ class MainWindow(QMainWindow):
         self.axis_view = axis
         self._add_view("Oś teleskopu", axis)
 
+        obs = ObservatoryAxisView(self.con, now_fn=self._now)
+        obs.status_message.connect(self._flash)
+        self.observatory_view = obs
+        self._add_view("Oś obserwatorium", obs)
+
         obj = ObjectAxisView(self.con, now_fn=self._now)
         obj.status_message.connect(self._flash)
         self.object_view = obj
@@ -709,6 +975,7 @@ class MainWindow(QMainWindow):
         wątku odświeżamy DOPIERO TERAZ (nie w trakcie skanu — WAL → zapisy workera widoczne). Oś obiektu
         przeładowuje też facety (skan/resolver mogły dodać teleskopy/filtry/obiekty)."""
         self.axis_view.refresh()
+        self.observatory_view.refresh()
         self.object_view._load_facets()
         self.object_view.refresh()
         self.grid_view._load_facets()
@@ -718,6 +985,7 @@ class MainWindow(QMainWindow):
         """W trakcie etapu wyłącz akcje zapisu osi (szczery disabled). Nawigacja zostaje aktywna —
         user może zerknąć na oś; blokujemy tylko ZAPIS (§6: aktywny tylko „Anuluj" skanu)."""
         self.axis_view.set_busy(running)
+        self.observatory_view.set_busy(running)
 
     # ---------------------------------------------------------------- menu Plik: Otwórz/Nowa baza
 

@@ -13,9 +13,12 @@ from importlib import resources
 # przedpotopowa baza v1 (sprzed przejścia) nie ma ścieżki migracji — jawny błąd w migrate().
 # 0003 to PRZYROST (staging writebacku, KROK 4): baza v2 dostaje puste tabele stagingu, świeża
 # leci 0002→0003 sekwencyjnie. Zero zmian istniejących tabel (D3: re-skan, nie konwerter).
+# 0004 to PRZYROST (oś OBSERWATORIUM): nowa tabela observatory + frame.observatory_id + widok
+# observatory_canonical; baza v3 dostaje pustą oś (resolve_observatory wypełnia z cards).
 MIGRATIONS = [
     (2, "0002_initial.sql"),
     (3, "0003_writeback.sql"),
+    (4, "0004_observatory.sql"),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 _KNOWN_VERSIONS = frozenset({0} | {v for v, _ in MIGRATIONS})

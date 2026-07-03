@@ -56,6 +56,11 @@ EXP_UNCOMPUTABLE_FULL = 1      # masterflat OIII: bajt \x07 w XML → sha1_data 
 EXP_FRAME_REVIEW_FULL = 1      # ten sam masterflat (kopia nieczytelna → review)
 EXP_CONFIG_REVIEW_FULL = 7     # masterdarki ED bez TELESCOP (dług kind-scoping, decyzja Zdzisława)
 EXP_XISF_KINDS = {"flat": 11, "light": 202, "master_dark": 38, "master_flat": 73, "unknown": 2}
+# Oś OBSERWATORIUM (PLAN_os_obserwatorium §8): GPS to FITS-only (0/326 XISF), więc 11 stanowisk i 15 409
+# klatek z GPS w OBU etapach; bez GPS 476 dopiero w FULL (150 fits + 326 xisf).
+EXP_OBSERVATORIES = 11         # klaster 4 km: 24 distinct pary → 11 stanowisk (dom↔praca 4.385 km OSOBNE)
+EXP_GPS_FRAMES = 15409         # klatki z SITELAT+SITELONG (97.0%)
+EXP_NO_GPS_FULL = 476          # bez GPS w FULL: 150 fits + 326 xisf
 
 
 def _ok(cond):
@@ -217,6 +222,7 @@ def check_criteria(con, summary, out):
         ("location", "location.added"), ("header", "header.recorded"),
         ("telescope", "telescope.proposed"), ("config", "config.proposed"),
         ("object", "object.upserted"), ("object_alias", "object.aliased"),
+        ("observatory", "observatory.proposed"),
     ]
     all_match = True
     for ent, verb in pairs:
@@ -229,10 +235,47 @@ def check_criteria(con, summary, out):
     va = con.execute("SELECT count(*) FROM event WHERE verb='config.assigned'").fetchone()[0]
     oa = con.execute("SELECT count(*) FROM frame WHERE object_id IS NOT NULL").fetchone()[0]
     vo = con.execute("SELECT count(*) FROM event WHERE verb='object.assigned'").fetchone()[0]
+    sa = con.execute("SELECT count(*) FROM frame WHERE observatory_id IS NOT NULL").fetchone()[0]
+    vs = con.execute("SELECT count(*) FROM event WHERE verb='observatory.assigned'").fetchone()[0]
     out(f"    frame.config_id {fa} == config.assigned {va}  [{_ok(fa == va)}]")
     out(f"    frame.object_id {oa} == object.assigned {vo}  [{_ok(oa == vo)}]")
-    all_match &= (fa == va) and (oa == vo)
+    out(f"    frame.observatory_id {sa} == observatory.assigned {vs}  [{_ok(sa == vs)}]")
+    all_match &= (fa == va) and (oa == vo) and (sa == vs)
     crit("§5.9 encje == eventy (co do sztuki, łącznie z przypisaniami)", all_match)
+
+    # §5.10 oś OBSERWATORIUM — 11 stanowisk (§8 klaster), populacje domykają, zero nieparsowalnego GPS
+    n_obs = con.execute("SELECT count(*) FROM observatory").fetchone()[0]
+    gps_cards = con.execute(
+        "SELECT count(*) FROM frame f "
+        "WHERE EXISTS(SELECT 1 FROM cards c WHERE c.frame_id=f.id AND c.keyword='SITELAT') "
+        "AND EXISTS(SELECT 1 FROM cards c WHERE c.frame_id=f.id AND c.keyword='SITELONG')").fetchone()[0]
+    gps_null = con.execute(
+        "SELECT count(*) FROM frame f WHERE f.observatory_id IS NULL "
+        "AND EXISTS(SELECT 1 FROM cards c WHERE c.frame_id=f.id AND c.keyword='SITELAT') "
+        "AND EXISTS(SELECT 1 FROM cards c WHERE c.frame_id=f.id AND c.keyword='SITELONG')").fetchone()[0]
+    no_obs = con.execute("SELECT count(*) FROM frame WHERE observatory_id IS NULL").fetchone()[0]
+    pops = con.execute(
+        "SELECT o.id, o.lat, o.lon, COUNT(fr.id) AS n FROM observatory o "
+        "LEFT JOIN observatory_canonical oc ON oc.canon_id=o.id "
+        "LEFT JOIN frame fr ON fr.observatory_id=oc.id "
+        "WHERE o.merged_into IS NULL GROUP BY o.id ORDER BY n DESC").fetchall()
+    out(f"\n§5.10 oś obserwatorium: {n_obs} stanowisk, {sa} przypisanych, {gps_cards} z GPS-kartami, "
+        f"{no_obs} bez stanowiska:")
+    for oid, la, lo, n in pops:
+        out(f"    #{oid:<3} {la:>10.5f}, {lo:>10.5f}  frames={n}")
+    crit(f"§5.10 {EXP_OBSERVATORIES} stanowisk (klaster 4 km, §8)", n_obs == EXP_OBSERVATORIES)
+    crit(f"§5.10 GPS-karty == {EXP_GPS_FRAMES} (§8, 97.0%)", gps_cards == EXP_GPS_FRAMES)
+    crit("§5.10 zero nieparsowalnego GPS (sonda: formaty czyste, 0 śmieci)", gps_null == 0)
+    # Twarda brama na CZĘŚCIOWY/śmieciowy GPS (rec.#11): `gps_null` widzi tylko klatki z OBIEMA kartami,
+    # więc lone-coord (jedna współrzędna → site_coords None → review) by mu umknął. review_summary łapie
+    # OBA (śmieć i lone-coord); jego BRAK dowodzi zero cichego review. Pusta lista → event nie powstaje.
+    obs_review = con.execute(
+        "SELECT count(*) FROM event WHERE verb='observatory.review_summary'").fetchone()[0]
+    crit("§5.10 zero cichego review (brak observatory.review_summary: śmieć/lone-coord)", obs_review == 0)
+    crit("§5.10 populacje stanowisk domykają do przypisanych", sum(p[3] for p in pops) == sa)
+    crit("§5.10 przypisane == GPS-karty (wszystkie sparsowane)", sa == gps_cards)
+    if full:
+        crit(f"§5.10 bez GPS == {EXP_NO_GPS_FULL} (150 fits + 326 xisf)", no_obs == EXP_NO_GPS_FULL)
 
     return results
 

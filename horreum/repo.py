@@ -16,6 +16,8 @@ Zasady:
 import json
 from contextlib import contextmanager
 
+from .resolve.observatory import nearest_site   # kierunek repo → resolve (liść math/re; COHESION §2b)
+
 
 @contextmanager
 def _immediate(con):
@@ -525,6 +527,66 @@ def backfill_filter_canon(con, items, now, actor="resolver"):
                    payload={"count": len(items)})
 
 
+# ============================================================ oś OBSERWATORIUM (§PLAN_os_obserwatorium)
+
+def propose_observatory(con, *, lat, lon, now, actor="resolver"):
+    """Wyłoń stanowisko (oś) z GPS — kotwica idempotencji GEOMETRYCZNA (ANCHOR-PROXIMITY §2b), NIE
+    string (GPS nie ma stabilnego klucza-stringa; greedy-od-zera co skan mintowałby duplikaty + churn).
+    Dopasuj punkt do ISTNIEJĄCEGO stanowiska ≤ `THRESH_KM` (`nearest_site`, liść `resolve.observatory`)
+    i zwróć id DOPASOWANEGO wiersza (**CZŁONKA, jak `propose_telescope` zwraca member-id — NIGDY
+    kanonu**; widok `observatory_canonical` roluje licznik pod kanon, więc kolaps-do-kanonu przy
+    zapisie jest zbędny i ŁAMAŁBY `unmerge` + robił churn). Trafienie → (id, False) bez eventu.
+    Żadne ≤ próg → INSERT seed (`lat`/`lon` ZAMROŻONE = pierwszy punkt regionu, §2b/D4) +
+    `event(observatory.proposed)` → (id, True). Stabilny anchor + zwrot member-id ⇒ re-skan zwraca TE
+    SAME id ⇒ zero churn, `unmerge` odwracalny. `lat`/`lon` = stopnie dziesiętne (wołający policzył
+    `site_coords`; NULL nie dochodzi tu — klatka bez współrzędnych jest poza osią)."""
+    rows = con.execute("SELECT id, lat, lon FROM observatory").fetchall()
+    hit = nearest_site((lat, lon), [(r["id"], r["lat"], r["lon"]) for r in rows])
+    if hit is not None:
+        return hit, False                                # dopasowanie do istniejącego (member-id)
+
+    with con:
+        cur = con.execute(
+            "INSERT INTO observatory(name, lat, lon, elev, status, created_at) "
+            "VALUES (NULL, ?, ?, NULL, 'proposed', ?)",
+            (lat, lon, now),
+        )
+        observatory_id = cur.lastrowid
+        emit_event(
+            con, actor=actor, verb="observatory.proposed", target=f"observatory:{observatory_id}",
+            now=now, payload={"lat": lat, "lon": lon})
+    return observatory_id, True
+
+
+def assign_observatory(con, *, frame_id, observatory_id, now, actor="resolver"):
+    """Przypisz stanowisko do frame'a (`frame.observatory_id`) — mirror `assign_config`. Idempotentny:
+    już przypisany ten sam → `False` bez eventu; inaczej UPDATE + `event(observatory.assigned)`."""
+    row = con.execute("SELECT observatory_id FROM frame WHERE id = ?", (frame_id,)).fetchone()
+    if row is not None and row[0] == observatory_id:
+        return False
+
+    with con:
+        con.execute("UPDATE frame SET observatory_id = ? WHERE id = ?", (observatory_id, frame_id))
+        emit_event(con, actor=actor, verb="observatory.assigned", target=f"frame:{frame_id}", now=now,
+                   payload={"observatory_id": observatory_id})
+    return True
+
+
+def flag_observatory_review_summary(con, items, now, actor="resolver"):
+    """GPS OBECNY ale nieparsowalny (śmieć / jedna współrzędna / poza zakresem) ZBIORCZO — JEDEN
+    `event(observatory.review_summary)` z licznością per surowa para (jak `flag_object_review_summary`).
+    `items` = lista `((lat_raw, lon_raw), count)`. Stan (`observatory_id NULL`) SAM jest deltą — event
+    audytowy, NIE zapisuje na frame. Pusta lista → bez eventu (sonda pf4: 0 nieparsowalnych → ten event
+    nie powstaje; forward-guard na wypadek śmieciowego GPS w przyszłym wsadzie)."""
+    items = list(items)
+    if not items:
+        return
+    with con:
+        emit_event(con, actor=actor, verb="observatory.review_summary", target="frame:*", now=now,
+                   payload={"distinct": len(items), "frames": sum(n for _, n in items),
+                            "items": [[list(pair), n] for pair, n in items]})
+
+
 # ============================================================ oś TELESKOP — zapis usera (GUI, §PLAN_gui)
 #
 # Pierwsza warstwa, gdzie `event.actor` ma formę `user:<uid>` (składaną TU, nie po stronie wołającego —
@@ -623,6 +685,90 @@ def unmerge_telescope(con, *, telescope_id, now, uid="local"):
         con.execute("UPDATE telescope SET merged_into = NULL WHERE id = ?", (telescope_id,))
         emit_event(con, actor=f"user:{uid}", verb="telescope.unmerged",
                    target=f"telescope:{telescope_id}", now=now,
+                   payload={"before": merged_into, "after": None})
+    return True
+
+
+# ============================================================ oś OBSERWATORIUM — zapis usera (GUI)
+#
+# Mirror osi teleskopu (label/merge/unmerge) — actor=user:<uid> składany TU (prefiks niefalsyfikowalny).
+# Etykieta = kolumna `name` (NIE `label` — tożsamość osi jest GEOMETRYCZNA §2b, `name` to nazwa usera).
+# BEZ `approve` (v1: port = merge+unmerge+label; status zostaje 'proposed'). Guardy czytane w `_immediate`
+# (atomowo z UPDATE — TOCTOU, P1). `uid` w v1 zawsze "local".
+
+
+def _observatory_row(con, observatory_id):
+    """Wiersz stanowiska albo `ValueError` (błąd wołania — id spoza listy GUI). Zwraca (name, status,
+    merged_into)."""
+    row = con.execute(
+        "SELECT name, status, merged_into FROM observatory WHERE id = ?", (observatory_id,)).fetchone()
+    if row is None:
+        raise ValueError(f"observatory:{observatory_id} nie istnieje")
+    return row["name"], row["status"], row["merged_into"]
+
+
+def label_observatory(con, *, observatory_id, name, now, uid="local"):
+    """Nadaj/zmień NAZWĘ stanowiska (akcja usera — USER-NAZYWA §0). Pusta/None nazwa (po strip) →
+    `ValueError` (kasowanie nazwy NIE wchodzi w v1 — błąd wołania, nie no-op). Ta sama nazwa już
+    ustawiona → `False` BEZ eventu (idempotencja). Inaczej UPDATE + `event(observatory.named)` z
+    `{before, after}`."""
+    if name is None or not str(name).strip():
+        raise ValueError("name pusty — kasowanie nazwy nie wchodzi w v1")
+    name = str(name).strip()
+    with _immediate(con):
+        before, _, _ = _observatory_row(con, observatory_id)
+        if before == name:
+            return False
+        con.execute("UPDATE observatory SET name = ? WHERE id = ?", (name, observatory_id))
+        emit_event(con, actor=f"user:{uid}", verb="observatory.named",
+                   target=f"observatory:{observatory_id}", now=now,
+                   payload={"before": before, "after": name})
+    return True
+
+
+def merge_observatory(con, *, source_id, target_id, now, uid="local"):
+    """Scal stanowisko `source` w `target` (akcja usera — user rozstrzyga granice, np. klastry
+    <2×`THRESH_KM`, D4). INWARIANT GŁĘBOKOŚĆ ≤ 1 — te same 4 GWARDY co `merge_telescope` (`ValueError`
+    przy naruszeniu): `source≠target`; target KANONICZNY (`merged_into IS NULL`); source KANONICZNY;
+    source NIE MA członków (inaczej łańcuch głębokości 2). Czyni cykl/łańcuch strukturalnie niemożliwymi.
+    source już `merged_into=target` → `False` (idempotencja). Inaczej UPDATE + `event(observatory.merged)`."""
+    if source_id == target_id:
+        raise ValueError("nie można scalić stanowiska w samo siebie")
+    with _immediate(con):
+        _, _, src_merged = _observatory_row(con, source_id)
+        if src_merged == target_id:
+            return False                                   # już scalony tam — idempotencja
+        if src_merged is not None:
+            raise ValueError(f"source observatory:{source_id} już scalony (merged_into={src_merged}) — "
+                             "scalać wolno tylko kanoniczny")
+        _, _, tgt_merged = _observatory_row(con, target_id)
+        if tgt_merged is not None:
+            raise ValueError(f"target observatory:{target_id} nie jest kanoniczny "
+                             f"(merged_into={tgt_merged}) — scalać wolno tylko w korzeń")
+        has_member = con.execute(
+            "SELECT 1 FROM observatory WHERE merged_into = ? LIMIT 1", (source_id,)).fetchone()
+        if has_member is not None:
+            raise ValueError(f"source observatory:{source_id} ma członków — najpierw unmerge "
+                             "(inwariant głębokość ≤ 1)")
+        con.execute("UPDATE observatory SET merged_into = ? WHERE id = ?", (target_id, source_id))
+        emit_event(con, actor=f"user:{uid}", verb="observatory.merged",
+                   target=f"observatory:{source_id}", now=now,
+                   payload={"source": source_id, "target": target_id})
+    return True
+
+
+def unmerge_observatory(con, *, observatory_id, now, uid="local"):
+    """Cofnij scalenie (`merged_into → NULL`) — append-only (nowy event, nie kasacja). Już kanoniczny
+    (`merged_into IS NULL`) → `False`. Inaczej UPDATE + `event(observatory.unmerged)` z `{before, after}`.
+    Dzięki inwariantowi głębokość ≤ 1 wiersz zawsze jest liściem — bez „środka łańcucha" do rozplątania;
+    klatki wracają pod członka (widok `observatory_canonical` je rozdziela)."""
+    with _immediate(con):
+        _, _, merged_into = _observatory_row(con, observatory_id)
+        if merged_into is None:
+            return False
+        con.execute("UPDATE observatory SET merged_into = NULL WHERE id = ?", (observatory_id,))
+        emit_event(con, actor=f"user:{uid}", verb="observatory.unmerged",
+                   target=f"observatory:{observatory_id}", now=now,
                    payload={"before": merged_into, "after": None})
     return True
 

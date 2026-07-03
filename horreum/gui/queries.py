@@ -72,6 +72,64 @@ def axis_events(con, telescope_id=None, limit=200):
     ).fetchall()
 
 
+# ============================================================ oś OBSERWATORIUM (PLAN_os_obserwatorium §3)
+# Read-model osi stanowisk — mirror osi teleskopu (lista→scal→nazwij). RÓŻNICA: licznik klatek liczony
+# ścieżką `observatory_canonical → frame` BEZPOŚREDNIO przez `frame.observatory_id` (obserwatorium NIE ma
+# configu — inaczej niż teleskop). Filtr kanoniczności JAWNY (`WHERE merged_into IS NULL`), jak teleskop.
+
+
+def active_observatories(con):
+    """Aktywne (KANONICZNE) stanowiska z licznością klatek — lista główna osi OBSERWATORIUM.
+
+    Filtr kanoniczności JAWNY (`WHERE o.merged_into IS NULL`, jak `active_telescopes`): widok
+    `observatory_canonical` zwraca WSZYSTKIE wiersze (kanon + scalone), więc sam join go nie odsiewa —
+    bez WHERE scalony wyciekłby jako osobny wiersz. Licznik agreguje po `canon_id` ścieżką
+    `observatory_canonical → frame` BEZPOŚREDNIO przez `frame.observatory_id` (BEZ configu): klatki
+    scalonych członków rolują się pod kanon. `LEFT JOIN` => stanowisko bez klatek ma `frame_count=0`
+    (nie znika). Zwraca: id, name, lat, lon, elev, status, frame_count."""
+    return con.execute(
+        "SELECT o.id, o.name, o.lat, o.lon, o.elev, o.status, "
+        "       COUNT(fr.id) AS frame_count "
+        "FROM observatory o "
+        "LEFT JOIN observatory_canonical oc ON oc.canon_id = o.id "
+        "LEFT JOIN frame fr ON fr.observatory_id = oc.id "
+        "WHERE o.merged_into IS NULL "
+        "GROUP BY o.id "
+        "ORDER BY o.id"
+    ).fetchall()
+
+
+def merged_under_observatory(con, canon_id):
+    """Stanowiska scalone „pod" danym kanonem (widok szczegółu — co zwinięto w to stanowisko). Dzięki
+    inwariantowi głębokość ≤ 1 (gwardy `merge_observatory`) wszystkie są BEZPOŚREDNIMI członkami
+    (`merged_into = canon_id`). Zwraca: id, name, lat, lon, elev, status (puste, gdy nic nie scala)."""
+    return con.execute(
+        "SELECT id, name, lat, lon, elev, status "
+        "FROM observatory WHERE merged_into = ? ORDER BY id",
+        (canon_id,),
+    ).fetchall()
+
+
+def observatory_axis_events(con, observatory_id=None, limit=200):
+    """Podgląd eventów osi obserwatorium (audyt — kto/kiedy/before→after). `observatory_id=None` =>
+    cała oś (`target LIKE 'observatory:%'`: proposed/named/merged/unmerged); inaczej historia JEDNEGO
+    stanowiska. Najnowsze pierwsze (`id DESC`), ucięte do `limit`. Dwie OSOBNE gałęzie z literałami SQL
+    (§4 — dynamiczny SQL wysadziłby bramkę); `target` składany w Pythonie i wiązany jako `?`.
+    (`observatory.assigned` celuje w `frame:<id>` — per-klatka, świadomie poza audytem osi, jak
+    `config.assigned` przy teleskopie.)"""
+    if observatory_id is None:
+        return con.execute(
+            "SELECT id, ts, actor, verb, target, payload, reason FROM event "
+            "WHERE target LIKE 'observatory:%' ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return con.execute(
+        "SELECT id, ts, actor, verb, target, payload, reason FROM event "
+        "WHERE target = ? ORDER BY id DESC LIMIT ?",
+        (f"observatory:{observatory_id}", limit),
+    ).fetchall()
+
+
 # ============================================================ oś OBIEKT (PLAN_gui_object §3, read-only)
 # Read-model biblioteki + kolejki przeglądu. KIND-AWARE: obiekt liczony TYLKO na light/master_light
 # (kalibracja nie ma obiektu z definicji — memory horreum-object-resolution-kind-aware). Filtr teleskopu

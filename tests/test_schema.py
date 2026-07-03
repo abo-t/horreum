@@ -8,6 +8,8 @@ EXPECTED_TABLES = {
     "calibration", "integration", "integration_input",
     # 0003 — staging writebacku (krok 4)
     "pending_changes", "commits", "header_backups", "macros",
+    # 0004 — oś obserwatorium
+    "observatory",
 }
 
 
@@ -79,11 +81,26 @@ def test_szkielet_przyszly_pusty(tmp_path):
     con.close()
 
 
-def test_user_version_v3_po_migracji(tmp_path):
-    """0003 podnosi user_version do 3 (świeża baza leci 0002→0003 sekwencyjnie)."""
+def test_user_version_v4_po_migracji(tmp_path):
+    """0004 podnosi user_version do 4 (świeża baza leci 0002→0003→0004 sekwencyjnie)."""
     con = db.open_db(str(tmp_path / "h.db"))
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 3
-    assert db.SCHEMA_VERSION == 3
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert db.SCHEMA_VERSION == 4
+    con.close()
+
+
+def test_os_obserwatorium_tabela_widok_kolumna(tmp_path):
+    """0004: tabela observatory (lat/lon NOT NULL = seed zamrożony; merged_into self-FK; name nullable
+    NIE-unique — tożsamość geometryczna, nie string), widok observatory_canonical, frame.observatory_id."""
+    con = db.open_db(str(tmp_path / "h.db"))
+    obs_cols = {r[1]: r for r in con.execute("PRAGMA table_info(observatory)")}
+    assert {"id", "name", "lat", "lon", "elev", "merged_into", "status", "created_at"} <= set(obs_cols)
+    assert obs_cols["lat"][3] == 1 and obs_cols["lon"][3] == 1     # notnull flag (seed zamrożony)
+    assert "name" not in _unique_cols(con, "observatory")          # nazwa NIE jest kluczem tożsamości
+    assert "observatory_canonical" in _names(con, "view")
+    frame_cols = {r[1] for r in con.execute("PRAGMA table_info(frame)")}
+    assert "observatory_id" in frame_cols
+    assert con.execute("SELECT count(*) FROM observatory").fetchone()[0] == 0    # pusta po migracji
     con.close()
 
 

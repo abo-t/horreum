@@ -13,25 +13,30 @@ grup po jednej kolumnie bazowej (D-D). `present` = kolumna statusu (zniknięte t
 from __future__ import annotations
 
 import json
+import math
 import os
+import statistics
 import uuid
 from datetime import datetime, timezone
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, QSettings, Signal
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, QSettings, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QGuiApplication
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QFrame, QHBoxLayout, QHeaderView, QInputDialog,
-    QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QSplitter,
-    QTableView, QVBoxLayout, QWidget,
+    QAbstractItemView, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
+    QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QSpinBox,
+    QSplitter, QTableView, QVBoxLayout, QWidget,
 )
 
-from horreum import filter_engine, macro as macro_mod, pivot as pivot_mod, repo, writeback
+from horreum import filter_engine, macro as macro_mod, naming, pivot as pivot_mod, repo, writeback
 from horreum.gui import queries
 
-# Kolumny bazowe: (nagłówek, klucz). Klucze `_telescope`/`_object` = pochodne (fallback etykiety).
+# Kolumny bazowe: (nagłówek, klucz). Klucze `_telescope`/`_object`/`_dt_delta` = pochodne. `_dt_delta`
+# (Δh nagłówek−nazwa) liczone w `_derive` z `naming.header_dt`/`filename_dt` — `base_rows` zwraca już
+# date_obs+path (zero zmian SQL). Kolumna renamu: grupowanie po Δh wykrawa homogeniczny wsad (§1).
 BASE_COLS = [
     ("Ścieżka", "path"), ("Rodzaj", "kind"), ("Kamera", "camera_model"),
     ("Teleskop", "_telescope"), ("Obiekt", "_object"), ("Filtr", "filter_canon"),
+    ("Δh (hdr−nazwa)", "_dt_delta"),
 ]
 _MISSING_TEXT = "—"
 _MISSING_COLOR = QColor(0x99, 0x99, 0x99)
@@ -75,11 +80,30 @@ def _obj_label(row):
     return row["object_canon"] or row["object_raw"] or ""
 
 
+def _half_away(x):
+    """Zaokrąglij do int metodą half-away-from-zero (NIE goły `round()`, który jest half-to-even —
+    R2 #5). Używane do przełożenia float-mediany Δ na całkowity offset spinu."""
+    return int(math.copysign(math.floor(abs(x) + 0.5), x)) if x else 0
+
+
+def _dt_delta_hours(date_obs, path):
+    """Δ = DATE-OBS − czas z nazwy pliku, w godzinach (float) albo None. Guard `path is None`
+    (LEFT JOIN location — `basename(None)` = TypeError, R1 #11). Brak któregoś źródła → None."""
+    if path is None:
+        return None
+    h = naming.header_dt(date_obs)
+    fn = naming.filename_dt(os.path.basename(path))
+    if h is None or fn is None:
+        return None
+    return (h - fn).total_seconds() / 3600.0
+
+
 def _derive(row):
-    """sqlite3.Row → dict z polami pochodnymi (_telescope/_object) do kolumn bazowych."""
+    """sqlite3.Row → dict z polami pochodnymi (_telescope/_object/_dt_delta) do kolumn bazowych."""
     d = {k: row[k] for k in row.keys()}
     d["_telescope"] = _tel_label(row)
     d["_object"] = _obj_label(row)
+    d["_dt_delta"] = _dt_delta_hours(d.get("date_obs"), d.get("path"))
     return d
 
 
@@ -97,13 +121,16 @@ class GridTableModel(QAbstractTableModel):
         self._sort_col = 0
         self._sort_desc = False
         self._numeric_kw = set() # keywordy z choć jedną komórką liczbową → MISSING „—" też prawo (P3-7)
-        self._preview = {}       # frame_id → {'keyword','old','new'} | {'skipped': reason} (podgląd makra, KROK 4)
+        self._preview = {}       # frame_id → {'keyword','old','new'} | {'skipped': reason} (podgląd makra/renamu)
+        self._preview_label = "makro →"   # etykieta efemerycznej kolumny podglądu (klinga-zależna, R1 #4)
 
-    def set_preview(self, preview):
-        """Podgląd makra (doktryna §5: „grid = podgląd makra"): frame_id → zmiana (stara→nowa) albo
-        pominięcie z powodem. Dokłada EFEMERYCZNĄ kolumnę „makro →" na końcu; `{}`/None ją zdejmuje."""
+    def set_preview(self, preview, *, label="makro →"):
+        """Podgląd klingi (doktryna §5: „grid = podgląd"): frame_id → zmiana (stara→nowa) albo
+        pominięcie z powodem. Dokłada EFEMERYCZNĄ kolumnę (`label`, np. „makro →"/„nazwa →") na końcu;
+        `{}`/None ją zdejmuje. `label` rozróżnia klingę (makro vs rename) w tym samym podglądzie (R1 #4)."""
         self.beginResetModel()
         self._preview = dict(preview or {})
+        self._preview_label = label
         self.endResetModel()
 
     def _preview_active(self):
@@ -146,7 +173,7 @@ class GridTableModel(QAbstractTableModel):
             return None
         if orientation == Qt.Horizontal:
             if section == self._preview_col():
-                return "makro →"
+                return self._preview_label
             if section < len(BASE_COLS):
                 return BASE_COLS[section][0]
             return self._keywords[section - len(BASE_COLS)]
@@ -201,6 +228,8 @@ class GridTableModel(QAbstractTableModel):
                 return f"pominięto: {pv['skipped']}"
             return None
         if role == Qt.DisplayRole:
+            if pv.get("op") == "rename":
+                return str(pv["new"])          # tylko NOWA nazwa (stara jest w kol. „Ścieżka"; wiz #1)
             old = "∅" if pv.get("old") is None else str(pv["old"])
             return f"{old} → {pv['new']}"
         if role == Qt.ToolTipRole:
@@ -233,6 +262,18 @@ class GridTableModel(QAbstractTableModel):
                 extra = "\n(zniknięta — wszystkie lokalizacje present=0)" if vanished else (
                     f"\n({row['n_present']} obecnych lokalizacji)" if dup else "")
                 return (path or "(brak lokalizacji)") + extra
+            return None
+        if key == "_dt_delta":
+            # JEDEN typ: zawsze float godzin (R2 #3). Pełne godziny renderują się „-2", ułamek „-1.97"
+            # (`:g`); ŻADNYCH stringów-znaczników (mieszany typ rozbrajałby sort numeryczny R1 #6). Flaga
+            # niepełnogodzinności mieszka WYŁĄCZNIE w panelu daty RenameBar, nie w komórce.
+            v = row.get("_dt_delta")
+            if role == Qt.DisplayRole:
+                return "" if v is None else f"{v:g}"           # None → pusta komórka (R1 #7)
+            if role == Qt.TextAlignmentRole and v is not None:
+                return int(Qt.AlignRight | Qt.AlignVCenter)
+            if role == Qt.ToolTipRole and v is not None:
+                return f"DATE-OBS − czas z nazwy = {v!r} h"     # surowy float (kontrola kwantyzacji)
             return None
         if role == Qt.DisplayRole:
             v = row.get(key)
@@ -275,7 +316,11 @@ class GridTableModel(QAbstractTableModel):
             return (0, "")
         kw = self._kw_for_col(col)
         if kw is None:
-            v = row.get(self._col_key(col))
+            key = self._col_key(col)
+            if key == "_dt_delta":                            # gałąź numeryczna (R1 #6), None na koniec
+                v = row.get("_dt_delta")
+                return (2, 0.0) if v is None else (0, float(v))
+            v = row.get(key)
             return (0, "" if v is None else str(v).lower())
         cell = row["cells"].get(kw, pivot_mod.MISSING)
         if cell is pivot_mod.MISSING:
@@ -288,7 +333,11 @@ class GridTableModel(QAbstractTableModel):
         if self._group_by in (None, ""):
             return None
         v = row.get(self._group_by)
-        return "(brak)" if v in (None, "") else str(v)
+        if v in (None, ""):
+            return "(brak)"
+        if self._group_by == "_dt_delta":
+            return f"{v:g}"                                    # etykieta grupy spójna z komórką („-2")
+        return str(v)
 
     def _rebuild(self):
         self.beginResetModel()
@@ -303,7 +352,11 @@ class GridTableModel(QAbstractTableModel):
         if self._group_by in (None, ""):
             self._rows = list(rows)
         else:
-            rows = sorted(rows, key=lambda r: (self._group_value(r) or "").lower())
+            if self._group_by == "_dt_delta":                 # porządek nagłówków grup NUMERYCZNY (R2 #4):
+                rows = sorted(rows, key=lambda r: (           # inaczej „-1", „-12", „-2"; None-grupa na koniec
+                    r.get("_dt_delta") is None, r.get("_dt_delta") or 0.0))
+            else:
+                rows = sorted(rows, key=lambda r: (self._group_value(r) or "").lower())
             self._rows = []
             cur = object()
             bucket = []
@@ -551,6 +604,137 @@ class MacroBar(QWidget):
             self.stage.emit(md)
 
 
+class RenameBar(QWidget):
+    """Zwijany pasek „Nazwy z faktów" (BLIŹNIAK strukturalny `MacroBar`, G3: pasek NIE modal). Trzy strefy:
+    (1) polityka wsadu — Źródło/Offset/Fallback + żywa etykieta celu; (2) panel inspekcji daty (G1, G4 —
+    pełne timestampy + Δ + align do drugiego źródła); (3) akcje. Emituje `preview(policy)`/`stage(policy)`/
+    `cleared()`/`toggled(bool)`/`sourceChanged()`. `policy` = {source, offset_hours, fallback} — jeden
+    silnik `naming.run_rename`. Panel daty KARMIONY z zewnątrz (`set_echo`) — FramesView zna zaznaczenie."""
+
+    preview = Signal(object)
+    stage = Signal(object)
+    cleared = Signal()
+    toggled = Signal(bool)       # rozwinięcie/zwinięcie — FramesView odświeża echo daty (G1 warunkowe)
+    sourceChanged = Signal()     # zmiana źródła → przelicz etykietę/znak align (R2 #2)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._median = None       # ostatnia mediana Δ wsadu (do przycisku „Wyrównaj")
+        outer = QVBoxLayout(self); outer.setContentsMargins(0, 0, 0, 0)
+        head = QHBoxLayout()
+        self.toggle = QPushButton("▸ Nazwy z faktów (rename plików)")
+        self.toggle.setCheckable(True)
+        self.toggle.clicked.connect(self._on_toggle)
+        head.addWidget(self.toggle); head.addStretch(1)
+        outer.addLayout(head)
+
+        self.body = QWidget(); self.body.setVisible(False)
+        b = QVBoxLayout(self.body); b.setContentsMargins(12, 4, 0, 4)
+
+        # (1) polityka wsadu
+        pol = QHBoxLayout()
+        pol.addWidget(QLabel("Źródło:"))
+        self.src = QComboBox()
+        self.src.addItem("DATE-OBS", "date_obs")          # D2: default DATE-OBS
+        self.src.addItem("nazwa pliku", "filename")
+        self.src.currentIndexChanged.connect(lambda *_: self.sourceChanged.emit())
+        pol.addWidget(self.src)
+        pol.addWidget(QLabel("Offset:"))
+        self.offset = QSpinBox(); self.offset.setRange(-24, 24); self.offset.setValue(0)
+        self.offset.setSuffix(" h")                       # BEZ założenia strefy (§2): 0 default
+        pol.addWidget(self.offset)
+        self.fallback = QCheckBox("Fallback na drugie źródło"); self.fallback.setChecked(True)  # D1
+        pol.addWidget(self.fallback)
+        pol.addStretch(1)
+        self.target_lbl = QLabel("")                      # żywa etykieta celu (R1 #18)
+        self.target_lbl.setStyleSheet("color: #666;")
+        pol.addWidget(self.target_lbl)
+        b.addLayout(pol)
+
+        # (2) panel inspekcji daty (G1 — zarezerwowana powierzchnia; G4 — pełne timestampy)
+        grid = QGridLayout(); grid.setContentsMargins(0, 2, 0, 2)
+        self.lbl_primary = QLabel("—"); self.lbl_secondary = QLabel("—")
+        self.lbl_delta = QLabel(""); self.lbl_flag = QLabel("")
+        self.lbl_flag.setStyleSheet("color: #b00;")
+        self.btn_align = QPushButton("Wyrównaj do drugiego źródła"); self.btn_align.setEnabled(False)
+        self.btn_align.clicked.connect(self._align)
+        grid.addWidget(self.lbl_primary, 0, 0); grid.addWidget(self.lbl_secondary, 0, 1)
+        grid.addWidget(self.lbl_delta, 1, 0); grid.addWidget(self.lbl_flag, 1, 1)
+        b.addLayout(grid)
+        align_row = QHBoxLayout()                        # „Wyrównaj" = szerokość treści (pomocnik NIE
+        align_row.addWidget(self.btn_align); align_row.addStretch(1)   # dominuje akcji głównych — wiz #5)
+        b.addLayout(align_row)
+
+        # (3) akcje (bliźniaczo do makra)
+        act = QHBoxLayout()
+        self.btn_prev = QPushButton("Podgląd"); self.btn_prev.clicked.connect(self._emit_preview)
+        self.btn_stage = QPushButton("Do stagingu"); self.btn_stage.clicked.connect(self._emit_stage)
+        btn_clear = QPushButton("Wyczyść podgląd"); btn_clear.clicked.connect(lambda: self.cleared.emit())
+        act.addStretch(1); act.addWidget(self.btn_prev); act.addWidget(self.btn_stage); act.addWidget(btn_clear)
+        b.addLayout(act)
+        outer.addWidget(self.body)
+
+    # ---- stan / API ----
+    def is_expanded(self):
+        return self.toggle.isChecked()
+
+    def source(self):
+        return self.src.currentData()
+
+    def policy(self):
+        return {"source": self.src.currentData(), "offset_hours": self.offset.value(),
+                "fallback": self.fallback.isChecked()}
+
+    def set_actions_enabled(self, on):
+        self.btn_prev.setEnabled(on)
+        self.btn_stage.setEnabled(on)
+
+    def set_target_label(self, text):
+        self.target_lbl.setText(text)
+
+    def set_echo(self, primary, secondary, delta, flag, *, median=None, spread=None):
+        """Wypełnij panel daty (FramesView liczy z zaznaczenia/widocznych). `median` (Δ w godzinach, float
+        albo None) uzbraja „Wyrównaj": znak ZALEŻNY od źródła (R2 #2), wartość przez half-away (R2 #5),
+        surowa mediana + rozrzut w tooltipie (R1 #16)."""
+        self.lbl_primary.setText(primary); self.lbl_secondary.setText(secondary)
+        self.lbl_delta.setText(delta); self.lbl_flag.setText(flag)
+        self._median = median
+        if median is None:
+            self.btn_align.setEnabled(False)
+            self.btn_align.setText("Wyrównaj do drugiego źródła")
+            self.btn_align.setToolTip("")
+            return
+        self.btn_align.setEnabled(True)
+        off = self._offset_from_median()
+        other = "czasu z nazw" if self.source() == "date_obs" else "DATE-OBS"
+        self.btn_align.setText(f"Wyrównaj do {other}: {off:+d} h")
+        tip = f"surowa mediana Δ = {median!r} h"
+        if spread is not None:
+            tip += f" · rozrzut {spread:g} h"
+        self.btn_align.setToolTip(tip)
+
+    def _offset_from_median(self):
+        """Offset całkowity z mediany Δ (=hdr−nazwa). source=date_obs → −Δ (przesuń nagłówek do nazwy);
+        source=filename → +Δ (przesuń nazwę do nagłówka). `resolve_dt` = base+offset (R2 #2)."""
+        signed = -self._median if self.source() == "date_obs" else self._median
+        return _half_away(signed)
+
+    def _align(self):
+        if self._median is not None:
+            self.offset.setValue(self._offset_from_median())
+
+    def _on_toggle(self, checked):
+        self.body.setVisible(checked)
+        self.toggle.setText(("▾ " if checked else "▸ ") + "Nazwy z faktów (rename plików)")
+        self.toggled.emit(checked)
+
+    def _emit_preview(self):
+        self.preview.emit(self.policy())
+
+    def _emit_stage(self):
+        self.stage.emit(self.policy())
+
+
 class StagingDrawer(QFrame):
     """Stała szuflada dolna stagingu (doktryna §5: „N zmian oczekuje · Przejrzyj · Zatwierdź · Odrzuć").
     Postęp i wynik commitu renderują się TU (nie w łańcuchu modali). Emituje `commit()`/`reject()`."""
@@ -577,7 +761,11 @@ class StagingDrawer(QFrame):
         self._n = n
         if n > 0:
             self.dot.setText("⬤"); self.dot.setStyleSheet("color: #d08000;")
-            self.label.setText(f"{n} zmian oczekuje")
+            # `label` rozróżnia klingę też przy n>0: „N zmian nazw oczekuje" vs domyślne „N zmian
+            # oczekuje" (mikro-zmiana §0; call-sites makra bez label → domyślny tekst, R1 #8).
+            self.label.setText(label or f"{n} zmian oczekuje")
+            if result is None:
+                self.result.setText("")      # nowy staging: skasuj STALE wynik commitu/odrzucenia (wiz #7)
         else:
             self.dot.setText("○"); self.dot.setStyleSheet("color: #999;")
             # `label` nadpisuje domyślny tekst pustego stanu: po commicie „Zatwierdzono…" zamiast
@@ -585,7 +773,8 @@ class StagingDrawer(QFrame):
             self.label.setText(label or "Brak zmian oczekujących")
         self.btn_commit.setEnabled(n > 0)
         self.btn_reject.setEnabled(n > 0)
-        # Nowy staging (n>0) chowa ewentualny stary „Cofnij"; commit/reject znów widoczne (#5).
+        # Nowy staging (n>0) → Zatwierdź/Odrzuć znowu widoczne. NIE chowa tu „Cofnij" (osobny przycisk
+        # FramesView) — to robi `_dismiss_undo` przy starcie stagingu (recenzent #1/#4, wiz #3).
         if n > 0:
             self.set_commit_actions_visible(True)
         if result is not None:
@@ -615,6 +804,15 @@ class FramesView(QWidget):
         self._frame_ids = []      # frame_id widoczne w gridzie (cel makra) — aktualizowane w refresh()
         self._run_id = None       # JEDEN run_id sesji makra (R#5 lifecycle: stage→commit/reject zwalnia)
         self._n_total = 0         # liczba widocznych klatek (baza licznika; zaznaczenie dokładane, G2)
+        # Stan renamu — CZTERY zmienne (R1 #1 + R2 #1): run aktywnego stagingu, flaga „skommitowany"
+        # (re-stage po commicie MINTUJE nowy run, nie kasuje wierszy 'applied'=undo), OSOBNY cel „Cofnij"
+        # (przechwycony przy commicie — bez niego mint przekierowałby żywy Cofnij na pusty run = złudzenie),
+        # tryb dispatchu współdzielonego „Cofnij" ({None,macro,rename}).
+        self._rename_run_id = None
+        self._rename_run_committed = False
+        self._undo_rename_run_id = None
+        self._undo_mode = None
+        self._preview_owner = None   # {None,'macro','rename'} — podgląd współdzielony (R1 #19)
         self._build_ui()
         self._load_facets()
         self.refresh()
@@ -663,10 +861,22 @@ class FramesView(QWidget):
         self.macro_bar.cleared.connect(self._on_macro_clear)
         rv.addWidget(self.macro_bar)
 
+        self.rename_bar = RenameBar()                    # bliźniaczy pasek pod makrem (G3)
+        self.rename_bar.preview.connect(self._on_rename_preview)
+        self.rename_bar.stage.connect(self._on_rename_stage)
+        self.rename_bar.cleared.connect(self._on_rename_clear)
+        self.rename_bar.toggled.connect(lambda *_: self._refresh_date_echo())
+        self.rename_bar.sourceChanged.connect(self._refresh_date_echo)
+        rv.addWidget(self.rename_bar)
+
         self.model = GridTableModel(self)
         self.table = QTableView()
         self.table.setModel(self.model)
-        self.table.selectionModel().selectionChanged.connect(lambda *_: self._update_count())
+        # Debounce panelu daty: `selectionChanged` może sypać setki eventów przy zaznaczeniu wsadu
+        # → przelicz echo raz, po 150 ms ciszy (R1 #15).
+        self._date_timer = QTimer(self); self._date_timer.setSingleShot(True); self._date_timer.setInterval(150)
+        self._date_timer.timeout.connect(self._refresh_date_echo)
+        self.table.selectionModel().selectionChanged.connect(lambda *_: self._on_selection_changed())
         self.table.setSortingEnabled(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -807,33 +1017,91 @@ class FramesView(QWidget):
         self.empty.setVisible(n == 0)
         self.table.setVisible(n > 0)
         self.macro_bar.set_actions_enabled(bool(base_ids))   # szczery disabled makra na pustym gridzie (#4)
+        self.rename_bar.set_actions_enabled(bool(base_ids))  # bliźniaczo dla renamu
+        self._sync_staging_mutex()                           # staging jednej klingi wyłącza „Do stagingu" drugiej
+        self._refresh_date_echo()                            # panel daty odbija świeże widoczne (echo warunkowe)
         self.status_message.emit(f"Grid: {n} klatek, {len(keywords)} kolumn-keywordów")
+
+    def _on_selection_changed(self):
+        self._update_count()
+        self._date_timer.start()                             # debounced echo daty (R1 #15)
 
     def _update_count(self):
         """Licznik = widoczne klatki + (gdy jest) zaznaczenie: „N klatek · M zaznaczonych" (wizytator G2 —
-        akcja na zaznaczeniu musi potwierdzać cel). Nagłówki grup są nieselektowalne → nie liczą się."""
+        akcja na zaznaczeniu musi potwierdzać cel). Nagłówki grup są nieselektowalne → nie liczą się.
+        Odświeża też żywą etykietę celu renamu (R1 #18): zaznaczenie-first, inaczej widoczne."""
         sm = self.table.selectionModel()
         sel = len(sm.selectedRows()) if sm else 0
         txt = f"{self._n_total} klatek" + (f"  ·  {sel} zaznaczonych" if sel else "")
         self.count_label.setText(txt)
+        if hasattr(self, "rename_bar"):
+            self.rename_bar.set_target_label(
+                f"Cel: {sel} zaznaczonych" if sel else f"Cel: {self._n_total} widocznych")
+
+    # ---- panel inspekcji daty (G1/G4 — RenameBar) ----
+    def _selected_data_rows(self):
+        """Wiersze-klatki (bez markerów grup) dla zaznaczenia. Puste zaznaczenie → []."""
+        sm = self.table.selectionModel()
+        if sm is None:
+            return []
+        out = []
+        for idx in sm.selectedRows():
+            row = self.model._rows[idx.row()]
+            if isinstance(row, dict) and "_group" not in row:
+                out.append(row)
+        return out
+
+    def _refresh_date_echo(self):
+        """Odśwież panel daty RenameBar z zaznaczenia (albo widocznych, gdy puste). G1 ŚWIADOMIE
+        WARUNKOWE (R1 #17): przy ZWINIĘTYM pasku echo zaznaczenia niesie już licznik G2 — pełne echo
+        daty wymaga rozwiniętego paska (przepływ renamu i tak dzieje się przy rozwiniętym)."""
+        if not self.rename_bar.is_expanded():
+            return
+        scope = self._selected_data_rows() or self.model._data_rows
+        if len(scope) == 1:
+            r = scope[0]
+            h = naming.header_dt(r.get("date_obs"))
+            fn = naming.filename_dt(os.path.basename(r["path"])) if r.get("path") else None
+            primary = f"DATE-OBS: {h:%Y-%m-%d %H:%M:%S}" if h else "DATE-OBS: (brak)"
+            secondary = f"czas z nazwy: {fn:%Y-%m-%d %H:%M:%S}" if fn else "czas z nazwy: (brak)"
+            d = r.get("_dt_delta")
+            if d is None:
+                self.rename_bar.set_echo(primary, secondary, "Δ = —", "brak źródła czasu")
+            else:
+                flag = "Δ niepełnogodzinna!" if abs(d - round(d)) > 1e-9 else ""
+                self.rename_bar.set_echo(primary, secondary, f"Δ (hdr−nazwa) = {d:g} h", flag)
+            return
+        # wsad (>1): mediana Δ + rozrzut (1 interakcja/wsad, §5b briefu-matki) + align
+        deltas = [r["_dt_delta"] for r in scope if r.get("_dt_delta") is not None]
+        primary = f"Wsad: {len(scope)} klatek ({len(deltas)} z obu źródeł)"
+        if deltas:
+            med = statistics.median(deltas)
+            spread = max(deltas) - min(deltas)
+            self.rename_bar.set_echo(primary, f"mediana Δ = {med:g} h · rozrzut {spread:g} h",
+                                     "", "", median=med, spread=spread)
+        else:
+            self.rename_bar.set_echo(primary, "brak źródła czasu w wsadzie", "", "")
 
     def set_busy(self, busy):
-        """Podczas etapu pipeline'u wyłącz akcje ZAPISU grida (makro/staging/commit/undo) — worker pisze
-        do bazy w tle (wizytator C1). Po etapie przywróć SZCZERE stany (makro wg widocznych klatek,
-        commit/odrzuć wg liczby oczekujących); nie tykamy etykiet/widoczności szuflady (bez regresji D2)."""
+        """Podczas etapu pipeline'u wyłącz akcje ZAPISU grida (makro/rename/staging/commit/undo) — worker
+        pisze do bazy w tle (wizytator C1). Po etapie przywróć SZCZERE stany (paski wg widocznych klatek,
+        commit/odrzuć wg liczby oczekujących AKTYWNEJ klingi); nie tykamy etykiet/widoczności szuflady (D2)."""
         if busy:
             self.macro_bar.set_actions_enabled(False)
+            self.rename_bar.set_actions_enabled(False)
             self.drawer.btn_commit.setEnabled(False)
             self.drawer.btn_reject.setEnabled(False)
             if hasattr(self, "_undo_btn"):
                 self._undo_btn.setEnabled(False)
         else:
             self.macro_bar.set_actions_enabled(bool(self._frame_ids))
-            n = self._pending_count()
+            self.rename_bar.set_actions_enabled(bool(self._frame_ids))
+            n = self._active_pending_count()             # mode-aware (R1 #2): makro LUB rename
             self.drawer.btn_commit.setEnabled(n > 0)
             self.drawer.btn_reject.setEnabled(n > 0)
             if hasattr(self, "_undo_btn"):
                 self._undo_btn.setEnabled(True)
+            self._sync_staging_mutex()
 
     # ---- makro / staging (KROK 4, druga klinga) ----
     def _targets_fn(self, frame_ids):
@@ -857,6 +1125,7 @@ class FramesView(QWidget):
     def _show_preview(self, run):
         """Wrzuć podgląd makra do modelu (stara→nowa / pominięto) i zwróć (touched, skipped).
         Grid kluczuje FRAME, a touched niesie location_id → mapuj przez `location.frame_id`."""
+        self._note_preview_takeover("macro")
         preview = {}
         for pv in run.touched:
             fid = self._frame_for_location(pv.location_id)
@@ -885,6 +1154,10 @@ class FramesView(QWidget):
         if not self._frame_ids:
             self.status_message.emit("Makro: brak widocznych klatek")
             return
+        if self._rename_pending_count() > 0:             # mutex symetryczny: staging renamu w toku
+            self.status_message.emit("Makro: najpierw zatwierdź/odrzuć staging nazw")
+            return
+        self._dismiss_undo()                             # nowy staging unieważnia leftover „Cofnij" (wiz #3)
         if self._run_id is None:
             self._run_id = uuid.uuid4().hex
         repo.clear_pending_for_run(self.con, self._run_id)   # idempotentny re-stage (R#5)
@@ -903,7 +1176,14 @@ class FramesView(QWidget):
 
     def _on_macro_clear(self):
         self.model.set_preview({})
+        self._preview_owner = None
         self.status_message.emit("Podgląd makra wyczyszczony")
+
+    @staticmethod
+    def _first_reason(res):
+        """Reprezentatywny powód blokady/błędu do summary — user na ścianie blocked pyta „czemu?",
+        nie chce samego licznika (wizytator #4). Pierwszy niepusty `reason` z blocked/failed."""
+        return next((fr.reason for fr in (res.blocked + res.failed) if fr.reason), None)
 
     def _pending_count(self):
         if self._run_id is None:
@@ -911,10 +1191,55 @@ class FramesView(QWidget):
         return sum(1 for r in writeback.pending_for_run(self.con, self._run_id)
                    if r["status"] == "pending")
 
+    def _rename_pending_count(self):
+        if self._rename_run_id is None:
+            return 0
+        return sum(1 for r in writeback.renames_for_run(self.con, self._rename_run_id)
+                   if r["status"] == "pending")
+
+    def _active_pending_count(self):
+        """Oczekujące AKTYWNEJ klingi. Staging jest MUTEX — najwyżej jedna niepusta, więc `or` wybiera ją."""
+        return self._pending_count() or self._rename_pending_count()
+
+    def _sync_staging_mutex(self):
+        """Staging na WYŁĄCZNOŚĆ: „Do stagingu" jednej klingi disabled+tooltip, gdy druga ma pending
+        (R2 #8 — stan widoczny BEZ klikania). AUTORYTATYWNY nad `btn_stage`: gdy druga klinga zwolni
+        staging, re-enable wg widocznych klatek (inaczej przycisk zostałby wyszarzony). Wołane po każdej
+        zmianie stagingu i w refresh() (po `set_actions_enabled`)."""
+        macro_n, rename_n = self._pending_count(), self._rename_pending_count()
+        has_frames = bool(self._frame_ids)
+        if macro_n > 0:
+            self.rename_bar.btn_stage.setEnabled(False)
+            self.rename_bar.btn_stage.setToolTip(f"staging makra w toku ({macro_n} zmian)")
+        else:
+            self.rename_bar.btn_stage.setEnabled(has_frames)
+            self.rename_bar.btn_stage.setToolTip("")
+        if rename_n > 0:
+            self.macro_bar.btn_stage.setEnabled(False)
+            self.macro_bar.btn_stage.setToolTip(f"staging nazw w toku ({rename_n} zmian)")
+        else:
+            self.macro_bar.btn_stage.setEnabled(has_frames)
+            self.macro_bar.btn_stage.setToolTip("")
+
     def _refresh_drawer(self):
-        self.drawer.set_count(self._pending_count())
+        """Szuflada MODE-AWARE (R1 #2): pokazuje AKTYWNĄ klingę (staging mutex → najwyżej jedna niepusta).
+        Rename → „N zmian nazw oczekuje" (mikro-zmiana §0); makro → domyślny. Gdy pending=0 ale „Cofnij"
+        widoczny (świeży commit), NIE nadpisuj etykiety „Zatwierdzono/Przemianowano" pustostanem (D2/#2)."""
+        rn = self._rename_pending_count()
+        macro_n = self._pending_count()
+        if rn > 0:
+            self.drawer.set_count(rn, label=f"{rn} zmian nazw oczekuje")
+        elif macro_n > 0:
+            self.drawer.set_count(macro_n)
+        elif self._undo_mode is None:         # brak pending i brak świeżego „Cofnij" → pustostan
+            self.drawer.set_count(0)          # (sygnał stanu, NIE isVisible() — zawodne bez show())
+        # else: undo oferowany (`_undo_mode` ustawiony) → zachowaj etykietę „Zatwierdzono/Przemianowano"
+        self._sync_staging_mutex()
 
     def _on_commit(self):
+        if self._rename_pending_count() > 0:             # szuflada aktywnej klingi (staging mutex)
+            self._on_commit_rename()
+            return
         if self._run_id is None:
             return
         QGuiApplication.setOverrideCursor(Qt.WaitCursor)
@@ -930,6 +1255,9 @@ class FramesView(QWidget):
         if res.skipped:
             parts.append(f"{len(res.skipped)} pominiętych")
         summary = " · ".join(parts)
+        detail = self._first_reason(res)                 # powód, nie tylko liczba (wiz #4)
+        if detail:
+            summary += f" — {detail}"
         if res.commit_id is not None and res.applied:
             summary += f"  (commit {res.commit_id})"
             self._last_commit_id = res.commit_id
@@ -943,18 +1271,38 @@ class FramesView(QWidget):
         self.status_message.emit(f"Writeback: {summary}")
 
     def _install_undo(self, commit_id, summary, applied):
-        """Po udanym commicie szuflada oferuje jednorazowe „Cofnij" (undo całego commitu). Przycisk
-        tworzony i podłączany RAZ (stabilny handler czyta `self._undo_commit_id`) — bez churnu
-        connect/disconnect (który sypał RuntimeWarning). Etykieta „Zatwierdzono…" zamiast pustostanu,
-        by nie przeczyła wynikowi obok (wizytator D2)."""
+        """Po udanym commicie makra szuflada oferuje jednorazowe „Cofnij" (undo całego commitu). Etykieta
+        „Zatwierdzono…" zamiast pustostanu, by nie przeczyła wynikowi obok (wizytator D2)."""
         self.drawer.set_count(0, result=summary, label=f"Zatwierdzono: {applied} (commit {commit_id})")
         self.drawer.set_commit_actions_visible(False)   # jedyna sensowna akcja teraz to Cofnij (#5)
         self._undo_commit_id = commit_id
+        self._undo_mode = "macro"                        # dispatch współdzielonego „Cofnij" (R1 #3)
+        self._ensure_undo_button()
+        self._undo_btn.setVisible(True)
+
+    def _ensure_undo_button(self):
+        """Współdzielony przycisk „Cofnij" (tworzony RAZ, stabilny handler → dispatch po `_undo_mode`;
+        bez churnu connect/disconnect, który sypał RuntimeWarning — wzorzec makra)."""
         if not hasattr(self, "_undo_btn"):
             self._undo_btn = QPushButton("Cofnij")
-            self._undo_btn.clicked.connect(lambda: self._on_undo(self._undo_commit_id))
+            self._undo_btn.clicked.connect(self._dispatch_undo)
             self.drawer.layout().addWidget(self._undo_btn)
-        self._undo_btn.setVisible(True)
+
+    def _dismiss_undo(self):
+        """Nowa operacja stagingu UNIEWAŻNIA „Cofnij" poprzedniego commitu (transient undo wygasa — inny
+        run w toku). Chowa przycisk + zeruje `_undo_mode`, żeby leftover „Cofnij" nie dispatchował undo
+        starej klingi na wierzch świeżego stagingu = osierocenie pending + zakleszczenie mutexa bez
+        widocznego powodu (recenzent #1, wizytator #3). Wołane na starcie stagingu obu kling."""
+        if hasattr(self, "_undo_btn"):
+            self._undo_btn.setVisible(False)
+        self._undo_mode = None
+
+    def _dispatch_undo(self):
+        """Współdzielony „Cofnij" woła undo AKTYWNEJ klingi wg `_undo_mode` (R1 #3, init None)."""
+        if self._undo_mode == "rename":
+            self._on_undo_rename(self._undo_rename_run_id)
+        else:
+            self._on_undo(self._undo_commit_id)
 
     def _on_undo(self, commit_id):
         QGuiApplication.setOverrideCursor(Qt.WaitCursor)
@@ -966,17 +1314,179 @@ class FramesView(QWidget):
         if res.blocked:
             msg += f" · {len(res.blocked)} zablokowanych"
         self._undo_btn.setVisible(False)
+        self._undo_mode = None
         self.drawer.set_commit_actions_visible(True)     # przywróć akcje po cofnięciu (#5)
         self.drawer.set_count(0, result=msg)
         self.refresh()
+        self._refresh_drawer()                           # honest: odbij pending drugiej klingi (wiz #3b)
         self.status_message.emit(f"Undo: {msg}")
 
     def _on_reject(self):
+        if self._rename_pending_count() > 0:             # szuflada aktywnej klingi (staging mutex)
+            self._on_reject_rename()
+            return
         if self._run_id is None:
             return
         n = self._pending_count()
         repo.clear_pending_for_run(self.con, self._run_id)
         self._run_id = None
         self.model.set_preview({})
+        self._preview_owner = None
         self.drawer.set_count(0, result=f"Odrzucono {n} zmian")   # trwałe sprzężenie w szufladzie (#3)
+        self._sync_staging_mutex()
         self.status_message.emit(f"Odrzucono {n} zmian")
+
+    # ---- rename „Nazwy z faktów" (druga klinga plików: os.rename) ----
+    def _note_preview_takeover(self, new_owner):
+        """Podgląd współdzielony (jeden `_preview`, R1 #19): przejęcie przez drugą klingę zdejmuje
+        pierwszy — komunikat w statusie, żeby zniknięcie nie było ciche. Wołane PRZED `set_preview`."""
+        if (self._preview_owner and self._preview_owner != new_owner
+                and self.model._preview_active()):
+            other = "makra" if self._preview_owner == "macro" else "nazw"
+            self.status_message.emit(f"Zdjęto podgląd {other} (druga klinga)")
+        self._preview_owner = new_owner
+
+    def _rename_target_ids(self):
+        """Cel wsadu renamu (D-I1): zaznaczenie jeśli niepuste, inaczej wszystkie widoczne. Zwraca
+        (frame_ids, ZAMROŻONY opis celu) — opis idzie do statusu po akcji (R2 #10, cel ruchomy)."""
+        rows = self._selected_data_rows()
+        if rows:
+            return [r["frame_id"] for r in rows], f"{len(rows)} zaznaczonych"
+        return list(self._frame_ids), f"{self._n_total} widocznych"
+
+    def _run_rename(self, ids, policy, run_id=None):
+        return naming.run_rename(
+            ids, targets_fn=lambda i: queries.rename_frame_targets(self.con, i),
+            source=policy["source"], offset_hours=policy["offset_hours"],
+            fallback=policy["fallback"], run_id=run_id)
+
+    def _show_rename_preview(self, run):
+        """Podgląd renamu do modelu (nazwa stara→nowa / pominięto). `RenamePreview` niesie `frame_id`
+        WPROST (bez mapowania location→frame jak makro). Etykieta kolumny „nazwa →" (R1 #4)."""
+        self._note_preview_takeover("rename")
+        preview = {}
+        for pv in run.touched:
+            preview[pv.frame_id] = {"keyword": "nazwa pliku", "op": "rename",
+                                    "old": os.path.basename(pv.old_path),
+                                    "new": os.path.basename(pv.new_path)}
+        for sk in run.skipped:
+            preview[sk.frame_id] = {"skipped": sk.reason}
+        self.model.set_preview(preview, label="nazwa →")
+        return len(run.touched), len(run.skipped)
+
+    def _on_rename_preview(self, policy):
+        ids, target = self._rename_target_ids()
+        if not ids:
+            self.status_message.emit("Rename: brak klatek do policzenia")
+            return
+        run = self._run_rename(ids, policy)
+        t, s = self._show_rename_preview(run)
+        self.status_message.emit(f"Podgląd nazw: {t} do zmiany, {s} pominięto (cel: {target})")
+
+    def _on_rename_stage(self, policy):
+        ids, target = self._rename_target_ids()
+        if not ids:
+            self.status_message.emit("Rename: brak klatek")
+            return
+        if self._pending_count() > 0:                    # mutex: staging makra w toku
+            self.status_message.emit("Rename: najpierw zatwierdź/odrzuć staging makra")
+            return
+        self._dismiss_undo()                             # nowy staging unieważnia leftover „Cofnij" (wiz #3)
+        # Pętla życia run_id (R1 #1 + R2 #1): run niecommitowany → clear (bezpieczne, same 'pending');
+        # run skommitowany → MINTUJ NOWY (clear skasowałby wiersze 'applied' = rekordy undo).
+        if self._rename_run_id is None or self._rename_run_committed:
+            self._rename_run_id = uuid.uuid4().hex
+            self._rename_run_committed = False
+        else:
+            repo.clear_renames_for_run(self.con, self._rename_run_id)
+        run = self._run_rename(ids, policy, run_id=self._rename_run_id)
+        for p in run.touched:
+            repo.stage_rename(self.con, run_id=self._rename_run_id, location_id=p.location_id,
+                              old_path=p.old_path, new_path=p.new_path, expected_mtime=p.mtime)
+        self._show_rename_preview(run)
+        self._refresh_drawer()
+        self.status_message.emit(
+            f"Do stagingu nazw: {len(run.touched)} zmian, {len(run.skipped)} pominięto (cel: {target})")
+
+    def _on_rename_clear(self):
+        self.model.set_preview({})
+        self._preview_owner = None
+        self.status_message.emit("Podgląd nazw wyczyszczony")
+
+    def _on_commit_rename(self):
+        run_id = self._rename_run_id
+        if run_id is None:
+            return
+        QGuiApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            res = writeback.commit_renames(self.con, run_id, now=self._now())
+        finally:
+            QGuiApplication.restoreOverrideCursor()
+        parts = [f"{len(res.applied)} przemianowanych"]
+        if res.blocked:
+            parts.append(f"{len(res.blocked)} zablokowanych")
+        if res.failed:
+            parts.append(f"{len(res.failed)} błędów")
+        if res.skipped:
+            parts.append(f"{len(res.skipped)} pominiętych")
+        summary = " · ".join(parts)
+        detail = self._first_reason(res)                 # powód, nie tylko liczba (wiz #4)
+        if detail:
+            summary += f" — {detail}"
+        if res.applied:                                  # Cofnij TYLKO gdy coś zrobione (R2 #6)
+            summary += f"  (run {run_id})"               # run_id w wyniku: undo po restarcie przez CLI (R2 #7)
+            self._undo_rename_run_id = run_id            # PRZECHWYĆ cel Cofnij przed re-stage (R2 #1)
+            self._rename_run_committed = True
+            self._install_rename_undo(run_id, summary, applied=len(res.applied))
+        else:                                            # wszystko blocked/failed → run zwolniony
+            self._rename_run_id = None
+            self._rename_run_committed = False
+            self.drawer.set_count(0, result=summary)
+        self.model.set_preview({})
+        self._preview_owner = None
+        self.refresh()                                   # baza odświeżona — grid pokazuje nowe ścieżki
+        self._refresh_drawer()
+        self.status_message.emit(f"Rename: {summary}")
+
+    def _install_rename_undo(self, run_id, summary, applied):
+        """Po udanym rename szuflada oferuje „Cofnij" (undo_renames przebiegu). Lustro `_install_undo`
+        makra, tryb `rename` (dispatch współdzielonego przycisku). Etykieta CZYSTA (bez 32-hex szumu);
+        pełny run_id zostaje w `result`=summary jako kotwica CLI-undo po restarcie (R2 #7, wiz #6)."""
+        self.drawer.set_count(0, result=summary, label=f"Przemianowano: {applied}")
+        self.drawer.set_commit_actions_visible(False)
+        self._undo_mode = "rename"
+        self._ensure_undo_button()
+        self._undo_btn.setVisible(True)
+
+    def _on_undo_rename(self, run_id):
+        QGuiApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            res = writeback.undo_renames(self.con, run_id, now=self._now())
+        finally:
+            QGuiApplication.restoreOverrideCursor()
+        msg = f"{len(res.restored)} przywróconych"
+        if res.blocked:
+            msg += f" · {len(res.blocked)} zablokowanych"
+        self._undo_rename_run_id = None
+        self._undo_mode = None
+        self._rename_run_id = None
+        self._rename_run_committed = False
+        self._undo_btn.setVisible(False)
+        self.drawer.set_commit_actions_visible(True)     # przywróć akcje po cofnięciu (#5)
+        self.drawer.set_count(0, result=msg)
+        self.refresh()
+        self._refresh_drawer()
+        self.status_message.emit(f"Undo nazw: {msg}")
+
+    def _on_reject_rename(self):
+        if self._rename_run_id is None:
+            return
+        n = self._rename_pending_count()
+        repo.clear_renames_for_run(self.con, self._rename_run_id)
+        self._rename_run_id = None
+        self._rename_run_committed = False
+        self.model.set_preview({})
+        self._preview_owner = None
+        self.drawer.set_count(0, result=f"Odrzucono {n} zmian nazw")
+        self._sync_staging_mutex()
+        self.status_message.emit(f"Odrzucono {n} zmian nazw")

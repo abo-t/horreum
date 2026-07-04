@@ -2,7 +2,9 @@
 `group` (teleskopy/config) + `resolve` (obiekt/filtr) + `delta` (read-only review) +
 `import-fitsmirror` (zasilenie świeżej bazy z dawcy — PF-3, brief §4)."""
 import argparse
+import json
 import sys
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -46,6 +48,21 @@ def main(argv=None):
                            help="zasil ŚWIEŻĄ bazę z bazy dawcy fitsmirror (dawca read-only)")
     p_imp.add_argument("donor", help="ścieżka bazy dawcy (fitsmirror.db)")
     p_imp.add_argument("db", help="ścieżka ŚWIEŻEJ bazy Horreum (utworzy ją migracja)")
+
+    p_ren = sub.add_parser("rename", help="rename plików z faktów (DRY domyślnie; --apply/--undo)")
+    p_ren.add_argument("db", help="ścieżka pliku bazy")
+    p_ren.add_argument("--source", choices=["date-obs", "filename"], default="date-obs",
+                       help="źródło czasu w nazwie (domyślnie date-obs)")
+    p_ren.add_argument("--offset-hours", type=int, default=0,
+                       help="całkowity offset godzin (BEZ założenia strefy; domyślnie 0)")
+    p_ren.add_argument("--no-fallback", action="store_true",
+                       help="wyłącz fallback na drugie źródło przy braku czasu")
+    p_ren.add_argument("--filter-json", default=None,
+                       help="drzewo filtra JSON (jak grid); brak = całe uniwersum")
+    grp = p_ren.add_mutually_exclusive_group()
+    grp.add_argument("--apply", action="store_true", help="WYKONAJ rename (destrukcyjne — ruch na dysku)")
+    grp.add_argument("--undo", metavar="RUN_ID", help="cofnij rename przebiegu o podanym run_id")
+    p_ren.add_argument("--limit", type=int, default=20, help="ile par stary->nowy wypisać (DRY; domyślnie 20)")
 
     args = parser.parse_args(argv)
     if args.cmd == "init":
@@ -102,6 +119,44 @@ def main(argv=None):
             return 1
         print(_format_import(args.donor, args.db, summary))
         return 0
+    if args.cmd == "rename":
+        # Qt-wolne: naming/filter_engine/queries (astropy-free); writeback/repo lazy tylko przy --apply/--undo.
+        from . import filter_engine, naming
+        from .gui import queries
+        now = datetime.now(timezone.utc).isoformat()
+        source = "date_obs" if args.source == "date-obs" else "filename"
+        con = db.open_db(args.db)
+        if args.undo:
+            from . import writeback
+            res = writeback.undo_renames(con, args.undo, now=now)
+            con.close()
+            print(_format_rename_undo(args.db, args.undo, res))
+            return 0
+        tree = json.loads(args.filter_json) if args.filter_json else None      # SPOT: drzewo filtra jak grid
+        frame_ids = filter_engine.run(
+            tree,
+            leaf_fn=lambda k, kw, p1, p2: queries.leaf_frame_ids(con, k, kw, p1, p2),
+            universe_fn=lambda: queries.all_frame_ids(con))
+        run_id = uuid.uuid4().hex if args.apply else None
+        run = naming.run_rename(
+            sorted(frame_ids), targets_fn=lambda ids: queries.rename_frame_targets(con, ids),
+            source=source, offset_hours=args.offset_hours, fallback=not args.no_fallback, run_id=run_id)
+        if not args.apply:
+            con.close()
+            print(_format_rename_dry(args.db, run, limit=args.limit))          # DRY: zero mutacji
+            return 0
+        from . import repo, writeback
+        for p in run.touched:
+            repo.stage_rename(con, run_id=run_id, location_id=p.location_id, old_path=p.old_path,
+                              new_path=p.new_path, expected_mtime=p.mtime)
+
+        def heartbeat(done, total, _path, _status):      # puls co 100 (rename na NAS wolniejszy niż import, R1 #10)
+            if done % 100 == 0 or done == total:
+                print(f"  rename: {done}/{total}")
+        res = writeback.commit_renames(con, run_id, now=now, progress=heartbeat)
+        con.close()
+        print(_format_rename_apply(args.db, run, res, run_id))
+        return 0
     parser.print_help()
     return 0
 
@@ -129,6 +184,47 @@ def _format_import(donor_path, db_path, s):
     lines.append(f"  bramki 4.6 {status}: {gates}")
     for fail in s.gate_failures:
         lines.append(f"    FAIL {fail}")
+    return "\n".join(lines)
+
+
+def _format_rename_dry(db_path, run, *, limit):
+    """DRY-raport renamu: liczby + zagregowane powody skipów + lista `stary -> nowy` (basename, do limitu).
+    ASCII-safe glify (`->`, bez `→`/`Δ`); polskie znaki w powodach przechodzą przez utf-8 reconfigure."""
+    lines = [f"Horreum rename {db_path} (DRY -- bez zmian na dysku):",
+             f"  do zmiany: {len(run.touched)}; pominieto: {len(run.skipped)}"]
+    reasons = {}
+    for s in run.skipped:
+        reasons[s.reason] = reasons.get(s.reason, 0) + 1
+    for reason, n in sorted(reasons.items()):
+        lines.append(f"    pominieto {n}: {reason}")
+    for p in run.touched[:limit]:
+        lines.append(f"    {Path(p.old_path).name} -> {Path(p.new_path).name}")
+    if len(run.touched) > limit:
+        lines.append(f"    ... (+{len(run.touched) - limit} wiecej; zwieksz --limit)")
+    return "\n".join(lines)
+
+
+def _format_rename_apply(db_path, run, res, run_id):
+    """Raport --apply: wynik commitu + osobno skipy podglądu; run_id i GOTOWA komenda undo (R2 #7)."""
+    lines = [f"Horreum rename {db_path} --apply:",
+             f"  przemianowano: {len(res.applied)}; zablokowane: {len(res.blocked)}; "
+             f"bledy: {len(res.failed)}; pominiete(commit): {len(res.skipped)}; "
+             f"pominiete(podglad): {len(run.skipped)}"]
+    for fr in res.blocked:
+        lines.append(f"    BLOCKED {Path(fr.path).name}: {fr.reason}")
+    for fr in res.failed:
+        lines.append(f"    FAILED {Path(fr.path).name}: {fr.reason}")
+    lines.append(f"  run_id: {run_id}")
+    lines.append(f"  cofnij: horreum rename {db_path} --undo {run_id}")
+    return "\n".join(lines)
+
+
+def _format_rename_undo(db_path, run_id, res):
+    """Raport --undo: przywrócone/zablokowane/błędy."""
+    lines = [f"Horreum rename {db_path} --undo {run_id}:",
+             f"  przywrocono: {len(res.restored)}; zablokowane: {len(res.blocked)}; bledy: {len(res.failed)}"]
+    for fr in res.blocked:
+        lines.append(f"    BLOCKED {Path(fr.path).name}: {fr.reason}")
     return "\n".join(lines)
 
 

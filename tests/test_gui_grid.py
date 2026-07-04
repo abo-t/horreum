@@ -9,7 +9,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from horreum import db, pivot as pivot_mod
+from horreum import db, pivot as pivot_mod, writeback
 from horreum.gui import queries
 
 from PySide6.QtCore import Qt
@@ -280,3 +280,246 @@ def test_macro_reject_clears_staging(wb_view):
     view._on_reject()
     assert view._run_id is None and view._pending_count() == 0
     assert view.model._preview == {}
+
+
+# ---------- kolumna Δh + sort/grupowanie (PLAN_wejscia_nazw §1) ----------
+
+def _delta_row(fid, delta):
+    return {"frame_id": fid, "path": chr(96 + fid), "_telescope": "", "_object": "", "kind": "light",
+            "camera_model": None, "filter_canon": None, "present": 1, "n_present": 1, "_dt_delta": delta}
+
+
+def test_dt_delta_kolumna_display_i_sort(gcon):
+    """R2 #3: JEDEN typ float — pełna godzina „-2", ułamek „-1.97", None → pusto. R1 #6: sort numeryczny,
+    None na koniec w OBU kierunkach."""
+    from horreum.gui.grid import GridTableModel, BASE_COLS
+    dcol = [k for _, k in BASE_COLS].index("_dt_delta")
+    base = [_delta_row(1, -2.0), _delta_row(2, -1.97), _delta_row(3, None)]
+    m = GridTableModel(); m.set_data(base, pivot_mod.build_pivot([1, 2, 3], [], []), [])
+
+    def disp(fid):
+        r = next(i for i, row in enumerate(m._rows) if row.get("frame_id") == fid)
+        return m.data(m.index(r, dcol), Qt.DisplayRole)
+    assert disp(1) == "-2" and disp(2) == "-1.97" and disp(3) == ""
+    # prawy align (kolumna liczbowa), None bez align
+    assert m.data(m.index(0, dcol), Qt.TextAlignmentRole) is not None
+
+    m.sort(dcol, Qt.AscendingOrder)
+    assert [r["frame_id"] for r in m._rows if "frame_id" in r] == [1, 2, 3]   # -2, -1.97, None-koniec
+    m.sort(dcol, Qt.DescendingOrder)
+    assert [r["frame_id"] for r in m._rows if "frame_id" in r] == [2, 1, 3]   # -1.97, -2, None-koniec
+
+
+def test_dt_delta_grupy_porzadek_numeryczny(gcon):
+    """R2 #4: nagłówki grup Δh w porządku NUMERYCZNYM (-12, -2, -1), nie tekstowym (-1, -12, -2)."""
+    from horreum.gui.grid import GridTableModel
+    base = [_delta_row(1, -2.0), _delta_row(2, -12.0), _delta_row(3, -1.0)]
+    m = GridTableModel()
+    m.set_data(base, pivot_mod.build_pivot([1, 2, 3], [], []), [], group_by="_dt_delta")
+    assert [r["_group"] for r in m._rows if "_group" in r] == ["-12", "-2", "-1"]
+
+
+# ---------- RenameBar: znak align zależny od źródła + half-away (§1, R2 #2/#5) ----------
+
+def test_renamebar_align_znak_zalezny_od_zrodla(qapp):
+    from horreum.gui.grid import RenameBar
+    bar = RenameBar()
+    bar.src.setCurrentIndex(0)                       # date_obs → offset = −median
+    bar.set_echo("", "", "", "", median=-2.0)
+    bar._align(); assert bar.offset.value() == 2
+    bar.src.setCurrentIndex(1)                       # filename → offset = +median
+    bar.set_echo("", "", "", "", median=-2.0)
+    bar._align(); assert bar.offset.value() == -2
+
+
+def test_renamebar_half_away_nie_half_to_even(qapp):
+    """R2 #5: -2.5 → -3 (half-away-from-zero), NIE -2 (goły round() = half-to-even)."""
+    from horreum.gui.grid import RenameBar, _half_away
+    assert _half_away(-2.5) == -3 and _half_away(2.5) == 3 and _half_away(-1.97) == -2
+    bar = RenameBar(); bar.src.setCurrentIndex(1)    # filename → signed = median
+    bar.set_echo("", "", "", "", median=-2.5)
+    bar._align(); assert bar.offset.value() == -3
+
+
+# ---------- FramesView: rename — cykl życia run_id / mutex / dispatch / podgląd (§1, R1/R2) ----------
+
+@pytest.fixture
+def rn_view(qapp, tmp_path, monkeypatch):
+    """FramesView nad bazą z DWOMA realnymi FITS (różne DANE → różne frame'y; DATE-OBS+TELESCOP dla
+    renamu I makra). Rename rusza dysk — pliki w tmp_path, NIGDY R:."""
+    import numpy as np
+    from astropy.io import fits
+    from PySide6.QtCore import QSettings
+    from horreum import scan
+    from horreum.gui.grid import FramesView
+    monkeypatch.setattr(QSettings, "value", lambda self, k, d=None: d)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: None)
+    con = db.open_db(str(tmp_path / "rn.db"))
+    files = []
+    for i, (obj, dobs) in enumerate([("NGC7000", "2024-03-15T21:30:45"),
+                                     ("M42", "2024-03-16T22:00:00")]):
+        p = tmp_path / f"raw{i}.fits"
+        hdu = fits.PrimaryHDU(data=np.full((4, 4), i + 1, dtype=np.int16))
+        hdu.header["IMAGETYP"] = "Light"; hdu.header["OBJECT"] = obj; hdu.header["TELESCOP"] = "RC8"
+        hdu.header["FILTER"] = "Ha"; hdu.header["DATE-OBS"] = dobs; hdu.header["EXPTIME"] = 300.0
+        hdu.writeto(str(p), overwrite=True)
+        scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary())
+        files.append(p)
+    v = FramesView(con, now_fn=lambda: NOW)
+    yield v, con, files
+    con.close()
+
+
+_POL = {"source": "date_obs", "offset_hours": 0, "fallback": True}
+
+
+def test_rename_lifecycle_stage_commit_restage_undo(rn_view):
+    """R1 #1 + R2 #1: stage→commit→re-stage MINTUJE nowy run_id, NIE kasuje 'applied' pierwszego. Fix#1
+    (rec#1/wiz#3): re-stage CHOWA leftover „Cofnij" (anty-orphan), a undo skommitowanego runu wraca
+    ścieżką CLI (R2 #7). Bezpośrednio po commicie (BEZ re-stage) „Cofnij" celuje w first_run."""
+    view, con, files = rn_view
+    view._on_rename_stage(_POL)
+    assert view._rename_pending_count() == 2
+    first_run = view._rename_run_id
+
+    view._on_commit()                                # dispatch → commit renamu (mutex: rename aktywny)
+    assert view._rename_run_committed and view._undo_rename_run_id == first_run
+    assert view._undo_mode == "rename" and view._undo_btn.isVisibleTo(view)
+    assert not any(f.exists() for f in files)        # przemianowane na dysku
+    applied = [r for r in writeback.renames_for_run(con, first_run) if r["status"] == "applied"]
+    assert len(applied) == 2
+
+    view._on_rename_stage(_POL)                      # committed → MINT nowy run (touched=0, nazwy kanoniczne)
+    assert view._rename_run_id != first_run
+    still = [r for r in writeback.renames_for_run(con, first_run) if r["status"] == "applied"]
+    assert len(still) == 2                           # 'applied' pierwszego NIENARUSZONE (R2 #1, nie clobber)
+    assert not view._undo_btn.isVisibleTo(view) and view._undo_mode is None   # fix#1: leftover „Cofnij" zdjęty
+
+    # undo skommitowanego runu wciąż osiągalne ścieżką CLI (R2 #7) → przywraca oryginały
+    writeback.undo_renames(con, first_run, now=NOW)
+    assert all(f.exists() for f in files)            # oryginalne nazwy wróciły
+
+
+def test_rename_commit_all_blocked_bez_undo(rn_view):
+    """R2 #6: commit z applied=0 (cel już zajęty na dysku) → BEZ „Cofnij", run zwolniony, oryginał nietknięty."""
+    view, con, files = rn_view
+    view._on_rename_stage(_POL)
+    for r in writeback.renames_for_run(con, view._rename_run_id):   # OBCE pliki pod celami → anty-clobber
+        with open(r["new_path"], "wb") as f:
+            f.write(b"OBCY")
+    view._on_commit()
+    assert view._rename_run_id is None and view._undo_rename_run_id is None
+    assert not (hasattr(view, "_undo_btn") and view._undo_btn.isVisible())
+    assert all(f.exists() for f in files)            # oryginały nietknięte
+
+
+def test_rename_macro_mutex_disabled_tooltip(rn_view):
+    """R2 #8: staging makra → „Do stagingu" renamu disabled+tooltip (stan bez klikania); reject makra zwalnia."""
+    view, con, files = rn_view
+    view.macro_bar.asg_kw.setCurrentText("TELESCOP")
+    view.macro_bar.asg_op.setCurrentIndex(0)
+    view.macro_bar.asg_expr.setText("EQ6")
+    view.macro_bar._emit_stage()
+    assert view._pending_count() >= 1
+    assert not view.rename_bar.btn_stage.isEnabled()
+    assert "makra" in view.rename_bar.btn_stage.toolTip()
+    view._on_reject()
+    assert view.rename_bar.btn_stage.isEnabled() and view.rename_bar.btn_stage.toolTip() == ""
+
+
+def test_preview_wspoldzielony_miedzy_klingami(rn_view):
+    """R1 #19: podgląd renamu ZDEJMUJE podgląd makra (jeden `_preview`); etykieta kolumny rozróżnia klingę."""
+    view, con, files = rn_view
+    view.macro_bar.asg_kw.setCurrentText("TELESCOP")
+    view.macro_bar.asg_op.setCurrentIndex(0)
+    view.macro_bar.asg_expr.setText("EQ6")
+    view.macro_bar._emit_preview()
+    assert view._preview_owner == "macro" and view.model._preview_label == "makro →"
+    view._on_rename_preview(_POL)
+    assert view._preview_owner == "rename" and view.model._preview_label == "nazwa →"
+
+
+def test_undo_mode_init_none_i_dispatch(rn_view):
+    """R1 #3: _undo_mode init None; po commicie renamu dispatch woła undo_renames (nie makro-undo)."""
+    view, con, files = rn_view
+    assert view._undo_mode is None
+    view._on_rename_stage(_POL)
+    view._on_commit()
+    assert view._undo_mode == "rename"
+    view._dispatch_undo()
+    assert all(f.exists() for f in files)
+
+
+def test_rename_pending_count_mode_aware_busy(rn_view):
+    """R1 #2: pod busy licznik/commit AKTYWNEJ klingi = rename; set_busy(False) re-enable wg rename-pending."""
+    view, con, files = rn_view
+    view._on_rename_stage(_POL)
+    assert view._active_pending_count() == 2 and view.drawer._n == 2   # szuflada mode-aware
+    view.set_busy(True)
+    assert not view.drawer.btn_commit.isEnabled()
+    view.set_busy(False)
+    assert view.drawer.btn_commit.isEnabled()                          # wg rename-pending, nie makra
+
+
+# ---------- fixy adjudykowane z recenzji kodu + audytu GUI ----------
+
+def test_drawer_label_sukcesu_nie_clobber_rename(rn_view):
+    """wiz#2/rec#2: po commicie renamu etykieta szuflady = „Przemianowano: N", NIE nadpisana pustostanem
+    przez końcowe _refresh_drawer (regresja noty D2)."""
+    view, con, files = rn_view
+    view._on_rename_stage(_POL)
+    view._on_commit()
+    assert "Przemianowano" in view.drawer.label.text()
+    assert view.drawer.label.text() != "Brak zmian oczekujących"
+
+
+def test_drawer_label_sukcesu_nie_clobber_makro(wb_view):
+    """wiz#2/rec#2: bliźniaczo dla makra — „Zatwierdzono: N" przeżywa końcowe _refresh_drawer."""
+    view, con, p = wb_view
+    view.macro_bar.asg_kw.setCurrentText("TELESCOP")
+    view.macro_bar.asg_op.setCurrentIndex(0)
+    view.macro_bar.asg_expr.setText("EQ6")
+    view.macro_bar._emit_stage()
+    view._on_commit()
+    assert "Zatwierdzono" in view.drawer.label.text()
+
+
+def test_cross_blade_dismiss_undo_bez_zakleszczenia(rn_view):
+    """rec#1/wiz#3: commit makra → stage renamu ZDEJMUJE leftover „Cofnij" makra (anty-orphan). Bez tego
+    klik stałego „Cofnij" cofał makro osierocając pending renamu = zakleszczenie mutexa do restartu."""
+    view, con, files = rn_view
+    view.macro_bar.asg_kw.setCurrentText("TELESCOP")
+    view.macro_bar.asg_op.setCurrentIndex(0)
+    view.macro_bar.asg_expr.setText("EQ6")
+    view.macro_bar._emit_stage()
+    view._on_commit()
+    assert view._undo_btn.isVisibleTo(view) and view._undo_mode == "macro"
+    view._on_rename_stage(_POL)                       # nowy staging → leftover „Cofnij" makra ZDJĘTY
+    assert not view._undo_btn.isVisibleTo(view) and view._undo_mode is None
+    assert view._rename_pending_count() == 2          # staging renamu żyje, nie osierocony
+
+
+def test_rename_preview_komorka_tylko_nowa_nazwa(rn_view):
+    """wiz#1: komórka podglądu renamu pokazuje TYLKO nową nazwę (stara jest w „Ścieżka"); pełne
+    stara→nowa w tooltipie (weryfikacja nazwy przed commitem bez scrolla po starym prefiksie)."""
+    view, con, files = rn_view
+    view._on_rename_preview(_POL)
+    from horreum.gui.grid import BASE_COLS
+    pcol = len(BASE_COLS) + len(view._columns)
+    r = next(i for i, row in enumerate(view.model._rows) if row.get("frame_id"))
+    disp = view.model.data(view.model.index(r, pcol), Qt.DisplayRole)
+    assert disp and "→" not in disp and disp.startswith("2024")   # tylko nowa nazwa kanoniczna
+    tip = view.model.data(view.model.index(r, pcol), Qt.ToolTipRole)
+    assert "→" in tip                                              # pełne stara→nowa w tooltipie
+
+
+def test_rename_commit_powod_w_summary(rn_view):
+    """wiz#4: blokada commitu niesie POWÓD w wyniku szuflady, nie tylko liczbę (user pyta „czemu?")."""
+    view, con, files = rn_view
+    view._on_rename_stage(_POL)
+    for r in writeback.renames_for_run(con, view._rename_run_id):   # OBCE pliki pod celami → blocked
+        with open(r["new_path"], "wb") as f:
+            f.write(b"OBCY")
+    view._on_commit()
+    assert "zablokowanych" in view.drawer.result.text()
+    assert "cel już istnieje" in view.drawer.result.text()         # reprezentatywny reason widoczny

@@ -19,15 +19,21 @@ from pathlib import Path
 import horreum
 
 PKG = Path(horreum.__file__).parent
-DOOR = "writeback.py"                 # jedyny dom mutacji plików (druga klinga)
+# Domy mutacji plików: `writeback.py` (druga klinga — nagłówki+rename, KROK 4) oraz `projection.py`
+# (trzecia klinga — link/kopia/katalog, KROK 6). Pętla pomija OBA (brief PLAN_projekcje §0).
+DOORS = {"writeback.py", "projection.py"}
 
-# os.<attr> — mutacje pliku (kwalifikowane przez moduł `os`, nie goły attr).
-OS_MUTATORS = {"replace", "remove", "rename", "unlink", "rmdir", "removedirs", "renames"}
+# os.<attr> — mutacje pliku (kwalifikowane przez moduł `os`, nie goły attr). `link`/`symlink`/`mkdir`/
+# `makedirs` doszły z projekcją (KROK 6): tworzenie linków/katalogów to mutacja filesystemu.
+OS_MUTATORS = {"replace", "remove", "rename", "unlink", "rmdir", "removedirs", "renames",
+               "link", "symlink", "mkdir", "makedirs"}
 # nazwy jednoznaczne (goły attr wystarcza — nie kolidują z metodami str/list/dict). `flush` CELOWO
 # pominięty: koliduje z lokalnymi funkcjami/Qt, a writeback pisze przez writeto+os.replace (nie
-# hdul.flush). In-place astropy łapiemy przez tryb `fits.open` (niżej), nie przez flush.
+# hdul.flush). In-place astropy łapiemy przez tryb `fits.open` (niżej), nie przez flush. `mkdir`/
+# `makedirs` TAKŻE tu (KROK 6): domyka furtkę `Path(dst).mkdir()` (bare attr, jednoznaczny — brak
+# metody str/list o tej nazwie); grep potwierdził ZERO użyć w rdzeniu poza `projection.py`.
 BARE_MUTATORS = {"writeto", "write_text", "write_bytes", "mkstemp", "mkdtemp",
-                 "NamedTemporaryFile", "TemporaryFile"}
+                 "NamedTemporaryFile", "TemporaryFile", "mkdir", "makedirs"}
 # moduły, których KAŻDE wywołanie mutujące łapiemy po `<mod>.<attr>`.
 MOD_MUTATORS = {"shutil": {"copy", "copy2", "copyfile", "move", "rmtree", "copytree"},
                 "np": {"save", "savez", "savetxt", "savez_compressed"},
@@ -105,24 +111,34 @@ def _file_mutators(tree, aliases):
 
 
 def test_mutacja_plikow_tylko_w_writeback():
-    """Statyczny meta-tripwir: żaden moduł poza `writeback.py` nie mutuje plików usera."""
+    """Statyczny meta-tripwir: żaden moduł poza klingami plików (`writeback.py`/`projection.py`)
+    nie mutuje plików usera."""
     offenders = []
     for src in _py_files():
-        if src.name == DOOR:
+        if src.name in DOORS:
             continue
         tree = ast.parse(src.read_text(encoding="utf-8"))
         aliases = _os_aliases(tree)
         for desc in _file_mutators(tree, aliases):
             offenders.append(f"{src.name}: {desc}")
-    assert not offenders, f"mutacja plików poza drugą klingą (writeback.py): {offenders}"
+    assert not offenders, f"mutacja plików poza klingami plików ({sorted(DOORS)}): {offenders}"
 
 
 def test_klinga_plikow_istnieje():
     """Pozytywna asercja zakresu: `writeback.py` REALNIE zawiera `os.replace` (klinga ma ostrze).
     Gdyby ktoś usunął zapis pliku z writeback.py, warstwa byłaby martwa — ten test to złapie."""
-    tree = ast.parse((PKG / DOOR).read_text(encoding="utf-8"))
+    tree = ast.parse((PKG / "writeback.py").read_text(encoding="utf-8"))
     found = list(_file_mutators(tree, _os_aliases(tree)))
     assert any("os.replace" in d for d in found), "writeback.py nie zawiera os.replace — klinga martwa"
+
+
+def test_klinga_projekcji_istnieje():
+    """Pozytywna asercja zakresu (bliźniak): `projection.py` REALNIE zawiera `os.link` (trzecia klinga
+    ma ostrze). Gdyby ktoś wyjął tworzenie linku z projekcji, warstwa byłaby martwa — ten test to
+    złapie (a rozszerzenie `OS_MUTATORS` bez realnego użycia dałoby fałszywe poczucie pokrycia)."""
+    tree = ast.parse((PKG / "projection.py").read_text(encoding="utf-8"))
+    found = list(_file_mutators(tree, _os_aliases(tree)))
+    assert any("os.link" in d for d in found), "projection.py nie zawiera os.link — klinga martwa"
 
 
 def test_dopasowanie_nie_lapie_str_list_methods():

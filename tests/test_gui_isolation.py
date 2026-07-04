@@ -46,9 +46,11 @@ def test_widgety_realnie_importuja_qt():
 
 
 def test_readmodel_i_init_gui_qt_free():
-    """Read path (`queries.py`), logika progresu (`progress.py`) i `gui/__init__.py` MUSZĄ być
-    Qt-free — `from horreum.gui import queries`/`progress` nie może wciągać Qt (testy logiki
-    Qt-wolnej chodzą bez PySide6)."""
+    """Read path (`queries.py`), logika progresu (`progress.py`), `gui/__init__.py` oraz TRZECIA KLINGA
+    `projection.py` MUSZĄ być Qt-free — `from horreum.gui import queries`/`progress` nie może wciągać Qt
+    (testy logiki Qt-wolnej chodzą bez PySide6). `projection.py` importuje `gui.queries`, więc to twardy
+    dowód, że klinga plików nie wciąga Qt mimo tego importu (`gui/__init__.py` pusty → import bezpieczny)."""
     assert not _imports_pyside6(PKG / "gui" / "queries.py")
     assert not _imports_pyside6(PKG / "gui" / "progress.py")
     assert not _imports_pyside6(PKG / "gui" / "__init__.py")
+    assert not _imports_pyside6(PKG / "projection.py")

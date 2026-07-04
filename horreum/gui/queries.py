@@ -406,6 +406,26 @@ def location_cards(con, location_id):
     ).fetchall()
 
 
+def present_locations(con, frame_ids):
+    """ŹRÓDŁO linku PROJEKCJI (krok 6) — dla zbioru frame_id KAŻDA OBECNA (`present=1`) location z
+    `path`+`volume`+`drive_letter`. Rozszerza wzorzec `writeback_frame_targets` (już `present=1`) o
+    `volume`/`drive_letter` (R#1: `base_rows` daje `MIN(id)` BEZ `present`/`volume` → ścieżka bywa
+    `present=0` → `os.link` na nieistniejące źródło; brak `volume` → EXDEV nierozstrzygalny z góry →
+    NIE nadaje się na cel linku). Frame BEZ obecnej kopii → wiersz z location_id NULL (silnik
+    projekcji: `skipped`-kwarantanna). Wiele obecnych → wiele wierszy; silnik bierze pierwszą (D-P5).
+    `base_rows` zostaje TYLKO do segmentów layoutu (object/filter/telescope). frame_ids jako TABLICA
+    JSON (`json_each`, jeden param — §4). ORDER BY frame_id, location_id. Zwraca: frame_id,
+    location_id, path, volume, drive_letter."""
+    return con.execute(
+        "SELECT f.id AS frame_id, l.id AS location_id, l.path, l.volume, l.drive_letter "
+        "FROM frame f "
+        "LEFT JOIN location l ON l.frame_id = f.id AND l.present = 1 "
+        "WHERE f.id IN (SELECT value FROM json_each(?)) "
+        "ORDER BY f.id, l.id",
+        (json.dumps(list(frame_ids)),),
+    ).fetchall()
+
+
 def base_rows(con, frame_ids):
     """Kolumny BAZOWE gridu (warstwa interpretacji NAD lustrem cards) dla zbioru frame_id. Location przez
     `MIN(id)` BEZ odsiewania po `present` — `present` to KOLUMNA, nie predykat (F3: klatka zniknięta MUSI

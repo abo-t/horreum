@@ -15,10 +15,13 @@ from importlib import resources
 # leci 0002→0003 sekwencyjnie. Zero zmian istniejących tabel (D3: re-skan, nie konwerter).
 # 0004 to PRZYROST (oś OBSERWATORIUM): nowa tabela observatory + frame.observatory_id + widok
 # observatory_canonical; baza v3 dostaje pustą oś (resolve_observatory wypełnia z cards).
+# 0005 to PRZYROST (staging renamu "Nazwy z faktów"): nowa tabela pending_renames; zero zmian
+# istniejących. Osobna od pending_changes (inny kształt path→path, inna kotwica mtime).
 MIGRATIONS = [
     (2, "0002_initial.sql"),
     (3, "0003_writeback.sql"),
     (4, "0004_observatory.sql"),
+    (5, "0005_rename.sql"),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 _KNOWN_VERSIONS = frozenset({0} | {v for v, _ in MIGRATIONS})

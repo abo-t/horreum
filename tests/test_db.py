@@ -8,7 +8,7 @@ def test_migracja_ustawia_user_version(tmp_path):
     con = db.connect(str(tmp_path / "h.db"))
     assert db._user_version(con) == 0
     db.migrate(con)
-    assert db._user_version(con) == db.SCHEMA_VERSION == 4   # 0002 initial + 0003 writeback + 0004 obs
+    assert db._user_version(con) == db.SCHEMA_VERSION == 5   # 0002 init + 0003 writeback + 0004 obs + 0005 rename
     con.close()
 
 
@@ -18,7 +18,7 @@ def test_migracja_idempotentna(tmp_path):
     con = db.open_db(path)
     con.close()
     con2 = db.open_db(path)               # ponowne open_db migruje znów — musi być no-op
-    assert db._user_version(con2) == 4
+    assert db._user_version(con2) == db.SCHEMA_VERSION
     con2.close()
 
 

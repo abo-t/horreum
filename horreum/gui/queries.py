@@ -355,6 +355,28 @@ def writeback_frame_targets(con, frame_ids):
     ).fetchall()
 
 
+def rename_frame_targets(con, frame_ids):
+    """Dla zbioru frame_id: fakty do `compose_name` (kind/filter_canon/object_canon/object_raw/
+    sha1_data/date_obs/exptime — frame+header) + KAŻDA OBECNA (`present=1`) location z `path`+`mtime`
+    (kotwica anty-stale renamu). Frame BEZ obecnej kopii → wiersz z location_id NULL (silnik odróżni
+    „brak kopii" od wielu, licząc wiersze per frame). Rename DOZWOLONY dla XISF (nie tyka nagłówka),
+    więc BEZ `header_hash`/`compressed` (nieistotne). frame_ids jako TABLICA JSON (`json_each`, jeden
+    param — §4). ORDER BY frame_id, location_id. Zwraca: frame_id, filetype, kind, filter_canon,
+    sha1_data, object_canon, object_raw, date_obs, exptime, location_id, path, mtime."""
+    return con.execute(
+        "SELECT f.id AS frame_id, f.filetype, f.kind, f.filter_canon, f.sha1_data, "
+        "       obj.canon AS object_canon, h.object_raw, h.date_obs, h.exptime, "
+        "       l.id AS location_id, l.path, l.mtime "
+        "FROM frame f "
+        "LEFT JOIN header h ON h.frame_id = f.id "
+        "LEFT JOIN object obj ON obj.id = f.object_id "
+        "LEFT JOIN location l ON l.frame_id = f.id AND l.present = 1 "
+        "WHERE f.id IN (SELECT value FROM json_each(?)) "
+        "ORDER BY f.id, l.id",
+        (json.dumps(list(frame_ids)),),
+    ).fetchall()
+
+
 def frame_for_location(con, location_id):
     """frame_id stojący pod daną LOCATION — mapowanie podglądu makra (touched niesie location_id,
     grid kluczuje frame). Zwraca int albo None."""

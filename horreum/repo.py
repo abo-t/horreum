@@ -831,3 +831,62 @@ def insert_header_backup(con, *, commit_id, location_id, hdu_index, header_text,
             "INSERT INTO header_backups(commit_id, location_id, hdu_index, header_text, post_hash) "
             "VALUES (?, ?, ?, ?, ?)",
             (commit_id, location_id, hdu_index, header_text, post_hash))
+
+
+# ============================================================ RENAME "Nazwy z faktów" (krok "nazwy")
+# relocate_location = FAKT DOMENOWY (mutacja pliku na dysku), emituje event — inaczej niż staging.
+# Staging renamu (pending_renames) = transient (bez eventu), jak staging writebacku. Rename NIE tyka
+# bajtów → `sha1_data`/`file_sha1`/`header_hash` NIEZMIENNE; ta sama location, nowy path (R2 #1: NIGDY
+# `ingest_record`, bo nowa ścieżka mintowałaby DRUGĄ location, starą zostawiając sierotą).
+
+
+def relocate_location(con, *, location_id, new_path, now, actor="user:local"):
+    """RENAME fizycznego pliku w modelu: UPDATE `location.path` IN-PLACE + `event(location.renamed)`.
+    Wołane przez `writeback.commit_renames` PO udanym `os.rename` (PLIK→DB, T8). NIE re-sync/ingest —
+    tożsamość frame przeżywa (rename nie tyka danych). ANTY-CLOBBER W BAZIE (R3 #3): brak INNEGO wiersza
+    `location(volume, new_path)` — inaczej UPDATE łamie `UNIQUE(volume, path)` PO renamie = rozjazd
+    plik↔DB → `ValueError` (commit oznaczy 'blocked'). Guard+UPDATE w `_immediate` (TOCTOU wobec
+    równoległego writera). Idempotentny: `path` już == `new_path` → `False` bez eventu."""
+    with _immediate(con):
+        row = con.execute(
+            "SELECT volume, path FROM location WHERE id = ?", (location_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"location:{location_id} nie istnieje")
+        volume, old_path = row["volume"], row["path"]
+        if old_path == new_path:
+            return False
+        clash = con.execute(
+            "SELECT id FROM location WHERE volume = ? AND path = ? AND id <> ?",
+            (volume, new_path, location_id)).fetchone()
+        if clash is not None:
+            raise ValueError(
+                f"cel zajęty w bazie: location:{clash['id']} ma już (volume={volume}, {new_path})")
+        con.execute("UPDATE location SET path = ? WHERE id = ?", (new_path, location_id))
+        emit_event(con, actor=actor, verb="location.renamed", target=f"location:{location_id}",
+                   now=now, payload={"before": old_path, "after": new_path})
+    return True
+
+
+def stage_rename(con, *, run_id, location_id, old_path, new_path, expected_mtime):
+    """Dopisz JEDEN wpis stagingu renamu (status 'pending'). Kluczowany LOCATION. Zwraca id wiersza.
+    Transient — bez eventu. `expected_mtime` = kotwica anty-stale (mtime pliku przy podglądzie)."""
+    with con:
+        cur = con.execute(
+            "INSERT INTO pending_renames(run_id, location_id, old_path, new_path, expected_mtime, "
+            "status) VALUES (?, ?, ?, ?, ?, 'pending')",
+            (run_id, location_id, old_path, new_path, expected_mtime))
+    return cur.lastrowid
+
+
+def set_rename_status(con, *, rename_id, status, reason=None):
+    """Ustaw status wpisu stagingu renamu ('applied'|'failed'|'skipped'|'blocked') + powód. Transient."""
+    with con:
+        con.execute("UPDATE pending_renames SET status = ?, reason = ? WHERE id = ?",
+                    (status, reason, rename_id))
+
+
+def clear_renames_for_run(con, run_id):
+    """Skasuj staging renamu przebiegu (ponowny podgląd / „Odrzuć"). DELETE sankcjonowany: lustro
+    oczekujących, nie historia (historia = event `location.renamed`). Transient — bez eventu."""
+    with con:
+        con.execute("DELETE FROM pending_renames WHERE run_id = ?", (run_id,))

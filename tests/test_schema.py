@@ -81,11 +81,11 @@ def test_szkielet_przyszly_pusty(tmp_path):
     con.close()
 
 
-def test_user_version_v4_po_migracji(tmp_path):
-    """0004 podnosi user_version do 4 (świeża baza leci 0002→0003→0004 sekwencyjnie)."""
+def test_user_version_v5_po_migracji(tmp_path):
+    """0005 podnosi user_version do 5 (świeża baza leci 0002→0003→0004→0005 sekwencyjnie)."""
     con = db.open_db(str(tmp_path / "h.db"))
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 4
-    assert db.SCHEMA_VERSION == 4
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 5
+    assert db.SCHEMA_VERSION == 5
     con.close()
 
 

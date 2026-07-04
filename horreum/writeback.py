@@ -351,6 +351,196 @@ def commit(con, run_id, *, now, clock=None,
     return CommitResult(run_id, commit_id, applied, blocked, failed, skipped, cancelled)
 
 
+# ============================================================ RENAME "Nazwy z faktów" (trzecia operacja)
+# Rename PLIKU = mutacja → mieszka w tej klindze (jak os.replace writebacku). Prymityw `os.rename`
+# (NIE `os.replace`): na Windows (tor R:/NAS) rzuca `FileExistsError` gdy cel istnieje = twardy backstop.
+# Anty-clobber DWUWARSTWOWY (R3 #1/#3): (1) `os.path.exists(new)` — brama PRZENOŚNA (na POSIX `os.rename`
+# CICHO nadpisuje, więc rename-fail sam nie wystarcza — R3-P2 #3); (2) `repo.relocate_location` re-sprawdza
+# `UNIQUE(volume,new_path)` atomowo. Kolejność commitu: DB/dysk-check → `os.rename` → `relocate_location`
+# (UPDATE path + event, T8: plik-first; crash pomiędzy → re-skan naprawia). Wiersz 'applied' sam jest
+# rekordem undo. `os.rename` żyje TU (meta-test: `rename` ∈ OS_MUTATORS, DOOR=writeback.py).
+
+
+@dataclasses.dataclass(frozen=True)
+class RenameFileResult:
+    status: str            # 'applied' | 'blocked' | 'failed'
+    reason: str | None
+
+
+def rename_file(old_path, new_path) -> RenameFileResult:
+    """Prymityw renamu pliku (KLINGA). Brama anty-clobber: źródło istnieje ORAZ cel NIE istnieje na
+    dysku (przenośne) → `os.rename` (Windows: `FileExistsError` przy wyścigu = backstop). Rename w tym
+    samym katalogu = atomowy na wolumenie. Zwraca status; wołający (`commit_renames`) mapuje na staging."""
+    old_path = os.fspath(old_path)
+    new_path = os.fspath(new_path)
+    try:
+        if not os.path.exists(old_path):
+            return RenameFileResult("blocked", "źródło nie istnieje na dysku")
+        if os.path.exists(new_path):
+            return RenameFileResult("blocked", "cel już istnieje na dysku (anty-clobber)")
+        os.rename(old_path, new_path)
+    except Exception as exc:  # noqa: BLE001 — raport zamiast wyjątku w warstwie zapisu
+        return RenameFileResult("failed", f"{type(exc).__name__}: {exc}")
+    return RenameFileResult("applied", None)
+
+
+def renames_for_run(con, run_id):
+    """Wpisy stagingu renamu przebiegu (commit + szuflada GUI). Kolejność `id` = kolejność stagingu."""
+    return con.execute(
+        "SELECT id, location_id, old_path, new_path, expected_mtime, status, reason "
+        "FROM pending_renames WHERE run_id = ? ORDER BY id",
+        (run_id,),
+    ).fetchall()
+
+
+def _location_rename(con, location_id):
+    """Wiersz location do renamu: id, volume, path, mtime, present (kotwica anty-stale)."""
+    return con.execute(
+        "SELECT id, volume, path, mtime, present FROM location WHERE id = ?",
+        (location_id,),
+    ).fetchone()
+
+
+def commit_renames(con, run_id, *, now,
+                   progress: Callable[[int, int, str, str], None] | None = None,
+                   should_cancel: Callable[[], bool] | None = None) -> CommitResult:
+    """Zapisz `pending_renames` (status 'pending') przebiegu na dysk. Per wiersz: kotwica (present +
+    `mtime`==staged + `path`==`old_path` + brak wiersza `location(volume,new_path)` — R3 #3) →
+    `rename_file` (`os.rename`, anty-clobber dyskowy R3 #1) → `repo.relocate_location` (UPDATE + event,
+    NIE ingest — R2 #1). Kotwica-mtime niezmienna po renamie (rename nie tyka treści), więc re-commit
+    po udanym renamie widzi już `path==new_path` → relocate idempotentny. Utrwalanie per plik (funkcje
+    `repo` commitują), więc anulowanie zostawia zrobione 'applied', resztę 'pending'. `progress(done,
+    total, path, status)` po KAŻDYM pliku (Qt-wolne). Zwraca `CommitResult` (`commit_id` zawsze None —
+    rename bez tabeli commitów; wiersz 'applied' sam jest undo-rekordem)."""
+    pending = [r for r in renames_for_run(con, run_id) if r["status"] == "pending"]
+    total = len(pending)
+    applied: list[FileResult] = []
+    blocked: list[FileResult] = []
+    failed: list[FileResult] = []
+    skipped: list[FileResult] = []
+    cancelled = False
+    done = 0
+
+    def _report(path, status):
+        nonlocal done
+        done += 1
+        if progress is not None:
+            progress(done, total, path, status)
+
+    for r in pending:
+        if should_cancel is not None and should_cancel():
+            cancelled = True
+            break
+        rid, location_id, old_path, new_path = r["id"], r["location_id"], r["old_path"], r["new_path"]
+        loc = _location_rename(con, location_id)
+        if loc is None:
+            repo.set_rename_status(con, rename_id=rid, status="failed", reason="brak location")
+            failed.append(FileResult(location_id, old_path, "failed", "brak location"))
+            _report(old_path, "failed")
+            continue
+        if not loc["present"]:
+            reason = "kopia zniknęła (present=0)"
+            repo.set_rename_status(con, rename_id=rid, status="skipped", reason=reason)
+            skipped.append(FileResult(location_id, old_path, "skipped", reason))
+            _report(old_path, "skipped")
+            continue
+        # Kotwica anty-stale: plik nietknięty od podglądu (mtime + ścieżka).
+        if loc["mtime"] != r["expected_mtime"] or loc["path"] != old_path:
+            reason = "plik zmieniony od podglądu (mtime/ścieżka)"
+            repo.set_rename_status(con, rename_id=rid, status="blocked", reason=reason)
+            blocked.append(FileResult(location_id, old_path, "blocked", reason))
+            _report(old_path, "blocked")
+            continue
+        # Anty-clobber W BAZIE PRZED renamem (R3 #3): brak INNEGO wiersza z celem (torn-state guard).
+        db_clash = con.execute(
+            "SELECT id FROM location WHERE volume = ? AND path = ? AND id <> ?",
+            (loc["volume"], new_path, location_id)).fetchone()
+        if db_clash is not None:
+            reason = f"cel zajęty w bazie (location:{db_clash['id']})"
+            repo.set_rename_status(con, rename_id=rid, status="blocked", reason=reason)
+            blocked.append(FileResult(location_id, old_path, "blocked", reason))
+            _report(old_path, "blocked")
+            continue
+
+        res = rename_file(old_path, new_path)          # tu następuje os.rename
+        if res.status == "applied":
+            try:
+                repo.relocate_location(con, location_id=location_id, new_path=new_path, now=now)
+            except ValueError as exc:                  # wyścig DB po renamie (rzadki torn-state)
+                repo.set_rename_status(con, rename_id=rid, status="failed", reason=str(exc))
+                failed.append(FileResult(location_id, new_path, "failed", str(exc)))
+                _report(new_path, "failed")
+                continue
+            repo.set_rename_status(con, rename_id=rid, status="applied", reason=None)
+            applied.append(FileResult(location_id, new_path, "applied"))
+            _report(new_path, "applied")
+        elif res.status == "blocked":
+            repo.set_rename_status(con, rename_id=rid, status="blocked", reason=res.reason)
+            blocked.append(FileResult(location_id, old_path, "blocked", res.reason))
+            _report(old_path, "blocked")
+        else:
+            repo.set_rename_status(con, rename_id=rid, status="failed", reason=res.reason)
+            failed.append(FileResult(location_id, old_path, "failed", res.reason))
+            _report(old_path, "failed")
+
+    return CommitResult(run_id, None, applied, blocked, failed, skipped, cancelled)
+
+
+def undo_renames(con, run_id, *, now,
+                 progress: Callable[[int, int, str, str], None] | None = None,
+                 should_cancel: Callable[[], bool] | None = None) -> UndoResult:
+    """Cofnij rename przebiegu: dla wierszy 'applied' odwrotny `os.rename` (new→old) pod TĄ SAMĄ bramą
+    anty-clobber + `relocate_location` z powrotem na `old_path`. Kolejność odwrotna (jak stos). Gdy plik
+    nie stoi na `new_path` (zmieniony od commitu) → 'blocked'. Udany rewert → status 'skipped' (powód
+    „cofnięto") — dwukrotne undo pomija (tylko 'applied' cofane). `commit_id` w wyniku = run przebiegu
+    (rename bez tabeli commitów). Bramka bezpieczna per plik."""
+    applied_rows = [r for r in renames_for_run(con, run_id) if r["status"] == "applied"]
+    total = len(applied_rows)
+    restored: list[FileResult] = []
+    blocked: list[FileResult] = []
+    failed: list[FileResult] = []
+    cancelled = False
+    done = 0
+
+    def _report(path, status):
+        nonlocal done
+        done += 1
+        if progress is not None:
+            progress(done, total, path, status)
+
+    for r in reversed(applied_rows):
+        if should_cancel is not None and should_cancel():
+            cancelled = True
+            break
+        rid, location_id, old_path, new_path = r["id"], r["location_id"], r["old_path"], r["new_path"]
+        loc = _location_rename(con, location_id)
+        if loc is None or loc["path"] != new_path:
+            reason = "plik nie stoi na nazwie z commitu"
+            blocked.append(FileResult(location_id, new_path, "blocked", reason))
+            _report(new_path, "blocked")
+            continue
+        res = rename_file(new_path, old_path)          # odwrotny os.rename
+        if res.status == "applied":
+            try:
+                repo.relocate_location(con, location_id=location_id, new_path=old_path, now=now)
+            except ValueError as exc:
+                repo.set_rename_status(con, rename_id=rid, status="failed", reason=str(exc))
+                failed.append(FileResult(location_id, old_path, "failed", str(exc)))
+                _report(old_path, "failed")
+                continue
+            repo.set_rename_status(con, rename_id=rid, status="skipped", reason="cofnięto (undo)")
+            restored.append(FileResult(location_id, old_path, "restored"))
+            _report(old_path, "restored")
+        elif res.status == "blocked":
+            blocked.append(FileResult(location_id, new_path, "blocked", res.reason))
+            _report(new_path, "blocked")
+        else:
+            failed.append(FileResult(location_id, new_path, "failed", res.reason))
+            _report(new_path, "failed")
+
+    return UndoResult(run_id, restored, blocked, failed, cancelled)
+
+
 def undo(con, commit_id, *, now,
          progress: Callable[[int, int, str, str], None] | None = None,
          should_cancel: Callable[[], bool] | None = None) -> UndoResult:

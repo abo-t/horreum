@@ -16,18 +16,21 @@ import json
 import math
 import os
 import statistics
+import threading
 import uuid
 from datetime import datetime, timezone
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, QSettings, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QGuiApplication
+from PySide6.QtCore import (
+    QAbstractTableModel, QModelIndex, QObject, Qt, QSettings, QThread, QTimer, Signal, Slot,
+)
+from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
-    QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton, QSpinBox,
-    QSplitter, QTableView, QVBoxLayout, QWidget,
+    QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QProgressBar, QPushButton,
+    QSpinBox, QSplitter, QTableView, QVBoxLayout, QWidget,
 )
 
-from horreum import filter_engine, macro as macro_mod, naming, pivot as pivot_mod, repo, writeback
+from horreum import db, filter_engine, macro as macro_mod, naming, pivot as pivot_mod, repo, writeback
 from horreum.gui import queries
 from horreum.gui.projection_dialog import ProjectionDialog
 
@@ -412,6 +415,18 @@ class FilterPanel(QWidget):
         rm.clicked.connect(lambda: self._remove(entry))
         self._rows.append(entry)
 
+    def set_keywords(self, keywords):
+        """Odśwież listę keywordów we WSZYSTKICH combo, także w wierszach już zbudowanych — inaczej wiersz
+        domyślny (dodany w `__init__`, zanim `_load_facets` pozna keywordy) zostaje z pustą listą i klik nie
+        rozwija pola do wyboru. Editable → zachowaj wpisany tekst. Bliźniacze do `MacroBar.set_keywords`."""
+        self._keywords = list(keywords)
+        for e in self._rows:
+            combo = e["kw"]
+            cur = combo.currentText()
+            combo.blockSignals(True)
+            combo.clear(); combo.addItems(self._keywords); combo.setCurrentText(cur)
+            combo.blockSignals(False)
+
     def _remove(self, entry):
         entry["holder"].setParent(None)
         self._rows.remove(entry)
@@ -742,6 +757,7 @@ class StagingDrawer(QFrame):
 
     commit = Signal()
     reject = Signal()
+    cancel = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -750,13 +766,41 @@ class StagingDrawer(QFrame):
         self.dot = QLabel("○")
         self.label = QLabel("Brak zmian oczekujących")
         self.result = QLabel(""); self.result.setStyleSheet("color: #666;")
+        # Postęp writebacku renderuje się TU (nie w modalu): pasek + „Anuluj" wchodzą w miejsce
+        # Zatwierdź/Odrzuć na czas commitu/undo (off-thread — GUI nie zamarza; rdzeń commituje per-plik).
+        self.bar = QProgressBar(); self.bar.setVisible(False); self.bar.setMaximumWidth(220); self.bar.setTextVisible(False)
+        self.btn_cancel = QPushButton("Anuluj"); self.btn_cancel.setVisible(False)
+        self.btn_cancel.clicked.connect(lambda: self.cancel.emit())
         self.btn_commit = QPushButton("Zatwierdź"); self.btn_commit.clicked.connect(lambda: self.commit.emit())
         self.btn_reject = QPushButton("Odrzuć"); self.btn_reject.clicked.connect(lambda: self.reject.emit())
         # Klaster licznik+wynik po LEWEJ (dot·label·result), rozpychacz, akcje po prawej — inaczej
         # `result` ze stretch=1 rozrzucał licznik i przyciski na całą szerokość (wizytator D1).
         lay.addWidget(self.dot); lay.addWidget(self.label); lay.addSpacing(8)
-        lay.addWidget(self.result); lay.addStretch(1); lay.addWidget(self.btn_commit); lay.addWidget(self.btn_reject)
+        lay.addWidget(self.result); lay.addStretch(1)
+        lay.addWidget(self.bar); lay.addWidget(self.btn_cancel)
+        lay.addWidget(self.btn_commit); lay.addWidget(self.btn_reject)
         self.set_count(0)
+
+    def begin_progress(self, total):
+        """Wejście w tryb postępu (start commitu/undo): pasek + „Anuluj" widoczne, Zatwierdź/Odrzuć
+        schowane (nie klikać w biegu). `total=0` → pasek nieokreślony do pierwszego progresu."""
+        self.bar.setRange(0, total if total > 0 else 0); self.bar.setValue(0); self.bar.setVisible(True)
+        self.btn_cancel.setVisible(True); self.btn_cancel.setEnabled(True)
+        self.btn_commit.setVisible(False); self.btn_reject.setVisible(False)
+
+    def update_progress(self, done, total, path):
+        """Slot postępu (główny wątek): pasek done/total + nazwa bieżącego pliku w `result`."""
+        if self.bar.maximum() != total:
+            self.bar.setRange(0, total)
+        self.bar.setValue(done)
+        tail = path.rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
+        self.result.setText(f"{done}/{total} · {tail}")
+
+    def end_progress(self):
+        """Wyjście z trybu postępu: schowaj pasek + „Anuluj". Widoczność Zatwierdź/Odrzuć/Cofnij ustawia
+        wołający (set_count / set_commit_actions_visible) w post-processingu commitu."""
+        self.bar.setVisible(False); self.btn_cancel.setVisible(False)
+        self.btn_commit.setVisible(True); self.btn_reject.setVisible(True)
 
     def set_count(self, n, *, result=None, label=None):
         self._n = n
@@ -788,6 +832,65 @@ class StagingDrawer(QFrame):
         self.btn_reject.setVisible(on)
 
 
+class WritebackWorker(QObject):
+    """Wykonawca commitu/undo writebacku w wątku tła — bliźniak `PipelineWorker` (pipeline.py §4).
+    Otwiera WŁASNE połączenie w SWOIM wątku (`db.connect`; sqlite `check_same_thread` — połączenia
+    nie dzielimy między wątkami) i woła Qt-wolny rdzeń `writeback.*` z callbackami `progress`/
+    `should_cancel`. NIE dotyka widżetów. Rdzeń commituje per-plik → anulowanie (`Event`) albo wyjątek
+    zostawia czysty stan applied/pending (utrwalony). Połączenie zamykane PRZED emisją `done`, żeby
+    slot głównego wątku czytał tylko przez `self.con` (bez nakładania połączeń na tym samym pliku)."""
+
+    progress = Signal(int, int, str, str)   # done, total, path, status — MID-commit (Qt-wolny callback rdzenia)
+    done = Signal(str, object)              # op, result (CommitResult|UndoResult) — niemutowany po zwrocie rdzenia
+    failed = Signal(str, str)               # op, msg — wyjątek → sygnał, NIE crash apki
+    finished = Signal()                     # run() wrócił KAŻDĄ drogą → quit wątku
+
+    # Cztery pętle-po-plikach dzielą sygnaturę (con, target_id, now=, progress=, should_cancel=).
+    _OPS = {
+        "commit":        lambda con, t, now, pr, sc: writeback.commit(con, t, now=now, progress=pr, should_cancel=sc),
+        "commit_rename": lambda con, t, now, pr, sc: writeback.commit_renames(con, t, now=now, progress=pr, should_cancel=sc),
+        "undo":          lambda con, t, now, pr, sc: writeback.undo(con, t, now=now, progress=pr, should_cancel=sc),
+        "undo_rename":   lambda con, t, now, pr, sc: writeback.undo_renames(con, t, now=now, progress=pr, should_cancel=sc),
+    }
+
+    def __init__(self, db_path, op, target_id, *, now_fn):
+        super().__init__()
+        self._db_path = db_path
+        self._op = op
+        self._target_id = target_id
+        self._now = now_fn
+        self._cancel = threading.Event()
+
+    def request_cancel(self):
+        """Kooperatywne anulowanie — stawiane w GŁÓWNYM wątku, czytane w workerze (`Event` bezpieczny
+        międzywątkowo; rdzeń sprawdza PRZED każdym plikiem, zostawiając zapisane 'applied')."""
+        self._cancel.set()
+
+    @Slot()
+    def run(self):
+        con = None
+        result = None
+        error = None
+        try:
+            con = db.connect(self._db_path)     # WŁASNE połączenie w TYM wątku (baza już zmigrowana)
+            result = self._OPS[self._op](con, self._target_id, self._now(),
+                                         self._emit_progress, self._cancel.is_set)
+        except Exception as exc:                # błąd → sygnał, NIE crash
+            error = f"{type(exc).__name__}: {exc}"
+        finally:
+            if con is not None:
+                con.close()                     # zamknij PRZED done — main czyta tylko przez self.con
+        if error is not None:
+            self.failed.emit(self._op, error)
+        else:
+            self.done.emit(self._op, result)
+        self.finished.emit()                    # zawsze: zwolnij wątek
+
+    def _emit_progress(self, done, total, path, status):
+        # wołane SYNCHRONICZNIE w wątku workera przez rdzeń; ~7 plików/s (I/O NAS) → emisja per plik tania
+        self.progress.emit(done, total, path, status)
+
+
 class FramesView(QWidget):
     """Widok „Klatki": panel Pól | (perspektywa + filtr + makro + grupowanie + grid) + szuflada stagingu.
     Kontrakt montażu `MainWindow`: `__init__(con, now_fn, parent)`, sygnał `status_message`, `refresh()`.
@@ -798,6 +901,7 @@ class FramesView(QWidget):
     def __init__(self, con, now_fn=None, parent=None):
         super().__init__(parent)
         self.con = con
+        self._db_path = self._db_path_of(con)   # worker writebacku otwiera WŁASNE połączenie (per-wątek)
         self._now = now_fn or (lambda: datetime.now(timezone.utc).isoformat())
         self._filter_tree = None
         self._only_dups = False
@@ -814,6 +918,13 @@ class FramesView(QWidget):
         self._undo_rename_run_id = None
         self._undo_mode = None
         self._preview_owner = None   # {None,'macro','rename'} — podgląd współdzielony (R1 #19)
+        # Writeback OFF-THREAD (commit/undo nie zamrażają GUI): worker+wątek per-operacja, ślad celu
+        # (run_id/commit_id) dla slotu post-processingu. `_writeback_async=False` (testy) → run() inline,
+        # sygnały direct = synchronicznie, ten sam rdzeń bez QThread.
+        self._wb_thread = None
+        self._wb_worker = None
+        self._wb_target_id = None
+        self._writeback_async = True
         self._build_ui()
         self._load_facets()
         self.refresh()
@@ -902,6 +1013,7 @@ class FramesView(QWidget):
         self.drawer = StagingDrawer()  # stała szuflada dolna stagingu (doktryna §5)
         self.drawer.commit.connect(self._on_commit)
         self.drawer.reject.connect(self._on_reject)
+        self.drawer.cancel.connect(self._on_wb_cancel)
         outer.addWidget(self.drawer)
 
     # ---- facety / perspektywy ----
@@ -914,7 +1026,7 @@ class FramesView(QWidget):
         ordered = sorted(facets, key=lambda f: f["keyword"] in STRUCT_NOISE)
         self.fields.load(ordered, set(default))
         self._columns = default
-        self.filter_panel._keywords = self._all_keywords
+        self.filter_panel.set_keywords(self._all_keywords)
         self.macro_bar.set_keywords(self._all_keywords)
         # perspektywy: presety + zapisane w QSettings
         self.combo_persp.blockSignals(True)
@@ -1251,18 +1363,69 @@ class FramesView(QWidget):
         # else: undo oferowany (`_undo_mode` ustawiony) → zachowaj etykietę „Zatwierdzono/Przemianowano"
         self._sync_staging_mutex()
 
-    def _on_commit(self):
-        if self._rename_pending_count() > 0:             # szuflada aktywnej klingi (staging mutex)
-            self._on_commit_rename()
+    # ---- writeback off-thread (commit/undo w wątku tła; postęp + „Anuluj" w szufladzie) ----
+    @staticmethod
+    def _db_path_of(con):
+        """Ścieżka pliku bazy z żywego połączenia (`PRAGMA database_list` → 'main'). Worker otwiera po
+        niej WŁASNE połączenie w swoim wątku — `con` nie przechodzi między wątkami (check_same_thread).
+        `:memory:` → '' → seam wymusza tryb inline (patrz `_start_writeback`)."""
+        for _seq, name, file in con.execute("PRAGMA database_list"):
+            if name == "main":
+                return file
+        return None
+
+    def _start_writeback(self, op, target_id, after_slot):
+        """Odpal `op` (commit/commit_rename/undo/undo_rename) na wątku tła; postęp → szuflada, `done`
+        → `after_slot` (post-processing na wątku GŁÓWNYM). `_writeback_async=False` lub brak pliku
+        (`:memory:`) → run() inline (sygnały direct = synchronicznie), ten sam rdzeń bez QThread."""
+        if self._wb_thread is not None:                  # jeden writeback naraz (akcje i tak schowane)
             return
-        if self._run_id is None:
-            return
-        QGuiApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            res = writeback.commit(self.con, self._run_id, now=self._now())
-        finally:
-            QGuiApplication.restoreOverrideCursor()
-        parts = [f"{len(res.applied)} zapisanych"]
+        self._wb_target_id = target_id
+        self.drawer.begin_progress(0)
+        self.macro_bar.btn_stage.setEnabled(False)       # bez nowego stagingu w biegu
+        self.rename_bar.btn_stage.setEnabled(False)
+        self._wb_worker = WritebackWorker(self._db_path, op, target_id, now_fn=self._now)
+        self._wb_worker.progress.connect(self._on_wb_progress)
+        self._wb_worker.done.connect(after_slot)
+        self._wb_worker.failed.connect(self._on_wb_failed)
+        if self._writeback_async and self._db_path:
+            self._wb_thread = QThread(self)
+            self._wb_worker.moveToThread(self._wb_thread)
+            self._wb_thread.started.connect(self._wb_worker.run)
+            self._wb_worker.finished.connect(self._wb_thread.quit)
+            self._wb_thread.finished.connect(self._cleanup_wb_thread)
+            self._wb_thread.start()
+        else:
+            try:
+                self._wb_worker.run()                    # inline: done/progress lecą direct = synchronicznie
+            finally:
+                self._wb_worker = None
+
+    def _cleanup_wb_thread(self):
+        self._wb_worker.deleteLater(); self._wb_thread.deleteLater()
+        self._wb_worker = None; self._wb_thread = None
+
+    @Slot(int, int, str, str)
+    def _on_wb_progress(self, done, total, path, status):
+        self.drawer.update_progress(done, total, path)
+
+    @Slot(str, str)
+    def _on_wb_failed(self, op, msg):
+        self.drawer.end_progress()
+        self.drawer.set_count(self._active_pending_count(), result=f"BŁĄD: {msg}")
+        self.refresh()
+        self._refresh_drawer()
+        self.status_message.emit(f"Writeback „{op}” nie powiódł się: {msg}")
+
+    def _on_wb_cancel(self):
+        if self._wb_worker is not None:
+            self._wb_worker.request_cancel()             # rdzeń sprawdza PRZED następnym plikiem
+            self.drawer.btn_cancel.setEnabled(False)
+            self.status_message.emit("Anulowanie… (po bieżącym pliku)")
+
+    def _commit_summary(self, res, noun):
+        """Podsumowanie CommitResult: „N {noun} · M zablokowanych · …" + pierwszy powód (wiz #4)."""
+        parts = [f"{len(res.applied)} {noun}"]
         if res.blocked:
             parts.append(f"{len(res.blocked)} zablokowanych")
         if res.failed:
@@ -1273,13 +1436,33 @@ class FramesView(QWidget):
         detail = self._first_reason(res)                 # powód, nie tylko liczba (wiz #4)
         if detail:
             summary += f" — {detail}"
-        if res.commit_id is not None and res.applied:
+        return summary
+
+    def _on_commit(self):
+        if self._rename_pending_count() > 0:             # szuflada aktywnej klingi (staging mutex)
+            self._on_commit_rename()
+            return
+        if self._run_id is None:
+            return
+        self._start_writeback("commit", self._run_id, self._after_commit)
+
+    def _after_commit(self, op, res):
+        """Post-processing commitu makra (wątek główny). Anulowano → część 'pending' została w runie:
+        run zostaje otwarty do dokończenia, bez „Cofnij" (zapisane siedzą w commits — undo po CLI)."""
+        self.drawer.end_progress()
+        summary = self._commit_summary(res, "zapisanych")
+        remaining = self._pending_count()
+        if remaining > 0:                                # przerwane anulowaniem
+            summary += f" — przerwano, {remaining} do dokończenia"
+            self.drawer.set_count(remaining, result=summary)
+        elif res.commit_id is not None and res.applied:
             summary += f"  (commit {res.commit_id})"
             self._last_commit_id = res.commit_id
             self._install_undo(res.commit_id, summary, applied=len(res.applied))
-        else:
-            self.drawer.set_count(self._pending_count(), result=summary)
-        self._run_id = None                              # R#5: run domknięty commitem
+            self._run_id = None                          # R#5: run domknięty commitem
+        else:                                            # wszystko blocked/failed/skipped
+            self.drawer.set_count(0, result=summary)
+            self._run_id = None
         self.model.set_preview({})
         self.refresh()                                   # baza odświeżona — grid pokazuje nowe wartości
         self._refresh_drawer()
@@ -1320,14 +1503,13 @@ class FramesView(QWidget):
             self._on_undo(self._undo_commit_id)
 
     def _on_undo(self, commit_id):
-        QGuiApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            res = writeback.undo(self.con, commit_id, now=self._now())
-        finally:
-            QGuiApplication.restoreOverrideCursor()
+        self._start_writeback("undo", commit_id, self._after_undo)
+
+    def _after_undo(self, op, res):
         msg = f"{len(res.restored)} przywróconych"
         if res.blocked:
             msg += f" · {len(res.blocked)} zablokowanych"
+        self.drawer.end_progress()
         self._undo_btn.setVisible(False)
         self._undo_mode = None
         self.drawer.set_commit_actions_visible(True)     # przywróć akcje po cofnięciu (#5)
@@ -1432,23 +1614,19 @@ class FramesView(QWidget):
         run_id = self._rename_run_id
         if run_id is None:
             return
-        QGuiApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            res = writeback.commit_renames(self.con, run_id, now=self._now())
-        finally:
-            QGuiApplication.restoreOverrideCursor()
-        parts = [f"{len(res.applied)} przemianowanych"]
-        if res.blocked:
-            parts.append(f"{len(res.blocked)} zablokowanych")
-        if res.failed:
-            parts.append(f"{len(res.failed)} błędów")
-        if res.skipped:
-            parts.append(f"{len(res.skipped)} pominiętych")
-        summary = " · ".join(parts)
-        detail = self._first_reason(res)                 # powód, nie tylko liczba (wiz #4)
-        if detail:
-            summary += f" — {detail}"
-        if res.applied:                                  # Cofnij TYLKO gdy coś zrobione (R2 #6)
+        self._start_writeback("commit_rename", run_id, self._after_commit_rename)
+
+    def _after_commit_rename(self, op, res):
+        """Post-processing commitu renamu (wątek główny). Anulowano → reszta nazw została 'pending':
+        run zostaje otwarty do dokończenia, bez „Cofnij"."""
+        self.drawer.end_progress()
+        run_id = self._wb_target_id
+        summary = self._commit_summary(res, "przemianowanych")
+        remaining = self._rename_pending_count()
+        if remaining > 0:                                # przerwane anulowaniem
+            summary += f" — przerwano, {remaining} do dokończenia"
+            self.drawer.set_count(remaining, label=f"{remaining} zmian nazw oczekuje", result=summary)
+        elif res.applied:                                # Cofnij TYLKO gdy coś zrobione (R2 #6)
             summary += f"  (run {run_id})"               # run_id w wyniku: undo po restarcie przez CLI (R2 #7)
             self._undo_rename_run_id = run_id            # PRZECHWYĆ cel Cofnij przed re-stage (R2 #1)
             self._rename_run_committed = True
@@ -1474,14 +1652,13 @@ class FramesView(QWidget):
         self._undo_btn.setVisible(True)
 
     def _on_undo_rename(self, run_id):
-        QGuiApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            res = writeback.undo_renames(self.con, run_id, now=self._now())
-        finally:
-            QGuiApplication.restoreOverrideCursor()
+        self._start_writeback("undo_rename", run_id, self._after_undo_rename)
+
+    def _after_undo_rename(self, op, res):
         msg = f"{len(res.restored)} przywróconych"
         if res.blocked:
             msg += f" · {len(res.blocked)} zablokowanych"
+        self.drawer.end_progress()
         self._undo_rename_run_id = None
         self._undo_mode = None
         self._rename_run_id = None

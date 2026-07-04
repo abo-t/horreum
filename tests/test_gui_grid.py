@@ -66,6 +66,7 @@ def view(qapp, gcon, tmp_path, monkeypatch):
     monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: None)
     from horreum.gui.grid import FramesView
     v = FramesView(gcon, now_fn=None)
+    v._writeback_async = False   # test: worker.run() inline (sync-seam), bez QThread
     yield v
 
 
@@ -226,6 +227,7 @@ def wb_view(qapp, tmp_path, monkeypatch):
     con = db.open_db(str(tmp_path / "wb.db"))
     scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary())
     v = FramesView(con, now_fn=lambda: NOW)
+    v._writeback_async = False   # test: worker.run() inline (sygnały direct = synchronicznie), bez QThread
     yield v, con, p
     con.close()
 
@@ -280,6 +282,41 @@ def test_macro_reject_clears_staging(wb_view):
     view._on_reject()
     assert view._run_id is None and view._pending_count() == 0
     assert view.model._preview == {}
+
+
+def test_writeback_worker_commit_emituje_postep(wb_view):
+    """Worker off-thread (pipeline-konwencja: test przez bezpośrednie run()) woła rdzeń z progresem,
+    zwraca `done(op, CommitResult)` i zapisuje plik przez WŁASNE połączenie."""
+    view, con, p = wb_view
+    from astropy.io import fits
+    from horreum.gui.grid import WritebackWorker
+    view.macro_bar.asg_kw.setCurrentText("TELESCOP"); view.macro_bar.asg_op.setCurrentIndex(0)
+    view.macro_bar.asg_expr.setText("EQ6"); view.macro_bar._emit_stage()
+    w = WritebackWorker(view._db_path, "commit", view._run_id, now_fn=lambda: NOW)
+    prog, done = [], []
+    w.progress.connect(lambda d, t, path, s: prog.append((d, t)))
+    w.done.connect(lambda op, res: done.append((op, res)))
+    w.run()
+    assert prog and prog[-1][0] == prog[-1][1]              # postęp doszedł do total/total (100%)
+    assert done and done[0][0] == "commit" and len(done[0][1].applied) == 1
+    assert fits.getheader(str(p))["TELESCOP"] == "EQ6"      # plik zapisany PRZEZ worker
+
+
+def test_writeback_worker_anulowanie_zostawia_pending(wb_view):
+    """should_cancel wpięty: anulowanie PRZED plikiem zostawia pending nietknięte (czysty stan do dokończenia)."""
+    view, con, p = wb_view
+    from astropy.io import fits
+    from horreum.gui.grid import WritebackWorker
+    view.macro_bar.asg_kw.setCurrentText("TELESCOP"); view.macro_bar.asg_op.setCurrentIndex(0)
+    view.macro_bar.asg_expr.setText("EQ6"); view.macro_bar._emit_stage()
+    w = WritebackWorker(view._db_path, "commit", view._run_id, now_fn=lambda: NOW)
+    w.request_cancel()
+    done = []
+    w.done.connect(lambda op, res: done.append(res))
+    w.run()
+    assert done and len(done[0].applied) == 0              # nic nie zapisane
+    assert fits.getheader(str(p))["TELESCOP"] == "RC8"     # plik nietknięty
+    assert view._pending_count() == 1                      # pending zostaje → dokończalne
 
 
 # ---------- kolumna Δh + sort/grupowanie (PLAN_wejscia_nazw §1) ----------
@@ -366,6 +403,7 @@ def rn_view(qapp, tmp_path, monkeypatch):
         scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW, summary=scan.ScanSummary())
         files.append(p)
     v = FramesView(con, now_fn=lambda: NOW)
+    v._writeback_async = False   # test: worker.run() inline (sygnały direct = synchronicznie), bez QThread
     yield v, con, files
     con.close()
 

@@ -64,6 +64,23 @@ def main(argv=None):
     grp.add_argument("--undo", metavar="RUN_ID", help="cofnij rename przebiegu o podanym run_id")
     p_ren.add_argument("--limit", type=int, default=20, help="ile par stary->nowy wypisać (DRY; domyślnie 20)")
 
+    p_proj = sub.add_parser("project",
+                            help="projekcja perspektywy w drzewo linków (DRY domyślnie; --apply)")
+    p_proj.add_argument("db", help="ścieżka pliku bazy")
+    p_proj.add_argument("--root", required=True,
+                        help="korzeń projekcji — MUSI zawierać segment _WBPP/_Review (bez domyślnej "
+                             "ścieżki: repo publiczne, prywatny R: poza kodem)")
+    p_proj.add_argument("--layout", choices=["po-obiektach", "wbpp-feed"], default="po-obiektach",
+                        help="układ katalogów (domyślnie po-obiektach)")
+    p_proj.add_argument("--filter-json", default=None,
+                        help="drzewo filtra JSON (jak grid): ścieżka pliku LUB inline; brak = cała baza")
+    p_proj.add_argument("--copy", action="store_true",
+                        help="kopiuj bajty (shutil.copy2) zamiast hardlinka — cross-wolumen / brak linków")
+    p_proj.add_argument("--apply", action="store_true",
+                        help="WYKONAJ: twórz linki/kopie + manifest (bez tego DRY — tylko raport)")
+    p_proj.add_argument("--limit", type=int, default=20,
+                        help="ile folderów kategorii / anomalii wypisać (domyślnie 20)")
+
     args = parser.parse_args(argv)
     if args.cmd == "init":
         con = db.open_db(args.path)
@@ -157,6 +174,38 @@ def main(argv=None):
         con.close()
         print(_format_rename_apply(args.db, run, res, run_id))
         return 0
+    if args.cmd == "project":
+        # Qt-wolne: filter_engine/queries/projection (projection importuje gui.queries, Qt-free).
+        from . import filter_engine, projection
+        from .gui import queries
+        now = datetime.now(timezone.utc).isoformat()
+        con = db.open_db(args.db)
+        tree = _load_filter_tree(args.filter_json)             # ścieżka pliku LUB inline JSON (SPOT z gridem)
+        frame_ids = filter_engine.run(
+            tree,
+            leaf_fn=lambda k, kw, p1, p2: queries.leaf_frame_ids(con, k, kw, p1, p2),
+            universe_fn=lambda: queries.all_frame_ids(con))
+        proj = projection.plan(con, sorted(frame_ids), args.layout)
+        manifest = {"perspektywa": args.filter_json or "cala-baza", "filter_tree": tree}
+
+        def heartbeat(done, total, _dst, _status):            # puls co 100 (link na NAS wolniejszy, R1 #10)
+            if done % 100 == 0 or done == total:
+                print(f"  projekcja: {done}/{total}")
+        try:
+            res = projection.apply(proj, args.root, do_apply=args.apply, copy=args.copy, now=now,
+                                   manifest=manifest, progress=heartbeat if args.apply else None)
+        except projection.ProjectionAbort as exc:
+            con.close()
+            print(f"Horreum project: ABORT -- {exc}")         # sonda pierwszego linku padla (SMB kopia?)
+            print(_format_project(args.root, exc.result, proj, limit=args.limit))
+            return 1
+        except ValueError as exc:                              # korzeń bez segmentu wykluczonego (§0)
+            con.close()
+            print(f"Horreum project: blad -- {exc}")
+            return 1
+        con.close()
+        print(_format_project(args.root, res, proj, limit=args.limit))
+        return 0
     parser.print_help()
     return 0
 
@@ -225,6 +274,56 @@ def _format_rename_undo(db_path, run_id, res):
              f"  przywrocono: {len(res.restored)}; zablokowane: {len(res.blocked)}; bledy: {len(res.failed)}"]
     for fr in res.blocked:
         lines.append(f"    BLOCKED {Path(fr.path).name}: {fr.reason}")
+    return "\n".join(lines)
+
+
+def _load_filter_tree(arg):
+    """--filter-json: ścieżka ISTNIEJĄCEGO pliku → wczytaj i sparsuj; inaczej potraktuj jako inline
+    JSON; brak → None (cała baza). SPOT z gridem (to samo drzewo predykatów)."""
+    if arg is None:
+        return None
+    p = Path(arg)
+    if p.exists():
+        return json.loads(p.read_text(encoding="utf-8"))
+    return json.loads(arg)
+
+
+def _format_project(root, res, proj, *, limit):
+    """Raport projekcji (ASCII-safe — konsola cp1250: `->` nie `→`). DRY: stan celu + drzewo kategorii;
+    --apply: liczności utworzenia + manifest. Anomalie (conflict/verify_bad/error) listowane do limitu."""
+    from .projection import MANIFEST_NAME                    # stały literał nazwy manifestu (SPOT)
+    c = res.counts
+    mode = (("--apply --copy" if res.copy else "--apply") if res.do_apply
+            else "DRY -- bez zmian na dysku")
+    lines = [f"Horreum project {root} ({mode}; layout {res.layout}):"]
+    if res.do_apply:
+        lines.append(
+            f"  zlinkowano: {c.get('linked',0)}; istnialo: {c.get('exists',0)}; "
+            f"konflikty: {c.get('conflict',0)}; verify_bad: {c.get('verify_bad',0)}; "
+            f"bledy: {c.get('error',0)}; pominieto: {c.get('skipped',0)}")
+    else:
+        lines.append(
+            f"  do zlinkowania: {c.get('would-link',0)}; istnieje: {c.get('exists',0)}; "
+            f"konflikty: {c.get('conflict',0)}; pominieto (brak kopii): {c.get('skipped',0)}")
+    if proj.multi_present:
+        lines.append(f"  wiele obecnych kopii: {proj.multi_present} (zlinkowano pierwsza; reszta w drzewie)")
+
+    folders = {}
+    for it in proj.items:
+        key = "/".join(it.segments)
+        folders[key] = folders.get(key, 0) + 1
+    lines.append(f"  drzewo ({len(folders)} folderow kategorii; do {limit}):")
+    for key, n in sorted(folders.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]:
+        lines.append(f"    {key}: {n}")
+    if len(folders) > limit:
+        lines.append(f"    ... (+{len(folders) - limit} folderow; zwieksz --limit)")
+
+    anomalies = [r for r in res.results if r.status in ("conflict", "verify_bad", "error")]
+    for r in anomalies[:limit]:
+        name = Path(r.dst).name if r.dst else ""
+        lines.append(f"    {r.status.upper()} {name}: {r.reason}")
+    if res.do_apply:
+        lines.append(f"  manifest: {Path(root) / MANIFEST_NAME}")
     return "\n".join(lines)
 
 

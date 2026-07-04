@@ -135,9 +135,10 @@ def _assert_excluded_segment(root):
     jako wejście skanu (sieroty). Split po OBU separatorach (`/`+`\\`) — przenośne (Windows/POSIX)."""
     parts = [p for p in re.split(r"[\\/]+", str(root)) if p]
     if not any(p.lower() in EXCLUDED_DIR_NAMES for p in parts):
+        names = " / ".join(sorted(n.upper() for n in EXCLUDED_DIR_NAMES))   # czytelne, wprost z setu (SPOT)
         raise ValueError(
-            f"korzeń projekcji {root!r} nie zawiera segmentu wykluczonego "
-            f"{sorted(EXCLUDED_DIR_NAMES)} — projekcja poza wykluczeniem wróciłaby jako wejście skanu")
+            f"korzeń projekcji {root} nie zawiera segmentu wykluczonego ({names}) — "
+            "projekcja poza wykluczeniem wróciłaby jako wejście skanu")
 
 
 def _link_to(src, dst, *, do_apply, copy):
@@ -242,7 +243,7 @@ def apply(projection, root, *, do_apply, copy=False, now=None, manifest=None,
                 partial = ApplyResult(root, projection.layout, do_apply, copy, results, cancelled)
                 raise ProjectionAbort(
                     "pierwszy link nie przeszedł sondy tożsamości (i-węzeł/rozmiar/treść) — "
-                    "wolumen nie wspiera hardlinków? użyj trybu kopii (--copy)", partial)
+                    "wolumen nie wspiera hardlinków? włącz tryb kopii", partial)
 
         results.append(LinkResult(item.frame_id, item.src, dst, status, reason))
         done += 1

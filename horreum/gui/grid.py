@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 
 from horreum import filter_engine, macro as macro_mod, naming, pivot as pivot_mod, repo, writeback
 from horreum.gui import queries
+from horreum.gui.projection_dialog import ProjectionDialog
 
 # Kolumny bazowe: (nagłówek, klucz). Klucze `_telescope`/`_object`/`_dt_delta` = pochodne. `_dt_delta`
 # (Δh nagłówek−nazwa) liczone w `_derive` z `naming.header_dt`/`filename_dt` — `base_rows` zwraca już
@@ -830,6 +831,9 @@ class FramesView(QWidget):
         bar.addWidget(self.combo_persp)
         btn_save = QPushButton("Zapisz jako…"); btn_save.clicked.connect(self._save_perspective)
         bar.addWidget(btn_save)
+        btn_proj = QPushButton("Projekcja…"); btn_proj.clicked.connect(self._open_projection)
+        btn_proj.setToolTip("Materializuj bieżącą perspektywę w drzewo linków/kopii (WBPP feed)")
+        bar.addWidget(btn_proj)
         bar.addSpacing(16)
         bar.addWidget(QLabel("Grupuj wg:"))
         self.combo_group = QComboBox()
@@ -978,6 +982,17 @@ class FramesView(QWidget):
         self._settings().setValue("grid/perspectives", json.dumps(store))
         self._load_facets()
         self.status_message.emit(f"Zapisano perspektywę „{name}”")
+
+    def _open_projection(self):
+        """Otwórz dialog projekcji dla WIDOCZNEJ perspektywy (`self._frame_ids` — po filtrach dups/review,
+        to co user widzi; doktryna §5). Modal TYLKO na potwierdzenie eksportu; cała mutacja plików w
+        Qt-wolnej klindze `projection` przez dialog. Pusty grid → szczery status, bez pustego dialogu."""
+        if not self._frame_ids:
+            self.status_message.emit("Projekcja: brak widocznych klatek")
+            return
+        dlg = ProjectionDialog(self.con, self._frame_ids, now_fn=self._now,
+                               perspektywa=self.combo_persp.currentText(), parent=self)
+        dlg.exec()
 
     # ---- reakcje ----
     def _on_filter(self, tree):

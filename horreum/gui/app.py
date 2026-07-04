@@ -43,6 +43,21 @@ def _utc_now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
+_NUM_ALIGN = Qt.AlignRight | Qt.AlignVCenter   # liczby prawo-wyrównane (skanowalność magnitud, wizytator T1/#2)
+
+
+def _fmt_event_ts(ts):
+    """Znacznik czasu audytu do minut: „2026-07-02T18:21:44.4+00:00" → „2026-07-02 18:21" (mikrosekundy
+    i strefa to szum w liście historii — wizytator C2). Pusty/nietypowy → zwróć jak jest."""
+    return ts[:16].replace("T", " ") if ts and "T" in ts else (ts or "")
+
+
+def _fmt_obs_date(s):
+    """Data klatki do sekund: „…T19:45:02.6075262" → „…T19:45:02" (7 cyfr ułamka to szum wizualny —
+    wizytator O2); pełna wartość zostaje w tooltipie. Pusty → ''."""
+    return s.split(".")[0] if s and "T" in s else (s or "")
+
+
 class TelescopeAxisView(QWidget):
     """Osadzalny widok osi TELESKOP: lista kanonicznych teleskopów (lewa) + szczegół zaznaczonego
     (prawa: członkowie scaleni pod nim, audyt). Akcje usera (`label`/`approve`/`merge`/`unmerge`)
@@ -78,8 +93,13 @@ class TelescopeAxisView(QWidget):
         self.table.setHorizontalHeaderLabels(HEADERS)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.table.horizontalHeader().setStretchLastSection(True)
+        # Szerokości: kolumny do treści, Etykieta (nazwa usera) rośnie — spójne z osią OBSERWATORIUM;
+        # `stretchLastSection` rozpychał „Klatki" i ucinał ją na wąsko (wizytator T2).
+        hdr = self.table.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(COL_LABEL, QHeaderView.Stretch)
         self.table.verticalHeader().setVisible(False)
+        self._edit_triggers = self.table.editTriggers()   # przywracane po set_busy(False) (wizytator T3)
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
         self.table.itemChanged.connect(self._on_item_changed)
         lv.addWidget(self.table)
@@ -134,9 +154,9 @@ class TelescopeAxisView(QWidget):
                 self._set_cell(r, COL_CANON, row["telescop_canon"])
                 self._set_cell(r, COL_LABEL, row["label"] or "", editable=True)
                 self._set_cell(r, COL_STATUS, row["status"])
-                self._set_cell(r, COL_FRATIO, _fmt(row["f_ratio_nominal"]))
-                self._set_cell(r, COL_FOCAL, _fmt(row["focal_nominal"]))
-                self._set_cell(r, COL_FRAMES, str(row["frame_count"]))
+                self._set_cell(r, COL_FRATIO, _fmt(row["f_ratio_nominal"]), align=_NUM_ALIGN)
+                self._set_cell(r, COL_FOCAL, _fmt(row["focal_nominal"]), align=_NUM_ALIGN)
+                self._set_cell(r, COL_FRAMES, str(row["frame_count"]), align=_NUM_ALIGN)
                 if row["id"] == prev:
                     target_row = r
         finally:
@@ -150,12 +170,14 @@ class TelescopeAxisView(QWidget):
             self.status_message.emit("Brak teleskopów na osi — uruchom grupowanie (horreum group).")
         self._on_selection_changed()
 
-    def _set_cell(self, r, c, text, *, editable=False, data=None):
+    def _set_cell(self, r, c, text, *, editable=False, data=None, align=None):
         item = QTableWidgetItem(text)
         flags = Qt.ItemIsSelectable | Qt.ItemIsEnabled
         if editable:                          # tylko etykieta jest edytowalna in-line
             flags |= Qt.ItemIsEditable
         item.setFlags(flags)
+        if align is not None:                 # liczby prawo-wyrównane (skanowalność, wizytator T1)
+            item.setTextAlignment(align)
         if data is not None:                  # telescope_id na kolumnie ID (kotwica wiersza)
             item.setData(Qt.UserRole, data)
         self.table.setItem(r, c, item)
@@ -191,7 +213,7 @@ class TelescopeAxisView(QWidget):
         self.events.clear()
         if tid is not None:
             for e in queries.axis_events(self.con, telescope_id=tid):
-                self.events.addItem(f'{e["ts"]}  ·  {e["verb"]}  ·  {e["actor"]}')
+                self.events.addItem(f'{_fmt_event_ts(e["ts"])}  ·  {e["verb"]}  ·  {e["actor"]}')
 
         # Cel scalenia z PLACEHOLDEREM na wejściu (currentData=None): merge to świadoma deklaracja
         # „to ten sam teleskop" — nie wolno go wyzwolić jednym klikiem w przypadkowy pierwszy wiersz
@@ -230,7 +252,9 @@ class TelescopeAxisView(QWidget):
             self.btn_merge.setEnabled(False)
             self.btn_unmerge.setEnabled(False)
             self.combo_target.setEnabled(False)
+            self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)   # zamknij in-line edyt etykiety (T3)
         else:
+            self.table.setEditTriggers(self._edit_triggers)
             self.combo_target.setEnabled(True)
             self._on_selection_changed()
 
@@ -450,7 +474,7 @@ class ObjectAxisView(QWidget):
             for r, row in enumerate(rows):
                 self._set_obj_cell(r, OBJ_COL_CANON, row["canon"], data=row["id"])
                 self._set_obj_cell(r, OBJ_COL_CATALOG, row["catalog"] or "")
-                self._set_obj_cell(r, OBJ_COL_FRAMES, str(row["frame_count"]))
+                self._set_obj_cell(r, OBJ_COL_FRAMES, str(row["frame_count"]), align=_NUM_ALIGN)
                 if row["id"] == prev:
                     target_row = r
             self._load_review()
@@ -484,9 +508,11 @@ class ObjectAxisView(QWidget):
         info.setFlags(Qt.ItemIsEnabled)        # nie do zaznaczenia (informacyjne)
         self.review.addItem(info)
 
-    def _set_obj_cell(self, r, c, text, *, data=None):
+    def _set_obj_cell(self, r, c, text, *, data=None, align=None):
         item = QTableWidgetItem(text)
         item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+        if align is not None:                 # liczba klatek prawo-wyrównana (skanowalność, wizytator O1)
+            item.setTextAlignment(align)
         if data is not None:
             item.setData(Qt.UserRole, data)
         self.objects.setItem(r, c, item)
@@ -541,7 +567,8 @@ class ObjectAxisView(QWidget):
             self._set_frame_cell(r, FRAME_COL_TEL, _tel_cell(row))
             self._set_frame_cell(r, FRAME_COL_CAM, row["camera_model"] or "")
             self._set_frame_cell(r, FRAME_COL_FILTER, row["filter_canon"] if "filter_canon" in keys else "")
-            self._set_frame_cell(r, FRAME_COL_DATE, row["date_obs"] or "")
+            self._set_frame_cell(r, FRAME_COL_DATE, _fmt_obs_date(row["date_obs"]),
+                                 tooltip=row["date_obs"] or None)
             if present_col and "present" in keys:
                 self._set_frame_cell(r, FRAME_COL_PRESENT, "tak" if row["present"] else "nie")
             else:
@@ -574,9 +601,6 @@ class ObjectAxisView(QWidget):
 # w v1 — brak approve) i bez Wysokości (atrybut D3, nie tożsamość — zejście na drugi plan).
 OBS_COL_ID, OBS_COL_NAME, OBS_COL_LAT, OBS_COL_LON, OBS_COL_FRAMES = range(5)
 OBS_HEADERS = ["ID", "Nazwa", "Szerokość", "Długość", "Klatki"]
-
-
-_NUM_ALIGN = Qt.AlignRight | Qt.AlignVCenter   # liczby prawo-wyrównane (skanowalność magnitud, wizytator #2)
 
 
 def _fmt_coord(v):
@@ -633,6 +657,7 @@ class ObservatoryAxisView(QWidget):
         hdr.setSectionResizeMode(QHeaderView.ResizeToContents)
         hdr.setSectionResizeMode(OBS_COL_NAME, QHeaderView.Stretch)
         self.table.verticalHeader().setVisible(False)
+        self._edit_triggers = self.table.editTriggers()   # przywracane po set_busy(False) (wizytator T3)
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
         self.table.itemChanged.connect(self._on_item_changed)
         lv.addWidget(self.table)
@@ -742,7 +767,7 @@ class ObservatoryAxisView(QWidget):
         self.events.clear()
         if oid is not None:
             for e in queries.observatory_axis_events(self.con, observatory_id=oid):
-                self.events.addItem(f'{e["ts"]}  ·  {e["verb"]}  ·  {e["actor"]}')
+                self.events.addItem(f'{_fmt_event_ts(e["ts"])}  ·  {e["verb"]}  ·  {e["actor"]}')
 
         # Cel scalenia z PLACEHOLDEREM (currentData=None): merge to świadoma deklaracja „to samo
         # stanowisko" (np. dom↔praca, gdy user uzna). `blockSignals` — przebudowa nie sypie sygnałem.
@@ -774,7 +799,9 @@ class ObservatoryAxisView(QWidget):
             self.btn_merge.setEnabled(False)
             self.btn_unmerge.setEnabled(False)
             self.combo_target.setEnabled(False)
+            self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)   # zamknij in-line edyt nazwy (T3)
         else:
+            self.table.setEditTriggers(self._edit_triggers)
             self.combo_target.setEnabled(True)
             self._on_selection_changed()
 
@@ -986,6 +1013,7 @@ class MainWindow(QMainWindow):
         user może zerknąć na oś; blokujemy tylko ZAPIS (§6: aktywny tylko „Anuluj" skanu)."""
         self.axis_view.set_busy(running)
         self.observatory_view.set_busy(running)
+        self.grid_view.set_busy(running)     # grid ma akcje ZAPISU (staging/commit/undo) — gatuj (wizytator C1)
 
     # ---------------------------------------------------------------- menu Plik: Otwórz/Nowa baza
 

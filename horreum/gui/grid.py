@@ -96,6 +96,7 @@ class GridTableModel(QAbstractTableModel):
         self._group_by = None
         self._sort_col = 0
         self._sort_desc = False
+        self._numeric_kw = set() # keywordy z choć jedną komórką liczbową → MISSING „—" też prawo (P3-7)
         self._preview = {}       # frame_id → {'keyword','old','new'} | {'skipped': reason} (podgląd makra, KROK 4)
 
     def set_preview(self, preview):
@@ -115,6 +116,15 @@ class GridTableModel(QAbstractTableModel):
             d["cells"] = cells.get(d["frame_id"], {})
         self._data_rows = list(base_rows)
         self._keywords = list(keywords)
+        # Kolumna-keyword jest NUMERYCZNA, gdy ma choć jedną komórkę liczbową — wtedy MISSING „—"
+        # wyrównujemy w prawo, by nie wisiał po lewej pod słupkiem liczb (wizytator P3-7).
+        self._numeric_kw = set()
+        for kw in self._keywords:
+            for d in self._data_rows:
+                c = d["cells"].get(kw, pivot_mod.MISSING)
+                if c is not pivot_mod.MISSING and c.num is not None:
+                    self._numeric_kw.add(kw)
+                    break
         self._group_by = group_by
         self._rebuild()
 
@@ -238,6 +248,8 @@ class GridTableModel(QAbstractTableModel):
                 return _MISSING_COLOR
             if role == Qt.FontRole:
                 f = QFont(); f.setItalic(True); return f
+            if role == Qt.TextAlignmentRole and kw in self._numeric_kw:
+                return int(Qt.AlignRight | Qt.AlignVCenter)   # „—" pod słupkiem liczb (wizytator P3-7)
             if role == Qt.ToolTipRole:
                 return "brak karty"
             return None
@@ -555,18 +567,22 @@ class StagingDrawer(QFrame):
         self.result = QLabel(""); self.result.setStyleSheet("color: #666;")
         self.btn_commit = QPushButton("Zatwierdź"); self.btn_commit.clicked.connect(lambda: self.commit.emit())
         self.btn_reject = QPushButton("Odrzuć"); self.btn_reject.clicked.connect(lambda: self.reject.emit())
+        # Klaster licznik+wynik po LEWEJ (dot·label·result), rozpychacz, akcje po prawej — inaczej
+        # `result` ze stretch=1 rozrzucał licznik i przyciski na całą szerokość (wizytator D1).
         lay.addWidget(self.dot); lay.addWidget(self.label); lay.addSpacing(8)
-        lay.addWidget(self.result, 1); lay.addWidget(self.btn_commit); lay.addWidget(self.btn_reject)
+        lay.addWidget(self.result); lay.addStretch(1); lay.addWidget(self.btn_commit); lay.addWidget(self.btn_reject)
         self.set_count(0)
 
-    def set_count(self, n, *, result=None):
+    def set_count(self, n, *, result=None, label=None):
         self._n = n
         if n > 0:
             self.dot.setText("⬤"); self.dot.setStyleSheet("color: #d08000;")
             self.label.setText(f"{n} zmian oczekuje")
         else:
             self.dot.setText("○"); self.dot.setStyleSheet("color: #999;")
-            self.label.setText("Brak zmian oczekujących")
+            # `label` nadpisuje domyślny tekst pustego stanu: po commicie „Zatwierdzono…" zamiast
+            # „Brak zmian oczekujących" (sprzeczność z wynikiem obok — wizytator D2).
+            self.label.setText(label or "Brak zmian oczekujących")
         self.btn_commit.setEnabled(n > 0)
         self.btn_reject.setEnabled(n > 0)
         # Nowy staging (n>0) chowa ewentualny stary „Cofnij"; commit/reject znów widoczne (#5).
@@ -598,6 +614,7 @@ class FramesView(QWidget):
         self._only_review = False
         self._frame_ids = []      # frame_id widoczne w gridzie (cel makra) — aktualizowane w refresh()
         self._run_id = None       # JEDEN run_id sesji makra (R#5 lifecycle: stage→commit/reject zwalnia)
+        self._n_total = 0         # liczba widocznych klatek (baza licznika; zaznaczenie dokładane, G2)
         self._build_ui()
         self._load_facets()
         self.refresh()
@@ -649,6 +666,7 @@ class FramesView(QWidget):
         self.model = GridTableModel(self)
         self.table = QTableView()
         self.table.setModel(self.model)
+        self.table.selectionModel().selectionChanged.connect(lambda *_: self._update_count())
         self.table.setSortingEnabled(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -784,11 +802,38 @@ class FramesView(QWidget):
         pv = pivot_mod.build_pivot(base_ids, keywords, rows)
         self.model.set_data(base, pv, keywords, group_by=self.combo_group.currentData())
         n = len(base)
-        self.count_label.setText(f"{n} klatek")
+        self._n_total = n
+        self._update_count()
         self.empty.setVisible(n == 0)
         self.table.setVisible(n > 0)
         self.macro_bar.set_actions_enabled(bool(base_ids))   # szczery disabled makra na pustym gridzie (#4)
         self.status_message.emit(f"Grid: {n} klatek, {len(keywords)} kolumn-keywordów")
+
+    def _update_count(self):
+        """Licznik = widoczne klatki + (gdy jest) zaznaczenie: „N klatek · M zaznaczonych" (wizytator G2 —
+        akcja na zaznaczeniu musi potwierdzać cel). Nagłówki grup są nieselektowalne → nie liczą się."""
+        sm = self.table.selectionModel()
+        sel = len(sm.selectedRows()) if sm else 0
+        txt = f"{self._n_total} klatek" + (f"  ·  {sel} zaznaczonych" if sel else "")
+        self.count_label.setText(txt)
+
+    def set_busy(self, busy):
+        """Podczas etapu pipeline'u wyłącz akcje ZAPISU grida (makro/staging/commit/undo) — worker pisze
+        do bazy w tle (wizytator C1). Po etapie przywróć SZCZERE stany (makro wg widocznych klatek,
+        commit/odrzuć wg liczby oczekujących); nie tykamy etykiet/widoczności szuflady (bez regresji D2)."""
+        if busy:
+            self.macro_bar.set_actions_enabled(False)
+            self.drawer.btn_commit.setEnabled(False)
+            self.drawer.btn_reject.setEnabled(False)
+            if hasattr(self, "_undo_btn"):
+                self._undo_btn.setEnabled(False)
+        else:
+            self.macro_bar.set_actions_enabled(bool(self._frame_ids))
+            n = self._pending_count()
+            self.drawer.btn_commit.setEnabled(n > 0)
+            self.drawer.btn_reject.setEnabled(n > 0)
+            if hasattr(self, "_undo_btn"):
+                self._undo_btn.setEnabled(True)
 
     # ---- makro / staging (KROK 4, druga klinga) ----
     def _targets_fn(self, frame_ids):
@@ -888,7 +933,7 @@ class FramesView(QWidget):
         if res.commit_id is not None and res.applied:
             summary += f"  (commit {res.commit_id})"
             self._last_commit_id = res.commit_id
-            self._install_undo(res.commit_id, summary)
+            self._install_undo(res.commit_id, summary, applied=len(res.applied))
         else:
             self.drawer.set_count(self._pending_count(), result=summary)
         self._run_id = None                              # R#5: run domknięty commitem
@@ -897,11 +942,12 @@ class FramesView(QWidget):
         self._refresh_drawer()
         self.status_message.emit(f"Writeback: {summary}")
 
-    def _install_undo(self, commit_id, summary):
+    def _install_undo(self, commit_id, summary, applied):
         """Po udanym commicie szuflada oferuje jednorazowe „Cofnij" (undo całego commitu). Przycisk
         tworzony i podłączany RAZ (stabilny handler czyta `self._undo_commit_id`) — bez churnu
-        connect/disconnect (który sypał RuntimeWarning)."""
-        self.drawer.set_count(0, result=summary)
+        connect/disconnect (który sypał RuntimeWarning). Etykieta „Zatwierdzono…" zamiast pustostanu,
+        by nie przeczyła wynikowi obok (wizytator D2)."""
+        self.drawer.set_count(0, result=summary, label=f"Zatwierdzono: {applied} (commit {commit_id})")
         self.drawer.set_commit_actions_visible(False)   # jedyna sensowna akcja teraz to Cofnij (#5)
         self._undo_commit_id = commit_id
         if not hasattr(self, "_undo_btn"):

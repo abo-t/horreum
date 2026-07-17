@@ -69,8 +69,11 @@ class FacetRail(QWidget):
     def set_data(self, counts, state):
         """Przeładuj listy. `counts`: dict facet → list[(value, label, n)] (sibling-set per facet);
         `state` = aktualny stan (właściciel: FramesView). Aktywne wybory nieobecne w counts →
-        PIN na górze grupy z n=0 (wartość odcięta przez INNE facety/advanced)."""
+        PIN na górze grupy z n=0 (wartość odcięta przez INNE facety/advanced). Pozycja scrolla
+        KAŻDEJ listy przeżywa przeładowanie (firsthand F4: klik wartości w środku długiej listy
+        nie może odrzucać widoku na górę — user klika tę samą wartość ponownie w cyklu ⊖)."""
         self._loading = True
+        scroll_pos = {facet: lw.verticalScrollBar().value() for facet, lw in self._lists.items()}
         try:
             self._state = state or facet_model.empty_state()
             for facet, lw in self._lists.items():
@@ -96,6 +99,9 @@ class FacetRail(QWidget):
                         it.setForeground(_EX_COLOR)
                     lw.addItem(it)
             self._filter_objects(self.search.text())
+            for facet, lw in self._lists.items():
+                lw.doItemsLayout()                         # przelicz zakres scrolla PRZED restore
+                lw.verticalScrollBar().setValue(scroll_pos[facet])   # setValue sam klampuje do zakresu
         finally:
             self._loading = False
 

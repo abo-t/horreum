@@ -343,6 +343,27 @@ def test_facet_kryteria_paska(view):
     assert "Rodzaj: light" in view.sel_bar.criteria_label._full
 
 
+def test_facet_rail_zachowuje_scroll_po_przeladowaniu(qapp):
+    """Firsthand F4: klik wartości w środku długiej listy przeładowuje listwę (`set_data`) —
+    pozycja scrolla MUSI przeżyć (inaczej widok ucieka na górę i user szuka wartości od nowa)."""
+    from horreum.gui.facets import FacetRail
+    rail = FacetRail()
+    rail.resize(260, 500)
+    rail.show()
+    counts = {"object": [(i, f"OBJ{i:03d}", 1) for i in range(60)],
+              "filter": [], "kind": [], "telescope": [], "night": []}
+    rail.set_data(counts, {})
+    qapp.processEvents()
+    lw = rail._lists["object"]
+    bar = lw.verticalScrollBar()
+    bar.setValue(bar.maximum())
+    pos = bar.value()
+    assert pos > 0                                        # lista realnie przescrollowana
+    rail.set_data(counts, {"object": {"in": [[40, "OBJ040"]]}})   # przeładowanie jak po kliku
+    assert bar.value() == pos
+    rail.hide()
+
+
 def test_facet_wyczysc_zbior(view):
     """Wiz F4 #3: „× Wyczyść zbiór" zdejmuje facety + advanced JEDNYM klikiem; uczciwy disabled,
     gdy nie ma co zdjąć (preset „Przegląd" jest no-opem, gdy już wybrany — to była jedyna droga)."""

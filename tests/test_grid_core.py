@@ -131,6 +131,47 @@ def test_pusta_grupa_to_wszystko(grid_db):
     assert _run(grid_db, {"op": "AND", "conditions": []}) == {1, 2, 3, 4}
 
 
+# ---------- NOT (F1 redesignu — PLAN_ux_redesign §2) ----------
+
+def test_not_lisc(grid_db):
+    """NOT(liść) = uniwersum − liść. Zawiera XISF f3 (bez cards) i znikniętą f4 — uniwersum z frame."""
+    tree = {"op": "NOT", "conditions": [{"keyword": "OBJECT", "operator": "eq", "value": "M51"}]}
+    assert _run(grid_db, tree) == {2, 3}  # uniwersum {1,2,3,4} − {1,4}
+
+
+def test_not_nad_grupa_or(grid_db):
+    """NOT nad grupą OR — negacja całego podwyrażenia."""
+    tree = {"op": "NOT", "conditions": [{"op": "OR", "conditions": [
+        {"keyword": "OBJECT", "operator": "eq", "value": "M51"},
+        {"keyword": "OBJECT", "operator": "eq", "value": "NGC891"},
+    ]}]}
+    assert _run(grid_db, tree) == {3}     # tylko XISF bez OBJECT
+
+
+def test_not_not_to_identycznosc(grid_db):
+    """NOT(NOT(x)) == x — podwójna negacja wraca do wyniku x (algebra, nie przypadek)."""
+    x = {"keyword": "GAIN", "operator": "exists"}
+    tree = {"op": "NOT", "conditions": [{"op": "NOT", "conditions": [x]}]}
+    assert _run(grid_db, tree) == _run(grid_db, x) == {1, 2}
+
+
+def test_not_pustej_grupy_to_zbior_pusty(grid_db):
+    """NOT(pusta-grupa) = ∅: pusta grupa to uniwersum, różnica daje zbiór pusty (semantyka brzegowa R#2)."""
+    tree = {"op": "NOT", "conditions": [{"op": "AND", "conditions": []}]}
+    assert _run(grid_db, tree) == set()
+
+
+def test_not_zla_licznosc_dzieci(grid_db):
+    """NOT z 0 lub 2 dziećmi → ValueError (EXPECT)."""
+    with pytest.raises(ValueError, match="NOT"):
+        _run(grid_db, {"op": "NOT", "conditions": []})
+    with pytest.raises(ValueError, match="NOT"):
+        _run(grid_db, {"op": "NOT", "conditions": [
+            {"keyword": "GAIN", "operator": "exists"},
+            {"keyword": "OBJECT", "operator": "exists"},
+        ]})
+
+
 def test_regex_odrzucony(grid_db):
     with pytest.raises(ValueError, match="regex"):
         _run(grid_db, {"keyword": "OBJECT", "operator": "regex", "value": ".*"})

@@ -378,7 +378,8 @@ class GridTableModel(QAbstractTableModel):
 
 
 class FilterPanel(QWidget):
-    """Minimalny builder drzewa filtra: wiersze [keyword][operator][wartość][×] + selektor AND/OR.
+    """Minimalny builder drzewa filtra: wiersze [keyword][operator][wartość][×] + selektor AND/OR
+    + checkbox „Odwróć" (F1 redesignu: owija drzewo w NOT — `uniwersum − wynik`).
     Emituje `filterApplied(dict|None)` — GUI v1 buduje jednopoziomową grupę (rdzeń wspiera głębiej)."""
 
     filterApplied = Signal(object)
@@ -392,6 +393,8 @@ class FilterPanel(QWidget):
         self.combo_op = QComboBox(); self.combo_op.addItems(["AND", "OR"])
         top.addWidget(QLabel("Łącz:")); top.addWidget(self.combo_op)
         btn_add = QPushButton("+ warunek"); btn_add.clicked.connect(self.add_row); top.addWidget(btn_add)
+        self.chk_invert = QCheckBox("Odwróć: pokaż wszystko POZA filtrem")
+        top.addWidget(self.chk_invert)
         btn_apply = QPushButton("Zastosuj"); btn_apply.clicked.connect(self._apply); top.addWidget(btn_apply)
         btn_clear = QPushButton("Wyczyść"); btn_clear.clicked.connect(self._clear); top.addWidget(btn_clear)
         top.addStretch(1)
@@ -434,16 +437,25 @@ class FilterPanel(QWidget):
     def _clear(self):
         for e in list(self._rows):
             self._remove(e)
+        self.chk_invert.setChecked(False)   # „Wyczyść" = pełny reset, także negacji
         self.add_row()   # zostaw pusty wiersz gotowy do następnego filtra
         self.filterApplied.emit(None)
 
     def set_tree(self, tree):
         """Odtwarza wiersze panelu z drzewa JEDNOPOZIOMOWEGO — synchronizuje panel z filtrem perspektywy
         (P3-3: bez tego preset ustawia filtr, a panel jest pusty → kolejny „Zastosuj" po cichu go nadpisuje).
+        Korzeń NOT (F1, R#1 BLOKUJĄCE): zaznacz „Odwróć" i odtwórz DZIECKO płaską logiką — bez tego
+        perspektywa z NOT wczytuje się w pusty panel i pierwszy „Zastosuj" po cichu kasuje negację.
         Głębsze zagnieżdżenie (grupa w grupie) niereprezentowalne w płaskim panelu → pusty wiersz. NIE emituje
         `filterApplied` (wołający już odświeża)."""
         for e in list(self._rows):
             self._remove(e)
+        invert = (isinstance(tree, dict) and "operator" not in tree
+                  and str(tree.get("op", "")).upper() == "NOT")
+        self.chk_invert.setChecked(invert)
+        if invert:
+            children = tree.get("conditions", [])
+            tree = children[0] if len(children) == 1 else None   # ≠1 dziecko: defensywnie pusty panel
         if tree is None:
             self.add_row()
             return
@@ -482,8 +494,11 @@ class FilterPanel(QWidget):
                 continue   # wiersz niedokończony (edytowalne combo auto-wybiera keyword) — NIE wstrzykuj `eq ''`
             conds.append({"keyword": kw, "operator": op, "value": val})
         if not conds:
-            return None
-        return {"op": self.combo_op.currentText(), "conditions": conds}
+            return None   # pusty panel = uniwersum, BEZ owijania w NOT (checkbox bez warunków nie kłamie ∅-em)
+        tree = {"op": self.combo_op.currentText(), "conditions": conds}
+        if self.chk_invert.isChecked():
+            return {"op": "NOT", "conditions": [tree]}
+        return tree
 
     def _apply(self):
         self.filterApplied.emit(self.build_tree())
@@ -901,7 +916,7 @@ class FramesView(QWidget):
     def __init__(self, con, now_fn=None, parent=None):
         super().__init__(parent)
         self.con = con
-        self._db_path = self._db_path_of(con)   # worker writebacku otwiera WŁASNE połączenie (per-wątek)
+        self._db_path = queries.db_path_of(con)   # worker writebacku otwiera WŁASNE połączenie (per-wątek)
         self._now = now_fn or (lambda: datetime.now(timezone.utc).isoformat())
         self._filter_tree = None
         self._only_dups = False
@@ -942,7 +957,7 @@ class FramesView(QWidget):
         bar.addWidget(self.combo_persp)
         btn_save = QPushButton("Zapisz jako…"); btn_save.clicked.connect(self._save_perspective)
         bar.addWidget(btn_save)
-        btn_proj = QPushButton("Projekcja…"); btn_proj.clicked.connect(self._open_projection)
+        btn_proj = QPushButton("Wydaj na stół…"); btn_proj.clicked.connect(self._open_projection)   # słownik F2 (wiz K4)
         btn_proj.setToolTip("Materializuj bieżącą perspektywę w drzewo linków/kopii (WBPP feed)")
         bar.addWidget(btn_proj)
         bar.addSpacing(16)
@@ -1364,16 +1379,6 @@ class FramesView(QWidget):
         self._sync_staging_mutex()
 
     # ---- writeback off-thread (commit/undo w wątku tła; postęp + „Anuluj" w szufladzie) ----
-    @staticmethod
-    def _db_path_of(con):
-        """Ścieżka pliku bazy z żywego połączenia (`PRAGMA database_list` → 'main'). Worker otwiera po
-        niej WŁASNE połączenie w swoim wątku — `con` nie przechodzi między wątkami (check_same_thread).
-        `:memory:` → '' → seam wymusza tryb inline (patrz `_start_writeback`)."""
-        for _seq, name, file in con.execute("PRAGMA database_list"):
-            if name == "main":
-                return file
-        return None
-
     def _start_writeback(self, op, target_id, after_slot):
         """Odpal `op` (commit/commit_rename/undo/undo_rename) na wątku tła; postęp → szuflada, `done`
         → `after_slot` (post-processing na wątku GŁÓWNYM). `_writeback_async=False` lub brak pliku

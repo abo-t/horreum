@@ -179,6 +179,52 @@ def test_filterpanel_set_tree_odbija_preset(qapp):
     assert p.build_tree() == tree                 # round-trip: co odtworzone, to odczytane
 
 
+def test_filterpanel_odwroc_owija_w_not(qapp):
+    """Checkbox „Odwróć" owija zbudowane drzewo w NOT (F1)."""
+    from horreum.gui.grid import FilterPanel
+    p = FilterPanel(["OBJECT"])
+    p._rows[0]["kw"].setCurrentText("OBJECT"); p._rows[0]["op"].setCurrentIndex(0)  # eq
+    p._rows[0]["val"].setText("M51")
+    p.chk_invert.setChecked(True)
+    tree = p.build_tree()
+    assert tree["op"] == "NOT"
+    assert len(tree["conditions"]) == 1
+    assert tree["conditions"][0]["conditions"][0]["keyword"] == "OBJECT"
+
+
+def test_filterpanel_pusty_z_odwroc_to_none(qapp):
+    """Pusty panel + zaznaczony „Odwróć" → None (uniwersum), BEZ owijania — UI nie kłamie ∅-em."""
+    from horreum.gui.grid import FilterPanel
+    p = FilterPanel(["OBJECT"])
+    p.chk_invert.setChecked(True)
+    assert p.build_tree() is None
+
+
+def test_filterpanel_set_tree_rozpoznaje_not(qapp):
+    """set_tree z korzeniem NOT: checkbox zaznaczony + dziecko odtworzone płasko; round-trip przeżywa
+    (R#1 BLOKUJĄCE: bez tego perspektywa z NOT wczytuje się w pusty panel i „Zastosuj" kasuje negację)."""
+    from horreum.gui.grid import FilterPanel
+    p = FilterPanel(["IMAGETYP"])
+    tree = {"op": "NOT", "conditions": [{"op": "AND", "conditions": [
+        {"keyword": "IMAGETYP", "operator": "contains", "value": "dark"},
+    ]}]}
+    p.set_tree(tree)
+    assert p.chk_invert.isChecked()
+    assert p.build_tree() == tree                 # round-trip: negacja przeżywa „Zastosuj"
+
+
+def test_filterpanel_set_tree_zwykly_odznacza_odwroc(qapp):
+    """set_tree bez NOT odznacza checkbox — stan panelu zawsze odbija wczytany filtr."""
+    from horreum.gui.grid import FilterPanel
+    p = FilterPanel(["OBJECT"])
+    p.chk_invert.setChecked(True)
+    p.set_tree({"op": "AND", "conditions": [{"keyword": "OBJECT", "operator": "exists"}]})
+    assert not p.chk_invert.isChecked()
+    p.chk_invert.setChecked(True)
+    p.set_tree(None)
+    assert not p.chk_invert.isChecked()
+
+
 # ---------- FramesView (integracja) ----------
 
 def test_view_refresh_liczy_klatki(view):
@@ -193,6 +239,32 @@ def test_view_filtr_gain(view):
     view.filter_panel._rows[0]["val"].setText("100")
     view.filter_panel._apply()
     assert view.count_label.text() == "2 klatek"  # f1,f2
+
+
+def test_view_filtr_odwrocony(view):
+    """GAIN=100 odwrócony → uniwersum − {f1,f2} = {f3,f4} (XISF bez cards wchodzi przez uniwersum)."""
+    view.filter_panel.add_row()
+    view.filter_panel._rows[0]["kw"].setCurrentText("GAIN")
+    view.filter_panel._rows[0]["op"].setCurrentIndex(0)  # eq
+    view.filter_panel._rows[0]["val"].setText("100")
+    view.filter_panel.chk_invert.setChecked(True)
+    view.filter_panel._apply()
+    assert view.count_label.text() == "2 klatek"
+
+
+def test_view_perspektywa_z_not_przezywa_zastosuj(view):
+    """Round-trip R#1: filtr perspektywy z korzeniem NOT → panel go odbija → „Zastosuj" NIE kasuje
+    negacji (scenariusz P3-3 piętro wyżej: bez poprawki set_tree pierwszy Zastosuj gubił NOT)."""
+    tree = {"op": "NOT", "conditions": [{"op": "AND", "conditions": [
+        {"keyword": "GAIN", "operator": "eq", "value": "100"},
+    ]}]}
+    view._filter_tree = tree
+    view.filter_panel.set_tree(tree)      # ścieżka _on_perspective (P3-3)
+    view.refresh()
+    assert view.count_label.text() == "2 klatek"
+    view.filter_panel._apply()            # user klika „Zastosuj" bez zmian
+    assert view._filter_tree == tree      # negacja przeżywa
+    assert view.count_label.text() == "2 klatek"
 
 
 def test_view_perspektywa_duplikaty(view):

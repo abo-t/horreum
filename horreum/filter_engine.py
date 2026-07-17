@@ -10,6 +10,10 @@ drzewo AND/OR łączymy w Pythonie (∩ dla AND, ∪ dla OR). Dzięki temu ZERO 
 Drzewo (JSON-serializowalne):
 - warunek: {"keyword": str, "operator": str, "value": ...}
 - grupa:   {"op": "AND"|"OR", "conditions": [ <warunek|grupa> ]}
+- negacja: {"op": "NOT", "conditions": [ <dokładnie 1 dziecko> ]} — `uniwersum − eval(dziecko)`
+  (F1 redesignu, PLAN_ux_redesign §2). NOT z ≠1 dzieckiem → ValueError (EXPECT). Zagnieżdżenia
+  legalne (NOT nad grupą, NOT(NOT(x)) == x). NOT(pusta-grupa) = ∅ — pusta grupa to uniwersum,
+  różnica daje zbiór pusty (konsekwencja algebry, nie przypadek do łatania). Zero nowego SQL.
 
 Operatory: eq ne gt lt ge le contains startswith exists not_exists (regex POMINIĘTY w v1 — D-F).
 - gt/lt/ge/le po `value_num`; keyword mieszany → wiersze bez `value_num` (NULL) wypadają same.
@@ -97,6 +101,11 @@ def _eval(node: dict, leaf_fn: LeafFn, universe_fn: UniverseFn) -> set[int]:
     if _is_condition(node):
         return _eval_condition(node, leaf_fn, universe_fn)
     op = str(node.get("op", "AND")).upper()
+    if op == "NOT":
+        children = node.get("conditions", [])
+        if len(children) != 1:
+            raise ValueError(f"NOT wymaga dokładnie 1 dziecka, dostał {len(children)}")
+        return universe_fn() - _eval(children[0], leaf_fn, universe_fn)
     if op not in ("AND", "OR"):
         raise ValueError(f"nieznana grupa: {op!r}")
     children = node.get("conditions", [])

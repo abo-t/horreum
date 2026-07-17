@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
 )
 
 from horreum import db, filter_engine, macro as macro_mod, naming, pivot as pivot_mod, repo, writeback
-from horreum.gui import facet_model, queries
+from horreum.gui import facet_model, queries, theme
 from horreum.gui.facets import FacetRail
 from horreum.gui.projection_dialog import ProjectionDialog
 
@@ -48,12 +48,21 @@ BASE_COLS = [
     ("Δh (hdr−nazwa)", "_dt_delta"),
 ]
 _MISSING_TEXT = "—"
-_MISSING_COLOR = QColor(0x99, 0x99, 0x99)
-_VANISHED_BG = QColor(0xFF, 0xE5, 0xE5)     # blady czerwony: wszystkie lokalizacje present=0
-_DUP_BG = QColor(0xE5, 0xF0, 0xFF)          # blady niebieski: >1 obecna lokalizacja (Duplikaty)
-_GROUP_BG = QColor(0xEE, 0xEE, 0xEE)        # tło nagłówka grupy
-_TOUCHED_BG = QColor(0xE3, 0xF6, 0xE3)      # blady zielony: wiersz DOTKNIĘTY makrem (podgląd widoczny bez scrolla)
-_SKIPPED_BG = QColor(0xF2, 0xF2, 0xF2)      # blady szary: wiersz POMINIĘTY przez makro (z powodem)
+
+# Kolory stanów gridu — z motywu (F6 §7, SPOT). Model czyta `_COLORS` NA ŻYWO w `data()`
+# (Qt nie cache'uje BackgroundRole), więc `use_theme` przy przełączeniu + `viewport().update()`
+# przemalowuje bez przebudowy modelu. Klucze: missing (foreground braku) / vanished_bg (present=0)
+# / dup_bg (>1 obecna) / group_bg (nagłówek grupy) / touched_bg (dotknięty makrem) / skipped_bg.
+_COLORS: dict[str, QColor] = {}
+
+
+def use_theme(name):
+    """Przeładuj kolory stanów gridu z motywu (Qt-wolny `theme.grid_colors`). Wołane przy imporcie
+    oraz przez `app.apply_theme` przy przełączeniu skórki."""
+    _COLORS.update({k: QColor(v) for k, v in theme.grid_colors(name).items()})
+
+
+use_theme(theme.DEFAULT)     # init przy imporcie (QColor bez QApplication — jak dawne stałe modułu)
 
 # Operatory filtra: etykieta → op (glif+słowo dla czytelności; regex POMINIĘTY, D-F).
 OPERATORS = [
@@ -214,7 +223,7 @@ class GridTableModel(QAbstractTableModel):
             if role == Qt.DisplayRole and col == 0:
                 return f"▸ {row['_group']}  ({row['_count']})"
             if role == Qt.BackgroundRole:
-                return _GROUP_BG
+                return _COLORS["group_bg"]
             if role == Qt.FontRole and col == 0:
                 f = QFont(); f.setBold(True); return f
             return None
@@ -235,7 +244,7 @@ class GridTableModel(QAbstractTableModel):
             if role == Qt.DisplayRole:
                 return "(pominięto)"
             if role == Qt.ForegroundRole:
-                return _MISSING_COLOR
+                return _COLORS["missing"]
             if role == Qt.ToolTipRole:
                 return f"pominięto: {pv['skipped']}"
             return None
@@ -258,11 +267,11 @@ class GridTableModel(QAbstractTableModel):
             # kolumnach bazowych NIEZALEŻNIE od scrolla poziomego (wizytator #1/#2 — „widać zanim zapiszesz").
             pv = self._preview.get(row.get("frame_id")) if self._preview else None
             if pv is not None:
-                return _SKIPPED_BG if "skipped" in pv else _TOUCHED_BG
+                return _COLORS["skipped_bg"] if "skipped" in pv else _COLORS["touched_bg"]
             if vanished:
-                return _VANISHED_BG
+                return _COLORS["vanished_bg"]
             if dup:
-                return _DUP_BG
+                return _COLORS["dup_bg"]
             return None
         if key == "path":
             path = row.get("path") or ""
@@ -298,7 +307,7 @@ class GridTableModel(QAbstractTableModel):
             if role == Qt.DisplayRole:
                 return _MISSING_TEXT
             if role == Qt.ForegroundRole:
-                return _MISSING_COLOR
+                return _COLORS["missing"]
             if role == Qt.FontRole:
                 f = QFont(); f.setItalic(True); return f
             if role == Qt.TextAlignmentRole and kw in self._numeric_kw:
@@ -668,7 +677,7 @@ class RenameBar(QWidget):
         pol.addWidget(self.fallback)
         pol.addStretch(1)
         self.target_lbl = QLabel("")                      # żywa etykieta celu (R1 #18)
-        self.target_lbl.setStyleSheet("color: #666;")
+        self.target_lbl.setProperty("role", "secondary")  # tekst drugorzędny z motywu (F6 §7)
         pol.addWidget(self.target_lbl)
         b.addLayout(pol)
 
@@ -788,7 +797,7 @@ class SelectionBar(QFrame):
         self.count_label = QLabel("")
         f = QFont(); f.setBold(True); self.count_label.setFont(f)
         self.criteria_label = ElidedLabel()
-        self.criteria_label.setStyleSheet("color: #666;")
+        self.criteria_label.setProperty("role", "secondary")   # kryteria zbioru czytelne na dark (F6 §7)
         self.btn_proj = QPushButton("Wydaj na stół…")
         self.btn_proj.setToolTip(self._PROJ_TIP)
         # „× Wyczyść zbiór" (wiz F4 #3): jednoklikowe zdjęcie facetów + filtra — bez niego jedyną
@@ -852,7 +861,7 @@ class StagingDrawer(QFrame):
         lay = QHBoxLayout(self); lay.setContentsMargins(8, 4, 8, 4)
         self.dot = QLabel("○")
         self.label = QLabel("Poczekalnia zmian — pusta")   # słownik F3 (§4)
-        self.result = QLabel(""); self.result.setStyleSheet("color: #666;")
+        self.result = QLabel(""); self.result.setProperty("role", "secondary")   # F6 §7
         # Postęp writebacku renderuje się TU (nie w modalu): pasek + „Anuluj" wchodzą w miejsce
         # Zatwierdź/Odrzuć na czas commitu/undo (off-thread — GUI nie zamarza; rdzeń commituje per-plik).
         self.bar = QProgressBar(); self.bar.setVisible(False); self.bar.setMaximumWidth(220); self.bar.setTextVisible(False)

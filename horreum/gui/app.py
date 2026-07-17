@@ -18,7 +18,8 @@ między widokami w `QStackedWidget`). Oś teleskopu z etapu 1 to teraz OSADZALNY
 import os
 from datetime import datetime, timezone
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QSettings, Signal
+from PySide6.QtGui import QActionGroup, QColor, QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QLabel,
     QListWidget, QListWidgetItem, QMainWindow, QPushButton, QSplitter, QStackedWidget, QTableWidget,
@@ -26,7 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from horreum import db, repo
-from horreum.gui import queries
+from horreum.gui import queries, theme
 
 # Kolumny listy głównej — indeksy nazwane (czytelne handlery zamiast magicznych liczb).
 # Nagłówek = telescop_canon (tożsamość osi po przejściu fitsmirror); Etykieta = nazwa usera.
@@ -44,6 +45,42 @@ def _utc_now_iso():
 
 
 _NUM_ALIGN = Qt.AlignRight | Qt.AlignVCenter   # liczby prawo-wyrównane (skanowalność magnitud, wizytator T1/#2)
+
+# Rola motywu (nasza nazwa) → QPalette.ColorRole (F6 §7 — składanie QColor w warstwie widżetów z
+# Qt-wolnych hexów `theme.palette_spec`). `disabled_text` obsłużone osobno (grupa Disabled).
+_PALETTE_ROLES = {
+    "window": QPalette.Window, "window_text": QPalette.WindowText,
+    "base": QPalette.Base, "alt_base": QPalette.AlternateBase, "text": QPalette.Text,
+    "button": QPalette.Button, "button_text": QPalette.ButtonText, "bright_text": QPalette.BrightText,
+    "highlight": QPalette.Highlight, "highlight_text": QPalette.HighlightedText,
+    "tooltip_base": QPalette.ToolTipBase, "tooltip_text": QPalette.ToolTipText,
+    "link": QPalette.Link, "placeholder": QPalette.PlaceholderText,
+}
+
+
+def _build_palette(name):
+    """Złóż QPalette z motywu `name` (MUSI być znormalizowany). Disabled dla tekstu = `disabled_text`."""
+    spec = theme.palette_spec(name)
+    pal = QPalette()
+    for key, role in _PALETTE_ROLES.items():
+        pal.setColor(role, QColor(spec[key]))
+    disabled = QColor(spec["disabled_text"])
+    for role in (QPalette.WindowText, QPalette.Text, QPalette.ButtonText):
+        pal.setColor(QPalette.Disabled, role, disabled)
+    return pal
+
+
+def apply_theme(app, name):
+    """Zastosuj motyw do CAŁEJ aplikacji: Fusion + QPalette (propaguje do otwartych okien) + QSS
+    akcentów; podłącz kolory stanów gridu/facetów (SPOT). `name` znormalizowany (`theme.normalize`).
+    Import grid/facets lazy — unika cyklu z warstwą Porządków (F5R2#1) i pozostaje spójny ze stylem
+    importów widoków w `_mount_views`."""
+    from horreum.gui import facets, grid
+    app.setStyle("Fusion")
+    app.setPalette(_build_palette(name))
+    app.setStyleSheet(theme.qss(name))
+    grid.use_theme(name)
+    facets.use_theme(name)
 
 
 def _fmt_event_ts(ts):
@@ -921,6 +958,37 @@ class MainWindow(QMainWindow):
         m = self.menuBar().addMenu("&Plik")
         m.addAction("Otwórz bazę…", self._on_open_db)
         m.addAction("Nowa baza…", self._on_new_db)
+        self._build_theme_menu()
+
+    def _build_theme_menu(self):
+        """Menu &Widok: wybór motywu (ciemny/jasny) — zaznaczenie ODBIJA bieżący motyw z QSettings
+        bez klikania (UI-NIE-KŁAMIE, F6 recenzja #6). Wykluczające przez QActionGroup."""
+        view = self.menuBar().addMenu("&Widok")
+        grp = QActionGroup(self)
+        grp.setExclusive(True)
+        current = theme.normalize(QSettings("Horreum", "Horreum").value("ui/theme", theme.DEFAULT))
+        self._theme_actions = {}
+        for name, title in (("dark", "Ciemny"), ("light", "Jasny")):
+            act = view.addAction(title)
+            act.setCheckable(True)
+            act.setChecked(name == current)
+            act.triggered.connect(lambda _checked=False, n=name: self._on_theme(n))
+            grp.addAction(act)
+            self._theme_actions[name] = act
+
+    def _on_theme(self, name):
+        """Przełącz motyw: zastosuj do aplikacji, POTEM utrwal (F6 recenzja #7 — nie zapisuj skórki,
+        która się wywali w apply), i przemaluj otwarte widoki. Paleta globalna odświeża resztę sama;
+        grid czyta kolory na żywo (viewport().update()), wykluczenia facetów wypalone → refresh_theme."""
+        app = QApplication.instance()
+        if app is None:
+            return
+        apply_theme(app, name)
+        QSettings("Horreum", "Horreum").setValue("ui/theme", name)
+        grid_view = getattr(self, "grid_view", None)
+        if grid_view is not None:
+            grid_view.table.viewport().update()
+            grid_view.facet_rail.refresh_theme()
 
     def _build_central(self):
         central = QWidget()
@@ -1092,8 +1160,6 @@ def main(argv=None):
     import sys
     from pathlib import Path
 
-    from PySide6.QtCore import QSettings
-
     # Konsola Windows bywa cp1250 — komunikat ma polskie znaki; przełącz stdout na UTF-8 (best-effort,
     # jak `horreum.cli`), by `print` nie wywalił się na innym kodowaniu konsoli.
     if hasattr(sys.stdout, "reconfigure"):
@@ -1105,8 +1171,11 @@ def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     app = QApplication.instance() or QApplication([])
 
-    # Trwałe ustawienia (Windows: rejestr) — przechowują ścieżkę ostatnio otwartej bazy.
+    # Trwałe ustawienia (Windows: rejestr) — przechowują ścieżkę ostatnio otwartej bazy i motyw.
     settings = QSettings("Horreum", "Horreum")
+
+    # Motyw PRZED oknem (F6 §7): domyślnie ciemny; paleta/QSS/kolory stanów podłączone globalnie.
+    apply_theme(app, theme.normalize(settings.value("ui/theme", theme.DEFAULT)))
 
     if argv:
         start = argv[0]

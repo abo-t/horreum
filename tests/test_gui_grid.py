@@ -472,8 +472,8 @@ def test_macro_preview_populates_column(wb_view):
     assert txt == "RC8 → SkyWatcher RC8"
     # wizytator #1/#2: dotknięty wiersz ma TŁO w kolumnach bazowych (widoczne bez scrolla)
     bg = view.model.data(view.model.index(0, 0), Qt.BackgroundRole)
-    from horreum.gui.grid import _TOUCHED_BG
-    assert bg == _TOUCHED_BG
+    from horreum.gui import grid as grid_mod        # F6: kolory stanów w przeładowywalnym _COLORS
+    assert bg == grid_mod._COLORS["touched_bg"]
     # podgląd NIE zapisuje: staging pusty
     assert view._pending_count() == 0
 

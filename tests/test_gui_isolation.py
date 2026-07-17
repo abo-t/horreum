@@ -59,3 +59,6 @@ def test_readmodel_i_init_gui_qt_free():
     # F4: model/składacz listwy facetów MUSI zostać Qt-wolny (widżet `facets.py` go importuje;
     # logika cyklu/compose testowana bez PySide6) — jawna asercja obok rglob (F4R#11).
     assert not _imports_pyside6(PKG / "gui" / "facet_model.py")
+    # F6: motyw (paleta/kolory jako hex + generator QSS) MUSI zostać Qt-wolny — grid.py/facets.py/app.py
+    # go importują i SKŁADAJĄ QColor/QPalette; `theme.py` samo Qt nie tyka (test_theme chodzi bez Qt).
+    assert not _imports_pyside6(PKG / "gui" / "theme.py")

@@ -148,6 +148,33 @@ def test_etap_pipeline_wylacza_akcje_osi_R5(qapp, tmp_path):
         win.close()
 
 
+def test_menu_widok_przelacza_motyw(qapp, tmp_path, monkeypatch):
+    """F6 §7: menu Widok odbija bieżący motyw bez klikania (default ciemny — recenzja #6);
+    `_on_theme` podmienia kolory stanów gridu na żywo i utrwala wybór w QSettings (recenzja #7)."""
+    from PySide6.QtCore import QSettings
+    from PySide6.QtGui import QColor
+    from horreum.gui import grid as grid_mod, theme
+    store = {}
+    monkeypatch.setattr(QSettings, "value", lambda self, k, d=None: store.get(k, d))
+    monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: store.__setitem__(k, v))
+    win = MainWindow(_seeded_db(tmp_path))
+    try:
+        # menu odbija DEFAULT (ciemny) — zaznaczony „Ciemny", nie „Jasny"
+        assert win._theme_actions["dark"].isChecked()
+        assert not win._theme_actions["light"].isChecked()
+        # przełącz na jasny: kolory gridu podmienione, wybór utrwalony (po apply — recenzja #7)
+        win._on_theme("light")
+        assert grid_mod._COLORS["group_bg"] == QColor(theme.grid_colors("light")["group_bg"])
+        assert store["ui/theme"] == "light"
+        # z powrotem na ciemny — kolory wracają, facet refresh_theme nie wybucha
+        win._on_theme("dark")
+        assert grid_mod._COLORS["group_bg"] == QColor(theme.grid_colors("dark")["group_bg"])
+        assert store["ui/theme"] == "dark"
+    finally:
+        win.close()
+        grid_mod.use_theme(theme.DEFAULT)              # przywróć globalny stan modułu dla innych testów
+
+
 # --- PORZĄDKI: lista zadań, badge, nawigacja do powierzchni (F5) ---
 
 def test_badge_zywy_od_montazu(qapp, tmp_path):

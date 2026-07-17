@@ -14,17 +14,28 @@ Szukajka filtruje TYLKO listę obiektów (prezentacja, nie zbiór)."""
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtGui import QBrush, QColor, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QVBoxLayout, QWidget,
 )
 
-from horreum.gui import facet_model
+from horreum.gui import facet_model, theme
 
 # (facet, tytuł grupy, czy-długa-lista) — długie (Obiekt/Noc) dostają stretch, krótkie zwarty pas.
 _GROUPS = [("object", "Obiekt", True), ("filter", "Filtr", False), ("kind", "Rodzaj", False),
            ("telescope", "Teleskop", False), ("night", "Noc", True)]
-_EX_COLOR = QColor(0xB0, 0x00, 0x00)      # czerwień wykluczeń (zapowiedź palety F6)
+
+# Czerwień wykluczeń ⊖ — z motywu (F6 §7, SPOT). WYPALANA w item przy `set_data`, więc zmiana
+# motywu wymaga `FacetRail.refresh_theme` (repaint sam nie odświeży wypalonego foregroundu).
+_COLORS: dict[str, QColor] = {}
+
+
+def use_theme(name):
+    """Przeładuj kolory facetów z motywu (Qt-wolny `theme.facet_colors`)."""
+    _COLORS.update({k: QColor(v) for k, v in theme.facet_colors(name).items()})
+
+
+use_theme(theme.DEFAULT)
 _SHORT_MAX_H = 72                          # ~3 wiersze; krótka grupa nie zjada pionu długim (wiz F4 #1)
 _LONG_MIN_H = 140                          # ~6 wierszy; Obiekt/Noc (47/173 wartości) wygrywają pion (wiz F4 #1)
 _RAIL_MIN_W = 220                          # bez poziomego scrolla tnącego liczniki „(+n ukryte)" (wiz F4 #2)
@@ -96,7 +107,7 @@ class FacetRail(QWidget):
                     if sel == "in":
                         f = QFont(); f.setBold(True); it.setFont(f)
                     elif sel == "ex":
-                        it.setForeground(_EX_COLOR)
+                        it.setForeground(_COLORS["exclusion"])
                     lw.addItem(it)
             self._filter_objects(self.search.text())
             for facet, lw in self._lists.items():
@@ -104,6 +115,18 @@ class FacetRail(QWidget):
                 lw.verticalScrollBar().setValue(scroll_pos[facet])   # setValue sam klampuje do zakresu
         finally:
             self._loading = False
+
+    def refresh_theme(self):
+        """Przemaluj wykluczenia po zmianie motywu. Kolor ⊖ jest WYPALONY w itemie przy `set_data`
+        (nie czytany z modelu na żywo jak grid), więc podmiana `_COLORS` + repaint go nie odświeży —
+        chodzimy po itemach i re-ustawiamy foreground wg bieżącego stanu (F6 recenzja #2)."""
+        default = QBrush()                          # foreground z palety (dla nie-⊖)
+        for facet, lw in self._lists.items():
+            for i in range(lw.count()):
+                it = lw.item(i)
+                f, value, _label = it.data(Qt.UserRole)
+                ex = facet_model.selection(self._state, f, value) == "ex"
+                it.setForeground(_COLORS["exclusion"] if ex else default)
 
     # ---- interakcja ----
     def _on_item_clicked(self, item):

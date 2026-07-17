@@ -215,7 +215,7 @@ class ProjectionDialog(QDialog):
         v.addLayout(row_add)
 
         hint = QLabel("Cel musi zawierać segment _WBPP lub _Review (drzewo wykluczone ze skanu).")
-        hint.setStyleSheet("color: #777;")           # trwała reguła celu (dyskoverowalna przed błędem, #2)
+        hint.setProperty("role", "secondary")        # trwała reguła celu (dyskoverowalna przed błędem, #2); tekst drugorzędny z motywu (F6 §7)
         v.addWidget(hint)
 
         row_l = QHBoxLayout()
@@ -296,7 +296,7 @@ class ProjectionDialog(QDialog):
             radio.setToolTip(t["path"])              # pełna ścieżka pod kursorem (wiz K3)
             self._btn_group.addButton(radio)
             note = QLabel("")
-            note.setStyleSheet("color: #777;")
+            note.setProperty("role", "secondary")   # tekst drugorzędny z motywu (F6 §7)
             row.addWidget(radio)
             row.addWidget(note)
             row.addStretch(1)

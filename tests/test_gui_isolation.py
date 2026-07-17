@@ -62,3 +62,6 @@ def test_readmodel_i_init_gui_qt_free():
     # F6: motyw (paleta/kolory jako hex + generator QSS) MUSI zostać Qt-wolny — grid.py/facets.py/app.py
     # go importują i SKŁADAJĄ QColor/QPalette; `theme.py` samo Qt nie tyka (test_theme chodzi bez Qt).
     assert not _imports_pyside6(PKG / "gui" / "theme.py")
+    # F7: agregat portfela naświetleń (godziny/tooltip = czysta prezentacja) MUSI zostać Qt-wolny
+    # (`grid.py` go importuje; testy formatowania chodzą bez PySide6) — jawna asercja obok rglob (F4R#11).
+    assert not _imports_pyside6(PKG / "gui" / "portfolio.py")

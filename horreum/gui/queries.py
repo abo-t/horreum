@@ -439,6 +439,33 @@ def review_frame_ids(con):
     ).fetchall()}
 
 
+# ============================================================ PORTFEL NAŚWIETLEŃ (F7, PLAN_ux_redesign §8)
+# „Ile mam godzin na obiekt, per filtr?". STAŁY literał + `json_each(?)`. Godziny z `header.exptime`
+# przez `frame JOIN header` — NIE z cards (cards FITS-only, `rec.cards=None` dla XISF → zaniżenie o XISF,
+# R#8). KIND-AWARE `kind='light'` (EXPTIME masterlighta = czas ZINTEGROWANY → wliczony podwoiłby godziny).
+# header 1:1 z frame (PK frame_id) → frame w >1 present location = JEDEN wiersz, `SUM` bez inflacji.
+
+
+def object_exposure(con, frame_ids):
+    """Naświetlenie per (obiekt, filtr) w zbiorze: `SUM(exptime)` sekund + liczba lightów BEZ exptime.
+    JAWNE-NULL: `exptime IS NULL` u lighta → `n_null` (nie ciche pominięcie); `filter_canon IS NULL`
+    → własna grupa (kubełek „(bez filtra)"). Grupa cała bez exptime → `secs=NULL` (agregat = 0 s).
+    `object_id IS NOT NULL` (kalibracja/bez-obiektu poza facetem Obiekt); XISF/light bez header wypada
+    JOIN-em. Godziny — jak licznik facetu — obejmują klatki `present=0` (parytet z `facet_objects`).
+    Zwraca wiersze: object_id, filter_canon, secs, n_null."""
+    return con.execute(
+        "SELECT f.object_id, f.filter_canon, "
+        "       SUM(h.exptime)         AS secs, "
+        "       SUM(h.exptime IS NULL) AS n_null "
+        "FROM frame f JOIN header h ON h.frame_id = f.id "
+        "WHERE f.kind = 'light' AND f.object_id IS NOT NULL "
+        "  AND f.id IN (SELECT value FROM json_each(?)) "
+        "GROUP BY f.object_id, f.filter_canon "
+        "ORDER BY f.object_id, secs DESC",
+        (json.dumps(list(frame_ids)),),
+    ).fetchall()
+
+
 # ============================================================ PORZĄDKI (F5, PLAN_ux_redesign §6)
 # Liczniki listy zadań `TasksView` — bieżący STAN tabel, nigdy `count(event)` (REVIEW-ZE-STANU,
 # memory horreum-review-queue-from-state). Zbiory dups/review REUŻYWANE z derywacji perspektyw

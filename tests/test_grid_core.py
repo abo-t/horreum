@@ -7,7 +7,7 @@ Wstawianie wierszy surowym SQL dozwolone w `tests/` (meta-test AST skanuje tylko
 import pytest
 
 from horreum import db, filter_engine, pivot
-from horreum.gui import facet_model, queries
+from horreum.gui import facet_model, portfolio, queries
 
 NOW = "2026-07-03T12:00:00"
 
@@ -304,7 +304,8 @@ def facet_db(tmp_path):
       f3: NGC7000, Ha,   config ED80,       2025-08-15T12:00:00            → noc 2025-08-15 (granica WŁĄCZNIE)
       f4: master_flat XISF BEZ header/obiektu/configu (przeżywa ⊖ nocy — F4R#3)
       f5: M51,     filter NULL, config RC8, 2025-08-14T23:30:00.1234567    → noc 2025-08-14 (ułamek 7 cyfr)
-      f6: light BEZ obiektu/header (kolejka review — `review_frame_ids`)."""
+      f6: light BEZ obiektu/header (kolejka review — `review_frame_ids`).
+    exptime (F7 portfel): f1=3600, f2=7200, f3=3600, f5=NULL (grupa „(bez filtra)" cała bez exptime)."""
     con = db.open_db(str(tmp_path / "facet.db"))
     con.executemany("INSERT INTO object (id, canon, catalog) VALUES (?,?,?)",
                     [(1, "M51", "Messier"), (2, "NGC7000", "NGC")])
@@ -328,11 +329,11 @@ def facet_db(tmp_path):
          (5, "f5", "light", "fits", 1, 1, None, NOW),
          (6, "f6", "light", "fits", 1, None, None, NOW)])
     con.executemany(
-        "INSERT INTO header (frame_id, raw_json, date_obs) VALUES (?,?,?)",
-        [(1, "{}", "2025-08-14T22:00:00.123"),
-         (2, "{}", "2025-08-15T11:59:59.999"),
-         (3, "{}", "2025-08-15T12:00:00"),
-         (5, "{}", "2025-08-14T23:30:00.1234567")])
+        "INSERT INTO header (frame_id, raw_json, date_obs, exptime) VALUES (?,?,?,?)",
+        [(1, "{}", "2025-08-14T22:00:00.123", 3600.0),
+         (2, "{}", "2025-08-15T11:59:59.999", 7200.0),
+         (3, "{}", "2025-08-15T12:00:00", 3600.0),
+         (5, "{}", "2025-08-14T23:30:00.1234567", None)])
     con.executemany(
         "INSERT INTO location (frame_id, volume, path, present) VALUES (?,?,?,?)",
         [(1, "V", "/a/1.fits", 1), (1, "V", "/b/1c.fits", 1),
@@ -519,3 +520,45 @@ def test_dup_i_review_sets(facet_db):
     """Sety trimów (F4R2#2): JEDNA derywacja dla zbioru głównego i sibling-setów (SPOT)."""
     assert queries.dup_frame_ids(facet_db) == {1}           # 2 OBECNE lokacje; present=0 się nie liczy
     assert queries.review_frame_ids(facet_db) == {6}        # light bez obiektu; master_flat f4 POZA
+
+
+# ---------- portfel naświetleń (F7, PLAN_ux_redesign §8) ----------
+
+def test_object_exposure_kind_aware_kubelki(facet_db):
+    """`object_exposure`: godziny per (obiekt, filtr). KIND-AWARE (`kind='light'`) → master_flat f4
+    POZA; light-bez-obiektu f6 (object_id NULL) i light-bez-header POZA JOIN. JAWNE-NULL: f5 (M51,
+    filtr NULL, exptime NULL) → grupa „(bez filtra)" z `secs=NULL` i `n_null=1`. ORDER secs DESC
+    (NULL ostatni). f5 present=0 wliczony (parytet z n)."""
+    rows = [(r["object_id"], r["filter_canon"], r["secs"], r["n_null"])
+            for r in queries.object_exposure(facet_db, list(queries.all_frame_ids(facet_db)))]
+    assert rows == [
+        (1, "Ha", 3600.0, 0),      # M51: f1
+        (1, None, None, 1),        # M51: f5 „(bez filtra)", cała-NULL exptime → secs NULL, n_null=1
+        (2, "OIII", 7200.0, 0),    # NGC7000: f2 (secs DESC → OIII przed Ha)
+        (2, "Ha", 3600.0, 0),      # NGC7000: f3
+    ]
+
+
+def test_object_exposure_honoruje_podzbior(facet_db):
+    """`json_each` zawęża — tylko f1 (M51/Ha) w podzbiorze → jedna grupa."""
+    rows = [(r["object_id"], r["filter_canon"], r["secs"]) for r in queries.object_exposure(facet_db, [1])]
+    assert rows == [(1, "Ha", 3600.0)]
+
+
+def test_portfolio_summarize_i_formatowanie():
+    """Agregat Qt-wolny: grupowanie per obiekt, `secs=NULL`→0 s, sufiks/tooltip ze słownictwem F7."""
+    rows = [
+        {"object_id": 1, "filter_canon": "Ha", "secs": 3600.0, "n_null": 0},
+        {"object_id": 1, "filter_canon": None, "secs": None, "n_null": 2},   # grupa cała bez exptime
+        {"object_id": 2, "filter_canon": "OIII", "secs": 7200.0, "n_null": 0},
+    ]
+    summ = portfolio.summarize(rows)
+    assert summ[1]["total_secs"] == 3600.0                   # NULL → 0 s
+    assert summ[1]["n_null"] == 2
+    assert summ[1]["per_filter"] == [("Ha", 3600.0, 0), (None, 0.0, 2)]
+    assert portfolio.format_hours(3600) == "1.0 h"
+    assert portfolio.format_hours(None) == "0.0 h"           # brak → 0, nie wyjątek
+    assert portfolio.object_suffix(summ[1]) == " · 1.0 h (+2 bez exptime)"
+    assert portfolio.object_tooltip(summ[1]) == "Ha: 1.0 h\n(bez filtra): 0.0 h\n+2 klatek bez exptime"
+    assert portfolio.object_suffix(summ[2]) == " · 2.0 h"    # bez ogona n_null gdy n_null=0
+    assert portfolio.object_tooltip(summ[2]) == "OIII: 2.0 h"

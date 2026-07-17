@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
 )
 
 from horreum import db, filter_engine, macro as macro_mod, naming, pivot as pivot_mod, repo, writeback
-from horreum.gui import facet_model, queries, theme
+from horreum.gui import facet_model, portfolio, queries, theme
 from horreum.gui.facets import FacetRail
 from horreum.gui.projection_dialog import ProjectionDialog
 
@@ -1373,7 +1373,7 @@ class FramesView(QWidget):
         grupy F (in+ex) — liczniki na pełnym zbiorze samo-zawężałyby facet i OR-wewnątrz byłby
         nieosiągalny. Facet BEZ aktywnego wyboru → sibling == zbiór bieżący (już policzony;
         D-UX-3(a)). Trimy dups/review = przecięcie z gotowymi setami (F4R2#2, bez base_rows)."""
-        counts = {}
+        counts, extras = {}, {}
         for facet in facet_model.FACETS:
             if facet not in self._facet_state:
                 ids = current_ids
@@ -1387,7 +1387,13 @@ class FramesView(QWidget):
                     sib &= review_ids
                 ids = list(sib)
             counts[facet] = self._facet_counts(facet, ids)
-        self.facet_rail.set_data(counts, self._facet_state)
+            if facet == "object":
+                # Portfel (F7 §8): godziny lightów per obiekt na TYM SAMYM `ids` co `facet_objects`
+                # (parytet n↔godziny; inne aktywne facety zawężają godziny). Formatowanie = `portfolio`.
+                summ = portfolio.summarize(queries.object_exposure(self.con, ids))
+                extras["object"] = {oid: (portfolio.object_suffix(e), portfolio.object_tooltip(e))
+                                    for oid, e in summ.items()}
+        self.facet_rail.set_data(counts, self._facet_state, extras)
 
     def _facet_counts(self, facet, ids):
         """Kubełki jednego facetu → list[(value, label, n)] (kontrakt `FacetRail.set_data`).

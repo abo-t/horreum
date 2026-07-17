@@ -364,6 +364,34 @@ def test_facet_rail_zachowuje_scroll_po_przeladowaniu(qapp):
     rail.hide()
 
 
+def test_facet_object_godziny_sufiks_i_guard_ex(qapp):
+    """F7 §8: wiersz obiektu „in"/none niesie sufiks godzin (extras) + tooltip per filtr. Guard
+    DD-render (recenzja #1): obiekt ⊖ JEST w extras (sibling-set obiektu ZAWIERA wykluczone), a MIMO
+    TO wiersz nie dokleja godzin. Obiekt bez wpisu extras → bez sufiksu."""
+    from horreum.gui.facets import FacetRail
+    rail = FacetRail()
+    counts = {"object": [(1, "M51", 5), (2, "NGC7000", 3), (7, "IC434", 2)],
+              "filter": [], "kind": [], "telescope": [], "night": []}
+    extras = {"object": {1: (" · 1.0 h", "Ha: 1.0 h"),
+                         2: (" · 2.0 h", "OIII: 2.0 h")}}     # NGC7000 (⊖) JEST w extras
+    state = {"object": {"in": [[1, "M51"]], "ex": [[2, "NGC7000"]]}}
+    rail.set_data(counts, state, extras)
+
+    def _item(v):
+        lw = rail._lists["object"]
+        for i in range(lw.count()):
+            if lw.item(i).data(Qt.UserRole)[1] == v:
+                return lw.item(i)
+        raise AssertionError(f"brak {v}")
+
+    assert _item(1).text() == "✓ M51 (5) · 1.0 h"            # in → sufiks doklejony
+    assert _item(1).toolTip() == "Ha: 1.0 h"
+    assert _item(2).text() == "⊖ NGC7000 (+3 ukryte)"        # ex → BEZ godzin mimo wpisu w extras
+    assert _item(2).toolTip() == ""
+    assert _item(7).text() == "IC434 (2)"                    # brak wpisu extras → bez sufiksu
+    assert _item(7).toolTip() == ""
+
+
 def test_facet_wyczysc_zbior(view):
     """Wiz F4 #3: „× Wyczyść zbiór" zdejmuje facety + advanced JEDNYM klikiem; uczciwy disabled,
     gdy nie ma co zdjąć (preset „Przegląd" jest no-opem, gdy już wybrany — to była jedyna droga)."""

@@ -77,18 +77,21 @@ class FacetRail(QWidget):
     def state(self):
         return self._state
 
-    def set_data(self, counts, state):
+    def set_data(self, counts, state, extras=None):
         """Przeładuj listy. `counts`: dict facet → list[(value, label, n)] (sibling-set per facet);
-        `state` = aktualny stan (właściciel: FramesView). Aktywne wybory nieobecne w counts →
-        PIN na górze grupy z n=0 (wartość odcięta przez INNE facety/advanced). Pozycja scrolla
-        KAŻDEJ listy przeżywa przeładowanie (firsthand F4: klik wartości w środku długiej listy
-        nie może odrzucać widoku na górę — user klika tę samą wartość ponownie w cyklu ⊖)."""
+        `state` = aktualny stan (właściciel: FramesView). `extras`: opc. dict facet → {value:
+        (suffix, tooltip)} — anotacja godzin portfela (F7 §8), dziś tylko facet „object". Aktywne
+        wybory nieobecne w counts → PIN na górze grupy z n=0 (wartość odcięta przez INNE facety/
+        advanced). Pozycja scrolla KAŻDEJ listy przeżywa przeładowanie (firsthand F4: klik wartości
+        w środku długiej listy nie może odrzucać widoku na górę — user klika tę samą wartość
+        ponownie w cyklu ⊖)."""
         self._loading = True
         scroll_pos = {facet: lw.verticalScrollBar().value() for facet, lw in self._lists.items()}
         try:
             self._state = state or facet_model.empty_state()
             for facet, lw in self._lists.items():
                 lw.clear()
+                facet_extras = (extras or {}).get(facet) or {}
                 entries = list((counts or {}).get(facet) or [])
                 present = {v for v, _l, _n in entries}
                 grp = self._state.get(facet) or {}
@@ -96,14 +99,22 @@ class FacetRail(QWidget):
                           if v not in present]
                 for value, label, n in pinned + entries:
                     sel = facet_model.selection(self._state, facet, value)
+                    tooltip = None
                     if sel == "ex":
                         # „(n)" przy ⊖ znaczy „ile WRÓCI po zdjęciu" (sibling-set), nie wkład do
-                        # zbioru (pokazanych jest 0) — render niesie tę semantykę (F4R2#1).
+                        # zbioru (pokazanych jest 0) — render niesie tę semantykę (F4R2#1). Godzin
+                        # NIE doklejamy: obiekt wykluczony nie wnosi ich do zbioru (F7 guard, DD-render).
                         text = f"⊖ {label} (+{n} ukryte)"
                     else:
                         text = f"{'✓ ' if sel == 'in' else ''}{label} ({n})"
+                        sx = facet_extras.get(value)          # sufiks/tooltip godzin (F7) — poza ⊖
+                        if sx:
+                            text += sx[0]
+                            tooltip = sx[1]
                     it = QListWidgetItem(text)
                     it.setData(Qt.UserRole, (facet, value, label))
+                    if tooltip:
+                        it.setToolTip(tooltip)
                     if sel == "in":
                         f = QFont(); f.setBold(True); it.setFont(f)
                     elif sel == "ex":

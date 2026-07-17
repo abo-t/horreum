@@ -101,8 +101,7 @@ def test_view_skan_w_watku_running_i_summary(qapp, tmp_path):
     a running_changed przeszło True→False (pętla kończy się na False = po sprzątnięciu wątku)."""
     db_path = _fresh_db(tmp_path)
     view = PipelineView(db_path, now_fn=lambda: NOW)
-    view._root = _tree(tmp_path, 2)
-    view._serial = "VOL1"
+    view._root = _tree(tmp_path, 2)                    # serial policzy się ŚWIEŻO w _scan_params (F5)
     running = []
     loop = QEventLoop()
     view.running_changed.connect(running.append)
@@ -174,12 +173,14 @@ def test_worker_all_anulowanie_przerywa_lancuch(qapp, tmp_path):
 # --- widok: bramkowanie przycisków + pełny „Przetwórz wszystko" w wątku ---
 
 def test_gating_przyciskow_wymaga_bazy_i_katalogu(qapp, tmp_path):
-    """all/scan wymagają bazy ORAZ katalogu; group/resolve/delta — samej bazy; anuluj wyłączony w spoczynku."""
+    """all/scan wymagają bazy ORAZ katalogu; group/resolve/delta — samej bazy; „Przyjmij nowe"
+    samej bazy (katalog przynosi własny, F5); anuluj wyłączony w spoczynku."""
     view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
     assert not view.btn_all.isEnabled() and not view.btn_scan.isEnabled()   # brak katalogu
+    assert view.btn_receive.isEnabled()                                     # F5: baza wystarcza
     assert view.btn_group.isEnabled() and view.btn_resolve.isEnabled() and view.btn_delta.isEnabled()
     assert not view.btn_cancel.isEnabled()
-    view._root = _tree(tmp_path, 1); view._serial = "VOL1"; view._sync_actions()
+    view._root = _tree(tmp_path, 1); view._sync_actions()
     assert view.btn_all.isEnabled() and view.btn_scan.isEnabled()           # katalog wskazany
 
 
@@ -198,8 +199,7 @@ def test_view_przetworz_wszystko_w_watku(qapp, tmp_path):
     """Pełny łańcuch z okna w PRAWDZIWYM wątku: panel akumuluje 4 sekcje (skan/grupuj/rozwiąż/delta),
     running wraca do False po sprzątnięciu."""
     view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
-    view._root = _tree(tmp_path, 2)
-    view._serial = "VOL1"
+    view._root = _tree(tmp_path, 2)                    # serial policzy się ŚWIEŻO w _scan_params (F5)
     running = []
     loop = QEventLoop()
     view.running_changed.connect(running.append)
@@ -210,3 +210,115 @@ def test_view_przetworz_wszystko_w_watku(qapp, tmp_path):
     txt = view.lbl_summary.text()
     assert "[skan]" in txt and "[grupuj]" in txt and "[rozwiąż]" in txt and "[delta]" in txt
     assert running[0] is True and running[-1] is False and view._thread is None
+
+
+# --- F5 (Dostawa): świeży serial, „Przyjmij nowe", guard mieszania serialu ---
+
+def _qsettings_dict(monkeypatch, store=None):
+    """QSettings na słowniku (wzorzec test_gui_grid) — bez tykania rejestru użytkownika."""
+    from PySide6.QtCore import QSettings
+    store = {} if store is None else store
+    monkeypatch.setattr(QSettings, "value", lambda self, k, d=None: store.get(k, d))
+    monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: store.__setitem__(k, v))
+    return store
+
+
+def test_scan_params_liczy_serial_swiezo(qapp, tmp_path, monkeypatch):
+    """R#7+R2-3: wartość do bramy `(volume,path,mtime)` ZAWSZE ze startu sekwencji — nigdy
+    z montażu/pamięci (stale po przepięciu dysku w trakcie sesji)."""
+    import horreum.gui.pipeline as pl
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    view._root = _tree(tmp_path, 1)
+    monkeypatch.setattr(pl, "volume_serial", lambda p: "FRESH")
+    assert view._scan_params()["volume"] == "FRESH"
+    monkeypatch.setattr(pl, "volume_serial", lambda p: None)
+    assert view._scan_params()["volume"] == "?"        # nieustalony → pełny skan (kontrakt bramy)
+
+
+def test_receive_z_pamiecia_startuje_cala_sekwencje(qapp, tmp_path, monkeypatch):
+    """„Przyjmij nowe" z zapamiętanym źródłem (D-UX-5): zero pytań, cała sekwencja „all"."""
+    tree = _tree(tmp_path, 2)
+    store = _qsettings_dict(monkeypatch, {"pipeline/last_source": tree})
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    running = []
+    loop = QEventLoop()
+    view.running_changed.connect(running.append)
+    view.running_changed.connect(lambda r: loop.quit() if r is False else None)
+    QTimer.singleShot(20000, loop.quit)
+    view._on_receive()
+    assert view._thread is not None                    # ruszyło bez pytania o katalog
+    loop.exec()
+    txt = view.lbl_summary.text()
+    assert "[skan]" in txt and "[delta]" in txt        # cała sekwencja
+    assert view._root == tree and store["pipeline/last_source"] == tree
+
+
+def test_receive_bez_pamieci_pyta_zapisuje_i_syncuje_memo(qapp, tmp_path, monkeypatch):
+    """Pierwsza dostawa: pytanie o katalog, zapis pamięci, memo z JEDNEJ funkcji (F5R#10/R2#6)."""
+    tree = _tree(tmp_path, 1)
+    store = _qsettings_dict(monkeypatch)
+    from PySide6.QtWidgets import QFileDialog
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: tree))
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    assert "pierwsza dostawa" in view.lbl_source_memo.text()
+    loop = QEventLoop()
+    view.running_changed.connect(lambda r: loop.quit() if r is False else None)
+    QTimer.singleShot(20000, loop.quit)
+    view._on_receive()
+    loop.exec()
+    assert store["pipeline/last_source"] == tree
+    assert tree in view.lbl_source_memo.text()
+
+
+def test_receive_anulowany_dialog_nie_startuje(qapp, tmp_path, monkeypatch):
+    _qsettings_dict(monkeypatch)                       # brak pamięci źródła
+    from PySide6.QtWidgets import QFileDialog
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: ""))
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    view._on_receive()
+    assert view._thread is None                        # anuluj → nic nie rusza
+
+
+def test_pick_dir_zapisuje_last_source(qapp, tmp_path, monkeypatch):
+    """D-UX-5: jedna pamięć ostatniego katalogu — „Wskaż katalog…" też ją zapisuje."""
+    tree = _tree(tmp_path, 1)
+    store = _qsettings_dict(monkeypatch)
+    from PySide6.QtWidgets import QFileDialog
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: tree))
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    view._on_pick_dir()
+    assert store["pipeline/last_source"] == tree and tree in view.lbl_source_memo.text()
+
+
+def test_serial_guard_wstrzymuje_skan_mieszany(qapp, tmp_path, monkeypatch):
+    """F5R#3: serial '?' do bazy znającej realny wolumen = STOP przed startem wątku (skan '?' by
+    PODWOIŁ lokacje każdej znanej klatki — brama nie trafi, UNIQUE(volume,path) wpuści drugą)."""
+    import horreum.gui.pipeline as pl
+    from horreum import repo
+    db_path = _fresh_db(tmp_path)
+    con = db.open_db(db_path)
+    fid, _ = repo.upsert_frame(con, sha1_data="sha-g", kind="light", filetype="fits",
+                               camera_id=None, now=NOW)
+    repo.add_location(con, frame_id=fid, volume="VOL1", path="/x/g.fits", now=NOW)
+    con.close()
+    view = PipelineView(db_path, now_fn=lambda: NOW)
+    view._root = _tree(tmp_path, 1)
+    monkeypatch.setattr(pl, "volume_serial", lambda p: None)
+    view._on_scan()
+    assert view._thread is None                        # wstrzymane PRZED startem wątku
+    assert not view.lbl_error.isHidden() and "wolumen nieustalony" in view.lbl_error.text()
+
+
+def test_serial_guard_przepuszcza_czysty_swiat(qapp, tmp_path, monkeypatch):
+    """Czysty świat '?' (baza bez realnych wolumenów — np. nie-Windows) skanuje jak dziś."""
+    import horreum.gui.pipeline as pl
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    view._root = _tree(tmp_path, 1)
+    monkeypatch.setattr(pl, "volume_serial", lambda p: None)
+    loop = QEventLoop()
+    view.running_changed.connect(lambda r: loop.quit() if r is False else None)
+    QTimer.singleShot(15000, loop.quit)
+    view._on_scan()
+    assert view._thread is not None
+    loop.exec()
+    assert "[skan] pliki 1" in view.lbl_summary.text()

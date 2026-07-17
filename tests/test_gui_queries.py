@@ -127,3 +127,61 @@ def test_read_model_nie_emituje_eventow(s8):
     queries.axis_events(con, telescope_id=ids["A"])
     after = con.execute("SELECT count(*) FROM event").fetchone()[0]
     assert before == after
+
+
+# --- PORZĄDKI: tasks_state (F5) — liczniki ze STANU ---
+
+def test_tasks_state_liczniki_na_s8_obj(s8_obj):
+    """Arytmetyka fixture (przeliczona w recenzji F5): unresolved = objrev1+objrev2+nullcfg (present0
+    MA obiekt); dups = a1 (2×present=1); teleskopy A–D wszystkie bez etykiety; zero obserwatoriów
+    i XISF; vanished = present0 (jedyna lokacja present=0) — bez guardu EXISTS licznik złapałby też
+    klatki BEZ lokacji w ogóle (w fixture jest ich 10)."""
+    con, ids = s8_obj
+    st = queries.tasks_state(con)
+    assert st == {
+        "unresolved_lights": 3,
+        "dup_frames": 1,
+        "telescopes_unlabeled": 4,
+        "observatories_unnamed": 0,
+        "xisf_frames": 0,
+        "vanished_frames": 1,
+    }
+
+
+def test_tasks_state_reaguje_na_stan_nie_eventy(s8_obj):
+    """REVIEW-ZE-STANU: nazwanie teleskopu ZDEJMUJE go z licznika (stan bieżący), a liczba eventów
+    nie ma znaczenia. Scalenie też zdejmuje (licznik tylko kanonicznych)."""
+    con, ids = s8_obj
+    repo.label_telescope(con, telescope_id=ids["A"], label="A140R", now=NOW)
+    assert queries.tasks_state(con)["telescopes_unlabeled"] == 3
+    repo.merge_telescope(con, source_id=ids["B"], target_id=ids["C"], now=NOW)
+    assert queries.tasks_state(con)["telescopes_unlabeled"] == 2   # B scalony → poza kanonem
+
+
+def test_tasks_state_pusta_baza_same_zera(tmp_path):
+    from horreum import db
+    con = db.open_db(str(tmp_path / "empty.db"))
+    try:
+        assert all(v == 0 for v in queries.tasks_state(con).values())
+    finally:
+        con.close()
+
+
+# --- guard mieszania serialu (F5R#3) ---
+
+def test_has_real_volume_locations(s8_obj, tmp_path):
+    """Baza fixture ma lokacje z realnymi serialami (vol1/vol2/vol3) → True; świeża/pusta → False;
+    baza znająca WYŁĄCZNIE '?' → False (czysty świat placeholdera nie blokuje skanu)."""
+    con, ids = s8_obj
+    assert queries.has_real_volume_locations(con) is True
+
+    from horreum import db
+    fresh = db.open_db(str(tmp_path / "fresh.db"))
+    try:
+        assert queries.has_real_volume_locations(fresh) is False
+        fid, _ = repo.upsert_frame(fresh, sha1_data="sha-q", kind="light", filetype="fits",
+                                   camera_id=None, now=NOW)
+        repo.add_location(fresh, frame_id=fid, volume="?", path="/x/q.fits", now=NOW)
+        assert queries.has_real_volume_locations(fresh) is False   # sam '?' nie jest „realny"
+    finally:
+        fresh.close()

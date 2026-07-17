@@ -882,11 +882,16 @@ class TelescopeAxisWindow(QMainWindow):
         raise AttributeError(name)
 
 
+# Miejsca nawigacji (F5, PLAN_ux_redesign §6): indeksy pozycji sidebara == indeksy stron stacku.
+NAV_DOSTAWA, NAV_ZBIORY, NAV_PORZADKI = range(3)
+
+
 class MainWindow(QMainWindow):
-    """Okno aplikacji (PLAN_gui_pipeline §2): menu Plik (Otwórz/Nowa baza) + nawigacja między
-    widokami w `QStackedWidget` (Pipeline ↔ Oś teleskopu). WŁAŚCICIEL połączenia `con` — otwiera je
-    z `db_path`, zamyka poprzednie przy przełączeniu bazy i bieżące przy zamknięciu okna (top-level
-    apki, w odróżnieniu od osadzonych widoków).
+    """Okno aplikacji (PLAN_gui_pipeline §2 + UX-redesign F5): menu Plik (Otwórz/Nowa baza) +
+    nawigacja 3 MIEJSC w sidebarze (Dostawa / Zbiory / Porządki — `QListWidget` prowadzi
+    `QStackedWidget`; osie teleskop/obserwatorium/obiekt to PODSTRONY Porządków w `TasksView`).
+    WŁAŚCICIEL połączenia `con` — otwiera je z `db_path`, zamyka poprzednie przy przełączeniu bazy
+    i bieżące przy zamknięciu okna (top-level apki, w odróżnieniu od osadzonych widoków).
 
     Trzyma `db_path` (nie tylko `con`): worker pipeline'u potrzebuje ŚCIEŻKI, by otworzyć WŁASNE
     połączenie w swoim wątku (sqlite `check_same_thread` — `con` głównego wątku nie przechodzi).
@@ -901,7 +906,6 @@ class MainWindow(QMainWindow):
         # Wstrzykiwane wywołanie zwrotne „zmieniono bazę" (wzór jak `now_fn`): `main` podpina tu zapis
         # ostatniej ścieżki do trwałych ustawień; testy go nie podają → brak skutków ubocznych.
         self._on_db_changed = on_db_changed
-        self._nav_buttons = []
         self.setWindowTitle("Horreum")
         self.resize(1000, 620)
         self._build_menu()
@@ -920,41 +924,40 @@ class MainWindow(QMainWindow):
 
     def _build_central(self):
         central = QWidget()
-        outer = QVBoxLayout(central)
-        self._nav_bar = QHBoxLayout()
-        self._nav_bar.addStretch(1)                 # przyciski wstawiane PRZED tym rozpychaczem
-        outer.addLayout(self._nav_bar)
+        outer = QHBoxLayout(central)
+        # Sidebar nawigacji (F5): lista pionowa 3 miejsc zamiast paska przycisków-zakładek.
+        # Ukryty do montażu widoków (dom widoczności JAWNY: _clear_views chowa, _mount_views odsłania).
+        self.nav = QListWidget()
+        self.nav.setFixedWidth(160)
+        self.nav.currentRowChanged.connect(self._on_nav_changed)
+        self.nav.setVisible(False)
+        outer.addWidget(self.nav)
         self.stack = QStackedWidget()
-        outer.addWidget(self.stack)
+        outer.addWidget(self.stack, 1)
+        # Pusty stan ODKRYWALNY w centrum (wizytator F5 #3) — statusBar to za mało dla pierwszego
+        # ekranu nowego usera; chowany, gdy jest baza (steruje _sync_db_state).
+        self.empty_note = QLabel("Brak bazy — otwórz lub utwórz bazę (menu Plik).")
+        self.empty_note.setAlignment(Qt.AlignCenter)
+        self.empty_note.setWordWrap(True)
+        self.empty_note.setVisible(False)
+        outer.addWidget(self.empty_note, 1)
         self.setCentralWidget(central)
         self.statusBar()
 
-    def _add_view(self, label, widget):
-        """Zarejestruj widok w stacku + przycisk nawigacji. Pasek nawigacji widoczny od ≥2 widoków
-        (samotny przycisk byłby szumem)."""
-        idx = self.stack.addWidget(widget)
-        btn = QPushButton(label)
-        btn.setCheckable(True)
-        btn.clicked.connect(lambda: self._show_view(idx))
-        self._nav_bar.insertWidget(len(self._nav_buttons), btn)
-        self._nav_buttons.append(btn)
-        self._sync_nav_visibility()
-
     def _show_view(self, idx):
-        self.stack.setCurrentIndex(idx)
-        for i, b in enumerate(self._nav_buttons):
-            b.setChecked(i == idx)
+        """Przełącz miejsce nawigacji (seam dla kodu i testów) — sidebar prowadzi stack."""
+        self.nav.setCurrentRow(idx)
 
-    def _sync_nav_visibility(self):
-        many = len(self._nav_buttons) >= 2
-        for b in self._nav_buttons:
-            b.setVisible(many)
+    def _on_nav_changed(self, row):
+        if row < 0:                     # nav.clear() przy przemontowaniu emituje -1 (F5R#6)
+            return
+        self.stack.setCurrentIndex(row)
+        if row == NAV_PORZADKI:         # wejście w Porządki = świeży stan liczników zadań
+            self.tasks_view.refresh_counts()
 
     def _clear_views(self):
-        for b in self._nav_buttons:
-            self._nav_bar.removeWidget(b)
-            b.deleteLater()
-        self._nav_buttons.clear()
+        self.nav.clear()
+        self.nav.setVisible(False)
         while self.stack.count():
             w = self.stack.widget(0)
             self.stack.removeWidget(w)
@@ -963,9 +966,14 @@ class MainWindow(QMainWindow):
     # ---------------------------------------------------------------- montaż widoków na bazie
 
     def _mount_views(self):
-        """(Prze)montuj widoki na bieżącej bazie. Wołane przy starcie z bazą i przy zmianie bazy.
-        Pipeline pierwszy (wejście usera: pierwszy przebieg); oś teleskopu jako drugi widok."""
+        """(Prze)montuj widoki na bieżącej bazie — 3 MIEJSCA (F5): Dostawa (pipeline), Zbiory (grid),
+        Porządki (zadania + podstrony osi). Importy widżetów lazy (wzorzec etapów; dla `TasksView`
+        OBOWIĄZKOWO — `tasks.py` importuje z `app.py` module-level, F5R2#1: import na górze domknąłby
+        cykl). Pod-widoki osi z `TasksView` ALIASOWANE na oknie — kontrakt `axis_view`/
+        `observatory_view`/`object_view` przeżywa przemontowanie bez zmian."""
         from horreum.gui.pipeline import PipelineView          # lazy: Qt-import tylko gdy montujemy
+        from horreum.gui.grid import FramesView
+        from horreum.gui.tasks import TasksView
 
         self._clear_views()
         pipeline = PipelineView(self.db_path, now_fn=self._now)
@@ -973,29 +981,27 @@ class MainWindow(QMainWindow):
         pipeline.stage_finished.connect(self._on_stage_finished)
         pipeline.running_changed.connect(self._on_pipeline_running)
         self.pipeline_view = pipeline
-        self._add_view("Przetwarzanie", pipeline)
 
-        axis = TelescopeAxisView(self.con, now_fn=self._now)
-        axis.status_message.connect(self._flash)
-        self.axis_view = axis
-        self._add_view("Oś teleskopu", axis)
-
-        obs = ObservatoryAxisView(self.con, now_fn=self._now)
-        obs.status_message.connect(self._flash)
-        self.observatory_view = obs
-        self._add_view("Oś obserwatorium", obs)
-
-        obj = ObjectAxisView(self.con, now_fn=self._now)
-        obj.status_message.connect(self._flash)
-        self.object_view = obj
-        self._add_view("Oś obiektu", obj)
-
-        from horreum.gui.grid import FramesView              # lazy: Qt-import tylko gdy montujemy
         grid = FramesView(self.con, now_fn=self._now)
         grid.status_message.connect(self._flash)
         self.grid_view = grid
-        self._add_view("Klatki", grid)
-        self._show_view(0)
+
+        tasks = TasksView(self.con, now_fn=self._now)
+        self.tasks_view = tasks
+        self.axis_view = tasks.axis_view
+        self.observatory_view = tasks.observatory_view
+        self.object_view = tasks.object_view
+        for v in (tasks.axis_view, tasks.observatory_view, tasks.object_view):
+            v.status_message.connect(self._flash)
+        tasks.open_collection.connect(self._on_open_collection)
+        tasks.counts_changed.connect(self._on_tasks_counts)
+
+        for label, widget in (("Dostawa", pipeline), ("Zbiory", grid), ("Porządki", tasks)):
+            self.stack.addWidget(widget)
+            self.nav.addItem(label)
+        self.nav.setVisible(True)
+        self._show_view(NAV_DOSTAWA)
+        tasks.refresh_counts()    # badge żywy od MONTAŻU (F5R#1) — connect i pozycje nav już stoją
 
     def _on_stage_finished(self, name):
         """Etap pipeline'u zakończył zapis (worker, własne połączenie). Read-modele osi w głównym
@@ -1007,6 +1013,19 @@ class MainWindow(QMainWindow):
         self.object_view.refresh()
         self.grid_view._load_facets()
         self.grid_view.refresh()
+        self.tasks_view.refresh_counts()    # liczniki zadań + badge ze świeżego stanu (F5)
+
+    def _on_open_collection(self, name):
+        """Zadanie z Porządków prowadzi do Zbiorów z ustawioną perspektywą (Duplikaty = flaga
+        `only_dups` presetu, NIE drzewo filtra — R#14)."""
+        self._show_view(NAV_ZBIORY)
+        self.grid_view.apply_perspective(name)
+
+    def _on_tasks_counts(self, n):
+        """Badge sidebara: „Porządki (N)" przy N>0; przy zerze GOŁE „Porządki" — „(0)" to szum (F5R#8)."""
+        item = self.nav.item(NAV_PORZADKI)
+        if item is not None:
+            item.setText("Porządki" if n == 0 else f"Porządki ({n})")
 
     def _on_pipeline_running(self, running):
         """W trakcie etapu wyłącz akcje zapisu osi (szczery disabled). Nawigacja zostaje aktywna —
@@ -1046,8 +1065,9 @@ class MainWindow(QMainWindow):
 
     def _sync_db_state(self):
         has = self.con is not None
-        for b in self._nav_buttons:
-            b.setEnabled(has)
+        self.nav.setEnabled(has)
+        self.stack.setVisible(has)
+        self.empty_note.setVisible(not has)            # pusty stan w centrum (wizytator F5 #3)
         if not has:
             # bez timeoutu — to trwała podpowiedź pustego stanu, nie ulotny komunikat akcji
             self.statusBar().showMessage("Brak bazy — otwórz lub utwórz bazę (menu Plik).")

@@ -16,13 +16,14 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
+from PySide6.QtCore import QObject, QSettings, QThread, Qt, Signal, Slot
 from PySide6.QtWidgets import (
     QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QProgressBar, QPushButton,
     QVBoxLayout, QWidget,
 )
 
 from horreum import db
+from horreum.gui import queries
 from horreum.gui.progress import counts_snapshot, should_emit
 from horreum.grouper import run_grouper
 from horreum.resolver import delta_report, run_resolver
@@ -144,10 +145,12 @@ _STAGE_LABEL = {"scan": "Skan", "group": "Grupowanie", "resolve": "Rozwiązywani
 
 
 class PipelineView(QWidget):
-    """Widok Pipeline (ETAP 2 — sekcja SKANU; group/resolve/delta dochodzą w etapie 3). Pionowy flow:
-    baza → źródło (katalog + tier + auto-wolumen) → skan z uczciwym % i anulowaniem → panel
-    `ScanSummary`. Stan widoczny BEZ klikania; akcja kroku wyróżniona; UI nie kłamie (disabled gdy
-    nie można).
+    """Widok DOSTAWY (miejsce 1 nawigacji F5; historycznie „Pipeline", etap 2). Pionowy flow:
+    baza → „Przyjmij nowe" (złota akcja: cała sekwencja na zapamiętanym źródle, D-UX-5) → tryb
+    zaawansowany (katalog + tier + auto-wolumen, etapy pojedyncze) → skan z uczciwym % i anulowaniem
+    → panel `ScanSummary` („co przyszło"). Stan widoczny BEZ klikania; UI nie kłamie (disabled gdy
+    nie można). Serial wolumenu do bramy liczony ŚWIEŻO na starcie każdej sekwencji (`_scan_params`);
+    skan `'?'` do bazy z realnymi wolumenami wstrzymuje guard `_serial_guard_ok` (F5R#3).
 
     Sygnały do gospodarza (`MainWindow`): `status_message(str)` (pasek statusu), `stage_finished(str)`
     (etap zakończył zapis — gospodarz odświeża read-model osi; WAL → widoczne), `running_changed(bool)`
@@ -162,12 +165,12 @@ class PipelineView(QWidget):
         self._db_path = db_path
         self._now = now_fn
         self._root = None
-        self._serial = None
         self._thread = None
         self._worker = None
         self._cancellable = False
         self._summary_lines = []
         self._build_ui()
+        self._sync_source_memo()
         self._sync_actions()
 
     # ---------------------------------------------------------------- budowa UI
@@ -181,7 +184,25 @@ class PipelineView(QWidget):
         v.addWidget(self.lbl_db)
         v.addWidget(self._hline())
 
-        # 2. Źródło: katalog + poziom + auto-wolumen
+        # 2. ZŁOTA akcja Dostawy (F5, D-UX-5): „Przyjmij nowe" = cała sekwencja na ZAPAMIĘTANYM
+        # źródle (QSettings pipeline/last_source; pierwsza dostawa pyta o katalog). Waga wizualna
+        # przejęta od dawnego „Przetwórz wszystko" (jedna złota akcja na miejsce, wzorzec F3 #3).
+        rec = QHBoxLayout()
+        self.btn_receive = QPushButton("Przyjmij nowe  (skan → grupuj → rozwiąż → delta)")
+        _f = self.btn_receive.font()
+        _f.setBold(True)
+        self.btn_receive.setFont(_f)
+        self.btn_receive.setMinimumHeight(34)
+        self.btn_receive.clicked.connect(self._on_receive)
+        rec.addWidget(self.btn_receive, 1)
+        v.addLayout(rec)
+        self.lbl_source_memo = QLabel("")          # treść = WYŁĄCZNIE _sync_source_memo (F5R2#6)
+        v.addWidget(self.lbl_source_memo)
+        v.addWidget(self._hline())
+
+        # 3. Tryb zaawansowany — źródło wskazywane ręcznie: katalog + poziom + auto-wolumen.
+        # JAWNY nagłówek sekcji (wizytator F5 #4): bez niego dwie pełnoszerokie akcje konkurują.
+        v.addWidget(QLabel("Tryb zaawansowany — wskazany katalog:"))
         src = QHBoxLayout()
         self.btn_pick = QPushButton("Wskaż katalog…")
         self.btn_pick.clicked.connect(self._on_pick_dir)
@@ -196,15 +217,10 @@ class PipelineView(QWidget):
         v.addLayout(src)
         self.lbl_volume = QLabel("wolumen: —")
         v.addWidget(self.lbl_volume)
-        v.addWidget(self._hline())
 
-        # 3. „Przetwórz wszystko" — DOMYŚLNA ścieżka (skan→grupuj→rozwiąż→delta jednym kliknięciem).
-        # Akcja główna ma wagę WIZUALNĄ (bold + wyższy) — wizytator P2: nie może wyglądać jak reszta.
-        self.btn_all = QPushButton("Przetwórz wszystko  (skan → grupuj → rozwiąż → delta)")
-        _f = self.btn_all.font()
-        _f.setBold(True)
-        self.btn_all.setFont(_f)
-        self.btn_all.setMinimumHeight(34)
+        # „Przetwórz wszystko" na wskazanym katalogu — zwykły ciężar, BEZ dopisku sekwencji
+        # (dublował złotą akcję — wizytator F5 #4; sekwencję nazywa „Przyjmij nowe" wyżej).
+        self.btn_all = QPushButton("Przetwórz wszystko")
         self.btn_all.clicked.connect(self._on_all)
         v.addWidget(self.btn_all)
 
@@ -258,29 +274,101 @@ class PipelineView(QWidget):
 
     # ---------------------------------------------------------------- źródło
 
-    def _on_pick_dir(self):
-        path = QFileDialog.getExistingDirectory(self, "Wskaż katalog do skanu")
-        if not path:
-            return
+    def _settings(self):
+        return QSettings("Horreum", "Horreum")
+
+    def _sync_source_memo(self):
+        """JEDYNY właściciel treści memo źródła (F5R2#6) — wołane z __init__ i po KAŻDYM zapisie
+        `pipeline/last_source` (stare memo po zmianie źródła kłamałoby)."""
+        source = self._settings().value("pipeline/last_source", None)
+        if source:
+            self.lbl_source_memo.setText(f"ostatnie źródło: {source}")
+        else:
+            self.lbl_source_memo.setText("(pierwsza dostawa — zapyta o katalog)")
+
+    def _remember_source(self, path):
+        self._settings().setValue("pipeline/last_source", path)
+        self._sync_source_memo()
+
+    def _set_root(self, path):
+        """Ustaw źródło skanu + etykiety. Serial na etykiecie jest INFORMACYJNY (stan z tej chwili);
+        wartość do bramy `(volume,path,mtime)` liczy ZAWSZE `_scan_params` na starcie sekwencji
+        (R#7+R2-3 — serial z pamięci/montażu bywa stale po przepięciu dysku w trakcie sesji)."""
         self._root = path
         self.lbl_root.setText(path)
         serial = volume_serial(path)
         if serial is None:
-            self.lbl_volume.setText("wolumen: ? (serial nieustalony → pełny skan, bez pomijania)")
+            # Neutralnie — skutek ('?' = pełny skan ALBO stop przy mieszanej bazie) nazywa wyłącznie
+            # guard na starcie sekwencji; obietnica tutaj przeczyłaby mu (wizytator F5 #5).
+            self.lbl_volume.setText("wolumen: ? (serial nieustalony)")
         else:
             self.lbl_volume.setText(f"wolumen: {serial} (skan przyrostowy — znane pliki pomijane)")
-        self._serial = serial
         self._sync_actions()
+
+    def _on_pick_dir(self):
+        path = QFileDialog.getExistingDirectory(self, "Wskaż katalog do skanu")
+        if not path:
+            return
+        self._remember_source(path)     # D-UX-5: jedna pamięć ostatniego katalogu (pick i receive)
+        self._set_root(path)
 
     # ---------------------------------------------------------------- akcje (worker)
 
     def _scan_params(self):
+        # Serial ŚWIEŻO na starcie KAŻDEJ sekwencji (all/scan/receive) — nigdy z pamięci ani
+        # z montażu (R#7+R2-3); nieustalony → '?' → pełny skan (kontrakt bramy).
+        serial = volume_serial(self._root)
         return dict(
             root=self._root,
-            volume=self._serial if self._serial is not None else "?",
+            volume=serial if serial is not None else "?",
             drive_letter=(Path(self._root).drive or None),
             tier=self.combo_tier.currentData(),
         )
+
+    def _serial_guard_ok(self, params):
+        """Guard mieszania serialu (F5R#3): skan `'?'` do bazy znającej REALNE wolumeny PODWOIŁBY
+        lokacje każdej znanej klatki (brama `(volume,path,mtime)` nie trafi, `UNIQUE(volume,path)`
+        wpuści drugą) → zadanie „Duplikaty" i perspektywa kłamią na masę. Warunek = konserwatywny
+        NADZBIÓR podwojenia (bez bypassa w v1 — decyzja jawna F5R2#3); czysty świat `'?'`
+        (nie-Windows) przechodzi. Krótkie WŁASNE połączenie (F5R2#4: baza już zmigrowana →
+        `db.connect`; finally zamyka — wiszący czytelnik WAL)."""
+        if params["volume"] != "?":
+            return True
+        con = db.connect(self._db_path)
+        try:
+            mixed = queries.has_real_volume_locations(con)
+        finally:
+            con.close()
+        if not mixed:
+            return True
+        msg = "wolumen nieustalony — skan wstrzymany (baza zna realne wolumeny)"
+        self.lbl_error.setText(f"BŁĄD — {msg}")
+        self.lbl_error.setVisible(True)
+        self.status_message.emit(msg)       # konwencja _on_failed: lbl_error + status (F5R2#5)
+        return False
+
+    def _start_scan_sequence(self, stage):
+        """Wspólna sekwencja startu skanujących ścieżek (F5R2#2 — JEDEN pomiar serialu, JEDEN dom
+        guardu): params → guard → begin → start."""
+        params = self._scan_params()
+        if not self._serial_guard_ok(params):
+            return
+        self._begin_run()
+        self._start_stage(stage, **params)
+
+    def _on_receive(self):
+        """„Przyjmij nowe" (F5, D-UX-5): cała sekwencja na ZAPAMIĘTANYM źródle; brak pamięci albo
+        katalog zniknął (plik-nie-katalog wpada w ten sam warunek) → pytanie o katalog + zapis."""
+        if self._db_path is None or self._thread is not None:
+            return
+        source = self._settings().value("pipeline/last_source", None)
+        if not source or not Path(source).is_dir():
+            source = QFileDialog.getExistingDirectory(self, "Wskaż katalog dostawy")
+            if not source:
+                return
+        self._remember_source(source)
+        self._set_root(source)
+        self._start_scan_sequence("all")
 
     def _begin_run(self):
         """Wyzeruj panel/pasek przed nowym przebiegiem (summary akumuluje per etap, więc czyścimy)."""
@@ -295,14 +383,12 @@ class PipelineView(QWidget):
     def _on_all(self):
         if not self._can_scan() or self._thread is not None:
             return
-        self._begin_run()
-        self._start_stage("all", **self._scan_params())
+        self._start_scan_sequence("all")
 
     def _on_scan(self):
         if not self._can_scan() or self._thread is not None:
             return
-        self._begin_run()
-        self._start_stage("scan", **self._scan_params())
+        self._start_scan_sequence("scan")
 
     def _on_group(self):
         if self._db_path is None or self._thread is not None:
@@ -450,6 +536,7 @@ class PipelineView(QWidget):
     def _refresh_buttons(self, running, cancellable):
         idle = not running
         has_db = self._db_path is not None
+        self.btn_receive.setEnabled(idle and has_db)   # katalog niepotrzebny — przynosi własny (F5)
         self.btn_pick.setEnabled(idle)
         self.combo_tier.setEnabled(idle)
         self.btn_all.setEnabled(idle and self._can_scan())

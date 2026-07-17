@@ -15,7 +15,8 @@ PKG = Path(horreum.__file__).parent
 # krok 3 scalenia) DOŁĄCZONY w kroku 3: warstwy widżetów, import Qt uprawniony. Rdzeń, read-model
 # (`queries.py`), silnik filtra/pivot (`filter_engine.py`/`pivot.py`) i progres (`progress.py`) zostają BEZ Qt.
 QT_WIDGET_FILES = {"app.py", "__main__.py", "pipeline.py", "grid.py", "projection_dialog.py",
-                   "facets.py"}   # F4: listwa facetów (FacetRail) — warstwa widżetów
+                   "facets.py",   # F4: listwa facetów (FacetRail) — warstwa widżetów
+                   "tasks.py"}    # F5: Porządki (TasksView) — warstwa widżetów
 
 
 def _imports_pyside6(path):

@@ -439,6 +439,54 @@ def review_frame_ids(con):
     ).fetchall()}
 
 
+# ============================================================ PORZĄDKI (F5, PLAN_ux_redesign §6)
+# Liczniki listy zadań `TasksView` — bieżący STAN tabel, nigdy `count(event)` (REVIEW-ZE-STANU,
+# memory horreum-review-queue-from-state). Zbiory dups/review REUŻYWANE z derywacji perspektyw
+# (SPOT — osobny literał COUNT byłby drugim właścicielem predykatu).
+
+
+def tasks_state(con):
+    """Liczniki Porządków ze STANU. `unresolved_lights`/`dup_frames` = len() zbiorów perspektyw
+    „Do przeglądu"/„Duplikaty" (JEDNA derywacja z gridem). `telescopes_unlabeled`/
+    `observatories_unnamed`: NULL = nienazwane (`label_telescope`/`label_observatory` odrzucają pusty
+    string, więc pustych stringów w bazie nie ma); tylko kanoniczne (`merged_into IS NULL`).
+    `xisf_frames` — informacyjny (writeback nagłówków pomija XISF, D-W2). `vanished_frames` = frame,
+    który MA lokacje, ale ŻADNEJ obecnej (guard EXISTS odróżnia „zniknięty" od „bez lokalizacji
+    w ogóle" — np. klatki z importu bez location). Zwraca dict sześciu liczników."""
+    telescopes_unlabeled = con.execute(
+        "SELECT COUNT(*) FROM telescope WHERE label IS NULL AND merged_into IS NULL"
+    ).fetchone()[0]
+    observatories_unnamed = con.execute(
+        "SELECT COUNT(*) FROM observatory WHERE name IS NULL AND merged_into IS NULL"
+    ).fetchone()[0]
+    xisf_frames = con.execute(
+        "SELECT COUNT(*) FROM frame WHERE filetype = 'xisf'"
+    ).fetchone()[0]
+    vanished_frames = con.execute(
+        "SELECT COUNT(*) FROM frame f "
+        "WHERE EXISTS (SELECT 1 FROM location l WHERE l.frame_id = f.id) "
+        "  AND NOT EXISTS (SELECT 1 FROM location l WHERE l.frame_id = f.id AND l.present = 1)"
+    ).fetchone()[0]
+    return {
+        "unresolved_lights": len(review_frame_ids(con)),
+        "dup_frames": len(dup_frame_ids(con)),
+        "telescopes_unlabeled": telescopes_unlabeled,
+        "observatories_unnamed": observatories_unnamed,
+        "xisf_frames": xisf_frames,
+        "vanished_frames": vanished_frames,
+    }
+
+
+def has_real_volume_locations(con):
+    """Czy baza zna JAKĄKOLWIEK lokację z realnym serialem (`volume != '?'`)? Guard mieszania
+    serialu (F5R#3): skan z serialem `'?'` do takiej bazy PODWOIŁBY lokacje znanych klatek (brama
+    `(volume,path,mtime)` nie trafi, `UNIQUE(volume,path)` wpuści drugą). `location.volume` jest
+    NOT NULL — porównanie bez pułapki trójwartościowej. Zwraca bool."""
+    return con.execute(
+        "SELECT 1 FROM location WHERE volume != '?' LIMIT 1"
+    ).fetchone() is not None
+
+
 def cards_pivot(con, frame_ids, keywords):
     """Wiersze cards dla pivota: literał `json_each` — listy id/keywordów jako TABLICE JSON (jeden param
     każda), bez dynamicznych `?` ani chunkowania (F4: plan po indeksie PK, ~53 ms/4000 klatek). ORDER BY

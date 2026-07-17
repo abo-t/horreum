@@ -69,6 +69,9 @@ STRUCT_NOISE = {"SIMPLE", "BITPIX", "NAXIS", "NAXIS1", "NAXIS2", "EXTEND", "BZER
                 "XBINNING", "YBINNING", "XPIXSZ", "YPIXSZ", "PCOUNT", "GCOUNT"}
 
 # Presety perspektyw (zaszyte): (nazwa, {filter_tree, group_by}). Kolumny domyślne dobierane z pokrycia.
+# PRESET_DUPS = stała współdzielona z TasksView (F5R#11 — klik w zadanie „Duplikaty" celuje w preset
+# po nazwie; rename presetu bez stałej cicho degradowałby klik do „nieznana perspektywa").
+PRESET_DUPS = "Duplikaty"
 PRESETS = {
     "Przegląd": {"filter": None, "group_by": None},
     "Kalibracja": {"filter": {"op": "OR", "conditions": [
@@ -76,7 +79,7 @@ PRESETS = {
         {"keyword": "IMAGETYP", "operator": "contains", "value": "flat"},
         {"keyword": "IMAGETYP", "operator": "contains", "value": "bias"},
     ]}, "group_by": "kind"},
-    "Duplikaty": {"filter": None, "group_by": None, "only_dups": True},
+    PRESET_DUPS: {"filter": None, "group_by": None, "only_dups": True},
     "Do przeglądu": {"filter": None, "group_by": None, "only_review": True},
 }
 
@@ -1181,6 +1184,22 @@ class FramesView(QWidget):
             self._columns = list(spec["columns"])
             self.fields.load(queries.keyword_facets(self.con), set(self._columns))
         self.refresh()
+
+    def apply_perspective(self, name):
+        """Ustaw perspektywę PO NAZWIE — publiczny seam dla wejść spoza widoku (F5: klik w zadanie
+        „Duplikaty" w Porządkach; R#14 — duplikatów NIE wyraża drzewo filtra, jedyna droga to
+        mechanizm perspektyw). Presety iterowane pierwsze w combo, więc kolizja nazwy z zapisaną
+        rozstrzyga się na preset. Pozycja już bieżąca → `_on_perspective()` wprost (klik w zadanie =
+        ZAWSZE czysta perspektywa, nie no-op nad facetami usera). Nieznana nazwa → status."""
+        for i in range(self.combo_persp.count()):
+            data = self.combo_persp.itemData(i)
+            if data and data[1] == name:
+                if i == self.combo_persp.currentIndex():
+                    self._on_perspective()
+                else:
+                    self.combo_persp.setCurrentIndex(i)   # currentIndexChanged → _on_perspective
+                return
+        self.status_message.emit(f"Nieznana perspektywa: {name}")
 
     def _load_saved(self, name):
         raw = self._settings().value("grid/perspectives", "{}")

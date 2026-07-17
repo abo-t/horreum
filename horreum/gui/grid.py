@@ -35,7 +35,8 @@ from PySide6.QtWidgets import (
 )
 
 from horreum import db, filter_engine, macro as macro_mod, naming, pivot as pivot_mod, repo, writeback
-from horreum.gui import queries
+from horreum.gui import facet_model, queries
+from horreum.gui.facets import FacetRail
 from horreum.gui.projection_dialog import ProjectionDialog
 
 # Kolumny bazowe: (nagłówek, klucz). Klucze `_telescope`/`_object`/`_dt_delta` = pochodne. `_dt_delta`
@@ -787,16 +788,24 @@ class SelectionBar(QFrame):
         self.criteria_label.setStyleSheet("color: #666;")
         self.btn_proj = QPushButton("Wydaj na stół…")
         self.btn_proj.setToolTip(self._PROJ_TIP)
+        # „× Wyczyść zbiór" (wiz F4 #3): jednoklikowe zdjęcie facetów + filtra — bez niego jedyną
+        # drogą było od-cyklowanie każdej wartości (preset „Przegląd" = no-op, gdy już wybrany).
+        self.btn_clear = QPushButton("× Wyczyść zbiór")
+        self.btn_clear.setToolTip("Zdejmij facety i filtr zaawansowany (perspektywa zostaje)")
         self.btn_macro = QPushButton("Popraw nagłówki…"); self.btn_macro.setCheckable(True)
         self.btn_rename = QPushButton("Uporządkuj nazwy plików…"); self.btn_rename.setCheckable(True)
         self.btn_save = QPushButton("★ Zapisz widok")
         lay.addWidget(self.count_label); lay.addSpacing(8)
         lay.addWidget(self.criteria_label, 1)
-        lay.addWidget(self.btn_proj); lay.addWidget(self.btn_macro)
+        lay.addWidget(self.btn_clear); lay.addWidget(self.btn_proj); lay.addWidget(self.btn_macro)
         lay.addWidget(self.btn_rename); lay.addWidget(self.btn_save)
 
     def set_criteria(self, text):
         self.criteria_label.set_full_text(text)
+
+    def set_clearable(self, on):
+        """Uczciwy disabled „× Wyczyść zbiór": aktywny TYLKO gdy jest co zdjąć (facety/filtr)."""
+        self.btn_clear.setEnabled(on)
 
     def set_have_frames(self, on):
         """Uczciwy disabled TYLKO realnej akcji na zbiorze (F3R#2): pusty zbiór gasi „Wydaj na stół…"
@@ -981,6 +990,11 @@ class FramesView(QWidget):
         self._db_path = queries.db_path_of(con)   # worker writebacku otwiera WŁASNE połączenie (per-wątek)
         self._now = now_fn or (lambda: datetime.now(timezone.utc).isoformat())
         self._filter_tree = None
+        # F4: stan listwy facetów (serializowany w perspektywie OSOBNO od `_filter_tree` — nota R2)
+        # + drzewo EFEKTYWNE compose(facety, advanced), ustawiane w refresh() (źródło paska kryteriów,
+        # F4R#8). Oba PRZED pierwszym refresh() (F4R2#7).
+        self._facet_state = facet_model.empty_state()
+        self._effective_tree = None
         self._only_dups = False
         self._only_review = False
         self._frame_ids = []      # frame_id widoczne w gridzie (cel makra) — aktualizowane w refresh()
@@ -1032,9 +1046,18 @@ class FramesView(QWidget):
         outer.addLayout(bar)
 
         splitter = QSplitter(Qt.Horizontal)
+        # F4: lewa kolumna = pionowy splitter FacetRail (góra, dominuje) / Pola (dół) — wybór kolumn
+        # to inna troska niż zawężanie zbioru (COHESION), oba zostają widoczne.
+        self.facet_rail = FacetRail()
+        self.facet_rail.facetsChanged.connect(self._on_facet_change)
         self.fields = FieldsPanel()
         self.fields.columnsChanged.connect(self._on_columns)
-        splitter.addWidget(self.fields)
+        left = QSplitter(Qt.Vertical)
+        left.addWidget(self.facet_rail)
+        left.addWidget(self.fields)
+        left.setStretchFactor(0, 3)
+        left.setStretchFactor(1, 1)
+        splitter.addWidget(left)
 
         right = QWidget()
         rv = QVBoxLayout(right); rv.setContentsMargins(0, 0, 0, 0)
@@ -1046,6 +1069,7 @@ class FramesView(QWidget):
         self.sel_bar = SelectionBar()
         self.count_label = self.sel_bar.count_label      # TEN SAM QLabel (F3R#5) — `_update_count` bez zmian
         self.sel_bar.btn_proj.clicked.connect(self._open_projection)
+        self.sel_bar.btn_clear.clicked.connect(self._on_clear_selection)
         self.sel_bar.btn_save.clicked.connect(self._save_perspective)
         self.sel_bar.btn_macro.clicked.connect(lambda: self._toggle_panel("macro"))
         self.sel_bar.btn_rename.clicked.connect(lambda: self._toggle_panel("rename"))
@@ -1142,7 +1166,12 @@ class FramesView(QWidget):
         self._only_dups = bool(spec.get("only_dups"))
         self._only_review = bool(spec.get("only_review"))
         self._filter_tree = spec.get("filter")
-        self.filter_panel.set_tree(self._filter_tree)   # panel odbija filtr perspektywy (P3-3)
+        # F4R#2: stan facetów resetowany dla KAŻDEJ perspektywy (preset ORAZ zapisana) — perspektywa
+        # definiuje CAŁY zbiór; stara zapisana bez klucza "facets" MUSI zerować stan, inaczej facety
+        # poprzedniego wyboru wyciekają w nowy zbiór. Rail przeładuje refresh() (set_data).
+        self._facet_state = spec.get("facets") or facet_model.empty_state()
+        self.filter_panel.set_tree(self._filter_tree)   # panel odbija filtr perspektywy (P3-3);
+        # set_tree dostaje TYLKO advanced — facety NIGDY nie idą w płaski panel (nota R2, P3-3 wyżej)
         gb = spec.get("group_by")
         idx = self.combo_group.findData(gb)
         self.combo_group.blockSignals(True)
@@ -1174,9 +1203,20 @@ class FramesView(QWidget):
             "filter": self._filter_tree, "columns": self._columns,
             "group_by": self.combo_group.currentData(),
             "only_dups": self._only_dups, "only_review": self._only_review,
+            "facets": self._facet_state,   # OSOBNO od "filter" (nota R2) — set_tree nigdy ich nie widzi
         }
         self._settings().setValue("grid/perspectives", json.dumps(store))
         self._load_facets()
+        # F4R2#6 (pre-existing, ścieżka tykana przez F4): rebuild combo pod blockSignals zostawiał
+        # indeks 0 („Przegląd") przy żywym stanie świeżo zapisanej perspektywy — etykieta kłamała.
+        # Re-select zapisanej, nadal bez emisji (_on_perspective nie ma czego przeładowywać:
+        # stan == właśnie zapisany).
+        self.combo_persp.blockSignals(True)
+        for i in range(self.combo_persp.count()):
+            if self.combo_persp.itemData(i) == ("saved", name):
+                self.combo_persp.setCurrentIndex(i)
+                break
+        self.combo_persp.blockSignals(False)
         self.status_message.emit(f"Zapisano perspektywę „{name}”")
 
     def _open_projection(self):
@@ -1221,9 +1261,10 @@ class FramesView(QWidget):
                 and self.panel_stack.currentWidget() is self.rename_bar)
 
     def _describe_criteria(self):
-        """Opis zbioru słowami do paska: drzewo filtra (`filter_engine.describe`) + flagi perspektyw
-        spoza silnika (`only_dups`/`only_review` — grid.py PRESETS), łączone „ · "."""
-        parts = [filter_engine.describe(self._filter_tree)]
+        """Opis zbioru słowami do paska: drzewo EFEKTYWNE (facety + advanced — F4R#8, samo
+        `_filter_tree` nie widzi facetów) + flagi perspektyw spoza silnika (`only_dups`/`only_review`
+        — grid.py PRESETS; drzewo ich nie koduje, F4R2#7), łączone „ · "."""
+        parts = [filter_engine.describe(self._effective_tree)]
         if self._only_dups:
             parts.append("tylko duplikaty")
         if self._only_review:
@@ -1243,19 +1284,41 @@ class FramesView(QWidget):
         self.model.set_group_by(self.combo_group.currentData())
 
     # ---- odczyt → widok ----
+    def _memo_leaf_fns(self):
+        """Memoizowane akcesory silnika na czas JEDNEGO refreshu (F4R2#4): sibling-sety facetów
+        re-używają tych samych liści, więc cache `(kind,kw,p1,p2)→set` zwija 5N wywołań liści do N.
+        Jedna migawka DB per refresh — cache umiera z wyjściem z refresh() (źródło prawdy = baza)."""
+        leaf_cache = {}
+        universe_cache = []
+
+        def leaf_fn(k, kw, p1, p2):
+            key = (k, kw, p1, p2)
+            if key not in leaf_cache:
+                leaf_cache[key] = queries.leaf_frame_ids(self.con, k, kw, p1, p2)
+            return leaf_cache[key]
+
+        def universe_fn():
+            if not universe_cache:
+                universe_cache.append(queries.all_frame_ids(self.con))
+            return universe_cache[0]
+
+        return leaf_fn, universe_fn
+
     def refresh(self):
-        """Silnik filtra → zbiór frame_id → base_rows + pivot → model. Źródło prawdy = baza (bez cache)."""
-        frame_ids = filter_engine.run(
-            self._filter_tree,
-            leaf_fn=lambda k, kw, p1, p2: queries.leaf_frame_ids(self.con, k, kw, p1, p2),
-            universe_fn=lambda: queries.all_frame_ids(self.con),
-        )
+        """Silnik filtra → zbiór frame_id → base_rows + pivot → model. Źródło prawdy = baza (bez
+        cache między refreshami). F4: drzewo EFEKTYWNE = compose(stan facetów, drzewo panelu);
+        trimy dups/review SETAMI literałowymi PRZED base_rows — JEDNA derywacja trimu dla zbioru
+        głównego i sibling-setów listwy (SPOT, F4R2#2); liczniki listwy per sibling-set (F4R#1)."""
+        leaf_fn, universe_fn = self._memo_leaf_fns()
+        self._effective_tree = facet_model.compose(self._facet_state, self._filter_tree)
+        frame_ids = filter_engine.run(self._effective_tree, leaf_fn=leaf_fn, universe_fn=universe_fn)
+        dup_ids = queries.dup_frame_ids(self.con) if self._only_dups else None
+        review_ids = queries.review_frame_ids(self.con) if self._only_review else None
+        if dup_ids is not None:
+            frame_ids &= dup_ids
+        if review_ids is not None:
+            frame_ids &= review_ids
         base = [_derive(r) for r in queries.base_rows(self.con, list(frame_ids))]
-        if self._only_dups:
-            base = [b for b in base if (b.get("n_present") or 0) > 1]
-        if self._only_review:
-            base = [b for b in base
-                    if b.get("object_canon") is None and b.get("kind") in ("light", "master_light")]
         base_ids = [b["frame_id"] for b in base]
         self._frame_ids = base_ids     # cel makra = to, co WIDAĆ (po filtrach dups/review), doktryna §5
         keywords = list(self._columns)
@@ -1271,9 +1334,61 @@ class FramesView(QWidget):
         self.rename_bar.set_actions_enabled(bool(base_ids))  # bliźniaczo dla renamu
         self.sel_bar.set_have_frames(bool(base_ids))         # pusty zbiór gasi „Wydaj na stół…" (F3R#2)
         self.sel_bar.set_criteria(self._describe_criteria()) # kryteria zbioru SŁOWAMI (F3)
+        self.sel_bar.set_clearable(bool(self._facet_state) or self._filter_tree is not None)
+        self._reload_facet_rail(leaf_fn, universe_fn, dup_ids, review_ids, base_ids)   # listwa (F4)
         self._sync_staging_mutex()                           # staging jednej klingi wyłącza „Do stagingu" drugiej
         self._refresh_date_echo()                            # panel daty odbija świeże widoczne (echo warunkowe)
         self.status_message.emit(f"Grid: {n} klatek, {len(keywords)} kolumn-keywordów")
+
+    def _reload_facet_rail(self, leaf_fn, universe_fn, dup_ids, review_ids, current_ids):
+        """Liczniki listwy facetów per SIBLING-SET (F4R#1): zbiór facetu F = compose bez CAŁEJ własnej
+        grupy F (in+ex) — liczniki na pełnym zbiorze samo-zawężałyby facet i OR-wewnątrz byłby
+        nieosiągalny. Facet BEZ aktywnego wyboru → sibling == zbiór bieżący (już policzony;
+        D-UX-3(a)). Trimy dups/review = przecięcie z gotowymi setami (F4R2#2, bez base_rows)."""
+        counts = {}
+        for facet in facet_model.FACETS:
+            if facet not in self._facet_state:
+                ids = current_ids
+            else:
+                tree = facet_model.compose(facet_model.sibling_state(self._facet_state, facet),
+                                           self._filter_tree)
+                sib = filter_engine.run(tree, leaf_fn=leaf_fn, universe_fn=universe_fn)
+                if dup_ids is not None:
+                    sib &= dup_ids
+                if review_ids is not None:
+                    sib &= review_ids
+                ids = list(sib)
+            counts[facet] = self._facet_counts(facet, ids)
+        self.facet_rail.set_data(counts, self._facet_state)
+
+    def _facet_counts(self, facet, ids):
+        """Kubełki jednego facetu → list[(value, label, n)] (kontrakt `FacetRail.set_data`).
+        Etykieta teleskopu = label→canon fallback (wzorzec `_tel_label`); filtr/rodzaj/noc są
+        swoją własną etykietą."""
+        if facet == "object":
+            return [(r["id"], r["canon"], r["n"]) for r in queries.facet_objects(self.con, ids)]
+        if facet == "filter":
+            return [(r["filter_canon"], r["filter_canon"], r["n"])
+                    for r in queries.facet_filters(self.con, ids)]
+        if facet == "kind":
+            return [(r["kind"], r["kind"], r["n"]) for r in queries.facet_kinds(self.con, ids)]
+        if facet == "telescope":
+            return [(r["id"], r["label"] or r["telescop_canon"], r["n"])
+                    for r in queries.facet_telescopes(self.con, ids)]
+        return [(r["night"], r["night"], r["n"]) for r in queries.facet_nights(self.con, ids)]
+
+    def _on_facet_change(self, state):
+        """Klik w listwie (cykl none→in→ex→none policzony w `facet_model.cycle`) → nowy stan →
+        przeskładanie zbioru. Stan JEST własnością FramesView (widżet emituje wynik)."""
+        self._facet_state = state
+        self.refresh()
+
+    def _on_clear_selection(self):
+        """„× Wyczyść zbiór" (wiz F4 #3): zdejmij facety + filtr advanced JEDNYM klikiem. Flagi
+        perspektywy (`only_dups`/`only_review`) zostają — są własnością perspektywy, nie filtra.
+        `_clear` panelu emituje `filterApplied(None)` → `_on_filter` → jeden refresh."""
+        self._facet_state = facet_model.empty_state()
+        self.filter_panel._clear()
 
     def _on_selection_changed(self):
         self._update_count()

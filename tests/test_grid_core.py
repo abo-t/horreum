@@ -7,7 +7,7 @@ Wstawianie wierszy surowym SQL dozwolone w `tests/` (meta-test AST skanuje tylko
 import pytest
 
 from horreum import db, filter_engine, pivot
-from horreum.gui import queries
+from horreum.gui import facet_model, queries
 
 NOW = "2026-07-03T12:00:00"
 
@@ -289,3 +289,233 @@ def test_describe_nieznany_op_fallback():
     with pytest.raises(ValueError):
         filter_engine.run({"keyword": "A", "operator": "regex", "value": "x"},
                           leaf_fn=lambda *a: set(), universe_fn=lambda: set())
+
+
+# ============================================================ FACETY (F4 — PLAN_ux_redesign §5)
+# Liście relacyjne (rel_*), składacz/cykl (facet_model), describe facetów, literały licznikowe,
+# sety trimów. Przypadki brzegowe nocy: przed/na granicy południa, ułamek 7-cyfrowy, klatka bez header.
+
+
+@pytest.fixture
+def facet_db(tmp_path):
+    """Baza facetów: 2 obiekty, 3 teleskopy (rc8bis SCALONY pod RC8), 3 configi, noce z granicami.
+      f1: M51,     Ha,   config RC8,        2025-08-14T22:00:00.123        → noc 2025-08-14; 2 OBECNE lokacje (dup)
+      f2: NGC7000, OIII, config rc8bis(→RC8) 2025-08-15T11:59:59.999       → noc 2025-08-14 (przed południem)
+      f3: NGC7000, Ha,   config ED80,       2025-08-15T12:00:00            → noc 2025-08-15 (granica WŁĄCZNIE)
+      f4: master_flat XISF BEZ header/obiektu/configu (przeżywa ⊖ nocy — F4R#3)
+      f5: M51,     filter NULL, config RC8, 2025-08-14T23:30:00.1234567    → noc 2025-08-14 (ułamek 7 cyfr)
+      f6: light BEZ obiektu/header (kolejka review — `review_frame_ids`)."""
+    con = db.open_db(str(tmp_path / "facet.db"))
+    con.executemany("INSERT INTO object (id, canon, catalog) VALUES (?,?,?)",
+                    [(1, "M51", "Messier"), (2, "NGC7000", "NGC")])
+    con.executemany(
+        "INSERT INTO telescope (id, telescop_canon, label, status, merged_into, created_at) "
+        "VALUES (?,?,?,?,?,?)",
+        [(1, "RC8", "RC8 8cala", "approved", None, NOW),
+         (2, "rc8bis", None, "proposed", 1, NOW),
+         (3, "ED80", None, "proposed", None, NOW)])
+    con.execute("INSERT INTO camera (id, model_canon, created_at) VALUES (1, 'ASI2600MM', ?)", (NOW,))
+    con.executemany(
+        "INSERT INTO config (id, telescope_id, camera_id, status, created_at) VALUES (?,?,?,?,?)",
+        [(1, 1, 1, "proposed", NOW), (2, 2, 1, "proposed", NOW), (3, 3, 1, "proposed", NOW)])
+    con.executemany(
+        "INSERT INTO frame (id, sha1_data, kind, filetype, config_id, object_id, filter_canon, "
+        "first_seen_at) VALUES (?,?,?,?,?,?,?,?)",
+        [(1, "f1", "light", "fits", 1, 1, "Ha", NOW),
+         (2, "f2", "light", "fits", 2, 2, "OIII", NOW),
+         (3, "f3", "light", "fits", 3, 2, "Ha", NOW),
+         (4, "f4", "master_flat", "xisf", None, None, None, NOW),
+         (5, "f5", "light", "fits", 1, 1, None, NOW),
+         (6, "f6", "light", "fits", 1, None, None, NOW)])
+    con.executemany(
+        "INSERT INTO header (frame_id, raw_json, date_obs) VALUES (?,?,?)",
+        [(1, "{}", "2025-08-14T22:00:00.123"),
+         (2, "{}", "2025-08-15T11:59:59.999"),
+         (3, "{}", "2025-08-15T12:00:00"),
+         (5, "{}", "2025-08-14T23:30:00.1234567")])
+    con.executemany(
+        "INSERT INTO location (frame_id, volume, path, present) VALUES (?,?,?,?)",
+        [(1, "V", "/a/1.fits", 1), (1, "V", "/b/1c.fits", 1),
+         (2, "V", "/a/2.fits", 1), (3, "V", "/a/3.fits", 1),
+         (4, "V", "/a/4.xisf", 1), (5, "V", "/a/5.fits", 0),
+         (6, "V", "/a/6.fits", 1)])
+    con.commit()
+    yield con
+    con.close()
+
+
+# ---------- liście relacyjne (rel_*) ----------
+
+def test_rel_object(facet_db):
+    assert _run(facet_db, {"facet": "object", "value": 1}) == {1, 5}
+    assert _run(facet_db, {"facet": "object", "value": 2}) == {2, 3}
+
+
+def test_rel_filter(facet_db):
+    assert _run(facet_db, {"facet": "filter", "value": "Ha"}) == {1, 3}
+
+
+def test_rel_kind(facet_db):
+    assert _run(facet_db, {"facet": "kind", "value": "master_flat"}) == {4}
+
+
+def test_rel_telescope_roluje_scalonego_pod_kanon(facet_db):
+    """f2 stoi na configu SCALONEGO rc8bis → roluje się pod kanon RC8 (telescope_canonical)."""
+    assert _run(facet_db, {"facet": "telescope", "value": 1}) == {1, 2, 5, 6}
+    assert _run(facet_db, {"facet": "telescope", "value": 3}) == {3}
+
+
+def test_rel_night_granice_poludnia(facet_db):
+    """Noc D = [D 12:00, D+1 12:00): 11:59:59.999 następnego dnia WCHODZI (przed południem),
+    12:00:00 zaczyna nową noc (granica włącznie); ułamek 7-cyfrowy porównuje się leksykalnie."""
+    assert _run(facet_db, {"facet": "night", "value": "2025-08-14"}) == {1, 2, 5}
+    assert _run(facet_db, {"facet": "night", "value": "2025-08-15"}) == {3}
+
+
+def test_not_night_zachowuje_klatki_bez_date_obs(facet_db):
+    """⊖ nocy (F4R#3): klatka BEZ header/date_obs (f4 XISF, f6) PRZEŻYWA wykluczenie każdej nocy —
+    „nieznana data ≠ ta noc" (uniwersum − zakres; konsekwencja algebry jak NOT(pusta-grupa)=∅)."""
+    tree = {"op": "NOT", "conditions": [{"facet": "night", "value": "2025-08-14"}]}
+    assert _run(facet_db, tree) == {3, 4, 6}
+
+
+def test_facet_label_czysta_prezentacja(facet_db):
+    """`label` nie wpływa na eval (perspektywa ze stale-label daje ten sam zbiór)."""
+    bez = _run(facet_db, {"facet": "object", "value": 1})
+    z = _run(facet_db, {"facet": "object", "value": 1, "label": "STARA-NAZWA"})
+    assert bez == z == {1, 5}
+
+
+def test_nieznany_facet_i_zla_noc(facet_db):
+    with pytest.raises(ValueError, match="facet"):
+        _run(facet_db, {"facet": "tag", "value": "x"})
+    for zla in ("2025-8-4", "sroda", None, "2025-08-14T00:00:00"):
+        with pytest.raises(ValueError, match="noc"):
+            _run(facet_db, {"facet": "night", "value": zla})
+
+
+def test_night_bounds_przelom_miesiaca():
+    assert filter_engine.night_bounds("2025-08-31") == ("2025-08-31T12:00:00", "2025-09-01T12:00:00")
+
+
+# ---------- facet_model: cykl / sibling / compose ----------
+
+def test_cycle_none_in_ex_none():
+    s0 = facet_model.empty_state()
+    s1 = facet_model.cycle(s0, "kind", "light", "light")
+    assert s1 == {"kind": {"in": [["light", "light"]]}}
+    assert facet_model.selection(s1, "kind", "light") == "in"
+    s2 = facet_model.cycle(s1, "kind", "light", "light")
+    assert s2 == {"kind": {"ex": [["light", "light"]]}}   # in→ex zachowuje label
+    assert facet_model.selection(s2, "kind", "light") == "ex"
+    s3 = facet_model.cycle(s2, "kind", "light", "light")
+    assert s3 == {}                                        # normalizacja: pusta grupa znika
+    assert s0 == {}                                        # wejścia niemutowane
+
+
+def test_cycle_nieznany_facet():
+    with pytest.raises(ValueError, match="facet"):
+        facet_model.cycle({}, "tag", "x", "x")
+
+
+def test_sibling_state_usuwa_cala_wlasna_grupe():
+    s = {"object": {"in": [[1, "M51"]], "ex": [[2, "NGC7000"]]}, "kind": {"in": [["light", "light"]]}}
+    assert facet_model.sibling_state(s, "object") == {"kind": {"in": [["light", "light"]]}}
+    assert facet_model.sibling_state(s, "night") == s      # brak grupy → stan bez zmian
+
+
+def test_compose_pusty_i_advanced():
+    adv = {"keyword": "EXPTIME", "operator": "exists"}
+    assert facet_model.compose({}, None) is None
+    assert facet_model.compose({}, adv) is adv             # advanced NIEPRZEZROCZYSTE (identyczność)
+
+
+def test_compose_jedno_dziecko_bez_and():
+    s = {"object": {"in": [[1, "M51"]]}}
+    assert facet_model.compose(s, None) == {"facet": "object", "value": 1, "label": "M51"}
+
+
+def test_compose_or_wewnatrz_and_miedzy_not_wykluczen(facet_db):
+    """AND( OR(in-wartości facetu), NOT(ex)…, advanced ) — i wynik na realnej bazie."""
+    s = {"object": {"in": [[1, "M51"], [2, "NGC7000"]]},
+         "night": {"ex": [["2025-08-14", "2025-08-14"]]}}
+    adv = {"keyword": "EXPTIME", "operator": "exists"}
+    tree = facet_model.compose(s, adv)
+    assert tree["op"] == "AND"
+    assert tree["conditions"][0] == {"op": "OR", "conditions": [
+        {"facet": "object", "value": 1, "label": "M51"},
+        {"facet": "object", "value": 2, "label": "NGC7000"}]}
+    assert tree["conditions"][1] == {"op": "NOT", "conditions": [
+        {"facet": "night", "value": "2025-08-14", "label": "2025-08-14"}]}
+    assert tree["conditions"][2] is adv                    # advanced OSTATNIE, nietknięte
+    # eval bez advanced: obiekty {1,2,3,5} − noc-14 {1,2,5} = {3}
+    assert _run(facet_db, facet_model.compose(s, None)) == {3}
+
+
+# ---------- describe facetów ----------
+
+def test_describe_facet_lisc():
+    d = filter_engine.describe
+    assert d({"facet": "object", "value": 1, "label": "M51"}) == "Obiekt: M51"
+    assert d({"facet": "object", "value": 1}) == "Obiekt: 1"          # bez label → value
+    assert d({"facet": "night", "value": "2025-08-14"}) == "Noc: 2025-08-14"
+    # F4R#7: facet-liść NIE wpada w fallback pustej grupy
+    assert d({"facet": "kind", "value": "light"}) != "wszystkie klatki"
+    not_tree = {"op": "NOT", "conditions": [{"facet": "night", "value": "2025-08-14"}]}
+    assert d(not_tree) == "poza (Noc: 2025-08-14)"
+
+
+# ---------- literały licznikowe + sety trimów ----------
+
+def test_facet_objects_kubelki_order_canon(facet_db):
+    ids = list(queries.all_frame_ids(facet_db))
+    rows = [(r["id"], r["canon"], r["n"]) for r in queries.facet_objects(facet_db, ids)]
+    assert rows == [(1, "M51", 2), (2, "NGC7000", 2)]      # f6 bez obiektu POZA (JOIN)
+
+
+def test_facet_filters_null_wypada(facet_db):
+    ids = list(queries.all_frame_ids(facet_db))
+    rows = [(r["filter_canon"], r["n"]) for r in queries.facet_filters(facet_db, ids)]
+    assert rows == [("Ha", 2), ("OIII", 1)]                # NULL (f4,f5,f6) bez fantomowego kubełka
+
+
+def test_facet_kinds(facet_db):
+    ids = list(queries.all_frame_ids(facet_db))
+    rows = [(r["kind"], r["n"]) for r in queries.facet_kinds(facet_db, ids)]
+    assert rows == [("light", 5), ("master_flat", 1)]
+
+
+def test_facet_telescopes_rollup(facet_db):
+    ids = list(queries.all_frame_ids(facet_db))
+    rows = {r["id"]: (r["label"], r["telescop_canon"], r["n"])
+            for r in queries.facet_telescopes(facet_db, ids)}
+    assert rows[1] == ("RC8 8cala", "RC8", 4)              # f2 spod scalonego rc8bis pod kanonem
+    assert rows[3] == (None, "ED80", 1)                    # label NULL → etykietę składa wołający
+    assert 2 not in rows                                   # scalony NIE jest osobnym kubełkiem
+
+
+def test_facet_nights_order_desc(facet_db):
+    ids = list(queries.all_frame_ids(facet_db))
+    rows = [(r["night"], r["n"]) for r in queries.facet_nights(facet_db, ids)]
+    assert rows == [("2025-08-15", 1), ("2025-08-14", 3)]  # najnowsze pierwsze; bez header POZA
+
+
+def test_facet_liczniki_na_podzbiorze_json_each(facet_db):
+    rows = [(r["id"], r["n"]) for r in queries.facet_objects(facet_db, [1, 3])]
+    assert rows == [(1, 1), (2, 1)]                        # json_each honoruje podzbiór
+
+
+def test_property_kubelek_nocy_rowna_sie_liscowi(facet_db):
+    """WŁASNOŚĆ (spójność dwóch derywacji nocy): dla KAŻDEGO kubełka `facet_nights`
+    count(rel_night(D)) == n — etykieta `date(−12h)` i liść string-range znaczą to samo."""
+    ids = list(queries.all_frame_ids(facet_db))
+    buckets = queries.facet_nights(facet_db, ids)
+    assert buckets                                          # fixture ma noce (test nie jest pusty)
+    for r in buckets:
+        assert len(_run(facet_db, {"facet": "night", "value": r["night"]})) == r["n"]
+
+
+def test_dup_i_review_sets(facet_db):
+    """Sety trimów (F4R2#2): JEDNA derywacja dla zbioru głównego i sibling-setów (SPOT)."""
+    assert queries.dup_frame_ids(facet_db) == {1}           # 2 OBECNE lokacje; present=0 się nie liczy
+    assert queries.review_frame_ids(facet_db) == {6}        # light bez obiektu; master_flat f4 POZA

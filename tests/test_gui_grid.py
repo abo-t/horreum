@@ -280,6 +280,139 @@ def test_view_grupowanie(view):
     assert {g["_group"] for g in groups} == {"light", "master_flat"}
 
 
+# ---------- FramesView: listwa facetów (F4 — PLAN_ux_redesign §5) ----------
+# Seed bez obiektów/configów/nocy → wehikułem testów jest facet Rodzaj (light×3, master_flat×1).
+
+def _rail_item(view, facet, value):
+    """Wiersz listwy dla wartości facetu (po danych UserRole, nie tekście — tekst niesie ✓/⊖/n)."""
+    lw = view.facet_rail._lists[facet]
+    for i in range(lw.count()):
+        it = lw.item(i)
+        if it.data(Qt.UserRole)[1] == value:
+            return it
+    raise AssertionError(f"brak wartości {value!r} w facecie {facet}")
+
+
+def test_facet_klik_cykluje_none_in_ex_none(view):
+    """Cykl kliku (F4): zawęź → wyklucz → zdejmij, zbiór odbija każdy krok (`itemClicked` handler)."""
+    view.facet_rail._on_item_clicked(_rail_item(view, "kind", "light"))
+    assert view._facet_state == {"kind": {"in": [["light", "light"]]}}
+    assert view.count_label.text() == "3 klatek"                    # f1,f2,f4
+    view.facet_rail._on_item_clicked(_rail_item(view, "kind", "light"))
+    assert view._facet_state == {"kind": {"ex": [["light", "light"]]}}
+    assert view.count_label.text() == "1 klatek"                    # uniwersum − lighty = f3
+    view.facet_rail._on_item_clicked(_rail_item(view, "kind", "light"))
+    assert view._facet_state == {}
+    assert view.count_label.text() == "4 klatek"
+
+
+def test_facet_sibling_lista_pokazuje_sasiadow(view):
+    """F4R#1: po zawężeniu do light lista Rodzaju NADAL pokazuje master_flat (sibling-set — inaczej
+    OR-wewnątrz byłby nieosiągalny); aktywna wartość znaczona ✓."""
+    view.facet_rail._on_item_clicked(_rail_item(view, "kind", "light"))
+    lw = view.facet_rail._lists["kind"]
+    values = {lw.item(i).data(Qt.UserRole)[1] for i in range(lw.count())}
+    assert values == {"light", "master_flat"}
+    assert _rail_item(view, "kind", "light").text().startswith("✓ ")
+    assert _rail_item(view, "kind", "master_flat").text() == "master_flat (1)"
+
+
+def test_facet_ex_render_ukryte(view):
+    """F4R2#1: „(n)" przy ⊖ znaczy „ile wróci po zdjęciu" — render to nazywa, nie udaje wkładu."""
+    view.facet_rail._on_item_clicked(_rail_item(view, "kind", "light"))
+    view.facet_rail._on_item_clicked(_rail_item(view, "kind", "light"))   # in → ex
+    assert _rail_item(view, "kind", "light").text() == "⊖ light (+3 ukryte)"
+
+
+def test_facet_pin_aktywnego_poza_siblingiem(view):
+    """Aktywny wybór ZAWSZE renderowany: ⊖ master_flat + advanced GAIN-istnieje odcina master_flat
+    z sibling-setu (XISF bez cards) → wiersz zostaje PINowany (niewidzialny filtr = UI kłamie)."""
+    view.facet_rail._on_item_clicked(_rail_item(view, "kind", "master_flat"))
+    view.facet_rail._on_item_clicked(_rail_item(view, "kind", "master_flat"))  # in → ex
+    view.filter_panel.add_row()
+    view.filter_panel._rows[0]["kw"].setCurrentText("GAIN")
+    view.filter_panel._rows[0]["op"].setCurrentIndex(8)   # 'istnieje'
+    view.filter_panel._apply()
+    assert view.count_label.text() == "2 klatek"          # f1,f2 (GAIN) − master_flat i tak poza
+    assert _rail_item(view, "kind", "master_flat").text() == "⊖ master_flat (+0 ukryte)"
+
+
+def test_facet_kryteria_paska(view):
+    """F4R#8: pasek zbioru opisuje drzewo EFEKTYWNE — facet wchodzi w kryteria słowami."""
+    view.facet_rail._on_item_clicked(_rail_item(view, "kind", "light"))
+    assert "Rodzaj: light" in view.sel_bar.criteria_label._full
+
+
+def test_facet_wyczysc_zbior(view):
+    """Wiz F4 #3: „× Wyczyść zbiór" zdejmuje facety + advanced JEDNYM klikiem; uczciwy disabled,
+    gdy nie ma co zdjąć (preset „Przegląd" jest no-opem, gdy już wybrany — to była jedyna droga)."""
+    assert not view.sel_bar.btn_clear.isEnabled()          # nic do czyszczenia
+    view.facet_rail._on_item_clicked(_rail_item(view, "kind", "light"))
+    view.filter_panel._rows[0]["kw"].setCurrentText("GAIN")
+    view.filter_panel._rows[0]["op"].setCurrentIndex(8)    # 'istnieje'
+    view.filter_panel._apply()
+    assert view.count_label.text() == "2 klatek"           # lighty ∩ GAIN
+    assert view.sel_bar.btn_clear.isEnabled()
+    view.sel_bar.btn_clear.click()
+    assert view._facet_state == {} and view._filter_tree is None
+    assert view.count_label.text() == "4 klatek"
+    assert not view.sel_bar.btn_clear.isEnabled()
+
+
+def test_facet_preset_zeruje_stan(view):
+    """F4R#2: perspektywa definiuje CAŁY zbiór — wczytanie presetu bez `facets` zdejmuje facety."""
+    view.facet_rail._on_item_clicked(_rail_item(view, "kind", "light"))
+    assert view._facet_state
+    idx = view.combo_persp.findText("Przegląd")
+    view.combo_persp.setCurrentIndex(idx) if idx != view.combo_persp.currentIndex() else view._on_perspective()
+    assert view._facet_state == {}
+    assert view.count_label.text() == "4 klatek"
+
+
+@pytest.fixture
+def view_settings(qapp, gcon, monkeypatch):
+    """FramesView z QSettings na SŁOWNIKU (round-trip perspektyw wymaga realnego zapisu/odczytu,
+    nie no-op jak w `view`; nadal zero dotykania rejestru usera)."""
+    from PySide6.QtCore import QSettings
+    store = {}
+    monkeypatch.setattr(QSettings, "value", lambda self, k, d=None: store.get(k, d))
+    monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: store.__setitem__(k, v))
+    from horreum.gui.grid import FramesView
+    v = FramesView(gcon, now_fn=None)
+    v._writeback_async = False
+    yield v
+
+
+def test_facet_roundtrip_perspektywy_zlozonej(view_settings, monkeypatch):
+    """Round-trip perspektywy ZŁOŻONEJ (nota R2): facety→rail, advanced→panel; combo odbija zapis
+    (F4R2#6); „Zastosuj" panelu NIE kasuje facetów; stara perspektywa nadpisuje stan w całości."""
+    from PySide6.QtWidgets import QInputDialog
+    v = view_settings
+    v.facet_rail._on_item_clicked(_rail_item(v, "kind", "light"))
+    v._filter_tree = {"keyword": "GAIN", "operator": "exists"}
+    v.filter_panel.set_tree(v._filter_tree)
+    v.refresh()
+    assert v.count_label.text() == "2 klatek"             # lighty ∩ GAIN = f1,f2
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("Zlozona", True)))
+    v._save_perspective()
+    assert v.combo_persp.currentData() == ("saved", "Zlozona")   # F4R2#6: etykieta nie kłamie
+    # odejdź na preset (F4R#2: preset zeruje facety)…
+    v.combo_persp.setCurrentIndex(v.combo_persp.findText("Przegląd"))
+    assert v._facet_state == {}
+    assert v.count_label.text() == "4 klatek"
+    # …i wróć do zapisanej: facety wracają do raila, advanced do panelu
+    for i in range(v.combo_persp.count()):
+        if v.combo_persp.itemData(i) == ("saved", "Zlozona"):
+            v.combo_persp.setCurrentIndex(i)
+            break
+    assert v._facet_state == {"kind": {"in": [["light", "light"]]}}
+    assert v.count_label.text() == "2 klatek"
+    assert _rail_item(v, "kind", "light").text().startswith("✓ ")
+    v.filter_panel._apply()                               # „Zastosuj" panelu — facety przeżywają
+    assert v._facet_state == {"kind": {"in": [["light", "light"]]}}
+    assert v.count_label.text() == "2 klatek"
+
+
 # ---------- FramesView: makro / writeback (KROK 4) ----------
 
 @pytest.fixture

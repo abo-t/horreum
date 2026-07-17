@@ -14,6 +14,15 @@ Drzewo (JSON-serializowalne):
   (F1 redesignu, PLAN_ux_redesign §2). NOT z ≠1 dzieckiem → ValueError (EXPECT). Zagnieżdżenia
   legalne (NOT nad grupą, NOT(NOT(x)) == x). NOT(pusta-grupa) = ∅ — pusta grupa to uniwersum,
   różnica daje zbiór pusty (konsekwencja algebry, nie przypadek do łatania). Zero nowego SQL.
+- facet:   {"facet": "object"|"filter"|"kind"|"telescope"|"night", "value": ..., "label": opc.} —
+  liść RELACYJNY (F4, PLAN_ux_redesign §5): mapowany na `rel_*` w dispatchu `leaf_frame_ids`
+  (object→object_id, filter→filter_canon, kind→kind, telescope→canon_id kanonicznego teleskopu,
+  night→zakres na header.date_obs). `label` = CZYSTA prezentacja (describe); `_eval` ignoruje.
+  Rozpoznawany PRZED warunkiem (nie ma `operator`) WŁASNĄ gałęzią — nigdy nie spada do
+  `_eval_condition` (`validate_keyword` nie widzi None). Nieznany facet → ValueError (EXPECT).
+  Noc: `[<D>T12:00:00, <D+1>T12:00:00)` — górna granica ZAWSZE pełnym datetime, nigdy `<=` z gołą
+  datą [skill: sqlite-bare-date-upper-bound-trap]; NOT(noc) ZOSTAWIA klatki bez date_obs
+  („nieznana data ≠ ta noc" — konsekwencja algebry, jak NOT(pusta-grupa)=∅).
 
 Operatory: eq ne gt lt ge le contains startswith exists not_exists (regex POMINIĘTY w v1 — D-F).
 - gt/lt/ge/le po `value_num`; keyword mieszany → wiersze bez `value_num` (NULL) wypadają same.
@@ -36,12 +45,18 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from datetime import date, timedelta
 
 # Charset/długość keyworda FITS jak w dawcy (query._KW_RE, pivot._KW_RE): do 68 znaków, spacje/kropki
 # odrzucane. Keyword i tak idzie do SELECT jako parametr `?`, ale walidacja defensywna odrzuca śmieci.
 _KW_RE = re.compile(r"^[A-Za-z0-9_\-]{1,68}$")
 
 _NUMERIC_KIND = {"gt": "num_gt", "lt": "num_lt", "ge": "num_ge", "le": "num_le"}
+
+# Facet-liść (F4): facet → kind dispatcha `leaf_frame_ids` (rel_night osobno — dwa parametry-granice).
+_FACET_KIND = {"object": "rel_object", "filter": "rel_filter", "kind": "rel_kind",
+               "telescope": "rel_telescope"}
+_NIGHT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 LeafFn = Callable[[str, str, object, object], "set[int]"]
 UniverseFn = Callable[[], "set[int]"]
@@ -71,6 +86,31 @@ def _like_escape(s: str) -> str:
 
 def _is_condition(node: dict) -> bool:
     return "operator" in node
+
+
+def _is_facet(node: dict) -> bool:
+    return "facet" in node
+
+
+def night_bounds(night) -> "tuple[str, str]":
+    """Granice nocy D (D-UX-1: noc = date(DATE-OBS − 12 h)) jako PEŁNE datetime:
+    `[<D>T12:00:00, <D+1>T12:00:00)`. Walidacja formatu (EXPECT) — zła data → ValueError."""
+    if not isinstance(night, str) or not _NIGHT_RE.match(night):
+        raise ValueError(f"niedozwolona noc (oczekiwane YYYY-MM-DD): {night!r}")
+    nxt = (date.fromisoformat(night) + timedelta(days=1)).isoformat()
+    return f"{night}T12:00:00", f"{nxt}T12:00:00"
+
+
+def _eval_facet(node: dict, leaf_fn: LeafFn) -> set[int]:
+    facet = node["facet"]
+    value = node.get("value")
+    if facet == "night":
+        p1, p2 = night_bounds(value)
+        return leaf_fn("rel_night", None, p1, p2)
+    kind = _FACET_KIND.get(facet)
+    if kind is None:
+        raise ValueError(f"nieznany facet: {facet!r}")
+    return leaf_fn(kind, None, value, None)
 
 
 def _eval_condition(node: dict, leaf_fn: LeafFn, universe_fn: UniverseFn) -> set[int]:
@@ -103,6 +143,8 @@ def _eval_condition(node: dict, leaf_fn: LeafFn, universe_fn: UniverseFn) -> set
 
 
 def _eval(node: dict, leaf_fn: LeafFn, universe_fn: UniverseFn) -> set[int]:
+    if _is_facet(node):                       # PRZED warunkiem: facet-liść nie ma `operator` (F4)
+        return _eval_facet(node, leaf_fn)
     if _is_condition(node):
         return _eval_condition(node, leaf_fn, universe_fn)
     op = str(node.get("op", "AND")).upper()
@@ -134,6 +176,10 @@ def run(filter_tree: dict | None, *, leaf_fn: LeafFn, universe_fn: UniverseFn) -
 _OP_WORDS = {"eq": "=", "ne": "≠", "gt": ">", "lt": "<", "ge": "≥", "le": "≤",
              "contains": "zawiera", "startswith": "zaczyna się od"}
 
+# Mapa facet→nazwa PL dla `describe` (prezentacja facet-liścia: „Obiekt: NGC7000").
+_FACET_WORDS = {"object": "Obiekt", "filter": "Filtr", "kind": "Rodzaj",
+                "telescope": "Teleskop", "night": "Noc"}
+
 
 def _describe_value(value) -> str:
     if isinstance(value, bool):
@@ -147,6 +193,11 @@ def describe(tree: dict | None, *, _nested: bool = False) -> str:
     dostaje nawiasy; korzeń idzie bez nich."""
     if tree is None:
         return "wszystkie klatki"
+    if _is_facet(tree):
+        # PRZED fallbackiem grupy (F4R#7): facet-liść bez `operator`/`conditions` wpadłby w
+        # „pusta grupa → wszystkie klatki" = cichy fałsz na pasku zbioru.
+        name = _FACET_WORDS.get(tree["facet"], str(tree["facet"]))
+        return f"{name}: {tree.get('label') or tree.get('value')}"
     if _is_condition(tree):
         kw = tree.get("keyword")
         op = tree.get("operator")

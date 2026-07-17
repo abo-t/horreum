@@ -275,8 +275,33 @@ def all_frame_ids(con):
 def leaf_frame_ids(con, kind, keyword, p1=None, p2=None):
     """Predykat-liść filtra → set[frame_id]. `kind` (z `filter_engine`) wybiera OSOBNY literał; keyword i
     wartości wiązane `?`. Numeryczne po `value_num` (wiersze NULL wypadają same); tekstowe po `value_raw`;
-    liczbo-podobne trafiają oba; `like` po `value_raw LIKE ? ESCAPE`. Semantyka 1:1 z dawcą `query.py`."""
-    if kind == "exists":
+    liczbo-podobne trafiają oba; `like` po `value_raw LIKE ? ESCAPE`. Semantyka 1:1 z dawcą `query.py`.
+    Liście RELACYJNE `rel_*` (F4, facety — PLAN_ux_redesign §5) chodzą po frame/config/header zamiast
+    cards; `keyword` dla nich nieużywany (silnik podaje None). `rel_telescope` = canon_id kanonicznego
+    teleskopu (scaleni członkowie rolują się pod kanon przez `telescope_canonical`, jak
+    `active_telescopes`). `rel_night` = zakres `[p1, p2)` na `header.date_obs` — OBA parametry pełne
+    datetime (granice liczy `filter_engine.night_bounds`); klatka bez header/date_obs nie wpada."""
+    if kind == "rel_object":
+        cur = con.execute("SELECT id FROM frame WHERE object_id = ?", (p1,))
+    elif kind == "rel_filter":
+        cur = con.execute("SELECT id FROM frame WHERE filter_canon = ?", (p1,))
+    elif kind == "rel_kind":
+        cur = con.execute("SELECT id FROM frame WHERE kind = ?", (p1,))
+    elif kind == "rel_telescope":
+        cur = con.execute(
+            "SELECT f.id FROM frame f "
+            "JOIN config c ON c.id = f.config_id "
+            "JOIN telescope_canonical tc ON tc.id = c.telescope_id "
+            "WHERE tc.canon_id = ?",
+            (p1,),
+        )
+    elif kind == "rel_night":
+        cur = con.execute(
+            "SELECT f.id FROM frame f JOIN header h ON h.frame_id = f.id "
+            "WHERE h.date_obs >= ? AND h.date_obs < ?",
+            (p1, p2),
+        )
+    elif kind == "exists":
         cur = con.execute("SELECT frame_id FROM cards WHERE keyword = ?", (keyword,))
     elif kind == "num_gt":
         cur = con.execute("SELECT frame_id FROM cards WHERE keyword = ? AND value_num > ?", (keyword, p1))
@@ -312,10 +337,106 @@ def leaf_frame_ids(con, kind, keyword, p1=None, p2=None):
 
 def keyword_facets(con):
     """Distinct keywordy z `cards` + pokrycie (ile klatek ma daną kartę) do panelu Pól. Cards są FITS-only
-    (XISF bez cards — D-G). Zwraca wiersze: keyword, n (COUNT DISTINCT frame_id), malejąco po pokryciu."""
+    (XISF bez cards — D-G). Zwraca wiersze: keyword, n (COUNT DISTINCT frame_id), malejąco po pokryciu.
+    UWAGA nazewnicza: „facets" tu = pokrycie KEYWORDÓW (kolumny gridu); listwa facetów F4 (Obiekt/Filtr/
+    Rodzaj/Teleskop/Noc) to funkcje `facet_*` niżej — INNY fakt (F4R#9)."""
     return con.execute(
         "SELECT keyword, COUNT(DISTINCT frame_id) AS n FROM cards GROUP BY keyword ORDER BY n DESC, keyword"
     ).fetchall()
+
+
+# ============================================================ LISTWA FACETÓW (F4, PLAN_ux_redesign §5)
+# Liczniki wymiarów dla FacetRail: liczność wartości w podanym zbiorze frame_ids (SIBLING-SET —
+# FramesView liczy zbiór per facet BEZ własnej grupy, F4R#1). Wszystko STAŁE LITERAŁY + `json_each(?)`.
+# JAWNE predykaty NULL (F4R#10): żaden literał nie może urodzić fantomowego kubełka NULL (kubełki NULL
+# świadomie poza v1 — kalibracja bez obiektu POPRAWNA, kind-aware).
+
+
+def facet_objects(con, frame_ids):
+    """Kubełki facetu Obiekt: kanoniczne obiekty w zbiorze + liczność. `object_id IS NULL` wypada
+    JOIN-em (kalibracja bez obiektu — poprawnie poza listą). ORDER canon (lista pod szukajkę).
+    Zwraca: id, canon, n."""
+    return con.execute(
+        "SELECT o.id, o.canon, COUNT(*) AS n "
+        "FROM frame f JOIN object o ON o.id = f.object_id "
+        "WHERE f.id IN (SELECT value FROM json_each(?)) "
+        "GROUP BY o.id ORDER BY o.canon",
+        (json.dumps(list(frame_ids)),),
+    ).fetchall()
+
+
+def facet_filters(con, frame_ids):
+    """Kubełki facetu Filtr: `filter_canon` w zbiorze + liczność; JAWNIE `IS NOT NULL` (F4R#10).
+    Zwraca: filter_canon, n (n DESC — najczęstsze na górze)."""
+    return con.execute(
+        "SELECT filter_canon, COUNT(*) AS n FROM frame "
+        "WHERE filter_canon IS NOT NULL "
+        "  AND id IN (SELECT value FROM json_each(?)) "
+        "GROUP BY filter_canon ORDER BY n DESC, filter_canon",
+        (json.dumps(list(frame_ids)),),
+    ).fetchall()
+
+
+def facet_kinds(con, frame_ids):
+    """Kubełki facetu Rodzaj: `kind` w zbiorze + liczność (`kind` NOT NULL w schemacie — bez predykatu).
+    Zwraca: kind, n (n DESC)."""
+    return con.execute(
+        "SELECT kind, COUNT(*) AS n FROM frame "
+        "WHERE id IN (SELECT value FROM json_each(?)) "
+        "GROUP BY kind ORDER BY n DESC, kind",
+        (json.dumps(list(frame_ids)),),
+    ).fetchall()
+
+
+def facet_telescopes(con, frame_ids):
+    """Kubełki facetu Teleskop: KANONICZNE teleskopy w zbiorze + liczność; klatki scalonych członków
+    rolują się pod kanon (`telescope_canonical`, jak `active_telescopes`); frame bez configu wypada
+    JOIN-em. Etykietę składa wołający (label→telescop_canon fallback, wzorzec `_tel_label`).
+    Zwraca: id (canon_id), label, telescop_canon, n (n DESC)."""
+    return con.execute(
+        "SELECT t.id, t.label, t.telescop_canon, COUNT(*) AS n "
+        "FROM frame f "
+        "JOIN config c ON c.id = f.config_id "
+        "JOIN telescope_canonical tc ON tc.id = c.telescope_id "
+        "JOIN telescope t ON t.id = tc.canon_id "
+        "WHERE f.id IN (SELECT value FROM json_each(?)) "
+        "GROUP BY t.id ORDER BY n DESC, t.id",
+        (json.dumps(list(frame_ids)),),
+    ).fetchall()
+
+
+def facet_nights(con, frame_ids):
+    """Kubełki facetu Noc: noc = `date(date_obs, '-12 hours')` (D-UX-1) + liczność; JAWNIE
+    `date_obs IS NOT NULL` (F4R#10). INWARIANT (F4R#6): `date_obs` = NAIWNE ISO z `T`, bez sufiksu
+    strefy — sufiks `Z`/`+HH:MM` rozjechałby tę derywację (konwersja UTC) z liściem `rel_night`
+    (porównanie leksykalne); spójność kubełek↔liść pinuje test własności. Zwraca: night, n
+    (night DESC — najnowsze na górze)."""
+    return con.execute(
+        "SELECT date(h.date_obs, '-12 hours') AS night, COUNT(*) AS n "
+        "FROM frame f JOIN header h ON h.frame_id = f.id "
+        "WHERE h.date_obs IS NOT NULL "
+        "  AND f.id IN (SELECT value FROM json_each(?)) "
+        "GROUP BY night ORDER BY night DESC",
+        (json.dumps(list(frame_ids)),),
+    ).fetchall()
+
+
+def dup_frame_ids(con):
+    """Zbiór frame_id z >1 OBECNĄ lokacją (perspektywa „Duplikaty"). JEDNA derywacja trimu dla zbioru
+    głównego i sibling-setów facetów (SPOT — trim w Pythonie na `n_present` i ten literał muszą znaczyć
+    to samo; por. `base_rows` n_present). Zwraca set[int]."""
+    return {int(r[0]) for r in con.execute(
+        "SELECT frame_id FROM location WHERE present = 1 GROUP BY frame_id HAVING COUNT(*) > 1"
+    ).fetchall()}
+
+
+def review_frame_ids(con):
+    """Zbiór frame_id perspektywy „Do przeglądu": light/master_light z `object_id IS NULL`
+    (równoważne trimowi `object_canon is None` — `object.canon` NOT NULL, LEFT JOIN daje NULL
+    wyłącznie przy braku obiektu). Zwraca set[int]."""
+    return {int(r[0]) for r in con.execute(
+        "SELECT id FROM frame WHERE object_id IS NULL AND kind IN ('light','master_light')"
+    ).fetchall()}
 
 
 def cards_pivot(con, frame_ids, keywords):

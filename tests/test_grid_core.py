@@ -228,3 +228,64 @@ def test_base_rows_xisf_kolumny(grid_db):
     rows = {r["frame_id"]: r for r in queries.base_rows(grid_db, [3])}
     assert rows[3]["kind"] == "master_flat"
     assert rows[3]["filetype"] == "xisf"
+
+
+# ---------- describe — kryteria zbioru SŁOWAMI (F3, PLAN_ux_redesign §4) ----------
+
+def test_describe_none_i_pusta_grupa():
+    assert filter_engine.describe(None) == "wszystkie klatki"
+    assert filter_engine.describe({"op": "AND", "conditions": []}) == "wszystkie klatki"
+
+
+def test_describe_lisc_kazdego_opa():
+    d = filter_engine.describe
+    assert d({"keyword": "EXPTIME", "operator": "eq", "value": 300}) == "EXPTIME = 300"
+    assert d({"keyword": "GAIN", "operator": "ne", "value": 100}) == "GAIN ≠ 100"
+    assert d({"keyword": "EXPTIME", "operator": "gt", "value": 60}) == "EXPTIME > 60"
+    assert d({"keyword": "EXPTIME", "operator": "lt", "value": 60}) == "EXPTIME < 60"
+    assert d({"keyword": "EXPTIME", "operator": "ge", "value": 60}) == "EXPTIME ≥ 60"
+    assert d({"keyword": "EXPTIME", "operator": "le", "value": 60}) == "EXPTIME ≤ 60"
+    assert d({"keyword": "OBJECT", "operator": "contains", "value": "M5"}) == "OBJECT zawiera M5"
+    assert d({"keyword": "OBJECT", "operator": "startswith", "value": "NGC"}) == "OBJECT zaczyna się od NGC"
+    assert d({"keyword": "DATE-OBS", "operator": "exists"}) == "ma DATE-OBS"
+    assert d({"keyword": "DATE-OBS", "operator": "not_exists"}) == "bez DATE-OBS"
+
+
+def test_describe_bool_parytet_TF():
+    """Bool renderuje się jak semantyka eq ('T'/'F'), nie 'True'/'False'."""
+    assert filter_engine.describe({"keyword": "SIMPLE", "operator": "eq", "value": True}) == "SIMPLE = T"
+    assert filter_engine.describe({"keyword": "SIMPLE", "operator": "eq", "value": False}) == "SIMPLE = F"
+
+
+def test_describe_and_or_nawiasy():
+    """Grupa zagnieżdżona o >1 dzieciach dostaje nawiasy; korzeń bez nich."""
+    tree = {"op": "AND", "conditions": [
+        {"keyword": "EXPTIME", "operator": "eq", "value": 300},
+        {"op": "OR", "conditions": [
+            {"keyword": "FILTER", "operator": "contains", "value": "Ha"},
+            {"keyword": "FILTER", "operator": "not_exists"},
+        ]},
+    ]}
+    assert filter_engine.describe(tree) == "EXPTIME = 300 i (FILTER zawiera Ha lub bez FILTER)"
+
+
+def test_describe_grupa_1_dziecko_bez_nawiasow():
+    tree = {"op": "AND", "conditions": [{"op": "OR", "conditions": [
+        {"keyword": "GAIN", "operator": "eq", "value": 100}]}]}
+    assert filter_engine.describe(tree) == "GAIN = 100"
+
+
+def test_describe_not_poza():
+    tree = {"op": "NOT", "conditions": [{"keyword": "OBJECT", "operator": "eq", "value": "M51"}]}
+    assert filter_engine.describe(tree) == "poza (OBJECT = M51)"
+    nested = {"op": "AND", "conditions": [
+        {"keyword": "IMAGETYP", "operator": "eq", "value": "Light"}, tree]}
+    assert filter_engine.describe(nested) == "IMAGETYP = Light i poza (OBJECT = M51)"
+
+
+def test_describe_nieznany_op_fallback():
+    """describe = prezentacja: nieznany op renderuje się surowo (wykonanie i tak podnosi ValueError)."""
+    assert filter_engine.describe({"keyword": "A", "operator": "regex", "value": "x"}) == "A regex x"
+    with pytest.raises(ValueError):
+        filter_engine.run({"keyword": "A", "operator": "regex", "value": "x"},
+                          leaf_fn=lambda *a: set(), universe_fn=lambda: set())

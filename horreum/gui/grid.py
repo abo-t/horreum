@@ -8,6 +8,10 @@ cała logika (silnik filtra, pivot, read-model) siedzi w Qt-wolnych `horreum.fil
 Kolumny BAZOWE (warstwa interpretacji nad lustrem) + dynamiczne kolumny-keywordy z `cards`. Perspektywy =
 nazwane {filtr+kolumny+grupowanie+sort} w `QSettings` + presety zaszyte (D-B). Grupowanie minimalne: nagłówki
 grup po jednej kolumnie bazowej (D-D). `present` = kolumna statusu (zniknięte tłowane); Duplikaty = n_present>1.
+
+F3 (PLAN_ux_redesign §4): pasek ZBIORU (`SelectionBar` — licznik + kryteria słowami + akcje) nad
+`_PanelStack`, w którym klingi (`MacroBar`/`RenameBar`) są PANELAMI otwieranymi z akcji — widoczny
+najwyżej JEDEN; przełączenie na cudzy panel czyści podgląd dotychczasowego właściciela (R#9).
 """
 
 from __future__ import annotations
@@ -27,7 +31,7 @@ from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
     QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QProgressBar, QPushButton,
-    QSpinBox, QSplitter, QTableView, QVBoxLayout, QWidget,
+    QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QTableView, QVBoxLayout, QWidget,
 )
 
 from horreum import db, filter_engine, macro as macro_mod, naming, pivot as pivot_mod, repo, writeback
@@ -548,9 +552,9 @@ class FieldsPanel(QWidget):
 
 
 class MacroBar(QWidget):
-    """Zwijany pasek makra (doktryna §5: „makro = zwijany pasek obok filtra") — sekcje Oblicz/Przypisz.
-    Emituje `preview(dict)` (policz i pokaż w gridzie, BEZ zapisu), `stage(dict)` (do szuflady),
-    `cleared()`. Makro operuje na tym, co widać w gridzie (frame_ids wołającego)."""
+    """Panel makra (F3: strona `_PanelStack`, otwierana z paska zbioru „Popraw nagłówki…") — sekcje
+    Oblicz/Przypisz. Emituje `preview(dict)` (policz i pokaż w gridzie, BEZ zapisu), `stage(dict)`
+    (do szuflady), `cleared()`. Makro operuje na tym, co widać w gridzie (frame_ids wołającego)."""
 
     preview = Signal(object)
     stage = Signal(object)
@@ -560,14 +564,7 @@ class MacroBar(QWidget):
         super().__init__(parent)
         self._keywords = keywords
         outer = QVBoxLayout(self); outer.setContentsMargins(0, 0, 0, 0)
-        head = QHBoxLayout()
-        self.toggle = QPushButton("▸ Makro (edycja nagłówków)")
-        self.toggle.setCheckable(True)
-        self.toggle.clicked.connect(self._on_toggle)
-        head.addWidget(self.toggle); head.addStretch(1)
-        outer.addLayout(head)
-
-        self.body = QWidget(); self.body.setVisible(False)
+        self.body = QWidget()
         b = QVBoxLayout(self.body); b.setContentsMargins(12, 4, 0, 4)
         # Oblicz (opcjonalny krok pośredni: nazwa = wyrażenie)
         comp = QHBoxLayout()
@@ -608,10 +605,6 @@ class MacroBar(QWidget):
         self.asg_kw.clear(); self.asg_kw.addItems(keywords); self.asg_kw.setCurrentText(cur)
         self.asg_kw.blockSignals(False)
 
-    def _on_toggle(self, checked):
-        self.body.setVisible(checked)
-        self.toggle.setText(("▾ " if checked else "▸ ") + "Makro (edycja nagłówków)")
-
     def macro_def(self):
         """Zbierz definicję makra z pól (None, gdy brak keyworda/wartości przypisania)."""
         kw = self.asg_kw.currentText().strip()
@@ -636,30 +629,23 @@ class MacroBar(QWidget):
 
 
 class RenameBar(QWidget):
-    """Zwijany pasek „Nazwy z faktów" (BLIŹNIAK strukturalny `MacroBar`, G3: pasek NIE modal). Trzy strefy:
-    (1) polityka wsadu — Źródło/Offset/Fallback + żywa etykieta celu; (2) panel inspekcji daty (G1, G4 —
-    pełne timestampy + Δ + align do drugiego źródła); (3) akcje. Emituje `preview(policy)`/`stage(policy)`/
-    `cleared()`/`toggled(bool)`/`sourceChanged()`. `policy` = {source, offset_hours, fallback} — jeden
-    silnik `naming.run_rename`. Panel daty KARMIONY z zewnątrz (`set_echo`) — FramesView zna zaznaczenie."""
+    """Panel „Nazwy z faktów" (F3: strona `_PanelStack`, otwierana z paska zbioru „Uporządkuj nazwy
+    plików…"; BLIŹNIAK strukturalny `MacroBar`). Trzy strefy: (1) polityka wsadu — Źródło/Offset/
+    Fallback + żywa etykieta celu; (2) panel inspekcji daty (G1, G4 — pełne timestampy + Δ + align do
+    drugiego źródła); (3) akcje. Emituje `preview(policy)`/`stage(policy)`/`cleared()`/`sourceChanged()`.
+    `policy` = {source, offset_hours, fallback} — jeden silnik `naming.run_rename`. Panel daty KARMIONY
+    z zewnątrz (`set_echo`) — FramesView zna zaznaczenie i wie, czy panel jest otwarty."""
 
     preview = Signal(object)
     stage = Signal(object)
     cleared = Signal()
-    toggled = Signal(bool)       # rozwinięcie/zwinięcie — FramesView odświeża echo daty (G1 warunkowe)
     sourceChanged = Signal()     # zmiana źródła → przelicz etykietę/znak align (R2 #2)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._median = None       # ostatnia mediana Δ wsadu (do przycisku „Wyrównaj")
         outer = QVBoxLayout(self); outer.setContentsMargins(0, 0, 0, 0)
-        head = QHBoxLayout()
-        self.toggle = QPushButton("▸ Nazwy z faktów (rename plików)")
-        self.toggle.setCheckable(True)
-        self.toggle.clicked.connect(self._on_toggle)
-        head.addWidget(self.toggle); head.addStretch(1)
-        outer.addLayout(head)
-
-        self.body = QWidget(); self.body.setVisible(False)
+        self.body = QWidget()
         b = QVBoxLayout(self.body); b.setContentsMargins(12, 4, 0, 4)
 
         # (1) polityka wsadu
@@ -706,9 +692,6 @@ class RenameBar(QWidget):
         outer.addWidget(self.body)
 
     # ---- stan / API ----
-    def is_expanded(self):
-        return self.toggle.isChecked()
-
     def source(self):
         return self.src.currentData()
 
@@ -754,16 +737,93 @@ class RenameBar(QWidget):
         if self._median is not None:
             self.offset.setValue(self._offset_from_median())
 
-    def _on_toggle(self, checked):
-        self.body.setVisible(checked)
-        self.toggle.setText(("▾ " if checked else "▸ ") + "Nazwy z faktów (rename plików)")
-        self.toggled.emit(checked)
-
     def _emit_preview(self):
         self.preview.emit(self.policy())
 
     def _emit_stage(self):
         self.stage.emit(self.policy())
+
+
+class ElidedLabel(QLabel):
+    """QLabel z elizją w prawo: pełny tekst przez `set_full_text` (ląduje też w tooltipie), render
+    przycinany do bieżącej szerokości — długi opis kryteriów nie rozpycha okna (F3, §4)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._full = ""
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.setMinimumWidth(40)
+
+    def set_full_text(self, text):
+        self._full = text or ""
+        self.setToolTip(self._full)
+        self._update_elide()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_elide()
+
+    def _update_elide(self):
+        fm = self.fontMetrics()
+        self.setText(fm.elidedText(self._full, Qt.ElideRight, max(0, self.width() - 4)))
+
+
+class SelectionBar(QFrame):
+    """Pasek ZBIORU (F3, PLAN_ux_redesign §4): licznik + kryteria słowami + akcje na zbiorze
+    [Wydaj na stół…][Popraw nagłówki…][Uporządkuj nazwy plików…][★ Zapisz widok]. Przyciski paneli
+    CHECKABLE — który panel otwarty widać bez klikania. Głupi widżet: FramesView łączy kliki i karmi
+    etykiety (NARROW). Przyciski-panele ZAWSZE aktywne (gating checkable = pułapka
+    disabled-but-checked-open, F3R#2); pusty zbiór gasi tylko „Wydaj na stół…"."""
+
+    _PROJ_TIP = "Materializuj bieżącą perspektywę w drzewo linków/kopii (WBPP feed)"
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFrameShape(QFrame.StyledPanel)
+        lay = QHBoxLayout(self); lay.setContentsMargins(8, 4, 8, 4)
+        self.count_label = QLabel("")
+        f = QFont(); f.setBold(True); self.count_label.setFont(f)
+        self.criteria_label = ElidedLabel()
+        self.criteria_label.setStyleSheet("color: #666;")
+        self.btn_proj = QPushButton("Wydaj na stół…")
+        self.btn_proj.setToolTip(self._PROJ_TIP)
+        self.btn_macro = QPushButton("Popraw nagłówki…"); self.btn_macro.setCheckable(True)
+        self.btn_rename = QPushButton("Uporządkuj nazwy plików…"); self.btn_rename.setCheckable(True)
+        self.btn_save = QPushButton("★ Zapisz widok")
+        lay.addWidget(self.count_label); lay.addSpacing(8)
+        lay.addWidget(self.criteria_label, 1)
+        lay.addWidget(self.btn_proj); lay.addWidget(self.btn_macro)
+        lay.addWidget(self.btn_rename); lay.addWidget(self.btn_save)
+
+    def set_criteria(self, text):
+        self.criteria_label.set_full_text(text)
+
+    def set_have_frames(self, on):
+        """Uczciwy disabled TYLKO realnej akcji na zbiorze (F3R#2): pusty zbiór gasi „Wydaj na stół…"
+        (guard `_open_projection` zostaje drugą linią); „★ Zapisz widok" i panele zawsze żywe."""
+        self.btn_proj.setEnabled(on)
+        self.btn_proj.setToolTip(self._PROJ_TIP if on else "brak klatek w zbiorze")
+
+    def set_active_panel(self, which):
+        """Synchronizuj zaznaczenie przycisków-paneli ze stanem stacku (`None`/'macro'/'rename');
+        blockSignals — to odbicie stanu, nie klik."""
+        for btn, key in ((self.btn_macro, "macro"), (self.btn_rename, "rename")):
+            btn.blockSignals(True)
+            btn.setChecked(which == key)
+            btn.blockSignals(False)
+
+
+class _PanelStack(QStackedWidget):
+    """Stack paneli kling (F3): sizeHint = BIEŻĄCA strona — goły QStackedWidget bierze max ze stron,
+    więc otwarte makro wisiałoby w pasie wysokości renamu [skill: pyside6-desktop-layout-gotchas]."""
+
+    def sizeHint(self):
+        w = self.currentWidget()
+        return w.sizeHint() if w is not None else super().sizeHint()
+
+    def minimumSizeHint(self):
+        w = self.currentWidget()
+        return w.minimumSizeHint() if w is not None else super().minimumSizeHint()
 
 
 class StagingDrawer(QFrame):
@@ -779,7 +839,7 @@ class StagingDrawer(QFrame):
         self.setFrameShape(QFrame.StyledPanel)
         lay = QHBoxLayout(self); lay.setContentsMargins(8, 4, 8, 4)
         self.dot = QLabel("○")
-        self.label = QLabel("Brak zmian oczekujących")
+        self.label = QLabel("Poczekalnia zmian — pusta")   # słownik F3 (§4)
         self.result = QLabel(""); self.result.setStyleSheet("color: #666;")
         # Postęp writebacku renderuje się TU (nie w modalu): pasek + „Anuluj" wchodzą w miejsce
         # Zatwierdź/Odrzuć na czas commitu/undo (off-thread — GUI nie zamarza; rdzeń commituje per-plik).
@@ -820,7 +880,7 @@ class StagingDrawer(QFrame):
     def set_count(self, n, *, result=None, label=None):
         self._n = n
         if n > 0:
-            self.dot.setText("⬤"); self.dot.setStyleSheet("color: #d08000;")
+            self.dot.setText("●"); self.dot.setStyleSheet("color: #d08000;")   # U+25CF: jest w Segoe UI, paruje z „○" (wiz F3 #2)
             # `label` rozróżnia klingę też przy n>0: „N zmian nazw oczekuje" vs domyślne „N zmian
             # oczekuje" (mikro-zmiana §0; call-sites makra bez label → domyślny tekst, R1 #8).
             self.label.setText(label or f"{n} zmian oczekuje")
@@ -829,8 +889,8 @@ class StagingDrawer(QFrame):
         else:
             self.dot.setText("○"); self.dot.setStyleSheet("color: #999;")
             # `label` nadpisuje domyślny tekst pustego stanu: po commicie „Zatwierdzono…" zamiast
-            # „Brak zmian oczekujących" (sprzeczność z wynikiem obok — wizytator D2).
-            self.label.setText(label or "Brak zmian oczekujących")
+            # pustostanu poczekalni (sprzeczność z wynikiem obok — wizytator D2).
+            self.label.setText(label or "Poczekalnia zmian — pusta")
         self.btn_commit.setEnabled(n > 0)
         self.btn_reject.setEnabled(n > 0)
         # Nowy staging (n>0) → Zatwierdź/Odrzuć znowu widoczne. NIE chowa tu „Cofnij" (osobny przycisk
@@ -907,9 +967,11 @@ class WritebackWorker(QObject):
 
 
 class FramesView(QWidget):
-    """Widok „Klatki": panel Pól | (perspektywa + filtr + makro + grupowanie + grid) + szuflada stagingu.
-    Kontrakt montażu `MainWindow`: `__init__(con, now_fn, parent)`, sygnał `status_message`, `refresh()`.
-    KROK 4: makro (druga klinga) — filtr→oblicz→przypisz na widocznych klatkach, staging, commit/undo."""
+    """Widok „Klatki": panel Pól | (perspektywa + filtr + PASEK ZBIORU + panele kling + grid)
+    + poczekalnia zmian (szuflada stagingu). Kontrakt montażu `MainWindow`: `__init__(con, now_fn,
+    parent)`, sygnał `status_message`, `refresh()`. KROK 4: makro (druga klinga) — filtr→oblicz→
+    przypisz na widocznych klatkach, staging, commit/undo. F3: klingi jako panele `_PanelStack`
+    otwierane z `SelectionBar` (najwyżej jeden widoczny; R#9 w `_toggle_panel`)."""
 
     status_message = Signal(str)
 
@@ -950,16 +1012,13 @@ class FramesView(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
 
+        # Górny pasek CHUDY (F3): tylko soczewki widoku (perspektywa + grupowanie); akcje na ZBIORZE
+        # mieszkają w SelectionBar niżej.
         bar = QHBoxLayout()
         bar.addWidget(QLabel("Perspektywa:"))
         self.combo_persp = QComboBox()
         self.combo_persp.currentIndexChanged.connect(self._on_perspective)
         bar.addWidget(self.combo_persp)
-        btn_save = QPushButton("Zapisz jako…"); btn_save.clicked.connect(self._save_perspective)
-        bar.addWidget(btn_save)
-        btn_proj = QPushButton("Wydaj na stół…"); btn_proj.clicked.connect(self._open_projection)   # słownik F2 (wiz K4)
-        btn_proj.setToolTip("Materializuj bieżącą perspektywę w drzewo linków/kopii (WBPP feed)")
-        bar.addWidget(btn_proj)
         bar.addSpacing(16)
         bar.addWidget(QLabel("Grupuj wg:"))
         self.combo_group = QComboBox()
@@ -970,8 +1029,6 @@ class FramesView(QWidget):
         self.combo_group.currentIndexChanged.connect(self._on_group)
         bar.addWidget(self.combo_group)
         bar.addStretch(1)
-        self.count_label = QLabel("")
-        bar.addWidget(self.count_label)
         outer.addLayout(bar)
 
         splitter = QSplitter(Qt.Horizontal)
@@ -985,19 +1042,31 @@ class FramesView(QWidget):
         self.filter_panel.filterApplied.connect(self._on_filter)
         rv.addWidget(self.filter_panel)
 
+        # Pasek zbioru (F3): licznik + kryteria słowami + akcje; klingi jako panele w stacku niżej.
+        self.sel_bar = SelectionBar()
+        self.count_label = self.sel_bar.count_label      # TEN SAM QLabel (F3R#5) — `_update_count` bez zmian
+        self.sel_bar.btn_proj.clicked.connect(self._open_projection)
+        self.sel_bar.btn_save.clicked.connect(self._save_perspective)
+        self.sel_bar.btn_macro.clicked.connect(lambda: self._toggle_panel("macro"))
+        self.sel_bar.btn_rename.clicked.connect(lambda: self._toggle_panel("rename"))
+        rv.addWidget(self.sel_bar)
+
         self.macro_bar = MacroBar([])
         self.macro_bar.preview.connect(self._on_macro_preview)
         self.macro_bar.stage.connect(self._on_macro_stage)
         self.macro_bar.cleared.connect(self._on_macro_clear)
-        rv.addWidget(self.macro_bar)
 
-        self.rename_bar = RenameBar()                    # bliźniaczy pasek pod makrem (G3)
+        self.rename_bar = RenameBar()                    # bliźniaczy panel obok makra (G3)
         self.rename_bar.preview.connect(self._on_rename_preview)
         self.rename_bar.stage.connect(self._on_rename_stage)
         self.rename_bar.cleared.connect(self._on_rename_clear)
-        self.rename_bar.toggled.connect(lambda *_: self._refresh_date_echo())
         self.rename_bar.sourceChanged.connect(self._refresh_date_echo)
-        rv.addWidget(self.rename_bar)
+
+        self.panel_stack = _PanelStack()                 # najwyżej JEDEN panel widoczny (F3)
+        self.panel_stack.addWidget(self.macro_bar)
+        self.panel_stack.addWidget(self.rename_bar)
+        self.panel_stack.setVisible(False)               # żaden panel nie otwarty na starcie
+        rv.addWidget(self.panel_stack)
 
         self.model = GridTableModel(self)
         self.table = QTableView()
@@ -1018,7 +1087,7 @@ class FramesView(QWidget):
 
         self.empty = QLabel("Brak klatek dla tego filtra — zmień filtr lub perspektywę.")
         self.empty.setAlignment(Qt.AlignCenter); self.empty.setWordWrap(True); self.empty.setVisible(False)
-        rv.addWidget(self.empty)
+        rv.addWidget(self.empty, 1)   # stretch: pusty stan zbiera leftover — SelectionBar/panel nie balonieją (wiz F3 #1)
 
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 1)
@@ -1121,6 +1190,46 @@ class FramesView(QWidget):
                                perspektywa=self.combo_persp.currentText(), parent=self)
         dlg.exec()
 
+    # ---- panele kling (F3, PLAN_ux_redesign §4) ----
+    def _toggle_panel(self, which):
+        """Panel klingi z paska zbioru: najwyżej JEDEN widoczny. Zamknięcie zostawia podgląd
+        (kolumna podglądu w gridzie to wartość sama w sobie; staging żyje w poczekalni niezależnie).
+        Otwarcie/przełączenie na panel X przy podglądzie CUDZEGO właściciela czyści go WPROST
+        handlerem `cleared` (R#9 — bez emitowania sygnału cudzego widżetu). SEKWENCJA otwarcia =
+        kontrakt (F3R#4): strona stacku → pokaż → echo daty (guard echa musi już widzieć rename)."""
+        target = self.macro_bar if which == "macro" else self.rename_bar
+        # „otwarty" = JAWNIE pokazany (isHidden odwrócone), NIE isVisible() — to drugie jest False,
+        # gdy przodek niepokazany (offscreen testy przed show()), i kłamałoby o stanie stacku.
+        if not self.panel_stack.isHidden() and self.panel_stack.currentWidget() is target:
+            self.panel_stack.setVisible(False)           # zamknięcie: podgląd ZOSTAJE
+            self.sel_bar.set_active_panel(None)
+            return
+        if (self._preview_owner and self._preview_owner != which
+                and self.model._preview_active()):
+            if self._preview_owner == "macro":
+                self._on_macro_clear()
+            else:
+                self._on_rename_clear()
+        self.panel_stack.setCurrentWidget(target)
+        self.panel_stack.setVisible(True)
+        self.sel_bar.set_active_panel(which)
+        if which == "rename":
+            self._refresh_date_echo()                    # PO pokazaniu strony (F3R#4)
+
+    def _rename_panel_open(self):
+        return (not self.panel_stack.isHidden()
+                and self.panel_stack.currentWidget() is self.rename_bar)
+
+    def _describe_criteria(self):
+        """Opis zbioru słowami do paska: drzewo filtra (`filter_engine.describe`) + flagi perspektyw
+        spoza silnika (`only_dups`/`only_review` — grid.py PRESETS), łączone „ · "."""
+        parts = [filter_engine.describe(self._filter_tree)]
+        if self._only_dups:
+            parts.append("tylko duplikaty")
+        if self._only_review:
+            parts.append("tylko do przeglądu")
+        return " · ".join(parts)
+
     # ---- reakcje ----
     def _on_filter(self, tree):
         self._filter_tree = tree
@@ -1160,6 +1269,8 @@ class FramesView(QWidget):
         self.table.setVisible(n > 0)
         self.macro_bar.set_actions_enabled(bool(base_ids))   # szczery disabled makra na pustym gridzie (#4)
         self.rename_bar.set_actions_enabled(bool(base_ids))  # bliźniaczo dla renamu
+        self.sel_bar.set_have_frames(bool(base_ids))         # pusty zbiór gasi „Wydaj na stół…" (F3R#2)
+        self.sel_bar.set_criteria(self._describe_criteria()) # kryteria zbioru SŁOWAMI (F3)
         self._sync_staging_mutex()                           # staging jednej klingi wyłącza „Do stagingu" drugiej
         self._refresh_date_echo()                            # panel daty odbija świeże widoczne (echo warunkowe)
         self.status_message.emit(f"Grid: {n} klatek, {len(keywords)} kolumn-keywordów")
@@ -1195,9 +1306,10 @@ class FramesView(QWidget):
 
     def _refresh_date_echo(self):
         """Odśwież panel daty RenameBar z zaznaczenia (albo widocznych, gdy puste). G1 ŚWIADOMIE
-        WARUNKOWE (R1 #17): przy ZWINIĘTYM pasku echo zaznaczenia niesie już licznik G2 — pełne echo
-        daty wymaga rozwiniętego paska (przepływ renamu i tak dzieje się przy rozwiniętym)."""
-        if not self.rename_bar.is_expanded():
+        WARUNKOWE (R1 #17): przy ZAMKNIĘTYM panelu echo zaznaczenia niesie już licznik G2 — pełne
+        echo daty wymaga otwartego panelu renamu (przepływ renamu i tak dzieje się przy otwartym;
+        `_toggle_panel` woła echo PO pokazaniu strony — F3R#4)."""
+        if not self._rename_panel_open():
             return
         scope = self._selected_data_rows() or self.model._data_rows
         if len(scope) == 1:
@@ -1231,6 +1343,7 @@ class FramesView(QWidget):
         if busy:
             self.macro_bar.set_actions_enabled(False)
             self.rename_bar.set_actions_enabled(False)
+            self.sel_bar.btn_proj.setEnabled(False)      # „Wydaj" gaśnie w biegu etapu (F3R#7)
             self.drawer.btn_commit.setEnabled(False)
             self.drawer.btn_reject.setEnabled(False)
             if hasattr(self, "_undo_btn"):
@@ -1238,6 +1351,7 @@ class FramesView(QWidget):
         else:
             self.macro_bar.set_actions_enabled(bool(self._frame_ids))
             self.rename_bar.set_actions_enabled(bool(self._frame_ids))
+            self.sel_bar.set_have_frames(bool(self._frame_ids))
             n = self._active_pending_count()             # mode-aware (R1 #2): makro LUB rename
             self.drawer.btn_commit.setEnabled(n > 0)
             self.drawer.btn_reject.setEnabled(n > 0)

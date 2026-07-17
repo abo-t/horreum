@@ -580,7 +580,7 @@ def test_drawer_label_sukcesu_nie_clobber_rename(rn_view):
     view._on_rename_stage(_POL)
     view._on_commit()
     assert "Przemianowano" in view.drawer.label.text()
-    assert view.drawer.label.text() != "Brak zmian oczekujących"
+    assert view.drawer.label.text() != "Poczekalnia zmian — pusta"
 
 
 def test_drawer_label_sukcesu_nie_clobber_makro(wb_view):
@@ -633,3 +633,104 @@ def test_rename_commit_powod_w_summary(rn_view):
     view._on_commit()
     assert "zablokowanych" in view.drawer.result.text()
     assert "cel już istnieje" in view.drawer.result.text()         # reprezentatywny reason widoczny
+
+
+# ---------- F3: pasek zbioru + panele kling (PLAN_ux_redesign §4) ----------
+
+def test_panele_ekskluzywne_i_checkable(view):
+    """F3: stack ukryty na starcie; otwarcie → jeden panel; przełączenie → drugi (nigdy oba);
+    klik w otwarty → zamknięcie + odznaczony przycisk (F3R#9)."""
+    assert not view.panel_stack.isVisibleTo(view)
+    view._toggle_panel("macro")
+    assert view.panel_stack.isVisibleTo(view) and view.panel_stack.currentWidget() is view.macro_bar
+    assert view.sel_bar.btn_macro.isChecked() and not view.sel_bar.btn_rename.isChecked()
+    view._toggle_panel("rename")
+    assert view.panel_stack.currentWidget() is view.rename_bar
+    assert view.sel_bar.btn_rename.isChecked() and not view.sel_bar.btn_macro.isChecked()
+    view._toggle_panel("rename")                       # ten sam → zamknij
+    assert not view.panel_stack.isVisibleTo(view)
+    assert not view.sel_bar.btn_rename.isChecked() and not view.sel_bar.btn_macro.isChecked()
+
+
+def test_przelaczenie_czysci_cudzy_podglad(rn_view):
+    """R#9: podgląd makra aktywny → otwarcie panelu renamu czyści go WPROST handlerem `cleared`
+    (właściciel None, kolumna podglądu znika) — właściciel nie może zniknąć z ekranu z żywym podglądem."""
+    view, con, files = rn_view
+    view._toggle_panel("macro")
+    view.macro_bar.asg_kw.setCurrentText("TELESCOP")
+    view.macro_bar.asg_op.setCurrentIndex(0)
+    view.macro_bar.asg_expr.setText("EQ6")
+    view.macro_bar._emit_preview()
+    assert view._preview_owner == "macro" and view.model._preview_active()
+    view._toggle_panel("rename")                       # cudzy panel → podgląd makra zdjęty
+    assert view._preview_owner is None and not view.model._preview_active()
+
+
+def test_zamkniecie_panelu_zostawia_podglad(rn_view):
+    """F3: zamknięcie panelu (≠ przełączenie) ZOSTAWIA podgląd — kolumna podglądu to wartość sama
+    w sobie (user chowa panel, żeby obejrzeć grid na pełnej szerokości); własny panel też nie tyka."""
+    view, con, files = rn_view
+    view._toggle_panel("rename")
+    view._on_rename_preview(_POL)
+    assert view._preview_owner == "rename" and view.model._preview_active()
+    view._toggle_panel("rename")                       # zamknięcie
+    assert not view.panel_stack.isVisibleTo(view)
+    assert view._preview_owner == "rename" and view.model._preview_active()
+    view._toggle_panel("rename")                       # ponowne otwarcie WŁASNEGO → podgląd nietknięty
+    assert view.model._preview_active()
+
+
+def test_staging_przezywa_przelaczenie_paneli(rn_view):
+    """F3: pending żyje w poczekalni NIEZALEŻNIE od paneli — przełączenie zdejmuje TYLKO podgląd,
+    nie staging; mutex „Do stagingu" drugiej klingi dalej widoczny w jej panelu."""
+    view, con, files = rn_view
+    view._toggle_panel("macro")
+    view.macro_bar.asg_kw.setCurrentText("TELESCOP")
+    view.macro_bar.asg_op.setCurrentIndex(0)
+    view.macro_bar.asg_expr.setText("EQ6")
+    view.macro_bar._emit_stage()
+    assert view._pending_count() == 2
+    view._toggle_panel("rename")
+    assert view._pending_count() == 2                  # staging nietknięty (podgląd ≠ staging)
+    assert not view.rename_bar.btn_stage.isEnabled()   # mutex dalej uczciwy
+    assert "makra" in view.rename_bar.btn_stage.toolTip()
+
+
+def test_echo_daty_po_otwarciu_rename_niepuste(rn_view):
+    """F3R#4 (kolejność = kontrakt): echo daty policzone OD RAZU przy otwarciu panelu renamu
+    (strona → pokaż → echo), nie dopiero po zmianie zaznaczenia."""
+    view, con, files = rn_view
+    assert view.rename_bar.lbl_primary.text() == "—"   # zastany placeholder z __init__
+    view._toggle_panel("rename")
+    assert view.rename_bar.lbl_primary.text().startswith("Wsad:")   # echo wsadu żywe na otwarciu
+
+
+def test_pusty_zbior_gasi_wydaj_nie_panele(view):
+    """F3R#2: pusty zbiór → „Wydaj na stół…" disabled+tooltip; przyciski-panele ŻYWE (gating
+    checkable = pułapka disabled-but-checked-open); „★ Zapisz widok" żywy."""
+    view.filter_panel.filterApplied.emit({"keyword": "OBJECT", "operator": "eq", "value": "BRAK"})
+    assert view.count_label.text() == "0 klatek"
+    assert not view.sel_bar.btn_proj.isEnabled()
+    assert "brak klatek" in view.sel_bar.btn_proj.toolTip()
+    assert view.sel_bar.btn_macro.isEnabled() and view.sel_bar.btn_rename.isEnabled()
+    assert view.sel_bar.btn_save.isEnabled()
+
+
+def test_set_busy_gasi_wydaj(view):
+    """F3R#7: podczas etapu pipeline'u „Wydaj na stół…" gaśnie; po etapie wraca wg widocznych."""
+    assert view.sel_bar.btn_proj.isEnabled()
+    view.set_busy(True)
+    assert not view.sel_bar.btn_proj.isEnabled()
+    view.set_busy(False)
+    assert view.sel_bar.btn_proj.isEnabled()
+
+
+def test_kryteria_slowami_na_pasku(view):
+    """F3: pasek odbija kryteria zbioru słowami (tooltip = pełny tekst); flagi perspektyw spoza
+    silnika (Duplikaty) doklejane „ · "."""
+    assert view.sel_bar.criteria_label.toolTip() == "wszystkie klatki"
+    view.filter_panel.filterApplied.emit({"keyword": "OBJECT", "operator": "eq", "value": "M51"})
+    assert view.sel_bar.criteria_label.toolTip() == "OBJECT = M51"
+    idx = view.combo_persp.findText("Duplikaty")
+    view.combo_persp.setCurrentIndex(idx)
+    assert "tylko duplikaty" in view.sel_bar.criteria_label.toolTip()

@@ -25,6 +25,11 @@ Operatory: eq ne gt lt ge le contains startswith exists not_exists (regex POMINI
 
 `leaf_fn(kind, kw, p1, p2) -> set[int]` — jeden literał SELECT per `kind` w `gui/queries.py`.
 `universe_fn() -> set[int]` — `SELECT id FROM frame` (wszystkie frame).
+
+`describe(tree)` — drzewo → opis SŁOWAMI dla paska zbioru (F3, PLAN_ux_redesign §4). Czysta
+prezentacja: mapa op→słowo mieszka tu (silnik = właściciel gramatyki, SPOT; etykiety combo
+`OPERATORS` w grid.py to INNY fakt — glify UI). Nieznany op renderuje się surowo — fail-fast
+dotyczy wykonania (`_eval` podnosi ValueError), nie formatera etykiety.
 """
 
 from __future__ import annotations
@@ -123,3 +128,40 @@ def run(filter_tree: dict | None, *, leaf_fn: LeafFn, universe_fn: UniverseFn) -
     if filter_tree is None:
         return universe_fn()
     return _eval(filter_tree, leaf_fn, universe_fn)
+
+
+# Mapa op→słowo dla `describe` (exists/not_exists mają własne frazy „ma KW"/„bez KW").
+_OP_WORDS = {"eq": "=", "ne": "≠", "gt": ">", "lt": "<", "ge": "≥", "le": "≤",
+             "contains": "zawiera", "startswith": "zaczyna się od"}
+
+
+def _describe_value(value) -> str:
+    if isinstance(value, bool):
+        return "T" if value else "F"   # parytet semantyki eq (bool → 'T'/'F')
+    return str(value)
+
+
+def describe(tree: dict | None, *, _nested: bool = False) -> str:
+    """Drzewo filtra → opis słowami: „EXPTIME = 300 i (FILTER zawiera Ha lub bez FILTER)";
+    NOT → „poza (…)"; `None`/pusta grupa → „wszystkie klatki". Grupa zagnieżdżona o >1 dzieciach
+    dostaje nawiasy; korzeń idzie bez nich."""
+    if tree is None:
+        return "wszystkie klatki"
+    if _is_condition(tree):
+        kw = tree.get("keyword")
+        op = tree.get("operator")
+        if op == "exists":
+            return f"ma {kw}"
+        if op == "not_exists":
+            return f"bez {kw}"
+        return f"{kw} {_OP_WORDS.get(op, str(op))} {_describe_value(tree.get('value'))}"
+    op = str(tree.get("op", "AND")).upper()
+    children = tree.get("conditions", [])
+    if op == "NOT":
+        # ≠1 dziecko to drzewo, które `_eval` i tak odrzuci — opis renderuje co jest (prezentacja).
+        inner = " i ".join(describe(c) for c in children)
+        return f"poza ({inner})"
+    if not children:
+        return "wszystkie klatki"
+    text = (" i " if op == "AND" else " lub ").join(describe(c, _nested=True) for c in children)
+    return f"({text})" if _nested and len(children) > 1 else text

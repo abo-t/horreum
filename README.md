@@ -5,6 +5,10 @@
 Standalone catalog manager for a deep‑sky astrophotography library (light frames and masters),
 working over any file tree.
 
+![Horreum main window — the Collections view: a faceted, queryable catalog over a FITS/XISF archive](doc/horreum-gui.png)
+
+*The Collections view — faceted axes (object, filter, kind, telescope, night) over the whole archive, dark theme.*
+
 Horreum inverts the classic *"folder = truth"* model: a **SQLite database is the authority**, and a
 file's **`sha1` content hash is its identity** — surviving renames and moves. Every identity change is
 an appended event, never a destructive update, so you get full history and time‑travel out of the box.
@@ -28,6 +32,10 @@ responses may take a while (that's expected, not neglect). See [CONTRIBUTING.md]
 ## Horreum (po polsku)
 
 Samodzielny menedżer biblioteki astrofotograficznej (suby i mastery) dla dowolnego drzewa plików.
+
+![Horreum — główne okno, widok Zbiory: przeszukiwalny katalog z facetami nad archiwum FITS/XISF](doc/horreum-gui.png)
+
+*Widok „Zbiory" — osie-facety (obiekt, filtr, rodzaj, teleskop, noc) nad całym archiwum; motyw ciemny.*
 
 > **Status:** wczesny rozwój. Schemat i API mogą się jeszcze zmieniać.
 >

@@ -6,7 +6,9 @@ schemat i API mogą się jeszcze zmieniać.
 
 ## [Niewydane]
 
-Redesign UX aplikacji okienkowej (F1–F7) — po tagu `v0.2`, jeszcze bez wydania.
+## [0.3.0] — 2026-07-18
+
+Redesign UX aplikacji okienkowej (F1–F8) i mapa stanowisk — po pniu scalenia `v0.2`.
 
 ### Dodane
 - **Nawigacja 3 miejsc** (F5): pasek boczny **Dostawa / Zbiory / Porządki** zamiast zakładek;
@@ -17,6 +19,10 @@ Redesign UX aplikacji okienkowej (F1–F7) — po tagu `v0.2`, jeszcze bez wydan
 - **Przyjmij nowe** (F2): cała sekwencja skan → grupuj → rozwiąż → delta jednym kliknięciem,
   na zapamiętanym katalogu źródłowym.
 - **Filtr negatywny** (F1) i **pasek zbioru** z panelami operacji na plikach (F3).
+- **Mapa stanowisk** (F8): graficzny rzut współrzędnych GPS osi obserwatorium na konturach
+  świata (Natural Earth).
+- **Dokumentacja**: dwujęzyczny README (angielska witryna wystawowa + polski przewodnik) ze
+  zrzutem głównego okna, CONTRIBUTING oraz instrukcja użytkownika w `doc/`.
 
 ### Naprawione
 - Paczka zamrożona: przypięty `PySide6==6.9.2` + kontrola obecności pluginu `qwindows` + smoke‑start GUI
@@ -24,7 +30,6 @@ Redesign UX aplikacji okienkowej (F1–F7) — po tagu `v0.2`, jeszcze bez wydan
 - Listwa facetów zachowuje pozycję przewijania przy przeładowaniu.
 
 ### W przygotowaniu
-- Mapa stanowisk (F8) — graficzny rzut współrzędnych na osi obserwatorium.
 - Ręczne przypisywanie obiektu do klatek z kolejki przeglądu.
 
 ## [0.2] — 2026-07-04
@@ -56,6 +61,7 @@ Fundament: przejście na model „baza = autorytet, `sha1` = tożsamość".
 - **Import zasilający** świeżej bazy z bazy‑dawcy (read‑only).
 - **CLI**: `init` / `scan` / `group` / `resolve` / `delta`.
 
-[Niewydane]: https://github.com/abo-t/horreum/compare/v0.2...HEAD
+[Niewydane]: https://github.com/abo-t/horreum/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/abo-t/horreum/compare/v0.2...v0.3.0
 [0.2]: https://github.com/abo-t/horreum/compare/v0.1...v0.2
 [0.1]: https://github.com/abo-t/horreum/releases/tag/v0.1

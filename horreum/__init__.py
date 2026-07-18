@@ -5,4 +5,4 @@ Zapis domenowy WYŁĄCZNIE przez `horreum.repo` (jedna klinga → event); pilnuj
 statyczny meta-tripwir AST (`tests/test_repo_safety.py`) od commitu zero.
 """
 
-__version__ = "0.0.1"
+__version__ = "0.3.0"

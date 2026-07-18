@@ -6,6 +6,14 @@ schemat i API mogą się jeszcze zmieniać.
 
 ## [Niewydane]
 
+## [0.3.1] — 2026-07-18
+
+Dopieszczenie dystrybucji Windows.
+
+### Dodane
+- Ikona aplikacji (astro — złota gwiazda) widoczna na skrótach, pasku zadań i w instalatorze.
+- Instrukcja użytkownika dołączona do instalatora jako PDF (skrót „Instrukcja" w menu Start).
+
 ## [0.3.0] — 2026-07-18
 
 Redesign UX aplikacji okienkowej (F1–F8) i mapa stanowisk — po pniu scalenia `v0.2`.
@@ -61,7 +69,8 @@ Fundament: przejście na model „baza = autorytet, `sha1` = tożsamość".
 - **Import zasilający** świeżej bazy z bazy‑dawcy (read‑only).
 - **CLI**: `init` / `scan` / `group` / `resolve` / `delta`.
 
-[Niewydane]: https://github.com/abo-t/horreum/compare/v0.3.0...HEAD
+[Niewydane]: https://github.com/abo-t/horreum/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/abo-t/horreum/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/abo-t/horreum/compare/v0.2...v0.3.0
 [0.2]: https://github.com/abo-t/horreum/compare/v0.1...v0.2
 [0.1]: https://github.com/abo-t/horreum/releases/tag/v0.1

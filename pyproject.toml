@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "horreum"
-version = "0.3.0"
+version = "0.3.1"
 description = "Menedżer biblioteki astrofoto deep-sky (suby i mastery) — baza = autorytet, sha1 = tożsamość. FITS -> SQLite, model osi (teleskop × kamera)."
 readme = "README.md"
 requires-python = ">=3.9"

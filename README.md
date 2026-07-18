@@ -1,8 +1,38 @@
 # Horreum
 
+**English** · [Polski](#horreum-po-polsku)
+
+Standalone catalog manager for a deep‑sky astrophotography library (light frames and masters),
+working over any file tree.
+
+Horreum inverts the classic *"folder = truth"* model: a **SQLite database is the authority**, and a
+file's **`sha1` content hash is its identity** — surviving renames and moves. Every identity change is
+an appended event, never a destructive update, so you get full history and time‑travel out of the box.
+Scanning only **reads** your files — it never moves, renames, or deletes them.
+
+Horreum derives the axes you actually search by — **telescope**, **observing site** (from GPS in the
+header), and **object** (Messier / Caldwell → NGC / IC cross‑catalogs, common names, Solar‑System
+bodies) — straight from FITS/XISF headers, independent of how your folders are arranged.
+
+**Who it's for:** astrophotographers who want one queryable catalog over a large FITS/XISF archive.
+
+**Status:** early development — schema and API may still change. The desktop UI and documentation are
+currently **Polish**; UI internationalization is planned. The full guide is in the Polish sections below.
+
+**Contributing:** a hobby project maintained in spare time — issues and pull requests are welcome, but
+responses may take a while (that's expected, not neglect). See [CONTRIBUTING.md](CONTRIBUTING.md) and
+[CHANGELOG.md](CHANGELOG.md).
+
+---
+
+## Horreum (po polsku)
+
 Samodzielny menedżer biblioteki astrofotograficznej (suby i mastery) dla dowolnego drzewa plików.
 
 > **Status:** wczesny rozwój. Schemat i API mogą się jeszcze zmieniać.
+>
+> **Nowy użytkownik?** Instrukcja krok po kroku (zakładanie bazy, pierwsza konfiguracja, obsługa):
+> [doc/instrukcja.md](doc/instrukcja.md).
 
 ## Filozofia: baza = autorytet
 

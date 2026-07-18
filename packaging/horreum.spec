@@ -44,11 +44,13 @@ REPO_ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
 datas = collect_data_files("astropy")
 datas += collect_data_files("horreum", includes=["**/*.sql", "**/*.json"])
 
-# astropy.io.fits = jedyny używany submoduł; dwa pakiety-data referowane tylko stringiem (#1).
+# astropy.io.fits = jedyny używany submoduł; pakiety-data referowane tylko stringiem (#1):
+# migracje .sql, katalog .json, oraz asset mapy stanowisk .json (F8 — `resources.files(pkg)`).
 hiddenimports = [
     "astropy.io.fits",
     "horreum.schema.migrations",
     "horreum.resolve.data",
+    "horreum.gui.assets",
 ]
 
 # GUARD: rozbraja kaskadę przerostu w brudnym env (fsspec/holoviz/jupyter) + inne wiązania Qt.

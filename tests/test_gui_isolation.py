@@ -16,7 +16,8 @@ PKG = Path(horreum.__file__).parent
 # (`queries.py`), silnik filtra/pivot (`filter_engine.py`/`pivot.py`) i progres (`progress.py`) zostają BEZ Qt.
 QT_WIDGET_FILES = {"app.py", "__main__.py", "pipeline.py", "grid.py", "projection_dialog.py",
                    "facets.py",   # F4: listwa facetów (FacetRail) — warstwa widżetów
-                   "tasks.py"}    # F5: Porządki (TasksView) — warstwa widżetów
+                   "tasks.py",    # F5: Porządki (TasksView) — warstwa widżetów
+                   "map_view.py"}  # F8: mapa stanowisk (SitesMapView, QPainter) — warstwa widżetów
 
 
 def _imports_pyside6(path):
@@ -65,3 +66,6 @@ def test_readmodel_i_init_gui_qt_free():
     # F7: agregat portfela naświetleń (godziny/tooltip = czysta prezentacja) MUSI zostać Qt-wolny
     # (`grid.py` go importuje; testy formatowania chodzą bez PySide6) — jawna asercja obok rglob (F4R#11).
     assert not _imports_pyside6(PKG / "gui" / "portfolio.py")
+    # F8: rzut/parser/URL mapy (equirect + GeoJSON + osm_url) MUSI zostać Qt-wolny (widżet `map_view.py`
+    # go importuje; testy rzutu chodzą bez PySide6) — jawna asercja obok rglob (F4R#11).
+    assert not _imports_pyside6(PKG / "gui" / "mapproj.py")

@@ -18,8 +18,8 @@ między widokami w `QStackedWidget`). Oś teleskopu z etapu 1 to teraz OSADZALNY
 import os
 from datetime import datetime, timezone
 
-from PySide6.QtCore import Qt, QSettings, Signal
-from PySide6.QtGui import QActionGroup, QColor, QPalette
+from PySide6.QtCore import Qt, QSettings, QUrl, Signal
+from PySide6.QtGui import QActionGroup, QColor, QDesktopServices, QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QLabel,
     QListWidget, QListWidgetItem, QMainWindow, QPushButton, QSplitter, QStackedWidget, QTableWidget,
@@ -27,7 +27,8 @@ from PySide6.QtWidgets import (
 )
 
 from horreum import db, repo
-from horreum.gui import queries, theme
+from horreum.gui import mapproj, queries, theme
+from horreum.gui.map_view import SitesMapView
 
 # Kolumny listy głównej — indeksy nazwane (czytelne handlery zamiast magicznych liczb).
 # Nagłówek = telescop_canon (tożsamość osi po przejściu fitsmirror); Etykieta = nazwa usera.
@@ -75,12 +76,13 @@ def apply_theme(app, name):
     akcentów; podłącz kolory stanów gridu/facetów (SPOT). `name` znormalizowany (`theme.normalize`).
     Import grid/facets lazy — unika cyklu z warstwą Porządków (F5R2#1) i pozostaje spójny ze stylem
     importów widoków w `_mount_views`."""
-    from horreum.gui import facets, grid
+    from horreum.gui import facets, grid, map_view
     app.setStyle("Fusion")
     app.setPalette(_build_palette(name))
     app.setStyleSheet(theme.qss(name))
     grid.use_theme(name)
     facets.use_theme(name)
+    map_view.use_theme(name)         # kolory mapy z motywu (F8) — init na starcie + przełączenie
 
 
 def _fmt_event_ts(ts):
@@ -670,6 +672,7 @@ class ObservatoryAxisView(QWidget):
         self._now = now_fn
         self._loading = False                # tłumi itemChanged podczas programowego wypełniania
         self._source_mergeable = False       # czy zaznaczony wiersz może być źródłem scalenia
+        self._obs_coords = {}                # oid → (lat, lon) z ostatniego refresh (źródło GPS dla OSM)
         self._build_ui()
         self.refresh()
 
@@ -736,17 +739,42 @@ class ObservatoryAxisView(QWidget):
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
-        outer.addWidget(splitter, 1)
+
+        # --- mapa stanowisk (F8) na DOLE, pełnej szerokości: scatter geo chce szerokości, user
+        # reguluje pionowy podział; przycisk OSM na zaznaczeniu (akcja tabeli, nie widżetu mapy). ---
+        vsplit = QSplitter(Qt.Vertical)
+        vsplit.addWidget(splitter)
+        self.map_box = QWidget()                      # ref — ukrywany przy 0 stanowisk (wiz F8 #6)
+        mv = QVBoxLayout(self.map_box)
+        mv.setContentsMargins(0, 0, 0, 0)
+        obar = QHBoxLayout()
+        self.btn_osm = QPushButton("Otwórz w OpenStreetMap…")
+        self.btn_osm.setEnabled(False)                # szczery disabled — bez zaznaczenia brak celu
+        self.btn_osm.clicked.connect(self._on_open_osm)
+        obar.addWidget(self.btn_osm)
+        obar.addStretch(1)
+        mv.addLayout(obar)
+        self.map_view = SitesMapView()
+        mv.addWidget(self.map_view, 1)
+        vsplit.addWidget(self.map_box)
+        # setStretchFactor sam nie wystarcza — sizeHint górnych tabel zjada przyrost i mapa siada na
+        # minimum 160 px (wiz F8 #1); setSizes wymusza sensowny DOMYŚLNY podział (~55/45), user reguluje.
+        vsplit.setStretchFactor(0, 3)
+        vsplit.setStretchFactor(1, 2)
+        vsplit.setSizes([460, 380])
+        outer.addWidget(vsplit, 1)
 
     # ---------------------------------------------------------------- odczyt → widok
 
     def refresh(self):
         """Przeładuj listę z read-modelu (źródło prawdy = baza; brak cache). Zachowuje zaznaczenie po
-        `observatory_id` (po merge wiersze się przesuwają)."""
+        `observatory_id` (po merge wiersze się przesuwają). Karmi mapę tymi SAMYMI wierszami (SPOT)
+        i zapamiętuje współrzędne dla linku OSM (F8 F8 — read-model nie jest cache'owany inaczej)."""
         prev = self._selected_observatory_id()
         self._loading = True
         try:
             rows = queries.active_observatories(self.con)
+            self._obs_coords = {row["id"]: (row["lat"], row["lon"]) for row in rows}
             self.table.setRowCount(len(rows))
             target_row = -1
             for r, row in enumerate(rows):
@@ -762,6 +790,8 @@ class ObservatoryAxisView(QWidget):
         empty = self.table.rowCount() == 0
         self.obs_empty.setVisible(empty)              # nota odkrywalna w widoku (wizytator #1)
         self.table.setVisible(not empty)
+        self.map_box.setVisible(not empty)            # 0 stanowisk → bez martwego pasa mapy (wiz F8 #6)
+        self.map_view.set_sites(rows)                 # mapa dostaje TE SAME wiersze co tabela (F8)
         if target_row >= 0:
             self.table.selectRow(target_row)
         elif not empty:
@@ -822,6 +852,10 @@ class ObservatoryAxisView(QWidget):
         self._sync_merge_enabled()
         self._sync_unmerge_enabled()
 
+        # mapa i OSM sprzężone z zaznaczeniem tabeli (F8): mapa wyróżnia punkt, OSM celuje w jego GPS.
+        self.map_view.set_selected(oid)
+        self.btn_osm.setEnabled(oid is not None)
+
     def _sync_merge_enabled(self):
         """„Scal" aktywny dopiero gdy źródło jest mergowalne ORAZ wskazano REALNY cel (nie placeholder)."""
         self.btn_merge.setEnabled(self._source_mergeable and self.combo_target.currentData() is not None)
@@ -846,6 +880,17 @@ class ObservatoryAxisView(QWidget):
 
     def _flash(self, msg):
         self.status_message.emit(msg)
+
+    def _on_open_osm(self):
+        """Otwórz zaznaczone stanowisko w OpenStreetMap (przeglądarka usera — zoom/satelita/okolica poza
+        apką, zero ciężaru w apce). Przycisk wyłączony bez zaznaczenia; handler i tak sprawdza (guard
+        drugą linią). Źródło GPS = `_obs_coords` z ostatniego refresh (F8 F8)."""
+        oid = self._selected_observatory_id()
+        coord = self._obs_coords.get(oid) if oid is not None else None
+        if coord is None:
+            self._flash("Zaznacz stanowisko, by otworzyć mapę.")
+            return
+        QDesktopServices.openUrl(QUrl(mapproj.osm_url(coord[0], coord[1])))
 
     def _on_item_changed(self, item):
         """Edycja in-line nazwy → `repo.label_observatory`. Pusta nazwa → `ValueError` (kasowanie poza
@@ -989,6 +1034,9 @@ class MainWindow(QMainWindow):
         if grid_view is not None:
             grid_view.table.viewport().update()
             grid_view.facet_rail.refresh_theme()
+        obs = getattr(self, "observatory_view", None)   # mapa maluje QPainterem — paleta jej nie odświeży (F8)
+        if obs is not None:
+            obs.map_view.refresh_theme()
 
     def _build_central(self):
         central = QWidget()

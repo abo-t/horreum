@@ -12,6 +12,7 @@ import pytest
 pytest.importorskip("PySide6")
 
 from horreum import db, repo
+from horreum.gui import app as appmod
 from horreum.gui import queries
 from horreum.gui.app import (
     OBS_COL_FRAMES, OBS_COL_ID, OBS_COL_LAT, OBS_COL_NAME, ObservatoryAxisView,
@@ -201,3 +202,42 @@ def test_widget_nie_pisze_do_bazy_z_pominieciem_repo(win):
     w.table.selectRow(_row_of(w, ids["praca"]))
     queries.active_observatories(con)
     assert _events(con) == before
+
+
+# --- mapa stanowisk (F8) ---
+
+def test_mapa_dostaje_stanowiska_z_refresh(win):
+    w, _, ids = win
+    # mapa karmiona TYMI SAMYMI wierszami co tabela (SPOT); oba stanowiska trafiają do scatteru.
+    assert {s[0] for s in w.map_view._sites} == {ids["dom"], ids["praca"]}
+
+
+def test_mapa_render_niejednolity(win):
+    """F8 F10: paintEvent połyka wyjątki (stderr, nie fail) — smoke asertuje, że mapa COŚ namalowała
+    (tło + kontury + punkty), nie tylko że obraz ma wymiary."""
+    w, _, _ = win
+    w.map_view.resize(320, 240)                    # resizeEvent → _refit (transform + cache konturów)
+    img = w.map_view.grab().toImage()
+    colors = {img.pixel(x, y) for y in range(0, img.height(), 4) for x in range(0, img.width(), 4)}
+    assert len(colors) >= 2, "mapa jednolita — nic nie namalowane (rzut/paint padł cicho)"
+
+
+def test_osm_przycisk_szczery_disabled_i_link(win, monkeypatch):
+    """Przycisk OSM wyłączony bez zaznaczenia, włączony po; klik otwiera URL z GPS zaznaczonego
+    stanowiska (F8 F8 — źródło współrzędnych z `_obs_coords`). QDesktopServices podmieniony, by test
+    NIE otwierał przeglądarki."""
+    w, _, ids = win
+    opened = []
+
+    class _FakeQDS:
+        @staticmethod
+        def openUrl(url):
+            opened.append(url.toString())
+
+    monkeypatch.setattr(appmod, "QDesktopServices", _FakeQDS)
+    w.table.clearSelection()
+    assert not w.btn_osm.isEnabled()               # bez zaznaczenia — brak celu (szczery disabled)
+    w.table.selectRow(_row_of(w, ids["dom"]))
+    assert w.btn_osm.isEnabled()
+    w._on_open_osm()
+    assert opened and "mlat=53.400000" in opened[0]   # lat DOM = 53.4 (fixture), format .6f

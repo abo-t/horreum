@@ -9,7 +9,7 @@ from horreum.gui import theme
 
 _THEMES = ("dark", "light")
 _HEX = re.compile(r"^#[0-9a-fA-F]{6}$")
-_SPECS = (theme.palette_spec, theme.grid_colors, theme.facet_colors, theme.accents)
+_SPECS = (theme.palette_spec, theme.grid_colors, theme.facet_colors, theme.accents, theme.map_colors)
 
 
 def test_default_ciemny():
@@ -53,6 +53,12 @@ def test_palette_klucze_kanoniczne():
 
 def test_facet_ma_exclusion():
     assert "exclusion" in theme.facet_colors("dark")
+
+
+def test_map_klucze_kanoniczne():
+    # `map_view.use_theme` (F8) czyta te klucze; brak któregoś = KeyError w malowaniu mapy.
+    assert set(theme.map_colors("dark")) == {
+        "bg", "land", "site", "site_selected", "sel_ring", "scale"}
 
 
 @pytest.mark.parametrize("fn", _SPECS)

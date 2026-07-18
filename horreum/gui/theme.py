@@ -60,6 +60,17 @@ _ACCENT = {
               "secondary_text": "#666666"},
 }
 
+# Kolory mapy stanowisk (F8 §9 — QPainter scatter na tle konturów NE). `land` = przygaszony kontur
+# (TŁO, nie punkt); `site`/`site_selected` = złoto spichlerza + jaśniejsze wyróżnienie zaznaczenia;
+# `scale` = tekst drugorzędny (pasek skali + etykiety stanowisk). Warianty per motyw — kontur na
+# jasnym tle musi być ciemniejszy niż na ciemnym. IDENTYCZNY zbiór kluczy (pin test_theme).
+_MAP = {
+    "dark": {"bg": "#1E1E1E", "land": "#505050", "site": "#E0A030",
+             "site_selected": "#FF8C1A", "sel_ring": "#7AB0FF", "scale": "#9A9A9A"},
+    "light": {"bg": "#FFFFFF", "land": "#BEBEBE", "site": "#D08000",
+              "site_selected": "#E85D00", "sel_ring": "#1E5FCC", "scale": "#808080"},
+}
+
 
 def normalize(name):
     """Nazwa motywu z QSettings → znany motyw (nieznana/None → DEFAULT). Granica łagodna."""
@@ -90,6 +101,11 @@ def facet_colors(name):
 def accents(name):
     """Akcenty → hex. Klucze: gold/ok_green/exclusion_red/secondary_text."""
     return _spec(_ACCENT, name)
+
+
+def map_colors(name):
+    """Kolory mapy stanowisk → hex. Klucze: bg/land/site/site_selected/sel_ring/scale (F8)."""
+    return _spec(_MAP, name)
 
 
 def qss(name):

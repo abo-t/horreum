@@ -23,6 +23,9 @@ bodies) — straight from FITS/XISF headers, independent of how your folders are
 **Status:** early development — schema and API may still change. The desktop UI and documentation are
 currently **Polish**; UI internationalization is planned. The full guide is in the Polish sections below.
 
+**Download (Windows):** the latest **installer** and a **portable zip** are on the
+[Releases](../../releases/latest) page.
+
 **Contributing:** a hobby project maintained in spare time — issues and pull requests are welcome, but
 responses may take a while (that's expected, not neglect). See [CONTRIBUTING.md](CONTRIBUTING.md) and
 [CHANGELOG.md](CHANGELOG.md).
@@ -64,13 +67,16 @@ bez zależności zewnętrznych (stdlib); astropy wchodzi dopiero na etapie skanu
 
 ### Wersja zamrożona (Windows, bez Pythona)
 
-Pobierz archiwum z [Releases](../../releases), rozpakuj i uruchom:
+**⬇ [Pobierz najnowszą wersję](../../releases/latest)** — z sekcji „Assets" wybierz jedną z dwóch:
 
-- `horreum-gui.exe` — aplikacja okienkowa (główny sposób pracy),
-- `horreum.exe` — to samo z linii poleceń (uruchamiaj z terminala: `horreum.exe --help`).
+- **`Horreum-Setup-*.exe`** — instalator (zalecany). Instaluje aplikację dla bieżącego użytkownika
+  (bez uprawnień administratora), tworzy skróty na pulpicie i w menu Start; uruchamiasz „Horreum"
+  jak każdy program. Odinstalowanie: Ustawienia → Aplikacje.
+- **`horreum-*-windows-x64.zip`** — wersja przenośna. Rozpakuj i uruchom `horreum-gui.exe` (okno)
+  lub `horreum.exe` (linia poleceń: `horreum.exe --help`). Folder `_internal/` trzymaj razem z plikami exe.
 
-Oba pliki dzielą folder `_internal/` — trzymaj je razem. Baza to plik `.db`, który wybierasz
-w aplikacji; nie jest przywiązana do katalogu programu.
+Baza to plik `.db`, który wybierasz w aplikacji; nie jest przywiązana do katalogu programu.
+Instrukcja krok po kroku: [doc/instrukcja.md](doc/instrukcja.md).
 
 ### Ze źródła (dowolny system)
 

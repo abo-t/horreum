@@ -39,6 +39,9 @@ from PyInstaller.utils.hooks import collect_data_files
 # SPECPATH = katalog tego pliku (packaging/); korzeń repo o poziom wyżej.
 REPO_ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
 
+# Ikona aplikacji (astro: złota gwiazda na nocnym tle) — wspólna dla obu exe.
+ICON = os.path.join(SPECPATH, "horreum.ico")
+
 # Dane astropy (erfa/IERS) + assety pakietu horreum (.sql migracje, .json katalog).
 # collect_data_files zachowuje strukturę pakietu → importlib.resources czyta z _internal/horreum/...
 datas = collect_data_files("astropy")
@@ -106,6 +109,7 @@ exe_gui = EXE(
     upx=False,
     console=False,   # windowed: brak okna konsoli i brak pułapki cp1250 na stdout
     disable_windowed_traceback=False,
+    icon=ICON,
 )
 
 exe_cli = EXE(
@@ -120,6 +124,7 @@ exe_cli = EXE(
     upx=False,
     console=True,    # CLI drukuje na stdout (delta / --version)
     disable_windowed_traceback=False,
+    icon=ICON,
 )
 
 # Jedna COLLECT → jedno dist/horreum/ z _internal/ współdzielonym przez oba exe (dedup dest-path).

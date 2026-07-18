@@ -37,6 +37,8 @@ ShowUninstDetails show
 
 !include "MUI2.nsh"
 !define MUI_ABORTWARNING
+!define MUI_ICON "${ROOT}\packaging\horreum.ico"
+!define MUI_UNICON "${ROOT}\packaging\horreum.ico"
 !define MUI_FINISHPAGE_RUN "$INSTDIR\${EXE}"
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
@@ -50,13 +52,13 @@ Section "Horreum" SecMain
   SetOutPath "$INSTDIR"
   ; Whole frozen onedir tree (exe + exe + _internal\), structure preserved.
   File /r "${ROOT}\dist\horreum\*"
-  ; User guide alongside the app.
-  File "${ROOT}\doc\instrukcja.md"
+  ; User guide (PDF) alongside the app.
+  File "${ROOT}\doc\instrukcja.pdf"
 
   CreateShortCut "$DESKTOP\${PRODUCT}.lnk" "$INSTDIR\${EXE}"
   CreateDirectory "$SMPROGRAMS\${PRODUCT}"
   CreateShortCut "$SMPROGRAMS\${PRODUCT}\${PRODUCT}.lnk" "$INSTDIR\${EXE}"
-  CreateShortCut "$SMPROGRAMS\${PRODUCT}\Instrukcja.lnk" "$INSTDIR\instrukcja.md"
+  CreateShortCut "$SMPROGRAMS\${PRODUCT}\Instrukcja.lnk" "$INSTDIR\instrukcja.pdf"
   CreateShortCut "$SMPROGRAMS\${PRODUCT}\Uninstall.lnk" "$INSTDIR\Uninstall.exe"
 
   ; Per-user uninstall entry (HKCU -> shows in Settings > Apps for this user).

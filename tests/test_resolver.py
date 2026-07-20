@@ -7,6 +7,7 @@ import numpy as np
 from astropy.io import fits
 
 from horreum import db
+from horreum.grouper import run_grouper
 from horreum.resolver import delta_report, run_resolver
 from horreum.scan import scan_tree
 
@@ -99,6 +100,63 @@ def test_delta_report_procent_na_lightach(tmp_path):
     assert (rep.object_resolved, rep.object_unresolved, rep.object_pct) == (3, 1, 75.0)
     assert rep.object_delta == [("Snapshot", 1)]       # FlatWizard NIE w delcie
     assert rep.filters_canon == 5
+    con.close()
+
+
+# --- kolejka przeglądu ze STANU, nie ze zliczania eventów (#12) ---
+
+def test_review_ze_stanu_nie_rosnie_przy_powtornej_dostawie(tmp_path):
+    """SEDNO #12: `flag_config_review` emituje BEZWARUNKOWO co przebieg, więc `count(event)` rósł
+    liniowo przy powtórnej dostawie bez żadnej realnej zmiany. Ten test trzyma OBA końce: eventy
+    mnożą się (dowód, że licznik ich NIE liczy), a stan stoi w miejscu."""
+    con = _scanned_tree(tmp_path)
+    run_grouper(con, now=NOW)
+    run_resolver(con, now=NOW)
+    pierwszy = delta_report(con).review
+    ev1 = con.execute("SELECT count(*) FROM event WHERE verb='config.review'").fetchone()[0]
+
+    run_grouper(con, now=NOW)                          # powtórna dostawa: ZERO nowych plików
+    run_resolver(con, now=NOW)
+    drugi = delta_report(con).review
+    ev2 = con.execute("SELECT count(*) FROM event WHERE verb='config.review'").fetchone()[0]
+
+    assert ev1 > 0 and ev2 == 2 * ev1                  # eventy się MNOŻĄ — dawne źródło licznika
+    assert drugi == pierwszy                           # stan jest idempotentny
+    assert pierwszy.total == 5                         # drzewo bez TELESCOP: 5 klatek czeka na config
+    con.close()
+
+
+def test_review_kubelki_zachodza_a_total_jest_distinct(tmp_path):
+    """Klatka bez INSTRUME nie ma kamery, więc grouper nie złoży jej configu — liczy się w OBU
+    kubełkach. `total` to DISTINCT klatek, NIGDY suma pól (inaczej raport zawyżyłby kolejkę)."""
+    con = db.open_db(str(tmp_path / "h.db"))
+    tree = tmp_path / "t"; tree.mkdir()
+    _fits(tree / "pelna.fits", [("INSTRUME", "ZWO ASI2600MM Pro"), ("XPIXSZ", 3.76),
+                                ("TELESCOP", "A140R"), ("IMAGETYP", "LIGHT"), ("OBJECT", "M31")], n=1)
+    _fits(tree / "bez_kamery.fits", [("TELESCOP", "A140R"), ("IMAGETYP", "LIGHT"),
+                                     ("OBJECT", "M31")], n=2)
+    scan_tree(con, tree, now=NOW)
+    run_grouper(con, now=NOW)
+    st = delta_report(con).review
+    assert (st.no_camera, st.no_config) == (1, 1)      # TA SAMA klatka w obu kubełkach
+    assert st.total == 1                               # distinct, nie 2
+    con.close()
+
+
+def test_review_rodzaj_nieznany_lapie_cichy_null(tmp_path):
+    """Zeznanie JEST, IMAGETYP brak → event `kind.unmapped` NIE powstaje (wymagał NIEPUSTEGO
+    IMAGETYP), a rodzaju i tak nie znamy. Świadome poszerzenie kontraktu #12: stan pokazuje to,
+    co event przemilczał — zero cichego NULL."""
+    con = db.open_db(str(tmp_path / "h.db"))
+    tree = tmp_path / "t"; tree.mkdir()
+    _fits(tree / "bez_imagetyp.fits", [("INSTRUME", "ZWO ASI2600MM Pro"), ("XPIXSZ", 3.76),
+                                       ("TELESCOP", "A140R"), ("OBJECT", "M31")], n=1)
+    scan_tree(con, tree, now=NOW)
+    run_grouper(con, now=NOW)
+    assert con.execute("SELECT count(*) FROM event WHERE verb='kind.unmapped'").fetchone()[0] == 0
+    st = delta_report(con).review
+    assert st.kind_unknown == 1 and st.headerless == 0  # rodzaj nieznany, ale zeznanie JEST
+    assert st.total == 1
     con.close()
 
 

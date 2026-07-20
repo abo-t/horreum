@@ -13,6 +13,8 @@ NIGDY składanie stringa SQL. Listy zmiennej długości (id/keywordy) idą jako 
 
 import json
 
+from horreum.resolver import review_state
+
 
 def active_telescopes(con):
     """Aktywne (KANONICZNE) teleskopy z licznością klatek — lista główna GUI.
@@ -201,6 +203,8 @@ def review_queue(con):
         i cicho zostaje config NULL; bez tego predykatu licznik zlałby trzy stany;
       - `headerless_count`: frame BEZ wiersza `header` (`NOT EXISTS`) — osobny realny kubełek
         wydobyty spod fałszywego config-review.
+    Oba liczniki liczy `resolver.review_state` — JEDEN właściciel predykatu stanu (#12): ta sama
+    derywacja zasila raport dostawy, więc kolejka i raport nie mogą się rozjechać.
     Zwraca dict: {object_review: [Row(object_raw, n)], config_review_count: int, headerless_count: int}."""
     object_review = con.execute(
         "SELECT h.object_raw AS object_raw, COUNT(*) AS n "
@@ -209,16 +213,9 @@ def review_queue(con):
         "  AND h.object_raw IS NOT NULL "
         "GROUP BY h.object_raw ORDER BY n DESC, object_raw"
     ).fetchall()
-    config_review_count = con.execute(
-        "SELECT COUNT(*) FROM frame f "
-        "WHERE f.config_id IS NULL AND EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id)"
-    ).fetchone()[0]
-    headerless_count = con.execute(
-        "SELECT COUNT(*) FROM frame f "
-        "WHERE NOT EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id)"
-    ).fetchone()[0]
-    return {"object_review": object_review, "config_review_count": config_review_count,
-            "headerless_count": headerless_count}
+    st = review_state(con)
+    return {"object_review": object_review, "config_review_count": st.no_config,
+            "headerless_count": st.headerless}
 
 
 def object_review_frames(con, object_raw):

@@ -143,6 +143,22 @@ class PipelineWorker(QObject):
 _TIERS = [("—", None), ("zimny (archiwum)", "cold"), ("roboczy", "scratch")]
 _STAGE_LABEL = {"scan": "Skan", "group": "Grupowanie", "resolve": "Rozwiązywanie", "delta": "Delta"}
 
+# Kolejność i nazwy powodów przeglądu w raporcie dostawy (rdzeń niesie same liczby — wording należy
+# do powierzchni; konsolowy `cli._format_delta` ma własne, ASCII-owe).
+_REVIEW_REASONS = [("no_config", "bez konfiguracji"), ("headerless", "bez nagłówka"),
+                   ("no_camera", "bez kamery"), ("kind_unknown", "rodzaj nieznany")]
+
+
+def _review_line(st):
+    """`ReviewState` → jedna linia raportu. Wiodąca liczba to DISTINCT klatek, po niej POWODY, które
+    się nakładają (klatka bez kamery jest też bez konfiguracji) — dlatego „powody", nie „w tym":
+    suma powodów bywa większa niż klatek i nie wolno jej czytać jak rozbicia. Zerowe powody milczą."""
+    if not st.total:
+        return "brak"
+    powody = ", ".join(f"{label} {n}" for attr, label in _REVIEW_REASONS
+                       if (n := getattr(st, attr)))
+    return f"{st.total} klatek · powody: {powody}"
+
 
 class PipelineView(QWidget):
     """Widok DOSTAWY (miejsce 1 nawigacji F5; historycznie „Pipeline", etap 2). Pionowy flow:
@@ -528,10 +544,9 @@ class PipelineView(QWidget):
     def _format_delta(self, r):
         total = r.object_resolved + r.object_unresolved
         top = ", ".join(f"{raw}×{n}" for raw, n in r.object_delta[:8]) or "—"
-        reviews = ", ".join(f"{v}:{n}" for v, n in sorted(r.review_counts.items())) or "—"
         return (
             f"[delta] obiekt {r.object_resolved}/{total} ({r.object_pct:.1f}%) · filtry {r.filters_canon}\n"
-            f"   nierozpoznane: {top}\n   do przeglądu: {reviews}")
+            f"   nierozpoznane: {top}\n   do przeglądu: {_review_line(r.review)}")
 
     def _refresh_buttons(self, running, cancellable):
         idle = not running

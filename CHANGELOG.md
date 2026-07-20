@@ -6,6 +6,12 @@ schemat i API mogą się jeszcze zmieniać.
 
 ## [Niewydane]
 
+### Naprawione
+- Licznik „do przeglądu" w raporcie dostawy liczy **stan**, nie zdarzenia z dziennika — powtórna
+  dostawa bez realnych zmian nie zawyża go już liniowo (7 klatek pokazywało się jako 35 po pięciu
+  przebiegach). Raport podaje teraz liczbę klatek (distinct) i powody, które się nakładają; klatka
+  z czytelnym nagłówkiem, ale nierozpoznanym rodzajem, przestała być cichym pominięciem.
+
 ## [0.3.1] — 2026-07-18
 
 Dopieszczenie dystrybucji Windows.

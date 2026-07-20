@@ -127,6 +127,54 @@ def resolve_observatory(con, now):
 
 
 @dataclass
+class ReviewState:
+    """Kolejka przeglądu wyprowadzona ze STANU tabel — NIE ze zliczania eventów (#12).
+
+    `flag_config_review` i pokrewne emitują BEZWARUNKOWO przy każdym przebiegu (grouper iteruje
+    WSZYSTKIE klatki z nagłówkiem), więc `count(event)` mnożył licznik przez liczbę dostaw: 7 klatek
+    czekających na decyzję pokazywało się jako 35 po pięciu przebiegach. Stan jest idempotentny —
+    ta sama derywacja, co kolejka osi obiektu w `gui.queries.review_queue`.
+
+    Kubełki NIE są rozłączne: klatka bez kamery nie da się złożyć w config, więc liczy się w
+    `no_camera` I `no_config`. `total` to DISTINCT klatek — NIGDY suma pól."""
+    no_config: int = 0        # config_id NULL mimo zeznania (bez EXISTS(header) zlałby się headerless)
+    headerless: int = 0       # brak wiersza `header` — plik nieczytelny przy skanie (frame-szkielet)
+    no_camera: int = 0        # camera_id NULL mimo zeznania (brak INSTRUME/XPIXSZ)
+    kind_unknown: int = 0     # zeznanie JEST, rodzaju nie dało się zmapować
+    total: int = 0            # DISTINCT klatek w KTÓRYMKOLWIEK kubełku (nie suma — kubełki zachodzą)
+
+
+def review_state(con):
+    """Policz kolejkę przeglądu ze STANU (read-only, zero zapisu). Po co i dlaczego DISTINCT — zob.
+    `ReviewState`.
+
+    `kind_unknown` idzie po `EXISTS(header)`, NIE po karcie IMAGETYP: `cards` są FITS-only (klatki
+    XISF nie mają kart), więc predykat na kartach byłby ślepy na XISF. Predykat jest przy tym
+    świadomie SZERSZY od dawnego eventu `kind.unmapped` (ten wymagał NIEPUSTEGO IMAGETYP): czytelne
+    zeznanie z nierozpoznanym rodzajem wymaga decyzji tak samo jak zeznanie z rodzajem niezmapowanym
+    — brak IMAGETYP był dotąd cichym NULL-em, którego raport nie pokazywał."""
+    no_config = con.execute(
+        "SELECT count(*) FROM frame f WHERE f.config_id IS NULL "
+        "AND EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id)").fetchone()[0]
+    headerless = con.execute(
+        "SELECT count(*) FROM frame f "
+        "WHERE NOT EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id)").fetchone()[0]
+    no_camera = con.execute(
+        "SELECT count(*) FROM frame f WHERE f.camera_id IS NULL "
+        "AND EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id)").fetchone()[0]
+    kind_unknown = con.execute(
+        "SELECT count(*) FROM frame f WHERE f.kind = 'unknown' "
+        "AND EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id)").fetchone()[0]
+    total = con.execute(
+        "SELECT count(*) FROM frame f WHERE "
+        "NOT EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id) "
+        "OR ((f.config_id IS NULL OR f.camera_id IS NULL OR f.kind = 'unknown') "
+        "    AND EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id))").fetchone()[0]
+    return ReviewState(no_config=no_config, headerless=headerless, no_camera=no_camera,
+                       kind_unknown=kind_unknown, total=total)
+
+
+@dataclass
 class DeltaReport:
     """Read-only delta do review (§Etap 6/§4.7) — wejście do przyszłego import-legacy. Liczy obiekt
     na light/master_light (kalibracja świadomie poza — nie ma obiektu)."""
@@ -134,7 +182,7 @@ class DeltaReport:
     object_unresolved: int = 0
     object_pct: float = 0.0
     object_delta: list = field(default_factory=list)   # [(object_raw, count)] nierozpoznane light'y
-    review_counts: dict = field(default_factory=dict)  # {verb: count} per-frame kanały review
+    review: ReviewState = field(default_factory=ReviewState)   # kolejka ze STANU (#12), nie z eventów
     filters_canon: int = 0
 
 
@@ -155,12 +203,9 @@ def delta_report(con, top=30):
         "WHERE f.kind IN ('light','master_light') AND f.object_id IS NULL "
         "AND h.object_raw IS NOT NULL GROUP BY h.object_raw ORDER BY n DESC, raw LIMIT ?",
         (top,)).fetchall()
-    counts = {}
-    for v in ("frame.review", "camera.review", "kind.unmapped", "config.review"):
-        counts[v] = con.execute("SELECT count(*) FROM event WHERE verb = ?", (v,)).fetchone()[0]
     filters_canon = con.execute(
         "SELECT count(*) FROM frame WHERE filter_canon IS NOT NULL").fetchone()[0]
     return DeltaReport(
         object_resolved=resolved, object_unresolved=unresolved, object_pct=pct,
-        object_delta=[(r["raw"], r["n"]) for r in delta], review_counts=counts,
+        object_delta=[(r["raw"], r["n"]) for r in delta], review=review_state(con),
         filters_canon=filters_canon)

@@ -336,8 +336,14 @@ def _format_delta(db_path, rep):
     for raw, n in rep.object_delta:
         lines.append(f"    {raw} -> {n}")
     lines.append(f"  filter_canon ustawione: {rep.filters_canon}")
-    review = " ".join(f"{v}={n}" for v, n in rep.review_counts.items())
-    lines.append(f"  review: {review}")
+    # Liczba wiodaca = DISTINCT klatek; powody sie NAKLADAJA (brak kamery => tez brak configu),
+    # wiec ich suma bywa wieksza niz klatek — swiadomie nie jest to rozbicie.
+    rv = rep.review
+    lines.append(f"  do przegladu: {rv.total} klatek (distinct; powody moga sie nakladac)")
+    for label, n in (("bez konfiguracji", rv.no_config), ("bez naglowka", rv.headerless),
+                     ("bez kamery", rv.no_camera), ("rodzaj nieznany", rv.kind_unknown)):
+        if n:
+            lines.append(f"    {label}: {n}")
     return "\n".join(lines)
 
 

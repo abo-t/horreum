@@ -44,10 +44,16 @@ _UNSET = "_UNSET"                      # segment layoutu pusty/None — nie gubi
 MANIFEST_NAME = "_PROJEKCJA.json"
 
 # Presety layoutu = KOD (uniwersalia, jak słowniki solar 5a; D-P1 rekomendacja (a)). Kolumny bazowe
-# z `base_rows`. JSON dojdzie, gdy user zażąda własnych layoutów (MINIMAL).
+# z `base_rows`. JSON dojdzie, gdy user zażąda własnych layoutów (MINIMAL). Spec segmentu = nazwa
+# kolumny ALBO krotka KOLUMN-KANDYDATÓW (pierwsza niepusta wygrywa — `_segment`).
+#
+# `telescope_label` → `telescop_canon` (P2, coalesce): na żywej bazie `label` jest NULL dla WSZYSTKICH
+# teleskopów (sonda DRY 2026-07-16: `_UNSET` w 100% ze 189 folderów), więc segment teleskopu w feedzie
+# nie niósł ŻADNEJ informacji. `telescop_canon` jest wypełniony i to nim GUI opisuje nienazwany
+# teleskop (wzorzec `_tel_label` — label→canon) → feed mówi to samo, co reszta aplikacji.
 LAYOUTS = {
     "po-obiektach": ("object_canon", "filter_canon"),
-    "wbpp-feed": ("object_canon", "telescope_label", "filter_canon"),
+    "wbpp-feed": ("object_canon", ("telescope_label", "telescop_canon"), "filter_canon"),
 }
 
 
@@ -74,13 +80,19 @@ class Projection:
     multi_present: int = 0
 
 
-def _segment(row, col):
+def _segment(row, spec):
     """Wartość kolumny bazowej → nazwa katalogu bezpieczna na dysku (SPOT: `naming._sanitize` — ta
     sama konwencja slug co nazwy plików). Pusty/None/brak wiersza oraz `.`/`..` (anty-traversal) →
-    `_UNSET`; nie gubimy klatki po cichu ani nie wychodzimy poza korzeń (brief §1/§0)."""
-    value = row[col] if row is not None else None
-    seg = naming._sanitize(value)
-    return _UNSET if seg in ("", ".", "..") else seg
+    `_UNSET`; nie gubimy klatki po cichu ani nie wychodzimy poza korzeń (brief §1/§0). `spec` =
+    nazwa kolumny ALBO krotka kandydatów: pierwsza dająca NIEPUSTY segment wygrywa (coalesce
+    label→canon), dopiero wyczerpanie wszystkich daje `_UNSET`."""
+    cols = spec if isinstance(spec, tuple) else (spec,)
+    for col in cols:
+        value = row[col] if row is not None else None
+        seg = naming._sanitize(value)
+        if seg not in ("", ".", ".."):
+            return seg
+    return _UNSET
 
 
 def plan(con, frame_ids, layout="po-obiektach"):
@@ -240,7 +252,11 @@ def apply(projection, root, *, do_apply, copy=False, now=None, manifest=None,
             if status == "verify_bad" or not _verify_content(item.src, dst):
                 results.append(LinkResult(item.frame_id, item.src, dst, "verify_bad",
                                           reason or "sonda pierwszego linku: cel nie jest hardlinkiem (i-węzeł/treść)"))
-                partial = ApplyResult(root, projection.layout, do_apply, copy, results, cancelled)
+                # Kwarantanna planu dochodzi TAKŻE do wyniku częściowego — inaczej raport abortu
+                # zawsze głosi „pominięto: 0", choćby plan miał klatki bez obecnej kopii (R#6).
+                partial_results = results + [LinkResult(fid, "", "", "skipped", why)
+                                             for fid, why in projection.skipped]
+                partial = ApplyResult(root, projection.layout, do_apply, copy, partial_results, cancelled)
                 raise ProjectionAbort(
                     "pierwszy link nie przeszedł sondy tożsamości (i-węzeł/rozmiar/treść) — "
                     "wolumen nie wspiera hardlinków? włącz tryb kopii", partial)
@@ -263,8 +279,13 @@ def _write_manifest(root, result: ApplyResult, *, now, manifest):
     """Zapisz `_PROJEKCJA.json` obok korzenia (PLIK, nie DB — projekcja efemeryczna, JEDNA-KLINGA
     nietknięta; brief §3). Snapshot: layout/korzeń/tryb/ts/liczności + `manifest` wołającego
     (perspektywa/filtr/wolumen). `open(...,'w')` żyje w tej klindze (DOOR meta-testu)."""
+    # `segments` obok `layout`: sama NAZWA presetu nie identyfikuje drzewa — zmiana definicji layoutu
+    # (P2: `telescope_label`→coalesce z `telescop_canon`) albo nazwanie teleskopu przez usera przesuwa
+    # katalogi, a ponowne wydanie do tego samego korzenia zbudowałoby DRUGIE drzewo obok starego
+    # (te same i-węzły → WBPP policzyłby klatki dwa razy). Manifest niesie zestaw, którym drzewo powstało.
     payload = {
         "layout": result.layout,
+        "segments": [list(s) if isinstance(s, tuple) else [s] for s in LAYOUTS[result.layout]],
         "root": root,
         "copy": result.copy,
         "ts": now,

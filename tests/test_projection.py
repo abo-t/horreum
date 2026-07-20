@@ -82,11 +82,35 @@ def test_plan_segmenty_filter_i_unset(tmp_path):
 
 
 def test_plan_layout_wbpp_feed(tmp_path):
-    """Preset „wbpp-feed" = (object_canon, telescope_label, filter_canon); brak teleskopu → _UNSET."""
+    """Preset „wbpp-feed" = (object_canon, teleskop, filter_canon); BRAK teleskopu → _UNSET."""
     con = db.open_db(str(tmp_path / "w.db"))
     fid, _ = _seed(con, r"R:\A\y.fits", filter_canon="OIII")
     proj = projection.plan(con, [fid], "wbpp-feed")
     assert proj.items[0].segments == ("_UNSET", "_UNSET", "OIII")
+    con.close()
+
+
+def test_plan_wbpp_feed_teleskop_coalesce_label_canon(tmp_path):
+    """P2 (coalesce): teleskop NIENAZWANY (`label` NULL — stan 100% żywej bazy) → segment bierze
+    `telescop_canon`, nie `_UNSET`; nazwany teleskop dalej wygrywa etykietą (wzorzec `_tel_label`)."""
+    con = db.open_db(str(tmp_path / "wc.db"))
+    fid_a, _ = _seed(con, r"R:\A\a.fits", filter_canon="Ha")
+    fid_b, _ = _seed(con, r"R:\A\b.fits", filter_canon="Ha")
+    # Oś teleskopu wchodzi przez config (frame→config→telescope_canonical→telescope) — jak base_rows.
+    con.execute("INSERT INTO telescope (id, telescop_canon, label, status, created_at) "
+                "VALUES (1, 'SW 72ED', NULL, 'proposed', ?)", (NOW,))     # nienazwany — stan żywej bazy
+    con.execute("INSERT INTO telescope (id, telescop_canon, label, status, created_at) "
+                "VALUES (2, 'TS 130', 'Duzy 130', 'approved', ?)", (NOW,))
+    con.execute("INSERT INTO camera (id, model_canon, created_at) VALUES (1, 'ASI', ?)", (NOW,))
+    con.execute("INSERT INTO config (id, telescope_id, camera_id, status, created_at) "
+                "VALUES (10, 1, 1, 'proposed', ?), (20, 2, 1, 'proposed', ?)", (NOW, NOW))
+    con.execute("UPDATE frame SET config_id=10 WHERE id=?", (fid_a,))
+    con.execute("UPDATE frame SET config_id=20 WHERE id=?", (fid_b,))
+    con.commit()
+    proj = projection.plan(con, [fid_a, fid_b], "wbpp-feed")
+    segs = {it.frame_id: it.segments for it in proj.items}
+    assert segs[fid_a] == ("_UNSET", "SW_72ED", "Ha")     # canon jako etykieta zastępcza
+    assert segs[fid_b] == ("_UNSET", "Duzy_130", "Ha")    # nazwany → label
     con.close()
 
 
@@ -110,6 +134,15 @@ def test_segment_sanityzacja_unset_traversal():
     assert projection._segment({"c": ".."}, "c") == "_UNSET"
     assert projection._segment({"c": "."}, "c") == "_UNSET"
     assert projection._segment(None, "c") == "_UNSET"
+
+
+def test_segment_coalesce_pierwsza_niepusta_kolumna():
+    """Spec-krotka = coalesce: pierwsza kolumna dająca NIEPUSTY segment wygrywa; dopiero wyczerpanie
+    wszystkich daje `_UNSET` (P2 — `telescope_label`→`telescop_canon`)."""
+    assert projection._segment({"a": "Duzy", "b": "SW 72ED"}, ("a", "b")) == "Duzy"
+    assert projection._segment({"a": None, "b": "SW 72ED"}, ("a", "b")) == "SW_72ED"
+    assert projection._segment({"a": "", "b": ".."}, ("a", "b")) == "_UNSET"   # ".." nie ratuje (anty-traversal)
+    assert projection._segment(None, ("a", "b")) == "_UNSET"
 
 
 # ============================================================ guard §0 (cel pod wykluczeniem)
@@ -262,6 +295,37 @@ def test_apply_abort_sonda_pierwszego_linku(monkeypatch, tmp_path):
         projection.apply(proj, root, do_apply=True, now=NOW)
     assert ei.value.result.counts.get("verify_bad") == 1
     assert not os.path.exists(os.path.join(root, projection.MANIFEST_NAME))  # abort przed manifestem
+    con.close()
+
+
+def test_apply_abort_niesie_kwarantanne_planu(monkeypatch, tmp_path):
+    """Wynik CZĘŚCIOWY abortu niesie też `skipped` z planu — inaczej raport zawsze głosi
+    „pominięto: 0", choćby plan miał klatki bez obecnej kopii."""
+    con = db.open_db(str(tmp_path / "abs.db"))
+    fid, _ = _seed_file(con, tmp_path, "h.fits", filter_canon="Ha")
+    _seed(con, r"R:\A\gone.fits", present=0)                      # kwarantanna: brak obecnej kopii
+    proj = projection.plan(con, [fid, fid + 1], "po-obiektach")
+    monkeypatch.setattr(projection, "_verify_content", lambda *a, **k: False)
+    with pytest.raises(projection.ProjectionAbort) as ei:
+        projection.apply(proj, str(tmp_path / "_WBPP" / "feed"), do_apply=True, now=NOW)
+    assert ei.value.result.counts.get("verify_bad") == 1
+    assert ei.value.result.counts.get("skipped") == 1
+    con.close()
+
+
+def test_manifest_niesie_zestaw_segmentow(tmp_path):
+    """Manifest zapisuje SEGMENTY, nie samą nazwę presetu: definicja layoutu (P2 coalesce) albo
+    nazwanie teleskopu przez usera przesuwa katalogi — ponowne wydanie do tego samego korzenia
+    zbudowałoby DRUGIE drzewo obok starego (te same i-węzły → WBPP liczyłby klatki dwa razy)."""
+    con = db.open_db(str(tmp_path / "ms.db"))
+    fid, _ = _seed_file(con, tmp_path, "i.fits", filter_canon="Ha")
+    proj = projection.plan(con, [fid], "wbpp-feed")
+    root = str(tmp_path / "_WBPP" / "feed")
+    projection.apply(proj, root, do_apply=True, now=NOW)
+    payload = json.loads(open(os.path.join(root, projection.MANIFEST_NAME), encoding="utf-8").read())
+    assert payload["layout"] == "wbpp-feed"
+    assert payload["segments"] == [["object_canon"], ["telescope_label", "telescop_canon"],
+                                   ["filter_canon"]]
     con.close()
 
 

@@ -449,7 +449,11 @@ class PipelineView(QWidget):
         self._thread.start()
 
     def _cleanup_thread(self):
+        # wait() PRZED thread.deleteLater() — deadlock GIL × ~QThread jak w
+        # projection_dialog._cleanup_dry_thread (komentarz tam); wait() zwalnia GIL,
+        # więc teardown wątku dokończy destrukcję workera (PyGILState_Ensure) i umrze.
         self._worker.deleteLater()
+        self._thread.wait()
         self._thread.deleteLater()
         self._worker = None
         self._thread = None

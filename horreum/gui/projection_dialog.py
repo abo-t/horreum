@@ -496,7 +496,13 @@ class ProjectionDialog(QDialog):
                 self._trigger_dry()
 
     def _cleanup_dry_thread(self):
+        # KOLEJNOŚĆ (deadlock GIL × ~QThread, native dump 2026-07-20): worker.deleteLater() doręcza
+        # się w TEARDOWN wątku (Shiboken::Object::destroy → PyGILState_Ensure). Bez wait() poniższy
+        # thread.deleteLater() mógłby doręczyć się na main, zanim wątek umrze: ~QThread czekałby na
+        # wątek TRZYMAJĄC GIL (destrukcja wrappera), a wątek na GIL — AB-BA na stałe. wait() zwalnia
+        # GIL, więc wątek dokańcza destrukcję workera i umiera; ~QThread trafia na martwy handle.
         self._dry_worker.deleteLater()
+        self._dry_thread.wait()
         self._dry_thread.deleteLater()
         self._dry_worker = None
         self._dry_thread = None
@@ -575,7 +581,10 @@ class ProjectionDialog(QDialog):
                 self._apply_worker = None
 
     def _cleanup_apply_thread(self):
+        # wait() przed thread.deleteLater() — ten sam deadlock GIL × ~QThread co w _cleanup_dry_thread
+        # (komentarz tam); wait() zwalnia GIL, więc teardown wątku dokończy destrukcję workera.
         self._apply_worker.deleteLater()
+        self._apply_thread.wait()
         self._apply_thread.deleteLater()
         self._apply_worker = None
         self._apply_thread = None

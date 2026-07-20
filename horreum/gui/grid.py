@@ -1700,7 +1700,12 @@ class FramesView(QWidget):
                 self._wb_worker = None
 
     def _cleanup_wb_thread(self):
-        self._wb_worker.deleteLater(); self._wb_thread.deleteLater()
+        # wait() PRZED thread.deleteLater(): worker.deleteLater() doręcza się w teardown wątku
+        # (Shiboken::Object::destroy → PyGILState_Ensure); bez wait() ~QThread mógłby czekać na
+        # wątek TRZYMAJĄC GIL → AB-BA deadlock (native dump 2026-07-20, ten sam mechanizm co
+        # projection_dialog._cleanup_dry_thread — komentarz tam). wait() zwalnia GIL → wątek
+        # dokańcza destrukcję i umiera; ~QThread trafia na martwy handle.
+        self._wb_worker.deleteLater(); self._wb_thread.wait(); self._wb_thread.deleteLater()
         self._wb_worker = None; self._wb_thread = None
 
     @Slot(int, int, str, str)

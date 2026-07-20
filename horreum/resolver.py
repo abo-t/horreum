@@ -19,6 +19,7 @@ from .resolve._coerce import _to_text
 from .resolve.filters import normalize_filter
 from .resolve.objects import resolve_object
 from .resolve.observatory import site_coords
+from .resolve.regions import resolve_region
 from .resolve.solar import resolve_solar
 
 # Klatki, które MAJĄ obiekt nieba (kandydaci osi OBIEKT). Reszta (kalibracja, unknown) → object_id
@@ -33,6 +34,7 @@ class ResolveSummary:
     light_frames: int = 0                 # light/master_light (kandydaci osi OBIEKT)
     objects_new: int = 0                  # nowe wiersze object (distinct kanon)
     objects_assigned: int = 0             # light'y z przypisanym object_id
+    objects_by_region: int = 0            # z tego: przypisane ze WSPÓŁRZĘDNYCH (kompleks, #5)
     objects_review: int = 0               # light'y obecne-ale-nierozpoznane (delta, per-frame)
     objects_unresolved_distinct: int = 0  # distinct object_raw w delcie
     filters_set: int = 0                  # frame'y z niepustym filter_canon
@@ -43,12 +45,14 @@ class ResolveSummary:
 
 def run_resolver(con, now):
     """Po skanie: dla każdego frame'a z nagłówkiem rozwiąż OBIEKT (tylko light/master_light) i FILTR
-    (wszystkie). Obiekt rozpoznany → `upsert_object`+`add_object_alias`+`assign_object`; light
+    (wszystkie). Obiekt rozpoznany → `upsert_object`+`assign_object` (+`add_object_alias`, gdy
+    rozpoznanie pochodzi z NAZWY — region rozpoznaje ze współrzędnych i aliasu nie ma); light
     nierozpoznany → delta (jeden zbiorczy `object.review_summary`); kalibracja → pomijana (poprawny
     NULL). Filtr → backfill zbiorczy `filter_canon`. Zwraca `ResolveSummary`. Idempotentny."""
     s = ResolveSummary()
     rows = con.execute(
-        "SELECT f.id AS fid, f.kind AS kind, h.object_raw AS obj, h.filter_raw AS filt "
+        "SELECT f.id AS fid, f.kind AS kind, f.object_source AS osrc, h.object_raw AS obj, "
+        "h.filter_raw AS filt, h.ra_deg AS ra, h.dec_deg AS dec "
         "FROM frame f JOIN header h ON h.frame_id = f.id").fetchall()
     s.frames = len(rows)
 
@@ -60,15 +64,24 @@ def run_resolver(con, now):
             s.light_frames += 1
             # solar/komety PRZED deep-sky: mają własne ID (nie katalogi mgławic), krok 5a.
             ident = resolve_solar(r["obj"]) or resolve_object(r["obj"])
+            # REGION = OSTATNI szczebel (#5, P3): dopiero gdy zeznanie nagłówka nic nie dało —
+            # 547 klatek `NGC6992` leży WEWNĄTRZ promienia Veil i chroni je wyłącznie ta kolejność.
+            # `object_source='user'` (ręczne przypisanie, przyszłe P4) bije INFERENCJĘ ze
+            # współrzędnych: derywacja nie kasuje decyzji człowieka. Zeznanie nagłówka zachowuje
+            # dotychczasowe pierwszeństwo — precedencję dla POZOSTAŁYCH szczebli uogólni P4.
+            if ident is None and r["osrc"] != "user":
+                ident = resolve_region(r["ra"], r["dec"])
             if ident is not None:
                 oid, created = repo.upsert_object(
                     con, canon=ident.canon, catalog=ident.catalog, kind=ident.kind, now=now)
                 s.objects_new += created
-                repo.add_object_alias(
-                    con, alias_norm=ident.alias_norm, object_id=oid, source=ident.source, now=now)
+                if ident.alias_norm:    # region NIE aliasuje — rozpoznanie nie pochodzi z nazwy
+                    repo.add_object_alias(con, alias_norm=ident.alias_norm, object_id=oid,
+                                          source=ident.source, now=now)
                 if repo.assign_object(con, frame_id=r["fid"], object_id=oid,
                                       object_source=ident.source, now=now):
                     s.objects_assigned += 1
+                    s.objects_by_region += ident.source == "region"
             else:
                 raw = _to_text(r["obj"])
                 if raw is not None:                  # obecny ale nierozpoznany → delta

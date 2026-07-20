@@ -52,8 +52,9 @@ class ObjectIdentity:
     canon: str           # NGC4258 | Sh2-131 | M45 …
     catalog: object      # NGC | IC | Sh2 | Messier | … (None gdy nieznany prefiks)
     kind: str            # deep_sky (solar/comet poza pierwszym przebiegiem)
-    source: str          # header | catalog_xref | common_name
-    alias_norm: str      # znormalizowana forma surowa (klucz object_alias)
+    source: str          # header | catalog_xref | common_name | solar | comet | region
+    alias_norm: object   # znormalizowana forma surowa (klucz object_alias); None gdy rozpoznanie
+                         # NIE pochodzi z nazwy (region — ze współrzędnych) → resolver pomija alias
 
 
 def _common_canon(raw):

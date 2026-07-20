@@ -506,7 +506,10 @@ def add_object_alias(con, *, alias_norm, object_id, source, now, actor="resolver
     """Zapisz równoważność `alias_norm` → obiekt (audyt „M106 ≡ NGC4258 via catalog_xref"). Po
     `UNIQUE(alias_norm)`: znana → (id, False) bez eventu (idempotencja); nowa → INSERT +
     `event(object.aliased)`; (id, True). `source` ∈ {header|catalog_xref|common_name|solar|comet|user}
-    (solar/comet = oś US/komet, krok 5a)."""
+    (solar/comet = oś US/komet, krok 5a). `region` w tym zbiorze NIE występuje ŚWIADOMIE: kompleks
+    rozpoznaje się ze WSPÓŁRZĘDNYCH, więc nie ma nazwy do zapisania jako równoważność — a alias
+    z surowego stringa byłby cichym konfliktem, bo ta funkcja zwraca istniejący wiersz po samym
+    `alias_norm`, BEZ sprawdzenia `object_id` (zob. `resolve/regions.py`)."""
     row = con.execute("SELECT id FROM object_alias WHERE alias_norm = ?", (alias_norm,)).fetchone()
     if row is not None:
         return row[0], False

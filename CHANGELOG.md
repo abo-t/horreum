@@ -6,6 +6,20 @@ schemat i API mogą się jeszcze zmieniać.
 
 ## [Niewydane]
 
+### Dodane
+- **Rozpoznawanie kompleksów po współrzędnych.** Obiekty rozciągłe, które nie mają jednego numeru
+  katalogowego — jak kompleks Veil, czyli Pętla Łabędzia (NGC6960 + NGC6979 + NGC6992 + NGC6995) —
+  są teraz rozpoznawane po tym, **gdzie celował teleskop**, a nie po nazwie w nagłówku. W archiwum
+  zdejmuje to z listy „do przeglądu" 250 klatek, w tym **83, którym program zapisujący nie wpisał
+  żadnej nazwy** — rozpoznanie po nazwie nie miało jak ich złapać. Rozpoznawalność obiektów na
+  klatkach światła: 97,2% → 99,0%. Definicje kompleksów są danymi
+  (`horreum/resolve/data/regions.json`), więc kolejny dopisuje się bez zmiany kodu.
+
+  Zachowawczo z założenia: **nazwa z nagłówka zawsze wygrywa ze współrzędnymi** — klatki podpisane
+  „NGC6992" zostają przy NGC6992, choć leżą wewnątrz kompleksu. Klatka celowana w pojedynczy obiekt,
+  ale bez podpisu, zostaje w przeglądzie, zamiast dostać zgadywany numer katalogowy. Ręczne
+  przypisanie obiektu, gdy powstanie, będzie miało pierwszeństwo przed rozpoznaniem ze współrzędnych.
+
 ## [0.3.2] — 2026-07-20
 
 Poprawki kolejki przeglądu (rzetelny licznik, trwały ślad nieczytelnej kopii) oraz dopieszczenie

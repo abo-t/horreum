@@ -135,8 +135,8 @@ CREATE TABLE config (
 CREATE TABLE object (
     id      INTEGER PRIMARY KEY,
     canon   TEXT NOT NULL UNIQUE,               -- NGC4258|Sh2-131|Moon|C/2025 A6 (Lemmon)
-    catalog TEXT,                               -- NGC|IC|Sh2|Messier|solar|comet
-    kind    TEXT                                -- deep_sky|solar_system|comet
+    catalog TEXT,                               -- NGC|IC|Sh2|Messier|solar|comet|region
+    kind    TEXT                                -- deep_sky|solar_system|comet|region
 );
 
 CREATE TABLE object_alias (
@@ -144,6 +144,7 @@ CREATE TABLE object_alias (
     alias_norm TEXT NOT NULL UNIQUE,            -- znormalizowana forma (bez spacji, lower)
     object_id  INTEGER NOT NULL REFERENCES object(id),
     source     TEXT NOT NULL                    -- catalog_xref|common_name|header|solar|comet|review|user
+                                                -- (region NIE aliasuje — rozpoznaje ze współrzędnych)
 );
 
 -- ============================================================ 1.6 audyt, kolekcje

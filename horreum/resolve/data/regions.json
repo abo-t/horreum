@@ -1,0 +1,12 @@
+{
+  "_comment": "Kompleksy nieba bez jednego oznaczenia katalogowego (zgłoszenie #5). Dopasowanie WYŁĄCZNIE po ra_deg/dec_deg nagłówka, w stopniach dziesiętnych; radius_deg to promień kątowy. Kanon trafia do object.canon dosłownie — object.canon nie ma COLLATE NOCASE, więc casing tutaj jest wiążący. Edycja tego pliku na istniejącej bazie to operacja MIGRACYJNA (zmiana środka/promienia przerzuca klatki między obiektami), nie zwykły re-run.",
+  "regions": [
+    {
+      "canon": "Veil",
+      "ra_deg": 312.75,
+      "dec_deg": 30.67,
+      "radius_deg": 1.8,
+      "note": "Cygnus Loop — pozostałość supernowej, ok. 3° średnicy, bez jednego oznaczenia katalogowego. Promień 1,8° obejmuje wszystkich czterech członków kompleksu: NGC6960 (0,95° od środka), NGC6995 (1,40°), NGC6979 (1,44°), NGC6992 (1,55°). Promień wybrany z ASTRONOMII, nie dopasowany do próbki — pomiar 2026-07-20 wykazał identyczny zbiór 250 klatek dla promieni od 1,0° do 3,0°."
+    }
+  ]
+}

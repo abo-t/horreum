@@ -136,11 +136,16 @@ class ReviewState:
     ta sama derywacja, co kolejka osi obiektu w `gui.queries.review_queue`.
 
     Kubełki NIE są rozłączne: klatka bez kamery nie da się złożyć w config, więc liczy się w
-    `no_camera` I `no_config`. `total` to DISTINCT klatek — NIGDY suma pól."""
+    `no_camera` I `no_config`. `total` to DISTINCT klatek — NIGDY suma pól.
+
+    `unreadable` (#13) to fakt o KOPII (location.unreadable_since), zliczany PO KLATKACH (DISTINCT
+    frame z ≥1 taką kopią — spójnie z resztą liczników, które są per-klatka). Kubełek zachodzi z
+    innymi jak dotychczasowe (kopia nieczytelna może być frame'em-szkieletem = też `headerless`)."""
     no_config: int = 0        # config_id NULL mimo zeznania (bez EXISTS(header) zlałby się headerless)
     headerless: int = 0       # brak wiersza `header` — plik nieczytelny przy skanie (frame-szkielet)
     no_camera: int = 0        # camera_id NULL mimo zeznania (brak INSTRUME/XPIXSZ)
     kind_unknown: int = 0     # zeznanie JEST, rodzaju nie dało się zmapować
+    unreadable: int = 0       # ≥1 kopia z unreadable_since NOT NULL (kopia stała się nieczytelna; #13)
     total: int = 0            # DISTINCT klatek w KTÓRYMKOLWIEK kubełku (nie suma — kubełki zachodzą)
 
 
@@ -152,7 +157,11 @@ def review_state(con):
     XISF nie mają kart), więc predykat na kartach byłby ślepy na XISF. Predykat jest przy tym
     świadomie SZERSZY od dawnego eventu `kind.unmapped` (ten wymagał NIEPUSTEGO IMAGETYP): czytelne
     zeznanie z nierozpoznanym rodzajem wymaga decyzji tak samo jak zeznanie z rodzajem niezmapowanym
-    — brak IMAGETYP był dotąd cichym NULL-em, którego raport nie pokazywał."""
+    — brak IMAGETYP był dotąd cichym NULL-em, którego raport nie pokazywał.
+
+    `unreadable` (#13) idzie po `location.unreadable_since IS NOT NULL` (join po kopii, DISTINCT po
+    klatce) i dokłada TRZECI dyzjunkt do `total` — kopia, która stała się nieczytelna, wchodzi do
+    kolejki jak „bez nagłówka", nawet gdy frame ma poprawne zeznanie (marker gaśnie po udanym odczycie)."""
     no_config = con.execute(
         "SELECT count(*) FROM frame f WHERE f.config_id IS NULL "
         "AND EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id)").fetchone()[0]
@@ -165,13 +174,20 @@ def review_state(con):
     kind_unknown = con.execute(
         "SELECT count(*) FROM frame f WHERE f.kind = 'unknown' "
         "AND EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id)").fetchone()[0]
+    # #13: DISTINCT klatek z ≥1 kopią oznaczoną nieczytelną (fakt o KOPII zliczony po klatkach —
+    # spójność z resztą liczników). Join po location; DISTINCT bo frame 1:N location.
+    unreadable = con.execute(
+        "SELECT count(DISTINCT f.id) FROM frame f JOIN location l ON l.frame_id = f.id "
+        "WHERE l.unreadable_since IS NOT NULL").fetchone()[0]
     total = con.execute(
         "SELECT count(*) FROM frame f WHERE "
         "NOT EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id) "
         "OR ((f.config_id IS NULL OR f.camera_id IS NULL OR f.kind = 'unknown') "
-        "    AND EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id))").fetchone()[0]
+        "    AND EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id)) "
+        "OR EXISTS (SELECT 1 FROM location l WHERE l.frame_id = f.id "
+        "           AND l.unreadable_since IS NOT NULL)").fetchone()[0]
     return ReviewState(no_config=no_config, headerless=headerless, no_camera=no_camera,
-                       kind_unknown=kind_unknown, total=total)
+                       kind_unknown=kind_unknown, unreadable=unreadable, total=total)
 
 
 @dataclass

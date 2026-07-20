@@ -146,7 +146,8 @@ _STAGE_LABEL = {"scan": "Skan", "group": "Grupowanie", "resolve": "Rozwiązywani
 # Kolejność i nazwy powodów przeglądu w raporcie dostawy (rdzeń niesie same liczby — wording należy
 # do powierzchni; konsolowy `cli._format_delta` ma własne, ASCII-owe).
 _REVIEW_REASONS = [("no_config", "bez konfiguracji"), ("headerless", "bez nagłówka"),
-                   ("no_camera", "bez kamery"), ("kind_unknown", "rodzaj nieznany")]
+                   ("no_camera", "bez kamery"), ("kind_unknown", "rodzaj nieznany"),
+                   ("unreadable", "kopia nieczytelna")]
 
 
 def _review_line(st):

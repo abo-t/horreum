@@ -11,6 +11,10 @@ schemat i API mogą się jeszcze zmieniać.
   dostawa bez realnych zmian nie zawyża go już liniowo (7 klatek pokazywało się jako 35 po pięciu
   przebiegach). Raport podaje teraz liczbę klatek (distinct) i powody, które się nakładają; klatka
   z czytelnym nagłówkiem, ale nierozpoznanym rodzajem, przestała być cichym pominięciem.
+- Kopia, która **stała się nieczytelna** przy re-skanie (transient NAS, bajty niezmienione), zostawia
+  teraz trwały znacznik w stanie — kolejka przeglądu pokazuje ją jako „kopia nieczytelna" (jak dziś
+  „bez nagłówka"), a skan przyrostowy re-czyta oznaczoną kopię do skutku (znacznik gaśnie dopiero po
+  udanym odczycie). Wcześniej alarm milkł po jednym przebiegu i nie było go widać w stanie (#13).
 
 ## [0.3.1] — 2026-07-18
 

@@ -81,12 +81,26 @@ def test_szkielet_przyszly_pusty(tmp_path):
     con.close()
 
 
-def test_user_version_v5_po_migracji(tmp_path):
-    """0005 podnosi user_version do 5 (świeża baza leci 0002→0003→0004→0005 sekwencyjnie)."""
+def test_user_version_v6_po_migracji(tmp_path):
+    """0006 podnosi user_version do 6 (świeża baza leci 0002→0003→0004→0005→0006 sekwencyjnie)."""
     con = db.open_db(str(tmp_path / "h.db"))
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 5
-    assert db.SCHEMA_VERSION == 5
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 6
+    assert db.SCHEMA_VERSION == 6
     con.close()
+
+
+def test_0006_marker_czytelnosci_kopii(tmp_path):
+    """0006 (#13): location.unreadable_since istnieje, DEFAULT NULL (czytelna do dowodu). Migracja
+    v5→v6 idempotentna (drugie open_db = no-op, nie „duplicate column"). Świeża baza = od razu v6."""
+    path = str(tmp_path / "h.db")
+    con = db.open_db(path)
+    loc_cols = {r[1] for r in con.execute("PRAGMA table_info(location)")}
+    assert "unreadable_since" in loc_cols
+    con.close()
+    con2 = db.open_db(path)                              # ponowna migracja: no-op, nie duplikuje kolumny
+    assert con2.execute("PRAGMA user_version").fetchone()[0] == 6
+    assert {r[1] for r in con2.execute("PRAGMA table_info(location)")} == loc_cols
+    con2.close()
 
 
 def test_os_obserwatorium_tabela_widok_kolumna(tmp_path):

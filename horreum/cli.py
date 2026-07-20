@@ -341,7 +341,8 @@ def _format_delta(db_path, rep):
     rv = rep.review
     lines.append(f"  do przegladu: {rv.total} klatek (distinct; powody moga sie nakladac)")
     for label, n in (("bez konfiguracji", rv.no_config), ("bez naglowka", rv.headerless),
-                     ("bez kamery", rv.no_camera), ("rodzaj nieznany", rv.kind_unknown)):
+                     ("bez kamery", rv.no_camera), ("rodzaj nieznany", rv.kind_unknown),
+                     ("kopia nieczytelna", rv.unreadable)):
         if n:
             lines.append(f"    {label}: {n}")
     return "\n".join(lines)

@@ -652,16 +652,21 @@ def test_scan_tree_header_none_frame_szkielet_D1(tmp_path):
 
 
 def test_scan_tree_szkielet_re_skan_idempotentny_D1(tmp_path):
-    """D1: re-skan tego samego nieczytelnego pliku NIE duplikuje frame'a ani frame.review (sha1
-    UNIQUE = kotwica idempotencji, której event-only frame.review wcześniej nie miał)."""
+    """D1 (+#13): re-skan nieczytelnego pliku NIE duplikuje frame'a; stan SETTLUJE, nie rośnie bez
+    końca. Brama OFF (volume='?') re-czyta plik: pierwszy re-odczyt ZAKŁADA marker `unreadable_since`
+    (przejście NULL→marker = jednorazowy frame.review), kolejny re-odczyt to cichy no-op (marker stoi,
+    mtime bez zmian → QUIET). Sha1 UNIQUE trzyma jeden frame; dziennik przestaje puchnąć."""
     con = _db(tmp_path)
     tree = tmp_path / "t"; tree.mkdir()
     (tree / "broken.xisf").write_bytes(b"NOTXISF!" + b"\x00" * 20)
-    scan_tree(con, tree, now=NOW)
-    s2 = scan_tree(con, tree, now=NOW)                       # drugi przebieg
-    assert (s2.frames_new, s2.frames_existing, s2.frame_review) == (0, 1, 0)
-    assert con.execute("SELECT count(*) FROM frame").fetchone()[0] == 1
-    assert con.execute("SELECT count(*) FROM event WHERE verb='frame.review'").fetchone()[0] == 1
+    scan_tree(con, tree, now=NOW)                            # skan 1: szkielet + frame.review (ścieżka nieznana)
+    s2 = scan_tree(con, tree, now=NOW)                       # skan 2: brama OFF re-czyta → marker zakładany
+    assert (s2.frames_new, s2.frames_existing, s2.frame_review) == (0, 1, 1)   # jednorazowe założenie markera
+    s3 = scan_tree(con, tree, now=NOW)                       # skan 3: marker stoi, mtime bez zmian → cichy no-op
+    assert (s3.frames_new, s3.frames_existing, s3.frame_review) == (0, 1, 0)
+    assert con.execute("SELECT count(*) FROM frame").fetchone()[0] == 1        # bez duplikatu frame'a
+    # dziennik SETTLUJE: nieznana-ścieżka (1) + założenie markera (1) = 2, dalej stały (nie rośnie)
+    assert con.execute("SELECT count(*) FROM event WHERE verb='frame.review'").fetchone()[0] == 2
     con.close()
 
 
@@ -975,9 +980,9 @@ def test_scan_tree_podmiana_tresci_rebound(tmp_path):
 
 
 def test_ingest_znana_sciezka_nieczytelna_bajty_bez_zmian(tmp_path):
-    """R3-b1: kopia, która BYŁA czytelna, teraz nieczytelna (transient NAS) przy NIEZMIENIONYCH
-    bajtach → tylko refresh mtime + frame.review „kopia nieczytelna"; ZERO nowych frame'ów
-    (degeneracja legalna wyłącznie dla ścieżki nieznanej)."""
+    """R3-b1 (#13): kopia, która BYŁA czytelna, teraz nieczytelna (transient NAS) przy NIEZMIENIONYCH
+    bajtach → refresh mtime + MARKER `unreadable_since` + frame.review „kopia nieczytelna"; ZERO
+    nowych frame'ów (degeneracja legalna wyłącznie dla ścieżki nieznanej)."""
     con = _db(tmp_path)
     tree = tmp_path / "t"; tree.mkdir()
     f = _light(tree / "l.fits", 1)
@@ -989,7 +994,131 @@ def test_ingest_znana_sciezka_nieczytelna_bajty_bez_zmian(tmp_path):
     ingest_record(con, bad, volume="VOL1", now=NOW, summary=s)
     assert (s.frames_new, s.frames_existing, s.frame_review) == (0, 1, 1)
     assert con.execute("SELECT count(*) FROM frame").fetchone()[0] == 1
-    assert con.execute("SELECT mtime FROM location").fetchone()[0] == "2027-01-01T00:00:00+00:00"
+    loc = con.execute("SELECT mtime, unreadable_since FROM location").fetchone()
+    assert loc["mtime"] == "2027-01-01T00:00:00+00:00"
+    assert loc["unreadable_since"] == NOW                    # marker ustawiony (znacznik czytelności)
     ev = con.execute("SELECT reason FROM event WHERE verb='frame.review'").fetchone()
     assert "kopia nieczytelna" in ev["reason"]
+    con.close()
+
+
+def test_brama_nie_pomija_kopii_oznaczonej_nieczytelnej(tmp_path):
+    """#13 (D4): kopia OZNACZONA nieczytelną (`unreadable_since` NOT NULL) NIGDY nie jest pomijana
+    przez bramę — re-czytana na każdym skanie mimo NIEZMIENIONEGO mtime, aż udany odczyt zgasi marker.
+    Bez tego marker po transiencie bez zmiany mtime nigdy by nie zgasł (brama pomijałaby w kółko)."""
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    f = _light(tree / "l.fits", 1)
+    scan_tree(con, tree, volume="VOL1", now=NOW)
+    row = con.execute("SELECT path, mtime FROM location").fetchone()
+    assert _already_scanned(con, "VOL1", row["path"], row["mtime"]) is True    # czytelna → pomijana
+    # oznacz nieczytelną przy TYM SAMYM mtime (marker był NULL → pierwsze oznaczenie mimo braku zmiany mtime)
+    good = scan_file(str(f))
+    bad = ScanRecord(path=good.path, size_bytes=good.size_bytes, mtime=row["mtime"],
+                     header=None, error="OSError: NAS timeout", file_sha1=good.file_sha1)
+    ingest_record(con, bad, volume="VOL1", now=NOW, summary=ScanSummary())
+    assert con.execute("SELECT unreadable_since FROM location").fetchone()[0] == NOW
+    assert _already_scanned(con, "VOL1", row["path"], row["mtime"]) is False   # marker → re-odczyt wymuszony
+    con.close()
+
+
+def test_ingest_nieczytelna_potem_wyzdrowienie_gasi_marker(tmp_path):
+    """#13: kopia nieczytelna → później znów czytelna przy TYM SAMYM mtime → marker ZGASZONY
+    (`location.refreshed` z diffem `unreadable_since`), mimo że pozostałe fakty kopii są identyczne."""
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    f = _light(tree / "l.fits", 1)
+    scan_tree(con, tree, volume="VOL1", now=NOW)
+    good = scan_file(str(f))
+    # 1) staje się nieczytelna (bajty bez zmian) → marker ustawiony
+    bad = ScanRecord(path=good.path, size_bytes=good.size_bytes, mtime=good.mtime,
+                     header=None, error="OSError: NAS timeout", file_sha1=good.file_sha1)
+    ingest_record(con, bad, volume="VOL1", now="2027-01-01T00:00:00+00:00", summary=ScanSummary())
+    assert con.execute("SELECT unreadable_since FROM location").fetchone()[0] == "2027-01-01T00:00:00+00:00"
+    # 2) wyzdrowienie: czytelna znów, TEN SAM mtime i te same bajty → marker gaśnie
+    s = ScanSummary()
+    ingest_record(con, good, volume="VOL1", now="2028-01-01T00:00:00+00:00", summary=s)
+    assert con.execute("SELECT unreadable_since FROM location").fetchone()[0] is None
+    assert (s.frames_existing, s.locations_refreshed) == (1, 1)
+    ev = con.execute(
+        "SELECT payload FROM event WHERE verb='location.refreshed' ORDER BY id DESC LIMIT 1").fetchone()
+    assert json.loads(ev["payload"]) == {
+        "unreadable_since": {"before": "2027-01-01T00:00:00+00:00", "after": None}}
+    con.close()
+
+
+def test_ingest_nieczytelna_powtorka_zero_nowego_review(tmp_path):
+    """#13/QUIET: powtórna awaria tej samej kopii bez zmiany mtime → `summary.frame_review == 0`
+    i ZERO nowego eventu frame.review (stan już alarmuje markerem — dziennik bez spamu co skan)."""
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    f = _light(tree / "l.fits", 1)
+    scan_tree(con, tree, volume="VOL1", now=NOW)
+    good = scan_file(str(f))
+    bad = ScanRecord(path=good.path, size_bytes=good.size_bytes, mtime=good.mtime,
+                     header=None, error="OSError: NAS timeout", file_sha1=good.file_sha1)
+    ingest_record(con, bad, volume="VOL1", now="2027-01-01T00:00:00+00:00", summary=ScanSummary())
+    ev1 = con.execute("SELECT count(*) FROM event WHERE verb='frame.review'").fetchone()[0]
+    s = ScanSummary()                                           # druga awaria, TEN SAM mtime → cichy no-op
+    ingest_record(con, bad, volume="VOL1", now="2028-01-01T00:00:00+00:00", summary=s)
+    assert s.frame_review == 0
+    assert con.execute("SELECT count(*) FROM event WHERE verb='frame.review'").fetchone()[0] == ev1
+    con.close()
+
+
+def _raise_oserror(msg):
+    """Podmianka `scan_file` symulująca plik, który przestał się OTWIERAĆ (błąd I/O poza try W1)."""
+    def boom(path):
+        raise OSError(msg)
+    return boom
+
+
+def test_backstop_znana_sciezka_open_failure_marker(tmp_path, monkeypatch):
+    """Z1 (#13): plik ZNANY przestaje się OTWIERAĆ (błąd I/O w `scan_file` — hasze są POZA try W1,
+    propagują do backstopu `scan_tree`) → backstop oznacza marker `unreadable_since` PRZEZ KLINGĘ
+    (idempotentnie), NIE flaguje sha1='?' co skan. Target eventu = REALNE sha1 (tożsamość znana)."""
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    _light(tree / "l.fits", 1)
+    scan_tree(con, tree, now=NOW)                            # 1. skan normalny → frame + location + header
+    monkeypatch.setattr("horreum.scan.scan_file", _raise_oserror("NAS otwarcie odmowione"))
+    s = scan_tree(con, tree, now="2027-01-01T00:00:00+00:00")   # gate OFF (volume='?') → scan_file wołany → boom
+    assert s.frame_review == 1
+    loc = con.execute("SELECT mtime, unreadable_since FROM location").fetchone()
+    assert loc["unreadable_since"] == "2027-01-01T00:00:00+00:00"     # marker ustawiony
+    ev = con.execute(
+        "SELECT target, reason FROM event WHERE verb='frame.review' ORDER BY id DESC LIMIT 1").fetchone()
+    assert ev["target"].startswith("sha1:") and ev["target"] != "sha1:?"   # tożsamość znana, nie backstop-'?'
+    assert "kopia nieczytelna" in ev["reason"]
+    con.close()
+
+
+def test_backstop_open_failure_powtorka_cichy_noop(tmp_path, monkeypatch):
+    """Z1/QUIET: powtórny skan przy wciąż-niedostępnym pliku (marker stoi, mtime Z BAZY bez zmiany) →
+    cichy no-op: `frame_review == 0`, ZERO nowych eventów. Domyka spam „open-failure co skan"."""
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    _light(tree / "l.fits", 1)
+    scan_tree(con, tree, now=NOW)
+    monkeypatch.setattr("horreum.scan.scan_file", _raise_oserror("nadal niedostepny"))
+    scan_tree(con, tree, now="2027-01-01T00:00:00+00:00")   # zakłada marker
+    ev1 = con.execute("SELECT count(*) FROM event WHERE verb='frame.review'").fetchone()[0]
+    s2 = scan_tree(con, tree, now="2028-01-01T00:00:00+00:00")   # druga awaria — marker stoi, mtime bez zmian
+    assert s2.frame_review == 0
+    assert con.execute("SELECT count(*) FROM event WHERE verb='frame.review'").fetchone()[0] == ev1
+    con.close()
+
+
+def test_backstop_nieznana_sciezka_flag_sha1_placeholder(tmp_path, monkeypatch):
+    """Z1: ścieżka NIEZNANA (brak location) + wyjątek w `scan_file` → backstop BEZ tożsamości:
+    `flag_frame_review(sha1='?')` (dotychczasowe zachowanie — brak kotwicy UNIQUE, może się powtórzyć).
+    Nic nie powstaje w tabelach domenowych (frame/location) — tylko event review."""
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    _light(tree / "l.fits", 1)                              # plik NIE skanowany wcześniej (brak location)
+    monkeypatch.setattr("horreum.scan.scan_file", _raise_oserror("boom"))
+    s = scan_tree(con, tree, now=NOW)
+    assert s.frame_review == 1
+    assert con.execute("SELECT target FROM event WHERE verb='frame.review'").fetchone()["target"] == "sha1:?"
+    assert con.execute("SELECT count(*) FROM location").fetchone()[0] == 0    # nic nie powstało
     con.close()

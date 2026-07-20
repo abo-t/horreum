@@ -156,6 +156,13 @@ def add_location(con, *, frame_id, volume, path, drive_letter=None, tier=None, m
         return row[0], False
 
     with con:  # atomowo: INSERT location + INSERT event
+        # FORWARD-GUARD (#13): `unreadable_since` NIE ustawiane tu — DEFAULT NULL (czytelna do
+        # dowodu). Ścieżka NIEZNANA-nieczytelna ma już ślad w STANIE: frame-szkielet bez `header`
+        # (kubełek `headerless`). Marker znaczy „kopia JEST nieczytelna" (BIEŻĄCY fakt — ostatnia
+        # próba odczytu nieudana), NIE „stała się nieczytelna po byciu czytelną": ustawia go WYŁĄCZNIE
+        # re-odczyt ZNANEJ ścieżki (`refresh_location_unreadable`). Skutek świadomy: kubełek `unreadable`
+        # bywa RÓŻNY między trybami bramy — przy `volume='?'` re-skan oznaczy też kopię nigdy-nie-czytelną,
+        # przy bramie ON pominie ją (marker NULL → brama skipuje). Issue zakresuje #13 do re-odczytu, nie tu.
         cur = con.execute(
             "INSERT INTO location(frame_id, volume, drive_letter, path, tier, mtime, "
             "file_sha1, header_hash, hdu_index, compressed, size_bytes, last_verified_at) "
@@ -171,8 +178,11 @@ def add_location(con, *, frame_id, volume, path, drive_letter=None, tier=None, m
     return location_id, True
 
 
-# Kolumny-fakty kopii na location — wspólna lista dla diffu w `refresh_location`.
-_LOCATION_FACTS = ("mtime", "file_sha1", "header_hash", "hdu_index", "compressed", "size_bytes")
+# Kolumny-fakty kopii na location — wspólna lista dla diffu w `refresh_location`. `unreadable_since`
+# TU (#13): przejście markera (np. udany odczyt gaszący go przy niezmienionym mtime) samo w sobie
+# jest zmianą faktu kopii — bez tego early-return `not changed` nigdy by markera nie zgasił.
+_LOCATION_FACTS = ("mtime", "file_sha1", "header_hash", "hdu_index", "compressed", "size_bytes",
+                   "unreadable_since")
 
 
 def rebind_location(con, *, location_id, frame_after, now, actor="scan"):
@@ -195,7 +205,7 @@ def rebind_location(con, *, location_id, frame_after, now, actor="scan"):
 
 
 def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_hash,
-                     hdu_index, compressed, size_bytes, now, actor="scan",
+                     hdu_index, compressed, size_bytes, unreadable_since, now, actor="scan",
                      raw_json=None, cards=None, hot_fields=None, camera_id=None, kind=None):
     """Re-odczyt ZNANEJ `(volume, path)` o NIEZMIENIONEJ tożsamości frame'a — kontrakt pełny
     brief §2 (R1#10 + R2#2/#7 + R3-b), domyka dług „mtime po re-odczycie nieaktualizowany":
@@ -208,6 +218,13 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
       przeliczenie pochodnych frame'a (R3-b2): `frame.camera_id`/`kind` z nowego zeznania →
       UPDATE + `event(frame.rederived)` (inaczej config budowany na stęchłej kamerze).
       Zeznanie odświeża OSTATNI re-odczyt (last-read-wins).
+    - **`unreadable_since` (#13)**: marker czytelności kopii — jeden z faktów kopii (`_LOCATION_FACTS`),
+      więc jego przejście SAMO jest zmianą. Udany odczyt podaje `None` → marker gaśnie (nawet gdy
+      pozostałe fakty identyczne, np. wyzdrowienie transientu przy tym samym mtime); rekord nieczytelny
+      przez degenerację podaje istniejący/nowy timestamp → marker zostaje/powstaje. Ślad wyzdrowienia
+      idzie do payloadu `location.refreshed` jako `{unreadable_since: {before, after}}`. Parametr
+      WYMAGANY (bez domyślnego): `None` znaczy „POTWIERDZAM udany odczyt pliku", nie „nie wiem" —
+      domyślne `None` byłoby cichym wektorem gaszenia alarmu, gdyby wołający zapomniał go policzyć.
 
     `hot_fields` = dict kolumn `header` (jak `extract_header`); `camera_id`/`kind` = pochodne
     POLICZONE przez wołającego z nowego dictu (emergencja kamery = osobny, idempotentny
@@ -216,12 +233,13 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
     jedyna sankcjonowana kasacja: cards są LUSTREM bieżącego zeznania, nie historią —
     historia mieszka w `event`."""
     after = {"mtime": mtime, "file_sha1": file_sha1, "header_hash": header_hash,
-             "hdu_index": hdu_index, "compressed": compressed, "size_bytes": size_bytes}
+             "hdu_index": hdu_index, "compressed": compressed, "size_bytes": size_bytes,
+             "unreadable_since": unreadable_since}
     result = {"facts": False, "header": False, "rederived": False}
     with _immediate(con):
         row = con.execute(
-            "SELECT mtime, file_sha1, header_hash, hdu_index, compressed, size_bytes "
-            "FROM location WHERE id = ?", (location_id,)).fetchone()
+            "SELECT mtime, file_sha1, header_hash, hdu_index, compressed, size_bytes, "
+            "unreadable_since FROM location WHERE id = ?", (location_id,)).fetchone()
         if row is None:
             raise ValueError(f"location:{location_id} nie istnieje")
         changed = {k: {"before": row[k], "after": after[k]}
@@ -230,8 +248,9 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
             return result
         con.execute(
             "UPDATE location SET mtime = ?, file_sha1 = ?, header_hash = ?, hdu_index = ?, "
-            "compressed = ?, size_bytes = ?, last_verified_at = ? WHERE id = ?",
-            (mtime, file_sha1, header_hash, hdu_index, compressed, size_bytes, now, location_id))
+            "compressed = ?, size_bytes = ?, unreadable_since = ?, last_verified_at = ? WHERE id = ?",
+            (mtime, file_sha1, header_hash, hdu_index, compressed, size_bytes, unreadable_since,
+             now, location_id))
         emit_event(con, actor=actor, verb="location.refreshed",
                    target=f"location:{location_id}", now=now, payload=changed)
         result["facts"] = True
@@ -282,19 +301,39 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
 
 def refresh_location_unreadable(con, *, location_id, sha1_data, path, mtime, reason,
                                 now, actor="scan"):
-    """Znana ścieżka, plik NIECZYTELNY, bajty NIEZMIENIONE (R3-b1): tylko refresh mtime +
-    `event(frame.review, „kopia nieczytelna")` — ZERO nowych frame'ów (transient NAS; degeneracja
-    tożsamości legalna wyłącznie dla ścieżki NIEZNANEJ). Target `sha1:` po tożsamości frame'a
-    lokacji (kotwica joinowalna)."""
+    """Znana ścieżka, plik NIECZYTELNY, bajty NIEZMIENIONE (R3-b1, #13): refresh mtime + ZNACZNIK
+    `unreadable_since` (marker czytelności kopii w STANIE) + `event(frame.review, „kopia
+    nieczytelna")` — ZERO nowych frame'ów (transient NAS; degeneracja tożsamości legalna wyłącznie
+    dla ścieżki NIEZNANEJ). Target `sha1:` po tożsamości frame'a lokacji (kotwica joinowalna).
+
+    SEMANTYKA MARKERA: znaczy „kopia JEST nieczytelna" (BIEŻĄCY fakt — ostatnia próba odczytu nieudana),
+    NIE „stała się nieczytelna po byciu czytelną". Ustawia go re-odczyt ZNANEJ ścieżki, więc przy bramie
+    OFF (`volume='?'`) oznaczy też kopię, która NIGDY nie była czytelna (przy bramie ON pominie ją) —
+    kubełek `unreadable` bywa RÓŻNY między trybami skanu, świadomie.
+
+    CYKL ŻYCIA MARKERA (#13): `unreadable_since = COALESCE(unreadable_since, now)` — PIERWSZA awaria
+    trzyma timestamp (idempotencja: powtórna awaria nie przestawia go). Marker w STANIE robi dwie
+    rzeczy: kolejka przeglądu (ze STANU po #12) pokazuje „kopia nieczytelna", a brama przyrostowa
+    (`scan._already_scanned`, `unreadable_since IS NULL`) re-czyta oznaczoną kopię aż do wyzdrowienia
+    (udany odczyt zgasi marker przez `refresh_location`). Gaśnie WYŁĄCZNIE po udanym odczycie.
+
+    ZWRACA bool (czy coś zmieniono). Zmiana zachodzi gdy `mtime` się różni LUB marker jest NULL
+    (pierwsze oznaczenie). QUIET: powtórna awaria bez zmiany mtime na już-oznaczonej kopii = cichy
+    no-op (`False`, BEZ eventu) — stan już alarmuje, dziennik bez spamu review co skan."""
     with _immediate(con):
-        row = con.execute("SELECT mtime FROM location WHERE id = ?", (location_id,)).fetchone()
+        row = con.execute(
+            "SELECT mtime, unreadable_since FROM location WHERE id = ?", (location_id,)).fetchone()
         if row is None:
             raise ValueError(f"location:{location_id} nie istnieje")
-        if row["mtime"] != mtime:
-            con.execute("UPDATE location SET mtime = ?, last_verified_at = ? WHERE id = ?",
-                        (mtime, now, location_id))
+        if row["mtime"] == mtime and row["unreadable_since"] is not None:
+            return False                              # powtórna awaria bez zmiany — cichy no-op (QUIET)
+        con.execute(
+            "UPDATE location SET mtime = ?, last_verified_at = ?, "
+            "unreadable_since = COALESCE(unreadable_since, ?) WHERE id = ?",
+            (mtime, now, now, location_id))
         emit_event(con, actor=actor, verb="frame.review", target=f"sha1:{sha1_data}", now=now,
                    reason=f"kopia nieczytelna: {reason}", payload={"path": path})
+    return True
 
 
 def _insert_cards(con, frame_id, cards):

@@ -516,21 +516,34 @@ def _filetype(path):
 
 def _already_scanned(con, volume, path, mtime):
     """Brama przyrostowa (§3.B / PLAN_skan §7.9): czy plik pod tą `(volume, path)` i `mtime` jest już
-    w bazie — TANIA detekcja (`stat`) PRZED drogim `sha1_of` (pełny odczyt). Czysta funkcja
+    w bazie I CZYTELNY — TANIA detekcja (`stat`) PRZED drogim `sha1_of` (pełny odczyt). Czysta funkcja
     `con→bool`, testowalna bez Qt.
 
     STAŁY literał SELECT + bind `?` (f-string wysadziłby bramkę AST §8.1 — `_first_sql_verb`=None dla
     nie-literału = offender poza repo.py/db.py). `UNIQUE(volume, path)` → ≤1 wiersz; `mtime`
-    rozstrzyga „niezmieniony". FORWARD-GUARD: gdy dojdzie pass zniknięć (`present`), dołożyć tu
-    `AND present=1` lub resetować `present=1` na trafieniu — inaczej „zmartwychwstały" plik
-    (present=0, ten sam mtime) zostałby pominięty. Dziś `present` zawsze 1 — uśpione.
+    rozstrzyga „niezmieniony".
+
+    GUARD MARKERA (#13): `unreadable_since IS NULL` — kopia OZNACZONA jako nieczytelna jest ZAWSZE
+    re-czytana na każdym skanie (marker ją wyklucza z pominięcia), aż UDANY odczyt zgasi marker. Bez
+    tego marker po transient awarii przy NIEZMIENIONYM mtime nigdy by nie zgasł: brama pomijałaby plik
+    w nieskończoność, a kopia zostałaby wiecznie „nieczytelna" w stanie mimo faktycznego wyzdrowienia.
+
+    FORWARD-GUARD: gdy dojdzie pass zniknięć (`present`), dołożyć tu `AND present=1` lub resetować
+    `present=1` na trafieniu — inaczej „zmartwychwstały" plik (present=0, ten sam mtime) zostałby
+    pominięty. Dziś `present` zawsze 1 — uśpione.
+
+    FORWARD-GUARD (marker × zniknięcie, #13): pass zniknięć MUSI rozstrzygnąć interakcję „znikła kopia
+    z markerem" — kopia OZNACZONA nieczytelną, a potem usunięta/przeniesiona (present=0) DZIŚ wisi
+    w kubełku `unreadable` bez ścieżki wyjścia (marker gaśnie WYŁĄCZNIE po udanym odczycie, którego już
+    nie będzie). Pass musi zdecydować: marker zostaje przy present=0 (kopia znikła nieczytelna) czy
+    gaśnie (znikła = już nie „nieczytelna, do odczytu"). Do czasu passa — świadoma luka.
 
     FORWARD-GUARD (prune wykluczeń): gdy dojdzie pass zniknięć, WYKLUCZENIE katalogu (np. `_WBPP`) to
     NIE to samo co zniknięcie pliku — plik istnieje, jest tylko poza zasięgiem skanu. Pass `present`
     MUSI liczyć `present=0` wyłącznie z faktycznie SKANOWANEGO poddrzewa (nie z tego, co prune odciął),
     inaczej przeniesienie danych pod wykluczony katalog fałszywie oznaczyłoby je jako znikłe (sieroty)."""
     row = con.execute(
-        "SELECT 1 FROM location WHERE volume=? AND path=? AND mtime=?",
+        "SELECT 1 FROM location WHERE volume=? AND path=? AND mtime=? AND unreadable_since IS NULL",
         (volume, path, mtime),
     ).fetchone()
     return row is not None
@@ -580,14 +593,16 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
         (multi-location); zeznanie z PIERWSZEGO wystąpienia (reguła N-lokacji, §2).
 
     ŚCIEŻKA ZNANA — kontrakt świeżości §2 (domyka dług „mtime nieaktualizowany"):
-      - plik NIECZYTELNY, bajty NIEZMIENIONE → `refresh_location_unreadable` (mtime + frame.review,
-        ZERO nowych frame'ów) — chyba że nic się nie zmieniło i frame to już szkielet (czysty
-        no-op idempotentnego re-skanu);
+      - plik NIECZYTELNY, bajty NIEZMIENIONE → `refresh_location_unreadable` (mtime + MARKER
+        `unreadable_since` + frame.review, ZERO nowych frame'ów; #13). Wołane BEZWARUNKOWO — cichy
+        no-op idempotentnego re-skanu rozstrzyga repo (zwraca False, gdy powtórna awaria niczego nie
+        zmienia); `summary.frame_review` rośnie TYLKO gdy repo zwróciło True;
       - PODMIANA TREŚCI (świeża tożsamość ≠ tożsamość frame'a lokacji — WBPP re-generuje master
         pod tą samą nazwą): `upsert_frame` (ew. degenerat) + `rebind_location` + świeże fakty
         kopii; stary frame ZOSTAJE (append-only — pass zniknięć go podchwyci);
       - ta sama tożsamość → `refresh_location`: fakty kopii + (przy zmianie `header_hash`)
-        odświeżenie zeznania i pochodnych frame'a (last-read-wins).
+        odświeżenie zeznania i pochodnych frame'a (last-read-wins). Udany odczyt GASI marker
+        `unreadable_since` (kopia wyzdrowiała; #13), degeneracja go zakłada/trzyma.
 
     NIE łapie wyjątków — backstop bez tożsamości (sha1 nieznany → `frame.review`, sha1='?') należy
     do wołającego (`scan_tree` / import), bo to on wie, jak zidentyfikować rekord do review."""
@@ -606,7 +621,8 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
         sha1_data, uncomputable = rec.file_sha1, 1
 
     loc = con.execute(
-        "SELECT id, frame_id, mtime, file_sha1 FROM location WHERE volume = ? AND path = ?",
+        "SELECT id, frame_id, mtime, file_sha1, unreadable_since "
+        "FROM location WHERE volume = ? AND path = ?",
         (volume, rec.path)).fetchone()
 
     if loc is None:                                    # ścieżka NIEZNANA — dotychczasowy tor
@@ -635,19 +651,23 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
         "SELECT sha1_data FROM frame WHERE id = ?", (loc["frame_id"],)).fetchone()
 
     if not readable and rec.file_sha1 == loc["file_sha1"]:
-        # R3-b1: znana kopia nieczytelna, bajty bez zmian → mtime + review; ZERO nowych frame'ów.
-        # Czysty no-op dla szkieletu bez żadnej zmiany (idempotentny re-skan bez szumu review).
+        # R3-b1 (#13): znana kopia nieczytelna, bajty bez zmian → refresh mtime + MARKER
+        # `unreadable_since` (znacznik czytelności w STANIE) + review; ZERO nowych frame'ów
+        # (degeneracja tożsamości legalna wyłącznie dla ścieżki nieznanej). Marker trzyma alarm i
+        # wymusza re-odczyt przez bramę aż do wyzdrowienia; `refresh_location_unreadable` zwraca
+        # False przy powtórnej awarii bez zmiany (QUIET) → wtedy licznik review milczy.
         summary.frames_existing += 1
-        had_header = con.execute(
-            "SELECT 1 FROM header WHERE frame_id = ?", (loc["frame_id"],)).fetchone() is not None
-        if had_header or rec.mtime != loc["mtime"]:
-            repo.refresh_location_unreadable(
+        if repo.refresh_location_unreadable(
                 con, location_id=loc["id"], sha1_data=frame_row["sha1_data"], path=rec.path,
-                mtime=rec.mtime, reason=rec.error, now=now, actor=actor)
+                mtime=rec.mtime, reason=rec.error, now=now, actor=actor):
             summary.frame_review += 1
         return
 
     frame_id = loc["frame_id"]
+    # Marker czytelności kopii (#13) dla OBU gałęzi refresh_location: udany odczyt (readable) gasi
+    # marker (None); rekord nieczytelny wpadający tu przez DEGENERACJĘ (podmiana treści na
+    # nieczytelną) trzyma/zakłada marker (istniejący timestamp albo `now`) — marker ma zostać, nie zgasnąć.
+    unreadable_after = None if readable else (loc["unreadable_since"] or now)
     if sha1_data != frame_row["sha1_data"]:            # PODMIANA TREŚCI pod znaną ścieżką
         frame_id, created = repo.upsert_frame(
             con, sha1_data=sha1_data, sha1_data_uncomputable=uncomputable,
@@ -668,7 +688,8 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
         refreshed = repo.refresh_location(
             con, location_id=loc["id"], frame_id=frame_id, mtime=rec.mtime,
             file_sha1=rec.file_sha1, header_hash=rec.header_hash, hdu_index=rec.hdu_index,
-            compressed=rec.compressed, size_bytes=rec.size_bytes, now=now, actor=actor)
+            compressed=rec.compressed, size_bytes=rec.size_bytes, unreadable_since=unreadable_after,
+            now=now, actor=actor)
         summary.locations_refreshed += refreshed["facts"]
         return
 
@@ -677,7 +698,8 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
     refreshed = repo.refresh_location(
         con, location_id=loc["id"], frame_id=frame_id, mtime=rec.mtime,
         file_sha1=rec.file_sha1, header_hash=rec.header_hash, hdu_index=rec.hdu_index,
-        compressed=rec.compressed, size_bytes=rec.size_bytes, now=now, actor=actor,
+        compressed=rec.compressed, size_bytes=rec.size_bytes, unreadable_since=unreadable_after,
+        now=now, actor=actor,
         raw_json=json.dumps(rec.header, ensure_ascii=False) if readable else None,
         cards=rec.cards, hot_fields=extract_header(rec.header) if readable else None,
         camera_id=camera_id, kind=kind)
@@ -721,8 +743,11 @@ def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now,
     (`repo`). Jeden plik = jedno dotknięcie (§1.2). Zapis WYŁĄCZNIE przez `repo` (zero DML tutaj).
 
     Per plik: brama przyrostowa → `scan_file` (read-only) → `ingest_record` (jądro). Backstop W1:
-    dowolny nieoczekiwany wyjątek per-plik → `frame.review`, skan leci dalej (pojedynczy plik nie
-    wywala całości). `now` jawny (ISO-8601) — deterministyczne testy. Zwraca `ScanSummary`.
+    dowolny nieoczekiwany wyjątek per-plik NIE wywala całości — skan leci dalej. Rozstrzygnięcie
+    zależy od tego, czy ścieżka jest ZNANA (#13): ZNANA → `refresh_location_unreadable` (marker
+    `unreadable_since`, idempotentnie — powtórna awaria to cichy no-op, nie spam review); NIEZNANA →
+    `flag_frame_review(sha1='?')` (backstop bez tożsamości — brak kotwicy UNIQUE, może się powtórzyć).
+    `now` jawny (ISO-8601) — deterministyczne testy. Zwraca `ScanSummary`.
 
     BRAMA PRZYROSTOWA (§3.B) — aktywna ⟺ `volume != '?'`. Gdy znamy trwały serial woluminu,
     plik o znanym `(volume, path, mtime)` jest POMIJANY bez `sha1_of` (drogi pełny odczyt) i bez DML
@@ -760,9 +785,24 @@ def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now,
                 ingest_record(con, rec, volume=volume, drive_letter=drive_letter, tier=tier,
                               now=now, summary=summary)
         except Exception as exc:                           # backstop W1: pojedynczy plik nie wywala skanu
-            repo.flag_frame_review(
-                con, sha1="?", path=spath, reason=f"{type(exc).__name__}: {exc}", now=now)
-            summary.frame_review += 1
+            # Błąd I/O w scan_file (hasze są POZA try W1 — otwarcie/odczyt pliku propaguje) na ZNANEJ
+            # ścieżce: oznacz marker `unreadable_since` przez klingę (#13) zamiast flagować sha1='?'
+            # co skan. Bez tego marker znosi bramę → plik, który przestał się OTWIERAĆ, generowałby
+            # +1 event/skan w nieskończoność. `mtime` bierzemy Z BAZY (bez zmiany) → powtórka to cichy
+            # no-op (QUIET). Ścieżka NIEZNANA (brak location) → backstop bez tożsamości: sha1='?'.
+            reason = f"{type(exc).__name__}: {exc}"
+            row = con.execute(
+                "SELECT l.id, l.mtime, f.sha1_data FROM location l JOIN frame f ON f.id = l.frame_id "
+                "WHERE l.volume = ? AND l.path = ?",
+                (volume, spath)).fetchone()
+            if row is not None:
+                if repo.refresh_location_unreadable(
+                        con, location_id=row["id"], sha1_data=row["sha1_data"], path=spath,
+                        mtime=row["mtime"], reason=reason, now=now):
+                    summary.frame_review += 1
+            else:
+                repo.flag_frame_review(con, sha1="?", path=spath, reason=reason, now=now)
+                summary.frame_review += 1
         if progress is not None:
             progress(summary.files, total, spath, summary)
     return summary

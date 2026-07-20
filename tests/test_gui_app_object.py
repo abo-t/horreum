@@ -164,7 +164,9 @@ def test_kolejka_review_drazenie(view):
 def test_kolejka_liczniki_informacyjne(view):
     v, con, ids = view
     texts = [v.review.item(r).text() for r in range(v.review.count())]
-    assert any("config-review: 4" in t and "bez nagłówka: 1" in t for t in texts)
+    # #13: linia informacyjna niesie też licznik „kopie nieczytelne" (fixture §8 nie ma żadnej → 0)
+    assert any("config-review: 4" in t and "bez nagłówka: 1" in t
+               and "kopie nieczytelne: 0" in t for t in texts)
 
 
 # --- read-only: render i brak zapisu ---

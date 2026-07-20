@@ -17,11 +17,14 @@ from importlib import resources
 # observatory_canonical; baza v3 dostaje pustą oś (resolve_observatory wypełnia z cards).
 # 0005 to PRZYROST (staging renamu "Nazwy z faktów"): nowa tabela pending_renames; zero zmian
 # istniejących. Osobna od pending_changes (inny kształt path→path, inna kotwica mtime).
+# 0006 to PRZYROST (#13): znacznik czytelności kopii — location.unreadable_since (NULL=czytelna,
+# ISO=pierwsza nieudana próba). Zero zmian istniejących: ADD COLUMN, re-skan wypełnia (jak 0004).
 MIGRATIONS = [
     (2, "0002_initial.sql"),
     (3, "0003_writeback.sql"),
     (4, "0004_observatory.sql"),
     (5, "0005_rename.sql"),
+    (6, "0006_unreadable.sql"),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 _KNOWN_VERSIONS = frozenset({0} | {v for v, _ in MIGRATIONS})

@@ -543,7 +543,8 @@ class ObjectAxisView(QWidget):
             self.review.addItem(it)
         # liczniki innych kanałów jako pozycje informacyjne (bez UserRole → nieklikane do klatek)
         info = QListWidgetItem(
-            f'— config-review: {q["config_review_count"]}  ·  bez nagłówka: {q["headerless_count"]}')
+            f'— config-review: {q["config_review_count"]}  ·  bez nagłówka: {q["headerless_count"]}'
+            f'  ·  kopie nieczytelne: {q["unreadable_count"]}')
         info.setFlags(Qt.ItemIsEnabled)        # nie do zaznaczenia (informacyjne)
         self.review.addItem(info)
 

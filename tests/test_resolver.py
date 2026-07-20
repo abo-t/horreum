@@ -160,6 +160,56 @@ def test_review_rodzaj_nieznany_lapie_cichy_null(tmp_path):
     con.close()
 
 
+def test_review_unreadable_ze_stanu_i_total_distinct(tmp_path):
+    """#13: kubełek `unreadable` liczy klatki z ≥1 kopią nieczytelną ZE STANU; `total` obejmuje taką
+    klatkę (trzeci dyzjunkt) i NIE liczy jej podwójnie, gdy ta sama klatka jest już w innym kubełku
+    (DISTINCT). Stan idempotentny: powtórna awaria bez zmiany mtime niczego nie zawyża."""
+    from horreum import repo
+    from horreum.resolver import review_state
+    con = db.open_db(str(tmp_path / "h.db"))
+    # light z zeznaniem, ale bez kamery i configu → kubełki no_camera + no_config (klatka już „w kolejce")
+    fid, _ = repo.upsert_frame(con, sha1_data="d1", kind="light", filetype="fits",
+                               camera_id=None, now=NOW)
+    repo.record_header(con, frame_id=fid, raw_json="{}", object_raw="M31", now=NOW)
+    lid, _ = repo.add_location(con, frame_id=fid, volume="V", path="x.fits", mtime="t1",
+                               file_sha1="f1", now=NOW)
+    st0 = review_state(con)
+    assert (st0.unreadable, st0.no_config, st0.no_camera, st0.total) == (0, 1, 1, 1)
+    # kopia staje się nieczytelna → marker w STANIE
+    repo.refresh_location_unreadable(con, location_id=lid, sha1_data="d1", path="x.fits",
+                                     mtime="t2", reason="OSError", now=NOW)
+    st1 = review_state(con)
+    assert st1.unreadable == 1                          # kubełek liczy ze STANU
+    assert (st1.no_config, st1.no_camera) == (1, 1)     # klatka nadal w tamtych kubełkach
+    assert st1.total == 1                               # DISTINCT — ta sama klatka, nie 3
+    # powtórna awaria (marker stoi, ten sam mtime) → stan stabilny (idempotencja)
+    repo.refresh_location_unreadable(con, location_id=lid, sha1_data="d1", path="x.fits",
+                                     mtime="t2", reason="OSError", now=NOW)
+    st2 = review_state(con)
+    assert (st2.unreadable, st2.total) == (1, 1)
+    con.close()
+
+
+def test_review_unreadable_distinct_po_kopiach(tmp_path):
+    """#13: klatka z DWIEMA nieczytelnymi kopiami liczy się w `unreadable` RAZ (count(DISTINCT f.id)) —
+    marker to fakt o KOPII, ale kubełek zlicza po klatkach (spójność z resztą liczników)."""
+    from horreum import repo
+    from horreum.resolver import review_state
+    con = db.open_db(str(tmp_path / "h.db"))
+    fid, _ = repo.upsert_frame(con, sha1_data="d1", kind="light", filetype="fits",
+                               camera_id=None, now=NOW)
+    l1, _ = repo.add_location(con, frame_id=fid, volume="V1", path="a.fits", mtime="t1",
+                              file_sha1="f1", now=NOW)
+    l2, _ = repo.add_location(con, frame_id=fid, volume="V2", path="b.fits", mtime="t1",
+                              file_sha1="f1", now=NOW)
+    repo.refresh_location_unreadable(con, location_id=l1, sha1_data="d1", path="a.fits",
+                                     mtime="t2", reason="e", now=NOW)
+    repo.refresh_location_unreadable(con, location_id=l2, sha1_data="d1", path="b.fits",
+                                     mtime="t2", reason="e", now=NOW)
+    assert review_state(con).unreadable == 1            # DWIE kopie, JEDNA klatka
+    con.close()
+
+
 def _solar_tree(tmp_path):
     """3 light'y solar/kometa (Jupiter, C/2023 A3, Lemmon) + 1 light prywatny (Mur, delta) +
     1 flat OBJECT='Moon' (kind-aware: kalibracja NIE dostaje obiektu). Wszystkie ASI2600MM."""

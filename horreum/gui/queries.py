@@ -202,10 +202,13 @@ def review_queue(con):
         (R#2): grouper iteruje `frame JOIN header`, więc klatka bez nagłówka nigdy nie jest flagowana
         i cicho zostaje config NULL; bez tego predykatu licznik zlałby trzy stany;
       - `headerless_count`: frame BEZ wiersza `header` (`NOT EXISTS`) — osobny realny kubełek
-        wydobyty spod fałszywego config-review.
-    Oba liczniki liczy `resolver.review_state` — JEDEN właściciel predykatu stanu (#12): ta sama
-    derywacja zasila raport dostawy, więc kolejka i raport nie mogą się rozjechać.
-    Zwraca dict: {object_review: [Row(object_raw, n)], config_review_count: int, headerless_count: int}."""
+        wydobyty spod fałszywego config-review;
+      - `unreadable_count`: klatki z ≥1 kopią, która STAŁA SIĘ nieczytelna (`location.unreadable_since
+        NOT NULL`, #13) — informacyjny, bez drążenia (to fakt o kopii/skanie, nie o osi obiektu).
+    Liczniki poza obiekt-review liczy `resolver.review_state` — JEDEN właściciel predykatu stanu
+    (#12): ta sama derywacja zasila raport dostawy, więc kolejka i raport nie mogą się rozjechać.
+    Zwraca dict: {object_review: [Row(object_raw, n)], config_review_count: int, headerless_count: int,
+    unreadable_count: int}."""
     object_review = con.execute(
         "SELECT h.object_raw AS object_raw, COUNT(*) AS n "
         "FROM frame f JOIN header h ON h.frame_id = f.id "
@@ -215,7 +218,7 @@ def review_queue(con):
     ).fetchall()
     st = review_state(con)
     return {"object_review": object_review, "config_review_count": st.no_config,
-            "headerless_count": st.headerless}
+            "headerless_count": st.headerless, "unreadable_count": st.unreadable}
 
 
 def object_review_frames(con, object_raw):

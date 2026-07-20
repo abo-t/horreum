@@ -275,7 +275,7 @@ def test_refresh_location_bez_zmian_zero_eventow(tmp_path):
     before = con.execute("SELECT count(*) FROM event").fetchone()[0]
     out = repo.refresh_location(con, location_id=lid, frame_id=fid, mtime="t1",
                                 file_sha1="f1", header_hash="h1", hdu_index=0, compressed=0,
-                                size_bytes=100, now=NOW)
+                                size_bytes=100, unreadable_since=None, now=NOW)
     assert out == {"facts": False, "header": False, "rederived": False}
     assert con.execute("SELECT count(*) FROM event").fetchone()[0] == before
     con.close()
@@ -288,7 +288,7 @@ def test_refresh_location_mtime_dlug_domkniety(tmp_path):
     fid, lid = _frame_with_location(con)
     out = repo.refresh_location(con, location_id=lid, frame_id=fid, mtime="t2",
                                 file_sha1="f1", header_hash="h1", hdu_index=0, compressed=0,
-                                size_bytes=100, now=NOW)
+                                size_bytes=100, unreadable_since=None, now=NOW)
     assert out["facts"] is True and out["header"] is False
     assert con.execute("SELECT mtime FROM location WHERE id=?", (lid,)).fetchone()[0] == "t2"
     ev = con.execute("SELECT payload FROM event WHERE verb='location.refreshed'").fetchall()
@@ -311,7 +311,7 @@ def test_refresh_location_header_hash_odswieza_zeznanie_i_pochodne(tmp_path):
                                    is_mono_source="model", raw_instrume="x", now=NOW)
     out = repo.refresh_location(
         con, location_id=lid, frame_id=fid, mtime="t2", file_sha1="f2", header_hash="h2",
-        hdu_index=0, compressed=0, size_bytes=102, now=NOW,
+        hdu_index=0, compressed=0, size_bytes=102, unreadable_since=None, now=NOW,
         raw_json='{"OBJECT": "M33"}',
         cards=[Card("OBJECT", 0, "M33", None, "str", None),
                Card("FILTER", 0, "Ha", None, "str", None)],
@@ -352,17 +352,57 @@ def test_rebind_location_przepina_i_zostawia_stary_frame(tmp_path):
     con.close()
 
 
-def test_refresh_location_unreadable_mtime_i_review(tmp_path):
-    """R3-b1: znana kopia nieczytelna (bajty bez zmian) → refresh mtime + event(frame.review
-    „kopia nieczytelna"), zero nowych frame'ów."""
+def test_refresh_location_unreadable_mtime_marker_i_review(tmp_path):
+    """R3-b1 (#13): znana kopia nieczytelna (bajty bez zmian) → refresh mtime + MARKER
+    `unreadable_since` (znacznik czytelności w STANIE) + event(frame.review „kopia nieczytelna");
+    zwraca True; zero nowych frame'ów."""
     con = _fresh(tmp_path)
     fid, lid = _frame_with_location(con)
-    repo.refresh_location_unreadable(con, location_id=lid, sha1_data="d1", path="x.fits",
-                                     mtime="t9", reason="OSError: NAS timeout", now=NOW)
-    assert con.execute("SELECT mtime FROM location WHERE id=?", (lid,)).fetchone()[0] == "t9"
+    assert repo.refresh_location_unreadable(con, location_id=lid, sha1_data="d1", path="x.fits",
+                                            mtime="t9", reason="OSError: NAS timeout", now=NOW) is True
+    row = con.execute("SELECT mtime, unreadable_since FROM location WHERE id=?", (lid,)).fetchone()
+    assert row["mtime"] == "t9" and row["unreadable_since"] == NOW      # marker = timestamp awarii
     ev = con.execute("SELECT target, reason FROM event WHERE verb='frame.review'").fetchone()
     assert ev["target"] == "sha1:d1" and "kopia nieczytelna" in ev["reason"]
     assert con.execute("SELECT count(*) FROM frame").fetchone()[0] == 1
+    con.close()
+
+
+def test_refresh_location_unreadable_powtorka_cichy_noop(tmp_path):
+    """D2/QUIET (#13): powtórna awaria bez zmiany mtime (marker już stoi) → `False`, BEZ drugiego
+    eventu; marker trzyma PIERWSZY timestamp (idempotencja przez COALESCE — stan już alarmuje)."""
+    con = _fresh(tmp_path)
+    fid, lid = _frame_with_location(con)   # mtime="t1"
+    assert repo.refresh_location_unreadable(con, location_id=lid, sha1_data="d1", path="x.fits",
+                                            mtime="t9", reason="OSError", now="n1") is True
+    # druga awaria z TYM SAMYM mtime "t9" (już w bazie) → marker stoi → cichy no-op
+    assert repo.refresh_location_unreadable(con, location_id=lid, sha1_data="d1", path="x.fits",
+                                            mtime="t9", reason="OSError", now="n2") is False
+    assert con.execute("SELECT unreadable_since FROM location WHERE id=?",
+                       (lid,)).fetchone()[0] == "n1"                    # PIERWSZY timestamp trzyma
+    assert con.execute("SELECT count(*) FROM event WHERE verb='frame.review'").fetchone()[0] == 1
+    con.close()
+
+
+def test_refresh_location_udany_odczyt_gasi_marker(tmp_path):
+    """#13: udany odczyt GASI marker `unreadable_since` NAWET gdy pozostałe fakty kopii identyczne
+    (przejście markera jest w `_LOCATION_FACTS`, więc samo w sobie jest zmianą — inaczej early-return
+    `not changed` nigdy by go nie zgasił). Ślad wyzdrowienia w payloadzie `location.refreshed`."""
+    con = _fresh(tmp_path)
+    fid, lid = _frame_with_location(con)   # mtime="t1", file_sha1="f1", header_hash="h1", ...
+    # oznacz kopię nieczytelną (mtime bez zmiany "t1", ale marker był NULL → change; marker=NOW)
+    repo.refresh_location_unreadable(con, location_id=lid, sha1_data="d1", path="x.fits",
+                                     mtime="t1", reason="OSError", now=NOW)
+    assert con.execute("SELECT unreadable_since FROM location WHERE id=?", (lid,)).fetchone()[0] == NOW
+    # udany odczyt: unreadable_since=None, WSZYSTKIE inne fakty IDENTYCZNE jak przy add_location
+    out = repo.refresh_location(con, location_id=lid, frame_id=fid, mtime="t1", file_sha1="f1",
+                                header_hash="h1", hdu_index=0, compressed=0, size_bytes=100,
+                                now="t2", unreadable_since=None)
+    assert out["facts"] is True                                        # przejście markera = zmiana faktu
+    assert con.execute("SELECT unreadable_since FROM location WHERE id=?", (lid,)).fetchone()[0] is None
+    ev = con.execute("SELECT payload FROM event WHERE verb='location.refreshed'").fetchall()
+    assert len(ev) == 1
+    assert json.loads(ev[0]["payload"]) == {"unreadable_since": {"before": NOW, "after": None}}
     con.close()
 
 

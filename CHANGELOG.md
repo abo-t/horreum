@@ -8,9 +8,27 @@ schemat i API mogą się jeszcze zmieniać.
 
 ## [0.3.2] — 2026-07-20
 
-Poprawki kolejki przeglądu: rzetelny licznik i trwały ślad nieczytelnej kopii.
+Poprawki kolejki przeglądu (rzetelny licznik, trwały ślad nieczytelnej kopii) oraz dopieszczenie
+list: liczby i godziny czytają się teraz jako kolumna, nie jako ogon nazwy.
+
+### Zmienione
+- **Listy pokazują liczby w osobnej kolumnie po prawej.** Dotyczy listwy filtrów w Zbiorach
+  (obiekt, filtr, rodzaj, teleskop, noc), listy zadań w Porządkach i panelu „Pola". Wcześniej
+  liczba i godziny naświetlania doklejały się do nazwy jednym ciągiem: najdłuższa pozycja
+  rozpychała listę i wymuszała poziomy pasek przewijania, przez co „1.5 h" bywało ucięte, a godzin
+  nie dało się porównać wzrokiem między wierszami. Teraz nazwa skraca się wielokropkiem, a liczba
+  zostaje zawsze w całości.
+- Godziny naświetlania przy obiekcie mają wagę drugorzędną — nazwa obiektu prowadzi wzrok, godziny
+  jej nie konkurują.
+- Porządki: liczba przy zadaniu jest pogrubiona, a zadania z zerem wyszarzone — „nic do zrobienia"
+  widać bez czytania liczby (pozycja zostaje klikalna, bo to jedyna droga do danego ekranu).
 
 ### Naprawione
+- Licznik zbioru odmienia się po polsku: „1 klatka" zamiast „1 klatek" (ścieżka Duplikatów robi
+  z pojedynczej klatki przypadek typowy).
+- Pusty widok Zbiorów na **pustej bazie** proponuje przyjęcie dostawy zamiast zmiany filtra —
+  wcześniej odsyłał do filtrowania czegoś, czego jeszcze nie ma.
+- Liczniki pokrycia w panelu „Pola" nie są już ucinane przy węższym oknie.
 - Licznik „do przeglądu" w raporcie dostawy liczy **stan**, nie zdarzenia z dziennika — powtórna
   dostawa bez realnych zmian nie zawyża go już liniowo (7 klatek pokazywało się jako 35 po pięciu
   przebiegach). Raport podaje teraz liczbę klatek (distinct) i powody, które się nakładają; klatka

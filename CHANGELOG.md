@@ -6,6 +6,10 @@ schemat i API mogą się jeszcze zmieniać.
 
 ## [Niewydane]
 
+## [0.3.2] — 2026-07-20
+
+Poprawki kolejki przeglądu: rzetelny licznik i trwały ślad nieczytelnej kopii.
+
 ### Naprawione
 - Licznik „do przeglądu" w raporcie dostawy liczy **stan**, nie zdarzenia z dziennika — powtórna
   dostawa bez realnych zmian nie zawyża go już liniowo (7 klatek pokazywało się jako 35 po pięciu

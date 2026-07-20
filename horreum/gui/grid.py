@@ -35,9 +35,11 @@ from PySide6.QtWidgets import (
 )
 
 from horreum import db, filter_engine, macro as macro_mod, naming, pivot as pivot_mod, repo, writeback
-from horreum.gui import facet_model, portfolio, queries, theme
-from horreum.gui.facets import FacetRail
-from horreum.gui.projection_dialog import ProjectionDialog
+from horreum.gui import facet_model, portfolio, queries, rows, theme
+from horreum.gui.facets import RAIL_MIN_W as _FIELDS_MIN_W, FacetRail
+# `plural` mieszka przy dialogu projekcji (jedyny właściciel — SPOT); grid i tak importuje ten moduł.
+from horreum.gui.projection_dialog import ProjectionDialog, plural
+from horreum.gui.rows import TwoPartDelegate
 
 # Kolumny bazowe: (nagłówek, klucz). Klucze `_telescope`/`_object`/`_dt_delta` = pochodne. `_dt_delta`
 # (Δh nagłówek−nazwa) liczone w `_derive` z `naming.header_dt`/`filename_dt` — `base_rows` zwraca już
@@ -48,6 +50,17 @@ BASE_COLS = [
     ("Δh (hdr−nazwa)", "_dt_delta"),
 ]
 _MISSING_TEXT = "—"
+
+
+def _frames(n):
+    """„klatka/klatki/klatek" — odmiana rzeczownika licznika zbioru [#11]."""
+    return plural(n, "klatka", "klatki", "klatek")
+
+
+# Pusty grid mówi DWIE różne rzeczy — filtr nic nie wpuścił vs. w bazie nie ma nic (wiz F5 #8:
+# „zmień filtr lub perspektywę" na pustej bazie wysyła usera w ślepy zaułek zamiast po dostawę).
+_EMPTY_FILTER = "Brak klatek dla tego filtra — zmień filtr lub perspektywę."
+_EMPTY_DB = "Baza pusta — przyjmij dostawę (miejsce „Dostawa” w lewym pasku)."
 
 # Kolory stanów gridu — z motywu (F6 §7, SPOT). Model czyta `_COLORS` NA ŻYWO w `data()`
 # (Qt nie cache'uje BackgroundRole), więc `use_theme` przy przełączeniu + `viewport().update()`
@@ -523,7 +536,11 @@ class FilterPanel(QWidget):
 
 class FieldsPanel(QWidget):
     """Panel Pól: checkbox kolumny-keyworda + pokrycie inline (ile klatek ma daną kartę). Emituje
-    `columnsChanged(list[str])`. Integruje wybór kolumn i pokrycie w JEDNYM panelu (bez modalu Pokrycie)."""
+    `columnsChanged(list[str])`. Integruje wybór kolumn i pokrycie w JEDNYM panelu (bez modalu Pokrycie).
+
+    Pokrycie idzie w PRAWĄ kolumnę (`rows.TwoPartDelegate`): przy 1200 px splitter 1:4 skąpi lewej
+    stronie i liczniki doklejone do keyworda były ucięte (wiz F3 #4). Minimum szerokości jak listwa
+    facetów — obie części lewej kolumny mają ten sam próg czytelności."""
 
     columnsChanged = Signal(object)
 
@@ -532,8 +549,11 @@ class FieldsPanel(QWidget):
         outer = QVBoxLayout(self); outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(QLabel("Pola (kolumny)"))
         self.list = QListWidget()
+        self.list.setItemDelegate(TwoPartDelegate(self.list))
+        self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.list.itemChanged.connect(self._on_changed)
         outer.addWidget(self.list)
+        self.setMinimumWidth(_FIELDS_MIN_W)
         self._loading = False
 
     def load(self, facets, checked):
@@ -543,7 +563,8 @@ class FieldsPanel(QWidget):
             self.list.clear()
             for f in facets:
                 kw, n = f["keyword"], f["n"]
-                it = QListWidgetItem(f"{kw}   ({n})")
+                it = QListWidgetItem(kw)
+                it.setData(rows.SECONDARY, f"({n})")     # pokrycie w prawej kolumnie (wiz F3 #4)
                 it.setData(Qt.UserRole, kw)
                 it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
                 it.setCheckState(Qt.Checked if kw in checked else Qt.Unchecked)
@@ -1121,7 +1142,7 @@ class FramesView(QWidget):
         self.table.horizontalHeader().setStretchLastSection(True)
         rv.addWidget(self.table)
 
-        self.empty = QLabel("Brak klatek dla tego filtra — zmień filtr lub perspektywę.")
+        self.empty = QLabel(_EMPTY_FILTER)
         self.empty.setAlignment(Qt.AlignCenter); self.empty.setWordWrap(True); self.empty.setVisible(False)
         rv.addWidget(self.empty, 1)   # stretch: pusty stan zbiera leftover — SelectionBar/panel nie balonieją (wiz F3 #1)
 
@@ -1356,6 +1377,11 @@ class FramesView(QWidget):
         n = len(base)
         self._n_total = n
         self._update_count()
+        if n == 0:
+            # Rozróżnienie „filtr nic nie wpuścił" vs „w bazie NIC nie ma" (wiz F5 #8). Uniwersum
+            # bierzemy z memoizowanego `universe_fn` TEGO refreshu — na niepustym gridzie zapytania
+            # nie ma w ogóle, a gdy filtr już go dotknął, jest z cache'u.
+            self.empty.setText(_EMPTY_FILTER if universe_fn() else _EMPTY_DB)
         self.empty.setVisible(n == 0)
         self.table.setVisible(n > 0)
         self.macro_bar.set_actions_enabled(bool(base_ids))   # szczery disabled makra na pustym gridzie (#4)
@@ -1366,7 +1392,7 @@ class FramesView(QWidget):
         self._reload_facet_rail(leaf_fn, universe_fn, dup_ids, review_ids, base_ids)   # listwa (F4)
         self._sync_staging_mutex()                           # staging jednej klingi wyłącza „Do stagingu" drugiej
         self._refresh_date_echo()                            # panel daty odbija świeże widoczne (echo warunkowe)
-        self.status_message.emit(f"Grid: {n} klatek, {len(keywords)} kolumn-keywordów")
+        self.status_message.emit(f"Grid: {n} {_frames(n)}, {len(keywords)} kolumn-keywordów")
 
     def _reload_facet_rail(self, leaf_fn, universe_fn, dup_ids, review_ids, current_ids):
         """Liczniki listwy facetów per SIBLING-SET (F4R#1): zbiór facetu F = compose bez CAŁEJ własnej
@@ -1431,14 +1457,18 @@ class FramesView(QWidget):
     def _update_count(self):
         """Licznik = widoczne klatki + (gdy jest) zaznaczenie: „N klatek · M zaznaczonych" (wizytator G2 —
         akcja na zaznaczeniu musi potwierdzać cel). Nagłówki grup są nieselektowalne → nie liczą się.
-        Odświeża też żywą etykietę celu renamu (R1 #18): zaznaczenie-first, inaczej widoczne."""
+        Odświeża też żywą etykietę celu renamu (R1 #18): zaznaczenie-first, inaczej widoczne.
+        Odmiana przez `plural` [#11]: ścieżka Duplikatów robi z n=1 przypadek TYPOWY, a „1 klatek"
+        na pasku zbioru czytało się jak błąd (wiz K7 / wiz F5 #7)."""
         sm = self.table.selectionModel()
         sel = len(sm.selectedRows()) if sm else 0
-        txt = f"{self._n_total} klatek" + (f"  ·  {sel} zaznaczonych" if sel else "")
+        txt = f"{self._n_total} {_frames(self._n_total)}" + (
+            f"  ·  {sel} {plural(sel, 'zaznaczona', 'zaznaczone', 'zaznaczonych')}" if sel else "")
         self.count_label.setText(txt)
         if hasattr(self, "rename_bar"):
             self.rename_bar.set_target_label(
-                f"Cel: {sel} zaznaczonych" if sel else f"Cel: {self._n_total} widocznych")
+                f"Cel: {sel} {plural(sel, 'zaznaczona', 'zaznaczone', 'zaznaczonych')}" if sel
+                else f"Cel: {self._n_total} {plural(self._n_total, 'widoczna', 'widoczne', 'widocznych')}")
 
     # ---- panel inspekcji daty (G1/G4 — RenameBar) ----
     def _selected_data_rows(self):

@@ -52,6 +52,13 @@ def _task_item(win, key):
     raise AssertionError(f"brak pozycji zadania {key!r}")
 
 
+def _task_row(win, key):
+    """(etykieta, człon drugi) wiersza zadania — kontrakt renderu `rows.TwoPartDelegate` (P1)."""
+    from horreum.gui import rows
+    it = _task_item(win, key)
+    return it.text(), it.data(rows.SECONDARY)
+
+
 def test_otwarte_na_bazie_montuje_widoki(qapp, tmp_path):
     win = MainWindow(_seeded_db(tmp_path))
     try:
@@ -183,10 +190,11 @@ def test_badge_zywy_od_montazu(qapp, tmp_path):
     win = MainWindow(_seeded_db(tmp_path, object_axis=True))
     try:
         assert win.nav.item(NAV_PORZADKI).text() == "Porządki (3)"
-        # wiersze akcyjne z chevronem „›" (afordancja kliku — wizytator F5 #2)
-        assert "Klatki bez obiektu — 3  ›" == _task_item(win, "unresolved_lights").text()
-        assert "Teleskopy bez etykiety — 4  ›" == _task_item(win, "telescopes_unlabeled").text()
-        assert "Duplikaty (>1 kopia) — 1  ›" == _task_item(win, "dup_frames").text()
+        # Wiersz DWUCZŁONOWY (P1, wiz F5 #6): etykieta w `text()`, liczba + chevron „›" w prawej
+        # kolumnie (`rows.SECONDARY`) — liczby ustawiają się w kolumnę i dają się skanować.
+        assert _task_row(win, "unresolved_lights") == ("Klatki bez obiektu", "3  ›")
+        assert _task_row(win, "telescopes_unlabeled") == ("Teleskopy bez etykiety", "4  ›")
+        assert _task_row(win, "dup_frames") == ("Duplikaty (>1 kopia)", "1  ›")
     finally:
         win.close()
 
@@ -198,6 +206,37 @@ def test_badge_zero_to_gole_porzadki(qapp, tmp_path):
     win = MainWindow(path)
     try:
         assert win.nav.item(NAV_PORZADKI).text() == "Porządki"
+    finally:
+        win.close()
+
+
+def test_zadanie_n_zero_wyszarzone_ale_klikalne(qapp, tmp_path):
+    """Wiz F5 #6: „nic do zrobienia" ma być widać BEZ czytania liczby → wiersz akcyjny z n=0
+    wyszarzony. Klikalność ZOSTAJE (podstrona osi to jedyna droga do niej po przemontowaniu
+    nawigacji) — wyszarzenie jest sygnałem stanu, nie wyłączeniem. Odwrót po zmianie stanu
+    (n=0 → n>0) MUSI zdjąć szarość, inaczej UI kłamie po pierwszym skanie."""
+    from horreum.gui.tasks import _DIM
+    win = MainWindow(_seeded_db(tmp_path, object_axis=True))
+    try:
+        zero = _task_item(win, "observatories_unnamed")        # s8+obiekt: 0 stanowisk bez nazwy
+        niezero = _task_item(win, "telescopes_unlabeled")      # 4 teleskopy bez etykiety
+        assert _task_row(win, "observatories_unnamed")[1] == "0  ›"
+        assert zero.foreground().color() == _DIM
+        assert niezero.foreground().color() != _DIM
+        assert zero.flags() & Qt.ItemIsEnabled                 # wciąż klikalny
+        win.tasks_view.tasks.itemClicked.emit(zero)
+        assert win.tasks_view.pages.currentIndex() != 0        # klik zaprowadził na podstronę osi
+        # OBA kierunki muszą działać, inaczej UI kłamie po pierwszym skanie: n>0 → szarość zapala się,
+        # a raz wyszarzony wiersz musi umieć wrócić do koloru z palety (QBrush(), nie „jaśniejszy szary").
+        win.con.execute("INSERT INTO observatory (name, lat, lon, status, created_at) "
+                        "VALUES (NULL, 50.0, 19.0, 'proposed', ?)", (NOW,))
+        win.con.commit()
+        win.tasks_view.refresh_counts()
+        assert zero.foreground().color() != _DIM                  # dim → normalny
+        for row in win.con.execute("SELECT id FROM telescope WHERE merged_into IS NULL").fetchall():
+            repo.label_telescope(win.con, telescope_id=row[0], label=f"T{row[0]}", now=NOW)
+        win.tasks_view.refresh_counts()
+        assert niezero.foreground().color() == _DIM               # normalny → dim
     finally:
         win.close()
 
@@ -226,7 +265,7 @@ def test_podstrona_osi_i_powrot_odswieza_licznik(qapp, tmp_path):
         repo.label_telescope(win.con, telescope_id=first, label="Nazwany", now=NOW)
         win.tasks_view._on_back()
         assert win.tasks_view.pages.currentIndex() == 0
-        assert _task_item(win, "telescopes_unlabeled").text() == "Teleskopy bez etykiety — 3  ›"
+        assert _task_row(win, "telescopes_unlabeled") == ("Teleskopy bez etykiety", "3  ›")
         assert win.nav.item(NAV_PORZADKI).text() == "Porządki (3)"   # wciąż 3 zadania (klatki/tel/dup)
     finally:
         win.close()
@@ -240,7 +279,7 @@ def test_stage_finished_odswieza_liczniki_zadan(qapp, tmp_path):
         for row in win.con.execute("SELECT id FROM telescope WHERE merged_into IS NULL").fetchall():
             repo.label_telescope(win.con, telescope_id=row[0], label=f"T{row[0]}", now=NOW)
         win._on_stage_finished("resolve")
-        assert _task_item(win, "telescopes_unlabeled").text() == "Teleskopy bez etykiety — 0  ›"
+        assert _task_row(win, "telescopes_unlabeled") == ("Teleskopy bez etykiety", "0  ›")
         assert win.nav.item(NAV_PORZADKI).text() == "Porządki (2)"   # klatki + duplikaty
     finally:
         win.close()

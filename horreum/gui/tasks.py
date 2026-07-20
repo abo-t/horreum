@@ -20,17 +20,18 @@ zegarem, asercja tożsamości `_now` w testach stabilna).
 `refresh_counts()` woła gospodarz przy montażu / po etapie pipeline'u / na wejściu w Porządki,
 a sam widok przy powrocie „← Porządki" (user mógł nazwać teleskopy w podstronie)."""
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QPushButton, QStackedWidget, QVBoxLayout,
     QWidget,
 )
 
-from horreum.gui import queries
+from horreum.gui import queries, rows
 from horreum.gui.app import (
     ObjectAxisView, ObservatoryAxisView, TelescopeAxisView, _utc_now_iso,
 )
 from horreum.gui.grid import PRESET_DUPS
+from horreum.gui.rows import TwoPartDelegate
 
 # Definicja listy zadań: (klucz stanu z `tasks_state`, etykieta, akcja). Akcja: numer podstrony
 # wewnętrznego stacku (int), nazwa perspektywy Zbiorów (str — sygnał `open_collection`) albo None
@@ -38,6 +39,17 @@ from horreum.gui.grid import PRESET_DUPS
 # v1). Wiersze AKCYJNE (akcja ≠ None) z n>0 liczą się do badge'a sidebara — informacja nie jest
 # zadaniem (stała obecność XISF w badge = wieczny szum).
 _PAGE_LIST, _PAGE_TELESCOPE, _PAGE_OBSERVATORY, _PAGE_OBJECTS = range(4)
+# Szarość wierszy BEZ roboty: pozycje informacyjne (zawsze) i akcyjne z n=0 (wiz F5 #6 — „nic do
+# zrobienia" ma być widać bez czytania liczby). Akcyjne z n=0 zostają KLIKALNE: podstrona osi to
+# jedyna droga do niej po przemontowaniu nawigacji.
+_DIM = QColor(0x88, 0x88, 0x88)
+# Szerokość listy zadań. Prawe wyrównanie liczb SKANUJE się w wąskim pasie i ROZJEŻDŻA na szerokim:
+# przy oknie 1200 px etykieta lądowała na x≈185, a liczba na x≈1180 — ~900 px pustki między nimi
+# (wizytator P1 #2, dług delegata przeniesionego z listwy 220 px na pełną szerokość okna).
+# Liczba z POMIARU TREŚCI, nie z oka: najdłuższa etykieta („XISF (nagłówki tylko do odczytu)") = 172 px
+# + najszerszy człon drugi („381  ›") = 35 px + `_GAP`/`_PAD` ≈ 230 px. 400 px daje oddech bez
+# rozjeżdżania; przy 520 px wzrok znów gubi drogę etykieta→liczba (wizytator P1 tura 2).
+_LIST_MAX_W = 400
 _TASKS = [
     ("unresolved_lights", "Klatki bez obiektu", _PAGE_OBJECTS),
     ("telescopes_unlabeled", "Teleskopy bez etykiety", _PAGE_TELESCOPE),
@@ -83,6 +95,11 @@ class TasksView(QWidget):
         # NoSelection: highlight selekcji Qt byłby drugim „zaznaczeniem" obok treści (wzorzec F4R2#3);
         # klik = WYŁĄCZNIE gest usera przez itemClicked (F4R#4 — nigdy selection-based).
         self.tasks.setSelectionMode(QListWidget.NoSelection)
+        # Liczba = TREŚĆ zadania → prawa kolumna, pogrubiona, w kolorze wiersza (`strong=True`),
+        # więc wyszarzenie wiersza gasi etykietę i liczbę razem (wiz F5 #6).
+        self.tasks.setItemDelegate(TwoPartDelegate(self.tasks, strong=True))
+        self.tasks.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)   # elizja zamiast scrolla
+        self.tasks.setMaximumWidth(_LIST_MAX_W)
         self.tasks.itemClicked.connect(self._on_task_clicked)
         for key, label, action in _TASKS:
             it = QListWidgetItem(label)
@@ -90,7 +107,7 @@ class TasksView(QWidget):
                 # informacyjna (wzorzec app.py — pozycje info): wyszarzona, żeby afordancja nie
                 # kłamała w obie strony (wizytator F5 #2 — „wygląda jednakowo, działa różnie")
                 it.setFlags(Qt.ItemIsEnabled)
-                it.setForeground(QColor(0x88, 0x88, 0x88))
+                it.setForeground(_DIM)
             else:
                 it.setData(Qt.UserRole, key)           # akcyjna — handler mapuje klucz → akcja
             self.tasks.addItem(it)
@@ -132,9 +149,14 @@ class TasksView(QWidget):
         badge = 0
         for row, (key, label, action) in enumerate(_TASKS):
             n = state[key]
-            # akcyjne z chevronem „›" — wiersz ZAPRASZA klik; informacyjne bez (wizytator F5 #2)
-            suffix = "  ›" if action is not None else ""
-            self.tasks.item(row).setText(f"{label} — {n}{suffix}")
+            it = self.tasks.item(row)
+            # akcyjne z chevronem „›" — wiersz ZAPRASZA klik; informacyjne bez (wizytator F5 #2).
+            # Liczba idzie w CZŁON DRUGI (prawa kolumna, `rows.SECONDARY`), nie w tekst etykiety —
+            # inaczej liczby nie ustawiają się w kolumnę i nie da się ich skanować (wiz F5 #6).
+            it.setText(label)
+            it.setData(rows.SECONDARY, f"{n}  ›" if action is not None else str(n))
+            if action is not None:
+                it.setForeground(QBrush() if n > 0 else _DIM)   # n=0 → wyszarzone, wciąż klikalne
             if action is not None and n > 0:
                 badge += 1
         self.counts_changed.emit(badge)

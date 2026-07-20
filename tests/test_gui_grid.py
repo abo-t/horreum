@@ -10,7 +10,7 @@ import pytest
 pytest.importorskip("PySide6")
 
 from horreum import db, pivot as pivot_mod, writeback
-from horreum.gui import queries
+from horreum.gui import queries, rows as rows_mod
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
@@ -228,7 +228,7 @@ def test_filterpanel_set_tree_zwykly_odznacza_odwroc(qapp):
 # ---------- FramesView (integracja) ----------
 
 def test_view_refresh_liczy_klatki(view):
-    assert view.count_label.text() == "4 klatek"
+    assert view.count_label.text() == "4 klatki"
     assert view.model.rowCount() >= 4  # 4 klatki (+ ewentualne nagłówki grup, tu brak)
 
 
@@ -238,7 +238,7 @@ def test_view_filtr_gain(view):
     view.filter_panel._rows[0]["op"].setCurrentIndex(0)  # eq
     view.filter_panel._rows[0]["val"].setText("100")
     view.filter_panel._apply()
-    assert view.count_label.text() == "2 klatek"  # f1,f2
+    assert view.count_label.text() == "2 klatki"  # f1,f2
 
 
 def test_view_filtr_odwrocony(view):
@@ -249,7 +249,7 @@ def test_view_filtr_odwrocony(view):
     view.filter_panel._rows[0]["val"].setText("100")
     view.filter_panel.chk_invert.setChecked(True)
     view.filter_panel._apply()
-    assert view.count_label.text() == "2 klatek"
+    assert view.count_label.text() == "2 klatki"
 
 
 def test_view_perspektywa_z_not_przezywa_zastosuj(view):
@@ -261,16 +261,16 @@ def test_view_perspektywa_z_not_przezywa_zastosuj(view):
     view._filter_tree = tree
     view.filter_panel.set_tree(tree)      # ścieżka _on_perspective (P3-3)
     view.refresh()
-    assert view.count_label.text() == "2 klatek"
+    assert view.count_label.text() == "2 klatki"
     view.filter_panel._apply()            # user klika „Zastosuj" bez zmian
     assert view._filter_tree == tree      # negacja przeżywa
-    assert view.count_label.text() == "2 klatek"
+    assert view.count_label.text() == "2 klatki"
 
 
 def test_view_perspektywa_duplikaty(view):
     idx = view.combo_persp.findText("Duplikaty")
     view.combo_persp.setCurrentIndex(idx)
-    assert view.count_label.text() == "1 klatek"  # tylko f1 (n_present=2)
+    assert view.count_label.text() == "1 klatka"  # tylko f1 (n_present=2)
 
 
 def test_view_grupowanie(view):
@@ -297,13 +297,13 @@ def test_facet_klik_cykluje_none_in_ex_none(view):
     """Cykl kliku (F4): zawęź → wyklucz → zdejmij, zbiór odbija każdy krok (`itemClicked` handler)."""
     view.facet_rail._on_item_clicked(_rail_item(view, "kind", "light"))
     assert view._facet_state == {"kind": {"in": [["light", "light"]]}}
-    assert view.count_label.text() == "3 klatek"                    # f1,f2,f4
+    assert view.count_label.text() == "3 klatki"                    # f1,f2,f4
     view.facet_rail._on_item_clicked(_rail_item(view, "kind", "light"))
     assert view._facet_state == {"kind": {"ex": [["light", "light"]]}}
-    assert view.count_label.text() == "1 klatek"                    # uniwersum − lighty = f3
+    assert view.count_label.text() == "1 klatka"                    # uniwersum − lighty = f3
     view.facet_rail._on_item_clicked(_rail_item(view, "kind", "light"))
     assert view._facet_state == {}
-    assert view.count_label.text() == "4 klatek"
+    assert view.count_label.text() == "4 klatki"
 
 
 def test_facet_sibling_lista_pokazuje_sasiadow(view):
@@ -314,14 +314,16 @@ def test_facet_sibling_lista_pokazuje_sasiadow(view):
     values = {lw.item(i).data(Qt.UserRole)[1] for i in range(lw.count())}
     assert values == {"light", "master_flat"}
     assert _rail_item(view, "kind", "light").text().startswith("✓ ")
-    assert _rail_item(view, "kind", "master_flat").text() == "master_flat (1)"
+    it = _rail_item(view, "kind", "master_flat")
+    assert (it.text(), it.data(rows_mod.SECONDARY)) == ("master_flat", "(1)")
 
 
 def test_facet_ex_render_ukryte(view):
     """F4R2#1: „(n)" przy ⊖ znaczy „ile wróci po zdjęciu" — render to nazywa, nie udaje wkładu."""
     view.facet_rail._on_item_clicked(_rail_item(view, "kind", "light"))
     view.facet_rail._on_item_clicked(_rail_item(view, "kind", "light"))   # in → ex
-    assert _rail_item(view, "kind", "light").text() == "⊖ light (+3 ukryte)"
+    it = _rail_item(view, "kind", "light")
+    assert (it.text(), it.data(rows_mod.SECONDARY)) == ("⊖ light", "(+3 ukryte)")
 
 
 def test_facet_pin_aktywnego_poza_siblingiem(view):
@@ -333,8 +335,9 @@ def test_facet_pin_aktywnego_poza_siblingiem(view):
     view.filter_panel._rows[0]["kw"].setCurrentText("GAIN")
     view.filter_panel._rows[0]["op"].setCurrentIndex(8)   # 'istnieje'
     view.filter_panel._apply()
-    assert view.count_label.text() == "2 klatek"          # f1,f2 (GAIN) − master_flat i tak poza
-    assert _rail_item(view, "kind", "master_flat").text() == "⊖ master_flat (+0 ukryte)"
+    assert view.count_label.text() == "2 klatki"          # f1,f2 (GAIN) − master_flat i tak poza
+    it = _rail_item(view, "kind", "master_flat")
+    assert (it.text(), it.data(rows_mod.SECONDARY)) == ("⊖ master_flat", "(+0 ukryte)")
 
 
 def test_facet_kryteria_paska(view):
@@ -367,7 +370,12 @@ def test_facet_rail_zachowuje_scroll_po_przeladowaniu(qapp):
 def test_facet_object_godziny_sufiks_i_guard_ex(qapp):
     """F7 §8: wiersz obiektu „in"/none niesie sufiks godzin (extras) + tooltip per filtr. Guard
     DD-render (recenzja #1): obiekt ⊖ JEST w extras (sibling-set obiektu ZAWIERA wykluczone), a MIMO
-    TO wiersz nie dokleja godzin. Obiekt bez wpisu extras → bez sufiksu."""
+    TO wiersz nie dokleja godzin. Obiekt bez wpisu extras → bez sufiksu.
+
+    P1 (wiz F7 #F1/#F2/#F4): licznik i godziny mieszkają w CZŁONIE DRUGIM (`rows.SECONDARY` — prawa
+    kolumna delegata), NAZWA zostaje sama w `text()`. Doklejanie do tekstu przepychało listwę przez
+    220 px w poziomy scrollbar i tłukło skanowalność kolumny godzin."""
+    from horreum.gui import rows
     from horreum.gui.facets import FacetRail
     rail = FacetRail()
     counts = {"object": [(1, "M51", 5), (2, "NGC7000", 3), (7, "IC434", 2)],
@@ -384,11 +392,14 @@ def test_facet_object_godziny_sufiks_i_guard_ex(qapp):
                 return lw.item(i)
         raise AssertionError(f"brak {v}")
 
-    assert _item(1).text() == "✓ M51 (5) · 1.0 h"            # in → sufiks doklejony
+    assert _item(1).text() == "✓ M51"                        # człon 1 = SAMA nazwa (+ marker stanu)
+    assert _item(1).data(rows.SECONDARY) == "(5) · 1.0 h"    # in → licznik + godziny w prawej kolumnie
     assert _item(1).toolTip() == "Ha: 1.0 h"
-    assert _item(2).text() == "⊖ NGC7000 (+3 ukryte)"        # ex → BEZ godzin mimo wpisu w extras
+    assert _item(2).text() == "⊖ NGC7000"
+    assert _item(2).data(rows.SECONDARY) == "(+3 ukryte)"    # ex → BEZ godzin mimo wpisu w extras
     assert _item(2).toolTip() == ""
-    assert _item(7).text() == "IC434 (2)"                    # brak wpisu extras → bez sufiksu
+    assert _item(7).text() == "IC434"
+    assert _item(7).data(rows.SECONDARY) == "(2)"            # brak wpisu extras → sam licznik
     assert _item(7).toolTip() == ""
 
 
@@ -400,11 +411,11 @@ def test_facet_wyczysc_zbior(view):
     view.filter_panel._rows[0]["kw"].setCurrentText("GAIN")
     view.filter_panel._rows[0]["op"].setCurrentIndex(8)    # 'istnieje'
     view.filter_panel._apply()
-    assert view.count_label.text() == "2 klatek"           # lighty ∩ GAIN
+    assert view.count_label.text() == "2 klatki"           # lighty ∩ GAIN
     assert view.sel_bar.btn_clear.isEnabled()
     view.sel_bar.btn_clear.click()
     assert view._facet_state == {} and view._filter_tree is None
-    assert view.count_label.text() == "4 klatek"
+    assert view.count_label.text() == "4 klatki"
     assert not view.sel_bar.btn_clear.isEnabled()
 
 
@@ -415,7 +426,7 @@ def test_facet_preset_zeruje_stan(view):
     idx = view.combo_persp.findText("Przegląd")
     view.combo_persp.setCurrentIndex(idx) if idx != view.combo_persp.currentIndex() else view._on_perspective()
     assert view._facet_state == {}
-    assert view.count_label.text() == "4 klatek"
+    assert view.count_label.text() == "4 klatki"
 
 
 @pytest.fixture
@@ -441,25 +452,25 @@ def test_facet_roundtrip_perspektywy_zlozonej(view_settings, monkeypatch):
     v._filter_tree = {"keyword": "GAIN", "operator": "exists"}
     v.filter_panel.set_tree(v._filter_tree)
     v.refresh()
-    assert v.count_label.text() == "2 klatek"             # lighty ∩ GAIN = f1,f2
+    assert v.count_label.text() == "2 klatki"             # lighty ∩ GAIN = f1,f2
     monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("Zlozona", True)))
     v._save_perspective()
     assert v.combo_persp.currentData() == ("saved", "Zlozona")   # F4R2#6: etykieta nie kłamie
     # odejdź na preset (F4R#2: preset zeruje facety)…
     v.combo_persp.setCurrentIndex(v.combo_persp.findText("Przegląd"))
     assert v._facet_state == {}
-    assert v.count_label.text() == "4 klatek"
+    assert v.count_label.text() == "4 klatki"
     # …i wróć do zapisanej: facety wracają do raila, advanced do panelu
     for i in range(v.combo_persp.count()):
         if v.combo_persp.itemData(i) == ("saved", "Zlozona"):
             v.combo_persp.setCurrentIndex(i)
             break
     assert v._facet_state == {"kind": {"in": [["light", "light"]]}}
-    assert v.count_label.text() == "2 klatek"
+    assert v.count_label.text() == "2 klatki"
     assert _rail_item(v, "kind", "light").text().startswith("✓ ")
     v.filter_panel._apply()                               # „Zastosuj" panelu — facety przeżywają
     assert v._facet_state == {"kind": {"in": [["light", "light"]]}}
-    assert v.count_label.text() == "2 klatek"
+    assert v.count_label.text() == "2 klatki"
 
 
 # ---------- FramesView: makro / writeback (KROK 4) ----------
@@ -896,6 +907,46 @@ def test_pusty_zbior_gasi_wydaj_nie_panele(view):
     assert "brak klatek" in view.sel_bar.btn_proj.toolTip()
     assert view.sel_bar.btn_macro.isEnabled() and view.sel_bar.btn_rename.isEnabled()
     assert view.sel_bar.btn_save.isEnabled()
+
+
+def test_pustostan_rozroznia_filtr_od_pustej_bazy(qapp, tmp_path, monkeypatch):
+    """Wiz F5 #8: pusty grid mówi DWIE różne rzeczy. Na bazie z klatkami „zmień filtr lub
+    perspektywę" jest prawdą; na PUSTEJ bazie wysyłałoby usera w ślepy zaułek (nie ma czego
+    filtrować) — tam komunikat kieruje po dostawę."""
+    from PySide6.QtCore import QSettings
+    monkeypatch.setattr(QSettings, "value", lambda self, k, d=None: d)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: None)
+    from horreum.gui.grid import _EMPTY_DB, _EMPTY_FILTER, FramesView
+
+    con = db.open_db(str(tmp_path / "pusta.db"))          # świeża baza: zero klatek
+    try:
+        v = FramesView(con, now_fn=None)
+        assert v.empty.isVisible() or v._n_total == 0
+        assert v.empty.text() == _EMPTY_DB
+    finally:
+        con.close()
+
+    con2 = db.open_db(str(tmp_path / "pelna.db"))
+    _seed(con2)
+    try:
+        v2 = FramesView(con2, now_fn=None)
+        assert v2.empty.text() == _EMPTY_FILTER           # niepusta baza → wariant filtrowy
+        v2.filter_panel.filterApplied.emit({"keyword": "OBJECT", "operator": "eq", "value": "BRAK"})
+        assert v2._n_total == 0 and v2.empty.text() == _EMPTY_FILTER
+    finally:
+        con2.close()
+
+
+def test_panel_pol_pokrycie_w_prawej_kolumnie(view):
+    """Wiz F3 #4: pokrycie doklejone do keyworda było ucięte przy 1200 px (splitter 1:4 skąpi lewej
+    stronie). Licznik idzie w człon drugi (prawa kolumna), a panel dostaje to samo minimum
+    szerokości co listwa facetów."""
+    from horreum.gui.facets import RAIL_MIN_W
+    lst = view.fields.list
+    it = next(lst.item(i) for i in range(lst.count()) if lst.item(i).data(Qt.UserRole) == "OBJECT")
+    assert it.text() == "OBJECT"                          # nazwa SAMA — bez doklejonego licznika
+    assert it.data(rows_mod.SECONDARY) == "(3)"           # f1,f2,f4 mają OBJECT
+    assert view.fields.minimumWidth() == RAIL_MIN_W
 
 
 def test_set_busy_gasi_wydaj(view):

@@ -76,13 +76,15 @@ def apply_theme(app, name):
     akcentów; podłącz kolory stanów gridu/facetów (SPOT). `name` znormalizowany (`theme.normalize`).
     Import grid/facets lazy — unika cyklu z warstwą Porządków (F5R2#1) i pozostaje spójny ze stylem
     importów widoków w `_mount_views`."""
-    from horreum.gui import facets, grid, map_view
+    from horreum.gui import facets, grid, map_view, rows
     app.setStyle("Fusion")
     app.setPalette(_build_palette(name))
     app.setStyleSheet(theme.qss(name))
     grid.use_theme(name)
     facets.use_theme(name)
     map_view.use_theme(name)         # kolory mapy z motywu (F8) — init na starcie + przełączenie
+    rows.use_theme(name)             # człon drugi wierszy (P1) — delegat czyta kolor NA ŻYWO w paint,
+                                     # więc zwykły repaint wystarczy (bez `refresh_theme`)
 
 
 def _fmt_event_ts(ts):

@@ -9,7 +9,12 @@ none→in→ex→none. Sygnał cyklu = `itemClicked` — WYŁĄCZNIE gest usera 
 Listy BEZ zaznaczenia Qt (`NoSelection` — `itemClicked` działa niezależnie): stan niesie ✓/⊖,
 drugie równoległe podświetlenie kłamałoby. Aktywne wybory ZAWSZE renderowane (pin na górze grupy,
 n=0 gdy wartość poza sibling-setem) — niewidzialny aktywny filtr łamałby UI-NIE-KŁAMIE.
-Szukajka filtruje TYLKO listę obiektów (prezentacja, nie zbiór)."""
+Szukajka filtruje TYLKO listę obiektów (prezentacja, nie zbiór).
+
+Wiersz jest DWUCZŁONOWY (`rows.TwoPartDelegate`, P1): nazwa od lewej (elidowana), licznik + godziny
+portfela od prawej jako tekst drugorzędny. Wcześniej godziny szły TEKSTEM za „(n)" — najdłuższy
+wiersz przepychał listwę przez 220 px w poziomy scrollbar i „1.5 h" bywało ucięte (wiz F7 #F1),
+kolumna godzin była nieskanowalna (#F2) i miała wagę nazwy (#F4)."""
 
 from __future__ import annotations
 
@@ -19,7 +24,8 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QVBoxLayout, QWidget,
 )
 
-from horreum.gui import facet_model, theme
+from horreum.gui import facet_model, rows, theme
+from horreum.gui.rows import TwoPartDelegate
 
 # (facet, tytuł grupy, czy-długa-lista) — długie (Obiekt/Noc) dostają stretch, krótkie zwarty pas.
 _GROUPS = [("object", "Obiekt", True), ("filter", "Filtr", False), ("kind", "Rodzaj", False),
@@ -38,7 +44,9 @@ def use_theme(name):
 use_theme(theme.DEFAULT)
 _SHORT_MAX_H = 72                          # ~3 wiersze; krótka grupa nie zjada pionu długim (wiz F4 #1)
 _LONG_MIN_H = 140                          # ~6 wierszy; Obiekt/Noc (47/173 wartości) wygrywają pion (wiz F4 #1)
-_RAIL_MIN_W = 220                          # bez poziomego scrolla tnącego liczniki „(+n ukryte)" (wiz F4 #2)
+# Próg czytelności LEWEJ KOLUMNY okna (wiz F4 #2) — publiczny, bo panel „Pola" w `grid.py` dzieli
+# to samo minimum (wiz F3 #4); dwie liczby rozjechałyby się przy pierwszej korekcie (SPOT).
+RAIL_MIN_W = 220
 
 
 class FacetRail(QWidget):
@@ -51,7 +59,7 @@ class FacetRail(QWidget):
         self._state = facet_model.empty_state()
         self._loading = False
         self._lists = {}
-        self.setMinimumWidth(_RAIL_MIN_W)
+        self.setMinimumWidth(RAIL_MIN_W)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         for facet, title, long_list in _GROUPS:
@@ -65,6 +73,11 @@ class FacetRail(QWidget):
                 outer.addWidget(self.search)
             lw = QListWidget()
             lw.setSelectionMode(QAbstractItemView.NoSelection)
+            # Człon drugi (licznik/godziny) do prawej kolumny; nazwa elidowana. Scrollbar poziomy OFF,
+            # inaczej Qt rozciąga viewport pod `sizeHint` najdłuższej nazwy i elizja nie dochodzi
+            # do głosu (wiz F7 #F1 — kometa Tsuchinshan-ATLAS tnie „1.5 h").
+            lw.setItemDelegate(TwoPartDelegate(lw))
+            lw.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
             lw.itemClicked.connect(self._on_item_clicked)
             if long_list:
                 lw.setMinimumHeight(_LONG_MIN_H)
@@ -80,7 +93,8 @@ class FacetRail(QWidget):
     def set_data(self, counts, state, extras=None):
         """Przeładuj listy. `counts`: dict facet → list[(value, label, n)] (sibling-set per facet);
         `state` = aktualny stan (właściciel: FramesView). `extras`: opc. dict facet → {value:
-        (suffix, tooltip)} — anotacja godzin portfela (F7 §8), dziś tylko facet „object". Aktywne
+        (suffix, tooltip)} — anotacja godzin portfela (F7 §8), dziś tylko facet „object"; sufiks
+        dokleja się do CZŁONU DRUGIEGO (`rows.SECONDARY` — prawa kolumna), nie do nazwy. Aktywne
         wybory nieobecne w counts → PIN na górze grupy z n=0 (wartość odcięta przez INNE facety/
         advanced). Pozycja scrolla KAŻDEJ listy przeżywa przeładowanie (firsthand F4: klik wartości
         w środku długiej listy nie może odrzucać widoku na górę — user klika tę samą wartość
@@ -104,15 +118,16 @@ class FacetRail(QWidget):
                         # „(n)" przy ⊖ znaczy „ile WRÓCI po zdjęciu" (sibling-set), nie wkład do
                         # zbioru (pokazanych jest 0) — render niesie tę semantykę (F4R2#1). Godzin
                         # NIE doklejamy: obiekt wykluczony nie wnosi ich do zbioru (F7 guard, DD-render).
-                        text = f"⊖ {label} (+{n} ukryte)"
+                        text, second = f"⊖ {label}", f"(+{n} ukryte)"
                     else:
-                        text = f"{'✓ ' if sel == 'in' else ''}{label} ({n})"
+                        text, second = f"{'✓ ' if sel == 'in' else ''}{label}", f"({n})"
                         sx = facet_extras.get(value)          # sufiks/tooltip godzin (F7) — poza ⊖
                         if sx:
-                            text += sx[0]
+                            second += sx[0]                   # „(5) · 1.0 h" — formatowanie: `portfolio`
                             tooltip = sx[1]
                     it = QListWidgetItem(text)
                     it.setData(Qt.UserRole, (facet, value, label))
+                    it.setData(rows.SECONDARY, second)        # prawa kolumna (delegat, P1)
                     if tooltip:
                         it.setToolTip(tooltip)
                     if sel == "in":

@@ -204,7 +204,7 @@ def review_queue(con):
       - `headerless_count`: frame BEZ wiersza `header` (`NOT EXISTS`) — osobny realny kubełek
         wydobyty spod fałszywego config-review;
       - `unreadable_count`: klatki z ≥1 kopią, która STAŁA SIĘ nieczytelna (`location.unreadable_since
-        NOT NULL`, #13) — informacyjny, bez drążenia (to fakt o kopii/skanie, nie o osi obiektu).
+        NOT NULL`, #13) — drążenie do dokładnych kopii daje `unreadable_copies` (Z6/P4).
     Liczniki poza obiekt-review liczy `resolver.review_state` — JEDEN właściciel predykatu stanu
     (#12): ta sama derywacja zasila raport dostawy, więc kolejka i raport nie mogą się rozjechać.
     Zwraca dict: {object_review: [Row(object_raw, n)], config_review_count: int, headerless_count: int,
@@ -239,6 +239,30 @@ def object_review_frames(con, object_raw):
         "WHERE f.kind IN ('light','master_light') AND f.object_id IS NULL AND h.object_raw = ? "
         "ORDER BY f.id",
         (object_raw,),
+    ).fetchall()
+
+
+def alias_target(con, alias_norm):
+    """Pre-check konfliktu aliasu w dialogu przypisania (#8, P4): `object_id`, na który wskazuje
+    `alias_norm`, albo None (alias nieznany — zapis go utworzy). Ostateczny guard i tak siedzi
+    w `repo.user_assign_object` (w `_immediate`, TOCTOU) — to czytnik UX, nie bramka."""
+    row = con.execute(
+        "SELECT object_id FROM object_alias WHERE alias_norm = ?", (alias_norm,)).fetchone()
+    return row["object_id"] if row is not None else None
+
+
+def unreadable_copies(con):
+    """Drążenie kubełka `unreadable` (#13, Z6/P4): DOKŁADNE KOPIE (location) z markerem
+    `unreadable_since` — nie klatki (klatka z 2 oznaczonymi kopiami = 2 wiersze). `present`
+    pokazane per kopia: oznaczona kopia może być `present=0` (znikła po oznaczeniu — forward-guard
+    #13) i to MA być widoczne. `sha1_data` = kontekst tożsamości klatki (UI skraca do 12).
+    ORDER: najnowsze oznaczenie na górze, potem ścieżka. Zwraca: frame_id, sha1_data, volume,
+    path, present, unreadable_since."""
+    return con.execute(
+        "SELECT l.frame_id, f.sha1_data, l.volume, l.path, l.present, l.unreadable_since "
+        "FROM location l JOIN frame f ON f.id = l.frame_id "
+        "WHERE l.unreadable_since IS NOT NULL "
+        "ORDER BY l.unreadable_since DESC, l.path"
     ).fetchall()
 
 

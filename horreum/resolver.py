@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 
 from . import repo
 from .resolve._coerce import _to_text
+from .resolve._text import norm_alnum
 from .resolve.filters import normalize_filter
 from .resolve.objects import resolve_object
 from .resolve.observatory import site_coords
@@ -34,6 +35,7 @@ class ResolveSummary:
     light_frames: int = 0                 # light/master_light (kandydaci osi OBIEKT)
     objects_new: int = 0                  # nowe wiersze object (distinct kanon)
     objects_assigned: int = 0             # light'y z przypisanym object_id
+    objects_by_alias: int = 0             # z tego: przypisane przez ZAPISANY ALIAS (#8, P4)
     objects_by_region: int = 0            # z tego: przypisane ze WSPÓŁRZĘDNYCH (kompleks, #5)
     objects_review: int = 0               # light'y obecne-ale-nierozpoznane (delta, per-frame)
     objects_unresolved_distinct: int = 0  # distinct object_raw w delcie
@@ -46,15 +48,28 @@ class ResolveSummary:
 def run_resolver(con, now):
     """Po skanie: dla każdego frame'a z nagłówkiem rozwiąż OBIEKT (tylko light/master_light) i FILTR
     (wszystkie). Obiekt rozpoznany → `upsert_object`+`assign_object` (+`add_object_alias`, gdy
-    rozpoznanie pochodzi z NAZWY — region rozpoznaje ze współrzędnych i aliasu nie ma); light
-    nierozpoznany → delta (jeden zbiorczy `object.review_summary`); kalibracja → pomijana (poprawny
-    NULL). Filtr → backfill zbiorczy `filter_canon`. Zwraca `ResolveSummary`. Idempotentny."""
+    rozpoznanie pochodzi z NAZWY — region rozpoznaje ze współrzędnych i aliasu nie ma). Drabina
+    szczebli: `resolve_solar`/`resolve_object` (header-primary ŚWIĘTE) → **ALIAS** (`object_alias`
+    zapisany wcześniej — #8, P4; jawna wiedza o nazwie, `object_source='alias'`) → `resolve_region`
+    (inferencja z geometrii, ostatni). **`object_source='user'` pomija CAŁĄ drabinę** (P4): decyzja
+    człowieka nie jest re-derywowana ani nadpisywana przez żaden szczebel automatyczny. Light
+    nierozpoznany → delta (jeden zbiorczy `object.review_summary`, liczony ze STANU
+    `object_id IS NULL` — D5); kalibracja → pomijana (poprawny NULL). Filtr → backfill zbiorczy
+    `filter_canon`. Zwraca `ResolveSummary`. Idempotentny."""
     s = ResolveSummary()
     rows = con.execute(
-        "SELECT f.id AS fid, f.kind AS kind, f.object_source AS osrc, h.object_raw AS obj, "
-        "h.filter_raw AS filt, h.ra_deg AS ra, h.dec_deg AS dec "
+        "SELECT f.id AS fid, f.kind AS kind, f.object_id AS oid, f.object_source AS osrc, "
+        "h.object_raw AS obj, h.filter_raw AS filt, h.ra_deg AS ra, h.dec_deg AS dec "
         "FROM frame f JOIN header h ON h.frame_id = f.id").fetchall()
     s.frames = len(rows)
+
+    # Szczebel ALIASU (P4, D-P4-1): preload WSZYSTKICH aliasów raz na przebieg (literał — resolver
+    # już czyta literałami). Snapshot z STARTU przebiegu jest bezpieczny (R#12): alias zapisany W TYM
+    # przebiegu dotyczy nazwy, która właśnie trafiła wcześniejszym szczeblem deterministycznie.
+    aliases = {}
+    for a in con.execute(
+            "SELECT a.alias_norm AS key, a.object_id AS oid FROM object_alias a").fetchall():
+        aliases[a["key"]] = a["oid"]
 
     unresolved = {}        # object_raw -> liczba (tylko light/master_light, obecny-nierozpoznany)
     filter_items = []      # (frame_id, filter_canon) do backfillu zbiorczego
@@ -62,31 +77,52 @@ def run_resolver(con, now):
         # --- oś OBIEKT: kind-aware (kalibracja nie ma obiektu z definicji) ---
         if r["kind"] in LIGHT_KINDS:
             s.light_frames += 1
-            # solar/komety PRZED deep-sky: mają własne ID (nie katalogi mgławic), krok 5a.
-            ident = resolve_solar(r["obj"]) or resolve_object(r["obj"])
-            # REGION = OSTATNI szczebel (#5, P3): dopiero gdy zeznanie nagłówka nic nie dało —
-            # 547 klatek `NGC6992` leży WEWNĄTRZ promienia Veil i chroni je wyłącznie ta kolejność.
-            # `object_source='user'` (ręczne przypisanie, przyszłe P4) bije INFERENCJĘ ze
-            # współrzędnych: derywacja nie kasuje decyzji człowieka. Zeznanie nagłówka zachowuje
-            # dotychczasowe pierwszeństwo — precedencję dla POZOSTAŁYCH szczebli uogólni P4.
-            if ident is None and r["osrc"] != "user":
-                ident = resolve_region(r["ra"], r["dec"])
-            if ident is not None:
-                oid, created = repo.upsert_object(
-                    con, canon=ident.canon, catalog=ident.catalog, kind=ident.kind, now=now)
-                s.objects_new += created
-                if ident.alias_norm:    # region NIE aliasuje — rozpoznanie nie pochodzi z nazwy
-                    repo.add_object_alias(con, alias_norm=ident.alias_norm, object_id=oid,
-                                          source=ident.source, now=now)
-                if repo.assign_object(con, frame_id=r["fid"], object_id=oid,
-                                      object_source=ident.source, now=now):
-                    s.objects_assigned += 1
-                    s.objects_by_region += ident.source == "region"
+            if r["osrc"] == "user":
+                # PRECEDENCJA `user` na WSZYSTKIE szczeble (P4): ręczne przypisanie pomija drabinę
+                # — frame zachowuje obiekt usera, zero re-derywacji, zero nadpisywania. (Wcześniej
+                # guard objmował tylko region; uogólniony na solar/deep-sky/alias/region.)
+                pass
             else:
-                raw = _to_text(r["obj"])
-                if raw is not None:                  # obecny ale nierozpoznany → delta
-                    unresolved[raw] = unresolved.get(raw, 0) + 1
-                    s.objects_review += 1
+                # solar/komety PRZED deep-sky: mają własne ID (nie katalogi mgławic), krok 5a.
+                ident = resolve_solar(r["obj"]) or resolve_object(r["obj"])
+                alias_oid = None
+                if ident is None:
+                    # ALIAS po katalogu, PRZED regionem (#8, P4): alias = jawna wiedza o NAZWIE,
+                    # region = inferencja z geometrii. Pusty klucz (norm_alnum("---") == "") pomija
+                    # lookup — alias "" łapałby KAŻDĄ niealfanumeryczną nazwę (D-P4-2, R#3).
+                    key = norm_alnum(r["obj"])
+                    alias_oid = aliases.get(key) if key else None
+                # REGION = OSTATNI szczebel (#5, P3): dopiero gdy zeznanie nagłówka i alias nic nie
+                # dały — 547 klatek `NGC6992` leży WEWNĄTRZ promienia Veil i chroni je kolejność.
+                if ident is None and alias_oid is None:
+                    ident = resolve_region(r["ra"], r["dec"])
+                if alias_oid is not None:
+                    # Trafienie aliasu: obiekt i alias ISTNIEJĄ z definicji — BEZ upsert_object i
+                    # BEZ zapisu aliasu; `object_source='alias'` (D-P4-6: klatka z aliasu zostaje
+                    # re-derywowalna, 'user' rezerwuje się dla jawnego przypisania).
+                    if repo.assign_object(con, frame_id=r["fid"], object_id=alias_oid,
+                                          object_source="alias", now=now):
+                        s.objects_assigned += 1
+                        s.objects_by_alias += 1
+                elif ident is not None:
+                    oid, created = repo.upsert_object(
+                        con, canon=ident.canon, catalog=ident.catalog, kind=ident.kind, now=now)
+                    s.objects_new += created
+                    if ident.alias_norm:    # region NIE aliasuje — rozpoznanie nie pochodzi z nazwy
+                        repo.add_object_alias(con, alias_norm=ident.alias_norm, object_id=oid,
+                                              source=ident.source, now=now)
+                    if repo.assign_object(con, frame_id=r["fid"], object_id=oid,
+                                          object_source=ident.source, now=now):
+                        s.objects_assigned += 1
+                        s.objects_by_region += ident.source == "region"
+                elif r["oid"] is None:
+                    # D5: delta ze STANU (`object_id IS NULL`), nie z rederywacji — frame przypisany
+                    # (ręcznie lub wcześniej), którego nagłówek dziś się nie rozwiązuje, NIE wraca
+                    # do review_summary (zgodnie z delta_report/review_queue, oba ze stanu).
+                    raw = _to_text(r["obj"])
+                    if raw is not None:              # obecny ale nierozpoznany → delta
+                        unresolved[raw] = unresolved.get(raw, 0) + 1
+                        s.objects_review += 1
             # obj brak (None) na lightcie → object_id NULL bez review (brak zeznania do rozwiązania)
 
         # --- oś FILTR: kind-agnostyczna (flat też ma filtr); brak/pusty → NULL (W2) ---

@@ -21,14 +21,19 @@ from datetime import datetime, timezone
 from PySide6.QtCore import Qt, QSettings, QUrl, Signal
 from PySide6.QtGui import QActionGroup, QColor, QDesktopServices, QPalette
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QLabel,
-    QListWidget, QListWidgetItem, QMainWindow, QPushButton, QSplitter, QStackedWidget, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
+    QMessageBox, QPushButton, QSplitter, QStackedWidget, QTableWidget, QTableWidgetItem,
+    QVBoxLayout, QWidget,
 )
 
 from horreum import db, repo
 from horreum.gui import mapproj, queries, theme
 from horreum.gui.map_view import SitesMapView
+from horreum.resolve._text import norm_alnum
+from horreum.resolve.catalog import catalog_canon, catalog_label, xref
+from horreum.resolve.objects import resolve_object
+from horreum.resolve.solar import resolve_solar
 
 # Kolumny listy głównej — indeksy nazwane (czytelne handlery zamiast magicznych liczb).
 # Nagłówek = telescop_canon (tożsamość osi po przejściu fitsmirror); Etykieta = nazwa usera.
@@ -360,13 +365,16 @@ class TelescopeAxisView(QWidget):
         self.refresh()
 
 
-# ============================================================ oś OBIEKT (PLAN_gui_object — READ-ONLY)
+# ============================================================ oś OBIEKT (PLAN_gui_object + #8/P4)
 
 OBJ_COL_CANON, OBJ_COL_CATALOG, OBJ_COL_FRAMES = range(3)
 OBJ_HEADERS = ["Obiekt", "Katalog", "Klatki"]
 FRAME_COL_SHA, FRAME_COL_TEL, FRAME_COL_CAM, FRAME_COL_FILTER, FRAME_COL_DATE, FRAME_COL_PRESENT, \
     FRAME_COL_PATH = range(7)
 FRAME_HEADERS = ["sha1 danych", "Teleskop", "Kamera", "Filtr", "Data", "Obecny", "Ścieżka"]
+# Tryb „kopie" prawego panelu (Z6/P4 — drążenie kubełka `unreadable` do dokładnych location).
+COPY_COL_PATH, COPY_COL_VOLUME, COPY_COL_PRESENT, COPY_COL_MARKED = range(4)
+COPY_HEADERS = ["Ścieżka", "Wolumen", "Obecna", "Oznaczona"]
 
 
 def _tel_facet_label(row):
@@ -382,21 +390,109 @@ def _tel_cell(row):
     return row["telescope_label"] or row["telescop_canon"] or ""
 
 
-class ObjectAxisView(QWidget):
-    """Osadzalny widok osi OBIEKT (PLAN_gui_object, wariant A — READ-ONLY): biblioteka (obiekty →
-    klatki, filtr po teleskopie/kamerze/filtrze) + kolejka przeglądu (obiekt-review / config-review /
-    headerless) ze STANU. **Zero akcji zapisu** — rozwiązywanie review świadomie odłożone (import-legacy);
-    UI to jawnie deklaruje („podgląd"), żeby nie kłamać obietnicą akcji. Meta-test AST pilnuje, że ten
-    widok nie tyka SQL zapisu (sama glue Qt↔read-model).
+class AssignObjectDialog(QDialog):
+    """Dialog ręcznego przypisania obiektu grupie review (#8, P4, D-P4-3): wybór ISTNIEJĄCEGO obiektu
+    z biblioteki (combo `canon · catalog`) ALBO nowe oznaczenie katalogowe parsowane jak resolver
+    (`catalog_canon` + `xref` — „IC 1795" → IC1795). Świadomie BEZ wolnego tekstu jako canon:
+    `object.canon` nie ma deduplikacji semantycznej, a śmieciowego obiektu nic by nie posprzątało.
 
-    `con` = otwarte połączenie (NIE własność widoku). `now_fn` nieużywane (brak zapisu) — przyjmowane
-    dla spójności sygnatury z `TelescopeAxisView` (montaż w `MainWindow`)."""
+    Walidacja PRZED akceptacją (błąd → czerwona nota, dialog zostaje otwarty): oznaczenie
+    nieparsowalne; konflikt aliasu (`alias_target` — pre-check UX; ostateczny guard w
+    `repo.user_assign_object`, TOCTOU). Nazwa rozwiązywalna katalogowo → nota o regule „katalog
+    bije alias" (nowe klatki z tą nazwą przypisze katalog, nie zapamiętany alias). Wynik walidacji
+    ląduje w `self.selected` = `(canon, catalog, kind)` (`kind=None` dla obiektu istniejącego —
+    repo go nie INSERTuje, więc pole nieużywane)."""
+
+    def __init__(self, con, *, object_raw, alias_norm, frame_count, parent=None):
+        super().__init__(parent)
+        self.con = con
+        self.alias_norm = alias_norm
+        self.selected = None
+        self.setWindowTitle("Przypisz obiekt")
+        lay = QVBoxLayout(self)
+
+        head = QLabel(f"Grupa „{object_raw}” — {frame_count} klatek.\n"
+                      "Alias zostanie zapamiętany: nowe klatki z tą nazwą przypisze resolver.")
+        head.setWordWrap(True)
+        lay.addWidget(head)
+        if resolve_solar(object_raw) or resolve_object(object_raw):
+            note = QLabel("Ta nazwa rozwiązuje się katalogowo — katalog bije alias: nowe klatki "
+                          "z tą nazwą przypisze nagłówek, zapamiętany alias dotyczy tej grupy.")
+            note.setWordWrap(True)
+            lay.addWidget(note)
+
+        lay.addWidget(QLabel("Istniejący obiekt:"))
+        self.combo = QComboBox()
+        self._objects = queries.library_objects(con)          # bez filtra — pełna biblioteka
+        for o in self._objects:
+            self.combo.addItem(f"{o['canon']}  ·  {o['catalog'] or '—'}",
+                               (o["id"], o["canon"], o["catalog"]))
+        lay.addWidget(self.combo)
+
+        lay.addWidget(QLabel("albo nowe oznaczenie katalogowe (wypełnione nadpisuje wybór z listy):"))
+        self.designation = QLineEdit()
+        self.designation.setPlaceholderText("np. IC 1795")
+        lay.addWidget(self.designation)
+
+        self.error = QLabel("")
+        self.error.setStyleSheet("color: #b00020")
+        self.error.setWordWrap(True)
+        lay.addWidget(self.error)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._validate_and_accept)
+        buttons.rejected.connect(self.reject)
+        lay.addWidget(buttons)
+
+    def _fail(self, msg):
+        self.error.setText(msg)
+
+    def _validate_and_accept(self):
+        """Waliduj wybór; poprawny → `self.selected` + accept, błąd → nota i dialog zostaje."""
+        text = self.designation.text().strip()
+        if text:
+            cc = catalog_canon(text)
+            if not cc:
+                return self._fail(f"Nie rozpoznaję oznaczenia katalogowego: „{text}”.")
+            canon, catalog, kind = xref(cc), catalog_label(xref(cc)), "deep_sky"
+            object_id = next((o["id"] for o in self._objects if o["canon"] == canon), None)
+        else:
+            object_id, canon, catalog = self.combo.currentData()
+            kind = None                                   # obiekt istnieje — repo nie INSERTuje
+        target = queries.alias_target(self.con, self.alias_norm)
+        if target is not None and target != object_id:
+            target_canon = next((o["canon"] for o in self._objects if o["id"] == target), target)
+            return self._fail(
+                f"Alias dla tej nazwy wskazuje już obiekt „{target_canon}” — wybierz go z listy.")
+        self.selected = (canon, catalog, kind)
+        self.accept()
+
+
+class ObjectAxisView(QWidget):
+    """Osadzalny widok osi OBIEKT (PLAN_gui_object + #8/P4): biblioteka (obiekty → klatki, filtr
+    po teleskopie/kamerze/filtrze) + kolejka przeglądu (obiekt-review / kopie nieczytelne /
+    config-review / headerless) ze STANU. **Akcja zapisu:** „Przypisz obiekt…" na pozycji
+    obiekt-review — dialog (`AssignObjectDialog`) → JEDNA klinga `repo.user_assign_object`
+    (`actor=user:local`): alias zapamiętany na przyszłość + klatki grupy z `object_source='user'`
+    (precedencja na całą drabinę resolvera). Drążenie „kopie nieczytelne" (Z6) → prawy panel
+    w trybie „kopie" (dokładne location z markerem). Meta-test AST pilnuje, że widok nie tyka
+    SQL zapisu — zapis idzie wyłącznie przez `repo`.
+
+    Dispatch pozycji kolejki po STRING-TAGU (R#6): `Qt.UserRole` = tag (`"object_raw"` /
+    `"unreadable"`), `Qt.UserRole+1` = payload (object_raw albo None) — tuple w jednej roli PySide6
+    konwertuje na listę (QVariant) i porównanie z krotką-sentinelem po cichu zawodzi.
+
+    `con` = otwarte połączenie (NIE własność widoku). `now_fn` = źródło czasu akcji zapisu
+    (ISO-8601); domyślnie zegar UTC, wstrzykiwalne dla testów."""
 
     status_message = Signal(str)
 
     def __init__(self, con, now_fn=_utc_now_iso, parent=None):
         super().__init__(parent)
         self.con = con
+        self._now = now_fn
+        self._busy = False                    # pipeline w biegu → akcja zapisu wygaszona
+        self._copies_mode = False             # prawy panel w trybie „kopie" (Z6)
         self._loading = False                 # tłumi sygnały selekcji podczas programowego wypełniania
         self._build_ui()
         self._load_facets()
@@ -408,7 +504,7 @@ class ObjectAxisView(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
 
-        # --- pasek filtra + jawna nota „podgląd" (UI nie kłamie obietnicą akcji) ---
+        # --- pasek filtra ---
         bar = QHBoxLayout()
         bar.addWidget(QLabel("Teleskop:"))
         self.combo_tel = QComboBox()
@@ -419,7 +515,6 @@ class ObjectAxisView(QWidget):
         self.combo_filter.currentIndexChanged.connect(self._on_filter_changed)
         bar.addWidget(self.combo_filter)
         bar.addStretch(1)
-        bar.addWidget(QLabel("Podgląd — rozwiązywanie review w przygotowaniu"))
         outer.addLayout(bar)
 
         splitter = QSplitter(Qt.Horizontal)
@@ -449,6 +544,15 @@ class ObjectAxisView(QWidget):
         self.review = QListWidget()
         self.review.itemSelectionChanged.connect(self._on_review_selected)
         lv.addWidget(self.review)
+        # Akcja #8/P4: przypisz obiekt zaznaczonej pozycji review (aktywna TYLKO przy tagu
+        # „object_raw" — obie listy wzajemnie czyszczą selekcję, przycisk śledzi obie).
+        assign_row = QHBoxLayout()
+        self.assign_btn = QPushButton("Przypisz obiekt…")
+        self.assign_btn.setEnabled(False)
+        self.assign_btn.clicked.connect(self._on_assign)
+        assign_row.addWidget(self.assign_btn)
+        assign_row.addStretch(1)
+        lv.addLayout(assign_row)
 
         # --- prawa: klatki zaznaczonego obiektu / pozycji review ---
         right = QWidget()
@@ -532,21 +636,32 @@ class ObjectAxisView(QWidget):
             self.frames.setRowCount(0)
             self.status_message.emit(
                 "Brak obiektów dla tego filtra — zeskanuj i rozwiąż (horreum resolve) lub zmień filtr.")
+        self._restore_frames_mode()            # tryb „kopie" znika przy refresh (D-P4-5)
+        self._sync_assign_enabled()
         self._on_object_selected()
 
     def _load_review(self):
-        """Kolejka przeglądu ze STANU: obiekt-review (drążenie do klatek), liczniki config-review /
-        headerless (informacyjne — bez drążenia, to inne osie/skan)."""
+        """Kolejka przeglądu ze STANU: obiekt-review (drążenie do klatek + akcja „Przypisz"),
+        kopie nieczytelne (drążenie do kopii, Z6), liczniki config-review/headerless (informacyjne
+        — bez drążenia, to inne osie/skan). Dispatch po string-tagu: `UserRole` = tag,
+        `UserRole+1` = payload (R#6 — tuple w roli QVariant konwertuje na listę)."""
         q = queries.review_queue(self.con)
         self.review.clear()
         for r in q["object_review"]:
             it = QListWidgetItem(f'{r["object_raw"]}  ·  {r["n"]} klatek')
-            it.setData(Qt.UserRole, r["object_raw"])
+            it.setData(Qt.UserRole, "object_raw")
+            it.setData(Qt.UserRole + 1, r["object_raw"])
             self.review.addItem(it)
-        # liczniki innych kanałów jako pozycje informacyjne (bez UserRole → nieklikane do klatek)
+        unread = QListWidgetItem(f'— kopie nieczytelne: {q["unreadable_count"]}')
+        unread.setData(Qt.UserRole, "unreadable")
+        unread.setData(Qt.UserRole + 1, None)
+        self.review.addItem(unread)
+        # liczniki innych kanałów jako pozycja informacyjne (bez tagu → nieklikana); nota
+        # „rozwiązywanie w przygotowaniu" ZAWĘŻONA do tych dwóch kanałów (R#9) — obiekt-review
+        # i kopie mają już swoje akcje.
         info = QListWidgetItem(
             f'— config-review: {q["config_review_count"]}  ·  bez nagłówka: {q["headerless_count"]}'
-            f'  ·  kopie nieczytelne: {q["unreadable_count"]}')
+            f'  (rozwiązywanie w przygotowaniu)')
         info.setFlags(Qt.ItemIsEnabled)        # nie do zaznaczenia (informacyjne)
         self.review.addItem(info)
 
@@ -567,9 +682,24 @@ class ObjectAxisView(QWidget):
         item = self.objects.item(rows[0].row(), OBJ_COL_CANON)
         return item.data(Qt.UserRole) if item else None
 
+    def _selected_review(self):
+        """Zaznaczona pozycja kolejki jako para (tag, payload) albo (None, None). Tag z
+        `Qt.UserRole`, payload z `Qt.UserRole+1` (string-tag dispatch, R#6)."""
+        sel = self.review.selectedItems()
+        if not sel:
+            return None, None
+        return sel[0].data(Qt.UserRole), sel[0].data(Qt.UserRole + 1)
+
+    def _sync_assign_enabled(self):
+        """„Przypisz obiekt…" aktywny WYŁĄCZNIE przy pozycji `object_raw` i poza biegiem pipeline
+        (szczery disabled — UI nie kłamie; R#10: obie listy wzajemnie czyszczą selekcję, więc
+        przycisk śledzi tag, nie to, która lista „ostatnio kliknięta")."""
+        tag, _ = self._selected_review()
+        self.assign_btn.setEnabled(tag == "object_raw" and not self._busy)
+
     def _on_object_selected(self):
         """Obiekt zaznaczony → klatki tego obiektu (z bieżącym filtrem). Czyści selekcję review (wzajemnie
-        wykluczające źródła klatek: obiekt vs pozycja review)."""
+        wykluczające źródła klatek: obiekt vs pozycja review) i wychodzi z trybu „kopie"."""
         if self._loading:
             return
         oid = self._selected_object_id()
@@ -577,6 +707,8 @@ class ObjectAxisView(QWidget):
             return
         if self.review.selectedItems():
             self.review.clearSelection()
+        self._restore_frames_mode()
+        self._sync_assign_enabled()
         flt = self._filters()
         rows = queries.object_frames(
             self.con, oid, telescope_id=flt["telescope_id"], filter_canon=flt["filter_canon"])
@@ -584,20 +716,96 @@ class ObjectAxisView(QWidget):
         self._fill_frames(rows, present_col=True)
 
     def _on_review_selected(self):
-        """Pozycja obiekt-review zaznaczona → jej nierozwiązane klatki (drążenie review). Pozycje
-        informacyjne (config/headerless) nie mają `UserRole` → ignorowane."""
+        """Pozycja kolejki zaznaczona → dispatch po tagu: `object_raw` = nierozwiązane klatki tej
+        nazwy (+ aktywacja „Przypisz obiekt…"); `unreadable` = tryb „kopie" prawego panelu (Z6);
+        pozycja informacyjna (bez tagu) nie drąży."""
         if self._loading:
             return
-        sel = self.review.selectedItems()
-        if not sel:
-            return
-        object_raw = sel[0].data(Qt.UserRole)
-        if object_raw is None:                 # pozycja informacyjna (liczniki) — nie drąży
+        tag, payload = self._selected_review()
+        self._sync_assign_enabled()
+        if tag is None:                        # nic nie zaznaczone / pozycja informacyjna
             return
         self.objects.clearSelection()
+        if tag == "object_raw":
+            self._restore_frames_mode()
+            rows = queries.object_review_frames(self.con, payload)
+            self.frames_label.setText(f"Klatki do przeglądu: {payload}")
+            self._fill_frames(rows, present_col=False)
+        elif tag == "unreadable":
+            self._show_copies()
+
+    # ------------------------------------------------ tryb „kopie" (Z6)
+
+    def _show_copies(self):
+        """Prawy panel w trybie „kopie": DOKŁADNE location z markerem `unreadable_since` (#13/Z6).
+        Tryb znika przy `refresh()` i przy wyborze obiektu/pozycji review (powrót do klatek
+        zaznaczenia — świadomie, udokumentowane w D-P4-5)."""
+        rows = queries.unreadable_copies(self.con)
+        self._copies_mode = True
+        self.frames.setColumnCount(len(COPY_HEADERS))
+        self.frames.setHorizontalHeaderLabels(COPY_HEADERS)
+        fh = self.frames.horizontalHeader()
+        fh.setSectionResizeMode(QHeaderView.ResizeToContents)
+        fh.setSectionResizeMode(COPY_COL_PATH, QHeaderView.Stretch)
+        self.frames.setRowCount(len(rows))
+        for r, row in enumerate(rows):
+            path = row["path"] or ""
+            self._set_frame_cell(r, COPY_COL_PATH,
+                                 os.path.basename(path) if path else "(brak ścieżki)",
+                                 tooltip=path or None)
+            self._set_frame_cell(r, COPY_COL_VOLUME, row["volume"])
+            self._set_frame_cell(r, COPY_COL_PRESENT, "tak" if row["present"] else "nie")
+            self._set_frame_cell(r, COPY_COL_MARKED, _fmt_event_ts(row["unreadable_since"]),
+                                 tooltip=row["unreadable_since"])
+        self.frames_label.setText(f"Kopie nieczytelne ({len(rows)})")
+
+    def _restore_frames_mode(self):
+        """Powrót prawego panelu z trybu „kopie" do tabeli klatek (kolumny + nagłówki FRAME_*)."""
+        if not self._copies_mode:
+            return
+        self._copies_mode = False
+        self.frames.setColumnCount(len(FRAME_HEADERS))
+        self.frames.setHorizontalHeaderLabels(FRAME_HEADERS)
+        fh = self.frames.horizontalHeader()
+        fh.setSectionResizeMode(QHeaderView.ResizeToContents)
+        fh.setSectionResizeMode(FRAME_COL_PATH, QHeaderView.Stretch)
+
+    # ------------------------------------------------ akcja zapisu (#8/P4)
+
+    def _on_assign(self):
+        """„Przypisz obiekt…": dialog wyboru obiektu → JEDNA klinga `repo.user_assign_object`
+        (grupa = klatki pozycji review o tym `object_raw`; klucz aliasu = `norm_alnum(object_raw)` —
+        ta sama funkcja, co resolver przy zapisie, SPOT). Raport „przypisano N z M" (R#8: dryf
+        grupy = klatka zajęta między dialogiem a zapisem jest pomijana), potem refresh."""
+        tag, object_raw = self._selected_review()
+        if tag != "object_raw" or not object_raw:
+            return
+        alias_norm = norm_alnum(object_raw)
+        if not alias_norm:                     # pusty klucz (D-P4-2/R#3) — dialog odrzuca grupę
+            QMessageBox.warning(
+                self, "Przypisz obiekt",
+                f"Nazwa „{object_raw}” nie ma znaków alfanumerycznych — nie może być "
+                "zapamiętanym aliasem.")
+            return
         rows = queries.object_review_frames(self.con, object_raw)
-        self.frames_label.setText(f"Klatki do przeglądu: {object_raw}")
-        self._fill_frames(rows, present_col=False)
+        frame_ids = [r["frame_id"] for r in rows]
+        dlg = AssignObjectDialog(self.con, object_raw=object_raw, alias_norm=alias_norm,
+                                 frame_count=len(frame_ids), parent=self)
+        if dlg.exec() != QDialog.Accepted or dlg.selected is None:
+            return
+        canon, catalog, kind = dlg.selected
+        try:
+            assigned, skipped = repo.user_assign_object(
+                self.con, alias_norm=alias_norm, canon=canon, catalog=catalog, kind=kind,
+                frame_ids=frame_ids, now=self._now())
+        except ValueError as e:                # konflikt aliasu / dryf do nieistniejącej klatki
+            QMessageBox.warning(self, "Przypisz obiekt", str(e))
+            return
+        msg = f"Przypisano {assigned} z {assigned + skipped} klatek → {canon}."
+        if skipped:
+            msg += f" ({skipped} pominięte — zajęte między dialogiem a zapisem)"
+        self.status_message.emit(msg)
+        self.refresh()
 
     def _fill_frames(self, rows, *, present_col):
         """Wypełnij tabelę klatek. `present_col` — czy źródło niesie kolumnę `present` (biblioteka tak,
@@ -629,10 +837,11 @@ class ObjectAxisView(QWidget):
         self.frames.setItem(r, c, item)
 
     def set_busy(self, busy):
-        """Spójność z gospodarzem: widok read-only nie ma akcji zapisu do wygaszenia. Realne ryzyko to
-        SELECT w trakcie zapisu workera — gospodarz odświeża DOPIERO po `stage_finished` (NIE woła tu
-        refresh w trakcie). Metoda istnieje dla jednolitego kontraktu montażu; no-op poza spójnością."""
-        # celowo no-op: brak przycisków zapisu; odświeżanie sterowane przez gospodarza po stage_finished.
+        """Pipeline w biegu → wygaszenie akcji zapisu („Przypisz obiekt…", #8/P4) — szczery disabled.
+        Read-modele odświeża gospodarz DOPIERO po `stage_finished` (WAL → zapisy workera widoczne),
+        więc SELECT w trakcie zapisu tu nie zachodzi."""
+        self._busy = busy
+        self._sync_assign_enabled()
 
 
 # ============================================================ oś OBSERWATORIUM (PLAN_os_obserwatorium §3)
@@ -1151,6 +1360,7 @@ class MainWindow(QMainWindow):
         user może zerknąć na oś; blokujemy tylko ZAPIS (§6: aktywny tylko „Anuluj" skanu)."""
         self.axis_view.set_busy(running)
         self.observatory_view.set_busy(running)
+        self.object_view.set_busy(running)     # „Przypisz obiekt…" (#8/P4) — zapis, gatowany jak inne
         self.grid_view.set_busy(running)     # grid ma akcje ZAPISU (staging/commit/undo) — gatuj (wizytator C1)
 
     # ---------------------------------------------------------------- menu Plik: Otwórz/Nowa baza

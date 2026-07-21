@@ -6,7 +6,7 @@ trafiają do delty. FILTR jest kind-AGNOSTYCZNY (flat też ma filtr → filter_c
 import numpy as np
 from astropy.io import fits
 
-from horreum import db
+from horreum import db, repo
 from horreum.grouper import run_grouper
 from horreum.resolver import delta_report, run_resolver
 from horreum.scan import scan_tree
@@ -267,4 +267,158 @@ def test_resolver_idempotentny(tmp_path):
     assert (s2.objects_new, s2.objects_assigned) == (0, 0)
     assert con.execute("SELECT count(*) FROM object").fetchone()[0] == 2
     assert con.execute("SELECT count(*) FROM object_alias").fetchone()[0] == 3
+    con.close()
+
+
+# --- P4 (#8): szczebel ALIASU, precedencja `user`, D5 (delta ze stanu) ---
+
+def _p4_tree(tmp_path):
+    """2 light'y 'HotS' (nazwa NIEROZWIĄZYWALNA katalogowo): h1 BEZ koordów, h2 WEWNĄTRZ regionu
+    Veil (RA/DEC środka). Pod testy kolejności szczebli alias/region i zapamiętania aliasu."""
+    con = db.open_db(str(tmp_path / "h.db"))
+    tree = tmp_path / "t"; tree.mkdir()
+    cam = [("INSTRUME", "ZWO ASI2600MM Pro"), ("XPIXSZ", 3.76)]
+    _fits(tree / "h1.fits", cam + [("IMAGETYP", "LIGHT"), ("OBJECT", "HotS")], n=1)
+    _fits(tree / "h2.fits", cam + [("IMAGETYP", "LIGHT"), ("OBJECT", "HotS"),
+                                   ("RA", 312.75), ("DEC", 30.67)], n=2)   # środek Veil (P3)
+    scan_tree(con, tree, now=NOW)
+    return con
+
+
+def test_p4_bez_aliasu_region_dalej_ostatnim_szczeblem(tmp_path):
+    """Kontrola P3 po wstawieniu szczebla aliasu: klatka z koordami w Veil trafia REGIONEM,
+    bez koordów — do review. Kolejność drabiny bez aliasu niezmieniona."""
+    con = _p4_tree(tmp_path)
+    s = run_resolver(con, now=NOW)
+    assert (s.objects_by_region, s.objects_by_alias, s.objects_review) == (1, 0, 1)
+    assert con.execute(
+        "SELECT object_source FROM frame WHERE object_id IS NOT NULL").fetchone()[0] == "region"
+    con.close()
+
+
+def test_p4_alias_bije_region(tmp_path):
+    """R2/D-P4-1: alias (jawna wiedza o NAZWIE) PRZED regionem (inferencja z geometrii) — klatka
+    'HotS' z koordami WEWNĄTRZ Veil i tak trafia aliasem (object_source='alias'), nie regionem."""
+    con = _p4_tree(tmp_path)
+    oid, _ = repo.upsert_object(con, canon="IC1795", catalog="IC", kind="deep_sky", now=NOW)
+    repo.add_object_alias(con, alias_norm="HOTS", object_id=oid, source="user", now=NOW)
+    s = run_resolver(con, now=NOW)
+    assert (s.objects_by_alias, s.objects_by_region, s.objects_review) == (2, 0, 0)
+    assert con.execute("SELECT count(*) FROM frame WHERE object_source='alias'").fetchone()[0] == 2
+    # trafienie aliasu NIE pisze nowego aliasu ani nowego obiektu
+    assert con.execute("SELECT count(*) FROM object_alias").fetchone()[0] == 1
+    assert con.execute("SELECT count(*) FROM object").fetchone()[0] == 1
+    con.close()
+
+
+def test_p4_katalog_bije_alias(tmp_path):
+    """R2/header-primary: nazwa rozwiązywalna katalogowo NIGDY nie idzie szczeblem aliasu — alias
+    'M42' wskazujący INNY obiekt istnieje, a klatka 'M 42' trafia katalogiem (M42→NGC1976)."""
+    con = db.open_db(str(tmp_path / "h.db"))
+    tree = tmp_path / "t"; tree.mkdir()
+    cam = [("INSTRUME", "ZWO ASI2600MM Pro"), ("XPIXSZ", 3.76)]
+    _fits(tree / "m.fits", cam + [("IMAGETYP", "LIGHT"), ("OBJECT", "M 42")], n=1)
+    scan_tree(con, tree, now=NOW)
+    oid_trap, _ = repo.upsert_object(con, canon="NGC7000", catalog="NGC", kind="deep_sky", now=NOW)
+    repo.add_object_alias(con, alias_norm="M42", object_id=oid_trap, source="user", now=NOW)
+    s = run_resolver(con, now=NOW)
+    assert s.objects_by_alias == 0
+    row = con.execute(
+        "SELECT f.object_id AS oid, f.object_source AS osrc FROM frame f "
+        "JOIN header h ON h.frame_id=f.id WHERE h.object_raw='M 42'").fetchone()
+    assert row["oid"] != oid_trap and row["osrc"] != "alias"
+    assert con.execute(
+        "SELECT canon FROM object WHERE id=?", (row["oid"],)).fetchone()[0] == "NGC1976"
+    con.close()
+
+
+def test_p4_pusty_klucz_aliasu_pomijany(tmp_path):
+    """R2/D-P4-2: nazwa czysto symboliczna ('---') → `norm_alnum` daje '' → lookup aliasu
+    POMINIĘTY (alias '' łapałby KAŻDĄ niealfanumeryczną nazwę — tu zasiano go obok klingi,
+    jako symulację stanu awaryjnego; `repo.user_assign_object` pusty klucz odrzuca)."""
+    con = db.open_db(str(tmp_path / "h.db"))
+    tree = tmp_path / "t"; tree.mkdir()
+    cam = [("INSTRUME", "ZWO ASI2600MM Pro"), ("XPIXSZ", 3.76)]
+    _fits(tree / "d.fits", cam + [("IMAGETYP", "LIGHT"), ("OBJECT", "---")], n=1)
+    scan_tree(con, tree, now=NOW)
+    oid, _ = repo.upsert_object(con, canon="IC1795", catalog="IC", kind="deep_sky", now=NOW)
+    with con:
+        con.execute(
+            "INSERT INTO object_alias(alias_norm, object_id, source) VALUES ('', ?, 'user')", (oid,))
+    s = run_resolver(con, now=NOW)
+    assert (s.objects_by_alias, s.objects_review) == (0, 1)
+    assert con.execute("SELECT object_id FROM frame").fetchone()[0] is None
+    con.close()
+
+
+def test_p4_precedencja_user_na_cala_drabine(tmp_path):
+    """R1/P4: `object_source='user'` pomija CAŁĄ drabinę — klatka z nagłówkiem rozwiązywalnym
+    katalogowo ('M 42'), koordami w Veil I aliasem-pułapką na inny obiekt zachowuje obiekt usera:
+    zero nowych `object.assigned`, poza `object.review_summary` (D5)."""
+    con = db.open_db(str(tmp_path / "h.db"))
+    tree = tmp_path / "t"; tree.mkdir()
+    cam = [("INSTRUME", "ZWO ASI2600MM Pro"), ("XPIXSZ", 3.76)]
+    _fits(tree / "u.fits", cam + [("IMAGETYP", "LIGHT"), ("OBJECT", "M 42"),
+                                  ("RA", 312.75), ("DEC", 30.67)], n=1)
+    scan_tree(con, tree, now=NOW)
+    fid = con.execute("SELECT id FROM frame").fetchone()[0]
+    # pułapka: alias 'M42' na INNY obiekt — gdyby user nie miał precedencji, resolver przepiąłby
+    oid_trap, _ = repo.upsert_object(con, canon="IC1795", catalog="IC", kind="deep_sky", now=NOW)
+    repo.add_object_alias(con, alias_norm="M42", object_id=oid_trap, source="user", now=NOW)
+    assigned, _ = repo.user_assign_object(
+        con, alias_norm="M42RECZNE", canon="NGC7000", catalog="NGC", kind="deep_sky",
+        frame_ids=[fid], now=NOW)
+    assert assigned == 1
+    s = run_resolver(con, now=NOW)
+    assert (s.objects_assigned, s.objects_by_alias, s.objects_by_region,
+            s.objects_review) == (0, 0, 0, 0)
+    row = con.execute("SELECT object_id, object_source FROM frame WHERE id=?", (fid,)).fetchone()
+    assert row["object_source"] == "user"
+    assert con.execute("SELECT canon FROM object WHERE id=?",
+                       (row["object_id"],)).fetchone()[0] == "NGC7000"
+    # jedyny object.assigned = ten od usera; review_summary pusty (D5 — przypisany nie wraca)
+    assert con.execute("SELECT count(*) FROM event WHERE verb='object.assigned'").fetchone()[0] == 1
+    assert con.execute(
+        "SELECT count(*) FROM event WHERE verb='object.review_summary'").fetchone()[0] == 0
+    con.close()
+
+
+def test_p4_user_assign_zapamietuje_alias_dla_nowych_klatek(tmp_path):
+    """R3/D-P4-1: ręczne przypisanie grupy 'HotS' zapamiętuje ALIAS — NOWA klatka z tym samym
+    `object_raw` rozwiązuje się szczeblem aliasu (`object_source='alias'`). Kolejność drabiny
+    w re-derywacji: klatka wcześniej zREGIONowana z nazwą 'HotS' PRZEPINA SIĘ na obiekt aliasu
+    (alias = wiedza o nazwie > region = inferencja z geometrii; oba szczeble re-derywowalne,
+    `assign_object` świadomie przepina przy innej parze — `repo.py:527-540`). Zamrożona jest
+    WYŁĄCZNIE klatka 'user'. Delta ze stanu pusta (D5)."""
+    con = _p4_tree(tmp_path)
+    s = run_resolver(con, now=NOW)
+    assert (s.objects_by_region, s.objects_review) == (1, 1)   # h2→Veil, h1→review
+    # user przypisuje nierozwiązaną h1 do nowego obiektu IC1795 (alias HOTS zapamiętany)
+    fids = [r[0] for r in con.execute(
+        "SELECT f.id FROM frame f JOIN header h ON h.frame_id=f.id "
+        "WHERE h.object_raw='HotS' AND f.object_id IS NULL")]
+    assert repo.user_assign_object(
+        con, alias_norm="HOTS", canon="IC1795", catalog="IC", kind="deep_sky",
+        frame_ids=fids, now=NOW) == (1, 0)
+    # re-resolve: h1 zamrożona ('user'), h2 RE-DERYWUJE się aliasem (Veil → IC1795) — precedencja
+    # aliasu nad regionem obowiązuje też przy powtórnym przebiegu; delta pusta (D5)
+    s2 = run_resolver(con, now=NOW)
+    assert (s2.objects_assigned, s2.objects_by_alias, s2.objects_review) == (1, 1, 0)
+    assert delta_report(con).object_unresolved == 0
+    # NOWA klatka z tą samą nazwą → szczebel ALIASU
+    _fits(tmp_path / "t" / "h3.fits",
+          [("INSTRUME", "ZWO ASI2600MM Pro"), ("XPIXSZ", 3.76),
+           ("IMAGETYP", "LIGHT"), ("OBJECT", "HotS")], n=3)
+    scan_tree(con, tmp_path / "t", now=NOW)
+    s3 = run_resolver(con, now=NOW)
+    assert (s3.objects_assigned, s3.objects_by_alias) == (1, 1)
+    src = {r["object_source"]: r["n"] for r in con.execute(
+        "SELECT object_source, count(*) AS n FROM frame GROUP BY object_source")}
+    assert src == {"user": 1, "alias": 2}                    # h1 user; h2 (przepięta) + h3 alias
+    # alias ani obiekt nie zduplikowane przez trafienia
+    assert con.execute("SELECT count(*) FROM object_alias WHERE alias_norm='HOTS'").fetchone()[0] == 1
+    assert con.execute("SELECT count(*) FROM object").fetchone()[0] == 2     # Veil + IC1795
+    # replay: szczebel aliasu idempotentny (R8 — zero nowych object.assigned)
+    s4 = run_resolver(con, now=NOW)
+    assert (s4.objects_assigned, s4.objects_by_alias) == (0, 0)
     con.close()

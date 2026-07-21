@@ -185,3 +185,54 @@ def test_has_real_volume_locations(s8_obj, tmp_path):
         assert queries.has_real_volume_locations(fresh) is False   # sam '?' nie jest „realny"
     finally:
         fresh.close()
+
+
+# --- P4 (#8/Z6): alias_target + unreadable_copies ---
+
+def test_alias_target_trafia_i_milczy(s8_obj):
+    """`alias_target` = pre-check konfliktu w dialogu (#8): znany alias → object_id, nieznany → None."""
+    con, ids = s8_obj
+    assert queries.alias_target(con, "FLATWIZARD") is None          # fixture nie zna aliasu
+    repo.add_object_alias(con, alias_norm="FLATWIZARD",
+                          object_id=ids["objects"]["NGC7000"], source="user", now=NOW)
+    assert queries.alias_target(con, "FLATWIZARD") == ids["objects"]["NGC7000"]
+
+
+def test_unreadable_copies_per_kopia_nie_per_klatka(s8_obj):
+    """Z6/#13: drążenie niesie DOKŁADNE KOPIE — klatka z 2 oznaczonymi kopiami = 2 wiersze;
+    oznaczona+czysta = 1 wiersz; `present` per kopia (oznaczona może być present=0 — znikła
+    po oznaczeniu i to MA być widoczne). ORDER: najnowsze oznaczenie na górze."""
+    con, ids = s8_obj
+    assert queries.unreadable_copies(con) == []                     # fixture bez oznaczeń
+    locs = con.execute(
+        "SELECT id, volume FROM location WHERE frame_id = ? ORDER BY id",
+        (ids["frames"]["a1"],)).fetchall()
+    assert len(locs) == 2                                           # a1: vol1 + vol2 (fixture R#3)
+    repo.refresh_location_unreadable(con, location_id=locs[0]["id"], sha1_data="sha-a1",
+                                     path="/astro/a1.fits", mtime="t2", reason="OSError", now=NOW)
+    repo.refresh_location_unreadable(con, location_id=locs[1]["id"], sha1_data="sha-a1",
+                                     path="/backup/a1.fits", mtime="t2", reason="OSError",
+                                     now="2026-06-29T13:00:01")
+    rows = queries.unreadable_copies(con)
+    assert len(rows) == 2                                           # DWIE kopie tej samej klatki
+    assert [r["volume"] for r in rows] == ["vol2", "vol1"]          # nowsze oznaczenie na górze
+    assert {r["path"] for r in rows} == {"/astro/a1.fits", "/backup/a1.fits"}
+    assert all(r["frame_id"] == ids["frames"]["a1"] and r["present"] == 1 for r in rows)
+    # oznaczona kopia, która POTEM zniknęła (present=0), dalej wynika z markera (forward-guard #13)
+    with con:
+        con.execute("UPDATE location SET present = 0 WHERE id = ?", (locs[0]["id"],))
+    rows = queries.unreadable_copies(con)
+    assert len(rows) == 2
+    assert {r["present"] for r in rows} == {0, 1}
+
+
+def test_unreadable_copies_czysta_kopia_poza_lista(s8_obj):
+    """Klatka z JEDNĄ oznaczoną i JEDNĄ czystą kopią → tylko oznaczona na liście (1 wiersz)."""
+    con, ids = s8_obj
+    loc = con.execute("SELECT id FROM location WHERE volume = 'vol2'").fetchone()
+    repo.refresh_location_unreadable(con, location_id=loc["id"], sha1_data="sha-a1",
+                                     path="/backup/a1.fits", mtime="t2", reason="OSError", now=NOW)
+    rows = queries.unreadable_copies(con)
+    assert len(rows) == 1 and rows[0]["volume"] == "vol2"
+    # review_queue niesie ten sam fakt licznikiem per-KLATKA (DISTINCT, spójność z resolverem)
+    assert queries.review_queue(con)["unreadable_count"] == 1

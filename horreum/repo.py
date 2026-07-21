@@ -569,6 +569,72 @@ def backfill_filter_canon(con, items, now, actor="resolver"):
                    payload={"count": len(items)})
 
 
+# ------------------------------------------------ oś OBIEKT — zapis usera (GUI, #8/P4)
+
+def user_assign_object(con, *, alias_norm, canon, catalog, kind, frame_ids, now, uid="local"):
+    """Ręczne przypisanie obiektu GRUPIE klatek z kolejki przeglądu (#8, D-P4-4) — JEDNA transakcja
+    `_immediate`, DML inline (NIE kompozycja `upsert_object`+`add_object_alias`+`assign_object`:
+    każda z nich ma własny `with con:` commitujący przy wyjściu — zawołane wewnątrz zewnętrznej
+    transakcji zamknęłyby ją po pierwszej i atomowość grupy pryskała).
+
+    Zapis: `INSERT object` (gdy kanon nowy, + `object.upserted`) → `INSERT object_alias`
+    (`source='user'`, gdy alias nowy, + `object.aliased`) → `UPDATE frame` per klatka
+    (`object_source='user'`, + `object.assigned`). Alias zapamiętuje nazwę NA PRZYSZŁOŚĆ — nowe
+    klatki z tym `object_raw` trafią szczeblem aliasu resolvera (`object_source='alias'`).
+
+    GUARDY (`ValueError`, zero zapisu): pusty `alias_norm` (`norm_alnum` czysto symbolicznej nazwy
+    daje `""` — alias "" łapałby KAŻDĄ niealfanumeryczną nazwę, D-P4-2/R#3); KONFLIKT aliasu
+    (`alias_norm` istnieje i wskazuje INNY obiekt — domyka pułapkę z `resolve/regions.py:18-22`;
+    guard czytany WEWNĄTRZ `_immediate`, TOCTOU).
+
+    DRYF GRUPY (R#8): klatki re-SELECTowane w transakcji; klatka, która między dialogiem a zapisem
+    dostała `object_id NOT NULL` (resolve z workera / inne przypisanie), jest POMIJANA i zliczana.
+    Zwraca `(assigned, skipped)` — GUI pokazuje „przypisano N z M". Idempotencja jak reszta repo:
+    powtórzenie tego samego przypisania → wszystkie klatki pominięte, ZERO nowych eventów."""
+    if not alias_norm:
+        raise ValueError("alias_norm pusty — nazwa bez znaków alfanumerycznych nie może być kluczem")
+    with _immediate(con):
+        row = con.execute("SELECT id FROM object WHERE canon = ?", (canon,)).fetchone()
+        object_id = row[0] if row is not None else None
+        existing = con.execute(
+            "SELECT object_id FROM object_alias WHERE alias_norm = ?", (alias_norm,)).fetchone()
+        if existing is not None and existing[0] != object_id:
+            raise ValueError(
+                f"alias '{alias_norm}' wskazuje już object:{existing[0]} — konflikt, zero zapisu")
+
+        actor = f"user:{uid}"
+        if object_id is None:
+            cur = con.execute(
+                "INSERT INTO object(canon, catalog, kind) VALUES (?, ?, ?)",
+                (canon, catalog, kind))
+            object_id = cur.lastrowid
+            emit_event(con, actor=actor, verb="object.upserted", target=f"object:{object_id}",
+                       now=now, payload={"canon": canon, "catalog": catalog, "kind": kind})
+        if existing is None:
+            con.execute(
+                "INSERT INTO object_alias(alias_norm, object_id, source) VALUES (?, ?, 'user')",
+                (alias_norm, object_id))
+            emit_event(con, actor=actor, verb="object.aliased", target=f"object:{object_id}",
+                       now=now, payload={"alias_norm": alias_norm, "source": "user"})
+
+        assigned = skipped = 0
+        for frame_id in frame_ids:
+            fr = con.execute(
+                "SELECT object_id FROM frame WHERE id = ?", (frame_id,)).fetchone()
+            if fr is None:
+                raise ValueError(f"frame:{frame_id} nie istnieje")
+            if fr[0] is not None:
+                skipped += 1                        # dryf: klatka zajęta między dialogiem a zapisem
+                continue
+            con.execute(
+                "UPDATE frame SET object_id = ?, object_source = 'user' WHERE id = ?",
+                (object_id, frame_id))
+            emit_event(con, actor=actor, verb="object.assigned", target=f"frame:{frame_id}",
+                       now=now, payload={"object_id": object_id, "object_source": "user"})
+            assigned += 1
+    return assigned, skipped
+
+
 # ============================================================ oś OBSERWATORIUM (§PLAN_os_obserwatorium)
 
 def propose_observatory(con, *, lat, lon, now, actor="resolver"):

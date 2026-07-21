@@ -537,3 +537,126 @@ def test_backfill_filter_canon_bulk_jeden_event(tmp_path):
     ev = con.execute("SELECT payload FROM event WHERE verb='filter.backfilled'").fetchall()
     assert len(ev) == 1 and json.loads(ev[0]["payload"]) == {"count": 2}
     con.close()
+
+
+# --- oś OBIEKT: user_assign_object (#8/P4, D-P4-4) ---
+
+def test_user_assign_object_nowy_obiekt_alias_klatki(tmp_path):
+    """Happy path: nowy kanon → INSERT object (`object.upserted`) + alias `source='user'`
+    (`object.aliased`) + UPDATE klatek (`object.assigned`, `object_source='user'`), actor
+    `user:local`, JEDNA transakcja `_immediate`. Zwraca (assigned, skipped)."""
+    con = _fresh(tmp_path)
+    f1, _ = repo.upsert_frame(con, sha1_data="a", kind="light", filetype="fits",
+                              camera_id=None, now=NOW)
+    f2, _ = repo.upsert_frame(con, sha1_data="b", kind="light", filetype="fits",
+                              camera_id=None, now=NOW)
+    assigned, skipped = repo.user_assign_object(
+        con, alias_norm="HOTS", canon="IC1795", catalog="IC", kind="deep_sky",
+        frame_ids=[f1, f2], now=NOW)
+    assert (assigned, skipped) == (2, 0)
+    oid = con.execute("SELECT id FROM object WHERE canon='IC1795'").fetchone()["id"]
+    row = con.execute(
+        "SELECT object_id, source FROM object_alias WHERE alias_norm='HOTS'").fetchone()
+    assert (row["object_id"], row["source"]) == (oid, "user")
+    for f in (f1, f2):
+        r = con.execute("SELECT object_id, object_source FROM frame WHERE id=?", (f,)).fetchone()
+        assert (r["object_id"], r["object_source"]) == (oid, "user")
+    verbs = [r["verb"] for r in con.execute(
+        "SELECT verb FROM event WHERE verb LIKE 'object.%' ORDER BY id")]
+    assert verbs == ["object.upserted", "object.aliased", "object.assigned", "object.assigned"]
+    actors = {r[0] for r in con.execute("SELECT actor FROM event WHERE verb LIKE 'object.%'")}
+    assert actors == {"user:local"}
+    con.close()
+
+
+def test_user_assign_object_istniejacy_obiekt_bez_upsertu(tmp_path):
+    """Obiekt istnieje (kanon) → ZERO `object.upserted` z tej akcji; alias nowy → `object.aliased`;
+    klatka dostaje `object_source='user'`. `kind=None` akceptowane (repo nie INSERTuje)."""
+    con = _fresh(tmp_path)
+    oid, _ = repo.upsert_object(con, canon="NGC7000", catalog="NGC", kind="deep_sky", now=NOW)
+    f1, _ = repo.upsert_frame(con, sha1_data="a", kind="light", filetype="fits",
+                              camera_id=None, now=NOW)
+    assigned, skipped = repo.user_assign_object(
+        con, alias_norm="FW", canon="NGC7000", catalog="NGC", kind=None,
+        frame_ids=[f1], now=NOW)
+    assert (assigned, skipped) == (1, 0)
+    assert con.execute("SELECT count(*) FROM object").fetchone()[0] == 1     # bez duplikatu
+    # jedyny object.upserted = ten z setupu (upsert_object), nie z akcji usera
+    assert con.execute("SELECT count(*) FROM event WHERE verb='object.upserted'").fetchone()[0] == 1
+    assert con.execute("SELECT object_source FROM frame WHERE id=?", (f1,)).fetchone()[0] == "user"
+    con.close()
+
+
+def test_user_assign_object_pusty_klucz_odrzucony_przed_zapisem(tmp_path):
+    """D-P4-2/R#3: pusty `alias_norm` (nazwa czysto symboliczna, np. '---') → ValueError PRZED
+    jakimkolwiek zapisem — alias '' łapałby KAŻDĄ niealfanumeryczną nazwę."""
+    con = _fresh(tmp_path)
+    with pytest.raises(ValueError):
+        repo.user_assign_object(con, alias_norm="", canon="IC1795", catalog="IC",
+                                kind="deep_sky", frame_ids=[], now=NOW)
+    assert con.execute("SELECT count(*) FROM event").fetchone()[0] == 0
+    assert con.execute("SELECT count(*) FROM object").fetchone()[0] == 0
+    con.close()
+
+
+def test_user_assign_object_konflikt_aliasu_zero_zapisu(tmp_path):
+    """Konflikt: `alias_norm` wskazuje INNY obiekt → ValueError i ZERO zapisu — także nowy kanon
+    NIE zostaje wstawiony (guard czytany w `_immediate` przed INSERTem; rollback cofa całość)."""
+    con = _fresh(tmp_path)
+    o1, _ = repo.upsert_object(con, canon="NGC7000", catalog="NGC", kind="deep_sky", now=NOW)
+    repo.add_object_alias(con, alias_norm="FW", object_id=o1, source="user", now=NOW)
+    f1, _ = repo.upsert_frame(con, sha1_data="a", kind="light", filetype="fits",
+                              camera_id=None, now=NOW)
+    with pytest.raises(ValueError):
+        repo.user_assign_object(con, alias_norm="FW", canon="IC1795", catalog="IC",
+                                kind="deep_sky", frame_ids=[f1], now=NOW)
+    assert con.execute("SELECT object_id FROM object_alias WHERE alias_norm='FW'").fetchone()[0] == o1
+    assert con.execute("SELECT count(*) FROM object WHERE canon='IC1795'").fetchone()[0] == 0
+    assert con.execute("SELECT object_id FROM frame WHERE id=?", (f1,)).fetchone()[0] is None
+    assert con.execute("SELECT count(*) FROM event WHERE verb='object.assigned'").fetchone()[0] == 0
+    con.close()
+
+
+def test_user_assign_object_dryf_grupy_pomija_zajete(tmp_path):
+    """R#8: klatka, która między dialogiem a zapisem dostała obiekt, jest POMIJANA (skipped,
+    jej `object_source` nietknięty), reszta przypisana — raport (assigned, skipped), bez wyjątku."""
+    con = _fresh(tmp_path)
+    oid, _ = repo.upsert_object(con, canon="NGC7000", catalog="NGC", kind="deep_sky", now=NOW)
+    f1, _ = repo.upsert_frame(con, sha1_data="a", kind="light", filetype="fits",
+                              camera_id=None, now=NOW)
+    f2, _ = repo.upsert_frame(con, sha1_data="b", kind="light", filetype="fits",
+                              camera_id=None, now=NOW)
+    repo.assign_object(con, frame_id=f2, object_id=oid, object_source="catalog_xref", now=NOW)
+    assigned, skipped = repo.user_assign_object(
+        con, alias_norm="FW", canon="NGC7000", catalog="NGC", kind=None,
+        frame_ids=[f1, f2], now=NOW)
+    assert (assigned, skipped) == (1, 1)
+    assert con.execute("SELECT object_source FROM frame WHERE id=?", (f1,)).fetchone()[0] == "user"
+    assert con.execute("SELECT object_source FROM frame WHERE id=?", (f2,)).fetchone()[0] == "catalog_xref"
+    con.close()
+
+
+def test_user_assign_object_nieistniejaca_klatka_odrzuca(tmp_path):
+    """Klatka spoza bazy → ValueError; rollback cofa także INSERT object/alias z tej transakcji."""
+    con = _fresh(tmp_path)
+    with pytest.raises(ValueError):
+        repo.user_assign_object(con, alias_norm="FW", canon="IC1795", catalog="IC",
+                                kind="deep_sky", frame_ids=[999], now=NOW)
+    assert con.execute("SELECT count(*) FROM object").fetchone()[0] == 0
+    assert con.execute("SELECT count(*) FROM object_alias").fetchone()[0] == 0
+    con.close()
+
+
+def test_user_assign_object_idempotentny(tmp_path):
+    """Powtórzenie przypisania → klatka pominięta (0, 1), ZERO nowych eventów, alias bez duplikatu."""
+    con = _fresh(tmp_path)
+    f1, _ = repo.upsert_frame(con, sha1_data="a", kind="light", filetype="fits",
+                              camera_id=None, now=NOW)
+    kw = dict(alias_norm="FW", canon="NGC7000", catalog="NGC", kind=None,
+              frame_ids=[f1], now=NOW)
+    assert repo.user_assign_object(con, **kw) == (1, 0)
+    ev = con.execute("SELECT count(*) FROM event").fetchone()[0]
+    assert repo.user_assign_object(con, **kw) == (0, 1)
+    assert con.execute("SELECT count(*) FROM event").fetchone()[0] == ev
+    assert con.execute("SELECT count(*) FROM object_alias").fetchone()[0] == 1
+    con.close()

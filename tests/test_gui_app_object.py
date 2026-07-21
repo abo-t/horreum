@@ -24,7 +24,7 @@ from horreum.gui.app import (
 
 from fixture_s8 import seed_object_axis
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QDialog, QHeaderView
 
 UROLE = 0x0100   # Qt.UserRole
 
@@ -242,13 +242,20 @@ def test_przycisk_przypisz_sledzi_tag_i_busy(view):
     assert v.assign_btn.isEnabled()
 
 
-def test_dialog_domyslny_wybor_istniejacego(view):
-    """Dialog (#8): domyślnie zaznacza pierwszy obiekt biblioteki; walidacja → `selected`
-    = (canon, catalog, None) — `kind=None`, bo repo nie INSERTuje istniejącego obiektu."""
+def test_dialog_wymaga_jawnego_wyboru_istniejacego(view):
+    """Dialog (#8): placeholder nie jest realnym celem; akcja rusza dopiero po jawnym wyborze."""
     v, con, ids = view
     dlg = AssignObjectDialog(con, object_raw="FlatWizard", alias_norm="FLATWIZARD",
                              frame_count=2, parent=v)
-    dlg._validate_and_accept()                               # combo bez zmian: M42 (ORDER canon)
+    assert dlg.combo.currentData() is None
+    assert not dlg.accept_btn.isEnabled()
+    assert dlg.accept_btn.text() == "Przypisz 2 klatki"
+    dlg._validate_and_accept()
+    assert dlg.selected is None
+    assert "Wybierz istniejący obiekt" in dlg.error.text()
+    dlg.combo.setCurrentIndex(1)                            # M42 (ORDER canon)
+    assert dlg.accept_btn.isEnabled()
+    dlg._validate_and_accept()
     assert dlg.selected == ("M42", "Messier", None)
     dlg.close()
 
@@ -260,6 +267,7 @@ def test_dialog_nowe_oznaczenie_nadpisuje_combo(view):
     dlg = AssignObjectDialog(con, object_raw="FlatWizard", alias_norm="FLATWIZARD",
                              frame_count=2, parent=v)
     dlg.designation.setText("IC 1795")
+    assert dlg.accept_btn.isEnabled()
     dlg._validate_and_accept()
     assert dlg.selected == ("IC1795", "IC", "deep_sky")
     dlg.close()
@@ -272,6 +280,8 @@ def test_dialog_nieparsowalne_oznaczenie_odrzuca(view):
     dlg = AssignObjectDialog(con, object_raw="FlatWizard", alias_norm="FLATWIZARD",
                              frame_count=2, parent=v)
     dlg.designation.setText("???")
+    assert not dlg.accept_btn.isEnabled()
+    assert "Nie rozpoznaję" in dlg.error.text()              # live feedback, disabled ma widoczny powód
     dlg._validate_and_accept()
     assert dlg.selected is None
     assert "Nie rozpoznaję" in dlg.error.text()
@@ -286,16 +296,75 @@ def test_dialog_konflikt_aliasu_odrzuca_pre_check(view):
                           source="user", now="2026-07-21T12:00:00")
     dlg = AssignObjectDialog(con, object_raw="FlatWizard", alias_norm="FLATWIZARD",
                              frame_count=2, parent=v)
-    dlg._validate_and_accept()                               # domyślny wybór M42 ≠ NGC7000 → konflikt
+    dlg.combo.setCurrentIndex(1)                            # jawny wybór M42 ≠ NGC7000 → konflikt
+    dlg._validate_and_accept()
     assert dlg.selected is None
     assert "wskazuje już" in dlg.error.text()
     for i in range(dlg.combo.count()):
-        if dlg.combo.itemData(i)[0] == ids["objects"]["NGC7000"]:
+        data = dlg.combo.itemData(i)
+        if data is not None and data[0] == ids["objects"]["NGC7000"]:
             dlg.combo.setCurrentIndex(i)
             break
+    assert dlg.error.text() == ""                            # zmieniony cel kasuje nieaktualny konflikt
     dlg._validate_and_accept()
     assert dlg.selected == ("NGC7000", "NGC", None)
     dlg.close()
+
+
+def test_on_assign_po_sukcesie_zaznacza_cel(view, monkeypatch):
+    """Po zapisie grupa znika, a widok pokazuje obiekt docelowy zamiast pierwszego alfabetycznie."""
+    v, con, ids = view
+
+    class AcceptedM42:
+        selected = ("M42", "Messier", None)
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def exec(self):
+            return QDialog.Accepted
+
+    monkeypatch.setattr("horreum.gui.app.AssignObjectDialog", AcceptedM42)
+    for i in range(v.combo_filter.count()):
+        if v.combo_filter.itemData(i) == "Ha":
+            v.combo_filter.setCurrentIndex(i)
+            break
+    assert "M42" not in _obj_rows(v)                         # cel ukryty przez filtr, kolejka globalna
+    _select_review_tag(v, "object_raw")
+    msgs = []
+    v.status_message.connect(msgs.append)
+    v._on_assign()
+
+    assert v.combo_tel.currentData() is None and v.combo_filter.currentData() is None
+    assert v._selected_object_id() == ids["objects"]["M42"]
+    assert v.frames.rowCount() == 5                           # 3 istniejące + 2 przypisane
+    assert msgs[-1] == "Przypisano 2 z 2 klatek → M42."
+    assert not any("FlatWizard" in v.review.item(r).text() for r in range(v.review.count()))
+
+
+def test_on_assign_zero_assigned_nie_udaje_wyboru_celu(view, monkeypatch):
+    """Gdy cała grupa zdryfowała, komunikat jest szczery, ale widok nie udaje sukcesu wyborem celu."""
+    v, con, ids = view
+
+    class AcceptedM42:
+        selected = ("M42", "Messier", None)
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def exec(self):
+            return QDialog.Accepted
+
+    monkeypatch.setattr("horreum.gui.app.AssignObjectDialog", AcceptedM42)
+    monkeypatch.setattr(repo, "user_assign_object", lambda *args, **kwargs: (0, 2))
+    _select_review_tag(v, "object_raw")
+    msgs = []
+    v.status_message.connect(msgs.append)
+    v._on_assign()
+
+    assert v._selected_object_id() is None
+    assert not v.objects.selectedItems() and v.frames.rowCount() == 0
+    assert msgs[-1].startswith("Przypisano 0 z 2 klatek → M42.")
 
 
 def test_przypisanie_zmniejsza_kolejke_i_zapisuje_user(view):
@@ -326,8 +395,11 @@ def test_kopie_nieczytelne_drazenie_do_dokladnych_kopii(view):
     location z markerem); wybór obiektu przywraca tabelę klatek (tryb kopii znika, D-P4-5)."""
     v, con, ids = view
     loc = con.execute("SELECT id FROM location WHERE volume = 'vol2'").fetchone()
+    long_path = "/backup/" + "/".join(["bardzo-dlugi-segment"] * 20) + "/a1.fits"
+    with con:
+        con.execute("UPDATE location SET path = ? WHERE id = ?", (long_path, loc["id"]))
     repo.refresh_location_unreadable(con, location_id=loc["id"], sha1_data="sha-a1",
-                                     path="/backup/a1.fits", mtime="t2", reason="OSError",
+                                     path=long_path, mtime="t2", reason="OSError",
                                      now="2026-07-21T12:00:00")
     v.refresh()
     r = _select_review_tag(v, "unreadable")
@@ -335,8 +407,9 @@ def test_kopie_nieczytelne_drazenie_do_dokladnych_kopii(view):
     hdrs = [v.frames.horizontalHeaderItem(c).text() for c in range(v.frames.columnCount())]
     assert hdrs == COPY_HEADERS
     assert v.frames.rowCount() == 1
-    assert v.frames.item(0, 0).text() == "a1.fits"           # basename, pełna ścieżka w tooltipie
-    assert v.frames.item(0, 0).toolTip() == "/backup/a1.fits"
+    assert v.frames.item(0, 0).text() == long_path           # dokładna location bez hovera
+    assert v.frames.item(0, 0).toolTip() == long_path
+    assert v.frames.horizontalHeader().sectionResizeMode(0) == QHeaderView.ResizeToContents
     assert v.frames.item(0, 1).text() == "vol2"
     assert v.frames.item(0, 2).text() == "tak"               # kopia nadal obecna
     assert v.frames_label.text() == "Kopie nieczytelne (1)"

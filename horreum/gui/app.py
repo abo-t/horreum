@@ -104,6 +104,13 @@ def _fmt_obs_date(s):
     return s.split(".")[0] if s and "T" in s else (s or "")
 
 
+def _frames_accusative(n):
+    """Biernik po liczbie: 1 klatkę, 2–4 klatki (poza 12–14), reszta klatek."""
+    if n == 1:
+        return "klatkę"
+    return "klatki" if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14) else "klatek"
+
+
 class TelescopeAxisView(QWidget):
     """Osadzalny widok osi TELESKOP: lista kanonicznych teleskopów (lewa) + szczegół zaznaczonego
     (prawa: członkowie scaleni pod nim, audyt). Akcje usera (`label`/`approve`/`merge`/`unmerge`)
@@ -396,12 +403,12 @@ class AssignObjectDialog(QDialog):
     (`catalog_canon` + `xref` — „IC 1795" → IC1795). Świadomie BEZ wolnego tekstu jako canon:
     `object.canon` nie ma deduplikacji semantycznej, a śmieciowego obiektu nic by nie posprzątało.
 
-    Walidacja PRZED akceptacją (błąd → czerwona nota, dialog zostaje otwarty): oznaczenie
-    nieparsowalne; konflikt aliasu (`alias_target` — pre-check UX; ostateczny guard w
-    `repo.user_assign_object`, TOCTOU). Nazwa rozwiązywalna katalogowo → nota o regule „katalog
-    bije alias" (nowe klatki z tą nazwą przypisze katalog, nie zapamiętany alias). Wynik walidacji
-    ląduje w `self.selected` = `(canon, catalog, kind)` (`kind=None` dla obiektu istniejącego —
-    repo go nie INSERTuje, więc pole nieużywane)."""
+    Walidacja PRZED akceptacją: placeholder zamiast domyślnego realnego celu; akcja aktywna dopiero
+    po jawnym wyborze albo parsowalnym oznaczeniu. Błąd konfliktu aliasu (`alias_target` — pre-check
+    UX; ostateczny guard w `repo.user_assign_object`, TOCTOU) zostawia dialog otwarty. Nazwa
+    rozwiązywalna katalogowo → nota o regule „katalog bije alias". Wynik walidacji ląduje w
+    `self.selected` = `(canon, catalog, kind)` (`kind=None` dla obiektu istniejącego — repo go nie
+    INSERTuje, więc pole nieużywane)."""
 
     def __init__(self, con, *, object_raw, alias_norm, frame_count, parent=None):
         super().__init__(parent)
@@ -423,6 +430,7 @@ class AssignObjectDialog(QDialog):
 
         lay.addWidget(QLabel("Istniejący obiekt:"))
         self.combo = QComboBox()
+        self.combo.addItem("— wybierz obiekt —", None)
         self._objects = queries.library_objects(con)          # bez filtra — pełna biblioteka
         for o in self._objects:
             self.combo.addItem(f"{o['canon']}  ·  {o['catalog'] or '—'}",
@@ -440,12 +448,26 @@ class AssignObjectDialog(QDialog):
         lay.addWidget(self.error)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.accept_btn = buttons.button(QDialogButtonBox.Ok)
+        self.accept_btn.setText(f"Przypisz {frame_count} {_frames_accusative(frame_count)}")
         buttons.accepted.connect(self._validate_and_accept)
         buttons.rejected.connect(self.reject)
         lay.addWidget(buttons)
+        self.combo.currentIndexChanged.connect(self._sync_accept_enabled)
+        self.designation.textChanged.connect(self._sync_accept_enabled)
+        self._sync_accept_enabled()
 
     def _fail(self, msg):
         self.error.setText(msg)
+
+    def _sync_accept_enabled(self):
+        """Akcja wymaga JAWNEGO celu; tekst oznaczenia walidujemy na żywo, żeby disabled miał powód."""
+        text = self.designation.text().strip()
+        valid_designation = bool(catalog_canon(text)) if text else False
+        self.accept_btn.setEnabled(valid_designation if text else self.combo.currentData() is not None)
+        self.error.clear()                                  # wejście się zmieniło → stary błąd nieaktualny
+        if text and not valid_designation:
+            self._fail(f"Nie rozpoznaję oznaczenia katalogowego: „{text}”.")
 
     def _validate_and_accept(self):
         """Waliduj wybór; poprawny → `self.selected` + accept, błąd → nota i dialog zostaje."""
@@ -457,7 +479,10 @@ class AssignObjectDialog(QDialog):
             canon, catalog, kind = xref(cc), catalog_label(xref(cc)), "deep_sky"
             object_id = next((o["id"] for o in self._objects if o["canon"] == canon), None)
         else:
-            object_id, canon, catalog = self.combo.currentData()
+            selected = self.combo.currentData()
+            if selected is None:
+                return self._fail("Wybierz istniejący obiekt albo podaj oznaczenie katalogowe.")
+            object_id, canon, catalog = selected
             kind = None                                   # obiekt istnieje — repo nie INSERTuje
         target = queries.alias_target(self.con, self.alias_norm)
         if target is not None and target != object_id:
@@ -605,10 +630,11 @@ class ObjectAxisView(QWidget):
 
     # ---------------------------------------------------------------- odczyt → widok
 
-    def refresh(self):
+    def refresh(self, *, select_canon=None, select_first=True):
         """Przeładuj bibliotekę i kolejkę z read-modelu (źródło prawdy = baza; brak cache). Zachowuje
-        zaznaczenie obiektu po `object_id` (po zmianie filtra wiersze się przesuwają)."""
-        prev = self._selected_object_id()
+        zaznaczenie obiektu po `object_id`; po zapisie `select_canon` wybiera jawny cel akcji.
+        `select_first=False` zostawia jednoznaczny pusty wybór po operacji, która nic nie przypisała."""
+        prev = self._selected_object_id() if select_canon is None else None
         flt = self._filters()
         self._loading = True
         try:
@@ -620,18 +646,33 @@ class ObjectAxisView(QWidget):
                 self._set_obj_cell(r, OBJ_COL_CANON, row["canon"], data=row["id"])
                 self._set_obj_cell(r, OBJ_COL_CATALOG, row["catalog"] or "")
                 self._set_obj_cell(r, OBJ_COL_FRAMES, str(row["frame_count"]), align=_NUM_ALIGN)
-                if row["id"] == prev:
+                if row["canon"] == select_canon \
+                        or (select_canon is None and row["id"] == prev):
                     target_row = r
             self._load_review()
         finally:
             self._loading = False
+        if target_row < 0 and select_canon is not None and any(flt.values()):
+            # Kolejka review jest globalna, biblioteka filtrowana: cel legalnego przypisania może być
+            # poza bieżącym filtrem. Zdejmij filtry bez pośrednich refreshy i pokaż wynik akcji.
+            self._loading = True
+            try:
+                self.combo_tel.setCurrentIndex(0)
+                self.combo_filter.setCurrentIndex(0)
+            finally:
+                self._loading = False
+            return self.refresh(select_canon=select_canon)
         empty = self.objects.rowCount() == 0
         self.lib_empty.setVisible(empty)               # nota odkrywalna w widoku (P1 #2)
         self.objects.setVisible(not empty)
         if target_row >= 0:
             self.objects.selectRow(target_row)
-        elif not empty:
+        elif not empty and select_first:
             self.objects.selectRow(0)
+        elif not empty:
+            self.objects.clearSelection()
+            self.frames.setRowCount(0)
+            self.frames_label.setText("Klatki")
         else:
             self.frames.setRowCount(0)
             self.status_message.emit(
@@ -746,12 +787,12 @@ class ObjectAxisView(QWidget):
         self.frames.setHorizontalHeaderLabels(COPY_HEADERS)
         fh = self.frames.horizontalHeader()
         fh.setSectionResizeMode(QHeaderView.ResizeToContents)
-        fh.setSectionResizeMode(COPY_COL_PATH, QHeaderView.Stretch)
+        fh.setSectionResizeMode(COPY_COL_PATH, QHeaderView.ResizeToContents)
+        self.frames.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.frames.setRowCount(len(rows))
         for r, row in enumerate(rows):
             path = row["path"] or ""
-            self._set_frame_cell(r, COPY_COL_PATH,
-                                 os.path.basename(path) if path else "(brak ścieżki)",
+            self._set_frame_cell(r, COPY_COL_PATH, path or "(brak ścieżki)",
                                  tooltip=path or None)
             self._set_frame_cell(r, COPY_COL_VOLUME, row["volume"])
             self._set_frame_cell(r, COPY_COL_PRESENT, "tak" if row["present"] else "nie")
@@ -805,7 +846,7 @@ class ObjectAxisView(QWidget):
         if skipped:
             msg += f" ({skipped} pominięte — zajęte między dialogiem a zapisem)"
         self.status_message.emit(msg)
-        self.refresh()
+        self.refresh(select_canon=canon if assigned else None, select_first=bool(assigned))
 
     def _fill_frames(self, rows, *, present_col):
         """Wypełnij tabelę klatek. `present_col` — czy źródło niesie kolumnę `present` (biblioteka tak,

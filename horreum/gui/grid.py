@@ -94,6 +94,9 @@ STRUCT_NOISE = {"SIMPLE", "BITPIX", "NAXIS", "NAXIS1", "NAXIS2", "EXTEND", "BZER
 # PRESET_DUPS = stała współdzielona z TasksView (F5R#11 — klik w zadanie „Duplikaty" celuje w preset
 # po nazwie; rename presetu bez stałej cicho degradowałby klik do „nieznana perspektywa").
 PRESET_DUPS = "Duplikaty"
+# PRESET_VANISHED — bliźniak PRESET_DUPS dla passa obecności (P5/#7): klik w zadanie „Zniknięte
+# z dysku" celuje w preset PO NAZWIE, więc stała musi być współdzielona z TasksView.
+PRESET_VANISHED = "Zniknięte"
 PRESETS = {
     "Przegląd": {"filter": None, "group_by": None},
     "Kalibracja": {"filter": {"op": "OR", "conditions": [
@@ -102,6 +105,7 @@ PRESETS = {
         {"keyword": "IMAGETYP", "operator": "contains", "value": "bias"},
     ]}, "group_by": "kind"},
     PRESET_DUPS: {"filter": None, "group_by": None, "only_dups": True},
+    PRESET_VANISHED: {"filter": None, "group_by": None, "only_vanished": True},
     "Do przeglądu": {"filter": None, "group_by": None, "only_review": True},
 }
 
@@ -1030,6 +1034,7 @@ class FramesView(QWidget):
         self._effective_tree = None
         self._only_dups = False
         self._only_review = False
+        self._only_vanished = False
         self._frame_ids = []      # frame_id widoczne w gridzie (cel makra) — aktualizowane w refresh()
         self._run_id = None       # JEDEN run_id sesji makra (R#5 lifecycle: stage→commit/reject zwalnia)
         self._n_total = 0         # liczba widocznych klatek (baza licznika; zaznaczenie dokładane, G2)
@@ -1198,6 +1203,7 @@ class FramesView(QWidget):
             return
         self._only_dups = bool(spec.get("only_dups"))
         self._only_review = bool(spec.get("only_review"))
+        self._only_vanished = bool(spec.get("only_vanished"))
         self._filter_tree = spec.get("filter")
         # F4R#2: stan facetów resetowany dla KAŻDEJ perspektywy (preset ORAZ zapisana) — perspektywa
         # definiuje CAŁY zbiór; stara zapisana bez klucza "facets" MUSI zerować stan, inaczej facety
@@ -1252,6 +1258,7 @@ class FramesView(QWidget):
             "filter": self._filter_tree, "columns": self._columns,
             "group_by": self.combo_group.currentData(),
             "only_dups": self._only_dups, "only_review": self._only_review,
+            "only_vanished": self._only_vanished,
             "facets": self._facet_state,   # OSOBNO od "filter" (nota R2) — set_tree nigdy ich nie widzi
         }
         self._settings().setValue("grid/perspectives", json.dumps(store))
@@ -1318,6 +1325,8 @@ class FramesView(QWidget):
             parts.append("tylko duplikaty")
         if self._only_review:
             parts.append("tylko do przeglądu")
+        if self._only_vanished:
+            parts.append("tylko zniknięte")
         return " · ".join(parts)
 
     # ---- reakcje ----
@@ -1363,10 +1372,13 @@ class FramesView(QWidget):
         frame_ids = filter_engine.run(self._effective_tree, leaf_fn=leaf_fn, universe_fn=universe_fn)
         dup_ids = queries.dup_frame_ids(self.con) if self._only_dups else None
         review_ids = queries.review_frame_ids(self.con) if self._only_review else None
+        gone_ids = queries.vanished_frame_ids(self.con) if self._only_vanished else None
         if dup_ids is not None:
             frame_ids &= dup_ids
         if review_ids is not None:
             frame_ids &= review_ids
+        if gone_ids is not None:
+            frame_ids &= gone_ids
         base = [_derive(r) for r in queries.base_rows(self.con, list(frame_ids))]
         base_ids = [b["frame_id"] for b in base]
         self._frame_ids = base_ids     # cel makra = to, co WIDAĆ (po filtrach dups/review), doktryna §5

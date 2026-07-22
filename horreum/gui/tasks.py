@@ -30,14 +30,16 @@ from horreum.gui import queries, rows
 from horreum.gui.app import (
     ObjectAxisView, ObservatoryAxisView, TelescopeAxisView, _utc_now_iso,
 )
-from horreum.gui.grid import PRESET_DUPS
+from horreum.gui.grid import PRESET_DUPS, PRESET_VANISHED
 from horreum.gui.rows import TwoPartDelegate
 
 # Definicja listy zadań: (klucz stanu z `tasks_state`, etykieta, akcja). Akcja: numer podstrony
 # wewnętrznego stacku (int), nazwa perspektywy Zbiorów (str — sygnał `open_collection`) albo None
-# (pozycja INFORMACYJNA — bez powierzchni akcji w v1: XISF to własność formatu, pass zniknięć poza
-# v1). Wiersze AKCYJNE (akcja ≠ None) z n>0 liczą się do badge'a sidebara — informacja nie jest
-# zadaniem (stała obecność XISF w badge = wieczny szum).
+# (pozycja INFORMACYJNA — bez powierzchni akcji: XISF to własność formatu, nie robota do zrobienia).
+# Wiersze AKCYJNE (akcja ≠ None) z n>0 liczą się do badge'a sidebara — informacja nie jest zadaniem
+# (stała obecność XISF w badge = wieczny szum). „Zniknięte" AWANSOWAŁY z informacji na akcję wraz
+# z passem obecności (P5/#7): dopóki nie było przebiegu wykrywającego, liczba była martwa i nie było
+# jej gdzie rozwinąć — teraz prowadzi do perspektywy z listą klatek bez ani jednej obecnej kopii.
 _PAGE_LIST, _PAGE_TELESCOPE, _PAGE_OBSERVATORY, _PAGE_OBJECTS = range(4)
 # Szarość wierszy BEZ roboty: pozycje informacyjne (zawsze) i akcyjne z n=0 (wiz F5 #6 — „nic do
 # zrobienia" ma być widać bez czytania liczby). Akcyjne z n=0 zostają KLIKALNE: podstrona osi to
@@ -56,7 +58,7 @@ _TASKS = [
     ("observatories_unnamed", "Stanowiska bez nazwy", _PAGE_OBSERVATORY),
     ("dup_frames", "Duplikaty (>1 kopia)", PRESET_DUPS),
     ("xisf_frames", "XISF (nagłówki tylko do odczytu)", None),
-    ("vanished_frames", "Zniknięte z dysku (present=0)", None),
+    ("vanished_frames", "Zniknięte z dysku", PRESET_VANISHED),
 ]
 
 

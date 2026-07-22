@@ -133,10 +133,10 @@ def seed_object_axis(con):
     repo.record_header(con, frame_id=p0, raw_json="{}", object_raw="NGC 7000", now=NOW)
     repo.assign_object(con, frame_id=p0, object_id=obj_ngc, object_source="catalog_xref", now=NOW)
     loc_p0, _ = repo.add_location(con, frame_id=p0, volume="vol3", path="/astro/present0.fits", now=NOW)
-    # present=0 nie ma jeszcze funkcji `repo` (pass zniknięć poza v1) — zasiew bezpośredni w FIXTURE
-    # (tests/ jest poza zakresem meta-testu AST, który skanuje pakiet horreum/). Symuluje „plik zniknął".
-    with con:
-        con.execute("UPDATE location SET present = 0 WHERE id = ?", (loc_p0,))
+    # Zniknięcie zasiewamy TĄ SAMĄ drogą, którą idzie pass obecności (P5) — nie surowym UPDATE:
+    # fixture ma odwzorowywać stan produkowany przez pień (present=0 + event), a nie własny skrót.
+    repo.mark_location_vanished(con, location_id=loc_p0, expected_path="/astro/present0.fits",
+                                root="/astro", run_id="fixture", now=NOW)
 
     # nullcfg z `seed` zostaje headerless (light, config NULL, BEZ headera) — kubełek headerless.
     ids["objects"] = {"NGC7000": obj_ngc, "M42": obj_m42}

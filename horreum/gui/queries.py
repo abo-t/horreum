@@ -445,6 +445,18 @@ def facet_nights(con, frame_ids):
     ).fetchall()
 
 
+def vanished_frame_ids(con):
+    """Zbiór frame_id ZNIKNIĘTYCH: klatka MA lokacje, ale ŻADNEJ obecnej (perspektywa „Zniknięte",
+    P5/#7). Guard `EXISTS` odróżnia „zniknęła" od „nigdy nie miała lokalizacji" (frame osierocony
+    przez `rebind_location` — inny stan, inna robota). JEDEN właściciel predykatu: liczy z niego
+    zarówno licznik Porządków (`tasks_state`), jak i trim gridu — jak `dup_frame_ids`. Zwraca set[int]."""
+    return {int(r[0]) for r in con.execute(
+        "SELECT f.id FROM frame f "
+        "WHERE EXISTS (SELECT 1 FROM location l WHERE l.frame_id = f.id) "
+        "  AND NOT EXISTS (SELECT 1 FROM location l WHERE l.frame_id = f.id AND l.present = 1)"
+    ).fetchall()}
+
+
 def dup_frame_ids(con):
     """Zbiór frame_id z >1 OBECNĄ lokacją (perspektywa „Duplikaty"). JEDNA derywacja trimu dla zbioru
     głównego i sibling-setów facetów (SPOT — trim w Pythonie na `n_present` i ten literał muszą znaczyć
@@ -501,9 +513,9 @@ def tasks_state(con):
     „Do przeglądu"/„Duplikaty" (JEDNA derywacja z gridem). `telescopes_unlabeled`/
     `observatories_unnamed`: NULL = nienazwane (`label_telescope`/`label_observatory` odrzucają pusty
     string, więc pustych stringów w bazie nie ma); tylko kanoniczne (`merged_into IS NULL`).
-    `xisf_frames` — informacyjny (writeback nagłówków pomija XISF, D-W2). `vanished_frames` = frame,
-    który MA lokacje, ale ŻADNEJ obecnej (guard EXISTS odróżnia „zniknięty" od „bez lokalizacji
-    w ogóle" — np. klatki z importu bez location). Zwraca dict sześciu liczników."""
+    `xisf_frames` — informacyjny (writeback nagłówków pomija XISF, D-W2). `vanished_frames` = len()
+    zbioru perspektywy „Zniknięte" (P5 — ta sama derywacja co grid; przed passem obecności był to
+    osobny literał COUNT, czyli drugi właściciel predykatu). Zwraca dict sześciu liczników."""
     telescopes_unlabeled = con.execute(
         "SELECT COUNT(*) FROM telescope WHERE label IS NULL AND merged_into IS NULL"
     ).fetchone()[0]
@@ -513,18 +525,13 @@ def tasks_state(con):
     xisf_frames = con.execute(
         "SELECT COUNT(*) FROM frame WHERE filetype = 'xisf'"
     ).fetchone()[0]
-    vanished_frames = con.execute(
-        "SELECT COUNT(*) FROM frame f "
-        "WHERE EXISTS (SELECT 1 FROM location l WHERE l.frame_id = f.id) "
-        "  AND NOT EXISTS (SELECT 1 FROM location l WHERE l.frame_id = f.id AND l.present = 1)"
-    ).fetchone()[0]
     return {
         "unresolved_lights": len(review_frame_ids(con)),
         "dup_frames": len(dup_frame_ids(con)),
         "telescopes_unlabeled": telescopes_unlabeled,
         "observatories_unnamed": observatories_unnamed,
         "xisf_frames": xisf_frames,
-        "vanished_frames": vanished_frames,
+        "vanished_frames": len(vanished_frame_ids(con)),
     }
 
 

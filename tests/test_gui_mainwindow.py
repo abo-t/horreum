@@ -15,6 +15,7 @@ import pytest
 pytest.importorskip("PySide6")
 
 from horreum import db, repo
+from horreum.gui import queries
 from horreum.gui.app import (
     NAV_DOSTAWA, NAV_PORZADKI, NAV_ZBIORY, MainWindow, ObjectAxisView, ObservatoryAxisView,
     TelescopeAxisView,
@@ -185,11 +186,13 @@ def test_menu_widok_przelacza_motyw(qapp, tmp_path, monkeypatch):
 # --- PORZĄDKI: lista zadań, badge, nawigacja do powierzchni (F5) ---
 
 def test_badge_zywy_od_montazu(qapp, tmp_path):
-    """F5R#1: badge liczony przy montażu, zanim user wejdzie w Porządki. s8+obiekt → 3 zadania
-    akcyjne z n>0 (klatki bez obiektu 3, teleskopy 4, duplikaty 1; stanowiska 0 poza badge)."""
+    """F5R#1: badge liczony przy montażu, zanim user wejdzie w Porządki. s8+obiekt → 4 zadania
+    akcyjne z n>0 (klatki bez obiektu 3, teleskopy 4, duplikaty 1, zniknięte 1; stanowiska 0 poza
+    badge). „Zniknięte" doszły do badge'a wraz z passem obecności (P5) — wcześniej liczba istniała,
+    ale była informacyjna, bo nie było przebiegu, który by ją wytwarzał."""
     win = MainWindow(_seeded_db(tmp_path, object_axis=True))
     try:
-        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (3)"
+        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (4)"
         # Wiersz DWUCZŁONOWY (P1, wiz F5 #6): etykieta w `text()`, liczba + chevron „›" w prawej
         # kolumnie (`rows.SECONDARY`) — liczby ustawiają się w kolumnę i dają się skanować.
         assert _task_row(win, "unresolved_lights") == ("Klatki bez obiektu", "3  ›")
@@ -266,7 +269,7 @@ def test_podstrona_osi_i_powrot_odswieza_licznik(qapp, tmp_path):
         win.tasks_view._on_back()
         assert win.tasks_view.pages.currentIndex() == 0
         assert _task_row(win, "telescopes_unlabeled") == ("Teleskopy bez etykiety", "3  ›")
-        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (3)"   # wciąż 3 zadania (klatki/tel/dup)
+        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (4)"   # wciąż 4 (klatki/tel/dup/zniknięte)
     finally:
         win.close()
 
@@ -280,13 +283,31 @@ def test_stage_finished_odswieza_liczniki_zadan(qapp, tmp_path):
             repo.label_telescope(win.con, telescope_id=row[0], label=f"T{row[0]}", now=NOW)
         win._on_stage_finished("resolve")
         assert _task_row(win, "telescopes_unlabeled") == ("Teleskopy bez etykiety", "0  ›")
-        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (2)"   # klatki + duplikaty
+        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (3)"   # klatki + duplikaty + zniknięte
+    finally:
+        win.close()
+
+
+def test_zadanie_zniknietych_otwiera_perspektywe(qapp, tmp_path):
+    """P5c: klik w „Zniknięte z dysku" prowadzi do Zbiorów z perspektywą `PRESET_VANISHED`, a grid
+    pokazuje DOKŁADNIE klatki bez ani jednej obecnej kopii. Bez tego licznik byłby liczbą, której
+    nie da się rozwinąć w listę (ten sam dług, co kubełek `unreadable` przed drążeniem)."""
+    from horreum.gui.grid import PRESET_VANISHED
+    win = MainWindow(_seeded_db(tmp_path, object_axis=True))
+    try:
+        win.tasks_view.tasks.itemClicked.emit(_task_item(win, "vanished_frames"))
+        assert win.stack.currentIndex() == NAV_ZBIORY
+        assert win.grid_view._only_vanished is True
+        assert win.grid_view.combo_persp.currentText() == PRESET_VANISHED
+        widoczne = set(win.grid_view._frame_ids)               # to, co WIDAĆ po trimie perspektywy
+        assert widoczne == queries.vanished_frame_ids(win.con) and len(widoczne) == 1
     finally:
         win.close()
 
 
 def test_pozycja_informacyjna_nie_nawiguje(qapp, tmp_path):
-    """Wiersze XISF/present=0 są INFORMACYJNE (bez UserRole) — klik nie zmienia strony ani widoku."""
+    """Wiersz XISF jest INFORMACYJNY (bez UserRole) — klik nie zmienia strony ani widoku. Od P5
+    jest JEDYNY taki: „Zniknięte" awansowały na akcyjne (prowadzą do perspektywy Zbiorów)."""
     win = MainWindow(_seeded_db(tmp_path, object_axis=True))
     try:
         tasks = win.tasks_view.tasks

@@ -411,6 +411,19 @@ def quote_fits(value, original):
     return _escape_xml(text, attribute=True).encode("utf-8")
 
 
+def encode_xisf_value(value, xml_bytes, span):
+    """Zakoduj SUROWĄ wartość do bajtów łaty — dla wycinków, które NIE są wartością karty:
+    `<Property>` (D-X-10) i atrybut `comment` (D-X-12). Sam escape XML, BEZ konwencji FITS:
+    apostrofy obejmujące to cecha KART (`quote_fits`), własność ich nie nosi.
+
+    Kontekst escape'u czytany z bajtu PRZED wycinkiem — `locate_value_span` zwraca albo wnętrze
+    cudzysłowu atrybutu, albo tekst elementu po `>`, więc trzeciej możliwości nie ma. Dzięki temu
+    wołający nie może podać kontekstu SPRZECZNEGO z wycinkiem (a `"` escape'ujemy wyłącznie
+    w atrybucie — w tekście elementu jest legalny surowy i escape zmieniłby bajty)."""
+    in_attribute = xml_bytes[span[0] - 1:span[0]] in (b'"', b"'")
+    return _escape_xml(str(value), attribute=in_attribute).encode("utf-8")
+
+
 def _escape_xml(text, *, attribute):
     """Escape XML dla wartości wstawianej do łaty. `&` MUSI iść pierwszy (inaczej podwójny escape).
     `"` tylko w atrybucie (w tekście elementu jest legalny surowy, a escape zmieniłby bajty)."""
@@ -477,15 +490,30 @@ def _tag_attrs(tag_bytes):
     return out
 
 
-def locate_value_span(xml_bytes, *, keyword=None, idx=0, property_id=None):
+class XisfTargetMissing(ValueError):
+    """Adresu NIE MA w nagłówku (karta / atrybut / własność). Osobny typ, bo wołający reaguje na to
+    RÓŻNIE zależnie od adresu: brak KARTY do zapisu = odmowa (dokładanie kart to D-X-12), brak
+    zmapowanej WŁASNOŚCI = świadome pominięcie (D-X-10 — plik, który jej nigdy nie miał, nie jest
+    sam ze sobą sprzeczny). Rozróżnianie po treści komunikatu byłoby kruche."""
+
+
+class XisfValueUnreachable(ValueError):
+    """Adres ISTNIEJE, ale jego wartość nie leży w nagłówku do przepisania: `location=`
+    (inline/attachment) albo element pusty. Wołający mapuje na `blocked` — cel jest realny, więc
+    ciche pominięcie zostawiłoby plik SPRZECZNY, a łata nagłówka nie ma tu czego chwycić."""
+
+
+def locate_value_span(xml_bytes, *, keyword=None, idx=0, property_id=None, attr="value"):
     """Wycinek `[start, end)` bajtów WARTOŚCI w nagłówku XISF — materiał łaty (P6/§5).
 
     Adresowanie: `keyword`+`idx` (karta `<FITSKeyword>`, `idx` = numer wystąpienia keyworda
     w kolejności dokumentu) ALBO `property_id` (`<Property id=…>`). Dokładnie jedno z dwojga.
+    `attr` wybiera atrybut karty — `value` (domyślnie) albo `comment` (D-X-12: komentarz łatamy
+    TĄ SAMĄ techniką); przy adresowaniu własności nie ma sensu i jest odrzucany.
 
     Trzy postaci wartości (D-X-10, zmierzone na 7/7 celach): atrybut `value=` · TEKST elementu
-    (`>ED<`) · `location=` (inline/attachment) → **`ValueError`**, wołający mapuje na `blocked` —
-    wartość nie leży w nagłówku, więc łata nagłówka jej nie dosięgnie.
+    (`>ED<`) · `location=` (inline/attachment) → **`XisfValueUnreachable`**. Adres nieobecny →
+    **`XisfTargetMissing`**. Oba są `ValueError` — wołający łapiący szeroko nic nie traci.
 
     GUARD EXPECT: wyłuskane bajty po odescape'owaniu MUSZĄ się zgadzać z wartością, którą z tego
     samego nagłówka wyjmuje parser XML. To CELOWO druga, niezależna derywacja — skan bajtowy
@@ -493,8 +521,11 @@ def locate_value_span(xml_bytes, *, keyword=None, idx=0, property_id=None):
     NIGDY cichy zgadunek (łata trafiłaby w niewłaściwe bajty)."""
     if (keyword is None) == (property_id is None):
         raise ValueError("locate_value_span: podaj DOKŁADNIE jedno z keyword / property_id")
+    if property_id is not None and attr != "value":
+        raise ValueError("locate_value_span: `attr` dotyczy wyłącznie kart (<FITSKeyword>)")
 
     want = keyword.strip().upper() if keyword is not None else None
+    want_attr = attr.encode("ascii")
     seen = 0
     for start, end in _iter_xml_tags(xml_bytes):
         tag = xml_bytes[start:end]
@@ -514,9 +545,9 @@ def locate_value_span(xml_bytes, *, keyword=None, idx=0, property_id=None):
             if seen != idx:
                 seen += 1
                 continue
-            if b"value" not in attrs:
-                raise ValueError(f"XISF: karta {want}[{idx}] bez atrybutu value=")
-            vs, ve = attrs[b"value"]
+            if want_attr not in attrs:
+                raise XisfTargetMissing(f"XISF: karta {want}[{idx}] bez atrybutu {attr}=")
+            vs, ve = attrs[want_attr]
             span = (start + vs, start + ve)
             break
 
@@ -526,14 +557,15 @@ def locate_value_span(xml_bytes, *, keyword=None, idx=0, property_id=None):
         if _unescape_xml(tag[ids:ide].decode("utf-8")) != property_id:
             continue
         if b"location" in attrs:
-            raise ValueError(
+            raise XisfValueUnreachable(
                 f"XISF: własność {property_id} trzyma wartość w location= — poza nagłówkiem")
         if b"value" in attrs:
             vs, ve = attrs[b"value"]
             span = (start + vs, start + ve)
             break
         if tag.rstrip().endswith(b"/>"):
-            raise ValueError(f"XISF: własność {property_id} pusta (element samozamykający)")
+            raise XisfValueUnreachable(
+                f"XISF: własność {property_id} pusta (element samozamykający)")
         text_end = xml_bytes.find(b"<", end)
         if text_end < 0:
             raise ValueError(f"XISF: własność {property_id} bez domknięcia elementu")
@@ -541,13 +573,14 @@ def locate_value_span(xml_bytes, *, keyword=None, idx=0, property_id=None):
         break
     else:
         cel = f"karta {want}[{idx}]" if want is not None else f"własność {property_id}"
-        raise ValueError(f"XISF: {cel} nieobecna w nagłówku")
+        raise XisfTargetMissing(f"XISF: {cel} nieobecna w nagłówku")
 
-    _assert_span_zgodny_z_parserem(xml_bytes, span, keyword=want, idx=idx, property_id=property_id)
+    _assert_span_zgodny_z_parserem(xml_bytes, span, keyword=want, idx=idx,
+                                   property_id=property_id, attr=attr)
     return span
 
 
-def _assert_span_zgodny_z_parserem(xml_bytes, span, *, keyword, idx, property_id):
+def _assert_span_zgodny_z_parserem(xml_bytes, span, *, keyword, idx, property_id, attr="value"):
     """GUARD do `locate_value_span`: to samo pytanie zadane `ElementTree`. Dwie derywacje muszą dać
     ten sam tekst — inaczej łata pisałaby w niewłaściwe miejsce."""
     root = ET.fromstring(xml_bytes)
@@ -561,7 +594,7 @@ def _assert_span_zgodny_z_parserem(xml_bytes, span, *, keyword, idx, property_id
             if not name or name.strip().upper() != keyword:
                 continue
             if seen == idx:
-                expected = elem.get("value", "")
+                expected = elem.get(attr, "")
                 break
             seen += 1
     else:
@@ -607,6 +640,7 @@ class XisfMeta:
     reserved: bytes
     first_attachment: object          # int | None — brak bloku attachment (degenerat, D-X-13)
     image_span: object                # (start, size) | None — wejście sha1_data
+    keyword_images: int               # ile <Image> NIESIE karty — >1 = cel niejednoznaczny (D-X-11)
 
     @property
     def padding_complete(self):
@@ -691,10 +725,48 @@ def read_xisf_meta_full(path):
         if pad_len > 0:
             padding = fh.read(pad_len)
 
+    # Ile obrazów NIESIE karty (D-X-11) — osobne przejście, bo to pytanie o RODZICA keyworda,
+    # a płaski `root.iter()` rodzica nie zna. Dziś 0 plików ma >1 (sonda #5 na 330 realnych), więc
+    # to asercja EXPECT na przyszłość: przy dwóch obrazach z kartami „TELESCOP klatki" przestaje
+    # mieć jedną odpowiedź i pisarz musi odmówić, zamiast wybrać za usera.
+    keyword_images = sum(1 for e in root.iter() if _local_name(e.tag) == "Image"
+                         and any(_local_name(k.tag) == "FITSKeyword" for k in e.iter()))
+
     return XisfMeta(header=header, cards=cards,
                     header_hash=hashlib.sha1(xml_bytes).hexdigest(),
                     xml_bytes=xml_bytes, padding=padding, reserved=reserved,
-                    first_attachment=first_attachment, image_span=image_span)
+                    first_attachment=first_attachment, image_span=image_span,
+                    keyword_images=keyword_images)
+
+
+def build_xisf_header_region(meta, new_xml):
+    """Bajty `[0, first_attachment)` po podmianie nagłówka XML — JEDYNE miejsce, gdzie liczy się
+    arytmetykę offsetów przy zapisie XISF (§0: pomyłka o 4 B nadpisuje pierwszy blok mastera,
+    a pisarz nie ma prawa przeliczać jej po raz drugi).
+
+    Składa: sygnatura + NOWA długość + `reserved` verbatim + `new_xml` + wypełnienie. Region ma
+    STAŁY ROZMIAR — offsety bloków danych są bezwzględne i zapisane w XML-u, więc dane się NIE
+    RUSZAJĄ, a wypełnienie kurczy się/rośnie dokładnie o deltę długości nagłówka. Zmiana dzieje się
+    na POCZĄTKU wypełnienia (tam, gdzie XML w nie wchodzi); ogon — ten stykający się z nieruchomym
+    blokiem danych — zostaje verbatim (D-X-1). Skrócenie dokłada ZERA: bajtów, które nadpisał
+    dłuższy nagłówek, nie da się wskrzesić, a wypełnienie z definicji nie niesie treści (zmierzone:
+    zerowe w 330/330 plików).
+
+    `ValueError` (wołający → `blocked`) gdy: brak bloku attachment (nie wiadomo, gdzie kończy się
+    nagłówek), plik przeczy sam sobie (`padding_complete`), nagłówek nie mieści się w rezerwie
+    (D-X-2). Trzeciej drogi nie ma — dane nie ustępują nagłówkowi."""
+    if meta.first_attachment is None:
+        raise ValueError("XISF: brak bloku attachment — nie wiadomo, gdzie kończy się nagłówek")
+    if not meta.padding_complete:
+        raise ValueError("XISF: wypełnienie nagłówka niekompletne — plik przeczy sam sobie")
+    room = meta.first_attachment - XISF_XML_OFFSET
+    if len(new_xml) > room:
+        raise ValueError(
+            f"XISF: nagłówek nie mieści się w rezerwie ({len(new_xml)} B > {room} B) — "
+            f"attachmenty się nie ruszają")
+    delta = len(new_xml) - len(meta.xml_bytes)
+    padding = meta.padding[delta:] if delta > 0 else b"\x00" * -delta + meta.padding
+    return _XISF_SIGNATURE + struct.pack("<I", len(new_xml)) + meta.reserved + new_xml + padding
 
 
 def read_xisf_meta(path):

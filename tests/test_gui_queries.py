@@ -133,9 +133,11 @@ def test_read_model_nie_emituje_eventow(s8):
 
 def test_tasks_state_liczniki_na_s8_obj(s8_obj):
     """Arytmetyka fixture (przeliczona w recenzji F5): unresolved = objrev1+objrev2+nullcfg (present0
-    MA obiekt); dups = a1 (2×present=1); teleskopy A–D wszystkie bez etykiety; zero obserwatoriów
-    i XISF; vanished = present0 (jedyna lokacja present=0) — bez guardu EXISTS licznik złapałby też
-    klatki BEZ lokacji w ogóle (w fixture jest ich 10)."""
+    MA obiekt); dups = a1 (2×present=1); teleskopy A–D wszystkie bez etykiety; zero obserwatoriów;
+    vanished = present0 (jedyna lokacja present=0) — bez guardu EXISTS licznik złapałby też
+    klatki BEZ lokacji w ogóle (w fixture jest ich 10). Kluczy jest PIĘĆ: `xisf_frames` zniknął
+    w P6c razem z wierszem Porządków (pisarz XISF istnieje, więc „tylko do odczytu" przestało
+    być prawdą, a licznik formatu nie jest zadaniem)."""
     con, ids = s8_obj
     st = queries.tasks_state(con)
     assert st == {
@@ -143,7 +145,6 @@ def test_tasks_state_liczniki_na_s8_obj(s8_obj):
         "dup_frames": 1,
         "telescopes_unlabeled": 4,
         "observatories_unnamed": 0,
-        "xisf_frames": 0,
         "vanished_frames": 1,
     }
 

@@ -285,13 +285,13 @@ def _evaluate_change(
 
 def _resolve_target(rows) -> tuple[dict | None, str | None]:
     """Z wierszy `writeback_frame_targets` JEDNEGO frame'a wybierz cel writebacku (JEDNA obecna
-    location FITS, kontrolowalna) albo powod pominiecia. Kolejnosc bramek = brief §6/D-W1/D-W2/T6.
+    location, kontrolowalna) albo powod pominiecia. Kolejnosc bramek = brief §6/D-W1/T6/D-X-13.
+
+    XISF NIE JEST juz odsiewany (P6c dal mu pisarza — D-W2 domkniete); przed backfillem kart
+    odcinala go i tak bramka `header_hash IS NULL`, bo bez odcisku nie ma kontroli zapisu.
 
     `rows` to >=1 wiersz per frame (LEFT JOIN present-location); frame bez obecnej kopii ma jeden
     wiersz z `location_id IS NULL`. Zwraca (wiersz_celu | None, powod | None)."""
-    filetype = rows[0]["filetype"]
-    if filetype == "xisf":
-        return None, "XISF poza krokiem 4 (writeback XISF = pod-etap D-W2)"
     present = [r for r in rows if r["location_id"] is not None]
     if not present:
         return None, "brak obecnej kopii do zapisu (wszystkie present=0)"
@@ -300,6 +300,12 @@ def _resolve_target(rows) -> tuple[dict | None, str | None]:
     target = present[0]
     if target["compressed"]:
         return None, "skompresowany master -- edycja poza krokiem 4 (T6)"
+    if rows[0]["sha1_data_uncomputable"]:
+        # D-X-13: zapis zmienia `file_sha1`, a przy degeneracie `sha1_data == file_sha1`, wiec
+        # re-sync zobaczylby PODMIANE TRESCI -> nowy frame + `rebind_location`, a stary zostalby
+        # sierota z zeznaniem i `object_id`. Bramka ma blizniaka w pisarzu (`_xisf_gates` patrzy
+        # na brak obrazu-attachmentu) -- ta czyta baze, tamta plik.
+        return None, "tozsamosc nieobliczalna (degenerat) -- zapis rozdwoilby klatke (D-X-13)"
     if target["header_hash"] is None:
         return None, "brak header_hash (plik nieczytelny) -- brak kontroli zapisu"
     return target, None

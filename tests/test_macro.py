@@ -1,8 +1,8 @@
 """Testy `horreum.macro` — czysty silnik makra nad frame_ids (widok gridu) z wstrzykiwanymi
 akcesorami (`queries.writeback_frame_targets`/`frame_cards`). Pokrycie: przyklady A/B, reguly
-set/add + idx (parytet dawcy), oraz NOWE bramki Horreum (D-W1 n_present, D-W2 XISF, T6 compressed,
-header_hash NULL). Karty/lokacje wstawiamy wprost SQL (testy poza bramka AST) — makro dziala na
-wierszach niezaleznie od zrodla.
+set/add + idx (parytet dawcy), oraz NOWE bramki Horreum (D-W1 n_present, T6 compressed, D-X-13
+degenerat tozsamosci, header_hash NULL). Karty/lokacje wstawiamy wprost SQL (testy poza bramka AST)
+— makro dziala na wierszach niezaleznie od zrodla. Bramki FORMATU juz nie ma: od P6c XISF ma pisarza.
 
 Makro NIE zapisuje (zwraca MacroRun); test sprawdza podglad, nie DML."""
 
@@ -123,12 +123,32 @@ def test_int_fractional_result_skips(tmp_path):
 
 # --- NOWE bramki celu (brief §6) ---
 
-def test_xisf_skipped_dw2(tmp_path):
+def test_xisf_jest_celem_od_p6c(tmp_path):
+    """D-W2 DOMKNIĘTE: XISF z odciskiem nagłówka jest normalnym celem writebacku (pisarz istnieje).
+    Wcześniej odsiewała go bramka formatu; dziś odsiewa go — jak każdy plik — tylko brak
+    `header_hash` (czyli brak kontroli zapisu)."""
     con = _con(tmp_path)
-    a = _frame(con, sha1="x", filetype="xisf",
-               locations=[{"path": "R:/x.xisf", "header_hash": None}])
-    run = _run(con, {"assign": {"keyword": "TELESCOP", "op": "add", "expr": "ED"}}, [a])
-    assert not run.touched and "XISF" in run.skipped[0].reason
+    a = _frame(con, sha1="x", filetype="xisf", cards=[_txt("TELESCOP", "ED")],
+               locations=[{"path": "R:/x.xisf", "header_hash": "hx", "hdu_index": None}])
+    run = _run(con, {"assign": {"keyword": "TELESCOP", "op": "set", "expr": "ED120R"}}, [a])
+    assert not run.skipped and [p.new_value for p in run.touched] == ["ED120R"]
+
+    b = _frame(con, sha1="x2", filetype="xisf", cards=[_txt("TELESCOP", "ED")],
+               locations=[{"path": "R:/x2.xisf", "header_hash": None, "hdu_index": None}])
+    run2 = _run(con, {"assign": {"keyword": "TELESCOP", "op": "set", "expr": "ED120R"}}, [b])
+    assert not run2.touched and "header_hash" in run2.skipped[0].reason
+
+
+def test_degenerat_tozsamosci_skipped_dx13(tmp_path):
+    """D-X-13: klatka z `sha1_data_uncomputable=1` NIE jest celem zapisu — zapis zmienia
+    `file_sha1`, a przy degeneracie `sha1_data == file_sha1`, więc re-sync uznałby plik za
+    podmianę treści i ROZDWOIŁ klatkę (nowy frame, stary sierotą z zeznaniem i obiektem)."""
+    con = _con(tmp_path)
+    a = _frame(con, sha1="d", cards=[_txt("OBJECT", "M51")], locations=[{"path": "R:/d.fits"}])
+    con.execute("UPDATE frame SET sha1_data_uncomputable = 1 WHERE id = ?", (a,))
+    con.commit()
+    run = _run(con, {"assign": {"keyword": "OBJECT", "op": "set", "expr": "NGC"}}, [a])
+    assert not run.touched and "rozdwoil" in run.skipped[0].reason
 
 
 def test_multi_present_location_skipped_dw1(tmp_path):

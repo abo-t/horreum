@@ -173,8 +173,9 @@ class RenameRun:
 
 def _resolve_target(rows):
     """Z wierszy `rename_frame_targets` JEDNEGO frame'a wybierz OBECNĄ location do renamu albo powód
-    pominięcia. RÓŻNICA vs `macro._resolve_target`: XISF DOZWOLONY (rename nie tyka nagłówka),
-    `header_hash`/`compressed` NIEISTOTNE (nie zapisujemy w plik). Multi-location skip jawny
+    pominięcia. RÓŻNICA vs `macro._resolve_target`: `header_hash`/`compressed`/degenerat tożsamości
+    NIEISTOTNE — rename nie tyka ANI JEDNEGO bajtu pliku, więc nie ma czego kontrolować odciskiem
+    i nie ma jak rozdwoić klatki (D-X-13 dotyczy zapisu). Multi-location skip jawny
     (R3 #7 — jedna nazwa na 2 pliki = kolizja; fan-out poza v1)."""
     present = [r for r in rows if r["location_id"] is not None]
     if not present:

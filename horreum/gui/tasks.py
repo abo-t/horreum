@@ -35,11 +35,13 @@ from horreum.gui.rows import TwoPartDelegate
 
 # Definicja listy zadań: (klucz stanu z `tasks_state`, etykieta, akcja). Akcja: numer podstrony
 # wewnętrznego stacku (int), nazwa perspektywy Zbiorów (str — sygnał `open_collection`) albo None
-# (pozycja INFORMACYJNA — bez powierzchni akcji: XISF to własność formatu, nie robota do zrobienia).
-# Wiersze AKCYJNE (akcja ≠ None) z n>0 liczą się do badge'a sidebara — informacja nie jest zadaniem
-# (stała obecność XISF w badge = wieczny szum). „Zniknięte" AWANSOWAŁY z informacji na akcję wraz
+# (pozycja INFORMACYJNA — bez powierzchni akcji). Wiersze AKCYJNE (akcja ≠ None) z n>0 liczą się do
+# badge'a sidebara — informacja nie jest zadaniem. „Zniknięte" AWANSOWAŁY z informacji na akcję wraz
 # z passem obecności (P5/#7): dopóki nie było przebiegu wykrywającego, liczba była martwa i nie było
 # jej gdzie rozwinąć — teraz prowadzi do perspektywy z listą klatek bez ani jednej obecnej kopii.
+# Wiersz „XISF (nagłówki tylko do odczytu)" ZNIKNĄŁ w P6c: pisarz XISF istnieje, więc zdanie było
+# już nieprawdą, a sam licznik plików danego formatu nie jest robotą do zrobienia (facet formatu
+# w Zbiorach mówi to samo, w miejscu, gdzie się o to pyta).
 _PAGE_LIST, _PAGE_TELESCOPE, _PAGE_OBSERVATORY, _PAGE_OBJECTS = range(4)
 # Szarość wierszy BEZ roboty: pozycje informacyjne (zawsze) i akcyjne z n=0 (wiz F5 #6 — „nic do
 # zrobienia" ma być widać bez czytania liczby). Akcyjne z n=0 zostają KLIKALNE: podstrona osi to
@@ -48,7 +50,8 @@ _DIM = QColor(0x88, 0x88, 0x88)
 # Szerokość listy zadań. Prawe wyrównanie liczb SKANUJE się w wąskim pasie i ROZJEŻDŻA na szerokim:
 # przy oknie 1200 px etykieta lądowała na x≈185, a liczba na x≈1180 — ~900 px pustki między nimi
 # (wizytator P1 #2, dług delegata przeniesionego z listwy 220 px na pełną szerokość okna).
-# Liczba z POMIARU TREŚCI, nie z oka: najdłuższa etykieta („XISF (nagłówki tylko do odczytu)") = 172 px
+# Liczba z POMIARU TREŚCI, nie z oka: najdłuższa etykieta ≈ 172 px (pomiar na „XISF (nagłówki tylko
+# do odczytu)", wiersz zdjęty w P6c — po nim etykiety są KRÓTSZE, więc zapas tylko urósł)
 # + najszerszy człon drugi („381  ›") = 35 px + `_GAP`/`_PAD` ≈ 230 px. 400 px daje oddech bez
 # rozjeżdżania; przy 520 px wzrok znów gubi drogę etykieta→liczba (wizytator P1 tura 2).
 _LIST_MAX_W = 400
@@ -57,7 +60,6 @@ _TASKS = [
     ("telescopes_unlabeled", "Teleskopy bez etykiety", _PAGE_TELESCOPE),
     ("observatories_unnamed", "Stanowiska bez nazwy", _PAGE_OBSERVATORY),
     ("dup_frames", "Duplikaty (>1 kopia)", PRESET_DUPS),
-    ("xisf_frames", "XISF (nagłówki tylko do odczytu)", None),
     ("vanished_frames", "Zniknięte z dysku", PRESET_VANISHED),
 ]
 

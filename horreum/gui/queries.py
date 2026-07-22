@@ -518,24 +518,24 @@ def tasks_state(con):
     „Do przeglądu"/„Duplikaty" (JEDNA derywacja z gridem). `telescopes_unlabeled`/
     `observatories_unnamed`: NULL = nienazwane (`label_telescope`/`label_observatory` odrzucają pusty
     string, więc pustych stringów w bazie nie ma); tylko kanoniczne (`merged_into IS NULL`).
-    `xisf_frames` — informacyjny (writeback nagłówków pomija XISF, D-W2). `vanished_frames` = len()
-    zbioru perspektywy „Zniknięte" (P5 — ta sama derywacja co grid; przed passem obecności był to
-    osobny literał COUNT, czyli drugi właściciel predykatu). Zwraca dict sześciu liczników."""
+    `vanished_frames` = len() zbioru perspektywy „Zniknięte" (P5 — ta sama derywacja co grid; przed
+    passem obecności był to osobny literał COUNT, czyli drugi właściciel predykatu). Zwraca dict
+    pięciu liczników.
+
+    Licznika `xisf_frames` NIE MA od P6c: był informacją „nagłówków XISF nie umiemy zapisać", a ta
+    przestała być prawdziwa razem z pisarzem — licznik samego formatu nie jest ani zadaniem, ani
+    osobliwością (liczbę plików XISF pokazuje facet formatu w Zbiorach)."""
     telescopes_unlabeled = con.execute(
         "SELECT COUNT(*) FROM telescope WHERE label IS NULL AND merged_into IS NULL"
     ).fetchone()[0]
     observatories_unnamed = con.execute(
         "SELECT COUNT(*) FROM observatory WHERE name IS NULL AND merged_into IS NULL"
     ).fetchone()[0]
-    xisf_frames = con.execute(
-        "SELECT COUNT(*) FROM frame WHERE filetype = 'xisf'"
-    ).fetchone()[0]
     return {
         "unresolved_lights": len(review_frame_ids(con)),
         "dup_frames": len(dup_frame_ids(con)),
         "telescopes_unlabeled": telescopes_unlabeled,
         "observatories_unnamed": observatories_unnamed,
-        "xisf_frames": xisf_frames,
         "vanished_frames": len(vanished_frame_ids(con)),
     }
 
@@ -570,14 +570,15 @@ def cards_pivot(con, frame_ids, keywords):
 
 
 def writeback_frame_targets(con, frame_ids):
-    """Dla zbioru frame_id: filetype (frame) + KAŻDA OBECNA (`present=1`) location z faktami kopii
-    potrzebnymi do zapisu (header_hash/hdu_index/compressed). Frame BEZ obecnej kopii → wiersz z
-    location_id NULL (makro odróżni „brak kopii" od wielu kopii licząc wiersze per frame). frame_ids
-    jako TABLICA JSON (`json_each`, jeden param). Wybór celu (D-W1: dokładnie 1 present; D-W2: nie XISF)
-    robi makro, nie ten czytnik. ORDER BY frame_id, location_id. Zwraca: frame_id, filetype,
+    """Dla zbioru frame_id: filetype + `sha1_data_uncomputable` (frame) + KAŻDA OBECNA (`present=1`)
+    location z faktami kopii potrzebnymi do zapisu (header_hash/hdu_index/compressed). Frame BEZ
+    obecnej kopii → wiersz z location_id NULL (makro odróżni „brak kopii" od wielu kopii licząc
+    wiersze per frame). frame_ids jako TABLICA JSON (`json_each`, jeden param). Wybór celu (D-W1:
+    dokładnie 1 present; T6: nie skompresowany; D-X-13: nie degenerat tożsamości) robi makro, nie ten
+    czytnik. ORDER BY frame_id, location_id. Zwraca: frame_id, filetype, sha1_data_uncomputable,
     location_id, path, header_hash, hdu_index, compressed."""
     return con.execute(
-        "SELECT f.id AS frame_id, f.filetype, "
+        "SELECT f.id AS frame_id, f.filetype, f.sha1_data_uncomputable, "
         "       l.id AS location_id, l.path, l.header_hash, l.hdu_index, l.compressed "
         "FROM frame f "
         "LEFT JOIN location l ON l.frame_id = f.id AND l.present = 1 "

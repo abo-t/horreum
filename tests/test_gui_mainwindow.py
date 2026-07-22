@@ -25,7 +25,7 @@ from horreum.gui.grid import PRESET_DUPS
 from fixture_s8 import NOW, build, seed
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QListWidgetItem
 
 
 @pytest.fixture(scope="session")
@@ -305,15 +305,20 @@ def test_zadanie_zniknietych_otwiera_perspektywe(qapp, tmp_path):
         win.close()
 
 
-def test_pozycja_informacyjna_nie_nawiguje(qapp, tmp_path):
-    """Wiersz XISF jest INFORMACYJNY (bez UserRole) — klik nie zmienia strony ani widoku. Od P5
-    jest JEDYNY taki: „Zniknięte" awansowały na akcyjne (prowadzą do perspektywy Zbiorów)."""
+def test_kazdy_wiersz_porzadkow_prowadzi_do_powierzchni(qapp, tmp_path):
+    """Po P6c KAŻDY wiersz Porządków jest AKCYJNY: ostatnia pozycja informacyjna („XISF — nagłówki
+    tylko do odczytu") zniknęła razem z pisarzem XISF, który uczynił ją nieprawdą. Lista nie ma
+    już wiersza, który wygląda jak zadanie, a nigdzie nie prowadzi.
+
+    Bezpiecznik na pozycję BEZ akcji zostaje w kodzie i jest tu pinowany wprost (klik w element bez
+    `UserRole` = cisza, nie wyjątek) — tabela `_TASKS` jest DANYMI, więc kolejna pozycja
+    informacyjna nie może wywalić okna tylko dlatego, że dziś takiej nie ma."""
     win = MainWindow(_seeded_db(tmp_path, object_axis=True))
     try:
         tasks = win.tasks_view.tasks
-        info = next(tasks.item(i) for i in range(tasks.count())
-                    if tasks.item(i).data(Qt.UserRole) is None)
-        tasks.itemClicked.emit(info)
+        assert tasks.count() and all(tasks.item(i).data(Qt.UserRole) is not None
+                                     for i in range(tasks.count()))
+        win.tasks_view._on_task_clicked(QListWidgetItem("bez akcji"))   # UserRole = None
         assert win.tasks_view.pages.currentIndex() == 0
         assert win.stack.currentIndex() == NAV_DOSTAWA
     finally:

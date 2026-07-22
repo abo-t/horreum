@@ -22,10 +22,17 @@ Pliki na dysku pozostają NIETKNIĘTE — to model przestaje czytać pole, któr
 from dataclasses import dataclass
 
 from . import repo
+from .calibration import KIND_RECIPE
 
-# Rodzaje BEZ osi teleskopu (kind-scoping config — zob. nagłówek). Jedyny właściciel faktu (SPOT);
-# `resolver.review_state` konsumuje tę samą stałą, żeby kolejka przeglądu nie rozjechała się z osią.
-NO_TELESCOPE_KINDS = frozenset({"dark", "bias", "master_dark", "master_bias"})
+# Rodzaje BEZ osi teleskopu (kind-scoping config — zob. nagłówek). `resolver.review_state` konsumuje
+# tę samą stałą, żeby kolejka przeglądu nie rozjechała się z osią.
+#
+# WYPROWADZONA z `calibration.KIND_RECIPE` (SPOT, C2), nie wypisana ręcznie: „ten rodzaj ma przepis"
+# i „ten rodzaj jest na osi teleskopu" to dwa fakty o TEJ SAMEJ populacji, więc mają jednego
+# właściciela. Dwie osobne listy rozjechałyby się przy pierwszym nowym rodzaju (dark-flaty z briefu
+# C0 §8): trafiłby do przepisów, a w osi teleskopu zostałby pominięty i zaczął budować configi pod
+# cudzą optyką. Wartość dziś == dawny literał {dark, bias, master_dark, master_bias} (test pinuje).
+NO_TELESCOPE_KINDS = frozenset(k for k, (_cls, on_axis) in KIND_RECIPE.items() if not on_axis)
 
 
 @dataclass

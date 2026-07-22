@@ -1095,3 +1095,98 @@ def clear_renames_for_run(con, run_id):
     oczekujących, nie historia (historia = event `location.renamed`). Transient — bez eventu."""
     with con:
         con.execute("DELETE FROM pending_renames WHERE run_id = ?", (run_id,))
+
+
+# ------------------------------------------------ oś KALIBRACJI — przepis + fakty (C2, #6)
+
+def record_calibration_fact(con, *, frame_id, key, value, source, now, actor):
+    """Zapisz fakt przepisu dla POJEDYNCZEJ klatki (`calibration_fact`) + `event(calibration.fact)`.
+    Idempotentny: ten sam `(frame_id, key)` o tej samej wartości i źródle → False BEZ eventu.
+
+    Trzyma WYŁĄCZNIE fakty, których w nagłówku NIE MA (`source` ∈ {'path','user'}) — zeznania nie
+    kopiujemy, czytamy je wprost (D-C-2). Fakt ze ŚCIEŻKI zapisujemy RAZ, przy pierwszym rozpoznaniu:
+    rename mastera usuwa `_G100_O21_10_` ze ścieżki, więc re-derywacja po cichu przepięłaby klatkę
+    do innego przepisu. Wpis usera NADPISUJE wcześniejszy fakt ze ścieżki (precedencja D-C-1);
+    odwrotnie NIE — ścieżka nie rusza tego, co podał człowiek."""
+    text = None if value is None else str(value)
+    row = con.execute(
+        "SELECT value, source FROM calibration_fact WHERE frame_id = ? AND key = ?",
+        (frame_id, key)).fetchone()
+    if row is not None:
+        if row[0] == text and row[1] == source:
+            return False
+        if row[1] == "user" and source != "user":       # człowiek bije ścieżkę (D-C-1)
+            return False
+    with con:
+        con.execute(
+            "INSERT INTO calibration_fact(frame_id, key, value, source, actor, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(frame_id, key) DO UPDATE SET "
+            "value = excluded.value, source = excluded.source, actor = excluded.actor, "
+            "created_at = excluded.created_at",
+            (frame_id, key, text, source, actor, now))
+        emit_event(con, actor=actor, verb="calibration.fact", target=f"frame:{frame_id}", now=now,
+                   payload={"key": key, "value": text, "source": source})
+    return True
+
+
+def upsert_calibration_profile(con, *, profile_key, recipe_class, camera_id, xbinning,
+                               exptime=None, set_temp_c=None, gain=None, offset_adu=None,
+                               telescope_id=None, filter_canon=None, now, actor="calibration"):
+    """Wyłoń przepis po `profile_key` (klasa równoważności nastaw). Istnieje → `(id, False)` BEZ
+    zmiany; nowy → INSERT + `event(calibration_profile.proposed)` → `(id, True)`.
+
+    Klucz nie zawiera NULL-i: komplet faktów swojej klasy jest warunkiem istnienia wiersza (CHECK
+    w 0008 tego pilnuje). Klatka bez kompletu NIE dostaje profilu — trafia do `review_summary`,
+    bo sentinel w kluczu zlewałby DWA mastery o RÓŻNYCH nieznanych nastawach w jeden przepis."""
+    row = con.execute("SELECT id FROM calibration_profile WHERE profile_key = ?",
+                      (profile_key,)).fetchone()
+    if row is not None:
+        return row[0], False
+    with con:
+        cur = con.execute(
+            "INSERT INTO calibration_profile(profile_key, recipe_class, camera_id, xbinning, "
+            "exptime, set_temp_c, gain, offset_adu, telescope_id, filter_canon, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (profile_key, recipe_class, camera_id, xbinning, exptime, set_temp_c, gain,
+             offset_adu, telescope_id, filter_canon, now))
+        pid = cur.lastrowid
+        emit_event(con, actor=actor, verb="calibration_profile.proposed",
+                   target=f"calibration_profile:{pid}", now=now,
+                   payload={"profile_key": profile_key, "recipe_class": recipe_class})
+    return pid, True
+
+
+def assign_calibration_profile(con, *, frame_id, profile_id, now, actor="calibration"):
+    """Przypisz przepis do klatki (`frame.calibration_profile_id`). Idempotentny: ten sam profil →
+    False bez eventu; inaczej UPDATE + `event(calibration_profile.assigned)`.
+
+    Verb jest CELOWO `calibration_profile.assigned`, nie `calibration.assigned`: tabela `calibration`
+    (0002) znaczy „light skalibrowany masterem" i ta nazwa należy do rodowodu (C4)."""
+    row = con.execute("SELECT calibration_profile_id FROM frame WHERE id = ?", (frame_id,)).fetchone()
+    if row is not None and row[0] == profile_id:
+        return False
+    with con:
+        con.execute("UPDATE frame SET calibration_profile_id = ? WHERE id = ?",
+                    (profile_id, frame_id))
+        if row is not None and row[0] is not None:      # re-przypisanie: ślad zostaje (append-only)
+            emit_event(con, actor=actor, verb="calibration_profile.unassigned",
+                       target=f"frame:{frame_id}", now=now, payload={"profile_id": row[0]})
+        emit_event(con, actor=actor, verb="calibration_profile.assigned",
+                   target=f"frame:{frame_id}", now=now, payload={"profile_id": profile_id})
+    return True
+
+
+def flag_calibration_review_summary(con, items, now, actor="calibration"):
+    """Klatki kalibracyjne BEZ kompletu przepisu — JEDEN `event(calibration.review_summary)`
+    z licznością per powód (wzorzec `flag_object_review_summary`). Stan (`calibration_profile_id`
+    NULL) SAM jest deltą; to event audytowy, nie zapis na frame. Pusta lista → bez eventu.
+
+    Emitowany JUŻ w C2, nie dopiero w C4: „brak jest widoczny" nie może opierać się na module,
+    który powstanie dwa segmenty później."""
+    items = list(items)
+    if not items:
+        return
+    with con:
+        emit_event(con, actor=actor, verb="calibration.review_summary", target="frame:*", now=now,
+                   payload={"distinct": len(items), "frames": sum(n for _, n in items),
+                            "items": [[reason, n] for reason, n in items]})

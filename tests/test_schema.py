@@ -85,11 +85,11 @@ def test_szkielet_przyszly_pusty(tmp_path):
     con.close()
 
 
-def test_user_version_v7_po_migracji(tmp_path):
-    """0007 podnosi user_version do 7 (świeża baza leci 0002→…→0007 sekwencyjnie)."""
+def test_user_version_v8_po_migracji(tmp_path):
+    """0008 podnosi user_version do 8 (świeża baza leci 0002→…→0008 sekwencyjnie)."""
     con = db.open_db(str(tmp_path / "h.db"))
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 7
-    assert db.SCHEMA_VERSION == 7
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 8
+    assert db.SCHEMA_VERSION == 8
     con.close()
 
 
@@ -181,4 +181,88 @@ def test_staging_writeback_kluczowany_location(tmp_path):
     assert {"commit_id", "location_id"} <= _unique_cols(con, "header_backups")
     for t in ("pending_changes", "commits", "header_backups", "macros"):
         assert con.execute(f"SELECT count(*) FROM {t}").fetchone()[0] == 0
+    con.close()
+
+
+def test_0008_nastawa_jest_odczytem_z_zeznania_nie_kopia(tmp_path):
+    """0008 (D-C-2): `header.set_temp` to kolumna GENERATED z `raw_json` — nastawa jest ODCZYTYWANA,
+    nie kopiowana, więc migracja nie ma backfillu i wartość nie może się zestarzeć po writebacku.
+
+    `CAST(... AS REAL)` jest konieczny, nie kosmetyczny: `json_extract` oddaje `-10.0` jako REAL
+    dla FITS-ów i jako TEXT dla XISF-ów (zmierzone na archiwum: 202 klatki) — bez rzutu ta sama
+    nastawa rozpadłaby się na dwie wartości (W3, ta sama pułapka co przy kamerach).
+
+    PUŁAPKA: `PRAGMA table_info` NIE POKAZUJE kolumn generowanych — widać je dopiero w `table_xinfo`.
+    Test schematu szukający `set_temp` w `table_info` dałby fałszywy alarm."""
+    con = db.open_db(str(tmp_path / "h.db"))
+    assert "set_temp" not in {r[1] for r in con.execute("PRAGMA table_info(header)")}
+    assert "set_temp" in {r[1] for r in con.execute("PRAGMA table_xinfo(header)")}
+
+    con.execute("INSERT INTO frame(sha1_data, kind, filetype, first_seen_at) "
+                "VALUES ('a', 'light', 'fits', 't')")
+    con.execute("INSERT INTO header(frame_id, raw_json) VALUES (1, '{\"SET-TEMP\": -10.0}')")
+    con.execute("INSERT INTO frame(sha1_data, kind, filetype, first_seen_at) "
+                "VALUES ('b', 'light', 'xisf', 't')")
+    con.execute("INSERT INTO header(frame_id, raw_json) VALUES (2, '{\"SET-TEMP\": \"-10.0\"}')")
+    con.execute("INSERT INTO frame(sha1_data, kind, filetype, first_seen_at) "
+                "VALUES ('c', 'master_dark', 'xisf', 't')")
+    con.execute("INSERT INTO header(frame_id, raw_json) VALUES (3, '{}')")
+
+    rows = {r[0]: r[1] for r in con.execute("SELECT frame_id, set_temp FROM header")}
+    assert rows[1] == -10.0                      # FITS: REAL
+    assert rows[2] == -10.0                      # XISF: string zrzutowany tym samym CASTem
+    assert rows[1] == rows[2]                    # jedna nastawa == jedna wartość (W3)
+    assert rows[3] is None                       # brak karty = BRAK WPISU, nigdy 0
+    assert con.execute("SELECT count(DISTINCT set_temp) FROM header "
+                       "WHERE set_temp IS NOT NULL").fetchone()[0] == 1
+    con.close()
+
+
+def test_0008_przepis_nie_powstaje_bez_kompletu(tmp_path):
+    """0008: `calibration_profile` nie przyjmuje niekompletnego przepisu — CHECK per klasa pilnuje
+    tego, czego warunkowy NOT NULL nie umie. Powód: sentinel w kluczu zlewałby DWA mastery
+    o RÓŻNYCH, nieznanych nastawach w jeden przepis, a UNIQUE by tego nie złapał."""
+    con = db.open_db(str(tmp_path / "h.db"))
+    con.execute("INSERT INTO camera(model_canon, pixel_um, is_mono, created_at) "
+                "VALUES ('ASI2600MM', 3.76, 1, 't')")
+    con.execute("INSERT INTO telescope(telescop_canon, status, created_at) "
+                "VALUES ('A140R', 'proposed', 't')")
+
+    with pytest.raises(sqlite3.IntegrityError):          # dark bez temperatury = niekompletny
+        con.execute("INSERT INTO calibration_profile(profile_key, recipe_class, camera_id, "
+                    "xbinning, exptime, gain, offset_adu, created_at) "
+                    "VALUES ('k1', 'dark', 1, 1, 300.0, 100, 21, 't')")
+    with pytest.raises(sqlite3.IntegrityError):          # flat bez teleskopu = niekompletny
+        con.execute("INSERT INTO calibration_profile(profile_key, recipe_class, camera_id, "
+                    "xbinning, filter_canon, created_at) VALUES ('k2', 'flat', 1, 1, 'Ha', 't')")
+
+    con.execute("INSERT INTO calibration_profile(profile_key, recipe_class, camera_id, xbinning, "
+                "exptime, set_temp_c, gain, offset_adu, created_at) "
+                "VALUES ('dark|cam=1|bin=1|exp=300.000|t=-10|g=100|o=21', 'dark', 1, 1, "
+                "300.0, -10, 100, 21, 't')")
+    con.execute("INSERT INTO calibration_profile(profile_key, recipe_class, camera_id, xbinning, "
+                "telescope_id, filter_canon, created_at) "
+                "VALUES ('flat|cam=1|bin=1|tel=1|filt=Ha', 'flat', 1, 1, 1, 'Ha', 't')")
+    # flat kamery KOLOROWEJ: brak filtra to FAKT, nie luka — przechodzi
+    con.execute("INSERT INTO calibration_profile(profile_key, recipe_class, camera_id, xbinning, "
+                "telescope_id, created_at) VALUES ('flat|cam=1|bin=1|tel=1|filt=~', 'flat', 1, 1, 1, 't')")
+    assert con.execute("SELECT count(*) FROM calibration_profile").fetchone()[0] == 3
+    con.close()
+
+
+def test_0008_fakt_nie_dubluje_zeznania(tmp_path):
+    """0008: `calibration_fact` trzyma WYŁĄCZNIE fakty, których w nagłówku NIE MA — `source`
+    dopuszcza 'user' i 'path', nigdy 'header' (D-C-2: zeznania nie kopiujemy, czytamy je wprost).
+    Klucz `(frame_id, key)` — jeden fakt danego rodzaju na klatkę."""
+    con = db.open_db(str(tmp_path / "h.db"))
+    con.execute("INSERT INTO frame(sha1_data, kind, filetype, first_seen_at) "
+                "VALUES ('a', 'master_dark', 'xisf', 't')")
+    con.execute("INSERT INTO calibration_fact(frame_id, key, value, source, actor, created_at) "
+                "VALUES (1, 'gain', '100', 'path', 'calibration', 't')")
+    with pytest.raises(sqlite3.IntegrityError):
+        con.execute("INSERT INTO calibration_fact(frame_id, key, value, source, actor, created_at) "
+                    "VALUES (1, 'gain', '100', 'header', 'scan', 't')")
+    with pytest.raises(sqlite3.IntegrityError):         # ten sam fakt drugi raz
+        con.execute("INSERT INTO calibration_fact(frame_id, key, value, source, actor, created_at) "
+                    "VALUES (1, 'gain', '0', 'user', 'user:local', 't')")
     con.close()

@@ -1,6 +1,6 @@
 """Widok Pipeline + worker `QThread` (PLAN_gui_pipeline §4/§6 — warstwa widżetów). User prowadzi
 CAŁY pierwszy przebieg na własnych danych Z OKNA: wskaż katalog → skan (przyrostowy) → grupuj →
-rozwiąż → delta — bez CLI. „Przetwórz wszystko" robi cały łańcuch jednym kliknięciem.
+rozwiąż → kalibracja → delta — bez CLI. „Przetwórz wszystko" robi cały łańcuch jednym kliknięciem.
 
 To JEDEN z plików warstwy widżetów, którym wolno importować PySide6 (test izolacji
 `test_gui_isolation.py` — `pipeline.py` na whiteliście). Logika domenowa (skan, brama, normalizacja)
@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from horreum import db, presence
+from horreum.calibration import run_calibration
 from horreum.gui import queries
 from horreum.gui.grid import PRESET_VANISHED
 from horreum.gui.progress import counts_snapshot, should_emit
@@ -79,6 +80,8 @@ class PipelineWorker(QObject):
                 self._bulk(con, "group")
             elif self._stage == "resolve":
                 self._bulk(con, "resolve")
+            elif self._stage == "calibrate":
+                self._bulk(con, "calibrate")
             elif self._stage == "delta":
                 self._bulk(con, "delta")
             elif self._stage in ("presence", "presence-apply"):
@@ -130,24 +133,31 @@ class PipelineWorker(QObject):
         return True
 
     def _bulk(self, con, name):
-        """Etap masowy (group/resolve/delta) — bezobsługowy, sekundy–minuty, bez progresu per-wiersz.
-        delta jest READ-ONLY (zero DML). Emituje stage_started → stage_done."""
+        """Etap masowy (group/resolve/calibrate/delta) — bezobsługowy, sekundy–minuty, bez progresu
+        per-wiersz. delta jest READ-ONLY (zero DML). Emituje stage_started → stage_done."""
         self.stage_started.emit(name)
         if name == "group":
             result = run_grouper(con, self._now())
         elif name == "resolve":
             result = run_resolver(con, self._now())
+        elif name == "calibrate":
+            result = run_calibration(con, now=self._now())
         else:                                          # delta — read-only
             result = delta_report(con)
         self.stage_done.emit(name, result)
 
     def _run_all(self, con):
-        """„Przetwórz wszystko": scan→group→resolve→delta w jednym wątku. Anulowanie skanu PRZERYWA
-        łańcuch (group/resolve/delta się nie wykonują — baza spójna, re-skan dokończy)."""
+        """„Przetwórz wszystko": scan→group→resolve→calibrate→delta w jednym wątku. Anulowanie skanu
+        PRZERYWA łańcuch (dalsze etapy się nie wykonują — baza spójna, re-skan dokończy).
+
+        Kalibracja stoi PO resolverze, bo przepis flata bierze `frame.filter_canon`, a wypełnia go
+        dopiero `run_resolver` (`resolver.py:137`) — odwrotna kolejność wyłoniłaby przepisy flatów
+        z pustym filtrem, a następny przebieg przepiąłby te klatki do innego profilu."""
         if not self._scan(con):
             return
         self._bulk(con, "group")
         self._bulk(con, "resolve")
+        self._bulk(con, "calibrate")
         self._bulk(con, "delta")
         # Obecność ZAWSZE w trybie DRY (raport dostawy ma być szczery: „nic nie znikło" to inna
         # wiadomość niż „nie sprawdziłem"). Zapis wymaga jawnego przycisku. Bez realnego serialu
@@ -169,8 +179,8 @@ class PipelineWorker(QObject):
 # Etykiety widoczne dla użytkownika po polsku; wartości danych ("cold"/"scratch") to identyfikatory
 # poziomu zapisywane do bazy (rdzeń `scan_tree`) — ZOSTAJĄ niezmienione.
 _TIERS = [("—", None), ("zimny (archiwum)", "cold"), ("roboczy", "scratch")]
-_STAGE_LABEL = {"scan": "Skan", "group": "Grupowanie", "resolve": "Rozwiązywanie", "delta": "Delta",
-                "presence": "Obecność"}
+_STAGE_LABEL = {"scan": "Skan", "group": "Grupowanie", "resolve": "Rozwiązywanie",
+                "calibrate": "Kalibracja", "delta": "Delta", "presence": "Obecność"}
 
 # Kolejność i nazwy powodów przeglądu w raporcie dostawy (rdzeń niesie same liczby — wording należy
 # do powierzchni; konsolowy `cli._format_delta` ma własne, ASCII-owe).
@@ -247,7 +257,7 @@ class PipelineView(QWidget):
         # źródle (QSettings pipeline/last_source; pierwsza dostawa pyta o katalog). Waga wizualna
         # przejęta od dawnego „Przetwórz wszystko" (jedna złota akcja na miejsce, wzorzec F3 #3).
         rec = QHBoxLayout()
-        self.btn_receive = QPushButton("Przyjmij nowe  (skan → grupuj → rozwiąż → delta)")
+        self.btn_receive = QPushButton("Przyjmij nowe  (skan → grupuj → rozwiąż → kalibracja → delta)")
         _f = self.btn_receive.font()
         _f.setBold(True)
         self.btn_receive.setFont(_f)
@@ -291,6 +301,10 @@ class PipelineView(QWidget):
         self.btn_group.clicked.connect(self._on_group)
         self.btn_resolve = QPushButton("Rozwiąż")
         self.btn_resolve.clicked.connect(self._on_resolve)
+        self.btn_calibrate = QPushButton("Kalibracja")
+        self.btn_calibrate.setToolTip("Przepis klatek kalibracyjnych — po „Rozwiąż” (przepis flata "
+                                      "potrzebuje filtra)")
+        self.btn_calibrate.clicked.connect(self._on_calibrate)
         self.btn_delta = QPushButton("Pokaż deltę")
         self.btn_delta.clicked.connect(self._on_delta)
         self.btn_presence = QPushButton("Sprawdź obecność")
@@ -298,8 +312,8 @@ class PipelineView(QWidget):
         self.btn_presence.clicked.connect(self._on_presence)
         self.btn_cancel = QPushButton("Anuluj")
         self.btn_cancel.clicked.connect(self._on_cancel)
-        for b in (self.btn_scan, self.btn_group, self.btn_resolve, self.btn_delta,
-                  self.btn_presence, self.btn_cancel):
+        for b in (self.btn_scan, self.btn_group, self.btn_resolve, self.btn_calibrate,
+                  self.btn_delta, self.btn_presence, self.btn_cancel):
             stages.addWidget(b)
         stages.addStretch(1)
         v.addLayout(stages)
@@ -509,6 +523,12 @@ class PipelineView(QWidget):
         self._begin_run()
         self._start_stage("resolve")
 
+    def _on_calibrate(self):
+        if self._db_path is None or self._thread is not None:
+            return
+        self._begin_run()
+        self._start_stage("calibrate")
+
     def _on_delta(self):
         if self._db_path is None or self._thread is not None:
             return
@@ -633,6 +653,8 @@ class PipelineView(QWidget):
             return self._format_group(r)
         if name == "resolve":
             return self._format_resolve(r)
+        if name == "calibrate":
+            return self._format_calibrate(r)
         if name == "delta":
             return self._format_delta(r)
         if name == "presence":
@@ -720,6 +742,17 @@ class PipelineView(QWidget):
             f"przypisane {s.objects_assigned} · przegląd {s.objects_review} "
             f"(różnych {s.objects_unresolved_distinct}) · filtry {s.filters_set}")
 
+    def _format_calibrate(self, s):
+        """Linia raportu osi przepisu. Powody braku kompletu WYPISUJEMY (nie tylko liczbę): „bez
+        kompletu 6" nie mówi, czego dopisać ręką w C3, a to jest jedyna akcja, jaką user ma tu do
+        wykonania. Zerowe braki milczą (QUIET)."""
+        linia = (f"[kalibracja] klatki {s.frames} · przepisy {s.profiles_proposed}/"
+                 f"{s.profiles_assigned} · fakty ze ścieżki {s.facts_recorded} · "
+                 f"bez kompletu {s.incomplete}")
+        if s.reasons:
+            linia += "\n   braki: " + ", ".join(f"{powod} ×{n}" for powod, n in s.reasons.items())
+        return linia
+
     def _format_delta(self, r):
         total = r.object_resolved + r.object_unresolved
         top = ", ".join(f"{raw}×{n}" for raw, n in r.object_delta[:8]) or "—"
@@ -737,6 +770,7 @@ class PipelineView(QWidget):
         self.btn_scan.setEnabled(idle and self._can_scan())
         self.btn_group.setEnabled(idle and has_db)
         self.btn_resolve.setEnabled(idle and has_db)
+        self.btn_calibrate.setEnabled(idle and has_db)
         self.btn_delta.setEnabled(idle and has_db)
         self.btn_presence.setEnabled(idle and self._can_scan())   # potrzebuje drzewa, nie samej bazy
         self.btn_mark_vanished.setEnabled(idle and self._presence_params is not None)

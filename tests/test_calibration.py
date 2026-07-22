@@ -136,6 +136,18 @@ def test_klucz_odporny_na_typ_z_naglowka(con):
     assert missing_facts("dark", dict(a, gain=None)) == ("gain",)
 
 
+def test_cli_calibrate_wypelnia_os(con, tmp_path):
+    """Wpięcie w CLI (#14): oś przepisu ma DROGĘ, którą ktoś ją odpala — bez niej profile są stęchłe
+    po każdym skanie. Kod wyjścia 0, przepis w bazie po przebiegu przez `cli.main`."""
+    from horreum import cli
+    _frame(con, kind="master_dark", sha1="d1", path=MASTERDARK, exptime=300.0)
+    path = con.execute("PRAGMA database_list").fetchone()[2]
+    con.commit()
+
+    assert cli.main(["calibrate", path]) == 0
+    assert con.execute("SELECT count(*) FROM calibration_profile").fetchone()[0] == 1
+
+
 def test_jedna_mapa_rodzajow_dla_obu_osi():
     """SPOT: `grouper.NO_TELESCOPE_KINDS` wyprowadza się z `KIND_RECIPE`, nie żyje obok niej.
     Wartość pinowana, bo dark na osi teleskopu budowałby configi pod cudzą optyką."""

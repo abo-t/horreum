@@ -130,10 +130,12 @@ def _scanned_db(tmp_path):
 
 def test_worker_group_resolve_delta_emituja_stage_done(qapp, tmp_path):
     """Etapy masowe wołają funkcje rdzenia i niosą właściwy typ wyniku w stage_done."""
+    from horreum.calibration import CalibrationSummary
     from horreum.grouper import GroupSummary
     from horreum.resolver import DeltaReport, ResolveSummary
     db_path = _scanned_db(tmp_path)
-    for stage, typ in [("group", GroupSummary), ("resolve", ResolveSummary), ("delta", DeltaReport)]:
+    for stage, typ in [("group", GroupSummary), ("resolve", ResolveSummary),
+                       ("calibrate", CalibrationSummary), ("delta", DeltaReport)]:
         w = PipelineWorker(db_path, now_fn=lambda: NOW)
         w.configure(stage)
         done, started = [], []
@@ -145,9 +147,11 @@ def test_worker_group_resolve_delta_emituja_stage_done(qapp, tmp_path):
 
 
 def test_worker_all_lancuch_scan_group_resolve_delta_obecnosc(qapp, tmp_path):
-    """„Przetwórz wszystko": jeden worker emituje stage_done dla scan→group→resolve→delta→obecność
-    w kolejności, a `finished` pada raz na końcu (sygnał do quit wątku). Obecność zamyka sekwencję,
-    bo raport dostawy ma mówić także o tym, co z drzewa ZNIKNĘŁO — zawsze w DRY (zapis = osobny gest).
+    """„Przetwórz wszystko": jeden worker emituje stage_done dla scan→group→resolve→calibrate→delta→
+    obecność w kolejności, a `finished` pada raz na końcu (sygnał do quit wątku). Kalibracja stoi PO
+    resolverze (przepis flata bierze `frame.filter_canon`, który wypełnia dopiero resolver), a PRZED
+    deltą. Obecność zamyka sekwencję, bo raport dostawy ma mówić także o tym, co z drzewa ZNIKNĘŁO —
+    zawsze w DRY (zapis = osobny gest).
 
     Tu wolumin jest zmyślony („VOL1"), więc pass poprawnie ABORCIUJE na guardzie serialu — sekwencja
     leci dalej, a nie wywala się: przesłanka nie do potwierdzenia to nie błąd etapu."""
@@ -158,7 +162,7 @@ def test_worker_all_lancuch_scan_group_resolve_delta_obecnosc(qapp, tmp_path):
     w.stage_done.connect(lambda n, r: (order.append(n), wyniki.__setitem__(n, r)))
     w.finished.connect(lambda: fin.append(1))
     w.run()
-    assert order == ["scan", "group", "resolve", "delta", "presence"]
+    assert order == ["scan", "group", "resolve", "calibrate", "delta", "presence"]
     assert wyniki["presence"].aborted is not None and wyniki["presence"].vanished == 0
     assert len(fin) == 1
 
@@ -173,7 +177,7 @@ def test_worker_all_bez_serialu_melduje_pominiecie_obecnosci(qapp, tmp_path):
     order, wyniki = [], {}
     w.stage_done.connect(lambda n, r: (order.append(n), wyniki.__setitem__(n, r)))
     w.run()
-    assert order == ["scan", "group", "resolve", "delta", "presence"]
+    assert order == ["scan", "group", "resolve", "calibrate", "delta", "presence"]
     s = wyniki["presence"]
     assert "pominięty" in s.aborted and s.walked == 0 and s.vanished == 0
 
@@ -194,12 +198,13 @@ def test_worker_all_anulowanie_przerywa_lancuch(qapp, tmp_path):
 # --- widok: bramkowanie przycisków + pełny „Przetwórz wszystko" w wątku ---
 
 def test_gating_przyciskow_wymaga_bazy_i_katalogu(qapp, tmp_path):
-    """all/scan wymagają bazy ORAZ katalogu; group/resolve/delta — samej bazy; „Przyjmij nowe"
-    samej bazy (katalog przynosi własny, F5); anuluj wyłączony w spoczynku."""
+    """all/scan wymagają bazy ORAZ katalogu; group/resolve/kalibracja/delta — samej bazy; „Przyjmij
+    nowe" samej bazy (katalog przynosi własny, F5); anuluj wyłączony w spoczynku."""
     view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
     assert not view.btn_all.isEnabled() and not view.btn_scan.isEnabled()   # brak katalogu
     assert view.btn_receive.isEnabled()                                     # F5: baza wystarcza
     assert view.btn_group.isEnabled() and view.btn_resolve.isEnabled() and view.btn_delta.isEnabled()
+    assert view.btn_calibrate.isEnabled()                                   # oś przepisu: sama baza
     assert not view.btn_cancel.isEnabled()
     view._root = _tree(tmp_path, 1); view._sync_actions()
     assert view.btn_all.isEnabled() and view.btn_scan.isEnabled()           # katalog wskazany
@@ -217,8 +222,8 @@ def test_pasek_ukryty_w_spoczynku_blad_w_osobnym_wierszu(qapp, tmp_path):
 
 
 def test_view_przetworz_wszystko_w_watku(qapp, tmp_path):
-    """Pełny łańcuch z okna w PRAWDZIWYM wątku: panel akumuluje 4 sekcje (skan/grupuj/rozwiąż/delta),
-    running wraca do False po sprzątnięciu."""
+    """Pełny łańcuch z okna w PRAWDZIWYM wątku: panel akumuluje 5 sekcji (skan/grupuj/rozwiąż/
+    kalibracja/delta), running wraca do False po sprzątnięciu."""
     view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
     view._root = _tree(tmp_path, 2)                    # serial policzy się ŚWIEŻO w _scan_params (F5)
     running = []
@@ -230,6 +235,7 @@ def test_view_przetworz_wszystko_w_watku(qapp, tmp_path):
     loop.exec()
     txt = view.lbl_summary.text()
     assert "[skan]" in txt and "[grupuj]" in txt and "[rozwiąż]" in txt and "[delta]" in txt
+    assert "[kalibracja]" in txt
     assert running[0] is True and running[-1] is False and view._thread is None
 
 

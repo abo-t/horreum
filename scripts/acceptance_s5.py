@@ -14,6 +14,9 @@ Tryb HYBRYDOWY (odpowiednik replay+subset ze skilla `pipeline-replay-validation`
       (volume z `volume_serial`), potem grouper+resolver. Odtwarza PF-4: FITS gate'owane mtime
       (skip, zero re-odczytu), XISF wciągane → 9. teleskop ED, pełne kotwice §5. Pełne `<xisf-root>`
       → pełny stan pf4 (czyta tylko ~331 nagłówków XISF, reszta stat-skip).
+  (K) KALIBRACJA — `run_calibration` na gotowym stanie (po grouperze i resolverze) + drugi przebieg
+      jako dowód idempotencji. Oś przepisu jest bramkowana tu, bo jej kotwice (38 dark / 37 flat)
+      zmierzono na pełnym archiwum, a mastery są XISF — bez doskanu nie ma czego liczyć.
   (C) KRYTERIA — stage-aware (import vs full po obecności XISF): zestawia aktualia z EXP_* PF-3+PF-4.
   (S) SUBSET (opcja `--subset DIR`) — realny `scan_tree` małego katalogu do OSOBNEJ work.db:
       dowód, że czytniki astropy/XISF + sha1 działają na realnych bajtach; tu (i tylko tu) realny
@@ -42,6 +45,7 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from horreum import db                                              # noqa: E402
+from horreum.calibration import KIND_RECIPE, run_calibration      # noqa: E402
 from horreum.grouper import NO_TELESCOPE_KINDS, run_grouper       # noqa: E402
 from horreum.import_fitsmirror import (                                   # noqa: E402
     ImportAbort, open_donor, read_repaired_registry, run_import,
@@ -81,6 +85,18 @@ EXP_OBSERVATORIES = 11         # klaster 4 km: 24 distinct pary → 11 stanowisk
 EXP_GPS_FRAMES_IMPORT = 15409  # dawca FITS: klatki z SITELAT+SITELONG (97.0%)
 EXP_GPS_FRAMES_FULL = 15611    # + 202 XISF z GPS w kartach (P6b; wszystkie do stanowiska #5)
 EXP_NO_GPS_FULL = 274          # bez GPS w FULL: 150 fits + 124 xisf (326 − 202 z GPS)
+# Oś KALIBRACJI (C2, brief PLAN_kalibracja_C_brief §3.2) — kotwice ZMIERZONE read-only PRZED kodem.
+# Mastery są XISF, więc obie liczby dotyczą wyłącznie etapu FULL; w imporcie FITS nie ma czego liczyć.
+EXP_RECIPE_DARK = 38           # 38 masterdarków → 38 przepisów (każdy master unikalny)
+# 38, nie 37 z briefu §3.2: brief mierzył ŻYWĄ pf4, a ta ma o jedną klasę MNIEJ z powodu, który
+# sam brief przewidział (§8). `frame 15645` ma DWIE kopie o sprzecznym zeznaniu — ten sam master
+# leży w `…RC8_2600MC\CLS\` i `…\L-Pro\` (identyczne DANE → jedna klatka, różne nagłówki → jeden
+# z nich przeżywa). Świeży skan zostaje przy PIERWSZYM odczycie (`CLS` — własna, jednoelementowa
+# klasa → 38); na żywej pf4 backfill P6b przestawił zeznanie na `L-Pro`, gdzie klasa już istniała
+# (→ 37). Sprzeczność siedzi w DANYCH i C2 ma ją POKAZAĆ, nie rozstrzygać — dlatego kotwicą jest
+# liczba świeżej bazy, a osobne kryterium pinuje samą PRZYCZYNĘ (klasa-sierota z pary kopii).
+EXP_RECIPE_FLAT = 38           # 2256 flatów + 73 masterflaty → 38 klas na ŚWIEŻEJ bazie
+EXP_MASTERS_EXCLUDED_FULL = 2  # `frame 15629`/`15636`: kind='unknown' — POZA osią, jawnie wykluczone
 
 
 def _ok(cond):
@@ -142,8 +158,36 @@ def doskan_xisf(con, xisf_root, now, out):
     out(f"  resolver: {rs}")
 
 
+# ── (K) OŚ KALIBRACJI: przepis + DOWÓD IDEMPOTENCJI (bramka C2) ──────────────────────────────────
+_CAL_VERBS = ("calibration_profile.proposed", "calibration_profile.assigned",
+              "calibration_profile.unassigned", "calibration.fact")
+
+
+def calibrate(con, now, out):
+    """Oś przepisu na gotowym stanie (PO grouperze i resolverze — przepis flata bierze
+    `frame.filter_canon`, który wypełnia dopiero resolver).
+
+    Drugi przebieg jest tu BRAMKĄ, nie ozdobą: liczy się zmiana STANU, więc porównujemy liczniki
+    eventów encyjnych sprzed i po. `calibration.review_summary` świadomie POZA porównaniem — to event
+    audytowy emitowany bezwarunkowo przy niepustej liście braków (wzorzec `flag_object_review_summary`),
+    więc jego powtórzenie nie jest zmianą stanu. Zwraca `(summary, idempotent)`."""
+    out("")
+    out("== (K) OŚ KALIBRACJI: run_calibration + idempotencja ==")
+    s1 = run_calibration(con, now=now)
+    out(f"  przebieg 1: {s1}")
+    przed = {v: con.execute("SELECT count(*) FROM event WHERE verb=?", (v,)).fetchone()[0]
+             for v in _CAL_VERBS}
+    s2 = run_calibration(con, now=now)
+    po = {v: con.execute("SELECT count(*) FROM event WHERE verb=?", (v,)).fetchone()[0]
+          for v in _CAL_VERBS}
+    idem = (s2.profiles_proposed, s2.profiles_assigned, s2.facts_recorded) == (0, 0, 0) and po == przed
+    out(f"  przebieg 2 (idempotencja): {s2}")
+    out(f"  eventy encyjne bez zmian: {przed == po} ({przed})")
+    return s1, idem
+
+
 # ── (C) KRYTERIA §5 na bazie zbudowanej z dawcy (stage-aware: import vs full) ─────────────────────
-def check_criteria(con, summary, out):
+def check_criteria(con, summary, out, cal=None, cal_idempotent=None):
     results = []                                    # (etykieta, PASS/FAIL)
 
     def crit(label, cond):
@@ -266,6 +310,7 @@ def check_criteria(con, summary, out):
         ("telescope", "telescope.proposed"), ("config", "config.proposed"),
         ("object", "object.upserted"), ("object_alias", "object.aliased"),
         ("observatory", "observatory.proposed"),
+        ("calibration_profile", "calibration_profile.proposed"),
     ]
     all_match = True
     for ent, verb in pairs:
@@ -280,10 +325,18 @@ def check_criteria(con, summary, out):
     vo = con.execute("SELECT count(*) FROM event WHERE verb='object.assigned'").fetchone()[0]
     sa = con.execute("SELECT count(*) FROM frame WHERE observatory_id IS NOT NULL").fetchone()[0]
     vs = con.execute("SELECT count(*) FROM event WHERE verb='observatory.assigned'").fetchone()[0]
+    # Przypisanie przepisu — para trzyma się TYLKO na świeżej bazie (jak wszystkie tutaj): na żywej
+    # re-przypisanie emituje `.unassigned`+`.assigned`, więc equality wymagałaby odjęcia odpięć.
+    ca = con.execute(
+        "SELECT count(*) FROM frame WHERE calibration_profile_id IS NOT NULL").fetchone()[0]
+    vc = con.execute(
+        "SELECT count(*) FROM event WHERE verb='calibration_profile.assigned'").fetchone()[0]
     out(f"    frame.config_id {fa} == config.assigned {va}  [{_ok(fa == va)}]")
     out(f"    frame.object_id {oa} == object.assigned {vo}  [{_ok(oa == vo)}]")
     out(f"    frame.observatory_id {sa} == observatory.assigned {vs}  [{_ok(sa == vs)}]")
-    all_match &= (fa == va) and (oa == vo) and (sa == vs)
+    out(f"    frame.calibration_profile_id {ca} == calibration_profile.assigned {vc}  "
+        f"[{_ok(ca == vc)}]")
+    all_match &= (fa == va) and (oa == vo) and (sa == vs) and (ca == vc)
     crit("§5.9 encje == eventy (co do sztuki, łącznie z przypisaniami)", all_match)
 
     # §5.10 oś OBSERWATORIUM — 11 stanowisk (§8 klaster), populacje domykają, zero nieparsowalnego GPS
@@ -321,6 +374,56 @@ def check_criteria(con, summary, out):
     if full:
         crit(f"§5.10 bez GPS == {EXP_NO_GPS_FULL} (150 fits + 124 xisf bez SITELAT/SITELONG)",
              no_obs == EXP_NO_GPS_FULL)
+
+    # §5.11 oś KALIBRACJI (C2) — kotwice przepisu + DOMKNIĘCIE POPULACJI. Rozkład, który się nie
+    # sumuje, to brama fałszywie zielona: „38 przepisów" nic nie znaczy, dopóki nie wiadomo, że
+    # każda klatka kalibracyjna jest ALBO w przepisie, ALBO policzona jako niekompletna.
+    if cal is not None:
+        kinds = json.dumps(sorted(KIND_RECIPE))
+        recipe_frames = con.execute(
+            "SELECT count(*) FROM frame WHERE kind IN (SELECT value FROM json_each(?))",
+            (kinds,)).fetchone()[0]
+        profiled = con.execute(
+            "SELECT count(*) FROM frame WHERE calibration_profile_id IS NOT NULL").fetchone()[0]
+        by_class = dict(con.execute(
+            "SELECT recipe_class, count(*) FROM calibration_profile GROUP BY recipe_class").fetchall())
+        masters_off = con.execute(
+            "SELECT count(*) FROM frame WHERE calibration_profile_id IS NULL "
+            "AND kind IN ('master_dark','master_bias','master_flat')").fetchone()[0]
+        unknown = con.execute("SELECT count(*) FROM frame WHERE kind='unknown'").fetchone()[0]
+        facts = dict(con.execute(
+            "SELECT source, count(*) FROM calibration_fact GROUP BY source").fetchall())
+        out(f"\n§5.11 kalibracja: klatki z przepisem {profiled}/{recipe_frames} "
+            f"(bez kompletu {cal.incomplete}); profile {by_class}; fakty {facts}")
+        for powod, n in cal.reasons.items():
+            out(f"    {n:5d}  {powod}")
+        crit("§5.11 domknięcie populacji (każda klatka z przepisem ALBO policzona jako niekompletna)",
+             profiled + cal.incomplete == recipe_frames and cal.frames == recipe_frames)
+        crit("§5.11 idempotencja: 2. przebieg = zero wierszy i zero eventów encyjnych",
+             bool(cal_idempotent))
+        crit("§5.11 fakt ze ścieżki JEST zapisany (rename mastera nie przepnie klatki po cichu)",
+             facts.get("path", 0) > 0 if full else True)
+        if full:
+            crit(f"§5.11 przepisy dark == {EXP_RECIPE_DARK} (38 masterdarków, każdy unikalny)",
+                 by_class.get("dark", 0) == EXP_RECIPE_DARK)
+            crit(f"§5.11 przepisy flat == {EXP_RECIPE_FLAT} (2256 flatów + 73 mastery, świeża baza)",
+                 by_class.get("flat", 0) == EXP_RECIPE_FLAT)
+            # Przyczyna 38. klasy pinowana WPROST: gdyby doszła druga sprzeczna para, sama liczba
+            # klas przesunęłaby się „legalnie" i nikt by nie zauważył, że archiwum zeznaje dwoma
+            # głosami. Klasa jednoelementowa sama w sobie jest zwyczajna (Sony ma trzy) — dopiero
+            # JEDNOELEMENTOWA + KLATKA O WIELU KOPIACH znaczy „kopie mówią co innego".
+            sierota = con.execute(
+                "SELECT count(*) FROM calibration_profile p WHERE p.recipe_class='flat' "
+                "AND (SELECT count(*) FROM frame f WHERE f.calibration_profile_id=p.id) = 1 "
+                "AND EXISTS(SELECT 1 FROM frame f JOIN location l ON l.frame_id=f.id "
+                "           WHERE f.calibration_profile_id=p.id AND l.present=1 "
+                "           GROUP BY f.id HAVING count(l.id) > 1)").fetchone()[0]
+            crit("§5.11 klasa-sierota ze sprzecznej pary kopii: dokładnie 1 (`frame 15645`, "
+                 f"CLS↔L-Pro; akt={sierota})", sierota == 1)
+            crit("§5.11 każdy master kalibracyjny MA przepis (mastery bez przepisu == 0)",
+                 masters_off == 0)
+            crit(f"§5.11 poza osią tylko {EXP_MASTERS_EXCLUDED_FULL} jawnie wykluczone "
+                 f"(kind='unknown', akt={unknown})", unknown == EXP_MASTERS_EXCLUDED_FULL)
 
     return results
 
@@ -394,7 +497,8 @@ def main(argv=None):
     if args.xisf_root:
         doskan_xisf(con, args.xisf_root, now, out)
 
-    results = check_criteria(con, summary, out)
+    cal, cal_idem = calibrate(con, now, out)
+    results = check_criteria(con, summary, out, cal=cal, cal_idempotent=cal_idem)
     con.close()
 
     subset_ok = True

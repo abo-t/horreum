@@ -1,6 +1,6 @@
 """CLI Horreum — wejście plastra B: `init` (utwórz/zmigruj bazę) + `scan` (wciągnij drzewo) +
-`group` (teleskopy/config) + `resolve` (obiekt/filtr) + `delta` (read-only review) +
-`import-fitsmirror` (zasilenie świeżej bazy z dawcy — PF-3, brief §4)."""
+`group` (teleskopy/config) + `resolve` (obiekt/filtr) + `calibrate` (oś przepisu) +
+`delta` (read-only review) + `import-fitsmirror` (zasilenie świeżej bazy z dawcy — PF-3, brief §4)."""
 import argparse
 import json
 import sys
@@ -40,6 +40,11 @@ def main(argv=None):
 
     p_resolve = sub.add_parser("resolve", help="resolver obiektu + filtra (krok zbiorczy po skanie)")
     p_resolve.add_argument("db", help="ścieżka pliku bazy")
+
+    p_cal = sub.add_parser("calibrate",
+                           help="oś przepisu klatek kalibracyjnych (krok zbiorczy PO `resolve` — "
+                                "przepis flata zna filtr dopiero po resolverze)")
+    p_cal.add_argument("db", help="ścieżka pliku bazy")
 
     p_delta = sub.add_parser("delta", help="delta do review (read-only): %% obiektu + nierozstrzygnięte")
     p_delta.add_argument("db", help="ścieżka pliku bazy")
@@ -134,6 +139,14 @@ def main(argv=None):
         summary = run_resolver(con, now=now)
         con.close()
         print(f"Horreum resolve {args.db}: {summary}")   # ASCII (cp1250)
+        return 0
+    if args.cmd == "calibrate":
+        from .calibration import run_calibration         # lazy: nie ładuj resolve dla init
+        now = datetime.now(timezone.utc).isoformat()
+        con = db.open_db(args.db)
+        summary = run_calibration(con, now=now)
+        con.close()
+        print(f"Horreum calibrate {args.db}: {summary}")  # ASCII (cp1250)
         return 0
     if args.cmd == "delta":
         from .resolver import delta_report               # read-only

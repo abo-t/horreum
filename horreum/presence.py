@@ -45,6 +45,7 @@ import uuid
 from dataclasses import dataclass, field
 
 from . import repo
+from .gui import queries          # Qt-WOLNE (jak w projection.py) — puste gui/__init__.py
 from .scan import HEADER_SUFFIXES, canonize_root, iter_headers, path_gone
 from .volumes import volume_serial
 
@@ -75,6 +76,7 @@ class PresenceSummary:
     resurfaced_paths: list = field(default_factory=list)
     undecided: int = 0             # stat bez rozstrzygnięcia — raport, ZERO zapisu
     drifted: int = 0               # ścieżka zmieniona między planem a zapisem (rename) — pominięte
+    frames_without_copy: int = 0   # KLATKI bez ani jednej obecnej kopii PO zapisie (≠ liczba kopii!)
     vanished: int = 0              # realnie oznaczone (0 przy DRY)
     gone_paths: list = field(default_factory=list)       # potwierdzone znikłe (raport, także DRY)
     cancelled: bool = False        # przerwane kooperatywnie na granicy kandydata — ZERO zapisu
@@ -161,8 +163,16 @@ def check(con, root, *, volume, apply=False, force=None, run_id=None, now,
         # daje przejście po CUDZYM drzewie przy zakresie z naszego woluminu — każdy wiersz stałby się
         # kandydatem, a `stat` uczciwie potwierdziłby „nie ma" (bo tam ich nie ma). Precedens guardu:
         # `import_fitsmirror.py:254-258`.
-        summary.aborted = (f"serial woluminu {serial!r} pod {summary.root} != podany {volume!r} "
-                           f"— zamontowany jest inny wolumin niż zakres w bazie")
+        if volume == "?":
+            summary.aborted = (
+                f"wolumin nieustalony ('?') — pass zdejmuje obecność, więc musi wiedzieć, CZYJE "
+                f"drzewo ogląda; pod {summary.root} jest {serial!r}")
+        elif serial is None:
+            summary.aborted = (f"nie da się odczytać serialu woluminu pod {summary.root} "
+                               f"— zamontuj wolumin i powtórz")
+        else:
+            summary.aborted = (f"serial woluminu {serial!r} pod {summary.root} != podany {volume!r} "
+                               f"— zamontowany jest inny wolumin niż zakres w bazie")
         return summary
 
     walked = iter_headers(summary.root, excluded_out=summary.excluded_dirs,
@@ -235,4 +245,8 @@ def check(con, root, *, volume, apply=False, force=None, run_id=None, now,
             summary.vanished += 1
         else:
             summary.drifted += 1               # rename między planem a zapisem albo już nieobecna
+    # Kopie ≠ klatki: zniknięcie JEDNEJ z dwóch kopii nie odbiera klatce obecności. Powierzchnia
+    # musi umieć powiedzieć obie liczby, inaczej obiecuje listę („pokaż zniknięte"), która bywa
+    # PUSTA mimo oznaczonych kopii (wizytator P5 #3). Predykat z JEDNEGO właściciela.
+    summary.frames_without_copy = len(queries.vanished_frame_ids(con))
     return summary

@@ -163,16 +163,19 @@ def test_worker_all_lancuch_scan_group_resolve_delta_obecnosc(qapp, tmp_path):
     assert len(fin) == 1
 
 
-def test_worker_all_bez_serialu_pomija_obecnosc(qapp, tmp_path):
-    """Wolumin '?' (serial nieustalony) → pass obecności NIE leci: bez trwałej kotwicy zakresu nie ma
-    czego potwierdzać, a abort w złotej ścieżce straszyłby usera bez powodu."""
+def test_worker_all_bez_serialu_melduje_pominiecie_obecnosci(qapp, tmp_path):
+    """Wolumin '?' (serial nieustalony) → pass NIE leci (bez trwałej kotwicy zakresu nie ma czego
+    potwierdzać), ale etap MELDUJE pominięcie. Cisza czytałaby się jak „sprawdzone, nic nie znikło",
+    a to jest „nie sprawdzone" — dokładnie ta różnica, dla której pass w ogóle powstał."""
     db_path = _fresh_db(tmp_path)
     w = PipelineWorker(db_path, now_fn=lambda: NOW)
     w.configure("all", root=_tree(tmp_path, 2), volume="?", drive_letter=None, tier=None)
-    order = []
-    w.stage_done.connect(lambda n, r: order.append(n))
+    order, wyniki = [], {}
+    w.stage_done.connect(lambda n, r: (order.append(n), wyniki.__setitem__(n, r)))
     w.run()
-    assert order == ["scan", "group", "resolve", "delta"]
+    assert order == ["scan", "group", "resolve", "delta", "presence"]
+    s = wyniki["presence"]
+    assert "pominięty" in s.aborted and s.walked == 0 and s.vanished == 0
 
 
 def test_worker_all_anulowanie_przerywa_lancuch(qapp, tmp_path):
@@ -345,6 +348,10 @@ def test_serial_guard_przepuszcza_czysty_swiat(qapp, tmp_path, monkeypatch):
 # --- P5b: pass obecności w Dostawie (DRY → jawny zapis → droga do perspektywy) ---
 
 def _czekaj_na_etap(view, timeout_ms=20000):
+    if not hasattr(view, "status_message_ostatni"):
+        view.status_message_ostatni = ""
+        view.status_message.connect(
+            lambda m: setattr(view, "status_message_ostatni", m))
     """Odczekaj etap w wątku: pętla kończy się na running_changed(False) — czyli PO sprzątnięciu."""
     loop = QEventLoop()
     view.running_changed.connect(lambda r: loop.quit() if r is False else None)
@@ -403,3 +410,35 @@ def test_obecnosc_bez_zniknieć_nie_pokazuje_sekcji(qapp, tmp_path):
     assert view.box_vanished.isHidden()
     assert not view.btn_mark_vanished.isEnabled()          # nie ma zamrożonych parametrów
     assert "nic nie znikło" in view.lbl_summary.text()
+
+
+def test_anulowanie_obecnosci_melduje_zamiast_wywalac_slot(qapp, tmp_path, monkeypatch):
+    """P1 (wizytator P5 #1): anulować da się KAŻDY przerywalny etap, nie tylko skan. `_on_cancelled`
+    formatował twardo `[skan]` i czytał `summary.files`, którego `PresenceSummary` nie ma → slot padał
+    AttributeError, panel zostawał PUSTY, pasek na 0%, a status „Anulowanie…" na wieki. Baza była
+    bezpieczna — user nie miał jak się o tym dowiedzieć."""
+    from horreum import presence as presence_mod
+    db_path = _fresh_db(tmp_path)
+    root = _tree(tmp_path, 3)
+    view = PipelineView(db_path, now_fn=lambda: NOW)
+    view._root = root
+    view._on_scan()
+    _czekaj_na_etap(view)
+    for n in ("l0.fits", "l1.fits"):        # JEDEN plik zostaje — inaczej hamulec „drzewo puste"
+        os.remove(str(Path(root) / n))       # zatrzymałby pass przed pętlą potwierdzeń
+
+    prawdziwe = presence_mod.path_gone
+
+    def wolno(p):                                      # imitacja zerwanego SMB: anuluj w trakcie
+        view._worker.request_cancel()
+        return prawdziwe(p)
+
+    monkeypatch.setattr(presence_mod, "path_gone", wolno)
+    view._on_presence()
+    _czekaj_na_etap(view)
+    assert "[obecność] przerwane przez użytkownika" in view.lbl_summary.text()
+    assert "przerwany" in view.status_message_ostatni
+    assert view.box_vanished.isHidden()                # nic nie potwierdzono → nie ma czego oznaczać
+    con = db.open_db(db_path)
+    assert con.execute("SELECT COUNT(*) FROM location WHERE present = 0").fetchone()[0] == 0
+    con.close()

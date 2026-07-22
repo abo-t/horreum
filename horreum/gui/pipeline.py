@@ -154,6 +154,10 @@ class PipelineWorker(QObject):
         # pass nie ma kotwicy zakresu — pomijamy go zamiast straszyć abortem w złotej ścieżce.
         if self._params.get("volume", "?") != "?":
             self._presence(con, apply=False)
+        else:
+            # Cisza czytałaby się jak „sprawdzone, nic nie znikło" — a to jest „nie sprawdzone".
+            self.stage_done.emit("presence", presence.PresenceSummary(
+                aborted="pominięty — wolumin nieustalony, brak kotwicy zakresu"))
 
     def _on_progress(self, done, total, path, summary):
         # wołane SYNCHRONICZNIE w wątku workera przez scan_tree; przerzedź i wyślij MIGAWKĘ (dict),
@@ -290,6 +294,7 @@ class PipelineView(QWidget):
         self.btn_delta = QPushButton("Pokaż deltę")
         self.btn_delta.clicked.connect(self._on_delta)
         self.btn_presence = QPushButton("Sprawdź obecność")
+        self.btn_presence.setToolTip("Wskaż katalog powyżej — pass porównuje drzewo z bazą")
         self.btn_presence.clicked.connect(self._on_presence)
         self.btn_cancel = QPushButton("Anuluj")
         self.btn_cancel.clicked.connect(self._on_cancel)
@@ -306,13 +311,16 @@ class PipelineView(QWidget):
         # klik → Zbiory). „Pokaż" PRZED zapisem nie ma sensu: perspektywa czyta STAN present=0.
         self.box_vanished = QWidget()
         bv = QHBoxLayout(self.box_vanished)
-        bv.setContentsMargins(0, 0, 0, 0)
+        bv.setContentsMargins(0, 10, 0, 0)   # oddech: sekcja to WYNIK, nie siódmy przycisk etapu
         self.lbl_vanished = QLabel("")
         # BEZ zawijania: zdanie ma ~46 znaków (~300 px), a etykieta z `wordWrap` dostaje od Qt małą
         # preferowaną szerokość i łamie się na dwie linie mimo wolnego miejsca — wtedy przycisk stoi
         # przy PIERWSZEJ linii, a reszta zdania wisi pod nim. Cały wiersz (zdanie + 2 przyciski) mieści
         # się w ~600 px, więc nie podnosi podłogi szerokości okna (dziś 1146 px, wiz P1 #8).
         self.lbl_vanished.setWordWrap(False)
+        _fv = self.lbl_vanished.font()
+        _fv.setBold(True)                # to jedyny komunikat Dostawy o UTRACIE — nie może ważyć
+        self.lbl_vanished.setFont(_fv)   # tyle, co wiersz „wolumen: …" (wizytator P5 #6)
         # Etykieta i JEJ przyciski trzymają się razem, stretch idzie NA KONIEC. Z `addWidget(lbl, 1)`
         # przycisk odlatywał na prawą krawędź okna — przy 1200 px to ~1150 px pustki między zdaniem
         # a akcją, którą to zdanie zapowiada (ten sam defekt, co w liście zadań: wizytator P1 #2).
@@ -353,6 +361,14 @@ class PipelineView(QWidget):
         v.addWidget(self.lbl_summary)
         v.addStretch(1)
 
+    def _forget_vanished(self):
+        """Schowaj sekcję i zapomnij ZAMROŻONE parametry — po tym „Oznacz zniknięte" nie ma czego
+        zapisać (guard w `_on_mark_vanished`), więc nie da się utrwalić wyniku, którego user już
+        nie widzi na ekranie."""
+        self._presence_params = None
+        self.box_vanished.setVisible(False)
+        self._sync_actions()
+
     def _hline(self):
         line = QFrame()
         line.setFrameShape(QFrame.HLine)
@@ -383,6 +399,7 @@ class PipelineView(QWidget):
         (R#7+R2-3 — serial z pamięci/montażu bywa stale po przepięciu dysku w trakcie sesji)."""
         self._root = path
         self.lbl_root.setText(path)
+        self._forget_vanished()      # wynik passa dotyczy STAREGO drzewa — po zmianie źródła kłamie
         serial = volume_serial(path)
         if serial is None:
             # Neutralnie — skutek ('?' = pełny skan ALBO stop przy mieszanej bazie) nazywa wyłącznie
@@ -458,8 +475,11 @@ class PipelineView(QWidget):
         self._start_scan_sequence("all")
 
     def _begin_run(self):
-        """Wyzeruj panel/pasek przed nowym przebiegiem (summary akumuluje per etap, więc czyścimy)."""
+        """Wyzeruj panel/pasek przed nowym przebiegiem (summary akumuluje per etap, więc czyścimy).
+        Sekcja zniknięć gaśnie RAZEM z panelem: zdanie „Zniknęły 2 kopie" bez raportu, do którego
+        się odnosi, wisiałoby nad wynikiem zupełnie innego etapu (wizytator P5 #9)."""
         self._summary_lines = []
+        self._forget_vanished()
         self.lbl_summary.setText("")
         self.lbl_error.setVisible(False)
         self.lbl_error.setText("")
@@ -507,8 +527,9 @@ class PipelineView(QWidget):
         żeby przycisk nie znaczył czegoś innego niż raport nad nim (wzorzec „Wydaj na stół")."""
         if self._thread is not None or self._presence_params is None:
             return
+        params = self._presence_params            # zdejmij PRZED _begin_run (ono je zapomina)
         self._begin_run()
-        self._start_stage("presence-apply", **self._presence_params)
+        self._start_stage("presence-apply", **params)
 
     def _on_cancel(self):
         if self._worker is not None:
@@ -579,10 +600,15 @@ class PipelineView(QWidget):
         self.bar.setRange(0, 1)
         self.bar.setValue(0)
         self.lbl_counts.setText("")
-        self._append_summary(
-            f"[skan] przerwano po {summary.files} plikach — baza spójna, ponowny skan dokończy.")
-        self._append_summary(self._format_result("scan", summary))
-        self.status_message.emit(f"Skan przerwany po {summary.files} plikach.")
+        # Anulować da się KAŻDY przerywalny etap, nie tylko skan (P5: pass obecności też) — twarde
+        # `[skan]` + `summary.files` wywalało slot AttributeError na `PresenceSummary`, a wtedy panel
+        # zostawał pusty, pasek na 0% i status „Anulowanie…" na wieki (wizytator P5 #1).
+        etykieta = _STAGE_LABEL.get(name, name)
+        if name == "scan":
+            self._append_summary(
+                f"[skan] przerwano po {summary.files} plikach — baza spójna, ponowny skan dokończy.")
+        self._append_summary(self._format_result(name, summary))
+        self.status_message.emit(f"Etap „{etykieta}” przerwany.")
         self.stage_finished.emit(name)                  # częściowy zapis też trzeba odświeżyć
 
     @Slot(str, str)
@@ -618,7 +644,7 @@ class PipelineView(QWidget):
         ciszą: cisza w raporcie dostawy czyta się jak „nie sprawdzono". Kubełki, które NIE są
         zniknięciami, pokazujemy tylko gdy niezerowe."""
         if s.aborted is not None:
-            return f"[obecność] PRZERWANE — {s.aborted}"
+            return f"[obecność] NIE WYKONANO — {s.aborted}"
         if s.cancelled:
             return "[obecność] przerwane przez użytkownika — nic nie zapisano"
         czesci = [f"zakres {s.scoped} · na dysku {s.walked}"]
@@ -644,12 +670,16 @@ class PipelineView(QWidget):
         applied = s.run_id is not None
         if applied:
             self._presence_params = None
-            self.lbl_vanished.setText(_odmiana(
-                s.vanished, "Oznaczono 1 kopię jako zniknioną.",
-                f"Oznaczono {s.vanished} kopie jako zniknięte.",
-                f"Oznaczono {s.vanished} kopii jako zniknięte."))
+            kopie = _odmiana(s.vanished, "1 kopię", f"{s.vanished} kopie", f"{s.vanished} kopii")
+            # Druga liczba jest KONIECZNA: zniknięcie jednej z dwóch kopii nie odbiera klatce
+            # obecności, więc „oznaczono 3 kopie" potrafi dać PUSTĄ listę zniknięć (wiz P5 #3).
+            klatki = _odmiana(s.frames_without_copy, "1 klatka straciła ostatnią kopię",
+                              f"{s.frames_without_copy} klatki straciły ostatnią kopię",
+                              f"{s.frames_without_copy} klatek straciło ostatnią kopię")
+            ogon = klatki if s.frames_without_copy else "żadna klatka nie straciła ostatniej kopii"
+            self.lbl_vanished.setText(f"Oznaczono {kopie} jako zniknięte — {ogon}.")
             self.btn_mark_vanished.setVisible(False)
-            self.btn_show_vanished.setVisible(bool(s.vanished))
+            self.btn_show_vanished.setVisible(bool(s.frames_without_copy))   # lista MUSI mieć treść
             self.box_vanished.setVisible(bool(s.vanished))
         elif s.confirmed_gone and s.aborted is None and not s.cancelled:
             self._presence_params = dict(root=self._root, volume=s.volume)   # ZAMROŻONE
@@ -711,6 +741,10 @@ class PipelineView(QWidget):
         self.btn_cancel.setEnabled(running and cancellable)
 
     def _set_running(self, running, *, cancellable=False):
+        # Pasek żyje TYLKO w trakcie przebiegu: „100%" po zakończeniu jest największym elementem
+        # ekranu i przejmuje uwagę od zdania, które faktycznie coś mówi (wizytator P5 #6).
+        if not running:
+            self.bar.setVisible(False)
         self._cancellable = cancellable if running else False
         self._refresh_buttons(running, self._cancellable)
         self.running_changed.emit(running)

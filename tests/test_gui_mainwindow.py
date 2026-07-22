@@ -318,3 +318,28 @@ def test_pozycja_informacyjna_nie_nawiguje(qapp, tmp_path):
         assert win.stack.currentIndex() == NAV_DOSTAWA
     finally:
         win.close()
+
+
+def test_pusta_perspektywa_nie_klamie_ze_baza_pusta(qapp, tmp_path):
+    """P1 (wizytator P5 #2): perspektywa z trimem, która daje ZERO klatek, mówiła „Baza pusta —
+    przyjmij dostawę" NA PEŁNEJ BAZIE, wysyłając usera po nieistniejącą dostawę zamiast po zmianę
+    perspektywy. Przyczyna: `filter_engine.run(None, …)` oddaje uniwersum WPROST (ten sam obiekt, co
+    memoizacja refreshu), więc `frame_ids &= trim` przycinało cache W MIEJSCU — a `grid.py` pyta
+    potem `universe_fn()`, żeby odróżnić „filtr nic nie wpuścił" od „w bazie nic nie ma".
+
+    Baza §8 bez osi obiektu nie ma zniknięć, więc „Zniknięte" są tu pustą perspektywą. Ten sam błąd
+    dotyczył Duplikatów i Do przeglądu — P5 tylko doprowadził do niego przyciskiem."""
+    from horreum.gui.grid import PRESET_VANISHED, _EMPTY_DB, _EMPTY_FILTER
+    win = MainWindow(_seeded_db(tmp_path))               # bez object_axis → zero present=0
+    try:
+        win._show_view(NAV_ZBIORY)
+        wszystkie = len(win.grid_view._frame_ids)
+        assert wszystkie > 1
+        win.grid_view.apply_perspective(PRESET_VANISHED)
+        assert win.grid_view._frame_ids == []            # pusto — i to jest PRAWDA o tej bazie
+        assert win.grid_view.empty.text() == _EMPTY_FILTER
+        assert win.grid_view.empty.text() != _EMPTY_DB   # baza ma klatki; grid nie ma prawa twierdzić inaczej
+        win.grid_view.apply_perspective("Przegląd")
+        assert len(win.grid_view._frame_ids) == wszystkie
+    finally:
+        win.close()

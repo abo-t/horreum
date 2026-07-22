@@ -562,3 +562,17 @@ def test_portfolio_summarize_i_formatowanie():
     assert portfolio.object_tooltip(summ[1]) == "Ha: 1.0 h\n(bez filtra): 0.0 h\n+2 klatek bez exptime"
     assert portfolio.object_suffix(summ[2]) == " · 2.0 h"    # bez ogona n_null gdy n_null=0
     assert portfolio.object_tooltip(summ[2]) == "OIII: 2.0 h"
+
+
+def test_run_bez_filtra_oddaje_uniwersum_wprost():
+    """TRIPWIR PRZESŁANKI (wizytator P5 #2): `filter_engine.run(None, …)` zwraca obiekt uniwersum
+    WPROST — nie kopię. To jest powód, dla którego każdy trim perspektywy w `grid.refresh` MUSI
+    budować nowy set (`a & b`), a nie przycinać w miejscu (`a &= b`): w miejscu truł memoizację
+    refreshu i grid twierdził „Baza pusta" na pełnej bazie.
+
+    Gdyby `run` zaczęło kiedyś zwracać kopię, ten test padnie — i wtedy komentarz w `grid.refresh`
+    przestanie być prawdą, więc trzeba go poprawić razem z tym testem. Objaw pilnuje osobno
+    `test_gui_mainwindow.py::test_pusta_perspektywa_nie_klamie_ze_baza_pusta`."""
+    uniwersum = {1, 2, 3}
+    wynik = filter_engine.run(None, leaf_fn=lambda *a: set(), universe_fn=lambda: uniwersum)
+    assert wynik is uniwersum

@@ -1373,12 +1373,13 @@ class FramesView(QWidget):
         dup_ids = queries.dup_frame_ids(self.con) if self._only_dups else None
         review_ids = queries.review_frame_ids(self.con) if self._only_review else None
         gone_ids = queries.vanished_frame_ids(self.con) if self._only_vanished else None
-        if dup_ids is not None:
-            frame_ids &= dup_ids
-        if review_ids is not None:
-            frame_ids &= review_ids
-        if gone_ids is not None:
-            frame_ids &= gone_ids
+        # NOWY set, NIGDY `&=`: przy pustym filtrze `filter_engine.run` zwraca uniwersum WPROST
+        # (`filter_engine.py:171`), a to jest ZAPAMIĘTANY obiekt memoizacji (`_memo_leaf_fns`).
+        # `&=` przycinało go W MIEJSCU, więc kolejne `universe_fn()` widziało już przycięty zbiór —
+        # perspektywa z trimem potrafiła pokazać „Baza pusta" na pełnej bazie (wizytator P5 #2).
+        for trim in (dup_ids, review_ids, gone_ids):
+            if trim is not None:
+                frame_ids = frame_ids & trim
         base = [_derive(r) for r in queries.base_rows(self.con, list(frame_ids))]
         base_ids = [b["frame_id"] for b in base]
         self._frame_ids = base_ids     # cel makra = to, co WIDAĆ (po filtrach dups/review), doktryna §5

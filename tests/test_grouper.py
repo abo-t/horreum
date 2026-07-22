@@ -85,6 +85,55 @@ def test_grouper_config_link_inwariant_i_bez_telescop_review(tmp_path):
     con.close()
 
 
+def _scanned_z_darkiem(tmp_path):
+    """Jak `_scanned_tree`, plus masterdark XISF z TELESCOP='ED' (teleskop, który dark widzi tylko
+    dlatego, że akwizycja wpisała pole sesji) — jedyne zeznanie o 'ED' w całym drzewie."""
+    con = _scanned_tree(tmp_path)
+    _xisf(tmp_path / "t" / "mdark.xisf",
+          [("INSTRUME", "'ZWO ASI2600MM Pro'"), ("XPIXSZ", "3.76"), ("TELESCOP", "'ED'"),
+           ("EXPTIME", "300.0"), ("IMAGETYP", "'Master Dark'")])
+    scan_tree(con, tmp_path / "t", now=NOW)
+    return con
+
+
+def test_grouper_dark_nie_powoluje_teleskopu_ani_configu(tmp_path):
+    """KIND-SCOPING (wariant B): masterdark z TELESCOP='ED' NIE tworzy teleskopu 'ED' (dark nie ma
+    optyki — pole to ślad sesji), nie dostaje configu I NIE trafia do `config.review`. Jego
+    `config_id IS NULL` to stan docelowy, nie delta. Flat/light zostają na osi bez zmian."""
+    con = _scanned_z_darkiem(tmp_path)
+    s = run_grouper(con, now=NOW)
+    assert {r["telescop_canon"] for r in con.execute("SELECT telescop_canon FROM telescope")} \
+        == {"A140R", "ED120R"}                                  # 'ED' NIE powstał
+    assert s.calibration_off_axis == 1 and s.configs_unassigned == 0
+    assert (s.telescop_missing, s.config_review) == (1, 1)      # nadal tylko masterflat bez TELESCOP
+    assert con.execute(
+        "SELECT config_id FROM frame WHERE kind='master_dark'").fetchone()["config_id"] is None
+    assert con.execute("SELECT count(*) FROM event WHERE verb='config.review'").fetchone()[0] == 1
+    con.close()
+
+
+def test_grouper_odpina_stechle_przypisanie_kalibracji(tmp_path):
+    """Dane SPRZED kind-scopingu: dark przypięty do cudzego configu. Przebieg AKTYWNIE go odpina
+    (`config.unassigned`, ślad z poprzednim id), drugi przebieg jest już no-opem — samoleczenie
+    idempotentne, bez migracji."""
+    con = _scanned_z_darkiem(tmp_path)
+    run_grouper(con, now=NOW)
+    cfg_id = con.execute("SELECT id FROM config LIMIT 1").fetchone()["id"]
+    con.execute("UPDATE frame SET config_id = ? WHERE kind='master_dark'", (cfg_id,))
+    con.commit()                                                # symulacja stanu sprzed B
+
+    s = run_grouper(con, now=NOW)
+    assert s.configs_unassigned == 1
+    assert con.execute(
+        "SELECT config_id FROM frame WHERE kind='master_dark'").fetchone()["config_id"] is None
+    ev = con.execute("SELECT payload, target FROM event WHERE verb='config.unassigned'").fetchall()
+    assert len(ev) == 1 and str(cfg_id) in ev[0]["payload"]
+    assert run_grouper(con, now=NOW).configs_unassigned == 0    # idempotencja
+    assert con.execute(
+        "SELECT count(*) FROM event WHERE verb='config.unassigned'").fetchone()[0] == 1
+    con.close()
+
+
 def test_grouper_idempotentny(tmp_path):
     """Drugi przebieg grouper nie tworzy duplikatów teleskopów/configów (propose_* idempotentne)."""
     con = _scanned_tree(tmp_path)

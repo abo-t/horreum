@@ -709,6 +709,8 @@ class PipelineView(QWidget):
         return (
             f"[grupuj] nagłówki {s.headers} · teleskopy {s.telescopes_proposed} · "
             f"bez TELESCOP {s.telescop_missing} · "
+            f"kalibracja poza osią {s.calibration_off_axis}"
+            f"{f' (odpięte {s.configs_unassigned})' if s.configs_unassigned else ''} · "
             f"konfiguracje {s.configs_proposed}/{s.configs_assigned} · "
             f"konfig. do przeglądu {s.config_review}")
 

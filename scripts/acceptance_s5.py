@@ -27,6 +27,7 @@ Użycie:
                                   [--subset PATH\\maly_real_dir] [--work PATH\\horreum_s5.db] [--keep]
 """
 import argparse
+import json
 import os
 import sqlite3
 import sys
@@ -36,7 +37,7 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from horreum import db                                              # noqa: E402
-from horreum.grouper import run_grouper                            # noqa: E402
+from horreum.grouper import NO_TELESCOPE_KINDS, run_grouper       # noqa: E402
 from horreum.import_fitsmirror import ImportAbort, open_donor, run_import  # noqa: E402
 from horreum.resolver import delta_report, run_resolver           # noqa: E402
 from horreum.scan import canonize_root, scan_tree                 # noqa: E402
@@ -54,7 +55,10 @@ EXP_OBJECT_PCT_MIN = 85.0      # % obiektu na light/master_light (pf4=87.5; pró
 # Stan PF-4 (pełny, po doskanie XISF) — XISF wnoszą dług review i degenerat:
 EXP_UNCOMPUTABLE_FULL = 1      # masterflat OIII: bajt \x07 w XML → sha1_data nieobliczalne (degenerat)
 EXP_FRAME_REVIEW_FULL = 1      # ten sam masterflat (kopia nieczytelna → review)
-EXP_CONFIG_REVIEW_FULL = 7     # masterdarki ED bez TELESCOP (dług kind-scoping, decyzja Zdzisława)
+# Po kind-scopingu config (wariant B, 2026-07-22) dark/bias są POZA osią teleskopu: ich `config_id
+# IS NULL` to stan docelowy, nie delta, więc `config.review` ich nie dotyczy. Zostaje 1 realna sprawa
+# — masterflat Sony A7R3 o rodzaju `unknown` (ten sam degenerat, co §5.2). Było 7 (6 masterdarków + on).
+EXP_CONFIG_REVIEW_FULL = 1     # `unknown` masterflat A7R3 — rodzaj wymaga decyzji, nie optyka
 EXP_XISF_KINDS = {"flat": 11, "light": 202, "master_dark": 38, "master_flat": 73, "unknown": 2}
 # Oś OBSERWATORIUM (PLAN_os_obserwatorium §8): GPS to FITS-only (0/326 XISF), więc 11 stanowisk i 15 409
 # klatek z GPS w OBU etapach; bez GPS 476 dopiero w FULL (150 fits + 326 xisf).
@@ -181,17 +185,32 @@ def check_criteria(con, summary, out):
     suspect = con.execute("SELECT count(*) FROM event WHERE verb='telescope.review'").fetchone()[0]
     crit(f"§5.4 telescope.review MARTWY po PF-2 (akt={suspect})", suspect == 0)
 
-    # §5.6 config bez cichego NULL: frame z headerem bez config_id ⟺ ma config.review
+    # §5.6 config bez cichego NULL: frame z headerem bez config_id ⟺ ma config.review.
+    # KIND-AWARE (wariant B): dark/bias są poza osią teleskopu, więc ich NULL nie jest „cichy" —
+    # jest docelowy. Predykat czerpie zbiór z `grouper.NO_TELESCOPE_KINDS` (jeden właściciel, SPOT),
+    # ten sam, którego używa `resolver.review_state`; osobno raportujemy, ile klatek tak wyłączono.
     cfg = con.execute("SELECT count(*) FROM config").fetchone()[0]
     cfg_review = con.execute("SELECT count(*) FROM event WHERE verb='config.review'").fetchone()[0]
+    off_axis = json.dumps(sorted(NO_TELESCOPE_KINDS))
     no_cfg_hdr = con.execute(
         "SELECT count(*) FROM frame f WHERE f.config_id IS NULL "
-        "AND EXISTS(SELECT 1 FROM header h WHERE h.frame_id=f.id)").fetchone()[0]
-    out(f"\n§5.6 config={cfg} config.review={cfg_review} frame-bez-config-z-headerem={no_cfg_hdr}")
+        "AND f.kind NOT IN (SELECT value FROM json_each(?)) "
+        "AND EXISTS(SELECT 1 FROM header h WHERE h.frame_id=f.id)", (off_axis,)).fetchone()[0]
+    calib_null = con.execute(
+        "SELECT count(*) FROM frame f WHERE f.config_id IS NULL "
+        "AND f.kind IN (SELECT value FROM json_each(?))", (off_axis,)).fetchone()[0]
+    unassigned = con.execute(
+        "SELECT count(*) FROM event WHERE verb='config.unassigned'").fetchone()[0]
+    out(f"\n§5.6 config={cfg} config.review={cfg_review} frame-bez-config-z-headerem={no_cfg_hdr} "
+        f"(kalibracja poza osią={calib_null}, odpięte={unassigned})")
     crit("§5.6 zero cichego NULL (frame z headerem bez config == config.review)",
          no_cfg_hdr == cfg_review)
+    crit("§5.6 kalibracja bez osi NIE ma config.assigned (kind-scoping)",
+         con.execute(
+             "SELECT count(*) FROM frame WHERE config_id IS NOT NULL "
+             "AND kind IN (SELECT value FROM json_each(?))", (off_axis,)).fetchone()[0] == 0)
     if full:
-        crit(f"§5.6 config.review ~{EXP_CONFIG_REVIEW_FULL} (masterdarki ED bez TELESCOP)",
+        crit(f"§5.6 config.review ~{EXP_CONFIG_REVIEW_FULL} (`unknown` masterflat A7R3)",
              cfg_review == EXP_CONFIG_REVIEW_FULL)
     else:
         crit("§5.6 config.review == 0 w imporcie FITS (nagłówki naprawione)", cfg_review == 0)

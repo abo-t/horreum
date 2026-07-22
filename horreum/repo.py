@@ -542,6 +542,23 @@ def assign_config(con, *, frame_id, config_id, now, actor="grouper"):
     return True
 
 
+def unassign_config(con, *, frame_id, now, actor="grouper"):
+    """Zdejmij `frame.config_id` z klatki, która NIE należy do osi teleskopu (dark/bias —
+    `grouper.NO_TELESCOPE_KINDS`). Potrzebne dla danych sprzed kind-scopingu: darki były przypięte
+    do configu zbudowanego z TELESCOP w ich nagłówku, więc bez odpięcia oś liczyłaby je pod cudzą
+    optyką na zawsze. Idempotentny: `config_id` już NULL → False bez eventu; inaczej UPDATE +
+    `event(config.unassigned)` z poprzednim id w payloadzie (append-only: ślad zostaje)."""
+    row = con.execute("SELECT config_id FROM frame WHERE id = ?", (frame_id,)).fetchone()
+    if row is None or row[0] is None:
+        return False
+
+    with con:
+        con.execute("UPDATE frame SET config_id = NULL WHERE id = ?", (frame_id,))
+        emit_event(con, actor=actor, verb="config.unassigned", target=f"frame:{frame_id}", now=now,
+                   payload={"config_id": row[0]}, reason="rodzaj bez osi teleskopu (kalibracja)")
+    return True
+
+
 def flag_config_review(con, *, frame_id, reason, now, actor="grouper"):
     """`frame.config_id` nierozstrzygalny (brak teleskopu/kamery/focratio — np. master bez FOCRATIO,
     W4) → `event(config.review)`. config_id zostaje NULL; ZERO cichego NULL (każdy ma powód)."""

@@ -12,9 +12,11 @@ delta (inaczej ~2333 FlatWizard-flatów = fałszywe „nierozwiązane"). Light n
 (audyt bez szumu, jak backfill focratio). FILTR jest kind-AGNOSTYCZNY (flat też ma filtr) → backfill
 zbiorczy `frame.filter_canon`; brak/pusty → NULL (W2, bez kanału review).
 """
+import json
 from dataclasses import dataclass, field
 
 from . import repo
+from .grouper import NO_TELESCOPE_KINDS
 from .resolve._coerce import _to_text
 from .resolve._text import norm_alnum
 from .resolve.filters import normalize_filter
@@ -190,7 +192,7 @@ class ReviewState:
     `unreadable` (#13) to fakt o KOPII (location.unreadable_since), zliczany PO KLATKACH (DISTINCT
     frame z ≥1 taką kopią — spójnie z resztą liczników, które są per-klatka). Kubełek zachodzi z
     innymi jak dotychczasowe (kopia nieczytelna może być frame'em-szkieletem = też `headerless`)."""
-    no_config: int = 0        # config_id NULL mimo zeznania (bez EXISTS(header) zlałby się headerless)
+    no_config: int = 0        # config_id NULL mimo zeznania, POZA kalibracją bez osi (kind-scoping)
     headerless: int = 0       # brak wiersza `header` — plik nieczytelny przy skanie (frame-szkielet)
     no_camera: int = 0        # camera_id NULL mimo zeznania (brak INSTRUME/XPIXSZ)
     kind_unknown: int = 0     # zeznanie JEST, rodzaju nie dało się zmapować
@@ -210,10 +212,17 @@ def review_state(con):
 
     `unreadable` (#13) idzie po `location.unreadable_since IS NOT NULL` (join po kopii, DISTINCT po
     klatce) i dokłada TRZECI dyzjunkt do `total` — kopia, która stała się nieczytelna, wchodzi do
-    kolejki jak „bez nagłówka", nawet gdy frame ma poprawne zeznanie (marker gaśnie po udanym odczycie)."""
+    kolejki jak „bez nagłówka", nawet gdy frame ma poprawne zeznanie (marker gaśnie po udanym odczycie).
+
+    `no_config` jest KIND-AWARE (`grouper.NO_TELESCOPE_KINDS`): dark/bias nie mają osi teleskopu, więc
+    ich `config_id IS NULL` to stan docelowy, nie delta — tak jak `object_id IS NULL` dla kalibracji.
+    Lista rodzajów idzie do SQL przez `json_each(?)` (literał stały + jeden parametr), żeby zbiór miał
+    JEDNEGO właściciela w `grouper` zamiast kopii wklejonej w predykat."""
+    off_axis = json.dumps(sorted(NO_TELESCOPE_KINDS))
     no_config = con.execute(
         "SELECT count(*) FROM frame f WHERE f.config_id IS NULL "
-        "AND EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id)").fetchone()[0]
+        "AND f.kind NOT IN (SELECT value FROM json_each(?)) "
+        "AND EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id)", (off_axis,)).fetchone()[0]
     headerless = con.execute(
         "SELECT count(*) FROM frame f "
         "WHERE NOT EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id)").fetchone()[0]
@@ -231,10 +240,12 @@ def review_state(con):
     total = con.execute(
         "SELECT count(*) FROM frame f WHERE "
         "NOT EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id) "
-        "OR ((f.config_id IS NULL OR f.camera_id IS NULL OR f.kind = 'unknown') "
+        "OR (((f.config_id IS NULL "
+        "      AND f.kind NOT IN (SELECT value FROM json_each(?))) "
+        "     OR f.camera_id IS NULL OR f.kind = 'unknown') "
         "    AND EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id)) "
         "OR EXISTS (SELECT 1 FROM location l WHERE l.frame_id = f.id "
-        "           AND l.unreadable_since IS NOT NULL)").fetchone()[0]
+        "           AND l.unreadable_since IS NOT NULL)", (off_axis,)).fetchone()[0]
     return ReviewState(no_config=no_config, headerless=headerless, no_camera=no_camera,
                        kind_unknown=kind_unknown, unreadable=unreadable, total=total)
 

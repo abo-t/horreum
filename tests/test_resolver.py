@@ -210,6 +210,27 @@ def test_review_unreadable_distinct_po_kopiach(tmp_path):
     con.close()
 
 
+def test_review_no_config_kind_aware_kalibracja_poza_kolejka(tmp_path):
+    """Kind-scoping config (wariant B, 2026-07-22): masterdark/bias z `config_id IS NULL` NIE jest
+    deltą — nie ma osi teleskopu, więc NULL to stan docelowy. Light z tym samym brakiem JEST deltą.
+    Predykat czerpie zbiór z `grouper.NO_TELESCOPE_KINDS` (jeden właściciel), więc kolejka GUI
+    i raport dostawy nie mogą się rozjechać z osią."""
+    from horreum import repo
+    from horreum.resolver import review_state
+    con = db.open_db(str(tmp_path / "h.db"))
+    cam, _ = repo.upsert_camera(con, model_canon="ASI2600MM", pixel_um=3.76, is_mono=1,
+                                is_mono_source="model", raw_instrume="ZWO ASI2600MM Pro", now=NOW)
+    for i, kind in enumerate(("master_dark", "bias", "light")):
+        fid, _ = repo.upsert_frame(con, sha1_data=f"d{i}", kind=kind, filetype="xisf",
+                                   camera_id=cam, now=NOW)
+        repo.record_header(con, frame_id=fid, raw_json="{}", now=NOW)
+    st = review_state(con)
+    assert st.no_config == 1                            # TYLKO light; dark i bias poza kolejką
+    assert (st.no_camera, st.headerless) == (0, 0)
+    assert st.total == 1                                # `total` używa tego samego wyłączenia
+    con.close()
+
+
 def _solar_tree(tmp_path):
     """3 light'y solar/kometa (Jupiter, C/2023 A3, Lemmon) + 1 light prywatny (Mur, delta) +
     1 flat OBJECT='Moon' (kind-aware: kalibracja NIE dostaje obiektu). Wszystkie ASI2600MM."""

@@ -6,6 +6,7 @@ dowód, że główny wątek nie woła `scan_tree` (R1) i że `running_changed` p
 `importorskip` na poziomie modułu — bez PySide6 plik się pomija (czyni §7.2 prawdziwym). FS = tmp_path
 (logika); firsthand na realnych FITS/XISF = Etap 4."""
 import os
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -143,18 +144,35 @@ def test_worker_group_resolve_delta_emituja_stage_done(qapp, tmp_path):
         assert done and done[0][0] == stage and isinstance(done[0][1], typ)
 
 
-def test_worker_all_lancuch_scan_group_resolve_delta(qapp, tmp_path):
-    """„Przetwórz wszystko": jeden worker emituje stage_done dla scan→group→resolve→delta w kolejności,
-    a `finished` pada raz na końcu (sygnał do quit wątku)."""
+def test_worker_all_lancuch_scan_group_resolve_delta_obecnosc(qapp, tmp_path):
+    """„Przetwórz wszystko": jeden worker emituje stage_done dla scan→group→resolve→delta→obecność
+    w kolejności, a `finished` pada raz na końcu (sygnał do quit wątku). Obecność zamyka sekwencję,
+    bo raport dostawy ma mówić także o tym, co z drzewa ZNIKNĘŁO — zawsze w DRY (zapis = osobny gest).
+
+    Tu wolumin jest zmyślony („VOL1"), więc pass poprawnie ABORCIUJE na guardzie serialu — sekwencja
+    leci dalej, a nie wywala się: przesłanka nie do potwierdzenia to nie błąd etapu."""
     db_path = _fresh_db(tmp_path)
     w = PipelineWorker(db_path, now_fn=lambda: NOW)
     w.configure("all", root=_tree(tmp_path, 2), volume="VOL1", drive_letter=None, tier=None)
-    order, fin = [], []
-    w.stage_done.connect(lambda n, r: order.append(n))
+    order, fin, wyniki = [], [], {}
+    w.stage_done.connect(lambda n, r: (order.append(n), wyniki.__setitem__(n, r)))
     w.finished.connect(lambda: fin.append(1))
     w.run()
-    assert order == ["scan", "group", "resolve", "delta"]
+    assert order == ["scan", "group", "resolve", "delta", "presence"]
+    assert wyniki["presence"].aborted is not None and wyniki["presence"].vanished == 0
     assert len(fin) == 1
+
+
+def test_worker_all_bez_serialu_pomija_obecnosc(qapp, tmp_path):
+    """Wolumin '?' (serial nieustalony) → pass obecności NIE leci: bez trwałej kotwicy zakresu nie ma
+    czego potwierdzać, a abort w złotej ścieżce straszyłby usera bez powodu."""
+    db_path = _fresh_db(tmp_path)
+    w = PipelineWorker(db_path, now_fn=lambda: NOW)
+    w.configure("all", root=_tree(tmp_path, 2), volume="?", drive_letter=None, tier=None)
+    order = []
+    w.stage_done.connect(lambda n, r: order.append(n))
+    w.run()
+    assert order == ["scan", "group", "resolve", "delta"]
 
 
 def test_worker_all_anulowanie_przerywa_lancuch(qapp, tmp_path):
@@ -322,3 +340,66 @@ def test_serial_guard_przepuszcza_czysty_swiat(qapp, tmp_path, monkeypatch):
     assert view._thread is not None
     loop.exec()
     assert "[skan] pliki 1" in view.lbl_summary.text()
+
+
+# --- P5b: pass obecności w Dostawie (DRY → jawny zapis → droga do perspektywy) ---
+
+def _czekaj_na_etap(view, timeout_ms=20000):
+    """Odczekaj etap w wątku: pętla kończy się na running_changed(False) — czyli PO sprzątnięciu."""
+    loop = QEventLoop()
+    view.running_changed.connect(lambda r: loop.quit() if r is False else None)
+    QTimer.singleShot(timeout_ms, loop.quit)
+    loop.exec()
+
+
+def test_obecnosc_dry_pokazuje_przycisk_a_zapis_droge_do_perspektywy(qapp, tmp_path):
+    """P5b: DRY tylko RAPORTUJE i odsłania „Oznacz zniknięte"; dopiero jawny klik zapisuje, a wtedy
+    przycisk zapisu znika (nie ma już czego oznaczać) i wchodzi droga 3→1 do perspektywy Zbiorów.
+
+    Ta sekwencja jest sercem P5b: sekwencja dostawy NIGDY nie zdejmuje obecności sama."""
+    from horreum.gui.grid import PRESET_VANISHED
+    db_path = _fresh_db(tmp_path)
+    root = _tree(tmp_path, 3)
+    view = PipelineView(db_path, now_fn=lambda: NOW)
+    view._root = root
+    view._on_scan()
+    _czekaj_na_etap(view)
+    os.remove(str(Path(root) / "l1.fits"))
+
+    view._on_presence()                                   # DRY
+    _czekaj_na_etap(view)
+    # `isVisible()` na widoku, który nigdy nie dostał show(), jest ZAWSZE False — pytamy o intencję
+    # widżetu (`isHidden`), tak jak reszta testów okna (wzorzec `empty_note`).
+    assert not view.box_vanished.isHidden() and not view.btn_mark_vanished.isHidden()
+    assert view.btn_show_vanished.isHidden()
+    assert view.lbl_vanished.text().startswith("Zniknęła 1 kopia")   # odmiana, nie szablon
+    con = db.open_db(db_path)
+    assert con.execute("SELECT COUNT(*) FROM location WHERE present = 0").fetchone()[0] == 0
+    con.close()
+
+    perspektywy = []
+    view.open_collection.connect(perspektywy.append)
+    view._on_mark_vanished()                              # jawny zapis
+    _czekaj_na_etap(view)
+    assert view.lbl_vanished.text().startswith("Oznaczono 1 kopię")
+    assert not view.btn_show_vanished.isHidden() and view.btn_mark_vanished.isHidden()
+    con = db.open_db(db_path)
+    assert con.execute("SELECT COUNT(*) FROM location WHERE present = 0").fetchone()[0] == 1
+    con.close()
+    view.btn_show_vanished.click()
+    assert perspektywy == [PRESET_VANISHED]
+
+
+def test_obecnosc_bez_zniknieć_nie_pokazuje_sekcji(qapp, tmp_path):
+    """QUIET: gdy nic nie znikło, sekcja akcji zostaje UKRYTA, a fakt idzie jedną linią do panelu —
+    pusty widżet „0 zniknięć" byłby stałym szumem w Dostawie."""
+    db_path = _fresh_db(tmp_path)
+    view = PipelineView(db_path, now_fn=lambda: NOW)
+    view._root = _tree(tmp_path, 2)
+    view._on_scan()
+    _czekaj_na_etap(view)
+    view._on_presence()
+    _czekaj_na_etap(view)
+    assert view.box_vanished.isHidden()
+    assert not view.btn_mark_vanished.isEnabled()          # nie ma zamrożonych parametrów
+    assert "nic nie znikło" in view.lbl_summary.text()

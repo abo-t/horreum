@@ -1349,6 +1349,7 @@ class MainWindow(QMainWindow):
         pipeline.status_message.connect(self._flash)
         pipeline.stage_finished.connect(self._on_stage_finished)
         pipeline.running_changed.connect(self._on_pipeline_running)
+        pipeline.open_collection.connect(self._on_open_collection)   # P5b: raport → perspektywa (3→1)
         self.pipeline_view = pipeline
 
         grid = FramesView(self.con, now_fn=self._now)

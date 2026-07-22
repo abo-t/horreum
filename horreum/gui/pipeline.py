@@ -22,8 +22,9 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from horreum import db
+from horreum import db, presence
 from horreum.gui import queries
+from horreum.gui.grid import PRESET_VANISHED
 from horreum.gui.progress import counts_snapshot, should_emit
 from horreum.grouper import run_grouper
 from horreum.resolver import delta_report, run_resolver
@@ -80,6 +81,8 @@ class PipelineWorker(QObject):
                 self._bulk(con, "resolve")
             elif self._stage == "delta":
                 self._bulk(con, "delta")
+            elif self._stage in ("presence", "presence-apply"):
+                self._presence(con, apply=self._stage.endswith("apply"))
             elif self._stage == "all":
                 self._run_all(con)
             else:
@@ -110,6 +113,22 @@ class PipelineWorker(QObject):
         self.stage_done.emit("scan", summary)
         return True
 
+    def _presence(self, con, *, apply):
+        """Pass obecności (P5b). Etap MASOWY jak group/resolve — bez progresu per-wiersz: koszt
+        siedzi w JEDNYM przejściu drzewa (~1,2 s / 15 tys. plików), którego nie da się sensownie
+        pociąć. Anulowanie DZIAŁA (pętla potwierdzeń pyta `should_cancel`), więc zerwany SMB nie
+        trzyma okna. `apply` NIGDY nie idzie w złotej akcji — tylko z jawnego przycisku."""
+        name = "presence"
+        self.stage_started.emit(name)
+        s = presence.check(
+            con, self._params["root"], volume=self._params.get("volume", "?"), apply=apply,
+            now=self._now(), should_cancel=self._cancel.is_set)
+        if s.cancelled:
+            self.cancelled.emit(name, s)
+            return False
+        self.stage_done.emit(name, s)
+        return True
+
     def _bulk(self, con, name):
         """Etap masowy (group/resolve/delta) — bezobsługowy, sekundy–minuty, bez progresu per-wiersz.
         delta jest READ-ONLY (zero DML). Emituje stage_started → stage_done."""
@@ -130,6 +149,11 @@ class PipelineWorker(QObject):
         self._bulk(con, "group")
         self._bulk(con, "resolve")
         self._bulk(con, "delta")
+        # Obecność ZAWSZE w trybie DRY (raport dostawy ma być szczery: „nic nie znikło" to inna
+        # wiadomość niż „nie sprawdziłem"). Zapis wymaga jawnego przycisku. Bez realnego serialu
+        # pass nie ma kotwicy zakresu — pomijamy go zamiast straszyć abortem w złotej ścieżce.
+        if self._params.get("volume", "?") != "?":
+            self._presence(con, apply=False)
 
     def _on_progress(self, done, total, path, summary):
         # wołane SYNCHRONICZNIE w wątku workera przez scan_tree; przerzedź i wyślij MIGAWKĘ (dict),
@@ -141,13 +165,25 @@ class PipelineWorker(QObject):
 # Etykiety widoczne dla użytkownika po polsku; wartości danych ("cold"/"scratch") to identyfikatory
 # poziomu zapisywane do bazy (rdzeń `scan_tree`) — ZOSTAJĄ niezmienione.
 _TIERS = [("—", None), ("zimny (archiwum)", "cold"), ("roboczy", "scratch")]
-_STAGE_LABEL = {"scan": "Skan", "group": "Grupowanie", "resolve": "Rozwiązywanie", "delta": "Delta"}
+_STAGE_LABEL = {"scan": "Skan", "group": "Grupowanie", "resolve": "Rozwiązywanie", "delta": "Delta",
+                "presence": "Obecność"}
 
 # Kolejność i nazwy powodów przeglądu w raporcie dostawy (rdzeń niesie same liczby — wording należy
 # do powierzchni; konsolowy `cli._format_delta` ma własne, ASCII-owe).
 _REVIEW_REASONS = [("no_config", "bez konfiguracji"), ("headerless", "bez nagłówka"),
                    ("no_camera", "bez kamery"), ("kind_unknown", "rodzaj nieznany"),
                    ("unreadable", "kopia nieczytelna")]
+
+
+def _odmiana(n, jedna, kilka, wiele):
+    """Polska zgoda liczebnika — user czyta ZDANIE, nie szablon: „Zniknęły 2 kopie", nie
+    „Zniknęło 2 kopii". Reguła: 1 → `jedna`; końcówka 2–4 → `kilka`; reszta → `wiele`, przy czym
+    12–14 idą do `wiele` mimo końcówki (2 kopie, ale 12 kopii)."""
+    if n == 1:
+        return jedna
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return kilka
+    return wiele
 
 
 def _review_line(st):
@@ -176,6 +212,7 @@ class PipelineView(QWidget):
     status_message = Signal(str)
     stage_finished = Signal(str)
     running_changed = Signal(bool)
+    open_collection = Signal(str)          # nazwa perspektywy Zbiorów (ścieżka 3→1 po oznaczeniu)
 
     def __init__(self, db_path, *, now_fn=_utc_now_iso, parent=None):
         super().__init__(parent)
@@ -186,6 +223,7 @@ class PipelineView(QWidget):
         self._worker = None
         self._cancellable = False
         self._summary_lines = []
+        self._presence_params = None       # ZAMROŻONE parametry ostatniego DRY (apply ich nie liczy)
         self._build_ui()
         self._sync_source_memo()
         self._sync_actions()
@@ -251,12 +289,44 @@ class PipelineView(QWidget):
         self.btn_resolve.clicked.connect(self._on_resolve)
         self.btn_delta = QPushButton("Pokaż deltę")
         self.btn_delta.clicked.connect(self._on_delta)
+        self.btn_presence = QPushButton("Sprawdź obecność")
+        self.btn_presence.clicked.connect(self._on_presence)
         self.btn_cancel = QPushButton("Anuluj")
         self.btn_cancel.clicked.connect(self._on_cancel)
-        for b in (self.btn_scan, self.btn_group, self.btn_resolve, self.btn_delta, self.btn_cancel):
+        for b in (self.btn_scan, self.btn_group, self.btn_resolve, self.btn_delta,
+                  self.btn_presence, self.btn_cancel):
             stages.addWidget(b)
         stages.addStretch(1)
         v.addLayout(stages)
+
+        # 4b. Wynik passa obecności — UKRYTY, dopóki nie ma czego pokazać (QUIET: „0 zniknięć" to
+        # linia w panelu, nie osobny widżet). Zapis jest ZAWSZE osobnym gestem: sekwencja tylko
+        # RAPORTUJE, a przycisk pojawia się dopiero, gdy DRY coś potwierdził. Po oznaczeniu wchodzi
+        # „Pokaż w Zbiorach" — ścieżka 3→1 wprost do perspektywy (wcześniej: raport → Porządki →
+        # klik → Zbiory). „Pokaż" PRZED zapisem nie ma sensu: perspektywa czyta STAN present=0.
+        self.box_vanished = QWidget()
+        bv = QHBoxLayout(self.box_vanished)
+        bv.setContentsMargins(0, 0, 0, 0)
+        self.lbl_vanished = QLabel("")
+        # BEZ zawijania: zdanie ma ~46 znaków (~300 px), a etykieta z `wordWrap` dostaje od Qt małą
+        # preferowaną szerokość i łamie się na dwie linie mimo wolnego miejsca — wtedy przycisk stoi
+        # przy PIERWSZEJ linii, a reszta zdania wisi pod nim. Cały wiersz (zdanie + 2 przyciski) mieści
+        # się w ~600 px, więc nie podnosi podłogi szerokości okna (dziś 1146 px, wiz P1 #8).
+        self.lbl_vanished.setWordWrap(False)
+        # Etykieta i JEJ przyciski trzymają się razem, stretch idzie NA KONIEC. Z `addWidget(lbl, 1)`
+        # przycisk odlatywał na prawą krawędź okna — przy 1200 px to ~1150 px pustki między zdaniem
+        # a akcją, którą to zdanie zapowiada (ten sam defekt, co w liście zadań: wizytator P1 #2).
+        bv.addWidget(self.lbl_vanished)
+        self.btn_mark_vanished = QPushButton("Oznacz zniknięte")
+        self.btn_mark_vanished.clicked.connect(self._on_mark_vanished)
+        bv.addWidget(self.btn_mark_vanished)
+        self.btn_show_vanished = QPushButton("Pokaż w Zbiorach")
+        self.btn_show_vanished.clicked.connect(lambda: self.open_collection.emit(PRESET_VANISHED))
+        self.btn_show_vanished.setVisible(False)
+        bv.addWidget(self.btn_show_vanished)
+        bv.addStretch(1)
+        self.box_vanished.setVisible(False)
+        v.addWidget(self.box_vanished)
 
         # 5. Pasek + liczniki (wspólne: skan = uczciwy %; etapy masowe = busy spinner). Pasek UKRYTY
         # w spoczynku — wizytator P2: „0%" w idle kłamie, że coś ruszyło. Pojawia się w _begin_run.
@@ -425,6 +495,21 @@ class PipelineView(QWidget):
         self._begin_run()
         self._start_stage("delta")
 
+    def _on_presence(self):
+        """Etap pojedynczy — ZAWSZE DRY. Zapis idzie wyłącznie przez „Oznacz zniknięte"."""
+        if not self._can_scan() or self._thread is not None:
+            return
+        self._begin_run()
+        self._start_stage("presence", **self._scan_params())
+
+    def _on_mark_vanished(self):
+        """Jawny gest zapisu na WYNIKU, który user właśnie zobaczył: parametry ZAMROŻONE przy DRY,
+        żeby przycisk nie znaczył czegoś innego niż raport nad nim (wzorzec „Wydaj na stół")."""
+        if self._thread is not None or self._presence_params is None:
+            return
+        self._begin_run()
+        self._start_stage("presence-apply", **self._presence_params)
+
     def _on_cancel(self):
         if self._worker is not None:
             self._worker.request_cancel()
@@ -445,7 +530,7 @@ class PipelineView(QWidget):
         # więc NIE wolno kończyć wątku na pierwszym z nich.
         self._worker.finished.connect(self._thread.quit)
         self._thread.finished.connect(self._cleanup_thread)
-        self._set_running(True, cancellable=stage in ("scan", "all"))
+        self._set_running(True, cancellable=stage in ("scan", "all", "presence", "presence-apply"))
         self._thread.start()
 
     def _cleanup_thread(self):
@@ -484,6 +569,8 @@ class PipelineView(QWidget):
         self.bar.setValue(1)
         self.lbl_counts.setText("")
         self._append_summary(self._format_result(name, result))
+        if name == "presence":
+            self._update_vanished_box(result)
         self.status_message.emit(f"{_STAGE_LABEL.get(name, name)}: gotowe.")
         self.stage_finished.emit(name)                  # gospodarz odświeża oś (WAL)
 
@@ -522,7 +609,62 @@ class PipelineView(QWidget):
             return self._format_resolve(r)
         if name == "delta":
             return self._format_delta(r)
+        if name == "presence":
+            return self._format_presence(r)
         return str(r)
+
+    def _format_presence(self, s):
+        """Linia raportu passa obecności. Zero zniknięć MUSI być zdaniem („nic nie znikło"), nie
+        ciszą: cisza w raporcie dostawy czyta się jak „nie sprawdzono". Kubełki, które NIE są
+        zniknięciami, pokazujemy tylko gdy niezerowe."""
+        if s.aborted is not None:
+            return f"[obecność] PRZERWANE — {s.aborted}"
+        if s.cancelled:
+            return "[obecność] przerwane przez użytkownika — nic nie zapisano"
+        czesci = [f"zakres {s.scoped} · na dysku {s.walked}"]
+        if s.out_of_reach:
+            czesci.append(f"poza zasięgiem {s.out_of_reach}")
+        if s.run_id is not None:
+            czesci.append(f"oznaczono {s.vanished}")
+        else:
+            czesci.append(f"zniknęło {s.confirmed_gone}" if s.confirmed_gone else "nic nie znikło")
+        if s.resurfaced:
+            czesci.append(f"WYNURZONE {s.resurfaced} (dryf wielkości liter?)")
+        if s.undecided:
+            czesci.append(f"nierozstrzygnięte {s.undecided}")
+        if s.drifted:
+            czesci.append(f"pominięte przez rename {s.drifted}")
+        line = "[obecność] " + " · ".join(czesci)
+        return line + f" · {s.brake}" if s.brake else line
+
+    def _update_vanished_box(self, s):
+        """Sekcja 4b: co user może ZROBIĆ z wynikiem. Rozróżnienie DRY↔zapis po `run_id` (ustawia go
+        wyłącznie faza zapisu) — po oznaczeniu przycisk zapisu znika, bo nie ma już czego oznaczać,
+        a wchodzi droga do perspektywy."""
+        applied = s.run_id is not None
+        if applied:
+            self._presence_params = None
+            self.lbl_vanished.setText(_odmiana(
+                s.vanished, "Oznaczono 1 kopię jako zniknioną.",
+                f"Oznaczono {s.vanished} kopie jako zniknięte.",
+                f"Oznaczono {s.vanished} kopii jako zniknięte."))
+            self.btn_mark_vanished.setVisible(False)
+            self.btn_show_vanished.setVisible(bool(s.vanished))
+            self.box_vanished.setVisible(bool(s.vanished))
+        elif s.confirmed_gone and s.aborted is None and not s.cancelled:
+            self._presence_params = dict(root=self._root, volume=s.volume)   # ZAMROŻONE
+            n = s.confirmed_gone
+            self.lbl_vanished.setText(_odmiana(
+                n, "Zniknęła 1 kopia — baza wciąż twierdzi, że jest.",
+                f"Zniknęły {n} kopie — baza wciąż twierdzi, że są.",
+                f"Zniknęło {n} kopii — baza wciąż twierdzi, że są."))
+            self.btn_mark_vanished.setVisible(True)
+            self.btn_show_vanished.setVisible(False)
+            self.box_vanished.setVisible(True)
+        else:
+            self._presence_params = None
+            self.box_vanished.setVisible(False)
+        self._sync_actions()
 
     def _format_scan(self, s):
         return (
@@ -564,6 +706,8 @@ class PipelineView(QWidget):
         self.btn_group.setEnabled(idle and has_db)
         self.btn_resolve.setEnabled(idle and has_db)
         self.btn_delta.setEnabled(idle and has_db)
+        self.btn_presence.setEnabled(idle and self._can_scan())   # potrzebuje drzewa, nie samej bazy
+        self.btn_mark_vanished.setEnabled(idle and self._presence_params is not None)
         self.btn_cancel.setEnabled(running and cancellable)
 
     def _set_running(self, running, *, cancellable=False):

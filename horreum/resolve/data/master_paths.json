@@ -1,0 +1,21 @@
+{
+  "_comment": [
+    "Wzorce ŚCIEŻEK masterów kalibracyjnych — konwencja nazewnicza JEDNEGO archiwum, dlatego DANE,",
+    "nie kod (wzorem regions.json). Inny użytkownik Horreum dokłada swój wzorzec bez tykania Pythona.",
+    "UWAGA: edycja tego pliku na ISTNIEJĄCEJ bazie to operacja MIGRACYJNA, nie zwykły re-run —",
+    "zmiana wzorca przerzuca klatki między przepisami (dokładnie jak zmiana promienia w regions.json).",
+    "temp_sign='negative' koduje JAWNIE regułę, że człon temperatury niesie MODUŁ nastawy, a znak",
+    "jest stały (chłodzenie): '10' → -10 °C. Potwierdzone dwukrotnie — słowem właściciela archiwum",
+    "(2026-07-22) oraz zgodnością z nastawami SET-TEMP lightów (-10,0 ×10237 i -13,0 ×2466).",
+    "To JEDYNE miejsce w Horreum, gdzie ścieżka jest źródłem faktu (brief C0 §5)."
+  ],
+  "patterns": [
+    {
+      "name": "masterdark_zwo_gain_offset_temp",
+      "recipe_class": "dark",
+      "regex": "_G(?P<gain>\\d+)_O(?P<offset_adu>\\d+)_(?P<temp_module>\\d+)_(?P<exptime>\\d+(?:\\.\\d+)?)_EXPOSURE",
+      "temp_sign": "negative",
+      "note": "MASTERDARK_26MM_G100_O21_10_0300.000_EXPOSURE_300s.xisf — łapie 38/38 masterdarków archiwum (2026-07-22)"
+    }
+  ]
+}

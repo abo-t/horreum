@@ -88,6 +88,7 @@ class Preflight:
     surplus_sample: list = field(default_factory=list)   # pierwsze ścieżki nadwyżki (raport)
     verified: list = field(default_factory=list)         # ścieżki sprawdzone falsyfikatorem
     late_repaired: list = field(default_factory=list)    # podgrupa naprawianych po scanned_at
+    repaired_registry: frozenset = frozenset()  # naprawione przez HORREUM (D-0722-2), obecne u dawcy
     recompute: frozenset = frozenset()         # ścieżki czytane z dysku zamiast syntezy z dawcy
     notes: list = field(default_factory=list)  # ustalenia raportowane userowi (ASCII)
 
@@ -183,11 +184,37 @@ def _late_repaired(donor):
     return [], [r["path"] for r in rows[:SAMPLE_LATE]], "ostatnio naprawiane (scanned_at nowszy)"
 
 
-def _verify_sample(donor, paths, late_set, notes):
+def read_repaired_registry(path):
+    """Rejestr napraw HORREUM (D-0722-2 wariant A) — ścieżki lokacji, którym writeback TEJ
+    instalacji przepisał nagłówek. Dawca o nich nie wie (jego zeznanie jest sprzed naprawy),
+    więc bez rejestru losowa próbka falsyfikatora czytała je jako „dawca stęchły z NIEZNANEGO
+    powodu" i abortowała import. Baza otwierana WYŁĄCZNIE read-only (jak dawca — rama DAWCA-RO;
+    to cudza żywa baza, import jej nie migruje ani nie tyka)."""
+    apath = os.path.abspath(str(path))
+    if not os.path.isfile(apath):
+        raise ImportAbort(f"baza rejestru napraw nie istnieje: {apath}")
+    con = sqlite3.connect("file:" + pathname2url(apath) + "?mode=ro", uri=True)
+    try:
+        rows = con.execute(
+            "SELECT DISTINCT l.path FROM header_backups hb "
+            "JOIN location l ON l.id = hb.location_id").fetchall()
+    finally:
+        con.close()
+    return frozenset(r[0] for r in rows)
+
+
+def _verify_sample(donor, paths, late_set, registry, notes):
     """Falsyfikator kierunku C (R1#6): dla każdej ścieżki próbki policz odciski Z DYSKU
     (`scan_file`) i porównaj z dawcą. Zwrot: True gdy fakty kopii późno-naprawianych się
     rozjechały (→ podgrupa do przeliczenia z dysku). Rozjazd `sha1_data` = STOP; rozjazd
-    faktów POZA późno-naprawianymi = stan nieoczekiwany (EXPECT) → abort."""
+    faktów POZA późno-naprawianymi I POZA rejestrem napraw Horreum = stan nieoczekiwany
+    (EXPECT) → abort.
+
+    DWA rejestry, DWIE dyspozycje (D-0722-2): `late_set` (dawca wie o naprawie, ale jego
+    fakty kopii mogą być stęchłe) → przeliczenie CAŁEJ podgrupy z dysku; `registry` (naprawił
+    Horreum, dawca nie wie) → sama NOTA, bo zeznanie dawcy jest wtedy spójnym snapshotem
+    sprzed naprawy, a to jest baseline tej bramki. Tożsamość (`sha1_data`) sprawdzana tak
+    samo w obu — writeback nie rusza danych, więc rozjazd tożsamości zostaje STOPEM."""
     stale_late = False
     for path in paths:
         row = donor.execute(
@@ -213,6 +240,9 @@ def _verify_sample(donor, paths, late_set, notes):
             stale_late = True
             notes.append(f"fakty kopii stechle na pozno-naprawianym: {path} "
                          f"-> cala podgrupa przeliczana z dysku")
+        elif path in registry:
+            notes.append(f"fakty kopii stechle na naprawionym przez Horreum: {path} "
+                         f"-> zeznanie dawcy sprzed naprawy (baseline), tozsamosc zgodna")
         else:
             raise ImportAbort(
                 f"falsyfikator: fakty kopii (file_sha1/header_hash/mtime) rozjechane POZA "
@@ -229,9 +259,12 @@ def _mtime_iso_from_epoch(mtime_epoch):
     return _mtime_iso(_St)
 
 
-def preflight(donor, *, rng_seed=None):
+def preflight(donor, *, rng_seed=None, repaired_paths=None):
     """Pre-flight §4.1 (twarde, EXPECT; zero zapisu). Zwraca `Preflight` z materiałem pętli
-    (stats, missing→skipped, recompute) albo rzuca `ImportAbort`."""
+    (stats, missing→skipped, recompute) albo rzuca `ImportAbort`.
+
+    `repaired_paths` = rejestr napraw Horreum (`read_repaired_registry` z ŻYWEJ bazy) — ścieżki,
+    dla których stęchłe fakty kopii u dawcy mają ZNANY powód, więc nie są abortem."""
     _assert_donor_complete(donor)
 
     paths = [r["path"] for r in donor.execute("SELECT path FROM files ORDER BY path")]
@@ -287,13 +320,17 @@ def preflight(donor, *, rng_seed=None):
     # falsyfikator kierunku C: 5 losowych + celowana próbka późno-naprawianych
     late, targeted, why = _late_repaired(donor)
     pf.late_repaired = late
+    pf.repaired_registry = frozenset(p for p in (repaired_paths or ()) if p in pf.stats)
+    if pf.repaired_registry:
+        pf.notes.append(f"rejestr napraw Horreum: {len(pf.repaired_registry)} sciezek "
+                        f"(znany powod stechlych faktow kopii — nota, nie abort)")
     reachable = sorted(pf.stats)
     rng = random.Random(rng_seed)
     sample = rng.sample(reachable, min(SAMPLE_RANDOM, len(reachable)))
     probe = list(dict.fromkeys(                     # dedup, kolejność: celowane najpierw
         [p for p in targeted if p in pf.stats] + sample))
     pf.notes.append(f"falsyfikator: {len(probe)} plikow (celowane: {why})")
-    stale_late = _verify_sample(donor, probe, frozenset(late), pf.notes)
+    stale_late = _verify_sample(donor, probe, frozenset(late), pf.repaired_registry, pf.notes)
     pf.verified = probe
     if stale_late:
         pf.recompute = frozenset(p for p in late if p in pf.stats)
@@ -351,12 +388,13 @@ def _gates(con, summary, axes_seen):
             summary=summary)
 
 
-def run_import(donor, con, *, now, rng_seed=None, progress=None):
+def run_import(donor, con, *, now, rng_seed=None, repaired_paths=None, progress=None):
     """Cały przebieg PF-3 na otwartych połączeniach (dawca RO, cel po `db.open_db`): pre-flight →
     pętla → grouper+resolver → bramki. Zwraca `ImportSummary`; twarde złamanie → `ImportAbort`.
-    `progress(done, total, path)` wołany po każdym pliku (CLI: heartbeat; Qt tu nie mieszka)."""
+    `progress(done, total, path)` wołany po każdym pliku (CLI: heartbeat; Qt tu nie mieszka).
+    `repaired_paths` → `preflight` (rejestr napraw Horreum, D-0722-2)."""
     _assert_target_fresh(con)
-    pf = preflight(donor, rng_seed=rng_seed)
+    pf = preflight(donor, rng_seed=rng_seed, repaired_paths=repaired_paths)
 
     summary = ImportSummary(preflight=pf, scan=ScanSummary(), files_total=pf.files_total)
     tel_seen, cam_seen, cfg_seen = set(), set(), set()

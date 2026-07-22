@@ -24,7 +24,12 @@ Tryb HYBRYDOWY (odpowiednik replay+subset ze skilla `pipeline-replay-validation`
 
 Użycie:
   python scripts/acceptance_s5.py --donor fitsmirror.db [--xisf-root <xisf-root>]
+                                  [--live-db <zywa horreum.db>]
                                   [--subset PATH\\maly_real_dir] [--work PATH\\horreum_s5.db] [--keep]
+
+`--live-db` podawaj ZAWSZE, gdy Horreum naprawiał nagłówki na tym samym drzewie (D-0722-2
+wariant A): dawca jest zamrożonym snapshotem sprzed napraw, więc bez rejestru losowa próbka
+falsyfikatora czyta naprawiony plik jako „dawca stęchły z NIEZNANEGO powodu" i abortuje.
 """
 import argparse
 import json
@@ -38,7 +43,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from horreum import db                                              # noqa: E402
 from horreum.grouper import NO_TELESCOPE_KINDS, run_grouper       # noqa: E402
-from horreum.import_fitsmirror import ImportAbort, open_donor, run_import  # noqa: E402
+from horreum.import_fitsmirror import (                                   # noqa: E402
+    ImportAbort, open_donor, read_repaired_registry, run_import,
+)
 from horreum.resolver import delta_report, run_resolver           # noqa: E402
 from horreum.scan import canonize_root, scan_tree                 # noqa: E402
 from horreum.volumes import volume_serial                         # noqa: E402
@@ -81,17 +88,25 @@ def _ok(cond):
 
 
 # ── (I) IMPORT: dawca LIVE → świeża baza przez realny pipeline PF-3 ───────────────────────────────
-def build_import(donor_path, work_path, now, out):
+def build_import(donor_path, work_path, now, out, live_db=None):
     """Zbuduj świeżą horreum.db z dawcy LIVE przez `run_import` (jedna klinga; §4.6 gate'y w środku).
-    Dawca RO (`open_donor`). Zwraca (con, ImportSummary). Twarde złamanie → ImportAbort propaguje."""
+    Dawca RO (`open_donor`). Zwraca (con, ImportSummary). Twarde złamanie → ImportAbort propaguje.
+
+    `live_db` (opcja `--live-db`) = ŻYWA baza Horreum, z której bierzemy rejestr napraw
+    (D-0722-2 wariant A). Bez niego falsyfikator czyta pliki naprawione przez Horreum jako
+    „dawca stęchły z nieznanego powodu" i abortuje, gdy losowa próbka w nie trafi."""
     if os.path.exists(work_path):
         os.remove(work_path)
     out(f"== (I) IMPORT: {donor_path} -> {work_path} ==")
+    repaired = None
+    if live_db:
+        repaired = read_repaired_registry(live_db)
+        out(f"  rejestr napraw Horreum: {len(repaired)} sciezek z {live_db}")
     donor = open_donor(donor_path)
     try:
         con = db.open_db(work_path)
         con.execute("PRAGMA synchronous=OFF")          # baza JEDNORAZOWA — wolno przyspieszyć
-        summary = run_import(donor, con, now=now)
+        summary = run_import(donor, con, now=now, repaired_paths=repaired)
     finally:
         donor.close()
     pf = summary.preflight
@@ -357,6 +372,9 @@ def main(argv=None):
     ap.add_argument("--donor", required=True, help="ścieżka dawcy fitsmirror.db (LIVE, otwierany read-only)")
     ap.add_argument("--xisf-root", default=None,
                     help="drzewo z XISF do doskanu (np. <xisf-root>) — odtwarza pełny stan PF-4")
+    ap.add_argument("--live-db", default=None,
+                    help="ŻYWA baza Horreum (read-only) — rejestr napraw writebacku; bez niej "
+                         "falsyfikator abortuje, gdy próbka trafi w plik naprawiony przez Horreum")
     ap.add_argument("--subset", default=None,
                     help="mały realny katalog (lub kilka po przecinku) do krzyż-czeku czytników/sha1")
     ap.add_argument("--work", default=None, help="ścieżka jednorazowej horreum.db (domyślnie obok skryptu)")
@@ -368,7 +386,7 @@ def main(argv=None):
     work = args.work or os.path.join(os.path.dirname(os.path.abspath(__file__)), "_horreum_s5.db")
 
     try:
-        con, summary = build_import(args.donor, work, now, out)
+        con, summary = build_import(args.donor, work, now, out, live_db=args.live_db)
     except ImportAbort as exc:
         out(f"\nACCEPTANCE ABORT (import z dawcy nie przeszedł): {exc}")
         return 1

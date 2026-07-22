@@ -15,7 +15,8 @@ from astropy.io import fits
 
 from horreum import db, repo
 from horreum.import_fitsmirror import (
-    ACTOR, ImportAbort, import_fitsmirror, open_donor, preflight, run_import,
+    ACTOR, ImportAbort, import_fitsmirror, open_donor, preflight, read_repaired_registry,
+    run_import,
 )
 from horreum.scan import scan_file
 
@@ -272,6 +273,83 @@ def test_abort_rozjazd_faktow_poza_pozno_naprawianymi(tmp_path):
     fits.setval(str(p), "TELESCOP", value="RC8-EDIT")   # edycja na dysku BEZ śladu w dawcy
     with pytest.raises(ImportAbort, match="pozno-naprawianymi"):
         _import(tmp_path, donor_path)
+
+
+def _mk_live_registry(tmp_path, paths):
+    """Żywa baza Horreum z rejestrem napraw (`header_backups`→`location`) — materiał
+    D-0722-2 wariant A. Wszystko przez `repo` (jedna klinga), jak realny writeback."""
+    live = tmp_path / "zywa.db"
+    con = db.open_db(str(live))
+    commit_id = repo.insert_commit(con, run_id="r1", now=NOW)
+    for i, path in enumerate(paths, start=1):
+        frame_id, _new = repo.upsert_frame(con, sha1_data=f"sha{i}", kind="light",
+                                           filetype="fits", camera_id=None, now=NOW)
+        loc_id, _known = repo.add_location(con, frame_id=frame_id, volume="V", path=str(path),
+                                           mtime=NOW, size_bytes=1, now=NOW)
+        repo.insert_header_backup(con, commit_id=commit_id, location_id=loc_id, hdu_index=0,
+                                  header_text="x", post_hash="y")
+    con.close()
+    return live
+
+
+def test_rejestr_napraw_horreum_to_nota_nie_abort(tmp_path):
+    """D-0722-2 wariant A: plik naprawiony przez HORREUM ma stęchłe fakty kopii u dawcy
+    (dawca o naprawie nie wie) — z rejestrem to NOTA, nie abort. Zeznanie dawcy sprzed
+    naprawy wchodzi jako baseline (bez przeliczania), tożsamość `sha1_data` przeżywa."""
+    donor_path, files = _mk_donor(tmp_path, SPECS)
+    p, _fid = files[os.path.join("LIGHTS", "m31_2.fits")]
+    fits.setval(str(p), "TELESCOP", value="RC8-EDIT")   # writeback Horreum: dawca nie ma wiersza
+    live = _mk_live_registry(tmp_path, [p])
+
+    with pytest.raises(ImportAbort, match="pozno-naprawianymi"):   # bez rejestru: abort (dziś)
+        _import(tmp_path, donor_path)
+    os.remove(str(tmp_path / "horreum.db"))
+
+    registry = read_repaired_registry(str(live))
+    assert registry == frozenset({str(p)})
+    donor = open_donor(str(donor_path))
+    try:
+        pf = preflight(donor, rng_seed=1, repaired_paths=registry)
+    finally:
+        donor.close()
+    assert pf.repaired_registry == frozenset({str(p)})
+    assert pf.recompute == frozenset()                  # rejestr NIE ciągnie przeliczania
+    assert any("naprawionym przez Horreum" in n for n in pf.notes)
+
+
+def test_rejestr_napraw_nie_gasi_ostrza_expect(tmp_path):
+    """Ostrze EXPECT zostaje: rozjazd faktów kopii POZA rejestrem (i poza późno-naprawianymi
+    dawcy) nadal abortuje — rejestr wpisuje ZNANE, nie wycisza nieznanego."""
+    donor_path, files = _mk_donor(tmp_path, SPECS)
+    znany, _ = files[os.path.join("LIGHTS", "m31_1.fits")]
+    obcy, _ = files[os.path.join("LIGHTS", "m31_2.fits")]
+    fits.setval(str(znany), "TELESCOP", value="RC8-NEW")
+    fits.setval(str(obcy), "TELESCOP", value="RC8-OBCY")           # stęchnięcie NIEZNANE
+    registry = read_repaired_registry(str(_mk_live_registry(tmp_path, [znany])))
+    donor = open_donor(str(donor_path))
+    try:
+        with pytest.raises(ImportAbort, match="pozno-naprawianymi"):
+            preflight(donor, rng_seed=1, repaired_paths=registry)
+    finally:
+        donor.close()
+
+
+def test_rejestr_napraw_nie_gasi_rozjazdu_tozsamosci(tmp_path):
+    """Tożsamość jest święta także w rejestrze: writeback nie rusza danych, więc rozjazd
+    `sha1_data` na pliku z rejestru = STOP (kierunek C pada), nie nota."""
+    donor_path, files = _mk_donor(tmp_path, SPECS)
+    p, fid = files[os.path.join("LIGHTS", "m31_1.fits")]
+    dcon = sqlite3.connect(str(donor_path))
+    dcon.execute("UPDATE files SET sha1_data = 'deadbeef' WHERE id = ?", (fid,))
+    dcon.commit()
+    dcon.close()
+    registry = read_repaired_registry(str(_mk_live_registry(tmp_path, [p])))
+    donor = open_donor(str(donor_path))
+    try:
+        with pytest.raises(ImportAbort, match="ROZJAZD sha1_data"):
+            preflight(donor, rng_seed=1, repaired_paths=registry)
+    finally:
+        donor.close()
 
 
 def test_abort_baza_docelowa_niepusta(tmp_path):

@@ -15,8 +15,8 @@ from astropy.io import fits
 from horreum import db
 from horreum.scan import (
     ScanRecord, ScanSummary, _already_scanned, header_dict_from_cards, ingest_record,
-    iter_fits, iter_headers, read_fits_header, read_fits_meta, read_header, read_xisf_header,
-    read_xisf_meta, scan_file, scan_tree,
+    iter_fits, iter_headers, locate_value_span, quote_fits, read_fits_header, read_fits_meta,
+    read_header, read_xisf_header, read_xisf_meta, read_xisf_meta_full, scan_file, scan_tree,
 )
 
 NOW = "2026-06-28T12:00:00"
@@ -429,9 +429,12 @@ def test_compressed_master_sha1_data_kanoniczny(tmp_path):
 
 def _write_xisf_attach(tmp_path, name, payload, keywords=()):
     """XISF z REALNYM attachmentem: `location` wskazuje faktyczny offset payloadu za nagłówkiem
-    (obliczany iteracyjnie — cyfry offsetu zmieniają długość XML aż do punktu stałego)."""
+    (obliczany iteracyjnie — cyfry offsetu zmieniają długość XML aż do punktu stałego).
+    `keywords` = `(nazwa, wartość)` albo `(nazwa, wartość, komentarz)`; wartość podajesz DOKŁADNIE
+    tak, jak ma stać w pliku (z apostrofami FITS albo bez — to materiał testu konwencji)."""
     def xml_for(start):
-        parts = "".join(f'<FITSKeyword name="{n}" value="{v}" comment=""/>' for n, v in keywords)
+        parts = "".join(f'<FITSKeyword name="{kw[0]}" value="{kw[1]}" '
+                        f'comment="{kw[2] if len(kw) > 2 else ""}"/>' for kw in keywords)
         return ('<?xml version="1.0" encoding="UTF-8"?>'
                 '<xisf version="1.0" xmlns="http://www.pixinsight.com/xisf">'
                 '<Image geometry="4:4:1" sampleFormat="UInt16" '
@@ -455,17 +458,189 @@ def _write_xisf_attach(tmp_path, name, payload, keywords=()):
 
 def test_scan_file_xisf_attachment_hash(tmp_path):
     """XISF: `sha1_data` = sha1 bajtów attachmentu pierwszego `<Image>` (wzorzec `integ_hash`
-    Custosa; brief §2); `file_sha1` = cały plik; `header_hash`/`hdu_index`/`compressed`/`cards`
-    = None (R2#14; cards dla XISF dojdą w PF-4)."""
+    Custosa; brief §2); `file_sha1` = cały plik. Od P6a `header_hash` i `cards` są WYPEŁNIONE
+    (dawniej None — R2#14), a `hdu_index`/`compressed` zostają None: to pojęcia obce formatowi
+    (D-X-7), nie brak zdolności."""
     payload = bytes((i * 7) & 0xFF for i in range(32))
     f = _write_xisf_attach(tmp_path, "m.xisf", payload,
                            keywords=[("INSTRUME", "'ZWO ASI2600MC Pro'")])
     rec = scan_file(str(f))
     assert rec.sha1_data == hashlib.sha1(payload).hexdigest()
     assert rec.file_sha1 == hashlib.sha1(f.read_bytes()).hexdigest()
-    assert rec.header_hash is None and rec.hdu_index is None
-    assert rec.compressed is None and rec.cards is None
+    assert rec.hdu_index is None and rec.compressed is None
     assert rec.header["INSTRUME"] == "ZWO ASI2600MC Pro"
+    # header_hash = sha1 SAMYCH bajtów XML (bez sygnatury, długości, reserved i wypełnienia)
+    raw = f.read_bytes()
+    (hlen,) = struct.unpack("<I", raw[8:12])
+    assert rec.header_hash == hashlib.sha1(raw[16:16 + hlen]).hexdigest()
+    assert [(c.keyword, c.value_raw, c.value_type) for c in rec.cards] == [
+        ("INSTRUME", "ZWO ASI2600MC Pro", "str")]
+
+
+def test_xisf_karty_kontrakt_z_zeznaniem_i_projekcja_liczbowa(tmp_path):
+    """D-X-4/4a: karty XISF to LUSTRO 1:1 zeznania — `header_dict_from_cards(cards)` musi dać
+    dokładnie to, co `read_xisf_header`. `value_type` zawsze `'str'` (inaczej `_card_value`
+    rzutowałby i kontrakt by pękł), a `value_num` to PROJEKCJA: wypełniona dla tekstu, który
+    parsuje się na liczbę, pusta dla reszty. COMMENT ma `value=""`, treść w atrybucie `comment`
+    (D-X-5) — zeznanie zostaje NIETKNIĘTE, kartę treść odzyskuje."""
+    f = _write_xisf_attach(tmp_path, "k.xisf", b"\x01" * 16, keywords=[
+        ("TELESCOP", "'ED'"), ("FOCALLEN", "796"), ("EXPTIME", "60.0"),
+        ("SWCREATE", "'PixInsight'"), ("COMMENT", "", "ciało")])
+    meta = read_xisf_meta_full(str(f))
+    assert header_dict_from_cards(meta.cards) == read_xisf_header(str(f))
+    assert {c.value_type for c in meta.cards} == {"str"}
+    num = {c.keyword: c.value_num for c in meta.cards}
+    assert (num["FOCALLEN"], num["EXPTIME"]) == (796.0, 60.0)
+    assert num["TELESCOP"] is None and num["SWCREATE"] is None
+
+    kom = [c for c in meta.cards if c.keyword == "COMMENT"]
+    assert len(kom) == 1 and kom[0].value_raw == "" and kom[0].comment == "ciało"
+    assert read_xisf_header(str(f))["COMMENT"] == [""]      # zeznanie NIETKNIĘTE
+
+
+def test_xisf_powtorzony_keyword_idx_i_zwyciezca(tmp_path):
+    """`idx` numeruje wystąpienia keyworda w kolejności dokumentu (jak `_parse_cards` dla FITS),
+    a przy powtórzeniu keyworda NIE-multi zeznanie bierze OSTATNI — obie strony kontraktu muszą
+    zgodzić się co do zwycięzcy, inaczej dict i karty opisałyby inną klatkę."""
+    f = _write_xisf_attach(tmp_path, "dup.xisf", b"\x02" * 16, keywords=[
+        ("FILTER", "'Ha'"), ("COMMENT", ""), ("FILTER", "'OIII'"), ("COMMENT", "")])
+    meta = read_xisf_meta_full(str(f))
+    assert [(c.keyword, c.idx, c.value_raw) for c in meta.cards] == [
+        ("FILTER", 0, "Ha"), ("COMMENT", 0, ""), ("FILTER", 1, "OIII"), ("COMMENT", 1, "")]
+    assert meta.header["FILTER"] == "OIII"                  # ostatni nadpisuje
+    assert header_dict_from_cards(meta.cards) == meta.header
+
+
+def test_xisf_meta_full_sufit_naglowka_i_tozsamosc_to_dwa_fakty(tmp_path):
+    """D-X-2: `first_attachment` = MIN po WSZYSTKICH blokach (tu miniatura leży PRZED obrazem),
+    a `image_span` = pierwszy `<Image>` w kolejności dokumentu (TOŻSAMOŚĆ). Mylenie ich znaczy
+    pisanie nagłówka w cudze bajty. `reserved` i `padding` wracają verbatim (D-X-1)."""
+    xml = ('<?xml version="1.0" encoding="UTF-8"?>'
+           '<xisf version="1.0" xmlns="http://www.pixinsight.com/xisf">'
+           '<Thumbnail location="attachment:900:16"/>'
+           '<Image id="integration" location="attachment:1000:64"/>'
+           '<Image id="rejection_low" location="attachment:2000:64"/>'
+           '</xisf>').encode("utf-8")
+    f = tmp_path / "sufit.xisf"
+    pad = b"\xAB" * (900 - 16 - len(xml))
+    with open(f, "wb") as fh:
+        fh.write(b"XISF0100"); fh.write(struct.pack("<I", len(xml)))
+        fh.write(b"\x01\x02\x03\x04"); fh.write(xml); fh.write(pad); fh.write(b"\xCD" * 200)
+    meta = read_xisf_meta_full(str(f))
+    assert meta.first_attachment == 900                     # miniatura, nie obraz
+    assert meta.image_span == (1000, 64)                    # integration, nie rejection_low
+    assert meta.reserved == b"\x01\x02\x03\x04"             # NIE literał zer
+    assert meta.padding == pad and meta.xml_bytes == xml
+
+
+def _xisf_prop(tmp_path, name, body):
+    """XISF bez attachmentu, z dowolnym ciałem XML — poligon dla `locate_value_span`."""
+    xml = ('<?xml version="1.0" encoding="UTF-8"?>'
+           '<xisf version="1.0" xmlns="http://www.pixinsight.com/xisf">'
+           + body + '</xisf>').encode("utf-8")
+    f = tmp_path / name
+    with open(f, "wb") as fh:
+        fh.write(b"XISF0100"); fh.write(struct.pack("<I", len(xml)))
+        fh.write(b"\x00" * 4); fh.write(xml)
+    return f, xml
+
+
+def test_zapis_tozsamosciowy_kart_nie_zmienia_ani_bajtu(tmp_path):
+    """§6 pkt 1 (najmocniejsze kryterium P6a) na fixture: przepisanie KAŻDEJ karty jej WŁASNĄ
+    aktualną wartością zostawia nagłówek bajtowo identyczny. Jednym ruchem pinuje lokalizator,
+    `quote_fits` i escape — implementacja, która gubi apostrofy albo dokłada padding, pęka tu,
+    a nie dopiero na archiwum. (Wersja na 330 realnych plikach = sonda firsthand.)"""
+    f = _write_xisf_attach(tmp_path, "id.xisf", b"\x03" * 16, keywords=[
+        ("TELESCOP", "'ED'"), ("FOCALLEN", "796"), ("FILTER", "'Ha'"),
+        ("INSTRUME", "'ZWO ASI2600MM Pro'"), ("FILTER", "'OIII'"), ("SWOWNER", "'O''Neil'")])
+    meta = read_xisf_meta_full(str(f))
+    xml = meta.xml_bytes
+    for card in meta.cards:
+        start, end = locate_value_span(xml, keyword=card.keyword, idx=card.idx)
+        assert quote_fits(card.value_raw, xml[start:end]) == xml[start:end]
+        assert xml[:start] + quote_fits(card.value_raw, xml[start:end]) + xml[end:] == xml
+
+
+def test_rekonstrukcja_dokladna_przy_zmianie_dlugosci(tmp_path):
+    """§6 pkt 2: łata o INNEJ długości składa się dokładnie z `xml[:start] + nowe + xml[end:]`.
+    Kryterium jest falsyfikowalne — implementacja, która „nic nie napisała", go nie przejdzie."""
+    f = _write_xisf_attach(tmp_path, "zm.xisf", b"\x04" * 16,
+                           keywords=[("TELESCOP", "'ED'"), ("FOCALLEN", "796")])
+    xml = read_xisf_meta_full(str(f)).xml_bytes
+
+    s1, e1 = locate_value_span(xml, keyword="TELESCOP")
+    nowy = xml[:s1] + quote_fits("ED120R", xml[s1:e1]) + xml[e1:]
+    assert nowy != xml and len(nowy) == len(xml) + 4        # 'ED' → 'ED120R'
+    assert b"value=\"'ED120R'\"" in nowy                    # apostrofy FITS przejęte z oryginału
+
+    s2, e2 = locate_value_span(xml, keyword="FOCALLEN")
+    assert xml[s2:e2] == b"796"
+    goly = xml[:s2] + quote_fits("789", xml[s2:e2]) + xml[e2:]
+    assert b'value="789"' in goly                           # gołe zostaje gołe
+
+
+def test_locate_value_span_respektuje_cudzyslowy(tmp_path):
+    """Regresja #13: `>` jest LEGALNY wewnątrz wartości atrybutu, więc granicy znacznika nie wolno
+    szukać przez `find(b'>')` — naiwny skan uciąłby znacznik w środku wartości i wskazał cudze
+    bajty. Komentarz XML z `>` w środku też nie może zmylić skanera."""
+    body = ('<!-- uwaga: a > b -->'
+            '<Image geometry="1:1:1">'
+            '<FITSKeyword name="HISTORY" value="flux > 3 sigma" comment=""/>'
+            '<FITSKeyword name="TELESCOP" value="\'ED\'" comment=""/>'
+            '</Image>')
+    f, xml = _xisf_prop(tmp_path, "gt.xisf", body)
+    start, end = locate_value_span(xml, keyword="HISTORY")
+    assert xml[start:end] == b"flux > 3 sigma"
+    s2, e2 = locate_value_span(xml, keyword="TELESCOP")
+    assert xml[s2:e2] == b"'ED'"                            # karta ZA feralną wartością trafiona
+
+
+def test_locate_value_span_property_atrybut_i_tekst(tmp_path):
+    """D-X-10: `<Property>` niesie wartość w atrybucie `value=` ALBO w TEKŚCIE elementu — obie
+    postaci w tym samym pliku (zmierzone na 7/7 celach naprawy `ED`). Lokalizator musi trafić
+    w obie, bo naprawa rusza je jednocześnie."""
+    body = ('<Property id="Instrument:Telescope:FocalLength" type="Float64" value="0.796"/>'
+            '<Property id="Instrument:Telescope:Name" type="String">ED</Property>')
+    f, xml = _xisf_prop(tmp_path, "prop.xisf", body)
+    s1, e1 = locate_value_span(xml, property_id="Instrument:Telescope:FocalLength")
+    assert xml[s1:e1] == b"0.796"
+    s2, e2 = locate_value_span(xml, property_id="Instrument:Telescope:Name")
+    assert xml[s2:e2] == b"ED"
+    assert xml[:s2] + b"ED120R" + xml[e2:] == xml.replace(b">ED<", b">ED120R<")
+
+
+@pytest.mark.parametrize("body, kwargs, fragment", [
+    ('<Property id="P" type="String" location="attachment:900:4"/>',
+     {"property_id": "P"}, "location="),
+    ('<Property id="P" type="String"/>', {"property_id": "P"}, "samozamykający"),
+    ('<FITSKeyword name="TELESCOP" value="\'ED\'"/>', {"keyword": "FILTER"}, "nieobecna"),
+    ('<FITSKeyword name="TELESCOP" value="\'ED\'"/>', {"keyword": "TELESCOP", "idx": 1},
+     "nieobecna"),
+])
+def test_locate_value_span_odmawia_zamiast_zgadywac(tmp_path, body, kwargs, fragment):
+    """Bramki odmowy (D-X-10/12): wartość poza nagłówkiem (`location=`), własność pusta, karta
+    nieobecna, `idx` poza zakresem → JAWNY `ValueError` z powodem. Wołający mapuje to na
+    `blocked`; cichy zgadunek pisałby w cudze bajty."""
+    f, xml = _xisf_prop(tmp_path, "odm.xisf", body)
+    with pytest.raises(ValueError, match=fragment):
+        locate_value_span(xml, **kwargs)
+
+
+def test_locate_value_span_wymaga_jednego_adresu(tmp_path):
+    """Adres jest albo kartą, albo własnością — nigdy obydwoma naraz i nigdy żadnym."""
+    f, xml = _xisf_prop(tmp_path, "adr.xisf", '<FITSKeyword name="A" value="1"/>')
+    for kwargs in ({}, {"keyword": "A", "property_id": "P"}):
+        with pytest.raises(ValueError, match="DOKŁADNIE jedno"):
+            locate_value_span(xml, **kwargs)
+
+
+def test_quote_fits_escape_xml_bez_gt():
+    """`quote_fits` escape'uje `&` `<` `"` (D-X-6), ale `>` zostawia SUROWY — jest legalny
+    w wartości atrybutu, a jego escape'owanie złamałoby zapis tożsamościowy pliku, który go niesie.
+    Apostrof wewnątrz wartości cytowanej podwaja się (escape FITS)."""
+    assert quote_fits('a & b < c > d "e"', b"goly") == b'a &amp; b &lt; c > d &quot;e&quot;'
+    assert quote_fits("O'Neil", b"'x'") == b"'O''Neil'"
+    assert quote_fits("O'Neil", b"x") == b"O'Neil"          # gołe: bez apostrofów i bez podwajania
 
 
 def test_xisf_span_pierwszy_image_w_dokumencie(tmp_path):

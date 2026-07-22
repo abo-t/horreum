@@ -8,8 +8,10 @@ Per plik produkuje TOŻSAMOŚĆ + ZEZNANIE nagłówka, niczego nie zapisując:
       * `file_sha1` = sha1 całego pliku (fakt KOPII na location — detekcja zmiany bajtów);
         dla pliku nieskompresowanego OBA hasze liczone JEDNYM przebiegiem (`sha1_of_span` —
         pozycje sekcji z nagłówków przed odczytem treści),
-      * `header_hash` = sha1 tekstu nagłówka (kontrola writeback/undo; NULL dla XISF),
-      * `cards` = pełne lustro nagłówka FITS (EAV: keyword/idx/value_raw/value_num/value_type/comment).
+      * `header_hash` = odcisk nagłówka (kontrola writeback/undo): FITS — sha1 tekstu nagłówka,
+        XISF — sha1 bajtów XML (P6a),
+      * `cards` = pełne lustro nagłówka (EAV: keyword/idx/value_raw/value_num/value_type/comment)
+        — FITS z astropy, XISF z `<FITSKeyword>` (P6a; `value_type` zawsze `'str'`).
   - `read_header` (dyspozytor) = pełny nagłówek jako JSON-owalny dict:
       * FITS (.fits/.fit/.fts) → astropy, read-only,
       * XISF (.xisf) → lekki czytnik stdlib (`struct` + `xml.etree`), bez nowej zależności.
@@ -44,7 +46,9 @@ rozdwaja lokacje przy tym samym `volume_serial`. Kanonizacja roota = jawna sekwe
 import ctypes
 import hashlib
 import json
+import math
 import os
+import re
 import struct
 import sys
 import xml.etree.ElementTree as ET
@@ -72,6 +76,12 @@ HEADER_SUFFIXES = FITS_SUFFIXES + XISF_SUFFIXES
 _MULTI_KEYWORDS = ("COMMENT", "HISTORY", "")
 
 _XISF_SIGNATURE = b"XISF0100"        # monolithic XISF 1.0; po nim uint32 LE = długość nagłówka XML
+_XISF_LENGTH_LEN = 4                 # uint32 LE — długość nagłówka XML
+_XISF_RESERVED_LEN = 4               # 4 B reserved (wg specyfikacji zerowe; kopiowane verbatim)
+
+# Bajt, na którym ZACZYNA SIĘ nagłówek XML. WYLICZONY, nigdy literał (P6/§0): pomyłka o 4 B przy
+# zapisie nadpisuje pierwszy blok danych mastera. JEDNO źródło dla czytnika i pisarza XISF.
+XISF_XML_OFFSET = len(_XISF_SIGNATURE) + _XISF_LENGTH_LEN + _XISF_RESERVED_LEN     # == 16
 
 # Katalogi-drzewa robocze wykluczane ze skanu (doktryna README §„baza = autorytet": projekcje WBPP
 # to wyjście z bazy, nie wejście). JAWNA LISTA, nie konwencja `_*` — firsthand na realnym drzewie pokazał
@@ -108,9 +118,12 @@ class ScanRecord:
         frame'a; None = nieobliczalne (brak sekcji danych / zepsuty kafelek / W1) → degeneracja
         w `ingest_record` (sha1 pliku + flaga `sha1_data_uncomputable`);
       - `file_sha1`: sha1 całego pliku (fakt KOPII na location — detekcja zmiany bajtów);
-      - `header_hash`/`hdu_index`/`compressed`: fakty kopii FITS (kontrola writeback/undo);
-        None dla XISF (R2#14) i przy W1;
-      - `cards`: pełne lustro nagłówka FITS (lista `Card`); None dla XISF (dojdzie w PF-4) i przy W1.
+      - `header_hash`: odcisk nagłówka (kontrola writeback/undo) — FITS: sha1 tekstu nagłówka,
+        XISF: sha1 bajtów XML (P6a/D-X-3); None przy W1;
+      - `hdu_index`/`compressed`: fakty kopii FITS; None dla XISF (D-X-7 — pojęcia obce formatowi)
+        i przy W1;
+      - `cards`: pełne lustro nagłówka (lista `Card`) — FITS z astropy, XISF z `<FITSKeyword>`
+        (P6a/D-X-4); None przy W1.
     """
     path: str                         # ścieżka bezwzględna (str — spójnie z sha1_of/repo)
     size_bytes: int                   # fakt kopii (→ location.size_bytes; R2#6)
@@ -378,6 +391,312 @@ def _unquote_fits(value):
     return value
 
 
+def quote_fits(value, original):
+    """Zakoduj wartość karty XISF do BAJTÓW łaty — odwrotność `_unquote_fits` (P6/D-X-6; w briefie
+    `_quote_fits`). Konwencji NIE wymyślamy: przejmujemy ją z ORYGINAŁU (`original` = surowe bajty
+    wartości sprzed zmiany, BEZ cudzysłowów XML).
+
+    Zmierzone na 37 187 kartach z 331 realnych plików (sonda #4, 2026-07-22): apostrofy FITS
+    w 4765 wartościach, 32 422 gołe, ZERO paddingu spacjami, ZERO podwojonych apostrofów, ZERO
+    escape'ów XML, atrybut zawsze w cudzysłowie `"`. Stąd reguła: było w apostrofach → piszemy
+    w apostrofach (z podwojeniem apostrofu wewnątrz — escape FITS); było gołe → piszemy gołe.
+    **Paddingu spacjami NIE dokładamy** — w tym archiwum go nie ma, a dokładanie łamałoby zapis
+    tożsamościowy (kryterium §6 pkt 1: przepisanie wartości AKTUALNEJ nie zmienia ani bajtu).
+
+    Escape XML: `&` `<` `"`. **`>` zostaje surowy** — jest legalny wewnątrz wartości atrybutu,
+    a escape'owanie go zmieniłoby bajty pliku, który go niesie."""
+    text = str(value)
+    if len(original) >= 2 and original.startswith(b"'") and original.endswith(b"'"):
+        text = "'" + text.replace("'", "''") + "'"
+    return _escape_xml(text, attribute=True).encode("utf-8")
+
+
+def _escape_xml(text, *, attribute):
+    """Escape XML dla wartości wstawianej do łaty. `&` MUSI iść pierwszy (inaczej podwójny escape).
+    `"` tylko w atrybucie (w tekście elementu jest legalny surowy, a escape zmieniłby bajty)."""
+    out = text.replace("&", "&amp;").replace("<", "&lt;")
+    return out.replace('"', "&quot;") if attribute else out
+
+
+def _unescape_xml(text):
+    """Odwrotność `_escape_xml` — do GUARDA zgodności z parserem, nie do zeznania. `&amp;` na
+    KOŃCU (inaczej `&amp;lt;` rozwinąłby się dwa razy). Referencji liczbowych (`&#10;`) świadomie
+    NIE rozwijamy: w archiwum jest ich zero (sonda #4), a gdyby się pojawiły, guard ma KRZYCZEĆ
+    niezgodnością, nie zgadywać."""
+    for ent, ch in (("&lt;", "<"), ("&gt;", ">"), ("&quot;", '"'), ("&apos;", "'")):
+        text = text.replace(ent, ch)
+    return text.replace("&amp;", "&")
+
+
+_XISF_TAG_NAME = re.compile(rb"<\s*/?\s*([A-Za-z_:][\w:.\-]*)")
+_XISF_ATTR = re.compile(rb"""([A-Za-z_:][\w:.\-]*)\s*=\s*("[^"]*"|'[^']*')""")
+
+
+def _iter_xml_tags(xml_bytes):
+    """Kolejne znaczniki `<…>` jako `(start, end)` — skan RESPEKTUJĄCY CUDZYSŁOWY: `>` wewnątrz
+    wartości atrybutu jest legalny i NIE kończy znacznika, więc `find(b'>')` tu nie wystarcza
+    (P6/#13). Komentarze i CDATA przeskakiwane po ich własnych terminatorach — one też mogą
+    nieść `>`. Znacznik bez domknięcia → `ValueError` (EXPECT: nie zgadujemy granicy)."""
+    i, n = 0, len(xml_bytes)
+    while True:
+        i = xml_bytes.find(b"<", i)
+        if i < 0:
+            return
+        for opener, closer in ((b"<!--", b"-->"), (b"<![CDATA[", b"]]>")):
+            if xml_bytes.startswith(opener, i):
+                end = xml_bytes.find(closer, i + len(opener))
+                if end < 0:
+                    raise ValueError(f"XISF: niedomknięte {opener.decode()} w nagłówku")
+                i = end + len(closer)
+                break
+        else:
+            j, quote = i + 1, None
+            while j < n:
+                c = xml_bytes[j:j + 1]
+                if quote is not None:
+                    if c == quote:
+                        quote = None
+                elif c in (b'"', b"'"):
+                    quote = c
+                elif c == b">":
+                    break
+                j += 1
+            if j >= n:
+                raise ValueError("XISF: znacznik bez domknięcia '>'")
+            yield i, j + 1
+            i = j + 1
+
+
+def _tag_attrs(tag_bytes):
+    """Atrybuty znacznika jako `nazwa_lokalna -> (start, end)` bajtów WARTOŚCI (bez cudzysłowów),
+    liczone względem początku znacznika."""
+    out = {}
+    for m in _XISF_ATTR.finditer(tag_bytes):
+        start, end = m.span(2)
+        out.setdefault(m.group(1).rsplit(b":", 1)[-1], (start + 1, end - 1))
+    return out
+
+
+def locate_value_span(xml_bytes, *, keyword=None, idx=0, property_id=None):
+    """Wycinek `[start, end)` bajtów WARTOŚCI w nagłówku XISF — materiał łaty (P6/§5).
+
+    Adresowanie: `keyword`+`idx` (karta `<FITSKeyword>`, `idx` = numer wystąpienia keyworda
+    w kolejności dokumentu) ALBO `property_id` (`<Property id=…>`). Dokładnie jedno z dwojga.
+
+    Trzy postaci wartości (D-X-10, zmierzone na 7/7 celach): atrybut `value=` · TEKST elementu
+    (`>ED<`) · `location=` (inline/attachment) → **`ValueError`**, wołający mapuje na `blocked` —
+    wartość nie leży w nagłówku, więc łata nagłówka jej nie dosięgnie.
+
+    GUARD EXPECT: wyłuskane bajty po odescape'owaniu MUSZĄ się zgadzać z wartością, którą z tego
+    samego nagłówka wyjmuje parser XML. To CELOWO druga, niezależna derywacja — skan bajtowy
+    i `ElementTree` liczą to samo dwiema drogami i muszą się spotkać. Rozejście → `ValueError`,
+    NIGDY cichy zgadunek (łata trafiłaby w niewłaściwe bajty)."""
+    if (keyword is None) == (property_id is None):
+        raise ValueError("locate_value_span: podaj DOKŁADNIE jedno z keyword / property_id")
+
+    want = keyword.strip().upper() if keyword is not None else None
+    seen = 0
+    for start, end in _iter_xml_tags(xml_bytes):
+        tag = xml_bytes[start:end]
+        m = _XISF_TAG_NAME.match(tag)
+        if m is None or tag.startswith(b"</"):
+            continue
+        local = m.group(1).rsplit(b":", 1)[-1]
+        attrs = _tag_attrs(tag)
+
+        if want is not None:
+            if local != b"FITSKeyword" or b"name" not in attrs:
+                continue
+            ns, ne = attrs[b"name"]
+            name = _unescape_xml(tag[ns:ne].decode("utf-8"))
+            if not name or name.strip().upper() != want:
+                continue
+            if seen != idx:
+                seen += 1
+                continue
+            if b"value" not in attrs:
+                raise ValueError(f"XISF: karta {want}[{idx}] bez atrybutu value=")
+            vs, ve = attrs[b"value"]
+            span = (start + vs, start + ve)
+            break
+
+        if local != b"Property" or b"id" not in attrs:
+            continue
+        ids, ide = attrs[b"id"]
+        if _unescape_xml(tag[ids:ide].decode("utf-8")) != property_id:
+            continue
+        if b"location" in attrs:
+            raise ValueError(
+                f"XISF: własność {property_id} trzyma wartość w location= — poza nagłówkiem")
+        if b"value" in attrs:
+            vs, ve = attrs[b"value"]
+            span = (start + vs, start + ve)
+            break
+        if tag.rstrip().endswith(b"/>"):
+            raise ValueError(f"XISF: własność {property_id} pusta (element samozamykający)")
+        text_end = xml_bytes.find(b"<", end)
+        if text_end < 0:
+            raise ValueError(f"XISF: własność {property_id} bez domknięcia elementu")
+        span = (end, text_end)
+        break
+    else:
+        cel = f"karta {want}[{idx}]" if want is not None else f"własność {property_id}"
+        raise ValueError(f"XISF: {cel} nieobecna w nagłówku")
+
+    _assert_span_zgodny_z_parserem(xml_bytes, span, keyword=want, idx=idx, property_id=property_id)
+    return span
+
+
+def _assert_span_zgodny_z_parserem(xml_bytes, span, *, keyword, idx, property_id):
+    """GUARD do `locate_value_span`: to samo pytanie zadane `ElementTree`. Dwie derywacje muszą dać
+    ten sam tekst — inaczej łata pisałaby w niewłaściwe miejsce."""
+    root = ET.fromstring(xml_bytes)
+    expected = None
+    if keyword is not None:
+        seen = 0
+        for elem in root.iter():
+            if _local_name(elem.tag) != "FITSKeyword":
+                continue
+            name = elem.get("name")
+            if not name or name.strip().upper() != keyword:
+                continue
+            if seen == idx:
+                expected = elem.get("value", "")
+                break
+            seen += 1
+    else:
+        for elem in root.iter():
+            if _local_name(elem.tag) == "Property" and elem.get("id") == property_id:
+                expected = elem.get("value") if elem.get("value") is not None else (elem.text or "")
+                break
+    actual = _unescape_xml(xml_bytes[span[0]:span[1]].decode("utf-8"))
+    if actual != expected:
+        cel = f"karta {keyword}[{idx}]" if keyword is not None else f"własność {property_id}"
+        raise ValueError(
+            f"XISF: skan bajtowy i parser rozeszły się na {cel} ({actual!r} != {expected!r})")
+
+
+def _xisf_value_num(text):
+    """`value_num` karty XISF = PROJEKCJA liczbowa tekstu (D-X-4), nie zmiana typu: `value_type`
+    zostaje `'str'`, więc `_card_value` i tak odda `value_raw` i kontrakt z `read_xisf_header`
+    stoi. Dzięki projekcji porównania liczbowe działają na XISF tak jak na FITS. Nieskończoności
+    i NaN odrzucamy — nie są wartością do porównywania."""
+    try:
+        num = float(text)
+    except (TypeError, ValueError):
+        return None
+    return num if math.isfinite(num) else None
+
+
+@dataclass(frozen=True)
+class XisfMeta:
+    """Komplet zeznania + odcisków + MATERIAŁU ŁATY z jednego otwarcia pliku XISF (P6a).
+
+    `xml_bytes` = nagłówek 1:1 (materiał łaty i backupu undo); `padding` = bajty między końcem XML
+    a pierwszym blokiem danych, `reserved` = 4 B [12,16) — OBA kopiowane verbatim przy zapisie
+    (D-X-1: wypełnienie jest zerowe w 330/330 plików, ale kopia nie kosztuje nic i nie zakłada
+    niczego). `first_attachment` = MIN pozycji po WSZYSTKICH blokach `attachment:` (D-X-2) — sufit
+    nagłówka; `image_span` = attachment PIERWSZEGO `<Image>` w kolejności dokumentu, czyli
+    TOŻSAMOŚĆ klatki (`sha1_data`). To DWA różne fakty: sufit bierze minimum ze wszystkiego,
+    tożsamość bierze pierwszy obraz."""
+    header: dict
+    cards: list
+    header_hash: str
+    xml_bytes: bytes
+    padding: bytes
+    reserved: bytes
+    first_attachment: object          # int | None — brak bloku attachment (degenerat, D-X-13)
+    image_span: object                # (start, size) | None — wejście sha1_data
+
+    @property
+    def padding_complete(self):
+        """Czy bajty między nagłówkiem a pierwszym blokiem danych są KOMPLETNE — BRAMKA PISARZA.
+
+        `False` znaczy, że plik przeczy sam sobie (deklarowany blok wchodzi w nagłówek albo pliku
+        brakuje przed blokiem). Odczyt to przeżywa (zeznanie i tożsamość są całe), ale łata NIE
+        MA PRAWA ruszyć: pisarz składa plik z `xml + padding + ogon`, więc niekompletne wypełnienie
+        przesunęłoby bloki danych. Trzymamy tę arytmetykę TU, żeby pisarz nie liczył jej po raz
+        drugi — pomyłka o 4 B przy `XISF_XML_OFFSET` nadpisuje pierwszy blok mastera (§0)."""
+        if self.first_attachment is None:
+            return False
+        return len(self.padding) == self.first_attachment - XISF_XML_OFFSET - len(self.xml_bytes)
+
+
+def read_xisf_meta_full(path):
+    """Odczytaj nagłówek XISF (monolithic) jako `XisfMeta` — jedno przejście, wszystkie fakty.
+
+    Karty (D-X-4/4a) powstają w TEJ SAMEJ pętli co dict zeznania, z tego samego filtra i tej samej
+    wartości — lustro 1:1 nie jest tu obietnicą, tylko konstrukcją: rozjazd wymagałby dwóch pętli,
+    a jest jedna. `value_type` ZAWSZE `'str'` (XISF trzyma wartości jako tekst), `value_num` to
+    projekcja liczbowa (D-X-4); `comment` z atrybutu `comment` (D-X-5 — COMMENT/HISTORY mają
+    `value=""`, treść siedzi w komentarzu; dict zeznania zostaje NIETKNIĘTY).
+
+    `header_hash` = sha1 bajtów `[16, 16+hlen)`, BEZ wypełnienia (D-X-3) — odpowiednik
+    `sha1(hdr.tostring())` z FITS.
+
+    Read-only. Podnosi wyjątek przy złej sygnaturze / uciętym nagłówku / niepoprawnym XML — łapie
+    to `scan_file` (miękkie lądowanie W1), nie użytkownik."""
+    with open(path, "rb") as fh:
+        signature = fh.read(len(_XISF_SIGNATURE))
+        if signature != _XISF_SIGNATURE:
+            raise ValueError(f"nie XISF monolithic (sygnatura {signature!r})")
+        length_bytes = fh.read(_XISF_LENGTH_LEN)
+        if len(length_bytes) < _XISF_LENGTH_LEN:
+            raise ValueError("XISF: brak pola długości nagłówka")
+        (header_len,) = struct.unpack("<I", length_bytes)
+        reserved = fh.read(_XISF_RESERVED_LEN)
+        if len(reserved) < _XISF_RESERVED_LEN:
+            raise ValueError("XISF: brak pola reserved")
+        xml_bytes = fh.read(header_len)
+        if len(xml_bytes) < header_len:
+            raise ValueError(f"XISF: nagłówek XML ucięty ({len(xml_bytes)}/{header_len} B)")
+
+        root = ET.fromstring(xml_bytes)   # ParseError przy niepoprawnym XML → łapie scan_file
+        header, cards = {}, []
+        counts = {}
+        image_span = None
+        first_attachment = None
+        for elem in root.iter():
+            local = _local_name(elem.tag)
+            loc = (elem.get("location") or "").split(":")
+            if len(loc) == 3 and loc[0] == "attachment":
+                pos = int(loc[1])
+                # sufit nagłówka = MIN po WSZYSTKICH blokach (D-X-2); kolejność dokumentu pokrywa
+                # się dziś z bajtową w 330/330 plików, ale to POMIAR, nie gwarancja formatu.
+                first_attachment = pos if first_attachment is None else min(first_attachment, pos)
+                if local == "Image" and image_span is None:
+                    image_span = (pos, int(loc[2]))
+            if local != "FITSKeyword":
+                continue
+            name = elem.get("name")
+            if not name:                  # FITSKeyword bez nazwy — nic do zaadresowania, pomiń
+                continue
+            keyword = name.strip().upper()
+            value_raw = _unquote_fits(elem.get("value", ""))
+            idx = counts.get(keyword, 0)
+            counts[keyword] = idx + 1
+            cards.append(Card(keyword, idx, value_raw, _xisf_value_num(value_raw), "str",
+                              elem.get("comment") or None))
+            _put(header, keyword, value_raw)
+
+        # Wypełnienie czytamy BEST-EFFORT i NIGDY nie wywracamy na nim odczytu: bajty LEŻĄCE ZA
+        # nagłówkiem nie mogą unieważnić samego nagłówka. Plik z deklaracją bloku wchodzącą
+        # w nagłówek albo ucięty przed blokiem ma nadal czytelne zeznanie i tożsamość — gdyby
+        # czytnik tu rzucał, `scan_file` zdegradowałby go do W1 (`header=None`) i klatka straciłaby
+        # kamerę/kind. Sprzeczność jest faktem o ZAPISIE i tam ma zatrzymać robotę: bramką jest
+        # `padding_complete`, którą pisarz sprawdza przed łatą (D-X-2).
+        padding = b""
+        pad_len = (first_attachment - (XISF_XML_OFFSET + header_len)
+                   if first_attachment is not None else 0)
+        if pad_len > 0:
+            padding = fh.read(pad_len)
+
+    return XisfMeta(header=header, cards=cards,
+                    header_hash=hashlib.sha1(xml_bytes).hexdigest(),
+                    xml_bytes=xml_bytes, padding=padding, reserved=reserved,
+                    first_attachment=first_attachment, image_span=image_span)
+
+
 def read_xisf_meta(path):
     """Odczytaj nagłówek XISF (monolithic) jako `(dict, span)`: dict zeznania — TEN SAM kontrakt
     co `read_fits_header` (klucze FITS wielkimi literami; COMMENT/HISTORY w listach), z jedną
@@ -401,35 +720,12 @@ def read_xisf_meta(path):
 
     Podnosi wyjątek przy złej sygnaturze / uciętym nagłówku / niepoprawnym XML — skan nie zgaduje;
     łapie to `scan_file` (miękkie lądowanie W1), nie użytkownik.
+
+    Od P6a to NAKŁADKA na `read_xisf_meta_full` (SPOT — jedna derywacja zeznania dla obu wejść);
+    kontrakt `(dict, span)` bez zmian, `span` to nadal PIERWSZY `<Image>` w kolejności dokumentu.
     """
-    with open(path, "rb") as fh:
-        signature = fh.read(8)
-        if signature != _XISF_SIGNATURE:
-            raise ValueError(f"nie XISF monolithic (sygnatura {signature!r})")
-        length_bytes = fh.read(4)
-        if len(length_bytes) < 4:
-            raise ValueError("XISF: brak pola długości nagłówka")
-        (header_len,) = struct.unpack("<I", length_bytes)
-        fh.read(4)                        # 4 B reserved (wg specyfikacji zerowe) — pomijamy
-        xml_bytes = fh.read(header_len)
-    if len(xml_bytes) < header_len:
-        raise ValueError(f"XISF: nagłówek XML ucięty ({len(xml_bytes)}/{header_len} B)")
-    root = ET.fromstring(xml_bytes)       # ParseError przy niepoprawnym XML → łapie scan_file
-    out = {}
-    span = None
-    for elem in root.iter():
-        local = _local_name(elem.tag)
-        if local == "Image" and span is None:
-            loc = (elem.get("location") or "").split(":")
-            if len(loc) == 3 and loc[0] == "attachment":
-                span = (int(loc[1]), int(loc[2]))
-        if local != "FITSKeyword":
-            continue
-        name = elem.get("name")
-        if not name:                      # FITSKeyword bez nazwy — nic do zaadresowania, pomiń
-            continue
-        _put(out, name.strip().upper(), _unquote_fits(elem.get("value", "")))
-    return out, span
+    meta = read_xisf_meta_full(path)
+    return meta.header, meta.image_span
 
 
 def read_xisf_header(path):
@@ -476,7 +772,9 @@ def scan_file(path):
     cards = header_hash = hdu_index = compressed = span = None
     try:
         if p.suffix.lower() in XISF_SUFFIXES:
-            header, span = read_xisf_meta(spath)
+            xmeta = read_xisf_meta_full(spath)
+            header, cards, header_hash = xmeta.header, xmeta.cards, xmeta.header_hash
+            span = xmeta.image_span       # `hdu_index`/`compressed` zostają None (D-X-7: obce formatowi)
         else:
             meta = read_fits_meta(spath)
             header, cards = meta.header, meta.cards

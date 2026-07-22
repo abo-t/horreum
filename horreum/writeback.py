@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import sqlite3
 import tempfile
 from collections.abc import Callable
 
@@ -273,7 +274,10 @@ def commit(con, run_id, *, now, clock=None,
 
     Bramki defensywne (makro już odsiało przy stagingu, ale stan mógł się zmienić): brak location /
     `present=0` / `compressed` → skipped z powodem, wpisy 'skipped'. `clock` = źródło `applied_at`
-    commitu (domyślnie `now`)."""
+    commitu (domyślnie `now`).
+
+    PORAŻKA BACKUPU po udanym zapisie (D-X-14) → 'failed' z powodem, NIE wyjątek: plik jest już
+    zmieniony, więc pętla musi go domknąć (re-sync + status), a nie zostawić przebiegu w połowie."""
     clock = clock or (lambda: now)
     pending = [r for r in pending_for_run(con, run_id) if r["status"] == "pending"]
     groups = _group_by_location(pending)
@@ -332,10 +336,24 @@ def commit(con, run_id, *, now, clock=None,
             if commit_id is None:
                 commit_id = repo.insert_commit(con, run_id=run_id, now=clock(),
                                                summary=f"run {run_id}")
-            repo.insert_header_backup(
-                con, commit_id=commit_id, location_id=location_id, hdu_index=loc["hdu_index"],
-                header_text=res.backup_text, post_hash=res.post_hash)
+            # Backup PO mutacji pliku — jego porażka NIE może wywalić pętli (D-X-14): plik jest już
+            # zmieniony, więc wyjątek zostawiłby resztę przebiegu nietkniętą, a TEN plik bez re-syncu
+            # i bez statusu. Zamiast tego: re-sync (baza MUSI opisywać bajty, które leżą na dysku)
+            # + status 'failed' z powodem — „zapisane, ale nieodwracalne" jest faktem do zobaczenia,
+            # nie do zgadnięcia. (`hdu_index` NULL dla XISF już nie wybucha — migracja 0007.)
+            backup_error = None
+            try:
+                repo.insert_header_backup(
+                    con, commit_id=commit_id, location_id=location_id, hdu_index=loc["hdu_index"],
+                    header_text=res.backup_text, post_hash=res.post_hash)
+            except sqlite3.Error as exc:
+                backup_error = f"plik ZAPISANY, ale backup do undo NIE powstał: {type(exc).__name__}: {exc}"
             _resync(con, path, loc["volume"], now=now)      # PLIK→DB (T8)
+            if backup_error is not None:
+                _mark(rows, "failed", backup_error)
+                failed.append(FileResult(location_id, path, "failed", backup_error))
+                _report(path, "failed")
+                continue
             _mark(rows, "applied", None)
             applied.append(FileResult(location_id, path, "applied"))
             _report(path, "applied")

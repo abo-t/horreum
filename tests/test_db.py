@@ -8,7 +8,8 @@ def test_migracja_ustawia_user_version(tmp_path):
     con = db.connect(str(tmp_path / "h.db"))
     assert db._user_version(con) == 0
     db.migrate(con)
-    assert db._user_version(con) == db.SCHEMA_VERSION == 6   # 0002 init + 0003 wb + 0004 obs + 0005 rename + 0006 unreadable
+    # 0002 init + 0003 wb + 0004 obs + 0005 rename + 0006 unreadable + 0007 backup-hdu-nullable
+    assert db._user_version(con) == db.SCHEMA_VERSION == 7
     con.close()
 
 

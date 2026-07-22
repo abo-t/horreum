@@ -19,12 +19,16 @@ from importlib import resources
 # istniejących. Osobna od pending_changes (inny kształt path→path, inna kotwica mtime).
 # 0006 to PRZYROST (#13): znacznik czytelności kopii — location.unreadable_since (NULL=czytelna,
 # ISO=pierwsza nieudana próba). Zero zmian istniejących: ADD COLUMN, re-skan wypełnia (jak 0004).
+# 0007 to jedyna dotąd PRZEBUDOWA tabeli (P6/D-X-14): header_backups.hdu_index traci NOT NULL,
+# bo XISF nie zna pojęcia HDU (D-X-7) i pisarz XISF wybuchałby PO mutacji pliku, bez backupu.
+# Dane kopiowane 1:1 (tabela append-only = historia undo).
 MIGRATIONS = [
     (2, "0002_initial.sql"),
     (3, "0003_writeback.sql"),
     (4, "0004_observatory.sql"),
     (5, "0005_rename.sql"),
     (6, "0006_unreadable.sql"),
+    (7, "0007_backup_hdu_nullable.sql"),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 _KNOWN_VERSIONS = frozenset({0} | {v for v, _ in MIGRATIONS})

@@ -60,11 +60,17 @@ EXP_FRAME_REVIEW_FULL = 1      # ten sam masterflat (kopia nieczytelna → revie
 # — masterflat Sony A7R3 o rodzaju `unknown` (ten sam degenerat, co §5.2). Było 7 (6 masterdarków + on).
 EXP_CONFIG_REVIEW_FULL = 1     # `unknown` masterflat A7R3 — rodzaj wymaga decyzji, nie optyka
 EXP_XISF_KINDS = {"flat": 11, "light": 202, "master_dark": 38, "master_flat": 73, "unknown": 2}
-# Oś OBSERWATORIUM (PLAN_os_obserwatorium §8): GPS to FITS-only (0/326 XISF), więc 11 stanowisk i 15 409
-# klatek z GPS w OBU etapach; bez GPS 476 dopiero w FULL (150 fits + 326 xisf).
+# Oś OBSERWATORIUM (PLAN_os_obserwatorium §8) — RE-BASELINE P6b (D-X-8a), świadomy i zmierzony:
+# do P6a karty XISF NIE POWSTAWAŁY, więc GPS był de facto FITS-only. Od P6a skan wypełnia karty
+# także dla XISF, a backfill (`horreum backfill-xisf`) dociąga je do lokacji sprzed P6a — 202 klatki
+# XISF niosą SITELAT+SITELONG i wchodzą na oś. Wszystkie 202 mają JEDNĄ parę współrzędnych, 52 m od
+# stanowiska „Szczecin, Będargowo" → ZERO nowych stanowisk (EXP_OBSERVATORIES bez ruchu), rusza się
+# wyłącznie populacja. Kotwica jest STAGE-AWARE: etap IMPORT (dawca FITS, zero XISF) zostaje na
+# 15 409 — gdyby liczba tam drgnęła, znaczyłoby to zmianę w torze FITS, nie skutek P6.
 EXP_OBSERVATORIES = 11         # klaster 4 km: 24 distinct pary → 11 stanowisk (dom↔praca 4.385 km OSOBNE)
-EXP_GPS_FRAMES = 15409         # klatki z SITELAT+SITELONG (97.0%)
-EXP_NO_GPS_FULL = 476          # bez GPS w FULL: 150 fits + 326 xisf
+EXP_GPS_FRAMES_IMPORT = 15409  # dawca FITS: klatki z SITELAT+SITELONG (97.0%)
+EXP_GPS_FRAMES_FULL = 15611    # + 202 XISF z GPS w kartach (P6b; wszystkie do stanowiska #5)
+EXP_NO_GPS_FULL = 274          # bez GPS w FULL: 150 fits + 124 xisf (326 − 202 z GPS)
 
 
 def _ok(cond):
@@ -282,8 +288,9 @@ def check_criteria(con, summary, out):
         f"{no_obs} bez stanowiska:")
     for oid, la, lo, n in pops:
         out(f"    #{oid:<3} {la:>10.5f}, {lo:>10.5f}  frames={n}")
+    exp_gps = EXP_GPS_FRAMES_FULL if full else EXP_GPS_FRAMES_IMPORT
     crit(f"§5.10 {EXP_OBSERVATORIES} stanowisk (klaster 4 km, §8)", n_obs == EXP_OBSERVATORIES)
-    crit(f"§5.10 GPS-karty == {EXP_GPS_FRAMES} (§8, 97.0%)", gps_cards == EXP_GPS_FRAMES)
+    crit(f"§5.10 GPS-karty == {exp_gps} (§8; FULL niesie +202 XISF po P6b)", gps_cards == exp_gps)
     crit("§5.10 zero nieparsowalnego GPS (sonda: formaty czyste, 0 śmieci)", gps_null == 0)
     # Twarda brama na CZĘŚCIOWY/śmieciowy GPS (rec.#11): `gps_null` widzi tylko klatki z OBIEMA kartami,
     # więc lone-coord (jedna współrzędna → site_coords None → review) by mu umknął. review_summary łapie
@@ -294,7 +301,8 @@ def check_criteria(con, summary, out):
     crit("§5.10 populacje stanowisk domykają do przypisanych", sum(p[3] for p in pops) == sa)
     crit("§5.10 przypisane == GPS-karty (wszystkie sparsowane)", sa == gps_cards)
     if full:
-        crit(f"§5.10 bez GPS == {EXP_NO_GPS_FULL} (150 fits + 326 xisf)", no_obs == EXP_NO_GPS_FULL)
+        crit(f"§5.10 bez GPS == {EXP_NO_GPS_FULL} (150 fits + 124 xisf bez SITELAT/SITELONG)",
+             no_obs == EXP_NO_GPS_FULL)
 
     return results
 

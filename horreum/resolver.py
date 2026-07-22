@@ -148,7 +148,8 @@ def resolve_observatory(con, now):
     """Oś OBSERWATORIUM (PLAN_os_obserwatorium §2b): dla każdej klatki z GPS w `cards` (SITELAT/SITELONG,
     `value_raw` — string dla obu formatów) wyłoń stanowisko przez `repo.propose_observatory` (kotwica
     GEOMETRYCZNA, member-id) i przypisz. Brak GPS (oba raw None) → `observatory_id` NULL cicho (świadomy
-    brak, jak 326 XISF). GPS OBECNY-ale-nieparsowalny → NULL + zliczenie do JEDNEGO `observatory.review_
+    brak — kalibracja i klatki sprzed montażu GPS; XISF-y już tu NIE należą: od P6a/P6b mają karty,
+    więc 202 z nich wchodzą na oś). GPS OBECNY-ale-nieparsowalny → NULL + zliczenie do JEDNEGO `observatory.review_
     summary`. Iteracja `ORDER BY f.id` = pierwszy przebieg powtarzalny (§5 D4). Zwraca (new, assigned,
     gps_unparseable). Idempotentny: re-run zwraca te same id (anchor stabilny), zero nowych eventów."""
     rows = con.execute(
@@ -204,8 +205,11 @@ def review_state(con):
     """Policz kolejkę przeglądu ze STANU (read-only, zero zapisu). Po co i dlaczego DISTINCT — zob.
     `ReviewState`.
 
-    `kind_unknown` idzie po `EXISTS(header)`, NIE po karcie IMAGETYP: `cards` są FITS-only (klatki
-    XISF nie mają kart), więc predykat na kartach byłby ślepy na XISF. Predykat jest przy tym
+    `kind_unknown` idzie po `EXISTS(header)`, NIE po karcie IMAGETYP: kolejka przeglądu pyta o ZEZNANIE
+    (jeden wiersz na klatkę), nie o jego lustro. Do P6a `cards` były w dodatku FITS-only, więc predykat
+    na nich był wprost ŚLEPY na 326 XISF-ów — dziś karty ma już każdy czytelny format, ale reguła
+    zostaje: lustro może być niekompletne (plik nieparsowalny, lokacja sprzed backfillu), zeznanie
+    rozstrzyga. Predykat jest przy tym
     świadomie SZERSZY od dawnego eventu `kind.unmapped` (ten wymagał NIEPUSTEGO IMAGETYP): czytelne
     zeznanie z nierozpoznanym rodzajem wymaga decyzji tak samo jak zeznanie z rodzajem niezmapowanym
     — brak IMAGETYP był dotąd cichym NULL-em, którego raport nie pokazywał.

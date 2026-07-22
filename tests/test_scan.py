@@ -14,9 +14,10 @@ from astropy.io import fits
 
 from horreum import db
 from horreum.scan import (
-    ScanRecord, ScanSummary, _already_scanned, header_dict_from_cards, ingest_record,
-    iter_fits, iter_headers, locate_value_span, quote_fits, read_fits_header, read_fits_meta,
-    read_header, read_xisf_header, read_xisf_meta, read_xisf_meta_full, scan_file, scan_tree,
+    ScanRecord, ScanSummary, _already_scanned, backfill_xisf_headers, header_dict_from_cards,
+    ingest_record, iter_fits, iter_headers, locate_value_span, quote_fits, read_fits_header,
+    read_fits_meta, read_header, read_xisf_header, read_xisf_meta, read_xisf_meta_full,
+    scan_file, scan_tree,
 )
 
 NOW = "2026-06-28T12:00:00"
@@ -666,6 +667,74 @@ def test_xisf_span_pierwszy_image_w_dokumencie(tmp_path):
     hdr, span2 = read_xisf_meta(str(g))
     assert span2 is None
     assert scan_file(str(g)).sha1_data is None           # tożsamość nieobliczalna → None (PF-2 flaga)
+
+
+def _do_stanu_sprzed_p6a(con, *paths):
+    """Cofnij lokacje do stanu SPRZED P6a: `header_hash` NULL i zero kart — dokładnie tak wygląda
+    331 lokacji XISF w żywej bazie (skan zwracał wtedy dla XISF `None`)."""
+    for p in paths:
+        con.execute("DELETE FROM cards WHERE frame_id IN "
+                    "(SELECT frame_id FROM location WHERE path = ?)", (str(p),))
+        con.execute("UPDATE location SET header_hash = NULL WHERE path = ?", (str(p),))
+    con.commit()
+
+
+def test_backfill_xisf_doczytuje_karty_i_hash_bez_nowych_lokacji(tmp_path):
+    """D-X-8: sterownik celowany bierze DOKŁADNIE lokacje XISF bez `header_hash`, czyta je tą samą
+    ścieżką co skan (`scan_file`→`ingest_record`) i podaje `volume` Z WIERSZA — pominięcie volume
+    dałoby drugą lokację na ten sam plik. Po przebiegu zbiór kandydatów jest PUSTY (kotwica
+    idempotencji), a powtórka nie czyta dysku i nie dokłada eventów."""
+    con = db.open_db(str(tmp_path / "h.db"))
+    a = _write_xisf_attach(tmp_path, "a.xisf", b"\x11" * 16,
+                           keywords=[("INSTRUME", "'ZWO ASI2600MM Pro'"), ("SITELAT", "53.3885")])
+    b = _write_xisf_attach(tmp_path, "b.xisf", b"\x22" * 16, keywords=[("TELESCOP", "'ED'")])
+    for p in (a, b):
+        ingest_record(con, scan_file(str(p)), volume="V", now=NOW, summary=ScanSummary())
+    _do_stanu_sprzed_p6a(con, a, b)
+    assert con.execute("SELECT count(*) FROM cards").fetchone()[0] == 0
+
+    s = backfill_xisf_headers(con, now=NOW)
+
+    assert (s.rows, s.read, s.failed, s.remaining) == (2, 2, 0, 0)
+    assert s.scan.locations_refreshed == 2 and s.scan.headers_refreshed == 2
+    assert con.execute("SELECT count(*) FROM location").fetchone()[0] == 2      # ZERO nowych lokacji
+    assert con.execute("SELECT count(*) FROM location WHERE volume = '?'").fetchone()[0] == 0
+    assert con.execute("SELECT count(*) FROM location WHERE header_hash IS NULL").fetchone()[0] == 0
+    assert con.execute("SELECT count(*) FROM cards WHERE keyword = 'SITELAT'").fetchone()[0] == 1
+    # dziennik odróżnia backfill od skanu (D-X-8b)
+    assert con.execute("SELECT count(*) FROM event WHERE actor = 'backfill:xisf' "
+                       "AND verb = 'location.refreshed'").fetchone()[0] == 2
+    ev = con.execute("SELECT count(*) FROM event WHERE actor = 'backfill:xisf'").fetchone()[0]
+
+    s2 = backfill_xisf_headers(con, now=NOW)                  # powtórka = no-op (zero kandydatów)
+    assert (s2.rows, s2.read, s2.remaining) == (0, 0, 0)
+    assert con.execute("SELECT count(*) FROM event WHERE actor = 'backfill:xisf'").fetchone()[0] == ev
+    con.close()
+
+
+def test_backfill_xisf_nieczytelna_kopia_zostaje_kandydatem_bez_zapisu(tmp_path):
+    """Kopia, której nie da się otworzyć (tu: skasowana między SELECT-em a odczytem), idzie do
+    `failed` i ZOSTAJE kandydatem — backfill nie jest passem obecności ani skanem, więc nie zdejmuje
+    `present` i nie stawia markera. Plik NIEparsowalny (XISF z zepsutym XML) też zostaje kandydatem,
+    bo `header_hash` się nie rodzi — P6 takich plików nie naprawia."""
+    con = db.open_db(str(tmp_path / "h.db"))
+    ok = _write_xisf_attach(tmp_path, "ok.xisf", b"\x33" * 16, keywords=[("TELESCOP", "'RC8'")])
+    gone = _write_xisf_attach(tmp_path, "gone.xisf", b"\x44" * 16, keywords=[("TELESCOP", "'RC6'")])
+    for p in (ok, gone):
+        ingest_record(con, scan_file(str(p)), volume="V", now=NOW, summary=ScanSummary())
+    _do_stanu_sprzed_p6a(con, ok, gone)
+    Path(gone).unlink()
+
+    s = backfill_xisf_headers(con, now=NOW)
+
+    assert (s.rows, s.read, s.failed, s.remaining) == (2, 1, 1, 1)
+    assert "gone.xisf" in s.failed_paths[0]
+    row = con.execute("SELECT id, header_hash, present, unreadable_since FROM location WHERE path = ?",
+                      (str(gone),)).fetchone()
+    assert (row["header_hash"], row["present"], row["unreadable_since"]) == (None, 1, None)
+    assert con.execute("SELECT count(*) FROM event WHERE actor = 'backfill:xisf' AND target = ?",
+                       (f"location:{row['id']}",)).fetchone()[0] == 0        # ZERO zapisu i ZERO śladu
+    con.close()
 
 
 def test_scan_file_w1_odciski_none(tmp_path):

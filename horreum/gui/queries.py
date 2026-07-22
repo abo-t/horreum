@@ -291,8 +291,10 @@ def filter_facets(con):
 
 
 def all_frame_ids(con):
-    """UNIWERSUM filtra = WSZYSTKIE frame (w tym XISF bez cards i zniknięte present=0 — F1). Baza dla
-    `not_exists` i `filter=None`. NIGDY z `DISTINCT frame_id FROM cards` (gubiłoby XISF). Zwraca set[int]."""
+    """UNIWERSUM filtra = WSZYSTKIE frame (w tym BEZ kart i zniknięte present=0 — F1). Baza dla
+    `not_exists` i `filter=None`. NIGDY z `DISTINCT frame_id FROM cards`: do P6a gubiłoby cały XISF,
+    dziś gubi klatki bez czytelnego zeznania (szkielety, kopie nieczytelne) — a te są w bazie
+    właśnie po to, żeby je było widać. Zwraca set[int]."""
     return {int(r[0]) for r in con.execute("SELECT id FROM frame").fetchall()}
 
 
@@ -360,8 +362,9 @@ def leaf_frame_ids(con, kind, keyword, p1=None, p2=None):
 
 
 def keyword_facets(con):
-    """Distinct keywordy z `cards` + pokrycie (ile klatek ma daną kartę) do panelu Pól. Cards są FITS-only
-    (XISF bez cards — D-G). Zwraca wiersze: keyword, n (COUNT DISTINCT frame_id), malejąco po pokryciu.
+    """Distinct keywordy z `cards` + pokrycie (ile klatek ma daną kartę) do panelu Pól. Od P6a/P6b
+    karty mają OBA formaty — XISF też (dawniej FITS-only, D-G), więc panel przestał być ślepy na
+    mastery. Zwraca wiersze: keyword, n (COUNT DISTINCT frame_id), malejąco po pokryciu.
     UWAGA nazewnicza: „facets" tu = pokrycie KEYWORDÓW (kolumny gridu); listwa facetów F4 (Obiekt/Filtr/
     Rodzaj/Teleskop/Noc) to funkcje `facet_*` niżej — INNY fakt (F4R#9)."""
     return con.execute(
@@ -477,8 +480,10 @@ def review_frame_ids(con):
 
 # ============================================================ PORTFEL NAŚWIETLEŃ (F7, PLAN_ux_redesign §8)
 # „Ile mam godzin na obiekt, per filtr?". STAŁY literał + `json_each(?)`. Godziny z `header.exptime`
-# przez `frame JOIN header` — NIE z cards (cards FITS-only, `rec.cards=None` dla XISF → zaniżenie o XISF,
-# R#8). KIND-AWARE `kind='light'` (EXPTIME masterlighta = czas ZINTEGROWANY → wliczony podwoiłby godziny).
+# przez `frame JOIN header` — NIE z cards. Powód pierwotny (cards FITS-only) ZNIKNĄŁ po P6a/P6b, ale
+# reguła zostaje: `header` to ZEZNANIE (jeden wiersz na klatkę, pola gorące), a `cards` to jego lustro
+# tekstowe — liczby bierzemy ze źródła, nie z odbicia. KIND-AWARE `kind='light'` (EXPTIME masterlighta
+# = czas ZINTEGROWANY → wliczony podwoiłby godziny).
 # header 1:1 z frame (PK frame_id) → frame w >1 present location = JEDEN wiersz, `SUM` bez inflacji.
 
 

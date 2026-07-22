@@ -30,7 +30,7 @@ Operatory: eq ne gt lt ge le contains startswith exists not_exists (regex POMINI
   i numeryczne 800 nie ginie); czysty tekst → value_raw. `ne` = EXISTS(karta ∧ value≠?) — NIE trafia
   klatek bez keyworda (parytet dawcy; UI dokumentuje, osobne „brak wartości" = not_exists).
 - exists/not_exists po istnieniu karty. `not_exists` = UNIWERSUM − {frame z kartą} (uniwersum =
-  WSZYSTKIE frame, w tym XISF bez cards i zniknięte — F1). `filter=None` → uniwersum.
+  WSZYSTKIE frame, w tym klatki BEZ kart i zniknięte — F1). `filter=None` → uniwersum.
 
 `leaf_fn(kind, kw, p1, p2) -> set[int]` — jeden literał SELECT per `kind` w `gui/queries.py`.
 `universe_fn() -> set[int]` — `SELECT id FROM frame` (wszystkie frame).

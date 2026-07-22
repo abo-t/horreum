@@ -1071,6 +1071,74 @@ def canonize_root(root):
     return s
 
 
+@dataclass
+class BackfillSummary:
+    """Zliczenia jednego przebiegu `backfill_xisf_headers` — kotwica idempotencji jest w `remaining`."""
+    rows: int = 0             # lokacje wybrane sterownikiem (kandydaci)
+    read: int = 0             # realnie odczytane z dysku (scan_file nie rzucił)
+    failed: int = 0           # odczyt/`stat` padł → ZERO zapisu dla tej lokacji
+    remaining: int = 0        # kandydaci PO przebiegu (0 = komplet; >0 = pliki nie do przeczytania)
+    failed_paths: list = field(default_factory=list)
+    scan: ScanSummary = field(default_factory=ScanSummary)   # eventy/odświeżenia z `ingest_record`
+
+
+def _xisf_backfill_rows(con):
+    """Kandydaci backfillu (D-X-8): lokacje XISF BEZ `header_hash`, obecne. STAŁY literał SELECT —
+    ten sam, którym mierzymy `remaining`, więc „pusto po przebiegu" znaczy dokładnie to samo, co
+    „nie ma czego backfillować" (jedno pytanie, nie dwa)."""
+    return con.execute(
+        "SELECT l.id, l.volume, l.path FROM location l JOIN frame f ON f.id = l.frame_id "
+        "WHERE f.filetype = 'xisf' AND l.header_hash IS NULL AND l.present = 1 ORDER BY l.id"
+    ).fetchall()
+
+
+def backfill_xisf_headers(con, *, now, progress=None):
+    """STEROWNIK CELOWANY (P6/D-X-8): dociągnij `cards` + `header_hash` do lokacji XISF, które
+    powstały PRZED P6a (skan zwracał dla XISF `None`). Zwraca `BackfillSummary`.
+
+    DLACZEGO nie `scan_tree --force`: globalny re-skan czytałby 839 GB i nie miałby kotwicy
+    „skończone". Sterownik pyta bazę o DOKŁADNIE te lokacje, których dotyczy brak
+    (`filetype='xisf' AND header_hash IS NULL AND present=1`), i po przebiegu ten sam SELECT jest
+    pusty — idempotencja za darmo (`remaining`). Ponowne wywołanie = no-op bez czytania dysku.
+
+    JEDNA ŚCIEŻKA ZAPISU (SPOT): `scan_file` → `ingest_record` — ta sama, którą chodzi skan i import.
+    `volume` bierzemy Z WIERSZA (pominięcie dałoby 331 NOWYCH lokacji pod `volume='?'`).
+    `ORDER BY l.id` = determinizm dla 5 klatek o dwóch kopiach: obie lokacje są kandydatami, zeznanie
+    zostaje po OSTATNIEJ przeczytanej (świadome, jednorazowe last-read-wins wbrew regule „zeznanie
+    z pierwszego wystąpienia" — bajty attachmentu są identyczne, więc różni je najwyżej nagłówek).
+
+    SKUTKI ŚWIADOME (D-X-8a/8b): `header_hash` NULL→wartość jest zmianą faktu kopii, więc
+    `refresh_location` odświeża zeznanie i wstawia karty — event PARAMI, nie tylko dla klatek z GPS.
+    Zmierzone na żywej `horreum_pf4.db` 2026-07-22: 330 `location.refreshed` + 330 `header.refreshed`
+    + 1 `frame.review`, wszystkie z `actor='backfill:xisf'` (dziennik ma je odróżniać od skanu).
+    Karty SITELAT/SITELONG stają się widoczne dla `resolver.resolve_observatory`, więc NASTĘPNY
+    `resolve` przypisze XISF-om stanowisko — to jest zamierzone, nie efekt uboczny.
+
+    Plik nieczytelny (`scan_file` rzuca) → `failed` + ścieżka do raportu, ZERO zapisu: backfill nie
+    jest passem obecności ani skanem, więc nie stawia markerów i nie zdejmuje obecności — od tego
+    są `scan_tree` i `presence`. Plik czytelny, ale bez parsowalnego nagłówka (XISF z `ParseError`)
+    idzie normalną ścieżką `ingest_record` (marker `unreadable_since` — kopia FAKTYCZNIE nieczytelna)
+    i zostaje w `remaining`."""
+    rows = _xisf_backfill_rows(con)
+    s = BackfillSummary(rows=len(rows))
+    total = len(rows)
+    for i, row in enumerate(rows, 1):
+        path = row["path"]
+        try:
+            rec = scan_file(path)
+        except Exception as exc:               # brak pliku / I/O — raport, nie zapis (patrz docstring)
+            s.failed += 1
+            s.failed_paths.append(f"{path}: {type(exc).__name__}: {exc}")
+        else:
+            s.read += 1
+            ingest_record(con, rec, volume=row["volume"], now=now, summary=s.scan,
+                          actor="backfill:xisf")
+        if progress is not None:
+            progress(i, total, path)
+    s.remaining = len(_xisf_backfill_rows(con))
+    return s
+
+
 def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now,
               progress=None, should_cancel=None):
     """Pętla PŁASKA: każdy plik nagłówkonośny w `root` oceniany RAZ i wciągany przez jedną klingę

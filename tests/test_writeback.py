@@ -7,6 +7,8 @@ dwukrotne undo blocked, expected_header_hash blokuje stale-pending (R#7)."""
 
 from __future__ import annotations
 
+import sqlite3
+
 import numpy as np
 import pytest
 from astropy.io import fits
@@ -124,6 +126,35 @@ def test_stale_pending_blocked_after_external_change(tmp_path):
     _scan_in(con, p)
     res = writeback.commit(con, "R", now=NOW)
     assert len(res.blocked) == 1 and not res.applied
+    con.close()
+
+
+def test_porazka_backupu_po_zapisie_daje_failed_nie_wyjatek(tmp_path, monkeypatch):
+    """D-X-14: backup wstawiany jest PO `os.replace`. Gdy padnie (dawniej: `hdu_index NOT NULL`
+    kontra NULL dla XISF), pętla commitu NIE MOŻE wybuchnąć — plik jest już zmieniony. Kontrakt:
+    baza re-syncowana do bajtów z dysku + status `failed` z powodem; reszta przebiegu leci dalej."""
+    con = db.open_db(str(tmp_path / "h.db"))
+    p = tmp_path / "f.fits"
+    _write_fits(p, TELESCOP="RC8", IMAGETYP="Light")
+    fr = _scan_in(con, p)
+    lid = _loc_id(con, p)
+    hh = con.execute("SELECT header_hash FROM location WHERE id=?", (lid,)).fetchone()["header_hash"]
+    _stage(con, "R", lid, "TELESCOP", "set", "EQ6", "str", expected=hh)
+
+    def _boom(*a, **kw):
+        raise sqlite3.IntegrityError("NOT NULL constraint failed: header_backups.hdu_index")
+    monkeypatch.setattr(writeback.repo, "insert_header_backup", _boom)
+
+    res = writeback.commit(con, "R", now=NOW)                 # ZERO wyjątku z pętli
+    assert len(res.failed) == 1 and not res.applied
+    assert "backup do undo NIE powstal" in res.failed[0].reason.replace("ł", "l")
+    assert fits.getheader(str(p))["TELESCOP"] == "EQ6"        # plik ZMIENIONY (to nie jest rollback)
+    # baza opisuje bajty z dysku: re-sync przeszedł mimo braku backupu
+    assert con.execute("SELECT telescop FROM header WHERE frame_id=?",
+                       (fr["id"],)).fetchone()["telescop"] == "EQ6"
+    assert con.execute("SELECT count(*) FROM header_backups").fetchone()[0] == 0
+    st = con.execute("SELECT status, reason FROM pending_changes WHERE run_id='R'").fetchone()
+    assert st["status"] == "failed" and st["reason"]
     con.close()
 
 

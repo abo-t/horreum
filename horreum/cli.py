@@ -44,6 +44,12 @@ def main(argv=None):
     p_delta = sub.add_parser("delta", help="delta do review (read-only): %% obiektu + nierozstrzygnięte")
     p_delta.add_argument("db", help="ścieżka pliku bazy")
 
+    p_bx = sub.add_parser("backfill-xisf",
+                          help="doczytaj cards+header_hash do lokacji XISF sprzed P6a (jednorazowo)")
+    p_bx.add_argument("db", help="ścieżka pliku bazy")
+    p_bx.add_argument("--limit", type=int, default=20,
+                      help="ile nieudanych odczytów wypisać (domyślnie 20)")
+
     p_imp = sub.add_parser("import-fitsmirror",
                            help="zasil ŚWIEŻĄ bazę z bazy dawcy fitsmirror (dawca read-only)")
     p_imp.add_argument("donor", help="ścieżka bazy dawcy (fitsmirror.db)")
@@ -136,6 +142,20 @@ def main(argv=None):
         con.close()
         print(_format_delta(args.db, rep))               # ASCII (cp1250)
         return 0
+    if args.cmd == "backfill-xisf":
+        from .scan import backfill_xisf_headers          # lazy (astropy przez scan)
+        now = datetime.now(timezone.utc).isoformat()
+        con = db.open_db(args.db)
+
+        def heartbeat(done, total, _path):               # puls co 50 (odczyt nagłówków z NAS)
+            if done % 50 == 0 or done == total:
+                print(f"  backfill: {done}/{total}")
+        s = backfill_xisf_headers(con, now=now, progress=heartbeat)
+        con.close()
+        print(_format_backfill_xisf(args.db, s, limit=args.limit))
+        # Kod wyjscia mowi o KOMPLETNOSCI: 1 = zostali kandydaci (pliki nie do przeczytania),
+        # wiec „przebieg sie udal" nie znaczy „nic nie zostalo".
+        return 1 if s.remaining else 0
     if args.cmd == "import-fitsmirror":
         from .import_fitsmirror import ImportAbort, import_fitsmirror   # lazy (astropy)
         now = datetime.now(timezone.utc).isoformat()
@@ -266,6 +286,24 @@ def _format_import(donor_path, db_path, s):
     lines.append(f"  bramki 4.6 {status}: {gates}")
     for fail in s.gate_failures:
         lines.append(f"    FAIL {fail}")
+    return "\n".join(lines)
+
+
+def _format_backfill_xisf(db_path, s, *, limit):
+    """Raport backfillu XISF (ASCII — konsola cp1250). Liczba wiodaca = KANDYDACI PO przebiegu:
+    0 znaczy „komplet", a nie „nic nie zostalo do zrobienia" — to dwie rozne rzeczy."""
+    sc = s.scan
+    lines = [f"Horreum backfill-xisf {db_path}:",
+             f"  kandydaci: {s.rows}; odczytane: {s.read}; nieudane odczyty: {s.failed}",
+             f"  odswiezone kopie: {sc.locations_refreshed}; odswiezone zeznania: {sc.headers_refreshed}",
+             f"  ZOSTALO kandydatow: {s.remaining}"]
+    for p in s.failed_paths[:limit]:
+        lines.append(f"    NIEUDANY {p}")
+    if len(s.failed_paths) > limit:
+        lines.append(f"    ... (+{len(s.failed_paths) - limit} wiecej; zwieksz --limit)")
+    if s.remaining:
+        lines.append("  UWAGA: kandydaci zostali -- pliki, ktorych naglowka nie da sie sparsowac "
+                     "(P6 ich NIE naprawia) albo kopie nie do odczytania")
     return "\n".join(lines)
 
 

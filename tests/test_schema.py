@@ -1,5 +1,9 @@
 """Schemat 0002 + 0003 — tabele/widoki istnieją, kształt zgodny z briefem przejścia §8
 i briefem writebacku §2 (staging krok 4)."""
+import sqlite3
+
+import pytest
+
 from horreum import db
 
 EXPECTED_TABLES = {
@@ -81,11 +85,11 @@ def test_szkielet_przyszly_pusty(tmp_path):
     con.close()
 
 
-def test_user_version_v6_po_migracji(tmp_path):
-    """0006 podnosi user_version do 6 (świeża baza leci 0002→0003→0004→0005→0006 sekwencyjnie)."""
+def test_user_version_v7_po_migracji(tmp_path):
+    """0007 podnosi user_version do 7 (świeża baza leci 0002→…→0007 sekwencyjnie)."""
     con = db.open_db(str(tmp_path / "h.db"))
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 6
-    assert db.SCHEMA_VERSION == 6
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 7
+    assert db.SCHEMA_VERSION == 7
     con.close()
 
 
@@ -98,9 +102,55 @@ def test_0006_marker_czytelnosci_kopii(tmp_path):
     assert "unreadable_since" in loc_cols
     con.close()
     con2 = db.open_db(path)                              # ponowna migracja: no-op, nie duplikuje kolumny
-    assert con2.execute("PRAGMA user_version").fetchone()[0] == 6
+    assert con2.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
     assert {r[1] for r in con2.execute("PRAGMA table_info(location)")} == loc_cols
     con2.close()
+
+
+def test_0007_backup_hdu_nullable_z_danymi(tmp_path):
+    """0007 (P6/D-X-14): `header_backups.hdu_index` NULLABLE — XISF nie ma HDU (D-X-7), a backup
+    z NULL-em musi wejść PRZED `os.replace`, nie wybuchnąć po nim. Przebudowa tabeli PRZENOSI dane
+    (append-only = historia undo) i odtwarza resztę kontraktu: FK, UNIQUE, CHECK, indeks."""
+    path = str(tmp_path / "h.db")
+    con = db.connect(path)
+    con.executescript(db._migration_sql("0002_initial.sql"))     # zatrzymaj się na v3 (przed 0007)
+    con.executescript(db._migration_sql("0003_writeback.sql"))
+    con.execute("PRAGMA user_version = 3")
+    con.execute("INSERT INTO frame(sha1_data, kind, filetype, first_seen_at) "
+                "VALUES ('s1','light','fits','t')")
+    con.execute("INSERT INTO location(frame_id, volume, path) VALUES (1,'V','p')")
+    con.execute("INSERT INTO location(frame_id, volume, path) VALUES (1,'V','p2')")   # kopia XISF
+    con.execute("INSERT INTO commits(run_id) VALUES ('r1')")
+    con.execute("INSERT INTO header_backups(commit_id, location_id, hdu_index, header_text, post_hash) "
+                "VALUES (1, 1, 0, 'SIMPLE = T', 'h0')")
+    con.commit()
+    con.close()
+
+    con = db.open_db(path)                                       # v3 → v7 (0007 przebudowuje tabelę)
+    assert con.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
+    row = con.execute("SELECT commit_id, location_id, hdu_index, header_text, post_hash "
+                      "FROM header_backups").fetchone()
+    assert tuple(row) == (1, 1, 0, 'SIMPLE = T', 'h0')           # stary wiersz PRZEŻYŁ przebudowę
+    hdu = {r[1]: r for r in con.execute("PRAGMA table_info(header_backups)")}["hdu_index"]
+    assert hdu[3] == 0                                            # notnull zdjęty
+    con.execute("INSERT INTO header_backups(commit_id, location_id, hdu_index, header_text, post_hash) "
+                "VALUES (1, 2, NULL, '<xisf/>', 'h1')")           # ← przed 0007: IntegrityError
+    assert con.execute("SELECT count(*) FROM header_backups WHERE hdu_index IS NULL").fetchone()[0] == 1
+    con.rollback()
+    # kontrakt reszty kolumn odtworzony 1:1 (przebudowa nie jest okazją do rozluźnienia)
+    for sql in (
+        "INSERT INTO header_backups(commit_id, location_id, hdu_index, header_text, post_hash) "
+        "VALUES (1, 2, NULL, '', 'h')",                           # CHECK length > 0
+        "INSERT INTO header_backups(commit_id, location_id, hdu_index, header_text, post_hash) "
+        "VALUES (999, 2, NULL, 'x', 'h')",                        # FK commits
+        "INSERT INTO header_backups(commit_id, location_id, hdu_index, header_text, post_hash) "
+        "VALUES (1, 1, NULL, 'x', 'h')",                          # UNIQUE(commit_id, location_id)
+    ):
+        with pytest.raises(sqlite3.IntegrityError):
+            con.execute(sql)
+        con.rollback()
+    assert "idx_header_backups_commit" in _names(con, "index")
+    con.close()
 
 
 def test_os_obserwatorium_tabela_widok_kolumna(tmp_path):

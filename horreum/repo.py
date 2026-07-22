@@ -181,14 +181,22 @@ def add_location(con, *, frame_id, volume, path, drive_letter=None, tier=None, m
 # Kolumny-fakty kopii na location — wspólna lista dla diffu w `refresh_location`. `unreadable_since`
 # TU (#13): przejście markera (np. udany odczyt gaszący go przy niezmienionym mtime) samo w sobie
 # jest zmianą faktu kopii — bez tego early-return `not changed` nigdy by markera nie zgasił.
+# `present` TU (P5/D-V-6): udany re-odczyt DOWODZI obecności, więc powrót kopii (0→1) jest zmianą
+# faktu i idzie do payloadu `location.refreshed` — ślad zmartwychwstania bez osobnego czasownika.
+# SPOT: każda nazwa z tej krotki MUSI występować w literale UPDATE niżej (pinuje test strukturalny
+# `test_presence.py::test_location_facts_pokrywaja_update`) — inaczej diff wykrywa zmianę, której
+# UPDATE nie zapisuje, i event leci w nieskończoność co skan.
 _LOCATION_FACTS = ("mtime", "file_sha1", "header_hash", "hdu_index", "compressed", "size_bytes",
-                   "unreadable_since")
+                   "unreadable_since", "present")
 
 
 def rebind_location(con, *, location_id, frame_after, now, actor="scan"):
     """PODMIANA TREŚCI pod znaną ścieżką (R3-b1): przepnij `location.frame_id` na nową tożsamość
     + `event(location.rebound)` `{frame_before, frame_after}`. Stary frame ZOSTAJE (append-only,
-    historia w eventach) — bez lokacji podchwyci go przyszły pass zniknięć. Już przepięta → False
+    historia w eventach) — bez ŻADNEJ lokacji. UWAGA (P5): pass zniknięć takiego frame'a NIE
+    podchwyci — działa na LOKACJACH, a tu nie została ani jedna (`vanished_frames` też go wyklucza
+    guardem `EXISTS`, `gui/queries.py:516-520`). Licznik `orphan_frames` = osobna, tania decyzja;
+    dopóki jej nie ma, osierocone frame'y są widoczne wyłącznie przez `location.rebound`. Już przepięta → False
     (idempotencja). Guard+UPDATE w `_immediate` (TOCTOU wobec równoległego writera)."""
     with _immediate(con):
         row = con.execute(
@@ -205,8 +213,9 @@ def rebind_location(con, *, location_id, frame_after, now, actor="scan"):
 
 
 def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_hash,
-                     hdu_index, compressed, size_bytes, unreadable_since, now, actor="scan",
-                     raw_json=None, cards=None, hot_fields=None, camera_id=None, kind=None):
+                     hdu_index, compressed, size_bytes, unreadable_since, present, now,
+                     actor="scan", raw_json=None, cards=None, hot_fields=None, camera_id=None,
+                     kind=None):
     """Re-odczyt ZNANEJ `(volume, path)` o NIEZMIENIONEJ tożsamości frame'a — kontrakt pełny
     brief §2 (R1#10 + R2#2/#7 + R3-b), domyka dług „mtime po re-odczycie nieaktualizowany":
 
@@ -225,6 +234,13 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
       idzie do payloadu `location.refreshed` jako `{unreadable_since: {before, after}}`. Parametr
       WYMAGANY (bez domyślnego): `None` znaczy „POTWIERDZAM udany odczyt pliku", nie „nie wiem" —
       domyślne `None` byłoby cichym wektorem gaszenia alarmu, gdyby wołający zapomniał go policzyć.
+    - **`present` (P5, D-V-6)**: obecność kopii — TEN SAM reżim dowodowy co `unreadable_since`.
+      Parametr WYMAGANY: `1` znaczy „POTWIERDZAM, że plik pod tą ścieżką ISTNIEJE" (wołający właśnie
+      go zestatował/przeczytał), nie „pewnie jest". Zmartwychwstanie (0→1) jest zmianą faktu, więc
+      idzie do payloadu `location.refreshed` — pass obecności nie musi go osobno wykrywać.
+      Domyślnej wartości NIE dodawać: przesłanka „każdy wołający właśnie czytał plik" jest prawdziwa
+      przez przypadek, nie przez kontrakt (`import_fitsmirror` karmi `ingest_record` z cache'u dawcy).
+      Zdejmowanie obecności (1→0) NIE należy tu — to `mark_location_vanished` (dowód nieobecności).
 
     `hot_fields` = dict kolumn `header` (jak `extract_header`); `camera_id`/`kind` = pochodne
     POLICZONE przez wołającego z nowego dictu (emergencja kamery = osobny, idempotentny
@@ -234,12 +250,12 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
     historia mieszka w `event`."""
     after = {"mtime": mtime, "file_sha1": file_sha1, "header_hash": header_hash,
              "hdu_index": hdu_index, "compressed": compressed, "size_bytes": size_bytes,
-             "unreadable_since": unreadable_since}
+             "unreadable_since": unreadable_since, "present": present}
     result = {"facts": False, "header": False, "rederived": False}
     with _immediate(con):
         row = con.execute(
             "SELECT mtime, file_sha1, header_hash, hdu_index, compressed, size_bytes, "
-            "unreadable_since FROM location WHERE id = ?", (location_id,)).fetchone()
+            "unreadable_since, present FROM location WHERE id = ?", (location_id,)).fetchone()
         if row is None:
             raise ValueError(f"location:{location_id} nie istnieje")
         changed = {k: {"before": row[k], "after": after[k]}
@@ -248,9 +264,10 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
             return result
         con.execute(
             "UPDATE location SET mtime = ?, file_sha1 = ?, header_hash = ?, hdu_index = ?, "
-            "compressed = ?, size_bytes = ?, unreadable_since = ?, last_verified_at = ? WHERE id = ?",
+            "compressed = ?, size_bytes = ?, unreadable_since = ?, present = ?, "
+            "last_verified_at = ? WHERE id = ?",
             (mtime, file_sha1, header_hash, hdu_index, compressed, size_bytes, unreadable_since,
-             now, location_id))
+             present, now, location_id))
         emit_event(con, actor=actor, verb="location.refreshed",
                    target=f"location:{location_id}", now=now, payload=changed)
         result["facts"] = True
@@ -317,22 +334,72 @@ def refresh_location_unreadable(con, *, location_id, sha1_data, path, mtime, rea
     (`scan._already_scanned`, `unreadable_since IS NULL`) re-czyta oznaczoną kopię aż do wyzdrowienia
     (udany odczyt zgasi marker przez `refresh_location`). Gaśnie WYŁĄCZNIE po udanym odczycie.
 
+    PRZESŁANKA WOŁANIA (P5, D-V-8): **plik ISTNIEJE** — wołający tego dowiódł (zahaszował go albo
+    zestatował). Dlatego funkcja ustawia `present = 1`: kopia nieczytelna-ale-obecna to legalny stan
+    (marker + obecność), a kopia, której NIE MA, należy do `mark_location_vanished` — nigdy tu.
+    Bez tego kopia, która wróciła po zniknięciu i znów padła na odczycie, zostawałaby `present=0`
+    z markerem, czyli w hybrydzie zakazanej przez inwariant `present=0 ⇒ unreadable_since IS NULL`.
+
     ZWRACA bool (czy coś zmieniono). Zmiana zachodzi gdy `mtime` się różni LUB marker jest NULL
-    (pierwsze oznaczenie). QUIET: powtórna awaria bez zmiany mtime na już-oznaczonej kopii = cichy
-    no-op (`False`, BEZ eventu) — stan już alarmuje, dziennik bez spamu review co skan."""
+    (pierwsze oznaczenie) LUB kopia była oznaczona jako zniknięta (`present=0` → powrót). QUIET:
+    powtórna awaria bez zmiany mtime na już-oznaczonej i obecnej kopii = cichy no-op (`False`, BEZ
+    eventu) — stan już alarmuje, dziennik bez spamu review co skan."""
     with _immediate(con):
         row = con.execute(
-            "SELECT mtime, unreadable_since FROM location WHERE id = ?", (location_id,)).fetchone()
+            "SELECT mtime, unreadable_since, present FROM location WHERE id = ?",
+            (location_id,)).fetchone()
         if row is None:
             raise ValueError(f"location:{location_id} nie istnieje")
-        if row["mtime"] == mtime and row["unreadable_since"] is not None:
+        if row["mtime"] == mtime and row["unreadable_since"] is not None and row["present"]:
             return False                              # powtórna awaria bez zmiany — cichy no-op (QUIET)
         con.execute(
-            "UPDATE location SET mtime = ?, last_verified_at = ?, "
+            "UPDATE location SET mtime = ?, last_verified_at = ?, present = 1, "
             "unreadable_since = COALESCE(unreadable_since, ?) WHERE id = ?",
             (mtime, now, now, location_id))
         emit_event(con, actor=actor, verb="frame.review", target=f"sha1:{sha1_data}", now=now,
                    reason=f"kopia nieczytelna: {reason}", payload={"path": path})
+    return True
+
+
+def mark_location_vanished(con, *, location_id, expected_path, root, run_id, now,
+                           actor="presence", forced=False):
+    """ZDJĘCIE OBECNOŚCI kopii (P5/#7): `present = 0` + zgaszenie markera + `event(location.vanished)`.
+    Jedyna droga zapisu `present=0` w całym pniu — dowód nieobecności zbiera wołający
+    (`presence.check`: `os.lstat` → `ENOENT`/`ENOTDIR`; backstop skanu: ten sam test na ścieżce błędu).
+
+    APPEND-ONLY: wiersz `location` ZOSTAJE (tożsamość `sha1_data` frame'a i historia nietknięte) —
+    znika wyłącznie twierdzenie „plik pod tą ścieżką jest". Powrót kopii przywraca `present=1`
+    przez zwykły re-odczyt (`refresh_location`, D-V-6) — tu nie ma drogi w drugą stronę.
+
+    MARKER GAŚNIE (D-V-5, ratyfikowane 2026-07-22): `unreadable_since = NULL`, stara wartość idzie
+    do payloadu. Kubełek `unreadable` to KOLEJKA ROBOTY („przeczytaj tę kopię ponownie") — kopia,
+    której nie ma, nie ma czego czytać i wisiałaby w nim bez wyjścia (marker gaśnie WYŁĄCZNIE po
+    udanym odczycie). Inwariant całego pnia: `present = 0 ⇒ unreadable_since IS NULL`.
+
+    KOTWICA ANTY-STALE (`expected_path`): pass planuje na migawce, a między planem a zapisem GUI może
+    zrobić rename (`relocate_location` zmienia `path` TEGO wiersza) — wtedy ścieżka w bazie wskazuje
+    na ISTNIEJĄCY plik i oznaczenie byłoby kłamstwem. Rozjazd → `False` (wołający liczy `drifted`),
+    ZERO zapisu. Guard+UPDATE w `_immediate` (TOCTOU wobec równoległego writera).
+
+    ZWRACA bool: `True` = oznaczono; `False` = dryf ścieżki ALBO kopia już nieobecna (idempotencja
+    powtórnego przebiegu — bez UPDATE i bez eventu, QUIET)."""
+    with _immediate(con):
+        row = con.execute(
+            "SELECT volume, path, present, unreadable_since FROM location WHERE id = ?",
+            (location_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"location:{location_id} nie istnieje")
+        if row["path"] != expected_path:
+            return False                              # dryf (rename między planem a zapisem)
+        if not row["present"]:
+            return False                              # już zniknięta — idempotencja, bez eventu
+        con.execute(
+            "UPDATE location SET present = 0, unreadable_since = NULL, last_verified_at = ? "
+            "WHERE id = ?", (now, location_id))
+        emit_event(
+            con, actor=actor, verb="location.vanished", target=f"location:{location_id}", now=now,
+            payload={"path": row["path"], "volume": row["volume"], "root": root, "run_id": run_id,
+                     "unreadable_since_before": row["unreadable_since"], "forced": forced})
     return True
 
 

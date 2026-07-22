@@ -125,7 +125,7 @@ class ScanRecord:
     cards: object = None              # list[Card] — lustro nagłówka; None dla XISF/W1
 
 
-def _iter_suffixes(root, suffixes, excluded_out=None):
+def _iter_suffixes(root, suffixes, excluded_out=None, errors_out=None):
     """Przejdź drzewo `root` i wydaj POSORTOWANE ścieżki plików o danych rozszerzeniach
     (case-insensitive). Zwraca `Path`; pomija katalogi i inne rozszerzenia. Czysty odczyt katalogu.
 
@@ -141,10 +141,21 @@ def _iter_suffixes(root, suffixes, excluded_out=None):
     `excluded_out` (opcjonalna lista): jeśli podana, dopisujemy do niej ŚCIEŻKI wykluczonych
     katalogów — nie chowamy faktu wykluczenia za samym licznikiem (diagnostyka: user widzi, czego
     skan nie wciągnął). `os.walk` daje kolejność systemową → finalne `sorted(...)` trzyma kontrakt
-    „POSORTOWANE" (jak dawne `rglob`+`sorted`)."""
+    „POSORTOWANE" (jak dawne `rglob`+`sorted`).
+
+    `errors_out` (opcjonalna lista, P5/D-V-11): ścieżki katalogów, których `os.walk` NIE PRZECZYTAŁ
+    (brak uprawnień, zerwany SMB). Domyślnie `os.walk` POŁYKA te błędy — dla SKANU to łagodne (pliki
+    wejdą następnym razem), ale dla passa obecności KORUMPUJĄCE: każdy wiersz DB pod nieprzeczytanym
+    katalogiem wyglądałby na zniknięty. Wołający, który podaje tę listę, MUSI traktować poddrzewa
+    z błędem dokładnie jak prune (poza oceną), nie jak brak plików."""
     root = Path(root)
     out = []
-    for dirpath, dirnames, filenames in os.walk(root):     # followlinks=False (domyślnie) — bez symlinków
+
+    def _on_error(exc):                                    # os.walk woła z OSError (ma .filename)
+        if errors_out is not None:
+            errors_out.append(getattr(exc, "filename", None) or str(exc))
+
+    for dirpath, dirnames, filenames in os.walk(root, onerror=_on_error):   # followlinks=False — bez symlinków
         excl = [d for d in dirnames if d.lower() in EXCLUDED_DIR_NAMES]
         if excluded_out is not None:
             excluded_out.extend(str(Path(dirpath) / d) for d in excl)
@@ -162,12 +173,13 @@ def iter_fits(root):
     return _iter_suffixes(root, FITS_SUFFIXES)
 
 
-def iter_headers(root, excluded_out=None):
+def iter_headers(root, excluded_out=None, errors_out=None):
     """Posortowane ścieżki WSZYSTKICH plików nagłówkonośnych pierwszego przebiegu (FITS + XISF,
-    case-insensitive) w drzewie `root`. Wejście pętli płaskiej skanu (§Etap 4): jeden mechanizm,
-    format = opakowanie (PLAN §1.1). Podkatalogi z `EXCLUDED_DIR_NAMES` odcięte (patrz
-    `_iter_suffixes`); `excluded_out` zbiera ich ścieżki do telemetrii skanu."""
-    return _iter_suffixes(root, HEADER_SUFFIXES, excluded_out=excluded_out)
+    case-insensitive) w drzewie `root`. Wejście pętli płaskiej skanu (§Etap 4) I passa obecności
+    (P5): jeden mechanizm, format = opakowanie (PLAN §1.1). Podkatalogi z `EXCLUDED_DIR_NAMES`
+    odcięte (patrz `_iter_suffixes`); `excluded_out` zbiera ich ścieżki do telemetrii skanu,
+    `errors_out` — katalogi NIEPRZECZYTANE (D-V-11; pass obecności traktuje je jak prune)."""
+    return _iter_suffixes(root, HEADER_SUFFIXES, excluded_out=excluded_out, errors_out=errors_out)
 
 
 def _jsonable(value):
@@ -504,6 +516,7 @@ class ScanSummary:
     camera_review: int = 0
     kind_unmapped: int = 0
     skipped: int = 0          # pliki POMINIĘTE bramą przyrostową (NIEczytane — bez sha1/nagłówka/DML)
+    vanished: int = 0         # kopie znikłe MIĘDZY listowaniem a odczytem (backstop D-V-8; nie pass)
     dirs_excluded: int = 0    # podkatalogi z listy odcięte (drzewa robocze: _WBPP/_Review — nie schodzone)
     excluded_dirs: list = field(default_factory=list)   # ich ścieżki (diagnostyka — nie cichy licznik)
     cancelled: bool = False   # skan przerwany kooperatywnie (should_cancel) na granicy pliku
@@ -512,6 +525,30 @@ class ScanSummary:
 def _filetype(path):
     """Format pliku z rozszerzenia: `xisf` | `fits` (fit/fts też FITS). DSLR-raw = drugi przebieg."""
     return "xisf" if Path(path).suffix.lower() in XISF_SUFFIXES else "fits"
+
+
+def path_gone(path):
+    """DOWÓD NIEOBECNOŚCI pliku (P5/D-V-12) — TRÓJSTANOWY, bo „nie ma" i „nie wolno spojrzeć" to
+    dwie różne odpowiedzi, a tylko pierwsza uprawnia do zdjęcia obecności (`present=0`):
+
+      `True`  — system mówi NIE MA: `FileNotFoundError` (ENOENT) albo `NotADirectoryError`
+                (ENOTDIR — komponent ścieżki przestał być katalogiem);
+      `False` — plik jest;
+      `None`  — NIE WIEM: każdy inny `OSError` (brak uprawnień, zerwany SMB, timeout, ELOOP).
+
+    `os.path.exists` jest tu ZAKAZANY: zwraca `False` w OBU złych przypadkach, więc awaria sieci
+    albo odebrane uprawnienia wyglądałyby jak skasowany plik. Wołający MUSI rozróżniać `is True`
+    od falsy — `None` idzie do kubełka `undecided` (raport, ZERO zapisu).
+
+    `os.stat` (nie `lstat`) — pytamy o plik, który byśmy PRZECZYTALI, więc podążamy za dowiązaniem;
+    zerwane dowiązanie = treści nie ma. Hardlinki projekcji (`projection.py`) statują normalnie."""
+    try:
+        os.stat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return True
+    except OSError:
+        return None
+    return False
 
 
 def _already_scanned(con, volume, path, mtime):
@@ -528,22 +565,15 @@ def _already_scanned(con, volume, path, mtime):
     tego marker po transient awarii przy NIEZMIENIONYM mtime nigdy by nie zgasł: brama pomijałaby plik
     w nieskończoność, a kopia zostałaby wiecznie „nieczytelna" w stanie mimo faktycznego wyzdrowienia.
 
-    FORWARD-GUARD: gdy dojdzie pass zniknięć (`present`), dołożyć tu `AND present=1` lub resetować
-    `present=1` na trafieniu — inaczej „zmartwychwstały" plik (present=0, ten sam mtime) zostałby
-    pominięty. Dziś `present` zawsze 1 — uśpione.
-
-    FORWARD-GUARD (marker × zniknięcie, #13): pass zniknięć MUSI rozstrzygnąć interakcję „znikła kopia
-    z markerem" — kopia OZNACZONA nieczytelną, a potem usunięta/przeniesiona (present=0) DZIŚ wisi
-    w kubełku `unreadable` bez ścieżki wyjścia (marker gaśnie WYŁĄCZNIE po udanym odczycie, którego już
-    nie będzie). Pass musi zdecydować: marker zostaje przy present=0 (kopia znikła nieczytelna) czy
-    gaśnie (znikła = już nie „nieczytelna, do odczytu"). Do czasu passa — świadoma luka.
-
-    FORWARD-GUARD (prune wykluczeń): gdy dojdzie pass zniknięć, WYKLUCZENIE katalogu (np. `_WBPP`) to
-    NIE to samo co zniknięcie pliku — plik istnieje, jest tylko poza zasięgiem skanu. Pass `present`
-    MUSI liczyć `present=0` wyłącznie z faktycznie SKANOWANEGO poddrzewa (nie z tego, co prune odciął),
-    inaczej przeniesienie danych pod wykluczony katalog fałszywie oznaczyłoby je jako znikłe (sieroty)."""
+    GUARD ZMARTWYCHWSTANIA (P5/D-V-6): `present = 1` — kopia oznaczona jako zniknięta jest ZAWSZE
+    re-czytana, gdy plik znów pojawi się na dysku. Bez tego powrót pliku o NIEZMIENIONYM `mtime`
+    zostałby pominięty przez bramę i wiersz zostałby `present=0` na zawsze (pass zniknięć byłby
+    drzwiami jednokierunkowymi). Koszt zerowy: bramę pytamy wyłącznie o pliki, które walk WIDZI
+    na dysku, więc warunek dotyka tylko realnych powrotów. Obecność przywraca dopiero UDANY odczyt
+    (`repo.refresh_location(present=1)`) — brama sama niczego nie zapisuje."""
     row = con.execute(
-        "SELECT 1 FROM location WHERE volume=? AND path=? AND mtime=? AND unreadable_since IS NULL",
+        "SELECT 1 FROM location WHERE volume=? AND path=? AND mtime=? "
+        "AND unreadable_since IS NULL AND present = 1",
         (volume, path, mtime),
     ).fetchone()
     return row is not None
@@ -599,10 +629,16 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
         zmienia); `summary.frame_review` rośnie TYLKO gdy repo zwróciło True;
       - PODMIANA TREŚCI (świeża tożsamość ≠ tożsamość frame'a lokacji — WBPP re-generuje master
         pod tą samą nazwą): `upsert_frame` (ew. degenerat) + `rebind_location` + świeże fakty
-        kopii; stary frame ZOSTAJE (append-only — pass zniknięć go podchwyci);
+        kopii; stary frame ZOSTAJE (append-only) — BEZ żadnej lokacji, więc pass zniknięć (oparty
+        na lokacjach) go NIE podchwyci; ślad niesie `location.rebound` (P5, `repo.rebind_location`);
       - ta sama tożsamość → `refresh_location`: fakty kopii + (przy zmianie `header_hash`)
         odświeżenie zeznania i pochodnych frame'a (last-read-wins). Udany odczyt GASI marker
         `unreadable_since` (kopia wyzdrowiała; #13), degeneracja go zakłada/trzyma.
+
+    OBECNOŚĆ (P5/D-V-6): każda ścieżka docierająca tutaj została ODCZYTANA (`scan_file`) albo
+    ZESTATOWANA (preflight importu odsiewa braki do `skipped`), więc obie gałęzie `refresh_location`
+    podają `present=1` — to DOWÓD obecności, nie domysł. Kopia wracająca po zniknięciu wraca tą
+    drogą (brama jej nie pomija, D-V-6) i dostaje `location.refreshed` z `{present:{0→1}}`.
 
     NIE łapie wyjątków — backstop bez tożsamości (sha1 nieznany → `frame.review`, sha1='?') należy
     do wołającego (`scan_tree` / import), bo to on wie, jak zidentyfikować rekord do review."""
@@ -689,7 +725,7 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
             con, location_id=loc["id"], frame_id=frame_id, mtime=rec.mtime,
             file_sha1=rec.file_sha1, header_hash=rec.header_hash, hdu_index=rec.hdu_index,
             compressed=rec.compressed, size_bytes=rec.size_bytes, unreadable_since=unreadable_after,
-            now=now, actor=actor)
+            present=1, now=now, actor=actor)
         summary.locations_refreshed += refreshed["facts"]
         return
 
@@ -699,7 +735,7 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
         con, location_id=loc["id"], frame_id=frame_id, mtime=rec.mtime,
         file_sha1=rec.file_sha1, header_hash=rec.header_hash, hdu_index=rec.hdu_index,
         compressed=rec.compressed, size_bytes=rec.size_bytes, unreadable_since=unreadable_after,
-        now=now, actor=actor,
+        present=1, now=now, actor=actor,
         raw_json=json.dumps(rec.header, ensure_ascii=False) if readable else None,
         cards=rec.cards, hot_fields=extract_header(rec.header) if readable else None,
         camera_id=camera_id, kind=kind)
@@ -790,12 +826,23 @@ def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now,
             # co skan. Bez tego marker znosi bramę → plik, który przestał się OTWIERAĆ, generowałby
             # +1 event/skan w nieskończoność. `mtime` bierzemy Z BAZY (bez zmiany) → powtórka to cichy
             # no-op (QUIET). Ścieżka NIEZNANA (brak location) → backstop bez tożsamości: sha1='?'.
+            #
+            # ROZGAŁĘZIENIE PO DOWODZIE (P5/D-V-8): plik mógł ZNIKNĄĆ między listowaniem a odczytem
+            # (walk go widział, `stat`/otwarcie już nie). Marker znaczy „kopia JEST nieczytelna,
+            # przeczytaj ją ponownie" — dla nieistniejącego pliku to kłamstwo bez wyjścia, a przy
+            # `present=0` byłoby hybrydą zakazaną przez inwariant D-V-5. Rozstrzyga `_gone` (lstat +
+            # errno), nie domysł; zniknięcie idzie do `mark_location_vanished` (ta sama klinga).
             reason = f"{type(exc).__name__}: {exc}"
             row = con.execute(
                 "SELECT l.id, l.mtime, f.sha1_data FROM location l JOIN frame f ON f.id = l.frame_id "
                 "WHERE l.volume = ? AND l.path = ?",
                 (volume, spath)).fetchone()
-            if row is not None:
+            if row is not None and path_gone(spath) is True:
+                if repo.mark_location_vanished(
+                        con, location_id=row["id"], expected_path=spath, root=root, run_id=None,
+                        now=now, actor="scan"):
+                    summary.vanished += 1
+            elif row is not None:
                 if repo.refresh_location_unreadable(
                         con, location_id=row["id"], sha1_data=row["sha1_data"], path=spath,
                         mtime=row["mtime"], reason=reason, now=now):

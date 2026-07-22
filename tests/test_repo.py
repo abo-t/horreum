@@ -275,7 +275,7 @@ def test_refresh_location_bez_zmian_zero_eventow(tmp_path):
     before = con.execute("SELECT count(*) FROM event").fetchone()[0]
     out = repo.refresh_location(con, location_id=lid, frame_id=fid, mtime="t1",
                                 file_sha1="f1", header_hash="h1", hdu_index=0, compressed=0,
-                                size_bytes=100, unreadable_since=None, now=NOW)
+                                size_bytes=100, unreadable_since=None, present=1, now=NOW)
     assert out == {"facts": False, "header": False, "rederived": False}
     assert con.execute("SELECT count(*) FROM event").fetchone()[0] == before
     con.close()
@@ -288,7 +288,7 @@ def test_refresh_location_mtime_dlug_domkniety(tmp_path):
     fid, lid = _frame_with_location(con)
     out = repo.refresh_location(con, location_id=lid, frame_id=fid, mtime="t2",
                                 file_sha1="f1", header_hash="h1", hdu_index=0, compressed=0,
-                                size_bytes=100, unreadable_since=None, now=NOW)
+                                size_bytes=100, unreadable_since=None, present=1, now=NOW)
     assert out["facts"] is True and out["header"] is False
     assert con.execute("SELECT mtime FROM location WHERE id=?", (lid,)).fetchone()[0] == "t2"
     ev = con.execute("SELECT payload FROM event WHERE verb='location.refreshed'").fetchall()
@@ -311,7 +311,7 @@ def test_refresh_location_header_hash_odswieza_zeznanie_i_pochodne(tmp_path):
                                    is_mono_source="model", raw_instrume="x", now=NOW)
     out = repo.refresh_location(
         con, location_id=lid, frame_id=fid, mtime="t2", file_sha1="f2", header_hash="h2",
-        hdu_index=0, compressed=0, size_bytes=102, unreadable_since=None, now=NOW,
+        hdu_index=0, compressed=0, size_bytes=102, unreadable_since=None, present=1, now=NOW,
         raw_json='{"OBJECT": "M33"}',
         cards=[Card("OBJECT", 0, "M33", None, "str", None),
                Card("FILTER", 0, "Ha", None, "str", None)],
@@ -397,7 +397,7 @@ def test_refresh_location_udany_odczyt_gasi_marker(tmp_path):
     # udany odczyt: unreadable_since=None, WSZYSTKIE inne fakty IDENTYCZNE jak przy add_location
     out = repo.refresh_location(con, location_id=lid, frame_id=fid, mtime="t1", file_sha1="f1",
                                 header_hash="h1", hdu_index=0, compressed=0, size_bytes=100,
-                                now="t2", unreadable_since=None)
+                                now="t2", unreadable_since=None, present=1)
     assert out["facts"] is True                                        # przejście markera = zmiana faktu
     assert con.execute("SELECT unreadable_since FROM location WHERE id=?", (lid,)).fetchone()[0] is None
     ev = con.execute("SELECT payload FROM event WHERE verb='location.refreshed'").fetchall()

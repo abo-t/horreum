@@ -81,6 +81,22 @@ def main(argv=None):
     p_proj.add_argument("--limit", type=int, default=20,
                         help="ile folderów kategorii / anomalii wypisać (domyślnie 20)")
 
+    p_pres = sub.add_parser("presence",
+                            help="pass obecnosci: wykryj znikniete kopie (DRY domyslnie; --apply)")
+    p_pres.add_argument("db", help="ścieżka pliku bazy")
+    p_pres.add_argument("--root", required=True,
+                        help="korzeń drzewa do sprawdzenia (bez domyślnej ścieżki: repo publiczne)")
+    p_pres.add_argument("--volume", required=True,
+                        help="trwały serial woluminu — KONFRONTOWANY z zamontowanym dyskiem "
+                             "(bez placeholdera '?': pass zdejmuje obecność, musi wiedzieć gdzie)")
+    p_pres.add_argument("--apply", action="store_true",
+                        help="WYKONAJ: oznacz potwierdzone zniknięcia (present=0) — bez tego DRY")
+    p_pres.add_argument("--force", type=int, default=None, metavar="N",
+                        help="deklaracja intencji: spodziewane N potwierdzonych zniknięć; "
+                             "przełamuje hamulec, a rozjazd z dyskiem = abort bez zapisu")
+    p_pres.add_argument("--limit", type=int, default=20,
+                        help="ile ścieżek wypisać w raporcie (domyślnie 20)")
+
     args = parser.parse_args(argv)
     if args.cmd == "init":
         con = db.open_db(args.path)
@@ -206,6 +222,23 @@ def main(argv=None):
         con.close()
         print(_format_project(args.root, res, proj, limit=args.limit))
         return 0
+    if args.cmd == "presence":
+        from . import presence                            # lazy: astropy dopiero tu (przez scan)
+        now = datetime.now(timezone.utc).isoformat()
+        con = db.open_db(args.db)
+        try:
+            s = presence.check(con, args.root, volume=args.volume, apply=args.apply,
+                               force=args.force, now=now)
+        except (ValueError, FileNotFoundError) as exc:    # root UNC / nieistniejacy (EXPECT)
+            con.close()
+            print(f"Horreum presence: blad -- {exc}")
+            return 1
+        con.close()
+        print(_format_presence(args.db, s, apply=args.apply, limit=args.limit))
+        # Kod wyjscia mowi o WERDYKCIE, nie o zapisie: 1 = przebieg go NIE WYDAL (abort przeslanki
+        # albo hamulec, ktory pominal potwierdzenia). Bez tego skrypt czytajacy `presence` w DRY
+        # nie odrozni „nic nie zniklo" od „nie sprawdzilem" -- a to dwie rozne rzeczy.
+        return 1 if (s.aborted is not None or not s.confirmed) else 0
     parser.print_help()
     return 0
 
@@ -233,6 +266,50 @@ def _format_import(donor_path, db_path, s):
     lines.append(f"  bramki 4.6 {status}: {gates}")
     for fail in s.gate_failures:
         lines.append(f"    FAIL {fail}")
+    return "\n".join(lines)
+
+
+def _format_presence(db_path, s, *, apply, limit):
+    """Raport passa obecnosci — ASCII (konsola Windows = cp1250). Tryb w NAGLOWKU, nie w stopce:
+    user ma widziec „DRY" zanim przeczyta liczby. Kubelki, ktore nie sa znikniecami (poza zasiegiem,
+    wynurzone, nierozstrzygniete), wypisujemy TYLKO gdy niezerowe — cisza przy sukcesie (QUIET)."""
+    tryb = "APPLY -- zapis do bazy" if apply else "DRY -- bez zmian w bazie"
+    lines = [f"Horreum presence {db_path} ({tryb}):",
+             f"  zakres: {s.scoped} lokacji pod {s.root} (wolumen {s.volume}); "
+             f"na dysku: {s.walked} plikow"]
+    if s.excluded_dirs:
+        lines.append(f"  odciete prune: {len(s.excluded_dirs)} katalogow")
+    if s.unreadable_dirs:
+        lines.append(f"  NIEPRZECZYTANE katalogi: {len(s.unreadable_dirs)} "
+                     f"(traktowane jak prune -- nie sa znikniecami)")
+        for d in s.unreadable_dirs[:limit]:
+            lines.append(f"    {d}")
+    if s.out_of_reach:
+        lines.append(f"  poza zasiegiem: {s.out_of_reach} kopii (istnieja, ale pod odcietym drzewem)")
+    potwierdzone = (f"potwierdzone znikniecia: {s.confirmed_gone}" if s.confirmed
+                    else "potwierdzen NIE liczono (hamulec) -- to nie znaczy 'nic nie zniklo'")
+    lines.append(f"  kandydaci: {s.candidates}; {potwierdzone}")
+    if s.undecided:
+        lines.append(f"  NIEROZSTRZYGNIETE: {s.undecided} (stat bez odpowiedzi -- zero zapisu)")
+    if s.resurfaced:
+        lines.append(f"  WYNURZONE: {s.resurfaced} -- kandydat jednak istnieje. Najczesciej dryf "
+                     f"wielkosci liter DB<->dysk; przyszly skan zminuje DRUGA lokacje na ten sam plik:")
+        for p in s.resurfaced_paths[:limit]:
+            lines.append(f"    {p}")
+    for p in s.gone_paths[:limit]:
+        lines.append(f"    znikl: {p}")
+    if len(s.gone_paths) > limit:
+        lines.append(f"    ... (+{len(s.gone_paths) - limit} wiecej; zwieksz --limit)")
+    if s.cancelled:
+        lines.append("  PRZERWANE -- zero zapisu (lista kandydatow niepelna)")
+    if s.brake is not None and s.aborted is None:
+        lines.append(f"  HAMULEC (tylko baner -- przebieg dokonczony): {s.brake}")
+    if s.aborted is not None:
+        lines.append(f"  ABORT -- nic nie zapisano: {s.aborted}")
+    if apply and s.vanished:
+        lines.append(f"  oznaczono present=0: {s.vanished} (run_id {s.run_id})")
+    if s.drifted:
+        lines.append(f"  pominieto przez dryf sciezki: {s.drifted} (rename miedzy planem a zapisem)")
     return "\n".join(lines)
 
 

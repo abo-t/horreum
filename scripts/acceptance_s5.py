@@ -50,7 +50,10 @@ EXP_CAMERAS = {
     "ASI294MC": (4.63, 0), "SONYA7RM3": (4.86, 0),
 }
 EXP_TELESCOPES_IMPORT = 8      # dawca FITS (§1): A140R/RC8/76EDPH/ED120R/RC6/N800/Sony135/ED120
-EXP_TELESCOPES_FULL = 9        # + ED (11 XISF z nienaprawionym TELESCOP — dług PF-4)
+# Po naprawie ED na realnym R: (2026-07-22, brief PLAN_p6_xisf_writeback §8) etykieta `ED` nie ma już
+# nosiciela na osi: 7 masterflatów XISF dostało `ED120R`+789, a masterdarki z `TELESCOP='ED'` są POZA
+# osią (kind-scoping, wariant B). Świeża baza nie powołuje 9. teleskopu — dług PF-4 spłacony.
+EXP_TELESCOPES_FULL = 8        # jak IMPORT: naprawa zdjęła jedynego nosiciela etykiety `ED`
 EXP_OBJECT_PCT_MIN = 85.0      # % obiektu na light/master_light (pf4=87.5; próg z zapasem)
 # Stan PF-4 (pełny, po doskanie XISF) — XISF wnoszą dług review i degenerat:
 EXP_UNCOMPUTABLE_FULL = 1      # masterflat OIII: bajt \x07 w XML → sha1_data nieobliczalne (degenerat)

@@ -92,6 +92,21 @@ def test_filter_kind_agnostyczny_takze_flat(tmp_path):
     con.close()
 
 
+def test_filter_backfill_nie_mnozy_eventow_przy_powtornym_resolve(tmp_path):
+    """D-0722-1 (zmierzone na `horreum_pf4.db`: 7× identyczny `count: 12582` przy zerze zmian):
+    powtórny `run_resolver` bez nowych plików NIE dokłada eventu `filter.backfilled`. `filters_set`
+    ZOSTAJE 5 — to licznik STANU (frame'y z niepustym kanonem), nie skutku przebiegu; te dwie
+    liczby są różnymi faktami i test trzyma oba końce."""
+    con = _scanned_tree(tmp_path)
+    assert run_resolver(con, now=NOW).filters_set == 5
+    ev1 = con.execute("SELECT count(*) FROM event WHERE verb='filter.backfilled'").fetchone()[0]
+
+    assert run_resolver(con, now=NOW).filters_set == 5      # stan bez zmian
+    ev2 = con.execute("SELECT count(*) FROM event WHERE verb='filter.backfilled'").fetchone()[0]
+    assert (ev1, ev2) == (1, 1)                             # dziennik bez szumu
+    con.close()
+
+
 def test_delta_report_procent_na_lightach(tmp_path):
     """% obiektu liczone NA light/master_light (kalibracja nie zaniża): 3/4 = 75%, delta=Snapshot."""
     con = _scanned_tree(tmp_path)

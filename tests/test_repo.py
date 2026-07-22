@@ -529,13 +529,36 @@ def test_backfill_filter_canon_bulk_jeden_event(tmp_path):
                               camera_id=None, now=NOW)
     f2, _ = repo.upsert_frame(con, sha1_data="b", kind="light", filetype="fits",
                               camera_id=None, now=NOW)
-    repo.backfill_filter_canon(con, [], now=NOW)                           # pusto → bez eventu
+    assert repo.backfill_filter_canon(con, [], now=NOW) == 0                # pusto → bez eventu
     assert con.execute("SELECT count(*) FROM event WHERE verb='filter.backfilled'").fetchone()[0] == 0
-    repo.backfill_filter_canon(con, [(f1, "Ha"), (f2, "OIII")], now=NOW)
+    assert repo.backfill_filter_canon(con, [(f1, "Ha"), (f2, "OIII")], now=NOW) == 2
     assert con.execute("SELECT filter_canon FROM frame WHERE id=?", (f1,)).fetchone()[0] == "Ha"
     assert con.execute("SELECT filter_canon FROM frame WHERE id=?", (f2,)).fetchone()[0] == "OIII"
     ev = con.execute("SELECT payload FROM event WHERE verb='filter.backfilled'").fetchall()
     assert len(ev) == 1 and json.loads(ev[0]["payload"]) == {"count": 2}
+    con.close()
+
+
+def test_backfill_filter_canon_idempotentny_count_ze_skutku(tmp_path):
+    """D-0722-1: powtórzenie TEGO SAMEGO wejścia nie pisze nic i NIE emituje eventu, a `count`
+    liczy REALNIE zmienione wiersze (nie `len(items)`). Dawniej `UPDATE` leciał bezwarunkowo,
+    więc każdy resolve dokładał identyczny event z licznikiem całej populacji."""
+    con = _fresh(tmp_path)
+    f1, _ = repo.upsert_frame(con, sha1_data="a", kind="light", filetype="fits",
+                              camera_id=None, now=NOW)
+    f2, _ = repo.upsert_frame(con, sha1_data="b", kind="light", filetype="fits",
+                              camera_id=None, now=NOW)
+    items = [(f1, "Ha"), (f2, "OIII")]
+    assert repo.backfill_filter_canon(con, items, now=NOW) == 2             # pierwszy: NULL → kanon
+    assert repo.backfill_filter_canon(con, items, now=NOW) == 0             # drugi: zero zmian
+    assert con.execute("SELECT count(*) FROM event WHERE verb='filter.backfilled'").fetchone()[0] == 1
+
+    # zmiana JEDNEJ klatki w tym samym wejściu → count = 1 (skutek), nie 2 (rozmiar wejścia)
+    assert repo.backfill_filter_canon(con, [(f1, "Ha"), (f2, "SII")], now=NOW) == 1
+    ev = con.execute("SELECT payload FROM event WHERE verb='filter.backfilled' "
+                     "ORDER BY id").fetchall()
+    assert len(ev) == 2 and json.loads(ev[1]["payload"]) == {"count": 1}
+    assert con.execute("SELECT filter_canon FROM frame WHERE id=?", (f2,)).fetchone()[0] == "SII"
     con.close()
 
 

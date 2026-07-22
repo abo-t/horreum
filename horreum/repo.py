@@ -640,17 +640,30 @@ def flag_object_review_summary(con, items, now, actor="resolver"):
 
 
 def backfill_filter_canon(con, items, now, actor="resolver"):
-    """Backfill kolumny POCHODNEJ `frame.filter_canon` ZBIORCZO (jak `backfill_focratio_norm`):
-    jedna transakcja + JEDEN event `filter.backfilled`. `items` = lista `(frame_id, filter_canon)`
-    (tylko frame'y z niepustym kanonem; brak filtra zostaje NULL — W2, bez review). Pusta → no-op."""
+    """Backfill kolumny POCHODNEJ `frame.filter_canon` ZBIORCZO: jedna transakcja + JEDEN event
+    `filter.backfilled`. `items` = lista `(frame_id, filter_canon)` (tylko frame'y z niepustym
+    kanonem; brak filtra zostaje NULL — W2, bez review). Zwraca liczbę REALNIE zmienionych wierszy.
+
+    IDEMPOTENTNY (D-0722-1): `WHERE filter_canon IS NOT ?` odsiewa wiersze, które już mają ten
+    kanon (`IS NOT` obsługuje NULL — pierwszy backfill przechodzi), a `count` w payloadzie to suma
+    `cur.rowcount`, czyli SKUTEK, nie rozmiar wejścia. Zero zmian → ZERO eventu, jak reszta repo
+    (`assign_object`, `flag_object_review_summary`). Wcześniej `UPDATE` leciał bezwarunkowo dla
+    każdego itemu, a `count = len(items)` — powtórny resolve dopisywał identyczny event z licznikiem
+    całej populacji (na `horreum_pf4.db` 7× `count: 12582` przy zerze zmian)."""
     items = list(items)
     if not items:
-        return
+        return 0
     with con:
+        changed = 0
         for frame_id, filter_canon in items:
-            con.execute("UPDATE frame SET filter_canon = ? WHERE id = ?", (filter_canon, frame_id))
-        emit_event(con, actor=actor, verb="filter.backfilled", target="frame:*", now=now,
-                   payload={"count": len(items)})
+            cur = con.execute(
+                "UPDATE frame SET filter_canon = ? WHERE id = ? AND filter_canon IS NOT ?",
+                (filter_canon, frame_id, filter_canon))
+            changed += cur.rowcount
+        if changed:
+            emit_event(con, actor=actor, verb="filter.backfilled", target="frame:*", now=now,
+                       payload={"count": changed})
+    return changed
 
 
 # ------------------------------------------------ oś OBIEKT — zapis usera (GUI, #8/P4)

@@ -174,7 +174,7 @@ class PipelineWorker(QObject):
         else:
             # Cisza czytałaby się jak „sprawdzone, nic nie znikło" — a to jest „nie sprawdzone".
             self.stage_done.emit("presence", presence.PresenceSummary(
-                aborted="pominięty — wolumin nieustalony, brak kotwicy zakresu"))
+                aborted=i18n.t("pipeline.presence.skipped_no_volume")))
 
     def _on_progress(self, done, total, path, summary):
         # wołane SYNCHRONICZNIE w wątku workera przez scan_tree; przerzedź i wyślij MIGAWKĘ (dict),
@@ -183,18 +183,29 @@ class PipelineWorker(QObject):
             self.progress.emit(done, total, path, counts_snapshot(summary))
 
 
-# Etykiety widoczne dla użytkownika po polsku; wartości danych ("cold"/"scratch") to identyfikatory
-# poziomu zapisywane do bazy (rdzeń `scan_tree`) — ZOSTAJĄ niezmienione.
-_TIERS = [("—", None), ("zimny (archiwum)", "cold"), ("roboczy", "scratch")]
-_STAGE_LABEL = {"scan": "Skan", "group": "Grupowanie", "resolve": "Rozwiązywanie",
-                "calibrate": "Kalibracja", "lineage": "Rodowód", "delta": "Delta",
-                "presence": "Obecność"}
+# Etykiety widoczne dla użytkownika = KLUCZE katalogu i18n (rozwiązywane `t()` w USE-site, po `set_lang`
+# — nie module-level, D-L1 restart); wartości danych ("cold"/"scratch") to identyfikatory poziomu
+# zapisywane do bazy (rdzeń `scan_tree`) — ZOSTAJĄ niezmienione. "—" neutralne — zostaje dosłowne.
+_TIERS = [("—", None), ("pipeline.tier.cold", "cold"), ("pipeline.tier.scratch", "scratch")]
+_STAGE_LABEL = {"scan": "pipeline.stage.scan", "group": "pipeline.stage.group",
+                "resolve": "pipeline.stage.resolve", "calibrate": "pipeline.stage.calibrate",
+                "lineage": "pipeline.stage.lineage", "delta": "pipeline.stage.delta",
+                "presence": "pipeline.stage.presence"}
 
-# Kolejność i nazwy powodów przeglądu w raporcie dostawy (rdzeń niesie same liczby — wording należy
+# Kolejność i klucze powodów przeglądu w raporcie dostawy (rdzeń niesie same liczby — wording należy
 # do powierzchni; konsolowy `cli._format_delta` ma własne, ASCII-owe).
-_REVIEW_REASONS = [("no_config", "bez konfiguracji"), ("headerless", "bez nagłówka"),
-                   ("no_camera", "bez kamery"), ("kind_unknown", "rodzaj nieznany"),
-                   ("unreadable", "kopia nieczytelna")]
+_REVIEW_REASONS = [("no_config", "pipeline.reason.no_config"),
+                   ("headerless", "pipeline.reason.headerless"),
+                   ("no_camera", "pipeline.reason.no_camera"),
+                   ("kind_unknown", "pipeline.reason.kind_unknown"),
+                   ("unreadable", "pipeline.reason.unreadable")]
+
+
+def _stage_label(name):
+    """Nazwa etapu w bieżącym języku (klucz z `_STAGE_LABEL`); nieznana → raw `name` (nie wołaj `t`
+    na nie-kluczu)."""
+    key = _STAGE_LABEL.get(name)
+    return i18n.t(key) if key else name
 
 
 def _review_line(st):
@@ -202,10 +213,11 @@ def _review_line(st):
     się nakładają (klatka bez kamery jest też bez konfiguracji) — dlatego „powody", nie „w tym":
     suma powodów bywa większa niż klatek i nie wolno jej czytać jak rozbicia. Zerowe powody milczą."""
     if not st.total:
-        return "brak"
-    powody = ", ".join(f"{label} {n}" for attr, label in _REVIEW_REASONS
+        return i18n.t("pipeline.review.none")
+    powody = ", ".join(f"{i18n.t(key)} {n}" for attr, key in _REVIEW_REASONS
                        if (n := getattr(st, attr)))
-    return f"{st.total} klatek · powody: {powody}"
+    return i18n.t("pipeline.review.line",
+                  frames=i18n.t_plural("grid.frames", st.total), reasons=powody)
 
 
 class PipelineView(QWidget):
@@ -246,7 +258,8 @@ class PipelineView(QWidget):
 
         # 1. Baza (wskaźnik; Otwórz/Nowa są w menu Plik okna)
         self.lbl_db = QLabel()
-        self.lbl_db.setText(f"Baza: {self._db_path}" if self._db_path else "Baza: (brak)")
+        self.lbl_db.setText(i18n.t("main.db_loaded", path=self._db_path)
+                            if self._db_path else i18n.t("pipeline.db_none"))
         v.addWidget(self.lbl_db)
         v.addWidget(self._hline())
 
@@ -254,7 +267,7 @@ class PipelineView(QWidget):
         # źródle (QSettings pipeline/last_source; pierwsza dostawa pyta o katalog). Waga wizualna
         # przejęta od dawnego „Przetwórz wszystko" (jedna złota akcja na miejsce, wzorzec F3 #3).
         rec = QHBoxLayout()
-        self.btn_receive = QPushButton("Przyjmij nowe  (skan → grupuj → rozwiąż → kalibracja → delta)")
+        self.btn_receive = QPushButton(i18n.t("pipeline.receive"))
         _f = self.btn_receive.font()
         _f.setBold(True)
         self.btn_receive.setFont(_f)
@@ -268,50 +281,49 @@ class PipelineView(QWidget):
 
         # 3. Tryb zaawansowany — źródło wskazywane ręcznie: katalog + poziom + auto-wolumen.
         # JAWNY nagłówek sekcji (wizytator F5 #4): bez niego dwie pełnoszerokie akcje konkurują.
-        v.addWidget(QLabel("Tryb zaawansowany — wskazany katalog:"))
+        v.addWidget(QLabel(i18n.t("pipeline.advanced_head")))
         src = QHBoxLayout()
-        self.btn_pick = QPushButton("Wskaż katalog…")
+        self.btn_pick = QPushButton(i18n.t("pipeline.pick_dir"))
         self.btn_pick.clicked.connect(self._on_pick_dir)
         src.addWidget(self.btn_pick)
-        self.lbl_root = QLabel("(nie wskazano)")
+        self.lbl_root = QLabel(i18n.t("pipeline.root_none"))
         src.addWidget(self.lbl_root, 1)
-        src.addWidget(QLabel("poziom:"))
+        src.addWidget(QLabel(i18n.t("pipeline.tier_label")))
         self.combo_tier = QComboBox()
         for label, value in _TIERS:
-            self.combo_tier.addItem(label, value)
+            # "—" (value None) neutralne — nie klucz; reszta rozwiązuje etykietę z katalogu.
+            self.combo_tier.addItem(i18n.t(label) if value is not None else label, value)
         src.addWidget(self.combo_tier)
         v.addLayout(src)
-        self.lbl_volume = QLabel("wolumen: —")
+        self.lbl_volume = QLabel(i18n.t("pipeline.volume_none"))
         v.addWidget(self.lbl_volume)
 
         # „Przetwórz wszystko" na wskazanym katalogu — zwykły ciężar, BEZ dopisku sekwencji
         # (dublował złotą akcję — wizytator F5 #4; sekwencję nazywa „Przyjmij nowe" wyżej).
-        self.btn_all = QPushButton("Przetwórz wszystko")
+        self.btn_all = QPushButton(i18n.t("pipeline.process_all"))
         self.btn_all.clicked.connect(self._on_all)
         v.addWidget(self.btn_all)
 
         # 4. Etapy pojedyncze (tryb zaawansowany) + anulowanie (tylko skan/all jest przerywalny)
         stages = QHBoxLayout()
-        self.btn_scan = QPushButton("Skanuj")
+        self.btn_scan = QPushButton(i18n.t("pipeline.btn.scan"))
         self.btn_scan.clicked.connect(self._on_scan)
-        self.btn_group = QPushButton("Grupuj")
+        self.btn_group = QPushButton(i18n.t("pipeline.btn.group"))
         self.btn_group.clicked.connect(self._on_group)
-        self.btn_resolve = QPushButton("Rozwiąż")
+        self.btn_resolve = QPushButton(i18n.t("pipeline.btn.resolve"))
         self.btn_resolve.clicked.connect(self._on_resolve)
-        self.btn_calibrate = QPushButton("Kalibracja")
-        self.btn_calibrate.setToolTip("Przepis klatek kalibracyjnych — po „Rozwiąż” (przepis flata "
-                                      "potrzebuje filtra)")
+        self.btn_calibrate = QPushButton(i18n.t("pipeline.btn.calibrate"))
+        self.btn_calibrate.setToolTip(i18n.t("pipeline.tip.calibrate"))
         self.btn_calibrate.clicked.connect(self._on_calibrate)
-        self.btn_lineage = QPushButton("Rodowód")
-        self.btn_lineage.setToolTip("Powiąż lighty z masterami po przepisie — po „Kalibracja” "
-                                    "(potrzebuje osi przepisu)")
+        self.btn_lineage = QPushButton(i18n.t("pipeline.btn.lineage"))
+        self.btn_lineage.setToolTip(i18n.t("pipeline.tip.lineage"))
         self.btn_lineage.clicked.connect(self._on_lineage)
-        self.btn_delta = QPushButton("Pokaż deltę")
+        self.btn_delta = QPushButton(i18n.t("pipeline.btn.delta"))
         self.btn_delta.clicked.connect(self._on_delta)
-        self.btn_presence = QPushButton("Sprawdź obecność")
-        self.btn_presence.setToolTip("Wskaż katalog powyżej — pass porównuje drzewo z bazą")
+        self.btn_presence = QPushButton(i18n.t("pipeline.btn.presence"))
+        self.btn_presence.setToolTip(i18n.t("pipeline.tip.presence"))
         self.btn_presence.clicked.connect(self._on_presence)
-        self.btn_cancel = QPushButton("Anuluj")
+        self.btn_cancel = QPushButton(i18n.t("pipeline.btn.cancel"))
         self.btn_cancel.clicked.connect(self._on_cancel)
         for b in (self.btn_scan, self.btn_group, self.btn_resolve, self.btn_calibrate,
                   self.btn_lineage, self.btn_delta, self.btn_presence, self.btn_cancel):
@@ -340,10 +352,10 @@ class PipelineView(QWidget):
         # przycisk odlatywał na prawą krawędź okna — przy 1200 px to ~1150 px pustki między zdaniem
         # a akcją, którą to zdanie zapowiada (ten sam defekt, co w liście zadań: wizytator P1 #2).
         bv.addWidget(self.lbl_vanished)
-        self.btn_mark_vanished = QPushButton("Oznacz zniknięte")
+        self.btn_mark_vanished = QPushButton(i18n.t("pipeline.btn.mark_vanished"))
         self.btn_mark_vanished.clicked.connect(self._on_mark_vanished)
         bv.addWidget(self.btn_mark_vanished)
-        self.btn_show_vanished = QPushButton("Pokaż w Zbiorach")
+        self.btn_show_vanished = QPushButton(i18n.t("pipeline.btn.show_collections"))
         self.btn_show_vanished.clicked.connect(lambda: self.open_collection.emit(PRESET_VANISHED))
         self.btn_show_vanished.setVisible(False)
         bv.addWidget(self.btn_show_vanished)
@@ -400,9 +412,9 @@ class PipelineView(QWidget):
         `pipeline/last_source` (stare memo po zmianie źródła kłamałoby)."""
         source = self._settings().value("pipeline/last_source", None)
         if source:
-            self.lbl_source_memo.setText(f"ostatnie źródło: {source}")
+            self.lbl_source_memo.setText(i18n.t("pipeline.source_last", source=source))
         else:
-            self.lbl_source_memo.setText("(pierwsza dostawa — zapyta o katalog)")
+            self.lbl_source_memo.setText(i18n.t("pipeline.source_first"))
 
     def _remember_source(self, path):
         self._settings().setValue("pipeline/last_source", path)
@@ -419,13 +431,13 @@ class PipelineView(QWidget):
         if serial is None:
             # Neutralnie — skutek ('?' = pełny skan ALBO stop przy mieszanej bazie) nazywa wyłącznie
             # guard na starcie sekwencji; obietnica tutaj przeczyłaby mu (wizytator F5 #5).
-            self.lbl_volume.setText("wolumen: ? (serial nieustalony)")
+            self.lbl_volume.setText(i18n.t("pipeline.volume_unset"))
         else:
-            self.lbl_volume.setText(f"wolumen: {serial} (skan przyrostowy — znane pliki pomijane)")
+            self.lbl_volume.setText(i18n.t("pipeline.volume_ok", serial=serial))
         self._sync_actions()
 
     def _on_pick_dir(self):
-        path = QFileDialog.getExistingDirectory(self, "Wskaż katalog do skanu")
+        path = QFileDialog.getExistingDirectory(self, i18n.t("pipeline.dlg.pick_scan"))
         if not path:
             return
         self._remember_source(path)     # D-UX-5: jedna pamięć ostatniego katalogu (pick i receive)
@@ -460,8 +472,8 @@ class PipelineView(QWidget):
             con.close()
         if not mixed:
             return True
-        msg = "wolumen nieustalony — skan wstrzymany (baza zna realne wolumeny)"
-        self.lbl_error.setText(f"BŁĄD — {msg}")
+        msg = i18n.t("pipeline.guard.mixed")
+        self.lbl_error.setText(i18n.t("pipeline.error_prefix", msg=msg))
         self.lbl_error.setVisible(True)
         self.status_message.emit(msg)       # konwencja _on_failed: lbl_error + status (F5R2#5)
         return False
@@ -482,7 +494,7 @@ class PipelineView(QWidget):
             return
         source = self._settings().value("pipeline/last_source", None)
         if not source or not Path(source).is_dir():
-            source = QFileDialog.getExistingDirectory(self, "Wskaż katalog dostawy")
+            source = QFileDialog.getExistingDirectory(self, i18n.t("pipeline.dlg.pick_delivery"))
             if not source:
                 return
         self._remember_source(source)
@@ -561,7 +573,7 @@ class PipelineView(QWidget):
     def _on_cancel(self):
         if self._worker is not None:
             self._worker.request_cancel()
-            self.status_message.emit("Anulowanie… (po bieżącym pliku)")
+            self.status_message.emit(i18n.t("pipeline.cancelling"))
 
     def _start_stage(self, stage, **params):
         self._worker = PipelineWorker(self._db_path, now_fn=self._now)
@@ -601,15 +613,15 @@ class PipelineView(QWidget):
         self.bar.setValue(done)
         tail = path.rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
         do_przegladu = counts["frame_review"] + counts["camera_review"]
-        self.lbl_counts.setText(
-            f"Pliki {done}/{total} · nowe {counts['frames_new']} · "
-            f"pominięte {counts['skipped']} · przegląd {do_przegladu} · {tail}")
+        self.lbl_counts.setText(i18n.t(
+            "pipeline.counts", done=done, total=total, new=counts["frames_new"],
+            skipped=counts["skipped"], review=do_przegladu, tail=tail))
 
     @Slot(str)
     def _on_stage_started(self, name):
         # skan: pasek nieokreślony do 1. progresu; etap masowy: busy spinner (bez progresu per-wiersz)
         self.bar.setRange(0, 0)
-        self.lbl_counts.setText(f"{_STAGE_LABEL.get(name, name)} w toku…")
+        self.lbl_counts.setText(i18n.t("pipeline.stage_running", stage=_stage_label(name)))
 
     @Slot(str, object)
     def _on_stage_done(self, name, result):
@@ -619,7 +631,7 @@ class PipelineView(QWidget):
         self._append_summary(self._format_result(name, result))
         if name == "presence":
             self._update_vanished_box(result)
-        self.status_message.emit(f"{_STAGE_LABEL.get(name, name)}: gotowe.")
+        self.status_message.emit(i18n.t("pipeline.stage_done_status", stage=_stage_label(name)))
         self.stage_finished.emit(name)                  # gospodarz odświeża oś (WAL)
 
     @Slot(str, object)
@@ -630,12 +642,11 @@ class PipelineView(QWidget):
         # Anulować da się KAŻDY przerywalny etap, nie tylko skan (P5: pass obecności też) — twarde
         # `[skan]` + `summary.files` wywalało slot AttributeError na `PresenceSummary`, a wtedy panel
         # zostawał pusty, pasek na 0% i status „Anulowanie…" na wieki (wizytator P5 #1).
-        etykieta = _STAGE_LABEL.get(name, name)
+        etykieta = _stage_label(name)
         if name == "scan":
-            self._append_summary(
-                f"[skan] przerwano po {summary.files} plikach — baza spójna, ponowny skan dokończy.")
+            self._append_summary(i18n.t("pipeline.scan_cancelled", n=summary.files))
         self._append_summary(self._format_result(name, summary))
-        self.status_message.emit(f"Etap „{etykieta}” przerwany.")
+        self.status_message.emit(i18n.t("pipeline.stage_interrupted", stage=etykieta))
         self.stage_finished.emit(name)                  # częściowy zapis też trzeba odświeżyć
 
     @Slot(str, str)
@@ -643,9 +654,9 @@ class PipelineView(QWidget):
         self.bar.setRange(0, 1)
         self.bar.setValue(0)
         self.lbl_counts.setText("")
-        self.lbl_error.setText(f"BŁĄD — etap „{_STAGE_LABEL.get(name, name)}”: {msg}")
+        self.lbl_error.setText(i18n.t("pipeline.stage_failed_line", stage=_stage_label(name), msg=msg))
         self.lbl_error.setVisible(True)                 # czerwony, osobny wiersz — nie ginie w panelu
-        self.status_message.emit(f"Etap „{name}” nie powiódł się.")
+        self.status_message.emit(i18n.t("pipeline.stage_failed_status", stage=name))
 
     # ---------------------------------------------------------------- formatowanie / stan przycisków
 
@@ -675,23 +686,24 @@ class PipelineView(QWidget):
         ciszą: cisza w raporcie dostawy czyta się jak „nie sprawdzono". Kubełki, które NIE są
         zniknięciami, pokazujemy tylko gdy niezerowe."""
         if s.aborted is not None:
-            return f"[obecność] NIE WYKONANO — {s.aborted}"
+            return i18n.t("pipeline.fmt.presence.not_done", reason=s.aborted)
         if s.cancelled:
-            return "[obecność] przerwane przez użytkownika — nic nie zapisano"
-        czesci = [f"zakres {s.scoped} · na dysku {s.walked}"]
+            return i18n.t("pipeline.fmt.presence.cancelled")
+        czesci = [i18n.t("pipeline.fmt.presence.scope", scoped=s.scoped, walked=s.walked)]
         if s.out_of_reach:
-            czesci.append(f"poza zasięgiem {s.out_of_reach}")
+            czesci.append(i18n.t("pipeline.fmt.presence.out_of_reach", n=s.out_of_reach))
         if s.run_id is not None:
-            czesci.append(f"oznaczono {s.vanished}")
+            czesci.append(i18n.t("pipeline.fmt.presence.marked", n=s.vanished))
         else:
-            czesci.append(f"zniknęło {s.confirmed_gone}" if s.confirmed_gone else "nic nie znikło")
+            czesci.append(i18n.t("pipeline.fmt.presence.gone", n=s.confirmed_gone)
+                          if s.confirmed_gone else i18n.t("pipeline.fmt.presence.nothing_gone"))
         if s.resurfaced:
-            czesci.append(f"WYNURZONE {s.resurfaced} (dryf wielkości liter?)")
+            czesci.append(i18n.t("pipeline.fmt.presence.resurfaced", n=s.resurfaced))
         if s.undecided:
-            czesci.append(f"nierozstrzygnięte {s.undecided}")
+            czesci.append(i18n.t("pipeline.fmt.presence.undecided", n=s.undecided))
         if s.drifted:
-            czesci.append(f"pominięte przez rename {s.drifted}")
-        line = "[obecność] " + " · ".join(czesci)
+            czesci.append(i18n.t("pipeline.fmt.presence.drifted", n=s.drifted))
+        line = i18n.t("pipeline.fmt.presence.prefix") + " · ".join(czesci)
         return line + f" · {s.brake}" if s.brake else line
 
     def _update_vanished_box(self, s):
@@ -705,8 +717,8 @@ class PipelineView(QWidget):
             # Druga liczba jest KONIECZNA: zniknięcie jednej z dwóch kopii nie odbiera klatce
             # obecności, więc „oznaczono 3 kopie" potrafi dać PUSTĄ listę zniknięć (wiz P5 #3).
             klatki = i18n.t_plural("pipeline.frames_lost_last", s.frames_without_copy)
-            ogon = klatki if s.frames_without_copy else "żadna klatka nie straciła ostatniej kopii"
-            self.lbl_vanished.setText(f"Oznaczono {kopie} jako zniknięte — {ogon}.")
+            ogon = klatki if s.frames_without_copy else i18n.t("pipeline.no_frame_lost_last")
+            self.lbl_vanished.setText(i18n.t("pipeline.marked_as_vanished", copies=kopie, tail=ogon))
             self.btn_mark_vanished.setVisible(False)
             self.btn_show_vanished.setVisible(bool(s.frames_without_copy))   # lista MUSI mieć treść
             self.box_vanished.setVisible(bool(s.vanished))
@@ -723,38 +735,37 @@ class PipelineView(QWidget):
         self._sync_actions()
 
     def _format_scan(self, s):
-        return (
-            f"[skan] pliki {s.files} · nowe {s.frames_new} · istniejące {s.frames_existing} · "
-            f"pominięte {s.skipped} · wykluczone katalogi {s.dirs_excluded} · "
-            f"lokalizacje {s.locations_new} · odświeżone {s.locations_refreshed} "
-            f"(zeznania {s.headers_refreshed}, przepięte {s.locations_rebound}) · "
-            f"nagłówki {s.headers} · "
-            f"przegląd f/{s.frame_review} k/{s.camera_review} rodzaj/{s.kind_unmapped}")
+        return i18n.t(
+            "pipeline.fmt.scan", files=s.files, new=s.frames_new, existing=s.frames_existing,
+            skipped=s.skipped, excluded=s.dirs_excluded, loc_new=s.locations_new,
+            loc_ref=s.locations_refreshed, hdr_ref=s.headers_refreshed, rebound=s.locations_rebound,
+            headers=s.headers, frame_review=s.frame_review, camera_review=s.camera_review,
+            kind=s.kind_unmapped)
 
     def _format_group(self, s):
-        return (
-            f"[grupuj] nagłówki {s.headers} · teleskopy {s.telescopes_proposed} · "
-            f"bez TELESCOP {s.telescop_missing} · "
-            f"kalibracja poza osią {s.calibration_off_axis}"
-            f"{f' (odpięte {s.configs_unassigned})' if s.configs_unassigned else ''} · "
-            f"konfiguracje {s.configs_proposed}/{s.configs_assigned} · "
-            f"konfig. do przeglądu {s.config_review}")
+        unassigned = (i18n.t("pipeline.fmt.group_unassigned", n=s.configs_unassigned)
+                      if s.configs_unassigned else "")
+        return i18n.t(
+            "pipeline.fmt.group", headers=s.headers, telescopes=s.telescopes_proposed,
+            no_tel=s.telescop_missing, off_axis=s.calibration_off_axis, unassigned=unassigned,
+            conf_prop=s.configs_proposed, conf_assign=s.configs_assigned, conf_review=s.config_review)
 
     def _format_resolve(self, s):
-        return (
-            f"[rozwiąż] klatki {s.frames} · klatki light {s.light_frames} · obiekty nowe {s.objects_new} · "
-            f"przypisane {s.objects_assigned} · przegląd {s.objects_review} "
-            f"(różnych {s.objects_unresolved_distinct}) · filtry {s.filters_set}")
+        return i18n.t(
+            "pipeline.fmt.resolve", frames=s.frames, lights=s.light_frames, obj_new=s.objects_new,
+            obj_assign=s.objects_assigned, obj_review=s.objects_review,
+            obj_distinct=s.objects_unresolved_distinct, filters=s.filters_set)
 
     def _format_calibrate(self, s):
         """Linia raportu osi przepisu. Powody braku kompletu WYPISUJEMY (nie tylko liczbę): „bez
         kompletu 6" nie mówi, czego dopisać ręką w C3, a to jest jedyna akcja, jaką user ma tu do
         wykonania. Zerowe braki milczą (QUIET)."""
-        linia = (f"[kalibracja] klatki {s.frames} · przepisy {s.profiles_proposed}/"
-                 f"{s.profiles_assigned} · fakty ze ścieżki {s.facts_recorded} · "
-                 f"bez kompletu {s.incomplete}")
+        linia = i18n.t(
+            "pipeline.fmt.calibrate", frames=s.frames, prof_prop=s.profiles_proposed,
+            prof_assign=s.profiles_assigned, facts=s.facts_recorded, incomplete=s.incomplete)
         if s.reasons:
-            linia += "\n   braki: " + ", ".join(f"{powod} ×{n}" for powod, n in s.reasons.items())
+            gaps = ", ".join(f"{powod} ×{n}" for powod, n in s.reasons.items())
+            linia += i18n.t("pipeline.fmt.calibrate_gaps", gaps=gaps)
         return linia
 
     def _format_lineage(self, s):
@@ -762,17 +773,18 @@ class PipelineView(QWidget):
         (nie tylko liczba): luka to jedyna informacja, którą user może tu wynieść — który light
         nie ma kalibratora i dlaczego. Zerowe luki milczą (QUIET)."""
         linked = " · ".join(f"{rel} {s.linked.get(rel, 0)}" for rel in ("dark", "flat"))
-        linia = f"[rodowód] lighty {s.lights} · powiązane: {linked}"
+        linia = i18n.t("pipeline.fmt.lineage", lights=s.lights, linked=linked)
         if s.reasons:
-            linia += "\n   luki: " + ", ".join(f"{powod} ×{n}" for powod, n in s.reasons.items())
+            gaps = ", ".join(f"{powod} ×{n}" for powod, n in s.reasons.items())
+            linia += i18n.t("pipeline.fmt.lineage_gaps", gaps=gaps)
         return linia
 
     def _format_delta(self, r):
         total = r.object_resolved + r.object_unresolved
-        top = ", ".join(f"{raw}×{n}" for raw, n in r.object_delta[:8]) or "—"
-        return (
-            f"[delta] obiekt {r.object_resolved}/{total} ({r.object_pct:.1f}%) · filtry {r.filters_canon}\n"
-            f"   nierozpoznane: {top}\n   do przeglądu: {_review_line(r.review)}")
+        top = ", ".join(f"{raw}×{n}" for raw, n in r.object_delta[:8]) or i18n.t("pipeline.delta.none")
+        return i18n.t(
+            "pipeline.fmt.delta", resolved=r.object_resolved, total=total, pct=r.object_pct,
+            filters=r.filters_canon, top=top, review=_review_line(r.review))
 
     def _refresh_buttons(self, running, cancellable):
         idle = not running

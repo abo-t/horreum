@@ -522,4 +522,204 @@ CATALOG = {
     "grid.rename.rejected": {
         "pl": "Odrzucono {n} zmian nazw", "en": "Discarded {n} name changes",
     },
+
+    # ============================================================ pipeline.py (rollout §4: pipeline)
+
+    # --- poziomy zapisu (combo; wartość "cold"/"scratch" = identyfikator do bazy, ZOSTAJE) ---
+    "pipeline.tier.cold": {"pl": "zimny (archiwum)", "en": "cold (archive)"},
+    "pipeline.tier.scratch": {"pl": "roboczy", "en": "scratch"},
+
+    # --- nazwy etapów (status bar / „… w toku"): _STAGE_LABEL trzyma KLUCZE ---
+    "pipeline.stage.scan": {"pl": "Skan", "en": "Scan"},
+    "pipeline.stage.group": {"pl": "Grupowanie", "en": "Grouping"},
+    "pipeline.stage.resolve": {"pl": "Rozwiązywanie", "en": "Resolving"},
+    "pipeline.stage.calibrate": {"pl": "Kalibracja", "en": "Calibration"},
+    "pipeline.stage.lineage": {"pl": "Rodowód", "en": "Lineage"},
+    "pipeline.stage.delta": {"pl": "Delta", "en": "Delta"},
+    "pipeline.stage.presence": {"pl": "Obecność", "en": "Presence"},
+
+    # --- powody przeglądu w raporcie delty: _REVIEW_REASONS trzyma KLUCZE ---
+    "pipeline.reason.no_config": {"pl": "bez konfiguracji", "en": "no config"},
+    "pipeline.reason.headerless": {"pl": "bez nagłówka", "en": "headerless"},
+    "pipeline.reason.no_camera": {"pl": "bez kamery", "en": "no camera"},
+    "pipeline.reason.kind_unknown": {"pl": "rodzaj nieznany", "en": "kind unknown"},
+    "pipeline.reason.unreadable": {"pl": "kopia nieczytelna", "en": "unreadable copy"},
+
+    # --- linia „do przeglądu" w raporcie delty (frames = reuse grid.frames) ---
+    "pipeline.review.none": {"pl": "brak", "en": "none"},
+    "pipeline.review.line": {
+        "pl": "{frames} · powody: {reasons}", "en": "{frames} · reasons: {reasons}",
+    },
+
+    # --- panel budowy UI ---
+    "pipeline.db_none": {"pl": "Baza: (brak)", "en": "Database: (none)"},
+    "pipeline.receive": {
+        "pl": "Przyjmij nowe  (skan → grupuj → rozwiąż → kalibracja → delta)",
+        "en": "Take new  (scan → group → resolve → calibrate → delta)",
+    },
+    "pipeline.source_last": {"pl": "ostatnie źródło: {source}", "en": "last source: {source}"},
+    "pipeline.source_first": {
+        "pl": "(pierwsza dostawa — zapyta o katalog)",
+        "en": "(first delivery — it will ask for a folder)",
+    },
+    "pipeline.advanced_head": {
+        "pl": "Tryb zaawansowany — wskazany katalog:",
+        "en": "Advanced mode — chosen folder:",
+    },
+    "pipeline.pick_dir": {"pl": "Wskaż katalog…", "en": "Choose folder…"},
+    "pipeline.root_none": {"pl": "(nie wskazano)", "en": "(none chosen)"},
+    "pipeline.tier_label": {"pl": "poziom:", "en": "tier:"},
+    "pipeline.volume_none": {"pl": "wolumen: —", "en": "volume: —"},
+    "pipeline.volume_unset": {
+        "pl": "wolumen: ? (serial nieustalony)", "en": "volume: ? (serial undetermined)",
+    },
+    "pipeline.volume_ok": {
+        "pl": "wolumen: {serial} (skan przyrostowy — znane pliki pomijane)",
+        "en": "volume: {serial} (incremental scan — known files skipped)",
+    },
+    "pipeline.process_all": {"pl": "Przetwórz wszystko", "en": "Process all"},
+    "pipeline.btn.scan": {"pl": "Skanuj", "en": "Scan"},
+    "pipeline.btn.group": {"pl": "Grupuj", "en": "Group"},
+    "pipeline.btn.resolve": {"pl": "Rozwiąż", "en": "Resolve"},
+    "pipeline.btn.calibrate": {"pl": "Kalibracja", "en": "Calibrate"},
+    "pipeline.btn.lineage": {"pl": "Rodowód", "en": "Lineage"},
+    "pipeline.btn.delta": {"pl": "Pokaż deltę", "en": "Show delta"},
+    "pipeline.btn.presence": {"pl": "Sprawdź obecność", "en": "Check presence"},
+    "pipeline.btn.cancel": {"pl": "Anuluj", "en": "Cancel"},
+    "pipeline.tip.calibrate": {
+        "pl": "Przepis klatek kalibracyjnych — po „Rozwiąż” (przepis flata potrzebuje filtra)",
+        "en": "Calibration frames recipe — after „Resolve” (the flat recipe needs the filter)",
+    },
+    "pipeline.tip.lineage": {
+        "pl": "Powiąż lighty z masterami po przepisie — po „Kalibracja” (potrzebuje osi przepisu)",
+        "en": "Link lights to masters by recipe — after „Calibrate” (needs the recipe axis)",
+    },
+    "pipeline.tip.presence": {
+        "pl": "Wskaż katalog powyżej — pass porównuje drzewo z bazą",
+        "en": "Choose a folder above — the pass compares the tree with the database",
+    },
+    "pipeline.btn.mark_vanished": {"pl": "Oznacz zniknięte", "en": "Mark vanished"},
+    "pipeline.btn.show_collections": {"pl": "Pokaż w Zbiorach", "en": "Show in Collections"},
+
+    # --- dialogi wyboru katalogu ---
+    "pipeline.dlg.pick_scan": {"pl": "Wskaż katalog do skanu", "en": "Choose a folder to scan"},
+    "pipeline.dlg.pick_delivery": {"pl": "Wskaż katalog dostawy", "en": "Choose a delivery folder"},
+
+    # --- guard serialu / błąd ---
+    "pipeline.guard.mixed": {
+        "pl": "wolumen nieustalony — skan wstrzymany (baza zna realne wolumeny)",
+        "en": "volume undetermined — scan halted (the database knows real volumes)",
+    },
+    "pipeline.error_prefix": {"pl": "BŁĄD — {msg}", "en": "ERROR — {msg}"},
+
+    # --- status / licznik w biegu ---
+    "pipeline.cancelling": {
+        "pl": "Anulowanie… (po bieżącym pliku)", "en": "Cancelling… (after current file)",
+    },
+    "pipeline.counts": {
+        "pl": "Pliki {done}/{total} · nowe {new} · pominięte {skipped} · przegląd {review} · {tail}",
+        "en": "Files {done}/{total} · new {new} · skipped {skipped} · review {review} · {tail}",
+    },
+    "pipeline.stage_running": {"pl": "{stage} w toku…", "en": "{stage} in progress…"},
+    "pipeline.stage_done_status": {"pl": "{stage}: gotowe.", "en": "{stage}: done."},
+    "pipeline.scan_cancelled": {
+        "pl": "[skan] przerwano po {n} plikach — baza spójna, ponowny skan dokończy.",
+        "en": "[scan] interrupted after {n} files — database consistent, a rescan will finish.",
+    },
+    "pipeline.stage_interrupted": {
+        "pl": "Etap „{stage}” przerwany.", "en": "Stage „{stage}” interrupted.",
+    },
+    "pipeline.stage_failed_status": {
+        "pl": "Etap „{stage}” nie powiódł się.", "en": "Stage „{stage}” failed.",
+    },
+    "pipeline.stage_failed_line": {
+        "pl": "BŁĄD — etap „{stage}”: {msg}", "en": "ERROR — stage „{stage}”: {msg}",
+    },
+
+    # --- sekcja zniknięć: zdanie po zapisie ---
+    "pipeline.marked_as_vanished": {
+        "pl": "Oznaczono {copies} jako zniknięte — {tail}.",
+        "en": "Marked {copies} as vanished — {tail}.",
+    },
+    "pipeline.no_frame_lost_last": {
+        "pl": "żadna klatka nie straciła ostatniej kopii",
+        "en": "no frame lost its last copy",
+    },
+
+    # --- raport dostawy: linie per etap (szkielet konkatenacji zostaje, wkład z katalogu) ---
+    "pipeline.fmt.scan": {
+        "pl": "[skan] pliki {files} · nowe {new} · istniejące {existing} · pominięte {skipped} · "
+              "wykluczone katalogi {excluded} · lokalizacje {loc_new} · odświeżone {loc_ref} "
+              "(zeznania {hdr_ref}, przepięte {rebound}) · nagłówki {headers} · "
+              "przegląd f/{frame_review} k/{camera_review} rodzaj/{kind}",
+        "en": "[scan] files {files} · new {new} · existing {existing} · skipped {skipped} · "
+              "excluded folders {excluded} · locations {loc_new} · refreshed {loc_ref} "
+              "(testimonies {hdr_ref}, rebound {rebound}) · headers {headers} · "
+              "review f/{frame_review} c/{camera_review} kind/{kind}",
+    },
+    "pipeline.fmt.group": {
+        "pl": "[grupuj] nagłówki {headers} · teleskopy {telescopes} · bez TELESCOP {no_tel} · "
+              "kalibracja poza osią {off_axis}{unassigned} · konfiguracje {conf_prop}/{conf_assign} · "
+              "konfig. do przeglądu {conf_review}",
+        "en": "[group] headers {headers} · telescopes {telescopes} · no TELESCOP {no_tel} · "
+              "off-axis calibration {off_axis}{unassigned} · configs {conf_prop}/{conf_assign} · "
+              "configs to review {conf_review}",
+    },
+    "pipeline.fmt.group_unassigned": {"pl": " (odpięte {n})", "en": " (unassigned {n})"},
+    "pipeline.fmt.resolve": {
+        "pl": "[rozwiąż] klatki {frames} · klatki light {lights} · obiekty nowe {obj_new} · "
+              "przypisane {obj_assign} · przegląd {obj_review} (różnych {obj_distinct}) · "
+              "filtry {filters}",
+        "en": "[resolve] frames {frames} · light frames {lights} · new objects {obj_new} · "
+              "assigned {obj_assign} · review {obj_review} (distinct {obj_distinct}) · "
+              "filters {filters}",
+    },
+    "pipeline.fmt.calibrate": {
+        "pl": "[kalibracja] klatki {frames} · przepisy {prof_prop}/{prof_assign} · "
+              "fakty ze ścieżki {facts} · bez kompletu {incomplete}",
+        "en": "[calibrate] frames {frames} · recipes {prof_prop}/{prof_assign} · "
+              "facts from path {facts} · incomplete {incomplete}",
+    },
+    "pipeline.fmt.calibrate_gaps": {"pl": "\n   braki: {gaps}", "en": "\n   gaps: {gaps}"},
+    "pipeline.fmt.lineage": {
+        "pl": "[rodowód] lighty {lights} · powiązane: {linked}",
+        "en": "[lineage] lights {lights} · linked: {linked}",
+    },
+    "pipeline.fmt.lineage_gaps": {"pl": "\n   luki: {gaps}", "en": "\n   gaps: {gaps}"},
+    "pipeline.fmt.delta": {
+        "pl": "[delta] obiekt {resolved}/{total} ({pct:.1f}%) · filtry {filters}\n"
+              "   nierozpoznane: {top}\n   do przeglądu: {review}",
+        "en": "[delta] object {resolved}/{total} ({pct:.1f}%) · filters {filters}\n"
+              "   unrecognized: {top}\n   to review: {review}",
+    },
+    "pipeline.delta.none": {"pl": "—", "en": "—"},
+
+    # --- raport passa obecności: części składane przez ` · ` ---
+    "pipeline.fmt.presence.not_done": {
+        "pl": "[obecność] NIE WYKONANO — {reason}", "en": "[presence] NOT DONE — {reason}",
+    },
+    "pipeline.fmt.presence.cancelled": {
+        "pl": "[obecność] przerwane przez użytkownika — nic nie zapisano",
+        "en": "[presence] cancelled by user — nothing was written",
+    },
+    "pipeline.fmt.presence.scope": {
+        "pl": "zakres {scoped} · na dysku {walked}", "en": "scope {scoped} · on disk {walked}",
+    },
+    "pipeline.fmt.presence.out_of_reach": {"pl": "poza zasięgiem {n}", "en": "out of reach {n}"},
+    "pipeline.fmt.presence.marked": {"pl": "oznaczono {n}", "en": "marked {n}"},
+    "pipeline.fmt.presence.gone": {"pl": "zniknęło {n}", "en": "vanished {n}"},
+    "pipeline.fmt.presence.nothing_gone": {"pl": "nic nie znikło", "en": "nothing vanished"},
+    "pipeline.fmt.presence.resurfaced": {
+        "pl": "WYNURZONE {n} (dryf wielkości liter?)",
+        "en": "RESURFACED {n} (letter-case drift?)",
+    },
+    "pipeline.fmt.presence.undecided": {"pl": "nierozstrzygnięte {n}", "en": "undecided {n}"},
+    "pipeline.fmt.presence.drifted": {
+        "pl": "pominięte przez rename {n}", "en": "skipped by rename {n}",
+    },
+    "pipeline.fmt.presence.prefix": {"pl": "[obecność] ", "en": "[presence] "},
+    "pipeline.presence.skipped_no_volume": {
+        "pl": "pominięty — wolumin nieustalony, brak kotwicy zakresu",
+        "en": "skipped — volume undetermined, no scope anchor",
+    },
 }

@@ -18,6 +18,7 @@ pytest.importorskip("PySide6")
 from astropy.io import fits
 
 from horreum import db
+from horreum.gui import i18n
 from horreum.gui.pipeline import PipelineView, PipelineWorker
 
 from PySide6.QtCore import QEventLoop, QTimer
@@ -451,3 +452,27 @@ def test_anulowanie_obecnosci_melduje_zamiast_wywalac_slot(qapp, tmp_path, monke
     con = db.open_db(db_path)
     assert con.execute("SELECT COUNT(*) FROM location WHERE present = 0").fetchone()[0] == 0
     con.close()
+
+
+# --- i18n: EN renderuje z katalogu (§4 rollout `pipeline`) ---
+
+def test_en_render_pipeline_z_katalogu(qapp, tmp_path):
+    """§5 (rollout pipeline): `set_lang('en')` PRZED budową → etykiety przycisków/paneli (stałe
+    _TIERS/_STAGE_LABEL trzymają KLUCZE) ORAZ raport dostawy (`_format_*` sklejany z katalogu)
+    renderują EN. Pełny łańcuch w PRAWDZIWYM wątku dowodzi obu warstw naraz. Autouse-fixture
+    `_reset_i18n_lang` wraca na PL — bez skażenia baterii (raport off-thread czyta stały `_lang`)."""
+    i18n.set_lang("en")
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    # build-time: stałe rozwiązane z katalogu, nie zamrożony PL
+    assert view.btn_receive.text().startswith("Take new")
+    assert view.btn_scan.text() == "Scan" and view.btn_all.text() == "Process all"
+    assert view.combo_tier.itemText(1) == "cold (archive)"     # _TIERS[1] klucz → EN
+    view._root = _tree(tmp_path, 2)
+    loop = QEventLoop()
+    view.running_changed.connect(lambda r: loop.quit() if r is False else None)
+    QTimer.singleShot(20000, loop.quit)
+    view._on_all()
+    loop.exec()
+    txt = view.lbl_summary.text()
+    assert "[scan]" in txt and "[group]" in txt and "[delta]" in txt   # tagi raportu EN
+    assert "files 2" in txt and "object" in txt                       # wkład tekstowy EN

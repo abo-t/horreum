@@ -356,6 +356,7 @@ def test_pusta_perspektywa_nie_klamie_ze_baza_pusta(qapp, tmp_path):
     Baza §8 bez osi obiektu nie ma zniknięć, więc „Zniknięte" są tu pustą perspektywą. Ten sam błąd
     dotyczył Duplikatów i Do przeglądu — P5 tylko doprowadził do niego przyciskiem."""
     from horreum.gui.grid import PRESET_VANISHED, _EMPTY_DB, _EMPTY_FILTER
+    from horreum.gui import i18n                          # _EMPTY_* to KLUCZE (rollout i18n) — rozwiąż t()
     win = MainWindow(_seeded_db(tmp_path))               # bez object_axis → zero present=0
     try:
         win._show_view(NAV_ZBIORY)
@@ -363,8 +364,8 @@ def test_pusta_perspektywa_nie_klamie_ze_baza_pusta(qapp, tmp_path):
         assert wszystkie > 1
         win.grid_view.apply_perspective(PRESET_VANISHED)
         assert win.grid_view._frame_ids == []            # pusto — i to jest PRAWDA o tej bazie
-        assert win.grid_view.empty.text() == _EMPTY_FILTER
-        assert win.grid_view.empty.text() != _EMPTY_DB   # baza ma klatki; grid nie ma prawa twierdzić inaczej
+        assert win.grid_view.empty.text() == i18n.t(_EMPTY_FILTER)
+        assert win.grid_view.empty.text() != i18n.t(_EMPTY_DB)   # baza ma klatki; grid nie kłamie
         win.grid_view.apply_perspective("Przegląd")
         assert len(win.grid_view._frame_ids) == wszystkie
     finally:

@@ -959,12 +959,13 @@ def test_pustostan_rozroznia_filtr_od_pustej_bazy(qapp, tmp_path, monkeypatch):
     monkeypatch.setattr(QSettings, "value", lambda self, k, d=None: d)
     monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: None)
     from horreum.gui.grid import _EMPTY_DB, _EMPTY_FILTER, FramesView
+    from horreum.gui import i18n                          # _EMPTY_* to KLUCZE (rollout i18n) — rozwiąż t()
 
     con = db.open_db(str(tmp_path / "pusta.db"))          # świeża baza: zero klatek
     try:
         v = FramesView(con, now_fn=None)
         assert v.empty.isVisible() or v._n_total == 0
-        assert v.empty.text() == _EMPTY_DB
+        assert v.empty.text() == i18n.t(_EMPTY_DB)
     finally:
         con.close()
 
@@ -972,11 +973,35 @@ def test_pustostan_rozroznia_filtr_od_pustej_bazy(qapp, tmp_path, monkeypatch):
     _seed(con2)
     try:
         v2 = FramesView(con2, now_fn=None)
-        assert v2.empty.text() == _EMPTY_FILTER           # niepusta baza → wariant filtrowy
+        assert v2.empty.text() == i18n.t(_EMPTY_FILTER)   # niepusta baza → wariant filtrowy
         v2.filter_panel.filterApplied.emit({"keyword": "OBJECT", "operator": "eq", "value": "BRAK"})
-        assert v2._n_total == 0 and v2.empty.text() == _EMPTY_FILTER
+        assert v2._n_total == 0 and v2.empty.text() == i18n.t(_EMPTY_FILTER)
     finally:
         con2.close()
+
+
+def test_en_render_grid_z_katalogu(qapp, tmp_path):
+    """§5 (rollout grid): `set_lang('en')` PRZED budową → nagłówki bazowe, akcje paska zbioru, presety
+    i pusty stan renderują EN z katalogu (stałe BASE_COLS/PRESETS trzymają KLUCZE). Split tożsamość/
+    tekst presetu: WYŚWIETLANIE = EN, `itemData` = tożsamość PL → `apply_perspective` po tożsamości
+    działa pod EN. Autouse-fixture wraca na PL."""
+    from horreum.gui import i18n
+    from horreum.gui.grid import FramesView, _EMPTY_DB
+    i18n.set_lang("en")
+    con = db.open_db(str(tmp_path / "en.db"))
+    try:
+        v = FramesView(con, now_fn=None)
+        assert v.model.headerData(0, Qt.Horizontal, Qt.DisplayRole) == "Path"   # BASE_COLS[0]=col.path
+        assert v.sel_bar.btn_proj.text() == "Serve to table…"
+        assert v.sel_bar.btn_save.text() == "★ Save view"
+        assert v.empty.text() == i18n.t(_EMPTY_DB)                              # pusta baza → wariant EN
+        # preset: WYŚWIETLANIE EN, tożsamość PL w itemData (split)
+        assert v.combo_persp.itemText(0) == "Review"
+        assert v.combo_persp.itemData(0) == ("preset", "Przegląd")
+        v.apply_perspective("Duplikaty")   # po TOŻSAMOŚCI PL — działa mimo EN wyświetlania
+        assert v.combo_persp.currentData() == ("preset", "Duplikaty")
+    finally:
+        con.close()
 
 
 def test_panel_pol_pokrycie_w_prawej_kolumnie(view):

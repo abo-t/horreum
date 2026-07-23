@@ -43,18 +43,21 @@ from horreum.gui.rows import TwoPartDelegate
 # Kolumny bazowe: (nagłówek, klucz). Klucze `_telescope`/`_object`/`_dt_delta` = pochodne. `_dt_delta`
 # (Δh nagłówek−nazwa) liczone w `_derive` z `naming.header_dt`/`filename_dt` — `base_rows` zwraca już
 # date_obs+path (zero zmian SQL). Kolumna renamu: grupowanie po Δh wykrawa homogeniczny wsad (§1).
+# Para (klucz-etykiety, klucz-danych). Klucz-etykiety → i18n.t w BUDOWIE nagłówka (headerData), nie
+# module-level (D-L1). Etykiety reużyte z katalogu app (col.path/frame.col.*/object.col.name) — SPOT.
 BASE_COLS = [
-    ("Ścieżka", "path"), ("Rodzaj", "kind"), ("Kamera", "camera_model"),
-    ("Teleskop", "_telescope"), ("Obiekt", "_object"), ("Filtr", "filter_canon"),
-    ("Δh (hdr−nazwa)", "_dt_delta"),
+    ("col.path", "path"), ("grid.col.kind", "kind"), ("frame.col.camera", "camera_model"),
+    ("frame.col.telescope", "_telescope"), ("object.col.name", "_object"),
+    ("frame.col.filter", "filter_canon"), ("grid.col.dt_delta", "_dt_delta"),
 ]
 _MISSING_TEXT = "—"
 
 
 # Pusty grid mówi DWIE różne rzeczy — filtr nic nie wpuścił vs. w bazie nie ma nic (wiz F5 #8:
 # „zmień filtr lub perspektywę" na pustej bazie wysyła usera w ślepy zaułek zamiast po dostawę).
-_EMPTY_FILTER = "Brak klatek dla tego filtra — zmień filtr lub perspektywę."
-_EMPTY_DB = "Baza pusta — przyjmij dostawę (miejsce „Dostawa” w lewym pasku)."
+# Stałe trzymają KLUCZ (nie string) — rozwiązywane `i18n.t` w USE-site (D-L1; string zamroziłby PL).
+_EMPTY_FILTER = "grid.empty_filter"
+_EMPTY_DB = "grid.empty_db"
 
 # Kolory stanów gridu — z motywu (F6 §7, SPOT). Model czyta `_COLORS` NA ŻYWO w `data()`
 # (Qt nie cache'uje BackgroundRole), więc `use_theme` przy przełączeniu + `viewport().update()`
@@ -71,11 +74,12 @@ def use_theme(name):
 
 use_theme(theme.DEFAULT)     # init przy imporcie (QColor bez QApplication — jak dawne stałe modułu)
 
-# Operatory filtra: etykieta → op (glif+słowo dla czytelności; regex POMINIĘTY, D-F).
+# Operatory filtra: (klucz-etykiety, op). Etykieta → i18n.t w budowie combo; op to DANE (regex POMINIĘTY, D-F).
 OPERATORS = [
-    ("= równe", "eq"), ("≠ różne", "ne"), ("> większe", "gt"), ("< mniejsze", "lt"),
-    ("≥", "ge"), ("≤", "le"), ("zawiera", "contains"), ("zaczyna się", "startswith"),
-    ("istnieje", "exists"), ("brak wartości", "not_exists"),
+    ("grid.op.eq", "eq"), ("grid.op.ne", "ne"), ("grid.op.gt", "gt"), ("grid.op.lt", "lt"),
+    ("grid.op.ge", "ge"), ("grid.op.le", "le"), ("grid.op.contains", "contains"),
+    ("grid.op.startswith", "startswith"), ("grid.op.exists", "exists"),
+    ("grid.op.not_exists", "not_exists"),
 ]
 _NO_VALUE = {"exists", "not_exists"}
 
@@ -101,6 +105,15 @@ PRESETS = {
     PRESET_DUPS: {"filter": None, "group_by": None, "only_dups": True},
     PRESET_VANISHED: {"filter": None, "group_by": None, "only_vanished": True},
     "Do przeglądu": {"filter": None, "group_by": None, "only_review": True},
+}
+# Etykieta WYŚWIETLANIA presetu (tekst) osobno od TOŻSAMOŚCI (klucz PRESETS w `itemData` — używany przez
+# `apply_perspective`/`_on_perspective`/`tasks.py`, odporny na tłumaczenie tekstu). Split D-L3.
+_PRESET_LABELS = {
+    "Przegląd": "perspective.review",
+    "Kalibracja": "perspective.calibration",
+    PRESET_DUPS: "perspective.dups",
+    PRESET_VANISHED: "perspective.vanished",
+    "Do przeglądu": "perspective.to_review",
 }
 
 
@@ -154,15 +167,16 @@ class GridTableModel(QAbstractTableModel):
         self._sort_desc = False
         self._numeric_kw = set() # keywordy z choć jedną komórką liczbową → MISSING „—" też prawo (P3-7)
         self._preview = {}       # frame_id → {'keyword','old','new'} | {'skipped': reason} (podgląd makra/renamu)
-        self._preview_label = "makro →"   # etykieta efemerycznej kolumny podglądu (klinga-zależna, R1 #4)
+        self._preview_label = i18n.t("grid.preview.macro")   # etykieta efemerycznej kolumny (klinga-zależna, R1 #4)
 
-    def set_preview(self, preview, *, label="makro →"):
+    def set_preview(self, preview, *, label=None):
         """Podgląd klingi (doktryna §5: „grid = podgląd"): frame_id → zmiana (stara→nowa) albo
         pominięcie z powodem. Dokłada EFEMERYCZNĄ kolumnę (`label`, np. „makro →"/„nazwa →") na końcu;
-        `{}`/None ją zdejmuje. `label` rozróżnia klingę (makro vs rename) w tym samym podglądzie (R1 #4)."""
+        `{}`/None ją zdejmuje. `label` rozróżnia klingę (makro vs rename) w tym samym podglądzie (R1 #4);
+        `None` → domyślna „makro →" z katalogu (rozwiązywana w wywołaniu, nie w sygnaturze — D-L1)."""
         self.beginResetModel()
         self._preview = dict(preview or {})
-        self._preview_label = label
+        self._preview_label = label if label is not None else i18n.t("grid.preview.macro")
         self.endResetModel()
 
     def _preview_active(self):
@@ -207,7 +221,7 @@ class GridTableModel(QAbstractTableModel):
             if section == self._preview_col():
                 return self._preview_label
             if section < len(BASE_COLS):
-                return BASE_COLS[section][0]
+                return i18n.t(BASE_COLS[section][0])
             return self._keywords[section - len(BASE_COLS)]
         return section + 1
 
@@ -253,11 +267,11 @@ class GridTableModel(QAbstractTableModel):
             return None
         if "skipped" in pv:
             if role == Qt.DisplayRole:
-                return "(pominięto)"
+                return i18n.t("grid.preview.skipped")
             if role == Qt.ForegroundRole:
                 return _COLORS["missing"]
             if role == Qt.ToolTipRole:
-                return f"pominięto: {pv['skipped']}"
+                return i18n.t("grid.preview.skipped_tip", reason=pv['skipped'])
             return None
         if role == Qt.DisplayRole:
             if pv.get("op") == "rename":
@@ -287,13 +301,13 @@ class GridTableModel(QAbstractTableModel):
         if key == "path":
             path = row.get("path") or ""
             if role == Qt.DisplayRole:
-                name = os.path.basename(path) if path else "(brak lokalizacji)"
+                name = os.path.basename(path) if path else i18n.t("object.no_location")
                 # Prefiks „×N" PRZED nazwą (P2-2): sufiks ginął przy elizji długich ścieżek.
                 return f"×{row['n_present']}  {name}" if dup else name
             if role == Qt.ToolTipRole:
-                extra = "\n(zniknięta — wszystkie lokalizacje present=0)" if vanished else (
-                    f"\n({row['n_present']} obecnych lokalizacji)" if dup else "")
-                return (path or "(brak lokalizacji)") + extra
+                extra = i18n.t("grid.tip.vanished") if vanished else (
+                    i18n.t("grid.tip.dup_locs", n=row['n_present']) if dup else "")
+                return (path or i18n.t("object.no_location")) + extra
             return None
         if key == "_dt_delta":
             # JEDEN typ: zawsze float godzin (R2 #3). Pełne godziny renderują się „-2", ułamek „-1.97"
@@ -419,12 +433,12 @@ class FilterPanel(QWidget):
         outer = QVBoxLayout(self); outer.setContentsMargins(0, 0, 0, 0)
         top = QHBoxLayout()
         self.combo_op = QComboBox(); self.combo_op.addItems(["AND", "OR"])
-        top.addWidget(QLabel("Łącz:")); top.addWidget(self.combo_op)
-        btn_add = QPushButton("+ warunek"); btn_add.clicked.connect(self.add_row); top.addWidget(btn_add)
-        self.chk_invert = QCheckBox("Odwróć: pokaż wszystko POZA filtrem")
+        top.addWidget(QLabel(i18n.t("grid.filter.join"))); top.addWidget(self.combo_op)
+        btn_add = QPushButton(i18n.t("grid.filter.add_cond")); btn_add.clicked.connect(self.add_row); top.addWidget(btn_add)
+        self.chk_invert = QCheckBox(i18n.t("grid.filter.invert"))
         top.addWidget(self.chk_invert)
-        btn_apply = QPushButton("Zastosuj"); btn_apply.clicked.connect(self._apply); top.addWidget(btn_apply)
-        btn_clear = QPushButton("Wyczyść"); btn_clear.clicked.connect(self._clear); top.addWidget(btn_clear)
+        btn_apply = QPushButton(i18n.t("grid.filter.apply")); btn_apply.clicked.connect(self._apply); top.addWidget(btn_apply)
+        btn_clear = QPushButton(i18n.t("grid.filter.clear")); btn_clear.clicked.connect(self._clear); top.addWidget(btn_clear)
         top.addStretch(1)
         outer.addLayout(top)
         self._rows_box = QVBoxLayout(); outer.addLayout(self._rows_box)
@@ -435,7 +449,7 @@ class FilterPanel(QWidget):
         kw = QComboBox(); kw.setEditable(True); kw.addItems(self._keywords)
         op = QComboBox()
         for label, _ in OPERATORS:
-            op.addItem(label)
+            op.addItem(i18n.t(label))
         val = QLineEdit()
         val.returnPressed.connect(self._apply)   # Enter w polu wartości = Zastosuj (P3-4)
         rm = QPushButton("×"); rm.setFixedWidth(28)
@@ -545,7 +559,7 @@ class FieldsPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         outer = QVBoxLayout(self); outer.setContentsMargins(0, 0, 0, 0)
-        outer.addWidget(QLabel("Pola (kolumny)"))
+        outer.addWidget(QLabel(i18n.t("grid.fields.title")))
         self.list = QListWidget()
         self.list.setItemDelegate(TwoPartDelegate(self.list))
         self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -600,26 +614,26 @@ class MacroBar(QWidget):
         b = QVBoxLayout(self.body); b.setContentsMargins(12, 4, 0, 4)
         # Oblicz (opcjonalny krok pośredni: nazwa = wyrażenie)
         comp = QHBoxLayout()
-        comp.addWidget(QLabel("Oblicz:"))
-        self.comp_name = QLineEdit(); self.comp_name.setPlaceholderText("nazwa (opc.)")
+        comp.addWidget(QLabel(i18n.t("grid.macro.compute")))
+        self.comp_name = QLineEdit(); self.comp_name.setPlaceholderText(i18n.t("grid.macro.name_ph"))
         self.comp_name.setFixedWidth(120)
-        self.comp_expr = QLineEdit(); self.comp_expr.setPlaceholderText("wyrażenie, np. FOCALLEN / FOCRATIO")
+        self.comp_expr = QLineEdit(); self.comp_expr.setPlaceholderText(i18n.t("grid.macro.expr_ph"))
         comp.addWidget(self.comp_name); comp.addWidget(QLabel("=")); comp.addWidget(self.comp_expr, 1)
         b.addLayout(comp)
         # Przypisz (keyword op wartość)
         asg = QHBoxLayout()
-        asg.addWidget(QLabel("Przypisz:"))
+        asg.addWidget(QLabel(i18n.t("grid.macro.assign")))
         self.asg_kw = QComboBox(); self.asg_kw.setEditable(True); self.asg_kw.addItems(keywords)
         self.asg_kw.setFixedWidth(160)
         self.asg_op = QComboBox(); self.asg_op.addItems(["set", "add"])
-        self.asg_expr = QLineEdit(); self.asg_expr.setPlaceholderText("wartość lub wyrażenie, np. round(new, 2)")
+        self.asg_expr = QLineEdit(); self.asg_expr.setPlaceholderText(i18n.t("grid.macro.assign_ph"))
         asg.addWidget(self.asg_kw); asg.addWidget(self.asg_op); asg.addWidget(QLabel("=")); asg.addWidget(self.asg_expr, 1)
         b.addLayout(asg)
         # akcje
         act = QHBoxLayout()
-        self.btn_prev = QPushButton("Podgląd"); self.btn_prev.clicked.connect(self._emit_preview)
-        self.btn_stage = QPushButton("Do stagingu"); self.btn_stage.clicked.connect(self._emit_stage)
-        btn_clear = QPushButton("Wyczyść podgląd"); btn_clear.clicked.connect(lambda: self.cleared.emit())
+        self.btn_prev = QPushButton(i18n.t("grid.action.preview")); self.btn_prev.clicked.connect(self._emit_preview)
+        self.btn_stage = QPushButton(i18n.t("grid.action.to_staging")); self.btn_stage.clicked.connect(self._emit_stage)
+        btn_clear = QPushButton(i18n.t("grid.action.clear_preview")); btn_clear.clicked.connect(lambda: self.cleared.emit())
         act.addStretch(1); act.addWidget(self.btn_prev); act.addWidget(self.btn_stage); act.addWidget(btn_clear)
         b.addLayout(act)
         outer.addWidget(self.body)
@@ -668,20 +682,22 @@ class _TokenRow(QWidget):
     removeRequested = Signal(object)
     moveRequested = Signal(object, int)                # (self, -1 w górę / +1 w dół)
 
-    _TOKENS = (("data-godzina", "datetime"), ("obiekt", "object"), ("rodzaj", "kind"),
-               ("filtr", "filter"), ("ekspozycja", "exp"), ("znaczek (disc)", "disc"),
-               ("folder nadrzędny", "folder"), ("fragment starej nazwy", "orig"))
+    # (klucz-etykiety, tid). Etykieta → i18n.t w budowie combo; tid to DANE `naming`.
+    _TOKENS = (("grid.token.datetime", "datetime"), ("grid.token.object", "object"),
+               ("grid.token.kind", "kind"), ("grid.token.filter", "filter"),
+               ("grid.token.exp", "exp"), ("grid.token.disc", "disc"),
+               ("grid.token.folder", "folder"), ("grid.token.orig", "orig"))
 
     def __init__(self, spec="kind", parent=None):
         super().__init__(parent)
         lay = QHBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0)
         self.combo = QComboBox(); self.combo.setFixedWidth(170)     # stała kolumna typu (wiz #2 — bez ragged)
         for lbl, tid in self._TOKENS:
-            self.combo.addItem(lbl, tid)
+            self.combo.addItem(i18n.t(lbl), tid)
         lay.addWidget(self.combo)
-        self.level = QSpinBox(); self.level.setRange(1, 8); self.level.setPrefix("poziom ")
+        self.level = QSpinBox(); self.level.setRange(1, 8); self.level.setPrefix(i18n.t("grid.token.level_prefix"))
         lay.addWidget(self.level)
-        self.regex = QLineEdit(); self.regex.setPlaceholderText("regex fragmentu starej nazwy")
+        self.regex = QLineEdit(); self.regex.setPlaceholderText(i18n.t("grid.token.regex_ph"))
         self.regex.setMinimumWidth(160)
         lay.addWidget(self.regex)
         lay.addStretch(1)                                           # wypełniacz → przyciski zawsze przy prawej
@@ -734,12 +750,12 @@ class _TemplateEditor(QWidget):
         super().__init__(parent)
         outer = QVBoxLayout(self); outer.setContentsMargins(0, 0, 0, 0)
         head = QHBoxLayout()
-        lbl = QLabel("Wzór nazwy:"); lbl.setProperty("role", "secondary")
+        lbl = QLabel(i18n.t("grid.tmpl.title")); lbl.setProperty("role", "secondary")
         head.addWidget(lbl); head.addStretch(1)
-        btn_add = QPushButton("+ Token"); btn_def = QPushButton("Przywróć domyślny")
+        btn_add = QPushButton(i18n.t("grid.tmpl.add_token")); btn_def = QPushButton(i18n.t("grid.tmpl.restore"))
         head.addWidget(btn_add); head.addWidget(btn_def)
         outer.addLayout(head)
-        self._empty_hint = QLabel("pusty wzór — dodaj token przyciskiem „+ Token"); self._empty_hint.hide()
+        self._empty_hint = QLabel(i18n.t("grid.tmpl.empty_hint")); self._empty_hint.hide()
         self._empty_hint.setProperty("role", "secondary")
         outer.addWidget(self._empty_hint)
         self._host = QWidget()
@@ -815,17 +831,17 @@ class RenameBar(QWidget):
 
         # (1) polityka wsadu
         pol = QHBoxLayout()
-        pol.addWidget(QLabel("Źródło:"))
+        pol.addWidget(QLabel(i18n.t("grid.rename.source")))
         self.src = QComboBox()
-        self.src.addItem("DATE-OBS", "date_obs")          # D2: default DATE-OBS
-        self.src.addItem("nazwa pliku", "filename")
+        self.src.addItem("DATE-OBS", "date_obs")          # D2: default DATE-OBS (kw FITS — bez tłumaczenia)
+        self.src.addItem(i18n.t("grid.rename.src_filename"), "filename")
         self.src.currentIndexChanged.connect(lambda *_: self.sourceChanged.emit())
         pol.addWidget(self.src)
-        pol.addWidget(QLabel("Offset:"))
+        pol.addWidget(QLabel(i18n.t("grid.rename.offset")))
         self.offset = QSpinBox(); self.offset.setRange(-24, 24); self.offset.setValue(0)
         self.offset.setSuffix(" h")                       # BEZ założenia strefy (§2): 0 default
         pol.addWidget(self.offset)
-        self.fallback = QCheckBox("Fallback na drugie źródło"); self.fallback.setChecked(True)  # D1
+        self.fallback = QCheckBox(i18n.t("grid.rename.fallback")); self.fallback.setChecked(True)  # D1
         pol.addWidget(self.fallback)
         pol.addStretch(1)
         self.target_lbl = QLabel("")                      # żywa etykieta celu (R1 #18)
@@ -838,7 +854,7 @@ class RenameBar(QWidget):
         self.lbl_primary = QLabel("—"); self.lbl_secondary = QLabel("—")
         self.lbl_delta = QLabel(""); self.lbl_flag = QLabel("")
         self.lbl_flag.setStyleSheet("color: #b00;")
-        self.btn_align = QPushButton("Wyrównaj do drugiego źródła"); self.btn_align.setEnabled(False)
+        self.btn_align = QPushButton(i18n.t("grid.rename.align")); self.btn_align.setEnabled(False)
         self.btn_align.clicked.connect(self._align)
         grid.addWidget(self.lbl_primary, 0, 0); grid.addWidget(self.lbl_secondary, 0, 1)
         grid.addWidget(self.lbl_delta, 1, 0); grid.addWidget(self.lbl_flag, 1, 1)
@@ -854,9 +870,9 @@ class RenameBar(QWidget):
 
         # (4) akcje (bliźniaczo do makra)
         act = QHBoxLayout()
-        self.btn_prev = QPushButton("Podgląd"); self.btn_prev.clicked.connect(self._emit_preview)
-        self.btn_stage = QPushButton("Do stagingu"); self.btn_stage.clicked.connect(self._emit_stage)
-        btn_clear = QPushButton("Wyczyść podgląd"); btn_clear.clicked.connect(lambda: self.cleared.emit())
+        self.btn_prev = QPushButton(i18n.t("grid.action.preview")); self.btn_prev.clicked.connect(self._emit_preview)
+        self.btn_stage = QPushButton(i18n.t("grid.action.to_staging")); self.btn_stage.clicked.connect(self._emit_stage)
+        btn_clear = QPushButton(i18n.t("grid.action.clear_preview")); btn_clear.clicked.connect(lambda: self.cleared.emit())
         act.addStretch(1); act.addWidget(self.btn_prev); act.addWidget(self.btn_stage); act.addWidget(btn_clear)
         b.addLayout(act)
         outer.addWidget(self.body)
@@ -885,16 +901,16 @@ class RenameBar(QWidget):
         self._median = median
         if median is None:
             self.btn_align.setEnabled(False)
-            self.btn_align.setText("Wyrównaj do drugiego źródła")
+            self.btn_align.setText(i18n.t("grid.rename.align"))
             self.btn_align.setToolTip("")
             return
         self.btn_align.setEnabled(True)
         off = self._offset_from_median()
-        other = "czasu z nazw" if self.source() == "date_obs" else "DATE-OBS"
-        self.btn_align.setText(f"Wyrównaj do {other}: {off:+d} h")
-        tip = f"surowa mediana Δ = {median!r} h"
+        other = i18n.t("grid.rename.other_fname") if self.source() == "date_obs" else "DATE-OBS"
+        self.btn_align.setText(i18n.t("grid.rename.align_to", other=other, off=f"{off:+d}"))
+        tip = i18n.t("grid.rename.align_tip", median=repr(median))
         if spread is not None:
-            tip += f" · rozrzut {spread:g} h"
+            tip += i18n.t("grid.rename.align_tip_spread", spread=f"{spread:g}")
         self.btn_align.setToolTip(tip)
 
     def _offset_from_median(self):
@@ -945,7 +961,7 @@ class SelectionBar(QFrame):
     etykiety (NARROW). Przyciski-panele ZAWSZE aktywne (gating checkable = pułapka
     disabled-but-checked-open, F3R#2); pusty zbiór gasi tylko „Wydaj na stół…"."""
 
-    _PROJ_TIP = "Materializuj bieżącą perspektywę w drzewo linków/kopii (WBPP feed)"
+    _PROJ_TIP = "grid.sel.proj_tip"   # KLUCZ (rozwiązywany i18n.t w use-site — nie zamrożony PL)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -955,15 +971,15 @@ class SelectionBar(QFrame):
         f = QFont(); f.setBold(True); self.count_label.setFont(f)
         self.criteria_label = ElidedLabel()
         self.criteria_label.setProperty("role", "secondary")   # kryteria zbioru czytelne na dark (F6 §7)
-        self.btn_proj = QPushButton("Wydaj na stół…")
-        self.btn_proj.setToolTip(self._PROJ_TIP)
+        self.btn_proj = QPushButton(i18n.t("grid.sel.project"))
+        self.btn_proj.setToolTip(i18n.t(self._PROJ_TIP))
         # „× Wyczyść zbiór" (wiz F4 #3): jednoklikowe zdjęcie facetów + filtra — bez niego jedyną
         # drogą było od-cyklowanie każdej wartości (preset „Przegląd" = no-op, gdy już wybrany).
-        self.btn_clear = QPushButton("× Wyczyść zbiór")
-        self.btn_clear.setToolTip("Zdejmij facety i filtr zaawansowany (perspektywa zostaje)")
-        self.btn_macro = QPushButton("Popraw nagłówki…"); self.btn_macro.setCheckable(True)
-        self.btn_rename = QPushButton("Uporządkuj nazwy plików…"); self.btn_rename.setCheckable(True)
-        self.btn_save = QPushButton("★ Zapisz widok")
+        self.btn_clear = QPushButton(i18n.t("grid.sel.clear_set"))
+        self.btn_clear.setToolTip(i18n.t("grid.sel.clear_tip"))
+        self.btn_macro = QPushButton(i18n.t("grid.sel.fix_headers")); self.btn_macro.setCheckable(True)
+        self.btn_rename = QPushButton(i18n.t("grid.sel.tidy_names")); self.btn_rename.setCheckable(True)
+        self.btn_save = QPushButton(i18n.t("grid.sel.save_view"))
         lay.addWidget(self.count_label); lay.addSpacing(8)
         lay.addWidget(self.criteria_label, 1)
         lay.addWidget(self.btn_clear); lay.addWidget(self.btn_proj); lay.addWidget(self.btn_macro)
@@ -980,7 +996,7 @@ class SelectionBar(QFrame):
         """Uczciwy disabled TYLKO realnej akcji na zbiorze (F3R#2): pusty zbiór gasi „Wydaj na stół…"
         (guard `_open_projection` zostaje drugą linią); „★ Zapisz widok" i panele zawsze żywe."""
         self.btn_proj.setEnabled(on)
-        self.btn_proj.setToolTip(self._PROJ_TIP if on else "brak klatek w zbiorze")
+        self.btn_proj.setToolTip(i18n.t(self._PROJ_TIP) if on else i18n.t("grid.sel.proj_tip_empty"))
 
     def set_active_panel(self, which):
         """Synchronizuj zaznaczenie przycisków-paneli ze stanem stacku (`None`/'macro'/'rename');
@@ -1017,15 +1033,15 @@ class StagingDrawer(QFrame):
         self.setFrameShape(QFrame.StyledPanel)
         lay = QHBoxLayout(self); lay.setContentsMargins(8, 4, 8, 4)
         self.dot = QLabel("○")
-        self.label = QLabel("Poczekalnia zmian — pusta")   # słownik F3 (§4)
+        self.label = QLabel(i18n.t("grid.drawer.empty"))   # słownik F3 (§4)
         self.result = QLabel(""); self.result.setProperty("role", "secondary")   # F6 §7
         # Postęp writebacku renderuje się TU (nie w modalu): pasek + „Anuluj" wchodzą w miejsce
         # Zatwierdź/Odrzuć na czas commitu/undo (off-thread — GUI nie zamarza; rdzeń commituje per-plik).
         self.bar = QProgressBar(); self.bar.setVisible(False); self.bar.setMaximumWidth(220); self.bar.setTextVisible(False)
-        self.btn_cancel = QPushButton("Anuluj"); self.btn_cancel.setVisible(False)
+        self.btn_cancel = QPushButton(i18n.t("grid.action.cancel")); self.btn_cancel.setVisible(False)
         self.btn_cancel.clicked.connect(lambda: self.cancel.emit())
-        self.btn_commit = QPushButton("Zatwierdź"); self.btn_commit.clicked.connect(lambda: self.commit.emit())
-        self.btn_reject = QPushButton("Odrzuć"); self.btn_reject.clicked.connect(lambda: self.reject.emit())
+        self.btn_commit = QPushButton(i18n.t("grid.action.commit")); self.btn_commit.clicked.connect(lambda: self.commit.emit())
+        self.btn_reject = QPushButton(i18n.t("grid.action.reject")); self.btn_reject.clicked.connect(lambda: self.reject.emit())
         # Klaster licznik+wynik po LEWEJ (dot·label·result), rozpychacz, akcje po prawej — inaczej
         # `result` ze stretch=1 rozrzucał licznik i przyciski na całą szerokość (wizytator D1).
         lay.addWidget(self.dot); lay.addWidget(self.label); lay.addSpacing(8)
@@ -1061,14 +1077,14 @@ class StagingDrawer(QFrame):
             self.dot.setText("●"); self.dot.setStyleSheet("color: #d08000;")   # U+25CF: jest w Segoe UI, paruje z „○" (wiz F3 #2)
             # `label` rozróżnia klingę też przy n>0: „N zmian nazw oczekuje" vs domyślne „N zmian
             # oczekuje" (mikro-zmiana §0; call-sites makra bez label → domyślny tekst, R1 #8).
-            self.label.setText(label or f"{n} zmian oczekuje")
+            self.label.setText(label or i18n.t("grid.drawer.pending", n=n))
             if result is None:
                 self.result.setText("")      # nowy staging: skasuj STALE wynik commitu/odrzucenia (wiz #7)
         else:
             self.dot.setText("○"); self.dot.setStyleSheet("color: #999;")
             # `label` nadpisuje domyślny tekst pustego stanu: po commicie „Zatwierdzono…" zamiast
             # pustostanu poczekalni (sprzeczność z wynikiem obok — wizytator D2).
-            self.label.setText(label or "Poczekalnia zmian — pusta")
+            self.label.setText(label or i18n.t("grid.drawer.empty"))
         self.btn_commit.setEnabled(n > 0)
         self.btn_reject.setEnabled(n > 0)
         # Nowy staging (n>0) → Zatwierdź/Odrzuć znowu widoczne. NIE chowa tu „Cofnij" (osobny przycisk
@@ -1199,14 +1215,14 @@ class FramesView(QWidget):
         # Górny pasek CHUDY (F3): tylko soczewki widoku (perspektywa + grupowanie); akcje na ZBIORZE
         # mieszkają w SelectionBar niżej.
         bar = QHBoxLayout()
-        bar.addWidget(QLabel("Perspektywa:"))
+        bar.addWidget(QLabel(i18n.t("grid.top.perspective")))
         self.combo_persp = QComboBox()
         self.combo_persp.currentIndexChanged.connect(self._on_perspective)
         bar.addWidget(self.combo_persp)
         bar.addSpacing(16)
-        bar.addWidget(QLabel("Grupuj wg:"))
+        bar.addWidget(QLabel(i18n.t("grid.top.group_by")))
         self.combo_group = QComboBox()
-        self.combo_group.addItem("(bez grupowania)", None)
+        self.combo_group.addItem(i18n.t("grid.top.no_group"), None)
         for label, key in BASE_COLS:
             if key not in ("path",):
                 self.combo_group.addItem(label, key)
@@ -1279,7 +1295,7 @@ class FramesView(QWidget):
         self.table.horizontalHeader().setStretchLastSection(True)
         rv.addWidget(self.table)
 
-        self.empty = QLabel(_EMPTY_FILTER)
+        self.empty = QLabel(i18n.t(_EMPTY_FILTER))
         self.empty.setAlignment(Qt.AlignCenter); self.empty.setWordWrap(True); self.empty.setVisible(False)
         rv.addWidget(self.empty, 1)   # stretch: pusty stan zbiera leftover — SelectionBar/panel nie balonieją (wiz F3 #1)
 
@@ -1310,7 +1326,7 @@ class FramesView(QWidget):
         self.combo_persp.blockSignals(True)
         self.combo_persp.clear()
         for name in PRESETS:
-            self.combo_persp.addItem(name, ("preset", name))
+            self.combo_persp.addItem(i18n.t(_PRESET_LABELS[name]), ("preset", name))
         for name in self._saved_perspectives():
             self.combo_persp.addItem(f"★ {name}", ("saved", name))
         self.combo_persp.blockSignals(False)
@@ -1367,7 +1383,7 @@ class FramesView(QWidget):
                 else:
                     self.combo_persp.setCurrentIndex(i)   # currentIndexChanged → _on_perspective
                 return
-        self.status_message.emit(f"Nieznana perspektywa: {name}")
+        self.status_message.emit(i18n.t("grid.persp.unknown", name=name))
 
     def _load_saved(self, name):
         raw = self._settings().value("grid/perspectives", "{}")
@@ -1377,7 +1393,7 @@ class FramesView(QWidget):
             return None
 
     def _save_perspective(self):
-        name, ok = QInputDialog.getText(self, "Zapisz perspektywę", "Nazwa:")
+        name, ok = QInputDialog.getText(self, i18n.t("grid.persp.save_title"), i18n.t("grid.persp.save_prompt"))
         if not ok or not name.strip():
             return
         name = name.strip()
@@ -1405,14 +1421,14 @@ class FramesView(QWidget):
                 self.combo_persp.setCurrentIndex(i)
                 break
         self.combo_persp.blockSignals(False)
-        self.status_message.emit(f"Zapisano perspektywę „{name}”")
+        self.status_message.emit(i18n.t("grid.persp.saved", name=name))
 
     def _open_projection(self):
         """Otwórz dialog projekcji dla WIDOCZNEJ perspektywy (`self._frame_ids` — po filtrach dups/review,
         to co user widzi; doktryna §5). Modal TYLKO na potwierdzenie eksportu; cała mutacja plików w
         Qt-wolnej klindze `projection` przez dialog. Pusty grid → szczery status, bez pustego dialogu."""
         if not self._frame_ids:
-            self.status_message.emit("Projekcja: brak widocznych klatek")
+            self.status_message.emit(i18n.t("grid.proj.no_frames"))
             return
         dlg = ProjectionDialog(self.con, self._frame_ids, now_fn=self._now,
                                perspektywa=self.combo_persp.currentText(), parent=self)
@@ -1454,11 +1470,11 @@ class FramesView(QWidget):
         — grid.py PRESETS; drzewo ich nie koduje, F4R2#7), łączone „ · "."""
         parts = [filter_engine.describe(self._effective_tree)]
         if self._only_dups:
-            parts.append("tylko duplikaty")
+            parts.append(i18n.t("grid.criteria.only_dups"))
         if self._only_review:
-            parts.append("tylko do przeglądu")
+            parts.append(i18n.t("grid.criteria.only_review"))
         if self._only_vanished:
-            parts.append("tylko zniknięte")
+            parts.append(i18n.t("grid.criteria.only_vanished"))
         return " · ".join(parts)
 
     # ---- reakcje ----
@@ -1526,7 +1542,7 @@ class FramesView(QWidget):
             # Rozróżnienie „filtr nic nie wpuścił" vs „w bazie NIC nie ma" (wiz F5 #8). Uniwersum
             # bierzemy z memoizowanego `universe_fn` TEGO refreshu — na niepustym gridzie zapytania
             # nie ma w ogóle, a gdy filtr już go dotknął, jest z cache'u.
-            self.empty.setText(_EMPTY_FILTER if universe_fn() else _EMPTY_DB)
+            self.empty.setText(i18n.t(_EMPTY_FILTER) if universe_fn() else i18n.t(_EMPTY_DB))
         self.empty.setVisible(n == 0)
         self.table.setVisible(n > 0)
         self.macro_bar.set_actions_enabled(bool(base_ids))   # szczery disabled makra na pustym gridzie (#4)
@@ -1538,7 +1554,7 @@ class FramesView(QWidget):
         self._sync_staging_mutex()                           # staging jednej klingi wyłącza „Do stagingu" drugiej
         self._refresh_date_echo()                            # panel daty odbija świeże widoczne (echo warunkowe)
         self.status_message.emit(
-            f"Grid: {i18n.t_plural('grid.frames', n)}, {len(keywords)} kolumn-keywordów")
+            i18n.t("grid.status.loaded", frames=i18n.t_plural('grid.frames', n), cols=len(keywords)))
 
     def _reload_facet_rail(self, leaf_fn, universe_fn, dup_ids, review_ids, current_ids):
         """Liczniki listwy facetów per SIBLING-SET (F4R#1): zbiór facetu F = compose bez CAŁEJ własnej
@@ -1641,25 +1657,29 @@ class FramesView(QWidget):
             r = scope[0]
             h = naming.header_dt(r.get("date_obs"))
             fn = naming.filename_dt(os.path.basename(r["path"])) if r.get("path") else None
-            primary = f"DATE-OBS: {h:%Y-%m-%d %H:%M:%S}" if h else "DATE-OBS: (brak)"
-            secondary = f"czas z nazwy: {fn:%Y-%m-%d %H:%M:%S}" if fn else "czas z nazwy: (brak)"
+            primary = (i18n.t("grid.echo.dateobs", ts=f"{h:%Y-%m-%d %H:%M:%S}") if h
+                       else i18n.t("grid.echo.dateobs_none"))
+            secondary = (i18n.t("grid.echo.fname_time", ts=f"{fn:%Y-%m-%d %H:%M:%S}") if fn
+                         else i18n.t("grid.echo.fname_none"))
             d = r.get("_dt_delta")
             if d is None:
-                self.rename_bar.set_echo(primary, secondary, "Δ = —", "brak źródła czasu")
+                self.rename_bar.set_echo(primary, secondary, i18n.t("grid.echo.delta_none"),
+                                         i18n.t("grid.echo.no_time_src"))
             else:
-                flag = "Δ niepełnogodzinna!" if abs(d - round(d)) > 1e-9 else ""
-                self.rename_bar.set_echo(primary, secondary, f"Δ (hdr−nazwa) = {d:g} h", flag)
+                flag = i18n.t("grid.echo.delta_subhour") if abs(d - round(d)) > 1e-9 else ""
+                self.rename_bar.set_echo(primary, secondary, i18n.t("grid.echo.delta", d=f"{d:g}"), flag)
             return
         # wsad (>1): mediana Δ + rozrzut (1 interakcja/wsad, §5b briefu-matki) + align
         deltas = [r["_dt_delta"] for r in scope if r.get("_dt_delta") is not None]
-        primary = f"Wsad: {len(scope)} klatek ({len(deltas)} z obu źródeł)"
+        primary = i18n.t("grid.echo.batch", n=len(scope), both=len(deltas))
         if deltas:
             med = statistics.median(deltas)
             spread = max(deltas) - min(deltas)
-            self.rename_bar.set_echo(primary, f"mediana Δ = {med:g} h · rozrzut {spread:g} h",
+            self.rename_bar.set_echo(primary,
+                                     i18n.t("grid.echo.batch_stats", med=f"{med:g}", spread=f"{spread:g}"),
                                      "", "", median=med, spread=spread)
         else:
-            self.rename_bar.set_echo(primary, "brak źródła czasu w wsadzie", "", "")
+            self.rename_bar.set_echo(primary, i18n.t("grid.echo.no_time_batch"), "", "")
 
     def set_busy(self, busy):
         """Podczas etapu pipeline'u wyłącz akcje ZAPISU grida (makro/rename/staging/commit/undo) — worker
@@ -1699,8 +1719,8 @@ class FramesView(QWidget):
                                        cards_fn=self._cards_fn, run_id=run_id)
         except (macro_mod.expr.ExprError, ValueError) as exc:
             # Błąd DEFINICJI makra → sprzężenie w szufladzie + status (bez modalu — doktryna §5, #3).
-            self.drawer.set_count(self._pending_count(), result=f"Błąd makra: {exc}")
-            self.status_message.emit(f"Błąd makra: {exc}")
+            self.drawer.set_count(self._pending_count(), result=i18n.t("grid.macro.error", exc=exc))
+            self.status_message.emit(i18n.t("grid.macro.error", exc=exc))
             return None
 
     def _show_preview(self, run):
@@ -1723,20 +1743,20 @@ class FramesView(QWidget):
 
     def _on_macro_preview(self, md):
         if not self._frame_ids:
-            self.status_message.emit("Makro: brak widocznych klatek do policzenia")
+            self.status_message.emit(i18n.t("grid.macro.no_frames_count"))
             return
         run = self._run(md)
         if run is None:
             return
         t, s = self._show_preview(run)
-        self.status_message.emit(f"Podgląd makra: {t} do zapisu, {s} pominięto")
+        self.status_message.emit(i18n.t("grid.macro.preview_result", t=t, s=s))
 
     def _on_macro_stage(self, md):
         if not self._frame_ids:
-            self.status_message.emit("Makro: brak widocznych klatek")
+            self.status_message.emit(i18n.t("grid.macro.no_frames"))
             return
         if self._rename_pending_count() > 0:             # mutex symetryczny: staging renamu w toku
-            self.status_message.emit("Makro: najpierw zatwierdź/odrzuć staging nazw")
+            self.status_message.emit(i18n.t("grid.macro.staging_busy"))
             return
         self._dismiss_undo()                             # nowy staging unieważnia leftover „Cofnij" (wiz #3)
         if self._run_id is None:
@@ -1753,12 +1773,12 @@ class FramesView(QWidget):
                 expected_header_hash=p.expected_header_hash)
         self._show_preview(run)
         self._refresh_drawer()
-        self.status_message.emit(f"Do stagingu: {len(run.touched)} zmian, {len(run.skipped)} pominięto")
+        self.status_message.emit(i18n.t("grid.macro.staged", t=len(run.touched), s=len(run.skipped)))
 
     def _on_macro_clear(self):
         self.model.set_preview({})
         self._preview_owner = None
-        self.status_message.emit("Podgląd makra wyczyszczony")
+        self.status_message.emit(i18n.t("grid.macro.preview_cleared"))
 
     @staticmethod
     def _first_reason(res):
@@ -1797,7 +1817,7 @@ class FramesView(QWidget):
             self.rename_bar.btn_stage.setToolTip("")
         if rename_n > 0:
             self.macro_bar.btn_stage.setEnabled(False)
-            self.macro_bar.btn_stage.setToolTip(f"staging nazw w toku ({rename_n} zmian)")
+            self.macro_bar.btn_stage.setToolTip(i18n.t("grid.rename.staging_busy_tip", n=rename_n))
         else:
             self.macro_bar.btn_stage.setEnabled(has_frames)
             self.macro_bar.btn_stage.setToolTip("")
@@ -1809,7 +1829,7 @@ class FramesView(QWidget):
         rn = self._rename_pending_count()
         macro_n = self._pending_count()
         if rn > 0:
-            self.drawer.set_count(rn, label=f"{rn} zmian nazw oczekuje")
+            self.drawer.set_count(rn, label=i18n.t("grid.drawer.pending_rename", n=rn))
         elif macro_n > 0:
             self.drawer.set_count(macro_n)
         elif self._undo_mode is None:         # brak pending i brak świeżego „Cofnij" → pustostan
@@ -1861,30 +1881,31 @@ class FramesView(QWidget):
     @Slot(str, str)
     def _on_wb_failed(self, op, msg):
         self.drawer.end_progress()
-        self.drawer.set_count(self._active_pending_count(), result=f"BŁĄD: {msg}")
+        self.drawer.set_count(self._active_pending_count(), result=i18n.t("grid.wb.error", msg=msg))
         self.refresh()
         self._refresh_drawer()
-        self.status_message.emit(f"Writeback „{op}” nie powiódł się: {msg}")
+        self.status_message.emit(i18n.t("grid.wb.failed", op=op, msg=msg))
 
     def _on_wb_cancel(self):
         if self._wb_worker is not None:
             self._wb_worker.request_cancel()             # rdzeń sprawdza PRZED następnym plikiem
             self.drawer.btn_cancel.setEnabled(False)
-            self.status_message.emit("Anulowanie… (po bieżącym pliku)")
+            self.status_message.emit(i18n.t("grid.wb.cancelling"))
 
-    def _commit_summary(self, res, noun):
-        """Podsumowanie CommitResult: „N {noun} · M zablokowanych · …" + pierwszy powód (wiz #4)."""
-        parts = [f"{len(res.applied)} {noun}"]
+    def _commit_summary(self, res, noun_key):
+        """Podsumowanie CommitResult: „N {noun} · M zablokowanych · …" + pierwszy powód (wiz #4).
+        `noun_key` = klucz frazy głównej (`grid.wb.applied`/`grid.wb.renamed`) — DANE, nie string PL."""
+        parts = [i18n.t(noun_key, n=len(res.applied))]
         if res.blocked:
-            parts.append(f"{len(res.blocked)} zablokowanych")
+            parts.append(i18n.t("grid.wb.blocked", n=len(res.blocked)))
         if res.failed:
-            parts.append(f"{len(res.failed)} błędów")
+            parts.append(i18n.t("grid.wb.errors", n=len(res.failed)))
         if res.skipped:
-            parts.append(f"{len(res.skipped)} pominiętych")
+            parts.append(i18n.t("grid.wb.skipped", n=len(res.skipped)))
         summary = " · ".join(parts)
         detail = self._first_reason(res)                 # powód, nie tylko liczba (wiz #4)
         if detail:
-            summary += f" — {detail}"
+            summary += i18n.t("grid.wb.detail_sep", detail=detail)
         return summary
 
     def _on_commit(self):
@@ -1899,13 +1920,13 @@ class FramesView(QWidget):
         """Post-processing commitu makra (wątek główny). Anulowano → część 'pending' została w runie:
         run zostaje otwarty do dokończenia, bez „Cofnij" (zapisane siedzą w commits — undo po CLI)."""
         self.drawer.end_progress()
-        summary = self._commit_summary(res, "zapisanych")
+        summary = self._commit_summary(res, "grid.wb.applied")
         remaining = self._pending_count()
         if remaining > 0:                                # przerwane anulowaniem
-            summary += f" — przerwano, {remaining} do dokończenia"
+            summary += i18n.t("grid.wb.interrupted", n=remaining)
             self.drawer.set_count(remaining, result=summary)
         elif res.commit_id is not None and res.applied:
-            summary += f"  (commit {res.commit_id})"
+            summary += i18n.t("grid.wb.commit_id", id=res.commit_id)
             self._last_commit_id = res.commit_id
             self._install_undo(res.commit_id, summary, applied=len(res.applied))
             self._run_id = None                          # R#5: run domknięty commitem
@@ -1915,12 +1936,13 @@ class FramesView(QWidget):
         self.model.set_preview({})
         self.refresh()                                   # baza odświeżona — grid pokazuje nowe wartości
         self._refresh_drawer()
-        self.status_message.emit(f"Writeback: {summary}")
+        self.status_message.emit(i18n.t("grid.wb.status", summary=summary))
 
     def _install_undo(self, commit_id, summary, applied):
         """Po udanym commicie makra szuflada oferuje jednorazowe „Cofnij" (undo całego commitu). Etykieta
         „Zatwierdzono…" zamiast pustostanu, by nie przeczyła wynikowi obok (wizytator D2)."""
-        self.drawer.set_count(0, result=summary, label=f"Zatwierdzono: {applied} (commit {commit_id})")
+        self.drawer.set_count(0, result=summary,
+                              label=i18n.t("grid.wb.committed_label", n=applied, id=commit_id))
         self.drawer.set_commit_actions_visible(False)   # jedyna sensowna akcja teraz to Cofnij (#5)
         self._undo_commit_id = commit_id
         self._undo_mode = "macro"                        # dispatch współdzielonego „Cofnij" (R1 #3)
@@ -1931,7 +1953,7 @@ class FramesView(QWidget):
         """Współdzielony przycisk „Cofnij" (tworzony RAZ, stabilny handler → dispatch po `_undo_mode`;
         bez churnu connect/disconnect, który sypał RuntimeWarning — wzorzec makra)."""
         if not hasattr(self, "_undo_btn"):
-            self._undo_btn = QPushButton("Cofnij")
+            self._undo_btn = QPushButton(i18n.t("grid.action.undo"))
             self._undo_btn.clicked.connect(self._dispatch_undo)
             self.drawer.layout().addWidget(self._undo_btn)
 
@@ -1955,9 +1977,9 @@ class FramesView(QWidget):
         self._start_writeback("undo", commit_id, self._after_undo)
 
     def _after_undo(self, op, res):
-        msg = f"{len(res.restored)} przywróconych"
+        msg = i18n.t("grid.wb.restored", n=len(res.restored))
         if res.blocked:
-            msg += f" · {len(res.blocked)} zablokowanych"
+            msg += " · " + i18n.t("grid.wb.blocked", n=len(res.blocked))
         self.drawer.end_progress()
         self._undo_btn.setVisible(False)
         self._undo_mode = None
@@ -1965,7 +1987,7 @@ class FramesView(QWidget):
         self.drawer.set_count(0, result=msg)
         self.refresh()
         self._refresh_drawer()                           # honest: odbij pending drugiej klingi (wiz #3b)
-        self.status_message.emit(f"Undo: {msg}")
+        self.status_message.emit(i18n.t("grid.wb.undo_status", msg=msg))
 
     def _on_reject(self):
         if self._rename_pending_count() > 0:             # szuflada aktywnej klingi (staging mutex)
@@ -1978,9 +2000,9 @@ class FramesView(QWidget):
         self._run_id = None
         self.model.set_preview({})
         self._preview_owner = None
-        self.drawer.set_count(0, result=f"Odrzucono {n} zmian")   # trwałe sprzężenie w szufladzie (#3)
+        self.drawer.set_count(0, result=i18n.t("grid.wb.rejected", n=n))   # trwałe sprzężenie w szufladzie (#3)
         self._sync_staging_mutex()
-        self.status_message.emit(f"Odrzucono {n} zmian")
+        self.status_message.emit(i18n.t("grid.wb.rejected", n=n))
 
     # ---- rename „Nazwy z faktów" (druga klinga plików: os.rename) ----
     def _note_preview_takeover(self, new_owner):
@@ -1988,8 +2010,9 @@ class FramesView(QWidget):
         pierwszy — komunikat w statusie, żeby zniknięcie nie było ciche. Wołane PRZED `set_preview`."""
         if (self._preview_owner and self._preview_owner != new_owner
                 and self.model._preview_active()):
-            other = "makra" if self._preview_owner == "macro" else "nazw"
-            self.status_message.emit(f"Zdjęto podgląd {other} (druga klinga)")
+            other = (i18n.t("grid.preview.owner_macro") if self._preview_owner == "macro"
+                     else i18n.t("grid.preview.owner_rename"))
+            self.status_message.emit(i18n.t("grid.preview.takeover", other=other))
         self._preview_owner = new_owner
 
     def _rename_target_ids(self):
@@ -2018,29 +2041,29 @@ class FramesView(QWidget):
                                     "new": os.path.basename(pv.new_path)}
         for sk in run.skipped:
             preview[sk.frame_id] = {"skipped": sk.reason}
-        self.model.set_preview(preview, label="nazwa →")
+        self.model.set_preview(preview, label=i18n.t("grid.preview.name"))
         return len(run.touched), len(run.skipped)
 
     def _on_rename_preview(self, policy):
         ids, target = self._rename_target_ids()
         if not ids:
-            self.status_message.emit("Rename: brak klatek do policzenia")
+            self.status_message.emit(i18n.t("grid.rename.no_count"))
             return
         try:
             run = self._run_rename(ids, policy)
         except ValueError as e:                          # zły regex orig we wzorze (INFORMUJ)
-            self.status_message.emit(f"Rename: {e}")
+            self.status_message.emit(i18n.t("grid.rename.error", e=e))
             return
         t, s = self._show_rename_preview(run)
-        self.status_message.emit(f"Podgląd nazw: {t} do zmiany, {s} pominięto (cel: {target})")
+        self.status_message.emit(i18n.t("grid.rename.preview_result", t=t, s=s, target=target))
 
     def _on_rename_stage(self, policy):
         ids, target = self._rename_target_ids()
         if not ids:
-            self.status_message.emit("Rename: brak klatek")
+            self.status_message.emit(i18n.t("grid.rename.no_frames"))
             return
         if self._pending_count() > 0:                    # mutex: staging makra w toku
-            self.status_message.emit("Rename: najpierw zatwierdź/odrzuć staging makra")
+            self.status_message.emit(i18n.t("grid.rename.staging_busy"))
             return
         self._dismiss_undo()                             # nowy staging unieważnia leftover „Cofnij" (wiz #3)
         # Pętla życia run_id (R1 #1 + R2 #1): run niecommitowany → clear (bezpieczne, same 'pending');
@@ -2048,7 +2071,7 @@ class FramesView(QWidget):
         try:
             naming.validate_template(policy.get("template") or naming.DEFAULT_TEMPLATE)  # zły regex → stop przed mintem
         except ValueError as e:
-            self.status_message.emit(f"Rename: {e}")
+            self.status_message.emit(i18n.t("grid.rename.error", e=e))
             return
         if self._rename_run_id is None or self._rename_run_committed:
             self._rename_run_id = uuid.uuid4().hex
@@ -2061,13 +2084,13 @@ class FramesView(QWidget):
                               old_path=p.old_path, new_path=p.new_path, expected_mtime=p.mtime)
         self._show_rename_preview(run)
         self._refresh_drawer()
-        self.status_message.emit(
-            f"Do stagingu nazw: {len(run.touched)} zmian, {len(run.skipped)} pominięto (cel: {target})")
+        self.status_message.emit(i18n.t(
+            "grid.rename.staged", t=len(run.touched), s=len(run.skipped), target=target))
 
     def _on_rename_clear(self):
         self.model.set_preview({})
         self._preview_owner = None
-        self.status_message.emit("Podgląd nazw wyczyszczony")
+        self.status_message.emit(i18n.t("grid.rename.preview_cleared"))
 
     def _on_commit_rename(self):
         run_id = self._rename_run_id
@@ -2080,13 +2103,14 @@ class FramesView(QWidget):
         run zostaje otwarty do dokończenia, bez „Cofnij"."""
         self.drawer.end_progress()
         run_id = self._wb_target_id
-        summary = self._commit_summary(res, "przemianowanych")
+        summary = self._commit_summary(res, "grid.wb.renamed")
         remaining = self._rename_pending_count()
         if remaining > 0:                                # przerwane anulowaniem
-            summary += f" — przerwano, {remaining} do dokończenia"
-            self.drawer.set_count(remaining, label=f"{remaining} zmian nazw oczekuje", result=summary)
+            summary += i18n.t("grid.wb.interrupted", n=remaining)
+            self.drawer.set_count(remaining, label=i18n.t("grid.drawer.pending_rename", n=remaining),
+                                  result=summary)
         elif res.applied:                                # Cofnij TYLKO gdy coś zrobione (R2 #6)
-            summary += f"  (run {run_id})"               # run_id w wyniku: undo po restarcie przez CLI (R2 #7)
+            summary += i18n.t("grid.wb.run_id", id=run_id)   # run_id w wyniku: undo po restarcie przez CLI (R2 #7)
             self._undo_rename_run_id = run_id            # PRZECHWYĆ cel Cofnij przed re-stage (R2 #1)
             self._rename_run_committed = True
             self._install_rename_undo(run_id, summary, applied=len(res.applied))
@@ -2098,13 +2122,13 @@ class FramesView(QWidget):
         self._preview_owner = None
         self.refresh()                                   # baza odświeżona — grid pokazuje nowe ścieżki
         self._refresh_drawer()
-        self.status_message.emit(f"Rename: {summary}")
+        self.status_message.emit(i18n.t("grid.rename.status_summary", summary=summary))
 
     def _install_rename_undo(self, run_id, summary, applied):
         """Po udanym rename szuflada oferuje „Cofnij" (undo_renames przebiegu). Lustro `_install_undo`
         makra, tryb `rename` (dispatch współdzielonego przycisku). Etykieta CZYSTA (bez 32-hex szumu);
         pełny run_id zostaje w `result`=summary jako kotwica CLI-undo po restarcie (R2 #7, wiz #6)."""
-        self.drawer.set_count(0, result=summary, label=f"Przemianowano: {applied}")
+        self.drawer.set_count(0, result=summary, label=i18n.t("grid.rename.renamed_label", n=applied))
         self.drawer.set_commit_actions_visible(False)
         self._undo_mode = "rename"
         self._ensure_undo_button()
@@ -2114,9 +2138,9 @@ class FramesView(QWidget):
         self._start_writeback("undo_rename", run_id, self._after_undo_rename)
 
     def _after_undo_rename(self, op, res):
-        msg = f"{len(res.restored)} przywróconych"
+        msg = i18n.t("grid.wb.restored", n=len(res.restored))
         if res.blocked:
-            msg += f" · {len(res.blocked)} zablokowanych"
+            msg += " · " + i18n.t("grid.wb.blocked", n=len(res.blocked))
         self.drawer.end_progress()
         self._undo_rename_run_id = None
         self._undo_mode = None
@@ -2127,7 +2151,7 @@ class FramesView(QWidget):
         self.drawer.set_count(0, result=msg)
         self.refresh()
         self._refresh_drawer()
-        self.status_message.emit(f"Undo nazw: {msg}")
+        self.status_message.emit(i18n.t("grid.rename.undo_status", msg=msg))
 
     def _on_reject_rename(self):
         if self._rename_run_id is None:
@@ -2138,6 +2162,6 @@ class FramesView(QWidget):
         self._rename_run_committed = False
         self.model.set_preview({})
         self._preview_owner = None
-        self.drawer.set_count(0, result=f"Odrzucono {n} zmian nazw")
+        self.drawer.set_count(0, result=i18n.t("grid.rename.rejected", n=n))
         self._sync_staging_mutex()
-        self.status_message.emit(f"Odrzucono {n} zmian nazw")
+        self.status_message.emit(i18n.t("grid.rename.rejected", n=n))

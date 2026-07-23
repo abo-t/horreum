@@ -4,7 +4,7 @@
 pasek `done/total`, „Anuluj" na granicy pliku, zamrożone parametry, abort sondy), auto-decyzja hardlink/kopia
 po serialach wolumenów (R#4+R2-1), licznik generacji stale-DRY (R2-2), słownictwo per tryb (wiz #5),
 rozmiar przy kopii (R#5), „Utwórz…" na PRAWDZIWYCH plikach. Czyste pomocniki (chosen_present/
-volume_decision/size_summary/plural) testowane wprost. `importorskip` — bez PySide6 plik pomijany.
+volume_decision/size_summary) testowane wprost. `importorskip` — bez PySide6 plik pomijany.
 Realny R: NIGDY nie dotykany; QSettings izolowane od rejestru (fake_settings)."""
 
 import json
@@ -22,7 +22,7 @@ from PySide6.QtWidgets import QApplication
 
 from horreum.gui import projection_dialog as pd_mod
 from horreum.gui.projection_dialog import (
-    ProjectionDialog, chosen_present, eta_text, plural, size_summary, volume_decision,
+    ProjectionDialog, chosen_present, eta_text, size_summary, volume_decision,
 )
 
 NOW = "2026-07-17T00:00:00+00:00"
@@ -98,14 +98,6 @@ def test_volume_decision_tabela():
 def test_size_summary_null_osobnym_kubelkiem():
     rows = [{"size_bytes": 100}, {"size_bytes": None}, {"size_bytes": 50}]
     assert size_summary(rows) == (150, 1)
-
-
-def test_plural_polski():
-    assert plural(1, "kopię", "kopie", "kopii") == "kopię"
-    assert plural(3, "kopię", "kopie", "kopii") == "kopie"
-    assert plural(13, "kopię", "kopie", "kopii") == "kopii"
-    assert plural(22, "link", "linki", "linków") == "linki"
-    assert plural(5, "link", "linki", "linków") == "linków"
 
 
 def test_eta_text_dopiero_po_rozgrzewce():

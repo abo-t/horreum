@@ -35,10 +35,9 @@ from PySide6.QtWidgets import (
 )
 
 from horreum import db, filter_engine, macro as macro_mod, naming, pivot as pivot_mod, repo, writeback
-from horreum.gui import facet_model, portfolio, queries, rows, theme
+from horreum.gui import facet_model, i18n, portfolio, queries, rows, theme
 from horreum.gui.facets import RAIL_MIN_W as _FIELDS_MIN_W, FacetRail
-# `plural` mieszka przy dialogu projekcji (jedyny właściciel — SPOT); grid i tak importuje ten moduł.
-from horreum.gui.projection_dialog import ProjectionDialog, plural
+from horreum.gui.projection_dialog import ProjectionDialog
 from horreum.gui.rows import TwoPartDelegate
 
 # Kolumny bazowe: (nagłówek, klucz). Klucze `_telescope`/`_object`/`_dt_delta` = pochodne. `_dt_delta`
@@ -50,11 +49,6 @@ BASE_COLS = [
     ("Δh (hdr−nazwa)", "_dt_delta"),
 ]
 _MISSING_TEXT = "—"
-
-
-def _frames(n):
-    """„klatka/klatki/klatek" — odmiana rzeczownika licznika zbioru [#11]."""
-    return plural(n, "klatka", "klatki", "klatek")
 
 
 # Pusty grid mówi DWIE różne rzeczy — filtr nic nie wpuścił vs. w bazie nie ma nic (wiz F5 #8:
@@ -1543,7 +1537,8 @@ class FramesView(QWidget):
         self._reload_facet_rail(leaf_fn, universe_fn, dup_ids, review_ids, base_ids)   # listwa (F4)
         self._sync_staging_mutex()                           # staging jednej klingi wyłącza „Do stagingu" drugiej
         self._refresh_date_echo()                            # panel daty odbija świeże widoczne (echo warunkowe)
-        self.status_message.emit(f"Grid: {n} {_frames(n)}, {len(keywords)} kolumn-keywordów")
+        self.status_message.emit(
+            f"Grid: {i18n.t_plural('grid.frames', n)}, {len(keywords)} kolumn-keywordów")
 
     def _reload_facet_rail(self, leaf_fn, universe_fn, dup_ids, review_ids, current_ids):
         """Liczniki listwy facetów per SIBLING-SET (F4R#1): zbiór facetu F = compose bez CAŁEJ własnej
@@ -1613,13 +1608,13 @@ class FramesView(QWidget):
         na pasku zbioru czytało się jak błąd (wiz K7 / wiz F5 #7)."""
         sm = self.table.selectionModel()
         sel = len(sm.selectedRows()) if sm else 0
-        txt = f"{self._n_total} {_frames(self._n_total)}" + (
-            f"  ·  {sel} {plural(sel, 'zaznaczona', 'zaznaczone', 'zaznaczonych')}" if sel else "")
+        txt = i18n.t_plural("grid.frames", self._n_total) + (
+            f"  ·  {i18n.t_plural('grid.selected', sel)}" if sel else "")
         self.count_label.setText(txt)
         if hasattr(self, "rename_bar"):
             self.rename_bar.set_target_label(
-                f"Cel: {sel} {plural(sel, 'zaznaczona', 'zaznaczone', 'zaznaczonych')}" if sel
-                else f"Cel: {self._n_total} {plural(self._n_total, 'widoczna', 'widoczne', 'widocznych')}")
+                f"Cel: {i18n.t_plural('grid.selected', sel)}" if sel
+                else f"Cel: {i18n.t_plural('grid.visible', self._n_total)}")
 
     # ---- panel inspekcji daty (G1/G4 — RenameBar) ----
     def _selected_data_rows(self):

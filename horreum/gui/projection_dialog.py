@@ -44,7 +44,7 @@ from PySide6.QtWidgets import (
 )
 
 from horreum import db, projection
-from horreum.gui import queries
+from horreum.gui import i18n, queries
 from horreum.volumes import volume_serial
 
 _TREE_CAP = 30                        # ile folderów kategorii pokazać w raporcie dialogu
@@ -99,15 +99,6 @@ def format_bytes(n):
         if value < 1024 or unit == "TB":
             return f"{int(value)} B" if unit == "B" else f"{value:.1f} {unit}"
         value /= 1024
-
-
-def plural(n, one, few, many):
-    """Polska liczba mnoga: 1 kopię · 2–4 kopie · 5 kopii (12–14 zawsze „many")."""
-    if n == 1:
-        return one
-    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
-        return few
-    return many
 
 
 def eta_text(done_n, total, elapsed_s, warmup=5):
@@ -521,9 +512,8 @@ class ProjectionDialog(QDialog):
         self.report.setPlainText(self._format(payload["res"], payload["plan"], dry=True,
                                               payload=payload))
         n = payload["res"].counts.get("would-link", 0)
-        noun = plural(n, "kopię", "kopie", "kopii") if payload["copy"] else \
-            plural(n, "link", "linki", "linków")
-        self.btn_apply.setText(f"Utwórz {n} {noun}")
+        key = "proj.create_copies" if payload["copy"] else "proj.create_links"
+        self.btn_apply.setText(i18n.t_plural(key, n))
         self.btn_apply.setEnabled(n > 0)             # zero do utworzenia → szczery disabled
         self._update_card_note(payload)
 
@@ -700,7 +690,7 @@ class ProjectionDialog(QDialog):
                 size_line = f"  rozmiar kopii: {format_bytes(payload['size_total'])}"
                 if payload["size_missing"]:
                     m = payload["size_missing"]
-                    size_line += f"  (+{m} {plural(m, 'plik', 'pliki', 'plików')} bez rozmiaru)"
+                    size_line += f"  {i18n.t_plural('proj.files_no_size', m)}"
                 lines.append(size_line)
         else:
             # abort → nie „Utworzono" (wizytator #6); anulowanie nazywa się WPROST (W1) — user ma
@@ -726,7 +716,7 @@ class ProjectionDialog(QDialog):
         nf = len(folders)
         # „drzewo PLANU": po anulowaniu/abortcie sekcja niżej dalej opisuje pełen plan, nie stan
         # dysku — bez tego słowa czyta się jak listing celu (wiz #6).
-        lines.append(f"  drzewo planu: {nf} {plural(nf, 'folder', 'foldery', 'folderów')} kategorii")
+        lines.append(f"  drzewo planu: {i18n.t_plural('proj.plan_tree_folders', nf)}")
         for key, n in sorted(folders.items(), key=lambda kv: (-kv[1], kv[0]))[:_TREE_CAP]:
             lines.append(f"    {key}: {n}")
         if len(folders) > _TREE_CAP:

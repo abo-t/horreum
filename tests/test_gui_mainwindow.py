@@ -183,6 +183,27 @@ def test_menu_widok_przelacza_motyw(qapp, tmp_path, monkeypatch):
         grid_mod.use_theme(theme.DEFAULT)              # przywróć globalny stan modułu dla innych testów
 
 
+def test_menu_widok_wybor_jezyka(qapp, tmp_path, monkeypatch):
+    """#1: menu &Widok niesie sekcję języka (endonimy), zaznaczenie odbija ŻYWY język sesji
+    (D-L1 restart-required: `_on_lang` utrwala `ui/lang`, NIE stosuje na żywo — nota w statusbarze)."""
+    from PySide6.QtCore import QSettings
+    from horreum.gui import i18n
+    store = {}
+    monkeypatch.setattr(QSettings, "value", lambda self, k, d=None: store.get(k, d))
+    monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: store.__setitem__(k, v))
+    i18n.set_lang("pl")                                  # symuluj żywy język sesji (ustawia go `main`)
+    win = MainWindow(_seeded_db(tmp_path))
+    try:
+        assert set(win._lang_actions) == {"pl", "en"}
+        assert win._lang_actions["pl"].isChecked()       # menu odbija żywy PL bez klikania
+        assert not win._lang_actions["en"].isChecked()
+        win._on_lang("en")                               # wybór EN — utrwalony, sesja NIE przełącza
+        assert store["ui/lang"] == "en"
+        assert i18n.current_lang() == "pl"               # D-L1: zmiana zadziała po restarcie
+    finally:
+        win.close()
+
+
 # --- PORZĄDKI: lista zadań, badge, nawigacja do powierzchni (F5) ---
 
 def test_badge_zywy_od_montazu(qapp, tmp_path):

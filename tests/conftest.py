@@ -5,6 +5,19 @@ import pytest
 from fixture_s8 import seed, seed_object_axis
 
 from horreum import db
+from horreum.gui import i18n   # Qt-wolny (słownik) — import bezpieczny bez PySide6
+
+
+@pytest.fixture(autouse=True)
+def _reset_i18n_lang():
+    """`i18n._LANG` to jedyny PROCESOWO-GLOBALNY stan wpływający na czyste funkcje prezentacji
+    (`t`/`t_plural`); test z `set_lang('en')` bez resetu skaziłby kolejne (porażki zależne od
+    KOLEJNOŚCI — łamią determinizm baterii). Reset PRZED każdym testem (R-i18n #4). `_missing`
+    (zbiór już-zalogowanych braków — log raz) też zerowany: przyszły test „warn raz na klucz"
+    inaczej stałby się order-dependent (recenzja fundamentu #1)."""
+    i18n.set_lang(i18n.DEFAULT)
+    i18n._missing.clear()
+    yield
 
 
 @pytest.fixture

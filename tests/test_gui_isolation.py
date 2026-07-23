@@ -70,3 +70,8 @@ def test_readmodel_i_init_gui_qt_free():
     # F8: rzut/parser/URL mapy (equirect + GeoJSON + osm_url) MUSI zostać Qt-wolny (widżet `map_view.py`
     # go importuje; testy rzutu chodzą bez PySide6) — jawna asercja obok rglob (F4R#11).
     assert not _imports_pyside6(PKG / "gui" / "mapproj.py")
+    # #1: i18n (słownik lekki — `t`/`t_plural`/`set_lang`) + katalog DANYCH MUSZĄ zostać Qt-wolne:
+    # widoki i pomocniki prezentacji (`portfolio`) je importują, a stan języka ustawia widok z QSettings
+    # PRZED oknem (i18n QSettings nie tyka). Testy `t`/`t_plural` chodzą bez PySide6.
+    assert not _imports_pyside6(PKG / "gui" / "i18n.py")
+    assert not _imports_pyside6(PKG / "gui" / "i18n_catalog.py")

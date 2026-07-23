@@ -18,7 +18,7 @@ między widokami w `QStackedWidget`). Oś teleskopu z etapu 1 to teraz OSADZALNY
 import os
 from datetime import datetime, timezone
 
-from PySide6.QtCore import Qt, QSettings, QUrl, Signal
+from PySide6.QtCore import Qt, QLocale, QSettings, QUrl, Signal
 from PySide6.QtGui import QActionGroup, QColor, QDesktopServices, QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from horreum import db, repo
-from horreum.gui import mapproj, queries, theme
+from horreum.gui import i18n, mapproj, queries, theme
 from horreum.gui.map_view import SitesMapView
 from horreum.resolve._text import norm_alnum
 from horreum.resolve.catalog import catalog_canon, catalog_label, xref
@@ -1268,12 +1268,18 @@ class MainWindow(QMainWindow):
         m = self.menuBar().addMenu("&Plik")
         m.addAction("Otwórz bazę…", self._on_open_db)
         m.addAction("Nowa baza…", self._on_new_db)
-        self._build_theme_menu()
+        self._build_view_menu()
 
-    def _build_theme_menu(self):
-        """Menu &Widok: wybór motywu (ciemny/jasny) — zaznaczenie ODBIJA bieżący motyw z QSettings
-        bez klikania (UI-NIE-KŁAMIE, F6 recenzja #6). Wykluczające przez QActionGroup."""
+    def _build_view_menu(self):
+        """Menu &Widok: motyw (ciemny/jasny) + język (PL/EN). Oba przez wykluczający QActionGroup;
+        zaznaczenie ODBIJA bieżący stan z QSettings bez klikania (UI-NIE-KŁAMIE, F6 recenzja #6)."""
         view = self.menuBar().addMenu("&Widok")
+        self._build_theme_menu(view)
+        view.addSeparator()
+        self._build_lang_menu(view)
+
+    def _build_theme_menu(self, view):
+        """Sekcja motywu w &Widok — wykluczająca przez QActionGroup."""
         grp = QActionGroup(self)
         grp.setExclusive(True)
         current = theme.normalize(QSettings("Horreum", "Horreum").value("ui/theme", theme.DEFAULT))
@@ -1285,6 +1291,30 @@ class MainWindow(QMainWindow):
             act.triggered.connect(lambda _checked=False, n=name: self._on_theme(n))
             grp.addAction(act)
             self._theme_actions[name] = act
+
+    def _build_lang_menu(self, view):
+        """Sekcja języka w &Widok — bliźniak motywu (QActionGroup, klucz QSettings `ui/lang`).
+        Endonimy z `i18n.available_langs()` NIE są tłumaczone. D-L1: zmiana zapisuje `ui/lang`
+        i stosuje się przy STARCIE (nota w statusbarze), więc zaznaczenie odbija stan trwały,
+        nie „za restart" — bieżąca sesja pozostaje w języku, w którym wystartowała."""
+        grp = QActionGroup(self)
+        grp.setExclusive(True)
+        current = i18n.current_lang()   # ŻYWY język sesji (ustawiony w `main` z QSettings/locale)
+        self._lang_actions = {}
+        for code, endonym in i18n.available_langs():
+            act = view.addAction(endonym)
+            act.setCheckable(True)
+            act.setChecked(code == current)
+            act.triggered.connect(lambda _checked=False, c=code: self._on_lang(c))
+            grp.addAction(act)
+            self._lang_actions[code] = act
+
+    def _on_lang(self, code):
+        """Zapisz wybór języka (zadziała przy następnym starcie — D-L1 restart-required v1).
+        NIE wołamy `i18n.set_lang` na żywo: `_LANG` mutowany w trakcie sesji rozdarłby raport
+        liczony off-thread (R-i18n #6). Nota w statusbarze mówi userowi, że trzeba zrestartować."""
+        QSettings("Horreum", "Horreum").setValue("ui/lang", code)
+        self.statusBar().showMessage(i18n.t("lang.restart_note"), 8000)
 
     def _on_theme(self, name):
         """Przełącz motyw: zastosuj do aplikacji, POTEM utrwal (F6 recenzja #7 — nie zapisuj skórki,
@@ -1491,6 +1521,13 @@ def main(argv=None):
 
     # Motyw PRZED oknem (F6 §7): domyślnie ciemny; paleta/QSS/kolory stanów podłączone globalnie.
     apply_theme(app, theme.normalize(settings.value("ui/theme", theme.DEFAULT)))
+
+    # Język PRZED oknem (#1, lustro motywu): jawny wybór z QSettings, inaczej auto z locale systemu
+    # (gdy w available_langs), inaczej PL. Ustawiamy `_LANG` RAZ — stałe→klucze w widokach rozwiążą
+    # etykiety z katalogu w czasie budowy (D-L1 restart-required v1; `_LANG` nie mutuje w sesji).
+    saved_lang = settings.value("ui/lang", None)
+    auto_lang = saved_lang if saved_lang is not None else QLocale().name()[:2]
+    i18n.set_lang(auto_lang)
 
     if argv:
         start = argv[0]

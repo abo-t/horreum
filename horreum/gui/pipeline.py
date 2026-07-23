@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
 from horreum import db, presence
 from horreum.calibration import run_calibration
 from horreum.lineage import run_lineage
-from horreum.gui import queries
+from horreum.gui import i18n, queries
 from horreum.gui.grid import PRESET_VANISHED
 from horreum.gui.progress import counts_snapshot, should_emit
 from horreum.grouper import run_grouper
@@ -195,17 +195,6 @@ _STAGE_LABEL = {"scan": "Skan", "group": "Grupowanie", "resolve": "Rozwiązywani
 _REVIEW_REASONS = [("no_config", "bez konfiguracji"), ("headerless", "bez nagłówka"),
                    ("no_camera", "bez kamery"), ("kind_unknown", "rodzaj nieznany"),
                    ("unreadable", "kopia nieczytelna")]
-
-
-def _odmiana(n, jedna, kilka, wiele):
-    """Polska zgoda liczebnika — user czyta ZDANIE, nie szablon: „Zniknęły 2 kopie", nie
-    „Zniknęło 2 kopii". Reguła: 1 → `jedna`; końcówka 2–4 → `kilka`; reszta → `wiele`, przy czym
-    12–14 idą do `wiele` mimo końcówki (2 kopie, ale 12 kopii)."""
-    if n == 1:
-        return jedna
-    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
-        return kilka
-    return wiele
 
 
 def _review_line(st):
@@ -712,12 +701,10 @@ class PipelineView(QWidget):
         applied = s.run_id is not None
         if applied:
             self._presence_params = None
-            kopie = _odmiana(s.vanished, "1 kopię", f"{s.vanished} kopie", f"{s.vanished} kopii")
+            kopie = i18n.t_plural("pipeline.marked_copies", s.vanished)
             # Druga liczba jest KONIECZNA: zniknięcie jednej z dwóch kopii nie odbiera klatce
             # obecności, więc „oznaczono 3 kopie" potrafi dać PUSTĄ listę zniknięć (wiz P5 #3).
-            klatki = _odmiana(s.frames_without_copy, "1 klatka straciła ostatnią kopię",
-                              f"{s.frames_without_copy} klatki straciły ostatnią kopię",
-                              f"{s.frames_without_copy} klatek straciło ostatnią kopię")
+            klatki = i18n.t_plural("pipeline.frames_lost_last", s.frames_without_copy)
             ogon = klatki if s.frames_without_copy else "żadna klatka nie straciła ostatniej kopii"
             self.lbl_vanished.setText(f"Oznaczono {kopie} jako zniknięte — {ogon}.")
             self.btn_mark_vanished.setVisible(False)
@@ -726,10 +713,7 @@ class PipelineView(QWidget):
         elif s.confirmed_gone and s.aborted is None and not s.cancelled:
             self._presence_params = dict(root=self._root, volume=s.volume)   # ZAMROŻONE
             n = s.confirmed_gone
-            self.lbl_vanished.setText(_odmiana(
-                n, "Zniknęła 1 kopia — baza wciąż twierdzi, że jest.",
-                f"Zniknęły {n} kopie — baza wciąż twierdzi, że są.",
-                f"Zniknęło {n} kopii — baza wciąż twierdzi, że są."))
+            self.lbl_vanished.setText(i18n.t_plural("pipeline.vanished_still_present", n))
             self.btn_mark_vanished.setVisible(True)
             self.btn_show_vanished.setVisible(False)
             self.box_vanished.setVisible(True)

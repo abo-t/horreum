@@ -386,6 +386,65 @@ def test_abort_dawca_niekompletny(tmp_path):
         _import(tmp_path, donor_path)
 
 
+def test_abort_sha1_file_null(tmp_path):
+    """Z4: wiersz dawcy z sha1_data OK ale sha1_file NULL → abort niekompletności.
+    Plik czytelny ZAWSZE ma odcisk całości → NULL znaczy „nieodczytany"; wpuszczenie go
+    dałoby `location.file_sha1 NULL`, co rozbraja marker nieczytelności (#13)."""
+    donor_path, files = _mk_donor(tmp_path, SPECS[:2])
+    _p, fid = files[os.path.join("LIGHTS", "m31_1.fits")]
+    dcon = sqlite3.connect(str(donor_path))
+    dcon.execute("UPDATE files SET sha1_file = NULL WHERE id = ?", (fid,))
+    dcon.commit()
+    dcon.close()
+    with pytest.raises(ImportAbort, match="niekompletny"):
+        _import(tmp_path, donor_path)
+
+
+# dark FITS: TELESCOP obecny (ślad sesji akwizycji), ale kalibracja NIE jest na osi teleskopu
+D_ED_MM = [("IMAGETYP", "Dark Frame"), ("TELESCOP", "ED"), ("INSTRUME", "ZWO ASI2600MM Pro"),
+           ("XPIXSZ", 3.76)]
+
+
+def test_dark_fits_kind_aware_bramki(tmp_path):
+    """KIND-ŚLEPA naprawione: FITS-owy dark u dawcy (TELESCOP='ED') NIE wywala importu.
+    Grouper pomija go na osi teleskopu (`config_id IS NULL` = STAN DOCELOWY), a bramki §4.6
+    są KIND-AWARE — telescope/config/config_id-NULL liczą się z pominięciem dark/bias. Bez
+    fixa: 'ED' i (ED,MM) fałszywie w derywacji + config_id NULL=1 → potrójny abort."""
+    specs = SPECS + [(os.path.join("CALIBRATION", "dark_1.fits"), D_ED_MM, 7)]
+    donor_path, files = _mk_donor(tmp_path, specs)
+    s = _import(tmp_path, donor_path)
+    assert s.gate_failures == [] and s.imported == 5
+    assert s.gates["telescope"] == (2, 2)              # 'ED' (dark-only) NIE powołane na oś
+    assert s.gates["config"] == (2, 2)                 # (ED,MM) NIE liczone do configu
+    assert s.gates["frame.config_id NULL"] == (0, 0)   # dark: NULL to stan docelowy, nie review
+    assert s.gates["frame.camera_id NULL"] == (0, 0)   # dark MA kamerę (oś kamery kind-agnostic)
+    con = db.open_db(str(tmp_path / "horreum.db"))
+    p, _fid = files[os.path.join("CALIBRATION", "dark_1.fits")]
+    row = con.execute(
+        "SELECT f.kind, f.config_id, f.camera_id FROM frame f "
+        "JOIN location l ON l.frame_id = f.id WHERE l.path = ?", (str(p),)).fetchone()
+    assert row["kind"] == "dark" and row["config_id"] is None and row["camera_id"] is not None
+    assert con.execute("SELECT count(*) FROM telescope WHERE telescop_canon = 'ED'"
+                       ).fetchone()[0] == 0
+    con.close()
+
+
+def test_facade_live_db_przekazuje_rejestr(tmp_path):
+    """Dokrętka --live-db: fasada `import_fitsmirror(repaired_db=...)` czyta rejestr napraw
+    i przekazuje go do `preflight` — plik naprawiony przez Horreum przechodzi jako NOTA zamiast
+    abortu falsyfikatora. Realny import poza `acceptance_s5` trafiłby tę samą loterię (SCOPE
+    domknięty: mechanizm był tylko na fladze acceptance, teraz i w fasadzie)."""
+    donor_path, files = _mk_donor(tmp_path, SPECS)
+    p, _fid = files[os.path.join("LIGHTS", "m31_2.fits")]
+    fits.setval(str(p), "TELESCOP", value="RC8-EDIT")   # writeback Horreum: dawca nie ma wiersza
+    live = _mk_live_registry(tmp_path, [p])
+    with pytest.raises(ImportAbort, match="pozno-naprawianymi"):   # bez --live-db: abort
+        import_fitsmirror(str(donor_path), str(tmp_path / "h1.db"), now=NOW, rng_seed=1)
+    s = import_fitsmirror(str(donor_path), str(tmp_path / "h2.db"), now=NOW, rng_seed=1,
+                          repaired_db=str(live))        # z --live-db: rejestr rozbraja falsyfikator
+    assert s.gate_failures == []
+
+
 def test_abort_sciezka_poza_listingiem(tmp_path):
     """Plik dawcy osiągalny na dysku, ale POZA listingiem skanu (katalog wykluczony _WBPP) —
     przyszły skan zdublowałby lokacje → abort (ochrona tożsamości, R3-a3)."""

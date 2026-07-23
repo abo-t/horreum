@@ -64,6 +64,9 @@ def main(argv=None):
                            help="zasil ŚWIEŻĄ bazę z bazy dawcy fitsmirror (dawca read-only)")
     p_imp.add_argument("donor", help="ścieżka bazy dawcy (fitsmirror.db)")
     p_imp.add_argument("db", help="ścieżka ŚWIEŻEJ bazy Horreum (utworzy ją migracja)")
+    p_imp.add_argument("--live-db", default=None,
+                       help="żywa baza Horreum — rejestr napraw writebacku (ścieżki naprawione "
+                            "przez tę instalację nie wywołają abortu falsyfikatora; D-0722-2)")
 
     p_ren = sub.add_parser("rename", help="rename plików z faktów (DRY domyślnie; --apply/--undo)")
     p_ren.add_argument("db", help="ścieżka pliku bazy")
@@ -190,7 +193,8 @@ def main(argv=None):
             if done % 1000 == 0 or done == total:
                 print(f"  import: {done}/{total}")
         try:
-            summary = import_fitsmirror(args.donor, args.db, now=now, progress=heartbeat)
+            summary = import_fitsmirror(args.donor, args.db, now=now,
+                                        repaired_db=args.live_db, progress=heartbeat)
         except ImportAbort as exc:
             print(f"Horreum import-fitsmirror: ABORT — {exc}")
             if exc.summary is not None:

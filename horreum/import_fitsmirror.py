@@ -43,6 +43,7 @@ uri=True — rama DAWCA-RO); pliki na `R:` dotykane wyłącznie `os.stat` + odcz
 próbki i podgrupy przeliczanej. Zapis do bazy docelowej WYŁĄCZNIE przez `repo`/`ingest_record`
 (jedna klinga); SELECT-y stałymi literałami + `?` (bramka AST §8.1 — także do dawcy).
 """
+import json
 import os
 import random
 import sqlite3
@@ -51,8 +52,9 @@ from pathlib import Path
 from urllib.request import pathname2url
 
 from . import db, repo
-from .grouper import run_grouper
+from .grouper import NO_TELESCOPE_KINDS, run_grouper
 from .resolve.cameras import normalize_camera
+from .resolve.frames import normalize_kind
 from .resolver import run_resolver
 from .scan import (
     Card, ScanRecord, ScanSummary, canonize_root, header_dict_from_cards, ingest_record,
@@ -137,10 +139,17 @@ def _fold_ascii(s):
 def _assert_donor_complete(donor):
     """EXPECT: import stoi na komplecie zeznań dawcy (§1: status='ok' i tożsamość 100%).
     Wiersz 'unreadable' albo bez obliczalnej tożsamości (sha1_data NULL bez degeneracji
-    z sha1_file) nie ma czego zaimportować → abort z listą (decyzja przy dawcy, nie tu)."""
+    z sha1_file) nie ma czego zaimportować → abort z listą (decyzja przy dawcy, nie tu).
+
+    `sha1_file IS NULL` = TWARDY brak (Z4): plik czytelny ZAWSZE ma odcisk całości, więc NULL
+    znaczy „nieodczytany", a `location.file_sha1` NULL rozbraja marker nieczytelności (#13 —
+    gałąź podmiany z degeneratem ominęłaby oznaczenie kopii). Wiersz z `sha1_data` OK ale
+    `sha1_file NULL` jest sam w sobie sprzeczny (odcisku danych nie policzysz bez odczytu pliku)
+    → odrzucamy go tu, zamiast wpuścić lokację bez `file_sha1`."""
     bad = donor.execute(
         "SELECT path, status FROM files WHERE status != 'ok' "
-        "OR (sha1_data IS NULL AND (sha1_data_uncomputable = 0 OR sha1_file IS NULL)) "
+        "OR sha1_file IS NULL "
+        "OR (sha1_data IS NULL AND sha1_data_uncomputable = 0) "
         "ORDER BY path LIMIT 20").fetchall()
     if bad:
         listing = "; ".join(f"{r['path']} [{r['status']}]" for r in bad)
@@ -351,8 +360,15 @@ def _gates(con, summary, axes_seen):
     """Bramki liczbowe §4.6 — versus dawca W CHWILI importu, ze STANU, MINUS skipped.
     `axes_seen` = (telescopes, cameras, configs) zebrane z zeznań w pętli (niezależna derywacja
     Pythonem: strip+fold ASCII jak NOCASE, `normalize_camera` — R2#11 bez TRIM-a SQLite).
-    Wypełnia `summary.gates`/`gate_failures`; naruszenie → `ImportAbort` (z summary)."""
+    Wypełnia `summary.gates`/`gate_failures`; naruszenie → `ImportAbort` (z summary).
+
+    `frame.config_id NULL` jest KIND-AWARE (`grouper.NO_TELESCOPE_KINDS`): dark/bias nie mają
+    osi teleskopu, więc ich `config_id IS NULL` to STAN DOCELOWY, nie delta (jak `object_id NULL`
+    dla kalibracji). Bez tego FITS-owy dark u dawcy wywaliłby import przez tę bramkę mimo poprawnego
+    przebiegu groupera. Zbiór idzie do SQL przez `json_each(?)` (literał stały + jeden parametr) —
+    JEDEN właściciel w `grouper`, nie kopia w predykacie (spójność z `resolver.review_state`)."""
     tel_seen, cam_seen, cfg_seen = axes_seen
+    off_axis = json.dumps(sorted(NO_TELESCOPE_KINDS))
     expected = {
         "frame": summary.imported,
         "location": summary.imported,
@@ -374,7 +390,8 @@ def _gates(con, summary, axes_seen):
         "frame.camera_id NULL": con.execute(
             "SELECT count(*) FROM frame WHERE camera_id IS NULL").fetchone()[0],
         "frame.config_id NULL": con.execute(
-            "SELECT count(*) FROM frame WHERE config_id IS NULL").fetchone()[0],
+            "SELECT count(*) FROM frame WHERE config_id IS NULL "
+            "AND kind NOT IN (SELECT value FROM json_each(?))", (off_axis,)).fetchone()[0],
         "camera.pixel_conflict": con.execute(
             "SELECT count(*) FROM camera WHERE pixel_conflict = 1").fetchone()[0],
     }
@@ -430,14 +447,19 @@ def run_import(donor, con, *, now, rng_seed=None, repaired_paths=None, progress=
         summary.scan.files += 1
         summary.expected_cards += len(rec.cards or ())
         if rec.header is not None:             # niezależna derywacja osi do bramek §4.6
-            tel = str(rec.header.get("TELESCOP") or "").strip()
             cam = normalize_camera(rec.header.get("INSTRUME"))
-            if tel:
-                tel_seen.add(_fold_ascii(tel))
             if cam:
-                cam_seen.add(cam)
-            if tel and cam:
-                cfg_seen.add((_fold_ascii(tel), cam))
+                cam_seen.add(cam)              # kamera na KAŻDEJ klatce (dark też ma kamerę)
+            # oś TELESKOPU/config jest KIND-AWARE (grouper.NO_TELESCOPE_KINDS): dark/bias nie
+            # powołują teleskopu ani configu — ich TELESCOP to ślad sesji, nie fakt o klatce.
+            # Bez tego pominięcia bramki `telescope`/`config` przeliczyłyby ED-dark jako oś,
+            # a grouper by go pominął → fałszywy rozjazd. Dawca jest FITS/XISF → kind z IMAGETYP.
+            if normalize_kind(rec.header.get("IMAGETYP")) not in NO_TELESCOPE_KINDS:
+                tel = str(rec.header.get("TELESCOP") or "").strip()
+                if tel:
+                    tel_seen.add(_fold_ascii(tel))
+                if tel and cam:
+                    cfg_seen.add((_fold_ascii(tel), cam))
         ingest_record(con, rec, volume=pf.volume, drive_letter=pf.drive_letter, tier=None,
                       now=now, summary=summary.scan, actor=ACTOR)
         if progress is not None:
@@ -450,14 +472,23 @@ def run_import(donor, con, *, now, rng_seed=None, repaired_paths=None, progress=
     return summary
 
 
-def import_fitsmirror(donor_path, db_path, *, now, rng_seed=None, progress=None):
+def import_fitsmirror(donor_path, db_path, *, now, rng_seed=None, repaired_db=None, progress=None):
     """Wejście CLI: otwórz dawcę (RO) + bazę docelową (utworzy/zmigruje `db.open_db`),
-    przeprowadź `run_import`, pozamykaj. Zwraca `ImportSummary` (albo propaguje `ImportAbort`)."""
+    przeprowadź `run_import`, pozamykaj. Zwraca `ImportSummary` (albo propaguje `ImportAbort`).
+
+    `repaired_db` = ścieżka ŻYWEJ bazy Horreum (CLI `--live-db`): rejestr napraw writebacku
+    (`read_repaired_registry`, RO) idzie do `preflight` jako `repaired_paths`, żeby ścieżki
+    naprawione przez tę instalację nie trafiły w abort falsyfikatora (D-0722-2). Realny import
+    poza `acceptance_s5` trafiłby tę samą loterię co bramka etapu — bez rejestru losowa próbka
+    czyta naprawiony plik jako „dawca stęchły z nieznanego powodu". Brak → import bez rejestru
+    (zachowanie sprzed dokrętki: świeży dawca bez napraw Horreum przechodzi tak czy tak)."""
     donor = open_donor(donor_path)
     try:
+        repaired = read_repaired_registry(repaired_db) if repaired_db else None
         con = db.open_db(db_path)
         try:
-            return run_import(donor, con, now=now, rng_seed=rng_seed, progress=progress)
+            return run_import(donor, con, now=now, rng_seed=rng_seed,
+                              repaired_paths=repaired, progress=progress)
         finally:
             con.close()
     finally:

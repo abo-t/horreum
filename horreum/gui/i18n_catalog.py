@@ -722,4 +722,131 @@ CATALOG = {
         "pl": "pominięty — wolumin nieustalony, brak kotwicy zakresu",
         "en": "skipped — volume undetermined, no scope anchor",
     },
+
+    # ============================================================ projection_dialog.py (rollout §4)
+    # (proj.create_copies/create_links/files_no_size/plan_tree_folders = FUNDAMENT wyżej)
+
+    # --- eta_text (Qt-wolny pomocnik prezentacji — jak portfolio) ---
+    "proj.eta_s": {"pl": " · pozostało ~{n} s", "en": " · ~{n} s left"},
+    "proj.eta_min": {"pl": " · pozostało ~{n} min", "en": " · ~{n} min left"},
+    "proj.eta_h": {"pl": " · pozostało ~{h:.1f} h", "en": " · ~{h:.1f} h left"},
+
+    # --- budowa dialogu ---
+    "proj.title": {"pl": "Wydaj na stół", "en": "Serve to table"},
+    "proj.frames_in_perspective": {
+        "pl": "Klatek w perspektywie: {n}", "en": "Frames in the perspective: {n}",
+    },
+    "proj.target_label": {"pl": "Cel wydania:", "en": "Target:"},
+    "proj.add_target": {"pl": "+ inny cel…", "en": "+ another target…"},
+    "proj.segment_hint": {
+        "pl": "Cel musi zawierać segment _WBPP lub _Review (drzewo wykluczone ze skanu).",
+        "en": "The target must contain a _WBPP or _Review segment (a tree excluded from the scan).",
+    },
+    "proj.layout_label": {"pl": "Układ:", "en": "Layout:"},
+    "proj.layout_by_object": {
+        "pl": "po obiektach  (obiekt / filtr)", "en": "by object  (object / filter)",
+    },
+    "proj.layout_wbpp": {
+        "pl": "WBPP feed  (obiekt / teleskop / filtr)",
+        "en": "WBPP feed  (object / telescope / filter)",
+    },
+    "proj.force_copy": {
+        "pl": "Wymuś kopię bajtów (tryb zaawansowany — gdy hardlink po SMB zawodzi)",
+        "en": "Force byte copy (advanced — when hardlink over SMB fails)",
+    },
+    "proj.placeholder": {
+        "pl": "Dodaj lub wybierz cel wydania — podgląd (DRY) policzy się sam.",
+        "en": "Add or pick a target — the preview (DRY) will compute itself.",
+    },
+    "proj.btn_refresh": {"pl": "Odśwież podgląd", "en": "Refresh preview"},
+    "proj.btn_create": {"pl": "Utwórz", "en": "Create"},
+    "proj.btn_cancel_apply": {"pl": "Przerwij wydawanie", "en": "Stop serving"},
+    "proj.btn_close": {"pl": "Zamknij", "en": "Close"},
+
+    # --- dodawanie celu ---
+    "proj.dlg.pick_target": {
+        "pl": "Wskaż cel wydania (pod _WBPP/_Review)", "en": "Choose a target (under _WBPP/_Review)",
+    },
+    "proj.dlg.name_title": {"pl": "Nazwa celu", "en": "Target name"},
+    "proj.dlg.name_label": {"pl": "Nazwa:", "en": "Name:"},
+    "proj.add_failed": {"pl": "Nie można dodać celu: {e}", "en": "Cannot add target: {e}"},
+
+    # --- auto-DRY: stany raportu / noty karty ---
+    "proj.pick_or_add": {
+        "pl": "Dodaj lub wybierz cel wydania („+ inny cel…”).",
+        "en": "Add or pick a target („+ another target…”).",
+    },
+    "proj.probing": {"pl": "Sonduję cel (DRY)…", "en": "Probing target (DRY)…"},
+    "proj.dry_failed": {"pl": "Nie można: {msg}", "en": "Cannot: {msg}"},
+    "proj.note_forced_copy": {"pl": "wymuszona kopia bajtów", "en": "forced byte copy"},
+    "proj.note_other_vol": {"pl": "inny wolumen → kopia bajtów", "en": "other volume → byte copy"},
+    "proj.note_same_vol": {
+        "pl": "ten sam wolumen → hardlink (zero bajtów)",
+        "en": "same volume → hardlink (zero bytes)",
+    },
+
+    # --- apply: nagłówek biegu, przyciski-skutki, błędy ---
+    "proj.applying": {
+        "pl": "Wydaję na stół → {root}\n\nDysk się ZMIENIA. „Przerwij wydawanie” zatrzyma po bieżącym "
+              "pliku; to, co powstało,\nzostaje na dysku (undo = skasuj folder w Eksploratorze).",
+        "en": "Serving to table → {root}\n\nThe disk is CHANGING. „Stop serving” halts after the current "
+              "file; whatever was made\nstays on disk (undo = delete the folder in Explorer).",
+    },
+    "proj.cancelling": {
+        "pl": "Anulowanie… (po bieżącym pliku)", "en": "Cancelling… (after current file)",
+    },
+    "proj.btn_cancelled": {"pl": "Przerwano", "en": "Cancelled"},
+    "proj.btn_created_ok": {"pl": "Utworzono ✓", "en": "Created ✓"},
+    "proj.abort_prefix": {"pl": "ABORT: {msg}\n\n", "en": "ABORT: {msg}\n\n"},
+    "proj.btn_not_created": {"pl": "Nie utworzono", "en": "Not created"},
+    "proj.made_before_error": {
+        "pl": "\n\nUtworzono {done} z {total} przed błędem — częściowe drzewo zostaje w celu.",
+        "en": "\n\nCreated {done} of {total} before the error — a partial tree stays in the target.",
+    },
+    "proj.apply_error": {
+        "pl": "Błąd: {msg}{made}\n\nOdśwież podgląd przed kolejną próbą.",
+        "en": "Error: {msg}{made}\n\nRefresh the preview before the next attempt.",
+    },
+    "proj.btn_error": {"pl": "Przerwane błędem", "en": "Failed with error"},
+
+    # --- raport `_format`: słowa trybu, nagłówki, linie liczników ---
+    "proj.word_copy_todo": {"pl": "do skopiowania", "en": "to copy"},
+    "proj.word_link_todo": {"pl": "do zlinkowania", "en": "to link"},
+    "proj.word_copy_done": {"pl": "skopiowano", "en": "copied"},
+    "proj.word_link_done": {"pl": "zlinkowano", "en": "linked"},
+    "proj.mode_copies": {"pl": "kopie", "en": "copies"},
+    "proj.mode_links": {"pl": "hardlinki", "en": "hardlinks"},
+    "proj.dry_head": {
+        "pl": "DRY — bez zmian na dysku (układ {layout}, {mode}):",
+        "en": "DRY — no disk changes (layout {layout}, {mode}):",
+    },
+    "proj.dry_counts": {
+        "pl": "  {todo}: {would}   istnieje: {exists}   konflikty: {conflict}   pominięto: {skipped}",
+        "en": "  {todo}: {would}   exists: {exists}   conflicts: {conflict}   skipped: {skipped}",
+    },
+    "proj.dry_size": {"pl": "  rozmiar kopii: {size}", "en": "  copy size: {size}"},
+    "proj.head_cancelled": {"pl": "Przerwano", "en": "Cancelled"},
+    "proj.head_partial": {"pl": "Wynik częściowy", "en": "Partial result"},
+    "proj.head_created": {"pl": "Utworzono", "en": "Created"},
+    "proj.done_head": {
+        "pl": "{head} (układ {layout}, {mode}):", "en": "{head} (layout {layout}, {mode}):",
+    },
+    "proj.done_counts": {
+        "pl": "  {done}: {linked}   istniało: {exists}   konflikty: {conflict}   verify_bad: {vbad}"
+              "   błędy: {errors}   pominięto: {skipped}",
+        "en": "  {done}: {linked}   existed: {exists}   conflicts: {conflict}   verify_bad: {vbad}"
+              "   errors: {errors}   skipped: {skipped}",
+    },
+    "proj.untouched": {
+        "pl": "  nietknięte: {n} (plan zostaje — wznów przez „Odśwież podgląd”)",
+        "en": "  untouched: {n} (the plan stays — resume via „Refresh preview”)",
+    },
+    "proj.multi_present": {
+        "pl": "  wiele obecnych kopii: {n} (użyto pierwszej)",
+        "en": "  multiple present copies: {n} (used the first)",
+    },
+    "proj.plan_tree": {"pl": "  drzewo planu: {tree}", "en": "  plan tree: {tree}"},
+    "proj.more_folders": {
+        "pl": "    … (+{n} folderów)", "en": "    … (+{n} more folders)",
+    },
 }

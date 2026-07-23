@@ -110,10 +110,10 @@ def eta_text(done_n, total, elapsed_s, warmup=5):
         return ""
     remaining = (total - done_n) * (elapsed_s / done_n)
     if remaining < 90:
-        return f" · pozostało ~{int(remaining)} s"
+        return i18n.t("proj.eta_s", n=int(remaining))
     if remaining < 5400:
-        return f" · pozostało ~{int(round(remaining / 60))} min"
-    return f" · pozostało ~{remaining / 3600:.1f} h"
+        return i18n.t("proj.eta_min", n=int(round(remaining / 60)))
+    return i18n.t("proj.eta_h", h=remaining / 3600)
 
 
 def _elide_path(path, cap=64):
@@ -261,7 +261,7 @@ class ProjectionDialog(QDialog):
         # karty są zamrożone w biegu, więc `_current_root()` pozostaje prawdą do końca wydania.
         self._apply_thread = None
         self._apply_worker = None
-        self.setWindowTitle("Wydaj na stół")
+        self.setWindowTitle(i18n.t("proj.title"))
         self.setModal(True)
         self.resize(640, 520)
         self._build_ui()
@@ -270,14 +270,14 @@ class ProjectionDialog(QDialog):
     # ---- budowa ----
     def _build_ui(self):
         v = QVBoxLayout(self)
-        v.addWidget(QLabel(f"Klatek w perspektywie: {len(self._frame_ids)}"))
+        v.addWidget(QLabel(i18n.t("proj.frames_in_perspective", n=len(self._frame_ids))))
 
-        v.addWidget(QLabel("Cel wydania:"))
+        v.addWidget(QLabel(i18n.t("proj.target_label")))
         self._targets_box = QVBoxLayout()
         v.addLayout(self._targets_box)
         self._btn_group = QButtonGroup(self)         # karty w osobnych wierszach → jawna ekskluzywność
         row_add = QHBoxLayout()
-        self.btn_add = QPushButton("+ inny cel…")        # atrybut: blokowany na czas apply (W1)
+        self.btn_add = QPushButton(i18n.t("proj.add_target"))   # atrybut: blokowany na czas apply (W1)
         btn_add = self.btn_add
         btn_add.setAutoDefault(False)
         btn_add.clicked.connect(self._on_add_target)
@@ -285,28 +285,28 @@ class ProjectionDialog(QDialog):
         row_add.addStretch(1)
         v.addLayout(row_add)
 
-        hint = QLabel("Cel musi zawierać segment _WBPP lub _Review (drzewo wykluczone ze skanu).")
+        hint = QLabel(i18n.t("proj.segment_hint"))
         hint.setProperty("role", "secondary")        # trwała reguła celu (dyskoverowalna przed błędem, #2); tekst drugorzędny z motywu (F6 §7)
         v.addWidget(hint)
 
         row_l = QHBoxLayout()
-        row_l.addWidget(QLabel("Układ:"))
+        row_l.addWidget(QLabel(i18n.t("proj.layout_label")))
         self.combo_layout = QComboBox()
-        self.combo_layout.addItem("po obiektach  (obiekt / filtr)", "po-obiektach")
-        self.combo_layout.addItem("WBPP feed  (obiekt / teleskop / filtr)", "wbpp-feed")
+        self.combo_layout.addItem(i18n.t("proj.layout_by_object"), "po-obiektach")
+        self.combo_layout.addItem(i18n.t("proj.layout_wbpp"), "wbpp-feed")
         self.combo_layout.currentIndexChanged.connect(self._on_param_changed)
         row_l.addWidget(self.combo_layout)
         row_l.addStretch(1)
         v.addLayout(row_l)
 
-        self.chk_copy = QCheckBox("Wymuś kopię bajtów (tryb zaawansowany — gdy hardlink po SMB zawodzi)")
+        self.chk_copy = QCheckBox(i18n.t("proj.force_copy"))
         self.chk_copy.toggled.connect(self._on_param_changed)
         v.addWidget(self.chk_copy)
 
         self.report = QPlainTextEdit()
         self.report.setReadOnly(True)
         self.report.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))   # monospace: słupki liczb (#7)
-        self.report.setPlaceholderText("Dodaj lub wybierz cel wydania — podgląd (DRY) policzy się sam.")
+        self.report.setPlaceholderText(i18n.t("proj.placeholder"))
         v.addWidget(self.report, 1)
 
         act = QHBoxLayout()
@@ -324,20 +324,20 @@ class ProjectionDialog(QDialog):
         self.progress_note = QLabel("")              # „12/131 · plik.fits" — postęp NAZWANY, nie sam słupek
         self.progress_note.setProperty("role", "secondary")
         act.addWidget(self.progress_note)
-        self.btn_dry = QPushButton("Odśwież podgląd")
+        self.btn_dry = QPushButton(i18n.t("proj.btn_refresh"))
         self.btn_dry.setAutoDefault(False)           # ręczny re-DRY (np. po zmianie na dysku poza apką)
         self.btn_dry.setEnabled(False)               # bez celu nie ma czego sondować (wiz K5)
         self.btn_dry.clicked.connect(self._on_manual_dry)
-        self.btn_apply = QPushButton("Utwórz")
+        self.btn_apply = QPushButton(i18n.t("proj.btn_create"))
         self.btn_apply.setEnabled(False)             # uzbraja WYŁĄCZNIE zakończony świeży DRY
         self.btn_apply.setDefault(True)              # złota akcja wydania (F2: 1-klik)
         self.btn_apply.clicked.connect(self._on_apply)
-        self.btn_cancel = QPushButton("Przerwij wydawanie")   # NAZYWA skutek — „Anuluj" obok „Zamknij" czytało się jak bliźniak (wiz #9)
+        self.btn_cancel = QPushButton(i18n.t("proj.btn_cancel_apply"))   # NAZYWA skutek — „Anuluj" obok „Zamknij" czytało się jak bliźniak (wiz #9)
         # wchodzi W MIEJSCE „Utwórz" na czas biegu (wzorzec szuflady gridu)
         self.btn_cancel.setAutoDefault(False)
         self.btn_cancel.setVisible(False)
         self.btn_cancel.clicked.connect(self._on_cancel_apply)
-        btn_close = QPushButton("Zamknij")
+        btn_close = QPushButton(i18n.t("proj.btn_close"))
         btn_close.setAutoDefault(False)
         btn_close.clicked.connect(self.reject)
         act.addStretch(1)
@@ -406,10 +406,11 @@ class ProjectionDialog(QDialog):
         return None
 
     def _on_add_target(self):
-        path = QFileDialog.getExistingDirectory(self, "Wskaż cel wydania (pod _WBPP/_Review)")
+        path = QFileDialog.getExistingDirectory(self, i18n.t("proj.dlg.pick_target"))
         if not path:
             return
-        name, ok = QInputDialog.getText(self, "Nazwa celu", "Nazwa:",
+        name, ok = QInputDialog.getText(self, i18n.t("proj.dlg.name_title"),
+                                        i18n.t("proj.dlg.name_label"),
                                         text=os.path.basename(path) or path)
         if not ok or not name.strip():
             return
@@ -421,7 +422,7 @@ class ProjectionDialog(QDialog):
         try:
             projection._assert_excluded_segment(path)
         except ValueError as exc:
-            self.report.setPlainText(f"Nie można dodać celu: {exc}")
+            self.report.setPlainText(i18n.t("proj.add_failed", e=exc))
             return False
         self._save_target(name, path)
         self._reload_targets(select_path=path)       # nowa karta zaznaczona → auto-DRY
@@ -435,7 +436,7 @@ class ProjectionDialog(QDialog):
         self._plan = None
         self._dry = None
         self.btn_apply.setEnabled(False)
-        self.btn_apply.setText("Utwórz")
+        self.btn_apply.setText(i18n.t("proj.btn_create"))
 
     def _on_target_toggled(self, checked):
         if not checked:
@@ -457,12 +458,12 @@ class ProjectionDialog(QDialog):
         przyjdzie ze STARĄ generacją, zostanie odrzucony i re-triggernie świeży (R2-2)."""
         root = self._current_root()
         if not root:
-            self.report.setPlainText("Dodaj lub wybierz cel wydania („+ inny cel…”).")
+            self.report.setPlainText(i18n.t("proj.pick_or_add"))
             return
         if self._dry_worker is not None or self._apply_worker is not None:
             return                                   # w biegu apply DRY nie startuje (plan jest materializowany)
         self._dry_pending = False                    # flagę gasi UDANY start — odbity re-trigger nie przepada
-        self.report.setPlainText("Sonduję cel (DRY)…")
+        self.report.setPlainText(i18n.t("proj.probing"))
         self.busy.setVisible(True)                   # bieg widoczny, nie tylko tekstem (wiz W2)
         self.btn_dry.setEnabled(False)               # jeden DRY naraz — „Odśwież" gaśnie na czas biegu
         worker = DryWorker(self._db_path, self._frame_ids, self.combo_layout.currentData(),
@@ -527,16 +528,16 @@ class ProjectionDialog(QDialog):
         self._plan = None
         self._dry = None
         self.btn_apply.setEnabled(False)
-        self.report.setPlainText(f"Nie można: {msg}")
+        self.report.setPlainText(i18n.t("proj.dry_failed", msg=msg))
 
     def _update_card_note(self, payload):
         """Szczera nota trybu na ZAZNACZONEJ karcie celu (brief §3): skąd decyzja hardlink/kopia."""
         if self.chk_copy.isChecked():
-            note = "wymuszona kopia bajtów"
+            note = i18n.t("proj.note_forced_copy")
         elif payload["auto_copy"]:
-            note = "inny wolumen → kopia bajtów"
+            note = i18n.t("proj.note_other_vol")
         else:
-            note = "ten sam wolumen → hardlink (zero bajtów)"
+            note = i18n.t("proj.note_same_vol")
         for c in self._cards:
             c["note"].setText(note if c["radio"].isChecked() else "")
 
@@ -595,10 +596,7 @@ class ProjectionDialog(QDialog):
         self.busy.setTextVisible(True)
         self.busy.setVisible(True)
         self.progress_note.setText(f"0/{total}")
-        self.report.setPlainText(
-            f"Wydaję na stół → {root}\n\n"
-            f"Dysk się ZMIENIA. „Przerwij wydawanie” zatrzyma po bieżącym pliku; to, co powstało,\n"
-            f"zostaje na dysku (undo = skasuj folder w Eksploratorze).")
+        self.report.setPlainText(i18n.t("proj.applying", root=root))
         self.btn_apply.setVisible(False)
         self.btn_apply.setEnabled(False)             # WPROST, nie tylko przez ukrycie (default-button łapie Enter)
         self.btn_cancel.setVisible(True)
@@ -632,7 +630,7 @@ class ProjectionDialog(QDialog):
         if self._apply_worker is not None:
             self._apply_worker.request_cancel()      # rdzeń sprawdza PRZED następnym plikiem
             self.btn_cancel.setEnabled(False)
-            self.progress_note.setText("Anulowanie… (po bieżącym pliku)")
+            self.progress_note.setText(i18n.t("proj.cancelling"))
 
     @Slot(int, int, str, str)
     def _on_apply_progress(self, done_n, total, dst, status):
@@ -653,16 +651,19 @@ class ProjectionDialog(QDialog):
         self._settings().setValue("projection/last_target", self._current_root())   # ostatnio UŻYTY = domyślny
         self.report.setPlainText(self._format(res, self._plan, dry=False, partial=res.cancelled))
         self.btn_apply.setEnabled(False)
-        self.btn_apply.setText("Przerwano" if res.cancelled else "Utworzono ✓")   # nie głosi akcji, która zaszła (wiz K2)
+        # nie głosi akcji, która zaszła (wiz K2)
+        self.btn_apply.setText(i18n.t("proj.btn_cancelled") if res.cancelled
+                               else i18n.t("proj.btn_created_ok"))
 
     @Slot(str, object)
     def _on_apply_aborted(self, msg, partial):
         """Sonda pierwszego linku padła (SMB oddał kopię zamiast hardlinka) — werdykt o wolumenie."""
         self._apply_end()
         self.report.setPlainText(
-            f"ABORT: {msg}\n\n" + self._format(partial, self._plan, dry=False, partial=True))
+            i18n.t("proj.abort_prefix", msg=msg)
+            + self._format(partial, self._plan, dry=False, partial=True))
         self.btn_apply.setEnabled(False)
-        self.btn_apply.setText("Nie utworzono")      # przycisk NIE obiecuje akcji, której raport zabrania (wiz #4)
+        self.btn_apply.setText(i18n.t("proj.btn_not_created"))  # NIE obiecuje akcji, której raport zabrania (wiz #4)
 
     @Slot(str)
     def _on_apply_failed(self, msg):
@@ -670,24 +671,24 @@ class ProjectionDialog(QDialog):
         # częściowe drzewo (ścieżka anulowania to mówi, ścieżka błędu milczała — wiz #2).
         done_n, total = self._apply_seen
         self._apply_end()
-        made = f"\n\nUtworzono {done_n} z {total} przed błędem — częściowe drzewo zostaje w celu." \
-            if done_n else ""
-        self.report.setPlainText(f"Błąd: {msg}{made}\n\nOdśwież podgląd przed kolejną próbą.")
+        made = i18n.t("proj.made_before_error", done=done_n, total=total) if done_n else ""
+        self.report.setPlainText(i18n.t("proj.apply_error", msg=msg, made=made))
         self.btn_apply.setEnabled(False)             # dysk mógł się zmienić częściowo — DRY musi przeliczyć
-        self.btn_apply.setText("Przerwane błędem")
+        self.btn_apply.setText(i18n.t("proj.btn_error"))
 
     def _format(self, res, plan, *, dry, partial=False, payload=None):
         c = res.counts
-        word_todo = "do skopiowania" if res.copy else "do zlinkowania"
-        word_done = "skopiowano" if res.copy else "zlinkowano"
-        mode = "kopie" if res.copy else "hardlinki"
+        word_todo = i18n.t("proj.word_copy_todo" if res.copy else "proj.word_link_todo")
+        word_done = i18n.t("proj.word_copy_done" if res.copy else "proj.word_link_done")
+        mode = i18n.t("proj.mode_copies" if res.copy else "proj.mode_links")
         lines = []
         if dry:
-            lines.append(f"DRY — bez zmian na dysku (układ {res.layout}, {mode}):")
-            lines.append(f"  {word_todo}: {c.get('would-link', 0)}   istnieje: {c.get('exists', 0)}   "
-                         f"konflikty: {c.get('conflict', 0)}   pominięto: {c.get('skipped', 0)}")
+            lines.append(i18n.t("proj.dry_head", layout=res.layout, mode=mode))
+            lines.append(i18n.t("proj.dry_counts", todo=word_todo, would=c.get("would-link", 0),
+                                exists=c.get("exists", 0), conflict=c.get("conflict", 0),
+                                skipped=c.get("skipped", 0)))
             if payload is not None and res.copy:
-                size_line = f"  rozmiar kopii: {format_bytes(payload['size_total'])}"
+                size_line = i18n.t("proj.dry_size", size=format_bytes(payload["size_total"]))
                 if payload["size_missing"]:
                     m = payload["size_missing"]
                     size_line += f"  {i18n.t_plural('proj.files_no_size', m)}"
@@ -695,20 +696,21 @@ class ProjectionDialog(QDialog):
         else:
             # abort → nie „Utworzono" (wizytator #6); anulowanie nazywa się WPROST (W1) — user ma
             # wiedzieć, że reszta planu jest nietknięta, a nie że wydanie zawiodło.
-            head = "Przerwano" if res.cancelled else ("Wynik częściowy" if partial else "Utworzono")
-            lines.append(f"{head} (układ {res.layout}, {mode}):")
-            lines.append(f"  {word_done}: {c.get('linked', 0)}   istniało: {c.get('exists', 0)}   "
-                         f"konflikty: {c.get('conflict', 0)}   verify_bad: {c.get('verify_bad', 0)}   "
-                         f"błędy: {c.get('error', 0)}   pominięto: {c.get('skipped', 0)}")
+            head = i18n.t("proj.head_cancelled") if res.cancelled else (
+                i18n.t("proj.head_partial") if partial else i18n.t("proj.head_created"))
+            lines.append(i18n.t("proj.done_head", head=head, layout=res.layout, mode=mode))
+            lines.append(i18n.t("proj.done_counts", done=word_done, linked=c.get("linked", 0),
+                                exists=c.get("exists", 0), conflict=c.get("conflict", 0),
+                                vbad=c.get("verify_bad", 0), errors=c.get("error", 0),
+                                skipped=c.get("skipped", 0)))
             if res.cancelled:
                 # Ile planu ZOSTAŁO: drzewo kategorii niżej rysuje się z PEŁNEGO planu, więc bez tej
                 # linii raport po anulowaniu wygląda na kompletny. PO liczbach tego, co się stało —
                 # pierwsza liczba pod nagłówkiem ma mówić o skutku, nie o jego braku (wiz #11).
                 touched = sum(c.get(k, 0) for k in ("linked", "exists", "conflict", "error", "verify_bad"))
-                lines.append(f"  nietknięte: {max(len(plan.items) - touched, 0)} "
-                             "(plan zostaje — wznów przez „Odśwież podgląd”)")
+                lines.append(i18n.t("proj.untouched", n=max(len(plan.items) - touched, 0)))
         if plan.multi_present:
-            lines.append(f"  wiele obecnych kopii: {plan.multi_present} (użyto pierwszej)")
+            lines.append(i18n.t("proj.multi_present", n=plan.multi_present))
         folders: dict = {}
         for it in plan.items:
             key = "/".join(it.segments)
@@ -716,11 +718,11 @@ class ProjectionDialog(QDialog):
         nf = len(folders)
         # „drzewo PLANU": po anulowaniu/abortcie sekcja niżej dalej opisuje pełen plan, nie stan
         # dysku — bez tego słowa czyta się jak listing celu (wiz #6).
-        lines.append(f"  drzewo planu: {i18n.t_plural('proj.plan_tree_folders', nf)}")
+        lines.append(i18n.t("proj.plan_tree", tree=i18n.t_plural("proj.plan_tree_folders", nf)))
         for key, n in sorted(folders.items(), key=lambda kv: (-kv[1], kv[0]))[:_TREE_CAP]:
             lines.append(f"    {key}: {n}")
         if len(folders) > _TREE_CAP:
-            lines.append(f"    … (+{len(folders) - _TREE_CAP} folderów)")
+            lines.append(i18n.t("proj.more_folders", n=len(folders) - _TREE_CAP))
         return "\n".join(lines)
 
     # ---- sprzątanie wątków przy zamknięciu ----

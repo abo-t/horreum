@@ -20,6 +20,7 @@ from horreum import db, projection
 
 from PySide6.QtWidgets import QApplication
 
+from horreum.gui import i18n
 from horreum.gui import projection_dialog as pd_mod
 from horreum.gui.projection_dialog import (
     ProjectionDialog, chosen_present, eta_text, size_summary, volume_decision,
@@ -529,4 +530,30 @@ def test_framesview_projekcja_pusta_perspektywa(qapp, tmp_path):
     view._frame_ids = []
     view._open_projection()
     assert any("brak widocznych" in m for m in msgs)
+    con.close()
+
+
+# --- i18n: EN renderuje z katalogu (§4 rollout `projection_dialog`) ---
+
+def test_en_render_projekcja_z_katalogu(qapp, tmp_path, fake_settings, monkeypatch):
+    """§5 (rollout projekcji): `set_lang('en')` PRZED budową → tytuł/etykiety/przyciski ORAZ raport
+    DRY+apply (`_format`, `eta_text`) renderują EN z katalogu; `t_plural` przycisku „Create N links".
+    Realny hardlink jak w teście 1-klik. Autouse-fixture `_reset_i18n_lang` wraca na PL."""
+    i18n.set_lang("en")
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con = db.open_db(str(tmp_path / "en.db"))
+    ids = _seed_files(con, tmp_path, 2)
+    root = tmp_path / "_WBPP" / "feed"
+    _target(fake_settings, root)
+    dlg = _dlg(con, ids)
+    assert dlg.windowTitle() == "Serve to table"
+    assert dlg.btn_add.text() == "+ another target…" and dlg.btn_apply.text() == "Create 2 links"
+    rep = dlg.report.toPlainText()
+    assert "to link: 2" in rep and "plan tree:" in rep       # nagłówki raportu DRY po EN
+    sel = next(c for c in dlg._cards if c["radio"].isChecked())
+    assert sel["note"].text() == "same volume → hardlink (zero bytes)"
+    dlg._on_apply()
+    assert "linked: 2" in dlg.report.toPlainText()
+    assert dlg.btn_apply.text() == "Created ✓"
+    assert eta_text(10, 20, 10.0) == " · ~10 s left"          # Qt-wolny helper też EN
     con.close()

@@ -1008,6 +1008,7 @@ class ObservatoryAxisView(QWidget):
         obar.addStretch(1)
         mv.addLayout(obar)
         self.map_view = SitesMapView()
+        self.map_view.siteClicked.connect(self._on_map_click)   # klik w punkt → selekcja wiersza (#10)
         mv.addWidget(self.map_view, 1)
         vsplit.addWidget(self.map_box)
         # setStretchFactor sam nie wystarcza — sizeHint górnych tabel zjada przyrost i mapa siada na
@@ -1064,6 +1065,17 @@ class ObservatoryAxisView(QWidget):
         if data is not None:                  # observatory_id na kolumnie ID (kotwica wiersza)
             item.setData(Qt.UserRole, data)
         self.table.setItem(r, c, item)
+
+    def _on_map_click(self, oid):
+        """Klik w punkt mapy (hit-test) → zaznacz odpowiedni wiersz tabeli (mapa→tabela; #10).
+        Selekcja tabeli kaskaduje przez `itemSelectionChanged` → `_on_selection_changed`
+        (wyróżnienie mapy + stan OSM) — mapa NIE orkiestruje, tabela zostaje właścicielem selekcji
+        (SPOT). Nieznany oid (wiersz zniknął między refreshami) ignorowany."""
+        for r in range(self.table.rowCount()):
+            item = self.table.item(r, OBS_COL_ID)
+            if item and item.data(Qt.UserRole) == oid:
+                self.table.selectRow(r)
+                return
 
     def _selected_observatory_id(self):
         rows = self.table.selectionModel().selectedRows() if self.table.selectionModel() else []

@@ -143,6 +143,44 @@ def test_osm_url_bez_notacji_wykladniczej():
     assert "e" not in url.split("#")[0].split("?")[1]     # w części query brak wykładnika
 
 
+# ----------------------------------------------------------------- hit-test (klik/hover, #10)
+
+_PTS = [(100.0, 100.0), (105.0, 103.0), (200.0, 50.0)]   # dwa blisko (klaster), jeden daleko
+
+
+def test_nearest_point_w_progu():
+    assert mapproj.nearest_point(_PTS, 101.0, 99.0, 14.0) == 0     # najbliżej #0
+    assert mapproj.nearest_point(_PTS, 198.0, 52.0, 14.0) == 2     # najbliżej #2
+
+
+def test_nearest_point_poza_progiem_none():
+    assert mapproj.nearest_point(_PTS, 150.0, 150.0, 14.0) is None  # nic w promieniu 14 px
+    assert mapproj.nearest_point([], 0.0, 0.0, 14.0) is None        # pusta lista
+
+
+def test_nearest_point_wybiera_blizszy_z_klastra():
+    # kursor między dwoma bliskimi punktami, minimalnie bliżej #1
+    assert mapproj.nearest_point(_PTS, 104.0, 102.0, 20.0) == 1
+
+
+def test_points_within_klaster_dekolizji():
+    # próg 16 px łapie #0 i #1 (odległe ~5.8 px), NIE #2 (setki px)
+    assert set(mapproj.points_within(_PTS, 100.0, 100.0, 16.0)) == {0, 1}
+    assert mapproj.points_within(_PTS, 200.0, 50.0, 16.0) == [2]     # daleki sam
+
+
+def test_clamp_label_y0_trzyma_stack_w_kadrze():
+    asc, lh, h = 12.0, 16.0, 300.0
+    # punkt u GÓRY (anchor 3) → stack zsunięty w dół, górna etykieta nie ucięta (top ≥ 0)
+    y0_top = mapproj.clamp_label_y0(3.0, 2, asc, lh, h)
+    assert y0_top - asc - 1 >= 0
+    # punkt u DOŁU (anchor 297) → dolna etykieta nie wyłazi pod spód (bottom ≤ h)
+    y0_bot = mapproj.clamp_label_y0(297.0, 2, asc, lh, h)
+    assert y0_bot + 2 * lh - asc - 1 <= h
+    # punkt w ŚRODKU → wyśrodkowany bez klampu
+    assert abs(mapproj.clamp_label_y0(150.0, 1, asc, lh, h) - (150.0 + asc / 2)) < 1e-9
+
+
 # ----------------------------------------------------------------- wbudowany asset
 
 def test_load_land_polylines_asset():

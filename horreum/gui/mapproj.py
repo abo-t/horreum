@@ -179,6 +179,40 @@ def point_radius(frame_count, max_count, r_min=3.0, r_max=11.0):
     return r_min + (r_max - r_min) * math.log1p(min(frame_count, max_count)) / math.log1p(max_count)
 
 
+# ----------------------------------------------------------------------------- hit-test (klik/hover, #10)
+
+def nearest_point(points_px, x, y, max_px):
+    """Indeks punktu NAJBLIŻSZEGO do (x,y) w progu `max_px` (euklides w px), albo None. Qt-wolny
+    (widżet podaje `to_px` wyników) — logika hit-testu żyje tu (IZOLACJA-QT), nie w `paintEvent`.
+    Remis → wygrywa późniejszy indeks (bez znaczenia dla selekcji pojedynczego punktu)."""
+    best_i, best_d2 = None, float(max_px) ** 2
+    for i, (px, py) in enumerate(points_px):
+        d2 = (px - x) ** 2 + (py - y) ** 2
+        if d2 <= best_d2:
+            best_i, best_d2 = i, d2
+    return best_i
+
+
+def points_within(points_px, x, y, radius_px):
+    """Indeksy WSZYSTKICH punktów w promieniu `radius_px` od (x,y) — dekolizja etykiet: stanowiska
+    oddalone o kilka km zlewają się w px przy zasięgu kontynentalnym (Dom+Będargowo 4 km), a hover
+    ma pokazać je wszystkie stackiem, nie jedno na drugim. Próg px → adaptuje się do skali widoku."""
+    r2 = float(radius_px) ** 2
+    return [i for i, (px, py) in enumerate(points_px)
+            if (px - x) ** 2 + (py - y) ** 2 <= r2]
+
+
+def clamp_label_y0(anchor_y, count, ascent, line_h, height, margin=2.0):
+    """Górny baseline pionowego stacku `count` etykiet, wyśrodkowany na `anchor_y`, ale KLAMPOWANY
+    tak, by stack nie ucinał się o krawędź widżetu (wiz #10 P2: klaster najbardziej na północ ląduje
+    domyślnie u góry kadru — dokładnie tam, gdzie dekolizja jest najczęściej używana). Punkt u góry →
+    stack rozwija się w dół; u dołu → w górę; stack wyższy niż widok → dosunięty do góry (`lo`)."""
+    y0 = anchor_y + ascent / 2 - (count - 1) * line_h / 2
+    lo = margin + ascent + 1
+    hi = height - margin - count * line_h + ascent + 1
+    return max(lo, min(y0, hi)) if hi >= lo else lo
+
+
 # ----------------------------------------------------------------------------- link zewnętrzny
 
 def osm_url(lat, lon, zoom=13):

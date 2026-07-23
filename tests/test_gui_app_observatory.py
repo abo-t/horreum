@@ -241,3 +241,70 @@ def test_osm_przycisk_szczery_disabled_i_link(win, monkeypatch):
     assert w.btn_osm.isEnabled()
     w._on_open_osm()
     assert opened and "mlat=53.400000" in opened[0]   # lat DOM = 53.4 (fixture), format .6f
+
+
+# --- interakcja z mapą: hit-test klik + hover (#10) ---
+
+def _press(w, px, py):
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+    ev = QMouseEvent(QEvent.MouseButtonPress, QPointF(px, py), Qt.LeftButton, Qt.LeftButton,
+                     Qt.NoModifier)
+    w.map_view.mousePressEvent(ev)
+
+
+def test_mapa_klik_w_punkt_emituje_siteclicked(win):
+    """Hit-test: klik lewym w punkt → sygnał `siteClicked(oid)` klikniętego stanowiska."""
+    w, _, ids = win
+    w.map_view.resize(320, 240)                    # resizeEvent → _refit ustawia transform
+    got = []
+    w.map_view.siteClicked.connect(got.append)
+    px, py = w.map_view._xf.to_px(53.4, 114.4)     # pozycja DOM
+    _press(w, px, py)
+    assert got == [ids["dom"]]
+
+
+def test_mapa_klik_poza_punktem_nie_emituje(win):
+    """Klik w tło (poza progiem `_HIT_PX`) nie emituje — mapa nie zgaduje, tabela zostaje właścicielem."""
+    w, _, _ = win
+    w.map_view.resize(320, 240)
+    got = []
+    w.map_view.siteClicked.connect(got.append)
+    _press(w, 2.0, 2.0)                            # narożnik = margines, daleko od punktów
+    assert got == []
+
+
+def test_mapa_klik_zaznacza_wiersz_tabeli(win):
+    """Wpięcie mapa→tabela: `siteClicked` → `selectRow` → kaskada `_on_selection_changed`
+    (wyróżnienie mapy + stan OSM). Tabela zostaje SPOT selekcji."""
+    w, _, ids = win
+    w.table.selectRow(_row_of(w, ids["praca"]))
+    assert w._selected_observatory_id() == ids["praca"]
+    w.map_view.siteClicked.emit(ids["dom"])        # symuluj klik w DOM
+    assert w._selected_observatory_id() == ids["dom"]   # tabela przeskoczyła (mapa→tabela)
+    assert w.map_view._selected == ids["dom"]           # wyróżnienie mapy zsynchronizowane
+    assert w.btn_osm.isEnabled()                        # OSM wskazuje nowy cel
+
+
+def test_mapa_hover_ustawia_i_gasi(win):
+    """Hover nad punktem ustawia `_hover` (etykieta pod kursorem); zejście kursora gasi."""
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+    w, _, ids = win
+    w.map_view.resize(320, 240)
+    px, py = w.map_view._xf.to_px(53.4, 114.4)     # DOM
+    w.map_view.mouseMoveEvent(QMouseEvent(QEvent.MouseMove, QPointF(px, py), Qt.NoButton,
+                                          Qt.NoButton, Qt.NoModifier))
+    assert w.map_view._hover == ids["dom"]
+    w.map_view.leaveEvent(QEvent(QEvent.Leave))
+    assert w.map_view._hover is None
+
+
+def test_mapa_hover_render_niejednolity(win):
+    """Smoke dekolizji: paintEvent ze stackiem etykiet hover COŚ maluje (bez wyjątku, non-uniform)."""
+    w, _, ids = win
+    w.map_view.resize(320, 240)
+    w.map_view._hover = ids["dom"]
+    img = w.map_view.grab().toImage()
+    colors = {img.pixel(x, y) for y in range(0, img.height(), 4) for x in range(0, img.width(), 4)}
+    assert len(colors) >= 2

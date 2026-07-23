@@ -38,7 +38,16 @@ from horreum.resolve.solar import resolve_solar
 # Kolumny listy głównej — indeksy nazwane (czytelne handlery zamiast magicznych liczb).
 # Nagłówek = telescop_canon (tożsamość osi po przejściu fitsmirror); Etykieta = nazwa usera.
 COL_ID, COL_CANON, COL_LABEL, COL_STATUS, COL_FRATIO, COL_FOCAL, COL_FRAMES = range(7)
-HEADERS = ["ID", "Nagłówek", "Etykieta", "Status", "f/", "Ogniskowa", "Klatki"]
+# Stałe nagłówków trzymają KLUCZE katalogu (nie stringi) — etykieta rozwiązuje się `_headers()` w czasie
+# BUDOWY widżetu, po `i18n.set_lang` w `main` (D-L1: stałe module-level ewaluują się przed set_lang, więc
+# string zamroziłby domyślny PL; klucz jest językowo-neutralny).
+HEADERS = ["col.id", "axis.tel.col.canon", "axis.tel.col.label", "col.status",
+           "axis.tel.col.fratio", "axis.tel.col.focal", "col.frames"]
+
+
+def _headers(keys):
+    """Nagłówki kolumn z katalogu w czasie budowy tabeli (klucze → etykiety bieżącego języka)."""
+    return [i18n.t(k) for k in keys]
 
 
 def _fmt(v):
@@ -104,13 +113,6 @@ def _fmt_obs_date(s):
     return s.split(".")[0] if s and "T" in s else (s or "")
 
 
-def _frames_accusative(n):
-    """Biernik po liczbie: 1 klatkę, 2–4 klatki (poza 12–14), reszta klatek."""
-    if n == 1:
-        return "klatkę"
-    return "klatki" if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14) else "klatek"
-
-
 class TelescopeAxisView(QWidget):
     """Osadzalny widok osi TELESKOP: lista kanonicznych teleskopów (lewa) + szczegół zaznaczonego
     (prawa: członkowie scaleni pod nim, audyt). Akcje usera (`label`/`approve`/`merge`/`unmerge`)
@@ -141,9 +143,9 @@ class TelescopeAxisView(QWidget):
         # --- lewa: tabela aktywnych + pasek akcji ---
         left = QWidget()
         lv = QVBoxLayout(left)
-        lv.addWidget(QLabel("Aktywne teleskopy (kanoniczne)"))
+        lv.addWidget(QLabel(i18n.t("axis.tel.active")))
         self.table = QTableWidget(0, len(HEADERS))
-        self.table.setHorizontalHeaderLabels(HEADERS)
+        self.table.setHorizontalHeaderLabels(_headers(HEADERS))
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         # Szerokości: kolumny do treści, Etykieta (nazwa usera) rośnie — spójne z osią OBSERWATORIUM;
@@ -158,15 +160,15 @@ class TelescopeAxisView(QWidget):
         lv.addWidget(self.table)
 
         actions = QHBoxLayout()
-        self.btn_approve = QPushButton("Zatwierdź")
+        self.btn_approve = QPushButton(i18n.t("axis.tel.approve"))
         self.btn_approve.clicked.connect(self._on_approve)
         actions.addWidget(self.btn_approve)
         actions.addStretch(1)
-        actions.addWidget(QLabel("Scal zaznaczony w:"))
+        actions.addWidget(QLabel(i18n.t("axis.tel.merge_into")))
         self.combo_target = QComboBox()
         self.combo_target.currentIndexChanged.connect(self._sync_merge_enabled)
         actions.addWidget(self.combo_target)
-        self.btn_merge = QPushButton("Scal")
+        self.btn_merge = QPushButton(i18n.t("action.merge"))
         self.btn_merge.clicked.connect(self._on_merge)
         actions.addWidget(self.btn_merge)
         lv.addLayout(actions)
@@ -174,14 +176,14 @@ class TelescopeAxisView(QWidget):
         # --- prawa: szczegół zaznaczonego ---
         right = QWidget()
         rv = QVBoxLayout(right)
-        rv.addWidget(QLabel("Scalone pod tym teleskopem:"))
+        rv.addWidget(QLabel(i18n.t("axis.tel.merged_under")))
         self.members = QListWidget()
         self.members.itemSelectionChanged.connect(self._sync_unmerge_enabled)
         rv.addWidget(self.members)
-        self.btn_unmerge = QPushButton("Cofnij scalenie")
+        self.btn_unmerge = QPushButton(i18n.t("action.unmerge"))
         self.btn_unmerge.clicked.connect(self._on_unmerge)
         rv.addWidget(self.btn_unmerge)
-        rv.addWidget(QLabel("Historia (audyt):"))
+        rv.addWidget(QLabel(i18n.t("axis.history")))
         self.events = QListWidget()
         rv.addWidget(self.events)
 
@@ -220,7 +222,7 @@ class TelescopeAxisView(QWidget):
             self.table.selectRow(0)
         else:
             # pusty stan ma sensowny komunikat, nie gołe nagłówki (wizytator P3)
-            self.status_message.emit("Brak teleskopów na osi — uruchom grupowanie (horreum group).")
+            self.status_message.emit(i18n.t("axis.tel.empty_status"))
         self._on_selection_changed()
 
     def _set_cell(self, r, c, text, *, editable=False, data=None, align=None):
@@ -273,7 +275,7 @@ class TelescopeAxisView(QWidget):
         # (wizytator P2). `blockSignals` — przebudowa listy nie ma sypać `currentIndexChanged`.
         self.combo_target.blockSignals(True)
         self.combo_target.clear()
-        self.combo_target.addItem("— wybierz cel —", None)
+        self.combo_target.addItem(i18n.t("axis.pick_target"), None)
         for t in queries.active_telescopes(self.con):
             if t["id"] != tid:                # cel ≠ źródło → self-merge strukturalnie niemożliwy
                 self.combo_target.addItem(
@@ -326,10 +328,10 @@ class TelescopeAxisView(QWidget):
             changed = repo.label_telescope(
                 self.con, telescope_id=tid, label=item.text(), now=self._now())
         except ValueError as e:
-            self._flash(f"Etykieta odrzucona: {e}")
+            self._flash(i18n.t("axis.tel.label_rejected", e=e))
             self.refresh()
             return
-        self._flash("Etykieta zapisana." if changed else "Etykieta bez zmian.")
+        self._flash(i18n.t("axis.tel.label_saved") if changed else i18n.t("axis.tel.label_unchanged"))
         self.refresh()
 
     def _on_approve(self):
@@ -339,9 +341,9 @@ class TelescopeAxisView(QWidget):
         try:
             changed = repo.approve_telescope(self.con, telescope_id=tid, now=self._now())
         except ValueError as e:
-            self._flash(f"Nie zatwierdzono: {e}")
+            self._flash(i18n.t("axis.tel.approve_failed", e=e))
             return
-        self._flash("Zatwierdzono." if changed else "Już zatwierdzony.")
+        self._flash(i18n.t("axis.tel.approved") if changed else i18n.t("axis.tel.already_approved"))
         self.refresh()
 
     def _on_merge(self):
@@ -353,9 +355,10 @@ class TelescopeAxisView(QWidget):
             changed = repo.merge_telescope(
                 self.con, source_id=src, target_id=tgt, now=self._now())
         except ValueError as e:
-            self._flash(f"Nie scalono: {e}")
+            self._flash(i18n.t("axis.merge_failed", e=e))
             return
-        self._flash(f"Scalono #{src} → #{tgt}." if changed else "Już scalony.")
+        self._flash(i18n.t("axis.merged", src=src, tgt=tgt) if changed
+                    else i18n.t("axis.tel.already_merged"))
         self.refresh()
 
     def _on_unmerge(self):
@@ -366,22 +369,24 @@ class TelescopeAxisView(QWidget):
         try:
             changed = repo.unmerge_telescope(self.con, telescope_id=mid, now=self._now())
         except ValueError as e:
-            self._flash(f"Nie cofnięto: {e}")
+            self._flash(i18n.t("axis.unmerge_failed", e=e))
             return
-        self._flash(f"Cofnięto scalenie #{mid}." if changed else "Już kanoniczny.")
+        self._flash(i18n.t("axis.unmerged", mid=mid) if changed
+                    else i18n.t("axis.tel.already_canonical"))
         self.refresh()
 
 
 # ============================================================ oś OBIEKT (PLAN_gui_object + #8/P4)
 
 OBJ_COL_CANON, OBJ_COL_CATALOG, OBJ_COL_FRAMES = range(3)
-OBJ_HEADERS = ["Obiekt", "Katalog", "Klatki"]
+OBJ_HEADERS = ["object.col.name", "object.col.catalog", "col.frames"]
 FRAME_COL_SHA, FRAME_COL_TEL, FRAME_COL_CAM, FRAME_COL_FILTER, FRAME_COL_DATE, FRAME_COL_PRESENT, \
     FRAME_COL_PATH = range(7)
-FRAME_HEADERS = ["sha1 danych", "Teleskop", "Kamera", "Filtr", "Data", "Obecny", "Ścieżka"]
+FRAME_HEADERS = ["frame.col.sha", "frame.col.telescope", "frame.col.camera", "frame.col.filter",
+                 "frame.col.date", "frame.col.present", "col.path"]
 # Tryb „kopie" prawego panelu (Z6/P4 — drążenie kubełka `unreadable` do dokładnych location).
 COPY_COL_PATH, COPY_COL_VOLUME, COPY_COL_PRESENT, COPY_COL_MARKED = range(4)
-COPY_HEADERS = ["Ścieżka", "Wolumen", "Obecna", "Oznaczona"]
+COPY_HEADERS = ["col.path", "copy.col.volume", "copy.col.present", "copy.col.marked"]
 
 
 def _tel_facet_label(row):
@@ -415,31 +420,30 @@ class AssignObjectDialog(QDialog):
         self.con = con
         self.alias_norm = alias_norm
         self.selected = None
-        self.setWindowTitle("Przypisz obiekt")
+        self.setWindowTitle(i18n.t("assign.title"))
         lay = QVBoxLayout(self)
 
-        head = QLabel(f"Grupa „{object_raw}” — {frame_count} klatek.\n"
-                      "Alias zostanie zapamiętany: nowe klatki z tą nazwą przypisze resolver.")
+        head = QLabel(i18n.t_plural("assign.group_head", frame_count, name=object_raw)
+                      + "\n" + i18n.t("assign.alias_remembered"))
         head.setWordWrap(True)
         lay.addWidget(head)
         if resolve_solar(object_raw) or resolve_object(object_raw):
-            note = QLabel("Ta nazwa rozwiązuje się katalogowo — katalog bije alias: nowe klatki "
-                          "z tą nazwą przypisze nagłówek, zapamiętany alias dotyczy tej grupy.")
+            note = QLabel(i18n.t("assign.catalog_note"))
             note.setWordWrap(True)
             lay.addWidget(note)
 
-        lay.addWidget(QLabel("Istniejący obiekt:"))
+        lay.addWidget(QLabel(i18n.t("assign.existing_object")))
         self.combo = QComboBox()
-        self.combo.addItem("— wybierz obiekt —", None)
+        self.combo.addItem(i18n.t("assign.pick_object"), None)
         self._objects = queries.library_objects(con)          # bez filtra — pełna biblioteka
         for o in self._objects:
             self.combo.addItem(f"{o['canon']}  ·  {o['catalog'] or '—'}",
                                (o["id"], o["canon"], o["catalog"]))
         lay.addWidget(self.combo)
 
-        lay.addWidget(QLabel("albo nowe oznaczenie katalogowe (wypełnione nadpisuje wybór z listy):"))
+        lay.addWidget(QLabel(i18n.t("assign.new_designation")))
         self.designation = QLineEdit()
-        self.designation.setPlaceholderText("np. IC 1795")
+        self.designation.setPlaceholderText(i18n.t("assign.designation_placeholder"))
         lay.addWidget(self.designation)
 
         self.error = QLabel("")
@@ -449,7 +453,7 @@ class AssignObjectDialog(QDialog):
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         self.accept_btn = buttons.button(QDialogButtonBox.Ok)
-        self.accept_btn.setText(f"Przypisz {frame_count} {_frames_accusative(frame_count)}")
+        self.accept_btn.setText(i18n.t_plural("assign.accept_btn", frame_count))
         buttons.accepted.connect(self._validate_and_accept)
         buttons.rejected.connect(self.reject)
         lay.addWidget(buttons)
@@ -467,7 +471,7 @@ class AssignObjectDialog(QDialog):
         self.accept_btn.setEnabled(valid_designation if text else self.combo.currentData() is not None)
         self.error.clear()                                  # wejście się zmieniło → stary błąd nieaktualny
         if text and not valid_designation:
-            self._fail(f"Nie rozpoznaję oznaczenia katalogowego: „{text}”.")
+            self._fail(i18n.t("assign.unknown_designation", text=text))
 
     def _validate_and_accept(self):
         """Waliduj wybór; poprawny → `self.selected` + accept, błąd → nota i dialog zostaje."""
@@ -475,20 +479,19 @@ class AssignObjectDialog(QDialog):
         if text:
             cc = catalog_canon(text)
             if not cc:
-                return self._fail(f"Nie rozpoznaję oznaczenia katalogowego: „{text}”.")
+                return self._fail(i18n.t("assign.unknown_designation", text=text))
             canon, catalog, kind = xref(cc), catalog_label(xref(cc)), "deep_sky"
             object_id = next((o["id"] for o in self._objects if o["canon"] == canon), None)
         else:
             selected = self.combo.currentData()
             if selected is None:
-                return self._fail("Wybierz istniejący obiekt albo podaj oznaczenie katalogowe.")
+                return self._fail(i18n.t("assign.pick_or_designate"))
             object_id, canon, catalog = selected
             kind = None                                   # obiekt istnieje — repo nie INSERTuje
         target = queries.alias_target(self.con, self.alias_norm)
         if target is not None and target != object_id:
             target_canon = next((o["canon"] for o in self._objects if o["id"] == target), target)
-            return self._fail(
-                f"Alias dla tej nazwy wskazuje już obiekt „{target_canon}” — wybierz go z listy.")
+            return self._fail(i18n.t("assign.alias_conflict", target=target_canon))
         self.selected = (canon, catalog, kind)
         self.accept()
 
@@ -531,11 +534,11 @@ class ObjectAxisView(QWidget):
 
         # --- pasek filtra ---
         bar = QHBoxLayout()
-        bar.addWidget(QLabel("Teleskop:"))
+        bar.addWidget(QLabel(i18n.t("filter.telescope")))
         self.combo_tel = QComboBox()
         self.combo_tel.currentIndexChanged.connect(self._on_filter_changed)
         bar.addWidget(self.combo_tel)
-        bar.addWidget(QLabel("Filtr:"))
+        bar.addWidget(QLabel(i18n.t("filter.filter")))
         self.combo_filter = QComboBox()
         self.combo_filter.currentIndexChanged.connect(self._on_filter_changed)
         bar.addWidget(self.combo_filter)
@@ -547,9 +550,9 @@ class ObjectAxisView(QWidget):
         # --- lewa: biblioteka obiektów + kolejka przeglądu pod nią ---
         left = QWidget()
         lv = QVBoxLayout(left)
-        lv.addWidget(QLabel("Biblioteka (obiekty)"))
+        lv.addWidget(QLabel(i18n.t("object.library")))
         self.objects = QTableWidget(0, len(OBJ_HEADERS))
-        self.objects.setHorizontalHeaderLabels(OBJ_HEADERS)
+        self.objects.setHorizontalHeaderLabels(_headers(OBJ_HEADERS))
         self.objects.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.objects.setSelectionMode(QAbstractItemView.SingleSelection)
         self.objects.setEditTriggers(QAbstractItemView.NoEditTriggers)   # read-only
@@ -559,20 +562,20 @@ class ObjectAxisView(QWidget):
         # Nota pustego stanu W WIDOKU (wizytator P1 #2): pusty filtr nie może komunikować się tylko
         # ulotnym flashem na statusbarze — user patrzy na pustą bibliotekę i pełną kolejkę i nie wie,
         # czy to błąd. Nota jest odkrywalna w obszarze tabeli, chowana gdy są obiekty.
-        self.lib_empty = QLabel("Brak obiektów dla tego filtra — zmień filtr lub rozwiąż (resolve).")
+        self.lib_empty = QLabel(i18n.t("object.lib_empty"))
         self.lib_empty.setAlignment(Qt.AlignCenter)
         self.lib_empty.setWordWrap(True)
         self.lib_empty.setVisible(False)
         lv.addWidget(self.lib_empty)
 
-        lv.addWidget(QLabel("Kolejka przeglądu"))
+        lv.addWidget(QLabel(i18n.t("object.review_queue")))
         self.review = QListWidget()
         self.review.itemSelectionChanged.connect(self._on_review_selected)
         lv.addWidget(self.review)
         # Akcja #8/P4: przypisz obiekt zaznaczonej pozycji review (aktywna TYLKO przy tagu
         # „object_raw" — obie listy wzajemnie czyszczą selekcję, przycisk śledzi obie).
         assign_row = QHBoxLayout()
-        self.assign_btn = QPushButton("Przypisz obiekt…")
+        self.assign_btn = QPushButton(i18n.t("object.assign_btn"))
         self.assign_btn.setEnabled(False)
         self.assign_btn.clicked.connect(self._on_assign)
         assign_row.addWidget(self.assign_btn)
@@ -582,10 +585,10 @@ class ObjectAxisView(QWidget):
         # --- prawa: klatki zaznaczonego obiektu / pozycji review ---
         right = QWidget()
         rv = QVBoxLayout(right)
-        self.frames_label = QLabel("Klatki")
+        self.frames_label = QLabel(i18n.t("col.frames"))
         rv.addWidget(self.frames_label)
         self.frames = QTableWidget(0, len(FRAME_HEADERS))
-        self.frames.setHorizontalHeaderLabels(FRAME_HEADERS)
+        self.frames.setHorizontalHeaderLabels(_headers(FRAME_HEADERS))
         self.frames.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.frames.setEditTriggers(QAbstractItemView.NoEditTriggers)
         # Kolumny wąskie (sha/tel/kam/filtr/data/obecny) do treści, Ścieżka bierze resztę — inaczej
@@ -610,11 +613,11 @@ class ObjectAxisView(QWidget):
         self._loading = True
         try:
             self.combo_tel.clear()
-            self.combo_tel.addItem("(wszystkie)", None)
+            self.combo_tel.addItem(i18n.t("filter.all"), None)
             for t in queries.telescope_facets(self.con):
                 self.combo_tel.addItem(_tel_facet_label(t), t["id"])
             self.combo_filter.clear()
-            self.combo_filter.addItem("(wszystkie)", None)
+            self.combo_filter.addItem(i18n.t("filter.all"), None)
             for f in queries.filter_facets(self.con):
                 self.combo_filter.addItem(f["filter_canon"], f["filter_canon"])
         finally:
@@ -672,11 +675,10 @@ class ObjectAxisView(QWidget):
         elif not empty:
             self.objects.clearSelection()
             self.frames.setRowCount(0)
-            self.frames_label.setText("Klatki")
+            self.frames_label.setText(i18n.t("col.frames"))
         else:
             self.frames.setRowCount(0)
-            self.status_message.emit(
-                "Brak obiektów dla tego filtra — zeskanuj i rozwiąż (horreum resolve) lub zmień filtr.")
+            self.status_message.emit(i18n.t("object.empty_status"))
         self._restore_frames_mode()            # tryb „kopie" znika przy refresh (D-P4-5)
         self._sync_assign_enabled()
         self._on_object_selected()
@@ -689,20 +691,20 @@ class ObjectAxisView(QWidget):
         q = queries.review_queue(self.con)
         self.review.clear()
         for r in q["object_review"]:
-            it = QListWidgetItem(f'{r["object_raw"]}  ·  {r["n"]} klatek')
+            it = QListWidgetItem(i18n.t("object.review_item", name=r["object_raw"], n=r["n"]))
             it.setData(Qt.UserRole, "object_raw")
             it.setData(Qt.UserRole + 1, r["object_raw"])
             self.review.addItem(it)
-        unread = QListWidgetItem(f'— kopie nieczytelne: {q["unreadable_count"]}')
+        unread = QListWidgetItem(i18n.t("object.unreadable_line", n=q["unreadable_count"]))
         unread.setData(Qt.UserRole, "unreadable")
         unread.setData(Qt.UserRole + 1, None)
         self.review.addItem(unread)
         # liczniki innych kanałów jako pozycja informacyjne (bez tagu → nieklikana); nota
         # „rozwiązywanie w przygotowaniu" ZAWĘŻONA do tych dwóch kanałów (R#9) — obiekt-review
         # i kopie mają już swoje akcje.
-        info = QListWidgetItem(
-            f'— config-review: {q["config_review_count"]}  ·  bez nagłówka: {q["headerless_count"]}'
-            f'  (rozwiązywanie w przygotowaniu)')
+        info = QListWidgetItem(i18n.t(
+            "object.review_info",
+            config=q["config_review_count"], headerless=q["headerless_count"]))
         info.setFlags(Qt.ItemIsEnabled)        # nie do zaznaczenia (informacyjne)
         self.review.addItem(info)
 
@@ -753,7 +755,7 @@ class ObjectAxisView(QWidget):
         flt = self._filters()
         rows = queries.object_frames(
             self.con, oid, telescope_id=flt["telescope_id"], filter_canon=flt["filter_canon"])
-        self.frames_label.setText("Klatki obiektu")
+        self.frames_label.setText(i18n.t("object.frames_of_object"))
         self._fill_frames(rows, present_col=True)
 
     def _on_review_selected(self):
@@ -770,7 +772,7 @@ class ObjectAxisView(QWidget):
         if tag == "object_raw":
             self._restore_frames_mode()
             rows = queries.object_review_frames(self.con, payload)
-            self.frames_label.setText(f"Klatki do przeglądu: {payload}")
+            self.frames_label.setText(i18n.t("object.frames_review", name=payload))
             self._fill_frames(rows, present_col=False)
         elif tag == "unreadable":
             self._show_copies()
@@ -784,7 +786,7 @@ class ObjectAxisView(QWidget):
         rows = queries.unreadable_copies(self.con)
         self._copies_mode = True
         self.frames.setColumnCount(len(COPY_HEADERS))
-        self.frames.setHorizontalHeaderLabels(COPY_HEADERS)
+        self.frames.setHorizontalHeaderLabels(_headers(COPY_HEADERS))
         fh = self.frames.horizontalHeader()
         fh.setSectionResizeMode(QHeaderView.ResizeToContents)
         fh.setSectionResizeMode(COPY_COL_PATH, QHeaderView.ResizeToContents)
@@ -792,13 +794,14 @@ class ObjectAxisView(QWidget):
         self.frames.setRowCount(len(rows))
         for r, row in enumerate(rows):
             path = row["path"] or ""
-            self._set_frame_cell(r, COPY_COL_PATH, path or "(brak ścieżki)",
+            self._set_frame_cell(r, COPY_COL_PATH, path or i18n.t("object.no_path"),
                                  tooltip=path or None)
             self._set_frame_cell(r, COPY_COL_VOLUME, row["volume"])
-            self._set_frame_cell(r, COPY_COL_PRESENT, "tak" if row["present"] else "nie")
+            self._set_frame_cell(r, COPY_COL_PRESENT,
+                                 i18n.t("common.yes") if row["present"] else i18n.t("common.no"))
             self._set_frame_cell(r, COPY_COL_MARKED, _fmt_event_ts(row["unreadable_since"]),
                                  tooltip=row["unreadable_since"])
-        self.frames_label.setText(f"Kopie nieczytelne ({len(rows)})")
+        self.frames_label.setText(i18n.t("object.unreadable_title", n=len(rows)))
 
     def _restore_frames_mode(self):
         """Powrót prawego panelu z trybu „kopie" do tabeli klatek (kolumny + nagłówki FRAME_*)."""
@@ -806,7 +809,7 @@ class ObjectAxisView(QWidget):
             return
         self._copies_mode = False
         self.frames.setColumnCount(len(FRAME_HEADERS))
-        self.frames.setHorizontalHeaderLabels(FRAME_HEADERS)
+        self.frames.setHorizontalHeaderLabels(_headers(FRAME_HEADERS))
         fh = self.frames.horizontalHeader()
         fh.setSectionResizeMode(QHeaderView.ResizeToContents)
         fh.setSectionResizeMode(FRAME_COL_PATH, QHeaderView.Stretch)
@@ -824,9 +827,8 @@ class ObjectAxisView(QWidget):
         alias_norm = norm_alnum(object_raw)
         if not alias_norm:                     # pusty klucz (D-P4-2/R#3) — dialog odrzuca grupę
             QMessageBox.warning(
-                self, "Przypisz obiekt",
-                f"Nazwa „{object_raw}” nie ma znaków alfanumerycznych — nie może być "
-                "zapamiętanym aliasem.")
+                self, i18n.t("assign.title"),
+                i18n.t("object.alias_no_alnum", name=object_raw))
             return
         rows = queries.object_review_frames(self.con, object_raw)
         frame_ids = [r["frame_id"] for r in rows]
@@ -840,11 +842,11 @@ class ObjectAxisView(QWidget):
                 self.con, alias_norm=alias_norm, canon=canon, catalog=catalog, kind=kind,
                 frame_ids=frame_ids, now=self._now())
         except ValueError as e:                # konflikt aliasu / dryf do nieistniejącej klatki
-            QMessageBox.warning(self, "Przypisz obiekt", str(e))
+            QMessageBox.warning(self, i18n.t("assign.title"), str(e))
             return
-        msg = f"Przypisano {assigned} z {assigned + skipped} klatek → {canon}."
+        msg = i18n.t("object.assigned_report", assigned=assigned, total=assigned + skipped, canon=canon)
         if skipped:
-            msg += f" ({skipped} pominięte — zajęte między dialogiem a zapisem)"
+            msg += i18n.t("object.assigned_skipped", n=skipped)
         self.status_message.emit(msg)
         self.refresh(select_canon=canon if assigned else None, select_first=bool(assigned))
 
@@ -861,13 +863,15 @@ class ObjectAxisView(QWidget):
             self._set_frame_cell(r, FRAME_COL_DATE, _fmt_obs_date(row["date_obs"]),
                                  tooltip=row["date_obs"] or None)
             if present_col and "present" in keys:
-                self._set_frame_cell(r, FRAME_COL_PRESENT, "tak" if row["present"] else "nie")
+                self._set_frame_cell(r, FRAME_COL_PRESENT,
+                                     i18n.t("common.yes") if row["present"] else i18n.t("common.no"))
             else:
                 self._set_frame_cell(r, FRAME_COL_PRESENT, "")
             # Ścieżka: pokaż NAZWĘ PLIKU (elizja od prawej gubiłaby ją z pełnej ścieżki „R:\...");
             # pełna ścieżka w tooltipie (hover). Klatka bez lokalizacji (zniknięta) → jawny znacznik.
             path = row["path"] or ""
-            self._set_frame_cell(r, FRAME_COL_PATH, os.path.basename(path) if path else "(brak lokalizacji)",
+            self._set_frame_cell(r, FRAME_COL_PATH,
+                                 os.path.basename(path) if path else i18n.t("object.no_location"),
                                  tooltip=path or None)
 
     def _set_frame_cell(self, r, c, text, *, tooltip=None):
@@ -892,7 +896,7 @@ class ObjectAxisView(QWidget):
 # to etykieta usera (edytowalna in-line → `label_observatory`). Bez kolumny Status (zawsze 'proposed'
 # w v1 — brak approve) i bez Wysokości (atrybut D3, nie tożsamość — zejście na drugi plan).
 OBS_COL_ID, OBS_COL_NAME, OBS_COL_LAT, OBS_COL_LON, OBS_COL_FRAMES = range(5)
-OBS_HEADERS = ["ID", "Nazwa", "Szerokość", "Długość", "Klatki"]
+OBS_HEADERS = ["col.id", "obs.col.name", "obs.col.lat", "obs.col.lon", "col.frames"]
 
 
 def _fmt_coord(v):
@@ -939,9 +943,9 @@ class ObservatoryAxisView(QWidget):
         # --- lewa: tabela aktywnych stanowisk + pasek akcji ---
         left = QWidget()
         lv = QVBoxLayout(left)
-        lv.addWidget(QLabel("Aktywne stanowiska (kanoniczne)"))
+        lv.addWidget(QLabel(i18n.t("axis.obs.active")))
         self.table = QTableWidget(0, len(OBS_HEADERS))
-        self.table.setHorizontalHeaderLabels(OBS_HEADERS)
+        self.table.setHorizontalHeaderLabels(_headers(OBS_HEADERS))
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         # Priorytet szerokości: Nazwa (etykieta usera) rośnie, reszta do treści (wizytator #3/#4 —
@@ -957,7 +961,7 @@ class ObservatoryAxisView(QWidget):
         # Nota pustego stanu W WIDOKU (wizytator #1): `status_message` bywa nadpisany flashem gospodarza
         # (MainWindow), więc pusty stan musi być odkrywalny w obszarze tabeli — wzorzec 1:1 z
         # `ObjectAxisView.lib_empty`. Chowana, gdy są stanowiska.
-        self.obs_empty = QLabel("Brak stanowisk — uruchom rozwiązywanie (resolve) na skanie z GPS.")
+        self.obs_empty = QLabel(i18n.t("axis.obs.empty_note"))
         self.obs_empty.setAlignment(Qt.AlignCenter)
         self.obs_empty.setWordWrap(True)
         self.obs_empty.setVisible(False)
@@ -965,11 +969,11 @@ class ObservatoryAxisView(QWidget):
 
         actions = QHBoxLayout()
         actions.addStretch(1)
-        actions.addWidget(QLabel("Scal zaznaczone w:"))
+        actions.addWidget(QLabel(i18n.t("axis.obs.merge_into")))
         self.combo_target = QComboBox()
         self.combo_target.currentIndexChanged.connect(self._sync_merge_enabled)
         actions.addWidget(self.combo_target)
-        self.btn_merge = QPushButton("Scal")
+        self.btn_merge = QPushButton(i18n.t("action.merge"))
         self.btn_merge.clicked.connect(self._on_merge)
         actions.addWidget(self.btn_merge)
         lv.addLayout(actions)
@@ -977,14 +981,14 @@ class ObservatoryAxisView(QWidget):
         # --- prawa: szczegół zaznaczonego ---
         right = QWidget()
         rv = QVBoxLayout(right)
-        rv.addWidget(QLabel("Scalone pod tym stanowiskiem:"))
+        rv.addWidget(QLabel(i18n.t("axis.obs.merged_under")))
         self.members = QListWidget()
         self.members.itemSelectionChanged.connect(self._sync_unmerge_enabled)
         rv.addWidget(self.members)
-        self.btn_unmerge = QPushButton("Cofnij scalenie")
+        self.btn_unmerge = QPushButton(i18n.t("action.unmerge"))
         self.btn_unmerge.clicked.connect(self._on_unmerge)
         rv.addWidget(self.btn_unmerge)
-        rv.addWidget(QLabel("Historia (audyt):"))
+        rv.addWidget(QLabel(i18n.t("axis.history")))
         self.events = QListWidget()
         rv.addWidget(self.events)
 
@@ -1001,7 +1005,7 @@ class ObservatoryAxisView(QWidget):
         mv = QVBoxLayout(self.map_box)
         mv.setContentsMargins(0, 0, 0, 0)
         obar = QHBoxLayout()
-        self.btn_osm = QPushButton("Otwórz w OpenStreetMap…")
+        self.btn_osm = QPushButton(i18n.t("axis.obs.open_osm"))
         self.btn_osm.setEnabled(False)                # szczery disabled — bez zaznaczenia brak celu
         self.btn_osm.clicked.connect(self._on_open_osm)
         obar.addWidget(self.btn_osm)
@@ -1051,7 +1055,7 @@ class ObservatoryAxisView(QWidget):
         elif not empty:
             self.table.selectRow(0)
         else:
-            self.status_message.emit("Brak stanowisk na osi — uruchom rozwiązywanie (horreum resolve).")
+            self.status_message.emit(i18n.t("axis.obs.empty_status"))
         self._on_selection_changed()
 
     def _set_cell(self, r, c, text, *, editable=False, data=None, align=None):
@@ -1105,7 +1109,7 @@ class ObservatoryAxisView(QWidget):
         # stanowisko" (np. dom↔praca, gdy user uzna). `blockSignals` — przebudowa nie sypie sygnałem.
         self.combo_target.blockSignals(True)
         self.combo_target.clear()
-        self.combo_target.addItem("— wybierz cel —", None)
+        self.combo_target.addItem(i18n.t("axis.pick_target"), None)
         for o in queries.active_observatories(self.con):
             if o["id"] != oid:                # cel ≠ źródło → self-merge strukturalnie niemożliwy
                 self.combo_target.addItem(f'#{o["id"]}  {_obs_row_label(o)}', o["id"])
@@ -1153,7 +1157,7 @@ class ObservatoryAxisView(QWidget):
         oid = self._selected_observatory_id()
         coord = self._obs_coords.get(oid) if oid is not None else None
         if coord is None:
-            self._flash("Zaznacz stanowisko, by otworzyć mapę.")
+            self._flash(i18n.t("axis.obs.select_for_map"))
             return
         QDesktopServices.openUrl(QUrl(mapproj.osm_url(coord[0], coord[1])))
 
@@ -1167,10 +1171,10 @@ class ObservatoryAxisView(QWidget):
             changed = repo.label_observatory(
                 self.con, observatory_id=oid, name=item.text(), now=self._now())
         except ValueError as e:
-            self._flash(f"Nazwa odrzucona: {e}")
+            self._flash(i18n.t("axis.obs.name_rejected", e=e))
             self.refresh()
             return
-        self._flash("Nazwa zapisana." if changed else "Nazwa bez zmian.")
+        self._flash(i18n.t("axis.obs.name_saved") if changed else i18n.t("axis.obs.name_unchanged"))
         self.refresh()
 
     def _on_merge(self):
@@ -1182,9 +1186,10 @@ class ObservatoryAxisView(QWidget):
             changed = repo.merge_observatory(
                 self.con, source_id=src, target_id=tgt, now=self._now())
         except ValueError as e:
-            self._flash(f"Nie scalono: {e}")
+            self._flash(i18n.t("axis.merge_failed", e=e))
             return
-        self._flash(f"Scalono #{src} → #{tgt}." if changed else "Już scalone.")
+        self._flash(i18n.t("axis.merged", src=src, tgt=tgt) if changed
+                    else i18n.t("axis.obs.already_merged"))
         self.refresh()
 
     def _on_unmerge(self):
@@ -1195,9 +1200,10 @@ class ObservatoryAxisView(QWidget):
         try:
             changed = repo.unmerge_observatory(self.con, observatory_id=mid, now=self._now())
         except ValueError as e:
-            self._flash(f"Nie cofnięto: {e}")
+            self._flash(i18n.t("axis.unmerge_failed", e=e))
             return
-        self._flash(f"Cofnięto scalenie #{mid}." if changed else "Już kanoniczne.")
+        self._flash(i18n.t("axis.unmerged", mid=mid) if changed
+                    else i18n.t("axis.obs.already_canonical"))
         self.refresh()
 
 
@@ -1212,7 +1218,7 @@ class TelescopeAxisWindow(QMainWindow):
 
     def __init__(self, con, now_fn=_utc_now_iso, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Horreum — oś teleskopu")
+        self.setWindowTitle(i18n.t("window.telescope_axis"))
         self.resize(960, 560)
         self.view = TelescopeAxisView(con, now_fn=now_fn)
         self.view.status_message.connect(lambda m: self.statusBar().showMessage(m, 5000))
@@ -1265,15 +1271,15 @@ class MainWindow(QMainWindow):
     # ---------------------------------------------------------------- budowa szkieletu
 
     def _build_menu(self):
-        m = self.menuBar().addMenu("&Plik")
-        m.addAction("Otwórz bazę…", self._on_open_db)
-        m.addAction("Nowa baza…", self._on_new_db)
+        m = self.menuBar().addMenu(i18n.t("menu.file"))
+        m.addAction(i18n.t("menu.open_db"), self._on_open_db)
+        m.addAction(i18n.t("menu.new_db"), self._on_new_db)
         self._build_view_menu()
 
     def _build_view_menu(self):
         """Menu &Widok: motyw (ciemny/jasny) + język (PL/EN). Oba przez wykluczający QActionGroup;
         zaznaczenie ODBIJA bieżący stan z QSettings bez klikania (UI-NIE-KŁAMIE, F6 recenzja #6)."""
-        view = self.menuBar().addMenu("&Widok")
+        view = self.menuBar().addMenu(i18n.t("menu.view"))
         self._build_theme_menu(view)
         view.addSeparator()
         self._build_lang_menu(view)
@@ -1284,8 +1290,8 @@ class MainWindow(QMainWindow):
         grp.setExclusive(True)
         current = theme.normalize(QSettings("Horreum", "Horreum").value("ui/theme", theme.DEFAULT))
         self._theme_actions = {}
-        for name, title in (("dark", "Ciemny"), ("light", "Jasny")):
-            act = view.addAction(title)
+        for name, key in (("dark", "menu.theme.dark"), ("light", "menu.theme.light")):
+            act = view.addAction(i18n.t(key))
             act.setCheckable(True)
             act.setChecked(name == current)
             act.triggered.connect(lambda _checked=False, n=name: self._on_theme(n))
@@ -1347,7 +1353,7 @@ class MainWindow(QMainWindow):
         outer.addWidget(self.stack, 1)
         # Pusty stan ODKRYWALNY w centrum (wizytator F5 #3) — statusBar to za mało dla pierwszego
         # ekranu nowego usera; chowany, gdy jest baza (steruje _sync_db_state).
-        self.empty_note = QLabel("Brak bazy — otwórz lub utwórz bazę (menu Plik).")
+        self.empty_note = QLabel(i18n.t("main.no_db"))
         self.empty_note.setAlignment(Qt.AlignCenter)
         self.empty_note.setWordWrap(True)
         self.empty_note.setVisible(False)
@@ -1408,7 +1414,8 @@ class MainWindow(QMainWindow):
         tasks.open_collection.connect(self._on_open_collection)
         tasks.counts_changed.connect(self._on_tasks_counts)
 
-        for label, widget in (("Dostawa", pipeline), ("Zbiory", grid), ("Porządki", tasks)):
+        for label, widget in ((i18n.t("nav.dostawa"), pipeline), (i18n.t("nav.zbiory"), grid),
+                              (i18n.t("nav.porzadki"), tasks)):
             self.stack.addWidget(widget)
             self.nav.addItem(label)
         self.nav.setVisible(True)
@@ -1437,7 +1444,7 @@ class MainWindow(QMainWindow):
         """Badge sidebara: „Porządki (N)" przy N>0; przy zerze GOŁE „Porządki" — „(0)" to szum (F5R#8)."""
         item = self.nav.item(NAV_PORZADKI)
         if item is not None:
-            item.setText("Porządki" if n == 0 else f"Porządki ({n})")
+            item.setText(i18n.t("nav.porzadki") if n == 0 else i18n.t("nav.porzadki_count", n=n))
 
     def _on_pipeline_running(self, running):
         """W trakcie etapu wyłącz akcje zapisu osi (szczery disabled). Nawigacja zostaje aktywna —
@@ -1451,13 +1458,13 @@ class MainWindow(QMainWindow):
 
     def _on_open_db(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Otwórz bazę Horreum", "", "Bazy SQLite (*.db *.sqlite);;Wszystkie pliki (*)")
+            self, i18n.t("dialog.open_db_title"), "", i18n.t("dialog.open_db_filter"))
         if path:
             self._open_path(path)
 
     def _on_new_db(self):
         path, _ = QFileDialog.getSaveFileName(
-            self, "Nowa baza Horreum", "", "Bazy SQLite (*.db)")
+            self, i18n.t("dialog.new_db_title"), "", i18n.t("dialog.new_db_filter"))
         if path:
             self._open_path(path)
 
@@ -1474,7 +1481,7 @@ class MainWindow(QMainWindow):
             old.close()
         if self._on_db_changed is not None:        # zapamiętaj ostatnią bazę (trwałe ustawienia)
             self._on_db_changed(path)
-        self._flash(f"Baza: {path}")
+        self._flash(i18n.t("main.db_loaded", path=path))
 
     def _sync_db_state(self):
         has = self.con is not None
@@ -1483,7 +1490,7 @@ class MainWindow(QMainWindow):
         self.empty_note.setVisible(not has)            # pusty stan w centrum (wizytator F5 #3)
         if not has:
             # bez timeoutu — to trwała podpowiedź pustego stanu, nie ulotny komunikat akcji
-            self.statusBar().showMessage("Brak bazy — otwórz lub utwórz bazę (menu Plik).")
+            self.statusBar().showMessage(i18n.t("main.no_db"))
 
     def _flash(self, msg):
         self.statusBar().showMessage(msg, 5000)

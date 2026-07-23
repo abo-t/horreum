@@ -17,10 +17,9 @@ import pytest
 pytest.importorskip("PySide6")
 
 from horreum import db, repo
-from horreum.gui import queries
+from horreum.gui import i18n, queries
 from horreum.gui.app import (
-    AssignObjectDialog, ObjectAxisView, COPY_HEADERS, FRAME_HEADERS,
-    OBJ_COL_CANON, OBJ_COL_FRAMES)
+    AssignObjectDialog, ObjectAxisView, OBJ_COL_CANON, OBJ_COL_FRAMES)
 
 from fixture_s8 import seed_object_axis
 
@@ -405,7 +404,7 @@ def test_kopie_nieczytelne_drazenie_do_dokladnych_kopii(view):
     r = _select_review_tag(v, "unreadable")
     assert "kopie nieczytelne: 1" in v.review.item(r).text()
     hdrs = [v.frames.horizontalHeaderItem(c).text() for c in range(v.frames.columnCount())]
-    assert hdrs == COPY_HEADERS
+    assert hdrs == ["Ścieżka", "Wolumen", "Obecna", "Oznaczona"]   # PL z katalogu (stałe = klucze)
     assert v.frames.rowCount() == 1
     assert v.frames.item(0, 0).text() == long_path           # dokładna location bez hovera
     assert v.frames.item(0, 0).toolTip() == long_path
@@ -416,5 +415,25 @@ def test_kopie_nieczytelne_drazenie_do_dokladnych_kopii(view):
     # wybór obiektu → powrót do tabeli klatek (tryb „kopie" znika)
     _select_object_canon(v, "NGC7000")
     hdrs = [v.frames.horizontalHeaderItem(c).text() for c in range(v.frames.columnCount())]
-    assert hdrs == FRAME_HEADERS
+    assert hdrs == ["sha1 danych", "Teleskop", "Kamera", "Filtr", "Data", "Obecny", "Ścieżka"]
     assert v.frames.rowCount() == 5
+
+
+# --- i18n: EN renderuje z katalogu (§4 rollout `app`) ---
+
+def test_en_render_z_katalogu(qapp, tmp_path):
+    """§5: `set_lang('en')` PRZED budową widoku → nagłówki i etykiety renderują EN z katalogu —
+    dowód, że stałe trzymają KLUCZE rozwiązywane w czasie budowy, nie zamrożony PL. Autouse-fixture
+    `_reset_i18n_lang` wraca na PL po teście (bez skażenia baterii)."""
+    i18n.set_lang("en")
+    con = db.open_db(str(tmp_path / "en.db"))
+    seed_object_axis(con)
+    v = ObjectAxisView(con)
+    try:
+        hdrs = [v.objects.horizontalHeaderItem(c).text() for c in range(v.objects.columnCount())]
+        assert hdrs == ["Object", "Catalog", "Frames"]
+        assert v.assign_btn.text() == "Assign object…"
+        assert v.lib_empty.text() == "No objects for this filter — change the filter or resolve."
+    finally:
+        v.close()
+        con.close()

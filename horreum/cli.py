@@ -28,7 +28,7 @@ def main(argv=None):
     p_init = sub.add_parser("init", help="utwórz/zmigruj bazę Horreum")
     p_init.add_argument("path", help="ścieżka pliku bazy (np. horreum.db)")
 
-    p_scan = sub.add_parser("scan", help="zeskanuj drzewo (FITS+XISF) do bazy")
+    p_scan = sub.add_parser("scan", help="zeskanuj drzewo (FITS+XISF+RAW) do bazy")
     p_scan.add_argument("root", help="katalog do przeskanowania")
     p_scan.add_argument("db", help="ścieżka pliku bazy")
     p_scan.add_argument("--volume", default="?",

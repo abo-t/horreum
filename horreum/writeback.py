@@ -39,7 +39,7 @@ from collections.abc import Callable
 
 from astropy.io import fits
 
-from . import repo, scan
+from . import exif, repo, scan
 
 # ============================================================ WRITER (port dawcy fits_io)
 
@@ -116,6 +116,13 @@ def _is_xisf(path) -> bool:
     return os.path.splitext(os.fspath(path))[1].lower() in scan.XISF_SUFFIXES
 
 
+def _is_raw(path) -> bool:
+    """Czy plik to DSLR/RAW (.dng/.arw/.cr2) — SPOT z `exif.RAW_SUFFIXES` (#2). RAW jest READ-ONLY
+    dla Horreum: pisarz ODMAWIA przed dyspozycją FITS/XISF, inaczej `.dng` wpadłby w `fits.open`
+    (crash, nie czyste `blocked`; znal.4)."""
+    return exif.is_raw(path)
+
+
 def _post_hash(path: str) -> str:
     """header_hash z ZAPISANEGO pliku — LICZONY TĄ SAMĄ formułą co skan (FITS: `read_fits_meta` →
     `scan._header_hash`; XISF: `read_xisf_meta_full` → sha1 bajtów XML, D-X-3), więc przyszły
@@ -129,7 +136,10 @@ def write_changes(path, ops: list[WriteOp], expected_hash: str | None) -> WriteR
     """Atomowo zapisz zmiany w nagłówku wybranego HDU. Kontrola `header_hash`: nagłówek na dysku ≠
     `expected_hash` → 'blocked', NIE pisze. Po zapisie zwraca `post_hash` z zapisanego pliku +
     `backup_text` (pełny nagłówek sprzed zmian → undo). Port dawcy `fits_io.write_changes`.
-    `.xisf` → `write_xisf_changes` (inny format, TEN SAM kontrakt `WriteResult`)."""
+    `.xisf` → `write_xisf_changes` (inny format, TEN SAM kontrakt `WriteResult`).
+    `.dng/.arw/.cr2` → ODMOWA (#2): RAW jest read-only (rename dozwolony osobno)."""
+    if _is_raw(path):
+        return WriteResult("blocked", "format RAW jest read-only (#2)", None)
     if _is_xisf(path):
         return write_xisf_changes(path, ops, expected_hash)
     path = os.fspath(path)
@@ -167,7 +177,10 @@ def write_full_header(path, header_text: str, expected_hash: str | None) -> Writ
     `header_hash` jak w `write_changes` (dysk ≠ `expected_hash` → 'blocked'). `header_text` =
     wcześniejszy `hdr.tostring()`; odtwarzamy przez `Header.fromstring`. Dane nietknięte (zmienia
     się `file_sha1`, `sha1_data` zostaje). Port dawcy `fits_io.write_full_header`.
-    `.xisf` → `write_xisf_full_header` (tam `header_text` = oryginalny XML)."""
+    `.xisf` → `write_xisf_full_header` (tam `header_text` = oryginalny XML).
+    `.dng/.arw/.cr2` → ODMOWA (#2): RAW jest read-only."""
+    if _is_raw(path):
+        return WriteResult("blocked", "format RAW jest read-only (#2)", None)
     if _is_xisf(path):
         return write_xisf_full_header(path, header_text, expected_hash)
     path = os.fspath(path)

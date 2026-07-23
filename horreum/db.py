@@ -29,6 +29,8 @@ from importlib import resources
 # 0009 to PRZEBUDOWA tabeli `calibration` (RODOWÓD light↔master, C4/#6): pusty szkielet z 0002
 # dostaje NOT NULL + CHECK(relation) + UNIQUE(light_frame_id, relation). UNIQUE (nie kod) trzyma
 # idempotencję rodowodu; tabela dowodnie pusta, więc INSERT SELECT kopiuje 0 wierszy.
+# 0010 to PRZYROST (DSLR/RAW, #2): frame.kind_source — prowieniencja rodzaju (header|path|NULL).
+# ADD COLUMN, wiersze sprzed migracji dostają NULL; re-skan/nowy ingest ustawia jawnie.
 MIGRATIONS = [
     (2, "0002_initial.sql"),
     (3, "0003_writeback.sql"),
@@ -38,6 +40,7 @@ MIGRATIONS = [
     (7, "0007_backup_hdu_nullable.sql"),
     (8, "0008_calibration.sql"),
     (9, "0009_calibration_lineage.sql"),
+    (10, "0010_kind_source.sql"),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 _KNOWN_VERSIONS = frozenset({0} | {v for v, _ in MIGRATIONS})

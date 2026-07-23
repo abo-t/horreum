@@ -10,6 +10,16 @@ Mapa = WYŁĄCZNIE zeznanie firsthand + warianty „na zapas" (agnostyczność �
 nierozpoznane/brak → `unknown` jawnie (sygnał do rozszerzenia mapy, nie ciche dopasowanie).
 """
 import re
+from pathlib import Path
+
+# DSLR/RAW (#2, D-R-4): rodzaj klatki z NAZWY KATALOGU (case-insensitive, dokładny segment).
+# Wąska mapa — tylko cztery rodzaje sub-klatek, jakie może nieść drzewo akwizycji.
+_KIND_DIRS = {
+    "light": "light", "lights": "light",
+    "dark": "dark", "darks": "dark",
+    "flat": "flat", "flats": "flat",
+    "bias": "bias", "biases": "bias",
+}
 
 # Po normalizacji (lower, kolaps białych znaków/`_`, zdjęcie końcowego „ frame") → kanon kind.
 _KIND_MAP = {
@@ -33,3 +43,16 @@ def normalize_kind(imagetyp):
     key = re.sub(r"[\s_]+", " ", str(imagetyp).strip().lower())
     key = re.sub(r" frame$", "", key)          # zdejmij sufiks „ frame" (Light Frame → light)
     return _KIND_MAP.get(key, "unknown")
+
+
+def kind_from_path(path):
+    """Rodzaj klatki z FOLDERU — RAW nie niesie IMAGETYP w EXIF (#2, D-R-4; `kind_source='path'`).
+    Precedens C1: ścieżka jako źródło faktu (wąski, jawny, dowodowy). Dopasowanie po SEGMENCIE
+    (dokładna nazwa katalogu, case-insensitive) — NIE substring: folder obiektu „IC1318" nie ma
+    nic udawać. Żaden pasujący segment → 'unknown' (NIE zgadujemy; DSLR-kalibracja = dług na przyszłość,
+    dziś 763 RAW pod katalogiem LIGHTS). Pierwszy pasujący segment od korzenia wygrywa."""
+    for seg in Path(path).parts:
+        k = _KIND_DIRS.get(seg.strip().lower())
+        if k:
+            return k
+    return "unknown"

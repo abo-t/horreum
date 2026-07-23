@@ -59,17 +59,20 @@ from pathlib import Path
 import numpy as np
 from astropy.io import fits
 
-from . import repo
+from . import exif, repo
 from .hashing import sha1_of, sha1_of_span
 from .resolve.cameras import camera_identity
-from .resolve.frames import normalize_kind
+from .resolve.frames import kind_from_path, normalize_kind
 from .resolve.headers import extract_header
 
-# Rozszerzenia nagłówkonośne pierwszego przebiegu (PLAN §1.1: jeden mechanizm, format = opakowanie).
-# DSLR-raw (.ARW/.DNG, czytnik EXIF) to DRUGI przebieg / osobny moduł — NIE tu (PLAN §1.5).
+# Rozszerzenia nagłówkonośne (PLAN §1.1: jeden mechanizm, format = opakowanie). DSLR/RAW
+# (.dng/.arw/.cr2, czytnik EXIF `exif.py`) DOŁĄCZONY do JEDNEGO passa skanu (#2, D-R-3 —
+# ratyfikacja Zdzinia 2026-07-23; ODWRACA dawne „drugi przebieg" z PLAN §1.5): osobny MODUŁ
+# czytnika, ale WSPÓLNY `ingest_record`/tożsamość/brama przyrostowa/wykluczenia (anty-SIN-DUP).
+# Dyspozycja po SUFIKSIE (`read_header`/`scan_file`/`_filetype`).
 FITS_SUFFIXES = (".fits", ".fit", ".fts")
 XISF_SUFFIXES = (".xisf",)
-HEADER_SUFFIXES = FITS_SUFFIXES + XISF_SUFFIXES
+HEADER_SUFFIXES = FITS_SUFFIXES + XISF_SUFFIXES + exif.RAW_SUFFIXES
 
 # Słowa-klucze nagłówkowe powtarzalne (komentarze/historia/puste) — akumulujemy w listę, żeby
 # zeznanie było 1:1 (nie gubimy powtórzeń przez kolizję klucza w dict). Wspólne FITS↔XISF.
@@ -808,9 +811,13 @@ def read_xisf_header(path):
 
 def read_header(path):
     """Dyspozytor czytnika nagłówka po rozszerzeniu (case-insensitive): `.xisf` → `read_xisf_header`,
-    pozostałe (FITS) → `read_fits_header`. Jeden punkt wejścia dla `scan_file` i pętli §Etap 4."""
-    if Path(path).suffix.lower() in XISF_SUFFIXES:
+    RAW (`.dng/.arw/.cr2`) → `exif.read_exif_header` (#2), pozostałe (FITS) → `read_fits_header`.
+    Jeden punkt wejścia dla `scan_file` i pętli §Etap 4."""
+    suffix = Path(path).suffix.lower()
+    if suffix in XISF_SUFFIXES:
         return read_xisf_header(path)
+    if suffix in exif.RAW_SUFFIXES:
+        return exif.read_exif_header(path)
     return read_fits_header(path)
 
 
@@ -843,7 +850,13 @@ def scan_file(path):
     header = None
     cards = header_hash = hdu_index = compressed = span = None
     try:
-        if p.suffix.lower() in XISF_SUFFIXES:
+        suffix = p.suffix.lower()
+        if suffix in exif.RAW_SUFFIXES:
+            emeta = exif.read_exif_meta(spath)
+            header, header_hash = emeta.header, emeta.header_hash
+            cards = [Card(*row) for row in emeta.card_rows]   # opakuj krotki (unikamy cyklu importu)
+            span = (0, st.st_size)        # D-R-1: tożsamość RAW = sha1 CAŁEGO pliku → sha1_data==file_sha1
+        elif suffix in XISF_SUFFIXES:
             xmeta = read_xisf_meta_full(spath)
             header, cards, header_hash = xmeta.header, xmeta.cards, xmeta.header_hash
             span = xmeta.image_span       # `hdu_index`/`compressed` zostają None (D-X-7: obce formatowi)
@@ -893,8 +906,13 @@ class ScanSummary:
 
 
 def _filetype(path):
-    """Format pliku z rozszerzenia: `xisf` | `fits` (fit/fts też FITS). DSLR-raw = drugi przebieg."""
-    return "xisf" if Path(path).suffix.lower() in XISF_SUFFIXES else "fits"
+    """Format pliku z rozszerzenia: `raw` (.dng/.arw/.cr2, #2) | `xisf` | `fits` (fit/fts też FITS).
+    Vendor niesie już `INSTRUME` — spłaszczamy do `'raw'` (schemat 0002:16 przewidywał per-vendor,
+    ale dyspozycja idzie po SUFIKSIE, nie po `filetype`; D-R-3/znal.7)."""
+    suffix = Path(path).suffix.lower()
+    if suffix in exif.RAW_SUFFIXES:
+        return "raw"
+    return "xisf" if suffix in XISF_SUFFIXES else "fits"
 
 
 def path_gone(path):
@@ -973,6 +991,17 @@ def _record_testimony_and_flags(con, rec, *, frame_id, sha1_data, readable, iden
         summary.kind_unmapped += 1
 
 
+def _derive_kind(rec, *, readable, is_raw):
+    """Rodzaj klatki + PROWIENIENCJA (#2, D-R-4). RAW nie ma IMAGETYP w EXIF → rodzaj z FOLDERU
+    (`kind_source='path'`, precedens C1: ścieżka jako źródło faktu — wąski, jawny); FITS/XISF z
+    IMAGETYP zeznania (`source='header'`); nieczytelny (W1) → `unknown`/None (brak zeznania)."""
+    if not readable:
+        return "unknown", None
+    if is_raw:
+        return kind_from_path(rec.path), "path"
+    return normalize_kind(rec.header.get("IMAGETYP")), "header"
+
+
 def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, summary,
                   actor="scan"):
     """Wciągnij JEDEN `ScanRecord` przez jedną klingę (`repo`) — JĄDRO wspólne dla skanu drzewa
@@ -1013,14 +1042,15 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
     NIE łapie wyjątków — backstop bez tożsamości (sha1 nieznany → `frame.review`, sha1='?') należy
     do wołającego (`scan_tree` / import), bo to on wie, jak zidentyfikować rekord do review."""
     readable = rec.header is not None
-    ident = camera_identity(rec.header) if readable else None
+    is_raw = _filetype(rec.path) == "raw"          # #2: FAKT formatu (→ raw_format, kind z folderu)
+    ident = camera_identity(rec.header, raw_format=is_raw) if readable else None
     camera_id = None
     if ident is not None:
         camera_id, _ = repo.upsert_camera(
             con, model_canon=ident.model_canon, pixel_um=ident.pixel_um,
             is_mono=ident.is_mono, is_mono_source=ident.is_mono_source,
             raw_instrume=ident.raw_instrume, now=now, actor=actor)
-    kind = normalize_kind(rec.header.get("IMAGETYP")) if readable else "unknown"
+    kind, kind_source = _derive_kind(rec, readable=readable, is_raw=is_raw)
     if rec.sha1_data is not None:
         sha1_data, uncomputable = rec.sha1_data, 0
     else:                                              # degeneracja: sha1 pliku + flaga
@@ -1034,7 +1064,8 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
     if loc is None:                                    # ścieżka NIEZNANA — dotychczasowy tor
         frame_id, created = repo.upsert_frame(
             con, sha1_data=sha1_data, sha1_data_uncomputable=uncomputable,
-            kind=kind, filetype=_filetype(rec.path), camera_id=camera_id, now=now, actor=actor)
+            kind=kind, kind_source=kind_source, filetype=_filetype(rec.path),
+            camera_id=camera_id, now=now, actor=actor)
         if created:
             summary.frames_new += 1
         else:
@@ -1077,7 +1108,8 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
     if sha1_data != frame_row["sha1_data"]:            # PODMIANA TREŚCI pod znaną ścieżką
         frame_id, created = repo.upsert_frame(
             con, sha1_data=sha1_data, sha1_data_uncomputable=uncomputable,
-            kind=kind, filetype=_filetype(rec.path), camera_id=camera_id, now=now, actor=actor)
+            kind=kind, kind_source=kind_source, filetype=_filetype(rec.path),
+            camera_id=camera_id, now=now, actor=actor)
         if created:
             summary.frames_new += 1
         else:

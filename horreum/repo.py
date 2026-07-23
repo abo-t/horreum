@@ -112,7 +112,7 @@ def upsert_camera(con, *, model_canon, pixel_um, is_mono, is_mono_source,
 
 
 def upsert_frame(con, *, sha1_data, sha1_data_uncomputable=0, kind, filetype, camera_id,
-                 now, actor="scan"):
+                 now, actor="scan", kind_source=None):
     """Wyłoń frame po `sha1_data` (tożsamość = odcisk sekcji DANYCH — przeżywa edycję nagłówka/
     rename/move/writeback; brief §2). Istnieje → zwróć (id, False) BEZ zmiany tożsamości — drugie
     wystąpienie to nowa LOKALIZACJA (`add_location`), nie nowy frame. Nowy → INSERT frame +
@@ -121,6 +121,7 @@ def upsert_frame(con, *, sha1_data, sha1_data_uncomputable=0, kind, filetype, ca
     `sha1_data_uncomputable=1` = degeneracja: odcisk danych nieobliczalny, `sha1_data` niesie
     sha1 CAŁEGO pliku (lekcja v3 dawcy) — legalne WYŁĄCZNIE dla ścieżki nieznanej (R3-b1).
     `camera_id` może być None (oś nierozstrzygnięta → `flag_camera_review` w warstwie skanu).
+    `kind_source` (#2) = prowieniencja rodzaju ('header'|'path'|None) — jawne, nie domyślane.
     Fakty kopii (rozmiar, hashe pliku) mieszkają na location, nie tu (R2#6)."""
     row = con.execute("SELECT id FROM frame WHERE sha1_data = ?", (sha1_data,)).fetchone()
     if row is not None:
@@ -128,15 +129,16 @@ def upsert_frame(con, *, sha1_data, sha1_data_uncomputable=0, kind, filetype, ca
 
     with con:  # atomowo: INSERT frame + INSERT event
         cur = con.execute(
-            "INSERT INTO frame(sha1_data, sha1_data_uncomputable, kind, filetype, camera_id, "
-            "first_seen_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (sha1_data, sha1_data_uncomputable, kind, filetype, camera_id, now),
+            "INSERT INTO frame(sha1_data, sha1_data_uncomputable, kind, kind_source, filetype, "
+            "camera_id, first_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (sha1_data, sha1_data_uncomputable, kind, kind_source, filetype, camera_id, now),
         )
         frame_id = cur.lastrowid
         emit_event(
             con, actor=actor, verb="frame.observed", target=f"frame:{frame_id}", now=now,
             payload={"sha1_data": sha1_data, "uncomputable": sha1_data_uncomputable,
-                     "kind": kind, "filetype": filetype, "camera_id": camera_id},
+                     "kind": kind, "kind_source": kind_source, "filetype": filetype,
+                     "camera_id": camera_id},
         )
     return frame_id, True
 

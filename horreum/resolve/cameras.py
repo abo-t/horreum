@@ -34,6 +34,11 @@ def normalize_camera(instrume):
     # ILCE-7RM3[A] -> A7RM3, by jedna kamera fizyczna miala jedna tozsamosc (decyzja Zdzisawa PF-4;
     # brief §3 „normalize_camera 1:1" rozszerzony o forme ILCE). Idempotentne: 'A7RM3' nie nosi ILCE.
     s = re.sub(r"\bILCE-?7RM3A?\b", "A7RM3", s)
+    # DSLR/RAW (#2, D-R-5): pozostałe korpusy Sony alfa 7 do formy 'A7…' — paralela do foldu 7RM3A,
+    # jedna kamera fizyczna = jedna tożsamość na osi. 7RM3 zdjęte wyżej, więc te wzorce się nie
+    # przecinają (po '7' idzie 'S'/'M3', nie 'RM3'). Idempotentne: 'A7S'/'A7M3' nie noszą ILCE.
+    s = re.sub(r"\bILCE-?7M3\b", "A7M3", s)
+    s = re.sub(r"\bILCE-?7S\b", "A7S", s)
     cleaned = re.sub(r"\b(ZWO|PRO|CAMERA|CMOS|CCD)\b", "", s)
     cleaned = re.sub(r"[^A-Z0-9]+", "", cleaned)
     return cleaned or None
@@ -74,8 +79,13 @@ class CameraIdentity:
     raw_instrume: object         # surowy INSTRUME (audyt) | None
 
 
-def camera_identity(header):
+def camera_identity(header, *, raw_format=None):
     """Wyłoń tożsamość kamery ze zeznania nagłówka (dict ze skanu). Brief przejścia §3.
+
+    `raw_format` (#2, D-R-2/znal.2): FAKT formatu pliku (RAW/DSLR), NIE karta nagłówka — wołający
+    (`scan.ingest_record`) podaje go z rozszerzenia, bo zeznanie EXIF nie niesie BAYERPAT, a DSLR
+    to zawsze kolor (mozaika w formacie). Aktywuje gałąź `is_mono(raw_format=…)`; FITS/XISF podają
+    None → zachowanie bez zmian. NIE przemycamy markera do dict-a (byłaby to fabrykacja karty).
 
     KONTRAKT ODWRÓCONY (R1#3/R2#4): tożsamość wymaga TYLKO `model_canon` — po naprawie nagłówków
     INSTRUME jest w 100% klatek, a model rozstrzyga oś. `pixel_um` to Optional WŁAŚCIWOŚĆ
@@ -98,7 +108,8 @@ def camera_identity(header):
     pixel_um = _to_float(header.get("XPIXSZ"))   # W3: XISF zwraca string → rzut na float
     if not model_canon:
         return None
-    mono, source = is_mono(bayerpat=header.get("BAYERPAT"), model_canon=model_canon)
+    mono, source = is_mono(bayerpat=header.get("BAYERPAT"), model_canon=model_canon,
+                           raw_format=raw_format)
     if mono == 0 and re.fullmatch(r"ASI\d+", model_canon):   # Reguła B: OSC ZWO + kolor → MC
         model_canon += "MC"
     return CameraIdentity(

@@ -53,12 +53,19 @@ def parse_coord(raw):
 def site_coords(lat_raw, lon_raw):
     """(lat, lon) w zakresie albo None — reguła „oba albo NULL" (§1). UNIWERSALNOŚĆ: znormalizuj
     konwencję 0-360° długości do [-180, 180] PRZED sprawdzeniem zakresu (dane dziś 9.4-38.8, ale
-    soft bywa różny). Sentinel (0, 0) NIE występuje (sonda) — nie filtrujemy go osobno."""
+    soft bywa różny).
+
+    Sentinel (0, 0) „null island" → None (#2, §4): EXIF DSLR zapisuje (0,0) gdy aparat nie miał
+    fixa GPS — to „unset", nie pozycja (zmierzone: 12/12 Canonów w archiwum). Filtr jest KONIUNKCJĄ
+    `lat==0 AND lon==0`: sam równik (`lat=0`) czy sam południk Greenwich (`lon=0`) to WARTOŚCI, nie
+    sentinel. SPOT — reguła żyje tu, przy walidacji zakresu, nie rozproszona w czytniku EXIF."""
     lat, lon = parse_coord(lat_raw), parse_coord(lon_raw)
     if lat is None or lon is None:
         return None
     if lon > 180:
         lon -= 360                                      # 0-360 → [-180, 180] (270°→-90°)
+    if lat == 0 and lon == 0:                           # null island — „brak fixa", nie pozycja
+        return None
     if not (-90 <= lat <= 90 and -180 <= lon <= 180):
         return None
     return (lat, lon)

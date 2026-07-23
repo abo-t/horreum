@@ -85,11 +85,47 @@ def test_szkielet_przyszly_pusty(tmp_path):
     con.close()
 
 
-def test_user_version_v8_po_migracji(tmp_path):
-    """0008 podnosi user_version do 8 (świeża baza leci 0002→…→0008 sekwencyjnie)."""
+def test_user_version_v9_po_migracji(tmp_path):
+    """0009 podnosi user_version do 9 (świeża baza leci 0002→…→0009 sekwencyjnie)."""
     con = db.open_db(str(tmp_path / "h.db"))
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 8
-    assert db.SCHEMA_VERSION == 8
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 9
+    assert db.SCHEMA_VERSION == 9
+    con.close()
+
+
+def test_0009_calibration_rebuild_kontrakt(tmp_path):
+    """0009 (C4): PRZEBUDOWA `calibration` — pusty szkielet 0002 dostaje NOT NULL + CHECK(relation)
+    + UNIQUE(light_frame_id, relation). To ON trzyma idempotencję rodowodu (nie kod). Test wchodzi
+    na bazę Z DANYMI (dwie klatki), by dowieść, że INSERT SELECT nie gubi wierszy i kontrakt działa."""
+    path = str(tmp_path / "h.db")
+    con = db.connect(path)
+    con.executescript(db._migration_sql("0002_initial.sql"))
+    for v in ("0003_writeback.sql", "0004_observatory.sql", "0005_rename.sql",
+              "0006_unreadable.sql", "0007_backup_hdu_nullable.sql", "0008_calibration.sql"):
+        con.executescript(db._migration_sql(v))
+    con.execute("PRAGMA user_version = 8")
+    # dwie klatki, by relacja miała na czym stanąć (FK ON)
+    con.execute("INSERT INTO frame(id, sha1_data, kind, filetype, first_seen_at) "
+                "VALUES (1, 'l1', 'light', 'fits', 't'), (2, 'm1', 'master_flat', 'fits', 't')")
+    con.execute("INSERT INTO calibration(light_frame_id, master_frame_id, relation, asserted_by, "
+                "confidence) VALUES (1, 2, 'flat', 'horreum', 'recipe')")
+    con.commit()
+
+    con = db.open_db(path)                                       # v8 → v9 (przebudowa)
+    assert con.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
+    assert con.execute("SELECT count(*) FROM calibration").fetchone()[0] == 1   # wiersz przeżył
+
+    uniq = _unique_cols(con, "calibration")
+    assert {"light_frame_id", "relation"} <= uniq                # UNIQUE(light, relation)
+    with pytest.raises(sqlite3.IntegrityError):                  # duplikat (light, relation)
+        con.execute("INSERT INTO calibration(light_frame_id, master_frame_id, relation, "
+                    "asserted_by) VALUES (1, 2, 'flat', 'horreum')")
+    with pytest.raises(sqlite3.IntegrityError):                  # CHECK relation
+        con.execute("INSERT INTO calibration(light_frame_id, master_frame_id, relation, "
+                    "asserted_by) VALUES (1, 2, 'bogus', 'horreum')")
+    with pytest.raises(sqlite3.IntegrityError):                  # NOT NULL master
+        con.execute("INSERT INTO calibration(light_frame_id, relation, asserted_by) "
+                    "VALUES (1, 'dark', 'horreum')")
     con.close()
 
 

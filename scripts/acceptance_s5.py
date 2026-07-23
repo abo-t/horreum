@@ -46,6 +46,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from horreum import db                                              # noqa: E402
 from horreum.calibration import KIND_RECIPE, run_calibration      # noqa: E402
+from horreum.lineage import run_lineage                           # noqa: E402
 from horreum.grouper import NO_TELESCOPE_KINDS, run_grouper       # noqa: E402
 from horreum.import_fitsmirror import (                                   # noqa: E402
     ImportAbort, open_donor, read_repaired_registry, run_import,
@@ -97,6 +98,12 @@ EXP_RECIPE_DARK = 38           # 38 masterdarków → 38 przepisów (każdy mast
 # liczba świeżej bazy, a osobne kryterium pinuje samą PRZYCZYNĘ (klasa-sierota z pary kopii).
 EXP_RECIPE_FLAT = 38           # 2256 flatów + 73 masterflaty → 38 klas na ŚWIEŻEJ bazie
 EXP_MASTERS_EXCLUDED_FULL = 2  # `frame 15629`/`15636`: kind='unknown' — POZA osią, jawnie wykluczone
+# RODOWÓD (C4) — lighty powiązane z masterem po przepisie, ŚWIEŻA baza. Zmierzone przebiegiem
+# `acceptance_s5 --full --live-db` 2026-07-23 (świeża baza z dawcy) ORAZ niezależnie na kopii żywej
+# pf4 — obie dały te same liczby (profil-sierota CLS↔L-Pro §5.11 nie ruszył sum rodowodu). Domknięcie:
+# dark 7331 + luki 6185 = flat 11938 + luki 1578 = 13 516 lightów.
+EXP_LINEAGE_DARK = 7331        # lighty z masterdarkiem (reszta: 5978 brak przepisu + 207 niekompletny)
+EXP_LINEAGE_FLAT = 11938       # lighty z masterflatem (reszta: 1455 brak przepisu + 123 brak mastera)
 
 
 def _ok(cond):
@@ -186,8 +193,34 @@ def calibrate(con, now, out):
     return s1, idem
 
 
+# ── (L) RODOWÓD: light↔master + DOWÓD IDEMPOTENCJI (bramka C4) ─────────────────────────────────────
+# Verby rodowodu MUSZĄ tu być (adj. #3): bez nich „zero eventów encyjnych" byłoby ślepe na
+# `calibration.linked/.unlinked`. `calibration.lineage_summary` POZA porównaniem — event audytowy.
+_LIN_VERBS = ("calibration.linked", "calibration.unlinked")
+
+
+def lineage(con, now, out):
+    """Rodowód na gotowym stanie (PO kalibracji — dopasowuje light do wyłonionych profili).
+    Drugi przebieg jest BRAMKĄ: liczy się zmiana STANU, więc porównujemy liczniki eventów rodowodu
+    sprzed i po. Zwraca `(summary, idempotent)`."""
+    out("")
+    out("== (L) RODOWÓD: run_lineage + idempotencja ==")
+    s1 = run_lineage(con, now=now)
+    out(f"  przebieg 1: lighty={s1.lights} linked={s1.linked} luki={s1.reasons}")
+    przed = {v: con.execute("SELECT count(*) FROM event WHERE verb=?", (v,)).fetchone()[0]
+             for v in _LIN_VERBS}
+    rows_przed = con.execute("SELECT count(*) FROM calibration").fetchone()[0]
+    s2 = run_lineage(con, now=now)
+    po = {v: con.execute("SELECT count(*) FROM event WHERE verb=?", (v,)).fetchone()[0]
+          for v in _LIN_VERBS}
+    rows_po = con.execute("SELECT count(*) FROM calibration").fetchone()[0]
+    idem = not s2.linked_new and po == przed and rows_przed == rows_po
+    out(f"  przebieg 2 (idempotencja): linked_new={s2.linked_new} wiersze {rows_przed}=={rows_po}")
+    return s1, idem
+
+
 # ── (C) KRYTERIA §5 na bazie zbudowanej z dawcy (stage-aware: import vs full) ─────────────────────
-def check_criteria(con, summary, out, cal=None, cal_idempotent=None):
+def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, lin_idempotent=None):
     results = []                                    # (etykieta, PASS/FAIL)
 
     def crit(label, cond):
@@ -425,7 +458,66 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None):
             crit(f"§5.11 poza osią tylko {EXP_MASTERS_EXCLUDED_FULL} jawnie wykluczone "
                  f"(kind='unknown', akt={unknown})", unknown == EXP_MASTERS_EXCLUDED_FULL)
 
+    # §5.12 RODOWÓD (C4) — DOMKNIĘCIE POPULACJI per relacja + szwy pinowane WPROST. Suma kubełków,
+    # która nie schodzi do liczby lightów, to brama fałszywie zielona: rozjazd klucza (np. header
+    # lightu vs ścieżka mastera) spuchłby „brak przepisu" i nadal się „zsumował".
+    if lin is not None:
+        lights = con.execute("SELECT count(*) FROM frame WHERE kind='light'").fetchone()[0]
+        # kubełki luki po relacji (z reasons "<rel>: <powód>") + stan linked
+        for rel in ("dark", "flat"):
+            gaps = sum(n for powod, n in lin.reasons.items() if powod.startswith(f"{rel}:"))
+            linked = lin.linked.get(rel, 0)
+            out(f"\n§5.12 rodowód [{rel}]: linked {linked} + luki {gaps} == lighty {lights}")
+            crit(f"§5.12 domknięcie populacji [{rel}] (linked + luki == lighty)",
+                 linked + gaps == lights and lin.lights == lights)
+        crit("§5.12 idempotencja: 2. przebieg = zero wierszy `calibration` i zero eventów rodowodu",
+             bool(lin_idempotent))
+        # Każdy kalibrator to MASTER — surowy dark/flat jako kalibrator = złamanie brief C2 §5.
+        not_master = con.execute(
+            "SELECT count(*) FROM calibration c JOIN frame f ON f.id=c.master_frame_id "
+            "WHERE f.kind NOT LIKE 'master_%'").fetchone()[0]
+        crit("§5.12 każdy kalibrator to master (kind LIKE 'master_%')", not_master == 0)
+        # Reguła czasowa pinowana WPROST: light w profilu FLAT wielo-masterowym linkuje master
+        # o min |Δ date_obs| (nie MIN id, nie pierwszy). Sprawdzamy na KAŻDYM takim wierszu.
+        czasowa_ok = _check_nearest_in_time(con)
+        crit("§5.12 reguła czasowa: każdy link flat = master o min |Δczasu| w profilu", czasowa_ok)
+        if full:
+            if EXP_LINEAGE_DARK is not None:
+                crit(f"§5.12 lighty z darkiem == {EXP_LINEAGE_DARK}",
+                     lin.linked.get("dark", 0) == EXP_LINEAGE_DARK)
+            if EXP_LINEAGE_FLAT is not None:
+                crit(f"§5.12 lighty z flatem == {EXP_LINEAGE_FLAT}",
+                     lin.linked.get("flat", 0) == EXP_LINEAGE_FLAT)
+
     return results
+
+
+def _check_nearest_in_time(con):
+    """Dla KAŻDEGO wiersza `calibration` relacji flat: czy podpięty master ma min |Δ date_obs|
+    wśród masterów swojego profilu? Liczone na `naming.header_dt` (jak produkcja), NIE `julianday`."""
+    from horreum.naming import header_dt
+    masters = {}
+    for r in con.execute(
+            "SELECT f.calibration_profile_id AS pid, f.id AS fid, h.date_obs AS d "
+            "FROM frame f LEFT JOIN header h ON h.frame_id=f.id "
+            "WHERE f.calibration_profile_id IS NOT NULL AND f.kind LIKE 'master_%'"):
+        masters.setdefault(r["pid"], []).append((r["fid"], header_dt(r["d"])))
+    for r in con.execute(
+            "SELECT c.master_frame_id AS mid, hl.date_obs AS ld, mf.calibration_profile_id AS pid "
+            "FROM calibration c JOIN frame mf ON mf.id=c.master_frame_id "
+            "LEFT JOIN header hl ON hl.frame_id=c.light_frame_id "
+            "WHERE c.relation='flat'"):
+        cand = masters.get(r["pid"], [])
+        if len(cand) <= 1:
+            continue
+        ld = header_dt(r["ld"])
+        if ld is None:
+            continue
+        best = min(cand, key=lambda m: (abs((m[1] - ld).total_seconds())
+                                        if m[1] is not None else float("inf"), m[0]))
+        if best[0] != r["mid"]:
+            return False
+    return True
 
 
 # ── (S) SUBSET: realny skan małego katalogu (czytniki + sha1 na realnych bajtach) ────────────────
@@ -498,7 +590,9 @@ def main(argv=None):
         doskan_xisf(con, args.xisf_root, now, out)
 
     cal, cal_idem = calibrate(con, now, out)
-    results = check_criteria(con, summary, out, cal=cal, cal_idempotent=cal_idem)
+    lin, lin_idem = lineage(con, now, out)
+    results = check_criteria(con, summary, out, cal=cal, cal_idempotent=cal_idem,
+                             lin=lin, lin_idempotent=lin_idem)
     con.close()
 
     subset_ok = True

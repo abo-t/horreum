@@ -26,6 +26,9 @@ from importlib import resources
 # frame.calibration_profile_id. `header.set_temp` wchodzi jako kolumna GENERATED z `raw_json`
 # (D-C-2) — nastawa jest ODCZYTYWANA z zeznania, nie kopiowana, więc migracja NIE ma backfillu
 # i wartość nie może się zestarzeć po writebacku.
+# 0009 to PRZEBUDOWA tabeli `calibration` (RODOWÓD light↔master, C4/#6): pusty szkielet z 0002
+# dostaje NOT NULL + CHECK(relation) + UNIQUE(light_frame_id, relation). UNIQUE (nie kod) trzyma
+# idempotencję rodowodu; tabela dowodnie pusta, więc INSERT SELECT kopiuje 0 wierszy.
 MIGRATIONS = [
     (2, "0002_initial.sql"),
     (3, "0003_writeback.sql"),
@@ -34,6 +37,7 @@ MIGRATIONS = [
     (6, "0006_unreadable.sql"),
     (7, "0007_backup_hdu_nullable.sql"),
     (8, "0008_calibration.sql"),
+    (9, "0009_calibration_lineage.sql"),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 _KNOWN_VERSIONS = frozenset({0} | {v for v, _ in MIGRATIONS})

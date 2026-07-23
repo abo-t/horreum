@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 
 from horreum import db, presence
 from horreum.calibration import run_calibration
+from horreum.lineage import run_lineage
 from horreum.gui import queries
 from horreum.gui.grid import PRESET_VANISHED
 from horreum.gui.progress import counts_snapshot, should_emit
@@ -82,6 +83,8 @@ class PipelineWorker(QObject):
                 self._bulk(con, "resolve")
             elif self._stage == "calibrate":
                 self._bulk(con, "calibrate")
+            elif self._stage == "lineage":
+                self._bulk(con, "lineage")
             elif self._stage == "delta":
                 self._bulk(con, "delta")
             elif self._stage in ("presence", "presence-apply"):
@@ -133,8 +136,8 @@ class PipelineWorker(QObject):
         return True
 
     def _bulk(self, con, name):
-        """Etap masowy (group/resolve/calibrate/delta) — bezobsługowy, sekundy–minuty, bez progresu
-        per-wiersz. delta jest READ-ONLY (zero DML). Emituje stage_started → stage_done."""
+        """Etap masowy (group/resolve/calibrate/lineage/delta) — bezobsługowy, sekundy–minuty, bez
+        progresu per-wiersz. delta jest READ-ONLY (zero DML). Emituje stage_started → stage_done."""
         self.stage_started.emit(name)
         if name == "group":
             result = run_grouper(con, self._now())
@@ -142,22 +145,26 @@ class PipelineWorker(QObject):
             result = run_resolver(con, self._now())
         elif name == "calibrate":
             result = run_calibration(con, now=self._now())
+        elif name == "lineage":
+            result = run_lineage(con, now=self._now())
         else:                                          # delta — read-only
             result = delta_report(con)
         self.stage_done.emit(name, result)
 
     def _run_all(self, con):
-        """„Przetwórz wszystko": scan→group→resolve→calibrate→delta w jednym wątku. Anulowanie skanu
-        PRZERYWA łańcuch (dalsze etapy się nie wykonują — baza spójna, re-skan dokończy).
+        """„Przetwórz wszystko": scan→group→resolve→calibrate→lineage→delta w jednym wątku. Anulowanie
+        skanu PRZERYWA łańcuch (dalsze etapy się nie wykonują — baza spójna, re-skan dokończy).
 
         Kalibracja stoi PO resolverze, bo przepis flata bierze `frame.filter_canon`, a wypełnia go
         dopiero `run_resolver` (`resolver.py:137`) — odwrotna kolejność wyłoniłaby przepisy flatów
-        z pustym filtrem, a następny przebieg przepiąłby te klatki do innego profilu."""
+        z pustym filtrem, a następny przebieg przepiąłby te klatki do innego profilu. Rodowód stoi
+        PO kalibracji, bo dopasowuje light do profili, które `calibrate` dopiero wyłania."""
         if not self._scan(con):
             return
         self._bulk(con, "group")
         self._bulk(con, "resolve")
         self._bulk(con, "calibrate")
+        self._bulk(con, "lineage")
         self._bulk(con, "delta")
         # Obecność ZAWSZE w trybie DRY (raport dostawy ma być szczery: „nic nie znikło" to inna
         # wiadomość niż „nie sprawdziłem"). Zapis wymaga jawnego przycisku. Bez realnego serialu
@@ -180,7 +187,8 @@ class PipelineWorker(QObject):
 # poziomu zapisywane do bazy (rdzeń `scan_tree`) — ZOSTAJĄ niezmienione.
 _TIERS = [("—", None), ("zimny (archiwum)", "cold"), ("roboczy", "scratch")]
 _STAGE_LABEL = {"scan": "Skan", "group": "Grupowanie", "resolve": "Rozwiązywanie",
-                "calibrate": "Kalibracja", "delta": "Delta", "presence": "Obecność"}
+                "calibrate": "Kalibracja", "lineage": "Rodowód", "delta": "Delta",
+                "presence": "Obecność"}
 
 # Kolejność i nazwy powodów przeglądu w raporcie dostawy (rdzeń niesie same liczby — wording należy
 # do powierzchni; konsolowy `cli._format_delta` ma własne, ASCII-owe).
@@ -305,6 +313,10 @@ class PipelineView(QWidget):
         self.btn_calibrate.setToolTip("Przepis klatek kalibracyjnych — po „Rozwiąż” (przepis flata "
                                       "potrzebuje filtra)")
         self.btn_calibrate.clicked.connect(self._on_calibrate)
+        self.btn_lineage = QPushButton("Rodowód")
+        self.btn_lineage.setToolTip("Powiąż lighty z masterami po przepisie — po „Kalibracja” "
+                                    "(potrzebuje osi przepisu)")
+        self.btn_lineage.clicked.connect(self._on_lineage)
         self.btn_delta = QPushButton("Pokaż deltę")
         self.btn_delta.clicked.connect(self._on_delta)
         self.btn_presence = QPushButton("Sprawdź obecność")
@@ -313,7 +325,7 @@ class PipelineView(QWidget):
         self.btn_cancel = QPushButton("Anuluj")
         self.btn_cancel.clicked.connect(self._on_cancel)
         for b in (self.btn_scan, self.btn_group, self.btn_resolve, self.btn_calibrate,
-                  self.btn_delta, self.btn_presence, self.btn_cancel):
+                  self.btn_lineage, self.btn_delta, self.btn_presence, self.btn_cancel):
             stages.addWidget(b)
         stages.addStretch(1)
         v.addLayout(stages)
@@ -529,6 +541,12 @@ class PipelineView(QWidget):
         self._begin_run()
         self._start_stage("calibrate")
 
+    def _on_lineage(self):
+        if self._db_path is None or self._thread is not None:
+            return
+        self._begin_run()
+        self._start_stage("lineage")
+
     def _on_delta(self):
         if self._db_path is None or self._thread is not None:
             return
@@ -655,6 +673,8 @@ class PipelineView(QWidget):
             return self._format_resolve(r)
         if name == "calibrate":
             return self._format_calibrate(r)
+        if name == "lineage":
+            return self._format_lineage(r)
         if name == "delta":
             return self._format_delta(r)
         if name == "presence":
@@ -753,6 +773,16 @@ class PipelineView(QWidget):
             linia += "\n   braki: " + ", ".join(f"{powod} ×{n}" for powod, n in s.reasons.items())
         return linia
 
+    def _format_lineage(self, s):
+        """Linia raportu rodowodu. Powiązania per relacja (dark/flat) + „czego brakuje" wypisane
+        (nie tylko liczba): luka to jedyna informacja, którą user może tu wynieść — który light
+        nie ma kalibratora i dlaczego. Zerowe luki milczą (QUIET)."""
+        linked = " · ".join(f"{rel} {s.linked.get(rel, 0)}" for rel in ("dark", "flat"))
+        linia = f"[rodowód] lighty {s.lights} · powiązane: {linked}"
+        if s.reasons:
+            linia += "\n   luki: " + ", ".join(f"{powod} ×{n}" for powod, n in s.reasons.items())
+        return linia
+
     def _format_delta(self, r):
         total = r.object_resolved + r.object_unresolved
         top = ", ".join(f"{raw}×{n}" for raw, n in r.object_delta[:8]) or "—"
@@ -771,6 +801,7 @@ class PipelineView(QWidget):
         self.btn_group.setEnabled(idle and has_db)
         self.btn_resolve.setEnabled(idle and has_db)
         self.btn_calibrate.setEnabled(idle and has_db)
+        self.btn_lineage.setEnabled(idle and has_db)
         self.btn_delta.setEnabled(idle and has_db)
         self.btn_presence.setEnabled(idle and self._can_scan())   # potrzebuje drzewa, nie samej bazy
         self.btn_mark_vanished.setEnabled(idle and self._presence_params is not None)

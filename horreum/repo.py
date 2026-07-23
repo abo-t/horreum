@@ -1190,3 +1190,53 @@ def flag_calibration_review_summary(con, items, now, actor="calibration"):
         emit_event(con, actor=actor, verb="calibration.review_summary", target="frame:*", now=now,
                    payload={"distinct": len(items), "frames": sum(n for _, n in items),
                             "items": [[reason, n] for reason, n in items]})
+
+
+def link_calibration(con, *, light_frame_id, master_frame_id, relation, now,
+                     actor="lineage", asserted_by="horreum", confidence="recipe"):
+    """RODOWÓD (C4): powiąż light z egzemplarzem mastera danej klasy — wiersz `calibration`
+    + `event(calibration.linked)`. Idempotentny na kluczu UNIQUE(light_frame_id, relation) (0009):
+    ten sam kalibrator → False BEZ eventu.
+
+    Gdy dla tej klasy stał JUŻ inny master (doszedł bliższy czasowo w nowym wsadzie) → UPDATE
+    + `event(calibration.unlinked)` na starym (ślad append-only) + `.linked` na nowym. To POŻĄDANE
+    (lepszy kalibrator), nie regres — idempotencja liczy TYLKO brak zmiany.
+
+    Verb należy do rodowodu: C2 celowo zostawił `calibration.linked/.unlinked` (użył
+    `calibration_profile.assigned` dla klatka↔profil), by tej nazwy nie zająć."""
+    row = con.execute(
+        "SELECT id, master_frame_id FROM calibration WHERE light_frame_id = ? AND relation = ?",
+        (light_frame_id, relation)).fetchone()
+    if row is not None and row["master_frame_id"] == master_frame_id:
+        return False
+    with con:
+        if row is None:
+            con.execute(
+                "INSERT INTO calibration(light_frame_id, master_frame_id, relation, asserted_by, "
+                "confidence) VALUES (?, ?, ?, ?, ?)",
+                (light_frame_id, master_frame_id, relation, asserted_by, confidence))
+        else:
+            con.execute(
+                "UPDATE calibration SET master_frame_id = ?, asserted_by = ?, confidence = ? "
+                "WHERE id = ?", (master_frame_id, asserted_by, confidence, row["id"]))
+            emit_event(con, actor=actor, verb="calibration.unlinked",
+                       target=f"frame:{light_frame_id}", now=now,
+                       payload={"relation": relation, "master_frame_id": row["master_frame_id"]})
+        emit_event(con, actor=actor, verb="calibration.linked",
+                   target=f"frame:{light_frame_id}", now=now,
+                   payload={"relation": relation, "master_frame_id": master_frame_id})
+    return True
+
+
+def flag_calibration_lineage_summary(con, items, now, actor="lineage"):
+    """Lighty BEZ pokrycia kalibratorem — JEDEN `event(calibration.lineage_summary)` z licznością
+    per powód (wzorzec `flag_calibration_review_summary`). Stan (brak wiersza `calibration` dla
+    `(light, relation)`) SAM jest deltą; to event audytowy, nie zapis na frame. Pusta lista → bez
+    eventu, więc idempotentny przebieg bez luk nie emituje (jak review_summary)."""
+    items = list(items)
+    if not items:
+        return
+    with con:
+        emit_event(con, actor=actor, verb="calibration.lineage_summary", target="frame:*", now=now,
+                   payload={"distinct": len(items), "frames": sum(n for _, n in items),
+                            "items": [[reason, n] for reason, n in items]})

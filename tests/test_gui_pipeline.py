@@ -132,10 +132,12 @@ def test_worker_group_resolve_delta_emituja_stage_done(qapp, tmp_path):
     """Etapy masowe wołają funkcje rdzenia i niosą właściwy typ wyniku w stage_done."""
     from horreum.calibration import CalibrationSummary
     from horreum.grouper import GroupSummary
+    from horreum.lineage import LineageSummary
     from horreum.resolver import DeltaReport, ResolveSummary
     db_path = _scanned_db(tmp_path)
     for stage, typ in [("group", GroupSummary), ("resolve", ResolveSummary),
-                       ("calibrate", CalibrationSummary), ("delta", DeltaReport)]:
+                       ("calibrate", CalibrationSummary), ("lineage", LineageSummary),
+                       ("delta", DeltaReport)]:
         w = PipelineWorker(db_path, now_fn=lambda: NOW)
         w.configure(stage)
         done, started = [], []
@@ -147,10 +149,11 @@ def test_worker_group_resolve_delta_emituja_stage_done(qapp, tmp_path):
 
 
 def test_worker_all_lancuch_scan_group_resolve_delta_obecnosc(qapp, tmp_path):
-    """„Przetwórz wszystko": jeden worker emituje stage_done dla scan→group→resolve→calibrate→delta→
-    obecność w kolejności, a `finished` pada raz na końcu (sygnał do quit wątku). Kalibracja stoi PO
-    resolverze (przepis flata bierze `frame.filter_canon`, który wypełnia dopiero resolver), a PRZED
-    deltą. Obecność zamyka sekwencję, bo raport dostawy ma mówić także o tym, co z drzewa ZNIKNĘŁO —
+    """„Przetwórz wszystko": jeden worker emituje stage_done dla scan→group→resolve→calibrate→
+    lineage→delta→obecność w kolejności, a `finished` pada raz na końcu (sygnał do quit wątku).
+    Kalibracja stoi PO resolverze (przepis flata bierze `frame.filter_canon`, który wypełnia dopiero
+    resolver), rodowód PO kalibracji (dopasowuje do wyłonionych profili), oba PRZED deltą. Obecność
+    zamyka sekwencję, bo raport dostawy ma mówić także o tym, co z drzewa ZNIKNĘŁO —
     zawsze w DRY (zapis = osobny gest).
 
     Tu wolumin jest zmyślony („VOL1"), więc pass poprawnie ABORCIUJE na guardzie serialu — sekwencja
@@ -162,7 +165,7 @@ def test_worker_all_lancuch_scan_group_resolve_delta_obecnosc(qapp, tmp_path):
     w.stage_done.connect(lambda n, r: (order.append(n), wyniki.__setitem__(n, r)))
     w.finished.connect(lambda: fin.append(1))
     w.run()
-    assert order == ["scan", "group", "resolve", "calibrate", "delta", "presence"]
+    assert order == ["scan", "group", "resolve", "calibrate", "lineage", "delta", "presence"]
     assert wyniki["presence"].aborted is not None and wyniki["presence"].vanished == 0
     assert len(fin) == 1
 
@@ -177,7 +180,7 @@ def test_worker_all_bez_serialu_melduje_pominiecie_obecnosci(qapp, tmp_path):
     order, wyniki = [], {}
     w.stage_done.connect(lambda n, r: (order.append(n), wyniki.__setitem__(n, r)))
     w.run()
-    assert order == ["scan", "group", "resolve", "calibrate", "delta", "presence"]
+    assert order == ["scan", "group", "resolve", "calibrate", "lineage", "delta", "presence"]
     s = wyniki["presence"]
     assert "pominięty" in s.aborted and s.walked == 0 and s.vanished == 0
 

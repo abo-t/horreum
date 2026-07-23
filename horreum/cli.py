@@ -46,6 +46,11 @@ def main(argv=None):
                                 "przepis flata zna filtr dopiero po resolverze)")
     p_cal.add_argument("db", help="ścieżka pliku bazy")
 
+    p_lin = sub.add_parser("lineage",
+                           help="rodowód light<->master po przepisie (krok zbiorczy PO `calibrate` — "
+                                "wymaga zapełnionej osi przepisu)")
+    p_lin.add_argument("db", help="ścieżka pliku bazy")
+
     p_delta = sub.add_parser("delta", help="delta do review (read-only): %% obiektu + nierozstrzygnięte")
     p_delta.add_argument("db", help="ścieżka pliku bazy")
 
@@ -147,6 +152,14 @@ def main(argv=None):
         summary = run_calibration(con, now=now)
         con.close()
         print(f"Horreum calibrate {args.db}: {summary}")  # ASCII (cp1250)
+        return 0
+    if args.cmd == "lineage":
+        from .lineage import run_lineage                  # lazy: nie ładuj resolve dla init
+        now = datetime.now(timezone.utc).isoformat()
+        con = db.open_db(args.db)
+        summary = run_lineage(con, now=now)
+        con.close()
+        print(f"Horreum lineage {args.db}: {summary}")    # ASCII (cp1250)
         return 0
     if args.cmd == "delta":
         from .resolver import delta_report               # read-only

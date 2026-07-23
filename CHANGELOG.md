@@ -6,19 +6,54 @@ schemat i API mogą się jeszcze zmieniać.
 
 ## [Niewydane]
 
-### Dodane
-- **Rozpoznawanie kompleksów po współrzędnych.** Obiekty rozciągłe, które nie mają jednego numeru
-  katalogowego — jak kompleks Veil, czyli Pętla Łabędzia (NGC6960 + NGC6979 + NGC6992 + NGC6995) —
-  są teraz rozpoznawane po tym, **gdzie celował teleskop**, a nie po nazwie w nagłówku. W archiwum
-  zdejmuje to z listy „do przeglądu" 250 klatek, w tym **83, którym program zapisujący nie wpisał
-  żadnej nazwy** — rozpoznanie po nazwie nie miało jak ich złapać. Rozpoznawalność obiektów na
-  klatkach światła: 97,2% → 99,0%. Definicje kompleksów są danymi
-  (`horreum/resolve/data/regions.json`), więc kolejny dopisuje się bez zmiany kodu.
+## [0.4.0] — 2026-07-23
 
-  Zachowawczo z założenia: **nazwa z nagłówka zawsze wygrywa ze współrzędnymi** — klatki podpisane
-  „NGC6992" zostają przy NGC6992, choć leżą wewnątrz kompleksu. Klatka celowana w pojedynczy obiekt,
-  ale bez podpisu, zostaje w przeglądzie, zamiast dostać zgadywany numer katalogowy. Ręczne
-  przypisanie obiektu, gdy powstanie, będzie miało pierwszeństwo przed rozpoznaniem ze współrzędnych.
+Angielski interfejs, ręczne przypisanie obiektu, wykrywanie zniknięć kopii, oś kalibracji z rodowodem
+light↔master, szablony zmiany nazw, obsługa plików RAW oraz zapis nagłówków XISF. Dystrybucja Windows
+jako pojedynczy plik `.exe`.
+
+### Dodane
+- **Angielski interfejs.** Przełącznik języka w menu **Widok → English** (zmiana po ponownym
+  uruchomieniu). Polski pozostaje domyślny; wartości domenowe (nazwy obiektów, filtrów, teleskopów)
+  zostają w oryginale, tłumaczy się warstwę okna.
+- **Ręczne przypisanie obiektu** z kolejki „do przeglądu": klatce bez rozpoznanej nazwy można nadać
+  obiekt wprost, ze szczeblem aliasu — z pierwszeństwem przed rozpoznaniem automatycznym. (Zapowiadane
+  w 0.3.0 jako „w przygotowaniu".)
+- **Wykrywanie zniknięć kopii.** Osobny przebieg sprawdza, które pliki zniknęły z dysku (z dowodem per
+  plik — brak dostępu to „nie wiem", nie „nie ma"), pokazuje je w raporcie Dostawy oraz w nowej
+  perspektywie **„Zniknięte"** w Zbiorach. Zapis stanu jest jawnym gestem, nie efektem ubocznym skanu.
+- **Rozpoznawanie kompleksów po współrzędnych.** Obiekty rozciągłe bez jednego numeru katalogowego —
+  jak kompleks Veil, czyli Pętla Łabędzia (NGC6960 + NGC6979 + NGC6992 + NGC6995) — są rozpoznawane po
+  tym, **gdzie celował teleskop**, a nie po nazwie w nagłówku. Zdejmuje to z listy „do przeglądu" 250
+  klatek, w tym **83 bez żadnej nazwy w nagłówku**. Rozpoznawalność obiektów na klatkach światła:
+  97,2% → 99,0%. Definicje kompleksów są danymi (`horreum/resolve/data/regions.json`) — kolejny
+  dopisuje się bez zmiany kodu. Nazwa z nagłówka zawsze wygrywa ze współrzędnymi.
+- **Oś kalibracji i rodowód.** Nowy etap **„Kalibracja"** i **„Rodowód"** w łańcuchu Dostawy (oraz
+  `horreum calibrate` / `horreum lineage`): program odczytuje przepis masterów (gain / offset /
+  temperatura) i łączy każdy light z pasującym masterdarkiem i masterflatem — najbliższym czasowo.
+  Przepis nieobecny w nagłówku jest odzyskiwany ze ścieżki pliku (jedyny, wąski i jawny wyjątek od
+  zasady „nagłówek jest źródłem prawdy").
+- **Szablony zmiany nazw.** Zmiana nazw działa na szablonie z tokenów (fragmenty ścieżki, wzorce ze
+  starej nazwy), z edytorem rzędów w pasku i osobnym wzorem per typ pliku.
+- **Obsługa plików RAW z aparatów** (`.dng` / `.arw` / `.cr2`): odczyt EXIF jako trzeci format wejścia
+  obok FITS i XISF.
+- **Interakcja z mapą stanowisk**: klik w punkt zaznacza stanowisko, najechanie pokazuje etykietę
+  (nakładające się punkty klastra rozsuwają się do odczytu).
+- **Masowe wydanie projekcji z okna** („Wydaj na stół") na wątku tła — z paskiem postępu, przerwaniem
+  i szacowanym czasem.
+
+### Zmienione
+- **Zapis nagłówków obejmuje pliki XISF** (wcześniej tylko FITS) — korekta pól nagłówka masterów
+  z zachowaniem tożsamości pliku i pełnym, bajtowym cofnięciem.
+- **Klatki dark i bias nie trafiają już na oś teleskopu ani do konfiguracji** — z definicji nie zależą
+  od optyki, więc ich brak przypisania to stan docelowy, a nie zaległość do przeglądu.
+- **Dystrybucja Windows jako pojedynczy plik `.exe`** (onefile): jeden `horreum-gui.exe`, bez folderu
+  obok — wystarczy pobrać i uruchomić.
+
+### Naprawione
+- Zawieszanie się aplikacji przy zamykaniu długich operacji (zakleszczenie wątków roboczych).
+- Domknięcie bramek importu z bazy‑dawcy: spójność rodzajów klatek i kompletność zeznania.
+- Czytelniejszy powód pominięcia przy zmianie nazw, gdy brak i daty w nagłówku, i czasu w nazwie pliku.
 
 ## [0.3.2] — 2026-07-20
 
@@ -115,7 +150,8 @@ Fundament: przejście na model „baza = autorytet, `sha1` = tożsamość".
 - **Import zasilający** świeżej bazy z bazy‑dawcy (read‑only).
 - **CLI**: `init` / `scan` / `group` / `resolve` / `delta`.
 
-[Niewydane]: https://github.com/abo-t/horreum/compare/v0.3.2...HEAD
+[Niewydane]: https://github.com/abo-t/horreum/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/abo-t/horreum/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/abo-t/horreum/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/abo-t/horreum/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/abo-t/horreum/compare/v0.2...v0.3.0

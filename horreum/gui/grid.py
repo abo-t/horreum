@@ -31,7 +31,7 @@ from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
     QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QProgressBar, QPushButton,
-    QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QTableView, QVBoxLayout, QWidget,
+    QScrollArea, QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QTableView, QVBoxLayout, QWidget,
 )
 
 from horreum import db, filter_engine, macro as macro_mod, naming, pivot as pivot_mod, repo, writeback
@@ -666,6 +666,139 @@ class MacroBar(QWidget):
             self.stage.emit(md)
 
 
+class _TokenRow(QWidget):
+    """Jeden rząd edytora wzoru: typ tokenu + argument (folder→poziom, orig→regex) + ↑↓⊖. `spec()`
+    zwraca goły string (token bez argumentu) LUB dict `{"t":…}` (parametryczny) — forma DANE `naming`."""
+
+    changed = Signal()
+    removeRequested = Signal(object)
+    moveRequested = Signal(object, int)                # (self, -1 w górę / +1 w dół)
+
+    _TOKENS = (("data-godzina", "datetime"), ("obiekt", "object"), ("rodzaj", "kind"),
+               ("filtr", "filter"), ("ekspozycja", "exp"), ("znaczek (disc)", "disc"),
+               ("folder nadrzędny", "folder"), ("fragment starej nazwy", "orig"))
+
+    def __init__(self, spec="kind", parent=None):
+        super().__init__(parent)
+        lay = QHBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0)
+        self.combo = QComboBox(); self.combo.setFixedWidth(170)     # stała kolumna typu (wiz #2 — bez ragged)
+        for lbl, tid in self._TOKENS:
+            self.combo.addItem(lbl, tid)
+        lay.addWidget(self.combo)
+        self.level = QSpinBox(); self.level.setRange(1, 8); self.level.setPrefix("poziom ")
+        lay.addWidget(self.level)
+        self.regex = QLineEdit(); self.regex.setPlaceholderText("regex fragmentu starej nazwy")
+        self.regex.setMinimumWidth(160)
+        lay.addWidget(self.regex)
+        lay.addStretch(1)                                           # wypełniacz → przyciski zawsze przy prawej
+        btn_up = QPushButton("↑"); btn_dn = QPushButton("↓"); btn_rm = QPushButton("⊖")
+        for b in (btn_up, btn_dn, btn_rm):
+            b.setFixedWidth(28); lay.addWidget(b)
+        btn_up.clicked.connect(lambda: self.moveRequested.emit(self, -1))
+        btn_dn.clicked.connect(lambda: self.moveRequested.emit(self, +1))
+        btn_rm.clicked.connect(lambda: self.removeRequested.emit(self))
+        self.combo.currentIndexChanged.connect(self._sync_args)
+        self.combo.currentIndexChanged.connect(lambda *_: self.changed.emit())
+        self.level.valueChanged.connect(lambda *_: self.changed.emit())
+        self.regex.textChanged.connect(lambda *_: self.changed.emit())
+        self.set_spec(spec)
+
+    def _sync_args(self):
+        tok = self.combo.currentData()
+        self.level.setVisible(tok == "folder")
+        self.regex.setVisible(tok == "orig")
+
+    def set_spec(self, spec):
+        tok = spec.get("t") if isinstance(spec, dict) else spec
+        args = spec if isinstance(spec, dict) else {}
+        i = self.combo.findData(tok)
+        if i >= 0:
+            self.combo.setCurrentIndex(i)
+        if tok == "folder":
+            self.level.setValue(int(args.get("n", 1)))
+        elif tok == "orig":
+            self.regex.setText(str(args.get("re", "")))
+        self._sync_args()
+
+    def spec(self):
+        tok = self.combo.currentData()
+        if tok == "folder":
+            return {"t": "folder", "n": self.level.value()}
+        if tok == "orig":
+            return {"t": "orig", "re": self.regex.text()}
+        return tok
+
+
+class _TemplateEditor(QWidget):
+    """Edytor wzoru nazwy (§5): lista `_TokenRow` + [+ Token][Przywróć domyślny]. `template()` = lista
+    specyfikacji (DANE dla `naming.run_rename`). Domyślny preset = `DEFAULT_TEMPLATE` (Z `disc` — D-I4
+    bezpieczny domyśl; czyste nazwy = user RĘCZNIE usuwa rząd `disc`, kolizja → warning+skip)."""
+
+    changed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        outer = QVBoxLayout(self); outer.setContentsMargins(0, 0, 0, 0)
+        head = QHBoxLayout()
+        lbl = QLabel("Wzór nazwy:"); lbl.setProperty("role", "secondary")
+        head.addWidget(lbl); head.addStretch(1)
+        btn_add = QPushButton("+ Token"); btn_def = QPushButton("Przywróć domyślny")
+        head.addWidget(btn_add); head.addWidget(btn_def)
+        outer.addLayout(head)
+        self._empty_hint = QLabel("pusty wzór — dodaj token przyciskiem „+ Token"); self._empty_hint.hide()
+        self._empty_hint.setProperty("role", "secondary")
+        outer.addWidget(self._empty_hint)
+        self._host = QWidget()
+        self._rows_lay = QVBoxLayout(self._host); self._rows_lay.setContentsMargins(0, 0, 0, 0)
+        # Sufit wysokości + scroll (wiz #1): rozbudowany wzór NIE zjada gridu — nadwyżka scrolluje.
+        self._scroll = QScrollArea(); self._scroll.setWidgetResizable(True); self._scroll.setWidget(self._host)
+        self._scroll.setFrameShape(QFrame.NoFrame); self._scroll.setMaximumHeight(200)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        outer.addWidget(self._scroll)
+        btn_add.clicked.connect(lambda: (self._add_row("kind"), self.changed.emit()))
+        btn_def.clicked.connect(lambda: self._restore_default())
+        self.set_template(naming.DEFAULT_TEMPLATE)
+
+    def _rows(self):
+        return [self._rows_lay.itemAt(i).widget() for i in range(self._rows_lay.count())]
+
+    def _refresh_empty(self):
+        self._empty_hint.setVisible(len(self._rows()) == 0)
+
+    def _add_row(self, spec):
+        row = _TokenRow(spec)
+        row.removeRequested.connect(self._remove)
+        row.moveRequested.connect(self._move)
+        row.changed.connect(self.changed)
+        self._rows_lay.addWidget(row)
+        self._refresh_empty()
+        return row
+
+    def _remove(self, row):
+        self._rows_lay.removeWidget(row); row.deleteLater()
+        self._refresh_empty(); self.changed.emit()
+
+    def _move(self, row, direction):
+        i = self._rows_lay.indexOf(row); j = i + direction
+        if 0 <= j < self._rows_lay.count():
+            self._rows_lay.removeWidget(row); self._rows_lay.insertWidget(j, row); self.changed.emit()
+
+    def _restore_default(self):
+        self.set_template(naming.DEFAULT_TEMPLATE); self.changed.emit()
+
+    def set_template(self, specs):
+        while self._rows_lay.count():
+            w = self._rows_lay.takeAt(0).widget()
+            if w is not None:
+                w.deleteLater()
+        for spec in specs:
+            self._add_row(spec)
+        self._refresh_empty()
+
+    def template(self):
+        return [row.spec() for row in self._rows()]
+
+
 class RenameBar(QWidget):
     """Panel „Nazwy z faktów" (F3: strona `_PanelStack`, otwierana z paska zbioru „Uporządkuj nazwy
     plików…"; BLIŹNIAK strukturalny `MacroBar`). Trzy strefy: (1) polityka wsadu — Źródło/Offset/
@@ -720,7 +853,12 @@ class RenameBar(QWidget):
         align_row.addWidget(self.btn_align); align_row.addStretch(1)   # dominuje akcji głównych — wiz #5)
         b.addLayout(align_row)
 
-        # (3) akcje (bliźniaczo do makra)
+        # (3) edytor wzoru nazwy (v2 §5 — folder/orig/per-token; DANE dla `run_rename`)
+        b.addSpacing(10)                                 # oddech od panelu daty (wiz #4)
+        self.template_editor = _TemplateEditor()
+        b.addWidget(self.template_editor)
+
+        # (4) akcje (bliźniaczo do makra)
         act = QHBoxLayout()
         self.btn_prev = QPushButton("Podgląd"); self.btn_prev.clicked.connect(self._emit_preview)
         self.btn_stage = QPushButton("Do stagingu"); self.btn_stage.clicked.connect(self._emit_stage)
@@ -735,7 +873,7 @@ class RenameBar(QWidget):
 
     def policy(self):
         return {"source": self.src.currentData(), "offset_hours": self.offset.value(),
-                "fallback": self.fallback.isChecked()}
+                "fallback": self.fallback.isChecked(), "template": self.template_editor.template()}
 
     def set_actions_enabled(self, on):
         self.btn_prev.setEnabled(on)
@@ -1871,6 +2009,7 @@ class FramesView(QWidget):
         return naming.run_rename(
             ids, targets_fn=lambda i: queries.rename_frame_targets(self.con, i),
             source=policy["source"], offset_hours=policy["offset_hours"],
+            template=policy.get("template") or naming.DEFAULT_TEMPLATE,
             fallback=policy["fallback"], run_id=run_id)
 
     def _show_rename_preview(self, run):
@@ -1892,7 +2031,11 @@ class FramesView(QWidget):
         if not ids:
             self.status_message.emit("Rename: brak klatek do policzenia")
             return
-        run = self._run_rename(ids, policy)
+        try:
+            run = self._run_rename(ids, policy)
+        except ValueError as e:                          # zły regex orig we wzorze (INFORMUJ)
+            self.status_message.emit(f"Rename: {e}")
+            return
         t, s = self._show_rename_preview(run)
         self.status_message.emit(f"Podgląd nazw: {t} do zmiany, {s} pominięto (cel: {target})")
 
@@ -1907,6 +2050,11 @@ class FramesView(QWidget):
         self._dismiss_undo()                             # nowy staging unieważnia leftover „Cofnij" (wiz #3)
         # Pętla życia run_id (R1 #1 + R2 #1): run niecommitowany → clear (bezpieczne, same 'pending');
         # run skommitowany → MINTUJ NOWY (clear skasowałby wiersze 'applied' = rekordy undo).
+        try:
+            naming.validate_template(policy.get("template") or naming.DEFAULT_TEMPLATE)  # zły regex → stop przed mintem
+        except ValueError as e:
+            self.status_message.emit(f"Rename: {e}")
+            return
         if self._rename_run_id is None or self._rename_run_committed:
             self._rename_run_id = uuid.uuid4().hex
             self._rename_run_committed = False

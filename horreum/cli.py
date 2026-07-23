@@ -77,7 +77,10 @@ def main(argv=None):
     p_ren.add_argument("--no-fallback", action="store_true",
                        help="wyłącz fallback na drugie źródło przy braku czasu")
     p_ren.add_argument("--filter-json", default=None,
-                       help="drzewo filtra JSON (jak grid); brak = całe uniwersum")
+                       help="drzewo filtra JSON (jak grid): ścieżka pliku LUB inline; brak = całe uniwersum")
+    p_ren.add_argument("--template-json", default=None,
+                       help="wzór nazwy JSON (ścieżka pliku LUB inline): lista specyfikacji tokenów ALBO "
+                            "dict per typ pliku; brak = wzór domyślny")
     grp = p_ren.add_mutually_exclusive_group()
     grp.add_argument("--apply", action="store_true", help="WYKONAJ rename (destrukcyjne — ruch na dysku)")
     grp.add_argument("--undo", metavar="RUN_ID", help="cofnij rename przebiegu o podanym run_id")
@@ -215,15 +218,22 @@ def main(argv=None):
             con.close()
             print(_format_rename_undo(args.db, args.undo, res))
             return 0
-        tree = json.loads(args.filter_json) if args.filter_json else None      # SPOT: drzewo filtra jak grid
+        tree = _load_filter_tree(args.filter_json)             # ścieżka pliku LUB inline (SPOT z gridem)
+        template = _load_filter_tree(args.template_json) or naming.DEFAULT_TEMPLATE   # file-or-inline; brak→domyślny
         frame_ids = filter_engine.run(
             tree,
             leaf_fn=lambda k, kw, p1, p2: queries.leaf_frame_ids(con, k, kw, p1, p2),
             universe_fn=lambda: queries.all_frame_ids(con))
         run_id = uuid.uuid4().hex if args.apply else None
-        run = naming.run_rename(
-            sorted(frame_ids), targets_fn=lambda ids: queries.rename_frame_targets(con, ids),
-            source=source, offset_hours=args.offset_hours, fallback=not args.no_fallback, run_id=run_id)
+        try:
+            run = naming.run_rename(
+                sorted(frame_ids), targets_fn=lambda ids: queries.rename_frame_targets(con, ids),
+                source=source, offset_hours=args.offset_hours, template=template,
+                fallback=not args.no_fallback, run_id=run_id)
+        except ValueError as e:                                # zły regex orig w szablonie (INFORMUJ)
+            con.close()
+            print(f"Horreum rename: błąd wzoru nazwy: {e}")
+            return 2
         if not args.apply:
             con.close()
             print(_format_rename_dry(args.db, run, limit=args.limit))          # DRY: zero mutacji

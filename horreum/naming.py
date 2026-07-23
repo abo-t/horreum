@@ -90,6 +90,8 @@ DEFAULT_TEMPLATE = ("datetime", "object", "kind", "filter", "exp", "disc")
 _UNSET = "_UNSET"
 _DISC_LEN = 12                                         # hex prefiksu sha1_data (kolizja pomijalna)
 _UNSAFE = re.compile(r"[^0-9A-Za-z+._-]+")             # spacje/separatory/śmieć → '_'
+# Tokeny bez argumentu — WSTECZNIE zgodne z v1 (goły string w liście szablonu).
+BARE_TOKENS = frozenset({"datetime", "object", "kind", "filter", "exp", "disc"})
 
 
 def _sanitize(text):
@@ -101,21 +103,67 @@ def _sanitize(text):
     return s
 
 
+def _spec_parts(spec):
+    """Element szablonu → `(token, args)`. Goły string = token bez argumentu (v1). Dict `{"t":…}` =
+    token parametryczny (v2: folder/orig). SPOT normalizacji — reszta rdzenia widzi jedną formę."""
+    if isinstance(spec, dict):
+        return spec.get("t"), spec
+    return spec, {}
+
+
+def _folder_segment(path, n):
+    """Sanitowany basename katalogu `n` poziomów nad plikiem (1 = katalog bezpośredni). Poza korzeniem
+    (drive/root) → '' (segment pominięty jak pusty filtr). `path` None → '' (multi/brak już odsiane, ale
+    szew broniony — R-v2 potwierdzenia). Token folder MOŻE wciągnąć segment `R:\\ASTRO_` gdy user wskaże
+    głęboki `n` — to JEGO wybór, nie auto (§0)."""
+    if not path:
+        return ""
+    d = os.path.dirname(path)
+    for _ in range(int(n) - 1):
+        parent = os.path.dirname(d)
+        if parent == d:                                # korzeń — brak dalszego rodzica
+            return ""
+        d = parent
+    return _sanitize(os.path.basename(d))
+
+
+def _orig_segment(path, pattern):
+    """Fragment ze STAREJ nazwy (basename bez rozszerzenia) po regexie usera. Grupa 1 gdy jest, inaczej
+    cały match; sanitowany. Brak trafienia / pusty regex → '' (segment pominięty). NIE-IDEMPOTENTNY
+    (R-v2 #5): czyta MUTOWALNY basename → po apply re-ekstrahuje z NOWEJ nazwy; punkt stały należy do
+    USERA. Pomyślany do PIERWSZEJ kanonizacji zaimportowanych nazw niosących fakt. Zły regex łapany
+    w `run_rename` PRZED przebiegiem (raz, INFORMUJ) — tu defensywnie pomijamy."""
+    if not path or not pattern:
+        return ""
+    stem = os.path.splitext(os.path.basename(path))[0]
+    try:
+        m = re.search(pattern, stem)
+    except re.error:
+        return ""
+    if m is None:
+        return ""
+    return _sanitize(m.group(1) if m.groups() else m.group(0))
+
+
 def compose_name(facts, dt, *, template=DEFAULT_TEMPLATE):
     """Komponuj kanoniczną nazwę z faktów frame'a. Zwraca `(nazwa | None, problem | None)`.
 
     `facts` = dict pól: kind, object_canon, object_raw, filter_canon, exptime, sha1_data, ext
-    (`ext` z kropką, np. '.fits'). `dt` = rozstrzygnięty `datetime` (z `resolve_dt`) albo None.
-    `template` = uporządkowana lista tokenów (DANE — §0 UNIWERSALNOŚĆ, konfigurowalna).
+    (`ext` z kropką, np. '.fits'), oraz `path` (pełna ścieżka obecnej kopii — dla tokenów folder/orig).
+    `dt` = rozstrzygnięty `datetime` (z `resolve_dt`) albo None. `template` = uporządkowana lista
+    SPECYFIKACJI tokenów (DANE — §0 UNIWERSALNOŚĆ): goły string LUB dict `{"t":token, …args}`.
 
-    INFORMUJ (§0): brak daty (`dt is None`) → problem (NIGDY nazwa bez czasu). Token obiektu KIND-
-    AWARE: light/master_light nierozwiązany → `_UNSET` (nie problem — plik i tak dostaje nazwę
-    chronologiczną); kalibracja → token pominięty. Filtr/exp brak → token pominięty. Dyskryminator
-    `sha1_data[:12]` gwarantuje unikalność."""
+    Tokeny: datetime/object/kind/filter/exp/disc (bez argumentu, v1) + folder(`n`)/orig(`re`) (v2,
+    ze ścieżki). INFORMUJ (§0): brak daty (`dt is None`) → problem (NIGDY nazwa bez czasu). Token
+    obiektu KIND-AWARE: light/master_light nierozwiązany → `_UNSET`; kalibracja → token pominięty.
+    Filtr/exp/folder/orig bez wartości → token pominięty. `disc` (`sha1_data[:12]`) w domyśle gwarantuje
+    unikalność (D-I4 — user może zdjąć go w edytorze na własne ryzyko; kolizja łapana w `run_rename`)."""
     tokens: list[str] = []
     ext = facts.get("ext") or ""
     kind = facts.get("kind")
-    for tok in template:
+    path = facts.get("path")
+    for spec in template:
+        tok, args = _spec_parts(spec)
         if tok == "datetime":
             if dt is None:
                 return None, "brak rozstrzygniętej daty-godziny"
@@ -138,9 +186,49 @@ def compose_name(facts, dt, *, template=DEFAULT_TEMPLATE):
             sha = facts.get("sha1_data")
             if sha:
                 tokens.append(str(sha)[:_DISC_LEN])
+        elif tok == "folder":
+            seg = _folder_segment(path, args.get("n", 1))
+            if seg:
+                tokens.append(seg)
+        elif tok == "orig":
+            seg = _orig_segment(path, args.get("re", ""))
+            if seg:
+                tokens.append(seg)
         else:
             raise ValueError(f"nieznany token szablonu: {tok!r}")
     return "_".join(t for t in tokens if t) + ext, None
+
+
+# ============================================================ szablon per typ pliku (§3)
+
+
+def _pick_template(template, kind, filetype):
+    """Wybierz listę specyfikacji dla klatki. `template` = lista (jeden wzór dla WSZYSTKICH — v1) ALBO
+    dict per typ. **Precedencja JAWNA: `filetype` > `kind` > `"default"` > DEFAULT_TEMPLATE.** Przestrzenie
+    kluczy rozłączne (fits/xisf/raw vs light/master_flat), więc bez kolizji klucza — ale wpis `"fits"`
+    PRZYKRYWA `"light"` dla klatki light-fits (filetype wygrywa; udokumentowane, R-v2 #6)."""
+    if not isinstance(template, dict):
+        return template
+    for key in (filetype, kind):
+        if key is not None and key in template:
+            return template[key]
+    return template.get("default", DEFAULT_TEMPLATE)
+
+
+def validate_template(template):
+    """Skompiluj regexy tokenów `orig` w CAŁYM szablonie (lista albo dict per typ) RAZ przed przebiegiem
+    (INFORMUJ, R-v2 #5): zły regex → `ValueError` z czytelnym powodem do wołającego (CLI/GUI pokaże),
+    nie ciche pominięcie na każdej klatce. TANIA (O(tokenów)) — powierzchnia może ją wołać przed mintem
+    run_id, by nie przebiegać dwa razy."""
+    lists = template.values() if isinstance(template, dict) else [template]
+    for specs in lists:
+        for spec in specs:
+            tok, args = _spec_parts(spec)
+            if tok == "orig":
+                try:
+                    re.compile(args.get("re", ""))
+                except re.error as e:
+                    raise ValueError(f"zły regex w tokenie 'orig': {args.get('re')!r} ({e})")
 
 
 # ============================================================ silnik run_rename (§3)
@@ -186,7 +274,8 @@ def _resolve_target(rows):
 
 
 def _facts_of(row):
-    """Wiersz targetu → dict faktów dla `compose_name` (klucze jak w §1)."""
+    """Wiersz targetu → dict faktów dla `compose_name` (klucze jak w §1). `path` niesiony WPROST — tokeny
+    folder/orig (v2) go potrzebują; `ext` z niego wyłuskany dla wygody."""
     return {
         "kind": row["kind"],
         "object_canon": row["object_canon"],
@@ -194,6 +283,7 @@ def _facts_of(row):
         "filter_canon": row["filter_canon"],
         "exptime": row["exptime"],
         "sha1_data": row["sha1_data"],
+        "path": row["path"],
         "ext": os.path.splitext(row["path"])[1],
     }
 
@@ -204,11 +294,16 @@ def run_rename(frame_ids, *, targets_fn, source, offset_hours, template=DEFAULT_
     wstrzykiwany `targets_fn(ids) -> rows` (`queries.rename_frame_targets`). ZERO zapisu / ZERO
     `os.rename` — zwraca `RenameRun`; staging + mutację robi wołający.
 
+    `template` = lista specyfikacji (jeden wzór — v1) ALBO dict per typ (`_pick_template` wybiera po
+    filetype/kind — v2). Regexy `orig` walidowane RAZ na starcie (`ValueError` do wołającego, INFORMUJ).
+
     Per frame: wybór OBECNEJ location (multi/brak → skip) → `resolve_dt` (D1 fallback: brak źródła →
-    drugie źródło z offsetem 0, bo nazwa już lokalna, + flaga; R2 #6) → `compose_name` → `new_path`
-    w TYM SAMYM katalogu. Nazwa bez zmian → skip (idempotencja). KOLIZJA WEWNĄTRZ WSADU (dwa frame'y
-    → ten sam `new_path`) wykryta TU, w podglądzie (R3 #4) — oba lądują w `skipped`; commit polega na
+    drugie źródło z offsetem 0, bo nazwa już lokalna, + flaga; R2 #6) → wzór wg typu → `compose_name` →
+    `new_path` w TYM SAMYM katalogu. Nazwa bez zmian → skip (idempotencja). KOLIZJA WEWNĄTRZ WSADU (dwa
+    frame'y → ten sam `new_path`) wykryta TU, w podglądzie (R3 #4) — oba lądują w `skipped` z podpowiedzią
+    „dodaj token disc" (D-I4: user zdjął disc ze wzoru → warning, poprawia wzór); commit polega na
     nieistnieniu na dysku, NIE na tym przeglądzie."""
+    validate_template(template)                        # zły regex orig → ValueError PRZED przebiegiem
     run_id = run_id or "rename"
     ids = sorted(int(i) for i in frame_ids)
     by_frame: dict[int, list] = {}
@@ -243,7 +338,8 @@ def run_rename(frame_ids, *, targets_fn, source, offset_hours, template=DEFAULT_
             skipped.append(SkippedRename(fid, old_path, prob or "brak daty"))
             continue
 
-        new_name, prob = compose_name(_facts_of(target), dt, template=template)
+        specs = _pick_template(template, target["kind"], target["filetype"])   # wzór wg typu pliku (§3)
+        new_name, prob = compose_name(_facts_of(target), dt, template=specs)
         if new_name is None:
             skipped.append(SkippedRename(fid, old_path, prob or "compose"))
             continue
@@ -255,17 +351,19 @@ def run_rename(frame_ids, *, targets_fn, source, offset_hours, template=DEFAULT_
             frame_id=fid, location_id=int(target["location_id"]),
             old_path=old_path, new_path=new_path, mtime=target["mtime"]))
 
-    # Kolizja WEWNĄTRZ wsadu (R3 #4): dwa różne frame'y → ten sam new_path. sha1-disc czyni to
-    # strukturalnie nieosiągalnym dla DISTINCT frame'ów, ale skan mógł zwrócić powtórki — bramka
-    # obronna. Kolidujące → skipped (oba), reszta → touched.
+    # Kolizja WEWNĄTRZ wsadu (R3 #4): dwa różne frame'y → ten sam new_path. Token `disc` (domyśle)
+    # czyni to strukturalnie nieosiągalnym dla DISTINCT frame'ów; user, który zdjął disc ze wzoru (D-I4),
+    # dostaje tu WARNING i poprawia wzór (kolejka: „warning przy próbie zmiany na duplikaty"). Powtórki
+    # skanu (ten sam sha1) też tu lądują. Kolidujące → skipped (oba), reszta → touched.
     counts: dict[str, int] = {}
     for p in previews:
         counts[p.new_path] = counts.get(p.new_path, 0) + 1
     touched: list[RenamePreview] = []
     for p in previews:
         if counts[p.new_path] > 1:
-            skipped.append(SkippedRename(p.frame_id, p.old_path,
-                                         f"kolizja nazwy w wsadzie: {os.path.basename(p.new_path)}"))
+            skipped.append(SkippedRename(
+                p.frame_id, p.old_path,
+                f"kolizja nazwy w wsadzie: {os.path.basename(p.new_path)} — dodaj token disc lub zmień wzór"))
         else:
             touched.append(p)
 

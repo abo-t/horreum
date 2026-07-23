@@ -188,6 +188,89 @@ def test_run_rename_bez_fallbacku_powod_pojedynczy():
     assert "brak źródła czasu 'date_obs'" in run.skipped[0].reason
 
 
+# ============================================================ v2: tokeny folder/orig, per-typ, D-I4
+
+import os   # noqa: E402  (import lokalny sekcji v2 — ścieżki tokenów folder/orig)
+
+
+def test_compose_folder_token():
+    """`folder:n` = sanitowany basename katalogu n poziomów w górę; poza korzeniem → pominięty."""
+    p = os.path.join("aaa", "NGC7000 night", "sub", "old.fits")
+    facts = {"kind": "light", "object_canon": "NGC7000", "sha1_data": SHA, "ext": ".fits", "path": p}
+    n1, _ = naming.compose_name(facts, DT, template=[{"t": "folder", "n": 1}, "disc"])
+    assert n1.startswith("sub_")                                   # katalog bezpośredni
+    n2, _ = naming.compose_name(facts, DT, template=[{"t": "folder", "n": 2}])
+    assert n2 == "NGC7000_night.fits"                              # 2 poziomy + sanityzacja spacji
+    n9, _ = naming.compose_name(facts, DT, template=[{"t": "folder", "n": 9}, "kind"])
+    assert n9 == "light.fits"                                      # poza korzeniem → folder pominięty
+
+
+def test_compose_orig_token():
+    """`orig:regex` = fragment ze STAREJ nazwy (stem); grupa 1 gdy jest, inaczej cały match; brak→pominięty."""
+    facts = {"kind": "light", "sha1_data": SHA, "ext": ".fits",
+             "path": os.path.join("d", "M42_Ha_gain100.fits")}
+    whole, _ = naming.compose_name(facts, DT, template=[{"t": "orig", "re": r"gain\d+"}, "kind"])
+    assert whole == "gain100_light.fits"
+    grp, _ = naming.compose_name(facts, DT, template=[{"t": "orig", "re": r"gain(\d+)"}])
+    assert grp == "100.fits"                                       # grupa 1
+    miss, _ = naming.compose_name(facts, DT, template=[{"t": "orig", "re": r"ZZZ"}, "kind"])
+    assert miss == "light.fits"                                    # brak trafienia → pominięty
+
+
+def test_compose_zly_regex_defensywnie_pomija():
+    """Bezpośrednio `compose_name` z niepoprawnym regexem → token pominięty, BEZ crashu (walidacja
+    twarda żyje w `run_rename`)."""
+    facts = {"kind": "light", "sha1_data": SHA, "ext": ".fits", "path": os.path.join("d", "x.fits")}
+    name, prob = naming.compose_name(facts, DT, template=[{"t": "orig", "re": "("}, "kind"])
+    assert prob is None and name == "light.fits"
+
+
+def test_pick_template_precedencja():
+    """`_pick_template`: filetype > kind > default > DEFAULT_TEMPLATE; lista → wprost (wsteczna zgodność)."""
+    t = {"fits": ["kind"], "light": ["object"], "default": ["disc"]}
+    assert naming._pick_template(t, "light", "fits") == ["kind"]       # filetype wygrywa z kind
+    assert naming._pick_template(t, "light", "xisf") == ["object"]     # kind
+    assert naming._pick_template(t, "dark", "raw") == ["disc"]         # default
+    assert naming._pick_template(["kind"], "light", "fits") == ["kind"]  # lista → wprost
+    assert naming._pick_template({"raw": ["kind"]}, "light", "fits") == naming.DEFAULT_TEMPLATE
+
+
+def test_run_rename_pick_per_typ():
+    """Dict per typ: klatka fits dostaje wzór 'fits' (bez obiektu/disc), nie 'default'."""
+    tmpl = {"fits": ["datetime", "kind"], "default": naming.DEFAULT_TEMPLATE}
+    run = naming.run_rename([1], targets_fn=_targets([_row(filetype="fits")]),
+                            source="date_obs", offset_hours=0, template=tmpl)
+    assert len(run.touched) == 1
+    assert os.path.basename(run.touched[0].new_path) == "20240315_213045_light.fits"
+
+
+def test_run_rename_kolizja_bez_disc_warning():
+    """D-I4: wzór BEZ `disc` + dwie klatki o tych samych faktach → kolizja → WARNING+skip
+    z podpowiedzią „dodaj token disc" (kolejka: „warning przy próbie zmiany na duplikaty")."""
+    rows = [_row(frame_id=1, location_id=10, path=r"R:\A\a.fits"),
+            _row(frame_id=2, location_id=11, path=r"R:\A\b.fits")]
+    tmpl = ["datetime", "object", "kind", "filter", "exp"]            # BEZ disc
+    run = naming.run_rename([1, 2], targets_fn=_targets(rows), source="date_obs",
+                            offset_hours=0, template=tmpl)
+    assert not run.touched
+    assert all("dodaj token disc" in s.reason for s in run.skipped)
+
+
+def test_run_rename_zly_regex_valueerror():
+    """Zły regex `orig` → `ValueError` PRZED przebiegiem (INFORMUJ, nie ciche pominięcie na każdej klatce)."""
+    with pytest.raises(ValueError):
+        naming.run_rename([1], targets_fn=_targets([_row()]), source="date_obs",
+                          offset_hours=0, template=[{"t": "orig", "re": "("}])
+
+
+def test_validate_template_dict_i_lista():
+    """`validate_template` chodzi po dict per typ I po liście; poprawny regex nie rzuca."""
+    naming.validate_template({"fits": [{"t": "orig", "re": "NGC"}], "default": ["kind"]})
+    naming.validate_template([{"t": "orig", "re": r"\d+"}, "disc"])
+    with pytest.raises(ValueError):
+        naming.validate_template({"fits": [{"t": "orig", "re": "["}]})
+
+
 # ============================================================ integracja DB — migracja + relocate
 
 def test_migracja_0005_pending_renames(tmp_path):

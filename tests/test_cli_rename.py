@@ -85,3 +85,40 @@ def test_cli_rename_raport_ascii_safe(tmp_path, capsys):
     cli.main(["rename", str(dbp)])
     out = capsys.readouterr().out
     assert "→" not in out and "Δ" not in out
+
+
+def test_cli_rename_template_json_inline(tmp_path, capsys):
+    """--template-json inline (lista specyfikacji): wzór bez `disc` → czysta nazwa; folder wciąga katalog."""
+    dbp, _ = _seed(tmp_path)
+    tmpl = '["datetime", "object", "kind", {"t": "folder", "n": 1}]'
+    rc = cli.main(["rename", str(dbp), "--template-json", tmpl])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "do zmiany: 2" in out
+    assert "abc" not in out                                  # brak dyskryminatora sha1 we wzorze
+    # katalog nadrzędny (tmp_path basename) w nowej nazwie:
+    assert tmp_path.name in out
+
+
+def test_cli_rename_template_json_z_pliku_dict_per_typ(tmp_path, capsys):
+    """--template-json ze ŚCIEŻKI PLIKU + dict per typ: klatki fits dostają wzór 'fits'."""
+    dbp, _ = _seed(tmp_path)
+    tf = tmp_path / "wzor.json"
+    tf.write_text('{"fits": ["datetime", "kind"], "default": ["datetime", "object", "kind", "disc"]}',
+                  encoding="utf-8")
+    rc = cli.main(["rename", str(dbp), "--template-json", str(tf)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "do zmiany: 2" in out
+    assert "_light.fits" in out and "NGC7000" not in out     # wzór fits: bez obiektu
+
+
+def test_cli_rename_zly_regex_kod_2(tmp_path, capsys):
+    """Zły regex `orig` w szablonie → komunikat błędu + kod 2 (INFORMUJ, zero mutacji)."""
+    dbp, files = _seed(tmp_path)
+    snap = {f: f.read_bytes() for f in files}
+    rc = cli.main(["rename", str(dbp), "--template-json", '[{"t": "orig", "re": "("}]'])
+    assert rc == 2
+    assert "błąd wzoru" in capsys.readouterr().out
+    for f in files:                                          # zero mutacji przy błędzie
+        assert f.exists() and f.read_bytes() == snap[f]

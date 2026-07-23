@@ -9,7 +9,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from horreum import db, pivot as pivot_mod, writeback
+from horreum import db, naming, pivot as pivot_mod, writeback
 from horreum.gui import queries, rows as rows_mod
 
 from PySide6.QtCore import Qt
@@ -641,6 +641,48 @@ def test_renamebar_half_away_nie_half_to_even(qapp):
     bar = RenameBar(); bar.src.setCurrentIndex(1)    # filename → signed = median
     bar.set_echo("", "", "", "", median=-2.5)
     bar._align(); assert bar.offset.value() == -3
+
+
+# ---------- RenameBar: edytor wzoru (v2 §5 — folder/orig/per-token, D-I4) ----------
+
+def test_renamebar_edytor_domyslny_z_disc(qapp):
+    """Domyślny preset edytora = DEFAULT_TEMPLATE (Z `disc` — D-I4 bezpieczny domyśl); policy niesie wzór."""
+    from horreum.gui.grid import RenameBar
+    bar = RenameBar()
+    assert bar.policy()["template"] == list(naming.DEFAULT_TEMPLATE)
+    assert "disc" in bar.policy()["template"]
+
+
+def test_renamebar_edytor_folder_orig_serializuja(qapp):
+    """Rzędy folder/orig serializują się do dict-specyfikacji; kolejność zachowana."""
+    from horreum.gui.grid import RenameBar
+    bar = RenameBar()
+    bar.template_editor.set_template(["datetime", {"t": "folder", "n": 2}, {"t": "orig", "re": r"gain\d+"}])
+    tmpl = bar.policy()["template"]
+    assert tmpl == ["datetime", {"t": "folder", "n": 2}, {"t": "orig", "re": r"gain\d+"}]
+
+
+def test_renamebar_edytor_usun_disc_i_przywroc(qapp):
+    """User usuwa rząd `disc` (czyste nazwy) → wzór bez disc; „Przywróć domyślny" wraca do DEFAULT."""
+    from horreum.gui.grid import RenameBar
+    bar = RenameBar()
+    disc_row = next(r for r in bar.template_editor._rows() if r.spec() == "disc")
+    bar.template_editor._remove(disc_row)
+    assert "disc" not in bar.policy()["template"]
+    bar.template_editor._restore_default()
+    assert bar.policy()["template"] == list(naming.DEFAULT_TEMPLATE)
+
+
+def test_renamebar_edytor_pusty_pokazuje_hint(qapp):
+    """Wiz #3: usunięcie WSZYSTKICH rzędów → hint widoczny, wzór pusty (bezpieczny: kolizja→skip)."""
+    from horreum.gui.grid import RenameBar
+    bar = RenameBar()
+    for row in list(bar.template_editor._rows()):
+        bar.template_editor._remove(row)
+    assert bar.policy()["template"] == []
+    assert not bar.template_editor._empty_hint.isHidden()     # off-screen: flaga hide, nie isVisible
+    bar.template_editor._add_row("kind")
+    assert bar.template_editor._empty_hint.isHidden()
 
 
 # ---------- FramesView: rename — cykl życia run_id / mutex / dispatch / podgląd (§1, R1/R2) ----------

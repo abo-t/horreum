@@ -237,6 +237,8 @@ def run_rename(frame_ids, *, targets_fn, source, offset_hours, template=DEFAULT_
             alt = "filename" if source == "date_obs" else "date_obs"
             dt, prob = resolve_dt(header_dt(target["date_obs"]), filename_dt(basename),
                                   source=alt, offset_hours=0)
+            if dt is None:                             # oba źródła puste → powód ŁĄCZNY (wiz #9):
+                prob = "brak DATE-OBS ani czasu w nazwie"   # komunikat z fallbacku mylił (drugie źródło)
         if dt is None:
             skipped.append(SkippedRename(fid, old_path, prob or "brak daty"))
             continue

@@ -168,6 +168,26 @@ def test_run_rename_fallback_source(monkeypatch):
     assert "20240315_213045" in run.touched[0].new_path
 
 
+def test_run_rename_oba_zrodla_puste_powod_laczny():
+    """Wiz #9: oba źródła czasu puste (brak DATE-OBS I nazwa bez czasu) → powód ŁĄCZNY,
+    nie mylący komunikat z próby fallbacku ('brak źródła czasu filename' opisywał drugie
+    źródło, nie realny brak). Silnik nadal pomija klatkę — zmienia się tylko diagnostyka."""
+    tgt = _row(date_obs=None, path=r"R:\A\bez_czasu.fits")
+    run = naming.run_rename([1], targets_fn=_targets([tgt]), source="date_obs", offset_hours=0)
+    assert not run.touched
+    assert run.skipped[0].reason == "brak DATE-OBS ani czasu w nazwie"
+
+
+def test_run_rename_bez_fallbacku_powod_pojedynczy():
+    """--no-fallback: user świadomie wyłączył drugie źródło → powód zostaje przy WYBRANYM
+    źródle (pojedynczy), bo łączny komunikat kłamałby o próbie, której nie było."""
+    tgt = _row(date_obs=None, path=r"R:\A\bez_czasu.fits")
+    run = naming.run_rename([1], targets_fn=_targets([tgt]), source="date_obs",
+                            offset_hours=0, fallback=False)
+    assert not run.touched
+    assert "brak źródła czasu 'date_obs'" in run.skipped[0].reason
+
+
 # ============================================================ integracja DB — migracja + relocate
 
 def test_migracja_0005_pending_renames(tmp_path):

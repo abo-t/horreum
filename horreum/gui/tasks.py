@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from horreum.gui import queries, rows
+from horreum.gui import i18n, queries, rows
 from horreum.gui.app import (
     ObjectAxisView, ObservatoryAxisView, TelescopeAxisView, _utc_now_iso,
 )
@@ -55,12 +55,13 @@ _DIM = QColor(0x88, 0x88, 0x88)
 # + najszerszy człon drugi („381  ›") = 35 px + `_GAP`/`_PAD` ≈ 230 px. 400 px daje oddech bez
 # rozjeżdżania; przy 520 px wzrok znów gubi drogę etykieta→liczba (wizytator P1 tura 2).
 _LIST_MAX_W = 400
+# etykieta = KLUCZ i18n rozwiązywany w budowie/refresh (nie zamrażać PL przy imporcie).
 _TASKS = [
-    ("unresolved_lights", "Klatki bez obiektu", _PAGE_OBJECTS),
-    ("telescopes_unlabeled", "Teleskopy bez etykiety", _PAGE_TELESCOPE),
-    ("observatories_unnamed", "Stanowiska bez nazwy", _PAGE_OBSERVATORY),
-    ("dup_frames", "Duplikaty (>1 kopia)", PRESET_DUPS),
-    ("vanished_frames", "Zniknięte z dysku", PRESET_VANISHED),
+    ("unresolved_lights", "tasks.unresolved_lights", _PAGE_OBJECTS),
+    ("telescopes_unlabeled", "tasks.telescopes_unlabeled", _PAGE_TELESCOPE),
+    ("observatories_unnamed", "tasks.observatories_unnamed", _PAGE_OBSERVATORY),
+    ("dup_frames", "tasks.dup_frames", PRESET_DUPS),
+    ("vanished_frames", "tasks.vanished_frames", PRESET_VANISHED),
 ]
 
 
@@ -94,7 +95,7 @@ class TasksView(QWidget):
         # strona 0: lista zadań
         list_page = QWidget()
         lv = QVBoxLayout(list_page)
-        lv.addWidget(QLabel("Porządki — zadania ze stanu bazy"))
+        lv.addWidget(QLabel(i18n.t("tasks.list_title")))
         self.tasks = QListWidget()
         # NoSelection: highlight selekcji Qt byłby drugim „zaznaczeniem" obok treści (wzorzec F4R2#3);
         # klik = WYŁĄCZNIE gest usera przez itemClicked (F4R#4 — nigdy selection-based).
@@ -106,7 +107,7 @@ class TasksView(QWidget):
         self.tasks.setMaximumWidth(_LIST_MAX_W)
         self.tasks.itemClicked.connect(self._on_task_clicked)
         for key, label, action in _TASKS:
-            it = QListWidgetItem(label)
+            it = QListWidgetItem(i18n.t(label))
             if action is None:
                 # informacyjna (wzorzec app.py — pozycje info): wyszarzona, żeby afordancja nie
                 # kłamała w obie strony (wizytator F5 #2 — „wygląda jednakowo, działa różnie")
@@ -119,9 +120,9 @@ class TasksView(QWidget):
         self.pages.addWidget(list_page)                # _PAGE_LIST
 
         # strony 1–3: podstrony osi (kolejność MUSI zgadzać się ze stałymi _PAGE_*)
-        self.pages.addWidget(self._wrap("Oś teleskopu", self.axis_view))          # _PAGE_TELESCOPE
-        self.pages.addWidget(self._wrap("Oś obserwatorium", self.observatory_view))   # _PAGE_OBSERVATORY
-        self.pages.addWidget(self._wrap("Przegląd obiektów", self.object_view))   # _PAGE_OBJECTS
+        self.pages.addWidget(self._wrap(i18n.t("tasks.telescope_axis"), self.axis_view))          # _PAGE_TELESCOPE
+        self.pages.addWidget(self._wrap(i18n.t("tasks.observatory_axis"), self.observatory_view))   # _PAGE_OBSERVATORY
+        self.pages.addWidget(self._wrap(i18n.t("tasks.object_review"), self.object_view))   # _PAGE_OBJECTS
 
     def _wrap(self, title, view):
         """Podstrona osi: pasek powrotu + tytuł + widok. Powrót odświeża listę (stan mógł się
@@ -130,7 +131,7 @@ class TasksView(QWidget):
         pv = QVBoxLayout(page)
         pv.setContentsMargins(0, 0, 0, 0)
         bar = QHBoxLayout()
-        back = QPushButton("← Porządki")
+        back = QPushButton(i18n.t("tasks.back"))
         back.clicked.connect(self._on_back)
         bar.addWidget(back)
         lbl = QLabel(title)
@@ -157,7 +158,7 @@ class TasksView(QWidget):
             # akcyjne z chevronem „›" — wiersz ZAPRASZA klik; informacyjne bez (wizytator F5 #2).
             # Liczba idzie w CZŁON DRUGI (prawa kolumna, `rows.SECONDARY`), nie w tekst etykiety —
             # inaczej liczby nie ustawiają się w kolumnę i nie da się ich skanować (wiz F5 #6).
-            it.setText(label)
+            it.setText(i18n.t(label))
             it.setData(rows.SECONDARY, f"{n}  ›" if action is not None else str(n))
             if action is not None:
                 it.setForeground(QBrush() if n > 0 else _DIM)   # n=0 → wyszarzone, wciąż klikalne

@@ -1000,6 +1000,11 @@ def test_en_render_grid_z_katalogu(qapp, tmp_path):
         assert v.combo_persp.itemData(0) == ("preset", "Przegląd")
         v.apply_perspective("Duplikaty")   # po TOŻSAMOŚCI PL — działa mimo EN wyświetlania
         assert v.combo_persp.currentData() == ("preset", "Duplikaty")
+        # facety (rollout drobne): _GROUPS tytuły + szukajka trzymają KLUCZE → EN z katalogu
+        from PySide6.QtWidgets import QLabel
+        assert v.facet_rail.search.placeholderText() == "search object…"
+        titles = {lb.text() for lb in v.facet_rail.findChildren(QLabel)}
+        assert {"Object", "Filter", "Kind", "Telescope", "Night"} <= titles
     finally:
         con.close()
 

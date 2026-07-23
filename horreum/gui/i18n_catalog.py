@@ -849,4 +849,39 @@ CATALOG = {
     "proj.more_folders": {
         "pl": "    … (+{n} folderów)", "en": "    … (+{n} more folders)",
     },
+
+    # ============================================================ drobne (rollout §4: tasks/facets/portfolio)
+    # (mapproj/map_view: 0 UI-stringów — „km" jednostka neutralna; NIE dokładamy i18n, R-i18n #7)
+
+    # --- tasks.py (widok Porządki): _TASKS + tytuły podstron trzymają KLUCZE ---
+    "tasks.list_title": {
+        "pl": "Porządki — zadania ze stanu bazy", "en": "Housekeeping — tasks from the database state",
+    },
+    "tasks.back": {"pl": "← Porządki", "en": "← Housekeeping"},
+    "tasks.telescope_axis": {"pl": "Oś teleskopu", "en": "Telescope axis"},
+    "tasks.observatory_axis": {"pl": "Oś obserwatorium", "en": "Observatory axis"},
+    "tasks.object_review": {"pl": "Przegląd obiektów", "en": "Object review"},
+    "tasks.unresolved_lights": {"pl": "Klatki bez obiektu", "en": "Frames without object"},
+    "tasks.telescopes_unlabeled": {"pl": "Teleskopy bez etykiety", "en": "Telescopes without a label"},
+    "tasks.observatories_unnamed": {"pl": "Stanowiska bez nazwy", "en": "Sites without a name"},
+    "tasks.dup_frames": {"pl": "Duplikaty (>1 kopia)", "en": "Duplicates (>1 copy)"},
+    "tasks.vanished_frames": {"pl": "Zniknięte z dysku", "en": "Vanished from disk"},
+
+    # --- facets.py (listwa facetów): _GROUPS tytuły trzymają KLUCZE ---
+    "facets.group.object": {"pl": "Obiekt", "en": "Object"},
+    "facets.group.filter": {"pl": "Filtr", "en": "Filter"},
+    "facets.group.kind": {"pl": "Rodzaj", "en": "Kind"},
+    "facets.group.telescope": {"pl": "Teleskop", "en": "Telescope"},
+    "facets.group.night": {"pl": "Noc", "en": "Night"},
+    "facets.search_object": {"pl": "szukaj obiektu…", "en": "search object…"},
+    "facets.hidden": {"pl": "(+{n} ukryte)", "en": "(+{n} hidden)"},
+
+    # --- portfolio.py (Qt-wolny agregat godzin): _NO_FILTER trzyma KLUCZ ---
+    "portfolio.no_filter": {"pl": "(bez filtra)", "en": "(no filter)"},
+    "portfolio.plus_no_exptime": {
+        "pl": " (+{n} bez exptime)", "en": " (+{n} without exptime)",
+    },
+    "portfolio.frames_no_exptime": {
+        "pl": "+{n} klatek bez exptime", "en": "+{n} frames without exptime",
+    },
 }

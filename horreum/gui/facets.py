@@ -24,12 +24,14 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QVBoxLayout, QWidget,
 )
 
-from horreum.gui import facet_model, rows, theme
+from horreum.gui import facet_model, i18n, rows, theme
 from horreum.gui.rows import TwoPartDelegate
 
-# (facet, tytuł grupy, czy-długa-lista) — długie (Obiekt/Noc) dostają stretch, krótkie zwarty pas.
-_GROUPS = [("object", "Obiekt", True), ("filter", "Filtr", False), ("kind", "Rodzaj", False),
-           ("telescope", "Teleskop", False), ("night", "Noc", True)]
+# (facet, KLUCZ tytułu grupy, czy-długa-lista) — długie (Obiekt/Noc) dostają stretch, krótkie zwarty
+# pas. Tytuł = klucz i18n rozwiązywany w budowie (nie zamrażać PL przy imporcie).
+_GROUPS = [("object", "facets.group.object", True), ("filter", "facets.group.filter", False),
+           ("kind", "facets.group.kind", False), ("telescope", "facets.group.telescope", False),
+           ("night", "facets.group.night", True)]
 
 # Czerwień wykluczeń ⊖ — z motywu (F6 §7, SPOT). WYPALANA w item przy `set_data`, więc zmiana
 # motywu wymaga `FacetRail.refresh_theme` (repaint sam nie odświeży wypalonego foregroundu).
@@ -63,12 +65,12 @@ class FacetRail(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         for facet, title, long_list in _GROUPS:
-            lbl = QLabel(title)
+            lbl = QLabel(i18n.t(title))
             f = QFont(); f.setBold(True); lbl.setFont(f)
             outer.addWidget(lbl)
             if facet == "object":
                 self.search = QLineEdit()
-                self.search.setPlaceholderText("szukaj obiektu…")
+                self.search.setPlaceholderText(i18n.t("facets.search_object"))
                 self.search.textChanged.connect(self._filter_objects)
                 outer.addWidget(self.search)
             lw = QListWidget()
@@ -118,7 +120,7 @@ class FacetRail(QWidget):
                         # „(n)" przy ⊖ znaczy „ile WRÓCI po zdjęciu" (sibling-set), nie wkład do
                         # zbioru (pokazanych jest 0) — render niesie tę semantykę (F4R2#1). Godzin
                         # NIE doklejamy: obiekt wykluczony nie wnosi ich do zbioru (F7 guard, DD-render).
-                        text, second = f"⊖ {label}", f"(+{n} ukryte)"
+                        text, second = f"⊖ {label}", i18n.t("facets.hidden", n=n)
                     else:
                         text, second = f"{'✓ ' if sel == 'in' else ''}{label}", f"({n})"
                         sx = facet_extras.get(value)          # sufiks/tooltip godzin (F7) — poza ⊖

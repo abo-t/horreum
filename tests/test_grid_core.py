@@ -564,6 +564,19 @@ def test_portfolio_summarize_i_formatowanie():
     assert portfolio.object_tooltip(summ[2]) == "OIII: 2.0 h"
 
 
+def test_en_render_portfolio():
+    """§5 (rollout drobne): `set_lang('en')` → słownictwo portfela (Qt-wolny) z katalogu — `_NO_FILTER`
+    i ogony „bez exptime" trzymają KLUCZE, nie zamrożony PL. Autouse-fixture wraca na PL."""
+    from horreum.gui import i18n
+    i18n.set_lang("en")
+    summ = portfolio.summarize([
+        {"object_id": 1, "filter_canon": "Ha", "secs": 3600.0, "n_null": 0},
+        {"object_id": 1, "filter_canon": None, "secs": None, "n_null": 2},
+    ])
+    assert portfolio.object_suffix(summ[1]) == " · 1.0 h (+2 without exptime)"
+    assert portfolio.object_tooltip(summ[1]) == "Ha: 1.0 h\n(no filter): 0.0 h\n+2 frames without exptime"
+
+
 def test_run_bez_filtra_oddaje_uniwersum_wprost():
     """TRIPWIR PRZESŁANKI (wizytator P5 #2): `filter_engine.run(None, …)` zwraca obiekt uniwersum
     WPROST — nie kopię. To jest powód, dla którego każdy trim perspektywy w `grid.refresh` MUSI

@@ -10,7 +10,9 @@ JAWNE-NULL: `secs=NULL` (grupa cała bez exptime) liczony jak 0 sekund; `n_null`
 
 from __future__ import annotations
 
-_NO_FILTER = "(bez filtra)"
+from horreum.gui import i18n
+
+_NO_FILTER = "portfolio.no_filter"   # KLUCZ i18n — rozwiązywany w USE-site (nie zamrażać PL przy imporcie)
 
 
 def summarize(rows) -> dict:
@@ -40,7 +42,7 @@ def object_suffix(entry) -> str:
     """Sufiks wiersza obiektu: `" · 12.3 h"` + (gdy są lighty bez exptime) `" (+5 bez exptime)"`."""
     s = f" · {format_hours(entry['total_secs'])}"
     if entry["n_null"]:
-        s += f" (+{entry['n_null']} bez exptime)"
+        s += i18n.t("portfolio.plus_no_exptime", n=entry["n_null"])
     return s
 
 
@@ -49,7 +51,7 @@ def object_tooltip(entry) -> str:
     `"Ha: 8.1 h\\nOIII: 4.2 h\\n(bez filtra): 1.0 h\\n+5 klatek bez exptime"`. Nowe linie zamiast
     „·" — skanowalne i odporne na liczbę filtrów (obiekt z >10 filtrami nie rodzi ściany, wiz F7 #F3).
     Filtr `None` → „(bez filtra)"; ogon `n_null` (gdy >0) na końcu."""
-    parts = [f"{f or _NO_FILTER}: {format_hours(secs)}" for f, secs, _n in entry["per_filter"]]
+    parts = [f"{f or i18n.t(_NO_FILTER)}: {format_hours(secs)}" for f, secs, _n in entry["per_filter"]]
     if entry["n_null"]:
-        parts.append(f"+{entry['n_null']} klatek bez exptime")
+        parts.append(i18n.t("portfolio.frames_no_exptime", n=entry["n_null"]))
     return "\n".join(parts)

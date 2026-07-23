@@ -223,6 +223,21 @@ def test_badge_zywy_od_montazu(qapp, tmp_path):
         win.close()
 
 
+def test_en_render_zadania(qapp, tmp_path):
+    """§5 (rollout drobne): `set_lang('en')` PRZED budową okna → etykiety zadań Porządków (stała
+    `_TASKS` trzyma KLUCZE) renderują EN z katalogu; człon drugi (liczba + „›") bez zmian. Tożsamość
+    klucza stanu (`unresolved_lights`) niezmienna → nawigacja działa pod EN. Autouse-fixture wraca na PL."""
+    from horreum.gui import i18n
+    i18n.set_lang("en")
+    win = MainWindow(_seeded_db(tmp_path, object_axis=True))
+    try:
+        assert _task_row(win, "unresolved_lights") == ("Frames without object", "3  ›")
+        assert _task_row(win, "dup_frames") == ("Duplicates (>1 copy)", "1  ›")
+        assert win.nav.item(NAV_PORZADKI).text() == "Housekeeping (4)"    # nav.porzadki_count EN (app)
+    finally:
+        win.close()
+
+
 def test_badge_zero_to_gole_porzadki(qapp, tmp_path):
     """F5R#8: N=0 → gołe „Porządki" (nie „(0)" — ten sam szum, co wieczny XISF w badge)."""
     path = str(tmp_path / "empty.db")

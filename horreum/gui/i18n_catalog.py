@@ -250,6 +250,57 @@ CATALOG = {
     "nav.zbiory": {"pl": "Zbiory", "en": "Collections"},
     "nav.porzadki": {"pl": "Porządki", "en": "Housekeeping"},
     "nav.porzadki_count": {"pl": "Porządki ({n})", "en": "Housekeeping ({n})"},
+    "nav.planer": {"pl": "Planer", "en": "Planner"},
+
+    # --- PLANER CELÓW (T5): nagłówek nocy, komórki listy, noty ---------------------------------
+    # Świadomie BEZ badge'a przy pozycji nav (D-0731-6): „ile do zrobienia" zależy od suwaka
+    # `min_hours`, więc liczba w nawiasie kłamałaby przy każdej zmianie progu.
+    "planner.night_header": {
+        "pl": "Noc {night} · {site} · ciemność {dark} UTC · Księżyc {moon}, wys. {alt}",
+        "en": "Night {night} · {site} · darkness {dark} UTC · Moon {moon}, alt {alt}",
+    },
+    "planner.site_unnamed": {"pl": "stanowisko bez nazwy", "en": "unnamed site"},
+    "planner.counts": {
+        "pl": "Cele: {pool} → {feasible} po progach → {above} nad horyzontem → {visible} widocznych"
+              " (wierszy: {rows})",
+        "en": "Targets: {pool} → {feasible} after thresholds → {above} above horizon → {visible}"
+              " visible (rows: {rows})",
+    },
+    "planner.arcmin": {"pl": "{n}′", "en": "{n}′"},
+    "planner.one_frame": {"pl": "1 kadr", "en": "1 frame"},
+    "planner.mosaic": {"pl": "mozaika {n}", "en": "mosaic {n}"},
+    "planner.your_name": {"pl": "u Ciebie: {names}", "en": "your name: {names}"},
+    "planner.gaps": {"pl": "brak {channels}", "en": "missing {channels}"},
+    "planner.no_frames": {"pl": "bez klatek", "en": "no frames"},
+    "planner.reason_no_gap": {"pl": "bez luk", "en": "no gaps"},
+    "planner.reason_rig_cannot": {"pl": "zestaw nie umie", "en": "rig cannot"},
+    "planner.reason_no_rig": {"pl": "brak zestawu", "en": "no rig"},
+    "planner.status_planned": {"pl": "zaplanowany", "en": "planned"},
+    "planner.status_active": {"pl": "w toku", "en": "active"},
+    "planner.status_done": {"pl": "zrobiony", "en": "done"},
+    "planner.status_skip": {"pl": "pominięty", "en": "skipped"},
+    "planner.park_unset": {
+        "pl": "Park NIEUSTAWIONY — liczone WSZYSTKIE teleskopy bazy, także historyczne.",
+        "en": "Park NOT SET — counting ALL telescopes in the database, historical ones too.",
+    },
+    "planner.park_source_db": {"pl": "Park (z bazy): {park}", "en": "Park (from database): {park}"},
+    "planner.park_source_arg": {"pl": "Park (z wywołania): {park}", "en": "Park (from call): {park}"},
+    "planner.park_without_rigs": {
+        "pl": "W parku bez zestawu (brak lightów): {names}",
+        "en": "In the park with no rig (no lights): {names}",
+    },
+    "planner.unfiltered_mono": {
+        "pl": "{n} lightów bez filtra na kamerze mono — kubełek RGB może być zanieczyszczony.",
+        "en": "{n} lights with no filter on a mono camera — the RGB bucket may be polluted.",
+    },
+    "planner.hidden_by_status": {
+        "pl": "Ukrytych jako „pominięty”: {n} (filtr statusu je pokaże).",
+        "en": "Hidden as “skipped”: {n} (the status filter will show them).",
+    },
+    "planner.rig_skipped": {
+        "pl": "Zestaw {name} poza planem: {reason}",
+        "en": "Rig {name} outside the plan: {reason}",
+    },
     "main.no_db": {
         "pl": "Brak bazy — otwórz lub utwórz bazę (menu Plik).",
         "en": "No database — open or create one (File menu).",

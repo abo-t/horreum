@@ -286,6 +286,41 @@ def unreadable_copies(con):
     ).fetchall()
 
 
+def park_overview(con):
+    """Przegląd parku (T4/T5): kanoniczne teleskopy z licznikiem lightów, ostatnią klatką i stanem
+    `in_park` (1 = w parku, 0 = historyczny, NULL = user się nie wypowiedział).
+
+    JEDEN właściciel literału (SPOT): ten sam wiersz karmi CLI `horreum park` i dialog „Park…"
+    ekranu planera — dwie powierzchnie tej samej decyzji nie mają prawa liczyć lightów inaczej.
+    Kolejność `lights DESC` jest kolejnością SPRZĘTU, nie alfabetu: `sky.park` sortuje raport
+    alfabetycznie (determinizm), ale człowiek szuka swojego głównego teleskopu na górze.
+    Zwraca wiersze: id, canon, in_park, lights, last_seen."""
+    return con.execute(
+        "SELECT t.id, t.telescop_canon AS canon, t.in_park, "
+        "  (SELECT COUNT(*) FROM frame f JOIN config c ON c.id = f.config_id "
+        "   WHERE c.telescope_id = t.id AND f.kind = 'light') AS lights, "
+        "  (SELECT MAX(h.date_obs) FROM frame f JOIN config c ON c.id = f.config_id "
+        "   JOIN header h ON h.frame_id = f.id "
+        "   WHERE c.telescope_id = t.id AND f.kind = 'light') AS last_seen "
+        "FROM telescope t WHERE t.merged_into IS NULL ORDER BY lights DESC"
+    ).fetchall()
+
+
+def object_ids_for_canons(con, canons):
+    """`object_id` dla listy kanonów archiwum (most planer → grid, D-0731-7). Zwraca pary
+    `(id, canon)` — facet Obiekt gridu chce OBU (etykieta chipa bierze kanon, filtr id).
+
+    Wiele kanonów, bo jeden cel katalogu bywa w archiwum pod kilkoma nazwami naraz (`IC410`
+    ORAZ `LBN807`, D-T2-d) — most ma pokazać SUMĘ klatek celu, nie jedną z nazw. Lista idzie
+    przez `json_each(?)` (literał stały, jeden parametr — reguła nagłówka pliku); kanon nieznany
+    bazie po prostu nie ma wiersza, bo „cel bez klatek" to stan, nie błąd."""
+    return con.execute(
+        "SELECT id, canon FROM object WHERE canon IN (SELECT value FROM json_each(?)) "
+        "ORDER BY canon",
+        (json.dumps(list(canons)),),
+    ).fetchall()
+
+
 def telescope_facets(con):
     """Distinct KANONICZNE teleskopy (`merged_into IS NULL`) do kontrolki filtra — żeby filtr pokazywał
     realnie istniejące osie. `telescop_canon` służy za etykietę zastępczą, gdy `label` pusty (teleskop

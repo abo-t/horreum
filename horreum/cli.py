@@ -607,6 +607,7 @@ def _cmd_park(args):
     nieznany bazie kończy się kodem 2 i LISTĄ kanonicznych — park nie powołuje osi (oś wyłania się
     ze skanu), więc literówka nie ma prawa utworzyć wiersza."""
     from . import repo
+    from .gui import queries          # leniwie: `gui.queries` ciągnie `resolver` (koszt startu CLI)
     now = datetime.now(timezone.utc).isoformat()
     con = db.open_db(args.db)
     known = {r["telescop_canon"]: r["id"] for r in con.execute(
@@ -621,14 +622,9 @@ def _cmd_park(args):
             return 2
         if repo.set_telescope_park(con, telescope_id=known[match], in_park=value, now=now):
             changed += 1
-    rows = con.execute(
-        "SELECT t.id, t.telescop_canon AS canon, t.in_park, "
-        "  (SELECT COUNT(*) FROM frame f JOIN config c ON c.id = f.config_id "
-        "   WHERE c.telescope_id = t.id AND f.kind = 'light') AS lights, "
-        "  (SELECT MAX(h.date_obs) FROM frame f JOIN config c ON c.id = f.config_id "
-        "   JOIN header h ON h.frame_id = f.id "
-        "   WHERE c.telescope_id = t.id AND f.kind = 'light') AS last_seen "
-        "FROM telescope t WHERE t.merged_into IS NULL ORDER BY lights DESC").fetchall()
+    # Literał przeniesiony do `gui.queries.park_overview` (T5b) — ten sam przegląd karmi dialog
+    # „Park…" ekranu planera; dwie powierzchnie jednej decyzji liczą lighty JEDNYM zapytaniem.
+    rows = queries.park_overview(con)
     con.close()
     lines = [f"Horreum park {args.db}:" + (f" zmieniono {changed}" if changed else "")]
     lines.append(f"  {'teleskop':<12}{'lighty':>8}  {'ostatnia klatka':<20}park")

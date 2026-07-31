@@ -80,3 +80,6 @@ def test_readmodel_i_init_gui_qt_free():
     # odpowiedź bez GUI, a ekran T5 dopiero je skonsumuje.
     assert not _imports_pyside6(PKG / "sky.py")
     assert not _imports_pyside6(PKG / "targets.py")
+    # T5: view-model ekranu planera (komórki, soczewka chipa, noty nagłówka) MUSI zostać Qt-wolny —
+    # widżet `planner.py` go importuje, a testy prezentacji chodzą bez PySide6 (F4R#11).
+    assert not _imports_pyside6(PKG / "gui" / "planner_model.py")

@@ -1,0 +1,449 @@
+"""EKRAN PLANERA CELÓW (T5c) — „co dziś mam na niebie, w odpowiedniej wielkości i filtrach".
+
+Czwarte miejsce nawigacji (D-0731-6): nie zakładka Porządków, bo badge liczy ROBOTY, a „ile do
+zrobienia" w planerze zależy od suwaka `min_hours` — liczba w nawiasie kłamałaby przy każdej
+zmianie progu. Nie grid, bo wiersz planera to CEL KATALOGU, który nie ma ani jednej klatki
+(D-0731-1), a grid operuje na `frame_ids`.
+
+WARSTWY: widżety tutaj, formatowanie w `planner_model` (Qt-wolne), rachunek w `targets`/`sky`
+(rdzeń NIETKNIĘTY). Ten plik nie liczy nieba i nie formatuje komórek — montuje i steruje.
+
+OFF-THREAD MIMO 0,35 S: rachunek nocy idzie na wątek tła z paskiem nieokreślonym, bo poprzeczką
+jest brak zamrożenia okna, nie zmierzony czas (memory `horreum-gui-long-ops-progress`); przy
+warstwie cirrus i wolniejszym dysku to samo 0,35 s bywa wielokrotnie dłuższe.
+
+PRZERWANIE = UNIEWAŻNIENIE GENERACJĄ, świadomie BEZ haka `should_cancel` w rdzeniu: dokładanie
+przerwania do `targets.plan` byłoby zmianą kontraktu T3 bez potrzeby. Kontrolki zostają AKTYWNE
+w biegu — każda zmiana to nowa generacja, stary wynik ląduje w koszu.
+"""
+from __future__ import annotations
+
+from datetime import date, datetime, timezone
+
+from PySide6.QtCore import (QAbstractTableModel, QDate, QModelIndex, QObject, Qt, QThread, QTimer,
+                            Signal, Slot)
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QDateEdit,
+                               QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView,
+                               QLabel, QLineEdit, QProgressBar, QPushButton, QTableView,
+                               QToolButton, QVBoxLayout, QWidget)
+
+from horreum import db, targets
+from horreum.gui import i18n, planner_model as pm
+
+# Debounce zmian parametrów: pojedyncze kliknięcie w strzałkę spinboxa nie ma prawa startować
+# rachunku nocy, a przytrzymana strzałka wygenerowałaby ich kilkanaście.
+_DEBOUNCE_MS = 300
+
+# Kolumny listy: (klucz i18n, pole `ViewRow`). Jedenaście kolumn MUSI się elidować przy podłodze
+# okna 1146 px — dlatego rozciąga się TYLKO pokrycie, reszta idzie do treści.
+_COLUMNS = (("planner.col_canon", "canon"), ("planner.col_type", "type"),
+            ("planner.col_size", "size"), ("planner.col_culmination", "culmination"),
+            ("planner.col_window", "window"), ("planner.col_rig", "rig"),
+            ("planner.col_coverage", "coverage"), ("planner.col_cost", "cost"),
+            ("planner.col_recommend", "recommend"), ("planner.col_plan", "plan"),
+            ("planner.col_note", "note"))
+_STRETCH_COL = 6            # pokrycie — jedyna kolumna, która ma prawo zjeść nadmiar
+
+_STATUSES = ("planned", "active", "done", "skip")
+
+
+def _utc_now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+
+class PlanWorker(QObject):
+    """Rachunek nocy poza wątkiem GUI (wzorzec `DryWorker` z `projection_dialog`). Otwiera WŁASNE
+    połączenie po `db_path` — `con` głównego wątku nie przechodzi (sqlite `check_same_thread`).
+
+    Wynik niesie GENERACJĘ startu: handler odrzuca stale, więc zmiana parametru w biegu nie kończy
+    się starym planem na ekranie. `PlanResult` jest `frozen`, więc bezpiecznie przechodzi przez
+    sygnał (precedens `stage_done` w `pipeline.py`)."""
+
+    done = Signal(int, object)          # (generacja, targets.PlanResult)
+    failed = Signal(int, str)           # (generacja, komunikat)
+    finished = Signal()
+
+    def __init__(self, db_path, params, gen, con=None):
+        super().__init__()
+        self._db_path = db_path
+        self._con = con                 # tryb inline (testy / baza bez ścieżki) — bieg synchroniczny
+        self._params = dict(params)
+        self._gen = gen
+
+    @Slot()
+    def run(self):
+        try:
+            self.done.emit(self._gen, self._compute())
+        except ValueError as exc:
+            # Baza bez stanowiska z GPS (`targets.plan`) — SZCZERY komunikat zamiast crashu:
+            # planer bez pozycji obserwatora nie ma czego liczyć, a podstawienie „środka Polski"
+            # byłoby kłamstwem.
+            self.failed.emit(self._gen, str(exc))
+        except Exception as exc:
+            self.failed.emit(self._gen, f"{type(exc).__name__}: {exc}")
+        finally:
+            self.finished.emit()
+
+    def _compute(self):
+        own = bool(self._db_path)
+        con = db.connect(self._db_path) if own else self._con
+        try:
+            return targets.plan(con, **self._params)
+        finally:
+            if own:
+                con.close()
+
+
+class PlannerTableModel(QAbstractTableModel):
+    """Model read-only nad `planner_model.ViewRow` (wzorzec `GridTableModel`): karmiony GOTOWYMI
+    komórkami, zero SQL i zero formatowania. Wiersz niewidoczny jest WYSZARZONY, nie ukryty —
+    Księżyc i horyzont wyceniają, nie wycinają (D-0731-14)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._rows = []
+        self._dim = QColor(128, 128, 128)
+
+    def set_rows(self, rows):
+        self.beginResetModel()
+        self._rows = list(rows)
+        self.endResetModel()
+
+    def row_at(self, r):
+        return self._rows[r] if 0 <= r < len(self._rows) else None
+
+    def rowCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self._rows)
+
+    def columnCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(_COLUMNS)
+
+    def headerData(self, section, orientation, role=Qt.DisplayRole):
+        if role != Qt.DisplayRole or orientation != Qt.Horizontal:
+            return None
+        return i18n.t(_COLUMNS[section][0])
+
+    def data(self, index, role=Qt.DisplayRole):
+        if not index.isValid():
+            return None
+        row = self._rows[index.row()]
+        if role == Qt.DisplayRole:
+            return getattr(row, _COLUMNS[index.column()][1])
+        if role == Qt.ForegroundRole and not row.visible:
+            return self._dim
+        if role == Qt.ToolTipRole and not row.visible:
+            return i18n.t("planner.not_visible_tip")
+        return None
+
+
+class PlannerView(QWidget):
+    """Ekran planera: nagłówek nocy + panel sterowania + lista celów.
+
+    DWA UCHWYTY DO BAZY, jawnie w konstruktorze: `db_path` dla workera (własne połączenie w wątku)
+    oraz `con` dla zapisów kuratelii na GŁÓWNYM wątku (T5d). Bez `db_path` (testy, `:memory:`)
+    rachunek idzie inline na `con` — synchronicznie, bez wątku."""
+
+    status_message = Signal(str)
+    show_frames_for = Signal(object)     # T5e: kanony archiwum celu → most do gridu
+
+    def __init__(self, con, db_path=None, now_fn=_utc_now_iso, parent=None, off_thread=True):
+        super().__init__(parent)
+        self.con = con
+        self._db_path = db_path
+        self._now = now_fn
+        self._off_thread = off_thread
+        self._gen = 0
+        self._shown_gen = 0              # generacja, której wynik (albo błąd) stoi na ekranie
+        self._worker = None
+        self._thread = None
+        self._result = None
+        self._rig_chip = None            # None = soczewka „najlepsze dopasowanie" (D-0731-13)
+        self._loading = True             # blokada re-planu na czas budowy kontrolek
+        self._build()
+        self._loading = False
+        self._debounce = QTimer(self)
+        self._debounce.setSingleShot(True)
+        self._debounce.setInterval(_DEBOUNCE_MS)
+        self._debounce.timeout.connect(self.replan)
+        self.replan()
+
+    # ---------------------------------------------------------------- budowa
+
+    def _build(self):
+        outer = QVBoxLayout(self)
+        self.night_label = QLabel("")
+        self.night_label.setWordWrap(True)
+        self.counts_label = QLabel("")
+        self.notes_label = QLabel("")
+        self.notes_label.setWordWrap(True)
+        outer.addWidget(self.night_label)
+        outer.addWidget(self.counts_label)
+        outer.addWidget(self.notes_label)
+        outer.addWidget(self._build_controls())
+        self.chips_row = QHBoxLayout()
+        outer.addLayout(self.chips_row)
+        self.busy = QProgressBar()
+        self.busy.setRange(0, 0)                 # nieokreślony — nie znamy postępu rachunku nocy
+        self.busy.setVisible(False)
+        outer.addWidget(self.busy)
+        self.table = QTableView()
+        self.model = PlannerTableModel(self)
+        self.table.setModel(self.model)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
+        hh = self.table.horizontalHeader()
+        hh.setSectionResizeMode(QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(_STRETCH_COL, QHeaderView.Stretch)
+        hh.setStretchLastSection(False)
+        self.table.setTextElideMode(Qt.ElideRight)     # 11 kolumn ma elidować, nie podnosić minimum okna
+        outer.addWidget(self.table, 1)
+        self.empty_note = QLabel(i18n.t("planner.empty"))
+        self.empty_note.setAlignment(Qt.AlignCenter)
+        self.empty_note.setWordWrap(True)
+        self.empty_note.setVisible(False)
+        outer.addWidget(self.empty_note, 1)
+
+    def _build_controls(self):
+        box = QGroupBox(i18n.t("planner.controls"))
+        lay = QHBoxLayout(box)
+        form = QFormLayout()
+        self.night_edit = QDateEdit()
+        self.night_edit.setCalendarPopup(True)
+        self.night_edit.setSpecialValueText(i18n.t("planner.night_auto"))
+        # Minimum = wartość specjalna „noc bieżąca": DOPÓKI user nie tknie pola, noc wybiera rdzeń
+        # (`targets.default_night` liczy dobę z DŁUGOŚCI stanowiska, nie ze strefy maszyny) —
+        # podstawianie tu `QDate.currentDate()` byłoby DRUGIM właścicielem faktu „która to noc".
+        self.night_edit.setMinimumDate(QDate(1970, 1, 1))
+        self.night_edit.setDate(QDate(1970, 1, 1))
+        self.night_edit.dateChanged.connect(self._queue_replan)
+        form.addRow(i18n.t("planner.night"), self.night_edit)
+
+        self.cirrus = QCheckBox(i18n.t("planner.layer_cirrus"))   # D-0731-9: domyślnie OFF
+        self.cirrus.toggled.connect(self._queue_replan)
+        form.addRow("", self.cirrus)
+
+        self.status_combo = QComboBox()
+        self.status_combo.addItem(i18n.t("planner.status_any"), None)
+        for s in _STATUSES:
+            self.status_combo.addItem(i18n.t(f"planner.status_{s}"), s)
+        self.status_combo.currentIndexChanged.connect(self._queue_replan)
+        form.addRow(i18n.t("planner.status"), self.status_combo)
+        lay.addLayout(form)
+
+        # Progi: RUNTIME, świadomie bez QSettings (D-0731-10 — „w BIEŻĄCYM wyszukiwaniu").
+        thresholds = QFormLayout()
+        self.min_size = self._spin(thresholds, "planner.min_size", 6.0, 0.0, 600.0, 1.0)
+        self.min_dark = self._spin(thresholds, "planner.min_dark", 15.0, 0.0, 600.0, 1.0)
+        self.max_mag = self._spin(thresholds, "planner.max_mag", 13.0, 0.0, 25.0, 0.5)
+        self.min_alt = self._spin(thresholds, "planner.min_alt", 30.0, 0.0, 89.0, 5.0)
+        lay.addLayout(thresholds)
+
+        right = QFormLayout()
+        self.min_hours = self._spin(right, "planner.min_hours", 1.0, 0.0, 100.0, 0.5)
+        cost_row = QHBoxLayout()
+        self.max_cost_on = QCheckBox()            # D-0731-14: próg kosztu domyślnie WYŁĄCZONY
+        self.max_cost_on.toggled.connect(self._on_max_cost_toggled)
+        self.max_cost = QDoubleSpinBox()
+        self.max_cost.setRange(1.0, 100.0)
+        self.max_cost.setSingleStep(0.5)
+        self.max_cost.setValue(3.0)
+        self.max_cost.setEnabled(False)
+        self.max_cost.valueChanged.connect(self._queue_replan)
+        cost_row.addWidget(self.max_cost_on)
+        cost_row.addWidget(self.max_cost)
+        right.addRow(i18n.t("planner.max_cost"), cost_row)
+
+        find_row = QHBoxLayout()
+        self.find_edit = QLineEdit()
+        self.find_edit.setPlaceholderText(i18n.t("planner.find_hint"))
+        self.find_edit.returnPressed.connect(self.replan)
+        btn = QPushButton(i18n.t("planner.find"))
+        btn.clicked.connect(self.replan)
+        find_row.addWidget(self.find_edit, 1)
+        find_row.addWidget(btn)
+        right.addRow(i18n.t("planner.find_label"), find_row)
+        lay.addLayout(right)
+        return box
+
+    def _spin(self, form, key, value, lo, hi, step):
+        w = QDoubleSpinBox()
+        w.setRange(lo, hi)
+        w.setSingleStep(step)
+        w.setValue(value)
+        w.valueChanged.connect(self._queue_replan)
+        form.addRow(i18n.t(key), w)
+        return w
+
+    def _on_max_cost_toggled(self, on):
+        self.max_cost.setEnabled(on)
+        self._queue_replan()
+
+    # ---------------------------------------------------------------- chipy zestawu (soczewka)
+
+    def _rebuild_chips(self, result):
+        """Chipy zestawów w porządku po lightach + „najlepsze dopasowanie" jako pozycja pierwsza.
+        Chip jest SOCZEWKĄ (nic nie znika — `planner_model`), więc przełączenie NIE re-planuje:
+        przelicza tylko komórki z tego samego `PlanResult`."""
+        while self.chips_row.count():
+            item = self.chips_row.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        self._chip_group = QButtonGroup(self)
+        self._chip_group.setExclusive(True)
+        names = (None,) + pm.rig_choices(result)
+        if self._rig_chip not in names:          # zestaw zniknął (inny park) → wracamy do best-fit
+            self._rig_chip = None
+        for name in names:
+            b = QToolButton()
+            b.setCheckable(True)
+            b.setText(i18n.t("planner.chip_best") if name is None else name)
+            b.setChecked(name == self._rig_chip)
+            b.clicked.connect(lambda _c=False, n=name: self._on_chip(n))
+            self._chip_group.addButton(b)
+            self.chips_row.addWidget(b)
+        self.chips_row.addStretch(1)
+
+    def _on_chip(self, name):
+        self._rig_chip = name
+        self._render_rows()
+
+    # ---------------------------------------------------------------- rachunek
+
+    def _params(self):
+        """Parametry rachunku z kontrolek. `night=None` dopóki user nie tknął daty — wtedy noc
+        wybiera rdzeń. Tekst w „Szukaj" włącza tryb `find`, który POMIJA progi (pytasz o konkretny
+        obiekt — masz dostać jego okno, nawet gdy nigdy nie wschodzi); mówi o tym nota nad listą."""
+        qd = self.night_edit.date()
+        night = None if qd == self.night_edit.minimumDate() else date(qd.year(), qd.month(), qd.day())
+        find = self.find_edit.text().strip() or None
+        return {"night": night, "limit": None, "find": find,
+                "layers": targets.ALL_LAYERS if self.cirrus.isChecked() else targets.DEFAULT_LAYERS,
+                "status": self.status_combo.currentData(),
+                "min_size": self.min_size.value(), "min_dark": self.min_dark.value(),
+                "max_mag": self.max_mag.value(), "min_alt": self.min_alt.value(),
+                "min_hours": self.min_hours.value(),
+                "max_cost": self.max_cost.value() if self.max_cost_on.isChecked() else None}
+
+    def _queue_replan(self, *_a):
+        if not self._loading:
+            self._debounce.start()
+
+    def replan(self):
+        """Policz plan pod BIEŻĄCE parametry. Nowa generacja unieważnia wynik w locie — jeden
+        worker naraz, stary wynik ląduje w koszu (kontrolki zostają aktywne)."""
+        self._debounce.stop()
+        self._gen += 1
+        if self._worker is not None:
+            return                       # wynik w biegu i tak przyjdzie ze STARĄ generacją → odrzucony
+        self._start(self._gen)
+
+    def _start(self, gen):
+        self.busy.setVisible(True)
+        worker = PlanWorker(self._db_path, self._params(), gen,
+                            con=None if self._db_path else self.con)
+        worker.done.connect(self._on_done)
+        worker.failed.connect(self._on_failed)
+        self._worker = worker
+        if self._off_thread and self._db_path:
+            self._thread = QThread(self)
+            worker.moveToThread(self._thread)
+            self._thread.started.connect(worker.run)
+            worker.finished.connect(self._thread.quit)
+            self._thread.finished.connect(self._cleanup_thread)
+            self._thread.start()
+        else:
+            try:
+                worker.run()             # inline: done/failed lecą direct = synchronicznie
+            finally:
+                self._worker = None
+                self.busy.setVisible(False)
+
+    def _cleanup_thread(self):
+        # ŚWIĘTA KOLEJNOŚĆ (deadlock AB-BA GIL × ~QThread, natywny dump 2026-07-20 → `08992c4`):
+        # worker.deleteLater() doręcza się w TEARDOWN wątku (Shiboken::Object::destroy →
+        # PyGILState_Ensure). Bez wait() poniższy thread.deleteLater() mógłby doręczyć się na main
+        # ZANIM wątek umrze: ~QThread czekałby na wątek TRZYMAJĄC GIL, a wątek na GIL. wait()
+        # zwalnia GIL, więc wątek dokańcza destrukcję workera i umiera.
+        self._worker.deleteLater()
+        self._thread.wait()
+        self._thread.deleteLater()
+        self._worker = None
+        self._thread = None
+        self.busy.setVisible(False)
+        if self._pending_gen():
+            self._start(self._gen)       # parametry zmieniły się w biegu → licz jeszcze raz
+
+    def _pending_gen(self):
+        """Czy na ekranie stoi coś starszego niż bieżące parametry. Liczymy WYŁĄCZNIE generacjami —
+        „wynik pusty" i „wynik nieudany" to prawidłowe stany ekranu, a nie powód do kolejnego biegu
+        (warunek na `self._result is None` zapętliłby ekran przy bazie bez stanowiska GPS)."""
+        return self._shown_gen != self._gen
+
+    @Slot(int, object)
+    def _on_done(self, gen, result):
+        if gen != self._gen:
+            return                       # stale — świeży bieg wystartuje w cleanupie
+        self._result = result
+        self._shown_gen = gen
+        self._rebuild_chips(result)
+        self._render_header(result)
+        self._render_rows()
+
+    @Slot(int, str)
+    def _on_failed(self, gen, message):
+        if gen != self._gen:
+            return
+        self._result = None
+        self._shown_gen = gen
+        self.model.set_rows(())
+        self.night_label.setText(message)
+        self.counts_label.setText("")
+        self.notes_label.setText("")
+        self.empty_note.setVisible(False)
+        self.table.setVisible(True)
+        self.status_message.emit(message)
+
+    # ---------------------------------------------------------------- render
+
+    def _render_header(self, result):
+        self.night_label.setText(pm.night_text(result))
+        self.counts_label.setText(pm.counts_text(result))
+        notes = [t for _lvl, t in pm.header_notes(result)]
+        if self.find_edit.text().strip():
+            notes.insert(0, i18n.t("planner.find_note"))
+        self.notes_label.setText("\n".join(notes))
+        self.notes_label.setVisible(bool(notes))
+
+    def _render_rows(self):
+        if self._result is None:
+            return
+        rows = pm.view_rows(self._result, self._rig_chip)
+        self.model.set_rows(rows)
+        empty = not rows
+        self.empty_note.setVisible(empty)
+        self.table.setVisible(not empty)
+
+    # ---------------------------------------------------------------- cykl życia
+
+    def selected_row(self):
+        """`planner_model.ViewRow` zaznaczonego wiersza albo None (seam dla panelu i testów)."""
+        sel = self.table.selectionModel()
+        rows = sel.selectedRows() if sel else []
+        return self.model.row_at(rows[0].row()) if rows else None
+
+    def refresh(self):
+        """Świeże klatki (pipeline) zmieniają pokrycie — przelicz nocy od nowa."""
+        self.replan()
+
+    def set_busy(self, running):
+        """W biegu pipeline'u ekran nie liczy planu na wpół zapisanej bazie (spójnie z osiami)."""
+        self.setEnabled(not running)
+
+    def closeEvent(self, event):
+        """Zamknięcie w biegu = unieważnienie generacją; wątek dokańcza i sprząta się sam."""
+        self._gen += 1
+        super().closeEvent(event)

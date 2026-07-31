@@ -63,8 +63,8 @@ def _task_row(win, key):
 def test_otwarte_na_bazie_montuje_widoki(qapp, tmp_path):
     win = MainWindow(_seeded_db(tmp_path))
     try:
-        assert win.stack.count() == 3                  # Dostawa + Zbiory + Porządki (F5)
-        assert win.nav.count() == 3 and not win.nav.isHidden()
+        assert win.stack.count() == 4                  # Dostawa + Zbiory + Porządki (F5) + Planer (T5)
+        assert win.nav.count() == 4 and not win.nav.isHidden()
         # kontrakt aliasów (R#10): osie żyją jako podstrony Porządków, atrybuty zostają
         assert isinstance(win.axis_view, TelescopeAxisView)
         assert isinstance(win.observatory_view, ObservatoryAxisView)
@@ -109,7 +109,7 @@ def test_zmiana_bazy_przemontowuje_i_zamyka_stara(qapp, tmp_path):
         assert win.con is not con_a                    # przejęta nowa baza
         assert win.db_path.endswith("b.db")            # ścieżka aktualna (worker jej potrzebuje)
         assert win.axis_view.table.rowCount() == 0     # pusta → 0 teleskopów
-        assert win.stack.count() == 3                  # przemontowane 3 miejsca, nie nadmontowane
+        assert win.stack.count() == 4                  # przemontowane 4 miejsca, nie nadmontowane
         with pytest.raises(Exception):                 # stare połączenie zamknięte
             con_a.execute("SELECT 1")
     finally:

@@ -1243,7 +1243,10 @@ class TelescopeAxisWindow(QMainWindow):
 
 
 # Miejsca nawigacji (F5, PLAN_ux_redesign §6): indeksy pozycji sidebara == indeksy stron stacku.
-NAV_DOSTAWA, NAV_ZBIORY, NAV_PORZADKI = range(3)
+# NAV_PLANER dołożony w T5 jako CZWARTE miejsce (D-0731-6) — świadomie BEZ badge'a: „ile do
+# zrobienia" zależy u planera od suwaka `min_hours`, więc liczba w nawiasie kłamałaby przy każdej
+# zmianie progu (badge Porządków liczy roboty, które są faktem bazy, nie funkcją parametru).
+NAV_DOSTAWA, NAV_ZBIORY, NAV_PORZADKI, NAV_PLANER = range(4)
 
 
 class MainWindow(QMainWindow):
@@ -1398,6 +1401,7 @@ class MainWindow(QMainWindow):
         from horreum.gui.pipeline import PipelineView          # lazy: Qt-import tylko gdy montujemy
         from horreum.gui.grid import FramesView
         from horreum.gui.tasks import TasksView
+        from horreum.gui.planner import PlannerView
 
         self._clear_views()
         pipeline = PipelineView(self.db_path, now_fn=self._now)
@@ -1421,8 +1425,12 @@ class MainWindow(QMainWindow):
         tasks.open_collection.connect(self._on_open_collection)
         tasks.counts_changed.connect(self._on_tasks_counts)
 
+        planner = PlannerView(self.con, db_path=self.db_path, now_fn=self._now)
+        planner.status_message.connect(self._flash)
+        self.planner_view = planner
+
         for label, widget in ((i18n.t("nav.dostawa"), pipeline), (i18n.t("nav.zbiory"), grid),
-                              (i18n.t("nav.porzadki"), tasks)):
+                              (i18n.t("nav.porzadki"), tasks), (i18n.t("nav.planer"), planner)):
             self.stack.addWidget(widget)
             self.nav.addItem(label)
         self.nav.setVisible(True)
@@ -1440,6 +1448,9 @@ class MainWindow(QMainWindow):
         self.grid_view._load_facets()
         self.grid_view.refresh()
         self.tasks_view.refresh_counts()    # liczniki zadań + badge ze świeżego stanu (F5)
+        # Planer (T5): świeże klatki zmieniają POKRYCIE celów (godziny per kanał), więc plan nocy
+        # policzony przed dostawą pokazywałby stare luki.
+        self.planner_view.refresh()
 
     def _on_open_collection(self, name):
         """Zadanie z Porządków prowadzi do Zbiorów z ustawioną perspektywą (Duplikaty = flaga
@@ -1460,6 +1471,7 @@ class MainWindow(QMainWindow):
         self.observatory_view.set_busy(running)
         self.object_view.set_busy(running)     # „Przypisz obiekt…" (#8/P4) — zapis, gatowany jak inne
         self.grid_view.set_busy(running)     # grid ma akcje ZAPISU (staging/commit/undo) — gatuj (wizytator C1)
+        self.planner_view.set_busy(running)  # planer czyta CAŁE archiwum — nie liczmy nocy na wpół zapisanej bazie
 
     # ---------------------------------------------------------------- menu Plik: Otwórz/Nowa baza
 

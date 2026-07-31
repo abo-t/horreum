@@ -304,8 +304,9 @@ def test_filtr_statusu_i_kolumny_wiersza(con):
 
 
 def test_priorytet_nie_rusza_klucza_sortowania(con):
-    """D-T4-c: pięć członów `_sort_key` wywalczył firsthand T3. Priorytet przed „widoczny"
-    postawiłby na czele listy cel pod horyzontem."""
+    """D-T4-c ROZSTRZYGNIĘTE 2026-07-31 (GO Zdzinia): priorytet NIE wchodzi do porządku listy.
+    Pięć członów `_sort_key` wywalczył firsthand T3; priorytet przed „widoczny" postawiłby na czele
+    listy cel pod horyzontem. Ten test pinuje rozstrzygnięcie, nie tylko stan przejściowy."""
     _park_ready(con)
     base = [r.target.canon for r in targets.plan(con, night=date(2026, 8, 15), limit=None).rows]
     repo.set_target_plan(con, canon=base[-1], status="planned", priority=1, now=NOW)

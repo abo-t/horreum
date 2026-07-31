@@ -582,8 +582,10 @@ def plan(con, *, night=None, site=None, park=None, layers=DEFAULT_LAYERS,
                               recommend_reason=reason, plan_status=mark_status,
                               priority=mark["priority"] if mark is not None else None,
                               note=mark["note"] if mark is not None else None))
-    # Priorytet użytkownika NIE wchodzi do klucza sortowania (D-T4-c): pięć członów `_sort_key`
-    # wywalczył firsthand T3, a priorytet przed „widoczny" postawiłby na czele cel pod horyzontem.
+    # Priorytet użytkownika NIE wchodzi do klucza sortowania (D-T4-c ROZSTRZYGNIĘTE 2026-07-31,
+    # GO Zdzinia — domyślna utrzymana): pięć członów `_sort_key` wywalczył firsthand T3, a priorytet
+    # przed „widoczny" postawiłby na czele cel pod horyzontem. Priorytet zostaje kolumną i filtrem;
+    # ewentualny przełącznik porządku to sort WTÓRNY w widoku, nie zmiana tego klucza.
     rows.sort(key=_sort_key)
     # liczniki opisują NOC, nie wyświetloną listę — dlatego przed limitem (firsthand: „12 widocznych"
     # przy `--limit 12` opisywało długość ekranu, nie niebo)

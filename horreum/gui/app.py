@@ -1348,9 +1348,9 @@ class MainWindow(QMainWindow):
         obs = getattr(self, "observatory_view", None)   # mapa maluje QPainterem — paleta jej nie odświeży (F8)
         if obs is not None:
             obs.map_view.refresh_theme()
-        planner = getattr(self, "planner_view", None)   # szarość wiersza niewidocznego jest per MOTYW (T5)
-        if planner is not None:
-            planner.model.use_theme(name)
+        planner = getattr(self, "planner_view", None)   # akcenty planera są per MOTYW (T5, wiz R2):
+        if planner is not None:                        # wyszarzenie wiersza, ⚠ nota, „bez luk", chipy
+            planner.use_theme(name)
 
     def _build_central(self):
         central = QWidget()

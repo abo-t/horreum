@@ -345,8 +345,11 @@ CATALOG = {
     },
     "planner.max_cost_on": {"pl": "licz próg", "en": "apply threshold"},
     "planner.counts_find": {
-        "pl": "Tryb szukania: {n} trafień dla „{needle}” (progi i horyzont pominięte)",
-        "en": "Search mode: {n} hits for “{needle}” (thresholds and horizon skipped)",
+        "pl": {"one": "Tryb szukania: {n} trafienie dla „{needle}” (progi i horyzont pominięte)",
+               "few": "Tryb szukania: {n} trafienia dla „{needle}” (progi i horyzont pominięte)",
+               "many": "Tryb szukania: {n} trafień dla „{needle}” (progi i horyzont pominięte)"},
+        "en": {"one": "Search mode: {n} hit for “{needle}” (thresholds and horizon skipped)",
+               "other": "Search mode: {n} hits for “{needle}” (thresholds and horizon skipped)"},
     },
     "planner.empty_find": {
         "pl": "Nie znam celu „{needle}” — sprawdź nazwę albo oznaczenie katalogowe (np. NGC7000, Sh2-155).",

@@ -157,6 +157,32 @@ def test_panel_nie_przenosi_statusu_na_kolejny_cel(view):
     assert view.save_btn.isEnabled() is True
 
 
+def test_zapisz_nie_jest_martwym_przyciskiem_od_startu(view):
+    """Wiz T5 R1 (P1, regresja MOJEJ poprawki #1): `_sync_save_enabled` wisiało tylko na
+    `currentIndexChanged`, a `setCurrentIndex(0)` na indeksie JUŻ zerowym nie emituje sygnału —
+    więc „Zapisz" zostawał aktywny (bold + pierścień domyślnego) od startu do pierwszej zmiany
+    statusu. Trafiało to w 392/429 celów i w PIERWSZY klik każdej sesji."""
+    assert view.save_btn.isEnabled() is False          # zanim cokolwiek zaznaczono
+    view.table.selectRow(0)                            # cel nietknięty (fixture nic nie oznacza)
+    assert view.panel_status.currentData() is None
+    assert view.save_btn.isEnabled() is False          # ...i nadal, BEZ zmiany indeksu
+    view.table.clearSelection()
+    assert view.save_btn.isEnabled() is False
+
+
+def test_akcenty_ida_za_motywem(view):
+    """Wiz T5 R2: kolory wisiały na `theme.DEFAULT` (ciemnym), a `main` ustawia motyw PRZED budową
+    okna — jasny start dostawał akcenty ciemne (wyszarzenie 2,38:1 na białym, gorzej niż sztywne
+    128 sprzed „naprawy")."""
+    from horreum.gui import theme
+    view.use_theme("light")
+    assert view.model._dim.name().lower() == theme.accents("light")["secondary_text"].lower()
+    assert theme.accents("light")["gold"] in view.warn_label.styleSheet()
+    assert theme.palette_spec("light")["highlight"] in view._chip_qss
+    view.use_theme("dark")
+    assert view.model._dim.name().lower() == theme.accents("dark")["secondary_text"].lower()
+
+
 def test_stara_generacja_nie_trafia_na_ekran(view):
     """Wynik w locie unieważniamy generacją (przerwanie BEZ haka w rdzeniu — kontrakt T3 nietknięty)."""
     stale = view._gen - 1

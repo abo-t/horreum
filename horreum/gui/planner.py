@@ -20,8 +20,8 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 
-from PySide6.QtCore import (QAbstractTableModel, QDate, QModelIndex, QObject, Qt, QThread, QTimer,
-                            Signal, Slot)
+from PySide6.QtCore import (QAbstractTableModel, QDate, QModelIndex, QObject, QSettings, Qt,
+                            QThread, QTimer, Signal, Slot)
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QDateEdit,
                                QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QGroupBox,
@@ -259,6 +259,10 @@ class PlannerView(QWidget):
         self._rig_chip = None            # None = soczewka „najlepsze dopasowanie" (D-0731-13)
         self._loading = True             # blokada re-planu na czas budowy kontrolek
         self._build()
+        # Motyw ŻYWY, nie `DEFAULT` (wiz T5 R2): `main` woła `apply_theme` PRZED budową okna,
+        # więc widok musi sam przeczytać wybór użytkownika, inaczej jasny start dostaje akcenty
+        # ciemne (kontrast 2,0–2,4:1).
+        self.use_theme(QSettings("Horreum", "Horreum").value("ui/theme", theme.DEFAULT))
         self._loading = False
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
@@ -272,17 +276,28 @@ class PlannerView(QWidget):
         outer = QVBoxLayout(self)
         self.night_label = QLabel("")
         self.night_label.setWordWrap(True)
+        nf = self.night_label.font()          # kotwica nagłówka WAGĄ, nie tylko kolorem (wiz T5 R6)
+        nf.setBold(True)
+        nf.setPointSizeF(nf.pointSizeF() * 1.15)
+        self.night_label.setFont(nf)
         self.counts_label = QLabel("")
         self.notes_label = QLabel("")
         self.notes_label.setWordWrap(True)
         head = QHBoxLayout()
-        head.addWidget(self.night_label, 1)
+        head.addWidget(self.night_label)
         # „Szukaj" NA ZEWNĄTRZ zwijanego panelu (wiz T5 #3): to inny TRYB (pomija progi), więc musi
         # przeżyć zwinięcie progów — schowany razem z nimi znikał jedyną drogą do celu spoza progów.
         self.find_edit = QLineEdit()
         self.find_edit.setPlaceholderText(i18n.t("planner.find_hint"))
-        self.find_edit.setMaximumWidth(260)
+        # MINIMUM, nie tylko maksimum (wiz T5 R3): po przeprowadzce do nagłówka pole ściskało się
+        # do 74 px przy placeholderze wymagającym 127 — wejście do trybu, który zwijanie progów
+        # miało uratować, było najmniejszą kontrolką ekranu. Krzyżyk = wyjście z trybu jednym klikiem.
+        self.find_edit.setMinimumWidth(200)
+        self.find_edit.setMaximumWidth(320)
+        self.find_edit.setClearButtonEnabled(True)
         self.find_edit.returnPressed.connect(self.replan)
+        head.addStretch(1)
+        head.addWidget(QLabel(i18n.t("planner.find_label")))
         head.addWidget(self.find_edit)
         find_btn = QPushButton(i18n.t("planner.find"))
         find_btn.clicked.connect(self.replan)
@@ -497,6 +512,26 @@ class PlannerView(QWidget):
 
     # ---------------------------------------------------------------- chipy zestawu (soczewka)
 
+    def use_theme(self, name):
+        """Akcenty CAŁEGO ekranu z ŻYWEGO motywu (wiz T5 R2). Wcześniej wszystkie nowe kolory
+        wisiały na `theme.DEFAULT` (ciemnym), a `main` woła `apply_theme` PRZED budową okna —
+        start w motywie jasnym malował planera akcentami ciemnymi. Zmierzone skutki: wyszarzenie
+        wiersza 2,38:1 na białym (sztywne `128` sprzed poprawki dawało 3,95 — „naprawa" pogorszyła
+        dokładnie ten motyw, który miała ratować), ⚠ nota 1,99:1, „bez luk" 2,21:1."""
+        self._theme = theme.normalize(name)
+        a = theme.accents(self._theme)
+        p = theme.palette_spec(self._theme)
+        self.warn_label.setStyleSheet(f"color: {a['gold']};")
+        self.no_gaps_label.setStyleSheet(f"color: {a['ok_green']};")
+        self._chip_qss = (
+            "QToolButton:checked { background: %s; color: %s; font-weight: bold; "
+            "border: 1px solid %s; border-radius: 3px; padding: 2px 8px; }"
+            "QToolButton { padding: 2px 8px; }" % (p["highlight"], p["highlight_text"], a["gold"]))
+        group = getattr(self, "_chip_group", None)
+        for b in (group.buttons() if group is not None else ()):
+            b.setStyleSheet(self._chip_qss)
+        self.model.use_theme(self._theme)
+
     def _rebuild_chips(self, result):
         """Chipy zestawów w porządku po lightach + „najlepsze dopasowanie" jako pozycja pierwsza.
         Chip jest SOCZEWKĄ (nic nie znika — `planner_model`), więc przełączenie NIE re-planuje:
@@ -511,14 +546,8 @@ class PlannerView(QWidget):
         # Etykieta mówi WPROST, że to soczewka, a nie filtr (wiz T5 #2 P1): sam pasek nazw
         # teleskopów czytał się jak zawężanie listy, choć zmienia dwie KOLUMNY, nie zbiór.
         self.chips_row.addWidget(QLabel(i18n.t("planner.chips_label")))
-        a = theme.accents(theme.DEFAULT)
-        # Zaznaczony chip na kolorze zaznaczenia motywu: zmierzone 64 vs 81 na tle 43 (różnica
-        # 17/255, i to zaznaczony był CIEMNIEJSZY) nie odróżniało soczewki od reszty.
-        chip_qss = ("QToolButton:checked { background: %s; color: %s; font-weight: bold; "
-                    "border: 1px solid %s; border-radius: 3px; padding: 2px 8px; }"
-                    "QToolButton { padding: 2px 8px; }"
-                    % (theme.palette_spec(theme.DEFAULT)["highlight"],
-                       theme.palette_spec(theme.DEFAULT)["highlight_text"], a["gold"]))
+        # Zaznaczony chip na kolorze zaznaczenia ŻYWEGO motywu (`use_theme`): zmierzone 64 vs 81
+        # na tle 43 (różnica 17/255, i to zaznaczony był CIEMNIEJSZY) nie odróżniało soczewki.
         names = (None,) + pm.rig_choices(result)
         if self._rig_chip not in names:          # zestaw zniknął (inny park) → wracamy do best-fit
             self._rig_chip = None
@@ -527,7 +556,7 @@ class PlannerView(QWidget):
             b.setCheckable(True)
             b.setText(i18n.t("planner.chip_best") if name is None else name)
             b.setChecked(name == self._rig_chip)
-            b.setStyleSheet(chip_qss)
+            b.setStyleSheet(self._chip_qss)
             b.setToolTip(i18n.t("planner.chip_tip"))
             b.clicked.connect(lambda _c=False, n=name: self._on_chip(n))
             self._chip_group.addButton(b)
@@ -650,7 +679,7 @@ class PlannerView(QWidget):
         self.night_label.setText(pm.night_text(result))
         # W trybie `find` lejek („1560 → 1 po progach") kłamał: progi są pominięte (wiz T5 #7).
         self.counts_label.setText(
-            i18n.t("planner.counts_find", n=len(result.rows), needle=find) if find
+            i18n.t_plural("planner.counts_find", len(result.rows), needle=find) if find
             else pm.counts_text(result))
         warns, infos = [], []
         for level, text in pm.header_notes(result):
@@ -710,6 +739,7 @@ class PlannerView(QWidget):
             self.panel_note.setText("")
             self.no_gaps_label.setText("")
             self.panel_status.setCurrentIndex(0)
+            self._sync_save_enabled()      # patrz niżej — `setCurrentIndex(0)` na zerze MILCZY
             return
         src = row.source
         # Kanon w TYTULE panelu (wiz T5 #8): etykieta w rzędzie kontrolek była ściskana przez
@@ -719,6 +749,11 @@ class PlannerView(QWidget):
         # BEZWARUNKOWO — także przy `None` (wtedy „(bez oznaczenia)"): inaczej combo trzyma
         # status poprzedniego celu i „Zapisz" wpisuje cudze zdanie (wiz T5 #1, P1).
         self.panel_status.setCurrentIndex(max(0, self.panel_status.findData(src.plan_status)))
+        # Stan przycisku ustawiamy WPROST, nie licząc na sygnał (wiz T5 R1, P1): `setCurrentIndex(0)`
+        # na indeksie już zerowym NIE emituje `currentIndexChanged`, więc „Zapisz" zostawał
+        # aktywny (bold + pierścień domyślnego) od startu aplikacji do pierwszej zmiany statusu —
+        # najczęstszy pierwszy klik sesji trafiał w martwy przycisk i nie dostawał nawet komunikatu.
+        self._sync_save_enabled()
         self.panel_priority.setValue(src.priority or 0)
         self.panel_note.setText(src.note or "")
         self.frames_btn.setEnabled(pm.can_show_frames(src))

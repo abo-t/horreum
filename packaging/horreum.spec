@@ -53,6 +53,7 @@ hiddenimports = [
     "astropy.io.fits",
     "horreum.schema.migrations",
     "horreum.resolve.data",
+    "horreum.data",
     "horreum.gui.assets",
 ]
 

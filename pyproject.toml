@@ -31,6 +31,7 @@ include = ["horreum*"]
 # nie znajdzie migracji ani uniwersaliów katalogowych w runtime.
 "horreum.schema.migrations" = ["*.sql"]
 "horreum.resolve.data" = ["*.json"]
+"horreum.data" = ["*.json"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

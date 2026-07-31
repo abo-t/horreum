@@ -120,6 +120,18 @@ def test_niewidoczny_wiersz_zostaje_wyszarzony_nie_ukryty(view):
     assert view.model.data(idx, Qt.ToolTipRole)
 
 
+def test_panel_wyszukiwania_zwija_sie(view):
+    """Firsthand T5f: rozwinięty panel zjada ~100 px pionu, a przy podłodze okna 1146×760 lista
+    schodzi do kilkunastu wierszy. Zwinięcie chowa TREŚĆ, tytuł zostaje — user wie, że progi żyją."""
+    box = view.min_hours.parent().parent()               # QGroupBox „Wyszukiwanie"
+    assert box.isCheckable() and box.isChecked()
+    body = view.min_hours.parent()
+    box.setChecked(False)
+    assert body.isHidden() is True        # `isVisible` byłoby False także dla niepokazanego okna
+    box.setChecked(True)
+    assert body.isHidden() is False
+
+
 def test_stara_generacja_nie_trafia_na_ekran(view):
     """Wynik w locie unieważniamy generacją (przerwanie BEZ haka w rdzeniu — kontrakt T3 nietknięty)."""
     stale = view._gen - 1

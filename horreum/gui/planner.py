@@ -170,7 +170,9 @@ class ParkDialog(QDialog):
         self._combos = {}
         for r, row in enumerate(rows):
             self._fill(r, row)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        hh = self.table.horizontalHeader()
+        hh.setSectionResizeMode(QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(self.COL_PARK, QHeaderView.Stretch)   # combo wypełnia dialog (firsthand)
         lay.addWidget(self.table)
         box = QDialogButtonBox(QDialogButtonBox.Close)
         box.rejected.connect(self.reject)
@@ -322,8 +324,18 @@ class PlannerView(QWidget):
         return self.panel
 
     def _build_controls(self):
+        # ZWIJANY (firsthand T5f): rozwinięty panel zjada ~100 px pionu, a przy podłodze okna
+        # 1146×760 lista celów schodzi wtedy do kilkunastu wierszy. Zwinięcie chowa TREŚĆ, a nie
+        # sam pasek — tytuł zostaje widoczny, więc user wie, że progi wciąż działają.
         box = QGroupBox(i18n.t("planner.controls"))
-        lay = QHBoxLayout(box)
+        box.setCheckable(True)
+        box.setChecked(True)
+        outer = QVBoxLayout(box)
+        body = QWidget()
+        box.toggled.connect(body.setVisible)
+        outer.addWidget(body)
+        lay = QHBoxLayout(body)
+        lay.setContentsMargins(0, 0, 0, 0)
         form = QFormLayout()
         self.night_edit = QDateEdit()
         self.night_edit.setCalendarPopup(True)

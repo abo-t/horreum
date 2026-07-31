@@ -36,6 +36,13 @@ filtrach" — z katalogu, Twojego sprzętu, nocy i tego, co już masz w archiwum
 - **Scalenie teleskopów nie gubi parku** — deklaracja idzie za sprzętem; dwa sprzeczne zdania
   o jednym sprzęcie kończą się odmową, nie cichym wyborem jednego z nich.
 
+### Naprawione
+- **Program mówi prawdę o swojej wersji.** Numer widnieje teraz w **tytule okna** —
+  wydanie jedzie do Ciebie jako jeden plik `horreum-gui.exe`, więc okno jest jedyną powierzchnią,
+  na której da się sprawdzić, co masz. Wcześniej `horreum --version` w wydaniu 0.4.0 odpowiadał
+  `horreum 0.3.2`: numer był wpisany z ręki w dwóch miejscach naraz i rozjechał się o dwa wydania.
+  Teraz jest jeden, czytany.
+
 ## [0.4.0] — 2026-07-23
 
 Angielski interfejs, ręczne przypisanie obiektu, wykrywanie zniknięć kopii, oś kalibracji z rodowodem

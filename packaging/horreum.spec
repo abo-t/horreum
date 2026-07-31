@@ -34,7 +34,7 @@ u korzenia, gdyby ktoś zbudował w brudnym env); w czystym venv większość to
 
 import os
 
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_data_files, copy_metadata
 
 # SPECPATH = katalog tego pliku (packaging/); korzeń repo o poziom wyżej.
 REPO_ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
@@ -46,6 +46,9 @@ ICON = os.path.join(SPECPATH, "horreum.ico")
 # collect_data_files zachowuje strukturę pakietu → importlib.resources czyta z _internal/horreum/...
 datas = collect_data_files("astropy")
 datas += collect_data_files("horreum", includes=["**/*.sql", "**/*.json"])
+# Metadane paczki — JEDYNY właściciel numeru wersji (`horreum/__init__.py`). Bez nich frozen
+# `horreum --version` odpowiada „nieznana”: dist-info nie wchodzi do exe samo z siebie.
+datas += copy_metadata("horreum")
 
 # astropy.io.fits = jedyny używany submoduł; pakiety-data referowane tylko stringiem (#1):
 # migracje .sql, katalog .json, oraz asset mapy stanowisk .json (F8 — `resources.files(pkg)`).

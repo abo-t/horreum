@@ -1269,7 +1269,11 @@ class MainWindow(QMainWindow):
         # Wstrzykiwane wywołanie zwrotne „zmieniono bazę" (wzór jak `now_fn`): `main` podpina tu zapis
         # ostatniej ścieżki do trwałych ustawień; testy go nie podają → brak skutków ubocznych.
         self._on_db_changed = on_db_changed
-        self.setWindowTitle("Horreum")
+        # Numer wersji W TYTULE, bo wydanie jedzie do użytkownika jako JEDEN plik `horreum-gui.exe`
+        # (onefile — CLI `horreum --version` nie powstaje) i okno jest wtedy jedyną powierzchnią,
+        # na której da się sprawdzić, co się ma. Numer czytany, nie pisany (`horreum/__init__.py`).
+        from .. import __version__
+        self.setWindowTitle(f"Horreum {__version__}")
         self.resize(1000, 620)
         self._build_menu()
         self._build_central()

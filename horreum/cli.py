@@ -8,7 +8,21 @@ import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-from . import __version__, db
+from . import db
+
+
+class _VersionAction(argparse.Action):
+    """`--version` sięga po numer DOPIERO przy użyciu flagi. `importlib.metadata` (jedyny
+    właściciel numeru — patrz `horreum/__init__.py`) kosztuje ~45 ms, czyli więcej niż cały
+    import CLI; ta sama dyscyplina leniwości co `_layout` niżej."""
+
+    def __init__(self, option_strings, dest, help=None):
+        super().__init__(option_strings, dest, nargs=0, default=argparse.SUPPRESS, help=help)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        from . import __version__
+        print(f"horreum {__version__}")
+        parser.exit()
 
 
 def _layout(name):
@@ -35,7 +49,7 @@ def main(argv=None):
             pass
 
     parser = argparse.ArgumentParser(prog="horreum", description="Horreum — biblioteka astrofoto deep-sky")
-    parser.add_argument("--version", action="version", version=f"horreum {__version__}")
+    parser.add_argument("--version", action=_VersionAction, help="wypisz wersję i zakończ")
     sub = parser.add_subparsers(dest="cmd")
 
     p_init = sub.add_parser("init", help="utwórz/zmigruj bazę Horreum")

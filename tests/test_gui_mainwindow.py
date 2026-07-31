@@ -60,6 +60,18 @@ def _task_row(win, key):
     return it.text(), it.data(rows.SECONDARY)
 
 
+def test_tytul_okna_niesie_numer_wersji(qapp, tmp_path):
+    """Wydanie jedzie do użytkownika jako JEDEN `horreum-gui.exe` (onefile — CLI `--version` tam
+    nie powstaje), więc TYTUŁ jest jedyną powierzchnią, na której da się sprawdzić, co się ma.
+    Numer czytany z jedynego właściciela (`pyproject.toml`) — bramka klasy: `tests/test_version.py`."""
+    import horreum
+    win = MainWindow(_seeded_db(tmp_path))
+    try:
+        assert win.windowTitle() == f"Horreum {horreum.__version__}"
+    finally:
+        win.close()
+
+
 def test_otwarte_na_bazie_montuje_widoki(qapp, tmp_path):
     win = MainWindow(_seeded_db(tmp_path))
     try:

@@ -27,7 +27,7 @@ Analysis. `excludes` nizej rozbraja tez kaskade fsspec/holoviz. Buduj z .venv-bu
 
 import os
 
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_data_files, copy_metadata
 
 # SPECPATH = katalog tego pliku (packaging/); korzen repo o poziom wyzej.
 REPO_ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
@@ -38,6 +38,9 @@ ICON = os.path.join(SPECPATH, "horreum.ico")
 # Dane astropy (erfa/IERS) + assety pakietu horreum (.sql migracje, .json katalog + mapa).
 datas = collect_data_files("astropy")
 datas += collect_data_files("horreum", includes=["**/*.sql", "**/*.json"])
+# Metadane paczki = JEDYNY wlasciciel numeru wersji (`horreum/__init__.py`). Bez nich frozen
+# `horreum --version` odpowiada "nieznana": dist-info nie wchodzi do exe samo z siebie.
+datas += copy_metadata("horreum")
 
 # Pakiety referowane WYLACZNIE stringiem przez importlib.resources — graf ich nie widzi.
 hiddenimports = [

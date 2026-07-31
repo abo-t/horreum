@@ -75,3 +75,8 @@ def test_readmodel_i_init_gui_qt_free():
     # PRZED oknem (i18n QSettings nie tyka). Testy `t`/`t_plural` chodzą bez PySide6.
     assert not _imports_pyside6(PKG / "gui" / "i18n.py")
     assert not _imports_pyside6(PKG / "gui" / "i18n_catalog.py")
+    # PLANER (T1/T3): `sky.py` i `targets.py` importują `gui.queries` (SPOT: stanowiska, godziny
+    # per obiekt×filtr), a mimo to MUSZĄ zostać Qt-wolne — CLI `horreum plan` ma dawać pełną
+    # odpowiedź bez GUI, a ekran T5 dopiero je skonsumuje.
+    assert not _imports_pyside6(PKG / "sky.py")
+    assert not _imports_pyside6(PKG / "targets.py")

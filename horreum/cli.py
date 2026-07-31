@@ -5,7 +5,7 @@ import argparse
 import json
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from . import __version__, db
@@ -53,6 +53,29 @@ def main(argv=None):
 
     p_delta = sub.add_parser("delta", help="delta do review (read-only): %% obiektu + nierozstrzygnięte")
     p_delta.add_argument("db", help="ścieżka pliku bazy")
+
+    p_plan = sub.add_parser("plan",
+                            help="planer celów (read-only): co dziś na niebie, w jakim kadrze, "
+                                 "czego brakuje i ile kosztuje Księżyc")
+    p_plan.add_argument("db", help="ścieżka pliku bazy")
+    p_plan.add_argument("--night", help="data WIECZORU (YYYY-MM-DD); domyślnie noc, która ma sens teraz")
+    p_plan.add_argument("--park", help="lista teleskopów po przecinku (domyślnie wszystkie z bazy)")
+    p_plan.add_argument("--layers", default="core",
+                        help="warstwy katalogu: core|cirrus|core,cirrus (curated ZAWSZE)")
+    p_plan.add_argument("--min-size", type=float, default=6.0, help="próg rozmiaru [']")
+    p_plan.add_argument("--min-dark", type=float, default=15.0, help="próg rozmiaru ciemnej [']")
+    p_plan.add_argument("--max-mag", type=float, default=13.0, help="próg magnitudo GALAKTYK")
+    p_plan.add_argument("--min-alt", type=float, default=30.0, help="próg wysokości [deg]")
+    p_plan.add_argument("--min-hours", type=float, default=1.0, help="ile godzin kanału to pokrycie")
+    p_plan.add_argument("--max-cost", type=float, default=None,
+                        help="odetnij cele droższe niż N× (domyślnie BEZ progu — D-0731-14)")
+    p_plan.add_argument("--overlap", type=float, default=0.10, help="zakładka mozaiki (0..1)")
+    p_plan.add_argument("--gaps", action="store_true", help="tylko cele z luką")
+    p_plan.add_argument("--new", action="store_true", help="tylko cele nigdy nie fotografowane")
+    p_plan.add_argument("--find", help="szukaj po kanonie ORAZ nazwach potocznych (pomija progi)")
+    p_plan.add_argument("--limit", type=int, default=30, help="ile wierszy (domyślnie 30)")
+    p_plan.add_argument("--all", action="store_true", help="bez limitu wierszy")
+    p_plan.add_argument("--json", action="store_true", help="wyjście maszynowe")
 
     p_bx = sub.add_parser("backfill-xisf",
                           help="doczytaj cards+header_hash do lokacji XISF sprzed P6a (jednorazowo)")
@@ -173,6 +196,35 @@ def main(argv=None):
         rep = delta_report(con)
         con.close()
         print(_format_delta(args.db, rep))               # ASCII (cp1250)
+        return 0
+    if args.cmd == "plan":
+        from . import targets                             # lazy: Qt-wolne, astropy niepotrzebne
+        # READ-ONLY: `connect`, NIE `open_db` — komenda czytająca nie ma prawa podnieść schematu
+        # żywego archiwum (T3 §0). Niezgodna wersja = jawny błąd, nie milcząca migracja.
+        con = db.connect(args.db)
+        version = db._user_version(con)
+        if version != db.SCHEMA_VERSION:
+            con.close()
+            print(f"Horreum plan: baza {args.db} ma schemat v{version}, kod oczekuje "
+                  f"v{db.SCHEMA_VERSION} — uruchom `horreum init {args.db}` (plan nie migruje).")
+            return 2
+        try:
+            result = targets.plan(
+                con,
+                night=date.fromisoformat(args.night) if args.night else None,
+                park=[p.strip() for p in args.park.split(",")] if args.park else None,
+                layers=tuple(x.strip() for x in args.layers.split(",") if x.strip()),
+                min_size=args.min_size, min_dark=args.min_dark, max_mag=args.max_mag,
+                min_alt=args.min_alt, min_hours=args.min_hours, max_cost=args.max_cost,
+                overlap=args.overlap, only_gaps=args.gaps, only_new=args.new, find=args.find,
+                limit=None if args.all else args.limit)
+        except ValueError as e:                           # brak stanowiska z GPS / zła warstwa
+            con.close()
+            print(f"Horreum plan: {e}")
+            return 2
+        con.close()
+        print(json.dumps(_plan_json(result), ensure_ascii=False, indent=1) if args.json
+              else _format_plan(args.db, result))
         return 0
     if args.cmd == "backfill-xisf":
         from .scan import backfill_xisf_headers          # lazy (astropy przez scan)
@@ -480,6 +532,110 @@ def _format_project(root, res, proj, *, limit):
     if res.do_apply:
         lines.append(f"  manifest: {Path(root) / MANIFEST_NAME}")
     return "\n".join(lines)
+
+
+def _hhmm(dt):
+    return "--:--" if dt is None else dt.strftime("%H:%M")
+
+
+def _coverage_text(row):
+    """Pokrycie jednym zdaniem: co jest (godziny per kanał) i czego brakuje. Nazwa, POD KTÓRĄ
+    użytkownik ma klatki, jedzie wprost, gdy różni się od kanonu wiersza (D-T2-d)."""
+    from . import targets as T
+    cov = row.coverage
+    if not cov.known:
+        return "nigdy"
+    parts = []
+    alien = [c for c in cov.archive_canons if c != row.target.canon]
+    if alien:
+        parts.append("u Ciebie: " + "/".join(alien))
+    for ch in (T.RGB,) + T.NARROW_CHANNELS:
+        hours = cov.hours_by_channel.get(ch, 0.0)
+        if hours > 0:
+            parts.append(f"{ch} {hours:.1f}h")
+    if cov.gaps:
+        parts.append("brak " + "/".join(cov.gaps))
+    return ", ".join(parts)
+
+
+def _format_plan(db_path, res):
+    """Plan nocy do czytelnego ASCII (konsola Windows = cp1250 — bez znaków spoza ASCII)."""
+    site = res.site
+    lines = [f"Horreum plan {db_path}: noc {res.night_date}, {site.name or 'stanowisko'} "
+             f"({site.lat_deg:.2f}N {site.lon_deg:.2f}E)"]
+    nw = res.night
+    astro = (f" (astronomiczna {_hhmm(nw.astro_start)}-{_hhmm(nw.astro_end)})"
+             if nw.astro_idx else " (bez nocy astronomicznej)")
+    lines.append(f"  ciemnosc zeglarska {_hhmm(nw.dark_start)}-{_hhmm(nw.dark_end)} UTC{astro}, "
+                 f"Ksiezyc {res.moon.illumination * 100:.0f}% alt {res.moon.alt_deg:.0f}")
+    c = res.counts
+    lines.append(f"  cele: {c['pool']} -> {c['feasible']} po progach -> {c['above_horizon']} "
+                 f"nad horyzontem -> {c['visible']} widocznych")
+    for rig in res.rigs:
+        lines.append(f"  zestaw {rig.telescope}: kadr {rig.fov_x_arcmin:.0f}'x{rig.fov_y_arcmin:.0f}'"
+                     f", kamery {'/'.join(rig.cameras)}{'' if rig.mono else ' (tylko OSC)'}")
+    for rig in res.skipped_rigs:
+        lines.append(f"  zestaw {rig.telescope} POZA planem: {rig.reason}")
+    if res.unfiltered_mono:
+        lines.append(f"  UWAGA: {res.unfiltered_mono} lightow bez filtra na kamerze mono — "
+                     f"kubelek RGB moze byc zanieczyszczony")
+    lines.append("")
+    lines.append(f"  {'cel':<14}{'typ':<6}{'rozm':>6}{'kulm':>6}{'h>':>5}  {'zestaw':<17}"
+                 f"{'koszt B/D/N':<14}{'rada':<6}pokrycie")
+    for row in res.rows:
+        rig = row.best_rig
+        fr = row.framing.get(rig.telescope) if rig is not None else None
+        rig_txt = "-" if fr is None else (
+            f"{rig.telescope} " + ("1 kadr" if fr.panels == 1 else f"mozaika {fr.panels}"))
+        cost = row.cost
+        cost_txt = (f"{cost['broadband']:.1f}/{cost['duoband']:.1f}/{cost['narrowband']:.1f}")
+        lines.append(
+            f"  {row.target.canon:<14}{row.target.type:<6}"
+            f"{row.target.major_arcmin:>5.0f}'{row.window.max_alt_deg:>6.1f}"
+            f"{row.window.hours_above:>5.1f}  {rig_txt:<17}{cost_txt:<14}"
+            f"{row.recommend or '-':<6}{_coverage_text(row)}")
+    if res.hidden:
+        lines.append(f"  ... {res.hidden} wierszy ukrytych limitem (--all zdejmuje)")
+    if res.unmatched:
+        top = sorted(res.unmatched.items(), key=lambda kv: -kv[1])
+        shown = ", ".join(f"{k} {v:.1f}h" for k, v in top[:5])
+        lines.append(f"  godziny bez celu w katalogu: {shown}"
+                     + (f" (+{len(top) - 5})" if len(top) > 5 else ""))
+    return "\n".join(lines)
+
+
+def _plan_json(res):
+    """Ten sam materiał maszynowo — wejście dla T5 i dla firsthandu."""
+    return {
+        "night": res.night_date.isoformat(),
+        "site": {"name": res.site.name, "lat": res.site.lat_deg, "lon": res.site.lon_deg},
+        "dark": {"start": res.night.dark_start.isoformat() if res.night.dark_start else None,
+                 "end": res.night.dark_end.isoformat() if res.night.dark_end else None,
+                 "darkness": res.night.darkness},
+        "moon": {"illumination": res.moon.illumination, "alt_deg": res.moon.alt_deg},
+        "counts": res.counts,
+        "hidden": res.hidden,
+        "rigs": [{"telescope": r.telescope, "fov_x": r.fov_x_arcmin, "fov_y": r.fov_y_arcmin,
+                  "cameras": list(r.cameras), "mono": r.mono, "lights": r.lights}
+                 for r in res.rigs],
+        "skipped_rigs": [{"telescope": r.telescope, "reason": r.reason} for r in res.skipped_rigs],
+        "unmatched": {k: round(v, 3) for k, v in sorted(res.unmatched.items())},
+        "rows": [{
+            "canon": row.target.canon, "type": row.target.type,
+            "major_arcmin": row.target.major_arcmin, "minor_arcmin": row.target.minor_arcmin,
+            "ra_deg": row.target.ra_deg, "dec_deg": row.target.dec_deg, "layer": row.target.layer,
+            "max_alt_deg": round(row.window.max_alt_deg, 2),
+            "hours_above": row.window.hours_above, "visible": row.window.visible,
+            "framing": {k: {"panels": v.panels, "fill": round(v.fill, 3)}
+                        for k, v in row.framing.items()},
+            "best_rig": row.best_rig.telescope if row.best_rig else None,
+            "cost": {k: round(v, 3) for k, v in row.cost.items()},
+            "recommend": row.recommend, "recommend_reason": row.recommend_reason,
+            "archive_canons": list(row.coverage.archive_canons),
+            "hours_by_channel": {k: round(v, 3) for k, v in row.coverage.hours_by_channel.items()},
+            "gaps": list(row.coverage.gaps),
+        } for row in res.rows],
+    }
 
 
 def _format_delta(db_path, rep):

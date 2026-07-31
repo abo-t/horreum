@@ -49,6 +49,9 @@ from datetime import date
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from horreum.resolve.catalog import catalog_canon, xref  # noqa: E402
+# Taksonomia typów ma JEDNEGO właściciela — `horreum.targets` (T3 §3). Skrypt ją IMPORTUJE:
+# gdyby trzymał kopię, filtr planera i podłoga assetu mogłyby się rozjechać po cichu.
+from horreum.targets import DARK_TYPES, GALAXY_TYPES, NEBULA_TYPES  # noqa: E402
 
 OUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "horreum", "data")
 TIMEOUT_S = 90
@@ -58,11 +61,10 @@ TIMEOUT_S = 90
 FLOOR_ARCMIN = 3.0
 FLOOR_DARK_ARCMIN = 8.0
 
-# Klasy typów OpenNGC. Gromady BEZ mgławicy odrzucone świadomie („nie interesują mnie gromady"),
-# `Cl+N` ZOSTAJE — gromada z mgławicą to cel fotograficzny.
-GALAXY = {"G", "GPair", "GTrpl", "GGroup"}
-NEBULA = {"Neb", "EmN", "HII", "RfN", "Cl+N", "SNR", "PN"}
-DARK = {"DrkN"}
+# Klasy typów OpenNGC — WŁAŚCICIELEM jest `horreum.targets` (import wyżej). Gromady BEZ mgławicy
+# odrzucone świadomie („nie interesują mnie gromady"), `Cl+N` ZOSTAJE — gromada z mgławicą to cel
+# fotograficzny.
+GALAXY, NEBULA, DARK = GALAXY_TYPES, NEBULA_TYPES, DARK_TYPES
 
 # Warstwa „cirrus" (D-0731-9): LBN/LDN to 2017 z 3579 rekordów i domyślnie ich nie widać.
 CIRRUS_SRC = {"lbn", "ldn"}

@@ -28,6 +28,8 @@ wypada ~90-100°, przy 150° rozpraszanie wsteczne znów je podnosi. Wynik podaj
 
 Qt-wolne, READ-ONLY (zero DML, zero eventów — moduł nie jest klingą), SELECT literałem.
 """
+from __future__ import annotations       # `float | None` w ciele dataclassy wybucha na 3.9 (T3 §2)
+
 import json
 import math
 from dataclasses import dataclass
@@ -419,8 +421,58 @@ class Window:
         return self.max_alt_deg >= self.min_alt_deg
 
 
+@dataclass(frozen=True)
+class NightWindow:
+    """Ciemność nocy dla STANOWISKA — fakt niezależny od celu. Wydzielony, bo planer liczy setki
+    celów tej samej nocy, a Słońce ma jedną trajektorię (T3 §4a: 289 próbek × N celów to ten sam
+    rachunek N razy). Niesie też próbki i JD, żeby wysokość celu liczyć bez powtarzania siatki."""
+    night_date: date
+    samples: list
+    jds: list
+    dark_idx: list
+    astro_idx: list
+    darkness: str                 # astronomical|nautical|none
+    step_min: int
+
+    @property
+    def dark_start(self):
+        return self.samples[self.dark_idx[0]] if self.dark_idx else None
+
+    @property
+    def dark_end(self):
+        return self.samples[self.dark_idx[-1]] if self.dark_idx else None
+
+    @property
+    def astro_start(self):
+        return self.samples[self.astro_idx[0]] if self.astro_idx else None
+
+    @property
+    def astro_end(self):
+        return self.samples[self.astro_idx[-1]] if self.astro_idx else None
+
+
+def night_window(site, night_date, *, step_min=5):
+    """Granice ciemności nocy `night_date` na stanowisku `site` (bez celu).
+
+    Ciemność liczymy PRÓBKOWANIEM (`step_min`, domyślnie 5 min) od południa UTC przez 24 h;
+    `night_date` to data WIECZORU. NOC ŻEGLARSKA (☉ ≤ −12°) jest zakresem rozważań, astronomiczna
+    (≤ −18°) opisuje jakość nieba i bywa pusta (na 53° N nie istnieje od ~połowy maja do ~końca
+    lipca)."""
+    start = datetime(night_date.year, night_date.month, night_date.day, 12, tzinfo=timezone.utc)
+    steps = int(24 * 60 / step_min) + 1
+    samples = [start + timedelta(minutes=step_min * i) for i in range(steps)]
+    jds = [_jd(t) for t in samples]
+    sun_alt = [_alt_from_jd(*_sun_radec(j), site.lat_deg, site.lon_deg, j, precess=False)
+               for j in jds]
+    dark_idx = [i for i, a in enumerate(sun_alt) if a <= -12.0]
+    astro_idx = [i for i, a in enumerate(sun_alt) if a <= -18.0]
+    darkness = "none" if not dark_idx else ("astronomical" if astro_idx else "nautical")
+    return NightWindow(night_date=night_date, samples=samples, jds=jds, dark_idx=dark_idx,
+                       astro_idx=astro_idx, darkness=darkness, step_min=step_min)
+
+
 def visibility_window(ra_deg, dec_deg, site, night_date, *, min_alt=30.0, step_min=5,
-                      v_zen=V_ZEN_DEFAULT, k_ext=K_EXT_DEFAULT):
+                      v_zen=V_ZEN_DEFAULT, k_ext=K_EXT_DEFAULT, night=None):
     """Okno nocy dla celu: jak wysoko wejdzie, ile godzin utrzyma próg i jak drogi jest Księżyc.
 
     ZAKRESEM ROZWAŻAŃ JEST NOC ŻEGLARSKA (☉ ≤ −12°) — zawsze, nie tylko latem jako awaryjny
@@ -428,17 +480,11 @@ def visibility_window(ra_deg, dec_deg, site, night_date, *, min_alt=30.0, step_m
     a `min_alt` jest progiem-suwakiem, nie stałą. Noc astronomiczna zostaje raportowana osobno
     (`astro_*`, `darkness`, `no_astro_night`), bo mówi o jakości nieba, a nie o dostępności celu.
 
-    Ciemność liczymy PRÓBKOWANIEM (`step_min`, domyślnie 5 min) od południa UTC przez 24 h.
-    `moon` opisuje chwilę KULMINACJI celu w oknie — najlepszy moment nocy, więc i uczciwą wycenę."""
-    start = datetime(night_date.year, night_date.month, night_date.day, 12, tzinfo=timezone.utc)
-    steps = int(24 * 60 / step_min) + 1
-    samples = [start + timedelta(minutes=step_min * i) for i in range(steps)]
-    jds = [_jd(t) for t in samples]
-    sun_alt = [_alt_from_jd(*_sun_radec(j), site.lat_deg, site.lon_deg, j, precess=False)
-               for j in jds]
-
-    dark_idx = [i for i, a in enumerate(sun_alt) if a <= -12.0]
-    astro_idx = [i for i, a in enumerate(sun_alt) if a <= -18.0]
+    `night` = gotowy `NightWindow` (SPOT: ta sama siatka dla wielu celów jednej nocy); None =
+    policz na miejscu. `moon` opisuje chwilę KULMINACJI celu w oknie — najlepszy moment nocy,
+    więc i uczciwą wycenę."""
+    nw = night if night is not None else night_window(site, night_date, step_min=step_min)
+    samples, jds, dark_idx, astro_idx = nw.samples, nw.jds, nw.dark_idx, nw.astro_idx
     darkness = "astronomical" if astro_idx else "nautical"
     reason = None if astro_idx else "no_astro_night"
     if not dark_idx:
@@ -448,7 +494,9 @@ def visibility_window(ra_deg, dec_deg, site, night_date, *, min_alt=30.0, step_m
 
     alts = [(i, _alt_from_jd(ra_deg, dec_deg, site.lat_deg, site.lon_deg, jds[i])) for i in dark_idx]
     best_i, max_alt = max(alts, key=lambda p: p[1])
-    hours = sum(1 for _, a in alts if a >= min_alt) * step_min / 60.0
+    # krok bierzemy Z SIATKI, nie z argumentu — przy podanym `night` argument `step_min` opisuje
+    # zamówienie wołającego, a godziny liczy siatka, którą realnie dostał
+    hours = sum(1 for _, a in alts if a >= min_alt) * nw.step_min / 60.0
 
     if max_alt <= 0:
         reason = "never_rises"

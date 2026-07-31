@@ -59,7 +59,8 @@ def main(argv=None):
                                  "czego brakuje i ile kosztuje Księżyc")
     p_plan.add_argument("db", help="ścieżka pliku bazy")
     p_plan.add_argument("--night", help="data WIECZORU (YYYY-MM-DD); domyślnie noc, która ma sens teraz")
-    p_plan.add_argument("--park", help="lista teleskopów po przecinku (domyślnie wszystkie z bazy)")
+    p_plan.add_argument("--park", help="lista teleskopów po przecinku; BIJE park z bazy "
+                                       "(bez flagi: `telescope.in_park`, a gdy pusty — wszystkie)")
     p_plan.add_argument("--layers", default="core",
                         help="warstwy katalogu: core|cirrus|core,cirrus (curated ZAWSZE)")
     p_plan.add_argument("--min-size", type=float, default=6.0, help="próg rozmiaru [']")

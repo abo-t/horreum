@@ -10,7 +10,8 @@ def test_migracja_ustawia_user_version(tmp_path):
     db.migrate(con)
     # 0002 init + 0003 wb + 0004 obs + 0005 rename + 0006 unreadable + 0007 backup-hdu-nullable
     # + 0008 kalibracja + 0009 rodowód + 0010 kind_source (DSLR/RAW, #2)
-    assert db._user_version(con) == db.SCHEMA_VERSION == 10
+    # + 0011 target_plan + telescope.in_park (planer T4)
+    assert db._user_version(con) == db.SCHEMA_VERSION == 11
     con.close()
 
 

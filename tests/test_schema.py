@@ -14,6 +14,8 @@ EXPECTED_TABLES = {
     "pending_changes", "commits", "header_backups", "macros",
     # 0004 — oś obserwatorium
     "observatory",
+    # 0011 — kuratela celów planera (T4)
+    "target_plan",
 }
 
 
@@ -85,11 +87,11 @@ def test_szkielet_przyszly_pusty(tmp_path):
     con.close()
 
 
-def test_user_version_v10_po_migracji(tmp_path):
-    """0010 podnosi user_version do 10 (świeża baza leci 0002→…→0010 sekwencyjnie; #2 kind_source)."""
+def test_user_version_v11_po_migracji(tmp_path):
+    """0011 podnosi user_version do 11 (świeża baza leci 0002→…→0011 sekwencyjnie; planer T4)."""
     con = db.open_db(str(tmp_path / "h.db"))
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 10
-    assert db.SCHEMA_VERSION == 10
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 11
+    assert db.SCHEMA_VERSION == 11
     con.close()
 
 

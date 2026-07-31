@@ -31,6 +31,9 @@ from importlib import resources
 # idempotencję rodowodu; tabela dowodnie pusta, więc INSERT SELECT kopiuje 0 wierszy.
 # 0010 to PRZYROST (DSLR/RAW, #2): frame.kind_source — prowieniencja rodzaju (header|path|NULL).
 # ADD COLUMN, wiersze sprzed migracji dostają NULL; re-skan/nowy ingest ustawia jawnie.
+# 0011 to PRZYROST (planer T4): target_plan (kuratela celów, klucz = kanon KATALOGU, nie FK do
+# `object`) + telescope.in_park (trójstan 1|0|NULL). Oba niosą fakt o PRZYSZŁOŚCI — czego archiwum
+# nie zna z definicji, więc backfillu nie ma i mieć nie może (D-0731-4, D-T3-d).
 MIGRATIONS = [
     (2, "0002_initial.sql"),
     (3, "0003_writeback.sql"),
@@ -41,6 +44,7 @@ MIGRATIONS = [
     (8, "0008_calibration.sql"),
     (9, "0009_calibration_lineage.sql"),
     (10, "0010_kind_source.sql"),
+    (11, "0011_target_plan.sql"),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 _KNOWN_VERSIONS = frozenset({0} | {v for v, _ in MIGRATIONS})

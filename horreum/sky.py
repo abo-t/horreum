@@ -96,6 +96,21 @@ class Rig:
         return self.fov_y_arcmin
 
 
+def park(con):
+    """PARK AKTUALNY z bazy (`telescope.in_park = 1`) albo `None`, gdy nikt nic nie oznaczył.
+
+    JEDYNY właściciel odczytu „co jest w parku" — powierzchnie wołają tę funkcję, nie własny SELECT.
+    `None` (nie pusta krotka!) znaczy „park nieustawiony" i wołający ma wtedy liczyć WSZYSTKIE
+    teleskopy — pusta krotka znaczyłaby „park pusty" i wygasiła planer do zera wierszy.
+
+    Kanoniczność jak w `rigs`: teleskop scalony w inny odpada nawet oznaczony — park wskazywałby
+    wtedy oś, której już nie ma. Kolejność deterministyczna (kanon), bo trafia do raportu."""
+    rows = con.execute(
+        "SELECT telescop_canon FROM telescope "
+        "WHERE in_park = 1 AND merged_into IS NULL ORDER BY telescop_canon").fetchall()
+    return tuple(r["telescop_canon"] for r in rows) or None
+
+
 def rigs(con, only=None):
     """Zestawy z bazy; `only` = jawna lista `telescop_canon` (None => wszystkie, bez udawania,
     że moduł wie, co jest aktualne).

@@ -1242,3 +1242,96 @@ def flag_calibration_lineage_summary(con, items, now, actor="lineage"):
         emit_event(con, actor=actor, verb="calibration.lineage_summary", target="frame:*", now=now,
                    payload={"distinct": len(items), "frames": sum(n for _, n in items),
                             "items": [[reason, n] for reason, n in items]})
+
+
+# ═══════════════════════════════════════════════ 1.8 kuratela celów + park (planer T4)
+# Dwa pola UŻYTKOWNIKA o PRZYSZŁOŚCI (co chcę sfotografować, czym będę fotografował). Reszta bazy
+# zeznaje przeszłość, więc żadnego z nich nie da się zderywować — `max(date_obs)` wskazałby jako
+# „aktualny" teleskop, którego user nie używa (D-0731-12). Zapis wyłącznie z ręki, `actor=user:<uid>`.
+
+def _target_plan_row(con, canon):
+    """Wiersz kuratelii jako dict albo `None`. Osobno, bo czytają go OBIE funkcje zapisu (payload
+    eventu musi nieść stan SPRZED zmiany — także przy kasacji, gdzie po fakcie nie ma go skąd wziąć)."""
+    row = con.execute(
+        "SELECT canon, status, priority, note, created_at, updated_at "
+        "FROM target_plan WHERE canon = ?", (canon,)).fetchone()
+    return None if row is None else dict(row)
+
+
+def set_target_plan(con, *, canon, status, priority=None, note=None, now, uid="local"):
+    """Oznacz cel katalogu (`status`/`priority`/`note`) — akcja usera, klucz = KANON KATALOGU.
+
+    Kanon MUSI być zwalidowany wobec assetu przez wołającego (`targets.resolve_plan_canon`) — repo
+    nie czyta plików katalogu, a wiersz na literówce nigdy nie spotkałby celu. Słownik statusów
+    trzyma CHECK w DDL (0011), nie kod: baza jest ostatnią bramką i przeżyje każdą powierzchnię.
+    Idempotentny: ten sam komplet trzech pól → `False` BEZ eventu (przeklikanie w GUI nie ma prawa
+    puchnąć dziennika). Inaczej INSERT albo UPDATE + `event(target_plan.set)` z `{before, after}`
+    — `before=None` odróżnia założenie od zmiany."""
+    if not str(canon or "").strip():
+        raise ValueError("kanon pusty — kuratela bez celu nie ma sensu")
+    canon = str(canon).strip()
+    with _immediate(con):
+        before = _target_plan_row(con, canon)
+        after = {"canon": canon, "status": status, "priority": priority, "note": note}
+        if before is not None and all(before[k] == after[k] for k in ("status", "priority", "note")):
+            return False
+        if before is None:
+            con.execute(
+                "INSERT INTO target_plan (canon, status, priority, note, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)", (canon, status, priority, note, now, now))
+        else:
+            con.execute(
+                "UPDATE target_plan SET status = ?, priority = ?, note = ?, updated_at = ? "
+                "WHERE canon = ?", (status, priority, note, now, canon))
+        emit_event(con, actor=f"user:{uid}", verb="target_plan.set",
+                   target=f"target_plan:{canon}", now=now,
+                   payload={"before": before, "after": after})
+    return True
+
+
+def clear_target_plan(con, *, canon, now, uid="local"):
+    """Zdejmij oznaczenie celu — KASUJE wiersz. Zwraca `True`, gdy było co kasować.
+
+    DELETE na tabeli TRWAŁEJ jest tu świadomym precedensem (dotąd kasowały się wyłącznie tabele
+    stagingu): `target_plan` znaczy „bieżąca lista życzeń", nie „historia życzeń". Nagrobek
+    (`status` pusty) zmusiłby KAŻDY odczyt do filtrowania i zamienił małą tabelę w archiwum stanów.
+    Historia nie ginie — `event(target_plan.cleared)` niesie CAŁY wiersz sprzed kasacji, więc
+    odtworzenie jest odczytem dziennika, nie archeologią."""
+    canon = str(canon or "").strip()
+    with _immediate(con):
+        before = _target_plan_row(con, canon)
+        if before is None:
+            return False
+        con.execute("DELETE FROM target_plan WHERE canon = ?", (canon,))
+        emit_event(con, actor=f"user:{uid}", verb="target_plan.cleared",
+                   target=f"target_plan:{canon}", now=now, payload={"before": before})
+    return True
+
+
+def set_telescope_park(con, *, telescope_id, in_park, now, uid="local"):
+    """Wstaw/wyjmij teleskop z PARKU AKTUALNEGO (`telescope.in_park`) — akcja usera (D-T3-d).
+
+    `in_park`: 1 = w parku · 0 = jawnie historyczny · `None` = cofnięcie do „nic nie powiedziano".
+    Trójstan jest niesiony do końca, bo `NULL` i `0` znaczą co innego (baza świeża vs park
+    przejrzany). GUARD: tylko KANONICZNY teleskop (`merged_into IS NULL`) — park wskazujący wiersz
+    scalony w inny opisywałby oś, której już nie ma (lustro `approve_telescope`). Idempotentny:
+    ta sama wartość → `False` bez eventu."""
+    if in_park not in (0, 1, None):
+        raise ValueError(f"in_park={in_park!r} — dozwolone 1 (park) | 0 (historyczny) | None")
+    with _immediate(con):
+        row = con.execute(
+            "SELECT telescop_canon, in_park, merged_into FROM telescope WHERE id = ?",
+            (telescope_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"telescope:{telescope_id} nie istnieje")
+        if row["merged_into"] is not None:
+            raise ValueError(f"telescope:{telescope_id} jest scalony (merged_into="
+                             f"{row['merged_into']}) — park tylko dla kanonicznego")
+        if row["in_park"] == in_park:
+            return False
+        con.execute("UPDATE telescope SET in_park = ? WHERE id = ?", (in_park, telescope_id))
+        emit_event(con, actor=f"user:{uid}", verb="telescope.parked",
+                   target=f"telescope:{telescope_id}", now=now,
+                   payload={"telescope": row["telescop_canon"],
+                            "before": row["in_park"], "after": in_park})
+    return True

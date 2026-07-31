@@ -151,6 +151,10 @@ class TargetRow:
     cost: dict                     # paleta -> ile razy dłużej dla tego samego S/N
     recommend: str | None          # kanał do zrobienia dziś
     recommend_reason: str | None   # no_gap|rig_cannot|no_rig
+    # Kuratela (T4) — `None` znaczy „użytkownik tego celu nie tknął", nie „odrzucił".
+    plan_status: str | None = None      # planned|active|done|skip
+    priority: int | None = None         # mniejsza = pilniejsza
+    note: str | None = None
 
 
 @dataclass(frozen=True)
@@ -166,6 +170,12 @@ class PlanResult:
     counts: dict
     unfiltered_mono: int
     hidden: int                    # ile wierszy ucięto limitem (ZERO cichych sufitów)
+    # Park (T4): CZYM liczono i SKĄD to wiadomo — „ile mam zestawów" bez tego jest liczbą
+    # bez zeznania. `park_without_rigs` = teleskopy oznaczone, które nie dały ANI JEDNEGO zestawu
+    # (0 lightów) — cichy ubytek zestawu to ta sama kategoria błędu co cichy sufit listy.
+    park: tuple = ()
+    park_source: str = "none"      # arg (jawne wołanie) | db (telescope.in_park) | none
+    park_without_rigs: tuple = ()
 
 
 # ─────────────────────────────────────────────────────── asset
@@ -218,6 +228,47 @@ def feasible(t, *, min_size=6.0, min_dark=15.0, max_mag=13.0):
             return False
         return (t.mag - B_TO_V if t.mag_from_b else t.mag) <= max_mag
     return True
+
+
+def resolve_plan_canon(needle, layers=ALL_LAYERS):
+    """Wejście użytkownika → KANON KATALOGU dla kuratelii. Zwraca `(kanon, kandydaci)`.
+
+    Trzy drogi w kolejności pewności: kanon (bez względu na wielkość liter) → alias KATALOGOWY przez
+    gramatykę resolvera (`M42` → `NGC1976`) → nazwa potoczna. Nazwa potoczna bywa DWUZNACZNA
+    (zmierzone w T3: „Eastern Veil" wskazuje NGC6992 **i** NGC6995), więc kolizja zwraca
+    `(None, kandydaci)` — zapis kuratelii na losowym z dwóch rekordów byłby cichym wyborem za
+    użytkownika. Nic nie trafione → `(None, najbliżsi po podciągu)`, żeby literówka dostała
+    odpowiedź, a nie ciszę.
+
+    Szukamy we WSZYSTKICH warstwach: cel z cirrusu wolno oznaczyć, mając wczytany rdzeń."""
+    pool = load_targets(tuple(layers))
+    n = str(needle or "").strip()
+    if not n:
+        return None, ()
+    fold = n.casefold()
+    hits = [t for t in pool if t.canon.casefold() == fold]
+    if not hits:
+        cc = catalog_canon(n)
+        key = xref(cc) if cc else None
+        if key:
+            hits = [t for t in pool if t.canon == key or key in t.catalog_aliases]
+    if not hits:
+        hits = [t for t in pool if any(a.casefold() == fold for a in t.aliases)]
+    canons = sorted({t.canon for t in hits})
+    if len(canons) == 1:
+        return canons[0], ()
+    if canons:
+        return None, tuple(canons)
+    near = sorted({t.canon for t in pool if fold in t.canon.casefold()
+                   or any(fold in a.casefold() for a in t.aliases)})
+    return None, tuple(near[:5])
+
+
+def plan_marks(con):
+    """Kuratela z bazy: `kanon → wiersz target_plan`. JEDEN literał i JEDEN odczyt na przebieg —
+    zapytanie per cel dałoby 777 zapytań na listę, którą i tak trzymamy w pamięci."""
+    return {r["canon"]: r for r in con.execute(
+        "SELECT canon, status, priority, note FROM target_plan").fetchall()}
 
 
 def coverage_index(targets):
@@ -444,7 +495,7 @@ def default_night(site, *, now=None, step_min=5):
 def plan(con, *, night=None, site=None, park=None, layers=DEFAULT_LAYERS,
          min_size=6.0, min_dark=15.0, max_mag=13.0, min_alt=30.0, min_hours=1.0,
          max_cost=None, overlap=0.10, v_zen=sky.V_ZEN_DEFAULT, k_ext=sky.K_EXT_DEFAULT,
-         only_gaps=False, only_new=False, find=None, limit=None, step_min=5):
+         only_gaps=False, only_new=False, status=None, find=None, limit=None, step_min=5):
     """Pełna odpowiedź planera dla jednej nocy (READ-ONLY).
 
     KOLEJNOŚĆ JEST KOLEJNOŚCIĄ KOSZTU: progi typo-zależne (arytmetyka) → przedcięcie deklinacją →
@@ -454,7 +505,13 @@ def plan(con, *, night=None, site=None, park=None, layers=DEFAULT_LAYERS,
     `find` ma semantykę WYSZUKIWANIA, nie filtra wyniku: pomija progi i przedcięcie (pytasz
     o konkretny obiekt — masz dostać jego okno, nawet gdy nigdy nie wschodzi) i dopasowuje po
     kanonie ORAZ po WSZYSTKICH aliasach, także potocznych. To jedyne miejsce, gdzie nazwa potoczna
-    ma głos: „Eagle Nebula" zwróci OBA rekordy, które ją noszą."""
+    ma głos: „Eagle Nebula" zwróci OBA rekordy, które ją noszą.
+
+    KURATELA (T4): `park=None` bierze park z bazy (`sky.park`); jawna lista go BIJE, bo wołanie
+    jest silniejsze niż stan trwały. Cel oznaczony `skip` znika z listy Z LICZNIKIEM
+    (`counts['hidden_by_status']`) — ale nie znika przed `find` ani przed jawnym `status='skip'`:
+    własne skreślenie nie ma prawa zasłonić odpowiedzi na pytanie wprost. `done` NIE ukrywa —
+    cel domknięty w Ha może mieć lukę w SII i planer ma prawo to pokazać."""
     site = site or sky.default_site(con)
     if site is None:
         raise ValueError("targets: baza nie ma stanowiska z pozycją GPS — planer bez pozycji "
@@ -466,7 +523,17 @@ def plan(con, *, night=None, site=None, park=None, layers=DEFAULT_LAYERS,
     targets = load_targets(tuple(layers))
     owner = coverage_index(targets)          # kanon -> rekord WŁAŚCICIEL (curated wygrywa)
     per_canon, unfiltered_mono = archive_coverage(con)
+    marks = plan_marks(con)
+
+    # Park: jawny argument BIJE bazę; brak oznaczeń w bazie => wszystkie teleskopy (zachowanie
+    # sprzed T4) i `park_source='none'`, żeby powierzchnia mogła to powiedzieć wprost.
+    park_source = "arg" if park is not None else "none"
+    if park is None:
+        park = sky.park(con)
+        park_source = "db" if park else "none"
     rigs, skipped = rig_sets(con, park=park)
+    known_rigs = {r.telescope for r in rigs} | {r.telescope for r in skipped}
+    park_without_rigs = tuple(sorted(c for c in (park or ()) if c not in known_rigs))
 
     if find:
         needle = find.casefold()
@@ -481,8 +548,18 @@ def plan(con, *, night=None, site=None, park=None, layers=DEFAULT_LAYERS,
         pool = [t for t in pool
                 if 90.0 - abs(site.lat_deg - t.dec_deg) >= min_alt - _CUT_MARGIN]
 
-    rows = []
+    rows, hidden_by_status = [], 0
     for t in pool:
+        # Kuratela ROZSTRZYGA PRZED rachunkiem nieba (najdroższym krokiem): cel skreślony nie ma
+        # po co przechodzić przez siatkę Słońca. `find` i jawny `status` przebijają ukrycie.
+        mark = marks.get(t.canon)
+        mark_status = mark["status"] if mark is not None else None
+        if status is not None:
+            if mark_status != status:
+                continue
+        elif mark_status == "skip" and not find:
+            hidden_by_status += 1
+            continue
         window = sky.visibility_window(t.ra_deg, t.dec_deg, site, night_date, min_alt=min_alt,
                                        step_min=step_min, v_zen=v_zen, k_ext=k_ext, night=nw)
         # WŁAŚCICIEL kanonu bierze godziny: gdy `curated` przejmie klucz rekordu generowanego,
@@ -502,13 +579,19 @@ def plan(con, *, night=None, site=None, park=None, layers=DEFAULT_LAYERS,
             continue
         rows.append(TargetRow(target=t, window=window, framing=framing, best_rig=best,
                               coverage=coverage, cost=cost, recommend=channel,
-                              recommend_reason=reason))
+                              recommend_reason=reason, plan_status=mark_status,
+                              priority=mark["priority"] if mark is not None else None,
+                              note=mark["note"] if mark is not None else None))
+    # Priorytet użytkownika NIE wchodzi do klucza sortowania (D-T4-c): pięć członów `_sort_key`
+    # wywalczył firsthand T3, a priorytet przed „widoczny" postawiłby na czele cel pod horyzontem.
     rows.sort(key=_sort_key)
     # liczniki opisują NOC, nie wyświetloną listę — dlatego przed limitem (firsthand: „12 widocznych"
     # przy `--limit 12` opisywało długość ekranu, nie niebo)
     counts = {"pool": len(targets), "feasible": after_thresholds, "above_horizon": len(pool),
               "matched": sum(1 for r in rows if r.coverage.known),
-              "visible": sum(1 for r in rows if r.window.visible), "rows": len(rows)}
+              "visible": sum(1 for r in rows if r.window.visible), "rows": len(rows),
+              "marked": sum(1 for r in rows if r.plan_status is not None),
+              "hidden_by_status": hidden_by_status}
     hidden = 0
     if limit is not None and len(rows) > limit:
         hidden = len(rows) - limit
@@ -525,7 +608,9 @@ def plan(con, *, night=None, site=None, park=None, layers=DEFAULT_LAYERS,
     return PlanResult(rows=tuple(rows), night_date=night_date, site=site, night=nw,
                       moon=_night_moon(site, nw, v_zen=v_zen, k_ext=k_ext),
                       rigs=rigs, skipped_rigs=skipped, unmatched=unmatched, counts=counts,
-                      unfiltered_mono=unfiltered_mono, hidden=hidden)
+                      unfiltered_mono=unfiltered_mono, hidden=hidden,
+                      park=tuple(park or ()), park_source=park_source,
+                      park_without_rigs=park_without_rigs)
 
 
 def _night_moon(site, nw, *, v_zen, k_ext):

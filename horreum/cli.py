@@ -72,10 +72,33 @@ def main(argv=None):
     p_plan.add_argument("--overlap", type=float, default=0.10, help="zakładka mozaiki (0..1)")
     p_plan.add_argument("--gaps", action="store_true", help="tylko cele z luką")
     p_plan.add_argument("--new", action="store_true", help="tylko cele nigdy nie fotografowane")
+    p_plan.add_argument("--status", choices=("planned", "active", "done", "skip"),
+                        help="tylko cele o tym statusie kuratelii (bez flagi: 'skip' ukryty)")
     p_plan.add_argument("--find", help="szukaj po kanonie ORAZ nazwach potocznych (pomija progi)")
     p_plan.add_argument("--limit", type=int, default=30, help="ile wierszy (domyślnie 30)")
     p_plan.add_argument("--all", action="store_true", help="bez limitu wierszy")
     p_plan.add_argument("--json", action="store_true", help="wyjście maszynowe")
+
+    # Park i kuratela = jedyne komendy planera, które PISZĄ (T4). Stąd `open_db`, nie `connect`.
+    p_park = sub.add_parser("park",
+                            help="park aktualny: czym Zdzin BĘDZIE fotografował (nie da się "
+                                 "wyprowadzić z archiwum — ono opisuje przeszłość)")
+    p_park.add_argument("db", help="ścieżka pliku bazy")
+    p_park.add_argument("--add", action="append", default=[], metavar="TELESKOP",
+                        help="wstaw teleskop do parku (powtarzalne)")
+    p_park.add_argument("--drop", action="append", default=[], metavar="TELESKOP",
+                        help="oznacz teleskop jako historyczny (powtarzalne)")
+
+    p_tgt = sub.add_parser("target",
+                           help="kuratela celów: status/priorytet/notatka na celu z katalogu")
+    p_tgt.add_argument("db", help="ścieżka pliku bazy")
+    p_tgt.add_argument("canon", nargs="?",
+                       help="kanon albo alias celu (bez argumentu = lista oznaczonych)")
+    p_tgt.add_argument("--status", choices=("planned", "active", "done", "skip"),
+                       help="stan celu; przy liście = filtr")
+    p_tgt.add_argument("--priority", type=int, default=None, help="mniejsza = pilniejsza")
+    p_tgt.add_argument("--note", default=None, help="notatka własna")
+    p_tgt.add_argument("--clear", action="store_true", help="zdejmij oznaczenie celu")
 
     p_bx = sub.add_parser("backfill-xisf",
                           help="doczytaj cards+header_hash do lokacji XISF sprzed P6a (jednorazowo)")
@@ -216,7 +239,8 @@ def main(argv=None):
                 layers=tuple(x.strip() for x in args.layers.split(",") if x.strip()),
                 min_size=args.min_size, min_dark=args.min_dark, max_mag=args.max_mag,
                 min_alt=args.min_alt, min_hours=args.min_hours, max_cost=args.max_cost,
-                overlap=args.overlap, only_gaps=args.gaps, only_new=args.new, find=args.find,
+                overlap=args.overlap, only_gaps=args.gaps, only_new=args.new,
+                status=args.status, find=args.find,
                 limit=None if args.all else args.limit)
         except ValueError as e:                           # brak stanowiska z GPS / zła warstwa
             con.close()
@@ -226,6 +250,10 @@ def main(argv=None):
         print(json.dumps(_plan_json(result), ensure_ascii=False, indent=1) if args.json
               else _format_plan(args.db, result))
         return 0
+    if args.cmd == "park":
+        return _cmd_park(args)
+    if args.cmd == "target":
+        return _cmd_target(args)
     if args.cmd == "backfill-xisf":
         from .scan import backfill_xisf_headers          # lazy (astropy przez scan)
         now = datetime.now(timezone.utc).isoformat()
@@ -558,6 +586,100 @@ def _coverage_text(row):
     return ", ".join(parts)
 
 
+def _cmd_park(args):
+    """`horreum park` — przegląd i oznaczanie parku aktualnego (D-T3-d).
+
+    Bez `--add`/`--drop` to czysty przegląd: kanon, lighty, ostatnia klatka, stan parku. Teleskop
+    nieznany bazie kończy się kodem 2 i LISTĄ kanonicznych — park nie powołuje osi (oś wyłania się
+    ze skanu), więc literówka nie ma prawa utworzyć wiersza."""
+    from . import repo
+    now = datetime.now(timezone.utc).isoformat()
+    con = db.open_db(args.db)
+    known = {r["telescop_canon"]: r["id"] for r in con.execute(
+        "SELECT id, telescop_canon FROM telescope WHERE merged_into IS NULL").fetchall()}
+    changed = 0
+    for name, value in [(n, 1) for n in args.add] + [(n, 0) for n in args.drop]:
+        match = next((k for k in known if k.casefold() == name.strip().casefold()), None)
+        if match is None:
+            con.close()
+            print(f"Horreum park: teleskop {name!r} nieznany bazie. Kanoniczne: "
+                  f"{', '.join(sorted(known))}")
+            return 2
+        if repo.set_telescope_park(con, telescope_id=known[match], in_park=value, now=now):
+            changed += 1
+    rows = con.execute(
+        "SELECT t.id, t.telescop_canon AS canon, t.in_park, "
+        "  (SELECT COUNT(*) FROM frame f JOIN config c ON c.id = f.config_id "
+        "   WHERE c.telescope_id = t.id AND f.kind = 'light') AS lights, "
+        "  (SELECT MAX(h.date_obs) FROM frame f JOIN config c ON c.id = f.config_id "
+        "   JOIN header h ON h.frame_id = f.id "
+        "   WHERE c.telescope_id = t.id AND f.kind = 'light') AS last_seen "
+        "FROM telescope t WHERE t.merged_into IS NULL ORDER BY lights DESC").fetchall()
+    con.close()
+    lines = [f"Horreum park {args.db}:" + (f" zmieniono {changed}" if changed else "")]
+    lines.append(f"  {'teleskop':<12}{'lighty':>8}  {'ostatnia klatka':<20}park")
+    for r in rows:
+        state = {1: "TAK", 0: "historyczny"}.get(r["in_park"], "-")
+        lines.append(f"  {r['canon']:<12}{r['lights']:>8}  {(r['last_seen'] or '-')[:19]:<20}{state}")
+    if not any(r["in_park"] == 1 for r in rows):
+        lines.append("  park NIEUSTAWIONY — planer liczy WSZYSTKIE teleskopy, takze historyczne "
+                     "(`horreum park <db> --add <teleskop>`)")
+    print("\n".join(lines))
+    return 0
+
+
+def _cmd_target(args):
+    """`horreum target` — kuratela celów katalogu (status/priorytet/notatka).
+
+    Bez kanonu = lista oznaczonych. Kanon walidowany wobec ASSETU (`targets.resolve_plan_canon`):
+    literówka albo nazwa dwuznaczna kończy się kodem 2 i listą kandydatów, nigdy cichym zapisem
+    na losowym rekordzie. Cel oznaczony, którego katalog już nie zna (podmiana assetu), zostaje
+    na liście z etykietą — kasowanie cudzej decyzji to nie sprzątanie."""
+    from . import repo, targets
+    now = datetime.now(timezone.utc).isoformat()
+    con = db.open_db(args.db)
+    if args.canon:
+        canon, candidates = targets.resolve_plan_canon(args.canon)
+        if canon is None:
+            con.close()
+            hint = (f" Kandydaci: {', '.join(candidates)}" if candidates
+                    else " Brak podobnych w katalogu.")
+            print(f"Horreum target: {args.canon!r} nie wskazuje jednego celu katalogu.{hint}")
+            return 2
+        if args.clear:
+            done = repo.clear_target_plan(con, canon=canon, now=now)
+            con.close()
+            print(f"Horreum target {canon}: " + ("oznaczenie zdjete" if done else "nie bylo oznaczenia"))
+            return 0
+        if args.status is None:
+            con.close()
+            print(f"Horreum target {canon}: podaj --status (planned|active|done|skip) albo --clear")
+            return 2
+        repo.set_target_plan(con, canon=canon, status=args.status, priority=args.priority,
+                             note=args.note, now=now)
+        con.close()
+        print(f"Horreum target {canon}: {args.status}"
+              + (f", priorytet {args.priority}" if args.priority is not None else "")
+              + (f", nota {args.note!r}" if args.note else ""))
+        return 0
+    rows = con.execute(
+        "SELECT canon, status, priority, note FROM target_plan ORDER BY canon").fetchall()
+    con.close()
+    known = {t.canon for t in targets.load_targets(targets.ALL_LAYERS)}
+    rows = [r for r in rows if args.status is None or r["status"] == args.status]
+    if not rows:
+        print(f"Horreum target {args.db}: brak oznaczonych celow.")
+        return 0
+    lines = [f"Horreum target {args.db}: {len(rows)} oznaczonych",
+             f"  {'cel':<16}{'status':<9}{'prio':>5}  nota"]
+    for r in rows:
+        orphan = "" if r["canon"] in known else "  [poza katalogiem]"
+        prio = "-" if r["priority"] is None else str(r["priority"])
+        lines.append(f"  {r['canon']:<16}{r['status']:<9}{prio:>5}  {r['note'] or ''}{orphan}")
+    print("\n".join(lines))
+    return 0
+
+
 def _format_plan(db_path, res):
     """Plan nocy do czytelnego ASCII (konsola Windows = cp1250 — bez znaków spoza ASCII)."""
     site = res.site
@@ -576,12 +698,24 @@ def _format_plan(db_path, res):
                      f", kamery {'/'.join(rig.cameras)}{'' if rig.mono else ' (tylko OSC)'}")
     for rig in res.skipped_rigs:
         lines.append(f"  zestaw {rig.telescope} POZA planem: {rig.reason}")
+    if res.park_source == "none":
+        lines.append("  park NIEUSTAWIONY: liczone WSZYSTKIE teleskopy bazy, takze historyczne "
+                     "(`horreum park <db> --add <teleskop>`)")
+    else:
+        lines.append(f"  park ({'z bazy' if res.park_source == 'db' else 'z flagi'}): "
+                     f"{', '.join(res.park)}")
+    if res.park_without_rigs:
+        lines.append(f"  UWAGA: w parku bez zestawu (brak lightow): "
+                     f"{', '.join(res.park_without_rigs)}")
+    if res.counts.get("hidden_by_status"):
+        lines.append(f"  ukrytych jako 'skip': {res.counts['hidden_by_status']} "
+                     f"(`--status skip` pokazuje ktore)")
     if res.unfiltered_mono:
         lines.append(f"  UWAGA: {res.unfiltered_mono} lightow bez filtra na kamerze mono — "
                      f"kubelek RGB moze byc zanieczyszczony")
     lines.append("")
     lines.append(f"  {'cel':<14}{'typ':<6}{'rozm':>6}{'kulm':>6}{'h>':>5}  {'zestaw':<17}"
-                 f"{'koszt B/D/N':<14}{'rada':<6}pokrycie")
+                 f"{'koszt B/D/N':<14}{'rada':<6}{'plan':<10}pokrycie")
     for row in res.rows:
         rig = row.best_rig
         fr = row.framing.get(rig.telescope) if rig is not None else None
@@ -589,11 +723,13 @@ def _format_plan(db_path, res):
             f"{rig.telescope} " + ("1 kadr" if fr.panels == 1 else f"mozaika {fr.panels}"))
         cost = row.cost
         cost_txt = (f"{cost['broadband']:.1f}/{cost['duoband']:.1f}/{cost['narrowband']:.1f}")
+        plan_txt = "-" if row.plan_status is None else (
+            row.plan_status + ("" if row.priority is None else f" {row.priority}"))
         lines.append(
             f"  {row.target.canon:<14}{row.target.type:<6}"
             f"{row.target.major_arcmin:>5.0f}'{row.window.max_alt_deg:>6.1f}"
             f"{row.window.hours_above:>5.1f}  {rig_txt:<17}{cost_txt:<14}"
-            f"{row.recommend or '-':<6}{_coverage_text(row)}")
+            f"{row.recommend or '-':<6}{plan_txt:<10}{_coverage_text(row)}")
     if res.hidden:
         lines.append(f"  ... {res.hidden} wierszy ukrytych limitem (--all zdejmuje)")
     if res.unmatched:
@@ -615,6 +751,8 @@ def _plan_json(res):
         "moon": {"illumination": res.moon.illumination, "alt_deg": res.moon.alt_deg},
         "counts": res.counts,
         "hidden": res.hidden,
+        "park": {"telescopes": list(res.park), "source": res.park_source,
+                 "without_rigs": list(res.park_without_rigs)},
         "rigs": [{"telescope": r.telescope, "fov_x": r.fov_x_arcmin, "fov_y": r.fov_y_arcmin,
                   "cameras": list(r.cameras), "mono": r.mono, "lights": r.lights}
                  for r in res.rigs],
@@ -631,6 +769,7 @@ def _plan_json(res):
             "best_rig": row.best_rig.telescope if row.best_rig else None,
             "cost": {k: round(v, 3) for k, v in row.cost.items()},
             "recommend": row.recommend, "recommend_reason": row.recommend_reason,
+            "plan_status": row.plan_status, "priority": row.priority, "note": row.note,
             "archive_canons": list(row.coverage.archive_canons),
             "hours_by_channel": {k: round(v, 3) for k, v in row.coverage.hours_by_channel.items()},
             "gaps": list(row.coverage.gaps),

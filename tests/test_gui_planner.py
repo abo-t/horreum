@@ -120,16 +120,41 @@ def test_niewidoczny_wiersz_zostaje_wyszarzony_nie_ukryty(view):
     assert view.model.data(idx, Qt.ToolTipRole)
 
 
-def test_panel_wyszukiwania_zwija_sie(view):
-    """Firsthand T5f: rozwinięty panel zjada ~100 px pionu, a przy podłodze okna 1146×760 lista
-    schodzi do kilkunastu wierszy. Zwinięcie chowa TREŚĆ, tytuł zostaje — user wie, że progi żyją."""
-    box = view.min_hours.parent().parent()               # QGroupBox „Wyszukiwanie"
-    assert box.isCheckable() and box.isChecked()
-    body = view.min_hours.parent()
-    box.setChecked(False)
-    assert body.isHidden() is True        # `isVisible` byłoby False także dla niepokazanego okna
-    box.setChecked(True)
+def test_pasek_progow_zwija_sie_i_niesie_stan(view):
+    """Wiz T5 #3 (P1): zwijamy PRZYCISKIEM ze strzałką, nie `checkable QGroupBox` — odznaczony
+    checkbox przy DZIAŁAJĄCYCH progach czyta się w Qt jak „grupa wyłączona". Tytuł niesie STAN,
+    więc zwinięty pasek nadal mówi, czym tniesz listę."""
+    body = view._controls_body
+    assert body.isHidden() is False       # `isVisible` byłoby False także dla niepokazanego okna
+    assert "6′" in view.controls_toggle.text() and "13.0" in view.controls_toggle.text()
+    view.controls_toggle.setChecked(False)
+    assert body.isHidden() is True
+    assert "Progi" in view.controls_toggle.text()          # stan widoczny MIMO zwinięcia
+    assert view.find_edit.isHidden() is False              # „Szukaj" przeżywa zwinięcie progów
+    view.min_size.setValue(20.0)
+    assert "20′" in view.controls_toggle.text()            # tytuł podąża za progiem
+    view.controls_toggle.setChecked(True)
     assert body.isHidden() is False
+
+
+def test_panel_nie_przenosi_statusu_na_kolejny_cel(view):
+    """Wiz T5 #1 (P1) — NAJDROŻSZY defekt wizytacji: combo trzymało status POPRZEDNIEGO celu,
+    więc jeden klik w „Zapisz" wpisywał do bazy zdanie, którego user nie wybrał, a kolumna „Plan"
+    pokazywała w tej samej chwili „—"."""
+    view.table.selectRow(0)
+    a = view.selected_row().canon
+    view.panel_status.setCurrentIndex(view.panel_status.findData("done"))
+    view._on_save_mark()
+
+    view.table.selectRow(1)                                # cel NIETKNIĘTY
+    b = view.selected_row().canon
+    assert b != a
+    assert view.panel_status.currentData() is None         # panel odbija „—" z kolumny, nie cudze zdanie
+    assert view.save_btn.isEnabled() is False              # nie ma czego zapisać (szczery disabled)
+    view._on_save_mark()                                   # klik i tak nic nie zapisze
+    assert view.con.execute("SELECT count(*) FROM target_plan WHERE canon = ?", (b,)).fetchone()[0] == 0
+    view.panel_status.setCurrentIndex(view.panel_status.findData("planned"))
+    assert view.save_btn.isEnabled() is True
 
 
 def test_stara_generacja_nie_trafia_na_ekran(view):

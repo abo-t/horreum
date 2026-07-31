@@ -334,6 +334,27 @@ CATALOG = {
         "en": "Search mode SKIPS thresholds and horizon — you asked about one target, you get its window.",
     },
     "planner.chip_best": {"pl": "najlepsze dopasowanie", "en": "best fit"},
+    "planner.chips_label": {"pl": "Patrzę oczami zestawu:", "en": "Seen through the rig:"},
+    "planner.chip_tip": {
+        "pl": "Soczewka, nie filtr: zmienia kolumny „Zestaw i kadr” oraz „Rada”. Żaden cel nie znika.",
+        "en": "A lens, not a filter: changes the “Rig and framing” and “Advice” columns. No target disappears.",
+    },
+    "planner.controls_state": {
+        "pl": "Progi — rozmiar ≥{size}′, ciemna ≥{dark}′, mag ≤{mag}, wys. ≥{alt}°, {hours} h/kanał",
+        "en": "Thresholds — size ≥{size}′, dark ≥{dark}′, mag ≤{mag}, alt ≥{alt}°, {hours} h/channel",
+    },
+    "planner.max_cost_on": {"pl": "licz próg", "en": "apply threshold"},
+    "planner.counts_find": {
+        "pl": "Tryb szukania: {n} trafień dla „{needle}” (progi i horyzont pominięte)",
+        "en": "Search mode: {n} hits for “{needle}” (thresholds and horizon skipped)",
+    },
+    "planner.empty_find": {
+        "pl": "Nie znam celu „{needle}” — sprawdź nazwę albo oznaczenie katalogowe (np. NGC7000, Sh2-155).",
+        "en": "I do not know the target “{needle}” — check the name or catalog id (e.g. NGC7000, Sh2-155).",
+    },
+    "planner.status_none": {"pl": "(bez oznaczenia)", "en": "(not marked)"},
+    "planner.panel_of": {"pl": "Zaznaczony cel — {canon}", "en": "Selected target — {canon}"},
+    "planner.park_close": {"pl": "Zamknij", "en": "Close"},
     "planner.not_visible_tip": {
         "pl": "Tej nocy nie wychodzi nad przyjęty horyzont — wiersz zostaje, żeby było widać dlaczego.",
         "en": "Does not rise above the chosen horizon tonight — the row stays so you can see why.",

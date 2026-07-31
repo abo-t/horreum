@@ -11,6 +11,19 @@ from pathlib import Path
 from . import __version__, db
 
 
+def _layout(name):
+    """Nazwa układu projekcji — walidacja LENIWA, bo jedynym właścicielem listy jest
+    `projection.LAYOUTS` (layout = DANE, D-P1), a import `projection` przy BUDOWIE parsera
+    kosztowałby ~0,26 s na KAŻDE wywołanie CLI (ciągnie `scan`). `type=` argparse woła dopiero
+    przy parsowaniu, więc `horreum --version` nadal nic nie płaci. Komunikat ASCII — leci na
+    stderr, którego `main` nie przełącza na UTF-8 (konsola bywa cp1250)."""
+    from .projection import LAYOUTS
+    if name not in LAYOUTS:
+        raise argparse.ArgumentTypeError(
+            f"nieznany uklad {name!r}; dostepne: {', '.join(sorted(LAYOUTS))}")
+    return name
+
+
 def main(argv=None):
     # Konsola Windows bywa cp1250; `delta` wypisuje surowe object_raw (dane usera — mogą mieć znaki
     # spoza cp1250). Przełącz stdout na UTF-8 (best-effort), by `print` nie wywalił się na nazwie
@@ -139,8 +152,8 @@ def main(argv=None):
     p_proj.add_argument("--root", required=True,
                         help="korzeń projekcji — MUSI zawierać segment _WBPP/_Review (bez domyślnej "
                              "ścieżki: repo publiczne, prywatny R: poza kodem)")
-    p_proj.add_argument("--layout", choices=["po-obiektach", "wbpp-feed"], default="po-obiektach",
-                        help="układ katalogów (domyślnie po-obiektach)")
+    p_proj.add_argument("--layout", type=_layout, default="po-obiektach",
+                        help="układ katalogów (domyślnie po-obiektach; zła nazwa wypisze dostępne)")
     p_proj.add_argument("--filter-json", default=None,
                         help="drzewo filtra JSON (jak grid): ścieżka pliku LUB inline; brak = cała baza")
     p_proj.add_argument("--copy", action="store_true",

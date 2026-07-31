@@ -118,6 +118,31 @@ def test_cli_project_root_wymagany(tmp_path):
         cli.main(["project", str(dbp)])
 
 
+def test_cli_project_kazdy_layout_z_LAYOUTS_przechodzi(tmp_path, capsys):
+    """Jeden właściciel listy układów: `projection.LAYOUTS` (layout = DANE, D-P1). Test chodzi po
+    KLUCZACH, więc trzeci układ jest pokryty bez dopisywania testu — a CLI, które by go nie znało,
+    tu pada. Wcześniej `choices` w parserze duplikowało tę listę ręcznie (SIN-DUP)."""
+    dbp, _ = _seed(tmp_path)
+    for layout in sorted(projection.LAYOUTS):
+        rc = cli.main(["project", str(dbp), "--root", str(tmp_path / "_WBPP"), "--layout", layout])
+        assert rc == 0, layout
+        assert "DRY" in capsys.readouterr().out
+
+
+def test_cli_project_nieznany_layout_wypisuje_dostepne(tmp_path, capsys):
+    """Cisza po literówce byłaby najgorszą odpowiedzią — komunikat NIESIE listę (ASCII: stderr nie
+    jest przełączany na UTF-8)."""
+    dbp, _ = _seed(tmp_path)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["project", str(dbp), "--root", str(tmp_path / "_WBPP"), "--layout", "po-obiektah"])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "nieznany uklad" in err
+    for layout in projection.LAYOUTS:
+        assert layout in err
+    assert err.isascii()
+
+
 def test_cli_project_raport_ascii_safe(tmp_path, capsys):
     """Warstwa strukturalna raportu bez glifów spoza ASCII (`->`, nie `→`/`Δ`/`—` — konsola cp1250)."""
     dbp, _ = _seed(tmp_path)

@@ -6,6 +6,36 @@ schemat i API mogą się jeszcze zmieniać.
 
 ## [Niewydane]
 
+Planer celów: odpowiedź na pytanie „co dziś mam na niebie, w odpowiedniej wielkości i odpowiednich
+filtrach" — z katalogu, Twojego sprzętu, nocy i tego, co już masz w archiwum.
+
+### Dodane
+- **Planer celów** — nowe, czwarte miejsce w oknie. Dla wybranej nocy pokazuje cele katalogu wraz
+  z oknem widoczności, kulminacją, kadrowaniem w Twoich zestawach (jeden kadr albo mozaika z liczbą
+  paneli), pokryciem z archiwum per kanał (RGB/Ha/OIII/SII), kosztem czasu narzuconym przez Księżyc
+  i radą, co dziś warto zrobić. Cele nigdy nie fotografowane są **w wynikach**, nie poza nimi.
+- **Kuratela celów**: status (zaplanowany / w toku / zrobiony / pominięty), priorytet i notatka —
+  Twoje zdanie o celu, zapisywane wprost, nigdy wywnioskowane. `horreum target` robi to samo z wiersza
+  poleceń.
+- **Park teleskopów** — jawna deklaracja, czym dziś fotografujesz (okno: przycisk „Park…", wiersz
+  poleceń: `horreum park`). Program tego NIE zgaduje z ostatniej klatki: „ostatnio używany" to nie to
+  samo co „posiadany", a plan liczony historycznym sprzętem byłby planem cudzej nocy.
+- **`horreum plan`** — pełna odpowiedź planera bez okna, z wyjściem czytelnym dla człowieka i `--json`
+  dla skryptów.
+- **Katalog celów w pakiecie** (~1200 obiektów wykonalnych Twoim sprzętem, warstwa rdzenia + osobna
+  warstwa mgławic rozciągłych LBN/LDN). Aplikacja **nigdy nie sięga do sieci** — katalog jest plikiem
+  w pakiecie, odświeżanym podmianą assetu; osobny skrypt deweloperski buduje go z OpenNGC.
+  Pochodzenie i licencje danych: `horreum/data/PROVENANCE.md`.
+- **Przejście z planera do Zbiorów**: „Pokaż klatki celu" ustawia filtr obiektu — także gdy ten sam
+  cel leży w archiwum pod kilkoma nazwami naraz (np. `IC410` i `LBN807`); zobaczysz sumę, nie jedną
+  z nich.
+
+### Zmienione
+- **Kolejka „do przeglądu" mówi całą prawdę**: klatki bez ŻADNEJ nazwy w nagłówku mają teraz własny
+  kubełek. Wcześniej były widoczne w Zbiorach, ale kolejka o nich milczała (w archiwum autora: 25).
+- **Scalenie teleskopów nie gubi parku** — deklaracja idzie za sprzętem; dwa sprzeczne zdania
+  o jednym sprzęcie kończą się odmową, nie cichym wyborem jednego z nich.
+
 ## [0.4.0] — 2026-07-23
 
 Angielski interfejs, ręczne przypisanie obiektu, wykrywanie zniknięć kopii, oś kalibracji z rodowodem

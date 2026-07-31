@@ -685,9 +685,10 @@ class ObjectAxisView(QWidget):
 
     def _load_review(self):
         """Kolejka przeglądu ze STANU: obiekt-review (drążenie do klatek + akcja „Przypisz"),
-        kopie nieczytelne (drążenie do kopii, Z6), liczniki config-review/headerless (informacyjne
-        — bez drążenia, to inne osie/skan). Dispatch po string-tagu: `UserRole` = tag,
-        `UserRole+1` = payload (R#6 — tuple w roli QVariant konwertuje na listę)."""
+        klatki bez nazwy w nagłówku (licznik — nie ma czego zgrupować, T5a), kopie nieczytelne
+        (drążenie do kopii, Z6), liczniki config-review/headerless (informacyjne — bez drążenia,
+        to inne osie/skan). Dispatch po string-tagu: `UserRole` = tag, `UserRole+1` = payload
+        (R#6 — tuple w roli QVariant konwertuje na listę)."""
         q = queries.review_queue(self.con)
         self.review.clear()
         for r in q["object_review"]:
@@ -695,6 +696,12 @@ class ObjectAxisView(QWidget):
             it.setData(Qt.UserRole, "object_raw")
             it.setData(Qt.UserRole + 1, r["object_raw"])
             self.review.addItem(it)
+        # Bezimienne (T5a): grid „Do przeglądu" je pokazuje, kolejka do dziś o nich milczała —
+        # bez `object_raw` nie ma klucza grupowania, więc idą własnym licznikiem. Bez akcji:
+        # przypisanie po nazwie nie ma tu czego chwycić (drążenie do klatek = wariant rozwojowy).
+        nameless = QListWidgetItem(i18n.t("object.nameless_line", n=q["nameless_count"]))
+        nameless.setFlags(Qt.ItemIsEnabled)     # informacyjny, nie do zaznaczenia
+        self.review.addItem(nameless)
         unread = QListWidgetItem(i18n.t("object.unreadable_line", n=q["unreadable_count"]))
         unread.setData(Qt.UserRole, "unreadable")
         unread.setData(Qt.UserRole + 1, None)

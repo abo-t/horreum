@@ -174,6 +174,8 @@ CATALOG = {
         "en": "No objects for this filter — scan and resolve (horreum resolve) or change the filter.",
     },
     "object.review_item": {"pl": "{name}  ·  {n} klatek", "en": "{name}  ·  {n} frames"},
+    "object.nameless_line": {"pl": "— bez nazwy w nagłówku: {n}",
+                             "en": "— no name in header: {n}"},
     "object.unreadable_line": {"pl": "— kopie nieczytelne: {n}", "en": "— unreadable copies: {n}"},
     "object.review_info": {
         "pl": "— config-review: {config}  ·  bez nagłówka: {headerless}  (rozwiązywanie w przygotowaniu)",

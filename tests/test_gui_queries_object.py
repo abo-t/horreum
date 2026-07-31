@@ -159,6 +159,55 @@ def test_object_review_frames_drazenie(s8_obj):
     assert {r["frame_id"] for r in rows} == {ids["frames"]["objrev1"], ids["frames"]["objrev2"]}
 
 
+# --- T5a: szew „do przeglądu" — kolejka vs perspektywa gridu ---
+
+def _nameless_light(con, sha):
+    """Light z NAGŁÓWKIEM, ale bez `object_raw` i bez obiektu — klasa 25 klatek żywej pf4."""
+    fid, _ = repo.upsert_frame(con, sha1_data=sha, kind="light", filetype="fits",
+                               camera_id=None, now=NOW)
+    repo.record_header(con, frame_id=fid, raw_json="{}", object_raw=None, now=NOW)
+    return fid
+
+
+def test_review_queue_kubelek_bezimiennych(s8_obj):
+    """T5a: klatka bez `object_raw` NIE ma jak trafić do `object_review` (GROUP BY po nazwie) —
+    liczy ją własny kubełek. Bez niego kolejka milczała o tym, co grid pokazuje."""
+    con, ids = s8_obj
+    assert queries.review_queue(con)["nameless_count"] == 0        # fixture: same nazwane
+    _nameless_light(con, "sha-nameless1")
+    q = queries.review_queue(con)
+    assert q["nameless_count"] == 1
+    # nie przecieka do kubełka nazwanych ani do headerless (nagłówek JEST)
+    assert [(r["object_raw"], r["n"]) for r in q["object_review"]] == [("FlatWizard", 2)]
+    assert q["headerless_count"] == 1                              # nadal sam nullcfg
+
+
+def test_review_queue_partycja_pokrywa_perspektywe_gridu(s8_obj):
+    """Szew z kolejki (rozjazd `queries.py:215` vs `:477`): kubełki kolejki MUSZĄ sumować się do
+    zbioru, który grid pokazuje w perspektywie „Do przeglądu". Trzeci człon jest kind-scopowany —
+    globalny `headerless_count` liczy też kalibrację i `unknown`, więc do partycji się NIE nadaje."""
+    def _partycja():
+        q = queries.review_queue(con)
+        headerless_lights = con.execute(
+            "SELECT count(*) FROM frame f WHERE f.kind IN ('light','master_light') "
+            "AND f.object_id IS NULL "
+            "AND NOT EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id)").fetchone()[0]
+        return sum(r["n"] for r in q["object_review"]) + q["nameless_count"] + headerless_lights
+
+    con, ids = s8_obj
+    # stan wyjściowy: objrev1+objrev2 (nazwane) + nullcfg (light bez nagłówka) = 3
+    assert len(queries.review_frame_ids(con)) == 3
+    assert _partycja() == 3
+    _nameless_light(con, "sha-nameless1")
+    _nameless_light(con, "sha-nameless2")
+    assert len(queries.review_frame_ids(con)) == 5
+    assert _partycja() == 5
+    # rozwiązanie klatki opuszcza OBIE strony równania
+    repo.assign_object(con, frame_id=ids["frames"]["objrev1"],
+                       object_id=ids["objects"]["NGC7000"], object_source="user", now=NOW)
+    assert _partycja() == len(queries.review_frame_ids(con)) == 4
+
+
 # --- facets ---
 
 def test_facets_teleskop_kanoniczne_i_filtry(s8_obj):

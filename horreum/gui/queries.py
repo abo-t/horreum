@@ -195,20 +195,32 @@ def object_frames(con, object_id, *, telescope_id=None, camera_id=None, filter_c
 
 def review_queue(con):
     """Kolejka przeglądu osi obiektu ze STANU (NIE z `count(event)` — R#2/R#4: `flag_config_review`/
-    `object.review_summary` mnożą eventy przy re-skanie, stan jest idempotentny). Trzy kanały:
+    `object.review_summary` mnożą eventy przy re-skanie, stan jest idempotentny). Kanały:
       - `object_review`: light/master_light z `object_id IS NULL` i obecnym `object_raw` (JOIN header,
         GROUP BY object_raw) — co user zostawił nierozpoznane;
+      - `nameless_count`: light/master_light z `object_id IS NULL`, z nagłówkiem, ale BEZ `object_raw`
+        (T5a) — klatka, która nie ma o czym zeznawać, więc GROUP BY nie ma jej jak pokazać;
       - `config_review_count`: `config_id IS NULL AND EXISTS(header)` — KONIECZNY `EXISTS(header)`
         (R#2): grouper iteruje `frame JOIN header`, więc klatka bez nagłówka nigdy nie jest flagowana
         i cicho zostaje config NULL; bez tego predykatu licznik zlałby trzy stany;
       - `headerless_count`: frame BEZ wiersza `header` (`NOT EXISTS`) — osobny realny kubełek
-        wydobyty spod fałszywego config-review;
+        wydobyty spod fałszywego config-review; liczony po WSZYSTKICH rodzajach (inna oś: skan);
       - `unreadable_count`: klatki z ≥1 kopią, która STAŁA SIĘ nieczytelna (`location.unreadable_since
         NOT NULL`, #13) — drążenie do dokładnych kopii daje `unreadable_copies` (Z6/P4).
-    Liczniki poza obiekt-review liczy `resolver.review_state` — JEDEN właściciel predykatu stanu
-    (#12): ta sama derywacja zasila raport dostawy, więc kolejka i raport nie mogą się rozjechać.
-    Zwraca dict: {object_review: [Row(object_raw, n)], config_review_count: int, headerless_count: int,
-    unreadable_count: int}."""
+    Liczniki poza obiekt-review i `nameless_count` liczy `resolver.review_state` — JEDEN właściciel
+    predykatu stanu (#12): ta sama derywacja zasila raport dostawy, więc kolejka i raport nie mogą
+    się rozjechać.
+
+    PARTYCJA wobec perspektywy gridu (T5a — dwa predykaty „do przeglądu" pod jedną nazwą; szew
+    zmierzony 2026-07-31, żywa pf4: 0 nazwanych + 25 bezimiennych + 0 lightów bez nagłówka = 25):
+        sum(object_review.n) + nameless_count + (lighty bez wiersza `header`) == |review_frame_ids|
+    Trzeci człon jest PODZBIOREM `headerless_count` (ten liczy też kalibrację i `unknown`, bo mówi
+    o skanie, nie o osi obiektu) — dlatego kolejka nie może go po prostu dodać: te dwa liczniki
+    odpowiadają na różne pytania. Dopóki `nameless_count` nie istniał, kolejka milczała o klatkach,
+    które grid pokazywał — stąd ten kubełek.
+
+    Zwraca dict: {object_review: [Row(object_raw, n)], nameless_count: int, config_review_count: int,
+    headerless_count: int, unreadable_count: int}."""
     object_review = con.execute(
         "SELECT h.object_raw AS object_raw, COUNT(*) AS n "
         "FROM frame f JOIN header h ON h.frame_id = f.id "
@@ -216,8 +228,16 @@ def review_queue(con):
         "  AND h.object_raw IS NOT NULL "
         "GROUP BY h.object_raw ORDER BY n DESC, object_raw"
     ).fetchall()
+    # Lustro `object_review` po drugiej stronie NULL-a: JOIN header = „zeznanie JEST", brak
+    # `object_raw` = „nie mówi o obiekcie". Bez tego kubełka klatki wpadały między predykaty.
+    nameless_count = con.execute(
+        "SELECT COUNT(*) FROM frame f JOIN header h ON h.frame_id = f.id "
+        "WHERE f.kind IN ('light','master_light') AND f.object_id IS NULL "
+        "  AND h.object_raw IS NULL"
+    ).fetchone()[0]
     st = review_state(con)
-    return {"object_review": object_review, "config_review_count": st.no_config,
+    return {"object_review": object_review, "nameless_count": nameless_count,
+            "config_review_count": st.no_config,
             "headerless_count": st.headerless, "unreadable_count": st.unreadable}
 
 
@@ -472,7 +492,14 @@ def dup_frame_ids(con):
 def review_frame_ids(con):
     """Zbiór frame_id perspektywy „Do przeglądu": light/master_light z `object_id IS NULL`
     (równoważne trimowi `object_canon is None` — `object.canon` NOT NULL, LEFT JOIN daje NULL
-    wyłącznie przy braku obiektu). Zwraca set[int]."""
+    wyłącznie przy braku obiektu).
+
+    To SZERSZE pytanie niż kubełek `object_review` w `review_queue`: tam GROUP BY `object_raw`
+    wymaga nagłówka Z NAZWĄ, tutaj liczy się sam brak obiektu. Rozjazd nie jest duplikatem do
+    usunięcia — to dwa różne pytania (grid: „co jeszcze nie ma obiektu", kolejka: „co rozstrzygnąć
+    i pod jaką nazwą"). Relacja jest PARTYCJĄ i tak ją trzyma `review_queue` (T5a):
+        |ten zbiór| == sum(object_review.n) + nameless_count + (lighty bez wiersza `header`)
+    Zwraca set[int]."""
     return {int(r[0]) for r in con.execute(
         "SELECT id FROM frame WHERE object_id IS NULL AND kind IN ('light','master_light')"
     ).fetchall()}

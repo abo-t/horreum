@@ -185,10 +185,28 @@ def test_kulminacja_ctb1_z_bedargowa():
 
 
 def test_brak_nocy_astronomicznej_latem_ma_powod():
-    """53,4° N: od ~połowy maja do ~końca lipca ☉ nie schodzi poniżej −18°."""
+    """53,4° N: od ~połowy maja do ~końca lipca ☉ nie schodzi poniżej −18°. Okno ŻEGLARSKIE
+    istnieje mimo to i to ono jest zakresem rozważań — brak twardej ciemności opisuje jakość
+    nieba, nie dostępność celu."""
     w = sky.visibility_window(350.3, 62.7, BEDARGOWO, date(2026, 6, 15))
     assert w.darkness == "nautical" and w.reason == "no_astro_night"
-    assert w.dark_start is not None and w.hours_above > 0
+    assert w.astro_start is None and w.dark_start is not None and w.hours_above > 0
+
+
+def test_okno_to_noc_zeglarska_takze_zima():
+    """Zimą noc astronomiczna ISTNIEJE, ale zakresem rozważań pozostaje żeglarska — okno musi
+    być SZERSZE od astronomicznego, inaczej cel na skraju nocy zniknąłby bez powodu."""
+    w = sky.visibility_window(350.3, 62.7, BEDARGOWO, date(2026, 1, 15))
+    assert w.darkness == "astronomical" and w.astro_start is not None
+    assert w.dark_start < w.astro_start and w.dark_end > w.astro_end
+
+
+def test_widoczny_to_maksimum_nocy_zeglarskiej_wobec_suwaka():
+    """`visible` = max_alt >= min_alt; próg jest SUWAKIEM, nie stałą (D-0731-10)."""
+    w30 = sky.visibility_window(313.0, 31.0, BEDARGOWO, date(2026, 8, 20))
+    w80 = sky.visibility_window(313.0, 31.0, BEDARGOWO, date(2026, 8, 20), min_alt=80.0)
+    assert w30.visible and not w80.visible
+    assert w30.max_alt_deg == pytest.approx(w80.max_alt_deg, abs=0.01)   # miara się nie zmienia
 
 
 def test_okoloobiegunowy_nie_zachodzi():

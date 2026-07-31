@@ -394,26 +394,42 @@ def moon_state(ra_deg, dec_deg, site, when, *, v_zen=V_ZEN_DEFAULT, k_ext=K_EXT_
 @dataclass(frozen=True)
 class Window:
     """`night_date` to data WIECZORU — doba przesunięta o −12 h, tak samo jak facet Noc
-    (`queries.facet_nights`); planer i grid muszą znaczyć tym słowem to samo."""
+    (`queries.facet_nights`); planer i grid muszą znaczyć tym słowem to samo.
+
+    `dark_start`/`dark_end` to granice NOCY ŻEGLARSKIEJ (☉ ≤ −12°) i to ONA jest zakresem
+    rozważań; `astro_start`/`astro_end` opisują twardą ciemność (≤ −18°) i bywają `None` —
+    na 53° N nie istnieje od ~połowy maja do ~końca lipca."""
     night_date: date
     dark_start: datetime | None
     dark_end: datetime | None
+    astro_start: datetime | None
+    astro_end: datetime | None
     darkness: str                 # astronomical|nautical|none
-    max_alt_deg: float
+    max_alt_deg: float            # MAKSIMUM w nocy żeglarskiej — miara widoczności
     hours_above: float
     min_alt_deg: float
     moon: MoonState | None
     reason: str | None            # never_rises|no_astro_night|circumpolar|no_night
 
+    @property
+    def visible(self):
+        """Czy cel jest tej nocy dostępny: maksimum nocy żeglarskiej ≥ próg (suwak `min_alt`).
+        Poza nocą żeglarską wysokości NIE LICZYMY — cel wysoki o zmierzchu cywilnym nie jest
+        celem (decyzja Zdzinia 2026-07-31)."""
+        return self.max_alt_deg >= self.min_alt_deg
+
 
 def visibility_window(ra_deg, dec_deg, site, night_date, *, min_alt=30.0, step_min=5,
                       v_zen=V_ZEN_DEFAULT, k_ext=K_EXT_DEFAULT):
-    """Okno nocy dla celu: ile godzin powyżej progu i jak drogi jest wtedy Księżyc.
+    """Okno nocy dla celu: jak wysoko wejdzie, ile godzin utrzyma próg i jak drogi jest Księżyc.
 
-    Ciemność liczymy PRÓBKOWANIEM (`step_min`, domyślnie 5 min) od południa UTC dnia `night_date`
-    przez 24 h. Na 53° N noc ASTRONOMICZNA (☉ ≤ −18°) nie istnieje od ~połowy maja do ~końca lipca —
-    wtedy schodzimy na NAUTYCZNĄ (≤ −12°) i mówimy o tym wprost (`no_astro_night`), zamiast oddać
-    puste okno bez powodu. `moon` opisuje chwilę KULMINACJI celu w oknie (najlepszy moment nocy)."""
+    ZAKRESEM ROZWAŻAŃ JEST NOC ŻEGLARSKA (☉ ≤ −12°) — zawsze, nie tylko latem jako awaryjny
+    zamiennik. Miarą widoczności jest MAKSYMALNA wysokość osiągnięta w tym oknie (`max_alt_deg`),
+    a `min_alt` jest progiem-suwakiem, nie stałą. Noc astronomiczna zostaje raportowana osobno
+    (`astro_*`, `darkness`, `no_astro_night`), bo mówi o jakości nieba, a nie o dostępności celu.
+
+    Ciemność liczymy PRÓBKOWANIEM (`step_min`, domyślnie 5 min) od południa UTC przez 24 h.
+    `moon` opisuje chwilę KULMINACJI celu w oknie — najlepszy moment nocy, więc i uczciwą wycenę."""
     start = datetime(night_date.year, night_date.month, night_date.day, 12, tzinfo=timezone.utc)
     steps = int(24 * 60 / step_min) + 1
     samples = [start + timedelta(minutes=step_min * i) for i in range(steps)]
@@ -421,15 +437,14 @@ def visibility_window(ra_deg, dec_deg, site, night_date, *, min_alt=30.0, step_m
     sun_alt = [_alt_from_jd(*_sun_radec(j), site.lat_deg, site.lon_deg, j, precess=False)
                for j in jds]
 
-    darkness, dark_idx = "astronomical", [i for i, a in enumerate(sun_alt) if a <= -18.0]
-    reason = None
+    dark_idx = [i for i, a in enumerate(sun_alt) if a <= -12.0]
+    astro_idx = [i for i, a in enumerate(sun_alt) if a <= -18.0]
+    darkness = "astronomical" if astro_idx else "nautical"
+    reason = None if astro_idx else "no_astro_night"
     if not dark_idx:
-        darkness, dark_idx = "nautical", [i for i, a in enumerate(sun_alt) if a <= -12.0]
-        reason = "no_astro_night"
-    if not dark_idx:
-        return Window(night_date=night_date, dark_start=None, dark_end=None, darkness="none",
-                      max_alt_deg=-90.0, hours_above=0.0, min_alt_deg=min_alt, moon=None,
-                      reason="no_night")
+        return Window(night_date=night_date, dark_start=None, dark_end=None, astro_start=None,
+                      astro_end=None, darkness="none", max_alt_deg=-90.0, hours_above=0.0,
+                      min_alt_deg=min_alt, moon=None, reason="no_night")
 
     alts = [(i, _alt_from_jd(ra_deg, dec_deg, site.lat_deg, site.lon_deg, jds[i])) for i in dark_idx]
     best_i, max_alt = max(alts, key=lambda p: p[1])
@@ -440,8 +455,10 @@ def visibility_window(ra_deg, dec_deg, site, night_date, *, min_alt=30.0, step_m
     elif reason is None and min(a for _, a in alts) > 0:
         reason = "circumpolar"
     return Window(night_date=night_date, dark_start=samples[dark_idx[0]],
-                  dark_end=samples[dark_idx[-1]], darkness=darkness, max_alt_deg=max_alt,
-                  hours_above=hours, min_alt_deg=min_alt,
+                  dark_end=samples[dark_idx[-1]],
+                  astro_start=samples[astro_idx[0]] if astro_idx else None,
+                  astro_end=samples[astro_idx[-1]] if astro_idx else None,
+                  darkness=darkness, max_alt_deg=max_alt, hours_above=hours, min_alt_deg=min_alt,
                   moon=moon_state(ra_deg, dec_deg, site, samples[best_i], v_zen=v_zen, k_ext=k_ext),
                   reason=reason)
 

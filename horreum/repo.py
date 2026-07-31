@@ -854,7 +854,17 @@ def merge_telescope(con, *, source_id, target_id, now, uid="local"):
     source KANONICZNY; source NIE MA członków (`NOT EXISTS merged_into=source`) — inaczej powstałby
     łańcuch głębokości 2. Czyni cykl/łańcuch strukturalnie niemożliwymi (widok `telescope_canonical`
     pozostaje poprawny, ale dane nie schodzą głębiej niż 1). source już `merged_into=target` → `False`
-    (idempotencja). Inaczej UPDATE + `event(telescope.merged)`."""
+    (idempotencja). Inaczej UPDATE + `event(telescope.merged)`.
+
+    PARK JEDZIE ZA SPRZĘTEM (D-T3-d, dług T4 §10): scalenie mówi „to ten sam teleskop", a `in_park`
+    jest zdaniem o SPRZĘCIE, nie o wierszu — więc oznaczenie source'a przechodzi na korzeń, gdy
+    korzeń MILCZY (`in_park IS NULL`), osobnym `event(telescope.parked)` z `via: merge:<id>`.
+    `sky.park` filtruje `merged_into IS NULL`, więc bez tego przeniesienia scalenie GASIŁO decyzję
+    usera po cichu i planer liczył inny park niż oznaczony. PIĄTY GUARD: sprzeczne zdania (1 vs 0)
+    → `ValueError` — dwóch zdań usera o tym samym sprzęcie klinga nie rozstrzyga za niego; park
+    porządkuje się przed scaleniem (`horreum park --add/--drop`). Zgodne albo milczący source →
+    bez ruchu. Wartość source'a ZOSTAJE na jego wierszu (odczyt i tak go pomija), więc `unmerge`
+    oddaje wiersz z nietkniętym oznaczeniem."""
     if source_id == target_id:
         raise ValueError("nie można scalić teleskopu w samego siebie")
     with _immediate(con):
@@ -873,10 +883,25 @@ def merge_telescope(con, *, source_id, target_id, now, uid="local"):
         if has_member is not None:
             raise ValueError(f"source telescope:{source_id} ma członków — najpierw unmerge "
                              "(inwariant głębokość ≤ 1)")
+        src_park = con.execute(
+            "SELECT in_park FROM telescope WHERE id = ?", (source_id,)).fetchone()["in_park"]
+        tgt = con.execute(
+            "SELECT telescop_canon, in_park FROM telescope WHERE id = ?", (target_id,)).fetchone()
+        if src_park is not None and tgt["in_park"] is not None and src_park != tgt["in_park"]:
+            raise ValueError(
+                f"telescope:{source_id} i telescope:{target_id} mają SPRZECZNE zdanie o parku "
+                f"(in_park={src_park} vs {tgt['in_park']}) — rozstrzygnij park przed scaleniem "
+                "(`horreum park <db> --add/--drop <teleskop>`)")
         con.execute("UPDATE telescope SET merged_into = ? WHERE id = ?", (target_id, source_id))
         emit_event(con, actor=f"user:{uid}", verb="telescope.merged",
                    target=f"telescope:{source_id}", now=now,
                    payload={"source": source_id, "target": target_id})
+        if src_park is not None and tgt["in_park"] is None:
+            con.execute("UPDATE telescope SET in_park = ? WHERE id = ?", (src_park, target_id))
+            emit_event(con, actor=f"user:{uid}", verb="telescope.parked",
+                       target=f"telescope:{target_id}", now=now,
+                       payload={"telescope": tgt["telescop_canon"], "before": None,
+                                "after": src_park, "via": f"merge:{source_id}"})
     return True
 
 
@@ -884,7 +909,12 @@ def unmerge_telescope(con, *, telescope_id, now, uid="local"):
     """Cofnij scalenie (`merged_into → NULL`) — append-only (nowy event, nie kasacja). Już kanoniczny
     (`merged_into IS NULL`) → `False`. Inaczej UPDATE + `event(telescope.unmerged)` z `{before, after}`
     (`former_target`→None). Dzięki inwariantowi głębokość ≤ 1 wiersz zawsze jest liściem — un-merge
-    nie ma „środka łańcucha" do rozplątania."""
+    nie ma „środka łańcucha" do rozplątania.
+
+    PARKU NIE COFA: `merge_telescope` niczego nie skasowało (source trzyma własne `in_park`, korzeń
+    dostał swoje), więc rozplątanie oddaje oba wiersze z ich oznaczeniami. Zdejmowanie parku z korzenia
+    „bo przyszedł ze scalenia" zgadywałoby, czy user zdążył go w międzyczasie potwierdzić —
+    oznaczenie zdejmuje się jawnie (`horreum park --drop`)."""
     with _immediate(con):
         _, _, merged_into = _telescope_row(con, telescope_id)
         if merged_into is None:

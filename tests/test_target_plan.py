@@ -169,6 +169,49 @@ def test_park_nie_wchodzi_na_teleskop_scalony(con):
         repo.set_telescope_park(con, telescope_id=3, in_park=1, now=NOW)
 
 
+def _park_col(con, tid):
+    return con.execute("SELECT in_park FROM telescope WHERE id = ?", (tid,)).fetchone()["in_park"]
+
+
+def test_scalenie_przenosi_park_na_korzen(con):
+    """Dług T4 §10: `sky.park` filtruje `merged_into IS NULL`, więc bez przeniesienia scalenie
+    GASIŁO oznaczenie usera po cichu — park zdanie o SPRZĘCIE, nie o wierszu."""
+    repo.set_telescope_park(con, telescope_id=1, in_park=1, now=NOW)      # A140R w parku
+    assert sky.park(con) == ("A140R",)
+    assert repo.merge_telescope(con, source_id=1, target_id=2, now=NOW) is True
+    assert _park_col(con, 2) == 1 and _park_col(con, 1) == 1              # source trzyma swoje
+    assert sky.park(con) == ("RC8",)                                      # park NIE zgasł
+    ev = _events(con, "telescope.parked")[-1]["payload"]
+    for fragment in ('"telescope": "RC8"', '"before": null', '"after": 1', '"via": "merge:1"'):
+        assert fragment in ev
+    # unmerge oddaje oba wiersze z oznaczeniami — nic nie zostało skasowane, więc nic nie wraca
+    repo.unmerge_telescope(con, telescope_id=1, now=NOW)
+    assert sky.park(con) == ("A140R", "RC8")
+
+
+def test_scalenie_nie_nadpisuje_wlasnego_zdania_korzenia(con):
+    """Korzeń, który już mówi 1, nie dostaje drugiego eventu; milczący source nie ma co przenieść."""
+    repo.set_telescope_park(con, telescope_id=1, in_park=1, now=NOW)
+    repo.set_telescope_park(con, telescope_id=2, in_park=1, now=NOW)
+    before = len(_events(con, "telescope.parked"))
+    assert repo.merge_telescope(con, source_id=1, target_id=2, now=NOW) is True
+    assert len(_events(con, "telescope.parked")) == before                # zgodne = bez ruchu
+    assert repo.merge_telescope(con, source_id=3, target_id=2, now=NOW) is True   # source milczy
+    assert len(_events(con, "telescope.parked")) == before
+    assert _park_col(con, 3) is None
+
+
+def test_sprzeczny_park_odmawia_scalenia(con):
+    """1 vs 0 to dwa zdania usera o tym samym sprzęcie — klinga nie rozstrzyga za niego."""
+    repo.set_telescope_park(con, telescope_id=1, in_park=1, now=NOW)
+    repo.set_telescope_park(con, telescope_id=2, in_park=0, now=NOW)
+    with pytest.raises(ValueError, match="SPRZECZNE"):
+        repo.merge_telescope(con, source_id=1, target_id=2, now=NOW)
+    assert con.execute("SELECT merged_into FROM telescope WHERE id=1").fetchone()[0] is None
+    assert len(_events(con, "telescope.merged")) == 0                     # rollback całości
+    assert (_park_col(con, 1), _park_col(con, 2)) == (1, 0)
+
+
 # ─────────────────────────────────────────────────────────────── odczyt parku (`sky.park`)
 
 def test_park_pusty_to_None_a_nie_pusta_krotka(con):

@@ -27,11 +27,13 @@ horreum = "horreum.cli:main"
 include = ["horreum*"]
 
 [tool.setuptools.package-data]
-# Te assety MUSZĄ trafić do wheela — inaczej non-editable `pip install .` (bramka clone'a)
-# nie znajdzie migracji ani uniwersaliów katalogowych w runtime.
-"horreum.schema.migrations" = ["*.sql"]
-"horreum.resolve.data" = ["*.json"]
-"horreum.data" = ["*.json"]
+# Assety MUSZĄ trafić do wheela — inaczej non-editable `pip install .` (bramka clone'a) nie znajdzie
+# w runtime migracji, katalogu celów, uniwersaliów ani mapy lądów. WZORZEC, NIE LISTA: enumeracja
+# katalogów rozjechała się dwa razy (`horreum.gui.assets` w `hiddenimports` obu speców, ale nie tu —
+# mapa F8 padłaby na czystej instalacji), bo dorzucenie assetu i dopisanie wiersza to dwa różne
+# gesty. Specy PyInstallera od początku biorą `collect_data_files("horreum", includes=["**/*.sql",
+# "**/*.json"])` i nigdy nie zgubiły pliku — tu ten sam wzorzec. Bramka: `tests/test_packaging.py`.
+"*" = ["*.json", "*.sql"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

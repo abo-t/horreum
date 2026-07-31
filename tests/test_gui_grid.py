@@ -273,6 +273,36 @@ def test_view_perspektywa_duplikaty(view):
     assert view.count_label.text() == "1 klatka"  # tylko f1 (n_present=2)
 
 
+def test_apply_object_facet_sumuje_dwie_nazwy_celu(view, gcon):
+    """T5e (most planer→grid, D-0731-7): jeden cel katalogu bywa w archiwum pod DWIEMA nazwami
+    (`IC410` ORAZ `LBN807`, D-T2-d), więc seam bierze LISTĘ par i pokazuje ich SUMĘ. Reużywa
+    istniejący facet Obiekt — zero drugiej ścieżki filtrowania (SPOT `facet_model.compose`)."""
+    gcon.executemany("INSERT INTO object (id, canon, kind) VALUES (?,?,?)",
+                     [(1, "IC410", "deep_sky"), (2, "LBN807", "deep_sky")])
+    gcon.execute("UPDATE frame SET object_id = 1 WHERE id = 1")
+    gcon.execute("UPDATE frame SET object_id = 2 WHERE id = 2")
+    gcon.commit()
+    view.refresh()
+    view.apply_object_facet([(1, "IC410")])
+    assert view.count_label.text() == "1 klatka"
+    view.apply_object_facet([(1, "IC410"), (2, "LBN807")])
+    assert view.count_label.text() == "2 klatki"          # SUMA obu nazw, nie jedna z nich
+    assert view._facet_state["object"]["in"] == [[1, "IC410"], [2, "LBN807"]]
+
+
+def test_apply_object_facet_zdejmuje_perspektywe_i_filtr(view, gcon):
+    """Wejście z zewnątrz definiuje CAŁY zbiór: perspektywa „Duplikaty" i filtr advanced nie mają
+    prawa dołożyć się do klatek celu (inaczej ekran pokazałby przecięcie i skłamał, czyje to klatki)."""
+    gcon.execute("INSERT INTO object (id, canon, kind) VALUES (1, 'IC410', 'deep_sky')")
+    gcon.execute("UPDATE frame SET object_id = 1 WHERE id IN (1, 2)")
+    gcon.commit()
+    view.combo_persp.setCurrentIndex(view.combo_persp.findText("Duplikaty"))
+    view._filter_tree = {"keyword": "GAIN", "operator": "eq", "value": "100"}
+    view.apply_object_facet([(1, "IC410")])
+    assert view._only_dups is False and view._filter_tree is None
+    assert view.count_label.text() == "2 klatki"
+
+
 def test_view_grupowanie(view):
     idx = view.combo_group.findData("kind")
     view.combo_group.setCurrentIndex(idx)

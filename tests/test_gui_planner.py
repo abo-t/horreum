@@ -169,6 +169,108 @@ def test_status_filtruje_a_kuratela_widac_w_kolumnie(view):
     assert view.model.row_at(0).plan == "zaplanowany 1"
 
 
+# ─────────────────────────────────────────────────────────────── kuratela i park (ZAPIS, T5d)
+
+def _events(con, verb):
+    return con.execute("SELECT count(*) FROM event WHERE verb = ?", (verb,)).fetchone()[0]
+
+
+def test_panel_zapisuje_kuratel_i_wraca_na_ten_sam_cel(view):
+    view.table.selectRow(0)
+    canon = view.selected_row().canon
+    view.panel_status.setCurrentIndex(view.panel_status.findData("planned"))
+    view.panel_priority.setValue(2)
+    view.panel_note.setText("domknac SII")
+    view._on_save_mark()
+    row = view.con.execute("SELECT * FROM target_plan WHERE canon = ?", (canon,)).fetchone()
+    assert (row["status"], row["priority"], row["note"]) == ("planned", 2, "domknac SII")
+    assert view.selected_row().canon == canon            # zaznaczenie wróciło na ten sam cel
+    assert view.selected_row().plan == "zaplanowany 2"   # lista odbija zapis
+
+
+def test_powtorzony_zapis_nie_puchnie_dziennika(view):
+    view.table.selectRow(0)
+    view.panel_status.setCurrentIndex(view.panel_status.findData("active"))
+    view._on_save_mark()
+    before = _events(view.con, "target_plan.set")
+    view._on_save_mark()                                 # ten sam komplet → idempotencja repo
+    assert _events(view.con, "target_plan.set") == before
+
+
+def test_skip_znika_z_listy_a_panel_mowi_prawde(view):
+    view.table.selectRow(0)
+    canon = view.selected_row().canon
+    view.panel_status.setCurrentIndex(view.panel_status.findData("skip"))
+    view._on_save_mark()
+    canons = {view.model.row_at(r).canon for r in range(view.model.rowCount())}
+    assert canon not in canons                           # `skip` chowa cel (z licznikiem w nagłówku)
+    assert view.selected_row() is None                   # pusty panel = uczciwa odpowiedź
+    assert not view.panel.isEnabled()
+    assert "pominięty" in view.notes_label.text() or view._result.counts["hidden_by_status"] == 1
+
+
+def test_zdjecie_oznaczenia_kasuje_wiersz(view):
+    view.table.selectRow(0)
+    canon = view.selected_row().canon
+    view.panel_status.setCurrentIndex(view.panel_status.findData("planned"))
+    view._on_save_mark()
+    view._on_clear_mark()
+    assert view.con.execute("SELECT count(*) FROM target_plan WHERE canon = ?",
+                            (canon,)).fetchone()[0] == 0
+    assert _events(view.con, "target_plan.cleared") == 1
+
+
+def test_bez_luk_to_informacja_a_nie_zapis(view):
+    """D-T4-d: „✓ bez luk" podpowiada, ale statusu NIE stawia — automat czyniłby trwały status
+    funkcją suwaka `min_hours`."""
+    view.min_hours.setValue(0.0)                         # przy zerze nikt nie ma luk
+    view.replan()
+    view.table.selectRow(0)
+    assert view.no_gaps_label.text() == "✓ bez luk"
+    assert view.con.execute("SELECT count(*) FROM target_plan").fetchone()[0] == 0
+
+
+def test_dialog_parku_zapisuje_zdanie_uzytkownika(view, qapp):
+    from horreum.gui.planner import ParkDialog
+    dlg = ParkDialog(view.con, view._now)
+    try:
+        combo = dlg._combos[1]
+        combo.setCurrentIndex(combo.findData(1))
+        dlg._on_pick(1, combo)
+        assert dlg.changed == 1
+        assert combo.findData(None) == -1                # etykieta „nie wypowiedziałeś się" znika
+        from horreum import sky
+        assert sky.park(view.con) == ("A140R",)
+        dlg._on_pick(1, combo)                           # to samo zdanie drugi raz = brak zmiany
+        assert dlg.changed == 1
+    finally:
+        dlg.close()
+
+
+# ─────────────────────────────────────────────────────────────── most do gridu (T5e)
+
+def test_most_emituje_kanony_celu_z_pokryciem(view):
+    from horreum import repo as _repo
+    canon = view.model.row_at(0).canon
+    got = []
+    view.show_frames_for.connect(got.append)
+    view.table.selectRow(0)
+    view._on_show_frames()
+    assert got == []                                     # cel bez klatek nie ma czego pokazać
+    assert not view.frames_btn.isEnabled()
+
+    # daj celowi pokrycie: obiekt + light z godzinami
+    oid, _ = _repo.upsert_object(view.con, canon=canon, catalog="NGC", kind="deep_sky", now=NOW)
+    view.con.execute("UPDATE frame SET object_id = ?, filter_canon = 'Ha' WHERE id = 1", (oid,))
+    view.con.commit()
+    view.replan()
+    idx = next(r for r in range(view.model.rowCount()) if view.model.row_at(r).canon == canon)
+    view.table.selectRow(idx)
+    assert view.frames_btn.isEnabled()
+    view._on_show_frames()
+    assert got == [(canon,)]
+
+
 # ─────────────────────────────────────────────────────────────── wątek tła
 
 def test_watek_tla_liczy_i_sprzata_bez_zawisu(qapp, tmp_path):

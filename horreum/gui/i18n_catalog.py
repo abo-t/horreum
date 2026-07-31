@@ -342,6 +342,42 @@ CATALOG = {
         "pl": "Żaden cel nie przeszedł bieżących progów — poluzuj rozmiar, magnitudo albo wysokość.",
         "en": "No target passed the current thresholds — relax size, magnitude or altitude.",
     },
+
+    # --- panel celu (T5d, JEDYNE miejsce zapisu ekranu) + park -------------------------------
+    "planner.panel": {"pl": "Zaznaczony cel", "en": "Selected target"},
+    "planner.priority": {"pl": "Priorytet", "en": "Priority"},
+    "planner.priority_none": {"pl": "—", "en": "—"},
+    "planner.note_hint": {"pl": "notatka do celu", "en": "note for this target"},
+    "planner.save_mark": {"pl": "Zapisz oznaczenie", "en": "Save mark"},
+    "planner.clear_mark": {"pl": "Zdejmij oznaczenie", "en": "Clear mark"},
+    "planner.show_frames": {"pl": "Pokaż klatki celu →", "en": "Show target frames →"},
+    "planner.no_gaps": {"pl": "✓ bez luk", "en": "✓ no gaps"},
+    "planner.mark_saved": {"pl": "Zapisano oznaczenie: {canon}.", "en": "Mark saved: {canon}."},
+    "planner.mark_cleared": {"pl": "Zdjęto oznaczenie: {canon}.", "en": "Mark cleared: {canon}."},
+    "planner.mark_same": {"pl": "Bez zmian: {canon}.", "en": "No change: {canon}."},
+    "planner.park_btn": {"pl": "Park…", "en": "Park…"},
+    "planner.park_title": {"pl": "Park teleskopów", "en": "Telescope park"},
+    "planner.park_hint": {
+        "pl": "Czym dziś fotografujesz? Park jest Twoim zdaniem o sprzęcie — planer nie zgaduje go\n"
+              "z ostatniej klatki, bo „ostatnio używany” to nie to samo co „posiadany”.",
+        "en": "What do you shoot with today? The park is your statement about gear — the planner does\n"
+              "not guess it from the last frame: “last used” is not “owned”.",
+    },
+    "planner.park_col_telescope": {"pl": "Teleskop", "en": "Telescope"},
+    "planner.park_col_lights": {"pl": "Lighty", "en": "Lights"},
+    "planner.park_col_last": {"pl": "Ostatnia klatka", "en": "Last frame"},
+    "planner.park_col_state": {"pl": "Park", "en": "Park"},
+    "planner.park_in": {"pl": "w parku", "en": "in the park"},
+    "planner.park_historic": {"pl": "historyczny", "en": "historical"},
+    "planner.park_unsaid": {"pl": "(nie wypowiedziałeś się)", "en": "(you have not said)"},
+    "planner.no_object_for_target": {
+        "pl": "Ten cel nie ma w bazie żadnego obiektu — nie ma czego pokazać w Zbiorach.",
+        "en": "This target has no object in the database — there is nothing to show in Collections.",
+    },
+    "planner.park_changed": {
+        "pl": "Park: zmieniono {n} oznaczeń — plan przeliczony.",
+        "en": "Park: {n} marks changed — plan recomputed.",
+    },
     "main.no_db": {
         "pl": "Brak bazy — otwórz lub utwórz bazę (menu Plik).",
         "en": "No database — open or create one (File menu).",

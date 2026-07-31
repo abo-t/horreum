@@ -24,12 +24,13 @@ from PySide6.QtCore import (QAbstractTableModel, QDate, QModelIndex, QObject, Qt
                             Signal, Slot)
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QDateEdit,
-                               QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView,
-                               QLabel, QLineEdit, QProgressBar, QPushButton, QTableView,
+                               QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QGroupBox,
+                               QHBoxLayout, QHeaderView, QLabel, QLineEdit, QProgressBar,
+                               QPushButton, QSpinBox, QTableView, QTableWidget, QTableWidgetItem,
                                QToolButton, QVBoxLayout, QWidget)
 
-from horreum import db, targets
-from horreum.gui import i18n, planner_model as pm
+from horreum import db, repo, targets
+from horreum.gui import i18n, planner_model as pm, queries
 
 # Debounce zmian parametrów: pojedyncze kliknięcie w strzałkę spinboxa nie ma prawa startować
 # rachunku nocy, a przytrzymana strzałka wygenerowałaby ich kilkanaście.
@@ -137,6 +138,75 @@ class PlannerTableModel(QAbstractTableModel):
         return None
 
 
+class ParkDialog(QDialog):
+    """„Park…" — jawna własność użytkownika: CZYM dziś fotografuje (D-0731-12). Park NIE jest
+    derywowalny z danych (`max(date_obs)` wskazałby sprzęt ostatnio używany, a nie posiadany),
+    więc jedyną drogą jest zdanie człowieka.
+
+    Przegląd z `queries.park_overview` (ten sam literał co CLI `horreum park`). Przełącznik ma
+    DWA stany — „w parku" / „historyczny"; cofnięcia do NULL („wycofuję zdanie") świadomie NIE
+    eksponujemy: klinga je umie i testuje, ale dziś nikt nie potrzebuje odróżnić „odrzuciłem"
+    od „nie wypowiedziałem się" (dług T4 nazwany, nie ukryty).
+
+    Zapis idzie przez `repo.set_telescope_park` na GŁÓWNYM wątku — jak każda akcja osi."""
+
+    COL_CANON, COL_LIGHTS, COL_LAST, COL_PARK = range(4)
+
+    def __init__(self, con, now_fn, parent=None):
+        super().__init__(parent)
+        self.con = con
+        self._now = now_fn
+        self.changed = 0
+        self.setWindowTitle(i18n.t("planner.park_title"))
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel(i18n.t("planner.park_hint")))
+        rows = queries.park_overview(con)
+        self.table = QTableWidget(len(rows), 4)
+        self.table.setHorizontalHeaderLabels([i18n.t("planner.park_col_telescope"),
+                                              i18n.t("planner.park_col_lights"),
+                                              i18n.t("planner.park_col_last"),
+                                              i18n.t("planner.park_col_state")])
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._combos = {}
+        for r, row in enumerate(rows):
+            self._fill(r, row)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        lay.addWidget(self.table)
+        box = QDialogButtonBox(QDialogButtonBox.Close)
+        box.rejected.connect(self.reject)
+        box.accepted.connect(self.accept)
+        lay.addWidget(box)
+
+    def _fill(self, r, row):
+        self.table.setItem(r, self.COL_CANON, QTableWidgetItem(row["canon"]))
+        self.table.setItem(r, self.COL_LIGHTS, QTableWidgetItem(str(row["lights"])))
+        self.table.setItem(r, self.COL_LAST, QTableWidgetItem((row["last_seen"] or "—")[:19]))
+        combo = QComboBox()
+        combo.addItem(i18n.t("planner.park_in"), 1)
+        combo.addItem(i18n.t("planner.park_historic"), 0)
+        if row["in_park"] is None:
+            # Trzeci stan („nic nie powiedziałem") pokazujemy JAKO POZYCJĘ, żeby lista nie
+            # udawała, że user już się wypowiedział — ale wybrać go z powrotem nie można.
+            combo.addItem(i18n.t("planner.park_unsaid"), None)
+            combo.setCurrentIndex(2)
+        else:
+            combo.setCurrentIndex(0 if row["in_park"] == 1 else 1)
+        combo.activated.connect(lambda _i, tid=row["id"], c=combo: self._on_pick(tid, c))
+        self.table.setCellWidget(r, self.COL_PARK, combo)
+        self._combos[row["id"]] = combo
+
+    def _on_pick(self, telescope_id, combo):
+        value = combo.currentData()
+        if value is None:
+            return                       # pozycja „nie wypowiedziałeś się" jest tylko etykietą stanu
+        if repo.set_telescope_park(self.con, telescope_id=telescope_id, in_park=value,
+                                   now=self._now()):
+            self.changed += 1
+        idx = combo.findData(None)       # zdanie padło → etykieta stanu wyjściowego znika z listy
+        if idx >= 0:
+            combo.removeItem(idx)
+
+
 class PlannerView(QWidget):
     """Ekran planera: nagłówek nocy + panel sterowania + lista celów.
 
@@ -158,6 +228,7 @@ class PlannerView(QWidget):
         self._worker = None
         self._thread = None
         self._result = None
+        self._keep_canon = None          # cel, na który zaznaczenie ma wrócić po re-planie
         self._rig_chip = None            # None = soczewka „najlepsze dopasowanie" (D-0731-13)
         self._loading = True             # blokada re-planu na czas budowy kontrolek
         self._build()
@@ -177,7 +248,12 @@ class PlannerView(QWidget):
         self.counts_label = QLabel("")
         self.notes_label = QLabel("")
         self.notes_label.setWordWrap(True)
-        outer.addWidget(self.night_label)
+        head = QHBoxLayout()
+        head.addWidget(self.night_label, 1)
+        self.park_btn = QPushButton(i18n.t("planner.park_btn"))
+        self.park_btn.clicked.connect(self._on_park)
+        head.addWidget(self.park_btn)
+        outer.addLayout(head)
         outer.addWidget(self.counts_label)
         outer.addWidget(self.notes_label)
         outer.addWidget(self._build_controls())
@@ -205,6 +281,45 @@ class PlannerView(QWidget):
         self.empty_note.setWordWrap(True)
         self.empty_note.setVisible(False)
         outer.addWidget(self.empty_note, 1)
+        outer.addWidget(self._build_row_panel())
+        self.table.selectionModel().selectionChanged.connect(self._on_row_selected)
+        self._sync_panel()
+
+    def _build_row_panel(self):
+        """Panel zaznaczonego celu — JEDYNE miejsce zapisu ekranu (kuratela). Kanon bierzemy
+        z `row.target.canon`, czyli z assetu (`targets.load_targets`), NIGDY z wpisanego tekstu:
+        „Eastern Veil" wskazuje naraz NGC6992 i NGC6995, więc zapis po nazwie potocznej trafiłby
+        w losowy rekord. Pole „Szukaj" filtruje widok i niczego nie zapisuje — reguła jest więc
+        spełniona KONSTRUKCYJNIE, nie regulaminowo."""
+        self.panel = QGroupBox(i18n.t("planner.panel"))
+        lay = QHBoxLayout(self.panel)
+        self.panel_canon = QLabel("—")
+        lay.addWidget(self.panel_canon)
+        self.panel_status = QComboBox()
+        for s in _STATUSES:
+            self.panel_status.addItem(i18n.t(f"planner.status_{s}"), s)
+        lay.addWidget(QLabel(i18n.t("planner.status")))
+        lay.addWidget(self.panel_status)
+        self.panel_priority = QSpinBox()
+        self.panel_priority.setRange(0, 99)
+        self.panel_priority.setSpecialValueText(i18n.t("planner.priority_none"))   # 0 → NULL
+        lay.addWidget(QLabel(i18n.t("planner.priority")))
+        lay.addWidget(self.panel_priority)
+        self.panel_note = QLineEdit()
+        self.panel_note.setPlaceholderText(i18n.t("planner.note_hint"))
+        lay.addWidget(self.panel_note, 1)
+        self.save_btn = QPushButton(i18n.t("planner.save_mark"))
+        self.save_btn.clicked.connect(self._on_save_mark)
+        lay.addWidget(self.save_btn)
+        self.clear_btn = QPushButton(i18n.t("planner.clear_mark"))
+        self.clear_btn.clicked.connect(self._on_clear_mark)
+        lay.addWidget(self.clear_btn)
+        self.frames_btn = QPushButton(i18n.t("planner.show_frames"))
+        self.frames_btn.clicked.connect(self._on_show_frames)
+        lay.addWidget(self.frames_btn)
+        self.no_gaps_label = QLabel("")     # „✓ bez luk" = INFORMACJA, nigdy zapis (D-T4-d)
+        lay.addWidget(self.no_gaps_label)
+        return self.panel
 
     def _build_controls(self):
         box = QGroupBox(i18n.t("planner.controls"))
@@ -426,6 +541,95 @@ class PlannerView(QWidget):
         empty = not rows
         self.empty_note.setVisible(empty)
         self.table.setVisible(not empty)
+        # Zaznaczenie po zapisie wraca na TEN SAM cel, o ile został na liście: `skip` go z niej
+        # zdejmuje i wtedy pusty panel jest UCZCIWĄ odpowiedzią („skreśliłeś go", nie „zgubiłem").
+        if self._keep_canon is not None:
+            for r, v in enumerate(rows):
+                if v.canon == self._keep_canon:
+                    self.table.selectRow(r)
+                    break
+            self._keep_canon = None
+        self._sync_panel()
+
+    # ---------------------------------------------------------------- panel wiersza (ZAPIS)
+
+    def _on_row_selected(self, *_a):
+        self._sync_panel()
+
+    def _sync_panel(self):
+        """Panel odbija ZAZNACZONY wiersz. Brak zaznaczenia = szczery disabled (UI nie kłamie);
+        „Pokaż klatki celu" gaśnie osobno, gdy cel nie ma pokrycia — pusty filtr pokazałby
+        w gridzie pełną bazę."""
+        row = self.selected_row()
+        self.panel.setEnabled(row is not None)
+        if row is None:
+            self.panel_canon.setText("—")
+            self.panel_note.setText("")
+            self.no_gaps_label.setText("")
+            return
+        src = row.source
+        self.panel_canon.setText(row.canon)
+        if src.plan_status is not None:
+            self.panel_status.setCurrentIndex(self.panel_status.findData(src.plan_status))
+        self.panel_priority.setValue(src.priority or 0)
+        self.panel_note.setText(src.note or "")
+        self.frames_btn.setEnabled(pm.can_show_frames(src))
+        self.clear_btn.setEnabled(src.plan_status is not None)
+        # Podpowiedź, nie automat (D-T4-d): status jest zdaniem CZŁOWIEKA, a luka zależy od suwaka
+        # `min_hours` — automatyczne `done` czyniłoby trwały status funkcją parametru runtime.
+        self.no_gaps_label.setText("" if src.coverage.gaps else i18n.t("planner.no_gaps"))
+
+    def _selected_canon(self):
+        row = self.selected_row()
+        return None if row is None else row.source.target.canon
+
+    def _on_save_mark(self):
+        canon = self._selected_canon()
+        if canon is None:
+            return
+        priority = self.panel_priority.value() or None      # 0 = „bez priorytetu" → NULL
+        changed = repo.set_target_plan(
+            self.con, canon=canon, status=self.panel_status.currentData(),
+            priority=priority, note=self.panel_note.text().strip() or None, now=self._now())
+        self.status_message.emit(i18n.t("planner.mark_saved" if changed else "planner.mark_same",
+                                        canon=canon))
+        if changed:
+            self._replan_keeping(canon)
+
+    def _on_clear_mark(self):
+        canon = self._selected_canon()
+        if canon is None:
+            return
+        changed = repo.clear_target_plan(self.con, canon=canon, now=self._now())
+        self.status_message.emit(i18n.t("planner.mark_cleared" if changed else "planner.mark_same",
+                                        canon=canon))
+        if changed:
+            self._replan_keeping(canon)
+
+    def _replan_keeping(self, canon):
+        """Po udanym zapisie licz plan od nowa (status zmienia listę — `skip` z niej znika)
+        i wróć zaznaczeniem na ten sam cel, o ile został."""
+        self._keep_canon = canon
+        self.replan()
+
+    def _on_park(self):
+        """Dialog parku. Po zmianie oznaczeń plan liczy się od nowa — park ZMIENIA zestawy, więc
+        stary wynik opisywałby inny sprzęt (a po scaleniu osi park bywa stęchły — `5dfe28b`)."""
+        dlg = ParkDialog(self.con, self._now, parent=self)
+        dlg.exec()
+        if dlg.changed:
+            self.status_message.emit(i18n.t("planner.park_changed", n=dlg.changed))
+            self.replan()
+
+    def _on_show_frames(self):
+        """Most do gridu (D-0731-7, WĄSKO): emituj KANONY ARCHIWUM celu — jeden cel bywa
+        w archiwum pod kilkoma nazwami naraz (`IC410` ORAZ `LBN807`), więc most oddaje sumę.
+        Okno zamienia je na `object_id` i ustawia ISTNIEJĄCY facet Obiekt; planer nie składa
+        drzewa filtra (druga ścieżka składania złamałaby SPOT `facet_model.compose`)."""
+        row = self.selected_row()
+        if row is None or not pm.can_show_frames(row.source):
+            return
+        self.show_frames_for.emit(tuple(row.source.coverage.archive_canons))
 
     # ---------------------------------------------------------------- cykl życia
 

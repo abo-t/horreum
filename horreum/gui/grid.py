@@ -1369,6 +1369,23 @@ class FramesView(QWidget):
             self.fields.load(queries.keyword_facets(self.con), set(self._columns))
         self.refresh()
 
+    def apply_object_facet(self, pairs):
+        """Ustaw zbiór na WSKAZANE obiekty — publiczny seam dla wejść spoza widoku (T5e: „Pokaż
+        klatki celu" z planera, D-0731-7). `pairs` = `[(object_id, canon), …]`; wiele par, bo jeden
+        cel katalogu bywa w archiwum pod kilkoma nazwami (`IC410` ORAZ `LBN807`) i most ma pokazać
+        SUMĘ klatek.
+
+        Reużywa ISTNIEJĄCY facet Obiekt (liść `rel_object` + `facet_model.compose`) zamiast składać
+        drzewo filtra po swojemu — druga ścieżka składania złamałaby SPOT i rozjechałaby się
+        z cyklem facetów przy pierwszej zmianie. Perspektywa wraca do „Wszystkie" (zbiór definiuje
+        wejście, nie poprzedni widok), advanced-filtr znika — jak przy każdej perspektywie."""
+        self._only_dups = self._only_review = self._only_vanished = False
+        self._filter_tree = None
+        self.filter_panel.set_tree(None)
+        self._facet_state = {"object": {"in": [[oid, canon] for oid, canon in pairs]}} \
+            if pairs else facet_model.empty_state()
+        self.refresh()
+
     def apply_perspective(self, name):
         """Ustaw perspektywę PO NAZWIE — publiczny seam dla wejść spoza widoku (F5: klik w zadanie
         „Duplikaty" w Porządkach; R#14 — duplikatów NIE wyraża drzewo filtra, jedyna droga to

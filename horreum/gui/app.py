@@ -1427,6 +1427,7 @@ class MainWindow(QMainWindow):
 
         planner = PlannerView(self.con, db_path=self.db_path, now_fn=self._now)
         planner.status_message.connect(self._flash)
+        planner.show_frames_for.connect(self._on_show_target_frames)   # T5e: most planer → grid
         self.planner_view = planner
 
         for label, widget in ((i18n.t("nav.dostawa"), pipeline), (i18n.t("nav.zbiory"), grid),
@@ -1457,6 +1458,18 @@ class MainWindow(QMainWindow):
         `only_dups` presetu, NIE drzewo filtra — R#14)."""
         self._show_view(NAV_ZBIORY)
         self.grid_view.apply_perspective(name)
+
+    def _on_show_target_frames(self, canons):
+        """Most planer → Zbiory (T5e, D-0731-7 WĄSKO): kanony celu → `object_id` → ISTNIEJĄCY facet
+        Obiekt. Nieznany bazie kanon po prostu nie ma pary, a gdy nie ma ŻADNEJ — nie idziemy do
+        gridu wcale: pusty facet pokazałby PEŁNĄ bazę i skłamał, że to klatki celu (przycisk jest
+        wtedy nieaktywny, to bramka druga)."""
+        pairs = [(r["id"], r["canon"]) for r in queries.object_ids_for_canons(self.con, canons)]
+        if not pairs:
+            self._flash(i18n.t("planner.no_object_for_target"))
+            return
+        self._show_view(NAV_ZBIORY)
+        self.grid_view.apply_object_facet(pairs)
 
     def _on_tasks_counts(self, n):
         """Badge sidebara: „Porządki (N)" przy N>0; przy zerze GOŁE „Porządki" — „(0)" to szum (F5R#8)."""

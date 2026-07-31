@@ -111,6 +111,8 @@ class PlannerTableModel(QAbstractTableModel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._rows = []
+        # Kolor USTAWIA `use_theme` (widok woła je przy budowie) — druga inicjalizacja z
+        # `theme.DEFAULT` była drugim właścicielem faktu i nadpisywała się w locie (wiz T5 N3).
         self._dim = QColor(theme.accents(theme.DEFAULT)["secondary_text"])
 
     def use_theme(self, name):
@@ -244,7 +246,8 @@ class PlannerView(QWidget):
     status_message = Signal(str)
     show_frames_for = Signal(object)     # T5e: kanony archiwum celu → most do gridu
 
-    def __init__(self, con, db_path=None, now_fn=_utc_now_iso, parent=None, off_thread=True):
+    def __init__(self, con, db_path=None, now_fn=_utc_now_iso, parent=None, off_thread=True,
+                 theme_name=None):
         super().__init__(parent)
         self.con = con
         self._db_path = db_path
@@ -262,7 +265,10 @@ class PlannerView(QWidget):
         # Motyw ŻYWY, nie `DEFAULT` (wiz T5 R2): `main` woła `apply_theme` PRZED budową okna,
         # więc widok musi sam przeczytać wybór użytkownika, inaczej jasny start dostaje akcenty
         # ciemne (kontrast 2,0–2,4:1).
-        self.use_theme(QSettings("Horreum", "Horreum").value("ui/theme", theme.DEFAULT))
+        # Motyw od TEGO, KTO GO ZASTOSOWAŁ (wiz T5 N4): `MainWindow` zna nazwę, którą podał
+        # `apply_theme`. Rejestr jest fallbackiem dla wywołań bez okna (testy, podgląd).
+        self.use_theme(theme_name if theme_name is not None
+                       else QSettings("Horreum", "Horreum").value("ui/theme", theme.DEFAULT))
         self._loading = False
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
@@ -284,7 +290,9 @@ class PlannerView(QWidget):
         self.notes_label = QLabel("")
         self.notes_label.setWordWrap(True)
         head = QHBoxLayout()
-        head.addWidget(self.night_label)
+        head.addWidget(self.night_label, 1)      # STRETCH na kotwicy, nie na pustce (wiz T5 N1):
+        #                                         bez niego `wordWrap` oddawał szerokość do minimum
+        #                                         i noc zawijała się na 3 linie obok pół ekranu pustki
         # „Szukaj" NA ZEWNĄTRZ zwijanego panelu (wiz T5 #3): to inny TRYB (pomija progi), więc musi
         # przeżyć zwinięcie progów — schowany razem z nimi znikał jedyną drogą do celu spoza progów.
         self.find_edit = QLineEdit()
@@ -296,7 +304,10 @@ class PlannerView(QWidget):
         self.find_edit.setMaximumWidth(320)
         self.find_edit.setClearButtonEnabled(True)
         self.find_edit.returnPressed.connect(self.replan)
-        head.addStretch(1)
+        # N2: krzyżyk „✕" ma WYCHODZIĆ z trybu szukania, nie tylko czyścić pole — po `clear()`
+        # ekran nadal mówił „Tryb szukania: 1 trafienie" nad listą z jednym wierszem z 429.
+        # Debounce (300 ms) jest już w `_queue_replan`, więc przy okazji dostajemy żywe szukanie.
+        self.find_edit.textChanged.connect(self._queue_replan)
         head.addWidget(QLabel(i18n.t("planner.find_label")))
         head.addWidget(self.find_edit)
         find_btn = QPushButton(i18n.t("planner.find"))
@@ -308,9 +319,8 @@ class PlannerView(QWidget):
         outer.addLayout(head)
         self.counts_label.setProperty("role", "secondary")   # hierarchia nagłówka (wiz T5 #13)
         outer.addWidget(self.counts_label)
-        self.warn_label = QLabel("")                         # noty `warn` — waga z modelu NIE ginie
+        self.warn_label = QLabel("")            # noty `warn` — waga z modelu NIE ginie; kolor z `use_theme`
         self.warn_label.setWordWrap(True)
-        self.warn_label.setStyleSheet(f"color: {theme.accents(theme.DEFAULT)['gold']};")
         outer.addWidget(self.warn_label)
         self.notes_label.setProperty("role", "secondary")
         outer.addWidget(self.notes_label)
@@ -361,9 +371,8 @@ class PlannerView(QWidget):
         spełniona KONSTRUKCYJNIE, nie regulaminowo."""
         self.panel = QGroupBox(i18n.t("planner.panel"))
         lay = QHBoxLayout(self.panel)
-        self.no_gaps_label = QLabel("")     # „✓ bez luk" = INFORMACJA, nigdy zapis (D-T4-d);
-        self.no_gaps_label.setStyleSheet(   # przy KANONIE, bo to opis celu, nie akcja (wiz T5 #17)
-            f"color: {theme.accents(theme.DEFAULT)['ok_green']};")
+        self.no_gaps_label = QLabel("")     # „✓ bez luk" = INFORMACJA, nigdy zapis (D-T4-d),
+        #                                     przy KANONIE, bo to opis celu, nie akcja (wiz T5 #17)
         lay.addWidget(self.no_gaps_label)
         self.panel_status = QComboBox()
         # PIERWSZA pozycja = „(bez oznaczenia)" z `data=None` (wiz T5 #1, P1): bez niej combo
@@ -521,7 +530,9 @@ class PlannerView(QWidget):
         self._theme = theme.normalize(name)
         a = theme.accents(self._theme)
         p = theme.palette_spec(self._theme)
-        self.warn_label.setStyleSheet(f"color: {a['gold']};")
+        # `bright_text`, nie `gold` (wiz T5 N5): złoto to akcent spichlerza i w jasnym motywie ma
+        # 2,72:1 — jedyny sygnał „coś jest nie tak" nie dochodził do progu czytelności (AA 4,5).
+        self.warn_label.setStyleSheet(f"color: {p['bright_text']};")
         self.no_gaps_label.setStyleSheet(f"color: {a['ok_green']};")
         self._chip_qss = (
             "QToolButton:checked { background: %s; color: %s; font-weight: bold; "

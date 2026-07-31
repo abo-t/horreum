@@ -177,7 +177,8 @@ def test_akcenty_ida_za_motywem(view):
     from horreum.gui import theme
     view.use_theme("light")
     assert view.model._dim.name().lower() == theme.accents("light")["secondary_text"].lower()
-    assert theme.accents("light")["gold"] in view.warn_label.styleSheet()
+    # ⚠ nota kolorem OSTRZEGAWCZYM (wiz T5 N5) — złoto spichlerza miało w jasnym 2,72:1
+    assert theme.palette_spec("light")["bright_text"] in view.warn_label.styleSheet()
     assert theme.palette_spec("light")["highlight"] in view._chip_qss
     view.use_theme("dark")
     assert view.model._dim.name().lower() == theme.accents("dark")["secondary_text"].lower()

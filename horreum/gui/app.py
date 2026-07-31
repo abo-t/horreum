@@ -1428,7 +1428,10 @@ class MainWindow(QMainWindow):
         tasks.open_collection.connect(self._on_open_collection)
         tasks.counts_changed.connect(self._on_tasks_counts)
 
-        planner = PlannerView(self.con, db_path=self.db_path, now_fn=self._now)
+        # Motyw PRZEKAZANY, nie czytany przez widok z rejestru (wiz T5 N4— jeden właściciel faktu).
+        planner = PlannerView(self.con, db_path=self.db_path, now_fn=self._now,
+                              theme_name=theme.normalize(
+                                  QSettings("Horreum", "Horreum").value("ui/theme", theme.DEFAULT)))
         planner.status_message.connect(self._flash)
         planner.show_frames_for.connect(self._on_show_target_frames)   # T5e: most planer → grid
         self.planner_view = planner

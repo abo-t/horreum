@@ -346,6 +346,21 @@ def test_cli_park_dodaje_i_odmawia_nieznanego(tmp_path, capsys, con):
     assert "nieznany bazie" in out and "A140R" in out
 
 
+def test_cli_park_clear_wycofuje_zdanie_do_null(tmp_path, capsys, con):
+    """Dług P-A #7 po stronie CLI: `--add` daje 1, `--drop` 0, a trzeci stan (`NULL` = „nic nie
+    powiedziałem") był osiągalny wyłącznie z `repo`. Raport odróżnia stany: `historyczny` vs `-`."""
+    path = con.execute("PRAGMA database_list").fetchone()["file"]
+    assert cli.main(["park", path, "--drop", "A140R"]) == 0
+    assert "historyczny" in capsys.readouterr().out
+    assert cli.main(["park", path, "--clear", "a140r"]) == 0          # dopasowanie bez case, jak --add
+    out = capsys.readouterr().out
+    assert "zmieniono 1" in out and "historyczny" not in out
+    assert con.execute("SELECT in_park FROM telescope WHERE telescop_canon = 'A140R'"
+                       ).fetchone()[0] is None
+    assert cli.main(["park", path, "--clear", "A140R"]) == 0          # idempotentne — nic nie zmienia
+    assert "zmieniono" not in capsys.readouterr().out
+
+
 def test_cli_park_bez_oznaczen_mowi_wprost(tmp_path, capsys, con):
     path = con.execute("PRAGMA database_list").fetchone()["file"]
     assert cli.main(["park", path]) == 0

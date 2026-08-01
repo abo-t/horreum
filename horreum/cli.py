@@ -116,6 +116,9 @@ def main(argv=None):
                         help="wstaw teleskop do parku (powtarzalne)")
     p_park.add_argument("--drop", action="append", default=[], metavar="TELESKOP",
                         help="oznacz teleskop jako historyczny (powtarzalne)")
+    p_park.add_argument("--clear", action="append", default=[], metavar="TELESKOP",
+                        help="wycofaj zdanie o teleskopie — stan wraca do nie-wypowiedzianego "
+                             "(NULL, inny fakt niz historyczny; powtarzalne)")
 
     p_tgt = sub.add_parser("target",
                            help="kuratela celów: status/priorytet/notatka na celu z katalogu")
@@ -617,9 +620,13 @@ def _coverage_text(row):
 def _cmd_park(args):
     """`horreum park` — przegląd i oznaczanie parku aktualnego (D-T3-d).
 
-    Bez `--add`/`--drop` to czysty przegląd: kanon, lighty, ostatnia klatka, stan parku. Teleskop
-    nieznany bazie kończy się kodem 2 i LISTĄ kanonicznych — park nie powołuje osi (oś wyłania się
-    ze skanu), więc literówka nie ma prawa utworzyć wiersza."""
+    Bez `--add`/`--drop`/`--clear` to czysty przegląd: kanon, lighty, ostatnia klatka, stan parku.
+    Teleskop nieznany bazie kończy się kodem 2 i LISTĄ kanonicznych — park nie powołuje osi (oś
+    wyłania się ze skanu), więc literówka nie ma prawa utworzyć wiersza.
+
+    TRZY OZNACZENIA, BO `in_park` MA TRZY STANY: `--add` → 1, `--drop` → 0 (jawnie historyczny),
+    `--clear` → NULL (wycofuję zdanie). „Historyczny" i „nie wypowiedziałem się" to różne fakty —
+    pierwszy znaczy park przejrzany, drugi bazę świeżą — i różnią raport (`-` vs `historyczny`)."""
     from . import repo
     from .gui import queries          # leniwie: `gui.queries` ciągnie `resolver` (koszt startu CLI)
     now = datetime.now(timezone.utc).isoformat()
@@ -627,7 +634,8 @@ def _cmd_park(args):
     known = {r["telescop_canon"]: r["id"] for r in con.execute(
         "SELECT id, telescop_canon FROM telescope WHERE merged_into IS NULL").fetchall()}
     changed = 0
-    for name, value in [(n, 1) for n in args.add] + [(n, 0) for n in args.drop]:
+    for name, value in ([(n, 1) for n in args.add] + [(n, 0) for n in args.drop]
+                        + [(n, None) for n in args.clear]):
         match = next((k for k in known if k.casefold() == name.strip().casefold()), None)
         if match is None:
             con.close()

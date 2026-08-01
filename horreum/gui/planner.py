@@ -394,6 +394,8 @@ class PlannerView(QWidget):
         lay.addWidget(self.panel_note, 1)
         # Hierarchia akcji (wiz T5 #9): zapis jest AKCJĄ GŁÓWNĄ (bold, domyślny), zdjęcie płaskie,
         # a „Pokaż klatki" stoi PO ODSTĘPIE — to skok na inny ekran, nie zapis.
+        # ŚWIADOMIE bez skrótu „Zaplanuj" (D-0731-15, Zdzin 2026-08-01): drugi przycisk zapisu
+        # wpisywałby status, którego user nie wskazał wprost — combo jest jedyną drogą.
         self.save_btn = QPushButton(i18n.t("planner.save_mark"))
         self.save_btn.setDefault(True)
         f = self.save_btn.font()

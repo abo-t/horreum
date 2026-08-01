@@ -56,8 +56,12 @@ from horreum.resolver import (                                    # noqa: E402
 from horreum.scan import canonize_root, scan_tree                 # noqa: E402
 from horreum.volumes import volume_serial                         # noqa: E402
 
-# ── Kotwice EXP_* PF-3 (dawca) + PF-4 (doskan XISF), z horreum_pf4.db 2026-07-02 ─────────────────
-# 5 kamer: (pixel_um, is_mono). Po naprawie nagłówków INSTRUME 100% — brak review kamer.
+# ── Kotwice EXP_* PF-3 (dawca) + PF-4 (doskan drzewa `R:`), z horreum_pf4.db 2026-07-02 ──────────
+# UWAGA 2026-08-01: doskan NIE jest już „XISF-owy" — odkąd istnieje moduł DSLR (`e7dcdda`), ciągnie
+# z `R:` także 763 RAW-y, więc baza FULL ma populacje, których żywa `pf4` (0 RAW-ów) nie zna.
+# Stąd kotwice FULL są STAGE-AWARE i ROZDZIELONE astro/RAW — liczba sklejająca oba tory ukryłaby
+# regresję w torze astro za kolejną sesją z lustrzanką.
+# 5 kamer w IMPORT: (pixel_um, is_mono). Po naprawie nagłówków INSTRUME 100% — brak review kamer.
 EXP_CAMERAS_IMPORT = {
     "ASI2600MM": (3.76, 1), "ASI2600MD": (3.76, 1), "ASI2600MC": (3.76, 0),
     "ASI294MC": (4.63, 0), "SONYA7RM3": (4.86, 0),

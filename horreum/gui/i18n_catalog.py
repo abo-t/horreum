@@ -178,6 +178,11 @@ CATALOG = {
     "object.review_item": {"pl": "{name}  ·  {n} klatek", "en": "{name}  ·  {n} frames"},
     "object.nameless_line": {"pl": "— bez nazwy w nagłówku: {n}",
                              "en": "— no name in header: {n}"},
+    # RAW/DSLR: format nie zna karty OBJECT, więc te klatki czekają na RĘCZNE przypisanie —
+    # dlatego wiersz mówi DROGĘ naprawy, nie sam objaw (kubełek wyżej otwiera okno zapisu karty,
+    # ten nie ma czego otworzyć).
+    "object.nameless_raw_line": {"pl": "— bez nazwy, format bez karty (RAW): {n}  ·  do przypisania ręcznie",
+                                 "en": "— nameless, format has no card (RAW): {n}  ·  assign by hand"},
     "object.unreadable_line": {"pl": "— kopie nieczytelne: {n}", "en": "— unreadable copies: {n}"},
     "object.review_info": {
         "pl": "— config-review: {config}  ·  bez nagłówka: {headerless}  (rozwiązywanie w przygotowaniu)",
@@ -950,6 +955,10 @@ CATALOG = {
               "   to review: {review}",
     },
     "pipeline.delta.none": {"pl": "—", "en": "—"},
+    # Doklejka do `{nameless}`, wyłącznie gdy populacja RAW istnieje. Osobny klucz, nie druga linia
+    # szablonu: przy archiwum bez lustrzanki (dziś 0) stałe „RAW: 0" byłoby szumem w każdej dostawie.
+    "pipeline.delta.nameless_raw": {"pl": "  (+{n} RAW — format bez karty, do przypisania ręcznie)",
+                                    "en": "  (+{n} RAW — format has no card, assign by hand)"},
 
     # --- raport passa obecności: części składane przez ` · ` ---
     "pipeline.fmt.presence.not_done": {

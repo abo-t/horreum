@@ -161,9 +161,10 @@ def test_object_review_frames_drazenie(s8_obj):
 
 # --- T5a: szew „do przeglądu" — kolejka vs perspektywa gridu ---
 
-def _nameless_light(con, sha):
-    """Light z NAGŁÓWKIEM, ale bez `object_raw` i bez obiektu — klasa 25 klatek żywej pf4."""
-    fid, _ = repo.upsert_frame(con, sha1_data=sha, kind="light", filetype="fits",
+def _nameless_light(con, sha, filetype="fits"):
+    """Light z NAGŁÓWKIEM, ale bez `object_raw` i bez obiektu — klasa 25 klatek żywej pf4.
+    `filetype='raw'` daje bliźniaka po drugiej stronie FORMATU (DSLR — EXIF nie zna `OBJECT`)."""
+    fid, _ = repo.upsert_frame(con, sha1_data=sha, kind="light", filetype=filetype,
                                camera_id=None, now=NOW)
     repo.record_header(con, frame_id=fid, raw_json="{}", object_raw=None, now=NOW)
     return fid
@@ -192,7 +193,8 @@ def test_review_queue_partycja_pokrywa_perspektywe_gridu(s8_obj):
             "SELECT count(*) FROM frame f WHERE f.kind IN ('light','master_light') "
             "AND f.object_id IS NULL "
             "AND NOT EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id)").fetchone()[0]
-        return sum(r["n"] for r in q["object_review"]) + q["nameless_count"] + headerless_lights
+        return (sum(r["n"] for r in q["object_review"]) + q["nameless_count"]
+                + q["nameless_raw_count"] + headerless_lights)
 
     con, ids = s8_obj
     # stan wyjściowy: objrev1+objrev2 (nazwane) + nullcfg (light bez nagłówka) = 3
@@ -262,6 +264,45 @@ def test_nameless_count_jest_dlugoscia_read_modelu(s8_obj):
                        object_source="header", now=NOW)
     assert (queries.review_queue(con)["nameless_count"] == len(queries.nameless_frames(con))
             == nameless_lights(con) == 2)
+
+
+def test_nameless_swiadomy_formatu_raw_ma_wlasny_kubelek(s8_obj):
+    """RAW nie ma JAK zeznać o obiekcie (EXIF nie zna `OBJECT`), więc nie jest „do naprawienia
+    kartą" — a `nameless_frames` to WEJŚCIE dialogu zapisu. Bez tego rozdziału okno „Napraw
+    nagłówek…" otwierałoby się z listą, której każda pozycja i tak jest pominięta przez
+    `macro.resolve_target` (RAW = read-only)."""
+    from horreum.resolver import nameless_lights, nameless_raw_lights
+
+    con, _ = s8_obj
+    _nameless_light(con, "sha-nl-fits")
+    _nameless_light(con, "sha-nl-raw", filetype="raw")
+    q = queries.review_queue(con)
+    assert q["nameless_count"] == nameless_lights(con) == 1          # tylko FITS
+    assert q["nameless_raw_count"] == nameless_raw_lights(con) == 1  # RAW własnym kubełkiem
+    # drążenie (wejście dialogu) NIE podaje RAW-a
+    assert [r["frame_id"] for r in queries.nameless_frames(con)] == [
+        con.execute("SELECT id FROM frame WHERE sha1_data='sha-nl-fits'").fetchone()[0]]
+
+
+def test_partycja_przezywa_klatke_raw(s8_obj):
+    """FALSYFIKATOR rozdziału: RAW zostaje w perspektywie gridu „Do przeglądu" (`object_id IS
+    NULL`), więc samo wycięcie go z `nameless_count` rozspójniłoby partycję dokładnie o jego
+    liczbę. Ten test pęka, gdy ktoś skasuje kubełek RAW zamiast go policzyć."""
+    con, _ = s8_obj
+
+    def _partycja():
+        q = queries.review_queue(con)
+        headerless_lights = con.execute(
+            "SELECT count(*) FROM frame f WHERE f.kind IN ('light','master_light') "
+            "AND f.object_id IS NULL "
+            "AND NOT EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id)").fetchone()[0]
+        return (sum(r["n"] for r in q["object_review"]) + q["nameless_count"]
+                + q["nameless_raw_count"] + headerless_lights)
+
+    baza = len(queries.review_frame_ids(con))
+    _nameless_light(con, "sha-part-raw", filetype="raw")
+    assert len(queries.review_frame_ids(con)) == baza + 1     # RAW JEST w perspektywie gridu
+    assert _partycja() == baza + 1                            # …i partycja go widzi
 
 
 # --- facets ---

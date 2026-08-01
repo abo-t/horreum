@@ -254,23 +254,66 @@ def review_state(con):
                        kind_unknown=kind_unknown, unreadable=unreadable, total=total)
 
 
+NO_OBJECT_CARD_FILETYPES = ("raw",)
+"""Formaty, które NIE MAJĄ JAK zeznać o obiekcie — JEDYNY właściciel tego faktu.
+
+EXIF nie zna pola `OBJECT` ani RA/DEC, więc RAW-owy light nie dostanie obiektu ANI z nagłówka,
+ANI z regionu po współrzędnych: milczenie tego pliku jest STANEM DOCELOWYM formatu, nie luką
+do naprawienia. Zmierzone na realnym archiwum 2026-08-01: **0 z 763** RAW-lightów ma `object_raw`.
+
+To ta sama figura myślowa, co `grouper.NO_TELESCOPE_KINDS` na osi teleskopu i „kalibracja nie ma
+obiektu" na osi obiektu (kind-aware) — tyle że oś podziału jest tu FORMAT, nie rodzaj klatki.
+Konsumenci biorą TĘ stałą przez `json_each(?)`; kopiowanie listy do predykatu jest zakazane
+(#12 „jeden właściciel").
+
+Czego ta stała NIE mówi: że RAW nie wymaga przeglądu. Wymaga — tylko drogą RĘCZNĄ
+(„Przypisz obiekt…"), nie kartą w pliku (`macro.resolve_target` odmawia RAW: read-only).
+Dlatego populacja idzie do WŁASNEGO kubełka (`nameless_raw_lights`), a nie znika z rachunku."""
+
+
 def nameless_lights(con):
-    """Lighty, których nagłówek MILCZY o obiekcie: `object_id IS NULL`, wiersz `header` JEST,
-    `object_raw IS NULL` (P-D). Rdzeniowy właściciel predykatu — read-only, zero zapisu.
+    """Lighty, których nagłówek MILCZY o obiekcie, a format POZWALAŁBY mu mówić: `object_id IS NULL`,
+    wiersz `header` JEST, `object_raw IS NULL`, `filetype` spoza `NO_OBJECT_CARD_FILETYPES` (P-D).
+    Rdzeniowy właściciel predykatu — read-only, zero zapisu.
 
     Po co osobno od `object_unresolved`: mianownik delty WYMAGA `object_raw NOT NULL`
     (`delta_report` niżej), więc raport dostawy był na tę populację ŚLEPY — bramka akceptacji
     świeciła zielono o klatkach, których nie widzi, a pierwsza nowa dostawa bez `OBJECT`
-    przeszłaby bez śladu. To jest KOTWICA NAWROTU: P-D naprawia dzisiejsze 25 plików, a ta liczba
-    pilnuje, żeby populacja nie odrosła po cichu.
+    przeszłaby bez śladu. To jest KOTWICA NAWROTU: P-D naprawiła 25 plików na `R:` (pilot
+    2026-08-01), a ta liczba pilnuje, żeby populacja nie odrosła po cichu.
+
+    ŚWIADOMA FORMATU od 2026-08-01: bez tego warunku kotwica mieszała 25 klatek FITS (naprawialnych
+    kartą) z 763 RAW-ami, których naprawić się NIE DA — jedna liczba na dwie populacje nie pilnuje
+    żadnej z nich, bo ruch jednej maskuje ruch drugiej. RAW liczy `nameless_raw_lights`.
 
     Drążenie do klatek (grupy, cel writebacku) daje `gui.queries.nameless_frames` — TEN SAM
     predykat, znak w znak. Dwa literały, bo warstwy są dwie i zależność idzie w jedną stronę
-    (`gui.queries` importuje ten moduł, nie odwrotnie); równość obu pinuje test."""
+    (`gui.queries` importuje ten moduł, nie odwrotnie); równość obu pinuje test.
+
+    Literał PEŁNY, mimo że bliźniak niżej różni się jednym słowem: wspólny prefiks + sklejenie
+    czyni SQL nie-literałem, a `_first_sql_verb` zwraca wtedy `None` = offender bramki AST §8.1
+    (złapane przebiegiem 2026-08-01 — bramka zadziałała dokładnie tak, jak miała)."""
     return con.execute(
         "SELECT count(*) FROM frame f JOIN header h ON h.frame_id = f.id "
         "WHERE f.kind IN ('light','master_light') AND f.object_id IS NULL "
-        "AND h.object_raw IS NULL").fetchone()[0]
+        "AND h.object_raw IS NULL "
+        "AND f.filetype NOT IN (SELECT value FROM json_each(?))",
+        (json.dumps(list(NO_OBJECT_CARD_FILETYPES)),)).fetchone()[0]
+
+
+def nameless_raw_lights(con):
+    """Lighty bez obiektu w formacie, który NIE MA JAK go podać (`NO_OBJECT_CARD_FILETYPES`).
+
+    Osobny kubełek, nie odjęcie: te klatki zostają w perspektywie „Do przeglądu" (`object_id IS
+    NULL`), więc partycja kolejki musi je gdzieś policzyć — inaczej `review_queue` przestałaby
+    domykać się do `review_frame_ids` dokładnie o tę populację. Droga naprawy jest inna niż dla
+    `nameless_lights`: ręczne „Przypisz obiekt…", nigdy karta w pliku."""
+    return con.execute(
+        "SELECT count(*) FROM frame f JOIN header h ON h.frame_id = f.id "
+        "WHERE f.kind IN ('light','master_light') AND f.object_id IS NULL "
+        "AND h.object_raw IS NULL "
+        "AND f.filetype IN (SELECT value FROM json_each(?))",
+        (json.dumps(list(NO_OBJECT_CARD_FILETYPES)),)).fetchone()[0]
 
 
 @dataclass
@@ -284,6 +327,9 @@ class DeltaReport:
     review: ReviewState = field(default_factory=ReviewState)   # kolejka ze STANU (#12), nie z eventów
     filters_canon: int = 0
     object_nameless: int = 0   # lighty BEZ `object_raw` — poza mianownikiem delty (P-D/D-PD-10)
+    # …a te BEZ `object_raw` i bez SZANSY na niego (format nie zna karty; `NO_OBJECT_CARD_FILETYPES`).
+    # Osobne pole, bo osobna droga naprawy: ręczne przypisanie, nigdy zapis karty do pliku.
+    object_nameless_raw: int = 0
 
 
 def delta_report(con, top=30):
@@ -292,7 +338,12 @@ def delta_report(con, top=30):
 
     `object_nameless` stoi OBOK procentu, nie w nim: klatka bez `object_raw` nie ma jak być
     „nierozpoznana pod nazwą" (nie ma nazwy), więc do mianownika nie wchodzi — ale musi być
-    WIDOCZNA, inaczej raport milczy o całej klasie (P-D/D-PD-10)."""
+    WIDOCZNA, inaczej raport milczy o całej klasie (P-D/D-PD-10).
+
+    `object_nameless_raw` idzie OSOBNO od `object_nameless`, bo to dwie różne sprawy pod jednym
+    objawem: pierwsza jest do naprawienia kartą w pliku, druga wyłącznie ręką. Zlanie ich w jedną
+    liczbę (tak było do 2026-08-01) sprawiało, że kotwica nawrotu nie pilnowała ani jednej —
+    763 RAW-y przykryłyby każdy ruch w populacji FITS."""
     resolved = con.execute(
         "SELECT count(*) FROM frame WHERE kind IN ('light','master_light') "
         "AND object_id IS NOT NULL").fetchone()[0]
@@ -312,4 +363,5 @@ def delta_report(con, top=30):
     return DeltaReport(
         object_resolved=resolved, object_unresolved=unresolved, object_pct=pct,
         object_delta=[(r["raw"], r["n"]) for r in delta], review=review_state(con),
-        filters_canon=filters_canon, object_nameless=nameless_lights(con))
+        filters_canon=filters_canon, object_nameless=nameless_lights(con),
+        object_nameless_raw=nameless_raw_lights(con))

@@ -824,6 +824,11 @@ def _format_delta(db_path, rep):
     # POZA procentem wyzej: klatka bez `object_raw` nie ma nazwy, wiec nie wchodzi do mianownika —
     # ale musi byc widoczna, inaczej raport milczy o calej klasie (P-D, kotwica nawrotu).
     lines.append(f"  bez nazwy w naglowku (light/master_light): {rep.object_nameless}")
+    # Osobna pozycja i TYLKO gdy jest co pokazac: RAW nie ma karty OBJECT z natury
+    # (`resolver.NO_OBJECT_CARD_FILETYPES`), wiec droga naprawy jest inna — reka, nie writeback.
+    if rep.object_nameless_raw:
+        lines.append(f"    z tego format bez karty (RAW, do przypisania recznie): "
+                     f"{rep.object_nameless_raw}")
     lines.append(f"  filter_canon ustawione: {rep.filters_canon}")
     # Liczba wiodaca = DISTINCT klatek; powody sie NAKLADAJA (brak kamery => tez brak configu),
     # wiec ich suma bywa wieksza niz klatek — swiadomie nie jest to rozbicie.

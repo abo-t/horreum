@@ -795,10 +795,16 @@ class PipelineView(QWidget):
     def _format_delta(self, r):
         total = r.object_resolved + r.object_unresolved
         top = ", ".join(f"{raw}×{n}" for raw, n in r.object_delta[:8]) or i18n.t("pipeline.delta.none")
+        # Populacja RAW dokleja się do TEJ SAMEJ pozycji, a nie do własnej linii: to ten sam objaw
+        # (klatka bez nazwy), inna droga naprawy — rozdzielenie na dwa wiersze sugerowałoby dwa
+        # niezależne problemy. Milczy przy zerze (archiwum bez lustrzanki).
+        nameless = str(r.object_nameless)
+        if r.object_nameless_raw:
+            nameless += i18n.t("pipeline.delta.nameless_raw", n=r.object_nameless_raw)
         return i18n.t(
             "pipeline.fmt.delta", resolved=r.object_resolved, total=total, pct=r.object_pct,
             filters=r.filters_canon, top=top, review=_review_line(r.review),
-            nameless=r.object_nameless)
+            nameless=nameless)
 
     def _refresh_buttons(self, running, cancellable):
         idle = not running

@@ -51,21 +51,36 @@ from horreum.grouper import NO_TELESCOPE_KINDS, run_grouper       # noqa: E402
 from horreum.import_fitsmirror import (                                   # noqa: E402
     ImportAbort, open_donor, read_repaired_registry, run_import,
 )
-from horreum.resolver import delta_report, run_resolver           # noqa: E402
+from horreum.resolver import (                                    # noqa: E402
+    NO_OBJECT_CARD_FILETYPES, delta_report, run_resolver)
 from horreum.scan import canonize_root, scan_tree                 # noqa: E402
 from horreum.volumes import volume_serial                         # noqa: E402
 
 # ── Kotwice EXP_* PF-3 (dawca) + PF-4 (doskan XISF), z horreum_pf4.db 2026-07-02 ─────────────────
 # 5 kamer: (pixel_um, is_mono). Po naprawie nagłówków INSTRUME 100% — brak review kamer.
-EXP_CAMERAS = {
+EXP_CAMERAS_IMPORT = {
     "ASI2600MM": (3.76, 1), "ASI2600MD": (3.76, 1), "ASI2600MC": (3.76, 0),
     "ASI294MC": (4.63, 0), "SONYA7RM3": (4.86, 0),
 }
+# RE-BASELINE FULL 2026-08-01 (odnowa bramki): doskan `R:` ciągnie też RAW-y, odkąd istnieje moduł
+# DSLR (`e7dcdda`) — korpusy lustrzanek są na osi kamer TAK SAMO realne jak ASI. `pixel_um=None`
+# NIE jest luką do załatania: EXIF nie podaje rozmiaru piksela, a wpisanie go z deklaracji byłoby
+# DRUGIM właścicielem faktu (ta sama zasada, co „FOV z zeznania klatek" w planerze). Skutek do
+# zapamiętania: dla DSLR nie policzymy FOV, więc planer ich nie kadruje.
+# `SONYA7RM3` NIE jest nowa — ma 4.86 µm z `bayerpat` (FITS) i dodatkowo 301 klatek RAW; to ONA
+# dowodzi, że oba tory schodzą się na jednym wierszu kamery zamiast go rozbijać.
+EXP_CAMERAS_FULL = dict(EXP_CAMERAS_IMPORT,
+                        SONYA7S=(None, 0), SONYA7M3=(None, 0), CANONEOS40D=(None, 0))
 EXP_TELESCOPES_IMPORT = 8      # dawca FITS (§1): A140R/RC8/76EDPH/ED120R/RC6/N800/Sony135/ED120
 # Po naprawie ED na realnym R: (2026-07-22, brief PLAN_p6_xisf_writeback §8) etykieta `ED` nie ma już
 # nosiciela na osi: 7 masterflatów XISF dostało `ED120R`+789, a masterdarki z `TELESCOP='ED'` są POZA
 # osią (kind-scoping, wariant B). Świeża baza nie powołuje 9. teleskopu — dług PF-4 spłacony.
-EXP_TELESCOPES_FULL = 8        # jak IMPORT: naprawa zdjęła jedynego nosiciela etykiety `ED`
+# RE-BASELINE FULL 2026-08-01: 8 optyk astro + 4 OBIEKTYWY z EXIF, które wnoszą RAW-y (`FE 24-105mm
+# F4 G OSS` 265 klatek, `105mm F1.4 DG HSM | Art 018` 36, `DT 0mm F0 SAM` 22, `FE 70-300mm` 8 —
+# wszystkie w 100% RAW). Obiektyw JEST optyką, więc własny wiersz osi jest poprawny, nie śmieciem;
+# do PLANERA i tak nie wchodzą, bo park jest jawną własnością usera (D-0731-12), nie derywatem.
+EXP_TELESCOPES_FULL = 12       # 8 astro (jak IMPORT) + 4 obiektywy DSLR
+EXP_TELESCOPES_RAW_ONLY_FULL = 4   # z tych 12 — powołane WYŁĄCZNIE przez klatki RAW
 EXP_OBJECT_PCT_MIN = 85.0      # % obiektu na light/master_light (pf4=87.5; próg z zapasem)
 # Stan PF-4 (pełny, po doskanie XISF) — XISF wnoszą dług review i degenerat:
 EXP_UNCOMPUTABLE_FULL = 1      # masterflat OIII: bajt \x07 w XML → sha1_data nieobliczalne (degenerat)
@@ -74,6 +89,11 @@ EXP_FRAME_REVIEW_FULL = 1      # ten sam masterflat (kopia nieczytelna → revie
 # IS NULL` to stan docelowy, nie delta, więc `config.review` ich nie dotyczy. Zostaje 1 realna sprawa
 # — masterflat Sony A7R3 o rodzaju `unknown` (ten sam degenerat, co §5.2). Było 7 (6 masterdarków + on).
 EXP_CONFIG_REVIEW_FULL = 1     # `unknown` masterflat A7R3 — rodzaj wymaga decyzji, nie optyka
+# …liczona POZA RAW-ami (2026-08-01). 432 RAW-y bez configu to stan UCZCIWY: zdjęcie z lustrzanki
+# bez teleskopu w EXIF nie ma z czego powołać osi. Gdyby obie populacje wpadły do jednej kotwicy
+# (433), pojawienie się DRUGIEJ realnej sprawy w torze astro schowałoby się za jednym zdjęciem
+# mniej z aparatu — kotwica przestałaby pilnować tego, po co powstała.
+EXP_CONFIG_REVIEW_RAW_FULL = 432
 EXP_XISF_KINDS = {"flat": 11, "light": 202, "master_dark": 38, "master_flat": 73, "unknown": 2}
 # Oś OBSERWATORIUM (PLAN_os_obserwatorium §8) — RE-BASELINE P6b (D-X-8a), świadomy i zmierzony:
 # do P6a karty XISF NIE POWSTAWAŁY, więc GPS był de facto FITS-only. Od P6a skan wypełnia karty
@@ -85,7 +105,12 @@ EXP_XISF_KINDS = {"flat": 11, "light": 202, "master_dark": 38, "master_flat": 73
 EXP_OBSERVATORIES = 11         # klaster 4 km: 24 distinct pary → 11 stanowisk (dom↔praca 4.385 km OSOBNE)
 EXP_GPS_FRAMES_IMPORT = 15409  # dawca FITS: klatki z SITELAT+SITELONG (97.0%)
 EXP_GPS_FRAMES_FULL = 15611    # + 202 XISF z GPS w kartach (P6b; wszystkie do stanowiska #5)
-EXP_NO_GPS_FULL = 274          # bez GPS w FULL: 150 fits + 124 xisf (326 − 202 z GPS)
+EXP_NO_GPS_FULL = 274          # bez GPS w torze ASTRO: 150 fits + 124 xisf (326 − 202 z GPS)
+# RAW osobno (2026-08-01): 763 klatki DSLR, wszystkie bez stanowiska. To NIE brak danych — sentinel
+# GPS (0,0) idzie w `resolve/observatory.py:67` na `None` świadomie („null island" nie jest miejscem),
+# a aparat bez modułu GPS nie zapisuje nic. Rozdzielone od astro z tego samego powodu, co
+# `config.review`: 763 przykryłoby ruch w populacji FITS/XISF.
+EXP_NO_GPS_RAW_FULL = 763
 # Oś KALIBRACJI (C2, brief PLAN_kalibracja_C_brief §3.2) — kotwice ZMIERZONE read-only PRZED kodem.
 # Mastery są XISF, więc obie liczby dotyczą wyłącznie etapu FULL; w imporcie FITS nie ma czego liczyć.
 EXP_RECIPE_DARK = 38           # 38 masterdarków → 38 przepisów (każdy master unikalny)
@@ -115,9 +140,20 @@ EXP_NAMELESS_IMPORT = 25       # ZMIERZONE przebiegiem IMPORT 2026-08-01 (`--don
 # nie policzone z rachunku: dawca niesie 108 lightów bez karty `OBJECT`, region rozwiązuje 83,
 # zostaje 25. Liczba jest STABILNA także po naprawie plików na `R:` — baza importu powstaje
 # z ZAMROŻONEGO dawcy, którego zeznanie naprawa nie dotyka.
-EXP_NAMELESS_FULL = None       # DO POMIARU PO PILOCIE: dziś FULL czyta realne pliki, więc do naprawy
-# jest równy IMPORT (25), a po niej ma paść na 0. Zaszycie 0 przed pilotem zapaliłoby bramkę na
-# czerwono przy poprawnym stanie; None = pozycja raportuje liczbę i nie kłamie w żadną stronę.
+EXP_NAMELESS_FULL = 25         # ZMIERZONE po pilocie P-D na `R:` (2026-08-01), przebieg
+# `--xisf-root R:\ASTRO_ --live-db`. **Przesłanka briefu §6 pkt 9 („po naprawie padnie na 0")
+# OKAZAŁA SIĘ FAŁSZYWA i to jest tu udokumentowane, żeby nikt nie „poprawił" tej liczby z powrotem
+# na 0:** baza akceptacji bierze `mtime` ze STANU NA DYSKU, ale zeznanie FITS (nagłówek, `file_sha1`,
+# `header_hash`) z ZAMROŻONEGO dawcy — więc brama przyrostowa doskanu widzi `mtime` równy i pomija
+# plik. Dowód: lokacja 4581 ma w bazie akceptacji `mtime` PO naprawie i `file_sha1` SPRZED niej,
+# a jej dziennik nie zawiera ani jednego `location.refreshed` (same trzy zdarzenia `import:fitsmirror`).
+# FULL nie ma więc jak zobaczyć naprawy na `R:` — jego 25 to ta sama populacja dawcy, co w IMPORT,
+# i z tego samego powodu jest stabilna. Zadaniem obu kotwic jest łapać ZMIANĘ W DAWCY; nawrotu na
+# ŻYWEJ bazie pilnuje `object_nameless` w raporcie dostawy (inna rola — patrz §6 pkt 9 briefu).
+EXP_NAMELESS_RAW_FULL = 763    # lighty w formacie bez karty `OBJECT` (`resolver.NO_OBJECT_CARD_
+# FILETYPES`). Zmierzone: 763/763 RAW-lightów bez `object_raw`, ZERO wyjątków — EXIF nie zna tego
+# pola. Osobna kotwica, bo osobna droga naprawy (ręka, nie karta); zlanie z 25 dało 788 i sprawiło,
+# że liczba nie pilnowała ANI populacji astro, ANI DSLR.
 
 
 def _ok(cond):
@@ -270,33 +306,46 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
         out(f"  (full) frame={n_frame} location={n_loc} — dedupy treścią = {n_loc - n_frame}")
         crit("§4.6 location >= frame (dedup sha1_data łączy byte-identyczne mastery)", n_loc >= n_frame)
 
-    # §5.3/§5.8 kamery: 5 form, piksel, mono, ZERO rozbić modelu (no-split)
+    # §5.3/§5.8 kamery: forma, piksel, mono, ZERO rozbić modelu (no-split). STAGE-AWARE od
+    # 2026-08-01: FULL niesie 3 korpusy lustrzanek z RAW-ów, IMPORT (dawca FITS) ich nie zna.
+    exp_cams = EXP_CAMERAS_FULL if full else EXP_CAMERAS_IMPORT
     out("\n§5.3/§5.8 kamery (model, pixel, is_mono, src):")
     cams = {r[0]: r for r in con.execute(
         "SELECT model_canon, pixel_um, is_mono, is_mono_source, pixel_conflict FROM camera")}
     for mc in sorted(cams):
         _, px, mono, msrc, pc = cams[mc]
         out(f"    {mc:12s} px={px} is_mono={mono} src={msrc} pixel_conflict={pc}")
-    cams_ok = set(cams) == set(EXP_CAMERAS)
-    px_mono_ok = all(mc in cams and cams[mc][1] == EXP_CAMERAS[mc][0]
-                     and cams[mc][2] == EXP_CAMERAS[mc][1] for mc in EXP_CAMERAS)
-    crit("§5.3 5 kamer, piksel+mono zgodne (MM/MD mono, MC/294/Sony kolor)", cams_ok and px_mono_ok)
+    cams_ok = set(cams) == set(exp_cams)
+    px_mono_ok = all(mc in cams and cams[mc][1] == exp_cams[mc][0]
+                     and cams[mc][2] == exp_cams[mc][1] for mc in exp_cams)
+    crit(f"§5.3 {len(exp_cams)} kamer, piksel+mono zgodne (MM/MD mono, MC/294/Sony/DSLR kolor)",
+         cams_ok and px_mono_ok)
     distinct_models = con.execute("SELECT count(DISTINCT model_canon) FROM camera").fetchone()[0]
     n_cam_rows = con.execute("SELECT count(*) FROM camera").fetchone()[0]
     crit("§5.8 zero rozbić modelu (distinct model_canon == wierszy camera)",
-         distinct_models == n_cam_rows == len(EXP_CAMERAS))
+         distinct_models == n_cam_rows == len(exp_cams))
     pconf = con.execute("SELECT count(*) FROM camera WHERE pixel_conflict=1").fetchone()[0]
     crit("§5.3 pixel_conflict == 0 (brak rozjazdu piksela)", pconf == 0)
 
-    # §5.4 teleskopy: liczność (import 8 / full 9) + suspect=0 (verb telescope.review MARTWY po PF-2)
-    out("\n§5.4 teleskopy (canon, f/, focal, #frames):")
+    # §5.4 teleskopy: liczność (import 8 / full 12) + suspect=0 (verb telescope.review MARTWY po PF-2)
+    out("\n§5.4 teleskopy (canon, f/, focal, #frames, #RAW):")
     tels = con.execute(
         "SELECT t.telescop_canon, t.f_ratio_nominal, t.focal_nominal, "
-        "  (SELECT count(*) FROM frame f JOIN config c ON c.id=f.config_id WHERE c.telescope_id=t.id) "
-        "FROM telescope t ORDER BY 4 DESC").fetchall()
-    for tc, fr_, fl, nfr in tels:
-        out(f"    {tc:10s} f/{str(fr_):<5} focal={str(fl):<6} frames={nfr}")
+        "  (SELECT count(*) FROM frame f JOIN config c ON c.id=f.config_id WHERE c.telescope_id=t.id), "
+        "  (SELECT count(*) FROM frame f JOIN config c ON c.id=f.config_id "
+        "   WHERE c.telescope_id=t.id AND f.filetype IN (SELECT value FROM json_each(?))) "
+        "FROM telescope t ORDER BY 4 DESC",
+        (json.dumps(list(NO_OBJECT_CARD_FILETYPES)),)).fetchall()
+    for tc, fr_, fl, nfr, nraw in tels:
+        out(f"    {tc:28s} f/{str(fr_):<5} focal={str(fl):<6} frames={nfr:<6} RAW={nraw}")
     crit(f"§5.4 liczba teleskopów == {exp_tel} (akt={len(tels)})", len(tels) == exp_tel)
+    if full:
+        # Rozdział, nie sama liczba: kotwica „12" milczałaby o tym, czy przybyło optyki astro,
+        # czy kolejnego obiektywu. Obiektyw = oś powołana WYŁĄCZNIE klatkami RAW.
+        raw_only = sum(1 for *_x, nfr, nraw in tels if nfr and nfr == nraw)
+        out(f"    z tego powołane wyłącznie przez RAW (obiektywy DSLR): {raw_only}")
+        crit(f"§5.4 osie wyłącznie-RAW == {EXP_TELESCOPES_RAW_ONLY_FULL} (obiektywy z EXIF)",
+             raw_only == EXP_TELESCOPES_RAW_ONLY_FULL)
     suspect = con.execute("SELECT count(*) FROM event WHERE verb='telescope.review'").fetchone()[0]
     crit(f"§5.4 telescope.review MARTWY po PF-2 (akt={suspect})", suspect == 0)
 
@@ -325,8 +374,19 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
              "SELECT count(*) FROM frame WHERE config_id IS NOT NULL "
              "AND kind IN (SELECT value FROM json_each(?))", (off_axis,)).fetchone()[0] == 0)
     if full:
-        crit(f"§5.6 config.review ~{EXP_CONFIG_REVIEW_FULL} (`unknown` masterflat A7R3)",
-             cfg_review == EXP_CONFIG_REVIEW_FULL)
+        # RAW liczony ODDZIELNIE (2026-08-01): DSLR bez teleskopu w EXIF nie ma z czego powołać osi,
+        # więc jego `config_id IS NULL` to stan docelowy — dokładnie ta sama figura, co kind-scoping
+        # dark/bias wyżej, tylko po osi FORMATU.
+        cfg_review_raw = con.execute(
+            "SELECT count(*) FROM frame f JOIN header h ON h.frame_id = f.id "
+            "WHERE f.config_id IS NULL AND f.filetype IN (SELECT value FROM json_each(?)) "
+            "AND f.kind NOT IN (SELECT value FROM json_each(?))",
+            (json.dumps(list(NO_OBJECT_CARD_FILETYPES)), off_axis)).fetchone()[0]
+        out(f"    z tego RAW (DSLR bez teleskopu w EXIF): {cfg_review_raw}")
+        crit(f"§5.6 config.review poza RAW ~{EXP_CONFIG_REVIEW_FULL} (`unknown` masterflat A7R3)",
+             cfg_review - cfg_review_raw == EXP_CONFIG_REVIEW_FULL)
+        crit(f"§5.6 config.review RAW == {EXP_CONFIG_REVIEW_RAW_FULL} (stan docelowy DSLR)",
+             cfg_review_raw == EXP_CONFIG_REVIEW_RAW_FULL)
     else:
         crit("§5.6 config.review == 0 w imporcie FITS (nagłówki naprawione)", cfg_review == 0)
 
@@ -351,6 +411,16 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
     else:
         crit(f"§5.7b object_nameless == {exp_nameless} (akt={rep.object_nameless})",
              rep.object_nameless == exp_nameless)
+    # Bliźniacza populacja po drugiej stronie FORMATU: klatki, które nie mają JAK zeznać o obiekcie.
+    # Liczona zawsze, pilnowana tylko w FULL — dawca jest FITS-only, więc w IMPORT jest z definicji 0
+    # i osobne kryterium byłoby pustym rytuałem.
+    out(f"    z tego format bez karty `OBJECT` (RAW): {rep.object_nameless_raw}")
+    if full:
+        crit(f"§5.7b object_nameless_raw == {EXP_NAMELESS_RAW_FULL} (DSLR — droga naprawy: ręka)",
+             rep.object_nameless_raw == EXP_NAMELESS_RAW_FULL)
+    else:
+        crit("§5.7b zero RAW w imporcie FITS (dawca jest FITS-only)",
+             rep.object_nameless_raw == 0)
 
     # §5.8 (full) — kinds XISF (dowód, że doskan wciągnął to co PF-4)
     if full:
@@ -432,8 +502,18 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
     crit("§5.10 populacje stanowisk domykają do przypisanych", sum(p[3] for p in pops) == sa)
     crit("§5.10 przypisane == GPS-karty (wszystkie sparsowane)", sa == gps_cards)
     if full:
-        crit(f"§5.10 bez GPS == {EXP_NO_GPS_FULL} (150 fits + 124 xisf bez SITELAT/SITELONG)",
-             no_obs == EXP_NO_GPS_FULL)
+        # ROZDZIELONE 2026-08-01: tor astro (FITS+XISF bez SITELAT/SITELONG) i tor DSLR (aparat bez
+        # modułu GPS albo sentinel (0,0) → `None`). Jedna liczba 1037 nie odróżniłaby nowej dziury
+        # w nagłówkach astro od kolejnej sesji z lustrzanką.
+        no_obs_raw = con.execute(
+            "SELECT count(*) FROM frame WHERE observatory_id IS NULL "
+            "AND filetype IN (SELECT value FROM json_each(?))",
+            (json.dumps(list(NO_OBJECT_CARD_FILETYPES)),)).fetchone()[0]
+        out(f"    bez stanowiska: astro={no_obs - no_obs_raw}  RAW={no_obs_raw}")
+        crit(f"§5.10 bez GPS w torze astro == {EXP_NO_GPS_FULL} (150 fits + 124 xisf)",
+             no_obs - no_obs_raw == EXP_NO_GPS_FULL)
+        crit(f"§5.10 bez GPS w torze RAW == {EXP_NO_GPS_RAW_FULL} (DSLR bez modułu GPS)",
+             no_obs_raw == EXP_NO_GPS_RAW_FULL)
 
     # §5.11 oś KALIBRACJI (C2) — kotwice przepisu + DOMKNIĘCIE POPULACJI. Rozkład, który się nie
     # sumuje, to brama fałszywie zielona: „38 przepisów" nic nie znaczy, dopóki nie wiadomo, że

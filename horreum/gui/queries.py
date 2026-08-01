@@ -13,7 +13,7 @@ NIGDY składanie stringa SQL. Listy zmiennej długości (id/keywordy) idą jako 
 
 import json
 
-from horreum.resolver import review_state
+from horreum.resolver import NO_OBJECT_CARD_FILETYPES, nameless_raw_lights, review_state
 
 
 def telescope_label(row):
@@ -231,16 +231,25 @@ def review_queue(con):
     predykatu stanu (#12): ta sama derywacja zasila raport dostawy, więc kolejka i raport nie mogą
     się rozjechać.
 
+      - `nameless_raw_count`: jak wyżej, ale w formacie, który NIE MA JAK zeznać o obiekcie
+        (`resolver.NO_OBJECT_CARD_FILETYPES` — EXIF nie zna `OBJECT` ani RA/DEC). Osobny kubełek,
+        bo osobna droga naprawy: RĘCZNE przypisanie, nigdy karta w pliku.
+
     PARTYCJA wobec perspektywy gridu (T5a — dwa predykaty „do przeglądu" pod jedną nazwą; szew
     zmierzony 2026-07-31, żywa pf4: 0 nazwanych + 25 bezimiennych + 0 lightów bez nagłówka = 25):
-        sum(object_review.n) + nameless_count + (lighty bez wiersza `header`) == |review_frame_ids|
+        sum(object_review.n) + nameless_count + nameless_raw_count
+            + (lighty bez wiersza `header`) == |review_frame_ids|
+    Człon RAW dopisany 2026-08-01 RAZEM ze świadomością formatu i to nie jest kosmetyka: `review_
+    _frame_ids` pyta o sam brak obiektu, więc RAW-y w nim SĄ. Samo wycięcie ich z `nameless_count`
+    (bez tego kubełka) rozspójniłoby partycję dokładnie o ich liczbę — na żywej pf4 niewidoczne
+    (0 RAW-ów), na archiwum z lustrzanką: o 763.
     Trzeci człon jest PODZBIOREM `headerless_count` (ten liczy też kalibrację i `unknown`, bo mówi
     o skanie, nie o osi obiektu) — dlatego kolejka nie może go po prostu dodać: te dwa liczniki
     odpowiadają na różne pytania. Dopóki `nameless_count` nie istniał, kolejka milczała o klatkach,
     które grid pokazywał — stąd ten kubełek.
 
-    Zwraca dict: {object_review: [Row(object_raw, n)], nameless_count: int, config_review_count: int,
-    headerless_count: int, unreadable_count: int}."""
+    Zwraca dict: {object_review: [Row(object_raw, n)], nameless_count: int, nameless_raw_count: int,
+    config_review_count: int, headerless_count: int, unreadable_count: int}."""
     object_review = con.execute(
         "SELECT h.object_raw AS object_raw, COUNT(*) AS n "
         "FROM frame f JOIN header h ON h.frame_id = f.id "
@@ -256,6 +265,7 @@ def review_queue(con):
     nameless = nameless_frames(con)
     st = review_state(con)
     return {"object_review": object_review, "nameless_count": len(nameless),
+            "nameless_raw_count": nameless_raw_lights(con),
             "config_review_count": st.no_config,
             "headerless_count": st.headerless, "unreadable_count": st.unreadable}
 
@@ -285,6 +295,11 @@ def nameless_frames(con):
     """Drążenie kubełka „bez nazwy w nagłówku" (P-D, D-PD-11): DOKŁADNIE JEDEN wiersz na klatkę,
     z celem writebacku (`present=1`) i jawną kardynalnością kopii. Predykat ZNAK W ZNAK ten sam,
     co licznik `review_queue` — który liczy `len()` tego wyniku (D-PD-10, jeden właściciel).
+
+    ŚWIADOMY FORMATU (2026-08-01): `NO_OBJECT_CARD_FILETYPES` odpada, bo ta lista jest WEJŚCIEM
+    DIALOGU zapisu — RAW-a `macro.resolve_target` i tak odrzuca (read-only), więc bez tego warunku
+    okno „Napraw nagłówek…" otwierałoby się z listą, której KAŻDA pozycja jest pominięta. Populacja
+    nie znika z kolejki: liczy ją własny kubełek (`resolver.nameless_raw_lights`).
 
     Cel przez `l.id = (SELECT MIN(id) … present = 1)`, NIE przez `JOIN … present = 1`:
       - naiwny JOIN ZMIENIŁby predykat — klatka bezimienna BEZ obecnej kopii wypadłaby z licznika,
@@ -319,7 +334,9 @@ def nameless_frames(con):
         "                                WHERE frame_id = f.id AND present = 1) "
         "WHERE f.kind IN ('light','master_light') AND f.object_id IS NULL "
         "  AND h.object_raw IS NULL "
-        "ORDER BY l.path, f.id"
+        "  AND f.filetype NOT IN (SELECT value FROM json_each(?)) "
+        "ORDER BY l.path, f.id",
+        (json.dumps(list(NO_OBJECT_CARD_FILETYPES)),)
     ).fetchall()
 
 
@@ -610,7 +627,11 @@ def review_frame_ids(con):
     wymaga nagłówka Z NAZWĄ, tutaj liczy się sam brak obiektu. Rozjazd nie jest duplikatem do
     usunięcia — to dwa różne pytania (grid: „co jeszcze nie ma obiektu", kolejka: „co rozstrzygnąć
     i pod jaką nazwą"). Relacja jest PARTYCJĄ i tak ją trzyma `review_queue` (T5a):
-        |ten zbiór| == sum(object_review.n) + nameless_count + (lighty bez wiersza `header`)
+        |ten zbiór| == sum(object_review.n) + nameless_count + nameless_raw_count
+                       + (lighty bez wiersza `header`)
+    Ten zbiór NIE jest świadomy formatu i to jest zamierzone: RAW-owy light bez obiektu wymaga
+    przeglądu tak samo jak każdy inny — różni się DROGĄ naprawy (ręka, nie karta), a nie tym,
+    czy jest do zrobienia. Świadomość formatu żyje po stronie kubełków kolejki, nie tutaj.
     Zwraca set[int]."""
     return {int(r[0]) for r in con.execute(
         "SELECT id FROM frame WHERE object_id IS NULL AND kind IN ('light','master_light')"

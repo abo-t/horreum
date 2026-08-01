@@ -482,3 +482,30 @@ def test_delta_report_widzi_lighty_bez_nazwy_w_naglowku(tmp_path):
     assert (rep.object_resolved, rep.object_unresolved, rep.object_delta) \
         == (baza.object_resolved, baza.object_unresolved, baza.object_delta)
     con.close()
+
+
+def test_kotwica_nawrotu_rozdziela_format_bez_karty(tmp_path):
+    """Kotwica MUSI rozróżniać dwie populacje pod jednym objawem, bo mają różne drogi naprawy:
+    FITS bez `OBJECT` naprawia karta w pliku, RAW — wyłącznie ręka (EXIF nie zna tego pola).
+
+    Falsyfikator zlania ich w jedną liczbę: na realnym archiwum było to 25 + 763 = 788, gdzie
+    763 przykrywało każdy ruch w populacji astro — kotwica nie pilnowała już niczego."""
+    from horreum import repo
+    from horreum.resolver import (NO_OBJECT_CARD_FILETYPES, nameless_lights,
+                                  nameless_raw_lights)
+
+    assert "raw" in NO_OBJECT_CARD_FILETYPES        # właściciel faktu, nie literał u wołającego
+    con = _scanned_tree(tmp_path)
+    run_resolver(con, now=NOW)
+
+    for sha, ft in (("sha-nm-fits", "fits"), ("sha-nm-raw", "raw"), ("sha-nm-raw2", "raw")):
+        fid, _ = repo.upsert_frame(con, sha1_data=sha, kind="light", filetype=ft,
+                                   camera_id=None, now=NOW)
+        repo.record_header(con, frame_id=fid, raw_json="{}", object_raw=None, now=NOW)
+
+    rep = delta_report(con)
+    assert rep.object_nameless == nameless_lights(con) == 1
+    assert rep.object_nameless_raw == nameless_raw_lights(con) == 2
+    # RAW nie przecieka do procentu ani do delty (nie ma nazwy, pod którą byłby „nierozpoznany")
+    assert rep.object_delta == delta_report(con).object_delta
+    con.close()

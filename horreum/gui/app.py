@@ -1124,6 +1124,17 @@ class ObjectAxisView(QWidget):
         else:
             nameless.setFlags(Qt.ItemIsEnabled)     # informacyjny, nie do zaznaczenia
         self.review.addItem(nameless)
+        # Bliźniak kubełka wyżej po drugiej stronie FORMATU (`resolver.NO_OBJECT_CARD_FILETYPES`):
+        # RAW nie ma karty `OBJECT` z natury, więc „Napraw nagłówek…" go nie dotyczy, ale klatki
+        # ZOSTAJĄ w perspektywie gridu „Do przeglądu" i partycja musi je policzyć. Wiersz jest
+        # INFORMACYJNY (bez tagu → nieklikalny): akcją jest ręczne przypisanie, a to osobna
+        # powierzchnia (#8/P4) — udawany tag otwierałby okno, które nie ma czego zapisać.
+        # Pokazywany TYLKO gdy populacja istnieje: na archiwum bez lustrzanki to stałe „0".
+        if q["nameless_raw_count"] > 0:
+            raw_it = QListWidgetItem(
+                i18n.t("object.nameless_raw_line", n=q["nameless_raw_count"]))
+            raw_it.setFlags(Qt.ItemIsEnabled)
+            self.review.addItem(raw_it)
         unread = QListWidgetItem(i18n.t("object.unreadable_line", n=q["unreadable_count"]))
         unread.setData(Qt.UserRole, "unreadable")
         unread.setData(Qt.UserRole + 1, None)

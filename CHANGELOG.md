@@ -6,6 +6,11 @@ schemat i API mogą się jeszcze zmieniać.
 
 ## [Niewydane]
 
+## [0.5.1] — 2026-08-01
+
+Szlif po pierwszym realnym spotkaniu planera z archiwum: liczby dają się skanować wzrokiem,
+ekrany nie kłamią pustą ramką, a lista nieczytelnych kopii mówi wreszcie DLACZEGO.
+
 ### Zmienione
 - **Liczby w listwie facetów stoją w jednej kolumnie.** Godziny naświetlenia obiektu mają teraz
   własną kolumnę przy prawej krawędzi, więc licznik „(n)" kończy się w tym samym miejscu w każdym
@@ -213,7 +218,8 @@ Fundament: przejście na model „baza = autorytet, `sha1` = tożsamość".
 - **Import zasilający** świeżej bazy z bazy‑dawcy (read‑only).
 - **CLI**: `init` / `scan` / `group` / `resolve` / `delta`.
 
-[Niewydane]: https://github.com/abo-t/horreum/compare/v0.5.0...HEAD
+[Niewydane]: https://github.com/abo-t/horreum/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/abo-t/horreum/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/abo-t/horreum/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/abo-t/horreum/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/abo-t/horreum/compare/v0.3.1...v0.3.2

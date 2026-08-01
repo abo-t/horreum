@@ -1183,6 +1183,7 @@ class FramesView(QWidget):
         self._only_dups = False
         self._only_review = False
         self._only_vanished = False
+        self._reveal_facet = None   # (facet, wartość) do odsłonięcia w listwie — patrz `apply_object_facet`
         self._frame_ids = []      # frame_id widoczne w gridzie (cel makra) — aktualizowane w refresh()
         self._run_id = None       # JEDEN run_id sesji makra (R#5 lifecycle: stage→commit/reject zwalnia)
         self._n_total = 0         # liczba widocznych klatek (baza licznika; zaznaczenie dokładane, G2)
@@ -1378,12 +1379,18 @@ class FramesView(QWidget):
         Reużywa ISTNIEJĄCY facet Obiekt (liść `rel_object` + `facet_model.compose`) zamiast składać
         drzewo filtra po swojemu — druga ścieżka składania złamałaby SPOT i rozjechałaby się
         z cyklem facetów przy pierwszej zmianie. Perspektywa wraca do „Wszystkie" (zbiór definiuje
-        wejście, nie poprzedni widok), advanced-filtr znika — jak przy każdej perspektywie."""
+        wejście, nie poprzedni widok), advanced-filtr znika — jak przy każdej perspektywie.
+
+        ZAZNACZENIE MUSI BYĆ WIDOCZNE: listwa domyślnie odtwarza pozycję scrolla (słusznie dla kliku
+        W listwie), więc wejście z zewnątrz zostawiało `✓` poza viewportem — zmierzone: pozycja 36
+        z 48 przy scrollu 0. Stąd JEDNORAZOWY `_reveal_facet`, konsumowany przez najbliższe
+        przeładowanie listwy."""
         self._only_dups = self._only_review = self._only_vanished = False
         self._filter_tree = None
         self.filter_panel.set_tree(None)
         self._facet_state = {"object": {"in": [[oid, canon] for oid, canon in pairs]}} \
             if pairs else facet_model.empty_state()
+        self._reveal_facet = ("object", pairs[0][0]) if pairs else None
         self.refresh()
 
     def apply_perspective(self, name):
@@ -1598,7 +1605,10 @@ class FramesView(QWidget):
                 summ = portfolio.summarize(queries.object_exposure(self.con, ids))
                 extras["object"] = {oid: (portfolio.object_suffix(e), portfolio.object_tooltip(e))
                                     for oid, e in summ.items()}
-        self.facet_rail.set_data(counts, self._facet_state, extras)
+        # `_reveal_facet` jest JEDNORAZOWY: gasimy go tu, nie u wołającego — inaczej każdy kolejny
+        # refresh (klik w listwie, zmiana perspektywy) skakałby do celu sprzed pół godziny.
+        reveal, self._reveal_facet = self._reveal_facet, None
+        self.facet_rail.set_data(counts, self._facet_state, extras, reveal=reveal)
 
     def _facet_counts(self, facet, ids):
         """Kubełki jednego facetu → list[(value, label, n)] (kontrakt `FacetRail.set_data`).

@@ -5,6 +5,7 @@ Meta-testów NIE kopiujemy — `test_repo_safety`/`test_gui_isolation` chodzą p
 moduł same (T1 §7). Tu pinujemy zachowanie, którego one nie widzą.
 """
 import json
+import os
 from datetime import date, datetime, timezone
 
 import pytest
@@ -74,6 +75,27 @@ def test_asset_repo_ma_kotwice_i_curated_zawsze():
     assert "WR134" in {t.canon for t in targets.load_targets(("cirrus",))}
     ctb = [t for t in core if t.canon == "CTB1"][0]
     assert ctb.type == "SNR" and ctb.major_arcmin == pytest.approx(34.0, abs=0.5)
+
+
+def test_cache_assetu_widzi_podmiane_pliku(tmp_path, monkeypatch):
+    """Dług P-A #6: `lru_cache` na samych warstwach zamrażał katalog na CAŁY proces, więc
+    `scripts/build_catalog.py` odpalony obok działającego okna nie odsłaniał się do restartu.
+    Kluczem cache'u jest dziś `mtime_ns` — sygnał zmiany pliku wg kanonu repo (NIGDY rozmiar)."""
+    import json
+    from horreum import targets as T
+
+    data = {"targets": [{"c": "TEST1", "t": "EmN", "r": 10.0, "d": 20.0, "a": 30.0}]}
+    asset = tmp_path / "targets_core.json"
+    asset.write_text(json.dumps(data), encoding="utf-8")
+    curated = tmp_path / "curated.json"
+    curated.write_text('{"targets": []}', encoding="utf-8")
+    monkeypatch.setattr(T.resources, "files", lambda _pkg: tmp_path)
+
+    assert {t.canon for t in T.load_targets(("core",))} == {"TEST1"}
+    data["targets"][0]["c"] = "TEST2"
+    asset.write_text(json.dumps(data), encoding="utf-8")
+    os.utime(asset, ns=(asset.stat().st_atime_ns, asset.stat().st_mtime_ns + 1_000_000_000))
+    assert {t.canon for t in T.load_targets(("core",))} == {"TEST2"}
 
 
 def test_indeks_nie_zawiera_nazw_potocznych():

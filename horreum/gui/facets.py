@@ -94,7 +94,7 @@ class FacetRail(QWidget):
     def state(self):
         return self._state
 
-    def set_data(self, counts, state, extras=None):
+    def set_data(self, counts, state, extras=None, reveal=None):
         """Przeładuj listy. `counts`: dict facet → list[(value, label, n)] (sibling-set per facet);
         `state` = aktualny stan (właściciel: FramesView). `extras`: opc. dict facet → {value:
         (suffix, tooltip)} — anotacja godzin portfela (F7 §8), dziś tylko facet „object"; sufiks
@@ -102,7 +102,14 @@ class FacetRail(QWidget):
         wybory nieobecne w counts → PIN na górze grupy z n=0 (wartość odcięta przez INNE facety/
         advanced). Pozycja scrolla KAŻDEJ listy przeżywa przeładowanie (firsthand F4: klik wartości
         w środku długiej listy nie może odrzucać widoku na górę — user klika tę samą wartość
-        ponownie w cyklu ⊖)."""
+        ponownie w cyklu ⊖).
+
+        `reveal` = `(facet, value)` ODWRACA tę regułę dla JEDNEJ listy: zbiór przyszedł Z ZEWNĄTRZ
+        (most „Pokaż klatki celu" z planera), więc nie ma pozycji scrolla do uszanowania — jest
+        wybór, którego user nie widzi. Zmierzone przed poprawką: `✓ NGC7000` stało na pozycji 36/48
+        przy scrollu 0, czyli poza widokiem, a listwa wyglądała jak nietknięta. Odtworzenie scrolla
+        jest słuszne dla kliku W listwie i szkodliwe dla wejścia z zewnątrz — stąd jawny parametr,
+        nie zgadywanie po stanie."""
         self._loading = True
         scroll_pos = {facet: lw.verticalScrollBar().value() for facet, lw in self._lists.items()}
         try:
@@ -155,8 +162,27 @@ class FacetRail(QWidget):
             for facet, lw in self._lists.items():
                 lw.doItemsLayout()                         # przelicz zakres scrolla PRZED restore
                 lw.verticalScrollBar().setValue(scroll_pos[facet])   # setValue sam klampuje do zakresu
+            self._reveal(reveal)
         finally:
             self._loading = False
+
+    def _reveal(self, reveal):
+        """Przewiń listę do WSKAZANEJ wartości (wejście z zewnątrz — patrz `set_data`). Wartość
+        nieobecna na liście = brak ruchu: pin aktywnego wyboru gwarantuje obecność, ale gdyby
+        wołający podał wartość spoza facetu, cichy no-op jest lepszy niż skok w losowe miejsce.
+        `PositionAtCenter`, nie `EnsureVisible` — wybór ma być WIDOCZNY, a nie doklejony do brzegu
+        w miejscu, w którym oko go nie szuka."""
+        if not reveal:
+            return
+        facet, value = reveal
+        lw = self._lists.get(facet)
+        if lw is None:
+            return
+        for i in range(lw.count()):
+            it = lw.item(i)
+            if it.data(Qt.UserRole)[1] == value:
+                lw.scrollToItem(it, QAbstractItemView.PositionAtCenter)
+                return
 
     def refresh_theme(self):
         """Przemaluj wykluczenia po zmianie motywu. Kolor ⊖ jest WYPALONY w itemie przy `set_data`

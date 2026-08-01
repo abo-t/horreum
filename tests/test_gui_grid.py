@@ -290,6 +290,29 @@ def test_apply_object_facet_sumuje_dwie_nazwy_celu(view, gcon):
     assert view._facet_state["object"]["in"] == [[1, "IC410"], [2, "LBN807"]]
 
 
+def test_apply_object_facet_odslania_zaznaczenie_w_listwie(view, gcon):
+    """Dług P-A #1 (firsthand 2026-08-01): listwa odtwarza pozycję scrolla przy każdym przeładowaniu
+    — słusznie dla kliku W listwie, szkodliwie dla wejścia Z ZEWNĄTRZ. Zmierzone przed poprawką:
+    `✓ NGC7000` stało na pozycji 36/48 przy scrollu 0, więc most „Pokaż klatki celu" wyglądał
+    jak brak reakcji. Odsłonięcie jest JEDNORAZOWE — kolejny refresh nie ma prawa skakać."""
+    gcon.executemany("INSERT INTO object (id, canon, kind) VALUES (?,?,?)",
+                     [(1, "IC410", "deep_sky"), (2, "LBN807", "deep_sky")])
+    gcon.execute("UPDATE frame SET object_id = 1 WHERE id = 1")
+    gcon.execute("UPDATE frame SET object_id = 2 WHERE id = 2")
+    gcon.commit()
+    view.refresh()
+
+    revealed = []
+    rail = view.facet_rail
+    orig = rail._reveal
+    rail._reveal = lambda r: (revealed.append(r), orig(r))[1]
+    view.apply_object_facet([(2, "LBN807")])
+    assert revealed == [("object", 2)]                    # pierwsza para — most oddaje sumę nazw
+    assert view._reveal_facet is None                     # zużyte przy pierwszym przeładowaniu
+    view.refresh()
+    assert revealed == [("object", 2), None]              # kolejny refresh NIE przewija listy
+
+
 def test_apply_object_facet_zdejmuje_perspektywe_i_filtr(view, gcon):
     """Wejście z zewnątrz definiuje CAŁY zbiór: perspektywa „Duplikaty" i filtr advanced nie mają
     prawa dołożyć się do klatek celu (inaczej ekran pokazałby przecięcie i skłamał, czyje to klatki)."""

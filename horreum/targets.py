@@ -180,14 +180,38 @@ class PlanResult:
 
 # ─────────────────────────────────────────────────────── asset
 
-@functools.lru_cache(maxsize=8)
 def load_targets(layers=DEFAULT_LAYERS):
     """Wczytaj asset (krotka — wynik jest cache'owany, lista pozwoliłaby wołającemu zmutować cache).
 
     `curated` doklejany ZAWSZE (D-0731-11: asset kurowany jest obowiązkowy, nie opcją) — bez tego
-    `--layers cirrus` gubiłby `WR134`, cel bez numeru katalogowego."""
-    out = []
+    `--layers cirrus` gubiłby `WR134`, cel bez numeru katalogowego.
+
+    CACHE ZNA STEMPEL PLIKÓW: klucz niesie `mtime_ns` każdej wczytywanej warstwy, więc podmiana
+    assetu w trakcie sesji (`scripts/build_catalog.py` obok działającego okna) odsłania się przy
+    następnym wołaniu, zamiast czekać na restart. Sygnałem zmiany jest MTIME, nigdy rozmiar —
+    reguła repo jest w tym jednoznaczna [memory: `horreum-file-size-not-discriminator`]."""
+    return _load_stamped(tuple(layers), _asset_stamp(layers))
+
+
+def _asset_stamp(layers):
+    """`mtime_ns` warstw jako klucz cache'u. Asset spoza systemu plików (hipotetyczny zip-import)
+    nie ma `stat` — wtedy stempel jest `None` i cache zachowuje się jak przed zmianą (jedno
+    wczytanie na proces). Frozen onefile rozpakowuje `horreum/data` do realnych plików, więc
+    w wydaniu stempel JEST."""
+    stamps = []
     for layer in tuple(layers) + ("curated",):
+        try:
+            stamps.append(resources.files("horreum.data").joinpath(_ASSET[layer]).stat().st_mtime_ns)
+        except (OSError, AttributeError, NotImplementedError):
+            stamps.append(None)
+    return tuple(stamps)
+
+
+@functools.lru_cache(maxsize=8)
+def _load_stamped(layers, _stamp):
+    """Właściwe wczytanie — `_stamp` uczestniczy WYŁĄCZNIE w kluczu cache'u (stąd podkreślenie)."""
+    out = []
+    for layer in layers + ("curated",):
         text = resources.files("horreum.data").joinpath(_ASSET[layer]).read_text(encoding="utf-8")
         for raw in json.loads(text)["targets"]:
             out.append(_target(raw, layer))

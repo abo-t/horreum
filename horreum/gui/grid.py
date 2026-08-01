@@ -6,7 +6,10 @@ cała logika (silnik filtra, pivot, read-model) siedzi w Qt-wolnych `horreum.fil
 `horreum.gui.queries`. Model port `fitsmirror/gui/grid_model.py` (3 stany komórki + sort), bez edycji/stagingu.
 
 Kolumny BAZOWE (warstwa interpretacji nad lustrem) + dynamiczne kolumny-keywordy z `cards`. Perspektywy =
-nazwane {filtr+kolumny+grupowanie+sort} w `QSettings` + presety zaszyte (D-B). Grupowanie minimalne: nagłówki
+nazwane {filtr+kolumny+grupowanie+sort} w `QSettings` + presety zaszyte (D-B). **D-B ODWRÓCONE
+2026-08-01 (GO Zdzinia, D-P-I-3): docelowo perspektywa mieszka w BAZIE i wędruje z archiwum, nie
+z maszyną; presety zostają w kodzie. Kod poniżej czyta jeszcze rejestr — przeniesienie to segment I-1
+(`brief/PLAN_pi_martwe_tabele.md`), nie dług do samodzielnego „posprzątania".** Grupowanie minimalne: nagłówki
 grup po jednej kolumnie bazowej (D-D). `present` = kolumna statusu (zniknięte tłowane); Duplikaty = n_present>1.
 
 F3 (PLAN_ux_redesign §4): pasek ZBIORU (`SelectionBar` — licznik + kryteria słowami + akcje) nad

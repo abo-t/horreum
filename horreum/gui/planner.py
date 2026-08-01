@@ -65,8 +65,10 @@ _MIN_W = 1126
 _STATUSES = ("planned", "active", "done", "skip")
 
 # Progi wyszukiwania: (atrybut, klucz i18n, domyślna, min, max, krok) — JEDEN właściciel wartości
-# domyślnych (D-0731-10). Zapamiętywane w `QSettings` per maszyna (klasa D-B, jak perspektywy
-# gridu): „w bieżącym wyszukiwaniu" mówiło o tym, że progi nie idą do assetu — a nie o tym, że mają
+# domyślnych (D-0731-10). Zapamiętywane w `QSettings` per maszyna — to zostaje, ale UWAGA na wzorzec:
+# porównanie „jak perspektywy gridu" jest NIEAKTUALNE od 2026-08-01 (D-P-I-3 odwróciło D-B, perspektywy
+# idą do BAZY). Próg wyszukiwania jest własnością BIURKA, nie archiwum, więc dzieli los rejestru
+# świadomie, a nie przez analogię: „w bieżącym wyszukiwaniu" mówiło o tym, że progi nie idą do assetu — a nie o tym, że mają
 # ginąć przy każdym uruchomieniu. „Przywróć domyślne" jest obok, więc powrót do 6′/15′/13 mag
 # kosztuje jeden klik i stan zawsze widnieje w tytule zwiniętego paska.
 _THRESHOLDS = {"min_size": ("planner.min_size", 6.0, 0.0, 600.0, 1.0),

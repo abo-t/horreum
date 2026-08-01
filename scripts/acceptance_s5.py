@@ -2,13 +2,15 @@
 
 Re-baseline PF-5: baseline = DAWCA LIVE (`fitsmirror.db`), koniec custos.db. Świeżą bazę
 Horreum buduje wprost z dawcy przez REALNY import (`import_fitsmirror.run_import`) — ten sam
-pipeline co PF-3 (jedna klinga: `ingest_record` → grouper → resolver, z bramkami §4.6 w środku).
+pipeline co PF-3 (jedna klinga: `ingest_record` → grouper → resolver → kalibracja → rodowód,
+z bramkami §4.6 w środku).
 Skrypt dokłada kryteria §5 na wynikowej bazie i (opcjonalnie) odtwarza pełny stan PF-4 doskanem
 XISF. Zero prywatnych ścieżek w kodzie — wszystko z argumentów.
 
 Tryb HYBRYDOWY (odpowiednik replay+subset ze skilla `pipeline-replay-validation`):
   (I) IMPORT  — `run_import(dawca LIVE → świeża work.db)`. Cache'owane zeznania dawcy przez
-      DOKŁADNIE ten sam `ingest_record`+grouper+resolver co realny skan; §4.6 gate'y w środku
+      DOKŁADNIE ten sam `ingest_record`+grouper+resolver co realny skan, a od P-G także
+      kalibracja+rodowód (fasada kończy CAŁY łańcuch Dostawy); §4.6 gate'y w środku
       (abort = twarde złamanie). Baseline FITS (8 teleskopów, 5 kamer), w minuty, zero 839 GB.
   (X) XISF-DOSKAN (opcja `--xisf-root DIR`) — po imporcie realny `scan_tree` po drzewie z XISF
       (volume z `volume_serial`), potem grouper+resolver. Odtwarza PF-4: FITS gate'owane mtime

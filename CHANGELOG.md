@@ -6,6 +6,26 @@ schemat i API mogą się jeszcze zmieniać.
 
 ## [Niewydane]
 
+### Naprawione
+- **Okno „Napraw nagłówek…" przyjmuje wreszcie Księżyc, planety i komety.** Sprawdzało nazwę
+  węziej, niż potrafi ją potem rozpoznać sam program, więc odmawiało zapisania `Moon`, `Jupiter`
+  czy `C/2023 A3` — mimo że po zapisie obiekt wskoczyłby na swoje miejsce. To samo dotyczyło
+  nazwy, której nauczyłeś program wcześniej przez „Przypisz obiekt…" (np. `WR134`). Nazwa,
+  której nie zna nikt, nadal jest odrzucana — po to, żeby zapis do pliku nie zostawił klatki bez
+  obiektu.
+- **Licznik na przycisku „Zapisz karty" mówi, ile ZOSTAŁO.** Po udanym zapisie przycisk zostawał
+  wygaszony z liczbą sprzed zapisu, więc opisywał przeszłość. Teraz liczba znika, a po „Cofnij"
+  wraca.
+
+### Zmienione
+- **Wydawanie na stół ostrzega, gdy w katalogu docelowym stoi już drzewo o innym układzie.**
+  Program zapisywał kształt drzewa obok niego od początku, ale nigdy go nie czytał — a ponowne
+  wydanie z innym układem dokłada drugie drzewo obok starego (te same pliki policzone dwa razy).
+  Ostrzeżenie pojawia się i przy podglądzie, i przy tworzeniu; decyzja zostaje po Twojej stronie.
+- **Import z dawcy kończy tę samą drogę, co „Przetwórz wszystko".** Dotąd zatrzymywał się na
+  rozpoznaniu obiektów, więc baza zaraz po imporcie nie miała jeszcze przepisów kalibracji ani
+  powiązania klatek z masterami. Teraz przechodzi cały łańcuch i raport pokazuje oba etapy.
+
 ## [0.5.1] — 2026-08-01
 
 Szlif po pierwszym realnym spotkaniu planera z archiwum: liczby dają się skanować wzrokiem,

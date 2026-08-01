@@ -303,8 +303,10 @@ przeglądu w **Porządki → Klatki bez obiektu**.
 **Miejsca nawigacji (F5):** `Dostawa` = `PipelineView`, `Zbiory` = `FramesView`, `Porządki` =
 `TasksView`. Osie (teleskop/obserwatorium/obiekt) to podstrony Porządków.
 
-**Etapy dostawy** = `scan_tree` → `run_grouper` → `run_resolver` → `delta_report`
-(`horreum/gui/pipeline.py`). „Przyjmij nowe" = stage `all` na zapamiętanym `pipeline/last_source`
+**Etapy dostawy** = `scan_tree` → `run_grouper` → `run_resolver` → `run_calibration` →
+`run_lineage` → `delta_report` (`horreum/gui/pipeline.py`). Ten sam łańcuch, w tej samej
+kolejności, wykonuje fasada importu `import_fitsmirror.run_import` (P-G) — „po imporcie" i „po
+Dostawie" znaczą od 2026-08-01 to samo. „Przyjmij nowe" = stage `all` na zapamiętanym `pipeline/last_source`
 (QSettings). Skan przyrostowy: brama `(volume, path, mtime)`; ponowny skan pomija znane pliki;
 tożsamość = `sha1_data`.
 

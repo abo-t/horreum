@@ -14,9 +14,12 @@ Tryb HYBRYDOWY (odpowiednik replay+subset ze skilla `pipeline-replay-validation`
       (volume z `volume_serial`), potem grouper+resolver. Odtwarza PF-4: FITS gate'owane mtime
       (skip, zero re-odczytu), XISF wciągane → 9. teleskop ED, pełne kotwice §5. Pełne `<xisf-root>`
       → pełny stan pf4 (czyta tylko ~331 nagłówków XISF, reszta stat-skip).
-  (K) KALIBRACJA — `run_calibration` na gotowym stanie (po grouperze i resolverze) + drugi przebieg
+  (K) KALIBRACJA — `run_calibration` na gotowym stanie (po grouperze i resolverze) + kolejny przebieg
       jako dowód idempotencji. Oś przepisu jest bramkowana tu, bo jej kotwice (38 dark / 37 flat)
       zmierzono na pełnym archiwum, a mastery są XISF — bez doskanu nie ma czego liczyć.
+      **Od P-G łańcuch kalibracji+rodowodu robi już `run_import`**, więc w trybie IMPORT ta faza
+      jest przebiegiem DRUGIM (zera delt = dowód, nie regresja; pinuje to §4.6), a w FULL wciąż
+      pierwszym dla masterów przyniesionych doskanem.
   (C) KRYTERIA — stage-aware (import vs full po obecności XISF): zestawia aktualia z EXP_* PF-3+PF-4.
   (S) SUBSET (opcja `--subset DIR`) — realny `scan_tree` małego katalogu do OSOBNEJ work.db:
       dowód, że czytniki astropy/XISF + sha1 działają na realnych bajtach; tu (i tylko tu) realny
@@ -228,14 +231,20 @@ def calibrate(con, now, out):
     """Oś przepisu na gotowym stanie (PO grouperze i resolverze — przepis flata bierze
     `frame.filter_canon`, który wypełnia dopiero resolver).
 
-    Drugi przebieg jest tu BRAMKĄ, nie ozdobą: liczy się zmiana STANU, więc porównujemy liczniki
+    Od P-G (2026-08-01) `run_import` sam kończy łańcuch kalibracją, więc **w trybie IMPORT ten
+    przebieg jest już DRUGI** i pokazuje zera delt — to nie regresja, tylko dowód, że fasada
+    zrobiła swoje (pinuje to §4.6 w kryteriach). W trybie FULL nadal robi realną robotę: mastery
+    XISF przychodzą doskanem PO imporcie. Liczby STANU (`frames`/`incomplete`/`reasons`) są
+    przeliczane z bazy przy każdym przebiegu, więc kryteria §5.11 czytają je tak samo w obu trybach.
+
+    Kolejny przebieg jest tu BRAMKĄ, nie ozdobą: liczy się zmiana STANU, więc porównujemy liczniki
     eventów encyjnych sprzed i po. `calibration.review_summary` świadomie POZA porównaniem — to event
     audytowy emitowany bezwarunkowo przy niepustej liście braków (wzorzec `flag_object_review_summary`),
     więc jego powtórzenie nie jest zmianą stanu. Zwraca `(summary, idempotent)`."""
     out("")
     out("== (K) OŚ KALIBRACJI: run_calibration + idempotencja ==")
     s1 = run_calibration(con, now=now)
-    out(f"  przebieg 1: {s1}")
+    out(f"  przebieg po imporcie (FULL: pierwszy dla XISF, IMPORT: już drugi): {s1}")
     przed = {v: con.execute("SELECT count(*) FROM event WHERE verb=?", (v,)).fetchone()[0]
              for v in _CAL_VERBS}
     s2 = run_calibration(con, now=now)
@@ -255,12 +264,14 @@ _LIN_VERBS = ("calibration.linked", "calibration.unlinked")
 
 def lineage(con, now, out):
     """Rodowód na gotowym stanie (PO kalibracji — dopasowuje light do wyłonionych profili).
-    Drugi przebieg jest BRAMKĄ: liczy się zmiana STANU, więc porównujemy liczniki eventów rodowodu
-    sprzed i po. Zwraca `(summary, idempotent)`."""
+    Kolejny przebieg jest BRAMKĄ: liczy się zmiana STANU, więc porównujemy liczniki eventów rodowodu
+    sprzed i po. Jak w (K): od P-G rodowód liczy już `run_import`, więc w trybie IMPORT to przebieg
+    DRUGI — ale `linked`/`reasons`/`lights` są STANEM (przeliczane co przebieg), nie deltą, więc
+    kryteria §5.12 czytają je bez zmian. Zwraca `(summary, idempotent)`."""
     out("")
     out("== (L) RODOWÓD: run_lineage + idempotencja ==")
     s1 = run_lineage(con, now=now)
-    out(f"  przebieg 1: lighty={s1.lights} linked={s1.linked} luki={s1.reasons}")
+    out(f"  przebieg po imporcie: lighty={s1.lights} linked={s1.linked} luki={s1.reasons}")
     przed = {v: con.execute("SELECT count(*) FROM event WHERE verb=?", (v,)).fetchone()[0]
              for v in _LIN_VERBS}
     rows_przed = con.execute("SELECT count(*) FROM calibration").fetchone()[0]
@@ -287,6 +298,22 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
     exp_tel = EXP_TELESCOPES_FULL if full else EXP_TELESCOPES_IMPORT
     out("")
     out(f"== (C) KRYTERIA §5 — stan: {stage} ==")
+
+    # §4.6 IMPORT DOMYKA ŁAŃCUCH (P-G, 2026-08-01): fasada robi group→resolve→calibrate→lineage,
+    # więc baza „po imporcie" znaczy to samo, co baza po Dostawie w GUI. Bramka jest KONIECZNA,
+    # bo regresja byłaby tu NIEWIDOCZNA: (K)/(L) niżej i tak zbudowałyby oś, tyle że dopiero
+    # w skrypcie — a realny import poza tym skryptem zostawiłby bazę z pustą osią przepisu.
+    out(f"\n§4.6 łańcuch importu: kalibracja {summary.calibration}; "
+        f"rodowód lighty={getattr(summary.lineage, 'lights', None)}")
+    # Domknięcie populacji, nie „> 0 profili": kompletność przepisu zależy od DANYCH (dawca bez
+    # masterdarków dałby same niekompletne), a pytanie brzmi „czy etap poszedł", nie „czy dane były
+    # ładne". Ten sam kształt co §5.11 niżej — tam na stanie bazy, tu na zeznaniu fasady.
+    cal_i = summary.calibration
+    crit("§4.6 import domyka łańcuch: oś przepisu policzona JUŻ w imporcie (populacja domknięta)",
+         cal_i is not None and cal_i.frames > 0
+         and cal_i.profiles_assigned + cal_i.incomplete == cal_i.frames)
+    crit("§4.6 import domyka łańcuch: rodowód policzony JUŻ w imporcie",
+         summary.lineage is not None and summary.lineage.lights > 0)
 
     # §5.1 tożsamość: sha1_data 100% (każdy frame ma odcisk danych; degenerat = flaga)
     n_frame = con.execute("SELECT count(*) FROM frame").fetchone()[0]

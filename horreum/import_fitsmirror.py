@@ -52,7 +52,9 @@ from pathlib import Path
 from urllib.request import pathname2url
 
 from . import db, repo
+from .calibration import run_calibration
 from .grouper import NO_TELESCOPE_KINDS, run_grouper
+from .lineage import run_lineage
 from .resolve.cameras import normalize_camera
 from .resolve.frames import normalize_kind
 from .resolver import run_resolver
@@ -103,6 +105,8 @@ class ImportSummary:
     scan: ScanSummary = None
     group: object = None                       # GroupSummary
     resolve: object = None                     # ResolveSummary
+    calibration: object = None                 # CalibrationSummary (oś przepisu, C2)
+    lineage: object = None                     # LineageSummary (rodowód light↔master, C4)
     files_total: int = 0
     imported: int = 0
     skipped: int = 0
@@ -407,7 +411,8 @@ def _gates(con, summary, axes_seen):
 
 def run_import(donor, con, *, now, rng_seed=None, repaired_paths=None, progress=None):
     """Cały przebieg PF-3 na otwartych połączeniach (dawca RO, cel po `db.open_db`): pre-flight →
-    pętla → grouper+resolver → bramki. Zwraca `ImportSummary`; twarde złamanie → `ImportAbort`.
+    pętla → grouper+resolver+kalibracja+rodowód → bramki. Zwraca `ImportSummary`; twarde złamanie
+    → `ImportAbort`.
     `progress(done, total, path)` wołany po każdym pliku (CLI: heartbeat; Qt tu nie mieszka).
     `repaired_paths` → `preflight` (rejestr napraw Horreum, D-0722-2)."""
     _assert_target_fresh(con)
@@ -466,8 +471,15 @@ def run_import(donor, con, *, now, rng_seed=None, repaired_paths=None, progress=
             progress(done, total, path)
 
     summary.imported = summary.files_total - summary.skipped
+    # ŁAŃCUCH W TEJ SAMEJ KOLEJNOŚCI CO DOSTAWA W GUI (§4.4, SPOT): group → resolve → calibrate →
+    # lineage. Kolejność nie jest gustem: przepis flata bierze `frame.filter_canon` (powstaje
+    # w resolverze), a rodowód dopasowuje light do już wyłonionych profili. Do 2026-08-01 fasada
+    # kończyła na resolverze, więc po samym imporcie oś przepisu była PUSTA do pierwszego
+    # `calibrate` — baza „po imporcie" nie znaczyła tego samego, co baza po Dostawie.
     summary.group = run_grouper(con, now=now)          # te same funkcje co pipeline GUI (§4.4)
     summary.resolve = run_resolver(con, now=now)
+    summary.calibration = run_calibration(con, now=now)
+    summary.lineage = run_lineage(con, now=now)
     _gates(con, summary, (tel_seen, cam_seen, cfg_seen))
     return summary
 

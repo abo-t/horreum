@@ -429,6 +429,35 @@ def test_dark_fits_kind_aware_bramki(tmp_path):
     con.close()
 
 
+def test_import_domyka_lancuch_kalibracja_i_rodowod(tmp_path):
+    """P-G: fasada importu kończy ŁAŃCUCH DOSTAWY (group → resolve → **calibrate → lineage**),
+    nie na resolverze. Do 2026-08-01 baza „po imporcie" miała oś przepisu PUSTĄ do pierwszego
+    `calibrate`, więc nie znaczyła tego samego, co baza po Dostawie w GUI.
+
+    Dowód przez DOMKNIĘCIE POPULACJI, nie przez „>0 profili": kompletność przepisu zależy od
+    DANYCH (ten dawca nie niesie nastaw darka, więc klatka ląduje w `incomplete` — i to jest
+    poprawne), a pytanie brzmi „czy etap poszedł". Idempotencja jest cudza (bramka `acceptance_s5`
+    §5.11/§5.12) — tu pilnujemy tylko, że łańcuch nie kończy się na resolverze."""
+    specs = SPECS + [(os.path.join("CALIBRATION", "dark_1.fits"), D_ED_MM, 7)]
+    donor_path, _files = _mk_donor(tmp_path, specs)
+    s = _import(tmp_path, donor_path)
+    assert s.gate_failures == []
+    # Klatki z przepisem = 1 (dark). Flat z SPECS ma `IMAGETYP='Flat Field'`, ale bez FILTER-a
+    # w derywacji ląduje jako `kind='unknown'` — poza `KIND_RECIPE`, więc oś go nie liczy.
+    assert s.calibration is not None and s.calibration.frames == 1
+    assert s.calibration.profiles_assigned + s.calibration.incomplete == 1   # domknięcie populacji
+    assert s.calibration.incomplete == 1                                     # dawca nie zna nastaw
+    assert s.lineage is not None and s.lineage.lights == 3                   # 3 lighty z SPECS
+    assert set(s.lineage.reasons) == {"dark: niekompletny przepis lightu",
+                                      "flat: niekompletny przepis lightu"}
+    con = db.open_db(str(tmp_path / "horreum.db"))
+    # Oś przepisu jest policzona zaraz po imporcie — bez dodatkowego `horreum calibrate`.
+    assert con.execute(
+        "SELECT count(*) FROM frame WHERE calibration_profile_id IS NOT NULL").fetchone()[0] \
+        == s.calibration.profiles_assigned
+    con.close()
+
+
 def test_facade_live_db_przekazuje_rejestr(tmp_path):
     """Dokrętka --live-db: fasada `import_fitsmirror(repaired_db=...)` czyta rejestr napraw
     i przekazuje go do `preflight` — plik naprawiony przez Horreum przechodzi jako NOTA zamiast

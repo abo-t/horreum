@@ -432,6 +432,15 @@ def _format_import(donor_path, db_path, s):
             lines.append(f"    {p}")
     lines.append(f"  grouper: {s.group}")
     lines.append(f"  resolver: {s.resolve}")
+    if s.calibration is not None:
+        c = s.calibration
+        lines.append(f"  kalibracja: klatki {c.frames}; przepisy {c.profiles_proposed}; "
+                     f"przypisania {c.profiles_assigned}; fakty ze sciezki {c.facts_recorded}; "
+                     f"bez kompletu {c.incomplete}")
+    if s.lineage is not None:
+        li = s.lineage
+        linked = " ".join(f"{rel}={li.linked.get(rel, 0)}" for rel in sorted(li.linked)) or "-"
+        lines.append(f"  rodowod: lighty {li.lights}; z kalibratorem {linked}")
     status = "OK" if not s.gate_failures else "FAIL"
     gates = " ".join(f"{k}={a}" for k, (_, a) in s.gates.items())
     lines.append(f"  bramki 4.6 {status}: {gates}")

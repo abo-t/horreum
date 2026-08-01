@@ -358,12 +358,15 @@ def nameless_stacks(con):
     o sam brak obiektu, więc stacki w nim SĄ — wycięcie ich z `nameless_lights` bez policzenia
     tutaj rozspójniłoby kolejkę dokładnie o tę populację.
 
-    DROGA NAPRAWY JEST TRZECIA i dlatego kubełek jest osobny, a nie „lighty razem":
-    lightowi archiwum dopisujemy kartę `OBJECT` do PLIKU (P-D), RAW-owi przypisujemy obiekt RĘKĄ,
-    a stackowi — ANI JEDNO, ANI DRUGIE. Drzewo obróbki jest read-only (§5 briefu P-I: „nie mutuje
-    ani jednego bajtu"), a produkt integracji nie jest klatką z teleskopu, więc nie wchodzi do
-    kolejki, w której user naprawia archiwum. Kubełek jest INFORMACYJNY: mówi, ile gotowych
-    obrazów nie wie, co przedstawia."""
+    DROGA NAPRAWY JEST TA SAMA CO U LIGHTÓW od D-0802-1 (2026-08-02): karta `OBJECT` wraca do
+    PLIKU, oknem „Napraw nagłówek…". Do tego dnia kubełek był INFORMACYJNY z powodu, który
+    przestał obowiązywać — pisarz XISF nie umiał dopisać karty (D-X-12), więc akcja kończyłaby się
+    'blocked' na każdej pozycji; P6d go tego nauczyła (`scan.build_fits_keyword_element`).
+
+    OSOBNY kubełek zostaje, bo to osobna POPULACJA: gotowy obraz po integracji nie jest klatką
+    z teleskopu, a partycja kolejki musi liczyć oba zbiory rozłącznie (`review_frame_ids` pyta
+    o sam brak obiektu, więc stacki w nim SĄ). Drążenie do klatek =
+    `gui.queries.nameless_stack_frames` — ten sam predykat, znak w znak; równość pinuje test."""
     return con.execute(
         "SELECT count(*) FROM frame f JOIN header h ON h.frame_id = f.id "
         "WHERE f.kind = 'master_light' AND f.object_id IS NULL "

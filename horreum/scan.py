@@ -633,6 +633,93 @@ def locate_value_span(xml_bytes, *, keyword=None, idx=0, property_id=None, attr=
     return span
 
 
+_KEYWORD_ATTRS_ZNANE = frozenset((b"name", b"value", b"comment"))
+
+
+def build_fits_keyword_element(xml_bytes, *, keyword, value, comment=None):
+    """Wstawka NOWEJ karty `<FITSKeyword>` jako `(offset, bajty)` — domknięcie D-X-12 (P6d).
+
+    D-X-12 odmawiało dopisania karty z DWÓCH powodów: nie było wiadomo, GDZIE wstawić element
+    i jakim prefiksem namespace go nazwać, a `quote_fits` nie miał ORYGINAŁU, z którego przejmuje
+    konwencję cudzysłowu. Oba znikają, gdy nowej karty nie SKŁADAMY, tylko KOPIUJEMY sąsiada
+    z tego samego pliku i podmieniamy w nim trzy wartości: pisownia znacznika, prefiks, kolejność
+    i cudzysłowy atrybutów są wtedy takie same z KONSTRUKCJI, nie z obietnicy.
+
+    Wzorzec = ostatnia karta, której wartość jest w apostrofach FITS — bo nową kartę zakładamy
+    TEKSTOWĄ, a apostrofy są konwencją wartości tekstowych. Brak takiej karty → odmowa: konwencji
+    tego pliku nie znamy, a zgadnięta zmieniłaby semantykę wartości. Zmierzone na 22 realnych
+    stosach bez karty `OBJECT` (2026-08-02): każdy ma ≥1 kartę w apostrofach, zero plików bez
+    kart, zero z wieloma `<Image>` niosącymi karty.
+
+    MIEJSCE to koniec bloku kart (za OSTATNIM `<FITSKeyword>` w kolejności dokumentu), a nie za
+    wzorcem — wzorzec daje styl, nie pozycję. Wcięcie kopiujemy z białych znaków poprzedzających
+    ostatnią kartę, więc nowy element siada w tej samej kolumnie.
+
+    Atrybuty wzorca spoza `name`/`value`/`comment` → odmowa (EXPECT): skopiowalibyśmy do nowej
+    karty cudzą wartość, nie wiedząc, co znaczy. `comment` wzorca ZAWSZE nadpisujemy (pustym
+    tekstem, gdy wołający nie podał) — przepisany komentarz sąsiada byłby cichym fałszem o nowej
+    karcie.
+
+    Zwraca `(offset, blob)` do wycinka ZEROWEJ długości `(offset, offset, blob)`; mieszczenie się
+    w rezerwie liczy `build_xisf_header_region`, tak samo jak dla łaty podmieniającej."""
+    ostatnia = None
+    wzorzec = None
+    for start, end in _iter_xml_tags(xml_bytes):
+        tag = xml_bytes[start:end]
+        m = _XISF_TAG_NAME.match(tag)
+        if m is None or tag.startswith(b"</"):
+            continue
+        if m.group(1).rsplit(b":", 1)[-1] != b"FITSKeyword":
+            continue
+        ostatnia = (start, end)
+        attrs = _tag_attrs(tag)
+        if b"value" in attrs:
+            vs, ve = attrs[b"value"]
+            surowa = tag[vs:ve]
+            if len(surowa) >= 2 and surowa.startswith(b"'") and surowa.endswith(b"'"):
+                wzorzec = (start, end)
+    if ostatnia is None:
+        raise XisfTargetMissing(
+            "XISF: nagłówek nie ma ani jednej karty <FITSKeyword> — nie ma z czego przejąć "
+            "konwencji zapisu nowej")
+    if wzorzec is None:
+        raise ValueError(
+            "XISF: żadna karta tego pliku nie trzyma wartości w apostrofach FITS — konwencji "
+            "wartości tekstowej NIE ZNAM, więc nowej karty nie składam")
+
+    tmpl = xml_bytes[wzorzec[0]:wzorzec[1]]
+    attrs = _tag_attrs(tmpl)
+    obce = set(attrs) - _KEYWORD_ATTRS_ZNANE
+    if obce:
+        nazwy = ", ".join(sorted(a.decode("ascii", "replace") for a in obce))
+        raise ValueError(f"XISF: wzorzec karty ma nieznane atrybuty ({nazwy}) — kopiowanie "
+                         "przeniosłoby do nowej karty wartość, której nie rozumiem")
+    if b"name" not in attrs or b"value" not in attrs:
+        raise ValueError("XISF: wzorzec karty bez atrybutu name= albo value= — nie ma czego podmienić")
+
+    podmiany = [(attrs[b"name"], _escape_xml(str(keyword).strip().upper(),
+                                             attribute=True).encode("utf-8")),
+                (attrs[b"value"], quote_fits(value, tmpl[attrs[b"value"][0]:attrs[b"value"][1]]))]
+    if b"comment" in attrs:
+        podmiany.append((attrs[b"comment"],
+                         _escape_xml(str(comment or ""), attribute=True).encode("utf-8")))
+    elif comment:
+        raise ValueError("XISF: wzorzec karty nie ma atrybutu comment= — dopisanie atrybutu "
+                         "jest poza P6d")
+
+    out, last = [], 0
+    for (s, e), blob in sorted(podmiany):
+        out.append(tmpl[last:s])
+        out.append(blob)
+        last = e
+    out.append(tmpl[last:])
+    element = b"".join(out)
+
+    biale = xml_bytes[:ostatnia[0]]
+    sep = biale[len(biale.rstrip()):]          # wcięcie sprzed ostatniej karty — ta sama kolumna
+    return ostatnia[1], sep + element
+
+
 def _assert_span_zgodny_z_parserem(xml_bytes, span, *, keyword, idx, property_id, attr="value"):
     """GUARD do `locate_value_span`: to samo pytanie zadane `ElementTree`. Dwie derywacje muszą dać
     ten sam tekst — inaczej łata pisałaby w niewłaściwe miejsce."""

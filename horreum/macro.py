@@ -290,26 +290,28 @@ def _evaluate_change(
     return change, None
 
 
-def resolve_target(rows, op) -> tuple[dict | None, str | None]:
+def resolve_target(rows) -> tuple[dict | None, str | None]:
     """Z wierszy `writeback_frame_targets` JEDNEGO frame'a wybierz cel writebacku (JEDNA obecna
     location, kontrolowalna) albo powod pominiecia. Kolejnosc bramek = brief §6/D-W1/T6/D-X-13.
 
     BRAMKA FORMATU (P-D/D-PD-5) jest PIERWSZA i patrzy na `filetype` ('raw'|'xisf'|'fits',
-    `scan.py`): RAW jest dla Horreum READ-ONLY (pisarz odmawia — `writeback._is_raw`), a XISF nie
-    umie operacji `add` (latka bajtowa nie dorabia karty, ktorej nie ma — `writeback._xisf_gates`).
-    Bez niej user dostawal 'blocked' PO commicie zamiast czystego pominiecia PRZED nim; wolajacy
-    podaje `op`, bo XISF wolno `set`. Nieznany/NULL `filetype` przechodzi (baza sprzed kolumny).
+    `scan.py`): RAW jest dla Horreum READ-ONLY (pisarz odmawia — `writeback._is_raw`). Bez niej
+    user dostawal 'blocked' PO commicie zamiast czystego pominiecia PRZED nim. Nieznany/NULL
+    `filetype` przechodzi (baza sprzed kolumny).
 
     XISF NIE JEST odsiewany w calosci (P6c dal mu pisarza — D-W2 domkniete); przed backfillem kart
     odcinala go i tak bramka `header_hash IS NULL`, bo bez odcisku nie ma kontroli zapisu.
+
+    ODSIEW `xisf`+`add` ZDJETY 2026-08-02 (P6d, D-0802-1): pisarz umie juz dopisac karte, kopiujac
+    konwencje z sasiedniej karty tego samego pliku (`scan.build_fits_keyword_element`). `op` zostaje
+    w sygnaturze — bramki dopisania sa teraz w pisarzu i sa WEZSZE niz format (karta juz istnieje,
+    wlasnosc bez karty, brak wzorca w apostrofach), wiec ich miejsce jest tam, gdzie widac bajty.
 
     `rows` to >=1 wiersz per frame (LEFT JOIN present-location); frame bez obecnej kopii ma jeden
     wiersz z `location_id IS NULL`. Zwraca (wiersz_celu | None, powod | None)."""
     filetype = rows[0]["filetype"]
     if filetype == "raw":
         return None, "plik RAW (DSLR) -- Horreum go NIE zapisuje (read-only)"
-    if filetype == "xisf" and op == "add":
-        return None, "XISF nie przyjmuje nowej karty (add) -- pisarz latce bajtowej nie ma czego podmienic"
     present = [r for r in rows if r["location_id"] is not None]
     if not present:
         return None, "brak obecnej kopii do zapisu (wszystkie present=0)"
@@ -362,7 +364,7 @@ def run_macro(macro_def, frame_ids, *, targets_fn, cards_fn, run_id=None) -> Mac
         if not rows:                              # frame zniknal z bazy miedzy filtrem a makrem
             skipped.append(SkippedFrame(fid, "", "frame nieobecny w bazie"))
             continue
-        target, reason = resolve_target(rows, md.assign.op)
+        target, reason = resolve_target(rows)
         if target is None:
             path = next((r["path"] for r in rows if r["path"]), "")
             skipped.append(SkippedFrame(fid, path or "", reason or ""))

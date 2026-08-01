@@ -310,10 +310,13 @@ def _nameless_stack(con, sha):
     return fid
 
 
-def test_nameless_stos_ma_wlasny_kubelek_i_nie_wchodzi_do_dialogu(s8_obj):
-    """D-P-I-5: `master_light` liczy się OSOBNO od lightów archiwum, bo droga naprawy jest trzecia
-    — żadna. Drzewo obróbki trzymamy read-only (§5 briefu P-I), więc stack nie ma prawa pojawić
-    się w `nameless_frames` (wejście dialogu „Napraw nagłówek…"), który obiecuje zapis karty."""
+def test_nameless_stos_drazy_wlasnym_kubelkiem_rozlacznie_z_lightami(s8_obj):
+    """D-P-I-5 + D-0802-1: `master_light` liczy się OSOBNO od lightów archiwum — ale od 2026-08-02
+    NIE dlatego, że nie ma drogi naprawy (ma tę samą: karta `OBJECT` do pliku, P6d), tylko dlatego,
+    że to osobna POPULACJA i osobny licznik partycji.
+
+    Dwa drążenia muszą zostać ROZŁĄCZNE: gdyby `nameless_frames` zaczęło podawać stacki, partycja
+    `review_queue` policzyłaby je dwa razy i domykałaby się tylko przypadkiem."""
     from horreum.resolver import nameless_lights, nameless_stacks
 
     con, _ = s8_obj
@@ -322,9 +325,26 @@ def test_nameless_stos_ma_wlasny_kubelek_i_nie_wchodzi_do_dialogu(s8_obj):
     q = queries.review_queue(con)
     assert q["nameless_count"] == nameless_lights(con) == 1            # tylko light archiwum
     assert q["nameless_stacks_count"] == nameless_stacks(con) == 1     # stos własnym kubełkiem
-    # drążenie (wejście dialogu zapisu) NIE podaje stacku
-    assert [r["frame_id"] for r in queries.nameless_frames(con)] == [
-        con.execute("SELECT id FROM frame WHERE sha1_data='sha-nl-light'").fetchone()[0]]
+    light_id = con.execute("SELECT id FROM frame WHERE sha1_data='sha-nl-light'").fetchone()[0]
+    stos_id = con.execute("SELECT id FROM frame WHERE sha1_data='sha-nl-stack'").fetchone()[0]
+    assert [r["frame_id"] for r in queries.nameless_frames(con)] == [light_id]
+    assert [r["frame_id"] for r in queries.nameless_stack_frames(con)] == [stos_id]
+
+
+def test_licznik_stosow_jest_dlugoscia_drazenia(s8_obj):
+    """D-PD-10 dla trzeciego kubełka: licznik w kolejce to DŁUGOŚĆ read-modelu, którym kubełek
+    się otwiera — nie osobny COUNT. Dwa literały rozjechałyby się przy pierwszej zmianie kształtu
+    i wiersz pokazywałby inną liczbę niż lista, którą pod nim widać.
+
+    Rdzeniowy `resolver.nameless_stacks` zostaje osobnym literałem (warstwy są dwie, zależność
+    idzie w jedną stronę) — dlatego jego równość z drążeniem pinujemy tutaj."""
+    from horreum.resolver import nameless_stacks
+
+    con, _ = s8_obj
+    for i in range(3):
+        _nameless_stack(con, f"sha-cnt-stack-{i}")
+    n = queries.review_queue(con)["nameless_stacks_count"]
+    assert n == len(queries.nameless_stack_frames(con)) == nameless_stacks(con) == 3
 
 
 def test_partycja_przezywa_gotowy_stos(s8_obj):

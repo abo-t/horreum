@@ -141,10 +141,15 @@ def test_xisf_jest_celem_od_p6c(tmp_path):
     assert not run2.touched and "header_hash" in run2.skipped[0].reason
 
 
-def test_bramka_formatu_raw_i_xisf_add(tmp_path):
-    """D-PD-5: bramka FORMATU odsiewa PRZED commitem, nie po. RAW jest read-only dla Horreum
-    (pisarz odmawia), a XISF nie przyjmuje `add` (łatka bajtowa nie dorabia karty, której nie ma).
-    `set` na XISF przechodzi — bramka jest wąska, nie „XISF poza zapisem"."""
+def test_bramka_formatu_odsiewa_raw_a_xisf_przepuszcza(tmp_path):
+    """D-PD-5: bramka FORMATU odsiewa PRZED commitem, nie po — ale odsiewa WYŁĄCZNIE RAW-a, bo on
+    jedyny jest dla Horreum read-only.
+
+    ZAKAZ `xisf`+`add` ZDJĘTY 2026-08-02 (P6d/D-0802-1): pisarz umie dopisać kartę, kopiując
+    konwencję z sąsiedniej karty pliku. Bramki dopisania zostały, ale są WĘŻSZE niż format (karta
+    już jest, własność bez karty, brak wzorca) i liczą się z BAJTÓW, więc mieszkają w pisarzu —
+    tutaj sprawdzamy tylko, że format ich nie uprzedza. Falsyfikator wprost: gdyby stary odsiew
+    wrócił, `add` na XISF znów wypadłby do `skipped` i ten test by to złapał."""
     con = _con(tmp_path)
     raw = _frame(con, sha1="r", filetype="raw", cards=[_txt("TELESCOP", "ED")],
                  locations=[{"path": "R:/r.dng"}])
@@ -154,7 +159,7 @@ def test_bramka_formatu_raw_i_xisf_add(tmp_path):
     x = _frame(con, sha1="xa", filetype="xisf", cards=[_txt("TELESCOP", "ED")],
                locations=[{"path": "R:/xa.xisf", "header_hash": "hx", "hdu_index": None}])
     add = _run(con, {"assign": {"keyword": "OBJECT", "op": "add", "expr": "'NGC7635'"}}, [x])
-    assert not add.touched and "XISF" in add.skipped[0].reason
+    assert not add.skipped and [p.new_value for p in add.touched] == ["NGC7635"]
     sett = _run(con, {"assign": {"keyword": "TELESCOP", "op": "set", "expr": "ED120R"}}, [x])
     assert not sett.skipped and [p.new_value for p in sett.touched] == ["ED120R"]
 

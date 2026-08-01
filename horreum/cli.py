@@ -897,10 +897,10 @@ def _format_delta(db_path, rep):
     if rep.object_nameless_raw:
         lines.append(f"    z tego format bez karty (RAW, do przypisania recznie): "
                      f"{rep.object_nameless_raw}")
-    # Trzecia droga: zadna. Gotowy obraz po integracji lezy w drzewie obrobki, ktore P-I trzyma
-    # read-only — ten wiersz INFORMUJE, ile obrazow nie wie, co przedstawia (D-P-I-5).
+    # Gotowe obrazy po integracji (D-P-I-5). Od D-0802-1 droga naprawy jest TA SAMA co u lightow
+    # (karta OBJECT do pliku, GUI „Napraw naglowek…"), wiec wiersz nazywa populacje, nie zakaz.
     if rep.object_nameless_stacks:
-        lines.append(f"    z tego gotowe stosy (drzewo obrobki — read-only): "
+        lines.append(f"    z tego gotowe stosy (po integracji): "
                      f"{rep.object_nameless_stacks}")
     lines.append(f"  filter_canon ustawione: {rep.filters_canon}")
     # Liczba wiodaca = DISTINCT klatek; powody sie NAKLADAJA (brak kamery => tez brak configu),

@@ -361,9 +361,25 @@ def test_xisf_stale_header_hash_blokuje_bez_tkniecia(tmp_path):
     ("nieparsowalny",
      lambda tp: _uszkodz(_xisf(tp, "zly.xisf")),
      [writeback.WriteOp("TELESCOP", "set", "ED120R", "str")], "nieczytelny"),
-    ("operacja add",
-     lambda tp: _xisf(tp, "add.xisf"),
-     [writeback.WriteOp("FILTER", "add", "Ha", "str")], "D-X-12"),
+    # P6d (D-0802-1): `add` NIE jest już odmawiany z definicji — odmawiają go WĘŻSZE bramki,
+    # każda o czymś innym. Stary przypadek „operacja add → D-X-12" zniknął razem z zakazem.
+    ("operacja nieznana",
+     lambda tp: _xisf(tp, "op.xisf"),
+     [writeback.WriteOp("FILTER", "usun", "Ha", "str")], "zna 'set'"),
+    ("add na karcie, która JEST",
+     lambda tp: _xisf(tp, "jest.xisf"),
+     [writeback.WriteOp("TELESCOP", "add", "ED120R", "str")], "już istnieje"),
+    ("add gdy własność zeznaje, a karty nie ma",
+     lambda tp: _xisf(tp, "wlasnosc.xisf",
+                      props='<Property id="Observation:Object:Name" type="String">M42</Property>'),
+     [writeback.WriteOp("OBJECT", "add", "NGC 7000", "str")], "mogłoby mu zaprzeczyć"),
+    ("add bez wzorca w apostrofach",
+     lambda tp: _xisf(tp, "gole.xisf", keywords=[("FOCALLEN", "796"), ("XBINNING", "1")],
+                      props=""),
+     [writeback.WriteOp("OBJECT", "add", "NGC 7000", "str")], "apostrofach"),
+    ("add nie mieści się w rezerwie",
+     lambda tp: _xisf(tp, "ciasno.xisf", pad=8),
+     [writeback.WriteOp("OBJECT", "add", "NGC 7000", "str")], "mieści"),
     ("karta nieobecna",
      lambda tp: _xisf(tp, "brak.xisf"),
      [writeback.WriteOp("FILTER", "set", "Ha", "str")], "nieobecna"),
@@ -388,6 +404,67 @@ def test_xisf_bramki_odmowy_zero_zapisu(tmp_path, nazwa, buduj, ops, fragment):
     res = writeback.write_xisf_changes(str(p), ops, None)
     assert res.status == "blocked", f"{nazwa}: {res}"
     assert fragment in res.reason and _sha_pliku(p) == przed
+
+
+def test_xisf_add_dopisuje_karte_przejmujac_konwencje(tmp_path):
+    """P6d (D-0802-1): dopisanie karty do XISF. Element nie jest składany od zera — jest KOPIĄ
+    sąsiedniej karty tego samego pliku z podmienionymi trzema wartościami, więc konwencja
+    (apostrofy FITS) przychodzi z pliku, a nie z gustu autora kodu.
+
+    Trzy rzeczy pilnowane naraz, bo to one czynią zapis bezpiecznym dla 940-megabajtowego mastera:
+    wartość ląduje w apostrofach jak wzorzec, `sha1_data` NIE drgnie (inaczej `_resync` rozdwoiłby
+    klatkę), a komentarz wzorca NIE jest przepisany do nowej karty (przepisany byłby cichym fałszem
+    o niej)."""
+    p = _xisf(tmp_path, "dopisz.xisf",
+              keywords=[("TELESCOP", "'ED'", "optyka"), ("FOCALLEN", "796")])
+    przed = scan.read_xisf_meta_full(str(p))
+    dane_przed = p.read_bytes()[przed.image_span[0]:przed.image_span[0] + przed.image_span[1]]
+
+    res = writeback.write_xisf_changes(
+        str(p), [writeback.WriteOp("OBJECT", "add", "NGC 7000", "str")], przed.header_hash)
+    assert res.status == "applied", res.reason
+
+    po = scan.read_xisf_meta_full(str(p))
+    karta = next(c for c in po.cards if c.keyword == "OBJECT")
+    assert karta.value_raw == "NGC 7000"          # czytnik zdejmuje apostrofy…
+    assert b"value=\"'NGC 7000'\"" in po.xml_bytes  # …a w PLIKU stoją, jak u wzorca
+    assert not karta.comment                       # pusty komentarz → czytnik oddaje None
+    assert po.xml_bytes.count(b"optyka") == 1      # komentarz wzorca NIE przepisany do nowej karty
+    assert [c.keyword for c in po.cards] == ["TELESCOP", "FOCALLEN", "OBJECT"]  # na KOŃCU bloku
+    assert p.read_bytes()[po.image_span[0]:po.image_span[0] + po.image_span[1]] == dane_przed
+
+
+def test_xisf_add_przezywa_undo_bajtowo(tmp_path):
+    """Dopisanie jest odwracalne TAK SAMO jak podmiana: `write_xisf_full_header` wraca do
+    oryginalnego XML-a, a że wypełnienie w archiwum jest zerowe, plik wraca bajtowo. To jest
+    warunek, pod którym wolno w ogóle ruszać gotowe stosy — pomyłka kosztuje jedno cofnięcie."""
+    p = _xisf(tmp_path, "cofnij.xisf")
+    przed_bajty = p.read_bytes()
+    meta = scan.read_xisf_meta_full(str(p))
+
+    res = writeback.write_xisf_changes(
+        str(p), [writeback.WriteOp("OBJECT", "add", "NGC 7000", "str")], meta.header_hash)
+    assert res.status == "applied" and p.read_bytes() != przed_bajty
+
+    undo = writeback.write_xisf_full_header(str(p), res.backup_text, res.post_hash)
+    assert undo.status == "applied"
+    assert p.read_bytes() == przed_bajty
+
+
+def test_xisf_add_object_laduje_wlasnosc_razem_z_karta(tmp_path):
+    """Lustro D-X-10 dla `OBJECT`: gdy plik ma OBIE strony (karta + `Observation:Object:Name`),
+    `set` łata je RAZEM — inaczej zapis zostawiłby plik zeznający dwie różne nazwy. Mapa własności
+    dostała `OBJECT` w P6d, bo od D-0802-1 writeback sięga stosów, a PixInsight trzyma tam nazwę
+    obiektu podwójnie (zmierzone: 103 ze 128 realnych stosów)."""
+    p = _xisf(tmp_path, "oba.xisf", keywords=[("OBJECT", "'M42'")],
+              props='<Property id="Observation:Object:Name" type="String">M42</Property>',
+              pad=128)
+    res = writeback.write_xisf_changes(
+        str(p), [writeback.WriteOp("OBJECT", "set", "NGC 7000", "str")], None)
+    assert res.status == "applied", res.reason
+    po = scan.read_xisf_meta_full(str(p))
+    assert next(c for c in po.cards if c.keyword == "OBJECT").value_raw == "NGC 7000"
+    assert b">NGC 7000</Property>" in po.xml_bytes
 
 
 def _uszkodz(path):

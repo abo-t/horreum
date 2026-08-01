@@ -629,7 +629,7 @@ class RepairHeaderDialog(QDialog):
             if not trows:                       # klatka zniknęła z bazy między odczytem a otwarciem
                 self._skipped.append((r["path"] or "", i18n.t("repair.skip.gone")))
                 continue
-            target, reason = macro_mod.resolve_target(trows, "add")
+            target, reason = macro_mod.resolve_target(trows)
             if target is None:
                 self._skipped.append((r["path"] or "", reason or ""))
                 continue
@@ -1143,14 +1143,16 @@ class ObjectAxisView(QWidget):
             raw_it.setFlags(Qt.ItemIsEnabled)
             self.review.addItem(raw_it)
         # TRZECI kubełek tej samej partycji (I-2b/D-P-I-5): gotowy obraz po integracji, wciągnięty
-        # drogą „Stosy". Też INFORMACYJNY, ale z innego powodu niż RAW: tam akcja istnieje i leży
-        # gdzie indziej, tu akcji NIE MA — drzewo obróbki jest read-only z decyzji (§5 briefu P-I),
-        # a produkt integracji nie jest klatką z teleskopu, więc nie wchodzi do kolejki napraw
-        # archiwum. Wiersz mówi, ile gotowych obrazów nie wie, co przedstawia — i tyle.
+        # drogą „Stosy". Do 2026-08-02 był INFORMACYJNY, bo pisarz XISF nie umiał dopisać karty
+        # (D-X-12) — wiersz z akcją obiecywałby zapis, który kończy się 'blocked' na każdej pozycji.
+        # P6d nauczyła pisarza wstawiać kartę, a D-0802-1 otworzyła ten tor, więc kubełek DRĄŻY
+        # tak samo jak lightowy. Osobny od niego zostaje, bo to osobna populacja (i osobny licznik
+        # partycji), nie dlatego, że droga naprawy jest inna — jest ta sama.
         if q["nameless_stacks_count"] > 0:
             stk_it = QListWidgetItem(
                 i18n.t("object.nameless_stacks_line", n=q["nameless_stacks_count"]))
-            stk_it.setFlags(Qt.ItemIsEnabled)
+            stk_it.setData(Qt.UserRole, "nameless_stacks")
+            stk_it.setData(Qt.UserRole + 1, None)
             self.review.addItem(stk_it)
         unread = QListWidgetItem(i18n.t("object.unreadable_line", n=q["unreadable_count"]))
         unread.setData(Qt.UserRole, "unreadable")
@@ -1197,7 +1199,10 @@ class ObjectAxisView(QWidget):
         gdy DRUGA powierzchnia writebacku pisze do plików (mutex, D-PD-3)."""
         tag, _ = self._selected_review()
         self.assign_btn.setEnabled(tag == "object_raw" and not self._busy)
-        self.repair_btn.setEnabled(tag == "nameless" and not self._busy and not self._foreign_wb)
+        # Dwa tagi, jedna akcja: kubełek lightów archiwum i kubełek gotowych stosów mają od
+        # D-0802-1 tę samą drogę naprawy (karta `OBJECT` do PLIKU), więc przycisk obsługuje oba.
+        self.repair_btn.setEnabled(tag in ("nameless", "nameless_stacks")
+                                   and not self._busy and not self._foreign_wb)
 
     def _on_object_selected(self):
         """Obiekt zaznaczony → klatki tego obiektu (z bieżącym filtrem). Czyści selekcję review (wzajemnie
@@ -1237,6 +1242,11 @@ class ObjectAxisView(QWidget):
             self._restore_frames_mode()
             rows = queries.nameless_frames(self.con)
             self.frames_label.setText(i18n.t("object.frames_nameless", n=len(rows)))
+            self._fill_frames(rows, present_col=False)
+        elif tag == "nameless_stacks":
+            self._restore_frames_mode()
+            rows = queries.nameless_stack_frames(self.con)
+            self.frames_label.setText(i18n.t("object.frames_nameless_stacks", n=len(rows)))
             self._fill_frames(rows, present_col=False)
         elif tag == "unreadable":
             self._show_copies()
@@ -1330,8 +1340,14 @@ class ObjectAxisView(QWidget):
         """„Napraw nagłówek…": klatki bezimienne → dialog (grupy po folderze, propozycja ze ścieżki)
         → karta `OBJECT` w PLIKU. Zapis idzie klingą writebacku, nie do bazy — dlatego po nim
         odświeżamy kolejkę, a oś obiektu wypełnia dopiero takt 3 (`Rozwiąż`, delegowany gospodarzowi
-        przez `run_stage_fn`; brak gospodarza = brak taktu 3, okno powie to wprost)."""
-        rows = queries.nameless_frames(self.con)
+        przez `run_stage_fn`; brak gospodarza = brak taktu 3, okno powie to wprost).
+
+        Wejście bierzemy z ZAZNACZONEGO kubełka (D-0802-1): lighty archiwum i gotowe stosy mają tę
+        samą drogę naprawy, ale to DWIE rozłączne populacje i dwa liczniki — otwarcie okna zawsze
+        na lightach kłamałoby licznikiem, na którym user kliknął."""
+        tag, _ = self._selected_review()
+        rows = (queries.nameless_stack_frames(self.con) if tag == "nameless_stacks"
+                else queries.nameless_frames(self.con))
         if not rows:
             self.status_message.emit(i18n.t("repair.nothing"))
             return

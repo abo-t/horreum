@@ -183,9 +183,12 @@ CATALOG = {
     # ten nie ma czego otworzyć).
     "object.nameless_raw_line": {"pl": "— bez nazwy, format bez karty (RAW): {n}  ·  do przypisania ręcznie",
                                  "en": "— nameless, format has no card (RAW): {n}  ·  assign by hand"},
+    # Gotowe stosy: od D-0802-1 droga naprawy jest ta sama co u lightów (karta OBJECT do pliku),
+    # więc wiersz przestał zapowiadać read-only i nazywa POPULACJĘ — tym różni się od kubełka
+    # wyżej, nie drogą.
     "object.nameless_stacks_line": {
-        "pl": "— bez nazwy, gotowe stosy: {n}  ·  drzewo obróbki jest read-only",
-        "en": "— nameless, finished stacks: {n}  ·  the processing tree is read-only"},
+        "pl": "— bez nazwy, gotowe stosy: {n}  ·  do naprawy kartą",
+        "en": "— nameless, finished stacks: {n}  ·  repair with a card"},
     "object.unreadable_line": {"pl": "— kopie nieczytelne: {n}", "en": "— unreadable copies: {n}"},
     "object.review_info": {
         "pl": "— config-review: {config}  ·  bez nagłówka: {headerless}  (rozwiązywanie w przygotowaniu)",
@@ -208,6 +211,10 @@ CATALOG = {
     },
     "object.frames_nameless": {
         "pl": "Klatki bez nazwy w nagłówku ({n})", "en": "Frames with no name in header ({n})",
+    },
+    "object.frames_nameless_stacks": {
+        "pl": "Gotowe stosy bez nazwy w nagłówku ({n})",
+        "en": "Finished stacks with no name in header ({n})",
     },
 
     # --- P-D: „Napraw nagłówek…" — karta OBJECT wraca do PLIKU (wariant C) ---

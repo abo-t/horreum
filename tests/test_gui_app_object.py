@@ -545,6 +545,29 @@ def test_kubelek_bezimiennych_drazy_i_aktywuje_akcje(repair):
     assert v.repair_btn.isEnabled()
 
 
+def test_kubelek_gotowych_stosow_drazy_wlasna_lista(repair):
+    """D-0802-1: wiersz „bez nazwy, gotowe stosy" przestał być informacyjny — ma tag, włącza
+    „Napraw nagłówek…" i drąży do SWOJEJ listy, nie do lightowej.
+
+    To jest falsyfikator pomyłki, która by nie bolała od razu: gdyby akcja brała zawsze
+    `nameless_frames`, przycisk działałby, okno by się otwierało i naprawiałoby CUDZĄ populację —
+    user kliknąłby licznik stosów, a poprawił lighty archiwum."""
+    v, con, files, _open = repair
+    fid, _ = repo.upsert_frame(con, sha1_data="sha-gui-stack", kind="master_light",
+                               filetype="xisf", camera_id=None, now=NOW_PD)
+    repo.record_header(con, frame_id=fid, raw_json="{}", object_raw=None, now=NOW_PD)
+    v.refresh()
+
+    assert queries.review_queue(con)["nameless_stacks_count"] == 1
+    _select_review_tag(v, "nameless_stacks")
+    assert v.frames.rowCount() == 1                    # SWOJA lista, nie dwa lighty fixture'u
+    assert v.repair_btn.isEnabled() and not v.assign_btn.isEnabled()
+    assert [r["frame_id"] for r in queries.nameless_stack_frames(con)] == [fid]
+
+    _select_review_tag(v, "nameless")                  # ten sam przycisk, druga populacja
+    assert v.frames.rowCount() == 2 and v.repair_btn.isEnabled()
+
+
 def test_propozycja_z_dwoch_swiadkow_i_domyslne_zaznaczenie(repair):
     """D-PD-2: folder po `LIGHTS` i nazwa pliku mówią to samo → pole wypełnione, grupa ZAZNACZONA
     (bez tego obietnica „≤ 4 interakcje" jest nieprawdziwa). Podgląd pokazuje DOKŁADNIE to, co

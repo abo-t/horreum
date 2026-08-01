@@ -14,7 +14,7 @@ NIGDY składanie stringa SQL. Listy zmiennej długości (id/keywordy) idą jako 
 import json
 
 from horreum.resolver import (
-    NO_OBJECT_CARD_FILETYPES, nameless_raw_lights, nameless_stacks, review_state)
+    NO_OBJECT_CARD_FILETYPES, nameless_raw_lights, review_state)
 
 
 def telescope_label(row):
@@ -236,9 +236,10 @@ def review_queue(con):
         (`resolver.NO_OBJECT_CARD_FILETYPES` — EXIF nie zna `OBJECT` ani RA/DEC). Osobny kubełek,
         bo osobna droga naprawy: RĘCZNE przypisanie, nigdy karta w pliku.
       - `nameless_stacks_count`: jak wyżej, ale to GOTOWY OBRAZ po integracji (`kind='master_light'`,
-        droga „Stosy" — I-2b/D-P-I-5). Trzeci kubełek, bo TRZECIA droga naprawy: żadna. Drzewo
-        obróbki jest read-only z decyzji, więc ten wiersz mówi „tyle obrazów nie wie, co
-        przedstawia" i na tym poprzestaje.
+        droga „Stosy" — I-2b/D-P-I-5). Osobny kubełek, bo osobna POPULACJA — nie dlatego, że nie ma
+        drogi naprawy. Od D-0802-1 (2026-08-02) droga jest ta sama co u lightów (karta `OBJECT`
+        do pliku), więc kubełek DRĄŻY (`nameless_stack_frames`) i niesie akcję; licznik jest
+        długością tego drążenia (D-PD-10), nie osobnym COUNT-em.
 
     PARTYCJA wobec perspektywy gridu (T5a — dwa predykaty „do przeglądu" pod jedną nazwą; szew
     zmierzony 2026-07-31, żywa pf4: 0 nazwanych + 25 bezimiennych + 0 lightów bez nagłówka = 25):
@@ -268,10 +269,11 @@ def review_queue(con):
     # COUNT — dwa literały rozjechałyby się przy pierwszej zmianie kształtu (kubełek pokazywałby
     # inną liczbę niż lista, którą otwiera).
     nameless = nameless_frames(con)
+    stosy = nameless_stack_frames(con)          # licznik = długość drążenia (D-PD-10), jak wyżej
     st = review_state(con)
     return {"object_review": object_review, "nameless_count": len(nameless),
             "nameless_raw_count": nameless_raw_lights(con),
-            "nameless_stacks_count": nameless_stacks(con),
+            "nameless_stacks_count": len(stosy),
             "config_review_count": st.no_config,
             "headerless_count": st.headerless, "unreadable_count": st.unreadable}
 
@@ -308,9 +310,9 @@ def nameless_frames(con):
     nie znika z kolejki: liczy ją własny kubełek (`resolver.nameless_raw_lights`).
 
     ŚWIADOMY ŹRÓDŁA od I-2b (D-P-I-5): `kind='light'` zamiast `IN ('light','master_light')` —
-    gotowe stacki NIE są celem writebacku. Drzewo obróbki jest read-only z DECYZJI (§5 briefu P-I),
-    więc pokazanie ich w oknie „Napraw nagłówek…" byłoby obietnicą, której ten tor nie ma prawa
-    spełnić. Populacja nie znika z kolejki: liczy ją `resolver.nameless_stacks`.
+    gotowe stacki mają WŁASNE drążenie (`nameless_stack_frames`), bo są własnym kubełkiem kolejki.
+    Od D-0802-1 (2026-08-02) nie chodzi już o to, że writeback ich nie tyka — tyka — tylko o to,
+    że dwa kubełki muszą zostać rozłączne, inaczej partycja policzyłaby stacki dwa razy.
 
     Cel przez `l.id = (SELECT MIN(id) … present = 1)`, NIE przez `JOIN … present = 1`:
       - naiwny JOIN ZMIENIŁby predykat — klatka bezimienna BEZ obecnej kopii wypadłaby z licznika,
@@ -348,6 +350,45 @@ def nameless_frames(con):
         "  AND f.filetype NOT IN (SELECT value FROM json_each(?)) "
         "ORDER BY l.path, f.id",
         (json.dumps(list(NO_OBJECT_CARD_FILETYPES)),)
+    ).fetchall()
+
+
+def nameless_stack_frames(con):
+    """Drążenie kubełka „gotowe stosy bez nazwy" (D-0802-1, P6d) — bliźniak `nameless_frames`
+    o jednym słowie różnicy: `kind='master_light'`.
+
+    Do 2026-08-02 ten kubełek był INFORMACYJNY, bo pisarz XISF nie umiał dopisać karty (D-X-12),
+    więc okno „Napraw nagłówek…" otwierałoby się z listą, której KAŻDA pozycja jest pominięta —
+    ta sama patologia, dla której RAW-y są wycięte z `nameless_frames`. P6d nauczyła pisarza
+    wstawiać kartę (`scan.build_fits_keyword_element`), więc droga naprawy istnieje i kubełek
+    dostał drążenie.
+
+    ROZŁĄCZNY z `nameless_frames` po `kind` — partycja `review_queue` liczy oba i zsumowanie
+    zachodzących zbiorów rozspójniłoby ją dokładnie o liczbę stosów.
+
+    `NO_OBJECT_CARD_FILETYPES` świadomie POZA predykatem, inaczej niż u lightów: RAW-owy
+    `master_light` nie ma jak powstać (`kind_from_path` zna tylko light/dark/flat/bias, a droga
+    „Stosy" powołuje rodzaj z `IMAGETYP`), więc warunek byłby martwą literą udającą bramkę.
+
+    Kolumny, cel przez `MIN(id) … present = 1` i `ORDER BY` — jak w `nameless_frames` (ten sam
+    panel `_fill_frames` je czyta). Zwraca: frame_id, sha1_data, filetype, date_obs,
+    telescope_label, telescop_canon, camera_model, location_id, path, n_present."""
+    return con.execute(
+        "SELECT f.id AS frame_id, f.sha1_data, f.filetype, h.date_obs, "
+        "       t.label AS telescope_label, t.telescop_canon, "
+        "       cam.model_canon AS camera_model, "
+        "       l.id AS location_id, l.path, "
+        "       (SELECT COUNT(*) FROM location WHERE frame_id = f.id AND present = 1) AS n_present "
+        "FROM frame f JOIN header h ON h.frame_id = f.id "
+        "LEFT JOIN config c ON c.id = f.config_id "
+        "LEFT JOIN telescope_canonical tc ON tc.id = c.telescope_id "
+        "LEFT JOIN telescope t ON t.id = tc.canon_id "
+        "LEFT JOIN camera cam ON cam.id = f.camera_id "
+        "LEFT JOIN location l ON l.id = (SELECT MIN(id) FROM location "
+        "                                WHERE frame_id = f.id AND present = 1) "
+        "WHERE f.kind = 'master_light' AND f.object_id IS NULL "
+        "  AND h.object_raw IS NULL "
+        "ORDER BY l.path, f.id"
     ).fetchall()
 
 

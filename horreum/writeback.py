@@ -229,6 +229,12 @@ def write_full_header(path, header_text: str, expected_hash: str | None) -> Writ
 _XISF_PROPERTY_TARGETS = {
     "TELESCOP": ("Instrument:Telescope:Name", str),
     "FOCALLEN": ("Instrument:Telescope:FocalLength", lambda v: repr(float(v) / 1000.0)),
+    # OBJECT dopisany 2026-08-02 (P6d): PixInsight trzyma nazwę obiektu tak samo podwójnie jak
+    # teleskop, więc od chwili, w której writeback sięga gotowych stosów, edycja samej karty
+    # zostawiałaby plik sprzeczny ze sobą. Reguła jest tożsamościowa (`str`) — zmierzone na 128
+    # realnych stosach: 106 ma kartę, z nich 103 ma też własność i bramka zrozumienia przechodzi
+    # 103/103 przy ZERO rozjazdów; 3 nie mają własności i zostają pominięte (D-X-10).
+    "OBJECT": ("Observation:Object:Name", str),
 }
 
 
@@ -311,28 +317,85 @@ def _xisf_property_patch(meta, keyword, idx, new_text):
     return (*span, nowa)
 
 
+def _xisf_add_patch(meta, keyword: str, new_text: str, comment) -> tuple[int, int, bytes]:
+    """Wycinek ZEROWEJ długości `(offset, offset, bajty)` = dopisanie karty (P6d, domknięcie D-X-12).
+
+    Trzy bramki odmowy PRZED złożeniem elementu — każda pilnuje czegoś innego:
+
+    1. **Karta już jest** → odmowa. `add` na istniejącej karcie dopisałby DRUGĄ o tej samej nazwie,
+       a wtedy `locate_value_span(idx=0)` i parser wskazywałyby różne wystąpienia. Kto chce zmienić
+       wartość, woła `set`.
+    2. **Własność zmapowana ISTNIEJE, a karty nie ma** → odmowa. To lustro D-X-10 od drugiej strony:
+       plik zeznaje o obiekcie własnością, więc dopisanie karty o INNEJ treści uczyniłoby go
+       sprzecznym, a bramki zrozumienia nie ma jak postawić — nie istnieje karta, z której reguła
+       miałaby policzyć wartość oczekiwaną. Zmierzone: z 22 stosów bez karty `OBJECT` własność
+       ma ZERO, więc ta bramka dziś nie odsiewa nic i ma tak zostać.
+    3. Reszta (brak kart, brak wzorca w apostrofach, obce atrybuty wzorca) → `build_fits_keyword_
+       element` odmawia własnymi słowami; tu tylko mapujemy `ValueError` na 'blocked', bo to
+       wszystko są cechy PLIKU, nie usterki kodu.
+
+    Własności NIE dopisujemy razem z kartą (D-X-10 „nieobecna → nie tworzymy"): plik, który jej
+    nigdy nie miał, nie jest ze sobą sprzeczny, a tworzenie `<Property>` to wybór miejsca i typu
+    — osobna klasa ryzyka niż kopia sąsiedniej karty."""
+    xml = meta.xml_bytes
+    try:
+        scan.locate_value_span(xml, keyword=keyword, idx=0)
+    except scan.XisfTargetMissing:
+        pass
+    else:
+        raise _XisfRefusal(f"karta {keyword} już istnieje — 'add' dopisałby drugą; zmiana wartości "
+                           f"idzie przez 'set'")
+    target = _XISF_PROPERTY_TARGETS.get(keyword)
+    if target is not None:
+        try:
+            scan.locate_value_span(xml, property_id=target[0])
+        except scan.XisfTargetMissing:
+            pass
+        except scan.XisfValueUnreachable as exc:
+            raise _XisfRefusal(str(exc)) from exc
+        else:
+            raise _XisfRefusal(
+                f"plik nie ma karty {keyword}, ale ma własność {target[0]} — dopisanie karty "
+                f"mogłoby mu zaprzeczyć, a bramki zrozumienia nie ma na czym postawić")
+    try:
+        offset, blob = scan.build_fits_keyword_element(
+            xml, keyword=keyword, value=new_text, comment=comment)
+    except ValueError as exc:                 # w tym XisfTargetMissing/Unreachable (podklasy)
+        raise _XisfRefusal(str(exc)) from exc
+    return offset, offset, blob
+
+
 def _xisf_patches(meta, ops: list[WriteOp]) -> list[tuple[int, int, bytes]]:
     """Komplet wycinków do podmiany `[(start, end, bajty)]`, liczonych na ORYGINALNYM `xml_bytes` —
     dlatego najpierw lokalizujemy wszystko, a plik składamy JEDEN raz (adresy nie mogą się przesuwać
     pod własną łatą).
 
-    `add` → odmowa (D-X-12): insercja elementu wymaga wyboru miejsca i prefiksu namespace, a dla
-    `quote_fits` nie ma ORYGINAŁU, z którego przejęlibyśmy konwencję cudzysłowu. `set` na karcie
-    NIEOBECNEJ też jest odmową — w FITS astropy dopisałby ją po cichu, tu byłaby to ta sama nowa
-    klasa ryzyka pod inną nazwą. Wartość idzie do pliku jako TEKST bez rzutowania: XISF trzyma
-    wartości tekstem, a karty XISF mają `value_type` zawsze `'str'` (D-X-4)."""
+    `add` idzie osobną drogą (`_xisf_add_patch`, P6d) i daje wycinek ZEROWEJ długości — wstawkę,
+    nie podmianę. `_xisf_apply` przyjmuje ją bez zmian, bo asercja niezachodzenia porównuje
+    `start < last`, a wstawka ma `start == end`. D-X-12 („dodawanie kart poza P6") jest tym
+    DOMKNIĘTE, nie obejście: element nie jest składany od zera, tylko kopiowany z sąsiedniej karty
+    tego samego pliku.
+
+    `set` na karcie NIEOBECNEJ zostaje odmową — w FITS astropy dopisałby ją po cichu, a tutaj
+    założenie karty ma być decyzją wołającego wypowiedzianą wprost ('add'), nie skutkiem ubocznym
+    literówki w keywordzie. Wartość idzie do pliku jako TEKST bez rzutowania: XISF trzyma wartości
+    tekstem, a karty XISF mają `value_type` zawsze `'str'` (D-X-4)."""
     xml = meta.xml_bytes
     patches: list[tuple[int, int, bytes]] = []
     for op in ops:
-        if op.op != "set":
-            raise _XisfRefusal(f"operacja '{op.op}' na XISF poza P6 — dodanie karty wymaga wyboru "
-                               f"miejsca i prefiksu namespace (D-X-12)")
+        if op.op not in ("set", "add"):
+            raise _XisfRefusal(f"operacja '{op.op}' na XISF nie istnieje — writeback zna 'set' "
+                               f"i 'add'")
         keyword, idx = op.keyword.strip().upper(), op.idx or 0
         new_text = str(op.value)
+        if op.op == "add":
+            patches.append(_xisf_add_patch(meta, keyword, new_text, op.comment))
+            continue
         try:
             span = scan.locate_value_span(xml, keyword=keyword, idx=idx)
         except scan.XisfTargetMissing as exc:
-            raise _XisfRefusal(f"{exc} — dodawanie kart do XISF poza P6 (D-X-12)") from exc
+            raise _XisfRefusal(f"{exc} — 'set' nie zakłada karty; dopisanie idzie przez "
+                               f"'add' (P6d)") from exc
         patches.append((*span, scan.quote_fits(new_text, xml[span[0]:span[1]])))
         if op.comment is not None:
             try:

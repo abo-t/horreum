@@ -90,10 +90,12 @@ def test_qss_niesie_wszystkie_role(name):
 def test_theme_jest_jedynym_wlascicielem_kolorow():
     """BRAMKA KLASY (P-C): żaden moduł poza `theme` nie ma prawa nieść koloru w kodzie.
 
-    Cztery sztywne kolory przeżyły F6 i rozjechały się z motywem: `#b00020` w `pipeline`/`app`
+    PIĘĆ sztywnych kolorów przeżyło F6 i rozjechało się z motywem: `#b00020` w `pipeline`/`app`
     (na ciemnej bazie 1,6:1 — porażka etapu była nieczytelna dokładnie w motywie domyślnym),
     `#b00` w panelu daty, `#d08000`/`#999` na kropce poczekalni (złoto JASNEGO motywu wypalone
-    na stałe). Znalezisko jednostkowe podniesione do kontroli, żeby nie wracało.
+    na stałe) oraz `tasks.QColor(0x88,0x88,0x88)` (3,54:1 w jasnym) — ten ostatni znaleziony
+    dopiero przez wizytatora, bo pierwsza wersja tej bramki liczyła tylko stringi.
+    Znalezisko jednostkowe podniesione do kontroli, żeby nie wracało.
 
     AST, nie grep: liczy się STRING W KODZIE, a nie wzmianka w komentarzu czy docstringu —
     komentarz „nie sztywne #b00" opisuje regułę i sam jej nie łamie.

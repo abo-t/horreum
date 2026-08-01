@@ -1,4 +1,4 @@
-"""Delegat wiersza dwuczłonowego (`gui/rows.py`, P1 polish) — testy STERUJĄCE realnym Qt (offscreen).
+"""Delegat wiersza wieloczłonowego (`gui/rows.py`, P1 polish) — testy STERUJĄCE realnym Qt (offscreen).
 `importorskip` na poziomie modułu (§9.4): bez PySide6 plik się POMIJA."""
 import os
 

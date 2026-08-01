@@ -1,12 +1,17 @@
-"""Delegat wiersza DWUCZŁONOWEGO `TwoPartDelegate` (P1 polish) — warstwa WIDŻETÓW (whitelist
-`test_gui_isolation`). Jeden mechanizm zamyka trzy znaleziska wizytatora o tym samym kształcie:
-liczba/adnotacja doklejona do tekstu wiersza przepycha go poza szerokość listy i zlewa się z nazwą.
+"""Delegat wiersza WIELOCZŁONOWEGO `TwoPartDelegate` (P1 polish) — warstwa WIDŻETÓW (whitelist
+`test_gui_isolation`). Nazwa klasy została z czasów dwóch członów; trzeci doszedł w tym samym
+mechanizmie, a przemianowanie ruszyłoby wszystkich wołających dla zera zmiany zachowania.
+Jeden mechanizm zamyka znaleziska wizytatora o tym samym kształcie: liczba/adnotacja doklejona do
+tekstu wiersza przepycha go poza szerokość listy i zlewa się z nazwą.
 
 - F7 #F1/#F2/#F4 (listwa facetów): godziny doklejone TEKSTEM za „(n)" rodziły poziomy scrollbar
   (najdłuższy wiersz — kometa Tsuchinshan-ATLAS) i miały wagę nazwy, więc kolumny godzin nie dało
   się skanować wzrokiem.
 - wiz F5 #6 (lista zadań Porządków): `n` bez wyrównania, wiersze n=0 nie do odróżnienia.
 - wiz F3 #4 (panel „Pola"): liczniki pokrycia ucięte przy 1200 px.
+- wiz P1 #4 (listwa facetów, RESZTKA po sklejeniu w jeden run): licznik jechał za szerokością
+  ogona godzin → człon TRZECI, niżej.
+- wiz P1 #6 (lista zadań): pogrubienie liczby było ustawieniem CAŁEJ listy → rola `STRONG`, niżej.
 
 Kontrakt: `DisplayRole` = człon PIERWSZY (nazwa — rysowany od lewej, ELIDOWANY do wolnego miejsca),
 rola `SECONDARY` = człon DRUGI (liczba — rysowany od prawej, NIGDY nie elidowany), rola `TERTIARY`

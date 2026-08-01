@@ -117,10 +117,6 @@ _PRESET_LABELS = {
 }
 
 
-def _tel_label(row):
-    return row["telescope_label"] or row["telescop_canon"] or ""
-
-
 def _obj_label(row):
     return row["object_canon"] or row["object_raw"] or ""
 
@@ -146,7 +142,7 @@ def _dt_delta_hours(date_obs, path):
 def _derive(row):
     """sqlite3.Row → dict z polami pochodnymi (_telescope/_object/_dt_delta) do kolumn bazowych."""
     d = {k: row[k] for k in row.keys()}
-    d["_telescope"] = _tel_label(row)
+    d["_telescope"] = queries.telescope_label(row)
     d["_object"] = _obj_label(row)
     d["_dt_delta"] = _dt_delta_hours(d.get("date_obs"), d.get("path"))
     return d
@@ -1612,8 +1608,8 @@ class FramesView(QWidget):
 
     def _facet_counts(self, facet, ids):
         """Kubełki jednego facetu → list[(value, label, n)] (kontrakt `FacetRail.set_data`).
-        Etykieta teleskopu = label→canon fallback (wzorzec `_tel_label`); filtr/rodzaj/noc są
-        swoją własną etykietą."""
+        Etykieta teleskopu = label→canon fallback z JEDNEGO właściciela (`queries.telescope_label`);
+        filtr/rodzaj/noc są swoją własną etykietą."""
         if facet == "object":
             return [(r["id"], r["canon"], r["n"]) for r in queries.facet_objects(self.con, ids)]
         if facet == "filter":
@@ -1622,7 +1618,7 @@ class FramesView(QWidget):
         if facet == "kind":
             return [(r["kind"], r["kind"], r["n"]) for r in queries.facet_kinds(self.con, ids)]
         if facet == "telescope":
-            return [(r["id"], r["label"] or r["telescop_canon"], r["n"])
+            return [(r["id"], queries.telescope_label(r), r["n"])
                     for r in queries.facet_telescopes(self.con, ids)]
         return [(r["night"], r["night"], r["n"]) for r in queries.facet_nights(self.con, ids)]
 

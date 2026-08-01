@@ -273,7 +273,7 @@ class TelescopeAxisView(QWidget):
         members = queries.merged_under(self.con, tid) if tid is not None else []
         for m in members:
             it = QListWidgetItem(
-                f'#{m["id"]}  {m["label"] or m["telescop_canon"]}  ·  {m["status"]}')
+                f'#{m["id"]}  {queries.telescope_label(m)}  ·  {m["status"]}')
             it.setData(Qt.UserRole, m["id"])
             self.members.addItem(it)
 
@@ -291,7 +291,7 @@ class TelescopeAxisView(QWidget):
         for t in queries.active_telescopes(self.con):
             if t["id"] != tid:                # cel ≠ źródło → self-merge strukturalnie niemożliwy
                 self.combo_target.addItem(
-                    f'#{t["id"]}  {t["label"] or t["telescop_canon"]}', t["id"])
+                    f'#{t["id"]}  {queries.telescope_label(t)}', t["id"])
         self.combo_target.setCurrentIndex(0)  # placeholder — użytkownik musi wybrać cel świadomie
         self.combo_target.blockSignals(False)
 
@@ -400,19 +400,6 @@ FRAME_HEADERS = ["frame.col.sha", "frame.col.telescope", "frame.col.camera", "fr
 COPY_COL_PATH, COPY_COL_VOLUME, COPY_COL_PRESENT, COPY_COL_MARKED, COPY_COL_REASON = range(5)
 COPY_HEADERS = ["col.path", "copy.col.volume", "copy.col.present", "copy.col.marked",
                 "copy.col.reason"]
-
-
-def _tel_facet_label(row):
-    """Etykieta teleskopu do comba filtra: nazwa usera, a gdy brak (proposed) — `telescop_canon`
-    (nazwa z nagłówka — po przejściu fitsmirror zawsze obecna i user-czytelna)."""
-    return row["label"] or row["telescop_canon"]
-
-
-def _tel_cell(row):
-    """Etykieta teleskopu w tabeli klatek (wizytator P1 #1): nazwa usera, a gdy brak (teleskop
-    jeszcze nienazwany — realny przypadek: cała oś `proposed`) — `telescop_canon` z nagłówka, by
-    kolumna NIE milczała. Klatka bez teleskopu (config NULL) → '' (brak osi, nie brak danych)."""
-    return row["telescope_label"] or row["telescop_canon"] or ""
 
 
 class AssignObjectDialog(QDialog):
@@ -634,7 +621,7 @@ class ObjectAxisView(QWidget):
             self.combo_tel.clear()
             self.combo_tel.addItem(i18n.t("filter.all"), None)
             for t in queries.telescope_facets(self.con):
-                self.combo_tel.addItem(_tel_facet_label(t), t["id"])
+                self.combo_tel.addItem(queries.telescope_label(t), t["id"])
             self.combo_filter.clear()
             self.combo_filter.addItem(i18n.t("filter.all"), None)
             for f in queries.filter_facets(self.con):
@@ -893,7 +880,7 @@ class ObjectAxisView(QWidget):
         for r, row in enumerate(rows):
             keys = row.keys()
             self._set_frame_cell(r, FRAME_COL_SHA, (row["sha1_data"] or "")[:12])
-            self._set_frame_cell(r, FRAME_COL_TEL, _tel_cell(row))
+            self._set_frame_cell(r, FRAME_COL_TEL, queries.telescope_label(row))
             self._set_frame_cell(r, FRAME_COL_CAM, row["camera_model"] or "")
             self._set_frame_cell(r, FRAME_COL_FILTER, row["filter_canon"] if "filter_canon" in keys else "")
             self._set_frame_cell(r, FRAME_COL_DATE, _fmt_obs_date(row["date_obs"]),

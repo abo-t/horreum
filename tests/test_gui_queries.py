@@ -4,8 +4,11 @@
 Pokrycie: aktywne teleskopy z licznością (kanon-filtr JAWNY, kolizja kamery, frame `config NULL`
 poza sumą, `frame_count=0` dla teleskopu bez klatek), roll-up po scaleniu + zniknięcie source,
 `merged_under`, audyt eventów (cała oś vs jeden teleskop), oraz że odczyt nie pisze do bazy."""
+import ast
 import json
+from pathlib import Path
 
+import horreum
 from horreum import repo
 from horreum.gui import queries
 
@@ -286,3 +289,62 @@ def test_unreadable_copies_kopia_przemianowana_bez_powodu(s8_obj):
         con.execute("UPDATE location SET path = ? WHERE id = ?", ("/backup/a1-NOWA.fits", loc["id"]))
     row = queries.unreadable_copies(con)[0]
     assert row["path"] == "/backup/a1-NOWA.fits" and row["reason"] is None
+
+
+# --- telescope_label: JEDEN właściciel reguły label→canon (P-B) ---
+
+def test_telescope_label_nazwa_usera_bije_canon(s8):
+    con, ids = s8
+    repo.label_telescope(con, telescope_id=ids["A"], label="Askar 140", now=NOW)
+    row = next(r for r in queries.active_telescopes(con) if r["id"] == ids["A"])
+    assert queries.telescope_label(row) == "Askar 140"
+
+
+def test_telescope_label_bez_nazwy_spada_na_canon(s8):
+    """Cała oś bywa `proposed` (realny stan po imporcie) — kolumna nie milczy, mówi nagłówkiem."""
+    con, ids = s8
+    row = next(r for r in queries.active_telescopes(con) if r["id"] == ids["C"])
+    assert row["label"] is None and queries.telescope_label(row) == "RC8"
+
+
+def test_telescope_label_ten_sam_wynik_na_wierszu_osi_i_klatki(s8):
+    """Ta sama kolumna ma DWA zapisy — `label` na wierszu osi, `telescope_label` w JOIN-ie klatki.
+    Właściciel zna oba, więc lista teleskopów i tabela klatek nie mają jak powiedzieć czegoś innego
+    o tym samym teleskopie."""
+    con, ids = s8
+    repo.label_telescope(con, telescope_id=ids["A"], label="Askar 140", now=NOW)
+    os_row = next(r for r in queries.active_telescopes(con) if r["id"] == ids["A"])
+    frame_row = queries.base_rows(con, [ids["frames"]["a1"]])[0]
+    assert "telescope_label" not in os_row.keys() and "label" not in frame_row.keys()
+    assert queries.telescope_label(frame_row) == queries.telescope_label(os_row) == "Askar 140"
+
+
+def test_telescope_label_klatka_bez_osi_pusty_string(s8):
+    """`config_id NULL` (review) → klatka nie ma osi: '' zamiast None, bo komórka tabeli i etykieta
+    kubełka chcą stringa. Brak osi to stan, nie brak danych."""
+    con, ids = s8
+    row = queries.base_rows(con, [ids["frames"]["nullcfg"]])[0]
+    assert row["telescope_label"] is None and row["telescop_canon"] is None
+    assert queries.telescope_label(row) == ""
+
+
+def test_regula_label_canon_ma_jednego_wlasciciela():
+    """BRAMKA po P-B (SIN-DUP): fallback `… or …["telescop_canon"]` wolno napisać WYŁĄCZNIE
+    w `gui/queries.py` (`telescope_label`). Reguła siedziała w czterech miejscach warstwy widżetów
+    i zdążyła się rozjechać o końcowe `or ""` — znalezisko jednostkowe podniesione do kontroli, żeby
+    nie wróciło. AST, nie regex: docstring opisujący regułę (jak ten) nie ma prawa dać trafienia.
+    Krotka nazw kolumn w `projection.LAYOUTS` to NIE `or` — coalesce w danych (D-P1) zostaje poza
+    bramką świadomie."""
+    pkg = Path(horreum.__file__).parent
+    offenders = []
+    for path in sorted(pkg.rglob("*.py")):
+        if path.name == "queries.py":
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not (isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or)):
+                continue
+            for value in node.values:
+                if (isinstance(value, ast.Subscript) and isinstance(value.slice, ast.Constant)
+                        and value.slice.value == "telescop_canon"):
+                    offenders.append(f"{path.relative_to(pkg)}:{node.lineno}")
+    assert not offenders, f"reguła label→telescop_canon poza `queries.telescope_label`: {offenders}"

@@ -16,6 +16,25 @@ import json
 from horreum.resolver import review_state
 
 
+def telescope_label(row):
+    """JEDYNY właściciel reguły `label → telescop_canon` (P-B; wcześniej ta sama reguła siedziała
+    w czterech miejscach warstwy widżetów i rozjeżdżała się o końcowe `or ""`).
+
+    Nazwa usera (`label`), a gdy teleskop jeszcze nienazwany — `telescop_canon` z nagłówka
+    (realny przypadek: cała oś `proposed`; kolumna NIE ma prawa milczeć, bo nazwa z nagłówka jest
+    user-czytelna). Klatka bez osi (LEFT JOIN bez configu — review) → `''`: brak osi, nie brak danych.
+
+    Wiersz OSI niesie kolumnę `label`, wiersz KLATKI `telescope_label` (alias JOIN-a) — właściciel
+    zna oba zapisy, wołający żadnego. Wiersz bez którejkolwiek kolumny to błąd zapytania, nie stan
+    do obsłużenia: `KeyError`/`IndexError` wprost (EXPECT).
+
+    Ta sama reguła w DANYCH żyje osobno i świadomie: `projection.LAYOUTS['wbpp-feed']` robi coalesce
+    krotką nazw kolumn, bo layout jest danymi (D-P1), nie kodem — konsolidacja z tą funkcją
+    skasowałaby tamten kontrakt."""
+    label = row["telescope_label"] if "telescope_label" in row.keys() else row["label"]
+    return label or row["telescop_canon"] or ""
+
+
 def active_telescopes(con):
     """Aktywne (KANONICZNE) teleskopy z licznością klatek — lista główna GUI.
 
@@ -487,7 +506,7 @@ def facet_kinds(con, frame_ids):
 def facet_telescopes(con, frame_ids):
     """Kubełki facetu Teleskop: KANONICZNE teleskopy w zbiorze + liczność; klatki scalonych członków
     rolują się pod kanon (`telescope_canonical`, jak `active_telescopes`); frame bez configu wypada
-    JOIN-em. Etykietę składa wołający (label→telescop_canon fallback, wzorzec `_tel_label`).
+    JOIN-em. Etykietę składa wołający JEDNYM `telescope_label(row)` z tego pliku (label→canon).
     Zwraca: id (canon_id), label, telescop_canon, n (n DESC)."""
     return con.execute(
         "SELECT t.id, t.label, t.telescop_canon, COUNT(*) AS n "

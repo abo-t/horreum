@@ -92,7 +92,8 @@ def test_plan_layout_wbpp_feed(tmp_path):
 
 def test_plan_wbpp_feed_teleskop_coalesce_label_canon(tmp_path):
     """P2 (coalesce): teleskop NIENAZWANY (`label` NULL — stan 100% żywej bazy) → segment bierze
-    `telescop_canon`, nie `_UNSET`; nazwany teleskop dalej wygrywa etykietą (wzorzec `_tel_label`)."""
+    `telescop_canon`, nie `_UNSET`; nazwany teleskop dalej wygrywa etykietą (ta sama reguła co
+    `gui.queries.telescope_label`)."""
     con = db.open_db(str(tmp_path / "wc.db"))
     fid_a, _ = _seed(con, r"R:\A\a.fits", filter_canon="Ha")
     fid_b, _ = _seed(con, r"R:\A\b.fits", filter_canon="Ha")

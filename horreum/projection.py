@@ -50,7 +50,8 @@ MANIFEST_NAME = "_PROJEKCJA.json"
 # `telescope_label` → `telescop_canon` (P2, coalesce): na żywej bazie `label` jest NULL dla WSZYSTKICH
 # teleskopów (sonda DRY 2026-07-16: `_UNSET` w 100% ze 189 folderów), więc segment teleskopu w feedzie
 # nie niósł ŻADNEJ informacji. `telescop_canon` jest wypełniony i to nim GUI opisuje nienazwany
-# teleskop (wzorzec `_tel_label` — label→canon) → feed mówi to samo, co reszta aplikacji.
+# teleskop (ta sama reguła co `gui.queries.telescope_label` — label→canon) → feed mówi to samo,
+# co reszta aplikacji.
 LAYOUTS = {
     "po-obiektach": ("object_canon", "filter_canon"),
     "wbpp-feed": ("object_canon", ("telescope_label", "telescop_canon"), "filter_canon"),

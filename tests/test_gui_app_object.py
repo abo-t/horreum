@@ -83,6 +83,19 @@ def test_facety_wypelnione(view):
         ["(wszystkie)", "Ha", "OIII"]
 
 
+def test_combo_teleskopow_mowi_canonem_gdy_nienazwany(view):
+    """Etykieta comba idzie od JEDNEGO właściciela (`queries.telescope_label`, P-B) — teleskopy
+    fixture są `proposed` (label=NULL), więc lista mówi nagłówkiem, nie pustkami; po nazwaniu
+    przechodzi na nazwę usera. Bez tej asercji tekst pozycji był niepilnowany (testy trzymały
+    tylko `count`/`itemData`), a to on jest widoczny."""
+    v, con, ids = view
+    assert [v.combo_tel.itemText(i) for i in range(1, v.combo_tel.count())] == \
+        ["A140R", "A140R-bis", "RC8", "76EDPH"]         # ORDER BY id, canon zamiast pustki
+    repo.label_telescope(con, telescope_id=ids["A"], label="Askar 140", now="2026-06-29T14:00:00")
+    v._load_facets()
+    assert v.combo_tel.itemText(1) == "Askar 140"       # nazwa usera bije canon
+
+
 # --- filtr zmienia listę ---
 
 def test_filtr_teleskop_zaweza(view):

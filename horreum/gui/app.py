@@ -16,18 +16,20 @@ ETAP 2 (PLAN_gui_pipeline): okno aplikacji to `MainWindow` (menu Plik: Otwórz/N
 między widokami w `QStackedWidget`). Oś teleskopu z etapu 1 to teraz OSADZALNY widok `TelescopeAxisView`;
 `TelescopeAxisWindow` zostaje jako cienka powłoka-okno (zgodność wstecz: `python -m horreum.gui` i testy)."""
 import os
+import re
+import uuid
 from datetime import datetime, timezone
 
 from PySide6.QtCore import Qt, QLocale, QSettings, QUrl, Signal
 from PySide6.QtGui import QActionGroup, QColor, QDesktopServices, QPalette
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
-    QMessageBox, QPushButton, QSplitter, QStackedWidget, QTableWidget, QTableWidgetItem,
-    QVBoxLayout, QWidget,
+    QMessageBox, QProgressBar, QPushButton, QScrollArea, QSplitter, QStackedWidget, QTableWidget,
+    QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from horreum import db, repo
+from horreum import db, macro as macro_mod, repo
 from horreum.gui import i18n, mapproj, queries, theme
 from horreum.gui.map_view import SitesMapView
 from horreum.resolve._text import norm_alnum
@@ -498,6 +500,399 @@ class AssignObjectDialog(QDialog):
         self.accept()
 
 
+# ---------------------------------------------------------------- P-D: nazwa wraca do NAGŁÓWKA
+# Klatka, której nagłówek MILCZY o obiekcie (czwarty przypadek obok uniwersalium/regionu/literówki),
+# dostaje kartę `OBJECT` w PLIKU — propozycja ze ścieżki, zapis z ręki człowieka, oś wypełnia zwykły
+# `Rozwiąż` (header-primary). Zapis do `frame.object_id` z ręki naprawiłby bazę i zostawił plik niemy:
+# WBPP/PixInsight dalej nie wiedzą, czym jest klatka, a każda przyszła baza z tego drzewa wymagałaby
+# powtórzenia decyzji (D-PD-1).
+
+_OBJECT_CARD_MAX = 68     # rekord nagłówka FITS: powyżej astropy wchodzi w CONTINUE (nagłówek ASCII)
+
+
+def _witness_folder(path):
+    """Świadek 1 propozycji: segment PO `LIGHTS` (KOTWICA, nie stała głębokość — drzewo archiwum ma
+    różne poziomy), przepuszczony przez `catalog_canon`. Brak kotwicy/nieparsowalny → None."""
+    segs = [s for s in re.split(r"[\\/]+", path or "") if s]
+    dirs = segs[:-1]                                  # ostatni segment to nazwa pliku
+    for i, seg in enumerate(dirs):
+        if seg.strip().upper() == "LIGHTS" and i + 1 < len(dirs):
+            return catalog_canon(dirs[i + 1])
+    return None
+
+
+def _witness_filename(path):
+    """Świadek 2: stem nazwy pliku cięty po `_`, PIERWSZY człon parsujący się katalogowo — nie
+    prefiks. Prefiks jest martwy dla plików przemianowanych własnym rename v2: `DEFAULT_TEMPLATE`
+    stawia na pierwszej pozycji `datetime`, więc oznaczenie ląduje w środku nazwy."""
+    stem = os.path.splitext(os.path.basename(path or ""))[0]
+    for seg in stem.split("_"):
+        cc = catalog_canon(seg)
+        if cc:
+            return cc
+    return None
+
+
+def _path_proposal(path):
+    """Propozycja kanonu ze ścieżki = ZGODNE zeznanie DWÓCH świadków (folder + nazwa pliku), albo
+    None. Ścieżka jest DOWODEM, nie prawdą: rozjazd zostawia pole puste i decyzję człowiekowi."""
+    a, b = _witness_folder(path), _witness_filename(path)
+    return a if a and a == b else None
+
+
+def _validate_object_value(text):
+    """Walidacja PRZED zapisem (D-PD-4) → `(wartość_do_pliku | None, powód_odmowy | None)`.
+
+    Kolejność: `strip()` → `catalog_canon()` → bramki. Do pliku idzie forma PO `catalog_canon`
+    (kolaps spacji + upper), nigdy surowy segment ścieżki — inaczej „podgląd == plik" rozjechałoby
+    się o białe znaki. Forma jest PRZED `xref` (D-PD-9): zapis po `xref` przepisywałby konwencję
+    użytkownika w JEGO plikach (folder `M82` → karta `NGC3034`).
+
+    Bramki odmowy (zero zapisu): pusto po `strip()`; nie-ASCII (nagłówek FITS jest ASCII);
+    dłuższe niż rekord. Bez nich taki kanon padłby dopiero w `writeto` i wrócił jako 'failed'
+    („coś się zepsuło") zamiast czystej odmowy. CZWARTA bramka — nazwa NIEROZPOZNAWALNA przez
+    resolver — jest dodana ponad brief świadomie: cały wariant C stoi na tym, że po zapisie oś
+    wypełni się sama, a nazwa, której `resolve_object` nie zna, przeniosłaby klatkę tylko z kubełka
+    „bez nazwy" do „nierozpoznane" — po nieodwracalnej mutacji pliku."""
+    raw = (text or "").strip()
+    if not raw:
+        return None, i18n.t("repair.err.empty")
+    value = catalog_canon(raw) or raw
+    if not value.isascii():
+        return None, i18n.t("repair.err.ascii", text=value)
+    if len(value) > _OBJECT_CARD_MAX:
+        return None, i18n.t("repair.err.too_long", n=len(value), max=_OBJECT_CARD_MAX)
+    if resolve_object(value) is None:
+        return None, i18n.t("repair.err.unresolvable", text=raw)
+    return value, None
+
+
+class RepairHeaderDialog(QDialog):
+    """„Napraw nagłówek…" — dopisanie karty `OBJECT` do PLIKÓW klatek bezimiennych (P-D, wariant C).
+
+    Trzy takty (D-PD-6): **zapis karty → re-sync zeznania (automatyczny, w `writeback.commit`) →
+    `Rozwiąż`**. Takty 1–2 dzieją się TU jednym kliknięciem („Zapisz karty"): staging i commit to
+    JEDEN takt, bo sam staging osierociłby `run_id`, którego żadna inna powierzchnia nie zna.
+    Takt 3 NIE uruchamia resolvera z dialogu — deleguje do `PipelineView.run_stage('resolve')`
+    (wołanie inline zamroziłoby GUI na 15k klatek i ominęło bramkę `running_changed`).
+
+    Mutacja pliku idzie WYŁĄCZNIE przez `writeback` (jedna klinga), staging WYŁĄCZNIE przez
+    `repo.stage_pending`; ten dialog nie zna SQL. Bramki celu liczy `macro.resolve_target` — TA SAMA
+    funkcja, która potem odsieje cel przy zapisie, więc lista pominiętych nie jest drugą regułą,
+    tylko tym samym zdaniem powiedzianym wcześniej.
+
+    Cofanie ma OKNO: „Cofnij" żyje od udanego zapisu do zamknięcia okna (i tylko przed taktem 3) —
+    poza nim nie ma powierzchni cofania nagłówka, dlatego dialog pokazuje `commit_id`, a kotwicą
+    ratunku zostaje kopia bajtowa."""
+
+    changed = Signal()          # zapis/cofnięcie doszło do skutku → gospodarz odświeża kolejkę
+    busy_changed = Signal(bool)  # ta powierzchnia pisze do plików → mutex drugiej (D-PD-3)
+
+    def __init__(self, con, *, rows, db_path, now_fn, run_stage_fn=None, parent=None):
+        super().__init__(parent)
+        # Lazy: `wb_worker` ciągnie `writeback` → astropy; start apki nie ma za co płacić, dopóki
+        # user nie otworzy tego okna (wzorzec lazy-importów widoków w `_mount_views`).
+        from horreum.gui.wb_worker import WritebackRunner
+
+        self.con = con
+        self._now = now_fn
+        self._run_stage = run_stage_fn
+        self._run_id = None
+        self._commit_id = None
+        self._committed = False   # karty są w plikach → zapis milczy do cofnięcia
+        self._runner = WritebackRunner(db_path, now_fn=now_fn, parent=self)
+        self._runner.busy_changed.connect(self.busy_changed)   # uchwyt zna OBA końce operacji
+        self._groups = []       # [{folder, rows, check, edit, preview}]
+        self._skipped = []      # [(path, powód)] — jawnie widoczne, nigdy ciche
+        self.setWindowTitle(i18n.t("repair.title"))
+        self._split_rows(rows)
+        self._build_ui()
+        self._sync_preview()
+
+    # ---------------------------------------------------------------- podział wejścia
+    def _split_rows(self, rows):
+        """Wiersze read-modelu → grupy po FOLDERZE + lista pominiętych z powodem. Grupowanie
+        SŁOWNIKIEM (kolejność pierwszego wystąpienia), bo porządek po pełnej ścieżce przeplata
+        katalog z podkatalogiem. Folder bierzemy z celu writebacku, nie z `path` read-modelu —
+        żeby grupa opisywała dokładnie ten plik, który zostanie zapisany."""
+        ids = [r["frame_id"] for r in rows]
+        targets = {}
+        for t in queries.writeback_frame_targets(self.con, ids):
+            targets.setdefault(int(t["frame_id"]), []).append(t)
+        groups = {}
+        for r in rows:
+            trows = targets.get(int(r["frame_id"]))
+            if not trows:                       # klatka zniknęła z bazy między odczytem a otwarciem
+                self._skipped.append((r["path"] or "", i18n.t("repair.skip.gone")))
+                continue
+            target, reason = macro_mod.resolve_target(trows, "add")
+            if target is None:
+                self._skipped.append((r["path"] or "", reason or ""))
+                continue
+            groups.setdefault(os.path.dirname(target["path"]), []).append(
+                dict(frame_id=r["frame_id"], path=target["path"]))
+        for folder, items in groups.items():
+            proposals = {_path_proposal(it["path"]) for it in items}
+            common = proposals.pop() if len(proposals) == 1 else None
+            self._groups.append({"folder": folder, "rows": items, "proposal": common})
+
+    # ---------------------------------------------------------------- budowa UI
+    def _build_ui(self):
+        lay = QVBoxLayout(self)
+        n_frames = sum(len(g["rows"]) for g in self._groups)
+        head = QLabel(i18n.t("repair.head", frames=n_frames, groups=len(self._groups)))
+        head.setWordWrap(True)
+        lay.addWidget(head)
+
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        inner = QWidget()
+        gl = QVBoxLayout(inner)
+        for g in self._groups:
+            row = QHBoxLayout()
+            g["check"] = QCheckBox(i18n.t("repair.group", folder=os.path.basename(g["folder"]),
+                                          n=len(g["rows"])))
+            g["check"].setToolTip(g["folder"])
+            # Grupa z parsowalną propozycją jest ZAZNACZONA: bez tego cztery grupy kosztują cztery
+            # dodatkowe kliknięcia, a obietnica „≤ 4 interakcje" przestaje być prawdziwa.
+            g["check"].setChecked(bool(g["proposal"]))
+            row.addWidget(g["check"], 2)
+            g["edit"] = QLineEdit(g["proposal"] or "")
+            g["edit"].setPlaceholderText(i18n.t("repair.no_proposal"))
+            g["edit"].textChanged.connect(self._sync_preview)
+            g["check"].toggled.connect(self._sync_preview)
+            row.addWidget(g["edit"], 1)
+            g["preview"] = QLabel("")
+            g["preview"].setTextInteractionFlags(Qt.TextSelectableByMouse)
+            row.addWidget(g["preview"], 2)
+            gl.addLayout(row)
+        gl.addStretch(1)
+        area.setWidget(inner)
+        lay.addWidget(area, 1)
+
+        if self._skipped:
+            lay.addWidget(QLabel(i18n.t("repair.skipped_head", n=len(self._skipped))))
+            lst = QListWidget()
+            for path, reason in self._skipped:
+                lst.addItem(f"{os.path.basename(path) or i18n.t('object.no_location')} — {reason}")
+            lst.setMaximumHeight(90)
+            lay.addWidget(lst)
+
+        self.bar = QProgressBar()
+        self.bar.setVisible(False)
+        lay.addWidget(self.bar)
+        self.status = QLabel("")
+        self.status.setWordWrap(True)
+        self.status.setTextInteractionFlags(Qt.TextSelectableByMouse)   # `commit_id` do skopiowania
+        lay.addWidget(self.status)
+        self.error = QLabel("")
+        self.error.setProperty("role", "error")
+        self.error.setWordWrap(True)
+        lay.addWidget(self.error)
+
+        actions = QHBoxLayout()
+        self.save_btn = QPushButton(i18n.t("repair.save_btn"))
+        _f = self.save_btn.font(); _f.setBold(True); self.save_btn.setFont(_f)   # złota akcja: WAGA, nie kolor (P-C)
+        self.save_btn.clicked.connect(self._on_save)
+        actions.addWidget(self.save_btn)
+        self.undo_btn = QPushButton(i18n.t("grid.action.undo"))
+        self.undo_btn.setVisible(False)
+        self.undo_btn.clicked.connect(self._on_undo)
+        actions.addWidget(self.undo_btn)
+        self.resolve_btn = QPushButton(i18n.t("repair.resolve_btn"))
+        self.resolve_btn.setVisible(False)
+        self.resolve_btn.clicked.connect(self._on_resolve)
+        actions.addWidget(self.resolve_btn)
+        actions.addStretch(1)
+        close_btn = QPushButton(i18n.t("repair.close_btn"))
+        close_btn.clicked.connect(self.reject)
+        actions.addWidget(close_btn)
+        lay.addLayout(actions)
+
+    # ---------------------------------------------------------------- podgląd „co wpiszemy"
+    def _sync_preview(self):
+        """Podgląd DOKŁADNIE tego, co pójdzie do pliku (`OBJECT = 'NGC7635'`), plus szczery stan
+        akcji. Grupa zaznaczona z niepoprawną wartością pokazuje powód przy sobie — user nie musi
+        klikać, żeby dowiedzieć się, czemu zapis nie ruszy."""
+        ready, first_err = 0, None
+        for g in self._groups:
+            if not g["check"].isChecked():
+                g["preview"].setText("")
+                continue
+            value, err = _validate_object_value(g["edit"].text())
+            if err:
+                g["preview"].setText(i18n.t("repair.preview_none"))
+                first_err = first_err or i18n.t(
+                    "repair.err.group", folder=os.path.basename(g["folder"]), reason=err)
+            else:
+                g["preview"].setText(i18n.t("repair.preview", value=repr(value)))
+                ready += len(g["rows"])
+        self.error.setText(first_err or "")     # wejście się zmieniło → stary błąd nieaktualny
+        # Po udanym commicie zapis MILCZY do czasu cofnięcia: karty są już w plikach, więc drugie
+        # kliknięcie dałoby tylko listę „karta już istnieje" — szczery disabled zamiast pustego biegu.
+        self.save_btn.setEnabled(ready > 0 and first_err is None and not self._committed
+                                 and not self._runner.is_busy)
+        self.save_btn.setText(i18n.t("repair.save_btn_n", n=ready) if ready
+                              else i18n.t("repair.save_btn"))
+
+    def _fail(self, msg):
+        self.error.setText(msg)
+
+    # ---------------------------------------------------------------- takt 1+2: staging + commit
+    def _on_save(self):
+        """Staging i commit JEDNYM taktem. Walidacja WSZYSTKICH zaznaczonych grup PRZED
+        jakimkolwiek zapisem — częściowy staging po odmowie zostawiłby otwarty run."""
+        if self._runner.is_busy:
+            return
+        self.error.clear()
+        plan = []
+        for g in self._groups:
+            if not g["check"].isChecked():
+                continue
+            value, err = _validate_object_value(g["edit"].text())
+            if err:
+                return self._fail(i18n.t("repair.err.group", folder=os.path.basename(g["folder"]),
+                                         reason=err))
+            plan.append((g, value))
+        if not plan:
+            return self._fail(i18n.t("repair.err.nothing"))
+
+        run_id = uuid.uuid4().hex
+        staged, skipped = 0, []
+        for g, value in plan:
+            # `repr(value)` — bo `expr` traktuje gołe `NGC7635` jak NAZWĘ ZMIENNEJ (przy kolizji
+            # z keywordem wpisalibyśmy WARTOŚĆ TEJ KARTY), a sam cudzysłów nie wystarcza: kanon
+            # z apostrofem wysadza kompilację i makro wpisałoby surową zawartość pola razem
+            # z cudzysłowami. Python dobiera cudzysłów i escape sam.
+            md = macro_mod.MacroDef(assign=macro_mod.Assign(
+                keyword="OBJECT", op="add", expr=repr(value), value_type="str"))
+            run = macro_mod.run_macro(
+                md, [it["frame_id"] for it in g["rows"]],
+                targets_fn=lambda ids: queries.writeback_frame_targets(self.con, ids),
+                cards_fn=lambda fid: queries.frame_cards(self.con, fid),
+                run_id=run_id)
+            for p in run.touched:
+                repo.stage_pending(
+                    self.con, run_id=run_id, location_id=p.location_id, keyword=p.keyword,
+                    idx=p.idx, op=p.op, old_value=p.old_value, new_value=p.new_value,
+                    new_type=p.new_type, new_comment=p.comment,
+                    expected_header_hash=p.expected_header_hash)
+            staged += len(run.touched)
+            skipped += [(s.path, s.reason) for s in run.skipped]
+        if staged == 0:
+            repo.clear_pending_for_run(self.con, run_id)     # nic do zapisu → run nie zostaje otwarty
+            return self._fail(i18n.t("repair.err.all_skipped",
+                                     reason=(skipped[0][1] if skipped else "")))
+
+        self._run_id = run_id
+        self._begin_progress(staged)
+        self._runner.start("commit", run_id, on_progress=self._on_progress,
+                           on_done=self._after_commit, on_failed=self._on_failed)
+
+    def _begin_progress(self, total):
+        self.bar.setRange(0, total)
+        self.bar.setValue(0)
+        self.bar.setVisible(True)
+        self.save_btn.setEnabled(False)
+        self.undo_btn.setEnabled(False)
+        self.resolve_btn.setEnabled(False)
+
+    def _on_progress(self, done, total, path, status):
+        if self.bar.maximum() != total:
+            self.bar.setRange(0, total)
+        self.bar.setValue(done)
+        self.status.setText(f"{done}/{total} · {os.path.basename(path)}")
+
+    def _after_commit(self, op, res):
+        """Post-processing commitu (wątek główny). Udany zapis → jednorazowe „Cofnij" + „Rozwiąż
+        teraz"; `commit_id` WIDOCZNY, bo po zamknięciu okna to jedyny uchwyt do cofnięcia z ręki."""
+        self.bar.setVisible(False)
+        parts = [i18n.t("grid.wb.applied", n=len(res.applied))]
+        if res.blocked:
+            parts.append(i18n.t("grid.wb.blocked", n=len(res.blocked)))
+        if res.failed:
+            parts.append(i18n.t("grid.wb.errors", n=len(res.failed)))
+        if res.skipped:
+            parts.append(i18n.t("grid.wb.skipped", n=len(res.skipped)))
+        summary = " · ".join(parts)
+        detail = next((fr.reason for fr in (res.blocked + res.failed) if fr.reason), None)
+        if detail:
+            summary += i18n.t("grid.wb.detail_sep", detail=detail)
+        if res.applied and res.commit_id is not None:
+            self._commit_id = res.commit_id
+            self._committed = True
+            summary += i18n.t("grid.wb.commit_id", id=res.commit_id)
+            self.undo_btn.setVisible(True)
+            self.resolve_btn.setVisible(True)
+            self._run_id = None                  # run domknięty commitem (R#5) — nie kasuj przy zamknięciu
+        self.undo_btn.setEnabled(True)
+        self.resolve_btn.setEnabled(True)
+        self._sync_preview()
+        self.status.setText(summary)
+        self.changed.emit()
+
+    def _on_failed(self, op, msg):
+        self.bar.setVisible(False)
+        self.undo_btn.setEnabled(True)
+        self.resolve_btn.setEnabled(True)
+        self._sync_preview()                     # PRZED `_fail`: podgląd czyści pole błędu
+        self._fail(i18n.t("grid.wb.error", msg=msg))
+        self.changed.emit()
+
+    # ---------------------------------------------------------------- cofanie (OKNO do zamknięcia)
+    def _on_undo(self):
+        if self._commit_id is None or self._runner.is_busy:
+            return
+        self.error.clear()
+        self._begin_progress(0)
+        self._runner.start("undo", self._commit_id, on_progress=self._on_progress,
+                           on_done=self._after_undo, on_failed=self._on_failed)
+
+    def _after_undo(self, op, res):
+        self.bar.setVisible(False)
+        msg = i18n.t("grid.wb.restored", n=len(res.restored))
+        if res.blocked:
+            msg += " · " + i18n.t("grid.wb.blocked", n=len(res.blocked))
+        self.status.setText(msg)
+        self.undo_btn.setVisible(False)          # commit ZUŻYTY — drugi undo nie ma czego cofać
+        self.resolve_btn.setVisible(False)
+        self._commit_id = None
+        self._committed = False                  # karty zdjęte → zapis znów ma sens
+        self._sync_preview()
+        self.status.setText(msg)
+        self.changed.emit()
+
+    # ---------------------------------------------------------------- takt 3: delegacja do pipeline'u
+    def _on_resolve(self):
+        """„Rozwiąż teraz" = ISTNIEJĄCY etap Dostawy, nie drugi resolver. Odmowa (etap już biegnie)
+        ZOSTAWIA okno otwarte i NIE chowa „Cofnij": okno cofania musi przeżyć nieudaną delegację,
+        inaczej UI potwierdzałoby sukces, którego nie było."""
+        if self._run_stage is None:
+            return self._fail(i18n.t("repair.err.no_host"))
+        reason = self._run_stage()
+        if reason:
+            return self._fail(reason)
+        self.accept()
+
+    def set_pipeline_busy(self, busy):
+        """Etap pipeline'u w biegu → akcje zapisu tego okna gasną. Modalne okno jest POZA zasięgiem
+        `ObjectAxisView.set_busy` (tamto gasi widżety widoku), więc gospodarz przekazuje fakt tutaj."""
+        self.undo_btn.setEnabled(not busy)
+        self.resolve_btn.setEnabled(not busy)
+        if busy:
+            self.save_btn.setEnabled(False)
+        else:
+            self._sync_preview()
+
+    def reject(self):
+        """Zamknięcie okna: staging BEZ commitu jest sierotą (`run_id` zna tylko to okno), więc
+        znika. Po udanym commicie `_run_id` jest już None — wierszy 'applied' nie ruszamy."""
+        if self._run_id is not None:
+            repo.clear_pending_for_run(self.con, self._run_id)
+            self._run_id = None
+        super().reject()
+
+
 class ObjectAxisView(QWidget):
     """Osadzalny widok osi OBIEKT (PLAN_gui_object + #8/P4): biblioteka (obiekty → klatki, filtr
     po teleskopie/kamerze/filtrze) + kolejka przeglądu (obiekt-review / kopie nieczytelne /
@@ -516,14 +911,21 @@ class ObjectAxisView(QWidget):
     (ISO-8601); domyślnie zegar UTC, wstrzykiwalne dla testów."""
 
     status_message = Signal(str)
+    writeback_busy = Signal(bool)         # okno naprawy pisze do plików → mutex gridu (D-PD-3)
 
     def __init__(self, con, now_fn=_utc_now_iso, parent=None):
         super().__init__(parent)
         self.con = con
         self._now = now_fn
         self._busy = False                    # pipeline w biegu → akcja zapisu wygaszona
+        self._foreign_wb = False              # DRUGA powierzchnia writebacku pisze (mutex, D-PD-3)
         self._copies_mode = False             # prawy panel w trybie „kopie" (Z6)
         self._loading = False                 # tłumi sygnały selekcji podczas programowego wypełniania
+        self._repair_dlg = None               # otwarte okno naprawy nagłówka (modalne — poza set_busy)
+        # Takt 3 (`Rozwiąż`) należy do Dostawy: gospodarz wstrzykuje wywołanie ISTNIEJĄCEJ,
+        # bramkowanej drogi (`PipelineView.run_stage`). None = widok bez gospodarza (testy samego
+        # widoku) → okno naprawy powie wprost, że taktu 3 nie ma stąd jak uruchomić.
+        self.run_stage_fn = None
         self._build_ui()
         self._load_facets()
         self.refresh()
@@ -581,6 +983,12 @@ class ObjectAxisView(QWidget):
         self.assign_btn.setEnabled(False)
         self.assign_btn.clicked.connect(self._on_assign)
         assign_row.addWidget(self.assign_btn)
+        # P-D: druga akcja tej samej kolejki — naprawa NAGŁÓWKA (plik), nie bazy. Aktywna wyłącznie
+        # na pozycji `nameless`, więc obie akcje nigdy nie są klikalne naraz.
+        self.repair_btn = QPushButton(i18n.t("repair.open_btn"))
+        self.repair_btn.setEnabled(False)
+        self.repair_btn.clicked.connect(self._on_repair)
+        assign_row.addWidget(self.repair_btn)
         assign_row.addStretch(1)
         lv.addLayout(assign_row)
 
@@ -704,11 +1112,17 @@ class ObjectAxisView(QWidget):
             it.setData(Qt.UserRole, "object_raw")
             it.setData(Qt.UserRole + 1, r["object_raw"])
             self.review.addItem(it)
-        # Bezimienne (T5a): grid „Do przeglądu" je pokazuje, kolejka do dziś o nich milczała —
-        # bez `object_raw` nie ma klucza grupowania, więc idą własnym licznikiem. Bez akcji:
-        # przypisanie po nazwie nie ma tu czego chwycić (drążenie do klatek = wariant rozwojowy).
+        # Bezimienne (T5a): grid „Do przeglądu" je pokazuje, kolejka do dziś o nich milczała — bez
+        # `object_raw` nie ma klucza grupowania, więc idą własnym licznikiem. Od P-D pozycja DRĄŻY
+        # do klatek i niesie akcję „Napraw nagłówek…" (nazwa wraca do PLIKU, nie do bazy). Tag
+        # nadawany WYŁĄCZNIE przy n>0: kubełek pusty ma zostać informacyjny, żeby zaznaczenie nie
+        # otwierało okna bez treści.
         nameless = QListWidgetItem(i18n.t("object.nameless_line", n=q["nameless_count"]))
-        nameless.setFlags(Qt.ItemIsEnabled)     # informacyjny, nie do zaznaczenia
+        if q["nameless_count"] > 0:
+            nameless.setData(Qt.UserRole, "nameless")
+            nameless.setData(Qt.UserRole + 1, None)
+        else:
+            nameless.setFlags(Qt.ItemIsEnabled)     # informacyjny, nie do zaznaczenia
         self.review.addItem(nameless)
         unread = QListWidgetItem(i18n.t("object.unreadable_line", n=q["unreadable_count"]))
         unread.setData(Qt.UserRole, "unreadable")
@@ -749,11 +1163,13 @@ class ObjectAxisView(QWidget):
         return sel[0].data(Qt.UserRole), sel[0].data(Qt.UserRole + 1)
 
     def _sync_assign_enabled(self):
-        """„Przypisz obiekt…" aktywny WYŁĄCZNIE przy pozycji `object_raw` i poza biegiem pipeline
-        (szczery disabled — UI nie kłamie; R#10: obie listy wzajemnie czyszczą selekcję, więc
-        przycisk śledzi tag, nie to, która lista „ostatnio kliknięta")."""
+        """Akcje kolejki aktywne WYŁĄCZNIE przy swojej pozycji i poza biegiem pipeline (szczery
+        disabled — UI nie kłamie; R#10: obie listy wzajemnie czyszczą selekcję, więc przyciski
+        śledzą tag, nie to, która lista „ostatnio kliknięta"). „Napraw nagłówek…" gaśnie dodatkowo,
+        gdy DRUGA powierzchnia writebacku pisze do plików (mutex, D-PD-3)."""
         tag, _ = self._selected_review()
         self.assign_btn.setEnabled(tag == "object_raw" and not self._busy)
+        self.repair_btn.setEnabled(tag == "nameless" and not self._busy and not self._foreign_wb)
 
     def _on_object_selected(self):
         """Obiekt zaznaczony → klatki tego obiektu (z bieżącym filtrem). Czyści selekcję review (wzajemnie
@@ -788,6 +1204,11 @@ class ObjectAxisView(QWidget):
             self._restore_frames_mode()
             rows = queries.object_review_frames(self.con, payload)
             self.frames_label.setText(i18n.t("object.frames_review", name=payload))
+            self._fill_frames(rows, present_col=False)
+        elif tag == "nameless":
+            self._restore_frames_mode()
+            rows = queries.nameless_frames(self.con)
+            self.frames_label.setText(i18n.t("object.frames_nameless", n=len(rows)))
             self._fill_frames(rows, present_col=False)
         elif tag == "unreadable":
             self._show_copies()
@@ -875,6 +1296,34 @@ class ObjectAxisView(QWidget):
         self.status_message.emit(msg)
         self.refresh(select_canon=canon if assigned else None, select_first=bool(assigned))
 
+    # ------------------------------------------------ akcja zapisu do PLIKU (P-D)
+
+    def _on_repair(self):
+        """„Napraw nagłówek…": klatki bezimienne → dialog (grupy po folderze, propozycja ze ścieżki)
+        → karta `OBJECT` w PLIKU. Zapis idzie klingą writebacku, nie do bazy — dlatego po nim
+        odświeżamy kolejkę, a oś obiektu wypełnia dopiero takt 3 (`Rozwiąż`, delegowany gospodarzowi
+        przez `run_stage_fn`; brak gospodarza = brak taktu 3, okno powie to wprost)."""
+        rows = queries.nameless_frames(self.con)
+        if not rows:
+            self.status_message.emit(i18n.t("repair.nothing"))
+            return
+        dlg = RepairHeaderDialog(self.con, rows=rows, db_path=queries.db_path_of(self.con),
+                                 now_fn=self._now, run_stage_fn=self.run_stage_fn, parent=self)
+        dlg.changed.connect(self._on_repair_changed)
+        dlg.busy_changed.connect(self.writeback_busy)   # mutex: gospodarz wygasi drugą powierzchnię
+        self._repair_dlg = dlg
+        try:
+            dlg.exec()
+        finally:
+            self._repair_dlg = None
+
+    def _on_repair_changed(self):
+        """Zapis/cofnięcie w oknie naprawy → kolejka mówi świeżą prawdę JUŻ po takcie 2 (dialog żyje
+        w tym samym widoku). Oś obiektu i badge Porządków ruszą się dopiero po takcie 3 — to nie
+        rozjazd, tylko dwa różne fakty: karta jest w pliku, obiektu jeszcze nie ma."""
+        self._load_review()
+        self._sync_assign_enabled()
+
     def _fill_frames(self, rows, *, present_col):
         """Wypełnij tabelę klatek. `present_col` — czy źródło niesie kolumnę `present` (biblioteka tak,
         review nie). `present=0` pokazujemy jako „nie" (R#7 — klatka WIDOCZNA mimo zniknięcia pliku)."""
@@ -907,10 +1356,21 @@ class ObjectAxisView(QWidget):
         self.frames.setItem(r, c, item)
 
     def set_busy(self, busy):
-        """Pipeline w biegu → wygaszenie akcji zapisu („Przypisz obiekt…", #8/P4) — szczery disabled.
-        Read-modele odświeża gospodarz DOPIERO po `stage_finished` (WAL → zapisy workera widoczne),
-        więc SELECT w trakcie zapisu tu nie zachodzi."""
+        """Pipeline w biegu → wygaszenie akcji zapisu („Przypisz obiekt…" #8/P4, „Napraw nagłówek…"
+        P-D) — szczery disabled. Read-modele odświeża gospodarz DOPIERO po `stage_finished`
+        (WAL → zapisy workera widoczne), więc SELECT w trakcie zapisu tu nie zachodzi.
+
+        OTWARTE okno naprawy jest MODALNE, więc poza zasięgiem tej metody (gasi widżety WIDOKU) —
+        fakt przekazujemy mu wprost, inaczej „Zapisz karty" zostałby klikalny w trakcie biegu."""
         self._busy = busy
+        self._sync_assign_enabled()
+        if self._repair_dlg is not None:
+            self._repair_dlg.set_pipeline_busy(busy)
+
+    def set_writeback_busy(self, busy):
+        """DRUGA powierzchnia writebacku (grid) pisze do plików — „Napraw nagłówek…" gaśnie
+        (mutex, D-PD-3: dwa równoległe commity spotkałyby się na `BEGIN IMMEDIATE`)."""
+        self._foreign_wb = busy
         self._sync_assign_enabled()
 
 
@@ -1438,6 +1898,7 @@ class MainWindow(QMainWindow):
 
         grid = FramesView(self.con, now_fn=self._now)
         grid.status_message.connect(self._flash)
+        grid.writeback_busy.connect(self._on_writeback_busy)
         self.grid_view = grid
 
         tasks = TasksView(self.con, now_fn=self._now)
@@ -1445,6 +1906,11 @@ class MainWindow(QMainWindow):
         self.axis_view = tasks.axis_view
         self.observatory_view = tasks.observatory_view
         self.object_view = tasks.object_view
+        # Takt 3 P-D: okno naprawy nagłówka nie ma własnego resolvera — dostaje ISTNIEJĄCĄ drogę
+        # etapu wraz z przełączeniem widoku na Dostawę (precedens „3→1"). Wstrzykiwane TU, bo tylko
+        # gospodarz zna obie powierzchnie.
+        tasks.object_view.run_stage_fn = self._resolve_after_repair
+        tasks.object_view.writeback_busy.connect(grid.set_writeback_busy)   # mutex w drugą stronę
         for v in (tasks.axis_view, tasks.observatory_view, tasks.object_view):
             v.status_message.connect(self._flash)
         tasks.open_collection.connect(self._on_open_collection)
@@ -1504,6 +1970,22 @@ class MainWindow(QMainWindow):
         item = self.nav.item(NAV_PORZADKI)
         if item is not None:
             item.setText(i18n.t("nav.porzadki") if n == 0 else i18n.t("nav.porzadki_count", n=n))
+
+    def _resolve_after_repair(self):
+        """Takt 3 P-D wołany z okna „Napraw nagłówek…": ISTNIEJĄCY etap Dostawy. Zwraca POWÓD
+        odmowy (okno je pokaże i zostanie otwarte) albo None — wtedy przełączamy widok na Dostawę,
+        żeby postęp etapu był widoczny tam, gdzie zawsze. Przełączenie nie jest interakcją
+        użytkownika, więc nie liczy się do budżetu kliknięć."""
+        reason = self.pipeline_view.run_stage("resolve")
+        if reason is None:
+            self._show_view(NAV_DOSTAWA)
+        return reason
+
+    def _on_writeback_busy(self, busy):
+        """Mutex DWÓCH powierzchni writebacku (D-PD-3). Grid pisze do plików → „Napraw nagłówek…"
+        gaśnie; okno naprawy pisze → gaśnie Zatwierdź/Odrzuć/Cofnij gridu. Bez tego oba commity
+        spotkałyby się na `BEGIN IMMEDIATE` (`busy_timeout` 5 s) i jeden wróciłby jako 'failed'."""
+        self.object_view.set_writeback_busy(busy)
 
     def _on_pipeline_running(self, running):
         """W trakcie etapu wyłącz akcje zapisu osi (szczery disabled). Nawigacja zostaje aktywna —

@@ -476,3 +476,206 @@ def test_en_render_z_katalogu(qapp, tmp_path):
     finally:
         v.close()
         con.close()
+
+
+# ============================================================ P-D: „Napraw nagłówek…" (wariant C)
+# Nazwa wraca do PLIKU (karta OBJECT), oś obiektu wypełnia potem zwykły `Rozwiąż`. Testy jadą na
+# REALNYCH plikach FITS — writeback rusza bajty, więc atrapa nie dowodzi niczego. Worker inline
+# (`_runner.async_ok = False`, seam jak w gridzie): ten sam rdzeń, sygnały direct = synchronicznie.
+
+NOW_PD = "2026-08-01T00:00:00Z"
+
+
+def _nameless_tree(root, names=("NGC7635_20230103_a.fits", "NGC7635_20230103_b.fits"), seed=0):
+    """Drzewo `…/LIGHTS/NGC7635/RC8_2600MC/L-eXtreme/NGC7635_*.fits` — lighty BEZ karty OBJECT.
+    Kotwicą propozycji jest segment PO `LIGHTS`, więc struktura katalogu jest częścią testu."""
+    import numpy as np
+    from astropy.io import fits
+    d = root / "LIGHTS" / "NGC7635" / "RC8_2600MC" / "L-eXtreme"
+    d.mkdir(parents=True, exist_ok=True)
+    made = []
+    for i, name in enumerate(names):
+        p = d / name
+        hdu = fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.int16) + seed + i)  # różne DANE = różne klatki
+        hdu.header["TELESCOP"] = "RC8"
+        hdu.header["IMAGETYP"] = "Light"
+        hdu.writeto(str(p), overwrite=True)
+        made.append(p)
+    return made
+
+
+@pytest.fixture
+def repair(qapp, tmp_path):
+    """ObjectAxisView + fabryka dialogu naprawy nad bazą z DWOMA realnymi lightami bez OBJECT."""
+    from horreum import scan
+    from horreum.gui.app import RepairHeaderDialog
+    files = _nameless_tree(tmp_path)
+    con = db.open_db(str(tmp_path / "pd.db"))
+    for p in files:
+        scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW_PD,
+                           summary=scan.ScanSummary())
+    v = ObjectAxisView(con, now_fn=lambda: NOW_PD)
+
+    def _open(run_stage_fn=None):
+        dlg = RepairHeaderDialog(con, rows=queries.nameless_frames(con),
+                                 db_path=queries.db_path_of(con), now_fn=lambda: NOW_PD,
+                                 run_stage_fn=run_stage_fn, parent=v)
+        dlg._runner.async_ok = False        # inline: commit/undo synchronicznie, bez QThread
+        return dlg
+
+    yield v, con, files, _open
+    v.close()
+    con.close()
+
+
+def test_kubelek_bezimiennych_drazy_i_aktywuje_akcje(repair):
+    """Kubełek przestał być samym licznikiem: ma tag, drąży do klatek i włącza „Napraw nagłówek…".
+    Obie akcje kolejki nigdy nie są aktywne naraz — śledzą różne tagi."""
+    v, con, files, _open = repair
+    assert queries.review_queue(con)["nameless_count"] == 2
+    _select_review_tag(v, "nameless")
+    assert v.frames.rowCount() == 2
+    assert v.repair_btn.isEnabled() and not v.assign_btn.isEnabled()
+    v.set_busy(True)                                  # etap w biegu → szczery disabled
+    assert not v.repair_btn.isEnabled()
+    v.set_busy(False)
+    v.set_writeback_busy(True)                        # druga powierzchnia pisze (mutex D-PD-3)
+    assert not v.repair_btn.isEnabled()
+    v.set_writeback_busy(False)
+    assert v.repair_btn.isEnabled()
+
+
+def test_propozycja_z_dwoch_swiadkow_i_domyslne_zaznaczenie(repair):
+    """D-PD-2: folder po `LIGHTS` i nazwa pliku mówią to samo → pole wypełnione, grupa ZAZNACZONA
+    (bez tego obietnica „≤ 4 interakcje" jest nieprawdziwa). Podgląd pokazuje DOKŁADNIE to, co
+    pójdzie do pliku — z `repr`."""
+    v, con, files, _open = repair
+    dlg = _open()
+    assert len(dlg._groups) == 1                      # jeden folder = jedna grupa, dwie klatki
+    g = dlg._groups[0]
+    assert g["edit"].text() == "NGC7635" and g["check"].isChecked()
+    assert g["preview"].text() == "do pliku: OBJECT = 'NGC7635'"
+    assert dlg.save_btn.isEnabled() and "2" in dlg.save_btn.text()
+    dlg.reject()
+
+
+def test_rozjazd_swiadkow_zostawia_pole_puste(repair, tmp_path):
+    """Ścieżka jest DOWODEM, nie prawdą: folder mówi `NGC7635`, nazwa pliku `NGC1491` → propozycji
+    NIE MA, grupa niezaznaczona, zapis wygaszony. Zgadywanie tu byłoby zapisem do cudzego pliku."""
+    from horreum import scan
+    v, con, files, _open = repair
+    p = _nameless_tree(tmp_path, names=("NGC1491_20220130_x.fits",), seed=7)[0]
+    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW_PD,
+                       summary=scan.ScanSummary())
+    dlg = _open()
+    assert len(dlg._groups) == 1 and len(dlg._groups[0]["rows"]) == 3   # ten sam folder
+    g = dlg._groups[0]
+    assert g["edit"].text() == "" and not g["check"].isChecked()
+    assert not dlg.save_btn.isEnabled()
+    dlg.reject()
+
+
+def test_walidacja_kanonu_bramki_odmowy():
+    """D-PD-4: kolejność `strip` → `catalog_canon` → bramki. Do pliku idzie forma KANONICZNA
+    (kolaps spacji + upper), nigdy surowy segment; nie-ASCII, przepełnienie rekordu i nazwa
+    nierozpoznawalna przez resolver są ODMOWĄ (zero zapisu), nie 'failed' po commicie."""
+    from horreum.gui.app import _validate_object_value as val
+    assert val("  ngc 7635 ")[0] == "NGC7635"                # normalizacja PRZED zapisem
+    assert val("M 42")[0] == "M42"
+    assert val("")[1] and val("   ")[1]                      # pusto
+    assert val("Mgławica Serce")[1]                          # nie-ASCII
+    assert val("NGC" + "7" * 70)[1]                          # dłuższe niż rekord nagłówka
+    assert val("Wesolinka Kosmiczna 7")[1]                   # ani katalog, ani znana nazwa
+    # nazwa potoczna, którą resolver ZNA, przechodzi (i idzie do pliku w formie usera)
+    assert val("Bubble Nebula")[0] == "Bubble Nebula"
+
+
+def test_dwa_takty_zapis_do_pliku_i_kolejka_pusta(repair):
+    """Takt 1+2 JEDNYM kliknięciem: staging → commit → re-sync zeznania. Karta ląduje w PLIKU,
+    `sha1_data` (tożsamość danych) NIE rusza się, a kubełek kolejki gaśnie już po takcie 2.
+    Obiektu jeszcze NIE MA — to zadanie taktu 3."""
+    from astropy.io import fits
+    v, con, files, _open = repair
+    before = {r["frame_id"]: r["sha1_data"] for r in queries.nameless_frames(con)}
+    dlg = _open()
+    dlg._on_save()
+    assert [fits.getheader(str(p))["OBJECT"] for p in files] == ["NGC7635", "NGC7635"]
+    after = con.execute(
+        "SELECT f.id, f.sha1_data, h.object_raw, f.object_id FROM frame f "
+        "JOIN header h ON h.frame_id = f.id").fetchall()
+    assert {r["id"]: r["sha1_data"] for r in after} == before      # tożsamość przeżyła zapis
+    assert {r["object_raw"] for r in after} == {"NGC7635"}         # zeznanie odświeżone re-syncem
+    assert {r["object_id"] for r in after} == {None}               # oś czeka na takt 3
+    assert queries.review_queue(con)["nameless_count"] == 0
+    assert not dlg.undo_btn.isHidden() and not dlg.resolve_btn.isHidden()   # okno bez show(): isVisible() zawodne
+    assert "commit 1" in dlg.status.text()                         # commit_id WIDOCZNY (D-PD-7)
+    assert not dlg.save_btn.isEnabled()          # karty w plikach → drugi zapis byłby pustym biegiem
+    dlg.reject()
+
+
+def test_cofnij_przywraca_plik_i_kubelek(repair):
+    """D-PD-7: „Cofnij" żyje od udanego zapisu do zamknięcia okna. Kontrakt jest SEMANTYCZNY —
+    karta znika, klatka wraca do kubełka; `sha1_data` stoi (undo nie rusza danych)."""
+    from astropy.io import fits
+    v, con, files, _open = repair
+    dlg = _open()
+    dlg._on_save()
+    dlg._on_undo()
+    assert all("OBJECT" not in fits.getheader(str(p)) for p in files)
+    assert queries.review_queue(con)["nameless_count"] == 2
+    assert dlg.undo_btn.isHidden()                  # commit ZUŻYTY — drugi undo nie ma czego cofać
+    assert dlg.save_btn.isEnabled()                 # karty zdjęte → zapis znów ma sens
+    dlg.reject()
+
+
+def test_takt3_delegowany_a_odmowa_zostawia_okno(repair):
+    """D-PD-6: „Rozwiąż teraz" NIE uruchamia resolvera z dialogu — deleguje do etapu Dostawy.
+    Odmowa (etap w biegu) ZOSTAWIA okno otwarte i NIE chowa „Cofnij": okno cofania musi przeżyć
+    nieudaną delegację, inaczej UI potwierdzałoby sukces, którego nie było."""
+    v, con, files, _open = repair
+    calls = []
+
+    def _refuse():
+        calls.append("x")
+        return "etap w biegu — uruchom Rozwiąż po jego zakończeniu"
+
+    dlg = _open(run_stage_fn=_refuse)
+    dlg._on_save()
+    dlg._on_resolve()
+    assert calls == ["x"] and dlg.result() != QDialog.Accepted
+    assert not dlg.undo_btn.isHidden() and "etap w biegu" in dlg.error.text()
+    dlg.reject()
+
+    ok = _open(run_stage_fn=lambda: None)
+    ok._on_save()
+    ok._on_resolve()
+    assert ok.result() == QDialog.Accepted           # udana delegacja zamyka okno
+
+
+def test_pominiete_widoczne_z_powodem(repair):
+    """Klatka bez OBECNEJ kopii nie jest celem zapisu — i to MA być widać. Powód pochodzi z tej
+    samej funkcji, która odsieje ją przy zapisie (`macro.resolve_target`), więc lista pominiętych
+    nie jest drugą regułą, tylko tym samym zdaniem powiedzianym wcześniej."""
+    v, con, files, _open = repair
+    fid = con.execute("SELECT id FROM frame ORDER BY id LIMIT 1").fetchone()[0]
+    row = con.execute("SELECT id, path FROM location WHERE frame_id = ?", (fid,)).fetchone()
+    repo.mark_location_vanished(con, location_id=row["id"], expected_path=row["path"],
+                                root=str(files[0].parent), run_id="r1", now=NOW_PD)
+    dlg = _open()
+    assert len(dlg._skipped) == 1 and "brak obecnej kopii" in dlg._skipped[0][1]
+    assert sum(len(g["rows"]) for g in dlg._groups) == 1        # druga klatka nadal do naprawy
+    dlg.reject()
+
+
+def test_zamkniecie_bez_commitu_nie_zostawia_stagingu(repair):
+    """Staging bez commitu jest SIEROTĄ — `run_id` zna tylko to okno, więc zamknięcie go kasuje.
+    Po udanym commicie wierszy 'applied' nie ruszamy (są kotwicą undo)."""
+    v, con, files, _open = repair
+    lid = con.execute("SELECT id FROM location ORDER BY id LIMIT 1").fetchone()[0]
+    dlg = _open()
+    dlg._run_id = "sierota"
+    repo.stage_pending(con, run_id="sierota", location_id=lid, keyword="OBJECT", idx=None,
+                       op="add", old_value=None, new_value="X", new_type="str", new_comment=None,
+                       expected_header_hash=None)
+    dlg.reject()
+    assert con.execute("SELECT count(*) FROM pending_changes").fetchone()[0] == 0

@@ -19,7 +19,8 @@ QT_WIDGET_FILES = {"app.py", "__main__.py", "pipeline.py", "grid.py", "projectio
                    "tasks.py",    # F5: Porządki (TasksView) — warstwa widżetów
                    "map_view.py",  # F8: mapa stanowisk (SitesMapView, QPainter) — warstwa widżetów
                    "rows.py",     # P1: delegat wiersza wieloczłonowego — warstwa widżetów
-                   "planner.py"}  # T5: ekran planera celów (PlannerView + PlanWorker) — widżety
+                   "planner.py",  # T5: ekran planera celów (PlannerView + PlanWorker) — widżety
+                   "wb_worker.py"}  # P-D: wspólny wykonawca writebacku (QThread) — warstwa widżetów
 
 
 def _imports_pyside6(path):

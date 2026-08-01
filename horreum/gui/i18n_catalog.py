@@ -198,6 +198,66 @@ CATALOG = {
         "pl": "Nazwa „{name}” nie ma znaków alfanumerycznych — nie może być zapamiętanym aliasem.",
         "en": "Name „{name}” has no alphanumeric characters — it cannot be a remembered alias.",
     },
+    "object.frames_nameless": {
+        "pl": "Klatki bez nazwy w nagłówku ({n})", "en": "Frames with no name in header ({n})",
+    },
+
+    # --- P-D: „Napraw nagłówek…" — karta OBJECT wraca do PLIKU (wariant C) ---
+    "repair.open_btn": {"pl": "Napraw nagłówek…", "en": "Repair header…"},
+    "repair.title": {"pl": "Napraw nagłówek — karta OBJECT", "en": "Repair header — OBJECT card"},
+    "repair.head": {
+        "pl": "{frames} klatek w {groups} folderach. Nazwa trafi do PLIKU (karta OBJECT); "
+              "obiekt w bazie wypełni potem zwykły etap „Rozwiąż”.",
+        "en": "{frames} frames in {groups} folders. The name goes into the FILE (OBJECT card); "
+              "the object in the database is filled later by the regular „Resolve” stage.",
+    },
+    "repair.group": {"pl": "{folder}  ·  {n} klatek", "en": "{folder}  ·  {n} frames"},
+    "repair.no_proposal": {
+        "pl": "brak zgodnej propozycji ze ścieżki — wpisz oznaczenie",
+        "en": "no matching proposal from the path — type a designation",
+    },
+    "repair.preview": {"pl": "do pliku: OBJECT = {value}", "en": "into file: OBJECT = {value}"},
+    "repair.preview_none": {"pl": "—", "en": "—"},
+    "repair.skipped_head": {
+        "pl": "Pominięte ({n}) — powód przy każdej:", "en": "Skipped ({n}) — reason for each:",
+    },
+    "repair.save_btn": {"pl": "Zapisz karty", "en": "Write cards"},
+    "repair.save_btn_n": {"pl": "Zapisz karty ({n})", "en": "Write cards ({n})"},
+    "repair.resolve_btn": {"pl": "Rozwiąż teraz", "en": "Resolve now"},
+    "repair.close_btn": {"pl": "Zamknij", "en": "Close"},
+    "repair.nothing": {
+        "pl": "Brak klatek bez nazwy w nagłówku.", "en": "No frames without a name in the header.",
+    },
+    "repair.skip.gone": {
+        "pl": "klatka zniknęła z bazy między odczytem a otwarciem okna",
+        "en": "frame disappeared from the database between the read and opening the window",
+    },
+    "repair.err.empty": {"pl": "pusto — wpisz oznaczenie", "en": "empty — type a designation"},
+    "repair.err.ascii": {
+        "pl": "„{text}” ma znaki spoza ASCII — nagłówek FITS ich nie przyjmie",
+        "en": "„{text}” has non-ASCII characters — a FITS header will not take them",
+    },
+    "repair.err.too_long": {
+        "pl": "za długie ({n} znaków, limit {max})", "en": "too long ({n} characters, limit {max})",
+    },
+    "repair.err.unresolvable": {
+        "pl": "„{text}” nie jest oznaczeniem katalogowym ani znaną nazwą — po zapisie klatka "
+              "zostałaby bez obiektu",
+        "en": "„{text}” is neither a catalog designation nor a known name — after writing, the "
+              "frame would still have no object",
+    },
+    "repair.err.group": {"pl": "{folder}: {reason}", "en": "{folder}: {reason}"},
+    "repair.err.nothing": {
+        "pl": "Żadna grupa nie jest zaznaczona.", "en": "No group is selected.",
+    },
+    "repair.err.all_skipped": {
+        "pl": "Nic do zapisu — wszystkie klatki pominięte. {reason}",
+        "en": "Nothing to write — all frames skipped. {reason}",
+    },
+    "repair.err.no_host": {
+        "pl": "Ten widok nie ma skąd uruchomić etapu — użyj „Rozwiąż” w Dostawie.",
+        "en": "This view cannot start the stage — use „Resolve” in Delivery.",
+    },
 
     # --- dialog „Przypisz obiekt" ---
     "assign.title": {"pl": "Przypisz obiekt", "en": "Assign object"},
@@ -798,6 +858,16 @@ CATALOG = {
     "pipeline.cancelling": {
         "pl": "Anulowanie… (po bieżącym pliku)", "en": "Cancelling… (after current file)",
     },
+    # Powody odmowy fasady `run_stage` (D-PD-6) — POWÓD, nie goły False: jedna bramka łączyła dwa
+    # różne stany, a komunikat oparty na bool-u mógłby skłamać.
+    "pipeline.refuse.no_db": {
+        "pl": "brak otwartej bazy — otwórz bazę i spróbuj ponownie",
+        "en": "no database open — open one and try again",
+    },
+    "pipeline.refuse.running": {
+        "pl": "etap w biegu — uruchom „Rozwiąż” po jego zakończeniu",
+        "en": "a stage is running — start „Resolve” after it finishes",
+    },
     "pipeline.counts": {
         "pl": "Pliki {done}/{total} · nowe {new} · pominięte {skipped} · przegląd {review} · {tail}",
         "en": "Files {done}/{total} · new {new} · skipped {skipped} · review {review} · {tail}",
@@ -868,11 +938,16 @@ CATALOG = {
         "en": "[lineage] lights {lights} · linked: {linked}",
     },
     "pipeline.fmt.lineage_gaps": {"pl": "\n   luki: {gaps}", "en": "\n   gaps: {gaps}"},
+    # `nameless` STOI OSOBNO od procentu (P-D): klatka bez `object_raw` nie wchodzi do mianownika
+    # delty (nie ma nazwy, pod którą byłaby „nierozpoznana"), a bez tej pozycji raport dostawy jest
+    # na całą klasę ślepy — i pierwsza nowa dostawa bez `OBJECT` przeszłaby bez śladu.
     "pipeline.fmt.delta": {
         "pl": "[delta] obiekt {resolved}/{total} ({pct:.1f}%) · filtry {filters}\n"
-              "   nierozpoznane: {top}\n   do przeglądu: {review}",
+              "   nierozpoznane: {top}\n   bez nazwy w nagłówku: {nameless}\n"
+              "   do przeglądu: {review}",
         "en": "[delta] object {resolved}/{total} ({pct:.1f}%) · filters {filters}\n"
-              "   unrecognized: {top}\n   to review: {review}",
+              "   unrecognized: {top}\n   no name in header: {nameless}\n"
+              "   to review: {review}",
     },
     "pipeline.delta.none": {"pl": "—", "en": "—"},
 

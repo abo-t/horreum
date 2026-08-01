@@ -254,6 +254,25 @@ def review_state(con):
                        kind_unknown=kind_unknown, unreadable=unreadable, total=total)
 
 
+def nameless_lights(con):
+    """Lighty, których nagłówek MILCZY o obiekcie: `object_id IS NULL`, wiersz `header` JEST,
+    `object_raw IS NULL` (P-D). Rdzeniowy właściciel predykatu — read-only, zero zapisu.
+
+    Po co osobno od `object_unresolved`: mianownik delty WYMAGA `object_raw NOT NULL`
+    (`delta_report` niżej), więc raport dostawy był na tę populację ŚLEPY — bramka akceptacji
+    świeciła zielono o klatkach, których nie widzi, a pierwsza nowa dostawa bez `OBJECT`
+    przeszłaby bez śladu. To jest KOTWICA NAWROTU: P-D naprawia dzisiejsze 25 plików, a ta liczba
+    pilnuje, żeby populacja nie odrosła po cichu.
+
+    Drążenie do klatek (grupy, cel writebacku) daje `gui.queries.nameless_frames` — TEN SAM
+    predykat, znak w znak. Dwa literały, bo warstwy są dwie i zależność idzie w jedną stronę
+    (`gui.queries` importuje ten moduł, nie odwrotnie); równość obu pinuje test."""
+    return con.execute(
+        "SELECT count(*) FROM frame f JOIN header h ON h.frame_id = f.id "
+        "WHERE f.kind IN ('light','master_light') AND f.object_id IS NULL "
+        "AND h.object_raw IS NULL").fetchone()[0]
+
+
 @dataclass
 class DeltaReport:
     """Read-only delta do review (§Etap 6/§4.7) — wejście do przyszłego import-legacy. Liczy obiekt
@@ -264,11 +283,16 @@ class DeltaReport:
     object_delta: list = field(default_factory=list)   # [(object_raw, count)] nierozpoznane light'y
     review: ReviewState = field(default_factory=ReviewState)   # kolejka ze STANU (#12), nie z eventów
     filters_canon: int = 0
+    object_nameless: int = 0   # lighty BEZ `object_raw` — poza mianownikiem delty (P-D/D-PD-10)
 
 
 def delta_report(con, top=30):
     """Zbierz deltę nierozstrzygniętych (read-only, zero zapisu). % obiektu liczone NA light'ach
-    (mianownik = light/master_light z obecnym object_raw); kalibracja nie zaniża wyniku."""
+    (mianownik = light/master_light z obecnym object_raw); kalibracja nie zaniża wyniku.
+
+    `object_nameless` stoi OBOK procentu, nie w nim: klatka bez `object_raw` nie ma jak być
+    „nierozpoznana pod nazwą" (nie ma nazwy), więc do mianownika nie wchodzi — ale musi być
+    WIDOCZNA, inaczej raport milczy o całej klasie (P-D/D-PD-10)."""
     resolved = con.execute(
         "SELECT count(*) FROM frame WHERE kind IN ('light','master_light') "
         "AND object_id IS NOT NULL").fetchone()[0]
@@ -288,4 +312,4 @@ def delta_report(con, top=30):
     return DeltaReport(
         object_resolved=resolved, object_unresolved=unresolved, object_pct=pct,
         object_delta=[(r["raw"], r["n"]) for r in delta], review=review_state(con),
-        filters_canon=filters_canon)
+        filters_canon=filters_canon, object_nameless=nameless_lights(con))

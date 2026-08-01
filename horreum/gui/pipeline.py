@@ -528,35 +528,44 @@ class PipelineView(QWidget):
             return
         self._start_scan_sequence("scan")
 
-    def _on_group(self):
-        if self._db_path is None or self._thread is not None:
-            return
+    def run_stage(self, stage):
+        """PUBLICZNE wejście w etap masowy (group/resolve/calibrate/lineage/delta) — jedyna droga dla
+        powierzchni SPOZA tego widoku (P-D/D-PD-6: dialog „Napraw nagłówek…" po zapisie kart woła
+        `run_stage('resolve')`). Zwraca **POWÓD ODMOWY** (string) albo `None`, gdy etap wystartował.
+
+        Powód, nie `bool`: jedna bramka łączy dwa różne stany („nie ma bazy" i „etap już biegnie"),
+        więc komunikat oparty na gołym False mógłby skłamać, a guard jest tu HISTORYCZNIE CICHY
+        (sloty po prostu wracały). Wołanie rdzenia inline byłoby błędem: `run_resolver` off-thread
+        żyje wyłącznie w `PipelineWorker`, więc bezpośrednie wywołanie zamroziłoby GUI na 15k klatek
+        I ominęło `running_changed` → gospodarz zostawiłby aktywne akcje zapisu w gridzie, na osi
+        i w planerze podczas biegu w tle.
+
+        Pięć slotów masowych deleguje TU (jeden dom bramki zamiast pięciu kopii). Poza fasadą
+        świadomie: `_on_scan`/`_on_all` (własny `_can_scan()` + bramka serialu wolumenu),
+        `_on_presence`/`_on_mark_vanished` (własne parametry) — wciągnięcie ich zgubiłoby te
+        bramki albo uczyniło fasadę niejednolitą."""
+        if self._db_path is None:
+            return i18n.t("pipeline.refuse.no_db")
+        if self._thread is not None:
+            return i18n.t("pipeline.refuse.running")
         self._begin_run()
-        self._start_stage("group")
+        self._start_stage(stage)
+        return None
+
+    def _on_group(self):
+        self.run_stage("group")
 
     def _on_resolve(self):
-        if self._db_path is None or self._thread is not None:
-            return
-        self._begin_run()
-        self._start_stage("resolve")
+        self.run_stage("resolve")
 
     def _on_calibrate(self):
-        if self._db_path is None or self._thread is not None:
-            return
-        self._begin_run()
-        self._start_stage("calibrate")
+        self.run_stage("calibrate")
 
     def _on_lineage(self):
-        if self._db_path is None or self._thread is not None:
-            return
-        self._begin_run()
-        self._start_stage("lineage")
+        self.run_stage("lineage")
 
     def _on_delta(self):
-        if self._db_path is None or self._thread is not None:
-            return
-        self._begin_run()
-        self._start_stage("delta")
+        self.run_stage("delta")
 
     def _on_presence(self):
         """Etap pojedynczy — ZAWSZE DRY. Zapis idzie wyłącznie przez „Oznacz zniknięte"."""
@@ -788,7 +797,8 @@ class PipelineView(QWidget):
         top = ", ".join(f"{raw}×{n}" for raw, n in r.object_delta[:8]) or i18n.t("pipeline.delta.none")
         return i18n.t(
             "pipeline.fmt.delta", resolved=r.object_resolved, total=total, pct=r.object_pct,
-            filters=r.filters_canon, top=top, review=_review_line(r.review))
+            filters=r.filters_canon, top=top, review=_review_line(r.review),
+            nameless=r.object_nameless)
 
     def _refresh_buttons(self, running, cancellable):
         idle = not running

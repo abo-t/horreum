@@ -821,6 +821,9 @@ def _format_delta(db_path, rep):
                  f"delta {rep.object_unresolved} w {len(rep.object_delta)} distinct")
     for raw, n in rep.object_delta:
         lines.append(f"    {raw} -> {n}")
+    # POZA procentem wyzej: klatka bez `object_raw` nie ma nazwy, wiec nie wchodzi do mianownika —
+    # ale musi byc widoczna, inaczej raport milczy o calej klasie (P-D, kotwica nawrotu).
+    lines.append(f"  bez nazwy w naglowku (light/master_light): {rep.object_nameless}")
     lines.append(f"  filter_canon ustawione: {rep.filters_canon}")
     # Liczba wiodaca = DISTINCT klatek; powody sie NAKLADAJA (brak kamery => tez brak configu),
     # wiec ich suma bywa wieksza niz klatek — swiadomie nie jest to rozbicie.

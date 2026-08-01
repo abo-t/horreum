@@ -640,7 +640,7 @@ def test_writeback_worker_commit_emituje_postep(wb_view):
     zwraca `done(op, CommitResult)` i zapisuje plik przez WŁASNE połączenie."""
     view, con, p = wb_view
     from astropy.io import fits
-    from horreum.gui.grid import WritebackWorker
+    from horreum.gui.wb_worker import WritebackWorker   # P-D: wykonawca wspólny dla dwóch powierzchni
     view.macro_bar.asg_kw.setCurrentText("TELESCOP"); view.macro_bar.asg_op.setCurrentIndex(0)
     view.macro_bar.asg_expr.setText("EQ6"); view.macro_bar._emit_stage()
     w = WritebackWorker(view._db_path, "commit", view._run_id, now_fn=lambda: NOW)
@@ -657,7 +657,7 @@ def test_writeback_worker_anulowanie_zostawia_pending(wb_view):
     """should_cancel wpięty: anulowanie PRZED plikiem zostawia pending nietknięte (czysty stan do dokończenia)."""
     view, con, p = wb_view
     from astropy.io import fits
-    from horreum.gui.grid import WritebackWorker
+    from horreum.gui.wb_worker import WritebackWorker   # P-D: wykonawca wspólny dla dwóch powierzchni
     view.macro_bar.asg_kw.setCurrentText("TELESCOP"); view.macro_bar.asg_op.setCurrentIndex(0)
     view.macro_bar.asg_expr.setText("EQ6"); view.macro_bar._emit_stage()
     w = WritebackWorker(view._db_path, "commit", view._run_id, now_fn=lambda: NOW)

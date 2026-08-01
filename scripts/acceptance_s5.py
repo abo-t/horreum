@@ -104,6 +104,20 @@ EXP_MASTERS_EXCLUDED_FULL = 2  # `frame 15629`/`15636`: kind='unknown' — POZA 
 # dark 7331 + luki 6185 = flat 11938 + luki 1578 = 13 516 lightów.
 EXP_LINEAGE_DARK = 7331        # lighty z masterdarkiem (reszta: 5978 brak przepisu + 207 niekompletny)
 EXP_LINEAGE_FLAT = 11938       # lighty z masterflatem (reszta: 1455 brak przepisu + 123 brak mastera)
+# KOTWICA NAWROTU P-D (D-PD-10): lighty, których nagłówek MILCZY o obiekcie. `delta_report` był na
+# nie ślepy (mianownik wymaga `object_raw NOT NULL`), więc §5.7 świeciło zielono o klatkach, których
+# nie widzi. Kotwica jest STAGE-AWARE i to nie jest ozdoba: w IMPORT baza powstaje z ZAMROŻONEGO
+# dawcy, którego zeznanie dla tych plików nadal nie ma karty `OBJECT`, więc jedna liczba dla obu
+# trybów świeciłaby na czerwono przy POPRAWNYM przebiegu. Zadaniem kotwicy jest wykrywać ZMIANĘ
+# (nowa dostawa bez `OBJECT`), a nie być równa 25: liczba porusza się razem z `regions.json` —
+# dawca niesie 108 lightów bez karty, z czego region rozwiązuje 83.
+EXP_NAMELESS_IMPORT = 25       # ZMIERZONE przebiegiem IMPORT 2026-08-01 (`--donor` + `--live-db`),
+# nie policzone z rachunku: dawca niesie 108 lightów bez karty `OBJECT`, region rozwiązuje 83,
+# zostaje 25. Liczba jest STABILNA także po naprawie plików na `R:` — baza importu powstaje
+# z ZAMROŻONEGO dawcy, którego zeznanie naprawa nie dotyka.
+EXP_NAMELESS_FULL = None       # DO POMIARU PO PILOCIE: dziś FULL czyta realne pliki, więc do naprawy
+# jest równy IMPORT (25), a po niej ma paść na 0. Zaszycie 0 przed pilotem zapaliłoby bramkę na
+# czerwono przy poprawnym stanie; None = pozycja raportuje liczbę i nie kłamie w żadną stronę.
 
 
 def _ok(cond):
@@ -324,6 +338,19 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
         out(f"    {n:5d}  {raw}")
     crit(f"§5.7 object_pct >= {EXP_OBJECT_PCT_MIN}% (akt={rep.object_pct}%)",
          rep.object_pct >= EXP_OBJECT_PCT_MIN)
+
+    # §5.7b kotwica nawrotu P-D — lighty bez `object_raw` (poza mianownikiem procentu wyżej).
+    # Dopóki kotwica nie jest zmierzona (None), pozycja RAPORTUJE liczbę i nie zapala bramki:
+    # zaszycie liczby wziętej z rachunku zamiast z przebiegu byłoby dokładnie tym błędem,
+    # który ta kotwica ma łapać.
+    exp_nameless = EXP_NAMELESS_FULL if full else EXP_NAMELESS_IMPORT
+    out(f"\n§5.7b bez nazwy w nagłówku (light/master_light): {rep.object_nameless}")
+    if exp_nameless is None:
+        out(f"    (kotwica NIEZMIERZONA dla trybu {'FULL' if full else 'IMPORT'} — "
+            f"zaszyj EXP_NAMELESS_* po tym przebiegu)")
+    else:
+        crit(f"§5.7b object_nameless == {exp_nameless} (akt={rep.object_nameless})",
+             rep.object_nameless == exp_nameless)
 
     # §5.8 (full) — kinds XISF (dowód, że doskan wciągnął to co PF-4)
     if full:

@@ -458,3 +458,27 @@ def test_p4_user_assign_zapamietuje_alias_dla_nowych_klatek(tmp_path):
     s4 = run_resolver(con, now=NOW)
     assert (s4.objects_assigned, s4.objects_by_alias) == (0, 0)
     con.close()
+
+
+def test_delta_report_widzi_lighty_bez_nazwy_w_naglowku(tmp_path):
+    """P-D/D-PD-10 — KOTWICA NAWROTU. Mianownik procentu wymaga `object_raw NOT NULL`, więc light
+    z nagłówkiem MILCZĄCYM o obiekcie był dla raportu dostawy NIEWIDZIALNY: bramka akceptacji
+    świeciła zielono o klatkach, których nie widzi. `object_nameless` stoi OBOK procentu (nie w nim
+    — klatka bez nazwy nie ma jak być „nierozpoznana pod nazwą") i nie rusza żadnej starej liczby."""
+    from horreum import repo
+    from horreum.resolver import nameless_lights
+
+    con = _scanned_tree(tmp_path)
+    run_resolver(con, now=NOW)
+    baza = delta_report(con)
+    assert baza.object_nameless == 0
+
+    fid, _ = repo.upsert_frame(con, sha1_data="sha-bezimienny", kind="light", filetype="fits",
+                               camera_id=None, now=NOW)
+    repo.record_header(con, frame_id=fid, raw_json="{}", object_raw=None, now=NOW)
+    rep = delta_report(con)
+    assert rep.object_nameless == nameless_lights(con) == 1
+    # stare liczby BEZ zmian — nowa klatka nie weszła ani do rozwiązanych, ani do delty
+    assert (rep.object_resolved, rep.object_unresolved, rep.object_delta) \
+        == (baza.object_resolved, baza.object_unresolved, baza.object_delta)
+    con.close()

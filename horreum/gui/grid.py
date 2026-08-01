@@ -20,7 +20,6 @@ import json
 import math
 import os
 import statistics
-import threading
 import uuid
 from datetime import datetime, timezone
 
@@ -34,11 +33,12 @@ from PySide6.QtWidgets import (
     QScrollArea, QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QTableView, QVBoxLayout, QWidget,
 )
 
-from horreum import db, filter_engine, macro as macro_mod, naming, pivot as pivot_mod, repo, writeback
+from horreum import filter_engine, macro as macro_mod, naming, pivot as pivot_mod, repo, writeback
 from horreum.gui import facet_model, i18n, portfolio, queries, rows, theme
 from horreum.gui.facets import RAIL_MIN_W as _FIELDS_MIN_W, FacetRail
 from horreum.gui.projection_dialog import ProjectionDialog
 from horreum.gui.rows import TwoPartDelegate
+from horreum.gui.wb_worker import WritebackRunner
 
 # Kolumny bazowe: (nagłówek, klucz). Klucze `_telescope`/`_object`/`_dt_delta` = pochodne. `_dt_delta`
 # (Δh nagłówek−nazwa) liczone w `_derive` z `naming.header_dt`/`filename_dt` — `base_rows` zwraca już
@@ -1137,65 +1137,6 @@ class StagingDrawer(QFrame):
         self.btn_reject.setVisible(on)
 
 
-class WritebackWorker(QObject):
-    """Wykonawca commitu/undo writebacku w wątku tła — bliźniak `PipelineWorker` (pipeline.py §4).
-    Otwiera WŁASNE połączenie w SWOIM wątku (`db.connect`; sqlite `check_same_thread` — połączenia
-    nie dzielimy między wątkami) i woła Qt-wolny rdzeń `writeback.*` z callbackami `progress`/
-    `should_cancel`. NIE dotyka widżetów. Rdzeń commituje per-plik → anulowanie (`Event`) albo wyjątek
-    zostawia czysty stan applied/pending (utrwalony). Połączenie zamykane PRZED emisją `done`, żeby
-    slot głównego wątku czytał tylko przez `self.con` (bez nakładania połączeń na tym samym pliku)."""
-
-    progress = Signal(int, int, str, str)   # done, total, path, status — MID-commit (Qt-wolny callback rdzenia)
-    done = Signal(str, object)              # op, result (CommitResult|UndoResult) — niemutowany po zwrocie rdzenia
-    failed = Signal(str, str)               # op, msg — wyjątek → sygnał, NIE crash apki
-    finished = Signal()                     # run() wrócił KAŻDĄ drogą → quit wątku
-
-    # Cztery pętle-po-plikach dzielą sygnaturę (con, target_id, now=, progress=, should_cancel=).
-    _OPS = {
-        "commit":        lambda con, t, now, pr, sc: writeback.commit(con, t, now=now, progress=pr, should_cancel=sc),
-        "commit_rename": lambda con, t, now, pr, sc: writeback.commit_renames(con, t, now=now, progress=pr, should_cancel=sc),
-        "undo":          lambda con, t, now, pr, sc: writeback.undo(con, t, now=now, progress=pr, should_cancel=sc),
-        "undo_rename":   lambda con, t, now, pr, sc: writeback.undo_renames(con, t, now=now, progress=pr, should_cancel=sc),
-    }
-
-    def __init__(self, db_path, op, target_id, *, now_fn):
-        super().__init__()
-        self._db_path = db_path
-        self._op = op
-        self._target_id = target_id
-        self._now = now_fn
-        self._cancel = threading.Event()
-
-    def request_cancel(self):
-        """Kooperatywne anulowanie — stawiane w GŁÓWNYM wątku, czytane w workerze (`Event` bezpieczny
-        międzywątkowo; rdzeń sprawdza PRZED każdym plikiem, zostawiając zapisane 'applied')."""
-        self._cancel.set()
-
-    @Slot()
-    def run(self):
-        con = None
-        result = None
-        error = None
-        try:
-            con = db.connect(self._db_path)     # WŁASNE połączenie w TYM wątku (baza już zmigrowana)
-            result = self._OPS[self._op](con, self._target_id, self._now(),
-                                         self._emit_progress, self._cancel.is_set)
-        except Exception as exc:                # błąd → sygnał, NIE crash
-            error = f"{type(exc).__name__}: {exc}"
-        finally:
-            if con is not None:
-                con.close()                     # zamknij PRZED done — main czyta tylko przez self.con
-        if error is not None:
-            self.failed.emit(self._op, error)
-        else:
-            self.done.emit(self._op, result)
-        self.finished.emit()                    # zawsze: zwolnij wątek
-
-    def _emit_progress(self, done, total, path, status):
-        # wołane SYNCHRONICZNIE w wątku workera przez rdzeń; ~7 plików/s (I/O NAS) → emisja per plik tania
-        self.progress.emit(done, total, path, status)
-
-
 class FramesView(QWidget):
     """Widok „Klatki": panel Pól | (perspektywa + filtr + PASEK ZBIORU + panele kling + grid)
     + poczekalnia zmian (szuflada stagingu). Kontrakt montażu `MainWindow`: `__init__(con, now_fn,
@@ -1204,6 +1145,10 @@ class FramesView(QWidget):
     otwierane z `SelectionBar` (najwyżej jeden widoczny; R#9 w `_toggle_panel`)."""
 
     status_message = Signal(str)
+    # Mutex DWÓCH powierzchni writebacku (D-PD-3): gospodarz przekazuje ten fakt drugiej powierzchni
+    # (dialog „Napraw nagłówek…"). Dwa równoległe commity spotkałyby się na `BEGIN IMMEDIATE`
+    # z `busy_timeout` 5 s i jeden wróciłby jako 'failed' — bez powodu widocznego dla usera.
+    writeback_busy = Signal(bool)
 
     def __init__(self, con, now_fn=None, parent=None):
         super().__init__(parent)
@@ -1232,13 +1177,16 @@ class FramesView(QWidget):
         self._undo_rename_run_id = None
         self._undo_mode = None
         self._preview_owner = None   # {None,'macro','rename'} — podgląd współdzielony (R1 #19)
-        # Writeback OFF-THREAD (commit/undo nie zamrażają GUI): worker+wątek per-operacja, ślad celu
-        # (run_id/commit_id) dla slotu post-processingu. `_writeback_async=False` (testy) → run() inline,
-        # sygnały direct = synchronicznie, ten sam rdzeń bez QThread.
-        self._wb_thread = None
-        self._wb_worker = None
+        # Writeback OFF-THREAD (commit/undo nie zamrażają GUI): cykl worker+wątek trzyma WSPÓLNY
+        # uchwyt (`wb_worker.WritebackRunner`, P-D/D-PD-3 — ten sam kod wykonuje dialog „Napraw
+        # nagłówek…"), tu zostaje tylko to, co widżetowe. Uchwyt POWSTAJE W `__init__`, bo seam
+        # `_writeback_async` bywa ustawiany z zewnątrz PRZED pierwszą operacją (testy).
+        # `_wb_target_id` zostaje W WIDOKU: czyta go `_after_commit_rename` PO zakończeniu operacji,
+        # a uchwyt jest per-powierzchnia — wspólny ślad celu nadpisywałyby sobie dwa okna.
+        self._wb = WritebackRunner(self._db_path, now_fn=self._now, parent=self)
+        self._wb.busy_changed.connect(self.writeback_busy)   # re-emisja: uchwyt zna oba końce operacji
         self._wb_target_id = None
-        self._writeback_async = True
+        self._foreign_wb = False   # DRUGA powierzchnia pisze (mutex; ustawia gospodarz)
         self._build_ui()
         self._load_facets()
         self.refresh()
@@ -1772,6 +1720,23 @@ class FramesView(QWidget):
                 self._undo_btn.setEnabled(True)
             self._sync_staging_mutex()
 
+    def set_writeback_busy(self, busy):
+        """DRUGA powierzchnia writebacku (dialog „Napraw nagłówek…") pisze do plików — wygaś
+        Zatwierdź/Odrzuć/Cofnij (D-PD-3). To NIE to samo co `set_busy`: tam pisze pipeline do BAZY
+        i gasną wszystkie akcje zapisu; tu chodzi o jeden zasób — mutację plików pod jedną
+        transakcją. Własny bieg gridu tej ścieżki nie używa (jego akcje są wtedy schowane paskiem
+        postępu), więc flaga mówi wyłącznie o CUDZEJ operacji."""
+        self._foreign_wb = busy
+        if busy:
+            self.drawer.btn_commit.setEnabled(False)
+            self.drawer.btn_reject.setEnabled(False)
+            if hasattr(self, "_undo_btn"):
+                self._undo_btn.setEnabled(False)
+        else:
+            if hasattr(self, "_undo_btn"):
+                self._undo_btn.setEnabled(True)
+            self._refresh_drawer()                       # szczere stany wg oczekujących AKTYWNEJ klingi
+
     # ---- makro / staging (KROK 4, druga klinga) ----
     def _targets_fn(self, frame_ids):
         return queries.writeback_frame_targets(self.con, frame_ids)
@@ -1906,41 +1871,29 @@ class FramesView(QWidget):
         self._sync_staging_mutex()
 
     # ---- writeback off-thread (commit/undo w wątku tła; postęp + „Anuluj" w szufladzie) ----
+    @property
+    def _writeback_async(self):
+        """Seam testowy „inline zamiast QThread" — ustawiany Z ZEWNĄTRZ na WIDOKU (cztery testy),
+        a mieszkający na uchwycie. Property z getterem i SETTEREM, żeby oba zapisy trafiały w to
+        samo miejsce po wydzieleniu wykonawcy (D-PD-3)."""
+        return self._wb.async_ok
+
+    @_writeback_async.setter
+    def _writeback_async(self, value):
+        self._wb.async_ok = value
+
     def _start_writeback(self, op, target_id, after_slot):
         """Odpal `op` (commit/commit_rename/undo/undo_rename) na wątku tła; postęp → szuflada, `done`
-        → `after_slot` (post-processing na wątku GŁÓWNYM). `_writeback_async=False` lub brak pliku
-        (`:memory:`) → run() inline (sygnały direct = synchronicznie), ten sam rdzeń bez QThread."""
-        if self._wb_thread is not None:                  # jeden writeback naraz (akcje i tak schowane)
+        → `after_slot` (post-processing na wątku GŁÓWNYM). Cykl wątku trzyma uchwyt `self._wb`;
+        TUTAJ zostają wyłącznie rzeczy widżetowe (pasek szuflady, wygaszenie „Do stagingu")."""
+        if self._wb.is_busy or self._foreign_wb:         # jeden writeback naraz (akcje i tak schowane)
             return
         self._wb_target_id = target_id
         self.drawer.begin_progress(0)
         self.macro_bar.btn_stage.setEnabled(False)       # bez nowego stagingu w biegu
         self.rename_bar.btn_stage.setEnabled(False)
-        self._wb_worker = WritebackWorker(self._db_path, op, target_id, now_fn=self._now)
-        self._wb_worker.progress.connect(self._on_wb_progress)
-        self._wb_worker.done.connect(after_slot)
-        self._wb_worker.failed.connect(self._on_wb_failed)
-        if self._writeback_async and self._db_path:
-            self._wb_thread = QThread(self)
-            self._wb_worker.moveToThread(self._wb_thread)
-            self._wb_thread.started.connect(self._wb_worker.run)
-            self._wb_worker.finished.connect(self._wb_thread.quit)
-            self._wb_thread.finished.connect(self._cleanup_wb_thread)
-            self._wb_thread.start()
-        else:
-            try:
-                self._wb_worker.run()                    # inline: done/progress lecą direct = synchronicznie
-            finally:
-                self._wb_worker = None
-
-    def _cleanup_wb_thread(self):
-        # wait() PRZED thread.deleteLater(): worker.deleteLater() doręcza się w teardown wątku
-        # (Shiboken::Object::destroy → PyGILState_Ensure); bez wait() ~QThread mógłby czekać na
-        # wątek TRZYMAJĄC GIL → AB-BA deadlock (native dump 2026-07-20, ten sam mechanizm co
-        # projection_dialog._cleanup_dry_thread — komentarz tam). wait() zwalnia GIL → wątek
-        # dokańcza destrukcję i umiera; ~QThread trafia na martwy handle.
-        self._wb_worker.deleteLater(); self._wb_thread.wait(); self._wb_thread.deleteLater()
-        self._wb_worker = None; self._wb_thread = None
+        self._wb.start(op, target_id, on_progress=self._on_wb_progress, on_done=after_slot,
+                       on_failed=self._on_wb_failed)
 
     @Slot(int, int, str, str)
     def _on_wb_progress(self, done, total, path, status):
@@ -1955,8 +1908,8 @@ class FramesView(QWidget):
         self.status_message.emit(i18n.t("grid.wb.failed", op=op, msg=msg))
 
     def _on_wb_cancel(self):
-        if self._wb_worker is not None:
-            self._wb_worker.request_cancel()             # rdzeń sprawdza PRZED następnym plikiem
+        if self._wb.is_busy:
+            self._wb.cancel()                            # rdzeń sprawdza PRZED następnym plikiem
             self.drawer.btn_cancel.setEnabled(False)
             self.status_message.emit(i18n.t("grid.wb.cancelling"))
 

@@ -476,3 +476,26 @@ def test_en_render_pipeline_z_katalogu(qapp, tmp_path):
     txt = view.lbl_summary.text()
     assert "[scan]" in txt and "[group]" in txt and "[delta]" in txt   # tagi raportu EN
     assert "files 2" in txt and "object" in txt                       # wkład tekstowy EN
+
+
+def test_run_stage_fasada_zwraca_powod_odmowy(qapp, tmp_path):
+    """D-PD-6: `run_stage` to PUBLICZNE wejście w etap masowy dla powierzchni spoza tego widoku
+    (okno „Napraw nagłówek…" po zapisie kart). Zwraca POWÓD odmowy, nie goły `False`: jedna bramka
+    łączy dwa różne stany („brak bazy" i „etap w biegu"), więc bool mógłby skłamać. Pięć slotów
+    masowych deleguje TU — jeden dom bramki zamiast pięciu kopii."""
+    view = PipelineView(None, now_fn=lambda: NOW)
+    assert "baz" in view.run_stage("resolve")                 # bez bazy: powód, nie wystartowanie
+
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    started = []
+    view._start_stage = lambda stage, **kw: started.append((stage, kw))
+    assert view.run_stage("resolve") is None and started == [("resolve", {})]
+
+    # etap w biegu → odmowa z powodem; slot masowy dziedziczy tę samą bramkę (delegacja)
+    view._thread = object()
+    assert "biegu" in view.run_stage("resolve")
+    view._on_group()
+    assert started == [("resolve", {})]                       # nic nowego nie ruszyło
+    view._thread = None
+    view._on_group()
+    assert started[-1] == ("group", {})

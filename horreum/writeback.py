@@ -258,7 +258,7 @@ def _read_xisf_or_refuse(path):
 def _xisf_gates(meta) -> None:
     """Bramki odmowy liczone z PLIKU (D-X-11/13), zanim cokolwiek policzymy z operacji.
 
-    Bramka tożsamości ma bliźniaka w bazie (`macro._resolve_target` czyta
+    Bramka tożsamości ma bliźniaka w bazie (`macro.resolve_target` czyta
     `frame.sha1_data_uncomputable`) — ta tutaj domyka wywołanie pisarza z pominięciem makra."""
     if meta.keyword_images > 1:
         raise _XisfRefusal("karty pod wieloma <Image> — cel zapisu niejednoznaczny (D-X-11)")

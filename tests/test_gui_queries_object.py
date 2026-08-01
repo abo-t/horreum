@@ -208,6 +208,62 @@ def test_review_queue_partycja_pokrywa_perspektywe_gridu(s8_obj):
     assert _partycja() == len(queries.review_frame_ids(con)) == 4
 
 
+# --- P-D: drążenie kubełka bezimiennych (D-PD-11) ---
+
+def test_nameless_frames_jeden_wiersz_na_klatke_i_cel_present(s8_obj):
+    """Kształt read-modelu: DOKŁADNIE jeden wiersz na klatkę mimo N lokacji, a cel to kopia
+    OBECNA — nie `MIN(id)` po wszystkich. Klatka z 2 obecnymi kopiami ma `n_present=2` i zostaje
+    JEDNYM wierszem (naiwny LEFT JOIN po `present=1` zawyżyłby licznik)."""
+    con, ids = s8_obj
+    fid = _nameless_light(con, "sha-nameless-loc")
+    repo.add_location(con, frame_id=fid, volume="v1", path="/a/one.fits", now=NOW)
+    rows = [r for r in queries.nameless_frames(con) if r["frame_id"] == fid]
+    assert len(rows) == 1 and rows[0]["n_present"] == 1 and rows[0]["path"] == "/a/one.fits"
+
+    lid2, _ = repo.add_location(con, frame_id=fid, volume="v2", path="/b/two.fits", now=NOW)
+    rows = [r for r in queries.nameless_frames(con) if r["frame_id"] == fid]
+    assert len(rows) == 1 and rows[0]["n_present"] == 2
+    assert rows[0]["path"] == "/a/one.fits"                 # MIN(id) WŚRÓD OBECNYCH
+
+    # pierwsza kopia znika → celem staje się DRUGA (a nie martwa ścieżka z MIN(id) bez `present`)
+    lid1 = con.execute("SELECT id FROM location WHERE path = '/a/one.fits'").fetchone()[0]
+    repo.mark_location_vanished(con, location_id=lid1, expected_path="/a/one.fits",
+                                root="/a", run_id="r-pd", now=NOW)
+    rows = [r for r in queries.nameless_frames(con) if r["frame_id"] == fid]
+    assert len(rows) == 1 and rows[0]["n_present"] == 1 and rows[0]["location_id"] == lid2
+
+
+def test_nameless_frames_klatka_bez_lokacji_zostaje_w_wyniku(s8_obj):
+    """Predykat populacji NIE zależy od lokacji (D-PD-11): klatka bez obecnej kopii ZOSTAJE
+    w wyniku z `n_present=0` i pustym celem — dialog pokaże ją jako pominiętą Z POWODEM. Naiwny
+    `JOIN location … present=1` wyrzuciłby ją z licznika, choć zostaje w perspektywie gridu."""
+    con, ids = s8_obj
+    fid = _nameless_light(con, "sha-nameless-noloc")
+    row = next(r for r in queries.nameless_frames(con) if r["frame_id"] == fid)
+    assert row["n_present"] == 0 and row["location_id"] is None and row["path"] is None
+    assert fid in queries.review_frame_ids(con)
+
+
+def test_nameless_count_jest_dlugoscia_read_modelu(s8_obj):
+    """D-PD-10 — JEDEN właściciel predykatu na TRZECH powierzchniach: kubełek kolejki, drążenie
+    do klatek i raport dostawy (`resolver.nameless_lights`, literał rdzenia) muszą dawać tę samą
+    liczbę. Rozjazd znaczyłby, że kubełek otwiera listę innej długości, niż zapowiada."""
+    from horreum.resolver import nameless_lights
+
+    con, ids = s8_obj
+    for sha in ("sha-nl-1", "sha-nl-2", "sha-nl-3"):
+        _nameless_light(con, sha)
+    n = queries.review_queue(con)["nameless_count"]
+    assert n == len(queries.nameless_frames(con)) == nameless_lights(con) == 3
+    # rozwiązany obiekt wyprowadza klatkę z kubełka WSZĘDZIE naraz (tu skrótem — na żywo robi to
+    # takt 3: karta w pliku → re-sync zeznania → `resolve`)
+    fid = con.execute("SELECT id FROM frame WHERE sha1_data = 'sha-nl-1'").fetchone()[0]
+    repo.assign_object(con, frame_id=fid, object_id=ids["objects"]["NGC7000"],
+                       object_source="header", now=NOW)
+    assert (queries.review_queue(con)["nameless_count"] == len(queries.nameless_frames(con))
+            == nameless_lights(con) == 2)
+
+
 # --- facets ---
 
 def test_facets_teleskop_kanoniczne_i_filtry(s8_obj):

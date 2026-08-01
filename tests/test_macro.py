@@ -2,7 +2,9 @@
 akcesorami (`queries.writeback_frame_targets`/`frame_cards`). Pokrycie: przyklady A/B, reguly
 set/add + idx (parytet dawcy), oraz NOWE bramki Horreum (D-W1 n_present, T6 compressed, D-X-13
 degenerat tozsamosci, header_hash NULL). Karty/lokacje wstawiamy wprost SQL (testy poza bramka AST)
-— makro dziala na wierszach niezaleznie od zrodla. Bramki FORMATU juz nie ma: od P6c XISF ma pisarza.
+— makro dziala na wierszach niezaleznie od zrodla. Bramka FORMATU jest WASKA (D-PD-5): RAW odsiany
+zawsze (Horreum go nie zapisuje), XISF odsiany TYLKO dla `add` (od P6c ma pisarza, ale latka bajtowa
+nie dorabia karty nieobecnej); `set` na XISF przechodzi.
 
 Makro NIE zapisuje (zwraca MacroRun); test sprawdza podglad, nie DML."""
 
@@ -137,6 +139,57 @@ def test_xisf_jest_celem_od_p6c(tmp_path):
                locations=[{"path": "R:/x2.xisf", "header_hash": None, "hdu_index": None}])
     run2 = _run(con, {"assign": {"keyword": "TELESCOP", "op": "set", "expr": "ED120R"}}, [b])
     assert not run2.touched and "header_hash" in run2.skipped[0].reason
+
+
+def test_bramka_formatu_raw_i_xisf_add(tmp_path):
+    """D-PD-5: bramka FORMATU odsiewa PRZED commitem, nie po. RAW jest read-only dla Horreum
+    (pisarz odmawia), a XISF nie przyjmuje `add` (łatka bajtowa nie dorabia karty, której nie ma).
+    `set` na XISF przechodzi — bramka jest wąska, nie „XISF poza zapisem"."""
+    con = _con(tmp_path)
+    raw = _frame(con, sha1="r", filetype="raw", cards=[_txt("TELESCOP", "ED")],
+                 locations=[{"path": "R:/r.dng"}])
+    run = _run(con, {"assign": {"keyword": "TELESCOP", "op": "set", "expr": "ED120R"}}, [raw])
+    assert not run.touched and "RAW" in run.skipped[0].reason
+
+    x = _frame(con, sha1="xa", filetype="xisf", cards=[_txt("TELESCOP", "ED")],
+               locations=[{"path": "R:/xa.xisf", "header_hash": "hx", "hdu_index": None}])
+    add = _run(con, {"assign": {"keyword": "OBJECT", "op": "add", "expr": "'NGC7635'"}}, [x])
+    assert not add.touched and "XISF" in add.skipped[0].reason
+    sett = _run(con, {"assign": {"keyword": "TELESCOP", "op": "set", "expr": "ED120R"}}, [x])
+    assert not sett.skipped and [p.new_value for p in sett.touched] == ["ED120R"]
+
+
+def test_add_literal_repr_przezywa_apostrof_i_backslash(tmp_path):
+    """P-D/D-PD-4: wartość karty idzie do makra jako `repr(kanon)`. Sprawdzamy WARTOŚĆ, nie brak
+    wyjątku: kanon z apostrofem wysadza kompilację `expr`, makro spada na tryb literału i bez
+    `repr` wpisałoby SUROWĄ zawartość pola razem z cudzysłowami. Gołe `NGC7635` (bez `repr`)
+    byłoby dla `expr` NAZWĄ ZMIENNEJ — przy kolizji z keywordem wpisalibyśmy wartość TEJ karty."""
+    con = _con(tmp_path)
+    a = _frame(con, sha1="q1", locations=[{"path": "R:/q1.fits"}])
+    run = _run(con, {"assign": {"keyword": "OBJECT", "op": "add", "expr": repr("Barnard's Loop"),
+                                "value_type": "str"}}, [a])
+    assert [p.new_value for p in run.touched] == ["Barnard's Loop"]
+
+    b = _frame(con, sha1="q2", locations=[{"path": "R:/q2.fits"}])
+    run2 = _run(con, {"assign": {"keyword": "OBJECT", "op": "add", "expr": repr("A\\B"),
+                                 "value_type": "str"}}, [b])
+    assert [p.new_value for p in run2.touched] == ["A\\B"]
+
+    # kolizja z keywordem: gołe `TELESCOP` wpisałoby WARTOŚĆ karty, `repr` — sam tekst
+    c = _frame(con, sha1="q3", cards=[_txt("TELESCOP", "RC8")], locations=[{"path": "R:/q3.fits"}])
+    run3 = _run(con, {"assign": {"keyword": "OBJECT", "op": "add", "expr": repr("TELESCOP"),
+                                 "value_type": "str"}}, [c])
+    assert [p.new_value for p in run3.touched] == ["TELESCOP"]
+
+
+def test_add_na_karcie_obecnej_odmawia(tmp_path):
+    """Reguła `add`: karta MUSI być nieobecna (bliźniak w pisarzu). Klatka, która ma już `OBJECT`,
+    nie jest celem naprawy nagłówka — nadpisanie to `set`, inna klasa ryzyka."""
+    con = _con(tmp_path)
+    a = _frame(con, sha1="dup", cards=[_txt("OBJECT", "M51")], locations=[{"path": "R:/dup.fits"}])
+    run = _run(con, {"assign": {"keyword": "OBJECT", "op": "add", "expr": repr("NGC7635"),
+                                "value_type": "str"}}, [a])
+    assert not run.touched and "juz istnieje" in run.skipped[0].reason
 
 
 def test_degenerat_tozsamosci_skipped_dx13(tmp_path):

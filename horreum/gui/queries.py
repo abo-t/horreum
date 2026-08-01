@@ -219,6 +219,7 @@ def review_queue(con):
         GROUP BY object_raw) — co user zostawił nierozpoznane;
       - `nameless_count`: light/master_light z `object_id IS NULL`, z nagłówkiem, ale BEZ `object_raw`
         (T5a) — klatka, która nie ma o czym zeznawać, więc GROUP BY nie ma jej jak pokazać;
+        drążenie do klatek daje `nameless_frames` (P-D) i to ONO jest właścicielem predykatu;
       - `config_review_count`: `config_id IS NULL AND EXISTS(header)` — KONIECZNY `EXISTS(header)`
         (R#2): grouper iteruje `frame JOIN header`, więc klatka bez nagłówka nigdy nie jest flagowana
         i cicho zostaje config NULL; bez tego predykatu licznik zlałby trzy stany;
@@ -249,13 +250,12 @@ def review_queue(con):
     ).fetchall()
     # Lustro `object_review` po drugiej stronie NULL-a: JOIN header = „zeznanie JEST", brak
     # `object_raw` = „nie mówi o obiekcie". Bez tego kubełka klatki wpadały między predykaty.
-    nameless_count = con.execute(
-        "SELECT COUNT(*) FROM frame f JOIN header h ON h.frame_id = f.id "
-        "WHERE f.kind IN ('light','master_light') AND f.object_id IS NULL "
-        "  AND h.object_raw IS NULL"
-    ).fetchone()[0]
+    # JEDEN właściciel predykatu (D-PD-10): licznik to DŁUGOŚĆ read-modelu drążenia, nie osobny
+    # COUNT — dwa literały rozjechałyby się przy pierwszej zmianie kształtu (kubełek pokazywałby
+    # inną liczbę niż lista, którą otwiera).
+    nameless = nameless_frames(con)
     st = review_state(con)
-    return {"object_review": object_review, "nameless_count": nameless_count,
+    return {"object_review": object_review, "nameless_count": len(nameless),
             "config_review_count": st.no_config,
             "headerless_count": st.headerless, "unreadable_count": st.unreadable}
 
@@ -278,6 +278,48 @@ def object_review_frames(con, object_raw):
         "WHERE f.kind IN ('light','master_light') AND f.object_id IS NULL AND h.object_raw = ? "
         "ORDER BY f.id",
         (object_raw,),
+    ).fetchall()
+
+
+def nameless_frames(con):
+    """Drążenie kubełka „bez nazwy w nagłówku" (P-D, D-PD-11): DOKŁADNIE JEDEN wiersz na klatkę,
+    z celem writebacku (`present=1`) i jawną kardynalnością kopii. Predykat ZNAK W ZNAK ten sam,
+    co licznik `review_queue` — który liczy `len()` tego wyniku (D-PD-10, jeden właściciel).
+
+    Cel przez `l.id = (SELECT MIN(id) … present = 1)`, NIE przez `JOIN … present = 1`:
+      - naiwny JOIN ZMIENIŁby predykat — klatka bezimienna BEZ obecnej kopii wypadłaby z licznika,
+        choć zostaje w `review_frame_ids` i w inwariancie partycji `review_queue`;
+      - naiwny LEFT JOIN po `present=1` ZAWYŻAŁby licznik przy dwóch obecnych kopiach.
+    `n_present` (podzapytanie) jest więc KOLUMNĄ, nie predykatem: `0` i `>1` idą do dialogu jako
+    pominięte Z POWODEM — tym samym, którego użyje makro. Cel jest TEN SAM co makra: read-model
+    bierze `MIN(id)` wśród obecnych, `macro.resolve_target` bierze `present[0]` z `ORDER BY f.id,
+    l.id` (`writeback_frame_targets`) — ta sama lokacja, nie „podobna".
+
+    Kolumny NIE są ozdobą: panel klatek dialogu jedzie `_fill_frames`, który czyta `sha1_data`
+    bezwarunkowo i woła `telescope_label(row)` (kontrakt `IndexError` przy braku kolumny) — wąski
+    SELECT wywaliłby dialog przy pierwszym renderze. `f_ratio_nominal`/`focal_nominal` świadomie
+    POZA (NARROW: `_fill_frames` ich nie czyta).
+
+    `ORDER BY l.path, f.id` daje stabilność i wypycha `n_present=0` na górę (NULL sortuje się
+    pierwszy); grupowanie po folderze robi wołający SŁOWNIKIEM (kolejność pierwszego wystąpienia),
+    bo porządek po PEŁNEJ ścieżce przeplata katalog z podkatalogiem. Zwraca: frame_id, sha1_data,
+    filetype, date_obs, telescope_label, telescop_canon, camera_model, location_id, path, n_present."""
+    return con.execute(
+        "SELECT f.id AS frame_id, f.sha1_data, f.filetype, h.date_obs, "
+        "       t.label AS telescope_label, t.telescop_canon, "
+        "       cam.model_canon AS camera_model, "
+        "       l.id AS location_id, l.path, "
+        "       (SELECT COUNT(*) FROM location WHERE frame_id = f.id AND present = 1) AS n_present "
+        "FROM frame f JOIN header h ON h.frame_id = f.id "
+        "LEFT JOIN config c ON c.id = f.config_id "
+        "LEFT JOIN telescope_canonical tc ON tc.id = c.telescope_id "
+        "LEFT JOIN telescope t ON t.id = tc.canon_id "
+        "LEFT JOIN camera cam ON cam.id = f.camera_id "
+        "LEFT JOIN location l ON l.id = (SELECT MIN(id) FROM location "
+        "                                WHERE frame_id = f.id AND present = 1) "
+        "WHERE f.kind IN ('light','master_light') AND f.object_id IS NULL "
+        "  AND h.object_raw IS NULL "
+        "ORDER BY l.path, f.id"
     ).fetchall()
 
 

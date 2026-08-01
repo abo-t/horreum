@@ -6,6 +6,19 @@ schemat i API mogą się jeszcze zmieniać.
 
 ## [Niewydane]
 
+### Dodane
+- **Gotowe obrazy po integracji trafiają wreszcie do biblioteki — nową drogą „Stosy".** W Dostawie
+  jest osobna sekcja: wskazujesz korzeń swojego drzewa obróbki, a Horreum wciąga z niego wyłącznie
+  pliki `masterLight*.xisf` — bez wersji pochodnych (kadrowanych, po ABE, bez gwiazd). Korzeń jest
+  zapamiętywany, więc następnym razem okno wyboru otwiera się od razu we właściwym miejscu.
+  Droga jest w całości **tylko do odczytu**: ani jeden bajt w drzewie obróbki się nie zmienia.
+  Świadomie stoi **osobno od „Przyjmij nowe"** — drzewo obróbki to nie archiwum, więc sięga się
+  tam osobnym gestem, a codzienna dostawa zostaje bez zmian. Z wiersza poleceń: `horreum stacks`.
+- **Gotowe obrazy bez nazwy obiektu mają w kolejce przeglądu własny wiersz.** Nie mieszają się
+  z klatkami archiwum, bo droga naprawy jest inna: klatce archiwum można dopisać kartę `OBJECT`
+  do pliku, a gotowego obrazu Horreum nie tknie. Wiersz mówi, ile obrazów nie wie, co przedstawia
+  — i na tym poprzestaje.
+
 ### Naprawione
 - **Okno „Napraw nagłówek…" przyjmuje wreszcie Księżyc, planety i komety.** Sprawdzało nazwę
   węziej, niż potrafi ją potem rozpoznać sam program, więc odmawiało zapisania `Moon`, `Jupiter`

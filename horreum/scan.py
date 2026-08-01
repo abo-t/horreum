@@ -92,6 +92,17 @@ XISF_XML_OFFSET = len(_XISF_SIGNATURE) + _XISF_LENGTH_LEN + _XISF_RESERVED_LEN  
 # NIEWRAŻLIWE na wielkość (NTFS; realne nazwy to `_WBPP`/`_REVIEW`). Trzymamy w lowercase.
 EXCLUDED_DIR_NAMES = frozenset({"_wbpp", "_review"})
 
+# ── droga „Stosy" (I-2b, P-I / D-P-I-1 wariant A) ────────────────────────────────────────────────
+# Gotowe obrazy po integracji leżą w drzewie OBRÓBKI, jawnie poza zakresem skanu archiwum
+# (`horreum-scan-scope-canonical-tree`). Horreum wciąga je WŁASNĄ komendą ze wskazanym korzeniem —
+# `scan_tree` i standing-op doskanu zostają NIETKNIĘTE. Odrzucone świadomie: rozszerzenie skanu
+# (wciągnęłoby setki plików pośrednich obróbki, które nie są klatkami).
+STACK_NAME_PREFIX = "masterlight"       # konwencja WBPP; porównanie na `name.lower()`
+# Znaczniki PLIKU POCHODNEGO obróbki — granica §5 briefu P-I. Kolejność bez znaczenia (test `in`).
+DERIVED_NAME_MARKERS = ("_autocrop", "_abe", "_dbe", "_spcc", "_starless", "_stars")
+# Rodzaj, który droga „Stosy" wpuszcza do bazy — JEDYNY. Zeznanie (`IMAGETYP`), nie nazwa.
+STACK_KIND = "master_light"
+
 
 @dataclass(frozen=True)
 class Card:
@@ -196,6 +207,45 @@ def iter_headers(root, excluded_out=None, errors_out=None):
     odcięte (patrz `_iter_suffixes`); `excluded_out` zbiera ich ścieżki do telemetrii skanu,
     `errors_out` — katalogi NIEPRZECZYTANE (D-V-11; pass obecności traktuje je jak prune)."""
     return _iter_suffixes(root, HEADER_SUFFIXES, excluded_out=excluded_out, errors_out=errors_out)
+
+
+def iter_stacks(root, derived_out=None, errors_out=None):
+    """Posortowane ścieżki KANDYDATÓW drogi „Stosy" (I-2b, P-I): pliki XISF, których nazwa zaczyna
+    się od `masterLight` i NIE niesie znacznika pochodnej obróbki. Wejście `scan_stacks`.
+
+    DWA SITA, bo mają dwa różne zadania:
+      1. `STACK_NAME_PREFIX` — konwencja WBPP dla produktu integracji. Sito TANIE: zawęża
+         7383 plików XISF drzewa obróbki do 259 bez otwierania choćby jednego.
+      2. `DERIVED_NAME_MARKERS` — granica §5 briefu P-I („nie wciągamy plików pochodnych
+         obróbki"). `masterLight…_autocrop` to ten sam stack po kadrowaniu, `…_ABE`/`…_starless`
+         to kolejne kroki obróbki — obrazy, nie klatki archiwum. Zmierzone na realnym drzewie
+         2026-08-01: 259 nazw pasuje sicie 1, z tego 131 niesie znacznik pochodnej → **128
+         kandydatów** (kotwica D-P-I-6; 85 to liczba INTEGRACJI, nie plików).
+
+    Nazwa NIE jest jednak dowodem, że plik jest stackiem — rozstrzyga ZEZNANIE (`IMAGETYP`),
+    które sprawdza dopiero `scan_stacks`. To sito wyznacza ZAKRES (§5), tamta bramka TOŻSAMOŚĆ.
+
+    WYKLUCZENIA DRZEW ROBOCZYCH obowiązują TAK SAMO (`_iter_suffixes` → `EXCLUDED_DIR_NAMES`):
+    `_WBPP`/`_Review` to katalogi, do których Horreum sam WYDAJE projekcje, więc wciąganie ich
+    z powrotem byłoby zapętleniem niezależnie od tego, którą drogą się tam wchodzi. Na realnym
+    drzewie to dziś NO-OP i jest to zmierzone, nie założone: `rglob` bez żadnych wykluczeń
+    i `iter_stacks` dają tę samą liczbę 128 (katalogi WBPP obróbki nazywają się `WBPP`/`WBPP2`,
+    bez podkreślnika, więc lista ich nie dotyczy).
+
+    `derived_out` (opcjonalna lista): ścieżki odrzucone sitem 2 — wykluczenie ma być WIDOCZNE,
+    nie schowane w różnicy liczników (ta sama zasada, co `excluded_dirs` w skanie).
+    `errors_out` — katalogi NIEPRZECZYTANE (jak w `iter_headers`)."""
+    out = []
+    for p in _iter_suffixes(root, XISF_SUFFIXES, errors_out=errors_out):
+        name = p.name.lower()
+        if not name.startswith(STACK_NAME_PREFIX):
+            continue
+        if any(m in name for m in DERIVED_NAME_MARKERS):
+            if derived_out is not None:
+                derived_out.append(str(p))
+            continue
+        out.append(p)
+    return out                                             # `_iter_suffixes` już posortowało
 
 
 def _jsonable(value):
@@ -1043,14 +1093,17 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
     do wołającego (`scan_tree` / import), bo to on wie, jak zidentyfikować rekord do review."""
     readable = rec.header is not None
     is_raw = _filetype(rec.path) == "raw"          # #2: FAKT formatu (→ raw_format, kind z folderu)
-    ident = camera_identity(rec.header, raw_format=is_raw) if readable else None
+    # `kind` WYPRZEDZA oś kamery (kolejność zmieniona 2026-08-02, I-2b): `camera_identity` bierze go
+    # do bramki `NO_PIXEL_KINDS` — gotowy stack powołuje kamerę, ale nie wnosi `XPIXSZ`. Derywacja
+    # rodzaju od kamery NIE zależy (`_derive_kind` czyta rekord i format), więc zamiana jest bezpieczna.
+    kind, kind_source = _derive_kind(rec, readable=readable, is_raw=is_raw)
+    ident = camera_identity(rec.header, raw_format=is_raw, kind=kind) if readable else None
     camera_id = None
     if ident is not None:
         camera_id, _ = repo.upsert_camera(
             con, model_canon=ident.model_canon, pixel_um=ident.pixel_um,
             is_mono=ident.is_mono, is_mono_source=ident.is_mono_source,
             raw_instrume=ident.raw_instrume, now=now, actor=actor)
-    kind, kind_source = _derive_kind(rec, readable=readable, is_raw=is_raw)
     if rec.sha1_data is not None:
         sha1_data, uncomputable = rec.sha1_data, 0
     else:                                              # degeneracja: sha1 pliku + flaga
@@ -1240,6 +1293,104 @@ def backfill_xisf_headers(con, *, now, progress=None):
         if progress is not None:
             progress(i, total, path)
     s.remaining = len(_xisf_backfill_rows(con))
+    return s
+
+
+@dataclass
+class StackScanSummary:
+    """Zliczenia jednego przebiegu `scan_stacks`. Kształt wzorowany na `BackfillSummary` (sterownik
+    celowany trzyma własne liczniki i ZAGNIEŻDŻA `ScanSummary` z `ingest_record`) — nie na
+    `ScanSummary`, bo droga „Stosy" ma pytania, których skan drzewa nie zna: ile nazw odpadło jako
+    pochodne obróbki i ile plików ZEZNAŁO, że stackiem nie jest.
+
+    KAŻDY licznik odrzucenia niesie też ścieżki: droga wpuszczająca 128 ze 259 plików musi umieć
+    powiedzieć, co zostawiła i dlaczego — inaczej „wciągnięto 128" jest nieweryfikowalne."""
+    candidates: int = 0        # nazwy, które przeszły OBA sita `iter_stacks`
+    derived_skipped: int = 0   # `masterLight…` ze znacznikiem pochodnej (§5 — poza zakresem)
+    ingested: int = 0          # zeznanie potwierdziło `master_light` → poszło przez `ingest_record`
+    skipped: int = 0           # brama przyrostowa (znane `(volume, path, mtime)`) — ZERO odczytu
+    rejected_kind: int = 0     # przeczytane, ale `IMAGETYP` mówi co innego → ZERO zapisu
+    rejected_unreadable: int = 0   # nagłówek nieczytelny → nie da się potwierdzić → ZERO zapisu
+    failed: int = 0            # `scan_file` rzucił (I/O) → ZERO zapisu
+    kinds_rejected: dict = field(default_factory=dict)     # jaki kind zeznały odrzucone (diagnostyka)
+    derived_paths: list = field(default_factory=list)
+    rejected_paths: list = field(default_factory=list)
+    failed_paths: list = field(default_factory=list)
+    cancelled: bool = False
+    scan: ScanSummary = field(default_factory=ScanSummary)  # eventy/odświeżenia z `ingest_record`
+
+
+def scan_stacks(con, root, *, volume="?", drive_letter=None, tier=None, now,
+                progress=None, should_cancel=None):
+    """DROGA „STOSY" (I-2b, P-I / D-P-I-1 wariant A): wciągnij GOTOWE OBRAZY PO INTEGRACJI ze
+    wskazanego korzenia drzewa obróbki. Zwraca `StackScanSummary`.
+
+    DLACZEGO OSOBNA KOMENDA, a nie rozszerzenie skanu: drzewo obróbki nie jest archiwum. Leży
+    poza `R:\\ASTRO_`, żyje własnym rytmem i niesie setki plików pośrednich (`_starless`, `_SPCC`,
+    `ABE`), które klatkami nie są. Skan archiwum i standing-op doskanu zostają NIETKNIĘTE — user
+    wskazuje korzeń stosów świadomie, osobnym gestem.
+
+    DWIE BRAMKI, każda o innym zadaniu — i to jest sedno tej drogi:
+      * **zakres** — `iter_stacks` (nazwa `masterLight…` bez znacznika pochodnej, §5 briefu);
+      * **tożsamość** — `IMAGETYP` przez `normalize_kind` musi dać `STACK_KIND`. Nazwa NIE
+        wystarcza: gdyby user wskazał korzeń z plikiem nazwanym po WBPP, ale będącym czymkolwiek
+        innym, droga wciągnęłaby go jako stack. Plik, który nie zeznaje `master_light`, jest
+        ODRZUCANY z policzonym `kind` — nie wciągany „na wszelki wypadek".
+    Zmierzone na realnym drzewie 2026-08-01: 128/128 kandydatów zeznało `master_light`, zero
+    odrzuceń — bramka tożsamości nie odsiewa dziś niczego i ma tak zostać. Jej rolą jest ODMOWA
+    w dniu, w którym konwencja nazw przestanie się zgadzać z zawartością.
+
+    **ZERO ZAPISU przy każdej odmowie** (odrzucenie, nieczytelność, I/O) — powód ten sam, co
+    w `backfill_xisf_headers`: to sterownik celowany, NIE skan i NIE pass obecności. Nie stawia
+    markera `unreadable_since`, nie zdejmuje `present`, nie zakłada frame'ów-szkieletów. Drzewo
+    obróbki jest ŻYWE i nieuporządkowane (brief §6 pkt 4) — droga, która zapisywałaby po każdym
+    potknięciu, zaśmieciłaby kolejkę przeglądu przy pierwszym przestawieniu folderów.
+
+    IDEMPOTENCJA stoi na tej samej bramie przyrostowej, co skan (`_already_scanned`,
+    `(volume, path, mtime)`) — drugi przebieg na niezmienionym drzewie to `skipped == candidates`
+    i zero DML. Brama wymaga REALNEGO serialu; `volume='?'` ją wyłącza (jak w `scan_tree`).
+
+    ZAPIS wyłącznie przez `ingest_record` (jedna klinga, ta sama, którą idzie skan i import) —
+    `actor='stacks'`, żeby dziennik odróżniał tę drogę od doskanu archiwum. Bajtów NIE RUSZAMY:
+    pliki otwierane read-only, jak wszędzie w tym module.
+
+    Hooki `progress`/`should_cancel` — kontrakt jak w `scan_tree` (anulowanie na GRANICY PLIKU)."""
+    s = StackScanSummary()
+    derived = []
+    root = canonize_root(root)
+    paths = iter_stacks(root, derived_out=derived)
+    s.derived_paths = derived
+    s.derived_skipped = len(derived)
+    s.candidates = len(paths)
+    total = len(paths)
+    gate_on = volume != "?"
+    for i, path in enumerate(paths, 1):
+        if should_cancel is not None and should_cancel():
+            s.cancelled = True
+            break
+        spath = str(path)
+        try:
+            if gate_on and _already_scanned(con, volume, spath, _mtime_iso(path.stat())):
+                s.skipped += 1
+            else:
+                rec = scan_file(spath)
+                if rec.header is None:                     # W1: nie ma czym potwierdzić tożsamości
+                    s.rejected_unreadable += 1
+                    s.rejected_paths.append(f"{spath}: nagłówek nieczytelny ({rec.error})")
+                elif normalize_kind(rec.header.get("IMAGETYP")) != STACK_KIND:
+                    kind = normalize_kind(rec.header.get("IMAGETYP"))
+                    s.rejected_kind += 1
+                    s.kinds_rejected[kind] = s.kinds_rejected.get(kind, 0) + 1
+                    s.rejected_paths.append(f"{spath}: zeznaje '{kind}', nie {STACK_KIND}")
+                else:
+                    ingest_record(con, rec, volume=volume, drive_letter=drive_letter, tier=tier,
+                                  now=now, summary=s.scan, actor="stacks")
+                    s.ingested += 1
+        except Exception as exc:                           # I/O — raport, NIGDY zapis (patrz docstring)
+            s.failed += 1
+            s.failed_paths.append(f"{spath}: {type(exc).__name__}: {exc}")
+        if progress is not None:
+            progress(i, total, spath, s)
     return s
 
 

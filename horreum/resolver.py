@@ -314,12 +314,17 @@ def nameless_lights(con):
     predykat, znak w znak. Dwa literały, bo warstwy są dwie i zależność idzie w jedną stronę
     (`gui.queries` importuje ten moduł, nie odwrotnie); równość obu pinuje test.
 
-    Literał PEŁNY, mimo że bliźniak niżej różni się jednym słowem: wspólny prefiks + sklejenie
+    ZAWĘŻONY DO `kind='light'` od 2026-08-01 (I-2b/D-P-I-5): gotowe stacki wciągnięte drogą
+    „Stosy" są `master_light` i mają WŁASNY kubełek (`nameless_stacks`) — ta sama zasada, co przy
+    RAW-ach, tylko oś inna. Bez zawężenia 22 stacki bez `OBJECT` dopisałyby się do 25 klatek
+    archiwum i kotwica nawrotu przestałaby pilnować tej, dla której powstała.
+
+    Literał PEŁNY, mimo że bliźniaki niżej różnią się jednym słowem: wspólny prefiks + sklejenie
     czyni SQL nie-literałem, a `_first_sql_verb` zwraca wtedy `None` = offender bramki AST §8.1
     (złapane przebiegiem 2026-08-01 — bramka zadziałała dokładnie tak, jak miała)."""
     return con.execute(
         "SELECT count(*) FROM frame f JOIN header h ON h.frame_id = f.id "
-        "WHERE f.kind IN ('light','master_light') AND f.object_id IS NULL "
+        "WHERE f.kind = 'light' AND f.object_id IS NULL "
         "AND h.object_raw IS NULL "
         "AND f.filetype NOT IN (SELECT value FROM json_each(?))",
         (json.dumps(list(NO_OBJECT_CARD_FILETYPES)),)).fetchone()[0]
@@ -331,13 +336,38 @@ def nameless_raw_lights(con):
     Osobny kubełek, nie odjęcie: te klatki zostają w perspektywie „Do przeglądu" (`object_id IS
     NULL`), więc partycja kolejki musi je gdzieś policzyć — inaczej `review_queue` przestałaby
     domykać się do `review_frame_ids` dokładnie o tę populację. Droga naprawy jest inna niż dla
-    `nameless_lights`: ręczne „Przypisz obiekt…", nigdy karta w pliku."""
+    `nameless_lights`: ręczne „Przypisz obiekt…", nigdy karta w pliku.
+
+    `kind='light'` jest tu STRUKTURALNIE równoważne dawnemu `IN ('light','master_light')`, nie
+    zawężeniem: `filetype='raw'` bierze rodzaj z FOLDERU (`kind_from_path`), a ta mapa zna
+    wyłącznie light/dark/flat/bias — RAW-owy `master_light` nie ma jak powstać. Napisane wprost,
+    żeby trzy kubełki były rozłączne z WIDOKU, nie z rozumowania."""
     return con.execute(
         "SELECT count(*) FROM frame f JOIN header h ON h.frame_id = f.id "
-        "WHERE f.kind IN ('light','master_light') AND f.object_id IS NULL "
+        "WHERE f.kind = 'light' AND f.object_id IS NULL "
         "AND h.object_raw IS NULL "
         "AND f.filetype IN (SELECT value FROM json_each(?))",
         (json.dumps(list(NO_OBJECT_CARD_FILETYPES)),)).fetchone()[0]
+
+
+def nameless_stacks(con):
+    """GOTOWE STACKI, których nagłówek milczy o obiekcie (I-2b/D-P-I-5): `kind='master_light'`,
+    `object_id IS NULL`, wiersz `header` JEST, `object_raw IS NULL`.
+
+    TRZECI kubełek tej samej partycji, z tego samego powodu co RAW-owy: `review_frame_ids` pyta
+    o sam brak obiektu, więc stacki w nim SĄ — wycięcie ich z `nameless_lights` bez policzenia
+    tutaj rozspójniłoby kolejkę dokładnie o tę populację.
+
+    DROGA NAPRAWY JEST TRZECIA i dlatego kubełek jest osobny, a nie „lighty razem":
+    lightowi archiwum dopisujemy kartę `OBJECT` do PLIKU (P-D), RAW-owi przypisujemy obiekt RĘKĄ,
+    a stackowi — ANI JEDNO, ANI DRUGIE. Drzewo obróbki jest read-only (§5 briefu P-I: „nie mutuje
+    ani jednego bajtu"), a produkt integracji nie jest klatką z teleskopu, więc nie wchodzi do
+    kolejki, w której user naprawia archiwum. Kubełek jest INFORMACYJNY: mówi, ile gotowych
+    obrazów nie wie, co przedstawia."""
+    return con.execute(
+        "SELECT count(*) FROM frame f JOIN header h ON h.frame_id = f.id "
+        "WHERE f.kind = 'master_light' AND f.object_id IS NULL "
+        "AND h.object_raw IS NULL").fetchone()[0]
 
 
 @dataclass
@@ -354,6 +384,9 @@ class DeltaReport:
     # …a te BEZ `object_raw` i bez SZANSY na niego (format nie zna karty; `NO_OBJECT_CARD_FILETYPES`).
     # Osobne pole, bo osobna droga naprawy: ręczne przypisanie, nigdy zapis karty do pliku.
     object_nameless_raw: int = 0
+    # …a te są GOTOWYMI OBRAZAMI po integracji (I-2b/D-P-I-5) — trzecia droga naprawy: ŻADNA
+    # z dwóch powyższych, bo drzewo obróbki jest read-only. Pole informacyjne.
+    object_nameless_stacks: int = 0
 
 
 def delta_report(con, top=30):
@@ -364,10 +397,11 @@ def delta_report(con, top=30):
     „nierozpoznana pod nazwą" (nie ma nazwy), więc do mianownika nie wchodzi — ale musi być
     WIDOCZNA, inaczej raport milczy o całej klasie (P-D/D-PD-10).
 
-    `object_nameless_raw` idzie OSOBNO od `object_nameless`, bo to dwie różne sprawy pod jednym
-    objawem: pierwsza jest do naprawienia kartą w pliku, druga wyłącznie ręką. Zlanie ich w jedną
-    liczbę (tak było do 2026-08-01) sprawiało, że kotwica nawrotu nie pilnowała ani jednej —
-    763 RAW-y przykryłyby każdy ruch w populacji FITS."""
+    `object_nameless_raw` i `object_nameless_stacks` idą OSOBNO od `object_nameless`, bo to trzy
+    różne sprawy pod jednym objawem: pierwszą naprawia karta w pliku, drugą wyłącznie ręka,
+    a trzeciej nie naprawia NIC (drzewo obróbki jest read-only). Zlanie ich w jedną liczbę
+    sprawia, że kotwica nawrotu nie pilnuje żadnej — 763 RAW-y przykryłyby każdy ruch w populacji
+    FITS, a 22 stacki przykryłyby ruch w niej po raz drugi."""
     resolved = con.execute(
         "SELECT count(*) FROM frame WHERE kind IN ('light','master_light') "
         "AND object_id IS NOT NULL").fetchone()[0]
@@ -388,4 +422,5 @@ def delta_report(con, top=30):
         object_resolved=resolved, object_unresolved=unresolved, object_pct=pct,
         object_delta=[(r["raw"], r["n"]) for r in delta], review=review_state(con),
         filters_canon=filters_canon, object_nameless=nameless_lights(con),
-        object_nameless_raw=nameless_raw_lights(con))
+        object_nameless_raw=nameless_raw_lights(con),
+        object_nameless_stacks=nameless_stacks(con))

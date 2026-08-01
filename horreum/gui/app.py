@@ -1142,6 +1142,16 @@ class ObjectAxisView(QWidget):
                 i18n.t("object.nameless_raw_line", n=q["nameless_raw_count"]))
             raw_it.setFlags(Qt.ItemIsEnabled)
             self.review.addItem(raw_it)
+        # TRZECI kubełek tej samej partycji (I-2b/D-P-I-5): gotowy obraz po integracji, wciągnięty
+        # drogą „Stosy". Też INFORMACYJNY, ale z innego powodu niż RAW: tam akcja istnieje i leży
+        # gdzie indziej, tu akcji NIE MA — drzewo obróbki jest read-only z decyzji (§5 briefu P-I),
+        # a produkt integracji nie jest klatką z teleskopu, więc nie wchodzi do kolejki napraw
+        # archiwum. Wiersz mówi, ile gotowych obrazów nie wie, co przedstawia — i tyle.
+        if q["nameless_stacks_count"] > 0:
+            stk_it = QListWidgetItem(
+                i18n.t("object.nameless_stacks_line", n=q["nameless_stacks_count"]))
+            stk_it.setFlags(Qt.ItemIsEnabled)
+            self.review.addItem(stk_it)
         unread = QListWidgetItem(i18n.t("object.unreadable_line", n=q["unreadable_count"]))
         unread.setData(Qt.UserRole, "unreadable")
         unread.setData(Qt.UserRole + 1, None)

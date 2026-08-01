@@ -157,6 +157,25 @@ folder niż zapamiętany albo puścić etapy pojedynczo (**Skanuj**, **Grupuj**,
 **Pokaż deltę**). Pole **poziom** pozwala oznaczyć, czy to archiwum (**zimny (archiwum)**) czy dysk
 roboczy — dla zwykłego przeglądu zostaw **—**. Na co dzień wystarcza złota **Przyjmij nowe**.
 
+### Stosy — gotowe obrazy po integracji
+
+Na dole ekranu **Dostawa** jest osobna sekcja **Stosy**. Twoje archiwum to pojedyncze klatki
+z teleskopu; gotowe obrazy po złożeniu (integracji) leżą gdzie indziej — w drzewie obróbki.
+Kliknij **Wciągnij stosy…**, wskaż korzeń tego drzewa, a Horreum doda te obrazy do biblioteki.
+
+Co dokładnie bierze: **wyłącznie pliki `masterLight*.xisf`**, czyli wynik integracji. Pomija
+wersje pochodne — skadrowane (`_autocrop`), po usunięciu gradientu (`_ABE`, `_DBE`), bez gwiazd
+(`_starless`) i podobne. To są kolejne kroki obróbki jednego obrazu, a nie osobne zdjęcia.
+
+> **To bezpieczne — i osobne.** Ta droga tylko **czyta**: w drzewie obróbki nie zmienia się ani
+> jeden bajt. Nie wchodzi też do **Przyjmij nowe** — codzienna dostawa dotyczy archiwum, a po
+> stosy sięgasz osobno, kiedy chcesz. Folder jest zapamiętywany, więc następnym razem okno wyboru
+> otworzy się od razu we właściwym miejscu.
+
+Jeśli gotowy obraz nie ma w nagłówku nazwy obiektu, pojawi się o tym wiersz w **Porządkach** —
+informacyjny. Takiemu plikowi Horreum nazwy nie dopisze (drzewo obróbki zostaje nietknięte);
+wiersz mówi tylko, ile obrazów nie wie, co przedstawia.
+
 ---
 
 ## Krok 4 — Uporządkuj: nadaj nazwy i przejrzyj wątpliwości
@@ -272,6 +291,7 @@ zapamiętany) → przechodzi w kilkanaście sekund, bo stare pliki są pomijane,
 | Wrócić do swojego katalogu | **Plik → Otwórz bazę…** (albo sam wróci przy starcie) |
 | Wczytać nowe zdjęcia | **Dostawa → Przyjmij nowe** |
 | Wskazać inny folder niż zwykle | **Dostawa → Tryb zaawansowany → Wskaż katalog…** |
+| Dodać gotowe obrazy po integracji | **Dostawa → Stosy → Wciągnij stosy…** |
 | Nazwać teleskop | **Porządki → Teleskopy bez etykiety → dwuklik w Etykieta** |
 | Nazwać miejsce | **Porządki → Stanowiska bez nazwy → dwuklik w Nazwa** |
 | Znaleźć duplikaty | **Porządki → Duplikaty** albo **Zbiory → perspektywa Duplikaty** |

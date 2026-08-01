@@ -499,3 +499,116 @@ def test_run_stage_fasada_zwraca_powod_odmowy(qapp, tmp_path):
     view._thread = None
     view._on_group()
     assert started[-1] == ("group", {})
+
+
+# --- droga „Stosy" (I-2b): własny korzeń, własna pamięć, poza sekwencją dostawy ---
+
+def _stack_xisf(path, n, imagetyp="Master Light"):
+    """Minimalny monolityczny XISF z `IMAGETYP` i unikalną treścią (attachment) → własny sha1."""
+    import struct
+    xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<xisf version="1.0" xmlns="http://www.pixinsight.com/xisf">'
+        '<Image geometry="4:4:1" sampleFormat="UInt16" location="attachment:%d:32">'
+        '<FITSKeyword name="IMAGETYP" value="\'%s\'" comment=""/>'
+        '<FITSKeyword name="INSTRUME" value="\'ZWO ASI2600MM Pro\'" comment=""/>'
+        '<FITSKeyword name="XPIXSZ" value="3.76" comment=""/>'
+        '</Image></xisf>'
+    )
+    body = xml % (0, imagetyp)
+    raw = body.encode("utf-8")
+    offset = 16 + len(raw)
+    raw = (xml % (offset, imagetyp)).encode("utf-8")
+    with open(path, "wb") as fh:
+        fh.write(b"XISF0100")
+        fh.write(struct.pack("<I", len(raw)))
+        fh.write(b"\x00\x00\x00\x00")
+        fh.write(raw)
+        fh.write(bytes([n]) * 32)
+    return path
+
+
+def _stack_tree(tmp_path, n=2):
+    t = tmp_path / "obrobka"
+    t.mkdir()
+    for i in range(n):
+        _stack_xisf(t / f"masterLight_{i}.xisf", i + 1)
+    return str(t)
+
+
+def test_worker_stacks_emituje_stage_done(qapp, tmp_path):
+    """Kontrakt sygnałów etapu „stacks" identyczny ze skanem: progres per plik + `stage_done`
+    z podsumowaniem drogi (nie ze `ScanSummary` — droga ma własne pytania)."""
+    tree = _stack_tree(tmp_path)
+    w = PipelineWorker(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    w.configure("stacks", root=tree, volume="VOL1")
+    done, prog = [], []
+    w.stage_done.connect(lambda name, s: done.append((name, s)))
+    w.progress.connect(lambda d, t, p, c: prog.append((d, t, dict(c))))
+    w.run()
+    assert [n for n, _ in done] == ["stacks"]
+    s = done[0][1]
+    assert (s.candidates, s.ingested) == (2, 2)
+    assert prog and isinstance(prog[-1][2], dict)      # migawka DICT, nie żywy summary
+
+
+def test_stacks_pamieta_korzen_i_podpowiada_go(qapp, tmp_path, monkeypatch):
+    """Korzeń drogi jest ZAPAMIĘTYWANY (`stacks/last_root`, QSettings per maszyna) i PODPOWIADANY
+    przy kolejnym uruchomieniu — dialog dostaje go jako katalog startowy. Osobna pamięć od
+    `pipeline/last_source`: to inny korzeń i inny gest, więc jedna pamięć kłamałaby na przemian
+    o obu."""
+    tree = _stack_tree(tmp_path)
+    store = _qsettings_dict(monkeypatch)
+    from PySide6.QtWidgets import QFileDialog
+    widziane = []
+
+    def _dlg(_parent, _title, start=""):
+        widziane.append(start)
+        return tree
+
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(_dlg))
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    assert "jeszcze nie wskazano" in view.lbl_stacks_memo.text()
+    loop = QEventLoop()
+    view.running_changed.connect(lambda r: loop.quit() if r is False else None)
+    QTimer.singleShot(20000, loop.quit)
+    view._on_stacks()
+    loop.exec()
+    assert store["stacks/last_root"] == tree
+    assert tree in view.lbl_stacks_memo.text()
+    assert widziane == [""]                            # pierwszy raz: brak podpowiedzi
+    view._on_stacks()                                  # drugi raz: dialog startuje OD zapamiętanego
+    assert widziane[-1] == tree
+    assert "pipeline/last_source" not in store         # pamięci są ROZDZIELNE
+
+
+def test_stacks_anulowany_dialog_nie_startuje(qapp, tmp_path, monkeypatch):
+    _qsettings_dict(monkeypatch)
+    from PySide6.QtWidgets import QFileDialog
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: ""))
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    view._on_stacks()
+    assert view._thread is None
+
+
+def test_stacks_poza_sekwencja_przyjmij_nowe(qapp, tmp_path):
+    """D-P-I-1: droga „Stosy" jest OSOBNA — „Przetwórz wszystko" jej NIE woła. Gdyby wpadła do
+    łańcucha dostawy, codzienny skan sięgałby do drzewa obróbki bez pytania, a to jest inny
+    zakres i inna odwracalność."""
+    tree = _tree(tmp_path, 1)
+    w = PipelineWorker(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    w.configure("all", root=tree, volume="VOL1")
+    etapy = []
+    w.stage_done.connect(lambda name, s: etapy.append(name))
+    w.run()
+    assert "stacks" not in etapy
+
+
+def test_stacks_przycisk_wymaga_samej_bazy(qapp, tmp_path):
+    """Stosy przynoszą WŁASNY korzeń (dialog), więc — jak „Przyjmij nowe" — nie zależą od katalogu
+    trybu zaawansowanego. Bez bazy przycisk jest szczerze wygaszony."""
+    view = PipelineView(None, now_fn=lambda: NOW)
+    assert view.btn_stacks.isEnabled() is False
+    view2 = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    assert view2.btn_stacks.isEnabled() is True        # mimo braku wskazanego katalogu
+    assert view2.btn_scan.isEnabled() is False         # …a skan wymaga katalogu

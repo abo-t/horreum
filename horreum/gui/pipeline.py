@@ -30,7 +30,7 @@ from horreum.gui.grid import PRESET_VANISHED
 from horreum.gui.progress import counts_snapshot, should_emit
 from horreum.grouper import run_grouper
 from horreum.resolver import delta_report, run_resolver
-from horreum.scan import scan_tree
+from horreum.scan import scan_stacks, scan_tree
 from horreum.volumes import volume_serial
 
 
@@ -77,6 +77,8 @@ class PipelineWorker(QObject):
             con = db.open_db(self._db_path)
             if self._stage == "scan":
                 self._scan(con)
+            elif self._stage == "stacks":
+                self._stacks(con)
             elif self._stage == "group":
                 self._bulk(con, "group")
             elif self._stage == "resolve":
@@ -118,6 +120,32 @@ class PipelineWorker(QObject):
             return False
         self.stage_done.emit("scan", summary)
         return True
+
+    def _stacks(self, con):
+        """Droga „Stosy" (I-2b): wciągnięcie gotowych obrazów po integracji ze wskazanego drzewa
+        obróbki. Kontrakt sygnałów jak w `_scan` (postęp per plik, anulowanie na granicy pliku);
+        etap ŚWIADOMIE poza łańcuchem „Przyjmij nowe" — to inny korzeń i inny gest (D-P-I-1)."""
+        self.stage_started.emit("stacks")
+        s = scan_stacks(
+            con, self._params["root"],
+            volume=self._params.get("volume", "?"),
+            drive_letter=self._params.get("drive_letter"),
+            tier=self._params.get("tier"),
+            now=self._now(),
+            progress=self._on_stack_progress,
+            should_cancel=self._cancel.is_set,
+        )
+        if s.cancelled:
+            self.cancelled.emit("stacks", s)
+            return False
+        self.stage_done.emit("stacks", s)
+        return True
+
+    def _on_stack_progress(self, done, total, path, s):
+        # `scan_stacks` podaje własne summary (StackScanSummary) — migawkę robimy z ZAGNIEŻDŻONEGO
+        # `ScanSummary`, bo to on niesie liczniki, które umie czytać `counts_snapshot`.
+        if should_emit(done, total):
+            self.progress.emit(done, total, path, counts_snapshot(s.scan))
 
     def _presence(self, con, *, apply):
         """Pass obecności (P5b). Etap MASOWY jak group/resolve — bez progresu per-wiersz: koszt
@@ -187,7 +215,8 @@ class PipelineWorker(QObject):
 # — nie module-level, D-L1 restart); wartości danych ("cold"/"scratch") to identyfikatory poziomu
 # zapisywane do bazy (rdzeń `scan_tree`) — ZOSTAJĄ niezmienione. "—" neutralne — zostaje dosłowne.
 _TIERS = [("—", None), ("pipeline.tier.cold", "cold"), ("pipeline.tier.scratch", "scratch")]
-_STAGE_LABEL = {"scan": "pipeline.stage.scan", "group": "pipeline.stage.group",
+_STAGE_LABEL = {"scan": "pipeline.stage.scan", "stacks": "pipeline.stage.stacks",
+                "group": "pipeline.stage.group",
                 "resolve": "pipeline.stage.resolve", "calibrate": "pipeline.stage.calibrate",
                 "lineage": "pipeline.stage.lineage", "delta": "pipeline.stage.delta",
                 "presence": "pipeline.stage.presence"}
@@ -249,6 +278,7 @@ class PipelineView(QWidget):
         self._presence_params = None       # ZAMROŻONE parametry ostatniego DRY (apply ich nie liczy)
         self._build_ui()
         self._sync_source_memo()
+        self._sync_stacks_memo()
         self._sync_actions()
 
     # ---------------------------------------------------------------- budowa UI
@@ -330,6 +360,21 @@ class PipelineView(QWidget):
             stages.addWidget(b)
         stages.addStretch(1)
         v.addLayout(stages)
+
+        # 4a. Droga „Stosy" (I-2b, D-P-I-1 wariant A) — WŁASNA sekcja, nie ósmy przycisk etapu.
+        # Rozdzielenie jest tu TREŚCIĄ, nie estetyką: wszystko powyżej dotyczy archiwum (`R:\ASTRO_`),
+        # a ta akcja sięga do drzewa OBRÓBKI — innego korzenia, innego rytmu, innej odwracalności.
+        # Wrzucenie jej między etapy sugerowałoby, że należy do sekwencji dostawy; nie należy.
+        v.addWidget(self._hline())
+        v.addWidget(QLabel(i18n.t("pipeline.stacks_head")))
+        stk = QHBoxLayout()
+        self.btn_stacks = QPushButton(i18n.t("pipeline.btn.stacks"))
+        self.btn_stacks.setToolTip(i18n.t("pipeline.tip.stacks"))
+        self.btn_stacks.clicked.connect(self._on_stacks)
+        stk.addWidget(self.btn_stacks)
+        self.lbl_stacks_memo = QLabel("")      # treść = WYŁĄCZNIE _sync_stacks_memo
+        stk.addWidget(self.lbl_stacks_memo, 1)
+        v.addLayout(stk)
 
         # 4b. Wynik passa obecności — UKRYTY, dopóki nie ma czego pokazać (QUIET: „0 zniknięć" to
         # linia w panelu, nie osobny widżet). Zapis jest ZAWSZE osobnym gestem: sekwencja tylko
@@ -446,6 +491,43 @@ class PipelineView(QWidget):
             return
         self._remember_source(path)     # D-UX-5: jedna pamięć ostatniego katalogu (pick i receive)
         self._set_root(path)
+
+    # ---------------------------------------------------------------- korzeń stosów (I-2b)
+
+    def _sync_stacks_memo(self):
+        """JEDYNY właściciel treści memo korzenia stosów (wzorzec `_sync_source_memo`) — wołane
+        z `__init__` i po KAŻDYM zapisie `stacks/last_root`."""
+        root = self._settings().value("stacks/last_root", None)
+        self.lbl_stacks_memo.setText(i18n.t("pipeline.stacks_last", root=root) if root
+                                     else i18n.t("pipeline.stacks_first"))
+
+    def _on_stacks(self):
+        """Droga „Stosy" — ZAWSZE przez dialog katalogu, ale PODPOWIEDZIANY zapamiętanym korzeniem
+        (`stacks/last_root`, QSettings per maszyna; ścieżka na dysku jest własnością BIURKA, nie
+        archiwum, więc do bazy nie idzie mimo D-P-I-3).
+
+        Dlaczego pytamy za każdym razem, choć „Przyjmij nowe" nie pyta: tam korzeniem jest ustalone
+        archiwum, tu — drzewo obróbki, które ŻYJE (foldery wędrują między dyskami i rocznikami).
+        Milczące wciągnięcie starego korzenia byłoby zapisem do bazy na podstawie pamięci sprzed
+        miesięcy. Podpowiedź daje jedno kliknięcie różnicy i zero zgadywania."""
+        if self._db_path is None or self._thread is not None:
+            return
+        last = str(self._settings().value("stacks/last_root", "") or "")
+        root = QFileDialog.getExistingDirectory(self, i18n.t("pipeline.dlg.pick_stacks"), last)
+        if not root:
+            return
+        self._settings().setValue("stacks/last_root", root)
+        self._sync_stacks_memo()
+        # Serial ŚWIEŻO dla TEGO korzenia (nie z `_scan_params` — tamten mierzy korzeń archiwum).
+        # Guard mieszania serialu obowiązuje tak samo: '?' do bazy ze znanymi wolumenami podwoiłby
+        # lokacje przy drugim przebiegu i zabrałby drodze idempotencję.
+        serial = volume_serial(root)
+        params = dict(root=root, volume=serial if serial is not None else "?",
+                      drive_letter=(Path(root).drive or None), tier=self.combo_tier.currentData())
+        if not self._serial_guard_ok(params):
+            return
+        self._begin_run()
+        self._start_stage("stacks", **params)
 
     # ---------------------------------------------------------------- akcje (worker)
 
@@ -603,7 +685,8 @@ class PipelineView(QWidget):
         # więc NIE wolno kończyć wątku na pierwszym z nich.
         self._worker.finished.connect(self._thread.quit)
         self._thread.finished.connect(self._cleanup_thread)
-        self._set_running(True, cancellable=stage in ("scan", "all", "presence", "presence-apply"))
+        self._set_running(True, cancellable=stage in ("scan", "stacks", "all",
+                                                      "presence", "presence-apply"))
         self._thread.start()
 
     def _cleanup_thread(self):
@@ -692,7 +775,26 @@ class PipelineView(QWidget):
             return self._format_delta(r)
         if name == "presence":
             return self._format_presence(r)
+        if name == "stacks":
+            return self._format_stacks(r)
         return str(r)
+
+    def _format_stacks(self, s):
+        """Linia raportu drogi „Stosy". ODMOWY mają własne człony i pojawiają się TYLKO, gdy są
+        (QUIET) — ale gdy są, muszą stać obok liczby wciągniętych: „wciągnięto 128" bez „odrzucono
+        3" byłoby raportem, który zataja, że coś zostało za drzwiami. Pochodne obróbki liczymy
+        zawsze, bo to nie odmowa, tylko granica zakresu (§5 briefu P-I)."""
+        czesci = [i18n.t("pipeline.fmt.stacks.taken", n=s.ingested, cand=s.candidates),
+                  i18n.t("pipeline.fmt.stacks.derived", n=s.derived_skipped)]
+        if s.skipped:
+            czesci.append(i18n.t("pipeline.fmt.stacks.skipped", n=s.skipped))
+        if s.rejected_kind:
+            czesci.append(i18n.t("pipeline.fmt.stacks.rejected_kind", n=s.rejected_kind))
+        if s.rejected_unreadable:
+            czesci.append(i18n.t("pipeline.fmt.stacks.rejected_unreadable", n=s.rejected_unreadable))
+        if s.failed:
+            czesci.append(i18n.t("pipeline.fmt.stacks.failed", n=s.failed))
+        return i18n.t("pipeline.fmt.stacks.prefix") + " · ".join(czesci)
 
     def _format_presence(self, s):
         """Linia raportu passa obecności. Zero zniknięć MUSI być zdaniem („nic nie znikło"), nie
@@ -801,6 +903,8 @@ class PipelineView(QWidget):
         nameless = str(r.object_nameless)
         if r.object_nameless_raw:
             nameless += i18n.t("pipeline.delta.nameless_raw", n=r.object_nameless_raw)
+        if r.object_nameless_stacks:
+            nameless += i18n.t("pipeline.delta.nameless_stacks", n=r.object_nameless_stacks)
         return i18n.t(
             "pipeline.fmt.delta", resolved=r.object_resolved, total=total, pct=r.object_pct,
             filters=r.filters_canon, top=top, review=_review_line(r.review),
@@ -820,6 +924,9 @@ class PipelineView(QWidget):
         self.btn_lineage.setEnabled(idle and has_db)
         self.btn_delta.setEnabled(idle and has_db)
         self.btn_presence.setEnabled(idle and self._can_scan())   # potrzebuje drzewa, nie samej bazy
+        # Stosy przynoszą WŁASNY korzeń (dialog), więc jak „Przyjmij nowe" nie zależą od `_root`
+        # trybu zaawansowanego — wymagają samej bazy.
+        self.btn_stacks.setEnabled(idle and has_db)
         self.btn_mark_vanished.setEnabled(idle and self._presence_params is not None)
         self.btn_cancel.setEnabled(running and cancellable)
 

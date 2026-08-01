@@ -183,31 +183,36 @@ def test_review_queue_kubelek_bezimiennych(s8_obj):
     assert q["headerless_count"] == 1                              # nadal sam nullcfg
 
 
+def _partycja(con):
+    """Suma kubełków kolejki, która MUSI równać się `|review_frame_ids|`. JEDEN dom (nie kopia
+    per test): każdy nowy kubełek dopisujesz TU i wszystkie falsyfikatory od razu go pilnują —
+    inaczej trzeci kubełek wchodzi do jednej kopii, a druga cicho zostaje przy dwóch.
+    Ostatni człon jest kind-scopowany: globalny `headerless_count` liczy też kalibrację
+    i `unknown`, więc do partycji się NIE nadaje."""
+    q = queries.review_queue(con)
+    headerless_lights = con.execute(
+        "SELECT count(*) FROM frame f WHERE f.kind IN ('light','master_light') "
+        "AND f.object_id IS NULL "
+        "AND NOT EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id)").fetchone()[0]
+    return (sum(r["n"] for r in q["object_review"]) + q["nameless_count"]
+            + q["nameless_raw_count"] + q["nameless_stacks_count"] + headerless_lights)
+
+
 def test_review_queue_partycja_pokrywa_perspektywe_gridu(s8_obj):
     """Szew z kolejki (rozjazd `queries.py:215` vs `:477`): kubełki kolejki MUSZĄ sumować się do
-    zbioru, który grid pokazuje w perspektywie „Do przeglądu". Trzeci człon jest kind-scopowany —
-    globalny `headerless_count` liczy też kalibrację i `unknown`, więc do partycji się NIE nadaje."""
-    def _partycja():
-        q = queries.review_queue(con)
-        headerless_lights = con.execute(
-            "SELECT count(*) FROM frame f WHERE f.kind IN ('light','master_light') "
-            "AND f.object_id IS NULL "
-            "AND NOT EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id)").fetchone()[0]
-        return (sum(r["n"] for r in q["object_review"]) + q["nameless_count"]
-                + q["nameless_raw_count"] + headerless_lights)
-
+    zbioru, który grid pokazuje w perspektywie „Do przeglądu"."""
     con, ids = s8_obj
     # stan wyjściowy: objrev1+objrev2 (nazwane) + nullcfg (light bez nagłówka) = 3
     assert len(queries.review_frame_ids(con)) == 3
-    assert _partycja() == 3
+    assert _partycja(con) == 3
     _nameless_light(con, "sha-nameless1")
     _nameless_light(con, "sha-nameless2")
     assert len(queries.review_frame_ids(con)) == 5
-    assert _partycja() == 5
+    assert _partycja(con) == 5
     # rozwiązanie klatki opuszcza OBIE strony równania
     repo.assign_object(con, frame_id=ids["frames"]["objrev1"],
                        object_id=ids["objects"]["NGC7000"], object_source="user", now=NOW)
-    assert _partycja() == len(queries.review_frame_ids(con)) == 4
+    assert _partycja(con) == len(queries.review_frame_ids(con)) == 4
 
 
 # --- P-D: drążenie kubełka bezimiennych (D-PD-11) ---
@@ -289,20 +294,61 @@ def test_partycja_przezywa_klatke_raw(s8_obj):
     NULL`), więc samo wycięcie go z `nameless_count` rozspójniłoby partycję dokładnie o jego
     liczbę. Ten test pęka, gdy ktoś skasuje kubełek RAW zamiast go policzyć."""
     con, _ = s8_obj
-
-    def _partycja():
-        q = queries.review_queue(con)
-        headerless_lights = con.execute(
-            "SELECT count(*) FROM frame f WHERE f.kind IN ('light','master_light') "
-            "AND f.object_id IS NULL "
-            "AND NOT EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id)").fetchone()[0]
-        return (sum(r["n"] for r in q["object_review"]) + q["nameless_count"]
-                + q["nameless_raw_count"] + headerless_lights)
-
     baza = len(queries.review_frame_ids(con))
     _nameless_light(con, "sha-part-raw", filetype="raw")
     assert len(queries.review_frame_ids(con)) == baza + 1     # RAW JEST w perspektywie gridu
-    assert _partycja() == baza + 1                            # …i partycja go widzi
+    assert _partycja(con) == baza + 1                         # …i partycja go widzi
+
+
+# --- I-2b/D-P-I-5: gotowy stack jako TRZECI kubełek bezimiennych ---
+
+def _nameless_stack(con, sha):
+    """Gotowy obraz po integracji BEZ karty `OBJECT` — klasa 22 plików realnego drzewa obróbki."""
+    fid, _ = repo.upsert_frame(con, sha1_data=sha, kind="master_light", filetype="xisf",
+                               camera_id=None, now=NOW)
+    repo.record_header(con, frame_id=fid, raw_json="{}", object_raw=None, now=NOW)
+    return fid
+
+
+def test_nameless_stos_ma_wlasny_kubelek_i_nie_wchodzi_do_dialogu(s8_obj):
+    """D-P-I-5: `master_light` liczy się OSOBNO od lightów archiwum, bo droga naprawy jest trzecia
+    — żadna. Drzewo obróbki trzymamy read-only (§5 briefu P-I), więc stack nie ma prawa pojawić
+    się w `nameless_frames` (wejście dialogu „Napraw nagłówek…"), który obiecuje zapis karty."""
+    from horreum.resolver import nameless_lights, nameless_stacks
+
+    con, _ = s8_obj
+    _nameless_light(con, "sha-nl-light")
+    _nameless_stack(con, "sha-nl-stack")
+    q = queries.review_queue(con)
+    assert q["nameless_count"] == nameless_lights(con) == 1            # tylko light archiwum
+    assert q["nameless_stacks_count"] == nameless_stacks(con) == 1     # stos własnym kubełkiem
+    # drążenie (wejście dialogu zapisu) NIE podaje stacku
+    assert [r["frame_id"] for r in queries.nameless_frames(con)] == [
+        con.execute("SELECT id FROM frame WHERE sha1_data='sha-nl-light'").fetchone()[0]]
+
+
+def test_partycja_przezywa_gotowy_stos(s8_obj):
+    """FALSYFIKATOR trzeciego rozdziału (bliźniak testu RAW): stack bez obiektu ZOSTAJE
+    w `review_frame_ids` (predykat pyta o sam brak obiektu, a `master_light` jest kind-em osi),
+    więc wycięcie go z `nameless_count` bez własnego kubełka rozspójnia partycję o jego liczbę."""
+    con, _ = s8_obj
+    baza = len(queries.review_frame_ids(con))
+    _nameless_stack(con, "sha-part-stack")
+    assert len(queries.review_frame_ids(con)) == baza + 1
+    assert _partycja(con) == baza + 1
+
+
+def test_trzy_kubelki_bezimiennych_sa_rozlaczne(s8_obj):
+    """Trzy drogi naprawy — trzy kubełki, ZERO zachodzenia. Gdyby predykaty się nakładały,
+    partycja domykałaby się tylko przypadkiem: nadmiar w jednym kubełku kompensowałby brak
+    w drugim i falsyfikatory wyżej przestałyby cokolwiek pilnować."""
+    from horreum.resolver import nameless_lights, nameless_raw_lights, nameless_stacks
+
+    con, _ = s8_obj
+    _nameless_light(con, "sha-3-fits")
+    _nameless_light(con, "sha-3-raw", filetype="raw")
+    _nameless_stack(con, "sha-3-stack")
+    assert (nameless_lights(con), nameless_raw_lights(con), nameless_stacks(con)) == (1, 1, 1)
 
 
 # --- facets ---

@@ -183,6 +183,9 @@ CATALOG = {
     # ten nie ma czego otworzyć).
     "object.nameless_raw_line": {"pl": "— bez nazwy, format bez karty (RAW): {n}  ·  do przypisania ręcznie",
                                  "en": "— nameless, format has no card (RAW): {n}  ·  assign by hand"},
+    "object.nameless_stacks_line": {
+        "pl": "— bez nazwy, gotowe stosy: {n}  ·  drzewo obróbki jest read-only",
+        "en": "— nameless, finished stacks: {n}  ·  the processing tree is read-only"},
     "object.unreadable_line": {"pl": "— kopie nieczytelne: {n}", "en": "— unreadable copies: {n}"},
     "object.review_info": {
         "pl": "— config-review: {config}  ·  bez nagłówka: {headerless}  (rozwiązywanie w przygotowaniu)",
@@ -784,6 +787,7 @@ CATALOG = {
     "pipeline.stage.lineage": {"pl": "Rodowód", "en": "Lineage"},
     "pipeline.stage.delta": {"pl": "Delta", "en": "Delta"},
     "pipeline.stage.presence": {"pl": "Obecność", "en": "Presence"},
+    "pipeline.stage.stacks": {"pl": "Stosy", "en": "Stacks"},
 
     # --- powody przeglądu w raporcie delty: _REVIEW_REASONS trzyma KLUCZE ---
     "pipeline.reason.no_config": {"pl": "bez konfiguracji", "en": "no config"},
@@ -848,9 +852,29 @@ CATALOG = {
     "pipeline.btn.mark_vanished": {"pl": "Oznacz zniknięte", "en": "Mark vanished"},
     "pipeline.btn.show_collections": {"pl": "Pokaż w Zbiorach", "en": "Show in Collections"},
 
+    # --- droga „Stosy" (I-2b, P-I): gotowe obrazy po integracji z drzewa OBRÓBKI ---
+    "pipeline.stacks_head": {
+        "pl": "Stosy — gotowe obrazy po integracji (drzewo obróbki, osobno od archiwum):",
+        "en": "Stacks — finished images after integration (processing tree, separate from the archive):",
+    },
+    "pipeline.btn.stacks": {"pl": "Wciągnij stosy…", "en": "Take in stacks…"},
+    "pipeline.tip.stacks": {
+        "pl": "Wskaż korzeń drzewa obróbki — Horreum wciągnie same pliki `masterLight*.xisf` "
+              "(bez plików pochodnych) i nie ruszy ani jednego bajtu",
+        "en": "Choose the processing tree root — Horreum takes only `masterLight*.xisf` files "
+              "(no derived files) and touches not a single byte",
+    },
+    "pipeline.stacks_last": {"pl": "ostatni korzeń: {root}", "en": "last root: {root}"},
+    "pipeline.stacks_first": {
+        "pl": "(jeszcze nie wskazano korzenia)", "en": "(no root chosen yet)",
+    },
+
     # --- dialogi wyboru katalogu ---
     "pipeline.dlg.pick_scan": {"pl": "Wskaż katalog do skanu", "en": "Choose a folder to scan"},
     "pipeline.dlg.pick_delivery": {"pl": "Wskaż katalog dostawy", "en": "Choose a delivery folder"},
+    "pipeline.dlg.pick_stacks": {
+        "pl": "Wskaż korzeń drzewa obróbki", "en": "Choose the processing tree root",
+    },
 
     # --- guard serialu / błąd ---
     "pipeline.guard.mixed": {
@@ -914,6 +938,24 @@ CATALOG = {
               "(testimonies {hdr_ref}, rebound {rebound}) · headers {headers} · "
               "review f/{frame_review} c/{camera_review} kind/{kind}",
     },
+    # Droga „Stosy" — człony składane w `PipelineView._format_stacks`; odmowy TYLKO gdy niezerowe.
+    "pipeline.fmt.stacks.prefix": {"pl": "[stosy] ", "en": "[stacks] "},
+    "pipeline.fmt.stacks.taken": {
+        "pl": "wciągnięte {n} z {cand} kandydatów", "en": "taken {n} of {cand} candidates",
+    },
+    "pipeline.fmt.stacks.derived": {
+        "pl": "pochodne obróbki poza zakresem {n}", "en": "derived files out of scope {n}",
+    },
+    "pipeline.fmt.stacks.skipped": {"pl": "znane, pominięte {n}", "en": "known, skipped {n}"},
+    "pipeline.fmt.stacks.rejected_kind": {
+        "pl": "ODRZUCONE (nie zeznają stacku) {n}", "en": "REJECTED (not testifying a stack) {n}",
+    },
+    "pipeline.fmt.stacks.rejected_unreadable": {
+        "pl": "ODRZUCONE (nagłówek nieczytelny) {n}", "en": "REJECTED (unreadable header) {n}",
+    },
+    "pipeline.fmt.stacks.failed": {
+        "pl": "błędy odczytu, bez zapisu {n}", "en": "read errors, nothing written {n}",
+    },
     "pipeline.fmt.group": {
         "pl": "[grupuj] nagłówki {headers} · teleskopy {telescopes} · bez TELESCOP {no_tel} · "
               "kalibracja poza osią {off_axis}{unassigned} · konfiguracje {conf_prop}/{conf_assign} · "
@@ -959,6 +1001,9 @@ CATALOG = {
     # szablonu: przy archiwum bez lustrzanki (dziś 0) stałe „RAW: 0" byłoby szumem w każdej dostawie.
     "pipeline.delta.nameless_raw": {"pl": "  (+{n} RAW — format bez karty, do przypisania ręcznie)",
                                     "en": "  (+{n} RAW — format has no card, assign by hand)"},
+    "pipeline.delta.nameless_stacks": {
+        "pl": "  (+{n} gotowych stosów — drzewo obróbki jest read-only)",
+        "en": "  (+{n} finished stacks — the processing tree is read-only)"},
 
     # --- raport passa obecności: części składane przez ` · ` ---
     "pipeline.fmt.presence.not_done": {

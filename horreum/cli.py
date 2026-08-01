@@ -62,6 +62,20 @@ def main(argv=None):
                         help="trwały identyfikator wolumenu (domyślnie placeholder '?')")
     p_scan.add_argument("--tier", default=None, help="cold|scratch")
 
+    # Droga „Stosy" (I-2b, P-I / D-P-I-1 wariant A) — OSOBNA od `scan` z decyzji, nie z wygody:
+    # drzewo obróbki nie jest archiwum, więc wskazuje się je świadomym gestem, a standing-op
+    # doskanu zostaje nietknięty.
+    p_stk = sub.add_parser("stacks",
+                           help="wciągnij GOTOWE OBRAZY po integracji (`masterLight*.xisf`) ze "
+                                "wskazanego drzewa obróbki — read-only, poza skanem archiwum")
+    p_stk.add_argument("root", help="korzeń drzewa obróbki")
+    p_stk.add_argument("db", help="ścieżka pliku bazy")
+    p_stk.add_argument("--volume", default="?",
+                       help="trwały identyfikator wolumenu (bez niego brama przyrostowa OFF)")
+    p_stk.add_argument("--tier", default=None, help="cold|scratch")
+    p_stk.add_argument("--limit", type=int, default=10,
+                       help="ile odrzuconych/nieudanych ścieżek wypisać (domyślnie 10)")
+
     p_group = sub.add_parser("group", help="grouper teleskopów + config (krok zbiorczy po skanie)")
     p_group.add_argument("db", help="ścieżka pliku bazy")
 
@@ -212,6 +226,17 @@ def main(argv=None):
         con.close()
         print(f"Horreum scan {args.root} -> {args.db}: {summary}")   # ASCII: konsola Windows = cp1250
         return 0
+    if args.cmd == "stacks":
+        from .scan import scan_stacks                    # lazy: nie ładuj astropy dla init/--version
+        now = datetime.now(timezone.utc).isoformat()
+        con = db.open_db(args.db)
+        s = scan_stacks(con, args.root, volume=args.volume,
+                        drive_letter=(Path(args.root).drive or None), tier=args.tier, now=now)
+        con.close()
+        print(_format_stacks(args.root, args.db, s, limit=args.limit))   # ASCII (cp1250)
+        # Odmowa NIE jest błędem drogi (plik po prostu nie jest stackiem), ale kod wyjścia ma ją
+        # nieść: skrypt, który woła tę komendę, nie ma czytać prozy, żeby dowiedzieć się o brakach.
+        return 1 if (s.rejected_kind or s.rejected_unreadable or s.failed) else 0
     if args.cmd == "group":
         from .grouper import run_grouper                 # lazy: nie ładuj resolve/astropy dla init
         now = datetime.now(timezone.utc).isoformat()
@@ -827,6 +852,35 @@ def _plan_json(res):
     }
 
 
+def _format_stacks(root, db_path, s, limit=10):
+    """Sformatuj `StackScanSummary` do ASCII (konsola Windows = cp1250).
+
+    Raport nazywa ODMOWY, nie tylko sukcesy: droga wpuszczajaca 128 plikow z 259 pasujacych nazwie
+    musi powiedziec, co zostawila i dlaczego — inaczej licznik „wciagnieto 128" jest twierdzeniem
+    bez dowodu. Sciezki ucinane do `limit`, ale liczniki ZAWSZE pelne (ucinanie listy nie ma prawa
+    ucinac faktu)."""
+    lines = [f"Horreum stacks {root} -> {db_path}:"]
+    lines.append(f"  kandydaci: {s.candidates} (pochodne obrobki pominiete: {s.derived_skipped})")
+    lines.append(f"  wciagniete: {s.ingested}; pominiete brama (mtime): {s.skipped}")
+    lines.append(f"  nowe klatki: {s.scan.frames_new}; znane: {s.scan.frames_existing}; "
+                 f"nowe kopie: {s.scan.locations_new}; odswiezone: {s.scan.locations_refreshed}")
+    if s.rejected_kind:
+        lines.append(f"  ODRZUCONE (zeznanie != master_light): {s.rejected_kind} {s.kinds_rejected}")
+    if s.rejected_unreadable:
+        lines.append(f"  ODRZUCONE (naglowek nieczytelny): {s.rejected_unreadable}")
+    for p in s.rejected_paths[:limit]:
+        lines.append(f"    {p}")
+    if len(s.rejected_paths) > limit:
+        lines.append(f"    ... i {len(s.rejected_paths) - limit} wiecej")
+    if s.failed:
+        lines.append(f"  BLEDY I/O (zero zapisu): {s.failed}")
+        for p in s.failed_paths[:limit]:
+            lines.append(f"    {p}")
+    if s.cancelled:
+        lines.append("  PRZERWANE na granicy pliku — baza spojna, ponowny przebieg dokonczy")
+    return "\n".join(lines)
+
+
 def _format_delta(db_path, rep):
     """Sformatuj DeltaReport do czytelnego ASCII (konsola Windows = cp1250 — bez znaków spoza ASCII)."""
     lines = [f"Horreum delta {db_path}:"]
@@ -843,6 +897,11 @@ def _format_delta(db_path, rep):
     if rep.object_nameless_raw:
         lines.append(f"    z tego format bez karty (RAW, do przypisania recznie): "
                      f"{rep.object_nameless_raw}")
+    # Trzecia droga: zadna. Gotowy obraz po integracji lezy w drzewie obrobki, ktore P-I trzyma
+    # read-only — ten wiersz INFORMUJE, ile obrazow nie wie, co przedstawia (D-P-I-5).
+    if rep.object_nameless_stacks:
+        lines.append(f"    z tego gotowe stosy (drzewo obrobki — read-only): "
+                     f"{rep.object_nameless_stacks}")
     lines.append(f"  filter_canon ustawione: {rep.filters_canon}")
     # Liczba wiodaca = DISTINCT klatek; powody sie NAKLADAJA (brak kamery => tez brak configu),
     # wiec ich suma bywa wieksza niz klatek — swiadomie nie jest to rozbicie.

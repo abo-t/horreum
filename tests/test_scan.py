@@ -15,9 +15,9 @@ from astropy.io import fits
 from horreum import db
 from horreum.scan import (
     ScanRecord, ScanSummary, _already_scanned, backfill_xisf_headers, header_dict_from_cards,
-    ingest_record, iter_fits, iter_headers, locate_value_span, quote_fits, read_fits_header,
-    read_fits_meta, read_header, read_xisf_header, read_xisf_meta, read_xisf_meta_full,
-    scan_file, scan_tree,
+    ingest_record, iter_fits, iter_headers, iter_stacks, locate_value_span, quote_fits,
+    read_fits_header, read_fits_meta, read_header, read_xisf_header, read_xisf_meta,
+    read_xisf_meta_full, scan_file, scan_stacks, scan_tree,
 )
 
 NOW = "2026-06-28T12:00:00"
@@ -1365,4 +1365,203 @@ def test_backstop_nieznana_sciezka_flag_sha1_placeholder(tmp_path, monkeypatch):
     assert s.frame_review == 1
     assert con.execute("SELECT target FROM event WHERE verb='frame.review'").fetchone()["target"] == "sha1:?"
     assert con.execute("SELECT count(*) FROM location").fetchone()[0] == 0    # nic nie powstało
+    con.close()
+
+
+# ---------------------------------------------------------------------------------------------------
+# Droga „Stosy" (I-2b, P-I / D-P-I-1 wariant A): gotowe obrazy po integracji ze wskazanego drzewa
+# OBRÓBKI. Dwie bramki o różnych zadaniach — nazwa wyznacza ZAKRES (§5), zeznanie TOŻSAMOŚĆ.
+# ---------------------------------------------------------------------------------------------------
+
+def _stack(path, imagetyp="Master Light", n=0):
+    """Plik o konwencji nazwy WBPP z podanym `IMAGETYP`. Treść unikalna (`n`) → własny sha1."""
+    return _write_xisf_attach(path.parent, path.name, bytes([n]) * 32,
+                              keywords=[("IMAGETYP", f"'{imagetyp}'"),
+                                        ("INSTRUME", "'ZWO ASI2600MM Pro'"),
+                                        ("XPIXSZ", "3.76")])
+
+
+def test_iter_stacks_dwa_sita_nazwa_i_pochodne(tmp_path):
+    """Sito 1 (prefiks `masterLight`) zawęża drzewo; sito 2 (znaczniki pochodnych) egzekwuje
+    granicę §5 briefu P-I. Odrzucenia sita 2 są WIDOCZNE (`derived_out`) — wykluczenie schowane
+    w różnicy liczników byłoby twierdzeniem bez dowodu."""
+    t = tmp_path / "obrobka"
+    t.mkdir()
+    for name in ("masterLight_FILTER-H_mono.xisf",              # kandydat
+                 "masterLight_FILTER-H_mono_autocrop.xisf",     # pochodna
+                 "masterLight_FILTER-O_mono_starless.xisf",     # pochodna
+                 "integration_wynik.xisf",                      # inna konwencja — poza prefiksem
+                 "MASTERLIGHT_wielkie.xisf"):                   # prefiks NIEWRAŻLIWY na wielkość
+        (t / name).write_bytes(b"x")
+    derived = []
+    got = [p.name for p in iter_stacks(t, derived_out=derived)]
+    # Kolejność dziedziczy po `_iter_suffixes` (sort po `Path`, na Windowsie NIEWRAŻLIWY na wielkość
+    # liter) — kontraktem jest DETERMINIZM, nie konkretny porządek bajtowy.
+    assert got == ["masterLight_FILTER-H_mono.xisf", "MASTERLIGHT_wielkie.xisf"]
+    assert sorted(Path(p).name for p in derived) == [
+        "masterLight_FILTER-H_mono_autocrop.xisf", "masterLight_FILTER-O_mono_starless.xisf"]
+
+
+def test_scan_stacks_wciaga_tylko_zeznane_stacki(tmp_path):
+    """BRAMKA TOŻSAMOŚCI: nazwa NIE wystarcza. Plik nazwany po WBPP, ale zeznający inny rodzaj,
+    jest ODRZUCANY z policzonym `kind` i ZERO zapisu — droga nie wciąga niczego „na wszelki
+    wypadek". Zmierzone na realnym drzewie: 128/128 zeznaje `master_light`, więc ta bramka dziś
+    nic nie odsiewa i ma tak zostać; jej rolą jest odmowa w dniu, w którym nazwa skłamie."""
+    con = _db(tmp_path)
+    t = tmp_path / "obrobka"
+    t.mkdir()
+    _stack(t / "masterLight_A.xisf", n=1)
+    _stack(t / "masterLight_B.xisf", n=2)
+    _stack(t / "masterLight_udaje.xisf", imagetyp="Master Flat", n=3)
+    _stack(t / "masterLight_C_autocrop.xisf", n=4)              # pochodna — poza zakresem
+    s = scan_stacks(con, t, now=NOW)
+    assert (s.candidates, s.ingested, s.derived_skipped) == (3, 2, 1)
+    assert s.rejected_kind == 1 and s.kinds_rejected == {"master_flat": 1}
+    assert con.execute("SELECT count(*) FROM frame").fetchone()[0] == 2
+    assert {r[0] for r in con.execute("SELECT kind FROM frame")} == {"master_light"}
+    con.close()
+
+
+def test_scan_stacks_idempotentny_na_serialu(tmp_path):
+    """IDEMPOTENCJA na tej samej bramie, co skan (`(volume, path, mtime)`): drugi przebieg na
+    niezmienionym drzewie to `skipped == candidates` i ZERO nowych klatek oraz ZERO DML."""
+    con = _db(tmp_path)
+    t = tmp_path / "obrobka"
+    t.mkdir()
+    _stack(t / "masterLight_A.xisf", n=1)
+    _stack(t / "masterLight_B.xisf", n=2)
+    s1 = scan_stacks(con, t, volume="VOL1", now=NOW)
+    assert (s1.ingested, s1.skipped) == (2, 0)
+    ev1 = con.execute("SELECT count(*) FROM event").fetchone()[0]
+    s2 = scan_stacks(con, t, volume="VOL1", now=NOW)
+    assert (s2.ingested, s2.skipped, s2.candidates) == (0, 2, 2)
+    assert con.execute("SELECT count(*) FROM event").fetchone()[0] == ev1   # zero DML
+    assert con.execute("SELECT count(*) FROM frame").fetchone()[0] == 2
+    con.close()
+
+
+def test_scan_stacks_blad_odczytu_nie_zapisuje_nic(tmp_path, monkeypatch):
+    """ZERO ZAPISU przy odmowie — powód ten sam, co w `backfill_xisf_headers`: to sterownik
+    celowany, NIE skan i NIE pass obecności. Drzewo obróbki jest żywe i nieuporządkowane, więc
+    droga zapisująca po każdym potknięciu zaśmieciłaby kolejkę przeglądu markerami i szkieletami."""
+    con = _db(tmp_path)
+    t = tmp_path / "obrobka"
+    t.mkdir()
+    _stack(t / "masterLight_A.xisf", n=1)
+    monkeypatch.setattr("horreum.scan.scan_file", _raise_oserror("SMB padl"))
+    s = scan_stacks(con, t, now=NOW)
+    assert s.failed == 1 and s.ingested == 0 and s.failed_paths
+    assert con.execute("SELECT count(*) FROM frame").fetchone()[0] == 0
+    assert con.execute("SELECT count(*) FROM location").fetchone()[0] == 0
+    assert con.execute("SELECT count(*) FROM event").fetchone()[0] == 0     # ani jednego markera
+    con.close()
+
+
+def test_scan_stacks_nieczytelny_naglowek_odrzucony_bez_szkieletu(tmp_path):
+    """Nagłówek nieczytelny = nie da się POTWIERDZIĆ, że plik jest stackiem. Skan drzewa zrobiłby
+    tu frame-szkielet (W1) — droga „Stosy" NIE, bo wciągałaby do archiwum plik, o którym wie
+    wyłącznie tyle, że ktoś go tak nazwał."""
+    con = _db(tmp_path)
+    t = tmp_path / "obrobka"
+    t.mkdir()
+    (t / "masterLight_zepsuty.xisf").write_bytes(b"NIE-XISF" + b"\x00" * 64)
+    s = scan_stacks(con, t, now=NOW)
+    assert s.rejected_unreadable == 1 and s.ingested == 0
+    assert con.execute("SELECT count(*) FROM frame").fetchone()[0] == 0
+    con.close()
+
+
+def test_scan_stacks_actor_odroznia_droge_w_dzienniku(tmp_path):
+    """Dziennik ma odróżniać tę drogę od doskanu archiwum (wzorzec `actor='backfill:xisf'`):
+    bez tego nie da się później odpowiedzieć, czy klatka przyszła ze skanu archiwum, czy z drzewa
+    obróbki — a to dwa różne zakresy z dwiema różnymi odwracalnościami."""
+    con = _db(tmp_path)
+    t = tmp_path / "obrobka"
+    t.mkdir()
+    _stack(t / "masterLight_A.xisf", n=1)
+    scan_stacks(con, t, now=NOW)
+    actors = {r[0] for r in con.execute("SELECT DISTINCT actor FROM event")}
+    assert actors == {"stacks"}
+    con.close()
+
+
+def test_scan_stacks_anulowanie_na_granicy_pliku(tmp_path):
+    """Kontrakt anulowania jak w `scan_tree`: przerwanie na GRANICY pliku — bieżący plik albo
+    cały wciągnięty, albo nietknięty. Baza zostaje spójna, ponowny przebieg dokończy."""
+    con = _db(tmp_path)
+    t = tmp_path / "obrobka"
+    t.mkdir()
+    for i in range(4):
+        _stack(t / f"masterLight_{i}.xisf", n=i)
+    stan = {"n": 0}
+
+    def _cancel():
+        stan["n"] += 1
+        return stan["n"] > 2                       # po dwóch plikach
+
+    s = scan_stacks(con, t, now=NOW, should_cancel=_cancel)
+    assert s.cancelled is True and s.ingested == 2
+    assert con.execute("SELECT count(*) FROM frame").fetchone()[0] == 2
+    s2 = scan_stacks(con, t, now=NOW)              # dokończenie
+    assert s2.cancelled is False
+    assert con.execute("SELECT count(*) FROM frame").fetchone()[0] == 4
+    con.close()
+
+
+def test_scan_stacks_nie_rusza_bajtow(tmp_path):
+    """§5 briefu P-I: tor jest w CAŁOŚCI read-only — ani jeden bajt drzewa obróbki się nie zmienia
+    (łącznie z plikami odrzuconymi i pochodnymi, których droga w ogóle nie otwiera)."""
+    con = _db(tmp_path)
+    t = tmp_path / "obrobka"
+    t.mkdir()
+    _stack(t / "masterLight_A.xisf", n=1)
+    _stack(t / "masterLight_udaje.xisf", imagetyp="Master Flat", n=2)
+    _stack(t / "masterLight_A_autocrop.xisf", n=3)
+    przed = {p.name: (p.read_bytes(), p.stat().st_mtime) for p in t.iterdir()}
+    scan_stacks(con, t, now=NOW)
+    assert {p.name: (p.read_bytes(), p.stat().st_mtime) for p in t.iterdir()} == przed
+    con.close()
+
+
+def test_stos_powoluje_kamere_ale_nie_wnosi_piksela(tmp_path):
+    """Decyzja Zdzinia 2026-08-02 (I-2b): „oś podziału masterów po pikselu jest niepotrzebna —
+    liczy się, JAKĄ KAMERĄ robione". Gotowy stack POWOŁUJE kamerę (model), ale jego `XPIXSZ`
+    nie wchodzi na oś: `_drizzle_2x` zapisuje piksel SIATKI WYNIKOWEJ (1.88 przy matrycy 3.76),
+    a to opis obróbki, nie sprzętu."""
+    con = _db(tmp_path)
+    t = tmp_path / "obrobka"
+    t.mkdir()
+    _write_xisf_attach(t, "masterLight_drizzle.xisf", b"\x01" * 32, keywords=[
+        ("IMAGETYP", "'Master Light'"), ("INSTRUME", "'ZWO ASI2600MM Pro'"), ("XPIXSZ", "1.88")])
+    s = scan_stacks(con, t, now=NOW)
+    assert s.ingested == 1
+    cam = con.execute("SELECT model_canon, pixel_um FROM camera").fetchall()
+    assert [(r[0], r[1]) for r in cam] == [("ASI2600MM", None)]   # model JEST, piksel NIE
+    # zeznanie pliku zostaje NIETKNIĘTE — bramka dotyczy OSI, nie audytu
+    assert con.execute(
+        "SELECT value_raw FROM cards WHERE keyword='XPIXSZ'").fetchone()[0] == "1.88"
+    con.close()
+
+
+def test_stos_nie_konfliktuje_piksela_znanej_kamery(tmp_path):
+    """FALSYFIKATOR decyzji: bez bramki `NO_PIXEL_KINDS` stack z innym `XPIXSZ` zapalał
+    `camera.pixel_conflict` na kamerze wyłonionej z archiwum (zmierzone na realnych danych:
+    2 kamery — ASI2600MM przez drizzle i SONYA7RM3 przez Sony). Klatka z akwizycji nadal
+    piksel wnosi — bramka jest wąska i dotyczy WYŁĄCZNIE produktu integracji."""
+    con = _db(tmp_path)
+    arch = tmp_path / "archiwum"
+    arch.mkdir()
+    _light(arch / "l.fits", 1)                      # light z akwizycji: XPIXSZ 3.76 → oś
+    scan_tree(con, arch, now=NOW)
+    assert con.execute("SELECT pixel_um FROM camera").fetchone()[0] == 3.76
+
+    t = tmp_path / "obrobka"
+    t.mkdir()
+    _write_xisf_attach(t, "masterLight_drizzle.xisf", b"\x02" * 32, keywords=[
+        ("IMAGETYP", "'Master Light'"), ("INSTRUME", "'ZWO ASI2600MM Pro'"), ("XPIXSZ", "1.88")])
+    scan_stacks(con, t, now=NOW)
+    row = con.execute("SELECT pixel_um, pixel_conflict FROM camera").fetchone()
+    assert (row[0], row[1]) == (3.76, 0)            # piksel archiwum NIETKNIĘTY, zero konfliktu
+    assert con.execute(
+        "SELECT count(*) FROM event WHERE verb='camera.pixel_conflict'").fetchone()[0] == 0
     con.close()

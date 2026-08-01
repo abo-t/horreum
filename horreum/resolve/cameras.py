@@ -12,6 +12,24 @@ from dataclasses import dataclass
 from ._coerce import _to_float
 from ._text import norm
 
+# Rodzaje, które NIE zeznają o rozmiarze piksela MATRYCY — decyzja Zdzinia 2026-08-02 (I-2b):
+# „oś podziału masterów na piksele jest mi niepotrzebna, ważne jaką kamerą robione".
+#
+# Bliźniak `grouper.NO_TELESCOPE_KINDS` i `resolver.NO_OBJECT_CARD_FILETYPES` — ta sama figura:
+# populacja, która pewnego faktu NIE MA Z DEFINICJI, wypada z JEGO osi, a nie z osi w ogóle.
+# Gotowy obraz po integracji nadal powołuje KAMERĘ (to samo `model_canon`), bo „czym robione"
+# jest pytaniem sensownym; przestaje tylko wnosić `XPIXSZ`.
+#
+# DLACZEGO — zmierzone na 128 realnych stosach, dwie różne przyczyny tego samego objawu:
+#   * `_drizzle_2x` zapisuje `XPIXSZ=1.88` przy matrycy 3.76. To NIE jest błąd danych: drizzle
+#     zagęszcza siatkę, więc produkt uczciwie opisuje piksel WYNIKOWY. Tożsamość kamery opisuje
+#     jednak sprzęt, a nie siatkę wyjściową — mieszanie ich rozbiłoby jedną kamerę na dwie.
+#   * korpusy Sony podają w produkcie integracji `5.4` tam, gdzie archiwum zna `4.86` (ILCE-7RM3A),
+#     i tam, gdzie nie zna nic (ILCE-7S — EXIF piksela nie podaje). Ta wartość jest WĄTPLIWA
+#     i nie ma prawa nadpisać ani podważyć zeznania klatek z akwizycji.
+# Bez tej bramki oba przypadki zapalały `camera.pixel_conflict` na osi (zmierzone: 2 kamery).
+NO_PIXEL_KINDS = frozenset({"master_light"})
+
 
 def normalize_camera(instrume):
     """Znormalizuj kamerę: 'ZWO ASI2600MM Pro' -> 'ASI2600MM'. None gdy brak.
@@ -79,13 +97,19 @@ class CameraIdentity:
     raw_instrume: object         # surowy INSTRUME (audyt) | None
 
 
-def camera_identity(header, *, raw_format=None):
+def camera_identity(header, *, raw_format=None, kind=None):
     """Wyłoń tożsamość kamery ze zeznania nagłówka (dict ze skanu). Brief przejścia §3.
 
     `raw_format` (#2, D-R-2/znal.2): FAKT formatu pliku (RAW/DSLR), NIE karta nagłówka — wołający
     (`scan.ingest_record`) podaje go z rozszerzenia, bo zeznanie EXIF nie niesie BAYERPAT, a DSLR
     to zawsze kolor (mozaika w formacie). Aktywuje gałąź `is_mono(raw_format=…)`; FITS/XISF podają
     None → zachowanie bez zmian. NIE przemycamy markera do dict-a (byłaby to fabrykacja karty).
+
+    `kind` (I-2b, decyzja Zdzinia 2026-08-02): rodzaj klatki — TEŻ fakt spoza nagłówka w sensie osi
+    (wyprowadza go `scan._derive_kind`). Służy WYŁĄCZNIE bramce `NO_PIXEL_KINDS`: rodzaj, który nie
+    zeznaje o pikselu matrycy, oddaje `pixel_um=None` mimo obecnej karty `XPIXSZ`. Model wraca
+    normalnie — kamera zostaje wyłoniona, bo „czym robione" pozostaje pytaniem sensownym.
+    `None` (domyślnie) = zachowanie bez zmian; karta rządzi.
 
     KONTRAKT ODWRÓCONY (R1#3/R2#4): tożsamość wymaga TYLKO `model_canon` — po naprawie nagłówków
     INSTRUME jest w 100% klatek, a model rozstrzyga oś. `pixel_um` to Optional WŁAŚCIWOŚĆ
@@ -105,7 +129,11 @@ def camera_identity(header, *, raw_format=None):
     """
     raw_instrume = header.get("INSTRUME")
     model_canon = normalize_camera(raw_instrume)
-    pixel_um = _to_float(header.get("XPIXSZ"))   # W3: XISF zwraca string → rzut na float
+    # Bramka PRZED rzutem, nie po: dla `NO_PIXEL_KINDS` karta `XPIXSZ` w ogóle nie wchodzi na oś
+    # (nie „wchodzi i jest ignorowana"), więc `upsert_camera` nie ma czego uzupełnić ani z czym
+    # skonfliktować — a zeznanie pliku zostaje nietknięte w `header`/`cards` do audytu.
+    pixel_um = (None if kind in NO_PIXEL_KINDS
+                else _to_float(header.get("XPIXSZ")))   # W3: XISF zwraca string → rzut na float
     if not model_canon:
         return None
     mono, source = is_mono(bayerpat=header.get("BAYERPAT"), model_canon=model_canon,

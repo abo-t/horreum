@@ -418,7 +418,9 @@ def test_kopie_nieczytelne_drazenie_do_dokladnych_kopii(view, qapp):
     # Zawijanie WYŁĄCZONE — inaczej elizja ścieżki (jedno słowo, zero spacji) tnie ją do „R:..."
     # niezależnie od szerokości sekcji i kolumna jest równie nieczytelna, co przed zmianą.
     assert not v.frames.wordWrap()
-    v.resize(1146, 720)                                      # deklarowana podłoga okna
+    v.resize(1073, 720)                       # podłoga sprzed D-0801-1, zmierzona realnym fontem
+    #                                           („1146" z sondy offscreen było zawyżone) — węższe
+    #                                           okno jest tu OSTRZEJSZYM testem niż dzisiejsze 1310
     qapp.processEvents()
     assert (hh.sectionPosition(COPY_COL_REASON) + hh.sectionSize(COPY_COL_REASON)
             <= v.frames.viewport().width())

@@ -343,7 +343,8 @@ class PipelineView(QWidget):
         # BEZ zawijania: zdanie ma ~46 znaków (~300 px), a etykieta z `wordWrap` dostaje od Qt małą
         # preferowaną szerokość i łamie się na dwie linie mimo wolnego miejsca — wtedy przycisk stoi
         # przy PIERWSZEJ linii, a reszta zdania wisi pod nim. Cały wiersz (zdanie + 2 przyciski) mieści
-        # się w ~600 px, więc nie podnosi podłogi szerokości okna (dziś 1146 px, wiz P1 #8).
+        # się w ~600 px, więc nie podnosi podłogi szerokości okna (dziś **1310 px** — D-0801-1, wcześniej
+        # 1073 zmierzone realnym fontem; zapis „1146" pochodził z sondy offscreen i był zawyżony).
         self.lbl_vanished.setWordWrap(False)
         _fv = self.lbl_vanished.font()
         _fv.setBold(True)                # to jedyny komunikat Dostawy o UTRACIE — nie może ważyć

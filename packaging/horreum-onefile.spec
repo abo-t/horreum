@@ -71,12 +71,12 @@ excludes = [
 # pathex = korzen repo: entry-skrypt lezy w horreum/gui/, nie w korzeniu -> bez tego `import horreum`
 # padlby w Analysis.
 #
-# UWAGA: build.ps1 NIE buduje tego speca (robi wylacznie onedir/horreum.spec), wiec ZADEN jego pas
-# bezpieczenstwa tu nie dziala. Przed kazdym buildem onefile ZROB RECZNIE w .venv-build:
-#   pip uninstall -y pytest        (obecny pytest wywala hook-astropy -> Analysis)
-#   pip install -e .               (metadane = numer wersji w exe; zmierzone 2026-08-01: venv mial
-#                                   `horreum 0.0.1`, czyli numer sprzed wszystkich wydan)
-# Bramka tests/test_version.py TEGO NIE ZLAPIE -- pilnuje dev-enva, nie .venv-build.
+# Ten spec buduje `build.ps1 -Onefile` (od 2026-08-01) i to ON niesie pasy bezpieczenstwa tej
+# drogi: asercja "pytest NIEOBECNY" (obecny pytest wywala hook-astropy -> Analysis), zawsze-swiezy
+# `pip install -e .` (metadane = numer wersji w exe; zmierzone 2026-08-01: venv mial `horreum
+# 0.0.1`, numer sprzed wszystkich wydan) oraz sonda tytulu okna z procesu POTOMNEGO (bootloader
+# onefile ma pusty MainWindowTitle). Build reczny bez skryptu = te same trzy kroki na Twojej glowie;
+# bramka tests/test_version.py ICH NIE ZLAPIE -- pilnuje dev-enva, nie .venv-build.
 
 a = Analysis(
     [os.path.join(REPO_ROOT, "horreum", "gui", "__main__.py")],

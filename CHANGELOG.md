@@ -6,6 +6,8 @@ schemat i API mogą się jeszcze zmieniać.
 
 ## [Niewydane]
 
+## [0.5.0] — 2026-08-01
+
 Planer celów: odpowiedź na pytanie „co dziś mam na niebie, w odpowiedniej wielkości i odpowiednich
 filtrach" — z katalogu, Twojego sprzętu, nocy i tego, co już masz w archiwum.
 
@@ -187,7 +189,8 @@ Fundament: przejście na model „baza = autorytet, `sha1` = tożsamość".
 - **Import zasilający** świeżej bazy z bazy‑dawcy (read‑only).
 - **CLI**: `init` / `scan` / `group` / `resolve` / `delta`.
 
-[Niewydane]: https://github.com/abo-t/horreum/compare/v0.4.0...HEAD
+[Niewydane]: https://github.com/abo-t/horreum/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/abo-t/horreum/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/abo-t/horreum/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/abo-t/horreum/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/abo-t/horreum/compare/v0.3.0...v0.3.1

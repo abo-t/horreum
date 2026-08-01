@@ -1,0 +1,5 @@
+# Bramka klasy CRLF (D-0731-16, decyzja Zdzinia 2026-08-01): skrypty sesji 0731 przestawily
+# 6 plikow z LF na CRLF — diff commitu mial 3735 linii przy 183 realnych zmianach i zresetowal
+# blame planner.py. Ten plik broni przed powtorka z KAZDEGO narzedzia: git normalizuje *.py
+# do LF przy stage'owaniu niezaleznie od tego, co narzedzie zapisalo na dysku.
+*.py text eol=lf

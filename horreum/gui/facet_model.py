@@ -67,6 +67,22 @@ def cycle(state: dict, facet: str, value, label=None) -> dict:
     return out
 
 
+def toggle_exclude(state: dict, facet: str, value, label=None) -> dict:
+    """NOWY stan po WYKLUCZENIU wprost: none/in → ex, ex → none (skrót prawego klika listwy).
+
+    Nie zastępuje `cycle`, tylko skraca do niego drogę: „pokaż wszystko OPRÓCZ tego" kosztowało dwa
+    kliki przez stan `in`, a między nimi zbiór zwężał się do JEDNEJ wartości i listwa przeliczała
+    liczniki na zbiorze, którego user nigdy nie chciał zobaczyć. Idempotencja jest tu WŁASNOŚCIĄ,
+    nie efektem ubocznym: powtórny prawy klik zdejmuje wykluczenie, więc gest ma drogę powrotną.
+    Wynik przechodzi przez `cycle`, więc normalizacja pustych grup ma JEDNEGO właściciela (SPOT)."""
+    sel = selection(state, facet, value)
+    if sel == "ex":
+        return cycle(state, facet, value, label)              # ex → none
+    if sel == "in":
+        return cycle(state, facet, value, label)              # in → ex
+    return cycle(cycle(state, facet, value, label), facet, value, label)   # none → in → ex
+
+
 def sibling_state(state: dict, facet: str) -> dict:
     """Stan bez CAŁEJ grupy facetu (in+ex) — baza liczników tego facetu (F4R#1)."""
     return {f: g for f, g in state.items() if f != facet}

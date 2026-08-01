@@ -376,8 +376,11 @@ class PipelineView(QWidget):
 
         # 6. Błąd etapu — OSOBNY wiersz, kolor semantyczny (wizytator P2: błąd nie może ginąć wśród
         # czarnych wierszy panelu). Ukryty dopóki nie padnie failed.
+        # Kolor Z MOTYWU (`role="error"` → `theme.qss`), nie inline: sztywne `#b00020` przeżyło F6
+        # i na ciemnej bazie #2B2B2B dawało 1,6:1 — jedyny sygnał porażki etapu był nieczytelny
+        # dokładnie w motywie DOMYŚLNYM (P-C).
         self.lbl_error = QLabel("")
-        self.lbl_error.setStyleSheet("color: #b00020;")
+        self.lbl_error.setProperty("role", "error")
         self.lbl_error.setWordWrap(True)
         self.lbl_error.setVisible(False)
         v.addWidget(self.lbl_error)

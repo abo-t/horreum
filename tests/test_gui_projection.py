@@ -18,9 +18,11 @@ pytest.importorskip("PySide6")
 
 from horreum import db, projection
 
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QFont, QTextCursor
 from PySide6.QtWidgets import QApplication
 
-from horreum.gui import i18n
+from horreum.gui import i18n, theme
 from horreum.gui import projection_dialog as pd_mod
 from horreum.gui.projection_dialog import (
     ProjectionDialog, chosen_present, eta_text, size_summary, volume_decision,
@@ -556,4 +558,138 @@ def test_en_render_projekcja_z_katalogu(qapp, tmp_path, fake_settings, monkeypat
     assert "linked: 2" in dlg.report.toPlainText()
     assert dlg.btn_apply.text() == "Created ✓"
     assert eta_text(10, 20, 10.0) == " · ~10 s left"          # Qt-wolny helper też EN
+    con.close()
+
+
+# --- P-C: kolor semantyczny nagłówka raportu (wizytacja P2 — dialog był jednolicie szary) ---
+
+def _block_fmt(edit, n):
+    """Format PIERWSZEGO znaku bloku `n` raportu — tędy widać kolor nagłówka. `textFormats()` się
+    do tego nie nadaje: oddaje zakres także dla tekstu NIEformatowanego (domyślny format bloku),
+    więc „są formaty" nie znaczy „jest kolor"."""
+    cur = QTextCursor(edit.document().findBlockByNumber(n))
+    cur.movePosition(QTextCursor.Right, QTextCursor.KeepAnchor)
+    return cur.charFormat()
+
+
+class _Res:
+    """Minimalny nośnik wyniku dla `report_outcome` — Qt-wolny helper czyta tylko dwa pola."""
+
+    def __init__(self, counts, cancelled=False):
+        self.counts = counts
+        self.cancelled = cancelled
+
+
+def test_report_outcome_zielono_tylko_przy_pelnym_sukcesie():
+    ok = {"linked": 5, "exists": 2}
+    assert pd_mod.report_outcome(_Res(ok), partial=False) == "ok"
+    assert pd_mod.report_outcome(_Res(ok, cancelled=True), partial=False) == "warn"
+    assert pd_mod.report_outcome(_Res(ok), partial=True) == "warn"
+    for bad in ("conflict", "error", "verify_bad", "skipped"):
+        assert pd_mod.report_outcome(_Res({**ok, bad: 1}), partial=False) == "warn", bad
+
+
+def test_show_report_koloruje_naglowek_nie_ruszajac_tekstu(qapp, tmp_path, fake_settings, monkeypatch):
+    """Kolor to warstwa FORMATU: `toPlainText()` oddaje dokładnie to, co weszło (kontrakt „raport
+    zaczyna się od «Przerwano»" trzyma), a pierwszy blok dostaje kolor roli i bold. Drugi blok
+    zostaje bez koloru — inaczej kolorowałby się cały słupek liczb."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con = db.open_db(str(tmp_path / "col.db"))
+    ids = _seed_files(con, tmp_path, 1)
+    _target(fake_settings, tmp_path / "_WBPP" / "feed")
+    dlg = _dlg(con, ids)
+    dlg._show_report("Utworzono\nzlinkowano: 1", "ok")
+    assert dlg.report.toPlainText() == "Utworzono\nzlinkowano: 1"
+    head = _block_fmt(dlg.report, 0)
+    assert head.foreground().color().name().lower() == theme.accents(theme.DEFAULT)["ok_green"].lower()
+    assert head.fontWeight() > QFont.Normal
+    tail = _block_fmt(dlg.report, 1)                       # słupek liczb zostaje neutralny
+    assert tail.foreground().style() == Qt.NoBrush and tail.fontWeight() == QFont.Normal
+    con.close()
+
+
+def test_show_report_bez_werdyktu_nie_maluje(qapp, tmp_path, fake_settings, monkeypatch):
+    """`outcome=None` (sonda, plan, podgląd) zostaje w kolorze tekstu — neutralność też jest
+    komunikatem, a pomalowanie planu na zielono obiecywałoby skutek, którego nie było."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con = db.open_db(str(tmp_path / "col2.db"))
+    ids = _seed_files(con, tmp_path, 1)
+    _target(fake_settings, tmp_path / "_WBPP" / "feed")
+    dlg = _dlg(con, ids)
+    dlg._show_report("Sonduję cel…")
+    head = _block_fmt(dlg.report, 0)
+    assert head.foreground().style() == Qt.NoBrush and head.fontWeight() == QFont.Normal
+    con.close()
+
+
+def test_use_theme_przelacza_kolory_naglowka():
+    """Kolory nagłówka idą Z MOTYWU (SPOT), nie z literałów — jak `grid.use_theme`."""
+    pd_mod.use_theme("light")
+    assert pd_mod._COLORS["error"].name().lower() == theme.accents("light")["exclusion_red"].lower()
+    pd_mod.use_theme(theme.DEFAULT)
+    assert pd_mod._COLORS["error"].name().lower() == theme.accents("dark")["exclusion_red"].lower()
+
+
+def test_zlota_akcja_ma_wage_wizualna(qapp, tmp_path, fake_settings, monkeypatch):
+    """Wiz F3 #3: terminalna akcja dialogu odróżnia się od dwóch pomocniczych obok (bold + wysokość
+    jak „Przyjmij nowe" Dostawy). Bez tego [Odśwież][Utwórz][Zamknij] czytało się jak trzy bliźniaki."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con = db.open_db(str(tmp_path / "gold.db"))
+    ids = _seed_files(con, tmp_path, 1)
+    _target(fake_settings, tmp_path / "_WBPP" / "feed")
+    dlg = _dlg(con, ids)
+    assert dlg.btn_apply.font().bold() and dlg.btn_apply.minimumHeight() == 34
+    assert not dlg.btn_dry.font().bold()                  # pomocnicza zostaje pomocniczą
+    con.close()
+
+
+# --- P-C adjudykacja: nagłówek nie obiecuje czynności, której nie było (wizytacja #1/#4) ---
+
+def test_report_head_key_powtorka_nie_glosi_utworzenia():
+    """Wizytacja P-C #1: powtórne wydanie na ten sam cel dawało „Utworzono … zlinkowano: 0
+    istniało: 4" — a nowy zielony akcent tę nieprawdę pogłaśniał. `linked == 0` bez anulowania to
+    „Nic nowego", nie porażka: rola zostaje `ok`, zmienia się CZASOWNIK."""
+    assert pd_mod.report_head_key(_Res({"linked": 4}), partial=False) == "proj.head_created"
+    assert pd_mod.report_head_key(_Res({"linked": 0, "exists": 4}), partial=False) \
+        == "proj.head_nothing_new"
+    assert pd_mod.report_head_key(_Res({}), partial=False) == "proj.head_nothing_new"
+    assert pd_mod.report_head_key(_Res({"linked": 0}, cancelled=True), partial=False) \
+        == "proj.head_cancelled"
+    assert pd_mod.report_head_key(_Res({"linked": 2}), partial=True) == "proj.head_partial"
+    # Kolor i czasownik czytają JEDEN rozbiór — „nic nowego" pozostaje zielone.
+    assert pd_mod.report_outcome(_Res({"linked": 0, "exists": 4}), partial=False) == "ok"
+
+
+def test_powtorne_wydanie_mowi_nic_nowego(qapp, tmp_path, fake_settings, monkeypatch):
+    """Pełna droga na PRAWDZIWYCH plikach: wydanie → świeży DRY → wydanie na ten sam cel."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con = db.open_db(str(tmp_path / "rep.db"))
+    ids = _seed_files(con, tmp_path, 2)
+    root = tmp_path / "_WBPP" / "feed"
+    _target(fake_settings, root)
+    dlg = _dlg(con, ids)
+    dlg._on_apply()
+    assert dlg.report.toPlainText().startswith("Utworzono")
+    dlg._on_manual_dry()                                   # świeży DRY uzbraja „Utwórz" ponownie
+    dlg._on_apply()
+    rep = dlg.report.toPlainText()
+    assert rep.startswith("Nic nowego") and "zlinkowano: 0" in rep and "istniało: 2" in rep
+    assert dlg.btn_apply.text() == "Bez zmian ✓"
+    con.close()
+
+
+def test_wydanie_zostawia_slad_po_zamknieciu(qapp, tmp_path, fake_settings, monkeypatch):
+    """Wizytacja P-C #4: po `exec()` okno główne nie niosło ANI SŁOWA o wydaniu — jedynym trwałym
+    zapisem był `_PROJEKCJA.json` w celu, czyli poza aplikacją. Zdanie składa dialog (tam liczby
+    są świeże), `grid` je tylko przekazuje na statusbar."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con = db.open_db(str(tmp_path / "slad.db"))
+    ids = _seed_files(con, tmp_path, 2)
+    root = tmp_path / "_WBPP" / "feed"
+    _target(fake_settings, root)
+    dlg = _dlg(con, ids)
+    assert dlg.summary is None                             # przed wydaniem nie ma czego głosić
+    dlg._on_apply()
+    assert dlg.summary and "2" in dlg.summary and "zlinkowano" in dlg.summary
+    assert str(root) in dlg.summary
     con.close()

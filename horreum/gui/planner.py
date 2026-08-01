@@ -224,7 +224,10 @@ class ParkDialog(QDialog):
             self._fill(r, row)
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(QHeaderView.ResizeToContents)
-        hh.setSectionResizeMode(self.COL_PARK, QHeaderView.Stretch)   # combo wypełnia dialog (firsthand)
+        # Stretch na DACIE, nie na combo (wizytacja P-C #10): rozciągnięte combo miało ~450 px na
+        # napis „w parku", a numery wierszy Qt niosły informację zerową (grid chowa je tak samo).
+        hh.setSectionResizeMode(self.COL_LAST, QHeaderView.Stretch)
+        self.table.verticalHeader().setVisible(False)
         lay.addWidget(self.table)
         box = QDialogButtonBox(QDialogButtonBox.Close)
         # Tekst przycisku z katalogu, nie z Qt: repo nie wozi `QTranslator`, więc standardowy
@@ -236,7 +239,15 @@ class ParkDialog(QDialog):
         lay.addWidget(box)
 
     def _fill(self, r, row):
-        self.table.setItem(r, self.COL_CANON, QTableWidgetItem(row["canon"]))
+        # Nazwa USERA przez `queries.telescope_label` (P-C; jedyny właściciel reguły label→kanon,
+        # P-B). Dotąd kolumna pokazywała surowy `telescop_canon`, czyli napis Z NAGŁÓWKA — user
+        # oglądał tu cudze słowo o własnym sprzęcie. Kanon zostaje TOŻSAMOŚCIĄ zestawu (`sky.park`,
+        # token CLI), więc gdy nazwa go przesłania, idzie w tooltip — inaczej nie dałoby się
+        # połączyć wiersza dialogu z wierszem `horreum park`.
+        item = QTableWidgetItem(queries.telescope_label(row))
+        if row["label"]:
+            item.setToolTip(i18n.t("planner.park_canon_tip", canon=row["telescop_canon"]))
+        self.table.setItem(r, self.COL_CANON, item)
         lights = QTableWidgetItem(str(row["lights"]))
         lights.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)     # słupek liczb (wiz T5 #5)
         self.table.setItem(r, self.COL_LIGHTS, lights)

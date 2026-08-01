@@ -12,7 +12,7 @@ pytest.importorskip("PySide6")
 from horreum import db, naming, pivot as pivot_mod, writeback
 from horreum.gui import queries, rows as rows_mod
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtWidgets import QApplication
 
 NOW = "2026-07-03T14:00:00"
@@ -357,6 +357,29 @@ def test_facet_klik_cykluje_none_in_ex_none(view):
     view.facet_rail._on_item_clicked(_rail_item(view, "kind", "light"))
     assert view._facet_state == {}
     assert view.count_label.text() == "4 klatki"
+
+
+def test_facet_prawy_klik_wyklucza_jednym_gestem(view):
+    """P-C: prawy klik na wartości = ⊖ WPROST i z powrotem — bez stanu pośredniego `in`, na którym
+    zbiór zwężał się do jednej wartości. Ten sam widok, ta sama normalizacja co lewy klik."""
+    lw = view.facet_rail._lists["kind"]
+    it = _rail_item(view, "kind", "light")
+    view.facet_rail._on_item_right_clicked(lw, lw.visualItemRect(it).center())
+    assert view._facet_state == {"kind": {"ex": [["light", "light"]]}}
+    assert view.count_label.text() == "1 klatka"                    # uniwersum − lighty = f3
+    it = _rail_item(view, "kind", "light")                          # listwa przebudowana
+    view.facet_rail._on_item_right_clicked(lw, lw.visualItemRect(it).center())
+    assert view._facet_state == {}
+    assert view.count_label.text() == "4 klatki"
+
+
+def test_facet_prawy_klik_w_pustke_bez_skutku(view):
+    """Gest celuje we WARTOŚĆ, nie w listę — klik pod ostatnim wierszem nie ma prawa nic zmienić."""
+    view.facet_rail._on_item_clicked(_rail_item(view, "kind", "light"))
+    before = dict(view._facet_state)
+    lw = view.facet_rail._lists["kind"]
+    view.facet_rail._on_item_right_clicked(lw, QPoint(5, lw.sizeHintForRow(0) * (lw.count() + 4)))
+    assert view._facet_state == before
 
 
 def test_facet_sibling_lista_pokazuje_sasiadow(view):
@@ -933,6 +956,36 @@ def test_rename_commit_powod_w_summary(rn_view):
     assert "cel już istnieje" in view.drawer.result.text()         # reprezentatywny reason widoczny
 
 
+# ---------- P-C: „Zniknięte" mówi KIEDY (wiz P5 #11) ----------
+
+def _path_tip(view, frame_id):
+    r = next(i for i, row in enumerate(view.model._rows) if row.get("frame_id") == frame_id)
+    return view.model.data(view.model.index(r, 0), Qt.ToolTipRole)     # kolumna 0 = „Ścieżka"
+
+
+def test_tooltip_znikietej_niesie_date_znikniecia(view, gcon):
+    """Wizytacja P5 #11: przy szukaniu backupu liczy się katalog I data. Katalog tooltip niósł od
+    początku (pełna ścieżka); datę bierze `location.last_verified_at`, którą stempluje jedyna droga
+    zapisu `present=0` (`repo.mark_location_vanished`) — do minut, bez „T"."""
+    gcon.execute("UPDATE location SET last_verified_at = ? WHERE frame_id = 4",
+                 ("2026-07-22T18:21:44.4+00:00",))
+    gcon.commit()
+    view.refresh()
+    tip = _path_tip(view, 4)
+    assert "/a/f4.fits" in tip                                # katalog: pełna ścieżka jak dotąd
+    assert "2026-07-22 18:21" in tip and "zniknięta" in tip
+
+
+def test_tooltip_znikietej_bez_daty_nie_zmysla(view, gcon):
+    """Baza sprzed markera (`last_verified_at IS NULL`) → człon BEZ daty. Brak faktu nie ma prawa
+    udawać faktu, a „—" w zdaniu o zniknięciu czytałoby się jak data."""
+    gcon.execute("UPDATE location SET last_verified_at = NULL WHERE frame_id = 4")
+    gcon.commit()
+    view.refresh()
+    tip = _path_tip(view, 4)
+    assert "zniknięta" in tip and "2026" not in tip.split("f4.fits")[-1]
+
+
 # ---------- F3: pasek zbioru + panele kling (PLAN_ux_redesign §4) ----------
 
 def test_panele_ekskluzywne_i_checkable(view):
@@ -948,6 +1001,52 @@ def test_panele_ekskluzywne_i_checkable(view):
     view._toggle_panel("rename")                       # ten sam → zamknij
     assert not view.panel_stack.isVisibleTo(view)
     assert not view.sel_bar.btn_rename.isChecked() and not view.sel_bar.btn_macro.isChecked()
+
+
+def test_kropka_poczekalni_przelacza_role_i_przepolerowuje(view, monkeypatch):
+    """Wizytacja P-C #9: mechanika `_set_role` była bez bramki, a bez `unpolish`/`polish` sam
+    `setProperty` NIE przemalowuje żywego widżetu — usunięcie tych dwóch linii przeszłoby całą
+    baterię, a kropka poczekalni zamarłaby na kolorze z chwili budowy."""
+    from horreum.gui import grid as grid_mod
+    polished = []
+    real = grid_mod._set_role
+    monkeypatch.setattr(grid_mod, "_set_role",
+                        lambda w, role: (polished.append(role), real(w, role))[1])
+    view.drawer.set_count(7)
+    assert view.drawer.dot.property("role") == "warn" and view.drawer.dot.text() == "●"
+    view.drawer.set_count(0)
+    assert view.drawer.dot.property("role") == "secondary" and view.drawer.dot.text() == "○"
+    assert polished == ["warn", "secondary"]
+
+
+def test_set_role_niesie_repolish():
+    """Kontrakt helpera pilnowany STATYCZNIE: `_set_role` musi wołać `unpolish` i `polish`.
+    Spy na `lbl.style()` byłby gorszy niż brak testu — `style()` oddaje WSPÓŁDZIELONY styl
+    aplikacji, więc podmiana metody wyciekłaby na wszystkie kolejne testy sesji."""
+    import ast
+    import inspect
+    from horreum.gui import grid as grid_mod
+    body = ast.parse(inspect.getsource(grid_mod._set_role))
+    called = {n.func.attr for n in ast.walk(body)
+              if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
+    assert {"unpolish", "polish"} <= called
+
+
+def test_afordancja_prawego_klika_na_listwie(view):
+    """Wizytacja P-C #2: gest bez menu jest niewidoczny. Tooltip listy nazywa OBA kliki — inaczej
+    skrót 2→1 istnieje wyłącznie dla tego, kto czytał commit."""
+    for lw in view.facet_rail._lists.values():
+        assert "Prawy klik" in lw.toolTip()
+
+
+def test_zlota_akcja_zbioru_ma_wage(view):
+    """Wiz F3 #3 (dług zamknięty w P-C): JEDNA złota akcja na miejsce niesie wagę wizualną —
+    „Wydaj na stół…" bold, reszta paska nie. Waga, nie kolor: złoto motywu ma w jasnej skórce
+    2,7:1 i jako tekst nie dochodzi do progu AA (ta sama pułapka co wiz T5 N5)."""
+    assert view.sel_bar.btn_proj.font().bold()
+    for other in (view.sel_bar.btn_clear, view.sel_bar.btn_macro,
+                  view.sel_bar.btn_rename, view.sel_bar.btn_save):
+        assert not other.font().bold()
 
 
 def test_przelaczenie_czysci_cudzy_podglad(rn_view):
@@ -1102,3 +1201,16 @@ def test_kryteria_slowami_na_pasku(view):
     idx = view.combo_persp.findText("Duplikaty")
     view.combo_persp.setCurrentIndex(idx)
     assert "tylko duplikaty" in view.sel_bar.criteria_label.toolTip()
+
+
+def test_flaga_panelu_daty_nazywa_wage(rn_view):
+    """Wizytacja P-C #7: „Δ niepełnogodzinna!" (ostrzeżenie) i „brak źródła czasu" (stan
+    informacyjny) nosiły tę samą czerwień co „Etap padł" Dostawy. Akcent, który krzyczy
+    o wszystkim, nie mówi o niczym — czerwień zostaje dla awarii."""
+    view, con, files = rn_view
+    view._toggle_panel("rename")
+    bar = view.rename_bar
+    bar.set_echo("", "", "", "Δ niepełnogodzinna!")
+    assert bar.lbl_flag.property("role") == "warn"
+    bar.set_echo("", "", "", "brak źródła czasu", flag_role="secondary")
+    assert bar.lbl_flag.property("role") == "secondary"

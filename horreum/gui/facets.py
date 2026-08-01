@@ -83,6 +83,16 @@ class FacetRail(QWidget):
             lw.setItemDelegate(TwoPartDelegate(lw))
             lw.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
             lw.itemClicked.connect(self._on_item_clicked)
+            # Prawy klik = ⊖ WPROST (bez menu — gest, nie polecenie). Skrót cyklu, nie druga
+            # ścieżka stanu: kończy w `facet_model.toggle_exclude`, więc lewy i prawy klik dzielą
+            # jedną normalizację. `CustomContextMenu` przechwytuje też klawisz menu kontekstowego.
+            lw.setContextMenuPolicy(Qt.CustomContextMenu)
+            lw.customContextMenuRequested.connect(
+                lambda pos, w=lw: self._on_item_right_clicked(w, pos))
+            # Gest bez menu jest NIEWIDOCZNY (wizytacja P-C #2: skrót 2→1 istniał wyłącznie dla
+            # tego, kto czytał commit). Tooltip listy nazywa OBA kliki — jedyna afordancja, jaką
+            # ma listwa bez paska narzędzi.
+            lw.setToolTip(i18n.t("facets.tip.clicks"))
             if long_list:
                 lw.setMinimumHeight(_LONG_MIN_H)
             else:
@@ -202,6 +212,18 @@ class FacetRail(QWidget):
             return
         facet, value, label = item.data(Qt.UserRole)
         self._state = facet_model.cycle(self._state, facet, value, label)
+        self.facetsChanged.emit(self._state)
+
+    def _on_item_right_clicked(self, lw, pos):
+        """Prawy klik na wartości = ⊖ wprost (P-C; dotąd 2 kliki przez `in`). Klik w PUSTE miejsce
+        listy jest bez skutku — gest celuje we wartość, nie w listę."""
+        if self._loading:
+            return
+        item = lw.itemAt(pos)
+        if item is None:
+            return
+        facet, value, label = item.data(Qt.UserRole)
+        self._state = facet_model.toggle_exclude(self._state, facet, value, label)
         self.facetsChanged.emit(self._state)
 
     def _filter_objects(self, text):

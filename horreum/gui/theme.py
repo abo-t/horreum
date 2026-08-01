@@ -53,11 +53,15 @@ _FACET = {
 
 # Akcenty do QSS (złoto spichlerza, zieleń poczekalni-OK, czerwień wykluczeń) i tekst drugorzędny
 # (etykiety kryteriów/celu/wyniku — na dark hardcoded #666 byłby nieczytelny, F6 recenzja #3).
+# `warn` jest OSOBNY od `gold` (P-C): złoto to akcent MARKI (chipy planera, punkty mapy), bursztyn
+# to znaczenie „poszło, ale nie w całości". Wartości dobrane pod AA 4,5 na `base` OBU motywów
+# (zmierzone: dark 7,4:1 · light 6,3:1) — `gold` w jasnym ma 2,7:1 i do tekstu się nie nadaje
+# (ta sama pułapka co wiz T5 N5 w `planner.use_theme`).
 _ACCENT = {
     "dark": {"gold": "#E0A030", "ok_green": "#5FB65F", "exclusion_red": "#FF6E6E",
-             "secondary_text": "#A8A8A8"},
+             "warn": "#F0B040", "secondary_text": "#A8A8A8"},
     "light": {"gold": "#D08000", "ok_green": "#2E7D32", "exclusion_red": "#B00000",
-              "secondary_text": "#666666"},
+              "warn": "#8A5300", "secondary_text": "#666666"},
 }
 
 # Kolory mapy stanowisk (F8 §9 — QPainter scatter na tle konturów NE). `land` = przygaszony kontur
@@ -99,7 +103,7 @@ def facet_colors(name):
 
 
 def accents(name):
-    """Akcenty → hex. Klucze: gold/ok_green/exclusion_red/secondary_text."""
+    """Akcenty → hex. Klucze: gold/ok_green/exclusion_red/warn/secondary_text."""
     return _spec(_ACCENT, name)
 
 
@@ -108,8 +112,14 @@ def map_colors(name):
     return _spec(_MAP, name)
 
 
+ROLES = {"secondary": "secondary_text", "error": "exclusion_red", "warn": "warn", "ok": "ok_green"}
+
+
 def qss(name):
-    """Arkusz stylów akcentów dla motywu. Tekst drugorzędny przez własność `role="secondary"`
-    (etykiety, które w widżetach ustawiają `setProperty("role","secondary")` zamiast inline color)."""
+    """Arkusz stylów akcentów dla motywu: własność `role` etykiety → kolor z `ROLES` (widżet pisze
+    `setProperty("role","error")` zamiast inline `color:`). Rola jest CZYTANA PRZY POLISHU — etykieta,
+    która zmienia rolę w locie, musi przejść `unpolish`/`polish`; robi to `grid._set_role` (kropka
+    poczekalni ● / ○ i flaga panelu daty). Arkusz idzie na `QApplication`, więc przełączenie motywu
+    przemalowuje sam."""
     a = accents(name)
-    return f'QLabel[role="secondary"] {{ color: {a["secondary_text"]}; }}'
+    return "".join(f'QLabel[role="{role}"] {{ color: {a[key]}; }}' for role, key in ROLES.items())

@@ -327,9 +327,11 @@ def park_overview(con):
     ekranu planera — dwie powierzchnie tej samej decyzji nie mają prawa liczyć lightów inaczej.
     Kolejność `lights DESC` jest kolejnością SPRZĘTU, nie alfabetu: `sky.park` sortuje raport
     alfabetycznie (determinizm), ale człowiek szuka swojego głównego teleskopu na górze.
-    Zwraca wiersze: id, canon, in_park, lights, last_seen."""
+    Zwraca wiersze: id, telescop_canon, label, in_park, lights, last_seen — OBIE kolumny nazwy, bo
+    wiersz musi przejść przez `telescope_label` (dialog „Park…" pokazuje nazwę USERA), a `canon`
+    zostaje tożsamością zestawu i tokenem CLI `horreum park --add`."""
     return con.execute(
-        "SELECT t.id, t.telescop_canon AS canon, t.in_park, "
+        "SELECT t.id, t.telescop_canon, t.label, t.in_park, "
         "  (SELECT COUNT(*) FROM frame f JOIN config c ON c.id = f.config_id "
         "   WHERE c.telescope_id = t.id AND f.kind = 'light') AS lights, "
         "  (SELECT MAX(h.date_obs) FROM frame f JOIN config c ON c.id = f.config_id "
@@ -771,13 +773,19 @@ def base_rows(con, frame_ids):
     zostać w gridzie; baza=autorytet). `n_present` = liczba obecnych lokalizacji (perspektywa „Duplikaty"
     = n_present > 1). Teleskop przez config→telescope_canonical→kanon (jak `object_frames`). frame_ids jako
     tablica JSON (`json_each`). Zwraca: frame_id, kind, filetype, filter_canon, camera_model,
-    telescope_label, telescop_canon, object_canon, object_raw, date_obs, exptime, path, present, n_present."""
+    telescope_label, telescop_canon, object_canon, object_raw, date_obs, exptime, path, present,
+    last_verified_at, n_present.
+
+    `last_verified_at` NA WIERSZU `present=0` JEST CHWILĄ ZNIKNIĘCIA: jedyną drogą zapisu `present=0`
+    jest `repo.mark_location_vanished`, a ona stempluje tę kolumnę tym samym `now`, którym emituje
+    `event(location.vanished)` (`repo.py`). Dla kopii OBECNEJ ta sama kolumna znaczy „ostatnio
+    zweryfikowana" — interpretacja należy do wołającego, dlatego alias jest surowy, nie `vanished_at`."""
     return con.execute(
         "SELECT f.id AS frame_id, f.kind, f.filetype, f.filter_canon, "
         "       cam.model_canon AS camera_model, "
         "       t.label AS telescope_label, t.telescop_canon, "
         "       obj.canon AS object_canon, h.object_raw, "
-        "       h.date_obs, h.exptime, loc.path, loc.present, "
+        "       h.date_obs, h.exptime, loc.path, loc.present, loc.last_verified_at, "
         "       (SELECT COUNT(*) FROM location lp WHERE lp.frame_id = f.id AND lp.present = 1) AS n_present "
         "FROM frame f "
         "LEFT JOIN header h ON h.frame_id = f.id "

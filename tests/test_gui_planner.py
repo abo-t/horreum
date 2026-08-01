@@ -406,6 +406,27 @@ def test_dialog_parku_umie_wycofac_zdanie_do_null(view, qapp):
         dlg.close()
 
 
+def test_dialog_parku_pokazuje_nazwe_usera_a_kanon_w_tooltipie(view, qapp):
+    """P-C: kolumna „Teleskop" pokazywała surowy `telescop_canon` — czyli napis Z NAGŁÓWKA, cudze
+    słowo o własnym sprzęcie usera. Teraz idzie przez `queries.telescope_label` (właściciel reguły
+    label→kanon, P-B), a kanon — tożsamość zestawu i token `horreum park --add` — schodzi do
+    tooltipu, żeby wiersz dialogu dało się połączyć z wierszem CLI."""
+    from horreum.gui.planner import ParkDialog
+    view.con.execute("UPDATE telescope SET label = 'Askar na tarasie' WHERE id = 1")
+    view.con.commit()
+    dlg = ParkDialog(view.con, view._now)
+    try:
+        row = next(r for r in range(dlg.table.rowCount())
+                   if dlg.table.item(r, ParkDialog.COL_CANON).text() == "Askar na tarasie")
+        assert "A140R" in dlg.table.item(row, ParkDialog.COL_CANON).toolTip()
+        # Teleskop NIENAZWANY zostaje przy kanonie i BEZ tooltipu — nie ma czego rozróżniać.
+        other = next(r for r in range(dlg.table.rowCount())
+                     if dlg.table.item(r, ParkDialog.COL_CANON).text() == "RC8")
+        assert dlg.table.item(other, ParkDialog.COL_CANON).toolTip() == ""
+    finally:
+        dlg.close()
+
+
 def test_ekran_deklaruje_podloge_szerokosci(view):
     """Dług P-A #2 (decyzja Zdzinia 2026-08-01): kolumny NIE ustępują, ustępuje okno. Zmierzone
     realnym fontem: 11 kolumn zajmuje 981 px treści, więc przy dawnej podłodze 1073 px tabela

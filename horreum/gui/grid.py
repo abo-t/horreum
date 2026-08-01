@@ -74,6 +74,30 @@ def use_theme(name):
 
 use_theme(theme.DEFAULT)     # init przy imporcie (QColor bez QApplication — jak dawne stałe modułu)
 
+
+def _vanished_tip(row):
+    """Człon tooltipu kolumny ścieżki dla klatki ZNIKNIĘTEJ — z DATĄ, gdy baza ją zna.
+
+    Wizytacja P5 #11: przy szukaniu backupu liczy się katalog i data. Katalog tooltip niósł od
+    początku (pełna ścieżka), daty NIE niósł nikt — a `location.last_verified_at` na wierszu
+    `present=0` jest dokładnie chwilą oznaczenia (patrz `queries.base_rows`). Kolumna zostaje przy
+    nazwie pliku: doklejenie katalogu do DISPLAY zjadałaby elizja, a zmiana dotknęłaby wszystkich
+    perspektyw, nie tylko „Zniknięte". Data do MINUT, bez „T" (wzorzec `app._fmt_event_ts`).
+    Baza sprzed markera (`NULL`) → człon bez daty; brak faktu nie ma prawa udawać faktu."""
+    ts = row.get("last_verified_at")
+    if not ts:
+        return i18n.t("grid.tip.vanished")
+    return i18n.t("grid.tip.vanished_at", ts=str(ts)[:16].replace("T", " "))
+
+
+def _set_role(w, role):
+    """Zmiana roli koloru (`theme.ROLES` → QSS aplikacji) na ŻYWYM widżecie. Samo `setProperty` nic
+    nie przemaluje: selektor `[role="…"]` jest ewaluowany przy POLISHU, więc widżet już pokazany
+    trzyma stary kolor do końca życia. Dotyczy jedynej roli zmiennej w locie — kropki poczekalni."""
+    w.setProperty("role", role)
+    w.style().unpolish(w)
+    w.style().polish(w)
+
 # Operatory filtra: (klucz-etykiety, op). Etykieta → i18n.t w budowie combo; op to DANE (regex POMINIĘTY, D-F).
 OPERATORS = [
     ("grid.op.eq", "eq"), ("grid.op.ne", "ne"), ("grid.op.gt", "gt"), ("grid.op.lt", "lt"),
@@ -301,7 +325,7 @@ class GridTableModel(QAbstractTableModel):
                 # Prefiks „×N" PRZED nazwą (P2-2): sufiks ginął przy elizji długich ścieżek.
                 return f"×{row['n_present']}  {name}" if dup else name
             if role == Qt.ToolTipRole:
-                extra = i18n.t("grid.tip.vanished") if vanished else (
+                extra = _vanished_tip(row) if vanished else (
                     i18n.t("grid.tip.dup_locs", n=row['n_present']) if dup else "")
                 return (path or i18n.t("object.no_location")) + extra
             return None
@@ -849,7 +873,7 @@ class RenameBar(QWidget):
         grid = QGridLayout(); grid.setContentsMargins(0, 2, 0, 2)
         self.lbl_primary = QLabel("—"); self.lbl_secondary = QLabel("—")
         self.lbl_delta = QLabel(""); self.lbl_flag = QLabel("")
-        self.lbl_flag.setStyleSheet("color: #b00;")
+        self.lbl_flag.setProperty("role", "error")       # kolor z motywu (P-C), nie sztywne #b00
         self.btn_align = QPushButton(i18n.t("grid.rename.align")); self.btn_align.setEnabled(False)
         self.btn_align.clicked.connect(self._align)
         grid.addWidget(self.lbl_primary, 0, 0); grid.addWidget(self.lbl_secondary, 0, 1)
@@ -888,12 +912,18 @@ class RenameBar(QWidget):
     def set_target_label(self, text):
         self.target_lbl.setText(text)
 
-    def set_echo(self, primary, secondary, delta, flag, *, median=None, spread=None):
+    def set_echo(self, primary, secondary, delta, flag, *, flag_role="warn", median=None, spread=None):
         """Wypełnij panel daty (FramesView liczy z zaznaczenia/widocznych). `median` (Δ w godzinach, float
         albo None) uzbraja „Wyrównaj": znak ZALEŻNY od źródła (R2 #2), wartość przez half-away (R2 #5),
-        surowa mediana + rozrzut w tooltipie (R1 #16)."""
+        surowa mediana + rozrzut w tooltipie (R1 #16).
+
+        `flag_role` NAZYWA WAGĘ komunikatu (wizytacja P-C #7): „Δ niepełnogodzinna!" to ostrzeżenie
+        (`warn`), „brak źródła czasu" to stan informacyjny (`secondary`). Do P-C oba nosiły tę samą
+        czerwień co „Etap padł" Dostawy — akcent semantyczny, który krzyczy o wszystkim, nie mówi
+        o niczym. Czerwień zostaje wyłącznie dla awarii."""
         self.lbl_primary.setText(primary); self.lbl_secondary.setText(secondary)
         self.lbl_delta.setText(delta); self.lbl_flag.setText(flag)
+        _set_role(self.lbl_flag, flag_role)
         self._median = median
         if median is None:
             self.btn_align.setEnabled(False)
@@ -969,6 +999,11 @@ class SelectionBar(QFrame):
         self.criteria_label.setProperty("role", "secondary")   # kryteria zbioru czytelne na dark (F6 §7)
         self.btn_proj = QPushButton(i18n.t("grid.sel.project"))
         self.btn_proj.setToolTip(i18n.t(self._PROJ_TIP))
+        # ZŁOTA AKCJA Zbiorów (wiz F3 #3, dług zamknięty w P-C): jedna akcja na miejsce niesie wagę
+        # wizualną — wzorzec „Przyjmij nowe" (`pipeline._build_ui`). Waga = BOLD, nie kolor: złoto
+        # motywu ma w jasnej skórce 2,7:1 i jako tekst nie dochodzi do progu czytelności (wiz T5 N5).
+        # Bez podnoszenia wysokości — pasek zbioru trzyma pięć przycisków w jednym rzędzie.
+        _f = self.btn_proj.font(); _f.setBold(True); self.btn_proj.setFont(_f)
         # „× Wyczyść zbiór" (wiz F4 #3): jednoklikowe zdjęcie facetów + filtra — bez niego jedyną
         # drogą było od-cyklowanie każdej wartości (preset „Przegląd" = no-op, gdy już wybrany).
         self.btn_clear = QPushButton(i18n.t("grid.sel.clear_set"))
@@ -978,7 +1013,12 @@ class SelectionBar(QFrame):
         self.btn_save = QPushButton(i18n.t("grid.sel.save_view"))
         lay.addWidget(self.count_label); lay.addSpacing(8)
         lay.addWidget(self.criteria_label, 1)
-        lay.addWidget(self.btn_clear); lay.addWidget(self.btn_proj); lay.addWidget(self.btn_macro)
+        # Złota akcja WYJĘTA z klastra pomocniczych (wizytacja P-C #6): sam bold przegrywał wzrokowo
+        # z glifem ★ sąsiada, bo wszystkie pięć stało w jednym ciągu. Odstęp, nie ramka — QSS
+        # `border` na QPushButton w Fusion zastępuje CAŁE malowanie ramki i spłaszcza przycisk.
+        lay.addWidget(self.btn_clear)
+        lay.addSpacing(12); lay.addWidget(self.btn_proj); lay.addSpacing(12)
+        lay.addWidget(self.btn_macro)
         lay.addWidget(self.btn_rename); lay.addWidget(self.btn_save)
 
     def set_criteria(self, text):
@@ -1070,14 +1110,14 @@ class StagingDrawer(QFrame):
     def set_count(self, n, *, result=None, label=None):
         self._n = n
         if n > 0:
-            self.dot.setText("●"); self.dot.setStyleSheet("color: #d08000;")   # U+25CF: jest w Segoe UI, paruje z „○" (wiz F3 #2)
+            self.dot.setText("●"); _set_role(self.dot, "warn")   # U+25CF: jest w Segoe UI, paruje z „○" (wiz F3 #2)
             # `label` rozróżnia klingę też przy n>0: „N zmian nazw oczekuje" vs domyślne „N zmian
             # oczekuje" (mikro-zmiana §0; call-sites makra bez label → domyślny tekst, R1 #8).
             self.label.setText(label or i18n.t("grid.drawer.pending", n=n))
             if result is None:
                 self.result.setText("")      # nowy staging: skasuj STALE wynik commitu/odrzucenia (wiz #7)
         else:
-            self.dot.setText("○"); self.dot.setStyleSheet("color: #999;")
+            self.dot.setText("○"); _set_role(self.dot, "secondary")
             # `label` nadpisuje domyślny tekst pustego stanu: po commicie „Zatwierdzono…" zamiast
             # pustostanu poczekalni (sprzeczność z wynikiem obok — wizytator D2).
             self.label.setText(label or i18n.t("grid.drawer.empty"))
@@ -1453,6 +1493,11 @@ class FramesView(QWidget):
         dlg = ProjectionDialog(self.con, self._frame_ids, now_fn=self._now,
                                perspektywa=self.combo_persp.currentText(), parent=self)
         dlg.exec()
+        # Wydanie zostawia ślad W APLIKACJI (wiz P-C #4): przed tym jedynym zapisem był
+        # `_PROJEKCJA.json` w celu, więc po zamknięciu dialogu okno nie wiedziało nic o tym,
+        # co przed chwilą wyjechało na stół. Zdanie składa dialog (tam liczby są świeże).
+        if dlg.summary:
+            self.status_message.emit(dlg.summary)
 
     # ---- panele kling (F3, PLAN_ux_redesign §4) ----
     def _toggle_panel(self, which):
@@ -1687,7 +1732,7 @@ class FramesView(QWidget):
             d = r.get("_dt_delta")
             if d is None:
                 self.rename_bar.set_echo(primary, secondary, i18n.t("grid.echo.delta_none"),
-                                         i18n.t("grid.echo.no_time_src"))
+                                         i18n.t("grid.echo.no_time_src"), flag_role="secondary")
             else:
                 flag = i18n.t("grid.echo.delta_subhour") if abs(d - round(d)) > 1e-9 else ""
                 self.rename_bar.set_echo(primary, secondary, i18n.t("grid.echo.delta", d=f"{d:g}"), flag)

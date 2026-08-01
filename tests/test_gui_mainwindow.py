@@ -186,6 +186,11 @@ def test_menu_widok_przelacza_motyw(qapp, tmp_path, monkeypatch):
         win._on_theme("light")
         assert grid_mod._COLORS["group_bg"] == QColor(theme.grid_colors("light")["group_bg"])
         assert store["ui/theme"] == "light"
+        # P-C: `apply_theme` przełącza TEŻ kolory nagłówka raportu projekcji — moduł ma własne
+        # `_COLORS` (QSS ról nie sięga QPlainTextEdit), więc pominięcie go w apply zostawiłoby
+        # dialog na kolorach ciemnych w jasnej skórce (ta sama pułapka co planer, wiz T5 R2).
+        from horreum.gui import projection_dialog as pd_mod
+        assert pd_mod._COLORS["ok"] == QColor(theme.accents("light")["ok_green"])
         # z powrotem na ciemny — kolory wracają, facet refresh_theme nie wybucha
         win._on_theme("dark")
         assert grid_mod._COLORS["group_bg"] == QColor(theme.grid_colors("dark")["group_bg"])
@@ -271,14 +276,16 @@ def test_zadanie_n_zero_wyszarzone_ale_klikalne(qapp, tmp_path):
     `strong` było ustawieniem CAŁEJ listy, „0" na wyszarzonym wierszu zostawało pogrubione —
     krzyczało dokładnie tam, gdzie nie ma nic do zrobienia."""
     from horreum.gui import rows
+    # `_DIM` jest DICT-em od P-C (kolor przeniesiony do motywu — wcześniej sztywne
+    # `QColor(0x88,0x88,0x88)` miało w motywie jasnym 3,54:1, poniżej AA).
     from horreum.gui.tasks import _DIM
     win = MainWindow(_seeded_db(tmp_path, object_axis=True))
     try:
         zero = _task_item(win, "observatories_unnamed")        # s8+obiekt: 0 stanowisk bez nazwy
         niezero = _task_item(win, "telescopes_unlabeled")      # 4 teleskopy bez etykiety
         assert _task_row(win, "observatories_unnamed")[1] == "0  ›"
-        assert zero.foreground().color() == _DIM
-        assert niezero.foreground().color() != _DIM
+        assert zero.foreground().color() == _DIM["fg"]
+        assert niezero.foreground().color() != _DIM["fg"]
         assert zero.data(rows.STRONG) is False                 # n=0 → liczba bez pogrubienia
         assert niezero.data(rows.STRONG) is True               # n>0 → liczba jest treścią
         assert zero.flags() & Qt.ItemIsEnabled                 # wciąż klikalny
@@ -290,12 +297,12 @@ def test_zadanie_n_zero_wyszarzone_ale_klikalne(qapp, tmp_path):
                         "VALUES (NULL, 50.0, 19.0, 'proposed', ?)", (NOW,))
         win.con.commit()
         win.tasks_view.refresh_counts()
-        assert zero.foreground().color() != _DIM                  # dim → normalny
+        assert zero.foreground().color() != _DIM["fg"]                  # dim → normalny
         assert zero.data(rows.STRONG) is True                     # …a z nim wraca pogrubienie
         for row in win.con.execute("SELECT id FROM telescope WHERE merged_into IS NULL").fetchall():
             repo.label_telescope(win.con, telescope_id=row[0], label=f"T{row[0]}", now=NOW)
         win.tasks_view.refresh_counts()
-        assert niezero.foreground().color() == _DIM               # normalny → dim
+        assert niezero.foreground().color() == _DIM["fg"]               # normalny → dim
         assert niezero.data(rows.STRONG) is False
     finally:
         win.close()

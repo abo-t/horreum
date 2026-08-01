@@ -154,7 +154,7 @@ def test_park_overview_ten_sam_material_co_cli(con):
     _park_ready(con)
     repo.set_telescope_park(con, telescope_id=2, in_park=1, now=NOW)
     rows = queries.park_overview(con)
-    by_canon = {r["canon"]: r for r in rows}
+    by_canon = {r["telescop_canon"]: r for r in rows}
     assert by_canon["RC8"]["in_park"] == 1 and by_canon["A140R"]["in_park"] is None
     assert by_canon["A140R"]["lights"] == 4
     assert [r["lights"] for r in rows] == sorted((r["lights"] for r in rows), reverse=True)

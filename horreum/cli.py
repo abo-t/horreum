@@ -652,7 +652,11 @@ def _cmd_park(args):
     lines.append(f"  {'teleskop':<12}{'lighty':>8}  {'ostatnia klatka':<20}park")
     for r in rows:
         state = {1: "TAK", 0: "historyczny"}.get(r["in_park"], "-")
-        lines.append(f"  {r['canon']:<12}{r['lights']:>8}  {(r['last_seen'] or '-')[:19]:<20}{state}")
+        # KANON, nie nazwa usera — to on jest tokenem `--add/--drop/--clear`; raport CLI ma
+        # wypisywać dokładnie to, co da się wpisać z powrotem. (Dialog „Park…" pokazuje nazwę
+        # usera, bo tam się nic nie wpisuje — klika się wiersz.)
+        lines.append(f"  {r['telescop_canon']:<12}{r['lights']:>8}  "
+                     f"{(r['last_seen'] or '-')[:19]:<20}{state}")
     if not any(r["in_park"] == 1 for r in rows):
         lines.append("  park NIEUSTAWIONY — planer liczy WSZYSTKIE teleskopy, takze historyczne "
                      "(`horreum park <db> --add <teleskop>`)")

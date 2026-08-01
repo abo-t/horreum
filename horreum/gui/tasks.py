@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from horreum.gui import i18n, queries, rows
+from horreum.gui import i18n, queries, rows, theme
 from horreum.gui.app import (
     ObjectAxisView, ObservatoryAxisView, TelescopeAxisView, _utc_now_iso,
 )
@@ -46,7 +46,18 @@ _PAGE_LIST, _PAGE_TELESCOPE, _PAGE_OBSERVATORY, _PAGE_OBJECTS = range(4)
 # Szarość wierszy BEZ roboty: pozycje informacyjne (zawsze) i akcyjne z n=0 (wiz F5 #6 — „nic do
 # zrobienia" ma być widać bez czytania liczby). Akcyjne z n=0 zostają KLIKALNE: podstrona osi to
 # jedyna droga do niej po przemontowaniu nawigacji.
-_DIM = QColor(0x88, 0x88, 0x88)
+_DIM: dict[str, QColor] = {}
+
+
+def use_theme(name):
+    """Szarość wierszy bez roboty — Z MOTYWU (wzorzec `grid.use_theme`, wołane przez `app.apply_theme`).
+    Sztywne `QColor(0x88,0x88,0x88)` przeżyło F6 i miało w motywie JASNYM 3,54:1 — poniżej AA;
+    bramka `test_theme_jest_jedynym_wlascicielem_kolorow` go nie łapała, bo skanowała stringi,
+    a to wywołanie na literałach liczbowych (wizytacja P-C #5)."""
+    _DIM["fg"] = QColor(theme.accents(name)["secondary_text"])
+
+
+use_theme(theme.DEFAULT)
 # Szerokość listy zadań. Prawe wyrównanie liczb SKANUJE się w wąskim pasie i ROZJEŻDŻA na szerokim:
 # przy oknie 1200 px etykieta lądowała na x≈185, a liczba na x≈1180 — ~900 px pustki między nimi
 # (wizytator P1 #2, dług delegata przeniesionego z listwy 220 px na pełną szerokość okna).
@@ -113,7 +124,7 @@ class TasksView(QWidget):
                 # informacyjna (wzorzec app.py — pozycje info): wyszarzona, żeby afordancja nie
                 # kłamała w obie strony (wizytator F5 #2 — „wygląda jednakowo, działa różnie")
                 it.setFlags(Qt.ItemIsEnabled)
-                it.setForeground(_DIM)
+                it.setForeground(_DIM["fg"])
             else:
                 it.setData(Qt.UserRole, key)           # akcyjna — handler mapuje klucz → akcja
             self.tasks.addItem(it)
@@ -187,7 +198,7 @@ class TasksView(QWidget):
             live = action is not None and n > 0
             it.setData(rows.STRONG, live)
             if action is not None:
-                it.setForeground(QBrush() if n > 0 else _DIM)   # n=0 → wyszarzone, wciąż klikalne
+                it.setForeground(QBrush() if n > 0 else _DIM["fg"])   # n=0 → wyszarzone, wciąż klikalne
             if live:
                 badge += 1
         self._fit_task_list()          # metryki fontu są prawdziwe dopiero po `show()`

@@ -37,17 +37,33 @@ import threading
 import time
 
 from PySide6.QtCore import QObject, QSettings, QThread, Signal, Slot
-from PySide6.QtGui import QFontDatabase
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog, QHBoxLayout, QInputDialog,
     QLabel, QPlainTextEdit, QProgressBar, QPushButton, QRadioButton, QVBoxLayout, QWidget,
 )
 
 from horreum import db, projection
-from horreum.gui import i18n, queries
+from horreum.gui import i18n, queries, theme
 from horreum.volumes import volume_serial
 
 _TREE_CAP = 30                        # ile folderów kategorii pokazać w raporcie dialogu
+
+# Kolory semantyczne NAGŁÓWKA raportu — z motywu (SPOT), wzorzec `grid._COLORS`. Raport jest
+# QPlainTextEdit, więc QSS ról (`theme.qss`) tu nie sięga: kolor pierwszego bloku nakłada
+# `QTextCharFormat`, a ten chce QColor.
+_COLORS: dict[str, QColor] = {}
+
+
+def use_theme(name):
+    """Przeładuj kolory nagłówka raportu z motywu. Wołane przy imporcie oraz przez
+    `app.apply_theme`; dialog jest modalny i krótkotrwały, więc bierze kolor przy każdym pisaniu."""
+    a = theme.accents(name)
+    _COLORS.update({"ok": QColor(a["ok_green"]), "warn": QColor(a["warn"]),
+                    "error": QColor(a["exclusion_red"])})
+
+
+use_theme(theme.DEFAULT)
 
 
 # ---------------------------------------------------------------- pomocniki Qt-WOLNE (testowane wprost)
@@ -114,6 +130,36 @@ def eta_text(done_n, total, elapsed_s, warmup=5):
     if remaining < 5400:
         return i18n.t("proj.eta_min", n=int(round(remaining / 60)))
     return i18n.t("proj.eta_h", h=remaining / 3600)
+
+
+def report_head_key(res, *, partial):
+    """Wynik wydania → KLUCZ nagłówka raportu (Qt-WOLNE, testowane wprost). JEDEN właściciel dla
+    tekstu i koloru: `report_outcome` czyta ten sam rozbiór, więc czasownik i akcent nie mogą się
+    rozjechać.
+
+    Czwarty stan `head_nothing_new` wszedł po wizytacji P-C #1: powtórne wydanie na ten sam cel
+    dawało „**Utworzono** … zlinkowano: 0 istniało: 4" — czasownik obiecywał czynność, której nie
+    było, a nowy zielony akcent tę nieprawdę POGŁOŚNIŁ. Kolor wzmacnia komunikat, więc komunikat
+    musi być prawdziwy wcześniej. „Komplet już w celu" to nie porażka — stąd rola nadal `ok`."""
+    if res.cancelled:
+        return "proj.head_cancelled"
+    if partial:
+        return "proj.head_partial"
+    return "proj.head_created" if res.counts.get("linked", 0) else "proj.head_nothing_new"
+
+
+def report_outcome(res, *, partial):
+    """Wynik wydania → rola koloru nagłówka raportu: `ok` | `warn` (Qt-WOLNE, testowane wprost).
+
+    ZIELONO znaczy PEŁNY sukces i nic poza tym. Anulowanie, wynik częściowy oraz KAŻDY niezerowy
+    licznik kłopotu (`conflict`/`error`/`verify_bad`/`skipped`) schodzą na bursztyn — inaczej
+    „Utworzono" świeciłoby na zielono nad słupkiem mówiącym „konflikt: 40", a wizytacja P2 zgłosiła
+    właśnie to: jednolity szary nie odróżniał wydania czystego od wydania z dziurami. Błąd wydania
+    (`proj.apply_error`) nie przechodzi tędy — tam koloru nie ma czego wyliczać, jest wprost."""
+    c = res.counts
+    if res.cancelled or partial:
+        return "warn"
+    return "warn" if any(c.get(k, 0) for k in ("conflict", "error", "verify_bad", "skipped")) else "ok"
 
 
 def _elide_path(path, cap=64):
@@ -261,6 +307,7 @@ class ProjectionDialog(QDialog):
         # karty są zamrożone w biegu, więc `_current_root()` pozostaje prawdą do końca wydania.
         self._apply_thread = None
         self._apply_worker = None
+        self.summary = None              # zdanie o wydaniu dla statusbara wołającego (wiz P-C #4)
         self.setWindowTitle(i18n.t("proj.title"))
         self.setModal(True)
         self.resize(640, 520)
@@ -331,6 +378,11 @@ class ProjectionDialog(QDialog):
         self.btn_apply = QPushButton(i18n.t("proj.btn_create"))
         self.btn_apply.setEnabled(False)             # uzbraja WYŁĄCZNIE zakończony świeży DRY
         self.btn_apply.setDefault(True)              # złota akcja wydania (F2: 1-klik)
+        # Waga wizualna złotej akcji (wiz F3 #3, dług zamknięty w P-C): bold + wysokość jak
+        # „Przyjmij nowe" Dostawy. W rzędzie [Odśwież][Utwórz][Zamknij] terminalna akcja była
+        # nieodróżnialna od dwóch pomocniczych — a to ona rusza dysk.
+        _fa = self.btn_apply.font(); _fa.setBold(True); self.btn_apply.setFont(_fa)
+        self.btn_apply.setMinimumHeight(34)
         self.btn_apply.clicked.connect(self._on_apply)
         self.btn_cancel = QPushButton(i18n.t("proj.btn_cancel_apply"))   # NAZYWA skutek — „Anuluj" obok „Zamknij" czytało się jak bliźniak (wiz #9)
         # wchodzi W MIEJSCE „Utwórz" na czas biegu (wzorzec szuflady gridu)
@@ -422,7 +474,7 @@ class ProjectionDialog(QDialog):
         try:
             projection._assert_excluded_segment(path)
         except ValueError as exc:
-            self.report.setPlainText(i18n.t("proj.add_failed", e=exc))
+            self._show_report(i18n.t("proj.add_failed", e=exc), "error")
             return False
         self._save_target(name, path)
         self._reload_targets(select_path=path)       # nowa karta zaznaczona → auto-DRY
@@ -458,12 +510,12 @@ class ProjectionDialog(QDialog):
         przyjdzie ze STARĄ generacją, zostanie odrzucony i re-triggernie świeży (R2-2)."""
         root = self._current_root()
         if not root:
-            self.report.setPlainText(i18n.t("proj.pick_or_add"))
+            self._show_report(i18n.t("proj.pick_or_add"))
             return
         if self._dry_worker is not None or self._apply_worker is not None:
             return                                   # w biegu apply DRY nie startuje (plan jest materializowany)
         self._dry_pending = False                    # flagę gasi UDANY start — odbity re-trigger nie przepada
-        self.report.setPlainText(i18n.t("proj.probing"))
+        self._show_report(i18n.t("proj.probing"))
         self.busy.setVisible(True)                   # bieg widoczny, nie tylko tekstem (wiz W2)
         self.btn_dry.setEnabled(False)               # jeden DRY naraz — „Odśwież" gaśnie na czas biegu
         worker = DryWorker(self._db_path, self._frame_ids, self.combo_layout.currentData(),
@@ -510,8 +562,7 @@ class ProjectionDialog(QDialog):
         self.btn_dry.setEnabled(True)
         self._plan = payload["plan"]
         self._dry = payload
-        self.report.setPlainText(self._format(payload["res"], payload["plan"], dry=True,
-                                              payload=payload))
+        self._show_report(self._format(payload["res"], payload["plan"], dry=True, payload=payload))
         n = payload["res"].counts.get("would-link", 0)
         key = "proj.create_copies" if payload["copy"] else "proj.create_links"
         self.btn_apply.setText(i18n.t_plural(key, n))
@@ -528,7 +579,7 @@ class ProjectionDialog(QDialog):
         self._plan = None
         self._dry = None
         self.btn_apply.setEnabled(False)
-        self.report.setPlainText(i18n.t("proj.dry_failed", msg=msg))
+        self._show_report(i18n.t("proj.dry_failed", msg=msg), "error")
 
     def _update_card_note(self, payload):
         """Szczera nota trybu na ZAZNACZONEJ karcie celu (brief §3): skąd decyzja hardlink/kopia."""
@@ -596,7 +647,7 @@ class ProjectionDialog(QDialog):
         self.busy.setTextVisible(True)
         self.busy.setVisible(True)
         self.progress_note.setText(f"0/{total}")
-        self.report.setPlainText(i18n.t("proj.applying", root=root))
+        self._show_report(i18n.t("proj.applying", root=root))
         self.btn_apply.setVisible(False)
         self.btn_apply.setEnabled(False)             # WPROST, nie tylko przez ukrycie (default-button łapie Enter)
         self.btn_cancel.setVisible(True)
@@ -649,19 +700,26 @@ class ProjectionDialog(QDialog):
         self._apply_end()
         # Cel był ZAMROŻONY na czas biegu, więc `_current_root()` to dokładnie ten, na który wydano.
         self._settings().setValue("projection/last_target", self._current_root())   # ostatnio UŻYTY = domyślny
-        self.report.setPlainText(self._format(res, self._plan, dry=False, partial=res.cancelled))
+        self._show_report(self._format(res, self._plan, dry=False, partial=res.cancelled),
+                          report_outcome(res, partial=res.cancelled))
+        # ŚLAD PO ZAMKNIĘCIU (wizytacja P-C #4): po `exec()` okno główne nie niosło ani słowa
+        # o wydaniu — jedynym trwałym zapisem był `_PROJEKCJA.json` w celu, czyli POZA aplikacją.
+        # Zdanie składamy TU, gdzie liczby są świeże; `grid` je tylko przekazuje na statusbar.
+        self.summary = i18n.t("proj.status_summary", n=res.counts.get("linked", 0),
+                              word=i18n.t("proj.word_copy_done" if res.copy else "proj.word_link_done"),
+                              root=self._current_root())
         self.btn_apply.setEnabled(False)
-        # nie głosi akcji, która zaszła (wiz K2)
-        self.btn_apply.setText(i18n.t("proj.btn_cancelled") if res.cancelled
-                               else i18n.t("proj.btn_created_ok"))
+        # nie głosi akcji, która zaszła (wiz K2) — także wtedy, gdy nie zaszła ŻADNA (#1)
+        self.btn_apply.setText(i18n.t("proj.btn_cancelled") if res.cancelled else (
+            i18n.t("proj.btn_created_ok") if res.counts.get("linked", 0)
+            else i18n.t("proj.btn_nothing_new")))
 
     @Slot(str, object)
     def _on_apply_aborted(self, msg, partial):
         """Sonda pierwszego linku padła (SMB oddał kopię zamiast hardlinka) — werdykt o wolumenie."""
         self._apply_end()
-        self.report.setPlainText(
-            i18n.t("proj.abort_prefix", msg=msg)
-            + self._format(partial, self._plan, dry=False, partial=True))
+        self._show_report(i18n.t("proj.abort_prefix", msg=msg)
+                          + self._format(partial, self._plan, dry=False, partial=True), "error")
         self.btn_apply.setEnabled(False)
         self.btn_apply.setText(i18n.t("proj.btn_not_created"))  # NIE obiecuje akcji, której raport zabrania (wiz #4)
 
@@ -672,9 +730,28 @@ class ProjectionDialog(QDialog):
         done_n, total = self._apply_seen
         self._apply_end()
         made = i18n.t("proj.made_before_error", done=done_n, total=total) if done_n else ""
-        self.report.setPlainText(i18n.t("proj.apply_error", msg=msg, made=made))
+        self._show_report(i18n.t("proj.apply_error", msg=msg, made=made), "error")
         self.btn_apply.setEnabled(False)             # dysk mógł się zmienić częściowo — DRY musi przeliczyć
         self.btn_apply.setText(i18n.t("proj.btn_error"))
+
+    def _show_report(self, text, outcome=None):
+        """JEDYNA droga tekstu do panelu raportu. `outcome` (None | 'ok' | 'warn' | 'error') koloruje
+        PIERWSZY BLOK — wynik widać, zanim user przeczyta słupek liczb (wizytacja P2: `pipeline`
+        koloruje błąd, a ten dialog był jednolicie szary).
+
+        Tekst zostaje NIETKNIĘTY: `toPlainText()` oddaje dokładnie argument, bo kolor to warstwa
+        formatu, nie treść — kontrakt „raport zaczyna się od «Przerwano»" (wiz #6) i wszystkie
+        asercje na tekście trzymają się bez zmian. `outcome=None` (podgląd, sonda, plan) zostaje
+        w kolorze tekstu — neutralność też jest komunikatem."""
+        self.report.setPlainText(text)
+        if outcome is None:
+            return
+        cur = QTextCursor(self.report.document().firstBlock())
+        cur.movePosition(QTextCursor.EndOfBlock, QTextCursor.KeepAnchor)
+        fmt = QTextCharFormat()
+        fmt.setForeground(_COLORS[outcome])
+        fmt.setFontWeight(QFont.Bold)
+        cur.mergeCharFormat(fmt)
 
     def _format(self, res, plan, *, dry, partial=False, payload=None):
         c = res.counts
@@ -695,9 +772,9 @@ class ProjectionDialog(QDialog):
                 lines.append(size_line)
         else:
             # abort → nie „Utworzono" (wizytator #6); anulowanie nazywa się WPROST (W1) — user ma
-            # wiedzieć, że reszta planu jest nietknięta, a nie że wydanie zawiodło.
-            head = i18n.t("proj.head_cancelled") if res.cancelled else (
-                i18n.t("proj.head_partial") if partial else i18n.t("proj.head_created"))
+            # wiedzieć, że reszta planu jest nietknięta, a nie że wydanie zawiodło. Rozbiór stanów
+            # (w tym „nic nowego" przy powtórce) ma JEDNEGO właściciela: `report_head_key`.
+            head = i18n.t(report_head_key(res, partial=partial))
             lines.append(i18n.t("proj.done_head", head=head, layout=res.layout, mode=mode))
             lines.append(i18n.t("proj.done_counts", done=word_done, linked=c.get("linked", 0),
                                 exists=c.get("exists", 0), conflict=c.get("conflict", 0),

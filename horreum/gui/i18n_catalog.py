@@ -408,6 +408,10 @@ CATALOG = {
               "not guess it from the last frame: “last used” is not “owned”.",
     },
     "planner.park_col_telescope": {"pl": "Teleskop", "en": "Telescope"},
+    "planner.park_canon_tip": {
+        "pl": "Z nagłówka: {canon}\n(tej nazwy używa `horreum park --add`)",
+        "en": "From header: {canon}\n(this is the name `horreum park --add` takes)",
+    },
     "planner.park_col_lights": {"pl": "Lighty", "en": "Lights"},
     "planner.park_col_last": {"pl": "Ostatnia klatka", "en": "Last frame"},
     "planner.park_col_state": {"pl": "Park", "en": "Park"},
@@ -484,6 +488,10 @@ CATALOG = {
     "grid.tip.vanished": {
         "pl": "\n(zniknięta — wszystkie lokalizacje present=0)",
         "en": "\n(vanished — all locations present=0)",
+    },
+    "grid.tip.vanished_at": {
+        "pl": "\n(zniknięta {ts} — wszystkie lokalizacje present=0)",
+        "en": "\n(vanished {ts} — all locations present=0)",
     },
     "grid.tip.dup_locs": {
         "pl": "\n({n} obecnych lokalizacji)", "en": "\n({n} present locations)",
@@ -971,6 +979,11 @@ CATALOG = {
     },
     "proj.btn_cancelled": {"pl": "Przerwano", "en": "Cancelled"},
     "proj.btn_created_ok": {"pl": "Utworzono ✓", "en": "Created ✓"},
+    "proj.btn_nothing_new": {"pl": "Bez zmian ✓", "en": "No changes ✓"},
+    "proj.status_summary": {
+        "pl": "Wydano na stół: {n} {word} → {root}",
+        "en": "Served to table: {n} {word} → {root}",
+    },
     "proj.abort_prefix": {"pl": "ABORT: {msg}\n\n", "en": "ABORT: {msg}\n\n"},
     "proj.btn_not_created": {"pl": "Nie utworzono", "en": "Not created"},
     "proj.made_before_error": {
@@ -1002,6 +1015,8 @@ CATALOG = {
     "proj.head_cancelled": {"pl": "Przerwano", "en": "Cancelled"},
     "proj.head_partial": {"pl": "Wynik częściowy", "en": "Partial result"},
     "proj.head_created": {"pl": "Utworzono", "en": "Created"},
+    "proj.head_nothing_new": {"pl": "Nic nowego — komplet już w celu",
+                              "en": "Nothing new — target already complete"},
     "proj.done_head": {
         "pl": "{head} (układ {layout}, {mode}):", "en": "{head} (layout {layout}, {mode}):",
     },
@@ -1048,6 +1063,10 @@ CATALOG = {
     "facets.group.telescope": {"pl": "Teleskop", "en": "Telescope"},
     "facets.group.night": {"pl": "Noc", "en": "Night"},
     "facets.search_object": {"pl": "szukaj obiektu…", "en": "search object…"},
+    "facets.tip.clicks": {
+        "pl": "Klik: uwzględnij → wyklucz → wyczyść   ·   Prawy klik: wyklucz wprost",
+        "en": "Click: include → exclude → clear   ·   Right click: exclude directly",
+    },
     "facets.hidden": {"pl": "(+{n} ukryte)", "en": "(+{n} hidden)"},
 
     # --- portfolio.py (Qt-wolny agregat godzin): _NO_FILTER trzyma KLUCZ ---

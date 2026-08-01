@@ -419,6 +419,30 @@ def test_cycle_nieznany_facet():
         facet_model.cycle({}, "tag", "x", "x")
 
 
+def test_toggle_exclude_z_kazdego_stanu_wprost():
+    """P-C: prawy klik = ⊖ JEDNYM ruchem z każdego stanu, z drogą powrotną. Bez tego „pokaż
+    wszystko oprócz tego" kosztowało dwa kliki, a stan pośredni `in` zwężał zbiór do jednej
+    wartości i przeliczał liczniki listwy na zbiorze, którego nikt nie chciał zobaczyć."""
+    ex = {"kind": {"ex": [["light", "light"]]}}
+    assert facet_model.toggle_exclude({}, "kind", "light", "light") == ex
+    inn = facet_model.cycle({}, "kind", "light", "light")
+    assert facet_model.toggle_exclude(inn, "kind", "light", "light") == ex
+    assert facet_model.toggle_exclude(ex, "kind", "light", "light") == {}   # powrót jednym gestem
+
+
+def test_toggle_exclude_nie_rusza_innych_wartosci_ani_wejscia():
+    s0 = facet_model.cycle({}, "kind", "flat", "flat")
+    out = facet_model.toggle_exclude(s0, "kind", "light", "light")
+    assert facet_model.selection(out, "kind", "flat") == "in"
+    assert facet_model.selection(out, "kind", "light") == "ex"
+    assert s0 == {"kind": {"in": [["flat", "flat"]]}}       # wejście niemutowane (jak `cycle`)
+
+
+def test_toggle_exclude_nieznany_facet():
+    with pytest.raises(ValueError, match="facet"):
+        facet_model.toggle_exclude({}, "tag", "x", "x")
+
+
 def test_sibling_state_usuwa_cala_wlasna_grupe():
     s = {"object": {"in": [[1, "M51"]], "ex": [[2, "NGC7000"]]}, "kind": {"in": [["light", "light"]]}}
     assert facet_model.sibling_state(s, "object") == {"kind": {"in": [["light", "light"]]}}

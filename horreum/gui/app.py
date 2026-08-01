@@ -90,12 +90,14 @@ def apply_theme(app, name):
     akcentów; podłącz kolory stanów gridu/facetów (SPOT). `name` znormalizowany (`theme.normalize`).
     Import grid/facets lazy — unika cyklu z warstwą Porządków (F5R2#1) i pozostaje spójny ze stylem
     importów widoków w `_mount_views`."""
-    from horreum.gui import facets, grid, map_view, rows
+    from horreum.gui import facets, grid, map_view, projection_dialog, rows, tasks
     app.setStyle("Fusion")
     app.setPalette(_build_palette(name))
     app.setStyleSheet(theme.qss(name))
     grid.use_theme(name)
     facets.use_theme(name)
+    projection_dialog.use_theme(name)   # kolor nagłówka raportu (P-C) — QSS ról nie sięga QPlainTextEdit
+    tasks.use_theme(name)               # szarość wierszy bez roboty (P-C) — QBrush, nie QSS
     map_view.use_theme(name)         # kolory mapy z motywu (F8) — init na starcie + przełączenie
     rows.use_theme(name)             # człon drugi wierszy (P1) — delegat czyta kolor NA ŻYWO w paint,
                                      # więc zwykły repaint wystarczy (bez `refresh_theme`)
@@ -447,7 +449,7 @@ class AssignObjectDialog(QDialog):
         lay.addWidget(self.designation)
 
         self.error = QLabel("")
-        self.error.setStyleSheet("color: #b00020")
+        self.error.setProperty("role", "error")     # kolor z motywu (P-C) — sztywny #b00020 był ślepy na dark
         self.error.setWordWrap(True)
         lay.addWidget(self.error)
 

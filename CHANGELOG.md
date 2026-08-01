@@ -22,6 +22,14 @@ schemat i API mogą się jeszcze zmieniać.
   zasięgiem wzroku. Pełny zapis zostaje pod kursorem; kopia przemianowana po awarii pokazuje „—",
   bo powód pożyczony od innej kopii byłby zmyśleniem.
 
+### Naprawione
+- **Kolumna „Powód" mieści się w oknie.** Ścieżka archiwum bierze teraz tylko tyle miejsca, ile
+  zostaje, więc diagnoza stoi na ekranie zamiast za prawą krawędzią — wcześniej stuznakowa ścieżka
+  rozpychała panel i powód, dla którego cała lista powstała, wymagał przewinięcia w bok.
+- **Ścieżki w prawym panelu Przeglądu obiektów znów są czytelne.** Skrócona ścieżka pokazuje
+  początek katalogu, a nie samo „R:…" — panel skracał ją do dwóch znaków niezależnie od tego, ile
+  miejsca realnie miał. Pełna ścieżka wciąż jest pod kursorem.
+
 ## [0.5.0] — 2026-08-01
 
 Planer celów: odpowiedź na pytanie „co dziś mam na niebie, w odpowiedniej wielkości i odpowiednich

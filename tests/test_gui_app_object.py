@@ -19,7 +19,8 @@ pytest.importorskip("PySide6")
 from horreum import db, repo
 from horreum.gui import i18n, queries
 from horreum.gui.app import (
-    AssignObjectDialog, ObjectAxisView, OBJ_COL_CANON, OBJ_COL_FRAMES)
+    AssignObjectDialog, ObjectAxisView, COPY_COL_PATH, COPY_COL_REASON, OBJ_COL_CANON,
+    OBJ_COL_FRAMES)
 
 from fixture_s8 import seed_object_axis
 
@@ -389,7 +390,7 @@ def test_przypisanie_zmniejsza_kolejke_i_zapisuje_user(view):
 
 # --- drążenie „kopie nieczytelne" (Z6/P4) ---
 
-def test_kopie_nieczytelne_drazenie_do_dokladnych_kopii(view):
+def test_kopie_nieczytelne_drazenie_do_dokladnych_kopii(view, qapp):
     """Z6: klik pozycji „kopie nieczytelne" → prawy panel w trybie „kopie" (COPY_HEADERS, dokładne
     location z markerem); wybór obiektu przywraca tabelę klatek (tryb kopii znika, D-P4-5)."""
     v, con, ids = view
@@ -406,9 +407,21 @@ def test_kopie_nieczytelne_drazenie_do_dokladnych_kopii(view):
     hdrs = [v.frames.horizontalHeaderItem(c).text() for c in range(v.frames.columnCount())]
     assert hdrs == ["Ścieżka", "Wolumen", "Obecna", "Oznaczona", "Powód"]  # PL (stałe = klucze)
     assert v.frames.rowCount() == 1
-    assert v.frames.item(0, 0).text() == long_path           # dokładna location bez hovera
+    assert v.frames.item(0, 0).text() == long_path           # dokładna location w komórce
     assert v.frames.item(0, 0).toolTip() == long_path
-    assert v.frames.horizontalHeader().sectionResizeMode(0) == QHeaderView.ResizeToContents
+    # Ścieżka bierze resztę i elidować się jej wolno; „Powód" MUSI zmieścić się w panelu (firsthand
+    # 2026-08-01 na żywej pf4: przy `ResizeToContents` 100-znakowa ścieżka wypychała diagnozę poza
+    # prawą krawędź — kolumna, dla której powstał cały Z6, była nie do przeczytania bez scrolla).
+    hh = v.frames.horizontalHeader()
+    assert hh.sectionResizeMode(COPY_COL_PATH) == QHeaderView.Stretch
+    assert hh.sectionResizeMode(COPY_COL_REASON) == QHeaderView.ResizeToContents
+    # Zawijanie WYŁĄCZONE — inaczej elizja ścieżki (jedno słowo, zero spacji) tnie ją do „R:..."
+    # niezależnie od szerokości sekcji i kolumna jest równie nieczytelna, co przed zmianą.
+    assert not v.frames.wordWrap()
+    v.resize(1146, 720)                                      # deklarowana podłoga okna
+    qapp.processEvents()
+    assert (hh.sectionPosition(COPY_COL_REASON) + hh.sectionSize(COPY_COL_REASON)
+            <= v.frames.viewport().width())
     assert v.frames.item(0, 1).text() == "vol2"
     assert v.frames.item(0, 2).text() == "tak"               # kopia nadal obecna
     # Powód z dziennika (Z6): komórka bez prefiksu, tooltip = zapis dosłowny

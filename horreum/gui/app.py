@@ -604,6 +604,12 @@ class ObjectAxisView(QWidget):
         self.frames.setHorizontalHeaderLabels(_headers(FRAME_HEADERS))
         self.frames.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.frames.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        # ZAWIJANIE WYŁĄCZONE, inaczej elizja kłamie (firsthand 2026-08-01, żywa pf4): przy
+        # `wordWrap=True` (domyślne) delegat układa ścieżkę bez spacji jako jedną nierozrywalną
+        # linię i tnie ją do „R:..." — ZANIM dojdzie do głosu szerokość sekcji. Zmierzone:
+        # sekcja 281 px, `fontMetrics.elidedText` na tej szerokości daje 45 znaków
+        # („R:\ASTRO_\CALIBRATION\masters\flats\A140R_260…"), a panel rysował 2 znaki.
+        self.frames.setWordWrap(False)
         # Kolumny wąskie (sha/tel/kam/filtr/data/obecny) do treści, Ścieżka bierze resztę — inaczej
         # stałe 100px zjadają panel i na Ścieżkę zostaje ~130px (widać tylko „R:...", ginie nazwa pliku).
         fh = self.frames.horizontalHeader()
@@ -809,7 +815,13 @@ class ObjectAxisView(QWidget):
         self.frames.setHorizontalHeaderLabels(_headers(COPY_HEADERS))
         fh = self.frames.horizontalHeader()
         fh.setSectionResizeMode(QHeaderView.ResizeToContents)
-        fh.setSectionResizeMode(COPY_COL_PATH, QHeaderView.ResizeToContents)
+        # Ścieżka bierze RESZTĘ i elidować się jej wolno (lustro trybu klatek — `FRAME_COL_PATH`
+        # wyżej): przy `ResizeToContents` realna ścieżka archiwum (100 znaków) zjadała cały panel
+        # i „Powód" — jedyna kolumna, dla której ten tryb powstał — stał za prawą krawędzią.
+        # Firsthand 2026-08-01 na żywej pf4: jedyna nieczytelna kopia to master flat XISF,
+        # a diagnozy („ParseError…") nie dało się przeczytać bez scrolla w poziomie.
+        # Pełna ścieżka nie ginie: niesie ją tooltip komórki (niżej) i poziomy scroll.
+        fh.setSectionResizeMode(COPY_COL_PATH, QHeaderView.Stretch)
         self.frames.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.frames.setRowCount(len(rows))
         for r, row in enumerate(rows):

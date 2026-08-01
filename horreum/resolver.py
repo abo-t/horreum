@@ -271,6 +271,30 @@ Czego ta stała NIE mówi: że RAW nie wymaga przeglądu. Wymaga — tylko drog�
 Dlatego populacja idzie do WŁASNEGO kubełka (`nameless_raw_lights`), a nie znika z rachunku."""
 
 
+def name_resolves(con, text):
+    """Czy przebieg resolvera rozpozna TĘ NAZWĘ po wpisaniu jej do nagłówka — pytanie bramki dialogu
+    „Napraw nagłówek…" (P-D), zadane TĄ SAMĄ drabiną, którą pójdzie `run_resolver`. Read-only.
+
+    Szczeble zależne od NAZWY, w kolejności przebiegu: `resolve_solar` → `resolve_object` → **ALIAS**
+    (`object_alias` — jawna wiedza usera z „Przypisz obiekt…"). Region świadomie POZA drabiną: on
+    rozpoznaje ze WSPÓŁRZĘDNYCH, więc od wpisanego tekstu nie zależy, a dla każdej klatki wchodzącej
+    do dialogu (`object_id IS NULL`) już się nie odezwał.
+
+    Dlaczego nie sam `resolve_object` (adjudykacja bramki, 2026-08-01): pytanie „czy po zapisie oś
+    się wypełni" ma w przebiegu TRZY odpowiedzi twierdzące, a bramka znała jedną. Zmierzone odmowy
+    fałszywe: `Moon`/`Jupiter`/`C/2023 A3` (solar — archiwum ma `_COMETS` i `_SOLAR` jako realne
+    lighty) oraz nazwa świeżo nauczona aliasem (`WR134` — cel z `data/curated.json`, bez numeru
+    katalogowego). Obie populacje resolver rozwiązuje, więc odmowa zapisu była nieprawdą o własnym
+    zachowaniu."""
+    if resolve_solar(text) is not None or resolve_object(text) is not None:
+        return True
+    key = norm_alnum(text)
+    if not key:      # pusty klucz łapałby KAŻDĄ niealfanumeryczną nazwę (D-P4-2, R#3)
+        return False
+    return con.execute(
+        "SELECT 1 FROM object_alias WHERE alias_norm = ?", (key,)).fetchone() is not None
+
+
 def nameless_lights(con):
     """Lighty, których nagłówek MILCZY o obiekcie, a format POZWALAŁBY mu mówić: `object_id IS NULL`,
     wiersz `header` JEST, `object_raw IS NULL`, `filetype` spoza `NO_OBJECT_CARD_FILETYPES` (P-D).

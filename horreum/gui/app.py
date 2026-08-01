@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from horreum import db, macro as macro_mod, repo
+from horreum import db, macro as macro_mod, repo, resolver
 from horreum.gui import i18n, mapproj, queries, theme
 from horreum.gui.map_view import SitesMapView
 from horreum.resolve._text import norm_alnum
@@ -540,7 +540,7 @@ def _path_proposal(path):
     return a if a and a == b else None
 
 
-def _validate_object_value(text):
+def _validate_object_value(con, text):
     """Walidacja PRZED zapisem (D-PD-4) → `(wartość_do_pliku | None, powód_odmowy | None)`.
 
     Kolejność: `strip()` → `catalog_canon()` → bramki. Do pliku idzie forma PO `catalog_canon`
@@ -552,8 +552,12 @@ def _validate_object_value(text):
     dłuższe niż rekord. Bez nich taki kanon padłby dopiero w `writeto` i wrócił jako 'failed'
     („coś się zepsuło") zamiast czystej odmowy. CZWARTA bramka — nazwa NIEROZPOZNAWALNA przez
     resolver — jest dodana ponad brief świadomie: cały wariant C stoi na tym, że po zapisie oś
-    wypełni się sama, a nazwa, której `resolve_object` nie zna, przeniosłaby klatkę tylko z kubełka
-    „bez nazwy" do „nierozpoznane" — po nieodwracalnej mutacji pliku."""
+    wypełni się sama, a nazwa, której przebieg nie zna, przeniosłaby klatkę tylko z kubełka
+    „bez nazwy" do „nierozpoznane" — po nieodwracalnej mutacji pliku.
+
+    Pytanie czwartej bramki zadaje `resolver.name_resolves` — CAŁA drabina nazwy (solar → katalog →
+    alias), nie sam `resolve_object`; dlatego walidacja potrzebuje `con`. Bramka pytająca węższym
+    predykatem niż przebieg odmawiałaby nazw, które przebieg rozwiązuje (`Moon`, `WR134`)."""
     raw = (text or "").strip()
     if not raw:
         return None, i18n.t("repair.err.empty")
@@ -562,7 +566,7 @@ def _validate_object_value(text):
         return None, i18n.t("repair.err.ascii", text=value)
     if len(value) > _OBJECT_CARD_MAX:
         return None, i18n.t("repair.err.too_long", n=len(value), max=_OBJECT_CARD_MAX)
-    if resolve_object(value) is None:
+    if not resolver.name_resolves(con, value):
         return None, i18n.t("repair.err.unresolvable", text=raw)
     return value, None
 
@@ -719,7 +723,7 @@ class RepairHeaderDialog(QDialog):
             if not g["check"].isChecked():
                 g["preview"].setText("")
                 continue
-            value, err = _validate_object_value(g["edit"].text())
+            value, err = _validate_object_value(self.con, g["edit"].text())
             if err:
                 g["preview"].setText(i18n.t("repair.preview_none"))
                 first_err = first_err or i18n.t(
@@ -732,8 +736,11 @@ class RepairHeaderDialog(QDialog):
         # kliknięcie dałoby tylko listę „karta już istnieje" — szczery disabled zamiast pustego biegu.
         self.save_btn.setEnabled(ready > 0 and first_err is None and not self._committed
                                  and not self._runner.is_busy)
-        self.save_btn.setText(i18n.t("repair.save_btn_n", n=ready) if ready
-                              else i18n.t("repair.save_btn"))
+        # Licznik mówi, ile ZOSTAŁO do zapisania — nie ile BYŁO gotowe. Po commicie zostaje zero,
+        # więc liczba znika razem z sensem drugiego kliknięcia; zamrożone „Zapisz karty (23)"
+        # pod wygaszonym przyciskiem opisywało przeszłość (firsthand pilota P-D na `R:`).
+        self.save_btn.setText(i18n.t("repair.save_btn_n", n=ready)
+                              if ready and not self._committed else i18n.t("repair.save_btn"))
 
     def _fail(self, msg):
         self.error.setText(msg)
@@ -749,7 +756,7 @@ class RepairHeaderDialog(QDialog):
         for g in self._groups:
             if not g["check"].isChecked():
                 continue
-            value, err = _validate_object_value(g["edit"].text())
+            value, err = _validate_object_value(self.con, g["edit"].text())
             if err:
                 return self._fail(i18n.t("repair.err.group", folder=os.path.basename(g["folder"]),
                                          reason=err))

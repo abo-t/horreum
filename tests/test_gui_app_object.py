@@ -575,19 +575,38 @@ def test_rozjazd_swiadkow_zostawia_pole_puste(repair, tmp_path):
     dlg.reject()
 
 
-def test_walidacja_kanonu_bramki_odmowy():
+def test_walidacja_kanonu_bramki_odmowy(repair):
     """D-PD-4: kolejność `strip` → `catalog_canon` → bramki. Do pliku idzie forma KANONICZNA
     (kolaps spacji + upper), nigdy surowy segment; nie-ASCII, przepełnienie rekordu i nazwa
     nierozpoznawalna przez resolver są ODMOWĄ (zero zapisu), nie 'failed' po commicie."""
     from horreum.gui.app import _validate_object_value as val
-    assert val("  ngc 7635 ")[0] == "NGC7635"                # normalizacja PRZED zapisem
-    assert val("M 42")[0] == "M42"
-    assert val("")[1] and val("   ")[1]                      # pusto
-    assert val("Mgławica Serce")[1]                          # nie-ASCII
-    assert val("NGC" + "7" * 70)[1]                          # dłuższe niż rekord nagłówka
-    assert val("Wesolinka Kosmiczna 7")[1]                   # ani katalog, ani znana nazwa
+    v, con, files, _open = repair
+    assert val(con, "  ngc 7635 ")[0] == "NGC7635"           # normalizacja PRZED zapisem
+    assert val(con, "M 42")[0] == "M42"
+    assert val(con, "")[1] and val(con, "   ")[1]            # pusto
+    assert val(con, "Mgławica Serce")[1]                     # nie-ASCII
+    assert val(con, "NGC" + "7" * 70)[1]                     # dłuższe niż rekord nagłówka
+    assert val(con, "Wesolinka Kosmiczna 7")[1]              # ani katalog, ani znana nazwa
     # nazwa potoczna, którą resolver ZNA, przechodzi (i idzie do pliku w formie usera)
-    assert val("Bubble Nebula")[0] == "Bubble Nebula"
+    assert val(con, "Bubble Nebula")[0] == "Bubble Nebula"
+
+
+def test_czwarta_bramka_pyta_cala_drabina_nazwy(repair):
+    """Adjudykacja czwartej bramki (2026-08-01): pytanie brzmi „czy PRZEBIEG rozpozna tę nazwę",
+    a przebieg ma trzy szczeble zależne od nazwy — solar → katalog → ALIAS. Bramka pytająca samym
+    `resolve_object` odmawiała zapisu nazw, które resolver rozwiązuje: `Moon`/`C/2023 A3` (archiwum
+    ma `_COMETS` i `_SOLAR` jako realne lighty) oraz nazwy nauczonej wcześniej „Przypisz obiekt…"
+    (`WR134` — cel z `curated.json`, bez numeru katalogowego). To był fałsz o własnym zachowaniu."""
+    from horreum.gui.app import _validate_object_value as val
+    from horreum import resolver
+    v, con, files, _open = repair
+    assert val(con, "Moon")[0] == "Moon"                     # szczebel solar
+    assert val(con, "C/2023 A3")[0] == "C/2023 A3"           # kometa (IAU-desig)
+    assert val(con, "WR134")[1]                              # nieznana NIKOMU → wciąż odmowa
+    oid, _ = repo.upsert_object(con, canon="WR134", catalog=None, kind="deep_sky", now=NOW_PD)
+    repo.add_object_alias(con, alias_norm="WR134", object_id=oid, source="user", now=NOW_PD)
+    assert val(con, "WR134")[0] == "WR134"                   # user nauczył → oś wypełni się sama
+    assert not resolver.name_resolves(con, "---")            # pusty klucz aliasu NIE łapie wszystkiego
 
 
 def test_dwa_takty_zapis_do_pliku_i_kolejka_pusta(repair):
@@ -610,6 +629,7 @@ def test_dwa_takty_zapis_do_pliku_i_kolejka_pusta(repair):
     assert not dlg.undo_btn.isHidden() and not dlg.resolve_btn.isHidden()   # okno bez show(): isVisible() zawodne
     assert "commit 1" in dlg.status.text()                         # commit_id WIDOCZNY (D-PD-7)
     assert not dlg.save_btn.isEnabled()          # karty w plikach → drugi zapis byłby pustym biegiem
+    assert "2" not in dlg.save_btn.text()        # licznik mówi ILE ZOSTAŁO (zero), nie ile BYŁO
     dlg.reject()
 
 
@@ -625,6 +645,7 @@ def test_cofnij_przywraca_plik_i_kubelek(repair):
     assert queries.review_queue(con)["nameless_count"] == 2
     assert dlg.undo_btn.isHidden()                  # commit ZUŻYTY — drugi undo nie ma czego cofać
     assert dlg.save_btn.isEnabled()                 # karty zdjęte → zapis znów ma sens
+    assert "2" in dlg.save_btn.text()               # …i licznik wraca: znów jest co zapisać
     dlg.reject()
 
 

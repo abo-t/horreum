@@ -69,7 +69,15 @@ excludes = [
 ]
 
 # pathex = korzen repo: entry-skrypt lezy w horreum/gui/, nie w korzeniu -> bez tego `import horreum`
-# padlby w Analysis. build.ps1 dodatkowo robi `pip install -e .` (pas bezpieczenstwa).
+# padlby w Analysis.
+#
+# UWAGA: build.ps1 NIE buduje tego speca (robi wylacznie onedir/horreum.spec), wiec ZADEN jego pas
+# bezpieczenstwa tu nie dziala. Przed kazdym buildem onefile ZROB RECZNIE w .venv-build:
+#   pip uninstall -y pytest        (obecny pytest wywala hook-astropy -> Analysis)
+#   pip install -e .               (metadane = numer wersji w exe; zmierzone 2026-08-01: venv mial
+#                                   `horreum 0.0.1`, czyli numer sprzed wszystkich wydan)
+# Bramka tests/test_version.py TEGO NIE ZLAPIE -- pilnuje dev-enva, nie .venv-build.
+
 a = Analysis(
     [os.path.join(REPO_ROOT, "horreum", "gui", "__main__.py")],
     pathex=[REPO_ROOT],

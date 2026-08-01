@@ -330,6 +330,31 @@ def test_manifest_niesie_zestaw_segmentow(tmp_path):
     con.close()
 
 
+def test_dry_ostrzega_gdy_korzen_niesie_inny_uklad(tmp_path):
+    """Resztka z recenzji P2: manifest niósł `segments` od pierwszego dnia, ale NIKT ich nie czytał.
+    Sonda (DRY) ma ostrzec, że w korzeniu stoi drzewo o INNYM kształcie — ponowne wydanie dołoży
+    drugie obok niego. Stare pozycje nie są `conflict` (leżą pod inną ścieżką), więc bez tego
+    cross-checku liczniki wyglądają czysto. Ostrzeżenie, NIE blokada: `would-link` stoi."""
+    con = db.open_db(str(tmp_path / "dr.db"))
+    fid, _ = _seed_file(con, tmp_path, "d.fits", filter_canon="Ha")
+    root = str(tmp_path / "_WBPP" / "drift")
+    projection.apply(projection.plan(con, [fid], "wbpp-feed"), root, do_apply=True, now=NOW)
+
+    proj = projection.plan(con, [fid], "po-obiektach")            # INNY układ do tego samego korzenia
+    res = projection.apply(proj, root, do_apply=False, now=NOW)
+    assert res.drift == "wbpp-feed: object_canon/telescope_label|telescop_canon/filter_canon"
+    assert res.counts.get("would-link") == 1                     # ostrzega, nie blokuje
+
+    # Ten sam układ = cisza; brak/uszkodzony manifest też (efemeryczny — user kasuje w Eksploratorze).
+    same = projection.apply(projection.plan(con, [fid], "wbpp-feed"), root, do_apply=False, now=NOW)
+    assert same.drift is None
+    with open(os.path.join(root, projection.MANIFEST_NAME), "w", encoding="utf-8") as fh:
+        fh.write("{niepoprawny json")
+    assert projection.manifest_drift(root, "po-obiektach") is None
+    assert projection.read_manifest(str(tmp_path / "_WBPP" / "nie-ma")) is None
+    con.close()
+
+
 # ============================================================ meta-test bramki zielony
 
 

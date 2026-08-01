@@ -571,6 +571,11 @@ def _format_project(root, res, proj, *, limit):
         lines.append(
             f"  do zlinkowania: {c.get('would-link',0)}; istnieje: {c.get('exists',0)}; "
             f"konflikty: {c.get('conflict',0)}; pominieto (brak kopii): {c.get('skipped',0)}")
+    if res.drift:
+        # Rozjazd manifestu PRZED liczbami: stare drzewo nie daje `conflict` (lezy pod INNA sciezka),
+        # wiec liczniki wygladaja czysto, a korzen dostaje DRUGIE drzewo obok starego.
+        lines.append(f"  UWAGA: w korzeniu stoi juz drzewo o innym ukladzie ({res.drift}) -- "
+                     "ponowne wydanie dolozy drugie obok niego")
     if proj.multi_present:
         lines.append(f"  wiele obecnych kopii: {proj.multi_present} (zlinkowano pierwsza; reszta w drzewie)")
 

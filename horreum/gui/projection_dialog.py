@@ -786,6 +786,11 @@ class ProjectionDialog(QDialog):
                 # pierwsza liczba pod nagłówkiem ma mówić o skutku, nie o jego braku (wiz #11).
                 touched = sum(c.get(k, 0) for k in ("linked", "exists", "conflict", "error", "verify_bad"))
                 lines.append(i18n.t("proj.untouched", n=max(len(plan.items) - touched, 0)))
+        if res.drift:
+            # Rozjazd manifestu PRZED drzewem planu: stare drzewo NIE daje `conflict` (leży pod inną
+            # ścieżką), więc liczniki wyżej wyglądają czysto — bez tej linii raport milczy o tym,
+            # że korzeń dostanie DRUGIE drzewo obok starego (te same i-węzły, WBPP liczy dwa razy).
+            lines.append(i18n.t("proj.drift", was=res.drift))
         if plan.multi_present:
             lines.append(i18n.t("proj.multi_present", n=plan.multi_present))
         folders: dict = {}

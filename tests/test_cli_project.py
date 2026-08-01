@@ -70,6 +70,19 @@ def test_cli_project_apply_hardlinki_i_manifest(tmp_path, capsys):
     assert all(f.exists() for f in files)                  # źródła nietknięte (read-only wobec biblioteki)
 
 
+def test_cli_project_dry_mowi_o_innym_ukladzie_w_korzeniu(tmp_path, capsys):
+    """Sonda ostrzega, gdy korzeń niesie drzewo o INNYM kształcie (resztka z recenzji P2): ponowne
+    wydanie dołoży drugie obok starego, a liczniki tego nie pokażą (stare leży pod inną ścieżką)."""
+    dbp, _ = _seed(tmp_path)
+    root = tmp_path / "_WBPP" / "feed"
+    cli.main(["project", str(dbp), "--root", str(root), "--layout", "wbpp-feed", "--apply"])
+    capsys.readouterr()
+    rc = cli.main(["project", str(dbp), "--root", str(root), "--layout", "po-obiektach"])
+    out = capsys.readouterr().out
+    assert rc == 0 and "innym ukladzie" in out and "wbpp-feed" in out
+    assert "do zlinkowania: 2" in out                        # ostrzega, nie blokuje
+
+
 def test_cli_project_root_bez_wykluczenia_blad(tmp_path, capsys):
     """Guard §0: korzeń bez segmentu _WBPP/_Review → rc=1, komunikat, ZERO tworzenia (przed masą)."""
     dbp, _ = _seed(tmp_path)

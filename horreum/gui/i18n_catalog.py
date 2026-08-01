@@ -1118,6 +1118,12 @@ CATALOG = {
         "pl": "  wiele obecnych kopii: {n} (użyto pierwszej)",
         "en": "  multiple present copies: {n} (used the first)",
     },
+    "proj.drift": {
+        "pl": "  ⚠ w korzeniu stoi już drzewo o innym układzie ({was}) — ponowne wydanie dołoży "
+              "drugie obok niego",
+        "en": "  ⚠ the root already holds a tree with a different layout ({was}) — issuing again "
+              "will add a second one next to it",
+    },
     "proj.plan_tree": {"pl": "  drzewo planu: {tree}", "en": "  plan tree: {tree}"},
     "proj.more_folders": {
         "pl": "    … (+{n} folderów)", "en": "    … (+{n} more folders)",

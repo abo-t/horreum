@@ -202,6 +202,47 @@ class LinkResult:
     reason: str | None = None
 
 
+def _shape(layout, segments):
+    """Kształt drzewa jako JEDEN maszynowy string: `wbpp-feed: object_canon/telescope_label|telescop_canon
+    /filter_canon`. Language-neutral (nazwy kolumn), więc rdzeń może go oddać powierzchniom, a każda
+    ubierze go własną prozą — inaczej polski komunikat rdzenia wyciekłby do wersji EN."""
+    parts = []
+    for spec in segments:
+        cols = spec if isinstance(spec, (tuple, list)) else (spec,)
+        parts.append("|".join(str(c) for c in cols))
+    return f"{layout}: {'/'.join(parts)}"
+
+
+def read_manifest(root):
+    """`_PROJEKCJA.json` z korzenia → dict albo None. TOLERANCYJNY z rozmysłem: manifest jest
+    efemeryczny i user może go skasować w Eksploratorze razem z drzewem, więc brak pliku, uszkodzony
+    JSON i brak uprawnień znaczą to samo — „nie wiem, co tu stało", nigdy wyjątek w środku sondy."""
+    try:
+        with open(os.path.join(root, MANIFEST_NAME), encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def manifest_drift(root, layout):
+    """Kształt drzewa, KTÓRY W TYM KORZENIU JUŻ STOI, jeśli różni się od bieżącego — inaczej None.
+
+    Manifest niósł `segments` od pierwszego dnia, ale NIKT ich nie czytał (resztka z recenzji P2).
+    Rozjazd jest cichy i kosztowny: zmiana definicji layoutu (P2: `telescope_label` → coalesce
+    z `telescop_canon`) albo nazwanie teleskopu przez usera przesuwa katalogi, więc ponowne wydanie
+    do TEGO SAMEGO korzenia buduje DRUGIE drzewo obok starego — te same i-węzły, a WBPP policzy
+    klatki dwa razy. Stare pozycje nie są `conflict` (leżą pod inną ścieżką), więc raport bez tego
+    cross-checku wygląda na czysty.
+
+    Manifest bez `segments` (zapisany przed tym polem) → milczymy: brak zeznania to nie rozjazd."""
+    payload = read_manifest(root)
+    if not payload or not payload.get("segments"):
+        return None
+    was = _shape(payload.get("layout"), payload["segments"])
+    return None if was == _shape(layout, LAYOUTS[layout]) else was
+
+
 @dataclasses.dataclass(frozen=True)
 class ApplyResult:
     root: str
@@ -210,6 +251,10 @@ class ApplyResult:
     copy: bool
     results: list                     # list[LinkResult] — pełny per-frame (items + skipped z planu)
     cancelled: bool = False
+    # Kształt drzewa, które w korzeniu JUŻ stało, gdy różni się od bieżącego (`manifest_drift`).
+    # Ostrzeżenie, NIE blokada: rozstrzygnięcie („inny korzeń czy świadome dołożenie") należy do
+    # człowieka, a projekcja jest kasowalna w Eksploratorze.
+    drift: str | None = None
 
     @property
     def counts(self) -> dict:
@@ -229,6 +274,9 @@ def apply(projection, root, *, do_apply, copy=False, now=None, manifest=None,
     (Qt-wolne). `should_cancel` PRZED frame'em (anulowanie na granicy pliku). Przy `do_apply` pisze
     `_PROJEKCJA.json` obok korzenia (PLIK, nie DB). Pominięte z planu dochodzą jako `skipped`."""
     _assert_excluded_segment(root)
+    # PRZED czymkolwiek: `_write_manifest` nadpisze zeznanie starego drzewa, więc po masie nie byłoby
+    # już czego czytać. DRY sonduje ten sam fakt, bo to właśnie DRY ma ostrzec PRZED wydaniem.
+    drift = manifest_drift(root, projection.layout)
     if do_apply:
         os.makedirs(root, exist_ok=True)           # korzeń istnieje dla linków I manifestu (KLINGA)
 
@@ -257,7 +305,8 @@ def apply(projection, root, *, do_apply, copy=False, now=None, manifest=None,
                 # zawsze głosi „pominięto: 0", choćby plan miał klatki bez obecnej kopii (R#6).
                 partial_results = results + [LinkResult(fid, "", "", "skipped", why)
                                              for fid, why in projection.skipped]
-                partial = ApplyResult(root, projection.layout, do_apply, copy, partial_results, cancelled)
+                partial = ApplyResult(root, projection.layout, do_apply, copy, partial_results,
+                                      cancelled, drift)
                 raise ProjectionAbort(
                     "pierwszy link nie przeszedł sondy tożsamości (i-węzeł/rozmiar/treść) — "
                     "wolumen nie wspiera hardlinków? włącz tryb kopii", partial)
@@ -270,7 +319,7 @@ def apply(projection, root, *, do_apply, copy=False, now=None, manifest=None,
     for fid, reason in projection.skipped:         # kwarantanna z planu → wynik
         results.append(LinkResult(fid, "", "", "skipped", reason))
 
-    result = ApplyResult(root, projection.layout, do_apply, copy, results, cancelled)
+    result = ApplyResult(root, projection.layout, do_apply, copy, results, cancelled, drift)
     if do_apply:
         _write_manifest(root, result, now=now, manifest=manifest)
     return result

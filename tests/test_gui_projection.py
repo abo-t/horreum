@@ -146,6 +146,28 @@ def test_dialog_cel_z_pamieci_auto_dry_1_klik(qapp, tmp_path, fake_settings, mon
     con.close()
 
 
+def test_dry_mowi_o_innym_ukladzie_w_korzeniu(qapp, tmp_path, fake_settings, monkeypatch):
+    """Resztka z recenzji P2: manifest niósł `segments`, ale nikt ich nie czytał. Auto-DRY na
+    otwarciu ma powiedzieć, że w korzeniu stoi drzewo o INNYM kształcie — stare pozycje leżą pod
+    inną ścieżką, więc `conflict` = 0 i raport bez tej linii wygląda czysto. Ostrzeżenie, nie
+    blokada: „Utwórz" zostaje uzbrojone."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con = db.open_db(str(tmp_path / "drift.db"))
+    ids = _seed_files(con, tmp_path, 2)
+    root = tmp_path / "_WBPP" / "feed"
+    root.mkdir(parents=True)
+    (root / projection.MANIFEST_NAME).write_text(json.dumps(
+        {"layout": "wbpp-feed", "segments": [["object_canon"],
+                                             ["telescope_label", "telescop_canon"],
+                                             ["filter_canon"]]}), encoding="utf-8")
+    _target(fake_settings, root)
+    dlg = _dlg(con, ids)
+    rep = dlg.report.toPlainText()
+    assert "innym układzie" in rep and "wbpp-feed" in rep
+    assert "do zlinkowania: 2" in rep and dlg.btn_apply.isEnabled()
+    con.close()
+
+
 def test_dialog_auto_kopia_inny_wolumen(qapp, tmp_path, fake_settings, monkeypatch):
     """Seriale źródeł ≠ serial celu → auto-KOPIA całości: słownictwo per tryb (wiz #5), rozmiar
     z kubełkiem NULL (R#5), nota „inny wolumen" na karcie; pliki po apply NIE są hardlinkami."""

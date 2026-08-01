@@ -107,6 +107,18 @@ def _fmt_event_ts(ts):
     return ts[:16].replace("T", " ") if ts and "T" in ts else (ts or "")
 
 
+def _copy_reason(raw):
+    """Powód nieczytelności do komórki (Z6): zdejmij prefiks dziennika — lista sama nazywa się
+    „Kopie nieczytelne", więc powtórzony wstęp tylko odsuwa to, po co user tu przyszedł
+    („ParseError: …"). Fraza ma JEDNEGO właściciela — `repo.UNREADABLE_REASON_PREFIX`; event bez
+    prefiksu (miękkie lądowanie W1) idzie w całości. Brak eventu dla tej kopii → myślnik: „nie
+    wiem" jest faktem, pusta komórka wygląda na brak danych."""
+    if not raw:
+        return i18n.t("copy.no_reason")
+    prefix = repo.UNREADABLE_REASON_PREFIX
+    return raw[len(prefix):] if raw.startswith(prefix) else raw
+
+
 def _fmt_obs_date(s):
     """Data klatki do sekund: „…T19:45:02.6075262" → „…T19:45:02" (7 cyfr ułamka to szum wizualny —
     wizytator O2); pełna wartość zostaje w tooltipie. Pusty → ''."""
@@ -385,8 +397,9 @@ FRAME_COL_SHA, FRAME_COL_TEL, FRAME_COL_CAM, FRAME_COL_FILTER, FRAME_COL_DATE, F
 FRAME_HEADERS = ["frame.col.sha", "frame.col.telescope", "frame.col.camera", "frame.col.filter",
                  "frame.col.date", "frame.col.present", "col.path"]
 # Tryb „kopie" prawego panelu (Z6/P4 — drążenie kubełka `unreadable` do dokładnych location).
-COPY_COL_PATH, COPY_COL_VOLUME, COPY_COL_PRESENT, COPY_COL_MARKED = range(4)
-COPY_HEADERS = ["col.path", "copy.col.volume", "copy.col.present", "copy.col.marked"]
+COPY_COL_PATH, COPY_COL_VOLUME, COPY_COL_PRESENT, COPY_COL_MARKED, COPY_COL_REASON = range(5)
+COPY_HEADERS = ["col.path", "copy.col.volume", "copy.col.present", "copy.col.marked",
+                "copy.col.reason"]
 
 
 def _tel_facet_label(row):
@@ -808,6 +821,10 @@ class ObjectAxisView(QWidget):
                                  i18n.t("common.yes") if row["present"] else i18n.t("common.no"))
             self._set_frame_cell(r, COPY_COL_MARKED, _fmt_event_ts(row["unreadable_since"]),
                                  tooltip=row["unreadable_since"])
+            # Powód z dziennika (Z6): stan mówi KTÓRA kopia, ten człon — CZEGO nie da się
+            # przeczytać. Tooltip niesie zapis dosłowny (z prefiksem), komórka — samą diagnozę.
+            self._set_frame_cell(r, COPY_COL_REASON, _copy_reason(row["reason"]),
+                                 tooltip=row["reason"] or None)
         self.frames_label.setText(i18n.t("object.unreadable_title", n=len(rows)))
 
     def _restore_frames_mode(self):

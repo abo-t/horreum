@@ -318,6 +318,12 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
     return result
 
 
+# Prefiks powodu w dzienniku przy oznaczeniu kopii (#13) — JEDEN właściciel frazy. Powierzchnia,
+# która sama nazywa się „Kopie nieczytelne", zdejmuje go przy wyświetlaniu (`gui.app._copy_reason`,
+# Z6), żeby to diagnoza („ParseError: …") zajmowała kolumnę, nie powtórzony wstęp.
+UNREADABLE_REASON_PREFIX = "kopia nieczytelna: "
+
+
 def refresh_location_unreadable(con, *, location_id, sha1_data, path, mtime, reason,
                                 now, actor="scan"):
     """Znana ścieżka, plik NIECZYTELNY, bajty NIEZMIENIONE (R3-b1, #13): refresh mtime + ZNACZNIK
@@ -359,7 +365,7 @@ def refresh_location_unreadable(con, *, location_id, sha1_data, path, mtime, rea
             "unreadable_since = COALESCE(unreadable_since, ?) WHERE id = ?",
             (mtime, now, now, location_id))
         emit_event(con, actor=actor, verb="frame.review", target=f"sha1:{sha1_data}", now=now,
-                   reason=f"kopia nieczytelna: {reason}", payload={"path": path})
+                   reason=f"{UNREADABLE_REASON_PREFIX}{reason}", payload={"path": path})
     return True
 
 

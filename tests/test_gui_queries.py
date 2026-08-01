@@ -237,3 +237,52 @@ def test_unreadable_copies_czysta_kopia_poza_lista(s8_obj):
     assert len(rows) == 1 and rows[0]["volume"] == "vol2"
     # review_queue niesie ten sam fakt licznikiem per-KLATKA (DISTINCT, spójność z resolverem)
     assert queries.review_queue(con)["unreadable_count"] == 1
+
+
+def test_unreadable_copies_powod_z_dziennika_per_KOPIA(s8_obj):
+    """Z6: `reason` opisuje TĘ kopię, nie klatkę. Obie kopie `a1` mają ten sam `target sha1:`,
+    więc rozstrzyga `payload.path` — po samym sha1 każdy wiersz dostałby powód drugiej kopii."""
+    con, ids = s8_obj
+    locs = con.execute("SELECT id, path FROM location WHERE frame_id = ? ORDER BY id",
+                       (ids["frames"]["a1"],)).fetchall()
+    repo.refresh_location_unreadable(con, location_id=locs[0]["id"], sha1_data="sha-a1",
+                                     path=locs[0]["path"], mtime="t2",
+                                     reason="OSError: [Errno 5] I/O error", now=NOW)
+    repo.refresh_location_unreadable(con, location_id=locs[1]["id"], sha1_data="sha-a1",
+                                     path=locs[1]["path"], mtime="t2",
+                                     reason="ParseError: line 4, column 5322",
+                                     now="2026-06-29T13:00:01")
+    powody = {r["path"]: r["reason"] for r in queries.unreadable_copies(con)}
+    assert powody[locs[0]["path"]] == "kopia nieczytelna: OSError: [Errno 5] I/O error"
+    assert powody[locs[1]["path"]] == "kopia nieczytelna: ParseError: line 4, column 5322"
+
+
+def test_unreadable_copies_powod_najswiezszy_bije_starszy(s8_obj):
+    """Powód to OSTATNIE zeznanie o kopii, nie pierwsze: kolejna awaria z inną diagnozą przestawia
+    kolumnę, a marker (`unreadable_since`) zostaje przy PIERWSZYM czasie — to dwa różne fakty."""
+    con, ids = s8_obj
+    loc = con.execute("SELECT id, path FROM location WHERE volume = 'vol2'").fetchone()
+    repo.refresh_location_unreadable(con, location_id=loc["id"], sha1_data="sha-a1",
+                                     path=loc["path"], mtime="t2", reason="OSError", now=NOW)
+    # nowa próba: inny mtime (inaczej repo robi cichy no-op bez eventu) i inna diagnoza
+    repo.refresh_location_unreadable(con, location_id=loc["id"], sha1_data="sha-a1",
+                                     path=loc["path"], mtime="t3", reason="ParseError",
+                                     now="2026-06-30T09:00:00")
+    row = queries.unreadable_copies(con)[0]
+    assert row["reason"] == "kopia nieczytelna: ParseError"
+    assert row["unreadable_since"] == NOW                       # marker trzyma PIERWSZĄ awarię
+
+
+def test_unreadable_copies_kopia_przemianowana_bez_powodu(s8_obj):
+    """Payload dziennika trzyma ścieżkę Z CHWILI awarii. Po przemianowaniu kopii para (sha1, path)
+    nie ma pokrycia → `reason IS NULL`, bo powód pożyczony od innej kopii byłby zmyśleniem;
+    powierzchnia pokazuje wtedy „—" (`app._copy_reason`)."""
+    con, ids = s8_obj
+    loc = con.execute("SELECT id, path FROM location WHERE volume = 'vol2'").fetchone()
+    repo.refresh_location_unreadable(con, location_id=loc["id"], sha1_data="sha-a1",
+                                     path=loc["path"], mtime="t2", reason="OSError", now=NOW)
+    assert queries.unreadable_copies(con)[0]["reason"] == "kopia nieczytelna: OSError"
+    with con:
+        con.execute("UPDATE location SET path = ? WHERE id = ?", ("/backup/a1-NOWA.fits", loc["id"]))
+    row = queries.unreadable_copies(con)[0]
+    assert row["path"] == "/backup/a1-NOWA.fits" and row["reason"] is None

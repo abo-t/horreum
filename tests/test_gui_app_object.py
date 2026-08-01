@@ -404,14 +404,25 @@ def test_kopie_nieczytelne_drazenie_do_dokladnych_kopii(view):
     r = _select_review_tag(v, "unreadable")
     assert "kopie nieczytelne: 1" in v.review.item(r).text()
     hdrs = [v.frames.horizontalHeaderItem(c).text() for c in range(v.frames.columnCount())]
-    assert hdrs == ["Ścieżka", "Wolumen", "Obecna", "Oznaczona"]   # PL z katalogu (stałe = klucze)
+    assert hdrs == ["Ścieżka", "Wolumen", "Obecna", "Oznaczona", "Powód"]  # PL (stałe = klucze)
     assert v.frames.rowCount() == 1
     assert v.frames.item(0, 0).text() == long_path           # dokładna location bez hovera
     assert v.frames.item(0, 0).toolTip() == long_path
     assert v.frames.horizontalHeader().sectionResizeMode(0) == QHeaderView.ResizeToContents
     assert v.frames.item(0, 1).text() == "vol2"
     assert v.frames.item(0, 2).text() == "tak"               # kopia nadal obecna
+    # Powód z dziennika (Z6): komórka bez prefiksu, tooltip = zapis dosłowny
+    assert v.frames.item(0, 4).text() == "OSError"
+    assert v.frames.item(0, 4).toolTip() == "kopia nieczytelna: OSError"
     assert v.frames_label.text() == "Kopie nieczytelne (1)"
+    # kopia bez pokrycia w dzienniku (przemianowana po awarii) → „—", nie pustka: „nie wiem,
+    # dlaczego" jest faktem, a pusta komórka czyta się jak brak danych w kolumnie
+    with con:
+        con.execute("UPDATE location SET path = ? WHERE id = ?", ("/backup/a1-NOWA.fits", loc["id"]))
+    v.refresh()
+    _select_review_tag(v, "unreadable")
+    assert v.frames.item(0, 4).text() == "—"
+    assert not v.frames.item(0, 4).toolTip()
     # wybór obiektu → powrót do tabeli klatek (tryb „kopie" znika)
     _select_object_canon(v, "NGC7000")
     hdrs = [v.frames.horizontalHeaderItem(c).text() for c in range(v.frames.columnCount())]

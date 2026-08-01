@@ -155,6 +155,8 @@ CATALOG = {
     "copy.col.volume": {"pl": "Wolumen", "en": "Volume"},
     "copy.col.present": {"pl": "Obecna", "en": "Present"},
     "copy.col.marked": {"pl": "Oznaczona", "en": "Marked"},
+    "copy.col.reason": {"pl": "Powód", "en": "Reason"},
+    "copy.no_reason": {"pl": "—", "en": "—"},
     "filter.telescope": {"pl": "Teleskop:", "en": "Telescope:"},
     "filter.filter": {"pl": "Filtr:", "en": "Filter:"},
     "filter.all": {"pl": "(wszystkie)", "en": "(all)"},

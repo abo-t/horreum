@@ -277,9 +277,23 @@ def unreadable_copies(con):
     pokazane per kopia: oznaczona kopia może być `present=0` (znikła po oznaczeniu — forward-guard
     #13) i to MA być widoczne. `sha1_data` = kontekst tożsamości klatki (UI skraca do 12).
     ORDER: najnowsze oznaczenie na górze, potem ścieżka. Zwraca: frame_id, sha1_data, volume,
-    path, present, unreadable_since."""
+    path, present, unreadable_since, reason.
+
+    `reason` (Z6) = OSTATNI `event(frame.review)` TEJ kopii: stan mówi, KTÓRA kopia wypadła,
+    dziennik — CZEGO nie da się przeczytać (żywa pf4: „ParseError: not well-formed…"). Atrybucja
+    idzie PARĄ (`target = 'sha1:'||sha1_data` ORAZ `payload.path == location.path`), bo target
+    jest per KLATKA, a klatka bywa wielokopiowa — po samym sha1 obie kopie dostałyby cudzy powód.
+    BEZ filtra po prefiksie: `frame.review` emitują DWA miejsca (`flag_frame_review` przy miękkim
+    lądowaniu W1 i `refresh_location_unreadable` przy markerze) i oba opisują tę samą niemożność
+    odczytu, więc rozstrzyga ŚWIEŻOŚĆ, nie autor. Kopia przemianowana po oznaczeniu zostawia
+    w payloadzie STARĄ ścieżkę → `reason IS NULL` i powierzchnia pokazuje „—": brak dowodu jest
+    uczciwszy niż powód pożyczony od innej kopii."""
     return con.execute(
-        "SELECT l.frame_id, f.sha1_data, l.volume, l.path, l.present, l.unreadable_since "
+        "SELECT l.frame_id, f.sha1_data, l.volume, l.path, l.present, l.unreadable_since, "
+        "       (SELECT e.reason FROM event e "
+        "         WHERE e.verb = 'frame.review' AND e.target = 'sha1:' || f.sha1_data "
+        "           AND json_extract(e.payload, '$.path') = l.path "
+        "         ORDER BY e.id DESC LIMIT 1) AS reason "
         "FROM location l JOIN frame f ON f.id = l.frame_id "
         "WHERE l.unreadable_since IS NOT NULL "
         "ORDER BY l.unreadable_since DESC, l.path"

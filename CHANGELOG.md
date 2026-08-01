@@ -6,6 +6,13 @@ schemat i API mogą się jeszcze zmieniać.
 
 ## [Niewydane]
 
+### Zmienione
+- **Lista „Kopie nieczytelne" mówi teraz, DLACZEGO** kopii nie da się przeczytać — nowa kolumna
+  „Powód" z zapisem z dziennika (np. „ParseError: not well-formed…" dla uszkodzonego pliku XISF).
+  Wcześniej ekran pokazywał tylko, KTÓRA kopia wypadła, a diagnoza leżała w dzienniku, poza
+  zasięgiem wzroku. Pełny zapis zostaje pod kursorem; kopia przemianowana po awarii pokazuje „—",
+  bo powód pożyczony od innej kopii byłby zmyśleniem.
+
 ## [0.5.0] — 2026-08-01
 
 Planer celów: odpowiedź na pytanie „co dziś mam na niebie, w odpowiedniej wielkości i odpowiednich

@@ -402,9 +402,12 @@ def test_facet_object_godziny_sufiks_i_guard_ex(qapp):
     DD-render (recenzja #1): obiekt ⊖ JEST w extras (sibling-set obiektu ZAWIERA wykluczone), a MIMO
     TO wiersz nie dokleja godzin. Obiekt bez wpisu extras → bez sufiksu.
 
-    P1 (wiz F7 #F1/#F2/#F4): licznik i godziny mieszkają w CZŁONIE DRUGIM (`rows.SECONDARY` — prawa
-    kolumna delegata), NAZWA zostaje sama w `text()`. Doklejanie do tekstu przepychało listwę przez
-    220 px w poziomy scrollbar i tłukło skanowalność kolumny godzin."""
+    P1 (wiz F7 #F1/#F2/#F4): licznik i godziny mieszkają w prawych kolumnach delegata, NAZWA zostaje
+    sama w `text()`. Doklejanie do tekstu przepychało listwę przez 220 px w poziomy scrollbar
+    i tłukło skanowalność kolumny godzin. **Człony są ROZDZIELONE (wiz P1 #4):** licznik w
+    `rows.SECONDARY`, godziny w `rows.TERTIARY` — sklejone w jeden run przesuwały licznik o szerokość
+    ogona godzin (zmierzone na żywej pf4: „(301) · 60.4 h" kończyło „(n)" 108 px od prawej,
+    „(60) · 3.0 h" 96 px), więc kolumny liczb nie dało się skanować."""
     from horreum.gui import rows
     from horreum.gui.facets import FacetRail
     rail = FacetRail()
@@ -423,14 +426,21 @@ def test_facet_object_godziny_sufiks_i_guard_ex(qapp):
         raise AssertionError(f"brak {v}")
 
     assert _item(1).text() == "✓ M51"                        # człon 1 = SAMA nazwa (+ marker stanu)
-    assert _item(1).data(rows.SECONDARY) == "(5) · 1.0 h"    # in → licznik + godziny w prawej kolumnie
+    assert _item(1).data(rows.SECONDARY) == "(5)"            # in → SAM licznik (człon drugi)
+    assert _item(1).data(rows.TERTIARY) == " · 1.0 h"        # godziny = własna kolumna (człon trzeci)
     assert _item(1).toolTip() == "Ha: 1.0 h"
     assert _item(2).text() == "⊖ NGC7000"
     assert _item(2).data(rows.SECONDARY) == "(+3 ukryte)"    # ex → BEZ godzin mimo wpisu w extras
+    assert _item(2).data(rows.TERTIARY) is None
     assert _item(2).toolTip() == ""
     assert _item(7).text() == "IC434"
     assert _item(7).data(rows.SECONDARY) == "(2)"            # brak wpisu extras → sam licznik
+    assert _item(7).data(rows.TERTIARY) is None
     assert _item(7).toolTip() == ""
+    # Kolumna godzin ma WSPÓLNĄ szerokość dla listy (`fit_tertiary` po wypełnieniu) — dopiero to
+    # ustawia liczby w kolumnę. Grupa bez adnotacji zostaje przy układzie dwuczłonowym (0).
+    assert rail._lists["object"].itemDelegate()._tertiary_w > 0
+    assert rail._lists["kind"].itemDelegate()._tertiary_w == 0
 
 
 def test_facet_wyczysc_zbior(view):

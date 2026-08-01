@@ -9,10 +9,25 @@ liczba/adnotacja doklejona do tekstu wiersza przepycha go poza szerokość listy
 - wiz F3 #4 (panel „Pola"): liczniki pokrycia ucięte przy 1200 px.
 
 Kontrakt: `DisplayRole` = człon PIERWSZY (nazwa — rysowany od lewej, ELIDOWANY do wolnego miejsca),
-rola `SECONDARY` = człon DRUGI (liczba/godziny — rysowany od prawej, NIGDY nie elidowany). Dzięki
-temu nazwa oddaje szerokość liczbie, nie odwrotnie: licznik jest ostatnią rzeczą, którą widać.
+rola `SECONDARY` = człon DRUGI (liczba — rysowany od prawej, NIGDY nie elidowany), rola `TERTIARY`
+= człon TRZECI (adnotacja — własna KOLUMNA przy prawej krawędzi, WRAZ z własnym separatorem:
+„ · 12.3 h", nie „· 12.3 h"). Dzięki temu nazwa oddaje szerokość liczbie, nie odwrotnie: licznik jest
+ostatnią rzeczą, którą widać. Separator należy do adnotacji, a nie do delegata, bo to jedyny układ,
+w którym wiersz NAJSZERSZY rysuje się dokładnie tak jak przed rozdzieleniem członów — wyrównanie
+kosztuje wtedy wyłącznie nieuniknioną cenę kolumny na wierszach węższych (zmierzone, Segoe UI 9 pt:
+pas nazwy 132 px jak dotąd; dokładany `_GAP` zjadałby dodatkowe 9 px w KAŻDYM wierszu).
 
-`strong` (per LISTA, nie per wiersz) mówi, czym jest człon drugi:
+Człon TRZECI zamyka wiz P1 #4: gdy godziny szły w tym samym runie co „(n)", zmienna szerokość ogona
+przesuwała licznik — „(301) · 60.4 h" kończyło „(n)" 108 px od prawej, a „(60) · 3.0 h" 96 px
+(zmierzone na żywej pf4), więc kolumny liczb nie dało się skanować wzrokiem. Szerokość kolumny
+ustala WOŁAJĄCY jednym `fit_tertiary(teksty_listy)` po przeładowaniu — mierzona z NAJSZERSZEJ treści
+listy, nie z odgadniętej stałej, więc adnotacja nigdy nie przepełnia kolumny (ogon „(+n bez exptime)"
+poszerza ją dla CAŁEJ listy, zamiast rozjeżdżać jeden wiersz). Bez `fit_tertiary` wiersz rysuje się
+na własnej szerokości — niewyrównany, nigdy nachodzący.
+
+`strong` mówi, czym jest człon drugi. Domyślna wartość jest PER LISTA, a rola `STRONG` nadpisuje ją
+PER WIERSZ (wiz P1 #6: „0" na wierszu wyszarzonym było pogrubione mimo wyszarzenia — pogrubienie
+krzyczy dokładnie tam, gdzie nie ma nic do zrobienia):
 - `strong=True` — LICZBA JEST TREŚCIĄ (Porządki: „ile do zrobienia") → pogrubiona, w kolorze wiersza,
   więc wyszarzenie itemu (`setForeground`) gasi oba człony razem.
 - `strong=False` — ADNOTACJA (godziny portfela, pokrycie pól) → tekst drugorzędny z motywu (F6 §7).
@@ -29,9 +44,11 @@ from PySide6.QtWidgets import QApplication, QStyle, QStyledItemDelegate, QStyleO
 
 from horreum.gui import theme
 
-# Rola członu drugiego. `Qt.UserRole` jest ZAJĘTA u wszystkich konsumentów (facets: (facet,value,label);
-# fields: keyword; tasks: klucz stanu) — dlatego +1, nie własna baza.
+# Role członów. `Qt.UserRole` jest ZAJĘTA u wszystkich konsumentów (facets: (facet,value,label);
+# fields: keyword; tasks: klucz stanu) — dlatego +1…+3, nie własna baza.
 SECONDARY = Qt.UserRole + 1
+TERTIARY = Qt.UserRole + 2     # adnotacja w KOLUMNIE (godziny portfela) — szerokość z `fit_tertiary`
+STRONG = Qt.UserRole + 3       # nadpisuje `strong` listy dla TEGO wiersza (None → wartość listy)
 
 _GAP = 12          # odstęp nazwa↔liczba; poniżej ~8 px człony się sklejają przy wąskiej listwie
 _PAD = 6           # zapas przy prawej ramce; bez niego ink „›" dotyka krawędzi (wizytator P1 #3)
@@ -55,6 +72,27 @@ class TwoPartDelegate(QStyledItemDelegate):
     def __init__(self, parent=None, *, strong=False):
         super().__init__(parent)
         self._strong = strong
+        self._tertiary_w = 0            # szerokość kolumny adnotacji (0 = lista bez trzeciego członu)
+
+    def _is_strong(self, index):
+        """Czy człon drugi TEGO wiersza jest treścią? Rola `STRONG` bije domyślną wartość listy —
+        wiersz bez roboty (Porządki, n=0) gasi pogrubienie razem z wyszarzeniem (wiz P1 #6)."""
+        own = index.data(STRONG)
+        return self._strong if own is None else bool(own)
+
+    def fit_tertiary(self, texts):
+        """Ustal szerokość KOLUMNY trzeciego członu na najszerszej adnotacji listy (wiz P1 #4).
+        Woła konsument PO przeładowaniu itemów, raz na listę — dzięki temu liczby („(n)") mają stały
+        prawy brzeg niezależnie od tego, ile cyfr ma ogon godzin. Mierzymy fontem WIDŻETU z `bold`
+        listy: człon drugi i trzeci rysują się `sec_font`em, który wymusza `setBold(strong)` także na
+        wierszach z własnym pogrubieniem (facety: aktywny wybór ✓) — pomiar jest więc dokładny, nie
+        przybliżony. Pusta lista adnotacji → 0 (kolumna znika, układ wraca do dwuczłonowego)."""
+        widget = self.parent()
+        font = QFont(widget.font() if widget is not None else QFont())
+        font.setBold(self._strong)
+        fm = QFontMetrics(font)
+        self._tertiary_w = max((fm.horizontalAdvance(t) for t in texts if t), default=0)
+        return self._tertiary_w
 
     def _own_color(self, index, selected):
         """Czy człon drugi ma iść KOLOREM WIERSZA zamiast szarością drugorzędną? Tak, gdy kolor
@@ -65,13 +103,15 @@ class TwoPartDelegate(QStyledItemDelegate):
           po zdjęciu wykluczenia) i wyszarzenie zadań z n=0 mają objąć oba człony, nie pół wiersza;
         - `strong` — liczba jest treścią z definicji (Porządki).
         """
-        return self._strong or selected or index.data(Qt.ForegroundRole) is not None
+        return self._is_strong(index) or selected or index.data(Qt.ForegroundRole) is not None
 
     def paint(self, painter, option, index):
         opt = QStyleOptionViewItem(option)
         self.initStyleOption(opt, index)
         secondary = index.data(SECONDARY)
         secondary = "" if secondary is None else str(secondary)
+        tertiary = index.data(TERTIARY)
+        tertiary = "" if tertiary is None else str(tertiary)
         primary = opt.text
         opt.text = ""                    # tło/zaznaczenie/hover maluje STYL; oba człony rysujemy sami
         widget = opt.widget
@@ -87,17 +127,28 @@ class TwoPartDelegate(QStyledItemDelegate):
         selected = bool(opt.state & QStyle.State_Selected)
         text_color = opt.palette.color(QPalette.HighlightedText if selected else QPalette.Text)
         painter.save()
-        sec_w = 0
-        if secondary:
+        # Człony prawe zjadają miejsce od prawej krawędzi: najpierw KOLUMNA adnotacji (trzeci),
+        # potem liczba (drugi). `tail` = ile px już zajęte — nazwa dostaje resztę.
+        tail = 0
+        if secondary or tertiary:
             sec_font = QFont(opt.font)
-            sec_font.setBold(self._strong)
-            sec_w = QFontMetrics(sec_font).horizontalAdvance(secondary) + _GAP
+            sec_font.setBold(self._is_strong(index))
+            fm = QFontMetrics(sec_font)
             painter.setFont(sec_font)
             painter.setPen(text_color if self._own_color(index, selected) else _COLORS["secondary"])
-            painter.drawText(rect, Qt.AlignRight | Qt.AlignVCenter, secondary)
+            # Kolumna adnotacji: `fit_tertiary` (wołane przez konsumenta) daje wspólną szerokość dla
+            # CAŁEJ listy — dopiero to ustawia liczby w kolumnę. Bez niego wiersz bierze własną
+            # szerokość: niewyrównany, ale NIGDY nachodzący na liczbę.
+            col = max(self._tertiary_w, fm.horizontalAdvance(tertiary)) if tertiary else self._tertiary_w
+            if tertiary:
+                painter.drawText(rect, Qt.AlignRight | Qt.AlignVCenter, tertiary)
+            tail = col                          # separator siedzi W adnotacji — patrz docstring modułu
+            if secondary:
+                painter.drawText(rect.adjusted(0, 0, -tail, 0), Qt.AlignRight | Qt.AlignVCenter, secondary)
+                tail += fm.horizontalAdvance(secondary) + _GAP
         painter.setFont(opt.font)
         painter.setPen(text_color)
-        prim = rect.adjusted(0, 0, -sec_w, 0)
+        prim = rect.adjusted(0, 0, -tail, 0)
         elided = QFontMetrics(opt.font).elidedText(primary, Qt.ElideRight, max(0, prim.width()))
         painter.drawText(prim, Qt.AlignLeft | Qt.AlignVCenter, elided)
         painter.restore()

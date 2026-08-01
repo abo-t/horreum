@@ -265,7 +265,12 @@ def test_zadanie_n_zero_wyszarzone_ale_klikalne(qapp, tmp_path):
     """Wiz F5 #6: „nic do zrobienia" ma być widać BEZ czytania liczby → wiersz akcyjny z n=0
     wyszarzony. Klikalność ZOSTAJE (podstrona osi to jedyna droga do niej po przemontowaniu
     nawigacji) — wyszarzenie jest sygnałem stanu, nie wyłączeniem. Odwrót po zmianie stanu
-    (n=0 → n>0) MUSI zdjąć szarość, inaczej UI kłamie po pierwszym skanie."""
+    (n=0 → n>0) MUSI zdjąć szarość, inaczej UI kłamie po pierwszym skanie.
+
+    Wiz P1 #6: razem z szarością gaśnie POGRUBIENIE liczby (rola `rows.STRONG` per wiersz). Gdy
+    `strong` było ustawieniem CAŁEJ listy, „0" na wyszarzonym wierszu zostawało pogrubione —
+    krzyczało dokładnie tam, gdzie nie ma nic do zrobienia."""
+    from horreum.gui import rows
     from horreum.gui.tasks import _DIM
     win = MainWindow(_seeded_db(tmp_path, object_axis=True))
     try:
@@ -274,6 +279,8 @@ def test_zadanie_n_zero_wyszarzone_ale_klikalne(qapp, tmp_path):
         assert _task_row(win, "observatories_unnamed")[1] == "0  ›"
         assert zero.foreground().color() == _DIM
         assert niezero.foreground().color() != _DIM
+        assert zero.data(rows.STRONG) is False                 # n=0 → liczba bez pogrubienia
+        assert niezero.data(rows.STRONG) is True               # n>0 → liczba jest treścią
         assert zero.flags() & Qt.ItemIsEnabled                 # wciąż klikalny
         win.tasks_view.tasks.itemClicked.emit(zero)
         assert win.tasks_view.pages.currentIndex() != 0        # klik zaprowadził na podstronę osi
@@ -284,10 +291,37 @@ def test_zadanie_n_zero_wyszarzone_ale_klikalne(qapp, tmp_path):
         win.con.commit()
         win.tasks_view.refresh_counts()
         assert zero.foreground().color() != _DIM                  # dim → normalny
+        assert zero.data(rows.STRONG) is True                     # …a z nim wraca pogrubienie
         for row in win.con.execute("SELECT id FROM telescope WHERE merged_into IS NULL").fetchall():
             repo.label_telescope(win.con, telescope_id=row[0], label=f"T{row[0]}", now=NOW)
         win.tasks_view.refresh_counts()
         assert niezero.foreground().color() == _DIM               # normalny → dim
+        assert niezero.data(rows.STRONG) is False
+    finally:
+        win.close()
+
+
+def test_lista_zadan_hugguje_tresc(qapp, tmp_path):
+    """Wizytator P1 tura 2: lista zadań dostawała CAŁY pion strony — przy oknie 1400×900 ramka miała
+    807 px na 60 px treści (~750 px obramowanej pustki, zmierzone na żywej pf4), co czyta się jako
+    „coś tu miało być". Wysokość idzie z POMIARU (`sizeHintForRow(0) × liczba wierszy` + ramka),
+    a nie ze stałej — inaczej rozjedzie się przy innym DPI/foncie. Reszta pionu zostaje pusta,
+    ale BEZ ramki (stretch pod listą).
+
+    Falsyfikator: gdyby lista nadal rosła z oknem, dwa razy wyższe okno dałoby wyższą listę."""
+    win = MainWindow(_seeded_db(tmp_path, object_axis=True))
+    try:
+        win.resize(1400, 900)
+        win.show()
+        qapp.processEvents()
+        tasks = win.tasks_view.tasks
+        win.tasks_view.refresh_counts()
+        oczekiwana = tasks.sizeHintForRow(0) * tasks.count() + 2 * tasks.frameWidth()
+        assert tasks.height() == oczekiwana
+        assert tasks.height() < 300                        # treść, nie cały pion strony
+        win.resize(1400, 1800)                             # dwa razy wyższe okno…
+        qapp.processEvents()
+        assert tasks.height() == oczekiwana                # …lista tej samej wysokości
     finally:
         win.close()
 

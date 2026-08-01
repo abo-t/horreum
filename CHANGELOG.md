@@ -7,6 +7,15 @@ schemat i API mogą się jeszcze zmieniać.
 ## [Niewydane]
 
 ### Zmienione
+- **Liczby w listwie facetów stoją w jednej kolumnie.** Godziny naświetlenia obiektu mają teraz
+  własną kolumnę przy prawej krawędzi, więc licznik „(n)" kończy się w tym samym miejscu w każdym
+  wierszu — wcześniej przesuwała go szerokość godzin („(301) · 60,4 h" kontra „(60) · 3,0 h")
+  i kolumny liczb nie dało się przebiec wzrokiem.
+- **Lista zadań w Porządkach ma wysokość swojej treści.** Ramka sięgała dotąd dołu strony, więc
+  pod pięcioma wierszami zostawało kilkaset pikseli obramowanej pustki, która czytała się jako
+  „coś tu miało być".
+- **Zadanie bez roboty nie krzyczy.** Na wyszarzonym wierszu (n=0) liczba przestała być pogrubiona —
+  pogrubienie zostaje tam, gdzie faktycznie jest co zrobić.
 - **Lista „Kopie nieczytelne" mówi teraz, DLACZEGO** kopii nie da się przeczytać — nowa kolumna
   „Powód" z zapisem z dziennika (np. „ParseError: not well-formed…" dla uszkodzonego pliku XISF).
   Wcześniej ekran pokazywał tylko, KTÓRA kopia wypadła, a diagnoza leżała w dzienniku, poza

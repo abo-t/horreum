@@ -100,8 +100,9 @@ class TasksView(QWidget):
         # NoSelection: highlight selekcji Qt byłby drugim „zaznaczeniem" obok treści (wzorzec F4R2#3);
         # klik = WYŁĄCZNIE gest usera przez itemClicked (F4R#4 — nigdy selection-based).
         self.tasks.setSelectionMode(QListWidget.NoSelection)
-        # Liczba = TREŚĆ zadania → prawa kolumna, pogrubiona, w kolorze wiersza (`strong=True`),
-        # więc wyszarzenie wiersza gasi etykietę i liczbę razem (wiz F5 #6).
+        # Liczba = TREŚĆ zadania → prawa kolumna, w kolorze wiersza (`strong=True`), więc wyszarzenie
+        # wiersza gasi etykietę i liczbę razem (wiz F5 #6). POGRUBIENIE zdejmuje z wiersza bez roboty
+        # rola `rows.STRONG`, ustawiana per wiersz w `refresh_counts` (wiz P1 #6).
         self.tasks.setItemDelegate(TwoPartDelegate(self.tasks, strong=True))
         self.tasks.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)   # elizja zamiast scrolla
         self.tasks.setMaximumWidth(_LIST_MAX_W)
@@ -117,12 +118,30 @@ class TasksView(QWidget):
                 it.setData(Qt.UserRole, key)           # akcyjna — handler mapuje klucz → akcja
             self.tasks.addItem(it)
         lv.addWidget(self.tasks)
+        # Lista HUGGUJE treść, reszta pionu zostaje pusta BEZ ramki (wizytator P1 tura 2): przy oknie
+        # 1400×900 ramka miała 807 px na 60 px treści — ~750 px obramowanej pustki czyta się jako
+        # „coś tu miało być". Wysokość z `_fit_task_list` (pomiar, nie stała); stretch trzyma listę
+        # przy GÓRZE — centrowanie zerwałoby lewą oś czytania (sidebar + nagłówek na x≈185)
+        # i wyglądałoby jak strona www, nie okno Qt.
+        lv.addStretch(1)
+        self._fit_task_list()
         self.pages.addWidget(list_page)                # _PAGE_LIST
 
         # strony 1–3: podstrony osi (kolejność MUSI zgadzać się ze stałymi _PAGE_*)
         self.pages.addWidget(self._wrap(i18n.t("tasks.telescope_axis"), self.axis_view))          # _PAGE_TELESCOPE
         self.pages.addWidget(self._wrap(i18n.t("tasks.observatory_axis"), self.observatory_view))   # _PAGE_OBSERVATORY
         self.pages.addWidget(self._wrap(i18n.t("tasks.object_review"), self.object_view))   # _PAGE_OBJECTS
+
+    def _fit_task_list(self):
+        """Zetnij wysokość listy zadań do jej treści (`sizeHintForRow(0) × liczba wierszy` + ramka).
+        Wołane DWA razy: w budowie (żeby pierwszy paint nie mignął pełną ramką) i w `refresh_counts`
+        — dopiero po `show()` metryki fontu są prawdziwe (`sizeHintForRow` przed pokazaniem potrafi
+        oddać wartość zastępczą), a `refresh_counts` woła gospodarz właśnie na wejściu w Porządki.
+        Idempotentne: ten sam pomiar daje tę samą liczbę, więc powtórne wołanie nic nie rusza."""
+        n = self.tasks.count()
+        if not n:
+            return
+        self.tasks.setFixedHeight(self.tasks.sizeHintForRow(0) * n + 2 * self.tasks.frameWidth())
 
     def _wrap(self, title, view):
         """Podstrona osi: pasek powrotu + tytuł + widok. Powrót odświeża listę (stan mógł się
@@ -160,10 +179,18 @@ class TasksView(QWidget):
             # inaczej liczby nie ustawiają się w kolumnę i nie da się ich skanować (wiz F5 #6).
             it.setText(i18n.t(label))
             it.setData(rows.SECONDARY, f"{n}  ›" if action is not None else str(n))
+            # Pogrubienie liczby = „TU JEST ROBOTA", więc jest rolą WIERSZA, nie całej listy
+            # (wiz P1 #6): wiersz wyszarzony — informacyjny albo akcyjny z n=0 — dostawał
+            # pogrubione „0" mimo wyszarzenia, czyli krzyczał dokładnie tam, gdzie nie ma nic
+            # do zrobienia. Kolor drugiego członu zostaje bez zmian (jawny `ForegroundRole`
+            # dalej obejmuje oba człony — `TwoPartDelegate._own_color`).
+            live = action is not None and n > 0
+            it.setData(rows.STRONG, live)
             if action is not None:
                 it.setForeground(QBrush() if n > 0 else _DIM)   # n=0 → wyszarzone, wciąż klikalne
-            if action is not None and n > 0:
+            if live:
                 badge += 1
+        self._fit_task_list()          # metryki fontu są prawdziwe dopiero po `show()`
         self.counts_changed.emit(badge)
         return badge
 

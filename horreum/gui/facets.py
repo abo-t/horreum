@@ -11,10 +11,12 @@ drugie równoległe podświetlenie kłamałoby. Aktywne wybory ZAWSZE renderowan
 n=0 gdy wartość poza sibling-setem) — niewidzialny aktywny filtr łamałby UI-NIE-KŁAMIE.
 Szukajka filtruje TYLKO listę obiektów (prezentacja, nie zbiór).
 
-Wiersz jest DWUCZŁONOWY (`rows.TwoPartDelegate`, P1): nazwa od lewej (elidowana), licznik + godziny
-portfela od prawej jako tekst drugorzędny. Wcześniej godziny szły TEKSTEM za „(n)" — najdłuższy
-wiersz przepychał listwę przez 220 px w poziomy scrollbar i „1.5 h" bywało ucięte (wiz F7 #F1),
-kolumna godzin była nieskanowalna (#F2) i miała wagę nazwy (#F4)."""
+Wiersz jest TRÓJCZŁONOWY (`rows.TwoPartDelegate`, P1): nazwa od lewej (elidowana), licznik i godziny
+portfela od prawej jako tekst drugorzędny — każde we WŁASNEJ kolumnie. Wcześniej godziny szły TEKSTEM
+za „(n)" — najdłuższy wiersz przepychał listwę przez 220 px w poziomy scrollbar i „1.5 h" bywało
+ucięte (wiz F7 #F1), kolumna godzin była nieskanowalna (#F2) i miała wagę nazwy (#F4). Po sklejeniu
+ich w jeden run członu drugiego został ostatni rozjazd: liczba jechała za zmienną szerokością godzin
+(wiz P1 #4) — dlatego godziny mają dziś rolę `rows.TERTIARY` i wspólną szerokość z `fit_tertiary`."""
 
 from __future__ import annotations
 
@@ -113,9 +115,10 @@ class FacetRail(QWidget):
                 grp = self._state.get(facet) or {}
                 pinned = [(v, l, 0) for v, l in (grp.get("in") or []) + (grp.get("ex") or [])
                           if v not in present]
+                hours = []                                    # adnotacje listy → szerokość kolumny
                 for value, label, n in pinned + entries:
                     sel = facet_model.selection(self._state, facet, value)
-                    tooltip = None
+                    tooltip, third = None, ""
                     if sel == "ex":
                         # „(n)" przy ⊖ znaczy „ile WRÓCI po zdjęciu" (sibling-set), nie wkład do
                         # zbioru (pokazanych jest 0) — render niesie tę semantykę (F4R2#1). Godzin
@@ -125,11 +128,19 @@ class FacetRail(QWidget):
                         text, second = f"{'✓ ' if sel == 'in' else ''}{label}", f"({n})"
                         sx = facet_extras.get(value)          # sufiks/tooltip godzin (F7) — poza ⊖
                         if sx:
-                            second += sx[0]                   # „(5) · 1.0 h" — formatowanie: `portfolio`
+                            # Godziny idą w CZŁON TRZECI (własna kolumna), nie doklejone do „(n)" —
+                            # inaczej ich zmienna szerokość przesuwa licznik i kolumny liczb nie da
+                            # się skanować (wiz P1 #4). Sufiks idzie WPROST, z własnym separatorem
+                            # („ · 1.0 h") — kontrakt `rows.TERTIARY`; dzięki temu wiersz najszerszy
+                            # rysuje się piksel w piksel jak przed rozdzieleniem członów.
+                            third = sx[0]                     # „ · 1.0 h" — formatowanie: `portfolio`
                             tooltip = sx[1]
                     it = QListWidgetItem(text)
                     it.setData(Qt.UserRole, (facet, value, label))
                     it.setData(rows.SECONDARY, second)        # prawa kolumna (delegat, P1)
+                    if third:
+                        it.setData(rows.TERTIARY, third)
+                        hours.append(third)
                     if tooltip:
                         it.setToolTip(tooltip)
                     if sel == "in":
@@ -137,6 +148,9 @@ class FacetRail(QWidget):
                     elif sel == "ex":
                         it.setForeground(_COLORS["exclusion"])
                     lw.addItem(it)
+                # Wspólna szerokość kolumny godzin PO wypełnieniu listy — dopiero to ustawia liczby
+                # w jedną kolumnę. Grupa bez adnotacji (Filtr/Rodzaj/…) dostaje 0 = układ dwuczłonowy.
+                lw.itemDelegate().fit_tertiary(hours)
             self._filter_objects(self.search.text())
             for facet, lw in self._lists.items():
                 lw.doItemsLayout()                         # przelicz zakres scrolla PRZED restore

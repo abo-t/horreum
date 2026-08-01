@@ -191,11 +191,18 @@ EXP_TELESCOPES_STACKS = 14     # 12 z FULL + DWIE etykiety, które żyją WYŁĄ
 # `ED` (4 klatki) — etykieta ZDJĘTA z archiwum writebackiem P6 (2026-07-22), ale pliki po integracji
 # noszą ją dalej, bo powstały przed naprawą i nikt ich nie przepisywał; oraz `EQMOD HEQ5/6` (4) —
 # nazwa MONTAŻU wpisana przez program akwizycji w kartę `TELESCOP`. Obie to FAKT archiwum obróbki,
-# nie śmieć do wyczyszczenia: drzewo trzymamy read-only, a szum modelu naprawia się kind-scopingiem,
-# nigdy kasowaniem pól. `EQMOD HEQ5/6` czeka na decyzję kuratelską (park/merge) — patrz kolejka.
+# nie śmieć do wyczyszczenia — szum modelu naprawia się kind-scopingiem, nigdy kasowaniem pól.
+# `EQMOD HEQ5/6` czeka na decyzję kuratelską (park/merge) — patrz kolejka.
 EXP_NAMELESS_STACKS = 18       # gotowe stosy bez karty `OBJECT` i bez obiektu (własny kubełek,
 # D-P-I-5). Plików bez karty jest 22 — cztery rozwiązał REGION po współrzędnych, więc z kubełka
 # wypadły. KLUCZOWY DOWÓD ROZDZIAŁU: `EXP_NAMELESS_FULL` (25) po dołożeniu 18 stosów NIE DRGNĘŁO.
+#
+# ⚠️ KOTWICE STOSÓW SĄ RUCHOME INACZEJ NIŻ RESZTA (D-0802-1 + P6d, 2026-08-02). Kotwice FULL stoją
+# na ZAMROŻONYM dawcy, więc naprawa plików na `R:` ich nie rusza („BAZA AKCEPTACJI NIE WIDZI NAPRAW
+# NA R:" — kolejka). Stosy przychodzą z ŻYWEGO skanu `R:\!!ASTROFOTO`, a writeback od D-0802-1 ich
+# SIĘGA — więc pierwsza naprawa kart `OBJECT` w drzewie obróbki ZBIJE tę liczbę i bramka zaświeci
+# czerwono ZGODNIE Z PRAWDĄ. To NIE jest regresja: wtedy podbij kotwicę i dopisz, ile plików
+# dostało kartę. Ta sama uwaga dotyczy `EXP_CONFIG_REVIEW_STACKS` (7 stosów bez `TELESCOP`).
 EXP_NO_GPS_STACKS = 402        # 274 z FULL + 128 stosów. PixInsight NIE przenosi `SITELAT`/`SITELONG`
 # do produktu integracji — zmierzone 0/128, więc CAŁA populacja stosów jest poza osią obserwatorium.
 EXP_CONFIG_REVIEW_STACKS = 8   # 1 z FULL (`unknown` masterflat A7R3) + 7 stosów bez `TELESCOP`.
@@ -585,10 +592,10 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
     # FULL wyżej NIE drgnie po dołożeniu stosów — i to jest dowód, że rozdział działa: gdyby
     # `EXP_NAMELESS_FULL` skoczyło z 25, znaczyłoby, że stacki wpadły do kubełka archiwum
     # i pierwsza dostawa bez `OBJECT` schowałaby się za drzewem obróbki.
-    out(f"    z tego gotowe stosy (drzewo obróbki — read-only): {rep.object_nameless_stacks}")
+    out(f"    z tego gotowe stosy (po integracji): {rep.object_nameless_stacks}")
     if ze_stosami:
         crit_anchor("§5.7b object_nameless_stacks", EXP_NAMELESS_STACKS,
-                    rep.object_nameless_stacks, nota=" — droga naprawy: ŻADNA")
+                    rep.object_nameless_stacks, nota=" — własny kubełek, naprawa kartą (P6d)")
     else:
         crit("§5.7b zero stosów, gdy droga Stosów nie szła (etap ich nie wciągał)",
              rep.object_nameless_stacks == 0)

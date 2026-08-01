@@ -20,7 +20,14 @@ Krok po kroku dla każdego frame'a z `frame_ids` (już przefiltrowanych przez `f
 Plik bez operandu / z błędem obliczenia / łamiący regułę operacji → POMINIĘTY z jawnym powodem
 (zebrany w `MacroRun.skipped`). Reguły operacji: `set` wymaga istniejącej karty (keyword
 kardynalności >1 wymaga jawnego `idx`); `add` wymaga braku karty. Operand `0` to WARTOSC, nie brak.
-Makra JSON-serializowalne (`to_dict`/`from_dict`), zapisywane w tabeli `macros`.
+Makra są JSON-serializowalne (`to_dict`/`from_dict`), ale **NIE SĄ NIGDZIE UTRWALANE** — definicja
+powstaje w pasku (`gui.grid.MacroBar.macro_def`) na czas jednego przebiegu i ginie z zamknięciem okna.
+Tabela `macros` (migracja 0003) stoi PUSTA i taka zostaje: **decyzja Zdzinia 2026-08-01 (D-P-I-4,
+wariant B)** — naprawy nagłówka w tym archiwum okazały się operacjami jednorazowymi na konkretnej
+porcji plików (`ED`→`ED120R`, IC1795, dopisanie kart `OBJECT`), a nie przepisami, po które się wraca,
+więc biblioteka przepisów byłaby funkcją dla nikogo. Wcześniejsze zdanie w tym miejscu („zapisywane
+w tabeli `macros`") opisywało zamiar, nie stan, i wprowadzało w błąd. Wskrzeszenie = jeden pisarz
+w `repo` + lista w pasku; szkielet tabeli czeka gotowy. Ślad: `brief/PLAN_pi_martwe_tabele.md` §3/§4.3.
 
 Przykłady akceptacyjne:
 - A: filter FOCRATIO>20 ; compute new=FOCALLEN/FOCRATIO ; assign FOCRATIO=round(new,2)

@@ -39,17 +39,47 @@ _DEBOUNCE_MS = 300
 # Spinbox na „1,00" nie potrzebuje pół ekranu (wiz T5 #12) — kolumna kontrolek ma być kolumną.
 _SPIN_W = 96
 
-# Kolumny listy: (klucz i18n, pole `ViewRow`). Jedenaście kolumn MUSI się elidować przy podłodze
-# okna 1146 px — dlatego rozciąga się TYLKO pokrycie, reszta idzie do treści.
+# Kolumny listy: (klucz i18n, pole `ViewRow`). Kolumny idą do TREŚCI (`ResizeToContents`), a nadmiar
+# zjada ostatnia — Notatka (wiz T5 #4). Elizji NIE MA i obiecywać jej nie wolno: `ResizeToContents`
+# z definicji nie schodzi poniżej treści, więc `ElideRight` niżej broni tylko komórek przyciętych
+# ręcznie przez usera. Wcześniejszy zapis mówił o „elizji 11 kolumn przy 1146 px" i o stałej
+# `_STRETCH_COL = 6` (pokrycie), której NIC nie czytało — oba były nieprawdą, patrz `_MIN_W`.
 _COLUMNS = (("planner.col_canon", "canon"), ("planner.col_type", "type"),
             ("planner.col_size", "size"), ("planner.col_culmination", "culmination"),
             ("planner.col_window", "window"), ("planner.col_rig", "rig"),
             ("planner.col_coverage", "coverage"), ("planner.col_cost", "cost"),
             ("planner.col_recommend", "recommend"), ("planner.col_plan", "plan"),
             ("planner.col_note", "note"))
-_STRETCH_COL = 6            # pokrycie — jedyna kolumna, która ma prawo zjeść nadmiar
+
+# PODŁOGA EKRANU — decyzja Zdzinia 2026-08-01 (D-0801-1): kolumny NIE ustępują, ustępuje okno.
+# Zmierzone realnym fontem (Segoe UI 9 pt, żywa pf4, 429 wierszy, planer na wierzchu w oknie):
+# jedenaście kolumn zajmuje 981 px treści, ramka + pionowy scrollbar biorą 36 px, sidebar nawigacji
+# 184 px. Przy oknie 1073 (dawna podłoga, dyktowana przez Zbiory) tabela scrollowała się w poziomie
+# o 375 px, przy 1146 o 55. 1126 px ekranu = 1310 px okna daje 109 px zapasu na dłuższe treści
+# (warstwa cirrus, katalog EN) i mieści się na 1366×768 przy skalowaniu 100%.
+# ⚠ ZNANY KOSZT, zaakceptowany świadomie: przy skalowaniu 125% laptop 1366 raportuje 1093 px
+# logicznych — okno wtedy się NIE MIEŚCI, a prawa krawędź ucieka poza ekran. Falsyfikator tej
+# decyzji: pierwszy firsthand na maszynie ze skalowaniem.
+_MIN_W = 1126
 
 _STATUSES = ("planned", "active", "done", "skip")
+
+# Progi wyszukiwania: (atrybut, klucz i18n, domyślna, min, max, krok) — JEDEN właściciel wartości
+# domyślnych (D-0731-10). Zapamiętywane w `QSettings` per maszyna (klasa D-B, jak perspektywy
+# gridu): „w bieżącym wyszukiwaniu" mówiło o tym, że progi nie idą do assetu — a nie o tym, że mają
+# ginąć przy każdym uruchomieniu. „Przywróć domyślne" jest obok, więc powrót do 6′/15′/13 mag
+# kosztuje jeden klik i stan zawsze widnieje w tytule zwiniętego paska.
+_THRESHOLDS = {"min_size": ("planner.min_size", 6.0, 0.0, 600.0, 1.0),
+               "min_dark": ("planner.min_dark", 15.0, 0.0, 600.0, 1.0),
+               "max_mag": ("planner.max_mag", 13.0, 0.0, 25.0, 0.5),
+               "min_alt": ("planner.min_alt", 30.0, 0.0, 89.0, 5.0),
+               "min_hours": ("planner.min_hours", 1.0, 0.0, 100.0, 0.5)}
+_MAX_COST_DEFAULT = 3.0
+_SETTINGS_PREFIX = "planner/"
+
+# Wartownik pozycji „nie wypowiedziałeś się" w combo parku: `QComboBox.itemData(None)` jest
+# nierozróżnialne od pustych danych, a trójstan `in_park` musi przejść przez UI bez zlania stanów.
+_PARK_UNSAID = "unsaid"
 
 
 def _utc_now_iso():
@@ -163,9 +193,12 @@ class ParkDialog(QDialog):
     więc jedyną drogą jest zdanie człowieka.
 
     Przegląd z `queries.park_overview` (ten sam literał co CLI `horreum park`). Przełącznik ma
-    DWA stany — „w parku" / „historyczny"; cofnięcia do NULL („wycofuję zdanie") świadomie NIE
-    eksponujemy: klinga je umie i testuje, ale dziś nikt nie potrzebuje odróżnić „odrzuciłem"
-    od „nie wypowiedziałem się" (dług T4 nazwany, nie ukryty).
+    TRZY stany, bo tyle ma `telescope.in_park`: „w parku" (1) · „historyczny" (0) · „nie
+    wypowiedziałeś się" (NULL). Trzeci był wcześniej tylko ETYKIETĄ stanu wyjściowego i znikał
+    z listy po pierwszym wyborze — czyli UI oferowało drogę w jedną stronę: raz wypowiedziane
+    zdanie zostawało na zawsze, a jedyną drogą powrotu było `repo` z konsoli. „Odrzuciłem"
+    i „wycofuję zdanie" znaczą co innego (park przejrzany vs baza świeża) i to `in_park` niesie,
+    więc powierzchnia musi umieć oba.
 
     Zapis idzie przez `repo.set_telescope_park` na GŁÓWNYM wątku — jak każda akcja osi."""
 
@@ -213,27 +246,23 @@ class ParkDialog(QDialog):
         combo = QComboBox()
         combo.addItem(i18n.t("planner.park_in"), 1)
         combo.addItem(i18n.t("planner.park_historic"), 0)
-        if row["in_park"] is None:
-            # Trzeci stan („nic nie powiedziałem") pokazujemy JAKO POZYCJĘ, żeby lista nie
-            # udawała, że user już się wypowiedział — ale wybrać go z powrotem nie można.
-            combo.addItem(i18n.t("planner.park_unsaid"), None)
-            combo.setCurrentIndex(2)
-        else:
-            combo.setCurrentIndex(0 if row["in_park"] == 1 else 1)
+        # Trzeci stan ZAWSZE na liście — jest wyborem, nie etykietą (patrz docstring klasy).
+        # `findData(None)` w Qt zwraca −1 (None znaczy „brak dopasowania"), więc indeksu pozycji
+        # NULL nie szukamy po danych, tylko go znamy: jest ostatni.
+        combo.addItem(i18n.t("planner.park_unsaid"), _PARK_UNSAID)
+        combo.setCurrentIndex({1: 0, 0: 1}.get(row["in_park"], 2))
         combo.activated.connect(lambda _i, tid=row["id"], c=combo: self._on_pick(tid, c))
         self.table.setCellWidget(r, self.COL_PARK, combo)
         self._combos[row["id"]] = combo
 
     def _on_pick(self, telescope_id, combo):
+        """Wybór z listy → `in_park`. Wartownik `_PARK_UNSAID` zamieniamy na `None` dopiero tutaj:
+        w `itemData` `None` byłby nieodróżnialny od „brak danych pozycji"."""
         value = combo.currentData()
-        if value is None:
-            return                       # pozycja „nie wypowiedziałeś się" jest tylko etykietą stanu
-        if repo.set_telescope_park(self.con, telescope_id=telescope_id, in_park=value,
+        if repo.set_telescope_park(self.con, telescope_id=telescope_id,
+                                   in_park=None if value == _PARK_UNSAID else value,
                                    now=self._now()):
             self.changed += 1
-        idx = combo.findData(None)       # zdanie padło → etykieta stanu wyjściowego znika z listy
-        if idx >= 0:
-            combo.removeItem(idx)
 
 
 class PlannerView(QWidget):
@@ -260,7 +289,11 @@ class PlannerView(QWidget):
         self._result = None
         self._keep_canon = None          # cel, na który zaznaczenie ma wrócić po re-planie
         self._rig_chip = None            # None = soczewka „najlepsze dopasowanie" (D-0731-13)
+        self._order = pm.ORDER_CORE      # porządek listy — prezentacja, klucz rdzenia nietknięty
+        self._settings = QSettings("Horreum", "Horreum")
         self._loading = True             # blokada re-planu na czas budowy kontrolek
+        # Podłoga ekranu (D-0801-1) — okno idzie za nią, bo Qt propaguje minimum dziecka w górę.
+        self.setMinimumWidth(_MIN_W)
         self._build()
         # Motyw ŻYWY, nie `DEFAULT` (wiz T5 R2): `main` woła `apply_theme` PRZED budową okna,
         # więc widok musi sam przeczytać wybór użytkownika, inaczej jasny start dostaje akcenty
@@ -463,49 +496,103 @@ class PlannerView(QWidget):
         form.addRow(i18n.t("planner.status"), self.status_combo)
         lay.addLayout(form)
 
-        # Progi: RUNTIME, świadomie bez QSettings (D-0731-10 — „w BIEŻĄCYM wyszukiwaniu").
+        # Progi: wartości PAMIĘTANE między sesjami (`QSettings`, per maszyna — klasa D-B).
+        # D-0731-10 zabrania pieczenia progów w ASSECIE, nie zapamiętywania ich w profilu maszyny;
+        # zerowanie ich przy każdym starcie kazało powtarzać te same cztery ruchy każdego wieczoru.
         thresholds = QFormLayout()
-        self.min_size = self._spin(thresholds, "planner.min_size", 6.0, 0.0, 600.0, 1.0)
-        self.min_dark = self._spin(thresholds, "planner.min_dark", 15.0, 0.0, 600.0, 1.0)
-        self.max_mag = self._spin(thresholds, "planner.max_mag", 13.0, 0.0, 25.0, 0.5)
-        self.min_alt = self._spin(thresholds, "planner.min_alt", 30.0, 0.0, 89.0, 5.0)
-        lay.addLayout(thresholds)
-
         right = QFormLayout()
-        self.min_hours = self._spin(right, "planner.min_hours", 1.0, 0.0, 100.0, 0.5)
+        self._spins = {}
+        self.min_size = self._spin(thresholds, "min_size")
+        self.min_dark = self._spin(thresholds, "min_dark")
+        self.max_mag = self._spin(thresholds, "max_mag")
+        self.min_alt = self._spin(thresholds, "min_alt")
+        lay.addLayout(thresholds)
+        self.min_hours = self._spin(right, "min_hours")
+
         cost_row = QHBoxLayout()
         # Checkbox Z ETYKIETĄ (wiz T5 #12): nagi kwadracik nie mówi, co włącza.
         self.max_cost_on = QCheckBox(i18n.t("planner.max_cost_on"))   # D-0731-14: domyślnie WYŁĄCZONY
+        self.max_cost_on.setChecked(self._read_setting("max_cost_on", 0.0) == 1.0)
         self.max_cost_on.toggled.connect(self._on_max_cost_toggled)
         self.max_cost = QDoubleSpinBox()
         self.max_cost.setRange(1.0, 100.0)
         self.max_cost.setSingleStep(0.5)
-        self.max_cost.setValue(3.0)
-        self.max_cost.setEnabled(False)
+        self.max_cost.setValue(self._read_setting("max_cost", _MAX_COST_DEFAULT))
+        self.max_cost.setEnabled(self.max_cost_on.isChecked())
         self.max_cost.setMaximumWidth(_SPIN_W)
         self.max_cost.valueChanged.connect(self._queue_replan)
+        self.max_cost.valueChanged.connect(lambda _v: self._save_thresholds())
         cost_row.addWidget(self.max_cost_on)
         cost_row.addWidget(self.max_cost)
         cost_row.addStretch(1)
         right.addRow(i18n.t("planner.max_cost"), cost_row)
+        # Powrót do 6′/15′/13 mag jednym klikiem — bez niego zapamiętane progi byłyby drogą
+        # w jedną stronę, a user nie ma skąd znać wartości domyślnych (są w kodzie, nie na ekranie).
+        self.reset_btn = QPushButton(i18n.t("planner.reset_thresholds"))
+        self.reset_btn.setToolTip(i18n.t("planner.reset_thresholds_tip"))
+        self.reset_btn.clicked.connect(self._on_reset_thresholds)
+        right.addRow("", self.reset_btn)
         lay.addLayout(right)
         lay.addStretch(1)
         self._sync_controls_title()
         return box
 
-    def _spin(self, form, key, value, lo, hi, step):
+    def _read_setting(self, name, default):
+        """Próg z `QSettings` → float. Wpis nieczytelny (ręczna edycja rejestru, wpis z innej wersji)
+        spada na domyślną: ekran ma wystartować, a nie wysypać się na cudzym stringu. Zakres pilnuje
+        sam spinbox (`setValue` klampuje), więc wartość spoza widełek nie przejdzie dalej."""
+        try:
+            return float(self._settings.value(_SETTINGS_PREFIX + name, default))
+        except (TypeError, ValueError):
+            return default
+
+    def _save_thresholds(self):
+        """Zapisz progi (bez debounce'u — `QSettings` to zapis lokalny, a stan ma przeżyć zamknięcie
+        okna także wtedy, gdy user zmienił próg i od razu wyszedł)."""
+        if self._loading:
+            return
+        for name, w in self._spins.items():
+            self._settings.setValue(_SETTINGS_PREFIX + name, w.value())
+        self._settings.setValue(_SETTINGS_PREFIX + "max_cost", self.max_cost.value())
+        self._settings.setValue(_SETTINGS_PREFIX + "max_cost_on",
+                                1.0 if self.max_cost_on.isChecked() else 0.0)
+
+    def _on_reset_thresholds(self):
+        """Wszystkie progi na domyślne + JEDEN re-plan. `_loading` tłumi sygnały pośrednie, więc
+        pięć `setValue` nie startuje pięciu rachunków nocy (debounce by je scalił, ale liczenie
+        na przypadek nie jest kontraktem)."""
+        self._loading = True
+        try:
+            for name, (_key, default, _lo, _hi, _step) in _THRESHOLDS.items():
+                self._spins[name].setValue(default)
+            self.max_cost_on.setChecked(False)
+            self.max_cost.setValue(_MAX_COST_DEFAULT)
+        finally:
+            self._loading = False
+        self.max_cost.setEnabled(False)
+        self._save_thresholds()
+        self._sync_controls_title()
+        self.replan()
+
+    def _spin(self, form, name):
+        """Spinbox progu `name` — widełki, krok i wartość domyślna z `_THRESHOLDS` (SPOT), bieżąca
+        wartość z `QSettings`. Rejestruje się w `_spins`, więc zapis i reset nie mają własnej listy."""
+        key, default, lo, hi, step = _THRESHOLDS[name]
         w = QDoubleSpinBox()
         w.setRange(lo, hi)
         w.setSingleStep(step)
-        w.setValue(value)
+        w.setValue(self._read_setting(name, default))
+        self._spins[name] = w
         w.setMaximumWidth(_SPIN_W)          # spinbox na „1,00" nie ma prawa jechać przez pół ekranu
         w.valueChanged.connect(self._queue_replan)
         w.valueChanged.connect(lambda _v: self._sync_controls_title())
+        w.valueChanged.connect(lambda _v: self._save_thresholds())
         form.addRow(i18n.t(key), w)
         return w
 
     def _on_max_cost_toggled(self, on):
         self.max_cost.setEnabled(on)
+        self._save_thresholds()
         self._queue_replan()
 
     def _on_controls_toggled(self, shown):
@@ -575,9 +662,26 @@ class PlannerView(QWidget):
             self._chip_group.addButton(b)
             self.chips_row.addWidget(b)
         self.chips_row.addStretch(1)
+        # Porządek listy PRZY chipach, bo to ta sama myśl: chip mówi CZYIMI oczami patrzysz,
+        # porządek — czy lista ma iść za tym spojrzeniem. Do T5 chip zmieniał radę, ale nie
+        # kolejność, więc „patrzę oczami RC8" zostawiało na górze cele wybrane dla A140R.
+        self.chips_row.addWidget(QLabel(i18n.t("planner.order_label")))
+        self.order_combo = QComboBox()
+        self.order_combo.addItem(i18n.t("planner.order_core"), pm.ORDER_CORE)
+        self.order_combo.addItem(i18n.t("planner.order_lens"), pm.ORDER_LENS)
+        self.order_combo.setCurrentIndex(0 if self._order == pm.ORDER_CORE else 1)
+        self.order_combo.setToolTip(i18n.t("planner.order_tip"))
+        self.order_combo.currentIndexChanged.connect(self._on_order)
+        self.chips_row.addWidget(self.order_combo)
 
     def _on_chip(self, name):
         self._rig_chip = name
+        self._render_rows()
+
+    def _on_order(self, _index):
+        """Zmiana porządku = PRZERYSOWANIE, nie nowy rachunek nocy (jak chip): ten sam `PlanResult`,
+        inne ułożenie gotowych wierszy."""
+        self._order = self.order_combo.currentData()
         self._render_rows()
 
     # ---------------------------------------------------------------- rachunek
@@ -707,7 +811,7 @@ class PlannerView(QWidget):
     def _render_rows(self):
         if self._result is None:
             return
-        rows = pm.view_rows(self._result, self._rig_chip)
+        rows = pm.view_rows(self._result, self._rig_chip, order=self._order)
         # Niezapisana notatka nie ma prawa zniknąć przy przeliczeniu (wiz T5 #10): trzymamy ją
         # razem z kanonem i oddajemy, gdy zaznaczenie wróci na TEN SAM cel.
         typed = (self._keep_canon, self.panel_note.text()) if self.panel_note.isModified() else None

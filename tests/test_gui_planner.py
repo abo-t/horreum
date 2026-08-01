@@ -60,7 +60,20 @@ def _seed(path):
 
 
 @pytest.fixture
-def view(qapp, tmp_path):
+def settings_store(monkeypatch):
+    """QSettings na SŁOWNIKU (wzorzec `test_gui_grid`). Od czasu, gdy progi są pamiętane między
+    sesjami, ekran REALNIE pisze do rejestru — bez tej izolacji bateria wstawiłaby użytkownikowi
+    swoje wartości skrajne (zmierzone: `min_size=600`, `min_hours=0`) i sama zaczęłaby czytać je
+    zamiast domyślnych, więc test progów przechodziłby albo nie zależnie od poprzedniego przebiegu."""
+    from PySide6.QtCore import QSettings
+    store = {}
+    monkeypatch.setattr(QSettings, "value", lambda self, k, d=None: store.get(k, d))
+    monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: store.__setitem__(k, v))
+    return store
+
+
+@pytest.fixture
+def view(qapp, tmp_path, settings_store):
     """Ekran INLINE (bez `db_path`) — plan liczy się synchronicznie, więc test widzi wynik od razu."""
     con = _seed(str(tmp_path / "planer.db"))
     v = PlannerView(con, db_path=None)
@@ -81,7 +94,7 @@ def test_plan_liczy_sie_i_lista_niepusta(view):
     assert first.canon and first.cost and first.rig
 
 
-def test_noc_wybiera_rdzen_dopoki_user_nie_tknie_daty(qapp, tmp_path):
+def test_noc_wybiera_rdzen_dopoki_user_nie_tknie_daty(qapp, tmp_path, settings_store):
     """Wartość specjalna kalendarza = „bieżąca noc": `night=None` → dobę liczy `targets.default_night`
     z DŁUGOŚCI stanowiska. Podstawienie dzisiejszej daty w widżecie byłoby DRUGIM właścicielem faktu."""
     con = _seed(str(tmp_path / "auto.db"))
@@ -135,6 +148,63 @@ def test_pasek_progow_zwija_sie_i_niesie_stan(view):
     assert "20′" in view.controls_toggle.text()            # tytuł podąża za progiem
     view.controls_toggle.setChecked(True)
     assert body.isHidden() is False
+
+
+def test_progi_przezywaja_zamkniecie_ekranu(qapp, tmp_path, settings_store):
+    """Dług P-A #5: progi są PAMIĘTANE między sesjami (`QSettings`, klasa D-B). D-0731-10 zabrania
+    pieczenia ich w ASSECIE — nie zapamiętywania w profilu maszyny; zerowanie co start kazało
+    powtarzać te same ruchy każdego wieczoru."""
+    con = _seed(str(tmp_path / "progi.db"))
+    first = PlannerView(con, db_path=None)
+    first.min_size.setValue(9.0)
+    first.max_cost_on.setChecked(True)
+    first.close()
+    assert settings_store["planner/min_size"] == 9.0
+
+    second = PlannerView(con, db_path=None)
+    try:
+        assert second.min_size.value() == 9.0
+        assert second.max_cost_on.isChecked() is True
+        assert second.max_cost.isEnabled() is True     # stan checkboxa i pola nie mogą się rozjechać
+        assert second.min_dark.value() == 15.0         # nietknięty próg zostaje domyślny
+    finally:
+        second.close()
+        con.close()
+
+
+def test_przywroc_domyslne_cofa_wszystkie_progi(view):
+    """Zapamiętane progi bez drogi powrotnej byłyby pułapką: wartości domyślnych nie ma na ekranie,
+    więc user nie ma skąd ich znać. Reset jest JEDNYM re-planem, nie pięcioma."""
+    view.min_size.setValue(9.0)
+    view.min_hours.setValue(4.0)
+    view.max_cost_on.setChecked(True)
+    gen = view._gen
+    view._on_reset_thresholds()
+    assert (view.min_size.value(), view.min_dark.value(), view.max_mag.value(),
+            view.min_alt.value(), view.min_hours.value()) == (6.0, 15.0, 13.0, 30.0, 1.0)
+    assert view.max_cost_on.isChecked() is False and view.max_cost.isEnabled() is False
+    assert view._gen == gen + 1                        # dokładnie jeden bieg, nie pięć
+    assert "6′" in view.controls_toggle.text()         # tytuł zwiniętego paska mówi prawdę
+
+
+def test_porzadek_po_soczewce_przestawia_liste_bez_re_planu(view):
+    """Dług P-A #3: chip zmieniał radę, ale NIE porządek — „patrzę oczami RC8" zostawiało na górze
+    cele wybrane dla A140R. Sort żyje w WIDOKU: `targets._sort_key` (pięć członów, D-T4-c) i CLI
+    zostają nietknięte, a przełącznik nie liczy nocy od nowa."""
+    from horreum.gui import planner_model as pm
+    view._on_chip("RC8")
+    core = [view.model.row_at(r).canon for r in range(view.model.rowCount())]
+    before, gen = view._result, view._gen
+
+    view.order_combo.setCurrentIndex(view.order_combo.findData(pm.ORDER_LENS))
+    assert view._result is before and view._gen == gen        # zero nowych rachunków nocy
+    lens = [view.model.row_at(r).canon for r in range(view.model.rowCount())]
+    assert sorted(lens) == sorted(core) and lens != core      # ten sam zbiór, inny porządek
+    # Pierwszy wiersz mieści się w JEDNYM kadrze — porządek soczewki zaczyna od kadrowalnych.
+    assert "1 kadr" in view.model.row_at(0).rig
+
+    view.order_combo.setCurrentIndex(view.order_combo.findData(pm.ORDER_CORE))
+    assert [view.model.row_at(r).canon for r in range(view.model.rowCount())] == core
 
 
 def test_panel_nie_przenosi_statusu_na_kolejny_cel(view):
@@ -194,7 +264,7 @@ def test_stara_generacja_nie_trafia_na_ekran(view):
     assert view.night_label.text() != "stary błąd"
 
 
-def test_baza_bez_stanowiska_mowi_wprost(qapp, tmp_path):
+def test_baza_bez_stanowiska_mowi_wprost(qapp, tmp_path, settings_store):
     """`targets.plan` rzuca `ValueError` bez stanowiska z GPS — ekran ma to POWIEDZIEĆ, nie paść
     (podstawienie „środka Polski" byłoby kłamstwem)."""
     con = db.open_db(str(tmp_path / "pusta.db"))
@@ -302,13 +372,48 @@ def test_dialog_parku_zapisuje_zdanie_uzytkownika(view, qapp):
         combo.setCurrentIndex(combo.findData(1))
         dlg._on_pick(1, combo)
         assert dlg.changed == 1
-        assert combo.findData(None) == -1                # etykieta „nie wypowiedziałeś się" znika
         from horreum import sky
         assert sky.park(view.con) == ("A140R",)
         dlg._on_pick(1, combo)                           # to samo zdanie drugi raz = brak zmiany
         assert dlg.changed == 1
     finally:
         dlg.close()
+
+
+def test_dialog_parku_umie_wycofac_zdanie_do_null(view, qapp):
+    """Dług P-A #7: trójstan `in_park` (1 · 0 · NULL) miał w UI drogę tylko w jedną stronę —
+    pozycja „nie wypowiedziałeś się" znikała po pierwszym wyborze, więc raz wypowiedziane zdanie
+    dawało się zmienić, ale nie WYCOFAĆ. „Historyczny" (park przejrzany) i „nie wypowiedziano"
+    (baza świeża) to różne fakty i powierzchnia musi umieć oba."""
+    from horreum.gui.planner import _PARK_UNSAID, ParkDialog
+    dlg = ParkDialog(view.con, view._now)
+    try:
+        combo = dlg._combos[1]
+        combo.setCurrentIndex(combo.findData(0))         # najpierw: jawnie historyczny
+        dlg._on_pick(1, combo)
+        assert view.con.execute("SELECT in_park FROM telescope WHERE id = 1").fetchone()[0] == 0
+
+        assert combo.findData(_PARK_UNSAID) >= 0         # pozycja ZOSTAJE na liście
+        combo.setCurrentIndex(combo.findData(_PARK_UNSAID))
+        dlg._on_pick(1, combo)
+        assert view.con.execute("SELECT in_park FROM telescope WHERE id = 1").fetchone()[0] is None
+        assert dlg.changed == 2
+        # Ślad w dzienniku, nie ciche UPDATE — `after: None` odróżnia wycofanie od odrzucenia.
+        ev = view.con.execute("SELECT payload FROM event WHERE verb = 'telescope.parked' "
+                              "ORDER BY id DESC LIMIT 1").fetchone()[0]
+        assert '"after": null' in ev
+    finally:
+        dlg.close()
+
+
+def test_ekran_deklaruje_podloge_szerokosci(view):
+    """Dług P-A #2 (decyzja Zdzinia 2026-08-01): kolumny NIE ustępują, ustępuje okno. Zmierzone
+    realnym fontem: 11 kolumn zajmuje 981 px treści, więc przy dawnej podłodze 1073 px tabela
+    scrollowała się w poziomie o 375 px. Test pilnuje deklaracji, nie pikseli renderu — te zależą
+    od fontu maszyny (offscreen podawał wartości zawyżone o ~45%)."""
+    from horreum.gui.planner import _MIN_W
+    assert view.minimumWidth() == _MIN_W
+    assert view.minimumSizeHint().width() >= _MIN_W
 
 
 # ─────────────────────────────────────────────────────────────── most do gridu (T5e)
@@ -337,7 +442,7 @@ def test_most_emituje_kanony_celu_z_pokryciem(view):
 
 # ─────────────────────────────────────────────────────────────── wątek tła
 
-def test_watek_tla_liczy_i_sprzata_bez_zawisu(qapp, tmp_path):
+def test_watek_tla_liczy_i_sprzata_bez_zawisu(qapp, tmp_path, settings_store):
     """Realny `QThread` (jak w oknie): plan przychodzi sygnałem, a cleanup idzie ŚWIĘTĄ kolejnością
     `worker.deleteLater()` → `thread.wait()` → `thread.deleteLater()` (deadlock AB-BA, `08992c4`)."""
     from PySide6.QtCore import QDeadlineTimer, QEventLoop, QTimer

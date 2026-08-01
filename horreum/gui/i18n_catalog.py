@@ -336,6 +336,24 @@ CATALOG = {
         "en": "Search mode SKIPS thresholds and horizon — you asked about one target, you get its window.",
     },
     "planner.chip_best": {"pl": "najlepsze dopasowanie", "en": "best fit"},
+    "planner.order_label": {"pl": "Porządek:", "en": "Order:"},
+    "planner.order_core": {"pl": "rada planera", "en": "planner advice"},
+    "planner.order_lens": {"pl": "dopasowanie do soczewki", "en": "fit in the lens"},
+    "planner.order_tip": {
+        "pl": "„Rada planera” układa listę tak, jak radzi rachunek nocy (widoczność, luki, koszt\n"
+              "Księżyca, okno, wysokość). „Dopasowanie do soczewki” układa ją kadrem wybranego\n"
+              "zestawu: najpierw cele mieszczące się w jednym kadrze, potem najlepiej wypełniające.",
+        "en": "“Planner advice” orders the list the way the night computation advises (visibility,\n"
+              "gaps, Moon cost, window, altitude). “Fit in the lens” orders it by framing in the\n"
+              "chosen rig: single-frame targets first, then the ones filling it best.",
+    },
+    "planner.reset_thresholds": {"pl": "Przywróć domyślne", "en": "Restore defaults"},
+    "planner.reset_thresholds_tip": {
+        "pl": "Progi wracają do 6′ rozmiaru, 15′ dla ciemnych, 13 mag dla galaktyk, 30° wysokości\n"
+              "i 1 h na kanał; próg kosztu Księżyca wyłączony.",
+        "en": "Thresholds return to 6′ size, 15′ for dark nebulae, 13 mag for galaxies, 30° altitude\n"
+              "and 1 h per channel; the Moon cost threshold goes off.",
+    },
     "planner.chips_label": {"pl": "Patrzę oczami zestawu:", "en": "Seen through the rig:"},
     "planner.chip_tip": {
         "pl": "Soczewka, nie filtr: zmienia kolumny „Zestaw i kadr” oraz „Rada”. Żaden cel nie znika.",

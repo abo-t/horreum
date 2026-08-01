@@ -14,9 +14,10 @@ zakładał ~87 i jego arytmetyka padła — sama decyzja nie). Chip robi to, co 
 wiersz OCZAMI wybranego zestawu — kadrowanie i rada liczone dla NIEGO, zamiast dla
 najlepszego dopasowania. Nic nie znika, więc chip jest w pełni odwracalny.
 
-PORZĄDEK LISTY NALEŻY DO RDZENIA: chip nie przestawia wierszy, choć zmienia radę
-(`_sort_key` ma pięć członów wywalczonych firsthandem T3 — D-T4-c). Sort wtórny „po soczewce"
-to wariant rozwojowy widoku, nie zmiana klucza.
+PORZĄDEK RDZENIA JEST DOMYŚLNY, SORT SOCZEWKI ŻYJE W WIDOKU (D-T4-c): `targets._sort_key` ma pięć
+członów wywalczonych firsthandem T3 i pozostaje NIETKNIĘTY. `order=ORDER_LENS` przestawia GOTOWE
+wiersze — to prezentacja, tak jak sam chip; rdzeń nadal oddaje jedną, deterministyczną kolejność,
+a CLI (`horreum plan`) o istnieniu tego porządku nie wie i wiedzieć nie musi.
 """
 
 from __future__ import annotations
@@ -28,6 +29,10 @@ from horreum.gui import i18n, portfolio
 
 # Kolejność kanałów w opisie pokrycia — RGB pierwszy, potem wąskie (jak w CLI `_coverage_text`).
 _CHANNELS = (T.RGB,) + T.NARROW_CHANNELS
+
+# Porządki listy. `ORDER_CORE` = rada rdzenia (pięcioczłonowy `targets._sort_key`); `ORDER_LENS` =
+# dopasowanie do soczewki, liczone TU (widok), nigdy w rdzeniu.
+ORDER_CORE, ORDER_LENS = "core", "lens"
 
 # Powody braku rady (`TargetRow.recommend_reason`) → klucze i18n. Powód JEST odpowiedzią
 # („nie ma czego robić" vs „ten zestaw tego nie umie"), więc pusta komórka byłaby stratą faktu.
@@ -90,9 +95,26 @@ def recommendation(row, rig):
     return T.recommend_channel(row.coverage, row.cost, rig)
 
 
-def view_rows(result, telescope=None):
-    """`PlanResult` → krotka `ViewRow` w PORZĄDKU RDZENIA (chip nie przestawia listy)."""
-    return tuple(_view_row(r, result, telescope) for r in result.rows)
+def view_rows(result, telescope=None, order=ORDER_CORE):
+    """`PlanResult` → krotka `ViewRow`. `order=ORDER_CORE` (domyślnie) zachowuje porządek rdzenia;
+    `ORDER_LENS` przestawia wiersze WEDŁUG KADROWANIA w soczewce (patrz `_lens_key`)."""
+    rows = tuple(_view_row(r, result, telescope) for r in result.rows)
+    if order != ORDER_LENS:
+        return rows
+    # `sorted` jest STABILNY, więc remis (ten sam kadr, to samo wypełnienie) zostaje rozstrzygnięty
+    # porządkiem rdzenia — dwa przebiegi dają ten sam plik i nie ma tu drugiego klucza do utrzymania.
+    return tuple(sorted(rows, key=lambda v: _lens_key(v, result, telescope)))
+
+
+def _lens_key(view_row, result, telescope):
+    """Klucz sortu „po soczewce": (najpierw JEDEN KADR, potem najlepiej wypełniające) — dokładnie
+    te dwa człony, którymi rdzeń wybiera `best_rig` (`targets._framing_for`), więc oko dostaje ten
+    sam ranking, który stoi za kolumną „Zestaw i kadr". Cel bez kadrowania w tej soczewce idzie na
+    KONIEC (nie na początek jako „0 paneli") — brak odpowiedzi nie ma prawa wygrywać z odpowiedzią."""
+    _rig, fr = lens(view_row.source, result, telescope)
+    if fr is None:
+        return (1, 0, 0.0)
+    return (0, fr.panels, -fr.fill)
 
 
 def _view_row(row, result, telescope):

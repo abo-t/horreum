@@ -387,8 +387,8 @@ class DeltaReport:
     # …a te BEZ `object_raw` i bez SZANSY na niego (format nie zna karty; `NO_OBJECT_CARD_FILETYPES`).
     # Osobne pole, bo osobna droga naprawy: ręczne przypisanie, nigdy zapis karty do pliku.
     object_nameless_raw: int = 0
-    # …a te są GOTOWYMI OBRAZAMI po integracji (I-2b/D-P-I-5) — trzecia droga naprawy: ŻADNA
-    # z dwóch powyższych, bo drzewo obróbki jest read-only. Pole informacyjne.
+    # …a te są GOTOWYMI OBRAZAMI po integracji (I-2b/D-P-I-5). Osobne pole, bo osobna POPULACJA —
+    # droga naprawy jest od D-0802-1 TA SAMA co u lightów (karta `OBJECT` do pliku, P6d).
     object_nameless_stacks: int = 0
 
 
@@ -401,10 +401,10 @@ def delta_report(con, top=30):
     WIDOCZNA, inaczej raport milczy o całej klasie (P-D/D-PD-10).
 
     `object_nameless_raw` i `object_nameless_stacks` idą OSOBNO od `object_nameless`, bo to trzy
-    różne sprawy pod jednym objawem: pierwszą naprawia karta w pliku, drugą wyłącznie ręka,
-    a trzeciej nie naprawia NIC (drzewo obróbki jest read-only). Zlanie ich w jedną liczbę
-    sprawia, że kotwica nawrotu nie pilnuje żadnej — 763 RAW-y przykryłyby każdy ruch w populacji
-    FITS, a 22 stacki przykryłyby ruch w niej po raz drugi."""
+    różne POPULACJE pod jednym objawem: light archiwum i gotowy stos naprawia karta w pliku
+    (stos od D-0802-1/P6d — wcześniej nie naprawiało go nic), RAW-a wyłącznie ręka. Zlanie ich
+    w jedną liczbę sprawia, że kotwica nawrotu nie pilnuje żadnej — 763 RAW-y przykryłyby każdy
+    ruch w populacji FITS, a 22 stacki przykryłyby ruch w niej po raz drugi."""
     resolved = con.execute(
         "SELECT count(*) FROM frame WHERE kind IN ('light','master_light') "
         "AND object_id IS NOT NULL").fetchone()[0]

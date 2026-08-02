@@ -1509,8 +1509,11 @@ def test_scan_stacks_anulowanie_na_granicy_pliku(tmp_path):
 
 
 def test_scan_stacks_nie_rusza_bajtow(tmp_path):
-    """§5 briefu P-I: tor jest w CAŁOŚCI read-only — ani jeden bajt drzewa obróbki się nie zmienia
-    (łącznie z plikami odrzuconymi i pochodnymi, których droga w ogóle nie otwiera)."""
+    """§5 briefu P-I: DROGA WCIĄGANIA nie zmienia ani jednego bajtu drzewa obróbki (łącznie
+    z plikami odrzuconymi i pochodnymi, których w ogóle nie otwiera).
+
+    Granica wiąże TEN tor, nie wszystkie funkcje: od D-0802-1 writeback SIĘGA gotowych stosów
+    i dopisuje im kartę `OBJECT` (P6d). To dwie różne sprawy — skan czyta, writeback pisze."""
     con = _db(tmp_path)
     t = tmp_path / "obrobka"
     t.mkdir()

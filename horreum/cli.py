@@ -67,7 +67,7 @@ def main(argv=None):
     # doskanu zostaje nietknięty.
     p_stk = sub.add_parser("stacks",
                            help="wciągnij GOTOWE OBRAZY po integracji (`masterLight*.xisf`) ze "
-                                "wskazanego drzewa obróbki — read-only, poza skanem archiwum")
+                                "wskazanego drzewa obróbki — sam odczyt, poza skanem archiwum")
     p_stk.add_argument("root", help="korzeń drzewa obróbki")
     p_stk.add_argument("db", help="ścieżka pliku bazy")
     p_stk.add_argument("--volume", default="?",

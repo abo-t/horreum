@@ -20,6 +20,12 @@ wyłącznie w `find`. Kanon archiwum, który nie trafi w żaden rekord (region `
 do JAWNEJ RESZTY z godzinami — cicho zgubione godziny czyniłyby rachunek pokrycia fałszywie
 zielonym.
 
+POKRYCIE MA DWIE LICZBY GODZIN (I-2e): zebrane (wszystkie lighty) i ZINTEGROWANE (to, co weszło
+w gotowy obraz — rodowód stosów P-I). Druga liczy każdy sub RAZ, choć `integration_input` jest
+N:M: reprocessing tej samej nocy i warianty tego samego obrazu (`_ast`, `_drizzle_1x`) dzielą
+wejścia, więc suma po relacjach rosłaby od samego przeliczania archiwum. Luki i rada stoją na
+liczbie ZEBRANEJ — „nie zestackowałem" nie jest brakiem materiału.
+
 KSIĘŻYC WYCENIA, NIE WYCINA (D-0731-14): koszt jest kolumną i członem klucza sortowania, próg
 domyślnie wyłączony. Sortowanie ma TRZY człony przed kosztem-i-nazwą, bo każdy pojedynczy zawodzi:
 cel pod horyzontem ma uczciwe `cost=1,00`, a przy nowiu KAŻDY cel ma 1,00 i ranking zdegenerowałby
@@ -32,12 +38,13 @@ from __future__ import annotations
 
 import functools
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from importlib import resources
 
 from . import sky
-from .gui.queries import all_frame_ids, object_exposure
+from .gui.queries import (all_frame_ids, integrated_exposure, object_exposure,
+                          stack_locations)
 from .resolve._coerce import _to_float, _to_text
 from .resolve.catalog import catalog_canon, xref
 
@@ -110,16 +117,30 @@ class Target:
 @dataclass(frozen=True)
 class Coverage:
     """Pokrycie celu w archiwum. `hours_by_channel` niesie kanały (§6), `archive_canons` mówi, POD
-    JAKĄ NAZWĄ użytkownik ma klatki — `LBN807` na wierszu `IC410` (D-T2-d)."""
+    JAKĄ NAZWĄ użytkownik ma klatki — `LBN807` na wierszu `IC410` (D-T2-d).
+
+    DWIE RÓŻNE LICZBY GODZIN, ŚWIADOMIE OBOK SIEBIE (I-2e): `hours_*` to CO ZEBRANO (wszystkie
+    lighty), `integrated_*` to CO WESZŁO w gotowy obraz (rodowód stosów, sub liczony raz). Luki
+    i rada liczą się z pierwszej — cel z 8 h w Ha ma ten kanał zrobiony, niezależnie od tego, czy
+    zdążył go zestackować. Druga jest odpowiedzią na inne pytanie („ile z tego jest obrazem")
+    i domyka most, którego planer nie miał. Baza bez rodowodu stosów daje po prostu zera —
+    nie brak faktu, tylko fakt „nic jeszcze nie zintegrowano"."""
     hours_by_filter: dict
     hours_by_channel: dict
     gaps: tuple
     archive_canons: tuple
     frames_no_exptime: int
+    integrated_by_filter: dict = field(default_factory=dict)
+    integrated_by_channel: dict = field(default_factory=dict)
+    stacks: tuple = ()             # (frame_id, ścieżka|None) gotowych obrazów tego celu
 
     @property
     def total_hours(self):
         return sum(self.hours_by_filter.values())
+
+    @property
+    def integrated_hours(self):
+        return sum(self.integrated_by_filter.values())
 
     @property
     def known(self):
@@ -388,19 +409,40 @@ def archive_coverage(con):
     więc drugiego literału „uniwersum lightów" nie piszemy. Grupa całkiem bez `exptime` zwraca
     `secs=NULL` → `or 0.0`.
 
+    DRUGA OŚ FAKTU (I-2e): `queries.integrated_exposure` dokłada godziny, które weszły w gotowe
+    obrazy (sub liczony RAZ mimo N:M), a `queries.stack_locations` — gdzie te obrazy leżą. Kanon
+    stosu bez ANI JEDNEGO lighta zakłada WŁASNY wpis zamiast wypaść po cichu: „obraz jest, subów
+    w archiwum nie ma" to znalezisko, nie szum (klatki poza biblioteką, skasowane suby), a cichy
+    ubytek celu to ta sama klasa błędu co cichy sufit listy.
+
     Licznik `unfiltered_mono` jest STRAŻNIKIEM, nie agregatem: brak filtra na matrycy kolorowej to
     broadband (OSC zbiera RGB jednym strzałem), ale brak filtra na mono znaczy „nie wiadomo co",
     i wtedy kubełek RGB byłby zanieczyszczony. Zmierzone dziś: 0."""
     objs = {r["id"]: r["canon"] for r in con.execute("SELECT id, canon FROM object").fetchall()}
     per = {}
+
+    def _entry(object_id):
+        canon = objs.get(object_id)
+        return None if canon is None else per.setdefault(
+            canon, {"by_filter": {}, "n_null": 0, "integrated": {}, "stacks": []})
+
     for r in object_exposure(con, all_frame_ids(con)):
-        canon = objs.get(r["object_id"])
-        if canon is None:
+        entry = _entry(r["object_id"])
+        if entry is None:
             continue
-        entry = per.setdefault(canon, {"by_filter": {}, "n_null": 0})
         key = r["filter_canon"]
         entry["by_filter"][key] = entry["by_filter"].get(key, 0.0) + (r["secs"] or 0.0) / 3600.0
         entry["n_null"] += r["n_null"] or 0
+    for r in integrated_exposure(con):
+        entry = _entry(r["object_id"])
+        if entry is None:
+            continue
+        key = r["filter_canon"]
+        entry["integrated"][key] = entry["integrated"].get(key, 0.0) + (r["secs"] or 0.0) / 3600.0
+    for r in stack_locations(con):
+        entry = _entry(r["object_id"])
+        if entry is not None:
+            entry["stacks"].append((r["frame_id"], r["path"]))
     unfiltered_mono = con.execute(
         "SELECT COUNT(*) FROM frame f JOIN camera c ON c.id = f.camera_id "
         "WHERE f.kind = 'light' AND f.filter_canon IS NULL AND c.is_mono = 1").fetchone()[0]
@@ -434,16 +476,29 @@ def required_channels(target_type):
 
 def _coverage_for(t, index_hits, min_hours):
     """Złóż `Coverage` z dopasowanych kanonów archiwum (dopasowanie jest WIELE→JEDEN: archiwum może
-    mieć jednocześnie `IC410` i `LBN807`, więc godziny sumujemy, a oba kanony zostają widoczne)."""
-    by_filter, n_null = {}, 0
+    mieć jednocześnie `IC410` i `LBN807`, więc godziny sumujemy, a oba kanony zostają widoczne).
+
+    Godziny zintegrowane sumują się tą samą drogą i jest to bezpieczne dokładnie dlatego, że
+    `integrated_exposure` zdjęła N:M PRZED agregacją: tu dodajemy rozłączne kanony archiwum
+    (`IC410` + `LBN807`), a nie wielokrotne relacje tego samego suba.
+
+    LUKI I RADA ZOSTAJĄ NA GODZINACH ZEBRANYCH — świadomie. „Nie zestackowałem" nie jest luką
+    w materiale i nie ma prawa wysłać użytkownika po kolejne 8 h Ha, których już ma."""
+    by_filter, integrated, stacks, n_null = {}, {}, [], 0
     for entry in index_hits.values():
         for name, hours in entry["by_filter"].items():
             by_filter[name] = by_filter.get(name, 0.0) + hours
+        for name, hours in entry.get("integrated", {}).items():
+            integrated[name] = integrated.get(name, 0.0) + hours
+        stacks.extend(entry.get("stacks", ()))
         n_null += entry["n_null"]
     channels = channel_hours(by_filter)
     gaps = tuple(ch for ch in required_channels(t.type) if channels.get(ch, 0.0) < min_hours)
     return Coverage(hours_by_filter=by_filter, hours_by_channel=channels, gaps=gaps,
-                    archive_canons=tuple(sorted(index_hits)), frames_no_exptime=n_null)
+                    archive_canons=tuple(sorted(index_hits)), frames_no_exptime=n_null,
+                    integrated_by_filter=integrated,
+                    integrated_by_channel=channel_hours(integrated),
+                    stacks=tuple(sorted(stacks)))
 
 
 # ─────────────────────────────────────────────────────── Księżyc, rada, kolejność

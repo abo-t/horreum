@@ -363,6 +363,13 @@ CATALOG = {
     "planner.your_name": {"pl": "u Ciebie: {names}", "en": "your name: {names}"},
     "planner.gaps": {"pl": "brak {channels}", "en": "missing {channels}"},
     "planner.no_frames": {"pl": "bez klatek", "en": "no frames"},
+    # I-2e — most rodowodu stosów do planera. „w obrazach" mówi o CZASIE, który realnie wszedł
+    # w gotowy obraz; jest osobną liczbą od godzin zebranych i nie ma prawa brzmieć jak ich powtórka.
+    "planner.integrated": {"pl": "w obrazach {hours}", "en": "in images {hours}"},
+    "planner.stacks_header": {"pl": "Gotowe obrazy ({n}):", "en": "Finished images ({n}):"},
+    "planner.stack_no_copy": {"pl": "(brak kopii pod ręką)", "en": "(no copy at hand)"},
+    "planner.integrated_by_channel": {"pl": "Zintegrowane: {parts}",
+                                      "en": "Integrated: {parts}"},
     "planner.reason_no_gap": {"pl": "bez luk", "en": "no gaps"},
     "planner.reason_rig_cannot": {"pl": "zestaw nie umie", "en": "rig cannot"},
     "planner.reason_no_rig": {"pl": "brak zestawu", "en": "no rig"},

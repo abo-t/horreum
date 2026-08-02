@@ -720,6 +720,63 @@ def object_exposure(con, frame_ids):
     ).fetchall()
 
 
+def integrated_exposure(con):
+    """Naświetlenie, które REALNIE weszło w gotowe obrazy — per (obiekt, filtr), SUB LICZONY RAZ.
+
+    Siostra `object_exposure`: tamta mówi „ile naświetliłem", ta „ile z tego jest w obrazie".
+    Różnica jest wartością sama w sobie — 40 h zebrane i 12 h zintegrowane to dwa różne stany
+    projektu, a planer bez tej drugiej liczby doradza wyłącznie z naświetleń.
+
+    LICZNIK STOI NA `DISTINCT input_frame_id` I TO JEST CAŁY SENS TEJ FUNKCJI (fakt 20 briefu P-I).
+    `integration_input` jest POKRYCIEM, nie podziałem: zmierzone 43 pary integracji tej samej półki
+    mają nakładające się okna (reprocessingi tej samej nocy — `WBPP` vs `WBPP_nowy` — oraz warianty
+    tego samego obrazu: `_ast`, `_drizzle_1x`, `_integration`). Suma po WIERSZACH relacji policzyłaby
+    ten sam sub tyle razy, ile obrazów z niego zrobiono, i pokrycie rosłoby od samego przeliczania
+    archiwum. Podzapytanie `DISTINCT` zdejmuje N:M PRZED sumowaniem.
+
+    `excluded = 0` — werdykt ręki „ta klatka NIE weszła" (I-2d) jest faktem, a nie ukryciem wiersza.
+
+    OBIEKT BIERZEMY Z KLATKI WEJŚCIOWEJ, nie z mastera: godziny są własnością subów, a oś obiektu
+    lighta przeszła tę samą drabinę resolvera co reszta archiwum. `kind = 'light'` w warunku jest
+    strażnikiem, nie ozdobą — rodowód wiąże dziś wyłącznie lighty, ale `EXPTIME` mastera to czas
+    ZINTEGROWANY i wpuszczony tu podwoiłby rachunek.
+
+    JAWNE-NULL jak w `object_exposure`: `n_null` liczy wejścia bez `exptime` zamiast je przemilczeć.
+    Zwraca wiersze: object_id, filter_canon, secs, n_null."""
+    return con.execute(
+        "SELECT f.object_id, f.filter_canon, "
+        "       SUM(h.exptime)         AS secs, "
+        "       SUM(h.exptime IS NULL) AS n_null "
+        "FROM (SELECT DISTINCT ii.input_frame_id AS fid FROM integration_input ii "
+        "       WHERE ii.excluded = 0) d "
+        "JOIN frame f ON f.id = d.fid "
+        "JOIN header h ON h.frame_id = d.fid "
+        "WHERE f.kind = 'light' AND f.object_id IS NOT NULL "
+        "GROUP BY f.object_id, f.filter_canon "
+        "ORDER BY f.object_id, secs DESC").fetchall()
+
+
+def stack_locations(con):
+    """GDZIE LEŻY GOTOWY OBRAZ — klatki `master_light` per obiekt, ze ścieżką obecnej kopii.
+
+    Druga połowa mostu do planera (I-2e): „ile godzin weszło" bez „gdzie to jest" zostawia
+    użytkownika z liczbą, po którą musi iść do eksploratora. Ścieżka jak w `nameless_frames`
+    (`present = 1`, najniższe `id`) — kopia, którą realnie da się otworzyć.
+
+    Stos bez obecnej kopii ZOSTAJE w wyniku z `path = NULL`: tożsamość klatki to `sha1_data`, nie
+    ścieżka, a „obraz jest, ale nie mam go pod ręką" to inna odpowiedź niż „obrazu nie ma".
+    Obiektu nierozpoznanego nie zgadujemy — stos bez `object_id` do wiersza celu nie należy i widać
+    go własnym kubełkiem bezimiennych (D-P-I-5).
+
+    Zwraca wiersze: object_id, frame_id, path."""
+    return con.execute(
+        "SELECT f.object_id, f.id AS frame_id, "
+        "       (SELECT l.path FROM location l WHERE l.frame_id = f.id AND l.present = 1 "
+        "         ORDER BY l.id LIMIT 1) AS path "
+        "FROM frame f WHERE f.kind = 'master_light' AND f.object_id IS NOT NULL "
+        "ORDER BY f.object_id, f.id").fetchall()
+
+
 def stack_lineage_head(con, frame_id):
     """Wiersz `integration` dla klatki stosu + LICZBY, którymi panel opisze obraz (I-2d) — albo
     `None`, gdy rodowodu jeszcze nie liczono dla tej klatki.

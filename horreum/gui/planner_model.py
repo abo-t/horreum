@@ -53,6 +53,7 @@ class ViewRow:
     window: str
     rig: str
     coverage: str
+    coverage_tip: str              # gdzie leżą gotowe obrazy (I-2e) — tooltip, nie kolumna
     cost: str
     recommend: str
     plan: str
@@ -129,6 +130,7 @@ def _view_row(row, result, telescope):
         window=f"{row.window.hours_above:.1f} h",
         rig=rig_text(rig, fr),
         coverage=coverage_text(row),
+        coverage_tip=coverage_tip(row),
         cost=cost_text(row),
         recommend=recommend_text(channel, reason),
         plan=plan_text(row),
@@ -179,11 +181,40 @@ def coverage_text(row):
         hours = cov.hours_by_channel.get(ch, 0.0)
         if hours > 0:
             parts.append(f"{ch} {portfolio.format_hours(hours * 3600)}")
+    # ZINTEGROWANE JEDNĄ LICZBĄ, nie per kanał (I-2e): rozbicie podwoiłoby długość komórki, która
+    # i tak jest najszersza w tabeli, a pytanie brzmi „ile z tego jest obrazem", nie „w czym".
+    # Rozbicie mieszka w tooltipie razem ze ścieżkami. Zero stosów = MILCZENIE, nie „0 h":
+    # większość celów nigdy nie była stackowana i zero przy każdym z nich byłoby szumem.
+    if cov.integrated_hours > 0:
+        parts.append(i18n.t("planner.integrated",
+                            hours=portfolio.format_hours(cov.integrated_hours * 3600)))
     if cov.gaps:
         parts.append(i18n.t("planner.gaps", channels="/".join(cov.gaps)))
     if not parts:
         return i18n.t("planner.no_frames")
     return " · ".join(parts)
+
+
+def coverage_tip(row):
+    """GDZIE LEŻY GOTOWY OBRAZ (I-2e) — tooltip komórki pokrycia; pusty string, gdy stosów nie ma.
+
+    Ścieżki idą do tooltipa, a nie do kolumny, z dwóch powodów naraz: mają po sto znaków (kolumna
+    rozjechałaby tabelę, której podłogę szerokości Zdzin ustalił świadomie — D-0801-1), a odpowiedź
+    „gdzie to jest" potrzebna jest RAZ, przy sięganiu po plik, nie przy każdym skanowaniu listy.
+
+    Stos bez obecnej kopii dostaje jawne „(brak kopii pod ręką)" zamiast pustej linii: „obraz jest,
+    ale nie mam go teraz" to inna odpowiedź niż „obrazu nie ma", i tylko ta pierwsza mówi
+    użytkownikowi, że ma podłączyć dysk."""
+    cov = row.coverage
+    if not cov.stacks:
+        return ""
+    lines = [i18n.t("planner.stacks_header", n=len(cov.stacks))]
+    lines += [path or i18n.t("planner.stack_no_copy") for _fid, path in cov.stacks]
+    integrated = [f"{ch} {portfolio.format_hours(h * 3600)}"
+                  for ch in _CHANNELS for h in (cov.integrated_by_channel.get(ch, 0.0),) if h > 0]
+    if integrated:
+        lines.append(i18n.t("planner.integrated_by_channel", parts=" · ".join(integrated)))
+    return "\n".join(lines)
 
 
 def cost_text(row):

@@ -667,6 +667,11 @@ def _coverage_text(row):
         hours = cov.hours_by_channel.get(ch, 0.0)
         if hours > 0:
             parts.append(f"{ch} {hours:.1f}h")
+    # Godziny ZINTEGROWANE (I-2e) obok zebranych — druga liczba, nie powtórka pierwszej. Milczy,
+    # gdy stosów nie ma: „0h w obrazach" przy każdym celu nigdy nie stackowanym byłoby szumem.
+    if cov.integrated_hours > 0:
+        parts.append(f"w obrazach {cov.integrated_hours:.1f}h"
+                     + (f" ({len(cov.stacks)} plik.)" if cov.stacks else ""))
     if cov.gaps:
         parts.append("brak " + "/".join(cov.gaps))
     return ", ".join(parts)
@@ -863,6 +868,12 @@ def _plan_json(res):
             "plan_status": row.plan_status, "priority": row.priority, "note": row.note,
             "archive_canons": list(row.coverage.archive_canons),
             "hours_by_channel": {k: round(v, 3) for k, v in row.coverage.hours_by_channel.items()},
+            # I-2e: druga oś godzin (co weszło w obraz) + gdzie te obrazy leżą. Ścieżki jadą
+            # w JSON-ie w całości — to wyjście MASZYNOWE, a ucinanie listy w nim byłoby cichym
+            # sufitem; skracanie należy do powierzchni, nie do faktu.
+            "integrated_by_channel": {k: round(v, 3)
+                                      for k, v in row.coverage.integrated_by_channel.items()},
+            "stacks": [{"frame_id": fid, "path": path} for fid, path in row.coverage.stacks],
             "gaps": list(row.coverage.gaps),
         } for row in res.rows],
     }

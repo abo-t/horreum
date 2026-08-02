@@ -51,6 +51,10 @@ _COLUMNS = (("planner.col_canon", "canon"), ("planner.col_type", "type"),
             ("planner.col_recommend", "recommend"), ("planner.col_plan", "plan"),
             ("planner.col_note", "note"))
 
+# Indeks kolumny „Pokrycie" liczony Z `_COLUMNS`, nie wpisany liczbą: przestawienie kolumn nie ma
+# prawa przenieść tooltipu ze ścieżkami stosów (I-2e) na cudzą komórkę.
+_COL_COVERAGE = next(i for i, (key, _f) in enumerate(_COLUMNS) if key == "planner.col_coverage")
+
 # PODŁOGA EKRANU — decyzja Zdzinia 2026-08-01 (D-0801-1): kolumny NIE ustępują, ustępuje okno.
 # Zmierzone realnym fontem (Segoe UI 9 pt, żywa pf4, 429 wierszy, planer na wierzchu w oknie):
 # jedenaście kolumn zajmuje 981 px treści, ramka + pionowy scrollbar biorą 36 px, sidebar nawigacji
@@ -184,8 +188,14 @@ class PlannerTableModel(QAbstractTableModel):
             return int(Qt.AlignRight | Qt.AlignVCenter)
         if role == Qt.ForegroundRole and not row.visible:
             return self._dim
-        if role == Qt.ToolTipRole and not row.visible:
-            return i18n.t("planner.not_visible_tip")
+        if role == Qt.ToolTipRole:
+            # Pokrycie ma WŁASNY tooltip (I-2e — gdzie leżą gotowe obrazy) i wygrywa na swojej
+            # kolumnie: „ten cel dziś nie wschodzi" powtarza się w dziesięciu innych komórkach
+            # tego samego wiersza, a ścieżka do obrazu jest tylko tutaj.
+            if index.column() == _COL_COVERAGE and row.coverage_tip:
+                return row.coverage_tip
+            if not row.visible:
+                return i18n.t("planner.not_visible_tip")
         return None
 
 

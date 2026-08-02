@@ -325,6 +325,97 @@ def test_reszta_jawna_z_kotwica_domkniecia_godzin(con):
     assert dopasowane + sum(res.unmatched.values()) == pytest.approx(total)
 
 
+# ───────────────────────────────────────────── most rodowodu stosów do planera (I-2e, paczka P-I)
+
+def _master(con, sha1, object_id, *, path, filter_canon="Ha"):
+    """Klatka gotowego obrazu (`master_light`) — materiał `queries.stack_locations`.
+    `path=None` znaczy „bez obecnej kopii" (klatka jest w bibliotece, pliku nie ma pod ręką)."""
+    con.execute("INSERT INTO frame(sha1_data, kind, filetype, camera_id, config_id, object_id, "
+                "filter_canon, first_seen_at) VALUES (?, 'master_light', 'xisf', 1, 1, ?, ?, ?)",
+                (sha1, object_id, filter_canon, NOW))
+    fid = con.execute("SELECT id FROM frame WHERE sha1_data = ?", (sha1,)).fetchone()["id"]
+    if path is not None:
+        con.execute("INSERT INTO location(frame_id, volume, path, present) VALUES (?, 'V1', ?, 1)",
+                    (fid, path))
+    return fid
+
+
+def _integracja(con, master_frame_id, wejscia, *, integ_hash="h"):
+    from horreum import repo
+    con.commit()                # pisarze `repo` biorą `BEGIN IMMEDIATE` — surowe INSERT-y fixture'u
+    iid, _ = repo.upsert_integration(
+        con, master_frame_id=master_frame_id, integ_hash=integ_hash, tool="WBPP",
+        window_start=None, window_end=None, declared_rows=None, drizzle_inputs=None,
+        disabled_inputs=None, degenerate=0, ambiguous=0, telescope_mismatch=0,
+        unresolved_reason=None, now=NOW)
+    for fid in wejscia:
+        repo.link_integration(con, integration_id=iid, input_frame_id=fid,
+                              asserted_by="window", now=NOW)
+    return iid
+
+
+def test_godziny_zintegrowane_licza_sub_raz_mimo_reprocessingu(con):
+    """BRAMKA I-2e: pokrycie NIE ROŚNIE po dołożeniu reprocessingu tej samej nocy.
+
+    `integration_input` jest POKRYCIEM, nie podziałem (fakt 20 briefu: 43 pary tej samej półki mają
+    nakładające się okna). Suma po WIERSZACH relacji rosłaby od samego przeliczania archiwum —
+    dlatego licznik stoi na `DISTINCT input_frame_id`. Test dokłada DRUGĄ integrację z tych samych
+    trzech subów i żąda tej samej liczby godzin."""
+    oid = _obiekt(con, "CTB1")
+    subs = [_light(con, config_id=1, sha1=f"s{i}", focal=784.0, object_id=oid,
+                   filter_canon="Ha", exptime=1200.0) for i in range(3)]
+    m1 = _master(con, "m1", oid, path=r"R:\ASTRO_\CTB1\masterLight_a.xisf")
+    _integracja(con, m1, subs)
+    per, _ = targets.archive_coverage(con)
+    assert per["CTB1"]["integrated"]["Ha"] == pytest.approx(1.0)      # 3 × 1200 s = 1 h
+
+    m2 = _master(con, "m2", oid, path=r"R:\ASTRO_\CTB1\masterLight_a_drizzle_1x.xisf")
+    _integracja(con, m2, subs, integ_hash="h")                        # ten sam zbiór wejść
+    per, _ = targets.archive_coverage(con)
+    assert per["CTB1"]["integrated"]["Ha"] == pytest.approx(1.0)      # BEZ ZMIANY — sub liczony raz
+    assert len(per["CTB1"]["stacks"]) == 2                            # ale obrazy są DWA
+
+
+def test_odrzucony_reka_sub_nie_wchodzi_w_godziny_obrazu(con):
+    """Werdykt ręki „ta klatka NIE weszła" (I-2d) jest faktem, nie ukryciem wiersza."""
+    from horreum import repo
+    oid = _obiekt(con, "CTB1")
+    subs = [_light(con, config_id=1, sha1=f"x{i}", focal=784.0, object_id=oid,
+                   filter_canon="Ha", exptime=1800.0) for i in range(2)]
+    m = _master(con, "mx", oid, path=r"R:\ASTRO_\CTB1\masterLight_b.xisf")
+    iid = _integracja(con, m, subs)
+    repo.judge_integration_input(con, integration_id=iid, input_frame_id=subs[0],
+                                 excluded=1, now=NOW)
+    per, _ = targets.archive_coverage(con)
+    assert per["CTB1"]["integrated"]["Ha"] == pytest.approx(0.5)      # został JEDEN sub
+
+
+def test_pokrycie_niesie_dwie_rozne_liczby_godzin_a_luki_stoja_na_zebranych(con):
+    """Zebrane i zintegrowane to DWA różne fakty. „Nie zestackowałem" NIE jest luką w materiale —
+    inaczej planer wysyłałby po kolejne godziny, które użytkownik już ma na dysku."""
+    oid = _obiekt(con, "CTB1")
+    subs = [_light(con, config_id=1, sha1=f"y{i}", focal=784.0, object_id=oid,
+                   filter_canon="Ha", exptime=3600.0) for i in range(4)]
+    m = _master(con, "my", oid, path=r"R:\ASTRO_\CTB1\masterLight_c.xisf")
+    _integracja(con, m, subs[:1])                                    # zestackowana JEDNA z czterech
+    res = targets.plan(con, night=date(2026, 8, 15), find="CTB1")
+    row = [r for r in res.rows if r.target.canon == "CTB1"][0]
+    assert row.coverage.hours_by_channel["Ha"] == pytest.approx(4.0)
+    assert row.coverage.integrated_hours == pytest.approx(1.0)
+    assert "Ha" not in row.coverage.gaps                              # 4 h zebrane domykają kanał
+    assert row.coverage.stacks == ((m, r"R:\ASTRO_\CTB1\masterLight_c.xisf"),)
+
+
+def test_stos_bez_lightow_zaklada_wlasny_wpis_zamiast_zniknac(con):
+    """„Obraz jest, subów w archiwum nie ma" to ZNALEZISKO, nie szum — cichy ubytek celu byłby tą
+    samą klasą błędu co cichy sufit listy."""
+    oid = _obiekt(con, "CTB1")
+    m = _master(con, "mz", oid, path=None)          # obraz BEZ obecnej kopii i bez subów w bazie
+    per, _ = targets.archive_coverage(con)
+    assert per["CTB1"]["by_filter"] == {}
+    assert per["CTB1"]["stacks"] == [(m, None)]     # `path=None` = „nie mam go pod ręką", nie „nie ma"
+
+
 def test_reszta_nie_klamie_przy_warstwie_niewczytanej(con):
     """`LDN1152` leży w CIRRUSIE — przy domyślnym rdzeniu nie jest „godzinami bez celu w katalogu",
     tylko celem z warstwy, której użytkownik nie wczytał."""

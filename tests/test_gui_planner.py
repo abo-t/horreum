@@ -133,6 +133,27 @@ def test_niewidoczny_wiersz_zostaje_wyszarzony_nie_ukryty(view):
     assert view.model.data(idx, Qt.ToolTipRole)
 
 
+def test_tooltip_pokrycia_wygrywa_na_swojej_kolumnie(view):
+    """I-2e: ścieżki gotowych obrazów mieszkają w tooltipie kolumny „Pokrycie" i BIJĄ tam notę
+    „ten cel dziś nie wschodzi" — tamta powtarza się w dziesięciu innych komórkach tego samego
+    wiersza, a ścieżka do obrazu jest tylko tutaj. Indeks kolumny liczony z `_COLUMNS`, więc
+    przestawienie kolumn nie przeniesie tooltipu na cudzą komórkę."""
+    import dataclasses
+
+    from PySide6.QtCore import Qt
+
+    from horreum.gui import i18n
+    from horreum.gui import planner as P
+    assert P._COLUMNS[P._COL_COVERAGE][0] == "planner.col_coverage"
+    rows = [view.model.row_at(r) for r in range(view.model.rowCount())]
+    niewidoczny = next(r for r in rows if not r.visible)
+    tip = "Gotowe obrazy (1):\nR:\\m.xisf"
+    view.model.set_rows([dataclasses.replace(niewidoczny, coverage_tip=tip)])
+    assert view.model.data(view.model.index(0, P._COL_COVERAGE), Qt.ToolTipRole) == tip
+    assert view.model.data(view.model.index(0, 0), Qt.ToolTipRole) == \
+        i18n.t("planner.not_visible_tip")
+
+
 def test_pasek_progow_zwija_sie_i_niesie_stan(view):
     """Wiz T5 #3 (P1): zwijamy PRZYCISKIEM ze strzałką, nie `checkable QGroupBox` — odznaczony
     checkbox przy DZIAŁAJĄCYCH progach czyta się w Qt jak „grupa wyłączona". Tytuł niesie STAN,

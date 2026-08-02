@@ -95,6 +95,48 @@ def test_pokrycie_mowi_o_braku_klatek(res):
     assert pm.coverage_text(bez[0]) == "bez klatek"
 
 
+def _cov(**kw):
+    base = dict(hours_by_filter={"Ha": 4.0}, hours_by_channel={"RGB": 0.0, "Ha": 4.0},
+                gaps=("RGB",), archive_canons=("CTB1",), frames_no_exptime=0)
+    return targets.Coverage(**{**base, **kw})
+
+
+class _Row:
+    """Wiersz-atrapa dla samej prezentacji pokrycia (I-2e) — testy niżej pytają o TEKST, nie
+    o rachunek nieba, więc pełny `plan()` byłby drogą okrężną do tej samej asercji."""
+
+    def __init__(self, coverage):
+        self.coverage = coverage
+        self.target = targets.Target(canon="CTB1", type="SNR", ra_deg=0.0, dec_deg=60.0,
+                                     major_arcmin=100.0, minor_arcmin=None, mag=None,
+                                     mag_from_b=False, aliases=(), layer="core", why=None,
+                                     size_source=None)
+
+
+def test_pokrycie_niesie_godziny_w_obrazach_gdy_stosy_sa(res):
+    """I-2e: „w obrazach" to DRUGA liczba obok zebranych. Milczy, gdy stosów nie ma — zero przy
+    każdym celu nigdy nie stackowanym byłoby szumem w najszerszej kolumnie tabeli."""
+    assert "w obrazach" not in pm.coverage_text(_Row(_cov()))
+    tekst = pm.coverage_text(_Row(_cov(integrated_by_filter={"Ha": 1.5},
+                                       integrated_by_channel={"Ha": 1.5},
+                                       stacks=((7, r"R:\ASTRO_\CTB1\m.xisf"),))))
+    assert "Ha 4.0 h" in tekst and "w obrazach 1.5 h" in tekst
+
+
+def test_tooltip_pokrycia_mowi_gdzie_lezy_obraz(res):
+    """Druga połowa mostu: liczba godzin bez odpowiedzi „gdzie to jest" zostawia użytkownika
+    z wyprawą do eksploratora. Ścieżki idą do TOOLTIPA — kolumna z nimi rozjechałaby tabelę,
+    której podłogę szerokości Zdzin ustalił świadomie (D-0801-1)."""
+    assert pm.coverage_tip(_Row(_cov())) == ""                      # bez stosów: cisza
+    tip = pm.coverage_tip(_Row(_cov(integrated_by_filter={"Ha": 1.5},
+                                    integrated_by_channel={"Ha": 1.5},
+                                    stacks=((7, r"R:\ASTRO_\CTB1\m.xisf"), (9, None)))))
+    assert r"R:\ASTRO_\CTB1\m.xisf" in tip
+    # Obraz bez obecnej kopii NIE MILCZY: „mam go, ale nie pod ręką" to inna odpowiedź niż „nie ma"
+    assert "(brak kopii pod ręką)" in tip
+    assert "Zintegrowane: Ha 1.5 h" in tip
+
+
 def test_plan_pusty_to_kreska_a_status_ma_etykiete(con, res):
     assert pm.plan_text(res.rows[0]) == "—"
     canon = res.rows[0].target.canon

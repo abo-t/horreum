@@ -38,6 +38,9 @@ from importlib import resources
 # KLATCE MASTERA (UNIQUE) zamiast na wywnioskowanym zbiorze wejść, `integration_input` — UNIQUE
 # i trójstan `asserted_by` (history|window|user). Obie były pustym szkieletem z 0002 (zero wierszy,
 # zero pisarzy), więc INSERT SELECT kopiuje 0 wierszy.
+# 0013 to PRZEBUDOWA `saved_query` (I-1, P-I): `sql_text` → `spec_json` + `updated_at`. Perspektywa
+# Horreum nigdy nie była SQL-em (grid składa JSON-spec), a od D-P-I-3 mieszka w BAZIE zamiast
+# w rejestrze użytkownika — nazwany widok jest własnością ARCHIWUM, nie komputera.
 MIGRATIONS = [
     (2, "0002_initial.sql"),
     (3, "0003_writeback.sql"),
@@ -50,6 +53,7 @@ MIGRATIONS = [
     (10, "0010_kind_source.sql"),
     (11, "0011_target_plan.sql"),
     (12, "0012_stack_lineage.sql"),
+    (13, "0013_saved_query_spec.sql"),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 _KNOWN_VERSIONS = frozenset({0} | {v for v, _ in MIGRATIONS})

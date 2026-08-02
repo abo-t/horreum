@@ -4,6 +4,7 @@ import json
 import pytest
 
 from horreum import db, repo
+from horreum.gui import queries
 from horreum.resolve.cameras import camera_identity
 from horreum.scan import Card
 
@@ -682,4 +683,72 @@ def test_user_assign_object_idempotentny(tmp_path):
     assert repo.user_assign_object(con, **kw) == (0, 1)
     assert con.execute("SELECT count(*) FROM event").fetchone()[0] == ev
     assert con.execute("SELECT count(*) FROM object_alias").fetchone()[0] == 1
+    con.close()
+
+
+# ─────────────────────────────────────────── perspektywy w bazie (I-1, D-P-I-3 odwraca D-B)
+
+def test_perspektywa_zapisuje_sie_i_wraca_z_bazy(tmp_path):
+    """Rdzeń decyzji: nazwany widok jest własnością ARCHIWUM. Zapis w jednym połączeniu, odczyt
+    w drugim — to jest w miniaturze „zapisz na stacji, otwórz na laptopie"."""
+    con = _fresh(tmp_path)
+    spec = {"filter": None, "columns": ["OBJECT"], "group_by": None, "facets": {}}
+    _id, verb = repo.save_perspective(con, name="Ha z A140R", spec=spec, now=NOW)
+    assert verb == "perspective.saved"
+    con.close()
+    con = db.open_db(str(tmp_path / "h.db"))
+    assert queries.perspectives(con) == [("Ha z A140R", spec)]
+    con.close()
+
+
+def test_perspektywa_ta_sama_tresc_nie_pisze_i_nie_puchnie_dziennik(tmp_path):
+    """Idempotencja NIE jest kosmetyką: na niej stoi import z rejestru, wołany przy KAŻDYM
+    otwarciu widoku. Kolejność kluczy nie ma prawa udawać zmiany."""
+    con = _fresh(tmp_path)
+    spec = {"filter": None, "columns": ["OBJECT", "FILTER"]}
+    repo.save_perspective(con, name="P", spec=spec, now=NOW)
+    ev = con.execute("SELECT count(*) FROM event").fetchone()[0]
+    _id, verb = repo.save_perspective(con, name="P", spec=dict(reversed(list(spec.items()))),
+                                      now=NOW)
+    assert verb is None
+    assert con.execute("SELECT count(*) FROM event").fetchone()[0] == ev
+    con.close()
+
+
+def test_kolizja_nazw_to_jawny_upsert_z_eventem_nie_cicha_podmiana(tmp_path):
+    """F9 recenzji: perspektywa jedzie z bazą, więc ta sama nazwa bywa przyjechana z drugiej
+    maszyny z INNĄ treścią. Nadpisanie musi zostawić ślad i własny czasownik — inaczej komunikat
+    „zapisano" opisywałby coś, co się nie stało."""
+    con = _fresh(tmp_path)
+    repo.save_perspective(con, name="P", spec={"columns": ["A"]}, now=NOW)
+    _id, verb = repo.save_perspective(con, name="P", spec={"columns": ["B"]}, now=NOW)
+    assert verb == "perspective.overwritten"
+    row = con.execute("SELECT verb, payload, target FROM event ORDER BY id DESC").fetchone()
+    assert row["verb"] == "perspective.overwritten" and row["target"] == "perspective:P"
+    payload = json.loads(row["payload"])
+    assert json.loads(payload["before"]) == {"columns": ["A"]}
+    assert payload["after"] == {"columns": ["B"]}
+    assert con.execute("SELECT count(*) FROM saved_query").fetchone()[0] == 1
+    assert con.execute("SELECT updated_at FROM saved_query").fetchone()[0] == NOW
+    con.close()
+
+
+def test_perspektywa_bez_nazwy_odrzucona_przed_zapisem(tmp_path):
+    """Nazwa JEST tożsamością tego wiersza — pusta zamieniłaby UNIQUE w pułapkę."""
+    con = _fresh(tmp_path)
+    with pytest.raises(ValueError):
+        repo.save_perspective(con, name="   ", spec={}, now=NOW)
+    assert con.execute("SELECT count(*) FROM saved_query").fetchone()[0] == 0
+    con.close()
+
+
+def test_perspektywa_w_starym_formacie_nie_udaje_specyfikacji(tmp_path):
+    """Wiersz z migracji 0013 (`legacy_sql`) wraca jako `None`, a nie jako pusty spec: pusty
+    zastosowany w gridzie czyta się jak „pokaż wszystko", czyli filtr zdejmujący filtr."""
+    con = _fresh(tmp_path)
+    con.execute("INSERT INTO saved_query(name, spec_json, created_at) "
+                "VALUES ('stary', ?, ?)", (json.dumps({"legacy_sql": "SELECT 1"}), NOW))
+    con.execute("INSERT INTO saved_query(name, spec_json, created_at) VALUES ('smiec', 'nie-json', ?)",
+                (NOW,))
+    assert queries.perspectives(con) == [("smiec", None), ("stary", None)]
     con.close()

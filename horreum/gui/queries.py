@@ -720,6 +720,34 @@ def object_exposure(con, frame_ids):
     ).fetchall()
 
 
+def perspectives(con):
+    """Nazwane widoki z BAZY (I-1, D-P-I-3) — `[(nazwa, spec|None), …]` po nazwie.
+
+    Perspektywa jedzie z archiwum, nie z komputerem: ta sama para „nazwa + specyfikacja" ma się
+    otworzyć na laptopie po skopiowaniu pliku bazy. Sortowanie po nazwie, bo lista jest do
+    ZNAJDOWANIA, a kolejność zapisu nie niesie tu żadnej informacji.
+
+    `spec=None` znaczy „wiersz jest, ale nie umiem go zastosować" i ma DWIE przyczyny: treść nie
+    jest JSON-em obiektowym albo niesie znacznik `legacy_sql` z migracji 0013 (nazwany widok
+    zapisany kiedyś jako SQL — szkielet z 0002 nigdy nie dostał pisarza, więc taki wiersz mógł
+    powstać wyłącznie ręcznie). Degradacja jest ŁAGODNA i JAWNA: pusty spec zastosowany w gridzie
+    czyta się jak „pokaż wszystko", czyli filtr zdejmujący filtr — cichy fałsz zamiast pytania.
+
+    Nieznane KLUCZE wewnątrz spec-a to co innego i tu ich nie ruszamy: baza z nowszej wersji
+    Horreum ma prawo nieść pole, którego ta jeszcze nie zna, a `grid` czyta spec przez `.get`,
+    więc pomija je bez wyjątku (§4.3 briefu)."""
+    out = []
+    for r in con.execute("SELECT name, spec_json FROM saved_query ORDER BY name").fetchall():
+        try:
+            spec = json.loads(r["spec_json"])
+        except (ValueError, TypeError):
+            spec = None
+        if not isinstance(spec, dict) or "legacy_sql" in spec:
+            spec = None
+        out.append((r["name"], spec))
+    return out
+
+
 def integrated_exposure(con):
     """Naświetlenie, które REALNIE weszło w gotowe obrazy — per (obiekt, filtr), SUB LICZONY RAZ.
 

@@ -1,6 +1,7 @@
 """Widok „Klatki" (PLAN_gui_grid) — testy STERUJĄCE realnym oknem Qt (offscreen). Model 3 stanów +
 sort + grupowanie; FilterPanel → drzewo; FramesView refresh/filtr/perspektywa. `importorskip` na poziomie
 modułu (§9.4): bez PySide6 plik się POMIJA (pełny pytest bez Qt zostaje prawdziwy)."""
+import json
 import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -557,6 +558,67 @@ def test_facet_roundtrip_perspektywy_zlozonej(view_settings, monkeypatch):
     v.filter_panel._apply()                               # „Zastosuj" panelu — facety przeżywają
     assert v._facet_state == {"kind": {"in": [["light", "light"]]}}
     assert v.count_label.text() == "2 klatki"
+
+
+def test_perspektywa_ladujaca_z_bazy_przezywa_nowe_okno(view_settings, monkeypatch, gcon):
+    """I-1 (D-P-I-3): nazwany widok jest własnością ARCHIWUM. Zapis w jednym oknie, odczyt
+    w DRUGIM zbudowanym nad tą samą bazą — to jest w miniaturze „zapisz na stacji, otwórz na
+    laptopie", którego rejestr użytkownika nie umiał."""
+    from PySide6.QtWidgets import QInputDialog
+
+    from horreum.gui.grid import FramesView
+    v = view_settings
+    v.facet_rail._on_item_clicked(_rail_item(v, "kind", "light"))
+    v.refresh()
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("Z bazy", True)))
+    v._save_perspective()
+    assert queries.perspectives(gcon)[0][0] == "Z bazy"
+
+    drugie = FramesView(gcon, now_fn=None)                 # inne okno, ta sama baza
+    idx = next(i for i in range(drugie.combo_persp.count())
+               if drugie.combo_persp.itemData(i) == ("saved", "Z bazy"))
+    drugie.combo_persp.setCurrentIndex(idx)
+    assert drugie._facet_state == {"kind": {"in": [["light", "light"]]}}
+
+
+def test_perspektywy_z_rejestru_wciagaja_sie_raz_i_nie_puchna(qapp, gcon, monkeypatch):
+    """Wydanie publiczne trzymało perspektywy w `QSettings` (D-B), więc przeniesienie kanonu do
+    bazy BEZ importu skasowałoby użytkownikom nazwane widoki — regresja, nie sprzątanie (FORWARD).
+    Import jest idempotentny, bo woła się przy KAŻDYM otwarciu widoku: drugie okno nie ma prawa
+    dopisać ani wiersza, ani eventu."""
+    from PySide6.QtCore import QSettings
+
+    from horreum.gui.grid import FramesView
+    store = {"grid/perspectives": json.dumps(
+        {"Stara": {"filter": None, "columns": ["OBJECT"], "only_dups": True}})}
+    monkeypatch.setattr(QSettings, "value", lambda self, k, d=None: store.get(k, d))
+    monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: store.__setitem__(k, v))
+
+    FramesView(gcon, now_fn=None)
+    assert dict(queries.perspectives(gcon))["Stara"]["only_dups"] is True
+    ev = gcon.execute("SELECT count(*) FROM event").fetchone()[0]
+
+    FramesView(gcon, now_fn=None)                          # drugie otwarcie: zero ruchu
+    assert len(queries.perspectives(gcon)) == 1
+    assert gcon.execute("SELECT count(*) FROM event").fetchone()[0] == ev
+    # Rejestru NIE czyścimy — kopia ratuje kogoś, kto wróci na starsze wydanie
+    assert "grid/perspectives" in store
+
+
+def test_perspektywa_w_starym_formacie_nie_udaje_pustego_filtra(view_settings):
+    """Wiersz z migracji 0013 (`legacy_sql`) ZOSTAJE na liście z ostrzeżeniem, ale wybór go nie
+    stosuje: pusty spec zdjąłby filtr i wyglądał na „perspektywa pokazuje wszystko"."""
+    v = view_settings
+    v.con.execute("INSERT INTO saved_query(name, spec_json, created_at) VALUES ('Stary', ?, 't')",
+                  (json.dumps({"legacy_sql": "SELECT 1"}),))
+    v.con.commit()
+    v._load_facets()
+    idx = next(i for i in range(v.combo_persp.count())
+               if v.combo_persp.itemData(i) == ("saved", "Stary"))
+    assert v.combo_persp.itemText(idx).endswith("⚠")       # widoczna, nie ukryta
+    v._only_dups = True                                     # stan, który pusty spec by wyzerował
+    v.combo_persp.setCurrentIndex(idx)
+    assert v._only_dups is True                             # nietknięty — perspektywa NIE zadziałała
 
 
 # ---------- FramesView: makro / writeback (KROK 4) ----------

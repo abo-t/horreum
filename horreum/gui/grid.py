@@ -6,10 +6,13 @@ cała logika (silnik filtra, pivot, read-model) siedzi w Qt-wolnych `horreum.fil
 `horreum.gui.queries`. Model port `fitsmirror/gui/grid_model.py` (3 stany komórki + sort), bez edycji/stagingu.
 
 Kolumny BAZOWE (warstwa interpretacji nad lustrem) + dynamiczne kolumny-keywordy z `cards`. Perspektywy =
-nazwane {filtr+kolumny+grupowanie+sort} w `QSettings` + presety zaszyte (D-B). **D-B ODWRÓCONE
-2026-08-01 (GO Zdzinia, D-P-I-3): docelowo perspektywa mieszka w BAZIE i wędruje z archiwum, nie
-z maszyną; presety zostają w kodzie. Kod poniżej czyta jeszcze rejestr — przeniesienie to segment I-1
-(`brief/PLAN_pi_martwe_tabele.md`), nie dług do samodzielnego „posprzątania".** Grupowanie minimalne: nagłówki
+nazwane {filtr+kolumny+grupowanie+sort} w **BAZIE** (`saved_query.spec_json`, migracja 0013) + presety
+zaszyte w kodzie. **D-B ODWRÓCONE 2026-08-01 (GO Zdzinia, D-P-I-3), WDROŻONE w I-1:** nazwany widok jest
+własnością ARCHIWUM, nie komputera — jedzie z bazą na laptop i przeżywa reinstalację. Rejestr zostaje
+własnością BIURKA (progi, ostatnie katalogi); perspektywy zapisane w nim przed tą zmianą wciąga
+JEDNORAZOWY, idempotentny import przy otwarciu widoku (`_import_settings_perspectives`) — wydanie
+publiczne miało tę funkcję w `QSettings`, więc ciche porzucenie cudzych widoków byłoby regresją,
+nie sprzątaniem. Grupowanie minimalne: nagłówki
 grup po jednej kolumnie bazowej (D-D). `present` = kolumna statusu (zniknięte tłowane); Duplikaty = n_present>1.
 
 F3 (PLAN_ux_redesign §4): pasek ZBIORU (`SelectionBar` — licznik + kryteria słowami + akcje) nad
@@ -1557,6 +1560,9 @@ class FramesView(QWidget):
         self._wb_target_id = None
         self._foreign_wb = False   # DRUGA powierzchnia pisze (mutex; ustawia gospodarz)
         self._build_ui()
+        # PRZED pierwszym zbudowaniem listy perspektyw: rejestr sprzed I-1 dowozi swoje widoki do
+        # bazy, więc combo od razu pokazuje komplet, a nie „gdzie się podziały moje perspektywy".
+        self._import_settings_perspectives()
         self._load_facets()
         self.refresh()
         self._refresh_drawer()
@@ -1690,24 +1696,50 @@ class FramesView(QWidget):
         self._columns = default
         self.filter_panel.set_keywords(self._all_keywords)
         self.macro_bar.set_keywords(self._all_keywords)
-        # perspektywy: presety + zapisane w QSettings
+        # perspektywy: presety (kod) + zapisane w BAZIE (I-1)
         self.combo_persp.blockSignals(True)
         self.combo_persp.clear()
         for name in PRESETS:
             self.combo_persp.addItem(i18n.t(_PRESET_LABELS[name]), ("preset", name))
-        for name in self._saved_perspectives():
-            self.combo_persp.addItem(f"★ {name}", ("saved", name))
+        for name, spec in self._saved_perspectives():
+            # Wiersz, którego nie umiemy zastosować (`spec is None` — stary `sql_text` z 0013),
+            # ZOSTAJE NA LIŚCIE i mówi to wprost. Ukrycie go byłoby zniknięciem cudzej pracy bez
+            # słowa; wybór kończy się statusem, nie pustym filtrem.
+            label = f"★ {name}" if spec is not None else f"★ {name} ⚠"
+            self.combo_persp.addItem(label, ("saved", name))
         self.combo_persp.blockSignals(False)
 
     def _settings(self):
         return QSettings("Horreum", "Horreum")
 
     def _saved_perspectives(self):
+        """Perspektywy z BAZY — `[(nazwa, spec|None), …]`. Rejestru już nie czytamy: to, co w nim
+        było, wciągnął jednorazowy import przy budowie widoku."""
+        return queries.perspectives(self.con)
+
+    def _import_settings_perspectives(self):
+        """JEDNORAZOWY, IDEMPOTENTNY import perspektyw z rejestru użytkownika do bazy (I-1).
+
+        Wydanie publiczne zapisywało je w `QSettings` (D-B), więc przeniesienie kanonu do bazy bez
+        tego kroku skasowałoby użytkownikom nazwane widoki — regresja, nie sprzątanie (FORWARD).
+        Rejestru NIE czyścimy: koszt jest zerowy, a zostawiona kopia ratuje kogoś, kto wróci na
+        starsze wydanie. Powtórzenie importu jest darmowe, bo `repo.save_perspective` przy
+        identycznej treści nie pisze i nie emituje eventu — dlatego nie ma tu flagi „już zrobione",
+        która i tak nie przeżyłaby przesiadki na drugą maszynę.
+
+        Nazwa ISTNIEJĄCA W BAZIE wygrywa z rejestrową: baza jest teraz kanonem, a import ma
+        dowieźć to, czego w niej nie ma, nie cofać czyjegoś zapisu do stanu sprzed przesiadki."""
         raw = self._settings().value("grid/perspectives", "{}")
         try:
-            return list(json.loads(raw).keys())
+            store = json.loads(raw)
         except (ValueError, TypeError):
-            return []
+            return
+        if not isinstance(store, dict) or not store:
+            return
+        znane = {name for name, _spec in queries.perspectives(self.con)}
+        for name, spec in store.items():
+            if name not in znane and isinstance(spec, dict):
+                repo.save_perspective(self.con, name=name, spec=spec, now=self._now())
 
     def _on_perspective(self):
         data = self.combo_persp.currentData()
@@ -1716,6 +1748,11 @@ class FramesView(QWidget):
         kind, name = data
         spec = PRESETS.get(name) if kind == "preset" else self._load_saved(name)
         if spec is None:
+            # Perspektywa jest, ale nie umiemy jej zastosować (stary `sql_text` z migracji 0013).
+            # MÓWIMY to wprost: zastosowanie pustego spec-a zdjęłoby filtr i wyglądałoby na
+            # „perspektywa pokazuje wszystko", czyli cichy fałsz zamiast pytania.
+            if kind == "saved":
+                self.status_message.emit(i18n.t("grid.persp.unreadable", name=name))
             return
         self._only_dups = bool(spec.get("only_dups"))
         self._only_review = bool(spec.get("only_review"))
@@ -1777,30 +1814,24 @@ class FramesView(QWidget):
         self.status_message.emit(i18n.t("grid.persp.unknown", name=name))
 
     def _load_saved(self, name):
-        raw = self._settings().value("grid/perspectives", "{}")
-        try:
-            return json.loads(raw).get(name)
-        except (ValueError, TypeError):
-            return None
+        return dict(self._saved_perspectives()).get(name)
 
     def _save_perspective(self):
         name, ok = QInputDialog.getText(self, i18n.t("grid.persp.save_title"), i18n.t("grid.persp.save_prompt"))
         if not ok or not name.strip():
             return
         name = name.strip()
-        raw = self._settings().value("grid/perspectives", "{}")
-        try:
-            store = json.loads(raw)
-        except (ValueError, TypeError):
-            store = {}
-        store[name] = {
+        spec = {
             "filter": self._filter_tree, "columns": self._columns,
             "group_by": self.combo_group.currentData(),
             "only_dups": self._only_dups, "only_review": self._only_review,
             "only_vanished": self._only_vanished,
             "facets": self._facet_state,   # OSOBNO od "filter" (nota R2) — set_tree nigdy ich nie widzi
         }
-        self._settings().setValue("grid/perspectives", json.dumps(store))
+        # Zapis idzie do BAZY (I-1) — perspektywa jedzie z archiwum, nie z tą maszyną. Czasownik
+        # z klingi rozstrzyga KOMUNIKAT: nazwa przyjechana z drugiej maszyny z inną treścią zostaje
+        # NADPISANA, a „zapisano" bez słowa o tym mówiłoby o czymś, co się nie stało (F9).
+        _id, verb = repo.save_perspective(self.con, name=name, spec=spec, now=self._now())
         self._load_facets()
         # F4R2#6 (pre-existing, ścieżka tykana przez F4): rebuild combo pod blockSignals zostawiał
         # indeks 0 („Przegląd") przy żywym stanie świeżo zapisanej perspektywy — etykieta kłamała.
@@ -1812,7 +1843,9 @@ class FramesView(QWidget):
                 self.combo_persp.setCurrentIndex(i)
                 break
         self.combo_persp.blockSignals(False)
-        self.status_message.emit(i18n.t("grid.persp.saved", name=name))
+        self.status_message.emit(i18n.t(
+            "grid.persp.overwritten" if verb == "perspective.overwritten" else "grid.persp.saved",
+            name=name))
 
     def _open_projection(self):
         """Otwórz dialog projekcji dla WIDOCZNEJ perspektywy (`self._frame_ids` — po filtrach dups/review,

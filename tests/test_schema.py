@@ -1,5 +1,6 @@
 """Schemat 0002 + 0003 — tabele/widoki istnieją, kształt zgodny z briefem przejścia §8
 i briefem writebacku §2 (staging krok 4)."""
+import json
 import sqlite3
 
 import pytest
@@ -92,11 +93,41 @@ def test_szkielet_przyszly_pusty(tmp_path):
     con.close()
 
 
-def test_user_version_v12_po_migracji(tmp_path):
-    """0012 podnosi user_version do 12 (świeża baza leci 0002→…→0012 sekwencyjnie; rodowód stosów)."""
+def test_user_version_v13_po_migracji(tmp_path):
+    """0013 podnosi user_version do 13 (świeża baza leci 0002→…→0013 sekwencyjnie; perspektywy)."""
     con = db.open_db(str(tmp_path / "h.db"))
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 12
-    assert db.SCHEMA_VERSION == 12
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 13
+    assert db.SCHEMA_VERSION == 13
+    con.close()
+
+
+def test_0013_saved_query_rebuild_kontrakt(tmp_path):
+    """0013 (I-1): PRZEBUDOWA `saved_query` — `sql_text` → `spec_json` + `updated_at`.
+
+    Test wchodzi na bazę Z WIERSZEM szkieletu, bo tylko tak widać obie połowy decyzji: treść
+    PRZEŻYWA (nic nie kasujemy), ale trafia pod znacznik `legacy_sql`, więc czytelnik rozpozna ją
+    jako NIE-specyfikację. Skopiowanie SQL-a wprost do `spec_json` byłoby gorsze niż strata: spec
+    bez znanych kluczy czyta się w gridzie jak perspektywa PUSTA, czyli filtr zdejmujący filtr."""
+    path = str(tmp_path / "h.db")
+    con = db.connect(path)
+    for v, _f in db.MIGRATIONS[:-1]:
+        con.executescript(db._migration_sql(dict(db.MIGRATIONS)[v]))
+    con.execute("PRAGMA user_version = 12")
+    con.execute("INSERT INTO saved_query(id, name, sql_text, created_at) "
+                "VALUES (3, 'stary', 'SELECT 1', 't')")
+    con.commit()
+
+    con = db.open_db(path)                                       # v12 → v13 (przebudowa)
+    assert con.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
+    row = con.execute("SELECT id, name, spec_json, updated_at FROM saved_query").fetchone()
+    assert (row["id"], row["name"], row["updated_at"]) == (3, "stary", None)
+    assert json.loads(row["spec_json"]) == {"legacy_sql": "SELECT 1"}
+    cols = {r[1] for r in con.execute("PRAGMA table_info(saved_query)")}
+    assert "sql_text" not in cols and {"spec_json", "updated_at"} <= cols
+    assert "name" in _unique_cols(con, "saved_query")
+    with pytest.raises(sqlite3.IntegrityError):                  # nazwa JEST tożsamością
+        con.execute("INSERT INTO saved_query(name, spec_json, created_at) "
+                    "VALUES ('stary', '{}', 't')")
     con.close()
 
 

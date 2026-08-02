@@ -898,6 +898,14 @@ CATALOG = {
     "grid.persp.save_title": {"pl": "Zapisz perspektywę", "en": "Save perspective"},
     "grid.persp.save_prompt": {"pl": "Nazwa:", "en": "Name:"},
     "grid.persp.saved": {"pl": "Zapisano perspektywę „{name}”", "en": "Perspective „{name}” saved"},
+    # I-1: perspektywa mieszka w BAZIE, więc ta sama nazwa bywa przyjechana z drugiej maszyny.
+    # Nadpisanie musi być POWIEDZIANE — „zapisano" mówiłoby o czymś, co się nie stało.
+    "grid.persp.overwritten": {"pl": "Nadpisano perspektywę „{name}” (nazwa była już w bazie)",
+                               "en": "Perspective „{name}” overwritten (name already in database)"},
+    "grid.persp.unreadable": {
+        "pl": "Perspektywa „{name}” zapisana w starym formacie (SQL) — nie umiem jej zastosować",
+        "en": "Perspective „{name}” stored in the old format (SQL) — cannot apply it",
+    },
 
     # --- projekcja / kryteria zbioru ---
     "grid.proj.no_frames": {

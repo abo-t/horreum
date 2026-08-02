@@ -1548,3 +1548,55 @@ def set_telescope_park(con, *, telescope_id, in_park, now, uid="local"):
                    payload={"telescope": row["telescop_canon"],
                             "before": row["in_park"], "after": in_park})
     return True
+
+
+# ═══════════════════════════════════════════════ 1.9 perspektywy (nazwane widoki, I-1 / D-P-I-3)
+# Perspektywa = nazwany komplet {filtr + kolumny + grupowanie + facety}, którym user ogląda Zbiory.
+# Mieszkała w rejestrze użytkownika (D-B); D-P-I-3 odwróciło tę decyzję ŚWIADOMIE: nazwany widok
+# jest własnością ARCHIWUM, nie komputera — jedzie z bazą na laptop i przeżywa reinstalację.
+# Rejestr zostaje własnością BIURKA (progi planera, ostatnie katalogi) i to nie jest niekonsekwencja,
+# tylko granica: „czym patrzę na archiwum" vs „jak mam ustawione to okno".
+
+def save_perspective(con, *, name, spec, now, uid="local"):
+    """Zapisz nazwaną perspektywę — `(id, verb)`; `verb=None`, gdy nic się nie zmieniło.
+
+    KOLIZJA NAZW JEST UPSERTEM JAWNYM, NIGDY CICHĄ PODMIANĄ (F9 recenzji). Perspektywa wędruje
+    z bazą, więc ta sama nazwa potrafi przyjechać z drugiej maszyny z INNĄ treścią — a wtedy
+    „zapisano" bez słowa o nadpisaniu byłoby komunikatem o czymś, co się nie stało. Stąd dwa
+    czasowniki: `perspective.saved` (nowa) i `perspective.overwritten` (z `before`/`after`).
+
+    Idempotentny: identyczna specyfikacja pod tą samą nazwą → `verb=None` bez eventu. To nie jest
+    kosmetyka dziennika — na tym stoi jednorazowy import z rejestru (`grid._import_settings_
+    perspectives`), który przy każdym starcie okna woła tę funkcję dla wszystkich znanych nazw.
+
+    `spec` idzie przez `json.dumps` z `sort_keys`, bo porównanie „czy się zmieniła" jest
+    porównaniem TEKSTU — bez stabilnej kolejności kluczy ten sam widok potrafiłby wyglądać na
+    zmieniony i puchnąć dziennik przy każdym starcie."""
+    name = str(name or "").strip()
+    if not name:
+        raise ValueError("perspektywa bez nazwy — nazwa JEST tożsamością tego wiersza")
+    text = json.dumps(spec, sort_keys=True, ensure_ascii=False)
+    with _immediate(con):
+        row = con.execute("SELECT id, spec_json FROM saved_query WHERE name = ?",
+                          (name,)).fetchone()
+        if row is None:
+            cur = con.execute(
+                "INSERT INTO saved_query(name, spec_json, created_at) VALUES (?, ?, ?)",
+                (name, text, now))
+            emit_event(con, actor=f"user:{uid}", verb="perspective.saved",
+                       target=f"perspective:{name}", now=now, payload={"spec": spec})
+            return cur.lastrowid, "perspective.saved"
+        if row["spec_json"] == text:
+            return row["id"], None
+        con.execute("UPDATE saved_query SET spec_json = ?, updated_at = ? WHERE id = ?",
+                    (text, now, row["id"]))
+        emit_event(con, actor=f"user:{uid}", verb="perspective.overwritten",
+                   target=f"perspective:{name}", now=now,
+                   payload={"before": row["spec_json"], "after": spec})
+    return row["id"], "perspective.overwritten"
+
+
+# USUWANIA PERSPEKTYWY TU NIE MA — i to jest decyzja, nie przeoczenie. Powierzchnia nigdy go nie
+# miała (rejestr też nie dawał drogi z okna), a pisarz bez ekranu byłby kodem dla nikogo. Dług
+# nazwany w kolejce: kasowanie ma sens dopiero razem z listą perspektyw do zarządzania, a to jest
+# ekran, nie funkcja.

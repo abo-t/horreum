@@ -320,6 +320,50 @@ def test_nieprzeczytane_zeznanie_NIE_degraduje_gotowego_rodowodu(con):
     assert (s.kept_unread, s.linked_new, s.unlinked) == (1, 0, 0)         # zero ruchu Z WYBORU
 
 
+def test_nieprzeczytane_zeznanie_nie_dopisuje_powodu_do_stosu_z_rodowodem(con):
+    """TURA 2 #1 — defekt WPROWADZONY przez strażnika 4. Guard pomijał tylko wiersze, a głowa
+    integracji była już zapisana z planu: powód wynika z BAZY (tu: zniknął obiekt), więc powstaje
+    także przy nieodczytanym pliku. Stan „powód + stare wiersze" łamie inwariant bramki §5.14.
+
+    Reguła brzmi „bez zeznania nie dotykamy TEGO stosu" i obejmuje głowę tak samo jak wiersze."""
+    m = _master(con)
+    _light(con, "l1", date_obs="2025-08-30T20:30:00")
+    run_stack_lineage(con, now=NOW, xml_reader=_brak_xml)
+    assert len(inputs_of(con, m)) == 1
+
+    con.execute("UPDATE frame SET object_id = NULL WHERE id = ?", (m,))   # powód z BAZY
+    con.commit()
+
+    def _wybuch(_p):
+        raise OSError("dysk odłączony")
+
+    s = run_stack_lineage(con, now=NOW, xml_reader=_wybuch)
+    assert _integracja(con, m)["unresolved_reason"] is None      # głowy też nie ruszamy
+    assert len(inputs_of(con, m)) == 1
+    assert s.kept_unread == 1 and s.reasons == {}
+
+
+def test_nieprzeczytane_zeznanie_nie_kasuje_faktow_historii(con):
+    """TURA 2 #2 — druga połowa tego samego defektu. `t.rows`/`t.tool` są przy nieodczytanym pliku
+    `None`, więc `upsert_integration` wołany bezwarunkowo KASOWAŁ fakty zeznania (`declared_rows`,
+    `tool`, drizzle) na integracji, której wiersze `history` właśnie zachowaliśmy obok — panel
+    mówił „plik zeznał" i nie umiał powiedzieć, ile ten plik deklaruje."""
+    m = _master(con)
+    _light(con, "l1", date_obs="2025-08-30T20:30:00", ccd_temp=-10.0)
+    _light(con, "l2", date_obs="2025-08-30T21:30:00", ccd_temp=-9.9)
+    run_stack_lineage(con, now=NOW, xml_reader=lambda _p: _xml_historii([-10.0, -9.9]))
+    przed = _integracja(con, m)
+    assert (przed["declared_rows"], przed["drizzle_inputs"]) == (2, 2)
+
+    def _wybuch(_p):
+        raise OSError("dysk odłączony")
+
+    run_stack_lineage(con, now=NOW, xml_reader=_wybuch)
+    po = _integracja(con, m)
+    assert (po["declared_rows"], po["drizzle_inputs"], po["tool"]) == \
+           (przed["declared_rows"], przed["drizzle_inputs"], przed["tool"])
+
+
 def test_brak_obecnej_lokacji_liczy_sie_jak_nieodczytane_zeznanie(con):
     """Klatka mastera bez OBECNEJ kopii to ten sam stan, co błąd odczytu: pliku nie ma pod ręką,
     więc jego zeznania NIE ZNAMY. Wcześniej ta połowa populacji nie wchodziła do licznika w ogóle

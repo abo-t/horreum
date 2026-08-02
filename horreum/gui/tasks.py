@@ -144,7 +144,7 @@ class TasksView(QWidget):
         self.pages.addWidget(self._wrap(i18n.t("tasks.object_review"), self.object_view))   # _PAGE_OBJECTS
 
     def _fit_task_list(self):
-        """Zetnij wysokość listy zadań do jej treści (`sizeHintForRow(0) × liczba wierszy` + ramka).
+        """Zetnij wysokość listy zadań do jej treści (suma wysokości wierszy przez delegata + ramka).
         Wołane DWA razy: w budowie (żeby pierwszy paint nie mignął pełną ramką) i w `refresh_counts`
         — dopiero po `show()` metryki fontu są prawdziwe (`sizeHintForRow` przed pokazaniem potrafi
         oddać wartość zastępczą), a `refresh_counts` woła gospodarz właśnie na wejściu w Porządki.

@@ -58,10 +58,17 @@ REASON_TELESCOPE = "telescope_mismatch"
 
 @dataclass
 class StackLineageSummary:
-    """Zliczenia przebiegu (QUIET), tym samym podziałem co `LineageSummary`: `linked` = STAN,
-    `linked_new` = delta zapisu (idempotentny re-run daje 0), `reasons` = kubełki „nie wiem"."""
+    """Zliczenia przebiegu (QUIET), tym samym podziałem co `LineageSummary`: `linked` = ile
+    integracji MA rodowód, `linked_new` = delta zapisu (idempotentny re-run daje 0), `reasons` =
+    kubełki „nie wiem".
+
+    `linked`/`reasons` liczy PLAN, nie zapytanie o stan — i to jest różnica, którą trzeba trzymać
+    w głowie przy czytaniu bramki: domykają one populację (`linked + suma(reasons) == stacks`),
+    czyli mówią, co automat POTRAFIŁ ustalić w tym przebiegu. Jedyny wyjątek to stos pominięty
+    strażnikiem 4 — tam plan jest niewiarygodny, więc źródło bierzemy ze STANU. `inputs` liczymy
+    zapytaniem, bo werdykt ręki zmienia tabelę, nie plan."""
     stacks: int = 0
-    linked: int = 0            # STAN: integracje z co najmniej jednym wejściem
+    linked: int = 0            # integracje z co najmniej jednym wejściem
     inputs: int = 0            # STAN: wierszy `integration_input`
     linked_new: int = 0        # delta: realnie zapisane relacje tego przebiegu
     unlinked: int = 0          # delta: relacje zdjęte przez reconcile
@@ -273,6 +280,27 @@ def run_stack_lineage(con, *, now, actor="stacks", xml_reader=None, progress=Non
     for p in plany:
         t = p["testimony"]
         s.history_unread += p["history_unread"]
+        # STRAŻNIK 4 — decyzja PRZED policzeniem i PRZED zapisem CZEGOKOLWIEK. Reguła brzmi „bez
+        # zeznania nie dotykamy tego stosu", więc obejmuje GŁOWĘ integracji tak samo jak wiersze.
+        # Guard postawiony za `upsert_integration` chronił tylko wiersze i przez to sam produkował
+        # dwa defekty:
+        #   * głowa dostawała `unresolved_reason` z planu, którego wiersze właśnie ODMÓWIŁ
+        #     zastosować (powód wynika z BAZY — obiekt, okno, kandydaci, teleskop — więc powstaje
+        #     i bez pliku), a stare wiersze zostawały → stan łamał inwariant bramki §5.14
+        #     „powód wyklucza wejścia automatu";
+        #   * `t.rows`/`t.tool` przy nieodczytanym pliku są `None`, więc jeden przebieg offline
+        #     KASOWAŁ fakty zeznania (`declared_rows`, `tool`, drizzle) przy wierszach `history`
+        #     zachowanych obok — panel mówił „plik zeznał" i nie umiał powiedzieć, ile deklaruje.
+        # Liczniki idą wtedy ze STANU, nie z planu: rodowód istnieje, tylko nie myśmy go teraz
+        # ustalili. `ambiguous`/`telescope_mismatch` świadomie pomijamy — to fakty TEGO przebiegu,
+        # a ten przebieg o tym stosie niczego nie rozstrzygnął.
+        if p["history_unread"]:
+            zrodlo = _zapisane_zrodlo(con, p["frame_id"])
+            if zrodlo is not None:
+                s.kept_unread += 1
+                s.linked += 1
+                _bump(s.by_assert, zrodlo)
+                continue
         if p["reason"]:
             _bump(s.reasons, p["reason"])
         else:
@@ -297,18 +325,11 @@ def run_stack_lineage(con, *, now, actor="stacks", xml_reader=None, progress=Non
             degenerate=int(t.degenerate), ambiguous=int(p["frame_id"] in ambi),
             telescope_mismatch=int(p["telescope_mismatch"]),
             unresolved_reason=p["reason"], now=now, actor=actor)
-        # ZEZNANIE NIEODCZYTANE ⇒ NIE RUSZAMY GOTOWEGO RODOWODU (strażnik 4). Gdy pliku nie ma pod
-        # ręką, plan spada na samo okno (`t.rows is None`), więc zapis DOŁOŻYŁBY wejścia, których
-        # historia nie potwierdza, a UPDATE zdegradowałby `history` do kandydata: jeden przebieg bez
-        # zamontowanego `R:` przepisałby dowód na domysł i przesunął kotwicę bramki. Świeża
-        # integracja (zero wierszy) dostaje kandydatów normalnie — tam nie ma czego stracić, a
-        # milczenie łamałoby „bez wejść ZAWSZE niesie powód".
-        if p["history_unread"] and _ma_wejscia(con, iid):
-            s.kept_unread += 1
-        else:
-            s.linked_new += _zapisz_wejscia(con, iid, wejscia, p["asserted_by"],
-                                            now=now, actor=actor)
-            s.unlinked += _reconcile(con, iid, wejscia, now=now, actor=actor)
+        # Tu docierają WYŁĄCZNIE stosy, o których wolno nam pisać: albo zeznanie było czytelne,
+        # albo rodowodu jeszcze nie ma (świeża integracja nie ma czego stracić, a milczenie
+        # łamałoby „bez wejść ZAWSZE niesie powód"). Strażnik 4 stoi wyżej, przed `upsert`.
+        s.linked_new += _zapisz_wejscia(con, iid, wejscia, p["asserted_by"], now=now, actor=actor)
+        s.unlinked += _reconcile(con, iid, wejscia, now=now, actor=actor)
 
     # `inputs` liczymy ze STANU, nie z planu (lustro `LineageSummary.linked`): odrzucenie ręką
     # zostawia wiersz w tabeli, ale ten sub w obraz NIE wszedł — plan wciąż widzi go jako kandydata,
@@ -318,7 +339,8 @@ def run_stack_lineage(con, *, now, actor="stacks", xml_reader=None, progress=Non
     s.inputs = con.execute(
         "SELECT count(*) FROM integration_input WHERE excluded = 0").fetchone()[0]
     s.reasons = dict(sorted(s.reasons.items()))
-    repo.flag_stack_lineage_summary(con, sorted(s.reasons.items()), now, actor=actor)
+    repo.flag_stack_lineage_summary(con, sorted(s.reasons.items()), now, actor=actor,
+                                    kept_unread=s.kept_unread)
     return s
 
 
@@ -332,12 +354,22 @@ def _fingerprint(con, frame_ids):
         for r in con.execute("SELECT sha1_data FROM frame WHERE id = ?", (fid,)))
 
 
-def _ma_wejscia(con, integration_id):
-    """Czy ta integracja ma JUŻ zapisany rodowód (dowolnego źródła)? Pytanie o STAN, nie o plan —
-    rozstrzyga, czy wolno go ruszyć przebiegowi, który nie przeczytał zeznania pliku."""
-    return con.execute(
-        "SELECT 1 FROM integration_input WHERE integration_id = ? LIMIT 1",
-        (integration_id,)).fetchone() is not None
+def _zapisane_zrodlo(con, master_frame_id):
+    """Źródło pewności JUŻ ZAPISANEGO rodowodu tego stosu — albo `None`, gdy rodowodu nie ma.
+    Pytanie o STAN, nie o plan: rozstrzyga, czy wolno go ruszyć przebiegowi, który nie przeczytał
+    zeznania pliku, i czym go wtedy policzyć w podsumowaniu.
+
+    Wiersze automatu są jednorodne (plan nadaje jedno źródło całej integracji), więc jedyna możliwa
+    mieszanka to automat + werdykty ręki. Sortowanie stawia NIE-`user` pierwszy, bo podsumowanie
+    pyta „na czym stoi ten rodowód", a nie „czy ktoś go dotknął"; sam `user` wychodzi tylko wtedy,
+    gdy innych wierszy nie ma. Pytamy po KLATCE MASTERA, bo wołający nie zna jeszcze `integration.id`
+    — i nie ma go poznać, skoro właśnie decyduje, czy w ogóle pisać."""
+    row = con.execute(
+        "SELECT ii.asserted_by AS zrodlo FROM integration_input ii "
+        "JOIN integration i ON i.id = ii.integration_id "
+        "WHERE i.master_frame_id = ? ORDER BY (ii.asserted_by = 'user'), ii.asserted_by LIMIT 1",
+        (master_frame_id,)).fetchone()
+    return None if row is None else row["zrodlo"]
 
 
 def _zapisz_wejscia(con, integration_id, frame_ids, asserted_by, *, now, actor):

@@ -1082,6 +1082,12 @@ CATALOG = {
     "pipeline.fmt.slin.telescope": {
         "pl": "rozjazd teleskopu: {n}", "en": "telescope mismatch: {n}",
     },
+    # Recepta w komunikacie, nie sam licznik: to jedyny człon raportu, po którym user ma coś ZROBIĆ
+    # (podłączyć archiwum), a nie tylko coś wiedzieć.
+    "pipeline.fmt.slin.kept_unread": {
+        "pl": "pominięto bez zeznania pliku: {n} — podłącz archiwum i powtórz",
+        "en": "skipped without file testimony: {n} — connect the archive and repeat",
+    },
     # Droga „Stosy" — człony składane w `PipelineView._format_stacks`; odmowy TYLKO gdy niezerowe.
     "pipeline.fmt.stacks.prefix": {"pl": "[stosy] ", "en": "[stacks] "},
     "pipeline.fmt.stacks.taken": {

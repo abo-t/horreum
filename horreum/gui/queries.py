@@ -754,7 +754,12 @@ def stack_lineage_head(con, frame_id):
         "          JOIN integration_input ib ON ib.input_frame_id = ia.input_frame_id "
         "          JOIN integration b ON b.id = ib.integration_id "
         "         WHERE ia.integration_id = i.id AND ia.excluded = 0 AND ib.excluded = 0 "
-        "           AND b.id <> i.id AND b.integ_hash IS NOT i.integ_hash) AS shared, "
+        # ODCISK NIEZNANY ⇒ OSTRZEGAJ. `IS NOT` byłby NULL-safe jako operator, ale semantycznie
+        # zlewa „nie wiem, jaki zbiór" z „ten sam zbiór": dwie integracje bez odcisku (rodowód
+        # z samych werdyktów ręki) dzieliłyby wtedy klatkę bez słowa. Warunek jawny trzyma też
+        # spójność z `twins`, który NULL-e wyklucza wprost.
+        "           AND b.id <> i.id AND (i.integ_hash IS NULL OR b.integ_hash IS NULL "
+        "                                 OR b.integ_hash <> i.integ_hash)) AS shared, "
         "       (SELECT COUNT(*) FROM integration_input ii "
         "         WHERE ii.integration_id = i.id AND ii.excluded = 0) AS inputs, "
         "       (SELECT COUNT(*) FROM integration_input ii "

@@ -809,6 +809,12 @@ class PipelineView(QWidget):
             czesci.append(i18n.t("pipeline.fmt.slin.ambiguous", n=s.ambiguous))
         if s.telescope_mismatch:
             czesci.append(i18n.t("pipeline.fmt.slin.telescope", n=s.telescope_mismatch))
+        # PRZEBIEG, KTÓRY ŚWIADOMIE NIC NIE ZAPISAŁ, NIE MA PRAWA WYGLĄDAĆ JAK UDANY. Strażnik 4
+        # zostawia gotowy rodowód nietknięty, gdy pliku nie ma pod ręką (odłączone archiwum) —
+        # bez tego członu okno pokazywało te same liczby co po realnym przeliczeniu, a jedyna
+        # wzmianka szła do CLI, którego wydanie w ogóle nie ma (onefile jest sam GUI).
+        if s.kept_unread:
+            czesci.append(i18n.t("pipeline.fmt.slin.kept_unread", n=s.kept_unread))
         return i18n.t("pipeline.fmt.slin.prefix") + " · ".join(czesci)
 
     def _format_stacks(self, s):

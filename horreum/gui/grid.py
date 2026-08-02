@@ -1074,6 +1074,16 @@ class LineageBar(QWidget):
             return
         powod = _lineage_reason_text(head)
         ostrz, info = _lineage_flags(head)
+        # LISTA POWSTAJE ZAWSZE, ZANIM ROZSTRZYGNIEMY O NAGŁÓWKU. Integracja z POWODEM może mieć
+        # wiersze — `_reconcile` omija werdykty ręki, więc odrzucone kandydatury zostają, mając
+        # `head["inputs"] == 0`. Gałąź powodu, która listy nie wypełniała, zabierała wtedy JEDYNĄ
+        # drogę cofnięcia własnej decyzji (`stack_lineage_inputs` oddaje je właśnie po to).
+        for r in inputs:
+            it = QListWidgetItem(_lineage_item_text(r))
+            it.setData(Qt.UserRole, r["input_frame_id"])
+            if r["excluded"]:
+                it.setForeground(_COLORS["secondary_text"])
+            self.items.addItem(it)
         if not head["inputs"] and powod:
             # NIE MA CZEGO POLICZYĆ ⇒ NIE LICZYMY. „Weszło 0 klatek · 0.0 h" o obrazie, który
             # przecież Z CZEGOŚ powstał, jest twierdzeniem, którego model nie ma — a to stan
@@ -1084,22 +1094,16 @@ class LineageBar(QWidget):
             # kandydatury, `inputs` też jest zerem — ale wtedy „weszło 0 klatek" jest PRAWDĄ
             # i jego własną decyzją, więc nagłówek ma ją pokazać.
             self.head.setText(powod)
-            self.warn.set_full_text("")
-            self.note.set_full_text("")
-            self._sync_visible(False)
-            return
-        godziny = (head["secs"] or 0) / 3600.0
-        self.head.setText(i18n.t_plural("grid.lin.head", head["inputs"],
-                                        hours=f"{godziny:.1f}"))
-        self.warn.set_full_text(ostrz)
-        self.note.set_full_text(" · ".join(x for x in (powod, info) if x))
-        for r in inputs:
-            it = QListWidgetItem(_lineage_item_text(r))
-            it.setData(Qt.UserRole, r["input_frame_id"])
-            if r["excluded"]:
-                it.setForeground(_COLORS["secondary_text"])
-            self.items.addItem(it)
-        self._sync_visible(True)
+            self.note.set_full_text(info)
+        else:
+            godziny = (head["secs"] or 0) / 3600.0
+            self.head.setText(i18n.t_plural("grid.lin.head", head["inputs"],
+                                            hours=f"{godziny:.1f}"))
+            self.note.set_full_text(" · ".join(x for x in (powod, info) if x))
+        self.warn.set_full_text(ostrz)          # `_lineage_flags` samo milczy przy pustej liście
+        # Widoczność z LISTY, nie z licznika: stos z powodem, ale z odrzuconymi wierszami, ma je
+        # pokazać (i dać się cofnąć), a stos bez ani jednego wiersza nie ma zajmować pionu na listę.
+        self._sync_visible(bool(inputs))
 
     def integration_id(self):
         """Integracja, której dotyczy panel (albo `None`) — gospodarz pyta o cel zapisu TU, zamiast
@@ -1175,18 +1179,20 @@ def _lineage_flags(head):
 
     OSTRZEŻENIE MILCZY, GDY LISTA JEST PUSTA. „⚠ część TYCH klatek wchodzi też w inny obraz" przy
     zerze wejść mówi o czymś, czego na ekranie nie ma — a to stan 42 z 47 stosów bez rodowodu.
+    Gaśnie WYŁĄCZNIE ostrzeżenie: informacje („odrzuconych: N", „plik deklaruje N") są przy zerze
+    JEDYNYM wyjaśnieniem tego zera, więc wspólny guard zabierał je dokładnie tam, gdzie są potrzebne
+    — przy stosie, z którego człowiek własnoręcznie odrzucił wszystkie kandydatury.
 
     Współdzielenie bierzemy z `shared` (realne: ten sam wiersz wejścia w integracji o INNYM
     odcisku), nie z `ambiguous` (nakładanie się okien planu). Poprzedni `elif` gasił ostrzeżenie
     obecnością bliźniaka — zmierzone: 17 ze 128 integracji ma JEDNO I DRUGIE, więc uspokojenie
     zjadało wtedy sygnał, który miał znaczenie. Rozdzielone predykaty nie muszą się wykluczać."""
-    if not head["inputs"]:
-        return "", ""
     ostrz, info = [], []
-    if head["shared"]:
-        ostrz.append(i18n.t("grid.lin.flag.ambiguous"))
-    if head["telescope_mismatch"]:
-        ostrz.append(i18n.t("grid.lin.flag.telescope"))
+    if head["inputs"]:
+        if head["shared"]:
+            ostrz.append(i18n.t("grid.lin.flag.ambiguous"))
+        if head["telescope_mismatch"]:
+            ostrz.append(i18n.t("grid.lin.flag.telescope"))
     if head["twins"]:
         # NIE ostrzeżenie: ten sam zbiór wejść pod inną nazwą pliku to WARIANT tego samego obrazu
         # (`_ast`, `_drizzle_1x`, `_integration`), a nie kolizja. Zmierzone: 51 z 62 oflagowanych.

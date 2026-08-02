@@ -1271,7 +1271,9 @@ def test_panel_rodowodu_bez_wejsc_NIE_liczy_zera(view, gcon):
     assert bar.items.count() == 0
     assert "jedną klatkę" in bar.head.text()
     assert "0 klatek" not in bar.head.text() and "0.0 h" not in bar.head.text()
-    assert not bar.items.isVisible() and not bar.action_row.isVisible()
+    # `isHidden` odwrócone, NIE `isVisible()`: to drugie jest fałszem także wtedy, gdy przodek
+    # niepokazany (offscreen przed `show()`), więc twierdziłoby o schowaniu bez pokrycia.
+    assert bar.items.isHidden() and bar.action_row.isHidden()
 
 
 def test_panel_bez_wejsc_nie_ostrzega_o_klatkach_ktorych_nie_ma(view, gcon):
@@ -1300,6 +1302,29 @@ def test_werdykt_reki_na_wszystkich_zostawia_uczciwe_zero(view, gcon):
     view.lineage_bar._emit(True)
     assert "0 klatek" in view.lineage_bar.head.text()
     assert view.lineage_bar.items.count() == 2          # wiersze zostają jako fakt „nie weszły"
+    # TURA 2 #3: przy zerze to INFORMACJE są jedynym wyjaśnieniem zera — wspólny guard gasił je
+    # dokładnie tam, gdzie są potrzebne. Gaśnie wyłącznie ostrzeżenie.
+    assert "odrzuconych: 2" in view.lineage_bar.note.full_text()
+
+
+def test_stos_z_powodem_pokazuje_odrzucone_wiersze_zeby_dalo_sie_cofnac(view, gcon):
+    """TURA 2 #4: `_reconcile` omija werdykty ręki, więc integracja z POWODEM może mieć wiersze
+    `user` przy `inputs == 0`. Gałąź powodu, która listy nie wypełniała, zabierała wtedy JEDYNĄ
+    drogę cofnięcia własnej decyzji — panel pokazywał samo zdanie o powodzie."""
+    _seed_stos(gcon)
+    assert _zaznacz_frame(view, 10)
+    view._toggle_panel("lineage")
+    for i in range(view.lineage_bar.items.count()):
+        view.lineage_bar.items.item(i).setSelected(True)
+    view.lineage_bar._emit(True)                        # wszystkie odrzucone ręką
+    gcon.execute("UPDATE integration SET unresolved_reason = 'no_window' WHERE id = 5")
+    gcon.commit()
+    view._refresh_lineage()
+
+    bar = view.lineage_bar
+    assert "nie podaje czasu" in bar.head.text()        # nagłówek oddaje głos powodowi
+    assert bar.items.count() == 2 and not bar.items.isHidden()   # …a wiersze ZOSTAJĄ do cofnięcia
+    assert not bar.action_row.isHidden()
 
 
 def test_panel_rodowodu_wymaga_jednego_stosu(view, gcon):

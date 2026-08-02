@@ -429,9 +429,13 @@ def stack_lineage(con, now, out):
     po = {v: con.execute("SELECT count(*) FROM event WHERE verb=?", (v,)).fetchone()[0]
           for v in _SLIN_VERBS}
     rows_po = con.execute("SELECT count(*) FROM integration_input").fetchone()[0]
-    idem = (not s2.linked_new and not s2.unlinked and po == przed and rows_przed == rows_po)
+    # `kept_unread` MUSI wejść w kryterium: strażnik 4 produkuje zerowe delty Z WYBORU, więc bez
+    # tego warunku przebieg na niezamontowanym archiwum świeciłby zieloną idempotencją, nic nie
+    # zmierzywszy. Zero zapisu z braku zmian i zero zapisu z odmowy to dwa różne fakty.
+    idem = (not s2.linked_new and not s2.unlinked and not s2.kept_unread
+            and po == przed and rows_przed == rows_po)
     out(f"  przebieg 2 (idempotencja): linked_new={s2.linked_new} unlinked={s2.unlinked} "
-        f"wiersze {rows_przed}=={rows_po}")
+        f"pominietych_bez_zeznania={s2.kept_unread} wiersze {rows_przed}=={rows_po}")
     return s1, idem
 
 

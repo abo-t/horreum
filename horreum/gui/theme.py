@@ -130,4 +130,4 @@ def qss(name):
     a = accents(name)
     return "".join(
         f'QLabel[role="{role}"] {{ color: {a[key]}; }}' for role, key in ROLES.items()
-    ) + (f'QPushButton:checked {{ border: 1px solid {a["gold"]}; font-weight: bold; }}')
+    ) + (f'QPushButton:checked {{ border: 2px solid {a["gold"]}; font-weight: bold; }}')

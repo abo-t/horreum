@@ -1158,7 +1158,7 @@ class ObjectAxisView(QWidget):
                 i18n.t("object.nameless_stacks_line", n=q["nameless_stacks_count"]),
                 tag="nameless_stacks")
         self._add_review_item(i18n.t("object.unreadable_line", n=q["unreadable_count"]),
-                              tag="unreadable", dim_if_zero=q["unreadable_count"] == 0)
+                              tag="unreadable" if q["unreadable_count"] > 0 else None)
         # liczniki innych kanałów jako pozycja informacyjne (bez tagu → nieklikana); nota
         # „rozwiązywanie w przygotowaniu" ZAWĘŻONA do tych dwóch kanałów (R#9) — obiekt-review
         # i kopie mają już swoje akcje.
@@ -1166,14 +1166,19 @@ class ObjectAxisView(QWidget):
             "object.review_info",
             config=q["config_review_count"], headerless=q["headerless_count"]))
 
-    def _add_review_item(self, text, *, tag=None, payload=None, dim_if_zero=False):
+    def _add_review_item(self, text, *, tag=None, payload=None):
         """Jedna pozycja kolejki przeglądu — JEDEN producent wiersza dla wszystkich kubełków.
 
         WIZ #11: pięć wierszy miało identyczny krój i kolor, a klikalne były dwa — nic na ekranie
         nie mówiło, który z nich prowadzi dalej. Wiersz z drogą dostaje znacznik „›" (ten sam co
-        na liście Porządków), wiersz bez drogi gaśnie i przestaje być zaznaczalny. Kubełek pusty
-        gaśnie TEŻ, zostając klikalnym (wiz #17): „nic do zrobienia" ma być widać bez czytania
-        liczby, a wejście do środka zostaje otwarte.
+        na liście Porządków), wiersz bez drogi gaśnie i przestaje być zaznaczalny.
+
+        KUBEŁEK PUSTY NIE MA DOKĄD PROWADZIĆ, więc jest informacyjny — jedna reguła dla wszystkich
+        (wiz T2 N6: dwa puste kubełki zachowywały się dwojako, a drążenie w pusty otwierało tabelę
+        z zerem wierszy i bez zdania). Wyszarzenie SELEKTOWALNEGO wiersza było przy okazji
+        defektem kontrastu (T2 N3): jawny `ForegroundRole` bije `HighlightedText`, więc zaznaczona
+        szarość na podświetleniu spadała do 1,84:1 — ta sama lekcja, którą `rows.TwoPartDelegate`
+        ma już zapisaną w `_own_color`. Brak drogi ⇒ brak zaznaczenia ⇒ problem nie powstaje.
 
         Rozdzielenie stoi na TAGU, nie na osobnym parametrze — tag jest jedynym faktem, którego
         dispatch (`_selected_review`) realnie używa, więc druga flaga „czy klikalny" mogłaby się
@@ -1182,8 +1187,6 @@ class ObjectAxisView(QWidget):
         if tag:
             it.setData(Qt.UserRole, tag)
             it.setData(Qt.UserRole + 1, payload)
-            if dim_if_zero:
-                it.setForeground(_DIM["fg"])
         else:
             it.setFlags(Qt.ItemIsEnabled)      # informacyjny, nie do zaznaczenia
             it.setForeground(_DIM["fg"])
@@ -1911,6 +1914,16 @@ class MainWindow(QMainWindow):
         planner = getattr(self, "planner_view", None)   # akcenty planera są per MOTYW (T5, wiz R2):
         if planner is not None:                        # wyszarzenie wiersza, ⚠ nota, „bez luk", chipy
             planner.use_theme(name)
+        # KOLOR WYPALONY W ITEMIE NIE ŚLEDZI MOTYWU (wiz T2 N4). `_DIM["fg"]` odświeża się przy
+        # `apply_theme`, ale wiersze zbudowane WCZEŚNIEJ trzymają starą wartość — po przełączeniu
+        # na jasny szarość z motywu ciemnego spadała do 2,07:1. Listy budowane z `QListWidgetItem`
+        # (nie przez delegata czytającego motyw w `paint`) muszą więc powstać na nowo.
+        objects = getattr(self, "object_view", None)
+        if objects is not None:
+            objects._load_review()
+        tasks_view = getattr(self, "tasks_view", None)
+        if tasks_view is not None:
+            tasks_view.refresh_counts()
 
     def _build_central(self):
         central = QWidget()

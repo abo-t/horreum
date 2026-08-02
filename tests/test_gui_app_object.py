@@ -186,8 +186,11 @@ def test_kolejka_liczniki_informacyjne(view):
     v, con, ids = view
     items = [(v.review.item(r).text(), v.review.item(r).data(UROLE))
              for r in range(v.review.count())]
-    # fixture §8 nie ma oznaczonych kopii → 0; pozycja klikalna (tag 'unreadable')
-    assert any(t.startswith("— kopie nieczytelne: 0") and tag == "unreadable" for t, tag in items)
+    # fixture §8 nie ma oznaczonych kopii → 0. KUBEŁEK PUSTY NIE MA DOKĄD PROWADZIĆ (wiz T2 N6):
+    # drążenie w zero otwierało tabelę bez ani jednego wiersza i bez zdania, a wyszarzony wiersz
+    # zaznaczalny spadał na podświetleniu do 1,84:1 kontrastu (T2 N3). Jedna reguła dla wszystkich
+    # kubełków — `nameless` zachowywał się tak od początku. Klikalny wraca przy n>0 (#13/Z6).
+    assert any(t.startswith("— kopie nieczytelne: 0") and tag is None for t, tag in items)
     # nota „rozwiązywanie w przygotowaniu" zawężona do dwóch kanałów bez akcji (R#9)
     assert any("config-review: 4" in t and "bez nagłówka: 1" in t
                and "rozwiązywanie w przygotowaniu" in t and tag is None for t, tag in items)
@@ -257,8 +260,9 @@ def test_przycisk_przypisz_sledzi_tag_i_busy(view):
     assert not v.assign_btn.isEnabled()                      # start: selekcja na obiekcie, nie review
     _select_review_tag(v, "object_raw")
     assert v.assign_btn.isEnabled()
-    _select_review_tag(v, "unreadable")
-    assert not v.assign_btn.isEnabled()
+    v.review.clearSelection()                  # brak pozycji ⇒ przycisk gaśnie. Fixture nie ma już
+    v._sync_assign_enabled()                    # innego KLIKALNEGO kubełka: pusty `unreadable` jest
+    assert not v.assign_btn.isEnabled()         # od T2 N6 informacyjny, więc nie da się go zaznaczyć
     _select_review_tag(v, "object_raw")
     v.set_busy(True)                                         # pipeline w biegu → wygaszony
     assert not v.assign_btn.isEnabled()

@@ -1496,6 +1496,12 @@ class FramesView(QWidget):
         self.panel_stack.addWidget(self.rename_bar)
         self.panel_stack.addWidget(self.lineage_bar)
         self.panel_stack.setVisible(False)               # żaden panel nie otwarty na starcie
+        # PANEL BIERZE TYLE, ILE POTRZEBUJE — NADMIAR NALEŻY DO TABELI (wiz T2 N1). Domyślna
+        # polityka `QStackedWidget` jest pionowo Expanding, więc stack pochłaniał leftover i stał
+        # 309 px WYSOKI także wtedy, gdy niósł jedno zdanie (`sizeHint` 36 px): panel zjadał połowę
+        # okna, a tabela pokazywała 10 wierszy ze 128. Samo skrócenie treści panelu tego nie ruszyło
+        # — bo o wysokości decydowała polityka, nie treść.
+        self.panel_stack.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         rv.addWidget(self.panel_stack)
 
         self.model = GridTableModel(self)
@@ -1516,7 +1522,7 @@ class FramesView(QWidget):
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.table.horizontalHeader().setStretchLastSection(True)
-        rv.addWidget(self.table)
+        rv.addWidget(self.table, 1)   # stretch: nadmiar pionu należy do TABELI, nie do panelu (N1)
 
         self.empty = QLabel(i18n.t(_EMPTY_FILTER))
         self.empty.setAlignment(Qt.AlignCenter); self.empty.setWordWrap(True); self.empty.setVisible(False)

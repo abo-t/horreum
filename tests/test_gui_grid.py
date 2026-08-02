@@ -1214,3 +1214,110 @@ def test_flaga_panelu_daty_nazywa_wage(rn_view):
     assert bar.lbl_flag.property("role") == "warn"
     bar.set_echo("", "", "", "brak źródła czasu", flag_role="secondary")
     assert bar.lbl_flag.property("role") == "secondary"
+
+
+# --- panel RODOWODU gotowego stosu (I-2d, P-I) ---
+
+def _seed_stos(con, *, reason=None, asserted="window"):
+    """Stos + dwie klatki wejściowe + policzony rodowód — minimalny materiał panelu."""
+    con.execute("INSERT INTO frame (id, sha1_data, kind, filetype, first_seen_at) "
+                "VALUES (10, 'm10', 'master_light', 'xisf', ?)", (NOW,))
+    con.execute("INSERT INTO header (frame_id, raw_json) VALUES (10, '{}')")
+    con.execute("INSERT INTO location (frame_id, volume, path, present) "
+                "VALUES (10, 'V', '/a/masterLight.xisf', 1)")
+    con.execute("INSERT INTO integration (id, master_frame_id, created_at, degenerate, ambiguous, "
+                "telescope_mismatch, unresolved_reason) VALUES (5, 10, ?, 0, 0, 0, ?)",
+                (NOW, reason))
+    if reason is None:
+        for fid in (1, 2):
+            con.execute("INSERT INTO integration_input (integration_id, input_frame_id, "
+                        "asserted_by) VALUES (5, ?, ?)", (fid, asserted))
+    con.commit()
+
+
+def _zaznacz_frame(view, frame_id):
+    """Zaznacz w tabeli wiersz danej klatki (przez model, nie przez piksele)."""
+    view.refresh()
+    for i, r in enumerate(view.model._rows):
+        if isinstance(r, dict) and r.get("frame_id") == frame_id:
+            view.table.selectRow(i)
+            return True
+    return False
+
+
+def test_panel_rodowodu_pokazuje_zrodlo_pewnosci(view, gcon):
+    """Panel mówi WPROST, na jakiej podstawie klatka jest w obrazie: „plik zeznał" vs „wynika
+    z czasu". Bez tej różnicy rodowód wyglądałby jak wiedza pewna, a w większości nią nie jest."""
+    _seed_stos(gcon, asserted="window")
+    assert _zaznacz_frame(view, 10)
+    view._toggle_panel("lineage")
+    bar = view.lineage_bar
+    assert bar.items.count() == 2
+    assert "wynika z czasu" in bar.items.item(0).text()
+    assert "Weszło 2" in bar.head.text()
+
+
+def test_panel_rodowodu_bez_wejsc_tlumaczy_powod(view, gcon):
+    """Stos bez rodowodu NIE jest pustym panelem: powód („nagłówek opisuje jedną klatkę") mówi
+    użytkownikowi, którą naprawę wykonać. 47 ze 128 stosów archiwum jest w tym stanie."""
+    _seed_stos(gcon, reason="degenerate_window")
+    assert _zaznacz_frame(view, 10)
+    view._toggle_panel("lineage")
+    assert view.lineage_bar.items.count() == 0
+    assert "jedną klatkę" in view.lineage_bar.note.toolTip()
+
+
+def test_panel_rodowodu_wymaga_jednego_stosu(view, gcon):
+    """Rodowód opisuje POJEDYNCZY obraz — inne zaznaczenie dostaje ZDANIE, nie pustkę. Zaznaczenie
+    zwykłej klatki tłumaczy się inaczej niż brak zaznaczenia (dwie różne pomyłki, dwie podpowiedzi)."""
+    _seed_stos(gcon)
+    view._toggle_panel("lineage")
+    assert "Zaznacz w tabeli" in view.lineage_bar.head.text()
+    assert _zaznacz_frame(view, 1)                     # zwykły light, nie stos
+    view._refresh_lineage()
+    assert "nim nie jest" in view.lineage_bar.head.text()
+
+
+def test_werdykt_reki_zapisuje_sie_i_odejmuje_od_godzin(view, gcon):
+    """Odrzucenie ręką: wiersz ZOSTAJE (fakt „nie weszła"), ale wypada z liczby klatek i godzin —
+    i przeżywa kolejny przebieg rodowodu (precedencja `user` w klindze)."""
+    from horreum.stacks import run_stack_lineage
+    _seed_stos(gcon)
+    assert _zaznacz_frame(view, 10)
+    view._toggle_panel("lineage")
+    view.lineage_bar.items.item(0).setSelected(True)
+    view.lineage_bar._emit(True)                        # „Odrzuć zaznaczone"
+
+    row = gcon.execute("SELECT asserted_by, excluded FROM integration_input "
+                       "WHERE input_frame_id = 1").fetchone()
+    assert (row["asserted_by"], row["excluded"]) == ("user", 1)
+    assert "Weszło 1" in view.lineage_bar.head.text()   # licznik panelu odjął odrzuconą
+    assert view.lineage_bar.items.count() == 2          # …ale wiersz został na liście
+
+    run_stack_lineage(gcon, now=NOW, xml_reader=lambda _p: None)
+    row2 = gcon.execute("SELECT asserted_by, excluded FROM integration_input "
+                        "WHERE input_frame_id = 1").fetchone()
+    assert (row2["asserted_by"], row2["excluded"]) == ("user", 1)   # automat nie cofnął ręki
+
+
+def test_panel_odroznia_wariant_obrazu_od_realnego_wspoldzielenia(view, gcon):
+    """Zmierzone na 128 realnych stosach: z 62 integracji oflagowanych jako „okno nierozłączne"
+    **51 ma bliźniaka o IDENTYCZNYM zbiorze wejść** (to warianty tego samego obrazu: `_ast`,
+    `_drizzle_1x`), a tylko 11 dzieli klatki częściowo. Jedno ostrzeżenie na oba przypadki
+    krzyczałoby o niczym w 82% sytuacji — dlatego panel czyta `integ_hash`, nie samą flagę."""
+    _seed_stos(gcon)
+    gcon.execute("UPDATE integration SET ambiguous = 1, integ_hash = 'ZBIOR-A' WHERE id = 5")
+    gcon.execute("INSERT INTO frame (id, sha1_data, kind, filetype, first_seen_at) "
+                 "VALUES (11, 'm11', 'master_light', 'xisf', ?)", (NOW,))
+    gcon.execute("INSERT INTO integration (id, master_frame_id, created_at, integ_hash, ambiguous) "
+                 "VALUES (6, 11, ?, 'ZBIOR-A', 1)", (NOW,))
+    gcon.commit()
+    assert _zaznacz_frame(view, 10)
+    view._toggle_panel("lineage")
+    assert "inna wersja obrazu" in view.lineage_bar.note.toolTip()
+    assert "⚠" not in view.lineage_bar.note.toolTip()
+
+    gcon.execute("UPDATE integration SET integ_hash = 'ZBIOR-B' WHERE id = 6")   # inny zbiór
+    gcon.commit()
+    view._refresh_lineage()
+    assert "⚠ część tych klatek" in view.lineage_bar.note.toolTip()

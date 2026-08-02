@@ -693,6 +693,99 @@ CATALOG = {
     "grid.sel.tidy_names": {"pl": "Uporządkuj nazwy plików…", "en": "Tidy file names…"},
     "grid.sel.save_view": {"pl": "★ Zapisz widok", "en": "★ Save view"},
 
+    # --- Panel RODOWODU gotowego stosu (I-2d, P-I) ---
+    # Słownictwo trzyma jedną granicę: „weszło" = fakt zapisany, „wynika z czasu" = kandydat.
+    # Nigdzie nie mówimy „na pewno" o czymś, czego dowodem jest wyłącznie okno czasu.
+    "grid.sel.lineage": {"pl": "Rodowód…", "en": "Lineage…"},
+    "grid.sel.lineage_tip": {
+        "pl": "Co weszło w gotowy obraz — zaznacz JEDEN stos w tabeli",
+        "en": "What went into the finished image — select ONE stack in the table",
+    },
+    "grid.lin.head": {
+        "pl": "Weszło {n} klatek · {hours} h", "en": "{n} frames went in · {hours} h",
+    },
+    "grid.lin.confirm": {"pl": "Potwierdź zaznaczone", "en": "Confirm selected"},
+    "grid.lin.confirm_tip": {
+        "pl": "Zapisz, że te klatki NAPRAWDĘ weszły w ten obraz (przestają być kandydatami)",
+        "en": "Record that these frames REALLY went into this image (they stop being candidates)",
+    },
+    "grid.lin.reject": {"pl": "Odrzuć zaznaczone", "en": "Reject selected"},
+    "grid.lin.reject_tip": {
+        "pl": "Zapisz, że te klatki NIE weszły — zostaną na liście jako odrzucone i nie wliczą się "
+              "do godzin",
+        "en": "Record that these frames did NOT go in — they stay listed as rejected and stop "
+              "counting towards the hours",
+    },
+    "grid.lin.judged_confirmed": {"pl": "Potwierdzono {n}", "en": "Confirmed {n}"},
+    "grid.lin.judged_excluded": {"pl": "Odrzucono {n}", "en": "Rejected {n}"},
+    "grid.lin.src.history": {"pl": "plik zeznał", "en": "file testified"},
+    "grid.lin.src.window": {"pl": "wynika z czasu", "en": "inferred from time"},
+    "grid.lin.src.user": {"pl": "Twoja decyzja", "en": "your decision"},
+    "grid.lin.src.excluded": {"pl": "odrzucone", "en": "rejected"},
+    "grid.lin.hint.none": {
+        "pl": "Zaznacz w tabeli gotowy obraz (stos), żeby zobaczyć, z czego powstał.",
+        "en": "Select a finished image (stack) in the table to see what it was made of.",
+    },
+    "grid.lin.hint.not_stack": {
+        "pl": "Rodowód mają gotowe obrazy po integracji — zaznaczona pozycja nim nie jest.",
+        "en": "Lineage belongs to finished images after integration — the selected row is not one.",
+    },
+    "grid.lin.hint.many": {
+        "pl": "Zaznacz DOKŁADNIE jeden gotowy obraz — rodowód opisuje pojedynczy obraz.",
+        "en": "Select EXACTLY one finished image — lineage describes a single image.",
+    },
+    "grid.lin.hint.not_computed": {
+        "pl": "Rodowodu jeszcze nie liczono. Wciągnij stosy w Dostawie — policzy się przy okazji.",
+        "en": "Lineage has not been computed yet. Pull in stacks in Delivery — it is computed there.",
+    },
+    "grid.lin.reason.degenerate_window": {
+        "pl": "Nie wiem, z czego powstał: nagłówek opisuje jedną klatkę, nie całą serię.",
+        "en": "Unknown source: the header describes a single frame, not a whole series.",
+    },
+    "grid.lin.reason.history_mismatch": {
+        "pl": "Nie wiem, z czego powstał: plik zeznaje inne klatki, niż wychodzi z czasu.",
+        "en": "Unknown source: the file testifies to different frames than the time window gives.",
+    },
+    "grid.lin.reason.no_object": {
+        "pl": "Nie wiem, z czego powstał: obraz nie ma rozpoznanego obiektu.",
+        "en": "Unknown source: the image has no recognised object.",
+    },
+    "grid.lin.reason.no_window": {
+        "pl": "Nie wiem, z czego powstał: nagłówek nie podaje czasu początku i końca.",
+        "en": "Unknown source: the header gives no start and end time.",
+    },
+    "grid.lin.reason.no_candidates": {
+        "pl": "Nie wiem, z czego powstał: w tym czasie nie ma w archiwum ani jednej pasującej klatki.",
+        "en": "Unknown source: the archive holds no matching frame from that time.",
+    },
+    "grid.lin.reason.telescope_mismatch": {
+        "pl": "Nie wiem, z czego powstał: klatki z tej nocy są z innego teleskopu niż zapisany "
+              "w obrazie.",
+        "en": "Unknown source: that night's frames come from a different telescope than the image "
+              "records.",
+    },
+    "grid.lin.flag.ambiguous": {
+        "pl": "⚠ część tych klatek wchodzi też w inny obraz",
+        "en": "⚠ some of these frames also go into another image",
+    },
+    # Odmiana przez `t_plural` [#11]: n=1 jest tu przypadkiem TYPOWYM (para plik + `_drizzle_1x`),
+    # a „1 inne wersje" czytałoby się jak błąd — ta sama lekcja co przy liczniku zaznaczenia.
+    "grid.lin.flag.twins": {
+        "pl": {"one": "ten sam zestaw klatek ma jeszcze {n} inna wersja obrazu",
+               "few": "ten sam zestaw klatek mają jeszcze {n} inne wersje obrazu",
+               "many": "ten sam zestaw klatek ma jeszcze {n} innych wersji obrazu"},
+        "en": {"one": "{n} other version of the image uses the same set of frames",
+               "other": "{n} other versions of the image use the same set of frames"},
+    },
+    "grid.lin.flag.telescope": {
+        "pl": "⚠ obraz zapisał inny teleskop niż jego klatki (karta do naprawy)",
+        "en": "⚠ the image records a different telescope than its frames (header to fix)",
+    },
+    "grid.lin.flag.declared": {
+        "pl": "plik deklaruje {n} klatek", "en": "the file declares {n} frames",
+    },
+    "grid.lin.flag.excluded": {"pl": "odrzuconych: {n}", "en": "rejected: {n}"},
+
     # --- StagingDrawer (poczekalnia zmian) ---
     "grid.drawer.empty": {"pl": "Poczekalnia zmian — pusta", "en": "Changes waiting room — empty"},
     "grid.drawer.pending": {"pl": "{n} zmian oczekuje", "en": "{n} changes pending"},
@@ -795,6 +888,7 @@ CATALOG = {
     "pipeline.stage.delta": {"pl": "Delta", "en": "Delta"},
     "pipeline.stage.presence": {"pl": "Obecność", "en": "Presence"},
     "pipeline.stage.stacks": {"pl": "Stosy", "en": "Stacks"},
+    "pipeline.stage.stack_lineage": {"pl": "Rodowód stosów", "en": "Stack lineage"},
 
     # --- powody przeglądu w raporcie delty: _REVIEW_REASONS trzyma KLUCZE ---
     "pipeline.reason.no_config": {"pl": "bez konfiguracji", "en": "no config"},
@@ -944,6 +1038,24 @@ CATALOG = {
               "excluded folders {excluded} · locations {loc_new} · refreshed {loc_ref} "
               "(testimonies {hdr_ref}, rebound {rebound}) · headers {headers} · "
               "review f/{frame_review} c/{camera_review} kind/{kind}",
+    },
+    # Rodowód stosów (I-2d) — człony składane w `PipelineView._format_stack_lineage`.
+    "pipeline.fmt.slin.prefix": {"pl": "[rodowód stosów] ", "en": "[stack lineage] "},
+    "pipeline.fmt.slin.linked": {
+        "pl": "wiadomo z czego: {n} z {total} obrazów ({inputs} klatek)",
+        "en": "source known: {n} of {total} images ({inputs} frames)",
+    },
+    "pipeline.fmt.slin.history": {
+        "pl": "z tego {n} potwierdza sam plik", "en": "of those {n} confirmed by the file itself",
+    },
+    "pipeline.fmt.slin.waiting": {
+        "pl": "czeka na Ciebie {n}", "en": "waiting for you {n}",
+    },
+    "pipeline.fmt.slin.ambiguous": {
+        "pl": "wspólne klatki z innym obrazem: {n}", "en": "frames shared with another image: {n}",
+    },
+    "pipeline.fmt.slin.telescope": {
+        "pl": "rozjazd teleskopu: {n}", "en": "telescope mismatch: {n}",
     },
     # Droga „Stosy" — człony składane w `PipelineView._format_stacks`; odmowy TYLKO gdy niezerowe.
     "pipeline.fmt.stacks.prefix": {"pl": "[stosy] ", "en": "[stacks] "},

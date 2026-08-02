@@ -1395,6 +1395,41 @@ def unlink_integration_input(con, *, integration_id, input_frame_id, now, actor=
     return True
 
 
+def judge_integration_input(con, *, integration_id, input_frame_id, excluded, now, uid="local"):
+    """ROZSTRZYGNIĘCIE RĘKĄ (I-2d): człowiek potwierdza kandydata albo go odrzuca —
+    `asserted_by='user'` + `excluded` 0/1, `event(integration.judged)`.
+
+    ODRZUCONY WIERSZ ZOSTAJE, nie znika: „ta klatka NIE weszła w ten obraz" jest faktem tak samo
+    jak „weszła", a skasowanie go kazałoby automatowi odkrywać ją na nowo przy każdym przebiegu.
+    Precedencji broni `link_integration`/`unlink_integration_input` (oba omijają `user`), więc
+    werdykt przeżywa kolejne przebiegi rodowodu.
+
+    Idempotentny: ten sam werdykt na tym samym wierszu → `False` bez eventu (przeklikanie w oknie
+    nie ma prawa puchnąć dziennika)."""
+    row = con.execute(
+        "SELECT rowid AS rid, asserted_by, excluded FROM integration_input "
+        "WHERE integration_id = ? AND input_frame_id = ?",
+        (integration_id, input_frame_id)).fetchone()
+    excluded = 1 if excluded else 0
+    if row is not None and (row["asserted_by"], row["excluded"]) == ("user", excluded):
+        return False
+    with _immediate(con):
+        if row is None:
+            con.execute(
+                "INSERT INTO integration_input(integration_id, input_frame_id, asserted_by, "
+                "excluded) VALUES (?, ?, 'user', ?)", (integration_id, input_frame_id, excluded))
+        else:
+            con.execute(
+                "UPDATE integration_input SET asserted_by = 'user', excluded = ? WHERE rowid = ?",
+                (excluded, row["rid"]))
+        emit_event(con, actor=f"user:{uid}", verb="integration.judged",
+                   target=f"integration:{integration_id}", now=now,
+                   payload={"input_frame_id": input_frame_id, "excluded": excluded,
+                            "before": None if row is None else
+                            {"asserted_by": row["asserted_by"], "excluded": row["excluded"]}})
+    return True
+
+
 def flag_stack_lineage_summary(con, items, now, actor="stacks"):
     """Stosy BEZ zapisanych wejść — JEDEN `event(integration.lineage_summary)` z licznością per
     powód (wzorzec `flag_calibration_lineage_summary`). Stan (`unresolved_reason` niepuste) SAM

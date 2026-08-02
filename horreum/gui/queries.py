@@ -720,6 +720,64 @@ def object_exposure(con, frame_ids):
     ).fetchall()
 
 
+def stack_lineage_head(con, frame_id):
+    """Wiersz `integration` dla klatki stosu + LICZBY, którymi panel opisze obraz (I-2d) — albo
+    `None`, gdy rodowodu jeszcze nie liczono dla tej klatki.
+
+    `inputs`/`secs` liczą WYŁĄCZNIE wejścia niewykluczone (`excluded = 0`): odrzucone ręką zostają
+    w tabeli jako fakt „ta klatka NIE weszła", ale w godzinach obrazu nie mają czego szukać.
+    `excluded` osobno, żeby powierzchnia umiała powiedzieć, ile decyzji już zapadło.
+
+    `twins` = ile INNYCH integracji ma DOKŁADNIE ten sam zbiór wejść (równość `integ_hash`).
+    Bez tej liczby flaga „okno nierozłączne" kłamie o przyczynie: zmierzone na 128 realnych stosach
+    — z 62 oflagowanych integracji **51 ma bliźniaka o identycznym zbiorze** (to warianty tego
+    samego obrazu: `_ast`, `_drizzle_1x`, `_integration`), a tylko **11** dzieli klatki częściowo
+    z INNYM ujęciem tej nocy. Ostrzeżenie należy się tym jedenastu; reszcie należy się wyjaśnienie.
+
+    Zwraca: integration_id, unresolved_reason, degenerate, ambiguous, telescope_mismatch,
+    declared_rows, drizzle_inputs, disabled_inputs, tool, window_start, window_end,
+    inputs, excluded, secs, sources (rozdzielone przecinkiem źródła pewności wejść), twins."""
+    return con.execute(
+        "SELECT i.id AS integration_id, i.unresolved_reason, i.degenerate, i.ambiguous, "
+        "       i.telescope_mismatch, i.declared_rows, i.drizzle_inputs, i.disabled_inputs, "
+        "       i.tool, i.window_start, i.window_end, "
+        "       (SELECT COUNT(*) FROM integration b WHERE b.integ_hash IS NOT NULL "
+        "         AND b.integ_hash = i.integ_hash AND b.id <> i.id) AS twins, "
+        "       (SELECT COUNT(*) FROM integration_input ii "
+        "         WHERE ii.integration_id = i.id AND ii.excluded = 0) AS inputs, "
+        "       (SELECT COUNT(*) FROM integration_input ii "
+        "         WHERE ii.integration_id = i.id AND ii.excluded = 1) AS excluded, "
+        "       (SELECT SUM(h.exptime) FROM integration_input ii "
+        "          JOIN header h ON h.frame_id = ii.input_frame_id "
+        "         WHERE ii.integration_id = i.id AND ii.excluded = 0) AS secs, "
+        "       (SELECT GROUP_CONCAT(DISTINCT ii.asserted_by) FROM integration_input ii "
+        "         WHERE ii.integration_id = i.id AND ii.excluded = 0) AS sources "
+        "FROM integration i WHERE i.master_frame_id = ?", (frame_id,)).fetchone()
+
+
+def stack_lineage_inputs(con, frame_id):
+    """Wejścia stosu pod listę panelu (I-2d) — WSZYSTKIE, także odrzucone ręką (kolumna `excluded`
+    niesie werdykt; ukrycie odrzuconych zabrałoby jedyną drogę cofnięcia własnej decyzji).
+
+    Cel przez `MIN(id) … present = 1` jak w `nameless_frames` — panel pokazuje ścieżkę OBECNEJ
+    kopii, a klatka bez obecnej kopii i tak zostaje w rodowodzie (tożsamość to `sha1_data`,
+    nie ścieżka). Zwraca: input_frame_id, asserted_by, excluded, date_obs, exptime, path."""
+    return con.execute(
+        "SELECT ii.input_frame_id, ii.asserted_by, ii.excluded, h.date_obs, h.exptime, "
+        "       (SELECT l.path FROM location l WHERE l.frame_id = ii.input_frame_id "
+        "         AND l.present = 1 ORDER BY l.id LIMIT 1) AS path "
+        "FROM integration_input ii JOIN integration i ON i.id = ii.integration_id "
+        "LEFT JOIN header h ON h.frame_id = ii.input_frame_id "
+        "WHERE i.master_frame_id = ? ORDER BY h.date_obs, ii.input_frame_id",
+        (frame_id,)).fetchall()
+
+
+# NIE MA TU `stack_frames_needing_hand` — i to jest decyzja, nie przeoczenie. Wiersz Porządków
+# „gotowe obrazy czekające na Twoje słowo" wymaga własnej PERSPEKTYWY w Zbiorach (flaga presetu
+# + serializacja + facety), a nie samego zapytania; zapytanie bez powierzchni byłoby kodem dla
+# nikogo (SIN-PRECRUFT). Dług nazwany w kolejce — panel rodowodu działa dziś z zaznaczenia.
+
+
 # ============================================================ PORZĄDKI (F5, PLAN_ux_redesign §6)
 # Liczniki listy zadań `TasksView` — bieżący STAN tabel, nigdy `count(event)` (REVIEW-ZE-STANU,
 # memory horreum-review-queue-from-state). Zbiory dups/review REUŻYWANE z derywacji perspektyw

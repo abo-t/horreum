@@ -537,8 +537,13 @@ def _stack_tree(tmp_path, n=2):
 
 
 def test_worker_stacks_emituje_stage_done(qapp, tmp_path):
-    """Kontrakt sygnałów etapu „stacks" identyczny ze skanem: progres per plik + `stage_done`
-    z podsumowaniem drogi (nie ze `ScanSummary` — droga ma własne pytania)."""
+    """Kontrakt sygnałów etapu „stosy" identyczny ze skanem: progres per plik + `stage_done`
+    z podsumowaniem drogi (nie ze `ScanSummary` — droga ma własne pytania).
+
+    Od I-2d droga DOMYKA ŁAŃCUCH (`group` → `resolve` → `stack_lineage`), więc etapów jest cztery:
+    sam skan zostawiłby stosy bez osi i bez rodowodu, a „wciągnąłem" znaczyłoby mniej, niż user
+    widzi na ekranie. Kolejność jest częścią kontraktu — rodowód stoi PO obu osiach, bo dobór okna
+    stoi na obiekcie i teleskopie."""
     tree = _stack_tree(tmp_path)
     w = PipelineWorker(_fresh_db(tmp_path), now_fn=lambda: NOW)
     w.configure("stacks", root=tree, volume="VOL1")
@@ -546,9 +551,10 @@ def test_worker_stacks_emituje_stage_done(qapp, tmp_path):
     w.stage_done.connect(lambda name, s: done.append((name, s)))
     w.progress.connect(lambda d, t, p, c: prog.append((d, t, dict(c))))
     w.run()
-    assert [n for n, _ in done] == ["stacks"]
+    assert [n for n, _ in done] == ["stacks", "group", "resolve", "stack_lineage"]
     s = done[0][1]
     assert (s.candidates, s.ingested) == (2, 2)
+    assert done[-1][1].stacks == 2                     # rodowód zobaczył OBA wciągnięte stosy
     assert prog and isinstance(prog[-1][2], dict)      # migawka DICT, nie żywy summary
 
 

@@ -31,6 +31,7 @@ from horreum.gui.progress import counts_snapshot, should_emit
 from horreum.grouper import run_grouper
 from horreum.resolver import delta_report, run_resolver
 from horreum.scan import scan_stacks, scan_tree
+from horreum.stacks import run_stack_lineage
 from horreum.volumes import volume_serial
 
 
@@ -124,7 +125,13 @@ class PipelineWorker(QObject):
     def _stacks(self, con):
         """Droga „Stosy" (I-2b): wciągnięcie gotowych obrazów po integracji ze wskazanego drzewa
         obróbki. Kontrakt sygnałów jak w `_scan` (postęp per plik, anulowanie na granicy pliku);
-        etap ŚWIADOMIE poza łańcuchem „Przyjmij nowe" — to inny korzeń i inny gest (D-P-I-1)."""
+        etap ŚWIADOMIE poza łańcuchem „Przyjmij nowe" — to inny korzeń i inny gest (D-P-I-1).
+
+        DOMYKA ŁAŃCUCH (I-2d, lustro P-G na fasadzie importu): sam skan zostawiłby stosy bez osi
+        (config/obiekt) i bez rodowodu, więc „wciągnąłem" znaczyłoby mniej, niż user widzi na
+        ekranie. Po skanie idą więc `group` → `resolve` → **rodowód stosów** — w tej kolejności,
+        bo dobór okna stoi na osi obiektu i osi teleskopu, które dopiero tamte dwa etapy powołują.
+        Anulowanie skanu PRZERYWA łańcuch (jak w „Przetwórz wszystko")."""
         self.stage_started.emit("stacks")
         s = scan_stacks(
             con, self._params["root"],
@@ -139,6 +146,9 @@ class PipelineWorker(QObject):
             self.cancelled.emit("stacks", s)
             return False
         self.stage_done.emit("stacks", s)
+        self._bulk(con, "group")
+        self._bulk(con, "resolve")
+        self._bulk(con, "stack_lineage")
         return True
 
     def _on_stack_progress(self, done, total, path, s):
@@ -175,6 +185,8 @@ class PipelineWorker(QObject):
             result = run_calibration(con, now=self._now())
         elif name == "lineage":
             result = run_lineage(con, now=self._now())
+        elif name == "stack_lineage":
+            result = run_stack_lineage(con, now=self._now())
         else:                                          # delta — read-only
             result = delta_report(con)
         self.stage_done.emit(name, result)
@@ -219,7 +231,8 @@ _STAGE_LABEL = {"scan": "pipeline.stage.scan", "stacks": "pipeline.stage.stacks"
                 "group": "pipeline.stage.group",
                 "resolve": "pipeline.stage.resolve", "calibrate": "pipeline.stage.calibrate",
                 "lineage": "pipeline.stage.lineage", "delta": "pipeline.stage.delta",
-                "presence": "pipeline.stage.presence"}
+                "presence": "pipeline.stage.presence",
+                "stack_lineage": "pipeline.stage.stack_lineage"}
 
 # Kolejność i klucze powodów przeglądu w raporcie dostawy (rdzeń niesie same liczby — wording należy
 # do powierzchni; konsolowy `cli._format_delta` ma własne, ASCII-owe).
@@ -777,7 +790,26 @@ class PipelineView(QWidget):
             return self._format_presence(r)
         if name == "stacks":
             return self._format_stacks(r)
+        if name == "stack_lineage":
+            return self._format_stack_lineage(r)
         return str(r)
+
+    def _format_stack_lineage(self, s):
+        """Linia raportu rodowodu stosów (I-2d). Mówi TRZY rzeczy naraz i żadnej nie da się pominąć:
+        ile obrazów wie, z czego powstało; ile z tego jest DOWIEDZIONE zeznaniem pliku (reszta to
+        kandydaci z okna czasu); ile czeka na rękę i dlaczego. Sam „rodowód: 81" byłby liczbą
+        udającą pewność."""
+        czesci = [i18n.t("pipeline.fmt.slin.linked", n=s.linked, total=s.stacks, inputs=s.inputs)]
+        if s.by_assert.get("history"):
+            czesci.append(i18n.t("pipeline.fmt.slin.history", n=s.by_assert["history"]))
+        czekaja = sum(s.reasons.values())
+        if czekaja:
+            czesci.append(i18n.t("pipeline.fmt.slin.waiting", n=czekaja))
+        if s.ambiguous:
+            czesci.append(i18n.t("pipeline.fmt.slin.ambiguous", n=s.ambiguous))
+        if s.telescope_mismatch:
+            czesci.append(i18n.t("pipeline.fmt.slin.telescope", n=s.telescope_mismatch))
+        return i18n.t("pipeline.fmt.slin.prefix") + " · ".join(czesci)
 
     def _format_stacks(self, s):
         """Linia raportu drogi „Stosy". ODMOWY mają własne człony i pojawiają się TYLKO, gdy są

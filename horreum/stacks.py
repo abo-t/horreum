@@ -252,7 +252,6 @@ def run_stack_lineage(con, *, now, actor="stacks", xml_reader=None, progress=Non
             _bump(s.reasons, p["reason"])
         else:
             s.linked += 1
-            s.inputs += len(p["inputs"])
             _bump(s.by_assert, p["asserted_by"])
         s.ambiguous += p["frame_id"] in ambi
         s.telescope_mismatch += p["telescope_mismatch"]
@@ -271,6 +270,13 @@ def run_stack_lineage(con, *, now, actor="stacks", xml_reader=None, progress=Non
         s.linked_new += _zapisz_wejscia(con, iid, wejscia, p["asserted_by"], now=now, actor=actor)
         s.unlinked += _reconcile(con, iid, wejscia, now=now, actor=actor)
 
+    # `inputs` liczymy ze STANU, nie z planu (lustro `LineageSummary.linked`): odrzucenie ręką
+    # zostawia wiersz w tabeli, ale ten sub w obraz NIE wszedł — plan wciąż widzi go jako kandydata,
+    # więc rachunek z planu zawyżałby o każdy werdykt „nie". `linked`/`reasons` zostają Z PLANU,
+    # bo to one domykają partycję populacji (człowiek wykluczający WSZYSTKIE wejścia nie zmienia
+    # tego, co automat potrafił ustalić — a bramka pyta właśnie o to).
+    s.inputs = con.execute(
+        "SELECT count(*) FROM integration_input WHERE excluded = 0").fetchone()[0]
     s.reasons = dict(sorted(s.reasons.items()))
     repo.flag_stack_lineage_summary(con, sorted(s.reasons.items()), now, actor=actor)
     return s

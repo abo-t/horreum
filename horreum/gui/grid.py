@@ -979,6 +979,12 @@ class ElidedLabel(QLabel):
         self.setToolTip(self._full)
         self._update_elide()
 
+    def full_text(self):
+        """Tekst PRZED elizją — wołający pyta o treść, nie o to, co się akurat zmieściło
+        (`text()` zwraca wersję przyciętą i „czy jest co pokazać" odpowiedziałby na niej fałszem
+        przy wąskim panelu)."""
+        return self._full
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._update_elide()
@@ -1012,11 +1018,19 @@ class LineageBar(QWidget):
         super().__init__(parent)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(8, 4, 8, 4)
+        lay.setSpacing(4)               # domyślny odstęp rozpychał panel o 55 px pustki (wiz #6)
         self.head = QLabel("")
         _f = self.head.font(); _f.setBold(True); self.head.setFont(_f)
+        self.head.setWordWrap(True)     # powód bywa zdaniem, a nie liczbą — nie elidujemy go
+        # DWIE ETYKIETY, BO TO DWIE STAWKI: ostrzeżenie żąda decyzji, informacja tylko tłumaczy.
+        # Wspólna szara nota malowała „⚠ karta do naprawy" tym samym kolorem co „to druga wersja
+        # obrazu" i użytkownik nie miał po czym ich odróżnić (wiz #4).
+        self.warn = ElidedLabel()
+        self.warn.setProperty("role", "warn")
         self.note = ElidedLabel()
         self.note.setProperty("role", "secondary")
         lay.addWidget(self.head)
+        lay.addWidget(self.warn)
         lay.addWidget(self.note)
         self.items = QListWidget()
         self.items.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -1025,7 +1039,11 @@ class LineageBar(QWidget):
         self.items.setMaximumHeight(160)                # panel nie ma prawa zjeść gridu (wiz F3 #1)
         self.items.itemSelectionChanged.connect(self._sync_buttons)
         lay.addWidget(self.items)
-        row = QHBoxLayout()
+        # Wiersz akcji w WIDŻECIE, nie w gołym layoucie — pusta lista chowa go w całości (wiz #6),
+        # a layoutu nie da się ukryć jednym wywołaniem.
+        self.actions = QWidget()
+        row = QHBoxLayout(self.actions)
+        row.setContentsMargins(0, 0, 0, 0)
         self.btn_confirm = QPushButton(i18n.t("grid.lin.confirm"))
         self.btn_confirm.setToolTip(i18n.t("grid.lin.confirm_tip"))
         self.btn_confirm.clicked.connect(lambda: self._emit(False))
@@ -1035,7 +1053,9 @@ class LineageBar(QWidget):
         row.addWidget(self.btn_confirm)
         row.addWidget(self.btn_reject)
         row.addStretch(1)
-        lay.addLayout(row)
+        lay.addWidget(self.actions)
+        lay.addStretch(1)               # pustkę zbiera dół panelu, nie odstępy między wierszami
+        self._busy = False
         self.set_lineage(None, [])
 
     def set_lineage(self, head, inputs, *, hint=None):
@@ -1048,35 +1068,79 @@ class LineageBar(QWidget):
             # Brak materiału ZAWSZE mówi zdaniem — także w stanie startowym, zanim ktokolwiek
             # cokolwiek zaznaczył. Pusty panel bez wyjaśnienia czyta się jak awaria.
             self.head.setText(hint if hint is not None else i18n.t("grid.lin.hint.none"))
+            self.warn.set_full_text("")
             self.note.set_full_text("")
-            self._sync_buttons()
+            self._sync_visible(False)
+            return
+        powod = _lineage_reason_text(head)
+        ostrz, info = _lineage_flags(head)
+        if not head["inputs"] and powod:
+            # NIE MA CZEGO POLICZYĆ ⇒ NIE LICZYMY. „Weszło 0 klatek · 0.0 h" o obrazie, który
+            # przecież Z CZEGOŚ powstał, jest twierdzeniem, którego model nie ma — a to stan
+            # NAJCZĘSTSZY, nie brzegowy: 47 ze 128 stosów archiwum. Głos oddaje powód, bo to on
+            # mówi, KTÓRĄ naprawę wykonać; zero i „0.0 h" znikają.
+            #
+            # Warunek stoi na POWODZIE, nie na samym zerze: gdy człowiek odrzuci wszystkie
+            # kandydatury, `inputs` też jest zerem — ale wtedy „weszło 0 klatek" jest PRAWDĄ
+            # i jego własną decyzją, więc nagłówek ma ją pokazać.
+            self.head.setText(powod)
+            self.warn.set_full_text("")
+            self.note.set_full_text("")
+            self._sync_visible(False)
             return
         godziny = (head["secs"] or 0) / 3600.0
-        self.head.setText(i18n.t("grid.lin.head", n=head["inputs"], hours=f"{godziny:.1f}"))
-        self.note.set_full_text(" · ".join(x for x in (
-            _lineage_reason_text(head), _lineage_flags_text(head)) if x))
+        self.head.setText(i18n.t_plural("grid.lin.head", head["inputs"],
+                                        hours=f"{godziny:.1f}"))
+        self.warn.set_full_text(ostrz)
+        self.note.set_full_text(" · ".join(x for x in (powod, info) if x))
         for r in inputs:
             it = QListWidgetItem(_lineage_item_text(r))
             it.setData(Qt.UserRole, r["input_frame_id"])
             if r["excluded"]:
                 it.setForeground(_COLORS["secondary_text"])
             self.items.addItem(it)
-        self._sync_buttons()
+        self._sync_visible(True)
 
     def integration_id(self):
         """Integracja, której dotyczy panel (albo `None`) — gospodarz pyta o cel zapisu TU, zamiast
         sięgać do pola widżetu (NARROW: panel wystawia fakt, nie swoje wnętrze)."""
         return None if self._head is None else self._head["integration_id"]
 
+    def set_busy(self, busy):
+        """Etap pipeline'u pisze do bazy w tle — werdykt ręki musi wtedy zamilknąć. To DRUGA
+        powierzchnia zapisu tego samego stołu (`integration_input`), więc obowiązuje ją ta sama
+        bramka co makro/rename/staging; bez niej klik w „Odrzuć" trafiał w wiersz, który worker
+        właśnie przeliczał."""
+        self._busy = busy
+        self._sync_buttons()
+
+    def _sync_visible(self, ma_liste):
+        """Panel bez listy nie ma prawa zajmować miejsca na listę: pusty `QListWidget` (130 px)
+        i dwa wygaszone przyciski mówiły „tu coś będzie" tam, gdzie nic nie będzie (wiz #6).
+        Chowamy oba i oddajemy pion gridowi; puste etykiety znikają razem z ich treścią."""
+        self.items.setVisible(ma_liste)
+        self.actions.setVisible(ma_liste)
+        self.warn.setVisible(bool(self.warn.full_text()))
+        self.note.setVisible(bool(self.note.full_text()))
+        self._sync_buttons()
+
     def _sync_buttons(self):
         """Uczciwy disabled: werdykt dotyczy ZAZNACZONYCH wierszy listy, więc bez zaznaczenia nie ma
         na czym go wydać (wzorzec `set_have_frames` — gasimy realną akcję, nie panel)."""
         ile = len(self.items.selectedItems())
         for b in (self.btn_confirm, self.btn_reject):
-            b.setEnabled(ile > 0)
+            b.setEnabled(ile > 0 and not self._busy)
 
     def selected_frame_ids(self):
         return [it.data(Qt.UserRole) for it in self.items.selectedItems()]
+
+    def select_frame_ids(self, frame_ids):
+        """Przywróć zaznaczenie po przebudowie listy — po KLATKACH, nie po indeksach. Klatka, która
+        z listy zniknęła, po prostu nie wraca (cicho): to stan, nie błąd."""
+        chciane = set(frame_ids)
+        for i in range(self.items.count()):
+            it = self.items.item(i)
+            it.setSelected(it.data(Qt.UserRole) in chciane)
 
     def _emit(self, excluded):
         ids = self.selected_frame_ids()
@@ -1102,23 +1166,36 @@ def _lineage_reason_text(head):
     return i18n.t(f"grid.lin.reason.{powod}") if powod else ""
 
 
-def _lineage_flags_text(head):
-    """Flagi, które NIE blokują rodowodu, ale zmieniają jego czytanie: okno nierozłączne z innym
-    stosem (ten sam sub liczony dwa razy) i rozjazd zeznań o teleskopie (karta do naprawy)."""
-    out = []
+def _lineage_flags(head):
+    """Flagi panelu rozdzielone WEDŁUG STAWKI → `(ostrzeżenia, informacje)`.
+
+    Ostrzeżenie żąda decyzji („ten sub policzono dwa razy", „karta teleskopu do naprawy"),
+    informacja tylko tłumaczy obraz („to druga wersja", „plik deklaruje N"). Wspólny szary ciąg
+    zrównywał jedno z drugim — powierzchnia maluje je teraz różnymi rolami (wiz #4).
+
+    OSTRZEŻENIE MILCZY, GDY LISTA JEST PUSTA. „⚠ część TYCH klatek wchodzi też w inny obraz" przy
+    zerze wejść mówi o czymś, czego na ekranie nie ma — a to stan 42 z 47 stosów bez rodowodu.
+
+    Współdzielenie bierzemy z `shared` (realne: ten sam wiersz wejścia w integracji o INNYM
+    odcisku), nie z `ambiguous` (nakładanie się okien planu). Poprzedni `elif` gasił ostrzeżenie
+    obecnością bliźniaka — zmierzone: 17 ze 128 integracji ma JEDNO I DRUGIE, więc uspokojenie
+    zjadało wtedy sygnał, który miał znaczenie. Rozdzielone predykaty nie muszą się wykluczać."""
+    if not head["inputs"]:
+        return "", ""
+    ostrz, info = [], []
+    if head["shared"]:
+        ostrz.append(i18n.t("grid.lin.flag.ambiguous"))
+    if head["telescope_mismatch"]:
+        ostrz.append(i18n.t("grid.lin.flag.telescope"))
     if head["twins"]:
         # NIE ostrzeżenie: ten sam zbiór wejść pod inną nazwą pliku to WARIANT tego samego obrazu
         # (`_ast`, `_drizzle_1x`, `_integration`), a nie kolizja. Zmierzone: 51 z 62 oflagowanych.
-        out.append(i18n.t_plural("grid.lin.flag.twins", head["twins"]))
-    elif head["ambiguous"]:
-        out.append(i18n.t("grid.lin.flag.ambiguous"))
-    if head["telescope_mismatch"]:
-        out.append(i18n.t("grid.lin.flag.telescope"))
+        info.append(i18n.t_plural("grid.lin.flag.twins", head["twins"]))
     if head["declared_rows"] is not None:
-        out.append(i18n.t("grid.lin.flag.declared", n=head["declared_rows"]))
+        info.append(i18n.t("grid.lin.flag.declared", n=head["declared_rows"]))
     if head["excluded"]:
-        out.append(i18n.t("grid.lin.flag.excluded", n=head["excluded"]))
-    return " · ".join(out)
+        info.append(i18n.t("grid.lin.flag.excluded", n=head["excluded"]))
+    return " · ".join(ostrz), " · ".join(info)
 
 
 class SelectionBar(QFrame):
@@ -1640,11 +1717,14 @@ class FramesView(QWidget):
         return (not self.panel_stack.isHidden()
                 and self.panel_stack.currentWidget() is self.lineage_bar)
 
-    def _refresh_lineage(self):
+    def _refresh_lineage(self, *, select_frame_ids=None):
         """Wypełnij panel rodowodu z zaznaczenia. Warunek: DOKŁADNIE JEDNA zaznaczona klatka
         `master_light` — rodowód jest faktem o JEDNYM obrazie, a „rodowód zbioru" nie znaczy nic.
         Każdy inny stan dostaje ZDANIE, nie pustkę: user ma wiedzieć, czego brakuje do odpowiedzi
         (wzorzec „uczciwy disabled", tylko że tłumaczy się panel, nie przycisk).
+
+        `select_frame_ids` przywraca zaznaczenie PO odświeżeniu (werdykt ręki) — po klatkach,
+        nie po indeksach, bo kolejność wierszy należy do zapytania, a nie do panelu.
 
         Świadomie WARUNKOWE (jak `_refresh_date_echo`): przy zamkniętym panelu nie czytamy bazy."""
         if not self._lineage_panel_open():
@@ -1662,6 +1742,8 @@ class FramesView(QWidget):
             self.lineage_bar.set_lineage(None, [], hint=i18n.t("grid.lin.hint.not_computed"))
             return
         self.lineage_bar.set_lineage(head, queries.stack_lineage_inputs(self.con, fid))
+        if select_frame_ids:
+            self.lineage_bar.select_frame_ids(select_frame_ids)
 
     def _on_lineage_judged(self, frame_ids, excluded):
         """Werdykt ręki → jedna klinga (`repo.judge_integration_input`), potem odświeżenie panelu
@@ -1675,9 +1757,16 @@ class FramesView(QWidget):
             n += repo.judge_integration_input(
                 self.con, integration_id=iid, input_frame_id=fid,
                 excluded=excluded, now=self._now())
-        self._refresh_lineage()
-        self.status_message.emit(i18n.t(
-            "grid.lin.judged_excluded" if excluded else "grid.lin.judged_confirmed", n=n))
+        # ZAZNACZENIE PRZEŻYWA WERDYKT: lista jest przebudowywana ze stanu, więc bez tego człowiek
+        # tracił wiersze zaraz po decyzji i cofnięcie własnego „odrzuć" kosztowało odszukanie ich
+        # od nowa (wiz #8). Zwracamy te same klatki, nie te same indeksy — kolejność wierszy
+        # należy do zapytania.
+        self._refresh_lineage(select_frame_ids=frame_ids)
+        # Klinga jest idempotentna, więc powtórzony ten sam werdykt daje 0 — a „Potwierdzono 0"
+        # brzmi jak porażka zapisu, którym nie jest (QUIET: brak zmiany mówi o braku zmiany).
+        klucz = ("grid.lin.judged_none" if not n else
+                 "grid.lin.judged_excluded" if excluded else "grid.lin.judged_confirmed")
+        self.status_message.emit(i18n.t(klucz, n=n))
 
     def _describe_criteria(self):
         """Opis zbioru słowami do paska: drzewo EFEKTYWNE (facety + advanced — F4R#8, samo
@@ -1909,6 +1998,9 @@ class FramesView(QWidget):
             self.sel_bar.btn_proj.setEnabled(False)      # „Wydaj" gaśnie w biegu etapu (F3R#7)
             self.drawer.btn_commit.setEnabled(False)
             self.drawer.btn_reject.setEnabled(False)
+            # Panel „Rodowód" to CZWARTA powierzchnia zapisu (I-2d) i pisze do tego samego stołu,
+            # który worker właśnie przelicza — bez tej linii werdykt ręki wchodził w środek etapu.
+            self.lineage_bar.set_busy(True)
             if hasattr(self, "_undo_btn"):
                 self._undo_btn.setEnabled(False)
         else:
@@ -1918,6 +2010,7 @@ class FramesView(QWidget):
             n = self._active_pending_count()             # mode-aware (R1 #2): makro LUB rename
             self.drawer.btn_commit.setEnabled(n > 0)
             self.drawer.btn_reject.setEnabled(n > 0)
+            self.lineage_bar.set_busy(False)             # panel wraca do stanu z zaznaczenia
             if hasattr(self, "_undo_btn"):
                 self._undo_btn.setEnabled(True)
             self._sync_staging_mutex()

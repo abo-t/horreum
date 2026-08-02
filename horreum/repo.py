@@ -1348,18 +1348,24 @@ def link_integration(con, *, integration_id, input_frame_id, asserted_by, now, a
     → `False` bez eventu. Zmiana źródła (np. kandydat z okna DOWIEDZIONY historią) to UPDATE
     z eventem — podniesienie pewności zostawia ślad.
 
-    PRECEDENCJA `user` > `history` > `window` STOI TU, w klindze, nie w pętli wołającego: relacji
-    rozstrzygniętej ręką automat nie ma prawa zdegradować do kandydata. Bez tego guardu każdy
-    kolejny przebieg cofałby decyzję usera po cichu (złapane testem, nie rozumowaniem) — a to ta
-    sama reguła, którą oś obiektu trzyma przez `object_source='user'`."""
-    row = con.execute(
-        "SELECT rowid AS rid, asserted_by FROM integration_input "
-        "WHERE integration_id = ? AND input_frame_id = ?",
-        (integration_id, input_frame_id)).fetchone()
-    if row is not None and (row["asserted_by"] == asserted_by
-                            or (row["asserted_by"] == "user" and asserted_by != "user")):
-        return False
-    with con:
+    PRECEDENCJA `user` > `history` > `window` STOI TU, w klindze, nie w pętli wołającego: pewność
+    wolno PODNIEŚĆ, nigdy obniżyć. Dotyczy to obu szczebli i z tego samego powodu — relacji
+    rozstrzygniętej ręką automat nie ma prawa zdegradować do kandydata, a relacji DOWIEDZIONEJ
+    zeznaniem pliku nie ma prawa zdegradować przebieg, który tego zeznania akurat nie przeczytał
+    (plik na odłączonym dysku). Bez tego guardu jeden przebieg bez zamontowanego archiwum cofałby
+    dowód po cichu — to ta sama reguła, którą oś obiektu trzyma przez `object_source='user'`.
+
+    `_immediate`, bo guard (SELECT stanu) musi trzymać do zapisu: panel „Rodowód" pisze werdykt
+    ręki z wątku GUI, gdy droga „Stosy" liczy w tle na własnym połączeniu. Bez locka SELECT widzi
+    stan sprzed werdyktu i nadpisuje go kandydatem — albo trafia na `UNIQUE` i wywala etap."""
+    RANGA = {"window": 0, "history": 1, "user": 2}
+    with _immediate(con):
+        row = con.execute(
+            "SELECT rowid AS rid, asserted_by FROM integration_input "
+            "WHERE integration_id = ? AND input_frame_id = ?",
+            (integration_id, input_frame_id)).fetchone()
+        if row is not None and RANGA.get(row["asserted_by"], 0) >= RANGA.get(asserted_by, 0):
+            return False
         if row is None:
             con.execute(
                 "INSERT INTO integration_input(integration_id, input_frame_id, asserted_by) "

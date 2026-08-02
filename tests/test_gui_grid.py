@@ -1254,17 +1254,52 @@ def test_panel_rodowodu_pokazuje_zrodlo_pewnosci(view, gcon):
     bar = view.lineage_bar
     assert bar.items.count() == 2
     assert "wynika z czasu" in bar.items.item(0).text()
-    assert "Weszło 2" in bar.head.text()
+    assert "Weszły 2 klatki" in bar.head.text()          # odmiana przez `t_plural` (wiz #15)
 
 
-def test_panel_rodowodu_bez_wejsc_tlumaczy_powod(view, gcon):
-    """Stos bez rodowodu NIE jest pustym panelem: powód („nagłówek opisuje jedną klatkę") mówi
-    użytkownikowi, którą naprawę wykonać. 47 ze 128 stosów archiwum jest w tym stanie."""
+def test_panel_rodowodu_bez_wejsc_NIE_liczy_zera(view, gcon):
+    """WIZYTACJA P1 #1: stos, którego rodowodu nie da się ustalić, dostawał nagłówek „Weszło
+    0 klatek · 0.0 h" — twierdzenie, którego model NIE MA (obraz z czegoś powstał, tylko nie wiemy
+    z czego). Dotyczyło 47 ze 128 stosów archiwum, czyli stanu najczęstszego.
+
+    Nagłówek oddaje wtedy głos POWODOWI, bo to on mówi, którą naprawę wykonać; liczba i godziny
+    znikają, a lista i przyciski nie zajmują pionu na treść, której nie będzie (wiz #6)."""
     _seed_stos(gcon, reason="degenerate_window")
     assert _zaznacz_frame(view, 10)
     view._toggle_panel("lineage")
-    assert view.lineage_bar.items.count() == 0
-    assert "jedną klatkę" in view.lineage_bar.note.toolTip()
+    bar = view.lineage_bar
+    assert bar.items.count() == 0
+    assert "jedną klatkę" in bar.head.text()
+    assert "0 klatek" not in bar.head.text() and "0.0 h" not in bar.head.text()
+    assert not bar.items.isVisible() and not bar.actions.isVisible()
+
+
+def test_panel_bez_wejsc_nie_ostrzega_o_klatkach_ktorych_nie_ma(view, gcon):
+    """WIZYTACJA P1 #2: „⚠ część TYCH klatek wchodzi też w inny obraz" świeciło przy PUSTEJ liście
+    wejść — ostrzeżenie o czymś, czego na ekranie nie ma. Zmierzone: 42 z 47 stosów bez rodowodu
+    miało jednocześnie `ambiguous=1`, więc to był stan typowy, nie brzegowy."""
+    _seed_stos(gcon, reason="degenerate_window")
+    gcon.execute("UPDATE integration SET ambiguous = 1, telescope_mismatch = 1 WHERE id = 5")
+    gcon.commit()
+    assert _zaznacz_frame(view, 10)
+    view._toggle_panel("lineage")
+    bar = view.lineage_bar
+    assert bar.warn.full_text() == "" and bar.note.full_text() == ""
+    assert "⚠" not in bar.head.text()
+
+
+def test_werdykt_reki_na_wszystkich_zostawia_uczciwe_zero(view, gcon):
+    """Odwrotna strona P1 #1: gdy CZŁOWIEK odrzuci wszystkie kandydatury, „weszło 0 klatek" jest
+    PRAWDĄ i jego własną decyzją — nagłówek ma ją pokazać, a nie schować za powodem. Warunek stoi
+    więc na POWODZIE (`unresolved_reason`), nie na samym zerze."""
+    _seed_stos(gcon)
+    assert _zaznacz_frame(view, 10)
+    view._toggle_panel("lineage")
+    for i in range(view.lineage_bar.items.count()):
+        view.lineage_bar.items.item(i).setSelected(True)
+    view.lineage_bar._emit(True)
+    assert "0 klatek" in view.lineage_bar.head.text()
+    assert view.lineage_bar.items.count() == 2          # wiersze zostają jako fakt „nie weszły"
 
 
 def test_panel_rodowodu_wymaga_jednego_stosu(view, gcon):
@@ -1291,8 +1326,11 @@ def test_werdykt_reki_zapisuje_sie_i_odejmuje_od_godzin(view, gcon):
     row = gcon.execute("SELECT asserted_by, excluded FROM integration_input "
                        "WHERE input_frame_id = 1").fetchone()
     assert (row["asserted_by"], row["excluded"]) == ("user", 1)
-    assert "Weszło 1" in view.lineage_bar.head.text()   # licznik panelu odjął odrzuconą
+    assert "Weszła 1 klatka" in view.lineage_bar.head.text()   # licznik panelu odjął odrzuconą
     assert view.lineage_bar.items.count() == 2          # …ale wiersz został na liście
+    # ZAZNACZENIE PRZEŻYWA WERDYKT (wiz #8): bez tego cofnięcie własnej decyzji kosztowało
+    # odszukanie tych samych wierszy od nowa, a lista jest przebudowywana ze stanu.
+    assert view.lineage_bar.selected_frame_ids() == [1]
 
     run_stack_lineage(gcon, now=NOW, xml_reader=lambda _p: None)
     row2 = gcon.execute("SELECT asserted_by, excluded FROM integration_input "
@@ -1304,20 +1342,33 @@ def test_panel_odroznia_wariant_obrazu_od_realnego_wspoldzielenia(view, gcon):
     """Zmierzone na 128 realnych stosach: z 62 integracji oflagowanych jako „okno nierozłączne"
     **51 ma bliźniaka o IDENTYCZNYM zbiorze wejść** (to warianty tego samego obrazu: `_ast`,
     `_drizzle_1x`), a tylko 11 dzieli klatki częściowo. Jedno ostrzeżenie na oba przypadki
-    krzyczałoby o niczym w 82% sytuacji — dlatego panel czyta `integ_hash`, nie samą flagę."""
+    krzyczałoby o niczym w 82% sytuacji — dlatego panel czyta `integ_hash`, nie samą flagę.
+
+    RECENZJA #6 (zmierzone 17 ze 128): stary `elif` gasił ostrzeżenie SAMĄ obecnością bliźniaka,
+    więc integracja mająca JEDNO I DRUGIE dostawała wyłącznie komunikat uspokajający. Predykaty są
+    teraz rozłączne i pytają o dwie różne rzeczy, więc mogą wystąpić razem — a ostrzeżenie stoi na
+    REALNYM współdzieleniu wiersza wejścia (`shared`), nie na nakładaniu się okien planu.
+
+    Ostrzeżenie i informacja mają też RÓŻNE ROLE malowania (wiz #4): jedno żąda decyzji, drugie
+    tylko tłumaczy obraz — wspólna szara nota zrównywała je ze sobą."""
     _seed_stos(gcon)
     gcon.execute("UPDATE integration SET ambiguous = 1, integ_hash = 'ZBIOR-A' WHERE id = 5")
     gcon.execute("INSERT INTO frame (id, sha1_data, kind, filetype, first_seen_at) "
                  "VALUES (11, 'm11', 'master_light', 'xisf', ?)", (NOW,))
     gcon.execute("INSERT INTO integration (id, master_frame_id, created_at, integ_hash, ambiguous) "
                  "VALUES (6, 11, ?, 'ZBIOR-A', 1)", (NOW,))
+    gcon.execute("INSERT INTO integration_input (integration_id, input_frame_id, asserted_by) "
+                 "VALUES (6, 1, 'window')")              # ta sama klatka w obu integracjach
     gcon.commit()
     assert _zaznacz_frame(view, 10)
     view._toggle_panel("lineage")
-    assert "inna wersja obrazu" in view.lineage_bar.note.toolTip()
-    assert "⚠" not in view.lineage_bar.note.toolTip()
+    bar = view.lineage_bar
+    assert "inna wersja obrazu" in bar.note.full_text()
+    assert bar.warn.full_text() == ""                    # ten sam zbiór ⇒ to wariant, nie kolizja
 
     gcon.execute("UPDATE integration SET integ_hash = 'ZBIOR-B' WHERE id = 6")   # inny zbiór
     gcon.commit()
     view._refresh_lineage()
-    assert "⚠ część tych klatek" in view.lineage_bar.note.toolTip()
+    assert "⚠ część tych klatek" in bar.warn.full_text()
+    assert bar.warn.property("role") == "warn"           # ostrzeżenie nie jest szarą notą
+    assert "⚠" not in bar.note.full_text()

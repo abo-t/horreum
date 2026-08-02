@@ -68,7 +68,10 @@ class StackLineageSummary:
     by_assert: dict = field(default_factory=dict)   # 'history'/'window' -> ile integracji
     ambiguous: int = 0         # integracje z oknem nierozłącznym (patrz strażnik 3)
     telescope_mismatch: int = 0    # master zeznaje inny teleskop niż klatki jego okna
-    history_unread: int = 0    # plik nieosiągalny/nieczytelny → ścieżka okna, POLICZONA
+    history_unread: int = 0    # plik nieosiągalny/nieczytelny (błąd odczytu ALBO brak lokacji)
+    kept_unread: int = 0       # gotowy rodowód ZOSTAWIONY nietknięty, bo zeznania nie dało się
+                               # przeczytać — delta zapisu jest wtedy zerowa Z WYBORU, nie z braku
+                               # zmian, i bez tego licznika wyglądałaby jak idempotencja
     reasons: dict = field(default_factory=dict)     # powód -> licznik (integracje bez wejść)
 
 
@@ -95,7 +98,14 @@ def _window_candidates(con, *, object_id, exptime):
     Python, bo każde z tych porównań ma własną regułę: parser ISO, normalizacja filtra, kanon osi).
 
     `exptime` porównywane w SQL, bo to jedyny warunek, który jest zwykłą równością liczby —
-    wołający podaje je JUŻ SKOERCOWANE do float (patrz `_plan`), a nie surowe zeznanie stosu."""
+    wołający podaje je JUŻ SKOERCOWANE do float (patrz `_plan`), a nie surowe zeznanie stosu.
+
+    TEMPERATURA IDZIE Z `ccd_temp` (POMIAR) I TAK MA BYĆ — to wynik pomiaru, nie przeoczenie.
+    Nazwa wejścia WBPP niesie temperaturę ZMIERZONĄ, nie nastawę: na 6 stosach z historią test
+    tożsamości (`resolve.stack.inputs_contained`) przechodzi na `ccd_temp` 6/6, a na `set_temp`
+    0/6 — nastawa jest stała (−10,0), gdy deklarowane wartości rozkładają się −10,1…−9,6.
+    Podmiana na `header.set_temp` zamieniłaby wszystkie dowiedzione rodowody w `history_mismatch`.
+    (Standing „SET-TEMP jest osią, nie pomiar" dotyczy PRZEPISU KALIBRACJI — innej osi niż ta.)"""
     return con.execute(
         "SELECT f.id AS frame_id, f.filter_canon AS filter_canon, h.date_obs AS date_obs, "
         "h.ccd_temp AS ccd_temp, tc.canon_id AS telescope_id "
@@ -128,11 +138,21 @@ def _in_window(rows, *, start, end, filter_canon, telescope_id):
       * okno MIESZA teleskopy i żaden nie jest masterowy → nie ma czym rozstrzygnąć, zero relacji.
 
     Wariant „twardy" (odmowa zawsze) kosztowałby dziś 7 rodowodów i nazwałby je `no_candidates`,
-    czyli nieprawdą: kandydaci byli, odrzuciła ich oś."""
+    czyli nieprawdą: kandydaci byli, odrzuciła ich oś.
+
+    MASTER, KTÓRY SAM NIE ZNA TELESKOPU, NIE FLAGUJE ROZJAZDU — świadoma granica, nie przeoczenie:
+    nie ma czego z czym rozjechać. Okno mieszające wtedy dwa teleskopy weszłoby w całości bez
+    ostrzeżenia; zmierzone na realnym archiwum 0/128, więc granica zostaje NAZWANA, a nie obłożona
+    kodem na populację zerową. Wraca do rozważenia, gdy pojawi się pierwszy taki przypadek.
+
+    Okno jest PÓŁOTWARTE `[start, end)`: `DATE-END` to koniec ostatniej ekspozycji, więc klatka
+    ZACZYNAJĄCA się w tej chwili należy do następnej serii, nie do tej. Zmierzone: 0 wejść na 128
+    stosach siada dokładnie na granicy, więc dziś to no-op — i o to chodzi, bo granicę domyka się,
+    póki jest pusta, a nie po pierwszym cudzym subie wciągniętym do obrazu."""
     okno = []
     for r in rows:
         t = header_dt(r["date_obs"])
-        if t is None or not (start <= t <= end):
+        if t is None or not (start <= t < end):
             continue
         if filter_canon and r["filter_canon"] != filter_canon:
             continue
@@ -188,6 +208,11 @@ def _plan(con, row, *, xml_reader):
             xml = xml_reader(row["path"])
         except Exception:              # plik zniknął/leży na odłączonym dysku — patrz docstring
             unread = True
+    else:
+        # BRAK OBECNEJ LOKACJI TO TEN SAM STAN, co błąd odczytu: pliku nie ma pod ręką, więc jego
+        # zeznania NIE ZNAMY. Rozdzielanie tych dwóch przypadków dawało licznik, który milczał
+        # o połowie populacji — a wołający podejmuje na nim decyzję „nie ruszaj gotowego rodowodu".
+        unread = True
     t = rstack.read_testimony(header, xml)
     start, end = t.window_start, t.window_end
     # KOERCJA PRZY WEJŚCIU, nie w SQL-u: XISF oddaje KAŻDĄ kartę jako tekst (`_put(header,
@@ -254,7 +279,12 @@ def run_stack_lineage(con, *, now, actor="stacks", xml_reader=None, progress=Non
             s.linked += 1
             _bump(s.by_assert, p["asserted_by"])
         s.ambiguous += p["frame_id"] in ambi
-        s.telescope_mismatch += p["telescope_mismatch"]
+        # ROZJAZD TELESKOPU LICZYMY TYLKO TAM, GDZIE RODOWÓD POWSTAŁ — bo tylko tam jest FLAGĄ
+        # („relacje są, ale karta się nie zgadza"). Rozjazd, który skończył się ODMOWĄ, siedzi już
+        # w `reasons['telescope_mismatch']`; wspólny licznik meldował go dwa razy i kazał raportowi
+        # mówić „karta do naprawy: N" o stosach, przy których nie zapisano niczego.
+        if p["telescope_mismatch"] and not p["reason"]:
+            s.telescope_mismatch += 1
         wejscia = [r["frame_id"] for r in p["inputs"]]
         odcisk = _fingerprint(con, wejscia)
         iid, _ = repo.upsert_integration(
@@ -267,8 +297,18 @@ def run_stack_lineage(con, *, now, actor="stacks", xml_reader=None, progress=Non
             degenerate=int(t.degenerate), ambiguous=int(p["frame_id"] in ambi),
             telescope_mismatch=int(p["telescope_mismatch"]),
             unresolved_reason=p["reason"], now=now, actor=actor)
-        s.linked_new += _zapisz_wejscia(con, iid, wejscia, p["asserted_by"], now=now, actor=actor)
-        s.unlinked += _reconcile(con, iid, wejscia, now=now, actor=actor)
+        # ZEZNANIE NIEODCZYTANE ⇒ NIE RUSZAMY GOTOWEGO RODOWODU (strażnik 4). Gdy pliku nie ma pod
+        # ręką, plan spada na samo okno (`t.rows is None`), więc zapis DOŁOŻYŁBY wejścia, których
+        # historia nie potwierdza, a UPDATE zdegradowałby `history` do kandydata: jeden przebieg bez
+        # zamontowanego `R:` przepisałby dowód na domysł i przesunął kotwicę bramki. Świeża
+        # integracja (zero wierszy) dostaje kandydatów normalnie — tam nie ma czego stracić, a
+        # milczenie łamałoby „bez wejść ZAWSZE niesie powód".
+        if p["history_unread"] and _ma_wejscia(con, iid):
+            s.kept_unread += 1
+        else:
+            s.linked_new += _zapisz_wejscia(con, iid, wejscia, p["asserted_by"],
+                                            now=now, actor=actor)
+            s.unlinked += _reconcile(con, iid, wejscia, now=now, actor=actor)
 
     # `inputs` liczymy ze STANU, nie z planu (lustro `LineageSummary.linked`): odrzucenie ręką
     # zostawia wiersz w tabeli, ale ten sub w obraz NIE wszedł — plan wciąż widzi go jako kandydata,
@@ -290,6 +330,14 @@ def _fingerprint(con, frame_ids):
     return sha1_of_set(
         r["sha1_data"] for fid in frame_ids
         for r in con.execute("SELECT sha1_data FROM frame WHERE id = ?", (fid,)))
+
+
+def _ma_wejscia(con, integration_id):
+    """Czy ta integracja ma JUŻ zapisany rodowód (dowolnego źródła)? Pytanie o STAN, nie o plan —
+    rozstrzyga, czy wolno go ruszyć przebiegowi, który nie przeczytał zeznania pliku."""
+    return con.execute(
+        "SELECT 1 FROM integration_input WHERE integration_id = ? LIMIT 1",
+        (integration_id,)).fetchone() is not None
 
 
 def _zapisz_wejscia(con, integration_id, frame_ids, asserted_by, *, now, actor):

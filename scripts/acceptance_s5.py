@@ -718,17 +718,26 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
         ).fetchone()[0]
         crit("§5.14 integracja bez wejść ZAWSZE niesie powód (zero cichych pustek)",
              bez_powodu == 0)
+        # OBA STRAŻNIKI PYTAJĄ O AUTOMAT, NIE O CZŁOWIEKA — stąd `asserted_by <> 'user'`. Werdykt
+        # ręki ZOSTAJE w tabeli z założenia (`unlink_integration_input` go omija), więc bez tego
+        # wyłączenia pierwsze „odrzuć wejście" w panelu „Rodowód" zapala bramkę na stanie
+        # POPRAWNYM — a bramkę czerwoną na poprawnym stanie naprawia się podnoszeniem kotwicy,
+        # po czym przestaje ona łapać regresję prawdziwą. Inwariant brzmi „automat nie zapisał
+        # wejść", nie „nie ma wejść".
         z_wejsciami_i_powodem = con.execute(
             "SELECT count(*) FROM integration i WHERE i.unresolved_reason IS NOT NULL "
-            "AND EXISTS (SELECT 1 FROM integration_input ii WHERE ii.integration_id = i.id)"
+            "AND EXISTS (SELECT 1 FROM integration_input ii WHERE ii.integration_id = i.id "
+            "            AND ii.asserted_by <> 'user')"
         ).fetchone()[0]
-        crit("§5.14 powód wyklucza wejścia (odmowa == ZERO relacji)", z_wejsciami_i_powodem == 0)
+        crit("§5.14 powód wyklucza wejścia automatu (odmowa == ZERO relacji)",
+             z_wejsciami_i_powodem == 0)
         # Strażnik okna zdegenerowanego — sedno D-P-I-2: taki stos ma NIE dostać ani jednej relacji.
         deg_z_wejsciami = con.execute(
             "SELECT count(*) FROM integration i WHERE i.degenerate = 1 "
-            "AND EXISTS (SELECT 1 FROM integration_input ii WHERE ii.integration_id = i.id)"
+            "AND EXISTS (SELECT 1 FROM integration_input ii WHERE ii.integration_id = i.id "
+            "            AND ii.asserted_by <> 'user')"
         ).fetchone()[0]
-        crit("§5.14 okno zdegenerowane nie dostaje relacji (strażnik D-P-I-2)",
+        crit("§5.14 okno zdegenerowane nie dostaje relacji automatu (strażnik D-P-I-2)",
              deg_z_wejsciami == 0)
         nie_light = con.execute(
             "SELECT count(*) FROM integration_input ii JOIN frame f ON f.id = ii.input_frame_id "

@@ -41,7 +41,13 @@
 -- (migracja nie ma prawa rozbrajać kontraktu, na który reszta bazy liczy): wiersze dziecka
 -- przechodzą przez tabelę PRZECHOWALNI bez FK, dziecko znika PRZED rodzicem, a wraca po nim.
 -- Na produkcji obie tabele są puste, więc to formalność — ale migracja ma być poprawna dla
--- DOWOLNYCH danych, nie dla tych, które akurat zastała.
+-- KAŻDYCH danych, jakie ten schemat mógł wyprodukować sensownie.
+--
+-- ŚWIADOMA GRANICA TEJ OBIETNICY: 0002 dopuszczało `master_frame_id` NULL i duplikaty (kolumna
+-- bez NOT NULL i bez UNIQUE, `0002_initial.sql:185`), a docelowa tabela wymaga obu. Baza z takim
+-- wierszem wywali migrację na CONSTRAINT — i ma wywalić. Cichy `GROUP BY`/`WHERE` zgubiłby
+-- integracje bez śladu, a to gorsze niż głośna odmowa: dane, których ten szkielet nigdy nie
+-- dostał (obie tabele były martwe od 0002), nie zasługują na zgadywanie ich tożsamości.
 
 CREATE TABLE _integration_input_hold (
     integration_id INTEGER,

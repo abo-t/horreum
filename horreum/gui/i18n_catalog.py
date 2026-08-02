@@ -701,8 +701,15 @@ CATALOG = {
         "pl": "Co weszło w gotowy obraz — zaznacz JEDEN stos w tabeli",
         "en": "What went into the finished image — select ONE stack in the table",
     },
+    # Odmiana przez `t_plural` [wiz #15]: „Weszło 1 klatek" czytało się jak błąd bazy, a bliźniacza
+    # flaga `grid.lin.flag.twins` w TYM SAMYM panelu odmieniała się poprawnie — rozjazd był widoczny
+    # obok siebie. Godziny idą dodatkowym `kw`, bo forma zależy WYŁĄCZNIE od liczby klatek.
     "grid.lin.head": {
-        "pl": "Weszło {n} klatek · {hours} h", "en": "{n} frames went in · {hours} h",
+        "pl": {"one": "Weszła {n} klatka · {hours} h",
+               "few": "Weszły {n} klatki · {hours} h",
+               "many": "Weszło {n} klatek · {hours} h"},
+        "en": {"one": "{n} frame went in · {hours} h",
+               "other": "{n} frames went in · {hours} h"},
     },
     "grid.lin.confirm": {"pl": "Potwierdź zaznaczone", "en": "Confirm selected"},
     "grid.lin.confirm_tip": {
@@ -718,6 +725,10 @@ CATALOG = {
     },
     "grid.lin.judged_confirmed": {"pl": "Potwierdzono {n}", "en": "Confirmed {n}"},
     "grid.lin.judged_excluded": {"pl": "Odrzucono {n}", "en": "Rejected {n}"},
+    "grid.lin.judged_none": {
+        "pl": "Bez zmian — te klatki miały już taki werdykt",
+        "en": "No change — those frames already carried this verdict",
+    },
     "grid.lin.src.history": {"pl": "plik zeznał", "en": "file testified"},
     "grid.lin.src.window": {"pl": "wynika z czasu", "en": "inferred from time"},
     "grid.lin.src.user": {"pl": "Twoja decyzja", "en": "your decision"},

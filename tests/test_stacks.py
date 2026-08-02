@@ -215,6 +215,10 @@ def test_okno_mieszane_bez_teleskopu_mastera_odmawia_z_wlasnym_powodem(con):
     s = run_stack_lineage(con, now=NOW, xml_reader=_brak_xml)
 
     assert s.reasons == {REASON_TELESCOPE: 1} and s.linked == 0
+    # RECENZJA #11: rozjazd, który skończył się ODMOWĄ, siedzi już w `reasons` — wspólny licznik
+    # meldował go drugi raz jako flagę i kazał raportowi mówić „karta do naprawy" o stosie, przy
+    # którym nie zapisano niczego. Flagą jest wyłącznie rozjazd, który rodowodu NIE zablokował.
+    assert s.telescope_mismatch == 0
 
 
 def test_okna_nierozlaczne_flagowane_po_obu_stronach(con):
@@ -293,6 +297,37 @@ def test_plik_poza_zasiegiem_schodzi_na_okno_i_jest_policzony(con):
     _light(con, "l1", date_obs="2025-08-30T20:30:00")
     s = run_stack_lineage(con, now=NOW, xml_reader=_wybuch)
     assert (s.history_unread, s.by_assert) == (1, {"window": 1})
+
+
+def test_nieprzeczytane_zeznanie_NIE_degraduje_gotowego_rodowodu(con):
+    """RECENZJA P1 #2 — najgroźniejszy szew tego modułu. Gdy plik jest poza zasięgiem, plan spada
+    na samo okno, bo `t.rows is None`; bez strażnika drugi przebieg (np. bez zamontowanego `R:`)
+    NADPISYWAŁBY dowiedziony rodowód kandydatami: `history` → `window`, plus wejścia, których
+    historia nie potwierdza (test zawierania jest wtedy pomijany).
+
+    Dowód pewności ma przeżyć NIEOBECNOŚĆ dowodu — brak odczytu to brak wiedzy, nie nowa wiedza."""
+    m = _master(con)
+    _light(con, "l1", date_obs="2025-08-30T20:30:00", ccd_temp=-10.0)
+    _light(con, "l2", date_obs="2025-08-30T21:30:00", ccd_temp=-9.9)
+    run_stack_lineage(con, now=NOW, xml_reader=lambda _p: _xml_historii([-10.0, -9.9]))
+    assert {r["asserted_by"] for r in inputs_of(con, m)} == {"history"}
+
+    def _wybuch(_p):
+        raise OSError("dysk odłączony")
+
+    s = run_stack_lineage(con, now=NOW, xml_reader=_wybuch)
+    assert {r["asserted_by"] for r in inputs_of(con, m)} == {"history"}   # dowód przeżył
+    assert (s.kept_unread, s.linked_new, s.unlinked) == (1, 0, 0)         # zero ruchu Z WYBORU
+
+
+def test_brak_obecnej_lokacji_liczy_sie_jak_nieodczytane_zeznanie(con):
+    """Klatka mastera bez OBECNEJ kopii to ten sam stan, co błąd odczytu: pliku nie ma pod ręką,
+    więc jego zeznania NIE ZNAMY. Wcześniej ta połowa populacji nie wchodziła do licznika w ogóle
+    — a to na nim stoi decyzja „nie ruszaj gotowego rodowodu"."""
+    _master(con, path=None)
+    _light(con, "l1", date_obs="2025-08-30T20:30:00")
+    s = run_stack_lineage(con, now=NOW, xml_reader=_brak_xml)
+    assert s.history_unread == 1
 
 
 def test_ekspozycja_ze_stosu_jest_TEKSTEM_i_musi_dopasowac(con):

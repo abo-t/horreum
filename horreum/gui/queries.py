@@ -731,18 +731,30 @@ def stack_lineage_head(con, frame_id):
     `twins` = ile INNYCH integracji ma DOKŁADNIE ten sam zbiór wejść (równość `integ_hash`).
     Bez tej liczby flaga „okno nierozłączne" kłamie o przyczynie: zmierzone na 128 realnych stosach
     — z 62 oflagowanych integracji **51 ma bliźniaka o identycznym zbiorze** (to warianty tego
-    samego obrazu: `_ast`, `_drizzle_1x`, `_integration`), a tylko **11** dzieli klatki częściowo
-    z INNYM ujęciem tej nocy. Ostrzeżenie należy się tym jedenastu; reszcie należy się wyjaśnienie.
+    samego obrazu: `_ast`, `_drizzle_1x`, `_integration`), a tylko część dzieli klatki częściowo
+    z INNYM ujęciem tej nocy. Ostrzeżenie należy się tym drugim; pierwszym należy się wyjaśnienie.
+
+    `shared` LICZY REALNE WSPÓŁDZIELENIE, nie nakładanie się okien — i to jest różnica, nie niuans.
+    `integration.ambiguous` mówi o PLANIE („okna tej półki zachodzą"), więc bywa prawdziwe także
+    tam, gdzie całe zachodzenie tłumaczą warianty tego samego obrazu. `shared` pyta o STAN: czy ten
+    sam wiersz `integration_input` należy do integracji o INNYM odcisku. Panel ostrzega z tego
+    pytania, bo tylko ono odróżnia „ten sub policzono dwa razy" od „ten obraz ma drugą wersję".
 
     Zwraca: integration_id, unresolved_reason, degenerate, ambiguous, telescope_mismatch,
     declared_rows, drizzle_inputs, disabled_inputs, tool, window_start, window_end,
-    inputs, excluded, secs, sources (rozdzielone przecinkiem źródła pewności wejść), twins."""
+    inputs, excluded, secs, sources (rozdzielone przecinkiem źródła pewności wejść), twins,
+    shared."""
     return con.execute(
         "SELECT i.id AS integration_id, i.unresolved_reason, i.degenerate, i.ambiguous, "
         "       i.telescope_mismatch, i.declared_rows, i.drizzle_inputs, i.disabled_inputs, "
         "       i.tool, i.window_start, i.window_end, "
         "       (SELECT COUNT(*) FROM integration b WHERE b.integ_hash IS NOT NULL "
         "         AND b.integ_hash = i.integ_hash AND b.id <> i.id) AS twins, "
+        "       (SELECT COUNT(DISTINCT b.id) FROM integration_input ia "
+        "          JOIN integration_input ib ON ib.input_frame_id = ia.input_frame_id "
+        "          JOIN integration b ON b.id = ib.integration_id "
+        "         WHERE ia.integration_id = i.id AND ia.excluded = 0 AND ib.excluded = 0 "
+        "           AND b.id <> i.id AND b.integ_hash IS NOT i.integ_hash) AS shared, "
         "       (SELECT COUNT(*) FROM integration_input ii "
         "         WHERE ii.integration_id = i.id AND ii.excluded = 0) AS inputs, "
         "       (SELECT COUNT(*) FROM integration_input ii "

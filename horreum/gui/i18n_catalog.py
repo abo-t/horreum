@@ -1085,8 +1085,8 @@ CATALOG = {
     # Recepta w komunikacie, nie sam licznik: to jedyny człon raportu, po którym user ma coś ZROBIĆ
     # (podłączyć archiwum), a nie tylko coś wiedzieć.
     "pipeline.fmt.slin.kept_unread": {
-        "pl": "pominięto bez zeznania pliku: {n} — podłącz archiwum i powtórz",
-        "en": "skipped without file testimony: {n} — connect the archive and repeat",
+        "pl": "pominięto, archiwum odłączone: {n} — podłącz i powtórz",
+        "en": "skipped, archive disconnected: {n} — connect it and repeat",
     },
     # DRUGA przyczyna tego samego pominięcia, z INNĄ receptą: pliku nie ma w bibliotece (skasowany
     # roboczy WBPP, stos przeniesiony), więc „podłącz archiwum" kazałoby czekać na coś, co nie

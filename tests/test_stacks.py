@@ -387,6 +387,68 @@ def test_nieprzeczytane_zeznanie_nie_kasuje_faktow_historii(con):
            (przed["declared_rows"], przed["drizzle_inputs"], przed["tool"])
 
 
+def test_potwierdzenie_reka_chroni_rodowod_tak_jak_zeznanie_pliku(con):
+    """TURA 4 #4: predykat ochrony na literale `'history'` gubił werdykt ręki — a potwierdzenie
+    („tak, ta klatka weszła") jest zeznaniem MOCNIEJSZYM niż plik. Stos potwierdzony ręką stawał
+    się nieochroniony i przy powodzie z bazy dostawał `unresolved_reason` obok niewykluczonych
+    wierszy `user`, czyli dokładnie ten stan, który tura 2 nazwała defektem — a bramka §5.14 jest
+    na niego ślepa z założenia (`asserted_by <> 'user'`)."""
+    m = _master(con)
+    fid = _light(con, "l1", date_obs="2025-08-30T20:30:00")
+    run_stack_lineage(con, now=NOW, xml_reader=_brak_xml)
+    iid = _integracja(con, m)["id"]
+    repo.judge_integration_input(con, integration_id=iid, input_frame_id=fid,
+                                 excluded=False, now=NOW)          # człowiek POTWIERDZA
+
+    con.execute("UPDATE frame SET object_id = NULL WHERE id = ?", (m,))
+    con.commit()
+
+    def _wybuch(_p):
+        raise OSError("dysk odłączony")
+
+    s = run_stack_lineage(con, now=NOW, xml_reader=_wybuch)
+    assert _integracja(con, m)["unresolved_reason"] is None
+    assert len(inputs_of(con, m)) == 1
+    assert s.kept_unread == 1 and s.by_assert == {"user": 1}
+
+
+def test_odrzucenie_wszystkiego_nie_kasuje_faktow_zeznania_w_glowie(con):
+    """TURA 4 #3: „czy są zapisane fakty zeznania" (głowa) NIE zależy od tego, czy jakikolwiek
+    wiersz przeżył. Stos, z którego człowiek odrzucił wszystkie kandydatury, wciąż ma
+    `declared_rows` z czasu, gdy plik był czytelny — a warunek `EXISTS` na wierszach kasował je
+    przez `None` w UPDATE, wskrzeszając defekt naprawiony turę wcześniej."""
+    m = _master(con)
+    fid = _light(con, "l1", date_obs="2025-08-30T20:30:00", ccd_temp=-10.0)
+    run_stack_lineage(con, now=NOW, xml_reader=lambda _p: _xml_historii([-10.0]))
+    przed = _integracja(con, m)
+    assert przed["declared_rows"] == 1
+    repo.judge_integration_input(con, integration_id=przed["id"], input_frame_id=fid,
+                                 excluded=True, now=NOW)           # człowiek ODRZUCA wszystko
+
+    def _wybuch(_p):
+        raise OSError("dysk odłączony")
+
+    run_stack_lineage(con, now=NOW, xml_reader=_wybuch)
+    po = _integracja(con, m)
+    assert (po["declared_rows"], po["tool"]) == (przed["declared_rows"], przed["tool"])
+
+
+def test_dwie_przyczyny_pominiecia_licza_sie_osobno(con):
+    """TURA 4 #1: `no_location` liczy CAŁĄ populację, a `kept_unread` tylko pominiętych — próg
+    porównujący te dwa potrafił wskazać receptę stosu, którego wcale nie pominięto. Recepty są
+    różne („podłącz archiwum" vs „puść skan"), więc licznik pominiętych bez kopii jest osobny."""
+    m = _master(con)
+    _light(con, "l1", date_obs="2025-08-30T20:30:00", ccd_temp=-10.0)
+    run_stack_lineage(con, now=NOW, xml_reader=lambda _p: _xml_historii([-10.0]))
+    assert {r["asserted_by"] for r in inputs_of(con, m)} == {"history"}
+    con.execute("UPDATE location SET present = 0 WHERE frame_id = ?", (m,))   # kopia znika
+    con.commit()
+
+    s = run_stack_lineage(con, now=NOW, xml_reader=_brak_xml)
+    assert (s.kept_unread, s.kept_no_location) == (1, 1)   # pominięty Z POWODU braku kopii
+    assert s.no_location == 1
+
+
 def test_brak_obecnej_lokacji_liczy_sie_jak_nieodczytane_zeznanie(con):
     """Klatka mastera bez OBECNEJ kopii to ten sam stan, co błąd odczytu: pliku nie ma pod ręką,
     więc jego zeznania NIE ZNAMY. Wcześniej ta połowa populacji nie wchodziła do licznika w ogóle

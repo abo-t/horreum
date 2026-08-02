@@ -759,10 +759,13 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
                     nota=" — reszta to KANDYDACI z okna, nie fakty")
         crit("§5.14 rodowód idempotentny (2. przebieg: zero relacji, zero eventów zapisu)",
              slin_idempotent is True)
-        # OSOBNE kryterium, bo to osobny fakt: przebieg, który pominął stosy bez zeznania pliku,
-        # NIE ZMIERZYŁ całej populacji — a jego zerowe delty wyglądają identycznie jak zerowe
-        # delty z idempotencji. Sklejone razem dawały czerwień o fałszywej przyczynie.
-        crit(f"§5.14 przebieg zmierzył CAŁĄ populację (pominiętych bez zeznania: {slin_kept})",
+        # DWA kryteria, bo „nic nie pominąłem" jest WĘŻSZE niż „przeczytałem wszystko": stos BEZ
+        # wcześniejszego rodowodu nigdy nie wchodzi do `kept_unread` (nie ma czego chronić), więc
+        # sam ten licznik byłby zielony także wtedy, gdy przebieg nie przeczytał ANI JEDNEGO
+        # zeznania. Kotwica jest realna, nie ozdobna: korpus to 128/128 czytelnych `.xisf`.
+        crit(f"§5.14 przebieg przeczytał zeznanie KAŻDEGO stosu (nieodczytanych: "
+             f"{slin.history_unread})", slin.history_unread == 0)
+        crit(f"§5.14 żaden gotowy rodowód nie został pominięty (pominiętych: {slin_kept})",
              slin_kept == 0)
 
     # §5.9 encje == eventy (co do sztuki) — audyt jednej klingi kompletny

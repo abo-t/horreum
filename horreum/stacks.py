@@ -78,6 +78,9 @@ class StackLineageSummary:
     history_unread: int = 0    # plik nieosiągalny/nieczytelny (błąd odczytu ALBO brak lokacji)
     no_location: int = 0       # …z tego: klatka NIE MA obecnej kopii — inna recepta dla człowieka
                                # („puść skan/Obecność") niż odłączone archiwum („podłącz i powtórz")
+    kept_no_location: int = 0  # …z POMINIĘTYCH: te bez obecnej kopii. Osobno od `no_location`,
+                               # bo tamten liczy CAŁĄ populację — próg na dwóch różnych populacjach
+                               # potrafił wskazać receptę stosu, którego wcale nie pominięto
     kept_unread: int = 0       # gotowy rodowód ZOSTAWIONY nietknięty, bo zeznania nie dało się
                                # przeczytać — delta zapisu jest wtedy zerowa Z WYBORU, nie z braku
                                # zmian, i bez tego licznika wyglądałaby jak idempotencja
@@ -185,6 +188,13 @@ def _shelf_ambiguous(plany):
         if p["start"] is None or p["end"] is None:
             continue
         polki.setdefault(p["shelf"], []).append(p)
+    # GRANICA ZNANA, NIE ZAŁATANA: stos pominięty strażnikiem 4 nie dostaje przepisanej głowy, więc
+    # dla pary nierozłącznych okien, w której jedna strona jest pominięta, flaga trafia do bazy
+    # TYLKO po jednej stronie — most do planera (I-2e) policzyłby wtedy wspólny sub dwa razy.
+    # Warunek wystąpienia jest wąski: obie strony muszą leżeć na TEJ SAMEJ półce, a plik jednej być
+    # nieczytelny przy czytelnym drugim. Zmierzona populacja: 0 (jedyne pominięcia na realnym
+    # archiwum to 6 stosów historii, każdy na własnej półce). Domknąć przy I-2e, gdy flaga zacznie
+    # cokolwiek liczyć — dziś kod na populację zerową byłby zgadywaniem.
     for grupa in polki.values():
         for i, a in enumerate(grupa):
             for b in grupa[i + 1:]:
@@ -281,6 +291,10 @@ def run_stack_lineage(con, *, now, actor="stacks", xml_reader=None, progress=Non
         if progress is not None:
             progress(i, len(rows), row["frame_id"])
     ambi = _shelf_ambiguous(plany)
+    # KTÓRE stosy pominięto — nie tylko ILE. „Pominięto 6" bez listy jest receptą bez adresu:
+    # z bazy nie da się ich odtworzyć (głowy nietknięte, brak markera), więc jedyną drogą byłoby
+    # zgadywanie po gridzie. Lista idzie do TEGO SAMEGO eventu zbiorczego (§6), nie do osobnego.
+    pominiete = []
 
     for p in plany:
         t = p["testimony"]
@@ -310,15 +324,22 @@ def run_stack_lineage(con, *, now, actor="stacks", xml_reader=None, progress=Non
         #     pliku skasowałby je, choć nikt ich nie obalił.
         # Reszta głowy jedzie normalnie, bo wynika z bazy.
         stan = _zapisany_stan(con, p["frame_id"]) if p["history_unread"] else None
-        chroniony = stan is not None and stan["zrodlo"] == "history"
+        # CHRONIONY = rodowód, który NIE stoi na samym oknie. Predykat na literale `'history'`
+        # gubił werdykt ręki: potwierdzenie kandydata („tak, ta klatka weszła") jest zeznaniem
+        # MOCNIEJSZYM niż plik, a zdejmowało ochronę — bo `user` to nie `history`. Kanon precedencji
+        # żyje w klindze (`repo.link_integration`, RANGA); tu pytamy o jego dopełnienie: samo okno
+        # przebieg umie policzyć bez pliku, wszystko inne — nie.
+        chroniony = stan is not None and stan["zrodlo"] not in (None, "window")
         if chroniony and p["reason"]:
             # JEDYNY przypadek, w którym trzeba zostawić stos w spokoju w całości: powodu nie da
             # się zapisać, nie kasując wierszy (inwariant §5.14 „powód wyklucza wejścia automatu"),
             # a kasować ich nie wolno, bo to dowód. Liczniki idą wtedy ze STANU — rodowód istnieje,
             # tylko nie myśmy go w tym przebiegu ustalili.
             s.kept_unread += 1
+            s.kept_no_location += p["no_location"]
+            pominiete.append(p["frame_id"])
             s.linked += 1
-            _bump(s.by_assert, "history")
+            _bump(s.by_assert, stan["zrodlo"])
             s.ambiguous += bool(stan["ambiguous"])
             s.telescope_mismatch += bool(stan["telescope_mismatch"])
             continue
@@ -328,7 +349,7 @@ def run_stack_lineage(con, *, now, actor="stacks", xml_reader=None, progress=Non
             s.linked += 1
             # Źródło ze STANU, gdy wiersze zostają nietknięte: one naprawdę są `history`, choć plan
             # — bez pliku — umiałby powiedzieć tylko „window".
-            _bump(s.by_assert, "history" if chroniony else p["asserted_by"])
+            _bump(s.by_assert, stan["zrodlo"] if chroniony else p["asserted_by"])
         s.ambiguous += p["frame_id"] in ambi
         # ROZJAZD TELESKOPU LICZYMY TYLKO TAM, GDZIE RODOWÓD POWSTAŁ — bo tylko tam jest FLAGĄ
         # („relacje są, ale karta się nie zgadza"). Rozjazd, który skończył się ODMOWĄ, siedzi już
@@ -338,8 +359,10 @@ def run_stack_lineage(con, *, now, actor="stacks", xml_reader=None, progress=Non
             s.telescope_mismatch += 1
         wejscia = [r["frame_id"] for r in p["inputs"]]
         # Fakty zeznania: ze STANU, gdy pliku nie przeczytaliśmy (nikt ich nie obalił), z pliku
-        # w każdym innym wypadku. Odcisk chronionego rodowodu też zostaje — opisuje wiersze, które
-        # zostają, a nie okno, które właśnie policzyliśmy.
+        # w każdym innym wypadku. Odcisk chronionego rodowodu też zostaje — to odcisk OSTATNIEGO
+        # DOPASOWANIA AUTOMATU (nie zbioru wierszy niewykluczonych: odrzucenie ręką zostawia wiersz
+        # w tabeli, a odcisku nie przelicza), więc zastąpienie go odciskiem świeżo policzonego okna
+        # byłoby podmianą faktu o przeszłości na fakt o czymś innym.
         if stan is not None:
             tool_v, rows_v = stan["tool"], stan["declared_rows"]
             driz_v, dis_v = stan["drizzle_inputs"], stan["disabled_inputs"]
@@ -358,6 +381,8 @@ def run_stack_lineage(con, *, now, actor="stacks", xml_reader=None, progress=Non
             unresolved_reason=p["reason"], now=now, actor=actor)
         if chroniony:
             s.kept_unread += 1          # głowa zaktualizowana, WIERSZE nietknięte
+            s.kept_no_location += p["no_location"]
+            pominiete.append(p["frame_id"])
         else:
             s.linked_new += _zapisz_wejscia(con, iid, wejscia, p["asserted_by"],
                                             now=now, actor=actor)
@@ -372,7 +397,7 @@ def run_stack_lineage(con, *, now, actor="stacks", xml_reader=None, progress=Non
         "SELECT count(*) FROM integration_input WHERE excluded = 0").fetchone()[0]
     s.reasons = dict(sorted(s.reasons.items()))
     repo.flag_stack_lineage_summary(con, sorted(s.reasons.items()), now, actor=actor,
-                                    kept_unread=s.kept_unread)
+                                    kept_unread=s.kept_unread, kept_frames=pominiete)
     return s
 
 
@@ -397,17 +422,24 @@ def _zapisany_stan(con, master_frame_id):
     stawia NIE-`user` pierwszy, bo pytamy „na czym stoi ten rodowód", nie „czy ktoś go dotknął".
 
     Pozostałe pola to FAKTY ZEZNANIA PLIKU plus odcisk — wartości, których przebieg bez pliku nie
-    ma czym zastąpić, a `None` z nieodczytanego nagłówka by je skasował. Pytamy po KLATCE MASTERA,
-    bo wołający nie zna jeszcze `integration.id` — i nie ma go poznać, skoro właśnie decyduje,
-    czy w ogóle pisać."""
+    ma czym zastąpić, a `None` z nieodczytanego nagłówka by je skasował.
+
+    DWA PYTANIA, DWA ZAKRESY — i to jest cała subtelność tej funkcji. „Czy są zapisane fakty
+    zeznania" (głowa) NIE zależy od tego, czy jakikolwiek wiersz przeżył: stos, z którego człowiek
+    odrzucił wszystkie kandydatury, wciąż ma w głowie `declared_rows` z czasu, gdy plik był
+    czytelny. Warunek `EXISTS` na wierszach kasował te fakty przez `None` w UPDATE — czyli
+    wskrzeszał defekt, który sam ten moduł już raz naprawiał. Głowę czytamy więc BEZ warunku,
+    a brak rodowodu sygnalizuje `zrodlo IS NULL`.
+
+    Pytamy po KLATCE MASTERA, bo wołający nie zna jeszcze `integration.id` — i nie ma go poznać,
+    skoro właśnie decyduje, czy w ogóle pisać."""
     return con.execute(
         "SELECT i.tool, i.declared_rows, i.drizzle_inputs, i.disabled_inputs, i.integ_hash, "
         "       i.ambiguous, i.telescope_mismatch, "
         "       (SELECT ii.asserted_by FROM integration_input ii "
         "         WHERE ii.integration_id = i.id AND ii.excluded = 0 "
         "         ORDER BY (ii.asserted_by = 'user'), ii.asserted_by LIMIT 1) AS zrodlo "
-        "FROM integration i WHERE i.master_frame_id = ? AND EXISTS "
-        "  (SELECT 1 FROM integration_input ii WHERE ii.integration_id = i.id AND ii.excluded = 0)",
+        "FROM integration i WHERE i.master_frame_id = ?",
         (master_frame_id,)).fetchone()
 
 

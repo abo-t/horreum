@@ -1436,14 +1436,16 @@ def judge_integration_input(con, *, integration_id, input_frame_id, excluded, no
     return True
 
 
-def flag_stack_lineage_summary(con, items, now, actor="stacks", kept_unread=0):
+def flag_stack_lineage_summary(con, items, now, actor="stacks", kept_unread=0, kept_frames=()):
     """Stosy BEZ zapisanych wejść — JEDEN `event(integration.lineage_summary)` z licznością per
     powód (wzorzec `flag_calibration_lineage_summary`). Stan (`unresolved_reason` niepuste) SAM
     jest deltą; pusty materiał → bez eventu.
 
     `kept_unread` (stosy, których rodowodu przebieg ŚWIADOMIE nie ruszył, bo nie przeczytał pliku)
     wchodzi do payloadu i SAM wystarcza, żeby event powstał: masowa decyzja „nie dotykam N gotowych
-    rodowodów" jest faktem o przebiegu, a bez śladu w dzienniku wyglądałaby jak brak roboty."""
+    rodowodów" jest faktem o przebiegu, a bez śladu w dzienniku wyglądałaby jak brak roboty.
+    `kept_frames` niesie ICH KLATKI — sam licznik jest receptą bez adresu, bo stanu pominiętych nie
+    da się odróżnić od stanu przeliczonych (głowy nietknięte, żadnego markera w tabeli)."""
     items = list(items)
     if not items and not kept_unread:
         return
@@ -1451,7 +1453,8 @@ def flag_stack_lineage_summary(con, items, now, actor="stacks", kept_unread=0):
         emit_event(con, actor=actor, verb="integration.lineage_summary", target="frame:*", now=now,
                    payload={"distinct": len(items), "frames": sum(n for _, n in items),
                             "items": [[reason, n] for reason, n in items],
-                            "kept_unread": kept_unread})
+                            "kept_unread": kept_unread,
+                            "kept_frames": list(kept_frames)})
 
 
 # ═══════════════════════════════════════════════ 1.8 kuratela celów + park (planer T4)

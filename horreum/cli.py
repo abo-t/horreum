@@ -925,13 +925,16 @@ def _format_stack_lineage(db_path, s):
                      f"{s.telescope_mismatch} — karta do naprawy")
     if s.history_unread:
         lines.append(f"  historia nieodczytana (plik poza zasiegiem): {s.history_unread}")
-    if s.kept_unread:
-        # Dwie przyczyny, dwie recepty: „podłącz archiwum" jest nieprawdą dla stosu, którego
-        # w bibliotece NIE MA (skasowany plik roboczy WBPP, stos przeniesiony).
-        recepta = ("pu:sc skan/Obecnosc" if s.no_location >= s.kept_unread
-                   else "podlacz archiwum i powtorz")
-        lines.append(f"  gotowy rodowod ZOSTAWIONY nietkniety (brak zeznania pliku): "
-                     f"{s.kept_unread} (bez obecnej kopii: {s.no_location}) — {recepta}")
+    # Dwie przyczyny, dwie recepty — i ROZBICIE zamiast progu: „podłącz archiwum" jest nieprawdą
+    # dla stosu, którego w bibliotece NIE MA (skasowany plik roboczy WBPP, stos przeniesiony),
+    # a przy mieszance żaden pojedynczy komunikat nie jest prawdziwy dla obu połówek.
+    odlaczone = s.kept_unread - s.kept_no_location
+    if odlaczone:
+        lines.append(f"  gotowy rodowod ZOSTAWIONY nietkniety (archiwum odlaczone): "
+                     f"{odlaczone} — podlacz i powtorz")
+    if s.kept_no_location:
+        lines.append(f"  gotowy rodowod ZOSTAWIONY nietkniety (brak obecnej kopii pliku): "
+                     f"{s.kept_no_location} — pusc skan albo Obecnosc")
     for powod, n in sorted(s.reasons.items()):
         lines.append(f"  bez rodowodu [{powod}]: {n} — {_STACK_REASON_PROZA.get(powod, '')}")
     return "\n".join(lines)

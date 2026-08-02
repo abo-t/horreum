@@ -813,10 +813,13 @@ class PipelineView(QWidget):
         # zostawia gotowy rodowód nietknięty, gdy pliku nie ma pod ręką (odłączone archiwum) —
         # bez tego członu okno pokazywało te same liczby co po realnym przeliczeniu, a jedyna
         # wzmianka szła do CLI, którego wydanie w ogóle nie ma (onefile jest sam GUI).
-        if s.kept_unread:
-            klucz = ("pipeline.fmt.slin.kept_no_location" if s.no_location >= s.kept_unread
-                     else "pipeline.fmt.slin.kept_unread")
-            czesci.append(i18n.t(klucz, n=s.kept_unread))
+        # ROZBICIE, nie próg: przy mieszance przyczyn żaden pojedynczy komunikat nie jest
+        # prawdziwy dla obu połówek, a recepta jest tu ważniejsza niż liczba.
+        if s.kept_unread - s.kept_no_location:
+            czesci.append(i18n.t("pipeline.fmt.slin.kept_unread",
+                                 n=s.kept_unread - s.kept_no_location))
+        if s.kept_no_location:
+            czesci.append(i18n.t("pipeline.fmt.slin.kept_no_location", n=s.kept_no_location))
         return i18n.t("pipeline.fmt.slin.prefix") + " · ".join(czesci)
 
     def _format_stacks(self, s):

@@ -6,6 +6,10 @@ bajtów (sekcja DANYCH HDU / attachment XISF) w JEDNYM przebiegu strumieniowym �
 wycinka znane z nagłówka PRZED odczytem treści, więc jeden odczyt aktualizuje oba hasze.
 Pliki otwierane WYŁĄCZNIE do odczytu binarnego ('rb') — faza skanu Horreum niczego nie
 zapisuje na dysk usera (inwariant append-only, PLAN §6).
+
+`sha1_of_set` NIE dotyka dysku — to odcisk ZBIORU tożsamości (I-2c): materiał do porównania
+„czy dopasowanie wyszło tak samo jak poprzednim razem". Mieszka tu, bo pytanie jest to samo
+(„czy treść jest ta sama"), tylko przedmiotem jest zbiór, nie plik.
 """
 import hashlib
 
@@ -44,3 +48,18 @@ def sha1_of_span(path, span, buf=1 << 20):
             h_file.update(b)
             pos += len(b)
     return h_file.hexdigest(), (h_span.hexdigest() if h_span is not None else None)
+
+
+def sha1_of_set(values):
+    """Odcisk ZBIORU tożsamości (I-2c) — `None` dla zbioru pustego.
+
+    Wejście traktujemy jak ZBIÓR: duplikaty znoszone, kolejność bez znaczenia (sort przed
+    haszowaniem). Dzięki temu ten sam zestaw wejść dopasowany w innej kolejności daje ten sam
+    odcisk, a odcisk zmienia się DOKŁADNIE wtedy, gdy zmienił się skład — po to jest liczony.
+
+    Rozdzielamy elementy bajtem `\\n`, który w sha1 heksowym nie występuje; bez separatora
+    ['ab','c'] i ['a','bc'] dałyby jeden odcisk."""
+    unikaty = sorted({str(v) for v in values})
+    if not unikaty:
+        return None
+    return hashlib.sha1("\n".join(unikaty).encode("utf-8")).hexdigest()

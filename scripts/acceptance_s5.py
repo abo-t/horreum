@@ -27,6 +27,9 @@ Tryb HYBRYDOWY (odpowiednik replay+subset ze skilla `pipeline-replay-validation`
       ZAKRES — dawca to archiwum FITS, `--xisf-root` to archiwum XISF, a to jest drzewo poza
       archiwum. Uruchomiony BEZ `--xisf-root` daje bazę, której ta bramka nie zna (kotwice STOSÓW
       są liczone na stanie FULL) — skrypt odmawia takiego przebiegu zamiast liczyć nieporównywalne.
+  (U) RODOWÓD STOSÓW (razem z `--stacks-root`) — `run_stack_lineage` (I-2c): co weszło w gotowy
+      obraz. Osobna faza od (L), bo to inna oś (tam „czym skalibrowano klatkę", tu „z czego zrobiono
+      obraz") i inne źródło pewności: historia PixInsighta DOWODZI, okno tylko WSKAZUJE kandydatów.
   (C) KRYTERIA — stage-aware (import / full / full+stosy): zestawia aktualia z EXP_* PF-3+PF-4+P-I.
   (S) SUBSET (opcja `--subset DIR`) — realny `scan_tree` małego katalogu do OSOBNEJ work.db:
       dowód, że czytniki astropy/XISF + sha1 działają na realnych bajtach; tu (i tylko tu) realny
@@ -64,6 +67,7 @@ from horreum.import_fitsmirror import (                                   # noqa
 from horreum.resolver import (                                    # noqa: E402
     NO_OBJECT_CARD_FILETYPES, delta_report, run_resolver)
 from horreum.scan import canonize_root, scan_stacks, scan_tree    # noqa: E402
+from horreum.stacks import run_stack_lineage                      # noqa: E402
 from horreum.volumes import volume_serial                         # noqa: E402
 
 # ── Kotwice EXP_* PF-3 (dawca) + PF-4 (doskan drzewa `R:`), z horreum_pf4.db 2026-07-02 ──────────
@@ -205,6 +209,22 @@ EXP_NAMELESS_STACKS = 18       # gotowe stosy bez karty `OBJECT` i bez obiektu (
 # dostało kartę. Ta sama uwaga dotyczy `EXP_CONFIG_REVIEW_STACKS` (7 stosów bez `TELESCOP`).
 EXP_NO_GPS_STACKS = 402        # 274 z FULL + 128 stosów. PixInsight NIE przenosi `SITELAT`/`SITELONG`
 # do produktu integracji — zmierzone 0/128, więc CAŁA populacja stosów jest poza osią obserwatorium.
+# ── Kotwice RODOWODU STOSÓW (I-2c, faza (U)) — ZMIERZONE przebiegiem 2026-08-02 ──────────────────
+# Ostrożność, która okazała się niepotrzebna, ale zostaje zapisana: nie wolno było przepisać liczb
+# z sondy na kopii ŻYWEJ pf4, bo baza akceptacji stoi na ZAMROŻONYM dawcy i zna inne nazwy obiektów
+# niż archiwum po naprawach writebacku („Mur"/„Snapshot" zamiast NGC7000/IC1795), a oś obiektu jest
+# WARUNKIEM doboru okna. Pomiar dał liczby IDENTYCZNE z sondą (81/3367/6) — bo żaden stos nie celuje
+# w obiekt, którego nazwę naprawiano. To ZBIEG OKOLICZNOŚCI tych danych, nie reguła: pierwszy stos
+# NGC7000 rozjedzie te dwa światy i wtedy ta kotwica ma zaświecić, a nie zostać „poprawiona".
+EXP_SLIN_LINKED = 81           # integracje z co najmniej jednym wejściem (z 128 stosów)
+EXP_SLIN_INPUTS = 3367         # wierszy `integration_input` razem
+EXP_SLIN_HISTORY = 6           # …z tego DOWIEDZIONE zeznaniem pliku; 75 to KANDYDACI z okna.
+# Reszta populacji to trzy rozłączne kubełki „nie wiem": okno zdegenerowane 24, brak obiektu 18,
+# okno puste 5 (81 + 47 == 128 — partycję pilnuje osobne kryterium, nie te trzy liczby).
+# ⚠️ Te kotwice są RUCHOME tak samo jak `EXP_NAMELESS_STACKS`: stoją na ŻYWYM skanie drzewa obróbki,
+# a nie na zamrożonym dawcy. Naprawa karty `OBJECT` w stosie przesunie 18 → mniej i podniesie
+# `linked`; przeniesienie stosów do `R:\ASTRO_\STACKS` zmieni ścieżki, ale nie liczby (tożsamość
+# integracji to KLATKA, nie ścieżka). Zmiana = zmierz i podbij z notą, nigdy „napraw do zera".
 EXP_CONFIG_REVIEW_STACKS = 8   # 1 z FULL (`unknown` masterflat A7R3) + 7 stosów bez `TELESCOP`.
 # Siedem plików po integracji nie niesie karty teleskopu, więc nie ma z czego powołać osi — stan
 # UCZCIWY, dokładnie jak 432 RAW-y obok.
@@ -381,9 +401,43 @@ def lineage(con, now, out):
     return s1, idem
 
 
+# ── (U) RODOWÓD STOSÓW: run_stack_lineage + idempotencja (I-2c, P-I) ─────────────────────────────
+_SLIN_VERBS = ("integration.recorded", "integration.updated", "integration.linked",
+               "integration.unlinked")
+
+
+def stack_lineage(con, now, out):
+    """Rodowód stosów na gotowym stanie (PO (T) i po grouperze/resolverze — dobór stoi na osi
+    obiektu i osi teleskopu). Drugi przebieg jest BRAMKĄ jak w (K)/(L): zero nowych relacji, zero
+    nowych eventów zapisu, tyle samo wierszy.
+
+    UWAGA NA WYBÓR ŚWIADKA: `integration.lineage_summary` emituje się PRZY KAŻDYM przebiegu (to
+    event audytowy o STANIE, jak `review_summary`), więc do dowodu idempotencji bierzemy WYŁĄCZNIE
+    czasowniki ZAPISU. Ta sama pułapka co §5.6 — kotwica na `count(event)` mierzy liczbę przebiegów,
+    nie liczbę spraw. Zwraca `(summary, idempotent)`."""
+    out("")
+    out("== (U) RODOWÓD STOSÓW: run_stack_lineage + idempotencja ==")
+    s1 = run_stack_lineage(con, now=now)
+    out(f"  przebieg 1: stosy={s1.stacks} z_rodowodem={s1.linked} wejsc={s1.inputs} "
+        f"zrodla={s1.by_assert} powody={s1.reasons}")
+    out(f"    okna nierozlaczne={s1.ambiguous} rozjazd_teleskopu={s1.telescope_mismatch} "
+        f"historia_nieodczytana={s1.history_unread}")
+    przed = {v: con.execute("SELECT count(*) FROM event WHERE verb=?", (v,)).fetchone()[0]
+             for v in _SLIN_VERBS}
+    rows_przed = con.execute("SELECT count(*) FROM integration_input").fetchone()[0]
+    s2 = run_stack_lineage(con, now=now)
+    po = {v: con.execute("SELECT count(*) FROM event WHERE verb=?", (v,)).fetchone()[0]
+          for v in _SLIN_VERBS}
+    rows_po = con.execute("SELECT count(*) FROM integration_input").fetchone()[0]
+    idem = (not s2.linked_new and not s2.unlinked and po == przed and rows_przed == rows_po)
+    out(f"  przebieg 2 (idempotencja): linked_new={s2.linked_new} unlinked={s2.unlinked} "
+        f"wiersze {rows_przed}=={rows_po}")
+    return s1, idem
+
+
 # ── (C) KRYTERIA §5 na bazie zbudowanej z dawcy (stage-aware: import vs full) ─────────────────────
 def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, lin_idempotent=None,
-                   stacks=None, stacks_idempotent=None):
+                   stacks=None, stacks_idempotent=None, slin=None, slin_idempotent=None):
     results = []                                    # (etykieta, PASS/FAIL)
 
     def crit(label, cond):
@@ -645,6 +699,51 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
         # raz groził skanowi (guard serialu w Dostawie).
         crit("§5.13 droga idempotentna (2. przebieg: wszystko pominięte, zero DML)",
              stacks_idempotent is True)
+
+    # §5.14 RODOWÓD STOSÓW (I-2c, P-I) — bramka pyta o INWARIANTY, nie tylko o liczby. Powód:
+    # kotwice tego toru zależą od osi obiektu, a ta zależy od tego, czy nagłówki były naprawiane;
+    # inwariant („każdy stos ma wiersz", „wejście to zawsze light", „bez wejść ⇒ jest POWÓD")
+    # obroni się na każdej bazie, a kotwica dopiero po pomiarze.
+    if ze_stosami and slin is not None:
+        out(f"\n§5.14 rodowod stosow: z_rodowodem={slin.linked}/{slin.stacks} wejsc={slin.inputs} "
+            f"zrodla={slin.by_assert} powody={slin.reasons}")
+        n_int = con.execute("SELECT count(*) FROM integration").fetchone()[0]
+        n_ml = con.execute("SELECT count(*) FROM frame WHERE kind='master_light'").fetchone()[0]
+        # KAŻDY stos dostaje wiersz — także ten bez wejść. „Nie wiem z czego" jest faktem
+        # i musi być odróżnialne od „jeszcze nie liczyliśmy" (milczenie obu wyglądałoby tak samo).
+        crit(f"§5.14 każdy stos ma wiersz integracji ({n_int} == {n_ml})", n_int == n_ml)
+        bez_powodu = con.execute(
+            "SELECT count(*) FROM integration i WHERE i.unresolved_reason IS NULL "
+            "AND NOT EXISTS (SELECT 1 FROM integration_input ii WHERE ii.integration_id = i.id)"
+        ).fetchone()[0]
+        crit("§5.14 integracja bez wejść ZAWSZE niesie powód (zero cichych pustek)",
+             bez_powodu == 0)
+        z_wejsciami_i_powodem = con.execute(
+            "SELECT count(*) FROM integration i WHERE i.unresolved_reason IS NOT NULL "
+            "AND EXISTS (SELECT 1 FROM integration_input ii WHERE ii.integration_id = i.id)"
+        ).fetchone()[0]
+        crit("§5.14 powód wyklucza wejścia (odmowa == ZERO relacji)", z_wejsciami_i_powodem == 0)
+        # Strażnik okna zdegenerowanego — sedno D-P-I-2: taki stos ma NIE dostać ani jednej relacji.
+        deg_z_wejsciami = con.execute(
+            "SELECT count(*) FROM integration i WHERE i.degenerate = 1 "
+            "AND EXISTS (SELECT 1 FROM integration_input ii WHERE ii.integration_id = i.id)"
+        ).fetchone()[0]
+        crit("§5.14 okno zdegenerowane nie dostaje relacji (strażnik D-P-I-2)",
+             deg_z_wejsciami == 0)
+        nie_light = con.execute(
+            "SELECT count(*) FROM integration_input ii JOIN frame f ON f.id = ii.input_frame_id "
+            "WHERE f.kind <> 'light'").fetchone()[0]
+        crit("§5.14 wejściem jest WYŁĄCZNIE light (stos nie wchodzi w stos)", nie_light == 0)
+        # Partycja: każdy stos jest ALBO z rodowodem, ALBO w dokładnie jednym kubełku powodu.
+        crit(f"§5.14 partycja domyka populację ({slin.linked} + {sum(slin.reasons.values())} "
+             f"== {slin.stacks})", slin.linked + sum(slin.reasons.values()) == slin.stacks)
+        crit_anchor("§5.14 integracje z rodowodem", EXP_SLIN_LINKED, slin.linked)
+        crit_anchor("§5.14 wejść razem", EXP_SLIN_INPUTS, slin.inputs)
+        crit_anchor("§5.14 dowiedzione historią pliku", EXP_SLIN_HISTORY,
+                    slin.by_assert.get("history", 0),
+                    nota=" — reszta to KANDYDACI z okna, nie fakty")
+        crit("§5.14 rodowód idempotentny (2. przebieg: zero relacji, zero eventów zapisu)",
+             slin_idempotent is True)
 
     # §5.9 encje == eventy (co do sztuki) — audyt jednej klingi kompletny
     out("\n§5.9 encje == eventy:")
@@ -932,9 +1031,15 @@ def main(argv=None):
 
     cal, cal_idem = calibrate(con, now, out)
     lin, lin_idem = lineage(con, now, out)
+    # Rodowód stosów PO kalibracji i rodowodzie kalibracji — kolejność bez znaczenia dla wyniku
+    # (osie rozłączne), ale trzyma czytelny porządek raportu: najpierw archiwum, potem produkty.
+    slin = slin_idem = None
+    if args.stacks_root:
+        slin, slin_idem = stack_lineage(con, now, out)
     results = check_criteria(con, summary, out, cal=cal, cal_idempotent=cal_idem,
                              lin=lin, lin_idempotent=lin_idem,
-                             stacks=stacks, stacks_idempotent=stacks_idem)
+                             stacks=stacks, stacks_idempotent=stacks_idem,
+                             slin=slin, slin_idempotent=slin_idem)
     con.close()
 
     subset_ok = True

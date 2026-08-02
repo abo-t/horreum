@@ -80,18 +80,64 @@ def test_telescope_canon_nocase_i_camera_model_unique(tmp_path):
 
 
 def test_szkielet_przyszly_pusty(tmp_path):
-    """calibration/integration* istnieją, ale puste (nie projektujemy pod dane, których nie ma)."""
+    """Świeża baza startuje z PUSTYMI tabelami rodowodu — populację robi dopiero przebieg.
+
+    Wcześniejsze uzasadnienie („nie projektujemy pod dane, których nie ma") STRACIŁO WAŻNOŚĆ
+    2026-08-02: `calibration` ma pisarza od C4, `integration`/`integration_input` od I-2c, a 0012
+    dołożyło im kontrakt. Test zostaje w innej roli — pilnuje, że sama MIGRACJA niczego nie
+    wstawia (backfill „na oko" byłby zgadywaniem rodowodu, którego nikt nie zmierzył)."""
     con = db.open_db(str(tmp_path / "h.db"))
     for t in ("calibration", "integration", "integration_input"):
         assert con.execute(f"SELECT count(*) FROM {t}").fetchone()[0] == 0
     con.close()
 
 
-def test_user_version_v11_po_migracji(tmp_path):
-    """0011 podnosi user_version do 11 (świeża baza leci 0002→…→0011 sekwencyjnie; planer T4)."""
+def test_user_version_v12_po_migracji(tmp_path):
+    """0012 podnosi user_version do 12 (świeża baza leci 0002→…→0012 sekwencyjnie; rodowód stosów)."""
     con = db.open_db(str(tmp_path / "h.db"))
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 11
-    assert db.SCHEMA_VERSION == 11
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 12
+    assert db.SCHEMA_VERSION == 12
+    con.close()
+
+
+def test_0012_integration_rebuild_kontrakt(tmp_path):
+    """0012 (I-2c): PRZEBUDOWA obu tabel rodowodu stosów. `integration` dostaje tożsamość na KLATCE
+    MASTERA (UNIQUE + NOT NULL), `integration_input` — UNIQUE(integracja, wejście) jako strażnik
+    idempotencji i CHECK na trójstanie `asserted_by`. Test wchodzi na bazę Z DANYMI szkieletu,
+    by dowieść, że INSERT SELECT nie gubi wierszy, a stary wiersz relacji dostaje `window`
+    (najsłabsze źródło — awans wymaga dowodu, nie migracji)."""
+    path = str(tmp_path / "h.db")
+    con = db.connect(path)
+    for v in ("0002_initial.sql", "0003_writeback.sql", "0004_observatory.sql", "0005_rename.sql",
+              "0006_unreadable.sql", "0007_backup_hdu_nullable.sql", "0008_calibration.sql",
+              "0009_calibration_lineage.sql", "0010_kind_source.sql", "0011_target_plan.sql"):
+        con.executescript(db._migration_sql(v))
+    con.execute("PRAGMA user_version = 11")
+    con.execute("INSERT INTO frame(id, sha1_data, kind, filetype, first_seen_at) "
+                "VALUES (1, 'm1', 'master_light', 'xisf', 't'), (2, 'l1', 'light', 'fits', 't')")
+    con.execute("INSERT INTO integration(id, master_frame_id, integ_hash, created_at, tool) "
+                "VALUES (7, 1, 'h', 't', 'WBPP')")
+    con.execute("INSERT INTO integration_input(integration_id, input_frame_id) VALUES (7, 2)")
+    con.commit()
+
+    con = db.open_db(path)                                       # v11 → v12 (przebudowa)
+    assert con.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
+    row = con.execute("SELECT id, master_frame_id, integ_hash, tool FROM integration").fetchone()
+    assert tuple(row) == (7, 1, "h", "WBPP")                     # wiersz przeżył Z id-em
+    assert con.execute("SELECT asserted_by FROM integration_input").fetchone()[0] == "window"
+
+    assert _unique_cols(con, "integration") >= {"master_frame_id"}
+    with pytest.raises(sqlite3.IntegrityError):                  # drugi wiersz o tym samym masterze
+        con.execute("INSERT INTO integration(master_frame_id, created_at) VALUES (1, 't')")
+    with pytest.raises(sqlite3.IntegrityError):                  # duplikat relacji
+        con.execute("INSERT INTO integration_input(integration_id, input_frame_id, asserted_by) "
+                    "VALUES (7, 2, 'history')")
+    with pytest.raises(sqlite3.IntegrityError):                  # CHECK asserted_by
+        con.execute("INSERT INTO integration_input(integration_id, input_frame_id, asserted_by) "
+                    "VALUES (7, 1, 'zgadywanie')")
+    with pytest.raises(sqlite3.IntegrityError):                  # CHECK unresolved_reason
+        con.execute("INSERT INTO integration(master_frame_id, created_at, unresolved_reason) "
+                    "VALUES (2, 't', 'bo tak')")
     con.close()
 
 

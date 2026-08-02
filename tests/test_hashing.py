@@ -1,7 +1,8 @@
-"""sha1_of / sha1_of_span — tożsamość frame'a i odciski przejścia, read-only ('rb')."""
+"""sha1_of / sha1_of_span — tożsamość frame'a i odciski przejścia, read-only ('rb').
+`sha1_of_set` (I-2c) nie dotyka dysku: odcisk ZBIORU tożsamości pod porównanie dopasowań."""
 import hashlib
 
-from horreum.hashing import sha1_of, sha1_of_span
+from horreum.hashing import sha1_of, sha1_of_set, sha1_of_span
 
 
 def test_sha1_zgodne_z_hashlib(tmp_path):
@@ -66,3 +67,22 @@ def test_span_caly_plik_rowny_sha1_of(tmp_path):
     f.write_bytes(payload)
     file_h, span_h = sha1_of_span(str(f), (0, len(payload)))
     assert file_h == span_h == sha1_of(str(f))
+
+
+# --- sha1_of_set: odcisk ZBIORU (I-2c, rodowód stosów) ---
+
+def test_set_nie_zalezy_od_kolejnosci_ani_powtorzen():
+    """Zbiór, nie lista: ten sam skład w innej kolejności (i z duplikatem) daje TEN SAM odcisk.
+    Dzięki temu odcisk zmienia się DOKŁADNIE wtedy, gdy zmienił się skład dopasowania."""
+    assert sha1_of_set(["b", "a"]) == sha1_of_set(["a", "b", "a"])
+    assert sha1_of_set(["a", "b"]) != sha1_of_set(["a", "c"])
+
+
+def test_set_pusty_daje_none():
+    """Brak wejść to BRAK odcisku, nie odcisk pustki — kolumna ma milczeć, gdy nie ma o czym mówić."""
+    assert sha1_of_set([]) is None
+
+
+def test_set_separator_chroni_przed_sklejeniem():
+    """Bez separatora ['ab','c'] i ['a','bc'] dałyby jeden odcisk — kolizja na sklejeniu."""
+    assert sha1_of_set(["ab", "c"]) != sha1_of_set(["a", "bc"])

@@ -92,6 +92,14 @@ def main(argv=None):
                                 "wymaga zapełnionej osi przepisu)")
     p_lin.add_argument("db", help="ścieżka pliku bazy")
 
+    # Rodowód STOSÓW (I-2c) — osobno od `lineage`, bo to inna oś: tam „czym skalibrowano klatkę",
+    # tu „z czego zrobiono ten obraz". Czyta nagłówki stosów z DYSKU (historia PixInsighta nie
+    # mieszka w bazie), więc wymaga dostępu do drzewa, z którego stosy wciągnięto.
+    p_slin = sub.add_parser("stack-lineage",
+                            help="rodowód gotowych stosów: co weszło w ten obraz (krok zbiorczy "
+                                 "PO `group` i `resolve`)")
+    p_slin.add_argument("db", help="ścieżka pliku bazy")
+
     p_delta = sub.add_parser("delta", help="delta do review (read-only): %% obiektu + nierozstrzygnięte")
     p_delta.add_argument("db", help="ścieżka pliku bazy")
 
@@ -268,6 +276,14 @@ def main(argv=None):
         summary = run_lineage(con, now=now)
         con.close()
         print(f"Horreum lineage {args.db}: {summary}")    # ASCII (cp1250)
+        return 0
+    if args.cmd == "stack-lineage":
+        from .stacks import run_stack_lineage             # lazy: ciągnie `scan` dopiero przy odczycie
+        now = datetime.now(timezone.utc).isoformat()
+        con = db.open_db(args.db)
+        summary = run_stack_lineage(con, now=now)
+        con.close()
+        print(_format_stack_lineage(args.db, summary))    # ASCII (cp1250)
         return 0
     if args.cmd == "delta":
         from .resolver import delta_report               # read-only
@@ -878,6 +894,39 @@ def _format_stacks(root, db_path, s, limit=10):
             lines.append(f"    {p}")
     if s.cancelled:
         lines.append("  PRZERWANE na granicy pliku — baza spojna, ponowny przebieg dokonczy")
+    return "\n".join(lines)
+
+
+_STACK_REASON_PROZA = {
+    "degenerate_window": "okno opisuje jedna klatke, nie stos",
+    "history_mismatch": "okno nie zgadza sie z historia pliku",
+    "no_object": "stos bez rozpoznanego obiektu",
+    "no_window": "brak okna czasu (DATE-OBS/DATE-END)",
+    "no_candidates": "okno nie wybralo ani jednej klatki",
+    "telescope_mismatch": "klatki okna sa z innego teleskopu i nie ma czym rozstrzygnac",
+}
+
+
+def _format_stack_lineage(db_path, s):
+    """Sformatuj `StackLineageSummary` do ASCII (konsola Windows = cp1250).
+
+    Rdzen niesie TOKENY powodow (slownik trzyma CHECK migracji 0012), proza nalezy do powierzchni —
+    ta sama granica co przy `ProjectionAbort`/`wbpp-feed`. Raport pokazuje ROZKLAD zrodel pewnosci
+    obok liczby powiazan, bo „ile" bez „na jakiej podstawie" jest w tym module nieuczciwe."""
+    lines = [f"Horreum stack-lineage {db_path}:"]
+    lines.append(f"  stosy: {s.stacks}; z rodowodem: {s.linked}; wejsc razem: {s.inputs}")
+    zrodla = ", ".join(f"{k}={v}" for k, v in sorted(s.by_assert.items())) or "brak"
+    lines.append(f"  zrodlo pewnosci: {zrodla}")
+    lines.append(f"  zapisane teraz: {s.linked_new}; zdjete (reconcile): {s.unlinked}")
+    if s.ambiguous:
+        lines.append(f"  okna NIEROZLACZNE (ten sam sub w dwoch stosach): {s.ambiguous}")
+    if s.telescope_mismatch:
+        lines.append(f"  ROZJAZD TELESKOPU (master zeznaje inny niz klatki okna): "
+                     f"{s.telescope_mismatch} — karta do naprawy")
+    if s.history_unread:
+        lines.append(f"  historia nieodczytana (plik poza zasiegiem): {s.history_unread}")
+    for powod, n in sorted(s.reasons.items()):
+        lines.append(f"  bez rodowodu [{powod}]: {n} — {_STACK_REASON_PROZA.get(powod, '')}")
     return "\n".join(lines)
 
 

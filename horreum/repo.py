@@ -1280,6 +1280,134 @@ def flag_calibration_lineage_summary(con, items, now, actor="lineage"):
                             "items": [[reason, n] for reason, n in items]})
 
 
+# ═══════════════════════════════════════════════ 1.7b RODOWÓD STOSÓW (I-2c, P-I)
+# Siostra rodowodu kalibracji, ale o innej tożsamości: tam kluczem był (light, relation), tu
+# KLATKA MASTERA (migracja 0012, §4.1 briefu). Wejścia są zbiorem osobno, bo zbiór bywa
+# WYLICZONY (okno czasu), a wyliczenie nie ma prawa być kluczem rekordu.
+
+def upsert_integration(con, *, master_frame_id, integ_hash, tool, window_start, window_end,
+                       declared_rows, drizzle_inputs, disabled_inputs, degenerate, ambiguous,
+                       telescope_mismatch, unresolved_reason, now, actor="stacks"):
+    """Wiersz `integration` dla klatki mastera — `(integration_id, zmienione)`.
+
+    Idempotentny na UNIQUE(master_frame_id) z 0012: identyczny komplet faktów → `False` BEZ eventu
+    (drugi przebieg nie ma prawa puchnąć dziennika). Inaczej INSERT `integration.recorded` albo
+    UPDATE `integration.updated` z `{before, after}` SAMYCH zmienionych pól — payload ma mówić,
+    co drgnęło, a nie powtarzać cały wiersz (UPDATE idzie po wszystkich kolumnach, bo SQL zostaje
+    LITERAŁEM; to dwie różne rzeczy i tylko payload jest kanałem dla człowieka).
+
+    Wiersz powstaje TAKŻE, gdy wejść nie znamy (`unresolved_reason` niepuste): „to jest stos,
+    ale nie wiem z czego" jest faktem wartym zapisania, a jego brak byłby milczeniem nie do
+    odróżnienia od „jeszcze nie liczyliśmy".
+
+    `_immediate`, bo guard (SELECT stanu) musi trzymać do zapisu — droga „Stosy" bywa wołana
+    równolegle z GUI na tej samej bazie."""
+    fields = {"integ_hash": integ_hash, "tool": tool, "window_start": window_start,
+              "window_end": window_end, "declared_rows": declared_rows,
+              "drizzle_inputs": drizzle_inputs, "disabled_inputs": disabled_inputs,
+              "degenerate": degenerate, "ambiguous": ambiguous,
+              "telescope_mismatch": telescope_mismatch, "unresolved_reason": unresolved_reason}
+    wartosci = list(fields.values())
+    with _immediate(con):
+        row = con.execute(
+            "SELECT id, integ_hash, tool, window_start, window_end, declared_rows, drizzle_inputs, "
+            "disabled_inputs, degenerate, ambiguous, telescope_mismatch, unresolved_reason "
+            "FROM integration WHERE master_frame_id = ?", (master_frame_id,)).fetchone()
+        if row is None:
+            cur = con.execute(
+                "INSERT INTO integration(master_frame_id, created_at, integ_hash, tool, "
+                "window_start, window_end, declared_rows, drizzle_inputs, disabled_inputs, "
+                "degenerate, ambiguous, telescope_mismatch, unresolved_reason) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [master_frame_id, now] + wartosci)
+            iid = cur.lastrowid
+            emit_event(con, actor=actor, verb="integration.recorded",
+                       target=f"frame:{master_frame_id}", now=now,
+                       payload={"integration_id": iid, **fields})
+            return iid, True
+        zmiany = {k: [row[k], v] for k, v in fields.items() if row[k] != v}
+        if not zmiany:
+            return row["id"], False
+        con.execute(
+            "UPDATE integration SET updated_at = ?, integ_hash = ?, tool = ?, window_start = ?, "
+            "window_end = ?, declared_rows = ?, drizzle_inputs = ?, disabled_inputs = ?, "
+            "degenerate = ?, ambiguous = ?, telescope_mismatch = ?, unresolved_reason = ? "
+            "WHERE id = ?", [now] + wartosci + [row["id"]])
+        emit_event(con, actor=actor, verb="integration.updated",
+                   target=f"frame:{master_frame_id}", now=now,
+                   payload={"integration_id": row["id"],
+                            "before": {k: v[0] for k, v in zmiany.items()},
+                            "after": {k: v[1] for k, v in zmiany.items()}})
+        return row["id"], True
+
+
+def link_integration(con, *, integration_id, input_frame_id, asserted_by, now, actor="stacks"):
+    """Powiąż klatkę wejściową ze stosem — wiersz `integration_input` + `event(integration.linked)`.
+
+    Idempotentny na UNIQUE(integration_id, input_frame_id) z 0012: relacja o tym samym źródle
+    → `False` bez eventu. Zmiana źródła (np. kandydat z okna DOWIEDZIONY historią) to UPDATE
+    z eventem — podniesienie pewności zostawia ślad.
+
+    PRECEDENCJA `user` > `history` > `window` STOI TU, w klindze, nie w pętli wołającego: relacji
+    rozstrzygniętej ręką automat nie ma prawa zdegradować do kandydata. Bez tego guardu każdy
+    kolejny przebieg cofałby decyzję usera po cichu (złapane testem, nie rozumowaniem) — a to ta
+    sama reguła, którą oś obiektu trzyma przez `object_source='user'`."""
+    row = con.execute(
+        "SELECT rowid AS rid, asserted_by FROM integration_input "
+        "WHERE integration_id = ? AND input_frame_id = ?",
+        (integration_id, input_frame_id)).fetchone()
+    if row is not None and (row["asserted_by"] == asserted_by
+                            or (row["asserted_by"] == "user" and asserted_by != "user")):
+        return False
+    with con:
+        if row is None:
+            con.execute(
+                "INSERT INTO integration_input(integration_id, input_frame_id, asserted_by) "
+                "VALUES (?, ?, ?)", (integration_id, input_frame_id, asserted_by))
+        else:
+            con.execute("UPDATE integration_input SET asserted_by = ? WHERE rowid = ?",
+                        (asserted_by, row["rid"]))
+        emit_event(con, actor=actor, verb="integration.linked",
+                   target=f"integration:{integration_id}", now=now,
+                   payload={"input_frame_id": input_frame_id, "asserted_by": asserted_by,
+                            **({"before": row["asserted_by"]} if row is not None else {})})
+    return True
+
+
+def unlink_integration_input(con, *, integration_id, input_frame_id, now, actor="stacks"):
+    """Zdejmij wejście, którego bieżące dopasowanie już nie wskazuje — `event(integration.unlinked)`.
+
+    RECONCILE w modelu append-only (§4.2 briefu): wiersz relacji jest WSKAŹNIKIEM bieżącego
+    dopasowania, więc znika z tabeli, a jego historia zostaje w dzienniku — dokładnie jak przy
+    `calibration.unlinked`, gdzie doskan podstawia bliższego mastera.
+
+    Wołający MUSI pominąć relacje `asserted_by='user'` — automat nie ma prawa cofać rozstrzygnięcia
+    ręki. Guard stoi TU (`AND asserted_by <> 'user'`), bo ostatnią bramką jest klinga, nie pętla."""
+    with con:
+        cur = con.execute(
+            "DELETE FROM integration_input WHERE integration_id = ? AND input_frame_id = ? "
+            "AND asserted_by <> 'user'", (integration_id, input_frame_id))
+        if not cur.rowcount:
+            return False
+        emit_event(con, actor=actor, verb="integration.unlinked",
+                   target=f"integration:{integration_id}", now=now,
+                   payload={"input_frame_id": input_frame_id})
+    return True
+
+
+def flag_stack_lineage_summary(con, items, now, actor="stacks"):
+    """Stosy BEZ zapisanych wejść — JEDEN `event(integration.lineage_summary)` z licznością per
+    powód (wzorzec `flag_calibration_lineage_summary`). Stan (`unresolved_reason` niepuste) SAM
+    jest deltą; pusta lista → bez eventu."""
+    items = list(items)
+    if not items:
+        return
+    with con:
+        emit_event(con, actor=actor, verb="integration.lineage_summary", target="frame:*", now=now,
+                   payload={"distinct": len(items), "frames": sum(n for _, n in items),
+                            "items": [[reason, n] for reason, n in items]})
+
+
 # ═══════════════════════════════════════════════ 1.8 kuratela celów + park (planer T4)
 # Dwa pola UŻYTKOWNIKA o PRZYSZŁOŚCI (co chcę sfotografować, czym będę fotografował). Reszta bazy
 # zeznaje przeszłość, więc żadnego z nich nie da się zderywować — `max(date_obs)` wskazałby jako

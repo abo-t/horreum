@@ -14,10 +14,16 @@ schemat i API mogą się jeszcze zmieniać.
   Droga jest w całości **tylko do odczytu**: ani jeden bajt w drzewie obróbki się nie zmienia.
   Świadomie stoi **osobno od „Przyjmij nowe"** — drzewo obróbki to nie archiwum, więc sięga się
   tam osobnym gestem, a codzienna dostawa zostaje bez zmian. Z wiersza poleceń: `horreum stacks`.
-- **Gotowe obrazy bez nazwy obiektu mają w kolejce przeglądu własny wiersz.** Nie mieszają się
-  z klatkami archiwum, bo droga naprawy jest inna: klatce archiwum można dopisać kartę `OBJECT`
-  do pliku, a gotowego obrazu Horreum nie tknie. Wiersz mówi, ile obrazów nie wie, co przedstawia
-  — i na tym poprzestaje.
+- **Gotowe obrazy bez nazwy obiektu mają w kolejce przeglądu własny wiersz** — i można je stąd
+  naprawić tak samo jak klatki archiwum. Wiersz nie miesza się z klatkami z teleskopu, bo to inna
+  populacja; ale wchodzi w niego kliknięciem, a okno „Napraw nagłówek…" dopisuje kartę `OBJECT`
+  także do pliku po integracji.
+- **Horreum wie, z czego powstał gotowy obraz.** Dla każdego wciągniętego stosu zapisuje jego
+  rodowód — które klatki archiwum w nim siedzą — i mówi wprost, na jakiej podstawie: „plik sam
+  to zeznał" (historia zapisana przez PixInsight) albo „wynika z czasu naświetlania" (kandydat).
+  Gdy nagłówek obrazu opisuje jedną klatkę zamiast całej serii, program **nie zgaduje**: taki stos
+  zostaje z jawnym powodem, zamiast dostać jedno przypadkowe zdjęcie i wyglądać wiarygodnie.
+  Z wiersza poleceń: `horreum stack-lineage`.
 
 ### Naprawione
 - **Okno „Napraw nagłówek…" przyjmuje wreszcie Księżyc, planety i komety.** Sprawdzało nazwę

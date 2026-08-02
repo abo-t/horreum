@@ -120,6 +120,14 @@ def qss(name):
     `setProperty("role","error")` zamiast inline `color:`). Rola jest CZYTANA PRZY POLISHU — etykieta,
     która zmienia rolę w locie, musi przejść `unpolish`/`polish`; robi to `grid._set_role` (kropka
     poczekalni ● / ○ i flaga panelu daty). Arkusz idzie na `QApplication`, więc przełączenie motywu
-    przemalowuje sam."""
+    przemalowuje sam.
+
+    PRZYCISK-PRZEŁĄCZNIK MUSI BYĆ WIDOCZNY, gdy jest wciśnięty (wiz #5). Fusion maluje `:checked`
+    różnicą, którą ZMIERZONO na 17/255 kanału (średnia 9) — `isChecked()` mówiło `True`, a oko nie
+    widziało nic. Ramka w kolorze złota daje sygnał niezależny od tła i od motywu; dotyczy
+    WSZYSTKICH przełączników paska zbioru („Rodowód…", „Popraw nagłówki…", „Uporządkuj nazwy…"),
+    bo to jedna klasa kontrolki, nie trzy osobne przypadki."""
     a = accents(name)
-    return "".join(f'QLabel[role="{role}"] {{ color: {a[key]}; }}' for role, key in ROLES.items())
+    return "".join(
+        f'QLabel[role="{role}"] {{ color: {a[key]}; }}' for role, key in ROLES.items()
+    ) + (f'QPushButton:checked {{ border: 1px solid {a["gold"]}; font-weight: bold; }}')

@@ -1271,7 +1271,7 @@ def test_panel_rodowodu_bez_wejsc_NIE_liczy_zera(view, gcon):
     assert bar.items.count() == 0
     assert "jedną klatkę" in bar.head.text()
     assert "0 klatek" not in bar.head.text() and "0.0 h" not in bar.head.text()
-    assert not bar.items.isVisible() and not bar.actions.isVisible()
+    assert not bar.items.isVisible() and not bar.action_row.isVisible()
 
 
 def test_panel_bez_wejsc_nie_ostrzega_o_klatkach_ktorych_nie_ma(view, gcon):

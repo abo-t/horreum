@@ -148,11 +148,19 @@ class TasksView(QWidget):
         Wołane DWA razy: w budowie (żeby pierwszy paint nie mignął pełną ramką) i w `refresh_counts`
         — dopiero po `show()` metryki fontu są prawdziwe (`sizeHintForRow` przed pokazaniem potrafi
         oddać wartość zastępczą), a `refresh_counts` woła gospodarz właśnie na wejściu w Porządki.
-        Idempotentne: ten sam pomiar daje tę samą liczbę, więc powtórne wołanie nic nie rusza."""
+        Idempotentne: ten sam pomiar daje tę samą liczbę, więc powtórne wołanie nic nie rusza.
+
+        WIZ #14: `sizeHintForRow(0) × n` KŁAMAŁO, bo wiersze maluje `TwoPartDelegate` i realna
+        wysokość jest większa niż podpowiedź widoku (zmierzone: podpowiedź 13 px przy wierszu
+        wyraźnie wyższym) — lista dostawała pasek przewijania przy PIĘCIU pozycjach, mając pod sobą
+        ~700 px wolnego pionu. Sumujemy więc wysokości WSZYSTKICH wierszy przez delegata
+        (`sizeHintForIndex`), zamiast mnożyć jedną podpowiedź: wiersze nie muszą być równe."""
         n = self.tasks.count()
         if not n:
             return
-        self.tasks.setFixedHeight(self.tasks.sizeHintForRow(0) * n + 2 * self.tasks.frameWidth())
+        model = self.tasks.model()
+        wys = sum(self.tasks.sizeHintForIndex(model.index(i, 0)).height() for i in range(n))
+        self.tasks.setFixedHeight(wys + 2 * self.tasks.frameWidth())
 
     def _wrap(self, title, view):
         """Podstrona osi: pasek powrotu + tytuł + widok. Powrót odświeża listę (stan mógł się

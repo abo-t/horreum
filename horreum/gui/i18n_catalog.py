@@ -169,6 +169,20 @@ CATALOG = {
     },
     "object.review_queue": {"pl": "Kolejka przeglądu", "en": "Review queue"},
     "object.assign_btn": {"pl": "Przypisz obiekt…", "en": "Assign object…"},
+    # Wygaszony przycisk tłumaczy się SAM (wiz #12): trzy drogi naprawy bezimiennej klatki (karta
+    # w pliku / ręka / żadna) były w kolejce niewidoczne — widać było jedną i drugą wygaszoną.
+    "object.assign_tip": {
+        "pl": "Wskaż, co ta nazwa z nagłówka oznacza — alias zapamięta ją na przyszłość",
+        "en": "Say what this header name means — the alias remembers it for the future",
+    },
+    "object.assign_tip_card": {
+        "pl": "Dla tego kubełka naprawą jest karta OBJECT w PLIKU — użyj „Napraw nagłówek…”",
+        "en": "For this bucket the fix is the OBJECT card in the FILE — use “Repair header…”",
+    },
+    "object.assign_tip_pick": {
+        "pl": "Zaznacz najpierw pozycję kolejki przeglądu",
+        "en": "Select a review queue entry first",
+    },
     "object.frames_of_object": {"pl": "Klatki obiektu", "en": "Object frames"},
     "object.frames_review": {"pl": "Klatki do przeglądu: {name}", "en": "Frames to review: {name}"},
     "object.empty_status": {

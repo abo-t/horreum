@@ -103,6 +103,21 @@ def apply_theme(app, name):
     map_view.use_theme(name)         # kolory mapy z motywu (F8) — init na starcie + przełączenie
     rows.use_theme(name)             # człon drugi wierszy (P1) — delegat czyta kolor NA ŻYWO w paint,
                                      # więc zwykły repaint wystarczy (bez `refresh_theme`)
+    use_theme(name)                  # szarość pozycji kolejki przeglądu bez drogi dalej (wiz #11)
+
+
+# Szarość pozycji kolejki przeglądu, które NIE prowadzą nigdzie (informacyjne albo z zerem).
+# Wzorzec `tasks._DIM`: QBrush, nie QSS — QSS nie sięga pojedynczej pozycji `QListWidget`.
+_DIM: dict[str, QColor] = {}
+
+
+def use_theme(name):
+    """Kolor wygaszenia Z MOTYWU (wzorzec `tasks.use_theme`) — nigdy literałem, bo sztywna szarość
+    przeszła kiedyś w motywie jasnym z kontrastem 3,54:1, poniżej AA."""
+    _DIM["fg"] = QColor(theme.accents(name)["secondary_text"])
+
+
+use_theme(theme.DEFAULT)             # init przy imporcie (QColor bez QApplication — jak stałe modułu)
 
 
 def _fmt_event_ts(ts):
@@ -1115,22 +1130,15 @@ class ObjectAxisView(QWidget):
         q = queries.review_queue(self.con)
         self.review.clear()
         for r in q["object_review"]:
-            it = QListWidgetItem(i18n.t("object.review_item", name=r["object_raw"], n=r["n"]))
-            it.setData(Qt.UserRole, "object_raw")
-            it.setData(Qt.UserRole + 1, r["object_raw"])
-            self.review.addItem(it)
+            self._add_review_item(i18n.t("object.review_item", name=r["object_raw"], n=r["n"]),
+                                  tag="object_raw", payload=r["object_raw"])
         # Bezimienne (T5a): grid „Do przeglądu" je pokazuje, kolejka do dziś o nich milczała — bez
         # `object_raw` nie ma klucza grupowania, więc idą własnym licznikiem. Od P-D pozycja DRĄŻY
         # do klatek i niesie akcję „Napraw nagłówek…" (nazwa wraca do PLIKU, nie do bazy). Tag
         # nadawany WYŁĄCZNIE przy n>0: kubełek pusty ma zostać informacyjny, żeby zaznaczenie nie
         # otwierało okna bez treści.
-        nameless = QListWidgetItem(i18n.t("object.nameless_line", n=q["nameless_count"]))
-        if q["nameless_count"] > 0:
-            nameless.setData(Qt.UserRole, "nameless")
-            nameless.setData(Qt.UserRole + 1, None)
-        else:
-            nameless.setFlags(Qt.ItemIsEnabled)     # informacyjny, nie do zaznaczenia
-        self.review.addItem(nameless)
+        self._add_review_item(i18n.t("object.nameless_line", n=q["nameless_count"]),
+                              tag="nameless" if q["nameless_count"] > 0 else None)
         # Bliźniak kubełka wyżej po drugiej stronie FORMATU (`resolver.NO_OBJECT_CARD_FILETYPES`):
         # RAW nie ma karty `OBJECT` z natury, więc „Napraw nagłówek…" go nie dotyczy, ale klatki
         # ZOSTAJĄ w perspektywie gridu „Do przeglądu" i partycja musi je policzyć. Wiersz jest
@@ -1138,10 +1146,7 @@ class ObjectAxisView(QWidget):
         # powierzchnia (#8/P4) — udawany tag otwierałby okno, które nie ma czego zapisać.
         # Pokazywany TYLKO gdy populacja istnieje: na archiwum bez lustrzanki to stałe „0".
         if q["nameless_raw_count"] > 0:
-            raw_it = QListWidgetItem(
-                i18n.t("object.nameless_raw_line", n=q["nameless_raw_count"]))
-            raw_it.setFlags(Qt.ItemIsEnabled)
-            self.review.addItem(raw_it)
+            self._add_review_item(i18n.t("object.nameless_raw_line", n=q["nameless_raw_count"]))
         # TRZECI kubełek tej samej partycji (I-2b/D-P-I-5): gotowy obraz po integracji, wciągnięty
         # drogą „Stosy". Do 2026-08-02 był INFORMACYJNY, bo pisarz XISF nie umiał dopisać karty
         # (D-X-12) — wiersz z akcją obiecywałby zapis, który kończy się 'blocked' na każdej pozycji.
@@ -1149,23 +1154,40 @@ class ObjectAxisView(QWidget):
         # tak samo jak lightowy. Osobny od niego zostaje, bo to osobna populacja (i osobny licznik
         # partycji), nie dlatego, że droga naprawy jest inna — jest ta sama.
         if q["nameless_stacks_count"] > 0:
-            stk_it = QListWidgetItem(
-                i18n.t("object.nameless_stacks_line", n=q["nameless_stacks_count"]))
-            stk_it.setData(Qt.UserRole, "nameless_stacks")
-            stk_it.setData(Qt.UserRole + 1, None)
-            self.review.addItem(stk_it)
-        unread = QListWidgetItem(i18n.t("object.unreadable_line", n=q["unreadable_count"]))
-        unread.setData(Qt.UserRole, "unreadable")
-        unread.setData(Qt.UserRole + 1, None)
-        self.review.addItem(unread)
+            self._add_review_item(
+                i18n.t("object.nameless_stacks_line", n=q["nameless_stacks_count"]),
+                tag="nameless_stacks")
+        self._add_review_item(i18n.t("object.unreadable_line", n=q["unreadable_count"]),
+                              tag="unreadable", dim_if_zero=q["unreadable_count"] == 0)
         # liczniki innych kanałów jako pozycja informacyjne (bez tagu → nieklikana); nota
         # „rozwiązywanie w przygotowaniu" ZAWĘŻONA do tych dwóch kanałów (R#9) — obiekt-review
         # i kopie mają już swoje akcje.
-        info = QListWidgetItem(i18n.t(
+        self._add_review_item(i18n.t(
             "object.review_info",
             config=q["config_review_count"], headerless=q["headerless_count"]))
-        info.setFlags(Qt.ItemIsEnabled)        # nie do zaznaczenia (informacyjne)
-        self.review.addItem(info)
+
+    def _add_review_item(self, text, *, tag=None, payload=None, dim_if_zero=False):
+        """Jedna pozycja kolejki przeglądu — JEDEN producent wiersza dla wszystkich kubełków.
+
+        WIZ #11: pięć wierszy miało identyczny krój i kolor, a klikalne były dwa — nic na ekranie
+        nie mówiło, który z nich prowadzi dalej. Wiersz z drogą dostaje znacznik „›" (ten sam co
+        na liście Porządków), wiersz bez drogi gaśnie i przestaje być zaznaczalny. Kubełek pusty
+        gaśnie TEŻ, zostając klikalnym (wiz #17): „nic do zrobienia" ma być widać bez czytania
+        liczby, a wejście do środka zostaje otwarte.
+
+        Rozdzielenie stoi na TAGU, nie na osobnym parametrze — tag jest jedynym faktem, którego
+        dispatch (`_selected_review`) realnie używa, więc druga flaga „czy klikalny" mogłaby się
+        z nim rozjechać (SPOT)."""
+        it = QListWidgetItem(f"{text}  ›" if tag else text)
+        if tag:
+            it.setData(Qt.UserRole, tag)
+            it.setData(Qt.UserRole + 1, payload)
+            if dim_if_zero:
+                it.setForeground(_DIM["fg"])
+        else:
+            it.setFlags(Qt.ItemIsEnabled)      # informacyjny, nie do zaznaczenia
+            it.setForeground(_DIM["fg"])
+        self.review.addItem(it)
 
     def _set_obj_cell(self, r, c, text, *, data=None, align=None):
         item = QTableWidgetItem(text)
@@ -1203,6 +1225,13 @@ class ObjectAxisView(QWidget):
         # D-0802-1 tę samą drogę naprawy (karta `OBJECT` do PLIKU), więc przycisk obsługuje oba.
         self.repair_btn.setEnabled(tag in ("nameless", "nameless_stacks")
                                    and not self._busy and not self._foreign_wb)
+        # WIZ #12: „Przypisz obiekt…" gasł BEZ SŁOWA obok aktywnego „Napraw nagłówek…", więc obie
+        # drogi naprawy wyglądały jak jedna zepsuta. Wygaszony przycisk tłumaczy się sam — tooltip
+        # nazywa drogę WŁAŚCIWĄ dla zaznaczonego kubełka, zamiast milczeć o istnieniu drugiej.
+        self.assign_btn.setToolTip(i18n.t(
+            "object.assign_tip" if tag == "object_raw" else
+            "object.assign_tip_card" if tag in ("nameless", "nameless_stacks") else
+            "object.assign_tip_pick"))
 
     def _on_object_selected(self):
         """Obiekt zaznaczony → klatki tego obiektu (z bieżącym filtrem). Czyści selekcję review (wzajemnie
@@ -1370,7 +1399,12 @@ class ObjectAxisView(QWidget):
 
     def _fill_frames(self, rows, *, present_col):
         """Wypełnij tabelę klatek. `present_col` — czy źródło niesie kolumnę `present` (biblioteka tak,
-        review nie). `present=0` pokazujemy jako „nie" (R#7 — klatka WIDOCZNA mimo zniknięcia pliku)."""
+        review nie). `present=0` pokazujemy jako „nie" (R#7 — klatka WIDOCZNA mimo zniknięcia pliku).
+
+        Źródło BEZ tej kolumny CHOWA ją w całości (wiz #10): pusta komórka pod nagłówkiem „Obecny"
+        czyta się jak „nie ma", a w widoku obiektu obok ta sama kolumna mówi „tak". Nagłówek bez
+        treści jest obietnicą bez pokrycia — znika razem z nią."""
+        self.frames.setColumnHidden(FRAME_COL_PRESENT, not present_col)
         self.frames.setRowCount(len(rows))
         for r, row in enumerate(rows):
             keys = row.keys()

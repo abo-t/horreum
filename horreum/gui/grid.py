@@ -1041,8 +1041,8 @@ class LineageBar(QWidget):
         lay.addWidget(self.items)
         # Wiersz akcji w WIDŻECIE, nie w gołym layoucie — pusta lista chowa go w całości (wiz #6),
         # a layoutu nie da się ukryć jednym wywołaniem.
-        self.actions = QWidget()
-        row = QHBoxLayout(self.actions)
+        self.action_row = QWidget()
+        row = QHBoxLayout(self.action_row)
         row.setContentsMargins(0, 0, 0, 0)
         self.btn_confirm = QPushButton(i18n.t("grid.lin.confirm"))
         self.btn_confirm.setToolTip(i18n.t("grid.lin.confirm_tip"))
@@ -1053,7 +1053,7 @@ class LineageBar(QWidget):
         row.addWidget(self.btn_confirm)
         row.addWidget(self.btn_reject)
         row.addStretch(1)
-        lay.addWidget(self.actions)
+        lay.addWidget(self.action_row)
         lay.addStretch(1)               # pustkę zbiera dół panelu, nie odstępy między wierszami
         self._busy = False
         self.set_lineage(None, [])
@@ -1119,7 +1119,7 @@ class LineageBar(QWidget):
         i dwa wygaszone przyciski mówiły „tu coś będzie" tam, gdzie nic nie będzie (wiz #6).
         Chowamy oba i oddajemy pion gridowi; puste etykiety znikają razem z ich treścią."""
         self.items.setVisible(ma_liste)
-        self.actions.setVisible(ma_liste)
+        self.action_row.setVisible(ma_liste)
         self.warn.setVisible(bool(self.warn.full_text()))
         self.note.setVisible(bool(self.note.full_text()))
         self._sync_buttons()

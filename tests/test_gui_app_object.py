@@ -187,10 +187,21 @@ def test_kolejka_liczniki_informacyjne(view):
     items = [(v.review.item(r).text(), v.review.item(r).data(UROLE))
              for r in range(v.review.count())]
     # fixture §8 nie ma oznaczonych kopii → 0; pozycja klikalna (tag 'unreadable')
-    assert ("— kopie nieczytelne: 0", "unreadable") in items
+    assert any(t.startswith("— kopie nieczytelne: 0") and tag == "unreadable" for t, tag in items)
     # nota „rozwiązywanie w przygotowaniu" zawężona do dwóch kanałów bez akcji (R#9)
     assert any("config-review: 4" in t and "bez nagłówka: 1" in t
                and "rozwiązywanie w przygotowaniu" in t and tag is None for t, tag in items)
+
+
+def test_kolejka_pokazuje_ktora_pozycja_prowadzi_dalej(view):
+    """WIZ #11: pięć wierszy kolejki miało identyczny krój i kolor, a klikalne były dwa — nic na
+    ekranie nie mówiło, który prowadzi dalej („do przypisania ręcznie" wzywało do akcji i nie
+    prowadziło nigdzie). Znacznik „›" niesie WYŁĄCZNIE wiersz z drogą; jest pochodną tagu, więc
+    nie może się z dispatchem rozjechać."""
+    v, con, ids = view
+    for r in range(v.review.count()):
+        it = v.review.item(r)
+        assert it.text().endswith("›") == (it.data(UROLE) is not None)
 
 
 # --- read-only: render i brak zapisu ---

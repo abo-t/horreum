@@ -279,3 +279,26 @@ def test_obie_drogi_czytaja_TE_SAME_kolumny_przepisu():
         listy = [s.split(" FROM ")[0] for s in stale if s.startswith(prefiks)]
         assert len(listy) == 2, f"spodziewane dwa zapytania: {opis} — jest {len(listy)}"
         assert listy[0] == listy[1], f"przebieg i panel czytają INNE kolumny — {opis}"
+
+
+def test_gotowy_obraz_NIE_udaje_nieposzytej_osi_przepisu(con):
+    """FALSYFIKATOR ZNALEZISKA WIZYTACJI (P1, `265cf2d`): `master_light` — gotowy obraz po integracji
+    — profilu nie ma i mieć NIE BĘDZIE, bo `KIND_RECIPE` go nie zna. Predykat pytający o „każdy
+    master" (`kind LIKE 'master_%'`) łapał go razem z kalibracyjnymi, więc JEDEN wciągnięty stos
+    zapalał na stałe zdanie „przepisy nie są jeszcze policzone" — o bazie z policzoną osią przepisu,
+    z odesłaniem do etapu, który niczego nie zmieni. Droga „Stosy" wciąga ich 128.
+
+    Test trzyma OBIE strony: przy policzonej osi przepisu obecność stosu nie zmienia powodu luki,
+    a prawdziwy master kalibracyjny bez profilu ten powód nadal zapala."""
+    from horreum.lineage import explain_light
+    _frame(con, kind="master_light", sha1="stos1", date_obs="2024-02-01T00:00:00")   # gotowy obraz
+    lid = _light_dark(con, "l1", exptime=999.0)          # przepis, którego archiwum nie zna
+    run_calibration(con, now=NOW)
+
+    stan = {r["relation"]: r for r in explain_light(con, lid)}
+    assert stan["dark"]["gap"] == "no_profile", "gotowy obraz udaje niepoliczoną oś przepisu"
+
+    # Druga strona: master KALIBRACYJNY bez profilu to prawdziwy sygnał „uruchom Kalibrację".
+    _frame(con, kind="master_dark", sha1="d_bez", exptime=300.0)   # bez ścieżki i faktów → bez profilu
+    stan2 = {r["relation"]: r for r in explain_light(con, lid)}
+    assert stan2["dark"]["gap"] == "not_calibrated"

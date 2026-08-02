@@ -711,9 +711,15 @@ CATALOG = {
     # Słownictwo trzyma jedną granicę: „weszło" = fakt zapisany, „wynika z czasu" = kandydat.
     # Nigdzie nie mówimy „na pewno" o czymś, czego dowodem jest wyłącznie okno czasu.
     "grid.sel.lineage": {"pl": "Rodowód…", "en": "Lineage…"},
+    # Tooltip był JEDYNYM drogowskazem do panelu i po dołożeniu osi kalibracji ZAPRZECZAŁ jej
+    # istnieniu („zaznacz JEDEN stos"), czyli zniechęcał do zaznaczenia klatki nieba — drugiej
+    # połowy tego, co panel umie. Zdanie powitalne wymienia obie osie, ale widać je dopiero
+    # PO otwarciu panelu, więc nie jest afordancją.
     "grid.sel.lineage_tip": {
-        "pl": "Co weszło w gotowy obraz — zaznacz JEDEN stos w tabeli",
-        "en": "What went into the finished image — select ONE stack in the table",
+        "pl": "Skąd ta klatka ma swój kształt — zaznacz gotowy obraz (z czego powstał) "
+              "albo klatkę nieba (czym ją skalibrowano)",
+        "en": "Where this frame gets its shape — select a finished image (what it was made of) "
+              "or a sky frame (what calibrated it)",
     },
     # Odmiana przez `t_plural` [wiz #15]: „Weszło 1 klatek" czytało się jak błąd bazy, a bliźniacza
     # flaga `grid.lin.flag.twins` w TYM SAMYM panelu odmieniała się poprawnie — rozjazd był widoczny
@@ -772,6 +778,7 @@ CATALOG = {
         "pl": "master #{id} — plik zniknął z dysku",
         "en": "master #{id} — the file has vanished from disk",
     },
+    "grid.lin.cal.delta": {"pl": "Δ {n} dni", "en": "Δ {n} days"},
     "grid.lin.cal.src.horreum": {"pl": "dobrane z przepisu", "en": "matched by recipe"},
     "grid.lin.cal.src.user": {"pl": "Twoja decyzja", "en": "your decision"},
     "grid.lin.cal.src.wbpp": {"pl": "z historii obróbki", "en": "from processing history"},

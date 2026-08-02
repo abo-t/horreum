@@ -1238,6 +1238,11 @@ def _calibration_item_text(r):
         # liczył go do „skalibrowana". Powiązanie jest prawdziwe (tożsamość to `sha1_data`),
         # nieprawdziwa jest dostępność — i to ona ma być na ekranie.
         gdzie = r["master_path"] or i18n.t("grid.lin.cal.vanished", id=r["master_frame_id"])
+        # DYSTANS OBOK ŹRÓDŁA — liczba, nie werdykt. Progu „za daleko" świadomie nie stawiamy:
+        # ile dni to za dużo, zależy od klasy i od sprzętu, a zgadnięty próg malowałby na czerwono
+        # dobór, który bywa jedynym możliwym. Użytkownik dostaje miarę i ocenia sam.
+        if r.get("days_apart") is not None:
+            zrodlo = f"{zrodlo} · {i18n.t('grid.lin.cal.delta', n=r['days_apart'])}"
         return f"{klasa} · [{zrodlo}] · {gdzie}"
     # BRAK MA POWÓD ALBO GO NIE MA — i to są dwa różne zdania. Token `gap` niesie powód archiwum;
     # `pending` znaczy, że master JEST, tylko nikt jeszcze nie policzył powiązania.

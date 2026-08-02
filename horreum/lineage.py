@@ -24,10 +24,11 @@ nie tworzy. Dług C3 żyje w kolejce z falsyfikatorem `incomplete > 0`.
 
 Qt-wolne, zapis wyłącznie przez `repo` (DB-KLINGA), SELECT literałem.
 """
+import json
 from dataclasses import dataclass, field
 
 from . import repo
-from .calibration import _collect, missing_facts, profile_key
+from .calibration import KIND_RECIPE, _collect, missing_facts, profile_key
 from .naming import header_dt
 
 # Klasy, które light realnie potrzebuje. `bias` pominięty świadomie: 0 masterbiasów w archiwum
@@ -210,9 +211,19 @@ def explain_light(con, light_frame_id):
     # Bez tego pytania `no_profile` mówiłoby „brak w archiwum czegokolwiek o tej nastawie" o bazie
     # PO SKANIE, ale przed etapem „Kalibracja", gdzie mastery leżą, tylko nikt im nie policzył
     # przepisu — czyli zdanie fałszywe dla KAŻDEGO lightu naraz.
+    #
+    # PYTAMY O KLATKI, KTÓRE PRZEPIS MIEĆ MOGĄ (`KIND_RECIPE` — SPOT z osią przepisu), nie o „każdy
+    # master". `master_light` to gotowy obraz po integracji: profilu nie ma i mieć nie będzie, bo
+    # `KIND_RECIPE` go nie zna. Wzorzec `LIKE 'master_%'` łapał go razem z kalibracyjnymi, więc
+    # JEDEN wciągnięty stos wystarczał, żeby to zdanie zapaliło się na stałe — a droga „Stosy"
+    # wciąga ich 128. Panel mówiłby wtedy „przepisy nie są policzone" o bazie z 19 268 powiązaniami
+    # i odsyłał do etapu, który niczego nie zmieni.
+    # Wiązanie listy klas przez `json_each` — idiom `calibration.run_calibration`: literał SQL
+    # zostaje STAŁY (bramka `test_repo_safety`), a lista klas ma jedno źródło.
     bez_przepisu = con.execute(
-        "SELECT EXISTS(SELECT 1 FROM frame WHERE kind LIKE 'master_%' "
-        "AND calibration_profile_id IS NULL)").fetchone()[0]
+        "SELECT EXISTS(SELECT 1 FROM frame WHERE calibration_profile_id IS NULL "
+        "AND kind IN (SELECT value FROM json_each(?)))",
+        (json.dumps(tuple(KIND_RECIPE)),)).fetchone()[0]
     masters = _LazyMasters(con)
     light_dt = header_dt(row["date_obs"])
     d = {k: row[k] for k in row.keys()}
@@ -223,15 +234,22 @@ def explain_light(con, light_frame_id):
     for relation in relacje:
         s = stan.get(relation)
         if s is not None:
+            # DYSTANS CZASU JEST CZĘŚCIĄ ODPOWIEDZI, nie ozdobą. Master dobiera reguła „najbliższy
+            # czasowo", więc „dobrane z przepisu" bez liczby brzmi jak pewnik — a zmierzone na
+            # żywym archiwum mediany to 139 dni (dark) i 43 dni (flat), z ogonem powyżej trzech lat.
+            # Oś stosów w tym samym panelu odróżnia fakt od domysłu; ta ma na to własną miarę.
+            mdt = header_dt(s["master_date"])
+            dni = None if (mdt is None or light_dt is None) else abs((mdt - light_dt).days)
             out.append({"relation": relation, "master_frame_id": s["master_frame_id"],
                         "master_path": s["master_path"], "confidence": s["confidence"],
-                        "asserted_by": s["asserted_by"], "gap": None, "pending": False})
+                        "asserted_by": s["asserted_by"], "days_apart": dni,
+                        "gap": None, "pending": False})
             continue
         master_id, gap = _decide(d, relation, profiles, masters, light_dt)
         if gap == "no_profile" and bez_przepisu:
             gap = "not_calibrated"
         out.append({"relation": relation, "master_frame_id": None, "master_path": None,
-                    "confidence": None, "asserted_by": None, "gap": gap,
+                    "confidence": None, "asserted_by": None, "days_apart": None, "gap": gap,
                     "pending": master_id is not None})
     return out
 
@@ -247,6 +265,7 @@ def calibrators_for(con, light_frame_id):
     return con.execute(
         "SELECT c.relation AS relation, c.master_frame_id AS master_frame_id, "
         "c.confidence AS confidence, c.asserted_by AS asserted_by, "
+        "(SELECT h.date_obs FROM header h WHERE h.frame_id = c.master_frame_id) AS master_date, "
         "(SELECT l.path FROM location l WHERE l.frame_id = c.master_frame_id AND l.present = 1 "
         " ORDER BY l.id LIMIT 1) AS master_path "
         "FROM calibration c WHERE c.light_frame_id = ? ORDER BY c.relation",

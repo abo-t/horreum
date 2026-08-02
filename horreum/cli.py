@@ -926,8 +926,12 @@ def _format_stack_lineage(db_path, s):
     if s.history_unread:
         lines.append(f"  historia nieodczytana (plik poza zasiegiem): {s.history_unread}")
     if s.kept_unread:
+        # Dwie przyczyny, dwie recepty: „podłącz archiwum" jest nieprawdą dla stosu, którego
+        # w bibliotece NIE MA (skasowany plik roboczy WBPP, stos przeniesiony).
+        recepta = ("pu:sc skan/Obecnosc" if s.no_location >= s.kept_unread
+                   else "podlacz archiwum i powtorz")
         lines.append(f"  gotowy rodowod ZOSTAWIONY nietkniety (brak zeznania pliku): "
-                     f"{s.kept_unread} — zamontuj archiwum i powtorz")
+                     f"{s.kept_unread} (bez obecnej kopii: {s.no_location}) — {recepta}")
     for powod, n in sorted(s.reasons.items()):
         lines.append(f"  bez rodowodu [{powod}]: {n} — {_STACK_REASON_PROZA.get(powod, '')}")
     return "\n".join(lines)

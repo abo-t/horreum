@@ -1088,6 +1088,13 @@ CATALOG = {
         "pl": "pominięto bez zeznania pliku: {n} — podłącz archiwum i powtórz",
         "en": "skipped without file testimony: {n} — connect the archive and repeat",
     },
+    # DRUGA przyczyna tego samego pominięcia, z INNĄ receptą: pliku nie ma w bibliotece (skasowany
+    # roboczy WBPP, stos przeniesiony), więc „podłącz archiwum" kazałoby czekać na coś, co nie
+    # wróci. Rozdział należy do powierzchni — rdzeń niesie dwa liczniki, nie dwie prozy.
+    "pipeline.fmt.slin.kept_no_location": {
+        "pl": "pominięto bez obecnej kopii pliku: {n} — puść skan albo Obecność",
+        "en": "skipped without a present copy: {n} — run scan or Presence",
+    },
     # Droga „Stosy" — człony składane w `PipelineView._format_stacks`; odmowy TYLKO gdy niezerowe.
     "pipeline.fmt.stacks.prefix": {"pl": "[stosy] ", "en": "[stacks] "},
     "pipeline.fmt.stacks.taken": {

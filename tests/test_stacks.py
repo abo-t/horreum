@@ -320,16 +320,16 @@ def test_nieprzeczytane_zeznanie_NIE_degraduje_gotowego_rodowodu(con):
     assert (s.kept_unread, s.linked_new, s.unlinked) == (1, 0, 0)         # zero ruchu Z WYBORU
 
 
-def test_nieprzeczytane_zeznanie_nie_dopisuje_powodu_do_stosu_z_rodowodem(con):
-    """TURA 2 #1 — defekt WPROWADZONY przez strażnika 4. Guard pomijał tylko wiersze, a głowa
-    integracji była już zapisana z planu: powód wynika z BAZY (tu: zniknął obiekt), więc powstaje
-    także przy nieodczytanym pliku. Stan „powód + stare wiersze" łamie inwariant bramki §5.14.
+def test_powod_nie_dopisuje_sie_obok_zachowanych_wierszy_dowiedzionych(con):
+    """TURA 2 #1 — defekt WPROWADZONY przez strażnika 4, zawężony w turze 3. Powodu NIE DA SIĘ
+    zapisać, nie kasując wierszy (inwariant §5.14 „powód wyklucza wejścia automatu"), a kasować
+    wierszy DOWIEDZIONYCH nie wolno, gdy plik akurat milczy. Taki stos zostaje w spokoju w całości.
 
-    Reguła brzmi „bez zeznania nie dotykamy TEGO stosu" i obejmuje głowę tak samo jak wiersze."""
+    Dotyczy WYŁĄCZNIE rodowodu `history` — to on stoi na zeznaniu pliku."""
     m = _master(con)
-    _light(con, "l1", date_obs="2025-08-30T20:30:00")
-    run_stack_lineage(con, now=NOW, xml_reader=_brak_xml)
-    assert len(inputs_of(con, m)) == 1
+    _light(con, "l1", date_obs="2025-08-30T20:30:00", ccd_temp=-10.0)
+    run_stack_lineage(con, now=NOW, xml_reader=lambda _p: _xml_historii([-10.0]))
+    assert {r["asserted_by"] for r in inputs_of(con, m)} == {"history"}
 
     con.execute("UPDATE frame SET object_id = NULL WHERE id = ?", (m,))   # powód z BAZY
     con.commit()
@@ -341,6 +341,29 @@ def test_nieprzeczytane_zeznanie_nie_dopisuje_powodu_do_stosu_z_rodowodem(con):
     assert _integracja(con, m)["unresolved_reason"] is None      # głowy też nie ruszamy
     assert len(inputs_of(con, m)) == 1
     assert s.kept_unread == 1 and s.reasons == {}
+
+
+def test_rodowod_z_okna_aktualizuje_sie_mimo_nieczytelnego_pliku(con):
+    """TURA 3 #3 — zakres strażnika idzie ZA ŹRÓDŁEM FAKTU. Rodowód `window` nie stoi na zeznaniu
+    pliku ani w jednym kawałku (okno, osie i powód liczy się z BAZY), więc przebieg bez pliku ma
+    o nim pełną wiedzę i MUSI go zaktualizować. Strażnik zamrażający wszystko zostawiał tu master
+    po naprawie karty z relacjami do lightów INNEGO obiektu — cicha nieprawda, której zakazuje
+    nagłówek modułu. Na realnym archiwum dotyczyło to 122 ze 128 stosów."""
+    m = _master(con)
+    _light(con, "l1", date_obs="2025-08-30T20:30:00")
+    run_stack_lineage(con, now=NOW, xml_reader=_brak_xml)
+    assert {r["asserted_by"] for r in inputs_of(con, m)} == {"window"}
+
+    con.execute("UPDATE frame SET object_id = NULL WHERE id = ?", (m,))
+    con.commit()
+
+    def _wybuch(_p):
+        raise OSError("dysk odłączony")
+
+    s = run_stack_lineage(con, now=NOW, xml_reader=_wybuch)
+    assert _integracja(con, m)["unresolved_reason"] == REASON_NO_OBJECT
+    assert inputs_of(con, m) == []          # reconcile zdjął relacje do cudzego obiektu
+    assert s.kept_unread == 0 and s.reasons == {REASON_NO_OBJECT: 1}
 
 
 def test_nieprzeczytane_zeznanie_nie_kasuje_faktow_historii(con):

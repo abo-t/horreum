@@ -76,6 +76,8 @@ class StackLineageSummary:
     ambiguous: int = 0         # integracje z oknem nierozłącznym (patrz strażnik 3)
     telescope_mismatch: int = 0    # master zeznaje inny teleskop niż klatki jego okna
     history_unread: int = 0    # plik nieosiągalny/nieczytelny (błąd odczytu ALBO brak lokacji)
+    no_location: int = 0       # …z tego: klatka NIE MA obecnej kopii — inna recepta dla człowieka
+                               # („puść skan/Obecność") niż odłączone archiwum („podłącz i powtórz")
     kept_unread: int = 0       # gotowy rodowód ZOSTAWIONY nietknięty, bo zeznania nie dało się
                                # przeczytać — delta zapisu jest wtedy zerowa Z WYBORU, nie z braku
                                # zmian, i bez tego licznika wyglądałaby jak idempotencja
@@ -209,17 +211,19 @@ def _read_history_xml(path):
 def _plan(con, row, *, xml_reader):
     """Materiał decyzji dla JEDNEJ klatki stosu — bez zapisu (czysta faza, testowalna osobno)."""
     header = json.loads(row["raw_json"]) if row["raw_json"] else {}
-    xml, unread = None, False
+    xml, unread, brak_lokacji = None, False, False
     if row["path"]:
         try:
             xml = xml_reader(row["path"])
         except Exception:              # plik zniknął/leży na odłączonym dysku — patrz docstring
             unread = True
     else:
-        # BRAK OBECNEJ LOKACJI TO TEN SAM STAN, co błąd odczytu: pliku nie ma pod ręką, więc jego
-        # zeznania NIE ZNAMY. Rozdzielanie tych dwóch przypadków dawało licznik, który milczał
-        # o połowie populacji — a wołający podejmuje na nim decyzję „nie ruszaj gotowego rodowodu".
-        unread = True
+        # BRAK OBECNEJ LOKACJI TO TEN SAM STAN dla strażnika, co błąd odczytu: pliku nie ma pod
+        # ręką, więc jego zeznania NIE ZNAMY. Dla POWIERZCHNI to jednak dwie różne rzeczy i dwie
+        # różne recepty — „podłącz archiwum" jest nieprawdą dla stosu, którego w bibliotece nie ma
+        # (skasowany plik roboczy WBPP, stos przeniesiony). Stąd drugi licznik: jeden fakt
+        # dla decyzji, dwa dla człowieka.
+        unread = brak_lokacji = True
     t = rstack.read_testimony(header, xml)
     start, end = t.window_start, t.window_end
     # KOERCJA PRZY WEJŚCIU, nie w SQL-u: XISF oddaje KAŻDĄ kartę jako tekst (`_put(header,
@@ -230,7 +234,8 @@ def _plan(con, row, *, xml_reader):
     exptime = _to_float(t.exptime)
     plan = {
         "frame_id": row["frame_id"], "testimony": t, "start": start, "end": end,
-        "history_unread": unread, "inputs": [], "asserted_by": None, "reason": None,
+        "history_unread": unread, "no_location": brak_lokacji,
+        "inputs": [], "asserted_by": None, "reason": None,
         "telescope_mismatch": False,
         "shelf": (row["object_id"], row["filter_canon"], exptime, row["telescope_id"]),
     }
@@ -280,6 +285,7 @@ def run_stack_lineage(con, *, now, actor="stacks", xml_reader=None, progress=Non
     for p in plany:
         t = p["testimony"]
         s.history_unread += p["history_unread"]
+        s.no_location += p["no_location"]
         # STRAŻNIK 4 — decyzja PRZED policzeniem i PRZED zapisem CZEGOKOLWIEK. Reguła brzmi „bez
         # zeznania nie dotykamy tego stosu", więc obejmuje GŁOWĘ integracji tak samo jak wiersze.
         # Guard postawiony za `upsert_integration` chronił tylko wiersze i przez to sam produkował
@@ -291,21 +297,38 @@ def run_stack_lineage(con, *, now, actor="stacks", xml_reader=None, progress=Non
         #   * `t.rows`/`t.tool` przy nieodczytanym pliku są `None`, więc jeden przebieg offline
         #     KASOWAŁ fakty zeznania (`declared_rows`, `tool`, drizzle) przy wierszach `history`
         #     zachowanych obok — panel mówił „plik zeznał" i nie umiał powiedzieć, ile deklaruje.
-        # Liczniki idą wtedy ze STANU, nie z planu: rodowód istnieje, tylko nie myśmy go teraz
-        # ustalili. `ambiguous`/`telescope_mismatch` świadomie pomijamy — to fakty TEGO przebiegu,
-        # a ten przebieg o tym stosie niczego nie rozstrzygnął.
-        if p["history_unread"]:
-            zrodlo = _zapisane_zrodlo(con, p["frame_id"])
-            if zrodlo is not None:
-                s.kept_unread += 1
-                s.linked += 1
-                _bump(s.by_assert, zrodlo)
-                continue
+        # ZAKRES STRAŻNIKA IDZIE ZA ŹRÓDŁEM FAKTU, nie za jednym bitem „plik nieczytelny". Z PLIKU
+        # pochodzą WYŁĄCZNIE `rows`/`inputs`/`tool` (`resolve.stack.read_testimony`); okno,
+        # `degenerate`, osie i powód liczy się z BAZY i są tak samo prawdziwe bez pliku. Strażnik
+        # zamrażający całą głowę był więc o rząd wielkości za szeroki: na realnym archiwum tylko
+        # 6 ze 128 rodowodów stoi na zeznaniu pliku, a odmawiał aktualizacji wszystkim 128 —
+        # master po naprawie karty zostawał z relacjami do lightów INNEGO obiektu.
+        #
+        # Chronimy więc dokładnie to, co bez pliku traci pokrycie:
+        #   * WIERSZE rodowodu `history` (plan spadłby na okno i zdegradował dowód do kandydata);
+        #   * FAKTY ZEZNANIA w głowie (`tool`, `declared_rows`, drizzle) — `None` z nieodczytanego
+        #     pliku skasowałby je, choć nikt ich nie obalił.
+        # Reszta głowy jedzie normalnie, bo wynika z bazy.
+        stan = _zapisany_stan(con, p["frame_id"]) if p["history_unread"] else None
+        chroniony = stan is not None and stan["zrodlo"] == "history"
+        if chroniony and p["reason"]:
+            # JEDYNY przypadek, w którym trzeba zostawić stos w spokoju w całości: powodu nie da
+            # się zapisać, nie kasując wierszy (inwariant §5.14 „powód wyklucza wejścia automatu"),
+            # a kasować ich nie wolno, bo to dowód. Liczniki idą wtedy ze STANU — rodowód istnieje,
+            # tylko nie myśmy go w tym przebiegu ustalili.
+            s.kept_unread += 1
+            s.linked += 1
+            _bump(s.by_assert, "history")
+            s.ambiguous += bool(stan["ambiguous"])
+            s.telescope_mismatch += bool(stan["telescope_mismatch"])
+            continue
         if p["reason"]:
             _bump(s.reasons, p["reason"])
         else:
             s.linked += 1
-            _bump(s.by_assert, p["asserted_by"])
+            # Źródło ze STANU, gdy wiersze zostają nietknięte: one naprawdę są `history`, choć plan
+            # — bez pliku — umiałby powiedzieć tylko „window".
+            _bump(s.by_assert, "history" if chroniony else p["asserted_by"])
         s.ambiguous += p["frame_id"] in ambi
         # ROZJAZD TELESKOPU LICZYMY TYLKO TAM, GDZIE RODOWÓD POWSTAŁ — bo tylko tam jest FLAGĄ
         # („relacje są, ale karta się nie zgadza"). Rozjazd, który skończył się ODMOWĄ, siedzi już
@@ -314,22 +337,31 @@ def run_stack_lineage(con, *, now, actor="stacks", xml_reader=None, progress=Non
         if p["telescope_mismatch"] and not p["reason"]:
             s.telescope_mismatch += 1
         wejscia = [r["frame_id"] for r in p["inputs"]]
-        odcisk = _fingerprint(con, wejscia)
+        # Fakty zeznania: ze STANU, gdy pliku nie przeczytaliśmy (nikt ich nie obalił), z pliku
+        # w każdym innym wypadku. Odcisk chronionego rodowodu też zostaje — opisuje wiersze, które
+        # zostają, a nie okno, które właśnie policzyliśmy.
+        if stan is not None:
+            tool_v, rows_v = stan["tool"], stan["declared_rows"]
+            driz_v, dis_v = stan["drizzle_inputs"], stan["disabled_inputs"]
+        else:
+            tool_v, rows_v = t.tool, t.rows
+            driz_v = sum(1 for x in t.inputs if x.has_drizzle) if t.rows is not None else None
+            dis_v = sum(1 for x in t.inputs if not x.enabled) if t.rows is not None else None
+        odcisk = stan["integ_hash"] if chroniony else _fingerprint(con, wejscia)
         iid, _ = repo.upsert_integration(
-            con, master_frame_id=p["frame_id"], integ_hash=odcisk, tool=t.tool,
+            con, master_frame_id=p["frame_id"], integ_hash=odcisk, tool=tool_v,
             window_start=p["start"].isoformat() if p["start"] else None,
             window_end=p["end"].isoformat() if p["end"] else None,
-            declared_rows=t.rows,
-            drizzle_inputs=sum(1 for x in t.inputs if x.has_drizzle) if t.rows is not None else None,
-            disabled_inputs=sum(1 for x in t.inputs if not x.enabled) if t.rows is not None else None,
+            declared_rows=rows_v, drizzle_inputs=driz_v, disabled_inputs=dis_v,
             degenerate=int(t.degenerate), ambiguous=int(p["frame_id"] in ambi),
             telescope_mismatch=int(p["telescope_mismatch"]),
             unresolved_reason=p["reason"], now=now, actor=actor)
-        # Tu docierają WYŁĄCZNIE stosy, o których wolno nam pisać: albo zeznanie było czytelne,
-        # albo rodowodu jeszcze nie ma (świeża integracja nie ma czego stracić, a milczenie
-        # łamałoby „bez wejść ZAWSZE niesie powód"). Strażnik 4 stoi wyżej, przed `upsert`.
-        s.linked_new += _zapisz_wejscia(con, iid, wejscia, p["asserted_by"], now=now, actor=actor)
-        s.unlinked += _reconcile(con, iid, wejscia, now=now, actor=actor)
+        if chroniony:
+            s.kept_unread += 1          # głowa zaktualizowana, WIERSZE nietknięte
+        else:
+            s.linked_new += _zapisz_wejscia(con, iid, wejscia, p["asserted_by"],
+                                            now=now, actor=actor)
+            s.unlinked += _reconcile(con, iid, wejscia, now=now, actor=actor)
 
     # `inputs` liczymy ze STANU, nie z planu (lustro `LineageSummary.linked`): odrzucenie ręką
     # zostawia wiersz w tabeli, ale ten sub w obraz NIE wszedł — plan wciąż widzi go jako kandydata,
@@ -354,22 +386,29 @@ def _fingerprint(con, frame_ids):
         for r in con.execute("SELECT sha1_data FROM frame WHERE id = ?", (fid,)))
 
 
-def _zapisane_zrodlo(con, master_frame_id):
-    """Źródło pewności JUŻ ZAPISANEGO rodowodu tego stosu — albo `None`, gdy rodowodu nie ma.
-    Pytanie o STAN, nie o plan: rozstrzyga, czy wolno go ruszyć przebiegowi, który nie przeczytał
-    zeznania pliku, i czym go wtedy policzyć w podsumowaniu.
+def _zapisany_stan(con, master_frame_id):
+    """ZAPISANY stan rodowodu tego stosu — albo `None`, gdy rodowodu nie ma. Pytanie o STAN, nie
+    o plan: rozstrzyga, czego przebiegowi bez zeznania pliku nie wolno ruszyć i czym to policzyć.
 
-    Wiersze automatu są jednorodne (plan nadaje jedno źródło całej integracji), więc jedyna możliwa
-    mieszanka to automat + werdykty ręki. Sortowanie stawia NIE-`user` pierwszy, bo podsumowanie
-    pyta „na czym stoi ten rodowód", a nie „czy ktoś go dotknął"; sam `user` wychodzi tylko wtedy,
-    gdy innych wierszy nie ma. Pytamy po KLATCE MASTERA, bo wołający nie zna jeszcze `integration.id`
-    — i nie ma go poznać, skoro właśnie decyduje, czy w ogóle pisać."""
-    row = con.execute(
-        "SELECT ii.asserted_by AS zrodlo FROM integration_input ii "
-        "JOIN integration i ON i.id = ii.integration_id "
-        "WHERE i.master_frame_id = ? ORDER BY (ii.asserted_by = 'user'), ii.asserted_by LIMIT 1",
+    `zrodlo` bierzemy z wierszy NIEWYKLUCZONYCH (`excluded = 0`): stos, z którego człowiek odrzucił
+    wszystkie kandydatury, nie ma rodowodu w żadnym sensie, którego broni strażnik — i nie ma prawa
+    trafić do `linked`, skoro `inputs` liczone ze stanu go nie widzi. Wiersze automatu są jednorodne
+    (plan nadaje jedno źródło całej integracji), więc jedyna mieszanka to automat + ręka; sortowanie
+    stawia NIE-`user` pierwszy, bo pytamy „na czym stoi ten rodowód", nie „czy ktoś go dotknął".
+
+    Pozostałe pola to FAKTY ZEZNANIA PLIKU plus odcisk — wartości, których przebieg bez pliku nie
+    ma czym zastąpić, a `None` z nieodczytanego nagłówka by je skasował. Pytamy po KLATCE MASTERA,
+    bo wołający nie zna jeszcze `integration.id` — i nie ma go poznać, skoro właśnie decyduje,
+    czy w ogóle pisać."""
+    return con.execute(
+        "SELECT i.tool, i.declared_rows, i.drizzle_inputs, i.disabled_inputs, i.integ_hash, "
+        "       i.ambiguous, i.telescope_mismatch, "
+        "       (SELECT ii.asserted_by FROM integration_input ii "
+        "         WHERE ii.integration_id = i.id AND ii.excluded = 0 "
+        "         ORDER BY (ii.asserted_by = 'user'), ii.asserted_by LIMIT 1) AS zrodlo "
+        "FROM integration i WHERE i.master_frame_id = ? AND EXISTS "
+        "  (SELECT 1 FROM integration_input ii WHERE ii.integration_id = i.id AND ii.excluded = 0)",
         (master_frame_id,)).fetchone()
-    return None if row is None else row["zrodlo"]
 
 
 def _zapisz_wejscia(con, integration_id, frame_ids, asserted_by, *, now, actor):

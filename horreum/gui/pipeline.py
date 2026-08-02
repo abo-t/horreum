@@ -814,7 +814,9 @@ class PipelineView(QWidget):
         # bez tego członu okno pokazywało te same liczby co po realnym przeliczeniu, a jedyna
         # wzmianka szła do CLI, którego wydanie w ogóle nie ma (onefile jest sam GUI).
         if s.kept_unread:
-            czesci.append(i18n.t("pipeline.fmt.slin.kept_unread", n=s.kept_unread))
+            klucz = ("pipeline.fmt.slin.kept_no_location" if s.no_location >= s.kept_unread
+                     else "pipeline.fmt.slin.kept_unread")
+            czesci.append(i18n.t(klucz, n=s.kept_unread))
         return i18n.t("pipeline.fmt.slin.prefix") + " · ".join(czesci)
 
     def _format_stacks(self, s):

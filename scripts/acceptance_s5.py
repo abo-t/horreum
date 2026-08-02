@@ -429,19 +429,21 @@ def stack_lineage(con, now, out):
     po = {v: con.execute("SELECT count(*) FROM event WHERE verb=?", (v,)).fetchone()[0]
           for v in _SLIN_VERBS}
     rows_po = con.execute("SELECT count(*) FROM integration_input").fetchone()[0]
-    # `kept_unread` MUSI wejść w kryterium: strażnik 4 produkuje zerowe delty Z WYBORU, więc bez
-    # tego warunku przebieg na niezamontowanym archiwum świeciłby zieloną idempotencją, nic nie
-    # zmierzywszy. Zero zapisu z braku zmian i zero zapisu z odmowy to dwa różne fakty.
-    idem = (not s2.linked_new and not s2.unlinked and not s2.kept_unread
-            and po == przed and rows_przed == rows_po)
+    # DWA RÓŻNE FAKTY, DWIE RÓŻNE LINIE. „Zero zapisu, bo nic się nie zmieniło" (idempotencja)
+    # i „zero zapisu, bo nie przeczytaliśmy pliku" (strażnik 4) to nie to samo — sklejone w jedno
+    # kryterium dawały czerwień o FAŁSZYWEJ przyczynie: etykieta mówiłaby „zero relacji, zero
+    # eventów", gdy jedno i drugie faktycznie zachodzi. A bramkę czerwoną na poprawnym stanie
+    # naprawia się podnoszeniem kotwicy — po czym przestaje ona łapać regresję prawdziwą.
+    idem = (not s2.linked_new and not s2.unlinked and po == przed and rows_przed == rows_po)
     out(f"  przebieg 2 (idempotencja): linked_new={s2.linked_new} unlinked={s2.unlinked} "
         f"pominietych_bez_zeznania={s2.kept_unread} wiersze {rows_przed}=={rows_po}")
-    return s1, idem
+    return s1, idem, s2.kept_unread
 
 
 # ── (C) KRYTERIA §5 na bazie zbudowanej z dawcy (stage-aware: import vs full) ─────────────────────
 def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, lin_idempotent=None,
-                   stacks=None, stacks_idempotent=None, slin=None, slin_idempotent=None):
+                   stacks=None, stacks_idempotent=None, slin=None, slin_idempotent=None,
+                   slin_kept=None):
     results = []                                    # (etykieta, PASS/FAIL)
 
     def crit(label, cond):
@@ -757,6 +759,11 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
                     nota=" — reszta to KANDYDACI z okna, nie fakty")
         crit("§5.14 rodowód idempotentny (2. przebieg: zero relacji, zero eventów zapisu)",
              slin_idempotent is True)
+        # OSOBNE kryterium, bo to osobny fakt: przebieg, który pominął stosy bez zeznania pliku,
+        # NIE ZMIERZYŁ całej populacji — a jego zerowe delty wyglądają identycznie jak zerowe
+        # delty z idempotencji. Sklejone razem dawały czerwień o fałszywej przyczynie.
+        crit(f"§5.14 przebieg zmierzył CAŁĄ populację (pominiętych bez zeznania: {slin_kept})",
+             slin_kept == 0)
 
     # §5.9 encje == eventy (co do sztuki) — audyt jednej klingi kompletny
     out("\n§5.9 encje == eventy:")
@@ -1046,13 +1053,13 @@ def main(argv=None):
     lin, lin_idem = lineage(con, now, out)
     # Rodowód stosów PO kalibracji i rodowodzie kalibracji — kolejność bez znaczenia dla wyniku
     # (osie rozłączne), ale trzyma czytelny porządek raportu: najpierw archiwum, potem produkty.
-    slin = slin_idem = None
+    slin = slin_idem = slin_kept = None
     if args.stacks_root:
-        slin, slin_idem = stack_lineage(con, now, out)
+        slin, slin_idem, slin_kept = stack_lineage(con, now, out)
     results = check_criteria(con, summary, out, cal=cal, cal_idempotent=cal_idem,
                              lin=lin, lin_idempotent=lin_idem,
                              stacks=stacks, stacks_idempotent=stacks_idem,
-                             slin=slin, slin_idempotent=slin_idem)
+                             slin=slin, slin_idempotent=slin_idem, slin_kept=slin_kept)
     con.close()
 
     subset_ok = True

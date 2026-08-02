@@ -24,6 +24,21 @@ schemat i API mogą się jeszcze zmieniać.
   Gdy nagłówek obrazu opisuje jedną klatkę zamiast całej serii, program **nie zgaduje**: taki stos
   zostaje z jawnym powodem, zamiast dostać jedno przypadkowe zdjęcie i wyglądać wiarygodnie.
   Z wiersza poleceń: `horreum stack-lineage`.
+- **Panel „Rodowód" odpowiada teraz na dwa pytania naraz.** Dla klatki z nieba mówi, czym ją
+  skalibrowano (którym masterdarkiem, którym flatem i dlaczego akurat tym); dla gotowego obrazu —
+  które klatki w nim siedzą. Jedna etykieta, dwie odpowiedzi zależne od tego, co zaznaczysz.
+- **Plan celów mówi, ile godzin naprawdę weszło w gotowy obraz.** Obok „ile zebrałem" stoi teraz
+  druga liczba — „w obrazach" — a pod kursorem, w kolumnie „Pokrycie", wypisuje się **gdzie te
+  obrazy leżą**. Każda klatka liczy się **raz**, choć często siedzi w kilku obrazach naraz
+  (ponowne złożenie tej samej nocy, wersja drizzle, wersja bez gwiazd): bez tego godziny rosłyby
+  od samego przeliczania archiwum. Luki i rada nadal patrzą na godziny ZEBRANE — „jeszcze tego nie
+  złożyłem" nie jest brakiem materiału i nie wyśle Cię po klatki, które już masz.
+- **Perspektywy mieszkają w bazie i jadą razem z nią.** Nazwany widok („Do przeglądu Ha z A140R")
+  był dotąd własnością komputera: nie przenosił się na laptopa i ginął przy przeinstalowaniu
+  programu. Teraz siedzi w pliku biblioteki — skopiuj bazę, a perspektywy jadą z nią. Zapisanie
+  pod nazwą, która już tam jest, **mówi wprost, że nadpisuje** (bo mogła przyjechać z drugiej
+  maszyny z inną treścią). Perspektywy zapisane wcześniej program przenosi sam, przy pierwszym
+  otwarciu Zbiorów.
 
 ### Naprawione
 - **Okno „Napraw nagłówek…" przyjmuje wreszcie Księżyc, planety i komety.** Sprawdzało nazwę

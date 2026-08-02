@@ -13,6 +13,10 @@ różnicy. Kalibrator to WYŁĄCZNIE `master_%` (filtr w zapytaniu `_masters_by_
 Druga strona monety — „czego brakuje" — to trzy rozłączne kubełki luki per relacja (brak przepisu /
 brak mastera / niekompletny przepis lightu); z „linked" domykają populację lightów (bramka §5.12).
 
+STRONA ODCZYTU (C3, Issue #6): `explain_light` odpowiada za JEDNĄ klatkę — powiązania bierze ze
+STANU (`calibrators_for`), a powód braku z tej samej derywacji, którą liczy przebieg (`_decide`).
+Bez wspólnego predykatu ekran tłumaczyłby brak inaczej, niż przebieg go tworzy.
+
 Qt-wolne, zapis wyłącznie przez `repo` (DB-KLINGA), SELECT literałem.
 """
 from dataclasses import dataclass, field
@@ -26,6 +30,16 @@ from .naming import header_dt
 # dla ręki/przyszłości, ale derywacja rodowodu go nie składa.
 _RELATIONS = ("dark", "flat")
 
+# Powód luki jedzie z derywacji jako TOKEN, a zdanie składa się dopiero u wołającego: raport
+# przebiegu bierze prozę stąd (kotwice §5.12 bramki stoją na tych właśnie ciągach), panel GUI
+# bierze swoją z katalogu i18n. Bez tego rozdziału polskie zdanie rdzenia wyciekłoby do wersji EN
+# — ta sama granica co przy `unresolved_reason` rodowodu stosów i `ProjectionAbort`.
+_GAP_PROSE = {
+    "incomplete_recipe": "niekompletny przepis lightu",
+    "no_profile": "brak przepisu w archiwum",
+    "no_master": "brak mastera (są tylko surowe)",
+}
+
 
 @dataclass
 class LineageSummary:
@@ -37,15 +51,28 @@ class LineageSummary:
     reasons: dict = field(default_factory=dict)        # "relation: powód" -> licznik (luki)
 
 
-def _masters_by_profile(con):
+def _masters_by_profile(con, profile_id=None):
     """`profile_id -> [(frame_id, datetime|None)]` dla kandydatów `kind LIKE 'master_%'`.
     Master i klatka surowa dzielą profil (C2), więc filtr `master_%` jest KONIECZNY — inaczej
-    „czym skalibrować" oddałoby surowego darka jako kalibrator (brief C2 §5)."""
+    „czym skalibrować" oddałoby surowego darka jako kalibrator (brief C2 §5).
+
+    `profile_id` ZAWĘŻA do jednego przepisu — odczyt pojedynczej klatki (panel) nie ma powodu
+    czytać wszystkich masterów archiwum. Dwa PEŁNE literały zamiast sklejania: bramka
+    `test_repo_safety` czyta pierwszy argument `execute` jako stałą, więc `PREFIX + warunek`
+    byłaby dla niej SQL-em dynamicznym poza `repo.py`/`db.py`. Powtórzona lista kolumn jest
+    kosztem tej bramki, świadomym."""
     out = {}
-    for r in con.execute(
+    if profile_id is None:
+        cur = con.execute(
             "SELECT f.calibration_profile_id AS pid, f.id AS fid, h.date_obs AS d "
             "FROM frame f LEFT JOIN header h ON h.frame_id = f.id "
-            "WHERE f.calibration_profile_id IS NOT NULL AND f.kind LIKE 'master_%'"):
+            "WHERE f.calibration_profile_id IS NOT NULL AND f.kind LIKE 'master_%'")
+    else:
+        cur = con.execute(
+            "SELECT f.calibration_profile_id AS pid, f.id AS fid, h.date_obs AS d "
+            "FROM frame f LEFT JOIN header h ON h.frame_id = f.id "
+            "WHERE f.calibration_profile_id = ? AND f.kind LIKE 'master_%'", (profile_id,))
+    for r in cur:
         out.setdefault(r["pid"], []).append((r["fid"], header_dt(r["d"])))
     return out
 
@@ -66,6 +93,28 @@ def _choose(masters, light_dt):
 
 def _bump(d, key):
     d[key] = d.get(key, 0) + 1
+
+
+def _decide(row, relation, profiles, masters, light_dt):
+    """JEDNA decyzja „czym skalibrować TĘ klatkę w TEJ relacji" → `(master_frame_id, gap_token)`;
+    dokładnie jedno z dwojga jest `None`.
+
+    Właściciel predykatu dla OBU wołających: przebieg (`run_lineage`) i odczyt pojedynczej klatki
+    (`explain_light`). Bez tego panel odpowiadałby na „dlaczego brak" własną derywacją, która
+    rozjeżdża się z przebiegiem po cichu — a rozjazd między tym, co ekran TŁUMACZY, a tym, co
+    przebieg ROBI, jest gorszy niż brak tłumaczenia (SIN-DUP)."""
+    d = dict(row)
+    d["recipe_class"] = relation
+    facts = _collect(d, {})                            # stored={} — light nie ma faktów path/user
+    if missing_facts(relation, facts):
+        return None, "incomplete_recipe"
+    pid = profiles.get(profile_key(relation, facts))
+    if pid is None:
+        return None, "no_profile"
+    cand = masters.get(pid)
+    if not cand:
+        return None, "no_master"
+    return _choose(cand, light_dt), None
 
 
 def run_lineage(con, *, now, actor="lineage"):
@@ -92,20 +141,10 @@ def run_lineage(con, *, now, actor="lineage"):
         light_dt = header_dt(row["date_obs"])
         d = {k: row[k] for k in row.keys()}
         for relation in _RELATIONS:
-            d["recipe_class"] = relation
-            facts = _collect(d, {})                        # stored={} — light nie ma faktów path/user
-            if missing_facts(relation, facts):
-                _bump(s.reasons, f"{relation}: niekompletny przepis lightu")
+            master_id, gap = _decide(d, relation, profiles, masters, light_dt)
+            if gap:
+                _bump(s.reasons, f"{relation}: {_GAP_PROSE[gap]}")
                 continue
-            pid = profiles.get(profile_key(relation, facts))
-            if pid is None:
-                _bump(s.reasons, f"{relation}: brak przepisu w archiwum")
-                continue
-            cand = masters.get(pid)
-            if not cand:
-                _bump(s.reasons, f"{relation}: brak mastera (są tylko surowe)")
-                continue
-            master_id = _choose(cand, light_dt)
             s.linked[relation] = s.linked.get(relation, 0) + 1       # STAN (do domknięcia populacji)
             if repo.link_calibration(con, light_frame_id=row["frame_id"], master_frame_id=master_id,
                                      relation=relation, now=now, actor=actor):
@@ -116,9 +155,72 @@ def run_lineage(con, *, now, actor="lineage"):
     return s
 
 
+class _LazyMasters:
+    """Leniwy nośnik kandydatów pod odczyt POJEDYNCZEJ klatki — `.get(pid)` sięga do bazy dopiero
+    dla przepisu, który realnie wyszedł z derywacji. Interfejs `.get` jest tu po to, żeby `_decide`
+    NIE musiał wiedzieć, czy woła go przebieg (słownik wszystkich masterów), czy panel (jeden
+    przepis): predykat zostaje jeden, a koszt odczytu nie rośnie do rozmiaru archiwum."""
+
+    def __init__(self, con):
+        self._con = con
+        self._cache = {}
+
+    def get(self, pid):
+        if pid not in self._cache:
+            self._cache[pid] = _masters_by_profile(self._con, pid).get(pid, [])
+        return self._cache[pid]
+
+
+def explain_light(con, light_frame_id):
+    """READ-ONLY odpowiedź na pytanie ekranu: „czym skalibrowano tę klatkę — a jeśli niczym, to
+    DLACZEGO". Zwraca listę dictów (po jednym na relację `dark`/`flat`) albo `None`, gdy klatka
+    nie jest lightem (kalibratory ma z definicji tylko klatka nieba — ta sama figura kind-aware
+    co przy osi teleskopu).
+
+    TRZY STANY, ROZŁĄCZNE — i trzeci jest tu sednem, nie ozdobą:
+
+    - **powiązana** (`master_frame_id`): wiersz `calibration` ISTNIEJE. Bierzemy STAN z tabeli,
+      nigdy ponownej derywacji — powierzchnia pokazuje to, co zapisano, a nie to, co wyszłoby
+      dziś (REVIEW-ZE-STANU).
+    - **luka** (`gap`): wiersza nie ma i derywacja mówi, czego brakuje (token → zdanie u wołającego).
+    - **nieliczona** (`pending`): wiersza nie ma, ale derywacja WSKAZUJE mastera. To nie luka
+      archiwum, tylko nieprzebiegnięty (albo stęchły) etap „Rodowód" — i użytkownik ma usłyszeć
+      dwie różne rzeczy, bo jedna wymaga zakupu klatek, a druga jednego kliknięcia w Dostawie.
+
+    Zapisu nie ma i mieć nie będzie: panel tłumaczy stan, a zmienia go przebieg (jedna klinga)."""
+    row = con.execute(
+        "SELECT f.id AS frame_id, f.camera_id AS camera_id, f.filter_canon AS filter_canon, "
+        "c.telescope_id AS telescope_id, h.exptime AS exptime, h.set_temp AS set_temp, "
+        "h.gain AS gain, h.offset_adu AS offset_adu, h.xbinning AS xbinning, "
+        "h.date_obs AS date_obs "
+        "FROM frame f LEFT JOIN header h ON h.frame_id = f.id "
+        "LEFT JOIN config c ON c.id = f.config_id WHERE f.kind = 'light' AND f.id = ?",
+        (light_frame_id,)).fetchone()
+    if row is None:
+        return None
+    stan = {r["relation"]: r for r in calibrators_for(con, light_frame_id)}
+    profiles = {r["profile_key"]: r["id"] for r in con.execute(
+        "SELECT id, profile_key FROM calibration_profile")}
+    masters = _LazyMasters(con)
+    light_dt = header_dt(row["date_obs"])
+    d = {k: row[k] for k in row.keys()}
+    out = []
+    for relation in _RELATIONS:
+        s = stan.get(relation)
+        if s is not None:
+            out.append({"relation": relation, "master_frame_id": s["master_frame_id"],
+                        "master_path": s["master_path"], "confidence": s["confidence"],
+                        "gap": None, "pending": False})
+            continue
+        master_id, gap = _decide(d, relation, profiles, masters, light_dt)
+        out.append({"relation": relation, "master_frame_id": None, "master_path": None,
+                    "confidence": None, "gap": gap, "pending": master_id is not None})
+    return out
+
+
 def calibrators_for(con, light_frame_id):
     """READ-ONLY „czym to skalibrować": wiersze rodowodu dla lightu z nazwą kalibratora (ścieżka
-    mastera) i klasą. Dane pod perspektywę GUI (dokłada się z C3) i raport CLI — bez zapisu."""
+    mastera) i klasą. Dane pod perspektywę GUI (`explain_light`) i raport CLI — bez zapisu."""
     return con.execute(
         "SELECT c.relation AS relation, c.master_frame_id AS master_frame_id, "
         "c.confidence AS confidence, "

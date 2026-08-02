@@ -747,13 +747,49 @@ CATALOG = {
     "grid.lin.src.window": {"pl": "wynika z czasu", "en": "inferred from time"},
     "grid.lin.src.user": {"pl": "Twoja decyzja", "en": "your decision"},
     "grid.lin.src.excluded": {"pl": "odrzucone", "en": "rejected"},
+    # Zdania powitalne panelu opisują OBIE osie od C3: gotowy obraz mówi, z czego powstał, klatka
+    # nieba — czym ją skalibrowano. Zdanie wymieniające tylko stosy kłamałoby o połowie panelu.
     "grid.lin.hint.none": {
-        "pl": "Zaznacz w tabeli gotowy obraz (stos), żeby zobaczyć, z czego powstał.",
-        "en": "Select a finished image (stack) in the table to see what it was made of.",
+        "pl": "Zaznacz w tabeli gotowy obraz (zobaczysz, z czego powstał) albo klatkę nieba "
+              "(zobaczysz, czym ją skalibrowano).",
+        "en": "Select a finished image (to see what it was made of) or a sky frame (to see what "
+              "calibrated it).",
     },
     "grid.lin.hint.not_stack": {
-        "pl": "Rodowód mają gotowe obrazy po integracji — zaznaczona pozycja nim nie jest.",
-        "en": "Lineage belongs to finished images after integration — the selected row is not one.",
+        "pl": "Rodowód mają gotowe obrazy i klatki nieba — klatka kalibracyjna sama jest "
+              "narzędziem, nie ma czym być skalibrowana.",
+        "en": "Lineage belongs to finished images and sky frames — a calibration frame is the tool "
+              "itself, so nothing calibrates it.",
+    },
+    # --- oś KALIBRACJI w panelu (C3, Issue #6) ---
+    "grid.lin.cal.head": {
+        "pl": {"one": "Skalibrowana: {n} z {total} klas",
+               "few": "Skalibrowana: {n} z {total} klas",
+               "many": "Skalibrowana: {n} z {total} klas"},
+        "en": {"one": "Calibrated: {n} of {total} classes",
+               "other": "Calibrated: {n} of {total} classes"},
+    },
+    "grid.lin.cal.rel.dark": {"pl": "ciemność (dark)", "en": "dark"},
+    "grid.lin.cal.rel.flat": {"pl": "pole (flat)", "en": "flat"},
+    "grid.lin.cal.state.pending": {
+        "pl": "master jest — powiązania jeszcze nie policzono",
+        "en": "master exists — the link has not been computed yet",
+    },
+    "grid.lin.cal.pending": {
+        "pl": "⚠ uruchom etap Rodowód w Dostawie, żeby powiązać to, co już jest w archiwum",
+        "en": "⚠ run the Lineage step in Delivery to link what the archive already holds",
+    },
+    "grid.lin.cal.gap.incomplete_recipe": {
+        "pl": "nie wiadomo, czego szukać: klatka nie podaje pełnej nastawy",
+        "en": "nothing to look for: the frame does not give its full settings",
+    },
+    "grid.lin.cal.gap.no_profile": {
+        "pl": "brak w archiwum czegokolwiek o tej nastawie",
+        "en": "the archive holds nothing with these settings",
+    },
+    "grid.lin.cal.gap.no_master": {
+        "pl": "są klatki surowe, nie ma złożonego mastera",
+        "en": "raw frames exist, no stacked master",
     },
     "grid.lin.hint.many": {
         "pl": "Zaznacz DOKŁADNIE jeden gotowy obraz — rodowód opisuje pojedynczy obraz.",

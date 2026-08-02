@@ -36,7 +36,8 @@ from PySide6.QtWidgets import (
     QScrollArea, QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QTableView, QVBoxLayout, QWidget,
 )
 
-from horreum import filter_engine, macro as macro_mod, naming, pivot as pivot_mod, repo, writeback
+from horreum import (filter_engine, lineage, macro as macro_mod, naming, pivot as pivot_mod, repo,
+                     writeback)
 from horreum.gui import facet_model, i18n, portfolio, queries, rows, theme
 from horreum.gui.facets import RAIL_MIN_W as _FIELDS_MIN_W, FacetRail
 from horreum.gui.projection_dialog import ProjectionDialog
@@ -994,6 +995,12 @@ class ElidedLabel(QLabel):
         self.setText(fm.elidedText(self._full, Qt.ElideRight, max(0, self.width() - 4)))
 
 
+# Sufit listy panelu rodowodu: wejść stosu bywa 190, więc lista MUSI mieć próg, za którym oddaje
+# pion gridowi. Oś kalibracji ma zawsze dwa wiersze i sufit sobie zaniża do treści (`set_calibration`),
+# dlatego droga stosu przywraca tę wartość WPROST — panel przełącza się w obie strony.
+_LINEAGE_LIST_MAX_H = 160
+
+
 class LineageBar(QWidget):
     """Panel „Rodowód" (I-2d, P-I): CO WESZŁO W TEN OBRAZ — strona `_PanelStack` otwierana z paska
     zbioru, gdy zaznaczono DOKŁADNIE JEDEN gotowy stos (`kind='master_light'`).
@@ -1036,7 +1043,7 @@ class LineageBar(QWidget):
         self.items.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.items.setTextElideMode(Qt.ElideLeft)       # ścieżka: koniec (nazwa pliku) niesie sens
         self.items.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.items.setMaximumHeight(160)                # panel nie ma prawa zjeść gridu (wiz F3 #1)
+        self.items.setMaximumHeight(_LINEAGE_LIST_MAX_H)   # panel nie zjada gridu (wiz F3 #1)
         self.items.itemSelectionChanged.connect(self._sync_buttons)
         lay.addWidget(self.items)
         # Wiersz akcji w WIDŻECIE, nie w gołym layoucie — pusta lista chowa go w całości (wiz #6),
@@ -1063,6 +1070,7 @@ class LineageBar(QWidget):
         wiersze `queries.stack_lineage_inputs`, `hint` = gotowe zdanie, gdy nie ma czego pokazać
         (złe zaznaczenie / rodowód nieliczony). Zero SQL i zero decyzji — sama prezentacja."""
         self.items.clear()
+        self.items.setMaximumHeight(_LINEAGE_LIST_MAX_H)   # oś kalibracji zaniża sufit do treści
         self._head = head
         if head is None:
             # Brak materiału ZAWSZE mówi zdaniem — także w stanie startowym, zanim ktokolwiek
@@ -1105,9 +1113,51 @@ class LineageBar(QWidget):
         # pokazać (i dać się cofnąć), a stos bez ani jednego wiersza nie ma zajmować pionu na listę.
         self._sync_visible(bool(inputs))
 
+    def set_calibration(self, relations):
+        """DRUGA ODPOWIEDŹ TEGO SAMEGO PANELU (C3, Issue #6): czym skalibrowano zaznaczoną klatkę
+        nieba. `relations` = wynik `lineage.explain_light` (po jednym wierszu na `dark`/`flat`).
+
+        Panel jest kind-aware, a nie zdublowany, bo pytanie użytkownika jest JEDNO — „skąd ta
+        klatka ma swój kształt" — i tylko odpowiedź zależy od rodzaju: gotowy obraz mówi, co
+        w niego weszło, klatka nieba mówi, czym ją skalibrowano. Dwa osobne panele kazałyby
+        zgadywać, który otworzyć, zanim wiadomo, co się zaznaczyło.
+
+        WERDYKTU RĘKI TU NIE MA i to nie jest przeoczenie: `calibration` nie zna kolumny
+        `excluded` — dobór mastera jest funkcją przepisu i czasu, więc ręka zmienia go naprawiając
+        FAKT (nastawę, kartę), nie przegłosowując wynik. Wiersz akcji chowa się w całości."""
+        self.items.clear()
+        self._head = None
+        powiazane = [r for r in relations if r["master_frame_id"] is not None]
+        for r in relations:
+            it = QListWidgetItem(_calibration_item_text(r))
+            it.setData(Qt.UserRole, r["master_frame_id"])
+            if r["master_frame_id"] is None:
+                it.setForeground(_COLORS["secondary_text"])
+            self.items.addItem(it)
+        self.head.setText(i18n.t_plural("grid.lin.cal.head", len(powiazane),
+                                        total=len(relations)))
+        # LISTA DO TREŚCI, nie do sufitu. Wejść stosu bywa 190, więc tam sufit 160 px chroni grid;
+        # tutaj wiersze są ZAWSZE dwa (dark, flat), a ten sam sufit zostawiał ~100 px pustki —
+        # dokładnie ten zarzut, który zdjął pustkę z panelu stosu (wiz #6), tylko z drugiej strony.
+        wiersz = self.items.sizeHintForRow(0) if self.items.count() else 0
+        self.items.setMaximumHeight(wiersz * self.items.count() + 2 * self.items.frameWidth())
+        # NIELICZONE ≠ LUKA — pierwsze naprawia jedno kliknięcie w Dostawie, drugie wymaga klatek,
+        # których w archiwum nie ma. Wspólne „brak" kazałoby szukać winy tam, gdzie jej nie ma.
+        czeka = [r for r in relations if r["pending"]]
+        self.warn.set_full_text(i18n.t("grid.lin.cal.pending") if czeka else "")
+        self.note.set_full_text("")
+        self.items.setVisible(True)
+        self.action_row.setVisible(False)          # w tej osi nie ma czego potwierdzać ani odrzucać
+        self.warn.setVisible(bool(self.warn.full_text()))
+        self.note.setVisible(False)
+        self._sync_buttons()
+
     def integration_id(self):
         """Integracja, której dotyczy panel (albo `None`) — gospodarz pyta o cel zapisu TU, zamiast
-        sięgać do pola widżetu (NARROW: panel wystawia fakt, nie swoje wnętrze)."""
+        sięgać do pola widżetu (NARROW: panel wystawia fakt, nie swoje wnętrze).
+
+        Tryb kalibracji zeruje `_head`, więc werdykt ręki nie ma tam celu zapisu — i dobrze:
+        `judged` nie ma prawa trafić w tabelę, która werdyktów nie zna."""
         return None if self._head is None else self._head["integration_id"]
 
     def set_busy(self, busy):
@@ -1161,6 +1211,21 @@ def _lineage_item_text(r):
     if r["excluded"]:
         zrodlo = i18n.t("grid.lin.src.excluded")
     return f"{czas} · {exp} · [{zrodlo}] · {r['path'] or ''}"
+
+
+def _calibration_item_text(r):
+    """Jeden wiersz osi kalibracji: KLASA · stan · ścieżka mastera. Klasa stoi pierwsza, bo to ona
+    jest pytaniem („czym odjęto ciemność, czym wyrównano pole"); ścieżka jest elidowana od lewej,
+    więc ustępuje ona, nigdy werdykt — dokładnie jak w wierszu wejść stosu."""
+    klasa = i18n.t(f"grid.lin.cal.rel.{r['relation']}")
+    if r["master_frame_id"] is not None:
+        return f"{klasa} · {r['master_path'] or ''}"
+    # BRAK MA POWÓD ALBO GO NIE MA — i to są dwa różne zdania. Token `gap` niesie powód archiwum;
+    # `pending` znaczy, że master JEST, tylko nikt jeszcze nie policzył powiązania.
+    if r["pending"]:
+        return f"{klasa} · {i18n.t('grid.lin.cal.state.pending')}"
+    powod = i18n.t(f"grid.lin.cal.gap.{r['gap']}")
+    return f"{klasa} · {powod}"
 
 
 def _lineage_reason_text(head):
@@ -1744,6 +1809,15 @@ class FramesView(QWidget):
         wiersze = self._selected_data_rows()
         stosy = [r for r in wiersze if r.get("kind") == "master_light"]
         if len(stosy) != 1:
+            # OŚ KALIBRACJI (C3, Issue #6) — druga odpowiedź tego samego panelu. Warunek jest
+            # DOPEŁNIENIEM osi stosów, nie jej konkurentem: pytamy dopiero, gdy w zaznaczeniu nie
+            # ma gotowego obrazu, więc droga stosu zachowuje się dokładnie jak przedtem.
+            lighty = [r for r in wiersze if r.get("kind") == "light"]
+            if not stosy and len(lighty) == 1:
+                relacje = lineage.explain_light(self.con, lighty[0]["frame_id"])
+                if relacje:
+                    self.lineage_bar.set_calibration(relacje)
+                    return
             klucz = ("grid.lin.hint.none" if not wiersze else
                      "grid.lin.hint.not_stack" if not stosy else "grid.lin.hint.many")
             self.lineage_bar.set_lineage(None, [], hint=i18n.t(klucz))

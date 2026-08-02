@@ -204,3 +204,71 @@ def test_light_bez_date_obs_degeneruje_do_min_id_bez_crash(con):
     run_calibration(con, now=NOW)
     run_lineage(con, now=NOW)
     assert con.execute("SELECT master_frame_id FROM calibration WHERE light_frame_id=?", (lid,)).fetchone()[0] == m1
+
+
+# --- ODCZYT POJEDYNCZEJ KLATKI (`explain_light`, C3/#6) — materiał panelu „Rodowód" ---
+
+def test_explain_light_oddaje_stan_a_nie_ponowna_derywacje(con):
+    """Powiązanie bierze się z TABELI, nie z ponownego liczenia: panel pokazuje to, co zapisano,
+    więc gdy ktoś podmieni master ręką, ekran mówi o TYM masterze, a nie o tym, który wyszedłby
+    dziś z reguły czasowej (REVIEW-ZE-STANU)."""
+    from horreum.lineage import explain_light
+    md = _frame(con, kind="master_dark", sha1="d1", path=MASTERDARK, exptime=300.0,
+                date_obs="2023-01-01T00:00:00")
+    lid = _light_dark(con, "l1")
+    run_calibration(con, now=NOW)
+    run_lineage(con, now=NOW)
+
+    stan = {r["relation"]: r for r in explain_light(con, lid)}
+    assert set(stan) == {"dark", "flat"}                    # ZAWSZE obie klasy, także ta pusta
+    assert stan["dark"]["master_frame_id"] == md
+    assert stan["dark"]["master_path"] == MASTERDARK        # ścieżka pod wiersz listy
+    assert (stan["dark"]["gap"], stan["dark"]["pending"]) == (None, False)
+    # Flat nie ma nawet z czego złożyć klucza (ten light nie niesie filtra) — to LUKA, i to ona,
+    # nie cisza, jedzie na ekran. Powód jest PRECYZYJNY: nie „brak w archiwum", tylko „klatka nie
+    # podaje, czego szukać" — dwie różne naprawy.
+    assert stan["flat"]["gap"] == "incomplete_recipe" and not stan["flat"]["pending"]
+
+
+def test_explain_light_odroznia_nieliczone_od_luki_archiwum(con):
+    """TRZECI STAN, sedno C3: master JEST, tylko powiązania nikt jeszcze nie policzył. Bez tego
+    rozróżnienia ekran mówiłby „brak" o czymś, co leży w archiwum — i kazałby szukać winy
+    w sprzęcie zamiast uruchomić etap. Falsyfikator: po przebiegu ten sam light ma `pending=False`."""
+    from horreum.lineage import explain_light
+    _frame(con, kind="master_dark", sha1="d1", path=MASTERDARK, exptime=300.0,
+           date_obs="2023-01-01T00:00:00")
+    lid = _light_dark(con, "l1")
+    run_calibration(con, now=NOW)                           # oś przepisu tak, rodowód NIE
+
+    przed = {r["relation"]: r for r in explain_light(con, lid)}
+    assert przed["dark"]["pending"] and przed["dark"]["gap"] is None
+    assert przed["dark"]["master_frame_id"] is None          # bo w tabeli nadal nic nie ma
+
+    run_lineage(con, now=NOW)
+    po = {r["relation"]: r for r in explain_light(con, lid)}
+    assert not po["dark"]["pending"] and po["dark"]["master_frame_id"] is not None
+
+
+def test_explain_light_milczy_o_klatce_ktora_nie_jest_lightem(con):
+    """Kalibratory ma z definicji tylko klatka nieba (ta sama figura kind-aware co oś teleskopu).
+    Master sam jest narzędziem — pytanie „czym go skalibrowano" nie ma treści, więc odpowiedzią
+    jest `None`, a nie pusta lista udająca zmierzone zero."""
+    from horreum.lineage import explain_light
+    md = _frame(con, kind="master_dark", sha1="d1", path=MASTERDARK, exptime=300.0)
+    assert explain_light(con, md) is None
+    assert explain_light(con, 9999) is None                  # klatka, której nie ma
+
+
+def test_obie_drogi_czytaja_TE_SAME_kolumny_przepisu():
+    """BRAMKA KLASY, nie przypadek: przebieg i odczyt pojedynczej klatki mają dwa PEŁNE literały
+    SQL (wymusza to `test_repo_safety` — sklejany SQL byłby dla niej dynamiczny). Rozjazd list
+    kolumn znaczyłby, że panel tłumaczy brak z innego zeznania, niż przebieg go tworzy — cicho
+    i tylko dla pola, które ktoś dodał w jednym miejscu."""
+    import ast
+    import pathlib
+    src = pathlib.Path("horreum/lineage.py").read_text(encoding="utf-8")
+    listy = [n.value.split(" FROM ")[0] for n in ast.walk(ast.parse(src))
+             if isinstance(n, ast.Constant) and isinstance(n.value, str)
+             and n.value.startswith("SELECT f.id AS frame_id")]
+    assert len(listy) == 2, f"spodziewane dwa zapytania o przepis lightu, jest {len(listy)}"
+    assert listy[0] == listy[1], "przebieg i panel czytają INNE kolumny przepisu"

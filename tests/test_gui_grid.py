@@ -1328,14 +1328,61 @@ def test_stos_z_powodem_pokazuje_odrzucone_wiersze_zeby_dalo_sie_cofnac(view, gc
 
 
 def test_panel_rodowodu_wymaga_jednego_stosu(view, gcon):
-    """Rodowód opisuje POJEDYNCZY obraz — inne zaznaczenie dostaje ZDANIE, nie pustkę. Zaznaczenie
-    zwykłej klatki tłumaczy się inaczej niż brak zaznaczenia (dwie różne pomyłki, dwie podpowiedzi)."""
+    """Rodowód opisuje POJEDYNCZY obraz — inne zaznaczenie dostaje ZDANIE, nie pustkę.
+
+    Od C3 (#6) „inne zaznaczenie" znaczy węziej niż przedtem: klatka NIEBA ma teraz własną
+    odpowiedź (czym ją skalibrowano), więc zdanie „to nie ma rodowodu" należy się już tylko
+    klatce KALIBRACYJNEJ — ona sama jest narzędziem i nie ma czym być skalibrowana."""
     _seed_stos(gcon)
     view._toggle_panel("lineage")
     assert "Zaznacz w tabeli" in view.lineage_bar.head.text()
-    assert _zaznacz_frame(view, 1)                     # zwykły light, nie stos
+    assert _zaznacz_frame(view, 3)                     # master_flat — narzędzie, nie cel kalibracji
     view._refresh_lineage()
-    assert "nim nie jest" in view.lineage_bar.head.text()
+    assert "klatka kalibracyjna" in view.lineage_bar.head.text()
+
+
+def test_panel_pokazuje_os_kalibracji_dla_klatki_nieba(view, gcon):
+    """C3 (#6): TEN SAM panel, druga odpowiedź. Zaznaczona klatka nieba pokazuje obie klasy
+    (ciemność i pole) — także tę, której brakuje, bo „czego nie ma" jest tu połową odpowiedzi."""
+    gcon.execute("INSERT INTO calibration (light_frame_id, master_frame_id, relation, "
+                 "asserted_by, confidence) VALUES (1, 3, 'flat', 'horreum', 'recipe')")
+    gcon.commit()
+    assert _zaznacz_frame(view, 1)
+    view._toggle_panel("lineage")
+    bar = view.lineage_bar
+    assert bar.items.count() == 2                       # dark + flat, zawsze obie klasy
+    teksty = [bar.items.item(i).text() for i in range(2)]
+    assert any("/a/f3.xisf" in t for t in teksty)       # powiązany master pokazuje SWOJĄ ścieżkę
+    assert "1 z 2" in bar.head.text()
+    # Werdykt ręki NIE ISTNIEJE w tej osi — `calibration` nie zna kolumny `excluded`, więc przyciski
+    # nie mają w co trafić. Widoczne, ale bezczynne byłyby obietnicą bez pokrycia.
+    assert bar.action_row.isHidden()
+
+
+def test_panel_kalibracji_odroznia_nieliczone_od_braku(view, gcon):
+    """Dwa różne „nie ma" wymagają dwóch różnych zdań: brak w archiwum kosztuje klatki, których
+    nikt nie zrobił, a nieliczone powiązanie — jedno kliknięcie w Dostawie. Wspólny komunikat
+    kazałby szukać winy tam, gdzie jej nie ma."""
+    assert _zaznacz_frame(view, 1)
+    view._toggle_panel("lineage")
+    bar = view.lineage_bar
+    assert "Skalibrowana: 0 z 2" in bar.head.text()
+    assert bar.warn.full_text() == ""                   # nic nie czeka na przeliczenie — brak ⚠
+
+
+def test_przelaczenie_osi_wraca_z_zanizonym_sufitem_listy(view, gcon):
+    """Oś kalibracji zaniża sufit listy do swoich DWÓCH wierszy (sufit 160 px zostawiał ~100 px
+    pustki). Sufit musi więc wracać przy powrocie na oś stosów — inaczej obraz o 190 wejściach
+    dostałby okno wysokości dwóch wierszy i przewijanie zamiast listy."""
+    _seed_stos(gcon)
+    assert _zaznacz_frame(view, 1)                      # klatka nieba → oś kalibracji
+    view._toggle_panel("lineage")
+    niski = view.lineage_bar.items.maximumHeight()
+    assert niski < 160
+
+    assert _zaznacz_frame(view, 10)                     # gotowy obraz → oś stosów
+    view._refresh_lineage()
+    assert view.lineage_bar.items.maximumHeight() == 160
 
 
 def test_werdykt_reki_zapisuje_sie_i_odejmuje_od_godzin(view, gcon):

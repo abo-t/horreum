@@ -27,11 +27,12 @@ import uuid
 from datetime import datetime, timezone
 
 from PySide6.QtCore import (
-    QAbstractTableModel, QModelIndex, QObject, Qt, QSettings, QThread, QTimer, Signal, Slot,
+    QAbstractTableModel, QEvent, QModelIndex, QObject, Qt, QSettings, QThread, QTimer, Signal, Slot,
 )
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
+    QLayout,
     QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QProgressBar, QPushButton,
     QScrollArea, QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QTableView, QVBoxLayout, QWidget,
 )
@@ -1134,13 +1135,15 @@ class LineageBar(QWidget):
             if r["master_frame_id"] is None:
                 it.setForeground(_COLORS["secondary_text"])
             self.items.addItem(it)
-        self.head.setText(i18n.t_plural("grid.lin.cal.head", len(powiazane),
-                                        total=len(relations)))
+        self.head.setText(i18n.t("grid.lin.cal.head", n=len(powiazane), total=len(relations)))
         # LISTA DO TREŚCI, nie do sufitu. Wejść stosu bywa 190, więc tam sufit 160 px chroni grid;
-        # tutaj wiersze są ZAWSZE dwa (dark, flat), a ten sam sufit zostawiał ~100 px pustki —
+        # tutaj wierszy jest kilka (klasy przepisu), a ten sam sufit zostawiał ~100 px pustki —
         # dokładnie ten zarzut, który zdjął pustkę z panelu stosu (wiz #6), tylko z drugiej strony.
-        wiersz = self.items.sizeHintForRow(0) if self.items.count() else 0
-        self.items.setMaximumHeight(wiersz * self.items.count() + 2 * self.items.frameWidth())
+        # Pusta lista NIE zaniża sufitu do paska kilku pikseli: zero relacji jest dziś niemożliwe
+        # (stała `_RELATIONS`), ale sufit liczony z nieistniejącego wiersza byłby pułapką czekającą.
+        if self.items.count():
+            wiersz = self.items.sizeHintForRow(0)
+            self.items.setMaximumHeight(wiersz * self.items.count() + 2 * self.items.frameWidth())
         # NIELICZONE ≠ LUKA — pierwsze naprawia jedno kliknięcie w Dostawie, drugie wymaga klatek,
         # których w archiwum nie ma. Wspólne „brak" kazałoby szukać winy tam, gdzie jej nie ma.
         czeka = [r for r in relations if r["pending"]]
@@ -1213,13 +1216,29 @@ def _lineage_item_text(r):
     return f"{czas} · {exp} · [{zrodlo}] · {r['path'] or ''}"
 
 
+def _znany(klucz, zapasowo):
+    """Etykieta z katalogu ALBO surowa wartość, gdy katalog jej nie zna. `i18n.t` na nieznanym kluczu
+    zwraca sam klucz („grid.lin.cal.rel.bias" na ekranie), a baza dopuszcza wartości spoza stałych
+    kodu (`0009`: `bias`, wpisy ręki/WBPP). Lepiej pokazać surowe `bias` niż ścieżkę klucza."""
+    return i18n.t(klucz) if klucz in i18n.CATALOG else zapasowo
+
+
 def _calibration_item_text(r):
-    """Jeden wiersz osi kalibracji: KLASA · stan · ścieżka mastera. Klasa stoi pierwsza, bo to ona
-    jest pytaniem („czym odjęto ciemność, czym wyrównano pole"); ścieżka jest elidowana od lewej,
-    więc ustępuje ona, nigdy werdykt — dokładnie jak w wierszu wejść stosu."""
-    klasa = i18n.t(f"grid.lin.cal.rel.{r['relation']}")
+    """Jeden wiersz osi kalibracji: KLASA · [źródło pewności] · ścieżka mastera. Klasa stoi pierwsza,
+    bo to ona jest pytaniem („czym odjęto ciemność, czym wyrównano pole"); ścieżka jest elidowana
+    od lewej, więc ustępuje ona, nigdy werdykt — dokładnie jak w wierszu wejść stosu.
+
+    Klasa spoza stałej (`bias`, wpis ręki) dostaje SWOJĄ nazwę zamiast surowego klucza — katalog
+    zna dwie, a baza dopuszcza więcej (`0009`)."""
+    klasa = _znany(f"grid.lin.cal.rel.{r['relation']}", r["relation"])
     if r["master_frame_id"] is not None:
-        return f"{klasa} · {r['master_path'] or ''}"
+        zrodlo = _znany(f"grid.lin.cal.src.{r['asserted_by']}", r["asserted_by"] or "")
+        # ZNIKNIĘTY MASTER MUSI SIĘ PRZYZNAĆ. `calibrators_for` bierze ścieżkę tylko z kopii
+        # OBECNEJ, więc po zniknięciu pliku wiersz kończył się kropką i pustką — a nagłówek dalej
+        # liczył go do „skalibrowana". Powiązanie jest prawdziwe (tożsamość to `sha1_data`),
+        # nieprawdziwa jest dostępność — i to ona ma być na ekranie.
+        gdzie = r["master_path"] or i18n.t("grid.lin.cal.vanished", id=r["master_frame_id"])
+        return f"{klasa} · [{zrodlo}] · {gdzie}"
     # BRAK MA POWÓD ALBO GO NIE MA — i to są dwa różne zdania. Token `gap` niesie powód archiwum;
     # `pending` znaczy, że master JEST, tylko nikt jeszcze nie policzył powiązania.
     if r["pending"]:
@@ -1340,7 +1359,56 @@ class SelectionBar(QFrame):
 
 class _PanelStack(QStackedWidget):
     """Stack paneli kling (F3): sizeHint = BIEŻĄCA strona — goły QStackedWidget bierze max ze stron,
-    więc otwarte makro wisiałoby w pasie wysokości renamu [skill: pyside6-desktop-layout-gotchas]."""
+    więc otwarte makro wisiałoby w pasie wysokości renamu [skill: pyside6-desktop-layout-gotchas].
+
+    SAM sizeHint NIE WYSTARCZYŁ i to jest lekcja zmierzona, nie teoria (firsthand 2026-08-02).
+    Nadpisane podpowiedzi czyta layout RODZICA, ale wewnętrzny `QStackedLayout` osobno wymusza na
+    tym widżecie minimum równe NAJWYŻSZEJ stronie — więc stack i tak nie schodził poniżej 240 px
+    (wysokość renamu), a niska strona wisiała w nim WYŚRODKOWANA. Zmierzone na realnym oknie:
+    panel rodowodu zajmował 68 px treści, a odbierał tabeli 246 px — 92 px martwego pasa nad
+    i 92 pod. Panel makra tracił 6 px, bo jego strona jest bliska maksimum i pasa nie widać.
+
+    Dlatego sufit jest USTAWIANY WPROST z bieżącej strony — przy przełączeniu strony i przy każdej
+    zmianie jej treści (`LayoutRequest`), bo panele rosną i maleją w biegu (ostrzeżenie w rodowodzie,
+    rzędy tokenów w renamie)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # ŹRÓDŁO PUSTKI: `QLayout` z domyślnym `SetDefaultConstraint` wpisuje widżetowi TWARDE
+        # `minimumSize` równe maksimum ze stron — i to ono, nie podpowiedzi, trzymało stack na
+        # wysokości renamu. Zdejmujemy wymuszanie i czyścimy minimum wpisane przed tą zmianą;
+        # od tej pory o wysokości decydują nadpisane niżej podpowiedzi BIEŻĄCEJ strony.
+        self.layout().setSizeConstraint(QLayout.SetNoConstraint)
+        self.setMinimumHeight(0)
+        self.currentChanged.connect(lambda _i: self._sync_ceiling())
+
+    def event(self, e):
+        # DWA KROKI SĄ KONIECZNE, każdy leczy co innego (zmierzone osobno):
+        # zdjęcie wymuszenia pozwala stackowi ZEJŚĆ do wysokości bieżącej strony, a sufit sprawia,
+        # że layout rodzica nie rezerwuje slotu na najwyższą stronę i nie centruje w nim niskiej.
+        # Sufit liczymy przy `LayoutRequest`, bo panele rosną i maleją BEZ przełączania strony
+        # (ostrzeżenie w rodowodzie, rzędy tokenów w renamie) — i dopiero po zdjęciu wymuszenia
+        # podpowiedź strony jest w tym momencie już prawdziwa. Sam sufit obcinał treść o krok.
+        if e.type() == QEvent.LayoutRequest:
+            self._sync_ceiling()
+        return super().event(e)
+
+    def _sync_ceiling(self):
+        """Sufit = wysokość BIEŻĄCEJ strony, z JEDNĄ synchroniczną przeliczką rodzica.
+
+        Bez niej sufit był o krok w tyle i OBCINAŁ treść (zmierzone: strona żądała 68 px, stack
+        stał na 56, lista traciła 12 px z 40) — `setMaximumHeight` w trakcie `LayoutRequest` trafia
+        w przebieg, który rodzic już policzył. Guard równości zamyka pętlę: przeliczka rodzica
+        wraca tu `LayoutRequest`-em, ale przy niezmienionym suficie nie robi nic."""
+        w = self.currentWidget()
+        if w is None:
+            return
+        h = w.sizeHint().height()
+        if self.maximumHeight() != h:
+            self.setMaximumHeight(h)
+            rodzic = self.parentWidget()
+            if rodzic is not None and rodzic.layout() is not None:
+                rodzic.layout().activate()
 
     def sizeHint(self):
         w = self.currentWidget()
@@ -1349,6 +1417,7 @@ class _PanelStack(QStackedWidget):
     def minimumSizeHint(self):
         w = self.currentWidget()
         return w.minimumSizeHint() if w is not None else super().minimumSizeHint()
+
 
 
 class StagingDrawer(QFrame):
@@ -1789,6 +1858,16 @@ class FramesView(QWidget):
         return (not self.panel_stack.isHidden()
                 and self.panel_stack.currentWidget() is self.rename_bar)
 
+    def changeEvent(self, e):
+        """Zmiana skórki PRZEBUDOWUJE panel rodowodu — wygaszenie wiersza jest w nim WYPALONE
+        w itemie (`setForeground`), a nie czytane w `paint` jak w delegacie gridu, więc samo
+        odmalowanie zostawiłoby kolor ze starego motywu. Lekcja jest w repo spisana od dawna
+        (`app.py` przebudowuje z tego powodu inne listy) — panel rodowodu był drugim jej złamaniem,
+        raz w osi stosów, raz w dołożonej osi kalibracji."""
+        super().changeEvent(e)
+        if e.type() == QEvent.PaletteChange:
+            self._refresh_lineage()          # warunkowe: przy zamkniętym panelu nie czyta bazy
+
     # ---- panel RODOWODU (I-2d) ----
     def _lineage_panel_open(self):
         return (not self.panel_stack.isHidden()
@@ -1813,13 +1892,21 @@ class FramesView(QWidget):
             # DOPEŁNIENIEM osi stosów, nie jej konkurentem: pytamy dopiero, gdy w zaznaczeniu nie
             # ma gotowego obrazu, więc droga stosu zachowuje się dokładnie jak przedtem.
             lighty = [r for r in wiersze if r.get("kind") == "light"]
-            if not stosy and len(lighty) == 1:
+            # DOKŁADNIE JEDEN ZAZNACZONY WIERSZ, nie „jeden light wśród kilku klatek" (CAPTAIN):
+            # nagłówek panelu nie nazywa klatki, więc przy zaznaczeniu light+dark+bias użytkownik
+            # nie miałby jak sprawdzić, o której z nich mówi ekran.
+            if len(wiersze) == 1 and lighty:
                 relacje = lineage.explain_light(self.con, lighty[0]["frame_id"])
                 if relacje:
                     self.lineage_bar.set_calibration(relacje)
                     return
+            # TRZY RÓŻNE POMYŁKI, TRZY ZDANIA. Jeden komunikat na wszystkie mówił o klatce
+            # KALIBRACYJNEJ także wtedy, gdy zaznaczono dwie klatki nieba — czyli zdanie fałszywe
+            # o tym, co użytkownik ma przed oczami (ta sama klasa co „kryterium sklejające fakty").
             klucz = ("grid.lin.hint.none" if not wiersze else
-                     "grid.lin.hint.not_stack" if not stosy else "grid.lin.hint.many")
+                     "grid.lin.hint.many" if len(stosy) > 1 or len(lighty) > 1 else
+                     "grid.lin.hint.one_only" if len(wiersze) > 1 else
+                     "grid.lin.hint.not_stack")
             self.lineage_bar.set_lineage(None, [], hint=i18n.t(klucz))
             return
         fid = stosy[0]["frame_id"]
@@ -1943,6 +2030,7 @@ class FramesView(QWidget):
         self._reload_facet_rail(leaf_fn, universe_fn, dup_ids, review_ids, base_ids)   # listwa (F4)
         self._sync_staging_mutex()                           # staging jednej klingi wyłącza „Do stagingu" drugiej
         self._refresh_date_echo()                            # panel daty odbija świeże widoczne (echo warunkowe)
+        self._refresh_lineage()                              # …i panel rodowodu, tak samo warunkowo
         self.status_message.emit(
             i18n.t("grid.status.loaded", frames=i18n.t_plural('grid.frames', n), cols=len(keywords)))
 

@@ -13,9 +13,14 @@ różnicy. Kalibrator to WYŁĄCZNIE `master_%` (filtr w zapytaniu `_masters_by_
 Druga strona monety — „czego brakuje" — to trzy rozłączne kubełki luki per relacja (brak przepisu /
 brak mastera / niekompletny przepis lightu); z „linked" domykają populację lightów (bramka §5.12).
 
-STRONA ODCZYTU (C3, Issue #6): `explain_light` odpowiada za JEDNĄ klatkę — powiązania bierze ze
+STRONA ODCZYTU (C4b, Issue #6): `explain_light` odpowiada za JEDNĄ klatkę — powiązania bierze ze
 STANU (`calibrators_for`), a powód braku z tej samej derywacji, którą liczy przebieg (`_decide`).
 Bez wspólnego predykatu ekran tłumaczyłby brak inaczej, niż przebieg go tworzy.
+
+**To NIE jest C3.** C3 z planu (`brief/PLAN_kalibracja_lineage.md:45`) to RĘCZNE UZUPEŁNIENIE faktu
+przepisu — zapis `source='user'`, `actor=user:local`, przebijający ścieżkę. Tej drogi w repo nie ma
+(jedyny wołający `repo.record_calibration_fact` to `calibration.py` z `source='path'`), a odczyt jej
+nie tworzy. Dług C3 żyje w kolejce z falsyfikatorem `incomplete > 0`.
 
 Qt-wolne, zapis wyłącznie przez `repo` (DB-KLINGA), SELECT literałem.
 """
@@ -145,10 +150,10 @@ def run_lineage(con, *, now, actor="lineage"):
             if gap:
                 _bump(s.reasons, f"{relation}: {_GAP_PROSE[gap]}")
                 continue
-            s.linked[relation] = s.linked.get(relation, 0) + 1       # STAN (do domknięcia populacji)
+            _bump(s.linked, relation)                                # STAN (do domknięcia populacji)
             if repo.link_calibration(con, light_frame_id=row["frame_id"], master_frame_id=master_id,
                                      relation=relation, now=now, actor=actor):
-                s.linked_new[relation] = s.linked_new.get(relation, 0) + 1
+                _bump(s.linked_new, relation)                        # delta realnych zapisów
 
     s.reasons = dict(sorted(s.reasons.items()))
     repo.flag_calibration_lineage_summary(con, sorted(s.reasons.items()), now, actor=actor)
@@ -201,29 +206,47 @@ def explain_light(con, light_frame_id):
     stan = {r["relation"]: r for r in calibrators_for(con, light_frame_id)}
     profiles = {r["profile_key"]: r["id"] for r in con.execute(
         "SELECT id, profile_key FROM calibration_profile")}
+    # OŚ PRZEPISU TEŻ BYWA NIEPOLICZONA — i to jest stan świeżej bazy, nie przypadek brzegowy.
+    # Bez tego pytania `no_profile` mówiłoby „brak w archiwum czegokolwiek o tej nastawie" o bazie
+    # PO SKANIE, ale przed etapem „Kalibracja", gdzie mastery leżą, tylko nikt im nie policzył
+    # przepisu — czyli zdanie fałszywe dla KAŻDEGO lightu naraz.
+    bez_przepisu = con.execute(
+        "SELECT EXISTS(SELECT 1 FROM frame WHERE kind LIKE 'master_%' "
+        "AND calibration_profile_id IS NULL)").fetchone()[0]
     masters = _LazyMasters(con)
     light_dt = header_dt(row["date_obs"])
     d = {k: row[k] for k in row.keys()}
     out = []
-    for relation in _RELATIONS:
+    # Relacje ze STANU obok stałej: `0009` dopuszcza `bias` i wpisy ręki/WBPP, a panel iterujący
+    # samą stałą byłby ślepy na wiersz, który w bazie JEST (kłamałby o stanie, którego nie zna).
+    relacje = list(_RELATIONS) + [r for r in stan if r not in _RELATIONS]
+    for relation in relacje:
         s = stan.get(relation)
         if s is not None:
             out.append({"relation": relation, "master_frame_id": s["master_frame_id"],
                         "master_path": s["master_path"], "confidence": s["confidence"],
-                        "gap": None, "pending": False})
+                        "asserted_by": s["asserted_by"], "gap": None, "pending": False})
             continue
         master_id, gap = _decide(d, relation, profiles, masters, light_dt)
+        if gap == "no_profile" and bez_przepisu:
+            gap = "not_calibrated"
         out.append({"relation": relation, "master_frame_id": None, "master_path": None,
-                    "confidence": None, "gap": gap, "pending": master_id is not None})
+                    "confidence": None, "asserted_by": None, "gap": gap,
+                    "pending": master_id is not None})
     return out
 
 
 def calibrators_for(con, light_frame_id):
     """READ-ONLY „czym to skalibrować": wiersze rodowodu dla lightu z nazwą kalibratora (ścieżka
-    mastera) i klasą. Dane pod perspektywę GUI (`explain_light`) i raport CLI — bez zapisu."""
+    mastera) i klasą. Dane pod perspektywę GUI (`explain_light`) i raport CLI — bez zapisu.
+
+    `asserted_by` JEST tu potrzebne, choć długo go nie było: migracja `0009` zapowiada wpisy ręki
+    i WBPP przebijające derywację, a w DRUGIEJ osi tego samego panelu źródło pewności jest sednem
+    („plik zeznał" vs „wynika z czasu"). Panel, który dla stosów pyta „skąd to wiemy", a dla
+    kalibracji nie, uczyłby, że pewność bywa nieważna."""
     return con.execute(
         "SELECT c.relation AS relation, c.master_frame_id AS master_frame_id, "
-        "c.confidence AS confidence, "
+        "c.confidence AS confidence, c.asserted_by AS asserted_by, "
         "(SELECT l.path FROM location l WHERE l.frame_id = c.master_frame_id AND l.present = 1 "
         " ORDER BY l.id LIMIT 1) AS master_path "
         "FROM calibration c WHERE c.light_frame_id = ? ORDER BY c.relation",

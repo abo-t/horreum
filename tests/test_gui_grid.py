@@ -1368,6 +1368,61 @@ def test_panel_kalibracji_odroznia_nieliczone_od_braku(view, gcon):
     bar = view.lineage_bar
     assert "Skalibrowana: 0 z 2" in bar.head.text()
     assert bar.warn.full_text() == ""                   # nic nie czeka na przeliczenie — brak ⚠
+    # POWÓD LUKI MUSI BYĆ NA EKRANIE, nie tylko w modelu — i ma być POWODEM TEJ klatki: light
+    # fixture'u nie niesie nastawy, więc uczciwe jest „nie wiadomo, czego szukać", a nie zdanie
+    # o pustym archiwum (dwie różne naprawy, dwa różne zdania).
+    teksty = " ".join(bar.items.item(i).text() for i in range(bar.items.count()))
+    assert "nie podaje pełnej nastawy" in teksty
+    assert "grid.lin.cal" not in teksty                 # surowy klucz = literówka w tokenie
+
+
+def test_panel_kalibracji_pokazuje_stan_nieliczony(view, gcon):
+    """SEDNO tej osi: master JEST, powiązania nikt nie policzył. Bez dowodu na powierzchni ta gałąź
+    była zaimplementowana i niewidziana — a to ona odróżnia „uruchom etap" od „kup klatki"."""
+    # Materiał podajemy WPROST: derywację trzech stanów pokrywa `test_lineage.py` (rdzeń), a tu
+    # sprawdzamy, czy powierzchnia je RENDERUJE — inaczej test badałby dwa razy to samo.
+    stan = [{"relation": "dark", "master_frame_id": None, "master_path": None, "confidence": None,
+             "asserted_by": None, "gap": None, "pending": True},
+            {"relation": "flat", "master_frame_id": None, "master_path": None, "confidence": None,
+             "asserted_by": None, "gap": None, "pending": True}]
+    view._toggle_panel("lineage")
+    view.lineage_bar.set_calibration(stan)
+    teksty = " ".join(view.lineage_bar.items.item(i).text()
+                      for i in range(view.lineage_bar.items.count()))
+    assert "powiązania jeszcze nie policzono" in teksty
+    assert "uruchom etap Rodowód" in view.lineage_bar.warn.full_text()
+
+
+def test_panel_kalibracji_przyznaje_sie_do_znikniętego_mastera(view, gcon):
+    """Powiązanie jest prawdziwe (tożsamość to `sha1_data`), ale plik zniknął — wiersz kończył się
+    kropką i PUSTKĄ, a nagłówek dalej liczył go do „skalibrowana". Milczenie dokładnie tam, gdzie
+    panel ma najwięcej do powiedzenia."""
+    gcon.execute("INSERT INTO calibration (light_frame_id, master_frame_id, relation, "
+                 "asserted_by, confidence) VALUES (1, 3, 'flat', 'horreum', 'recipe')")
+    gcon.execute("UPDATE location SET present = 0 WHERE frame_id = 3")
+    gcon.commit()
+    assert _zaznacz_frame(view, 1)
+    view._toggle_panel("lineage")
+    teksty = " ".join(view.lineage_bar.items.item(i).text()
+                      for i in range(view.lineage_bar.items.count()))
+    assert "plik zniknął z dysku" in teksty and "#3" in teksty
+
+
+def test_panel_kalibracji_nie_zgaduje_ktora_klatke_opisuje(view, gcon):
+    """Zaznaczenie light + klatka kalibracyjna: panel NIE odpowiada o lighcie po cichu — nagłówek
+    nie nazywa klatki, więc użytkownik nie miałby jak sprawdzić, o której z nich mowa (CAPTAIN)."""
+    view.refresh()
+    idx = {}
+    for i, r in enumerate(view.model._rows):
+        if isinstance(r, dict):
+            idx[r.get("frame_id")] = i
+    view.table.selectRow(idx[1])
+    from PySide6.QtCore import QItemSelectionModel
+    view.table.selectionModel().select(
+        view.table.model().index(idx[3], 0),
+        QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows)
+    view._toggle_panel("lineage")
+    assert "Zostaw jedną" in view.lineage_bar.head.text()
 
 
 def test_przelaczenie_osi_wraca_z_zanizonym_sufitem_listy(view, gcon):

@@ -266,9 +266,16 @@ def test_obie_drogi_czytaja_TE_SAME_kolumny_przepisu():
     i tylko dla pola, które ktoś dodał w jednym miejscu."""
     import ast
     import pathlib
-    src = pathlib.Path("horreum/lineage.py").read_text(encoding="utf-8")
-    listy = [n.value.split(" FROM ")[0] for n in ast.walk(ast.parse(src))
-             if isinstance(n, ast.Constant) and isinstance(n.value, str)
-             and n.value.startswith("SELECT f.id AS frame_id")]
-    assert len(listy) == 2, f"spodziewane dwa zapytania o przepis lightu, jest {len(listy)}"
-    assert listy[0] == listy[1], "przebieg i panel czytają INNE kolumny przepisu"
+
+    import horreum
+    # Ścieżka z PAKIETU, nie z katalogu startowego — `build.ps1` odpala pytest z innego CWD,
+    # a bramka meta nie ma prawa padać z powodu miejsca uruchomienia.
+    src = (pathlib.Path(horreum.__file__).parent / "lineage.py").read_text(encoding="utf-8")
+    stale = [n.value for n in ast.walk(ast.parse(src))
+             if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+
+    for prefiks, opis in (("SELECT f.id AS frame_id", "przepis lightu"),
+                          ("SELECT f.calibration_profile_id AS pid", "kandydaci masterów")):
+        listy = [s.split(" FROM ")[0] for s in stale if s.startswith(prefiks)]
+        assert len(listy) == 2, f"spodziewane dwa zapytania: {opis} — jest {len(listy)}"
+        assert listy[0] == listy[1], f"przebieg i panel czytają INNE kolumny — {opis}"

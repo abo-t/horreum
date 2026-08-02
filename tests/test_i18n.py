@@ -122,3 +122,39 @@ def test_klucze_call_site_podzbior_katalogu():
     unknown = used - set(CATALOG)
     assert not unknown, f"klucze i18n spoza katalogu: {sorted(unknown)}"
     assert "grid.frames" in used, "kolektor nic nie złapał — bramka byłaby ślepa"
+
+
+def test_parytet_tokenow_dynamicznych_z_katalogiem():
+    """BRAMKA NA KLUCZE SKŁADANE W LOCIE. `test_klucze_call_site_podzbior_katalogu` zbiera wyłącznie
+    LITERAŁY, więc `i18n.t(f"grid.lin.cal.gap.{token}")` jest dla niej niewidzialny — a literówka
+    w tokenie rdzenia albo nowa wartość w bazie renderują użytkownikowi SUROWY KLUCZ.
+
+    Pilnujemy parytetu w jedną stronę: każdy token, który rdzeń UMIE wyprodukować, ma zdanie
+    w katalogu. Odwrotnie nie — katalog wolno mieć bogatszy (`bias`, źródła z migracji `0009`
+    zapowiedziane, zanim je ktoś zapisze)."""
+    from horreum import lineage
+    from horreum.gui.i18n_catalog import CATALOG
+
+    braki = []
+    for token in lineage._GAP_PROSE:
+        if f"grid.lin.cal.gap.{token}" not in CATALOG:
+            braki.append(f"grid.lin.cal.gap.{token}")
+    braki += [f"grid.lin.cal.gap.{t}" for t in ("not_calibrated",)
+              if f"grid.lin.cal.gap.{t}" not in CATALOG]        # token składany na powierzchni
+    for relation in lineage._RELATIONS:
+        if f"grid.lin.cal.rel.{relation}" not in CATALOG:
+            braki.append(f"grid.lin.cal.rel.{relation}")
+    assert not braki, f"rdzeń produkuje tokeny bez zdania w katalogu: {braki}"
+
+
+def test_parytet_zrodel_pewnosci_obu_osi_panelu():
+    """Oba źródła pewności panelu rodowodu mają komplet zdań: oś stosów (`asserted_by` wejścia)
+    i oś kalibracji (`asserted_by` powiązania). Wartości bierzemy z CHECK-ów migracji, żeby bramka
+    szła za schematem, a nie za listą przepisaną do testu."""
+    from horreum.gui.i18n_catalog import CATALOG
+
+    braki = [f"grid.lin.{rodzina}.{w}"
+             for rodzina, wartosci in (("src", ("history", "window", "user")),
+                                       ("cal.src", ("horreum", "user", "wbpp")))
+             for w in wartosci if f"grid.lin.{rodzina}.{w}" not in CATALOG]
+    assert not braki, f"źródło pewności bez zdania: {braki}"

@@ -762,12 +762,22 @@ CATALOG = {
               "itself, so nothing calibrates it.",
     },
     # --- oś KALIBRACJI w panelu (C3, Issue #6) ---
+    # Zwykłe `t`, nie `t_plural`: trzy identyczne formy PL to sam koszt i ryzyko rozjazdu przy
+    # edycji jednej z nich — odmiany tu nie ma, bo liczba stoi przy „z {total}".
     "grid.lin.cal.head": {
-        "pl": {"one": "Skalibrowana: {n} z {total} klas",
-               "few": "Skalibrowana: {n} z {total} klas",
-               "many": "Skalibrowana: {n} z {total} klas"},
-        "en": {"one": "Calibrated: {n} of {total} classes",
-               "other": "Calibrated: {n} of {total} classes"},
+        "pl": "Skalibrowana: {n} z {total} klas",
+        "en": "Calibrated: {n} of {total} classes",
+    },
+    "grid.lin.cal.vanished": {
+        "pl": "master #{id} — plik zniknął z dysku",
+        "en": "master #{id} — the file has vanished from disk",
+    },
+    "grid.lin.cal.src.horreum": {"pl": "dobrane z przepisu", "en": "matched by recipe"},
+    "grid.lin.cal.src.user": {"pl": "Twoja decyzja", "en": "your decision"},
+    "grid.lin.cal.src.wbpp": {"pl": "z historii obróbki", "en": "from processing history"},
+    "grid.lin.cal.gap.not_calibrated": {
+        "pl": "przepisy nie są jeszcze policzone — uruchom etap Kalibracja w Dostawie",
+        "en": "recipes have not been computed yet — run the Calibration step in Delivery",
     },
     "grid.lin.cal.rel.dark": {"pl": "ciemność (dark)", "en": "dark"},
     "grid.lin.cal.rel.flat": {"pl": "pole (flat)", "en": "flat"},
@@ -792,8 +802,14 @@ CATALOG = {
         "en": "raw frames exist, no stacked master",
     },
     "grid.lin.hint.many": {
-        "pl": "Zaznacz DOKŁADNIE jeden gotowy obraz — rodowód opisuje pojedynczy obraz.",
-        "en": "Select EXACTLY one finished image — lineage describes a single image.",
+        "pl": "Zaznacz DOKŁADNIE jedną klatkę — rodowód opisuje pojedynczą klatkę.",
+        "en": "Select EXACTLY one frame — lineage describes a single frame.",
+    },
+    "grid.lin.hint.one_only": {
+        "pl": "Zaznaczono kilka różnych klatek. Zostaw jedną — panel nie ma jak powiedzieć, "
+              "o której z nich mówi.",
+        "en": "Several different frames are selected. Leave one — the panel has no way to say "
+              "which of them it is describing.",
     },
     "grid.lin.hint.not_computed": {
         "pl": "Rodowodu jeszcze nie liczono. Wciągnij stosy w Dostawie — policzy się przy okazji.",

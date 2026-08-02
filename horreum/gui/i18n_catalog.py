@@ -1009,8 +1009,8 @@ CATALOG = {
     "pipeline.delta.nameless_raw": {"pl": "  (+{n} RAW — format bez karty, do przypisania ręcznie)",
                                     "en": "  (+{n} RAW — format has no card, assign by hand)"},
     "pipeline.delta.nameless_stacks": {
-        "pl": "  (+{n} gotowych stosów — drzewo obróbki jest read-only)",
-        "en": "  (+{n} finished stacks — the processing tree is read-only)"},
+        "pl": "  (+{n} gotowych stosów — do naprawy kartą w Porządkach)",
+        "en": "  (+{n} finished stacks — repair with a card in Housekeeping)"},
 
     # --- raport passa obecności: części składane przez ` · ` ---
     "pipeline.fmt.presence.not_done": {

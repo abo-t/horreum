@@ -621,9 +621,15 @@ def assign_object(con, *, frame_id, object_id, object_source, now, actor="resolv
     już ustawiona → False bez eventu; inaczej UPDATE + `event(object.assigned)`; True.
 
     RE-przypisanie emituje PARĘ `object.unassigned` + `object.assigned` (wzorzec
-    `assign_calibration_profile`), payload odpięcia niesie stan SPRZED. Powód nie jest kosmetyczny:
-    bramka akceptacji `§5.9` liczy `count(frame.object_id NOT NULL) == count('object.assigned')`
-    co do sztuki, więc bez odpięcia każde przepięcie rozjeżdża tę równość o 1.
+    `assign_calibration_profile`), payload odpięcia niesie stan SPRZED.
+
+    UWAGA — SAMA PARA RÓWNOŚCI NIE DOMYKA. Bramka `§5.9` liczy dziś
+    `count(frame.object_id NOT NULL) == count('object.assigned')` i **nie odejmuje odpięć**
+    (`scripts/acceptance_s5.py`, ta sama nota stoi tam od dawna przy przepisie kalibracji), więc
+    przepięcie rozjeżdża równość o 1 tak samo jak przed dołożeniem tego verbu. Para jest MATERIAŁEM
+    dla poprawionej formuły — `assigned − unassigned` — która wchodzi razem z resztą zmian
+    w akceptacji. Do tego czasu czerwień `§5.9` po przepięciu jest ZNANYM brakiem formuły,
+    nie regresją: adjudykuj ją przez dodanie odejmowania, nigdy przez podniesienie kotwicy.
 
     Predykat emisji to `row[0] IS NOT NULL` („obiekt BYŁ"), **nie** `row[0] != object_id`: ta funkcja
     wychodzi wcześnie po PARZE (obiekt, źródło), więc zmiana samego ŹRÓDŁA przy tym samym obiekcie

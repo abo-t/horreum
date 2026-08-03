@@ -733,12 +733,20 @@ def _cmd_target(args):
     na liście z etykietą — kasowanie cudzej decyzji to nie sprzątanie.
 
     `--clear` DOSTAJE FALLBACK: walidacja wobec assetu broni ZAPISU przed zgadywaniem, ale przy
-    KASOWANIU zamykała jedyne drzwi — oznaczenie na kanonie, którego katalog już nie zna, jest
-    widoczne w `--list` z etykietą `[poza katalogiem]`, a `resolve_plan_canon` zwraca dla niego
-    `(None, …)`, czyli kod 2. Nie dało się zdjąć własnej decyzji o celu, który wypadł z assetu.
-    Kolejność zostaje: NAJPIERW asset (żeby `M42` dalej trafiało w `NGC1976` — normalizacji nie
-    wycinamy), a dopiero przy `(None, …)` dokładne trafienie w `target_plan`. Fallback jest
-    WYŁĄCZNIE dla `--clear`; ścieżka zapisu kodu 2 nie traci."""
+    KASOWANIU zamykała jedyne drzwi — oznaczenie na kanonie, którego katalog już nie zna, widać
+    na liście (wywołanie BEZ argumentu `canon`) z etykietą `[poza katalogiem]`, a
+    `resolve_plan_canon` zwraca dla niego `(None, …)`, czyli kod 2. Nie dało się zdjąć własnej
+    decyzji o celu, który wypadł z assetu. Kolejność zostaje: NAJPIERW asset (żeby `M42` dalej
+    trafiało w `NGC1976` — normalizacji nie wycinamy), a dopiero przy `(None, …)` DOKŁADNE
+    trafienie w `target_plan`. Fallback jest WYŁĄCZNIE dla `--clear`; ścieżka zapisu kodu 2
+    nie traci.
+
+    Fallback nie zgaduje NICZEGO: kasuje wyłącznie wiersz o tej samej nazwie, którą podał user,
+    więc komunikat mówi „dokładna nazwa", a nie „cel spoza katalogu" — to drugie byłoby zdaniem
+    o katalogu, a wiemy tylko tyle, że asset tej nazwy nie rozstrzygnął. Rozróżnienie ma znaczenie
+    przy nazwie DWUZNACZNEJ (asset zwraca kandydatów): jeśli akurat istnieje wiersz o literalnie
+    tej nazwie, zdejmujemy JEGO i mówimy to wprost, a gdy takiego wiersza nie ma — user dostaje
+    listę kandydatów, nie ciche zero."""
     from . import repo, targets
     now = datetime.now(timezone.utc).isoformat()
     con = db.open_db(args.db)
@@ -748,7 +756,8 @@ def _cmd_target(args):
             raw = str(args.canon).strip()
             if repo.clear_target_plan(con, canon=raw, now=now):
                 con.close()
-                print(f"Horreum target {raw}: oznaczenie zdjete (cel spoza katalogu)")
+                print(f"Horreum target {raw}: oznaczenie zdjete (dokladna nazwa, "
+                      f"poza rozstrzygnieciem katalogu)")
                 return 0
         if canon is None:
             con.close()

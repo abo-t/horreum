@@ -1220,13 +1220,19 @@ CATALOG = {
     # delty (nie ma nazwy, pod którą byłaby „nierozpoznana"), a bez tej pozycji raport dostawy jest
     # na całą klasę ślepy — i pierwsza nowa dostawa bez `OBJECT` przeszłaby bez śladu.
     "pipeline.fmt.delta": {
-        "pl": "[delta] obiekt {resolved}/{total} ({pct:.1f}%) · filtry {filters}\n"
+        "pl": "[delta] obiekt {resolved}/{total} ({pct:.1f}%){no_raw} · filtry {filters}\n"
               "   nierozpoznane: {top}\n   bez nazwy w nagłówku: {nameless}\n"
               "   do przeglądu: {review}",
-        "en": "[delta] object {resolved}/{total} ({pct:.1f}%) · filters {filters}\n"
+        "en": "[delta] object {resolved}/{total} ({pct:.1f}%){no_raw} · filters {filters}\n"
               "   unrecognized: {top}\n   no name in header: {nameless}\n"
               "   to review: {review}",
     },
+    # Doklejka do PROCENTU (nie do `{nameless}`): to druga strona tego samego zawężenia — klatki,
+    # które obiekt MAJĄ, ale nazwy w nagłówku nie miały, więc do ułamka nie wchodzą po ŻADNEJ
+    # stronie. Bez tej doklejki licznik po prostu spada i ekran nie tłumaczy dlaczego.
+    "pipeline.delta.resolved_no_raw": {
+        "pl": " + {n} rozwiązanych bez nazwy (poza procentem)",
+        "en": " + {n} resolved without a name (outside the percentage)"},
     "pipeline.delta.none": {"pl": "—", "en": "—"},
     # Doklejka do `{nameless}`, wyłącznie gdy populacja RAW istnieje. Osobny klucz, nie druga linia
     # szablonu: przy archiwum bez lustrzanki (dziś 0) stałe „RAW: 0" byłoby szumem w każdej dostawie.

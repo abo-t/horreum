@@ -390,9 +390,13 @@ class DeltaReport:
     # …a te są GOTOWYMI OBRAZAMI po integracji (I-2b/D-P-I-5). Osobne pole, bo osobna POPULACJA —
     # droga naprawy jest od D-0802-1 TA SAMA co u lightów (karta `OBJECT` do pliku, P6d).
     object_nameless_stacks: int = 0
-    # Klatki, które obiekt MAJĄ, choć nagłówek nazwy nie niósł — rozwiązane innym świadkiem niż
+    # Klatki, które obiekt MAJĄ, choć nazwy w nagłówku nie było — rozwiązane innym świadkiem niż
     # nazwa (dziś: region). Do `object_pct` NIE wchodzą, bo procent mierzy rozpoznanie NAZWY, a te
     # klatki nazwy nie mają. Stoją obok, żeby zawężenie licznika niczego nie schowało.
+    # ŚWIADOMIE `LEFT JOIN`, wbrew symetrii z bliźniakami (one mają INNER): pole ma pokazać CAŁĄ
+    # populację wypchniętą z procentu, a wypada z niego również klatka bez wiersza `header` w ogóle.
+    # Dwie klasy pod jedną liczbą — dziś druga jest pusta (szkielety mają `kind='unknown'`, więc nie
+    # są lightem), ale gdyby przestała być, to TU się pokaże, zamiast zniknąć między predykatami.
     object_resolved_no_raw: int = 0
 
 

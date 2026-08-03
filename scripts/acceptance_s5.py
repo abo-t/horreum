@@ -99,7 +99,12 @@ EXP_TELESCOPES_IMPORT = 8      # dawca FITS (§1): A140R/RC8/76EDPH/ED120R/RC6/N
 # do PLANERA i tak nie wchodzą, bo park jest jawną własnością usera (D-0731-12), nie derywatem.
 EXP_TELESCOPES_FULL = 12       # 8 astro (jak IMPORT) + 4 obiektywy DSLR
 EXP_TELESCOPES_RAW_ONLY_FULL = 4   # z tych 12 — powołane WYŁĄCZNIE przez klatki RAW
-EXP_OBJECT_PCT_MIN = 85.0      # % obiektu na light/master_light (pf4=87.5; próg z zapasem)
+# % obiektu na light/master_light. Próg z zapasem; wartość AKTUALNĄ podaje wydruk §5.7 tego skryptu
+# (dawca, `--full`) — nie zamrażamy jej tutaj, bo metryka zmieniła DEFINICJĘ w S0 (licznik zawężony
+# do klatek z nazwą w nagłówku, symetrycznie do mianownika), więc każda liczba sprzed tej zmiany
+# opisuje inny rachunek. Licznik i mianownik kurczą się razem, więc próg powinien się bronić —
+# ale to jest do ZMIERZENIA pierwszym przebiegiem po S0, nie do założenia.
+EXP_OBJECT_PCT_MIN = 85.0
 # Stan PF-4 (pełny, po doskanie XISF) — XISF wnoszą dług review i degenerat:
 EXP_UNCOMPUTABLE_FULL = 1      # masterflat OIII: bajt \x07 w XML → sha1_data nieobliczalne (degenerat)
 EXP_FRAME_REVIEW_FULL = 1      # ten sam masterflat (kopia nieczytelna → review)

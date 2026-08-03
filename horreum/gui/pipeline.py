@@ -948,10 +948,15 @@ class PipelineView(QWidget):
             nameless += i18n.t("pipeline.delta.nameless_raw", n=r.object_nameless_raw)
         if r.object_nameless_stacks:
             nameless += i18n.t("pipeline.delta.nameless_stacks", n=r.object_nameless_stacks)
+        # Druga strona zawężenia procentu: klatki Z obiektem, ale BEZ nazwy w nagłówku, stoją poza
+        # ułamkiem po obu stronach. Bez tej doklejki licznik po prostu spada i ekran nie tłumaczy
+        # dlaczego — a Horreum jest aplikacją okienkową, więc CLI tego nie wyjaśni za niego.
+        no_raw = (i18n.t("pipeline.delta.resolved_no_raw", n=r.object_resolved_no_raw)
+                  if r.object_resolved_no_raw else "")
         return i18n.t(
             "pipeline.fmt.delta", resolved=r.object_resolved, total=total, pct=r.object_pct,
             filters=r.filters_canon, top=top, review=_review_line(r.review),
-            nameless=nameless)
+            nameless=nameless, no_raw=no_raw)
 
     def _refresh_buttons(self, running, cancellable):
         idle = not running

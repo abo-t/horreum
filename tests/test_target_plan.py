@@ -363,7 +363,7 @@ def test_cli_park_clear_wycofuje_zdanie_do_null(tmp_path, capsys, con):
 
 def test_cli_target_clear_zdejmuje_cel_spoza_katalogu(tmp_path, capsys, con):
     """Kuratela na kanonie, którego asset już nie zna (podmiana katalogu), była NIEUSUWALNA:
-    `--list` pokazywał ją z etykietą `[poza katalogiem]`, a `--clear` szedł przez
+    lista (wywołanie BEZ argumentu `canon`) pokazywała ją z etykietą `[poza katalogiem]`, a `--clear` szedł przez
     `resolve_plan_canon` i kończył kodem 2. Fallback jest WYŁĄCZNIE dla kasowania — ścieżka zapisu
     dalej odmawia, bo tam zgadywanie kanonu tworzy cudzą decyzję, a tu ją zdejmuje.
 
@@ -375,7 +375,7 @@ def test_cli_target_clear_zdejmuje_cel_spoza_katalogu(tmp_path, capsys, con):
     con.commit()
 
     assert cli.main(["target", path, "NGC9999", "--clear"]) == 0
-    assert "spoza katalogu" in capsys.readouterr().out
+    assert "dokladna nazwa" in capsys.readouterr().out
     assert con.execute("SELECT count(*) FROM target_plan WHERE canon='NGC9999'").fetchone()[0] == 0
 
     # Nadal odmawia, gdy nie ma czego zdjąć ANI w asecie, ANI w tabeli — cisza byłaby gorsza.
@@ -386,6 +386,31 @@ def test_cli_target_clear_zdejmuje_cel_spoza_katalogu(tmp_path, capsys, con):
     assert cli.main(["target", path, "M42", "--clear"]) == 0
     assert "NGC1976" in capsys.readouterr().out
     assert con.execute("SELECT count(*) FROM target_plan WHERE canon='NGC1976'").fetchone()[0] == 0
+
+
+def test_cli_target_clear_nazwa_dwuznaczna_nie_kasuje_po_cichu(tmp_path, capsys, con):
+    """Nazwa POTOCZNA bywa dwuznaczna („Eastern Veil" wskazuje dwa rekordy) — asset zwraca wtedy
+    `(None, kandydaci)`, tak samo jak dla sieroty. Fallback nie ma prawa udawać, że wie, o który
+    cel chodzi: kasuje WYŁĄCZNIE wiersz o literalnie tej nazwie, a gdy takiego nie ma — user
+    dostaje kandydatów i kod 2, nie ciche zero.
+
+    Komunikat mówi „dokładna nazwa, poza rozstrzygnięciem katalogu", a NIE „cel spoza katalogu":
+    to drugie byłoby zdaniem o katalogu, a wiemy tylko tyle, że asset tej nazwy nie rozstrzygnął."""
+    path = con.execute("PRAGMA database_list").fetchone()["file"]
+    igla = "Eastern Veil"
+    assert targets.resolve_plan_canon(igla)[1], "fikstura wymaga nazwy DWUZNACZNEJ w asecie"
+
+    # Bez wiersza o tej nazwie: odmowa z kandydatami — zachowanie sprzed fallbacku, nietknięte.
+    assert cli.main(["target", path, igla, "--clear"]) == 2
+    assert "nie wskazuje jednego celu" in capsys.readouterr().out
+
+    # Z wierszem o literalnie tej nazwie: zdejmujemy JEGO i mówimy to wprost.
+    con.execute("INSERT INTO target_plan(canon, status, created_at, updated_at) "
+                "VALUES (?, 'planned', ?, ?)", (igla, NOW, NOW))
+    con.commit()
+    assert cli.main(["target", path, igla, "--clear"]) == 0
+    assert "dokladna nazwa" in capsys.readouterr().out
+    assert con.execute("SELECT count(*) FROM target_plan WHERE canon=?", (igla,)).fetchone()[0] == 0
 
 
 def test_cli_park_bez_oznaczen_mowi_wprost(tmp_path, capsys, con):

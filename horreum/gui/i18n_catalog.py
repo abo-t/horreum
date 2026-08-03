@@ -803,6 +803,29 @@ CATALOG = {
     "grid.sel.fix_headers": {"pl": "Popraw nagłówki…", "en": "Fix headers…"},
     "grid.sel.tidy_names": {"pl": "Uporządkuj nazwy plików…", "en": "Tidy file names…"},
     "grid.sel.save_view": {"pl": "★ Zapisz widok", "en": "★ Save view"},
+    # Oś obiektu na zaznaczeniu (S2b) — JEDNA kontrolka, dwie pozycje menu.
+    "grid.sel.object": {"pl": "Obiekt ▾", "en": "Object ▾"},
+    "grid.sel.object_name": {"pl": "Nazwij zaznaczenie…", "en": "Name selection…"},
+    "grid.sel.object_clear": {"pl": "Cofnij przypisanie", "en": "Undo assignment"},
+    "grid.sel.object_empty": {
+        "pl": "Zaznacz klatki — ta akcja pisze WYŁĄCZNIE po zaznaczeniu, nie po tym, co widać.",
+        "en": "Select frames — this action writes ONLY to the selection, not to what is visible."},
+    "grid.sel.object_conflict": {
+        "pl": "Zaznaczenie ma {n} różnych obiektów do nadpisania — zawęź je. Nic nie zapisano.",
+        "en": "Selection holds {n} different objects to overwrite — narrow it. Nothing was written."},
+    "grid.sel.object_named": {
+        "pl": "Nazwano {assigned} z {total} klatek: {canon}",
+        "en": "Named {assigned} of {total} frames: {canon}"},
+    "grid.sel.object_cleared": {
+        "pl": "Cofnięto przypisanie na {assigned} z {total} klatek",
+        "en": "Assignment undone on {assigned} of {total} frames"},
+    # Rozbicie PER FAKT — każda przyczyna osobno, bo znaczą dla człowieka co innego.
+    "grid.sel.object_skip_kind": {"pl": " · kalibracja: {n}", "en": " · calibration: {n}"},
+    "grid.sel.object_skip_source": {"pl": " · z nagłówka/regionu: {n}",
+                                    "en": " · from header/region: {n}"},
+    "grid.sel.object_skip_drift": {"pl": " · zmieniły się w międzyczasie: {n}",
+                                   "en": " · changed meanwhile: {n}"},
+    "grid.sel.object_skip_stack": {"pl": " · gotowe obrazy: {n}", "en": " · finished images: {n}"},
 
     # --- Panel RODOWODU gotowego stosu (I-2d, P-I) ---
     # Słownictwo trzyma jedną granicę: „weszło" = fakt zapisany, „wynika z czasu" = kandydat.

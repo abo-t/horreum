@@ -1561,3 +1561,117 @@ def test_panel_odroznia_wariant_obrazu_od_realnego_wspoldzielenia(view, gcon):
     assert "⚠ część tych klatek" in bar.warn.full_text()
     assert bar.warn.property("role") == "warn"           # ostrzeżenie nie jest szarą notą
     assert "⚠" not in bar.note.full_text()
+
+
+# ═════════════════════════ S2b — OŚ OBIEKTU NA ZAZNACZENIU (§4/14c a·f·g·j)
+
+
+@pytest.fixture
+def obj_view(qapp, tmp_path, monkeypatch):
+    """FramesView nad bazą: 2 lighty ze ŚCIEŻKI (źródło słabe), 1 z NAGŁÓWKA, 1 dark."""
+    from PySide6.QtCore import QSettings
+    from horreum.gui.grid import FramesView
+    monkeypatch.setattr(QSettings, "value", lambda self, k, d=None: d)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: None)
+    con = db.open_db(str(tmp_path / "obj.db"))
+    con.execute("INSERT INTO object(id, canon, catalog, kind) VALUES (5,'NGC6960','NGC','deep_sky')")
+    for i, (kind, src) in enumerate([("light", "path"), ("light", "path"),
+                                     ("light", "header"), ("dark", None)], start=1):
+        con.execute("INSERT INTO frame(id, kind, filetype, sha1_data, first_seen_at, "
+                    "object_id, object_source) VALUES (?,?, 'raw', ?, ?, ?, ?)",
+                    (i, kind, f"sha{i}", NOW, 5 if src else None, src))
+        con.execute("INSERT INTO header(frame_id, raw_json) VALUES (?, '{}')", (i,))
+        con.execute("INSERT INTO location(frame_id, volume, path, present) VALUES (?,'V',?,1)",
+                    (i, rf"R:\ASTRO_\LIGHTS\NGC6960\f{i}.ARW"))
+    con.commit()
+    v = FramesView(con, now_fn=lambda: NOW)
+    yield v, con
+    con.close()
+
+
+def _zaznacz(view, frame_ids):
+    """Zaznacz wiersze po KLATCE, nigdy po indeksie: grid sortuje i grupuje, więc `index(0)` bywa
+    zupełnie inną klatką, niż wpisała fikstura. Pierwsza wersja tego helpera zaznaczała po pozycji
+    i trafiała w darka — testy „przechodziły" na pustym geście."""
+    from PySide6.QtCore import QItemSelectionModel
+    sm = view.table.selectionModel()
+    sm.clearSelection()
+    chciane = set(frame_ids)
+    for i, row in enumerate(view.model._rows):
+        if isinstance(row, dict) and row.get("frame_id") in chciane:
+            sm.select(view.model.index(i, 0),
+                      QItemSelectionModel.Select | QItemSelectionModel.Rows)
+
+
+def test_pasek_ma_JEDNA_kontrolke_osi_z_dwiema_pozycjami(obj_view):
+    """§4/14c-j: pasek zyskuje JEDNĄ kontrolkę, nie dwa przyciski — siódmy i ósmy przewróciłyby go
+    do drugiego rzędu. Etykiety z KLUCZA i18n, nie literałem."""
+    v, _ = obj_view
+    assert v.sel_bar.btn_object.menu() is not None
+    from horreum.gui import i18n
+    assert [a.text() for a in v.sel_bar.btn_object.menu().actions()] == [
+        i18n.t("grid.sel.object_name"), i18n.t("grid.sel.object_clear")]
+
+
+def test_puste_zaznaczenie_GASI_obie_pozycje(obj_view):
+    """§4/14c-a: cel to WYŁĄCZNIE zaznaczenie; przy pustym gaśnie cała kontrolka."""
+    v, _ = obj_view
+    v.refresh()
+    _zaznacz(v, [])
+    v._update_count()
+    assert not v.sel_bar.act_name.isEnabled() and not v.sel_bar.act_clear.isEnabled()
+    assert not v.sel_bar.btn_object.isEnabled()
+
+
+def test_gest_przy_PUSTYM_zaznaczeniu_NIE_pisze_ani_jednego_wiersza(obj_view):
+    """FALSYFIKATOR §4/14c-a woła SLOT, nie przycisk: klik w wyszarzony przycisk przeszedłby
+    trywialnie i bramka nie mogłaby się zaczerwienić. Wygaszenie to PIERWSZA linia, guard w slocie
+    DRUGA — i to ta druga jest tu dowodzona."""
+    v, con = obj_view
+    v.refresh()
+    _zaznacz(v, [])
+    przed = con.execute("SELECT count(*) FROM event").fetchone()[0]
+    v._on_object_clear()
+    v._on_object_name()
+    assert con.execute("SELECT count(*) FROM event").fetchone()[0] == przed
+    assert con.execute("SELECT count(*) FROM frame WHERE object_source = 'user_cleared'"
+                       ).fetchone()[0] == 0
+
+
+def test_cofniecie_z_paska_rusza_sciezke_a_naglowek_ZOSTAJE(obj_view):
+    """§4/14c-e na POWIERZCHNI (klinga ma swój dom w `test_object_gesture`): zaznaczenie ze wszystkim
+    naraz — dwie klatki ze ścieżki, jedna z nagłówka, jeden dark."""
+    v, con = obj_view
+    v.refresh()
+    _zaznacz(v, [1, 2, 3, 4])
+    v._on_object_clear()
+    zrodla = dict(con.execute(
+        "SELECT COALESCE(object_source,'—'), count(*) FROM frame GROUP BY 1").fetchall())
+    assert zrodla == {"user_cleared": 2, "header": 1, "—": 1}
+
+
+def test_gest_odswieza_OS_OBIEKTU_sygnalem(obj_view):
+    """§4/14c-f, człon czwartej powierzchni: kolejka przeglądu żyje w INNYM oknie, więc grid nie może
+    jej odświeżyć wołaniem — i nie ma poznawać gospodarza. Sygnał leci TYLKO gdy coś zapisano."""
+    v, _ = obj_view
+    ile = []
+    v.object_axis_changed.connect(lambda: ile.append(1))
+    v.refresh()
+    _zaznacz(v, [1, 2])
+    v._on_object_clear()
+    assert ile == [1]
+    v._on_object_clear()                 # drugi raz: nic do cofnięcia ⇒ zero zapisu ⇒ zero sygnału
+    assert ile == [1]
+
+
+def test_kolejka_NIE_dostaje_nowego_kubelka_poza_czlonem_cofniecia(obj_view):
+    """§4/14c-g: nagrobek NIE tworzy szóstego kubełka — klatka wraca do tego, w którym była, a jej
+    partycja dalej się domyka. Falsyfikator: gdyby `user_cleared` wypadło z `review_frame_ids`,
+    równanie partycji rozjechałoby się DOKŁADNIE o liczbę cofnięć."""
+    v, con = obj_view
+    v.refresh()
+    _zaznacz(v, [1, 2])
+    v._on_object_clear()
+    q = queries.review_queue(con)
+    assert q["nameless_raw_count"] == 2                    # cofnięte wróciły do swojego kubełka
+    assert len(queries.review_frame_ids(con)) == 2

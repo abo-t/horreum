@@ -20,7 +20,12 @@ QT_WIDGET_FILES = {"app.py", "__main__.py", "pipeline.py", "grid.py", "projectio
                    "map_view.py",  # F8: mapa stanowisk (SitesMapView, QPainter) — warstwa widżetów
                    "rows.py",     # P1: delegat wiersza wieloczłonowego — warstwa widżetów
                    "planner.py",  # T5: ekran planera celów (PlannerView + PlanWorker) — widżety
-                   "wb_worker.py"}  # P-D: wspólny wykonawca writebacku (QThread) — warstwa widżetów
+                   "wb_worker.py",  # P-D: wspólny wykonawca writebacku (QThread) — warstwa widżetów
+                   # S2b: okno przypisania obiektu wydzielone z `app.py`, bo od paska Zbiorów ma
+                   # DWÓCH wołających, a `grid` nie sięgnie do `app` bez cyklu. Warstwa widżetów —
+                   # wpis jest tu PRZESUNIĘCIEM granicy, nie jej rozluźnieniem: rdzeń i read-model
+                   # zostają bez Qt, a lista dalej wymienia każdy uprawniony plik z imienia.
+                   "assign_dialog.py"}
 
 
 def _imports_pyside6(path):

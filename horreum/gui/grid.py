@@ -37,13 +37,16 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
     QLayout,
     QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QProgressBar, QPushButton,
-    QScrollArea, QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QTableView, QVBoxLayout, QWidget,
+    QDialog, QMenu, QMessageBox,
+    QScrollArea, QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QTableView, QToolButton,
+    QVBoxLayout, QWidget,
 )
 
 from horreum import (filter_engine, lineage, macro as macro_mod, naming, pivot as pivot_mod, repo,
                      writeback)
 from horreum.gui import facet_model, i18n, portfolio, queries, rows, theme
 from horreum.gui.facets import RAIL_MIN_W as _FIELDS_MIN_W, FacetRail
+from horreum.gui.assign_dialog import AssignObjectDialog
 from horreum.gui.projection_dialog import ProjectionDialog
 from horreum.gui.rows import TwoPartDelegate
 from horreum.gui.wb_worker import WritebackRunner
@@ -1331,6 +1334,16 @@ class SelectionBar(QFrame):
         # tłumaczy sam panel zdaniem, a nie wygaszony przycisk, który nie mówi DLACZEGO.
         self.btn_lineage = QPushButton(i18n.t("grid.sel.lineage")); self.btn_lineage.setCheckable(True)
         self.btn_lineage.setToolTip(i18n.t("grid.sel.lineage_tip"))
+        # OŚ OBIEKTU NA ZAZNACZENIU (S2b, D-OW-6) — JEDNA kontrolka z menu, nie dwa przyciski:
+        # pasek trzyma już sześć, a siódmy i ósmy przewróciłyby go do drugiego rzędu. Obie pozycje
+        # są tą samą sprawą („co to za obiekt"), więc menu jest tu grupowaniem, nie chowaniem.
+        self.btn_object = QToolButton()
+        self.btn_object.setText(i18n.t("grid.sel.object"))
+        self.btn_object.setPopupMode(QToolButton.InstantPopup)
+        menu = QMenu(self.btn_object)
+        self.act_name = menu.addAction(i18n.t("grid.sel.object_name"))
+        self.act_clear = menu.addAction(i18n.t("grid.sel.object_clear"))
+        self.btn_object.setMenu(menu)
         self.btn_save = QPushButton(i18n.t("grid.sel.save_view"))
         lay.addWidget(self.count_label); lay.addSpacing(8)
         lay.addWidget(self.criteria_label, 1)
@@ -1340,10 +1353,21 @@ class SelectionBar(QFrame):
         lay.addWidget(self.btn_clear)
         lay.addSpacing(12); lay.addWidget(self.btn_proj); lay.addSpacing(12)
         lay.addWidget(self.btn_macro)
-        lay.addWidget(self.btn_rename); lay.addWidget(self.btn_lineage); lay.addWidget(self.btn_save)
+        lay.addWidget(self.btn_rename); lay.addWidget(self.btn_lineage)
+        lay.addWidget(self.btn_object); lay.addWidget(self.btn_save)
 
     def set_criteria(self, text):
         self.criteria_label.set_full_text(text)
+
+    def set_object_actions(self, *, namable, clearable):
+        """Uczciwy disabled obu pozycji osi obiektu (S2b, §4/14c-a). Cel gestu to WYŁĄCZNIE
+        zaznaczenie, więc przy pustym gaśnie wszystko — fallback „to, co widoczne" jest dla ZAPISU
+        osi ZAKAZANY (800 widocznych klatek i jedno chybione kliknięcie to ta sama sekunda).
+        Kontrolka zbiorcza zostaje żywa, dopóki cokolwiek da się zrobić: menu, które tłumaczy
+        wygaszoną pozycję, mówi WIĘCEJ niż wygaszony przycisk bez powodu."""
+        self.act_name.setEnabled(bool(namable))
+        self.act_clear.setEnabled(bool(clearable))
+        self.btn_object.setEnabled(bool(namable or clearable))
 
     def set_clearable(self, on):
         """Uczciwy disabled „× Wyczyść zbiór": aktywny TYLKO gdy jest co zdjąć (facety/filtr)."""
@@ -1517,6 +1541,9 @@ class FramesView(QWidget):
     otwierane z `SelectionBar` (najwyżej jeden widoczny; R#9 w `_toggle_panel`)."""
 
     status_message = Signal(str)
+    # Gest osi obiektu z paska Zbiorów zmienia stan, który pokazuje INNE okno (kolejka przeglądu
+    # osi obiektu). Sygnał, nie wołanie: grid nie zna gospodarza i nie ma go poznawać (NARROW).
+    object_axis_changed = Signal()
     # Mutex DWÓCH powierzchni writebacku (D-PD-3): gospodarz przekazuje ten fakt drugiej powierzchni
     # (dialog „Napraw nagłówek…"). Dwa równoległe commity spotkałyby się na `BEGIN IMMEDIATE`
     # z `busy_timeout` 5 s i jeden wróciłby jako 'failed' — bez powodu widocznego dla usera.
@@ -1620,6 +1647,8 @@ class FramesView(QWidget):
         self.sel_bar.btn_macro.clicked.connect(lambda: self._toggle_panel("macro"))
         self.sel_bar.btn_rename.clicked.connect(lambda: self._toggle_panel("rename"))
         self.sel_bar.btn_lineage.clicked.connect(lambda: self._toggle_panel("lineage"))
+        self.sel_bar.act_name.triggered.connect(self._on_object_name)
+        self.sel_bar.act_clear.triggered.connect(self._on_object_clear)
         rv.addWidget(self.sel_bar)
 
         self.macro_bar = MacroBar([])
@@ -1862,6 +1891,71 @@ class FramesView(QWidget):
         # co przed chwilą wyjechało na stół. Zdanie składa dialog (tam liczby są świeże).
         if dlg.summary:
             self.status_message.emit(dlg.summary)
+
+    # ---- oś OBIEKTU na zaznaczeniu (S2b, D-OW-6) ----
+
+    def _object_gesture_ids(self):
+        """Cel OBU gestów: WYŁĄCZNIE zaznaczenie (§4/14c-a). Fallback „to, co widoczne" jest dla
+        zapisu osi ZAKAZANY — przy 800 widocznych klatkach chybione kliknięcie i zamierzony gest
+        wyglądają identycznie. Pusty ⇒ status i zero zapisu; to druga linia obrony za wygaszeniem,
+        bo bramka woła SLOT, nie przycisk (klik w wyszarzony przycisk przeszedłby trywialnie)."""
+        ids = [r["frame_id"] for r in self._selected_data_rows()]
+        if not ids:
+            self.status_message.emit(i18n.t("grid.sel.object_empty"))
+        return ids
+
+    def _po_gescie_osi(self, klucz, gest, **kw):
+        """Wspólny ogon obu gestów: zdanie z ROZBICIEM per fakt + odświeżenie CZTERECH powierzchni.
+
+        Liczniki idą osobno, bo znaczą co innego: „kalibracja" to ochrona, która zadziałała,
+        a „zmieniły się w międzyczasie" to ostrzeżenie, że stan uciekł. Jedno „pominięto N" kazałoby
+        człowiekowi zgadywać, którą z tych dwóch rzeczy właśnie zobaczył."""
+        msg = i18n.t(klucz, assigned=gest.assigned, total=gest.assigned + gest.skipped, **kw)
+        for pole, sufiks in (("skipped_kind", "kind"), ("skipped_source", "source"),
+                             ("skipped_drift", "drift"), ("skipped_stack", "stack")):
+            n = getattr(gest, pole)
+            if n:
+                msg += i18n.t(f"grid.sel.object_skip_{sufiks}", n=n)
+        self.status_message.emit(msg)
+        if gest.assigned:
+            # CZTERY POWIERZCHNIE: wiersze gridu, facety (Obiekt zmienił zawartość), licznik/pasek
+            # oraz kolejka przeglądu w oknie osi — ta ostatnia przez sygnał, bo nie jest nasza.
+            self.refresh()
+            self.object_axis_changed.emit()
+
+    def _on_object_name(self):
+        """„Nazwij zaznaczenie…": nadpisuje WYŁĄCZNIE źródła słabe, przy zamrożonym stanie okna."""
+        ids = self._object_gesture_ids()
+        if not ids:
+            return
+        stan = queries.selection_object_state(self.con, ids)
+        if stan["conflict"]:
+            # Dwa różne obiekty wśród klatek podlegających nadpisaniu ⇒ gest nie ma JEDNEGO
+            # przedmiotu. Odmowa BEZ zapisu — częściowe wykonanie byłoby gorsze niż żadne, bo
+            # user zobaczyłby „nazwano 30 z 80" i nie wiedział, które 30.
+            self.status_message.emit(i18n.t("grid.sel.object_conflict", n=2))
+            return
+        dlg = AssignObjectDialog(self.con, object_raw=None, frame_count=len(ids), parent=self)
+        if dlg.exec() != QDialog.Accepted or dlg.selected is None:
+            return
+        canon, catalog, kind, alias_norm = dlg.selected
+        try:
+            gest = repo.user_assign_object(
+                self.con, alias_norm=alias_norm, canon=canon, catalog=catalog, kind=kind,
+                frame_ids=ids, now=self._now(), overwrite_weak=True,
+                expected_object_id=stan["expected_object_id"])
+        except ValueError as e:                # konflikt aliasu / dryf do nieistniejącej klatki
+            QMessageBox.warning(self, i18n.t("grid.sel.object_name"), str(e))
+            return
+        self._po_gescie_osi("grid.sel.object_named", gest, canon=canon)
+
+    def _on_object_clear(self):
+        """„Cofnij przypisanie": zdejmuje wyłącznie to, co postawiła ręka albo ścieżka."""
+        ids = self._object_gesture_ids()
+        if not ids:
+            return
+        gest = repo.clear_object_assignment(self.con, frame_ids=ids, now=self._now())
+        self._po_gescie_osi("grid.sel.object_cleared", gest)
 
     # ---- panele kling (F3, PLAN_ux_redesign §4) ----
     def _toggle_panel(self, which):
@@ -2146,6 +2240,13 @@ class FramesView(QWidget):
         txt = i18n.t_plural("grid.frames", self._n_total) + (
             f"  ·  {i18n.t_plural('grid.selected', sel)}" if sel else "")
         self.count_label.setText(txt)
+        # Uczciwy disabled osi obiektu — liczony z ZAZNACZENIA, nie z widocznych (§4/14c-a).
+        # Read-model pytamy tylko wtedy, gdy jest o co pytać: przy pustym zaznaczeniu odpowiedź
+        # jest znana bez SQL-a, a `_update_count` chodzi przy KAŻDEJ zmianie zaznaczenia.
+        ids = [r["frame_id"] for r in self._selected_data_rows()] if sel else []
+        stan = queries.selection_object_state(self.con, ids) if ids else None
+        self.sel_bar.set_object_actions(namable=stan["namable"] if stan else 0,
+                                        clearable=stan["clearable"] if stan else 0)
         if hasattr(self, "rename_bar"):
             self.rename_bar.set_target_label(
                 f"Cel: {i18n.t_plural('grid.selected', sel)}" if sel

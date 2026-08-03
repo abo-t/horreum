@@ -13,6 +13,8 @@ NIGDY składanie stringa SQL. Listy zmiennej długości (id/keywordy) idą jako 
 
 import json
 
+from horreum.resolve.frames import LIGHT_KINDS
+from horreum.resolve.objects import WEAK_OBJECT_SOURCES
 from horreum.resolver import NO_OBJECT_CARD_FILETYPES, path_proposals, review_state
 
 
@@ -1069,6 +1071,50 @@ def writeback_frame_targets(con, frame_ids):
         "ORDER BY f.id, l.id",
         (json.dumps(list(frame_ids)),),
     ).fetchall()
+
+
+def selection_object_state(con, frame_ids):
+    """Stan osi OBIEKT dla ZAZNACZENIA — jedyne wejście obu gestów paska Zbiorów (S2b, §4/14c).
+
+    OSOBNY, WĄSKI CZYTNIK, a nie dwie nowe kolumny w `base_rows`: tamten wiersz karmi WSZYSTKIE
+    perspektywy i wchodzi w kolizję z podłogą okna (D-0801-1), a te dwa fakty są potrzebne wyłącznie
+    w chwili gestu. Rozstrzyga TRZY pytania, których widok sam sobie nie odpowie:
+
+    * czy jest co robić (`namable`/`clearable` — wygaszenie kontrolki mówi prawdę, a nie „może się
+      uda"; pusty zbiór to jedno, a 800 klatek z samego nagłówka — zupełnie co innego);
+    * jaki jest ZAMROŻONY STAN okna (`expected_object_id`) — do parametru klingi;
+    * czy zaznaczenie jest jednorodne (`conflict`) — dwa różne obiekty wśród klatek podlegających
+      nadpisaniu znaczą ODMOWĘ, bo gest „nazwij te wszystkie" nie ma wtedy jednego przedmiotu.
+
+    `expected` i `conflict` liczą się WYŁĄCZNIE wśród klatek, które gest może ruszyć (light, źródło
+    słabe). Liczenie ich po całym zaznaczeniu blokowałoby akcję z powodu klatki, której i tak nikt
+    nie zamierzał tknąć — a to odmowa o fałszywej przyczynie.
+
+    Zwraca dict: n, lights, stacks, namable, clearable, expected_object_id, conflict, by_source."""
+    rows = con.execute(
+        "SELECT f.kind, f.object_id, f.object_source FROM frame f "
+        "WHERE f.id IN (SELECT value FROM json_each(?))",
+        (json.dumps(list(frame_ids)),)).fetchall()
+    by_source, slabe = {}, set()
+    n = lights = stacks = namable = clearable = 0
+    for r in rows:
+        n += 1
+        by_source[r["object_source"]] = by_source.get(r["object_source"], 0) + 1
+        if r["kind"] not in LIGHT_KINDS:
+            continue
+        lights += 1
+        if r["kind"] == "master_light":
+            stacks += 1
+        elif r["object_source"] in ("path", "user") and r["object_id"] is not None:
+            clearable += 1
+        if r["object_id"] is None or r["object_source"] in WEAK_OBJECT_SOURCES:
+            namable += 1
+            if r["object_id"] is not None:
+                slabe.add(r["object_id"])
+    return {"n": n, "lights": lights, "stacks": stacks, "namable": namable,
+            "clearable": clearable, "by_source": by_source,
+            "expected_object_id": next(iter(slabe)) if len(slabe) == 1 else None,
+            "conflict": len(slabe) > 1}
 
 
 def rename_frame_targets(con, frame_ids):

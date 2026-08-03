@@ -53,6 +53,11 @@ schemat i API mogą się jeszcze zmieniać.
   same nazwy. Wpisujesz „Large Magellanic Cloud" albo „LMC" w oknie „Napraw nagłówek…" i program
   je przyjmuje, zamiast odmawiać. Wpis może być **samą nazwą** — obiekt, którego nie da się
   zaplanować (LMC z Polski nigdy nie wschodzi), nie zaśmieca planu, ale w bibliotece istnieje.
+  **Do tej klasy dołączył `Orion`** — szerokie pole gwiazdozbioru fotografowane obiektywem 50–70 mm,
+  a więc coś zupełnie innego niż Wielka Mgławica w Orionie (`NGC1976`), która ma swój własny numer
+  i swoje własne klatki. Nazwa opisuje to, co jest na zdjęciu: **cały gwiazdozbiór**. Kadry ciaśniej
+  wycelowane w pas i miecz nie dostają osobnej nazwy — to nadal ten sam obszar nieba, a różni je
+  obiektyw, nie obiekt.
 - **Nazwy potoczne stają się równoważnościami, a ich wycofanie naprawdę się cofa.** Każda nazwa
   wpisana obok obiektu trafia do biblioteki jako jego druga nazwa, więc szukanie działa dla
   wszystkich naraz. Gdy usuniesz nazwę z pliku, program nie zostawia po niej kłamstwa: wycofuje

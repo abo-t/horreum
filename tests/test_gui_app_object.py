@@ -812,10 +812,13 @@ R_S2 = "R:\\ASTRO_"
 
 @pytest.fixture
 def sciezka(qapp, tmp_path):
-    """ObjectAxisView nad bazą z 3 klatkami `LMC` i 1 klatką `Orion` (bez wpisu w słowniku)."""
+    """ObjectAxisView nad bazą z 3 klatkami `LMC` i 1 klatką z folderu, którego NIE ZNA żaden
+    szczebel. Do 2026-08-03 tę rolę grał `Orion`; po D-OW-3/A słownik go zna, więc czwarta klatka
+    musi wskazywać folder ad-hoc — inaczej fikstura przestałaby dawać populację „bez propozycji",
+    na której stoją trzy testy niżej (droga awaryjna ręki)."""
     con = db.open_db(str(tmp_path / "s2.db"))
     items = [(rf"{R_S2}\LIGHTS\LMC\A7R3_105\OSC\_7R3880{i}.ARW") for i in range(3)]
-    items.append(rf"{R_S2}\LIGHTS\Orion\A7S1_070\OSC\_dsc9412.ARW")
+    items.append(rf"{R_S2}\LIGHTS\ProbaObiektywu\A7S1_070\OSC\_dsc9412.ARW")
     for i, path in enumerate(items, start=1):
         con.execute("INSERT INTO frame(id, kind, filetype, sha1_data, first_seen_at) "
                     "VALUES (?, 'light', 'raw', ?, ?)", (i, f"sha{i}", NOW_S2))
@@ -837,7 +840,7 @@ def test_kubelek_propozycji_ma_wlasny_wiersz_i_akcje(sciezka):
     v, con = sciezka
     q = queries.review_queue(con)
     assert (q["nameless_raw_count"], q["path_proposed_names"], q["path_proposed_frames"]) \
-        == (4, 1, 3)                      # Orion bez wpisu w słowniku → bez propozycji
+        == (4, 1, 3)                      # folder ad-hoc bez wpisu w słowniku → bez propozycji
     _select_review_tag(v, "path_proposals")
     assert v.confirm_path_btn.isEnabled()
     assert not v.repair_btn.isEnabled() and not v.assign_btn.isEnabled()
@@ -1032,8 +1035,9 @@ def test_dialog_bez_zeznania_z_gramatyki_NIE_TWORZY_klucza(sciezka):
 def test_dialog_przyjmuje_nazwe_spoza_gramatyki_katalogowej(sciezka):
     """Bramka nazwy to CAŁA drabina, nie `catalog_canon`: nazwa potoczna wpisu słownika („Large
     Magellanic Cloud") i nazwa z drabiny solar („Moon") są rozwiązywalne przez przebieg, więc okno
-    nie ma prawa ich odrzucać. `Orion` zostaje odrzucony — i to jest stan ZAMIERZONY do czasu
-    D-OW-3 (odłożone): słownik go nie zna, więc przebieg też by go nie rozwiązał."""
+    nie ma prawa ich odrzucać. Od D-OW-3/A (2026-08-03) dochodzi `Orion` — słownik go zna, więc
+    okno przyjmuje go tą samą drogą co `LMC`. Odmowę pinuje odtąd nazwa spoza KAŻDEGO szczebla:
+    bez niej test straciłby jedyny człon, który może się zaczerwienić."""
     v, con = sciezka
     dlg = AssignObjectDialog(con, object_raw=None, frame_count=4, parent=v)
     dlg.designation.setText("Large Magellanic Cloud")
@@ -1042,7 +1046,11 @@ def test_dialog_przyjmuje_nazwe_spoza_gramatyki_katalogowej(sciezka):
     assert dlg.selected[0] == "LMC"
     dlg.designation.setText("Moon")
     assert dlg.accept_btn.isEnabled()
-    dlg.designation.setText("Orion")
+    dlg.designation.setText("Orion")                     # D-OW-3/A — wpis własny, kanon sam sobą
+    assert dlg.accept_btn.isEnabled()
+    dlg._validate_and_accept()
+    assert dlg.selected[0] == "Orion"
+    dlg.designation.setText("ProbaObiektywu")
     assert not dlg.accept_btn.isEnabled()
     assert "Nie rozpoznaję nazwy" in dlg.error.text()
     dlg.close()
@@ -1050,8 +1058,8 @@ def test_dialog_przyjmuje_nazwe_spoza_gramatyki_katalogowej(sciezka):
 
 def test_on_assign_raw_przypisuje_grupe_podana_parametrem(sciezka, monkeypatch):
     """Cała droga gestu: kubełek RAW → dialog → klinga ręki. Grupa jedzie do zapisu jako LISTA
-    `frame_ids` z drążenia tego kubełka (nie z tagu), więc znika CAŁA — łącznie z klatką `Orion`,
-    której szczebel ścieżki nie umiał zaproponować. To jest droga awaryjna dla wszystkiego, czego
+    `frame_ids` z drążenia tego kubełka (nie z tagu), więc znika CAŁA — łącznie z klatką z folderu
+    ad-hoc, której szczebel ścieżki nie umiał zaproponować. To jest droga awaryjna dla wszystkiego, czego
     ścieżka nie domknie."""
     v, con = sciezka
 

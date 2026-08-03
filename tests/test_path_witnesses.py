@@ -18,8 +18,9 @@ PINY, KTÓRE MIAŁY SIĘ PRZEWRÓCIĆ — ADJUDYKACJA (S0 wypisał je imiennie, 
   dziś `LMC` (słownik nazw własnych z S1 + drabina zamiast `catalog_canon`), a `_SOLAR\Moon` —
   `Moon` (reguła kategorii z S2, marker rodzaju z `_KIND_DIRS`). Gdyby te piny były dalej zielone
   na `None`, znaczyłoby to, że LMC nadal nie działa.
-* **NIE przewrócony i tak ma zostać:** `LIGHTS\Orion` milczy, bo D-OW-3 jest ODŁOŻONE — 20 klatek
-  Oriona zostaje bezimiennych do osobnej sesji ze Zdzinem.
+* **D-OW-3 — PRZEWRÓCONY 2026-08-03, i to był cel asercji odmowy.** `LIGHTS\Orion` daje dziś
+  `Orion`: osobna sesja się odbyła, wariant A wszedł do słownika, kanon obejmuje CAŁĄ populację
+  (pas i miecz nie dostają osobnego kanonu — rozróżnia je obiektyw, nie oś obiektu).
 
 REGUŁA ADJUDYKACJI (bez zmian): przewrócenie pinu to STOP i wpis do briefu, nigdy automatyczne
 przestemplowanie. Czerwień spoza wypisanych klas znaczy regresję.
@@ -150,8 +151,20 @@ def test_PIN_PRZEWROCONY_S1_nazwa_wlasna_dostaje_DWOCH_swiadkow():
         con, rf"{R}\LIGHTS\LMC\A7R3_105\OSC\LMC_20230323.ARW") == "LMC"
 
 
-def test_PIN_NIEPRZEWROCONY_Orion_zostaje_bezimienny():
-    """D-OW-3 ODŁOŻONE do osobnej sesji ze Zdzinem: 20 klatek Oriona ma zostać bez kanonu.
-    Zzielenienie tego pinu znaczyłoby, że ktoś dopisał `Orion` do słownika bez tej rozmowy."""
+def test_PIN_PRZEWROCONY_D_OW_3_Orion_dostaje_kanon():
+    """PIN_PRZEWROCONY(D-OW-3, 2026-08-03): rozmowa się odbyła, wariant A wszedł do słownika.
+    Poprzednik tego pinu asertował ODMOWĘ właśnie po to, żeby dopisanie `Orion` bez tej rozmowy
+    przewróciło baterię. Kanon jest JEDEN na całą populację — folder obiektywu leży PONIŻEJ pozycji
+    obiektu, więc świadek ścieżki i tak go nie widzi; kadr niesie oś sprzętu, nie oś obiektu."""
     con = _con()
-    assert resolver.path_proposal(con, rf"{R}\LIGHTS\Orion\A7S1_070\OSC\Orion_0001.ARW") is None
+    assert resolver.path_proposal(con, rf"{R}\LIGHTS\Orion\A7S1_070\OSC\Orion_0001.ARW") == "Orion"
+    assert resolver.path_proposal(con, rf"{R}\LIGHTS\Orion\A7S1_050\OSC\Orion_0002.ARW") == "Orion"
+
+
+def test_PIN_nazwa_spoza_KAZDEGO_szczebla_dalej_milczy():
+    """Zastępca poprzedniego pinu: rolę „nazwa, której nie zna nikt" przejmuje folder ad-hoc.
+    Bez tego wiersza dopisanie `Orion` skasowałoby JEDYNY dowód, że drabina umie powiedzieć NIE —
+    a pin, który nie może się zaczerwienić, nie jest pinem."""
+    con = _con()
+    assert resolver.path_proposal(
+        con, rf"{R}\LIGHTS\ProbaObiektywu\A7S1_070\OSC\x.ARW") is None

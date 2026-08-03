@@ -261,10 +261,12 @@ def test_kolejka_pokazuje_propozycje_POZA_partycja():
 
     Równanie partycji ma JEDEN dom (`test_gui_queries_object._partycja`) i to stamtąd je bierzemy:
     druga kopia, dopisana w segmencie, który dokłada kubełek, byłaby już o człon uboższa."""
-    con = _baza(_lmc(3) + [(rf"{R}\LIGHTS\Orion\A7S1_070\OSC\x.ARW", None, "raw")])
+    con = _baza(_lmc(3) + [(rf"{R}\LIGHTS\ProbaObiektywu\A7S1_070\OSC\x.ARW", None, "raw")])
     q = queries.review_queue(con)
     assert q["nameless_raw_count"] == 4                    # cała populacja RAW bez obiektu
-    assert (q["path_proposed_names"], q["path_proposed_frames"]) == (1, 3)   # Orion bez propozycji
+    assert (q["path_proposed_names"], q["path_proposed_frames"]) == (1, 3)   # folder ad-hoc: bez
+    #  propozycji. Do 2026-08-03 stał tu `Orion` — po D-OW-3/A słownik go zna, więc rolę „nazwa,
+    #  której nie zna żaden szczebel" musi nieść folder spoza każdej gramatyki i spoza słownika.
     assert _partycja(con) == len(queries.review_frame_ids(con))
 
 
@@ -327,7 +329,7 @@ def test_klinga_odmawia_zrodla_spoza_stalej():
 
 def test_drazenie_dekoruje_id_od_jednego_wlasciciela():
     """Panel drążenia nie ma własnego predykatu populacji — dostaje id-y od `path_proposals`."""
-    con = _baza(_lmc(2) + [(rf"{R}\LIGHTS\Orion\A7S1\OSC\x.ARW", None, "raw")])
+    con = _baza(_lmc(2) + [(rf"{R}\LIGHTS\ProbaObiektywu\A7S1\OSC\x.ARW", None, "raw")])
     ids = [fid for p in resolver.path_proposals(con) for fid in p.frame_ids]
     rows = queries.path_proposal_frames(con, ids)
     assert [r["frame_id"] for r in rows] == ids

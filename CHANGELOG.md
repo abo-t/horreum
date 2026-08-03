@@ -51,11 +51,32 @@ schemat i API mogą się jeszcze zmieniać.
   w trzech miejscach). Odznaczasz, czego nie chcesz, i zatwierdzasz resztę jednym kliknięciem.
   Sam przebieg „Rozwiąż" nie zmienia przy tym ani jednego wiersza — liczy tylko kandydatów
   i pisze o nich w raporcie Dostawy.
+- **Szukajka obiektów znajduje po KAŻDEJ nazwie, jaką obiekt nosi — i nie czepia się kropek ani
+  spacji.** Wpisz „Large Magellanic Cloud", a znajdziesz kubełek `LMC`; wpisz „M 42" ze spacją,
+  a znajdziesz `M42`; „sh2 155" znajdzie `Sh2-155`. Do tej pory pole porównywało wpisany tekst
+  znak w znak z nazwą na liście, więc trafiało tylko wtedy, gdy pisałeś dokładnie tak, jak nazwa
+  jest zapisana w katalogu — a nazwy potocznej nie znajdowało w ogóle, bo `LMC` nie ma z frazą
+  „Large Magellanic Cloud" ani jednej wspólnej litery.
 - **Katalog `_SOLAR` i `_COMETS` przestał być ślepym zaułkiem.** Zdjęcia Księżyca, Jowisza
   i komety 21P leżą o poziom głębiej niż zwykłe cele — program to teraz rozumie i nazywa je
   tak samo jak resztę.
 
 ### Zmienione
+- **Gotowy obraz po integracji można teraz nazwać I cofnąć tak samo jak każdą inną klatkę.** Do tej
+  pory „Nazwij zaznaczenie…" go obejmowało, a „Cofnij przypisanie" już nie — więc dało się nadać
+  stosowi nazwę i zostać z nią na zawsze: żaden ekran nie umiał tego odwrócić. Teraz oba gesty
+  obejmują stosy, a zdanie po geście mówi, ile ich ruszyłeś („w tym gotowe obrazy: 2") — bo to
+  jedyna klatka, przy której nazwa sięga powiązania ze zdjęciami, z których obraz powstał.
+  Powiązanie potwierdzone plikiem albo Twoją ręką **przeżywa** taki gest; powiązanie zwykłe,
+  dobrane z okna czasu, przelicza się uczciwie — stos bez obiektu okna nie ma z definicji.
+- **Klatka, której zdjąłeś nazwę, jest w kolejce przeglądu widoczna jako TWÓJ WERDYKT.** Wracała do
+  tego samego wiersza co klatki, o których nikt nic nie powiedział, i wyglądała identycznie — a
+  „Przypisz obiekt…" po cichu jej nie tykało, bo program chroni cofnięcie przed przypadkowym
+  odwróceniem. Dostawałeś „przypisano 5 z 8" bez wyjaśnienia. Teraz takie klatki mają w kolejce
+  własny wiersz z dopiskiem **„cofnięte ręką"**, a przycisk przy nim działa i mówi wprost, że
+  przypisanie nadpisze wcześniejszy werdykt. Raport Dostawy podaje przy okazji, ile
+  z nierozpoznanych klatek to Twoja decyzja, a ile brak wiedzy — te pierwsze zostają w procencie
+  rozpoznania świadomie, bo inaczej odrzucenie nazwy podnosiłoby wynik.
 - **Okno „Napraw nagłówek…" i rozpoznawanie nazw mówią wreszcie JEDNYM głosem.** Do tej pory
   ekran i baza odpowiadały różnie na to samo pytanie: przebieg umiał nazwać `LMC` czy `Moon`,
   a okno naprawy przy tych samych plikach milczało. Teraz obie drogi pytają tej samej reguły,

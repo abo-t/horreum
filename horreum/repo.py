@@ -849,12 +849,16 @@ class ObjectGesture:
     skipped_kind: int = 0      # rodzaj poza `LIGHT_KINDS` — kalibracja obiektu nie ma z definicji
     skipped_source: int = 0    # źródło poza zakresem gestu (nagłówek/xref/region — fakt z pliku)
     skipped_drift: int = 0     # stan inny niż oczekiwany w chwili zapisu (TOCTOU)
-    skipped_stack: int = 0     # gotowy obraz (`master_light`) — patrz `clear_object_assignment`
+    stacks: int = 0            # …z ZAPISANYCH: ile było gotowych obrazów. NIE jest pominięciem
+                               # (D-OW-7: stos jest w zasięgu OBU gestów) i dlatego stoi POZA sumą
+                               # `skipped` — to informacja o tym, co gest ruszył, a nie o tym, czego
+                               # nie ruszył. Osobno, bo gotowy obraz jest jedyną klatką, przy której
+                               # zapis osi może dotknąć rodowodu
 
     @property
     def skipped(self):
         """Suma pominięć — do zdania „przypisano N z M", gdzie rozbicie idzie osobno."""
-        return self.skipped_kind + self.skipped_source + self.skipped_drift + self.skipped_stack
+        return self.skipped_kind + self.skipped_source + self.skipped_drift
 
 
 def user_assign_object(con, *, alias_norm, canon, catalog, kind, frame_ids, now, uid="local",
@@ -938,7 +942,7 @@ def user_assign_object(con, *, alias_norm, canon, catalog, kind, frame_ids, now,
             emit_event(con, actor=actor, verb="object.aliased", target=f"object:{object_id}",
                        now=now, payload={"alias_norm": alias_norm, "source": "user"})
 
-        assigned = kind_skip = source_skip = drift = 0
+        assigned = kind_skip = source_skip = drift = stacks = 0
         for frame_id in frame_ids:
             fr = con.execute(
                 "SELECT kind, object_id, object_source FROM frame WHERE id = ?",
@@ -975,8 +979,13 @@ def user_assign_object(con, *, alias_norm, canon, catalog, kind, frame_ids, now,
             emit_event(con, actor=actor, verb="object.assigned", target=f"frame:{frame_id}",
                        now=now, payload={"object_id": object_id, "object_source": object_source})
             assigned += 1
+            # Licznik gotowych obrazów jest LUSTREM licznika z `clear_object_assignment` (D-OW-7):
+            # skoro stos jest w zasięgu obu gestów, oba muszą o nim mówić. Nazwanie stosu PRZEPINA
+            # dobór okna jego rodowodu — user ma prawo wiedzieć, że tego właśnie dotknął, zanim
+            # zobaczy w Dostawie „pominięto, zapisany dowód mocniejszy".
+            stacks += fr["kind"] == "master_light"
     return ObjectGesture(assigned=assigned, skipped_kind=kind_skip,
-                         skipped_source=source_skip, skipped_drift=drift)
+                         skipped_source=source_skip, skipped_drift=drift, stacks=stacks)
 
 
 def clear_object_assignment(con, *, frame_ids, now, uid="local"):
@@ -994,17 +1003,22 @@ def clear_object_assignment(con, *, frame_ids, now, uid="local"):
     (`STICKY_OBJECT_SOURCES`). Nagrobek jest STICKY i gaśnie JEDNYM gestem: writebackiem karty
     `OBJECT` do pliku (`writeback._clear_object_tombstone`) albo kolejnym „Nazwij zaznaczenie".
 
-    GOTOWE OBRAZY POMIJAMY (R24#7) — `master_light` ma własny licznik. Odebranie stosowi
-    `object_id` ROZBRAJA dobór okna rodowodu (`stacks._window_candidates` pyta o obiekt), więc
-    najbliższy przebieg zobaczyłby stos bez kandydatów i zdegradował dowiedziony rodowód do
-    „brak wejść". To nie jest ostrożność — to jedyna droga, na której gest osi obiektu może
-    skasować cudzą pracę.
+    GOTOWE OBRAZY SĄ W ZASIĘGU (D-OW-7, decyzja Zdzinia 2026-08-03 — odwraca R24#7): gest obejmuje
+    `master_light` tak samo jak lighta, a licznik `stacks` mówi, ile ich ruszył. Odwrócenie wolno
+    było zrobić dopiero po tym, jak ochrona rodowodu zeszła DO PRZEBIEGU: R24#7 pomijał stosy, bo
+    odebranie `object_id` rozbraja dobór okna (`stacks._window_candidates` pyta o obiekt) i najbliższy
+    przebieg degradował dowiedziony rodowód do „brak wejść". Od ochrony RANGĄ (`repo.RANGA_ASSERT`)
+    rodowód `history`/`user` przeżywa taki przebieg niezależnie od tego, który gest wyjął klatkę
+    z okna — a rodowód `window` przelicza się uczciwie, bo stos bez obiektu okna nie ma z definicji.
+    Pomijanie stosu kupowało więc ochronę, której już nie potrzebuje, ceną ŚLEPEGO ZAUŁKA: „Nazwij"
+    stos PRZEPINAŁO (rodzaj jest w `LIGHT_KINDS`), a „Cofnij" go nie tykało, więc przepiętego stosu
+    nie dało się w GUI naprawić ani cofnąć.
 
     PARA VERBÓW: `object.unassigned` (co zdjęto) + `object.cleared` (że to WERDYKT, nie brak).
     Dwa, nie jeden, bo pytania są dwa: bilans osi (§5.9) liczy odpięcia, a kolejka przeglądu musi
     umieć pokazać człon „cofnięte ręką" bez zaglądania w payload. Zwraca `ObjectGesture`."""
     actor = f"user:{uid}"
-    cleared = kind_skip = source_skip = stack_skip = 0
+    cleared = kind_skip = source_skip = stacks = 0
     with _immediate(con):
         for frame_id in frame_ids:
             fr = con.execute(
@@ -1014,9 +1028,6 @@ def clear_object_assignment(con, *, frame_ids, now, uid="local"):
                 raise ValueError(f"frame:{frame_id} nie istnieje")
             if fr["kind"] not in LIGHT_KINDS:
                 kind_skip += 1
-                continue
-            if fr["kind"] == "master_light":
-                stack_skip += 1                     # gotowy obraz — patrz docstring (rodowód)
                 continue
             if (fr["object_id"] is None
                     or fr["object_source"] not in CLEARABLE_OBJECT_SOURCES):
@@ -1032,8 +1043,9 @@ def clear_object_assignment(con, *, frame_ids, now, uid="local"):
                        now=now, payload={"was_object_id": fr["object_id"],
                                          "was_source": fr["object_source"]})
             cleared += 1
+            stacks += fr["kind"] == "master_light"
     return ObjectGesture(assigned=cleared, skipped_kind=kind_skip,
-                         skipped_source=source_skip, skipped_stack=stack_skip)
+                         skipped_source=source_skip, stacks=stacks)
 
 
 def clear_object_tombstone(con, *, frame_id, now, actor="user:local"):

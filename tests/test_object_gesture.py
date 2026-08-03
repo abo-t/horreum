@@ -186,17 +186,28 @@ def test_cofniecie_NIE_rusza_naglowka_xrefu_ani_regionu():
     assert _stan(con, 1) == (5, "header") and _stan(con, 2) == (5, "region")
 
 
-def test_cofniecie_POMIJA_gotowe_obrazy_wlasnym_licznikiem():
-    """§4/14c-h (R24#7): odebranie stosowi `object_id` ROZBRAJA dobór okna rodowodu — najbliższy
-    przebieg zobaczyłby stos bez kandydatów i zdegradował dowiedziony rodowód do „brak wejść".
-    Licznik jest WŁASNY, bo to ochrona cudzej pracy, a nie ten sam fakt co „nie ma czego cofać"."""
+def test_cofniecie_OBEJMUJE_gotowe_obrazy_i_liczy_je_OSOBNO():
+    """§4/14c-h po **D-OW-7** (decyzja Zdzinia 2026-08-03, odwraca R24#7): stos jest w zasięgu OBU
+    gestów. Licznik zostaje własny, ale znaczy co innego — „w tym gotowe obrazy", nie „pominięte";
+    dlatego stoi POZA sumą `skipped`, inaczej zdanie „cofnięto 2 z 2 · pominięto 1" przeczyłoby
+    samo sobie. Ochrona rodowodu zeszła do PRZEBIEGU (`repo.RANGA_ASSERT`), więc pomijanie stosu
+    kupowało już tylko ślepy zaułek: „Nazwij" go przepinało, „Cofnij" nie tykało."""
     con = _baza([("master_light", "xisf", None, None), ("light", "raw", None, None)])
     con.execute("INSERT INTO object(id, canon, kind) VALUES (5, 'NGC7000', 'deep_sky')")
     con.execute("UPDATE frame SET object_id = 5, object_source = 'user'")
     con.commit()
     g = repo.clear_object_assignment(con, frame_ids=[1, 2], now=NOW)
-    assert (g.assigned, g.skipped_stack, g.skipped_source) == (1, 1, 0)
-    assert _stan(con, 1) == (5, "user")                    # gotowy obraz NIETKNIĘTY
+    assert (g.assigned, g.stacks, g.skipped) == (2, 1, 0)
+    assert _stan(con, 1) == (None, "user_cleared")         # gotowy obraz RUSZONY, z nagrobkiem
+
+
+def test_nazwanie_liczy_gotowe_obrazy_TYM_SAMYM_licznikiem():
+    """Człon LUSTRZANY D-OW-7: skoro stos jest w zasięgu obu gestów, oba muszą o nim mówić — i tą
+    samą liczbą. Asymetria licznika wróciłaby tym samym wejściem, którym wróciłaby asymetria gestu."""
+    con = _baza([("master_light", "xisf", None, None), ("light", "raw", None, None)])
+    g = repo.user_assign_object(con, alias_norm=None, canon="NGC7000", catalog="NGC",
+                                kind="deep_sky", frame_ids=[1, 2], now=NOW)
+    assert (g.assigned, g.stacks, g.skipped) == (2, 1, 0)
 
 
 def test_cofniecie_jest_idempotentne():

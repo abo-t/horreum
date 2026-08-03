@@ -1110,9 +1110,9 @@ def selection_object_state(con, frame_ids):
             continue
         lights += 1
         if r["kind"] == "master_light":
-            stacks += 1
-        elif (r["object_source"] in CLEARABLE_OBJECT_SOURCES
-              and r["object_id"] is not None):
+            stacks += 1        # LICZONY, nie wykluczany (D-OW-7): stos jest w zasięgu obu gestów
+        if (r["object_source"] in CLEARABLE_OBJECT_SOURCES
+                and r["object_id"] is not None):
             clearable += 1
         if r["object_id"] is None or r["object_source"] in WEAK_OBJECT_SOURCES:
             namable += 1

@@ -504,26 +504,45 @@ def test_repo_odmawia_zrodla_spoza_trojstanu(con):
 # ═════════════════════════ S2b §4/14c (i) — GESTY OSI OBIEKTU vs RODOWÓD
 
 
-def test_cofniecie_NIE_rusza_gotowego_obrazu_ani_jego_rodowodu(con):
-    """§4/14c-h/i, człon PIERWSZY: gest „Cofnij" na zaznaczeniu, w którym jest gotowy obraz.
+def test_cofniecie_NA_STOSIE_nie_kasuje_rodowodu_DOWIEDZIONEGO(con):
+    """§4/14c-h/i po **D-OW-7**: gest „Cofnij" sięga gotowego obrazu — i wtedy rodowód broni się
+    SAM, w przebiegu, a nie tym, że gest go omija.
 
-    Odebranie stosowi `object_id` rozbraja `_window_candidates` (pyta o obiekt), więc najbliższy
-    przebieg zobaczyłby stos bez kandydatów i zdegradował dowiedziony rodowód do „brak wejść".
-    Klinga pomija go WŁASNYM licznikiem — a że to ochrona CUDZEJ pracy, dowodzimy jej skutku
-    na rodowodzie, nie samego licznika."""
-    m = _master(con)
-    a = _light(con, "l1", date_obs="2025-08-30T20:30:00")
-    b = _light(con, "l2", date_obs="2025-08-30T20:40:00")
-    run_stack_lineage(con, now=NOW, xml_reader=_brak_xml)
+    Do D-OW-7 klinga pomijała stos, bo odebranie `object_id` rozbraja `_window_candidates`
+    i najbliższy przebieg degradował dowiedziony rodowód do „brak wejść". Ochrona zeszła do
+    przebiegu (RANGA), więc gest wolno było otworzyć — ale to TU trzeba dowieść, że otwarcie nie
+    kosztowało dowodu. Plik czytelny: rodowód `history` przeżywa, głowa nie dostaje powodu."""
+    m, a, b, czytelny = _historia_dwoch(con)
     przed = {(r["input_frame_id"], r["asserted_by"]) for r in inputs_of(con, m)}
-    assert len(przed) == 2
+    con.execute("UPDATE frame SET object_source = 'user' WHERE id = ?", (m,))
+    con.commit()
 
     g = repo.clear_object_assignment(con, frame_ids=[m, a, b], now=LATER)
-    assert (g.assigned, g.skipped_stack) == (0, 1)     # lighty mają źródło spoza ręki → nietknięte
-    s = run_stack_lineage(con, now=LATER, xml_reader=_brak_xml)
+    assert (g.assigned, g.stacks) == (1, 1)            # lighty mają źródło spoza ręki → nietknięte
+    s = run_stack_lineage(con, now=LATER, xml_reader=czytelny)
     assert {(r["input_frame_id"], r["asserted_by"]) for r in inputs_of(con, m)} == przed
-    assert s.unlinked == 0
+    assert (s.unlinked, s.kept_proven) == (0, 1)
     assert _integracja(con, m)["unresolved_reason"] is None      # głowa BEZ powodu
+
+
+def test_cofniecie_NA_STOSIE_z_rodowodem_z_OKNA_przelicza_sie_uczciwie(con):
+    """Człon LUSTRZANY D-OW-7 — bez niego „chroń stos zawsze" przeszłoby test wyżej.
+
+    Rodowód `window` to DOBÓR z bieżącego stanu, a stos bez obiektu okna nie ma z definicji.
+    Musi się więc uczciwie przeliczyć na `no_object`, a nie zastygnąć — inaczej gotowy obraz
+    zostawałby z relacjami do lightów, których nic już z nim nie łączy."""
+    m = _master(con)
+    _light(con, "l1", date_obs="2025-08-30T20:30:00")
+    run_stack_lineage(con, now=NOW, xml_reader=_brak_xml)
+    assert len(inputs_of(con, m)) == 1
+    con.execute("UPDATE frame SET object_source = 'user' WHERE id = ?", (m,))
+    con.commit()
+
+    assert repo.clear_object_assignment(con, frame_ids=[m], now=LATER).assigned == 1
+    s = run_stack_lineage(con, now=LATER, xml_reader=_brak_xml)
+    assert inputs_of(con, m) == []
+    assert (s.unlinked, s.kept_proven) == (1, 0)
+    assert _integracja(con, m)["unresolved_reason"] == REASON_NO_OBJECT
 
 
 def test_gest_na_LIGHCIE_zdejmuje_go_z_okna_ale_reszta_rodowodu_stoi(con):

@@ -1912,10 +1912,16 @@ class FramesView(QWidget):
         człowiekowi zgadywać, którą z tych dwóch rzeczy właśnie zobaczył."""
         msg = i18n.t(klucz, assigned=gest.assigned, total=gest.assigned + gest.skipped, **kw)
         for pole, sufiks in (("skipped_kind", "kind"), ("skipped_source", "source"),
-                             ("skipped_drift", "drift"), ("skipped_stack", "stack")):
+                             ("skipped_drift", "drift")):
             n = getattr(gest, pole)
             if n:
                 msg += i18n.t(f"grid.sel.object_skip_{sufiks}", n=n)
+        # Gotowe obrazy NIE stoją w pętli pominięć (D-OW-7): od chwili, gdy stos jest w zasięgu obu
+        # gestów, ta liczba mówi o tym, co gest ZROBIŁ, a nie czego nie tknął. Zdanie „nazwano 30
+        # · gotowe obrazy: 2" znaczy „dwa z tych trzydziestu to obrazy po integracji" — a nie „dwa
+        # zostawiłem". Człon zostaje osobny, bo to jedyny zapis osi, który sięga rodowodu.
+        if gest.stacks:
+            msg += i18n.t("grid.sel.object_stacks", n=gest.stacks)
         if gest.assigned:
             # CZTERY POWIERZCHNIE: wiersze gridu, facety (Obiekt zmienił zawartość), licznik/pasek
             # oraz kolejka przeglądu w oknie osi — ta ostatnia przez sygnał, bo nie jest nasza.

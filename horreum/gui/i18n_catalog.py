@@ -855,7 +855,12 @@ CATALOG = {
                                     "en": " · from header/region: {n}"},
     "grid.sel.object_skip_drift": {"pl": " · zmieniły się w międzyczasie: {n}",
                                    "en": " · changed meanwhile: {n}"},
-    "grid.sel.object_skip_stack": {"pl": " · gotowe obrazy: {n}", "en": " · finished images: {n}"},
+    # NIE pominięcie, tylko skład tego, co zapisano (D-OW-7) — „w tym", nie „poza tym". Gotowy
+    # obraz jest jedyną klatką, przy której zapis osi sięga rodowodu, więc user ma prawo wiedzieć,
+    # że go dotknął. Dawne brzmienie („· gotowe obrazy: N" wśród pominięć) po odwróceniu decyzji
+    # mówiłoby dokładnie odwrotnie do prawdy.
+    "grid.sel.object_stacks": {"pl": " · w tym gotowe obrazy: {n}",
+                               "en": " · including finished images: {n}"},
 
     # --- Panel RODOWODU gotowego stosu (I-2d, P-I) ---
     # Słownictwo trzyma jedną granicę: „weszło" = fakt zapisany, „wynika z czasu" = kandydat.

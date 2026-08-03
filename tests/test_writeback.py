@@ -500,3 +500,59 @@ def test_gone_copy_skipped(tmp_path):
     res = writeback.commit(con, "R", now=NOW)
     assert len(res.skipped) == 1 and not res.applied
     con.close()
+
+
+def test_zapis_karty_OBJECT_gasi_NAGROBEK_reki(tmp_path):
+    """§4/14b (c) — jedyna droga wyjścia z werdyktu ręki poza kolejnym gestem (S2b).
+
+    Klatka cofnięta ma `object_source='user_cleared'` i drabina ją POMIJA. Człowiek podaje właściwą
+    nazwę TAM, GDZIE archiwum trzyma prawdę — w nagłówku — więc od tej chwili zeznanie istnieje
+    i nagrobek traci przedmiot. Bez tego wpięcia „Cofnij" byłoby ślepym zaułkiem: klatka zostałaby
+    poza osią NA ZAWSZE, nawet po dopisaniu karty.
+
+    Falsyfikator (dlaczego wyzwalaczem jest KARTA, a nie sam re-sync): każdy skan odświeża zeznanie,
+    więc gaszenie na ścieżce skanu odwoływałoby werdykt, którego nikt nie odwołał."""
+    con = db.open_db(str(tmp_path / "h.db"))
+    p = tmp_path / "tomb.fits"
+    _write_fits(p, TELESCOP="RC8", IMAGETYP="Light")
+    fr = _scan_in(con, p)
+    repo.user_assign_object(con, alias_norm=None, canon="COS", catalog=None, kind="own",
+                            frame_ids=[fr["id"]], now=NOW)
+    repo.clear_object_assignment(con, frame_ids=[fr["id"]], now=NOW)
+    assert con.execute("SELECT object_source FROM frame WHERE id=?",
+                       (fr["id"],)).fetchone()[0] == "user_cleared"
+
+    lid = _loc_id(con, p)
+    hh = con.execute("SELECT header_hash FROM location WHERE id=?", (lid,)).fetchone()["header_hash"]
+    _stage(con, "R", lid, "OBJECT", "set", "NGC7000", "str", expected=hh)
+    res = writeback.commit(con, "R", now=NOW)
+
+    assert len(res.applied) == 1
+    row = con.execute("SELECT object_id, object_source FROM frame WHERE id=?",
+                      (fr["id"],)).fetchone()
+    assert (row["object_id"], row["object_source"]) == (None, None)   # nagrobek ZGASZONY
+    assert con.execute("SELECT count(*) FROM event WHERE verb='object.tombstone_cleared'"
+                       ).fetchone()[0] == 1
+    con.close()
+
+
+def test_zapis_INNEJ_karty_NIE_rusza_nagrobka(tmp_path):
+    """Druga strona tej samej reguły: writeback teleskopu też odpala re-sync, ale werdykt o OBIEKCIE
+    zostaje — bo nikt go nie odwołał. Bez tego członu poprzedni test przechodziłby także dla
+    implementacji gaszącej nagrobek przy KAŻDYM zapisie."""
+    con = db.open_db(str(tmp_path / "h.db"))
+    p = tmp_path / "tomb2.fits"
+    _write_fits(p, TELESCOP="RC8", IMAGETYP="Light")
+    fr = _scan_in(con, p)
+    repo.user_assign_object(con, alias_norm=None, canon="COS", catalog=None, kind="own",
+                            frame_ids=[fr["id"]], now=NOW)
+    repo.clear_object_assignment(con, frame_ids=[fr["id"]], now=NOW)
+
+    lid = _loc_id(con, p)
+    hh = con.execute("SELECT header_hash FROM location WHERE id=?", (lid,)).fetchone()["header_hash"]
+    _stage(con, "R", lid, "TELESCOP", "set", "EQ6", "str", expected=hh)
+    assert len(writeback.commit(con, "R", now=NOW).applied) == 1
+
+    assert con.execute("SELECT object_source FROM frame WHERE id=?",
+                       (fr["id"],)).fetchone()[0] == "user_cleared"
+    con.close()

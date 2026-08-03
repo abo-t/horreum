@@ -32,6 +32,8 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
+from .resolve.frames import LIGHT_KINDS   # jedyne z obiektem (kind-aware) — właściciel w liściu
+
 # ============================================================ ekstraktory daty-godziny (§2)
 
 # DATE-OBS: ISO z opcjonalnym separatorem T/spacja; ułamek sekund i 'Z' IGNOROWANE (nie przesuwamy
@@ -85,7 +87,6 @@ def resolve_dt(hdr_dt, fname_dt, *, source, offset_hours):
 
 # ============================================================ rdzeń compose_name (§1, SPOT)
 
-LIGHT_KINDS = frozenset({"light", "master_light"})     # jedyne z obiektem (kind-aware)
 DEFAULT_TEMPLATE = ("datetime", "object", "kind", "filter", "exp", "disc")
 _UNSET = "_UNSET"
 _DISC_LEN = 12                                         # hex prefiksu sha1_data (kolizja pomijalna)

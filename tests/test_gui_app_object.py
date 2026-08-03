@@ -437,7 +437,8 @@ def test_on_assign_zero_assigned_nie_udaje_wyboru_celu(view, monkeypatch):
             return QDialog.Accepted
 
     monkeypatch.setattr("horreum.gui.app.AssignObjectDialog", AcceptedM42)
-    monkeypatch.setattr(repo, "user_assign_object", lambda *args, **kwargs: (0, 2))
+    monkeypatch.setattr(repo, "user_assign_object",
+                        lambda *a, **k: repo.ObjectGesture(assigned=0, skipped_drift=2))
     _select_review_tag(v, "object_raw")
     msgs = []
     v.status_message.connect(msgs.append)
@@ -455,10 +456,10 @@ def test_przypisanie_zmniejsza_kolejke_i_zapisuje_user(view):
     v, con, ids = view
     rows = queries.object_review_frames(con, "FlatWizard")
     assert len(rows) == 2
-    assigned, skipped = repo.user_assign_object(
+    g = repo.user_assign_object(
         con, alias_norm="FLATWIZARD", canon="M42", catalog="Messier", kind=None,
         frame_ids=[r["frame_id"] for r in rows], now="2026-07-21T12:00:00")
-    assert (assigned, skipped) == (2, 0)
+    assert (g.assigned, g.skipped) == (2, 0)
     v.refresh()
     texts = [v.review.item(r).text() for r in range(v.review.count())]
     assert not any("FlatWizard" in t for t in texts)         # nigdy nie wraca do kolejki
@@ -1024,10 +1025,10 @@ def test_dialog_bez_zeznania_z_gramatyki_NIE_TWORZY_klucza(sciezka):
     # bramką, która nie może się zaczerwienić (ta sama pułapka, co przy nocie wyżej)
     assert dlg.own_note.isHidden()                      # kanon katalogowy — kolumna „Katalog" pełna
     canon, catalog, kind, alias_norm = dlg.selected
-    assigned, skipped = repo.user_assign_object(
+    g = repo.user_assign_object(
         con, alias_norm=alias_norm, canon=canon, catalog=catalog, kind=kind,
         frame_ids=[1, 2], now=NOW_S2)
-    assert (assigned, skipped) == (2, 0)
+    assert (g.assigned, g.skipped) == (2, 0)
     assert con.execute("SELECT count(*) FROM object_alias").fetchone()[0] == 0
     dlg.close()
 

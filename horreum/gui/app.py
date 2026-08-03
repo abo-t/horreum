@@ -732,13 +732,13 @@ class ConfirmPathObjectsDialog(QDialog):
         for it in wybrane:
             p = it["proposal"]
             try:
-                a, s = repo.user_assign_object(
+                g = repo.user_assign_object(
                     self.con, alias_norm=None, canon=p.canon, catalog=p.catalog, kind=p.kind,
                     frame_ids=list(p.frame_ids), now=self._now(), object_source="path")
             except ValueError as e:
                 self.error.setText(str(e))
                 break
-            assigned, skipped = assigned + a, skipped + s
+            assigned, skipped = assigned + g.assigned, skipped + g.skipped
         self.assigned = assigned
         msg = i18n.t("path.done", names=len(wybrane), assigned=assigned,
                      total=assigned + skipped)
@@ -1643,12 +1643,13 @@ class ObjectAxisView(QWidget):
             return
         canon, catalog, kind, alias_norm = dlg.selected
         try:
-            assigned, skipped = repo.user_assign_object(
+            g = repo.user_assign_object(
                 self.con, alias_norm=alias_norm, canon=canon, catalog=catalog, kind=kind,
                 frame_ids=frame_ids, now=self._now())
         except ValueError as e:                # konflikt aliasu / dryf do nieistniejącej klatki
             QMessageBox.warning(self, i18n.t("assign.title"), str(e))
             return
+        assigned, skipped = g.assigned, g.skipped
         msg = i18n.t("object.assigned_report", assigned=assigned, total=assigned + skipped, canon=canon)
         if skipped:
             msg += i18n.t("object.assigned_skipped", n=skipped)

@@ -15,10 +15,13 @@ Zasady:
 """
 import json
 from contextlib import contextmanager
+from dataclasses import dataclass
 
 from .resolve._text import norm_alnum          # kierunek repo → resolve (liść; COHESION §2b)
 from .resolve.catalog import catalog_canon      # gramatyka katalogowa — CZYSTA, bez assetu (liść)
-from .resolve.objects import OBJECT_SOURCES     # enum źródeł osi OBIEKT — jeden właściciel (S1)
+from .resolve.frames import LIGHT_KINDS         # guard RODZAJU w klindze (S2b) — liść, bez cyklu
+from .resolve.objects import (OBJECT_SOURCES,   # enum źródeł osi OBIEKT — jeden właściciel (S1)
+                              WEAK_OBJECT_SOURCES)
 from .resolve.observatory import nearest_site   # kierunek repo → resolve (liść math/re; COHESION §2b)
 
 
@@ -829,8 +832,32 @@ def backfill_filter_canon(con, items, now, actor="resolver"):
 
 # ------------------------------------------------ oś OBIEKT — zapis usera (GUI, #8/P4)
 
+@dataclass(frozen=True)
+class ObjectGesture:
+    """Wynik GESTU CZŁOWIEKA na osi obiektu — LICZNIKI PER FAKT, nie jedno „skipped" (S2b).
+
+    Do S2b klinga oddawała `(assigned, skipped)`, a gest szedł na kubełek jednorodny. Gest z paska
+    Zbiorów bierze DOWOLNE zaznaczenie: mogą w nim być darki, gotowe obrazy i klatki nazwane
+    z nagłówka — i każda z tych trzech przyczyn znaczy dla człowieka co INNEGO. Jeden licznik
+    kazałby ekranowi powiedzieć „pominięto 40", co jest prawdą bezużyteczną: nie wiadomo, czy to
+    ochrona zadziałała, czy gest chybił celu.
+
+    `skipped_drift` to jedyny licznik o TOCTOU (stan zmienił się między oknem a zapisem); pozostałe
+    trzy opisują zaznaczenie, które user złożył świadomie."""
+    assigned: int = 0          # klatki realnie zapisane (przypisane albo cofnięte)
+    skipped_kind: int = 0      # rodzaj poza `LIGHT_KINDS` — kalibracja obiektu nie ma z definicji
+    skipped_source: int = 0    # źródło poza zakresem gestu (nagłówek/xref/region — fakt z pliku)
+    skipped_drift: int = 0     # stan inny niż oczekiwany w chwili zapisu (TOCTOU)
+    skipped_stack: int = 0     # gotowy obraz (`master_light`) — patrz `clear_object_assignment`
+
+    @property
+    def skipped(self):
+        """Suma pominięć — do zdania „przypisano N z M", gdzie rozbicie idzie osobno."""
+        return self.skipped_kind + self.skipped_source + self.skipped_drift + self.skipped_stack
+
+
 def user_assign_object(con, *, alias_norm, canon, catalog, kind, frame_ids, now, uid="local",
-                       object_source="user"):
+                       object_source="user", expected_object_id=None, overwrite_weak=False):
     """Przypisanie obiektu GRUPIE klatek GESTEM CZŁOWIEKA (#8, D-P4-4) — JEDNA transakcja
     `_immediate`, DML inline (NIE kompozycja `upsert_object`+`add_object_alias`+`assign_object`:
     każda z nich ma własny `with con:` commitujący przy wyjściu — zawołane wewnątrz zewnętrznej
@@ -861,8 +888,25 @@ def user_assign_object(con, *, alias_norm, canon, catalog, kind, frame_ids, now,
 
     DRYF GRUPY (R#8): klatki re-SELECTowane w transakcji; klatka, która między dialogiem a zapisem
     dostała `object_id NOT NULL` (resolve z workera / inne przypisanie), jest POMIJANA i zliczana.
-    Zwraca `(assigned, skipped)` — GUI pokazuje „przypisano N z M". Idempotencja jak reszta repo:
-    powtórzenie tego samego przypisania → wszystkie klatki pominięte, ZERO nowych eventów."""
+    Zwraca `ObjectGesture` — GUI pokazuje „przypisano N z M" plus rozbicie. Idempotencja jak reszta
+    repo: powtórzenie tego samego przypisania → wszystkie klatki pominięte, ZERO nowych eventów.
+
+    GUARD RODZAJU STOI TU, NIE W GEŚCIE (S2b, §4/14c-b): od paska Zbiorów zaznaczenie bierze się
+    z widoku, więc wpadną w nie darki i flaty. Kalibracja obiektu nie ma z DEFINICJI (memory
+    `horreum-object-resolution-kind-aware`), a `§5.9` takiego zapisu NIE złapie — encje i eventy
+    zgadzałyby się co do joty. Klinga jest jedynym miejscem, przez które przechodzą OBIE
+    powierzchnie (kolejka i pasek), więc guard postawiony wyżej zostawiłby drugą drogę otwartą.
+
+    DWA PARAMETRY „NAZWIJ ZAZNACZENIE" (S2b, D-OW-6) — domyślnie OBA nieaktywne, więc dotychczasowi
+    wołający dostają dokładnie dawne zachowanie:
+
+    * `overwrite_weak=True` dopuszcza nadpisanie klatki, KTÓRA JUŻ MA OBIEKT — ale wyłącznie ze
+      źródła SŁABEGO (`WEAK_OBJECT_SOURCES`, dziś `path`). Nagłówek, xref i region zostają
+      nietknięte: to fakty z pliku i z geometrii, a nie cudza pomyłka do naprawienia. Nadpisanie
+      emituje PARĘ verbów, nie samo `object.assigned` (inaczej §5.9 rozjeżdża się cicho).
+    * `expected_object_id` to ZAMROŻONY STAN z chwili, gdy user patrzył na okno. Klatka, która
+      w międzyczasie trafiła pod inny obiekt, jest pomijana jako dryf — bez tego gest „przemaluj
+      te 30 klatek z `NGC6960`" nadpisałby też klatkę, która właśnie stała się czymś innym."""
     if alias_norm is not None and not alias_norm:
         raise ValueError("alias_norm pusty — nazwa bez znaków alfanumerycznych nie może być kluczem")
     if object_source not in OBJECT_SOURCES:
@@ -893,14 +937,36 @@ def user_assign_object(con, *, alias_norm, canon, catalog, kind, frame_ids, now,
             emit_event(con, actor=actor, verb="object.aliased", target=f"object:{object_id}",
                        now=now, payload={"alias_norm": alias_norm, "source": "user"})
 
-        assigned = skipped = 0
+        assigned = kind_skip = source_skip = drift = 0
         for frame_id in frame_ids:
             fr = con.execute(
-                "SELECT object_id FROM frame WHERE id = ?", (frame_id,)).fetchone()
+                "SELECT kind, object_id, object_source FROM frame WHERE id = ?",
+                (frame_id,)).fetchone()
             if fr is None:
                 raise ValueError(f"frame:{frame_id} nie istnieje")
-            if fr[0] is not None:
-                skipped += 1                        # dryf: klatka zajęta między dialogiem a zapisem
+            if fr["kind"] not in LIGHT_KINDS:
+                kind_skip += 1                      # kalibracja: obiektu nie ma z DEFINICJI
+                continue
+            if fr["object_id"] is not None:
+                if not overwrite_weak:
+                    drift += 1                      # dryf: klatka zajęta między dialogiem a zapisem
+                    continue
+                if fr["object_source"] not in WEAK_OBJECT_SOURCES:
+                    source_skip += 1                # fakt z pliku/geometrii — ręka go nie zamaluje
+                    continue
+                if expected_object_id is not None and fr["object_id"] != expected_object_id:
+                    drift += 1                      # nie ten obiekt, co user widział w oknie
+                    continue
+                # PRZEPIĘCIE emituje PARĘ (§5.9, człon 3) — bez `object.unassigned` bilans encji
+                # i eventów rozjeżdża się dokładnie o liczbę nadpisań, a bramka świeci ZIELONO.
+                emit_event(con, actor=actor, verb="object.unassigned", target=f"frame:{frame_id}",
+                           now=now, payload={"object_id": fr["object_id"],
+                                             "object_source": fr["object_source"]})
+            elif fr["object_source"] is not None and not overwrite_weak:
+                # NAGROBEK bez nadpisania: `object_id IS NULL` przy niepustym źródle to werdykt
+                # ręki (`user_cleared`). Gest z kubełka nie ma prawa go po cichu wskrzesić —
+                # tylko jawne „Nazwij zaznaczenie" (`overwrite_weak`) jest drugim gestem człowieka.
+                source_skip += 1
                 continue
             con.execute(
                 "UPDATE frame SET object_id = ?, object_source = ? WHERE id = ?",
@@ -908,7 +974,85 @@ def user_assign_object(con, *, alias_norm, canon, catalog, kind, frame_ids, now,
             emit_event(con, actor=actor, verb="object.assigned", target=f"frame:{frame_id}",
                        now=now, payload={"object_id": object_id, "object_source": object_source})
             assigned += 1
-    return assigned, skipped
+    return ObjectGesture(assigned=assigned, skipped_kind=kind_skip,
+                         skipped_source=source_skip, skipped_drift=drift)
+
+
+def clear_object_assignment(con, *, frame_ids, now, uid="local"):
+    """COFNIĘCIE przypisania obiektu GESTEM CZŁOWIEKA (S2b, D-OW-6) — druga strona `user_assign_object`.
+
+    ZAKRES = WYŁĄCZNIE ŹRÓDŁA, KTÓRE POSTAWIŁA RĘKA ALBO ŚCIEŻKA (`path`, `user`). Nagłówek, xref
+    i region zostają — cofnięcie ma naprawiać POMYŁKĘ CZŁOWIEKA, a nie kasować fakt zapisany
+    w pliku. Bez tego zawężenia jeden gest na zbiorze „Veil" zdjąłby 250 klatek rozpoznanych
+    z geometrii i 556 z nagłówka, a odtworzenie ich kosztowałoby pełny przebieg.
+
+    NAGROBEK (R15#4) — sedno tego, że cofnięcie NAPRAWDĘ się cofa: samo wyzerowanie `object_id`
+    nie wystarcza, bo kanon 707 klatek pochodzi ze ŚCIEŻKI, a szczebel derywuje go na nowo
+    z folderu — najbliższy `Rozwiąż` przypisałby klatkę PONOWNIE. Zostawiamy więc
+    `object_source='user_cleared'` przy `object_id NULL`; drabina taką klatkę pomija
+    (`STICKY_OBJECT_SOURCES`). Nagrobek jest STICKY i gaśnie JEDNYM gestem: writebackiem karty
+    `OBJECT` do pliku (`writeback._clear_object_tombstone`) albo kolejnym „Nazwij zaznaczenie".
+
+    GOTOWE OBRAZY POMIJAMY (R24#7) — `master_light` ma własny licznik. Odebranie stosowi
+    `object_id` ROZBRAJA dobór okna rodowodu (`stacks._window_candidates` pyta o obiekt), więc
+    najbliższy przebieg zobaczyłby stos bez kandydatów i zdegradował dowiedziony rodowód do
+    „brak wejść". To nie jest ostrożność — to jedyna droga, na której gest osi obiektu może
+    skasować cudzą pracę.
+
+    PARA VERBÓW: `object.unassigned` (co zdjęto) + `object.cleared` (że to WERDYKT, nie brak).
+    Dwa, nie jeden, bo pytania są dwa: bilans osi (§5.9) liczy odpięcia, a kolejka przeglądu musi
+    umieć pokazać człon „cofnięte ręką" bez zaglądania w payload. Zwraca `ObjectGesture`."""
+    actor = f"user:{uid}"
+    cleared = kind_skip = source_skip = stack_skip = 0
+    with _immediate(con):
+        for frame_id in frame_ids:
+            fr = con.execute(
+                "SELECT kind, object_id, object_source FROM frame WHERE id = ?",
+                (frame_id,)).fetchone()
+            if fr is None:
+                raise ValueError(f"frame:{frame_id} nie istnieje")
+            if fr["kind"] not in LIGHT_KINDS:
+                kind_skip += 1
+                continue
+            if fr["kind"] == "master_light":
+                stack_skip += 1                     # gotowy obraz — patrz docstring (rodowód)
+                continue
+            if fr["object_id"] is None or fr["object_source"] not in ("path", "user"):
+                source_skip += 1                    # nie ma czego cofać ALBO fakt spoza ręki
+                continue
+            con.execute(
+                "UPDATE frame SET object_id = NULL, object_source = 'user_cleared' WHERE id = ?",
+                (frame_id,))
+            emit_event(con, actor=actor, verb="object.unassigned", target=f"frame:{frame_id}",
+                       now=now, payload={"object_id": fr["object_id"],
+                                         "object_source": fr["object_source"]})
+            emit_event(con, actor=actor, verb="object.cleared", target=f"frame:{frame_id}",
+                       now=now, payload={"was_object_id": fr["object_id"],
+                                         "was_source": fr["object_source"]})
+            cleared += 1
+    return ObjectGesture(assigned=cleared, skipped_kind=kind_skip,
+                         skipped_source=source_skip, skipped_stack=stack_skip)
+
+
+def clear_object_tombstone(con, *, frame_id, now, actor="user:local"):
+    """ZGAŚ nagrobek `user_cleared` — jedyna droga wyjścia z werdyktu ręki poza kolejnym gestem.
+
+    Woła to `writeback` po wpisaniu karty `OBJECT` do pliku (S2b): człowiek powiedział „to nie ten
+    obiekt", a potem podał właściwy TAM, GDZIE archiwum trzyma prawdę — w nagłówku. Od tej chwili
+    zeznanie istnieje i drabina ma prawo je przeczytać, więc nagrobek traci przedmiot.
+
+    Klatka bez nagrobka → `False` bez zapisu i bez eventu (idempotencja jak reszta repo). Verb jest
+    WŁASNY (`object.tombstone_cleared`), nie `object.unassigned`: nic się nie odpina, znika sam
+    zakaz — a bramka §5.9 liczy odpięcia i para bez odpowiednika rozjechałaby jej bilans."""
+    with _immediate(con):
+        row = con.execute(
+            "SELECT object_source FROM frame WHERE id = ?", (frame_id,)).fetchone()
+        if row is None or row["object_source"] != "user_cleared":
+            return False
+        con.execute("UPDATE frame SET object_source = NULL WHERE id = ?", (frame_id,))
+        emit_event(con, actor=actor, verb="object.tombstone_cleared",
+                   target=f"frame:{frame_id}", now=now, payload={"reason": "object_card_written"})
+    return True
 
 
 # ============================================================ oś OBSERWATORIUM (§PLAN_os_obserwatorium)

@@ -59,7 +59,23 @@ ALIAS_SOURCES = frozenset({"header", "catalog_xref", "common_name", "curated", "
 # ścieżki nie trafi żadnego przyszłego `object_raw`, więc nie ma nazwy do zapisania jako
 # równoważność. Klatka nosi je po POTWIERDZENIU propozycji ręką — świadkiem pozostaje ścieżka,
 # więc źródło ma to mówić, zamiast udawać wskazanie palcem (`user`).
-OBJECT_SOURCES = ALIAS_SOURCES | {"alias", "region", "path"}
+#
+# `user_cleared` (S2b, D-OW-6) to NAGROBEK, a nie rozpoznanie: klatka ma `object_id IS NULL`, a to
+# pole niesie jedyny ślad, że pustka jest WERDYKTEM ręki, nie brakiem zeznania. Bez niego kolejny
+# `Rozwiąż` przypisywałby ją z powrotem tym samym szczeblem, który człowiek właśnie odrzucił —
+# a cofnięcie, które cofa się samo przy najbliższym przebiegu, nie jest cofnięciem.
+OBJECT_SOURCES = ALIAS_SOURCES | {"alias", "region", "path", "user_cleared"}
+
+# Źródła, które POMIJAJĄ CAŁĄ drabinę — jeden właściciel dla przebiegu, klingi i read-modelu.
+# Wspólny mianownik: oba są ZEZNANIEM CZŁOWIEKA o tej konkretnej klatce, a przebieg nie ma prawa
+# przegłosować ręki. Różni je tylko kierunek werdyktu (wskazał obiekt / zdjął obiekt).
+STICKY_OBJECT_SOURCES = frozenset({"user", "user_cleared"})
+
+# Źródła SŁABE — rozpoznania, które „Nazwij zaznaczenie" wolno NADPISAĆ (S2b). Świadkiem jest tu
+# ścieżka, czyli zeznanie o pliku, a nie o niebie: folder mógł zostać nazwany byle jak i to jest
+# dokładnie ta klasa pomyłki, którą gest ręki ma naprawiać. Nagłówek, xref i region ZOSTAJĄ poza —
+# ich nadpisanie byłoby cichym zamalowaniem faktu z pliku albo z geometrii.
+WEAK_OBJECT_SOURCES = frozenset({"path"})
 
 # …i TA SAMA reguła dla `object.kind`, bo segment domykający rozjazd źródeł wprowadził własny na
 # rodzaju: szczebel słownika zwraca `own`, którego DDL nie znał. Wartość spoza tej stałej znaczy,

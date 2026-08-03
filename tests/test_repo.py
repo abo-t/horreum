@@ -609,16 +609,16 @@ def test_backfill_filter_canon_idempotentny_count_ze_skutku(tmp_path):
 def test_user_assign_object_nowy_obiekt_alias_klatki(tmp_path):
     """Happy path: nowy kanon → INSERT object (`object.upserted`) + alias `source='user'`
     (`object.aliased`) + UPDATE klatek (`object.assigned`, `object_source='user'`), actor
-    `user:local`, JEDNA transakcja `_immediate`. Zwraca (assigned, skipped)."""
+    `user:local`, JEDNA transakcja `_immediate`. Zwraca `ObjectGesture`."""
     con = _fresh(tmp_path)
     f1, _ = repo.upsert_frame(con, sha1_data="a", kind="light", filetype="fits",
                               camera_id=None, now=NOW)
     f2, _ = repo.upsert_frame(con, sha1_data="b", kind="light", filetype="fits",
                               camera_id=None, now=NOW)
-    assigned, skipped = repo.user_assign_object(
+    g = repo.user_assign_object(
         con, alias_norm="HOTS", canon="IC1795", catalog="IC", kind="deep_sky",
         frame_ids=[f1, f2], now=NOW)
-    assert (assigned, skipped) == (2, 0)
+    assert (g.assigned, g.skipped) == (2, 0)
     oid = con.execute("SELECT id FROM object WHERE canon='IC1795'").fetchone()["id"]
     row = con.execute(
         "SELECT object_id, source FROM object_alias WHERE alias_norm='HOTS'").fetchone()
@@ -641,10 +641,10 @@ def test_user_assign_object_istniejacy_obiekt_bez_upsertu(tmp_path):
     oid, _ = repo.upsert_object(con, canon="NGC7000", catalog="NGC", kind="deep_sky", now=NOW)
     f1, _ = repo.upsert_frame(con, sha1_data="a", kind="light", filetype="fits",
                               camera_id=None, now=NOW)
-    assigned, skipped = repo.user_assign_object(
+    g = repo.user_assign_object(
         con, alias_norm="FW", canon="NGC7000", catalog="NGC", kind=None,
         frame_ids=[f1], now=NOW)
-    assert (assigned, skipped) == (1, 0)
+    assert (g.assigned, g.skipped) == (1, 0)
     assert con.execute("SELECT count(*) FROM object").fetchone()[0] == 1     # bez duplikatu
     # jedyny object.upserted = ten z setupu (upsert_object), nie z akcji usera
     assert con.execute("SELECT count(*) FROM event WHERE verb='object.upserted'").fetchone()[0] == 1
@@ -684,7 +684,7 @@ def test_user_assign_object_konflikt_aliasu_zero_zapisu(tmp_path):
 
 def test_user_assign_object_dryf_grupy_pomija_zajete(tmp_path):
     """R#8: klatka, która między dialogiem a zapisem dostała obiekt, jest POMIJANA (skipped,
-    jej `object_source` nietknięty), reszta przypisana — raport (assigned, skipped), bez wyjątku."""
+    jej `object_source` nietknięty), reszta przypisana — raport w `ObjectGesture`, bez wyjątku."""
     con = _fresh(tmp_path)
     oid, _ = repo.upsert_object(con, canon="NGC7000", catalog="NGC", kind="deep_sky", now=NOW)
     f1, _ = repo.upsert_frame(con, sha1_data="a", kind="light", filetype="fits",
@@ -692,10 +692,10 @@ def test_user_assign_object_dryf_grupy_pomija_zajete(tmp_path):
     f2, _ = repo.upsert_frame(con, sha1_data="b", kind="light", filetype="fits",
                               camera_id=None, now=NOW)
     repo.assign_object(con, frame_id=f2, object_id=oid, object_source="catalog_xref", now=NOW)
-    assigned, skipped = repo.user_assign_object(
+    g = repo.user_assign_object(
         con, alias_norm="FW", canon="NGC7000", catalog="NGC", kind=None,
         frame_ids=[f1, f2], now=NOW)
-    assert (assigned, skipped) == (1, 1)
+    assert (g.assigned, g.skipped_drift) == (1, 1)
     assert con.execute("SELECT object_source FROM frame WHERE id=?", (f1,)).fetchone()[0] == "user"
     assert con.execute("SELECT object_source FROM frame WHERE id=?", (f2,)).fetchone()[0] == "catalog_xref"
     con.close()
@@ -719,9 +719,9 @@ def test_user_assign_object_idempotentny(tmp_path):
                               camera_id=None, now=NOW)
     kw = dict(alias_norm="FW", canon="NGC7000", catalog="NGC", kind=None,
               frame_ids=[f1], now=NOW)
-    assert repo.user_assign_object(con, **kw) == (1, 0)
+    assert (lambda r: (r.assigned, r.skipped))(repo.user_assign_object(con, **kw)) == (1, 0)
     ev = con.execute("SELECT count(*) FROM event").fetchone()[0]
-    assert repo.user_assign_object(con, **kw) == (0, 1)
+    assert (lambda r: (r.assigned, r.skipped_drift))(repo.user_assign_object(con, **kw)) == (0, 1)
     assert con.execute("SELECT count(*) FROM event").fetchone()[0] == ev
     assert con.execute("SELECT count(*) FROM object_alias").fetchone()[0] == 1
     con.close()

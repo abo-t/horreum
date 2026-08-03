@@ -13,6 +13,15 @@ import re
 
 from ._text import path_segments
 
+# Klatki, które MAJĄ obiekt nieba (kandydaci osi OBIEKT). Reszta (kalibracja, `unknown`) → `object_id`
+# NULL bez review; `unknown` świadomie poza — sygnalizuje go osobny kanał `kind.unmapped` (§Etap 4).
+#
+# MIESZKA W LIŚCIU, nie w `resolver` (S2b, R24#5): guard rodzaju musi stać w KLINDZE `repo`, żeby
+# gest z paska Zbiorów nie mógł przypisać obiektu darkowi — a `repo` nie weźmie stałej z `resolver`
+# (cykl importu). Ten moduł nie importuje niczego z warstwy zapisu, więc bierze go każdy.
+# Do S2b fakt żył w DWÓCH kopiach (`resolver` i `naming`) — obie czytają odtąd stąd (SPOT).
+LIGHT_KINDS = frozenset({"light", "master_light"})
+
 # DSLR/RAW (#2, D-R-4): rodzaj klatki z NAZWY KATALOGU (case-insensitive, dokładny segment).
 # Wąska mapa — tylko cztery rodzaje sub-klatek, jakie może nieść drzewo akwizycji.
 _KIND_DIRS = {

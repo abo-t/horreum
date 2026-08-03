@@ -695,6 +695,14 @@ def commit(con, run_id, *, now, clock=None,
             except sqlite3.Error as exc:
                 backup_error = f"plik ZAPISANY, ale backup do undo NIE powstał: {type(exc).__name__}: {exc}"
             _resync(con, path, loc["volume"], now=now)      # PLIK→DB (T8)
+            # NAGROBEK RĘKI GAŚNIE TU, a nie w ścieżce skanu (S2b, §4/14b-c). Klatka cofnięta ma
+            # `object_source='user_cleared'` i drabina ją POMIJA — bez tego gestu zostałaby poza
+            # osią na zawsze, nawet po dopisaniu karty. Wyzwalaczem jest WPISANIE `OBJECT` do TEGO
+            # pliku, nie samo odświeżenie zeznania: klatka cofnięta MAJĄC już kartę ma zostać
+            # cofnięta, dopóki człowiek tej karty nie zmieni — a każdy skan odświeża zeznanie i
+            # gasiłby werdykt, którego nikt nie odwołał.
+            if any(op.keyword == "OBJECT" for op in ops):
+                repo.clear_object_tombstone(con, frame_id=loc["frame_id"], now=now)
             if backup_error is not None:
                 _mark(rows, "failed", backup_error)
                 failed.append(FileResult(location_id, path, "failed", backup_error))

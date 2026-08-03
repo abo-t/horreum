@@ -428,10 +428,10 @@ def test_p4_precedencja_user_na_cala_drabine(tmp_path):
     # pułapka: alias 'M42' na INNY obiekt — gdyby user nie miał precedencji, resolver przepiąłby
     oid_trap, _ = repo.upsert_object(con, canon="IC1795", catalog="IC", kind="deep_sky", now=NOW)
     repo.add_object_alias(con, alias_norm="M42", object_id=oid_trap, source="user", now=NOW)
-    assigned, _ = repo.user_assign_object(
+    g = repo.user_assign_object(
         con, alias_norm="M42RECZNE", canon="NGC7000", catalog="NGC", kind="deep_sky",
         frame_ids=[fid], now=NOW)
-    assert assigned == 1
+    assert g.assigned == 1
     s = run_resolver(con, now=NOW)
     assert (s.objects_assigned, s.objects_by_alias, s.objects_by_region,
             s.objects_review) == (0, 0, 0, 0)
@@ -462,7 +462,7 @@ def test_p4_user_assign_zapamietuje_alias_dla_nowych_klatek(tmp_path):
         "WHERE h.object_raw='HotS' AND f.object_id IS NULL")]
     assert repo.user_assign_object(
         con, alias_norm="HOTS", canon="IC1795", catalog="IC", kind="deep_sky",
-        frame_ids=fids, now=NOW) == (1, 0)
+        frame_ids=fids, now=NOW).assigned == 1
     # re-resolve: h1 zamrożona ('user'), h2 RE-DERYWUJE się aliasem (Veil → IC1795) — precedencja
     # aliasu nad regionem obowiązuje też przy powtórnym przebiegu; delta pusta (D5)
     s2 = run_resolver(con, now=NOW)

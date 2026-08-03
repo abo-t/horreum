@@ -22,15 +22,17 @@ from .resolve._coerce import _to_text
 from .resolve._text import norm_alnum
 from .resolve.catalog import catalog_canon
 from .resolve.filters import normalize_filter
-from .resolve.objects import ObjectIdentity, load_own_objects, resolve_object
+from .resolve.objects import (STICKY_OBJECT_SOURCES, ObjectIdentity, load_own_objects,
+                              resolve_object)
 from .resolve.observatory import site_coords
 from .resolve.paths import object_folder, object_from_path, filename_tokens
 from .resolve.regions import resolve_region
 from .resolve.solar import resolve_solar
 
-# Klatki, które MAJĄ obiekt nieba (kandydaci osi OBIEKT). Reszta (kalibracja, unknown) → object_id
-# NULL bez review. `unknown` świadomie poza — sygnalizuje go osobny kanał `kind.unmapped` (§Etap 4).
-LIGHT_KINDS = frozenset({"light", "master_light"})
+# Klatki, które MAJĄ obiekt nieba — fakt przeniesiony do liścia `resolve.frames` (S2b), bo guard
+# rodzaju musi go wziąć w `repo`, a stamtąd import `resolver` byłby cyklem. Re-eksport, żeby
+# dotychczasowi wołający `resolver.LIGHT_KINDS` nie musieli wiedzieć o przeprowadzce.
+from .resolve.frames import LIGHT_KINDS      # noqa: F401  (re-eksport — jeden właściciel faktu)
 
 
 @dataclass
@@ -43,6 +45,7 @@ class ResolveSummary:
     objects_by_alias: int = 0             # z tego: przypisane przez ZAPISANY ALIAS (#8, P4)
     objects_by_region: int = 0            # z tego: przypisane ze WSPÓŁRZĘDNYCH (kompleks, #5)
     objects_review: int = 0               # light'y obecne-ale-nierozpoznane (delta, per-frame)
+    objects_user_cleared: int = 0         # klatki z NAGROBKIEM ręki (S2b) — przebieg ich NIE tyka
     objects_unresolved_distinct: int = 0  # distinct object_raw w delcie
     filters_set: int = 0                  # frame'y z niepustym filter_canon
     observatories_new: int = 0            # nowe stanowiska (seed z propose_observatory, created=True)
@@ -255,7 +258,12 @@ def path_proposals(con):
         a nie oparta na obietnicy semantycznej stałej;
       * `object_id IS NULL` (STICKY) — klatka, która obiekt JUŻ ma, nie zostanie przemalowana po
         przenosinach plików (konsolidacja stosów przeniesie ich setki). Cena: kanon może się
-        zdezaktualizować, a wykrycie tego rozjazdu jest POZA tą paczką.
+        zdezaktualizować, a wykrycie tego rozjazdu jest POZA tą paczką;
+      * `object_source IS NULL` (S2b) — NAGROBEK RĘKI wyklucza propozycję. Przy `object_id IS NULL`
+        niepuste źródło znaczy dokładnie jedno: `user_cleared`. Bez tego członu klatka cofnięta
+        wracała do kubełka „ze ścieżki — do potwierdzenia" i JEDNO „Zatwierdź wszystko" cofało
+        cofnięcie — przy `run_resolver` poprawnie ją omijającym, więc bramka nagrobka świeciła
+        zielono. Zaczerwieniło to dopiero pytanie o PROPOZYCJE, nie o zapis (§4/14b).
 
     KOPIA: osobny SELECT z `MIN(id) … present = 1` (wzorzec `resolve_observatory`) — NIGDY
     `LEFT JOIN location` w pętli `run_resolver`. Brak obecnej kopii ⇒ ścieżki nie ma ⇒ szczebel
@@ -272,6 +280,7 @@ def path_proposals(con):
         "                                WHERE frame_id = f.id AND present = 1) "
         "WHERE f.kind = 'light' AND f.object_id IS NULL "
         "  AND h.object_raw IS NULL "
+        "  AND f.object_source IS NULL "
         "  AND f.filetype IN (SELECT value FROM json_each(?)) "
         "ORDER BY f.id",
         (json.dumps(list(NO_OBJECT_CARD_FILETYPES)),)).fetchall()
@@ -354,11 +363,17 @@ def run_resolver(con, now):
         # --- oś OBIEKT: kind-aware (kalibracja nie ma obiektu z definicji) ---
         if r["kind"] in LIGHT_KINDS:
             s.light_frames += 1
-            if r["osrc"] == "user":
-                # PRECEDENCJA `user` na WSZYSTKIE szczeble (P4): ręczne przypisanie pomija drabinę
-                # — frame zachowuje obiekt usera, zero re-derywacji, zero nadpisywania. (Wcześniej
-                # guard objmował tylko region; uogólniony na solar/deep-sky/alias/region.)
-                pass
+            if r["osrc"] in STICKY_OBJECT_SOURCES:
+                # PRECEDENCJA ZEZNANIA CZŁOWIEKA na WSZYSTKIE szczeble (P4 + S2b): ręczne
+                # przypisanie pomija drabinę — frame zachowuje obiekt usera, zero re-derywacji,
+                # zero nadpisywania. (Wcześniej guard obejmował tylko region; uogólniony na
+                # solar/deep-sky/alias/region.)
+                #
+                # NAGROBEK `user_cleared` idzie TĄ SAMĄ gałęzią i to jest sedno odwracalności:
+                # klatka cofnięta ma `object_id IS NULL`, więc bez tego guardu najbliższy przebieg
+                # przypisałby ją PONOWNIE tym samym szczeblem, który człowiek odrzucił. Nie liczymy
+                # jej też do `unresolved` — to nie jest nierozpoznane zeznanie, tylko werdykt.
+                s.objects_user_cleared += r["osrc"] == "user_cleared"
             else:
                 # CAŁA drabina zależna od nazwy (solar → katalog/słownik → alias) siedzi w JEDNYM
                 # właścicielu: `resolve_name`. Drugi człon krotki niepusty ⇒ trafienie ALIASU.

@@ -300,10 +300,10 @@ def test_zatwierdzenie_pisze_TA_SAMA_klinga_ze_zrodlem_path():
     a to działa wtedy i tylko wtedy, gdy zapis poszedł tą samą klingą i nadał źródło `path`."""
     con = _baza(_lmc(2))
     p = resolver.path_proposals(con)[0]
-    assigned, skipped = repo.user_assign_object(
+    g = repo.user_assign_object(
         con, alias_norm=None, canon=p.canon, catalog=p.catalog, kind=p.kind,
         frame_ids=list(p.frame_ids), now=NOW, object_source="path")
-    assert (assigned, skipped) == (2, 0)
+    assert (g.assigned, g.skipped) == (2, 0)
     zrodla = {r[0] for r in con.execute(
         "SELECT DISTINCT object_source FROM frame WHERE object_id IS NOT NULL").fetchall()}
     assert zrodla == {"path"}

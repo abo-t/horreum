@@ -271,10 +271,12 @@ def test_przycisk_przypisz_sledzi_tag_i_busy(view):
 
 
 def test_dialog_wymaga_jawnego_wyboru_istniejacego(view):
-    """Dialog (#8): placeholder nie jest realnym celem; akcja rusza dopiero po jawnym wyborze."""
+    """Dialog (#8): placeholder nie jest realnym celem; akcja rusza dopiero po jawnym wyborze.
+
+    PRZESTEMPLOWANY w S4: `alias_norm` zniknął z konstruktora (klucz liczy dialog, bo dopiero on
+    zna wybraną nazwę), a `selected` niesie CZWARTY człon — ten właśnie klucz."""
     v, con, ids = view
-    dlg = AssignObjectDialog(con, object_raw="FlatWizard", alias_norm="FLATWIZARD",
-                             frame_count=2, parent=v)
+    dlg = AssignObjectDialog(con, object_raw="FlatWizard", frame_count=2, parent=v)
     assert dlg.combo.currentData() is None
     assert not dlg.accept_btn.isEnabled()
     assert dlg.accept_btn.text() == "Przypisz 2 klatki"
@@ -284,46 +286,54 @@ def test_dialog_wymaga_jawnego_wyboru_istniejacego(view):
     dlg.combo.setCurrentIndex(1)                            # M42 (ORDER canon)
     assert dlg.accept_btn.isEnabled()
     dlg._validate_and_accept()
-    assert dlg.selected == ("M42", "Messier", None)
+    assert dlg.selected == ("M42", "Messier", None, "FLATWIZARD")
     dlg.close()
 
 
-def test_dialog_nowe_oznaczenie_nadpisuje_combo(view):
-    """Oznaczenie wpisane ręcznie nadpisuje wybór z listy i parsuje się jak w resolverze
-    („IC 1795" → canon IC1795, catalog IC, kind deep_sky)."""
+def test_dialog_nowa_nazwa_nadpisuje_combo(view):
+    """Nazwa wpisana ręcznie nadpisuje wybór z listy i rozwiązuje się jak w resolverze
+    („IC 1795" → canon IC1795, catalog IC, kind deep_sky).
+
+    PRZESTEMPLOWANY w S4: kanon i pola obiektu biorą się z `resolver.resolve_name` (dawniej
+    `catalog_canon`→`xref` + zaszyte `deep_sky`), a klucz aliasu zostaje z ZEZNANIA — grupa ma
+    `object_raw`, więc alias ma zapamiętać „FlatWizard", nie kanon."""
     v, con, ids = view
-    dlg = AssignObjectDialog(con, object_raw="FlatWizard", alias_norm="FLATWIZARD",
-                             frame_count=2, parent=v)
+    dlg = AssignObjectDialog(con, object_raw="FlatWizard", frame_count=2, parent=v)
     dlg.designation.setText("IC 1795")
     assert dlg.accept_btn.isEnabled()
     dlg._validate_and_accept()
-    assert dlg.selected == ("IC1795", "IC", "deep_sky")
+    assert dlg.selected == ("IC1795", "IC", "deep_sky", "FLATWIZARD")
     dlg.close()
 
 
-def test_dialog_nieparsowalne_oznaczenie_odrzuca(view):
-    """Oznaczenie nieparsowalne katalogowo → czerwona nota, `selected` zostaje None (dialog by
-    został otwarty — bez `accept()`)."""
+def test_dialog_nazwa_nierozwiazywalna_odrzuca(view):
+    """Nazwa, której NIE ROZWIĄŻE przebieg → czerwona nota, `selected` zostaje None (dialog by
+    został otwarty — bez `accept()`).
+
+    PRZESTEMPLOWANY w S4: bramką jest cała drabina (`resolver.name_resolves`), nie sama gramatyka
+    katalogowa — komunikat mówi o NAZWIE, bo o nazwę było pytanie."""
     v, con, ids = view
-    dlg = AssignObjectDialog(con, object_raw="FlatWizard", alias_norm="FLATWIZARD",
-                             frame_count=2, parent=v)
+    dlg = AssignObjectDialog(con, object_raw="FlatWizard", frame_count=2, parent=v)
     dlg.designation.setText("???")
     assert not dlg.accept_btn.isEnabled()
-    assert "Nie rozpoznaję" in dlg.error.text()              # live feedback, disabled ma widoczny powód
+    assert "Nie rozpoznaję nazwy" in dlg.error.text()        # live feedback, disabled ma widoczny powód
     dlg._validate_and_accept()
     assert dlg.selected is None
-    assert "Nie rozpoznaję" in dlg.error.text()
+    assert "Nie rozpoznaję nazwy" in dlg.error.text()
     dlg.close()
 
 
 def test_dialog_konflikt_aliasu_odrzuca_pre_check(view):
     """Pre-check UX (R#8/TOCTOU): alias nazwy wskazuje INNY obiekt niż wybrany → nota konfliktu,
-    `selected` None; wybór właściwego obiektu przechodzi. Ostateczny guard = `repo` (osobne testy)."""
+    `selected` None; wybór właściwego obiektu przechodzi. Ostateczny guard = `repo` (osobne testy).
+
+    PRZESTEMPLOWANY w S4: pre-check liczy się PO walidacji nazwy, na TYM SAMYM kluczu, którego
+    użyje zapis — dawniej klucz przychodził parametrem konstruktora, więc dwa przypadki z trzech
+    nie miały go z czego wziąć."""
     v, con, ids = view
     repo.add_object_alias(con, alias_norm="FLATWIZARD", object_id=ids["objects"]["NGC7000"],
                           source="user", now="2026-07-21T12:00:00")
-    dlg = AssignObjectDialog(con, object_raw="FlatWizard", alias_norm="FLATWIZARD",
-                             frame_count=2, parent=v)
+    dlg = AssignObjectDialog(con, object_raw="FlatWizard", frame_count=2, parent=v)
     dlg.combo.setCurrentIndex(1)                            # jawny wybór M42 ≠ NGC7000 → konflikt
     dlg._validate_and_accept()
     assert dlg.selected is None
@@ -335,7 +345,50 @@ def test_dialog_konflikt_aliasu_odrzuca_pre_check(view):
             break
     assert dlg.error.text() == ""                            # zmieniony cel kasuje nieaktualny konflikt
     dlg._validate_and_accept()
-    assert dlg.selected == ("NGC7000", "NGC", None)
+    assert dlg.selected == ("NGC7000", "NGC", None, "FLATWIZARD")
+    dlg.close()
+
+
+def test_pre_check_nie_widzi_konfliktu_tam_gdzie_zapis_przechodzi(view):
+    """Adjudykacja recenzji diffu S4 (P2 #3): id obiektu do pre-checku bierze się TĄ SAMĄ frazą,
+    której użyje klinga (`SELECT id FROM object WHERE canon = ?`), a nie z biblioteki.
+
+    Falsyfikator jest konkretny: obiekt BEZ klatek nie istnieje dla `library_objects` (`JOIN frame`),
+    więc dawna gałąź liczyła `object_id=None` i meldowała konflikt aliasu wskazującego DOKŁADNIE
+    ten obiekt — komunikat kłamiący o przyczynie, przy poprawnym kluczu i przechodzącym zapisie."""
+    v, con, ids = view
+    con.execute("INSERT INTO object(canon, catalog, kind) VALUES ('IC1795','IC','deep_sky')")
+    con.commit()
+    pusty = con.execute("SELECT id FROM object WHERE canon='IC1795'").fetchone()[0]
+    repo.add_object_alias(con, alias_norm="FLATWIZARD", object_id=pusty,
+                          source="user", now="2026-07-21T12:00:00")
+    dlg = AssignObjectDialog(con, object_raw="FlatWizard", frame_count=2, parent=v)
+    dlg.designation.setText("IC 1795")
+    dlg._validate_and_accept()
+    assert dlg.error.text() == "", "alias wskazuje TEN sam obiekt — to nie jest konflikt"
+    assert dlg.selected == ("IC1795", "IC", "deep_sky", "FLATWIZARD")
+    dlg.close()
+
+
+def test_uszkodzony_slownik_melduje_sie_zamiast_wywalac_okno(view, monkeypatch):
+    """Adjudykacja recenzji diffu S4 (P2 #5): `objects_own.json` jest plikiem CZŁOWIEKA i jego edycja
+    to operacja wspierana — literówka ma zostać ZGŁOSZONA, nie wywalić okno tracebackiem przy
+    naciśnięciu klawisza. Ta sama reguła, którą kolejka przeglądu ma od S2."""
+    v, con, ids = view
+
+    def wybuch(*_a, **_k):
+        raise ValueError("objects_own.json: rekord bez kanonu `c`")
+
+    dlg = AssignObjectDialog(con, object_raw="FlatWizard", frame_count=2, parent=v)
+    # Uszkodzony asset wywala OBIE drogi drabiny (obie idą przez `_own_index`), więc symulacja
+    # patchująca jedną z nich sprawdzałaby połowę okna i przepuściła zapis przez drugą połowę.
+    monkeypatch.setattr(resolver, "name_resolves", wybuch)
+    monkeypatch.setattr(resolver, "resolve_name", wybuch)
+    dlg.designation.setText("IC 1795")
+    assert not dlg.accept_btn.isEnabled()
+    assert "objects_own.json" in dlg.error.text()
+    dlg._validate_and_accept()
+    assert dlg.selected is None                       # zero zapisu, dialog zostaje otwarty
     dlg.close()
 
 
@@ -344,7 +397,7 @@ def test_on_assign_po_sukcesie_zaznacza_cel(view, monkeypatch):
     v, con, ids = view
 
     class AcceptedM42:
-        selected = ("M42", "Messier", None)
+        selected = ("M42", "Messier", None, "FLATWIZARD")
 
         def __init__(self, *args, **kwargs):
             pass
@@ -375,7 +428,7 @@ def test_on_assign_zero_assigned_nie_udaje_wyboru_celu(view, monkeypatch):
     v, con, ids = view
 
     class AcceptedM42:
-        selected = ("M42", "Messier", None)
+        selected = ("M42", "Messier", None, "FLATWIZARD")
 
         def __init__(self, *args, **kwargs):
             pass
@@ -862,6 +915,207 @@ def test_zatwierdzenie_pisze_klinga_reki_ze_zrodlem_path(sciezka):
     assert _events(con) > przed
     # kubełek gaśnie razem z populacją — kolejka mówi świeżą prawdę po zapisie
     assert queries.review_queue(con)["path_proposed_frames"] == 0
+
+
+def test_kubelek_raw_ma_tag_drazenie_i_akcje(sciezka):
+    """S4 / bramka 13 — POTRÓJNA RÓWNOŚĆ kubełka RAW: licznik kolejki == długość drążenia ==
+    kotwica rdzenia. Do S4 licznik był osobnym COUNT-em (jedyny wyłom wobec D-PD-10 w read-modelu),
+    a wiersz nie miał tagu — czyli jedyna droga naprawy tej populacji nie miała powierzchni.
+
+    „Napraw nagłówek…" przy tym kubełku milczy i to nie jest przeoczenie: format nie ma karty
+    `OBJECT`, więc okno zapisu do PLIKU otwierałoby listę, której każda pozycja jest pominięta."""
+    v, con = sciezka
+    from horreum.resolver import nameless_raw_lights
+    q = queries.review_queue(con)
+    assert q["nameless_raw_count"] == len(queries.nameless_raw_frames(con)) \
+        == nameless_raw_lights(con) == 4
+    _select_review_tag(v, "nameless_raw")
+    assert v.assign_btn.isEnabled()
+    assert not v.repair_btn.isEnabled() and not v.confirm_path_btn.isEnabled()
+    assert v.frames.rowCount() == 4                     # drążenie pokazuje KLATKI kubełka
+    assert "Format nie ma karty OBJECT" in v.assign_btn.toolTip()
+    v.set_busy(True)
+    assert not v.assign_btn.isEnabled()
+    v.set_busy(False)
+    assert v.assign_btn.isEnabled()
+
+
+def test_dialog_bez_zeznania_kanon_ze_slownika_NIE_TWORZY_klucza(sciezka):
+    """`catalog`/`kind` idą z WPISU SŁOWNIKA (`None`/`own`), nie z zaszytego `deep_sky`, a nota mówi
+    o pustej kolumnie „Katalog" ZANIM user kliknie.
+
+    KLUCZA ALIASU NIE MA — i to jest sedno adjudykacji recenzji diffu S4. Dyskryminatorem jest
+    WŁAŚCICIEL DRABINY („czy kanon broni się bez aliasu"), nie sam `catalog_canon`. Gdyby liczył
+    tylko gramatykę, ręka zakładałaby na kanonie słownika alias `source='user'` — a wtedy
+    `sync_own_aliases` przestaje zasiewać własny (`istniejace == oid` ⇒ `continue`) i
+    `retire_alias_and_unassign`, który wycofuje WYŁĄCZNIE `curated`, nie widzi już kanonu jako
+    zdjętego. Usunięcie `LMC` ze słownika zostawiałoby klatki przypięte do obiektu, którego słownik
+    nie zna, przy `§5.9` ZIELONEJ. Falsyfikator jest niżej — `zero_aliasow_po_zapisie`."""
+    v, con = sciezka
+    dlg = AssignObjectDialog(con, object_raw=None, frame_count=4, parent=v)
+    assert "bez nazwy w metadanych" in dlg.head.text()   # nagłówek nie cytuje nazwy — nie ma której
+    dlg.designation.setText("LMC")
+    assert dlg.accept_btn.isEnabled()
+    # `isHidden()` odwrócone, nie `isVisible()`: przy niepokazanym oknie to drugie kłamie (STANDING)
+    assert not dlg.own_note.isHidden() and "obiekt własny" in dlg.own_note.text()
+    dlg._validate_and_accept()
+    assert dlg.selected == ("LMC", None, "own", None)
+    dlg.close()
+
+
+def test_zapis_ze_slownika_zostawia_odwracalnosc_R_S1_4(sciezka):
+    """FALSYFIKATOR naprawy wyżej, na SKUTKU, nie na kształcie krotki: po ręcznym nazwaniu klatek
+    kanonem ze słownika `sync_own_aliases` MUSI móc zasiać własny alias `curated` — bo to on jest
+    jedynym strażnikiem kanonu przy usunięciu wpisu z assetu (klatki RAW nie mają zeznania, więc
+    innego świadka nie ma). Alias `user` na kanonie zabierał mu tę możliwość NA ZAWSZE."""
+    v, con = sciezka
+    dlg = AssignObjectDialog(con, object_raw=None, frame_count=4, parent=v)
+    dlg.designation.setText("LMC")
+    dlg._validate_and_accept()
+    canon, catalog, kind, alias_norm = dlg.selected
+    repo.user_assign_object(con, alias_norm=alias_norm, canon=canon, catalog=catalog, kind=kind,
+                            frame_ids=[1, 2, 3], now=NOW_S2)
+    assert con.execute("SELECT count(*) FROM object_alias").fetchone()[0] == 0
+    resolver.sync_own_aliases(con, NOW_S2)
+    zasiane = {(r["alias_norm"], r["source"]) for r in con.execute(
+        "SELECT alias_norm, source FROM object_alias").fetchall()}
+    assert ("LMC", "curated") in zasiane, "kanon MUSI mieć równoważność `curated` — inaczej " \
+                                          "wycofanie wpisu ze słownika nie odepnie klatek"
+    dlg.close()
+
+
+def test_dialog_bez_zeznania_kanon_nieznany_drabinie_BIERZE_klucz(sciezka):
+    """Przypadek DRUGI — jedyny, w którym klucz realnie powstaje: kanon, którego ŻADEN szczebel
+    drabiny nie zna (tu `Veil`, kanon powstały z REGIONU po współrzędnych). Bez tej równoważności
+    przyszły nagłówek mówiący „Veil" nie miałby czym trafić tego obiektu."""
+    v, con = sciezka
+    con.execute("INSERT INTO object(canon, catalog, kind) VALUES ('Veil', NULL, 'deep_sky')")
+    oid = con.execute("SELECT id FROM object WHERE canon='Veil'").fetchone()[0]
+    con.commit()
+    repo.assign_object(con, frame_id=4, object_id=oid, object_source="region", now=NOW_S2)
+    dlg = AssignObjectDialog(con, object_raw=None, frame_count=3, parent=v)
+    for i in range(dlg.combo.count()):
+        if dlg.combo.itemData(i) is not None and dlg.combo.itemData(i)[1] == "Veil":
+            dlg.combo.setCurrentIndex(i)
+            break
+    dlg._validate_and_accept()
+    assert dlg.selected == ("Veil", None, None, "VEIL")
+    assert dlg.own_note.isHidden()                  # `catalog` pusty, ale to NIE obiekt własny
+    dlg.close()
+
+
+def test_dialog_bez_zeznania_z_gramatyki_NIE_TWORZY_klucza(sciezka):
+    """Przypadek TRZECI — najczęstszy realny gest S4: RAW-y + `NGC 7635`. Klucz aliasu NIE powstaje,
+    bo byłby samozwrotny: gramatyka katalogowa stoi w drabinie NAD aliasem, więc nikt o taki klucz
+    nigdy nie zapyta, a diff-first słownika by go nie usunął (`source='user'`).
+
+    FALSYFIKATOR: do S4 ta ścieżka kończyła się twardym `ValueError` z `repo` („nazwa bez znaków
+    alfanumerycznych") — komunikatem kłamiącym o przyczynie. Dlatego test sprawdza też, że zapis
+    przez klingę PRZECHODZI i nie zostawia ani jednego wiersza `object_alias`."""
+    v, con = sciezka
+    dlg = AssignObjectDialog(con, object_raw=None, frame_count=4, parent=v)
+    dlg.designation.setText("NGC 7635")
+    dlg._validate_and_accept()
+    assert dlg.selected == ("NGC7635", "NGC", "deep_sky", None)
+    # `isHidden()` wprost — `not isVisible()` na niepokazanym oknie jest zawsze prawdą, czyli
+    # bramką, która nie może się zaczerwienić (ta sama pułapka, co przy nocie wyżej)
+    assert dlg.own_note.isHidden()                      # kanon katalogowy — kolumna „Katalog" pełna
+    canon, catalog, kind, alias_norm = dlg.selected
+    assigned, skipped = repo.user_assign_object(
+        con, alias_norm=alias_norm, canon=canon, catalog=catalog, kind=kind,
+        frame_ids=[1, 2], now=NOW_S2)
+    assert (assigned, skipped) == (2, 0)
+    assert con.execute("SELECT count(*) FROM object_alias").fetchone()[0] == 0
+    dlg.close()
+
+
+def test_dialog_przyjmuje_nazwe_spoza_gramatyki_katalogowej(sciezka):
+    """Bramka nazwy to CAŁA drabina, nie `catalog_canon`: nazwa potoczna wpisu słownika („Large
+    Magellanic Cloud") i nazwa z drabiny solar („Moon") są rozwiązywalne przez przebieg, więc okno
+    nie ma prawa ich odrzucać. `Orion` zostaje odrzucony — i to jest stan ZAMIERZONY do czasu
+    D-OW-3 (odłożone): słownik go nie zna, więc przebieg też by go nie rozwiązał."""
+    v, con = sciezka
+    dlg = AssignObjectDialog(con, object_raw=None, frame_count=4, parent=v)
+    dlg.designation.setText("Large Magellanic Cloud")
+    assert dlg.accept_btn.isEnabled()
+    dlg._validate_and_accept()
+    assert dlg.selected[0] == "LMC"
+    dlg.designation.setText("Moon")
+    assert dlg.accept_btn.isEnabled()
+    dlg.designation.setText("Orion")
+    assert not dlg.accept_btn.isEnabled()
+    assert "Nie rozpoznaję nazwy" in dlg.error.text()
+    dlg.close()
+
+
+def test_on_assign_raw_przypisuje_grupe_podana_parametrem(sciezka, monkeypatch):
+    """Cała droga gestu: kubełek RAW → dialog → klinga ręki. Grupa jedzie do zapisu jako LISTA
+    `frame_ids` z drążenia tego kubełka (nie z tagu), więc znika CAŁA — łącznie z klatką `Orion`,
+    której szczebel ścieżki nie umiał zaproponować. To jest droga awaryjna dla wszystkiego, czego
+    ścieżka nie domknie."""
+    v, con = sciezka
+
+    class AcceptedLMC:
+        selected = ("LMC", None, "own", None)      # kanon słownikowy broni się sam → bez klucza
+
+        def __init__(self, *args, **kwargs):
+            self.frame_count = kwargs["frame_count"]
+            AcceptedLMC.seen = kwargs
+
+        def exec(self):
+            return QDialog.Accepted
+
+    monkeypatch.setattr("horreum.gui.app.AssignObjectDialog", AcceptedLMC)
+    _select_review_tag(v, "nameless_raw")
+    msgs = []
+    v.status_message.connect(msgs.append)
+    v._on_assign()
+
+    assert AcceptedLMC.seen["object_raw"] is None and AcceptedLMC.seen["frame_count"] == 4
+    assert msgs[-1] == "Przypisano 4 z 4 klatek → LMC."
+    stan = con.execute("SELECT object_source, count(*) AS n FROM frame "
+                       "WHERE object_id IS NOT NULL GROUP BY object_source").fetchall()
+    assert [(r["object_source"], r["n"]) for r in stan] == [("user", 4)]
+    assert queries.review_queue(con)["nameless_raw_count"] == 0     # kubełek gaśnie z populacją
+
+
+def test_cel_gestu_to_ZAZNACZENIE_panelu_nie_cala_lista(sciezka, monkeypatch):
+    """Adjudykacja recenzji diffu S4 (P1 #2): kubełek RAW nie jest grupą semantyczną, tylko RESZTĄ —
+    na żywej bazie 763 klatki z kilkudziesięciu folderów. Zapis całej listy jednym kliknięciem
+    nadałby im JEDEN kanon ze źródłem `user`, którego dzisiejsza aplikacja nie umie cofnąć.
+
+    Trzy człony: (a) drążenie zaznacza wszystko, więc gest „cały kubełek" kosztuje tyle samo co
+    przedtem · (b) PRZYCIĘCIE zaznaczenia przycina zapis — reszta kubełka zostaje nietknięta ·
+    (c) puste zaznaczenie gasi akcję, a falsyfikator woła SLOT (klik w wyszarzony przycisk
+    przeszedłby trywialnie) i nie pisze ani jednego wiersza."""
+    v, con = sciezka
+
+    class AcceptedLMC:
+        selected = ("LMC", None, "own", None)
+
+        def __init__(self, *args, **kwargs):
+            AcceptedLMC.seen = kwargs
+
+        def exec(self):
+            return QDialog.Accepted
+
+    monkeypatch.setattr("horreum.gui.app.AssignObjectDialog", AcceptedLMC)
+    _select_review_tag(v, "nameless_raw")
+    assert len(v._selected_frame_ids()) == 4          # (a) drążenie zaznacza CAŁY kubełek
+
+    v.frames.clearSelection()                          # (c) puste zaznaczenie
+    assert not v.assign_btn.isEnabled()
+    przed = _events(con)
+    v._on_assign()                                     # falsyfikator: SLOT, nie przycisk
+    assert _events(con) == przed
+    assert con.execute("SELECT count(*) FROM frame WHERE object_id IS NOT NULL").fetchone()[0] == 0
+
+    v.frames.selectRow(0)                              # (b) przycięcie do JEDNEJ klatki
+    assert v.assign_btn.isEnabled()
+    v._on_assign()
+    assert AcceptedLMC.seen["frame_count"] == 1        # okno mówi o CELU, nie o kubełku
+    assert con.execute("SELECT count(*) FROM frame WHERE object_id IS NOT NULL").fetchone()[0] == 1
+    assert queries.review_queue(con)["nameless_raw_count"] == 3   # reszta kubełka nietknięta
 
 
 def test_okno_nie_pisze_dopoki_nie_klikniesz(sciezka):

@@ -618,6 +618,10 @@ def nameless_raw_lights(con):
     domykać się do `review_frame_ids` dokładnie o tę populację. Droga naprawy jest inna niż dla
     `nameless_lights`: ręczne „Przypisz obiekt…", nigdy karta w pliku.
 
+    Drążenie do klatek (grupa celu ręcznego przypisania) daje `gui.queries.nameless_raw_frames` —
+    TEN SAM predykat, znak w znak, i to ONO jest od S4 licznikiem kubełka. Dwa literały, bo warstwy
+    są dwie i zależność idzie w jedną stronę; równość obu pinuje test (bramka 13).
+
     `kind='light'` jest tu STRUKTURALNIE równoważne dawnemu `IN ('light','master_light')`, nie
     zawężeniem: `filetype='raw'` bierze rodzaj z FOLDERU (`kind_from_path`), a ta mapa zna
     wyłącznie light/dark/flat/bias — RAW-owy `master_light` nie ma jak powstać. Napisane wprost,

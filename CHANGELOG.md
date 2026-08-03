@@ -7,6 +7,22 @@ schemat i API mogą się jeszcze zmieniać.
 ## [Niewydane]
 
 ### Dodane
+- **Klatki z lustrzanki można wreszcie nazwać ręką — kubełek „bez nazwy (RAW)" przestał być
+  ślepym zaułkiem.** Wiersz w kolejce przeglądu mówił o nich od dawna, ale nie dało się w niego
+  kliknąć: jedyna droga naprawy (ręczne przypisanie) była podpięta pod pozycje, które mają nazwę
+  w nagłówku — a RAW jej nie ma z definicji formatu. Teraz wiersz otwiera listę tych klatek,
+  a przycisk „Przypisz obiekt…" działa przy nim tak samo jak przy każdej innej pozycji.
+  To jest droga awaryjna dla wszystkiego, czego nie domknie propozycja z folderu.
+  **Nazywasz to, co masz zaznaczone.** Otwarcie kubełka zaznacza wszystkie jego klatki, więc
+  „nazwij cały kubełek" to nadal jedno kliknięcie — ale możesz zaznaczenie przyciąć i nazwać
+  tylko część. Ten kubełek nie jest jedną grupą, tylko resztą po wszystkich innych drogach:
+  potrafi zebrać setki klatek z kilkudziesięciu różnych katalogów, a nazwy nadanej ręką dzisiejszy
+  program jeszcze nie umie cofnąć. Przy pustym zaznaczeniu przycisk jest wygaszony.
+- **Okno „Przypisz obiekt…" przyjmuje każdą nazwę, którą program naprawdę rozpozna.** Do tej pory
+  żądało oznaczenia katalogowego, więc odrzucało `LMC`, `Moon` i nazwy potoczne — mimo że przebieg
+  „Rozwiąż" rozwiązuje je bez wahania. Teraz okno pyta tej samej reguły co przebieg, a katalog
+  i rodzaj obiektu bierze z tego, co ta reguła zwróci: nazwa spoza katalogów zostaje **obiektem
+  własnym** (okno mówi o tym wprost, zanim klikniesz), a nie udawanym „deep sky" bez katalogu.
 - **Klatki z lustrzanki dostają nazwę obiektu z FOLDERU — ale dopiero, gdy ją potwierdzisz.**
   Pliki RAW nie mają w sobie miejsca na nazwę obiektu (EXIF go nie zna), więc 763 zdjęcia
   z aparatu stały w kolejce przeglądu bez żadnej drogi wyjścia. Teraz Horreum czyta nazwę

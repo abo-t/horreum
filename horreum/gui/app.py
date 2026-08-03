@@ -32,7 +32,7 @@ from horreum import db, macro as macro_mod, repo, resolver
 from horreum.gui import i18n, mapproj, queries, theme
 from horreum.gui.map_view import SitesMapView
 from horreum.resolve._text import norm_alnum
-from horreum.resolve.catalog import catalog_canon, catalog_label, xref
+from horreum.resolve.catalog import catalog_canon
 
 # Kolumny listy głównej — indeksy nazwane (czytelne handlery zamiast magicznych liczb).
 # Nagłówek = telescop_canon (tożsamość osi po przejściu fitsmirror); Etykieta = nazwa usera.
@@ -420,34 +420,63 @@ COPY_HEADERS = ["col.path", "copy.col.volume", "copy.col.present", "copy.col.mar
 
 class AssignObjectDialog(QDialog):
     """Dialog ręcznego przypisania obiektu grupie review (#8, P4, D-P4-3): wybór ISTNIEJĄCEGO obiektu
-    z biblioteki (combo `canon · catalog`) ALBO nowe oznaczenie katalogowe parsowane jak resolver
-    (`catalog_canon` + `xref` — „IC 1795" → IC1795). Świadomie BEZ wolnego tekstu jako canon:
-    `object.canon` nie ma deduplikacji semantycznej, a śmieciowego obiektu nic by nie posprzątało.
+    z biblioteki (combo `canon · catalog`) ALBO nowa NAZWA rozwiązywana TĄ SAMĄ drabiną, którą pójdzie
+    przebieg. Świadomie BEZ wolnego tekstu jako canon: `object.canon` nie ma deduplikacji semantycznej,
+    a śmieciowego obiektu nic by nie posprzątało — pełne cofnięcie ma dwa człony i przychodzi z S2b.
 
-    Walidacja PRZED akceptacją: placeholder zamiast domyślnego realnego celu; akcja aktywna dopiero
-    po jawnym wyborze albo parsowalnym oznaczeniu. Błąd konfliktu aliasu (`alias_target` — pre-check
-    UX; ostateczny guard w `repo.user_assign_object`, TOCTOU) zostawia dialog otwarty. Nazwa
-    rozwiązywalna katalogowo → nota o regule „katalog bije alias". Wynik walidacji ląduje w
-    `self.selected` = `(canon, catalog, kind)` (`kind=None` dla obiektu istniejącego — repo go nie
-    INSERTuje, więc pole nieużywane)."""
+    DWA WEJŚCIA, JEDNO OKNO (S4): grupa Z ZEZNANIEM (`object_raw` z nagłówka) i grupa BEZ NIEGO
+    (kubełek RAW — format nie ma karty `OBJECT`, więc zeznania nie ma z definicji, nie z braku).
+    `object_raw=None` to drugi przypadek; nagłówek okna mówi wtedy o klatkach, nie o nazwie.
 
-    def __init__(self, con, *, object_raw, alias_norm, frame_count, parent=None):
+    WALIDACJA STOI NA `resolver.name_resolves`, KANON NA `resolve_name` (S4, D-OW-2 pkt 5): walidator
+    zwraca `bool`, więc sam kanonu nie da, a dawna gałąź liczyła go przez `catalog_canon`→`xref` —
+    dla `LMC` dałoby to `canon=None` i naruszenie `NOT NULL`. Pytanie brzmi „czy przebieg rozpozna
+    tę nazwę", a odpowiedzi twierdzące są cztery: gramatyka katalogowa, nazwa potoczna, słownik
+    obiektów własnych i alias. `catalog`/`kind` biorą się z tej samej tożsamości — dla wpisu słownika
+    z jego rekordu (`catalog` bywa NULL, `kind='own'`), nie z zaszytego `deep_sky`.
+
+    KLUCZ ALIASU JEST TRZYPRZYPADKOWY (R16#2) — i to okno jest jego JEDYNYM właścicielem, bo dopiero
+    tu znana jest wybrana nazwa:
+      1. **zeznanie JEST** → `norm_alnum(object_raw)`; alias zapamiętuje nazwę z nagłówka NA
+         PRZYSZŁOŚĆ („FlatWizard" → M42) i tego nie wolno stracić;
+      2. **brak zeznania, nazwa SPOZA gramatyki** (`LMC`) → `norm_alnum(kanon)`; to jedyna droga,
+         którą przyszły nagłówek z tą nazwą trafi ten obiekt;
+      3. **brak zeznania, nazwa Z gramatyki** (`NGC7635` na RAW-ach) → **BRAK klucza** (`None`).
+         Alias z kanonu byłby samozwrotny: gramatyka katalogowa stoi w drabinie NAD aliasem, więc
+         nikt nigdy o taki klucz nie zapyta, a diff-first słownika go nie usunie (`source='user'`).
+         To najczęstszy realny gest S4 — do S4 kończył się twardym `ValueError` z `repo` i
+         komunikatem o „nazwie bez znaków alfanumerycznych", czyli kłamstwem o przyczynie.
+
+    Pre-check konfliktu aliasu (`alias_target` — UX; ostateczny guard w `repo.user_assign_object`,
+    TOCTOU) idzie na TYM SAMYM kluczu, którego użyje zapis, więc liczy się PO walidacji nazwy,
+    a nie w konstruktorze. Wynik walidacji ląduje w `self.selected` = `(canon, catalog, kind,
+    alias_norm)` (`kind=None` dla obiektu istniejącego — repo go nie INSERTuje, więc pole
+    nieużywane; `alias_norm=None` = przypadek trzeci)."""
+
+    def __init__(self, con, *, object_raw, frame_count, parent=None):
         super().__init__(parent)
         self.con = con
-        self.alias_norm = alias_norm
+        self.object_raw = object_raw
         self.selected = None
         self.setWindowTitle(i18n.t("assign.title"))
         lay = QVBoxLayout(self)
 
-        head = QLabel(i18n.t_plural("assign.group_head", frame_count, name=object_raw)
-                      + "\n" + i18n.t("assign.alias_remembered"))
-        head.setWordWrap(True)
-        lay.addWidget(head)
+        if object_raw is None:
+            # Grupa bez zeznania: nagłówek nie ma nazwy do zacytowania, a obietnica „alias zostanie
+            # zapamiętany" byłaby nieprawdziwa dla przypadku trzeciego — mówimy więc, skąd bierze
+            # się grupa, i zostawiamy naukę aliasu przy nazwie, która ją realnie dostaje.
+            head_text = i18n.t_plural("assign.group_head_nameless", frame_count)
+        else:
+            head_text = (i18n.t_plural("assign.group_head", frame_count, name=object_raw)
+                         + "\n" + i18n.t("assign.alias_remembered"))
+        self.head = QLabel(head_text)
+        self.head.setWordWrap(True)
+        lay.addWidget(self.head)
         # Drabina BEZ szczebla aliasu (`lookup` zawsze pusty) — i to jest tu ZAMIERZONE: alias
         # dopiero powstanie z tego gestu, więc pytanie brzmi „czy nazwa broni się sama". Pytamy
         # jednak WŁAŚCICIELA drabiny, nie własnej kompozycji: nowy szczebel trafia tę notę
-        # automatycznie, zamiast po cichu ją ominąć.
-        if resolver.resolve_name(lambda _key: None, object_raw)[0] is not None:
+        # automatycznie, zamiast po cichu ją ominąć. Grupa bez zeznania nie ma czego pytać.
+        if object_raw is not None and self._broni_sie_sama(object_raw):
             note = QLabel(i18n.t("assign.catalog_note"))
             note.setWordWrap(True)
             lay.addWidget(note)
@@ -465,6 +494,14 @@ class AssignObjectDialog(QDialog):
         self.designation = QLineEdit()
         self.designation.setPlaceholderText(i18n.t("assign.designation_placeholder"))
         lay.addWidget(self.designation)
+
+        # Nazwa spoza katalogów wygląda w bibliotece INACZEJ (kolumna „Katalog" zostaje pusta) —
+        # i to jest stan poprawny, nie brak danych. Nota mówi to ZANIM user kliknie, żeby pusta
+        # komórka po zapisie nie czytała się jak zgubione pole.
+        self.own_note = QLabel("")
+        self.own_note.setWordWrap(True)
+        self.own_note.setVisible(False)
+        lay.addWidget(self.own_note)
 
         self.error = QLabel("")
         self.error.setProperty("role", "error")     # kolor z motywu (P-C) — sztywny #b00020 był ślepy na dark
@@ -484,35 +521,104 @@ class AssignObjectDialog(QDialog):
     def _fail(self, msg):
         self.error.setText(msg)
 
+    @staticmethod
+    def _broni_sie_sama(text):
+        """Czy drabina rozwiąże tę nazwę BEZ aliasu — jedno pytanie, dwaj wołający (nota katalogowa
+        w konstruktorze i dyskryminator klucza aliasu). `lookup` zawsze pusty, więc alias nie ma głosu.
+
+        Uszkodzony słownik ⇒ `False`: nie wiemy, czy nazwa broni się sama, więc ani nie obiecujemy
+        noty, ani nie odbieramy klucza. Sam błąd melduje `_sync_accept_enabled` — tu byłby drugim
+        komunikatem o tej samej awarii."""
+        try:
+            return resolver.resolve_name(lambda _key: None, text)[0] is not None
+        except ValueError:
+            return False
+
     def _sync_accept_enabled(self):
-        """Akcja wymaga JAWNEGO celu; tekst oznaczenia walidujemy na żywo, żeby disabled miał powód."""
+        """Akcja wymaga JAWNEGO celu; wpisaną nazwę walidujemy na żywo, żeby disabled miał powód.
+
+        Pytamy `resolver.name_resolves` — TĘ SAMĄ bramkę, co okno „Napraw nagłówek…". Dawne
+        `catalog_canon` odpowiadało na węższe pytanie („czy to oznaczenie katalogowe") i odrzucało
+        nazwy, które przebieg rozwiązuje bez wahania: `LMC` ze słownika, `Moon` z drabiny solar,
+        nazwę potoczną, nazwę nauczoną wcześniej aliasem."""
         text = self.designation.text().strip()
-        valid_designation = bool(catalog_canon(text)) if text else False
-        self.accept_btn.setEnabled(valid_designation if text else self.combo.currentData() is not None)
         self.error.clear()                                  # wejście się zmieniło → stary błąd nieaktualny
-        if text and not valid_designation:
-            self._fail(i18n.t("assign.unknown_designation", text=text))
+        try:
+            valid_name = resolver.name_resolves(self.con, text) if text else False
+            ident = (resolver.resolve_name(resolver.alias_lookup(self.con), text)[0]
+                     if valid_name else None)
+        except ValueError:
+            # SŁOWNIK OBIEKTÓW WŁASNYCH JEST PLIKIEM CZŁOWIEKA, a jego edycja to operacja wspierana:
+            # literówka w assecie ma zostać ZGŁOSZONA, nie wywalić okno tracebackiem przy naciśnięciu
+            # klawisza. Ta sama reguła, co w `queries.review_queue` — od S4 dialog też czyta drabinę,
+            # więc dziedziczy jej tryb awarii. Akcja gaśnie: nie wiemy, czy nazwa się rozwiąże.
+            self.accept_btn.setEnabled(False)
+            self.own_note.setVisible(False)
+            return self._fail(i18n.t("assign.dictionary_broken"))
+        self.accept_btn.setEnabled(valid_name if text else self.combo.currentData() is not None)
+        if text and not valid_name:
+            self._fail(i18n.t("assign.unknown_name", text=text))
+        # Nota po RODZAJU, nie po pustym katalogu: `catalog IS NULL` mają też obiekty z REGIONU
+        # (`Veil`), a nazwanie ich „obiektem własnym" byłoby nieprawdą o pochodzeniu kanonu.
+        wlasny = ident is not None and ident.kind == "own"
+        # Warunek na LOKALNEJ zmiennej, nie na `isVisible()`: przy niepokazanym oknie ta metoda
+        # zwraca False niezależnie od `setVisible` (lekcja STANDING kolejki), więc nota nigdy nie
+        # dostałaby treści przed pierwszym wyświetleniem dialogu.
+        self.own_note.setVisible(wlasny)
+        if wlasny:
+            self.own_note.setText(i18n.t("assign.own_object_note", canon=ident.canon))
+
+    def _alias_key(self, canon):
+        """Klucz równoważności dla TEGO gestu — trzy przypadki (kontrakt w nagłówku klasy).
+
+        Przypadek 2 vs 3 rozstrzyga WŁAŚCICIEL DRABINY, nie jeden jej szczebel: pytamy `resolve_name`
+        z pustym `lookup`, czyli „czy kanon broni się BEZ aliasu". Odpowiedź twierdząca ⇒ alias byłby
+        samozwrotny, bo każdy szczebel drabiny stoi NAD aliasem — nikt o taki klucz nigdy nie zapyta.
+
+        Dyskryminator na samym `catalog_canon` łapał JEDEN z czterech szczebli i wywracał przy tym
+        odwracalność, którą S2 dopiero co zbudował (R-S1-4): ręka na kanonie SŁOWNIKA zakładała alias
+        `source='user'`, przez co `sync_own_aliases` nie zasiewał już własnego (`istniejace == oid`
+        ⇒ `continue`), a `retire_alias_and_unassign` — który wycofuje WYŁĄCZNIE `curated` — przestawał
+        widzieć kanon jako zdjęty. Skutek: usunięcie wpisu ze słownika zostawiało klatki przypięte do
+        obiektu, którego słownik już nie zna, przy `§5.9` ZIELONEJ. Ta sama klasa, którą S2 zamknął,
+        otwarta z drugiej strony."""
+        if self.object_raw is not None:
+            return norm_alnum(self.object_raw)
+        if self._broni_sie_sama(canon):
+            return None
+        return norm_alnum(canon) or None
 
     def _validate_and_accept(self):
         """Waliduj wybór; poprawny → `self.selected` + accept, błąd → nota i dialog zostaje."""
         text = self.designation.text().strip()
         if text:
-            cc = catalog_canon(text)
-            if not cc:
-                return self._fail(i18n.t("assign.unknown_designation", text=text))
-            canon, catalog, kind = xref(cc), catalog_label(xref(cc)), "deep_sky"
-            object_id = next((o["id"] for o in self._objects if o["canon"] == canon), None)
+            # Kanon i pola obiektu z WŁAŚCICIELA drabiny, nie z własnej kompozycji: `name_resolves`
+            # wyżej powiedziało „tak" tą samą funkcją, więc `None` tutaj znaczyłoby, że oba wołania
+            # odpowiadają różnie na jedno pytanie (EXPECT — nota, zero zapisu).
+            try:
+                ident, _ = resolver.resolve_name(resolver.alias_lookup(self.con), text)
+            except ValueError:
+                return self._fail(i18n.t("assign.dictionary_broken"))
+            if ident is None:
+                return self._fail(i18n.t("assign.unknown_name", text=text))
+            canon, catalog, kind = ident.canon, ident.catalog, ident.kind
         else:
             selected = self.combo.currentData()
             if selected is None:
                 return self._fail(i18n.t("assign.pick_or_designate"))
-            object_id, canon, catalog = selected
+            _, canon, catalog = selected
             kind = None                                   # obiekt istnieje — repo nie INSERTuje
-        target = queries.alias_target(self.con, self.alias_norm)
-        if target is not None and target != object_id:
-            target_canon = next((o["canon"] for o in self._objects if o["id"] == target), target)
-            return self._fail(i18n.t("assign.alias_conflict", target=target_canon))
-        self.selected = (canon, catalog, kind)
+        # Id po KANONIE, tą samą frazą co klinga (`queries.object_id_by_canon`), nie z biblioteki:
+        # `library_objects` ma `JOIN frame`, więc obiekt bez klatek dla niej nie istnieje i pre-check
+        # meldowałby konflikt tam, gdzie zapis przechodzi bez mrugnięcia.
+        object_id = queries.object_id_by_canon(self.con, canon)
+        alias_norm = self._alias_key(canon)
+        if alias_norm is not None:
+            target = queries.alias_target(self.con, alias_norm)
+            if target is not None and target != object_id:
+                target_canon = next((o["canon"] for o in self._objects if o["id"] == target), target)
+                return self._fail(i18n.t("assign.alias_conflict", target=target_canon))
+        self.selected = (canon, catalog, kind, alias_norm)
         self.accept()
 
 
@@ -1143,6 +1249,9 @@ class ObjectAxisView(QWidget):
         # sekcja 281 px, `fontMetrics.elidedText` na tej szerokości daje 45 znaków
         # („R:\ASTRO_\CALIBRATION\masters\flats\A140R_260…"), a panel rysował 2 znaki.
         self.frames.setWordWrap(False)
+        # Panel jest od S4 CELEM akcji zapisu, więc przycisk musi śledzić jego zaznaczenie tak samo
+        # jak tag kolejki — inaczej odznaczenie wszystkiego zostawiałoby aktywny przycisk bez celu.
+        self.frames.itemSelectionChanged.connect(self._sync_assign_enabled)
         # Kolumny wąskie (sha/tel/kam/filtr/data/obecny) do treści, Ścieżka bierze resztę — inaczej
         # stałe 100px zjadają panel i na Ścieżkę zostaje ~130px (widać tylko „R:...", ginie nazwa pliku).
         fh = self.frames.horizontalHeader()
@@ -1254,13 +1363,14 @@ class ObjectAxisView(QWidget):
         self._add_review_item(i18n.t("object.nameless_line", n=q["nameless_count"]),
                               tag="nameless" if q["nameless_count"] > 0 else None)
         # Bliźniak kubełka wyżej po drugiej stronie FORMATU (`resolver.NO_OBJECT_CARD_FILETYPES`):
-        # RAW nie ma karty `OBJECT` z natury, więc „Napraw nagłówek…" go nie dotyczy, ale klatki
-        # ZOSTAJĄ w perspektywie gridu „Do przeglądu" i partycja musi je policzyć. Wiersz jest
-        # INFORMACYJNY (bez tagu → nieklikalny): akcją jest ręczne przypisanie, a to osobna
-        # powierzchnia (#8/P4) — udawany tag otwierałby okno, które nie ma czego zapisać.
+        # RAW nie ma karty `OBJECT` z natury, więc „Napraw nagłówek…" go nie dotyczy — drogą
+        # naprawy jest RĘKA. Do S4 wiersz był INFORMACYJNY i to była luka, nie decyzja: akcja
+        # „Przypisz obiekt…" zapalała się wyłącznie przy tagu `object_raw`, którego ta populacja
+        # NIE MA z definicji formatu, więc jedyna droga naprawy nie miała powierzchni.
         # Pokazywany TYLKO gdy populacja istnieje: na archiwum bez lustrzanki to stałe „0".
         if q["nameless_raw_count"] > 0:
-            self._add_review_item(i18n.t("object.nameless_raw_line", n=q["nameless_raw_count"]))
+            self._add_review_item(i18n.t("object.nameless_raw_line", n=q["nameless_raw_count"]),
+                                  tag="nameless_raw")
         # PODZBIÓR kubełka wyżej, nie szósty kubełek (S2, D-OW-2/B): tym klatkom ŚCIEŻKA proponuje
         # kanon, a zapis czeka na gest człowieka. Wiersz stoi ZARAZ POD RAW-em, bo opisuje jego
         # drogę wyjścia — i świadomie NIE wchodzi do partycji, która już je policzyła.
@@ -1350,7 +1460,12 @@ class ObjectAxisView(QWidget):
         śledzą tag, nie to, która lista „ostatnio kliknięta"). „Napraw nagłówek…" gaśnie dodatkowo,
         gdy DRUGA powierzchnia writebacku pisze do plików (mutex, D-PD-3)."""
         tag, _ = self._selected_review()
-        self.assign_btn.setEnabled(tag == "object_raw" and not self._busy)
+        # Dwa tagi, jedna akcja (S4): grupa Z zeznaniem i kubełek RAW różnią się tym, SKĄD bierze
+        # się grupa, nie tym, co się z nią robi — obie nazywa ręka, obie zapisuje ta sama klinga.
+        # Trzeci warunek to CEL: od S4 pisze się zaznaczenie panelu, więc puste zaznaczenie znaczy
+        # „nie ma czego zapisać" i przycisk ma to powiedzieć wygaszeniem, a nie ciszą po kliknięciu.
+        self.assign_btn.setEnabled(tag in ("object_raw", "nameless_raw") and not self._busy
+                                   and bool(self._selected_frame_ids()))
         # Dwa tagi, jedna akcja: kubełek lightów archiwum i kubełek gotowych stosów mają od
         # D-0802-1 tę samą drogę naprawy (karta `OBJECT` do PLIKU), więc przycisk obsługuje oba.
         self.repair_btn.setEnabled(tag in ("nameless", "nameless_stacks")
@@ -1368,6 +1483,7 @@ class ObjectAxisView(QWidget):
         # nazywa drogę WŁAŚCIWĄ dla zaznaczonego kubełka, zamiast milczeć o istnieniu drugiej.
         self.assign_btn.setToolTip(i18n.t(
             "object.assign_tip" if tag == "object_raw" else
+            "object.assign_tip_raw" if tag == "nameless_raw" else
             "object.assign_tip_card" if tag in ("nameless", "nameless_stacks") else
             "object.assign_tip_pick"))
 
@@ -1391,8 +1507,9 @@ class ObjectAxisView(QWidget):
 
     def _on_review_selected(self):
         """Pozycja kolejki zaznaczona → dispatch po tagu: `object_raw` = nierozwiązane klatki tej
-        nazwy (+ aktywacja „Przypisz obiekt…"); `unreadable` = tryb „kopie" prawego panelu (Z6);
-        pozycja informacyjna (bez tagu) nie drąży."""
+        nazwy (+ aktywacja „Przypisz obiekt…"); `nameless_raw` = klatki w formacie bez karty
+        `OBJECT` (S4 — ta sama akcja, grupa bez zeznania); `unreadable` = tryb „kopie" prawego
+        panelu (Z6); pozycja informacyjna (bez tagu) nie drąży."""
         if self._loading:
             return
         tag, payload = self._selected_review()
@@ -1405,11 +1522,18 @@ class ObjectAxisView(QWidget):
             rows = queries.object_review_frames(self.con, payload)
             self.frames_label.setText(i18n.t("object.frames_review", name=payload))
             self._fill_frames(rows, present_col=False)
+            self._select_all_frames()
         elif tag == "nameless":
             self._restore_frames_mode()
             rows = queries.nameless_frames(self.con)
             self.frames_label.setText(i18n.t("object.frames_nameless", n=len(rows)))
             self._fill_frames(rows, present_col=False)
+        elif tag == "nameless_raw":
+            self._restore_frames_mode()
+            rows = queries.nameless_raw_frames(self.con)
+            self.frames_label.setText(i18n.t("object.frames_nameless_raw", n=len(rows)))
+            self._fill_frames(rows, present_col=False)
+            self._select_all_frames()
         elif tag == "nameless_stacks":
             self._restore_frames_mode()
             rows = queries.nameless_stack_frames(self.con)
@@ -1477,26 +1601,47 @@ class ObjectAxisView(QWidget):
     # ------------------------------------------------ akcja zapisu (#8/P4)
 
     def _on_assign(self):
-        """„Przypisz obiekt…": dialog wyboru obiektu → JEDNA klinga `repo.user_assign_object`
-        (grupa = klatki pozycji review o tym `object_raw`; klucz aliasu = `norm_alnum(object_raw)` —
-        ta sama funkcja, co resolver przy zapisie, SPOT). Raport „przypisano N z M" (R#8: dryf
-        grupy = klatka zajęta między dialogiem a zapisem jest pomijana), potem refresh."""
+        """„Przypisz obiekt…": dialog wyboru obiektu → JEDNA klinga `repo.user_assign_object`.
+        Raport „przypisano N z M" (R#8: dryf grupy = klatka zajęta między dialogiem a zapisem jest
+        pomijana), potem refresh.
+
+        DWA WEJŚCIA, JEDNA DROGA ZAPISU (S4): `object_raw` = grupa nierozpoznanej nazwy z nagłówka;
+        `nameless_raw` = kubełek klatek w formacie bez karty `OBJECT`. Grupa idzie dalej jako LISTA
+        `frame_ids`, nie jako tag — kto ją wyznacza, jest sprawą tego dispatchu, a nie zapisu.
+
+        CELEM JEST ZAZNACZENIE PANELU (`_selected_frame_ids`), nie wynik drążenia: drążenie zaznacza
+        wszystko, więc gest „cały kubełek" kosztuje tyle samo kliknięć co przedtem, ale zaznaczenie
+        można PRZYCIĄĆ — a kubełek RAW nie jest grupą semantyczną i jeden kanon dla całej reszty
+        archiwum byłby zapisem nieodwracalnym w dzisiejszej aplikacji.
+
+        KLUCZ ALIASU LICZY DIALOG (trzy przypadki — kontrakt w `AssignObjectDialog`), bo zna wybraną
+        nazwę; tu zostaje wyłącznie bramka pustego klucza dla grupy Z ZEZNANIEM, bo to własność
+        GRUPY, znana przed otwarciem okna (D-P4-2/R#3: alias `""` łapałby każdą niealfanumeryczną
+        nazwę). Kubełek RAW tej bramki nie potrzebuje: on zeznania nie ma i klucz bierze się skądinąd."""
         tag, object_raw = self._selected_review()
-        if tag != "object_raw" or not object_raw:
+        if tag == "object_raw":
+            if not object_raw:
+                return
+            if not norm_alnum(object_raw):     # pusty klucz (D-P4-2/R#3) — grupa odrzucona
+                QMessageBox.warning(
+                    self, i18n.t("assign.title"),
+                    i18n.t("object.alias_no_alnum", name=object_raw))
+                return
+        elif tag == "nameless_raw":
+            object_raw = None
+        else:
             return
-        alias_norm = norm_alnum(object_raw)
-        if not alias_norm:                     # pusty klucz (D-P4-2/R#3) — dialog odrzuca grupę
-            QMessageBox.warning(
-                self, i18n.t("assign.title"),
-                i18n.t("object.alias_no_alnum", name=object_raw))
+        frame_ids = self._selected_frame_ids()
+        if not frame_ids:
+            # Przycisk jest wygaszony przy pustym zaznaczeniu, ale SLOT wolno zawołać skądinąd —
+            # cisza po kliknięciu byłaby gorsza od odmowy, bo nie da się odróżnić od zapisu.
+            self.status_message.emit(i18n.t("object.assign_nothing"))
             return
-        rows = queries.object_review_frames(self.con, object_raw)
-        frame_ids = [r["frame_id"] for r in rows]
-        dlg = AssignObjectDialog(self.con, object_raw=object_raw, alias_norm=alias_norm,
+        dlg = AssignObjectDialog(self.con, object_raw=object_raw,
                                  frame_count=len(frame_ids), parent=self)
         if dlg.exec() != QDialog.Accepted or dlg.selected is None:
             return
-        canon, catalog, kind = dlg.selected
+        canon, catalog, kind, alias_norm = dlg.selected
         try:
             assigned, skipped = repo.user_assign_object(
                 self.con, alias_norm=alias_norm, canon=canon, catalog=catalog, kind=kind,
@@ -1585,7 +1730,11 @@ class ObjectAxisView(QWidget):
         self.frames.setRowCount(len(rows))
         for r, row in enumerate(rows):
             keys = row.keys()
-            self._set_frame_cell(r, FRAME_COL_SHA, (row["sha1_data"] or "")[:12])
+            # `frame_id` w roli danych PIERWSZEJ kolumny: od S4 panel jest CELEM akcji zapisu
+            # („Przypisz obiekt…" pisze zaznaczenie, nie całą listę), więc wiersz musi umieć
+            # powiedzieć, którą klatkę pokazuje. Źródło bez tej kolumny (biblioteka) zostawia None.
+            self._set_frame_cell(r, FRAME_COL_SHA, (row["sha1_data"] or "")[:12],
+                                 data=row["frame_id"] if "frame_id" in keys else None)
             self._set_frame_cell(r, FRAME_COL_TEL, queries.telescope_label(row))
             self._set_frame_cell(r, FRAME_COL_CAM, row["camera_model"] or "")
             self._set_frame_cell(r, FRAME_COL_FILTER, row["filter_canon"] if "filter_canon" in keys else "")
@@ -1603,12 +1752,37 @@ class ObjectAxisView(QWidget):
                                  os.path.basename(path) if path else i18n.t("object.no_location"),
                                  tooltip=path or None)
 
-    def _set_frame_cell(self, r, c, text, *, tooltip=None):
+    def _set_frame_cell(self, r, c, text, *, tooltip=None, data=None):
         item = QTableWidgetItem(text)
         item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
         if tooltip:
             item.setToolTip(tooltip)
+        if data is not None:
+            item.setData(Qt.UserRole, data)
         self.frames.setItem(r, c, item)
+
+    def _select_all_frames(self):
+        """Drążenie kubełka Z AKCJĄ zaznacza CAŁĄ grupę: domyślny cel zostaje ten sam co przed S4
+        (jeden gest na cały kubełek), a zaznaczenie na ekranie od początku mówi prawdę o zakresie
+        zapisu. Kubełki bez akcji zapisu tego nie robią — podświetlenie obiecywałoby czynność."""
+        self.frames.selectAll()
+
+    def _selected_frame_ids(self):
+        """Klatki ZAZNACZONE w panelu — cel akcji zapisu osi (S4, adjudykacja recenzji diffu).
+
+        Fallback na „wszystko widoczne" jest tu ZAKAZANY i to nie jest ostrożność na wyrost: kubełek
+        RAW nie jest grupą semantyczną, tylko resztą („czego nie umieliśmy nazwać") — na żywej bazie
+        763 klatki z kilkudziesięciu folderów. Zapis całej listy jednym kliknięciem nadawałby im
+        JEDEN kanon ze źródłem `user`, które pomija całą drabinę przy każdym kolejnym `Rozwiąż`,
+        jest sticky dla szczebla ścieżki i którego dzisiejsza aplikacja nie umie cofnąć.
+
+        Cały kubełek pozostaje jednym gestem: drążenie zaznacza wszystko (`_on_review_selected`),
+        więc domyślny cel jest ten sam co przed zmianą — dochodzi wyłącznie możliwość PRZYCIĘCIA
+        grupy i to, że zaznaczenie na ekranie mówi prawdę o tym, co pójdzie do zapisu."""
+        sm = self.frames.selectionModel()
+        rows = sm.selectedRows() if sm else []
+        ids = [self.frames.item(idx.row(), FRAME_COL_SHA) for idx in rows]
+        return [i.data(Qt.UserRole) for i in ids if i is not None and i.data(Qt.UserRole) is not None]
 
     def set_busy(self, busy):
         """Pipeline w biegu → wygaszenie akcji zapisu („Przypisz obiekt…" #8/P4, „Napraw nagłówek…"

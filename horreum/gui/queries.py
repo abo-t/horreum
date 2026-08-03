@@ -13,8 +13,7 @@ NIGDY składanie stringa SQL. Listy zmiennej długości (id/keywordy) idą jako 
 
 import json
 
-from horreum.resolver import (
-    NO_OBJECT_CARD_FILETYPES, nameless_raw_lights, path_proposals, review_state)
+from horreum.resolver import NO_OBJECT_CARD_FILETYPES, path_proposals, review_state
 
 
 def telescope_label(row):
@@ -234,7 +233,12 @@ def review_queue(con):
 
       - `nameless_raw_count`: jak wyżej, ale w formacie, który NIE MA JAK zeznać o obiekcie
         (`resolver.NO_OBJECT_CARD_FILETYPES` — EXIF nie zna `OBJECT` ani RA/DEC). Osobny kubełek,
-        bo osobna droga naprawy: RĘCZNE przypisanie, nigdy karta w pliku.
+        bo osobna droga naprawy: RĘCZNE przypisanie, nigdy karta w pliku. Od S4 kubełek DRĄŻY
+        (`nameless_raw_frames`) i niesie akcję, więc licznik jest DŁUGOŚCIĄ tego drążenia
+        (D-PD-10) — do S4 był ostatnim wyłomem wobec tej reguły w tym pliku: osobny `COUNT`
+        pokazywałby inną liczbę niż lista, którą kubełek otwiera. Kotwica akceptacji
+        (`resolver.nameless_raw_lights`) zostaje osobnym literałem po stronie rdzenia i równość
+        całej trójki pinuje test (bramka 13).
       - `nameless_stacks_count`: jak wyżej, ale to GOTOWY OBRAZ po integracji (`kind='master_light'`,
         droga „Stosy" — I-2b/D-P-I-5). Osobny kubełek, bo osobna POPULACJA — nie dlatego, że nie ma
         drogi naprawy. Od D-0802-1 (2026-08-02) droga jest ta sama co u lightów (karta `OBJECT`
@@ -278,6 +282,7 @@ def review_queue(con):
     # COUNT — dwa literały rozjechałyby się przy pierwszej zmianie kształtu (kubełek pokazywałby
     # inną liczbę niż lista, którą otwiera).
     nameless = nameless_frames(con)
+    raw = nameless_raw_frames(con)              # licznik = długość drążenia (D-PD-10), jak wyżej
     stosy = nameless_stack_frames(con)          # licznik = długość drążenia (D-PD-10), jak wyżej
     # Szczebel ścieżki wciągnął SŁOWNIK obiektów własnych do read-modelu kolejki, a słownik jest
     # plikiem CZŁOWIEKA i jego edycja to operacja wspierana. Literówka w assecie ma zostać
@@ -290,7 +295,7 @@ def review_queue(con):
         prop_names = prop_frames = None
     st = review_state(con)
     return {"object_review": object_review, "nameless_count": len(nameless),
-            "nameless_raw_count": nameless_raw_lights(con),
+            "nameless_raw_count": len(raw),
             "nameless_stacks_count": len(stosy),
             "path_proposed_names": prop_names,
             "path_proposed_frames": prop_frames,
@@ -373,6 +378,48 @@ def nameless_frames(con):
     ).fetchall()
 
 
+def nameless_raw_frames(con):
+    """Drążenie kubełka „bez nazwy, format bez karty (RAW)" (S4) — bliźniak `nameless_frames`
+    o jednym słowie różnicy: `filetype IN NO_OBJECT_CARD_FILETYPES` zamiast `NOT IN`.
+
+    Do S4 ten kubełek był wierszem INFORMACYJNYM: droga naprawy istniała (ręczne „Przypisz
+    obiekt…"), ale wisiała przy pozycji `object_raw`, a RAW `object_raw` NIE MA z definicji —
+    czyli mechanizm był bez powierzchni. Drążenie jest połową tej powierzchni: bez niego pozycja
+    zapala przycisk, który zapisze grupę, której user nigdy nie zobaczył.
+
+    ROZŁĄCZNY z `nameless_frames` po FORMACIE i z `nameless_stack_frames` po `kind` — partycja
+    `review_queue` liczy wszystkie trzy i zachodzące zbiory rozspójniłyby ją o własną liczbę.
+
+    RÓWNOŚĆ Z KOTWICĄ RDZENIA (bramka 13): `len()` tego wyniku == `resolver.nameless_raw_lights`.
+    Dwa literały, bo warstwy są dwie i zależność idzie w jedną stronę — jak przy `nameless_frames`.
+
+    Kolumny, cel przez `MIN(id) … present = 1` i `ORDER BY` — jak w `nameless_frames` (ten sam
+    panel `_fill_frames` je czyta; wąski SELECT wywala render na pierwszym wierszu). Cel jest tu
+    MARTWĄ literą dla writebacku (RAW jest read-only — `macro.resolve_target` go odrzuca), ale
+    kolumna `path` niesie folder, po którym user rozpoznaje grupę na ekranie. Zwraca: frame_id,
+    sha1_data, filetype, date_obs, telescope_label, telescop_canon, camera_model, location_id,
+    path, n_present."""
+    return con.execute(
+        "SELECT f.id AS frame_id, f.sha1_data, f.filetype, h.date_obs, "
+        "       t.label AS telescope_label, t.telescop_canon, "
+        "       cam.model_canon AS camera_model, "
+        "       l.id AS location_id, l.path, "
+        "       (SELECT COUNT(*) FROM location WHERE frame_id = f.id AND present = 1) AS n_present "
+        "FROM frame f JOIN header h ON h.frame_id = f.id "
+        "LEFT JOIN config c ON c.id = f.config_id "
+        "LEFT JOIN telescope_canonical tc ON tc.id = c.telescope_id "
+        "LEFT JOIN telescope t ON t.id = tc.canon_id "
+        "LEFT JOIN camera cam ON cam.id = f.camera_id "
+        "LEFT JOIN location l ON l.id = (SELECT MIN(id) FROM location "
+        "                                WHERE frame_id = f.id AND present = 1) "
+        "WHERE f.kind = 'light' AND f.object_id IS NULL "
+        "  AND h.object_raw IS NULL "
+        "  AND f.filetype IN (SELECT value FROM json_each(?)) "
+        "ORDER BY l.path, f.id",
+        (json.dumps(list(NO_OBJECT_CARD_FILETYPES)),)
+    ).fetchall()
+
+
 def nameless_stack_frames(con):
     """Drążenie kubełka „gotowe stosy bez nazwy" (D-0802-1, P6d) — bliźniak `nameless_frames`
     o jednym słowie różnicy: `kind='master_light'`.
@@ -442,6 +489,17 @@ def path_proposal_frames(con, frame_ids):
         "ORDER BY l.path, f.id",
         (json.dumps([int(i) for i in frame_ids]),)
     ).fetchall()
+
+
+def object_id_by_canon(con, canon):
+    """`object.id` dla kanonu albo None — TĄ SAMĄ frazą, której użyje zapis (`repo.user_assign_object`).
+
+    Dialog przypisania nie może brać id z `library_objects`: tamten read-model ma `JOIN frame`, więc
+    obiekt BEZ klatek (po odpięciu, po cofnięciu, po zasianiu z assetu) dla niego nie istnieje. Wtedy
+    pre-check konfliktu aliasu porównywał `alias.object_id` z `None` i meldował konflikt tam, gdzie
+    klinga zapisałaby bez mrugnięcia — komunikat kłamiący o przyczynie, przy poprawnym kluczu."""
+    row = con.execute("SELECT id FROM object WHERE canon = ?", (canon,)).fetchone()
+    return row["id"] if row is not None else None
 
 
 def alias_target(con, alias_norm):

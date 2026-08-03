@@ -175,6 +175,12 @@ CATALOG = {
         "pl": "Wskaż, co ta nazwa z nagłówka oznacza — alias zapamięta ją na przyszłość",
         "en": "Say what this header name means — the alias remembers it for the future",
     },
+    # RAW: droga naprawy jest JEDNA i to ta — format nie ma karty, więc „Napraw nagłówek…" nigdy
+    # się tu nie odezwie. Tooltip mówi, czego okno oczekuje, bo grupa nie ma nazwy do zacytowania.
+    "object.assign_tip_raw": {
+        "pl": "Format nie ma karty OBJECT — nazwij te klatki ręką (np. LMC albo NGC 7635)",
+        "en": "The format has no OBJECT card — name these frames by hand (e.g. LMC or NGC 7635)",
+    },
     "object.assign_tip_card": {
         "pl": "Dla tego kubełka naprawą jest karta OBJECT w PLIKU — użyj „Napraw nagłówek…”",
         "en": "For this bucket the fix is the OBJECT card in the FILE — use “Repair header…”",
@@ -263,12 +269,20 @@ CATALOG = {
         "pl": " ({n} pominięte — zajęte między dialogiem a zapisem)",
         "en": " ({n} skipped — taken between dialog and write)",
     },
+    "object.assign_nothing": {
+        "pl": "Nic nie zaznaczono w panelu klatek — zero zapisu.",
+        "en": "Nothing selected in the frames panel — nothing written.",
+    },
     "object.alias_no_alnum": {
         "pl": "Nazwa „{name}” nie ma znaków alfanumerycznych — nie może być zapamiętanym aliasem.",
         "en": "Name „{name}” has no alphanumeric characters — it cannot be a remembered alias.",
     },
     "object.frames_nameless": {
         "pl": "Klatki bez nazwy w nagłówku ({n})", "en": "Frames with no name in header ({n})",
+    },
+    "object.frames_nameless_raw": {
+        "pl": "Klatki bez nazwy — format bez karty OBJECT ({n})",
+        "en": "Frames with no name — format has no OBJECT card ({n})",
     },
     "object.frames_nameless_stacks": {
         "pl": "Gotowe stosy bez nazwy w nagłówku ({n})",
@@ -339,9 +353,25 @@ CATALOG = {
                "many": "Grupa „{name}” — {n} klatek."},
         "en": {"one": "Group „{name}” — {n} frame.", "other": "Group „{name}” — {n} frames."},
     },
+    # Grupa BEZ zeznania (kubełek RAW, S4): nagłówek nie ma nazwy do zacytowania. Obietnicy
+    # „alias zostanie zapamiętany" tu NIE MA i to jest zamierzone — dla nazwy z gramatyki
+    # katalogowej klucz aliasu nie powstaje, więc zdanie byłoby nieprawdziwe w najczęstszym geście.
+    "assign.group_head_nameless": {
+        "pl": {"one": "{n} klatka bez nazwy w metadanych (format bez karty OBJECT).",
+               "few": "{n} klatki bez nazwy w metadanych (format bez karty OBJECT).",
+               "many": "{n} klatek bez nazwy w metadanych (format bez karty OBJECT)."},
+        "en": {"one": "{n} frame with no name in metadata (format has no OBJECT card).",
+               "other": "{n} frames with no name in metadata (format has no OBJECT card)."},
+    },
     "assign.alias_remembered": {
         "pl": "Alias zostanie zapamiętany: nowe klatki z tą nazwą przypisze resolver.",
         "en": "The alias will be remembered: the resolver will assign new frames with this name.",
+    },
+    # Nazwa spoza katalogów (słownik obiektów własnych): kolumna „Katalog" zostaje PUSTA i to jest
+    # stan poprawny. Nota mówi to przed zapisem, żeby pusta komórka nie czytała się jak zgubione pole.
+    "assign.own_object_note": {
+        "pl": "„{canon}” to obiekt własny — spoza katalogów, więc kolumna „Katalog” zostanie pusta.",
+        "en": "„{canon}” is an own object — outside the catalogs, so the „Catalog” column stays empty.",
     },
     "assign.catalog_note": {
         "pl": "Ta nazwa rozwiązuje się katalogowo — katalog bije alias: nowe klatki "
@@ -351,23 +381,39 @@ CATALOG = {
     },
     "assign.existing_object": {"pl": "Istniejący obiekt:", "en": "Existing object:"},
     "assign.pick_object": {"pl": "— wybierz obiekt —", "en": "— pick object —"},
+    # Od S4 pole przyjmuje KAŻDĄ nazwę, którą rozpozna przebieg (oznaczenie katalogowe, nazwa
+    # potoczna, słownik obiektów własnych, nazwa nauczona aliasem) — etykieta mówiąca „oznaczenie
+    # katalogowe" kłamałaby o regule i odstraszała od jedynej drogi dla `LMC`.
     "assign.new_designation": {
-        "pl": "albo nowe oznaczenie katalogowe (wypełnione nadpisuje wybór z listy):",
-        "en": "or a new catalog designation (if filled, it overrides the list selection):",
+        "pl": "albo nowa nazwa (wypełnione nadpisuje wybór z listy):",
+        "en": "or a new name (if filled, it overrides the list selection):",
     },
-    "assign.designation_placeholder": {"pl": "np. IC 1795", "en": "e.g. IC 1795"},
+    "assign.designation_placeholder": {"pl": "np. IC 1795 albo LMC", "en": "e.g. IC 1795 or LMC"},
     "assign.accept_btn": {
         "pl": {"one": "Przypisz {n} klatkę", "few": "Przypisz {n} klatki",
                "many": "Przypisz {n} klatek"},
         "en": {"one": "Assign {n} frame", "other": "Assign {n} frames"},
     },
-    "assign.unknown_designation": {
-        "pl": "Nie rozpoznaję oznaczenia katalogowego: „{text}”.",
-        "en": "Unrecognized catalog designation: „{text}”.",
+    # Komunikat MUSI mówić o regule, która realnie odrzuciła nazwę: od S4 bramką jest cała drabina
+    # (`resolver.name_resolves`), nie sama gramatyka katalogowa. Dawne „nie rozpoznaję oznaczenia
+    # katalogowego" kłamałoby o przyczynie dla nazwy potocznej i dla wpisu słownika.
+    "assign.unknown_name": {
+        "pl": "Nie rozpoznaję nazwy „{text}” — resolver nie umie jej rozwiązać. "
+              "Podaj oznaczenie katalogowe, nazwę potoczną albo nazwę ze słownika obiektów własnych.",
+        "en": "Unrecognized name „{text}” — the resolver cannot resolve it. "
+              "Enter a catalog designation, a common name, or a name from the own-objects dictionary.",
+    },
+    # Słownik obiektów własnych jest plikiem CZŁOWIEKA — literówka w nim ma zostać ZGŁOSZONA, nie
+    # wywalić okno tracebackiem. Bliźniak `object.path_proposed_broken` po stronie kolejki.
+    "assign.dictionary_broken": {
+        "pl": "Słownik obiektów własnych ma błąd (objects_own.json) — popraw plik, żeby nazwy "
+              "dały się rozpoznać.",
+        "en": "The own-objects dictionary has an error (objects_own.json) — fix the file so names "
+              "can be resolved.",
     },
     "assign.pick_or_designate": {
-        "pl": "Wybierz istniejący obiekt albo podaj oznaczenie katalogowe.",
-        "en": "Pick an existing object or enter a catalog designation.",
+        "pl": "Wybierz istniejący obiekt albo podaj nazwę.",
+        "en": "Pick an existing object or enter a name.",
     },
     "assign.alias_conflict": {
         "pl": "Alias dla tej nazwy wskazuje już obiekt „{target}” — wybierz go z listy.",

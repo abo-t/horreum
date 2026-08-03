@@ -8,7 +8,7 @@ wielkości i odpowiednich filtrach". Cztery fakty składane w jeden wiersz: czy 
 WYKONALNOŚĆ JEST TYPO-ZALEŻNA (D-0731-10): galaktyka potrzebuje rozmiaru I magnitudo, mgławica
 emisyjna wyłącznie rozmiaru (Sh2 bywa „mag 20" i świetnie wychodzi w Ha — filtr po jasności wyciął
 by rdzeń archiwum), ciemna ma własny, wyższy próg rozmiaru. Typ spoza taksonomii ODPADA jawnie:
-`t` w `curated.json` pisze człowiek, a cicha przynależność do klasy emisyjnej dałaby mu przepustkę
+`t` w pliku człowieka pisze człowiek, a cicha przynależność do klasy emisyjnej dałaby mu przepustkę
 bez żadnego kryterium. Progi są ARGUMENTAMI — asset jest pulą, nie decyzją.
 
 SUFITU ROZMIARU NIE MA (D-0731-8): cel większy od kadru dostaje LICZBĘ PANELI. „Nie mieści się"
@@ -115,7 +115,7 @@ _NARROWBAND_FILTERS = frozenset({"Ha", "OIII", "SII"})
 
 @dataclass(frozen=True)
 class Target:
-    """Rekord assetu po walidacji i koercji. `curated.json` pisze CZŁOWIEK, więc `"a": "15"` musi
+    """Rekord assetu po walidacji i koercji. Plik człowieka pisze CZŁOWIEK, więc `"a": "15"` musi
     zachować się jak `15.0` (kanon W3) — koercja jest tu regułą, nie ozdobą."""
     canon: str
     type: str
@@ -282,7 +282,7 @@ def _load_stamped(layers, _stamp):
 
 def _target(raw, layer):
     """Rekord → `Target` z koercją. Pola OBOWIĄZKOWE (`c`/`t`/`r`/`d`/`a`) po koercji nie mogą być
-    puste — `curated.json` pisze człowiek, a cel bez rozmiaru albo bez typu przeszedłby przez pół
+    puste — plik człowieka pisze człowiek, a cel bez rozmiaru albo bez typu przeszedłby przez pół
     planera i wysypał się dopiero na kadrowaniu, daleko od przyczyny (EXPECT)."""
     fields = {"canon": _to_text(raw.get("c")), "type": _to_text(raw.get("t")),
               "ra_deg": _to_float(raw.get("r")), "dec_deg": _to_float(raw.get("d")),

@@ -1204,6 +1204,21 @@ CATALOG = {
               "assigned {obj_assign} · review {obj_review} (distinct {obj_distinct}) · "
               "filters {filters}",
     },
+    # Doklejka o SŁOWNIKU obiektów własnych — osobny klucz i wyłącznie przy niezerowym ruchu
+    # (QUIET: przy niezmienionym assecie każdy przebieg jest ciszą, więc stałe „słownik: 0" byłoby
+    # szumem w każdej dostawie). Bez tej linii cztery liczniki przebiegu nie miały ŻADNEJ
+    # powierzchni: odpięcie N klatek po edycji assetu i kolizja nazwy przechodziły bez słowa,
+    # a kolizja jest jedyną rzeczą, którą user ma tu do rozstrzygnięcia.
+    "pipeline.fmt.resolve_own": {
+        "pl": "  (słownik: +{seeded} nazw · −{retired} wycofanych · {unassigned} klatek wróciło "
+              "do kolejki)",
+        "en": "  (dictionary: +{seeded} names · −{retired} retired · {unassigned} frames back "
+              "in the queue)"},
+    "pipeline.fmt.resolve_own_conflict": {
+        "pl": "  ⚠ {n} nazw ze słownika należy już do innego obiektu — pominięte, "
+              "rozstrzygnij ręcznie",
+        "en": "  ⚠ {n} dictionary names already belong to another object — skipped, "
+              "resolve by hand"},
     "pipeline.fmt.calibrate": {
         "pl": "[kalibracja] klatki {frames} · przepisy {prof_prop}/{prof_assign} · "
               "fakty ze ścieżki {facts} · bez kompletu {incomplete}",

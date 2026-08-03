@@ -138,7 +138,7 @@ CREATE TABLE object (
     id      INTEGER PRIMARY KEY,
     canon   TEXT NOT NULL UNIQUE,               -- NGC4258|Sh2-131|Moon|C/2025 A6 (Lemmon)
     catalog TEXT,                               -- NGC|IC|Sh2|Messier|solar|comet|region
-    kind    TEXT                                -- deep_sky|solar_system|comet|region
+    kind    TEXT                                -- WARTOŚCI: resolve/objects.py (OBJECT_KINDS)
 );
 
 CREATE TABLE object_alias (

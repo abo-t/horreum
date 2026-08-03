@@ -154,6 +154,10 @@ def run_resolver(con, now):
             "SELECT a.alias_norm AS key, a.object_id AS oid FROM object_alias a").fetchall():
         aliases[a["key"]] = a["oid"]
 
+    # Kanon → id, tym samym snapshotem co aliasy: szczebel słownika musi odróżnić „ta nazwa należy
+    # już do MOJEGO obiektu" (nic do zrobienia) od „należy do CUDZEGO" (ustąp ręce, R-S1-2).
+    canons = {c["canon"]: c["id"] for c in con.execute("SELECT id, canon FROM object").fetchall()}
+
     unresolved = {}        # object_raw -> liczba (tylko light/master_light, obecny-nierozpoznany)
     filter_items = []      # (frame_id, filter_canon) do backfillu zbiorczego
     for r in rows:
@@ -169,7 +173,27 @@ def run_resolver(con, now):
                 # solar/komety PRZED deep-sky: mają własne ID (nie katalogi mgławic), krok 5a.
                 ident = resolve_solar(r["obj"]) or resolve_object(r["obj"])
                 alias_oid = None
-                if ident is None:
+                if ident is not None and ident.source == "curated":
+                    # SŁOWNIK USTĘPUJE RĘCE (R-S1-2). Szczebel słownika stoi WYŻEJ niż alias, więc
+                    # dla nazwy, którą user przypisał wcześniej pod własnym kanonem, przejąłby jego
+                    # klatki i ROZSZCZEPIŁ grupę: `object_source='user'` chroni tylko tę klatkę,
+                    # którą ręka dotknęła, a rodzeństwo z tym samym `object_raw` szłoby pod nowy
+                    # kanon. Alias zostawał przy starym obiekcie, więc tabela aliasów i klatki
+                    # mówiły co innego — a `sync_own_aliases` w tym samym przebiegu meldował
+                    # „alias zostaje przy dotychczasowym obiekcie", czyli raport przeczył zapisowi.
+                    # Zmierzone przed naprawą: grupa 3 klatek „WR 134" rozpadała się na 1 + 2.
+                    # Gramatyki katalogowej to NIE dotyczy — tam szczebel stoi ponad aliasem od
+                    # dawna i ta precedencja jest zamierzona (nazwa katalogowa jest faktem o niebie,
+                    # nie zdaniem człowieka o archiwum).
+                    # Ustępujemy WYŁĄCZNIE cudzemu obiektowi. Warunek „alias istnieje" był za
+                    # szeroki: po pierwszym przebiegu słownik zasiewa własny alias, więc drugi
+                    # przebieg przemalowywałby `curated` → `alias` i emitował parę eventów —
+                    # idempotencja padała na własnej obronie.
+                    key = ident.alias_norm
+                    zajety = aliases.get(key) if key else None
+                    if zajety is not None and zajety != canons.get(ident.canon):
+                        ident, alias_oid = None, zajety
+                if ident is None and alias_oid is None:
                     # ALIAS po katalogu, PRZED regionem (#8, P4): alias = jawna wiedza o NAZWIE,
                     # region = inferencja z geometrii. Pusty klucz (norm_alnum("---") == "") pomija
                     # lookup — alias "" łapałby KAŻDĄ niealfanumeryczną nazwę (D-P4-2, R#3).
@@ -369,7 +393,8 @@ def name_resolves(con, text):
     Dlaczego nie sam `resolve_object` (adjudykacja bramki, 2026-08-01): pytanie „czy po zapisie oś
     się wypełni" ma w przebiegu TRZY odpowiedzi twierdzące, a bramka znała jedną. Zmierzone odmowy
     fałszywe: `Moon`/`Jupiter`/`C/2023 A3` (solar — archiwum ma `_COMETS` i `_SOLAR` jako realne
-    lighty) oraz nazwa świeżo nauczona aliasem (`WR134` — cel z `data/curated.json`, bez numeru
+    lighty) oraz nazwa świeżo nauczona aliasem (od S1 `WR134` zna już SŁOWNIK, więc przykładem
+    jest dowolna nazwa nauczona ręką — bez numeru
     katalogowego). Obie populacje resolver rozwiązuje, więc odmowa zapisu była nieprawdą o własnym
     zachowaniu."""
     if resolve_solar(text) is not None or resolve_object(text) is not None:

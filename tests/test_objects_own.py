@@ -4,7 +4,7 @@ rozjechać osobno: szczebel drabiny (kanon z nazwy), kontrakt assetu (dwie klasy
 plik dla resolvera i planera) oraz cykl zasiewu aliasów (zasiej → cisza → migracja assetu odpina).
 """
 import pytest
-from horreum import db, resolver, targets
+from horreum import db, repo, resolver, targets
 from horreum.audit import entity_event_parity, light_population_closure, object_source_audit
 from horreum.resolve import objects as ro
 from horreum.resolve.objects import ALIAS_SOURCES, OBJECT_SOURCES, resolve_object
@@ -85,10 +85,32 @@ def test_kolizja_nazw_w_slowniku_wybucha(monkeypatch):
     to na zawsze; unikalność KANONÓW pilnuje producent, ale nazwy `n` widzi dopiero indeks."""
     monkeypatch.setattr(ro, "load_own_objects", lambda: (
         {"c": "AAA", "n": ["Wspolna"]}, {"c": "BBB", "n": ["Wspolna"]}))
-    ro._own_index.cache_clear()
+    ro._own_index_stamped.cache_clear()
     with pytest.raises(ValueError, match="dwa rekordy"):
         ro._own_index()
-    ro._own_index.cache_clear()
+    ro._own_index_stamped.cache_clear()
+
+
+def test_edycja_slownika_odslania_sie_bez_restartu(tmp_path, monkeypatch):
+    """Cache zna `mtime_ns`, więc podmiana pliku w trakcie sesji jest widoczna przy następnym
+    wołaniu. Bez tego „edycja assetu = operacja migracyjna" nie odpalała w żywym oknie: planer
+    (który stempluje od dawna) widziałby nową treść, a resolver starą — dwaj czytelnicy JEDNEGO
+    pliku rozjechani w oknie procesu."""
+    import json as _json
+    import os
+    plik = tmp_path / "objects_own.json"
+    plik.write_text(_json.dumps({"targets": [{"c": "AAA", "n": ["Pierwsza"]}]}), encoding="utf-8")
+    monkeypatch.setattr(ro.resources, "files", lambda _pkg: tmp_path)
+    ro._load_own_stamped.cache_clear()
+    ro._own_index_stamped.cache_clear()
+
+    assert resolve_object("Pierwsza").canon == "AAA"
+    plik.write_text(_json.dumps({"targets": [{"c": "BBB", "n": ["Druga"]}]}), encoding="utf-8")
+    os.utime(plik, ns=(plik.stat().st_atime_ns, plik.stat().st_mtime_ns + 1_000_000_000))
+    assert resolve_object("Pierwsza") is None, "stary wpis żyje mimo podmiany pliku"
+    assert resolve_object("Druga").canon == "BBB"
+    ro._load_own_stamped.cache_clear()
+    ro._own_index_stamped.cache_clear()
 
 
 # ─────────────────────────────────────────────────────────── enum źródeł (jeden właściciel)
@@ -266,3 +288,43 @@ def test_rozklad_lapie_klatke_bez_naglowka():
     c = light_population_closure(con, resolver.delta_report(con))
     assert c.headerless == 1 and c.ok
     assert sum(c.buckets.values()) == c.total - 1     # sześć kubełków SAMO by się nie domknęło
+
+
+def test_slownik_ustepuje_nazwie_nauczonej_reka():
+    """R-S1-2 (P1 z recenzji diffu S1). Szczebel słownika stoi WYŻEJ niż alias, więc dla nazwy,
+    którą user przypisał wcześniej pod WŁASNYM kanonem, przejmowałby jego klatki — a `user` chroni
+    tylko tę jedną, której ręka dotknęła. Grupa 3 klatek „WR 134" rozpadała się na 1 + 2 pod dwoma
+    kanonami, przy czym tabela aliasów dalej wskazywała stary obiekt: zapis przeczył raportowi."""
+    con = _baza(["WR 134", "WR 134", "WR 134"])
+    repo.user_assign_object(con, alias_norm="WR134", canon="MojaMgla", catalog=None,
+                            kind="deep_sky", frame_ids=[1], now=NOW)
+    resolver.run_resolver(con, NOW)
+
+    kanony = {r[0] for r in con.execute("SELECT canon FROM object").fetchall()}
+    assert kanony == {"MojaMgla"}, "słownik założył drugi kanon obok nazwy nauczonej ręką"
+    oid = con.execute("SELECT id FROM object WHERE canon = 'MojaMgla'").fetchone()[0]
+    assert [r[0] for r in con.execute(
+        "SELECT object_id FROM frame ORDER BY id").fetchall()] == [oid, oid, oid]
+    # …i alias dalej opisuje ten sam obiekt co klatki
+    assert con.execute("SELECT object_id FROM object_alias WHERE alias_norm = 'WR134'"
+                       ).fetchone()[0] == oid
+
+
+def test_ustepowanie_nie_dotyczy_wlasnego_aliasu():
+    """Falsyfikator obrony ZA SZEROKIEJ: gdyby szczebel ustępował na sam fakt istnienia aliasu,
+    drugi przebieg przemalowałby własne klatki z `curated` na `alias` i wyemitował parę eventów —
+    idempotencja padłaby na własnym guardzie (tak było przy pierwszym podejściu)."""
+    con = _baza(["LMC"])
+    resolver.run_resolver(con, NOW)
+    assert con.execute("SELECT object_source FROM frame WHERE id = 1").fetchone()[0] == "curated"
+    resolver.run_resolver(con, NOW)
+    assert con.execute("SELECT object_source FROM frame WHERE id = 1").fetchone()[0] == "curated"
+
+
+def test_polska_nazwa_z_diakrytykiem_trafia():
+    """`norm_alnum` KASUJE znaki spoza [A-Z0-9], a `ł` (U+0142) nie ma dekompozycji NFKD, więc nie
+    ratuje go nawet `norm_ascii`: „Obłok" → `OBOK`, „Oblok" → `OBLOK`. Dwa różne klucze, więc
+    poprawna pisownia polska musi stać w assecie OBOK wariantu ASCII — inaczej obietnica „wpisujesz
+    nazwę potoczną i masz klatki" nie działa dla jedynej polskiej nazwy w słowniku."""
+    assert resolve_object("Wielki Obłok Magellana").canon == "LMC"
+    assert resolve_object("Wielki Oblok Magellana").canon == "LMC"

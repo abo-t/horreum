@@ -50,12 +50,20 @@ Jeden rekord = jedna linia (czytelny diff przy podmianie katalogu), plik pozosta
 Klucze: `c` kanon · `t` typ · `r`/`d` RA/Dec J2000 [°] · `a`/`b` oś większa/mniejsza [′] ·
 `m` magnitudo (+`mb`, gdy pochodzi z B — B−V galaktyk to +0,7…1,0 mag) · `n` aliasy i nazwy potoczne.
 
-## `curated.json` — cele bez wpisu katalogowego
+## `../resolve/data/objects_own.json` — obiekty bez wpisu katalogowego
 
-**Plik człowieka.** `build_catalog.py` go waliduje (schemat + unikalność kanonu w sumie plików)
-i **nigdy nie nadpisuje**; scalanie z automatem należy do loadera (T3), gdzie curated wygrywa.
-Każdy wpis niesie `why` (dlaczego automat go nie ma), `provenance` (skąd pozycja) i `size_source`
-(`user`, gdy rozmiar jest oszacowaniem, a nie pomiarem).
+**Plik człowieka** (do 2026-08-03 `horreum/data/curated.json`; przeniesiony przy D-OW-1/E′, bo
+czytają go DWIE warstwy — planer bierze z niego cele, resolver same nazwy).
+`build_catalog.py` go waliduje (schemat + unikalność kanonu w sumie plików) i **nigdy nie
+nadpisuje**; jego BRAK jest błędem budowy, nie pustą listą. Scalanie z automatem należy do loadera
+(T3), gdzie warstwa `curated` wygrywa. Każdy wpis niesie `why` (dlaczego automat go nie ma),
+`provenance` (skąd pozycja) i — gdy jest celem — `size_source` (`user`, gdy rozmiar jest
+oszacowaniem, a nie pomiarem).
+
+**LICENCJA: MIT, jak kod.** Ten plik jest pisany RĘKĄ i nie zawiera danych pochodnych z OpenNGC
+ani z żadnego źródła CC-BY-SA — rozdział „kod MIT / dane CC-BY-SA" (D-T2-f) go nie obejmuje.
+Wpis, który kiedyś przepisze pozycję z katalogu na tej licencji, musi to odnotować we własnym
+polu `provenance` i wtedy dziedziczy jej warunki.
 
 ## Odczyt w kodzie
 

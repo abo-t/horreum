@@ -19,7 +19,9 @@ MIGRACYJNA, nie zwykły re-run.
 
 KIND-AWARENESS mieszka w orkiestracji (`horreum.resolver`), nie tu: ta funkcja ocenia sam string.
 Solar/komety (Lemmon/Księżyc/planety) rozwiązuje `resolve.solar` (krok 5a), wołany PRZED `resolve_object`
-w orkiestracji — ta funkcja pozostaje deep-sky-only. `kind='deep_sky'` dla wszystkiego, co tu wychodzi.
+w orkiestracji — ta funkcja pozostaje deep-sky-only. `kind='deep_sky'` dla wszystkiego, co wychodzi
+z gramatyki katalogowej i z `_COMMON`; szczebel SŁOWNIKA zwraca `own` (obiekt spoza katalogów bierze
+rodzaj z wpisu, `OBJECT_KINDS`).
 
 `_COMMON` = uniwersalia (wiedza o niebie jako KOD, jak deklaruje `resolve/__init__`) — NIE dane
 per-archiwum. Rośnie po firsthand; seed = przypadki nazwane w spec §3.5 + potwierdzone firsthand
@@ -54,6 +56,11 @@ ALIAS_SOURCES = frozenset({"header", "catalog_xref", "common_name", "curated", "
 # (trafienie zapisanej wcześniej równoważności) i `user` (gest człowieka, pomija całą drabinę).
 OBJECT_SOURCES = ALIAS_SOURCES | {"alias", "region"}
 
+# …i TA SAMA reguła dla `object.kind`, bo segment domykający rozjazd źródeł wprowadził własny na
+# rodzaju: szczebel słownika zwraca `own`, którego DDL nie znał. Wartość spoza tej stałej znaczy,
+# że ktoś dopisał rodzaj bez powiedzenia o tym drugiej stronie.
+OBJECT_KINDS = frozenset({"deep_sky", "solar_system", "comet", "region", "own"})
+
 # Nazwy potoczne → oznaczenie katalogowe (przed xref; np. Heart→IC1805, Bode's Galaxy→M81→NGC3031).
 # Klucze dopasowywane przez `norm_alnum` (apostrof/spacja/„the"/deskryptor nieistotne).
 _COMMON = {
@@ -81,7 +88,7 @@ class ObjectIdentity:
     Czysta dana, NIE zapis."""
     canon: str           # NGC4258 | Sh2-131 | M45 …
     catalog: object      # NGC | IC | Sh2 | Messier | … (None gdy nieznany prefiks)
-    kind: str            # deep_sky (solar/comet poza pierwszym przebiegiem)
+    kind: str            # ∈ OBJECT_KINDS: deep_sky | own (solar/comet poza pierwszym przebiegiem)
     source: str          # header | catalog_xref | common_name | solar | comet | region
     alias_norm: object   # znormalizowana forma surowa (klucz object_alias); None gdy rozpoznanie
                          # NIE pochodzi z nazwy (region — ze współrzędnych) → resolver pomija alias
@@ -95,21 +102,44 @@ def _common_canon(raw):
     return _COMMON.get(norm_alnum(key))
 
 
-@functools.lru_cache(maxsize=1)
+def _own_stamp():
+    """`mtime_ns` słownika jako klucz cache'u — bez niego edycja assetu NIE ODSŁANIA SIĘ w żywej
+    sesji, a to jest dokładnie funkcja, dla której ten plik powstał („edycja = operacja
+    migracyjna"). Wzorzec i uzasadnienie: `targets._asset_stamp` — DRUGI czytelnik TEGO SAMEGO
+    pliku stempluje od dawna, więc bez tego jedna sesja pokazywałaby planerowi nową treść, a
+    resolverowi starą. Asset spoza systemu plików nie ma `stat` → `None` (cache jak przed zmianą)."""
+    try:
+        return (resources.files("horreum.resolve.data")
+                .joinpath("objects_own.json").stat().st_mtime_ns)
+    except (OSError, AttributeError, NotImplementedError):
+        return None
+
+
 def load_own_objects():
-    """Wczytaj `objects_own.json` (cache jak `catalog.load_catalog_xref`). Zwraca krotkę surowych
-    rekordów — mutowalna lista pozwoliłaby wołającemu zmutować cache.
+    """Wczytaj `objects_own.json`. Zwraca krotkę surowych rekordów — mutowalna lista pozwoliłaby
+    wołającemu zmutować cache.
 
     Plik jest WSPÓLNY z planerem (D-OW-1/E′): tam czyta go `targets._load_stamped`, filtrując do
     rekordów-celów. Rdzeń bierze z niego NAZWY i nie pyta o pola celu — obiekt bez rozmiaru jest
     dla resolvera pełnoprawny, dla planera nie istnieje."""
+    return _load_own_stamped(_own_stamp())
+
+
+@functools.lru_cache(maxsize=2)
+def _load_own_stamped(_stamp):
+    """`_stamp` uczestniczy WYŁĄCZNIE w kluczu cache'u (stąd podkreślenie) — jak `targets`."""
     text = (resources.files("horreum.resolve.data")
             .joinpath("objects_own.json").read_text(encoding="utf-8"))
     return tuple(json.loads(text)["targets"])
 
 
-@functools.lru_cache(maxsize=1)
 def _own_index():
+    """Indeks nazw → tożsamość, przeliczany po zmianie pliku (stempel jak wyżej)."""
+    return _own_index_stamped(_own_stamp())
+
+
+@functools.lru_cache(maxsize=2)
+def _own_index_stamped(_stamp):
     """`norm_alnum(nazwa)` → `(kanon, catalog, kind)`, dla kanonu ORAZ każdej nazwy potocznej `n`.
     Indeks liczony raz: drabina pyta o niego per klatka, a plik ma rosnąć.
 
@@ -121,7 +151,11 @@ def _own_index():
         canon = _to_text(rec.get("c"))
         if canon is None:
             raise ValueError("objects_own.json: rekord bez kanonu `c`")
-        entry = (canon, rec.get("catalog"), rec.get("kind") or "own")
+        kind = rec.get("kind") or "own"
+        if kind not in OBJECT_KINDS:
+            raise ValueError(f"objects_own.json: rekord {canon!r} ma rodzaj {kind!r} spoza "
+                             f"OBJECT_KINDS — pole leci wprost do `object.kind`")
+        entry = (canon, rec.get("catalog"), kind)
         for name in (canon, *(rec.get("n") or ())):
             key = norm_alnum(name)
             if not key:

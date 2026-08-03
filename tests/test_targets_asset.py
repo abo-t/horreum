@@ -24,6 +24,7 @@ from importlib import resources
 import pytest
 
 from horreum import targets
+from horreum.resolve import objects as ro
 from horreum.resolve.catalog import catalog_canon, xref
 
 LAYERS = ("core", "cirrus")
@@ -246,3 +247,29 @@ def test_curated_niesie_wr134_bo_zaden_katalog_go_nie_ma(assets):
     wr = _by_canon(_load("curated")["targets"])["WR134"]
     assert wr["size_source"] == "user"
     assert not any("WR" in r["c"].upper() for a in assets.values() for r in a["targets"])
+
+
+def test_nazwy_slownika_nie_kolidują_z_COMMON_ani_z_gramatyką():
+    """Trzeci człon bramki §4/5, którego brakowało („unikalność NAZW `n` wobec aliasów i `_COMMON`").
+
+    Nazwa, którą łapie wcześniejszy szczebel drabiny, czyni wpis słownika MARTWYM: `_common_canon`
+    albo `catalog_canon` odpowie pierwszy, a wpis nigdy się nie odezwie — bez jednego sygnału.
+    Gorzej: `sync_own_aliases` mimo to zasieje alias na swój obiekt albo zgłosi kolizję, więc jedno
+    pytanie dostanie dwie odpowiedzi. Kolizję WEWNĄTRZ pliku łapie `_own_index`; ta jest o kolizji
+    z KODEM."""
+    for r in _load("curated")["targets"]:
+        for nazwa in (r["c"], *(r.get("n") or ())):
+            assert ro._common_canon(nazwa) is None, \
+                f"{nazwa!r} (wpis {r['c']}) łapie _COMMON — szczebel słownika nigdy się nie odezwie"
+            assert catalog_canon(nazwa) is None, \
+                f"{nazwa!r} (wpis {r['c']}) jest oznaczeniem katalogowym — wpis w słowniku martwy"
+
+
+def test_slownik_deklaruje_rodzaj_i_katalog_zgodne_z_osią():
+    """`kind` i `catalog` lecą WPROST do `object` i wypływają do facetu, nazw plików
+    (`naming.py`) oraz drzewa projekcji — więc kształt tych pól jest kontraktem, nie ozdobą."""
+    from horreum.resolve.objects import OBJECT_KINDS
+    for r in _load("curated")["targets"]:
+        assert (r.get("kind") or "own") in OBJECT_KINDS, f"{r['c']}: rodzaj spoza OBJECT_KINDS"
+        assert r.get("catalog") is None, \
+            f"{r['c']}: obiekt spoza gramatyki katalogowej nie ma prawa deklarować katalogu"

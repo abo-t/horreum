@@ -699,9 +699,12 @@ def retire_alias_and_unassign(con, *, object_id, alias_norms, now, actor="resolv
     if not keys:
         return 0, 0
 
+    # ZAKRES = równoważności ZASIANE (`source='curated'`). Kontrakt publicznej klingi nie może
+    # zależeć od tego, że wołający dobrze przefiltrował klucze: bez tego warunku przyszły wołający
+    # skasowałby aliasy nauczone RĘKĄ (`source='user'`), które ten mechanizm ma prawo tylko czytać.
     rows = con.execute(
         "SELECT a.id AS aid, a.alias_norm AS key, a.source AS src FROM object_alias a "
-        "WHERE a.object_id = ?", (object_id,)).fetchall()
+        "WHERE a.object_id = ? AND a.source = 'curated'", (object_id,)).fetchall()
     do_wycofania = [r for r in rows if r["key"] in keys]
 
     # Kandydaci do odpięcia: klatki TEGO obiektu, których źródło pochodzi z NAZWY. Świadka

@@ -909,10 +909,20 @@ class PipelineView(QWidget):
             conf_prop=s.configs_proposed, conf_assign=s.configs_assigned, conf_review=s.config_review)
 
     def _format_resolve(self, s):
-        return i18n.t(
+        """Linia raportu osi obiektu. Ruch SŁOWNIKA obiektów własnych dopisujemy tylko wtedy, gdy
+        zaszedł (QUIET) — ale gdy zaszedł, MUSI być widoczny: edycja assetu odpina klatki, a
+        kolizja nazwy jest jedyną rzeczą w tym przebiegu, którą rozstrzyga człowiek. Bez tej
+        doklejki cztery liczniki `ResolveSummary` nie miały powierzchni w aplikacji okienkowej."""
+        linia = i18n.t(
             "pipeline.fmt.resolve", frames=s.frames, lights=s.light_frames, obj_new=s.objects_new,
             obj_assign=s.objects_assigned, obj_review=s.objects_review,
             obj_distinct=s.objects_unresolved_distinct, filters=s.filters_set)
+        if s.own_aliases_seeded or s.own_aliases_retired or s.own_frames_unassigned:
+            linia += i18n.t("pipeline.fmt.resolve_own", seeded=s.own_aliases_seeded,
+                            retired=s.own_aliases_retired, unassigned=s.own_frames_unassigned)
+        if s.own_alias_conflicts:
+            linia += i18n.t("pipeline.fmt.resolve_own_conflict", n=s.own_alias_conflicts)
+        return linia
 
     def _format_calibrate(self, s):
         """Linia raportu osi przepisu. Powody braku kompletu WYPISUJEMY (nie tylko liczbę): „bez

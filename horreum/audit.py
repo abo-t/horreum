@@ -16,7 +16,7 @@ podniesieniem kotwicy, po czym bramka przestaje łapać regresję prawdziwą.
 """
 from dataclasses import dataclass
 
-from .resolve.objects import ALIAS_SOURCES, OBJECT_SOURCES
+from .resolve.objects import ALIAS_SOURCES, OBJECT_KINDS, OBJECT_SOURCES
 
 
 @dataclass(frozen=True)
@@ -31,7 +31,10 @@ class Parity:
 
     @property
     def ok(self):
-        return self.entities == self.events - self.retracted
+        # `retracted` MUSI mieścić się w emisjach: bez tego brak N emisji i nadmiar N wycofań
+        # znosiłyby się do zielonego — bramka przestałaby łapać dokładnie to, po co powstała.
+        return (self.entities == self.events - self.retracted
+                and 0 <= self.retracted <= self.events)
 
 
 def _events(con, verb):
@@ -119,10 +122,11 @@ class SourceAudit:
     """Wartości osi OBIEKT zastane w bazie wobec stałych, które je deklarują."""
     frame_unknown: tuple      # wartości `frame.object_source` spoza OBJECT_SOURCES
     alias_unknown: tuple      # wartości `object_alias.source` spoza ALIAS_SOURCES
+    kind_unknown: tuple       # wartości `object.kind` spoza OBJECT_KINDS
 
     @property
     def ok(self):
-        return not self.frame_unknown and not self.alias_unknown
+        return not (self.frame_unknown or self.alias_unknown or self.kind_unknown)
 
 
 def object_source_audit(con):
@@ -137,7 +141,10 @@ def object_source_audit(con):
         if r[0] not in OBJECT_SOURCES))
     al = tuple(sorted(r[0] for r in con.execute(
         "SELECT DISTINCT source FROM object_alias").fetchall() if r[0] not in ALIAS_SOURCES))
-    return SourceAudit(frame_unknown=fr, alias_unknown=al)
+    ki = tuple(sorted(r[0] for r in con.execute(
+        "SELECT DISTINCT kind FROM object WHERE kind IS NOT NULL").fetchall()
+        if r[0] not in OBJECT_KINDS))
+    return SourceAudit(frame_unknown=fr, alias_unknown=al, kind_unknown=ki)
 
 
 @dataclass(frozen=True)
@@ -146,10 +153,11 @@ class LightClosure:
     total: int
     buckets: dict
     headerless: int          # light/master_light bez wiersza `header` I bez obiektu
+    filetype_unknown: int    # …i te z zeznaniem, ale bez `filetype` (baza sprzed kolumny)
 
     @property
     def counted(self):
-        return sum(self.buckets.values()) + self.headerless
+        return sum(self.buckets.values()) + self.headerless + self.filetype_unknown
 
     @property
     def ok(self):
@@ -174,10 +182,25 @@ def light_population_closure(con, rep):
         "SELECT count(*) FROM frame f WHERE f.kind IN ('light','master_light') "
         "AND f.object_id IS NULL "
         "AND NOT EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id)").fetchone()[0]
+    # DRUGA klasa ucieczki, obok bezgłowej: predykaty `nameless_*` dzielą populację warunkiem
+    # `filetype IN/NOT IN (…)`, a `NULL` nie spełnia ŻADNEGO z nich (SQL: `NULL NOT IN` → NULL).
+    # Light z zeznaniem, bez obiektu, bez `object_raw` i bez `filetype` wypadał więc z sumy i
+    # wysadzałby to kryterium na bazie sprzed kolumny `filetype`. Dostaje własną liczbę, żeby
+    # klasa się POKAZAŁA — świadomie NIE ruszamy `nameless_lights`, bo to kotwica nawrotu P-D
+    # i zmiana jej predykatu przesunęłaby liczbę, którą tamta bramka pilnuje.
+    # `kind='light'` WYŁĄCZNIE — i to nie jest zawężenie z ostrożności: `nameless_stacks` pyta sam
+    # o `master_light` bez warunku na `filetype`, więc gotowy stos z NULL-em JUŻ tam wpada.
+    # Objęcie go tutaj liczyłoby tę samą klatkę dwa razy i zamieniło kryterium sumy w jego własną
+    # regresję.
+    filetype_unknown = con.execute(
+        "SELECT count(*) FROM frame f JOIN header h ON h.frame_id = f.id "
+        "WHERE f.kind = 'light' AND f.object_id IS NULL "
+        "AND h.object_raw IS NULL AND f.filetype IS NULL").fetchone()[0]
     buckets = {"resolved": rep.object_resolved,
                "resolved_no_raw": rep.object_resolved_no_raw,
                "unresolved": rep.object_unresolved,
                "nameless": rep.object_nameless,
                "nameless_raw": rep.object_nameless_raw,
                "nameless_stacks": rep.object_nameless_stacks}
-    return LightClosure(total=total, buckets=buckets, headerless=headerless)
+    return LightClosure(total=total, buckets=buckets, headerless=headerless,
+                        filetype_unknown=filetype_unknown)

@@ -647,7 +647,8 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
     # z sześciu. Dziś ta klasa jest pusta — kryterium jest tripwirem, nie naprawą.
     closure = light_population_closure(con, rep)
     out(f"    rozkład: {' + '.join(f'{k} {v}' for k, v in closure.buckets.items())}"
-        f" + bez nagłówka {closure.headerless} = {closure.counted} / {closure.total}")
+        f" + bez nagłówka {closure.headerless} + bez filetype {closure.filetype_unknown}"
+        f" = {closure.counted} / {closure.total}")
     crit(f"§5.7a rozkład lightów domyka się do populacji "
          f"({closure.counted} == {closure.total})", closure.ok)
 

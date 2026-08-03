@@ -7,6 +7,21 @@ schemat i API mogą się jeszcze zmieniać.
 ## [Niewydane]
 
 ### Dodane
+- **Obiekty bez numeru katalogowego mają wreszcie własne miejsce — i Horreum je rozpoznaje.**
+  Wielki Obłok Magellana, bańki Wolfa-Rayeta, cele o własnym imieniu: nazwy, których żaden katalog
+  nie zna, bo nie mieszczą się w gramatyce `NGC`/`IC`/`Sh2`. Dotąd program mógł co najwyżej mieć je
+  w spisie celów planera i nadal nie umiał nazwać ani jednej klatki. Teraz jest jeden plik takich
+  obiektów, z którego korzystają OBIE strony: planer bierze z niego cele, a rozpoznawanie nazw —
+  same nazwy. Wpisujesz „Large Magellanic Cloud" albo „LMC" w oknie „Napraw nagłówek…" i program
+  je przyjmuje, zamiast odmawiać. Wpis może być **samą nazwą** — obiekt, którego nie da się
+  zaplanować (LMC z Polski nigdy nie wschodzi), nie zaśmieca planu, ale w bibliotece istnieje.
+- **Nazwy potoczne stają się równoważnościami, a ich wycofanie naprawdę się cofa.** Każda nazwa
+  wpisana obok obiektu trafia do biblioteki jako jego druga nazwa, więc szukanie działa dla
+  wszystkich naraz. Gdy usuniesz nazwę z pliku, program nie zostawia po niej kłamstwa: wycofuje
+  równoważność **i odpina klatki**, które przez nią dostały obiekt — wracają do kolejki, zamiast
+  zostać z nazwą, której już nie ma. Jeżeli nazwa jest już zajęta przez inny obiekt, program jej
+  nie podmienia po cichu: melduje kolizję i zostawia decyzję Tobie.
+
 - **Gotowe obrazy po integracji trafiają wreszcie do biblioteki — nową drogą „Stosy".** W Dostawie
   jest osobna sekcja: wskazujesz korzeń swojego drzewa obróbki, a Horreum wciąga z niego wyłącznie
   pliki `masterLight*.xisf` — bez wersji pochodnych (kadrowanych, po ABE, bez gwiazd). Korzeń jest
@@ -41,12 +56,21 @@ schemat i API mogą się jeszcze zmieniać.
   otwarciu Zbiorów.
 
 ### Naprawione
+- **Rachunek „ile zapisano" przestał kłamać o cofniętych zapisach.** Kontrola spójności porównywała
+  liczbę rzeczy w bazie z liczbą zapisanych zdarzeń, ale nie odejmowała tych, które wycofano —
+  więc po każdym cofnięciu pokazywała rozjazd, który nie był błędem. Teraz odejmuje, a sama reguła
+  jest wołana zarówno przez testy, jak i przez skrypt kontrolny — dotąd żaden test nie mógł jej
+  sprawdzić, bo mieszkała wyłącznie w skrypcie.
+- **Rozkład klatek nieba musi się domykać.** Program dzieli je na sześć rubryk (rozpoznane, bez
+  nazwy, bez karty…) i nic nie sprawdzało, czy razem dają całość — a rozkład, który się nie domyka,
+  wygląda na zielony właśnie wtedy, gdy coś wypadło. Doszła kontrola sumy.
 - **Okno „Napraw nagłówek…" przyjmuje wreszcie Księżyc, planety i komety.** Sprawdzało nazwę
   węziej, niż potrafi ją potem rozpoznać sam program, więc odmawiało zapisania `Moon`, `Jupiter`
   czy `C/2023 A3` — mimo że po zapisie obiekt wskoczyłby na swoje miejsce. To samo dotyczyło
-  nazwy, której nauczyłeś program wcześniej przez „Przypisz obiekt…" (np. `WR134`). Nazwa,
-  której nie zna nikt, nadal jest odrzucana — po to, żeby zapis do pliku nie zostawił klatki bez
-  obiektu.
+  nazwy, której nauczyłeś program wcześniej przez „Przypisz obiekt…". Nazwa, której nie zna nikt,
+  nadal jest odrzucana — po to, żeby zapis do pliku nie zostawił klatki bez obiektu. (`WR134` był
+  tu pierwotnie przykładem nazwy do nauczenia; w tym samym wydaniu trafił do pliku obiektów
+  własnych, więc program zna go teraz od razu.)
 - **Licznik na przycisku „Zapisz karty" mówi, ile ZOSTAŁO.** Po udanym zapisie przycisk zostawał
   wygaszony z liczbą sprzed zapisu, więc opisywał przeszłość. Teraz liczba znika, a po „Cofnij"
   wraca.

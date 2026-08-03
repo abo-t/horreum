@@ -50,8 +50,22 @@ schemat i API mogą się jeszcze zmieniać.
 - **Licznik na przycisku „Zapisz karty" mówi, ile ZOSTAŁO.** Po udanym zapisie przycisk zostawał
   wygaszony z liczbą sprzed zapisu, więc opisywał przeszłość. Teraz liczba znika, a po „Cofnij"
   wraca.
+- **Oznaczenie celu, którego katalog już nie zna, daje się wreszcie zdjąć.** Po podmianie katalogu
+  celów Twoja własna decyzja („zaplanowane", „zrobione") zostawała na liście z dopiskiem
+  `[poza katalogiem]` — i nie było jak jej usunąć, bo program najpierw sprawdzał nazwę w katalogu
+  i odmawiał. Teraz, gdy katalog nazwy nie rozstrzyga, zdejmowane jest oznaczenie o dokładnie tej
+  nazwie, którą podałeś. Rozpoznawanie skrótów działa jak dotąd — `M42` nadal trafia w `NGC1976`.
+  Z wiersza poleceń: `horreum target <baza> <nazwa> --clear`.
 
 ### Zmienione
+- **Procent rozpoznanych obiektów przestał się zawyżać.** Licznik brał każdą klatkę, która ma
+  obiekt — także rozpoznaną po współrzędnych, bez nazwy w nagłówku — a dzielił przez klatki,
+  które nazwę mają. Te „darmowe" klatki podnosiły wynik i **maskowały spadek**: gdy przybywało
+  klatek nierozpoznanych, procent osuwał się wolniej, niż powinien. Teraz obie strony ułamka liczą
+  to samo, więc liczba mówi wprost, ile nazw program rozpoznał. Klatki rozpoznane bez nazwy nie
+  znikają — stoją obok, z własną liczbą, na wszystkich trzech ekranach (Dostawa, wiersz poleceń,
+  raport akceptacyjny). **Wynik po tej zmianie bywa niższy niż wczoraj — to ta sama biblioteka,
+  mierzona uczciwiej.**
 - **Wydawanie na stół ostrzega, gdy w katalogu docelowym stoi już drzewo o innym układzie.**
   Program zapisywał kształt drzewa obok niego od początku, ale nigdy go nie czytał — a ponowne
   wydanie z innym układem dokłada drugie drzewo obok starego (te same pliki policzone dwa razy).

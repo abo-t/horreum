@@ -499,3 +499,51 @@ def test_repo_odmawia_zrodla_spoza_trojstanu(con):
     with pytest.raises(Exception):
         repo.link_integration(con, integration_id=iid, input_frame_id=m,
                               asserted_by="zgadywanie", now=NOW)
+
+
+# ═════════════════════════ S2b §4/14c (i) — GESTY OSI OBIEKTU vs RODOWÓD
+
+
+def test_cofniecie_NIE_rusza_gotowego_obrazu_ani_jego_rodowodu(con):
+    """§4/14c-h/i, człon PIERWSZY: gest „Cofnij" na zaznaczeniu, w którym jest gotowy obraz.
+
+    Odebranie stosowi `object_id` rozbraja `_window_candidates` (pyta o obiekt), więc najbliższy
+    przebieg zobaczyłby stos bez kandydatów i zdegradował dowiedziony rodowód do „brak wejść".
+    Klinga pomija go WŁASNYM licznikiem — a że to ochrona CUDZEJ pracy, dowodzimy jej skutku
+    na rodowodzie, nie samego licznika."""
+    m = _master(con)
+    a = _light(con, "l1", date_obs="2025-08-30T20:30:00")
+    b = _light(con, "l2", date_obs="2025-08-30T20:40:00")
+    run_stack_lineage(con, now=NOW, xml_reader=_brak_xml)
+    przed = {(r["input_frame_id"], r["asserted_by"]) for r in inputs_of(con, m)}
+    assert len(przed) == 2
+
+    g = repo.clear_object_assignment(con, frame_ids=[m, a, b], now=LATER)
+    assert (g.assigned, g.skipped_stack) == (0, 1)     # lighty mają źródło spoza ręki → nietknięte
+    s = run_stack_lineage(con, now=LATER, xml_reader=_brak_xml)
+    assert {(r["input_frame_id"], r["asserted_by"]) for r in inputs_of(con, m)} == przed
+    assert s.unlinked == 0
+    assert _integracja(con, m)["unresolved_reason"] is None      # głowa BEZ powodu
+
+
+def test_gest_na_LIGHCIE_zdejmuje_go_z_okna_ale_reszta_rodowodu_stoi(con):
+    """§4/14c-i, człon LUSTRZANY — bez niego nadmiarowa ochrona byłaby NIEWYKRYWALNA.
+
+    Rodowód ma być odporny na gest, ale NIE zamrożony: stos z czytelnym plikiem musi się dalej
+    rekoncyliować. Light, któremu ręka zdjęła obiekt, WYPADA z okna — i to jest poprawne, bo okno
+    jest doborem z bieżącego stanu. Gdyby implementacja „chroniła" rodowód przez zamrożenie relacji,
+    ten człon zostałby czerwony, a poprzedni i tak by przeszedł."""
+    m = _master(con)
+    zostaje = _light(con, "l1", date_obs="2025-08-30T20:30:00")
+    wypadnie = _light(con, "l2", date_obs="2025-08-30T20:40:00")
+    run_stack_lineage(con, now=NOW, xml_reader=_brak_xml)
+    assert len(inputs_of(con, m)) == 2
+
+    con.execute("UPDATE frame SET object_source = 'user' WHERE id = ?", (wypadnie,))
+    con.commit()
+    g = repo.clear_object_assignment(con, frame_ids=[wypadnie], now=LATER)
+    assert g.assigned == 1
+
+    s = run_stack_lineage(con, now=LATER, xml_reader=_brak_xml)
+    assert {r["input_frame_id"] for r in inputs_of(con, m)} == {zostaje}
+    assert s.unlinked == 1

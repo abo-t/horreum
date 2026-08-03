@@ -1284,6 +1284,14 @@ CATALOG = {
         "pl": "pominięto bez obecnej kopii pliku: {n} — puść skan albo Obecność",
         "en": "skipped without a present copy: {n} — run scan or Presence",
     },
+    # TRZECIA przyczyna, JEDYNA bez recepty — i to jest informacja, nie brak. Plik leży na miejscu,
+    # a zapisany rodowód stoi na dowodzie mocniejszym niż to, co przebieg umiał ustalić teraz
+    # (`repo.RANGA_ASSERT`). Człon istnieje, żeby przebieg o zerowej delcie nie wyglądał jak
+    # bezczynność — po geście osi obiektu na lighcie dowiedzionego stosu to najczęstszy wynik.
+    "pipeline.fmt.slin.kept_proven": {
+        "pl": "pominięto, zapisany dowód mocniejszy: {n}",
+        "en": "skipped, recorded evidence is stronger: {n}",
+    },
     # Droga „Stosy" — człony składane w `PipelineView._format_stacks`; odmowy TYLKO gdy niezerowe.
     "pipeline.fmt.stacks.prefix": {"pl": "[stosy] ", "en": "[stacks] "},
     "pipeline.fmt.stacks.taken": {

@@ -820,6 +820,11 @@ class PipelineView(QWidget):
                                  n=s.kept_unread - s.kept_no_location))
         if s.kept_no_location:
             czesci.append(i18n.t("pipeline.fmt.slin.kept_no_location", n=s.kept_no_location))
+        # TRZECI powód pominięcia (S2b), jedyny BEZ recepty: zapisany dowód jest mocniejszy od
+        # tego, co przebieg umiał policzyć. Bez tego członu gest osi obiektu na lighcie dowiedzionego
+        # stosu dawałby przebieg o zerowej delcie i milczącym oknie — nieodróżnialny od bezczynności.
+        if s.kept_proven:
+            czesci.append(i18n.t("pipeline.fmt.slin.kept_proven", n=s.kept_proven))
         return i18n.t("pipeline.fmt.slin.prefix") + " · ".join(czesci)
 
     def _format_stacks(self, s):

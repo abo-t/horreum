@@ -442,8 +442,12 @@ def stack_lineage(con, now, out):
     # eventów", gdy jedno i drugie faktycznie zachodzi. A bramkę czerwoną na poprawnym stanie
     # naprawia się podnoszeniem kotwicy — po czym przestaje ona łapać regresję prawdziwą.
     idem = (not s2.linked_new and not s2.unlinked and po == przed and rows_przed == rows_po)
+    # `kept_proven` obok `kept_unread`, bo to DWA rozne powody zerowej delty (S2b): pierwszy znaczy
+    # „nie przeczytalem pliku", drugi „przeczytalem, ale zapisany dowod jest mocniejszy". Jedna
+    # liczba kazalaby diagnozowac odlaczone archiwum przy stosie lezacym na miejscu.
     out(f"  przebieg 2 (idempotencja): linked_new={s2.linked_new} unlinked={s2.unlinked} "
-        f"pominietych_bez_zeznania={s2.kept_unread} wiersze {rows_przed}=={rows_po}")
+        f"pominietych_bez_zeznania={s2.kept_unread} pominietych_dowod_mocniejszy={s2.kept_proven} "
+        f"wiersze {rows_przed}=={rows_po}")
     return s1, idem, s2.kept_unread
 
 

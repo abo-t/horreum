@@ -547,3 +547,76 @@ def test_gest_na_LIGHCIE_zdejmuje_go_z_okna_ale_reszta_rodowodu_stoi(con):
     s = run_stack_lineage(con, now=LATER, xml_reader=_brak_xml)
     assert {r["input_frame_id"] for r in inputs_of(con, m)} == {zostaje}
     assert s.unlinked == 1
+
+
+# ── rodowód DOWIEDZIONY (plik czytelny) wobec obu gestów — R26#4, domknięte adjudykacją S2b ──
+# Oba testy wyżej jadą `_brak_xml`, więc rodowód stoi na samym OKNIE i kasowanie relacji jest tam
+# poprawne. Klasy, dla której powstał strażnik, nie dotykały: `history` przy pliku LEŻĄCYM NA
+# MIEJSCU. Recenzja diffu S2b znalazła, że ochrona liczyła się wtedy WYŁĄCZNIE przy nieczytelnym
+# pliku, więc gest osi obiektu kasował dowód zeznany przez plik — przy zielonej bramce.
+
+
+def _historia_dwoch(con):
+    """Stos z rodowodem DOWIEDZIONYM zeznaniem czytelnego pliku (dwa wejścia, temperatury z XML)."""
+    m = _master(con)
+    a = _light(con, "l1", date_obs="2025-08-30T20:30:00", ccd_temp=-10.0)
+    b = _light(con, "l2", date_obs="2025-08-30T20:40:00", ccd_temp=-9.9)
+    czytelny = lambda _p: _xml_historii([-10.0, -9.9])       # noqa: E731 — seam jednolinijkowy
+    s = run_stack_lineage(con, now=NOW, xml_reader=czytelny)
+    assert s.by_assert == {"history": 1}                     # rodowód NAPRAWDĘ dowiedziony
+    return m, a, b, czytelny
+
+
+def test_cofniecie_na_LIGHCIE_nie_kasuje_rodowodu_DOWIEDZIONEGO(con):
+    """§4/14c-i: „Cofnij" na lighcie stosu z CZYTELNYM plikiem — dowód zeznany zostaje.
+
+    Łańcuch, który tu pilnujemy (R26#4): light wypada z okna → `inputs_contained` nie przechodzi
+    → `REASON_MISMATCH` → `_reconcile` kasuje relacje, z guardem wyłącznie na `user`. Ginęłyby
+    więc wiersze `history` — DOWIEDZIONE zeznaniem pliku, którego nikt nie obalił. Ochrona idzie
+    RANGĄ (`repo.RANGA_ASSERT`): zapisany `history` bije plan, który po odmowie nie ustala niczego."""
+    m, _a, b, czytelny = _historia_dwoch(con)
+    przed = {(r["input_frame_id"], r["asserted_by"]) for r in inputs_of(con, m)}
+
+    con.execute("UPDATE frame SET object_source = 'user' WHERE id = ?", (b,))
+    con.commit()
+    assert repo.clear_object_assignment(con, frame_ids=[b], now=LATER).assigned == 1
+
+    s = run_stack_lineage(con, now=LATER, xml_reader=czytelny)
+    assert {(r["input_frame_id"], r["asserted_by"]) for r in inputs_of(con, m)} == przed
+    assert (s.unlinked, s.kept_proven, s.kept_unread) == (0, 1, 0)   # POWÓD pominięcia własny
+    assert _integracja(con, m)["unresolved_reason"] is None          # zero degradacji głowy
+
+
+def test_nazwanie_LIGHTA_z_cudzego_stosu_nie_kasuje_rodowodu_DOWIEDZIONEGO(con):
+    """§4/14c-i, człon „DOSTAJE" — druga strona tego samego łańcucha, bez własnego testu do dziś.
+
+    Ręka nadaje kanon zaznaczeniu, w którym jest OBCA klatka; wchodzi ona do okna cudzego stosu
+    jako NADWYŻKA, więc zeznanie pliku znów przestaje się domykać. Skutek byłby gorszy niż przy
+    cofnięciu: `REASON_MISMATCH` na stosie, którego nikt nie dotykał."""
+    m, _a, _b, czytelny = _historia_dwoch(con)
+    przed = {(r["input_frame_id"], r["asserted_by"]) for r in inputs_of(con, m)}
+    obca = _light(con, "obca", date_obs="2025-08-30T21:00:00", ccd_temp=-15.0, object_id=None)
+
+    g = repo.user_assign_object(con, alias_norm=None, canon="CTB1", catalog="catalog",
+                                kind="deep_sky", frame_ids=[obca], now=LATER)
+    assert g.assigned == 1
+
+    s = run_stack_lineage(con, now=LATER, xml_reader=czytelny)
+    assert {(r["input_frame_id"], r["asserted_by"]) for r in inputs_of(con, m)} == przed
+    assert (s.unlinked, s.kept_proven) == (0, 1)
+    assert _integracja(con, m)["unresolved_reason"] is None
+
+
+def test_ochrona_rangi_NIE_zamraza_odtworzenia_tej_samej_sily(con):
+    """Człon LUSTRZANY ochrony rangowej — bez niego „chroń zawsze" przeszłoby oba testy wyżej.
+
+    Rodowód `history` wobec planu `history` to TA SAMA siła: przebieg ma prawo go odtworzyć,
+    a stos ma dalej śledzić stan. Falsyfikator: light dołożony do okna ZGODNIE z zeznaniem pliku
+    (trzy temperatury w XML, trzy klatki) musi dostać relację — implementacja zamrażająca rodowód
+    przy samym istnieniu zapisanego `history` zostawiłaby dwa wiersze i zaczerwieniła ten człon."""
+    m, _a, _b, _cz = _historia_dwoch(con)
+    trzeci = _light(con, "l3", date_obs="2025-08-30T20:50:00", ccd_temp=-9.8)
+
+    s = run_stack_lineage(con, now=LATER, xml_reader=lambda _p: _xml_historii([-10.0, -9.9, -9.8]))
+    assert {r["input_frame_id"] for r in inputs_of(con, m)} == {_a, _b, trzeci}
+    assert (s.linked_new, s.kept_proven, s.by_assert) == (1, 0, {"history": 1})

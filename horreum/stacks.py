@@ -84,7 +84,25 @@ class StackLineageSummary:
     kept_unread: int = 0       # gotowy rodowód ZOSTAWIONY nietknięty, bo zeznania nie dało się
                                # przeczytać — delta zapisu jest wtedy zerowa Z WYBORU, nie z braku
                                # zmian, i bez tego licznika wyglądałaby jak idempotencja
+    kept_proven: int = 0       # …a tu DRUGI powód pominięcia (S2b): plik był czytelny, ale ZAPISANE
+                               # zeznanie jest MOCNIEJSZE od tego, co przebieg umiał policzyć teraz.
+                               # Osobno od `kept_unread`, bo recepta jest inna: tam „podłącz dysk",
+                               # tu „nikt nic nie zgubił — rodowód stoi na dowodzie mocniejszym"
     reasons: dict = field(default_factory=dict)     # powód -> licznik (integracje bez wejść)
+
+
+def _bump_kept(s, p):
+    """Pominięcie rodowodu do WŁAŚCIWEGO kubełka — dwa powody, dwie recepty (S2b).
+
+    Do S2b powód był jeden („nie przeczytałem pliku") i licznik też jeden. Ochrona rangą dokłada
+    drugi: plik czytelny, ale zapisane zeznanie MOCNIEJSZE od tego, co przebieg umiał policzyć —
+    tam nie ma czego podłączać ani czego naprawiać. Wspólny licznik kazałby człowiekowi szukać
+    odłączonego dysku pod stosem, który leży na miejscu."""
+    if p["history_unread"]:
+        s.kept_unread += 1
+        s.kept_no_location += p["no_location"]
+    else:
+        s.kept_proven += 1
 
 
 def _bump(d, key):
@@ -323,20 +341,35 @@ def run_stack_lineage(con, *, now, actor="stacks", xml_reader=None, progress=Non
         #   * FAKTY ZEZNANIA w głowie (`tool`, `declared_rows`, drizzle) — `None` z nieodczytanego
         #     pliku skasowałby je, choć nikt ich nie obalił.
         # Reszta głowy jedzie normalnie, bo wynika z bazy.
-        stan = _zapisany_stan(con, p["frame_id"]) if p["history_unread"] else None
-        # CHRONIONY = rodowód, który NIE stoi na samym oknie. Predykat na literale `'history'`
-        # gubił werdykt ręki: potwierdzenie kandydata („tak, ta klatka weszła") jest zeznaniem
-        # MOCNIEJSZYM niż plik, a zdejmowało ochronę — bo `user` to nie `history`. Kanon precedencji
-        # żyje w klindze (`repo.link_integration`, RANGA); tu pytamy o jego dopełnienie: samo okno
-        # przebieg umie policzyć bez pliku, wszystko inne — nie.
-        chroniony = stan is not None and stan["zrodlo"] not in (None, "window")
+        # STAN ZAPISANY LICZYMY ZAWSZE, nie tylko przy nieczytelnym pliku (S2b, R26#4). Czytelność
+        # pliku rozstrzyga, skąd biorą się FAKTY ZEZNANIA (niżej) — nie rozstrzyga, czy wolno
+        # skasować cudzy dowód. Warunek `if p["history_unread"]` mieszał te dwa pytania i zostawiał
+        # rodowód `history` bezbronnym dokładnie tam, gdzie plik leżał na miejscu: gest osi obiektu
+        # na LIGHCIE (S2b „Cofnij"/„Nazwij") wyjmuje klatkę z okna → `inputs_contained` nie
+        # przechodzi → `REASON_MISMATCH` → `_reconcile` KASUJE relacje dowiedzione zeznaniem pliku.
+        stan = _zapisany_stan(con, p["frame_id"])
+        # CHRONIONY = rodowód ZAPISANY jest MOCNIEJSZY niż to, co przebieg umie ustalić TERAZ.
+        # Pytanie o RANGĘ, nie o wyliczankę wartości (`zrodlo not in (None,'window')` gubiło
+        # sąsiednie zeznanie przy każdym nowym źródle) i nie o jeden bit „plik nieczytelny".
+        # Kanon precedencji ma JEDNEGO właściciela — `repo.RANGA_ASSERT`. Plan Z POWODEM wypowiada
+        # się z siłą OKNA, nie „poniżej wszystkiego": powód znaczy „przeliczyłem okno z BAZY i nic
+        # w nim nie ma", a bazę przebieg czyta w całości — więc rodowód stojący na samym oknie musi
+        # dać się tym powodem obalić. Ranga poniżej najniższej zamrażała rodowód `window` przy
+        # naprawie karty stosu (bramka „rodowód z okna aktualizuje się mimo nieczytelnego pliku"
+        # zaczerwieniła się natychmiast) — to dokładnie ta nadmiarowa ochrona, przed którą broni
+        # człon lustrzany.
+        # To ochrona przed DEGRADACJĄ, a NIE zamrożenie: odtworzenie tej samej siły (plan `history`
+        # wobec zapisanego `history`) przechodzi normalnie i stos dalej się rekoncyliuje.
+        ranga_planu = repo.RANGA_ASSERT[p["asserted_by"] or "window"]
+        ranga_stanu = (repo.RANGA_ASSERT.get(stan["zrodlo"], -1)
+                       if stan is not None and stan["zrodlo"] else -1)
+        chroniony = ranga_stanu > ranga_planu
         if chroniony and p["reason"]:
             # JEDYNY przypadek, w którym trzeba zostawić stos w spokoju w całości: powodu nie da
             # się zapisać, nie kasując wierszy (inwariant §5.14 „powód wyklucza wejścia automatu"),
             # a kasować ich nie wolno, bo to dowód. Liczniki idą wtedy ze STANU — rodowód istnieje,
             # tylko nie myśmy go w tym przebiegu ustalili.
-            s.kept_unread += 1
-            s.kept_no_location += p["no_location"]
+            _bump_kept(s, p)
             pominiete.append(p["frame_id"])
             s.linked += 1
             _bump(s.by_assert, stan["zrodlo"])
@@ -359,11 +392,15 @@ def run_stack_lineage(con, *, now, actor="stacks", xml_reader=None, progress=Non
             s.telescope_mismatch += 1
         wejscia = [r["frame_id"] for r in p["inputs"]]
         # Fakty zeznania: ze STANU, gdy pliku nie przeczytaliśmy (nikt ich nie obalił), z pliku
-        # w każdym innym wypadku. Odcisk chronionego rodowodu też zostaje — to odcisk OSTATNIEGO
+        # w każdym innym wypadku — i to jest JEDYNE pytanie, które rozstrzyga czytelność pliku
+        # (ochronę wierszy rozstrzyga RANGA, wyżej). Warunek na samym `stan is not None` znaczyłby
+        # od S2b „mam zapisany rodowód", a nie „nie mam czym zastąpić" — i zamroziłby fakty zeznania
+        # przy KAŻDYM stosie, który już raz przez ten przebieg przeszedł.
+        # Odcisk chronionego rodowodu też zostaje — to odcisk OSTATNIEGO
         # DOPASOWANIA AUTOMATU (nie zbioru wierszy niewykluczonych: odrzucenie ręką zostawia wiersz
         # w tabeli, a odcisku nie przelicza), więc zastąpienie go odciskiem świeżo policzonego okna
         # byłoby podmianą faktu o przeszłości na fakt o czymś innym.
-        if stan is not None:
+        if p["history_unread"] and stan is not None:
             tool_v, rows_v = stan["tool"], stan["declared_rows"]
             driz_v, dis_v = stan["drizzle_inputs"], stan["disabled_inputs"]
         else:
@@ -380,8 +417,7 @@ def run_stack_lineage(con, *, now, actor="stacks", xml_reader=None, progress=Non
             telescope_mismatch=int(p["telescope_mismatch"]),
             unresolved_reason=p["reason"], now=now, actor=actor)
         if chroniony:
-            s.kept_unread += 1          # głowa zaktualizowana, WIERSZE nietknięte
-            s.kept_no_location += p["no_location"]
+            _bump_kept(s, p)            # głowa zaktualizowana, WIERSZE nietknięte
             pominiete.append(p["frame_id"])
         else:
             s.linked_new += _zapisz_wejscia(con, iid, wejscia, p["asserted_by"],
@@ -397,7 +433,8 @@ def run_stack_lineage(con, *, now, actor="stacks", xml_reader=None, progress=Non
         "SELECT count(*) FROM integration_input WHERE excluded = 0").fetchone()[0]
     s.reasons = dict(sorted(s.reasons.items()))
     repo.flag_stack_lineage_summary(con, sorted(s.reasons.items()), now, actor=actor,
-                                    kept_unread=s.kept_unread, kept_frames=pominiete)
+                                    kept_unread=s.kept_unread, kept_frames=pominiete,
+                                    kept_proven=s.kept_proven)
     return s
 
 

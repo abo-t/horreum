@@ -969,6 +969,12 @@ def _format_stack_lineage(db_path, s):
     if s.kept_no_location:
         lines.append(f"  gotowy rodowod ZOSTAWIONY nietkniety (brak obecnej kopii pliku): "
                      f"{s.kept_no_location} — pusc skan albo Obecnosc")
+    # TRZECIA przyczyna pominiecia, bez recepty i to jest poprawne (S2b): plik lezy na miejscu,
+    # a zapisane zeznanie jest MOCNIEJSZE niz to, co przebieg umial policzyc. Nic nie zginelo,
+    # nic nie trzeba podlaczac — ale przebieg z zerowa delta musi umiec powiedziec, DLACZEGO.
+    if s.kept_proven:
+        lines.append(f"  gotowy rodowod ZOSTAWIONY nietkniety (zapisany dowod mocniejszy): "
+                     f"{s.kept_proven} — nic do zrobienia")
     for powod, n in sorted(s.reasons.items()):
         lines.append(f"  bez rodowodu [{powod}]: {n} — {_STACK_REASON_PROZA.get(powod, '')}")
     return "\n".join(lines)

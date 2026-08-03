@@ -20,7 +20,8 @@ from dataclasses import dataclass
 from .resolve._text import norm_alnum          # kierunek repo → resolve (liść; COHESION §2b)
 from .resolve.catalog import catalog_canon      # gramatyka katalogowa — CZYSTA, bez assetu (liść)
 from .resolve.frames import LIGHT_KINDS         # guard RODZAJU w klindze (S2b) — liść, bez cyklu
-from .resolve.objects import (OBJECT_SOURCES,   # enum źródeł osi OBIEKT — jeden właściciel (S1)
+from .resolve.objects import (CLEARABLE_OBJECT_SOURCES,  # enum źródeł osi OBIEKT —
+                              OBJECT_SOURCES,           # jeden właściciel (S1/S2b)
                               WEAK_OBJECT_SOURCES)
 from .resolve.observatory import nearest_site   # kierunek repo → resolve (liść math/re; COHESION §2b)
 
@@ -1017,7 +1018,8 @@ def clear_object_assignment(con, *, frame_ids, now, uid="local"):
             if fr["kind"] == "master_light":
                 stack_skip += 1                     # gotowy obraz — patrz docstring (rodowód)
                 continue
-            if fr["object_id"] is None or fr["object_source"] not in ("path", "user"):
+            if (fr["object_id"] is None
+                    or fr["object_source"] not in CLEARABLE_OBJECT_SOURCES):
                 source_skip += 1                    # nie ma czego cofać ALBO fakt spoza ręki
                 continue
             con.execute(
@@ -1656,6 +1658,15 @@ def upsert_integration(con, *, master_frame_id, integ_hash, tool, window_start, 
         return row["id"], True
 
 
+RANGA_ASSERT = {"window": 0, "history": 1, "user": 2}
+"""Precedencja zeznania o wejściu stosu — JEDEN właściciel kanonu (`link_integration` ORAZ strażnik
+przebiegu w `stacks`). Do S2b liczba żyła jako zmienna lokalna klingi, więc przebieg, który musi
+zapytać „czy ZAPISANY rodowód jest mocniejszy od tego, co umiem policzyć TERAZ", nie miał jej skąd
+wziąć i odpowiadał wyliczanką wartości — a wyliczanka gubi sąsiednie zeznanie przy każdym nowym
+źródle. Rosnąco: `window` (dobór z bieżącego stanu bazy) < `history` (zeznanie pliku) < `user`
+(werdykt ręki)."""
+
+
 def link_integration(con, *, integration_id, input_frame_id, asserted_by, now, actor="stacks"):
     """Powiąż klatkę wejściową ze stosem — wiersz `integration_input` + `event(integration.linked)`.
 
@@ -1673,13 +1684,13 @@ def link_integration(con, *, integration_id, input_frame_id, asserted_by, now, a
     `_immediate`, bo guard (SELECT stanu) musi trzymać do zapisu: panel „Rodowód" pisze werdykt
     ręki z wątku GUI, gdy droga „Stosy" liczy w tle na własnym połączeniu. Bez locka SELECT widzi
     stan sprzed werdyktu i nadpisuje go kandydatem — albo trafia na `UNIQUE` i wywala etap."""
-    RANGA = {"window": 0, "history": 1, "user": 2}
     with _immediate(con):
         row = con.execute(
             "SELECT rowid AS rid, asserted_by FROM integration_input "
             "WHERE integration_id = ? AND input_frame_id = ?",
             (integration_id, input_frame_id)).fetchone()
-        if row is not None and RANGA.get(row["asserted_by"], 0) >= RANGA.get(asserted_by, 0):
+        if row is not None and (RANGA_ASSERT.get(row["asserted_by"], 0)
+                                >= RANGA_ASSERT.get(asserted_by, 0)):
             return False
         if row is None:
             con.execute(
@@ -1751,7 +1762,8 @@ def judge_integration_input(con, *, integration_id, input_frame_id, excluded, no
     return True
 
 
-def flag_stack_lineage_summary(con, items, now, actor="stacks", kept_unread=0, kept_frames=()):
+def flag_stack_lineage_summary(con, items, now, actor="stacks", kept_unread=0, kept_frames=(),
+                               kept_proven=0):
     """Stosy BEZ zapisanych wejść — JEDEN `event(integration.lineage_summary)` z licznością per
     powód (wzorzec `flag_calibration_lineage_summary`). Stan (`unresolved_reason` niepuste) SAM
     jest deltą; pusty materiał → bez eventu.
@@ -1760,15 +1772,22 @@ def flag_stack_lineage_summary(con, items, now, actor="stacks", kept_unread=0, k
     wchodzi do payloadu i SAM wystarcza, żeby event powstał: masowa decyzja „nie dotykam N gotowych
     rodowodów" jest faktem o przebiegu, a bez śladu w dzienniku wyglądałaby jak brak roboty.
     `kept_frames` niesie ICH KLATKI — sam licznik jest receptą bez adresu, bo stanu pominiętych nie
-    da się odróżnić od stanu przeliczonych (głowy nietknięte, żadnego markera w tabeli)."""
+    da się odróżnić od stanu przeliczonych (głowy nietknięte, żadnego markera w tabeli).
+
+    `kept_proven` (S2b) liczy DRUGI powód pominięcia i dlatego jest osobną liczbą: rodowód, którego
+    przebieg nie ruszył, bo ZAPISANE zeznanie jest MOCNIEJSZE od tego, co umiał policzyć teraz
+    (`RANGA_ASSERT`) — plik był czytelny, więc „nie przeczytałem" byłoby nieprawdą o przyczynie.
+    Zlanie obu w `kept_unread` kazałoby człowiekowi szukać odłączonego dysku przy stosie, który
+    leży na dysku i ma się dobrze."""
     items = list(items)
-    if not items and not kept_unread:
+    if not items and not kept_unread and not kept_proven:
         return
     with con:
         emit_event(con, actor=actor, verb="integration.lineage_summary", target="frame:*", now=now,
                    payload={"distinct": len(items), "frames": sum(n for _, n in items),
                             "items": [[reason, n] for reason, n in items],
                             "kept_unread": kept_unread,
+                            "kept_proven": kept_proven,
                             "kept_frames": list(kept_frames)})
 
 

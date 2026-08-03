@@ -77,6 +77,14 @@ STICKY_OBJECT_SOURCES = frozenset({"user", "user_cleared"})
 # ich nadpisanie byłoby cichym zamalowaniem faktu z pliku albo z geometrii.
 WEAK_OBJECT_SOURCES = frozenset({"path"})
 
+# Źródła, które „Cofnij przypisanie" wolno ZDJĄĆ (S2b) — postawiła je ręka albo ścieżka, więc
+# cofnięcie naprawia POMYŁKĘ CZŁOWIEKA, a nie kasuje faktu z pliku ani z geometrii. Stała powstała
+# przy adjudykacji recenzji S2b: zbiór żył jako literał `("path","user")` w DWÓCH miejscach — klindze
+# (`repo.clear_object_assignment`) i read-modelu wygaszającym kontrolkę (`gui.queries`) — a to jedno
+# pytanie z dwiema siedzibami. Pierwsze rozszerzenie rozjechałoby przycisk z klingą: aktywny gest,
+# który milczy, albo wygaszony przy robocie do zrobienia.
+CLEARABLE_OBJECT_SOURCES = WEAK_OBJECT_SOURCES | {"user"}
+
 # …i TA SAMA reguła dla `object.kind`, bo segment domykający rozjazd źródeł wprowadził własny na
 # rodzaju: szczebel słownika zwraca `own`, którego DDL nie znał. Wartość spoza tej stałej znaczy,
 # że ktoś dopisał rodzaj bez powiedzenia o tym drugiej stronie.

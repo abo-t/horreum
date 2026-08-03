@@ -36,7 +36,7 @@ def test_progi_sa_typo_zalezne():
 
 
 def test_typ_spoza_taksonomii_odpada_jawnie():
-    """`t` w `curated.json` pisze człowiek — gromada nie ma prawa wejść „resztą"."""
+    """`t` w pliku człowieka pisze człowiek — gromada nie ma prawa wejść „resztą"."""
     assert not targets.feasible(_t("Cr464", "OCl", a=60.0))
     assert not targets.feasible(_t("X", "cos-nowego", a=60.0))
 
@@ -53,7 +53,7 @@ def test_galaktyka_bez_magnitudo_odpada_mglawica_nie():
 
 
 def test_koercja_pola_pisanego_recznie():
-    """`curated.json` pisze CZŁOWIEK: `"a": "15"` musi zachować się jak `15.0` (kanon W3)."""
+    """Plik człowieka pisze CZŁOWIEK: `"a": "15"` musi zachować się jak `15.0` (kanon W3)."""
     t = targets._target({"c": "WR134", "t": "EmN", "r": "302.55", "d": "36.17", "a": "15"},
                         "curated")
     assert t.major_arcmin == 15.0 and t.ra_deg == pytest.approx(302.55)

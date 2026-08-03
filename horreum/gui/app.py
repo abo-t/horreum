@@ -1409,7 +1409,8 @@ class ObjectAxisView(QWidget):
         CELEM JEST ZAZNACZENIE PANELU (`_selected_frame_ids`), nie wynik drążenia: drążenie zaznacza
         wszystko, więc gest „cały kubełek" kosztuje tyle samo kliknięć co przedtem, ale zaznaczenie
         można PRZYCIĄĆ — a kubełek RAW nie jest grupą semantyczną i jeden kanon dla całej reszty
-        archiwum byłby zapisem nieodwracalnym w dzisiejszej aplikacji.
+        archiwum byłby zapisem, który do S2b nie miał drogi odwrotu (dziś ma ją w Zbiorach, ale gest
+        nadal ma trafiać w to, co user zaznaczył, a nie w całą resztę archiwum).
 
         KLUCZ ALIASU LICZY DIALOG (trzy przypadki — kontrakt w `AssignObjectDialog`), bo zna wybraną
         nazwę; tu zostaje wyłącznie bramka pustego klucza dla grupy Z ZEZNANIEM, bo to własność

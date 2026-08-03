@@ -18,7 +18,9 @@ class AssignObjectDialog(QDialog):
     """Dialog ręcznego przypisania obiektu grupie review (#8, P4, D-P4-3): wybór ISTNIEJĄCEGO obiektu
     z biblioteki (combo `canon · catalog`) ALBO nowa NAZWA rozwiązywana TĄ SAMĄ drabiną, którą pójdzie
     przebieg. Świadomie BEZ wolnego tekstu jako canon: `object.canon` nie ma deduplikacji semantycznej,
-    a śmieciowego obiektu nic by nie posprzątało — pełne cofnięcie ma dwa człony i przychodzi z S2b.
+    a śmieciowego obiektu nic by nie posprzątało. Cofnięcie SAMEGO PRZYPISANIA istnieje od S2b
+    („Obiekt ▾ → Cofnij przypisanie" w Zbiorach); sprzątanie osieroconego OBIEKTU to osobna sprawa
+    i czeka na ekran Porządków (`retired_at`, nie `DELETE`).
 
     DWA WEJŚCIA, JEDNO OKNO (S4): grupa Z ZEZNANIEM (`object_raw` z nagłówka) i grupa BEZ NIEGO
     (kubełek RAW — format nie ma karty `OBJECT`, więc zeznania nie ma z definicji, nie z braku).

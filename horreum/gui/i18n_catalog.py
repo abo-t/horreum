@@ -230,16 +230,18 @@ CATALOG = {
         "pl": "Zaznacz w kolejce pozycję „…z tego ze ścieżki”",
         "en": "Select the “…of which from path” entry in the queue"},
     "path.title": {"pl": "Zatwierdź nazwy ze ścieżki", "en": "Confirm names from path"},
-    # UI NIE KŁAMIE: „da się cofnąć" byłoby obietnicą bez pokrycia — powierzchnia cofania przychodzi
-    # dopiero z S2b, a dziś jedyną drogą odwrotu jest edycja słownika (i tylko dla jego kanonów).
-    # Zdanie mówi więc stan FAKTYCZNY, zamiast zapowiadać cudzy segment.
+    # UI NIE KŁAMIE — i to zdanie jest tego probierzem, bo od S2b prawda się ZMIENIŁA. Do S2b
+    # mówiło „powierzchnia cofania dochodzi w kolejnym kroku", co było wtedy faktem; po S2b ta sama
+    # ostrożność stała się kłamstwem w drugą stronę — droga odwrotu ISTNIEJE i user ma o niej
+    # wiedzieć, zanim zatwierdzi 707 klatek. Zdanie mówi więc, GDZIE jej szukać.
     "path.head": {
         "pl": "{names} nazw · {frames} klatek. Nazwa pochodzi z FOLDERU na pozycji obiektu; "
-              "zapis idzie do BAZY, nie do plików. Powierzchnia cofania dochodzi w kolejnym kroku "
-              "— dziś odznacz to, czego nie chcesz zapisać.",
+              "zapis idzie do BAZY, nie do plików. Odznacz to, czego nie chcesz zapisać; "
+              "zatwierdzone cofniesz w Zbiorach przez „Obiekt ▾ → Cofnij przypisanie”.",
         "en": "{names} names · {frames} frames. The name comes from the FOLDER at the object "
-              "position; the write goes to the DATABASE, not the files. The undo surface arrives "
-              "in the next step — for now, uncheck whatever you do not want written."},
+              "position; the write goes to the DATABASE, not the files. Uncheck whatever you do not "
+              "want written; confirmed names can be undone in Frames via “Object ▾ → Undo "
+              "assignment”."},
     "path.item": {"pl": "{canon}  ·  {n} klatek", "en": "{canon}  ·  {n} frames"},
     "path.new_badge": {"pl": "NOWA w bazie", "en": "NEW in the database"},
     "path.known_badge": {"pl": "kanon znany", "en": "canon known"},

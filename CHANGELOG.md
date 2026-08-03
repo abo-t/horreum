@@ -7,6 +7,23 @@ schemat i API mogą się jeszcze zmieniać.
 ## [Niewydane]
 
 ### Dodane
+- **Nazwę obiektu można teraz nadać i COFNĄĆ prosto z ekranu „Klatki".** Do tej pory nadanie nazwy
+  ręką było jednokierunkowe: pomyłkę dawało się odwrócić tylko przez edycję pliku ze słownikiem,
+  i tylko dla nazw, które w nim były. Pasek zaznaczenia dostał przycisk **„Obiekt ▾"** z dwiema
+  pozycjami — „Nazwij zaznaczenie…" i „Cofnij przypisanie". Obie działają **wyłącznie na tym, co
+  masz zaznaczone**, nigdy na całej widocznej liście; przy pustym zaznaczeniu są wygaszone.
+  **Program chroni to, czego nie powinien ruszać, i mówi o tym wprost.** Cofnięcie zdejmuje tylko
+  nazwy, które postawiła Twoja ręka albo folder — **nazwa odczytana z nagłówka pliku albo z pozycji
+  na niebie zostaje**, bo to fakt z archiwum, a nie pomyłka do naprawienia. Nazywanie pomija
+  kalibrację (dark, flat, bias — te obiektu nie mają z definicji), a cofanie pomija gotowe obrazy
+  po integracji, bo odebranie im obiektu zerwałoby powiązanie ze zdjęciami, z których powstały.
+  Po każdym geście dostajesz zdanie z rozbiciem: ile klatek zmieniono i **z jakiego powodu resztę
+  pominięto** — osobno kalibrację, osobno klatki z nagłówka, osobno te, które zmieniły się
+  w międzyczasie.
+  **Cofnięcie zostaje cofnięciem.** Klatka, której zdjęto nazwę, nie dostanie jej z powrotem przy
+  najbliższym „Rozwiąż" — nawet jeśli folder albo nagłówek dalej ją podpowiadają. Wraca do
+  przeglądu i czeka na Twoją decyzję. Znak zapytania znika dopiero wtedy, gdy sam podasz nazwę
+  ponownie albo wpiszesz ją do pliku przez „Napraw nagłówek…".
 - **Klatki z lustrzanki można wreszcie nazwać ręką — kubełek „bez nazwy (RAW)" przestał być
   ślepym zaułkiem.** Wiersz w kolejce przeglądu mówił o nich od dawna, ale nie dało się w niego
   kliknąć: jedyna droga naprawy (ręczne przypisanie) była podpięta pod pozycje, które mają nazwę

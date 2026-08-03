@@ -2153,6 +2153,11 @@ class MainWindow(QMainWindow):
         # kolejkę przeglądu w oknie osi — a tamten widok nie ma skąd o tym wiedzieć. Gospodarz zna
         # obie strony, więc to on je łączy (grid nie importuje osi, oś nie importuje gridu).
         grid.object_axis_changed.connect(tasks.object_view.refresh)
+        # …i PIĄTA: badge sidebara, widoczny CAŁY CZAS. Liczy `review_frame_ids`, czyli dokładnie
+        # populację, którą oba gesty zmieniają — bez tej linii licznik zadań pokazywał stan sprzed
+        # gestu aż do wejścia w Porządki, więc „stan widoczny bez klikania" przestawał być prawdą
+        # zaraz po akcji, która go zmieniła (adjudykacja recenzji S2b).
+        grid.object_axis_changed.connect(tasks.refresh_counts)
         for v in (tasks.axis_view, tasks.observatory_view, tasks.object_view):
             v.status_message.connect(self._flash)
         tasks.open_collection.connect(self._on_open_collection)

@@ -365,6 +365,34 @@ CATALOG = {
         "en": {"one": "{n} frame with no name in metadata (format has no OBJECT card).",
                "other": "{n} frames with no name in metadata (format has no OBJECT card)."},
     },
+    # ZAZNACZENIE z paska Zbiorów (S2b) — trzecie wejście tego okna i JEDYNE, które pyta
+    # o nadpisanie cudzej nazwy. Zdanie grupy RAW („bez nazwy w metadanych, format bez karty
+    # OBJECT") było tu podwójną nieprawdą: klatki nazwę mają (ze ścieżki), a bywają FITS-ami
+    # z kartą. Liczba = ile gest REALNIE ruszy, nie ile zaznaczono.
+    "assign.selection_head": {
+        "pl": {"one": "Zaznaczenie: {n} klatka do nazwania.",
+               "few": "Zaznaczenie: {n} klatki do nazwania.",
+               "many": "Zaznaczenie: {n} klatek do nazwania."},
+        "en": {"one": "Selection: {n} frame to name.", "other": "Selection: {n} frames to name."},
+    },
+    "assign.selection_overwrite": {
+        "pl": {"one": "{n} z nich ma już nazwę ze ścieżki — zostanie nadpisana.",
+               "few": "{n} z nich mają już nazwę ze ścieżki — zostanie nadpisana.",
+               "many": "{n} z nich ma już nazwę ze ścieżki — zostanie nadpisana."},
+        "en": {"one": "{n} of them already has a name from the path — it will be overwritten.",
+               "other": "{n} of them already have a name from the path — it will be overwritten."},
+    },
+    # Reszta zaznaczenia ZOSTAJE nietknięta i user ma to wiedzieć PRZED zapisem, a nie z komunikatu
+    # po nim: kalibracja i klatki z nagłówka/regionu są chronione, więc różnica między „zaznaczyłem
+    # 80" a „zapisze się 30" nie jest awarią, tylko regułą.
+    "assign.selection_skip": {
+        "pl": {"one": "{n} klatka zaznaczenia zostaje nietknięta (kalibracja albo nazwa z pliku).",
+               "few": "{n} klatki zaznaczenia zostają nietknięte (kalibracja albo nazwa z pliku).",
+               "many": "{n} klatek zaznaczenia zostaje nietkniętych (kalibracja albo nazwa z pliku)."},
+        "en": {"one": "{n} selected frame stays untouched (calibration or a name from the file).",
+               "other": "{n} selected frames stay untouched (calibration or a name from the file)."},
+    },
+    "assign.cancel_btn": {"pl": "Anuluj", "en": "Cancel"},
     "assign.alias_remembered": {
         "pl": "Alias zostanie zapamiętany: nowe klatki z tą nazwą przypisze resolver.",
         "en": "The alias will be remembered: the resolver will assign new frames with this name.",

@@ -1675,3 +1675,64 @@ def test_kolejka_NIE_dostaje_nowego_kubelka_poza_czlonem_cofniecia(obj_view):
     q = queries.review_queue(con)
     assert q["nameless_raw_count"] == 2                    # cofnięte wróciły do swojego kubełka
     assert len(queries.review_frame_ids(con)) == 2
+
+
+# ── adjudykacja recenzji diffu S2b: trzy zdania, które POWIERZCHNIA mówiła nieprawdziwie ──
+
+
+def test_rozbicie_PER_FAKT_przezywa_odswiezenie(obj_view):
+    """Zdanie po UDANYM geście musi być OSTATNIM, co pada — inaczej nikt go nie zobaczy.
+
+    `refresh()` kończy się własnym `status_message` („Grid: N klatek…"), a odbiornikiem jest jeden
+    `showMessage` paska stanu. Emisja przed odświeżeniem ginęła w tym samym obrocie pętli, więc
+    liczniki per fakt widać było WYŁĄCZNIE wtedy, gdy gest niczego nie zapisał. Bramka pyta
+    o KOLEJNOŚĆ, bo sama treść komunikatu przechodziła i przedtem."""
+    v, _ = obj_view
+    v.refresh()
+    zdania = []
+    v.status_message.connect(zdania.append)
+    _zaznacz(v, [1, 2, 3, 4])
+    v._on_object_clear()
+    assert zdania, "gest w ogóle nie odezwał się do usera"
+    assert "2" in zdania[-1] and "kalibracja" in zdania[-1]     # rozbicie, nie „Grid: N klatek"
+
+
+def test_odmowa_konfliktu_podaje_PRAWDZIWA_liczbe_obiektow(obj_view, monkeypatch):
+    """Komunikat odmowy liczył literałem „2", więc przy pięciu obiektach kazał zawęzić do dwóch —
+    a po zawężeniu odmawiał tak samo. Recepta, której nie da się wykonać, jest gorsza od milczenia."""
+    v, con = obj_view
+    con.execute("INSERT INTO object(id, canon, catalog, kind) VALUES (6,'M42','M','deep_sky')")
+    con.execute("UPDATE frame SET object_id = 6 WHERE id = 2")   # drugi obiekt, źródło dalej słabe
+    con.commit()
+    v.refresh()
+    zdania = []
+    v.status_message.connect(zdania.append)
+    _zaznacz(v, [1, 2])
+    v._on_object_name()
+    assert "2 różnych obiektów" in zdania[-1]
+    assert queries.selection_object_state(con, [1, 2])["conflict_n"] == 2
+
+
+def test_okno_dostaje_LICZBE_DO_ZAPISANIA_i_kontekst_zaznaczenia(obj_view, monkeypatch):
+    """Etykieta akcji obiecywała „Przypisz 8 klatek" i zapisywała 4: `frame_count` szło z długości
+    ZAZNACZENIA, nie z tego, co gest ruszy. Do tego okno wchodziło z `object_raw=None`, więc
+    opisywało zaznaczenie zdaniem kubełka RAW („bez nazwy w metadanych") — o klatkach, które nazwę
+    MAJĄ. Bramka pyta o OBA parametry, bo jeden bez drugiego dalej kłamie."""
+    v, _ = obj_view
+    v.refresh()
+    zapis = {}
+
+    class _Fake:
+        def __init__(self, con, *, object_raw, frame_count, selection=None, parent=None):
+            zapis.update(frame_count=frame_count, selection=selection)
+            self.selected = None
+
+        def exec(self):
+            return 0
+
+    monkeypatch.setattr("horreum.gui.grid.AssignObjectDialog", _Fake)
+    _zaznacz(v, [1, 2, 3, 4])            # 2 ze ścieżki + 1 z nagłówka + dark
+    v._on_object_name()
+    assert zapis["frame_count"] == 2                     # tyle gest realnie ruszy, nie 4
+    assert zapis["selection"]["n"] == 4                  # …a okno wie, ile zaznaczono
+    assert zapis["selection"]["overwrite"] == 2          # …i ile nazw przemaluje

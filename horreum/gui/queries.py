@@ -14,7 +14,7 @@ NIGDY składanie stringa SQL. Listy zmiennej długości (id/keywordy) idą jako 
 import json
 
 from horreum.resolve.frames import LIGHT_KINDS
-from horreum.resolve.objects import WEAK_OBJECT_SOURCES
+from horreum.resolve.objects import CLEARABLE_OBJECT_SOURCES, WEAK_OBJECT_SOURCES
 from horreum.resolver import NO_OBJECT_CARD_FILETYPES, path_proposals, review_state
 
 
@@ -1090,13 +1090,19 @@ def selection_object_state(con, frame_ids):
     słabe). Liczenie ich po całym zaznaczeniu blokowałoby akcję z powodu klatki, której i tak nikt
     nie zamierzał tknąć — a to odmowa o fałszywej przyczynie.
 
-    Zwraca dict: n, lights, stacks, namable, clearable, expected_object_id, conflict, by_source."""
+    DWIE LICZBY DLA ZDANIA, NIE SAM BIT (adjudykacja recenzji S2b): `overwrite` mówi, ile klatek
+    gest realnie PRZEMALUJE (mają już kanon ze źródła słabego), a `conflict_n` — ile jest różnych
+    obiektów, gdy gest odmawia. Bit `conflict` nie wystarczał: komunikat wstawiał literał „2", więc
+    zaznaczenie z siedmioma obiektami kazało zawęzić do dwóch i po zawężeniu odmawiało tak samo.
+
+    Zwraca dict: n, lights, stacks, namable, overwrite, clearable, expected_object_id, conflict,
+    conflict_n, by_source."""
     rows = con.execute(
         "SELECT f.kind, f.object_id, f.object_source FROM frame f "
         "WHERE f.id IN (SELECT value FROM json_each(?))",
         (json.dumps(list(frame_ids)),)).fetchall()
     by_source, slabe = {}, set()
-    n = lights = stacks = namable = clearable = 0
+    n = lights = stacks = namable = overwrite = clearable = 0
     for r in rows:
         n += 1
         by_source[r["object_source"]] = by_source.get(r["object_source"], 0) + 1
@@ -1105,16 +1111,18 @@ def selection_object_state(con, frame_ids):
         lights += 1
         if r["kind"] == "master_light":
             stacks += 1
-        elif r["object_source"] in ("path", "user") and r["object_id"] is not None:
+        elif (r["object_source"] in CLEARABLE_OBJECT_SOURCES
+              and r["object_id"] is not None):
             clearable += 1
         if r["object_id"] is None or r["object_source"] in WEAK_OBJECT_SOURCES:
             namable += 1
             if r["object_id"] is not None:
+                overwrite += 1              # ta klatka ma już kanon — gest go PRZEMALUJE
                 slabe.add(r["object_id"])
     return {"n": n, "lights": lights, "stacks": stacks, "namable": namable,
-            "clearable": clearable, "by_source": by_source,
+            "overwrite": overwrite, "clearable": clearable, "by_source": by_source,
             "expected_object_id": next(iter(slabe)) if len(slabe) == 1 else None,
-            "conflict": len(slabe) > 1}
+            "conflict": len(slabe) > 1, "conflict_n": len(slabe)}
 
 
 def rename_frame_targets(con, frame_ids):

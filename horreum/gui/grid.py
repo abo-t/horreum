@@ -1916,12 +1916,17 @@ class FramesView(QWidget):
             n = getattr(gest, pole)
             if n:
                 msg += i18n.t(f"grid.sel.object_skip_{sufiks}", n=n)
-        self.status_message.emit(msg)
         if gest.assigned:
             # CZTERY POWIERZCHNIE: wiersze gridu, facety (Obiekt zmienił zawartość), licznik/pasek
             # oraz kolejka przeglądu w oknie osi — ta ostatnia przez sygnał, bo nie jest nasza.
             self.refresh()
             self.object_axis_changed.emit()
+        # ZDANIE IDZIE PO ODŚWIEŻENIU, nie przed (adjudykacja recenzji S2b). `refresh()` kończy się
+        # własnym `status_message` („Grid: N klatek…"), a odbiornikiem jest jeden `showMessage`
+        # paska stanu — emisja przed odświeżeniem ginęła w tym samym obrocie pętli. Skutek był
+        # dokładnie odwrotny do zamierzonego: rozbicie per fakt user widział WYŁĄCZNIE wtedy, gdy
+        # gest niczego nie zapisał (bo wtedy `refresh()` nie leci), a po udanym zapisie — nigdy.
+        self.status_message.emit(msg)
 
     def _on_object_name(self):
         """„Nazwij zaznaczenie…": nadpisuje WYŁĄCZNIE źródła słabe, przy zamrożonym stanie okna."""
@@ -1933,9 +1938,17 @@ class FramesView(QWidget):
             # Dwa różne obiekty wśród klatek podlegających nadpisaniu ⇒ gest nie ma JEDNEGO
             # przedmiotu. Odmowa BEZ zapisu — częściowe wykonanie byłoby gorsze niż żadne, bo
             # user zobaczyłby „nazwano 30 z 80" i nie wiedział, które 30.
-            self.status_message.emit(i18n.t("grid.sel.object_conflict", n=2))
+            # Liczba z READ-MODELU, nie literał: „2" było zaszyte, więc zaznaczenie z siedmioma
+            # obiektami kazało zawęzić do dwóch, a po zawężeniu odmawiało tak samo — komunikat
+            # o fałszywej liczbie jest receptą, której nie da się wykonać.
+            self.status_message.emit(i18n.t("grid.sel.object_conflict", n=stan["conflict_n"]))
             return
-        dlg = AssignObjectDialog(self.con, object_raw=None, frame_count=len(ids), parent=self)
+        # LICZBA W OKNIE = ile gest realnie ruszy (`namable`), a nie ile zaznaczono: przycisk mówił
+        # „Przypisz 8 klatek" i zapisywał 4, a przy realnym archiwum (większość lightów ma źródło
+        # mocne) rozjazd jest regułą, nie wyjątkiem. Kontekst zaznaczenia idzie dalej, bo to okno
+        # pyta wtedy o NADPISANIE cudzej nazwy i musi to powiedzieć zamiast zdania o kubełku RAW.
+        dlg = AssignObjectDialog(self.con, object_raw=None, frame_count=stan["namable"],
+                                 selection=stan, parent=self)
         if dlg.exec() != QDialog.Accepted or dlg.selected is None:
             return
         canon, catalog, kind, alias_norm = dlg.selected

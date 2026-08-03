@@ -22,9 +22,13 @@ class AssignObjectDialog(QDialog):
     („Obiekt ▾ → Cofnij przypisanie" w Zbiorach); sprzątanie osieroconego OBIEKTU to osobna sprawa
     i czeka na ekran Porządków (`retired_at`, nie `DELETE`).
 
-    DWA WEJŚCIA, JEDNO OKNO (S4): grupa Z ZEZNANIEM (`object_raw` z nagłówka) i grupa BEZ NIEGO
-    (kubełek RAW — format nie ma karty `OBJECT`, więc zeznania nie ma z definicji, nie z braku).
-    `object_raw=None` to drugi przypadek; nagłówek okna mówi wtedy o klatkach, nie o nazwie.
+    TRZY WEJŚCIA, JEDNO OKNO: grupa Z ZEZNANIEM (`object_raw` z nagłówka), grupa BEZ NIEGO
+    (kubełek RAW — format nie ma karty `OBJECT`, więc zeznania nie ma z definicji, nie z braku)
+    oraz ZAZNACZENIE z paska Zbiorów (S2b, `selection` = read-model `selection_object_state`).
+    Trzeciego NIE WOLNO opisywać zdaniem drugiego, choć oba wchodzą z `object_raw=None`: zaznaczenie
+    bywa FITS-ami Z kartą `OBJECT` i klatkami, które kanon JUŻ mają — a to okno pyta wtedy o
+    nadpisanie cudzej nazwy i musi to powiedzieć wprost. `frame_count` = ile klatek gest REALNIE
+    ruszy (`namable`), nie ile jest zaznaczonych: etykieta akcji obiecywała 8 przy 4 do zapisania.
 
     WALIDACJA STOI NA `resolver.name_resolves`, KANON NA `resolve_name` (S4, D-OW-2 pkt 5): walidator
     zwraca `bool`, więc sam kanonu nie da, a dawna gałąź liczyła go przez `catalog_canon`→`xref` —
@@ -51,7 +55,7 @@ class AssignObjectDialog(QDialog):
     alias_norm)` (`kind=None` dla obiektu istniejącego — repo go nie INSERTuje, więc pole
     nieużywane; `alias_norm=None` = przypadek trzeci)."""
 
-    def __init__(self, con, *, object_raw, frame_count, parent=None):
+    def __init__(self, con, *, object_raw, frame_count, selection=None, parent=None):
         super().__init__(parent)
         # KONTRAKT PILNOWANY OD ŚRODKA (R-S4-9, odesłane z adjudykacji S4 i domknięte tutaj).
         # `object_raw` o wartości `""` NIE jest tym samym co `None`: przypadek 1 zwróci wtedy pusty
@@ -60,15 +64,35 @@ class AssignObjectDialog(QDialog):
         # wołającego; od S2b wołających jest dwóch, więc obrona z zewnątrz przestała wystarczać.
         # Poprawką NIE jest `norm_alnum(...) or None` — to zmieniłoby semantykę na „brak klucza"
         # tam, gdzie klucz miał zostać ZAPAMIĘTANY (przypadek 1 uczy nazwy z nagłówka na przyszłość).
-        assert object_raw is None or object_raw.strip(), (
-            "object_raw='' to nie 'brak zeznania' — podaj None dla grupy bez karty")
+        # Asercja pyta o KLUCZ, nie o białe znaki: bronimy przypadku 1, a on liczy klucz przez
+        # `norm_alnum`. Predykat `strip()` przepuszczał `"---"` — zeznanie realne w archiwum, po
+        # którym klucz jest pusty tak samo jak po `""`, a klinga rzuca ValueError-em o „nazwie bez
+        # znaków alfanumerycznych", czyli kłamstwem o przyczynie. Guard w `gui.app` łapał to dla
+        # JEDNEGO wołającego tym samym `norm_alnum` — dwa predykaty na jeden kontrakt to dwóch
+        # właścicieli, a właśnie ich mnożenie było powodem wydzielenia okna.
+        assert object_raw is None or norm_alnum(object_raw), (
+            "object_raw bez znaków alfanumerycznych to nie 'brak zeznania' — "
+            "podaj None dla grupy bez karty")
         self.con = con
         self.object_raw = object_raw
         self.selected = None
         self.setWindowTitle(i18n.t("assign.title"))
         lay = QVBoxLayout(self)
 
-        if object_raw is None:
+        if selection is not None:
+            # ZAZNACZENIE to nie „grupa bez zeznania" — i pomylenie ich było kłamstwem w chwili
+            # decyzji o nadpisaniu: pasek Zbiorów woła to okno z `object_raw=None`, więc nagłówek
+            # mówił „N klatek bez nazwy w metadanych (format bez karty OBJECT)" o klatkach, które
+            # nazwę MAJĄ (ze ścieżki) i bywają FITS-ami z kartą `OBJECT`. Zdanie składamy z tego
+            # samego read-modelu, który wygasza kontrolkę — jeden właściciel faktu o zaznaczeniu.
+            head_text = i18n.t_plural("assign.selection_head", frame_count)
+            if selection["overwrite"]:
+                head_text += "\n" + i18n.t_plural("assign.selection_overwrite",
+                                                  selection["overwrite"])
+            pominie = selection["n"] - frame_count
+            if pominie:
+                head_text += "\n" + i18n.t_plural("assign.selection_skip", pominie)
+        elif object_raw is None:
             # Grupa bez zeznania: nagłówek nie ma nazwy do zacytowania, a obietnica „alias zostanie
             # zapamiętany" byłaby nieprawdziwa dla przypadku trzeciego — mówimy więc, skąd bierze
             # się grupa, i zostawiamy naukę aliasu przy nazwie, która ją realnie dostaje.
@@ -118,6 +142,9 @@ class AssignObjectDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         self.accept_btn = buttons.button(QDialogButtonBox.Ok)
         self.accept_btn.setText(i18n.t_plural("assign.accept_btn", frame_count))
+        # Tekst przycisku z katalogu, nie z Qt (precedens `planner.py`): repo nie wozi QTranslator,
+        # więc `Cancel` zostawało po angielsku obok spolszczonego „Przypisz N klatek".
+        buttons.button(QDialogButtonBox.Cancel).setText(i18n.t("assign.cancel_btn"))
         buttons.accepted.connect(self._validate_and_accept)
         buttons.rejected.connect(self.reject)
         lay.addWidget(buttons)

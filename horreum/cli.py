@@ -997,6 +997,11 @@ def _format_delta(db_path, rep):
     if rep.object_resolved_no_raw:
         lines.append(f"  rozwiazane BEZ nazwy w naglowku (poza procentem): "
                      f"{rep.object_resolved_no_raw}")
+    # Ile z nierozpoznanych to WERDYKT CZLOWIEKA, a nie brak wiedzy (S3/R-S2b-2). Zostaja
+    # w procencie swiadomie — wykluczenie nagradzaloby odrzucenie zeznania — ale bez tej liczby
+    # raport nie umial ich odroznic od klatek, o ktorych nikt nic nie powiedzial.
+    if rep.object_cleared:
+        lines.append(f"  z tego cofniete reka (nagrobek): {rep.object_cleared}")
     # Osobna pozycja i TYLKO gdy jest co pokazac: RAW nie ma karty OBJECT z natury
     # (`resolver.NO_OBJECT_CARD_FILETYPES`), wiec droga naprawy jest inna — reka, nie writeback.
     if rep.object_nameless_raw:

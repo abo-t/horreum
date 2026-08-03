@@ -196,6 +196,29 @@ CATALOG = {
         "en": "No objects for this filter — scan and resolve (horreum resolve) or change the filter.",
     },
     "object.review_item": {"pl": "{name}  ·  {n} klatek", "en": "{name}  ·  {n} frames"},
+    # CZŁON „cofnięte ręką" (S3/R-S2b-1). Klatka, której zdjąłeś nazwę, wraca do TEGO SAMEGO
+    # kubełka — bo przeglądu wymaga tak samo jak nietknięta — ale wraca z INNĄ historią: to Twój
+    # werdykt, nie brak zeznania. Bez tego rozróżnienia pozycja wyglądała identycznie, a akcja
+    # ręki po cichu jej nie tykała (klinga chroni werdykt przed przypadkowym wskrzeszeniem).
+    "object.review_item_cleared": {
+        "pl": "{name}  ·  {n} klatek  ·  cofnięte ręką",
+        "en": "{name}  ·  {n} frames  ·  undone by hand"},
+    "object.nameless_raw_cleared_line": {
+        "pl": "— bez nazwy, format bez karty (RAW): {n}  ·  cofnięte ręką",
+        "en": "— nameless, format has no card (RAW): {n}  ·  undone by hand"},
+    "object.frames_review_cleared": {
+        "pl": "Klatki z cofniętym przypisaniem: {name}",
+        "en": "Frames with the assignment undone: {name}"},
+    "object.frames_nameless_raw_cleared": {
+        "pl": "Klatki z cofniętym przypisaniem — format bez karty OBJECT ({n})",
+        "en": "Frames with the assignment undone — format has no OBJECT card ({n})",
+    },
+    # Tooltip mówi wprost, że to DRUGI gest człowieka — bo tylko taki gasi nagrobek. Bez tego
+    # zdania user nie wie, czym ten przycisk różni się od tego samego przycisku kubełek wyżej.
+    "object.assign_tip_cleared": {
+        "pl": "Sam cofnąłeś tu nazwę — przypisanie ręką nadpisze ten werdykt",
+        "en": "You undid the name here — assigning by hand overrides that verdict",
+    },
     "object.nameless_line": {"pl": "— bez nazwy w nagłówku: {n}",
                              "en": "— no name in header: {n}"},
     # RAW/DSLR: format nie zna karty OBJECT, więc te klatki czekają na RĘCZNE przypisanie —
@@ -1405,6 +1428,10 @@ CATALOG = {
     # Doklejka do PROCENTU (nie do `{nameless}`): to druga strona tego samego zawężenia — klatki,
     # które obiekt MAJĄ, ale nazwy w nagłówku nie miały, więc do ułamka nie wchodzą po ŻADNEJ
     # stronie. Bez tej doklejki licznik po prostu spada i ekran nie tłumaczy dlaczego.
+    # Ile z „nierozpoznanych" to WERDYKT człowieka (S3/R-S2b-2). Zostają w procencie świadomie:
+    # wykluczenie podnosiłoby go, czyli metryka nagradzałaby odrzucenie zeznania.
+    "pipeline.delta.cleared": {
+        "pl": " · z tego cofnięte ręką: {n}", "en": " · of which undone by hand: {n}"},
     "pipeline.delta.resolved_no_raw": {
         "pl": " + {n} rozwiązanych bez nazwy (poza procentem)",
         "en": " + {n} resolved without a name (outside the percentage)"},

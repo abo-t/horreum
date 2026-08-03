@@ -697,6 +697,16 @@ class DeltaReport:
     # Dwie klasy pod jedną liczbą — dziś druga jest pusta (szkielety mają `kind='unknown'`, więc nie
     # są lightem), ale gdyby przestała być, to TU się pokaże, zamiast zniknąć między predykatami.
     object_resolved_no_raw: int = 0
+    # NAGROBEK MA WŁASNĄ LICZBĘ, a nie własne wykluczenie (S3/R-S2b-2, rozstrzygnięcie briefu §5).
+    # Klatka, której człowiek ZDJĄŁ nazwę, zostaje w `object_unresolved` i w `object_delta` — bo
+    # wykluczenie jej z delty PODNOSIŁOBY `object_pct`, czyli metryka nagradzałaby odrzucenie
+    # zeznania, a ma mierzyć ROZPOZNANIE. Bez osobnej liczby raport nie umiał jednak powiedzieć,
+    # ile z „nierozpoznanych" to WERDYKT, a nie brak wiedzy: przebieg meldował `objects_review = 0`
+    # (drabina pomija nagrobek poprawnie), a delta pokazywała tę samą populację jako nierozpoznaną.
+    # Dwa ekrany, dwie prawdy o jednym zbiorze. Predykat stoi na SAMYM `object_source`, NIEZALEŻNIE
+    # od `object_raw` — inaczej cofnięty RAW nazwany ze ścieżki wypadałby z liczby, a bramka 14b
+    # żąda wyniku na OBU populacjach.
+    object_cleared: int = 0
 
 
 def delta_report(con, top=30):
@@ -737,11 +747,15 @@ def delta_report(con, top=30):
         "WHERE f.kind IN ('light','master_light') AND f.object_id IS NULL "
         "AND h.object_raw IS NOT NULL GROUP BY h.object_raw ORDER BY n DESC, raw LIMIT ?",
         (top,)).fetchall()
+    cleared = con.execute(
+        "SELECT count(*) FROM frame "
+        "WHERE kind IN ('light','master_light') AND object_source = 'user_cleared'"
+    ).fetchone()[0]
     filters_canon = con.execute(
         "SELECT count(*) FROM frame WHERE filter_canon IS NOT NULL").fetchone()[0]
     return DeltaReport(
         object_resolved=resolved, object_unresolved=unresolved, object_pct=pct,
-        object_resolved_no_raw=resolved_no_raw,
+        object_resolved_no_raw=resolved_no_raw, object_cleared=cleared,
         object_delta=[(r["raw"], r["n"]) for r in delta], review=review_state(con),
         filters_canon=filters_canon, object_nameless=nameless_lights(con),
         object_nameless_raw=nameless_raw_lights(con),

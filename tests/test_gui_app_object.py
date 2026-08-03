@@ -1142,3 +1142,72 @@ def test_okno_nie_pisze_dopoki_nie_klikniesz(sciezka):
     assert _events(con) == przed
     assert con.execute("SELECT count(*) FROM frame WHERE object_id IS NOT NULL").fetchone()[0] == 0
     dlg.reject()
+
+
+# ═════════════════════════ S3/R-S2b-1 — CZŁON „COFNIĘTE RĘKĄ" (bramka 14b, wykonawcza część)
+
+
+def test_kubelek_RAW_rozszczepia_sie_po_zrodle_a_akcja_przestaje_milczec(sciezka):
+    """Bramka 14b, człon, który do S3 nie miał wykonawcy: kubełek z akcją, która na cofniętej
+    klatce NIC nie robiła.
+
+    Klatka z nagrobkiem wraca do tego samego kubełka (predykat pyta o sam brak obiektu) i do
+    rozszczepienia wyglądała identycznie jak nietknięta. „Przypisz obiekt…" wołało klingę BEZ
+    `overwrite_weak`, więc nagrobek wpadał w `source_skip` i user dostawał „przypisano 0 z N"
+    bez powodu: kubełek miał akcję, akcja go nie tykała, a jedyna działająca droga leżała
+    w zupełnie innym miejscu nawigacji (Zbiory) i nic o niej nie mówiło."""
+    v, con = sciezka
+    ids = [r["frame_id"] for r in queries.nameless_raw_frames(con)][:2]
+    repo.user_assign_object(con, alias_norm=None, canon="NGC7000", catalog="NGC",
+                            kind="deep_sky", frame_ids=ids, now=NOW_S2)
+    assert repo.clear_object_assignment(con, frame_ids=ids, now=NOW_S2).assigned == 2
+    v._load_review()
+
+    q = queries.review_queue(con)
+    assert (q["nameless_raw_count"], q["nameless_raw_cleared_count"]) == (2, 2)
+    _select_review_tag(v, "nameless_raw_cleared")
+    assert v.frames.rowCount() == 2                  # drążenie po PARZE, nie unia obu połówek
+    assert v.assign_btn.isEnabled()
+    assert "cofnąłeś" in v.assign_btn.toolTip()      # tooltip mówi, że to DRUGI gest człowieka
+
+    v._select_all_frames()
+    g = repo.user_assign_object(con, alias_norm=None, canon="NGC7000", catalog="NGC",
+                                kind="deep_sky", frame_ids=v._selected_frame_ids(),
+                                now=NOW_S2, overwrite_weak=True)
+    assert (g.assigned, g.skipped) == (2, 0)         # nagrobek NIE jest już cichym pominięciem
+
+
+def test_drazenie_po_parze_NIE_zwraca_unii_obu_polowek(sciezka):
+    """Falsyfikator rozszczepienia: gdyby klucz został samym stringiem, zapis z jednej połówki
+    sięgnąłby klatek spoza klikniętego wiersza — a obie połówki wyglądają na ekranie tak samo."""
+    v, con = sciezka
+    ids = [r["frame_id"] for r in queries.nameless_raw_frames(con)][:2]
+    repo.user_assign_object(con, alias_norm=None, canon="NGC7000", catalog="NGC",
+                            kind="deep_sky", frame_ids=ids, now=NOW_S2)
+    repo.clear_object_assignment(con, frame_ids=ids, now=NOW_S2)
+    swieze = {r["frame_id"] for r in queries.nameless_raw_frames(con)}
+    cofniete = {r["frame_id"] for r in queries.nameless_raw_frames(con, cleared=True)}
+    assert cofniete == set(ids)
+    assert not (swieze & cofniete)                   # ROZŁĄCZNE, nie kubełek i jego podzbiór
+
+
+def test_delta_daje_nagrobkowi_WLASNA_LICZBE_nie_wyklucza_go(sciezka):
+    """R-S2b-2 / brief §5: cofnięta klatka ZOSTAJE w procencie — wykluczenie podnosiłoby
+    `object_pct`, czyli metryka nagradzałaby odrzucenie zeznania, a ma mierzyć ROZPOZNANIE.
+    Bez własnej liczby raport nie umiał jednak odróżnić WERDYKTU od braku wiedzy.
+
+    Predykat stoi na SAMYM `object_source`, NIEZALEŻNIE od `object_raw` — falsyfikator: klatka RAW
+    (bez zeznania w nagłówku) też musi się policzyć, bo bramka 14b żąda wyniku na OBU populacjach."""
+    v, con = sciezka
+    ids = [r["frame_id"] for r in queries.nameless_raw_frames(con)][:2]
+    repo.user_assign_object(con, alias_norm=None, canon="NGC7000", catalog="NGC",
+                            kind="deep_sky", frame_ids=ids, now=NOW_S2)
+    przed = resolver.delta_report(con)
+    repo.clear_object_assignment(con, frame_ids=ids, now=NOW_S2)
+    po = resolver.delta_report(con)
+    assert (przed.object_cleared, po.object_cleared) == (0, 2)   # RAW bez `object_raw` — liczy się
+    # …i NIE ZNIKA z rachunku: wraca dokładnie tam, skąd ją wzięto (kubełek RAW rośnie o 2,
+    # „rozwiązane bez nazwy w nagłówku" spada o 2). Sam licznik nagrobków bez tego członu
+    # dałoby się zaimplementować jako wykluczenie populacji — i bramka by tego nie zobaczyła.
+    assert (przed.object_nameless_raw, po.object_nameless_raw) == (2, 4)
+    assert (przed.object_resolved_no_raw, po.object_resolved_no_raw) == (2, 0)

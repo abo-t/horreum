@@ -974,6 +974,10 @@ class PipelineView(QWidget):
         # dlaczego — a Horreum jest aplikacją okienkową, więc CLI tego nie wyjaśni za niego.
         no_raw = (i18n.t("pipeline.delta.resolved_no_raw", n=r.object_resolved_no_raw)
                   if r.object_resolved_no_raw else "")
+        # Człon nagrobka doklejamy do zdania o bezimiennych, nie do procentu: te klatki SĄ
+        # w procencie (świadomie), a zdanie ma powiedzieć, ile z nich to Twój werdykt.
+        if r.object_cleared:
+            nameless += i18n.t("pipeline.delta.cleared", n=r.object_cleared)
         return i18n.t(
             "pipeline.fmt.delta", resolved=r.object_resolved, total=total, pct=r.object_pct,
             filters=r.filters_canon, top=top, review=_review_line(r.review),

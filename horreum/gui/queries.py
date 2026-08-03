@@ -249,8 +249,11 @@ def review_queue(con):
 
     PARTYCJA wobec perspektywy gridu (T5a — dwa predykaty „do przeglądu" pod jedną nazwą; szew
     zmierzony 2026-07-31, żywa pf4: 0 nazwanych + 25 bezimiennych + 0 lightów bez nagłówka = 25):
-        sum(object_review.n) + nameless_count + nameless_raw_count + nameless_stacks_count
-            + (light/master_light bez wiersza `header`) == |review_frame_ids|
+        sum(object_review.n) + nameless_count + nameless_raw_count + nameless_raw_cleared_count
+            + nameless_stacks_count + (light/master_light bez wiersza `header`) == |review_frame_ids|
+    `object_review` domyka się bez osobnego członu, bo rozszczepienie siedzi w jego GROUP BY —
+    suma po wierszach liczy obie połówki. Kubełek RAW ma dwie liczby, bo jego licznik jest DŁUGOŚCIĄ
+    drążenia, a drążenia są dwa (S3/R-S2b-1).
     Człony RAW i STOSY dopisane 2026-08-01 i to nie jest kosmetyka: `review_frame_ids` pyta
     o sam brak obiektu, więc jedne i drugie w nim SĄ. Wycięcie populacji z `nameless_count` bez
     własnego kubełka rozspójnia partycję dokładnie o jej liczbę — dla RAW o 763, dla stosów o 22.
@@ -268,15 +271,17 @@ def review_queue(con):
         `resolver.path_proposals`. **`None` znaczy „nie policzono"** (słownik obiektów własnych ma
         błąd), a `0` — „nie ma czego liczyć"; wołający ma te dwa stany rozróżnić.
 
-    Zwraca dict: {object_review: [Row(object_raw, n)], nameless_count: int, nameless_raw_count: int,
+    Zwraca dict: {object_review: [Row(object_raw, cleared, n)], nameless_count: int,
+    nameless_raw_count: int, nameless_raw_cleared_count: int,
     nameless_stacks_count: int, path_proposed_names: int, path_proposed_frames: int,
     config_review_count: int, headerless_count: int, unreadable_count: int}."""
     object_review = con.execute(
-        "SELECT h.object_raw AS object_raw, COUNT(*) AS n "
+        "SELECT h.object_raw AS object_raw, "
+        "       (f.object_source IS 'user_cleared') AS cleared, COUNT(*) AS n "
         "FROM frame f JOIN header h ON h.frame_id = f.id "
         "WHERE f.kind IN ('light','master_light') AND f.object_id IS NULL "
         "  AND h.object_raw IS NOT NULL "
-        "GROUP BY h.object_raw ORDER BY n DESC, object_raw"
+        "GROUP BY h.object_raw, cleared ORDER BY n DESC, object_raw, cleared"
     ).fetchall()
     # Lustro `object_review` po drugiej stronie NULL-a: JOIN header = „zeznanie JEST", brak
     # `object_raw` = „nie mówi o obiekcie". Bez tego kubełka klatki wpadały między predykaty.
@@ -284,7 +289,11 @@ def review_queue(con):
     # COUNT — dwa literały rozjechałyby się przy pierwszej zmianie kształtu (kubełek pokazywałby
     # inną liczbę niż lista, którą otwiera).
     nameless = nameless_frames(con)
-    raw = nameless_raw_frames(con)              # licznik = długość drążenia (D-PD-10), jak wyżej
+    # DWIE LICZBY ROZŁĄCZNE, nie licznik i jego podzbiór (S3/R-S2b-1): klatka z nagrobkiem wraca
+    # do tego kubełka nieodróżnialna od nietkniętej, a akcja ręki cicho ją pomijała. Sumują się
+    # w partycji, bo `review_frame_ids` pyta o sam brak obiektu i widzi obie.
+    raw = nameless_raw_frames(con)               # licznik = długość drążenia (D-PD-10), jak wyżej
+    raw_cleared = nameless_raw_frames(con, cleared=True)
     stosy = nameless_stack_frames(con)          # licznik = długość drążenia (D-PD-10), jak wyżej
     # Szczebel ścieżki wciągnął SŁOWNIK obiektów własnych do read-modelu kolejki, a słownik jest
     # plikiem CZŁOWIEKA i jego edycja to operacja wspierana. Literówka w assecie ma zostać
@@ -298,6 +307,7 @@ def review_queue(con):
     st = review_state(con)
     return {"object_review": object_review, "nameless_count": len(nameless),
             "nameless_raw_count": len(raw),
+            "nameless_raw_cleared_count": len(raw_cleared),
             "nameless_stacks_count": len(stosy),
             "path_proposed_names": prop_names,
             "path_proposed_frames": prop_frames,
@@ -305,11 +315,22 @@ def review_queue(con):
             "headerless_count": st.headerless, "unreadable_count": st.unreadable}
 
 
-def object_review_frames(con, object_raw):
+def object_review_frames(con, object_raw, cleared=False):
     """Drążenie pojedynczej pozycji obiekt-review: klatki o danym `object_raw`, wciąż nierozwiązane
-    (`object_id IS NULL`). JOIN header (object_raw mieszka w header, R#3). Zwraca: frame_id,
-    sha1_data, telescope_label, telescop_canon, f_ratio_nominal, focal_nominal, camera_model,
-    date_obs, path."""
+    (`object_id IS NULL`). JOIN header (object_raw mieszka w header, R#3).
+
+    KLUCZ JEST PARĄ (`object_raw`, `cleared`) — S3/R-S2b-1. Klatka z NAGROBKIEM (`user_cleared`)
+    wraca do tego samego kubełka co nietknięta, bo predykat pyta o sam brak obiektu; do rozszczepienia
+    wyglądała identycznie, a akcja „Przypisz obiekt…" cicho ją pomijała (klinga chroni werdykt ręki
+    przed przypadkowym wskrzeszeniem). Drążenie po samym stringu zwróciłoby UNIĘ obu pozycji, więc
+    zapis sięgnąłby klatek spoza klikniętego wiersza.
+
+    Predykat idzie PARAMETREM na stałym literale (`IS 'user_cleared'` zwraca 0/1, null-safe), a nie
+    dwiema gałęziami SQL — dwa literały tego samego SELECT-a rozjechałyby się przy pierwszej zmianie
+    kolumn, a to ten sam panel je renderuje.
+
+    Zwraca: frame_id, sha1_data, telescope_label, telescop_canon, f_ratio_nominal, focal_nominal,
+    camera_model, date_obs, path."""
     return con.execute(
         "SELECT f.id AS frame_id, f.sha1_data, t.label AS telescope_label, "
         "       t.telescop_canon, t.f_ratio_nominal, t.focal_nominal, "
@@ -321,8 +342,9 @@ def object_review_frames(con, object_raw):
         "LEFT JOIN camera cam ON cam.id = f.camera_id "
         "LEFT JOIN location loc ON loc.id = (SELECT MIN(id) FROM location WHERE frame_id = f.id) "
         "WHERE f.kind IN ('light','master_light') AND f.object_id IS NULL AND h.object_raw = ? "
+        "  AND (f.object_source IS 'user_cleared') = ? "
         "ORDER BY f.id",
-        (object_raw,),
+        (object_raw, int(cleared)),
     ).fetchall()
 
 
@@ -380,7 +402,7 @@ def nameless_frames(con):
     ).fetchall()
 
 
-def nameless_raw_frames(con):
+def nameless_raw_frames(con, cleared=False):
     """Drążenie kubełka „bez nazwy, format bez karty (RAW)" (S4) — bliźniak `nameless_frames`
     o jednym słowie różnicy: `filetype IN NO_OBJECT_CARD_FILETYPES` zamiast `NOT IN`.
 
@@ -391,6 +413,9 @@ def nameless_raw_frames(con):
 
     ROZŁĄCZNY z `nameless_frames` po FORMACIE i z `nameless_stack_frames` po `kind` — partycja
     `review_queue` liczy wszystkie trzy i zachodzące zbiory rozspójniłyby ją o własną liczbę.
+    Od S3 rozłączny TAKŻE SAM ZE SOBĄ po `cleared`: klatka z nagrobkiem wraca do tego kubełka
+    (predykat pyta o sam brak obiektu), a wyglądała identycznie jak nietknięta — przy akcji, która
+    ją cicho pomijała. Dwie liczby ROZŁĄCZNE, nie kubełek i jego podzbiór: partycja sumuje obie.
 
     RÓWNOŚĆ Z KOTWICĄ RDZENIA (bramka 13): `len()` tego wyniku == `resolver.nameless_raw_lights`.
     Dwa literały, bo warstwy są dwie i zależność idzie w jedną stronę — jak przy `nameless_frames`.
@@ -417,8 +442,9 @@ def nameless_raw_frames(con):
         "WHERE f.kind = 'light' AND f.object_id IS NULL "
         "  AND h.object_raw IS NULL "
         "  AND f.filetype IN (SELECT value FROM json_each(?)) "
+        "  AND (f.object_source IS 'user_cleared') = ? "
         "ORDER BY l.path, f.id",
-        (json.dumps(list(NO_OBJECT_CARD_FILETYPES)),)
+        (json.dumps(list(NO_OBJECT_CARD_FILETYPES)), int(cleared))
     ).fetchall()
 
 

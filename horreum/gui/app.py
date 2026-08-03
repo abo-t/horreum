@@ -38,6 +38,12 @@ from horreum.resolve.catalog import catalog_canon
 # Kolumny listy głównej — indeksy nazwane (czytelne handlery zamiast magicznych liczb).
 # Nagłówek = telescop_canon (tożsamość osi po przejściu fitsmirror); Etykieta = nazwa usera.
 COL_ID, COL_CANON, COL_LABEL, COL_STATUS, COL_FRATIO, COL_FOCAL, COL_FRAMES = range(7)
+# Tagi kolejki przeglądu, które niosą akcję RĘKI, i te z nich, które opisują klatki z NAGROBKIEM
+# (S3/R-S2b-1). Jeden właściciel obu zbiorów, bo pytają o nie CZTERY miejsca — wygaszenie przycisku,
+# tooltip, drążenie i zapis — a wyliczanka powtórzona cztery razy rozjedzie się przy pierwszym
+# nowym kubełku: przycisk aktywny przy drążeniu, które go nie obsługuje, albo odwrotnie.
+_CLEARED_TAGS = frozenset({"object_raw_cleared", "nameless_raw_cleared"})
+_ASSIGN_TAGS = frozenset({"object_raw", "nameless_raw"}) | _CLEARED_TAGS
 # Stałe nagłówków trzymają KLUCZE katalogu (nie stringi) — etykieta rozwiązuje się `_headers()` w czasie
 # BUDOWY widżetu, po `i18n.set_lang` w `main` (D-L1: stałe module-level ewaluują się przed set_lang, więc
 # string zamroziłby domyślny PL; klucz jest językowo-neutralny).
@@ -1150,8 +1156,14 @@ class ObjectAxisView(QWidget):
         q = queries.review_queue(self.con)
         self.review.clear()
         for r in q["object_review"]:
-            self._add_review_item(i18n.t("object.review_item", name=r["object_raw"], n=r["n"]),
-                                  tag="object_raw", payload=r["object_raw"])
+            # CZŁON „cofnięte ręką" (S3/R-S2b-1) niesie TAG, nie payload: dispatch tego widoku stoi
+            # na string-tagu właśnie po to, żeby nie wozić krotki w roli QVariant (wraca jako lista,
+            # R#6). Para (`object_raw`, cleared) rozkłada się więc na tag + payload, a nie na tuple.
+            self._add_review_item(
+                i18n.t("object.review_item_cleared" if r["cleared"] else "object.review_item",
+                       name=r["object_raw"], n=r["n"]),
+                tag="object_raw_cleared" if r["cleared"] else "object_raw",
+                payload=r["object_raw"])
         # Bezimienne (T5a): grid „Do przeglądu" je pokazuje, kolejka do dziś o nich milczała — bez
         # `object_raw` nie ma klucza grupowania, więc idą własnym licznikiem. Od P-D pozycja DRĄŻY
         # do klatek i niesie akcję „Napraw nagłówek…" (nazwa wraca do PLIKU, nie do bazy). Tag
@@ -1168,6 +1180,13 @@ class ObjectAxisView(QWidget):
         if q["nameless_raw_count"] > 0:
             self._add_review_item(i18n.t("object.nameless_raw_line", n=q["nameless_raw_count"]),
                                   tag="nameless_raw")
+        # Druga połowa tego samego kubełka — klatki, którym nazwę ZDJĄŁEŚ. Osobny wiersz, nie
+        # dopisek: do rozszczepienia wracały nieodróżnialne od nietkniętych, a „Przypisz obiekt…"
+        # cicho ich nie tykało. QUIET — wiersza nie ma, dopóki nic nie cofnięto.
+        if q["nameless_raw_cleared_count"] > 0:
+            self._add_review_item(
+                i18n.t("object.nameless_raw_cleared_line", n=q["nameless_raw_cleared_count"]),
+                tag="nameless_raw_cleared")
         # PODZBIÓR kubełka wyżej, nie szósty kubełek (S2, D-OW-2/B): tym klatkom ŚCIEŻKA proponuje
         # kanon, a zapis czeka na gest człowieka. Wiersz stoi ZARAZ POD RAW-em, bo opisuje jego
         # drogę wyjścia — i świadomie NIE wchodzi do partycji, która już je policzyła.
@@ -1261,7 +1280,7 @@ class ObjectAxisView(QWidget):
         # się grupa, nie tym, co się z nią robi — obie nazywa ręka, obie zapisuje ta sama klinga.
         # Trzeci warunek to CEL: od S4 pisze się zaznaczenie panelu, więc puste zaznaczenie znaczy
         # „nie ma czego zapisać" i przycisk ma to powiedzieć wygaszeniem, a nie ciszą po kliknięciu.
-        self.assign_btn.setEnabled(tag in ("object_raw", "nameless_raw") and not self._busy
+        self.assign_btn.setEnabled(tag in _ASSIGN_TAGS and not self._busy
                                    and bool(self._selected_frame_ids()))
         # Dwa tagi, jedna akcja: kubełek lightów archiwum i kubełek gotowych stosów mają od
         # D-0802-1 tę samą drogę naprawy (karta `OBJECT` do PLIKU), więc przycisk obsługuje oba.
@@ -1279,6 +1298,7 @@ class ObjectAxisView(QWidget):
         # drogi naprawy wyglądały jak jedna zepsuta. Wygaszony przycisk tłumaczy się sam — tooltip
         # nazywa drogę WŁAŚCIWĄ dla zaznaczonego kubełka, zamiast milczeć o istnieniu drugiej.
         self.assign_btn.setToolTip(i18n.t(
+            "object.assign_tip_cleared" if tag in _CLEARED_TAGS else
             "object.assign_tip" if tag == "object_raw" else
             "object.assign_tip_raw" if tag == "nameless_raw" else
             "object.assign_tip_card" if tag in ("nameless", "nameless_stacks") else
@@ -1314,10 +1334,15 @@ class ObjectAxisView(QWidget):
         if tag is None:                        # nic nie zaznaczone / pozycja informacyjna
             return
         self.objects.clearSelection()
-        if tag == "object_raw":
+        if tag in ("object_raw", "object_raw_cleared"):
+            cofniete = tag in _CLEARED_TAGS
             self._restore_frames_mode()
-            rows = queries.object_review_frames(self.con, payload)
-            self.frames_label.setText(i18n.t("object.frames_review", name=payload))
+            # Drążenie PO PARZE, nie po samym stringu: bez członu `cleared` wróciłaby UNIA obu
+            # pozycji i zapis sięgnąłby klatek spoza klikniętego wiersza.
+            rows = queries.object_review_frames(self.con, payload, cleared=cofniete)
+            self.frames_label.setText(i18n.t(
+                "object.frames_review_cleared" if cofniete else "object.frames_review",
+                name=payload))
             self._fill_frames(rows, present_col=False)
             self._select_all_frames()
         elif tag == "nameless":
@@ -1325,10 +1350,13 @@ class ObjectAxisView(QWidget):
             rows = queries.nameless_frames(self.con)
             self.frames_label.setText(i18n.t("object.frames_nameless", n=len(rows)))
             self._fill_frames(rows, present_col=False)
-        elif tag == "nameless_raw":
+        elif tag in ("nameless_raw", "nameless_raw_cleared"):
+            cofniete = tag in _CLEARED_TAGS
             self._restore_frames_mode()
-            rows = queries.nameless_raw_frames(self.con)
-            self.frames_label.setText(i18n.t("object.frames_nameless_raw", n=len(rows)))
+            rows = queries.nameless_raw_frames(self.con, cleared=cofniete)
+            self.frames_label.setText(i18n.t(
+                "object.frames_nameless_raw_cleared" if cofniete
+                else "object.frames_nameless_raw", n=len(rows)))
             self._fill_frames(rows, present_col=False)
             self._select_all_frames()
         elif tag == "nameless_stacks":
@@ -1417,7 +1445,7 @@ class ObjectAxisView(QWidget):
         GRUPY, znana przed otwarciem okna (D-P4-2/R#3: alias `""` łapałby każdą niealfanumeryczną
         nazwę). Kubełek RAW tej bramki nie potrzebuje: on zeznania nie ma i klucz bierze się skądinąd."""
         tag, object_raw = self._selected_review()
-        if tag == "object_raw":
+        if tag in ("object_raw", "object_raw_cleared"):
             if not object_raw:
                 return
             if not norm_alnum(object_raw):     # pusty klucz (D-P4-2/R#3) — grupa odrzucona
@@ -1425,10 +1453,15 @@ class ObjectAxisView(QWidget):
                     self, i18n.t("assign.title"),
                     i18n.t("object.alias_no_alnum", name=object_raw))
                 return
-        elif tag == "nameless_raw":
+        elif tag in ("nameless_raw", "nameless_raw_cleared"):
             object_raw = None
         else:
             return
+        # NAGROBEK GASI DRUGI GEST CZŁOWIEKA — i to jest jedyne miejsce, w którym ta akcja różni
+        # się między połówkami kubełka. Bez `overwrite_weak` klinga chroni werdykt ręki przed
+        # przypadkowym wskrzeszeniem (`source_skip`), więc przycisk zapisywał 0 z N i mówił
+        # „pominięto" bez powodu: kubełek miał akcję, akcja go nie tykała.
+        cofniete = tag in _CLEARED_TAGS
         frame_ids = self._selected_frame_ids()
         if not frame_ids:
             # Przycisk jest wygaszony przy pustym zaznaczeniu, ale SLOT wolno zawołać skądinąd —
@@ -1443,7 +1476,7 @@ class ObjectAxisView(QWidget):
         try:
             g = repo.user_assign_object(
                 self.con, alias_norm=alias_norm, canon=canon, catalog=catalog, kind=kind,
-                frame_ids=frame_ids, now=self._now())
+                frame_ids=frame_ids, now=self._now(), overwrite_weak=cofniete)
         except ValueError as e:                # konflikt aliasu / dryf do nieistniejącej klatki
             QMessageBox.warning(self, i18n.t("assign.title"), str(e))
             return

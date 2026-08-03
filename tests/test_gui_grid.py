@@ -1667,13 +1667,18 @@ def test_gest_odswieza_OS_OBIEKTU_sygnalem(obj_view):
 def test_kolejka_NIE_dostaje_nowego_kubelka_poza_czlonem_cofniecia(obj_view):
     """§4/14c-g: nagrobek NIE tworzy szóstego kubełka — klatka wraca do tego, w którym była, a jej
     partycja dalej się domyka. Falsyfikator: gdyby `user_cleared` wypadło z `review_frame_ids`,
-    równanie partycji rozjechałoby się DOKŁADNIE o liczbę cofnięć."""
+    równanie partycji rozjechałoby się DOKŁADNIE o liczbę cofnięć.
+
+    CZŁON COFNIĘCIA (S3/R-S2b-1) — do dziś ta bramka pinowała jego BRAK jako stan poprawny, choć
+    własna nazwa go zapowiadała. Rozszczepienie idzie PO ŹRÓDLE wewnątrz kubełka: dwie liczby
+    ROZŁĄCZNE, których suma zostaje tą samą populacją. Bez rozłączności byłby to kubełek i jego
+    podzbiór, a partycja liczyłaby te klatki dwa razy."""
     v, con = obj_view
     v.refresh()
     _zaznacz(v, [1, 2])
     v._on_object_clear()
     q = queries.review_queue(con)
-    assert q["nameless_raw_count"] == 2                    # cofnięte wróciły do swojego kubełka
+    assert (q["nameless_raw_count"], q["nameless_raw_cleared_count"]) == (0, 2)
     assert len(queries.review_frame_ids(con)) == 2
 
 

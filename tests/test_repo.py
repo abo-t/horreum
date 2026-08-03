@@ -506,6 +506,47 @@ def test_assign_object_linkuje_i_idempotentny(tmp_path):
     row = con.execute("SELECT object_id, object_source FROM frame WHERE id=?", (fid,)).fetchone()
     assert (row["object_id"], row["object_source"]) == (oid, "catalog_xref")
     assert con.execute("SELECT count(*) FROM event WHERE verb='object.assigned'").fetchone()[0] == 1
+    # Pierwsze przypisanie (NULL→A) NIE emituje odpięcia — nie było czego odpiąć.
+    assert con.execute("SELECT count(*) FROM event WHERE verb='object.unassigned'").fetchone()[0] == 0
+    con.close()
+
+
+def test_assign_object_re_przypisanie_emituje_pare_verbow(tmp_path):
+    """RE-przypisanie emituje `object.unassigned` (stan SPRZED) + `object.assigned`.
+
+    Powód jest arytmetyczny, nie estetyczny: bramka `§5.9` liczy
+    `count(frame.object_id NOT NULL) == count('object.assigned')` co do sztuki, więc przepięcie bez
+    odpięcia rozjeżdża tę równość o 1 przy każdym zdarzeniu.
+
+    DRUGI przypadek pilnuje predykatu emisji: zmiana samego ŹRÓDŁA przy tym samym obiekcie też jest
+    re-przypisaniem. Implementacja porównująca OBIEKTY (`row[0] != object_id`) przechodzi pierwszy
+    człon i oblewa ten — a właśnie ten wariant robi resolver, gdy klatkę zregionowaną przejmuje
+    szczebel mocniejszy."""
+    con = _fresh(tmp_path)
+    a, _ = repo.upsert_object(con, canon="NGC6960", catalog="NGC", kind="deep_sky", now=NOW)
+    b, _ = repo.upsert_object(con, canon="NGC6992", catalog="NGC", kind="deep_sky", now=NOW)
+    fid, _ = repo.upsert_frame(con, sha1_data="a", kind="light", filetype="fits",
+                               camera_id=None, now=NOW)
+
+    repo.assign_object(con, frame_id=fid, object_id=a, object_source="region", now=NOW)
+    assert repo.assign_object(con, frame_id=fid, object_id=b, object_source="alias", now=NOW) is True
+
+    def _osie(): return con.execute(
+        "SELECT verb, payload FROM event WHERE target=? AND verb LIKE 'object.%' ORDER BY id",
+        (f"frame:{fid}",)).fetchall()
+
+    ev = _osie()
+    assert [e["verb"] for e in ev] == ["object.assigned", "object.unassigned", "object.assigned"]
+    before = json.loads(ev[1]["payload"])
+    assert (before["object_id"], before["object_source"]) == (a, "region")
+
+    # A(src1) → A(src2): ten sam obiekt, inne źródło — nadal PARA.
+    assert repo.assign_object(con, frame_id=fid, object_id=b, object_source="curated", now=NOW) is True
+    verbs = [r["verb"] for r in _osie()]
+    assert verbs.count("object.unassigned") == 2 and verbs.count("object.assigned") == 3
+
+    # Domknięcie równości §5.9 na tej klatce: encja jedna, a eventy się znoszą.
+    assert verbs.count("object.assigned") - verbs.count("object.unassigned") == 1
     con.close()
 
 

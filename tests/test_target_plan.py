@@ -361,6 +361,33 @@ def test_cli_park_clear_wycofuje_zdanie_do_null(tmp_path, capsys, con):
     assert "zmieniono" not in capsys.readouterr().out
 
 
+def test_cli_target_clear_zdejmuje_cel_spoza_katalogu(tmp_path, capsys, con):
+    """Kuratela na kanonie, którego asset już nie zna (podmiana katalogu), była NIEUSUWALNA:
+    `--list` pokazywał ją z etykietą `[poza katalogiem]`, a `--clear` szedł przez
+    `resolve_plan_canon` i kończył kodem 2. Fallback jest WYŁĄCZNIE dla kasowania — ścieżka zapisu
+    dalej odmawia, bo tam zgadywanie kanonu tworzy cudzą decyzję, a tu ją zdejmuje.
+
+    Drugi człon pilnuje, żeby fallback nie wyciął NORMALIZACJI: `M42` ma trafiać w `NGC1976`
+    (asset odpowiada pierwszy), a nie zakładać kasowania po surowym stringu."""
+    path = con.execute("PRAGMA database_list").fetchone()["file"]
+    con.execute("INSERT INTO target_plan(canon, status, created_at, updated_at) "
+                "VALUES ('NGC9999', 'planned', ?, ?)", (NOW, NOW))
+    con.commit()
+
+    assert cli.main(["target", path, "NGC9999", "--clear"]) == 0
+    assert "spoza katalogu" in capsys.readouterr().out
+    assert con.execute("SELECT count(*) FROM target_plan WHERE canon='NGC9999'").fetchone()[0] == 0
+
+    # Nadal odmawia, gdy nie ma czego zdjąć ANI w asecie, ANI w tabeli — cisza byłaby gorsza.
+    assert cli.main(["target", path, "NGC9999", "--clear"]) == 2
+
+    # Normalizacja żyje: `M42` idzie przez asset na `NGC1976`, fallback się nie odzywa.
+    repo.set_target_plan(con, canon="NGC1976", status="planned", priority=None, note=None, now=NOW)
+    assert cli.main(["target", path, "M42", "--clear"]) == 0
+    assert "NGC1976" in capsys.readouterr().out
+    assert con.execute("SELECT count(*) FROM target_plan WHERE canon='NGC1976'").fetchone()[0] == 0
+
+
 def test_cli_park_bez_oznaczen_mowi_wprost(tmp_path, capsys, con):
     path = con.execute("PRAGMA database_list").fetchone()["file"]
     assert cli.main(["park", path]) == 0

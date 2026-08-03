@@ -618,7 +618,18 @@ def add_object_alias(con, *, alias_norm, object_id, source, now, actor="resolver
 
 def assign_object(con, *, frame_id, object_id, object_source, now, actor="resolver"):
     """Przypisz obiekt do frame'a (`frame.object_id` + `object_source`). Idempotentny: ta sama para
-    już ustawiona → False bez eventu; inaczej UPDATE + `event(object.assigned)`; True."""
+    już ustawiona → False bez eventu; inaczej UPDATE + `event(object.assigned)`; True.
+
+    RE-przypisanie emituje PARĘ `object.unassigned` + `object.assigned` (wzorzec
+    `assign_calibration_profile`), payload odpięcia niesie stan SPRZED. Powód nie jest kosmetyczny:
+    bramka akceptacji `§5.9` liczy `count(frame.object_id NOT NULL) == count('object.assigned')`
+    co do sztuki, więc bez odpięcia każde przepięcie rozjeżdża tę równość o 1.
+
+    Predykat emisji to `row[0] IS NOT NULL` („obiekt BYŁ"), **nie** `row[0] != object_id`: ta funkcja
+    wychodzi wcześnie po PARZE (obiekt, źródło), więc zmiana samego ŹRÓDŁA przy tym samym obiekcie
+    (`region` → `alias`, realna po dołożeniu szczebla słownika) dotarłaby tutaj i przy porównaniu
+    obiektów wyemitowałaby `assigned` bez `unassigned`. `NULL→A`, `A→B` i `A(src1)→A(src2)`
+    domykają się wtedy identycznie."""
     row = con.execute(
         "SELECT object_id, object_source FROM frame WHERE id = ?", (frame_id,)).fetchone()
     if row is not None and row[0] == object_id and row[1] == object_source:
@@ -627,6 +638,9 @@ def assign_object(con, *, frame_id, object_id, object_source, now, actor="resolv
     with con:
         con.execute("UPDATE frame SET object_id = ?, object_source = ? WHERE id = ?",
                     (object_id, object_source, frame_id))
+        if row is not None and row[0] is not None:   # re-przypisanie: ślad zostaje (append-only)
+            emit_event(con, actor=actor, verb="object.unassigned", target=f"frame:{frame_id}",
+                       now=now, payload={"object_id": row[0], "object_source": row[1]})
         emit_event(con, actor=actor, verb="object.assigned", target=f"frame:{frame_id}", now=now,
                    payload={"object_id": object_id, "object_source": object_source})
     return True

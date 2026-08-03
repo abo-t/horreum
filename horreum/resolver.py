@@ -390,11 +390,21 @@ class DeltaReport:
     # …a te są GOTOWYMI OBRAZAMI po integracji (I-2b/D-P-I-5). Osobne pole, bo osobna POPULACJA —
     # droga naprawy jest od D-0802-1 TA SAMA co u lightów (karta `OBJECT` do pliku, P6d).
     object_nameless_stacks: int = 0
+    # Klatki, które obiekt MAJĄ, choć nagłówek nazwy nie niósł — rozwiązane innym świadkiem niż
+    # nazwa (dziś: region). Do `object_pct` NIE wchodzą, bo procent mierzy rozpoznanie NAZWY, a te
+    # klatki nazwy nie mają. Stoją obok, żeby zawężenie licznika niczego nie schowało.
+    object_resolved_no_raw: int = 0
 
 
 def delta_report(con, top=30):
     """Zbierz deltę nierozstrzygniętych (read-only, zero zapisu). % obiektu liczone NA light'ach
     (mianownik = light/master_light z obecnym object_raw); kalibracja nie zaniża wyniku.
+
+    LICZNIK STOI NA TEJ SAMEJ POPULACJI CO MIANOWNIK — `object_raw NOT NULL` po obu stronach.
+    Wcześniej licznik brał każdą klatkę z obiektem, także rozwiązaną REGIONEM bez nazwy w nagłówku,
+    więc procent rósł o klatki, których mianownik nie widział, i **maskował spadek rozpoznania**:
+    napływ klatek nierozpoznanych rozcieńczał się o stałą premię. Wypchnięta populacja nie znika
+    z raportu — ma własne pole `object_resolved_no_raw`.
 
     `object_nameless` stoi OBOK procentu, nie w nim: klatka bez `object_raw` nie ma jak być
     „nierozpoznana pod nazwą" (nie ma nazwy), więc do mianownika nie wchodzi — ale musi być
@@ -406,8 +416,13 @@ def delta_report(con, top=30):
     w jedną liczbę sprawia, że kotwica nawrotu nie pilnuje żadnej — 763 RAW-y przykryłyby każdy
     ruch w populacji FITS, a 22 stacki przykryłyby ruch w niej po raz drugi."""
     resolved = con.execute(
-        "SELECT count(*) FROM frame WHERE kind IN ('light','master_light') "
-        "AND object_id IS NOT NULL").fetchone()[0]
+        "SELECT count(*) FROM frame f JOIN header h ON h.frame_id = f.id "
+        "WHERE f.kind IN ('light','master_light') AND f.object_id IS NOT NULL "
+        "AND h.object_raw IS NOT NULL").fetchone()[0]
+    resolved_no_raw = con.execute(
+        "SELECT count(*) FROM frame f LEFT JOIN header h ON h.frame_id = f.id "
+        "WHERE f.kind IN ('light','master_light') AND f.object_id IS NOT NULL "
+        "AND h.object_raw IS NULL").fetchone()[0]
     unresolved = con.execute(
         "SELECT count(*) FROM frame f JOIN header h ON h.frame_id = f.id "
         "WHERE f.kind IN ('light','master_light') AND f.object_id IS NULL "
@@ -423,6 +438,7 @@ def delta_report(con, top=30):
         "SELECT count(*) FROM frame WHERE filter_canon IS NOT NULL").fetchone()[0]
     return DeltaReport(
         object_resolved=resolved, object_unresolved=unresolved, object_pct=pct,
+        object_resolved_no_raw=resolved_no_raw,
         object_delta=[(r["raw"], r["n"]) for r in delta], review=review_state(con),
         filters_canon=filters_canon, object_nameless=nameless_lights(con),
         object_nameless_raw=nameless_raw_lights(con),

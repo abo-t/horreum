@@ -730,12 +730,26 @@ def _cmd_target(args):
     Bez kanonu = lista oznaczonych. Kanon walidowany wobec ASSETU (`targets.resolve_plan_canon`):
     literówka albo nazwa dwuznaczna kończy się kodem 2 i listą kandydatów, nigdy cichym zapisem
     na losowym rekordzie. Cel oznaczony, którego katalog już nie zna (podmiana assetu), zostaje
-    na liście z etykietą — kasowanie cudzej decyzji to nie sprzątanie."""
+    na liście z etykietą — kasowanie cudzej decyzji to nie sprzątanie.
+
+    `--clear` DOSTAJE FALLBACK: walidacja wobec assetu broni ZAPISU przed zgadywaniem, ale przy
+    KASOWANIU zamykała jedyne drzwi — oznaczenie na kanonie, którego katalog już nie zna, jest
+    widoczne w `--list` z etykietą `[poza katalogiem]`, a `resolve_plan_canon` zwraca dla niego
+    `(None, …)`, czyli kod 2. Nie dało się zdjąć własnej decyzji o celu, który wypadł z assetu.
+    Kolejność zostaje: NAJPIERW asset (żeby `M42` dalej trafiało w `NGC1976` — normalizacji nie
+    wycinamy), a dopiero przy `(None, …)` dokładne trafienie w `target_plan`. Fallback jest
+    WYŁĄCZNIE dla `--clear`; ścieżka zapisu kodu 2 nie traci."""
     from . import repo, targets
     now = datetime.now(timezone.utc).isoformat()
     con = db.open_db(args.db)
     if args.canon:
         canon, candidates = targets.resolve_plan_canon(args.canon)
+        if canon is None and args.clear:
+            raw = str(args.canon).strip()
+            if repo.clear_target_plan(con, canon=raw, now=now):
+                con.close()
+                print(f"Horreum target {raw}: oznaczenie zdjete (cel spoza katalogu)")
+                return 0
         if canon is None:
             con.close()
             hint = (f" Kandydaci: {', '.join(candidates)}" if candidates
@@ -962,6 +976,12 @@ def _format_delta(db_path, rep):
     # POZA procentem wyzej: klatka bez `object_raw` nie ma nazwy, wiec nie wchodzi do mianownika —
     # ale musi byc widoczna, inaczej raport milczy o calej klasie (P-D, kotwica nawrotu).
     lines.append(f"  bez nazwy w naglowku (light/master_light): {rep.object_nameless}")
+    # Druga strona tej samej monety: klatki, ktore obiekt MAJA mimo milczacego naglowka (dzis
+    # region). Do procentu nie wchodza — procent mierzy rozpoznanie NAZWY — ale zostaja widoczne,
+    # zeby zawezenie licznika niczego nie schowalo.
+    if rep.object_resolved_no_raw:
+        lines.append(f"  rozwiazane BEZ nazwy w naglowku (poza procentem): "
+                     f"{rep.object_resolved_no_raw}")
     # Osobna pozycja i TYLKO gdy jest co pokazac: RAW nie ma karty OBJECT z natury
     # (`resolver.NO_OBJECT_CARD_FILETYPES`), wiec droga naprawy jest inna — reka, nie writeback.
     if rep.object_nameless_raw:

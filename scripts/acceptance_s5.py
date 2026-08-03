@@ -621,6 +621,12 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
     rep = delta_report(con, top=40)
     out(f"\n§5.7 obiekt: {rep.object_resolved}/{rep.object_resolved+rep.object_unresolved} "
         f"= {rep.object_pct}% (delta {rep.object_unresolved} w {len(rep.object_delta)} distinct)")
+    # Populacja WYPCHNIĘTA z procentu po zrównaniu licznika z mianownikiem (S0): klatki, które
+    # obiekt mają, choć nagłówek nazwy nie niósł (dziś: region). Wcześniej doliczały się do
+    # licznika, nie wchodząc do mianownika — czyli podnosiły wynik o wartość, której bramka nie
+    # widziała, i maskowały spadek rozpoznania. RAPORT, nie bramka: to nie jest dług do zamknięcia,
+    # tylko liczba, która ma być jawna.
+    out(f"    poza procentem — rozwiazane BEZ nazwy w naglowku: {rep.object_resolved_no_raw}")
     for raw, n in rep.object_delta[:12]:
         out(f"    {n:5d}  {raw}")
     crit(f"§5.7 object_pct >= {EXP_OBJECT_PCT_MIN}% (akt={rep.object_pct}%)",

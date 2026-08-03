@@ -118,6 +118,33 @@ def test_delta_report_procent_na_lightach(tmp_path):
     con.close()
 
 
+def test_delta_report_procent_nie_maskuje_spadku_klatka_bez_nazwy(tmp_path):
+    """Klatka rozwiązana BEZ nazwy w nagłówku (dziś: region) nie wchodzi ANI do licznika, ANI do
+    mianownika — procent mierzy ROZPOZNANIE NAZWY i musi stać na jednej populacji po obu stronach.
+
+    Defekt, który to zamyka: licznik brał każdą klatkę z obiektem, a mianownik wymagał `object_raw`.
+    Każda klatka rozwiązana regionem była wtedy stałą premią doliczaną do procentu, ale niewidoczną
+    w mianowniku — więc napływ klatek NIEROZPOZNANYCH rozcieńczał się o tę premię i bramka
+    `object_pct >= min` mogła zostać zielona mimo realnego spadku. Na tej fiksturze stary licznik
+    daje **4/5 = 80,0%** zamiast 3/4 = 75,0% — zmierzone przez podmianę zapytania, nie oszacowane
+    (pierwsza wersja tego zdania mówiła „4/4 = 100%" i była fałszywa: premia wchodzi do licznika,
+    ale mianownik zostaje sumą licznika i delty, więc rośnie razem z nim).
+
+    Populacja nie znika z raportu — ma własne pole `object_resolved_no_raw`."""
+    con = _scanned_tree(tmp_path)
+    run_resolver(con, now=NOW)
+    oid, _ = repo.upsert_object(con, canon="NGC6960", catalog="NGC", kind="deep_sky", now=NOW)
+    fid, _ = repo.upsert_frame(con, sha1_data="bez-nazwy", kind="light", filetype="fits",
+                               camera_id=None, now=NOW)
+    repo.record_header(con, frame_id=fid, raw_json="{}", now=NOW)  # nagłówek JEST, `object_raw` NULL
+    repo.assign_object(con, frame_id=fid, object_id=oid, object_source="region", now=NOW)
+
+    rep = delta_report(con)
+    assert (rep.object_resolved, rep.object_unresolved, rep.object_pct) == (3, 1, 75.0)
+    assert rep.object_resolved_no_raw == 1
+    con.close()
+
+
 # --- kolejka przeglądu ze STANU, nie ze zliczania eventów (#12) ---
 
 def test_review_ze_stanu_nie_rosnie_przy_powtornej_dostawie(tmp_path):

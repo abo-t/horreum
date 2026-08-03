@@ -33,8 +33,8 @@ schemat i API mogą się jeszcze zmieniać.
   **Nazywasz to, co masz zaznaczone.** Otwarcie kubełka zaznacza wszystkie jego klatki, więc
   „nazwij cały kubełek" to nadal jedno kliknięcie — ale możesz zaznaczenie przyciąć i nazwać
   tylko część. Ten kubełek nie jest jedną grupą, tylko resztą po wszystkich innych drogach:
-  potrafi zebrać setki klatek z kilkudziesięciu różnych katalogów, a nazwy nadanej ręką dzisiejszy
-  program jeszcze nie umie cofnąć. Przy pustym zaznaczeniu przycisk jest wygaszony.
+  potrafi zebrać setki klatek z kilkudziesięciu różnych katalogów — a nazwę nadaną ręką **cofniesz
+  w „Klatki" przez „Obiekt ▾ → Cofnij przypisanie"**. Przy pustym zaznaczeniu przycisk jest wygaszony.
 - **Okno „Przypisz obiekt…" przyjmuje każdą nazwę, którą program naprawdę rozpozna.** Do tej pory
   żądało oznaczenia katalogowego, więc odrzucało `LMC`, `Moon` i nazwy potoczne — mimo że przebieg
   „Rozwiąż" rozwiązuje je bez wahania. Teraz okno pyta tej samej reguły co przebieg, a katalog
@@ -116,6 +116,31 @@ schemat i API mogą się jeszcze zmieniać.
   otwarciu Zbiorów.
 
 ### Naprawione
+- **Powiązanie gotowego obrazu ze zdjęciami, z których powstał, przestało ginąć po nazwaniu albo
+  cofnięciu nazwy.** Program czyta z pliku stosu listę zdjęć, które do niego weszły — to najmocniejszy
+  dowód, jaki ma. Gdy jednak zmieniłeś nazwę obiektu któremuś ze zdjęć, następny przebieg „Stosy"
+  przeliczał okno od nowa, nie znajdował w nim tego zdjęcia i **kasował całe udowodnione powiązanie**,
+  podmieniając je na „nie wiem, z czego to powstało". Chroniony był tylko przypadek, w którym pliku
+  stosu nie dało się przeczytać — czyli akurat ten, w którym plik leżał poza zasięgiem. Teraz program
+  porównuje SIŁĘ dowodów: zapisane powiązanie potwierdzone plikiem albo Twoją ręką **przeżywa
+  przebieg**, który umie powiedzieć mniej. Powiązanie zwykłe (dobrane z okna czasu) dalej aktualizuje
+  się normalnie, więc rodowód nie zastyga. Raport przebiegu mówi wprost, ile rodowodów zostawiono
+  nietkniętych i **dlaczego** — osobno „archiwum odłączone", osobno „zapisany dowód mocniejszy".
+- **Podsumowanie gestu na osi obiektu było niewidoczne dokładnie wtedy, gdy coś zapisano.** Zdanie
+  z rozbiciem („nazwano 4 z 8 · kalibracja: 2 · z nagłówka: 2") padało chwilę przed odświeżeniem
+  listy, a odświeżenie natychmiast zastępowało je własnym „Wczytano N klatek". Widziałeś je więc
+  wyłącznie po geście, który niczego nie zmienił. Teraz pada jako ostatnie.
+- **Okno nazywania opisywało zaznaczenie cudzym zdaniem i obiecywało więcej, niż robiło.** Wywołane
+  z paska „Klatki" mówiło „N klatek bez nazwy w metadanych (format bez karty OBJECT)" — o klatkach,
+  które nazwę mają (z folderu) i bywają plikami FITS z kartą `OBJECT`. Przycisk liczył przy tym całe
+  zaznaczenie, więc obiecywał „Przypisz 8 klatek" i zapisywał 4. Teraz okno mówi, ile klatek naprawdę
+  ruszy, **ile nazw przemaluje** i ile zostawi nietkniętych — zanim klikniesz.
+- **Odmowa przy niejednorodnym zaznaczeniu podawała zmyśloną liczbę.** Komunikat zawsze mówił „2 różne
+  obiekty", także gdy było ich pięć — więc zawężenie zaznaczenia do dwóch kończyło się tą samą odmową.
+  Teraz liczba jest prawdziwa.
+- **Licznik zadań w bocznym pasku nie zauważał gestu, który go zmieniał** — pokazywał stan sprzed
+  nazwania albo cofnięcia aż do wejścia w „Porządki". Teraz odświeża się razem z resztą.
+- **Przycisk „Anuluj" w oknie przypisania był po angielsku.**
 - **Rachunek „ile zapisano" przestał kłamać o cofniętych zapisach.** Kontrola spójności porównywała
   liczbę rzeczy w bazie z liczbą zapisanych zdarzeń, ale nie odejmowała tych, które wycofano —
   więc po każdym cofnięciu pokazywała rozjazd, który nie był błędem. Teraz odejmuje, a sama reguła

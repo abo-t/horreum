@@ -493,6 +493,17 @@ def falsifiers(records, curated, groups, items):
     return bad, wielo
 
 
+def read_own_records(path=OWN_PATH):
+    """Rekordy pliku CZŁOWIEKA albo twarde wyjście. Wydzielone z `main`, żeby bramka §4/5 dała się
+    uruchomić baterią: reguła „brak pliku jest błędem, nie pustą listą" siedząca wyłącznie w pętli
+    głównej skryptu sieciowego jest regułą, której nikt nigdy nie sprawdzi (EXPECT)."""
+    if not os.path.exists(path):
+        raise SystemExit(f"BLAD: brak pliku czlowieka {path} -> kontrola kolizji kanonow "
+                         f"bylaby liczona na samych rekordach generowanych")
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)["targets"]
+
+
 def check_coverage(records, curated, path):
     """MIĘKKI falsyfikator: ile kanonow archiwum trafia w asset. Lista jest wlasnoscia ARCHIWUM,
     nie skryptu — repo jest publiczne, wiec sciezka do bazy nie ma tu prawa siedziec (§0)."""
@@ -544,11 +555,7 @@ def main(argv=None):
     # Plik człowieka jest OBOWIĄZKOWY (D-OW-1/E′): to on wnosi rekordy, których żadne źródło sieciowe
     # nie zna, i to na sumie z nim liczy się kontrola kolizji kanonów. Cicha degradacja do pustej
     # listy zdejmowała tę kontrolę bez jednego słowa w raporcie — EXPECT, nie `curated=[]`.
-    if not os.path.exists(OWN_PATH):
-        raise SystemExit(f"BLAD: brak pliku czlowieka {OWN_PATH} -> kontrola kolizji kanonow "
-                         f"bylaby liczona na samych rekordach generowanych")
-    with open(OWN_PATH, encoding="utf-8") as fh:
-        curated = json.load(fh)["targets"]
+    curated = read_own_records()
     _cele = sum(1 for r in curated if target_fields_present(r) == len(TARGET_FIELDS))
     print(f"       objects_own.json: {len(curated)} wpisow ({_cele} celow, "
           f"{len(curated) - _cele} nazw) - plik czlowieka, tylko walidowany")

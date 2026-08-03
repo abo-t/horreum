@@ -80,6 +80,50 @@ def test_asset_planera_i_resolvera_to_JEDEN_plik():
     assert targets._ASSET["curated"] == ("horreum.resolve.data", "objects_own.json")
 
 
+# ──────────────────────────────────────── producent assetu (bramka §4/5, człon trzeci)
+# Skrypt `scripts/build_catalog.py` jest dev-owy i chodzi po sieci, więc bateria go NIE URUCHAMIA.
+# Testuje dwa KONTRAKTY, które E′ na nim wymusiło i które inaczej nie mają wykonawcy: brak pliku
+# człowieka = twarde wyjście (nie ciche `curated=[]`) oraz rekord-NAZWA przechodzi walidację
+# zamiast `KeyError`. Obie reguły żyły dotąd wyłącznie w pętli głównej skryptu sieciowego — czyli
+# nigdzie, gdzie dałoby się je sprawdzić.
+
+def _producent():
+    import importlib.util
+    import pathlib
+    sciezka = pathlib.Path(__file__).resolve().parent.parent / "scripts" / "build_catalog.py"
+    spec = importlib.util.spec_from_file_location("build_catalog_pod_test", sciezka)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_producent_krzyczy_gdy_brak_pliku_czlowieka(tmp_path):
+    """Falsyfikator cichej degradacji: przed E′ brak pliku dawał `curated=[]`, co WYŁĄCZAŁO jedyną
+    kontrolę kolizji kanonów między rekordami ręcznymi a generowanymi — bez słowa w raporcie."""
+    prod = _producent()
+    assert prod.OWN_PATH.endswith("objects_own.json")
+    with pytest.raises(SystemExit, match="brak pliku czlowieka"):
+        prod.read_own_records(str(tmp_path / "nie_ma_mnie.json"))
+    kanony = {r["c"] for r in prod.read_own_records()}
+    assert {"LMC", "WR134"} <= kanony            # ścieżka domyślna trafia w PLIK, nie w pustkę
+
+
+def test_producent_przyjmuje_rekord_nazwe_i_zglasza_niepelny():
+    """Rekord-NAZWA nie ma pozycji ani rozmiaru z definicji klasy — sięgnięcie po `r["r"]` wprost
+    dawało na nim `KeyError`, czyli crash producenta zamiast raportu. Rekord CZĘŚCIOWY ma się
+    zgłosić jako falsyfikator, a nie przejść bokiem: to jedyna różnica między „druga klasa"
+    a „plik popsuty"."""
+    prod = _producent()
+    nazwa = {"c": "LMCTEST", "n": ["Test"], "why": "x", "provenance": "y"}
+    czesciowy = {"c": "POLOWICZNY", "t": "EmN", "r": 10.0, "why": "x", "provenance": "y"}
+
+    bad, _ = prod.falsifiers([], [nazwa], [], [])
+    assert not [b for b in bad if "LMCTEST" in b]
+
+    bad, _ = prod.falsifiers([], [czesciowy], [], [])
+    assert [b for b in bad if "POLOWICZNY" in b and "ani cel, ani nazwa" in b]
+
+
 def test_kolizja_nazw_w_slowniku_wybucha(monkeypatch):
     """Dwa rekordy pod jedną nazwą = człowiek wpisał ją dwa razy. Ciche „wygrywa ostatni" ukryłoby
     to na zawsze; unikalność KANONÓW pilnuje producent, ale nazwy `n` widzi dopiero indeks."""

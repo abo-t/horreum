@@ -12,6 +12,7 @@ delta (inaczej ~2333 FlatWizard-flatów = fałszywe „nierozwiązane"). Light n
 (audyt bez szumu, jak backfill focratio). FILTR jest kind-AGNOSTYCZNY (flat też ma filtr) → backfill
 zbiorczy `frame.filter_canon`; brak/pusty → NULL (W2, bez kanału review).
 """
+import dataclasses
 import json
 from dataclasses import dataclass, field
 
@@ -19,9 +20,11 @@ from . import repo
 from .grouper import NO_TELESCOPE_KINDS
 from .resolve._coerce import _to_text
 from .resolve._text import norm_alnum
+from .resolve.catalog import catalog_canon
 from .resolve.filters import normalize_filter
-from .resolve.objects import load_own_objects, resolve_object
+from .resolve.objects import ObjectIdentity, load_own_objects, resolve_object
 from .resolve.observatory import site_coords
+from .resolve.paths import object_folder, object_from_path, filename_tokens
 from .resolve.regions import resolve_region
 from .resolve.solar import resolve_solar
 
@@ -49,6 +52,10 @@ class ResolveSummary:
     own_aliases_retired: int = 0          # równoważności zdjęte po edycji słownika (migracja)
     own_frames_unassigned: int = 0        # klatki odpięte razem z wycofaną równoważnością
     own_alias_conflicts: int = 0          # nazwy zajęte przez INNY obiekt (pominięte, → review)
+    # SZCZEBEL ŚCIEŻKI (S2, D-OW-2/B) — PROPOZYCJE, nie zapisy. Przebieg nie rusza ani jednego
+    # wiersza osi obiektu z tego tytułu; te dwie liczby są jedynym śladem szczebla w raporcie.
+    path_proposed_frames: int = 0         # klatki, którym ścieżka proponuje kanon (do potwierdzenia)
+    path_proposed_names: int = 0          # …zgrupowane po NAZWIE (jednostka przeglądu człowieka)
 
 
 def sync_own_aliases(con, now, s=None):
@@ -123,6 +130,197 @@ def sync_own_aliases(con, now, s=None):
     return s
 
 
+# ═══════════════════════════════════════════ DRABINA NAZWY — JEDEN WŁAŚCICIEL (S2, D-OW-2 pkt 5)
+
+def resolve_name(lookup, text, *, from_path=False):
+    """Drabina zależna od NAZWY → `(ObjectIdentity | None, object_id | None)`. Read-only.
+
+    JEDEN właściciel kolejności szczebli dla WSZYSTKICH trzech miejsc wołania: passu masowego
+    (`run_resolver`), walidacji dialogu „Napraw nagłówek…" (`name_resolves`) i szczebla ŚCIEŻKI.
+    Dopóki każde z nich miało własną kopię, ekran i baza odpowiadały różnie na to samo pytanie —
+    dialog milczał o `LMC` i `_SOLAR\\Moon`, choć przebieg je nazywał.
+
+    Szczeble, w kolejności przebiegu: `resolve_solar` → `resolve_object` (katalog/xref → `_COMMON`
+    → słownik obiektów własnych) → **ALIAS** (`object_alias` — jawna wiedza usera). REGION świadomie
+    POZA drabiną: rozpoznaje ze WSPÓŁRZĘDNYCH, więc od tekstu nie zależy i wołający dokłada go sam.
+
+    `lookup` = CALLABLE `alias_norm → wiersz|None` z polami `object_id`/`canon`/`catalog`/`kind`.
+    Pass masowy podaje `.get` snapshotu (zero SELECT-ów w pętli), walidacja dialogu — domknięcie na
+    jednym SELECT-cie po UNIQUE (zero budowania snapshotu przy każdym naciśnięciu klawisza).
+    Wiersz MUSI nieść kanon, nie samo `object_id`: bez niego nie ma z czego zbudować tożsamości
+    dla trafienia aliasu, a `ObjectIdentity` id nie ma.
+
+    DRUGI CZŁON KROTKI JEST NIEPUSTY WYŁĄCZNIE PRZY TRAFIENIU ALIASU — mówi „ten obiekt JUŻ
+    ISTNIEJE, nie rób upsertu". Przy każdym innym szczeblu wołający sam zakłada/odnajduje obiekt.
+
+    `from_path=True` (JEDEN przełącznik trybu ścieżki, D-OW-2 pkt 5/5a) implikuje DWIE rzeczy naraz:
+      * `split=False` w gramatyce katalogowej — folder SPRZĘTU nie udaje oznaczenia;
+      * `alias_norm=None` w wyniku — segment ścieżki NIE trafi żadnego przyszłego `object_raw`,
+        więc równoważności z niego nie robimy. Bez tego naiwna kompozycja szczebla wsypałaby ~35
+        aliasów, których re-derywacja słownika (zakres `curated`) nigdy by nie usunęła, a żadna
+        bramka by się nie zaczerwieniła: alias i event idą parą, więc `§5.9` się domyka.
+        Zakaz dotyczy aliasu Z SEGMENTU — nazwy potoczne wpisu słownika zasiewa `sync_own_aliases`,
+        także gdy kanon przyszedł ścieżką."""
+    ident = resolve_solar(text) or resolve_object(text, split=not from_path)
+    key = ident.alias_norm if ident is not None else norm_alnum(text)
+    row = lookup(key) if key else None      # pusty klucz łapałby KAŻDĄ niealfanumeryczną nazwę
+
+    # SŁOWNIK USTĘPUJE RĘCE (R-S1-2): szczebel słownika stoi WYŻEJ niż alias, więc dla nazwy, którą
+    # user przypisał wcześniej pod własnym kanonem, przejąłby jego klatki i ROZSZCZEPIŁ grupę
+    # (`object_source='user'` chroni tylko klatkę dotkniętą ręką, rodzeństwo szłoby pod nowy kanon).
+    # Ustępujemy WYŁĄCZNIE CUDZEMU obiektowi — porównanie po KANONIE, bo po pierwszym przebiegu
+    # słownik zasiewa własny alias i warunek „alias istnieje" przemalowywałby `curated` → `alias`
+    # przy każdym kolejnym przebiegu, wywracając idempotencję na własnej obronie.
+    # Gramatyki katalogowej to NIE dotyczy: nazwa katalogowa jest faktem o niebie, nie zdaniem
+    # człowieka o archiwum, więc tam szczebel stoi ponad aliasem i ta precedencja jest zamierzona.
+    if ident is not None and ident.source == "curated" and row is not None \
+            and row["canon"] != ident.canon:
+        ident = None
+
+    oid = None
+    if ident is None:
+        if row is None:
+            return None, None
+        # Trafienie aliasu: obiekt i równoważność ISTNIEJĄ z definicji — wołający pomija upsert
+        # i zapis aliasu. `source='alias'` (D-P4-6): klatka z aliasu zostaje re-derywowalna,
+        # `user` rezerwuje się dla jawnego gestu człowieka.
+        ident, oid = ObjectIdentity(canon=row["canon"], catalog=row["catalog"], kind=row["kind"],
+                                    source="alias", alias_norm=key), row["object_id"]
+
+    # Zerowanie klucza obejmuje OBIE gałęzie — trafienie aliasu też wraca ze ścieżki bez niego.
+    # Wyjęcie go za `if` było kontraktem połowicznym: druga droga wychodziła z pełnym `alias_norm`,
+    # a pin bramki §4/4(c) podawał lookup, który NIGDY nie trafia, więc nie miał jak tego złapać.
+    if from_path and ident is not None:
+        ident = dataclasses.replace(ident, alias_norm=None)
+    return ident, oid
+
+
+def alias_lookup(con):
+    """Domknięcie `alias_norm → wiersz|None` na JEDNYM SELECT-cie po UNIQUE — `lookup` drabiny dla
+    wołających spoza passu masowego (walidacja dialogu, szczebel ścieżki liczony na żądanie).
+
+    `JOIN object` jest KONIECZNY, nie ozdobny: bez kanonu drabina nie ma z czego zbudować tożsamości
+    dla trafienia aliasu i musiałaby oddać samo `object_id`, czyli mniej, niż obiecuje kontrakt."""
+    def _lookup(key):
+        return con.execute(
+            "SELECT a.object_id AS object_id, o.canon AS canon, o.catalog AS catalog, "
+            "       o.kind AS kind "
+            "FROM object_alias a JOIN object o ON o.id = a.object_id "
+            "WHERE a.alias_norm = ?", (key,)).fetchone()
+    return _lookup
+
+
+def alias_snapshot(con):
+    """Snapshot WSZYSTKICH równoważności raz na przebieg: `alias_norm → wiersz` (jak wyżej).
+
+    Snapshot ze STARTU przebiegu jest bezpieczny (R#12): alias zapisany W TYM przebiegu dotyczy
+    nazwy, którą wcześniejszy szczebel trafił deterministycznie."""
+    return {r["key"]: r for r in con.execute(
+        "SELECT a.alias_norm AS key, a.object_id AS object_id, o.canon AS canon, "
+        "       o.catalog AS catalog, o.kind AS kind "
+        "FROM object_alias a JOIN object o ON o.id = a.object_id").fetchall()}
+
+
+# ═══════════════════════════════════════════ SZCZEBEL ŚCIEŻKI — PROPOZYCJA, NIE ZAPIS (D-OW-2/B)
+
+@dataclass(frozen=True)
+class PathProposal:
+    """Jedna pozycja do potwierdzenia: KANON + klatki, które go dostaną. Jednostką przeglądu jest
+    NAZWA, nie klatka (707 klatek ⇒ ≈35 pozycji) — inaczej „Zatwierdź wszystko" byłoby listą,
+    której nikt nie przeczyta."""
+    canon: str
+    catalog: object
+    kind: str
+    folder: str          # folder OBIEKTU pierwszej klatki grupy — skąd wzięła się nazwa
+    frame_ids: tuple
+    is_new: bool         # kanonu NIE MA jeszcze w bazie (to te pozycje mają przejść przez oko)
+
+    @property
+    def n_frames(self):
+        return len(self.frame_ids)
+
+
+def path_proposals(con):
+    """Kandydaci szczebla ŚCIEŻKI, POGRUPOWANI PO KANONIE — read-only, ZERO zapisu (D-OW-2/B).
+
+    JEDEN właściciel derywacji dla dwóch wołających: przebiegu (który tylko LICZY propozycje
+    w podsumowaniu) i powierzchni potwierdzania (która pokazuje je do zatwierdzenia). Dwie kopie
+    tego samego rozumowania dałyby licznik mówiący co innego niż lista, którą otwiera.
+
+    ZAKRES — trzy warunki naraz, każdy z ceną nazwaną:
+      * `filetype IN NO_OBJECT_CARD_FILETYPES` (nie literał `'raw'`) — szczebel odzywa się WYŁĄCZNIE
+        tam, gdzie format NIE MA JAK zeznać o obiekcie. Szerszy zakres opróżniałby kotwicę nawrotu
+        `nameless_lights` NAPRAWĄ NAZWY zamiast naprawą PLIKU (P-D naprawiła 25 plików na `R:`);
+      * `object_raw IS NULL` — równość z kubełkiem `nameless_raw_lights` ma być STRUKTURALNA,
+        a nie oparta na obietnicy semantycznej stałej;
+      * `object_id IS NULL` (STICKY) — klatka, która obiekt JUŻ ma, nie zostanie przemalowana po
+        przenosinach plików (konsolidacja stosów przeniesie ich setki). Cena: kanon może się
+        zdezaktualizować, a wykrycie tego rozjazdu jest POZA tą paczką.
+
+    KOPIA: osobny SELECT z `MIN(id) … present = 1` (wzorzec `resolve_observatory`) — NIGDY
+    `LEFT JOIN location` w pętli `run_resolver`. Brak obecnej kopii ⇒ ścieżki nie ma ⇒ szczebel
+    MILCZY (`path` NULL wypada na `object_from_path`).
+
+    Klatka-szkielet (bez wiersza `header`) nie odezwie się nigdy — `JOIN header` jak w kubełku,
+    którego ta populacja jest podzbiorem. Dziś koszt 0 (763/763 RAW ma `header`); nazwane, bo to ta
+    sama klasa cichej luki, co marker korzenia."""
+    lookup = alias_snapshot(con).get
+    kanony = {r["canon"] for r in con.execute("SELECT canon FROM object").fetchall()}
+    rows = con.execute(
+        "SELECT f.id AS fid, l.path AS path FROM frame f JOIN header h ON h.frame_id = f.id "
+        "LEFT JOIN location l ON l.id = (SELECT MIN(id) FROM location "
+        "                                WHERE frame_id = f.id AND present = 1) "
+        "WHERE f.kind = 'light' AND f.object_id IS NULL "
+        "  AND h.object_raw IS NULL "
+        "  AND f.filetype IN (SELECT value FROM json_each(?)) "
+        "ORDER BY f.id",
+        (json.dumps(list(NO_OBJECT_CARD_FILETYPES)),)).fetchall()
+
+    grupy = {}                       # kanon -> [ident, folder, [frame_id, …]]
+    for r in rows:
+        seg = object_from_path(r["path"])
+        if not seg:
+            continue
+        ident, _ = resolve_name(lookup, seg, from_path=True)
+        if ident is None:
+            continue
+        wpis = grupy.get(ident.canon)
+        if wpis is None:            # folder liczymy RAZ na grupę, nie raz na klatkę (763 wywołania
+            wpis = grupy[ident.canon] = [ident, object_folder(r["path"]), []]   # na odświeżenie)
+        wpis[2].append(r["fid"])
+    return tuple(
+        PathProposal(canon=canon, catalog=ident.catalog, kind=ident.kind, folder=folder,
+                     frame_ids=tuple(fids), is_new=canon not in kanony)
+        for canon, (ident, folder, fids) in sorted(grupy.items()))
+
+
+def path_proposal(con, path):
+    """Propozycja kanonu ze ścieżki dla dialogu „Napraw nagłówek…" (P-D) — albo None.
+
+    TA SAMA DRABINA co szczebel przebiegu (SPOT — do S2 repo miało DWIE reguły ścieżki i ekran
+    odpowiadał inaczej niż baza), ale reguła świadka jest OSTRZEJSZA i to jest różnica ZAMIERZONA:
+    tu zapis idzie do PLIKU i jest nieodwracalny bez kopii bajtowej, więc wymagamy ZGODNEGO
+    zeznania DWÓCH świadków (folder obiektu ∧ człon nazwy pliku). Szczebel przebiegu tylko
+    PROPONUJE do bazy, więc stać go na jednego świadka — dwaj zgodni łapią 31 klatek z 763.
+
+    ZWRACA FORMĘ SPRZED `xref` — to druga zamierzona różnica wobec szczebla (§4 wiersz 16 wypisuje
+    obie jawnie): do PLIKU idzie konwencja USERA (folder `M82` → karta `M82`), a nie kanon bazy
+    (`NGC3034`). Drabina odpowiada tu na pytanie „czy ta nazwa się rozwiąże", a nie „jak ją zapisać"
+    — inaczej naprawa nagłówka przepisywałaby użytkownikowi jego własne archiwum (D-PD-9)."""
+    seg = object_from_path(path)
+    if not seg:
+        return None
+    lookup = alias_lookup(con)
+    ident, _ = resolve_name(lookup, seg, from_path=True)
+    if ident is None:
+        return None
+    for token in filename_tokens(path):
+        drugi, _ = resolve_name(lookup, token, from_path=True)
+        if drugi is not None and drugi.canon == ident.canon:
+            return catalog_canon(seg, split=False) or seg.strip()
+    return None
+
+
 def run_resolver(con, now):
     """Po skanie: dla każdego frame'a z nagłówkiem rozwiąż OBIEKT (tylko light/master_light) i FILTR
     (wszystkie). Obiekt rozpoznany → `upsert_object`+`assign_object` (+`add_object_alias`, gdy
@@ -146,17 +344,9 @@ def run_resolver(con, now):
         "FROM frame f JOIN header h ON h.frame_id = f.id").fetchall()
     s.frames = len(rows)
 
-    # Szczebel ALIASU (P4, D-P4-1): preload WSZYSTKICH aliasów raz na przebieg (literał — resolver
-    # już czyta literałami). Snapshot z STARTU przebiegu jest bezpieczny (R#12): alias zapisany W TYM
-    # przebiegu dotyczy nazwy, która właśnie trafiła wcześniejszym szczeblem deterministycznie.
-    aliases = {}
-    for a in con.execute(
-            "SELECT a.alias_norm AS key, a.object_id AS oid FROM object_alias a").fetchall():
-        aliases[a["key"]] = a["oid"]
-
-    # Kanon → id, tym samym snapshotem co aliasy: szczebel słownika musi odróżnić „ta nazwa należy
-    # już do MOJEGO obiektu" (nic do zrobienia) od „należy do CUDZEGO" (ustąp ręce, R-S1-2).
-    canons = {c["canon"]: c["id"] for c in con.execute("SELECT id, canon FROM object").fetchall()}
+    # Szczebel ALIASU (P4, D-P4-1): preload WSZYSTKICH aliasów raz na przebieg — drabina dostaje go
+    # jako `lookup`, więc w pętli nie ma ANI JEDNEGO SELECT-a.
+    lookup = alias_snapshot(con).get
 
     unresolved = {}        # object_raw -> liczba (tylko light/master_light, obecny-nierozpoznany)
     filter_items = []      # (frame_id, filter_canon) do backfillu zbiorczego
@@ -170,35 +360,9 @@ def run_resolver(con, now):
                 # guard objmował tylko region; uogólniony na solar/deep-sky/alias/region.)
                 pass
             else:
-                # solar/komety PRZED deep-sky: mają własne ID (nie katalogi mgławic), krok 5a.
-                ident = resolve_solar(r["obj"]) or resolve_object(r["obj"])
-                alias_oid = None
-                if ident is not None and ident.source == "curated":
-                    # SŁOWNIK USTĘPUJE RĘCE (R-S1-2). Szczebel słownika stoi WYŻEJ niż alias, więc
-                    # dla nazwy, którą user przypisał wcześniej pod własnym kanonem, przejąłby jego
-                    # klatki i ROZSZCZEPIŁ grupę: `object_source='user'` chroni tylko tę klatkę,
-                    # którą ręka dotknęła, a rodzeństwo z tym samym `object_raw` szłoby pod nowy
-                    # kanon. Alias zostawał przy starym obiekcie, więc tabela aliasów i klatki
-                    # mówiły co innego — a `sync_own_aliases` w tym samym przebiegu meldował
-                    # „alias zostaje przy dotychczasowym obiekcie", czyli raport przeczył zapisowi.
-                    # Zmierzone przed naprawą: grupa 3 klatek „WR 134" rozpadała się na 1 + 2.
-                    # Gramatyki katalogowej to NIE dotyczy — tam szczebel stoi ponad aliasem od
-                    # dawna i ta precedencja jest zamierzona (nazwa katalogowa jest faktem o niebie,
-                    # nie zdaniem człowieka o archiwum).
-                    # Ustępujemy WYŁĄCZNIE cudzemu obiektowi. Warunek „alias istnieje" był za
-                    # szeroki: po pierwszym przebiegu słownik zasiewa własny alias, więc drugi
-                    # przebieg przemalowywałby `curated` → `alias` i emitował parę eventów —
-                    # idempotencja padała na własnej obronie.
-                    key = ident.alias_norm
-                    zajety = aliases.get(key) if key else None
-                    if zajety is not None and zajety != canons.get(ident.canon):
-                        ident, alias_oid = None, zajety
-                if ident is None and alias_oid is None:
-                    # ALIAS po katalogu, PRZED regionem (#8, P4): alias = jawna wiedza o NAZWIE,
-                    # region = inferencja z geometrii. Pusty klucz (norm_alnum("---") == "") pomija
-                    # lookup — alias "" łapałby KAŻDĄ niealfanumeryczną nazwę (D-P4-2, R#3).
-                    key = norm_alnum(r["obj"])
-                    alias_oid = aliases.get(key) if key else None
+                # CAŁA drabina zależna od nazwy (solar → katalog/słownik → alias) siedzi w JEDNYM
+                # właścicielu: `resolve_name`. Drugi człon krotki niepusty ⇒ trafienie ALIASU.
+                ident, alias_oid = resolve_name(lookup, r["obj"])
                 # REGION = OSTATNI szczebel (#5, P3): dopiero gdy zeznanie nagłówka i alias nic nie
                 # dały — 547 klatek `NGC6992` leży WEWNĄTRZ promienia Veil i chroni je kolejność.
                 if ident is None and alias_oid is None:
@@ -242,6 +406,13 @@ def run_resolver(con, now):
     repo.backfill_filter_canon(con, filter_items, now=now)        # no-op gdy pusto
     repo.flag_object_review_summary(
         con, sorted(unresolved.items(), key=lambda kv: (-kv[1], kv[0])), now=now)  # no-op gdy pusto
+
+    # SZCZEBEL ŚCIEŻKI — POLICZONY, NIE ZAPISANY (D-OW-2/B). Przebieg mówi, ile klatek CZEKA na
+    # gest człowieka; sam nie pisze do osi obiektu ani jednego wiersza. Liczony PO pętli i osobnym
+    # SELECT-em, bo pyta o ŚCIEŻKĘ (kopia obecna), której pętla `frame JOIN header` nie zna.
+    propozycje = path_proposals(con)
+    s.path_proposed_names = len(propozycje)
+    s.path_proposed_frames = sum(p.n_frames for p in propozycje)
 
     # ZASIEW NAZW POTOCZNYCH — PO pętli, i to jest jedyna kolejność, która działa na świeżej bazie:
     # zasiew wymaga ISTNIEJĄCEGO obiektu, a `LMC` powstaje dopiero, gdy szczebel słownika przypisze
@@ -396,14 +567,12 @@ def name_resolves(con, text):
     lighty) oraz nazwa świeżo nauczona aliasem (od S1 `WR134` zna już SŁOWNIK, więc przykładem
     jest dowolna nazwa nauczona ręką — bez numeru
     katalogowego). Obie populacje resolver rozwiązuje, więc odmowa zapisu była nieprawdą o własnym
-    zachowaniu."""
-    if resolve_solar(text) is not None or resolve_object(text) is not None:
-        return True
-    key = norm_alnum(text)
-    if not key:      # pusty klucz łapałby KAŻDĄ niealfanumeryczną nazwę (D-P4-2, R#3)
-        return False
-    return con.execute(
-        "SELECT 1 FROM object_alias WHERE alias_norm = ?", (key,)).fetchone() is not None
+    zachowaniu.
+
+    Od S2 to jedno zdanie nad `resolve_name`: „pierwszy człon drabiny nie jest None". Własna kopia
+    kolejności szczebli zniknęła — była trzecim miejscem, w którym repo odpowiadało na to samo
+    pytanie, i to ona miałaby prawo rozjechać się z przebiegiem po cichu."""
+    return resolve_name(alias_lookup(con), text)[0] is not None
 
 
 def nameless_lights(con):

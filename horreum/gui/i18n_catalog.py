@@ -203,6 +203,50 @@ CATALOG = {
     "object.nameless_stacks_line": {
         "pl": "— bez nazwy, gotowe stosy: {n}  ·  do naprawy kartą",
         "en": "— nameless, finished stacks: {n}  ·  repair with a card"},
+    # Ścieżka PROPONUJE (D-OW-2/B): wiersz stoi POD kubełkiem RAW, bo opisuje jego PODZBIÓR —
+    # drogę wyjścia, nie nową populację. Dwie liczby, bo jednostką przeglądu jest NAZWA, a jednostką
+    # skutku KLATKA; sama liczba klatek kazałaby userowi myśleć, że czeka go 707 decyzji.
+    "object.path_proposed_line": {
+        "pl": "— …z tego ze ścieżki: {names} nazw / {frames} klatek  ·  do potwierdzenia",
+        "en": "— …of which from path: {names} names / {frames} frames  ·  to confirm"},
+    "object.path_proposed_broken": {
+        "pl": "— ze ścieżki: NIE POLICZONO · słownik obiektów własnych ma błąd "
+              "(objects_own.json) — popraw plik i odśwież",
+        "en": "— from path: NOT COUNTED · the own-objects dictionary has an error "
+              "(objects_own.json) — fix the file and refresh"},
+    "object.frames_path_proposed": {
+        "pl": "Klatki z propozycją ze ścieżki ({n})", "en": "Frames proposed from path ({n})"},
+    "object.confirm_path_btn": {"pl": "Zatwierdź ze ścieżki…", "en": "Confirm from path…"},
+    "object.confirm_path_tip": {
+        "pl": "Ścieżka proponuje nazwę — zapis następuje dopiero po Twoim potwierdzeniu",
+        "en": "The path proposes a name — nothing is written until you confirm"},
+    "object.confirm_path_tip_pick": {
+        "pl": "Zaznacz w kolejce pozycję „…z tego ze ścieżki”",
+        "en": "Select the “…of which from path” entry in the queue"},
+    "path.title": {"pl": "Zatwierdź nazwy ze ścieżki", "en": "Confirm names from path"},
+    # UI NIE KŁAMIE: „da się cofnąć" byłoby obietnicą bez pokrycia — powierzchnia cofania przychodzi
+    # dopiero z S2b, a dziś jedyną drogą odwrotu jest edycja słownika (i tylko dla jego kanonów).
+    # Zdanie mówi więc stan FAKTYCZNY, zamiast zapowiadać cudzy segment.
+    "path.head": {
+        "pl": "{names} nazw · {frames} klatek. Nazwa pochodzi z FOLDERU na pozycji obiektu; "
+              "zapis idzie do BAZY, nie do plików. Powierzchnia cofania dochodzi w kolejnym kroku "
+              "— dziś odznacz to, czego nie chcesz zapisać.",
+        "en": "{names} names · {frames} frames. The name comes from the FOLDER at the object "
+              "position; the write goes to the DATABASE, not the files. The undo surface arrives "
+              "in the next step — for now, uncheck whatever you do not want written."},
+    "path.item": {"pl": "{canon}  ·  {n} klatek", "en": "{canon}  ·  {n} frames"},
+    "path.new_badge": {"pl": "NOWA w bazie", "en": "NEW in the database"},
+    "path.known_badge": {"pl": "kanon znany", "en": "canon known"},
+    "path.confirm_btn": {"pl": "Zatwierdź wszystko", "en": "Confirm all"},
+    "path.confirm_btn_n": {"pl": "Zatwierdź zaznaczone ({n})", "en": "Confirm selected ({n})"},
+    "path.close_btn": {"pl": "Zamknij", "en": "Close"},
+    "path.err.nothing": {"pl": "Nic nie zaznaczono — zero zapisu.",
+                         "en": "Nothing selected — nothing written."},
+    "path.done": {
+        "pl": "Zatwierdzono {names} nazw · przypisano {assigned} z {total} klatek.",
+        "en": "Confirmed {names} names · assigned {assigned} of {total} frames."},
+    "path.skipped": {"pl": " ({n} pominięte — zajęte między oknem a zapisem)",
+                     "en": " ({n} skipped — taken between the dialog and the write)"},
     "object.unreadable_line": {"pl": "— kopie nieczytelne: {n}", "en": "— unreadable copies: {n}"},
     "object.review_info": {
         "pl": "— config-review: {config}  ·  bez nagłówka: {headerless}  (rozwiązywanie w przygotowaniu)",
@@ -1214,6 +1258,10 @@ CATALOG = {
               "do kolejki)",
         "en": "  (dictionary: +{seeded} names · −{retired} retired · {unassigned} frames back "
               "in the queue)"},
+    # Szczebel ścieżki PROPONUJE — linia mówi wprost, że to CZEKA na gest, a nie że zostało zrobione.
+    "pipeline.fmt.resolve_path": {
+        "pl": "  (ze ścieżki: {names} nazw / {frames} klatek CZEKA na potwierdzenie — oś obiektu)",
+        "en": "  (from path: {names} names / {frames} frames AWAIT confirmation — object axis)"},
     "pipeline.fmt.resolve_own_conflict": {
         "pl": "  ⚠ {n} nazw ze słownika należy już do innego obiektu — pominięte, "
               "rozstrzygnij ręcznie",

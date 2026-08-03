@@ -16,7 +16,6 @@ ETAP 2 (PLAN_gui_pipeline): okno aplikacji to `MainWindow` (menu Plik: Otwórz/N
 między widokami w `QStackedWidget`). Oś teleskopu z etapu 1 to teraz OSADZALNY widok `TelescopeAxisView`;
 `TelescopeAxisWindow` zostaje jako cienka powłoka-okno (zgodność wstecz: `python -m horreum.gui` i testy)."""
 import os
-import re
 import uuid
 from datetime import datetime, timezone
 
@@ -34,8 +33,6 @@ from horreum.gui import i18n, mapproj, queries, theme
 from horreum.gui.map_view import SitesMapView
 from horreum.resolve._text import norm_alnum
 from horreum.resolve.catalog import catalog_canon, catalog_label, xref
-from horreum.resolve.objects import resolve_object
-from horreum.resolve.solar import resolve_solar
 
 # Kolumny listy głównej — indeksy nazwane (czytelne handlery zamiast magicznych liczb).
 # Nagłówek = telescop_canon (tożsamość osi po przejściu fitsmirror); Etykieta = nazwa usera.
@@ -446,7 +443,11 @@ class AssignObjectDialog(QDialog):
                       + "\n" + i18n.t("assign.alias_remembered"))
         head.setWordWrap(True)
         lay.addWidget(head)
-        if resolve_solar(object_raw) or resolve_object(object_raw):
+        # Drabina BEZ szczebla aliasu (`lookup` zawsze pusty) — i to jest tu ZAMIERZONE: alias
+        # dopiero powstanie z tego gestu, więc pytanie brzmi „czy nazwa broni się sama". Pytamy
+        # jednak WŁAŚCICIELA drabiny, nie własnej kompozycji: nowy szczebel trafia tę notę
+        # automatycznie, zamiast po cichu ją ominąć.
+        if resolver.resolve_name(lambda _key: None, object_raw)[0] is not None:
             note = QLabel(i18n.t("assign.catalog_note"))
             note.setWordWrap(True)
             lay.addWidget(note)
@@ -515,6 +516,134 @@ class AssignObjectDialog(QDialog):
         self.accept()
 
 
+class ConfirmPathObjectsDialog(QDialog):
+    """„Zatwierdź ze ścieżki…" — POWIERZCHNIA POTWIERDZANIA propozycji szczebla ścieżki (S2,
+    D-OW-2/**B**). To jest cena wariantu B i bez niej segment nie istnieje: przebieg resolvera
+    liczy kandydatów i NIE PISZE ani jednego wiersza osi obiektu, więc bez tego okna 707 klatek
+    zostaje bezimiennych mimo działającego szczebla.
+
+    JEDNOSTKĄ PRZEGLĄDU JEST NAZWA, NIE KLATKA: 707 klatek daje ≈35 pozycji. Lista per klatka
+    byłaby listą, której nikt nie przeczyta — a przeczytać ją trzeba, bo 232 klatki trafiają
+    w 21 kanonów, których w bazie NIE MA (`NGC6960` obok istniejących `NGC6992` i `Veil` to jeden
+    obiekt nieba w trzech pozycjach facetu). Dlatego każda pozycja niesie ZNACZNIK „NOWA w bazie" —
+    to właśnie te pozycje mają przejść przez oko.
+
+    Domyślnie zaznaczone są WSZYSTKIE (akcja nazywa się „Zatwierdź wszystko"), odznaczenie jest
+    wyjątkiem — 35 kliknięć na starcie zamieniłoby jeden gest w sesję klikania.
+
+    ZAPIS IDZIE TĄ SAMĄ KLINGĄ, KTÓRĄ PISZE RĘKA (`repo.user_assign_object`), ze źródłem `path`
+    i BEZ aliasu: jeden pisarz osi, nie dwóch — inaczej „Cofnij" z S2b widziałby jedną populację
+    z dwóch. Alias z segmentu ścieżki nie powstaje, bo segment nie trafi żadnego przyszłego
+    `object_raw` (D-OW-2 pkt 4); nazwy potoczne wpisu słownika zasieje najbliższy `Rozwiąż`."""
+
+    changed = Signal()          # zapis doszedł do skutku → gospodarz odświeża kolejkę i bibliotekę
+
+    def __init__(self, con, *, proposals, now_fn, parent=None):
+        super().__init__(parent)
+        self.con = con
+        self._now = now_fn
+        self._items = []        # [{proposal, check}]
+        self.assigned = 0
+        self.setWindowTitle(i18n.t("path.title"))
+        self._build_ui(proposals)
+        self._sync_action()
+
+    def _build_ui(self, proposals):
+        lay = QVBoxLayout(self)
+        head = QLabel(i18n.t("path.head", names=len(proposals),
+                             frames=sum(p.n_frames for p in proposals)))
+        head.setWordWrap(True)
+        lay.addWidget(head)
+
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        inner = QWidget()
+        gl = QVBoxLayout(inner)
+        for p in proposals:
+            row = QHBoxLayout()
+            check = QCheckBox(i18n.t("path.item", canon=p.canon, n=p.n_frames))
+            check.setChecked(True)
+            check.setToolTip(p.folder or "")
+            check.toggled.connect(self._sync_action)
+            row.addWidget(check, 2)
+            # ZNACZNIK NOWEJ NAZWY jest OSOBNĄ etykietą, nie sufiksem tekstu pozycji: to jedyny
+            # fakt, dla którego to okno w ogóle powstało, więc ma mieć własne miejsce i wagę.
+            badge = QLabel(i18n.t("path.new_badge") if p.is_new else i18n.t("path.known_badge"))
+            if p.is_new:
+                _f = badge.font(); _f.setBold(True); badge.setFont(_f)
+            row.addWidget(badge, 1)
+            folder = QLabel(p.folder or "")
+            folder.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            row.addWidget(folder, 3)
+            gl.addLayout(row)
+            self._items.append({"proposal": p, "check": check})
+        gl.addStretch(1)
+        area.setWidget(inner)
+        lay.addWidget(area, 1)
+
+        self.status = QLabel("")
+        self.status.setWordWrap(True)
+        lay.addWidget(self.status)
+        self.error = QLabel("")
+        self.error.setProperty("role", "error")
+        self.error.setWordWrap(True)
+        lay.addWidget(self.error)
+
+        actions = QHBoxLayout()
+        self.confirm_btn = QPushButton(i18n.t("path.confirm_btn"))
+        _f = self.confirm_btn.font(); _f.setBold(True); self.confirm_btn.setFont(_f)
+        self.confirm_btn.clicked.connect(self._on_confirm)
+        actions.addWidget(self.confirm_btn)
+        actions.addStretch(1)
+        close_btn = QPushButton(i18n.t("path.close_btn"))
+        close_btn.clicked.connect(self.reject)
+        actions.addWidget(close_btn)
+        lay.addLayout(actions)
+
+    def _checked(self):
+        return [it for it in self._items if it["check"].isChecked()]
+
+    def _sync_action(self):
+        """Licznik na przycisku mówi, ILE POZYCJI pójdzie do zapisu — szczery disabled przy zerze."""
+        n = len(self._checked())
+        self.confirm_btn.setText(i18n.t("path.confirm_btn_n", n=n) if n
+                                 else i18n.t("path.confirm_btn"))
+        self.confirm_btn.setEnabled(n > 0)
+        self.error.clear()
+
+    def _on_confirm(self):
+        """Zapis zaznaczonych pozycji — JEDNA klinga na pozycję (transakcja per nazwa, bo obiekt
+        i grupa klatek to jedna decyzja). Pozycja odznaczona NIE JEST zapisywana: „Zatwierdź
+        wszystko" znaczy „wszystko, co zostawiłeś zaznaczone", nie „wszystko, co widzisz".
+
+        Konflikt aliasu / dryf grupy wraca `ValueError` z klingi — okno zostaje otwarte z powodem,
+        a pozycje zapisane wcześniej ZOSTAJĄ zapisane (każda ma własną transakcję)."""
+        wybrane = self._checked()
+        if not wybrane:
+            self.error.setText(i18n.t("path.err.nothing"))
+            return
+        assigned = skipped = 0
+        for it in wybrane:
+            p = it["proposal"]
+            try:
+                a, s = repo.user_assign_object(
+                    self.con, alias_norm=None, canon=p.canon, catalog=p.catalog, kind=p.kind,
+                    frame_ids=list(p.frame_ids), now=self._now(), object_source="path")
+            except ValueError as e:
+                self.error.setText(str(e))
+                break
+            assigned, skipped = assigned + a, skipped + s
+        self.assigned = assigned
+        msg = i18n.t("path.done", names=len(wybrane), assigned=assigned,
+                     total=assigned + skipped)
+        if skipped:
+            msg += i18n.t("path.skipped", n=skipped)
+        self.status.setText(msg)
+        self.changed.emit()
+        if assigned and not self.error.text():
+            self.accept()
+
+
 # ---------------------------------------------------------------- P-D: nazwa wraca do NAGŁÓWKA
 # Klatka, której nagłówek MILCZY o obiekcie (czwarty przypadek obok uniwersalium/regionu/literówki),
 # dostaje kartę `OBJECT` w PLIKU — propozycja ze ścieżki, zapis z ręki człowieka, oś wypełnia zwykły
@@ -525,34 +654,12 @@ class AssignObjectDialog(QDialog):
 _OBJECT_CARD_MAX = 68     # rekord nagłówka FITS: powyżej astropy wchodzi w CONTINUE (nagłówek ASCII)
 
 
-def _witness_folder(path):
-    """Świadek 1 propozycji: segment PO `LIGHTS` (KOTWICA, nie stała głębokość — drzewo archiwum ma
-    różne poziomy), przepuszczony przez `catalog_canon`. Brak kotwicy/nieparsowalny → None."""
-    segs = [s for s in re.split(r"[\\/]+", path or "") if s]
-    dirs = segs[:-1]                                  # ostatni segment to nazwa pliku
-    for i, seg in enumerate(dirs):
-        if seg.strip().upper() == "LIGHTS" and i + 1 < len(dirs):
-            return catalog_canon(dirs[i + 1])
-    return None
-
-
-def _witness_filename(path):
-    """Świadek 2: stem nazwy pliku cięty po `_`, PIERWSZY człon parsujący się katalogowo — nie
-    prefiks. Prefiks jest martwy dla plików przemianowanych własnym rename v2: `DEFAULT_TEMPLATE`
-    stawia na pierwszej pozycji `datetime`, więc oznaczenie ląduje w środku nazwy."""
-    stem = os.path.splitext(os.path.basename(path or ""))[0]
-    for seg in stem.split("_"):
-        cc = catalog_canon(seg)
-        if cc:
-            return cc
-    return None
-
-
-def _path_proposal(path):
-    """Propozycja kanonu ze ścieżki = ZGODNE zeznanie DWÓCH świadków (folder + nazwa pliku), albo
-    None. Ścieżka jest DOWODEM, nie prawdą: rozjazd zostawia pole puste i decyzję człowiekowi."""
-    a, b = _witness_folder(path), _witness_filename(path)
-    return a if a and a == b else None
+# ZEJŚCIE DWÓCH REGUŁ ŚCIEŻKI DO JEDNEJ (S2, D-OW-2 pkt 6b). Do S2 ten plik miał WŁASNĄ regułę
+# ścieżki — literał `LIGHTS` zamiast markera rodzaju i `catalog_canon` zamiast drabiny nazwy — więc
+# ekran i baza odpowiadały RÓŻNIE na to samo pytanie: przebieg nazywał `LMC` i `_SOLAR\Moon`,
+# a dialog przy tych samych plikach milczał. Reguła ma teraz jednego właściciela
+# (`resolver.path_proposal` → `resolve.paths` + `resolver.resolve_name`), a koszt zejścia zmierzono
+# PRZED wdrożeniem na populacji P-D: 25 klatek bez karty, TRACI propozycję **0**.
 
 
 def _validate_object_value(con, text):
@@ -651,7 +758,7 @@ class RepairHeaderDialog(QDialog):
             groups.setdefault(os.path.dirname(target["path"]), []).append(
                 dict(frame_id=r["frame_id"], path=target["path"]))
         for folder, items in groups.items():
-            proposals = {_path_proposal(it["path"]) for it in items}
+            proposals = {resolver.path_proposal(self.con, it["path"]) for it in items}
             common = proposals.pop() if len(proposals) == 1 else None
             self._groups.append({"folder": folder, "rows": items, "proposal": common})
 
@@ -1011,6 +1118,13 @@ class ObjectAxisView(QWidget):
         self.repair_btn.setEnabled(False)
         self.repair_btn.clicked.connect(self._on_repair)
         assign_row.addWidget(self.repair_btn)
+        # TRZECIA akcja tej samej kolejki (S2, D-OW-2/B): potwierdzenie propozycji ze ŚCIEŻKI.
+        # Osobna od „Przypisz obiekt…", bo tam człowiek WSKAZUJE obiekt, a tu POTWIERDZA cudzą
+        # propozycję hurtem — i osobna od „Napraw nagłówek…", bo tamta pisze do PLIKÓW, ta do bazy.
+        self.confirm_path_btn = QPushButton(i18n.t("object.confirm_path_btn"))
+        self.confirm_path_btn.setEnabled(False)
+        self.confirm_path_btn.clicked.connect(self._on_confirm_path)
+        assign_row.addWidget(self.confirm_path_btn)
         assign_row.addStretch(1)
         lv.addLayout(assign_row)
 
@@ -1147,6 +1261,19 @@ class ObjectAxisView(QWidget):
         # Pokazywany TYLKO gdy populacja istnieje: na archiwum bez lustrzanki to stałe „0".
         if q["nameless_raw_count"] > 0:
             self._add_review_item(i18n.t("object.nameless_raw_line", n=q["nameless_raw_count"]))
+        # PODZBIÓR kubełka wyżej, nie szósty kubełek (S2, D-OW-2/B): tym klatkom ŚCIEŻKA proponuje
+        # kanon, a zapis czeka na gest człowieka. Wiersz stoi ZARAZ POD RAW-em, bo opisuje jego
+        # drogę wyjścia — i świadomie NIE wchodzi do partycji, która już je policzyła.
+        # Klikalny tylko przy niepustej populacji: pusta lista propozycji nie ma czego pokazać.
+        if q["path_proposed_frames"] is None:
+            # Słownik obiektów własnych ma błąd — kubełek NIE UDAJE zera (to dwie różne prawdy):
+            # wiersz mówi, że propozycji nie policzono, i nie prowadzi nigdzie, bo nie ma dokąd.
+            self._add_review_item(i18n.t("object.path_proposed_broken"))
+        elif q["path_proposed_frames"] > 0:
+            self._add_review_item(
+                i18n.t("object.path_proposed_line", names=q["path_proposed_names"],
+                       frames=q["path_proposed_frames"]),
+                tag="path_proposals")
         # TRZECI kubełek tej samej partycji (I-2b/D-P-I-5): gotowy obraz po integracji, wciągnięty
         # drogą „Stosy". Do 2026-08-02 był INFORMACYJNY, bo pisarz XISF nie umiał dopisać karty
         # (D-X-12) — wiersz z akcją obiecywałby zapis, który kończy się 'blocked' na każdej pozycji.
@@ -1228,6 +1355,14 @@ class ObjectAxisView(QWidget):
         # D-0802-1 tę samą drogę naprawy (karta `OBJECT` do PLIKU), więc przycisk obsługuje oba.
         self.repair_btn.setEnabled(tag in ("nameless", "nameless_stacks")
                                    and not self._busy and not self._foreign_wb)
+        # Potwierdzanie propozycji pisze do BAZY, nie do plików — mutex writebacku (`_foreign_wb`)
+        # jej NIE dotyczy; bramką jest sam bieg pipeline'u, jak przy „Przypisz obiekt…".
+        self.confirm_path_btn.setEnabled(tag == "path_proposals" and not self._busy)
+        # Wygaszony przycisk tłumaczy się SAM (ta sama lekcja co WIZ #12 pięć linii wyżej): przy
+        # swoim kubełku mówi, CO zrobi; poza nim — czego brakuje, żeby dało się go kliknąć.
+        self.confirm_path_btn.setToolTip(i18n.t(
+            "object.confirm_path_tip" if tag == "path_proposals"
+            else "object.confirm_path_tip_pick"))
         # WIZ #12: „Przypisz obiekt…" gasł BEZ SŁOWA obok aktywnego „Napraw nagłówek…", więc obie
         # drogi naprawy wyglądały jak jedna zepsuta. Wygaszony przycisk tłumaczy się sam — tooltip
         # nazywa drogę WŁAŚCIWĄ dla zaznaczonego kubełka, zamiast milczeć o istnieniu drugiej.
@@ -1279,6 +1414,15 @@ class ObjectAxisView(QWidget):
             self._restore_frames_mode()
             rows = queries.nameless_stack_frames(self.con)
             self.frames_label.setText(i18n.t("object.frames_nameless_stacks", n=len(rows)))
+            self._fill_frames(rows, present_col=False)
+        elif tag == "path_proposals":
+            # Drążenie pokazuje KLATKI (żeby wiersz nie był ślepym zaułkiem), a jednostkę przeglądu
+            # — NAZWĘ — pokazuje dopiero okno potwierdzania. Id-y bierzemy od JEDNEGO właściciela
+            # predykatu; read-model tylko je dekoruje kolumnami panelu.
+            self._restore_frames_mode()
+            ids = [fid for p in resolver.path_proposals(self.con) for fid in p.frame_ids]
+            rows = queries.path_proposal_frames(self.con, ids)
+            self.frames_label.setText(i18n.t("object.frames_path_proposed", n=len(rows)))
             self._fill_frames(rows, present_col=False)
         elif tag == "unreadable":
             self._show_copies()
@@ -1365,6 +1509,36 @@ class ObjectAxisView(QWidget):
             msg += i18n.t("object.assigned_skipped", n=skipped)
         self.status_message.emit(msg)
         self.refresh(select_canon=canon if assigned else None, select_first=bool(assigned))
+
+    # ------------------------------------------------ akcja potwierdzania propozycji (S2)
+
+    def _on_confirm_path(self):
+        """„Zatwierdź ze ścieżki…": propozycje szczebla ścieżki → okno przeglądu → klinga
+        `repo.user_assign_object` ze źródłem `path`.
+
+        Propozycje liczymy TU, w chwili otwarcia — nie z licznika kolejki: między odświeżeniem
+        a kliknięciem mógł przebiec `Rozwiąż` z workera i lista byłaby o niego starsza. Klinga
+        pomija klatki, które w międzyczasie dostały obiekt (dryf), więc podwójne liczenie kosztuje
+        jeden SELECT, a jego brak kosztowałby zapis pod nieaktualną listą."""
+        propozycje = resolver.path_proposals(self.con)
+        if not propozycje:
+            self.status_message.emit(i18n.t("path.err.nothing"))
+            return
+        dlg = ConfirmPathObjectsDialog(self.con, proposals=propozycje, now_fn=self._now,
+                                       parent=self)
+        # Zapis CZĘŚCIOWY przerwany odmową klingi zostawia okno otwarte, a kolejkę pod spodem
+        # nieaktualną — sygnał odświeża ją natychmiast (lustro `_on_repair_changed`).
+        dlg.changed.connect(self._on_confirm_path_changed)
+        dlg.exec()
+        if dlg.assigned:
+            self.status_message.emit(dlg.status.text())
+            self.refresh(select_first=True)
+
+    def _on_confirm_path_changed(self):
+        """Zapis w oknie potwierdzania → kolejka mówi świeżą prawdę JUŻ przy otwartym oknie
+        (częściowy zapis przerwany odmową klingi nie zostawia ekranu z nieaktualnym licznikiem)."""
+        self._load_review()
+        self._sync_assign_enabled()
 
     # ------------------------------------------------ akcja zapisu do PLIKU (P-D)
 

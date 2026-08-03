@@ -52,9 +52,14 @@ from .catalog import catalog_canon, catalog_label, xref
 # wymieniona tu jawnie, żeby audyt enumu nie czerwienił się na zastanej bazie.
 ALIAS_SOURCES = frozenset({"header", "catalog_xref", "common_name", "curated", "solar", "comet",
                            "review", "user"})
-# Źródła na KLATCE = źródła aliasu + szczeble, które nazwy nie zapisują (`region`), + `alias`
+# Źródła na KLATCE = źródła aliasu + szczeble, które nazwy nie zapisują (`region`, `path`), + `alias`
 # (trafienie zapisanej wcześniej równoważności) i `user` (gest człowieka, pomija całą drabinę).
-OBJECT_SOURCES = ALIAS_SOURCES | {"alias", "region"}
+#
+# `path` (S2, D-OW-2/B) NIE występuje wśród źródeł ALIASU z tego samego powodu co `region`: segment
+# ścieżki nie trafi żadnego przyszłego `object_raw`, więc nie ma nazwy do zapisania jako
+# równoważność. Klatka nosi je po POTWIERDZENIU propozycji ręką — świadkiem pozostaje ścieżka,
+# więc źródło ma to mówić, zamiast udawać wskazanie palcem (`user`).
+OBJECT_SOURCES = ALIAS_SOURCES | {"alias", "region", "path"}
 
 # …i TA SAMA reguła dla `object.kind`, bo segment domykający rozjazd źródeł wprowadził własny na
 # rodzaju: szczebel słownika zwraca `own`, którego DDL nie znał. Wartość spoza tej stałej znaczy,
@@ -167,18 +172,23 @@ def _own_index_stamped(_stamp):
     return idx
 
 
-def resolve_object(object_raw):
+def resolve_object(object_raw, *, split=True):
     """`object_raw` (zeznanie nagłówka) → `ObjectIdentity` albo None (nierozpoznane). Czysta funkcja.
 
     Brak/pusty → None (nie ma czego rozwiązywać). Oznaczenie katalogowe → kanon + xref; nazwa
     potoczna → kanon przez `_COMMON` + xref; nazwa ze SŁOWNIKA obiektów własnych → kanon wprost.
     None ⇒ warstwa wyżej decyduje o delcie (zależnie od `kind` — kalibracja nie ma obiektu, więc
-    jej None to poprawny stan, nie delta)."""
+    jej None to poprawny stan, nie delta).
+
+    `split` przewleczone do `catalog_canon` (D-OW-2 pkt 5a): wołanie ze ŚCIEŻKI idzie bez gałęzi
+    cięcia po `_`. Kwarg musi przejść TĘDY, a nie tylko przez `catalog_canon` — inaczej wołający
+    ze ścieżki miałby do wyboru dwie regresje: globalne `split=False` wywala `NGC4631_PGC42637`
+    na całej osi nagłówka (13,5 tys. klatek), globalne `True` wpuszcza folder sprzętu."""
     raw = _to_text(object_raw)
     if raw is None:
         return None
 
-    cc = catalog_canon(raw)
+    cc = catalog_canon(raw, split=split)
     if cc:
         final = xref(cc)
         source = "catalog_xref" if final != cc else "header"

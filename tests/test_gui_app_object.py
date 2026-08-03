@@ -16,11 +16,11 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from horreum import db, repo
+from horreum import db, repo, resolver
 from horreum.gui import i18n, queries
 from horreum.gui.app import (
-    AssignObjectDialog, ObjectAxisView, COPY_COL_PATH, COPY_COL_REASON, OBJ_COL_CANON,
-    OBJ_COL_FRAMES)
+    AssignObjectDialog, ConfirmPathObjectsDialog, ObjectAxisView, COPY_COL_PATH, COPY_COL_REASON,
+    OBJ_COL_CANON, OBJ_COL_FRAMES)
 
 from fixture_s8 import seed_object_axis
 
@@ -745,3 +745,137 @@ def test_zamkniecie_bez_commitu_nie_zostawia_stagingu(repair):
                        expected_header_hash=None)
     dlg.reject()
     assert con.execute("SELECT count(*) FROM pending_changes").fetchone()[0] == 0
+
+
+# ============================================================ S2: „Zatwierdź ze ścieżki…" (D-OW-2/B)
+# Szczebel ścieżki PROPONUJE, a zapis następuje dopiero tu — więc to okno JEST segmentem, nie jego
+# ozdobą. Populacja: RAW-owe lighty (`filetype='raw'`), których nagłówek milczy o obiekcie,
+# a nazwa mieszka WYŁĄCZNIE w folderze. Fikstura wstawia je surowym SQL — skan RAW-a wymagałby
+# realnego pliku DNG/ARW, a testowany jest read-model i klinga, nie czytnik EXIF.
+
+NOW_S2 = "2026-08-03T12:00:00Z"
+R_S2 = "R:\\ASTRO_"
+
+
+@pytest.fixture
+def sciezka(qapp, tmp_path):
+    """ObjectAxisView nad bazą z 3 klatkami `LMC` i 1 klatką `Orion` (bez wpisu w słowniku)."""
+    con = db.open_db(str(tmp_path / "s2.db"))
+    items = [(rf"{R_S2}\LIGHTS\LMC\A7R3_105\OSC\_7R3880{i}.ARW") for i in range(3)]
+    items.append(rf"{R_S2}\LIGHTS\Orion\A7S1_070\OSC\_dsc9412.ARW")
+    for i, path in enumerate(items, start=1):
+        con.execute("INSERT INTO frame(id, kind, filetype, sha1_data, first_seen_at) "
+                    "VALUES (?, 'light', 'raw', ?, ?)", (i, f"sha{i}", NOW_S2))
+        con.execute("INSERT INTO header(frame_id, object_raw, raw_json) VALUES (?, NULL, '{}')",
+                    (i,))
+        con.execute("INSERT INTO location(frame_id, volume, path, present) VALUES (?,'V',?,1)",
+                    (i, path))
+    con.commit()
+    v = ObjectAxisView(con, now_fn=lambda: NOW_S2)
+    yield v, con
+    v.close()
+    con.close()
+
+
+def test_kubelek_propozycji_ma_wlasny_wiersz_i_akcje(sciezka):
+    """Wiersz stoi POD kubełkiem RAW i mówi OBIE jednostki (nazwy / klatki). Akcja aktywna
+    WYŁĄCZNIE przy nim i poza biegiem pipeline'u; „Napraw nagłówek…" tu NIE działa (to inna droga
+    — karta w pliku, której RAW mieć nie może)."""
+    v, con = sciezka
+    q = queries.review_queue(con)
+    assert (q["nameless_raw_count"], q["path_proposed_names"], q["path_proposed_frames"]) \
+        == (4, 1, 3)                      # Orion bez wpisu w słowniku → bez propozycji
+    _select_review_tag(v, "path_proposals")
+    assert v.confirm_path_btn.isEnabled()
+    assert not v.repair_btn.isEnabled() and not v.assign_btn.isEnabled()
+    assert v.frames.rowCount() == 3                    # drążenie pokazuje KLATKI propozycji
+    v.set_busy(True)
+    assert not v.confirm_path_btn.isEnabled()
+    v.set_busy(False)
+    assert v.confirm_path_btn.isEnabled()
+
+
+def test_okno_grupuje_PO_NAZWIE_i_oznacza_nowa(sciezka):
+    """3 klatki ⇒ JEDNA pozycja (jednostką przeglądu jest NAZWA). Falsyfikator znacznika: `NGC6960`
+    przy ISTNIEJĄCYCH `NGC6992`/`Veil` jest NOWY — to jeden obiekt nieba w trzech pozycjach facetu
+    i dokładnie po to ten znacznik istnieje."""
+    v, con = sciezka
+    con.execute("INSERT INTO frame(id, kind, filetype, sha1_data, first_seen_at) "
+                "VALUES (9, 'light', 'raw', 'sha9', ?)", (NOW_S2,))
+    con.execute("INSERT INTO header(frame_id, object_raw, raw_json) VALUES (9, NULL, '{}')")
+    con.execute("INSERT INTO location(frame_id, volume, path, present) VALUES (9,'V',?,1)",
+                (rf"{R_S2}\LIGHTS\NGC6960\A7R3\OSC\x.ARW",))
+    con.execute("INSERT INTO object(canon, catalog, kind) VALUES ('NGC6992','NGC','deep_sky')")
+    con.execute("INSERT INTO object(canon, catalog, kind) VALUES ('Veil', NULL, 'region')")
+    con.commit()
+
+    dlg = ConfirmPathObjectsDialog(con, proposals=resolver.path_proposals(con),
+                                   now_fn=lambda: NOW_S2, parent=v)
+    pozycje = {it["proposal"].canon: it["proposal"] for it in dlg._items}
+    assert set(pozycje) == {"LMC", "NGC6960"}                     # 4 klatki ⇒ 2 pozycje
+    assert pozycje["LMC"].n_frames == 3
+    assert pozycje["LMC"].folder == rf"{R_S2}\LIGHTS\LMC"         # folder ŹRÓDŁOWY przy pozycji
+    assert pozycje["NGC6960"].is_new and pozycje["LMC"].is_new
+    assert all(it["check"].isChecked() for it in dlg._items)      # domyślnie WSZYSTKO zaznaczone
+    dlg.reject()
+
+
+def test_zatwierdz_wszystko_POMIJA_odznaczone(sciezka):
+    """„Zatwierdź wszystko" znaczy „wszystko, co zostawiłeś zaznaczone" — odznaczenie jednej z pozycji
+    ma zostawić jej klatki nietknięte, a nie zapisać je „przy okazji"."""
+    v, con = sciezka
+    con.execute("INSERT INTO frame(id, kind, filetype, sha1_data, first_seen_at) "
+                "VALUES (9, 'light', 'raw', 'sha9', ?)", (NOW_S2,))
+    con.execute("INSERT INTO header(frame_id, object_raw, raw_json) VALUES (9, NULL, '{}')")
+    con.execute("INSERT INTO location(frame_id, volume, path, present) VALUES (9,'V',?,1)",
+                (rf"{R_S2}\LIGHTS\NGC6960\A7R3\OSC\x.ARW",))
+    con.commit()
+
+    dlg = ConfirmPathObjectsDialog(con, proposals=resolver.path_proposals(con),
+                                   now_fn=lambda: NOW_S2, parent=v)
+    for it in dlg._items:
+        if it["proposal"].canon == "LMC":
+            it["check"].setChecked(False)
+    assert "1" in dlg.confirm_btn.text()                  # licznik mówi, ile pójdzie do zapisu
+    dlg._on_confirm()
+    kanony = {r[0] for r in con.execute("SELECT canon FROM object").fetchall()}
+    assert kanony == {"NGC6960"}, "odznaczona pozycja nie ma prawa nic zapisać"
+    assert con.execute(
+        "SELECT count(*) FROM frame WHERE object_id IS NOT NULL").fetchone()[0] == 1
+
+
+def test_zatwierdzenie_pisze_klinga_reki_ze_zrodlem_path(sciezka):
+    """Falsyfikator §4/19: klatka z propozycji ma dawać się cofnąć akcją z S2b — co działa wtedy
+    i tylko wtedy, gdy zapis poszedł TĄ SAMĄ klingą i nadał źródło `path`. Alias ze ścieżki NIE
+    powstaje: segment nie trafi żadnego przyszłego `object_raw`."""
+    v, con = sciezka
+    przed = _events(con)
+    dlg = ConfirmPathObjectsDialog(con, proposals=resolver.path_proposals(con),
+                                   now_fn=lambda: NOW_S2, parent=v)
+    dlg._on_confirm()
+    assert dlg.assigned == 3 and dlg.result() == QDialog.Accepted
+    stan = con.execute(
+        "SELECT object_source, count(*) AS n FROM frame WHERE object_id IS NOT NULL "
+        "GROUP BY object_source").fetchall()
+    assert [(r["object_source"], r["n"]) for r in stan] == [("path", 3)]
+    assert con.execute("SELECT count(*) FROM object_alias").fetchone()[0] == 0
+    assert _events(con) > przed
+    # kubełek gaśnie razem z populacją — kolejka mówi świeżą prawdę po zapisie
+    assert queries.review_queue(con)["path_proposed_frames"] == 0
+
+
+def test_okno_nie_pisze_dopoki_nie_klikniesz(sciezka):
+    """Rdzeń wariantu B po stronie EKRANU: samo otwarcie i przejrzenie listy nie rusza ani jednego
+    wiersza. Odznaczenie wszystkiego → akcja wygaszona, zero zapisu, powód na ekranie."""
+    v, con = sciezka
+    przed = _events(con)
+    dlg = ConfirmPathObjectsDialog(con, proposals=resolver.path_proposals(con),
+                                   now_fn=lambda: NOW_S2, parent=v)
+    for it in dlg._items:
+        it["check"].setChecked(False)
+    assert not dlg.confirm_btn.isEnabled()
+    dlg._on_confirm()                                  # falsyfikator woła SLOT, nie przycisk
+    assert dlg.error.text() and dlg.assigned == 0
+    assert _events(con) == przed
+    assert con.execute("SELECT count(*) FROM frame WHERE object_id IS NOT NULL").fetchone()[0] == 0
+    dlg.reject()

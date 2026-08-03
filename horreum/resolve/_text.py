@@ -22,3 +22,14 @@ def norm_ascii(s):
 def norm_alnum(s):
     """Mocniejsza normalizacja: tylko alfanumeryki (do dopasowań aliasów/obiektów)."""
     return re.sub(r"[^A-Z0-9]+", "", norm(s))
+
+
+#: Rozdzielnik segmentów ścieżki — `\` i `/` naraz, JEDEN właściciel dla wszystkich osi czytających
+#: drzewo (rodzaj klatki, obiekt ze ścieżki). `Path().parts` tej roboty nie wykona: poza Windows nie
+#: uzna `\` za rozdzielnik, więc jedna oś milczałaby tam, gdzie druga mówi (R-S0-12).
+_SEP = re.compile(r"[\\/]+")
+
+
+def path_segments(path):
+    """Ścieżka → krotka segmentów (puste odsiane). Ta sama odpowiedź na każdym systemie."""
+    return tuple(s for s in _SEP.split(path or "") if s)

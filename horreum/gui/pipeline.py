@@ -922,6 +922,12 @@ class PipelineView(QWidget):
                             retired=s.own_aliases_retired, unassigned=s.own_frames_unassigned)
         if s.own_alias_conflicts:
             linia += i18n.t("pipeline.fmt.resolve_own_conflict", n=s.own_alias_conflicts)
+        # SZCZEBEL ŚCIEŻKI (S2, D-OW-2/B) — przebieg go LICZY i nic nie zapisuje, więc bez tej
+        # doklejki Dostawa milczałaby o klatkach czekających na gest człowieka, a jedynym śladem
+        # byłby wiersz w kolejce INNEGO widoku. Zero propozycji = cisza (QUIET).
+        if s.path_proposed_frames:
+            linia += i18n.t("pipeline.fmt.resolve_path", names=s.path_proposed_names,
+                            frames=s.path_proposed_frames)
         return linia
 
     def _format_calibrate(self, s):

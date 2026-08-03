@@ -14,7 +14,7 @@ NIGDY składanie stringa SQL. Listy zmiennej długości (id/keywordy) idą jako 
 import json
 
 from horreum.resolver import (
-    NO_OBJECT_CARD_FILETYPES, nameless_raw_lights, review_state)
+    NO_OBJECT_CARD_FILETYPES, nameless_raw_lights, path_proposals, review_state)
 
 
 def telescope_label(row):
@@ -253,9 +253,18 @@ def review_queue(con):
     odpowiadają na różne pytania. Dopóki `nameless_count` nie istniał, kolejka milczała o klatkach,
     które grid pokazywał — stąd ten kubełek.
 
+      - `path_proposed_*`: PODZBIÓR kubełka RAW, świadomie **POZA PARTYCJĄ** (S2, D-OW-2/B) —
+        te klatki są już policzone w `nameless_raw_count` i dodanie ich do równania rozspójniłoby
+        je dokładnie o własną liczbę. To nie jest szósty kubełek, tylko DROGA WYJŚCIA pokazana przy
+        kubełku, który ją ma: ścieżka proponuje kanon, a zapis następuje dopiero gestem człowieka.
+        Dwie liczby, bo jednostki są dwie: `names` to pozycje do przejrzenia (≈35), `frames` to
+        klatki, które zmienią stan po zatwierdzeniu (≈707). Jeden właściciel derywacji —
+        `resolver.path_proposals`. **`None` znaczy „nie policzono"** (słownik obiektów własnych ma
+        błąd), a `0` — „nie ma czego liczyć"; wołający ma te dwa stany rozróżnić.
+
     Zwraca dict: {object_review: [Row(object_raw, n)], nameless_count: int, nameless_raw_count: int,
-    nameless_stacks_count: int, config_review_count: int, headerless_count: int,
-    unreadable_count: int}."""
+    nameless_stacks_count: int, path_proposed_names: int, path_proposed_frames: int,
+    config_review_count: int, headerless_count: int, unreadable_count: int}."""
     object_review = con.execute(
         "SELECT h.object_raw AS object_raw, COUNT(*) AS n "
         "FROM frame f JOIN header h ON h.frame_id = f.id "
@@ -270,10 +279,21 @@ def review_queue(con):
     # inną liczbę niż lista, którą otwiera).
     nameless = nameless_frames(con)
     stosy = nameless_stack_frames(con)          # licznik = długość drążenia (D-PD-10), jak wyżej
+    # Szczebel ścieżki wciągnął SŁOWNIK obiektów własnych do read-modelu kolejki, a słownik jest
+    # plikiem CZŁOWIEKA i jego edycja to operacja wspierana. Literówka w assecie ma zostać
+    # ZGŁOSZONA, nie wywalić widok tracebackiem przy samym otwarciu — i NIE ma udawać zera:
+    # `None` znaczy „nie policzono", `0` znaczy „nie ma czego liczyć". Dwie różne prawdy.
+    try:
+        propozycje = path_proposals(con)        # PODZBIÓR kubełka RAW, poza partycją (wyżej)
+        prop_names, prop_frames = len(propozycje), sum(p.n_frames for p in propozycje)
+    except ValueError:
+        prop_names = prop_frames = None
     st = review_state(con)
     return {"object_review": object_review, "nameless_count": len(nameless),
             "nameless_raw_count": nameless_raw_lights(con),
             "nameless_stacks_count": len(stosy),
+            "path_proposed_names": prop_names,
+            "path_proposed_frames": prop_frames,
             "config_review_count": st.no_config,
             "headerless_count": st.headerless, "unreadable_count": st.unreadable}
 
@@ -389,6 +409,38 @@ def nameless_stack_frames(con):
         "WHERE f.kind = 'master_light' AND f.object_id IS NULL "
         "  AND h.object_raw IS NULL "
         "ORDER BY l.path, f.id"
+    ).fetchall()
+
+
+def path_proposal_frames(con, frame_ids):
+    """Klatki propozycji ze ŚCIEŻKI pod panel drążenia (S2) — DEKORACJA podanych `frame_ids`,
+    nie drugi predykat.
+
+    Świadomie BEZ własnego `WHERE` na populacji: predykat szczebla ma JEDNEGO właściciela
+    (`resolver.path_proposals`) i to on rozstrzyga, która klatka jest kandydatem. Powtórzenie go
+    tutaj dałoby dwie odpowiedzi na jedno pytanie — dokładnie ta klasa, którą S2 zamyka po stronie
+    reguły ścieżki.
+
+    Kolumny jak w `nameless_frames` — ten sam panel (`_fill_frames`) je czyta, a jego kontrakt
+    (`sha1_data`, `telescope_label(row)`) wywala się przy wąskim SELECT-cie. Zwraca: frame_id,
+    sha1_data, filetype, date_obs, telescope_label, telescop_canon, camera_model, location_id,
+    path, n_present."""
+    return con.execute(
+        "SELECT f.id AS frame_id, f.sha1_data, f.filetype, h.date_obs, "
+        "       t.label AS telescope_label, t.telescop_canon, "
+        "       cam.model_canon AS camera_model, "
+        "       l.id AS location_id, l.path, "
+        "       (SELECT COUNT(*) FROM location WHERE frame_id = f.id AND present = 1) AS n_present "
+        "FROM frame f JOIN header h ON h.frame_id = f.id "
+        "LEFT JOIN config c ON c.id = f.config_id "
+        "LEFT JOIN telescope_canonical tc ON tc.id = c.telescope_id "
+        "LEFT JOIN telescope t ON t.id = tc.canon_id "
+        "LEFT JOIN camera cam ON cam.id = f.camera_id "
+        "LEFT JOIN location l ON l.id = (SELECT MIN(id) FROM location "
+        "                                WHERE frame_id = f.id AND present = 1) "
+        "WHERE f.id IN (SELECT value FROM json_each(?)) "
+        "ORDER BY l.path, f.id",
+        (json.dumps([int(i) for i in frame_ids]),)
     ).fetchall()
 
 

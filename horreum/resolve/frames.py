@@ -10,7 +10,8 @@ Mapa = WYŁĄCZNIE zeznanie firsthand + warianty „na zapas" (agnostyczność �
 nierozpoznane/brak → `unknown` jawnie (sygnał do rozszerzenia mapy, nie ciche dopasowanie).
 """
 import re
-from pathlib import Path
+
+from ._text import path_segments
 
 # DSLR/RAW (#2, D-R-4): rodzaj klatki z NAZWY KATALOGU (case-insensitive, dokładny segment).
 # Wąska mapa — tylko cztery rodzaje sub-klatek, jakie może nieść drzewo akwizycji.
@@ -34,6 +35,17 @@ _KIND_MAP = {
 }
 
 
+def kind_dir_segments():
+    """Mapa segmentów katalogu → `kind` (WARTOŚCI markera rodzaju) — jeden właściciel dla wszystkich,
+    którzy pytają „czy ten folder nadaje rodzaj". Kopia (`dict`), żeby wołający nie zmutował mapy.
+
+    Drugim konsumentem jest `resolve.paths` (świadek ścieżki na osi OBIEKT, S2): reguła pozycyjna
+    musi startować od TEGO SAMEGO segmentu, który nadał klatce rodzaj, a nie od własnego literału
+    `LIGHTS` — inaczej drzewo z `Light` w liczbie pojedynczej milczałoby na jednej osi i mówiło
+    na drugiej."""
+    return dict(_KIND_DIRS)
+
+
 def normalize_kind(imagetyp):
     """IMAGETYP (FITS/XISF) → kanon `kind`. Case-insensitive, kolaps białych znaków i `_`,
     zdjęcie końcowego „ frame" (`Light Frame`→light, `Dark Frame`→dark). Brak/nierozpoznane →
@@ -50,8 +62,13 @@ def kind_from_path(path):
     Precedens C1: ścieżka jako źródło faktu (wąski, jawny, dowodowy). Dopasowanie po SEGMENCIE
     (dokładna nazwa katalogu, case-insensitive) — NIE substring: folder obiektu „IC1318" nie ma
     nic udawać. Żaden pasujący segment → 'unknown' (NIE zgadujemy; DSLR-kalibracja = dług na przyszłość,
-    dziś 763 RAW pod katalogiem LIGHTS). Pierwszy pasujący segment od korzenia wygrywa."""
-    for seg in Path(path).parts:
+    dziś 763 RAW pod katalogiem LIGHTS). Pierwszy pasujący segment od korzenia wygrywa.
+
+    Segmenty tnie `path_segments`, nie `Path().parts` (R-S0-12, domknięte przy S2): druga połowa tej samej
+    reguły pozycyjnej — świadek obiektu w `resolve.paths` — tnie oba separatory, więc `Path` robiło
+    z nich dwie prawdy o jednej ścieżce (poza Windows `\\` nie jest rozdzielnikiem i oś RODZAJU
+    milczałaby tam, gdzie oś OBIEKTU mówi)."""
+    for seg in path_segments(path):
         k = _KIND_DIRS.get(seg.strip().lower())
         if k:
             return k

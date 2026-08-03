@@ -56,7 +56,7 @@ def _match_rules(key):
     return None
 
 
-def catalog_canon(text):
+def catalog_canon(text, *, split=True):
     """Zwróć formę kanoniczną oznaczenia katalogowego LUB None, gdy tekst nim NIE jest.
 
     Normalizuje zapis: kolaps białych znaków, upper, zdjęcie zer wiodących (`NGC 4736`→`NGC4736`,
@@ -65,14 +65,21 @@ def catalog_canon(text):
 
     Zapis dwuczłonowy (`NGC4631_PGC42637`): gdy całość nie jest oznaczeniem, próbuj PIERWSZY człon
     przed `_` (firsthand: dwa oznaczenia sklejone podkreślnikiem). Rozdzielnik to WYŁĄCZNIE `_` —
-    oznaczenia ze spacją wewnętrzną (`Sh 2-184`, `Caldwell 23`) to JEDEN człon i zostają nietknięte."""
+    oznaczenia ze spacją wewnętrzną (`Sh 2-184`, `Caldwell 23`) to JEDEN człon i zostają nietknięte.
+
+    `split=False` WYŁĄCZA tę gałąź (D-OW-2 pkt 5a) — wewnętrzny mechanizm dla wołania ze ŚCIEŻKI,
+    gdzie autorem stringa nie jest akwizycja, tylko drzewo katalogów: folder SPRZĘTU `C8_2600MC`
+    dałby po cięciu `C8` → Caldwell 8, a `C11` → śmieciowy kanon `C11`, który wypływa do facetu,
+    do nazw plików (`naming.py`) i do drzewa projekcji. Gołe `C8`/`C11` na pozycji obiektu ZOSTAJE
+    przyjęte (`_match_rules` dopasowuje je PRZED gałęzią cięcia) — gwarancję daje POZYCJA w drzewie,
+    nie filtrowanie tokenów. Jedynym wołającym z `split=False` jest drabina w trybie `from_path`."""
     if not text:
         return None
     key = re.sub(r"\s+", " ", str(text).strip()).upper()
     canon = _match_rules(key)
     if canon:
         return canon
-    if "_" in key:
+    if split and "_" in key:
         return _match_rules(key.split("_", 1)[0].strip())
     return None
 

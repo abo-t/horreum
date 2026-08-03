@@ -17,6 +17,8 @@ import json
 from contextlib import contextmanager
 
 from .resolve._text import norm_alnum          # kierunek repo → resolve (liść; COHESION §2b)
+from .resolve.catalog import catalog_canon      # gramatyka katalogowa — CZYSTA, bez assetu (liść)
+from .resolve.objects import OBJECT_SOURCES     # enum źródeł osi OBIEKT — jeden właściciel (S1)
 from .resolve.observatory import nearest_site   # kierunek repo → resolve (liść math/re; COHESION §2b)
 
 
@@ -672,6 +674,14 @@ def flag_object_alias_conflicts(con, items, now, actor="resolver"):
                    reason="nazwa ze słownika obiektów własnych zajęta przez inny obiekt")
 
 
+#: Źródła osi obiektu, które SŁOWNIK obiektów własnych potrafi wyprodukować — wprost (`curated`),
+#: przez zasianą przez siebie równoważność (`alias`) albo przez potwierdzoną propozycję ze ŚCIEŻKI
+#: (`path`, S2: kanon segmentu bierze się z wpisu słownika, gdy nagłówek milczy). Zbiór jest
+#: DOPEŁNIENIEM pytania „co da się odtworzyć bez tego wpisu", nie wyliczanką wartości: nowe źródło
+#: wyprodukowane ze słownika dopisujemy TU, inaczej klatki wypadną z odwracalności po cichu.
+_SLOWNIKOWE = frozenset({"alias", "curated", "path"})
+
+
 def retire_alias_and_unassign(con, *, object_id, alias_norms, now, actor="resolver"):
     """Wycofaj równoważności `alias_norms` obiektu i ODEPNIJ klatki, które przez nie dostały obiekt.
     Zwraca `(wycofane, odpięte)`. Druga połowa re-derywacji zasiewu (D-OW-4): edycja assetu jest
@@ -682,10 +692,35 @@ def retire_alias_and_unassign(con, *, object_id, alias_norms, now, actor="resolv
     dostały obiekt przez usuwaną równoważność, zostałyby z nim NA ZAWSZE, a „re-derywowalność"
     byłaby wtedy samą nazwą.
 
-    ODPINANIE JEST WĄSKIE — po ŚWIADKU, nie po źródle: bierzemy wyłącznie klatki, których
-    znormalizowane zeznanie nagłówka JEST jedną z wycofywanych nazw. Klatka tego samego obiektu
-    nazwana z nagłówka, z xref albo z regionu zostaje nietknięta; `user` zostaje nietknięty
-    z definicji precedencji.
+    ODPINANIE IDZIE PO DOPEŁNIENIU, NIE PO WYLICZANCE ŹRÓDEŁ (R-S1-4, odroczone z recenzji S1 do
+    czasu, aż źródło `path` powstanie): bierzemy klatki, których kanon da się odtworzyć WYŁĄCZNIE
+    z usuwanego wpisu. Dwa rozłączne przypadki:
+
+      * klatka ZEZNAJE — znormalizowane `object_raw` jest jedną z wycofywanych nazw (świadek);
+      * klatka NIE ZEZNAJE (`object_raw IS NULL`) — świadka nie ma, więc rozstrzyga źródło
+        ∈ `_SLOWNIKOWE` **ORAZ zdjęcie KANONU** obiektu. Po S2 należy tu `path`: 36 klatek LMC nie
+        ma ani karty `OBJECT`, ani współrzędnych, więc żaden ze świadków ich nie zafiszkuje — a bez
+        tego członu usunięcie `LMC` ze słownika zostawiłoby je przypięte do obiektu, którego słownik
+        już nie zna, przy `§5.9` ZIELONEJ (encje i eventy zgodne). Populacja sztandarowa całego
+        briefu wypadałaby z odwracalności w segmencie, który ją nazywa.
+
+    STRAŻNIK KANONU NIE JEST OSTROŻNOŚCIĄ — bez niego człon jest ZA SZEROKI: zdjęcie samej nazwy
+    potocznej (wpis zostaje) odpinałoby klatki, których kanon dalej się odtwarza. Czyta się go
+    wprost: „wpis, z którego ta klatka wzięła nazwę, PRZESTAŁ istnieć I nic innego jej nie nazwie".
+    Trzy człony tego zdania, każdy z ceną za brak:
+      * kanon wśród kluczy REALNIE wycofanych (nie wśród argumentów) — inaczej wołanie kluczem,
+        którego ten obiekt nie zna, odpina, nie wycofując niczego, a następny przebieg przypina
+        z powrotem (czysty churn w dzienniku);
+      * kanon NIEODTWARZALNY z GRAMATYKI KATALOGOWEJ — wpis o kanonie `NGC7000` wolno zdjąć ze
+        słownika, a klatki i tak zachowają nazwę, bo nazywa je gramatyka. Pytamy `catalog_canon`,
+        nie całej drabiny: drabina czyta SŁOWNIK, czyli dokładnie ten asset, który właśnie się
+        zmienia — klinga pytałaby o stan, który sama migruje, i odpowiedź zależałaby od tego, czyj
+        cache jest świeższy. Gramatyka jest czysta i niezmienna w czasie;
+      * kanoniczna równoważność, która przeżywa (bo zapisał ją inny szczebel), zostawia klatkę —
+        następny przebieg rozwiąże ją tym aliasem, więc odpięcie byłoby stratą bez zysku.
+
+    Klatka tego samego obiektu nazwana z nagłówka, z xref albo z regionu zostaje nietknięta; `user`
+    zostaje nietknięty z definicji precedencji.
 
     `object_source` wraca do NULL, nie do nagrobka: nagrobek jest STICKY i wypadałby z drabiny na
     zawsze, czyli „operacja migracyjna" kasowałaby klatce przyszłość. NULL = powrót do stanu sprzed
@@ -707,15 +742,29 @@ def retire_alias_and_unassign(con, *, object_id, alias_norms, now, actor="resolv
         "WHERE a.object_id = ? AND a.source = 'curated'", (object_id,)).fetchall()
     do_wycofania = [r for r in rows if r["key"] in keys]
 
-    # Kandydaci do odpięcia: klatki TEGO obiektu, których źródło pochodzi z NAZWY. Świadka
+    # Kandydaci do odpięcia: klatki TEGO obiektu, których kanon MÓGŁ powstać ze słownika. Świadka
     # (`object_raw`) normalizujemy w Pythonie — `norm_alnum` nie ma odpowiednika w SQL, a SELECT
     # w tej warstwie jedzie literałem (meta-tripwir AST).
     kandydaci = con.execute(
         "SELECT f.id AS fid, f.object_source AS src, h.object_raw AS raw FROM frame f "
         "JOIN header h ON h.frame_id = f.id "
-        "WHERE f.object_id = ? AND f.object_source IN ('alias', 'curated')",
-        (object_id,)).fetchall()
-    do_odpiecia = [r for r in kandydaci if norm_alnum(r["raw"] or "") in keys]
+        "WHERE f.object_id = ? AND f.object_source IN (SELECT value FROM json_each(?))",
+        (object_id, json.dumps(sorted(_SLOWNIKOWE)))).fetchall()
+    # Czy WPIS jako taki zniknął: kanon obiektu jest zawsze jednym z kluczy wpisu, więc jego
+    # wycofanie znaczy „tego rekordu już nie ma" (albo zmienił kanon). Klatka bez zeznania nie ma
+    # innego świadka, więc TO jest jej jedyny strażnik. Dwa doprecyzowania, oba z recenzji diffu:
+    #   * liczymy z kluczy REALNIE wycofanych, nie z argumentu — wołanie kluczem, którego ten obiekt
+    #     nie ma jako równoważności `curated`, odpinałoby klatki NIE wycofując niczego (alias dalej
+    #     wskazuje obiekt, klatki NULL, następny przebieg przypina je z powrotem = czysty churn);
+    #   * kanon musi być NIEODTWARZALNY po zmianie assetu. Wpis o kanonie GRAMATYCZNYM (`NGC7000`)
+    #     wolno usunąć ze słownika, a klatki i tak zachowają nazwę z gramatyki katalogowej — tam
+    #     odpięcie byłoby stratą, bo szczebel ścieżki tylko PROPONUJE i sam ich nie odzyska.
+    zdjete = {r["key"] for r in do_wycofania}
+    kanon = con.execute("SELECT canon FROM object WHERE id = ?", (object_id,)).fetchone()
+    kanon_zdjety = (kanon is not None and norm_alnum(kanon["canon"]) in zdjete
+                    and catalog_canon(kanon["canon"]) is None)
+    do_odpiecia = [r for r in kandydaci
+                   if (kanon_zdjety if r["raw"] is None else norm_alnum(r["raw"]) in keys)]
 
     if not do_wycofania and not do_odpiecia:
         return 0, 0                              # diff-first: zero różnicy ⇒ zero DML, zero eventu
@@ -780,32 +829,50 @@ def backfill_filter_canon(con, items, now, actor="resolver"):
 
 # ------------------------------------------------ oś OBIEKT — zapis usera (GUI, #8/P4)
 
-def user_assign_object(con, *, alias_norm, canon, catalog, kind, frame_ids, now, uid="local"):
-    """Ręczne przypisanie obiektu GRUPIE klatek z kolejki przeglądu (#8, D-P4-4) — JEDNA transakcja
+def user_assign_object(con, *, alias_norm, canon, catalog, kind, frame_ids, now, uid="local",
+                       object_source="user"):
+    """Przypisanie obiektu GRUPIE klatek GESTEM CZŁOWIEKA (#8, D-P4-4) — JEDNA transakcja
     `_immediate`, DML inline (NIE kompozycja `upsert_object`+`add_object_alias`+`assign_object`:
     każda z nich ma własny `with con:` commitujący przy wyjściu — zawołane wewnątrz zewnętrznej
     transakcji zamknęłyby ją po pierwszej i atomowość grupy pryskała).
 
     Zapis: `INSERT object` (gdy kanon nowy, + `object.upserted`) → `INSERT object_alias`
     (`source='user'`, gdy alias nowy, + `object.aliased`) → `UPDATE frame` per klatka
-    (`object_source='user'`, + `object.assigned`). Alias zapamiętuje nazwę NA PRZYSZŁOŚĆ — nowe
-    klatki z tym `object_raw` trafią szczeblem aliasu resolvera (`object_source='alias'`).
+    (+ `object.assigned`). Alias zapamiętuje nazwę NA PRZYSZŁOŚĆ — nowe klatki z tym `object_raw`
+    trafią szczeblem aliasu resolvera (`object_source='alias'`).
 
-    GUARDY (`ValueError`, zero zapisu): pusty `alias_norm` (`norm_alnum` czysto symbolicznej nazwy
-    daje `""` — alias "" łapałby KAŻDĄ niealfanumeryczną nazwę, D-P4-2/R#3); KONFLIKT aliasu
-    (`alias_norm` istnieje i wskazuje INNY obiekt — domyka pułapkę z `resolve/regions.py:18-22`;
-    guard czytany WEWNĄTRZ `_immediate`, TOCTOU).
+    JEDEN PISARZ OSI DLA KAŻDEGO GESTU CZŁOWIEKA (S2, D-OW-2/B) — stąd dwa parametry:
+
+    * `object_source` ∈ `OBJECT_SOURCES`. `user` = ręka wskazała obiekt (pomija całą drabinę
+      resolvera). `path` = człowiek POTWIERDZIŁ propozycję ze ścieżki — świadkiem pozostaje
+      ścieżka, więc źródło ma to mówić, a nie udawać wskazania palcem. Druga klinga dla propozycji
+      dałaby dwóch pisarzy jednej osi i „Cofnij" widziałby tylko jedną z dwóch populacji.
+    * `alias_norm=None` = rozpoznanie NIE pochodzi z nazwy zapisywalnej jako równoważność (ta sama
+      konwencja, co `ObjectIdentity.alias_norm=None` przy regionie). Segment ścieżki nie trafi
+      żadnego przyszłego `object_raw`, więc alias z niego byłby równoważnością do niczego —
+      a re-derywacja słownika (zakres `curated`) nigdy by go nie usunęła.
+
+    GUARDY (`ValueError`, zero zapisu): PUSTY `alias_norm` — `""` to nie „brak", tylko `norm_alnum`
+    nazwy czysto symbolicznej, a alias "" łapałby KAŻDĄ niealfanumeryczną nazwę (D-P4-2/R#3);
+    KONFLIKT aliasu (`alias_norm` istnieje i wskazuje INNY obiekt — domyka pułapkę z
+    `resolve/regions.py:18-22`; guard czytany WEWNĄTRZ `_immediate`, TOCTOU); źródło spoza
+    `OBJECT_SOURCES` (EXPECT — literówka w źródle jest niewykrywalna po zapisie, a audyt 5b
+    zaczerwieniłby się dopiero na całej bazie).
 
     DRYF GRUPY (R#8): klatki re-SELECTowane w transakcji; klatka, która między dialogiem a zapisem
     dostała `object_id NOT NULL` (resolve z workera / inne przypisanie), jest POMIJANA i zliczana.
     Zwraca `(assigned, skipped)` — GUI pokazuje „przypisano N z M". Idempotencja jak reszta repo:
     powtórzenie tego samego przypisania → wszystkie klatki pominięte, ZERO nowych eventów."""
-    if not alias_norm:
+    if alias_norm is not None and not alias_norm:
         raise ValueError("alias_norm pusty — nazwa bez znaków alfanumerycznych nie może być kluczem")
+    if object_source not in OBJECT_SOURCES:
+        raise ValueError(f"object_source '{object_source}' spoza OBJECT_SOURCES")
     with _immediate(con):
         row = con.execute("SELECT id FROM object WHERE canon = ?", (canon,)).fetchone()
         object_id = row[0] if row is not None else None
-        existing = con.execute(
+        # Bez klucza nie ma czego sprawdzać ani zapisywać — gałąź aliasu milczy w CAŁOŚCI (nie
+        # `SELECT … = NULL`, który po cichu zawsze zwraca pustkę i udawałby „alias wolny").
+        existing = None if alias_norm is None else con.execute(
             "SELECT object_id FROM object_alias WHERE alias_norm = ?", (alias_norm,)).fetchone()
         if existing is not None and existing[0] != object_id:
             raise ValueError(
@@ -819,7 +886,7 @@ def user_assign_object(con, *, alias_norm, canon, catalog, kind, frame_ids, now,
             object_id = cur.lastrowid
             emit_event(con, actor=actor, verb="object.upserted", target=f"object:{object_id}",
                        now=now, payload={"canon": canon, "catalog": catalog, "kind": kind})
-        if existing is None:
+        if alias_norm is not None and existing is None:
             con.execute(
                 "INSERT INTO object_alias(alias_norm, object_id, source) VALUES (?, ?, 'user')",
                 (alias_norm, object_id))
@@ -836,10 +903,10 @@ def user_assign_object(con, *, alias_norm, canon, catalog, kind, frame_ids, now,
                 skipped += 1                        # dryf: klatka zajęta między dialogiem a zapisem
                 continue
             con.execute(
-                "UPDATE frame SET object_id = ?, object_source = 'user' WHERE id = ?",
-                (object_id, frame_id))
+                "UPDATE frame SET object_id = ?, object_source = ? WHERE id = ?",
+                (object_id, object_source, frame_id))
             emit_event(con, actor=actor, verb="object.assigned", target=f"frame:{frame_id}",
-                       now=now, payload={"object_id": object_id, "object_source": "user"})
+                       now=now, payload={"object_id": object_id, "object_source": object_source})
             assigned += 1
     return assigned, skipped
 

@@ -7,6 +7,28 @@ schemat i API mogą się jeszcze zmieniać.
 ## [Niewydane]
 
 ### Dodane
+- **Klatki z lustrzanki dostają nazwę obiektu z FOLDERU — ale dopiero, gdy ją potwierdzisz.**
+  Pliki RAW nie mają w sobie miejsca na nazwę obiektu (EXIF go nie zna), więc 763 zdjęcia
+  z aparatu stały w kolejce przeglądu bez żadnej drogi wyjścia. Teraz Horreum czyta nazwę
+  z katalogu, w którym leżą (`…\LIGHTS\LMC\…`), i **proponuje** ją — nie zapisuje. W kolejce
+  przeglądu pojawia się wiersz „…z tego ze ścieżki", a pod nim okno z listą **pogrupowaną po
+  nazwie**: 743 klatki to 36 pozycji do przejrzenia, nie 743. Przy każdej widzisz liczbę klatek,
+  folder źródłowy i znacznik **„NOWA w bazie"** — bo to właśnie nowe nazwy warto obejrzeć, zanim
+  wejdą do biblioteki (`NGC6960` obok istniejących `NGC6992` i `Veil` to ten sam obiekt nieba
+  w trzech miejscach). Odznaczasz, czego nie chcesz, i zatwierdzasz resztę jednym kliknięciem.
+  Sam przebieg „Rozwiąż" nie zmienia przy tym ani jednego wiersza — liczy tylko kandydatów
+  i pisze o nich w raporcie Dostawy.
+- **Katalog `_SOLAR` i `_COMETS` przestał być ślepym zaułkiem.** Zdjęcia Księżyca, Jowisza
+  i komety 21P leżą o poziom głębiej niż zwykłe cele — program to teraz rozumie i nazywa je
+  tak samo jak resztę.
+
+### Zmienione
+- **Okno „Napraw nagłówek…" i rozpoznawanie nazw mówią wreszcie JEDNYM głosem.** Do tej pory
+  ekran i baza odpowiadały różnie na to samo pytanie: przebieg umiał nazwać `LMC` czy `Moon`,
+  a okno naprawy przy tych samych plikach milczało. Teraz obie drogi pytają tej samej reguły,
+  więc propozycja w oknie pojawia się wszędzie tam, gdzie program naprawdę rozpozna nazwę.
+  Przy okazji zniknęła stara pułapka: folder ze sprzętem (`C8_2600MC`) nie udaje już oznaczenia
+  katalogowego Caldwell 8.
 - **Obiekty bez numeru katalogowego mają wreszcie własne miejsce — i Horreum je rozpoznaje.**
   Wielki Obłok Magellana, bańki Wolfa-Rayeta, cele o własnym imieniu: nazwy, których żaden katalog
   nie zna, bo nie mieszczą się w gramatyce `NGC`/`IC`/`Sh2`. Dotąd program mógł co najwyżej mieć je

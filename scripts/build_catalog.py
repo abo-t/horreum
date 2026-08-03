@@ -49,11 +49,19 @@ from datetime import date
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from horreum.resolve.catalog import catalog_canon, xref  # noqa: E402
-# Taksonomia typów ma JEDNEGO właściciela — `horreum.targets` (T3 §3). Skrypt ją IMPORTUJE:
-# gdyby trzymał kopię, filtr planera i podłoga assetu mogłyby się rozjechać po cichu.
-from horreum.targets import DARK_TYPES, GALAXY_TYPES, NEBULA_TYPES  # noqa: E402
+# Taksonomia typów ORAZ kontrakt rekordu mają JEDNEGO właściciela — `horreum.targets` (T3 §3,
+# D-OW-1/E′). Skrypt je IMPORTUJE: gdyby trzymał kopię, producent i konsument assetu mogliby się
+# rozjechać po cichu — plik przechodziłby budowę i padał przy wczytaniu.
+from horreum.targets import (DARK_TYPES, GALAXY_TYPES, NEBULA_TYPES,  # noqa: E402
+                            TARGET_FIELDS, target_fields_present)
 
-OUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "horreum", "data")
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OUT_DIR = os.path.join(_ROOT, "horreum", "data")
+# PLIK CZŁOWIEKA — ścieżka JAWNA, świadomie NIE pochodna od `--out` (D-OW-1/E′). Gdy siedział
+# w katalogu wyjściowym, każdy przebieg z innym `--out` czytał go jako nieobecny i po cichu
+# wyłączał bramkę unikalności kanonów W SUMIE PLIKÓW — a to jedyna kontrola kolizji między
+# rekordami ręcznymi a generowanymi. Brak pliku jest odtąd BŁĘDEM, nie pustą listą.
+OWN_PATH = os.path.join(_ROOT, "horreum", "resolve", "data", "objects_own.json")
 TIMEOUT_S = 90
 
 # Podłoga TECHNICZNA puli — nie „wykonalność". Progi typo-zależne (6'/15'/mag 13) są suwakami
@@ -460,7 +468,18 @@ def falsifiers(records, curated, groups, items):
             if c and xref(c) in seen and xref(c) != r["c"]:
                 bad.append(f"alias {a} rekordu {r['c']} wskazuje na kanon innego rekordu")
 
+    # Pozycja i rozmiar dotyczą REKORDÓW-CELÓW. Plik człowieka niesie też rekordy-NAZWY (sam kanon
+    # z nazwami potocznymi — obiekt, którego planer nie planuje); sięganie po `r["r"]` wprost dawało
+    # na nich `KeyError`, czyli crash zamiast raportu. Rekord NIEPEŁNY nie jest trzecią klasą — to
+    # błąd pliku i ma się zgłosić jako falsyfikator, a nie przejść bokiem.
     for r in records + curated:
+        have = target_fields_present(r)
+        if have == 0:
+            continue                                     # rekord-NAZWA: nie jest celem
+        if have != len(TARGET_FIELDS):
+            miss = sorted(k for k in TARGET_FIELDS if r.get(k) is None)
+            bad.append(f"rekord {r['c']} ma czesc pol celu, brak {miss} -> ani cel, ani nazwa")
+            continue
         if not (0 <= r["r"] < 360) or not (-90 <= r["d"] <= 90) or r["a"] <= 0:
             bad.append(f"rekord {r['c']} ma pozycje/rozmiar poza zakresem")
 
@@ -522,12 +541,17 @@ def main(argv=None):
     print(f"[3/4] scalanie: {len(items)} -> {len(records)} rekordow "
           f"(kanon {stat['canon']}, alias {stat['alias']}, pozycja {stat['position']})")
 
-    curated_path = os.path.join(args.out, "curated.json")
-    curated = []
-    if os.path.exists(curated_path):
-        with open(curated_path, encoding="utf-8") as fh:
-            curated = json.load(fh)["targets"]
-        print(f"       curated.json: {len(curated)} wpisow (plik czlowieka - tylko walidowany)")
+    # Plik człowieka jest OBOWIĄZKOWY (D-OW-1/E′): to on wnosi rekordy, których żadne źródło sieciowe
+    # nie zna, i to na sumie z nim liczy się kontrola kolizji kanonów. Cicha degradacja do pustej
+    # listy zdejmowała tę kontrolę bez jednego słowa w raporcie — EXPECT, nie `curated=[]`.
+    if not os.path.exists(OWN_PATH):
+        raise SystemExit(f"BLAD: brak pliku czlowieka {OWN_PATH} -> kontrola kolizji kanonow "
+                         f"bylaby liczona na samych rekordach generowanych")
+    with open(OWN_PATH, encoding="utf-8") as fh:
+        curated = json.load(fh)["targets"]
+    _cele = sum(1 for r in curated if target_fields_present(r) == len(TARGET_FIELDS))
+    print(f"       objects_own.json: {len(curated)} wpisow ({_cele} celow, "
+          f"{len(curated) - _cele} nazw) - plik czlowieka, tylko walidowany")
 
     bad, wielo = falsifiers(records, curated, groups, items)
     if wielo:

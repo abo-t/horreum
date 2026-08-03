@@ -17,7 +17,9 @@ CREATE TABLE frame (
     camera_id     INTEGER REFERENCES camera(id),     -- oś KAMERA (deterministyczna przy skanie)
     config_id     INTEGER REFERENCES config(id),     -- iloczyn osi (po grupowaniu; NULL => review)
     object_id     INTEGER REFERENCES object(id),     -- oś OBIEKT (NULL => review)
-    object_source TEXT,                       -- header|alias|catalog_xref|review|user
+    object_source TEXT,                       -- źródło osi OBIEKT; WARTOŚCI: resolve/objects.py
+                                              -- (OBJECT_SOURCES) — wyliczanka tutaj rozjeżdżała się
+                                              -- z kodem, więc zostaje sam wskaźnik na właściciela
     filter_canon  TEXT,                       -- oś FILTR znormalizowana (Ha|OIII|L-Pro|...); NULL => review
     first_seen_at TEXT    NOT NULL
 );
@@ -143,7 +145,7 @@ CREATE TABLE object_alias (
     id         INTEGER PRIMARY KEY,
     alias_norm TEXT NOT NULL UNIQUE,            -- znormalizowana forma (bez spacji, lower)
     object_id  INTEGER NOT NULL REFERENCES object(id),
-    source     TEXT NOT NULL                    -- catalog_xref|common_name|header|solar|comet|review|user
+    source     TEXT NOT NULL                    -- WARTOŚCI: resolve/objects.py (ALIAS_SOURCES)
                                                 -- (region NIE aliasuje — rozpoznaje ze współrzędnych)
 );
 

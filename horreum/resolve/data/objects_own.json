@@ -1,0 +1,26 @@
+{
+ "_doc": "OBIEKTY WLASNE — jedna klasa, jeden plik, DWAJ czytelnicy (D-OW-1, wariant E'). Klasa: obiekt bez numeru katalogowego, ktorego gramatyka katalogow (catalog_canon) nie zwraca — banki Wolfa-Rayeta, obiekty o wlasnym imieniu, pola gwiazdozbiorow. PLIK CZLOWIEKA: scripts/build_catalog.py go WALIDUJE (schemat + unikalnosc kanonu w sumie plikow) i NIGDY nie nadpisuje; jego brak jest bledem budowy, nie pusta lista. DWIE KLASY REKORDOW: rekord-CEL niesie komplet 't'/'r'/'d'/'a' i trafia do puli planera; rekord-NAZWA nie ma zadnego z nich i zna go WYLACZNIE resolver — planer dostaje tylko cele, filtrem w loaderze, nie ostroznoscia wolajacego. Rekord z CZESCIA pol celu to blad pliku, nie trzecia klasa. Pola: 'c' kanon, 'n' nazwy potoczne (zasiew aliasow), 'catalog'/'kind' dla osi obiektu, 'why' (dlaczego automat go nie ma), 'provenance' (skad pozycja i rozmiar), 'size_source' ('catalog' albo 'user'). EDYCJA TEGO PLIKU JEST OPERACJA MIGRACYJNA, nie zwyklym re-runem: zasiane aliasy sa stanem POCHODNYM w bazie, wiec usuniecie nazwy 'n' wycofuje alias I odpina klatki, ktore przez niego dostaly obiekt (tak samo jak przy resolve/data/regions.json).",
+ "targets": [
+  {
+   "c": "LMC",
+   "n": ["Large Magellanic Cloud", "Wielki Oblok Magellana", "Nubecula Major"],
+   "catalog": null,
+   "kind": "own",
+   "why": "galaktyka satelitarna bez numeru w zadnym z 6 katalogow zrodlowych i bez oznaczenia, ktore rozpoznaje gramatyka katalogowa. W archiwum 36 klatek RAW z jednej nocy: naglowek EXIF nie niesie ani karty OBJECT, ani wspolrzednych, wiec ani szczebel naglowka, ani region po wspolrzednych nie maja czego zaczepic — jedynym swiadkiem nazwy jest sciezka. Rekord-NAZWA, nie cel: deklinacja -69,8 stopnia ze Szczecina (53,4 N) nigdy nie wschodzi, wiec pola celu nabiora sensu dopiero, gdy w bazie pojawi sie stanowisko poludniowe (D-OW-5).",
+   "provenance": "nazwa i tozsamosc: powszechna astronomiczna; wpis zalozony recznie 2026-08-03 (D-OW-1/E'), bez pol celu — pozycja nie jest tu potrzebna i nie zostala przepisana z zadnego katalogu"
+  },
+  {
+   "c": "WR134",
+   "t": "EmN",
+   "r": 302.5591,
+   "d": 36.1764,
+   "a": 15.0,
+   "n": ["HD 191765", "WR 134"],
+   "catalog": null,
+   "kind": "own",
+   "why": "ciag 'WR' nie wystepuje w zadnym z 6 katalogow zrodlowych; SIMBAD zna WR 134 wylacznie jako GWIAZDE HD 191765 (bez rozmiaru katowego), a najblizszy wpis katalogowy to LBN 182 (90') w odleglosci 0,37 stopnia — czyli warstwa cirrus, domyslnie wylaczona. Automat owinalby 15-minutowa banke w rozlegly obszar, ktorego uzytkownik nie widzi.",
+   "size_source": "user",
+   "provenance": "pozycja: SIMBAD (HD 191765, ICRS J2000, 2026-07-31); rozmiar: oszacowanie uzytkownika dla banki wiatru gwiazdowego"
+  }
+ ]
+}

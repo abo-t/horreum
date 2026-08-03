@@ -20,7 +20,7 @@ from .grouper import NO_TELESCOPE_KINDS
 from .resolve._coerce import _to_text
 from .resolve._text import norm_alnum
 from .resolve.filters import normalize_filter
-from .resolve.objects import resolve_object
+from .resolve.objects import load_own_objects, resolve_object
 from .resolve.observatory import site_coords
 from .resolve.regions import resolve_region
 from .resolve.solar import resolve_solar
@@ -45,6 +45,82 @@ class ResolveSummary:
     observatories_new: int = 0            # nowe stanowiska (seed z propose_observatory, created=True)
     observatories_assigned: int = 0       # klatki z przypisanym observatory_id
     gps_unparseable: int = 0              # klatki z GPS OBECNYM ale nieparsowalnym (→ review_summary)
+    own_aliases_seeded: int = 0           # nowe równoważności ze słownika obiektów własnych (S1)
+    own_aliases_retired: int = 0          # równoważności zdjęte po edycji słownika (migracja)
+    own_frames_unassigned: int = 0        # klatki odpięte razem z wycofaną równoważnością
+    own_alias_conflicts: int = 0          # nazwy zajęte przez INNY obiekt (pominięte, → review)
+
+
+def sync_own_aliases(con, now, s=None):
+    """Zsynchronizuj `object_alias` ze słownikiem obiektów własnych — DIFF-FIRST (D-OW-4/A′).
+
+    Nazwy potoczne z assetu (`n`) stają się równoważnościami, żeby szukajka i „Napraw nagłówek…"
+    znały „Large Magellanic Cloud", nie tylko kanon `LMC`. Zasiew jest przywiązany do TOŻSAMOŚCI,
+    nie do szczebla: liczy się to, że obiekt o tym kanonie ISTNIEJE — nieważne, którędy jego klatki
+    kanon dostały.
+
+    ZAKRES = OBIEKTY ISTNIEJĄCE, nigdy wpisy assetu (`object_alias.object_id` to `NOT NULL
+    REFERENCES object(id)` przy `foreign_keys=ON`): dopóki żadna klatka nie ma `LMC`, nie ma czego
+    aliasować i nie ma to skutku — asset opisuje klasę, baza opisuje archiwum.
+
+    DIFF-FIRST, nie kasuj-i-wstaw: liczymy zestaw docelowy, porównujemy z istniejącym i przy zerowej
+    różnicy NIE wykonujemy DML ani nie emitujemy (wzorzec `repo.backfill_filter_canon`). Naiwne
+    DELETE+INSERT emitowałoby przy każdym przebiegu i churnowało `id`.
+
+    KOLIZJA MA TRZY GAŁĘZIE, NIE WYJĄTEK: `alias_norm` jest UNIQUE i może już należeć do TEGO
+    obiektu (zostaw — nic do zrobienia) albo do INNEGO (pomiń + jeden ZBIORCZY event przeglądu).
+    Sprawdzamy to SELECT-em PRZED `repo.add_object_alias`, bo ta funkcja zwraca istniejący wiersz
+    BEZ porównania `object_id` — „jest idempotentna, więc wystarczy ją zawołać" nigdy nie odpaliłoby
+    gałęzi kolizji i przegrany ginąłby cicho. Wyjątku tu nie rzucamy: ta funkcja biegnie w passie
+    masowym Dostawy, a `gui/pipeline` zamieniłby go w `failed` i urwał `calibrate`/`lineage`/`delta`
+    z powodu danych, które user miał prawo stworzyć."""
+    s = s if s is not None else ResolveSummary()
+
+    obiekty = {r["canon"]: r["id"] for r in con.execute("SELECT id, canon FROM object").fetchall()}
+    chciane = {}                                   # alias_norm -> object_id (tylko istniejące obiekty)
+    for rec in load_own_objects():
+        oid = obiekty.get(_to_text(rec.get("c")))
+        if oid is None:
+            continue
+        for name in (rec.get("c"), *(rec.get("n") or ())):
+            key = norm_alnum(name or "")
+            if key:
+                chciane[key] = oid
+
+    istniejace = {r["key"]: r["oid"] for r in con.execute(
+        "SELECT alias_norm AS key, object_id AS oid FROM object_alias").fetchall()}
+    zasiane = {r["key"]: r["oid"] for r in con.execute(
+        "SELECT alias_norm AS key, object_id AS oid FROM object_alias "
+        "WHERE source = 'curated'").fetchall()}
+
+    kolizje = []
+    for key, oid in sorted(chciane.items()):
+        czyj = istniejace.get(key)
+        if czyj == oid:
+            continue                               # już jest (nasz albo cudzym szczeblem) — zostaw
+        if czyj is not None:
+            kolizje.append([key, czyj, oid])       # nazwa zajęta przez INNY obiekt — pomiń
+            continue
+        _, created = repo.add_object_alias(con, alias_norm=key, object_id=oid,
+                                           source="curated", now=now)
+        s.own_aliases_seeded += created
+
+    # WYCOFANIE: równoważności zasiane wcześniej, których asset już nie zna. Grupujemy po obiekcie,
+    # bo klinga odpina klatki tego obiektu jednym przebiegiem.
+    zbedne = {}
+    for key, oid in sorted(zasiane.items()):
+        if chciane.get(key) != oid:
+            zbedne.setdefault(oid, []).append(key)
+    for oid, keys in zbedne.items():
+        wycofane, odpiete = repo.retire_alias_and_unassign(
+            con, object_id=oid, alias_norms=keys, now=now)
+        s.own_aliases_retired += wycofane
+        s.own_frames_unassigned += odpiete
+
+    if kolizje:
+        s.own_alias_conflicts += len(kolizje)
+        repo.flag_object_alias_conflicts(con, kolizje, now)
+    return s
 
 
 def run_resolver(con, now):
@@ -57,7 +133,12 @@ def run_resolver(con, now):
     człowieka nie jest re-derywowana ani nadpisywana przez żaden szczebel automatyczny. Light
     nierozpoznany → delta (jeden zbiorczy `object.review_summary`, liczony ze STANU
     `object_id IS NULL` — D5); kalibracja → pomijana (poprawny NULL). Filtr → backfill zbiorczy
-    `filter_canon`. Zwraca `ResolveSummary`. Idempotentny."""
+    `filter_canon`. Zwraca `ResolveSummary`. Idempotentny.
+
+    SŁOWNIK OBIEKTÓW WŁASNYCH siedzi WEWNĄTRZ `resolve_object` (ostatni jego szczebel), więc stoi
+    przed aliasem i regionem — jest jawną wiedzą o NAZWIE, jak `_COMMON`, a nie inferencją. Dzięki
+    temu widzi go też `name_resolves`, czyli walidacja dialogu „Napraw nagłówek…". Zasiew nazw
+    potocznych tego słownika domyka przebieg (`sync_own_aliases`)."""
     s = ResolveSummary()
     rows = con.execute(
         "SELECT f.id AS fid, f.kind AS kind, f.object_id AS oid, f.object_source AS osrc, "
@@ -137,6 +218,11 @@ def run_resolver(con, now):
     repo.backfill_filter_canon(con, filter_items, now=now)        # no-op gdy pusto
     repo.flag_object_review_summary(
         con, sorted(unresolved.items(), key=lambda kv: (-kv[1], kv[0])), now=now)  # no-op gdy pusto
+
+    # ZASIEW NAZW POTOCZNYCH — PO pętli, i to jest jedyna kolejność, która działa na świeżej bazie:
+    # zasiew wymaga ISTNIEJĄCEGO obiektu, a `LMC` powstaje dopiero, gdy szczebel słownika przypisze
+    # pierwszą klatkę. Idempotentny, więc drugi przebieg jest ciszą.
+    sync_own_aliases(con, now, s)
 
     # oś OBSERWATORIUM foldnięta tu (SPOT — jeden wjazd; callerzy bez zmian). GPS z `cards`, nie z pętli
     # `header` powyżej (osobny SELECT — SITELAT/SITELONG nie są polami gorącymi `header`).

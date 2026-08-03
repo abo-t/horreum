@@ -631,19 +631,26 @@ def test_walidacja_kanonu_bramki_odmowy(repair):
 
 def test_czwarta_bramka_pyta_cala_drabina_nazwy(repair):
     """Adjudykacja czwartej bramki (2026-08-01): pytanie brzmi „czy PRZEBIEG rozpozna tę nazwę",
-    a przebieg ma trzy szczeble zależne od nazwy — solar → katalog → ALIAS. Bramka pytająca samym
-    `resolve_object` odmawiała zapisu nazw, które resolver rozwiązuje: `Moon`/`C/2023 A3` (archiwum
-    ma `_COMETS` i `_SOLAR` jako realne lighty) oraz nazwy nauczonej wcześniej „Przypisz obiekt…"
-    (`WR134` — cel z `curated.json`, bez numeru katalogowego). To był fałsz o własnym zachowaniu."""
+    a przebieg ma szczeble zależne od nazwy — solar → katalog → SŁOWNIK → ALIAS. Bramka pytająca
+    samym `resolve_object` odmawiała zapisu nazw, które resolver rozwiązuje: `Moon`/`C/2023 A3`
+    (archiwum ma `_COMETS` i `_SOLAR` jako realne lighty) oraz nazwy nauczonej wcześniej
+    „Przypisz obiekt…". To był fałsz o własnym zachowaniu.
+
+    PIN PRZESTEMPLOWANY W S1 (słownik obiektów własnych): `WR134` był tu przykładem nazwy „nieznanej
+    NIKOMU, dopóki user jej nie nauczy" — i przestał nim być, bo to właśnie ten rekord przeniósł się
+    do `objects_own.json` i drabina zna go teraz z assetu. Przewrócenie pinu jest CELEM segmentu,
+    nie jego skutkiem ubocznym; rolę nazwy nieznanej przejmuje string spoza wszystkich szczebli."""
     from horreum.gui.app import _validate_object_value as val
     from horreum import resolver
     v, con, files, _open = repair
     assert val(con, "Moon")[0] == "Moon"                     # szczebel solar
     assert val(con, "C/2023 A3")[0] == "C/2023 A3"           # kometa (IAU-desig)
-    assert val(con, "WR134")[1]                              # nieznana NIKOMU → wciąż odmowa
-    oid, _ = repo.upsert_object(con, canon="WR134", catalog=None, kind="deep_sky", now=NOW_PD)
-    repo.add_object_alias(con, alias_norm="WR134", object_id=oid, source="user", now=NOW_PD)
-    assert val(con, "WR134")[0] == "WR134"                   # user nauczył → oś wypełni się sama
+    assert val(con, "WR134")[0] == "WR134"                   # szczebel SŁOWNIKA (S1) — bez nauki
+    assert val(con, "Zupelnie Wymyslona 77")[1]              # nieznana NIKOMU → odmowa
+    oid, _ = repo.upsert_object(con, canon="ZW77", catalog=None, kind="deep_sky", now=NOW_PD)
+    repo.add_object_alias(con, alias_norm="ZUPELNIEWYMYSLONA77", object_id=oid, source="user",
+                          now=NOW_PD)
+    assert val(con, "Zupelnie Wymyslona 77")[0] == "Zupelnie Wymyslona 77"   # user nauczył → przejdzie
     assert not resolver.name_resolves(con, "---")            # pusty klucz aliasu NIE łapie wszystkiego
 
 

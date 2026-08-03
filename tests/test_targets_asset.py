@@ -2,8 +2,15 @@
 
 Producentem assetu jest `scripts/build_catalog.py` (dev, sieć) i bateria go NIE uruchamia. Testuje
 to, co realnie jedzie w wheelu i we frozen: `horreum/data/targets_core.json` + `targets_cirrus.json`
-+ `curated.json`. Te same inwarianty co falsyfikatory budowy (brief `PLAN_planer_T2_katalog.md` §7),
-bo asset można też podmienić ręcznie — a wtedy skrypt nie ma nic do powiedzenia.
++ `resolve/data/objects_own.json`. Te same inwarianty co falsyfikatory budowy (brief
+`PLAN_planer_T2_katalog.md` §7), bo asset można też podmienić ręcznie — a wtedy skrypt nie ma nic
+do powiedzenia.
+
+PLIK CZŁOWIEKA NIESIE DWIE KLASY REKORDÓW (D-OW-1/E′): rekordy-CELE (komplet `t`/`r`/`d`/`a`)
+i rekordy-NAZWY (żadnego z nich — obiekt, którego planer nie planuje, ale resolver zna). Dlatego
+inwarianty dzielą się na dwie rodziny: TOŻSAMOŚĆ (unikalność kanonów, aliasy) liczy się na SUMIE
+wszystkich rekordów, a GEOMETRIA (pozycja, rozmiar, typ, epoka) wyłącznie na celach. Wrzucenie
+rekordu-nazwy do testu geometrii dałoby `KeyError` zamiast wyniku.
 
 NAJWYŻSZA STAWKA: styk z osią OBIEKT. Kanon assetu powstaje TĄ SAMĄ funkcją co kanon resolvera
 (`xref(catalog_canon(...))`), więc `Sh2-184` z katalogu i `NGC281` z archiwum to JEDEN cel.
@@ -16,6 +23,7 @@ from importlib import resources
 
 import pytest
 
+from horreum import targets
 from horreum.resolve.catalog import catalog_canon, xref
 
 LAYERS = ("core", "cirrus")
@@ -29,21 +37,35 @@ FLOOR_ARCMIN, FLOOR_DARK_ARCMIN = 3.0, 8.0
 
 
 def _load(name):
-    text = resources.files("horreum.data").joinpath(f"{name}.json").read_text(encoding="utf-8")
+    """Warstwa → surowy asset. Pakiet bierzemy z mapy `targets._ASSET`, nie z literału: po E′
+    plik człowieka mieszka w assetach RESOLVERA, a test, który zna własną ścieżkę, przestałby
+    pilnować tego, co naprawdę czyta aplikacja."""
+    package, filename = targets._ASSET[name]
+    text = resources.files(package).joinpath(filename).read_text(encoding="utf-8")
     return json.loads(text)
 
 
 @pytest.fixture(scope="module")
 def assets():
-    return {name: _load(f"targets_{name}") for name in LAYERS}
+    return {name: _load(name) for name in LAYERS}
 
 
 @pytest.fixture(scope="module")
 def wszystkie(assets):
-    """Wszystkie cele z trzech plików — inwarianty tożsamości liczą się na SUMIE, nie per plik:
-    `LDN1174` i `NGC7023` to jeden obiekt (`catalog_xref.json`), a leżały w dwóch warstwach."""
+    """Wszystkie rekordy z trzech plików — inwarianty TOŻSAMOŚCI liczą się na SUMIE, nie per plik:
+    `LDN1174` i `NGC7023` to jeden obiekt (`catalog_xref.json`), a leżały w dwóch warstwach.
+    Rekordy-nazwy SĄ tutaj: kanon `LMC` ma być unikalny wobec generowanych tak samo jak każdy inny."""
     out = [r for a in assets.values() for r in a["targets"]]
     return out + _load("curated")["targets"]
+
+
+@pytest.fixture(scope="module")
+def wszystkie_cele(wszystkie):
+    """Podzbiór z kompletem pól celu — jedyna populacja, na której GEOMETRIA ma sens. Rekord-nazwa
+    nie ma pozycji ani rozmiaru z definicji klasy, więc test geometrii dostałby na nim `KeyError`,
+    czyli błąd narzędzia zamiast werdyktu o assecie."""
+    return [r for r in wszystkie
+            if targets.target_fields_present(r) == len(targets.TARGET_FIELDS)]
 
 
 def _sep_arcmin(a, b):
@@ -70,8 +92,8 @@ def test_asset_ma_meta_z_rodowodem_i_licencja(assets):
         assert any("CC-BY-SA-4.0" == s["license"] for s in meta["sources"])
 
 
-def test_rekordy_maja_pozycje_rozmiar_i_typ_z_dopuszczonej_klasy(wszystkie):
-    for r in wszystkie:
+def test_rekordy_maja_pozycje_rozmiar_i_typ_z_dopuszczonej_klasy(wszystkie_cele):
+    for r in wszystkie_cele:
         assert r["c"] and isinstance(r["c"], str)
         assert r["t"] in TYPES_OK, f"{r['c']} ma typ {r['t']} spoza klas planera"
         assert 0 <= r["r"] < 360 and -90 <= r["d"] <= 90, f"{r['c']} poza sferą"
@@ -185,17 +207,37 @@ def test_epoka_pozycji_jest_j2000_na_obu_torach(wszystkie, a, b, tol, tor):
     assert _sep_arcmin(rec_a, rec_b) <= tol, f"tor {tor} rozjechany"
 
 
-# ============================================================ curated (plik człowieka)
+# ================================================ objects_own (plik człowieka, D-OW-1/E′)
 
-def test_curated_ma_uzasadnienie_i_proweniencje():
+def test_slownik_ma_uzasadnienie_i_proweniencje():
     """Wpis ręczny bez `why`/`provenance` jest nieodróżnialny od zgadywanki — a `size_source`
-    mówi wprost, że rozmiar bywa oszacowaniem, nie pomiarem (SIN-UNSOURCED)."""
+    mówi wprost, że rozmiar bywa oszacowaniem, nie pomiarem (SIN-UNSOURCED). `size_source` i `t`
+    dotyczą WYŁĄCZNIE rekordów-celów: rekord-nazwa rozmiaru nie ma i mieć nie musi."""
     cur = _load("curated")["targets"]
-    assert cur, "seed curated nie może być pusty — WR134 jest dowodem, że klasa celów bez numeru istnieje"
+    assert cur, "słownik nie może być pusty — WR134 jest dowodem, że klasa celów bez numeru istnieje"
     for r in cur:
         assert r["why"] and r["provenance"]
-        assert r["size_source"] in ("catalog", "user")
-        assert r["t"] in TYPES_OK
+        if targets.target_fields_present(r) == len(targets.TARGET_FIELDS):
+            assert r["size_source"] in ("catalog", "user")
+            assert r["t"] in TYPES_OK
+
+
+def test_slownik_ma_dokladnie_dwie_klasy_rekordow():
+    """Rekord CZĘŚCIOWY (część pól celu) nie jest trzecią klasą, tylko błędem pliku: przeszedłby
+    filtr loadera jako cel i wybuchł dopiero na koercji `_target`, daleko od przyczyny."""
+    for r in _load("curated")["targets"]:
+        n = targets.target_fields_present(r)
+        assert n in (0, len(targets.TARGET_FIELDS)), \
+            f"{r['c']}: {n} z {len(targets.TARGET_FIELDS)} pól celu — ani cel, ani nazwa"
+
+
+def test_slownik_niesie_lmc_jako_rekord_nazwe():
+    """Sztandarowy przypadek klasy: 36 klatek RAW, nagłówek EXIF milczy o obiekcie i o pozycji,
+    a deklinacja −69,8° ze Szczecina nigdy nie wschodzi — więc kanon TAK, cel NIE."""
+    lmc = _by_canon(_load("curated")["targets"])["LMC"]
+    assert targets.target_fields_present(lmc) == 0
+    assert "Large Magellanic Cloud" in lmc["n"]
+    assert catalog_canon("LMC") is None, "gdyby gramatyka katalogowa go znała, wpis byłby zbędny"
 
 
 def test_curated_niesie_wr134_bo_zaden_katalog_go_nie_ma(assets):

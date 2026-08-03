@@ -58,6 +58,8 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from horreum import db                                              # noqa: E402
+from horreum.audit import (entity_event_parity, light_population_closure,  # noqa: E402
+                           object_source_audit)
 from horreum.calibration import KIND_RECIPE, run_calibration      # noqa: E402
 from horreum.lineage import run_lineage                           # noqa: E402
 from horreum.grouper import NO_TELESCOPE_KINDS, run_grouper       # noqa: E402
@@ -637,6 +639,18 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
     crit(f"§5.7 object_pct >= {EXP_OBJECT_PCT_MIN}% (akt={rep.object_pct}%)",
          rep.object_pct >= EXP_OBJECT_PCT_MIN)
 
+    # §5.7a ROZKŁAD POPULACJI SIĘ DOMYKA (R-S0-6). Sześć predykatów raportu dzieli lighty na kubełki,
+    # a dotąd NIC nie sprawdzało, czy pokrywają całość — rozkład, który się nie domyka, jest
+    # fałszywie zieloną bramą (repo pilnuje tego przy delcie, oś obiektu nie miała odpowiednika).
+    # Ujawnia przy okazji klasę „light bez wiersza `header` i bez obiektu": predykaty `nameless_*`
+    # mają INNER JOIN, a `resolved_no_raw` wymaga obiektu, więc taka klatka nie wpada do żadnego
+    # z sześciu. Dziś ta klasa jest pusta — kryterium jest tripwirem, nie naprawą.
+    closure = light_population_closure(con, rep)
+    out(f"    rozkład: {' + '.join(f'{k} {v}' for k, v in closure.buckets.items())}"
+        f" + bez nagłówka {closure.headerless} = {closure.counted} / {closure.total}")
+    crit(f"§5.7a rozkład lightów domyka się do populacji "
+         f"({closure.counted} == {closure.total})", closure.ok)
+
     # §5.7b kotwica nawrotu P-D — lighty bez `object_raw` (poza mianownikiem procentu wyżej).
     # Dopóki kotwica nie jest zmierzona (None), pozycja RAPORTUJE liczbę i nie zapala bramki:
     # zaszycie liczby wziętej z rachunku zamiast z przebiegu byłoby dokładnie tym błędem,
@@ -779,44 +793,28 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
         crit(f"§5.14 żaden gotowy rodowód nie został pominięty (pominiętych: {slin_kept})",
              slin_kept == 0)
 
-    # §5.9 encje == eventy (co do sztuki) — audyt jednej klingi kompletny
-    out("\n§5.9 encje == eventy:")
-    pairs = [
-        ("camera", "camera.upserted"), ("frame", "frame.observed"),
-        ("location", "location.added"), ("header", "header.recorded"),
-        ("telescope", "telescope.proposed"), ("config", "config.proposed"),
-        ("object", "object.upserted"), ("object_alias", "object.aliased"),
-        ("observatory", "observatory.proposed"),
-        ("calibration_profile", "calibration_profile.proposed"),
-    ]
+    # §5.9 encje == eventy (co do sztuki) — audyt jednej klingi kompletny. FORMUŁA ŻYJE
+    # W `horreum.audit`, żeby liczyła ją także bateria: dopóki mieszkała tu, żaden test nie mógł
+    # jej zaczerwienić, a skrypt chodzi wyłącznie na dawcy.
+    out("\n§5.9 encje == eventy (emisje − wycofania):")
+    parity = entity_event_parity(con)
     all_match = True
-    for ent, verb in pairs:
-        ne = con.execute(f"SELECT count(*) FROM {ent}").fetchone()[0]
-        nv = con.execute("SELECT count(*) FROM event WHERE verb=?", (verb,)).fetchone()[0]
-        ok = ne == nv
-        all_match &= ok
-        out(f"    {ent:13s} {ne:6d} == {verb:20s} {nv:6d}  [{_ok(ok)}]")
-    fa = con.execute("SELECT count(*) FROM frame WHERE config_id IS NOT NULL").fetchone()[0]
-    va = con.execute("SELECT count(*) FROM event WHERE verb='config.assigned'").fetchone()[0]
-    oa = con.execute("SELECT count(*) FROM frame WHERE object_id IS NOT NULL").fetchone()[0]
-    vo = con.execute("SELECT count(*) FROM event WHERE verb='object.assigned'").fetchone()[0]
-    sa = con.execute("SELECT count(*) FROM frame WHERE observatory_id IS NOT NULL").fetchone()[0]
-    vs = con.execute("SELECT count(*) FROM event WHERE verb='observatory.assigned'").fetchone()[0]
-    # Przypisanie przepisu — para trzyma się TYLKO na świeżej bazie (jak wszystkie tutaj): na żywej
-    # re-przypisanie emituje `.unassigned`+`.assigned`, więc equality wymagałaby odjęcia odpięć.
-    ca = con.execute(
-        "SELECT count(*) FROM frame WHERE calibration_profile_id IS NOT NULL").fetchone()[0]
-    vc = con.execute(
-        "SELECT count(*) FROM event WHERE verb='calibration_profile.assigned'").fetchone()[0]
-    out(f"    frame.config_id {fa} == config.assigned {va}  [{_ok(fa == va)}]")
-    out(f"    frame.object_id {oa} == object.assigned {vo}  [{_ok(oa == vo)}]")
-    out(f"    frame.observatory_id {sa} == observatory.assigned {vs}  [{_ok(sa == vs)}]")
-    out(f"    frame.calibration_profile_id {ca} == calibration_profile.assigned {vc}  "
-        f"[{_ok(ca == vc)}]")
-    all_match &= (fa == va) and (oa == vo) and (sa == vs) and (ca == vc)
+    for p in parity:
+        all_match &= p.ok
+        minus = f" − {p.minus} {p.retracted}" if p.minus else ""
+        out(f"    {p.name:28s} {p.entities:6d} == {p.events:6d}{minus}  [{_ok(p.ok)}]")
     crit("§5.9 encje == eventy (co do sztuki, łącznie z przypisaniami)", all_match)
 
+    # §5.9b enum źródeł osi OBIEKT ⊆ stałych, które go deklarują (jeden właściciel — S1).
+    src = object_source_audit(con)
+    if not src.ok:
+        out(f"    ŹRÓDŁA SPOZA STAŁEJ — frame: {src.frame_unknown}, alias: {src.alias_unknown}")
+    crit("§5.9b object_source i object_alias.source ⊆ resolve.objects (OBJECT/ALIAS_SOURCES)",
+         src.ok)
+
     # §5.10 oś OBSERWATORIUM — 11 stanowisk (§8 klaster), populacje domykają, zero nieparsowalnego GPS
+    # `sa` (klatki ze stanowiskiem) bierzemy z tego samego audytu, co §5.9 — jedna definicja liczby.
+    sa = next(p.entities for p in parity if p.name == "frame.observatory_id")
     n_obs = con.execute("SELECT count(*) FROM observatory").fetchone()[0]
     gps_cards = con.execute(
         "SELECT count(*) FROM frame f "

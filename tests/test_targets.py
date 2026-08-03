@@ -87,8 +87,10 @@ def test_cache_assetu_widzi_podmiane_pliku(tmp_path, monkeypatch):
     data = {"targets": [{"c": "TEST1", "t": "EmN", "r": 10.0, "d": 20.0, "a": 30.0}]}
     asset = tmp_path / "targets_core.json"
     asset.write_text(json.dumps(data), encoding="utf-8")
-    curated = tmp_path / "curated.json"
-    curated.write_text('{"targets": []}', encoding="utf-8")
+    # Warstwa `curated` czyta dziś plik człowieka z assetów RESOLVERA (D-OW-1/E′); podmiana
+    # `resources.files` ignoruje pakiet, więc obie warstwy jadą z `tmp_path`.
+    wlasne = tmp_path / "objects_own.json"
+    wlasne.write_text('{"targets": []}', encoding="utf-8")
     monkeypatch.setattr(T.resources, "files", lambda _pkg: tmp_path)
 
     assert {t.canon for t in T.load_targets(("core",))} == {"TEST1"}

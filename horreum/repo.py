@@ -16,6 +16,7 @@ Zasady:
 import json
 from contextlib import contextmanager
 
+from .resolve._text import norm_alnum          # kierunek repo → resolve (liść; COHESION §2b)
 from .resolve.observatory import nearest_site   # kierunek repo → resolve (liść math/re; COHESION §2b)
 
 
@@ -597,8 +598,10 @@ def upsert_object(con, *, canon, catalog, kind, now, actor="resolver"):
 def add_object_alias(con, *, alias_norm, object_id, source, now, actor="resolver"):
     """Zapisz równoważność `alias_norm` → obiekt (audyt „M106 ≡ NGC4258 via catalog_xref"). Po
     `UNIQUE(alias_norm)`: znana → (id, False) bez eventu (idempotencja); nowa → INSERT +
-    `event(object.aliased)`; (id, True). `source` ∈ {header|catalog_xref|common_name|solar|comet|user}
-    (solar/comet = oś US/komet, krok 5a). `region` w tym zbiorze NIE występuje ŚWIADOMIE: kompleks
+    `event(object.aliased)`; (id, True). `source` ∈ `resolve.objects.ALIAS_SOURCES` — JEDEN
+    właściciel enumu; wyliczanka w tym docstringu rozjeżdżała się z DDL-em o `review`, a DDL
+    `frame.object_source` rozjeżdżał się z żywą bazą o cztery wartości. `region` w tym zbiorze
+    NIE występuje ŚWIADOMIE: kompleks
     rozpoznaje się ze WSPÓŁRZĘDNYCH, więc nie ma nazwy do zapisania jako równoważność — a alias
     z surowego stringa byłby cichym konfliktem, bo ta funkcja zwraca istniejący wiersz po samym
     `alias_norm`, BEZ sprawdzenia `object_id` (zob. `resolve/regions.py`)."""
@@ -650,6 +653,84 @@ def assign_object(con, *, frame_id, object_id, object_source, now, actor="resolv
         emit_event(con, actor=actor, verb="object.assigned", target=f"frame:{frame_id}", now=now,
                    payload={"object_id": object_id, "object_source": object_source})
     return True
+
+
+def flag_object_alias_conflicts(con, items, now, actor="resolver"):
+    """Nazwy ze słownika obiektów własnych, które są już równoważnością INNEGO obiektu — JEDEN event
+    `object.alias_conflict` z listą (kanon passu masowego, jak `flag_object_review_summary`).
+    `items` = lista `[alias_norm, object_id_zajmujący, object_id_oczekiwany]`.
+
+    RAPORT, NIE ZAPIS: kolizja znaczy, że człowiek wpisał do assetu nazwę, którą archiwum już wiąże
+    z czymś innym — rozstrzyga to człowiek, nie automat. Alias zostaje przy dotychczasowym obiekcie.
+    Pusta lista → bez eventu (diff-first: cisza przy braku różnicy)."""
+    items = [list(i) for i in items]
+    if not items:
+        return
+    with con:
+        emit_event(con, actor=actor, verb="object.alias_conflict", target="object:*", now=now,
+                   payload={"count": len(items), "items": items},
+                   reason="nazwa ze słownika obiektów własnych zajęta przez inny obiekt")
+
+
+def retire_alias_and_unassign(con, *, object_id, alias_norms, now, actor="resolver"):
+    """Wycofaj równoważności `alias_norms` obiektu i ODEPNIJ klatki, które przez nie dostały obiekt.
+    Zwraca `(wycofane, odpięte)`. Druga połowa re-derywacji zasiewu (D-OW-4): edycja assetu jest
+    operacją MIGRACYJNĄ, a nie zwykłym re-runem.
+
+    DLACZEGO DWA CZŁONY, NIE JEDEN: samo skasowanie aliasu NIE zdejmuje `object_id` z klatek —
+    żaden szczebel resolvera tego nie robi (drabina przypisuje, nigdy nie odpina). Klatki, które
+    dostały obiekt przez usuwaną równoważność, zostałyby z nim NA ZAWSZE, a „re-derywowalność"
+    byłaby wtedy samą nazwą.
+
+    ODPINANIE JEST WĄSKIE — po ŚWIADKU, nie po źródle: bierzemy wyłącznie klatki, których
+    znormalizowane zeznanie nagłówka JEST jedną z wycofywanych nazw. Klatka tego samego obiektu
+    nazwana z nagłówka, z xref albo z regionu zostaje nietknięta; `user` zostaje nietknięty
+    z definicji precedencji.
+
+    `object_source` wraca do NULL, nie do nagrobka: nagrobek jest STICKY i wypadałby z drabiny na
+    zawsze, czyli „operacja migracyjna" kasowałaby klatce przyszłość. NULL = powrót do stanu sprzed
+    rozwiązania, klatka wraca do kolejki i następny przebieg ma prawo rozwiązać ją na nowo.
+
+    KAŻDY WIERSZ MA WŁASNY EVENT (`object.alias_retired` / `object.unassigned`, payload = stan
+    SPRZED). Zbiorczy zbiłby bramkę `§5.9` o N−1: liczy ona encje CO DO SZTUKI wobec emisji, więc
+    jeden event na N odpięć sam zapaliłby czerwień. `object` zostaje append-only — kasujemy
+    równoważność i przypisanie, nigdy obiekt."""
+    keys = tuple(dict.fromkeys(alias_norms))     # bez duplikatów, kolejność stabilna
+    if not keys:
+        return 0, 0
+
+    rows = con.execute(
+        "SELECT a.id AS aid, a.alias_norm AS key, a.source AS src FROM object_alias a "
+        "WHERE a.object_id = ?", (object_id,)).fetchall()
+    do_wycofania = [r for r in rows if r["key"] in keys]
+
+    # Kandydaci do odpięcia: klatki TEGO obiektu, których źródło pochodzi z NAZWY. Świadka
+    # (`object_raw`) normalizujemy w Pythonie — `norm_alnum` nie ma odpowiednika w SQL, a SELECT
+    # w tej warstwie jedzie literałem (meta-tripwir AST).
+    kandydaci = con.execute(
+        "SELECT f.id AS fid, f.object_source AS src, h.object_raw AS raw FROM frame f "
+        "JOIN header h ON h.frame_id = f.id "
+        "WHERE f.object_id = ? AND f.object_source IN ('alias', 'curated')",
+        (object_id,)).fetchall()
+    do_odpiecia = [r for r in kandydaci if norm_alnum(r["raw"] or "") in keys]
+
+    if not do_wycofania and not do_odpiecia:
+        return 0, 0                              # diff-first: zero różnicy ⇒ zero DML, zero eventu
+
+    with con:
+        for r in do_wycofania:
+            con.execute("DELETE FROM object_alias WHERE id = ?", (r["aid"],))
+            emit_event(con, actor=actor, verb="object.alias_retired",
+                       target=f"object:{object_id}", now=now,
+                       payload={"alias_norm": r["key"], "source": r["src"]},
+                       reason="nazwa zdjęta ze słownika obiektów własnych")
+        for r in do_odpiecia:
+            con.execute(
+                "UPDATE frame SET object_id = NULL, object_source = NULL WHERE id = ?", (r["fid"],))
+            emit_event(con, actor=actor, verb="object.unassigned", target=f"frame:{r['fid']}",
+                       now=now, payload={"object_id": object_id, "object_source": r["src"]},
+                       reason="równoważność wycofana ze słownika")
+    return len(do_wycofania), len(do_odpiecia)
 
 
 def flag_object_review_summary(con, items, now, actor="resolver"):

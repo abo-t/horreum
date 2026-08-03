@@ -62,8 +62,36 @@ NEBULA_TYPES = frozenset({"Neb", "EmN", "HII", "RfN", "Cl+N", "SNR", "PN"})
 # nie opcją — inaczej `--layers cirrus` gubi WR134).
 DEFAULT_LAYERS = ("core",)
 ALL_LAYERS = ("core", "cirrus")
-_ASSET = {"core": "targets_core.json", "cirrus": "targets_cirrus.json",
-          "curated": "curated.json"}
+# Warstwa `curated` czyta plik CZŁOWIEKA — po E′ (D-OW-1) jest nim `resolve/data/objects_own.json`,
+# wspólny z resolverem: jedna klasa „obiekt bez numeru katalogowego" ma jednego właściciela. Nazwa
+# warstwy zostaje `curated`, bo „curated wygrywa" stoi na LITERALE (`coverage_index` niżej).
+_ASSET = {"core": ("horreum.data", "targets_core.json"),
+          "cirrus": ("horreum.data", "targets_cirrus.json"),
+          "curated": ("horreum.resolve.data", "objects_own.json")}
+
+# ─────────────────────────────────────────── kontrakt rekordu assetu (JEDEN właściciel — D-OW-1/E′)
+# Plik człowieka niesie DWIE klasy rekordów: rekord-CEL (komplet pól niżej) i rekord-NAZWĘ (żadnego
+# z nich — sam kanon z nazwami potocznymi, dla obiektu, którego planer nie umie zaplanować: LMC nie
+# wschodzi ze Szczecina, `Orion` to pole gwiazdozbioru, nie obiekt o rozmiarze).
+#
+# PLANER DOSTAJE WYŁĄCZNIE REKORDY-CELE — z MECHANIZMU (filtr w loaderze), nie z ostrożności
+# wołającego. Rekord-nazwa wpuszczony do puli planera kosztowałby trzy awarie zmierzone w kodzie:
+# `--find` pomija `feasible` i przedcięcie, więc `ra_deg=None` szłoby wprost do `sky.visibility_window`
+# (wpisanie „LMC" w szukajkę wywala planer); `coverage_index` przejąłby kanon bez tworzenia wiersza,
+# więc godziny archiwum zniknęłyby i z `rows`, i z JAWNEJ RESZTY; a `_target` i tak by go odrzucił.
+# Dlatego rekord-nazwa NIE dociera do `_target` — jego koercja i tripwir zostają NIETKNIĘTE.
+#
+# Rekord NIEPEŁNY (część pól celu) NIE jest trzecią klasą — to błąd pliku i ma wybuchnąć na
+# `_target`, przy kanonie, a nie pół planera dalej (EXPECT).
+TARGET_FIELDS = ("t", "r", "d", "a")
+
+
+def target_fields_present(raw):
+    """Ile pól CELU niesie surowy rekord assetu: `0` = rekord-nazwa, `len(TARGET_FIELDS)` = rekord-cel,
+    pomiędzy = plik niepełny. Predykat jest wspólny dla loadera i dla `scripts/build_catalog.py`:
+    gdyby producent i konsument miały własne kopie, asset przechodziłby budowę i padał przy
+    wczytaniu (albo odwrotnie)."""
+    return sum(1 for k in TARGET_FIELDS if raw.get(k) is not None)
 
 # B−V galaktyk to +0,7…1,0 mag; bez korekty próg „mag ≤ 13" po cichu odrzuciłby galaktyki realnie
 # jaśniejsze od progu. HEURYSTYKA (jedna liczba na klasę), nie pomiar per obiekt.
@@ -214,15 +242,22 @@ def load_targets(layers=DEFAULT_LAYERS):
     return _load_stamped(tuple(layers), _asset_stamp(layers))
 
 
+def _asset_file(layer):
+    """Traversable warstwy. Pakiet jest CZĘŚCIĄ mapy `_ASSET`, nie stałą wpisaną w wołających:
+    plik człowieka mieszka w assetach resolvera, generowane katalogi w `horreum/data`."""
+    package, name = _ASSET[layer]
+    return resources.files(package).joinpath(name)
+
+
 def _asset_stamp(layers):
     """`mtime_ns` warstw jako klucz cache'u. Asset spoza systemu plików (hipotetyczny zip-import)
     nie ma `stat` — wtedy stempel jest `None` i cache zachowuje się jak przed zmianą (jedno
-    wczytanie na proces). Frozen onefile rozpakowuje `horreum/data` do realnych plików, więc
+    wczytanie na proces). Frozen onefile rozpakowuje oba katalogi assetów do realnych plików, więc
     w wydaniu stempel JEST."""
     stamps = []
     for layer in tuple(layers) + ("curated",):
         try:
-            stamps.append(resources.files("horreum.data").joinpath(_ASSET[layer]).stat().st_mtime_ns)
+            stamps.append(_asset_file(layer).stat().st_mtime_ns)
         except (OSError, AttributeError, NotImplementedError):
             stamps.append(None)
     return tuple(stamps)
@@ -230,11 +265,17 @@ def _asset_stamp(layers):
 
 @functools.lru_cache(maxsize=8)
 def _load_stamped(layers, _stamp):
-    """Właściwe wczytanie — `_stamp` uczestniczy WYŁĄCZNIE w kluczu cache'u (stąd podkreślenie)."""
+    """Właściwe wczytanie — `_stamp` uczestniczy WYŁĄCZNIE w kluczu cache'u (stąd podkreślenie).
+
+    REKORDY-NAZWY ODPADAJĄ TU (D-OW-1/E′): planer widzi wyłącznie rekordy z kompletem pól celu.
+    Filtr stoi PRZED `_target`, więc koercja i jej tripwir nie muszą wiedzieć o drugiej klasie
+    rekordu — rekord niepełny nadal na nich wybucha."""
     out = []
     for layer in layers + ("curated",):
-        text = resources.files("horreum.data").joinpath(_ASSET[layer]).read_text(encoding="utf-8")
+        text = _asset_file(layer).read_text(encoding="utf-8")
         for raw in json.loads(text)["targets"]:
+            if target_fields_present(raw) == 0:
+                continue                      # rekord-NAZWA: zna go resolver, planer nie
             out.append(_target(raw, layer))
     return tuple(out)
 

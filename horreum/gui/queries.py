@@ -705,6 +705,25 @@ def facet_objects(con, frame_ids):
     ).fetchall()
 
 
+def object_alias_index(con):
+    """Mapa `canon → {alias_norm}` dla szukajki facetu Obiekt (S3, obietnica §1).
+
+    Kanon `LMC` nie zawiera ani jednej litery z „Large Magellanic Cloud", więc bez tej mapy szukajka
+    jest ślepa dokładnie na klasę obiektów, dla której powstała ta paczka. Klucze są JUŻ znormalizowane
+    (`object_alias.alias_norm` to `norm_alnum` z chwili zapisu), więc dopasowanie liczy się bez
+    dotykania rdzenia po stronie widżetu — predykat mieszka w `facet_model.matches_search`.
+
+    Zakres = CAŁA biblioteka aliasów, nie tylko obiekty widocznego zbioru: szukajka chowa wiersze
+    listy, a ta lista przychodzi z sibling-setu — filtrowanie mapy po zbiorze nic by nie oszczędziło,
+    a rozjechałoby dwa wejścia tego samego pytania. Zwraca dict[str, set[str]]."""
+    idx = {}
+    for canon, alias in con.execute(
+            "SELECT o.canon AS canon, a.alias_norm AS alias_norm "
+            "FROM object_alias a JOIN object o ON o.id = a.object_id").fetchall():
+        idx.setdefault(canon, set()).add(alias)
+    return idx
+
+
 def facet_filters(con, frame_ids):
     """Kubełki facetu Filtr: `filter_canon` w zbiorze + liczność; JAWNIE `IS NOT NULL` (F4R#10).
     Zwraca: filter_canon, n (n DESC — najczęstsze na górze)."""

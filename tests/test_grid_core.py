@@ -613,3 +613,39 @@ def test_run_bez_filtra_oddaje_uniwersum_wprost():
     uniwersum = {1, 2, 3}
     wynik = filter_engine.run(None, leaf_fn=lambda *a: set(), universe_fn=lambda: uniwersum)
     assert wynik is uniwersum
+
+
+# ---------- S3: szukanie po nazwach (facet_model.matches_search) ----------
+# Predykat mieszka w module Qt-WOLNYM, więc bramka też — listwa dostaje go gotowego, a jej rolą jest
+# już tylko `setHidden`. To dlatego te człony da się postawić bez okna, na czystej funkcji.
+
+
+def test_szukajka_normalizuje_IGLE_I_SIANO():
+    """Obietnica §1 zaczyna się od tego, że user wpisuje nazwę tak, JAK JĄ MÓWI, a kanon zapisany
+    jest tak, jak dyktuje gramatyka katalogu. Dawne `needle in label.lower()` porównywało surowy
+    tekst do surowej etykiety, więc `M 42` nie znajdowało `M42`, a `sh2 155` — `Sh2-155`."""
+    assert facet_model.matches_search("M 42", "M42")
+    assert facet_model.matches_search("sh2 155", "Sh2-155")
+    assert facet_model.matches_search("ngc", "NGC6960")          # fragment dalej działa
+    assert not facet_model.matches_search("M43", "M42")
+
+
+def test_szukajka_widzi_DRUGIE_NAZWY_obiektu():
+    """Kryterium 9 (firsthand Zdzinia): „Large Magellanic Cloud" ze spacjami ma trafić kubełek `LMC`.
+    Kanon nie ma z tą frazą ANI JEDNEJ wspólnej litery, więc bez mapy aliasów szukajka jest ślepa
+    dokładnie na klasę obiektów, dla której powstała ta paczka."""
+    aliasy = {"LMC": {"LARGEMAGELLANICCLOUD"}}
+    assert facet_model.matches_search("Large Magellanic Cloud", "LMC", aliasy)
+    assert facet_model.matches_search("magellanic", "LMC", aliasy)      # fragment aliasu też
+    assert not facet_model.matches_search("Large Magellanic Cloud", "M42", aliasy)
+    # Obiekt spoza mapy = „nie ma innych nazw", nigdy „nie wiadomo" — bez tego członu brak wpisu
+    # dałoby się zaimplementować jako „przepuść wszystko" i bramka wyżej dalej by przechodziła.
+    assert not facet_model.matches_search("cokolwiek", "NGC6960", aliasy)
+
+
+def test_szukajka_PUSTA_przepuszcza_wszystko():
+    """Falsyfikator dla implementacji „pusta igła = brak dopasowań": wołający chowa wiersz po
+    `False`, więc pusta szukajka schowałaby CAŁĄ listę obiektów."""
+    assert facet_model.matches_search("", "M42")
+    assert facet_model.matches_search("   ", "M42")
+    assert facet_model.matches_search(None, "M42")

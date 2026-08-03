@@ -63,6 +63,7 @@ class FacetRail(QWidget):
         self._state = facet_model.empty_state()
         self._loading = False
         self._lists = {}
+        self._aliases = {}          # canon → {alias_norm}; dowozi `set_data` (S3)
         self.setMinimumWidth(RAIL_MIN_W)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -104,7 +105,7 @@ class FacetRail(QWidget):
     def state(self):
         return self._state
 
-    def set_data(self, counts, state, extras=None, reveal=None):
+    def set_data(self, counts, state, extras=None, reveal=None, aliases=None):
         """Przeładuj listy. `counts`: dict facet → list[(value, label, n)] (sibling-set per facet);
         `state` = aktualny stan (właściciel: FramesView). `extras`: opc. dict facet → {value:
         (suffix, tooltip)} — anotacja godzin portfela (F7 §8), dziś tylko facet „object"; sufiks
@@ -119,7 +120,15 @@ class FacetRail(QWidget):
         wybór, którego user nie widzi. Zmierzone przed poprawką: `✓ NGC7000` stało na pozycji 36/48
         przy scrollu 0, czyli poza widokiem, a listwa wyglądała jak nietknięta. Odtworzenie scrolla
         jest słuszne dla kliku W listwie i szkodliwe dla wejścia z zewnątrz — stąd jawny parametr,
-        nie zgadywanie po stanie."""
+        nie zgadywanie po stanie.
+
+        `aliases` = dict `canon → {alias_norm}` (S3): DRUGIE NAZWY obiektów, po których wolno szukać.
+        Jeden kwarg, a nie import rdzenia do listwy — dopasowanie liczy Qt-wolny
+        `facet_model.matches_search`, bo to logika (normalizacja + reguła), a listwa jest głupim
+        widżetem. Mapa TRZYMA SIĘ przez przeładowania: szukajka filtruje przy każdym wpisanym znaku,
+        a `set_data` woła się przy każdym `refresh` — gdyby `None` znaczyło „wyczyść", pierwszy
+        refresh po wpisaniu litery gasiłby aliasy w środku pisania. `None` znaczy więc „bez zmian",
+        pusty dict — „ta baza nie ma aliasów"."""
         self._loading = True
         scroll_pos = {facet: lw.verticalScrollBar().value() for facet, lw in self._lists.items()}
         try:
@@ -168,6 +177,8 @@ class FacetRail(QWidget):
                 # Wspólna szerokość kolumny godzin PO wypełnieniu listy — dopiero to ustawia liczby
                 # w jedną kolumnę. Grupa bez adnotacji (Filtr/Rodzaj/…) dostaje 0 = układ dwuczłonowy.
                 lw.itemDelegate().fit_tertiary(hours)
+            if aliases is not None:
+                self._aliases = aliases
             self._filter_objects(self.search.text())
             for facet, lw in self._lists.items():
                 lw.doItemsLayout()                         # przelicz zakres scrolla PRZED restore
@@ -227,11 +238,15 @@ class FacetRail(QWidget):
         self.facetsChanged.emit(self._state)
 
     def _filter_objects(self, text):
-        """Szukajka obiektów: chowa niepasujące wiersze (prezentacja; aktywne wybory ZAWSZE widoczne)."""
-        needle = (text or "").strip().lower()
+        """Szukajka obiektów: chowa niepasujące wiersze (prezentacja; aktywne wybory ZAWSZE widoczne).
+
+        Dopasowanie liczy `facet_model.matches_search` — normalizacja igły i siana plus DRUGIE NAZWY
+        obiektu (S3). Dawne `needle not in label.lower()` porównywało surowy tekst do surowej
+        etykiety, więc `M 42` nie znajdowało `M42`, a „Large Magellanic Cloud" nie znajdowało nic:
+        kanon `LMC` nie ma z tą frazą ani jednej wspólnej litery."""
         lw = self._lists["object"]
         for i in range(lw.count()):
             it = lw.item(i)
             facet, value, label = it.data(Qt.UserRole)
             active = facet_model.selection(self._state, facet, value) is not None
-            it.setHidden(bool(needle) and not active and needle not in str(label).lower())
+            it.setHidden(not active and not facet_model.matches_search(text, label, self._aliases))

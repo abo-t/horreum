@@ -1736,3 +1736,51 @@ def test_okno_dostaje_LICZBE_DO_ZAPISANIA_i_kontekst_zaznaczenia(obj_view, monke
     assert zapis["frame_count"] == 2                     # tyle gest realnie ruszy, nie 4
     assert zapis["selection"]["n"] == 4                  # …a okno wie, ile zaznaczono
     assert zapis["selection"]["overwrite"] == 2          # …i ile nazw przemaluje
+
+
+# ═════════════════════════ S3 — SZUKANIE PO NAZWACH (§4/9, obietnica §1)
+
+
+def test_szukajka_facetu_znajduje_obiekt_po_DRUGIEJ_NAZWIE(obj_view):
+    """Kryterium 9 end-to-end na realnym oknie: „Large Magellanic Cloud" (ze spacjami) zostawia
+    na liście kubełek `LMC`, a resztę chowa.
+
+    Bramka pyta o CAŁĄ DROGĘ, nie o predykat (ten ma swoje człony w `test_grid_core`): mapa musi
+    wyjść z bazy (`queries.object_alias_index`), przejść przez `FramesView._reload_facet_rail`
+    i dojechać do listwy kwargiem. Implementacja, która policzy dopasowanie poprawnie, ale zapomni
+    dowieźć aliasów, przechodzi tamte człony i przewraca ten."""
+    v, con = obj_view
+    con.execute("INSERT INTO object(id, canon, catalog, kind) VALUES (7,'LMC',NULL,'own')")
+    con.execute("INSERT INTO object_alias(alias_norm, object_id, source) "
+                "VALUES ('LARGEMAGELLANICCLOUD', 7, 'curated')")
+    con.execute("UPDATE frame SET object_id = 7, object_source = 'user' WHERE id = 3")
+    con.commit()
+    v.refresh()
+    lw = v.facet_rail._lists["object"]
+    etykiety = {lw.item(i).data(Qt.UserRole)[2] for i in range(lw.count())}
+    assert {"LMC", "NGC6960"} <= etykiety                  # oba kubełki są na liście
+
+    v.facet_rail.search.setText("Large Magellanic Cloud")
+    widoczne = {lw.item(i).data(Qt.UserRole)[2] for i in range(lw.count())
+                if not lw.item(i).isHidden()}
+    assert widoczne == {"LMC"}
+
+
+def test_szukajka_PRZEZYWA_odswiezenie_listwy(obj_view):
+    """Mapa aliasów dojeżdża przy KAŻDYM `set_data`, a szukajka filtruje przy każdym znaku — gdyby
+    `aliases=None` znaczyło „wyczyść", pierwszy refresh w środku pisania gasiłby drugie nazwy
+    i wiersz znikałby userowi spod palca. `None` znaczy „bez zmian"."""
+    v, con = obj_view
+    con.execute("INSERT INTO object(id, canon, catalog, kind) VALUES (7,'LMC',NULL,'own')")
+    con.execute("INSERT INTO object_alias(alias_norm, object_id, source) "
+                "VALUES ('LARGEMAGELLANICCLOUD', 7, 'curated')")
+    con.execute("UPDATE frame SET object_id = 7, object_source = 'user' WHERE id = 3")
+    con.commit()
+    v.refresh()
+    v.facet_rail.search.setText("magellanic")
+    lw = v.facet_rail._lists["object"]
+
+    v.facet_rail.set_data({"object": [(7, "LMC", 1)]}, v.facet_rail.state())   # BEZ kwargu
+    widoczne = {lw.item(i).data(Qt.UserRole)[2] for i in range(lw.count())
+                if not lw.item(i).isHidden()}
+    assert widoczne == {"LMC"}

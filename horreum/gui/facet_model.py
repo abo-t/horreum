@@ -19,6 +19,11 @@ nieosiągalny; dla facetu bez aktywnego wyboru sibling == stan pełny, D-UX-3(a)
 
 from __future__ import annotations
 
+# Jedyny import rdzenia w tym module — i celowy: szukajka MUSI liczyć igłę tą samą
+# normalizacją, którą przebieg liczy klucze równoważności (`matches_search`). Moduł
+# zostaje Qt-wolny, więc bramka izolacji §7.2 się nie rusza.
+from horreum.resolve._text import norm_alnum
+
 # Stała kolejność facetów: deterministyczne drzewo (testy, describe) i kolejność grup w listwie.
 FACETS = ("object", "filter", "kind", "telescope", "night")
 
@@ -108,3 +113,32 @@ def compose(state: dict, advanced) -> dict | None:
     if len(conds) == 1:
         return conds[0]
     return {"op": "AND", "conditions": conds}
+
+
+def matches_search(needle: str, label, aliases=None) -> bool:
+    """Czy wiersz facetu „Obiekt" pasuje do igły szukajki — S3, obietnica §1 („szukanie po nazwach").
+
+    Trzy fakty w jednym predykacie, i każdy z nich sam by nie wystarczył:
+
+    * **NORMALIZACJA `norm_alnum`** — ta sama, którą przebieg liczy klucze równoważności. Bez niej
+      szukajka porównywała surowy tekst do surowej etykiety, więc `M 42` nie znajdowało `M42`,
+      a `sh2 155` nie znajdowało `Sh2-155`: user wpisuje nazwę tak, jak ją mówi, a kanon zapisany
+      jest tak, jak go dyktuje gramatyka katalogu. Igła i siano MUSZĄ przejść tę samą bramkę.
+    * **ALIASY** — kanon `LMC` nie zawiera w sobie ani jednej litery z „Large Magellanic Cloud".
+      Nazwa potoczna żyje w `object_alias`, więc bez mapy `canon → {alias_norm}` szukajka jest ślepa
+      dokładnie na tę klasę obiektów, dla której powstała cała ta paczka (obiekty własne).
+    * **PUSTA IGŁA PASUJE ZAWSZE** — wołający chowa wiersz dopiero po `False`, a „nic nie wpisano"
+      nie jest pytaniem.
+
+    Predykat mieszka TU, nie w listwie: `FacetRail` jest głupim widżetem (NARROW), a to jest logika
+    — z normalizacją rdzenia i regułą, którą trzeba móc przetestować bez Qt.
+
+    `aliases` = dict `canon → set(alias_norm)`; brak wpisu (albo brak mapy) znaczy „ten obiekt nie
+    ma innych nazw", nigdy „nie wiadomo".
+    """
+    igla = norm_alnum(needle or "")
+    if not igla:
+        return True
+    if igla in norm_alnum(str(label)):
+        return True
+    return any(igla in a for a in (aliases or {}).get(str(label), ()))

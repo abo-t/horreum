@@ -26,6 +26,13 @@
 w `targets_core.json`/`targets_cirrus.json` rozpowszechniamy na **CC-BY-SA-4.0**. Kod (`horreum/*.py`,
 `scripts/*.py`) pozostaje MIT. Korzystanie z VizieR/CDS wymaga podania powyższej atrybucji.
 
+**D-T2-f ✅ ROZSTRZYGNIĘTE 2026-08-04, GO Zdzinia: rozdział ZOSTAJE** — kod MIT, dane CC-BY-SA,
+granica jawna tutaj i w polu `_meta.license` każdego assetu. Rozważana alternatywa („bez OpenNGC",
+czyli jednolity MIT w całym repo) była **odrzucona świadomie i z policzonym kosztem: 946 rekordów
+rdzenia i WSZYSTKIE galaktyki** — populacja, która w archiwum niesie 136,9 h materiału. Ta decyzja
+wiąże każdy nowy asset danych: źródło na CC-BY-SA wchodzi z atrybucją do tabeli wyżej, a nie przez
+rozmycie granicy.
+
 ### Przetworzenie (co skrypt robi z surowymi tabelami)
 
 1. **Epoki** — Sh2 niesie B1900, LBN/LDN B1950, vdB/Green J2000. **Nie precesujemy sami**: bierzemy

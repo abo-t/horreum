@@ -2,8 +2,9 @@
 
 *Dla osoby, która pobrała Horreum z GitHuba i chce zapanować nad własnym archiwum astrofoto —
 bez znajomości programowania. Przeprowadzi Cię od pustej bazy, przez pierwsze wczytanie zdjęć,
-po nazwanie sprzętu i przeglądanie zbiorów. Zaawansowane operacje (zmiana nazw plików na dysku,
-budowa drzewa pod WBPP) mają własne, osobne opisy — tutaj budujemy fundament.*
+po nazwanie sprzętu i obiektów, przeglądanie zbiorów i planowanie kolejnych sesji. Operacje, które
+zmieniają pliki na dysku (zmiana nazw z faktów, budowa drzewa pod WBPP), są tu tylko wskazane —
+mają dostać własny opis; tutaj budujemy fundament.*
 
 ---
 
@@ -34,8 +35,11 @@ Droga, którą przejdziesz w tej instrukcji:
     1. Uruchom program          (pobrany plik albo ze źródła)
     2. Załóż bazę               (Plik -> Nowa baza)
     3. Przyjmij pierwszą dostawę (Dostawa -> Przyjmij nowe)
-    4. Uporządkuj               (Porzadki -> nazwij teleskopy i stanowiska)
+    4. Uporządkuj               (Porzadki -> nazwij teleskopy, stanowiska i obiekty)
     5. Przeglądaj               (Zbiory -> perspektywy)
+    6. Zaplanuj                 (Planer -> co warto zrobic dzis)
+
+Kroki 1–5 przechodzisz po kolei, raz. Krok 6 jest osobny — możesz do niego wrócić kiedykolwiek.
 
 ---
 
@@ -45,7 +49,7 @@ Droga, którą przejdziesz w tej instrukcji:
 
 | | Kiedy tak | Co robisz |
 |---|---|---|
-| **Wersja gotowa** (zalecana) | Masz Windows, nie chcesz nic instalować | Pobierasz gotowy folder z **Releases**, rozpakowujesz, klikasz `horreum-gui.exe` |
+| **Wersja gotowa** (zalecana) | Masz Windows, nie chcesz nic instalować | Pobierasz **jeden plik `.exe`** z **Releases** i klikasz go dwa razy |
 | **Ze źródła** | Masz Linux/Mac, albo chcesz najnowszy kod / własne zmiany | Instalujesz Pythona i uruchamiasz komendą |
 
 Koszt pomyłki jest zerowy — obie wersje działają na tej samej bazie. Jeśli wahasz się, wybierz
@@ -55,7 +59,7 @@ Koszt pomyłki jest zerowy — obie wersje działają na tej samej bazie. Jeśli
 
 ## Mapa ekranu
 
-Po uruchomieniu widzisz jedno okno. Z lewej pasek z **trzema miejscami**, reszta to bieżący widok:
+Po uruchomieniu widzisz jedno okno. Z lewej pasek z **czterema miejscami**, reszta to bieżący widok:
 
     Menu:  Plik            Widok
            |                |
@@ -66,12 +70,17 @@ Po uruchomieniu widzisz jedno okno. Z lewej pasek z **trzema miejscami**, reszta
     | Dostawa   |   <- Krok 3: wczytujesz tu nowe zdjęcia   |
     | Zbiory    |   <- Krok 5: przegladasz katalog          |
     | Porzadki  |   <- Krok 4: nazywasz sprzet, przeglad    |
+    | Planer    |   <- Krok 6: co warto sfotografowac dzis  |
     +-----------+------------------------------------------+
 
 - **Dostawa** — tu wpuszczasz nowe zdjęcia do katalogu.
 - **Zbiory** — biblioteka wszystkich klatek; filtrujesz i układasz „perspektywami".
 - **Porządki** — lista rzeczy do zrobienia (nienazwany sprzęt, klatki bez obiektu) i osie
   Teleskop / Stanowisko / Obiekt. Cyfra przy nazwie, np. **Porządki (3)**, mówi, ile zadań czeka.
+- **Planer** — co da się sfotografować z Twojego stanowiska i ile materiału już masz.
+
+Pierwsze trzy miejsca to droga Twojego archiwum: **wpuść → uporządkuj → przeglądaj**. Czwarte
+patrzy w przód, a nie wstecz, więc możesz je poznać później — działa dopiero, gdy w bazie coś jest.
 
 ---
 
@@ -80,13 +89,20 @@ Po uruchomieniu widzisz jedno okno. Z lewej pasek z **trzema miejscami**, reszta
 ### Wersja gotowa (Windows)
 
 1. Wejdź na stronę projektu na GitHubie, w zakładkę **Releases**.
-2. Pobierz archiwum `.zip`, **rozpakuj cały folder** (np. na pulpit).
-3. Wejdź do rozpakowanego folderu i uruchom **`horreum-gui.exe`** (dwuklik).
+2. Pobierz plik **`Horreum-<wersja>-windows-x64.exe`** — to jedyny plik w sekcji „Assets".
+3. Zapisz go, gdzie Ci wygodnie (pulpit, folder z astrofoto, pendrive) i **kliknij dwa razy**.
 
-> Trzymaj plik `horreum-gui.exe` razem z folderem `_internal`, który leży obok — to jego „silnik".
-> Nie przenoś samego `.exe` w inne miejsce. Windows przy pierwszym uruchomieniu może ostrzec, że
-> to nieznana aplikacja — to normalne dla programów spoza sklepu; wybierz „Więcej informacji →
-> Uruchom mimo to".
+Nic nie instalujesz i nic nie rozpakowujesz — cały program siedzi w tym jednym pliku. Możesz go
+przenosić i kopiować dowolnie; nie ma żadnego folderu, który musiałby leżeć obok.
+
+> **Pierwsze uruchomienie trwa dłużej — i tak ma być.** Program rozpakowuje się w pamięci, więc
+> zanim pojawi się okno, mija kilka sekund. Okno od razu mówi, co robi („Otwieram bazę…",
+> „Buduję widoki…") — jeśli coś pisze, to pracuje, a nie zawiesiło się.
+>
+> Windows przy pierwszym uruchomieniu może ostrzec, że to nieznana aplikacja — to normalne dla
+> programów spoza sklepu; wybierz **Więcej informacji → Uruchom mimo to**.
+>
+> **Którą wersję mam?** Numer stoi w **tytule okna**, np. „Horreum 0.6.0".
 
 ### Ze źródła (każdy system)
 
@@ -114,7 +130,7 @@ Baza to pojedynczy plik `.db` — Twój katalog. Zakładasz go **raz**; potem ty
 | **Miejsce** | gdzie łatwo trafisz — pulpit albo folder z astrofoto |
 
 **Co system zrobi sam:** utworzy pusty plik i przygotuje go do pracy (założy wewnętrzną strukturę).
-Od tej chwili nazwa bazy jest widoczna, a trzy miejsca w pasku bocznym się odblokowują.
+Od tej chwili nazwa bazy jest widoczna, a miejsca w pasku bocznym się odblokowują.
 
 > Bazę zakładasz **pustą** — to normalne, że po tym kroku nic w niej nie ma. Zdjęcia wpuścisz w Kroku 3.
 > Gdy następnym razem otworzysz program, sam wróci do ostatnio używanej bazy — nie musisz jej szukać.
@@ -127,19 +143,20 @@ Od tej chwili nazwa bazy jest widoczna, a trzy miejsca w pasku bocznym się odbl
 To jest pierwsza konfiguracja: pokazujesz Horreum, gdzie leżą Twoje zdjęcia, a on buduje z nich katalog.
 
 1. Wejdź w miejsce **Dostawa** (pasek boczny).
-2. Kliknij dużą złotą akcję **Przyjmij nowe (skan → grupuj → rozwiąż → delta)**.
+2. Kliknij dużą złotą akcję **Przyjmij nowe  (skan → grupuj → rozwiąż → kalibracja → delta)**.
 3. Przy **pierwszym** uruchomieniu program zapyta o folder — wskaż **główny katalog z astrofoto**
    (może zawierać dowolnie zagnieżdżone podfoldery; Horreum zejdzie w głąb sam).
 4. Poczekaj. Pasek postępu i licznik pokazują, ile plików już przeszło. Duże archiwa idą minutami —
    to jednorazowy koszt.
 
-**Co oznaczają cztery etapy** (Horreum robi je po kolei, jednym kliknięciem):
+**Co oznaczają etapy** (Horreum robi je po kolei, jednym kliknięciem):
 
 | Etap | Co się dzieje |
 |---|---|
 | **skan** | czyta nagłówki plików i wpisuje klatki do katalogu (nic nie zmienia na dysku) |
 | **grupuj** | wyprowadza osie teleskopu i konfiguracji sprzętu |
 | **rozwiąż** | rozpoznaje obiekty (NGC/Messier/…), stanowiska (GPS) i filtry |
+| **kalibracja** | dobiera przepisy kalibracji i wiąże klatki z masterami |
 | **delta** | podsumowuje: ile obiektów rozpoznano, co zostało do ręcznej decyzji |
 
 Gdy skończy, na dole zobaczysz podsumowanie — np. ile klatek przyszło, ile było nowych, ile
@@ -173,8 +190,13 @@ wersje pochodne — skadrowane (`_autocrop`), po usunięciu gradientu (`_ABE`, `
 > otworzy się od razu we właściwym miejscu.
 
 Jeśli gotowy obraz nie ma w nagłówku nazwy obiektu, pojawi się o tym wiersz w **Porządkach** —
-informacyjny. Takiemu plikowi Horreum nazwy nie dopisze (drzewo obróbki zostaje nietknięte);
-wiersz mówi tylko, ile obrazów nie wie, co przedstawia.
+i **da się z niego wejść i naprawić**: gotowy obraz nazywa się dokładnie tak samo jak każda inna
+klatka (Krok 4). Wiersz mówi, ile obrazów nie wie, co przedstawia, a klik prowadzi do listy.
+
+**Horreum zapisuje też, z czego ten obraz powstał.** Dla każdego wciągniętego stosu szuka w bazie
+klatek, które do niego weszły, i wiąże je z nim — dzięki temu widzisz, ile godzin naprawdę siedzi
+w gotowym obrazie, a nie tylko ile klatek masz na dysku. To powiązanie zobaczysz w panelu
+**Rodowód…** (Zbiory, po zaznaczeniu obrazu).
 
 ---
 
@@ -210,12 +232,80 @@ wpisz nazwę miejsca. Dwa zapisy tego samego miejsca (np. minimalnie różne GPS
 > Nazwy i scalenia są **odwracalne** — dlatego program nie pyta „czy na pewno?". Zawsze możesz
 > poprawić: zmienić etykietę albo kliknąć **Cofnij scalenie**.
 
-### Przejrzyj obiekty
+### Przejrzyj obiekty — i nazwij to, czego automat nie rozpoznał
 
-**Klatki bez obiektu ›** otwiera **Przegląd obiektów** — bibliotekę rozpoznanych obiektów oraz
-**Kolejkę przeglądu** z klatkami, które czekają na rozstrzygnięcie. W tej wersji to **podgląd**:
-widzisz, co zostało, ale ręczne przypisywanie obiektu dojdzie w kolejnej odsłonie. Filtry u góry
-(**Teleskop**, **Filtr**) zawężają, co widać.
+**Klatki bez obiektu ›** otwiera **Przegląd obiektów**: z lewej biblioteka rozpoznanych obiektów,
+pod nią **Kolejka przeglądu** — lista tego, co czeka na Twoją decyzję. Klik w wiersz kolejki
+pokazuje po prawej te konkretne klatki.
+
+**Kolejka nie jest jedną listą — to kilka kubełków, bo drogi naprawy są różne.** Wiersz mówi, ile
+klatek zawiera i czego potrzebuje:
+
+| Wiersz kolejki | Co znaczy | Czym to naprawiasz |
+|---|---|---|
+| nazwa obiektu, np. **`FlatWizard · 12 klatek`** | nagłówek ma nazwę, ale program jej nie rozpoznaje | **Przypisz obiekt…** — wskazujesz, co to naprawdę jest |
+| **bez nazwy w nagłówku** | plik nic nie mówi o obiekcie | **Napraw nagłówek…** — nazwa idzie do **pliku** |
+| **bez nazwy, format bez karty (RAW)** | zdjęcie z lustrzanki; ten format nie ma gdzie zapisać nazwy | **Przypisz obiekt…** — nazwa idzie do bazy |
+| **bez nazwy, gotowe stosy** | obraz po integracji bez nazwy | **Napraw nagłówek…**, tak samo jak klatki |
+| **…z tego ze ścieżki** | folder podpowiada nazwę, program czeka na Twoje „tak" | **Zatwierdź ze ścieżki…** |
+| dopisek **`· cofnięte ręką`** | to Twoja własna decyzja, nie brak wiedzy — sam zdjąłeś tu nazwę | zależy od kubełka; program uprzedzi, że nadpisze Twój werdykt |
+
+**Wygaszony przycisk zawsze tłumaczy się sam** — najedź na niego myszą, a powie, czego mu brakuje
+albo która droga jest właściwa dla zaznaczonego wiersza. Nie musisz zgadywać.
+
+#### Nazwij klatki ręką
+
+1. Kliknij wiersz kolejki — po prawej pojawią się jego klatki, **wszystkie zaznaczone**.
+2. Jeśli chcesz nazwać tylko część — przytnij zaznaczenie (klik, `Ctrl`, `Shift`).
+3. Kliknij **Przypisz obiekt…**, wpisz lub wybierz nazwę, zatwierdź.
+
+Okno daje dwie drogi — wybierasz jedną:
+
+| Pole | Co zrobić |
+|---|---|
+| **Istniejący obiekt:** | rozwiń listę i wskaż obiekt, który już jest w bibliotece |
+| **albo nowa nazwa** | wpisz nazwę, jak ją znasz: `IC 1795`, `LMC`, `Księżyc`, `C/2023 A3` |
+
+Wypełnione pole nazwy **nadpisuje** wybór z listy. Gdy podasz nową nazwę, program zapamięta ją jako
+**alias**: kolejne klatki z tym zapisem w nagłówku rozpozna już sam, bez pytania.
+
+**Zapisujesz to, co masz ZAZNACZONE** — nigdy całą widoczną listę. Po zapisie dostajesz zdanie
+z rozbiciem: ile klatek zmieniono i **dlaczego resztę pominięto** (osobno kalibrację, osobno klatki
+z nagłówka, osobno te, które zmieniły się w międzyczasie).
+
+> Nazwa spoza katalogów też jest przyjmowana. `LMC` czy `Księżyc` nie mają numeru NGC — program
+> zapamięta je jako **obiekt własny** i od tej pory będzie je rozpoznawał sam.
+
+#### Potwierdź nazwy podpowiedziane przez foldery
+
+Jeśli trzymasz zdjęcia w folderach nazwanych obiektami (`…\NGC6960\…`), program to widzi i **proponuje** —
+ale nigdy nie zapisuje sam, bo folder bywa śmietnikiem. Kliknij **Zatwierdź ze ścieżki…**: dostaniesz
+listę propozycji pogrupowanych po nazwie, z liczbą klatek przy każdej. Odznacz te, których nie chcesz,
+i zatwierdź resztę.
+
+> **Nagłówek jest ważniejszy niż folder.** Gdy plik sam mówi, co przedstawia, program wierzy jemu —
+> propozycja z folderu dotyczy tylko klatek, które milczą.
+
+#### Wpisz nazwę do samego pliku
+
+**Napraw nagłówek…** to jedyna droga, która **zmienia Twoje pliki** — dopisuje im kartę `OBJECT`,
+żeby nazwa została w archiwum na zawsze, także dla innych programów.
+
+> ⚠ **To zapis na dysku.** Okno najpierw pokazuje pełną listę plików i dokładną nazwę, która do nich
+> pójdzie — przeczytaj ją przed zatwierdzeniem. Każdy zapis ma **kopię zapasową nagłówka**, więc
+> istnieje **Cofnij**; program przy tym nigdy nie rusza samego zdjęcia, tylko jego opis.
+
+#### Nazwij albo cofnij wprost ze Zbiorów
+
+Nie musisz iść przez kolejkę. W **Zbiory** zaznacz dowolne klatki i użyj **Obiekt ▾**:
+
+- **Nazwij zaznaczenie…** — to samo okno co wyżej,
+- **Cofnij przypisanie** — zdejmuje nazwę, którą postawiła Twoja ręka albo folder.
+
+> **Cofnięcie nie kasuje faktów z plików.** Nazwa odczytana z nagłówka albo z pozycji na niebie
+> **zostaje** — bo to fakt z archiwum, nie Twoja pomyłka. Cofnięcie zostaje też cofnięciem:
+> klatka nie dostanie nazwy z powrotem przy najbliższym **Rozwiąż**, tylko wróci do kolejki
+> i poczeka na Twoją decyzję.
 
 ---
 
@@ -231,8 +321,47 @@ Wejdź w **Zbiory** — to widok wszystkich klatek z filtrem. Najprościej korzy
 | **Duplikaty** | tylko klatki mające więcej niż jedną kopię |
 | **Do przeglądu** | to, co czeka na ręczną decyzję |
 
-Panel **Pola** z lewej pozwala dołożyć kolumny (Obiekt, Filtr, Kamera…). Własne ułożenie filtrów
-zapiszesz jako nową perspektywę. Motyw **Ciemny/Jasny** przełączysz w menu **Widok**.
+Panel **Pola (kolumny)** z lewej pozwala dołożyć kolumny (Obiekt, Filtr, Kamera…). Własne ułożenie filtrów
+zapiszesz przyciskiem **★ Zapisz widok** jako nową perspektywę — zapisane widoki **siedzą w bazie**,
+więc jadą razem z nią, gdy przeniesiesz plik `.db` na inny komputer. Motyw **Ciemny/Jasny**
+przełączysz w menu **Widok**.
+
+**Szukanie po nazwie, jaką znasz.** Nad listą obiektów jest pole szukania. Wpisz cokolwiek —
+`Ameryka Północna`, `NGC 7000`, `ngc7000` — trafi tak samo. Program zna nazwy potoczne, skróty
+katalogowe i nie czepia się spacji, kropek ani wielkości liter.
+
+**Zaznaczenie to Twój warsztat.** Cokolwiek zaznaczysz w tabeli, pasek pod spodem powie, ile tego
+jest, i da akcje na tym zbiorze: **Obiekt ▾** (nazwij / cofnij), **Rodowód…** (z czego powstał
+gotowy obraz albo czym skalibrowano klatkę), **Popraw nagłówki…**, **Uporządkuj nazwy plików…**
+oraz **Wydaj na stół…**.
+
+> Dwie ostatnie akcje **ruszają pliki na dysku** (zmieniają nazwy albo budują drzewo linków pod
+> obróbkę w WBPP). Obie najpierw pokazują **podgląd** i nie robią nic, dopóki go nie zatwierdzisz.
+
+---
+
+## Krok 6 — Zaplanuj, co sfotografować
+
+Poprzednie kroki opisują to, co **już masz**. **Planer** patrzy w przód: bierze Twoje stanowisko,
+Twój sprzęt i dzisiejszą datę, i mówi, co da się dziś złapać — oraz ile materiału już na to zebrałeś.
+
+Wejdź w **Planer**. Każdy wiersz to jeden cel:
+
+| Kolumna | Co mówi |
+|---|---|
+| **Cel** / **Typ** | co to za obiekt (mgławica, galaktyka…) |
+| **Rozmiar** / **Zestaw i kadr** | czy zmieści się w kadrze Twojego sprzętu |
+| **Okno** / **Kulminacja** | kiedy dziś jest nad horyzontem i kiedy stoi najwyżej |
+| **Pokrycie** | ile materiału już masz — **liczone z Twojego archiwum**, nie ze zgadywania |
+| **Koszt B/D/W** | ile jeszcze trzeba, żeby domknąć |
+| **Rada** | podpowiedź programu |
+| **Plan** / **Notatka** | Twoja własna decyzja i Twój komentarz |
+
+**Pokrycie liczy się z gotowych obrazów, nie z klatek na dysku.** Jeśli te same zdjęcia weszły do
+dwóch stosów, program nie policzy ich dwa razy — pyta o godziny, które realnie siedzą w obrazie.
+
+> Kolumna **Plan** jest **wyłącznie Twoja** — program nigdy sam nie oznaczy celu jako zrobionego.
+> Podpowiada („✓ bez luk"), ale decyzję zapisuje tylko Twoja ręka.
 
 ---
 
@@ -244,9 +373,16 @@ Masz na dysku `D:\AstroFoto` z 4 000 plików FITS z dwóch sezonów, robionych d
 2. **Dostawa → Przyjmij nowe** → wskazujesz `D:\AstroFoto` → czekasz ~3 minuty. Podsumowanie:
    „pliki 4000 · nowe 4000 · rozpoznane obiekty 92%".
 3. **Porządki** pokazuje **Porządki (3)**: Teleskopy bez etykiety — 2, Stanowiska bez nazwy — 1.
-4. Nazywasz teleskopy `Newton 8"` i `Refraktor 80/480`, stanowisko `Taras`. Badge gaśnie.
-5. **Zbiory → perspektywa Przegląd**, w panelu **Pola** dokładasz **Obiekt** i **Filtr** — widzisz
-   cały dorobek ułożony po obiektach.
+4. Nazywasz teleskopy `Newton 8"` i `Refraktor 80/480`, stanowisko `Taras`.
+5. Zostaje **Klatki bez obiektu — 140**. Klikasz i widzisz trzy wiersze: `FlatWizard · 96`
+   (nazwa z nagłówka, której program nie zna), **bez nazwy w nagłówku · 32** oraz
+   **…z tego ze ścieżki · 3 nazwy · 32 klatki**.
+   - `FlatWizard` to nie obiekt, tylko narzędzie — te klatki zostawiasz.
+   - Klikasz **…z tego ze ścieżki → Zatwierdź ze ścieżki…**, przeglądasz trzy propozycje
+     (`NGC6960`, `M31`, `IC1805`), odznaczasz jedną wątpliwą, zatwierdzasz resztę. Zostaje 12 klatek.
+   - Te 12 nazywasz ręką: zaznaczasz, **Przypisz obiekt…**, wpisujesz `NGC 7000`.
+6. **Zbiory → perspektywa Przegląd**, w panelu **Pola (kolumny)** dokładasz **Obiekt** i **Filtr** — widzisz
+   cały dorobek ułożony po obiektach. Zapisujesz ten układ przez **★ Zapisz widok**.
 
 Miesiąc później dogrywasz nową sesję do `D:\AstroFoto`. **Dostawa → Przyjmij nowe** (folder już
 zapamiętany) → przechodzi w kilkanaście sekund, bo stare pliki są pomijane, dopisują się tylko nowe.
@@ -259,7 +395,8 @@ zapamiętany) → przechodzi w kilkanaście sekund, bo stare pliki są pomijane,
 
 - czyta nagłówki i buduje katalog (skan tylko odczytuje pliki),
 - wyprowadza osie teleskopu, stanowiska i konfiguracji,
-- rozpoznaje obiekty z katalogów i nazw potocznych oraz filtry,
+- rozpoznaje obiekty z katalogów, nazw potocznych, pozycji na niebie oraz filtry,
+- wiąże gotowy obraz z klatkami, z których powstał,
 - przy kolejnych dostawach pomija pliki, które już zna,
 - pamięta ostatnią bazę i ostatni folder dostawy oraz wybrany motyw.
 
@@ -268,18 +405,23 @@ zapamiętany) → przechodzi w kilkanaście sekund, bo stare pliki są pomijane,
 - **nie zmienia, nie przenosi ani nie kasuje Twoich plików** podczas skanu,
 - **nie wymyśla nazw** teleskopów i stanowisk — te nadajesz Ty,
 - **nie zgaduje na siłę** obiektu, którego nie jest pewien — ląduje w kolejce przeglądu,
-- zaawansowane operacje ruszające pliki na dysku (zmiana nazw z faktów, budowa drzewa pod WBPP)
-  to **osobne, jawne akcje** — mają własne opisy i zawsze najpierw pokazują podgląd.
+- **nie ufa folderowi bez pytania** — nazwa z katalogu jest propozycją, którą potwierdzasz,
+- **nie oznacza celu jako zrobionego** w Planerze — to zapisuje wyłącznie Twoja ręka,
+- **nie odwraca Twojego cofnięcia** — klatka, której zdjąłeś nazwę, nie dostanie jej z powrotem sama,
+- operacje ruszające pliki na dysku (dopisanie karty `OBJECT`, zmiana nazw z faktów, budowa drzewa
+  pod WBPP) to **osobne, jawne akcje** — zawsze najpierw pokazują podgląd, a zapis nagłówka ma kopię
+  zapasową i **Cofnij**.
 
 ---
 
 ## Checklista pierwszego uruchomienia
 
-- ☐ Program się otwiera (widać okno z paskiem **Dostawa / Zbiory / Porządki**)
-- ☐ Założona baza — jej nazwa jest widoczna, trzy miejsca odblokowane
+- ☐ Program się otwiera (widać okno z paskiem **Dostawa / Zbiory / Porządki / Planer**)
+- ☐ Założona baza — jej nazwa jest widoczna, cztery miejsca odblokowane
 - ☐ **Przyjmij nowe** przeszło do końca, na dole jest podsumowanie
 - ☐ W **Zbiory → Przegląd** widać klatki
 - ☐ W **Porządki** nadane etykiety teleskopów i nazwy stanowisk (badge zgasł albo pokazuje tylko to, co zostawiasz)
+- ☐ W **Porządki → Klatki bez obiektu** kolejka jest pusta **albo** wiesz, co w niej zostawiasz świadomie
 
 ---
 
@@ -294,8 +436,17 @@ zapamiętany) → przechodzi w kilkanaście sekund, bo stare pliki są pomijane,
 | Dodać gotowe obrazy po integracji | **Dostawa → Stosy → Wciągnij stosy…** |
 | Nazwać teleskop | **Porządki → Teleskopy bez etykiety → dwuklik w Etykieta** |
 | Nazwać miejsce | **Porządki → Stanowiska bez nazwy → dwuklik w Nazwa** |
+| Nazwać klatki, których automat nie rozpoznał | **Porządki → Klatki bez obiektu → wiersz kolejki → Przypisz obiekt…** |
+| Nazwać klatki, które właśnie widzę | **Zbiory → zaznacz → Obiekt ▾ → Nazwij zaznaczenie…** |
+| Cofnąć własną pomyłkę w nazwie | **Zbiory → zaznacz → Obiekt ▾ → Cofnij przypisanie** |
+| Przyjąć nazwy podpowiedziane przez foldery | **Porządki → Klatki bez obiektu → …z tego ze ścieżki → Zatwierdź ze ścieżki…** |
+| Wpisać nazwę na stałe do pliku | **Porządki → Klatki bez obiektu → bez nazwy w nagłówku → Napraw nagłówek…** |
+| Znaleźć obiekt po nazwie potocznej | **Zbiory → pole szukania nad listą obiektów** |
+| Zobaczyć, z czego powstał gotowy obraz | **Zbiory → zaznacz obraz → Rodowód…** |
+| Sprawdzić, co sfotografować dziś | **Planer** |
 | Znaleźć duplikaty | **Porządki → Duplikaty** albo **Zbiory → perspektywa Duplikaty** |
 | Zmienić motyw na jasny | **Widok → Jasny** |
+| Sprawdzić, którą mam wersję | tytuł okna |
 
 ## FAQ
 
@@ -312,7 +463,26 @@ zawartość, nie ścieżka — Horreum rozpozna te same klatki pod nowym adresem
 **Przyjmij nowe** dobiegło końca. W **Zbiory** upewnij się, że perspektywa to **Przegląd**, a filtry są puste.
 
 **Część klatek nie ma obiektu.** To normalne dla nietypowych nazw w nagłówku — trafiają do kolejki
-przeglądu w **Porządki → Klatki bez obiektu**.
+przeglądu w **Porządki → Klatki bez obiektu**, skąd nadasz im nazwę ręką.
+
+**Nadałem złą nazwę — da się to odkręcić?** Tak. **Zbiory → zaznacz klatki → Obiekt ▾ → Cofnij
+przypisanie**. Zdejmie nazwę, którą postawiła Twoja ręka albo folder; nazwa odczytana z pliku
+zostaje, bo to nie jest Twoja pomyłka, tylko fakt z archiwum.
+
+**Zdjąłem nazwę, a po „Rozwiąż" wróciła.** Nie wróci — cofnięcie jest trwałe do Twojej kolejnej
+decyzji. Jeśli nazwa wróciła, to znaczy, że pochodzi **z nagłówka pliku**, a nie z ręki: żeby ją
+zmienić na stałe, użyj **Napraw nagłówek…** i popraw sam plik.
+
+**Nazwałem cały kubełek, a program mówi „przypisano 5 z 8".** Zdanie pod spodem wylicza, czemu
+pominął resztę: kalibracja (nie ma obiektu z definicji), klatki z nazwą w nagłówku (ich się nie
+nadpisuje bez potrzeby) albo klatki, które zmieniły się w międzyczasie.
+
+**Czy „Napraw nagłówek…" zepsuje mi zdjęcie?** Nie — dopisuje wyłącznie opis (kartę `OBJECT`),
+same dane obrazu zostają nietknięte. Przed zapisem widzisz listę plików i dokładną nazwę, a po
+zapisie działa **Cofnij** (program trzyma kopię nagłówka).
+
+**Skąd Planer wie, ile już mam?** Liczy godziny z Twojego archiwum — z gotowych obrazów i klatek,
+które do nich weszły. Dlatego pokrycie rośnie dopiero wtedy, gdy materiał realnie przybywa.
 
 <!-- APPENDIX-START: sekcja techniczna — usuwana z wersji PDF dla czytelnika -->
 
@@ -321,7 +491,21 @@ przeglądu w **Porządki → Klatki bez obiektu**.
 > Ta sekcja jest dla utrzymujących projekt, nie dla użytkownika końcowego. Odcinana przy generowaniu PDF.
 
 **Miejsca nawigacji (F5):** `Dostawa` = `PipelineView`, `Zbiory` = `FramesView`, `Porządki` =
-`TasksView`. Osie (teleskop/obserwatorium/obiekt) to podstrony Porządków.
+`TasksView`, `Planer` = `PlannerView` (T1–T5). Osie (teleskop/obserwatorium/obiekt) to podstrony
+Porządków.
+
+**Cztery drogi nadania obiektu** (`horreum/gui/app.py` — `ObjectAxisView`; `horreum/gui/grid.py` —
+`SelectionBar`): ręka z kolejki (`_on_assign` → `repo.user_assign_object`) · ręka ze Zbiorów
+(`Obiekt ▾`, ten sam czasownik klingi) · potwierdzenie propozycji ścieżki (`_on_confirm_path` →
+`resolver.path_proposals`, źródło `path`) · zapis karty `OBJECT` do PLIKU (`_on_repair` →
+`RepairHeaderDialog` → `writeback`, jedyna droga tykająca dysk; gasi też nagrobek `user_cleared`).
+Cofnięcie = `repo.clear_object_assignment`, zdejmuje wyłącznie `CLEARABLE_OBJECT_SOURCES`
+(`path`, `user`); nagrobek przeżywa `run_resolver`.
+
+**Kolejka przeglądu obiektów** (`gui/queries.review_queue`) ma cztery kubełki bezimiennych, każdy
+rozszczepiony po źródle (połówka nietknięta + `· cofnięte ręką`): `object_review` (GROUP BY),
+`nameless`, `nameless_raw`, `nameless_stacks`. Partycja musi domykać się do `review_frame_ids` —
+walidator `_partycja` w `tests/test_gui_queries_object.py`.
 
 **Etapy dostawy** = `scan_tree` → `run_grouper` → `run_resolver` → `run_calibration` →
 `run_lineage` → `delta_report` (`horreum/gui/pipeline.py`). Ten sam łańcuch, w tej samej
@@ -352,8 +536,19 @@ Operacje zaawansowane (osobne briefy, nie ta instrukcja): `horreum rename` (zmia
 faktów — DRY domyślnie, `--apply`/`--undo`), `horreum project` (drzewo linków/kopii pod WBPP — DRY
 domyślnie, `--apply`). W GUI odpowiedniki żyją w Zbiorach („Wydaj na stół…", staging writebacku).
 
-**Status dokumentu:** opisuje stan po F1–F7 (pień scalenia kompletny, oś obserwatorium jako podstrona
-Porządków, portfel naświetleń F7). Mapa stanowisk (F8) i ręczne przypisywanie obiektu (import-legacy)
-— w przygotowaniu; gdy wejdą, dopisać sekcje w Kroku 4/5.
+**Dystrybucja:** od 0.4.0 **onefile** — jeden `dist\horreum-gui.exe` z `packaging\build.ps1 -Onefile`,
+publikowany jako `Horreum-<wersja>-windows-x64.exe`. Instalator NSIS i przenośny zip **wycofane**
+(decyzja: „w jednym exe"); `packaging\horreum-installer.nsi` i wariant onedir zostają dla dev.
+Numer wersji ma jednego właściciela (`pyproject.toml`), widać go w tytule okna — bramka
+`tests/test_version.py`, sonda tytułu w buildzie.
+
+**Status dokumentu:** opisuje stan **0.6.0**. Dopisane w tym przebiegu: onefile zamiast zip+`_internal`,
+czwarte miejsce nawigacji (Planer), cztery drogi nadania obiektu i cofnięcie, propozycje ze ścieżki,
+rodowód stosów, szukanie po nazwach potocznych, perspektywy w bazie.
+
+**Nadal BEZ własnego opisu** (wskazane w instrukcji, ale nieopisane krok po kroku): **Wydaj na
+stół…** (projekcje pod WBPP), **Uporządkuj nazwy plików…** (rename z faktów), **Popraw nagłówki…**
+jako operacja masowa oraz panel **Rodowód…** w wariancie kalibracyjnym. Lead instrukcji mówi o nich
+„mają dostać własny opis" — dopóki go nie ma, to jest dług, nie stan docelowy.
 
 <!-- APPENDIX-END -->

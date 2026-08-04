@@ -6,6 +6,16 @@ schemat i API mogą się jeszcze zmieniać.
 
 ## [Niewydane]
 
+## [0.6.0] — 2026-08-04
+
+Wydanie o **nazywaniu obiektów ręką** — i o tym, żeby ta ręka miała gdzie się cofnąć.
+Do tej pory nazwa obiektu przychodziła wyłącznie z pliku: jeśli nagłówek milczał albo mylił się,
+klatka zostawała bez nazwy i nie było jak tego naprawić z programu. Teraz są cztery drogi —
+nazwiesz zaznaczenie wprost, potwierdzisz propozycję z folderu, dopiszesz kartę do samego pliku
+albo cofniesz własną pomyłkę — a każda z nich mówi, ile klatek ruszyła i czego nie tknęła.
+Osobno: gotowe obrazy po integracji trafiają wreszcie do biblioteki razem z rodowodem („z czego
+to powstało"), a program przestał milczeć przez pierwsze sekundy startu.
+
 ### Dodane
 - **Nazwę obiektu można teraz nadać i COFNĄĆ prosto z ekranu „Klatki".** Do tej pory nadanie nazwy
   ręką było jednokierunkowe: pomyłkę dawało się odwrócić tylko przez edycję pliku ze słownikiem,
@@ -234,7 +244,6 @@ schemat i API mogą się jeszcze zmieniać.
   nazwie, którą podałeś. Rozpoznawanie skrótów działa jak dotąd — `M42` nadal trafia w `NGC1976`.
   Z wiersza poleceń: `horreum target <baza> <nazwa> --clear`.
 
-### Zmienione
 - **Procent rozpoznanych obiektów przestał się zawyżać.** Licznik brał każdą klatkę, która ma
   obiekt — także rozpoznaną po współrzędnych, bez nazwy w nagłówku — a dzielił przez klatki,
   które nazwę mają. Te „darmowe" klatki podnosiły wynik i **maskowały spadek**: gdy przybywało
@@ -463,7 +472,8 @@ Fundament: przejście na model „baza = autorytet, `sha1` = tożsamość".
 - **Import zasilający** świeżej bazy z bazy‑dawcy (read‑only).
 - **CLI**: `init` / `scan` / `group` / `resolve` / `delta`.
 
-[Niewydane]: https://github.com/abo-t/horreum/compare/v0.5.1...HEAD
+[Niewydane]: https://github.com/abo-t/horreum/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/abo-t/horreum/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/abo-t/horreum/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/abo-t/horreum/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/abo-t/horreum/compare/v0.3.2...v0.4.0

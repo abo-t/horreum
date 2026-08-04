@@ -20,10 +20,11 @@ bodies) — straight from FITS/XISF headers, independent of how your folders are
 
 **Who it's for:** astrophotographers who want one queryable catalog over a large FITS/XISF archive.
 
-**Status:** early development — schema and API may still change. The desktop UI and documentation are
-currently **Polish**; UI internationalization is planned. The full guide is in the Polish sections below.
+**Status:** early development — schema and API may still change. The desktop UI ships in **English and
+Polish** (switchable at startup); the documentation is Polish, and the full guide is in the sections
+below.
 
-**Download (Windows):** the latest **installer** and a **portable zip** are on the
+**Download (Windows):** a **single portable `.exe`** — no installer, no unpacking — on the
 [Releases](../../releases/latest) page.
 
 **Contributing:** a hobby project maintained in spare time — issues and pull requests are welcome, but
@@ -67,13 +68,16 @@ bez zależności zewnętrznych (stdlib); astropy wchodzi dopiero na etapie skanu
 
 ### Wersja zamrożona (Windows, bez Pythona)
 
-**⬇ [Pobierz najnowszą wersję](../../releases/latest)** — z sekcji „Assets" wybierz jedną z dwóch:
+**⬇ [Pobierz najnowszą wersję](../../releases/latest)** — w sekcji „Assets" jest **jeden plik**:
+**`Horreum-<wersja>-windows-x64.exe`**.
 
-- **`Horreum-Setup-*.exe`** — instalator (zalecany). Instaluje aplikację dla bieżącego użytkownika
-  (bez uprawnień administratora), tworzy skróty na pulpicie i w menu Start; uruchamiasz „Horreum"
-  jak każdy program. Odinstalowanie: Ustawienia → Aplikacje.
-- **`horreum-*-windows-x64.zip`** — wersja przenośna. Rozpakuj i uruchom `horreum-gui.exe` (okno)
-  lub `horreum.exe` (linia poleceń: `horreum.exe --help`). Folder `_internal/` trzymaj razem z plikami exe.
+Nic nie instalujesz i nic nie rozpakowujesz: zapisz plik gdziekolwiek (pulpit, pendrive) i uruchom
+dwuklikiem. Cała aplikacja siedzi w tym jednym pliku. Numer wersji sprawdzisz w **tytule okna**.
+
+> Przy pierwszym uruchomieniu Windows może ostrzec, że to nieznana aplikacja — to normalne dla
+> programów spoza sklepu. Wybierz **Więcej informacji → Uruchom mimo to**. Start z jednego pliku
+> trwa kilka sekund dłużej niż zwykle (aplikacja rozpakowuje się do pamięci) — okno pojawia się
+> od razu i mówi, co robi.
 
 Baza to plik `.db`, który wybierasz w aplikacji; nie jest przywiązana do katalogu programu.
 Instrukcja krok po kroku: [doc/instrukcja.md](doc/instrukcja.md).
@@ -89,10 +93,18 @@ horreum --help               # linia poleceń
 ## Szybki start
 
 1. **Nowa baza** — wskaż plik `.db` (pusty powstanie z migracjami).
-2. **Skanuj** drzewo z plikami FITS/XISF — baza wciąga nagłówki (append-only, `sha1` = tożsamość).
+2. **Skanuj** drzewo z plikami FITS/XISF/RAW — baza wciąga nagłówki (append-only, `sha1` = tożsamość).
 3. **Grupuj** — Horreum wyprowadza osie teleskopu i konfiguracji.
-4. **Rozwiąż** — resolver rozpoznaje obiekty (katalogi krzyżowe, nazwy potoczne, ciała Układu).
-5. **Przegląd** — co wymaga ręcznej decyzji, trafia na listę; resztą zarządzasz z siatki.
+4. **Rozwiąż** — resolver rozpoznaje obiekty (katalogi krzyżowe, nazwy potoczne, ciała Układu,
+   regiony po współrzędnych, propozycje z nazwy folderu).
+5. **Przegląd** — co wymaga ręcznej decyzji, trafia na listę. Stamtąd nazwiesz klatki ręką,
+   potwierdzisz propozycję z folderu albo dopiszesz kartę `OBJECT` wprost do pliku; każdą własną
+   decyzję da się cofnąć.
+
+Poza tą drogą: **Stosy** (gotowe obrazy po integracji wchodzą do biblioteki razem z rodowodem —
+z czego powstały), **Planer** (co warto sfotografować dziś, z pokryciem materiału), **Wydaj na
+stół** (drzewo linków/kopii pod WBPP) i **Uporządkuj nazwy plików** (zmiana nazw z faktów
+nagłówka — z podglądem i cofnięciem).
 
 ## Budowanie wersji zamrożonej
 
@@ -100,11 +112,17 @@ Wymaga Windows + Pythona. Build idzie z czystego, izolowanego środowiska (`.ven
 skrypt tworzy je sam:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File packaging\build.ps1
+powershell -ExecutionPolicy Bypass -File packaging\build.ps1 -Onefile   # artefakt wydania
+powershell -ExecutionPolicy Bypass -File packaging\build.ps1           # onedir (dev)
 ```
 
-Wynik: `dist\horreum\` (spakuj cały folder do dystrybucji). Szczegóły decyzji pakietowania —
-`packaging\horreum.spec`.
+`-Onefile` daje **jeden plik** `dist\horreum-gui.exe` — to jest artefakt publikowany w Releases.
+Build sam sprawdza, czy zamrożony plik naprawdę wstaje i czy niesie właściwy numer wersji: uruchamia
+go i czyta **tytuł okna procesu potomnego** (bootloader jednego pliku sam tytułu nie ma). Numer ma
+jednego właściciela — `pyproject.toml`; pilnuje tego `tests/test_version.py`.
+
+Szczegóły decyzji pakietowania — `packaging\horreum-onefile.spec` (i `packaging\horreum.spec`
+dla wariantu katalogowego).
 
 ## Licencja
 

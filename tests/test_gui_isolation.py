@@ -25,6 +25,11 @@ QT_WIDGET_FILES = {"app.py", "__main__.py", "pipeline.py", "grid.py", "projectio
                    # DWÓCH wołających, a `grid` nie sięgnie do `app` bez cyklu. Warstwa widżetów —
                    # wpis jest tu PRZESUNIĘCIEM granicy, nie jej rozluźnieniem: rdzeń i read-model
                    # zostają bez Qt, a lista dalej wymienia każdy uprawniony plik z imienia.
+                   # F-1: wskaźnik zajętości z nazwaną fazą (kursor + wymuszone przemalowanie).
+                   # Własny plik, bo sięgają po niego OBAJ — `app.py` i `grid.py` — a grid nie może
+                   # importować `app` (cykl: `app` importuje grid). Ten sam powód, co przy
+                   # `assign_dialog.py`: PRZESUNIĘCIE granicy, nie jej rozluźnienie.
+                   "busy.py",
                    "assign_dialog.py"}
 
 

@@ -1855,3 +1855,186 @@ def test_szukajka_PRZEZYWA_odswiezenie_listwy(obj_view):
     widoczne = {lw.item(i).data(Qt.UserRole)[2] for i in range(lw.count())
                 if not lw.item(i).isHidden()}
     assert widoczne == {"LMC"}
+
+
+# ═════════════════════════ P-K — EKRAN NIE MILCZY (F-1 · F-2 · R-S2b-7 · R-S2b-8)
+
+
+def _grid_z_iloscia(qapp, tmp_path, monkeypatch, n):
+    """FramesView nad bazą o ZADANEJ liczbie lightów — fikstura bramek wydajności."""
+    from PySide6.QtCore import QSettings
+    from horreum.gui.grid import FramesView
+    monkeypatch.setattr(QSettings, "value", lambda self, k, d=None: d)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: None)
+    con = db.open_db(str(tmp_path / "perf.db"))
+    con.execute("INSERT INTO object(id, canon, catalog, kind) VALUES (5,'NGC6960','NGC','deep_sky')")
+    con.executemany(
+        "INSERT INTO frame(id, kind, filetype, sha1_data, first_seen_at, object_id, object_source) "
+        "VALUES (?, 'light', 'raw', ?, ?, 5, 'path')",
+        [(i, f"sha{i}", NOW) for i in range(1, n + 1)])
+    con.executemany("INSERT INTO header(frame_id, raw_json) VALUES (?, '{}')",
+                    [(i,) for i in range(1, n + 1)])
+    con.executemany("INSERT INTO location(frame_id, volume, path, present) VALUES (?,'V',?,1)",
+                    [(i, rf"R:\ASTRO_\LIGHTS\NGC6960\f{i}.ARW") for i in range(1, n + 1)])
+    con.commit()
+    return FramesView(con, now_fn=lambda: NOW), con
+
+
+def test_update_count_NIE_WOLA_selectedRows_ANI_RAZU(qapp, tmp_path, monkeypatch):
+    """R-S2b-7, bramka NIEZALEŻNA OD MASZYNY — liczy WYWOŁANIA, nie milisekundy.
+
+    Defekt miał dokładną postać: `_update_count` chodził po zaznaczeniu DWA razy przez
+    `QItemSelectionModel.selectedRows()`, a ta metoda woła `model.flags()` dla KAŻDEJ komórki
+    zakresu i buduje `QModelIndex` per wiersz. Zmierzone na żywej kopii `pf4` (16 648 klatek,
+    widżet POKAZANY): **2 071 ms** na jedno zdarzenie zaznaczenia, przy rubber-bandzie raz na
+    ruch myszy. Po zejściu na zakresy: **2,0 ms**.
+
+    Ta bramka pyta o PRZYCZYNĘ (zero wywołań), a bliźniacza niżej o SKUTEK (czas) — bo sam czas
+    przepuszcza wariant wolny z innego powodu, a samo liczenie wywołań przepuściłoby wariant,
+    który koszt przeniósł gdzie indziej."""
+    v, con = _grid_z_iloscia(qapp, tmp_path, monkeypatch, 200)
+    try:
+        v.resize(1200, 800)
+        v.show()
+        QApplication.processEvents()
+        v.table.selectAll()
+        QApplication.processEvents()
+
+        sm = v.table.selectionModel()
+        wolania = []
+        oryginal = sm.selectedRows
+        monkeypatch.setattr(sm, "selectedRows", lambda *a: (wolania.append(1), oryginal(*a))[1])
+        v._update_count()
+        assert len(v._selected_data_rows()) == 200, "fikstura nie zaznaczyła całości"
+        assert wolania == [], f"_update_count wołał selectedRows() {len(wolania)}× — kwadrat wrócił"
+    finally:
+        v.close()
+        con.close()
+
+
+def test_zaznaczenie_calosci_NIE_jest_kwadratowe_ASERCJA_CZASOWA(qapp, tmp_path, monkeypatch):
+    """R-S2b-7 — bramka CZASOWA, bo strukturalna przepuszcza wariant wolny z innego powodu
+    (lekcja z firsthandu 0804: „gdy naprawa ma wariant-pułapkę, bramka musi umieć odróżnić oba").
+
+    WIDŻET MUSI BYĆ POKAZANY (`show()`), inaczej model zaznaczenia nie ma czego przeliczać
+    i pomiar BRONI zepsutego kodu — ta sama ścieżka mierzyła 74 ms na widoku bez `show()`
+    i 57,7 s na pokazanym.
+
+    PRÓG WYZNACZONY POMIAREM, NIE NA OKO. Falsyfikator przebiegnięty przez podmianę
+    `_selected_data_rows` na wariant sprzed naprawy, ta sama fikstura, ta sama maszyna:
+
+        n=1000   nowa  1,8 ms   stara   36,9 ms
+        n=2000   nowa  3,9 ms   stara   73,1 ms
+        n=4000   nowa  7,8 ms   stara  146,9 ms
+
+    Stąd n=4000 i próg **50 ms**: stara droga przekracza go 3× (147 ms), nowa ma pod nim 6×
+    zapasu (7,8 ms). Pierwsza wersja tej bramki miała próg 300 ms i była OZDOBĄ — stara droga
+    mieściła się w nim swobodnie, więc test przechodził niezależnie od implementacji."""
+    import time
+    v, con = _grid_z_iloscia(qapp, tmp_path, monkeypatch, 4000)
+    try:
+        v.resize(1200, 800)
+        v.show()
+        QApplication.processEvents()
+        v.table.selectAll()
+        QApplication.processEvents()
+
+        t = time.perf_counter()
+        v._update_count()
+        dt = (time.perf_counter() - t) * 1000
+        assert len(v._selected_data_rows()) == 4000, "fikstura nie zaznaczyła całości"
+        assert dt < 50, f"_update_count przy pełnym zaznaczeniu: {dt:.0f} ms (kwadrat wrócił)"
+    finally:
+        v.close()
+        con.close()
+
+
+def test_traversal_zaznaczenia_ma_PARYTET_ze_stara_droga(obj_view):
+    """R-S2b-7 — nowa droga karmi ZAPIS osi obiektu, więc równość ze starą musi być dowiedziona,
+    nie założona. Przypadek graniczny jest jeden: zakresy zaznaczenia potrafią się NAKŁADAĆ
+    (kontrakt Qt), a `selectedRows()` oddaje wiersze unikalne — bez dedup po stronie zakresów
+    klatka wpadłaby do zapisu dwa razy.
+
+    Kolejność zmienia się ŚWIADOMIE (klikanie → wiersze), więc bramka porównuje ZBIORY i długości;
+    żaden z pięciu wołających na kolejności nie stoi."""
+    from PySide6.QtCore import QItemSelection, QItemSelectionModel, QModelIndex
+    v, _ = obj_view
+    v.refresh()
+    sm = v.table.selectionModel()
+    m = v.model
+    sm.clearSelection()
+    for a, b in ((0, 2), (1, 3)):                     # DRUGI zakres nachodzi na pierwszy
+        sm.select(QItemSelection(m.index(a, 0), m.index(b, m.columnCount(QModelIndex()) - 1)),
+                  QItemSelectionModel.Select)
+
+    stara = []
+    for idx in sm.selectedRows():
+        row = m._rows[idx.row()]
+        if isinstance(row, dict) and "_group" not in row:
+            stara.append(row["frame_id"])
+    nowa = [r["frame_id"] for r in v._selected_data_rows()]
+
+    assert len(nowa) == len(set(nowa)), "zakresy nachodzące zduplikowały klatkę"
+    assert set(nowa) == set(stara) and len(nowa) == len(stara)
+
+
+def test_wygaszona_kontrolka_osi_TLUMACZY_SIE_powodem(obj_view):
+    """R-S2b-8: „wygaszony przycisk tłumaczy się SAM" to doktryna repo, złamana akurat tu —
+    kontrolka „Obiekt ▾" gasła BEZ tooltipa, choć trzej gatujący sąsiedzi swoje mają.
+
+    Cztery stany, cztery różne zdania — bo user ma się dowiedzieć, GDZIE ta nazwa się poprawia,
+    a nie tylko że nie tutaj. Falsyfikator: gdyby powód liczył się jednym zdaniem dla wszystkich,
+    ten test przewróciłby się na dowolnej parze."""
+    from horreum.gui import i18n
+    v, con = obj_view
+    v.refresh()
+
+    _zaznacz(v, [])
+    v._update_count()
+    assert not v.sel_bar.btn_object.isEnabled()
+    assert v.sel_bar.btn_object.toolTip() == i18n.t("grid.sel.object_tip_empty")
+
+    _zaznacz(v, [4])                                    # sam dark — klatek nieba ZERO
+    v._update_count()
+    assert v.sel_bar.btn_object.toolTip() == i18n.t("grid.sel.object_tip_no_lights")
+
+    _zaznacz(v, [3])                                    # light z NAGŁÓWKA — poprawia się w pliku
+    v._update_count()
+    assert v.sel_bar.btn_object.toolTip() == i18n.t("grid.sel.object_tip_header")
+
+    _dodaj_stos(con, 12, src="header")                  # sam gotowy obraz z nazwą z pliku
+    v.refresh()
+    _zaznacz(v, [12])
+    v._update_count()
+    assert v.sel_bar.btn_object.toolTip() == i18n.t("grid.sel.object_tip_stacks")
+
+    _zaznacz(v, [1, 2])                                 # …a przy AKTYWNEJ mówi, ile gest ruszy
+    v._update_count()
+    assert v.sel_bar.btn_object.isEnabled()
+    assert v.sel_bar.btn_object.toolTip() == i18n.t("grid.sel.object_tip_ready",
+                                                    namable=2, clearable=2)
+
+
+def test_faza_zajetosci_gridu_NIE_zjada_zdania_koncowego(obj_view):
+    """F-1: faza dzieli kanał z raportem TYLKO tam, gdzie po niej pada zdanie końcowe. `refresh()`
+    kończy się własnym „Grid: N klatek…", więc opis roboty MUSI zostać przykryty — inaczej
+    wskaźnik zajętości kasowałby komunikat, po który user czekał (ta sama klasa, którą repo ma
+    zapisaną jako „zdanie idzie PO odświeżeniu")."""
+    from horreum.gui import i18n
+    v, _ = obj_view
+    zdania = []
+    v.status_message.connect(zdania.append)
+    v.refresh()
+    assert i18n.t("busy.read_frames") in zdania, "faza w ogóle się nie odezwała"
+    assert zdania[-1].startswith("Grid:"), f"faza przykryła zdanie końcowe: {zdania[-1]!r}"
+
+
+def test_kursor_oczekiwania_WRACA_takze_po_wyjatku(qapp):
+    """F-1: wyjątek w środku długiej operacji nie ma prawa zostawić aplikacji z klepsydrą —
+    to byłby wskaźnik, który sam udaje zawieszenie. `finally` w `busy` jest jedyną obroną."""
+    from horreum.gui import busy as busy_mod
+    assert QApplication.overrideCursor() is None
+    with pytest.raises(RuntimeError):
+        with busy_mod.busy(lambda _t: None, "robota"):
+            raise RuntimeError("bum")
+    assert QApplication.overrideCursor() is None

@@ -44,7 +44,7 @@ from PySide6.QtWidgets import (
 
 from horreum import (filter_engine, lineage, macro as macro_mod, naming, pivot as pivot_mod, repo,
                      writeback)
-from horreum.gui import facet_model, i18n, portfolio, queries, rows, theme
+from horreum.gui import busy, facet_model, i18n, portfolio, queries, rows, theme
 from horreum.gui.facets import RAIL_MIN_W as _FIELDS_MIN_W, FacetRail
 from horreum.gui.assign_dialog import AssignObjectDialog
 from horreum.gui.projection_dialog import ProjectionDialog
@@ -1299,6 +1299,27 @@ def _lineage_flags(head):
     return " · ".join(ostrz), " · ".join(info)
 
 
+def _object_gate_reason(stan):
+    """POWÓD wygaszenia kontrolki „Obiekt ▾" jako klucz i18n; `None` = jest co robić (R-S2b-8).
+
+    Wygaszony przycisk tłumaczy się SAM — to doktryna repo, złamana akurat w tym miejscu: przy
+    zaznaczeniu samych klatek z nagłówka (w realnym archiwum ~95% lightów) kontrolka była szara,
+    menu nieotwieralne i NIC nie mówiło dlaczego, choć trzej gatujący sąsiedzi (`btn_proj`,
+    `btn_clear`, `btn_lineage`) tooltipy mają.
+
+    Powód liczy się z READ-MODELU, nie z domysłu, i schodzi od najwęższego: brak zaznaczenia →
+    brak klatek nieba → sam gotowy obraz (droga naprawy jest inna: karta `OBJECT` w pliku) →
+    nazwa z nagłówka (poprawia się w PLIKU, nie w bazie). Kolejność ma znaczenie: zaznaczenie
+    mieszane trafia w pierwszy powód, który je opisuje prawdziwie."""
+    if stan is None or not stan["n"]:
+        return "grid.sel.object_tip_empty"
+    if not stan["lights"]:
+        return "grid.sel.object_tip_no_lights"
+    if stan["lights"] == stan["stacks"]:
+        return "grid.sel.object_tip_stacks"
+    return "grid.sel.object_tip_header"
+
+
 class SelectionBar(QFrame):
     """Pasek ZBIORU (F3, PLAN_ux_redesign §4): licznik + kryteria słowami + akcje na zbiorze
     [Wydaj na stół…][Popraw nagłówki…][Uporządkuj nazwy plików…][★ Zapisz widok]. Przyciski paneli
@@ -1359,15 +1380,24 @@ class SelectionBar(QFrame):
     def set_criteria(self, text):
         self.criteria_label.set_full_text(text)
 
-    def set_object_actions(self, *, namable, clearable):
+    def set_object_actions(self, *, namable, clearable, reason=None):
         """Uczciwy disabled obu pozycji osi obiektu (S2b, §4/14c-a). Cel gestu to WYŁĄCZNIE
         zaznaczenie, więc przy pustym gaśnie wszystko — fallback „to, co widoczne" jest dla ZAPISU
         osi ZAKAZANY (800 widocznych klatek i jedno chybione kliknięcie to ta sama sekunda).
         Kontrolka zbiorcza zostaje żywa, dopóki cokolwiek da się zrobić: menu, które tłumaczy
-        wygaszoną pozycję, mówi WIĘCEJ niż wygaszony przycisk bez powodu."""
+        wygaszoną pozycję, mówi WIĘCEJ niż wygaszony przycisk bez powodu.
+
+        `reason` (klucz i18n z `_object_gate_reason`) niesie POWÓD wygaszenia — bez niego szara
+        kontrolka odbierała jedyną powierzchnię, która mogła cokolwiek wytłumaczyć (R-S2b-8).
+        Przy AKTYWNEJ kontrolce tooltip mówi, ile klatek gest realnie ruszy: to ta sama liczba,
+        którą pokaże okno, więc user poznaje ją PRZED kliknięciem, a nie po."""
         self.act_name.setEnabled(bool(namable))
         self.act_clear.setEnabled(bool(clearable))
-        self.btn_object.setEnabled(bool(namable or clearable))
+        aktywna = bool(namable or clearable)
+        self.btn_object.setEnabled(aktywna)
+        self.btn_object.setToolTip(
+            i18n.t("grid.sel.object_tip_ready", namable=namable, clearable=clearable) if aktywna
+            else i18n.t(reason or "grid.sel.object_tip_empty"))
 
     def set_clearable(self, on):
         """Uczciwy disabled „× Wyczyść zbiór": aktywny TYLKO gdy jest co zdjąć (facety/filtr)."""
@@ -2147,7 +2177,16 @@ class FramesView(QWidget):
         """Silnik filtra → zbiór frame_id → base_rows + pivot → model. Źródło prawdy = baza (bez
         cache między refreshami). F4: drzewo EFEKTYWNE = compose(stan facetów, drzewo panelu);
         trimy dups/review SETAMI literałowymi PRZED base_rows — JEDNA derywacja trimu dla zbioru
-        głównego i sibling-setów listwy (SPOT, F4R2#2); liczniki listwy per sibling-set (F4R#1)."""
+        głównego i sibling-setów listwy (SPOT, F4R2#2); liczniki listwy per sibling-set (F4R#1).
+
+        POD NAZWANĄ FAZĄ (F-1): zmierzone **1 000 ms** na 16 648 klatkach, a wołane przy KAŻDEJ
+        zmianie facetu, perspektywy i filtra — czyli w reakcji na kliknięcie, po którym user czeka
+        i patrzy w nieruchomy ekran."""
+        with busy.busy(self.status_message.emit, i18n.t("busy.read_frames")):
+            self._refresh()
+
+    def _refresh(self):
+        """Wykonawcza połowa `refresh` (fazę zakłada wołający — JEDEN jej właściciel)."""
         leaf_fn, universe_fn = self._memo_leaf_fns()
         self._effective_tree = facet_model.compose(self._facet_state, self._filter_tree)
         frame_ids = filter_engine.run(self._effective_tree, leaf_fn=leaf_fn, universe_fn=universe_fn)
@@ -2263,33 +2302,78 @@ class FramesView(QWidget):
         akcja na zaznaczeniu musi potwierdzać cel). Nagłówki grup są nieselektowalne → nie liczą się.
         Odświeża też żywą etykietę celu renamu (R1 #18): zaznaczenie-first, inaczej widoczne.
         Odmiana przez `plural` [#11]: ścieżka Duplikatów robi z n=1 przypadek TYPOWY, a „1 klatek"
-        na pasku zbioru czytało się jak błąd (wiz K7 / wiz F5 #7)."""
-        sm = self.table.selectionModel()
-        sel = len(sm.selectedRows()) if sm else 0
+        na pasku zbioru czytało się jak błąd (wiz K7 / wiz F5 #7).
+
+        JEDEN PRZEBIEG ZAZNACZENIA NA ZDARZENIE (R-S2b-7). Do S3 ta metoda chodziła po zaznaczeniu
+        DWA razy — raz po licznik (`selectedRows()`), raz po id-y (`_selected_data_rows`) — a każdy
+        przebieg kosztował **1,06 s** przy pełnym zaznaczeniu 16 648 klatek. Licznik bierze się więc
+        z tej samej listy wierszy, z której biorą się id-y."""
+        rows = self._selected_data_rows()
+        sel = len(rows)
         txt = i18n.t_plural("grid.frames", self._n_total) + (
             f"  ·  {i18n.t_plural('grid.selected', sel)}" if sel else "")
         self.count_label.setText(txt)
-        # Uczciwy disabled osi obiektu — liczony z ZAZNACZENIA, nie z widocznych (§4/14c-a).
-        # Read-model pytamy tylko wtedy, gdy jest o co pytać: przy pustym zaznaczeniu odpowiedź
-        # jest znana bez SQL-a, a `_update_count` chodzi przy KAŻDEJ zmianie zaznaczenia.
-        ids = [r["frame_id"] for r in self._selected_data_rows()] if sel else []
-        stan = queries.selection_object_state(self.con, ids) if ids else None
-        self.sel_bar.set_object_actions(namable=stan["namable"] if stan else 0,
-                                        clearable=stan["clearable"] if stan else 0)
+        self._sync_object_actions(rows)
         if hasattr(self, "rename_bar"):
             self.rename_bar.set_target_label(
                 f"Cel: {i18n.t_plural('grid.selected', sel)}" if sel
                 else f"Cel: {i18n.t_plural('grid.visible', self._n_total)}")
 
+    def _sync_object_actions(self, rows=None):
+        """Uczciwy disabled osi obiektu — liczony z ZAZNACZENIA, nie z widocznych (§4/14c-a).
+
+        BEZ DEBOUNCE'U, i to jest wynik POMIARU, nie zaniechanie (R-S2b-7). Znalezisko mówiło
+        „read-model w gorącej pętli" i szacowało koszt na `json.dumps` 15 890 id + `json_each`
+        na wątku GUI. Zmierzone przy pełnym zaznaczeniu 16 648 klatek: `selection_object_state`
+        = **31 ms**, czyli 1,5% kosztu `_update_count`; całe 2 040 ms brał `selectedRows()`,
+        wołany dwa razy — i to jego zdjęcie (zakresy zamiast `QModelIndex`) załatwiło pętlę,
+        z 2 071 ms na **2 ms**. Debounce dołożony NA WIERZCH tej naprawy kupowałby 31 ms na
+        zdarzenie, a płacił niezmiennikiem „po zmianie zaznaczenia pasek mówi prawdę": stan
+        pozycji menu zależałby od timera, więc każda bramka uczciwości disabled musiałaby pompować
+        pętlę zdarzeń. Zła cena za 1,5%.
+
+        `rows` przekazuje wołający, gdy już je ma — jeden przebieg zaznaczenia na zdarzenie.
+        Read-model pytamy tylko wtedy, gdy jest o co pytać: przy pustym zaznaczeniu odpowiedź jest
+        znana bez SQL-a."""
+        if rows is None:
+            rows = self._selected_data_rows()
+        ids = [r["frame_id"] for r in rows]
+        stan = queries.selection_object_state(self.con, ids) if ids else None
+        self.sel_bar.set_object_actions(
+            namable=stan["namable"] if stan else 0,
+            clearable=stan["clearable"] if stan else 0,
+            reason=_object_gate_reason(stan))
+
     # ---- panel inspekcji daty (G1/G4 — RenameBar) ----
     def _selected_data_rows(self):
-        """Wiersze-klatki (bez markerów grup) dla zaznaczenia. Puste zaznaczenie → []."""
+        """Wiersze-klatki (bez markerów grup) dla zaznaczenia. Puste zaznaczenie → [].
+
+        Z ZAKRESÓW zaznaczenia, nie z `selectedRows()` (R-S2b-7). `QItemSelectionRange.indexes()`
+        woła `model.flags()` dla KAŻDEJ komórki zakresu i buduje `QModelIndex` per wiersz —
+        zmierzone **1,06 s** na 16 648 zaznaczonych klatkach, czyli ta sama klasa kosztu, którą
+        `b5d1b5c` zdjęło z przeładowania tabeli. Zakresy niosą samą geometrię (O(zakresów)),
+        a jedyne, czego ta metoda potrzebuje, to NUMERY wierszy.
+
+        Filtr `"_group" not in row` zostaje jedynym sitem i to on odtwarza kontrakt starej wersji:
+        `indexes()` odsiewał nagłówki grup przez `ItemIsSelectable`, zakres ich nie odsieje, bo nie
+        pyta modelu o flagi. Zakresy potrafią się nakładać (kontrakt Qt), więc numery deduplikujemy
+        — inaczej klatka wpadłaby do zapisu dwa razy.
+
+        KOLEJNOŚĆ ZMIENIA SIĘ ŚWIADOMIE: `selectedRows()` oddawał wiersze w kolejności KLIKANIA,
+        ta droga — w kolejności w tabeli. Sprawdzone na parytecie (zbiór identyczny w każdym
+        przypadku, także przy zakresach nakładających się i przy grupowaniu) oraz u wszystkich
+        pięciu wołających: każdy bierze zbiór albo długość, żaden nie stoi na kolejności kliknięć.
+        Porządek wierszowy jest przy tym DETERMINISTYCZNY, a tamten zależał od tego, jak user
+        klikał."""
         sm = self.table.selectionModel()
         if sm is None:
             return []
+        numery = set()
+        for zakres in sm.selection():
+            numery.update(range(zakres.top(), zakres.bottom() + 1))
         out = []
-        for idx in sm.selectedRows():
-            row = self.model._rows[idx.row()]
+        for i in sorted(numery):
+            row = self.model._rows[i]
             if isinstance(row, dict) and "_group" not in row:
                 out.append(row)
         return out

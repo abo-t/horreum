@@ -283,6 +283,32 @@ CATALOG = {
         "pl": "— config-review: {config}  ·  bez nagłówka: {headerless}  (rozwiązywanie w przygotowaniu)",
         "en": "— config-review: {config}  ·  headerless: {headerless}  (resolution in preparation)",
     },
+    # WYTŁUMACZENIA WIERSZY INFORMACYJNYCH (F-2) — tooltip + odpowiedź na klik. Każde mówi DWIE
+    # rzeczy: czego wiersz jest opisem i dlaczego nie prowadzi dalej. Bez nich klik w wiersz nie
+    # dawał żadnej reakcji, co dla użytkownika jest nieodróżnialne od zawieszenia aplikacji.
+    "object.review_info_generic": {
+        "pl": "To wiersz informacyjny — pokazuje liczbę, nie prowadzi do klatek.",
+        "en": "This is an informational row — it shows a count, it does not lead to frames."},
+    "object.review_info_why": {
+        "pl": "Licznik dwóch INNYCH osi: config-review (oś sprzętu) i klatek bez nagłówka. "
+              "Tu nie ma dokąd prowadzić — te osie mają własne ekrany w Porządkach.",
+        "en": "A counter for two OTHER axes: config-review (hardware) and headerless frames. "
+              "There is nowhere to go from here — those axes have their own screens in Tasks."},
+    "object.nameless_info_empty": {
+        "pl": "Ten kubełek jest pusty — każda klatka z nagłówkiem ma nazwę obiektu. "
+              "Wiersz zapali się i zacznie prowadzić do klatek, gdy pojawi się pierwsza bez niej.",
+        "en": "This bucket is empty — every frame with a header has an object name. "
+              "The row will light up and lead to frames once the first one appears without it."},
+    "object.unreadable_info_empty": {
+        "pl": "Żadna kopia nie jest oznaczona jako nieczytelna — nie ma czego pokazać.",
+        "en": "No copy is marked unreadable — there is nothing to show."},
+    "object.path_proposed_broken_info": {
+        "pl": "Propozycji ze ścieżki NIE POLICZONO, bo słownik obiektów własnych "
+              "(objects_own.json) ma błąd — wiersz nie udaje zera i nie prowadzi nigdzie, "
+              "bo nie ma dokąd. Popraw plik i odśwież.",
+        "en": "Path proposals were NOT COUNTED because the own-objects dictionary "
+              "(objects_own.json) has an error — the row does not fake a zero and leads nowhere, "
+              "because there is nowhere to lead. Fix the file and refresh."},
     "object.no_path": {"pl": "(brak ścieżki)", "en": "(no path)"},
     "object.unreadable_title": {"pl": "Kopie nieczytelne ({n})", "en": "Unreadable copies ({n})"},
     "object.no_location": {"pl": "(brak lokalizacji)", "en": "(no location)"},
@@ -316,6 +342,40 @@ CATALOG = {
 
     # --- P-D: „Napraw nagłówek…" — karta OBJECT wraca do PLIKU (wariant C) ---
     "repair.open_btn": {"pl": "Napraw nagłówek…", "en": "Repair header…"},
+    # TOOLTIPY TRZECIEGO PRZYCISKU KOLEJKI (R-S3-7) — do S3 miał pusty dla KAŻDEGO wiersza, jako
+    # jedyny w rzędzie. Każdy wariant nazywa drogę WŁAŚCIWĄ dla zaznaczonego kubełka, zamiast
+    # milczeć o tym, że w ogóle istnieje druga.
+    "repair.tip": {
+        "pl": "Dopisz kartę OBJECT do PLIKÓW tego kubełka — nazwa wraca do archiwum, "
+              "nie tylko do bazy.",
+        "en": "Add the OBJECT card to this bucket's FILES — the name goes back to the archive, "
+              "not just to the database."},
+    "repair.tip_raw": {
+        "pl": "RAW nie ma karty OBJECT z natury formatu — tu drogą jest „Przypisz obiekt…” "
+              "(ręka, zapis do bazy).",
+        "en": "RAW has no OBJECT card by the nature of the format — here the way is “Assign "
+              "object…” (by hand, written to the database)."},
+    "repair.tip_named": {
+        "pl": "Te klatki nazwę w nagłówku MAJĄ — jest tylko nierozpoznana. Drogą jest "
+              "„Przypisz obiekt…” (ręka, zapis do bazy).",
+        "en": "These frames DO have a name in the header — it is merely unrecognised. The way is "
+              "“Assign object…” (by hand, written to the database)."},
+    "repair.tip_path": {
+        "pl": "Ten kubełek ma już gotową propozycję nazwy — drogą jest „Zatwierdź ze ścieżki…”, "
+              "nie naprawa nagłówka.",
+        "en": "This bucket already has a proposed name — the way is “Confirm from path…”, "
+              "not header repair."},
+    "repair.tip_unreadable": {
+        "pl": "Tych kopii nie da się odczytać, więc nie ma do czego dopisać karty. "
+              "Najpierw odzyskaj plik albo podłącz nośnik.",
+        "en": "These copies cannot be read, so there is nothing to add a card to. "
+              "Recover the file or connect the medium first."},
+    "repair.tip_busy": {
+        "pl": "Druga powierzchnia właśnie pisze do plików — poczekaj na jej koniec.",
+        "en": "Another surface is writing to files right now — wait for it to finish."},
+    "repair.tip_pick": {
+        "pl": "Zaznacz kubełek klatek bez nazwy w nagłówku — ta akcja pisze do PLIKÓW.",
+        "en": "Select a bucket of frames with no name in the header — this action writes to FILES."},
     "repair.title": {"pl": "Napraw nagłówek — karta OBJECT", "en": "Repair header — OBJECT card"},
     "repair.head": {
         "pl": "{frames} klatek w {groups} folderach. Nazwa trafi do PLIKU (karta OBJECT); "
@@ -680,6 +740,22 @@ CATALOG = {
         "en": "No database — open or create one (File menu).",
     },
     "main.db_loaded": {"pl": "Baza: {path}", "en": "Database: {path}"},
+
+    # --- FAZY DŁUGICH OPERACJI (F-1) — czasownik w pierwszej osobie ---
+    # „Czytam bazę…", nie „Ładowanie": user pytał, czy aplikacja COŚ ROBI, więc odpowiedź ma być
+    # zdaniem o robocie, a nie etykietą stanu. Wielokropek niesie „to jeszcze trwa" — kończymy nim
+    # KAŻDĄ fazę, żeby jej zniknięcie było jedynym sygnałem końca.
+    "busy.open_db": {"pl": "Otwieram bazę: {name}…", "en": "Opening database: {name}…"},
+    "busy.mount_views": {"pl": "Buduję widoki…", "en": "Building views…"},
+    "busy.refresh_views": {"pl": "Odświeżam widoki po etapie…", "en": "Refreshing views after stage…"},
+    "busy.read_frames": {"pl": "Czytam klatki…", "en": "Reading frames…"},
+    "busy.read_queue": {"pl": "Czytam bibliotekę i kolejkę przeglądu…",
+                        "en": "Reading library and review queue…"},
+    "busy.fill_frames": {"pl": "Pokazuję klatki: {n}…", "en": "Showing frames: {n}…"},
+    "busy.count_proposals": {"pl": "Liczę propozycje ze ścieżki…", "en": "Counting path proposals…"},
+    "busy.saving_names": {"pl": "Zapisuję nazwy: {done} z {total}…",
+                          "en": "Saving names: {done} of {total}…"},
+    "busy.saving_frames": {"pl": "Zapisuję {n} klatek…", "en": "Saving {n} frames…"},
     "dialog.open_db_title": {"pl": "Otwórz bazę Horreum", "en": "Open Horreum database"},
     "dialog.open_db_filter": {
         "pl": "Bazy SQLite (*.db *.sqlite);;Wszystkie pliki (*)",
@@ -899,6 +975,29 @@ CATALOG = {
     # mówiłoby dokładnie odwrotnie do prawdy.
     "grid.sel.object_stacks": {"pl": " · w tym gotowe obrazy: {n}",
                                "en": " · including finished images: {n}"},
+    # POWÓD WYGASZENIA jako tooltip (R-S2b-8) — „wygaszony przycisk tłumaczy się SAM". Każdy powód
+    # niesie RECEPTĘ, nie samą diagnozę: user ma się dowiedzieć, gdzie ta nazwa się poprawia, a nie
+    # tylko że tutaj nie. Wariant AKTYWNY mówi, ile klatek gest ruszy — to ta sama liczba, którą
+    # pokaże okno, więc poznaje ją PRZED kliknięciem.
+    "grid.sel.object_tip_empty": {
+        "pl": "Zaznacz klatki — ta akcja pisze wyłącznie po zaznaczeniu.",
+        "en": "Select frames — this action writes only to the selection."},
+    "grid.sel.object_tip_no_lights": {
+        "pl": "Zaznaczenie nie ma klatek nieba. Kalibracja obiektu nie ma z definicji.",
+        "en": "The selection has no sky frames. Calibration has no object by definition."},
+    "grid.sel.object_tip_stacks": {
+        "pl": "Same gotowe obrazy z nazwą z pliku — tę poprawia się kartą OBJECT "
+              "(Porządki → „Napraw nagłówek…”).",
+        "en": "Only finished images named from the file — fix that with the OBJECT card "
+              "(Tasks → “Fix header…”)."},
+    "grid.sel.object_tip_header": {
+        "pl": "Nazwa pochodzi z nagłówka — poprawia się ją w PLIKU "
+              "(Porządki → „Napraw nagłówek…”), nie w bazie.",
+        "en": "The name comes from the header — fix it in the FILE "
+              "(Tasks → “Fix header…”), not in the database."},
+    "grid.sel.object_tip_ready": {
+        "pl": "Do nazwania: {namable} · do cofnięcia: {clearable}",
+        "en": "To name: {namable} · to undo: {clearable}"},
 
     # --- Panel RODOWODU gotowego stosu (I-2d, P-I) ---
     # Słownictwo trzyma jedną granicę: „weszło" = fakt zapisany, „wynika z czasu" = kandydat.

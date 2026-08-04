@@ -438,3 +438,99 @@ def test_pusta_perspektywa_nie_klamie_ze_baza_pusta(qapp, tmp_path):
         assert len(win.grid_view._frame_ids) == wszystkie
     finally:
         win.close()
+
+
+# ═════════════════════════ P-K / F-1 — OKNO NIE MILCZY PRZY DŁUGIEJ ROBOCIE
+
+
+def test_faza_startu_MA_WLASNY_KANAL_a_nie_pasek_raportow(qapp, tmp_path):
+    """F-1: opis roboty i raport nie mogą dzielić jednego miejsca.
+
+    `statusBar().showMessage` ma jedno pole, więc faza „Odświeżam widoki po etapie…" wypychałaby
+    z niego raport, który właśnie padł („Etap Rozwiąż zakończony") — a to raport jest tym, po co
+    user czekał. Stąd `phase_label` jako STAŁY widżet paska: dwa kanały, zero kolizji.
+
+    Falsyfikator: zawróć `_say_phase` na `showMessage` → `currentMessage()` przestanie być pusty
+    i raport zniknie."""
+    win = MainWindow(_seeded_db(tmp_path))
+    try:
+        win._say_phase("Czytam bazę…")
+        assert win.phase_label.text() == "Czytam bazę…"
+        assert win.statusBar().currentMessage() != "Czytam bazę…"   # raport ma własne pole
+
+        win.statusBar().showMessage("Etap Rozwiąż zakończony")
+        win._say_phase("Odświeżam widoki po etapie…")
+        assert win.statusBar().currentMessage() == "Etap Rozwiąż zakończony"   # faza go NIE zjadła
+    finally:
+        win.close()
+
+
+def test_faza_GASNIE_po_zakonczeniu_roboty(qapp, tmp_path):
+    """F-1: opis operacji, która się skończyła, jest kłamstwem — pasek nie ma prawa go trzymać.
+    `_end_phase` gasi etykietę i przywraca środek okna do zdania o STANIE."""
+    win = MainWindow(_seeded_db(tmp_path))
+    try:
+        win._say_phase("Buduję widoki…")
+        assert win.phase_label.text()
+        win._end_phase()
+        assert win.phase_label.text() == ""
+    finally:
+        win.close()
+
+
+def test_otwarcie_bazy_NAZYWA_FAZY_po_kolei(qapp, tmp_path):
+    """F-1, sedno żądania Zdzinia („czytam bazę / czytam nagłówki"): najdłuższa operacja aplikacji
+    ma mówić, CO ROBI, i to czasownikiem — zmierzone **4 649 ms** na żywej `pf4` (otwarcie bazy
+    + montaż czterech widoków), przez które do tej zmiany na ekranie nie było niczego.
+
+    Bramka zbiera KOLEJNOŚĆ faz, bo jedna faza na całość byłaby tym samym co żadna: user ma
+    widzieć, że robota POSTĘPUJE, a nie że stoi na jednym zdaniu."""
+    win = MainWindow()
+    fazy = []
+    try:
+        oryginal = win._say_phase
+        win._say_phase = lambda t: (fazy.append(t), oryginal(t))[1]
+        win.open_path(_seeded_db(tmp_path))
+        assert len(fazy) >= 2, f"start ma nazwać co najmniej dwie fazy, było: {fazy}"
+        assert any("Otwieram bazę" in f for f in fazy), fazy
+        assert any("Buduję widoki" in f for f in fazy), fazy
+        assert win.phase_label.text() == ""              # …i po wszystkim gaśnie
+        assert win.con is not None                       # baza realnie otwarta
+    finally:
+        win.close()
+
+
+def test_start_aplikacji_POKAZUJE_OKNO_ZANIM_czyta_baze(qapp, tmp_path, monkeypatch):
+    """F-1, cała naprawa siedzi w KOLEJNOŚCI: do tej zmiany `MainWindow(start)` otwierał bazę
+    i montował cztery widoki W KONSTRUKTORZE, a `show()` szedł dopiero po nim — 4,65 s czarnego
+    ekranu, w wydaniu onefile plus rozpakowanie bootloadera. User pytał wtedy nie „czy trwa",
+    tylko „czy ono w ogóle wstało".
+
+    Bramka pilnuje porządku zdarzeń: `show()` MUSI paść przed pierwszym dotknięciem bazy.
+    Falsyfikator: wróć do `MainWindow(start)` + `win.show()` → `kolejnosc` zacznie się od 'open'."""
+    from horreum.gui import app as app_mod
+
+    kolejnosc = []
+    prawdziwy_open = app_mod.MainWindow.open_path
+    prawdziwy_show = app_mod.MainWindow.show
+    okna = []
+
+    def _open(self, path):
+        kolejnosc.append("open")
+        return prawdziwy_open(self, path)
+
+    def _show(self):
+        kolejnosc.append("show")
+        okna.append(self)
+        return prawdziwy_show(self)
+
+    monkeypatch.setattr(app_mod.MainWindow, "open_path", _open)
+    monkeypatch.setattr(app_mod.MainWindow, "show", _show)
+    monkeypatch.setattr(app_mod.QApplication, "exec", lambda self: 0)
+
+    try:
+        app_mod.main([_seeded_db(tmp_path)])
+        assert kolejnosc == ["show", "open"], f"okno stanęło po odczycie bazy: {kolejnosc}"
+    finally:
+        for w in okna:
+            w.close()

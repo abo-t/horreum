@@ -18,6 +18,7 @@ między widokami w `QStackedWidget`). Oś teleskopu z etapu 1 to teraz OSADZALNY
 import os
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 from PySide6.QtCore import Qt, QLocale, QSettings, QUrl, Signal
 from PySide6.QtGui import QActionGroup, QColor, QDesktopServices, QPalette
@@ -29,7 +30,7 @@ from PySide6.QtWidgets import (
 )
 
 from horreum import db, macro as macro_mod, repo, resolver
-from horreum.gui import i18n, mapproj, queries, theme
+from horreum.gui import busy, i18n, mapproj, queries, theme
 from horreum.gui.assign_dialog import AssignObjectDialog
 from horreum.gui.map_view import SitesMapView
 from horreum.resolve._text import norm_alnum
@@ -44,6 +45,27 @@ COL_ID, COL_CANON, COL_LABEL, COL_STATUS, COL_FRATIO, COL_FOCAL, COL_FRAMES = ra
 # nowym kubełku: przycisk aktywny przy drążeniu, które go nie obsługuje, albo odwrotnie.
 _CLEARED_TAGS = frozenset({"object_raw_cleared", "nameless_raw_cleared"})
 _ASSIGN_TAGS = frozenset({"object_raw", "nameless_raw"}) | _CLEARED_TAGS
+# POWÓD WYGASZENIA „Napraw nagłówek…" PER KUBEŁEK (R-S3-7) — mapa, nie drabina `if`-ów.
+#
+# Drabina rosła o jeden człon na każdy nowy kubełek i dwa razy z rzędu zapomniała o kolejnym:
+# `object_raw` i `path_proposals` dostawały zdanie „zaznacz kubełek" o wierszu, który user
+# WŁAŚNIE zaznaczył — czyli odpowiedź na pytanie, którego nie zadał. Mapa czyni ten dług
+# STRUKTURALNYM: bramka przechodzi kolejkę i pyta, czy KAŻDY jej wiersz ma własne zdanie,
+# więc kubełek dodany jutro przewróci test, zamiast po cichu dostać cudzą receptę.
+#
+# Klucz `None` = brak zaznaczenia. Kubełki naprawiane KARTĄ (`nameless`, `nameless_stacks`) mają
+# przycisk AKTYWNY, więc ich wpis opisuje, co przycisk zrobi, a nie czego brakuje.
+_REPAIR_TIPS = {
+    "nameless": "repair.tip",
+    "nameless_stacks": "repair.tip",
+    "nameless_raw": "repair.tip_raw",
+    "nameless_raw_cleared": "repair.tip_raw",
+    "object_raw": "repair.tip_named",
+    "object_raw_cleared": "repair.tip_named",
+    "path_proposals": "repair.tip_path",
+    "unreadable": "repair.tip_unreadable",
+    None: "repair.tip_pick",
+}
 # Stałe nagłówków trzymają KLUCZE katalogu (nie stringi) — etykieta rozwiązuje się `_headers()` w czasie
 # BUDOWY widżetu, po `i18n.set_lang` w `main` (D-L1: stałe module-level ewaluują się przed set_lang, więc
 # string zamroziłby domyślny PL; klucz jest językowo-neutralny).
@@ -551,16 +573,22 @@ class ConfirmPathObjectsDialog(QDialog):
             self.error.setText(i18n.t("path.err.nothing"))
             return
         assigned = skipped = 0
-        for it in wybrane:
-            p = it["proposal"]
-            try:
-                g = repo.user_assign_object(
-                    self.con, alias_norm=None, canon=p.canon, catalog=p.catalog, kind=p.kind,
-                    frame_ids=list(p.frame_ids), now=self._now(), object_source="path")
-            except ValueError as e:
-                self.error.setText(str(e))
-                break
-            assigned, skipped = assigned + g.assigned, skipped + g.skipped
+        # FAZA Z LICZNIKIEM (F-1): zapis idzie transakcja per NAZWA, więc „zapisuję" bez liczby
+        # nie odróżniałoby przebiegu przez 34 pozycje od zawieszenia się na pierwszej. Licznik
+        # bierze się z tej samej listy, którą user zaznaczył — nie z liczby propozycji w ogóle.
+        with busy.busy(self.status.setText,
+                       i18n.t("busy.saving_names", done=0, total=len(wybrane))) as faza:
+            for i, it in enumerate(wybrane, 1):
+                p = it["proposal"]
+                try:
+                    g = repo.user_assign_object(
+                        self.con, alias_norm=None, canon=p.canon, catalog=p.catalog, kind=p.kind,
+                        frame_ids=list(p.frame_ids), now=self._now(), object_source="path")
+                except ValueError as e:
+                    self.error.setText(str(e))
+                    break
+                assigned, skipped = assigned + g.assigned, skipped + g.skipped
+                faza.say(i18n.t("busy.saving_names", done=i, total=len(wybrane)))
         self.assigned = assigned
         msg = i18n.t("path.done", names=len(wybrane), assigned=assigned,
                      total=assigned + skipped)
@@ -1032,6 +1060,8 @@ class ObjectAxisView(QWidget):
         lv.addWidget(QLabel(i18n.t("object.review_queue")))
         self.review = QListWidget()
         self.review.itemSelectionChanged.connect(self._on_review_selected)
+        # DRUGI sygnał, bo wiersz informacyjny nie jest zaznaczalny i pierwszego nie wyzwala (F-2).
+        self.review.itemClicked.connect(self._on_review_clicked)
         lv.addWidget(self.review)
         # Akcja #8/P4: przypisz obiekt zaznaczonej pozycji review (aktywna TYLKO przy tagu
         # „object_raw" — obie listy wzajemnie czyszczą selekcję, przycisk śledzi obie).
@@ -1124,6 +1154,12 @@ class ObjectAxisView(QWidget):
         flt = self._filters()
         self._loading = True
         try:
+            # BEZ FAZY ZAJĘTOŚCI — ŚWIADOMIE, i to jest pomiar, nie przeoczenie (F-1): cały
+            # `refresh()` tego widoku mierzy **164 ms** na 16 648 klatkach (z czego `review_queue`
+            # 146 ms), czyli poniżej progu, przy którym człowiek pyta „czy się zawiesiło". Faza
+            # mignęłaby na 0,16 s i byłaby szumem, a nie informacją — a że ten widok kończy akcje
+            # WŁASNYMI raportami („Przypisano 2 z 2 klatek → M42"), migający opis roboty
+            # wypychałby ze statusu dokładnie to zdanie, po które user czekał.
             rows = queries.library_objects(
                 self.con, telescope_id=flt["telescope_id"], filter_canon=flt["filter_canon"])
             _przeladuj_wiersze(self.objects, len(rows))
@@ -1189,7 +1225,8 @@ class ObjectAxisView(QWidget):
         # nadawany WYŁĄCZNIE przy n>0: kubełek pusty ma zostać informacyjny, żeby zaznaczenie nie
         # otwierało okna bez treści.
         self._add_review_item(i18n.t("object.nameless_line", n=q["nameless_count"]),
-                              tag="nameless" if q["nameless_count"] > 0 else None)
+                              tag="nameless" if q["nameless_count"] > 0 else None,
+                              info=i18n.t("object.nameless_info_empty"))
         # Bliźniak kubełka wyżej po drugiej stronie FORMATU (`resolver.NO_OBJECT_CARD_FILETYPES`):
         # RAW nie ma karty `OBJECT` z natury, więc „Napraw nagłówek…" go nie dotyczy — drogą
         # naprawy jest RĘKA. Do S4 wiersz był INFORMACYJNY i to była luka, nie decyzja: akcja
@@ -1213,7 +1250,8 @@ class ObjectAxisView(QWidget):
         if q["path_proposed_frames"] is None:
             # Słownik obiektów własnych ma błąd — kubełek NIE UDAJE zera (to dwie różne prawdy):
             # wiersz mówi, że propozycji nie policzono, i nie prowadzi nigdzie, bo nie ma dokąd.
-            self._add_review_item(i18n.t("object.path_proposed_broken"))
+            self._add_review_item(i18n.t("object.path_proposed_broken"),
+                                  info=i18n.t("object.path_proposed_broken_info"))
         elif q["path_proposed_frames"] > 0:
             self._add_review_item(
                 i18n.t("object.path_proposed_line", names=q["path_proposed_names"],
@@ -1230,15 +1268,17 @@ class ObjectAxisView(QWidget):
                 i18n.t("object.nameless_stacks_line", n=q["nameless_stacks_count"]),
                 tag="nameless_stacks")
         self._add_review_item(i18n.t("object.unreadable_line", n=q["unreadable_count"]),
-                              tag="unreadable" if q["unreadable_count"] > 0 else None)
+                              tag="unreadable" if q["unreadable_count"] > 0 else None,
+                              info=i18n.t("object.unreadable_info_empty"))
         # liczniki innych kanałów jako pozycja informacyjne (bez tagu → nieklikana); nota
         # „rozwiązywanie w przygotowaniu" ZAWĘŻONA do tych dwóch kanałów (R#9) — obiekt-review
         # i kopie mają już swoje akcje.
-        self._add_review_item(i18n.t(
-            "object.review_info",
-            config=q["config_review_count"], headerless=q["headerless_count"]))
+        self._add_review_item(
+            i18n.t("object.review_info",
+                   config=q["config_review_count"], headerless=q["headerless_count"]),
+            info=i18n.t("object.review_info_why"))
 
-    def _add_review_item(self, text, *, tag=None, payload=None):
+    def _add_review_item(self, text, *, tag=None, payload=None, info=None):
         """Jedna pozycja kolejki przeglądu — JEDEN producent wiersza dla wszystkich kubełków.
 
         WIZ #11: pięć wierszy miało identyczny krój i kolor, a klikalne były dwa — nic na ekranie
@@ -1254,7 +1294,16 @@ class ObjectAxisView(QWidget):
 
         Rozdzielenie stoi na TAGU, nie na osobnym parametrze — tag jest jedynym faktem, którego
         dispatch (`_selected_review`) realnie używa, więc druga flaga „czy klikalny" mogłaby się
-        z nim rozjechać (SPOT)."""
+        z nim rozjechać (SPOT).
+
+        WIERSZ INFORMACYJNY TŁUMACZY SIĘ SAM (F-2, firsthand Zdzinia 0804). Do tej zmiany klik
+        w niego nie dawał ŻADNEJ odpowiedzi — i to dosłownie: wiersz nie jest zaznaczalny, więc
+        `itemSelectionChanged` w ogóle nie leci i nie ma nawet podświetlenia. Dla użytkownika jest
+        to nieodróżnialne od zawieszenia, a trzy z pięciu wierszy kolejki tak mają. Dostaje więc
+        `info`: tooltip pod kursorem ORAZ zdanie w pasku statusu po kliknięciu — mówiące, CZEGO
+        ten wiersz jest opisem i dlaczego nie prowadzi dalej. Domyślne `info` jest świadome:
+        wiersz bez własnego wytłumaczenia i tak ma odpowiedzieć cokolwiek, bo cisza jest tu
+        gorsza od zdania ogólnego."""
         it = QListWidgetItem(f"{text}  ›" if tag else text)
         if tag:
             it.setData(Qt.UserRole, tag)
@@ -1262,7 +1311,18 @@ class ObjectAxisView(QWidget):
         else:
             it.setFlags(Qt.ItemIsEnabled)      # informacyjny, nie do zaznaczenia
             it.setForeground(_DIM["fg"])
+            powod = info or i18n.t("object.review_info_generic")
+            it.setData(Qt.UserRole + 2, powod)
+            it.setToolTip(powod)
         self.review.addItem(it)
+
+    def _on_review_clicked(self, item):
+        """Klik w wiersz kolejki. Wiersz Z DROGĄ obsługuje `_on_review_selected` (przez zaznaczenie);
+        tu zostaje WYŁĄCZNIE wiersz informacyjny — jedyny, który sam z siebie nie odpowiada niczym
+        (F-2). `itemClicked` leci także dla wierszy niezaznaczalnych, bo są `ItemIsEnabled`."""
+        if item is not None and item.data(Qt.UserRole) is None:
+            self.status_message.emit(item.data(Qt.UserRole + 2)
+                                     or i18n.t("object.review_info_generic"))
 
     def _set_obj_cell(self, r, c, text, *, data=None, align=None):
         item = QTableWidgetItem(text)
@@ -1322,6 +1382,16 @@ class ObjectAxisView(QWidget):
             "object.assign_tip_raw" if tag == "nameless_raw" else
             "object.assign_tip_card" if tag in ("nameless", "nameless_stacks") else
             "object.assign_tip_pick"))
+        # TRZECI przycisk tego rzędu milczał — jako JEDYNY (R-S3-7). Miał `enabled=False` i PUSTY
+        # tooltip dla każdego wiersza, choć obaj sąsiedzi tłumaczą się od S2/S4. Skutek: kubełek,
+        # który naprawia się kartą w PLIKU, wyglądał identycznie jak ten, który naprawia się ręką
+        # w bazie — a różnica jest fundamentalna, bo jedna droga tyka archiwum, druga nie.
+        # Osobny człon dla mutexu writebacku: „nie da się" i „nie teraz" to dwa różne zdania.
+        # Mutex writebacku BIJE powód kubełka: „nie da się" i „nie teraz" to dwa różne zdania,
+        # a użytkownik czekający na cudzy zapis potrzebuje tego drugiego.
+        self.repair_btn.setToolTip(i18n.t(
+            "repair.tip_busy" if self._foreign_wb and tag in ("nameless", "nameless_stacks")
+            else _REPAIR_TIPS.get(tag, "repair.tip_pick")))
 
     def _on_object_selected(self):
         """Obiekt zaznaczony → klatki tego obiektu (z bieżącym filtrem). Czyści selekcję review (wzajemnie
@@ -1345,7 +1415,12 @@ class ObjectAxisView(QWidget):
         """Pozycja kolejki zaznaczona → dispatch po tagu: `object_raw` = nierozwiązane klatki tej
         nazwy (+ aktywacja „Przypisz obiekt…"); `nameless_raw` = klatki w formacie bez karty
         `OBJECT` (S4 — ta sama akcja, grupa bez zeznania); `unreadable` = tryb „kopie" prawego
-        panelu (Z6); pozycja informacyjna (bez tagu) nie drąży."""
+        panelu (Z6); pozycja informacyjna (bez tagu) nie drąży.
+
+        BEZ FAZY ZAJĘTOŚCI, na pomiarze (F-1): drążenie kubełków mierzy **76–103 ms** na 16 648
+        klatkach po naprawie `b5d1b5c` — do niej te same ścieżki brały dziesiątki sekund i faza
+        byłaby tu konieczna, ale defekt kwadratowy zdjęto i został gest, który człowiek odbiera
+        jako natychmiastowy."""
         if self._loading:
             return
         tag, payload = self._selected_review()
@@ -1353,6 +1428,11 @@ class ObjectAxisView(QWidget):
         if tag is None:                        # nic nie zaznaczone / pozycja informacyjna
             return
         self.objects.clearSelection()
+        self._drill_review(tag, payload)
+
+    def _drill_review(self, tag, payload):
+        """Drążenie zaznaczonej pozycji kolejki do prawego panelu — wykonawcza połowa
+        `_on_review_selected` (dispatch po tagu oddzielony od bramek wejścia)."""
         if tag in ("object_raw", "object_raw_cleared"):
             cofniete = tag in _CLEARED_TAGS
             self._restore_frames_mode()
@@ -1496,9 +1576,11 @@ class ObjectAxisView(QWidget):
             return
         canon, catalog, kind, alias_norm = dlg.selected
         try:
-            g = repo.user_assign_object(
-                self.con, alias_norm=alias_norm, canon=canon, catalog=catalog, kind=kind,
-                frame_ids=frame_ids, now=self._now(), overwrite_weak=cofniete)
+            with busy.busy(self.status_message.emit,
+                           i18n.t("busy.saving_frames", n=len(frame_ids))):
+                g = repo.user_assign_object(
+                    self.con, alias_norm=alias_norm, canon=canon, catalog=catalog, kind=kind,
+                    frame_ids=frame_ids, now=self._now(), overwrite_weak=cofniete)
         except ValueError as e:                # konflikt aliasu / dryf do nieistniejącej klatki
             QMessageBox.warning(self, i18n.t("assign.title"), str(e))
             return
@@ -1525,7 +1607,7 @@ class ObjectAxisView(QWidget):
         a kliknięciem mógł przebiec `Rozwiąż` z workera i lista byłaby o niego starsza. Klinga
         pomija klatki, które w międzyczasie dostały obiekt (dryf), więc podwójne liczenie kosztuje
         jeden SELECT, a jego brak kosztowałby zapis pod nieaktualną listą."""
-        propozycje = resolver.path_proposals(self.con)
+        propozycje = resolver.path_proposals(self.con)   # 16 ms zmierzone — bez fazy (F-1)
         if not propozycje:
             self.status_message.emit(i18n.t("path.err.nothing"))
             return
@@ -2153,7 +2235,14 @@ class MainWindow(QMainWindow):
         self.empty_note.setVisible(False)
         outer.addWidget(self.empty_note, 1)
         self.setCentralWidget(central)
-        self.statusBar()
+        # WŁASNY KANAŁ FAZY (F-1) — widżet STAŁY paska statusu, nie `showMessage`. Rozdział jest
+        # tu koniecznością, nie estetyką: `showMessage` ma jedno miejsce, więc opis roboty
+        # („Odświeżam widoki po etapie…") wypychałby z niego raport, który właśnie padł („Etap
+        # Rozwiąż zakończony") — a raport jest tym, po co user czekał. Pusty w spoczynku, więc
+        # w bezczynności nie zabiera ani piksela.
+        self.phase_label = QLabel("")
+        self.phase_label.setProperty("role", "secondary")
+        self.statusBar().addPermanentWidget(self.phase_label)
 
     def _show_view(self, idx):
         """Przełącz miejsce nawigacji (seam dla kodu i testów) — sidebar prowadzi stack."""
@@ -2243,17 +2332,23 @@ class MainWindow(QMainWindow):
     def _on_stage_finished(self, name):
         """Etap pipeline'u zakończył zapis (worker, własne połączenie). Read-modele osi w głównym
         wątku odświeżamy DOPIERO TERAZ (nie w trakcie skanu — WAL → zapisy workera widoczne). Oś obiektu
-        przeładowuje też facety (skan/resolver mogły dodać teleskopy/filtry/obiekty)."""
-        self.axis_view.refresh()
-        self.observatory_view.refresh()
-        self.object_view._load_facets()
-        self.object_view.refresh()
-        self.grid_view._load_facets()
-        self.grid_view.refresh()
-        self.tasks_view.refresh_counts()    # liczniki zadań + badge ze świeżego stanu (F5)
-        # Planer (T5): świeże klatki zmieniają POKRYCIE celów (godziny per kanał), więc plan nocy
-        # policzony przed dostawą pokazywałby stare luki.
-        self.planner_view.refresh()
+        przeładowuje też facety (skan/resolver mogły dodać teleskopy/filtry/obiekty).
+
+        POD NAZWANĄ FAZĄ (F-1): to sześć przeładowań pod rząd, zmierzone ~1,2 s na żywej `pf4`,
+        i lecą DOKŁADNIE w chwili, w której pasek Dostawy właśnie zgasł — czyli user widzi „etap
+        zakończony" i zaraz potem nieruchome okno. Faza domyka tę lukę."""
+        with busy.busy(self._say_phase, i18n.t("busy.refresh_views")):
+            self.axis_view.refresh()
+            self.observatory_view.refresh()
+            self.object_view._load_facets()
+            self.object_view.refresh()
+            self.grid_view._load_facets()
+            self.grid_view.refresh()
+            self.tasks_view.refresh_counts()    # liczniki zadań + badge ze świeżego stanu (F5)
+            # Planer (T5): świeże klatki zmieniają POKRYCIE celów (godziny per kanał), więc plan nocy
+            # policzony przed dostawą pokazywałby stare luki.
+            self.planner_view.refresh()
+        self._end_phase()
 
     def _on_open_collection(self, name):
         """Zadanie z Porządków prowadzi do Zbiorów z ustawioną perspektywą (Duplikaty = flaga
@@ -2318,26 +2413,65 @@ class MainWindow(QMainWindow):
         if path:
             self._open_path(path)
 
+    def open_path(self, path):
+        """PUBLICZNE wejście w bazę — jedyna droga dla `main`, które otwiera bazę PO pokazaniu okna
+        (F-1). Nazwa bez podkreślenia, bo to nie jest już wyłącznie wewnętrzna sprawa okna."""
+        self._open_path(path)
+
     def _open_path(self, path):
         """Otwórz+zmigruj bazę, przejmij ją na własność, przemontuj widoki. Stare połączenie (nasza
-        własność) zamykamy — read-model nowej bazy musi widzieć właściwy plik."""
-        new_con = db.open_db(path)
-        old = self.con
-        self.con = new_con
-        self.db_path = path
-        self._mount_views()
-        self._sync_db_state()
-        if old is not None:
-            old.close()
+        własność) zamykamy — read-model nowej bazy musi widzieć właściwy plik.
+
+        DWIE NAZWANE FAZY (F-1), bo to najdłuższa operacja aplikacji — zmierzone 4 649 ms na żywej
+        `pf4` (16 648 klatek): otwarcie i migracja bazy, potem montaż czterech widoków. Faza idzie
+        na ŚRODEK okna, nie na pasek statusu: przy starcie w oknie nie ma jeszcze nic innego,
+        a pasek statusu na dole jest ostatnim miejscem, w które user patrzy, gdy pyta „czy to
+        w ogóle wstało"."""
+        with busy.busy(self._say_phase, i18n.t("busy.open_db", name=Path(path).name)) as faza:
+            new_con = db.open_db(path)
+            old = self.con
+            self.con = new_con
+            self.db_path = path
+            faza.say(i18n.t("busy.mount_views"))
+            self._mount_views()
+            self._sync_db_state()
+            if old is not None:
+                old.close()
+        self._end_phase()
         if self._on_db_changed is not None:        # zapamiętaj ostatnią bazę (trwałe ustawienia)
             self._on_db_changed(path)
         self._flash(i18n.t("main.db_loaded", path=path))
+
+    def _say_phase(self, text):
+        """Ujście fazy dla operacji CAŁEGO OKNA (F-1) — własna etykieta paska statusu, a przy
+        BRAKU zamontowanych widoków także środek okna.
+
+        Dwa miejsca, bo faza ma dwa różne konteksty. Przy starcie `empty_note` jest JEDYNYM
+        widocznym elementem: bez niego okno przez sekundy pokazywałoby „Brak bazy" — zdanie
+        fałszywe, bo baza właśnie się wczytuje. Przy operacji na zamontowanych widokach środek
+        jest zasłonięty stackiem, więc zostaje sama etykieta w pasku.
+
+        Etykieta, nie `showMessage` — patrz komentarz przy `phase_label`: raport i faza nie mogą
+        dzielić jednego miejsca, bo wtedy jedno kasuje drugie."""
+        self.phase_label.setText(text)
+        if not self.stack.isVisible():
+            self.empty_note.setText(text)
+            self.empty_note.setVisible(True)
+
+    def _end_phase(self):
+        """Koniec fazy okna: etykieta gaśnie, a środek wraca do zdania o STANIE (nie o robocie).
+        Bez tego pasek zostawałby z opisem operacji, która już się skończyła — czyli kłamał."""
+        self.phase_label.setText("")
+        self._sync_db_state()
 
     def _sync_db_state(self):
         has = self.con is not None
         self.nav.setEnabled(has)
         self.stack.setVisible(has)
         self.empty_note.setVisible(not has)            # pusty stan w centrum (wizytator F5 #3)
+        # Tekst pustego stanu WRACA po fazie (F-1): `_say_phase` wpisał tu opis roboty, a gdyby
+        # został, kolejne otwarcie bazy z menu zaczynałoby się od zdania o poprzednim otwarciu.
+        self.empty_note.setText(i18n.t("main.no_db"))
         if not has:
             # bez timeoutu — to trwała podpowiedź pustego stanu, nie ulotny komunikat akcji
             self.statusBar().showMessage(i18n.t("main.no_db"))
@@ -2397,6 +2531,18 @@ def main(argv=None):
     def zapamietaj_baze(path):
         settings.setValue("ostatnia_baza", path)
 
-    win = MainWindow(start, on_db_changed=zapamietaj_baze)
+    # OKNO STAJE PRZED CZYTANIEM BAZY (F-1). Do tej zmiany `MainWindow(start)` otwierał bazę
+    # i montował cztery widoki W KONSTRUKTORZE, a `show()` szedł dopiero po nim — zmierzone
+    # 4 649 ms na żywej `pf4`, przez które na ekranie nie było NICZEGO (a w wydaniu onefile
+    # dochodzi do tego rozpakowanie bootloadera). Użytkownik pytał wtedy nie „czy trwa", tylko
+    # „czy ono w ogóle wstało" — i nie miał gdzie przeczytać odpowiedzi.
+    # Kolejność jest tu CAŁĄ naprawą: okno bez bazy → faza na środku → dopiero odczyt.
+    win = MainWindow(on_db_changed=zapamietaj_baze)
     win.show()
+    if start:
+        # Faza PRZED pierwszym przemalowaniem: bez tego okno błysnęłoby zdaniem „Brak bazy",
+        # które za moment i tak przestaje być prawdą.
+        win._say_phase(i18n.t("busy.open_db", name=Path(start).name))
+        busy.repaint()
+        win.open_path(start)
     return app.exec()

@@ -209,6 +209,61 @@ def test_kolejka_pokazuje_ktora_pozycja_prowadzi_dalej(view):
         assert it.text().endswith("›") == (it.data(UROLE) is not None)
 
 
+# --- F-2: wiersz informacyjny tłumaczy się sam (firsthand Zdzinia 0804) ---
+
+def test_wiersz_informacyjny_ODPOWIADA_na_klik(view):
+    """F-2, sedno zgłoszenia: klik w wiersz informacyjny nie dawał ŻADNEJ odpowiedzi.
+
+    I to dosłownie — wiersz nie jest zaznaczalny, więc `itemSelectionChanged` w ogóle nie leci
+    i nie ma nawet podświetlenia; dla użytkownika nieodróżnialne od zawieszenia aplikacji.
+    Zmierzone przy zgłoszeniu: 0,1 ms na „config-review: 433 · bez nagłówka: 1", czyli aplikacja
+    była gotowa natychmiast i po prostu MILCZAŁA.
+
+    Falsyfikator: odepnij `itemClicked` → żaden wiersz bez tagu nie odezwie się ani słowem."""
+    v, con, ids = view
+    msgs = []
+    v.status_message.connect(msgs.append)
+    informacyjne = [v.review.item(r) for r in range(v.review.count())
+                    if v.review.item(r).data(UROLE) is None]
+    assert informacyjne, "fikstura nie ma ani jednego wiersza informacyjnego"
+
+    for it in informacyjne:
+        przed = len(msgs)
+        v._on_review_clicked(it)
+        assert len(msgs) == przed + 1, f"wiersz {it.text()!r} nie odpowiedział na klik"
+        assert msgs[-1].strip(), "odpowiedź jest pusta"
+
+
+def test_wiersz_informacyjny_MA_TOOLTIP_mowiacy_dlaczego_nie_prowadzi(view):
+    """F-2, druga powierzchnia tego samego faktu: tooltip pod kursorem, zanim user w ogóle kliknie.
+
+    Wiersz z DROGĄ tooltipa nie potrzebuje — jego odpowiedzią jest drążenie. Bramka pilnuje więc
+    obu stron rozdziału, bo tooltip na wszystkim byłby szumem."""
+    v, con, ids = view
+    for r in range(v.review.count()):
+        it = v.review.item(r)
+        if it.data(UROLE) is None:
+            assert it.toolTip().strip(), f"wiersz informacyjny {it.text()!r} milczy pod kursorem"
+
+
+def test_wiersz_licznikow_TLUMACZY_ze_to_INNE_OSIE(view):
+    """F-2: wiersz „config-review · bez nagłówka" opisuje DWIE INNE OSIE, które mają własne ekrany —
+    i to jest powód, dla którego nie prowadzi nigdzie. Zdanie ogólne („to wiersz informacyjny")
+    byłoby prawdziwe, ale bezużyteczne: user dalej nie wiedziałby, gdzie te sprawy załatwić."""
+    from horreum.gui import i18n
+    v, con, ids = view
+    msgs = []
+    v.status_message.connect(msgs.append)
+    for r in range(v.review.count()):
+        it = v.review.item(r)
+        if "config-review" in it.text():
+            v._on_review_clicked(it)
+            assert msgs[-1] == i18n.t("object.review_info_why")
+            assert msgs[-1] != i18n.t("object.review_info_generic")
+            return
+    raise AssertionError("nie znaleziono wiersza liczników")
+
+
 # --- read-only: render i brak zapisu ---
 
 def test_render_nie_pusty(view):
@@ -270,6 +325,74 @@ def test_przycisk_przypisz_sledzi_tag_i_busy(view):
     assert not v.assign_btn.isEnabled()
     v.set_busy(False)
     assert v.assign_btn.isEnabled()
+
+
+def test_TRZECI_przycisk_kolejki_tlumaczy_sie_gdy_wygaszony(view):
+    """R-S3-7: „Napraw nagłówek…" miał `enabled=False` i PUSTY tooltip dla KAŻDEGO wiersza — jako
+    jedyny w rzędzie, bo obaj sąsiedzi tłumaczą się od S2/S4.
+
+    To nie jest kosmetyka: dwie drogi naprawy różnią się tym, CO tykają — ta pisze do PLIKÓW
+    archiwum, „Przypisz obiekt…" tylko do bazy. Milczący przycisk zrównywał je wizualnie.
+
+    Bramka pyta o RÓŻNICĘ zdań, nie o samą niepustość: jeden tekst dla wszystkich kubełków
+    przeszedłby test „ma tooltip", a dalej nie mówiłby, gdzie iść."""
+    v, con, ids = view
+    _select_review_tag(v, "object_raw")
+    tip_obcy = v.repair_btn.toolTip()
+    assert tip_obcy.strip(), "wygaszony przycisk naprawy milczy"
+    assert not v.repair_btn.isEnabled()
+
+    v.review.clearSelection()
+    v._sync_assign_enabled()
+    tip_brak = v.repair_btn.toolTip()
+    assert tip_brak.strip() and tip_brak != tip_obcy, "ten sam tekst dla dwóch różnych powodów"
+
+
+def test_KAZDY_kubelek_kolejki_ma_WLASNA_recepte_naprawy(view):
+    """R-S3-7 podniesione do BRAMKI KLASY — bo ten sam defekt złapałem dwa razy z rzędu.
+
+    Drabina `if`-ów rosła o człon na kubełek i dwukrotnie zapomniała o kolejnym: `object_raw`
+    (bramka poniżej) i `path_proposals` (firsthand na żywej kopii) dostawały zdanie „zaznacz
+    kubełek" o wierszu, który user WŁAŚNIE zaznaczył — odpowiedź na pytanie, którego nie zadał.
+    Znalezisko jednostkowe podnosimy więc do kontroli: bramka przechodzi CAŁĄ kolejkę i żąda,
+    by żaden zaznaczalny wiersz nie dostawał recepty należącej do „nic nie wybrano".
+
+    Kubełek dodany jutro bez wpisu w `_REPAIR_TIPS` przewróci ten test, zamiast po cichu odesłać
+    użytkownika w złe miejsce."""
+    from horreum.gui import i18n
+    v, con, ids = view
+    fallback = i18n.t("repair.tip_pick")
+
+    v.review.clearSelection()
+    v._sync_assign_enabled()
+    assert v.repair_btn.toolTip() == fallback, "brak zaznaczenia ma dostać właśnie tę receptę"
+
+    zbadane = 0
+    for r in range(v.review.count()):
+        tag = v.review.item(r).data(UROLE)
+        if tag is None:
+            continue                      # wiersz informacyjny ma własną powierzchnię (F-2)
+        v.review.setCurrentRow(r)
+        v._sync_assign_enabled()
+        tip = v.repair_btn.toolTip()
+        assert tip.strip(), f"kubełek {tag!r} milczy"
+        assert tip != fallback, f"kubełek {tag!r} dostał receptę dla BRAKU zaznaczenia"
+        zbadane += 1
+    assert zbadane, "fikstura nie dała ani jednego klikalnego kubełka"
+
+    # ŚWIADEK NIEZALEŻNY — lista spisana z `_load_review`, nie z mapy, którą sprawdza. Gdyby
+    # bramka brała uniwersum tagów z `_REPAIR_TIPS`, byłaby tautologią: kubełek dopisany bez
+    # recepty przechodziłby, bo jego brak w mapie znaczyłby też brak w pytaniu. Fikstura pokazuje
+    # tylko część kubełków naraz, więc bez tego członu klasa zostałaby niedomknięta.
+    from horreum.gui.app import _REPAIR_TIPS
+    kubelki = {"object_raw", "object_raw_cleared", "nameless", "nameless_raw",
+               "nameless_raw_cleared", "path_proposals", "nameless_stacks", "unreadable"}
+    brakuje = kubelki - set(_REPAIR_TIPS)
+    assert not brakuje, f"kubełki bez własnej recepty naprawy: {sorted(brakuje)}"
+    assert None in _REPAIR_TIPS, "brak zaznaczenia musi mieć jawny wpis, nie wpadać w `.get`"
+
+    teksty = {t: i18n.t(k) for t, k in _REPAIR_TIPS.items()}
+    assert all(v.strip() for v in teksty.values()), f"pusta recepta: {teksty}"
 
 
 def test_dialog_wymaga_jawnego_wyboru_istniejacego(view):

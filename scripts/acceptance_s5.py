@@ -74,9 +74,11 @@ from horreum.volumes import volume_serial                         # noqa: E402
 
 # ── Kotwice EXP_* PF-3 (dawca) + PF-4 (doskan drzewa `R:`), z horreum_pf4.db 2026-07-02 ──────────
 # UWAGA 2026-08-01: doskan NIE jest już „XISF-owy" — odkąd istnieje moduł DSLR (`e7dcdda`), ciągnie
-# z `R:` także 763 RAW-y, więc baza FULL ma populacje, których żywa `pf4` (0 RAW-ów) nie zna.
-# Stąd kotwice FULL są STAGE-AWARE i ROZDZIELONE astro/RAW — liczba sklejająca oba tory ukryłaby
-# regresję w torze astro za kolejną sesją z lustrzanką.
+# z `R:` także RAW-y (dziś `EXP_NAMELESS_RAW_FULL`), więc baza FULL ma populacje, których żywa
+# `pf4` (0 RAW-ów w chwili tego zapisu) nie zna. Stąd kotwice FULL są STAGE-AWARE i ROZDZIELONE
+# astro/RAW — liczba sklejająca oba tory ukryłaby regresję w torze astro za kolejną sesją
+# z lustrzanką. **Tor RAW jedzie z ŻYWEGO drzewa, więc jego kotwice ruszają się od zmian na dysku
+# — pierwszy taki ruch: nota C3 przy `EXP_CONFIG_REVIEW_RAW_FULL`.**
 # 5 kamer w IMPORT: (pixel_um, is_mono). Po naprawie nagłówków INSTRUME 100% — brak review kamer.
 EXP_CAMERAS_IMPORT = {
     "ASI2600MM": (3.76, 1), "ASI2600MD": (3.76, 1), "ASI2600MC": (3.76, 0),
@@ -114,11 +116,23 @@ EXP_FRAME_REVIEW_FULL = 1      # ten sam masterflat (kopia nieczytelna → revie
 # IS NULL` to stan docelowy, nie delta, więc `config.review` ich nie dotyczy. Zostaje 1 realna sprawa
 # — masterflat Sony A7R3 o rodzaju `unknown` (ten sam degenerat, co §5.2). Było 7 (6 masterdarków + on).
 EXP_CONFIG_REVIEW_FULL = 1     # `unknown` masterflat A7R3 — rodzaj wymaga decyzji, nie optyka
-# …liczona POZA RAW-ami (2026-08-01). 432 RAW-y bez configu to stan UCZCIWY: zdjęcie z lustrzanki
-# bez teleskopu w EXIF nie ma z czego powołać osi. Gdyby obie populacje wpadły do jednej kotwicy
-# (433), pojawienie się DRUGIEJ realnej sprawy w torze astro schowałoby się za jednym zdjęciem
+# …liczona POZA RAW-ami (2026-08-01). RAW-y bez configu to stan UCZCIWY: zdjęcie z lustrzanki
+# bez teleskopu w EXIF nie ma z czego powołać osi. Gdyby obie populacje wpadły do jednej kotwicy,
+# pojawienie się DRUGIEJ realnej sprawy w torze astro schowałoby się za jednym zdjęciem
 # mniej z aparatu — kotwica przestałaby pilnować tego, po co powstała.
-EXP_CONFIG_REVIEW_RAW_FULL = 432
+#
+# ── NOTA C3: RE-BASELINE −7 NA TRZECH KOTWICACH RAW (2026-08-04) ─────────────────────────────────
+# Kotwice toru RAW jadą z ŻYWEGO skanu `R:\ASTRO_` (nie z zamrożonego dawcy — patrz uwaga nad
+# EXP_* FULL), więc kasowanie plików na dysku RUSZA je zgodnie z prawdą. Zdarzyło się to pierwszy
+# raz 2026-08-03: cały folder `LIGHTS\Orion\A7S1_000\OSC` (7 klatek `.dng`, `frame_id` 16627–16633)
+# został skasowany z dysku decyzją użytkownika — pliki WADLIWE, blok D-OW-3\C3 w briefie obiektów
+# własnych. Przebieg akceptacji 2026-08-04 zobaczył to jako pierwszy: 763→756, 432→425, 763→756,
+# jedna przyczyna na trzy czerwienie. Sprawdzone przed przestemplowaniem: pozostałe 13 klatek
+# Oriona (`A7S1_050` 4 + `A7S1_070` 9) leżą na dysku nietknięte, a plików z `A7S1_000` nie ma
+# NIGDZIE w `R:\ASTRO_` (nie przenosiny — kasacja). Strona BAZY C3 (7 wierszy `frame`/`location`/
+# `header` + 28 `cards` + 28 `event` na żywej `pf4`) jest na 2026-08-04 NIERUSZONA — należy do
+# etapu 3 D-0802-2. Kotwice mówią o świeżej bazie akceptacji, nie o `pf4`, więc są niezależne.
+EXP_CONFIG_REVIEW_RAW_FULL = 425   # było 432 do 2026-08-04 — nota C3 wyżej
 EXP_XISF_KINDS = {"flat": 11, "light": 202, "master_dark": 38, "master_flat": 73, "unknown": 2}
 # Oś OBSERWATORIUM (PLAN_os_obserwatorium §8) — RE-BASELINE P6b (D-X-8a), świadomy i zmierzony:
 # do P6a karty XISF NIE POWSTAWAŁY, więc GPS był de facto FITS-only. Od P6a skan wypełnia karty
@@ -131,11 +145,11 @@ EXP_OBSERVATORIES = 11         # klaster 4 km: 24 distinct pary → 11 stanowisk
 EXP_GPS_FRAMES_IMPORT = 15409  # dawca FITS: klatki z SITELAT+SITELONG (97.0%)
 EXP_GPS_FRAMES_FULL = 15611    # + 202 XISF z GPS w kartach (P6b; wszystkie do stanowiska #5)
 EXP_NO_GPS_FULL = 274          # bez GPS w torze ASTRO: 150 fits + 124 xisf (326 − 202 z GPS)
-# RAW osobno (2026-08-01): 763 klatki DSLR, wszystkie bez stanowiska. To NIE brak danych — sentinel
+# RAW osobno (2026-08-01): klatki DSLR, wszystkie bez stanowiska. To NIE brak danych — sentinel
 # GPS (0,0) idzie w `resolve/observatory.py:67` na `None` świadomie („null island" nie jest miejscem),
 # a aparat bez modułu GPS nie zapisuje nic. Rozdzielone od astro z tego samego powodu, co
-# `config.review`: 763 przykryłoby ruch w populacji FITS/XISF.
-EXP_NO_GPS_RAW_FULL = 763
+# `config.review`: jedna liczba przykryłaby ruch w populacji FITS/XISF.
+EXP_NO_GPS_RAW_FULL = 756      # było 763 do 2026-08-04 — nota C3 przy EXP_CONFIG_REVIEW_RAW_FULL
 # Oś KALIBRACJI (C2, brief PLAN_kalibracja_C_brief §3.2) — kotwice ZMIERZONE read-only PRZED kodem.
 # Mastery są XISF, więc obie liczby dotyczą wyłącznie etapu FULL; w imporcie FITS nie ma czego liczyć.
 EXP_RECIPE_DARK = 38           # 38 masterdarków → 38 przepisów (każdy master unikalny)
@@ -175,10 +189,11 @@ EXP_NAMELESS_FULL = 25         # ZMIERZONE po pilocie P-D na `R:` (2026-08-01), 
 # FULL nie ma więc jak zobaczyć naprawy na `R:` — jego 25 to ta sama populacja dawcy, co w IMPORT,
 # i z tego samego powodu jest stabilna. Zadaniem obu kotwic jest łapać ZMIANĘ W DAWCY; nawrotu na
 # ŻYWEJ bazie pilnuje `object_nameless` w raporcie dostawy (inna rola — patrz §6 pkt 9 briefu).
-EXP_NAMELESS_RAW_FULL = 763    # lighty w formacie bez karty `OBJECT` (`resolver.NO_OBJECT_CARD_
-# FILETYPES`). Zmierzone: 763/763 RAW-lightów bez `object_raw`, ZERO wyjątków — EXIF nie zna tego
-# pola. Osobna kotwica, bo osobna droga naprawy (ręka, nie karta); zlanie z 25 dało 788 i sprawiło,
-# że liczba nie pilnowała ANI populacji astro, ANI DSLR.
+EXP_NAMELESS_RAW_FULL = 756    # lighty w formacie bez karty `OBJECT` (`resolver.NO_OBJECT_CARD_
+# FILETYPES`). Zmierzone: KAŻDY RAW-light jest bez `object_raw`, ZERO wyjątków — EXIF nie zna tego
+# pola. Osobna kotwica, bo osobna droga naprawy (ręka, nie karta); zlanie z 25 sprawiło, że liczba
+# nie pilnowała ANI populacji astro, ANI DSLR.
+# Było 763 do 2026-08-04 — nota C3 przy EXP_CONFIG_REVIEW_RAW_FULL (te same 7 klatek).
 
 # ── ETAP STOSÓW (I-2b, P-I) — RE-BASELINE JAWNY, nie skutek uboczny ──────────────────────────────
 # Wciągnięcie gotowych obrazów po integracji RUSZA kotwice liczone po CAŁEJ bazie (brief §0 fakt 24)

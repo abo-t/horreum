@@ -143,6 +143,29 @@ schemat i API mogą się jeszcze zmieniać.
   otwarciu Zbiorów.
 
 ### Naprawione
+- **Program mówi teraz, co robi, zamiast stać nieruchomo.** Uruchomienie na pełnym archiwum
+  trwało kilka sekund, przez które **na ekranie nie było nic** — okno pojawiało się dopiero po
+  wczytaniu wszystkiego, więc jedynym sygnałem życia był kursor. Teraz okno staje **od razu**
+  i pisze, na czym stoi: „Otwieram bazę…", „Buduję widoki…". Tak samo przy dłuższych operacjach
+  w trakcie pracy — odświeżaniu widoków po etapie i zapisie nazw, gdzie dochodzi licznik
+  („Zapisuję nazwy: 12 z 34"). Opis znika, gdy robota się kończy, i **nie zasłania komunikatu
+  o jej wyniku** — to dwa osobne miejsca na pasku.
+- **Zaznaczenie wszystkich klatek przestało zamrażać okno.** Na archiwum kilkunastu tysięcy zdjęć
+  `Ctrl+A` i zaznaczanie myszą blokowały ekran na ponad dwie sekundy — przy przeciąganiu myszą
+  za każdym ruchem. Program przechodził wtedy po zaznaczeniu dwa razy i pytał tabelę o każdą
+  komórkę z osobna. Teraz robi to raz i bierze same numery wierszy: **te same dwie sekundy zeszły
+  do setnych części sekundy**. Zaznaczenie działa dokładnie tak samo — sprawdzone porównaniem
+  starej i nowej drogi, łącznie z zaznaczeniem nieciągłym i przy włączonym grupowaniu.
+- **Wiersze kolejki przeglądu, w które nie da się wejść, tłumaczą się zamiast milczeć.** Kliknięcie
+  w wiersz z samym licznikiem (np. „config-review: 433 · bez nagłówka: 1") nie dawało **żadnej**
+  reakcji — ani podświetlenia, ani komunikatu — więc wyglądało jak zawieszenie programu. Teraz
+  taki wiersz mówi, czego jest opisem i dlaczego nie prowadzi dalej; ta sama treść jest pod
+  kursorem jako podpowiedź.
+- **Wygaszone przyciski mówią, czego im brakuje.** „Napraw nagłówek…" był szary bez słowa
+  wyjaśnienia przy każdym wierszu kolejki, a „Obiekt ▾" — przy zaznaczeniu klatek, których nazwa
+  pochodzi z nagłówka (czyli przy większości zdjęć w archiwum). Każdy z nich podaje teraz
+  **drogę właściwą dla tego, co zaznaczyłeś**: gdzie tę nazwę się poprawia i którym gestem.
+  Gdy przycisk jest aktywny, podpowiedź mówi z góry, ilu klatek gest dotknie.
 - **Powiązanie gotowego obrazu ze zdjęciami, z których powstał, przestało ginąć po nazwaniu albo
   cofnięciu nazwy.** Program czyta z pliku stosu listę zdjęć, które do niego weszły — to najmocniejszy
   dowód, jaki ma. Gdy jednak zmieniłeś nazwę obiektu któremuś ze zdjęć, następny przebieg „Stosy"

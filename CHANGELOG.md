@@ -14,9 +14,8 @@ schemat i API mogą się jeszcze zmieniać.
   masz zaznaczone**, nigdy na całej widocznej liście; przy pustym zaznaczeniu są wygaszone.
   **Program chroni to, czego nie powinien ruszać, i mówi o tym wprost.** Cofnięcie zdejmuje tylko
   nazwy, które postawiła Twoja ręka albo folder — **nazwa odczytana z nagłówka pliku albo z pozycji
-  na niebie zostaje**, bo to fakt z archiwum, a nie pomyłka do naprawienia. Nazywanie pomija
-  kalibrację (dark, flat, bias — te obiektu nie mają z definicji), a cofanie pomija gotowe obrazy
-  po integracji, bo odebranie im obiektu zerwałoby powiązanie ze zdjęciami, z których powstały.
+  na niebie zostaje**, bo to fakt z archiwum, a nie pomyłka do naprawienia. Oba gesty pomijają
+  kalibrację (dark, flat, bias — te obiektu nie mają z definicji).
   Po każdym geście dostajesz zdanie z rozbiciem: ile klatek zmieniono i **z jakiego powodu resztę
   pominięto** — osobno kalibrację, osobno klatki z nagłówka, osobno te, które zmieniły się
   w międzyczasie.

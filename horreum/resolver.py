@@ -706,7 +706,21 @@ class DeltaReport:
     # Dwa ekrany, dwie prawdy o jednym zbiorze. Predykat stoi na SAMYM `object_source`, NIEZALEŻNIE
     # od `object_raw` — inaczej cofnięty RAW nazwany ze ścieżki wypadałby z liczby, a bramka 14b
     # żąda wyniku na OBU populacjach.
-    object_cleared: int = 0
+    #
+    # DWIE LICZBY, NIE JEDNA (recenzja + wizytacja S3, oba silniki niezależnie). Nagrobki NIE SĄ
+    # podzbiorem żadnego pojedynczego zdania raportu, bo `object_source` nic nie mówi o `object_raw`:
+    # klatka z nazwą w nagłówku ląduje w `object_unresolved`, a bezimienna w `object_nameless*`.
+    # Jedna liczba doklejona do któregokolwiek z tych zdań jest ARYTMETYCZNIE FAŁSZYWA — zmierzone
+    # na kopii żywej `pf4`: 16 nagrobków (9 bezimiennych + 7 z nazwą) renderowało się jako
+    # „bez nazwy w nagłówku: 0 · z tego cofnięte ręką: 16". Granica biegnie tam, gdzie raport już
+    # ją trzyma, więc rozbicie nie wprowadza nowej osi — czyta istniejącą.
+    object_cleared_named: int = 0      # …z `object_raw` — PODZBIÓR `object_unresolved`
+    object_cleared_nameless: int = 0   # …bez `object_raw` — PODZBIÓR `object_nameless*` (FITS/RAW/stos)
+
+    @property
+    def object_cleared(self):
+        """Wszystkie nagrobki — kotwica bramki 14b i CLI. Suma, nie trzeci literał (SPOT)."""
+        return self.object_cleared_named + self.object_cleared_nameless
 
 
 def delta_report(con, top=30):
@@ -747,15 +761,22 @@ def delta_report(con, top=30):
         "WHERE f.kind IN ('light','master_light') AND f.object_id IS NULL "
         "AND h.object_raw IS NOT NULL GROUP BY h.object_raw ORDER BY n DESC, raw LIMIT ?",
         (top,)).fetchall()
-    cleared = con.execute(
-        "SELECT count(*) FROM frame "
-        "WHERE kind IN ('light','master_light') AND object_source = 'user_cleared'"
-    ).fetchone()[0]
+    # Nagrobki rozbite po TEJ SAMEJ granicy, którą raport trzyma wyżej (`object_raw` obecny czy nie),
+    # bo tylko wtedy każda z dwóch liczb jest PODZBIOREM zdania, do którego się dokleja. `LEFT JOIN`,
+    # nie `INNER`: klatka bez wiersza `header` też może mieć nagrobek i musi wpaść do „bezimiennych",
+    # a nie wyparować między predykatami.
+    cleared_named, cleared_nameless = con.execute(
+        "SELECT count(*) FILTER (WHERE h.object_raw IS NOT NULL), "
+        "       count(*) FILTER (WHERE h.object_raw IS NULL) "
+        "FROM frame f LEFT JOIN header h ON h.frame_id = f.id "
+        "WHERE f.kind IN ('light','master_light') AND f.object_source = 'user_cleared'"
+    ).fetchone()
     filters_canon = con.execute(
         "SELECT count(*) FROM frame WHERE filter_canon IS NOT NULL").fetchone()[0]
     return DeltaReport(
         object_resolved=resolved, object_unresolved=unresolved, object_pct=pct,
-        object_resolved_no_raw=resolved_no_raw, object_cleared=cleared,
+        object_resolved_no_raw=resolved_no_raw,
+        object_cleared_named=cleared_named, object_cleared_nameless=cleared_nameless,
         object_delta=[(r["raw"], r["n"]) for r in delta], review=review_state(con),
         filters_canon=filters_canon, object_nameless=nameless_lights(con),
         object_nameless_raw=nameless_raw_lights(con),

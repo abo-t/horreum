@@ -1650,6 +1650,71 @@ def test_cofniecie_z_paska_rusza_sciezke_a_naglowek_ZOSTAJE(obj_view):
     assert zrodla == {"user_cleared": 2, "header": 1, "—": 1}
 
 
+def _dodaj_stos(con, fid, src="user"):
+    """Gotowy obraz z obiektem nadanym ręką — dokładnie ta klatka, którą D-OW-7 wpuściło pod gest."""
+    con.execute("INSERT INTO frame(id, kind, filetype, sha1_data, first_seen_at, "
+                "object_id, object_source) VALUES (?, 'master_light', 'xisf', ?, ?, 5, ?)",
+                (fid, f"sha-stos{fid}", NOW, src))
+    con.execute("INSERT INTO header(frame_id, raw_json) VALUES (?, '{}')", (fid,))
+    con.commit()
+
+
+def test_D_OW_7_gotowy_obraz_ODBLOKOWUJE_pozycje_Cofnij(obj_view):
+    """PIN READ-MODELU, KTÓRY OTWIERA D-OW-7 W GUI — jedyna zmiana wpuszczająca stos pod „Cofnij"
+    po stronie POWIERZCHNI (`queries.selection_object_state`: `stacks` przestało być `elif`-em
+    wykluczającym klatkę z dalszych pytań).
+
+    Wszystkie pozostałe bramki D-OW-7 jadą KLINGĄ (`repo.clear_object_assignment`), a klinga
+    pomijania stosów nigdy nie miała — więc przywrócenie `elif` w read-modelu zostawiało cały
+    komplet zielony, a w aplikacji pozycja „Cofnij" była przy stosie wygaszona. To ta sama figura,
+    co „człon lustrzany jadący inną gałęzią kodu niż chroniona".
+
+    Falsyfikator: zamień `if r["kind"] == "master_light"` z powrotem na `elif` przed testem
+    `CLEARABLE_OBJECT_SOURCES` → `clearable` spada do 0 i `act_clear` gaśnie."""
+    v, con = obj_view
+    _dodaj_stos(con, 10)
+    v.refresh()
+    _zaznacz(v, [10])
+    v._update_count()
+
+    stan = queries.selection_object_state(con, [10])
+    assert (stan["lights"], stan["stacks"], stan["clearable"]) == (1, 1, 1)
+    assert v.sel_bar.act_clear.isEnabled()          # …i pozycja jest REALNIE klikalna
+    assert v.sel_bar.btn_object.isEnabled()
+
+    # …a gest wykonany przez SLOT naprawdę zdejmuje nazwę ze stosu i mówi, że jej dotknął
+    msgs = []
+    v.status_message.connect(msgs.append)
+    v._on_object_clear()
+    assert con.execute("SELECT object_source FROM frame WHERE id = 10").fetchone()[0] == "user_cleared"
+    assert "w tym gotowe obrazy: 1" in msgs[-1]
+
+
+def test_licznik_stosow_NIE_sklei_sie_z_klatka_ktora_nie_miala_czego_cofac(obj_view):
+    """R-S2b-5 nie wróciło TYLNYMI DRZWIAMI, a nowy człon mówi prawdę o przyczynie (wizytacja S3).
+
+    Zaznaczenie: stos do cofnięcia + stos BEZ obiektu + light z nagłówka. Trzy różne fakty i trzy
+    różne człony zdania — do S3 dwa ostatnie schodziły do jednego („z nagłówka/regionu: 2"),
+    czyli komunikat mówił o nagłówku przy klatce, która żadnego nie miała, i podsuwał receptę
+    („napraw kartą"), której nie da się wykonać."""
+    v, con = obj_view
+    _dodaj_stos(con, 10)                                        # ma co cofać
+    con.execute("INSERT INTO frame(id, kind, filetype, sha1_data, first_seen_at) "
+                "VALUES (11, 'master_light', 'xisf', 'sha-stos11', ?)", (NOW,))
+    con.execute("INSERT INTO header(frame_id, raw_json) VALUES (11, '{}')")
+    con.commit()
+    v.refresh()
+    _zaznacz(v, [10, 11, 3])                                    # 3 = light z NAGŁÓWKA
+    msgs = []
+    v.status_message.connect(msgs.append)
+    v._on_object_clear()
+
+    assert "Cofnięto przypisanie na 1 z 3 klatek" in msgs[-1]
+    assert "· z nagłówka/regionu: 1" in msgs[-1]                # klatka 3 — fakt z pliku
+    assert "· nie było czego cofać: 1" in msgs[-1]              # klatka 11 — nie miała obiektu
+    assert "· w tym gotowe obrazy: 1" in msgs[-1]               # ze zmienionych, nie z pominiętych
+
+
 def test_gest_odswieza_OS_OBIEKTU_sygnalem(obj_view):
     """§4/14c-f, człon czwartej powierzchni: kolejka przeglądu żyje w INNYM oknie, więc grid nie może
     jej odświeżyć wołaniem — i nie ma poznawać gospodarza. Sygnał leci TYLKO gdy coś zapisano."""
@@ -1728,8 +1793,9 @@ def test_okno_dostaje_LICZBE_DO_ZAPISANIA_i_kontekst_zaznaczenia(obj_view, monke
     zapis = {}
 
     class _Fake:
-        def __init__(self, con, *, object_raw, frame_count, selection=None, parent=None):
-            zapis.update(frame_count=frame_count, selection=selection)
+        def __init__(self, con, *, object_raw, frame_count, selection=None, cleared_n=0,
+                     parent=None):
+            zapis.update(frame_count=frame_count, selection=selection, cleared_n=cleared_n)
             self.selected = None
 
         def exec(self):

@@ -1177,6 +1177,50 @@ def test_kubelek_RAW_rozszczepia_sie_po_zrodle_a_akcja_przestaje_milczec(sciezka
     assert (g.assigned, g.skipped) == (2, 0)         # nagrobek NIE jest już cichym pominięciem
 
 
+def test_akcja_kubelka_cofnietych_gasi_nagrobek_PRZEZ_SLOT_nie_obok_niego(sciezka, monkeypatch):
+    """PIN JEDYNEJ PRODUKCYJNEJ LINII NAPRAWY R-S2b-1 (`overwrite_weak=cofniete`, `gui/app.py`).
+
+    Bramka obok woła klingę WPROST z `overwrite_weak=True`, więc dowodzi tylko tego, że klinga
+    umie nadpisać nagrobek — a defekt siedział w POWIERZCHNI: to `_on_assign` nie podawał tego
+    kwargu. Usunięcie go z `app.py` zostawiało tamtą bramkę zieloną. To ta sama klasa, którą
+    kolejka trzyma jako lekcję STANDING: „bramka pyta klingę, defekt siedzi w powierzchni".
+
+    Falsyfikator: skasuj `overwrite_weak=cofniete` z `gui/app.py` → komunikat spada na
+    „Przypisano 0 z 2" i asercja stanu bazy czerwienieje."""
+    v, con = sciezka
+
+    class AcceptedNGC:
+        selected = ("NGC7000", "NGC", "deep_sky", None)
+
+        def __init__(self, *args, **kwargs):
+            AcceptedNGC.seen = kwargs
+
+        def exec(self):
+            return QDialog.Accepted
+
+    ids = [r["frame_id"] for r in queries.nameless_raw_frames(con)][:2]
+    repo.user_assign_object(con, alias_norm=None, canon="NGC7000", catalog="NGC",
+                            kind="deep_sky", frame_ids=ids, now=NOW_S2)
+    repo.clear_object_assignment(con, frame_ids=ids, now=NOW_S2)
+    v._load_review()
+
+    monkeypatch.setattr("horreum.gui.app.AssignObjectDialog", AcceptedNGC)
+    _select_review_tag(v, "nameless_raw_cleared")
+    v._select_all_frames()
+    msgs = []
+    v.status_message.connect(msgs.append)
+    v._on_assign()
+
+    # SKUTEK W BAZIE, nie „slot się wykonał": nagrobek zgasł i klatki mają obiekt.
+    assert msgs[-1] == "Przypisano 2 z 2 klatek → NGC7000."
+    assert con.execute(
+        "SELECT count(*) FROM frame WHERE id IN (?,?) AND object_id IS NOT NULL "
+        "AND object_source = 'user'", ids).fetchone()[0] == 2
+    assert queries.review_queue(con)["nameless_raw_cleared_count"] == 0
+    # …i OKNO o tym uprzedziło, zanim user kliknął (ostrzeżenie na drodze kliknięcia, nie w tooltipie)
+    assert AcceptedNGC.seen["cleared_n"] == 2
+
+
 def test_drazenie_po_parze_NIE_zwraca_unii_obu_polowek(sciezka):
     """Falsyfikator rozszczepienia: gdyby klucz został samym stringiem, zapis z jednej połówki
     sięgnąłby klatek spoza klikniętego wiersza — a obie połówki wyglądają na ekranie tak samo."""

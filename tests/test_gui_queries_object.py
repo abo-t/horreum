@@ -188,14 +188,23 @@ def _partycja(con):
     per test): każdy nowy kubełek dopisujesz TU i wszystkie falsyfikatory od razu go pilnują —
     inaczej trzeci kubełek wchodzi do jednej kopii, a druga cicho zostaje przy dwóch.
     Ostatni człon jest kind-scopowany: globalny `headerless_count` liczy też kalibrację
-    i `unknown`, więc do partycji się NIE nadaje."""
+    i `unknown`, więc do partycji się NIE nadaje.
+
+    `nameless_raw_cleared_count` jest tu od S3 i to NIE jest kosmetyka: rozszczepienie kubełka RAW
+    po źródle dołożyło liczbę ROZŁĄCZNĄ z `nameless_raw_count` (drążenia są dwa), a ten helper
+    jest JEDYNYM walidatorem partycji w repo. Bez tego członu kubełek istniał, klatki w nim
+    siedziały, a wszystkie falsyfikatory świeciły zielono — dokładnie ta klasa, którą kolejka
+    trzyma jako lekcję („bramka, której nazwa zapowiada człon, a asercja pinuje jego BRAK").
+    `object_review` własnego członu NIE dostaje: jego rozszczepienie siedzi w `GROUP BY`, więc
+    suma po wierszach liczy obie połówki."""
     q = queries.review_queue(con)
     headerless_lights = con.execute(
         "SELECT count(*) FROM frame f WHERE f.kind IN ('light','master_light') "
         "AND f.object_id IS NULL "
         "AND NOT EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id)").fetchone()[0]
     return (sum(r["n"] for r in q["object_review"]) + q["nameless_count"]
-            + q["nameless_raw_count"] + q["nameless_stacks_count"] + headerless_lights)
+            + q["nameless_raw_count"] + q["nameless_raw_cleared_count"]
+            + q["nameless_stacks_count"] + headerless_lights)
 
 
 def test_review_queue_partycja_pokrywa_perspektywe_gridu(s8_obj):
@@ -298,6 +307,54 @@ def test_partycja_przezywa_klatke_raw(s8_obj):
     _nameless_light(con, "sha-part-raw", filetype="raw")
     assert len(queries.review_frame_ids(con)) == baza + 1     # RAW JEST w perspektywie gridu
     assert _partycja(con) == baza + 1                         # …i partycja go widzi
+
+
+def test_partycja_przezywa_NAGROBEK_na_klatce_raw(s8_obj):
+    """FALSYFIKATOR ROZSZCZEPIENIA PO ŹRÓDLE (S3) — brakujący bliźniak testu wyżej.
+
+    Cofnięcie NIE wyprowadza klatki z perspektywy gridu (`object_id` wraca na NULL), ale
+    wyprowadza ją z `nameless_raw_count` do drugiej, ROZŁĄCZNEJ liczby. Dopóki `_partycja`
+    nie sumowała obu, kubełek istniał, klatka w nim siedziała, a równanie cicho gubiło ją
+    z lewej strony — bez ani jednej czerwonej bramki.
+
+    Falsyfikator: wytnij `nameless_raw_cleared_count` z `_partycja` → ten test czerwienieje o 1."""
+    con, _ = s8_obj
+    baza = len(queries.review_frame_ids(con))
+    fid = _nameless_light(con, "sha-part-raw-cleared", filetype="raw")
+    repo.user_assign_object(con, alias_norm=None, canon="NGC7000", catalog="NGC",
+                            kind="deep_sky", frame_ids=[fid], now=NOW)
+    assert repo.clear_object_assignment(con, frame_ids=[fid], now=NOW).assigned == 1
+
+    q = queries.review_queue(con)
+    assert (q["nameless_raw_count"], q["nameless_raw_cleared_count"]) == (0, 1)
+    assert len(queries.review_frame_ids(con)) == baza + 1      # nagrobek ZOSTAJE do przeglądu
+    assert _partycja(con) == baza + 1                          # …i partycja go widzi
+
+
+def test_kotwica_kubelka_RAW_liczy_OBIE_polowki(s8_obj):
+    """Bramka 13 po rozszczepieniu: kotwicą rdzenia jest SUMA obu drążeń, nie samo pierwsze.
+
+    Do S3 równość brzmiała `len(nameless_raw_frames()) == nameless_raw_lights`, a rozszczepienie
+    ją unieważniło: `nameless_raw_lights` pyta o sam brak obiektu (nagrobki liczy), a drążenie
+    domyślne bierze wyłącznie połówkę nietkniętą. Stary pin przechodził tylko dopóki żaden
+    nagrobek nie istniał — czyli pinował nieobecność populacji, nie równość."""
+    from horreum.resolver import nameless_raw_lights
+
+    con, _ = s8_obj
+    swiezy = _nameless_light(con, "sha-anchor-raw-fresh", filetype="raw")
+    cofniety = _nameless_light(con, "sha-anchor-raw-cleared", filetype="raw")
+    repo.user_assign_object(con, alias_norm=None, canon="NGC7000", catalog="NGC",
+                            kind="deep_sky", frame_ids=[cofniety], now=NOW)
+    repo.clear_object_assignment(con, frame_ids=[cofniety], now=NOW)
+
+    q = queries.review_queue(con)
+    a, b = q["nameless_raw_count"], q["nameless_raw_cleared_count"]
+    assert (a, b) == (1, 1)
+    assert a + b == len(queries.nameless_raw_frames(con)) + len(
+        queries.nameless_raw_frames(con, cleared=True)) == nameless_raw_lights(con) == 2
+    # …i połówki są ROZŁĄCZNE, a nie kubełek i jego podzbiór
+    assert {r["frame_id"] for r in queries.nameless_raw_frames(con)} == {swiezy}
+    assert {r["frame_id"] for r in queries.nameless_raw_frames(con, cleared=True)} == {cofniety}
 
 
 # --- I-2b/D-P-I-5: gotowy stack jako TRZECI kubełek bezimiennych ---

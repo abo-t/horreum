@@ -844,10 +844,17 @@ class ObjectGesture:
     ochrona zadziałała, czy gest chybił celu.
 
     `skipped_drift` to jedyny licznik o TOCTOU (stan zmienił się między oknem a zapisem); pozostałe
-    trzy opisują zaznaczenie, które user złożył świadomie."""
+    opisują zaznaczenie, które user złożył świadomie."""
     assigned: int = 0          # klatki realnie zapisane (przypisane albo cofnięte)
     skipped_kind: int = 0      # rodzaj poza `LIGHT_KINDS` — kalibracja obiektu nie ma z definicji
     skipped_source: int = 0    # źródło poza zakresem gestu (nagłówek/xref/region — fakt z pliku)
+    skipped_nothing: int = 0   # NIE BYŁO CZEGO COFAĆ (`object_id IS NULL`) — osobno od `skipped_source`
+                               # (wizytacja S3): jedno pole kazało ekranowi powiedzieć „z nagłówka/
+                               # regionu: 1" o klatce, która żadnego nagłówka ani regionu nie miała.
+                               # To ta sama klasa, którą ta paczka zamknęła raz przy `skipped_stack`
+                               # („kryterium nie ma prawa sklejać dwóch faktów"), a D-OW-7 podniosło
+                               # jej trafialność: stos bez obiektu wpadał przedtem do własnego
+                               # licznika, a od wejścia stosów w zasięg gestu — właśnie tutaj
     skipped_drift: int = 0     # stan inny niż oczekiwany w chwili zapisu (TOCTOU)
     stacks: int = 0            # …z ZAPISANYCH: ile było gotowych obrazów. NIE jest pominięciem
                                # (D-OW-7: stos jest w zasięgu OBU gestów) i dlatego stoi POZA sumą
@@ -857,8 +864,21 @@ class ObjectGesture:
 
     @property
     def skipped(self):
-        """Suma pominięć — do zdania „przypisano N z M", gdzie rozbicie idzie osobno."""
-        return self.skipped_kind + self.skipped_source + self.skipped_drift
+        """Suma pominięć — do zdania „przypisano N z M", gdzie rozbicie idzie osobno.
+
+        Właścicielem listy członów jest TA suma i rozbicie w GUI musi po niej iterować, a nie
+        powtarzać wyliczankę: czwarty człon (`skipped_nothing`) dołożony w S3 wszedłby inaczej
+        do „z M", a nie do rozbicia — czyli zniknąłby dokładnie tam, gdzie ma tłumaczyć."""
+        return (self.skipped_kind + self.skipped_source + self.skipped_nothing
+                + self.skipped_drift)
+
+    @property
+    def skipped_breakdown(self):
+        """Rozbicie pominięć jako [(sufiks klucza i18n, n)] — JEDEN właściciel kolejności i składu.
+
+        GUI powtarzało tę listę literałem, więc każdy nowy człon wpadał do sumy, a z ekranu znikał."""
+        return [("kind", self.skipped_kind), ("source", self.skipped_source),
+                ("nothing", self.skipped_nothing), ("drift", self.skipped_drift)]
 
 
 def user_assign_object(con, *, alias_norm, canon, catalog, kind, frame_ids, now, uid="local",
@@ -1018,7 +1038,7 @@ def clear_object_assignment(con, *, frame_ids, now, uid="local"):
     Dwa, nie jeden, bo pytania są dwa: bilans osi (§5.9) liczy odpięcia, a kolejka przeglądu musi
     umieć pokazać człon „cofnięte ręką" bez zaglądania w payload. Zwraca `ObjectGesture`."""
     actor = f"user:{uid}"
-    cleared = kind_skip = source_skip = stacks = 0
+    cleared = kind_skip = source_skip = nothing_skip = stacks = 0
     with _immediate(con):
         for frame_id in frame_ids:
             fr = con.execute(
@@ -1029,9 +1049,15 @@ def clear_object_assignment(con, *, frame_ids, now, uid="local"):
             if fr["kind"] not in LIGHT_KINDS:
                 kind_skip += 1
                 continue
-            if (fr["object_id"] is None
-                    or fr["object_source"] not in CLEARABLE_OBJECT_SOURCES):
-                source_skip += 1                    # nie ma czego cofać ALBO fakt spoza ręki
+            # DWA RÓŻNE FAKTY, DWA LICZNIKI (wizytacja S3): „ta klatka nazwy nie miała" to nie
+            # to samo, co „nazwę postawił nagłówek i ręka jej nie zdejmie". Sklejone dawały
+            # komunikat o FAŁSZYWEJ PRZYCZYNIE — user czytał „z nagłówka/regionu: 1" przy klatce
+            # bez nagłówka, czyli dostawał recepty („napraw kartą"), której nie da się wykonać.
+            if fr["object_id"] is None:
+                nothing_skip += 1                   # nie ma czego cofać
+                continue
+            if fr["object_source"] not in CLEARABLE_OBJECT_SOURCES:
+                source_skip += 1                    # fakt spoza ręki — nagłówek/xref/region
                 continue
             con.execute(
                 "UPDATE frame SET object_id = NULL, object_source = 'user_cleared' WHERE id = ?",
@@ -1045,7 +1071,7 @@ def clear_object_assignment(con, *, frame_ids, now, uid="local"):
             cleared += 1
             stacks += fr["kind"] == "master_light"
     return ObjectGesture(assigned=cleared, skipped_kind=kind_skip,
-                         skipped_source=source_skip, stacks=stacks)
+                         skipped_source=source_skip, skipped_nothing=nothing_skip, stacks=stacks)
 
 
 def clear_object_tombstone(con, *, frame_id, now, actor="user:local"):

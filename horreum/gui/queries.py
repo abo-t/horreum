@@ -218,7 +218,8 @@ def review_queue(con):
     """Kolejka przeglądu osi obiektu ze STANU (NIE z `count(event)` — R#2/R#4: `flag_config_review`/
     `object.review_summary` mnożą eventy przy re-skanie, stan jest idempotentny). Kanały:
       - `object_review`: light/master_light z `object_id IS NULL` i obecnym `object_raw` (JOIN header,
-        GROUP BY object_raw) — co user zostawił nierozpoznane;
+        `GROUP BY object_raw, cleared`) — co user zostawił nierozpoznane, rozszczepione po ŹRÓDLE:
+        klatka z nagrobkiem dostaje własny wiersz, bo jest WERDYKTEM, a nie brakiem wiedzy (S3);
       - `nameless_count`: light/master_light z `object_id IS NULL`, z nagłówkiem, ale BEZ `object_raw`
         (T5a) — klatka, która nie ma o czym zeznawać, więc GROUP BY nie ma jej jak pokazać;
         drążenie do klatek daje `nameless_frames` (P-D) i to ONO jest właścicielem predykatu;
@@ -417,8 +418,13 @@ def nameless_raw_frames(con, cleared=False):
     (predykat pyta o sam brak obiektu), a wyglądała identycznie jak nietknięta — przy akcji, która
     ją cicho pomijała. Dwie liczby ROZŁĄCZNE, nie kubełek i jego podzbiór: partycja sumuje obie.
 
-    RÓWNOŚĆ Z KOTWICĄ RDZENIA (bramka 13): `len()` tego wyniku == `resolver.nameless_raw_lights`.
-    Dwa literały, bo warstwy są dwie i zależność idzie w jedną stronę — jak przy `nameless_frames`.
+    RÓWNOŚĆ Z KOTWICĄ RDZENIA (bramka 13) PO ROZSZCZEPIENIU: kotwicą jest SUMA OBU drążeń —
+    `len(…()) + len(…(cleared=True)) == resolver.nameless_raw_lights`. Sam człon domyślny kotwicy
+    NIE równa się, bo `nameless_raw_lights` pyta o brak obiektu i nagrobki liczy. Zapis „`len()`
+    tego wyniku == kotwica" był prawdą do S3 i przestał nią być w tym samym commicie, który
+    dołożył parametr — dopóki żaden nagrobek nie istniał, stary pin świecił zielono, czyli pinował
+    NIEOBECNOŚĆ populacji zamiast równości. Dwa literały, bo warstwy są dwie i zależność idzie
+    w jedną stronę — jak przy `nameless_frames`.
 
     Kolumny, cel przez `MIN(id) … present = 1` i `ORDER BY` — jak w `nameless_frames` (ten sam
     panel `_fill_frames` je czyta; wąski SELECT wywala render na pierwszym wierszu). Cel jest tu
@@ -835,9 +841,11 @@ def review_frame_ids(con):
     To SZERSZE pytanie niż kubełek `object_review` w `review_queue`: tam GROUP BY `object_raw`
     wymaga nagłówka Z NAZWĄ, tutaj liczy się sam brak obiektu. Rozjazd nie jest duplikatem do
     usunięcia — to dwa różne pytania (grid: „co jeszcze nie ma obiektu", kolejka: „co rozstrzygnąć
-    i pod jaką nazwą"). Relacja jest PARTYCJĄ i tak ją trzyma `review_queue` (T5a):
-        |ten zbiór| == sum(object_review.n) + nameless_count + nameless_raw_count
-                       + nameless_stacks_count + (light/master_light bez wiersza `header`)
+    i pod jaką nazwą"). Relacja jest PARTYCJĄ, a jej równanie ma JEDEN DOM — docstring
+    `review_queue` (T5a). Powtórzenie go tutaj było drugą siedzibą tego samego faktu i rozjechało
+    się przy pierwszym rozszczepieniu kubełka: S3 dopisało `nameless_raw_cleared_count` do jednej
+    kopii, a druga cicho została przy starym składzie. Walidatorem jest `_partycja`
+    w `tests/test_gui_queries_object.py` — też JEDEN dom, nie kopia per test.
     Ten zbiór NIE jest świadomy ANI formatu, ANI źródła i to jest zamierzone: RAW-owy light bez
     obiektu i gotowy stack bez obiektu wymagają przeglądu tak samo jak każdy inny — różnią się
     DROGĄ naprawy (ręka / żadna / karta w pliku), a nie tym, czy jest co rozstrzygnąć. Ta

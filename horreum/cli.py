@@ -988,6 +988,11 @@ def _format_delta(db_path, rep):
                  f"delta {rep.object_unresolved} w {len(rep.object_delta)} distinct")
     for raw, n in rep.object_delta:
         lines.append(f"    {raw} -> {n}")
+    # Ile z NIEROZPOZNANYCH to WERDYKT CZLOWIEKA (S3/R-S2b-2). Wciecie 4, bo to PODZBIOR delty
+    # wyzej — a nie rodzenstwo wierszy o innych populacjach. Zostaja w procencie swiadomie:
+    # wykluczenie nagradzaloby odrzucenie zeznania.
+    if rep.object_cleared_named:
+        lines.append(f"    z tego cofniete reka (nagrobek): {rep.object_cleared_named}")
     # POZA procentem wyzej: klatka bez `object_raw` nie ma nazwy, wiec nie wchodzi do mianownika —
     # ale musi byc widoczna, inaczej raport milczy o calej klasie (P-D, kotwica nawrotu).
     lines.append(f"  bez nazwy w naglowku (light/master_light): {rep.object_nameless}")
@@ -997,11 +1002,12 @@ def _format_delta(db_path, rep):
     if rep.object_resolved_no_raw:
         lines.append(f"  rozwiazane BEZ nazwy w naglowku (poza procentem): "
                      f"{rep.object_resolved_no_raw}")
-    # Ile z nierozpoznanych to WERDYKT CZLOWIEKA, a nie brak wiedzy (S3/R-S2b-2). Zostaja
-    # w procencie swiadomie — wykluczenie nagradzaloby odrzucenie zeznania — ale bez tej liczby
-    # raport nie umial ich odroznic od klatek, o ktorych nikt nic nie powiedzial.
-    if rep.object_cleared:
-        lines.append(f"  z tego cofniete reka (nagrobek): {rep.object_cleared}")
+    # Druga polowa nagrobkow — ta BEZ nazwy w naglowku. Wciecie 4, bo to podzbior wiersza tuz
+    # wyzej. Rozdzial obu polowek nie jest kosmetyka wciec: do S3 stala tu JEDNA liczba na wciciu
+    # 2, wiec „z tego" wskazywalo na populacje, ktora nagrobkow nie zawiera z definicji
+    # (`object_id IS NOT NULL`), i rozdzielala rodzica od jego wlasnych dzieci.
+    if rep.object_cleared_nameless:
+        lines.append(f"    z tego cofniete reka (nagrobek): {rep.object_cleared_nameless}")
     # Osobna pozycja i TYLKO gdy jest co pokazac: RAW nie ma karty OBJECT z natury
     # (`resolver.NO_OBJECT_CARD_FILETYPES`), wiec droga naprawy jest inna — reka, nie writeback.
     if rep.object_nameless_raw:

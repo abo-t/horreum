@@ -13,8 +13,13 @@ mają dom w testach GUI):
   * **14c (c)/(e)** — gest rusza WYŁĄCZNIE źródła słabe: klatki z nagłówka i z regionu zostają.
   * **14c (d)** — `expected_object_id` jako ZAMROŻONY STAN okna: klatka, która w międzyczasie stała
     się czymś innym, jest pomijana jako dryf.
-  * **14c (h)** — „Cofnij" POMIJA gotowe obrazy (własny licznik), bo odebranie stosowi obiektu
-    rozbraja dobór okna rodowodu.
+  * **14c (h)** — „Cofnij" **OBEJMUJE** gotowe obrazy (D-OW-7): licznik `stacks` mówi, ile ich
+    RUSZYŁ, i stoi POZA sumą `skipped`. Dawne brzmienie („POMIJA … bo odebranie stosowi obiektu
+    rozbraja dobór okna rodowodu") opisywało PROTEZĘ: pomijanie kupowało ochronę rodowodu ceną
+    ślepego zaułka. Od ochrony RANGĄ powód zniknął, więc zniknęło ograniczenie — a to zdanie
+    zostało tu jeszcze po tym, jak przestało być prawdą.
+  * **14c (h2)** — pominięcia cofnięcia są ROZDZIELONE po przyczynie: „nie było czego cofać"
+    (`skipped_nothing`) nie jest tym samym, co „fakt spoza ręki" (`skipped_source`).
 
 REGUŁA CZYTANIA LICZNIKÓW: `ObjectGesture` rozbija pominięcia PER FAKT. Test, który sprawdza samo
 `skipped`, przechodzi także wtedy, gdy klinga pominęła klatkę z ZUPEŁNIE innego powodu — dlatego
@@ -211,14 +216,42 @@ def test_nazwanie_liczy_gotowe_obrazy_TYM_SAMYM_licznikiem():
 
 
 def test_cofniecie_jest_idempotentne():
-    """Powtórzony gest → zero zapisu i ZERO nowych eventów (idempotencja jak reszta repo)."""
+    """Powtórzony gest → zero zapisu i ZERO nowych eventów (idempotencja jak reszta repo).
+
+    Pominięcie ląduje w `skipped_nothing`, NIE w `skipped_source` (rozdział z S3): klatka już
+    cofnięta nie ma czego cofać, a żadnego nagłówka ani regionu przy niej nie ma. Do rozdziału
+    oba fakty schodziły do jednego licznika i ekran mówił „z nagłówka/regionu: 1" — komunikat
+    o fałszywej przyczynie, z receptą („napraw kartą"), której nie da się wykonać."""
     con = _baza([("light", "raw", None, None)])
     _przypisz(con, [1])
     repo.clear_object_assignment(con, frame_ids=[1], now=NOW)
     ile = con.execute("SELECT count(*) FROM event").fetchone()[0]
     g = repo.clear_object_assignment(con, frame_ids=[1], now=NOW)
-    assert (g.assigned, g.skipped_source) == (0, 1)
+    assert (g.assigned, g.skipped_nothing, g.skipped_source, g.skipped) == (0, 1, 0, 1)
     assert con.execute("SELECT count(*) FROM event").fetchone()[0] == ile
+
+
+def test_cofniecie_ROZROZNIA_brak_obiektu_od_faktu_z_pliku():
+    """FALSYFIKATOR ROZDZIAŁU (wizytacja S3) — dwa pominięcia, dwie różne przyczyny, dwie liczby.
+
+    Zmierzone na kopii żywej `pf4`: gest na trzech stosach, z których jeden nie miał obiektu,
+    meldował „· z nagłówka/regionu: 1" o klatce bez nagłówka. Sklejenie było w klindze przyznane
+    komentarzem („nie ma czego cofać ALBO fakt spoza ręki") — ta sama klasa, którą ta paczka
+    zamknęła raz przy `skipped_stack`: kryterium nie ma prawa sklejać dwóch faktów.
+
+    Falsyfikator: zlej oba `continue` z powrotem w jeden → `skipped_nothing` spada do 0."""
+    con = _baza([("light", "raw", None, None),          # 1: dostanie obiekt ręką → cofnie się
+                 ("light", "raw", "NGC7000", None),     # 2: fakt z pliku — ręka go nie zdejmie
+                 ("light", "raw", None, None)])         # 3: nigdy nie miała obiektu
+    con.execute("INSERT INTO object(id, canon, catalog, kind) "
+                "VALUES (6,'NGC7000','NGC','deep_sky')")
+    con.execute("UPDATE frame SET object_id = 6, object_source = 'header' WHERE id = 2")
+    con.commit()
+    _przypisz(con, [1])
+    g = repo.clear_object_assignment(con, frame_ids=[1, 2, 3], now=NOW)
+    assert (g.assigned, g.skipped_source, g.skipped_nothing) == (1, 1, 1)
+    assert g.skipped == 2                                # suma zna OBA człony
+    assert g.skipped_breakdown == [("kind", 0), ("source", 1), ("nothing", 1), ("drift", 0)]
 
 
 def test_nagrobka_NIE_wskrzesza_gest_bez_jawnego_nadpisania():

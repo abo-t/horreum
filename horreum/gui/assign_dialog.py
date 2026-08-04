@@ -55,7 +55,7 @@ class AssignObjectDialog(QDialog):
     alias_norm)` (`kind=None` dla obiektu istniejącego — repo go nie INSERTuje, więc pole
     nieużywane; `alias_norm=None` = przypadek trzeci)."""
 
-    def __init__(self, con, *, object_raw, frame_count, selection=None, parent=None):
+    def __init__(self, con, *, object_raw, frame_count, selection=None, cleared_n=0, parent=None):
         super().__init__(parent)
         # KONTRAKT PILNOWANY OD ŚRODKA (R-S4-9, odesłane z adjudykacji S4 i domknięte tutaj).
         # `object_raw` o wartości `""` NIE jest tym samym co `None`: przypadek 1 zwróci wtedy pusty
@@ -100,6 +100,14 @@ class AssignObjectDialog(QDialog):
         else:
             head_text = (i18n.t_plural("assign.group_head", frame_count, name=object_raw)
                          + "\n" + i18n.t("assign.alias_remembered"))
+        # NADPISANIE WŁASNEGO WERDYKTU MÓWI SIĘ W OKNIE, NIE W TOOLTIPIE (wizytacja S3). Zapis
+        # z kubełka „cofnięte ręką" jedzie z `overwrite_weak=True`, czyli świadomie gasi nagrobek —
+        # a jedyne ostrzeżenie mieszkało w tooltipie przycisku, który pojawia się po ~700 ms
+        # najechania i którego user klikający wprost z wiersza nigdy nie zobaczy. Ostrzeżenie ma
+        # stać na DRODZE KLIKNIĘCIA, w chwili decyzji. Liczba z parametru, nie z literału: jej
+        # właścicielem jest read-model wołającego (ta sama reguła, co przy odmowie konfliktu).
+        if cleared_n:
+            head_text += "\n" + i18n.t_plural("assign.cleared_warning", cleared_n)
         self.head = QLabel(head_text)
         self.head.setWordWrap(True)
         lay.addWidget(self.head)

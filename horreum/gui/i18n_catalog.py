@@ -405,6 +405,16 @@ CATALOG = {
         "en": {"one": "{n} of them already has a name from the path — it will be overwritten.",
                "other": "{n} of them already have a name from the path — it will be overwritten."},
     },
+    # OSTRZEŻENIE NA DRODZE KLIKNIĘCIA, nie w tooltipie (wizytacja S3): zapis na nagrobku gasi
+    # WŁASNY WERDYKT usera, a okno o tym milczało — jedyne zdanie na ten temat wisiało w tooltipie
+    # przycisku, którego klikający wprost z wiersza nigdy nie zobaczy.
+    "assign.cleared_warning": {
+        "pl": {"one": "{n} z nich sam cofnąłeś — ta nazwa zastąpi Twój wcześniejszy werdykt.",
+               "few": "{n} z nich sam cofnąłeś — ta nazwa zastąpi Twój wcześniejszy werdykt.",
+               "many": "{n} z nich sam cofnąłeś — ta nazwa zastąpi Twój wcześniejszy werdykt."},
+        "en": {"one": "{n} of them you undid yourself — this name replaces your earlier verdict.",
+               "other": "{n} of them you undid yourself — this name replaces your earlier verdict."},
+    },
     # Reszta zaznaczenia ZOSTAJE nietknięta i user ma to wiedzieć PRZED zapisem, a nie z komunikatu
     # po nim: kalibracja i klatki z nagłówka/regionu są chronione, więc różnica między „zaznaczyłem
     # 80" a „zapisze się 30" nie jest awarią, tylko regułą.
@@ -876,6 +886,11 @@ CATALOG = {
     "grid.sel.object_skip_kind": {"pl": " · kalibracja: {n}", "en": " · calibration: {n}"},
     "grid.sel.object_skip_source": {"pl": " · z nagłówka/regionu: {n}",
                                     "en": " · from header/region: {n}"},
+    # Osobno od `_source`, bo to INNA PRZYCZYNA (wizytacja S3): klatka bez obiektu nie miała czego
+    # cofać i nie ma przy niej żadnego nagłówka do naprawienia. Sklejone dawały receptę, której
+    # nie da się wykonać — user czytał „z nagłówka/regionu" o klatce bez nagłówka.
+    "grid.sel.object_skip_nothing": {"pl": " · nie było czego cofać: {n}",
+                                     "en": " · nothing to undo: {n}"},
     "grid.sel.object_skip_drift": {"pl": " · zmieniły się w międzyczasie: {n}",
                                    "en": " · changed meanwhile: {n}"},
     # NIE pominięcie, tylko skład tego, co zapisano (D-OW-7) — „w tym", nie „poza tym". Gotowy
@@ -1425,13 +1440,18 @@ CATALOG = {
               "   unrecognized: {top}\n   no name in header: {nameless}\n"
               "   to review: {review}",
     },
+    # DWA KLUCZE, BO DWIE POPULACJE (recenzja + wizytacja S3). Nagrobek nie jest podzbiorem
+    # żadnego POJEDYNCZEGO zdania raportu: część ma nazwę w nagłówku (idzie do „nierozpoznane"),
+    # część nie (idzie do „bez nazwy w nagłówku"). Jeden klucz doklejany w jedno miejsce mówił
+    # „z tego" o liczbie, której te klatki nie były częścią. Oba: zostają w procencie świadomie —
+    # wykluczenie podnosiłoby go, czyli metryka nagradzałaby odrzucenie zeznania.
+    "pipeline.delta.cleared_named": {
+        "pl": " · z tego cofnięte ręką: {n}", "en": " · of which undone by hand: {n}"},
+    "pipeline.delta.cleared_nameless": {
+        "pl": " · z tego cofnięte ręką: {n}", "en": " · of which undone by hand: {n}"},
     # Doklejka do PROCENTU (nie do `{nameless}`): to druga strona tego samego zawężenia — klatki,
     # które obiekt MAJĄ, ale nazwy w nagłówku nie miały, więc do ułamka nie wchodzą po ŻADNEJ
     # stronie. Bez tej doklejki licznik po prostu spada i ekran nie tłumaczy dlaczego.
-    # Ile z „nierozpoznanych" to WERDYKT człowieka (S3/R-S2b-2). Zostają w procencie świadomie:
-    # wykluczenie podnosiłoby go, czyli metryka nagradzałaby odrzucenie zeznania.
-    "pipeline.delta.cleared": {
-        "pl": " · z tego cofnięte ręką: {n}", "en": " · of which undone by hand: {n}"},
     "pipeline.delta.resolved_no_raw": {
         "pl": " + {n} rozwiązanych bez nazwy (poza procentem)",
         "en": " + {n} resolved without a name (outside the percentage)"},

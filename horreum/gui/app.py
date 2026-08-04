@@ -1468,8 +1468,11 @@ class ObjectAxisView(QWidget):
             # cisza po kliknięciu byłaby gorsza od odmowy, bo nie da się odróżnić od zapisu.
             self.status_message.emit(i18n.t("object.assign_nothing"))
             return
+        # Kubełek cofniętych zaznacza WYŁĄCZNIE nagrobki (drążenie jedzie `cleared=True`), więc
+        # liczba jest długością zaznaczenia — nie trzeba drugiego SELECT-a na ten sam fakt.
         dlg = AssignObjectDialog(self.con, object_raw=object_raw,
-                                 frame_count=len(frame_ids), parent=self)
+                                 frame_count=len(frame_ids),
+                                 cleared_n=len(frame_ids) if cofniete else 0, parent=self)
         if dlg.exec() != QDialog.Accepted or dlg.selected is None:
             return
         canon, catalog, kind, alias_norm = dlg.selected
@@ -1484,6 +1487,12 @@ class ObjectAxisView(QWidget):
         msg = i18n.t("object.assigned_report", assigned=assigned, total=assigned + skipped, canon=canon)
         if skipped:
             msg += i18n.t("object.assigned_skipped", n=skipped)
+        # TEN SAM FAKT MUSI BRZMIEĆ TAK SAMO NA OBU POWIERZCHNIACH (wizytacja S3). Zapis ze Zbiorów
+        # mówił „w tym gotowe obrazy: N", a bliźniaczy zapis z kolejki tę liczbę miał w ręku
+        # (`g.stacks`) i wyrzucał — a to kolejka jest naturalną drogą, którą stos trafia pod ten
+        # gest. Milczenie znaczyło: jedyny zapis osi sięgający rodowodu przechodził bez śladu.
+        if g.stacks:
+            msg += i18n.t("grid.sel.object_stacks", n=g.stacks)
         self.status_message.emit(msg)
         self.refresh(select_canon=canon if assigned else None, select_first=bool(assigned))
 

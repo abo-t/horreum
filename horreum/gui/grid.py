@@ -1911,9 +1911,10 @@ class FramesView(QWidget):
         a „zmieniły się w międzyczasie" to ostrzeżenie, że stan uciekł. Jedno „pominięto N" kazałoby
         człowiekowi zgadywać, którą z tych dwóch rzeczy właśnie zobaczył."""
         msg = i18n.t(klucz, assigned=gest.assigned, total=gest.assigned + gest.skipped, **kw)
-        for pole, sufiks in (("skipped_kind", "kind"), ("skipped_source", "source"),
-                             ("skipped_drift", "drift")):
-            n = getattr(gest, pole)
+        # Skład i kolejność członów ma JEDNEGO właściciela (`ObjectGesture.skipped_breakdown`),
+        # a nie literał tutaj: czwarty człon dołożony w S3 („nie było czego cofać") wpadłby
+        # do sumy „z M" i zniknął z rozbicia, czyli dokładnie stamtąd, gdzie miał tłumaczyć.
+        for sufiks, n in gest.skipped_breakdown:
             if n:
                 msg += i18n.t(f"grid.sel.object_skip_{sufiks}", n=n)
         # Gotowe obrazy NIE stoją w pętli pominięć (D-OW-7): od chwili, gdy stos jest w zasięgu obu
@@ -1953,8 +1954,12 @@ class FramesView(QWidget):
         # „Przypisz 8 klatek" i zapisywał 4, a przy realnym archiwum (większość lightów ma źródło
         # mocne) rozjazd jest regułą, nie wyjątkiem. Kontekst zaznaczenia idzie dalej, bo to okno
         # pyta wtedy o NADPISANIE cudzej nazwy i musi to powiedzieć zamiast zdania o kubełku RAW.
+        # Zaznaczenie też bywa nagrobkiem — „Nazwij" jedzie `overwrite_weak=True`, więc gasi
+        # werdykt tak samo, jak zapis z kubełka cofniętych. Liczba z read-modelu (`by_source`),
+        # nie z osobnego zapytania: ten sam dict już wygasza kontrolkę.
         dlg = AssignObjectDialog(self.con, object_raw=None, frame_count=stan["namable"],
-                                 selection=stan, parent=self)
+                                 selection=stan,
+                                 cleared_n=stan["by_source"].get("user_cleared", 0), parent=self)
         if dlg.exec() != QDialog.Accepted or dlg.selected is None:
             return
         canon, catalog, kind, alias_norm = dlg.selected

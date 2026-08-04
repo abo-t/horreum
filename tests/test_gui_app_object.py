@@ -24,7 +24,9 @@ from horreum.gui.app import (
 
 from fixture_s8 import seed_object_axis
 
-from PySide6.QtWidgets import QApplication, QDialog, QHeaderView
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDialog, QHeaderView, QTableWidget,
+                               QTableWidgetItem)
 
 UROLE = 0x0100   # Qt.UserRole
 
@@ -1255,3 +1257,56 @@ def test_delta_daje_nagrobkowi_WLASNA_LICZBE_nie_wyklucza_go(sciezka):
     # dałoby się zaimplementować jako wykluczenie populacji — i bramka by tego nie zobaczyła.
     assert (przed.object_nameless_raw, po.object_nameless_raw) == (2, 4)
     assert (przed.object_resolved_no_raw, po.object_resolved_no_raw) == (2, 0)
+
+
+def test_przeladowanie_tabeli_nie_jest_kwadratowe(qapp):
+    """Przeładowanie tabeli, która JEST zaznaczona w całości, musi zejść z wierszami — nie z
+    zaznaczeniem (`_przeladuj_wiersze`).
+
+    Bramka wisi na ZMIERZONEJ szkodzie, nie na stylu. Firsthand 2026-08-04 na kopii żywej `pf4`:
+    kliknięcie kubełka RAW (763 klatki) po wcześniejszym drążeniu innego kubełka zajmowało wątek
+    GUI na **138 s** (offscreen 57,7 s) i Windows dopisywał oknu „(brak odpowiedzi)". Przyczyna:
+    `setRowCount(n)` zostawia stare wiersze i ich zaznaczenie, więc model zaznaczenia przelicza
+    zakresy przy każdym z 5341 `setItem`.
+
+    Dwie asercje, bo każda sama by przepuściła inny regres:
+      * BRAK ZAZNACZENIA po przeładowaniu — pilnuje, że stare wiersze zeszły;
+      * BUDŻET CZASU — pilnuje, że zeszły WŁAŚCIWĄ drogą. `clearSelection()` też zostawia puste
+        zaznaczenie, a mierzy **228 s**, czyli gorzej niż brak poprawki: kasowanie zaznaczenia
+        z 763 wierszy samo jest kwadratem. Sama asercja strukturalna świeciłaby na to zielono.
+
+    Budżet 10 s przy zmierzonych 0,10 s (naprawione) i 57,7 s (zepsute) — margines ~570×, więc
+    wolna maszyna testu nie przewróci, a powrót defektu nie ma jak się przecisnąć."""
+    from horreum.gui.app import _przeladuj_wiersze
+    import time
+
+    N, KOLUMN, BUDZET_S = 800, 7, 10.0
+    t = QTableWidget(0, KOLUMN)
+    t.setSelectionBehavior(QAbstractItemView.SelectRows)
+    t.setWordWrap(False)
+    fh = t.horizontalHeader()
+    fh.setSectionResizeMode(QHeaderView.ResizeToContents)   # jak panel klatek osi obiektu
+    t.show()
+    qapp.processEvents()
+
+    def wypelnij():
+        _przeladuj_wiersze(t, N)
+        for r in range(N):
+            for c in range(KOLUMN):
+                it = QTableWidgetItem(f"{r}-{c}")
+                it.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+                t.setItem(r, c, it)
+
+    wypelnij()
+    t.selectAll()                                   # lustro `_select_all_frames` (kubełek z akcją)
+    qapp.processEvents()
+    assert len(t.selectionModel().selectedRows()) == N, "fikstura nie zaznaczyła całości"
+
+    t0 = time.perf_counter()
+    wypelnij()                                      # DRUGIE drążenie — na tabeli zaznaczonej
+    dt = time.perf_counter() - t0
+
+    assert not t.selectionModel().selectedRows(), "stare zaznaczenie przeżyło przeładowanie"
+    assert t.rowCount() == N
+    assert dt < BUDZET_S, f"przeładowanie {N}×{KOLUMN} trwało {dt:.1f} s (budżet {BUDZET_S} s)"
+    t.close()

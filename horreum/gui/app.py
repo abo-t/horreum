@@ -61,6 +61,25 @@ def _fmt(v):
     return "" if v is None else f"{v:g}"
 
 
+def _przeladuj_wiersze(table, n):
+    """Ustaw tabelę na `n` wierszy PRZEZ ZRZUCENIE STARYCH — jedyna wolna droga przeładowania.
+
+    `setRowCount(n)` na tabeli, która ma wiersze ORAZ zaznaczenie, każe modelowi zaznaczenia
+    przeliczać zakresy przy KAŻDYM `setItem`, więc koszt jest kwadratowy. Zmierzone na 763
+    wierszach kubełka RAW (firsthand 2026-08-04, kopia żywej `pf4`): **138 s** — Windows zdążył
+    dopisać oknu „(brak odpowiedzi)", a jeden przebieg zjadł ~100 s CPU. Zrzucenie wierszy hurtem
+    daje **0,26 s** (offscreen 57,7 → 0,10), czyli ~530×.
+
+    `clearSelection()` jest PUŁAPKĄ, nie poprawką: kasowanie zaznaczenia z 763 wierszy samo jest
+    kwadratem i mierzy **228 s**, czyli GORZEJ niż nic nie robić. Liczy się wyłącznie to, że stare
+    wiersze znikają JEDNYM ruchem, zabierając zaznaczenie ze sobą.
+
+    Właściciel reguły jest jeden (SPOT): każde przeładowanie tabeli w tym module idzie tędy —
+    zbiory małe dziś nie płacą nic, a nie ma wtedy dwóch dróg, z których jedna czeka na dane."""
+    table.setRowCount(0)
+    table.setRowCount(n)
+
+
 def _utc_now_iso():
     return datetime.now(timezone.utc).isoformat()
 
@@ -237,7 +256,7 @@ class TelescopeAxisView(QWidget):
         self._loading = True
         try:
             rows = queries.active_telescopes(self.con)
-            self.table.setRowCount(len(rows))
+            _przeladuj_wiersze(self.table, len(rows))
             target_row = -1
             for r, row in enumerate(rows):
                 self._set_cell(r, COL_ID, str(row["id"]), data=row["id"])
@@ -1107,7 +1126,7 @@ class ObjectAxisView(QWidget):
         try:
             rows = queries.library_objects(
                 self.con, telescope_id=flt["telescope_id"], filter_canon=flt["filter_canon"])
-            self.objects.setRowCount(len(rows))
+            _przeladuj_wiersze(self.objects, len(rows))
             target_row = -1
             for r, row in enumerate(rows):
                 self._set_obj_cell(r, OBJ_COL_CANON, row["canon"], data=row["id"])
@@ -1396,7 +1415,7 @@ class ObjectAxisView(QWidget):
         # Pełna ścieżka nie ginie: niesie ją tooltip komórki (niżej) i poziomy scroll.
         fh.setSectionResizeMode(COPY_COL_PATH, QHeaderView.Stretch)
         self.frames.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.frames.setRowCount(len(rows))
+        _przeladuj_wiersze(self.frames, len(rows))
         for r, row in enumerate(rows):
             path = row["path"] or ""
             self._set_frame_cell(r, COPY_COL_PATH, path or i18n.t("object.no_path"),
@@ -1568,7 +1587,7 @@ class ObjectAxisView(QWidget):
         czyta się jak „nie ma", a w widoku obiektu obok ta sama kolumna mówi „tak". Nagłówek bez
         treści jest obietnicą bez pokrycia — znika razem z nią."""
         self.frames.setColumnHidden(FRAME_COL_PRESENT, not present_col)
-        self.frames.setRowCount(len(rows))
+        _przeladuj_wiersze(self.frames, len(rows))
         for r, row in enumerate(rows):
             keys = row.keys()
             # `frame_id` w roli danych PIERWSZEJ kolumny: od S4 panel jest CELEM akcji zapisu
@@ -1788,7 +1807,7 @@ class ObservatoryAxisView(QWidget):
         try:
             rows = queries.active_observatories(self.con)
             self._obs_coords = {row["id"]: (row["lat"], row["lon"]) for row in rows}
-            self.table.setRowCount(len(rows))
+            _przeladuj_wiersze(self.table, len(rows))
             target_row = -1
             for r, row in enumerate(rows):
                 self._set_cell(r, OBS_COL_ID, str(row["id"]), data=row["id"])

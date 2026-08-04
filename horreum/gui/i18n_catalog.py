@@ -221,6 +221,15 @@ CATALOG = {
     },
     "object.nameless_line": {"pl": "— bez nazwy w nagłówku: {n}",
                              "en": "— no name in header: {n}"},
+    # R-S3-1: te dwa wiersze to lustro pary RAW-owej wyżej. Klatka trafia tu, gdy nazwę ZDJĄŁEŚ,
+    # a nagłówek o obiekcie milczy (nazwa przyszła z regionu\ścieżki\xref) — werdykt człowieka,
+    # nie brak wiedzy. Człon dopisany po myślniku, jak w obu wierszach, które go już miały.
+    "object.nameless_cleared_line": {
+        "pl": "— bez nazwy w nagłówku: {n}  ·  cofnięte ręką",
+        "en": "— no name in header: {n}  ·  undone by hand"},
+    "object.nameless_stacks_cleared_line": {
+        "pl": "— bez nazwy, gotowe stosy: {n}  ·  cofnięte ręką",
+        "en": "— nameless, finished stacks: {n}  ·  undone by hand"},
     # RAW/DSLR: format nie zna karty OBJECT, więc te klatki czekają na RĘCZNE przypisanie —
     # dlatego wiersz mówi DROGĘ naprawy, nie sam objaw (kubełek wyżej otwiera okno zapisu karty,
     # ten nie ma czego otworzyć).
@@ -335,6 +344,14 @@ CATALOG = {
         "pl": "Klatki bez nazwy — format bez karty OBJECT ({n})",
         "en": "Frames with no name — format has no OBJECT card ({n})",
     },
+    "object.frames_nameless_cleared": {
+        "pl": "Klatki z cofniętym przypisaniem — bez nazwy w nagłówku ({n})",
+        "en": "Frames with the assignment undone — no name in header ({n})",
+    },
+    "object.frames_nameless_stacks_cleared": {
+        "pl": "Gotowe stosy z cofniętym przypisaniem ({n})",
+        "en": "Finished stacks with the assignment undone ({n})",
+    },
     "object.frames_nameless_stacks": {
         "pl": "Gotowe stosy bez nazwy w nagłówku ({n})",
         "en": "Finished stacks with no name in header ({n})",
@@ -350,6 +367,14 @@ CATALOG = {
               "nie tylko do bazy.",
         "en": "Add the OBJECT card to this bucket's FILES — the name goes back to the archive, "
               "not just to the database."},
+    # R-S3-1: nad wierszem „cofnięte ręką" przycisk jest AKTYWNY, więc recepta musi powiedzieć,
+    # co stanie się z werdyktem — inaczej user waha się, czy zapis go uszanuje, czy zdepcze.
+    # Karta gasi nagrobek świadomie (`writeback.py:704-705`) i to jest jedyna droga, którą on gaśnie.
+    "repair.tip_cleared": {
+        "pl": "Tym klatkom nazwę zdjąłeś ręką — dopisanie karty OBJECT do PLIKÓW zastąpi "
+              "ten werdykt nazwą, którą tu wpiszesz.",
+        "en": "You undid the name on these frames — adding the OBJECT card to the FILES replaces "
+              "that verdict with the name you enter here."},
     "repair.tip_raw": {
         "pl": "RAW nie ma karty OBJECT z natury formatu — tu drogą jest „Przypisz obiekt…” "
               "(ręka, zapis do bazy).",

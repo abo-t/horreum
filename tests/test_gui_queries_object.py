@@ -196,15 +196,23 @@ def _partycja(con):
     siedziały, a wszystkie falsyfikatory świeciły zielono — dokładnie ta klasa, którą kolejka
     trzyma jako lekcję („bramka, której nazwa zapowiada człon, a asercja pinuje jego BRAK").
     `object_review` własnego członu NIE dostaje: jego rozszczepienie siedzi w `GROUP BY`, więc
-    suma po wierszach liczy obie połówki."""
+    suma po wierszach liczy obie połówki.
+
+    OD R-S3-1 SĄ TU KOMPLETNE CZTERY KUBEŁKI, po dwa człony na te trzy, których licznik jest
+    długością drążenia. Dług był dokładnie tej samej klasy co przy RAW-ie i został znaleziony tą
+    samą drogą: człon istniał w nazwie kubełka, nie istniał w równaniu — więc cofnięty light
+    archiwum i cofnięty stos wypadały z LEWEJ strony, zostając w prawej (`review_frame_ids` pyta
+    o sam brak obiektu). Równanie domykało się tylko dopóki żaden taki nagrobek nie istniał."""
     q = queries.review_queue(con)
     headerless_lights = con.execute(
         "SELECT count(*) FROM frame f WHERE f.kind IN ('light','master_light') "
         "AND f.object_id IS NULL "
         "AND NOT EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id)").fetchone()[0]
-    return (sum(r["n"] for r in q["object_review"]) + q["nameless_count"]
+    return (sum(r["n"] for r in q["object_review"])
+            + q["nameless_count"] + q["nameless_cleared_count"]
             + q["nameless_raw_count"] + q["nameless_raw_cleared_count"]
-            + q["nameless_stacks_count"] + headerless_lights)
+            + q["nameless_stacks_count"] + q["nameless_stacks_cleared_count"]
+            + headerless_lights)
 
 
 def test_review_queue_partycja_pokrywa_perspektywe_gridu(s8_obj):
@@ -413,6 +421,81 @@ def test_partycja_przezywa_gotowy_stos(s8_obj):
     _nameless_stack(con, "sha-part-stack")
     assert len(queries.review_frame_ids(con)) == baza + 1
     assert _partycja(con) == baza + 1
+
+
+def _cofnij(con, fid):
+    """Pełny gest ręki: nazwij klatkę, a potem ZDEJMIJ nazwę — zostaje nagrobek `user_cleared`
+    przy `object_id IS NULL`. Ta para to jedyna droga, którą nagrobek powstaje."""
+    repo.user_assign_object(con, alias_norm=None, canon="NGC7000", catalog="NGC",
+                            kind="deep_sky", frame_ids=[fid], now=NOW)
+    assert repo.clear_object_assignment(con, frame_ids=[fid], now=NOW).assigned == 1
+    return fid
+
+
+def test_partycja_przezywa_NAGROBEK_na_light_archiwum(s8_obj):
+    """R-S3-1, FALSYFIKATOR CZWARTEGO ROZSZCZEPIENIA — bliźniak testu RAW-owego wyżej, którego
+    do dziś brakowało.
+
+    Light archiwum bez `object_raw` może mieć nagrobek: nazwę dostał z REGIONU (współrzędne),
+    ścieżki albo xref-a, nie z karty — więc po cofnięciu wraca do kubełka bezimiennych, choć
+    nagłówek nigdy o obiekcie nie mówił. Do R-S3-1 wracał tam nieodróżnialny od klatki, o której
+    nikt nigdy nie decydował.
+
+    Falsyfikator: wytnij `nameless_cleared_count` z `_partycja` → ten test czerwienieje o 1."""
+    con, _ = s8_obj
+    baza = len(queries.review_frame_ids(con))
+    _cofnij(con, _nameless_light(con, "sha-part-fits-cleared"))
+
+    q = queries.review_queue(con)
+    assert (q["nameless_count"], q["nameless_cleared_count"]) == (0, 1)
+    assert len(queries.review_frame_ids(con)) == baza + 1      # nagrobek ZOSTAJE do przeglądu
+    assert _partycja(con) == baza + 1                          # …i partycja go widzi
+
+
+def test_partycja_przezywa_NAGROBEK_na_gotowym_stosie(s8_obj):
+    """R-S3-1 + D-OW-7: ta droga NIE jest hipotetyczna — gest osi obiektu sięga gotowego obrazu,
+    więc cofnięcie na stosie jest jednym kliknięciem. Bez własnego członu równanie gubiło stos
+    z werdyktem ręki dokładnie tak, jak gubiło cofniętego lighta.
+
+    Falsyfikator: wytnij `nameless_stacks_cleared_count` z `_partycja` → czerwienieje o 1."""
+    con, _ = s8_obj
+    baza = len(queries.review_frame_ids(con))
+    _cofnij(con, _nameless_stack(con, "sha-part-stack-cleared"))
+
+    q = queries.review_queue(con)
+    assert (q["nameless_stacks_count"], q["nameless_stacks_cleared_count"]) == (0, 1)
+    assert len(queries.review_frame_ids(con)) == baza + 1
+    assert _partycja(con) == baza + 1
+
+
+def test_kotwice_RDZENIA_licza_OBIE_polowki_lightow_i_stosow(s8_obj):
+    """Bramka 13 rozciągnięta na dwa kubełki, które rozszczepienia nie miały (R-S3-1).
+
+    Kotwicą rdzenia jest SUMA obu drążeń, nie samo pierwsze: `nameless_lights`/`nameless_stacks`
+    pytają o sam brak obiektu i nagrobki LICZĄ, a drążenie domyślne bierze wyłącznie połówkę
+    nietkniętą. Gdyby zapisać starą równość, pin przechodziłby tylko dopóki żaden nagrobek nie
+    istnieje — czyli pinowałby NIEOBECNOŚĆ populacji zamiast równości (ta sama pułapka, która
+    przy RAW-ie przeżyła całe S3)."""
+    from horreum.resolver import nameless_lights, nameless_stacks
+
+    con, _ = s8_obj
+    swiezy_l = _nameless_light(con, "sha-anchor-fits-fresh")
+    cofniety_l = _cofnij(con, _nameless_light(con, "sha-anchor-fits-cleared"))
+    swiezy_s = _nameless_stack(con, "sha-anchor-stack-fresh")
+    cofniety_s = _cofnij(con, _nameless_stack(con, "sha-anchor-stack-cleared"))
+
+    q = queries.review_queue(con)
+    assert (q["nameless_count"], q["nameless_cleared_count"]) == (1, 1)
+    assert (q["nameless_stacks_count"], q["nameless_stacks_cleared_count"]) == (1, 1)
+    assert len(queries.nameless_frames(con)) + len(
+        queries.nameless_frames(con, cleared=True)) == nameless_lights(con) == 2
+    assert len(queries.nameless_stack_frames(con)) + len(
+        queries.nameless_stack_frames(con, cleared=True)) == nameless_stacks(con) == 2
+    # …i połówki są ROZŁĄCZNE, a nie kubełek i jego podzbiór
+    assert {r["frame_id"] for r in queries.nameless_frames(con)} == {swiezy_l}
+    assert {r["frame_id"] for r in queries.nameless_frames(con, cleared=True)} == {cofniety_l}
+    assert {r["frame_id"] for r in queries.nameless_stack_frames(con)} == {swiezy_s}
+    assert {r["frame_id"] for r in queries.nameless_stack_frames(con, cleared=True)} == {cofniety_s}
 
 
 def test_trzy_kubelki_bezimiennych_sa_rozlaczne(s8_obj):

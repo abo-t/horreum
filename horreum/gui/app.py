@@ -43,8 +43,21 @@ COL_ID, COL_CANON, COL_LABEL, COL_STATUS, COL_FRATIO, COL_FOCAL, COL_FRAMES = ra
 # (S3/R-S2b-1). Jeden właściciel obu zbiorów, bo pytają o nie CZTERY miejsca — wygaszenie przycisku,
 # tooltip, drążenie i zapis — a wyliczanka powtórzona cztery razy rozjedzie się przy pierwszym
 # nowym kubełku: przycisk aktywny przy drążeniu, które go nie obsługuje, albo odwrotnie.
-_CLEARED_TAGS = frozenset({"object_raw_cleared", "nameless_raw_cleared"})
-_ASSIGN_TAGS = frozenset({"object_raw", "nameless_raw"}) | _CLEARED_TAGS
+_CLEARED_TAGS = frozenset({"object_raw_cleared", "nameless_raw_cleared",
+                           "nameless_cleared", "nameless_stacks_cleared"})
+_ASSIGN_TAGS = frozenset({"object_raw", "nameless_raw",
+                          "object_raw_cleared", "nameless_raw_cleared"})
+# Kubełki, których drogą naprawy jest KARTA `OBJECT` W PLIKU — i ich połówki cofnięte (R-S3-1).
+# Zbiór, nie wyliczanka w trzech `if`-ach: pytają o niego wygaszenie „Napraw nagłówek…", jego
+# tooltip, tooltip sąsiada i wejście samej akcji, a rozszczepienie po `cleared` podwoiło każdą
+# z tych list. Ta sama figura, co `_REPAIR_TIPS` niżej: kubełek dopisany jutro wchodzi JEDNYM
+# słowem albo nie wchodzi wcale — nie połową powierzchni.
+#
+# Połówka cofnięta zostaje TUTAJ, a poza `_ASSIGN_TAGS`, bo droga naprawy nagrobka nie zależy od
+# tego, kto zdjął nazwę, tylko od tego, czy plik ma jak o obiekcie zeznać: writeback wpisuje kartę
+# i TYM SAMYM gasi nagrobek (`writeback.py:704-705`). Ręka jest drogą kubełka RAW, nie tego.
+_CARD_TAGS = frozenset({"nameless", "nameless_stacks",
+                        "nameless_cleared", "nameless_stacks_cleared"})
 # POWÓD WYGASZENIA „Napraw nagłówek…" PER KUBEŁEK (R-S3-7) — mapa, nie drabina `if`-ów.
 #
 # Drabina rosła o jeden człon na każdy nowy kubełek i dwa razy z rzędu zapomniała o kolejnym:
@@ -58,6 +71,10 @@ _ASSIGN_TAGS = frozenset({"object_raw", "nameless_raw"}) | _CLEARED_TAGS
 _REPAIR_TIPS = {
     "nameless": "repair.tip",
     "nameless_stacks": "repair.tip",
+    # Połówki cofnięte (R-S3-1) mówią WPROST, że karta zdejmie nagrobek — inaczej user widzi
+    # aktywny przycisk nad wierszem „cofnięte ręką" i nie wie, czy tamten werdykt przeżyje zapis.
+    "nameless_cleared": "repair.tip_cleared",
+    "nameless_stacks_cleared": "repair.tip_cleared",
     "nameless_raw": "repair.tip_raw",
     "nameless_raw_cleared": "repair.tip_raw",
     "object_raw": "repair.tip_named",
@@ -1227,6 +1244,14 @@ class ObjectAxisView(QWidget):
         self._add_review_item(i18n.t("object.nameless_line", n=q["nameless_count"]),
                               tag="nameless" if q["nameless_count"] > 0 else None,
                               info=i18n.t("object.nameless_info_empty"))
+        # Druga połowa tego kubełka (R-S3-1) — lustro wiersza RAW-owego niżej, z tego samego powodu
+        # i w tej samej formie. Klatka trafia tu, gdy nazwę zdjąłeś ręką, a nagłówek o obiekcie
+        # MILCZY (nazwa przyszła z regionu/ścieżki/xref, nie z karty). QUIET — wiersza nie ma,
+        # dopóki nic nie cofnięto; na archiwum bez ani jednego nagrobka ekran wygląda jak przedtem.
+        if q["nameless_cleared_count"] > 0:
+            self._add_review_item(
+                i18n.t("object.nameless_cleared_line", n=q["nameless_cleared_count"]),
+                tag="nameless_cleared")
         # Bliźniak kubełka wyżej po drugiej stronie FORMATU (`resolver.NO_OBJECT_CARD_FILETYPES`):
         # RAW nie ma karty `OBJECT` z natury, więc „Napraw nagłówek…" go nie dotyczy — drogą
         # naprawy jest RĘKA. Do S4 wiersz był INFORMACYJNY i to była luka, nie decyzja: akcja
@@ -1267,6 +1292,15 @@ class ObjectAxisView(QWidget):
             self._add_review_item(
                 i18n.t("object.nameless_stacks_line", n=q["nameless_stacks_count"]),
                 tag="nameless_stacks")
+        # Czwarta i ostatnia połówka (R-S3-1). Ten wiersz nie jest teoretyczny: D-OW-7 wpuściło
+        # gest osi obiektu na GOTOWY OBRAZ, więc cofnięcie na stosie jest jednym kliknięciem —
+        # a bez własnego wiersza stos z werdyktem ręki wracał nad kubełek wyżej nieodróżnialny
+        # od stosu, o którym nikt nigdy nie decydował.
+        if q["nameless_stacks_cleared_count"] > 0:
+            self._add_review_item(
+                i18n.t("object.nameless_stacks_cleared_line",
+                       n=q["nameless_stacks_cleared_count"]),
+                tag="nameless_stacks_cleared")
         self._add_review_item(i18n.t("object.unreadable_line", n=q["unreadable_count"]),
                               tag="unreadable" if q["unreadable_count"] > 0 else None,
                               info=i18n.t("object.unreadable_info_empty"))
@@ -1361,9 +1395,12 @@ class ObjectAxisView(QWidget):
         # „nie ma czego zapisać" i przycisk ma to powiedzieć wygaszeniem, a nie ciszą po kliknięciu.
         self.assign_btn.setEnabled(tag in _ASSIGN_TAGS and not self._busy
                                    and bool(self._selected_frame_ids()))
-        # Dwa tagi, jedna akcja: kubełek lightów archiwum i kubełek gotowych stosów mają od
-        # D-0802-1 tę samą drogę naprawy (karta `OBJECT` do PLIKU), więc przycisk obsługuje oba.
-        self.repair_btn.setEnabled(tag in ("nameless", "nameless_stacks")
+        # Jedna akcja dla całej rodziny kubełków naprawianych KARTĄ: lighty archiwum i gotowe stosy
+        # mają od D-0802-1 tę samą drogę (karta `OBJECT` do PLIKU), a od R-S3-1 każdy z nich ma
+        # jeszcze połówkę cofniętą — dla niej ta droga jest TĄ SAMĄ drogą, bo writeback gasi
+        # nagrobek. Zbiór zamiast wyliczanki: przy rozszczepieniu wyliczanka zapala przycisk nad
+        # jedną połówką i gasi nad drugą, choć obie prowadzą do tego samego okna.
+        self.repair_btn.setEnabled(tag in _CARD_TAGS
                                    and not self._busy and not self._foreign_wb)
         # Potwierdzanie propozycji pisze do BAZY, nie do plików — mutex writebacku (`_foreign_wb`)
         # jej NIE dotyczy; bramką jest sam bieg pipeline'u, jak przy „Przypisz obiekt…".
@@ -1376,11 +1413,16 @@ class ObjectAxisView(QWidget):
         # WIZ #12: „Przypisz obiekt…" gasł BEZ SŁOWA obok aktywnego „Napraw nagłówek…", więc obie
         # drogi naprawy wyglądały jak jedna zepsuta. Wygaszony przycisk tłumaczy się sam — tooltip
         # nazywa drogę WŁAŚCIWĄ dla zaznaczonego kubełka, zamiast milczeć o istnieniu drugiej.
+        #
+        # KARTA PYTA PIERWSZA (R-S3-1): połówka cofnięta kubełka kartowego jest jednocześnie
+        # `_CLEARED_TAGS` i `_CARD_TAGS`, a rozstrzyga o niej DROGA NAPRAWY, nie to, kto zdjął
+        # nazwę. Przy starej kolejności („cofnięte" na górze) wygaszony przycisk mówiłby nad tym
+        # wierszem „ręka nadpisze Twój werdykt" — obietnicę akcji, której ten kubełek nie ma.
         self.assign_btn.setToolTip(i18n.t(
+            "object.assign_tip_card" if tag in _CARD_TAGS else
             "object.assign_tip_cleared" if tag in _CLEARED_TAGS else
             "object.assign_tip" if tag == "object_raw" else
             "object.assign_tip_raw" if tag == "nameless_raw" else
-            "object.assign_tip_card" if tag in ("nameless", "nameless_stacks") else
             "object.assign_tip_pick"))
         # TRZECI przycisk tego rzędu milczał — jako JEDYNY (R-S3-7). Miał `enabled=False` i PUSTY
         # tooltip dla każdego wiersza, choć obaj sąsiedzi tłumaczą się od S2/S4. Skutek: kubełek,
@@ -1390,7 +1432,7 @@ class ObjectAxisView(QWidget):
         # Mutex writebacku BIJE powód kubełka: „nie da się" i „nie teraz" to dwa różne zdania,
         # a użytkownik czekający na cudzy zapis potrzebuje tego drugiego.
         self.repair_btn.setToolTip(i18n.t(
-            "repair.tip_busy" if self._foreign_wb and tag in ("nameless", "nameless_stacks")
+            "repair.tip_busy" if self._foreign_wb and tag in _CARD_TAGS
             else _REPAIR_TIPS.get(tag, "repair.tip_pick")))
 
     def _on_object_selected(self):
@@ -1444,10 +1486,13 @@ class ObjectAxisView(QWidget):
                 name=payload))
             self._fill_frames(rows, present_col=False)
             self._select_all_frames()
-        elif tag == "nameless":
+        elif tag in ("nameless", "nameless_cleared"):
+            cofniete = tag in _CLEARED_TAGS
             self._restore_frames_mode()
-            rows = queries.nameless_frames(self.con)
-            self.frames_label.setText(i18n.t("object.frames_nameless", n=len(rows)))
+            rows = queries.nameless_frames(self.con, cleared=cofniete)
+            self.frames_label.setText(i18n.t(
+                "object.frames_nameless_cleared" if cofniete
+                else "object.frames_nameless", n=len(rows)))
             self._fill_frames(rows, present_col=False)
         elif tag in ("nameless_raw", "nameless_raw_cleared"):
             cofniete = tag in _CLEARED_TAGS
@@ -1458,10 +1503,13 @@ class ObjectAxisView(QWidget):
                 else "object.frames_nameless_raw", n=len(rows)))
             self._fill_frames(rows, present_col=False)
             self._select_all_frames()
-        elif tag == "nameless_stacks":
+        elif tag in ("nameless_stacks", "nameless_stacks_cleared"):
+            cofniete = tag in _CLEARED_TAGS
             self._restore_frames_mode()
-            rows = queries.nameless_stack_frames(self.con)
-            self.frames_label.setText(i18n.t("object.frames_nameless_stacks", n=len(rows)))
+            rows = queries.nameless_stack_frames(self.con, cleared=cofniete)
+            self.frames_label.setText(i18n.t(
+                "object.frames_nameless_stacks_cleared" if cofniete
+                else "object.frames_nameless_stacks", n=len(rows)))
             self._fill_frames(rows, present_col=False)
         elif tag == "path_proposals":
             # Drążenie pokazuje KLATKI (żeby wiersz nie był ślepym zaułkiem), a jednostkę przeglądu
@@ -1637,10 +1685,19 @@ class ObjectAxisView(QWidget):
 
         Wejście bierzemy z ZAZNACZONEGO kubełka (D-0802-1): lighty archiwum i gotowe stosy mają tę
         samą drogę naprawy, ale to DWIE rozłączne populacje i dwa liczniki — otwarcie okna zawsze
-        na lightach kłamałoby licznikiem, na którym user kliknął."""
+        na lightach kłamałoby licznikiem, na którym user kliknął.
+
+        OD R-S3-1 KUBEŁKI SĄ CZTERY, bo każda z tych populacji ma połówkę cofniętą ręką — i to jest
+        DRUGA oś tego samego wyboru, nie kosmetyka wiersza. Bez członu `cleared` kliknięcie
+        w „cofnięte ręką" otwierało okno z populacją NIETKNIĘTĄ: listą rozłączną z tą, którą user
+        widział pod spodem, i to zapisem do PLIKÓW. Wybór po parze (populacja, źródło) trzyma
+        kontrakt „okno pokazuje dokładnie to, co licznik, na którym kliknąłeś"."""
         tag, _ = self._selected_review()
-        rows = (queries.nameless_stack_frames(self.con) if tag == "nameless_stacks"
-                else queries.nameless_frames(self.con))
+        cofniete = tag in _CLEARED_TAGS
+        czytaj = (queries.nameless_stack_frames
+                  if tag in ("nameless_stacks", "nameless_stacks_cleared")
+                  else queries.nameless_frames)
+        rows = czytaj(self.con, cleared=cofniete)
         if not rows:
             self.status_message.emit(i18n.t("repair.nothing"))
             return

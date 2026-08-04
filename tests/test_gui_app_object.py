@@ -385,8 +385,9 @@ def test_KAZDY_kubelek_kolejki_ma_WLASNA_recepte_naprawy(view):
     # recepty przechodziłby, bo jego brak w mapie znaczyłby też brak w pytaniu. Fikstura pokazuje
     # tylko część kubełków naraz, więc bez tego członu klasa zostałaby niedomknięta.
     from horreum.gui.app import _REPAIR_TIPS
-    kubelki = {"object_raw", "object_raw_cleared", "nameless", "nameless_raw",
-               "nameless_raw_cleared", "path_proposals", "nameless_stacks", "unreadable"}
+    kubelki = {"object_raw", "object_raw_cleared", "nameless", "nameless_cleared",
+               "nameless_raw", "nameless_raw_cleared", "path_proposals",
+               "nameless_stacks", "nameless_stacks_cleared", "unreadable"}
     brakuje = kubelki - set(_REPAIR_TIPS)
     assert not brakuje, f"kubełki bez własnej recepty naprawy: {sorted(brakuje)}"
     assert None in _REPAIR_TIPS, "brak zaznaczenia musi mieć jawny wpis, nie wpadać w `.get`"
@@ -758,8 +759,127 @@ def test_kubelek_gotowych_stosow_drazy_wlasna_lista(repair):
     assert v.repair_btn.isEnabled() and not v.assign_btn.isEnabled()
     assert [r["frame_id"] for r in queries.nameless_stack_frames(con)] == [fid]
 
+
+# ═════════════════════════ R-S3-1 — CZŁON „COFNIĘTE RĘKĄ" W DWÓCH KUBEŁKACH KARTOWYCH
+
+
+def _cofnij_reka(con, fid, now):
+    """Nazwij klatkę i ZDEJMIJ nazwę — jedyna droga, którą powstaje nagrobek `user_cleared`."""
+    repo.user_assign_object(con, alias_norm=None, canon="NGC7000", catalog="NGC",
+                            kind="deep_sky", frame_ids=[fid], now=now)
+    assert repo.clear_object_assignment(con, frame_ids=[fid], now=now).assigned == 1
+    return fid
+
+
+class _StubNaprawa:
+    """Podstawka pod `RepairHeaderDialog` — łapie LISTĘ, na której okno zostało otwarte.
+
+    Pytanie bramki brzmi „którą populację user zobaczy", a nie „czy okno się otworzyło": defekt
+    siedzi w wyborze wejścia, a okno wygląda tak samo dla obu połówek."""
+
+    class _Sygnal:
+        def connect(self, _):
+            pass
+
+    def __init__(self, con, *, rows, **kwargs):
+        _StubNaprawa.rows = rows
+        self.changed = self.busy_changed = _StubNaprawa._Sygnal()
+
+    def exec(self):
+        return 0
+
+
+def test_polowka_cofnieta_lightow_drazy_i_NAPRAWIA_wlasna_liste(repair, monkeypatch):
+    """R-S3-1, człon wykonawczy: kubełek „bez nazwy w nagłówku" rozszczepia się po źródle — a okno
+    naprawy otwiera się na TEJ POŁÓWCE, którą user kliknął.
+
+    Bez członu `cleared` w `_on_repair` kliknięcie w „cofnięte ręką" otwierało okno z populacją
+    NIETKNIĘTĄ: listą ROZŁĄCZNĄ z tą, którą user widział pod spodem — i to akcją, która pisze
+    do PLIKÓW archiwum. To ta sama klasa co defekt stosów wyżej („user kliknął jeden licznik,
+    poprawił inną populację"), tylko druga oś tego samego wyboru.
+
+    Falsyfikator: przywróć w `_on_repair` `cleared=False` → `_StubNaprawa.rows` niesie klatkę
+    nietkniętą zamiast cofniętej i obie ostatnie asercje czerwienieją."""
+    v, con, files, _open = repair
+    wszystkie = [r["frame_id"] for r in queries.nameless_frames(con)]
+    assert len(wszystkie) == 2
+    cofniety = _cofnij_reka(con, wszystkie[0], NOW_PD)
+    nietkniety = wszystkie[1]
+    v.refresh()
+
+    q = queries.review_queue(con)
+    assert (q["nameless_count"], q["nameless_cleared_count"]) == (1, 1)
+    _select_review_tag(v, "nameless_cleared")
+    assert v.frames.rowCount() == 1                     # drążenie po PARZE, nie unia obu połówek
+    assert [r["frame_id"] for r in queries.nameless_frames(con, cleared=True)] == [cofniety]
+    # Kubełek naprawiany KARTĄ zostaje kartowy także w połówce cofniętej: writeback gasi nagrobek,
+    # więc przycisk jest aktywny, a ręka (droga kubełka RAW) — nie jego drogą.
+    assert v.repair_btn.isEnabled() and not v.assign_btn.isEnabled()
+
+    monkeypatch.setattr("horreum.gui.app.RepairHeaderDialog", _StubNaprawa)
+    v._on_repair()
+    assert [r["frame_id"] for r in _StubNaprawa.rows] == [cofniety]
+    assert nietkniety not in [r["frame_id"] for r in _StubNaprawa.rows]
+
+
+def test_polowka_cofnieta_gotowych_stosow_ma_WLASNY_wiersz_i_wlasna_liste(repair, monkeypatch):
+    """R-S3-1 na czwartym kubełku — i to NIE jest droga hipotetyczna: D-OW-7 wpuściło gest osi
+    obiektu na gotowy obraz, więc cofnięcie na stosie jest jednym kliknięciem.
+
+    Dwa stosy, jeden cofnięty: wiersze muszą być dwa, a każdy drążyć do SWOJEJ klatki. Do R-S3-1
+    oba siedziały w jednym wierszu, więc werdykt człowieka wyglądał jak brak wiedzy."""
+    v, con, files, _open = repair
+    stosy = []
+    for sha in ("sha-stack-fresh", "sha-stack-cleared"):
+        fid, _ = repo.upsert_frame(con, sha1_data=sha, kind="master_light", filetype="xisf",
+                                   camera_id=None, now=NOW_PD)
+        repo.record_header(con, frame_id=fid, raw_json="{}", object_raw=None, now=NOW_PD)
+        stosy.append(fid)
+    swiezy, cofniety = stosy[0], _cofnij_reka(con, stosy[1], NOW_PD)
+    v.refresh()
+
+    q = queries.review_queue(con)
+    assert (q["nameless_stacks_count"], q["nameless_stacks_cleared_count"]) == (1, 1)
+    _select_review_tag(v, "nameless_stacks")
+    assert [r["frame_id"] for r in queries.nameless_stack_frames(con)] == [swiezy]
+    _select_review_tag(v, "nameless_stacks_cleared")
+    assert v.frames.rowCount() == 1
+    assert [r["frame_id"] for r in queries.nameless_stack_frames(con, cleared=True)] == [cofniety]
+
+    # …a okno naprawy dostaje STOS, nie lighta archiwum: wybór idzie po PARZE (populacja, źródło),
+    # więc pomyłka na którejkolwiek osi otwiera cudzą listę.
+    monkeypatch.setattr("horreum.gui.app.RepairHeaderDialog", _StubNaprawa)
+    v._on_repair()
+    assert [r["frame_id"] for r in _StubNaprawa.rows] == [cofniety]
+
+
+def test_wiersz_cofnietych_MOWI_co_stanie_sie_z_werdyktem(repair):
+    """R-S3-1 / doktryna repo „wygaszony przycisk tłumaczy się sam" — tu w wariancie trudniejszym:
+    przycisk jest AKTYWNY, a mimo to musi się wytłumaczyć.
+
+    Nad wierszem „cofnięte ręką" user widzi aktywne „Napraw nagłówek…" i ma prawo nie wiedzieć,
+    czy zapis uszanuje jego werdykt, czy go zdepcze. Recepta ma to powiedzieć WPROST, i musi być
+    INNA niż recepta połówki nietkniętej — inaczej dwa różne stany dostają jedno zdanie."""
+    from horreum.gui import i18n
+    v, con, files, _open = repair
+    wszystkie = [r["frame_id"] for r in queries.nameless_frames(con)]
+    _cofnij_reka(con, wszystkie[0], NOW_PD)
+    v.refresh()
+
+    _select_review_tag(v, "nameless")
+    tip_nietkniety = v.repair_btn.toolTip()
+    _select_review_tag(v, "nameless_cleared")
+    tip_cofniety = v.repair_btn.toolTip()
+
+    assert tip_cofniety.strip() and tip_cofniety != tip_nietkniety
+    assert tip_cofniety != i18n.t("repair.tip_pick")     # nie recepta „nic nie wybrano"
+    assert "cofnięcie" in tip_cofniety or "zdjąłeś" in tip_cofniety
+
+    # …a przycisk zostaje aktywny nad OBIEMA połówkami: droga naprawy jest ta sama, różni się
+    # tylko zdanie, którym się tłumaczy. Fixture ma dwie klatki, jedna poszła pod nagrobek — więc
+    # połówka nietknięta liczy JEDNĄ (gdyby liczyła dwie, rozszczepienie by nie działało).
     _select_review_tag(v, "nameless")                  # ten sam przycisk, druga populacja
-    assert v.frames.rowCount() == 2 and v.repair_btn.isEnabled()
+    assert v.frames.rowCount() == 1 and v.repair_btn.isEnabled()
 
 
 def test_propozycja_z_dwoch_swiadkow_i_domyslne_zaznaczenie(repair):

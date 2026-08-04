@@ -74,10 +74,19 @@ schemat i API mogą się jeszcze zmieniać.
   odwróceniem. Dostawałeś „przypisano 5 z 8" bez wyjaśnienia. Teraz takie klatki mają w kolejce
   własny wiersz z dopiskiem **„cofnięte ręką"**, a przycisk przy nim działa i mówi wprost, że
   przypisanie nadpisze wcześniejszy werdykt — **mówi to również samo okno zapisu, zanim klikniesz**,
-  a nie dopiero w dymku nad przyciskiem. Dotyczy to wierszy z nazwą w nagłówku oraz kubełka zdjęć
-  z lustrzanki (RAW); przy dwóch pozostałych kubełkach bezimiennych („bez nazwy w nagłówku"
-  i „gotowe obrazy") cofnięta klatka wraca na razie do wspólnego wiersza — dopisek dostanie
-  je w kolejnym kroku.
+  a nie dopiero w dymku nad przyciskiem.
+- **Dopisek „cofnięte ręką" mają teraz WSZYSTKIE cztery wiersze kolejki, nie dwa z nich.** Wcześniej
+  dostały go pozycje z nazwą w nagłówku i kubełek zdjęć z lustrzanki (RAW), a dwa pozostałe —
+  „bez nazwy w nagłówku" i „gotowe obrazy" — nie. Klatka, której zdjąłeś nazwę odczytaną z pozycji
+  na niebie albo z folderu, wracała więc do wspólnego wiersza **nieodróżnialna od klatki, o której
+  nikt nigdy nie decydował**; przy gotowych obrazach ta droga jest osiągalna jednym kliknięciem,
+  odkąd „Obiekt ▾" obejmuje stosy. Teraz każda z tych populacji ma własny wiersz z dopiskiem
+  i **otwiera dokładnie tę listę, którą pokazuje jej licznik**. To ostatnie nie jest kosmetyką:
+  kliknięcie w „cofnięte ręką" otwierało dotąd okno „Napraw nagłówek…" z klatkami **nietkniętymi**
+  — czyli akcja pisząca do PLIKÓW archiwum celowała w grupę rozłączną z tą, którą widziałeś pod
+  spodem. Przycisk nad takim wierszem jest aktywny i mówi wprost, że dopisanie karty `OBJECT`
+  zastąpi Twój werdykt nazwą, którą wpiszesz — bo tak właśnie działa i to jedyna droga, którą
+  cofnięcie gaśnie.
   Raport Dostawy podaje przy okazji, ile z nierozpoznanych klatek to Twoja decyzja, a ile brak
   wiedzy — te pierwsze zostają w procencie rozpoznania świadomie, bo inaczej odrzucenie nazwy
   podnosiłoby wynik. **Liczby są dwie i każda stoi przy swoim zdaniu**: osobno klatki, które nazwę

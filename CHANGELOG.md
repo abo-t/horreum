@@ -73,9 +73,16 @@ schemat i API mogą się jeszcze zmieniać.
   „Przypisz obiekt…" po cichu jej nie tykało, bo program chroni cofnięcie przed przypadkowym
   odwróceniem. Dostawałeś „przypisano 5 z 8" bez wyjaśnienia. Teraz takie klatki mają w kolejce
   własny wiersz z dopiskiem **„cofnięte ręką"**, a przycisk przy nim działa i mówi wprost, że
-  przypisanie nadpisze wcześniejszy werdykt. Raport Dostawy podaje przy okazji, ile
-  z nierozpoznanych klatek to Twoja decyzja, a ile brak wiedzy — te pierwsze zostają w procencie
-  rozpoznania świadomie, bo inaczej odrzucenie nazwy podnosiłoby wynik.
+  przypisanie nadpisze wcześniejszy werdykt — **mówi to również samo okno zapisu, zanim klikniesz**,
+  a nie dopiero w dymku nad przyciskiem. Dotyczy to wierszy z nazwą w nagłówku oraz kubełka zdjęć
+  z lustrzanki (RAW); przy dwóch pozostałych kubełkach bezimiennych („bez nazwy w nagłówku"
+  i „gotowe obrazy") cofnięta klatka wraca na razie do wspólnego wiersza — dopisek dostanie
+  je w kolejnym kroku.
+  Raport Dostawy podaje przy okazji, ile z nierozpoznanych klatek to Twoja decyzja, a ile brak
+  wiedzy — te pierwsze zostają w procencie rozpoznania świadomie, bo inaczej odrzucenie nazwy
+  podnosiłoby wynik. **Liczby są dwie i każda stoi przy swoim zdaniu**: osobno klatki, które nazwę
+  w nagłówku mają, osobno te bez niej. Jedna wspólna liczba potrafiła dopisać „z tego cofnięte
+  ręką: 16" do wiersza pokazującego zero.
 - **Okno „Napraw nagłówek…" i rozpoznawanie nazw mówią wreszcie JEDNYM głosem.** Do tej pory
   ekran i baza odpowiadały różnie na to samo pytanie: przebieg umiał nazwać `LMC` czy `Moon`,
   a okno naprawy przy tych samych plikach milczało. Teraz obie drogi pytają tej samej reguły,
@@ -146,6 +153,15 @@ schemat i API mogą się jeszcze zmieniać.
   przebieg**, który umie powiedzieć mniej. Powiązanie zwykłe (dobrane z okna czasu) dalej aktualizuje
   się normalnie, więc rodowód nie zastyga. Raport przebiegu mówi wprost, ile rodowodów zostawiono
   nietkniętych i **dlaczego** — osobno „archiwum odłączone", osobno „zapisany dowód mocniejszy".
+- **„Cofnij przypisanie" mówiło o nagłówku przy klatce, która żadnego nie miała.** Program liczył
+  jednym workiem dwa zupełnie różne powody pominięcia: „ta klatka nazwy w ogóle nie miała, więc nie
+  było czego cofać" oraz „nazwę postawił nagłówek pliku albo pozycja na niebie, a tych ręka nie
+  zdejmuje". Dostawałeś „cofnięto 2 z 3 · z nagłówka/regionu: 1" i podpowiedź, żeby naprawić kartę
+  w pliku — przy klatce, w której nie było czego naprawiać. Teraz są to dwa osobne człony zdania.
+- **Zapis z kolejki przeglądu milczał o tym, że dotknął gotowego obrazu.** Ten sam gest wykonany
+  z ekranu „Klatki" mówił „w tym gotowe obrazy: 2", a wykonany z kolejki — nic, choć to właśnie
+  kolejka jest naturalną drogą do takiej klatki. Nazwanie gotowego obrazu jest jedynym zapisem
+  nazwy, który sięga powiązania ze zdjęciami źródłowymi, więc przechodził bez śladu.
 - **Podsumowanie gestu na osi obiektu było niewidoczne dokładnie wtedy, gdy coś zapisano.** Zdanie
   z rozbiciem („nazwano 4 z 8 · kalibracja: 2 · z nagłówka: 2") padało chwilę przed odświeżeniem
   listy, a odświeżenie natychmiast zastępowało je własnym „Wczytano N klatek". Widziałeś je więc

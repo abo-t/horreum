@@ -58,8 +58,9 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from horreum import db                                              # noqa: E402
+from horreum import supersede                                     # noqa: E402
 from horreum.audit import (entity_event_parity, light_population_closure,  # noqa: E402
-                           object_source_audit)
+                           object_source_audit, supersede_invariants)
 from horreum.calibration import KIND_RECIPE, run_calibration      # noqa: E402
 from horreum.lineage import run_lineage                           # noqa: E402
 from horreum.grouper import NO_TELESCOPE_KINDS, run_grouper       # noqa: E402
@@ -824,6 +825,32 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
         minus = f" − {p.minus} {p.retracted}" if p.minus else ""
         out(f"    {p.name:28s} {p.entities:6d} == {p.events:6d}{minus}  [{_ok(p.ok)}]")
     crit("§5.9 encje == eventy (co do sztuki, łącznie z przypisaniami)", all_match)
+
+    # §5.15 ZASTĄPIENIE TOŻSAMOŚCI (R4, #DR2) — bramka GO-1. Pyta o INWARIANTY, nie o liczbę:
+    # populacja zastąpionych jest na świeżej bazie dawcy z definicji ZEROWA (podmiana wymaga
+    # DRUGIEGO odczytu tej samej ścieżki, a skrypt czyta drzewo raz), więc kotwica na liczbie
+    # pinowałaby zero i milczała o wszystkim, co ma pilnować. Inwarianty czerwienią się natomiast
+    # w każdej bazie, do której pass wejdzie — także w żywej `pf4` puszczonej tym samym skryptem.
+    sup = supersede_invariants(con)
+    n_zastapionych = con.execute(
+        "SELECT count(*) FROM frame WHERE superseded_by IS NOT NULL").fetchone()[0]
+    sieroty = supersede.orphans(con)
+    out(f"\n§5.15 zastapienie tozsamosci: zastapionych={n_zastapionych} "
+        f"sieroty_bez_ogniwa={len(sieroty)} "
+        f"do_przeniesienia={len(supersede.pending_transfer(con))}")
+    crit("§5.15 klatka zastąpiona NIE MA obecnej kopii (inaczej jej godziny cicho wypadają)",
+         sup["zastapiona_z_obecna_kopia"] == 0)
+    crit("§5.15 łańcuch nie urywa się w powietrzu (ogniwo prowadzi do klatki z lokacją)",
+         sup["ogniwo_do_zastapionej"] == 0)
+    # Sierota BEZ ogniwa to otwarte pytanie, nie awaria; na żywej bazie zdejmuje je pass
+    # (`horreum supersede --apply`), nie kasowanie klatki (D-DR-4).
+    # ⚠ TO KRYTERIUM CZEKA NA PIERWSZY PRZEBIEG: zero jest WYWNIOSKOWANE (sierota powstaje wyłącznie
+    # przez `rebind_location`, a świeży skan czyta każdą ścieżkę RAZ), nie zmierzone na bazie dawcy.
+    # Zmierzone jest co innego — żywa `pf4`: 1 przed passem, 0 po. Jeśli pierwszy przebieg akceptacji
+    # zaczerwieni ten wiersz, to NIE jest usterka bramki: znaczy, że import dawcy produkuje klatkę
+    # bez lokacji, o której nikt dotąd nie wiedział — wtedy diagnoza, nie podnoszenie progu.
+    crit("§5.15 zero sierot nierozstrzygniętych (frame bez lokacji i bez `superseded_by`)",
+         len(sieroty) == 0)
 
     # §5.9b enum źródeł osi OBIEKT ⊆ stałych, które go deklarują (jeden właściciel — S1).
     src = object_source_audit(con)

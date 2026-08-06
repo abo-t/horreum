@@ -269,3 +269,105 @@ def test_sieroty_nierozstrzygniete_to_predykat_bramki():
     assert supersede.orphans(con) == [a]                  # sierota bez ogniwa = otwarte pytanie
     repo.mark_superseded(con, frame_id=a, superseded_by=b, now=NOW)
     assert supersede.orphans(con) == []                   # sierota ZOSTAJE, ale jest wyjaśniona
+
+
+# ---------------------------------------------------------------- przeniesienie faktów (D-DR-4)
+
+def _z_obiektem(con, fid, oid, source):
+    repo.assign_object(con, frame_id=fid, object_id=oid, object_source=source, now=NOW)
+
+
+def test_przenosi_fakt_reki_na_nastepczynie():
+    """Werdykt ręki nie ginie przy podmianie pliku — to jest cała racja bytu R4."""
+    con = _baza()
+    oid = repo.upsert_object(con, canon="IC443", catalog="IC", kind=None, now=NOW)[0]
+    a, b = _klatka(con, "aaa"), _klatka(con, "bbb")
+    lid = _kopia(con, a, r"R:\X\plik.dng")
+    _z_obiektem(con, a, oid, "user")
+    _podmiana(con, lid, b)
+    repo.mark_superseded(con, frame_id=a, superseded_by=b, now=NOW)
+
+    assert supersede.pending_transfer(con) == [(a, b, "user")]
+    wynik = repo.transfer_human_facts(con, frame_id=a, now=NOW)
+    assert wynik.object_moved is True and wynik.skipped == ""
+    assert con.execute(
+        "SELECT object_id, object_source FROM frame WHERE id=?", (b,)).fetchone()[:] == (oid, "user")
+    # stara klatka ZOSTAJE nietknięta (append-only) — z rachunku godzin wypada przez `superseded_by`
+    assert con.execute("SELECT object_id FROM frame WHERE id=?", (a,)).fetchone()[0] == oid
+    assert supersede.pending_transfer(con) == []          # kubełek się domknął
+
+
+def test_przenosi_nagrobek_bez_psucia_parytetu():
+    """NAGROBEK to też werdykt („ta klatka obiektu NIE ma"). Emituje `object.cleared` BEZ
+    `object.assigned` — `object_id` zostaje NULL, więc parytet §5.9 nie ma prawa drgnąć."""
+    con = _baza()
+    oid = repo.upsert_object(con, canon="IC443", catalog="IC", kind=None, now=NOW)[0]
+    a, b = _klatka(con, "aaa"), _klatka(con, "bbb")
+    lid = _kopia(con, a, r"R:\X\plik.dng")
+    _z_obiektem(con, a, oid, "path")
+    repo.clear_object_assignment(con, frame_ids=[a], now=NOW)      # ręka zdejmuje → nagrobek
+    _podmiana(con, lid, b)
+    repo.mark_superseded(con, frame_id=a, superseded_by=b, now=NOW)
+
+    assert repo.transfer_human_facts(con, frame_id=a, now=NOW).object_moved is True
+    assert con.execute(
+        "SELECT object_id, object_source FROM frame WHERE id=?", (b,)).fetchone()[:] \
+        == (None, "user_cleared")
+    stan = con.execute("SELECT count(*) FROM frame WHERE object_id IS NOT NULL").fetchone()[0]
+    przypisania = con.execute(
+        "SELECT count(*) FROM event WHERE verb='object.assigned'").fetchone()[0]
+    odpiecia = con.execute(
+        "SELECT count(*) FROM event WHERE verb='object.unassigned'").fetchone()[0]
+    assert stan == przypisania - odpiecia                 # parytet §5.9
+
+
+def test_nie_nadpisuje_nastepczyni_ktora_przemowila_sama():
+    """Klatka z własnym źródłem (nagłówek/xref/region/drugi gest) nie dostaje cudzego werdyktu."""
+    con = _baza()
+    oid = repo.upsert_object(con, canon="IC443", catalog="IC", kind=None, now=NOW)[0]
+    inny = repo.upsert_object(con, canon="M42", catalog="M", kind=None, now=NOW)[0]
+    a, b = _klatka(con, "aaa"), _klatka(con, "bbb")
+    lid = _kopia(con, a, r"R:\X\plik.dng")
+    _z_obiektem(con, a, oid, "user")
+    _podmiana(con, lid, b)
+    repo.mark_superseded(con, frame_id=a, superseded_by=b, now=NOW)
+    _z_obiektem(con, b, inny, "header")                   # następczyni ma zeznanie z pliku
+
+    assert supersede.pending_transfer(con) == []          # w kolejce jej nie ma
+    wynik = repo.transfer_human_facts(con, frame_id=a, now=NOW)
+    assert wynik.object_moved is False and wynik.skipped == "nastepczyni ma wlasne zrodlo"
+    assert con.execute("SELECT object_id FROM frame WHERE id=?", (b,)).fetchone()[0] == inny
+
+
+def test_bez_faktow_reki_nie_ma_czego_przenosic():
+    """Rozpoznanie z nagłówka wraca samo przy najbliższym przebiegu — przeniesione ręcznie byłoby
+    DRUGĄ derywacją tego samego faktu."""
+    con = _baza()
+    oid = repo.upsert_object(con, canon="IC443", catalog="IC", kind=None, now=NOW)[0]
+    a, b = _klatka(con, "aaa"), _klatka(con, "bbb")
+    lid = _kopia(con, a, r"R:\X\plik.dng")
+    _z_obiektem(con, a, oid, "header")
+    _podmiana(con, lid, b)
+    repo.mark_superseded(con, frame_id=a, superseded_by=b, now=NOW)
+
+    assert repo.transfer_human_facts(con, frame_id=a, now=NOW).skipped == "brak faktow czlowieka"
+    assert con.execute("SELECT object_id FROM frame WHERE id=?", (b,)).fetchone()[0] is None
+
+
+def test_przeniesienie_jest_idempotentne_i_wymaga_ogniwa():
+    con = _baza()
+    oid = repo.upsert_object(con, canon="IC443", catalog="IC", kind=None, now=NOW)[0]
+    a, b = _klatka(con, "aaa"), _klatka(con, "bbb")
+    lid = _kopia(con, a, r"R:\X\plik.dng")
+    _z_obiektem(con, a, oid, "user")
+
+    with pytest.raises(ValueError):                       # klatka nie jest zastąpiona
+        repo.transfer_human_facts(con, frame_id=a, now=NOW)
+
+    _podmiana(con, lid, b)
+    repo.mark_superseded(con, frame_id=a, superseded_by=b, now=NOW)
+    assert repo.transfer_human_facts(con, frame_id=a, now=NOW).object_moved is True
+    powtorka = repo.transfer_human_facts(con, frame_id=a, now=NOW)
+    assert powtorka.object_moved is False and powtorka.skipped == "nastepczyni ma wlasne zrodlo"
+    assert con.execute(
+        "SELECT count(*) FROM event WHERE verb='object.assigned'").fetchone()[0] == 2  # gest + przeniesienie

@@ -85,6 +85,15 @@ WEAK_OBJECT_SOURCES = frozenset({"path"})
 # który milczy, albo wygaszony przy robocie do zrobienia.
 CLEARABLE_OBJECT_SOURCES = WEAK_OBJECT_SOURCES | {"user"}
 
+# Źródła, które PRZEŻYWAJĄ PODMIANĘ PLIKU (R4, #DR2) — fakty przenoszone na następczynię, gdy
+# edytor RAW zmienił `sha1` i klatka wróciła jako inna tożsamość. Wspólny mianownik: każde z nich
+# postawił CZŁOWIEK i żaden przebieg ich nie odtworzy — resolver zaproponuje ze ścieżki najwyżej
+# to samo, ale POTWIERDZENIE propozycji było gestem, a nagrobek jest wprost odmową.
+# WYPROWADZONE, nie wypisane: to dokładnie suma dwóch stałych wyżej, więc rozszerzenie
+# którejkolwiek z nich wchodzi tu samo. Literał `("path","user","user_cleared")` byłby trzecią
+# siedzibą tego samego pytania — a to ta klasa duplikatu, którą domykało CLEARABLE_OBJECT_SOURCES.
+TRANSFERABLE_OBJECT_SOURCES = STICKY_OBJECT_SOURCES | WEAK_OBJECT_SOURCES
+
 # …i TA SAMA reguła dla `object.kind`, bo segment domykający rozjazd źródeł wprowadził własny na
 # rodzaju: szczebel słownika zwraca `own`, którego DDL nie znał. Wartość spoza tej stałej znaczy,
 # że ktoś dopisał rodzaj bez powiedzenia o tym drugiej stronie.

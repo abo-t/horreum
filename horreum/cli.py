@@ -466,14 +466,16 @@ def main(argv=None):
         con = db.open_db(args.db)
         s = supersede.backfill(con, now=now, apply=args.apply)
         sieroty = supersede.orphans(con)
+        do_przeniesienia = supersede.pending_transfer(con)
         con.close()
-        print(_format_supersede(args.db, s, sieroty, apply=args.apply, limit=args.limit))
+        print(_format_supersede(args.db, s, sieroty, do_przeniesienia,
+                                apply=args.apply, limit=args.limit))
         return 0
     parser.print_help()
     return 0
 
 
-def _format_supersede(db_path, s, sieroty, *, apply, limit):
+def _format_supersede(db_path, s, sieroty, do_przeniesienia, *, apply, limit):
     """Sformatuj SupersedeSummary do czytelnego ASCII (konsola Windows = cp1250 — bez strzalek).
 
     DOMKNIECIE PARTYCJI jest w raporcie WYLICZONE, nie zadeklarowane: kubelek, ktory wypadnie
@@ -500,6 +502,11 @@ def _format_supersede(db_path, s, sieroty, *, apply, limit):
     lines.append(f"  sieroty NIEROZSTRZYGNIETE (bez lokacji i bez ogniwa): {len(sieroty)}")
     if sieroty:
         lines.append(f"    {', '.join(str(i) for i in sieroty[:limit])}")
+    # KOLEJKA ROBOTY, nie lista zdarzen: para, w ktorej stara klatka niesie werdykt reki, a nowa
+    # nie ma jeszcze zadnego zrodla. Zero znaczy "nie ma czego przenosic", nie "nic sie nie stalo".
+    lines.append(f"  do przeniesienia faktow reki: {len(do_przeniesienia)}")
+    lines += [f"    frame {a} -> frame {b} (zrodlo: {src})"
+              for a, b, src in do_przeniesienia[:limit]]
     return "\n".join(lines)
 
 

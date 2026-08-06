@@ -22,6 +22,7 @@ from .resolve.catalog import catalog_canon      # gramatyka katalogowa — CZYST
 from .resolve.frames import LIGHT_KINDS         # guard RODZAJU w klindze (S2b) — liść, bez cyklu
 from .resolve.objects import (CLEARABLE_OBJECT_SOURCES,  # enum źródeł osi OBIEKT —
                               OBJECT_SOURCES,           # jeden właściciel (S1/S2b)
+                              TRANSFERABLE_OBJECT_SOURCES,   # …i przeżywające podmianę (R4)
                               WEAK_OBJECT_SOURCES)
 from .resolve.observatory import nearest_site   # kierunek repo → resolve (liść math/re; COHESION §2b)
 
@@ -269,6 +270,81 @@ def mark_superseded(con, *, frame_id, superseded_by, now, actor="supersede"):
         emit_event(con, actor=actor, verb="frame.superseded", target=f"frame:{frame_id}",
                    now=now, payload={"superseded_by": superseded_by})
     return True
+
+
+@dataclass
+class FactTransfer:
+    """Co przeszło z klatki zastąpionej na jej następczynię (R4). `object_moved` = przeniesiono
+    oś obiektu (także NAGROBEK, który jest werdyktem „ta klatka obiektu NIE ma");
+    `skipped` = powód pominięcia, gdy nic nie przeszło — GUI ma mówić DLACZEGO, nie milczeć."""
+    object_moved: bool = False
+    skipped: str = ""          # "" = nic nie pominięto (konwencja liczników z `ObjectGesture`)
+
+
+def transfer_human_facts(con, *, frame_id, now, actor="user:local"):
+    """PRZENIESIENIE FAKTÓW CZŁOWIEKA z klatki zastąpionej na następczynię (R4, D-DR-4).
+
+    Przenosimy WYŁĄCZNIE to, czego maszyna nie odtworzy: oś obiektu ze źródła ręki
+    (`TRANSFERABLE_OBJECT_SOURCES` — wskazanie palcem, potwierdzenie propozycji ze ścieżki
+    i nagrobek `user_cleared`). Nie przenosimy niczego, co wyliczy resolver i grouper — kind,
+    kamera, filtr i rozpoznanie z nagłówka wracają same przy najbliższym przebiegu, a przeniesione
+    ręcznie byłyby DRUGĄ derywacją tego samego faktu.
+
+    DLACZEGO GEST, A NIE AUTOMAT SKANU (§0 briefu): skan zapisuje OBSERWACJĘ (pod tą ścieżką leży
+    inna treść) i to jest fakt. Przeniesienie werdyktu jest OSĄDEM — człowiek stwierdza, że nowy
+    plik to nadal to samo zdjęcie tego samego obiektu, a nie inne ujęcie wgrane pod tę nazwę.
+    Automat nie ma jak tego rozstrzygnąć i przy pomyłce zamalowałby fakt cudzą decyzją.
+
+    NASTĘPCZYNI NIETKNIĘTA RĘKĄ (guard): przenosimy tylko, gdy jej `object_source IS NULL` — czyli
+    gdy NIC o niej dotąd nie orzeczono. Klatka, która ma już własne źródło (nagłówek, xref, region
+    albo drugi gest), przemówiła sama i cudzy werdykt nie ma prawa jej nadpisać. Zwraca wtedy
+    `skipped='nastepczyni ma wlasne zrodlo'`.
+
+    PARYTET §5.9 UTRZYMANY: przypisanie obiektu emituje `object.assigned` (stan `frame.object_id`
+    rośnie o 1, dziennik też), a NAGROBEK — `object.cleared` BEZ `object.assigned`, bo `object_id`
+    zostaje NULL i licznik nie drgnął. Emisja „na wszelki wypadek" obu rozjechałaby audyt.
+
+    STARA KLATKA ZOSTAJE NIETKNIĘTA (append-only): jej fakty są historią, nie duplikatem —
+    z rachunku godzin i tak wypada przez `superseded_by` (`queries.object_exposure`).
+
+    CO DOŁĄCZY PÓŹNIEJ, świadomie i z powodem: **ręczny config** (jest przedmiotem R1 — kolumny
+    `config_source` jeszcze nie ma, więc nie ma czego przenosić) i **werdykty rodowodu**
+    (`integration_input.excluded`; zmierzona populacja na żywym archiwum: **0**, a pierwszy RAW
+    wejdzie do rodowodu dopiero po GO-2 — kod na populację zerową byłby zgadywaniem kształtu).
+
+    Zwraca `FactTransfer`. Idempotentne: powtórzenie po udanym przeniesieniu trafia w guard
+    następczyni (ma już źródło) i zwraca `skipped` bez zapisu."""
+    with _immediate(con):
+        stara = con.execute(
+            "SELECT superseded_by, object_id, object_source FROM frame WHERE id = ?",
+            (frame_id,)).fetchone()
+        if stara is None:
+            raise ValueError(f"frame:{frame_id} nie istnieje")
+        if stara["superseded_by"] is None:
+            raise ValueError(f"frame:{frame_id} nie jest zastąpiona — nie ma dokąd przenosić")
+        if stara["object_source"] not in TRANSFERABLE_OBJECT_SOURCES:
+            return FactTransfer(skipped="brak faktow czlowieka")
+        nowa_id = stara["superseded_by"]
+        nowa = con.execute(
+            "SELECT object_source FROM frame WHERE id = ?", (nowa_id,)).fetchone()
+        if nowa is None:
+            raise ValueError(f"frame:{nowa_id} (następczyni) nie istnieje")
+        if nowa["object_source"] is not None:
+            return FactTransfer(skipped="nastepczyni ma wlasne zrodlo")
+
+        con.execute("UPDATE frame SET object_id = ?, object_source = ? WHERE id = ?",
+                    (stara["object_id"], stara["object_source"], nowa_id))
+        if stara["object_id"] is None:
+            emit_event(con, actor=actor, verb="object.cleared", target=f"frame:{nowa_id}",
+                       now=now, payload={"przeniesione_z": frame_id, "was_source": None},
+                       reason="nagrobek przeniesiony po podmianie pliku")
+        else:
+            emit_event(con, actor=actor, verb="object.assigned", target=f"frame:{nowa_id}",
+                       now=now, payload={"object_id": stara["object_id"],
+                                         "object_source": stara["object_source"],
+                                         "przeniesione_z": frame_id},
+                       reason="fakt ręki przeniesiony po podmianie pliku")
+    return FactTransfer(object_moved=True)
 
 
 def clear_superseded(con, *, frame_id, now, actor="scan"):

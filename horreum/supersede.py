@@ -38,9 +38,11 @@ awarią ŚWIATA ZEWNĘTRZNEGO (share zamontowany pusty ⇒ „wszystko zniknęł
 własny dziennik bazy, którego żadna awaria dysku nie napompuje. Granica nazwana, nie obłożona
 kodem na populację, która nie ma jak powstać.
 """
+import json
 from dataclasses import dataclass, field
 
 from . import repo
+from .resolve.objects import TRANSFERABLE_OBJECT_SOURCES   # jeden właściciel zbioru (SPOT)
 
 
 @dataclass
@@ -171,6 +173,27 @@ def backfill(con, *, now, apply=False, actor="supersede"):
             else:
                 s.already += 1
     return s
+
+
+def pending_transfer(con):
+    """Klatki zastąpione, których FAKT CZŁOWIEKA jeszcze nie przeszedł na następczynię (R4).
+
+    To jest predykat KUBEŁKA PODMIANY — kolejka roboty, nie lista zdarzeń. Wchodzi do niej para,
+    w której stara klatka niesie werdykt ręki (`TRANSFERABLE_OBJECT_SOURCES`), a następczyni nie ma
+    JESZCZE żadnego źródła. Wychodzi z niej dwiema drogami, obie poprawne: gestem przeniesienia
+    albo tym, że następczyni przemówiła sama (kartą w pliku, xrefem, regionem, drugim gestem).
+
+    KUBEŁEK JEST DZIŚ PUSTY I TO JEST WYNIK, NIE BRAK: jedyna zastąpiona klatka archiwum (15958)
+    ma `object_source NULL`, więc nie ma czego przenosić. Kolejka mówi „zero roboty", a nie „nic
+    się nie stało" — te dwie rzeczy odróżnia `orphans` obok.
+
+    Zwraca `[(stara, nowa, object_source), …]`."""
+    return [(r["id"], r["superseded_by"], r["object_source"]) for r in con.execute(
+        "SELECT f.id, f.superseded_by, f.object_source FROM frame f "
+        "JOIN frame n ON n.id = f.superseded_by "
+        "WHERE f.superseded_by IS NOT NULL AND n.object_source IS NULL "
+        "AND f.object_source IN (SELECT value FROM json_each(?)) ORDER BY f.id",
+        (json.dumps(sorted(TRANSFERABLE_OBJECT_SOURCES)),))]
 
 
 def orphans(con):

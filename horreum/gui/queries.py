@@ -913,6 +913,15 @@ def object_exposure(con, frame_ids):
     przez tamtą furtkę i doliczał ekspozycję, którą już liczy jego następczyni. Zniknięcie
     i zastąpienie to dwa różne stany: kopii, która ZNIKNĘŁA, godziny się należą (naświetlenie było,
     plik gdzieś jest), kopii ZASTĄPIONEJ — nie, bo to ten sam plik pod nową tożsamością.
+
+    ⚠ PARYTET Z `facet_objects` OBEJMUJE `present`, NIE ZASTĄPIENIE — i tu się rozjeżdża świadomie.
+    Uniwersum gridu to WSZYSTKIE klatki (`all_frame_ids`, w tym bez lokacji), a facet ich nie
+    odsiewa, więc para „zastąpiona + następczyni" pokaże w facecie **2**, a tutaj godziny **jednej**.
+    Dopóki klatka zastąpiona nie niesie obiektu, rozjazd jest niewidoczny (zmierzone na żywym
+    archiwum: jedyna taka klatka ma `object_id NULL`). Staje się widoczny po `transfer_human_facts`,
+    które ZOSTAWIA obiekt na starej klatce. Czy zastąpiona ma znikać z gridu i facetu, czy zostawać
+    widoczna jako nagrobek — to decyzja kubełka podmiany, nie tej funkcji; godziny nie mogą czekać
+    na jej rozstrzygnięcie, bo podwójny rachunek jest chorobą, którą R4 leczy.
     Zwraca wiersze: object_id, filter_canon, secs, n_null."""
     return con.execute(
         "SELECT f.object_id, f.filter_canon, "

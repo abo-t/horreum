@@ -59,8 +59,13 @@ class SupersedeSummary:
     cycles: int = 0                  # odrzuconych odmową cyklu
     conflicts: int = 0               # ogniwo już zajęte przez INNĄ następczynię
     missing: int = 0                 # następczyni albo poprzedniczka nie istnieje w `frame`
-    pairs: list = field(default_factory=list)        # [(frame_before, frame_after)] do raportu
+    pairs: list = field(default_factory=list)        # [(frame_before, frame_after)] — po strażnikach
     refused: list = field(default_factory=list)      # [(frame_before, frame_after, powód)]
+    superseded_by_later: list = field(default_factory=list)
+    """[(klatka, następczyni_porzucona, następczyni_bieżąca)] — obserwacje przykryte późniejszym
+    zdarzeniem o tej samej klatce (strażnik 2). NIE są odmową ani błędem: opisują stan, który już
+    minął. Raportujemy je, bo partycja liczy klatki, nie zdarzenia — bez tej listy jedna z dwóch
+    obserwacji znikałaby z rachunku i nikt by się nie dowiedział, że w ogóle była."""
 
 
 def _rebound_pairs(con):
@@ -121,19 +126,40 @@ def backfill(con, *, now, apply=False, actor="supersede"):
         before, after = r["frame_before"], r["frame_after"]
         if before is None or after is None or before == after:
             continue
+        poprzednie = ostatnie.get(before)
+        if poprzednie is not None and poprzednie != after:
+            # NADPISANIE MELDOWANE, NIE CICHE: partycja domykałaby się mimo porzuconej pary, więc
+            # raport twierdziłby „policzyłem wszystko", gdy jedna obserwacja wypadła bez powodu.
+            # To ta sama klasa milczenia, co licznik bez listy — liczba się zgadza, treść ginie.
+            s.superseded_by_later.append((before, poprzednie, after))
         ostatnie[before] = after
 
     istnieje = {r["id"] for r in con.execute("SELECT id FROM frame")}
     istniejace = _existing_links(con)
-    succ = dict(istniejace)
-    succ.update(ostatnie)
+
+    # ŻYWOTNOŚĆ ODSIEWA PRZY BUDOWIE MAPY, NIE DOPIERO PRZY ZAPISIE — i to jest warunek
+    # poprawności, nie optymalizacja. Klatka z obecną kopią NIE MOŻE być ogniwem: skoro plik pod
+    # nią leży, to ona niesie treść, a nie ktoś po niej. Zostawiona w mapie tworzy POZORNE cykle
+    # z dziennika, bo dziennik pamięta też podmiany, które człowiek już cofnął.
+    # Przypadek wzorcowy (zarzut blokujący z bramki 0806): edycja `A → B`, potem cofnięcie edycji
+    # `B → A`. Skan gasi ogniwo `A → B` (`repo.clear_superseded`), ale replay odtwarza je z dziennika
+    # i `_in_cycle` widzi pętlę `A → B → A`, więc odmawia OBU. Skutek byłby dokładnie tą chorobą,
+    # którą R4 leczy: `B` zostaje sierotą BEZ ogniwa, a jej godziny liczą się drugi raz — i żadne
+    # narzędzie już tego nie naprawi, bo każdy kolejny przebieg powtórzy tę samą odmowę.
+    # Po odsianiu żywej `A` mapa to `{B: A}`: cyklu nie ma, `B` dostaje ogniwo, rachunek się zgadza.
+    zywe = {before for before in ostatnie if _alive(con, before)}
+    succ = {b: a for b, a in istniejace.items() if b not in zywe}
+    succ.update({b: a for b, a in ostatnie.items() if b not in zywe})
 
     for before, after in sorted(ostatnie.items()):
         s.proposed += 1
-        s.pairs.append((before, after))
         if before not in istnieje or after not in istnieje:
             s.missing += 1
             s.refused.append((before, after, "klatka nie istnieje"))
+            continue
+        if before in zywe:
+            s.alive += 1
+            s.refused.append((before, after, "klatka ma obecną kopię"))
             continue
         if _in_cycle(succ, before):
             s.cycles += 1
@@ -155,10 +181,7 @@ def backfill(con, *, now, apply=False, actor="supersede"):
             s.conflicts += 1
             s.refused.append((before, after, f"ogniwo zajęte przez frame:{zapisane}"))
             continue
-        if _alive(con, before):
-            s.alive += 1
-            s.refused.append((before, after, "klatka ma obecną kopię"))
-            continue
+        s.pairs.append((before, after))     # dopiero TU: para, która przeszła wszystkie strażniki
         if not apply:
             s.marked += 1
             continue

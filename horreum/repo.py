@@ -336,7 +336,8 @@ def transfer_human_facts(con, *, frame_id, now, actor="user:local"):
                     (stara["object_id"], stara["object_source"], nowa_id))
         if stara["object_id"] is None:
             emit_event(con, actor=actor, verb="object.cleared", target=f"frame:{nowa_id}",
-                       now=now, payload={"przeniesione_z": frame_id, "was_source": None},
+                       now=now, payload={"przeniesione_z": frame_id,
+                                         "was_source": stara["object_source"]},
                        reason="nagrobek przeniesiony po podmianie pliku")
         else:
             emit_event(con, actor=actor, verb="object.assigned", target=f"frame:{nowa_id}",

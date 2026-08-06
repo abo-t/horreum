@@ -470,7 +470,11 @@ def main(argv=None):
         con.close()
         print(_format_supersede(args.db, s, sieroty, do_przeniesienia,
                                 apply=args.apply, limit=args.limit))
-        return 0
+        # Kod wyjscia mowi o WERDYKCIE, jak w `presence`: partycja, ktora sie nie domyka, znaczy
+        # kubelek bez powodu -- czyli wlasna asercje zlamana. Napis w raporcie jest niewidzialny
+        # dla skryptu, wiec rozjazd musi wyjsc kodem, inaczej bramka milczy przy zepsutym passie.
+        rozliczone = (s.marked + s.already + s.alive + s.cycles + s.conflicts + s.missing)
+        return 0 if rozliczone == s.proposed else 1
     parser.print_help()
     return 0
 
@@ -507,6 +511,13 @@ def _format_supersede(db_path, s, sieroty, do_przeniesienia, *, apply, limit):
     lines.append(f"  do przeniesienia faktow reki: {len(do_przeniesienia)}")
     lines += [f"    frame {a} -> frame {b} (zrodlo: {src})"
               for a, b, src in do_przeniesienia[:limit]]
+    # Obserwacje przykryte pozniejszym zdarzeniem o tej samej klatce: NIE odmowa, opisuja stan,
+    # ktory minal. Raportowane, bo partycja liczy KLATKI, nie zdarzenia -- bez tej listy jedna
+    # z dwoch obserwacji znikalaby z rachunku bez sladu.
+    if s.superseded_by_later:
+        lines.append(f"  obserwacje przykryte pozniejszymi: {len(s.superseded_by_later)}")
+        lines += [f"    frame {a}: porzucone -> {stara}, obowiazuje -> {nowa}"
+                  for a, stara, nowa in s.superseded_by_later[:limit]]
     return "\n".join(lines)
 
 

@@ -216,9 +216,12 @@ def supersede_invariants(con):
       inną drogą niż gałąź podmiany w skanie (np. przez `refresh_location`, gdy kopia była
       `present=0` i odżyła). Skutek: jej godziny wypadają z `object_exposure`, a klatka z doboru
       rodowodu — czyli archiwum CICHO chudnie. Gasi to `repo.clear_superseded`.
-    * `ogniwo_do_zastapionej` — następczyni sama jest zastąpiona, ale wskazuje na klatkę, która nie
-      ma lokacji i nie ma dalszego ogniwa. Łańcuch urwany w powietrzu: nie da się dojść do pliku,
-      który dziś niesie tę treść.
+    * `ogniwo_do_zastapionej` — łańcuch kończy się na klatce, która nie ma ŻADNEJ lokacji i nie ma
+      dalszego ogniwa, czyli nie da się dojść do wiersza, który miałby nieść tę treść.
+      **Granica świadoma: kopia `present=0` NIE jest tu naruszeniem** — zniknięcie i zastąpienie to
+      dwa różne stany (P5). Plik, który zniknął, ma lokację i może wrócić; łańcuch prowadzi wtedy
+      do istniejącego wiersza i jest cały. Objęcie `present=0` czerwieniłoby ten inwariant przy
+      każdym zwykłym skasowaniu pliku na dysku.
 
     Cyklu nie liczymy TUTAJ, bo łapie go pass przy zapisie (`supersede._in_cycle`), a DDL łapie
     najkrótszy (`superseded_by <> id`). Inwariant ma pokazywać rozjazd bazy ze ŚWIATEM,

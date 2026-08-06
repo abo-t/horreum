@@ -1198,7 +1198,9 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
         sha1_data, uncomputable = rec.file_sha1, 1
 
     loc = con.execute(
-        "SELECT id, frame_id, mtime, file_sha1, unreadable_since "
+        # `present` dołożone dla R4: gałąź „ta sama tożsamość" musi wiedzieć, czy kopia WŁAŚNIE
+        # odżyła (0 → 1), żeby zgasić ogniwo zastąpienia bez dopłacania zapytania per plik.
+        "SELECT id, frame_id, mtime, file_sha1, unreadable_since, present "
         "FROM location WHERE volume = ? AND path = ?",
         (volume, rec.path)).fetchone()
 
@@ -1293,6 +1295,14 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
         camera_id=camera_id, kind=kind)
     summary.locations_refreshed += refreshed["facts"]
     summary.headers_refreshed += refreshed["header"]
+    if loc["present"] == 0 and repo.clear_superseded(con, frame_id=frame_id, now=now, actor=actor):
+        # DRUGA DROGA POWROTU TREŚCI (R4): kopia była nieobecna (`present=0`) i właśnie odżyła —
+        # bez przepięcia, bo `sha1_data` się zgadza. Tożsamość oznaczona jako zastąpiona ma znów
+        # swój plik, więc oznaczenie przestało być prawdą; inwariant `zastapiona_z_obecna_kopia`
+        # zaczerwieniłby się na stałe, a godziny tej klatki wypadałyby z rachunku.
+        # `loc["present"] == 0` odsiewa BEZ ZAPYTANIA DO BAZY — wiersz lokacji już mamy w ręku,
+        # a ożywanie kopii jest rzadkie, więc zwykły przebieg nie płaci tu ani jednej transakcji.
+        summary.supersede_cleared += 1
 
 
 def canonize_root(root):

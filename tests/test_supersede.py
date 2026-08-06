@@ -173,9 +173,9 @@ def test_pass_ostatni_event_per_klatka_wygrywa():
     assert kroki == 3          # b → a → c → (koniec)
 
 
-def test_pass_odmawia_cyklu_obu_stronom():
-    """STRAŻNIK 4: `A→B→A` (edycja i cofnięcie edycji) — żadna strona nie jest zastąpiona.
-    Pass odmawia OBU zamiast wybierać arbitralnie; rozstrzyga odczyt z dysku, nie dziennik."""
+def test_zamiana_tresci_miedzy_dwoma_plikami_to_ZYWOTNOSC_nie_cykl():
+    """Dwie ścieżki wymieniły się treścią — obie klatki są ŻYWE (każda leży pod jakąś ścieżką),
+    więc żadna nie jest zastąpiona. Powód odmowy ma mówić prawdę: „ma obecną kopię", nie „cykl"."""
     con = _baza()
     a, b = _klatka(con, "aaa"), _klatka(con, "bbb")
     la = _kopia(con, a, r"R:\X\plik.dng")
@@ -184,9 +184,34 @@ def test_pass_odmawia_cyklu_obu_stronom():
     _podmiana(con, lb, a, now="2026-08-06T11:00:00+00:00")
 
     s = supersede.backfill(con, now=NOW, apply=True)
-    assert s.cycles == 2 and s.marked == 0
+    assert (s.alive, s.cycles, s.marked) == (2, 0, 0)
     assert con.execute(
         "SELECT count(*) FROM frame WHERE superseded_by IS NOT NULL").fetchone()[0] == 0
+
+
+def test_cofniecie_edycji_nie_zostawia_sieroty_bez_ogniwa():
+    """ZARZUT BLOKUJĄCY z bramki 0806 — regresja pinowana imiennie.
+
+    `A → B` (edycja), potem `B → A` (cofnięcie edycji). Skan gasi ogniwo `A → B`, ale replay
+    odtwarza je z DZIENNIKA, więc naiwna mapa widzi pętlę i odmawia OBU stronom NA ZAWSZE:
+    `B` zostaje sierotą bez ogniwa, jej godziny liczą się drugi raz, a każdy kolejny przebieg
+    powtarza tę samą odmowę. Lekarstwo: żywotność odsiewa PRZY BUDOWIE MAPY — `A` żyje, więc
+    nie jest ogniwem, pętla znika, a `B` dostaje należne `superseded_by = A`."""
+    con = _baza()
+    a, b = _klatka(con, "aaa"), _klatka(con, "bbb")
+    lid = _kopia(con, a, r"R:\X\plik.dng")
+    _podmiana(con, lid, b, now="2026-08-06T10:00:00+00:00")
+    supersede.backfill(con, now=NOW, apply=True)
+    assert con.execute("SELECT superseded_by FROM frame WHERE id=?", (a,)).fetchone()[0] == b
+
+    _podmiana(con, lid, a, now="2026-08-06T11:00:00+00:00")      # człowiek cofa edycję
+    repo.clear_superseded(con, frame_id=a, now=NOW)              # …a skan gasi ogniwo
+
+    s = supersede.backfill(con, now=NOW, apply=True)
+    assert s.cycles == 0, "żywa klatka nie ma prawa tworzyć pętli z własnego dziennika"
+    assert con.execute("SELECT superseded_by FROM frame WHERE id=?", (a,)).fetchone()[0] is None
+    assert con.execute("SELECT superseded_by FROM frame WHERE id=?", (b,)).fetchone()[0] == a
+    assert supersede.orphans(con) == [], "sierota bez ogniwa = §5.15 na czerwono bez drogi naprawy"
 
 
 def test_pass_partycja_sie_domyka():
@@ -371,3 +396,61 @@ def test_przeniesienie_jest_idempotentne_i_wymaga_ogniwa():
     assert powtorka.object_moved is False and powtorka.skipped == "nastepczyni ma wlasne zrodlo"
     assert con.execute(
         "SELECT count(*) FROM event WHERE verb='object.assigned'").fetchone()[0] == 2  # gest + przeniesienie
+
+
+def test_przykryta_obserwacja_jest_MELDOWANA_nie_gubiona():
+    """Strażnik 2 nadpisuje wcześniejszą obserwację o tej samej klatce. Partycja liczy KLATKI,
+    więc domknęłaby się mimo porzuconej pary — raport twierdziłby „policzyłem wszystko".
+
+    UWAGA NA KSZTAŁT SCENARIUSZA (kosztował poprawkę testu): dwie podmiany pod JEDNĄ ścieżką
+    NIE nadpisują się — `rebind_location` czyta bieżącą tożsamość lokacji, więc druga podmiana
+    ma `frame_before` = następczyni pierwszej i powstaje ŁAŃCUCH `a→b→c`. Nadpisanie wymaga
+    DWÓCH ścieżek tej samej treści, z których każda poszła w inną stronę."""
+    con = _baza()
+    a, b, c = _klatka(con, "aaa"), _klatka(con, "bbb"), _klatka(con, "ccc")
+    l1 = _kopia(con, a, r"R:\X\plik.dng")
+    l2 = _kopia(con, a, r"R:\Y\ten_sam.dng")
+    _podmiana(con, l1, b, now="2026-08-06T10:00:00+00:00")
+    _podmiana(con, l2, c, now="2026-08-06T11:00:00+00:00")       # przykrywa obserwację a→b
+
+    s = supersede.backfill(con, now=NOW, apply=True)
+    assert s.superseded_by_later == [(a, b, c)]
+    assert con.execute("SELECT superseded_by FROM frame WHERE id=?", (a,)).fetchone()[0] == c
+
+
+def test_ozywiona_kopia_gasi_ogniwo_bez_przepiecia():
+    """DRUGA droga powrotu treści: kopia była `present=0` i wróciła — ten sam `sha1_data`, więc
+    BEZ przepięcia lokacji. Bez gaszenia tu inwariant `zastapiona_z_obecna_kopia` czerwieni się
+    na stałe, a godziny klatki wypadają z rachunku."""
+    con = _baza()
+    a, b = _klatka(con, "aaa"), _klatka(con, "bbb")
+    la = _kopia(con, a, r"R:\X\plik.dng")
+    lb = _kopia(con, b, r"R:\Y\inny.dng")
+    _podmiana(con, la, b)
+    repo.mark_superseded(con, frame_id=a, superseded_by=b, now=NOW)
+    # `a` odzyskuje kopię pod inną ścieżką (druga lokacja, ta sama tożsamość)
+    repo.add_location(con, frame_id=a, volume="TESTVOL", path=r"R:\Z\wrocil.dng", now=NOW)
+    assert audit.supersede_invariants(con)["zastapiona_z_obecna_kopia"] == 1
+
+    assert repo.clear_superseded(con, frame_id=a, now=NOW) is True
+    assert audit.supersede_invariants(con)["zastapiona_z_obecna_kopia"] == 0
+    assert lb is not None
+
+
+def test_partycja_domyka_sie_takze_z_zywymi_i_przykrytymi():
+    """Trzy klasy naraz w jednym przebiegu: oznaczona · odmówiona żywotnością · przykryta."""
+    con = _baza()
+    a, b, c, d, e = (_klatka(con, s) for s in ("aaa", "bbb", "ccc", "ddd", "eee"))
+    la1 = _kopia(con, a, r"R:\X\1.dng")
+    la2 = _kopia(con, a, r"R:\Y\1_kopia.dng")      # `a` pod dwiema ścieżkami → nadpisanie
+    lc = _kopia(con, c, r"R:\Z\2.dng")
+    _kopia(con, c, r"R:\W\2_kopia.dng")            # `c` zostaje żywa pod drugą ścieżką
+    _podmiana(con, la1, b, now="2026-08-06T10:00:00+00:00")
+    _podmiana(con, la2, d, now="2026-08-06T11:00:00+00:00")     # przykrywa a→b
+    _podmiana(con, lc, e, now="2026-08-06T12:00:00+00:00")
+
+    s = supersede.backfill(con, now=NOW, apply=True)
+    assert s.proposed == s.marked + s.already + s.alive + s.cycles + s.conflicts + s.missing
+    assert (s.marked, s.alive) == (1, 1)
+    assert s.superseded_by_later == [(a, b, d)]
+    assert con.execute("SELECT superseded_by FROM frame WHERE id=?", (a,)).fetchone()[0] == d

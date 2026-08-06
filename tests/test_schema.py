@@ -93,11 +93,14 @@ def test_szkielet_przyszly_pusty(tmp_path):
     con.close()
 
 
-def test_user_version_v13_po_migracji(tmp_path):
-    """0013 podnosi user_version do 13 (świeża baza leci 0002→…→0013 sekwencyjnie; perspektywy)."""
+def test_user_version_v14_po_migracji(tmp_path):
+    """0014 podnosi user_version do 14 (świeża baza leci 0002→…→0014 sekwencyjnie; zastąpienie).
+
+    Pin JEST intencją: każda nowa migracja ma ten test PRZEWRÓCIĆ imiennie, żeby podniesienie
+    wersji było gestem, a nie skutkiem ubocznym."""
     con = db.open_db(str(tmp_path / "h.db"))
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 13
-    assert db.SCHEMA_VERSION == 13
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 14
+    assert db.SCHEMA_VERSION == 14
     con.close()
 
 
@@ -110,14 +113,18 @@ def test_0013_saved_query_rebuild_kontrakt(tmp_path):
     bez znanych kluczy czyta się w gridzie jak perspektywa PUSTA, czyli filtr zdejmujący filtr."""
     path = str(tmp_path / "h.db")
     con = db.connect(path)
-    for v, _f in db.MIGRATIONS[:-1]:
+    # Migracje DO v12 WŁĄCZNIE, pinowane LICZBĄ — nie `MIGRATIONS[:-1]`. Indeks względem końca
+    # listy znaczy „wszystko poza ostatnią", więc każda NOWA migracja przesuwała ten test o jedną
+    # pozycję i wpuszczała 0013, które testowaną kolumnę już usuwa. Przewróciła go dopiero 0014,
+    # choć zepsuty był od chwili napisania (docs.md: wartość zmienna w czasie — pin albo derywacja).
+    for v, _f in [m for m in db.MIGRATIONS if m[0] <= 12]:
         con.executescript(db._migration_sql(dict(db.MIGRATIONS)[v]))
     con.execute("PRAGMA user_version = 12")
     con.execute("INSERT INTO saved_query(id, name, sql_text, created_at) "
                 "VALUES (3, 'stary', 'SELECT 1', 't')")
     con.commit()
 
-    con = db.open_db(path)                                       # v12 → v13 (przebudowa)
+    con = db.open_db(path)                                       # v12 → dziś (0013 przebudowuje)
     assert con.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
     row = con.execute("SELECT id, name, spec_json, updated_at FROM saved_query").fetchone()
     assert (row["id"], row["name"], row["updated_at"]) == (3, "stary", None)

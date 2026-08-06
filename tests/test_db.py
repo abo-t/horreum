@@ -12,7 +12,8 @@ def test_migracja_ustawia_user_version(tmp_path):
     # + 0008 kalibracja + 0009 rodowód + 0010 kind_source (DSLR/RAW, #2)
     # + 0011 target_plan + telescope.in_park (planer T4) + 0012 rodowód stosów (I-2c)
     # + 0013 saved_query.spec_json (perspektywy w BAZIE, I-1)
-    assert db._user_version(con) == db.SCHEMA_VERSION == 13
+    # + 0014 frame.superseded_by (zastąpienie tożsamości po podmianie pliku, #DR2/R4)
+    assert db._user_version(con) == db.SCHEMA_VERSION == 14
     con.close()
 
 

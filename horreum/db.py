@@ -41,6 +41,9 @@ from importlib import resources
 # 0013 to PRZEBUDOWA `saved_query` (I-1, P-I): `sql_text` → `spec_json` + `updated_at`. Perspektywa
 # Horreum nigdy nie była SQL-em (grid składa JSON-spec), a od D-P-I-3 mieszka w BAZIE zamiast
 # w rejestrze użytkownika — nazwany widok jest własnością ARCHIWUM, nie komputera.
+# 0014 to PRZYROST (#DR2 segment R4): frame.superseded_by — treść pod ścieżką klatki podmieniona,
+# nowa tożsamość niesie plik dalej. Kolumna wchodzi PUSTA; wypełnia ją pass `horreum supersede`
+# (guardy: żywotność, ostatni event per klatka, odmowa cyklu), nie migracja — kanon jak 0004/0011.
 MIGRATIONS = [
     (2, "0002_initial.sql"),
     (3, "0003_writeback.sql"),
@@ -54,6 +57,7 @@ MIGRATIONS = [
     (11, "0011_target_plan.sql"),
     (12, "0012_stack_lineage.sql"),
     (13, "0013_saved_query_spec.sql"),
+    (14, "0014_superseded.sql"),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 _KNOWN_VERSIONS = frozenset({0} | {v for v, _ in MIGRATIONS})

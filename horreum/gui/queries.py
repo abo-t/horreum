@@ -907,6 +907,12 @@ def object_exposure(con, frame_ids):
     → własna grupa (kubełek „(bez filtra)"). Grupa cała bez exptime → `secs=NULL` (agregat = 0 s).
     `object_id IS NOT NULL` (kalibracja/bez-obiektu poza facetem Obiekt); XISF/light bez header wypada
     JOIN-em. Godziny — jak licznik facetu — obejmują klatki `present=0` (parytet z `facet_objects`).
+
+    KLATKA ZASTĄPIONA NIE DOLICZA SEKUND (R4, `frame.superseded_by`) — i to jest szew, na którym
+    `present=0` wyżej robi RÓŻNICĘ: duch nie ma obecnej kopii, więc bez tego warunku wpadałby tu
+    przez tamtą furtkę i doliczał ekspozycję, którą już liczy jego następczyni. Zniknięcie
+    i zastąpienie to dwa różne stany: kopii, która ZNIKNĘŁA, godziny się należą (naświetlenie było,
+    plik gdzieś jest), kopii ZASTĄPIONEJ — nie, bo to ten sam plik pod nową tożsamością.
     Zwraca wiersze: object_id, filter_canon, secs, n_null."""
     return con.execute(
         "SELECT f.object_id, f.filter_canon, "
@@ -914,6 +920,7 @@ def object_exposure(con, frame_ids):
         "       SUM(h.exptime IS NULL) AS n_null "
         "FROM frame f JOIN header h ON h.frame_id = f.id "
         "WHERE f.kind = 'light' AND f.object_id IS NOT NULL "
+        "  AND f.superseded_by IS NULL "
         "  AND f.id IN (SELECT value FROM json_each(?)) "
         "GROUP BY f.object_id, f.filter_canon "
         "ORDER BY f.object_id, secs DESC",

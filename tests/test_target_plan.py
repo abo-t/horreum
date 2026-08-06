@@ -21,7 +21,10 @@ NOW = "2026-07-31T12:00:00+00:00"
 
 def test_migracja_zaklada_kuratele_i_park(tmp_path):
     con = db.open_db(str(tmp_path / "h.db"))
-    assert con.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 13
+    # Bez literału wersji: właścicielem pinu liczby jest `test_schema.test_user_version_v*`
+    # (SPOT). Tu sprawdzamy to, o czym ten test naprawdę jest — że `open_db` domigrowuje do końca
+    # łańcucha i że 0011 w tym łańcuchu jest. Zduplikowany literał kazałby podnosić dwa miejsca.
+    assert con.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION >= 11
     assert con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='target_plan'"
                        ).fetchone() is not None
     assert "in_park" in {r[1] for r in con.execute("PRAGMA table_info(telescope)")}

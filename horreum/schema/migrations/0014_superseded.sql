@@ -1,0 +1,32 @@
+-- 0014 — ZASTĄPIENIE tożsamości klatki: frame.superseded_by (#DR2 segment R4, D-DR-4).
+--
+-- PRZYROST (ADD COLUMN, jak 0004/0006/0010) — zero zmian istniejących tabel, zero wierszy
+-- ruszonych. Kolumna WCHODZI PUSTA i taka zostaje: wypełnia ją PRZEBIEG (`horreum supersede`),
+-- nie ta migracja. Kanon repo (0004:3, `db.py:32-36`): migracja nakłada KSZTAŁT, fakty nakłada
+-- KLINGA — backfill w skrypcie DDL byłby DML-em w warstwie infra, ominąłby guardy passu
+-- (żywotność, cykl, ostatni event per klatka) i nie zostawiłby śladu w dzienniku.
+--
+-- CO ZNACZY: `frame.superseded_by = N` — treść pod ścieżką tej klatki została PODMIENIONA
+-- i żyje dziś pod tożsamością `N`. Wzorcowy sprawca: edytor RAW (Lightroom/Camera Raw) dopisuje
+-- XMP wprost do DNG, a tożsamością RAW jest `sha1` CAŁEGO pliku (D-R-1), więc plik o tej samej
+-- treści obrazu wraca jako INNA klatka.
+--
+-- Stara klatka NIE ZNIKA (append-only): zostaje z nagłówkiem, kartami i historią, traci wyłącznie
+-- lokację — i to ona jest w bazie SIEROTĄ (`repo.rebind_location`). Kolumna nadaje temu stanowi
+-- NAZWĘ, dotąd czytelną wyłącznie z dziennika `event(location.rebound)`.
+--
+-- NULL = klatka żywa albo nierozstrzygnięta. Trójstanu tu nie ma i mieć nie powinno: „zastąpiona
+-- przez kogo" to jedna informacja, a „nie wiem" i „nie zastąpiona" wyglądają dla każdego
+-- konsumenta tak samo — jak klatka, której nie wolno pominąć.
+--
+-- POWRÓT TREŚCI GASI kolumnę z powrotem do NULL (D-DR-4, `repo.clear_superseded`): klatka nie może
+-- być jednocześnie żywa i zastąpiona. Druga podmiana dokłada OGNIWO ŁAŃCUCHA na klatkach (A→B,
+-- potem B→C), a nie skrót A→C — stan trzymany na lokacji byłby jednomiejscowy
+-- (`UNIQUE(volume, path)`) i zgubiłby wersję środkową.
+--
+-- Dwa strażniki w DDL, bo baza jest ostatnią bramką słownika (wzorzec 0012:93):
+--   * REFERENCES frame(id) — wskazanie na nieistniejącą klatkę odpada (FK ON, `db.py:69`);
+--   * CHECK (superseded_by <> id) — klatka nie zastępuje samej siebie. To najtańszy z cykli
+--     i jedyny, który da się złapać deklaratywnie; dłuższe (A→B→A) odmawia pass.
+ALTER TABLE frame ADD COLUMN superseded_by INTEGER REFERENCES frame (id)
+    CHECK (superseded_by IS NULL OR superseded_by <> id);

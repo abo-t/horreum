@@ -1031,6 +1031,7 @@ class ScanSummary:
     locations_refreshed: int = 0   # znana ścieżka, fakty kopii odświeżone (mtime/hash/rozmiar — §2)
     headers_refreshed: int = 0     # zeznanie odświeżone po zmianie header_hash (writeback — §2)
     locations_rebound: int = 0     # podmiana treści pod znaną ścieżką → location przepięta (§2)
+    supersede_cleared: int = 0     # treść WRÓCIŁA pod oznaczoną tożsamość → ogniwo zgaszone (R4)
     headers: int = 0
     frame_review: int = 0
     camera_review: int = 0
@@ -1257,6 +1258,15 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
         repo.rebind_location(con, location_id=loc["id"], frame_after=frame_id, now=now,
                              actor=actor)
         summary.locations_rebound += 1
+        if not created and repo.clear_superseded(con, frame_id=frame_id, now=now, actor=actor):
+            # POWRÓT TREŚCI (#DR2/R4, D-DR-4): pod tą ścieżką znów leży tożsamość, którą wcześniej
+            # oznaczono jako zastąpioną — cofnięcie edycji w programie graficznym jest zwykłym
+            # gestem człowieka. Gasi je DOWÓD Z DYSKU (ten odczyt), nie upływ czasu i nie pass:
+            # dziennik mówi, co się działo, dysk mówi, co JEST. `created` odsiewa 99,99%
+            # przebiegów bez zapytania do bazy — świeża tożsamość nie mogła być oznaczona.
+            # Kierunek ODWROTNY (oznaczanie) tu NIE wchodzi: wymaga znajomości CAŁEJ mapy
+            # następczyń (cykl, dwie ścieżki, żywotność) — to robota passu `supersede.backfill`.
+            summary.supersede_cleared += 1
         if created:
             _record_testimony_and_flags(
                 con, rec, frame_id=frame_id, sha1_data=sha1_data, readable=readable,

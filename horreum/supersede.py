@@ -1,0 +1,185 @@
+"""Pass ZASTĄPIENIA tożsamości (#DR2 segment R4) — kto po kim niesie plik pod tą samą ścieżką.
+
+Skan rozstrzyga podmianę treści po `sha1_data` i przepina lokację na nową tożsamość
+(`scan.py:1248` → `repo.rebind_location`). Stara klatka zostaje wtedy **sierotą**: ma nagłówek,
+karty i historię, nie ma lokacji. Do 0014 ten stan nie miał w bazie nazwy — czytało się go
+wyłącznie z dziennika, więc każdy konsument (dobór rodowodu, lista masterów, rachunek godzin)
+widział dwie klatki tam, gdzie na dysku jest jeden plik, i liczył tę samą ekspozycję dwa razy.
+
+Ten pass nadaje stanowi nazwę WSTECZ: replayuje `event(location.rebound)` i wypełnia
+`frame.superseded_by`. Nowe podmiany oznacza już sam skan, na bieżąco — pass jest jednorazowym
+domknięciem historii i siatką bezpieczeństwa, nie stałym krokiem potoku.
+
+APPEND-ONLY (ŚWIĘTE): niczego nie kasuje — ani plików, ani wierszy. Zmienia się jedno twierdzenie:
+„ta tożsamość jest bieżąca" → „niesie ją dziś klatka N". Zapis idzie WYŁĄCZNIE przez klingę
+`repo.mark_superseded` (ten moduł nie wykonuje DML — meta-tripwir AST to potwierdza).
+
+CZTERY STRAŻNIKI (W8 z recenzji — naiwny backfill „przepisz payloady" łamie się na każdym z nich):
+
+  1. **REPLAY CHRONOLOGICZNY** (`ORDER BY ts, id`) — kolejność zapisu do dziennika jest jedyną
+     prawdą o kolejności podmian; `id` rozstrzyga remis w obrębie jednego przebiegu skanu.
+  2. **OSTATNI EVENT PER KLATKA** — ta sama tożsamość bywa `frame_before` więcej niż raz (kopia
+     pod dwiema ścieżkami, kolejne edycje). Liczy się ostatnia obserwacja; wcześniejsze opisują
+     stan, który już minął.
+  3. **ŻYWOTNOŚĆ** — klatka z obecną lokacją NIE jest zastąpiona, choćby dziennik mówił inaczej:
+     `frame` ma 1:N `location`, więc podmiana jednej kopii nie czyni drugiej duchem. Predykat
+     liczymy tu DLA RAPORTU, a rozstrzyga go ponownie klinga pod lockiem (TOCTOU) — ten sam
+     podział, co `presence.check` ↔ `mark_location_vanished`.
+  4. **ODMOWA CYKLU** — `A → B → A` (edycja i cofnięcie edycji) jest zwykłym gestem człowieka.
+     Wtedy ŻADNA ze stron nie jest zastąpiona i pass odmawia OBU, zamiast wybierać arbitralnie.
+     Bieżącej treści dowodzi odczyt z dysku, nie dziennik — dlatego cykl gasi się skanem
+     (`repo.clear_superseded`), a nie tutaj.
+
+ŁAŃCUCH ZOSTAJE ŁAŃCUCHEM (D-DR-4): `A→B` i `B→C` zapisujemy jako dwa ogniwa, nigdy jako skrót
+`A→C`. Skrót zgubiłby wersję środkową — a to ona bywa tą, do której człowiek chce wrócić.
+
+HAMULCA MASOWEGO NIE MA — świadomie, w odróżnieniu od `presence` (D-V-4). Tamten broni przed
+awarią ŚWIATA ZEWNĘTRZNEGO (share zamontowany pusty ⇒ „wszystko zniknęło"); tu wejściem jest
+własny dziennik bazy, którego żadna awaria dysku nie napompuje. Granica nazwana, nie obłożona
+kodem na populację, która nie ma jak powstać.
+"""
+from dataclasses import dataclass, field
+
+from . import repo
+
+
+@dataclass
+class SupersedeSummary:
+    """Wynik jednego przebiegu. Liczby są ROZŁĄCZNE i domykają się:
+    `proposed == marked + already + alive + cycles + conflicts + missing`.
+    Domknięcie jest ASERCJĄ raportu, nie ozdobą — kubełek, który wypadnie z sumy, znaczy, że
+    pass odrzucił klatkę bez podania powodu (ta sama lekcja, co partycja 128 stosów w rodowodzie)."""
+    events: int = 0                  # wierszy `location.rebound` przeczytanych
+    proposed: int = 0                # klatek z kandydatem na następczynię (po strażniku 2)
+    marked: int = 0                  # oznaczonych w tym przebiegu
+    already: int = 0                 # oznaczonych wcześniej tą samą tożsamością (idempotencja)
+    alive: int = 0                   # odrzuconych strażnikiem żywotności
+    cycles: int = 0                  # odrzuconych odmową cyklu
+    conflicts: int = 0               # ogniwo już zajęte przez INNĄ następczynię
+    missing: int = 0                 # następczyni albo poprzedniczka nie istnieje w `frame`
+    pairs: list = field(default_factory=list)        # [(frame_before, frame_after)] do raportu
+    refused: list = field(default_factory=list)      # [(frame_before, frame_after, powód)]
+
+
+def _rebound_pairs(con):
+    """Pary `(frame_before, frame_after)` z dziennika, chronologicznie (strażnik 1).
+
+    `json_extract` zamiast parsowania w Pythonie: payload jest tekstem JSON zapisanym przez
+    `repo.emit_event`, a odczyt w SQL-u trzyma zapytanie literałem (bramka AST) i nie kusi
+    do wciągania tu logiki, która należy do `repo`."""
+    return con.execute(
+        "SELECT id, "
+        "       json_extract(payload, '$.frame_before') AS frame_before, "
+        "       json_extract(payload, '$.frame_after')  AS frame_after "
+        "FROM event WHERE verb = 'location.rebound' "
+        "ORDER BY ts, id").fetchall()
+
+
+def _alive(con, frame_id):
+    """Czy klatka ma jeszcze OBECNĄ kopię (strażnik 3, wersja raportowa — patrz docstring modułu)."""
+    return con.execute(
+        "SELECT 1 FROM location WHERE frame_id = ? AND present = 1",
+        (frame_id,)).fetchone() is not None
+
+
+def _existing_links(con):
+    """Ogniwa JUŻ zapisane w bazie — cykl trzeba wykrywać na pełnej mapie, nie na samej propozycji.
+    Bez tego drugi przebieg passu po powrocie treści zobaczyłby tylko połowę pętli."""
+    return {r["id"]: r["superseded_by"] for r in con.execute(
+        "SELECT id, superseded_by FROM frame WHERE superseded_by IS NOT NULL")}
+
+
+def _in_cycle(succ, start):
+    """Czy podążanie za mapą następczyń od `start` wraca do klatki już odwiedzonej (strażnik 4)."""
+    widziane = {start}
+    cur = succ.get(start)
+    while cur is not None:
+        if cur in widziane:
+            return True
+        widziane.add(cur)
+        cur = succ.get(cur)
+    return False
+
+
+def backfill(con, *, now, apply=False, actor="supersede"):
+    """Jeden przebieg passu. DRY DOMYŚLNIE (`apply=False`): raportuje i NIE dotyka bazy.
+
+    DRY jest domyślne z tego samego powodu, co w `presence`: `event` jest APPEND-ONLY, więc
+    fałszywy przebieg zostawia w dzienniku tyle wierszy, ile klatek. Stan cofnie `clear_superseded`,
+    dziennika nie cofnie nic.
+
+    Zwraca `SupersedeSummary`. W DRY `marked` liczy klatki, które BY oznaczono — a nie zero, bo
+    zero znaczyłoby „nie ma czego robić" i raport kłamałby o zakresie."""
+    s = SupersedeSummary()
+    zdarzenia = _rebound_pairs(con)
+    s.events = len(zdarzenia)
+
+    ostatnie = {}                    # strażnik 2: późniejszy event nadpisuje wcześniejszy
+    for r in zdarzenia:
+        before, after = r["frame_before"], r["frame_after"]
+        if before is None or after is None or before == after:
+            continue
+        ostatnie[before] = after
+
+    istnieje = {r["id"] for r in con.execute("SELECT id FROM frame")}
+    istniejace = _existing_links(con)
+    succ = dict(istniejace)
+    succ.update(ostatnie)
+
+    for before, after in sorted(ostatnie.items()):
+        s.proposed += 1
+        s.pairs.append((before, after))
+        if before not in istnieje or after not in istnieje:
+            s.missing += 1
+            s.refused.append((before, after, "klatka nie istnieje"))
+            continue
+        if _in_cycle(succ, before):
+            s.cycles += 1
+            s.refused.append((before, after, "cykl — treść wróciła pod tę tożsamość"))
+            continue
+        zapisane = istniejace.get(before)
+        if zapisane == after:
+            # Ogniwo już jest — i liczy się TU, przed rozgałęzieniem na DRY/apply. Inaczej DRY
+            # meldowałby „oznaczyłbym 1" na bazie, w której nie ma czego oznaczać, a raport
+            # przed przebiegiem na żywej bazie zawyżałby zakres o wszystko, co już zrobiono.
+            s.already += 1
+            continue
+        if zapisane is not None and zapisane != after:
+            # DWIE ŚCIEŻKI, DWIE NASTĘPCZYNIE: ta sama treść leżała pod dwiema ścieżkami i każda
+            # kopia została podmieniona na co innego. Model trzyma JEDNO ogniwo na klatkę, więc
+            # drugiego nie da się zapisać bez zgubienia pierwszego — zostawiamy ogniwo starsze
+            # (jest już faktem w bazie) i meldujemy. Klinga na ten stan rzuca `ValueError`
+            # (EXPECT: wołający, który zna mapę, nie ma prawa tu trafić) — pass zna mapę i odsiewa.
+            s.conflicts += 1
+            s.refused.append((before, after, f"ogniwo zajęte przez frame:{zapisane}"))
+            continue
+        if _alive(con, before):
+            s.alive += 1
+            s.refused.append((before, after, "klatka ma obecną kopię"))
+            continue
+        if not apply:
+            s.marked += 1
+            continue
+        if repo.mark_superseded(con, frame_id=before, superseded_by=after, now=now, actor=actor):
+            s.marked += 1
+        else:
+            # Klinga odmówiła po SWOIM odczycie pod lockiem: albo oznaczono już wcześniej
+            # (idempotencja), albo kopia wróciła między raportem a zapisem (TOCTOU).
+            if _alive(con, before):
+                s.alive += 1
+                s.refused.append((before, after, "kopia wróciła w trakcie przebiegu"))
+            else:
+                s.already += 1
+    return s
+
+
+def orphans(con):
+    """Sieroty NIEROZSTRZYGNIĘTE — klatka bez ŻADNEJ lokacji i bez `superseded_by`.
+
+    To jest predykat bramki G1-7 i przyszłego kubełka podmiany: sierota z ogniwem jest
+    WYJAŚNIONA (wiadomo, kto niesie jej plik), sierota bez ogniwa to otwarte pytanie.
+    Sama sierota z bazy NIE ZNIKA (D-DR-4) — kasowanie klatki byłoby drugim wyjątkiem C3,
+    a wyjątek ma pozostać wyjątkiem."""
+    return [r["id"] for r in con.execute(
+        "SELECT f.id FROM frame f WHERE f.superseded_by IS NULL "
+        "AND NOT EXISTS (SELECT 1 FROM location l WHERE l.frame_id = f.id) ORDER BY f.id")]

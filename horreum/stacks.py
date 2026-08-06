@@ -111,7 +111,19 @@ def _bump(d, key):
 
 def _masters(con):
     """Klatki stosów z materiałem zeznania. `telescope_id` bierzemy z KANONU osi (widok
-    `telescope_canonical`), więc scalenie teleskopów przenosi rodowód razem ze sprzętem."""
+    `telescope_canonical`), więc scalenie teleskopów przenosi rodowód razem ze sprzętem.
+
+    ZASTĄPIONY MASTER NIE WRACA JAKO STOS (R4, `frame.superseded_by`): jego plik niesie dziś inna
+    tożsamość, a policzenie obu dałoby dwa obrazy tam, gdzie na dysku leży jeden. Zmierzona
+    populacja dziś: **0** (jedyna zastąpiona klatka archiwum to light, nie master) — klauzula
+    wchodzi PRZED pierwszym takim przypadkiem, bo kosztuje jeden warunek, a jej brak wychodzi
+    dopiero jako zdublowany obraz w Zbiorach.
+
+    GRANICA NAZWANA, NIE ZAŁATANA: wiersz `integration` zastąpionego mastera ZOSTAJE (jest kluczowany
+    `UNIQUE(master_frame_id)`, a tabela jest append-only) i nie dostanie już przepisanej głowy —
+    czyli zamarznie w stanie z ostatniego przebiegu. Dopóki populacja jest zerowa, kod na to byłby
+    zgadywaniem; przy pierwszym zastąpionym masterze rozstrzygnąć, czy głowa dostaje własny powód
+    (`superseded`), czy wiersz idzie do kubełka podmiany razem z klatką."""
     return con.execute(
         "SELECT f.id AS frame_id, f.object_id AS object_id, f.filter_canon AS filter_canon, "
         "h.raw_json AS raw_json, tc.canon_id AS telescope_id, "
@@ -120,7 +132,7 @@ def _masters(con):
         "FROM frame f LEFT JOIN header h ON h.frame_id = f.id "
         "LEFT JOIN config c ON c.id = f.config_id "
         "LEFT JOIN telescope_canonical tc ON tc.id = c.telescope_id "
-        "WHERE f.kind = 'master_light' ORDER BY f.id").fetchall()
+        "WHERE f.kind = 'master_light' AND f.superseded_by IS NULL ORDER BY f.id").fetchall()
 
 
 def _window_candidates(con, *, object_id, exptime):
@@ -129,6 +141,10 @@ def _window_candidates(con, *, object_id, exptime):
 
     `exptime` porównywane w SQL, bo to jedyny warunek, który jest zwykłą równością liczby —
     wołający podaje je JUŻ SKOERCOWANE do float (patrz `_plan`), a nie surowe zeznanie stosu.
+
+    KLATKA ZASTĄPIONA NIE JEST KANDYDATEM (R4): sierota i jej następczyni to ta sama ekspozycja
+    pod tą samą ścieżką, więc bez tego warunku okno policzyłoby ten sub DWA RAZY —
+    a `integrated_exposure` deduplikuje po `input_frame_id`, czyli duplikatu by nie zdjęło.
 
     TEMPERATURA IDZIE Z `ccd_temp` (POMIAR) I TAK MA BYĆ — to wynik pomiaru, nie przeoczenie.
     Nazwa wejścia WBPP niesie temperaturę ZMIERZONĄ, nie nastawę: na 6 stosach z historią test
@@ -143,7 +159,7 @@ def _window_candidates(con, *, object_id, exptime):
         "LEFT JOIN config c ON c.id = f.config_id "
         "LEFT JOIN telescope_canonical tc ON tc.id = c.telescope_id "
         "WHERE f.kind = 'light' AND f.object_id = ? AND h.exptime = ? "
-        "AND h.date_obs IS NOT NULL ORDER BY f.id",
+        "AND h.date_obs IS NOT NULL AND f.superseded_by IS NULL ORDER BY f.id",
         (object_id, exptime)).fetchall()
 
 

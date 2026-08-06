@@ -204,3 +204,33 @@ def light_population_closure(con, rep):
                "nameless_stacks": rep.object_nameless_stacks}
     return LightClosure(total=total, buckets=buckets, headerless=headerless,
                         filetype_unknown=filetype_unknown)
+
+
+def supersede_invariants(con):
+    """Dwa inwarianty kolumny `frame.superseded_by` (R4) — `{nazwa: liczba naruszeń}`, zero == zdrowo.
+
+    Kolumna twierdzi coś o RZECZYWISTOŚCI („pod tą ścieżką leży dziś inna tożsamość"), więc może
+    się z nią rozjechać — i wtedy milknie na dwa sposoby, oba kosztowne:
+
+    * `zastapiona_z_obecna_kopia` — klatka oznaczona, a ma obecną lokację. Znaczy, że plik wrócił
+      inną drogą niż gałąź podmiany w skanie (np. przez `refresh_location`, gdy kopia była
+      `present=0` i odżyła). Skutek: jej godziny wypadają z `object_exposure`, a klatka z doboru
+      rodowodu — czyli archiwum CICHO chudnie. Gasi to `repo.clear_superseded`.
+    * `ogniwo_do_zastapionej` — następczyni sama jest zastąpiona, ale wskazuje na klatkę, która nie
+      ma lokacji i nie ma dalszego ogniwa. Łańcuch urwany w powietrzu: nie da się dojść do pliku,
+      który dziś niesie tę treść.
+
+    Cyklu nie liczymy TUTAJ, bo łapie go pass przy zapisie (`supersede._in_cycle`), a DDL łapie
+    najkrótszy (`superseded_by <> id`). Inwariant ma pokazywać rozjazd bazy ze ŚWIATEM,
+    nie powtarzać strażnika, który już stoi na drodze zapisu."""
+    return {
+        "zastapiona_z_obecna_kopia": con.execute(
+            "SELECT count(*) FROM frame f WHERE f.superseded_by IS NOT NULL "
+            "AND EXISTS (SELECT 1 FROM location l WHERE l.frame_id = f.id AND l.present = 1)"
+        ).fetchone()[0],
+        "ogniwo_do_zastapionej": con.execute(
+            "SELECT count(*) FROM frame f JOIN frame n ON n.id = f.superseded_by "
+            "WHERE n.superseded_by IS NULL "
+            "AND NOT EXISTS (SELECT 1 FROM location l WHERE l.frame_id = n.id)"
+        ).fetchone()[0],
+    }

@@ -221,6 +221,79 @@ def rebind_location(con, *, location_id, frame_after, now, actor="scan"):
     return True
 
 
+def mark_superseded(con, *, frame_id, superseded_by, now, actor="supersede"):
+    """ZASTĄPIENIE tożsamości (#DR2/R4, D-DR-4): `frame.superseded_by` + `event(frame.superseded)`.
+    Jedyna droga zapisu tej kolumny. Dowód zbiera wołający (`supersede.backfill`: replay dziennika
+    `location.rebound`; skan: gałąź podmiany treści `scan.py:1248`).
+
+    APPEND-ONLY: klatka ZOSTAJE — z nagłówkiem, kartami i historią. Zmienia się jedno twierdzenie:
+    „ta tożsamość jest bieżąca" → „niesie ją dziś klatka N". Droga w drugą stronę istnieje
+    i jest jawna (`clear_superseded`), bo powrót treści pod ścieżkę jest zwykłym faktem, nie awarią.
+
+    GUARD ŻYWOTNOŚCI (W8, blokujący): klatka z JAKĄKOLWIEK obecną lokacją NIE jest zastąpiona —
+    `frame` ma 1:N `location`, więc ten sam plik potrafi leżeć pod dwiema ścieżkami, a podmiana
+    jednej kopii nie czyni drugiej duchem. Bez tego guarda backfill z dziennika oznaczyłby klatki
+    ŻYWE pod inną ścieżką, a `object_exposure` przestałby liczyć ich godziny. Zwraca `False`
+    (wołający zlicza `alive`), ZERO zapisu.
+
+    KONFLIKT ŁAŃCUCHA (EXPECT): klatka już zastąpiona przez INNĄ tożsamość → `ValueError`, nie
+    ciche nadpisanie. Druga podmiana dokłada ogniwo NA NASTĘPCZYNI (A→B, potem B→C); żądanie
+    zmiany A→B na A→C znaczy, że wołający pomylił ogniwo — a nadpisanie zgubiłoby wersję środkową.
+
+    Cyklu tu nie sprawdzamy dłuższego niż własny (DDL łapie `superseded_by = id`): pełny obchód
+    łańcucha wymaga ZNAJOMOŚCI CAŁEJ mapy, którą ma pass — klinga widzi jedną parę. Podział jak
+    przy hamulcu `presence`: klinga broni wiersza, pass broni przebiegu.
+
+    ZWRACA bool: `True` = oznaczono; `False` = klatka żywa ALBO już oznaczona tą samą tożsamością
+    (idempotencja powtórnego przebiegu — bez UPDATE i bez eventu, QUIET)."""
+    if frame_id == superseded_by:
+        raise ValueError(f"frame:{frame_id} nie może zastąpić samej siebie")
+    with _immediate(con):
+        row = con.execute(
+            "SELECT superseded_by FROM frame WHERE id = ?", (frame_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"frame:{frame_id} nie istnieje")
+        if con.execute("SELECT 1 FROM frame WHERE id = ?", (superseded_by,)).fetchone() is None:
+            raise ValueError(f"frame:{superseded_by} (następczyni) nie istnieje")
+        if row["superseded_by"] == superseded_by:
+            return False
+        if row["superseded_by"] is not None:
+            raise ValueError(
+                f"frame:{frame_id} jest już zastąpiona przez frame:{row['superseded_by']}, "
+                f"a żądano frame:{superseded_by} — ogniwo dokłada się na następczyni")
+        if con.execute(
+                "SELECT 1 FROM location WHERE frame_id = ? AND present = 1",
+                (frame_id,)).fetchone() is not None:
+            return False
+        con.execute("UPDATE frame SET superseded_by = ? WHERE id = ?", (superseded_by, frame_id))
+        emit_event(con, actor=actor, verb="frame.superseded", target=f"frame:{frame_id}",
+                   now=now, payload={"superseded_by": superseded_by})
+    return True
+
+
+def clear_superseded(con, *, frame_id, now, actor="scan"):
+    """POWRÓT TREŚCI pod ścieżkę (D-DR-4): `superseded_by = NULL` + `event(frame.supersede_cleared)`.
+    Klatka nie może być jednocześnie żywa i zastąpiona — a cykl `A → B → A` (edycja i cofnięcie
+    edycji w programie graficznym) jest zwykłym gestem człowieka, nie awarią.
+
+    Wołane ze skanu w gałęzi podmiany treści: lokacja wraca na tożsamość, która była oznaczona,
+    więc oznaczenie przestało być prawdą w tej samej chwili. Nie gaśnie samo z upływem czasu
+    ani przy przebiegu passu — gasi je wyłącznie DOWÓD, czyli ponowny odczyt tej treści z dysku.
+
+    Idempotentne: `superseded_by` już NULL → `False` bez UPDATE i bez eventu."""
+    with _immediate(con):
+        row = con.execute(
+            "SELECT superseded_by FROM frame WHERE id = ?", (frame_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"frame:{frame_id} nie istnieje")
+        if row["superseded_by"] is None:
+            return False
+        con.execute("UPDATE frame SET superseded_by = NULL WHERE id = ?", (frame_id,))
+        emit_event(con, actor=actor, verb="frame.supersede_cleared", target=f"frame:{frame_id}",
+                   now=now, payload={"superseded_by_before": row["superseded_by"]})
+    return True
+
+
 def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_hash,
                      hdu_index, compressed, size_bytes, unreadable_since, present, now,
                      actor="scan", raw_json=None, cards=None, hot_fields=None, camera_id=None,

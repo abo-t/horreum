@@ -218,6 +218,15 @@ def main(argv=None):
     p_pres.add_argument("--limit", type=int, default=20,
                         help="ile ścieżek wypisać w raporcie (domyślnie 20)")
 
+    p_sup = sub.add_parser("supersede",
+                           help="pass zastapienia: nazwij sieroty po podmianie pliku "
+                                "(DRY domyslnie; --apply)")
+    p_sup.add_argument("db", help="ścieżka pliku bazy")
+    p_sup.add_argument("--apply", action="store_true",
+                       help="WYKONAJ: zapisz ogniwa frame.superseded_by — bez tego DRY")
+    p_sup.add_argument("--limit", type=int, default=20,
+                       help="ile par i odmów wypisać w raporcie (domyślnie 20)")
+
     args = parser.parse_args(argv)
     if args.cmd == "init":
         con = db.open_db(args.path)
@@ -451,8 +460,47 @@ def main(argv=None):
         # albo hamulec, ktory pominal potwierdzenia). Bez tego skrypt czytajacy `presence` w DRY
         # nie odrozni „nic nie zniklo" od „nie sprawdzilem" -- a to dwie rozne rzeczy.
         return 1 if (s.aborted is not None or not s.confirmed) else 0
+    if args.cmd == "supersede":
+        from . import supersede                           # bez astropy — czyta wyłącznie bazę
+        now = datetime.now(timezone.utc).isoformat()
+        con = db.open_db(args.db)
+        s = supersede.backfill(con, now=now, apply=args.apply)
+        sieroty = supersede.orphans(con)
+        con.close()
+        print(_format_supersede(args.db, s, sieroty, apply=args.apply, limit=args.limit))
+        return 0
     parser.print_help()
     return 0
+
+
+def _format_supersede(db_path, s, sieroty, *, apply, limit):
+    """Sformatuj SupersedeSummary do czytelnego ASCII (konsola Windows = cp1250 — bez strzalek).
+
+    DOMKNIECIE PARTYCJI jest w raporcie WYLICZONE, nie zadeklarowane: kubelek, ktory wypadnie
+    z sumy, znaczy odmowe bez powodu."""
+    tryb = "APPLY" if apply else "DRY (bez zapisu)"
+    zsumowane = s.marked + s.already + s.alive + s.cycles + s.conflicts + s.missing
+    lines = [f"Horreum supersede {db_path} ({tryb}):",
+             f"  przeczytane zdarzenia location.rebound: {s.events}",
+             f"  klatki z kandydatem na nastepczynie   : {s.proposed}",
+             f"    oznaczone{' ' if apply else ' (byloby)'}: {s.marked}",
+             f"    juz oznaczone wczesniej             : {s.already}",
+             f"    odmowa - klatka ma obecna kopie     : {s.alive}",
+             f"    odmowa - cykl (tresc wrocila)       : {s.cycles}",
+             f"    odmowa - ogniwo zajete              : {s.conflicts}",
+             f"    odmowa - klatka nie istnieje        : {s.missing}",
+             f"  partycja: {zsumowane} == {s.proposed}"
+             f"{'' if zsumowane == s.proposed else '  <-- ROZJAZD, kubelek bez powodu'}"]
+    if s.pairs:
+        lines.append(f"  pary (pierwsze {min(limit, len(s.pairs))} z {len(s.pairs)}):")
+        lines += [f"    frame {a} -> frame {b}" for a, b in s.pairs[:limit]]
+    if s.refused:
+        lines.append(f"  odmowy (pierwsze {min(limit, len(s.refused))} z {len(s.refused)}):")
+        lines += [f"    frame {a} -> frame {b}: {p}" for a, b, p in s.refused[:limit]]
+    lines.append(f"  sieroty NIEROZSTRZYGNIETE (bez lokacji i bez ogniwa): {len(sieroty)}")
+    if sieroty:
+        lines.append(f"    {', '.join(str(i) for i in sieroty[:limit])}")
+    return "\n".join(lines)
 
 
 def _format_import(donor_path, db_path, s):

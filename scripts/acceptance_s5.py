@@ -59,8 +59,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from horreum import db                                              # noqa: E402
 from horreum import supersede                                     # noqa: E402
-from horreum.audit import (entity_event_parity, light_population_closure,  # noqa: E402
-                           object_source_audit, supersede_invariants)
+from horreum.audit import (config_source_invariants, entity_event_parity,  # noqa: E402
+                           light_population_closure, object_source_audit, supersede_invariants)
 from horreum.calibration import KIND_RECIPE, run_calibration      # noqa: E402
 from horreum.lineage import run_lineage                           # noqa: E402
 from horreum.grouper import NO_TELESCOPE_KINDS, run_grouper       # noqa: E402
@@ -614,10 +614,28 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
         "AND f.kind IN (SELECT value FROM json_each(?))", (off_axis,)).fetchone()[0]
     unassigned = con.execute(
         "SELECT count(*) FROM event WHERE verb='config.unassigned'").fetchone()[0]
+    # KRYTERIUM JEST KIERUNKOWE, nie równościowe (R1/W4) — i to jest poprawka wymuszona przez
+    # segment, który PIERWSZY RAZ W HISTORII REPO WYPROWADZA klatki z tego zbioru. Do R1 stan mógł
+    # tylko rosnąć albo stać, więc równość `stan == |targety|` przypadkiem działała. Gest „Przypisz
+    # zestaw…" zdejmuje klatkę ze stanu, a dziennik jest APPEND-ONLY: jej `config.review` zostaje
+    # tam na zawsze. Równość pękłaby więc na zmianie POPRAWNEJ, dokładnie o liczbę naprawionych
+    # klatek — czyli bramka karałaby za sprzątanie.
+    # Pytanie, na które ta pozycja odpowiada, brzmi „zero cichego NULL": czy KAŻDA klatka bez
+    # configu ma zapisany POWÓD. To zawieranie (`stan ⊆ targety`), nie równość — liczymy klatki
+    # stanu BEZ zdarzenia i żądamy zera. Nadmiar targetów po drugiej stronie jest odtąd normalny
+    # i raportowany jako `naprawione`, żeby liczba nie znikła z oczu.
+    bez_powodu = con.execute(
+        "SELECT count(*) FROM frame f WHERE f.config_id IS NULL "
+        "AND f.kind NOT IN (SELECT value FROM json_each(?)) "
+        "AND EXISTS(SELECT 1 FROM header h WHERE h.frame_id=f.id) "
+        "AND NOT EXISTS(SELECT 1 FROM event e WHERE e.verb='config.review' "
+        "               AND e.target = 'frame:' || f.id)", (off_axis,)).fetchone()[0]
+    naprawione = cfg_review - no_cfg_hdr
     out(f"\n§5.6 config={cfg} config.review={cfg_review} frame-bez-config-z-headerem={no_cfg_hdr} "
-        f"(kalibracja poza osią={calib_null}, odpięte={unassigned})")
-    crit("§5.6 zero cichego NULL (frame z headerem bez config == config.review)",
-         no_cfg_hdr == cfg_review)
+        f"(kalibracja poza osią={calib_null}, odpięte={unassigned}, "
+        f"wyprowadzone ze zbioru={naprawione}, bez powodu={bez_powodu})")
+    crit("§5.6 zero cichego NULL (każda klatka bez configu ma zapisany POWÓD)",
+         bez_powodu == 0)
     crit("§5.6 kalibracja bez osi NIE ma config.assigned (kind-scoping)",
          con.execute(
              "SELECT count(*) FROM frame WHERE config_id IS NOT NULL "
@@ -851,6 +869,22 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
     # bez lokacji, o której nikt dotąd nie wiedział — wtedy diagnoza, nie podnoszenie progu.
     crit("§5.15 zero sierot nierozstrzygniętych (frame bez lokacji i bez `superseded_by`)",
          len(sieroty) == 0)
+
+    # §5.16 OŚ SPRZĘTU WSKAZANA RĘKĄ (R1, #DR2) — bramka GO-1, zbudowana jak §5.15 i z tego samego
+    # powodu: na świeżej bazie dawcy populacja ręcznych zestawów jest ZEROWA (gest robi człowiek
+    # w GUI, skrypt nie), więc kotwica na liczbie pinowałaby zero. Inwarianty czerwienią się
+    # natomiast w KAŻDEJ bazie — także w żywej `pf4` puszczonej tym samym skryptem, a to właśnie
+    # tam ta populacja żyje.
+    cfg_inv = config_source_invariants(con)
+    n_reka = con.execute(
+        "SELECT count(*) FROM frame WHERE config_source IS NOT NULL").fetchone()[0]
+    out(f"\n§5.16 os sprzetu reka: klatek_ze_zrodlem={n_reka} naruszenia={cfg_inv}")
+    crit("§5.16 każdy ręczny zestaw ma ślad człowieka w dzienniku (`actor='user:*'`)",
+         cfg_inv["reka_bez_sladu"] == 0)
+    crit("§5.16 źródło ręki NIE stoi nad pustą osią (`config_source` bez `config_id`)",
+         cfg_inv["reka_bez_osi"] == 0)
+    crit("§5.16 kalibracja NIE ma zestawu od ręki (kind-scoping domyka się z obu stron)",
+         cfg_inv["reka_na_kalibracji"] == 0)
 
     # §5.9b enum źródeł osi OBIEKT ⊆ stałych, które go deklarują (jeden właściciel — S1).
     src = object_source_audit(con)

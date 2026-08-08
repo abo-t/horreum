@@ -261,6 +261,37 @@ def test_podmiana_pliku_przenosi_oba_fakty_reki():
     assert {p.name: p for p in audit.entity_event_parity(con)}["frame.config_id"].ok
 
 
+def test_inwarianty_5_16_sa_zielone_po_gescie():
+    """§5.16 — bramka zbudowana jak §5.15: pyta o INWARIANTY, nie o liczbę, bo na świeżej bazie
+    dawcy populacja ręcznych zestawów jest zerowa. Zielone po realnym geście, nie na pustej bazie."""
+    con = _baza()
+    cam, tel = _kamera(con), _teleskop(con)
+    a = _klatka(con, "aaa", camera_id=cam)
+    repo.user_assign_config(con, frame_ids=[a], telescope_id=tel, now=NOW)
+
+    assert audit.config_source_invariants(con) == {
+        "reka_bez_sladu": 0, "reka_bez_osi": 0, "reka_na_kalibracji": 0}
+
+
+def test_inwariant_lapie_wstrzykniecie_z_pominieciem_klingi(tmp_path):
+    """Falsyfikator inwariantu: zapis gołym SQL-em (bez klingi) MA zaczerwienić bramkę — inaczej
+    §5.16 pinowałaby własną nieobecność zamiast czegokolwiek."""
+    path = str(tmp_path / "h.db")
+    con = db.open_db(path)
+    cam, tel = _kamera(con), _teleskop(con)
+    a = _klatka(con, "aaa", camera_id=cam)
+    cfg, _ = repo.propose_config(con, telescope_id=tel, camera_id=cam, now=NOW)
+    con.close()
+
+    goly = sqlite3.connect(path)                     # z pominięciem `repo` — brak eventu człowieka
+    goly.execute("UPDATE frame SET config_id = ?, config_source = 'user' WHERE id = ?", (cfg, a))
+    goly.commit()
+    goly.close()
+
+    con = db.open_db(path)
+    assert audit.config_source_invariants(con)["reka_bez_sladu"] == 1
+
+
 def test_nastepczyni_z_wlasnym_configiem_nie_dostaje_cudzego():
     """Guard osi sprzętu pyta o CAŁĄ oś, nie o źródło — bo `config_source` zapisuje wyłącznie ręka
     (0015), więc predykat „źródło puste" przepuszczałby zawsze i zamalowywał zeznanie pliku."""

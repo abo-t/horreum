@@ -14,8 +14,10 @@ liczba encji to emisje MINUS wycofania. Bez tego pierwszy przebieg po edycji sł
 własnych świecił czerwono z powodu, który nie jest regresją — a taką czerwień „naprawia się"
 podniesieniem kotwicy, po czym bramka przestaje łapać regresję prawdziwą.
 """
+import json
 from dataclasses import dataclass
 
+from .repo import CONFIG_SOURCES                  # słownik źródeł osi sprzętu — jeden właściciel (R1)
 from .resolve.objects import ALIAS_SOURCES, OBJECT_KINDS, OBJECT_SOURCES
 
 
@@ -236,4 +238,45 @@ def supersede_invariants(con):
             "WHERE n.superseded_by IS NULL "
             "AND NOT EXISTS (SELECT 1 FROM location l WHERE l.frame_id = n.id)"
         ).fetchone()[0],
+    }
+
+
+def config_source_invariants(con):
+    """Trzy inwarianty kolumny `frame.config_source` (R1) — `{nazwa: liczba naruszeń}`, zero == zdrowo.
+
+    Kolumna twierdzi, że oś sprzętu tej klatki jest WERDYKTEM CZŁOWIEKA — a to twierdzenie da się
+    złamać na trzy sposoby, każdy inaczej kosztowny:
+
+    * `reka_bez_sladu` — źródło mówi „user", a w dzienniku nie ma zdarzenia od człowieka. Zapis
+      przez klingę zawsze zostawia `config.assigned` z aktorem `user:*`, więc naruszenie znaczy
+      wstrzyknięcie z pominięciem klingi (gołe SQL, cudzy skrypt). To jest ta sama bramka, którą
+      G1-1 stawia po stronie akceptacji, tylko liczona na dowolnej bazie.
+    * `reka_bez_osi` — źródło ustawione, `config_id` NULL. Klinga zapisuje oba pola razem, więc
+      taka para nie ma jak powstać — ale gdyby powstała, MILCZAŁABY: parytet `frame.config_id`
+      nie drgnąłby, a `transfer_human_facts` przeniósłby na następczynię „zestaw", którego nie ma
+      (stąd jawny człon `config_id IS NOT NULL` w jego guardzie).
+    * `reka_na_kalibracji` — dark albo bias z zestawem od ręki. Klinga tego odmawia
+      (`NO_TELESCOPE_KINDS`), a przebieg takie przypisanie odpina — inwariant pilnuje, że obie
+      drogi rzeczywiście się domykają, zamiast liczyć na jedną z nich.
+
+    Import odroczony (`grouper` importuje `repo`, `repo` importuje `resolve` — a ten moduł stoi
+    obok), z tego samego powodu, co w `repo.user_assign_config`: SPOT zbioru rodzajów ma jednego
+    właściciela i pytamy jego."""
+    from .grouper import NO_TELESCOPE_KINDS
+
+    zrodla = json.dumps(sorted(CONFIG_SOURCES))
+    off_axis = json.dumps(sorted(NO_TELESCOPE_KINDS))
+    return {
+        "reka_bez_sladu": con.execute(
+            "SELECT count(*) FROM frame f "
+            "WHERE f.config_source IN (SELECT value FROM json_each(?)) "
+            "AND NOT EXISTS (SELECT 1 FROM event e WHERE e.verb = 'config.assigned' "
+            "                AND e.target = 'frame:' || f.id AND e.actor LIKE 'user:%')",
+            (zrodla,)).fetchone()[0],
+        "reka_bez_osi": con.execute(
+            "SELECT count(*) FROM frame f WHERE f.config_source IS NOT NULL "
+            "AND f.config_id IS NULL").fetchone()[0],
+        "reka_na_kalibracji": con.execute(
+            "SELECT count(*) FROM frame f WHERE f.config_source IS NOT NULL "
+            "AND f.kind IN (SELECT value FROM json_each(?))", (off_axis,)).fetchone()[0],
     }

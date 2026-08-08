@@ -21,6 +21,39 @@ from horreum.resolve.objects import CLEARABLE_OBJECT_SOURCES, WEAK_OBJECT_SOURCE
 from horreum.resolver import NO_OBJECT_CARD_FILETYPES, path_proposals, review_state
 
 
+PATH_TAIL_DIRS = 2
+"""Ile katalogów pokazujemy przed nazwą pliku w panelu drążenia — ZMIERZONE, nie wybrane.
+
+Na 703 RAW-ach bez obiektu sam folder-rodzic ma **3 różne wartości** (`portable`, `OSC`,
+`NOCONFIG`) i nie rozróżnia niczego; ostatnie DWA katalogi mają **34** — i jest to dokładnie
+tyle, ile nazw wyprowadza z tych ścieżek świadek S2 („34 nazw / 703 klatek" w kolejce). Trzeci
+katalog dokłada `LIGHTS` u wszystkich, czyli zero informacji za dodatkową szerokość."""
+
+
+def path_tail(path, dirs=PATH_TAIL_DIRS):
+    """Ogon ścieżki: `dirs` ostatnich katalogów + nazwa pliku. Czysta funkcja, zero SQL.
+
+    Kolumna nazywa się „Ścieżka", a pokazywała `basename` — i to nie jest drobiazg nazewniczy,
+    tylko brak informacji, po której user wybiera (firsthand 0808, DWA zgłoszenia: najpierw
+    gotowe stosy, potem RAW-y). Nazwy z lustrzanki (`astro_dsc4198.dng`) i nazwy z WBPP
+    (`masterLight_BIN-1_….xisf`) nie niosą tożsamości ŻADNEJ — niesie ją katalog.
+
+    JEDNA REGUŁA DLA WSZYSTKICH KUBEŁKÓW, bez gałęzi per rodzaj klatki. Poprzednia wersja ciął
+    to po `kind='master_light'` z uzasadnieniem „light niesie oznaczenie we własnej nazwie" —
+    **uzasadnienie było fałszywe i obalił je pomiar** (703 RAW-y z nazwami bez oznaczenia).
+    Kubełki przeglądu z definicji zbierają klatki, których maszyna NIE UMIAŁA nazwać; nie ma
+    wśród nich takiego, w którym katalog byłby szumem.
+
+    Cena nazwana: przy stosach widać też `master`, przy RAW-ach `portable` — segmenty wspólne
+    całej populacji. Alternatywą byłaby lista segmentów „nieistotnych", czyli zgadywanie cudzej
+    konwencji katalogów; wolimy dwa znaki szumu od reguły, która przy pierwszym nowym drzewie
+    zacznie ukrywać coś, co niesie sens."""
+    if not path:
+        return ""
+    czesci = [c for c in re.split(r"[\\/]", str(path)) if c]
+    return "\\".join(czesci[-(dirs + 1):])
+
+
 def stack_folder(path):
     """Folder OBRAZU ze ścieżki gotowego stosu — albo `None`. Czysta funkcja, zero SQL.
 

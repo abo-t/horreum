@@ -1859,24 +1859,18 @@ class ObjectAxisView(QWidget):
             # Ścieżka: pokaż NAZWĘ PLIKU (elizja od prawej gubiłaby ją z pełnej ścieżki „R:\...");
             # pełna ścieżka w tooltipie (hover). Klatka bez lokalizacji (zniknięta) → jawny znacznik.
             #
-            # GOTOWY STOS DOSTAJE FOLDER PRZED NAZWĄ — bo u niego sama nazwa NIE JEST ROZRÓŻNIKIEM
-            # (firsthand 0808, zmierzone na 18 wierszach kubełka): pliki generuje WBPP, więc sześć
-            # stosów LMC i jeden IC443 czytają się identycznie (`masterLight_BIN-1_8000x5320_
-            # EXPOSURE-121.00s_FILTER-NoFilter__B.xisf`), a tożsamość siedzi WYŁĄCZNIE w folderze.
-            # Recepta kubełka brzmi „nazwij ten obraz" i była nie do wykonania: człowiek nie wiedział,
-            # KTÓRY nazywa. Tooltip nie wystarczał — wskazuje jeden wiersz naraz, a wybór jest
-            # PORÓWNANIEM. Klatek nieba to NIE dotyczy i to jest granica z pomiaru, nie ostrożność:
-            # tam nazwa pliku niesie czas akwizycji i rozróżnia sama.
+            # OGON ŚCIEŻKI, NIE SAMA NAZWA — bo nazwa pliku nie jest w tych kubełkach rozróżnikiem
+            # (firsthand 0808, DWA zgłoszenia): `masterLight_BIN-1_8000x5320_EXPOSURE-121.00s_….xisf`
+            # u stosów i `astro_dsc4198.dng` u RAW-ów nie mówią nic, tożsamość niesie KATALOG.
+            # ZMIERZONE na 703 RAW-ach: sam rodzic ma 3 różne wartości, dwa ostatnie katalogi — 34,
+            # czyli dokładnie tyle, ile nazw czyta z nich świadek ścieżki. Reguła jest JEDNA dla
+            # wszystkich kubełków: pierwsza wersja ciął ją po `master_light` z uzasadnieniem, które
+            # pomiar obalił. Tooltip z pełną ścieżką zostaje, ale sam NIE WYSTARCZA: pokazuje jeden
+            # wiersz naraz, a wybór spośród bliźniaków jest PORÓWNANIEM.
             path = row["path"] or ""
-            stos = path and "kind" in keys and row["kind"] == "master_light"
-            folder = queries.stack_folder(path) if stos else None
-            if not path:
-                tekst = i18n.t("object.no_location")
-            elif folder:
-                tekst = f"{folder}  \\  {os.path.basename(path)}"
-            else:
-                tekst = os.path.basename(path)
-            self._set_frame_cell(r, FRAME_COL_PATH, tekst, tooltip=path or None)
+            self._set_frame_cell(r, FRAME_COL_PATH,
+                                 queries.path_tail(path) if path else i18n.t("object.no_location"),
+                                 tooltip=path or None)
 
     def _set_frame_cell(self, r, c, text, *, tooltip=None, data=None):
         item = QTableWidgetItem(text)

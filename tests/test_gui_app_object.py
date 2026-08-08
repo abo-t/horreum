@@ -776,17 +776,19 @@ def test_kubelek_gotowych_stosow_drazy_wlasna_lista(repair):
     assert [r["frame_id"] for r in queries.nameless_stack_frames(con)] == [fid]
 
 
-def test_kubelek_stosow_pokazuje_FOLDER_bo_nazwa_pliku_nie_rozroznia(repair):
-    """FIRSTHAND ZDZINIA 0808: „nie widzę napisu IC443 ani LMC, nie ma takiej kolumny".
+def test_kolumna_sciezki_pokazuje_SCIEZKE_bo_nazwa_pliku_nie_rozroznia(repair):
+    """FIRSTHAND ZDZINIA 0808 — DWA zgłoszenia tej samej klasy: najpierw „nie widzę napisu IC443
+    ani LMC" (kubełek stosów), potem „nie widzę ścieżki" (kubełek RAW).
 
-    I nie było jak — kubełek daje 18 wierszy, pliki generuje WBPP, więc sześć stosów LMC i jeden
-    IC443 czytają się identycznie; tożsamość siedzi WYŁĄCZNIE w folderze, a kolumna pokazywała
-    `basename`. Recepta („nazwij ten obraz") była nie do wykonania.
+    Kolumna nazywa się „Ścieżka", a pokazywała `basename` — czyli dokładnie to, co w tych
+    kubełkach nie niesie tożsamości: `masterLight_BIN-1_….xisf` u stosów i `astro_dsc4198.dng`
+    u RAW-ów. Recepta („nazwij ten obraz") była nie do wykonania.
 
-    Test pinuje TĘ listę (`ObjectAxisView.frames`), nie grid Zbiorów — pierwsza naprawa poszła
-    w drugą powierzchnię i firsthand wykazał ją jako brak zmiany. Falsyfikator jest w tym samym
-    teście: klatka NIEBA ma zostać przy samej nazwie, bo tam nazwa niesie czas akwizycji
-    i rozróżnia sama."""
+    PIERWSZA NAPRAWA CIĘŁA TO PO `kind='master_light'` z uzasadnieniem „light niesie oznaczenie
+    we własnej nazwie" — POMIAR JE OBALIŁ: 703 RAW-y bez obiektu mają nazwy bez oznaczenia,
+    a rozróżnia je dopiero para katalogów (3 różne wartości dla samego rodzica, 34 dla dwóch).
+    Stąd JEDNA reguła bez gałęzi per rodzaj — i ten test pilnuje OBU populacji naraz, żeby
+    zawężenie nie wróciło."""
     v, con, files, _open = repair
     fid, _ = repo.upsert_frame(con, sha1_data="sha-folder-stack", kind="master_light",
                                filetype="xisf", camera_id=None, now=NOW_PD)
@@ -799,14 +801,13 @@ def test_kubelek_stosow_pokazuje_FOLDER_bo_nazwa_pliku_nie_rozroznia(repair):
 
     _select_review_tag(v, "nameless_stacks")
     tekst = v.frames.item(0, FRAME_COL_PATH).text()
-    assert "A7R3_105_LMC" in tekst, "folder jest JEDYNYM rozróżnikiem tych wierszy"
+    assert "A7R3_105_LMC" in tekst, "katalog jest JEDYNYM rozróżnikiem tych wierszy"
     assert "masterLight_BIN-1.xisf" in tekst, "nazwa pliku nie ma zniknąć, ma dostać kontekst"
-    assert "master" not in tekst.replace("masterLight_BIN-1.xisf", ""), \
-        "rodzic `master` jest wspólny wszystkim stosom — pokazanie go nie rozróżnia niczego"
+    assert "!!ASTROFOTO" not in tekst, "korzeń archiwum jest wspólny wszystkim — sam szum"
 
     _select_review_tag(v, "nameless")
     swiatlo = v.frames.item(0, FRAME_COL_PATH).text()
-    assert "\\" not in swiatlo, "klatka nieba zostaje przy samej nazwie (nazwa rozróżnia sama)"
+    assert "\\" in swiatlo, "klatka nieba dostaje ogon ścieżki TAK SAMO (pomiar obalił wyjątek)"
 
 
 # ═════════════════════════ R-S3-1 — CZŁON „COFNIĘTE RĘKĄ" W DWÓCH KUBEŁKACH KARTOWYCH

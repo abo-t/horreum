@@ -1196,6 +1196,13 @@ def stack_lineage_head(con, frame_id):
     sam wiersz `integration_input` należy do integracji o INNYM odcisku. Panel ostrzega z tego
     pytania, bo tylko ono odróżnia „ten sub policzono dwa razy" od „ten obraz ma drugą wersję".
 
+    `object_now` to BIEŻĄCY obiekt klatki mastera — nie po to, żeby go wyświetlić, tylko żeby
+    powierzchnia umiała rozpoznać, że `unresolved_reason` ZWIETRZAŁ. Powód jest zapisem z chwili
+    OSTATNIEGO przebiegu rodowodu, a obiekt zmienia się gestem człowieka między przebiegami —
+    więc panel potrafił twierdzić „obraz nie ma rozpoznanego obiektu" o wierszu, który w kolumnie
+    obok pokazywał nazwę (firsthand 0808, sprzeczność w JEDNYM oknie). Kolumna jest tu ODPOWIEDZIĄ
+    na tę sprzeczność, nie ozdobą: bez niej panel nie ma z czym porównać własnego zapisu.
+
     `utc_offset_min` (R2) niesie ODNIESIENIE CZASU tego obrazu w trójstanie migracji 0016:
     `None` = nikt nie wskazał, `0` = UTC, wartość = minuty. Panel czyta je po to, żeby odróżnić
     „nie wiem" od „to jest UTC" — dwa różne zdania, których jedna kolumna bez trójstanu nie
@@ -1209,6 +1216,7 @@ def stack_lineage_head(con, frame_id):
         "SELECT i.id AS integration_id, i.unresolved_reason, i.degenerate, i.ambiguous, "
         "       i.telescope_mismatch, i.declared_rows, i.drizzle_inputs, i.disabled_inputs, "
         "       i.tool, i.window_start, i.window_end, i.utc_offset_min, "
+        "       (SELECT f.object_id FROM frame f WHERE f.id = i.master_frame_id) AS object_now, "
         "       (SELECT COUNT(*) FROM integration b WHERE b.integ_hash IS NOT NULL "
         "         AND b.integ_hash = i.integ_hash AND b.id <> i.id) AS twins, "
         "       (SELECT COUNT(DISTINCT b.id) FROM integration_input ia "

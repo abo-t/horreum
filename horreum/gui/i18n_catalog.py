@@ -1299,6 +1299,14 @@ CATALOG = {
         "pl": "Odniesienie zapisane: {hours} h. Policz rodowód w Dostawie, żeby dobrać klatki.",
         "en": "Time reference saved: {hours} h. Compute lineage in Delivery to match frames.",
     },
+    # Powód, który przestał być prawdą, zanim ktokolwiek policzył go ponownie (firsthand 0808).
+    # Nie udajemy, że wiemy więcej: mówimy, że TEN ZAPIS jest starszy niż zmiana, i gdzie go odświeżyć.
+    "grid.lin.reason.stale": {
+        "pl": "Rodowód policzono, zanim zmieniłeś ten obraz — zapis poniżej jest nieaktualny. "
+              "Policz rodowód w Dostawie, żeby zobaczyć bieżący stan.",
+        "en": "Lineage was computed before you changed this image — the record below is out of "
+              "date. Compute lineage in Delivery to see the current state.",
+    },
     "grid.lin.reason.offset_unknown": {
         "pl": "Nie wiem, z czego powstał: materiał leży w plikach RAW, a te liczą czas w zegarze "
               "aparatu. Wskaż odniesienie tego obrazu, a klatki się dobiorą.",

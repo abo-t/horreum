@@ -1284,7 +1284,7 @@ class LineageBar(QWidget):
         pytaniem: ich czas i tak jest w jednym zegarze, a przycisk sugerowałby problem tam, gdzie
         go nie ma."""
         head = self._head
-        widoczny = head is not None and (head["unresolved_reason"] == "offset_unknown"
+        widoczny = head is not None and (head["unresolved_reason"] == REASON_OFFSET_TOKEN
                                          or head["utc_offset_min"] is not None)
         self.btn_offset.setVisible(widoczny)
         self.btn_offset.setEnabled(widoczny and not self._busy)
@@ -1342,11 +1342,47 @@ def _calibration_item_text(r):
     return f"{klasa} · {powod}"
 
 
+# Tokeny powodów, o których panel wie WIĘCEJ niż samą prozę — LUSTRO stałych rdzenia
+# (`stacks.REASON_NO_OBJECT`, `stacks.REASON_OFFSET_UNKNOWN`), trzymane tu jako literały, bo
+# warstwa widżetów nie importuje rdzenia poza `queries` (test izolacji §4). Równość obu zapisów
+# pinuje bramka w `tests/test_gui_grid.py`, żeby rozjazd nie przeszedł cicho.
+REASON_NO_OBJECT_TOKEN = "no_object"
+REASON_OFFSET_TOKEN = "offset_unknown"
+
+
 def _lineage_reason_text(head):
     """Prozę powodu składa POWIERZCHNIA, rdzeń niesie token (`unresolved_reason`) — ta sama granica
     co przy `wbpp-feed`/`ProjectionAbort`; inaczej polski komunikat rdzenia wyciekłby do wersji EN."""
     powod = head["unresolved_reason"]
-    return i18n.t(f"grid.lin.reason.{powod}") if powod else ""
+    if not powod:
+        return ""
+    if _lineage_stale(head):
+        return i18n.t("grid.lin.reason.stale")
+    return i18n.t(f"grid.lin.reason.{powod}")
+
+
+def _lineage_stale(head):
+    """Czy zapisany powód ZWIETRZAŁ wobec bieżącego stanu (firsthand 0808).
+
+    `unresolved_reason` jest zapisem z chwili OSTATNIEGO przebiegu rodowodu, a fakty, na których
+    stoi, zmienia GEST CZŁOWIEKA między przebiegami. Panel twierdził więc „obraz nie ma
+    rozpoznanego obiektu" o wierszu, który w kolumnie obok pokazywał `IC443` — sprzeczność w jednym
+    oknie, której user nie ma prawa rozstrzygać domysłem.
+
+    Wykrywamy ją wprost i WĄSKO: pytamy tylko o te powody, których przesłankę widać w tym samym
+    read-modelu. Powód ogólny („nie wiem, czy to jeszcze aktualne") wymagałby porównania czasu
+    przebiegu ze znacznikiem zmiany faktów — a takiego znacznika dziś nie ma i dorabianie go pod
+    komunikat byłoby budową mechanizmu pod zdanie.
+
+    NIE NAPRAWIAMY TU RODOWODU i to jest granica, nie brak: dobór wejść jedzie po CAŁYM archiwum
+    stosów, więc jego przeliczenie należy do etapu w Dostawie. Panel ma powiedzieć PRAWDĘ o tym,
+    co wie — a prawdą jest „ten zapis jest starszy niż twoje zmiany"."""
+    powod = head["unresolved_reason"]
+    if powod == REASON_NO_OBJECT_TOKEN:
+        return head["object_now"] is not None
+    if powod == REASON_OFFSET_TOKEN:
+        return head["utc_offset_min"] is not None
+    return False
 
 
 def _lineage_flags(head):

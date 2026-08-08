@@ -1365,6 +1365,41 @@ def test_bezimienny_stos_pokazuje_FOLDER_zamiast_pustki(gcon):
     assert _obj_label({"object_canon": None, "object_raw": None}) == ""
 
 
+def test_panel_nie_powtarza_powodu_ktory_zwietrzal(view, gcon):
+    """FIRSTHAND ZDZINIA 0808, pkt 9: panel twierdził „obraz nie ma rozpoznanego obiektu", gdy
+    kolumna Obiekt W TYM SAMYM OKNIE pokazywała `IC443`. Sprzeczności user nie ma prawa rozstrzygać
+    domysłem.
+
+    Mechanizm nie był zepsuty — `unresolved_reason` to zapis z ostatniego przebiegu rodowodu,
+    a obiekt nadaje się GESTEM między przebiegami. Zepsute było zdanie: powtarzało stary werdykt
+    jako bieżący. Odtąd panel mówi, że jego zapis jest starszy niż zmiana, i gdzie go odświeżyć."""
+    _seed_stos(gcon, reason="no_object")
+    assert _zaznacz_frame(view, 10)
+    view._toggle_panel("lineage")
+    assert "nie ma rozpoznanego obiektu" in view.lineage_bar.head.text()
+
+    # Gest człowieka MIĘDZY przebiegami — tak jak przy „Napraw nagłówek…"/„Przypisz obiekt…".
+    oid = gcon.execute(
+        "INSERT INTO object(canon, catalog, kind) VALUES ('IC443', 'catalog', 'deep_sky')").lastrowid
+    gcon.execute("UPDATE frame SET object_id = ? WHERE id = 10", (oid,))
+    gcon.commit()
+    view._refresh_lineage()
+    tekst = view.lineage_bar.head.text()
+    assert "nieaktualny" in tekst, "panel ma przyznać, że jego zapis zwietrzał"
+    assert "nie ma rozpoznanego obiektu" not in tekst, "stary werdykt nie ma prawa wrócić jako bieżący"
+
+
+def test_tokeny_panelu_sa_LUSTREM_stalych_rdzenia():
+    """Panel trzyma dwa powody jako literały (warstwa widżetów nie importuje rdzenia — izolacja §4),
+    więc równość obu zapisów musi pilnować bramka. Bez niej zmiana tokenu w `stacks` zostawiłaby
+    panel cicho ślepym: przycisk odniesienia przestałby się pokazywać, a nic by nie zaczerwieniło."""
+    from horreum import stacks
+    from horreum.gui.grid import REASON_NO_OBJECT_TOKEN, REASON_OFFSET_TOKEN
+
+    assert REASON_NO_OBJECT_TOKEN == stacks.REASON_NO_OBJECT
+    assert REASON_OFFSET_TOKEN == stacks.REASON_OFFSET_UNKNOWN
+
+
 def test_gest_odniesienia_wchodzi_tylko_tam_gdzie_jest_pytaniem(view, gcon):
     """R2: przycisk „Wskaż odniesienie…" ma się pokazać przy powodzie `offset_unknown` i NIE
     pokazywać przy innym. Dla 121 masterów FITS/ASI zegar nie jest pytaniem, a przycisk

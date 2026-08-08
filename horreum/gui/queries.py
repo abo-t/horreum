@@ -1105,9 +1105,18 @@ def lineage_reason_stale(row):
     ręką. Kubełek bez tego sita wysyłałby użytkownika do jedenastu wierszy, w których panel sam
     mówi „ten zapis jest starszy niż twoje zmiany".
 
-    `row` = wiersz z kolumnami `unresolved_reason`, `object_now`, `utc_offset_min`
+    WEJŚCIA WSKAZANE RĘKĄ WIETRZĄ KAŻDY POWÓD, nie tylko parę wrażliwą — i ten człon jest
+    KONIECZNOŚCIĄ, nie wygodą. Werdykt ręki ma rangę najwyższą (`repo.RANGA_ASSERT`), więc kolejny
+    przebieg rodowodu zostawia taki stos NIETKNIĘTY w całości (`stacks.run_stack_lineage`, gałąź
+    „chroniony i powód") — łącznie z zapisanym powodem, który zamarza w bazie NA ZAWSZE. Bez tego
+    członu stos raz rozstrzygnięty ręką wracałby do kubełka po każdym przebiegu, a panel powtarzałby
+    „nie wiem, z czego powstał" nad listą klatek, które człowiek własnoręcznie potwierdził.
+
+    `row` = wiersz z kolumnami `unresolved_reason`, `object_now`, `utc_offset_min`, `inputs`
     (`stack_lineage_head` albo `_lineage_reason_rows`). Zwraca bool."""
     powod = row["unresolved_reason"]
+    if row["inputs"]:
+        return True
     if powod == REASON_NO_OBJECT:
         return row["object_now"] is not None
     if powod == REASON_OFFSET_UNKNOWN:
@@ -1118,10 +1127,14 @@ def lineage_reason_stale(row):
 def _lineage_reason_rows(con):
     """Integracje z ZAPISANYM powodem braku rodowodu + fakty, po których poznać zwietrzenie.
     Wąski literał pod `lineage_pending_frame_ids` — pełny opis obrazu daje `stack_lineage_head`.
-    Zwraca: master_frame_id, unresolved_reason, object_now, utc_offset_min."""
+    `inputs` liczy WYŁĄCZNIE wejścia niewykluczone, jak w głowie panelu: stos, z którego człowiek
+    odrzucił wszystkich kandydatów, wciąż nie ma rodowodu i do kubełka NALEŻY.
+    Zwraca: master_frame_id, unresolved_reason, object_now, utc_offset_min, inputs."""
     return con.execute(
         "SELECT i.master_frame_id, i.unresolved_reason, i.utc_offset_min, "
-        "       (SELECT f.object_id FROM frame f WHERE f.id = i.master_frame_id) AS object_now "
+        "       (SELECT f.object_id FROM frame f WHERE f.id = i.master_frame_id) AS object_now, "
+        "       (SELECT COUNT(*) FROM integration_input ii "
+        "         WHERE ii.integration_id = i.id AND ii.excluded = 0) AS inputs "
         "FROM integration i WHERE i.unresolved_reason IS NOT NULL"
     ).fetchall()
 

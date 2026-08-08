@@ -39,7 +39,7 @@ stos schodzi wtedy na ścieżkę okna i jest to POLICZONE (`history_unread`), ni
 """
 import json
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import date, timedelta
 
 from . import repo
 from .hashing import sha1_of_set
@@ -366,6 +366,112 @@ def propose_offset_minutes(con, master_frame_id):
         if delta % 60 == 0 and abs(delta) <= repo.UTC_OFFSET_MAX_MIN:
             roznice.add(delta)
     return roznice.pop() if len(roznice) == 1 else None
+
+
+NIGHT_SPLIT_HOUR = 12
+"""Godzina, o której tniemy dobę na NOCE OBSERWACYJNE (UTC). Noc przechodzi przez północ, więc
+klatka z 01:00 należy do wieczoru dnia poprzedniego; podział o południu jest konwencją astronomiczną
+i jedyną, przy której jedna sesja zostaje jedną pozycją listy."""
+
+
+@dataclass(frozen=True)
+class CandidateNight:
+    """Jedna noc obserwacyjna z materiałem pod PROPOZYCJĘ rodowodu. `master_night` wyróżnia tę,
+    o której mówi sam obraz (`DATE-OBS`) — powierzchnia otwiera się na niej i tylko ona jest
+    zeznaniem pliku; pozostałe są ofertą dla oka człowieka."""
+    night: str
+    master_night: bool
+    frames: tuple
+
+
+def propose_lineage_candidates(con, master_frame_id):
+    """PROPOZYCJA MATERIAŁU dla stosu bez rodowodu — noce z kandydatami. Czysty odczyt, zero zapisu.
+
+    DLACZEGO ISTNIEJE: dobór automatu pyta o OKNO (`DATE-OBS`…`DATE-END`), a 30 stosów archiwum ma
+    okno ZDEGENEROWANE — `DATE-END` opisuje jedną klatkę zamiast serii (pułapka 1, `resolve/stack.py`:
+    23 z 84 masterów starszego rocznika). Zepsuty jest KONIEC; początek zostaje początkiem pierwszego
+    suba. Propozycja bierze więc tę samą oś co okno, tylko zamiast końca stawia NOC.
+
+    OSIE ZGODNOŚCI TE SAME, CO W DOBORZE, i to jest cały warunek uczciwości tej listy: obiekt,
+    filtr, teleskop, próg ekspozycji (`exposure_matches`, D-DR-2). Oś, której master NIE ZNA, nie
+    zawęża — dokładnie jak w `_in_window`. Luźniejsza reguła bez tych osi nie byłaby propozycją,
+    tylko spisem klatek obiektu.
+
+    NIE ZAPISUJE I NIE UDAJE FAKTU (lustro `propose_offset_minutes` i szczebla ścieżki S2): zwraca
+    KANDYDATÓW, a rodowód powstaje dopiero werdyktem ręki (`repo.judge_integration_input`,
+    `asserted_by='user'`). Maszyna nie ma czym rozstrzygnąć, z czego powstał obraz, którego własny
+    nagłówek tego nie mówi — ale umie pokazać, co tej nocy leżało w archiwum.
+
+    NOC MASTERA WCHODZI ZAWSZE, TAKŻE PUSTA, i to jest odpowiedź na POMIAR, nie ozdoba: 5 stosów
+    (`no_candidates`) nie ma materiału w swojej nocy, choć obiekt ma go setki w innych nocach
+    (NGC3034: 356 lightów w 11 nocach, NGC7635: 339 w 10). Lista bez pustej nocy mastera kazałaby
+    człowiekowi zgadywać, czy program w ogóle zrozumiał, o który wieczór pyta.
+
+    KOLEJNOŚĆ = ODLEGŁOŚĆ OD NOCY MASTERA, nie chronologia: sesja przesunięta o dzień jest
+    kandydatem znacznie mocniejszym niż ta sprzed roku, a pierwsze pozycje listy czyta się najuważniej.
+
+    KLATKA JUŻ OSĄDZONA NIE WRACA jako propozycja — ani potwierdzona, ani odrzucona. Werdykt
+    „to NIE jest materiał tego obrazu" ma zostać werdyktem; lista, która go co chwilę przywraca,
+    kazałaby wydawać go w kółko.
+
+    KANDYDAT RAW PRZY NIEZNANYM ODNIESIENIU NIE WCHODZI — granica przeniesiona wprost z `_in_window`
+    (EXIF niesie czas LOKALNY, XISF UTC), bo bez odniesienia nie da się powiedzieć, do której NOCY
+    taka klatka należy, a zgadnięcie doby jest tu gorsze niż milczenie. Zmierzona populacja puli
+    mieszanej na żywym archiwum: **0** (G2-1d).
+
+    Zwraca `tuple[CandidateNight, …]`; pusta krotka = nie ma czego proponować (brak obiektu, brak
+    czasu ekspozycji albo brak `DATE-OBS` — zmierzone: 1 stos z 35)."""
+    row = con.execute(
+        "SELECT f.id AS frame_id, f.object_id, f.filter_canon, h.raw_json, "
+        "       tc.canon_id AS telescope_id, i.id AS integration_id, i.utc_offset_min "
+        "FROM frame f LEFT JOIN header h ON h.frame_id = f.id "
+        "LEFT JOIN config c ON c.id = f.config_id "
+        "LEFT JOIN telescope_canonical tc ON tc.id = c.telescope_id "
+        "LEFT JOIN integration i ON i.master_frame_id = f.id "
+        "WHERE f.id = ?", (master_frame_id,)).fetchone()
+    if row is None or row["object_id"] is None:
+        return ()
+    t = rstack.read_testimony(json.loads(row["raw_json"]) if row["raw_json"] else {}, None)
+    exptime = _to_float(t.exptime)
+    start = t.window_start
+    if start is None or not exptime:
+        return ()
+    osadzone = {int(r[0]) for r in con.execute(
+        "SELECT input_frame_id FROM integration_input WHERE integration_id = ?",
+        (row["integration_id"],)).fetchall()} if row["integration_id"] else set()
+    noc_mastera = _night_key(start)
+    wg_nocy = {}
+    for r in _window_candidates(con, object_id=row["object_id"], exptime=exptime):
+        if r["frame_id"] in osadzone:
+            continue
+        if not exposure_matches(r["exptime"], exptime):
+            continue                       # SQL dał NADZBIÓR (pas ± sufit) — próg rozstrzyga tu
+        if row["filter_canon"] and r["filter_canon"] != row["filter_canon"]:
+            continue
+        if row["telescope_id"] and r["telescope_id"] != row["telescope_id"]:
+            continue
+        czas = header_dt(r["date_obs"])
+        if czas is None:
+            continue
+        if r["filetype"] == "raw":
+            if row["utc_offset_min"] is None:
+                continue
+            czas -= timedelta(minutes=row["utc_offset_min"])
+        wg_nocy.setdefault(_night_key(czas), []).append(r)
+    wg_nocy.setdefault(noc_mastera, [])
+    return tuple(
+        CandidateNight(night=n, master_night=(n == noc_mastera), frames=tuple(wg_nocy[n]))
+        for n in sorted(wg_nocy, key=lambda n: (n != noc_mastera,
+                                                abs((_date(n) - _date(noc_mastera)).days), n)))
+
+
+def _night_key(t):
+    """Klucz nocy obserwacyjnej dla momentu `t` — data WIECZORU (`YYYY-MM-DD`)."""
+    return (t - timedelta(hours=NIGHT_SPLIT_HOUR)).date().isoformat()
+
+
+def _date(klucz):
+    return date.fromisoformat(klucz)
 
 
 def _shelf_ambiguous(plany):

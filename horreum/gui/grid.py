@@ -1081,6 +1081,17 @@ class LineageBar(QWidget):
         lay.addWidget(self.head)
         lay.addWidget(self.warn)
         lay.addWidget(self.note)
+        # WYBÓR NOCY stoi NAD listą, bo rządzi jej treścią (decyzja Zdzinia 0808: „noc mastera
+        # + wybór innej nocy"). Widoczny WYŁĄCZNIE w trybie propozycji — przy gotowym rodowodzie
+        # nie ma czego wybierać, a pusty combo nad listą faktów sugerowałby, że są alternatywą.
+        self.night_row = QWidget()
+        nr = QHBoxLayout(self.night_row)
+        nr.setContentsMargins(0, 0, 0, 0)
+        nr.addWidget(QLabel(i18n.t("grid.lin.cand.night")))
+        self.combo_night = QComboBox()
+        self.combo_night.currentIndexChanged.connect(self._on_night)
+        nr.addWidget(self.combo_night, 1)
+        lay.addWidget(self.night_row)
         self.items = QListWidget()
         self.items.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.items.setTextElideMode(Qt.ElideLeft)       # ścieżka: koniec (nazwa pliku) niesie sens
@@ -1113,12 +1124,19 @@ class LineageBar(QWidget):
         lay.addStretch(1)               # pustkę zbiera dół panelu, nie odstępy między wierszami
         self._busy = False
         self._offset_hint = None        # propozycja z rdzenia (`stacks.propose_offset_minutes`)
+        self._nights = ()               # propozycje z rdzenia (`stacks.propose_lineage_candidates`)
+        self._note_base = ""            # nota sprzed trybu propozycji (combo jej nie zjada)
         self.set_lineage(None, [])
 
-    def set_lineage(self, head, inputs, *, hint=None):
+    def set_lineage(self, head, inputs, *, hint=None, candidates=()):
         """Wypełnij panel. `head` = wiersz `queries.stack_lineage_head` (albo `None`), `inputs` =
         wiersze `queries.stack_lineage_inputs`, `hint` = gotowe zdanie, gdy nie ma czego pokazać
-        (złe zaznaczenie / rodowód nieliczony). Zero SQL i zero decyzji — sama prezentacja."""
+        (złe zaznaczenie / rodowód nieliczony), `candidates` = noce z propozycjami
+        (`stacks.propose_lineage_candidates`). Zero SQL i zero decyzji — sama prezentacja.
+
+        PROPOZYCJE WCHODZĄ TYLKO W PUSTKĘ i to jest granica, nie optymalizacja: gdy stos MA wejścia,
+        lista jest zapisem faktu, a doklejenie do niej ofert kazałoby odróżniać jedno od drugiego
+        w tym samym oknie. Obraz z rodowodem niczego nie proponuje."""
         self.items.clear()
         self.items.setMaximumHeight(_LINEAGE_LIST_MAX_H)   # oś kalibracji zaniża sufit do treści
         self._head = head
@@ -1153,6 +1171,9 @@ class LineageBar(QWidget):
             # i jego własną decyzją, więc nagłówek ma ją pokazać.
             self.head.setText(powod)
             self.note.set_full_text(info)
+            if candidates:
+                self._set_candidates(candidates)
+                return
         else:
             godziny = (head["secs"] or 0) / 3600.0
             self.head.setText(i18n.t_plural("grid.lin.head", head["inputs"],
@@ -1162,6 +1183,51 @@ class LineageBar(QWidget):
         # Widoczność z LISTY, nie z licznika: stos z powodem, ale z odrzuconymi wierszami, ma je
         # pokazać (i dać się cofnąć), a stos bez ani jednego wiersza nie ma zajmować pionu na listę.
         self._sync_visible(bool(inputs))
+
+    def _set_candidates(self, nights):
+        """Tryb PROPOZYCJI: noce z materiałem w combo, klatki wybranej nocy na liście.
+
+        Otwiera się na NOCY MASTERA (pozycja 0 z rdzenia), także gdy ta noc jest pusta — bo pierwsze
+        pytanie człowieka brzmi „czy program dobrze zrozumiał, o który wieczór pytam", a nie „daj mi
+        cokolwiek". Przełączenie nocy NIE PYTA BAZY: rdzeń oddał wszystkie noce naraz, więc combo
+        przerysowuje listę z pamięci."""
+        self._nights = tuple(nights)
+        self._note_base = self.note.full_text()
+        self.combo_night.blockSignals(True)
+        self.combo_night.clear()
+        for n in self._nights:
+            klucz = "grid.lin.cand.night_master" if n.master_night else "grid.lin.cand.night_other"
+            self.combo_night.addItem(i18n.t(klucz, night=n.night, n=len(n.frames)), n.night)
+        self.combo_night.setCurrentIndex(0)
+        self.combo_night.blockSignals(False)
+        self._fill_night(0)
+
+    def _on_night(self, idx):
+        if idx >= 0:
+            self._fill_night(idx)
+
+    def _fill_night(self, idx):
+        """Przerysuj listę propozycji dla wybranej nocy. PUSTA NOC ZOSTAJE NA EKRANIE z własnym
+        zdaniem: „ta noc nie ma materiału, ale inne mają" to inna odpowiedź niż „nie ma nic",
+        a różnicę widać wyłącznie wtedy, gdy pusty wybór wolno wybrać."""
+        self.items.clear()
+        klatki = self._nights[idx].frames if 0 <= idx < len(self._nights) else ()
+        for r in klatki:
+            it = QListWidgetItem(_candidate_item_text(r))
+            it.setData(Qt.UserRole, r["frame_id"])
+            self.items.addItem(it)
+        gdzie_indziej = sum(len(n.frames) for n in self._nights) - len(klatki)
+        podpowiedz = "" if klatki else i18n.t(
+            "grid.lin.cand.empty_night" if gdzie_indziej else "grid.lin.cand.empty_all",
+            n=gdzie_indziej)
+        self.note.set_full_text(" · ".join(x for x in (self._note_base, podpowiedz) if x))
+        self.night_row.setVisible(True)
+        self.items.setVisible(bool(klatki))
+        self.action_row.setVisible(bool(klatki))
+        self.warn.setVisible(bool(self.warn.full_text()))
+        self.note.setVisible(bool(self.note.full_text()))
+        self._sync_buttons()
+        self._sync_offset_visible()
 
     def set_calibration(self, relations):
         """DRUGA ODPOWIEDŹ TEGO SAMEGO PANELU (C3, Issue #6): czym skalibrowano zaznaczoną klatkę
@@ -1228,7 +1294,12 @@ class LineageBar(QWidget):
     def _sync_visible(self, ma_liste):
         """Panel bez listy nie ma prawa zajmować miejsca na listę: pusty `QListWidget` (130 px)
         i dwa wygaszone przyciski mówiły „tu coś będzie" tam, gdzie nic nie będzie (wiz #6).
-        Chowamy oba i oddajemy pion gridowi; puste etykiety znikają razem z ich treścią."""
+        Chowamy oba i oddajemy pion gridowi; puste etykiety znikają razem z ich treścią.
+
+        WYBÓR NOCY GAŚNIE TU, A ZAPALA SIĘ WYŁĄCZNIE W `_fill_night` — jedna droga w każdą stronę:
+        combo należy do trybu propozycji, więc każde wyjście z niego (rodowód gotowy, inne
+        zaznaczenie, oś kalibracji) ma je zdjąć bez pamiętania o tym z osobna."""
+        self.night_row.setVisible(False)
         self.items.setVisible(ma_liste)
         self.action_row.setVisible(ma_liste)
         self.warn.setVisible(bool(self.warn.full_text()))
@@ -1315,6 +1386,17 @@ def _lineage_item_text(r):
     if r["excluded"]:
         zrodlo = i18n.t("grid.lin.src.excluded")
     return f"{czas} · {exp} · [{zrodlo}] · {r['path'] or ''}"
+
+
+def _candidate_item_text(r):
+    """Jeden wiersz PROPOZYCJI: czas · ekspozycja · filtr. Bez ścieżki i bez źródła pewności — obu
+    tu nie ma z definicji: kandydat nie jest jeszcze wejściem, więc źródła nie ma czym wypełnić,
+    a wiersz różnicuje CZAS (klatki jednej nocy leżą w jednym folderze i mają nazwy z akwizycji).
+    Filtr zostaje, bo master bez własnego `FILTER` nie zawęża tej osi — wtedy jest jedyną
+    informacją, która odróżnia kanały tej samej sesji."""
+    czas = (r["date_obs"] or "")[:19].replace("T", " ")
+    exp = f"{r['exptime']:.0f}s" if r["exptime"] is not None else "—"
+    return f"{czas} · {exp}" + (f" · {r['filter_canon']}" if r["filter_canon"] else "")
 
 
 def _znany(klucz, zapasowo):
@@ -2240,7 +2322,16 @@ class FramesView(QWidget):
         self.lineage_bar.set_offset_hint(
             stacks.propose_offset_minutes(self.con, fid)
             if head["unresolved_reason"] == REASON_OFFSET_TOKEN else None)
-        self.lineage_bar.set_lineage(head, queries.stack_lineage_inputs(self.con, fid))
+        # PROPOZYCJA MATERIAŁU liczona TYLKO tam, gdzie jest pytaniem — tak samo wąsko jak
+        # propozycja odniesienia wyżej: obraz z rodowodem ma fakt, a obraz z powodem ZWIETRZAŁYM
+        # czeka na przeliczenie etapem, nie na rękę. Poza tymi dwoma stanami zapytanie chodziłoby
+        # po całym materiale obiektu przy każdym zaznaczeniu, nie mając komu oddać wyniku.
+        kandydaci = ()
+        if head["unresolved_reason"] and not head["inputs"] \
+                and not queries.lineage_reason_stale(head):
+            kandydaci = stacks.propose_lineage_candidates(self.con, fid)
+        self.lineage_bar.set_lineage(head, queries.stack_lineage_inputs(self.con, fid),
+                                     candidates=kandydaci)
         self._lineage_frame_id = fid
         if select_frame_ids:
             self.lineage_bar.select_frame_ids(select_frame_ids)

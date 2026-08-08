@@ -203,17 +203,28 @@ def test_licznik_porzadkow_rodowodu_JEST_dlugoscia_swojej_listy(s8_obj):
 
 def test_zwietrzenie_powodu_ma_JEDNEGO_wlasciciela():
     """Ten sam predykat obsługuje panel „Rodowód" (jeden obraz) i perspektywę (całe archiwum),
-    więc kontrakt wiersza jest wspólny: `unresolved_reason` + `object_now` + `utc_offset_min`.
-    Powód spoza pary wrażliwej nie wietrzeje NIGDY — inaczej sito zjadłoby robotę do zrobienia."""
+    więc kontrakt wiersza jest wspólny: `unresolved_reason` + `object_now` + `utc_offset_min`
+    + `inputs`. Powód spoza pary wrażliwej nie wietrzeje sam z siebie — inaczej sito zjadłoby
+    robotę do zrobienia."""
+    def wiersz(**kw):
+        return {"unresolved_reason": None, "object_now": None, "utc_offset_min": None,
+                "inputs": 0, **kw}
+
+    assert queries.lineage_reason_stale(wiersz(unresolved_reason="no_object", object_now=7)) is True
+    assert queries.lineage_reason_stale(wiersz(unresolved_reason="no_object")) is False
     assert queries.lineage_reason_stale(
-        {"unresolved_reason": "no_object", "object_now": 7, "utc_offset_min": None}) is True
-    assert queries.lineage_reason_stale(
-        {"unresolved_reason": "no_object", "object_now": None, "utc_offset_min": None}) is False
-    assert queries.lineage_reason_stale(
-        {"unresolved_reason": "offset_unknown", "object_now": None, "utc_offset_min": 0}) is True, \
+        wiersz(unresolved_reason="offset_unknown", utc_offset_min=0)) is True, \
         "zero minut to WSKAZANE odniesienie (UTC), nie brak wskazania — trójstan migracji 0016"
     assert queries.lineage_reason_stale(
-        {"unresolved_reason": "degenerate_window", "object_now": 7, "utc_offset_min": 60}) is False
+        wiersz(unresolved_reason="degenerate_window", object_now=7, utc_offset_min=60)) is False
+    # WERDYKT RĘKI WIETRZY KAŻDY POWÓD: przebieg zostawia taki stos nietknięty (ranga `user`),
+    # więc powód zamarza w bazie — bez tego członu obraz z potwierdzonym materiałem wracałby
+    # do kubełka po każdym przeliczeniu.
+    assert queries.lineage_reason_stale(
+        wiersz(unresolved_reason="degenerate_window", inputs=9)) is True
+    # …ale ODRZUCENIE wszystkich kandydatów nie jest rodowodem: `inputs` liczy niewykluczone.
+    assert queries.lineage_reason_stale(
+        wiersz(unresolved_reason="degenerate_window", inputs=0)) is False
 
 
 def test_tasks_state_reaguje_na_stan_nie_eventy(s8_obj):

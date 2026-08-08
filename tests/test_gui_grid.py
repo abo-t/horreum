@@ -1389,6 +1389,108 @@ def test_panel_nie_powtarza_powodu_ktory_zwietrzal(view, gcon):
     assert "nie ma rozpoznanego obiektu" not in tekst, "stary werdykt nie ma prawa wrócić jako bieżący"
 
 
+def _seed_stos_z_kandydatami(gcon, *, reason="degenerate_window"):
+    """Stos z oknem ZDEGENEROWANYM + materiał dwóch nocy — minimalny materiał trybu propozycji.
+    Master bez configu, więc oś teleskopu nie zawęża (jak u 83 z 85 masterów archiwum)."""
+    gcon.execute("INSERT INTO object (id, canon, catalog, kind) "
+                 "VALUES (7, 'M51', 'catalog', 'deep_sky')")
+    raw = {"IMAGETYP": "Master Light", "EXPTIME": 300.0,
+           "DATE-OBS": "2023-04-21T20:00:00", "DATE-END": "2023-04-21T20:05:00"}
+    gcon.execute("INSERT INTO frame (id, sha1_data, kind, filetype, object_id, filter_canon, "
+                 "first_seen_at) VALUES (10, 'm10', 'master_light', 'xisf', 7, 'Ha', ?)", (NOW,))
+    gcon.execute("INSERT INTO header (frame_id, raw_json, date_obs, exptime) "
+                 "VALUES (10, ?, '2023-04-21T20:00:00', 300.0)", (json.dumps(raw),))
+    gcon.execute("INSERT INTO location (frame_id, volume, path, present) "
+                 "VALUES (10, 'V', '/a/masterLight.xisf', 1)")
+    gcon.execute("INSERT INTO integration (id, master_frame_id, created_at, degenerate, ambiguous, "
+                 "telescope_mismatch, unresolved_reason) VALUES (5, 10, ?, 1, 0, 0, ?)",
+                 (NOW, reason))
+    for fid, czas in ((20, "2023-04-21T20:00:00"), (21, "2023-04-21T21:00:00"),
+                      (22, "2023-04-25T20:00:00")):
+        gcon.execute("INSERT INTO frame (id, sha1_data, kind, filetype, object_id, filter_canon, "
+                     "first_seen_at) VALUES (?, ?, 'light', 'fits', 7, 'Ha', ?)",
+                     (fid, f"s{fid}", NOW))
+        gcon.execute("INSERT INTO header (frame_id, raw_json, date_obs, exptime) "
+                     "VALUES (?, '{}', ?, 300.0)", (fid, czas))
+    gcon.commit()
+
+
+def test_panel_proponuje_material_gdy_okno_nie_umialo_wybrac(view, gcon):
+    """Poz. 4 etapu 3 stała się WYKONALNA (0808): do tej zmiany panel przy 35 stosach bez rodowodu
+    tylko tłumaczył, dlaczego milczy — lista wejść była pusta, więc wiersz z przyciskami chował się
+    w całości i nie było czego potwierdzać. Teraz ten sam panel podaje materiał nocy obrazu."""
+    _seed_stos_z_kandydatami(gcon)
+    assert _zaznacz_frame(view, 10)
+    view._toggle_panel("lineage")
+    bar = view.lineage_bar
+    assert not bar.night_row.isHidden() and not bar.action_row.isHidden()
+    assert bar.combo_night.count() == 2
+    assert bar.combo_night.currentData() == "2023-04-21"          # otwiera się na NOCY OBRAZU
+    assert bar.items.count() == 2
+    assert "nie wiem" in bar.head.text().lower()                  # powód zostaje na wierzchu
+
+
+def test_przelaczenie_nocy_przerysowuje_liste_bez_pytania_bazy(view, gcon):
+    """Rdzeń oddaje WSZYSTKIE noce naraz, więc combo pracuje z pamięci. Zapytanie per przełączenie
+    chodziłoby po całym materiale obiektu przy każdym kliknięciu — a to ten sam gest, którym
+    człowiek przegląda listę w tę i we w tę."""
+    _seed_stos_z_kandydatami(gcon)
+    assert _zaznacz_frame(view, 10)
+    view._toggle_panel("lineage")
+    bar = view.lineage_bar
+    przed = gcon.total_changes
+    bar.combo_night.setCurrentIndex(1)
+    assert bar.combo_night.currentData() == "2023-04-25"
+    assert bar.items.count() == 1
+    assert gcon.total_changes == przed, "przełączenie nocy nie ma prawa niczego zapisać"
+
+
+def test_pusta_noc_obrazu_zostaje_na_ekranie_z_receptą(view, gcon):
+    """Pomiar 5 stosów `no_candidates`: obraz mówi o nocy, w której archiwum nie ma nic. Pusta noc
+    ZOSTAJE pierwsza i mówi wprost, że materiał leży gdzie indziej — bez tego człowiek nie odróżnia
+    „program nie zrozumiał, o co pytam" od „tej nocy naprawdę nic nie ma"."""
+    _seed_stos_z_kandydatami(gcon, reason="no_candidates")
+    gcon.execute("UPDATE header SET date_obs = '2023-04-30T20:00:00', "
+                 "raw_json = ? WHERE frame_id = 10",
+                 (json.dumps({"IMAGETYP": "Master Light", "EXPTIME": 300.0,
+                              "DATE-OBS": "2023-04-30T20:00:00",
+                              "DATE-END": "2023-04-30T20:05:00"}),))
+    gcon.commit()
+    assert _zaznacz_frame(view, 10)
+    view._toggle_panel("lineage")
+    bar = view.lineage_bar
+    assert bar.combo_night.currentData() == "2023-04-30" and bar.items.count() == 0
+    assert not bar.night_row.isHidden() and bar.action_row.isHidden()
+    assert "wybierz inną noc" in bar.note.full_text()
+
+
+def test_potwierdzenie_propozycji_domyka_stos_i_zdejmuje_go_z_kubelka(view, gcon):
+    """CAŁA DROGA poz. 4 w jednym teście: propozycja → werdykt ręki → obraz ma rodowód → wypada
+    z kubełka Porządków. Ostatni człon nie jest ozdobą: werdykt ręki ma rangę najwyższą, więc
+    kolejny przebieg zostawia stos nietknięty RAZEM z zapisanym powodem — bez członu „wejścia
+    wietrzą powód" obraz wracałby do kubełka po każdym przeliczeniu."""
+    _seed_stos_z_kandydatami(gcon)
+    assert 10 in queries.lineage_pending_frame_ids(gcon)
+    assert _zaznacz_frame(view, 10)
+    view._toggle_panel("lineage")
+    bar = view.lineage_bar
+    bar.items.selectAll()
+    bar._emit(False)                                              # „Potwierdź zaznaczone"
+
+    rows = gcon.execute("SELECT input_frame_id, asserted_by, excluded FROM integration_input "
+                        "WHERE integration_id = 5 ORDER BY input_frame_id").fetchall()
+    assert [(r["input_frame_id"], r["asserted_by"], r["excluded"]) for r in rows] == [
+        (20, "user", 0), (21, "user", 0)]
+    assert "Weszły 2 klatki" in bar.head.text()
+    assert bar.night_row.isHidden(), "obraz z rodowodem niczego już nie proponuje"
+    assert 10 not in queries.lineage_pending_frame_ids(gcon)
+
+    from horreum.stacks import run_stack_lineage
+    run_stack_lineage(gcon, now=NOW, xml_reader=lambda _p: None)
+    assert 10 not in queries.lineage_pending_frame_ids(gcon), \
+        "przebieg zamraża powód przy chronionym rodowodzie — kubełek nie ma prawa go odzyskać"
+
+
 def test_perspektywa_rodowodu_zaweza_grid_do_czekajacych(view, gcon):
     """0808: panel „Rodowód" umiał gest od I-2d, ale działał WYŁĄCZNIE z zaznaczenia jednej klatki
     — żeby trafić na 35 obrazów czekających na słowo, trzeba było przeklikać 128 stosów. Wiersz

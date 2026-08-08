@@ -1278,6 +1278,22 @@ CATALOG = {
         "en": "Unknown source: that night's frames come from a different telescope than the image "
               "records.",
     },
+    "grid.lin.cand.night": {"pl": "Noc:", "en": "Night:"},
+    "grid.lin.cand.night_master": {
+        "pl": "{night} — noc obrazu ({n})",
+        "en": "{night} — image's night ({n})",
+    },
+    "grid.lin.cand.night_other": {"pl": "{night} ({n})", "en": "{night} ({n})"},
+    "grid.lin.cand.empty_night": {
+        "pl": "Tej nocy archiwum nie ma pasującego materiału — wybierz inną noc "
+              "({n} klatek w pozostałych).",
+        "en": "The archive holds no matching material that night — pick another one "
+              "({n} frames in the rest).",
+    },
+    "grid.lin.cand.empty_all": {
+        "pl": "Archiwum nie ma ani jednej klatki tego obiektu o zgodnym filtrze i ekspozycji.",
+        "en": "The archive holds no frame of this object with a matching filter and exposure.",
+    },
     "grid.lin.offset": {
         "pl": "Wskaż odniesienie czasu…",
         "en": "Set time reference…",

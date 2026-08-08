@@ -1338,6 +1338,33 @@ def test_panel_rodowodu_bez_wejsc_NIE_liczy_zera(view, gcon):
     assert bar.items.isHidden() and bar.action_row.isHidden()
 
 
+def test_bezimienny_stos_pokazuje_FOLDER_zamiast_pustki(gcon):
+    """FIRSTHAND ZDZINIA 0808: „nie widzę napisu LMC ani IC443". I nie mógł — kubełek daje 18
+    wierszy, a nazwy plików generuje WBPP, więc sześć stosów LMC i jeden IC443 czytają się
+    identycznie (`masterLight_BIN-1_…_EXPOSURE-….xisf`). Tożsamość siedzi WYŁĄCZNIE w folderze.
+
+    Test pinuje trzy rzeczy naraz, bo każda z nich osobno dałaby się zepsuć bez czerwieni:
+    folder WCHODZI dla stosu bez nazwy · folder ma być DZIADKIEM, nie rodzicem (rodzic to `master`
+    u wszystkich, więc nie rozróżnia niczego) · nazwa PRAWDZIWA wygrywa z podpowiedzią i nie dostaje
+    nawiasów, żeby dwa różne twierdzenia nie wyglądały tak samo."""
+    from horreum.gui.grid import _obj_label
+
+    stos = dict(kind="master_light", object_canon=None, object_raw=None,
+                path=r"R:\!!ASTROFOTO\OBIEKTY_DNG\A7R3_105_LMC\master\masterLight_BIN-1.xisf")
+    assert _obj_label(stos) == "⟨A7R3_105_LMC⟩"
+
+    nazwany = dict(stos, object_canon="LMC")
+    assert _obj_label(nazwany) == "LMC"
+
+    light = dict(kind="light", object_canon=None, object_raw=None,
+                 path=r"R:\ASTRO_\LIGHTS\IC443\portable\20190110_DSC5559.dng")
+    assert _obj_label(light) == "", "light ma własną drogę (szczebel ścieżki S2)"
+
+    # Kolumny `kind`/`path` nie wchodzą z KAŻDEGO zapytania gridu — brak nie ma prawa wywalić
+    # renderu (dlatego `_derive` podaje słownik, nie surowy `sqlite3.Row`).
+    assert _obj_label({"object_canon": None, "object_raw": None}) == ""
+
+
 def test_gest_odniesienia_wchodzi_tylko_tam_gdzie_jest_pytaniem(view, gcon):
     """R2: przycisk „Wskaż odniesienie…" ma się pokazać przy powodzie `offset_unknown` i NIE
     pokazywać przy innym. Dla 121 masterów FITS/ASI zegar nie jest pytaniem, a przycisk

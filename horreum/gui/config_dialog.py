@@ -11,7 +11,8 @@ obiecywałaby jeden gest tam, gdzie muszą powstać dwa zestawy.
 """
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QLabel, QListWidget, QListWidgetItem, QVBoxLayout,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QLabel, QListWidget, QListWidgetItem,
+    QVBoxLayout,
 )
 
 from horreum.gui import i18n, queries
@@ -57,6 +58,18 @@ class AssignConfigDialog(QDialog):
         head.setWordWrap(True)
         lay.addWidget(head)
 
+        # PRZEŁĄCZNIK CAŁOŚCI (firsthand Zdzinia 0808): lista wchodzi ZAZNACZONA, bo przypadkiem
+        # typowym jest jedna sesja zdjęciowa = jeden teleskop na wszystko. Ale przypadek DRUGI CO
+        # DO CZĘSTOŚCI — „chcę nadać jednemu folderowi" — kosztował 38 kliknięć odznaczania przy
+        # 39 grupach. Odwrócenie domyślnego stanu byłoby lekiem gorszym od choroby (wtedy masowy
+        # gest kosztuje 39 kliknięć), więc domyślny stan ZOSTAJE, a dochodzi droga na skróty
+        # w OBIE strony. Stan pośredni (`PartiallyChecked`) jest tylko WYŚWIETLANY — klik zawsze
+        # rozstrzyga w jedną stronę, bo „częściowo" nie jest poleceniem, które da się wykonać.
+        self.check_all = QCheckBox(i18n.t("cfg.check_all"))
+        self.check_all.setTristate(True)
+        self.check_all.clicked.connect(self._on_check_all)
+        lay.addWidget(self.check_all)
+
         self.items = QListWidget()
         for g in self.groups:
             folder = g["folder"] or i18n.t("cfg.no_folder")
@@ -89,6 +102,8 @@ class AssignConfigDialog(QDialog):
             it.setData(Qt.UserRole, g["frame_ids"])
             it.setData(Qt.UserRole + 1, g["camera_id"])
             self.items.addItem(it)
+        self.items.itemChanged.connect(lambda _it: self._sync_check_all())
+        self._sync_check_all()
         lay.addWidget(self.items)
 
         bez_kamery = sum(g["n_frames"] for g in self.groups if g["camera_id"] is None)
@@ -123,6 +138,41 @@ class AssignConfigDialog(QDialog):
         self.items.itemChanged.connect(self._sync_accept_enabled)
         self.combo.currentIndexChanged.connect(self._sync_accept_enabled)
         self._sync_accept_enabled()
+
+    def _on_check_all(self):
+        """Klik w przełącznik całości — ustaw KAŻDY wiersz na jedno albo drugie.
+
+        Kierunek bierzemy ze stanu przełącznika PO kliknięciu Qt (`isChecked`), a nie z liczenia
+        wierszy: `setTristate` sprawia, że Qt sam cyklicznie przechodzi przez trzy stany, a my
+        chcemy tylko dwóch odpowiedzi — „wszystkie" albo „żadna". Stan pośredni jest wyłącznie
+        RAPORTEM (patrz `_sync_check_all`), więc gdy user kliknie w niego, sprowadzamy go do
+        pełnego zaznaczenia: „częściowo" nie jest poleceniem, które da się wykonać.
+
+        WIERSZE SŁABE ZAZNACZAMY TAK SAMO — świadomie. Grupa bez kamery i grupa bez kopii na dysku
+        wchodzą odznaczone (powód przy `setCheckState`), ale to jest DOMYŚLNY stan ostrożności, nie
+        zakaz: skoro user jawnie prosi „zaznacz wszystkie", odmowa akurat tym wierszom byłaby
+        cichym nadpisaniem jego decyzji. Zapis i tak je pominie (`_zaznaczone` odsiewa brak kamery),
+        a licznik na przycisku powie prawdę o liczbie klatek."""
+        stan = Qt.Checked if self.check_all.checkState() != Qt.Unchecked else Qt.Unchecked
+        self.items.blockSignals(True)                # jeden przebieg synchronizacji, nie N
+        for i in range(self.items.count()):
+            self.items.item(i).setCheckState(stan)
+        self.items.blockSignals(False)
+        self._sync_check_all()
+        self._sync_accept_enabled()
+
+    def _sync_check_all(self):
+        """Przełącznik CAŁOŚCI odbija stan listy: wszystkie / żadna / częściowo.
+
+        Sygnały blokujemy, bo `setCheckState` nie budzi wprawdzie `clicked` (ten leci wyłącznie
+        z interakcji człowieka), ale budzi `stateChanged` — a blokada trzyma tę funkcję
+        jednokierunkową (lista → przełącznik) i zamyka drogę do pętli zwrotnej."""
+        n = self.items.count()
+        zazn = sum(1 for i in range(n) if self.items.item(i).checkState() == Qt.Checked)
+        self.check_all.blockSignals(True)
+        self.check_all.setCheckState(
+            Qt.Checked if zazn == n and n else Qt.Unchecked if zazn == 0 else Qt.PartiallyChecked)
+        self.check_all.blockSignals(False)
 
     def _zaznaczone(self):
         """Klatki z zaznaczonych grup — POMIJAJĄC grupy bez kamery (klinga i tak je odmówi).

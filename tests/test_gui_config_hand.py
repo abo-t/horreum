@@ -154,6 +154,53 @@ def test_okno_wymaga_celu_i_teleskopu(view):
     dlg.close()
 
 
+def test_przelacznik_calosci_dziala_w_OBIE_strony(view):
+    """FIRSTHAND ZDZINIA 0808: „otwiera się okno i kilkadziesiąt wierszy zaznaczonych — muszę
+    wszystkie odklikać i jeden zostawić". Przy 39 grupach to 38 kliknięć za gest dotyczący jednego
+    folderu.
+
+    Domyślny stan ZOSTAJE zaznaczony (przypadek masowy: jedna sesja = jeden teleskop); dochodzi
+    droga na skróty w obie strony. Test jedzie w OBIE, bo przełącznik, który tylko odznacza,
+    zamienia jeden problem na drugi."""
+    v, con, ids = view
+    grupy = queries.config_review_groups(con)
+    dlg = AssignConfigDialog(con, groups=grupy)
+
+    dlg.check_all.setCheckState(Qt.Unchecked)
+    dlg._on_check_all()
+    assert all(dlg.items.item(i).checkState() == Qt.Unchecked for i in range(dlg.items.count()))
+    assert not dlg.accept_btn.isEnabled(), "bez celu akcja nie ma prawa być klikalna"
+
+    dlg.check_all.setCheckState(Qt.Checked)
+    dlg._on_check_all()
+    assert all(dlg.items.item(i).checkState() == Qt.Checked for i in range(dlg.items.count()))
+    dlg.close()
+
+
+def test_przelacznik_calosci_odbija_stan_listy(view):
+    """Przełącznik jest LUSTREM listy, nie własnym stanem: odznaczenie jednego wiersza z zaznaczonej
+    całości ma go wprowadzić w stan pośredni. Bez tego pokazywałby „wszystkie" nad listą, w której
+    jednego brakuje — czyli kłamałby o tym, co zrobi zapis."""
+    v, con, ids = view
+    # DWIE grupy, bo stan pośredni z definicji nie istnieje przy jednej — fikstura osi ma dokładnie
+    # jedną, więc test na niej mierzyłby co innego, niż nazywa (zmierzone: `config_review_groups`
+    # oddaje 1 wiersz). Dialog czyta grupy jako mapy, więc podajemy je wprost.
+    wzor = dict(queries.config_review_groups(con)[0])
+    grupy = [dict(wzor, folder="A"), dict(wzor, folder="B")]
+    dlg = AssignConfigDialog(con, groups=grupy)
+
+    dlg.check_all.setCheckState(Qt.Checked)
+    dlg._on_check_all()
+    assert dlg.check_all.checkState() == Qt.Checked
+
+    dlg.items.item(0).setCheckState(Qt.Unchecked)
+    assert dlg.check_all.checkState() == Qt.PartiallyChecked
+
+    dlg.items.item(1).setCheckState(Qt.Unchecked)
+    assert dlg.check_all.checkState() == Qt.Unchecked, "pusta lista to NIE stan pośredni"
+    dlg.close()
+
+
 def test_grupa_bez_sciezki_i_bez_kamery_wchodzi_ODZNACZONA(view):
     """Bramka pakietu 3a, zarzut 3: grupa `folder=None` zbiera WSZYSTKIE klatki bez obecnej kopii
     z całego archiwum — łączy je brak ścieżki, a nie wspólny sprzęt. Domyślne zaznaczenie kazałoby

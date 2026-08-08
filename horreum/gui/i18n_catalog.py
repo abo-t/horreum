@@ -340,6 +340,8 @@ CATALOG = {
         "en": "— headerless: {headerless}  (resolution in preparation)",
     },
     # ---- okno „Przypisz zestaw…" (R1)
+    "cfg.check_all": {"pl": "Zaznacz / odznacz wszystkie",
+                      "en": "Check / uncheck all"},
     "cfg.title": {"pl": "Przypisz zestaw (teleskop × kamera)", "en": "Assign setup (telescope × camera)"},
     "cfg.head": {
         "pl": "{folders} grup · {frames} klatek. Kamerę zna plik; wskazać trzeba TELESKOP. "

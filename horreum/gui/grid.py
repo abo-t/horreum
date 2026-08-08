@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import statistics
 import uuid
 from datetime import datetime, timezone
@@ -158,7 +159,47 @@ _PRESET_LABELS = {
 
 
 def _obj_label(row):
-    return row["object_canon"] or row["object_raw"] or ""
+    """Nazwa obiektu do kolumny — kanon, inaczej surowe zeznanie, inaczej PODPOWIEDŹ Z FOLDERU.
+
+    Trzeci szczebel dołożył firsthand Zdzinia 0808 i jest wąski Z POMIARU, nie z ostrożności.
+    Kubełek „bez nazwy, gotowe stosy" daje 18 wierszy, których NIE DA SIĘ ODRÓŻNIĆ na ekranie:
+    nazwy plików generuje WBPP i wyglądają tak (`masterLight_BIN-1_8000x5320_EXPOSURE-121.00s_
+    FILTER-NoFilter__B.xisf`), że sześć stosów LMC i jeden IC443 czyta się identycznie. Tożsamość
+    siedzi WYŁĄCZNIE w folderze — i tam jej nie widać, bo kolumna pokazuje ogon ścieżki. Recepta
+    kubełka brzmi „nazwij ten obraz", a człowiek nie wie, KTÓRY nazywa.
+
+    DLACZEGO TYLKO `master_light`: light z akwizycji niesie oznaczenie we WŁASNEJ nazwie i ma
+    osobną drogę (szczebel ścieżki S2 PROPONUJE mu kanon). Stos jej nie ma — dlatego dług E3-1
+    („świadek ścieżki nie sięga drzewa stosów") istnieje. To jego najtańsza połowa: pokazujemy
+    to, co widać w ścieżce, i ANI KROKU DALEJ.
+
+    PODPOWIEDŹ NIE UDAJE NAZWY — nawiasy kątowe odróżniają ją od kanonu, bo kolumna miesza wtedy
+    dwa różne twierdzenia („tak się ten obiekt nazywa" i „tyle wiem ze ścieżki"), a wzięcie
+    drugiego za pierwsze byłoby gorsze niż pusta komórka. Nic z tego nie trafia do bazy: to
+    warstwa PREZENTACJI, gest osi obiektu dalej należy do człowieka."""
+    nazwa = row.get("object_canon") or row.get("object_raw")
+    if nazwa:
+        return nazwa
+    if row.get("kind") != "master_light":
+        return ""
+    folder = _stack_folder(row.get("path"))
+    return f"⟨{folder}⟩" if folder else ""
+
+
+def _stack_folder(path):
+    """Folder OBRAZU ze ścieżki stosu — albo `None`. Bierzemy dziadka, nie rodzica: drzewo WBPP
+    kończy się katalogiem `master`, więc rodzic jest u wszystkich taki sam i nie rozróżnia niczego
+    (`…\\A7R3_105_LMC\\master\\masterLight_….xisf`). Gdy `master` nie występuje, rodzic jest
+    właściwą odpowiedzią — stąd wybór, a nie stałe piętro."""
+    if not path:
+        return None
+    czesci = [c for c in re.split(r"[\\/]", path) if c]
+    if len(czesci) < 2:
+        return None
+    rodzic = czesci[-2]
+    if rodzic.lower() == "master" and len(czesci) >= 3:
+        return czesci[-3]
+    return rodzic
 
 
 def _half_away(x):
@@ -183,7 +224,10 @@ def _derive(row):
     """sqlite3.Row → dict z polami pochodnymi (_telescope/_object/_dt_delta) do kolumn bazowych."""
     d = {k: row[k] for k in row.keys()}
     d["_telescope"] = queries.telescope_label(row)
-    d["_object"] = _obj_label(row)
+    # Ze SŁOWNIKA, nie z surowego wiersza: `_obj_label` pyta o `kind`/`path`, a te wchodzą nie
+    # z każdego zapytania gridu — `sqlite3.Row` na brakującym kluczu rzuca, `dict.get` oddaje None.
+    # Ta sama obrona, co przy `_dt_delta_hours` linijkę niżej.
+    d["_object"] = _obj_label(d)
     d["_dt_delta"] = _dt_delta_hours(d.get("date_obs"), d.get("path"))
     return d
 

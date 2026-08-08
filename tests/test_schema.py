@@ -93,14 +93,14 @@ def test_szkielet_przyszly_pusty(tmp_path):
     con.close()
 
 
-def test_user_version_v15_po_migracji(tmp_path):
-    """0015 podnosi user_version do 15 (świeża baza leci 0002→…→0015 sekwencyjnie; oś sprzętu ręką).
+def test_user_version_v16_po_migracji(tmp_path):
+    """0016 podnosi user_version do 16 (świeża baza leci 0002→…→0016 sekwencyjnie; odniesienie czasu).
 
     Pin JEST intencją: każda nowa migracja ma ten test PRZEWRÓCIĆ imiennie, żeby podniesienie
     wersji było gestem, a nie skutkiem ubocznym."""
     con = db.open_db(str(tmp_path / "h.db"))
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 15
-    assert db.SCHEMA_VERSION == 15
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 16
+    assert db.SCHEMA_VERSION == 16
     con.close()
 
 
@@ -176,6 +176,76 @@ def test_0012_integration_rebuild_kontrakt(tmp_path):
     with pytest.raises(sqlite3.IntegrityError):                  # CHECK unresolved_reason
         con.execute("INSERT INTO integration(master_frame_id, created_at, unresolved_reason) "
                     "VALUES (2, 't', 'bo tak')")
+    con.close()
+
+
+def test_0016_integration_rebuild_nie_gubi_rodowodu(tmp_path):
+    """0016 (#DR2/R2): PRZEBUDOWA `integration` pod nową kolumnę `utc_offset_min` i token
+    `offset_unknown` w CHECK-u powodów.
+
+    TO JEST PIERWSZA PRZEBUDOWA TABELI Z REALNYMI DANYMI w tym repo i cały ciężar testu leży
+    właśnie tam. 0012 i 0009 przebudowywały PUSTY szkielet, więc ich `INSERT SELECT` mógł kopiować
+    podzbiór kolumn i wstawiać stałą `'window'` do dziecka — kopiował zero wierszy. Tu na żywej
+    bazie stoi 128 integracji i 3367 wejść, więc pominięta kolumna nie jest niechlujstwem, tylko
+    CICHĄ UTRATĄ rodowodu gotowych obrazów. Dlatego wiersze wchodzą tu z KOMPLETEM faktów, w tym
+    dwoma, które stałą-w-migracji zamalowałaby bez śladu: `asserted_by='history'` (zeznanie pliku,
+    mocniejsze od okna) i `excluded=1` (werdykt CZŁOWIEKA — jego „nie" jest faktem)."""
+    path = str(tmp_path / "h.db")
+    con = db.connect(path)
+    for v, _f in [m for m in db.MIGRATIONS if m[0] <= 15]:
+        con.executescript(db._migration_sql(dict(db.MIGRATIONS)[v]))
+    con.execute("PRAGMA user_version = 15")
+    con.execute("INSERT INTO frame(id, sha1_data, kind, filetype, first_seen_at) "
+                "VALUES (1, 'm1', 'master_light', 'xisf', 't'), (2, 'l1', 'light', 'raw', 't'), "
+                "(3, 'l2', 'light', 'raw', 't'), (4, 'm2', 'master_light', 'xisf', 't')")
+    con.execute(
+        "INSERT INTO integration(id, master_frame_id, integ_hash, created_at, updated_at, tool, "
+        "window_start, window_end, declared_rows, drizzle_inputs, disabled_inputs, degenerate, "
+        "ambiguous, telescope_mismatch, unresolved_reason) VALUES "
+        "(7, 1, 'h7', 't0', 't1', 'WBPP', '2019-01-10T20:40:38', '2019-01-10T21:45:00', "
+        " 3, 2, 1, 0, 1, 0, NULL), "
+        "(8, 4, 'h8', 't0', NULL, NULL, NULL, NULL, NULL, NULL, NULL, 1, 0, 0, 'no_candidates')")
+    con.execute("INSERT INTO integration_input(integration_id, input_frame_id, asserted_by, "
+                "excluded) VALUES (7, 2, 'history', 0), (7, 3, 'user', 1)")
+    con.commit()
+
+    con = db.open_db(path)                                       # v15 → v16 (przebudowa)
+    assert con.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
+
+    glowy = con.execute(
+        "SELECT id, master_frame_id, integ_hash, created_at, updated_at, tool, window_start, "
+        "window_end, declared_rows, drizzle_inputs, disabled_inputs, degenerate, ambiguous, "
+        "telescope_mismatch, unresolved_reason, utc_offset_min FROM integration ORDER BY id"
+    ).fetchall()
+    assert [tuple(r) for r in glowy] == [
+        (7, 1, "h7", "t0", "t1", "WBPP", "2019-01-10T20:40:38", "2019-01-10T21:45:00",
+         3, 2, 1, 0, 1, 0, None, None),
+        (8, 4, "h8", "t0", None, None, None, None, None, None, None, 1, 0, 0,
+         "no_candidates", None)]
+
+    wejscia = con.execute("SELECT integration_id, input_frame_id, asserted_by, excluded "
+                          "FROM integration_input ORDER BY input_frame_id").fetchall()
+    assert [tuple(r) for r in wejscia] == [(7, 2, "history", 0), (7, 3, "user", 1)]
+
+    # Kontrakt tabeli przeżył przebudowę — inaczej migracja oddałaby dane bez strażników.
+    assert _unique_cols(con, "integration") >= {"master_frame_id"}
+    with pytest.raises(sqlite3.IntegrityError):
+        con.execute("INSERT INTO integration(master_frame_id, created_at) VALUES (1, 't')")
+    with pytest.raises(sqlite3.IntegrityError):
+        con.execute("INSERT INTO integration_input(integration_id, input_frame_id, asserted_by) "
+                    "VALUES (7, 2, 'window')")
+    with pytest.raises(sqlite3.IntegrityError):                  # CHECK dalej odrzuca literówkę
+        con.execute("INSERT INTO integration(master_frame_id, created_at, unresolved_reason) "
+                    "VALUES (2, 't', 'bo tak')")
+    con.execute("INSERT INTO integration(master_frame_id, created_at, unresolved_reason) "
+                "VALUES (2, 't', 'offset_unknown')")             # …a NOWY token przepuszcza
+    con.rollback()
+    assert con.execute(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'index' "
+        "AND name = 'idx_integration_input_frame'").fetchone()[0] == 1
+    assert con.execute(
+        "SELECT count(*) FROM sqlite_master WHERE name = '_integration_input_hold'"
+    ).fetchone()[0] == 0, "przechowalnia FK ma zniknąć — inaczej zostaje sierocy stół w bazie"
     con.close()
 
 

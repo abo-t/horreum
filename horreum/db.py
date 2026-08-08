@@ -47,6 +47,10 @@ from importlib import resources
 # 0015 to PRZYROST (#DR2 segment R1): frame.config_source — oś sprzętu wskazana RĘKĄ (`user`)
 # vs wyliczona z nagłówka (NULL). Kolumna wchodzi PUSTA i taka zostaje dla archiwum: wypełnia ją
 # gest z kolejki przeglądu, bo RAW przez teleskop nie ma czym zeznać (E3-3), a plik jest read-only.
+# 0016 to PRZEBUDOWA `integration` (#DR2 segment R2): kolumna `utc_offset_min` (trójstan NULL|0|minuty)
+# plus token `offset_unknown` w CHECK-u powodów. Sama kolumna poszłaby ADD COLUMN — CHECK wymusza
+# przebudowę. PIERWSZA przebudowa tabeli z REALNYMI danymi (128 wierszy + 3367 w dziecku), więc
+# INSERT SELECT kopiuje KOMPLET kolumn po obu stronach, a nie podzbiór jak 0012.
 MIGRATIONS = [
     (2, "0002_initial.sql"),
     (3, "0003_writeback.sql"),
@@ -62,6 +66,7 @@ MIGRATIONS = [
     (13, "0013_saved_query_spec.sql"),
     (14, "0014_superseded.sql"),
     (15, "0015_config_source.sql"),
+    (16, "0016_integration_offset.sql"),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 _KNOWN_VERSIONS = frozenset({0} | {v for v, _ in MIGRATIONS})

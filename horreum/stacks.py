@@ -39,6 +39,7 @@ stos schodzi wtedy na ścieżkę okna i jest to POLICZONE (`history_unread`), ni
 """
 import json
 from dataclasses import dataclass, field
+from datetime import timedelta
 
 from . import repo
 from .hashing import sha1_of_set
@@ -54,6 +55,47 @@ REASON_NO_OBJECT = "no_object"
 REASON_NO_WINDOW = "no_window"
 REASON_NO_CANDIDATES = "no_candidates"
 REASON_TELESCOPE = "telescope_mismatch"
+REASON_OFFSET_UNKNOWN = "offset_unknown"
+
+EXP_TOL_FLOOR_S = 0.5
+"""Podłoga tolerancji ekspozycji — poniżej niej próg nie schodzi nawet dla krótkich klatek."""
+
+EXP_TOL_FRACTION = 0.02
+"""Człon względny progu (2%) — liczony od KRÓTSZEJ z dwóch ekspozycji (patrz `exposure_matches`)."""
+
+EXP_TOL_CEILING_S = 3.0
+"""Sufit tolerancji. Bez niego próg względny rósł bez ograniczenia i przy 600 s dawał 12 s, czyli
+sklejał 600 z 610 — dwie różne nastawy tej samej nocy (W11)."""
+
+
+def exposure_matches(a, b):
+    """Czy dwie ekspozycje [s] to TA SAMA nastawa — JEDYNY właściciel progu D-DR-2 (SPOT).
+
+    `tol(a,b) = min( max(0,5 s; 2% · min(a,b)); 3,0 s )`, dopasowanie iff `|a−b| <= tol(a,b)`.
+
+    DLACZEGO PRÓG, A NIE RÓWNOŚĆ: dla kamery ASI ekspozycja jest NASTAWĄ i wraca z pliku co do
+    setnej — równość działa i ma działać. Dla lustrzanki jest POMIAREM: master IC443 zeznaje
+    `90,0`, a jego trzy suby `90,0 / 91,0 / 91,0`, więc równość wpuszcza jedną z trzech i nazywa
+    to kompletnym rodowodem. Próg nie poszerza doboru „na wszelki wypadek" — naprawia jednostkę
+    porównania.
+
+    TRZY CZŁONY, KAŻDY Z POWODU: **podłoga** trzyma sens dla krótkich klatek (2% z 10 s to 0,2 s,
+    czyli mniej niż rozdzielczość zeznania); **`min(a,b)`** zamiast `a` czyni relację choć
+    SYMETRYCZNĄ (`tol(a,b) == tol(b,a)`); **sufit** powstrzymuje próg względny przed sklejeniem
+    600 z 610 (W11 — v2 briefu obiecywał sufit w prozie, a formuła rosła bez ograniczenia).
+
+    RELACJA NIE JEST PRZECHODNIA I TO JEST WŁAŚCIWOŚĆ, NIE USTERKA — zmierzone: `90~91` ✓,
+    `91~92` ✓, a `90~92` ✗. Stąd dwa skutki w kodzie, oba wymuszone, nie wybrane: `exptime`
+    WYPADA z klucza półki (`_plan`), bo klucz zakłada równoważność, a `_shelf_ambiguous` porównuje
+    PARAMI (W2). Kto doda tu grupowanie po ekspozycji, złamie jedno albo drugie.
+
+    `None` po którejkolwiek stronie → `False`. Brak zeznania nie jest zgodnością: master bez
+    `EXPTIME` ma dostać ZERO kandydatów, a nie wszystkich (próg nie ma prawa zamienić braku
+    w dopasowanie)."""
+    if a is None or b is None:
+        return False
+    tol = min(max(EXP_TOL_FLOOR_S, EXP_TOL_FRACTION * min(a, b)), EXP_TOL_CEILING_S)
+    return abs(a - b) <= tol
 
 
 @dataclass
@@ -123,24 +165,44 @@ def _masters(con):
     `UNIQUE(master_frame_id)`, a tabela jest append-only) i nie dostanie już przepisanej głowy —
     czyli zamarznie w stanie z ostatniego przebiegu. Dopóki populacja jest zerowa, kod na to byłby
     zgadywaniem; przy pierwszym zastąpionym masterze rozstrzygnąć, czy głowa dostaje własny powód
-    (`superseded`), czy wiersz idzie do kubełka podmiany razem z klatką."""
+    (`superseded`), czy wiersz idzie do kubełka podmiany razem z klatką.
+
+    ODNIESIENIE CZASU (R2) PRZYCHODZI Z `integration`, nie z klatki — LEFT JOIN, bo stos widziany
+    pierwszy raz wiersza integracji jeszcze nie ma (zakłada go ten sam przebieg, niżej). Brak
+    wiersza i wiersz z `utc_offset_min IS NULL` znaczą dla doboru DOKŁADNIE to samo („nie wiem,
+    w jakim zegarze liczy ten master"), więc łączymy je bez rozróżnienia."""
     return con.execute(
         "SELECT f.id AS frame_id, f.object_id AS object_id, f.filter_canon AS filter_canon, "
-        "h.raw_json AS raw_json, tc.canon_id AS telescope_id, "
+        "h.raw_json AS raw_json, tc.canon_id AS telescope_id, i.utc_offset_min AS utc_offset_min, "
         "(SELECT l.path FROM location l WHERE l.frame_id = f.id AND l.present = 1 "
         " ORDER BY l.id LIMIT 1) AS path "
         "FROM frame f LEFT JOIN header h ON h.frame_id = f.id "
         "LEFT JOIN config c ON c.id = f.config_id "
         "LEFT JOIN telescope_canonical tc ON tc.id = c.telescope_id "
+        "LEFT JOIN integration i ON i.master_frame_id = f.id "
         "WHERE f.kind = 'master_light' AND f.superseded_by IS NULL ORDER BY f.id").fetchall()
 
 
 def _window_candidates(con, *, object_id, exptime):
-    """Lighty tego obiektu o tej ekspozycji — SUROWY materiał okna (czas/filtr/teleskop przycina
-    Python, bo każde z tych porównań ma własną regułę: parser ISO, normalizacja filtra, kanon osi).
+    """Lighty tego obiektu o zbliżonej ekspozycji — SUROWY materiał okna (czas/filtr/teleskop/próg
+    ekspozycji przycina Python, bo każde z tych porównań ma własną regułę: parser ISO, normalizacja
+    filtra, kanon osi, tolerancja D-DR-2).
 
-    `exptime` porównywane w SQL, bo to jedyny warunek, który jest zwykłą równością liczby —
-    wołający podaje je JUŻ SKOERCOWANE do float (patrz `_plan`), a nie surowe zeznanie stosu.
+    `exptime` DAJE W SQL NADZBIÓR, nie werdykt (R3, zmiana wobec stanu sprzed GO-2). Do R3 warunek
+    brzmiał `h.exptime = ?` i był jedynym porównaniem będącym zwykłą równością — po wprowadzeniu
+    progu to zdanie jest FAŁSZEM i zostało tu przepisane (lekcja E2-1: docstring obiecujący więcej,
+    niż droga dowozi, przechodzi przez recenzję jako dowód). SQL zawęża do pasa `± sufit progu`,
+    bo tolerancja nigdy nie przekracza `EXP_TOL_CEILING_S` — a rozstrzyga `exposure_matches`,
+    dokładnie tak, jak dziś rozstrzyga czas, filtr i teleskop. Indeks robi swoje, decyzja zostaje
+    w JEDNEJ funkcji.
+
+    `exptime` mastera `None` ⇒ ZERO kandydatów (guard wołającego, `_plan`) — próg nie ma prawa
+    zamienić braku zeznania w dopasowanie.
+
+    `filetype` WYCHODZI Z TEGO ZAPYTANIA dla R2: to ono, a nie stanowisko, rozstrzyga, czy czas
+    kandydata wymaga sprowadzenia do odniesienia mastera. Stanowisko ma 97% FITS-ów, więc warunek
+    postawiony na nim ruszyłby gałąź ASI — a nosicielem problemu jest FORMAT (EXIF RAW-a niesie
+    czas LOKALNY, XISF mastera UTC).
 
     KLATKA ZASTĄPIONA NIE JEST KANDYDATEM (R4): sierota i jej następczyni to ta sama ekspozycja
     pod tą samą ścieżką, więc bez tego warunku okno policzyłoby ten sub DWA RAZY —
@@ -154,17 +216,18 @@ def _window_candidates(con, *, object_id, exptime):
     (Standing „SET-TEMP jest osią, nie pomiar" dotyczy PRZEPISU KALIBRACJI — innej osi niż ta.)"""
     return con.execute(
         "SELECT f.id AS frame_id, f.filter_canon AS filter_canon, h.date_obs AS date_obs, "
-        "h.ccd_temp AS ccd_temp, tc.canon_id AS telescope_id "
+        "h.ccd_temp AS ccd_temp, h.exptime AS exptime, f.filetype AS filetype, "
+        "tc.canon_id AS telescope_id "
         "FROM frame f JOIN header h ON h.frame_id = f.id "
         "LEFT JOIN config c ON c.id = f.config_id "
         "LEFT JOIN telescope_canonical tc ON tc.id = c.telescope_id "
-        "WHERE f.kind = 'light' AND f.object_id = ? AND h.exptime = ? "
+        "WHERE f.kind = 'light' AND f.object_id = ? AND h.exptime BETWEEN ? AND ? "
         "AND h.date_obs IS NOT NULL AND f.superseded_by IS NULL ORDER BY f.id",
-        (object_id, exptime)).fetchall()
+        (object_id, exptime - EXP_TOL_CEILING_S, exptime + EXP_TOL_CEILING_S)).fetchall()
 
 
-def _in_window(rows, *, start, end, filter_canon, telescope_id):
-    """Przytnij kandydatów oknem czasu i osiami → `(wybrane, rozjazd_teleskopu)`.
+def _in_window(rows, *, start, end, filter_canon, telescope_id, exptime, utc_offset_min):
+    """Przytnij kandydatów oknem czasu i osiami → `(wybrane, rozjazd_teleskopu, raw_bez_odniesienia)`.
 
     Oś, której master NIE ZNA (filtr/teleskop puste — zmierzone: `TELESCOP` w 83 z 85, `FILTER`
     w 84 z 85), NIE zawęża doboru: nieznane nie może udawać warunku.
@@ -194,28 +257,66 @@ def _in_window(rows, *, start, end, filter_canon, telescope_id):
     Okno jest PÓŁOTWARTE `[start, end)`: `DATE-END` to koniec ostatniej ekspozycji, więc klatka
     ZACZYNAJĄCA się w tej chwili należy do następnej serii, nie do tej. Zmierzone: 0 wejść na 128
     stosach siada dokładnie na granicy, więc dziś to no-op — i o to chodzi, bo granicę domyka się,
-    póki jest pusta, a nie po pierwszym cudzym subie wciągniętym do obrazu."""
+    póki jest pusta, a nie po pierwszym cudzym subie wciągniętym do obrazu.
+
+    ODNIESIENIE CZASU (R2) — PRZESUWAMY KANDYDATA, NIGDY OKNA. Okno mastera (`window_start/end`)
+    idzie prosto do `upsert_integration` i ma zostać zapisem tego, co zeznał plik; przesunięcie go
+    zamieniłoby fakt o pliku na fakt o naszej interpretacji, a każdy kolejny przebieg przesuwałby
+    je ponownie. Kandydat `filetype='raw'` niesie czas LOKALNY (EXIF), master XISF — UTC, więc
+    sprowadzamy kandydata do zegara mastera przez ODJĘCIE offsetu (umowa `lokalny = UTC + offset`,
+    0016). FITS-y i XISF-y nie są ruszane wcale: to nie jest domysł o ich zegarze, tylko granica
+    zmierzona — podpis dwóch odniesień ma dokładnie 7 masterów ze 128 i wszystkie powstały z DNG-ów.
+
+    KANDYDAT RAW PRZY NIEZNANYM ODNIESIENIU NIE WCHODZI I NIE PRZEPADA PO CICHU — wypada z okna
+    (nie ma jak umieścić go w czasie), ale wraca trzecią wartością zwrotu, żeby wołający mógł
+    powiedzieć `offset_unknown` zamiast `no_candidates`. To rozróżnienie jest całym sensem R2:
+    „kandydaci są, tylko liczą w innym zegarze" to inna recepta niż „kandydatów nie ma".
+
+    GRANICA NAZWANA: gdy okno domknie się z materiału NIE-RAW, a obok stały nieosądzalne RAW-y,
+    stos dostaje rodowód i trzeciej wartości nikt nie czyta — czyli RAW-y milkną. Warunkiem jest
+    pula MIESZANA (ten sam obiekt i zbliżona ekspozycja w obu formatach); zmierzona populacja na
+    żywym archiwum: **0**. Wraca do rozstrzygnięcia przy pierwszym takim stosie — dziś kod na nią
+    byłby zgadywaniem kształtu powierzchni, która ma to pokazać."""
     okno = []
+    raw_bez_odniesienia = 0
     for r in rows:
-        t = header_dt(r["date_obs"])
-        if t is None or not (start <= t < end):
-            continue
+        if not exposure_matches(r["exptime"], exptime):
+            continue                       # SQL dał NADZBIÓR (pas ± sufit) — próg rozstrzyga tu
         if filter_canon and r["filter_canon"] != filter_canon:
+            continue
+        t = header_dt(r["date_obs"])
+        if t is None:
+            continue
+        if r["filetype"] == "raw":
+            if utc_offset_min is None:
+                raw_bez_odniesienia += 1
+                continue
+            t -= timedelta(minutes=utc_offset_min)
+        if not (start <= t < end):
             continue
         okno.append(r)
     if telescope_id is None or not okno:
-        return okno, False
+        return okno, False, raw_bez_odniesienia
     zgodne = [r for r in okno if r["telescope_id"] == telescope_id]
     if zgodne:
-        return zgodne, False
-    return (okno, True) if len({r["telescope_id"] for r in okno}) == 1 else ([], True)
+        return zgodne, False, raw_bez_odniesienia
+    if len({r["telescope_id"] for r in okno}) == 1:
+        return okno, True, raw_bez_odniesienia
+    return [], True, raw_bez_odniesienia
 
 
 def _shelf_ambiguous(plany):
     """Zbiór klatek mastera, których okno NAKŁADA się na okno innego stosu tej samej PÓŁKI
-    (obiekt+filtr+ekspozycja+teleskop). Fakt 20 briefu: 43 takie pary to reprocessingi tej samej
-    nocy (`WBPP` vs `WBPP_nowy`) — ten sam sub wchodzi wtedy do dwóch integracji, więc
-    `integration_input` jest POKRYCIEM, nie podziałem. Oznaczamy OBIE strony pary."""
+    (obiekt+filtr+teleskop) PRZY ZGODNEJ EKSPOZYCJI. Fakt 20 briefu: 43 takie pary to reprocessingi
+    tej samej nocy (`WBPP` vs `WBPP_nowy`) — ten sam sub wchodzi wtedy do dwóch integracji, więc
+    `integration_input` jest POKRYCIEM, nie podziałem. Oznaczamy OBIE strony pary.
+
+    EKSPOZYCJA WYPADŁA Z KLUCZA PÓŁKI I PRZESZŁA DO TESTU PARY (R3) — to jest wymuszenie, nie
+    porządki. Klucz słownika zakłada relację RÓWNOWAŻNOŚCI (kto trafia w to samo wiadro, jest
+    wzajemnie zgodny), a próg D-DR-2 przechodni NIE JEST: `90~91` ✓, `91~92` ✓, `90~92` ✗.
+    Ekspozycja w kluczu rozdzielałaby więc pary zgodne (90 i 91 lądowały w osobnych wiadrach),
+    a ekspozycja W KLUCZU PO ZAOKRĄGLENIU sklejałaby niezgodne. Jedyne uczciwe miejsce dla relacji
+    nieprzechodniej to porównanie PARAMI — tam, gdzie i tak porównujemy okna (W2)."""
     ambi = set()
     polki = {}
     for p in plany:
@@ -232,6 +333,8 @@ def _shelf_ambiguous(plany):
     for grupa in polki.values():
         for i, a in enumerate(grupa):
             for b in grupa[i + 1:]:
+                if not exposure_matches(a["exptime"], b["exptime"]):
+                    continue
                 if a["start"] <= b["end"] and b["start"] <= a["end"]:
                     ambi.add(a["frame_id"])
                     ambi.add(b["frame_id"])
@@ -280,8 +383,10 @@ def _plan(con, row, *, xml_reader):
         "frame_id": row["frame_id"], "testimony": t, "start": start, "end": end,
         "history_unread": unread, "no_location": brak_lokacji,
         "inputs": [], "asserted_by": None, "reason": None,
-        "telescope_mismatch": False,
-        "shelf": (row["object_id"], row["filter_canon"], exptime, row["telescope_id"]),
+        "telescope_mismatch": False, "exptime": exptime,
+        # PÓŁKA BEZ EKSPOZYCJI (R3) — zgodność ekspozycji rozstrzyga test PARY w `_shelf_ambiguous`,
+        # bo próg D-DR-2 nie jest przechodni, a klucz słownika zakłada równoważność (powód tam).
+        "shelf": (row["object_id"], row["filter_canon"], row["telescope_id"]),
     }
     if row["object_id"] is None:
         plan["reason"] = REASON_NO_OBJECT
@@ -290,12 +395,29 @@ def _plan(con, row, *, xml_reader):
         # Okno bez końca i okno o długości jednej klatki to ten sam brak: nie ma czym wybierać.
         plan["reason"] = REASON_NO_WINDOW if start is None or end is None else REASON_DEGENERATE
         return plan
-    kand, rozjazd = _in_window(
+    # GUARD ZEZNANIA (R3) STOI WYŻEJ I TO JEST SPRAWDZONE, NIE ZAŁOŻONE: master bez `EXPTIME` nie
+    # dochodzi tu wcale, bo `testimony.degenerate` jest wtedy `True` z definicji („brak czasu
+    # ekspozycji też jest True — nie mamy wtedy czym ograniczyć doboru", `resolve/stack.py`), więc
+    # plan kończy się na `degenerate_window` linijkę wyżej. Własny guard na `exptime is None` był
+    # tu przez chwilę i został ZDJĘTY jako martwy — pas nadzbioru wokół `None` nigdy nie powstaje,
+    # a kod na nieosiągalny stan udaje ochronę, której nikt nie testuje. Pinuje to test imienny
+    # `test_master_bez_ekspozycji_konczy_na_oknie_zdegenerowanym`.
+    kand, rozjazd, raw_bez_odniesienia = _in_window(
         _window_candidates(con, object_id=row["object_id"], exptime=exptime),
-        start=start, end=end, filter_canon=row["filter_canon"], telescope_id=row["telescope_id"])
+        start=start, end=end, filter_canon=row["filter_canon"], telescope_id=row["telescope_id"],
+        exptime=exptime, utc_offset_min=row["utc_offset_min"])
     plan["telescope_mismatch"] = rozjazd
     if not kand:
-        plan["reason"] = REASON_TELESCOPE if rozjazd else REASON_NO_CANDIDATES
+        # KOLEJNOŚĆ POWODÓW = KOLEJNOŚĆ RECEPT, nie hierarchia ważności. Rozjazd teleskopu idzie
+        # pierwszy, bo kandydaci BYLI i odrzuciła ich oś — recepta („napraw kartę") jest wtedy
+        # konkretniejsza niż „wskaż odniesienie". `offset_unknown` bije `no_candidates`, bo to
+        # cała treść R2: milczenie o istniejącym materiale jest nieprawdą, a nie brakiem odpowiedzi.
+        if rozjazd:
+            plan["reason"] = REASON_TELESCOPE
+        elif raw_bez_odniesienia:
+            plan["reason"] = REASON_OFFSET_UNKNOWN
+        else:
+            plan["reason"] = REASON_NO_CANDIDATES
         return plan
     if t.rows is None:
         plan["inputs"], plan["asserted_by"] = kand, "window"

@@ -1275,6 +1275,12 @@ CATALOG = {
         "en": "Unknown source: that night's frames come from a different telescope than the image "
               "records.",
     },
+    "grid.lin.reason.offset_unknown": {
+        "pl": "Nie wiem, z czego powstał: materiał leży w plikach RAW, a te liczą czas w zegarze "
+              "aparatu. Wskaż odniesienie tego obrazu, a klatki się dobiorą.",
+        "en": "Unknown source: the material sits in RAW files, which count time on the camera's "
+              "clock. Point out this image's time reference and the frames will match.",
+    },
     "grid.lin.flag.ambiguous": {
         "pl": "⚠ część tych klatek wchodzi też w inny obraz",
         "en": "⚠ some of these frames also go into another image",

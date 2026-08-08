@@ -2064,6 +2064,51 @@ def upsert_integration(con, *, master_frame_id, integ_hash, tool, window_start, 
         return row["id"], True
 
 
+def set_integration_offset(con, *, master_frame_id, utc_offset_min, now, uid="local"):
+    """Wskaż ODNIESIENIE CZASU stosu GESTEM CZŁOWIEKA (#DR2 R2, D-DR-1) — `True`, gdy drgnęło.
+
+    Trójstan wprost z 0016: `None` = nieznane · `0` = UTC · liczba = minuty. ZNAK trzyma się jednej
+    umowy w całym repo: **`lokalny = UTC + offset`**, więc kandydat wraca do odniesienia mastera
+    przez ODJĘCIE (IC443 `+60`, LMC `+120` — zmierzone zgodnością `mm:ss` przy różnicy pełnych
+    godzin). Konsumentem jest wyłącznie `stacks._in_window`.
+
+    DLACZEGO OSOBNA KLINGA, A NIE POLE W `upsert_integration`: tamta pisze LITERALNĄ listę pól przy
+    każdym przebiegu rodowodu, bo przepisuje głowę integracji z tego, co przebieg WYLICZYŁ. Offset
+    nie jest wyliczony — jest werdyktem człowieka o zegarze aparatu, a jedynym świadkiem jest okno
+    mastera. Wpuszczenie go do tamtej listy oznaczałoby, że pierwszy „Przetwórz wszystko" po geście
+    zdejmuje fakt z powrotem do NULL (lustro lekcji R1b, gdzie automat zamalowywał ręczny config).
+    Rozdział pisarzy JEST tu mechanizmem, nie stylem — pinuje go bramka G2-12.
+
+    ODMOWA DLA STOSU, KTÓREGO NIE MA: `master_frame_id` bez wiersza `integration` → `ValueError`
+    (błąd wołania, nie no-op). Wiersz integracji powstaje przy pierwszym przebiegu rodowodu także
+    dla stosu bez wejść (kanon 0012 pkt 3), więc każdy stos, który powierzchnia w ogóle pokazuje,
+    ma go już założony — brak wiersza znaczy, że pytamy o klatkę, która stosem nie jest.
+
+    IDEMPOTENCJA: ta sama wartość → `False`, zero DML i zero eventu. Rozróżniamy przy tym `NULL`
+    od `0` po stronie porównania (`is None`), bo w Pythonie `0 == False` — a to są dwa RÓŻNE
+    werdykty: „nie wiem" i „to jest UTC"."""
+    if utc_offset_min is not None and not isinstance(utc_offset_min, int):
+        raise ValueError("utc_offset_min musi być liczbą całkowitą minut albo None")
+    with _immediate(con):
+        row = con.execute(
+            "SELECT id, utc_offset_min FROM integration WHERE master_frame_id = ?",
+            (master_frame_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"frame:{master_frame_id} nie ma wiersza integration")
+        before = row["utc_offset_min"]
+        if before is None and utc_offset_min is None:
+            return False
+        if before is not None and utc_offset_min is not None and before == utc_offset_min:
+            return False
+        con.execute("UPDATE integration SET utc_offset_min = ? WHERE id = ?",
+                    (utc_offset_min, row["id"]))
+        emit_event(con, actor=f"user:{uid}", verb="integration.offset_set",
+                   target=f"frame:{master_frame_id}", now=now,
+                   payload={"integration_id": row["id"], "before": before,
+                            "after": utc_offset_min})
+    return True
+
+
 RANGA_ASSERT = {"window": 0, "history": 1, "user": 2}
 """Precedencja zeznania o wejściu stosu — JEDEN właściciel kanonu (`link_integration` ORAZ strażnik
 przebiegu w `stacks`). Do S2b liczba żyła jako zmienna lokalna klingi, więc przebieg, który musi

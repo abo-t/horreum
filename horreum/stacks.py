@@ -392,7 +392,8 @@ def propose_lineage_candidates(con, master_frame_id):
     23 z 84 masterów starszego rocznika). Zepsuty jest KONIEC; początek zostaje początkiem pierwszego
     suba. Propozycja bierze więc tę samą oś co okno, tylko zamiast końca stawia NOC.
 
-    OSIE ZGODNOŚCI TE SAME, CO W DOBORZE, i to jest cały warunek uczciwości tej listy: obiekt,
+    OSIE ZGODNOŚCI TE SAME, CO W DOBORZE (z JEDNYM wyjątkiem nazwanym niżej), i to jest cały
+    warunek uczciwości tej listy: obiekt,
     filtr, teleskop, próg ekspozycji (`exposure_matches`, D-DR-2). Oś, której master NIE ZNA, nie
     zawęża — dokładnie jak w `_in_window`. Luźniejsza reguła bez tych osi nie byłaby propozycją,
     tylko spisem klatek obiektu.

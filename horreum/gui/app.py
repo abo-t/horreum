@@ -2476,6 +2476,10 @@ class MainWindow(QMainWindow):
         # etapu wraz z przełączeniem widoku na Dostawę (precedens „3→1"). Wstrzykiwane TU, bo tylko
         # gospodarz zna obie powierzchnie.
         tasks.object_view.run_stage_fn = self._resolve_after_repair
+        # …i to samo dla gestu osi STOSU (R2): panel Rodowód zmienia fakt, na którym stoi dobór
+        # wejść, więc musi umieć domknąć własny gest. Bez tej linii user wędrował na inny ekran po
+        # przycisk stojący obok wyboru katalogu (firsthand 0808).
+        grid.run_stage_fn = self._stack_lineage_after_gesture
         tasks.object_view.writeback_busy.connect(grid.set_writeback_busy)   # mutex w drugą stronę
         # CZWARTA POWIERZCHNIA gestu osi obiektu (S2b, §4/14c-f): gest z paska Zbiorów zmienia
         # kolejkę przeglądu w oknie osi — a tamten widok nie ma skąd o tym wiedzieć. Gospodarz zna
@@ -2558,6 +2562,23 @@ class MainWindow(QMainWindow):
         żeby postęp etapu był widoczny tam, gdzie zawsze. Przełączenie nie jest interakcją
         użytkownika, więc nie liczy się do budżetu kliknięć."""
         reason = self.pipeline_view.run_stage("resolve")
+        if reason is None:
+            self._show_view(NAV_DOSTAWA)
+        return reason
+
+    def _stack_lineage_after_gesture(self):
+        """Takt 3 dla gestów osi STOSU (odniesienie czasu R2) — lustro `_resolve_after_repair`.
+
+        Gest zmienia fakt, na którym stoi dobór wejść, więc dopóki rodowód się nie przeliczy, ekran
+        pokazuje stan sprzed gestu. Zdzin nazwał koszt wprost: „muszę teraz zmienić zakładkę na
+        Dostawę i klikać button, który jest przy buttonie wyboru folderu — UX-owo to jest
+        niezrozumiałe". I jest: akcja domykająca gest mieszkała na innym ekranie, w sekcji
+        o wciąganiu plików z dysku.
+
+        Przełączenie widoku ZOSTAJE (jak przy naprawie nagłówka): etap jest długi i jego postęp ma
+        być widoczny tam, gdzie zawsze. Różnica wobec stanu sprzed tej zmiany jest w tym, że
+        przełącza PROGRAM po jednym kliknięciu, a nie człowiek po trzech."""
+        reason = self.pipeline_view.run_stage("stack_lineage")
         if reason is None:
             self._show_view(NAV_DOSTAWA)
         return reason

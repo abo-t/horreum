@@ -1816,6 +1816,10 @@ class FramesView(QWidget):
         self.lineage_bar.judged.connect(self._on_lineage_judged)
         self.lineage_bar.offset_asked.connect(self._on_lineage_offset)
         self._lineage_frame_id = None       # cel gestu odniesienia (klatka stosu w panelu)
+        # TAKT 3 gestu osi stosu — wstrzykuje gospodarz (`MainWindow`), bo tylko on zna Dostawę.
+        # None = widok bez gospodarza (testy samego gridu): gest zapisuje, a zdanie mówi, gdzie
+        # przeliczyć — dokładnie jak przed tą zmianą, więc brak wstrzyknięcia niczego nie psuje.
+        self.run_stage_fn = None
 
         self.panel_stack = _PanelStack()                 # najwyżej JEDEN panel widoczny (F3)
         self.panel_stack.addWidget(self.macro_bar)
@@ -2247,8 +2251,18 @@ class FramesView(QWidget):
         repo.set_integration_offset(self.con, master_frame_id=self._lineage_frame_id,
                                     utc_offset_min=minutes, now=self._now())
         self._refresh_lineage()
+        godziny = f"{minutes / 60.0:+.1f}"
+        # TAKT 3: gest sam się domyka. Bez tego user musiał przejść na inny ekran i znaleźć tam
+        # przycisk stojący obok wyboru katalogu — akcja domykająca gest mieszkała w sekcji
+        # o wciąganiu plików z dysku. Odmowa (etap już biegnie / brak bazy) NIE jest błędem gestu:
+        # zapis się udał, więc mówimy prawdę o obu połówkach i zostawiamy zdanie z receptą.
+        if self.run_stage_fn is None:
+            self.status_message.emit(i18n.t("grid.lin.offset_saved", hours=godziny))
+            return
+        powod = self.run_stage_fn()
         self.status_message.emit(
-            i18n.t("grid.lin.offset_saved", hours=f"{minutes / 60.0:+.1f}"))
+            i18n.t("grid.lin.offset_saved_counting", hours=godziny) if powod is None
+            else i18n.t("grid.lin.offset_saved_busy", hours=godziny, reason=powod))
 
     def _on_lineage_judged(self, frame_ids, excluded):
         """Werdykt ręki → jedna klinga (`repo.judge_integration_input`), potem odświeżenie panelu

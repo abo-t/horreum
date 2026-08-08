@@ -1432,6 +1432,38 @@ def test_gest_odniesienia_zapisuje_i_zostawia_droge_powrotu(view, gcon):
     assert "+1.0" in view.lineage_bar.btn_offset.text()
 
 
+def test_gest_odniesienia_DOMYKA_SIE_sam(view, gcon):
+    """FIRSTHAND ZDZINIA 0808: „podałem różnicę czasu i muszę teraz zmienić zakładkę na Dostawę
+    i klikać button, który jest przy buttonie wyboru folderu — UX-owo to jest niezrozumiałe".
+
+    Gest zmienia fakt, na którym stoi dobór wejść, więc dopóki rodowód się nie przeliczy, ekran
+    pokazuje stan sprzed gestu. Akcja domykająca mieszkała na INNYM ekranie, w sekcji o wciąganiu
+    plików z dysku — trzy kliknięcia i zmiana kontekstu za czynność, która jest drugą połową tej
+    samej decyzji. Takt 3 (wzorzec „Napraw nagłówek…" → `run_stage('resolve')`) domyka ją na miejscu.
+
+    Test pinuje OBIE gałęzie odmowy, bo zapis i przeliczenie to dwa różne zdarzenia: gdy silnik jest
+    zajęty, gest ma powiedzieć prawdę o obu połówkach (zapisano — nie policzono, i dlaczego)."""
+    _seed_stos(gcon, reason="offset_unknown")
+    assert _zaznacz_frame(view, 10)
+    view._toggle_panel("lineage")
+
+    wolane = []
+    view.run_stage_fn = lambda: wolane.append("stack_lineage") or None
+    komunikaty = []
+    view.status_message.connect(komunikaty.append)
+    view.lineage_bar.offset_asked.emit(60)
+
+    assert wolane == ["stack_lineage"], "gest ma sam uruchomić przeliczenie"
+    assert gcon.execute("SELECT utc_offset_min FROM integration WHERE id = 5").fetchone()[0] == 60
+    assert "liczę" in komunikaty[-1]
+
+    view.run_stage_fn = lambda: "etap już biegnie"
+    view.lineage_bar.offset_asked.emit(120)
+    assert "NIE policzony" in komunikaty[-1] and "biegnie" in komunikaty[-1]
+    assert gcon.execute("SELECT utc_offset_min FROM integration WHERE id = 5").fetchone()[0] == 120, \
+        "odmowa przeliczenia nie ma prawa cofnąć ZAPISU — to dwa różne zdarzenia"
+
+
 def test_gest_odniesienia_milknie_na_czas_przebiegu(view, gcon):
     """Ta sama bramka, co dla werdyktu ręki: etap pipeline'u pisze do `integration` w tle, więc
     druga powierzchnia zapisu tego samego stołu musi wtedy zamilknąć."""

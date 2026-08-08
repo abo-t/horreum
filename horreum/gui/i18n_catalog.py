@@ -1295,9 +1295,20 @@ CATALOG = {
         "en": "How many hours was the camera clock ahead of UTC when this material was shot?\n"
               "(Poland in winter: +1 · Poland in summer: +2 · recorded in UTC: 0)",
     },
+    # TRZY ZDANIA, BO TO TRZY RÓŻNE STANY — a nie odcienie jednego: gest bez gospodarza (nie ma
+    # czym przeliczyć), gest domknięty (liczy się już) i gest zapisany przy zajętym silniku.
+    # Ostatnie mówi o OBU połówkach: zapis się udał, przeliczenie nie ruszyło i wiadomo dlaczego.
     "grid.lin.offset_saved": {
-        "pl": "Odniesienie zapisane: {hours} h. Policz rodowód w Dostawie, żeby dobrać klatki.",
-        "en": "Time reference saved: {hours} h. Compute lineage in Delivery to match frames.",
+        "pl": "Odniesienie zapisane: {hours} h. Policz rodowód stosów w Dostawie, żeby dobrać klatki.",
+        "en": "Time reference saved: {hours} h. Compute stack lineage in Delivery to match frames.",
+    },
+    "grid.lin.offset_saved_counting": {
+        "pl": "Odniesienie zapisane: {hours} h — liczę rodowód stosów…",
+        "en": "Time reference saved: {hours} h — computing stack lineage…",
+    },
+    "grid.lin.offset_saved_busy": {
+        "pl": "Odniesienie zapisane: {hours} h. Rodowód NIE policzony: {reason}",
+        "en": "Time reference saved: {hours} h. Lineage NOT computed: {reason}",
     },
     # Powód, który przestał być prawdą, zanim ktokolwiek policzył go ponownie (firsthand 0808).
     # Nie udajemy, że wiemy więcej: mówimy, że TEN ZAPIS jest starszy niż zmiana, i gdzie go odświeżyć.

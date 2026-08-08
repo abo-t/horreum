@@ -6,6 +6,81 @@ schemat i API mogą się jeszcze zmieniać.
 
 ## [Niewydane]
 
+## [0.7.0] — 2026-08-08
+
+Wydanie o **materiale zdjęcia** — o tym, żeby program umiał powiedzieć, z czego powstał gotowy
+obraz, a tam gdzie nie umie, oddał Ci głos zamiast milczeć.
+
+Do tej pory rodowód („co weszło w ten obraz") dostawał wyłącznie ten stos, którego nagłówek sam
+podał poprawne okno czasu. Reszta — a to jest jedna trzecia archiwum — pokazywała zdanie „nie wiem,
+z czego powstał" i na tym się kończyło. Teraz masz **listę takich obrazów**, przy każdym **powód
+i propozycję materiału**, a potwierdzenie zajmuje jedno kliknięcie. Osobno doszła cała gałąź
+lustrzanki: zdjęcia z aparatu liczą czas w innym zegarze niż stos z PixInsight, więc program pyta
+Cię o odniesienie zamiast udawać, że materiału nie ma.
+
+### Dodane
+
+- **Obrazy bez rodowodu mają wreszcie swoją listę.** W **Porządkach** doszedł wiersz
+  **„Obrazy bez rodowodu"** z liczbą; klik prowadzi do **Zbiorów** z perspektywą
+  **„Rodowód do potwierdzenia"**, w której widzisz dokładnie te obrazy i nic poza nimi. Do tej
+  zmiany liczba istniała tylko w raporcie etapu Dostawy, a żeby trafić na konkretny obraz, trzeba
+  było przeklikać całe archiwum stosów i patrzeć, który się odezwie.
+  Lista **nie pokazuje obrazów, które czekają wyłącznie na przeliczenie** — jeśli nadałeś nazwę
+  po ostatnim przebiegu, program wie, że jego zapis zwietrzał, i nie wysyła Cię po robotę,
+  której tam nie ma.
+- **Panel „Rodowód" proponuje materiał, zamiast tłumaczyć milczenie.** Przy obrazie, którego
+  nagłówek nie podał sensownego okna czasu, dostajesz **klatki z tej samej nocy** — z czasem,
+  ekspozycją i filtrem — i zaznaczasz, co weszło. Propozycja trzyma się tych samych osi, co dobór
+  automatyczny (obiekt, filtr, teleskop, zgodna ekspozycja), więc nie jest spisem archiwum, tylko
+  materiałem tego zdjęcia.
+  **Gdy tej nocy nic nie ma, program to mówi i pokazuje pozostałe noce** tego obiektu z licznikami,
+  ustawione od najbliższej. Wybór należy do Ciebie — tego, z której sesji powstał obraz, nie da się
+  wyczytać z pliku, który o tym milczy.
+- **Zestaw sprzętu (teleskop × kamera) można wskazać ręką.** Kubełek „bez zestawu" w kolejce
+  przeglądu przestał być samą liczbą z notą „rozwiązywanie w przygotowaniu" — jest **klikalny**
+  i otwiera okno **„Przypisz zestaw…"**, w którym jednostką wyboru jest **folder × korpus**, a nie
+  pojedyncza klatka. Dotyczy to przede wszystkim zdjęć z lustrzanki przez teleskop: taki plik
+  **nie ma czym zeznać o optyce** — nie ma w nim nazwy teleskopu i nigdy nie będzie, więc jedyną
+  drogą jest Twoja ręka.
+  **Twoje wskazanie przeżywa kolejne przebiegi** — automat je omija zamiast nadpisywać. Pomyłkę
+  poprawisz drugą połową tego samego kubełka („zestaw wskazany ręką"), która otwiera to samo okno
+  w trybie zmiany.
+- **Odniesienie czasu dla zdjęć z lustrzanki.** Aparat zapisuje czas **lokalny**, a stos
+  z PixInsight — **UTC**, więc okno rodowodu mijało własne klatki o pełne godziny i program
+  meldował „nie ma pasujących klatek", mając je pod ręką. Panel „Rodowód" dostał przycisk
+  **„Wskaż odniesienie czasu…"**, a program **sam podpowiada wartość**, jeśli umie ją rozpoznać
+  z materiału. Po wskazaniu **od razu przelicza rodowód** — bez wędrówki na inny ekran.
+- **Tolerancja czasu ekspozycji.** Suby z aparatu bywają o sekundę dłuższe niż deklaruje stos
+  (90 vs 91 s). Dobór porównuje je odtąd z progiem, a nie na równość, więc materiał, który
+  wcześniej wypadał bez słowa, wchodzi do rodowodu.
+- **Edycja pliku RAW nie gubi już Twoich decyzji.** Programy do wywoływania (Lightroom, Camera Raw)
+  dopisują swoje dane wprost do pliku `.dng`, przez co zmienia się jego tożsamość i archiwum
+  widziało go jako **nową, obcą klatkę**, a stara zostawała bez pliku — razem z nazwą obiektu
+  i zestawem, które jej nadałeś. Program rozpoznaje teraz podmianę, **łączy starą klatkę z nową**
+  i pokazuje, które Twoje ustalenia czekają na przeniesienie. Przeniesienie jest **gestem, nie
+  automatem** — przy pomyłce automat zamalowałby cudzą decyzję.
+- **„Policz rodowód stosów" jako osobny etap Dostawy** — przeliczysz rodowód bez ponownego
+  wczytywania całego drzewa z dysku.
+
+### Poprawione
+
+- **Kolumna „Ścieżka" pokazuje ścieżkę, nie samą nazwę pliku.** Nazwy z aparatu
+  (`astro_dsc4198.dng`) i z PixInsight (`masterLight_BIN-1_…`) nie różnią się niczym — tożsamość
+  zdjęcia niesie **folder**, a jego właśnie nie było widać. Teraz w każdym panelu drążenia widzisz
+  dwa ostatnie katalogi przed nazwą.
+- **Panel „Rodowód" przestał powtarzać werdykt, który zdążył zwietrzeć.** Potrafił twierdzić, że
+  obraz nie ma rozpoznanego obiektu, gdy kolumna obok w tym samym oknie pokazywała jego nazwę.
+  Mówi teraz wprost, że jego zapis jest starszy niż Twoja zmiana, i gdzie go odświeżyć.
+- **Etap „Kalibracja" i „Rodowód stosów" nie nazywają się już tak samo.** Cztery kliknięcia
+  w przycisk „Rodowód" liczyły kalibrację, a nie rodowód obrazów — nazwy są rozdzielone, a bramka
+  pilnuje, żeby nie zeszły się z powrotem.
+
+### Zmienione
+
+- **Wydanie buduje się wyłącznie z tagu.** Plik `.exe`, który opuszcza tę maszynę, musi umieć
+  powiedzieć, którą wersją jest — build zewnętrzny odmawia, gdy nie stoi na tagu, a build lokalny
+  do własnych prób nie pyta o numer w ogóle.
+
 ## [0.6.0] — 2026-08-04
 
 Wydanie o **nazywaniu obiektów ręką** — i o tym, żeby ta ręka miała gdzie się cofnąć.

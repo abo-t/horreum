@@ -20,7 +20,7 @@ from horreum import db, repo, resolver
 from horreum.gui import i18n, queries
 from horreum.gui.app import (
     AssignObjectDialog, ConfirmPathObjectsDialog, ObjectAxisView, COPY_COL_PATH, COPY_COL_REASON,
-    OBJ_COL_CANON, OBJ_COL_FRAMES)
+    FRAME_COL_PATH, OBJ_COL_CANON, OBJ_COL_FRAMES)
 
 from fixture_s8 import seed_object_axis
 
@@ -774,6 +774,39 @@ def test_kubelek_gotowych_stosow_drazy_wlasna_lista(repair):
     assert v.frames.rowCount() == 1                    # SWOJA lista, nie dwa lighty fixture'u
     assert v.repair_btn.isEnabled() and not v.assign_btn.isEnabled()
     assert [r["frame_id"] for r in queries.nameless_stack_frames(con)] == [fid]
+
+
+def test_kubelek_stosow_pokazuje_FOLDER_bo_nazwa_pliku_nie_rozroznia(repair):
+    """FIRSTHAND ZDZINIA 0808: „nie widzę napisu IC443 ani LMC, nie ma takiej kolumny".
+
+    I nie było jak — kubełek daje 18 wierszy, pliki generuje WBPP, więc sześć stosów LMC i jeden
+    IC443 czytają się identycznie; tożsamość siedzi WYŁĄCZNIE w folderze, a kolumna pokazywała
+    `basename`. Recepta („nazwij ten obraz") była nie do wykonania.
+
+    Test pinuje TĘ listę (`ObjectAxisView.frames`), nie grid Zbiorów — pierwsza naprawa poszła
+    w drugą powierzchnię i firsthand wykazał ją jako brak zmiany. Falsyfikator jest w tym samym
+    teście: klatka NIEBA ma zostać przy samej nazwie, bo tam nazwa niesie czas akwizycji
+    i rozróżnia sama."""
+    v, con, files, _open = repair
+    fid, _ = repo.upsert_frame(con, sha1_data="sha-folder-stack", kind="master_light",
+                               filetype="xisf", camera_id=None, now=NOW_PD)
+    repo.record_header(con, frame_id=fid, raw_json="{}", object_raw=None, now=NOW_PD)
+    repo.add_location(
+        con, frame_id=fid, volume="V", drive_letter="R",
+        path=r"R:\!!ASTROFOTO\OBIEKTY_DNG\A7R3_105_LMC\master\masterLight_BIN-1.xisf",
+        now=NOW_PD)
+    v.refresh()
+
+    _select_review_tag(v, "nameless_stacks")
+    tekst = v.frames.item(0, FRAME_COL_PATH).text()
+    assert "A7R3_105_LMC" in tekst, "folder jest JEDYNYM rozróżnikiem tych wierszy"
+    assert "masterLight_BIN-1.xisf" in tekst, "nazwa pliku nie ma zniknąć, ma dostać kontekst"
+    assert "master" not in tekst.replace("masterLight_BIN-1.xisf", ""), \
+        "rodzic `master` jest wspólny wszystkim stosom — pokazanie go nie rozróżnia niczego"
+
+    _select_review_tag(v, "nameless")
+    swiatlo = v.frames.item(0, FRAME_COL_PATH).text()
+    assert "\\" not in swiatlo, "klatka nieba zostaje przy samej nazwie (nazwa rozróżnia sama)"
 
 
 # ═════════════════════════ R-S3-1 — CZŁON „COFNIĘTE RĘKĄ" W DWÓCH KUBEŁKACH KARTOWYCH

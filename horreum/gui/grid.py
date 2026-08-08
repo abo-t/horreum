@@ -182,24 +182,8 @@ def _obj_label(row):
         return nazwa
     if row.get("kind") != "master_light":
         return ""
-    folder = _stack_folder(row.get("path"))
+    folder = queries.stack_folder(row.get("path"))
     return f"⟨{folder}⟩" if folder else ""
-
-
-def _stack_folder(path):
-    """Folder OBRAZU ze ścieżki stosu — albo `None`. Bierzemy dziadka, nie rodzica: drzewo WBPP
-    kończy się katalogiem `master`, więc rodzic jest u wszystkich taki sam i nie rozróżnia niczego
-    (`…\\A7R3_105_LMC\\master\\masterLight_….xisf`). Gdy `master` nie występuje, rodzic jest
-    właściwą odpowiedzią — stąd wybór, a nie stałe piętro."""
-    if not path:
-        return None
-    czesci = [c for c in re.split(r"[\\/]", path) if c]
-    if len(czesci) < 2:
-        return None
-    rodzic = czesci[-2]
-    if rodzic.lower() == "master" and len(czesci) >= 3:
-        return czesci[-3]
-    return rodzic
 
 
 def _half_away(x):

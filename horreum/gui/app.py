@@ -1858,10 +1858,25 @@ class ObjectAxisView(QWidget):
                 self._set_frame_cell(r, FRAME_COL_PRESENT, "")
             # Ścieżka: pokaż NAZWĘ PLIKU (elizja od prawej gubiłaby ją z pełnej ścieżki „R:\...");
             # pełna ścieżka w tooltipie (hover). Klatka bez lokalizacji (zniknięta) → jawny znacznik.
+            #
+            # GOTOWY STOS DOSTAJE FOLDER PRZED NAZWĄ — bo u niego sama nazwa NIE JEST ROZRÓŻNIKIEM
+            # (firsthand 0808, zmierzone na 18 wierszach kubełka): pliki generuje WBPP, więc sześć
+            # stosów LMC i jeden IC443 czytają się identycznie (`masterLight_BIN-1_8000x5320_
+            # EXPOSURE-121.00s_FILTER-NoFilter__B.xisf`), a tożsamość siedzi WYŁĄCZNIE w folderze.
+            # Recepta kubełka brzmi „nazwij ten obraz" i była nie do wykonania: człowiek nie wiedział,
+            # KTÓRY nazywa. Tooltip nie wystarczał — wskazuje jeden wiersz naraz, a wybór jest
+            # PORÓWNANIEM. Klatek nieba to NIE dotyczy i to jest granica z pomiaru, nie ostrożność:
+            # tam nazwa pliku niesie czas akwizycji i rozróżnia sama.
             path = row["path"] or ""
-            self._set_frame_cell(r, FRAME_COL_PATH,
-                                 os.path.basename(path) if path else i18n.t("object.no_location"),
-                                 tooltip=path or None)
+            stos = path and "kind" in keys and row["kind"] == "master_light"
+            folder = queries.stack_folder(path) if stos else None
+            if not path:
+                tekst = i18n.t("object.no_location")
+            elif folder:
+                tekst = f"{folder}  \\  {os.path.basename(path)}"
+            else:
+                tekst = os.path.basename(path)
+            self._set_frame_cell(r, FRAME_COL_PATH, tekst, tooltip=path or None)
 
     def _set_frame_cell(self, r, c, text, *, tooltip=None, data=None):
         item = QTableWidgetItem(text)

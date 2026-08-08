@@ -13,11 +13,36 @@ NIGDY składanie stringa SQL. Listy zmiennej długości (id/keywordy) idą jako 
 
 import json
 import os
+import re
 
 from horreum.grouper import NO_TELESCOPE_KINDS      # jeden właściciel zbioru rodzajów poza osią
 from horreum.resolve.frames import LIGHT_KINDS
 from horreum.resolve.objects import CLEARABLE_OBJECT_SOURCES, WEAK_OBJECT_SOURCES
 from horreum.resolver import NO_OBJECT_CARD_FILETYPES, path_proposals, review_state
+
+
+def stack_folder(path):
+    """Folder OBRAZU ze ścieżki gotowego stosu — albo `None`. Czysta funkcja, zero SQL.
+
+    DZIADEK, NIE RODZIC — i to jest zmierzone, nie estetyczne: drzewo WBPP kończy się katalogiem
+    `master`, więc rodzic brzmi tak samo u WSZYSTKICH stosów i nie rozróżnia niczego
+    (`…\\A7R3_105_LMC\\master\\masterLight_….xisf`). Gdy `master` nie występuje, właściwą
+    odpowiedzią jest rodzic — stąd warunek, a nie stałe piętro w górę.
+
+    Powstało z firsthandu 0808: kubełek „bez nazwy, gotowe stosy" daje 18 wierszy, których nie da
+    się odróżnić, bo nazwy plików generuje WBPP i sześć stosów LMC czyta się identycznie.
+    Tożsamość siedzi WYŁĄCZNIE w tym segmencie ścieżki. JEDEN właściciel reguły, bo pytają o nią
+    dwie powierzchnie (kolumna Obiekt w Zbiorach i lista drążenia w Przeglądzie obiektów) —
+    dwie kopie rozjechałyby się przy pierwszej zmianie układu drzewa."""
+    if not path:
+        return None
+    czesci = [c for c in re.split(r"[\\/]", str(path)) if c]
+    if len(czesci) < 2:
+        return None
+    rodzic = czesci[-2]
+    if rodzic.lower() == "master" and len(czesci) >= 3:
+        return czesci[-3]
+    return rodzic
 
 
 def telescope_label(row):
@@ -630,10 +655,15 @@ def nameless_stack_frames(con, cleared=False):
     „Stosy" powołuje rodzaj z `IMAGETYP`), więc warunek byłby martwą literą udającą bramkę.
 
     Kolumny, cel przez `MIN(id) … present = 1` i `ORDER BY` — jak w `nameless_frames` (ten sam
-    panel `_fill_frames` je czyta). Zwraca: frame_id, sha1_data, filetype, date_obs,
-    telescope_label, telescop_canon, camera_model, location_id, path, n_present."""
+    panel `_fill_frames` je czyta). Zwraca: frame_id, sha1_data, filetype, kind, date_obs,
+    telescope_label, telescop_canon, camera_model, location_id, path, n_present.
+
+    `kind` wchodzi do WYNIKU, choć jest też warunkiem — po to, żeby panel umiał odróżnić stos od
+    klatki nieba i pokazać przy stosie FOLDER (firsthand 0808: nazwy plików WBPP nie rozróżniają
+    18 wierszy tego kubełka). Warunek w `WHERE` mówi, KOGO wybieramy; kolumna mówi wołającemu,
+    CO dostał — i tylko ta druga jest kontraktem dla powierzchni."""
     return con.execute(
-        "SELECT f.id AS frame_id, f.sha1_data, f.filetype, h.date_obs, "
+        "SELECT f.id AS frame_id, f.sha1_data, f.filetype, f.kind, h.date_obs, "
         "       t.label AS telescope_label, t.telescop_canon, "
         "       cam.model_canon AS camera_model, "
         "       l.id AS location_id, l.path, "

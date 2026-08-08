@@ -2064,6 +2064,14 @@ def upsert_integration(con, *, master_frame_id, integ_hash, tool, window_start, 
         return row["id"], True
 
 
+UTC_OFFSET_MAX_MIN = 840
+"""Sufit odniesienia czasu w minutach — fizyczny zakres zegarów świata (UTC−12…UTC+14).
+
+Nie jest to ostrożność na wyrost: bez niego literówka w geście (`600` zamiast `60`) zapisywała się
+cicho i zamieniała receptę R2 w ślepy zaułek — stos meldował potem `no_candidates`, bo kandydaci
+lądowali dziesięć godzin poza oknem, i nic nie wskazywało przyczyny."""
+
+
 def set_integration_offset(con, *, master_frame_id, utc_offset_min, now, uid="local"):
     """Wskaż ODNIESIENIE CZASU stosu GESTEM CZŁOWIEKA (#DR2 R2, D-DR-1) — `True`, gdy drgnęło.
 
@@ -2086,9 +2094,31 @@ def set_integration_offset(con, *, master_frame_id, utc_offset_min, now, uid="lo
 
     IDEMPOTENCJA: ta sama wartość → `False`, zero DML i zero eventu. Rozróżniamy przy tym `NULL`
     od `0` po stronie porównania (`is None`), bo w Pythonie `0 == False` — a to są dwa RÓŻNE
-    werdykty: „nie wiem" i „to jest UTC"."""
-    if utc_offset_min is not None and not isinstance(utc_offset_min, int):
+    werdykty: „nie wiem" i „to jest UTC".
+
+    DWIE BRAMY NA WEJŚCIU, obie z bramki pakietu (zarzuty 4 i 5), obie zamykają drogę do zapisu,
+    którego nie da się odróżnić od poprawnego:
+
+    * **`bool` NIE JEST liczbą minut**, choć `isinstance(True, int)` jest prawdą. Bez tego członu
+      `utc_offset_min=False` zapisywało się jako `0`, czyli jako werdykt „to jest UTC" — dokładnie
+      ta kolizja `0 == False`, którą akapit wyżej deklaruje rozróżniać. Rozróżnialiśmy ją wszędzie
+      poza wejściem;
+    * **zakres ±840 minut** = fizyczny sufit zegarów świata (UTC−12…UTC+14). Odsiewa wartości
+      spoza skali — `6000`, `-2000`, minuty pomylone z sekundami. **CZEGO NIE ŁAPIE I TRZEBA
+      TO WIEDZIEĆ:** literówki dającej wartość FIZYCZNIE MOŻLIWĄ (`600` zamiast `60` to dziesięć
+      godzin, czyli legalna strefa). Taki zapis przejdzie i stos zamelduje potem `no_candidates`
+      zamiast `offset_unknown`. Zakres jest więc bramką na NONSENS, nie na pomyłkę — jedyną realną
+      obroną przed tą drugą jest propozycja podana wprost w oknie (`stacks.propose_offset_minutes`)
+      i to, że gest da się powtórzyć. **Mocniejszy wariant to CHECK w DDL** (baza jako ostatnia
+      bramka słownika, kanon 0012/0015); tu wystarcza klinga, bo jest jedynym pisarzem tej
+      kolumny — CHECK dołożyć przy najbliższej migracji dotykającej `integration`."""
+    if isinstance(utc_offset_min, bool) or (
+            utc_offset_min is not None and not isinstance(utc_offset_min, int)):
         raise ValueError("utc_offset_min musi być liczbą całkowitą minut albo None")
+    if utc_offset_min is not None and abs(utc_offset_min) > UTC_OFFSET_MAX_MIN:
+        raise ValueError(
+            f"utc_offset_min poza zakresem zegarów świata (±{UTC_OFFSET_MAX_MIN} min): "
+            f"{utc_offset_min}")
     with _immediate(con):
         row = con.execute(
             "SELECT id, utc_offset_min FROM integration WHERE master_frame_id = ?",
@@ -2100,8 +2130,11 @@ def set_integration_offset(con, *, master_frame_id, utc_offset_min, now, uid="lo
             return False
         if before is not None and utc_offset_min is not None and before == utc_offset_min:
             return False
-        con.execute("UPDATE integration SET utc_offset_min = ? WHERE id = ?",
-                    (utc_offset_min, row["id"]))
+        # `updated_at` idzie razem z wartością (bramka pakietu, zarzut 8): głowa integracji DRGA
+        # gestem człowieka, więc znacznik modyfikacji, który zostawał z ostatniego PRZEBIEGU,
+        # pokazywał czas sprzed zmiany. Ślad w dzienniku był, kolumna kłamała.
+        con.execute("UPDATE integration SET utc_offset_min = ?, updated_at = ? WHERE id = ?",
+                    (utc_offset_min, now, row["id"]))
         emit_event(con, actor=f"user:{uid}", verb="integration.offset_set",
                    target=f"frame:{master_frame_id}", now=now,
                    payload={"integration_id": row["id"], "before": before,

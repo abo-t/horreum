@@ -229,6 +229,70 @@ def test_zero_to_werdykt_a_nie_brak(con):
     assert s.inputs == 1 and row["unresolved_reason"] is None
 
 
+def test_klinga_odmawia_boola_i_wartosci_spoza_zegarow_swiata(con):
+    """BRAMKA PAKIETU, zarzuty 4 i 5 — dwie drogi do zapisu nieodróżnialnego od poprawnego.
+
+    `isinstance(True, int)` jest PRAWDĄ, więc `False` przechodziło walidację i lądowało w bazie
+    jako `0`, czyli jako werdykt „to jest UTC" — dokładnie ta kolizja, którą klinga deklaruje
+    rozróżniać.
+
+    ZAKRES JEST BRAMKĄ NA NONSENS, NIE NA POMYŁKĘ — i test pinuje właśnie tę granicę, żeby nikt
+    nie wziął jej za większą, niż jest: `6000` odpada, ale `600` (przykład z recenzji, „zamiast
+    60") PRZECHODZI, bo dziesięć godzin to legalna strefa. Ostatnia asercja stoi tu po to, by
+    ta prawda była w bateri, a nie tylko w komentarzu."""
+    m = _master(con)
+    run_stack_lineage(con, now=NOW, xml_reader=_brak_xml)
+
+    for zly in (True, False):
+        with pytest.raises(ValueError):
+            repo.set_integration_offset(con, master_frame_id=m, utc_offset_min=zly, now=NOW)
+    for zly in (841, -841, 6000):
+        with pytest.raises(ValueError):
+            repo.set_integration_offset(con, master_frame_id=m, utc_offset_min=zly, now=NOW)
+
+    # Granice zegarów świata PRZECHODZĄ — bramka odsiewa nonsens, nie realne strefy.
+    assert repo.set_integration_offset(con, master_frame_id=m, utc_offset_min=840, now=NOW) is True
+    assert repo.set_integration_offset(con, master_frame_id=m, utc_offset_min=-720, now=NOW) is True
+    assert repo.set_integration_offset(con, master_frame_id=m, utc_offset_min=345, now=NOW) is True
+    assert repo.set_integration_offset(con, master_frame_id=m, utc_offset_min=600, now=NOW) is True, \
+        "literówka dająca wartość fizycznie możliwą PRZECHODZI — zakres jej nie łapie i nie udaje"
+
+
+def test_gest_offsetu_podbija_znacznik_modyfikacji(con):
+    """BRAMKA PAKIETU, zarzut 8: głowa integracji drga gestem człowieka, więc `updated_at` musi
+    iść razem z wartością. Wcześniej kolumna zostawała z czasem ostatniego PRZEBIEGU — ślad
+    niósł tylko dziennik, a kolumna pokazywała nieprawdę."""
+    m = _master(con)
+    run_stack_lineage(con, now=NOW, xml_reader=_brak_xml)
+    repo.set_integration_offset(con, master_frame_id=m, utc_offset_min=60, now=LATER)
+
+    assert _integracja(con, m)["updated_at"] == LATER
+
+
+def test_raw_z_innej_nocy_NIE_daje_recepty_o_odniesieniu(con):
+    """BRAMKA PAKIETU, zarzut 3 — fałszywa recepta jest gorsza niż `no_candidates`.
+
+    RAW o zgodnej ekspozycji, ale z INNEJ NOCY, nabijał licznik świadków bez odniesienia, więc
+    stos dostawał `offset_unknown` i zdanie „wskaż odniesienie" — gest, który nie miał prawa nic
+    zmienić, bo fizyczny sufit zegarów (±14 h) wykluczał tego kandydata z góry."""
+    m = _master(con)
+    _light(con, "daleki", date_obs="2019-03-20T21:40:38")     # dwa miesiące później
+    s = run_stack_lineage(con, now=NOW, xml_reader=_brak_xml)
+
+    assert _integracja(con, m)["unresolved_reason"] == REASON_NO_CANDIDATES
+    assert s.reasons == {REASON_NO_CANDIDATES: 1}
+
+
+def test_propozycja_odrzuca_swiadka_z_innej_doby(con):
+    """BRAMKA PAKIETU, zarzut 7: sama podzielność przez 60 przepuszczała 1500 minut, czyli klatkę
+    z następnej doby o trafionym `mm:ss` — jeden zbieg dawał propozycję fałszywą o całą dobę."""
+    m = _master(con)
+    _light(con, "doba", date_obs="2019-01-11T21:40:38")       # +25 h, mm:ss trafione
+    run_stack_lineage(con, now=NOW, xml_reader=_brak_xml)
+
+    assert stacks_propose(con, m) is None
+
+
 def test_klinga_offsetu_jest_idempotentna_i_odmawia_nie_stosowi(con):
     m = _master(con)
     run_stack_lineage(con, now=NOW, xml_reader=_brak_xml)

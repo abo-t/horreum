@@ -73,11 +73,18 @@ def exposure_matches(a, b):
 
     `tol(a,b) = min( max(0,5 s; 2% · min(a,b)); 3,0 s )`, dopasowanie iff `|a−b| <= tol(a,b)`.
 
-    DLACZEGO PRÓG, A NIE RÓWNOŚĆ: dla kamery ASI ekspozycja jest NASTAWĄ i wraca z pliku co do
-    setnej — równość działa i ma działać. Dla lustrzanki jest POMIAREM: master IC443 zeznaje
+    DLACZEGO PRÓG, A NIE RÓWNOŚĆ: dla lustrzanki ekspozycja jest POMIAREM — master IC443 zeznaje
     `90,0`, a jego trzy suby `90,0 / 91,0 / 91,0`, więc równość wpuszcza jedną z trzech i nazywa
-    to kompletnym rodowodem. Próg nie poszerza doboru „na wszelki wypadek" — naprawia jednostkę
-    porównania.
+    to kompletnym rodowodem. Próg naprawia jednostkę porównania, nie poszerza doboru „na wszelki
+    wypadek".
+
+    PRÓG OBOWIĄZUJE WSZYSTKIE FORMATY, NIE TYLKO RAW — i to jest świadome, ale wcześniejszy zapis
+    tego zdania sugerował, że dla ASI zostaje równość (bramka pakietu, zarzut 1: docstring
+    obiecywał więcej, niż droga dowozi — ta sama klasa co E2-1). Dla ASI ekspozycja jest NASTAWĄ
+    i wraca co do setnej, więc próg nie ma tam czego skleić — ale to jest fakt o DANYCH, nie
+    gałąź w kodzie. Pokrycie pomiarowe: bramka G2-6 na żywym archiwum zmierzyła **0 nowych
+    kandydatów** w gałęzi ASI po wprowadzeniu progu (wejścia `3367 fits` bez ruchu). Gałąź per
+    format byłaby drugą regułą do utrzymania tam, gdzie pomiar mówi, że jedna wystarcza.
 
     TRZY CZŁONY, KAŻDY Z POWODU: **podłoga** trzyma sens dla krótkich klatek (2% z 10 s to 0,2 s,
     czyli mniej niż rozdzielczość zeznania); **`min(a,b)`** zamiast `a` czyni relację choć
@@ -196,8 +203,12 @@ def _window_candidates(con, *, object_id, exptime):
     dokładnie tak, jak dziś rozstrzyga czas, filtr i teleskop. Indeks robi swoje, decyzja zostaje
     w JEDNEJ funkcji.
 
-    `exptime` mastera `None` ⇒ ZERO kandydatów (guard wołającego, `_plan`) — próg nie ma prawa
-    zamienić braku zeznania w dopasowanie.
+    `exptime` mastera `None` TU NIE DOCHODZI — i to jest zapis o SZWIE, nie obietnica łagodnego
+    zachowania (bramka pakietu, zarzut 2: poprzednie zdanie mówiło „ZERO kandydatów", a kod
+    wywaliłby `TypeError` na `exptime - EXP_TOL_CEILING_S`). Strażnikiem jest `testimony.degenerate`
+    z sąsiedniego modułu: brak czasu ekspozycji czyni okno zdegenerowanym z definicji, więc `_plan`
+    kończy linijkę wcześniej. Gdyby ten szew kiedyś pękł, wołanie ma wybuchnąć głośno (EXPECT),
+    a nie oddać cichą pustkę udającą poprawny wynik.
 
     `filetype` WYCHODZI Z TEGO ZAPYTANIA dla R2: to ono, a nie stanowisko, rozstrzyga, czy czas
     kandydata wymaga sprowadzenia do odniesienia mastera. Stanowisko ma 97% FITS-ów, więc warunek
@@ -289,7 +300,15 @@ def _in_window(rows, *, start, end, filter_canon, telescope_id, exptime, utc_off
             continue
         if r["filetype"] == "raw":
             if utc_offset_min is None:
-                raw_bez_odniesienia += 1
+                # LICZYMY TYLKO ŚWIADKÓW, KTÓRYCH JAKIKOLWIEK OFFSET MÓGŁBY WCIĄGNĄĆ (bramka
+                # pakietu, zarzut 3). Bez tego RAW z INNEJ NOCY o zgodnej ekspozycji i filtrze
+                # nabijał licznik, a stos dostawał `offset_unknown` i receptę „wskaż odniesienie",
+                # której wykonanie nic by nie dało — bo fizyczny sufit zegarów (±14 h) wykluczał
+                # tego świadka z góry. Fałszywa recepta jest gorsza niż `no_candidates`: wysyła
+                # człowieka do gestu, który nie ma prawa zadziałać.
+                if (start - timedelta(minutes=repo.UTC_OFFSET_MAX_MIN)
+                        <= t < end + timedelta(minutes=repo.UTC_OFFSET_MAX_MIN)):
+                    raw_bez_odniesienia += 1
                 continue
             t -= timedelta(minutes=utc_offset_min)
         if not (start <= t < end):
@@ -341,7 +360,10 @@ def propose_offset_minutes(con, master_frame_id):
         if t is None or (t.minute, t.second) != (start.minute, start.second):
             continue
         delta = round((t - start).total_seconds() / 60.0)
-        if delta % 60 == 0:
+        # SUFIT ZEGARÓW ŚWIATA odsiewa świadka z INNEJ DOBY (bramka pakietu, zarzut 7): sama
+        # podzielność przez 60 przepuszczała np. 1500 minut, czyli klatkę z następnej nocy
+        # o trafionym `mm:ss` — jeden przypadkowy zbieg dawał propozycję fałszywą co do doby.
+        if delta % 60 == 0 and abs(delta) <= repo.UTC_OFFSET_MAX_MIN:
             roznice.add(delta)
     return roznice.pop() if len(roznice) == 1 else None
 

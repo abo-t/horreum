@@ -74,7 +74,11 @@ def stack_folder(path):
         return None
     rodzic = czesci[-2]
     if rodzic.lower() == "master" and len(czesci) >= 3:
-        return czesci[-3]
+        dziadek = czesci[-3]
+        # KORZEŃ NIE JEST FOLDEREM OBIEKTU (bramka pakietu, zarzut 9): przy układzie
+        # `X:\master\plik` dziadkiem jest litera dysku, więc kolumna pokazywałaby `⟨R:⟩` —
+        # podpowiedź bez treści, udającą nazwę. Wtedy uczciwiej milczeć.
+        return None if dziadek.endswith(":") else dziadek
     return rodzic
 
 

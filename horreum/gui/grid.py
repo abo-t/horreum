@@ -25,7 +25,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import re
 import statistics
 import uuid
 from datetime import datetime, timezone
@@ -1264,14 +1263,19 @@ class LineageBar(QWidget):
 
         JEDNOSTKĄ OKNA SĄ GODZINY, choć baza trzyma MINUTY — bo tak brzmi pytanie do człowieka
         („o ile zegar aparatu wyprzedzał UTC"), a wszystkie zmierzone offsety archiwum są pełnymi
-        godzinami. Minuty w kolumnie zostają, żeby strefy półgodzinne (Indie, część Australii)
-        nie wymagały migracji, gdy Zdzin tam pojedzie — pole jest szersze niż dzisiejsze okno
-        i to jest świadome."""
+        godzinami. Minuty w kolumnie zostają, żeby strefy niecałogodzinne nie wymagały migracji,
+        gdy Zdzin tam pojedzie — pole jest szersze niż dzisiejsze okno i to jest świadome.
+
+        DWIE CYFRY PO PRZECINKU, NIE JEDNA — i to nie jest kosmetyka (bramka pakietu, zarzut 2).
+        Krok 0,1 h to 6 minut, więc strefy kwadransowe (Nepal `+5:45`, Chatham `+12:45`) nie dają
+        się w tym oknie WYRAZIĆ. Gorsze od braku: przy ponownym otwarciu wartość 345 min pokazałaby
+        się jako `5,8`, a samo OK zapisałoby **348** — ciche przepisanie poprawnego zapisu na błędny,
+        bez śladu dla człowieka. Przy dwóch cyfrach `5,75` wraca do 345 co do minuty."""
         biezacy = None if self._head is None else self._head["utc_offset_min"]
         wstepna = biezacy if biezacy is not None else (self._offset_hint or 0)
         godziny, ok = QInputDialog.getDouble(
             self, i18n.t("grid.lin.offset_title"), i18n.t("grid.lin.offset_prompt"),
-            wstepna / 60.0, -14.0, 14.0, 1)
+            wstepna / 60.0, -14.0, 14.0, 2)
         if ok:
             self.offset_asked.emit(round(godziny * 60))
 
@@ -2231,11 +2235,22 @@ class FramesView(QWidget):
         # liczenie go przy każdym zaznaczeniu byłoby kosztem bez odbiorcy.
         self.lineage_bar.set_offset_hint(
             stacks.propose_offset_minutes(self.con, fid)
-            if head["unresolved_reason"] == "offset_unknown" else None)
+            if head["unresolved_reason"] == REASON_OFFSET_TOKEN else None)
         self.lineage_bar.set_lineage(head, queries.stack_lineage_inputs(self.con, fid))
         self._lineage_frame_id = fid
         if select_frame_ids:
             self.lineage_bar.select_frame_ids(select_frame_ids)
+
+    def refresh_lineage_panel(self):
+        """Przerysuj panel rodowodu ze STANU — publiczne wejście dla gospodarza (NARROW).
+
+        Wołane po zakończeniu KAŻDEGO etapu Dostawy, bo etap przepisuje `unresolved_reason`,
+        a panel trzyma jego poprzednią wartość. Bez tego takt 3 zostawiał na ekranie zdanie
+        „zapis nieaktualny" dokładnie po tym, jak sam ten zapis odświeżył (bramka pakietu, zarzut 7).
+
+        Cicho, gdy panel nie jest otwarty albo nic nie zaznaczono — `_refresh_lineage` sam
+        rozstrzyga, czy ma co pokazać."""
+        self._refresh_lineage()
 
     def _on_lineage_offset(self, minutes):
         """Wskazane odniesienie czasu → jedna klinga (`repo.set_integration_offset`), potem

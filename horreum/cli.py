@@ -1006,7 +1006,7 @@ _STACK_REASON_PROZA = {
     "no_window": "brak okna czasu (DATE-OBS/DATE-END)",
     "no_candidates": "okno nie wybralo ani jednej klatki",
     "telescope_mismatch": "klatki okna sa z innego teleskopu i nie ma czym rozstrzygnac",
-    "offset_unknown": "material jest w RAW, ale nie wiadomo, w jakim zegarze liczy ten obraz",
+    "offset_unknown": "material jest w RAW, a zegar aparatu ma nieznane odniesienie",
 }
 
 

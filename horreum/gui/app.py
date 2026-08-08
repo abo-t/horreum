@@ -2597,6 +2597,13 @@ class MainWindow(QMainWindow):
         self.object_view.set_busy(running)     # „Przypisz obiekt…" (#8/P4) — zapis, gatowany jak inne
         self.grid_view.set_busy(running)     # grid ma akcje ZAPISU (staging/commit/undo) — gatuj (wizytator C1)
         self.planner_view.set_busy(running)  # planer czyta CAŁE archiwum — nie liczmy nocy na wpół zapisanej bazie
+        if not running:
+            # PANEL RODOWODU CZYTA STAN, KTÓRY ETAP WŁAŚNIE PRZEPISAŁ (bramka pakietu, zarzut 7).
+            # Bez tego takt 3 kończył się gorzej, niż zaczynał: gest uruchamiał przeliczenie, panel
+            # zostawał z zapisem sprzed niego i etykietą „nieaktualny", a user nie miał jak jej zdjąć
+            # inaczej niż przeklikaniem zaznaczenia. Odświeżamy po KAŻDYM etapie, nie tylko po
+            # rodowodzie — `resolve` i `group` też ruszają fakty, na których stoi powód.
+            self.grid_view.refresh_lineage_panel()
 
     # ---------------------------------------------------------------- menu Plik: Otwórz/Nowa baza
 

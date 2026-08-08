@@ -88,6 +88,13 @@ ALTER TABLE integration_new RENAME TO integration;
 -- Dziecko wraca ZE SWOIM źródłem i swoim `excluded` — inaczej migracja skasowałaby werdykty ręki
 -- (`excluded=1`) i zdegradowała dowiedzione `history` do `window`. 0012 mogła wstawić stałą
 -- `'window'`, bo kopiowała zero wierszy z tabeli bez tej kolumny; tu wierszy są tysiące.
+--
+-- KOMPLET DZIECKA JEST DOWIEDZIONY, NIE ZAŁOŻONY (bramka pakietu, zarzut 6 — recenzent słusznie
+-- nie mógł go rozstrzygnąć z samego diffu): `integration_input` z 0012 ma DOKŁADNIE cztery
+-- kolumny — `integration_id`, `input_frame_id`, `asserted_by`, `excluded` — bez klucza
+-- surogatowego (`0012:90-96`). Cztery kopiowane niżej to więc caly wiersz, nie jego wybor.
+-- Sprawdzenie po migracji na żywej bazie: `PRAGMA table_info(integration_input)` oddaje te same
+-- cztery nazwy, a `count(*)` zgadza się co do wiersza z zapisem sprzed przebudowy.
 CREATE TABLE integration_input (
     integration_id INTEGER NOT NULL REFERENCES integration (id),
     input_frame_id INTEGER NOT NULL REFERENCES frame (id),

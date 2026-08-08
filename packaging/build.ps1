@@ -74,26 +74,42 @@ if ($Release) {
     $tag = $tag.Trim()
 
     # (b) TRACKED files unmodified. PyInstaller freezes the WORKING TREE, not the tag, so a dirty
-    #     tracked file ships code that no tag ever pointed at. Untracked files are reported but do
-    #     NOT block: they are not part of any import the spec resolves, and this repo always
-    #     carries a few (session scratch, tooling dotfiles) that must not veto a release.
+    #     tracked file ships code that no tag ever pointed at.
+    #
+    #     UNTRACKED FILES ARE REPORTED, NOT BLOCKED -- but the earlier reasoning for that ("they are
+    #     not part of any import the spec resolves") was WRONG and the package gate said so:
+    #     the spec collects data by GLOB (`collect_data_files("horreum", includes=["**/*.sql",
+    #     "**/*.json"])`), so an untracked .sql/.json under horreum\ WOULD be frozen without being
+    #     in the tag. Blocking on any untracked file is still the wrong trade -- this repo always
+    #     carries a few (session scratch, tooling dotfiles) and they must not veto a release --
+    #     so the gate narrows the check to what the spec can actually pick up, and reports the rest.
     $dirty = (& git status --porcelain --untracked-files=no)
     if ($dirty) {
         throw ("Working tree has MODIFIED TRACKED files -- the artifact would not match {0}:`n{1}" `
                -f $tag, ($dirty -join "`n"))
     }
-    $untracked = (& git ls-files --others --exclude-standard)
+    $untracked = @(& git ls-files --others --exclude-standard)
+    # Data the spec CAN sweep up by glob -- these would ride into the artifact untagged, so they
+    # block. Everything else untracked is reported and waved through.
+    $sweepable = @($untracked | Where-Object { $_ -match '^horreum/.*\.(sql|json)$' })
+    if ($sweepable) {
+        throw ("Untracked data files under horreum\ would be FROZEN by the spec glob but are not " +
+               "in {0}:`n{1}" -f $tag, ($sweepable -join "`n"))
+    }
     if ($untracked) {
-        Write-Host ("NOTE -> untracked files present (not frozen, not blocking): {0}" `
+        Write-Host ("NOTE -> untracked files present (spec cannot sweep them, not blocking): {0}" `
                     -f ($untracked -join ", ")) -ForegroundColor DarkGray
     }
 
     # (c) Tag and pyproject agree. tests/test_version.py already pins this, but the battery is a
     #     DEV-env gate and the release path has shipped past it before ("horreum 0.0.1", 2026-08-01).
     #     The build is the last line of defence, so it reads pyproject itself instead of trusting.
-    $pyprojVersion = (Select-String -Path (Join-Path $repo "pyproject.toml") `
-                      -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
-                     ).Matches[0].Groups[1].Value
+    #     Brak linii `version =` konczy sie ZDANIEM bramki, nie krachem "Cannot index into a null
+    #     array" (package gate, finding 10) -- operator ma dostac recepte, nie stos PowerShella.
+    $verLine = Select-String -Path (Join-Path $repo "pyproject.toml") `
+               -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+    if (-not $verLine) { throw "pyproject.toml has no `version = ""...""` line -- cannot verify tag" }
+    $pyprojVersion = $verLine.Matches[0].Groups[1].Value
     $tagVersion = $tag.TrimStart("v")
     if ($tagVersion -ne $pyprojVersion) {
         throw ("Tag {0} disagrees with pyproject version {1} -- bump one of them, do not guess" `

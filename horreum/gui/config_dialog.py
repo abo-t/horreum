@@ -151,8 +151,14 @@ class AssignConfigDialog(QDialog):
         WIERSZE SŁABE ZAZNACZAMY TAK SAMO — świadomie. Grupa bez kamery i grupa bez kopii na dysku
         wchodzą odznaczone (powód przy `setCheckState`), ale to jest DOMYŚLNY stan ostrożności, nie
         zakaz: skoro user jawnie prosi „zaznacz wszystkie", odmowa akurat tym wierszom byłaby
-        cichym nadpisaniem jego decyzji. Zapis i tak je pominie (`_zaznaczone` odsiewa brak kamery),
-        a licznik na przycisku powie prawdę o liczbie klatek."""
+        cichym nadpisaniem jego decyzji.
+
+        DWIE SŁABE GRUPY KOŃCZĄ RÓŻNIE i to trzeba czytać dokładnie (bramka pakietu, zarzut 4 —
+        wcześniejsze zdanie obiecywało jedno dla obu): **bez kamery** zapis POMIJA (`_zaznaczone`
+        odsiewa po `camera_id`, bo bez niej nie ma z czego złożyć configu — inwariant DDL §1);
+        **bez kopii na dysku** zapis PRZECHODZI i tak ma być, bo brak pliku nie unieważnia wiedzy
+        o sprzęcie. Licznik na przycisku mówi prawdę o obu, bo liczy dokładnie to, co pójdzie
+        do klingi."""
         stan = Qt.Checked if self.check_all.checkState() != Qt.Unchecked else Qt.Unchecked
         self.items.blockSignals(True)                # jeden przebieg synchronizacji, nie N
         for i in range(self.items.count()):

@@ -1491,7 +1491,20 @@ CATALOG = {
     "pipeline.btn.group": {"pl": "Grupuj", "en": "Group"},
     "pipeline.btn.resolve": {"pl": "Rozwiąż", "en": "Resolve"},
     "pipeline.btn.calibrate": {"pl": "Kalibracja", "en": "Calibrate"},
-    "pipeline.btn.lineage": {"pl": "Rodowód", "en": "Lineage"},
+    # DWA RÓŻNE RODOWODY NIE MOGĄ NAZYWAĆ SIĘ TAK SAMO (firsthand 0808). Ten liczy oś KALIBRACJI
+    # (czym skalibrowano klatkę nieba); rodowód STOSÓW ma własny przycisk niżej. Etykieta „Rodowód"
+    # kosztowała Zdzinia cztery kliknięcia w niewłaściwy etap i wniosek, że program nie działa —
+    # bo klikał rzecz, która działała poprawnie, tylko robiła co innego.
+    "pipeline.btn.lineage": {"pl": "Rodowód kalibracji", "en": "Calibration lineage"},
+    "pipeline.btn.stack_lineage": {"pl": "Policz rodowód stosów", "en": "Compute stack lineage"},
+    "pipeline.tip.stack_lineage": {
+        "pl": "Przelicza, z czego powstały gotowe obrazy — z tego, co JUŻ jest w bazie. "
+              "Bez skanu dysku i bez pytania o katalog. Uruchom po nadaniu obiektu, zestawu "
+              "albo odniesienia czasu.",
+        "en": "Recomputes what the finished images were made of — from what is ALREADY in the "
+              "database. No disk scan, no folder prompt. Run it after assigning an object, "
+              "a setup or a time reference.",
+    },
     "pipeline.btn.delta": {"pl": "Pokaż deltę", "en": "Show delta"},
     "pipeline.btn.presence": {"pl": "Sprawdź obecność", "en": "Check presence"},
     "pipeline.btn.cancel": {"pl": "Anuluj", "en": "Cancel"},

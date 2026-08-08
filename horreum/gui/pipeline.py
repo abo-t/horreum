@@ -88,6 +88,11 @@ class PipelineWorker(QObject):
                 self._bulk(con, "calibrate")
             elif self._stage == "lineage":
                 self._bulk(con, "lineage")
+            elif self._stage == "stack_lineage":
+                # Etap ISTNIAŁ w `_bulk` od I-2c, ale nie miał własnego wejścia — leciał wyłącznie
+                # jako czwarty krok drogi „Stosy". Przez to jedynym sposobem przeliczenia rodowodu
+                # było ponowne wciągnięcie całego drzewa (firsthand 0808).
+                self._bulk(con, "stack_lineage")
             elif self._stage == "delta":
                 self._bulk(con, "delta")
             elif self._stage in ("presence", "presence-apply"):
@@ -385,6 +390,17 @@ class PipelineView(QWidget):
         self.btn_stacks.setToolTip(i18n.t("pipeline.tip.stacks"))
         self.btn_stacks.clicked.connect(self._on_stacks)
         stk.addWidget(self.btn_stacks)
+        # PRZELICZENIE BEZ WCIĄGANIA — osobny przycisk, bo to osobna potrzeba (firsthand 0808).
+        # Rodowód stosów zależy od faktów, które człowiek nadaje MIĘDZY przebiegami (obiekt, zestaw,
+        # odniesienie czasu), więc po każdym takim geście trzeba go policzyć od nowa. Dotąd jedyną
+        # drogą było „Wciągnij stosy…" — czyli ponowny skan CAŁEGO drzewa obróbki plus pytanie
+        # o korzeń, którego user już raz wskazał. Zdzin nazwał to wprost: „bez sensu dla usera,
+        # skoro już wciągał raz". Etap istniał w workerze (`_bulk('stack_lineage')`) od I-2c
+        # i był wołany wyłącznie z wnętrza drogi „Stosy”; tu dostaje własne wejście.
+        self.btn_stack_lineage = QPushButton(i18n.t("pipeline.btn.stack_lineage"))
+        self.btn_stack_lineage.setToolTip(i18n.t("pipeline.tip.stack_lineage"))
+        self.btn_stack_lineage.clicked.connect(self._on_stack_lineage)
+        stk.addWidget(self.btn_stack_lineage)
         self.lbl_stacks_memo = QLabel("")      # treść = WYŁĄCZNIE _sync_stacks_memo
         stk.addWidget(self.lbl_stacks_memo, 1)
         v.addLayout(stk)
@@ -513,6 +529,21 @@ class PipelineView(QWidget):
         root = self._settings().value("stacks/last_root", None)
         self.lbl_stacks_memo.setText(i18n.t("pipeline.stacks_last", root=root) if root
                                      else i18n.t("pipeline.stacks_first"))
+
+    def _on_stack_lineage(self):
+        """Przelicz rodowód gotowych stosów — BEZ skanu i BEZ pytania o korzeń.
+
+        Dlaczego to nie jest ten sam gest, co „Wciągnij stosy…": tamten pyta o katalog, bo wciąga
+        z DYSKU nowe pliki, a drzewo obróbki żyje. Ten liczy wyłącznie z tego, co JUŻ jest w bazie
+        — a to zmienia się gestami człowieka (obiekt, zestaw, odniesienie czasu), nie zawartością
+        dysku. Ta sama droga rdzenia (`_bulk('stack_lineage')`), inne wejście i inna cena.
+
+        IDEMPOTENTNY: drugi przebieg na niezmienionych danych daje zero wierszy i jedno zdarzenie
+        zbiorcze (kanon `run_stack_lineage`; E2-1 pilnuje, żeby docstring tego nie zawyżał)."""
+        if self._db_path is None or self._thread is not None:
+            return
+        self._begin_run()
+        self._start_stage("stack_lineage")
 
     def _on_stacks(self):
         """Droga „Stosy" — ZAWSZE przez dialog katalogu, ale PODPOWIEDZIANY zapamiętanym korzeniem
@@ -1009,6 +1040,7 @@ class PipelineView(QWidget):
         # Stosy przynoszą WŁASNY korzeń (dialog), więc jak „Przyjmij nowe" nie zależą od `_root`
         # trybu zaawansowanego — wymagają samej bazy.
         self.btn_stacks.setEnabled(idle and has_db)
+        self.btn_stack_lineage.setEnabled(idle and has_db)
         self.btn_mark_vanished.setEnabled(idle and self._presence_params is not None)
         self.btn_cancel.setEnabled(running and cancellable)
 

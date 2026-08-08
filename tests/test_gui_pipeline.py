@@ -558,6 +558,47 @@ def test_worker_stacks_emituje_stage_done(qapp, tmp_path):
     assert prog and isinstance(prog[-1][2], dict)      # migawka DICT, nie żywy summary
 
 
+def test_rodowod_stosow_liczy_sie_BEZ_skanu_i_BEZ_pytania_o_katalog(qapp, tmp_path, monkeypatch):
+    """FIRSTHAND ZDZINIA 0808: „«Wciągnij stosy» jest bez sensu dla usera, skoro już wciągał raz".
+
+    Rodowód stosów zależy od faktów, które człowiek nadaje MIĘDZY przebiegami (obiekt, zestaw,
+    odniesienie czasu), więc po każdym geście trzeba go przeliczyć. Jedyną drogą było dotąd
+    ponowne wciągnięcie CAŁEGO drzewa obróbki — z pytaniem o korzeń, który user już raz wskazał.
+    Do tego przycisk o mylącej nazwie: „Rodowód" w rzędzie etapów liczy oś KALIBRACJI, więc cztery
+    kliknięcia poszły w etap, który działał poprawnie i robił co innego (zmierzone na żywej bazie:
+    4× `calibration.lineage_summary`, 0× `integration.lineage_summary`).
+
+    Test pilnuje OBU połówek naprawy: etap liczy sam rodowód (`stack_lineage`, bez `stacks`)
+    i NIE OTWIERA dialogu katalogu — to drugie jest sednem zarzutu, więc ma własną asercję."""
+    from PySide6.QtWidgets import QFileDialog
+
+    pytano = []
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory",
+                        lambda *a, **k: pytano.append(a) or "")
+    w = PipelineWorker(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    w.configure("stack_lineage")
+    done = []
+    w.stage_done.connect(lambda name, s: done.append((name, s)))
+    w.run()
+    assert [n for n, _ in done] == ["stack_lineage"], "sam rodowód, bez skanu drzewa"
+
+    view = PipelineView(_fresh_db(tmp_path))
+    view._on_stack_lineage()
+    assert pytano == [], "etap NIE ma prawa pytać o katalog — liczy z tego, co jest w bazie"
+    view.close()
+
+
+def test_dwa_rodowody_maja_ROZNE_nazwy(qapp):
+    """Etykiety dwóch różnych osi nie mogą być tym samym słowem. Przed 0808 obie brzmiały
+    „Rodowód" — jedna w rzędzie etapów (kalibracja), druga jako panel klatki (stosy) — i user
+    kliknął czterokrotnie nie tę. Bramka pilnuje rozłączności, nie konkretnego brzmienia."""
+    kal = i18n.t("pipeline.btn.lineage")
+    stos = i18n.t("pipeline.btn.stack_lineage")
+    assert kal != stos and kal and stos
+    assert "kalibracj" in kal.lower(), "etap kalibracji ma się nazwać kalibracją"
+    assert "stos" in stos.lower(), "etap stosów ma się nazwać stosami"
+
+
 def test_stacks_pamieta_korzen_i_podpowiada_go(qapp, tmp_path, monkeypatch):
     """Korzeń drogi jest ZAPAMIĘTYWANY (`stacks/last_root`, QSettings per maszyna) i PODPOWIADANY
     przy kolejnym uruchomieniu — dialog dostaje go jako katalog startowy. Osobna pamięć od

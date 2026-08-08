@@ -275,9 +275,11 @@ def mark_superseded(con, *, frame_id, superseded_by, now, actor="supersede"):
 @dataclass
 class FactTransfer:
     """Co przeszło z klatki zastąpionej na jej następczynię (R4). `object_moved` = przeniesiono
-    oś obiektu (także NAGROBEK, który jest werdyktem „ta klatka obiektu NIE ma");
+    oś obiektu (także NAGROBEK, który jest werdyktem „ta klatka obiektu NIE ma"); `config_moved`
+    = przeniesiono oś sprzętu wskazaną ręką (R1);
     `skipped` = powód pominięcia, gdy nic nie przeszło — GUI ma mówić DLACZEGO, nie milczeć."""
     object_moved: bool = False
+    config_moved: bool = False
     skipped: str = ""          # "" = nic nie pominięto (konwencja liczników z `ObjectGesture`)
 
 
@@ -307,45 +309,75 @@ def transfer_human_facts(con, *, frame_id, now, actor="user:local"):
     STARA KLATKA ZOSTAJE NIETKNIĘTA (append-only): jej fakty są historią, nie duplikatem —
     z rachunku godzin i tak wypada przez `superseded_by` (`queries.object_exposure`).
 
-    CO DOŁĄCZY PÓŹNIEJ, świadomie i z powodem: **ręczny config** (jest przedmiotem R1 — kolumny
-    `config_source` jeszcze nie ma, więc nie ma czego przenosić) i **werdykty rodowodu**
+    DRUGA OŚ: RĘCZNY CONFIG (R1, `STICKY_CONFIG_SOURCES`) — i jej guard MUSI brzmieć inaczej niż
+    guard obiektu, bo kolumny znaczą co innego. `object_source` niepuste znaczy „coś ją nazwało"
+    (także automat), więc pyta się o NIEPUSTOŚĆ. `config_source` zapisuje WYŁĄCZNIE ręka (0015:
+    automat zostawia NULL), więc ten sam predykat przepuszczałby zawsze — pytamy zatem o oś
+    W CAŁOŚCI: przenosimy, gdy następczyni nie ma ANI werdyktu ręki, ANI configu z nagłówka.
+    Klatka, której grouper policzył zestaw z jej WŁASNEGO zeznania, przemówiła sama.
+
+    CO DOŁĄCZY PÓŹNIEJ, świadomie i z powodem: **werdykty rodowodu**
     (`integration_input.excluded`; zmierzona populacja na żywym archiwum: **0**, a pierwszy RAW
     wejdzie do rodowodu dopiero po GO-2 — kod na populację zerową byłby zgadywaniem kształtu).
 
-    Zwraca `FactTransfer`. Idempotentne: powtórzenie po udanym przeniesieniu trafia w guard
-    następczyni (ma już źródło) i zwraca `skipped` bez zapisu."""
+    Zwraca `FactTransfer`. Idempotentne: powtórzenie po udanym przeniesieniu trafia w guardy obu
+    osi (następczyni ma już swoje) i zwraca `skipped` bez zapisu."""
     with _immediate(con):
         stara = con.execute(
-            "SELECT superseded_by, object_id, object_source FROM frame WHERE id = ?",
-            (frame_id,)).fetchone()
+            "SELECT superseded_by, object_id, object_source, config_id, config_source "
+            "FROM frame WHERE id = ?", (frame_id,)).fetchone()
         if stara is None:
             raise ValueError(f"frame:{frame_id} nie istnieje")
         if stara["superseded_by"] is None:
             raise ValueError(f"frame:{frame_id} nie jest zastąpiona — nie ma dokąd przenosić")
-        if stara["object_source"] not in TRANSFERABLE_OBJECT_SOURCES:
+        ma_obiekt = stara["object_source"] in TRANSFERABLE_OBJECT_SOURCES
+        # Człon `config_id IS NOT NULL` nie jest nadmiarowy, choć klinga zapisuje oba pola razem:
+        # bez niego para (źródło ręki, oś pusta) — gdyby kiedykolwiek powstała — emitowałaby
+        # `config.assigned` przy `frame.config_id` dalej NULL, czyli rozjeżdżała parytet `audit.py`
+        # o cichy wiersz. Oś obiektu tego członu NIE MA celowo: tam NULL bywa WERDYKTEM (nagrobek).
+        ma_config = (stara["config_source"] in STICKY_CONFIG_SOURCES
+                     and stara["config_id"] is not None)
+        if not ma_obiekt and not ma_config:
             return FactTransfer(skipped="brak faktow czlowieka")
         nowa_id = stara["superseded_by"]
         nowa = con.execute(
-            "SELECT object_source FROM frame WHERE id = ?", (nowa_id,)).fetchone()
+            "SELECT object_source, config_id, config_source FROM frame WHERE id = ?",
+            (nowa_id,)).fetchone()
         if nowa is None:
             raise ValueError(f"frame:{nowa_id} (następczyni) nie istnieje")
-        if nowa["object_source"] is not None:
+        obiekt_do_przeniesienia = ma_obiekt and nowa["object_source"] is None
+        config_do_przeniesienia = (ma_config and nowa["config_source"] is None
+                                   and nowa["config_id"] is None)
+        if not obiekt_do_przeniesienia and not config_do_przeniesienia:
             return FactTransfer(skipped="nastepczyni ma wlasne zrodlo")
 
-        con.execute("UPDATE frame SET object_id = ?, object_source = ? WHERE id = ?",
-                    (stara["object_id"], stara["object_source"], nowa_id))
-        if stara["object_id"] is None:
-            emit_event(con, actor=actor, verb="object.cleared", target=f"frame:{nowa_id}",
-                       now=now, payload={"przeniesione_z": frame_id,
-                                         "was_source": stara["object_source"]},
-                       reason="nagrobek przeniesiony po podmianie pliku")
-        else:
-            emit_event(con, actor=actor, verb="object.assigned", target=f"frame:{nowa_id}",
-                       now=now, payload={"object_id": stara["object_id"],
-                                         "object_source": stara["object_source"],
+        if obiekt_do_przeniesienia:
+            con.execute("UPDATE frame SET object_id = ?, object_source = ? WHERE id = ?",
+                        (stara["object_id"], stara["object_source"], nowa_id))
+            if stara["object_id"] is None:
+                emit_event(con, actor=actor, verb="object.cleared", target=f"frame:{nowa_id}",
+                           now=now, payload={"przeniesione_z": frame_id,
+                                             "was_source": stara["object_source"]},
+                           reason="nagrobek przeniesiony po podmianie pliku")
+            else:
+                emit_event(con, actor=actor, verb="object.assigned", target=f"frame:{nowa_id}",
+                           now=now, payload={"object_id": stara["object_id"],
+                                             "object_source": stara["object_source"],
+                                             "przeniesione_z": frame_id},
+                           reason="fakt ręki przeniesiony po podmianie pliku")
+        if config_do_przeniesienia:
+            # Zestaw przechodzi TAKI SAM, nie przeliczony: config to iloczyn (teleskop × kamera),
+            # a kamera obu tożsamości jest ta sama — to ten sam plik, więc to samo zeznanie EXIF.
+            # Przeliczanie iloczynu tutaj byłoby DRUGĄ derywacją tego samego faktu (§0 briefu).
+            con.execute("UPDATE frame SET config_id = ?, config_source = ? WHERE id = ?",
+                        (stara["config_id"], stara["config_source"], nowa_id))
+            emit_event(con, actor=actor, verb="config.assigned", target=f"frame:{nowa_id}",
+                       now=now, payload={"config_id": stara["config_id"],
+                                         "config_source": stara["config_source"],
                                          "przeniesione_z": frame_id},
-                       reason="fakt ręki przeniesiony po podmianie pliku")
-    return FactTransfer(object_moved=True)
+                       reason="zestaw wskazany ręką przeniesiony po podmianie pliku")
+    return FactTransfer(object_moved=obiekt_do_przeniesienia,
+                        config_moved=config_do_przeniesienia)
 
 
 def clear_superseded(con, *, frame_id, now, actor="scan"):
@@ -692,12 +724,40 @@ def propose_config(con, *, telescope_id, camera_id, now, actor="grouper"):
     return config_id, True
 
 
+CONFIG_SOURCES = frozenset({"user"})
+"""Legalne wartości `frame.config_source` — LUSTRO CHECK-a z DDL (`0015_config_source.sql`).
+
+Jedno źródło, bo jest tylko jeden pisarz tej kolumny: RĘKA. Config wyliczony z nagłówka zostaje
+NULL i to jest decyzja migracji 0015 (powód tam) — `assign_config` jest idempotentny po
+`config_id`, więc zapisywanie „wyliczone" złapałoby wyłącznie klatki akurat ZMIENIAJĄCE config."""
+
+STICKY_CONFIG_SOURCES = CONFIG_SOURCES
+"""Źródła osi sprzętu, których PRZEBIEG nie ma prawa nadpisać ani zgłosić do przeglądu (R1b).
+
+ALIAS, nie druga lista — i to jest tu istotne: dziś każde źródło tej kolumny jest gestem
+człowieka, więc dwa osobne `frozenset` o tej samej treści rozjechałyby się przy pierwszej zmianie
+(SIN-DUP). Rozejdą się dopiero, gdy pojawi się źródło zapisywane przez MASZYNĘ — wtedy ta stała
+zostaje wąska, a `CONFIG_SOURCES` rośnie."""
+
+
 def assign_config(con, *, frame_id, config_id, now, actor="grouper"):
     """Przypisz config do frame'a (`frame.config_id`). INWARIANT (DDL §1): `config.camera_id` musi
     == `frame.camera_id` — gwarantuje grouper (config budowany z kamery tego frame'a). Idempotentny:
-    już przypisany ten sam config → False bez eventu; inaczej UPDATE + `event(config.assigned)`."""
-    row = con.execute("SELECT config_id FROM frame WHERE id = ?", (frame_id,)).fetchone()
-    if row is not None and row[0] == config_id:
+    już przypisany ten sam config → False bez eventu; inaczej UPDATE + `event(config.assigned)`.
+
+    GUARD ŹRÓDŁA (R1b): klatka z osią wskazaną RĘKĄ (`config_source` ∈ `STICKY_CONFIG_SOURCES`)
+    jest NIETYKALNA dla automatu — zwrot `False`, zero zapisu, zero eventu. Guard stoi TU, a nie
+    tylko w pętli groupera, bo to jedyne miejsce, przez które przechodzą OBAJ wołający: przebieg
+    i każdy przyszły pisarz osi. Bez niego pierwsze „Przetwórz wszystko" po geście zamalowałoby
+    fakt człowieka configiem z nagłówka — a nagłówek RAW-a przez teleskop niesie nazwę OBIEKTYWU
+    (E3-3), więc byłby to zapis WPROST fałszywy, nie tylko niechciany.
+
+    Ręka nadpisuje ręką przez `user_assign_config(overwrite=True)` — świadomym drugim gestem."""
+    row = con.execute(
+        "SELECT config_id, config_source FROM frame WHERE id = ?", (frame_id,)).fetchone()
+    if row is not None and row["config_source"] in STICKY_CONFIG_SOURCES:
+        return False
+    if row is not None and row["config_id"] == config_id:
         return False
 
     with con:
@@ -730,6 +790,118 @@ def flag_config_review(con, *, frame_id, reason, now, actor="grouper"):
     with con:
         emit_event(con, actor=actor, verb="config.review", target=f"frame:{frame_id}", now=now,
                    reason=reason)
+
+
+@dataclass
+class ConfigGesture:
+    """Wynik gestu „przypisz zestaw" (R1) — GUI ma powiedzieć „przypisano N z M" I DLACZEGO resztę
+    pominięto. Każdy licznik to inny powód odmowy, nie odcienie jednego."""
+    assigned: int = 0          # klatki, które REALNIE dostały oś sprzętu z tego gestu
+    configs_created: int = 0   # nowe wiersze `config` (iloczyn teleskop × kamera) powołane po drodze
+    kind_skip: int = 0         # kalibracja — osi teleskopu nie ma z DEFINICJI (kind-scoping)
+    no_camera: int = 0         # bez kamery nie ma czego złożyć w config (inwariant DDL §1)
+    occupied: int = 0          # klatka ma już config, a gest nie prosił o nadpisanie
+    unchanged: int = 0         # ten sam zestaw tą samą ręką — idempotencja, zero zapisu
+
+
+def user_assign_config(con, *, frame_ids, telescope_id, now, uid="local", overwrite=False):
+    """Przypisanie ZESTAWU (teleskop × kamera) GRUPIE klatek GESTEM CZŁOWIEKA (#DR2 R1, D-DR-3).
+
+    Powstało dla populacji, która nie ma jak zeznać: RAW zrobiony PRZEZ TELESKOP nie niesie nazwy
+    niczego (`exif.py` mapuje na `TELESCOP` nazwę OBIEKTYWU — E3-3), a plik jest read-only, więc
+    droga writebacku, którą naprawia się nagłówek FITS/XISF, jest tu zamknięta NA ZAWSZE. Jedyną
+    drogą jest baza — i to ten gest.
+
+    JEDNA TRANSAKCJA `_immediate`, DML inline (jak `user_assign_object`, z tego samego powodu):
+    `propose_config` i `assign_config` mają własne `with con:`, więc zawołane wewnątrz zewnętrznej
+    transakcji zamknęłyby ją po pierwszej klatce i atomowość grupy pryskała.
+
+    TELESKOP JEST ARGUMENTEM, KAMERA WYNIKA Z KLATKI — i to nie jest wygoda, tylko INWARIANT DDL
+    (`config.camera_id == frame.camera_id`, §1). Wołający wskazuje to, czego plik nie wie; reszta
+    zestawu stoi w archiwum. Stąd jednostka gestu = FOLDER × KAMERA (D-DR-3): dwa korpusy w jednym
+    folderze to dwa configi, bo `config` niesie dokładnie jedną kamerę (`UNIQUE(telescope_id,
+    camera_id)`).
+
+    CZTERY ODMOWY, KAŻDA Z WŁASNYM LICZNIKIEM (`ConfigGesture`):
+      * **kalibracja** (`grouper.NO_TELESCOPE_KINDS`) — dark i bias powstają przy zamkniętej
+        migawce, optyka ich nie opisuje. Guard stoi TU, w klindze, a nie w oknie: to jedyne
+        miejsce, przez które przejdzie także każda przyszła powierzchnia (lekcja S2b/§4-14c-b —
+        guard postawiony w GUI zostawia drugą drogę otwartą);
+      * **brak kamery** — configu nie da się złożyć bez drugiej osi, a zgadywanie łamałoby
+        inwariant DDL;
+      * **klatka zajęta** — oś już jest, a gest o nadpisanie nie prosił. `overwrite=True` to
+        ŚWIADOMY drugi gest człowieka („guard nadpisania jawny", D-DR-3): bez niego pierwsza
+        pomyłka ręki byłaby wieczna, z nim — cudzy zapis nie ginie po cichu;
+      * **bez zmiany** — ten sam zestaw tą samą ręką: idempotencja, zero DML i zero eventu (kanon
+        repo: powtórzony gest nie zaśmieca dziennika).
+
+    PRZEPIĘCIE EMITUJE PARĘ VERBÓW (`config.unassigned` + `config.assigned`), nie sam drugi —
+    inaczej parytet `audit.py` („`frame.config_id` == assigned − unassigned") rozjeżdża się
+    dokładnie o liczbę nadpisań, a bramka świeci ZIELONO przy zepsutym bilansie (ta sama lekcja,
+    co przy nadpisaniu obiektu w `user_assign_object`).
+
+    Zwraca `ConfigGesture`. Klatka nieistniejąca → `ValueError` i ZERO zapisu (cała grupa
+    wycofana) — jak w `user_assign_object`: dryf do nieistniejącej tożsamości znaczy, że wołający
+    pracuje na nieaktualnej liście, a nie że jedną pozycję da się pominąć."""
+    # Import odroczony: `grouper` importuje `repo` (kierunek stały), a ta stała jest wyprowadzana
+    # z `calibration.KIND_RECIPE` — SPOT ma jednego właściciela, więc pytamy jego, zamiast wyliczać
+    # drugi raz tutaj. Ten sam idiom, co `cli.py` → `supersede`.
+    from .grouper import NO_TELESCOPE_KINDS
+
+    g = ConfigGesture()
+    with _immediate(con):
+        if con.execute("SELECT 1 FROM telescope WHERE id = ?", (telescope_id,)).fetchone() is None:
+            raise ValueError(f"telescope:{telescope_id} nie istnieje")
+        actor = f"user:{uid}"
+        cfg_per_camera = {}                      # kamera → config; jeden SELECT na korpus, nie na klatkę
+        for frame_id in frame_ids:
+            fr = con.execute(
+                "SELECT kind, camera_id, config_id, config_source FROM frame WHERE id = ?",
+                (frame_id,)).fetchone()
+            if fr is None:
+                raise ValueError(f"frame:{frame_id} nie istnieje")
+            if fr["kind"] in NO_TELESCOPE_KINDS:
+                g.kind_skip += 1
+                continue
+            if fr["camera_id"] is None:
+                g.no_camera += 1
+                continue
+            cfg_id = cfg_per_camera.get(fr["camera_id"])
+            if cfg_id is None:
+                row = con.execute(
+                    "SELECT id FROM config WHERE telescope_id = ? AND camera_id = ?",
+                    (telescope_id, fr["camera_id"])).fetchone()
+                if row is None:
+                    cur = con.execute(
+                        "INSERT INTO config(telescope_id, camera_id, label, status, created_at) "
+                        "VALUES (?, ?, NULL, 'proposed', ?)",
+                        (telescope_id, fr["camera_id"], now))
+                    cfg_id = cur.lastrowid
+                    g.configs_created += 1
+                    emit_event(con, actor=actor, verb="config.proposed", target=f"config:{cfg_id}",
+                               now=now, payload={"telescope_id": telescope_id,
+                                                 "camera_id": fr["camera_id"]})
+                else:
+                    cfg_id = row["id"]
+                cfg_per_camera[fr["camera_id"]] = cfg_id
+            if fr["config_id"] == cfg_id and fr["config_source"] in STICKY_CONFIG_SOURCES:
+                g.unchanged += 1                 # ten sam zestaw tą samą ręką — nic do zapisania
+                continue
+            if fr["config_id"] is not None:
+                if not overwrite:
+                    g.occupied += 1
+                    continue
+                emit_event(con, actor=actor, verb="config.unassigned", target=f"frame:{frame_id}",
+                           now=now, payload={"config_id": fr["config_id"],
+                                             "config_source": fr["config_source"]},
+                           reason="zestaw wskazany ręką zastępuje poprzedni")
+            con.execute(
+                "UPDATE frame SET config_id = ?, config_source = 'user' WHERE id = ?",
+                (cfg_id, frame_id))
+            emit_event(con, actor=actor, verb="config.assigned", target=f"frame:{frame_id}",
+                       now=now, payload={"config_id": cfg_id, "config_source": "user"})
+            g.assigned += 1
+    return g
 
 
 # ============================================================ oś OBIEKT + filtr (§Etap 6)

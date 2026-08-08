@@ -1,0 +1,31 @@
+-- 0015 — PROWENIENCJA osi sprzętu: frame.config_source (#DR2 segment R1, D-DR-3).
+--
+-- PRZYROST (ADD COLUMN, jak 0004/0006/0010/0014) — zero zmian istniejących tabel, zero wierszy
+-- ruszonych. Kolumna WCHODZI PUSTA i taka zostaje dla całego archiwum: wypełnia ją GEST CZŁOWIEKA
+-- („przypisz zestaw" w kolejce przeglądu), nie ta migracja i nie przebieg. Kanon repo
+-- (0004:3, `db.py:32-36`): migracja nakłada KSZTAŁT, fakty nakłada KLINGA.
+--
+-- CO ZNACZY: `frame.config_source = 'user'` — zestaw (teleskop × kamera) wskazała RĘKA, bo plik
+-- nie miał czym zeznać. Wzorcowa populacja: 425 RAW-ów z lustrzanki w 36 folderach — EXIF mapuje
+-- na `TELESCOP` nazwę OBIEKTYWU, więc zdjęcie zrobione PRZEZ TELESKOP nie niesie nazwy niczego
+-- (E3-3). To luka STRUKTURALNA formatu, nie błąd pliku, a RAW jest read-only — writeback tu
+-- nie wejdzie NIGDY, więc jedyną drogą jest baza.
+--
+-- NULL = oś wyliczył AUTOMAT z nagłówka (`grouper.run_grouper`) albo osi jeszcze nie ma.
+-- Trójstanu tu nie ma świadomie: „skąd wiadomo" to jedna informacja, a dla każdego konsumenta
+-- „wyliczone" i „nieustalone" znaczą to samo — oś, którą przebieg ma prawo policzyć od nowa.
+-- Automat NIE zapisuje własnego źródła i to jest decyzja, nie przeoczenie: `assign_config` jest
+-- idempotentny po `config_id`, więc backfill „wyliczone" złapałby wyłącznie klatki, które akurat
+-- ZMIENIAJĄ config, a reszta archiwum została z NULL-em na zawsze — kolumna kłamałaby o połowie
+-- populacji. Fakt „to wyliczył grouper" jest odtwarzalny z samego przebiegu.
+--
+-- CO Z TEGO WYNIKA DLA PRZEBIEGU (R1b): źródło z tej kolumny jest LEPKIE. `run_grouper` mija
+-- klatkę z ręcznym zestawem BEZ zapisu i BEZ `config.review` — inaczej pierwsze „Przetwórz
+-- wszystko" po geście zdejmowałoby fakt człowieka, a licznik kubełka nigdy nie spadał.
+--
+-- Strażnik w DDL, bo baza jest ostatnią bramką słownika (wzorzec 0012:93, 0014:29): wstrzyknięcie
+-- literówki gołym `sqlite3` — z pominięciem klingi — ma odbić się o CHECK, a nie zamieszkać
+-- w kolumnie jako czwarta wartość, o której nie wie żaden konsument. Lustro w kodzie:
+-- `repo.CONFIG_SOURCES` (test pinuje równość obu list).
+ALTER TABLE frame ADD COLUMN config_source TEXT
+    CHECK (config_source IS NULL OR config_source IN ('user'));

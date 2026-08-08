@@ -312,7 +312,8 @@ def test_przenosi_fakt_reki_na_nastepczynie():
     _podmiana(con, lid, b)
     repo.mark_superseded(con, frame_id=a, superseded_by=b, now=NOW)
 
-    assert supersede.pending_transfer(con) == [(a, b, "user")]
+    # Trzeci człon nazywa OŚ, nie źródło (R1: gest przenosi dwie osie, kubełek jest jeden)
+    assert supersede.pending_transfer(con) == [(a, b, "obiekt")]
     wynik = repo.transfer_human_facts(con, frame_id=a, now=NOW)
     assert wynik.object_moved is True and wynik.skipped == ""
     assert con.execute(

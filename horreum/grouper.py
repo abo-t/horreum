@@ -47,6 +47,7 @@ class GroupSummary:
     config_review: int = 0
     calibration_off_axis: int = 0  # dark/bias pominięte na osi teleskopu (kind-scoping, NIE review)
     configs_unassigned: int = 0    # stęchłe przypisania kalibracji zdjęte (dane sprzed kind-scopingu)
+    config_by_hand: int = 0        # zestaw wskazany RĘKĄ — przebieg go mija (R1b, NIE review)
 
 
 def run_grouper(con, now):
@@ -59,11 +60,17 @@ def run_grouper(con, now):
     trafia do configu ani do `config.review` — jego `config_id IS NULL` to POPRAWNY STAN, nie delta
     (jak `object_id NULL` dla kalibracji w resolverze). Dane sprzed kind-scopingu mają takie klatki
     PRZYPISANE do cudzego configu, więc przebieg je AKTYWNIE ODPINA (`repo.unassign_config`) —
-    grouper sam się leczy, a oś teleskopu przestaje liczyć darki pod cudzą optyką."""
+    grouper sam się leczy, a oś teleskopu przestaje liczyć darki pod cudzą optyką.
+
+    `STICKY_CONFIG_SOURCES` (R1b) omija FAZĘ 2: zestaw wskazany ręką jest faktem, którego przebieg
+    nie ma prawa ani nadpisać, ani zgłosić do przeglądu. Faza 1 zostaje nietknięta — teleskopy
+    wyłaniają się z NAGŁÓWKÓW niezależnie od tego, komu ręka co przypisała, i cofnięcie tego
+    byłoby zmianą osi teleskopu przy okazji zmiany osi sprzętu."""
     s = GroupSummary()
 
     rows = con.execute(
         "SELECT f.id AS fid, f.camera_id AS cam, f.kind AS kind, f.config_id AS cfg, "
+        "       f.config_source AS cfg_src, "
         "       h.telescop AS tel, h.focallen AS fl, h.focratio_raw AS fr "
         "FROM frame f JOIN header h ON h.frame_id = f.id").fetchall()
     s.headers = len(rows)
@@ -96,6 +103,17 @@ def run_grouper(con, now):
             s.calibration_off_axis += 1
             if r["cfg"] is not None and repo.unassign_config(con, frame_id=r["fid"], now=now):
                 s.configs_unassigned += 1
+            continue
+        # RĘKA ROZSTRZYGNĘŁA — PRZEBIEG MILCZY (R1b). Wyjście z pętli stoi PRZED flagą przeglądu
+        # świadomie: `flag_config_review` strzelało dotąd BEZWARUNKOWO przy każdym przebiegu, więc
+        # klatka z zestawem od człowieka meldowałaby się do przeglądu w nieskończoność, a licznik
+        # kubełka nigdy nie spadał po geście — kolejka roboty mówiłaby o robocie już wykonanej.
+        # Drugi powód jest cięższy: dla tej populacji (RAW przez teleskop) automat NIE MA racji
+        # z definicji formatu — `TELESCOP` z EXIF-u niesie nazwę OBIEKTYWU (E3-3), więc przypisanie
+        # z nagłówka nadpisałoby fakt człowieka wartością WPROST fałszywą. Klinga broni tego samego
+        # (`repo.assign_config`); tutaj oszczędzamy jeszcze zdarzenie i zbędne SELECT-y.
+        if r["cfg_src"] in repo.STICKY_CONFIG_SOURCES:
+            s.config_by_hand += 1
             continue
         canon = (r["tel"] or "").strip()
         if not canon:

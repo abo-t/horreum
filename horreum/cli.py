@@ -507,10 +507,12 @@ def _format_supersede(db_path, s, sieroty, do_przeniesienia, *, apply, limit):
     if sieroty:
         lines.append(f"    {', '.join(str(i) for i in sieroty[:limit])}")
     # KOLEJKA ROBOTY, nie lista zdarzen: para, w ktorej stara klatka niesie werdykt reki, a nowa
-    # nie ma jeszcze zadnego zrodla. Zero znaczy "nie ma czego przenosic", nie "nic sie nie stalo".
+    # tego faktu jeszcze nie ma. Zero znaczy "nie ma czego przenosic", nie "nic sie nie stalo".
+    # Trzeci czlon nazywa OSIE (obiekt / config / oba) -- od R1 gest przenosi dwie, wiec raport
+    # ma mowic, czego dotyczy, a nie tylko ze cos czeka.
     lines.append(f"  do przeniesienia faktow reki: {len(do_przeniesienia)}")
-    lines += [f"    frame {a} -> frame {b} (zrodlo: {src})"
-              for a, b, src in do_przeniesienia[:limit]]
+    lines += [f"    frame {a} -> frame {b} (osie: {osie})"
+              for a, b, osie in do_przeniesienia[:limit]]
     # Obserwacje przykryte pozniejszym zdarzeniem o tej samej klatce: NIE odmowa, opisuja stan,
     # ktory minal. Raportowane, bo partycja liczy KLATKI, nie zdarzenia -- bez tej listy jedna
     # z dwoch obserwacji znikalaby z rachunku bez sladu.

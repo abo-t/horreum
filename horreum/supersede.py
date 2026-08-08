@@ -202,21 +202,45 @@ def pending_transfer(con):
     """Klatki zastąpione, których FAKT CZŁOWIEKA jeszcze nie przeszedł na następczynię (R4).
 
     To jest predykat KUBEŁKA PODMIANY — kolejka roboty, nie lista zdarzeń. Wchodzi do niej para,
-    w której stara klatka niesie werdykt ręki (`TRANSFERABLE_OBJECT_SOURCES`), a następczyni nie ma
-    JESZCZE żadnego źródła. Wychodzi z niej dwiema drogami, obie poprawne: gestem przeniesienia
-    albo tym, że następczyni przemówiła sama (kartą w pliku, xrefem, regionem, drugim gestem).
+    w której stara klatka niesie werdykt ręki, a następczyni tego faktu jeszcze nie ma. Wychodzi
+    z niej dwiema drogami, obie poprawne: gestem przeniesienia albo tym, że następczyni przemówiła
+    sama (kartą w pliku, xrefem, regionem, drugim gestem, własnym zeznaniem o sprzęcie).
+
+    DWIE OSIE, JEDEN KUBEŁEK (R1) — bo jeden gest przenosi oba fakty i jedna kolejka ma je
+    pokazywać. Predykaty osi są RÓŻNE i to wynika z kolumn, nie z gustu: `object_source` bywa
+    niepuste od automatu, więc guard pyta o niepustość; `config_source` zapisuje wyłącznie ręka
+    (0015), więc guard pyta o CAŁĄ oś (`config_id IS NULL AND config_source IS NULL`) — inaczej
+    para z configiem policzonym z nagłówka wisiałaby w kubełku bez wyjścia. Lustro tych warunków
+    stoi w `repo.transfer_human_facts`; rozjazd tych dwóch miejsc znaczy kubełek, którego gest nie
+    umie opróżnić — pinuje to test.
 
     KUBEŁEK JEST DZIŚ PUSTY I TO JEST WYNIK, NIE BRAK: jedyna zastąpiona klatka archiwum (15958)
-    ma `object_source NULL`, więc nie ma czego przenosić. Kolejka mówi „zero roboty", a nie „nic
-    się nie stało" — te dwie rzeczy odróżnia `orphans` obok.
+    ma `object_source NULL` i `config_source NULL`, więc nie ma czego przenosić. Kolejka mówi „zero
+    roboty", a nie „nic się nie stało" — te dwie rzeczy odróżnia `orphans` obok.
 
-    Zwraca `[(stara, nowa, object_source), …]`."""
-    return [(r["id"], r["superseded_by"], r["object_source"]) for r in con.execute(
-        "SELECT f.id, f.superseded_by, f.object_source FROM frame f "
+    Zwraca `[(stara, nowa, co), …]`, gdzie `co` = osie do przeniesienia (`obiekt` / `config` /
+    `obiekt+config`) — raport ma mówić, CZEGO gest dotyczy, nie tylko że coś czeka."""
+    rows = con.execute(
+        "SELECT f.id, f.superseded_by, f.object_source, f.config_source, f.config_id, "
+        "       n.object_source AS n_obj_src, n.config_source AS n_cfg_src, "
+        "       n.config_id AS n_cfg FROM frame f "
         "JOIN frame n ON n.id = f.superseded_by "
-        "WHERE f.superseded_by IS NOT NULL AND n.object_source IS NULL "
-        "AND f.object_source IN (SELECT value FROM json_each(?)) ORDER BY f.id",
-        (json.dumps(sorted(TRANSFERABLE_OBJECT_SOURCES)),))]
+        "WHERE f.superseded_by IS NOT NULL AND ("
+        "  (f.object_source IN (SELECT value FROM json_each(?)) AND n.object_source IS NULL)"
+        "  OR (f.config_source IN (SELECT value FROM json_each(?)) AND f.config_id IS NOT NULL "
+        "      AND n.config_source IS NULL AND n.config_id IS NULL)) ORDER BY f.id",
+        (json.dumps(sorted(TRANSFERABLE_OBJECT_SOURCES)),
+         json.dumps(sorted(repo.STICKY_CONFIG_SOURCES)))).fetchall()
+    out = []
+    for r in rows:
+        osie = []
+        if r["object_source"] in TRANSFERABLE_OBJECT_SOURCES and r["n_obj_src"] is None:
+            osie.append("obiekt")
+        if (r["config_source"] in repo.STICKY_CONFIG_SOURCES and r["config_id"] is not None
+                and r["n_cfg_src"] is None and r["n_cfg"] is None):
+            osie.append("config")
+        out.append((r["id"], r["superseded_by"], "+".join(osie)))
+    return out
 
 
 def orphans(con):

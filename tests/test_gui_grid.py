@@ -1338,6 +1338,50 @@ def test_panel_rodowodu_bez_wejsc_NIE_liczy_zera(view, gcon):
     assert bar.items.isHidden() and bar.action_row.isHidden()
 
 
+def test_gest_odniesienia_wchodzi_tylko_tam_gdzie_jest_pytaniem(view, gcon):
+    """R2: przycisk „Wskaż odniesienie…" ma się pokazać przy powodzie `offset_unknown` i NIE
+    pokazywać przy innym. Dla 121 masterów FITS/ASI zegar nie jest pytaniem, a przycisk
+    sugerowałby problem tam, gdzie go nie ma."""
+    _seed_stos(gcon, reason="degenerate_window")
+    assert _zaznacz_frame(view, 10)
+    view._toggle_panel("lineage")
+    assert view.lineage_bar.btn_offset.isHidden()
+
+    gcon.execute("UPDATE integration SET unresolved_reason = 'offset_unknown' WHERE id = 5")
+    gcon.commit()
+    view._refresh_lineage()
+    assert not view.lineage_bar.btn_offset.isHidden()
+    assert "odniesienie" in view.lineage_bar.btn_offset.text().lower()
+
+
+def test_gest_odniesienia_zapisuje_i_zostawia_droge_powrotu(view, gcon):
+    """Zapis idzie KLINGĄ (`repo.set_integration_offset`), a panel po nim NIE gaśnie: przycisk
+    zostaje, niosąc wskazaną wartość — bo pierwsza pomyłka ręki nie ma być wieczna (ta sama
+    lekcja, co przy zestawie w R1, gdzie zarzut bramki pakietu 3a nazwał dokładnie ten dług)."""
+    _seed_stos(gcon, reason="offset_unknown")
+    assert _zaznacz_frame(view, 10)
+    view._toggle_panel("lineage")
+    view.lineage_bar.offset_asked.emit(60)
+
+    assert gcon.execute("SELECT utc_offset_min FROM integration WHERE id = 5").fetchone()[0] == 60
+    assert gcon.execute("SELECT count(*) FROM event WHERE verb = 'integration.offset_set' "
+                        "AND actor LIKE 'user:%'").fetchone()[0] == 1
+    assert not view.lineage_bar.btn_offset.isHidden(), "droga powrotu ma zostać"
+    assert "+1.0" in view.lineage_bar.btn_offset.text()
+
+
+def test_gest_odniesienia_milknie_na_czas_przebiegu(view, gcon):
+    """Ta sama bramka, co dla werdyktu ręki: etap pipeline'u pisze do `integration` w tle, więc
+    druga powierzchnia zapisu tego samego stołu musi wtedy zamilknąć."""
+    _seed_stos(gcon, reason="offset_unknown")
+    assert _zaznacz_frame(view, 10)
+    view._toggle_panel("lineage")
+    view.lineage_bar.set_busy(True)
+    assert not view.lineage_bar.btn_offset.isEnabled()
+    view.lineage_bar.set_busy(False)
+    assert view.lineage_bar.btn_offset.isEnabled()
+
+
 def test_panel_bez_wejsc_nie_ostrzega_o_klatkach_ktorych_nie_ma(view, gcon):
     """WIZYTACJA P1 #2: „⚠ część TYCH klatek wchodzi też w inny obraz" świeciło przy PUSTEJ liście
     wejść — ostrzeżenie o czymś, czego na ekranie nie ma. Zmierzone: 42 z 47 stosów bez rodowodu

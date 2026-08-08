@@ -1166,14 +1166,19 @@ def stack_lineage_head(con, frame_id):
     sam wiersz `integration_input` należy do integracji o INNYM odcisku. Panel ostrzega z tego
     pytania, bo tylko ono odróżnia „ten sub policzono dwa razy" od „ten obraz ma drugą wersję".
 
+    `utc_offset_min` (R2) niesie ODNIESIENIE CZASU tego obrazu w trójstanie migracji 0016:
+    `None` = nikt nie wskazał, `0` = UTC, wartość = minuty. Panel czyta je po to, żeby odróżnić
+    „nie wiem" od „to jest UTC" — dwa różne zdania, których jedna kolumna bez trójstanu nie
+    umiałaby powiedzieć.
+
     Zwraca: integration_id, unresolved_reason, degenerate, ambiguous, telescope_mismatch,
     declared_rows, drizzle_inputs, disabled_inputs, tool, window_start, window_end,
-    inputs, excluded, secs, sources (rozdzielone przecinkiem źródła pewności wejść), twins,
-    shared."""
+    utc_offset_min, inputs, excluded, secs, sources (rozdzielone przecinkiem źródła pewności
+    wejść), twins, shared."""
     return con.execute(
         "SELECT i.id AS integration_id, i.unresolved_reason, i.degenerate, i.ambiguous, "
         "       i.telescope_mismatch, i.declared_rows, i.drizzle_inputs, i.disabled_inputs, "
-        "       i.tool, i.window_start, i.window_end, "
+        "       i.tool, i.window_start, i.window_end, i.utc_offset_min, "
         "       (SELECT COUNT(*) FROM integration b WHERE b.integ_hash IS NOT NULL "
         "         AND b.integ_hash = i.integ_hash AND b.id <> i.id) AS twins, "
         "       (SELECT COUNT(DISTINCT b.id) FROM integration_input ia "

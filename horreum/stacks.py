@@ -305,6 +305,47 @@ def _in_window(rows, *, start, end, filter_canon, telescope_id, exptime, utc_off
     return [], True, raw_bez_odniesienia
 
 
+def propose_offset_minutes(con, master_frame_id):
+    """PROPOZYCJA odniesienia czasu dla stosu — `minuty | None`. Czysty odczyt, zero zapisu.
+
+    Świadkiem jest OKNO MASTERA zestawione z materiałem RAW tego samego obiektu: gdy `mm:ss`
+    kandydata zgadza się z `mm:ss` początku okna, a różnią się PEŁNE GODZINY, to nie jest zbieg
+    okoliczności, tylko dwa zegary tej samej chwili. ZMIERZONE na kopii żywego archiwum (128 stosów,
+    po nadaniu obiektu 7 stosom DSLR): propozycja trafia **7 z 7** — sześć razy `+120` (LMC) i raz
+    `+60` (IC443) — przy **ZERO** trafieniach wśród pozostałych 121, czyli reguła nie strzela
+    w gałąź, której nie dotyczy. Falsyfikatorem był tu drugi człon, nie pierwszy: propozycja, która
+    trafia wszędzie, nie jest świadkiem.
+
+    PROPONUJE, NIE ZAPISUJE — i to jest cała jej rola (lustro szczebla ścieżki S2). Zegar aparatu
+    jest faktem o SPRZĘCIE, którego archiwum nie zna z definicji; maszyna umie go tylko obstawić
+    z kształtu liczb, więc werdykt zostaje przy człowieku, a zapis przy `repo.set_integration_offset`.
+
+    `None` znaczy „nie mam czym obstawić" — brak okna, brak kandydatów RAW albo podpis niejasny
+    (dwie różne różnice godzin wśród kandydatów). Milczenie jest tu uczciwsze niż środek: propozycja
+    wzięta z niezgodnych świadków byłaby zgadywaniem podanym jako pomiar."""
+    row = con.execute(
+        "SELECT f.object_id, i.window_start FROM frame f "
+        "JOIN integration i ON i.master_frame_id = f.id WHERE f.id = ?",
+        (master_frame_id,)).fetchone()
+    if row is None or row["window_start"] is None or row["object_id"] is None:
+        return None
+    start = header_dt(row["window_start"])
+    if start is None:
+        return None
+    roznice = set()
+    for r in con.execute(
+            "SELECT h.date_obs FROM frame f JOIN header h ON h.frame_id = f.id "
+            "WHERE f.kind = 'light' AND f.object_id = ? AND f.filetype = 'raw' "
+            "AND f.superseded_by IS NULL AND h.date_obs IS NOT NULL", (row["object_id"],)):
+        t = header_dt(r["date_obs"])
+        if t is None or (t.minute, t.second) != (start.minute, start.second):
+            continue
+        delta = round((t - start).total_seconds() / 60.0)
+        if delta % 60 == 0:
+            roznice.add(delta)
+    return roznice.pop() if len(roznice) == 1 else None
+
+
 def _shelf_ambiguous(plany):
     """Zbiór klatek mastera, których okno NAKŁADA się na okno innego stosu tej samej PÓŁKI
     (obiekt+filtr+teleskop) PRZY ZGODNEJ EKSPOZYCJI. Fakt 20 briefu: 43 takie pary to reprocessingi

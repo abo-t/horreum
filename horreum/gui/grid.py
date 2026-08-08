@@ -43,7 +43,7 @@ from PySide6.QtWidgets import (
 )
 
 from horreum import (filter_engine, lineage, macro as macro_mod, naming, pivot as pivot_mod, repo,
-                     writeback)
+                     stacks, writeback)
 from horreum.gui import busy, facet_model, i18n, portfolio, queries, rows, theme
 from horreum.gui.facets import RAIL_MIN_W as _FIELDS_MIN_W, FacetRail
 from horreum.gui.assign_dialog import AssignObjectDialog
@@ -1027,6 +1027,7 @@ class LineageBar(QWidget):
     niż brak panelu."""
 
     judged = Signal(list, bool)        # (frame_ids, excluded) — werdykt ręki, zapis u gospodarza
+    offset_asked = Signal(int)         # (minuty) — wskazane odniesienie czasu, zapis u gospodarza
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1068,8 +1069,16 @@ class LineageBar(QWidget):
         row.addWidget(self.btn_reject)
         row.addStretch(1)
         lay.addWidget(self.action_row)
+        # GEST ODNIESIENIA STOI POZA `action_row` I TO JEST ROZSTRZYGNIĘCIE, NIE UKŁAD: tamten
+        # wiersz chowa się razem z listą (`_sync_visible`), a ten przycisk potrzebny jest DOKŁADNIE
+        # wtedy, gdy listy nie ma — stos z materiałem RAW i nieznanym zegarem ma zero wejść. Wspólny
+        # rodzic znaczyłby, że jedyna recepta na `offset_unknown` znika razem z problemem.
+        self.btn_offset = QPushButton(i18n.t("grid.lin.offset"))
+        self.btn_offset.clicked.connect(self._ask_offset)
+        lay.addWidget(self.btn_offset)
         lay.addStretch(1)               # pustkę zbiera dół panelu, nie odstępy między wierszami
         self._busy = False
+        self._offset_hint = None        # propozycja z rdzenia (`stacks.propose_offset_minutes`)
         self.set_lineage(None, [])
 
     def set_lineage(self, head, inputs, *, hint=None):
@@ -1160,6 +1169,10 @@ class LineageBar(QWidget):
         self.warn.setVisible(bool(self.warn.full_text()))
         self.note.setVisible(False)
         self._sync_buttons()
+        # Odniesienie czasu jest faktem O OBRAZIE, a ta gałąź opisuje KLATKĘ NIEBA — przycisk
+        # gaśnie razem z całym trybem stosu. `_head` jest tu `None`, więc gest i tak nie miałby
+        # celu zapisu; jawne wołanie trzyma to w JEDNYM miejscu zamiast liczyć na kolejność pól.
+        self._sync_offset_visible()
 
     def integration_id(self):
         """Integracja, której dotyczy panel (albo `None`) — gospodarz pyta o cel zapisu TU, zamiast
@@ -1176,6 +1189,7 @@ class LineageBar(QWidget):
         właśnie przeliczał."""
         self._busy = busy
         self._sync_buttons()
+        self._sync_offset_visible()      # ten sam stół, ta sama bramka — gest odniesienia też milknie
 
     def _sync_visible(self, ma_liste):
         """Panel bez listy nie ma prawa zajmować miejsca na listę: pusty `QListWidget` (130 px)
@@ -1186,6 +1200,7 @@ class LineageBar(QWidget):
         self.warn.setVisible(bool(self.warn.full_text()))
         self.note.setVisible(bool(self.note.full_text()))
         self._sync_buttons()
+        self._sync_offset_visible()
 
     def _sync_buttons(self):
         """Uczciwy disabled: werdykt dotyczy ZAZNACZONYCH wierszy listy, więc bez zaznaczenia nie ma
@@ -1209,6 +1224,47 @@ class LineageBar(QWidget):
         ids = self.selected_frame_ids()
         if ids:
             self.judged.emit(ids, excluded)
+
+    def set_offset_hint(self, minutes):
+        """Propozycja odniesienia z rdzenia (`stacks.propose_offset_minutes`) — `None` = brak.
+        Panel jej NIE liczy (głupi widżet): dostaje ją gotową i tylko pokazuje jako wartość
+        wstępną okna. Zapis i tak wymaga potwierdzenia — propozycja skraca gest, nie zastępuje go."""
+        self._offset_hint = minutes
+
+    def _ask_offset(self):
+        """Zapytaj o odniesienie czasu tego obrazu i wyemituj `offset_asked` (zapis u gospodarza).
+
+        JEDNOSTKĄ OKNA SĄ GODZINY, choć baza trzyma MINUTY — bo tak brzmi pytanie do człowieka
+        („o ile zegar aparatu wyprzedzał UTC"), a wszystkie zmierzone offsety archiwum są pełnymi
+        godzinami. Minuty w kolumnie zostają, żeby strefy półgodzinne (Indie, część Australii)
+        nie wymagały migracji, gdy Zdzin tam pojedzie — pole jest szersze niż dzisiejsze okno
+        i to jest świadome."""
+        biezacy = None if self._head is None else self._head["utc_offset_min"]
+        wstepna = biezacy if biezacy is not None else (self._offset_hint or 0)
+        godziny, ok = QInputDialog.getDouble(
+            self, i18n.t("grid.lin.offset_title"), i18n.t("grid.lin.offset_prompt"),
+            wstepna / 60.0, -14.0, 14.0, 1)
+        if ok:
+            self.offset_asked.emit(round(godziny * 60))
+
+    def _sync_offset_visible(self):
+        """Przycisk odniesienia wchodzi TYLKO tam, gdzie ma co zmienić — a to znaczy: gdy powód
+        brzmi `offset_unknown` ALBO odniesienie już wskazano (droga POWROTNA, żeby pomyłka ręki
+        nie była wieczna — ta sama lekcja, co przy zestawie w R1).
+
+        Nie pokazujemy go przy każdym stosie, bo dla 121 masterów FITS/ASI odniesienie nie jest
+        pytaniem: ich czas i tak jest w jednym zegarze, a przycisk sugerowałby problem tam, gdzie
+        go nie ma."""
+        head = self._head
+        widoczny = head is not None and (head["unresolved_reason"] == "offset_unknown"
+                                         or head["utc_offset_min"] is not None)
+        self.btn_offset.setVisible(widoczny)
+        self.btn_offset.setEnabled(widoczny and not self._busy)
+        if widoczny:
+            biezacy = head["utc_offset_min"]
+            self.btn_offset.setText(
+                i18n.t("grid.lin.offset") if biezacy is None
+                else i18n.t("grid.lin.offset_set", hours=f"{biezacy / 60.0:+.1f}"))
 
 
 def _lineage_item_text(r):
@@ -1694,6 +1750,8 @@ class FramesView(QWidget):
 
         self.lineage_bar = LineageBar()                   # trzeci panel stacku (I-2d)
         self.lineage_bar.judged.connect(self._on_lineage_judged)
+        self.lineage_bar.offset_asked.connect(self._on_lineage_offset)
+        self._lineage_frame_id = None       # cel gestu odniesienia (klatka stosu w panelu)
 
         self.panel_stack = _PanelStack()                 # najwyżej JEDEN panel widoczny (F3)
         self.panel_stack.addWidget(self.macro_bar)
@@ -2100,9 +2158,33 @@ class FramesView(QWidget):
         if head is None:
             self.lineage_bar.set_lineage(None, [], hint=i18n.t("grid.lin.hint.not_computed"))
             return
+        # PROPOZYCJA ODNIESIENIA LICZONA TYLKO TAM, GDZIE JEST PYTANIEM (R2): dla 121 masterów
+        # FITS/ASI zegar nie jest problemem, a zapytanie chodzi po całym materiale obiektu, więc
+        # liczenie go przy każdym zaznaczeniu byłoby kosztem bez odbiorcy.
+        self.lineage_bar.set_offset_hint(
+            stacks.propose_offset_minutes(self.con, fid)
+            if head["unresolved_reason"] == "offset_unknown" else None)
         self.lineage_bar.set_lineage(head, queries.stack_lineage_inputs(self.con, fid))
+        self._lineage_frame_id = fid
         if select_frame_ids:
             self.lineage_bar.select_frame_ids(select_frame_ids)
+
+    def _on_lineage_offset(self, minutes):
+        """Wskazane odniesienie czasu → jedna klinga (`repo.set_integration_offset`), potem
+        odświeżenie panelu ze STANU — lustro `_on_lineage_judged`.
+
+        RODOWODU TU NIE PRZELICZAMY i to jest granica, nie brak: dobór wejść jedzie po CAŁYM
+        archiwum stosów (`run_stack_lineage`), więc jest robotą etapu w Dostawie, nie skutkiem
+        ubocznym kliknięcia w panelu. Zamiast tego zdanie mówi WPROST, gdzie to policzyć — ta sama
+        umowa, co przy geście zestawu w R1."""
+        iid = self.lineage_bar.integration_id()
+        if iid is None:
+            return
+        repo.set_integration_offset(self.con, master_frame_id=self._lineage_frame_id,
+                                    utc_offset_min=minutes, now=self._now())
+        self._refresh_lineage()
+        self.status_message.emit(
+            i18n.t("grid.lin.offset_saved", hours=f"{minutes / 60.0:+.1f}"))
 
     def _on_lineage_judged(self, frame_ids, excluded):
         """Werdykt ręki → jedna klinga (`repo.judge_integration_input`), potem odświeżenie panelu

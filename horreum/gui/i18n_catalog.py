@@ -1275,6 +1275,28 @@ CATALOG = {
         "en": "Unknown source: that night's frames come from a different telescope than the image "
               "records.",
     },
+    "grid.lin.offset": {
+        "pl": "Wskaż odniesienie czasu…",
+        "en": "Set time reference…",
+    },
+    "grid.lin.offset_set": {
+        "pl": "Odniesienie: {hours} h — zmień…",
+        "en": "Time reference: {hours} h — change…",
+    },
+    "grid.lin.offset_title": {
+        "pl": "Odniesienie czasu obrazu",
+        "en": "Image time reference",
+    },
+    "grid.lin.offset_prompt": {
+        "pl": "O ile godzin zegar aparatu wyprzedzał UTC, gdy powstawał ten materiał?\n"
+              "(Polska zimą: +1 · Polska latem: +2 · zapis w UTC: 0)",
+        "en": "How many hours was the camera clock ahead of UTC when this material was shot?\n"
+              "(Poland in winter: +1 · Poland in summer: +2 · recorded in UTC: 0)",
+    },
+    "grid.lin.offset_saved": {
+        "pl": "Odniesienie zapisane: {hours} h. Policz rodowód w Dostawie, żeby dobrać klatki.",
+        "en": "Time reference saved: {hours} h. Compute lineage in Delivery to match frames.",
+    },
     "grid.lin.reason.offset_unknown": {
         "pl": "Nie wiem, z czego powstał: materiał leży w plikach RAW, a te liczą czas w zegarze "
               "aparatu. Wskaż odniesienie tego obrazu, a klatki się dobiorą.",

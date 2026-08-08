@@ -15,7 +15,8 @@ import pytest
 
 from horreum import db, repo
 from horreum.stacks import (EXP_TOL_CEILING_S, REASON_NO_CANDIDATES, REASON_OFFSET_UNKNOWN,
-                            exposure_matches, inputs_of, run_stack_lineage)
+                            exposure_matches, inputs_of,
+                            propose_offset_minutes as stacks_propose, run_stack_lineage)
 
 NOW = "2026-08-08T12:00:00+00:00"
 LATER = "2026-08-08T13:00:00+00:00"
@@ -242,6 +243,37 @@ def test_klinga_offsetu_jest_idempotentna_i_odmawia_nie_stosowi(con):
         repo.set_integration_offset(con, master_frame_id=999, utc_offset_min=60, now=NOW)
     with pytest.raises(ValueError):
         repo.set_integration_offset(con, master_frame_id=m, utc_offset_min="60", now=NOW)
+
+
+# ================================================== PROPOZYCJA odniesienia (świadek = okno mastera)
+
+def test_propozycja_czyta_podpis_dwoch_zegarow(con):
+    """Podpis to zgodność `mm:ss` przy różnicy PEŁNYCH godzin. Na kopii żywego archiwum trafia
+    7 z 7 stosów DSLR i ZERO ze 121 pozostałych — drugi człon jest tu falsyfikatorem, bo
+    propozycja, która trafia wszędzie, nie jest świadkiem."""
+    m = _master(con)                                     # okno startuje 20:40:38
+    _light(con, "s1", date_obs="2019-01-10T21:40:38")    # ten sam mm:ss, +1 h
+    run_stack_lineage(con, now=NOW, xml_reader=_brak_xml)
+
+    assert stacks_propose(con, m) == 60
+
+
+def test_propozycja_milczy_gdy_podpisu_nie_ma(con):
+    """Trzy sposoby, na które świadek może nie zeznać — i we wszystkich milczenie jest uczciwsze
+    niż środek: brak podpisu (`mm:ss` się różnią), materiał NIE-RAW (inny zegar nie wchodzi w grę)
+    oraz świadkowie NIEZGODNI (dwie różne różnice godzin — propozycja z nich byłaby zgadywaniem
+    podanym jako pomiar)."""
+    m = _master(con)
+    _light(con, "a", date_obs="2019-01-10T21:41:07")     # mm:ss inne niż okno
+    run_stack_lineage(con, now=NOW, xml_reader=_brak_xml)
+    assert stacks_propose(con, m) is None
+
+    _light(con, "b", date_obs="2019-01-10T22:40:38", filetype="fits")   # podpis, ale nie RAW
+    assert stacks_propose(con, m) is None
+
+    _light(con, "c", date_obs="2019-01-10T21:40:38")     # +1 h
+    _light(con, "d", date_obs="2019-01-10T22:40:38")     # +2 h — świadkowie się kłócą
+    assert stacks_propose(con, m) is None
 
 
 # ============================================================ G2-11 · okno mastera NIETKNIĘTE

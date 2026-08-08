@@ -12,7 +12,9 @@ NIGDY składanie stringa SQL. Listy zmiennej długości (id/keywordy) idą jako 
 """
 
 import json
+import os
 
+from horreum.grouper import NO_TELESCOPE_KINDS      # jeden właściciel zbioru rodzajów poza osią
 from horreum.resolve.frames import LIGHT_KINDS
 from horreum.resolve.objects import CLEARABLE_OBJECT_SOURCES, WEAK_OBJECT_SOURCES
 from horreum.resolver import NO_OBJECT_CARD_FILETYPES, path_proposals, review_state
@@ -480,6 +482,81 @@ def nameless_raw_frames(con, cleared=False):
         "ORDER BY l.path, f.id",
         (json.dumps(list(NO_OBJECT_CARD_FILETYPES)), int(cleared))
     ).fetchall()
+
+
+def config_review_frames(con):
+    """Drążenie kubełka „bez zestawu (teleskop × kamera)" (R1, #DR2) — jeden wiersz na klatkę.
+
+    Predykat jest LUSTREM `resolver.review_state.no_config` znak w znak: `config_id IS NULL`
+    + rodzaj NA OSI teleskopu (kalibracja ma NULL jako stan docelowy) + `EXISTS(header)` (grouper
+    iteruje `frame JOIN header`, więc klatka bez zeznania nigdy nie jest flagowana). Dwa literały,
+    bo warstwy są dwie i zależność idzie w jedną stronę — a RÓWNOŚĆ PINUJE TEST, dokładnie jak przy
+    kotwicy `nameless_raw_lights` (bramka 13). Kopiowanie zbioru rodzajów jest zakazane: idzie
+    przez `json_each(?)` od jedynego właściciela (`grouper.NO_TELESCOPE_KINDS`).
+
+    KOLUMNA `telescop` NIE JEST OZDOBĄ — to ona pokazuje, DLACZEGO automat nie umiał: dla RAW-a
+    z lustrzanki nagłówek albo milczy (zdjęcie przez teleskop), albo niesie nazwę OBIEKTYWU (E3-3),
+    a użytkownik musi widzieć różnicę, zanim wskaże sprzęt. Reszta kolumn jak w `nameless_frames`
+    (ten sam panel `_fill_frames` je czyta; wąski SELECT wywala render na pierwszym wierszu).
+
+    Klatka BEZ KOPII zostaje w wyniku z `path IS NULL` (LEFT JOIN) — sierota po podmianie pliku
+    też jest w kubełku i licznik ją liczy, więc drążenie nie ma prawa jej gubić. Zwraca: frame_id,
+    sha1_data, filetype, date_obs, telescope_label, telescop_canon, camera_model, camera_id,
+    telescop, location_id, path, n_present."""
+    return con.execute(
+        "SELECT f.id AS frame_id, f.sha1_data, f.filetype, h.date_obs, "
+        "       t.label AS telescope_label, t.telescop_canon, "
+        "       cam.model_canon AS camera_model, f.camera_id, h.telescop, "
+        "       l.id AS location_id, l.path, "
+        "       (SELECT COUNT(*) FROM location WHERE frame_id = f.id AND present = 1) AS n_present "
+        "FROM frame f JOIN header h ON h.frame_id = f.id "
+        "LEFT JOIN config c ON c.id = f.config_id "
+        "LEFT JOIN telescope_canonical tc ON tc.id = c.telescope_id "
+        "LEFT JOIN telescope t ON t.id = tc.canon_id "
+        "LEFT JOIN camera cam ON cam.id = f.camera_id "
+        "LEFT JOIN location l ON l.id = (SELECT MIN(id) FROM location "
+        "                                WHERE frame_id = f.id AND present = 1) "
+        "WHERE f.config_id IS NULL "
+        "  AND f.kind NOT IN (SELECT value FROM json_each(?)) "
+        "ORDER BY l.path, f.id",
+        (json.dumps(sorted(NO_TELESCOPE_KINDS)),)
+    ).fetchall()
+
+
+def config_review_groups(con):
+    """Kubełek sprzętu pogrupowany w JEDNOSTKI GESTU: **folder × kamera** (D-DR-3).
+
+    Nie jest to drugi predykat, tylko PROJEKCJA `config_review_frames` — grupowanie robi Python,
+    bo folder to `dirname(path)`, którego SQLite nie ma, a drugi SELECT dałby dwie odpowiedzi na
+    jedno pytanie (ta sama reguła, co przy grupowaniu po folderze w oknie „Napraw nagłówek…").
+
+    KAMERA JEST CZĘŚCIĄ KLUCZA, nie ozdobą wiersza: `config` niesie DOKŁADNIE JEDNĄ kamerę
+    (`UNIQUE(telescope_id, camera_id)`), a zmierzone 2 z 36 folderów archiwum mają dwa korpusy
+    (`NGC5194\\portable`, `NGC6853\\portable`). Grupa „folder" bez kamery obiecywałaby jeden gest
+    tam, gdzie muszą być dwa configi.
+
+    KLATKA BEZ KOPII trafia do grupy o `folder=None` — i to jest jedyna grupa, której nazwy nie ma
+    na dysku. Nie znika: licznik kubełka ją liczy (sierota po podmianie pliku), więc lista, która
+    ją gubi, kłamałaby o zakresie gestu.
+
+    `telescop` grupy = zeznanie PIERWSZEJ klatki, gdy wszystkie mówią to samo; różne zeznania
+    w jednym folderze dają `None` (grupa nie ma jednego świadka i nie ma udawać, że ma).
+
+    Zwraca listę dictów: {folder, camera_id, camera_model, telescop, n_frames, frame_ids}."""
+    grupy = {}
+    for r in config_review_frames(con):
+        folder = os.path.dirname(r["path"]) if r["path"] else None
+        klucz = (folder, r["camera_id"])
+        g = grupy.get(klucz)
+        if g is None:
+            g = grupy[klucz] = {"folder": folder, "camera_id": r["camera_id"],
+                                "camera_model": r["camera_model"], "telescop": r["telescop"],
+                                "n_frames": 0, "frame_ids": []}
+        elif g["telescop"] != r["telescop"]:
+            g["telescop"] = None                 # folder z dwoma zeznaniami nie ma jednego świadka
+        g["n_frames"] += 1
+        g["frame_ids"].append(r["frame_id"])
+    return list(grupy.values())
 
 
 def nameless_stack_frames(con, cleared=False):

@@ -30,7 +30,14 @@ QT_WIDGET_FILES = {"app.py", "__main__.py", "pipeline.py", "grid.py", "projectio
                    # importować `app` (cykl: `app` importuje grid). Ten sam powód, co przy
                    # `assign_dialog.py`: PRZESUNIĘCIE granicy, nie jej rozluźnienie.
                    "busy.py",
-                   "assign_dialog.py"}
+                   "assign_dialog.py",
+                   # R1: okno „Przypisz zestaw…" (oś SPRZĘTU wskazana ręką). Wydzielone od pierwszej
+                   # linii wzorem `assign_dialog.py`, bo pyta o INNĄ oś niż reszta ekranu, a jego
+                   # kontrakt („teleskop wskazuje ręka, kamerę zna plik") jest inwariantem DDL.
+                   # Wpis PRZESUWA granicę, nie rozluźnia jej: read-model kubełka
+                   # (`queries.config_review_frames`/`config_review_groups`) zostaje Qt-wolny
+                   # i pilnuje tego asercja pozytywna w `test_readmodel_i_init_gui_qt_free`.
+                   "config_dialog.py"}
 
 
 def _imports_pyside6(path):

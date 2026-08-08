@@ -183,8 +183,13 @@ def test_kolejka_review_drazenie(view):
 
 
 def test_kolejka_liczniki_informacyjne(view):
-    """#13/P4: „kopie nieczytelne" to OSOBNA, klikalna pozycja (drążenie Z6); liczniki
-    config-review/headerless zostają na pozycji informacyjnej (bez tagu → nieklikana)."""
+    """#13/P4: „kopie nieczytelne" to OSOBNA, klikalna pozycja (drążenie Z6); licznik klatek bez
+    nagłówka zostaje na pozycji informacyjnej (bez tagu → nieklikana).
+
+    PRZESTEMPLOWANY W R1: oś SPRZĘTU wyszła z tego wiersza i dostała WŁASNY, klikalny (gest
+    „Przypisz zestaw…" istnieje, więc nota „rozwiązywanie w przygotowaniu" o niej byłaby dziś
+    kłamstwem). Nota zostaje wyłącznie nad klatkami bez nagłówka — tam naprawą jest ponowny
+    odczyt pliku, nie decyzja w kolejce."""
     v, con, ids = view
     items = [(v.review.item(r).text(), v.review.item(r).data(UROLE))
              for r in range(v.review.count())]
@@ -193,9 +198,12 @@ def test_kolejka_liczniki_informacyjne(view):
     # zaznaczalny spadał na podświetleniu do 1,84:1 kontrastu (T2 N3). Jedna reguła dla wszystkich
     # kubełków — `nameless` zachowywał się tak od początku. Klikalny wraca przy n>0 (#13/Z6).
     assert any(t.startswith("— kopie nieczytelne: 0") and tag is None for t, tag in items)
-    # nota „rozwiązywanie w przygotowaniu" zawężona do dwóch kanałów bez akcji (R#9)
-    assert any("config-review: 4" in t and "bez nagłówka: 1" in t
+    # nota „rozwiązywanie w przygotowaniu" zawężona do JEDNEGO kanału bez akcji (R#9 → R1)
+    assert any("bez nagłówka: 1" in t and "config-review" not in t
                and "rozwiązywanie w przygotowaniu" in t and tag is None for t, tag in items)
+    # …a oś sprzętu ma odtąd własny wiersz Z DROGĄ (fixture §8: 4 klatki bez zestawu)
+    assert any(t.startswith("— bez zestawu (teleskop × kamera): 4 klatek")
+               and tag == "config_review" for t, tag in items)
 
 
 def test_kolejka_pokazuje_ktora_pozycja_prowadzi_dalej(view):
@@ -246,19 +254,24 @@ def test_wiersz_informacyjny_MA_TOOLTIP_mowiacy_dlaczego_nie_prowadzi(view):
             assert it.toolTip().strip(), f"wiersz informacyjny {it.text()!r} milczy pod kursorem"
 
 
-def test_wiersz_licznikow_TLUMACZY_ze_to_INNE_OSIE(view):
-    """F-2: wiersz „config-review · bez nagłówka" opisuje DWIE INNE OSIE, które mają własne ekrany —
-    i to jest powód, dla którego nie prowadzi nigdzie. Zdanie ogólne („to wiersz informacyjny")
-    byłoby prawdziwe, ale bezużyteczne: user dalej nie wiedziałby, gdzie te sprawy załatwić."""
+def test_wiersz_licznikow_TLUMACZY_ze_to_INNA_OS(view):
+    """F-2: wiersz „bez nagłówka" opisuje INNĄ OŚ i to jest powód, dla którego nie prowadzi nigdzie.
+    Zdanie ogólne („to wiersz informacyjny") byłoby prawdziwe, ale bezużyteczne: user dalej nie
+    wiedziałby, gdzie tę sprawę załatwić.
+
+    WIERSZ ROZPOZNAJEMY PO JEGO WŁASNYM ZDANIU, nie po fragmencie tekstu licznika — bo tekst
+    licznika już raz się zmienił (R1 wyprowadził z niego oś sprzętu) i szukanie po „config-review"
+    przewróciło ten test, choć powierzchnia była poprawna. Tożsamością wiersza jest recepta."""
     from horreum.gui import i18n
     v, con, ids = view
     msgs = []
     v.status_message.connect(msgs.append)
+    powod = i18n.t("object.review_info_why")
     for r in range(v.review.count()):
         it = v.review.item(r)
-        if "config-review" in it.text():
+        if it.data(UROLE) is None and it.toolTip() == powod:
             v._on_review_clicked(it)
-            assert msgs[-1] == i18n.t("object.review_info_why")
+            assert msgs[-1] == powod
             assert msgs[-1] != i18n.t("object.review_info_generic")
             return
     raise AssertionError("nie znaleziono wiersza liczników")
@@ -387,7 +400,8 @@ def test_KAZDY_kubelek_kolejki_ma_WLASNA_recepte_naprawy(view):
     from horreum.gui.app import _REPAIR_TIPS
     kubelki = {"object_raw", "object_raw_cleared", "nameless", "nameless_cleared",
                "nameless_raw", "nameless_raw_cleared", "path_proposals",
-               "nameless_stacks", "nameless_stacks_cleared", "unreadable"}
+               "nameless_stacks", "nameless_stacks_cleared", "unreadable",
+               "config_review"}          # R1: oś SPRZĘTU — inna oś, więc własna recepta
     brakuje = kubelki - set(_REPAIR_TIPS)
     assert not brakuje, f"kubełki bez własnej recepty naprawy: {sorted(brakuje)}"
     assert None in _REPAIR_TIPS, "brak zaznaczenia musi mieć jawny wpis, nie wpadać w `.get`"

@@ -288,21 +288,94 @@ CATALOG = {
     "path.skipped": {"pl": " ({n} pominięte — zajęte między oknem a zapisem)",
                      "en": " ({n} skipped — taken between the dialog and the write)"},
     "object.unreadable_line": {"pl": "— kopie nieczytelne: {n}", "en": "— unreadable copies: {n}"},
+    # KUBEŁEK OSI SPRZĘTU (R1) — do tej pory był POŁOWĄ wiersza informacyjnego z notą
+    # „rozwiązywanie w przygotowaniu". Nota była uczciwa i dlatego musiała zniknąć razem z drogą:
+    # od R1 gest istnieje, więc wiersz prowadzi do klatek i niesie własną akcję. Jednostką pozycji
+    # jest KLATKA (tak liczy `resolver.review_state`), a jednostką GESTU folder × kamera — dlatego
+    # zdanie mówi „klatek", a okno pokazuje foldery.
+    "object.config_review_line": {
+        "pl": "— bez zestawu (teleskop × kamera): {n} klatek",
+        "en": "— without a setup (telescope × camera): {n} frames"},
+    "object.config_review_info_empty": {
+        "pl": "Ten kubełek jest pusty — każda klatka na osi teleskopu ma zestaw. Wiersz zapali "
+              "się, gdy pojawi się plik, który o sprzęcie nie zeznaje (typowo RAW z lustrzanki).",
+        "en": "This bucket is empty — every frame on the telescope axis has a setup. The row will "
+              "light up once a file appears that does not testify about hardware (typically DSLR RAW)."},
+    "object.frames_config_review": {
+        "pl": "Klatki bez zestawu ({n})", "en": "Frames without a setup ({n})"},
+    "object.set_config_btn": {"pl": "Przypisz zestaw…", "en": "Assign setup…"},
+    "object.set_config_tip": {
+        "pl": "Wskaż TELESKOP dla folderów, które o sprzęcie nie zeznają — kamerę bierzemy "
+              "z klatki. Zapis idzie do BAZY, nie do plików (RAW jest read-only).",
+        "en": "Point out the TELESCOPE for folders that do not testify about hardware — the camera "
+              "comes from the frame. The write goes to the DATABASE, not the files (RAW is read-only)."},
+    "object.set_config_tip_pick": {
+        "pl": "Zaznacz w kolejce pozycję „bez zestawu (teleskop × kamera)”",
+        "en": "Select the “without a setup (telescope × camera)” entry in the queue"},
     "object.review_info": {
-        "pl": "— config-review: {config}  ·  bez nagłówka: {headerless}  (rozwiązywanie w przygotowaniu)",
-        "en": "— config-review: {config}  ·  headerless: {headerless}  (resolution in preparation)",
+        "pl": "— bez nagłówka: {headerless}  (rozwiązywanie w przygotowaniu)",
+        "en": "— headerless: {headerless}  (resolution in preparation)",
     },
+    # ---- okno „Przypisz zestaw…" (R1)
+    "cfg.title": {"pl": "Przypisz zestaw (teleskop × kamera)", "en": "Assign setup (telescope × camera)"},
+    "cfg.head": {
+        "pl": "{folders} grup · {frames} klatek. Kamerę zna plik; wskazać trzeba TELESKOP. "
+              "Jednostką jest FOLDER × KAMERA, bo jeden zestaw niesie dokładnie jedną kamerę. "
+              "Zapis idzie do BAZY, nie do plików — RAW jest read-only.",
+        "en": "{folders} groups · {frames} frames. The file knows the camera; the TELESCOPE is what "
+              "you must point out. The unit is FOLDER × CAMERA, because one setup carries exactly "
+              "one camera. The write goes to the DATABASE, not the files — RAW is read-only."},
+    "cfg.item": {"pl": "{folder}  ·  {camera}  ·  {n} klatek",
+                 "en": "{folder}  ·  {camera}  ·  {n} frames"},
+    "cfg.no_folder": {"pl": "(bez kopii na dysku)", "en": "(no copy on disk)"},
+    "cfg.no_camera": {"pl": "(kamera nieznana)", "en": "(camera unknown)"},
+    "cfg.header_says": {"pl": "nagłówek mówi: {telescop}", "en": "header says: {telescop}"},
+    "cfg.header_silent": {"pl": "nagłówek milczy o sprzęcie", "en": "header is silent about hardware"},
+    "cfg.telescope": {"pl": "Teleskop (Twoje wskazanie):", "en": "Telescope (your indication):"},
+    "cfg.pick_telescope": {"pl": "— wybierz teleskop —", "en": "— pick a telescope —"},
+    "cfg.park_badge": {"pl": "w parku", "en": "in park"},
+    "cfg.assign_btn": {"pl": "Przypisz zaznaczone ({n})", "en": "Assign selected ({n})"},
+    "cfg.cancel_btn": {"pl": "Anuluj", "en": "Cancel"},
+    "cfg.err_nothing": {"pl": "Nic nie zaznaczono — zero zapisu.",
+                        "en": "Nothing selected — nothing written."},
+    "cfg.err_no_telescope": {"pl": "Wskaż teleskop — kamerę zna plik, tego nie zgadujemy.",
+                             "en": "Point out a telescope — the file knows the camera, this we do not guess."},
+    "cfg.no_camera_warning": {
+        "pl": "{n} klatek zostanie pominiętych: bez kamery nie ma z czego złożyć zestawu.",
+        "en": "{n} frames will be skipped: without a camera there is nothing to build a setup from."},
+    "object.config_assigned_report": {
+        "pl": "Przypisano zestaw {telescope} → {assigned} z {total} klatek.",
+        "en": "Assigned setup {telescope} → {assigned} of {total} frames."},
+    # NASTĘPNY TAKT NAZWANY, nie domyślony (wzorzec taktu 3 z „Napraw nagłówek…"): oś sprzętu
+    # działa natychmiast (facety, filtr), ale dobór rodowodu stosów czyta teleskop kandydata —
+    # więc jeśli te klatki są materiałem gotowego obrazu, rodowód trzeba przeliczyć. Zdanie mówi
+    # GDZIE; przycisku tu nie ma, bo na dzisiejszym archiwum nie miałby czego zmienić (wszystkie
+    # 3367 wejść rodowodu to FITS-y), a obietnica bez skutku jest gorsza od wskazania drogi.
+    "object.config_next_step": {
+        "pl": " Rodowód gotowych obrazów przelicz w Dostawie („Policz rodowód”), gdy te klatki "
+              "są materiałem stosu.",
+        "en": " Recompute stack lineage in Delivery (“Compute lineage”) if these frames are stack "
+              "material."},
+    "object.config_skipped": {
+        "pl": " (pominięte: {occupied} z zestawem, {no_camera} bez kamery, "
+              "{kind_skip} kalibracja, {unchanged} bez zmiany)",
+        "en": " (skipped: {occupied} already set, {no_camera} without a camera, "
+              "{kind_skip} calibration, {unchanged} unchanged)"},
     # WYTŁUMACZENIA WIERSZY INFORMACYJNYCH (F-2) — tooltip + odpowiedź na klik. Każde mówi DWIE
     # rzeczy: czego wiersz jest opisem i dlaczego nie prowadzi dalej. Bez nich klik w wiersz nie
     # dawał żadnej reakcji, co dla użytkownika jest nieodróżnialne od zawieszenia aplikacji.
     "object.review_info_generic": {
         "pl": "To wiersz informacyjny — pokazuje liczbę, nie prowadzi do klatek.",
         "en": "This is an informational row — it shows a count, it does not lead to frames."},
+    # Zdanie ZWĘŻONE w R1 z dwóch osi do jednej — bo oś sprzętu przestała być „w przygotowaniu"
+    # i dostała własny wiersz z akcją. Zostaje wyłącznie klatka bez nagłówka: tu naprawą jest
+    # ponowny odczyt pliku (skan), a nie decyzja w kolejce, więc wiersz nadal nie ma dokąd prowadzić.
     "object.review_info_why": {
-        "pl": "Licznik dwóch INNYCH osi: config-review (oś sprzętu) i klatek bez nagłówka. "
-              "Tu nie ma dokąd prowadzić — te osie mają własne ekrany w Porządkach.",
-        "en": "A counter for two OTHER axes: config-review (hardware) and headerless frames. "
-              "There is nowhere to go from here — those axes have their own screens in Tasks."},
+        "pl": "Licznik INNEJ osi: klatek bez nagłówka (plik nieczytelny przy skanie). "
+              "Tu nie ma dokąd prowadzić — naprawą jest ponowny odczyt pliku, nie decyzja w kolejce.",
+        "en": "A counter for a DIFFERENT axis: headerless frames (the file was unreadable during "
+              "the scan). There is nowhere to go from here — the fix is re-reading the file, not "
+              "a decision in this queue."},
     "object.nameless_info_empty": {
         "pl": "Ten kubełek jest pusty — każda klatka z nagłówkiem ma nazwę obiektu. "
               "Wiersz zapali się i zacznie prowadzić do klatek, gdy pojawi się pierwsza bez niej.",
@@ -398,6 +471,13 @@ CATALOG = {
     "repair.tip_busy": {
         "pl": "Druga powierzchnia właśnie pisze do plików — poczekaj na jej koniec.",
         "en": "Another surface is writing to files right now — wait for it to finish."},
+    # R1: kubełek osi SPRZĘTU trafia pod ten przycisk tylko dlatego, że sąsiaduje w kolejce —
+    # karta `OBJECT` nie ma z nim nic wspólnego, a milczenie odesłałoby usera w złe miejsce.
+    "repair.tip_config": {
+        "pl": "Ten kubełek nie jest o nazwie obiektu, a o SPRZĘCIE — drogą jest „Przypisz "
+              "zestaw…”. Karty do RAW-a i tak nie dopiszemy: format jest read-only.",
+        "en": "This bucket is not about the object name but about HARDWARE — the way is “Assign "
+              "setup…”. A card cannot be written to RAW anyway: the format is read-only."},
     "repair.tip_pick": {
         "pl": "Zaznacz kubełek klatek bez nazwy w nagłówku — ta akcja pisze do PLIKÓW.",
         "en": "Select a bucket of frames with no name in the header — this action writes to FILES."},

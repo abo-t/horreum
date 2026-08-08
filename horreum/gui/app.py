@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 from horreum import db, macro as macro_mod, repo, resolver
 from horreum.gui import busy, i18n, mapproj, queries, theme
 from horreum.gui.assign_dialog import AssignObjectDialog
+from horreum.gui.config_dialog import AssignConfigDialog
 from horreum.gui.map_view import SitesMapView
 from horreum.resolve._text import norm_alnum
 from horreum.resolve.catalog import catalog_canon
@@ -81,6 +82,9 @@ _REPAIR_TIPS = {
     "object_raw_cleared": "repair.tip_named",
     "path_proposals": "repair.tip_path",
     "unreadable": "repair.tip_unreadable",
+    # R1: kubełek osi SPRZĘTU. Sąsiaduje w kolejce, więc musi mieć własne zdanie — inaczej
+    # wygaszony przycisk naprawy odesłałby usera do karty `OBJECT`, która nie ma z nim nic wspólnego.
+    "config_review": "repair.tip_config",
     None: "repair.tip_pick",
 }
 # Stałe nagłówków trzymają KLUCZE katalogu (nie stringi) — etykieta rozwiązuje się `_headers()` w czasie
@@ -1100,6 +1104,15 @@ class ObjectAxisView(QWidget):
         self.confirm_path_btn.setEnabled(False)
         self.confirm_path_btn.clicked.connect(self._on_confirm_path)
         assign_row.addWidget(self.confirm_path_btn)
+        # CZWARTA akcja — i pierwsza w tym rzędzie, która nie dotyczy osi OBIEKTU (R1). Kubełek
+        # sprzętu mieszka w tej kolejce od początku, ale do R1 był wierszem informacyjnym z notą
+        # „rozwiązywanie w przygotowaniu": mechanizmu nie było, więc powierzchni też nie. Ekran
+        # zapowiadał userowi tę drogę wprost, a niedokończona obietnica na ekranie jest droższa
+        # niż dług w kolejce — dlatego akcja stoi tu, obok tej noty, którą właśnie zdejmuje.
+        self.set_config_btn = QPushButton(i18n.t("object.set_config_btn"))
+        self.set_config_btn.setEnabled(False)
+        self.set_config_btn.clicked.connect(self._on_set_config)
+        assign_row.addWidget(self.set_config_btn)
         assign_row.addStretch(1)
         lv.addLayout(assign_row)
 
@@ -1304,12 +1317,18 @@ class ObjectAxisView(QWidget):
         self._add_review_item(i18n.t("object.unreadable_line", n=q["unreadable_count"]),
                               tag="unreadable" if q["unreadable_count"] > 0 else None,
                               info=i18n.t("object.unreadable_info_empty"))
-        # liczniki innych kanałów jako pozycja informacyjne (bez tagu → nieklikana); nota
-        # „rozwiązywanie w przygotowaniu" ZAWĘŻONA do tych dwóch kanałów (R#9) — obiekt-review
-        # i kopie mają już swoje akcje.
+        # OŚ SPRZĘTU WYCHODZI Z WIERSZA INFORMACYJNEGO (R1) — do tej zmiany była połową licznika
+        # z notą „rozwiązywanie w przygotowaniu". Nota mówiła prawdę i dlatego musiała zniknąć
+        # razem z drogą: gest istnieje, więc wiersz DRĄŻY i niesie akcję. Reguła pustego kubełka
+        # ta sama, co u sąsiadów: zero nie ma dokąd prowadzić, więc zostaje informacyjne.
+        self._add_review_item(i18n.t("object.config_review_line", n=q["config_review_count"]),
+                              tag="config_review" if q["config_review_count"] > 0 else None,
+                              info=i18n.t("object.config_review_info_empty"))
+        # licznik POZOSTAŁEGO kanału jako pozycja informacyjna (bez tagu → nieklikana); nota
+        # „rozwiązywanie w przygotowaniu" ZAWĘŻONA do klatek bez nagłówka — obiekt-review, kopie
+        # i (od R1) oś sprzętu mają już swoje akcje.
         self._add_review_item(
-            i18n.t("object.review_info",
-                   config=q["config_review_count"], headerless=q["headerless_count"]),
+            i18n.t("object.review_info", headerless=q["headerless_count"]),
             info=i18n.t("object.review_info_why"))
 
     def _add_review_item(self, text, *, tag=None, payload=None, info=None):
@@ -1410,6 +1429,11 @@ class ObjectAxisView(QWidget):
         self.confirm_path_btn.setToolTip(i18n.t(
             "object.confirm_path_tip" if tag == "path_proposals"
             else "object.confirm_path_tip_pick"))
+        # Oś SPRZĘTU (R1) — jak potwierdzanie propozycji: pisze do BAZY, więc mutex writebacku
+        # jej nie dotyczy; bramką jest sam bieg pipeline'u. Wygaszony przycisk tłumaczy się sam.
+        self.set_config_btn.setEnabled(tag == "config_review" and not self._busy)
+        self.set_config_btn.setToolTip(i18n.t(
+            "object.set_config_tip" if tag == "config_review" else "object.set_config_tip_pick"))
         # WIZ #12: „Przypisz obiekt…" gasł BEZ SŁOWA obok aktywnego „Napraw nagłówek…", więc obie
         # drogi naprawy wyglądały jak jedna zepsuta. Wygaszony przycisk tłumaczy się sam — tooltip
         # nazywa drogę WŁAŚCIWĄ dla zaznaczonego kubełka, zamiast milczeć o istnieniu drugiej.
@@ -1519,6 +1543,14 @@ class ObjectAxisView(QWidget):
             ids = [fid for p in resolver.path_proposals(self.con) for fid in p.frame_ids]
             rows = queries.path_proposal_frames(self.con, ids)
             self.frames_label.setText(i18n.t("object.frames_path_proposed", n=len(rows)))
+            self._fill_frames(rows, present_col=False)
+        elif tag == "config_review":
+            # Drążenie pokazuje KLATKI, a jednostkę gestu — folder × kamerę — pokazuje dopiero
+            # okno (lustro `path_proposals` wyżej: tam jednostką jest nazwa). Read-model jest
+            # LUSTREM licznika kubełka i test pinuje tę równość.
+            self._restore_frames_mode()
+            rows = queries.config_review_frames(self.con)
+            self.frames_label.setText(i18n.t("object.frames_config_review", n=len(rows)))
             self._fill_frames(rows, present_col=False)
         elif tag == "unreadable":
             self._show_copies()
@@ -1674,6 +1706,55 @@ class ObjectAxisView(QWidget):
         (częściowy zapis przerwany odmową klingi nie zostawia ekranu z nieaktualnym licznikiem)."""
         self._load_review()
         self._sync_assign_enabled()
+
+    # ------------------------------------------------ akcja osi SPRZĘTU (R1)
+
+    def _on_set_config(self):
+        """„Przypisz zestaw…": grupy folder × kamera → okno wskazania TELESKOPU → jedna klinga
+        `repo.user_assign_config`.
+
+        Grupy liczymy TU, w chwili otwarcia — nie z licznika kolejki: między odświeżeniem
+        a kliknięciem mógł przebiec `Przetwórz wszystko` z workera i lista byłaby o niego starsza
+        (lustro `_on_confirm_path`). Klinga i tak pomija klatki, które w międzyczasie dostały
+        zestaw, więc podwójne liczenie kosztuje jeden SELECT, a jego brak kosztowałby zapis pod
+        nieaktualną listą.
+
+        CEL BIERZEMY Z OKNA, nie z zaznaczenia panelu — i tym ta akcja różni się od „Przypisz
+        obiekt…". Jednostką gestu jest FOLDER × KAMERA (D-DR-3), a panel klatek nie ma jak jej
+        pokazać: zaznaczenie 5 z 100 klatek folderu dałoby zestaw połowie serii zrobionej tym
+        samym sprzętem — stan, którego nikt nie chciał i którego nic w kolejce nie pokazuje."""
+        grupy = queries.config_review_groups(self.con)
+        if not grupy:
+            self.status_message.emit(i18n.t("cfg.err_nothing"))
+            return
+        dlg = AssignConfigDialog(self.con, groups=grupy, parent=self)
+        if dlg.exec() != QDialog.Accepted or dlg.selected is None:
+            return
+        telescope_id, telescope_label, frame_ids = dlg.selected
+        try:
+            with busy.busy(self.status_message.emit,
+                           i18n.t("busy.saving_frames", n=len(frame_ids))):
+                g = repo.user_assign_config(self.con, frame_ids=frame_ids,
+                                            telescope_id=telescope_id, now=self._now())
+        except ValueError as e:                # dryf do nieistniejącej klatki/teleskopu
+            QMessageBox.warning(self, i18n.t("cfg.title"), str(e))
+            return
+        pominiete = g.occupied + g.no_camera + g.kind_skip + g.unchanged
+        msg = i18n.t("object.config_assigned_report", telescope=telescope_label,
+                     assigned=g.assigned, total=g.assigned + pominiete)
+        if pominiete:
+            # Rozbicie CO DO POWODU, nie jedna liczba „pominięte": kalibracja, brak kamery i zajęta
+            # klatka to trzy różne stany i trzy różne dalsze kroki (lekcja `ObjectGesture`).
+            msg += i18n.t("object.config_skipped", occupied=g.occupied, no_camera=g.no_camera,
+                          kind_skip=g.kind_skip, unchanged=g.unchanged)
+        if g.assigned:
+            # Dobór rodowodu stosów czyta teleskop KANDYDATA (`stacks._in_window`), więc zestaw
+            # nadany ręką może przesunąć rodowód gotowego obrazu — ale dopiero, gdy te klatki są
+            # czyimś materiałem. Mówimy GDZIE to przeliczyć, zamiast liczyć za usera przy okazji
+            # innego gestu (takt należy do Dostawy, jak takt 3 przy naprawie nagłówka).
+            msg += i18n.t("object.config_next_step")
+        self.status_message.emit(msg)
+        self.refresh()
 
     # ------------------------------------------------ akcja zapisu do PLIKU (P-D)
 

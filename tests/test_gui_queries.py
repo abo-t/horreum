@@ -138,18 +138,82 @@ def test_tasks_state_liczniki_na_s8_obj(s8_obj):
     """Arytmetyka fixture (przeliczona w recenzji F5): unresolved = objrev1+objrev2+nullcfg (present0
     MA obiekt); dups = a1 (2×present=1); teleskopy A–D wszystkie bez etykiety; zero obserwatoriów;
     vanished = present0 (jedyna lokacja present=0) — bez guardu EXISTS licznik złapałby też
-    klatki BEZ lokacji w ogóle (w fixture jest ich 10). Kluczy jest PIĘĆ: `xisf_frames` zniknął
+    klatki BEZ lokacji w ogóle (w fixture jest ich 10). Kluczy jest SZEŚĆ: `xisf_frames` zniknął
     w P6c razem z wierszem Porządków (pisarz XISF istnieje, więc „tylko do odczytu" przestało
-    być prawdą, a licznik formatu nie jest zadaniem)."""
+    być prawdą, a licznik formatu nie jest zadaniem), a `stacks_lineage_pending` doszedł 0808
+    z kubełkiem rodowodu — w tej fixture jest ZERO, bo nie ma w niej ani jednej integracji, i to
+    jest właściwa odpowiedź: brak przebiegu rodowodu to nie to samo, co robota do zrobienia."""
     con, ids = s8_obj
     st = queries.tasks_state(con)
     assert st == {
         "unresolved_lights": 3,
+        "stacks_lineage_pending": 0,
         "dup_frames": 1,
         "telescopes_unlabeled": 4,
         "observatories_unnamed": 0,
         "vanished_frames": 1,
     }
+
+
+def _seed_stosy_z_powodami(con):
+    """Pięć gotowych obrazów pokrywających WSZYSTKIE stany rodowodu: dwa czekające na gest, dwa ze
+    zwietrzałym powodem (obiekt / odniesienie nadane PO przebiegu) i jeden z gotowym rodowodem."""
+    con.execute("INSERT OR IGNORE INTO object(canon, catalog, kind) "
+                "VALUES ('IC443','catalog','deep_sky')")
+    oid = con.execute("SELECT id FROM object WHERE canon = 'IC443'").fetchone()[0]
+    for fid in (901, 902, 903, 904, 905):
+        # obiekt tylko tam, gdzie ma czynić powód nieaktualnym (902) — reszta bez, żeby test
+        # mierzył POWÓD, nie obecność obiektu
+        con.execute("INSERT INTO frame (id, sha1_data, kind, filetype, first_seen_at, object_id) "
+                    "VALUES (?, ?, 'master_light', 'xisf', ?, ?)",
+                    (fid, f"m{fid}", NOW, oid if fid == 902 else None))
+    wiersze = [(901, "degenerate_window", None),   # czeka na gest człowieka
+               (902, "no_object", None),           # ZWIETRZAŁ — obiekt nadany po przebiegu
+               (903, "offset_unknown", 60),        # ZWIETRZAŁ — odniesienie wskazane po przebiegu
+               (904, "offset_unknown", None),      # czeka: odniesienia nikt nie wskazał
+               (905, None, None)]                  # rodowód policzony — nie ma o co pytać
+    for fid, powod, offset in wiersze:
+        con.execute("INSERT INTO integration (id, master_frame_id, created_at, "
+                    "unresolved_reason, utc_offset_min) VALUES (?, ?, ?, ?, ?)",
+                    (fid, fid, NOW, powod, offset))
+    con.commit()
+
+
+def test_kubelek_rodowodu_bierze_tylko_powody_AKTUALNE(s8_obj):
+    """Kubełek rodowodu (0808) liczy obrazy czekające NA GEST, a nie wszystkie z zapisanym powodem.
+
+    Rozróżnienie nie jest kosmetyką komunikatu, tylko treścią kubełka: stos, którego powód
+    zwietrzał, czeka na PRZELICZENIE etapem Dostawy, a nie na decyzję człowieka — wysłanie go
+    do listy gestów byłoby wysłaniem po robotę, której tam nie ma. Zmierzone na żywej pf4 0808:
+    46 stosów z powodem, z czego 11 zwietrzałych zaraz po nadaniu nazw ręką."""
+    con, ids = s8_obj
+    _seed_stosy_z_powodami(con)
+    assert queries.lineage_pending_frame_ids(con) == {901, 904}
+
+
+def test_licznik_porzadkow_rodowodu_JEST_dlugoscia_swojej_listy(s8_obj):
+    """D-PD-10 dla kubełka rodowodu: wiersz Porządków i perspektywa, którą on otwiera, muszą liczyć
+    TYM SAMYM predykatem. Osobny literał `COUNT` byłby drugim właścicielem i rozjechałby się przy
+    pierwszej zmianie kształtu — user zobaczyłby „35" i listę na 46 pozycji."""
+    con, ids = s8_obj
+    _seed_stosy_z_powodami(con)
+    assert queries.tasks_state(con)["stacks_lineage_pending"] \
+        == len(queries.lineage_pending_frame_ids(con)) == 2
+
+
+def test_zwietrzenie_powodu_ma_JEDNEGO_wlasciciela():
+    """Ten sam predykat obsługuje panel „Rodowód" (jeden obraz) i perspektywę (całe archiwum),
+    więc kontrakt wiersza jest wspólny: `unresolved_reason` + `object_now` + `utc_offset_min`.
+    Powód spoza pary wrażliwej nie wietrzeje NIGDY — inaczej sito zjadłoby robotę do zrobienia."""
+    assert queries.lineage_reason_stale(
+        {"unresolved_reason": "no_object", "object_now": 7, "utc_offset_min": None}) is True
+    assert queries.lineage_reason_stale(
+        {"unresolved_reason": "no_object", "object_now": None, "utc_offset_min": None}) is False
+    assert queries.lineage_reason_stale(
+        {"unresolved_reason": "offset_unknown", "object_now": None, "utc_offset_min": 0}) is True, \
+        "zero minut to WSKAZANE odniesienie (UTC), nie brak wskazania — trójstan migracji 0016"
+    assert queries.lineage_reason_stale(
+        {"unresolved_reason": "degenerate_window", "object_now": 7, "utc_offset_min": 60}) is False
 
 
 def test_tasks_state_reaguje_na_stan_nie_eventy(s8_obj):

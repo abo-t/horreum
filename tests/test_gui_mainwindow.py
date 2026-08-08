@@ -394,6 +394,34 @@ def test_zadanie_zniknietych_otwiera_perspektywe(qapp, tmp_path):
         win.close()
 
 
+def test_zadanie_rodowodu_otwiera_perspektywe(qapp, tmp_path):
+    """0808: klik w „Obrazy bez rodowodu" prowadzi do Zbiorów z perspektywą `PRESET_LINEAGE`,
+    a grid pokazuje DOKŁADNIE obrazy czekające na gest. Wiersz celuje w perspektywę, nie
+    w podstronę, bo gest (potwierdź / odrzuć wejście / wskaż odniesienie) mieszka w panelu
+    „Rodowód" TAM — i do tej zmiany dojście do niego wiodło przez przeklikanie archiwum stosów."""
+    from horreum.gui.grid import PRESET_LINEAGE
+    path = _seeded_db(tmp_path, object_axis=True)
+    con = db.open_db(path)
+    try:
+        fid = con.execute("SELECT id FROM frame ORDER BY id LIMIT 1").fetchone()[0]
+        con.execute("INSERT INTO integration (master_frame_id, created_at, unresolved_reason) "
+                    "VALUES (?, '2026-08-08T20:00:00', 'degenerate_window')", (fid,))
+        con.commit()
+    finally:
+        con.close()
+    win = MainWindow(path)
+    try:
+        assert _task_row(win, "stacks_lineage_pending")[0] == "Obrazy bez rodowodu"
+        win.tasks_view.tasks.itemClicked.emit(_task_item(win, "stacks_lineage_pending"))
+        assert win.stack.currentIndex() == NAV_ZBIORY
+        assert win.grid_view._only_lineage is True
+        assert win.grid_view.combo_persp.currentData() == ("preset", PRESET_LINEAGE)
+        widoczne = set(win.grid_view._frame_ids)          # to, co WIDAĆ po trimie perspektywy
+        assert widoczne == queries.lineage_pending_frame_ids(win.con) == {fid}
+    finally:
+        win.close()
+
+
 def test_kazdy_wiersz_porzadkow_prowadzi_do_powierzchni(qapp, tmp_path):
     """Po P6c KAŻDY wiersz Porządków jest AKCYJNY: ostatnia pozycja informacyjna („XISF — nagłówki
     tylko do odczytu") zniknęła razem z pisarzem XISF, który uczynił ją nieprawdą. Lista nie ma

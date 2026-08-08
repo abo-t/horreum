@@ -1389,6 +1389,48 @@ def test_panel_nie_powtarza_powodu_ktory_zwietrzal(view, gcon):
     assert "nie ma rozpoznanego obiektu" not in tekst, "stary werdykt nie ma prawa wrócić jako bieżący"
 
 
+def test_perspektywa_rodowodu_zaweza_grid_do_czekajacych(view, gcon):
+    """0808: panel „Rodowód" umiał gest od I-2d, ale działał WYŁĄCZNIE z zaznaczenia jednej klatki
+    — żeby trafić na 35 obrazów czekających na słowo, trzeba było przeklikać 128 stosów. Wiersz
+    Porządków celuje w tę perspektywę, więc jej trim jest jedyną drogą od liczby do listy."""
+    from horreum.gui.grid import PRESET_LINEAGE
+    _seed_stos(gcon, reason="degenerate_window")
+    view.apply_perspective(PRESET_LINEAGE)
+    assert view._only_lineage is True
+    assert set(view._frame_ids) == queries.lineage_pending_frame_ids(gcon) == {10}
+
+
+def test_perspektywa_rodowodu_NIE_wysyla_do_zwietrzalego_powodu(view, gcon):
+    """Ten sam predykat, co w panelu (`queries.lineage_reason_stale`) — i to jest cały sens jednego
+    właściciela: gdy user nada nazwę ręką, obraz WYPADA z listy gestów, bo czeka już tylko na etap
+    „Policz rodowód stosów". Dwie kopie reguły posłałyby go tam, gdzie panel mówi „nieaktualny"."""
+    from horreum.gui.grid import PRESET_LINEAGE
+    _seed_stos(gcon, reason="no_object")
+    view.apply_perspective(PRESET_LINEAGE)
+    assert set(view._frame_ids) == {10}
+
+    oid = gcon.execute(
+        "INSERT INTO object(canon, catalog, kind) VALUES ('IC443','catalog','deep_sky')").lastrowid
+    gcon.execute("UPDATE frame SET object_id = ? WHERE id = 10", (oid,))
+    gcon.commit()
+    view.refresh()
+    assert view._frame_ids == [], "powód zwietrzał — to robota etapu, nie ręki"
+
+
+def test_perspektywa_rodowodu_mowi_o_sobie_i_przezywa_zapis(view, gcon):
+    """Flaga perspektywy jest POZA drzewem filtra (jak `only_dups`), więc bez własnego członu pasek
+    kryteriów milczałby o zawężeniu, a zapisana perspektywa wracałaby jako „wszystkie klatki" —
+    cichy fałsz w obie strony. Serializacja i opis idą jednym ruchem z flagą."""
+    from horreum.gui.grid import PRESET_LINEAGE
+    _seed_stos(gcon, reason="degenerate_window")
+    view.apply_perspective(PRESET_LINEAGE)
+    assert "bez rodowodu" in view.sel_bar.criteria_label._full
+    spec = {"only_dups": view._only_dups, "only_review": view._only_review,
+            "only_vanished": view._only_vanished, "only_lineage": view._only_lineage}
+    assert spec["only_lineage"] is True and not any(
+        v for k, v in spec.items() if k != "only_lineage")
+
+
 def test_tokeny_panelu_sa_LUSTREM_stalych_rdzenia():
     """Panel trzyma dwa powody jako literały (warstwa widżetów nie importuje rdzenia — izolacja §4),
     więc równość obu zapisów musi pilnować bramka. Bez niej zmiana tokenu w `stacks` zostawiłaby

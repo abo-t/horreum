@@ -30,7 +30,7 @@ from horreum.gui import i18n, queries, rows, theme
 from horreum.gui.app import (
     ObjectAxisView, ObservatoryAxisView, TelescopeAxisView, _utc_now_iso,
 )
-from horreum.gui.grid import PRESET_DUPS, PRESET_VANISHED
+from horreum.gui.grid import PRESET_DUPS, PRESET_LINEAGE, PRESET_VANISHED
 from horreum.gui.rows import TwoPartDelegate
 
 # Definicja listy zadań: (klucz stanu z `tasks_state`, etykieta, akcja). Akcja: numer podstrony
@@ -42,6 +42,10 @@ from horreum.gui.rows import TwoPartDelegate
 # Wiersz „XISF (nagłówki tylko do odczytu)" ZNIKNĄŁ w P6c: pisarz XISF istnieje, więc zdanie było
 # już nieprawdą, a sam licznik plików danego formatu nie jest robotą do zrobienia (facet formatu
 # w Zbiorach mówi to samo, w miejscu, gdzie się o to pyta).
+# Wiersz „Obrazy bez rodowodu" DOSZEDŁ 0808 i celuje w PERSPEKTYWĘ, nie w podstronę — bo gest
+# (potwierdź / odrzuć wejście / wskaż odniesienie czasu) mieszka w panelu „Rodowód" w Zbiorach
+# i działa z zaznaczenia jednej klatki. Do tej zmiany liczba istniała wyłącznie w raporcie etapu
+# Dostawy, a droga od niej do konkretnego obrazu wiodła przez przeklikanie całego archiwum stosów.
 _PAGE_LIST, _PAGE_TELESCOPE, _PAGE_OBSERVATORY, _PAGE_OBJECTS = range(4)
 # Szarość wierszy BEZ roboty: pozycje informacyjne (zawsze) i akcyjne z n=0 (wiz F5 #6 — „nic do
 # zrobienia" ma być widać bez czytania liczby). Akcyjne z n=0 zostają KLIKALNE: podstrona osi to
@@ -69,6 +73,7 @@ _LIST_MAX_W = 400
 # etykieta = KLUCZ i18n rozwiązywany w budowie/refresh (nie zamrażać PL przy imporcie).
 _TASKS = [
     ("unresolved_lights", "tasks.unresolved_lights", _PAGE_OBJECTS),
+    ("stacks_lineage_pending", "tasks.stacks_lineage", PRESET_LINEAGE),
     ("telescopes_unlabeled", "tasks.telescopes_unlabeled", _PAGE_TELESCOPE),
     ("observatories_unnamed", "tasks.observatories_unnamed", _PAGE_OBSERVATORY),
     ("dup_frames", "tasks.dup_frames", PRESET_DUPS),

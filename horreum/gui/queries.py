@@ -19,6 +19,7 @@ from horreum.grouper import NO_TELESCOPE_KINDS      # jeden właściciel zbioru 
 from horreum.resolve.frames import LIGHT_KINDS
 from horreum.resolve.objects import CLEARABLE_OBJECT_SOURCES, WEAK_OBJECT_SOURCES
 from horreum.resolver import NO_OBJECT_CARD_FILETYPES, path_proposals, review_state
+from horreum.stacks import REASON_NO_OBJECT, REASON_OFFSET_UNKNOWN
 
 
 PATH_TAIL_DIRS = 2
@@ -1083,6 +1084,71 @@ def review_frame_ids(con):
     ).fetchall()}
 
 
+def lineage_reason_stale(row):
+    """Czy zapisany powód braku rodowodu ZWIETRZAŁ wobec bieżącego stanu. Czysta funkcja, zero SQL.
+
+    JEDEN WŁAŚCICIEL PREDYKATU (SPOT) dla dwóch wołających o różnych stawkach: panel „Rodowód"
+    pyta o JEDEN obraz („czy mam prawo powtórzyć to zdanie?"), perspektywa `lineage_pending_frame_ids`
+    pyta o CAŁE archiwum („kogo tam posłać?"). Predykat w Pythonie, nie w SQL, właśnie dlatego:
+    literał SQL nie da się współdzielić między zapytaniami (bramka §7.1 zakazuje składania), więc
+    druga siedziba tej reguły byłaby SIN-DUP-em, który rozjedzie się przy pierwszym nowym powodzie.
+
+    `unresolved_reason` jest zapisem z chwili OSTATNIEGO przebiegu rodowodu, a fakty, na których
+    stoi, zmienia GEST CZŁOWIEKA między przebiegami. Pytamy WĄSKO — tylko o te powody, których
+    przesłankę widać w tym samym wierszu: obiekt nadany po przebiegu i odniesienie czasu wskazane
+    po przebiegu. Powód ogólny („czy to jeszcze aktualne?") wymagałby znacznika zmiany faktów,
+    którego dziś nie ma.
+
+    STAWKA JEST WYŻSZA NIŻ KOMUNIKAT: stos ze zwietrzałym powodem czeka na PRZELICZENIE (etap
+    „Policz rodowód stosów" w Dostawie), nie na decyzję człowieka — więc do kubełka nie należy.
+    Zmierzone na żywej pf4 0808: 46 stosów z powodem, z czego 11 to `no_object` po nadaniu nazwy
+    ręką. Kubełek bez tego sita wysyłałby użytkownika do jedenastu wierszy, w których panel sam
+    mówi „ten zapis jest starszy niż twoje zmiany".
+
+    `row` = wiersz z kolumnami `unresolved_reason`, `object_now`, `utc_offset_min`
+    (`stack_lineage_head` albo `_lineage_reason_rows`). Zwraca bool."""
+    powod = row["unresolved_reason"]
+    if powod == REASON_NO_OBJECT:
+        return row["object_now"] is not None
+    if powod == REASON_OFFSET_UNKNOWN:
+        return row["utc_offset_min"] is not None
+    return False
+
+
+def _lineage_reason_rows(con):
+    """Integracje z ZAPISANYM powodem braku rodowodu + fakty, po których poznać zwietrzenie.
+    Wąski literał pod `lineage_pending_frame_ids` — pełny opis obrazu daje `stack_lineage_head`.
+    Zwraca: master_frame_id, unresolved_reason, object_now, utc_offset_min."""
+    return con.execute(
+        "SELECT i.master_frame_id, i.unresolved_reason, i.utc_offset_min, "
+        "       (SELECT f.object_id FROM frame f WHERE f.id = i.master_frame_id) AS object_now "
+        "FROM integration i WHERE i.unresolved_reason IS NOT NULL"
+    ).fetchall()
+
+
+def lineage_pending_frame_ids(con):
+    """Zbiór frame_id perspektywy „Rodowód do potwierdzenia": gotowe obrazy, których rodowodu
+    przebieg NIE ROZSTRZYGNĄŁ i których powód jest wciąż aktualny (`lineage_reason_stale` = False).
+
+    JEDEN właściciel predykatu — jak `dup_frame_ids`/`vanished_frame_ids`: liczy z niego zarówno
+    licznik Porządków (`tasks_state`), jak i trim gridu, więc wiersz zadania i lista, którą otwiera,
+    nie mają jak się rozjechać.
+
+    POWSTAŁO Z BRAKU POWIERZCHNI, nie z braku mechanizmu (Zdzin, 0808): panel „Rodowód" umiał
+    potwierdzić i odrzucić wejście od I-2d, ale działał WYŁĄCZNIE z zaznaczenia jednej klatki —
+    żeby trafić na 35 obrazów czekających na gest, trzeba było przeklikać 128 stosów i patrzeć,
+    który się odezwie. Kod nazywał ten dług wprost w tym pliku („NIE MA TU `stack_frames_needing_hand`")
+    i wskazywał cenę: własna PERSPEKTYWA, bo gest mieszka w Zbiorach. Tą ceną jest ten zbiór.
+
+    ŚWIADOMIE BEZ WARUNKU NA `kind`: `integration.master_frame_id` wskazuje gotowy obraz z definicji
+    drogi „Stosy", więc `kind = 'master_light'` byłby martwą literą udającą bramkę (ta sama figura,
+    co `NO_OBJECT_CARD_FILETYPES` poza `nameless_stack_frames`).
+
+    Zwraca set[int]."""
+    return {int(r["master_frame_id"]) for r in _lineage_reason_rows(con)
+            if not lineage_reason_stale(r)}
+
+
 # ============================================================ PORTFEL NAŚWIETLEŃ (F7, PLAN_ux_redesign §8)
 # „Ile mam godzin na obiekt, per filtr?". STAŁY literał + `json_each(?)`. Godziny z `header.exptime`
 # przez `frame JOIN header` — NIE z cards. Powód pierwotny (cards FITS-only) ZNIKNĄŁ po P6a/P6b, ale
@@ -1295,10 +1361,12 @@ def stack_lineage_inputs(con, frame_id):
         (frame_id,)).fetchall()
 
 
-# NIE MA TU `stack_frames_needing_hand` — i to jest decyzja, nie przeoczenie. Wiersz Porządków
-# „gotowe obrazy czekające na Twoje słowo" wymaga własnej PERSPEKTYWY w Zbiorach (flaga presetu
-# + serializacja + facety), a nie samego zapytania; zapytanie bez powierzchni byłoby kodem dla
-# nikogo (SIN-PRECRUFT). Dług nazwany w kolejce — panel rodowodu działa dziś z zaznaczenia.
+# DŁUG ZAPŁACONY 0808: „gotowe obrazy czekające na Twoje słowo" ma odtąd wiersz Porządków i własną
+# PERSPEKTYWĘ w Zbiorach (`grid.PRESET_LINEAGE`) — zbiór liczy `lineage_pending_frame_ids` wyżej.
+# Zapis pierwotny odkładał go słusznie: samo zapytanie bez powierzchni byłoby kodem dla nikogo
+# (SIN-PRECRUFT), a ceną jest flaga presetu + serializacja + kryteria, nie jeden SELECT. Cenę
+# zapłacił firsthand Zdzinia: panel rodowodu działał z ZAZNACZENIA, więc 35 obrazów czekających
+# na gest trzeba było znaleźć, przeklikując 128 stosów.
 
 
 # ============================================================ PORZĄDKI (F5, PLAN_ux_redesign §6)
@@ -1313,8 +1381,10 @@ def tasks_state(con):
     `observatories_unnamed`: NULL = nienazwane (`label_telescope`/`label_observatory` odrzucają pusty
     string, więc pustych stringów w bazie nie ma); tylko kanoniczne (`merged_into IS NULL`).
     `vanished_frames` = len() zbioru perspektywy „Zniknięte" (P5 — ta sama derywacja co grid; przed
-    passem obecności był to osobny literał COUNT, czyli drugi właściciel predykatu). Zwraca dict
-    pięciu liczników.
+    passem obecności był to osobny literał COUNT, czyli drugi właściciel predykatu).
+    `stacks_lineage_pending` = len() zbioru perspektywy „Rodowód do potwierdzenia" — ta sama figura
+    po raz trzeci; gest mieszka w panelu „Rodowód" w Zbiorach, więc wiersz Porządków prowadzi do
+    perspektywy, a nie do podstrony. Zwraca dict sześciu liczników.
 
     Licznika `xisf_frames` NIE MA od P6c: był informacją „nagłówków XISF nie umiemy zapisać", a ta
     przestała być prawdziwa razem z pisarzem — licznik samego formatu nie jest ani zadaniem, ani
@@ -1327,6 +1397,7 @@ def tasks_state(con):
     ).fetchone()[0]
     return {
         "unresolved_lights": len(review_frame_ids(con)),
+        "stacks_lineage_pending": len(lineage_pending_frame_ids(con)),
         "dup_frames": len(dup_frame_ids(con)),
         "telescopes_unlabeled": telescopes_unlabeled,
         "observatories_unnamed": observatories_unnamed,

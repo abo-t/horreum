@@ -924,6 +924,7 @@ CATALOG = {
     "perspective.calibration": {"pl": "Kalibracja", "en": "Calibration"},
     "perspective.dups": {"pl": "Duplikaty", "en": "Duplicates"},
     "perspective.vanished": {"pl": "Zniknięte", "en": "Vanished"},
+    "perspective.lineage": {"pl": "Rodowód do potwierdzenia", "en": "Lineage to confirm"},
     "perspective.to_review": {"pl": "Do przeglądu", "en": "To review"},
 
     # --- pusty grid (rozwiązywane w USE-site; stałe _EMPTY_* trzymają KLUCZ) ---
@@ -1383,6 +1384,10 @@ CATALOG = {
     "grid.criteria.only_dups": {"pl": "tylko duplikaty", "en": "only duplicates"},
     "grid.criteria.only_review": {"pl": "tylko do przeglądu", "en": "only to review"},
     "grid.criteria.only_vanished": {"pl": "tylko zniknięte", "en": "only vanished"},
+    "grid.criteria.only_lineage": {
+        "pl": "tylko obrazy bez rodowodu",
+        "en": "only images without lineage",
+    },
     "grid.status.loaded": {
         "pl": "Grid: {frames}, {cols} kolumn-keywordów",
         "en": "Grid: {frames}, {cols} keyword columns",
@@ -1946,6 +1951,7 @@ CATALOG = {
     "tasks.observatory_axis": {"pl": "Oś obserwatorium", "en": "Observatory axis"},
     "tasks.object_review": {"pl": "Przegląd obiektów", "en": "Object review"},
     "tasks.unresolved_lights": {"pl": "Klatki bez obiektu", "en": "Frames without object"},
+    "tasks.stacks_lineage": {"pl": "Obrazy bez rodowodu", "en": "Images without lineage"},
     "tasks.telescopes_unlabeled": {"pl": "Teleskopy bez etykiety", "en": "Telescopes without a label"},
     "tasks.observatories_unnamed": {"pl": "Stanowiska bez nazwy", "en": "Sites without a name"},
     "tasks.dup_frames": {"pl": "Duplikaty (>1 kopia)", "en": "Duplicates (>1 copy)"},

@@ -135,6 +135,11 @@ PRESET_DUPS = "Duplikaty"
 # PRESET_VANISHED — bliźniak PRESET_DUPS dla passa obecności (P5/#7): klik w zadanie „Zniknięte
 # z dysku" celuje w preset PO NAZWIE, więc stała musi być współdzielona z TasksView.
 PRESET_VANISHED = "Zniknięte"
+# PRESET_LINEAGE — trzeci bliźniak (0808). Gest rodowodu mieszka w panelu „Rodowód" TEGO widoku
+# i działa z zaznaczenia jednej klatki, więc wiersz Porządków „Obrazy bez rodowodu" nie ma dokąd
+# prowadzić POZA Zbiorami: perspektywa jest tu jedyną drogą od liczby do listy. Stała współdzielona
+# z TasksView po nazwie — jak u dwóch sąsiadów wyżej.
+PRESET_LINEAGE = "Rodowód"
 PRESETS = {
     "Przegląd": {"filter": None, "group_by": None},
     "Kalibracja": {"filter": {"op": "OR", "conditions": [
@@ -144,6 +149,7 @@ PRESETS = {
     ]}, "group_by": "kind"},
     PRESET_DUPS: {"filter": None, "group_by": None, "only_dups": True},
     PRESET_VANISHED: {"filter": None, "group_by": None, "only_vanished": True},
+    PRESET_LINEAGE: {"filter": None, "group_by": None, "only_lineage": True},
     "Do przeglądu": {"filter": None, "group_by": None, "only_review": True},
 }
 # Etykieta WYŚWIETLANIA presetu (tekst) osobno od TOŻSAMOŚCI (klucz PRESETS w `itemData` — używany przez
@@ -153,6 +159,7 @@ _PRESET_LABELS = {
     "Kalibracja": "perspective.calibration",
     PRESET_DUPS: "perspective.dups",
     PRESET_VANISHED: "perspective.vanished",
+    PRESET_LINEAGE: "perspective.lineage",
     "Do przeglądu": "perspective.to_review",
 }
 
@@ -1368,25 +1375,20 @@ def _lineage_reason_text(head):
 def _lineage_stale(head):
     """Czy zapisany powód ZWIETRZAŁ wobec bieżącego stanu (firsthand 0808).
 
-    `unresolved_reason` jest zapisem z chwili OSTATNIEGO przebiegu rodowodu, a fakty, na których
-    stoi, zmienia GEST CZŁOWIEKA między przebiegami. Panel twierdził więc „obraz nie ma
-    rozpoznanego obiektu" o wierszu, który w kolumnie obok pokazywał `IC443` — sprzeczność w jednym
-    oknie, której user nie ma prawa rozstrzygać domysłem.
+    Panel twierdził „obraz nie ma rozpoznanego obiektu" o wierszu, który w kolumnie obok pokazywał
+    `IC443` — sprzeczność w jednym oknie, której user nie ma prawa rozstrzygać domysłem.
 
-    Wykrywamy ją wprost i WĄSKO: pytamy tylko o te powody, których przesłankę widać w tym samym
-    read-modelu. Powód ogólny („nie wiem, czy to jeszcze aktualne") wymagałby porównania czasu
-    przebiegu ze znacznikiem zmiany faktów — a takiego znacznika dziś nie ma i dorabianie go pod
-    komunikat byłoby budową mechanizmu pod zdanie.
+    PREDYKAT MA JEDNEGO WŁAŚCICIELA I NIE JEST NIM POWIERZCHNIA (SPOT, 0808): od kubełka rodowodu
+    to samo pytanie zadaje perspektywa Zbiorów (`queries.lineage_pending_frame_ids` — zwietrzały
+    stos czeka na PRZELICZENIE, nie na gest, więc do kubełka nie należy). Dwie kopie reguły
+    rozjechałyby się przy pierwszym nowym powodzie, a rozjazd byłby niewidoczny: panel mówiłby
+    jedno, lista wysyłałaby gdzie indziej. Zostaje tu sam alias, bo tekst powodu składa
+    powierzchnia.
 
     NIE NAPRAWIAMY TU RODOWODU i to jest granica, nie brak: dobór wejść jedzie po CAŁYM archiwum
     stosów, więc jego przeliczenie należy do etapu w Dostawie. Panel ma powiedzieć PRAWDĘ o tym,
     co wie — a prawdą jest „ten zapis jest starszy niż twoje zmiany"."""
-    powod = head["unresolved_reason"]
-    if powod == REASON_NO_OBJECT_TOKEN:
-        return head["object_now"] is not None
-    if powod == REASON_OFFSET_TOKEN:
-        return head["utc_offset_min"] is not None
-    return False
+    return queries.lineage_reason_stale(head)
 
 
 def _lineage_flags(head):
@@ -1717,6 +1719,7 @@ class FramesView(QWidget):
         self._only_dups = False
         self._only_review = False
         self._only_vanished = False
+        self._only_lineage = False
         self._reveal_facet = None   # (facet, wartość) do odsłonięcia w listwie — patrz `apply_object_facet`
         self._frame_ids = []      # frame_id widoczne w gridzie (cel makra) — aktualizowane w refresh()
         self._run_id = None       # JEDEN run_id sesji makra (R#5 lifecycle: stage→commit/reject zwalnia)
@@ -1946,6 +1949,7 @@ class FramesView(QWidget):
         self._only_dups = bool(spec.get("only_dups"))
         self._only_review = bool(spec.get("only_review"))
         self._only_vanished = bool(spec.get("only_vanished"))
+        self._only_lineage = bool(spec.get("only_lineage"))
         self._filter_tree = spec.get("filter")
         # F4R#2: stan facetów resetowany dla KAŻDEJ perspektywy (preset ORAZ zapisana) — perspektywa
         # definiuje CAŁY zbiór; stara zapisana bez klucza "facets" MUSI zerować stan, inaczej facety
@@ -1978,7 +1982,7 @@ class FramesView(QWidget):
         W listwie), więc wejście z zewnątrz zostawiało `✓` poza viewportem — zmierzone: pozycja 36
         z 48 przy scrollu 0. Stąd JEDNORAZOWY `_reveal_facet`, konsumowany przez najbliższe
         przeładowanie listwy."""
-        self._only_dups = self._only_review = self._only_vanished = False
+        self._only_dups = self._only_review = self._only_vanished = self._only_lineage = False
         self._filter_tree = None
         self.filter_panel.set_tree(None)
         self._facet_state = {"object": {"in": [[oid, canon] for oid, canon in pairs]}} \
@@ -2014,7 +2018,7 @@ class FramesView(QWidget):
             "filter": self._filter_tree, "columns": self._columns,
             "group_by": self.combo_group.currentData(),
             "only_dups": self._only_dups, "only_review": self._only_review,
-            "only_vanished": self._only_vanished,
+            "only_vanished": self._only_vanished, "only_lineage": self._only_lineage,
             "facets": self._facet_state,   # OSOBNO od "filter" (nota R2) — set_tree nigdy ich nie widzi
         }
         # Zapis idzie do BAZY (I-1) — perspektywa jedzie z archiwum, nie z tą maszyną. Czasownik
@@ -2313,6 +2317,8 @@ class FramesView(QWidget):
             parts.append(i18n.t("grid.criteria.only_review"))
         if self._only_vanished:
             parts.append(i18n.t("grid.criteria.only_vanished"))
+        if self._only_lineage:
+            parts.append(i18n.t("grid.criteria.only_lineage"))
         return " · ".join(parts)
 
     # ---- reakcje ----
@@ -2368,11 +2374,12 @@ class FramesView(QWidget):
         dup_ids = queries.dup_frame_ids(self.con) if self._only_dups else None
         review_ids = queries.review_frame_ids(self.con) if self._only_review else None
         gone_ids = queries.vanished_frame_ids(self.con) if self._only_vanished else None
+        lin_ids = queries.lineage_pending_frame_ids(self.con) if self._only_lineage else None
         # NOWY set, NIGDY `&=`: przy pustym filtrze `filter_engine.run` zwraca uniwersum WPROST
         # (`filter_engine.py:171`), a to jest ZAPAMIĘTANY obiekt memoizacji (`_memo_leaf_fns`).
         # `&=` przycinało go W MIEJSCU, więc kolejne `universe_fn()` widziało już przycięty zbiór —
         # perspektywa z trimem potrafiła pokazać „Baza pusta" na pełnej bazie (wizytator P5 #2).
-        for trim in (dup_ids, review_ids, gone_ids):
+        for trim in (dup_ids, review_ids, gone_ids, lin_ids):
             if trim is not None:
                 frame_ids = frame_ids & trim
         base = [_derive(r) for r in queries.base_rows(self.con, list(frame_ids))]

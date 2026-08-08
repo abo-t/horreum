@@ -5,8 +5,27 @@
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File packaging\build.ps1            # onedir (NSIS path)
 #   powershell -ExecutionPolicy Bypass -File packaging\build.ps1 -SkipDeps  # reuse .venv-build
-#   powershell -ExecutionPolicy Bypass -File packaging\build.ps1 -Onefile   # RELEASE artifact:
+#   powershell -ExecutionPolicy Bypass -File packaging\build.ps1 -Onefile   # LOCAL build:
 #                                                                           # dist\horreum-gui.exe
+#   powershell -ExecutionPolicy Bypass -File packaging\build.ps1 -Onefile -Release
+#                                                                           # EXTERNAL build (gated)
+#
+# TWO KINDS OF BUILD, AND THE DIFFERENCE IS A RULE, NOT A HABIT (decision Z. 2026-08-08):
+#
+#   LOCAL (default)    -- for the owner's own firsthand. Version number is IRRELEVANT and the
+#                         artifact OVERWRITES itself at dist\horreum-gui.exe on purpose: stale
+#                         throwaway builds are clutter, not history. Nothing to decide, nothing
+#                         to ask -- run it and report.
+#   -Release           -- anything that leaves this machine. MUST be built from a tag, and the
+#                         script REFUSES otherwise (see gate 2R). The version is therefore never
+#                         a question at build time: it was decided when the tag was created.
+#                         Artifact is named with that version, because an external file that
+#                         cannot say which build it is has no way to answer a bug report.
+#
+# The gate exists because the drift is silent otherwise: a working tree 11 commits past v0.6.0
+# freezes an exe whose title still reads "Horreum 0.6.0" -- indistinguishable from the published
+# release (measured 2026-08-08). tests/test_version.py guards the four surfaces against EACH
+# OTHER; only this gate guards the ARTIFACT against the tree it was built from.
 #
 # The build MUST run from a venv WITHOUT pytest (see packaging\horreum.spec docstring:
 # pytest present + matplotlib absent makes hook-astropy crash Analysis). .venv-build doubles
@@ -19,7 +38,7 @@
 # venv's metadata. Measured 2026-08-01: stale metadata shipped "horreum 0.0.1" to the release
 # path and tests/test_version.py did NOT catch it (it guards the dev env, not .venv-build).
 
-param([switch]$SkipDeps, [switch]$Onefile)
+param([switch]$SkipDeps, [switch]$Onefile, [switch]$Release)
 
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
@@ -27,6 +46,62 @@ Set-Location $repo
 
 $venv = Join-Path $repo ".venv-build"
 $py   = Join-Path $venv "Scripts\python.exe"
+
+# 0R. RELEASE GATE -- runs FIRST, before venv work and before PyInstaller. A refusal must cost
+#     seconds, not the two minutes of a freeze that was never allowed to leave the machine.
+#     Three conditions, each guarding a different way an external build can lie about itself.
+$tagVersion = $null
+if ($Release) {
+    if (-not $Onefile) { throw "-Release is only defined for -Onefile (the external artifact)" }
+
+    # (a) HEAD sits EXACTLY on a tag.
+    #     `git tag --points-at HEAD` is chosen over `git describe --exact-match` DELIBERATELY, and
+    #     the reason is PowerShell, not git: describe writes "fatal: no tag exactly matches ..." to
+    #     STDERR, and PS 5.1 wraps native stderr into an ErrorRecord which -- under
+    #     $ErrorActionPreference='Stop' -- kills the script BEFORE the throw below, so the operator
+    #     sees a NativeCommandError stack instead of the sentence telling them what to do
+    #     (measured 2026-08-08, first run of this gate). `--points-at` stays silent and simply
+    #     prints nothing when HEAD carries no tag.
+    $tag = @(& git tag --points-at HEAD | Where-Object { $_ -match '^v' }) | Select-Object -First 1
+    if (-not $tag) {
+        $near = @(& git tag --sort=-v:refname | Select-Object -First 1)
+        # Parentheses around the WHOLE concatenation are load-bearing: -f binds tighter than +,
+        # so without them it formats only the trailing literal and "{0}" ships to the operator
+        # unsubstituted (measured 2026-08-08, second run of this gate).
+        throw (("HEAD is NOT on a tag -- external builds are tag-only. Latest tag: {0}. " +
+                "Decide the version, then: git tag -a vX.Y.Z -m '...'  and rerun.") -f $near)
+    }
+    $tag = $tag.Trim()
+
+    # (b) TRACKED files unmodified. PyInstaller freezes the WORKING TREE, not the tag, so a dirty
+    #     tracked file ships code that no tag ever pointed at. Untracked files are reported but do
+    #     NOT block: they are not part of any import the spec resolves, and this repo always
+    #     carries a few (session scratch, tooling dotfiles) that must not veto a release.
+    $dirty = (& git status --porcelain --untracked-files=no)
+    if ($dirty) {
+        throw ("Working tree has MODIFIED TRACKED files -- the artifact would not match {0}:`n{1}" `
+               -f $tag, ($dirty -join "`n"))
+    }
+    $untracked = (& git ls-files --others --exclude-standard)
+    if ($untracked) {
+        Write-Host ("NOTE -> untracked files present (not frozen, not blocking): {0}" `
+                    -f ($untracked -join ", ")) -ForegroundColor DarkGray
+    }
+
+    # (c) Tag and pyproject agree. tests/test_version.py already pins this, but the battery is a
+    #     DEV-env gate and the release path has shipped past it before ("horreum 0.0.1", 2026-08-01).
+    #     The build is the last line of defence, so it reads pyproject itself instead of trusting.
+    $pyprojVersion = (Select-String -Path (Join-Path $repo "pyproject.toml") `
+                      -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+                     ).Matches[0].Groups[1].Value
+    $tagVersion = $tag.TrimStart("v")
+    if ($tagVersion -ne $pyprojVersion) {
+        throw ("Tag {0} disagrees with pyproject version {1} -- bump one of them, do not guess" `
+               -f $tag, $pyprojVersion)
+    }
+    Write-Host ("OK -> release gate: HEAD on {0}, tree clean, pyproject agrees" -f $tag) `
+               -ForegroundColor Green
+}
 
 # 1. Clean build venv (gitignored). Created once; deps installed unless -SkipDeps.
 if (-not (Test-Path $py)) {
@@ -120,7 +195,21 @@ if ($Onefile) {
     }
     Write-Host ("OK -> child window title is '{0}'" -f $title) -ForegroundColor Green
 
-    Write-Host "Build complete: dist\horreum-gui.exe (single-file release artifact)" -ForegroundColor Green
+    if (-not $Release) {
+        # LOCAL: one path, overwritten every time. No version in the name ON PURPOSE -- old
+        # throwaway builds are clutter, and the owner asked for exactly one file to click.
+        Write-Host "Build complete: dist\horreum-gui.exe (LOCAL build -- overwrites, not for release)" `
+                   -ForegroundColor Green
+        exit 0
+    }
+
+    # RELEASE: rename to the published asset name. The rename happens AFTER the probe, because
+    # the probe finds the child process by image name 'horreum-gui.exe'.
+    $asset = Join-Path $repo ("dist\Horreum-{0}-windows-x64.exe" -f $tagVersion)
+    if (Test-Path $asset) { Remove-Item $asset -Force }
+    Move-Item -Path $exePath -Destination $asset
+    Write-Host ("Build complete: {0} (EXTERNAL artifact, built from tag)" -f (Split-Path $asset -Leaf)) `
+               -ForegroundColor Green
     exit 0
 }
 

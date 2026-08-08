@@ -97,3 +97,26 @@ def test_oba_specy_wnosza_metadane_do_frozen():
         assert 'copy_metadata("horreum")' in text, (
             f"{spec}: brak `copy_metadata(\"horreum\")` — frozen nie będzie miał skąd wziąć "
             f"numeru wersji")
+
+
+def test_build_zewnetrzny_ma_bramke_tagu():
+    """PIĄTA POWIERZCHNIA NUMERU — nie zgodność czterech zapisów ze sobą, tylko zgodność
+    ARTEFAKTU z drzewem, z którego powstał (decyzja Z. 2026-08-08: „buildy zewnętrzne powinny być
+    zawsze na tagu, wersjonowane").
+
+    Cztery pozostałe testy tego pliku pilnują, żeby kod, `pyproject`, tag i specy mówiły TO SAMO —
+    i wszystkie przechodzą na drzewie 11 commitów za tagiem, bo żaden nie pyta, czy exe powstał
+    z wydania. Bez tej bramki `-Onefile` zamraża tytuł „Horreum 0.6.0" na kodzie, którego wydane
+    0.6.0 nigdy nie miało (zmierzone 2026-08-08).
+
+    Test sprawdza OBECNOŚĆ mechanizmu, nie jego treść — pełne zachowanie bramki dowodzi się
+    uruchomieniem (skrypt odmawia poza tagiem). Chodzi o to, żeby usunięcie przełącznika
+    przewróciło baterię, a nie wyszło dopiero przy wydaniu."""
+    text = (ROOT / "packaging/build.ps1").read_text(encoding="ascii")
+    assert "[switch]$Release" in text, "build.ps1 stracił przełącznik -Release"
+    assert "git tag --points-at HEAD" in text, (
+        "build.ps1 nie sprawdza już, czy HEAD stoi na tagu — zewnętrzny build mógłby wyjść "
+        "z dowolnego stanu drzewa")
+    assert "--untracked-files=no" in text, (
+        "build.ps1 nie sprawdza już czystości drzewa — PyInstaller zamraża drzewo robocze, "
+        "nie tag, więc brudny plik śledzony trafiłby do wydania")

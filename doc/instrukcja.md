@@ -546,6 +546,12 @@ Numer wersji ma jednego właściciela (`pyproject.toml`), widać go w tytule okn
 czwarte miejsce nawigacji (Planer), cztery drogi nadania obiektu i cofnięcie, propozycje ze ścieżki,
 rodowód stosów, szukanie po nazwach potocznych, perspektywy w bazie.
 
+> **Instrukcja jest o jedno wydanie z tyłu.** Wersja **0.7.0** dołożyła cztery rzeczy, których
+> ten dokument jeszcze nie opisuje: wiersz **„Obrazy bez rodowodu"** w Porządkach z perspektywą
+> „Rodowód do potwierdzenia", **propozycję materiału** w panelu „Rodowód" (klatki nocy obrazu
+> z wyborem innej nocy), **ręczne wskazanie zestawu** teleskop × kamera dla zdjęć z lustrzanki
+> oraz **odniesienie czasu** dla stosów z aparatu. Pełny opis zmian → `CHANGELOG.md`.
+
 **Nadal BEZ własnego opisu** (wskazane w instrukcji, ale nieopisane krok po kroku): **Wydaj na
 stół…** (projekcje pod WBPP), **Uporządkuj nazwy plików…** (rename z faktów), **Popraw nagłówki…**
 jako operacja masowa oraz panel **Rodowód…** w wariancie kalibracyjnym. Lead instrukcji mówi o nich

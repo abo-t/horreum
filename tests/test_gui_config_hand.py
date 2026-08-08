@@ -137,26 +137,37 @@ def test_pusty_kubelek_nie_prowadzi_nigdzie(view, tmp_path):
 # --- okno: dwa jawne wybory, zero zapisu bez nich ---
 
 def test_okno_wymaga_celu_i_teleskopu(view):
+    """Dwa jawne wybory: cel i teleskop. Bez któregokolwiek akcja nie ma prawa być klikalna."""
     v, con, ids = view
     dlg = AssignConfigDialog(con, groups=queries.config_review_groups(con))
-    assert not dlg.accept_btn.isEnabled(), "bez teleskopu akcja nie ma prawa być klikalna"
-
     dlg.combo.setCurrentIndex(1)                     # jawne wskazanie teleskopu
+    for i in range(dlg.items.count()):               # jawne wskazanie celu
+        dlg.items.item(i).setCheckState(Qt.Checked)
     assert dlg.accept_btn.isEnabled()
-    for i in range(dlg.items.count()):               # …a teraz odbierz cel
+
+    dlg.combo.setCurrentIndex(0)                     # odbierz teleskop
+    assert not dlg.accept_btn.isEnabled()
+    dlg.combo.setCurrentIndex(1)
+    for i in range(dlg.items.count()):               # odbierz cel
         dlg.items.item(i).setCheckState(Qt.Unchecked)
     assert not dlg.accept_btn.isEnabled()
     dlg.close()
 
 
-def test_etykieta_mowi_ile_klatek_gest_RUSZY(view):
-    """Liczba na przycisku to klatki, które gest REALNIE ruszy — nie długość listy. Grupa bez
-    kamery wchodzi ODZNACZONA, bo klinga i tak ją odmówi (inwariant DDL §1)."""
+def test_grupa_bez_sciezki_i_bez_kamery_wchodzi_ODZNACZONA(view):
+    """Bramka pakietu 3a, zarzut 3: grupa `folder=None` zbiera WSZYSTKIE klatki bez obecnej kopii
+    z całego archiwum — łączy je brak ścieżki, a nie wspólny sprzęt. Domyślne zaznaczenie kazałoby
+    jednym kliknięciem ostemplować jednym teleskopem zbiór, o którym nikt nic nie twierdzi. Ta sama
+    reguła dla grupy bez kamery (klinga i tak ją odmówi). Liczba na przycisku ma to odbijać."""
     v, con, ids = view
     grupy = queries.config_review_groups(con)
     dlg = AssignConfigDialog(con, groups=grupy)
-    ruszalne = sum(g["n_frames"] for g in grupy if g["camera_id"] is not None)
-    assert dlg.accept_btn.text() == i18n.t("cfg.assign_btn", n=ruszalne)
+    for i, g in enumerate(grupy):
+        slaba = g["folder"] is None or g["camera_id"] is None
+        assert (dlg.items.item(i).checkState() == Qt.Unchecked) == slaba, g["folder"]
+    mocne = sum(g["n_frames"] for g in grupy
+                if g["camera_id"] is not None and g["folder"] is not None)
+    assert dlg.accept_btn.text() == i18n.t("cfg.assign_btn", n=mocne)
     dlg.close()
 
 
@@ -189,6 +200,52 @@ def test_gest_zapisuje_i_licznik_spada(view, monkeypatch):
                           (fid,)).fetchone()
         assert row["config_id"] is not None and row["config_source"] == "user"
     assert msgs and str(len(cel)) in msgs[-1] and tel["telescop_canon"] in msgs[-1]
+
+
+def test_pomylka_reki_MA_DROGE_POWROTNA(view, monkeypatch):
+    """Bramka pakietu 3a, zarzut BLOKUJĄCY: po geście klatka wypada z kubełka (`config_id` już nie
+    jest NULL), a automat jej nie tknie (guard lepkości) — bez drugiego wiersza pierwsza pomyłka
+    ręki byłaby WIECZNA. Test przechodzi całą drogę: gest → wiersz „zestaw wskazany ręką" →
+    ZMIANA na inny teleskop."""
+    v, con, ids = view
+    cel = [g["frame_ids"] for g in queries.config_review_groups(con)
+           if g["camera_id"] is not None][0]
+    tele = con.execute("SELECT id, telescop_canon FROM telescope ORDER BY id").fetchall()
+    zly, dobry = tele[0], tele[1]
+    repo.user_assign_config(con, frame_ids=cel, telescope_id=zly["id"], now=NOW)
+    v.refresh()
+
+    # 1. wiersz powrotny ISTNIEJE i prowadzi dalej
+    wiersz = [(v.review.item(i).text(), v.review.item(i).data(UROLE))
+              for i in range(v.review.count())
+              if v.review.item(i).data(UROLE) == "config_by_hand"]
+    assert wiersz and str(len(cel)) in wiersz[0][0]
+    assert len(queries.config_by_hand_frames(con)) == len(cel)
+
+    # 2. akcja zapala się nad NIM, a okno wchodzi w trybie ZMIANY (nic nie zaznaczone domyślnie)
+    r = next(i for i in range(v.review.count()) if v.review.item(i).data(UROLE) == "config_by_hand")
+    v.review.setCurrentRow(r)
+    assert v.set_config_btn.isEnabled()
+    assert v.set_config_btn.toolTip() == i18n.t("object.set_config_tip_change")
+    dlg = AssignConfigDialog(con, groups=queries.config_by_hand_groups(con), change=True)
+    assert all(dlg.items.item(i).checkState() == Qt.Unchecked for i in range(dlg.items.count()))
+    dlg.close()
+
+    # 3. ZMIANA przechodzi — z `overwrite`, więc klinga nie odmawia „zajęte"
+    class _Fake:
+        def __init__(self, *a, **k):
+            self.selected = (dobry["id"], dobry["telescop_canon"], cel)
+
+        def exec(self):
+            return QDialog.Accepted
+
+    monkeypatch.setattr("horreum.gui.app.AssignConfigDialog", _Fake)
+    v._on_set_config()
+    zestawy = {con.execute("SELECT config_id FROM frame WHERE id=?", (f,)).fetchone()[0]
+               for f in cel}
+    assert len(zestawy) == 1
+    assert con.execute("SELECT telescope_id FROM config WHERE id=?",
+                       (zestawy.pop(),)).fetchone()[0] == dobry["id"]
 
 
 def test_gest_bez_grup_nie_otwiera_okna(view, monkeypatch):

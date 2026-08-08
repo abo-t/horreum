@@ -241,6 +241,34 @@ def supersede_invariants(con):
     }
 
 
+def config_review_reason_gap(con):
+    """`§5.6` — ile klatek bez configu NIE MA zapisanego powodu. Zero == „zero cichego NULL".
+
+    Formuła mieszka TU, a nie w skrypcie akceptacji, z powodu, dla którego ten moduł powstał:
+    kryterium żyjące wyłącznie w `scripts/acceptance_s5.py` jest poza baterią i żaden test nie może
+    go zaczerwienić, a skrypt chodzi na dawcy i realnym `R:`.
+
+    KIERUNKOWE, nie równościowe — i to jest poprawka wymuszona przez R1 (W4). Do R1 zbiór „klatek
+    bez configu" mógł tylko rosnąć albo stać, więc równość `stan == |targety config.review|`
+    przypadkiem działała. Gest „Przypisz zestaw…" WYPROWADZA z niego klatki, a dziennik jest
+    append-only: ich `config.review` zostaje na zawsze. Równość pękłaby więc dokładnie o liczbę
+    NAPRAWIONYCH klatek — bramka karałaby za sprzątanie. Pytanie brzmi „czy każda klatka bez
+    configu ma zapisany POWÓD", czyli zawieranie `stan ⊆ targety`.
+
+    Kalibracja poza osią teleskopu NIE wchodzi (kind-scoping: jej `config_id IS NULL` to stan
+    docelowy), klatka bez zeznania też nie (grouper iteruje `frame JOIN header`, więc nigdy jej
+    nie flaguje) — te same dwa wyłączenia, co w `resolver.review_state.no_config`."""
+    from .grouper import NO_TELESCOPE_KINDS
+
+    return con.execute(
+        "SELECT count(*) FROM frame f WHERE f.config_id IS NULL "
+        "AND f.kind NOT IN (SELECT value FROM json_each(?)) "
+        "AND EXISTS(SELECT 1 FROM header h WHERE h.frame_id = f.id) "
+        "AND NOT EXISTS(SELECT 1 FROM event e WHERE e.verb = 'config.review' "
+        "               AND e.target = 'frame:' || f.id)",
+        (json.dumps(sorted(NO_TELESCOPE_KINDS)),)).fetchone()[0]
+
+
 def config_source_invariants(con):
     """Trzy inwarianty kolumny `frame.config_source` (R1) — `{nazwa: liczba naruszeń}`, zero == zdrowo.
 
@@ -267,11 +295,16 @@ def config_source_invariants(con):
     zrodla = json.dumps(sorted(CONFIG_SOURCES))
     off_axis = json.dumps(sorted(NO_TELESCOPE_KINDS))
     return {
+        # ŚLAD MUSI PASOWAĆ DO STANU, nie tylko istnieć (bramka pakietu 3a, zarzut 7): pytanie
+        # „czy kiedykolwiek był gest" przepuszczało podmianę `config_id` gołym SQL-em na klatce,
+        # która gest KIEDYŚ dostała — źródło zostawało 'user', a oś wskazywała już co innego.
+        # Porównujemy więc `config_id` z payloadu zdarzenia z bieżącym stanem.
         "reka_bez_sladu": con.execute(
             "SELECT count(*) FROM frame f "
             "WHERE f.config_source IN (SELECT value FROM json_each(?)) "
             "AND NOT EXISTS (SELECT 1 FROM event e WHERE e.verb = 'config.assigned' "
-            "                AND e.target = 'frame:' || f.id AND e.actor LIKE 'user:%')",
+            "                AND e.target = 'frame:' || f.id AND e.actor LIKE 'user:%' "
+            "                AND json_extract(e.payload, '$.config_id') IS f.config_id)",
             (zrodla,)).fetchone()[0],
         "reka_bez_osi": con.execute(
             "SELECT count(*) FROM frame f WHERE f.config_source IS NOT NULL "

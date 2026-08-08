@@ -303,6 +303,29 @@ CATALOG = {
               "light up once a file appears that does not testify about hardware (typically DSLR RAW)."},
     "object.frames_config_review": {
         "pl": "Klatki bez zestawu ({n})", "en": "Frames without a setup ({n})"},
+    # DRUGA POŁOWA kubełka sprzętu — droga POWROTNA dla pomyłki ręki (bramka pakietu 3a, zarzut 1).
+    # Bez niej klatka po geście wypadała z kubełka i nie było jak jej już dotknąć: automat odmawia
+    # (guard lepkości), a okno otwiera się z kubełka, w którym jej nie ma.
+    "object.config_by_hand_line": {
+        "pl": "— zestaw wskazany ręką: {n} klatek", "en": "— setup indicated by hand: {n} frames"},
+    "object.frames_config_by_hand": {
+        "pl": "Klatki z zestawem wskazanym ręką ({n})",
+        "en": "Frames with a setup indicated by hand ({n})"},
+    "object.set_config_tip_change": {
+        "pl": "ZMIEŃ zestaw wskazany wcześniej ręką — zaznacz w oknie tylko te foldery, "
+              "które mają się zmienić. Zapis idzie do BAZY.",
+        "en": "CHANGE a setup you indicated earlier by hand — in the dialog check only the folders "
+              "that should change. The write goes to the DATABASE."},
+    "cfg.title_change": {"pl": "Zmień zestaw (teleskop × kamera)",
+                         "en": "Change setup (telescope × camera)"},
+    "cfg.head_change": {
+        "pl": "{folders} grup · {frames} klatek — wszystkie mają zestaw wskazany PRZEZ CIEBIE. "
+              "Zaznacz tylko te, które chcesz zmienić: zapis NADPISZE poprzednie wskazanie. "
+              "Wchodzą odznaczone, żeby jedna poprawka nie przestemplowała reszty.",
+        "en": "{folders} groups · {frames} frames — all have a setup indicated BY YOU. Check only "
+              "the ones you want to change: the write OVERWRITES the previous indication. They "
+              "start unchecked so that one fix does not re-stamp the rest."},
+    "cfg.now_set": {"pl": "dziś: {telescope}", "en": "now: {telescope}"},
     "object.set_config_btn": {"pl": "Przypisz zestaw…", "en": "Assign setup…"},
     "object.set_config_tip": {
         "pl": "Wskaż TELESKOP dla folderów, które o sprzęcie nie zeznają — kamerę bierzemy "
@@ -340,9 +363,16 @@ CATALOG = {
                         "en": "Nothing selected — nothing written."},
     "cfg.err_no_telescope": {"pl": "Wskaż teleskop — kamerę zna plik, tego nie zgadujemy.",
                              "en": "Point out a telescope — the file knows the camera, this we do not guess."},
+    # Ostrzeżenie NAZYWA DROGĘ NAPRAWY, nie tylko odmowę (bramka pakietu 3a, zarzut 8): kubełek
+    # złożony wyłącznie z klatek bez kamery dawał okno z wiecznie wygaszonym zatwierdzeniem i bez
+    # słowa o tym, gdzie tę kamerę załatwić — a to inna oś (skan), nie ten gest.
     "cfg.no_camera_warning": {
-        "pl": "{n} klatek zostanie pominiętych: bez kamery nie ma z czego złożyć zestawu.",
-        "en": "{n} frames will be skipped: without a camera there is nothing to build a setup from."},
+        "pl": "{n} klatek zostanie pominiętych: bez kamery nie ma z czego złożyć zestawu. "
+              "Kamera przychodzi z zeznania pliku (INSTRUME/XPIXSZ) — to osobna oś: napraw "
+              "nagłówek albo przeskanuj ponownie, potem wróć tutaj.",
+        "en": "{n} frames will be skipped: without a camera there is nothing to build a setup from. "
+              "The camera comes from the file's testimony (INSTRUME/XPIXSZ) — a separate axis: "
+              "repair the header or re-scan, then come back here."},
     "object.config_assigned_report": {
         "pl": "Przypisano zestaw {telescope} → {assigned} z {total} klatek.",
         "en": "Assigned setup {telescope} → {assigned} of {total} frames."},
@@ -1587,13 +1617,18 @@ CATALOG = {
     },
     "pipeline.fmt.group": {
         "pl": "[grupuj] nagłówki {headers} · teleskopy {telescopes} · bez TELESCOP {no_tel} · "
-              "kalibracja poza osią {off_axis}{unassigned} · konfiguracje {conf_prop}/{conf_assign} · "
-              "konfig. do przeglądu {conf_review}",
+              "kalibracja poza osią {off_axis}{unassigned}{by_hand} · "
+              "konfiguracje {conf_prop}/{conf_assign} · konfig. do przeglądu {conf_review}",
         "en": "[group] headers {headers} · telescopes {telescopes} · no TELESCOP {no_tel} · "
-              "off-axis calibration {off_axis}{unassigned} · configs {conf_prop}/{conf_assign} · "
-              "configs to review {conf_review}",
+              "off-axis calibration {off_axis}{unassigned}{by_hand} · "
+              "configs {conf_prop}/{conf_assign} · configs to review {conf_review}",
     },
     "pipeline.fmt.group_unassigned": {"pl": " (odpięte {n})", "en": " (unassigned {n})"},
+    # R1b: przebieg MIJA klatki z zestawem od ręki — i musi to powiedzieć. Bez tej doklejki po
+    # geście na 427 klatkach raport pokazywałby SAM SPADEK („bez TELESCOP" i „do przeglądu" lecą
+    # w dół), a przyczyna byłaby niewidzialna: człowiek czytałby, że przebieg nagle „naprawił"
+    # coś sam. QUIET — doklejka wchodzi wyłącznie przy niezerowej liczbie, jak „odpięte" obok.
+    "pipeline.fmt.group_by_hand": {"pl": " (zestaw ręką {n})", "en": " (setup by hand {n})"},
     "pipeline.fmt.resolve": {
         "pl": "[rozwiąż] klatki {frames} · klatki light {lights} · obiekty nowe {obj_new} · "
               "przypisane {obj_assign} · przegląd {obj_review} (różnych {obj_distinct}) · "

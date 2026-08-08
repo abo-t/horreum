@@ -401,7 +401,9 @@ def test_KAZDY_kubelek_kolejki_ma_WLASNA_recepte_naprawy(view):
     kubelki = {"object_raw", "object_raw_cleared", "nameless", "nameless_cleared",
                "nameless_raw", "nameless_raw_cleared", "path_proposals",
                "nameless_stacks", "nameless_stacks_cleared", "unreadable",
-               "config_review"}          # R1: oś SPRZĘTU — inna oś, więc własna recepta
+               # R1: oś SPRZĘTU — inna oś, więc własna recepta; DWA kubełki, bo droga powrotna
+               # pomyłki ręki jest osobną populacją (bramka pakietu 3a, zarzut 1).
+               "config_review", "config_by_hand"}
     brakuje = kubelki - set(_REPAIR_TIPS)
     assert not brakuje, f"kubełki bez własnej recepty naprawy: {sorted(brakuje)}"
     assert None in _REPAIR_TIPS, "brak zaznaczenia musi mieć jawny wpis, nie wpadać w `.get`"

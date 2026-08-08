@@ -59,8 +59,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from horreum import db                                              # noqa: E402
 from horreum import supersede                                     # noqa: E402
-from horreum.audit import (config_source_invariants, entity_event_parity,  # noqa: E402
-                           light_population_closure, object_source_audit, supersede_invariants)
+from horreum.audit import (config_review_reason_gap, config_source_invariants,  # noqa: E402
+                           entity_event_parity, light_population_closure, object_source_audit,
+                           supersede_invariants)
 from horreum.calibration import KIND_RECIPE, run_calibration      # noqa: E402
 from horreum.lineage import run_lineage                           # noqa: E402
 from horreum.grouper import NO_TELESCOPE_KINDS, run_grouper       # noqa: E402
@@ -624,12 +625,8 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
     # configu ma zapisany POWÓD. To zawieranie (`stan ⊆ targety`), nie równość — liczymy klatki
     # stanu BEZ zdarzenia i żądamy zera. Nadmiar targetów po drugiej stronie jest odtąd normalny
     # i raportowany jako `naprawione`, żeby liczba nie znikła z oczu.
-    bez_powodu = con.execute(
-        "SELECT count(*) FROM frame f WHERE f.config_id IS NULL "
-        "AND f.kind NOT IN (SELECT value FROM json_each(?)) "
-        "AND EXISTS(SELECT 1 FROM header h WHERE h.frame_id=f.id) "
-        "AND NOT EXISTS(SELECT 1 FROM event e WHERE e.verb='config.review' "
-        "               AND e.target = 'frame:' || f.id)", (off_axis,)).fetchone()[0]
+    # Formuła w `horreum.audit`, nie tutaj — żeby liczyła ją TAKŻE bateria (powód: nagłówek `audit`).
+    bez_powodu = config_review_reason_gap(con)
     naprawione = cfg_review - no_cfg_hdr
     out(f"\n§5.6 config={cfg} config.review={cfg_review} frame-bez-config-z-headerem={no_cfg_hdr} "
         f"(kalibracja poza osią={calib_null}, odpięte={unassigned}, "

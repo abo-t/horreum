@@ -82,11 +82,16 @@ _REPAIR_TIPS = {
     "object_raw_cleared": "repair.tip_named",
     "path_proposals": "repair.tip_path",
     "unreadable": "repair.tip_unreadable",
-    # R1: kubełek osi SPRZĘTU. Sąsiaduje w kolejce, więc musi mieć własne zdanie — inaczej
-    # wygaszony przycisk naprawy odesłałby usera do karty `OBJECT`, która nie ma z nim nic wspólnego.
+    # R1: kubełek osi SPRZĘTU i jego DRUGA POŁOWA (klatki z zestawem od ręki). Sąsiadują w kolejce,
+    # więc muszą mieć własne zdanie — inaczej wygaszony przycisk naprawy odesłałby usera do karty
+    # `OBJECT`, która nie ma z nimi nic wspólnego.
     "config_review": "repair.tip_config",
+    "config_by_hand": "repair.tip_config",
     None: "repair.tip_pick",
 }
+# Kubełki osi SPRZĘTU — dwie rozłączne populacje, jedna akcja („Przypisz zestaw…"), bo różni je
+# to, SKĄD bierze się grupa, a nie to, co się z nią robi (lustro `_ASSIGN_TAGS` na osi obiektu).
+_CONFIG_TAGS = frozenset({"config_review", "config_by_hand"})
 # Stałe nagłówków trzymają KLUCZE katalogu (nie stringi) — etykieta rozwiązuje się `_headers()` w czasie
 # BUDOWY widżetu, po `i18n.set_lang` w `main` (D-L1: stałe module-level ewaluują się przed set_lang, więc
 # string zamroziłby domyślny PL; klucz jest językowo-neutralny).
@@ -1324,6 +1329,16 @@ class ObjectAxisView(QWidget):
         self._add_review_item(i18n.t("object.config_review_line", n=q["config_review_count"]),
                               tag="config_review" if q["config_review_count"] > 0 else None,
                               info=i18n.t("object.config_review_info_empty"))
+        # DRUGA POŁOWA TEGO KUBEŁKA — klatki, którym zestaw NADAŁA RĘKA (bramka pakietu 3a,
+        # zarzut 1). To nie kosmetyka wiersza, tylko jedyna droga powrotna: po geście klatka
+        # wypada z kubełka (`config_id` już nie jest NULL), a automat jej nie tknie (guard
+        # lepkości) — bez tego wiersza pierwsza pomyłka ręki byłaby WIECZNA. Ta sama figura,
+        # co „cofnięte ręką" na osi obiektu: populacja rozłączna, własny licznik, ta sama akcja.
+        # QUIET — wiersza nie ma, dopóki nikt niczego nie wskazał.
+        if q["config_by_hand_count"] > 0:
+            self._add_review_item(
+                i18n.t("object.config_by_hand_line", n=q["config_by_hand_count"]),
+                tag="config_by_hand")
         # licznik POZOSTAŁEGO kanału jako pozycja informacyjna (bez tagu → nieklikana); nota
         # „rozwiązywanie w przygotowaniu" ZAWĘŻONA do klatek bez nagłówka — obiekt-review, kopie
         # i (od R1) oś sprzętu mają już swoje akcje.
@@ -1431,9 +1446,11 @@ class ObjectAxisView(QWidget):
             else "object.confirm_path_tip_pick"))
         # Oś SPRZĘTU (R1) — jak potwierdzanie propozycji: pisze do BAZY, więc mutex writebacku
         # jej nie dotyczy; bramką jest sam bieg pipeline'u. Wygaszony przycisk tłumaczy się sam.
-        self.set_config_btn.setEnabled(tag == "config_review" and not self._busy)
+        self.set_config_btn.setEnabled(tag in _CONFIG_TAGS and not self._busy)
         self.set_config_btn.setToolTip(i18n.t(
-            "object.set_config_tip" if tag == "config_review" else "object.set_config_tip_pick"))
+            "object.set_config_tip_change" if tag == "config_by_hand"
+            else "object.set_config_tip" if tag == "config_review"
+            else "object.set_config_tip_pick"))
         # WIZ #12: „Przypisz obiekt…" gasł BEZ SŁOWA obok aktywnego „Napraw nagłówek…", więc obie
         # drogi naprawy wyglądały jak jedna zepsuta. Wygaszony przycisk tłumaczy się sam — tooltip
         # nazywa drogę WŁAŚCIWĄ dla zaznaczonego kubełka, zamiast milczeć o istnieniu drugiej.
@@ -1544,13 +1561,18 @@ class ObjectAxisView(QWidget):
             rows = queries.path_proposal_frames(self.con, ids)
             self.frames_label.setText(i18n.t("object.frames_path_proposed", n=len(rows)))
             self._fill_frames(rows, present_col=False)
-        elif tag == "config_review":
+        elif tag in ("config_review", "config_by_hand"):
             # Drążenie pokazuje KLATKI, a jednostkę gestu — folder × kamerę — pokazuje dopiero
             # okno (lustro `path_proposals` wyżej: tam jednostką jest nazwa). Read-model jest
-            # LUSTREM licznika kubełka i test pinuje tę równość.
+            # LUSTREM licznika kubełka i test pinuje tę równość. Dwa tagi, bo dwie ROZŁĄCZNE
+            # populacje (bez zestawu / z zestawem od ręki) — i to jest cały sens drugiego wiersza.
             self._restore_frames_mode()
-            rows = queries.config_review_frames(self.con)
-            self.frames_label.setText(i18n.t("object.frames_config_review", n=len(rows)))
+            reka = tag == "config_by_hand"
+            rows = (queries.config_by_hand_frames(self.con) if reka
+                    else queries.config_review_frames(self.con))
+            self.frames_label.setText(i18n.t(
+                "object.frames_config_by_hand" if reka else "object.frames_config_review",
+                n=len(rows)))
             self._fill_frames(rows, present_col=False)
         elif tag == "unreadable":
             self._show_copies()
@@ -1722,12 +1744,20 @@ class ObjectAxisView(QWidget):
         CEL BIERZEMY Z OKNA, nie z zaznaczenia panelu — i tym ta akcja różni się od „Przypisz
         obiekt…". Jednostką gestu jest FOLDER × KAMERA (D-DR-3), a panel klatek nie ma jak jej
         pokazać: zaznaczenie 5 z 100 klatek folderu dałoby zestaw połowie serii zrobionej tym
-        samym sprzętem — stan, którego nikt nie chciał i którego nic w kolejce nie pokazuje."""
-        grupy = queries.config_review_groups(self.con)
+        samym sprzętem — stan, którego nikt nie chciał i którego nic w kolejce nie pokazuje.
+
+        DWA WEJŚCIA, JEDNA DROGA ZAPISU (bramka pakietu 3a, zarzut 1): kubełek „bez zestawu"
+        NADAJE, a jego druga połowa („zestaw wskazany ręką") ZMIENIA — ta sama klinga, różnica
+        w jednym parametrze. Bez drugiego wejścia pierwsza pomyłka ręki była nieodwracalna
+        z ekranu: klatka wypada z kubełka, a automat jej nie tknie."""
+        tag, _ = self._selected_review()
+        zmiana = tag == "config_by_hand"
+        grupy = (queries.config_by_hand_groups(self.con) if zmiana
+                 else queries.config_review_groups(self.con))
         if not grupy:
             self.status_message.emit(i18n.t("cfg.err_nothing"))
             return
-        dlg = AssignConfigDialog(self.con, groups=grupy, parent=self)
+        dlg = AssignConfigDialog(self.con, groups=grupy, change=zmiana, parent=self)
         if dlg.exec() != QDialog.Accepted or dlg.selected is None:
             return
         telescope_id, telescope_label, frame_ids = dlg.selected
@@ -1735,7 +1765,8 @@ class ObjectAxisView(QWidget):
             with busy.busy(self.status_message.emit,
                            i18n.t("busy.saving_frames", n=len(frame_ids))):
                 g = repo.user_assign_config(self.con, frame_ids=frame_ids,
-                                            telescope_id=telescope_id, now=self._now())
+                                            telescope_id=telescope_id, now=self._now(),
+                                            overwrite=zmiana)
         except ValueError as e:                # dryf do nieistniejącej klatki/teleskopu
             QMessageBox.warning(self, i18n.t("cfg.title"), str(e))
             return

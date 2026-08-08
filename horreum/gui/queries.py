@@ -320,7 +320,11 @@ def review_queue(con):
     except ValueError:
         prop_names = prop_frames = None
     st = review_state(con)
-    return {"object_review": object_review, "nameless_count": len(nameless),
+    # Bliźniak kubełka sprzętu po drugiej stronie gestu (R1, bramka 3a zarzut 1): DROGA POWROTNA
+    # dla pomyłki ręki. Licznik = długość drążenia (D-PD-10), jak u kubełków bezimiennych.
+    reka = config_by_hand_frames(con)
+    return {"object_review": object_review, "config_by_hand_count": len(reka),
+            "nameless_count": len(nameless),
             "nameless_cleared_count": len(nameless_cleared),
             "nameless_raw_count": len(raw),
             "nameless_raw_cleared_count": len(raw_cleared),
@@ -523,6 +527,61 @@ def config_review_frames(con):
     ).fetchall()
 
 
+def config_by_hand_frames(con):
+    """Bliźniak `config_review_frames` po drugiej stronie GESTU: klatki, którym zestaw wskazała RĘKA.
+
+    Ten read-model jest DROGĄ POWROTNĄ, nie ozdobą (bramka pakietu 3a, zarzut 1). Kubełek sprzętu
+    pyta o `config_id IS NULL`, więc klatka po geście z niego WYPADA — i do R1 nie było jak jej
+    już dotknąć: automat odmawia (guard lepkości), a jedyne okno otwiera się z kubełka, w którym
+    jej nie ma. Pierwsza pomyłka ręki byłaby wieczna. Osobny wiersz kolejki i osobna lista są tu
+    dokładnie tą samą figurą, co „cofnięte ręką" na osi obiektu (S3/R-S3-1): populacja rozłączna
+    z kubełkiem, ta sama droga naprawy, własny licznik.
+
+    Kolumny jak w `config_review_frames` — obie listy jadą przez ten sam panel `_fill_frames`."""
+    return con.execute(
+        "SELECT f.id AS frame_id, f.sha1_data, f.filetype, h.date_obs, "
+        "       t.label AS telescope_label, t.telescop_canon, "
+        "       cam.model_canon AS camera_model, f.camera_id, h.telescop, "
+        "       l.id AS location_id, l.path, "
+        "       (SELECT COUNT(*) FROM location WHERE frame_id = f.id AND present = 1) AS n_present "
+        "FROM frame f JOIN header h ON h.frame_id = f.id "
+        "LEFT JOIN config c ON c.id = f.config_id "
+        "LEFT JOIN telescope_canonical tc ON tc.id = c.telescope_id "
+        "LEFT JOIN telescope t ON t.id = tc.canon_id "
+        "LEFT JOIN camera cam ON cam.id = f.camera_id "
+        "LEFT JOIN location l ON l.id = (SELECT MIN(id) FROM location "
+        "                                WHERE frame_id = f.id AND present = 1) "
+        "WHERE f.config_source IS NOT NULL "
+        "ORDER BY l.path, f.id").fetchall()
+
+
+def _grupuj_po_folderze_i_kamerze(rows):
+    """Wspólny składacz grup **folder × kamera** dla obu list osi sprzętu (SPOT).
+
+    Jedna funkcja, bo obie odpowiadają na to samo pytanie („co jest jednostką gestu"), a dwie kopie
+    rozjechałyby się przy pierwszej zmianie klucza — a klucz jest tu kontraktem DDL, nie gustem."""
+    grupy = {}
+    for r in rows:
+        folder = os.path.dirname(r["path"]) if r["path"] else None
+        klucz = (folder, r["camera_id"])
+        g = grupy.get(klucz)
+        if g is None:
+            g = grupy[klucz] = {"folder": folder, "camera_id": r["camera_id"],
+                                "camera_model": r["camera_model"], "telescop": r["telescop"],
+                                "telescope_label": r["telescope_label"],
+                                "n_frames": 0, "frame_ids": []}
+        elif g["telescop"] != r["telescop"]:
+            g["telescop"] = None                 # folder z dwoma zeznaniami nie ma jednego świadka
+        g["n_frames"] += 1
+        g["frame_ids"].append(r["frame_id"])
+    return list(grupy.values())
+
+
+def config_by_hand_groups(con):
+    """Grupy folder × kamera dla klatek z zestawem od RĘKI — wejście okna w trybie ZMIANY."""
+    return _grupuj_po_folderze_i_kamerze(config_by_hand_frames(con))
+
+
 def config_review_groups(con):
     """Kubełek sprzętu pogrupowany w JEDNOSTKI GESTU: **folder × kamera** (D-DR-3).
 
@@ -542,21 +601,9 @@ def config_review_groups(con):
     `telescop` grupy = zeznanie PIERWSZEJ klatki, gdy wszystkie mówią to samo; różne zeznania
     w jednym folderze dają `None` (grupa nie ma jednego świadka i nie ma udawać, że ma).
 
-    Zwraca listę dictów: {folder, camera_id, camera_model, telescop, n_frames, frame_ids}."""
-    grupy = {}
-    for r in config_review_frames(con):
-        folder = os.path.dirname(r["path"]) if r["path"] else None
-        klucz = (folder, r["camera_id"])
-        g = grupy.get(klucz)
-        if g is None:
-            g = grupy[klucz] = {"folder": folder, "camera_id": r["camera_id"],
-                                "camera_model": r["camera_model"], "telescop": r["telescop"],
-                                "n_frames": 0, "frame_ids": []}
-        elif g["telescop"] != r["telescop"]:
-            g["telescop"] = None                 # folder z dwoma zeznaniami nie ma jednego świadka
-        g["n_frames"] += 1
-        g["frame_ids"].append(r["frame_id"])
-    return list(grupy.values())
+    Zwraca listę dictów: {folder, camera_id, camera_model, telescop, telescope_label, n_frames,
+    frame_ids}."""
+    return _grupuj_po_folderze_i_kamerze(config_review_frames(con))
 
 
 def nameless_stack_frames(con, cleared=False):

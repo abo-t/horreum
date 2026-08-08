@@ -908,9 +908,14 @@ class PipelineView(QWidget):
     def _format_group(self, s):
         unassigned = (i18n.t("pipeline.fmt.group_unassigned", n=s.configs_unassigned)
                       if s.configs_unassigned else "")
+        # R1b: klatki z zestawem od RĘKI przebieg mija — i raport musi to powiedzieć, inaczej po
+        # geście widać sam SPADEK dwóch liczników bez przyczyny („przebieg naprawił coś sam").
+        by_hand = (i18n.t("pipeline.fmt.group_by_hand", n=s.config_by_hand)
+                   if s.config_by_hand else "")
         return i18n.t(
             "pipeline.fmt.group", headers=s.headers, telescopes=s.telescopes_proposed,
             no_tel=s.telescop_missing, off_axis=s.calibration_off_axis, unassigned=unassigned,
+            by_hand=by_hand,
             conf_prop=s.configs_proposed, conf_assign=s.configs_assigned, conf_review=s.config_review)
 
     def _format_resolve(self, s):

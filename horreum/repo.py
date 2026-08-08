@@ -341,15 +341,37 @@ def transfer_human_facts(con, *, frame_id, now, actor="user:local"):
             return FactTransfer(skipped="brak faktow czlowieka")
         nowa_id = stara["superseded_by"]
         nowa = con.execute(
-            "SELECT object_source, config_id, config_source FROM frame WHERE id = ?",
-            (nowa_id,)).fetchone()
+            "SELECT kind, camera_id, object_source, config_id, config_source FROM frame "
+            "WHERE id = ?", (nowa_id,)).fetchone()
         if nowa is None:
             raise ValueError(f"frame:{nowa_id} (następczyni) nie istnieje")
         obiekt_do_przeniesienia = ma_obiekt and nowa["object_source"] is None
-        config_do_przeniesienia = (ma_config and nowa["config_source"] is None
-                                   and nowa["config_id"] is None)
+        # ZESTAW PRZECHODZI TYLKO NA KLATKĘ, KTÓRA GO UNIESIE (bramka pakietu 3a, zarzut 4).
+        # Docstring twierdził, że kamera obu tożsamości jest ta sama, „bo to ten sam plik" — i to
+        # jest ZAŁOŻENIE, nie sprawdzenie: podmieniona treść ma własne zeznanie, więc może przyjść
+        # z innym `INSTRUME` albo z innym `IMAGETYP`. Bez tych dwóch warunków przeniesienie
+        # zapisywałoby config CUDZEJ kamery (łamiąc inwariant DDL §1 `config.camera_id ==
+        # frame.camera_id`) albo zestaw NA KALIBRACJI (łamiąc kind-scoping) — i to klingą, która
+        # w obu wypadkach sama sobie zaprzecza.
+        from .grouper import NO_TELESCOPE_KINDS          # import odroczony (cykl repo↔grouper)
+
+        kamera_zestawu = None
+        if ma_config:
+            wiersz = con.execute(
+                "SELECT camera_id FROM config WHERE id = ?", (stara["config_id"],)).fetchone()
+            kamera_zestawu = wiersz["camera_id"] if wiersz is not None else None
+        config_do_przeniesienia = (
+            ma_config and nowa["config_source"] is None and nowa["config_id"] is None
+            and nowa["kind"] not in NO_TELESCOPE_KINDS
+            and kamera_zestawu is not None and nowa["camera_id"] == kamera_zestawu)
         if not obiekt_do_przeniesienia and not config_do_przeniesienia:
-            return FactTransfer(skipped="nastepczyni ma wlasne zrodlo")
+            # POWÓD MA BYĆ PRAWDZIWY, nie jeden dla wszystkich odmów: „następczyni ma własne
+            # źródło" i „zestaw do niej nie pasuje" to dwa różne stany i dwie różne dalsze drogi
+            # (w pierwszym nie ma nic do roboty, w drugim ręka musi wskazać zestaw od nowa).
+            nie_pasuje = ma_config and (nowa["config_source"] is None
+                                        and nowa["config_id"] is None)
+            return FactTransfer(skipped="zestaw nie pasuje do nastepczyni" if nie_pasuje
+                                else "nastepczyni ma wlasne zrodlo")
 
         if obiekt_do_przeniesienia:
             con.execute("UPDATE frame SET object_id = ?, object_source = ? WHERE id = ?",
@@ -772,15 +794,32 @@ def unassign_config(con, *, frame_id, now, actor="grouper"):
     `grouper.NO_TELESCOPE_KINDS`). Potrzebne dla danych sprzed kind-scopingu: darki były przypięte
     do configu zbudowanego z TELESCOP w ich nagłówku, więc bez odpięcia oś liczyłaby je pod cudzą
     optyką na zawsze. Idempotentny: `config_id` już NULL → False bez eventu; inaczej UPDATE +
-    `event(config.unassigned)` z poprzednim id w payloadzie (append-only: ślad zostaje)."""
-    row = con.execute("SELECT config_id FROM frame WHERE id = ?", (frame_id,)).fetchone()
-    if row is None or row[0] is None:
+    `event(config.unassigned)` z poprzednim id w payloadzie (append-only: ślad zostaje).
+
+    ŹRÓDŁO GAŚNIE RAZEM Z OSIĄ (R1, bramka pakietu 3a zarzut 2) — `config_id` i `config_source`
+    to JEDNA oś opisana dwoma polami, więc zdjęcie połowy zostawia zdanie bez podmiotu: „ręka
+    wskazała zestaw", którego nie ma. Stan `config_id NULL + config_source 'user'` jest przy tym
+    NIENAPRAWIALNY z zewnątrz: grouper mija go przez guard lepkości, a gest ręki odmawia
+    kalibracji — więc wisiałby na zawsze, czerwieniąc inwariant `§5.16 reka_bez_osi`. Droga do
+    niego jest realna: klatka nazwana ręką, a potem przeklasyfikowana na darka (poprawiony
+    `IMAGETYP`, `kind_source='path'`). Poprzednie źródło idzie do payloadu — ślad zostaje.
+
+    BRAMKĄ ZOSTAJE SAMO `config_id`, nie para — i to jest wymuszone PARYTETEM, nie wygodą: gdyby
+    ta klinga odpinała także klatkę z pustą osią i niepustym źródłem, emitowałaby `config.unassigned`
+    przy stanie, który się NIE ZMIENIŁ (klatka bez configu nie jest liczona), czyli rozjeżdżałaby
+    `audit.entity_event_parity` o jeden wiersz. Stan `NULL + user` po tej poprawce nie ma już
+    PRODUCENTA — a gdyby powstał wstrzyknięciem, łapie go inwariant, nie ta droga."""
+    row = con.execute(
+        "SELECT config_id, config_source FROM frame WHERE id = ?", (frame_id,)).fetchone()
+    if row is None or row["config_id"] is None:
         return False
 
     with con:
-        con.execute("UPDATE frame SET config_id = NULL WHERE id = ?", (frame_id,))
+        con.execute(
+            "UPDATE frame SET config_id = NULL, config_source = NULL WHERE id = ?", (frame_id,))
         emit_event(con, actor=actor, verb="config.unassigned", target=f"frame:{frame_id}", now=now,
-                   payload={"config_id": row[0]}, reason="rodzaj bez osi teleskopu (kalibracja)")
+                   payload={"config_id": row["config_id"], "config_source": row["config_source"]},
+                   reason="rodzaj bez osi teleskopu (kalibracja)")
     return True
 
 
@@ -866,31 +905,38 @@ def user_assign_config(con, *, frame_ids, telescope_id, now, uid="local", overwr
             if fr["camera_id"] is None:
                 g.no_camera += 1
                 continue
+            # ZESTAW WYSZUKUJEMY, ale POWOŁUJEMY dopiero przy realnym zapisie (bramka pakietu 3a,
+            # zarzut 5): `INSERT` przed guardem zajętości zostawiał wiersz `config` i zdarzenie
+            # `config.proposed` nawet wtedy, gdy gest nie ruszył ANI JEDNEJ klatki (wyścig: wszystkie
+            # dostały zestaw między oknem a zapisem). Osierocony config nie łamie parytetu — łamie
+            # obietnicę „zero zmian, gdy nic nie zapisano".
             cfg_id = cfg_per_camera.get(fr["camera_id"])
             if cfg_id is None:
                 row = con.execute(
                     "SELECT id FROM config WHERE telescope_id = ? AND camera_id = ?",
                     (telescope_id, fr["camera_id"])).fetchone()
-                if row is None:
-                    cur = con.execute(
-                        "INSERT INTO config(telescope_id, camera_id, label, status, created_at) "
-                        "VALUES (?, ?, NULL, 'proposed', ?)",
-                        (telescope_id, fr["camera_id"], now))
-                    cfg_id = cur.lastrowid
-                    g.configs_created += 1
-                    emit_event(con, actor=actor, verb="config.proposed", target=f"config:{cfg_id}",
-                               now=now, payload={"telescope_id": telescope_id,
-                                                 "camera_id": fr["camera_id"]})
-                else:
+                if row is not None:
                     cfg_id = row["id"]
-                cfg_per_camera[fr["camera_id"]] = cfg_id
-            if fr["config_id"] == cfg_id and fr["config_source"] in STICKY_CONFIG_SOURCES:
+                    cfg_per_camera[fr["camera_id"]] = cfg_id
+            if cfg_id is not None and fr["config_id"] == cfg_id \
+                    and fr["config_source"] in STICKY_CONFIG_SOURCES:
                 g.unchanged += 1                 # ten sam zestaw tą samą ręką — nic do zapisania
                 continue
-            if fr["config_id"] is not None:
-                if not overwrite:
-                    g.occupied += 1
-                    continue
+            if fr["config_id"] is not None and not overwrite:
+                g.occupied += 1
+                continue
+            if cfg_id is None:                   # dopiero TERAZ wiadomo, że zestaw komuś posłuży
+                cur = con.execute(
+                    "INSERT INTO config(telescope_id, camera_id, label, status, created_at) "
+                    "VALUES (?, ?, NULL, 'proposed', ?)",
+                    (telescope_id, fr["camera_id"], now))
+                cfg_id = cur.lastrowid
+                cfg_per_camera[fr["camera_id"]] = cfg_id
+                g.configs_created += 1
+                emit_event(con, actor=actor, verb="config.proposed", target=f"config:{cfg_id}",
+                           now=now, payload={"telescope_id": telescope_id,
+                                             "camera_id": fr["camera_id"]})
+            if fr["config_id"] is not None:      # PRZEPIĘCIE — para verbów, inaczej parytet kłamie
                 emit_event(con, actor=actor, verb="config.unassigned", target=f"frame:{frame_id}",
                            now=now, payload={"config_id": fr["config_id"],
                                              "config_source": fr["config_source"]},

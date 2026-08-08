@@ -34,18 +34,26 @@ class AssignConfigDialog(QDialog):
     zdjęcie przez obiektyw). Pierwsze znaczy „wskaż teleskop", drugie „automat już coś wie, ale to
     nie teleskop" — a użytkownik ma tę różnicę widzieć PRZED gestem, nie po nim.
 
+    DWA TRYBY, JEDNO OKNO (`change`): **nadanie** (grupy z kubełka „bez zestawu") i **zmiana**
+    (grupy, którym zestaw nadała już ręka). Różnią się nagłówkiem, etykietą wiersza — bo w trybie
+    zmiany user musi widzieć, CO tam dziś stoi — i tym, że zapis idzie z `overwrite=True`.
+    Drugiego okna nie ma świadomie: pytanie jest jedno („czym to fotografowano"), a dwie
+    powierzchnie dla jednego pytania rozjeżdżają się przy pierwszej zmianie kontraktu.
+
     `self.selected` = `(telescope_id, telescope_label, frame_ids)` albo `None`."""
 
-    def __init__(self, con, *, groups, parent=None):
+    def __init__(self, con, *, groups, change=False, parent=None):
         super().__init__(parent)
         self.con = con
         self.groups = list(groups)
+        self.change = change
         self.selected = None
-        self.setWindowTitle(i18n.t("cfg.title"))
+        self.setWindowTitle(i18n.t("cfg.title_change" if change else "cfg.title"))
         lay = QVBoxLayout(self)
 
         klatek = sum(g["n_frames"] for g in self.groups)
-        head = QLabel(i18n.t("cfg.head", folders=len(self.groups), frames=klatek))
+        head = QLabel(i18n.t("cfg.head_change" if change else "cfg.head",
+                             folders=len(self.groups), frames=klatek))
         head.setWordWrap(True)
         lay.addWidget(head)
 
@@ -53,16 +61,31 @@ class AssignConfigDialog(QDialog):
         for g in self.groups:
             folder = g["folder"] or i18n.t("cfg.no_folder")
             kamera = g["camera_model"] or i18n.t("cfg.no_camera")
-            swiadek = (i18n.t("cfg.header_says", telescop=g["telescop"]) if g["telescop"]
-                       else i18n.t("cfg.header_silent"))
+            # W trybie ZMIANY świadkiem jest to, CO DZIŚ STOI na osi (wskazanie ręki), a nie co
+            # mówi nagłówek: user wraca tu właśnie po to, żeby zobaczyć własny poprzedni wybór.
+            if change:
+                swiadek = i18n.t("cfg.now_set", telescope=g["telescope_label"] or "—")
+            else:
+                swiadek = (i18n.t("cfg.header_says", telescop=g["telescop"]) if g["telescop"]
+                           else i18n.t("cfg.header_silent"))
             it = QListWidgetItem(
                 i18n.t("cfg.item", folder=folder, camera=kamera, n=g["n_frames"]) + f"   [{swiadek}]")
             it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
-            # Grupa BEZ KAMERY nie ma z czego złożyć zestawu (inwariant DDL §1), więc wchodzi
-            # ODZNACZONA: klinga i tak by ją pominęła, a zaznaczenie obiecywałoby zapis, którego
-            # nie będzie. Wiersz zostaje widoczny — kubełek ją liczy, więc lista nie ma prawa
-            # udawać, że jej nie ma.
-            it.setCheckState(Qt.Unchecked if g["camera_id"] is None else Qt.Checked)
+            # DWIE GRUPY WCHODZĄ ODZNACZONE, każda z innego powodu:
+            #  * BEZ KAMERY — nie ma z czego złożyć zestawu (inwariant DDL §1); klinga i tak by ją
+            #    pominęła, a zaznaczenie obiecywałoby zapis, którego nie będzie;
+            #  * BEZ KOPII NA DYSKU — to jedyna grupa, której klucz NIE JEST FOLDEREM (bramka
+            #    pakietu 3a, zarzut 3): wpadają do niej WSZYSTKIE klatki bez obecnej kopii z całego
+            #    archiwum — sieroty po podmianie i klatki, których plik zniknął. Łączy je brak
+            #    ścieżki, a nie wspólny sprzęt, więc domyślne zaznaczenie kazałoby jednym gestem
+            #    ostemplować jednym teleskopem zbiór, o którym nikt nic nie twierdzi.
+            # Oba wiersze ZOSTAJĄ widoczne — kubełek je liczy, więc lista nie ma prawa udawać,
+            # że ich nie ma; user może je zaznaczyć świadomie.
+            # TRYB ZMIANY wchodzi w całości ODZNACZONY — to nie kosmetyka: domyślne zaznaczenie
+            # znaczyłoby „przestempluj wszystko, co kiedykolwiek wskazałeś", czyli gest naprawy
+            # jednego folderu kasowałby przy okazji wszystkie pozostałe wskazania.
+            slabe = g["camera_id"] is None or g["folder"] is None or change
+            it.setCheckState(Qt.Unchecked if slabe else Qt.Checked)
             it.setData(Qt.UserRole, g["frame_ids"])
             it.setData(Qt.UserRole + 1, g["camera_id"])
             self.items.addItem(it)

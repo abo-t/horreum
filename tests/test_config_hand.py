@@ -273,6 +273,34 @@ def test_inwarianty_5_16_sa_zielone_po_gescie():
         "reka_bez_sladu": 0, "reka_bez_osi": 0, "reka_na_kalibracji": 0}
 
 
+def test_5_6_kierunkowe_przezywa_naprawe():
+    """§5.6 — kryterium KIERUNKOWE (R1/W4). Gest wyprowadza klatkę ze zbioru „bez configu",
+    a dziennik jest append-only, więc dawna RÓWNOŚĆ `stan == |targety|` pękłaby na zmianie
+    POPRAWNEJ. Test pinuje obie strony: przed gestem powód jest, po geście luki dalej nie ma."""
+    con = _baza()
+    cam, tel = _kamera(con), _teleskop(con)
+    a = _klatka(con, "aaa", camera_id=cam)
+    grouper.run_grouper(con, now=NOW)                 # zapisuje POWÓD (`config.review`)
+    assert audit.config_review_reason_gap(con) == 0
+
+    repo.user_assign_config(con, frame_ids=[a], telescope_id=tel, now=NOW)
+    assert audit.config_review_reason_gap(con) == 0   # zbiór pusty ⊆ targety — dalej zero luki
+    # …a stara równość WŁAŚNIE tu by pękła: stan 0, targetów 1 (dziennik nie chudnie)
+    assert con.execute(
+        "SELECT count(DISTINCT target) FROM event WHERE verb='config.review'").fetchone()[0] == 1
+
+
+def test_5_6_lapie_klatke_bez_powodu():
+    """Falsyfikator: klatka bez configu, o której dziennik MILCZY, ma zapalić czerwień — inaczej
+    kryterium pinowałoby własną nieobecność (kalibracja i klatka bez zeznania są poza zbiorem)."""
+    con = _baza()
+    _klatka(con, "aaa", camera_id=_kamera(con))       # bez przebiegu groupera = bez powodu
+    assert audit.config_review_reason_gap(con) == 1
+
+    dark = _klatka(con, "ddd", kind="dark", camera_id=_kamera(con))
+    assert dark and audit.config_review_reason_gap(con) == 1   # kalibracja NIE dolicza się
+
+
 def test_inwariant_lapie_wstrzykniecie_z_pominieciem_klingi(tmp_path):
     """Falsyfikator inwariantu: zapis gołym SQL-em (bez klingi) MA zaczerwienić bramkę — inaczej
     §5.16 pinowałaby własną nieobecność zamiast czegokolwiek."""

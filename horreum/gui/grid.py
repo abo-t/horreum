@@ -1125,21 +1125,28 @@ class LineageBar(QWidget):
         self._busy = False
         self._offset_hint = None        # propozycja z rdzenia (`stacks.propose_offset_minutes`)
         self._nights = ()               # propozycje z rdzenia (`stacks.propose_lineage_candidates`)
+        self._raw_bez_odniesienia = 0   # druga wartość tamtego zwrotu — kandydaci bez zegara
         self._note_base = ""            # nota sprzed trybu propozycji (combo jej nie zjada)
         self.set_lineage(None, [])
 
-    def set_lineage(self, head, inputs, *, hint=None, candidates=()):
+    def set_lineage(self, head, inputs, *, hint=None, candidates=(), raw_unreferenced=0):
         """Wypełnij panel. `head` = wiersz `queries.stack_lineage_head` (albo `None`), `inputs` =
         wiersze `queries.stack_lineage_inputs`, `hint` = gotowe zdanie, gdy nie ma czego pokazać
-        (złe zaznaczenie / rodowód nieliczony), `candidates` = noce z propozycjami
-        (`stacks.propose_lineage_candidates`). Zero SQL i zero decyzji — sama prezentacja.
+        (złe zaznaczenie / rodowód nieliczony), `candidates` + `raw_unreferenced` = obie wartości
+        zwrotu `stacks.propose_lineage_candidates`. Zero SQL i zero decyzji — sama prezentacja.
 
         PROPOZYCJE WCHODZĄ TYLKO W PUSTKĘ i to jest granica, nie optymalizacja: gdy stos MA wejścia,
         lista jest zapisem faktu, a doklejenie do niej ofert kazałoby odróżniać jedno od drugiego
-        w tym samym oknie. Obraz z rodowodem niczego nie proponuje."""
+        w tym samym oknie. Obraz z rodowodem niczego nie proponuje.
+
+        `raw_unreferenced` PRZYCHODZI OSOBNO, BO NIESIE INNĄ RECEPTĘ NIŻ PUSTA LISTA: „kandydaci są,
+        tylko nie znam zegara tego obrazu" prowadzi do gestu odniesienia, a „nie ma kandydatów" nie
+        prowadzi nigdzie. Bez tej wartości panel mówił 6 obrazom kubełka, że archiwum jest puste,
+        gdy stało w nim po 36 klatek (bramka pakietu 3a, 0808)."""
         self.items.clear()
         self.items.setMaximumHeight(_LINEAGE_LIST_MAX_H)   # oś kalibracji zaniża sufit do treści
         self._head = head
+        self._raw_bez_odniesienia = raw_unreferenced
         if head is None:
             # Brak materiału ZAWSZE mówi zdaniem — także w stanie startowym, zanim ktokolwiek
             # cokolwiek zaznaczył. Pusty panel bez wyjaśnienia czyta się jak awaria.
@@ -1150,6 +1157,11 @@ class LineageBar(QWidget):
             return
         powod = _lineage_reason_text(head)
         ostrz, info = _lineage_flags(head)
+        # OSTRZEŻENIE STAWIAMY OD RAZU, PRZED GAŁĘZIAMI — bo gałąź propozycji kończy się `return`
+        # i pomijała ten zapis, więc panel nowego obrazu nosił ostrzeżenie POPRZEDNIEGO („⚠ obraz
+        # zapisał inny teleskop niż jego klatki" o cudzym pliku). Zmierzone bramką pakietu 3a 0808;
+        # etykieta była realnie widoczna, nie tylko wypełniona.
+        self.warn.set_full_text(ostrz)          # `_lineage_flags` samo milczy przy pustej liście
         # LISTA POWSTAJE ZAWSZE, ZANIM ROZSTRZYGNIEMY O NAGŁÓWKU. Integracja z POWODEM może mieć
         # wiersze — `_reconcile` omija werdykty ręki, więc odrzucone kandydatury zostają, mając
         # `head["inputs"] == 0`. Gałąź powodu, która listy nie wypełniała, zabierała wtedy JEDYNĄ
@@ -1179,7 +1191,6 @@ class LineageBar(QWidget):
             self.head.setText(i18n.t_plural("grid.lin.head", head["inputs"],
                                             hours=f"{godziny:.1f}"))
             self.note.set_full_text(" · ".join(x for x in (powod, info) if x))
-        self.warn.set_full_text(ostrz)          # `_lineage_flags` samo milczy przy pustej liście
         # Widoczność z LISTY, nie z licznika: stos z powodem, ale z odrzuconymi wierszami, ma je
         # pokazać (i dać się cofnąć), a stos bez ani jednego wiersza nie ma zajmować pionu na listę.
         self._sync_visible(bool(inputs))
@@ -1217,9 +1228,18 @@ class LineageBar(QWidget):
             it.setData(Qt.UserRole, r["frame_id"])
             self.items.addItem(it)
         gdzie_indziej = sum(len(n.frames) for n in self._nights) - len(klatki)
-        podpowiedz = "" if klatki else i18n.t(
-            "grid.lin.cand.empty_night" if gdzie_indziej else "grid.lin.cand.empty_all",
-            n=gdzie_indziej)
+        # TRZY RÓŻNE PUSTKI, TRZY RECEPTY — i to jest sedno naprawy z bramki 3a. „Nie ma nic"
+        # i „są klatki, których nie umiem umieścić w czasie" prowadzą w zupełnie inne miejsca:
+        # pierwsze donikąd, drugie wprost do gestu odniesienia (przycisk niżej sam się zapala).
+        # Wspólne zdanie kłamało 6 obrazom kubełka, że archiwum jest puste, gdy stało w nim po 36.
+        if klatki:
+            podpowiedz = ""
+        elif gdzie_indziej:
+            podpowiedz = i18n.t_plural("grid.lin.cand.empty_night", gdzie_indziej)
+        elif self._raw_bez_odniesienia:
+            podpowiedz = i18n.t_plural("grid.lin.cand.no_reference", self._raw_bez_odniesienia)
+        else:
+            podpowiedz = i18n.t("grid.lin.cand.empty_all", n=0)
         self.note.set_full_text(" · ".join(x for x in (self._note_base, podpowiedz) if x))
         self.night_row.setVisible(True)
         self.items.setVisible(bool(klatki))
@@ -1359,14 +1379,22 @@ class LineageBar(QWidget):
 
     def _sync_offset_visible(self):
         """Przycisk odniesienia wchodzi TYLKO tam, gdzie ma co zmienić — a to znaczy: gdy powód
-        brzmi `offset_unknown` ALBO odniesienie już wskazano (droga POWROTNA, żeby pomyłka ręki
-        nie była wieczna — ta sama lekcja, co przy zestawie w R1).
+        brzmi `offset_unknown`, gdy PROPOZYCJA MA KANDYDATÓW BEZ ZEGARA, ALBO gdy odniesienie już
+        wskazano (droga POWROTNA, żeby pomyłka ręki nie była wieczna — ta sama lekcja, co przy
+        zestawie w R1).
 
         Nie pokazujemy go przy każdym stosie, bo dla 121 masterów FITS/ASI odniesienie nie jest
         pytaniem: ich czas i tak jest w jednym zegarze, a przycisk sugerowałby problem tam, gdzie
-        go nie ma."""
+        go nie ma.
+
+        CZŁON O KANDYDATACH JEST KONIECZNOŚCIĄ, NIE WYGODĄ (bramka pakietu 3a, 0808). Sam powód
+        `offset_unknown` NIE WYSTARCZA, bo `_plan` kończy na `degenerate_window` PRZED wywołaniem
+        `_in_window` (`stacks._plan`) — czyli stos o zdegenerowanym oknie, zbudowany z RAW-ów,
+        tego powodu nie dostanie NIGDY. Bez tego członu jedyna recepta na 6 z 35 obrazów kubełka
+        była strukturalnie nieklikalna, a panel twierdził przy tym, że archiwum jest puste."""
         head = self._head
         widoczny = head is not None and (head["unresolved_reason"] == REASON_OFFSET_TOKEN
+                                         or self._raw_bez_odniesienia > 0
                                          or head["utc_offset_min"] is not None)
         self.btn_offset.setVisible(widoczny)
         self.btn_offset.setEnabled(widoczny and not self._busy)
@@ -1395,7 +1423,7 @@ def _candidate_item_text(r):
     Filtr zostaje, bo master bez własnego `FILTER` nie zawęża tej osi — wtedy jest jedyną
     informacją, która odróżnia kanały tej samej sesji."""
     czas = (r["date_obs"] or "")[:19].replace("T", " ")
-    exp = f"{r['exptime']:.0f}s" if r["exptime"] is not None else "—"
+    exp = f"{r['exptime']:.0f}s" if r["exptime"] is not None else "-"   # DASH, ORDERs §5.2
     return f"{czas} · {exp}" + (f" · {r['filter_canon']}" if r["filter_canon"] else "")
 
 
@@ -2316,22 +2344,27 @@ class FramesView(QWidget):
         if head is None:
             self.lineage_bar.set_lineage(None, [], hint=i18n.t("grid.lin.hint.not_computed"))
             return
+        # PROPOZYCJA MATERIAŁU liczona TYLKO tam, gdzie jest pytaniem: obraz z rodowodem ma fakt,
+        # a obraz z powodem ZWIETRZAŁYM czeka na przeliczenie etapem, nie na rękę. Poza tymi dwoma
+        # stanami zapytanie chodziłoby po całym materiale obiektu przy każdym zaznaczeniu, nie
+        # mając komu oddać wyniku.
+        kandydaci, raw_bez_zegara = (), 0
+        if head["unresolved_reason"] and not head["inputs"] \
+                and not queries.lineage_reason_stale(head):
+            kandydaci, raw_bez_zegara = stacks.propose_lineage_candidates(self.con, fid)
         # PROPOZYCJA ODNIESIENIA LICZONA TYLKO TAM, GDZIE JEST PYTANIEM (R2): dla 121 masterów
         # FITS/ASI zegar nie jest problemem, a zapytanie chodzi po całym materiale obiektu, więc
         # liczenie go przy każdym zaznaczeniu byłoby kosztem bez odbiorcy.
+        #
+        # DRUGI WYZWALACZ DOSZEDŁ Z BRAMKI 3a i stoi PO policzeniu kandydatów, bo dopiero one
+        # mówią, że pytanie o zegar w ogóle padło. Powód `offset_unknown` sam nie wystarcza:
+        # stos o zdegenerowanym oknie go nie dostanie (`stacks._plan` kończy wcześniej), a to
+        # właśnie takie stosy stoją w kubełku z materiałem RAW nie do umieszczenia w czasie.
         self.lineage_bar.set_offset_hint(
             stacks.propose_offset_minutes(self.con, fid)
-            if head["unresolved_reason"] == REASON_OFFSET_TOKEN else None)
-        # PROPOZYCJA MATERIAŁU liczona TYLKO tam, gdzie jest pytaniem — tak samo wąsko jak
-        # propozycja odniesienia wyżej: obraz z rodowodem ma fakt, a obraz z powodem ZWIETRZAŁYM
-        # czeka na przeliczenie etapem, nie na rękę. Poza tymi dwoma stanami zapytanie chodziłoby
-        # po całym materiale obiektu przy każdym zaznaczeniu, nie mając komu oddać wyniku.
-        kandydaci = ()
-        if head["unresolved_reason"] and not head["inputs"] \
-                and not queries.lineage_reason_stale(head):
-            kandydaci = stacks.propose_lineage_candidates(self.con, fid)
+            if head["unresolved_reason"] == REASON_OFFSET_TOKEN or raw_bez_zegara else None)
         self.lineage_bar.set_lineage(head, queries.stack_lineage_inputs(self.con, fid),
-                                     candidates=kandydaci)
+                                     candidates=kandydaci, raw_unreferenced=raw_bez_zegara)
         self._lineage_frame_id = fid
         if select_frame_ids:
             self.lineage_bar.select_frame_ids(select_frame_ids)

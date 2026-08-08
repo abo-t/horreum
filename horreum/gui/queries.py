@@ -1105,6 +1105,13 @@ def lineage_reason_stale(row):
     ręką. Kubełek bez tego sita wysyłałby użytkownika do jedenastu wierszy, w których panel sam
     mówi „ten zapis jest starszy niż twoje zmiany".
 
+    CZŁON WEJŚĆ PYTA O KAŻDE NIEWYKLUCZONE WEJŚCIE, NIE O SAMĄ RĘKĘ — i to jest zgodne, nie
+    szersze, bo `asserted_by <> 'user'` przy zapisanym powodzie jest STANEM ZAKAZANYM: pilnuje go
+    bramka akceptacji §5.14 („powód wyklucza wejścia automatu", `scripts/acceptance_s5.py`).
+    Zależność jest tu NAZWANA, bo jest cicha: gdyby tamten inwariant kiedyś upadł, ten predykat
+    zacząłby uznawać wejście automatu za werdykt człowieka. Bramka pakietu 3a (0808) wskazała to
+    zgodnie dwoma silnikami — proza mówiła wtedy „ręką", a kod liczył wszystko.
+
     WEJŚCIA WSKAZANE RĘKĄ WIETRZĄ KAŻDY POWÓD, nie tylko parę wrażliwą — i ten człon jest
     KONIECZNOŚCIĄ, nie wygodą. Werdykt ręki ma rangę najwyższą (`repo.RANGA_ASSERT`), więc kolejny
     przebieg rodowodu zostawia taki stos NIETKNIĘTY w całości (`stacks.run_stack_lineage`, gałąź

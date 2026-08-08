@@ -1389,9 +1389,30 @@ def test_panel_nie_powtarza_powodu_ktory_zwietrzal(view, gcon):
     assert "nie ma rozpoznanego obiektu" not in tekst, "stary werdykt nie ma prawa wrócić jako bieżący"
 
 
-def _seed_stos_z_kandydatami(gcon, *, reason="degenerate_window"):
+def _seed_stos_z_rozjazdem(gcon):
+    """Drugi stos: MA wejście i MA rozjazd teleskopu, więc panel stawia przy nim ostrzeżenie.
+    Istnieje po to, żeby dało się zmierzyć, czy ostrzeżenie zostaje przy SWOIM obrazie."""
+    raw = {"IMAGETYP": "Master Light", "EXPTIME": 300.0,
+           "DATE-OBS": "2023-05-01T20:00:00", "DATE-END": "2023-05-01T23:00:00"}
+    gcon.execute("INSERT INTO frame (id, sha1_data, kind, filetype, object_id, filter_canon, "
+                 "first_seen_at) VALUES (11, 'm11', 'master_light', 'xisf', 7, 'Ha', ?)", (NOW,))
+    gcon.execute("INSERT INTO header (frame_id, raw_json, date_obs, exptime) "
+                 "VALUES (11, ?, '2023-05-01T20:00:00', 300.0)", (json.dumps(raw),))
+    gcon.execute("INSERT INTO location (frame_id, volume, path, present) "
+                 "VALUES (11, 'V', '/a/inny.xisf', 1)")
+    gcon.execute("INSERT INTO integration (id, master_frame_id, created_at, degenerate, ambiguous, "
+                 "telescope_mismatch, unresolved_reason) VALUES (6, 11, ?, 0, 0, 1, NULL)", (NOW,))
+    gcon.execute("INSERT INTO integration_input (integration_id, input_frame_id, asserted_by, "
+                 "excluded) VALUES (6, 20, 'window', 0)")
+    gcon.commit()
+
+
+def _seed_stos_z_kandydatami(gcon, *, reason="degenerate_window", filetype="fits"):
     """Stos z oknem ZDEGENEROWANYM + materiał dwóch nocy — minimalny materiał trybu propozycji.
-    Master bez configu, więc oś teleskopu nie zawęża (jak u 83 z 85 masterów archiwum)."""
+    Master bez configu, więc oś teleskopu nie zawęża (jak u 83 z 85 masterów archiwum).
+
+    `filetype='raw'` odtwarza populację 6× LMC: kandydaci SĄ, ale obraz nie ma wskazanego
+    odniesienia czasu, więc nie da się powiedzieć, do której NOCY należą."""
     gcon.execute("INSERT INTO object (id, canon, catalog, kind) "
                  "VALUES (7, 'M51', 'catalog', 'deep_sky')")
     raw = {"IMAGETYP": "Master Light", "EXPTIME": 300.0,
@@ -1408,8 +1429,8 @@ def _seed_stos_z_kandydatami(gcon, *, reason="degenerate_window"):
     for fid, czas in ((20, "2023-04-21T20:00:00"), (21, "2023-04-21T21:00:00"),
                       (22, "2023-04-25T20:00:00")):
         gcon.execute("INSERT INTO frame (id, sha1_data, kind, filetype, object_id, filter_canon, "
-                     "first_seen_at) VALUES (?, ?, 'light', 'fits', 7, 'Ha', ?)",
-                     (fid, f"s{fid}", NOW))
+                     "first_seen_at) VALUES (?, ?, 'light', ?, 7, 'Ha', ?)",
+                     (fid, f"s{fid}", filetype, NOW))
         gcon.execute("INSERT INTO header (frame_id, raw_json, date_obs, exptime) "
                      "VALUES (?, '{}', ?, 300.0)", (fid, czas))
     gcon.commit()
@@ -1443,6 +1464,52 @@ def test_przelaczenie_nocy_przerysowuje_liste_bez_pytania_bazy(view, gcon):
     assert bar.combo_night.currentData() == "2023-04-25"
     assert bar.items.count() == 1
     assert gcon.total_changes == przed, "przełączenie nocy nie ma prawa niczego zapisać"
+
+
+def test_kandydaci_RAW_bez_zegara_dostaja_ZDANIE_I_KLIKALNY_GEST(view, gcon):
+    """Bramka pakietu 3a (0808), zarzut BLOKUJĄCY — zmierzony na żywym archiwum na 6 z 35 obrazów
+    kubełka (6× LMC, po 36 kandydatów każdy).
+
+    Panel mówił im „Archiwum nie ma ani jednej klatki tego obiektu o zgodnym filtrze i ekspozycji",
+    co było NIEPRAWDĄ: klatki stały w archiwum i przechodziły każdą oś, a wypadały wyłącznie
+    na braku zegara obrazu. Recepta na to istnieje (gest odniesienia), ale przycisk był
+    STRUKTURALNIE nieklikalny — jego warunek pytał o powód `offset_unknown`, którego stos
+    o zdegenerowanym oknie nie dostanie NIGDY (`stacks._plan` kończy wcześniej).
+    Czyli: cicha strata i stan bez wyjścia naraz."""
+    _seed_stos_z_kandydatami(gcon, filetype="raw")
+    assert _zaznacz_frame(view, 10)
+    view._toggle_panel("lineage")
+    bar = view.lineage_bar
+    assert bar.items.count() == 0, "bez zegara nie umiemy umieścić ich w nocy — i to zostaje"
+    nota = bar.note.full_text()
+    assert "nie znam zegara" in nota, f"panel ma nazwać PRZYCZYNĘ pustki, a mówi: {nota!r}"
+    assert "3" in nota, "zdanie ma nieść LICZBĘ kandydatów — bez niej nie widać stawki"
+    assert "nie ma ani jednej klatki" not in nota, "to zdanie było fałszem"
+    assert not bar.btn_offset.isHidden() and bar.btn_offset.isEnabled(), \
+        "jedyna recepta musi być klikalna — inaczej ekran nie ma wyjścia"
+
+
+def test_ostrzezenie_NIE_PRZECIEKA_z_poprzedniego_obrazu(view, gcon):
+    """Bramka pakietu 3a (0808): gałąź propozycji kończy się `return`, więc omijała zapis
+    ostrzeżenia — i panel nowego obrazu nosił ostrzeżenie POPRZEDNIEGO („⚠ obraz zapisał inny
+    teleskop niż jego klatki") o cudzym pliku. Etykieta była realnie widoczna, nie tylko
+    wypełniona, więc człowiek dostawał receptę naprawy karty dla obrazu, który jej nie potrzebuje."""
+    _seed_stos_z_kandydatami(gcon)
+    _seed_stos_z_rozjazdem(gcon)
+    view.refresh()
+    assert _zaznacz_frame(view, 11)                 # obraz Z ostrzeżeniem
+    view._toggle_panel("lineage")
+    bar = view.lineage_bar
+    assert bar.warn.full_text(), "obraz 11 ma rozjazd teleskopu — ostrzeżenie ma stać"
+
+    assert _zaznacz_frame(view, 10)                 # obraz BEZ ostrzeżenia, w trybie propozycji
+    # Zmiana zaznaczenia odświeża panel przez DEBOUNCE (`_date_timer`, grid.py) — w teście
+    # offscreen pętla zdarzeń nie chodzi, więc domykamy takt jawnie. To ta sama funkcja,
+    # do której w aplikacji dochodzi timer.
+    view._refresh_lineage()
+    assert bar.combo_night.count(), "obraz 10 ma być w trybie propozycji (inaczej test nie mierzy)"
+    assert bar.warn.full_text() == "", "ostrzeżenie należało do obrazu 11"
+    assert bar.warn.isHidden(), "i nie ma prawa zostać na ekranie"
 
 
 def test_pusta_noc_obrazu_zostaje_na_ekranie_z_receptą(view, gcon):

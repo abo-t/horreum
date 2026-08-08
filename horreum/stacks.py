@@ -397,6 +397,15 @@ def propose_lineage_candidates(con, master_frame_id):
     zawęża — dokładnie jak w `_in_window`. Luźniejsza reguła bez tych osi nie byłaby propozycją,
     tylko spisem klatek obiektu.
 
+    JEDNA RÓŻNICA WOBEC DOBORU, NAZWANA ZAMIAST PRZEMILCZANEJ (bramka pakietu 3a, 0808): oś
+    teleskopu odsiewa TU per klatkę, a `_in_window` ma na niej regułę TRZYGAŁĘZIOWĄ i jej gałąź
+    środkowa (okno JEDNORODNE, ale z innego teleskopu → bierz i podnieś `rozjazd`) istnieje po to,
+    by master z kartą przestarzałą albo śmieciową („ED", „EQMOD HEQ5/6" — nazwa MONTAŻU) dostał
+    materiał do naprawy. Propozycja tej gałęzi nie ma, więc dla takiego mastera pokaże pustkę
+    zamiast wskazać kartę do poprawienia. Zmierzona populacja na żywym archiwum: **0** (rozjazdy
+    teleskopu zamknięto w etapie 3), dlatego kod na to byłby dziś zgadywaniem — ale granica ma być
+    NAZWANA, a nie brana za równość. Wraca przy pierwszym takim stosie.
+
     NIE ZAPISUJE I NIE UDAJE FAKTU (lustro `propose_offset_minutes` i szczebla ścieżki S2): zwraca
     KANDYDATÓW, a rodowód powstaje dopiero werdyktem ręki (`repo.judge_integration_input`,
     `asserted_by='user'`). Maszyna nie ma czym rozstrzygnąć, z czego powstał obraz, którego własny
@@ -414,13 +423,26 @@ def propose_lineage_candidates(con, master_frame_id):
     „to NIE jest materiał tego obrazu" ma zostać werdyktem; lista, która go co chwilę przywraca,
     kazałaby wydawać go w kółko.
 
-    KANDYDAT RAW PRZY NIEZNANYM ODNIESIENIU NIE WCHODZI — granica przeniesiona wprost z `_in_window`
-    (EXIF niesie czas LOKALNY, XISF UTC), bo bez odniesienia nie da się powiedzieć, do której NOCY
-    taka klatka należy, a zgadnięcie doby jest tu gorsze niż milczenie. Zmierzona populacja puli
-    mieszanej na żywym archiwum: **0** (G2-1d).
+    KANDYDAT RAW PRZY NIEZNANYM ODNIESIENIU NIE WCHODZI I NIE PRZEPADA PO CICHU — granica
+    przeniesiona z `_in_window` RAZEM Z JEJ DRUGĄ POŁOWĄ (EXIF niesie czas LOKALNY, XISF UTC).
+    Bez odniesienia nie da się powiedzieć, do której NOCY taka klatka należy, więc do listy nie
+    wchodzi — ale wraca DRUGĄ WARTOŚCIĄ ZWROTU, bo „kandydaci są, tylko liczą w innym zegarze"
+    to inna recepta niż „kandydatów nie ma". Bramka pakietu 3a (0808) zmierzyła, ile kosztowało
+    przepisanie samego pominięcia bez tej wartości: **6 z 35** obrazów kubełka (6× LMC, po 36
+    kandydatów przechodzących KAŻDĄ oś) dostawało pustą listę pod zdaniem „archiwum nie ma ani
+    jednej klatki tego obiektu" — twierdzeniem FAŁSZYWYM — a gest odniesienia był dla nich
+    strukturalnie nieosiągalny, bo `_plan` kończy na `degenerate_window` PRZED `_in_window`,
+    więc powodu `offset_unknown` te stosy nie dostaną nigdy.
 
-    Zwraca `tuple[CandidateNight, …]`; pusta krotka = nie ma czego proponować (brak obiektu, brak
-    czasu ekspozycji albo brak `DATE-OBS` — zmierzone: 1 stos z 35)."""
+    PASMO ±SUFIT Z `_in_window` TU NIE OBOWIĄZUJE — świadomie, nie przez pominięcie. Tam licznik
+    pilnował WĄSKIEGO okna (minuty), więc RAW z innej nocy trzeba było odsiać, żeby recepta nie
+    wysyłała człowieka do gestu bez prawa zadziałania. Tu pula jest już przycięta obiektem,
+    filtrem, teleskopem i progiem ekspozycji, a powierzchnia oddaje WSZYSTKIE noce do wyboru —
+    więc każdy taki kandydat realnie pojawi się na liście po wskazaniu odniesienia. Zmierzone:
+    wskazanie propozycji rdzenia (`+120`) daje 0 → 36 klatek, sześć razy na sześć.
+
+    Zwraca `(tuple[CandidateNight, …], raw_bez_odniesienia)`; pusta krotka = nie ma czego
+    proponować (brak obiektu, brak czasu ekspozycji albo brak `DATE-OBS` — zmierzone: 1 stos z 35)."""
     row = con.execute(
         "SELECT f.id AS frame_id, f.object_id, f.filter_canon, h.raw_json, "
         "       tc.canon_id AS telescope_id, i.id AS integration_id, i.utc_offset_min "
@@ -430,17 +452,18 @@ def propose_lineage_candidates(con, master_frame_id):
         "LEFT JOIN integration i ON i.master_frame_id = f.id "
         "WHERE f.id = ?", (master_frame_id,)).fetchone()
     if row is None or row["object_id"] is None:
-        return ()
+        return (), 0
     t = rstack.read_testimony(json.loads(row["raw_json"]) if row["raw_json"] else {}, None)
     exptime = _to_float(t.exptime)
     start = t.window_start
     if start is None or not exptime:
-        return ()
+        return (), 0
     osadzone = {int(r[0]) for r in con.execute(
         "SELECT input_frame_id FROM integration_input WHERE integration_id = ?",
         (row["integration_id"],)).fetchall()} if row["integration_id"] else set()
     noc_mastera = _night_key(start)
     wg_nocy = {}
+    raw_bez_odniesienia = 0
     for r in _window_candidates(con, object_id=row["object_id"], exptime=exptime):
         if r["frame_id"] in osadzone:
             continue
@@ -454,7 +477,15 @@ def propose_lineage_candidates(con, master_frame_id):
         if czas is None:
             continue
         if r["filetype"] == "raw":
+            # `is None` WYSTARCZA I NIE POTRZEBUJE DRUGIEJ OCHRONY. `integration.utc_offset_min`
+            # jest kolumną INTEGER (0016), a jej jedyny pisarz `repo.set_integration_offset`
+            # odrzuca wszystko poza `int`/`None` — token `offset_unknown` mieszka w CHECK-u
+            # SĄSIEDNIEJ kolumny `unresolved_reason` i tutaj nie ma jak trafić. Pin imienny, bo
+            # bramka pakietu 3a (0808) dostała ten sam fałszywy zarzut od DWÓCH silników naraz:
+            # oba czytały nazwę tokenu jako wartość offsetu i proponowały strażnika na stan
+            # nieosiągalny (lustro pinu przy `exptime is None` w `_window_candidates`).
             if row["utc_offset_min"] is None:
+                raw_bez_odniesienia += 1      # NIE `continue` po cichu — patrz docstring
                 continue
             czas -= timedelta(minutes=row["utc_offset_min"])
         wg_nocy.setdefault(_night_key(czas), []).append(r)
@@ -462,7 +493,8 @@ def propose_lineage_candidates(con, master_frame_id):
     return tuple(
         CandidateNight(night=n, master_night=(n == noc_mastera), frames=tuple(wg_nocy[n]))
         for n in sorted(wg_nocy, key=lambda n: (n != noc_mastera,
-                                                abs((_date(n) - _date(noc_mastera)).days), n)))
+                                                abs((_date(n) - _date(noc_mastera)).days), n))
+    ), raw_bez_odniesienia
 
 
 def _night_key(t):

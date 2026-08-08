@@ -1280,19 +1280,43 @@ CATALOG = {
     },
     "grid.lin.cand.night": {"pl": "Noc:", "en": "Night:"},
     "grid.lin.cand.night_master": {
-        "pl": "{night} — noc obrazu ({n})",
-        "en": "{night} — image's night ({n})",
+        "pl": "{night} - noc obrazu ({n})",
+        "en": "{night} - image's night ({n})",
     },
     "grid.lin.cand.night_other": {"pl": "{night} ({n})", "en": "{night} ({n})"},
+    # LICZBA W TYM ZDANIU ODMIENIA SIĘ, bo bywa jedynką: obraz z pustą nocą własną i JEDNĄ klatką
+    # w nocy sąsiedniej dostawał „1 klatek w pozostałych" (bramka pakietu 3a, 0808). Zdanie liczy
+    # materiał, więc nie ma prawa mówić o nim gramatyką listy.
     "grid.lin.cand.empty_night": {
-        "pl": "Tej nocy archiwum nie ma pasującego materiału — wybierz inną noc "
-              "({n} klatek w pozostałych).",
-        "en": "The archive holds no matching material that night — pick another one "
-              "({n} frames in the rest).",
+        "pl": {"one": "Tej nocy archiwum nie ma pasującego materiału - wybierz inną noc "
+                      "({n} klatka w pozostałych).",
+               "few": "Tej nocy archiwum nie ma pasującego materiału - wybierz inną noc "
+                      "({n} klatki w pozostałych).",
+               "many": "Tej nocy archiwum nie ma pasującego materiału - wybierz inną noc "
+                       "({n} klatek w pozostałych)."},
+        "en": {"one": "The archive holds no matching material that night - pick another one "
+                      "({n} frame in the rest).",
+               "other": "The archive holds no matching material that night - pick another one "
+                        "({n} frames in the rest)."},
     },
     "grid.lin.cand.empty_all": {
         "pl": "Archiwum nie ma ani jednej klatki tego obiektu o zgodnym filtrze i ekspozycji.",
         "en": "The archive holds no frame of this object with a matching filter and exposure.",
+    },
+    # TRZECIA PUSTKA, NIE ODMIANA DRUGIEJ: klatki SĄ, brakuje zegara tego obrazu. Zdanie ma nieść
+    # LICZBĘ (żeby było widać stawkę) i RECEPTĘ (gest stoi tuż pod nim), bo bez nich panel mówił
+    # tym obrazom, że archiwum jest puste — a stało w nim po 36 klatek (bramka pakietu 3a, 0808).
+    "grid.lin.cand.no_reference": {
+        "pl": {"one": "Jest {n} pasująca klatka z lustrzanki, ale nie znam zegara tego obrazu - "
+                      "wskaż odniesienie czasu przyciskiem niżej.",
+               "few": "Są {n} pasujące klatki z lustrzanki, ale nie znam zegara tego obrazu - "
+                      "wskaż odniesienie czasu przyciskiem niżej.",
+               "many": "Jest {n} pasujących klatek z lustrzanki, ale nie znam zegara tego obrazu - "
+                       "wskaż odniesienie czasu przyciskiem niżej."},
+        "en": {"one": "There is {n} matching DSLR frame, but this image's clock is unknown - "
+                      "point the time reference with the button below.",
+               "other": "There are {n} matching DSLR frames, but this image's clock is unknown - "
+                        "point the time reference with the button below."},
     },
     "grid.lin.offset": {
         "pl": "Wskaż odniesienie czasu…",

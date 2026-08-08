@@ -86,7 +86,7 @@ def test_noc_mastera_zbiera_material_ktorego_okno_nie_umialo_wybrac(con):
     _integracja(con, fid)
     for i, godz in enumerate(("20:00:00", "21:30:00", "23:59:00")):
         _light(con, f"s{i}", date_obs=f"2023-04-21T{godz}")
-    noce = propose_lineage_candidates(con, fid)
+    noce, _ = propose_lineage_candidates(con, fid)
     assert len(noce) == 1
     assert noce[0].master_night is True and noce[0].night == "2023-04-21"
     assert len(noce[0].frames) == 3
@@ -100,7 +100,7 @@ def test_noc_przechodzi_przez_polnoc(con):
     _integracja(con, fid)
     _light(con, "wieczor", date_obs="2023-04-21T22:00:00")
     _light(con, "po_polnocy", date_obs="2023-04-22T01:30:00")
-    noce = propose_lineage_candidates(con, fid)
+    noce, _ = propose_lineage_candidates(con, fid)
     assert len(noce) == 1 and len(noce[0].frames) == 2
 
 
@@ -113,7 +113,7 @@ def test_noc_mastera_wchodzi_TAKZE_pusta_a_reszta_po_odleglosci(con):
     _integracja(con, fid, reason="no_candidates")
     _light(con, "rok_wczesniej", date_obs="2022-04-21T22:00:00")
     _light(con, "dzien_pozniej", date_obs="2023-04-22T22:00:00")
-    noce = propose_lineage_candidates(con, fid)
+    noce, _ = propose_lineage_candidates(con, fid)
     assert [n.night for n in noce] == ["2023-04-21", "2023-04-22", "2022-04-21"]
     assert noce[0].master_night is True and noce[0].frames == ()
     assert len(noce[1].frames) == 1 and len(noce[2].frames) == 1
@@ -131,7 +131,7 @@ def test_osie_zgodnosci_te_same_co_w_doborze(con):
     _light(con, "inny_teleskop", date_obs="2023-04-21T20:30:00", config_id=2)
     con.execute("INSERT INTO object(canon, catalog, kind) VALUES ('M81','catalog','deep_sky')")
     _light(con, "inny_obiekt", date_obs="2023-04-21T20:40:00", object_id=2)
-    noce = propose_lineage_candidates(con, fid)
+    noce, _ = propose_lineage_candidates(con, fid)
     assert len(noce) == 1 and len(noce[0].frames) == 1
     assert noce[0].frames[0]["frame_id"] == con.execute(
         "SELECT id FROM frame WHERE sha1_data = 'dobra'").fetchone()[0]
@@ -150,7 +150,7 @@ def test_klatka_JUZ_OSADZONA_nie_wraca_jako_propozycja(con):
                                  excluded=False, now=NOW)
     repo.judge_integration_input(con, integration_id=iid, input_frame_id=odrzucona,
                                  excluded=True, now=NOW)
-    noce = propose_lineage_candidates(con, fid)
+    noce, _ = propose_lineage_candidates(con, fid)
     assert [r["frame_id"] for n in noce for r in n.frames] == [
         con.execute("SELECT id FROM frame WHERE sha1_data = 'nietknieta'").fetchone()[0]]
 
@@ -161,13 +161,14 @@ def test_bez_obiektu_i_bez_ekspozycji_NIE_zgadujemy(con):
     fid = _master(con, object_id=None)
     _integracja(con, fid)
     _light(con, "s0", date_obs="2023-04-21T20:00:00")
-    assert propose_lineage_candidates(con, fid) == ()
+    assert propose_lineage_candidates(con, fid) == ((), 0)
 
     con.execute("UPDATE frame SET object_id = 1 WHERE id = ?", (fid,))
     con.execute("UPDATE header SET raw_json = ? WHERE frame_id = ?",
                 (json.dumps({"IMAGETYP": "Master Light", "DATE-OBS": "2023-04-21T20:00:00"}), fid))
     con.commit()
-    assert propose_lineage_candidates(con, fid) == (), "bez EXPTIME nie ma czym ograniczyć doboru"
+    assert propose_lineage_candidates(con, fid) == ((), 0), \
+        "bez EXPTIME nie ma czym ograniczyć doboru"
 
 
 def test_RAW_bez_odniesienia_nie_wchodzi_a_z_odniesieniem_ladzie_we_wlasciwej_nocy(con):
@@ -177,9 +178,37 @@ def test_RAW_bez_odniesienia_nie_wchodzi_a_z_odniesieniem_ladzie_we_wlasciwej_no
     fid = _master(con)
     _integracja(con, fid)
     _light(con, "raw", date_obs="2023-04-22T01:30:00", filetype="raw")
-    assert propose_lineage_candidates(con, fid)[0].frames == ()
+    noce, _ = propose_lineage_candidates(con, fid)
+    assert noce[0].frames == ()
 
     repo.set_integration_offset(con, master_frame_id=fid, utc_offset_min=120, now=NOW)
-    noce = propose_lineage_candidates(con, fid)
+    noce, _ = propose_lineage_candidates(con, fid)
     assert len(noce) == 1 and len(noce[0].frames) == 1, \
         "01:30 lokalnego = 23:30 UTC — ta sama noc, co obraz"
+
+
+def test_RAW_bez_odniesienia_NIE_PRZEPADA_PO_CICHU_tylko_wraca_druga_wartoscia(con):
+    """Bramka pakietu 3a (0808), zarzut BLOKUJĄCY — i to jest cała jego treść: pominięcie RAW-a
+    przepisano z `_in_window`, ale JEGO DRUGĄ POŁOWĘ (licznik) już nie. Skutek zmierzony na żywym
+    archiwum: 6 z 35 obrazów kubełka dostawało pustą listę pod zdaniem „archiwum nie ma ani jednej
+    klatki tego obiektu", gdy stało w nim po 36 kandydatów przechodzących KAŻDĄ oś zgodności.
+
+    „Kandydaci są, tylko liczą w innym zegarze" to inna recepta niż „kandydatów nie ma" — a tej
+    różnicy nie da się wypowiedzieć bez liczby."""
+    fid = _master(con)
+    _integracja(con, fid)
+    for i, godz in enumerate(("20:00:00", "21:00:00", "22:00:00")):
+        _light(con, f"raw{i}", date_obs=f"2023-04-21T{godz}", filetype="raw")
+    _light(con, "fits", date_obs="2023-04-21T23:00:00")
+
+    noce, bez_zegara = propose_lineage_candidates(con, fid)
+    assert bez_zegara == 3, "trzy RAW-y wypadły z listy i mają być POLICZONE, nie przemilczane"
+    assert [r["frame_id"] for n in noce for r in n.frames] == [
+        con.execute("SELECT id FROM frame WHERE sha1_data = 'fits'").fetchone()[0]], \
+        "FITS-a zegar nie dotyczy — wchodzi normalnie"
+
+    # Po wskazaniu odniesienia licznik gaśnie, bo pytanie przestało istnieć.
+    repo.set_integration_offset(con, master_frame_id=fid, utc_offset_min=120, now=NOW)
+    noce, bez_zegara = propose_lineage_candidates(con, fid)
+    assert bez_zegara == 0
+    assert sum(len(n.frames) for n in noce) == 4

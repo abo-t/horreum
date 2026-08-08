@@ -547,7 +547,8 @@ Fundament: przejście na model „baza = autorytet, `sha1` = tożsamość".
 - **Import zasilający** świeżej bazy z bazy‑dawcy (read‑only).
 - **CLI**: `init` / `scan` / `group` / `resolve` / `delta`.
 
-[Niewydane]: https://github.com/abo-t/horreum/compare/v0.6.0...HEAD
+[Niewydane]: https://github.com/abo-t/horreum/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/abo-t/horreum/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/abo-t/horreum/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/abo-t/horreum/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/abo-t/horreum/compare/v0.4.0...v0.5.0

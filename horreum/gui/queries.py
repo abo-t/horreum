@@ -1089,18 +1089,6 @@ def superseded_frame_ids(con):
     ).fetchall()}
 
 
-def superseded_by_map(con):
-    """`{frame_id: id następczyni}` dla klatek zastąpionych — materiał ETYKIETY, nie predykatu.
-
-    Osobno od `superseded_frame_ids`, bo pytania są dwa: „kogo pokazać" (zbiór, trim gridu)
-    i „czym go podpisać" (mapa, tooltip wiersza). Widok, który zna sam zbiór, umie klatkę wyszarzyć,
-    ale nie umie powiedzieć, DOKĄD poszła jej treść — a bez tego zdania „zastąpiona" jest zarzutem
-    bez adresu."""
-    return {int(r[0]): int(r[1]) for r in con.execute(
-        "SELECT f.id, f.superseded_by FROM frame f WHERE f.superseded_by IS NOT NULL"
-    ).fetchall()}
-
-
 def dup_frame_ids(con):
     """Zbiór frame_id z >1 OBECNĄ lokacją (perspektywa „Duplikaty"). JEDNA derywacja trimu dla zbioru
     głównego i sibling-setów facetów (SPOT — trim w Pythonie na `n_present` i ten literał muszą znaczyć
@@ -1673,9 +1661,11 @@ def base_rows(con, frame_ids):
     `MIN(id)` BEZ odsiewania po `present` — `present` to KOLUMNA, nie predykat (F3: klatka zniknięta MUSI
     zostać w gridzie; baza=autorytet). `n_present` = liczba obecnych lokalizacji (perspektywa „Duplikaty"
     = n_present > 1). Teleskop przez config→telescope_canonical→kanon (jak `object_frames`). frame_ids jako
-    tablica JSON (`json_each`). Zwraca: frame_id, kind, filetype, filter_canon, camera_model,
-    telescope_label, telescop_canon, object_canon, object_raw, date_obs, exptime, path, present,
-    last_verified_at, n_present, superseded_by.
+    tablica JSON (`json_each`). Zwraca W TEJ KOLEJNOŚCI: frame_id, kind, filetype, filter_canon,
+    camera_model, telescope_label, telescop_canon, object_canon, object_raw, date_obs, exptime,
+    path, present, last_verified_at, superseded_by, n_present. Wiersze czyta się po NAZWIE
+    (`sqlite3.Row`), ale kolejność w tym zdaniu ma zgadzać się z SELECT-em — rozjazd był zarzutem
+    bramki 0809 i jest tańszy do naprawienia niż do wytłumaczenia następnej sesji.
 
     `superseded_by` JEST KOLUMNĄ Z TEGO SAMEGO POWODU, CO `present` (F3, decyzja Zdzinia 2026-08-09):
     klatka zastąpiona ZOSTAJE w gridzie i ma być WIDOCZNA JAKO ZASTĄPIONA — w każdej perspektywie,

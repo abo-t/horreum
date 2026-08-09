@@ -354,7 +354,6 @@ def test_klatka_zastapiona_jest_WIDOCZNA_perspektywa_i_wierszem_porzadkow():
     repo.mark_superseded(con, frame_id=a, superseded_by=b, now=NOW)
 
     assert queries.superseded_frame_ids(con) == {a}
-    assert queries.superseded_by_map(con) == {a: b}
     assert queries.tasks_state(con)["superseded_frames"] == 1
     # Uniwersum gridu ZOSTAJE pełne (F1) — zastąpiona znika z ROBOTY, nie z archiwum.
     assert a in queries.all_frame_ids(con)

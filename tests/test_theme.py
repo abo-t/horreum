@@ -43,7 +43,8 @@ def test_klucze_identyczne_miedzy_motywami(fn):
 
 def test_grid_klucze_kanoniczne():
     assert set(theme.grid_colors("dark")) == {
-        "missing", "vanished_bg", "dup_bg", "group_bg", "touched_bg", "skipped_bg"}
+        "missing", "vanished_bg", "dup_bg", "group_bg", "touched_bg", "skipped_bg",
+        "superseded_bg"}
 
 
 def test_palette_klucze_kanoniczne():

@@ -350,6 +350,7 @@ def review_queue(con):
         "       (f.object_source IS 'user_cleared') AS cleared, COUNT(*) AS n "
         "FROM frame f JOIN header h ON h.frame_id = f.id "
         "WHERE f.kind IN ('light','master_light') AND f.object_id IS NULL "
+        "  AND f.superseded_by IS NULL "
         "  AND h.object_raw IS NOT NULL "
         "GROUP BY h.object_raw, cleared ORDER BY n DESC, object_raw, cleared"
     ).fetchall()
@@ -492,6 +493,7 @@ def nameless_frames(con, cleared=False):
         "LEFT JOIN location l ON l.id = (SELECT MIN(id) FROM location "
         "                                WHERE frame_id = f.id AND present = 1) "
         "WHERE f.kind = 'light' AND f.object_id IS NULL "
+        "  AND f.superseded_by IS NULL "
         "  AND h.object_raw IS NULL "
         "  AND f.filetype NOT IN (SELECT value FROM json_each(?)) "
         "  AND (f.object_source IS 'user_cleared') = ? "
@@ -543,6 +545,7 @@ def nameless_raw_frames(con, cleared=False):
         "LEFT JOIN location l ON l.id = (SELECT MIN(id) FROM location "
         "                                WHERE frame_id = f.id AND present = 1) "
         "WHERE f.kind = 'light' AND f.object_id IS NULL "
+        "  AND f.superseded_by IS NULL "
         "  AND h.object_raw IS NULL "
         "  AND f.filetype IN (SELECT value FROM json_each(?)) "
         "  AND (f.object_source IS 'user_cleared') = ? "
@@ -566,8 +569,13 @@ def config_review_frames(con):
     a użytkownik musi widzieć różnicę, zanim wskaże sprzęt. Reszta kolumn jak w `nameless_frames`
     (ten sam panel `_fill_frames` je czyta; wąski SELECT wywala render na pierwszym wierszu).
 
-    Klatka BEZ KOPII zostaje w wyniku z `path IS NULL` (LEFT JOIN) — sierota po podmianie pliku
-    też jest w kubełku i licznik ją liczy, więc drążenie nie ma prawa jej gubić. Zwraca: frame_id,
+    Klatka BEZ KOPII zostaje w wyniku z `path IS NULL` (LEFT JOIN) — bo brak obecnej kopii NIE jest
+    sam w sobie powodem zniknięcia z kubełka (klatka zniknięta z dysku dalej czeka na decyzję).
+    WYJĄTKIEM jest klatka ZASTĄPIONA (`superseded_by IS NOT NULL`): tam robotę przejęła następczyni,
+    a stara jest zapisem historii — dlatego wypada z kubełka i ma własną perspektywę „Zastąpione".
+    Zmierzone 2026-08-09: bez tego warunku sierota 15958 siedziała w kubełku sprzętu (424 zamiast
+    423) i w kubełku RAW-ów jako JEDYNA jego pozycja, oferując robotę na pliku, którego nie ma.
+    Zwraca: frame_id,
     sha1_data, filetype, date_obs, telescope_label, telescop_canon, camera_model, camera_id,
     telescop, location_id, path, n_present."""
     return con.execute(
@@ -584,6 +592,7 @@ def config_review_frames(con):
         "LEFT JOIN location l ON l.id = (SELECT MIN(id) FROM location "
         "                                WHERE frame_id = f.id AND present = 1) "
         "WHERE f.config_id IS NULL "
+        "  AND f.superseded_by IS NULL "
         "  AND f.kind NOT IN (SELECT value FROM json_each(?)) "
         "ORDER BY l.path, f.id",
         (json.dumps(sorted(NO_TELESCOPE_KINDS)),)
@@ -714,6 +723,7 @@ def nameless_stack_frames(con, cleared=False):
         "LEFT JOIN location l ON l.id = (SELECT MIN(id) FROM location "
         "                                WHERE frame_id = f.id AND present = 1) "
         "WHERE f.kind = 'master_light' AND f.object_id IS NULL "
+        "  AND f.superseded_by IS NULL "
         "  AND h.object_raw IS NULL "
         "  AND (f.object_source IS 'user_cleared') = ? "
         "ORDER BY l.path, f.id",
@@ -1052,6 +1062,43 @@ def vanished_frame_ids(con):
     ).fetchall()}
 
 
+def superseded_frame_ids(con):
+    """Zbiór frame_id ZASTĄPIONYCH: `frame.superseded_by IS NOT NULL` (perspektywa „Zastąpione", R4).
+
+    TRZECI STAN, nie odmiana dwóch poprzednich, i różnica jest robocza, nie taksonomiczna:
+      * ZNIKNIĘTA (`vanished_frame_ids`) — plik zniknął z dysku, robota jest DO ZROBIENIA
+        (znaleźć albo wycofać);
+      * BEZ LOKACJI OD ZAWSZE — klatka szkieletowa, inny stan i inna robota;
+      * ZASTĄPIONA — treść pod ścieżką się zmieniła, robotę PRZEJĘŁA NASTĘPCZYNI. Nie ma tu nic
+        do zrobienia, jest co obejrzeć.
+
+    DLACZEGO WIDOCZNA, A NIE SKASOWANA (decyzja Zdzinia 2026-08-09, „z widocznym nagrobkiem"):
+    wiersz jest ogniwem — `superseded_by` to jedyny zapis faktu „to ta sama fotka po edycji",
+    a `repo.transfer_human_facts` czyta z niego werdykt człowieka. Kasacja gubiłaby jedno i drugie;
+    archiwum jest append-only, a jedyna kasacja w jego historii (C3, 7 klatek) była wyjątkiem
+    z czterema strażnikami. Tempo zmierzone: `location.rebound` odpalił **2 razy** przez pięć
+    tygodni życia bazy — populacja rośnie wolno i nie magazyn jest jej kosztem, tylko szum
+    w kubełkach roboczych.
+
+    JEDEN właściciel predykatu dla licznika Porządków i trimu gridu — jak `vanished_frame_ids`
+    i `dup_frame_ids`. Zwraca set[int]."""
+    return {int(r[0]) for r in con.execute(
+        "SELECT f.id FROM frame f WHERE f.superseded_by IS NOT NULL"
+    ).fetchall()}
+
+
+def superseded_by_map(con):
+    """`{frame_id: id następczyni}` dla klatek zastąpionych — materiał ETYKIETY, nie predykatu.
+
+    Osobno od `superseded_frame_ids`, bo pytania są dwa: „kogo pokazać" (zbiór, trim gridu)
+    i „czym go podpisać" (mapa, tooltip wiersza). Widok, który zna sam zbiór, umie klatkę wyszarzyć,
+    ale nie umie powiedzieć, DOKĄD poszła jej treść — a bez tego zdania „zastąpiona" jest zarzutem
+    bez adresu."""
+    return {int(r[0]): int(r[1]) for r in con.execute(
+        "SELECT f.id, f.superseded_by FROM frame f WHERE f.superseded_by IS NOT NULL"
+    ).fetchall()}
+
+
 def dup_frame_ids(con):
     """Zbiór frame_id z >1 OBECNĄ lokacją (perspektywa „Duplikaty"). JEDNA derywacja trimu dla zbioru
     głównego i sibling-setów facetów (SPOT — trim w Pythonie na `n_present` i ten literał muszą znaczyć
@@ -1078,9 +1125,14 @@ def review_frame_ids(con):
     obiektu i gotowy stack bez obiektu wymagają przeglądu tak samo jak każdy inny — różnią się
     DROGĄ naprawy (ręka / żadna / karta w pliku), a nie tym, czy jest co rozstrzygnąć. Ta
     świadomość żyje po stronie kubełków kolejki, nie tutaj.
+
+    ŚWIADOMY ZA TO ZASTĄPIENIA (2026-08-09): klatka z `superseded_by` odpada, bo jej robotę przejęła
+    następczyni — a przegląd jest listą ROBOTY, nie spisem wierszy. To ten sam warunek, co w każdym
+    kubełku kolejki i w rdzeniu; równość partycji wymaga, żeby stał po OBU stronach naraz.
     Zwraca set[int]."""
     return {int(r[0]) for r in con.execute(
-        "SELECT id FROM frame WHERE object_id IS NULL AND kind IN ('light','master_light')"
+        "SELECT id FROM frame WHERE object_id IS NULL AND superseded_by IS NULL "
+        "AND kind IN ('light','master_light')"
     ).fetchall()}
 
 
@@ -1404,7 +1456,10 @@ def tasks_state(con):
     passem obecności był to osobny literał COUNT, czyli drugi właściciel predykatu).
     `stacks_lineage_pending` = len() zbioru perspektywy „Rodowód do potwierdzenia" — ta sama figura
     po raz trzeci; gest mieszka w panelu „Rodowód" w Zbiorach, więc wiersz Porządków prowadzi do
-    perspektywy, a nie do podstrony. Zwraca dict sześciu liczników.
+    perspektywy, a nie do podstrony. `superseded_frames` = len() zbioru „Zastąpione" (R4) — ta sama
+    figura po raz czwarty, ale wiersz jest INFORMACYJNY: zastąpiona klatka nie jest robotą, tylko
+    zapisem historii, i po to tu stoi, żeby dało się ją znaleźć, skoro zniknęła z kolejek.
+    Zwraca dict siedmiu liczników.
 
     Licznika `xisf_frames` NIE MA od P6c: był informacją „nagłówków XISF nie umiemy zapisać", a ta
     przestała być prawdziwa razem z pisarzem — licznik samego formatu nie jest ani zadaniem, ani
@@ -1422,6 +1477,7 @@ def tasks_state(con):
         "telescopes_unlabeled": telescopes_unlabeled,
         "observatories_unnamed": observatories_unnamed,
         "vanished_frames": len(vanished_frame_ids(con)),
+        "superseded_frames": len(superseded_frame_ids(con)),
     }
 
 
@@ -1614,7 +1670,12 @@ def base_rows(con, frame_ids):
     = n_present > 1). Teleskop przez config→telescope_canonical→kanon (jak `object_frames`). frame_ids jako
     tablica JSON (`json_each`). Zwraca: frame_id, kind, filetype, filter_canon, camera_model,
     telescope_label, telescop_canon, object_canon, object_raw, date_obs, exptime, path, present,
-    last_verified_at, n_present.
+    last_verified_at, n_present, superseded_by.
+
+    `superseded_by` JEST KOLUMNĄ Z TEGO SAMEGO POWODU, CO `present` (F3, decyzja Zdzinia 2026-08-09):
+    klatka zastąpiona ZOSTAJE w gridzie i ma być WIDOCZNA JAKO ZASTĄPIONA — w każdej perspektywie,
+    nie tylko we własnej. Bez niej wiersz wyglądał identycznie jak żywa klatka bez kopii, a jedyną
+    różnicą było puste pole ścieżki, czyli brak informacji udawał informację.
 
     `last_verified_at` NA WIERSZU `present=0` JEST CHWILĄ ZNIKNIĘCIA: jedyną drogą zapisu `present=0`
     jest `repo.mark_location_vanished`, a ona stempluje tę kolumnę tym samym `now`, którym emituje
@@ -1625,7 +1686,7 @@ def base_rows(con, frame_ids):
         "       cam.model_canon AS camera_model, "
         "       t.label AS telescope_label, t.telescop_canon, "
         "       obj.canon AS object_canon, h.object_raw, "
-        "       h.date_obs, h.exptime, loc.path, loc.present, loc.last_verified_at, "
+        "       h.date_obs, h.exptime, loc.path, loc.present, loc.last_verified_at, f.superseded_by, "
         "       (SELECT COUNT(*) FROM location lp WHERE lp.frame_id = f.id AND lp.present = 1) AS n_present "
         "FROM frame f "
         "LEFT JOIN header h ON h.frame_id = f.id "

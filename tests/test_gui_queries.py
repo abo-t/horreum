@@ -138,11 +138,14 @@ def test_tasks_state_liczniki_na_s8_obj(s8_obj):
     """Arytmetyka fixture (przeliczona w recenzji F5): unresolved = objrev1+objrev2+nullcfg (present0
     MA obiekt); dups = a1 (2×present=1); teleskopy A–D wszystkie bez etykiety; zero obserwatoriów;
     vanished = present0 (jedyna lokacja present=0) — bez guardu EXISTS licznik złapałby też
-    klatki BEZ lokacji w ogóle (w fixture jest ich 10). Kluczy jest SZEŚĆ: `xisf_frames` zniknął
+    klatki BEZ lokacji w ogóle (w fixture jest ich 10). Kluczy jest SIEDEM: `xisf_frames` zniknął
     w P6c razem z wierszem Porządków (pisarz XISF istnieje, więc „tylko do odczytu" przestało
-    być prawdą, a licznik formatu nie jest zadaniem), a `stacks_lineage_pending` doszedł 0808
+    być prawdą, a licznik formatu nie jest zadaniem), `stacks_lineage_pending` doszedł 0808
     z kubełkiem rodowodu — w tej fixture jest ZERO, bo nie ma w niej ani jednej integracji, i to
-    jest właściwa odpowiedź: brak przebiegu rodowodu to nie to samo, co robota do zrobienia."""
+    jest właściwa odpowiedź: brak przebiegu rodowodu to nie to samo, co robota do zrobienia —
+    a `superseded_frames` doszedł 0809 z perspektywą „Zastąpione" i też jest ZEREM, bo fixture nie
+    zna podmiany treści. Zero jest tu WŁAŚCIWE dwa razy z różnych powodów i oba są wypowiedziane,
+    żeby przyszła zmiana nie wzięła braku populacji za dowód poprawności predykatu."""
     con, ids = s8_obj
     st = queries.tasks_state(con)
     assert st == {
@@ -152,6 +155,7 @@ def test_tasks_state_liczniki_na_s8_obj(s8_obj):
         "telescopes_unlabeled": 4,
         "observatories_unnamed": 0,
         "vanished_frames": 1,
+        "superseded_frames": 0,
     }
 
 

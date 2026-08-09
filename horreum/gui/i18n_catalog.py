@@ -925,6 +925,7 @@ CATALOG = {
     "perspective.dups": {"pl": "Duplikaty", "en": "Duplicates"},
     "perspective.vanished": {"pl": "Zniknięte", "en": "Vanished"},
     "perspective.lineage": {"pl": "Rodowód do potwierdzenia", "en": "Lineage to confirm"},
+    "perspective.superseded": {"pl": "Zastąpione", "en": "Superseded"},
     "perspective.to_review": {"pl": "Do przeglądu", "en": "To review"},
 
     # --- pusty grid (rozwiązywane w USE-site; stałe _EMPTY_* trzymają KLUCZ) ---
@@ -951,6 +952,16 @@ CATALOG = {
     "grid.tip.vanished": {
         "pl": "\n(zniknięta — wszystkie lokalizacje present=0)",
         "en": "\n(vanished — all locations present=0)",
+    },
+    # Zdanie mówi wprost, że NIC NIE ZGINĘŁO, i podaje adres — bo „zastąpiona" bez tego czyta się
+    # jak strata. Numer klatki jest tu jedynym stałym uchwytem: nazwa pliku bywa ta sama.
+    "grid.tip.superseded": {
+        "pl": "\n(zastąpiona — treść pod tą ścieżką jest dziś klatką #{id})",
+        "en": "\n(superseded — the content at this path is now frame #{id})",
+    },
+    "grid.cell.superseded": {
+        "pl": "zastąpiona przez #{id}",
+        "en": "superseded by #{id}",
     },
     "grid.tip.vanished_at": {
         "pl": "\n(zniknięta {ts} — wszystkie lokalizacje present=0)",
@@ -1424,6 +1435,7 @@ CATALOG = {
     "grid.criteria.only_dups": {"pl": "tylko duplikaty", "en": "only duplicates"},
     "grid.criteria.only_review": {"pl": "tylko do przeglądu", "en": "only to review"},
     "grid.criteria.only_vanished": {"pl": "tylko zniknięte", "en": "only vanished"},
+    "grid.criteria.only_superseded": {"pl": "tylko zastąpione", "en": "only superseded"},
     "grid.criteria.only_lineage": {
         "pl": "tylko obrazy bez rodowodu",
         "en": "only images without lineage",
@@ -1992,6 +2004,7 @@ CATALOG = {
     "tasks.object_review": {"pl": "Przegląd obiektów", "en": "Object review"},
     "tasks.unresolved_lights": {"pl": "Klatki bez obiektu", "en": "Frames without object"},
     "tasks.stacks_lineage": {"pl": "Obrazy bez rodowodu", "en": "Images without lineage"},
+    "tasks.superseded_frames": {"pl": "Zastąpione (historia)", "en": "Superseded (history)"},
     "tasks.telescopes_unlabeled": {"pl": "Teleskopy bez etykiety", "en": "Telescopes without a label"},
     "tasks.observatories_unnamed": {"pl": "Stanowiska bez nazwy", "en": "Sites without a name"},
     "tasks.dup_frames": {"pl": "Duplikaty (>1 kopia)", "en": "Duplicates (>1 copy)"},

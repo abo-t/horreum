@@ -6,7 +6,7 @@ kolumny. Bez plików na dysku — wejściem passu jest DZIENNIK bazy, nie drzewo
 """
 import pytest
 
-from horreum import audit, db, repo, supersede
+from horreum import audit, db, repo, resolver, supersede
 from horreum.gui import queries
 
 NOW = "2026-08-06T10:00:00+00:00"
@@ -294,6 +294,85 @@ def test_sieroty_nierozstrzygniete_to_predykat_bramki():
     assert supersede.orphans(con) == [a]                  # sierota bez ogniwa = otwarte pytanie
     repo.mark_superseded(con, frame_id=a, superseded_by=b, now=NOW)
     assert supersede.orphans(con) == []                   # sierota ZOSTAJE, ale jest wyjaśniona
+
+
+# ------------------------------------------------ kolejka przeglądu vs klatka zastąpiona (0809)
+
+def _kandydat_do_kubelkow(con, sha):
+    """Klatka, która TRAFIA do kubełków kolejki: RAW-owy light z zeznaniem, bez obiektu i bez
+    zestawu. Dokładnie kształt sieroty 15958 z żywego archiwum."""
+    fid = _klatka(con, sha)
+    repo.record_header(con, frame_id=fid, raw_json="{}", now=NOW)
+    return fid
+
+
+def test_klatka_zastapiona_wypada_ze_wszystkich_kubelkow_kolejki():
+    """R4 nauczył o zastąpieniu TRZECH konsumentów (dobór, okno, godziny) i nie nauczył kolejki —
+    a kolejka jest listą ROBOTY. Zmierzone na żywej `pf4` 0809: sierota 15958 była JEDYNĄ pozycją
+    kubełka „bez nazwy, format bez karty" i dodatkowo siedziała w kubełku sprzętu (424 zamiast 423),
+    oferując robotę na pliku, którego nie ma („(brak lokalizacji)" w kolumnie ścieżki).
+
+    Test ma FALSYFIKATOR WBUDOWANY: najpierw dowodzi, że klatka W KUBEŁKACH JEST, i dopiero potem
+    ją oznacza. Bez tej pierwszej połowy pinowałby nieobecność populacji, a nie zachowanie
+    predykatu — ta sama pułapka, która przez trzy paczki trzymała zielone piny kotwic."""
+    con = _baza()
+    a, b = _kandydat_do_kubelkow(con, "aaa"), _kandydat_do_kubelkow(con, "bbb")
+    lid = _kopia(con, a, r"R:\X\plik.dng")
+    _podmiana(con, lid, b)
+
+    przed = queries.review_queue(con)
+    assert przed["nameless_raw_count"] == 2, "falsyfikator: obie klatki mają być w kubełku RAW"
+    assert przed["config_review_count"] == 2
+    assert a in queries.review_frame_ids(con)
+    assert resolver.review_state(con).no_config == 2
+    assert resolver.nameless_raw_lights(con) == 2
+
+    repo.mark_superseded(con, frame_id=a, superseded_by=b, now=NOW)
+
+    po = queries.review_queue(con)
+    assert po["nameless_raw_count"] == 1, "zastąpiona nie jest robotą — kubełek ma jej nie liczyć"
+    assert po["config_review_count"] == 1
+    assert a not in queries.review_frame_ids(con)
+    assert [r["frame_id"] for r in queries.config_review_frames(con)] == [b]
+    assert [r["frame_id"] for r in queries.nameless_raw_frames(con)] == [b]
+    st = resolver.review_state(con)
+    assert (st.no_config, st.total) == (1, 1), "warunek stoi też w `total`, nie tylko w członach"
+    assert resolver.nameless_raw_lights(con) == 1, "rdzeń i powierzchnia muszą się zgadzać"
+
+
+def test_klatka_zastapiona_jest_WIDOCZNA_perspektywa_i_wierszem_porzadkow():
+    """Decyzja Zdzinia 0809: „z widocznym nagrobkiem". Wypadnięcie z kolejek bez własnej powierzchni
+    zamieniłoby defekt na drugi — klatka byłaby do znalezienia wyłącznie przypadkiem w gridzie
+    pełnym. Perspektywa i wiersz Porządków są DRUGĄ POŁOWĄ tej samej naprawy, nie ozdobą."""
+    con = _baza()
+    a, b = _klatka(con, "aaa"), _klatka(con, "bbb")
+    lid = _kopia(con, a, r"R:\X\plik.dng")
+    _podmiana(con, lid, b)
+    assert queries.superseded_frame_ids(con) == set()
+    assert queries.tasks_state(con)["superseded_frames"] == 0
+
+    repo.mark_superseded(con, frame_id=a, superseded_by=b, now=NOW)
+
+    assert queries.superseded_frame_ids(con) == {a}
+    assert queries.superseded_by_map(con) == {a: b}
+    assert queries.tasks_state(con)["superseded_frames"] == 1
+    # Uniwersum gridu ZOSTAJE pełne (F1) — zastąpiona znika z ROBOTY, nie z archiwum.
+    assert a in queries.all_frame_ids(con)
+    assert queries.base_rows(con, [a])[0]["superseded_by"] == b
+
+
+def test_zastapiona_bez_naglowka_nie_wisi_w_kubelku_bez_wyjscia():
+    """Przypadek zmierzony 0809 i najgorszy z całej klasy: klatka bez zeznania, która została
+    zastąpiona, siedziała w kubełku „bez nagłówka" — a nagłówka nie dostanie NIGDY, bo nie ma
+    lokacji, czyli nie ma czego przeczytać. Licznik nie do wyzerowania żadnym gestem człowieka."""
+    con = _baza()
+    a, b = _klatka(con, "aaa"), _klatka(con, "bbb")      # obie bez `record_header`
+    lid = _kopia(con, a, r"R:\X\plik.xisf")
+    _podmiana(con, lid, b)
+    assert resolver.review_state(con).headerless == 2    # falsyfikator
+
+    repo.mark_superseded(con, frame_id=a, superseded_by=b, now=NOW)
+    assert resolver.review_state(con).headerless == 1
 
 
 # ---------------------------------------------------------------- przeniesienie faktów (D-DR-4)

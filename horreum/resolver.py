@@ -279,6 +279,7 @@ def path_proposals(con):
         "LEFT JOIN location l ON l.id = (SELECT MIN(id) FROM location "
         "                                WHERE frame_id = f.id AND present = 1) "
         "WHERE f.kind = 'light' AND f.object_id IS NULL "
+        "  AND f.superseded_by IS NULL "
         "  AND h.object_raw IS NULL "
         "  AND f.object_source IS NULL "
         "  AND f.filetype IN (SELECT value FROM json_each(?)) "
@@ -517,35 +518,45 @@ def review_state(con):
     `no_config` jest KIND-AWARE (`grouper.NO_TELESCOPE_KINDS`): dark/bias nie mają osi teleskopu, więc
     ich `config_id IS NULL` to stan docelowy, nie delta — tak jak `object_id IS NULL` dla kalibracji.
     Lista rodzajów idzie do SQL przez `json_each(?)` (literał stały + jeden parametr), żeby zbiór miał
-    JEDNEGO właściciela w `grouper` zamiast kopii wklejonej w predykat."""
+    JEDNEGO właściciela w `grouper` zamiast kopii wklejonej w predykat.
+
+    KLATKA ZASTĄPIONA (`superseded_by IS NOT NULL`) NIE JEST W KOLEJCE — warunek stoi w KAŻDYM
+    członie, także w `total`, bo kolejka przeglądu jest listą ROBOTY, a robotę takiej klatki przejęła
+    następczyni. Zmierzone 2026-08-09: bez tego `headerless` pokazywał 1, a była to klatka, która
+    nagłówka nigdy już nie dostanie (nie ma lokacji, więc nie ma czego przeczytać) — licznik nie
+    do wyzerowania żadnym gestem. Populacja jest widoczna perspektywą „Zastąpione"
+    (`gui.queries.superseded_frame_ids`), więc znika z kolejki, a nie z oczu."""
     off_axis = json.dumps(sorted(NO_TELESCOPE_KINDS))
     no_config = con.execute(
         "SELECT count(*) FROM frame f WHERE f.config_id IS NULL "
+        "AND f.superseded_by IS NULL "
         "AND f.kind NOT IN (SELECT value FROM json_each(?)) "
         "AND EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id)", (off_axis,)).fetchone()[0]
     headerless = con.execute(
-        "SELECT count(*) FROM frame f "
-        "WHERE NOT EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id)").fetchone()[0]
+        "SELECT count(*) FROM frame f WHERE f.superseded_by IS NULL "
+        "AND NOT EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id)").fetchone()[0]
     no_camera = con.execute(
         "SELECT count(*) FROM frame f WHERE f.camera_id IS NULL "
+        "AND f.superseded_by IS NULL "
         "AND EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id)").fetchone()[0]
     kind_unknown = con.execute(
         "SELECT count(*) FROM frame f WHERE f.kind = 'unknown' "
+        "AND f.superseded_by IS NULL "
         "AND EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id)").fetchone()[0]
     # #13: DISTINCT klatek z ≥1 kopią oznaczoną nieczytelną (fakt o KOPII zliczony po klatkach —
     # spójność z resztą liczników). Join po location; DISTINCT bo frame 1:N location.
     unreadable = con.execute(
         "SELECT count(DISTINCT f.id) FROM frame f JOIN location l ON l.frame_id = f.id "
-        "WHERE l.unreadable_since IS NOT NULL").fetchone()[0]
+        "WHERE f.superseded_by IS NULL AND l.unreadable_since IS NOT NULL").fetchone()[0]
     total = con.execute(
-        "SELECT count(*) FROM frame f WHERE "
+        "SELECT count(*) FROM frame f WHERE f.superseded_by IS NULL AND ("
         "NOT EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id) "
         "OR (((f.config_id IS NULL "
         "      AND f.kind NOT IN (SELECT value FROM json_each(?))) "
         "     OR f.camera_id IS NULL OR f.kind = 'unknown') "
         "    AND EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id)) "
         "OR EXISTS (SELECT 1 FROM location l WHERE l.frame_id = f.id "
-        "           AND l.unreadable_since IS NOT NULL)", (off_axis,)).fetchone()[0]
+        "           AND l.unreadable_since IS NOT NULL))", (off_axis,)).fetchone()[0]
     return ReviewState(no_config=no_config, headerless=headerless, no_camera=no_camera,
                        kind_unknown=kind_unknown, unreadable=unreadable, total=total)
 
@@ -620,6 +631,7 @@ def nameless_lights(con):
     return con.execute(
         "SELECT count(*) FROM frame f JOIN header h ON h.frame_id = f.id "
         "WHERE f.kind = 'light' AND f.object_id IS NULL "
+        "AND f.superseded_by IS NULL "
         "AND h.object_raw IS NULL "
         "AND f.filetype NOT IN (SELECT value FROM json_each(?))",
         (json.dumps(list(NO_OBJECT_CARD_FILETYPES)),)).fetchone()[0]
@@ -644,6 +656,7 @@ def nameless_raw_lights(con):
     return con.execute(
         "SELECT count(*) FROM frame f JOIN header h ON h.frame_id = f.id "
         "WHERE f.kind = 'light' AND f.object_id IS NULL "
+        "AND f.superseded_by IS NULL "
         "AND h.object_raw IS NULL "
         "AND f.filetype IN (SELECT value FROM json_each(?))",
         (json.dumps(list(NO_OBJECT_CARD_FILETYPES)),)).fetchone()[0]
@@ -669,6 +682,7 @@ def nameless_stacks(con):
     return con.execute(
         "SELECT count(*) FROM frame f JOIN header h ON h.frame_id = f.id "
         "WHERE f.kind = 'master_light' AND f.object_id IS NULL "
+        "AND f.superseded_by IS NULL "
         "AND h.object_raw IS NULL").fetchone()[0]
 
 

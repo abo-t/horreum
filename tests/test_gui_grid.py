@@ -73,6 +73,46 @@ def view(qapp, gcon, tmp_path, monkeypatch):
 
 # ---------- model ----------
 
+def test_model_klatka_zastapiona_mowi_o_tym_WPROST(gcon):
+    """Decyzja Zdzinia 0809 („z widocznym nagrobkiem"): klatka zastąpiona ZOSTAJE w gridzie i ma się
+    tłumaczyć sama. Trzy nośniki, bo każdy zawodzi osobno: tło (motyw, daltonizm), tooltip (wymaga
+    najechania) i TEKST KOMÓRKI — ten ostatni jest jedynym, który widać zawsze.
+
+    PRECEDENCJA JEST TU TREŚCIĄ, NIE KOLEJNOŚCIĄ `if`-ów: zastąpiona nie ma ani jednej obecnej kopii,
+    więc dawny warunek uznawał ją za ZNIKNIĘTĄ — czyli za robotę („znajdź plik"), której nie ma.
+    Wiersz zniknięty obok pilnuje, że zawężenie nie zjadło tamtego stanu."""
+    from horreum.gui.grid import GridTableModel, BASE_COLS
+    from horreum.gui import grid as grid_mod
+    wspolne = {"kind": "light", "camera_model": None, "telescope_label": None,
+               "telescop_canon": None, "object_canon": None, "object_raw": None,
+               "filter_canon": None, "_telescope": None, "_object": None}
+    base = [
+        {"frame_id": 1, "path": "/a/zywa.fits", "present": 1, "n_present": 1,
+         "superseded_by": None, **wspolne},
+        {"frame_id": 4, "path": "/a/znikla.fits", "present": 0, "n_present": 0,
+         "superseded_by": None, **wspolne},
+        {"frame_id": 5, "path": None, "present": None, "n_present": 0,
+         "superseded_by": 99, **wspolne},
+    ]
+    m = GridTableModel()
+    m.set_data(base, pivot_mod.build_pivot([1, 4, 5], [], []), [])
+    kol_path = [k for _, k in BASE_COLS].index("path")
+
+    # Wiersze adresujemy PO TREŚCI, nie po indeksie: model sortuje, więc pozycja jest jego decyzją,
+    # a test ma pytać o zachowanie komórki, nie o kolejność (inaczej pada przy zmianie sortu).
+    teksty = [m.data(m.index(i, kol_path), Qt.DisplayRole) for i in range(m.rowCount())]
+    i_zast = teksty.index("zastąpiona przez #99")
+    i_znik, i_zywa = teksty.index("znikla.fits"), teksty.index("zywa.fits")
+
+    assert "#99" in m.data(m.index(i_zast, kol_path), Qt.ToolTipRole)
+    assert m.data(m.index(i_zast, 0), Qt.BackgroundRole) == grid_mod._COLORS["superseded_bg"]
+    # …i NIE jest malowana jak zniknięta, choć obecnej kopii nie ma tak samo
+    assert m.data(m.index(i_zast, 0), Qt.BackgroundRole) != grid_mod._COLORS["vanished_bg"]
+    # regresja: wiersz naprawdę zniknięty zostaje zniknięty
+    assert m.data(m.index(i_znik, 0), Qt.BackgroundRole) == grid_mod._COLORS["vanished_bg"]
+    assert m.data(m.index(i_zywa, 0), Qt.BackgroundRole) is None
+
+
 def test_model_kształt_i_stany(gcon):
     from horreum.gui.grid import GridTableModel, BASE_COLS
     base = [{"frame_id": 1, "path": "/a/f1.fits", "kind": "light", "camera_model": None,

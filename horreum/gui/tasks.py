@@ -30,7 +30,7 @@ from horreum.gui import i18n, queries, rows, theme
 from horreum.gui.app import (
     ObjectAxisView, ObservatoryAxisView, TelescopeAxisView, _utc_now_iso,
 )
-from horreum.gui.grid import PRESET_DUPS, PRESET_LINEAGE, PRESET_VANISHED
+from horreum.gui.grid import PRESET_DUPS, PRESET_LINEAGE, PRESET_SUPERSEDED, PRESET_VANISHED
 from horreum.gui.rows import TwoPartDelegate
 
 # Definicja listy zadań: (klucz stanu z `tasks_state`, etykieta, akcja). Akcja: numer podstrony
@@ -78,6 +78,10 @@ _TASKS = [
     ("observatories_unnamed", "tasks.observatories_unnamed", _PAGE_OBSERVATORY),
     ("dup_frames", "tasks.dup_frames", PRESET_DUPS),
     ("vanished_frames", "tasks.vanished_frames", PRESET_VANISHED),
+    # Wiersz INFORMACYJNY, nie zadanie: klatka zastąpiona nie ma czego wymagać od użytkownika —
+    # treść przejęła następczyni. Stoi tu, bo od 0809 wypadła z WSZYSTKICH kubełków kolejki
+    # (nie jest robotą), a bez tej pozycji jedyną drogą do niej byłby przypadek w gridzie pełnym.
+    ("superseded_frames", "tasks.superseded_frames", PRESET_SUPERSEDED),
 ]
 
 

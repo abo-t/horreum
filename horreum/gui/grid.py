@@ -73,7 +73,8 @@ _EMPTY_DB = "grid.empty_db"
 # Kolory stanów gridu — z motywu (F6 §7, SPOT). Model czyta `_COLORS` NA ŻYWO w `data()`
 # (Qt nie cache'uje BackgroundRole), więc `use_theme` przy przełączeniu + `viewport().update()`
 # przemalowuje bez przebudowy modelu. Klucze: missing (foreground braku) / vanished_bg (present=0)
-# / dup_bg (>1 obecna) / group_bg (nagłówek grupy) / touched_bg (dotknięty makrem) / skipped_bg.
+# / dup_bg (>1 obecna) / group_bg (nagłówek grupy) / touched_bg (dotknięty makrem) / skipped_bg
+# / superseded_bg (treść pod ścieżką podmieniona — klatka jest historią, nie robotą).
 _COLORS: dict[str, QColor] = {}
 
 
@@ -104,6 +105,16 @@ def _vanished_tip(row):
     if not ts:
         return i18n.t("grid.tip.vanished")
     return i18n.t("grid.tip.vanished_at", ts=str(ts)[:16].replace("T", " "))
+
+
+def _superseded_tip(row):
+    """Człon tooltipu ścieżki dla klatki ZASTĄPIONEJ — ZAWSZE z adresem następczyni.
+
+    Adres jest tu treścią, nie ozdobą: „zastąpiona" bez wskazania, DOKĄD poszła treść, jest
+    zarzutem bez odpowiedzi — a to jedyne zdanie, po którym user widzi, że nic nie zginęło.
+    Wzorzec `_vanished_tip`, z jedną różnicą: tam data bywa nieznana i człon się kurczy, tu
+    `superseded_by` jest NOT NULL z definicji predykatu, więc wariantu bez adresu nie ma."""
+    return i18n.t("grid.tip.superseded", id=row.get("superseded_by"))
 
 
 def _set_role(w, role):
@@ -140,6 +151,11 @@ PRESET_VANISHED = "Zniknięte"
 # prowadzić POZA Zbiorami: perspektywa jest tu jedyną drogą od liczby do listy. Stała współdzielona
 # z TasksView po nazwie — jak u dwóch sąsiadów wyżej.
 PRESET_LINEAGE = "Rodowód"
+# PRESET_SUPERSEDED — czwarty bliźniak (0809, decyzja Zdzinia „z widocznym nagrobkiem"). Klatka
+# zastąpiona wypadła ze WSZYSTKICH kubełków kolejki (nie jest robotą), więc bez własnej perspektywy
+# byłaby wyłącznie w gridzie pełnym — czyli do znalezienia tylko przez przypadek. Stała współdzielona
+# z TasksView po nazwie, jak trzej sąsiedzi wyżej.
+PRESET_SUPERSEDED = "Zastąpione"
 PRESETS = {
     "Przegląd": {"filter": None, "group_by": None},
     "Kalibracja": {"filter": {"op": "OR", "conditions": [
@@ -150,6 +166,7 @@ PRESETS = {
     PRESET_DUPS: {"filter": None, "group_by": None, "only_dups": True},
     PRESET_VANISHED: {"filter": None, "group_by": None, "only_vanished": True},
     PRESET_LINEAGE: {"filter": None, "group_by": None, "only_lineage": True},
+    PRESET_SUPERSEDED: {"filter": None, "group_by": None, "only_superseded": True},
     "Do przeglądu": {"filter": None, "group_by": None, "only_review": True},
 }
 # Etykieta WYŚWIETLANIA presetu (tekst) osobno od TOŻSAMOŚCI (klucz PRESETS w `itemData` — używany przez
@@ -160,6 +177,7 @@ _PRESET_LABELS = {
     PRESET_DUPS: "perspective.dups",
     PRESET_VANISHED: "perspective.vanished",
     PRESET_LINEAGE: "perspective.lineage",
+    PRESET_SUPERSEDED: "perspective.superseded",
     "Do przeglądu": "perspective.to_review",
 }
 
@@ -355,7 +373,12 @@ class GridTableModel(QAbstractTableModel):
         return None
 
     def _base_cell(self, row, key, role):
-        vanished = row.get("present") == 0 and (row.get("n_present") or 0) == 0
+        # ZASTĄPIONA bije ZNIKNIĘTĄ, bo to nie są dwa odcienie jednego stanu: klatka bez ani jednej
+        # kopii wygląda tak samo w obu, ale w pierwszym przypadku jest robota (znajdź plik), a w
+        # drugim nie ma żadnej — treść przejęła następczyni. Kolejność `if`-ów JEST tą regułą.
+        superseded = row.get("superseded_by") is not None
+        vanished = (not superseded and row.get("present") == 0
+                    and (row.get("n_present") or 0) == 0)
         dup = (row.get("n_present") or 0) > 1
         if role == Qt.BackgroundRole:
             # Podgląd makra WYGRYWA tło (bieżący fokus): dotknięty/pominięty wiersz widoczny w
@@ -363,6 +386,8 @@ class GridTableModel(QAbstractTableModel):
             pv = self._preview.get(row.get("frame_id")) if self._preview else None
             if pv is not None:
                 return _COLORS["skipped_bg"] if "skipped" in pv else _COLORS["touched_bg"]
+            if superseded:
+                return _COLORS["superseded_bg"]
             if vanished:
                 return _COLORS["vanished_bg"]
             if dup:
@@ -372,11 +397,17 @@ class GridTableModel(QAbstractTableModel):
             path = row.get("path") or ""
             if role == Qt.DisplayRole:
                 name = os.path.basename(path) if path else i18n.t("object.no_location")
+                # Klatka zastąpiona MÓWI TO WPROST W KOMÓRCE, nie tylko tłem i tooltipem: tło niesie
+                # kolor (a użytkownik bywa daltonistą albo ma inny motyw), tooltip wymaga najechania,
+                # a ten wiersz ma się tłumaczyć sam — inaczej wygląda jak plik, który zginął.
+                if superseded:
+                    return i18n.t("grid.cell.superseded", id=row.get("superseded_by"))
                 # Prefiks „×N" PRZED nazwą (P2-2): sufiks ginął przy elizji długich ścieżek.
                 return f"×{row['n_present']}  {name}" if dup else name
             if role == Qt.ToolTipRole:
-                extra = _vanished_tip(row) if vanished else (
-                    i18n.t("grid.tip.dup_locs", n=row['n_present']) if dup else "")
+                extra = _superseded_tip(row) if superseded else (
+                    _vanished_tip(row) if vanished else (
+                        i18n.t("grid.tip.dup_locs", n=row['n_present']) if dup else ""))
                 return (path or i18n.t("object.no_location")) + extra
             return None
         if key == "_dt_delta":
@@ -1830,6 +1861,7 @@ class FramesView(QWidget):
         self._only_review = False
         self._only_vanished = False
         self._only_lineage = False
+        self._only_superseded = False
         self._reveal_facet = None   # (facet, wartość) do odsłonięcia w listwie — patrz `apply_object_facet`
         self._frame_ids = []      # frame_id widoczne w gridzie (cel makra) — aktualizowane w refresh()
         self._run_id = None       # JEDEN run_id sesji makra (R#5 lifecycle: stage→commit/reject zwalnia)
@@ -2060,6 +2092,7 @@ class FramesView(QWidget):
         self._only_review = bool(spec.get("only_review"))
         self._only_vanished = bool(spec.get("only_vanished"))
         self._only_lineage = bool(spec.get("only_lineage"))
+        self._only_superseded = bool(spec.get("only_superseded"))
         self._filter_tree = spec.get("filter")
         # F4R#2: stan facetów resetowany dla KAŻDEJ perspektywy (preset ORAZ zapisana) — perspektywa
         # definiuje CAŁY zbiór; stara zapisana bez klucza "facets" MUSI zerować stan, inaczej facety
@@ -2093,6 +2126,7 @@ class FramesView(QWidget):
         z 48 przy scrollu 0. Stąd JEDNORAZOWY `_reveal_facet`, konsumowany przez najbliższe
         przeładowanie listwy."""
         self._only_dups = self._only_review = self._only_vanished = self._only_lineage = False
+        self._only_superseded = False
         self._filter_tree = None
         self.filter_panel.set_tree(None)
         self._facet_state = {"object": {"in": [[oid, canon] for oid, canon in pairs]}} \
@@ -2129,6 +2163,7 @@ class FramesView(QWidget):
             "group_by": self.combo_group.currentData(),
             "only_dups": self._only_dups, "only_review": self._only_review,
             "only_vanished": self._only_vanished, "only_lineage": self._only_lineage,
+            "only_superseded": self._only_superseded,
             "facets": self._facet_state,   # OSOBNO od "filter" (nota R2) — set_tree nigdy ich nie widzi
         }
         # Zapis idzie do BAZY (I-1) — perspektywa jedzie z archiwum, nie z tą maszyną. Czasownik
@@ -2443,6 +2478,8 @@ class FramesView(QWidget):
             parts.append(i18n.t("grid.criteria.only_vanished"))
         if self._only_lineage:
             parts.append(i18n.t("grid.criteria.only_lineage"))
+        if self._only_superseded:
+            parts.append(i18n.t("grid.criteria.only_superseded"))
         return " · ".join(parts)
 
     # ---- reakcje ----
@@ -2499,11 +2536,12 @@ class FramesView(QWidget):
         review_ids = queries.review_frame_ids(self.con) if self._only_review else None
         gone_ids = queries.vanished_frame_ids(self.con) if self._only_vanished else None
         lin_ids = queries.lineage_pending_frame_ids(self.con) if self._only_lineage else None
+        sup_ids = queries.superseded_frame_ids(self.con) if self._only_superseded else None
         # NOWY set, NIGDY `&=`: przy pustym filtrze `filter_engine.run` zwraca uniwersum WPROST
         # (`filter_engine.py:171`), a to jest ZAPAMIĘTANY obiekt memoizacji (`_memo_leaf_fns`).
         # `&=` przycinało go W MIEJSCU, więc kolejne `universe_fn()` widziało już przycięty zbiór —
         # perspektywa z trimem potrafiła pokazać „Baza pusta" na pełnej bazie (wizytator P5 #2).
-        for trim in (dup_ids, review_ids, gone_ids, lin_ids):
+        for trim in (dup_ids, review_ids, gone_ids, lin_ids, sup_ids):
             if trim is not None:
                 frame_ids = frame_ids & trim
         base = [_derive(r) for r in queries.base_rows(self.con, list(frame_ids))]

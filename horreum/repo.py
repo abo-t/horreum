@@ -276,10 +276,13 @@ def mark_superseded(con, *, frame_id, superseded_by, now, actor="supersede"):
 class FactTransfer:
     """Co przeszło z klatki zastąpionej na jej następczynię (R4). `object_moved` = przeniesiono
     oś obiektu (także NAGROBEK, który jest werdyktem „ta klatka obiektu NIE ma"); `config_moved`
-    = przeniesiono oś sprzętu wskazaną ręką (R1);
+    = przeniesiono oś sprzętu wskazaną ręką (R1); `lineage_moved` = ILE werdyktów rodowodu stosu
+    przeszło na następczynię (0809, warunek Zdzinia) — liczba, nie bit, bo jedna klatka bywa
+    wejściem wielu obrazów i raport ma powiedzieć ILU;
     `skipped` = powód pominięcia, gdy nic nie przeszło — GUI ma mówić DLACZEGO, nie milczeć."""
     object_moved: bool = False
     config_moved: bool = False
+    lineage_moved: int = 0
     skipped: str = ""          # "" = nic nie pominięto (konwencja liczników z `ObjectGesture`)
 
 
@@ -316,11 +319,32 @@ def transfer_human_facts(con, *, frame_id, now, actor="user:local"):
     W CAŁOŚCI: przenosimy, gdy następczyni nie ma ANI werdyktu ręki, ANI configu z nagłówka.
     Klatka, której grouper policzył zestaw z jej WŁASNEGO zeznania, przemówiła sama.
 
-    CO DOŁĄCZY PÓŹNIEJ, świadomie i z powodem: **werdykty rodowodu**
-    (`integration_input.excluded`; zmierzona populacja na żywym archiwum: **0**, a pierwszy RAW
-    wejdzie do rodowodu dopiero po GO-2 — kod na populację zerową byłby zgadywaniem kształtu).
+    TRZECIA OŚ: WERDYKTY RODOWODU STOSU (0809, warunek Zdzinia „wprowadzanie nowych subów albo
+    masterów nie może wpłynąć na wycofanie czegokolwiek już ustawionego ręcznie"). Przenosimy
+    wiersze `integration_input` ze źródłem `user`, w których zastąpiona klatka jest **WEJŚCIEM** —
+    czyli werdykt „ten sub wszedł w ten obraz" albo „NIE wszedł" (`excluded`). Bez tego edycja
+    RAW-a (jedyna droga, którą klatka bywa zastępowana) zostawiała potwierdzenie ręki na tożsamości
+    bez pliku, a obraz tracił wejście, którego nikt nie cofnął.
 
-    Zwraca `FactTransfer`. Idempotentne: powtórzenie po udanym przeniesieniu trafia w guardy obu
+    ROLA MASTERA ŚWIADOMIE POZA PRZENIESIENIEM — i to jest granica, nie przeoczenie. Gdy zastąpiona
+    klatka jest GŁOWĄ integracji (`integration.master_frame_id`), zostaje nią nadal: ponownie
+    zapisany master to NOWE PRZETWORZENIE, a nie ten sam obraz (dwa flow archiwum: wersje obróbki
+    jednej sesji są osobnymi obrazami). Przepięcie głowy byłoby OSĄDEM, którego nikt nie wydał —
+    tym samym, przed którym broni §0 briefu.
+
+    WIERSZ PRZECHODZI, NIE DUBLUJE SIĘ. `integration_input` jest z założenia WSKAŹNIKIEM bieżącego
+    dopasowania, a historia zostaje w dzienniku (§4.2, `unlink_integration_input`) — więc stary
+    wiersz znika z pary `integration.unlinked` + `.linked`, zamiast zostać jako drugi rekord o tym
+    samym subie. Zostawienie obu dałoby dokładnie ten defekt, który zgłosił Zdzin 0809: powierzchnia
+    roboty oferująca wiersz o pliku, którego nie ma. To NIE łamie append-only osi obiektu i sprzętu
+    — tam klatka zastąpiona zostaje nietknięta, bo tam kolumna opisuje KLATKĘ, a nie relację.
+
+    GUARD LUSTRZANY DO DWÓCH POZOSTAŁYCH: pomijamy integrację, w której następczyni ma JUŻ własny
+    werdykt ręki — przemówiła sama i cudzy werdykt nie ma prawa jej nadpisać. Wiersz automatu
+    (`window`/`history`) następczyni jest natomiast PODNOSZONY do `user`, bo to nie werdykt,
+    tylko dopasowanie — ta sama precedencja, co w `RANGA_ASSERT`.
+
+    Zwraca `FactTransfer`. Idempotentne: powtórzenie po udanym przeniesieniu trafia w guardy trzech
     osi (następczyni ma już swoje) i zwraca `skipped` bez zapisu."""
     with _immediate(con):
         stara = con.execute(
@@ -337,7 +361,12 @@ def transfer_human_facts(con, *, frame_id, now, actor="user:local"):
         # o cichy wiersz. Oś obiektu tego członu NIE MA celowo: tam NULL bywa WERDYKTEM (nagrobek).
         ma_config = (stara["config_source"] in STICKY_CONFIG_SOURCES
                      and stara["config_id"] is not None)
-        if not ma_obiekt and not ma_config:
+        # Pytamy o rolę WEJŚCIA, nie głowy — patrz granica w docstringu.
+        rodowod = con.execute(
+            "SELECT integration_id, excluded FROM integration_input "
+            "WHERE input_frame_id = ? AND asserted_by = 'user' ORDER BY integration_id",
+            (frame_id,)).fetchall()
+        if not ma_obiekt and not ma_config and not rodowod:
             return FactTransfer(skipped="brak faktow czlowieka")
         nowa_id = stara["superseded_by"]
         nowa = con.execute(
@@ -364,7 +393,13 @@ def transfer_human_facts(con, *, frame_id, now, actor="user:local"):
             ma_config and nowa["config_source"] is None and nowa["config_id"] is None
             and nowa["kind"] not in NO_TELESCOPE_KINDS
             and kamera_zestawu is not None and nowa["camera_id"] == kamera_zestawu)
-        if not obiekt_do_przeniesienia and not config_do_przeniesienia:
+        # Integracje, w których następczyni ma JUŻ własny werdykt ręki — jej zdanie zostaje.
+        wlasne = {r["integration_id"] for r in con.execute(
+            "SELECT integration_id FROM integration_input "
+            "WHERE input_frame_id = ? AND asserted_by = 'user'", (nowa_id,))}
+        rodowod_do_przeniesienia = [r for r in rodowod if r["integration_id"] not in wlasne]
+        if (not obiekt_do_przeniesienia and not config_do_przeniesienia
+                and not rodowod_do_przeniesienia):
             # POWÓD MA BYĆ PRAWDZIWY, nie jeden dla wszystkich odmów: „następczyni ma własne
             # źródło" i „zestaw do niej nie pasuje" to dwa różne stany i dwie różne dalsze drogi
             # (w pierwszym nie ma nic do roboty, w drugim ręka musi wskazać zestaw od nowa).
@@ -398,8 +433,30 @@ def transfer_human_facts(con, *, frame_id, now, actor="user:local"):
                                          "config_source": stara["config_source"],
                                          "przeniesione_z": frame_id},
                        reason="zestaw wskazany ręką przeniesiony po podmianie pliku")
+        for r in rodowod_do_przeniesienia:
+            iid = r["integration_id"]
+            # Kwalifikator `excluded.` to PSEUDO-TABELA upserta SQLite, nie nasza kolumna o tej
+            # samej nazwie — zbieżność nazw jest niefortunna, ale wartość bierzemy z wiersza
+            # WSTAWIANEGO, czyli z werdyktu klatki zastąpionej.
+            con.execute(
+                "INSERT INTO integration_input(integration_id, input_frame_id, asserted_by, "
+                "excluded) VALUES (?, ?, 'user', ?) "
+                "ON CONFLICT(integration_id, input_frame_id) DO UPDATE SET asserted_by = 'user', "
+                "excluded = excluded.excluded",
+                (iid, nowa_id, r["excluded"]))
+            con.execute(
+                "DELETE FROM integration_input WHERE integration_id = ? AND input_frame_id = ?",
+                (iid, frame_id))
+            emit_event(con, actor=actor, verb="integration.linked", target=f"integration:{iid}",
+                       now=now, payload={"input_frame_id": nowa_id, "asserted_by": "user",
+                                         "excluded": r["excluded"], "przeniesione_z": frame_id},
+                       reason="werdykt rodowodu przeniesiony po podmianie pliku")
+            emit_event(con, actor=actor, verb="integration.unlinked", target=f"integration:{iid}",
+                       now=now, payload={"input_frame_id": frame_id,
+                                         "przeniesione_na": nowa_id})
     return FactTransfer(object_moved=obiekt_do_przeniesienia,
-                        config_moved=config_do_przeniesienia)
+                        config_moved=config_do_przeniesienia,
+                        lineage_moved=len(rodowod_do_przeniesienia))
 
 
 def clear_superseded(con, *, frame_id, now, actor="scan"):
@@ -1964,11 +2021,33 @@ def link_calibration(con, *, light_frame_id, master_frame_id, relation, now,
     (lepszy kalibrator), nie regres — idempotencja liczy TYLKO brak zmiany.
 
     Verb należy do rodowodu: C2 celowo zostawił `calibration.linked/.unlinked` (użył
-    `calibration_profile.assigned` dla klatka↔profil), by tej nazwy nie zająć."""
+    `calibration_profile.assigned` dla klatka↔profil), by tej nazwy nie zająć.
+
+    AUTOMAT NIE DEGRADUJE OGNIWA WSKAZANEGO RĘKĄ (E4-2, warunek Zdzinia 0809: „wprowadzanie nowych
+    subów albo masterów nie może wpłynąć na wycofanie czegokolwiek już ustawionego ręcznie"). Do
+    0809 była to JEDYNA oś rodowodu bez takiej bramki: siostrzana `link_integration` ma
+    `RANGA_ASSERT`, `calibration_fact` ma człon `source == 'user'`, a tutaj nowy dark po prostu
+    przepinał ogniwo — bezwarunkowym UPDATE-em. Trzymało to wyłącznie na ZERZE populacji (dziś
+    `calibration` z `asserted_by='user'`: 0, bo gestu ręki na tej osi jeszcze nie ma), więc
+    pierwszy taki gest łamałby warunek po cichu. Teraz warunek trzyma MECHANIZM.
+
+    Pełnej drabiny rang tu NIE MA i to jest świadome: `RANGA_ASSERT` opisuje słownik osi stosów
+    (`history`/`window`/`user`), a ta oś ma własny (`horreum`, docelowo `wbpp` — DDL 0009). Dwa
+    słowniki w jednym dicie zrobiłyby z kanonu wspólny worek. Pytanie, na które ta bramka odpowiada,
+    jest jedno i binarne — „czy ręka już to rozstrzygnęła" — więc kształt jest taki sam, jak
+    w `calibration_fact`, i urośnie dopiero razem z drugim nie-ludzkim źródłem."""
     row = con.execute(
-        "SELECT id, master_frame_id FROM calibration WHERE light_frame_id = ? AND relation = ?",
+        "SELECT id, master_frame_id, asserted_by FROM calibration "
+        "WHERE light_frame_id = ? AND relation = ?",
         (light_frame_id, relation)).fetchone()
-    if row is not None and row["master_frame_id"] == master_frame_id:
+    # IDEMPOTENCJA PYTA O PARĘ (kalibrator, źródło), nie o sam kalibrator — inaczej bramka niżej
+    # byłaby NIEOSIĄGALNA: ręka potwierdzająca ten sam master, który wybrał automat, odbijała się
+    # od tego `return` i źródło zostawało `horreum`, więc werdykt nie miał jak powstać. Lustro
+    # `link_integration`: „podniesienie pewności zostawia ślad".
+    if row is not None and (row["master_frame_id"], row["asserted_by"]) == (master_frame_id,
+                                                                            asserted_by):
+        return False
+    if row is not None and row["asserted_by"] == "user" and asserted_by != "user":
         return False
     with con:
         if row is None:

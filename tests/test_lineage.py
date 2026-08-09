@@ -196,6 +196,40 @@ def test_relink_gdy_dojdzie_blizszy_master(con):
     assert con.execute("SELECT count(*) FROM event WHERE verb='calibration.unlinked'").fetchone()[0] == 1
 
 
+def test_nowy_master_NIE_przepina_ogniwa_wskazanego_reka(con):
+    """E4-2 / warunek Zdzinia 0809: „wprowadzanie nowych masterów nie może wpłynąć na wycofanie
+    czegokolwiek już ustawionego ręcznie".
+
+    Lustro testu wyżej, z jedną różnicą: ogniwo wskazała RĘKA. Do 0809 ta oś była JEDYNĄ osią
+    rodowodu bez bramki precedencji — siostrzana `link_integration` ma `RANGA_ASSERT`,
+    `calibration_fact` ma człon `source == 'user'`, a tutaj nowy flat przepinał bezwarunkowo.
+    Warunek trzymał się wyłącznie na tym, że gestu ręki na tej osi jeszcze nie ma (populacja 0)."""
+    stary = _frame(con, kind="master_flat", sha1="f_old", config_id=1, filter_canon="Ha",
+                   date_obs="2020-01-01T00:00:00")
+    lid = _frame(con, kind="light", sha1="l1", config_id=1, filter_canon="Ha",
+                 date_obs="2024-06-01T00:00:00")
+    run_calibration(con, now=NOW)
+    run_lineage(con, now=NOW)
+    # Ręka rozstrzyga: TEN flat, choćby jutro doszedł bliższy czasowo.
+    assert repo.link_calibration(con, light_frame_id=lid, master_frame_id=stary, relation="flat",
+                                 now=NOW, asserted_by="user") is True
+
+    nowy = _frame(con, kind="master_flat", sha1="f_new", config_id=1, filter_canon="Ha",
+                  date_obs="2024-05-01T00:00:00")               # bliżej lightu niż wskazany ręką
+    run_calibration(con, now=NOW)
+    s = run_lineage(con, now=NOW)
+
+    row = con.execute("SELECT master_frame_id, asserted_by FROM calibration "
+                      "WHERE light_frame_id=? AND relation='flat'", (lid,)).fetchone()
+    assert row[:] == (stary, "user")                            # werdykt stoi
+    assert s.linked_new.get("flat") is None                     # przebieg NIE zapisał zmiany
+    # FALSYFIKATOR: bramka broni przed AUTOMATEM, nie przed człowiekiem — ręka zmienia zdanie.
+    assert repo.link_calibration(con, light_frame_id=lid, master_frame_id=nowy, relation="flat",
+                                 now=NOW, asserted_by="user") is True
+    assert con.execute("SELECT master_frame_id FROM calibration WHERE light_frame_id=? "
+                       "AND relation='flat'", (lid,)).fetchone()[0] == nowy
+
+
 def test_light_bez_date_obs_degeneruje_do_min_id_bez_crash(con):
     """Light bez `date_obs` w profilu wielo-masterowym → MIN frame.id, jawnie, nie crash."""
     m1 = _frame(con, kind="master_flat", sha1="fa", config_id=1, filter_canon="Ha", date_obs="2022-01-01T00:00:00")

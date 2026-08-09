@@ -700,10 +700,17 @@ def run_stack_lineage(con, *, now, actor="stacks", xml_reader=None, progress=Non
         # człon lustrzany.
         # To ochrona przed DEGRADACJĄ, a NIE zamrożenie: odtworzenie tej samej siły (plan `history`
         # wobec zapisanego `history`) przechodzi normalnie i stos dalej się rekoncyliuje.
+        # DECYZJA O ZAPISIE PYTA O MINIMUM (`zrodlo`), LICZNIK O MAKSIMUM (`zrodlo_max`) — dwa
+        # pytania, dwie wartości (P4-4, patrz `_zapisany_stan`). Zlanie ich w jedno zamraża stos
+        # po jednym geście albo ukrywa rękę w raporcie; oba stany już tu były.
         ranga_planu = repo.RANGA_ASSERT[p["asserted_by"] or "window"]
-        ranga_stanu = (repo.RANGA_ASSERT.get(stan["zrodlo"], -1)
-                       if stan is not None and stan["zrodlo"] else -1)
+        ranga_stanu = _ranga(stan["zrodlo"]) if stan is not None and stan["zrodlo"] else -1
         chroniony = ranga_stanu > ranga_planu
+        # Kto ten rodowód ustalił: mocniejsze z zapisanego i z planu. Stos, w którym stoi choć jeden
+        # werdykt ręki, ma się meldować jako werdykt ręki — także gdy przebieg właśnie liczy resztę
+        # jego wierszy od nowa.
+        zrodlo_licznika = _mocniejsze(stan["zrodlo_max"] if stan is not None else None,
+                                      p["asserted_by"])
         if chroniony and p["reason"]:
             # JEDYNY przypadek, w którym trzeba zostawić stos w spokoju w całości: powodu nie da
             # się zapisać, nie kasując wierszy (inwariant §5.14 „powód wyklucza wejścia automatu"),
@@ -712,7 +719,7 @@ def run_stack_lineage(con, *, now, actor="stacks", xml_reader=None, progress=Non
             _bump_kept(s, p)
             pominiete.append(p["frame_id"])
             s.linked += 1
-            _bump(s.by_assert, stan["zrodlo"])
+            _bump(s.by_assert, zrodlo_licznika)
             s.ambiguous += bool(stan["ambiguous"])
             s.telescope_mismatch += bool(stan["telescope_mismatch"])
             continue
@@ -721,8 +728,9 @@ def run_stack_lineage(con, *, now, actor="stacks", xml_reader=None, progress=Non
         else:
             s.linked += 1
             # Źródło ze STANU, gdy wiersze zostają nietknięte: one naprawdę są `history`, choć plan
-            # — bez pliku — umiałby powiedzieć tylko „window".
-            _bump(s.by_assert, stan["zrodlo"] if chroniony else p["asserted_by"])
+            # — bez pliku — umiałby powiedzieć tylko „window". Ta sama wartość niesie werdykt ręki
+            # ze stosu MIESZANEGO, którego plan sam z siebie nie zna.
+            _bump(s.by_assert, zrodlo_licznika)
         s.ambiguous += p["frame_id"] in ambi
         # ROZJAZD TELESKOPU LICZYMY TYLKO TAM, GDZIE RODOWÓD POWSTAŁ — bo tylko tam jest FLAGĄ
         # („relacje są, ale karta się nie zgadza"). Rozjazd, który skończył się ODMOWĄ, siedzi już
@@ -794,9 +802,29 @@ def _zapisany_stan(con, master_frame_id):
 
     `zrodlo` bierzemy z wierszy NIEWYKLUCZONYCH (`excluded = 0`): stos, z którego człowiek odrzucił
     wszystkie kandydatury, nie ma rodowodu w żadnym sensie, którego broni strażnik — i nie ma prawa
-    trafić do `linked`, skoro `inputs` liczone ze stanu go nie widzi. Wiersze automatu są jednorodne
-    (plan nadaje jedno źródło całej integracji), więc jedyna mieszanka to automat + ręka; sortowanie
-    stawia NIE-`user` pierwszy, bo pytamy „na czym stoi ten rodowód", nie „czy ktoś go dotknął".
+    trafić do `linked`, skoro `inputs` liczone ze stanu go nie widzi.
+
+    DWA ŹRÓDŁA, BO DWA RÓŻNE PYTANIA (P4-4, rozstrzygnięte 0809 dopiero po tym, jak jedna wartość
+    okazała się na nie za wąska):
+
+    * `zrodlo` — **MINIMUM rangi**, odpowiada „czego automat dotknie". Wiersze, których przebieg
+      nie ma prawa ruszyć, broni klinga PER WIERSZ (`unlink_integration_input` omija `user`,
+      `link_integration` nie obniża rangi), więc strażnik STOSU ma sens tylko wtedy, gdy CAŁY
+      zapisany rodowód jest mocniejszy od planu. Dla stosu mieszanego (`window` + `user`) najsłabsze
+      wiersze są dokładnie tak mocne jak plan — i tak ma zostać: sub, który wypadł z okna (bo ktoś
+      poprawił mu `DATE-OBS`), musi dać się odpiąć także wtedy, gdy obok stoi werdykt ręki.
+    * `zrodlo_max` — **MAKSIMUM rangi**, odpowiada „kto ten rodowód ustalił". Idzie WYŁĄCZNIE do
+      liczników (`by_assert`), bo to była prawdziwa treść P4-4: stos z werdyktem człowieka meldował
+      się jako robota automatu i ręki nie było widać w żadnej liczbie.
+
+    PIERWSZA WERSJA TEJ NAPRAWY UŻYWAŁA MAKSIMUM DO OBU PYTAŃ i zamrażała rekoncyliację całego
+    stosu po jednym geście — obrona za szeroka, złapana przez
+    `test_reconcile_zdejmuje_wypadle_wejscie_ale_nie_rusza_reki`. Zapis zostaje, żeby nikt nie
+    „uprościł" tego z powrotem do jednej wartości.
+
+    Minimum i maksimum liczymy W PYTHONIE, bo kanon rangi ma jednego właściciela
+    (`repo.RANGA_ASSERT`): `CASE` sklejony z tego słownika byłby SQL-em dynamicznym (meta-tripwir
+    AST) albo drugą kopią kanonu.
 
     Pozostałe pola to FAKTY ZEZNANIA PLIKU plus odcisk — wartości, których przebieg bez pliku nie
     ma czym zastąpić, a `None` z nieodczytanego nagłówka by je skasował.
@@ -810,14 +838,30 @@ def _zapisany_stan(con, master_frame_id):
 
     Pytamy po KLATCE MASTERA, bo wołający nie zna jeszcze `integration.id` — i nie ma go poznać,
     skoro właśnie decyduje, czy w ogóle pisać."""
-    return con.execute(
-        "SELECT i.tool, i.declared_rows, i.drizzle_inputs, i.disabled_inputs, i.integ_hash, "
-        "       i.ambiguous, i.telescope_mismatch, "
-        "       (SELECT ii.asserted_by FROM integration_input ii "
-        "         WHERE ii.integration_id = i.id AND ii.excluded = 0 "
-        "         ORDER BY (ii.asserted_by = 'user'), ii.asserted_by LIMIT 1) AS zrodlo "
+    glowa = con.execute(
+        "SELECT i.id, i.tool, i.declared_rows, i.drizzle_inputs, i.disabled_inputs, i.integ_hash, "
+        "       i.ambiguous, i.telescope_mismatch "
         "FROM integration i WHERE i.master_frame_id = ?",
         (master_frame_id,)).fetchone()
+    if glowa is None:
+        return None
+    zrodla = [r["asserted_by"] for r in con.execute(
+        "SELECT DISTINCT asserted_by FROM integration_input "
+        "WHERE integration_id = ? AND excluded = 0", (glowa["id"],))]
+    stan = {k: glowa[k] for k in glowa.keys()}
+    stan["zrodlo"] = min(zrodla, key=_ranga, default=None)
+    stan["zrodlo_max"] = max(zrodla, key=_ranga, default=None)
+    return stan
+
+
+def _ranga(zrodlo):
+    """Ranga zeznania wg jedynego właściciela kanonu; `None` i wartość nieznana → poniżej najniższej."""
+    return repo.RANGA_ASSERT.get(zrodlo, -1)
+
+
+def _mocniejsze(a, b):
+    """To z dwóch zeznań, które waży więcej — do LICZNIKÓW, nigdy do decyzji o zapisie."""
+    return a if _ranga(a) >= _ranga(b) else b
 
 
 def _zapisz_wejscia(con, integration_id, frame_ids, asserted_by, *, now, actor):

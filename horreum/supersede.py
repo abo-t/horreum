@@ -38,7 +38,6 @@ awarią ŚWIATA ZEWNĘTRZNEGO (share zamontowany pusty ⇒ „wszystko zniknęł
 własny dziennik bazy, którego żadna awaria dysku nie napompuje. Granica nazwana, nie obłożona
 kodem na populację, która nie ma jak powstać.
 """
-import json
 from dataclasses import dataclass, field
 
 from . import repo
@@ -218,28 +217,45 @@ def pending_transfer(con):
     ma `object_source NULL` i `config_source NULL`, więc nie ma czego przenosić. Kolejka mówi „zero
     roboty", a nie „nic się nie stało" — te dwie rzeczy odróżnia `orphans` obok.
 
+    TRZECIA OŚ (0809): **werdykty rodowodu stosu**, w których zastąpiona klatka jest WEJŚCIEM.
+    Wyjście z kubełka jest tu takie samo jak na dwóch pozostałych: gest przeniesienia albo własny
+    werdykt ręki po stronie następczyni. Rola GŁOWY integracji do kubełka nie wchodzi — ponownie
+    zapisany master jest nowym przetworzeniem, nie tą samą klatką (granica z `transfer_human_facts`).
+
+    ODSIEW OSI ROBI SIĘ W PYTHONIE, nie w `WHERE`, i to jest zmiana wobec pierwotnego kształtu:
+    trzy warunki w jednym `WHERE` musiałyby powtórzyć te same podzapytania, które pętla i tak liczy
+    dla etykiety `co`, a rozjazd DWÓCH kopii tego samego kryterium jest dokładnie tym, przed czym
+    ostrzega akapit wyżej. Populacja to klatki zastąpione (dziś 2 na 16 797), więc pełne przejście
+    po nich nic nie kosztuje, a kryterium ma jedno miejsce.
+
     Zwraca `[(stara, nowa, co), …]`, gdzie `co` = osie do przeniesienia (`obiekt` / `config` /
-    `obiekt+config`) — raport ma mówić, CZEGO gest dotyczy, nie tylko że coś czeka."""
+    `rodowod` i ich sumy) — raport ma mówić, CZEGO gest dotyczy, nie tylko że coś czeka."""
     rows = con.execute(
         "SELECT f.id, f.superseded_by, f.object_source, f.config_source, f.config_id, "
         "       n.object_source AS n_obj_src, n.config_source AS n_cfg_src, "
-        "       n.config_id AS n_cfg FROM frame f "
-        "JOIN frame n ON n.id = f.superseded_by "
-        "WHERE f.superseded_by IS NOT NULL AND ("
-        "  (f.object_source IN (SELECT value FROM json_each(?)) AND n.object_source IS NULL)"
-        "  OR (f.config_source IN (SELECT value FROM json_each(?)) AND f.config_id IS NOT NULL "
-        "      AND n.config_source IS NULL AND n.config_id IS NULL)) ORDER BY f.id",
-        (json.dumps(sorted(TRANSFERABLE_OBJECT_SOURCES)),
-         json.dumps(sorted(repo.STICKY_CONFIG_SOURCES)))).fetchall()
+        "       n.config_id AS n_cfg, "
+        "       (SELECT count(*) FROM integration_input ii "
+        "         WHERE ii.input_frame_id = f.id AND ii.asserted_by = 'user' "
+        "           AND NOT EXISTS (SELECT 1 FROM integration_input jj "
+        "                            WHERE jj.integration_id = ii.integration_id "
+        "                              AND jj.input_frame_id = n.id "
+        "                              AND jj.asserted_by = 'user')) AS rodowod_n "
+        "FROM frame f JOIN frame n ON n.id = f.superseded_by "
+        "WHERE f.superseded_by IS NOT NULL ORDER BY f.id").fetchall()
+    transferowalne = set(TRANSFERABLE_OBJECT_SOURCES)
+    lepkie = set(repo.STICKY_CONFIG_SOURCES)
     out = []
     for r in rows:
         osie = []
-        if r["object_source"] in TRANSFERABLE_OBJECT_SOURCES and r["n_obj_src"] is None:
+        if r["object_source"] in transferowalne and r["n_obj_src"] is None:
             osie.append("obiekt")
-        if (r["config_source"] in repo.STICKY_CONFIG_SOURCES and r["config_id"] is not None
+        if (r["config_source"] in lepkie and r["config_id"] is not None
                 and r["n_cfg_src"] is None and r["n_cfg"] is None):
             osie.append("config")
-        out.append((r["id"], r["superseded_by"], "+".join(osie)))
+        if r["rodowod_n"]:
+            osie.append("rodowod")
+        if osie:
+            out.append((r["id"], r["superseded_by"], "+".join(osie)))
     return out
 
 

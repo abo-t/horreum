@@ -412,6 +412,36 @@ def test_potwierdzenie_reka_chroni_rodowod_tak_jak_zeznanie_pliku(con):
     assert s.kept_unread == 1 and s.by_assert == {"user": 1}
 
 
+def test_nowy_sub_nie_rusza_werdyktu_reki_a_licznik_go_WIDZI(con):
+    """P4-4 + warunek Zdzinia 0809 („wprowadzanie nowych subów nie może wpłynąć na wycofanie
+    czegokolwiek ustawionego ręcznie") — na stosie MIESZANYM, czyli tam, gdzie wjazd materiału
+    stawia stos, którego dziś w archiwum nie ma ani jednego (0 na 128).
+
+    DWIE RZECZY NARAZ, i one się nie wykluczają: wiersz ręki przeżywa przebieg (broni go klinga
+    PER WIERSZ), a nowy sub normalnie wchodzi (bo najsłabsze wiersze są tak samo mocne jak plan
+    — zamrożenie całego stosu po jednym geście byłoby obroną za szeroką, patrz
+    `test_reconcile_zdejmuje_wypadle_wejscie_ale_nie_rusza_reki`).
+
+    Naprawą P4-4 jest więc LICZNIK: do 0809 `by_assert` meldował taki stos jako `window`, czyli
+    jako robotę automatu, i ręki nie było widać w żadnej liczbie."""
+    m = _master(con)
+    l1 = _light(con, "l1", date_obs="2025-08-30T20:30:00")
+    l2 = _light(con, "l2", date_obs="2025-08-30T21:30:00")
+    run_stack_lineage(con, now=NOW, xml_reader=_brak_xml)
+    iid = _integracja(con, m)["id"]
+    repo.judge_integration_input(con, integration_id=iid, input_frame_id=l1,
+                                 excluded=False, now=NOW)      # ręka potwierdza JEDNO wejście
+    assert {r["asserted_by"] for r in inputs_of(con, m)} == {"user", "window"}
+
+    l3 = _light(con, "l3", date_obs="2025-08-30T22:00:00")      # nowy sub wjeżdża w to samo okno
+    s = run_stack_lineage(con, now=LATER, xml_reader=_brak_xml)
+
+    assert s.by_assert == {"user": 1}                           # licznik widzi rękę (P4-4)
+    assert {r["input_frame_id"] for r in inputs_of(con, m)} == {l1, l2, l3}
+    zrodla = {r["input_frame_id"]: r["asserted_by"] for r in inputs_of(con, m)}
+    assert zrodla == {l1: "user", l2: "window", l3: "window"}   # werdykt nietknięty, materiał doszedł
+
+
 def test_odrzucenie_wszystkiego_nie_kasuje_faktow_zeznania_w_glowie(con):
     """TURA 4 #3: „czy są zapisane fakty zeznania" (głowa) NIE zależy od tego, czy jakikolwiek
     wiersz przeżył. Stos, z którego człowiek odrzucił wszystkie kandydatury, wciąż ma

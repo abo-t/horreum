@@ -477,6 +477,108 @@ def test_przeniesienie_jest_idempotentne_i_wymaga_ogniwa():
         "SELECT count(*) FROM event WHERE verb='object.assigned'").fetchone()[0] == 2  # gest + przeniesienie
 
 
+def _integracja(con, master_frame_id, *, now=NOW):
+    """Głowa rodowodu stosu — minimalna, bo te testy pytają o WIERSZE wejść, nie o zeznanie pliku."""
+    iid, _ = repo.upsert_integration(
+        con, master_frame_id=master_frame_id, integ_hash=None, tool=None, window_start=None,
+        window_end=None, declared_rows=None, drizzle_inputs=None, disabled_inputs=None,
+        degenerate=0, ambiguous=0, telescope_mismatch=0, unresolved_reason=None, now=now)
+    return iid
+
+
+def test_przenosi_werdykt_rodowodu_na_nastepczynie():
+    """TRZECIA OŚ (0809, warunek Zdzinia). Edycja RAW-a rozszczepia tożsamość suba; bez tego
+    przeniesienia potwierdzenie „ta klatka weszła w ten obraz" zostawało na tożsamości BEZ PLIKU,
+    a obraz tracił wejście, którego nikt nie cofnął."""
+    con = _baza()
+    m = _klatka(con, "mmm", kind="master_light")
+    a, b = _klatka(con, "aaa"), _klatka(con, "bbb")
+    lid = _kopia(con, a, r"R:\X\sub.dng")
+    iid = _integracja(con, m)
+    repo.judge_integration_input(con, integration_id=iid, input_frame_id=a,
+                                 excluded=False, now=NOW)
+    _podmiana(con, lid, b)
+    repo.mark_superseded(con, frame_id=a, superseded_by=b, now=NOW)
+
+    assert supersede.pending_transfer(con) == [(a, b, "rodowod")]
+    wynik = repo.transfer_human_facts(con, frame_id=a, now=NOW)
+    assert wynik.lineage_moved == 1 and wynik.skipped == ""
+    # WSKAŹNIK PRZESZEDŁ, nie zdublował się (§4.2: historia zostaje w dzienniku, nie w tabeli) —
+    # inaczej panel oferowałby wiersz o pliku, którego nie ma (zgłoszenie Zdzinia 0809).
+    assert [tuple(r) for r in con.execute(
+        "SELECT input_frame_id, asserted_by FROM integration_input WHERE integration_id = ?",
+        (iid,))] == [(b, "user")]
+    assert supersede.pending_transfer(con) == []
+    # I to jest cały warunek: spis faktów ręki nie drgnął.
+    assert audit.human_facts_census(con).lineage_inputs == 1
+
+
+def test_werdykt_rodowodu_nie_nadpisuje_wlasnego_werdyktu_nastepczyni():
+    """Guard lustrzany do dwóch pozostałych osi: następczyni, która przemówiła sama, zostaje przy
+    swoim — także wtedy, gdy powiedziała coś PRZECIWNEGO (`excluded=1` wobec potwierdzenia)."""
+    con = _baza()
+    m = _klatka(con, "mmm", kind="master_light")
+    a, b = _klatka(con, "aaa"), _klatka(con, "bbb")
+    lid = _kopia(con, a, r"R:\X\sub.dng")
+    iid = _integracja(con, m)
+    repo.judge_integration_input(con, integration_id=iid, input_frame_id=a,
+                                 excluded=False, now=NOW)
+    _podmiana(con, lid, b)
+    repo.mark_superseded(con, frame_id=a, superseded_by=b, now=NOW)
+    repo.judge_integration_input(con, integration_id=iid, input_frame_id=b,
+                                 excluded=True, now=NOW)        # własny werdykt następczyni
+
+    assert supersede.pending_transfer(con) == []
+    wynik = repo.transfer_human_facts(con, frame_id=a, now=NOW)
+    assert wynik.lineage_moved == 0 and wynik.skipped == "nastepczyni ma wlasne zrodlo"
+    assert con.execute("SELECT excluded FROM integration_input WHERE integration_id = ? "
+                       "AND input_frame_id = ?", (iid, b)).fetchone()[0] == 1
+
+
+def test_werdykt_rodowodu_podnosi_wiersz_automatu_nastepczyni():
+    """Dopasowanie automatu NIE jest werdyktem, więc nie broni się przed nim — zostaje PODNIESIONE
+    do `user` razem z treścią werdyktu (tu: odrzucenia). Ta sama precedencja, co `RANGA_ASSERT`."""
+    con = _baza()
+    m = _klatka(con, "mmm", kind="master_light")
+    a, b = _klatka(con, "aaa"), _klatka(con, "bbb")
+    lid = _kopia(con, a, r"R:\X\sub.dng")
+    iid = _integracja(con, m)
+    repo.judge_integration_input(con, integration_id=iid, input_frame_id=a,
+                                 excluded=True, now=NOW)        # „ten sub NIE wszedł"
+    _podmiana(con, lid, b)
+    repo.mark_superseded(con, frame_id=a, superseded_by=b, now=NOW)
+    repo.link_integration(con, integration_id=iid, input_frame_id=b,
+                          asserted_by="window", now=NOW)        # automat zdążył ją dopasować
+
+    assert repo.transfer_human_facts(con, frame_id=a, now=NOW).lineage_moved == 1
+    assert con.execute(
+        "SELECT asserted_by, excluded FROM integration_input WHERE integration_id = ? "
+        "AND input_frame_id = ?", (iid, b)).fetchone()[:] == ("user", 1)
+    assert con.execute(
+        "SELECT count(*) FROM integration_input WHERE input_frame_id = ?", (a,)).fetchone()[0] == 0
+
+
+def test_glowa_integracji_zostaje_na_klatce_zastapionej():
+    """GRANICA ŚWIADOMA: ponownie zapisany master to NOWE PRZETWORZENIE, nie ten sam obraz (dwa
+    flow archiwum). Przepięcie głowy byłoby OSĄDEM, którego nikt nie wydał — więc kubełek podmiany
+    o tej roli MILCZY, zamiast oferować robotę, której nie wolno wykonać automatem."""
+    con = _baza()
+    a = _klatka(con, "aaa", kind="master_light")
+    b = _klatka(con, "bbb", kind="master_light")
+    sub = _klatka(con, "sss")
+    lid = _kopia(con, a, r"R:\X\master.xisf")
+    iid = _integracja(con, a)
+    repo.judge_integration_input(con, integration_id=iid, input_frame_id=sub,
+                                 excluded=False, now=NOW)
+    _podmiana(con, lid, b)
+    repo.mark_superseded(con, frame_id=a, superseded_by=b, now=NOW)
+
+    assert supersede.pending_transfer(con) == []
+    assert repo.transfer_human_facts(con, frame_id=a, now=NOW).skipped == "brak faktow czlowieka"
+    assert con.execute(
+        "SELECT master_frame_id FROM integration WHERE id = ?", (iid,)).fetchone()[0] == a
+
+
 def test_przykryta_obserwacja_jest_MELDOWANA_nie_gubiona():
     """Strażnik 2 nadpisuje wcześniejszą obserwację o tej samej klatce. Partycja liczy KLATKI,
     więc domknęłaby się mimo porzuconej pary — raport twierdziłby „policzyłem wszystko".

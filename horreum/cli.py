@@ -227,6 +227,17 @@ def main(argv=None):
     p_sup.add_argument("--limit", type=int, default=20,
                        help="ile par i odmów wypisać w raporcie (domyślnie 20)")
 
+    p_hf = sub.add_parser("human-facts",
+                          help="spis faktow zapisanych REKA (obiekt/config/rodowod/kalibracja); "
+                               "--baseline porownuje i zglasza UBYTKI kodem wyjscia")
+    p_hf.add_argument("db", help="ścieżka pliku bazy")
+    # JSON na STDOUT, nie `--save do pliku`: mutacja plików ma w tym pakiecie DWOJE drzwi
+    # (`writeback`, `projection`) i pilnuje ich meta-tripwir AST — wygoda jednej flagi nie jest
+    # warta wyłomu. Odniesienie robi się przekierowaniem: `... --json > przed.json`.
+    p_hf.add_argument("--json", action="store_true",
+                      help="wypisz sam spis jako JSON (do przekierowania: > przed.json)")
+    p_hf.add_argument("--baseline", help="plik JSON ze spisem SPRZED etapu; ubytek → kod wyjścia 1")
+
     args = parser.parse_args(argv)
     if args.cmd == "init":
         con = db.open_db(args.path)
@@ -475,6 +486,31 @@ def main(argv=None):
         # dla skryptu, wiec rozjazd musi wyjsc kodem, inaczej bramka milczy przy zepsutym passie.
         rozliczone = (s.marked + s.already + s.alive + s.cycles + s.conflicts + s.missing)
         return 0 if rozliczone == s.proposed else 1
+    if args.cmd == "human-facts":
+        from . import audit                                # read-only, bez astropy
+        # `connect`, NIE `open_db`: pomiar nie ma prawa zmigrować mierzonej bazy. Spis biegnie
+        # PRZED etapem i PO nim, często na żywym archiwum — otwarcie ze skutkiem ubocznym
+        # kazałoby liczyć na bazie innej niż ta, o którą pytamy.
+        con = db.connect(args.db)
+        spis = audit.human_facts_census(con)
+        con.close()
+        spadki = {}
+        if args.baseline:
+            with open(args.baseline, encoding="utf-8") as fh:
+                spadki = spis.spadki(audit.HumanFacts(**json.load(fh)))
+        if args.json:
+            print(json.dumps(spis.counts, indent=2))
+        else:
+            lines = [f"Horreum human-facts {args.db}:"]
+            lines += [f"  {k:<18} {v}" for k, v in spis.counts.items()]
+            if args.baseline:
+                lines.append(f"  odniesienie: {args.baseline}")
+                lines += ([f"  UBYTEK {k}: {bylo} -> {jest}" for k, (bylo, jest) in spadki.items()]
+                          or ["  ubytkow: BRAK — warunek dotrzymany"])
+            print("\n".join(lines))
+        # Kod wyjscia niesie WERDYKT, jak w `presence` i `supersede`: ubytek faktu reki ma
+        # zatrzymac skrypt etapu, a nie tylko wypisac sie na ekran.
+        return 1 if spadki else 0
     parser.print_help()
     return 0
 

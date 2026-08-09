@@ -17,8 +17,9 @@ podniesieniem kotwicy, po czym bramka przestaje łapać regresję prawdziwą.
 import json
 from dataclasses import dataclass
 
-from .repo import CONFIG_SOURCES                  # słownik źródeł osi sprzętu — jeden właściciel (R1)
-from .resolve.objects import ALIAS_SOURCES, OBJECT_KINDS, OBJECT_SOURCES
+from .repo import CONFIG_SOURCES, STICKY_CONFIG_SOURCES   # słowniki osi sprzętu — właściciel (R1)
+from .resolve.objects import (ALIAS_SOURCES, OBJECT_KINDS, OBJECT_SOURCES,
+                              TRANSFERABLE_OBJECT_SOURCES)
 
 
 @dataclass(frozen=True)
@@ -313,3 +314,81 @@ def config_source_invariants(con):
             "SELECT count(*) FROM frame f WHERE f.config_source IS NOT NULL "
             "AND f.kind IN (SELECT value FROM json_each(?))", (off_axis,)).fetchone()[0],
     }
+
+
+@dataclass(frozen=True)
+class HumanFacts:
+    """SPIS FAKTÓW, KTÓRE W BAZIE ZAPISAŁA RĘKA — po jednej liczbie na oś, żadnych sum.
+
+    Powstał z warunku Zdzinia (0809): *„wprowadzanie nowych subów albo masterów nie może wpłynąć
+    na wycofanie czegokolwiek już ustawionego ręcznie w istniejących w bazie klatkach"*. Do tej
+    pory zdanie „ręka przeżyła przebieg" było WNIOSKIEM Z LEKTURY KODU — trzy guardy w klingach
+    (`STICKY_OBJECT_SOURCES`, `STICKY_CONFIG_SOURCES`, `RANGA_ASSERT`) rzeczywiście stoją, ale
+    żaden pomiar tego nie sprawdzał, więc regresja w którymkolwiek z nich byłaby cicha.
+
+    NIE JEST INWARIANTEM, TYLKO POMIAREM — i to jest cała różnica wobec sąsiadów w tym module.
+    Sąsiedzi pytają „czy stan jest zdrowy" i odpowiadają na dowolnej bazie w dowolnej chwili;
+    tutaj zdrowie jest RELACJĄ MIĘDZY DWOMA CHWILAMI (przed etapem i po nim), bo liczba faktów
+    ręki nie ma żadnej poprawnej wartości bezwzględnej. Stąd `spadki` zamiast `ok`.
+
+    ROŚNIE WOLNO: gest ręki jest rzadki, więc każda z tych liczb zmienia się o jednostki na sesję.
+    Zmierzone na żywej `pf4` 2026-08-09, przed etapem 4: obiekt 703 (nagrobków 0) · config 3 ·
+    wejścia rodowodu 1876 (odrzuceń 0) · kalibracja 0 i 0."""
+    object_hand: int
+    object_cleared: int
+    config_hand: int
+    lineage_inputs: int
+    lineage_excluded: int
+    calibration_facts: int
+    calibration_links: int
+
+    @property
+    def counts(self):
+        """Spis jako `{oś: liczba}` — do porównania i do raportu, w jednej kolejności."""
+        return {"object_hand": self.object_hand, "object_cleared": self.object_cleared,
+                "config_hand": self.config_hand, "lineage_inputs": self.lineage_inputs,
+                "lineage_excluded": self.lineage_excluded,
+                "calibration_facts": self.calibration_facts,
+                "calibration_links": self.calibration_links}
+
+    def spadki(self, wczesniej):
+        """Osie, na których fakt ręki UBYŁ wobec wcześniejszego spisu — `{oś: (było, jest)}`.
+
+        Pusty słownik == warunek dotrzymany. WZROST NIE JEST NARUSZENIEM: nowy materiał wolno
+        opatrzyć ręką, a przeniesienie faktu na następczynię (`repo.transfer_human_facts`) też
+        podnosi licznik osi obiektu. Pytamy wyłącznie o UBYTEK, bo tylko on jest wycofaniem."""
+        return {k: (v, self.counts[k]) for k, v in wczesniej.counts.items() if self.counts[k] < v}
+
+
+def human_facts_census(con):
+    """Policz `HumanFacts` na tej bazie. READ-ONLY, jak cały moduł.
+
+    ZBIORY ŹRÓDEŁ BIERZEMY OD ICH WŁAŚCICIELI (`TRANSFERABLE_OBJECT_SOURCES`,
+    `STICKY_CONFIG_SOURCES`), nie z literałów: spis, który zna własną listę źródeł, przestałby
+    liczyć pierwszy nowy gest w dniu, w którym ten gest powstaje — czyli dokładnie wtedy, gdy
+    warunek najbardziej potrzebuje pomiaru.
+
+    NAGROBEK LICZY SIĘ OSOBNO, choć `object_hand` już go obejmuje jako źródło: „ta klatka obiektu
+    NIE ma" jest werdyktem tak samo jak wskazanie nazwy, ale jego zniknięcie wygląda w sumie
+    identycznie jak zniknięcie przypisania — a to dwie różne szkody i dwie różne drogi naprawy."""
+    zrodla_obiektu = json.dumps(sorted(TRANSFERABLE_OBJECT_SOURCES))
+    zrodla_configu = json.dumps(sorted(STICKY_CONFIG_SOURCES))
+    return HumanFacts(
+        object_hand=con.execute(
+            "SELECT count(*) FROM frame WHERE object_source IN (SELECT value FROM json_each(?))",
+            (zrodla_obiektu,)).fetchone()[0],
+        object_cleared=con.execute(
+            "SELECT count(*) FROM frame WHERE object_source = 'user_cleared'").fetchone()[0],
+        config_hand=con.execute(
+            "SELECT count(*) FROM frame WHERE config_source IN (SELECT value FROM json_each(?))",
+            (zrodla_configu,)).fetchone()[0],
+        lineage_inputs=con.execute(
+            "SELECT count(*) FROM integration_input WHERE asserted_by = 'user'").fetchone()[0],
+        lineage_excluded=con.execute(
+            "SELECT count(*) FROM integration_input WHERE asserted_by = 'user' "
+            "AND excluded = 1").fetchone()[0],
+        calibration_facts=con.execute(
+            "SELECT count(*) FROM calibration_fact WHERE source = 'user'").fetchone()[0],
+        calibration_links=con.execute(
+            "SELECT count(*) FROM calibration WHERE asserted_by = 'user'").fetchone()[0],
+    )

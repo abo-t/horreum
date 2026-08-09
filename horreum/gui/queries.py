@@ -667,8 +667,10 @@ def config_review_groups(con):
     tam, gdzie muszą być dwa configi.
 
     KLATKA BEZ KOPII trafia do grupy o `folder=None` — i to jest jedyna grupa, której nazwy nie ma
-    na dysku. Nie znika: licznik kubełka ją liczy (sierota po podmianie pliku), więc lista, która
-    ją gubi, kłamałaby o zakresie gestu.
+    na dysku. Nie znika, bo licznik kubełka ją liczy, więc lista, która ją gubi, kłamałaby
+    o zakresie gestu. ⚠ MOWA O KLATCE ZNIKNIĘTEJ, NIE O ZASTĄPIONEJ — dawny zapis wskazywał tu
+    „sierotę po podmianie pliku" i przestał być prawdą 0809 (`d3cbeb9`): zastąpiona wypadła
+    z kubełka razem z całą kolejką, bo jej robotę przejęła następczyni.
 
     `telescop` grupy = zeznanie PIERWSZEJ klatki, gdy wszystkie mówią to samo; różne zeznania
     w jednym folderze dają `None` (grupa nie ma jednego świadka i nie ma udawać, że ma).
@@ -1247,10 +1249,13 @@ def object_exposure(con, frame_ids):
     Uniwersum gridu to WSZYSTKIE klatki (`all_frame_ids`, w tym bez lokacji), a facet ich nie
     odsiewa, więc para „zastąpiona + następczyni" pokaże w facecie **2**, a tutaj godziny **jednej**.
     Dopóki klatka zastąpiona nie niesie obiektu, rozjazd jest niewidoczny (zmierzone na żywym
-    archiwum: jedyna taka klatka ma `object_id NULL`). Staje się widoczny po `transfer_human_facts`,
-    które ZOSTAWIA obiekt na starej klatce. Czy zastąpiona ma znikać z gridu i facetu, czy zostawać
-    widoczna jako nagrobek — to decyzja kubełka podmiany, nie tej funkcji; godziny nie mogą czekać
-    na jej rozstrzygnięcie, bo podwójny rachunek jest chorobą, którą R4 leczy.
+    archiwum 0809: obie takie klatki mają `object_id NULL`). Staje się widoczny po
+    `transfer_human_facts`, które ZOSTAWIA obiekt na starej klatce.
+    PYTANIE „ZNIKAĆ CZY ZOSTAWAĆ" JEST JUŻ ROZSTRZYGNIĘTE (decyzja Zdzinia 0809, `d3cbeb9`):
+    **zostaje i jest OZNACZONA** — grid maluje ją własnym tłem i pisze w komórce „zastąpiona przez
+    #N", a `PRESET_SUPERSEDED` daje jej perspektywę. Otwarty został wyłącznie SAM FACET: `facet_objects`
+    dalej liczy ją do uniwersum, więc rozjazd `2` vs `1` czeka na pierwszą zastąpioną Z OBIEKTEM.
+    Godziny na to nie czekają i nie mają czekać — podwójny rachunek jest chorobą, którą R4 leczy.
     Zwraca wiersze: object_id, filter_canon, secs, n_null."""
     return con.execute(
         "SELECT f.object_id, f.filter_canon, "

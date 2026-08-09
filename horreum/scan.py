@@ -114,7 +114,15 @@ def xml_parsable(xml_bytes):
     NEUTRALIZUJEMY WYŁĄCZNIE NA CZAS PARSOWANIA. `xml_bytes`, `header_hash` (sha1 SUROWYCH bajtów)
     i arytmetyka pisarza zostają na oryginale — inaczej tożsamość nagłówka zmieniałaby się od
     samego czytania, a plik po łacie różniłby się od siebie sprzed niej w miejscach, których nikt
-    nie prosił o zmianę."""
+    nie prosił o zmianę.
+
+    ⚠ GRANICA, KTÓRĄ TRZEBA NAZWAĆ, BO PROZA WYŻEJ OBIECUJE WIĘCEJ, NIŻ DAJE (bramka 3a 0809,
+    zarzut `kimi`): nietknięte zostają BAJTY, nie ZEZNANIE. Dict nagłówka i karty (`cards`) powstają
+    z drzewa PO neutralizacji, więc wartość, która sama niosła bajt sterujący, trafi do bazy ze
+    spacją w jego miejscu. W zmierzonym pliku bajty siedzą w ścieżkach historii przetwarzania, a nie
+    w kartach FITS, więc dziś nie dotyczy to ani jednej wartości zeznania — ale łata szukająca
+    KIEDYŚ wartości z bazy w surowych bajtach nie trafi i ma o tym wiedzieć stąd, nie z debugowania.
+    Rozszerzenie (parsowanie wartości z surowych bajtów) byłoby dziś kodem na populację zero."""
     return _XML_ILLEGAL_BYTES.sub(b" ", xml_bytes)
 
 # Katalogi-drzewa robocze wykluczane ze skanu (doktryna README §„baza = autorytet": projekcje WBPP
@@ -758,7 +766,14 @@ def _assert_span_zgodny_z_parserem(xml_bytes, span, *, keyword, idx, property_id
     Neutralizacja jak w czytniku (`xml_parsable`) i z tego samego powodu: guard ma sprawdzać, czy
     OBIE derywacje widzą tę samą wartość, a nie odmawiać pliku, który czytnik już przepuścił.
     Wolno tu, bo podmiana jest 1:1 co do długości, więc `span` liczony na surowych bajtach dalej
-    wskazuje ten sam wycinek."""
+    wskazuje ten sam wycinek.
+
+    ⛔ NEUTRALIZUJEMY OBIE STRONY PORÓWNANIA, nie samą lewą (bramka 3a 0809, zarzut `sol`a). Wartość
+    z parsera przychodzi już oczyszczona, a `xml_bytes[span]` jest surowy — gdyby ŁATANA wartość
+    sama niosła bajt sterujący, guard porównywałby spację ze znakiem sterującym i wywracał zapis,
+    którego czytnik przed chwilą nie miał za co odrzucić. Kierunek był bezpieczny (odmowa, nie
+    skorumpowany plik), ale guard przestawał zadawać TO SAMO pytanie dwa razy — a tylko po to
+    istnieje."""
     root = ET.fromstring(xml_parsable(xml_bytes))
     expected = None
     if keyword is not None:
@@ -778,7 +793,7 @@ def _assert_span_zgodny_z_parserem(xml_bytes, span, *, keyword, idx, property_id
             if _local_name(elem.tag) == "Property" and elem.get("id") == property_id:
                 expected = elem.get("value") if elem.get("value") is not None else (elem.text or "")
                 break
-    actual = _unescape_xml(xml_bytes[span[0]:span[1]].decode("utf-8"))
+    actual = _unescape_xml(xml_parsable(xml_bytes[span[0]:span[1]]).decode("utf-8"))
     if actual != expected:
         cel = f"karta {keyword}[{idx}]" if keyword is not None else f"własność {property_id}"
         raise ValueError(

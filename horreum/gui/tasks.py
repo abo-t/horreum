@@ -84,6 +84,15 @@ _TASKS = [
     ("superseded_frames", "tasks.superseded_frames", PRESET_SUPERSEDED),
 ]
 
+# TRZECI STAN WIERSZA: KLIKALNY, ALE NIE ROBOTA. Do 0809 lista znała dwa — informacyjny (cel `None`,
+# nie prowadzi nigdzie) i akcyjny (cel jest, liczba > 0 znaczy „tu jest robota"). Wiersz „Zastąpione"
+# nie mieści się w żadnym: MA dokąd prowadzić, ale jego liczba nigdy nie jest zadaniem.
+# Bez tego zbioru wpadał do odznaki sidebara i dostawał pogrubienie „TU JEST ROBOTA" — czyli tylnymi
+# drzwiami odtwarzał dokładnie ten defekt, który pakiet kolejki wyleczył w kubełkach (bramka 3a
+# 0809, zarzut `kimi` #4). Klucz, nie flaga w krotce: krotka opisuje POZYCJĘ, a to jest fakt o jej
+# NATURZE, i tak samo czyta go badge, jak i pogrubienie.
+_BEZ_ROBOTY = frozenset({"superseded_frames"})
+
 
 class TasksView(QWidget):
     """Miejsce PORZĄDKI: strona 0 = lista zadań ze stanu, strony 1–3 = podstrony osi (te same widoki
@@ -212,7 +221,7 @@ class TasksView(QWidget):
             # pogrubione „0" mimo wyszarzenia, czyli krzyczał dokładnie tam, gdzie nie ma nic
             # do zrobienia. Kolor drugiego członu zostaje bez zmian (jawny `ForegroundRole`
             # dalej obejmuje oba człony — `TwoPartDelegate._own_color`).
-            live = action is not None and n > 0
+            live = action is not None and n > 0 and key not in _BEZ_ROBOTY
             it.setData(rows.STRONG, live)
             if action is not None:
                 it.setForeground(QBrush() if n > 0 else _DIM["fg"])   # n=0 → wyszarzone, wciąż klikalne

@@ -1635,9 +1635,29 @@ def test_perspektywa_rodowodu_mowi_o_sobie_i_przezywa_zapis(view, gcon):
     view.apply_perspective(PRESET_LINEAGE)
     assert "bez rodowodu" in view.sel_bar.criteria_label._full
     spec = {"only_dups": view._only_dups, "only_review": view._only_review,
-            "only_vanished": view._only_vanished, "only_lineage": view._only_lineage}
+            "only_vanished": view._only_vanished, "only_lineage": view._only_lineage,
+            "only_superseded": view._only_superseded}
     assert spec["only_lineage"] is True and not any(
         v for k, v in spec.items() if k != "only_lineage")
+
+
+def test_perspektywa_zastapione_zawęża_grid_i_opisuje_się_w_kryteriach(view, gcon):
+    """Bliźniak testu wyżej dla flagi `only_superseded` (0809). Bramka 3a wskazała, że rodzina
+    `only_*` ma konsumentów rozsianych po widoku (spec zapisu, pasek kryteriów, trim `_refresh`),
+    a rozjechana enumeracja tych flag już raz wyprodukowała „Baza pusta" na pełnej bazie — więc
+    każdy nowy brat potrzebuje własnego przebiegu, nie samego wpisu w słowniku presetów."""
+    from horreum.gui.grid import PRESET_SUPERSEDED
+    gcon.execute("UPDATE frame SET superseded_by = 2 WHERE id = 1")
+    gcon.commit()
+
+    view.apply_perspective(PRESET_SUPERSEDED)
+    assert view._only_superseded is True
+    assert "zastąpione" in view.sel_bar.criteria_label._full
+    assert view._frame_ids == [1], "trim ma zostawić WYŁĄCZNIE klatkę zastąpioną"
+
+    view.apply_perspective("Przegląd")
+    assert view._only_superseded is False, "flaga ma gasnąć przy zmianie perspektywy"
+    assert 1 in view._frame_ids, "zastąpiona ZOSTAJE w gridzie pełnym (F1) — znika z ROBOTY, nie z archiwum"
 
 
 def test_tokeny_panelu_sa_LUSTREM_stalych_rdzenia():

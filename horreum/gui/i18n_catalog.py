@@ -955,9 +955,12 @@ CATALOG = {
     },
     # Zdanie mówi wprost, że NIC NIE ZGINĘŁO, i podaje adres — bo „zastąpiona" bez tego czyta się
     # jak strata. Numer klatki jest tu jedynym stałym uchwytem: nazwa pliku bywa ta sama.
+    # ⛔ NIE MÓWI „pod tą ścieżką" (bramka 3a 0809, zarzut `kimi`): klatka zastąpiona nie ma ANI
+    # JEDNEJ lokacji, więc komórka obok pokazuje „(brak lokalizacji)" — zdanie wskazywałoby ścieżkę,
+    # której na ekranie nie ma, czyli tłumaczyłoby się przez rzecz niewidoczną.
     "grid.tip.superseded": {
-        "pl": "\n(zastąpiona — treść pod tą ścieżką jest dziś klatką #{id})",
-        "en": "\n(superseded — the content at this path is now frame #{id})",
+        "pl": "\n(zastąpiona — jej treść żyje dalej jako klatka #{id}; ta kopia już nie istnieje)",
+        "en": "\n(superseded — its content lives on as frame #{id}; this copy is gone)",
     },
     "grid.cell.superseded": {
         "pl": "zastąpiona przez #{id}",

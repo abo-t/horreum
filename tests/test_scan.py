@@ -17,7 +17,7 @@ from horreum.scan import (
     ScanRecord, ScanSummary, _already_scanned, backfill_xisf_headers, header_dict_from_cards,
     ingest_record, iter_fits, iter_headers, iter_stacks, locate_value_span, quote_fits,
     read_fits_header, read_fits_meta, read_header, read_xisf_header, read_xisf_meta,
-    read_xisf_meta_full, scan_file, scan_stacks, scan_tree,
+    read_xisf_meta_full, scan_file, scan_stacks, scan_tree, xml_parsable,
 )
 
 NOW = "2026-06-28T12:00:00"
@@ -560,6 +560,41 @@ def test_zapis_tozsamosciowy_kart_nie_zmienia_ani_bajtu(tmp_path):
         start, end = locate_value_span(xml, keyword=card.keyword, idx=card.idx)
         assert quote_fits(card.value_raw, xml[start:end]) == xml[start:end]
         assert xml[:start] + quote_fits(card.value_raw, xml[start:end]) + xml[end:] == xml
+
+
+def test_naglowek_ze_znakiem_nielegalnym_w_xml_czyta_sie(tmp_path):
+    """Plik bywa poprawnym XISF-em, którego NAGŁÓWEK nie jest poprawnym XML-em — i to nie jest
+    hipoteza: `MASTERFLAT_FLATGRP_202509210_FILTER_OIII_` z żywego archiwum niósł **100× U+0007**
+    w ścieżce, którą PixInsight zapisał do historii przetwarzania (katalog z bajtem sterującym
+    w nazwie), i był JEDYNĄ z 16 770 klatek bez nagłówka. Odczyt ma go przepuścić z pełnym
+    zeznaniem, a SUROWE bajty mają zostać surowe — inaczej tożsamość nagłówka zmieniałaby się
+    od samego czytania."""
+    f = _write_xisf_attach(tmp_path, "bel.xisf", b"\x05" * 16, keywords=[
+        ("TELESCOP", "'A140R'"), ("FILTER", "'O'"),
+        ("SWCREATE", "'PixInsight'", "D:/ASTROFOTY/CTB1_zbiera\x07O3/wbpp/calibrated")])
+    meta = read_xisf_meta_full(str(f))
+    assert meta.header["TELESCOP"] == "A140R"
+    assert meta.header["FILTER"] == "O"
+    assert b"\x07" in meta.xml_bytes
+    assert meta.header_hash == hashlib.sha1(meta.xml_bytes).hexdigest()
+
+
+def test_span_laty_przezywa_neutralizacje_znaku_sterujacego(tmp_path):
+    """Neutralizacja jest 1:1 CO DO DŁUGOŚCI i TYLKO dlatego wolno jej wejść do toru łaty:
+    `locate_value_span` wraca z offsetami do SUROWYCH bajtów (a jego guard pyta `ElementTree`
+    o to samo), więc czyszczenie skracające tekst przesunęłoby span i pisarz nadpisałby cudzą
+    wartość. Falsyfikator jest ostry: bez neutralizacji w guardzie ten test pada na `ParseError`,
+    a przy neutralizacji zmieniającej długość — na przesuniętym wycinku."""
+    f = _write_xisf_attach(tmp_path, "bel_span.xisf", b"\x06" * 16, keywords=[
+        ("TELESCOP", "'ED'"), ("FOCALLEN", "796"),
+        ("SWCREATE", "'PixInsight'", "D:/ASTRO/CTB1_zbiera\x07O3")])
+    xml = read_xisf_meta_full(str(f)).xml_bytes
+    assert len(xml_parsable(xml)) == len(xml)
+    assert xml_parsable(xml).count(b" ") == xml.count(b" ") + 1     # jeden BEL → jedna spacja
+    start, end = locate_value_span(xml, keyword="FOCALLEN")
+    assert xml[start:end] == b"796"
+    start, end = locate_value_span(xml, keyword="TELESCOP")
+    assert xml[start:end] == b"'ED'"
 
 
 def test_rekonstrukcja_dokladna_przy_zmianie_dlugosci(tmp_path):

@@ -86,6 +86,37 @@ _XISF_RESERVED_LEN = 4               # 4 B reserved (wg specyfikacji zerowe; kop
 # zapisie nadpisuje pierwszy blok danych mastera. JEDNO źródło dla czytnika i pisarza XISF.
 XISF_XML_OFFSET = len(_XISF_SIGNATURE) + _XISF_LENGTH_LEN + _XISF_RESERVED_LEN     # == 16
 
+# Znaki, których XML 1.0 zabrania w treści dokumentu (wszystko poniżej spacji poza \t \n \r).
+# Klasa BAJTOWA, nie znakowa, i to jest warunek poprawności: w UTF-8 żaden z tych bajtów nie
+# występuje jako część sekwencji wielobajtowej (te używają 0x80-0xBF i 0xC2+), więc podmiana
+# bajt-za-bajt nie tknie polskiego znaku ani nie zepsuje kodowania.
+_XML_ILLEGAL_BYTES = re.compile(rb"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def xml_parsable(xml_bytes):
+    """Nagłówek XISF w postaci, którą PRZYJMIE parser — znak nielegalny w XML 1.0 na spację,
+    BAJT ZA BAJT. Zwraca bajty; oryginał zostaje nietknięty u wołającego.
+
+    DLACZEGO ISTNIEJE — plik bywa poprawnym XISF-em, którego nagłówek NIE JEST poprawnym XML-em.
+    PixInsight zapisuje w nagłówku historię przetwarzania, a w niej ścieżki źródłowe; gdy katalog
+    na dysku ma w nazwie bajt sterujący, trafia on do nagłówka WPROST i `ET.fromstring` odmawia
+    całości. Zmierzone na żywym archiwum (2026-08-09): `MASTERFLAT_FLATGRP_202509210_FILTER_OIII_`
+    niósł **100× U+0007** w jednej ścieżce (`…/CTB1_zbiera␇O3/…`, raz na każdą skalibrowaną klatkę)
+    i był JEDYNĄ z 16 770 klatek bez nagłówka — a po neutralizacji czyta się w całości: 26 kart,
+    `IMAGETYP='Master Flat'`, `FILTER='O'`, `TELESCOP='A140R'`. Odmowa opisywała nasz parser,
+    nie plik, a użytkownik dostawał „kopia nieczytelna" o pliku zdrowym.
+
+    PODMIANA JEST 1:1 CO DO DŁUGOŚCI i to nie jest kosmetyka, tylko warunek, pod którym wolno jej
+    użyć w torze ŁATY: `locate_value_span` wylicza offsety bajtowe wartości i wraca z nimi do
+    SUROWEGO nagłówka. Gdyby czyszczenie skracało tekst, span pokazywałby w bok o liczbę usuniętych
+    bajtów i pisarz nadpisałby cudzą wartość. Spacja ma dokładnie jeden bajt — dlatego spacja.
+
+    NEUTRALIZUJEMY WYŁĄCZNIE NA CZAS PARSOWANIA. `xml_bytes`, `header_hash` (sha1 SUROWYCH bajtów)
+    i arytmetyka pisarza zostają na oryginale — inaczej tożsamość nagłówka zmieniałaby się od
+    samego czytania, a plik po łacie różniłby się od siebie sprzed niej w miejscach, których nikt
+    nie prosił o zmianę."""
+    return _XML_ILLEGAL_BYTES.sub(b" ", xml_bytes)
+
 # Katalogi-drzewa robocze wykluczane ze skanu (doktryna README §„baza = autorytet": projekcje WBPP
 # to wyjście z bazy, nie wejście). JAWNA LISTA, nie konwencja `_*` — firsthand na realnym drzewie pokazał
 # realne `_COMETS`/`_SOLAR` pod LIGHTS\ (1197 lightów), które konwencja porzuciłaby. Dopasowanie
@@ -722,8 +753,13 @@ def build_fits_keyword_element(xml_bytes, *, keyword, value, comment=None):
 
 def _assert_span_zgodny_z_parserem(xml_bytes, span, *, keyword, idx, property_id, attr="value"):
     """GUARD do `locate_value_span`: to samo pytanie zadane `ElementTree`. Dwie derywacje muszą dać
-    ten sam tekst — inaczej łata pisałaby w niewłaściwe miejsce."""
-    root = ET.fromstring(xml_bytes)
+    ten sam tekst — inaczej łata pisałaby w niewłaściwe miejsce.
+
+    Neutralizacja jak w czytniku (`xml_parsable`) i z tego samego powodu: guard ma sprawdzać, czy
+    OBIE derywacje widzą tę samą wartość, a nie odmawiać pliku, który czytnik już przepuścił.
+    Wolno tu, bo podmiana jest 1:1 co do długości, więc `span` liczony na surowych bajtach dalej
+    wskazuje ten sam wycinek."""
+    root = ET.fromstring(xml_parsable(xml_bytes))
     expected = None
     if keyword is not None:
         seen = 0
@@ -825,7 +861,10 @@ def read_xisf_meta_full(path):
         if len(xml_bytes) < header_len:
             raise ValueError(f"XISF: nagłówek XML ucięty ({len(xml_bytes)}/{header_len} B)")
 
-        root = ET.fromstring(xml_bytes)   # ParseError przy niepoprawnym XML → łapie scan_file
+        # Neutralizacja znaków nielegalnych w XML 1.0 (`xml_parsable`) — `xml_bytes` ZOSTAJĄ surowe,
+        # bo z nich liczy się `header_hash` i z nich pisze pisarz. ParseError na tym, czego nawet to
+        # nie ratuje → łapie `scan_file` (miękkie lądowanie W1).
+        root = ET.fromstring(xml_parsable(xml_bytes))
         header, cards = {}, []
         counts = {}
         image_span = None

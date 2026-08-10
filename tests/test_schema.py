@@ -93,14 +93,44 @@ def test_szkielet_przyszly_pusty(tmp_path):
     con.close()
 
 
-def test_user_version_v16_po_migracji(tmp_path):
-    """0016 podnosi user_version do 16 (świeża baza leci 0002→…→0016 sekwencyjnie; odniesienie czasu).
+def test_user_version_v17_po_migracji(tmp_path):
+    """0017 podnosi user_version do 17 (świeża baza leci 0002→…→0017 sekwencyjnie; pamięć nagrobka).
 
     Pin JEST intencją: każda nowa migracja ma ten test PRZEWRÓCIĆ imiennie, żeby podniesienie
     wersji było gestem, a nie skutkiem ubocznym."""
     con = db.open_db(str(tmp_path / "h.db"))
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 16
-    assert db.SCHEMA_VERSION == 16
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 17
+    assert db.SCHEMA_VERSION == 17
+    con.close()
+
+
+def test_0017_CHECK_odbija_pamiec_bez_nagrobka(tmp_path):
+    """STRAŻNIK W DDL, nie konwencja: pamięć nagrobka (`object_cleared_id`) wolno nieść WYŁĄCZNIE
+    klatce, która jest nagrobkiem (`object_source='user_cleared'`).
+
+    Bez tego CHECK-a pisarz, który przypisze obiekt klatce cofniętej i zapomni zdjąć pamięć,
+    zostawiłby wskazanie na obiekt, którego ta klatka już nie odrzuca — a każdy czytelnik pamięci
+    (gest przywracania) wziąłby je za żywy werdykt. Kolumna wchodzi przez `ADD COLUMN`, więc test
+    dowodzi, że SQLite realnie egzekwuje CHECK dołożony tą drogą, a nie tylko go zapamiętuje.
+
+    Falsyfikator: zdejmij `CHECK` z `0017_object_cleared_memory.sql` → oba `raises` czerwienieją."""
+    con = db.open_db(str(tmp_path / "h.db"))
+    con.execute("INSERT INTO object(id, canon) VALUES (5, 'LMC')")
+    con.execute("INSERT INTO frame(id, kind, filetype, sha1_data, first_seen_at, object_id, "
+                "object_source, object_cleared_id) "
+                "VALUES (1, 'light', 'fits', 'sha1', '2026-08-10T00:00:00Z', NULL, "
+                "'user_cleared', 5)")                       # nagrobek Z pamięcią — legalny
+    with pytest.raises(sqlite3.IntegrityError):
+        con.execute("INSERT INTO frame(id, kind, filetype, sha1_data, first_seen_at, object_id, "
+                    "object_source, object_cleared_id) "
+                    "VALUES (2, 'light', 'fits', 'sha2', '2026-08-10T00:00:00Z', 5, 'user', 5)")
+    with pytest.raises(sqlite3.IntegrityError):             # …i tą samą drogą, którą idzie klinga
+        con.execute("UPDATE frame SET object_id = 5, object_source = 'user' WHERE id = 1")
+    # NAGROBEK BEZ PAMIĘCI ZOSTAJE LEGALNY — baza-dawca przywozi nagrobki sprzed tej migracji,
+    # a odmowa ich wpuszczenia byłaby utratą werdyktu ręki.
+    con.execute("INSERT INTO frame(id, kind, filetype, sha1_data, first_seen_at, object_id, "
+                "object_source) "
+                "VALUES (3, 'light', 'fits', 'sha3', '2026-08-10T00:00:00Z', NULL, 'user_cleared')")
     con.close()
 
 

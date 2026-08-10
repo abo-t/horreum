@@ -1,0 +1,36 @@
+-- 0017 — PAMIĘĆ NAGROBKA: frame.object_cleared_id (R-S2b-3, paczka odwracalności cofnięcia).
+--
+-- PRZYROST (ADD COLUMN, jak 0004/0006/0010/0014/0015) — zero zmian istniejących tabel, zero wierszy
+-- ruszonych. Kolumna WCHODZI PUSTA: wypełnia ją KLINGA (`repo.clear_object_assignment`), nie ta
+-- migracja i nie przebieg. Kanon repo (0004:3, `db.py`): migracja nakłada KSZTAŁT, fakty nakłada
+-- klinga. Backfillu NIE MA i mieć nie może — nagrobków w archiwum jest dziś ZERO (zmierzone
+-- `?mode=ro` na żywej `pf4` 2026-08-10), a dla nagrobka sprzed tej migracji nie istnieje żadne
+-- źródło, z którego dałoby się odtworzyć zdjęty obiekt bez zgadywania.
+--
+-- CO ZNACZY: „ta klatka miała obiekt X i ręka powiedziała, że to NIE X". Do S2b nagrobek
+-- (`object_source='user_cleared'` przy `object_id IS NULL`) zapisywał sam FAKT odmowy, ale nie jej
+-- PRZEDMIOT — więc masowe cofnięcie 120 klatek nie miało drogi powrotu: odtworzenie stanu sprzed
+-- pomyłki kosztowało 6-8 interakcji PLUS pamięć człowieka o tym, co tam stało.
+--
+-- DLACZEGO STAN, A NIE DZIENNIK. Pytanie „co ten nagrobek zdjął" jest pytaniem o STAN TEJ KLATKI,
+-- nie o historię, i odpowiadanie na nie skanem `event` łamie się dwa razy: klatka cofnięta
+-- DWUKROTNIE ma dwa `object.cleared` z różnym `was_object_id` (który wygrywa, wie tylko `MAX(id)`),
+-- a `repo.transfer_human_facts` emituje ten sam verb BEZ tego klucza — nagrobek przeniesiony po
+-- podmianie pliku miałby ślad w dzienniku, ale bez przedmiotu. To ta sama figura, którą repo
+-- dostało już trzy razy (pamięć `horreum-review-queue-from-state`): read-model liczony ze zdarzeń
+-- zamiast ze stanu.
+--
+-- STRAŻNIK W DDL, BO BAZA JEST OSTATNIĄ BRAMKĄ (wzorzec 0012:93, 0014:29, 0015). CHECK wiąże
+-- pamięć z nagrobkiem: pisarz, który przypisze obiekt klatce cofniętej i ZAPOMNI zdjąć pamięć,
+-- odbija się o `IntegrityError` zamiast zostawić w kolumnie wskazanie na obiekt, którego ta klatka
+-- już nie odrzuca. Sprawdzone falsyfikatorem przed napisaniem tej migracji — SQLite przyjmuje na
+-- `ADD COLUMN` i REFERENCES, i CHECK przez kolumny tego samego wiersza.
+--
+-- ODWROTNY KIERUNEK ZOSTAJE LEGALNY (nagrobek BEZ pamięci) i to jest świadome: baza-dawca może
+-- przywieźć nagrobki sprzed tej migracji, a odmowa ich wpuszczenia byłaby utratą werdyktu ręki.
+-- Gest przywracania mówi wtedy wprost „bez zapamiętanego obiektu: N" i nic nie zapisuje.
+--
+-- FK BEZ `ON DELETE`: `DELETE FROM object` nie istnieje w repo (jedyne kasowanie tej rodziny to
+-- `object_alias`), więc kaskada opisywałaby zdarzenie, którego nie ma.
+ALTER TABLE frame ADD COLUMN object_cleared_id INTEGER REFERENCES object(id)
+    CHECK (object_cleared_id IS NULL OR object_source = 'user_cleared');

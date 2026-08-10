@@ -1378,31 +1378,54 @@ def test_panel_rodowodu_bez_wejsc_NIE_liczy_zera(view, gcon):
     assert bar.items.isHidden() and bar.action_row.isHidden()
 
 
-def test_bezimienny_stos_pokazuje_FOLDER_zamiast_pustki(gcon):
-    """FIRSTHAND ZDZINIA 0808: „nie widzę napisu LMC ani IC443". I nie mógł — kubełek daje 18
-    wierszy, a nazwy plików generuje WBPP, więc sześć stosów LMC i jeden IC443 czytają się
-    identycznie (`masterLight_BIN-1_…_EXPOSURE-….xisf`). Tożsamość siedzi WYŁĄCZNIE w folderze.
+def test_komorka_obiektu_MALUJE_zeznanie_inaczej_niz_kanon(gcon):
+    """R-S3-4 NA POWIERZCHNI — sama polityka pięciu stanów ma dom w `test_gui_queries` (Qt-wolny).
+    Tu dowodzimy, że model REALNIE ją maluje: kanon bez ról, zeznanie z kursywą, szarością
+    i własnym tooltipem.
 
-    Test pinuje trzy rzeczy naraz, bo każda z nich osobno dałaby się zepsuć bez czerwieni:
-    folder WCHODZI dla stosu bez nazwy · folder ma być DZIADKIEM, nie rodzicem (rodzic to `master`
-    u wszystkich, więc nie rozróżnia niczego) · nazwa PRAWDZIWA wygrywa z podpowiedzią i nie dostaje
-    nawiasów, żeby dwa różne twierdzenia nie wyglądały tak samo."""
-    from horreum.gui.grid import _obj_label
+    Falsyfikator: zdejmij gałąź `key == "_object"` z `_base_cell` → wiersz cofnięty renderuje się
+    identycznie jak nazwany, czyli wraca dokładnie ten defekt (jeden ekran, dwa sprzeczne zdania
+    o tych samych klatkach: kolumna pokazuje `NGC7023`, facet Obiekt obok jest pusty)."""
+    from horreum.gui.grid import GridTableModel, BASE_COLS
 
-    stos = dict(kind="master_light", object_canon=None, object_raw=None,
-                path=r"R:\!!ASTROFOTO\OBIEKTY_DNG\A7R3_105_LMC\master\masterLight_BIN-1.xisf")
-    assert _obj_label(stos) == "⟨A7R3_105_LMC⟩"
+    m = GridTableModel()
+    m.set_data([
+        {"frame_id": 1, "path": "a", "kind": "light", "_telescope": "",
+         "_object": "NGC 7023", "_object_state": "canon"},
+        {"frame_id": 2, "path": "b", "kind": "light", "_telescope": "",
+         "_object": "↺ NGC7023", "_object_state": "cleared"},
+    ], pivot_mod.build_pivot([1, 2], [], []), [])
+    kol = [k for _, k in BASE_COLS].index("_object")
+    kanon, cofniete = m.index(0, kol), m.index(1, kol)
 
-    nazwany = dict(stos, object_canon="LMC")
-    assert _obj_label(nazwany) == "LMC"
+    assert m.data(kanon, Qt.DisplayRole) == "NGC 7023"
+    assert m.data(kanon, Qt.FontRole) is None and m.data(kanon, Qt.ForegroundRole) is None
+    assert m.data(kanon, Qt.ToolTipRole) is None, "kanon mówi sam za siebie — tooltip byłby szumem"
 
-    light = dict(kind="light", object_canon=None, object_raw=None,
-                 path=r"R:\ASTRO_\LIGHTS\IC443\portable\20190110_DSC5559.dng")
-    assert _obj_label(light) == "", "light ma własną drogę (szczebel ścieżki S2)"
+    assert m.data(cofniete, Qt.DisplayRole) == "↺ NGC7023"
+    assert m.data(cofniete, Qt.FontRole).italic()
+    assert m.data(cofniete, Qt.ForegroundRole) is not None
+    tip = m.data(cofniete, Qt.ToolTipRole)
+    assert "COFNIĘTE" in tip and "Przywróć" in tip, "tooltip niesie RECEPTĘ, nie samą diagnozę"
 
-    # Kolumny `kind`/`path` nie wchodzą z KAŻDEGO zapytania gridu — brak nie ma prawa wywalić
-    # renderu (dlatego `_derive` podaje słownik, nie surowy `sqlite3.Row`).
-    assert _obj_label({"object_canon": None, "object_raw": None}) == ""
+
+def test_komorka_obiektu_KAZDY_stan_ma_WLASNY_tooltip(gcon):
+    """Cztery niekanoniczne stany, cztery różne zdania — bo każdy ma inną drogę naprawy: nagrobek
+    zdejmuje się drugim gestem ręki, nazwę z nagłówka poprawia się w PLIKU, a kalibracji nie
+    poprawia się wcale (obiektu nie ma z definicji). Wspólny tooltip byłby prawdziwy i bezużyteczny.
+
+    Falsyfikator: wskaż dwa stany na ten sam klucz w `_OBJECT_STATE_TIPS` → zbiór się skurczy."""
+    from horreum.gui.grid import BASE_COLS, GridTableModel, _OBJECT_STATE_TIPS
+
+    stany = list(_OBJECT_STATE_TIPS)
+    m = GridTableModel()
+    m.set_data([{"frame_id": i, "path": "p", "kind": "light", "_telescope": "",
+                 "_object": "x", "_object_state": s} for i, s in enumerate(stany)],
+               pivot_mod.build_pivot(list(range(len(stany))), [], []), [])
+    kol = [k for _, k in BASE_COLS].index("_object")
+    tips = {m.data(m.index(i, kol), Qt.ToolTipRole) for i in range(len(stany))}
+    assert len(tips) == len(stany), f"stany dzielą tooltip: {tips}"
+    assert all(t and not t.startswith("grid.cell.") for t in tips), "surowy klucz na ekranie"
 
 
 def test_panel_nie_powtarza_powodu_ktory_zwietrzal(view, gcon):
@@ -2012,9 +2035,14 @@ def _zaznacz(view, frame_ids):
                       QItemSelectionModel.Select | QItemSelectionModel.Rows)
 
 
-def test_pasek_ma_JEDNA_kontrolke_osi_z_dwiema_pozycjami(obj_view):
-    """§4/14c-j: pasek zyskuje JEDNĄ kontrolkę, nie dwa przyciski — siódmy i ósmy przewróciłyby go
-    do drugiego rzędu. Etykiety z KLUCZA i18n, nie literałem."""
+def test_pasek_ma_JEDNA_kontrolke_osi_z_trzema_pozycjami(obj_view):
+    """§4/14c-j: pasek zyskuje JEDNĄ kontrolkę, nie osobne przyciski — siódmy i ósmy przewróciłyby
+    go do drugiego rzędu. Etykiety z KLUCZA i18n, nie literałem.
+
+    TRZECIA POZYCJA (R-S2b-3) jest WIDOCZNA ZAWSZE, także gdy nie ma czego przywracać — i to jest
+    pin na tę decyzję, nie skutek uboczny. Ukrycie jej do czasu, aż pojawi się nagrobek, znaczyłoby,
+    że o odwracalności gestu user dowiaduje się dopiero PO pomyłce, czyli w jedynym momencie,
+    w którym ta wiedza jest już spóźniona."""
     v, _ = obj_view
     assert v.sel_bar.btn_object.menu() is not None
     from horreum.gui import i18n
@@ -2022,7 +2050,8 @@ def test_pasek_ma_JEDNA_kontrolke_osi_z_dwiema_pozycjami(obj_view):
     # ukryta, dopóki dziennik nie ma czego pokazać — stała pula zamiast dokładania akcji, bo
     # `deleteLater` na QAction wywalał Qt (bramka pakietu, zarzut 8).
     assert [a.text() for a in v.sel_bar.btn_object.menu().actions() if a.isVisible()] == [
-        i18n.t("grid.sel.object_name"), i18n.t("grid.sel.object_clear")]
+        i18n.t("grid.sel.object_name"), i18n.t("grid.sel.object_clear"),
+        i18n.t("grid.sel.object_restore")]
 
 
 def test_puste_zaznaczenie_GASI_obie_pozycje(obj_view):
@@ -2139,6 +2168,154 @@ def test_gest_odswieza_OS_OBIEKTU_sygnalem(obj_view):
     assert ile == [1]
     v._on_object_clear()                 # drugi raz: nic do cofnięcia ⇒ zero zapisu ⇒ zero sygnału
     assert ile == [1]
+
+
+def test_zaznaczenie_PRZEZYWA_gest_osi(obj_view):
+    """R-S2b-3, człon pierwszy. `refresh()` przebudowuje model, więc zaznaczenie 120 klatek szło do
+    zera — a razem z nim JEDYNY tani cel gestu naprawczego. Zmierzone przez wizytację: odtworzenie
+    stanu sprzed pomyłki kosztowało 6-8 interakcji plus pamięć człowieka o tym, co tam stało.
+
+    Odkładanie idzie PO `frame_id`, nie po numerze wiersza — gest zmienia klucz sortu tej kolumny,
+    więc numer po odświeżeniu wskazuje inną klatkę.
+
+    Falsyfikator: zdejmij `_przywroc_zaznaczenie` z `_po_gescie_osi` → zbiór po geście jest pusty."""
+    v, con = obj_view
+    v.refresh()
+    _zaznacz(v, [1, 2])
+    assert {r["frame_id"] for r in v._selected_data_rows()} == {1, 2}
+    v._on_object_clear()
+    assert {r["frame_id"] for r in v._selected_data_rows()} == {1, 2}
+
+
+def test_zaznaczenie_odklada_sie_JEDNYM_wywolaniem_i_bez_naglowka_grupy(obj_view):
+    """DWA szwy naraz, bo oba są niewidoczne w teście, który pyta tylko o zbiór id.
+
+    JEDNO `select()`: każde wywołanie emituje `selectionChanged`, a ten ciągnie `_update_count`
+    → read-model osi (31 ms przy 16 648 klatkach). Pętla po zakresach wracałaby do kwadratu, który
+    zdjęło P-K (2 071 ms → 2 ms).
+
+    BEZ NAGŁÓWKA GRUPY: zmierzone falsyfikatorem na gołym Qt — `select()` na zakresie obejmującym
+    wiersz NIESELEKTOWALNY wciąga go do `sm.selection()` (`selectedRows()` go odsiewa, ZAKRESY nie),
+    a `_selected_data_rows` czyta właśnie zakresy. Bez łamania zakresów po geście podświetlałby się
+    nagłówek grupy — wiersz, którego gest nie tknął.
+
+    Falsyfikator drugiego członu: zdejmij warunek ciągłości → marker grupy wpada między klatki
+    i liczba wierszy-nie-klatek w zaznaczeniu rośnie."""
+    v, con = obj_view
+    v.combo_group.setCurrentIndex(v.combo_group.findData("kind"))   # grupowanie ⇒ markery w liście
+    v.refresh()
+    _zaznacz(v, [1, 2, 3])
+    ile = []
+    v.table.selectionModel().selectionChanged.connect(lambda *_: ile.append(1))
+    v._on_object_clear()
+
+    assert len(ile) == 1, f"zaznaczenie odłożone {len(ile)} wywołaniami zamiast jednym"
+    numery = set()
+    for zakres in v.table.selectionModel().selection():
+        numery.update(range(zakres.top(), zakres.bottom() + 1))
+    markery = [i for i in numery if "_group" in v.model._rows[i]]
+    assert not markery, f"zaznaczenie objęło nagłówki grup: {markery}"
+
+
+def test_samo_odswiezenie_NIE_odklada_zaznaczenia(obj_view):
+    """GRANICA CZŁONU PIERWSZEGO. Zaznaczenie przeżywa GEST OSI, a nie każdy `refresh()`: zmiana
+    facetu, perspektywy i filtra to gesty, po których zaznaczenie ginąć POWINNO — user zmienił
+    ZBIÓR, a nie stan tych klatek. Bez tej granicy zaznaczenie wracałoby na wierzch cudzej zmiany.
+
+    Falsyfikator: przenieś `_przywroc_zaznaczenie` z `_po_gescie_osi` do `_refresh` → ten test
+    czerwienieje, bo zaznaczenie wróci po zmianie, która go nie dotyczyła."""
+    v, _ = obj_view
+    v.refresh()
+    _zaznacz(v, [1, 2])
+    assert len(v._selected_data_rows()) == 2
+    v.refresh()
+    assert not v._selected_data_rows()
+
+
+def test_zdanie_po_cofnieciu_MOWI_co_zdjelo(obj_view):
+    """Cofnięcie kończyło się na „Cofnięto przypisanie na N z M klatek", a bliźniacze zdanie nadania
+    kończy się `: NGC 7023`. Człon idzie OSOBNYM kluczem, nie placeholderem w zdaniu bazowym —
+    to zdanie ma dwóch wołających o różnych kwargach.
+
+    Falsyfikator: zdejmij człon `object_canons` → asercja o kanonie czerwienieje, a zdanie wraca
+    do stanu, w którym user wie ILE, ale nie wie CO."""
+    v, con = obj_view
+    v.refresh()
+    _zaznacz(v, [1, 2])
+    msgs = []
+    v.status_message.connect(msgs.append)
+    v._on_object_clear()
+    assert ": NGC6960" in msgs[-1], msgs[-1]
+
+    # …a gest, który NICZEGO nie zdjął, nie dokleja członu o obiekcie, którego nie tknął.
+    # Pytamy o KANON, nie o dwukropek: rozbicie pominięć („nie było czego cofać: 2") ma własny.
+    msgs.clear()
+    v._on_object_clear()
+    assert "NGC6960" not in msgs[-1] and "nie było czego cofać: 2" in msgs[-1]
+
+
+def test_przywrocenie_ODDAJE_obiekt_JEDNYM_gestem_po_masowym_cofnieciu(obj_view):
+    """DROGA POWROTU (R-S2b-3, człon trzeci) — pełny przepływ przez POWIERZCHNIĘ: cofnij masowo,
+    a potem przywróć jednym kliknięciem. Składa się z członem pierwszym: zaznaczenie po cofnięciu
+    ZOSTAJE, więc cel gestu naprawczego jest już wskazany i nie trzeba go odtwarzać.
+
+    Falsyfikator: zdejmij `_przywroc_zaznaczenie` → gest przywracania trafia w pustkę i mówi
+    „zaznacz klatki", zamiast oddać obiekt."""
+    v, con = obj_view
+    v.refresh()
+    _zaznacz(v, [1, 2])
+    v._on_object_clear()
+    assert con.execute("SELECT count(*) FROM frame WHERE object_source = 'user_cleared'"
+                       ).fetchone()[0] == 2
+
+    v._update_count()
+    assert v.sel_bar.act_restore.isEnabled(), "pozycja wygaszona nad żywym nagrobkiem"
+    msgs = []
+    v.status_message.connect(msgs.append)
+    v._on_object_restore()
+
+    zrodla = dict(con.execute("SELECT COALESCE(object_source,'—'), count(*) FROM frame "
+                              "GROUP BY 1").fetchall())
+    assert zrodla.get("user_cleared") is None and zrodla["user"] == 2
+    assert "Przywrócono przypisanie na 2 z 2 klatek" in msgs[-1] and ": NGC6960" in msgs[-1]
+
+
+def test_pozycja_przywracania_GASNIE_gdy_nie_ma_czego_przywrocic(obj_view):
+    """Uczciwy disabled trzeciej pozycji — liczony z read-modelu, nie z domysłu. Kontrolka zostaje
+    żywa (są inne akcje), bo menu tłumaczące wygaszoną pozycję mówi więcej niż wygaszony przycisk.
+
+    Człon tooltipu MILCZY przy zerze: „do przywrócenia: 0" mówiłoby o czymś, czego w zaznaczeniu
+    nie ma — to ta sama reguła, którą R-S3-8 postawiło dla gotowych obrazów."""
+    v, con = obj_view
+    v.refresh()
+    _zaznacz(v, [1, 2])
+    v._update_count()
+    assert not v.sel_bar.act_restore.isEnabled()
+    assert "do przywrócenia" not in v.sel_bar.btn_object.toolTip()
+
+    v._on_object_clear()
+    v._update_count()
+    assert v.sel_bar.act_restore.isEnabled()
+    assert "do przywrócenia: 2" in v.sel_bar.btn_object.toolTip()
+
+
+def test_przywrocenie_nagrobka_BEZ_pamieci_mowi_prawde_i_nic_nie_pisze(obj_view):
+    """Nagrobek sprzed migracji 0017 (baza-dawca) wygląda na ekranie identycznie jak ten z pamięcią,
+    więc milczenie kazałoby userowi zgadywać, czy gest nie zadziałał, czy nie miał na czym."""
+    v, con = obj_view
+    v.refresh()
+    _zaznacz(v, [1])
+    v._on_object_clear()
+    con.execute("UPDATE frame SET object_cleared_id = NULL WHERE id = 1")
+    con.commit()
+
+    przed = con.execute("SELECT count(*) FROM event").fetchone()[0]
+    msgs = []
+    v.status_message.connect(msgs.append)
+    _zaznacz(v, [1])
+    v._on_object_restore()
+    assert con.execute("SELECT count(*) FROM event").fetchone()[0] == przed
+    assert "Nie ma czego przywrócić" in msgs[-1] and "bez zapamiętanego obiektu: 1" in msgs[-1]
 
 
 def test_kolejka_NIE_dostaje_nowego_kubelka_poza_czlonem_cofniecia(obj_view):
@@ -2729,7 +2906,7 @@ def test_lista_skrotu_przebudowuje_sie_a_nie_ROSNIE(qapp):
     assert not _pozycje_skrotu(bar)
     # …i ŻADNA akcja nie przybyła: pula jest stała, bo `deleteLater` na QAction wywalał Qt
     # (bramka pakietu, zarzut 8 - lekarstwo gorsze od choroby, zmierzone na pełnej baterii).
-    assert len(bar.btn_object.menu().actions()) == 2 + 1 + bar._RECENT_MAX
+    assert len(bar.btn_object.menu().actions()) == 3 + 1 + bar._RECENT_MAX
     bar.close()
 
 

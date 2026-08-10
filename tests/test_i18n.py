@@ -147,6 +147,25 @@ def test_parytet_tokenow_dynamicznych_z_katalogiem():
     assert not braki, f"rdzeń produkuje tokeny bez zdania w katalogu: {braki}"
 
 
+def test_parytet_stanow_kolumny_obiektu_z_katalogiem():
+    """DRUGA BRAMKA NA KLUCZE SKŁADANE (R-S3-4). Tooltip kolumny „Obiekt" jedzie mapą
+    `grid._OBJECT_STATE_TIPS`, więc kolektor literałów go NIE WIDZI — literówka w kluczu
+    renderowałaby użytkownikowi surowe `grid.cell.object_…` pod kursorem.
+
+    Parytet trzymamy w OBIE strony, bo tu obie znaczą defekt: klucz bez zdania w katalogu to surowy
+    tekst na ekranie, a stan bez klucza to komórka, która nie umie się wytłumaczyć. Zbiór stanów
+    bierzemy od WŁAŚCICIELA polityki (`queries.OBJECT_CELL_STATES`), nie z listy przepisanej tutaj.
+
+    `canon` jest jedynym stanem BEZ tooltipa i to jest treść, nie wyjątek: nazwa mówi wtedy sama
+    za siebie, a zdanie pod kursorem na każdej komórce kolumny byłoby szumem."""
+    from horreum.gui.grid import _OBJECT_STATE_TIPS
+    from horreum.gui.queries import OBJECT_CELL_STATES
+
+    assert set(_OBJECT_STATE_TIPS) == set(OBJECT_CELL_STATES) - {"canon"}
+    braki = [k for k in _OBJECT_STATE_TIPS.values() if k not in CATALOG]
+    assert not braki, f"stany kolumny bez zdania w katalogu: {braki}"
+
+
 def test_parytet_zrodel_pewnosci_obu_osi_panelu():
     """Oba źródła pewności panelu rodowodu mają komplet zdań: oś stosów (`asserted_by` wejścia)
     i oś kalibracji (`asserted_by` powiązania). Wartości bierzemy z CHECK-ów migracji, żeby bramka

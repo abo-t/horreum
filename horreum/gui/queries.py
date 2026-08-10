@@ -83,6 +83,68 @@ def stack_folder(path):
     return rodzic
 
 
+OBJECT_CELL_STATES = ("canon", "cleared", "kind", "raw", "hint")
+"""Stany komórki „Obiekt" — LUSTRO gałęzi `object_cell`, do bramki parytetu z katalogiem i18n.
+
+Kolejność JEST kolejnością rozstrzygania w `object_cell` i to nie jest przypadek: `cleared` bije
+`kind`, a `kind` bije `raw`, bo klatka może spełniać kilka warunków naraz, a powiedzieć ma tę
+rzecz, która jest jej NAJŚWIEŻSZYM faktem i tłumaczy pusty facet obok."""
+
+CLEARED_MARK = "↺"
+"""Znacznik cofnięcia — TEN SAM, którym kolejka przeglądu znaczy wiersze cofnięte (paczka G3).
+Jeden alfabet dla jednego faktu; drugi znak kazałby uczyć się dwa razy tego samego."""
+
+
+def object_cell(row):
+    """Komórka „Obiekt" jako para `(tekst, stan)` — JEDEN właściciel polityki tej kolumny.
+
+    Qt-wolne i to jest wybór, nie przypadek: polityka jest czystą funkcją, więc jej bramki jadą
+    bez PySide6 — jak `stack_folder`, który wyszedł tu z tego samego powodu (dwie powierzchnie
+    pytają o tę samą regułę).
+
+    DLACZEGO PARA, A NIE SAM STRING. Do tej paczki kolumna zwracała `object_canon or object_raw`
+    i zlewała w jednym napisie DWA RÓŻNE TWIERDZENIA: „ten obiekt tak się nazywa" (kanon osi)
+    oraz „tyle mówi nagłówek pliku" (surowe zeznanie). Skutek widać było gołym okiem po geście
+    „Cofnij przypisanie": wiersz dalej pokazywał `NGC7023`, a facet Obiekt na tym samym ekranie
+    był już pusty — jeden ekran, dwa sprzeczne zdania o tych samych klatkach (`R-S3-4`).
+
+    I NIE JEST TO DŁUG O ZEROWEJ POPULACJI. Zmierzone na żywym archiwum: **2364 klatki
+    KALIBRACYJNE** (flat 2256, master_flat 74, master_dark 34) niosą w nagłówku `FlatWizard`,
+    `DARK` albo `Target` — i kolumna twierdziła o nich „obiektem tego flata jest FlatWizard",
+    choć kalibracja obiektu nie ma z DEFINICJI. Nagrobek dokłada trzeci powód do populacji, która
+    istnieje niezależnie od niego.
+
+    NAGROBEK NIGDY NIE JEST PUSTKĄ (`CLEARED_MARK`) — i to też jest z pomiaru: **845 klatek nieba
+    nie ma `object_raw`** (w tym 757 RAW-ów z lustrzanki, które nie mają gdzie go nieść). Ich
+    komórka jest pusta, a kursywa i szarość na pustym stringu są niewidzialne — bez znacznika dług
+    zostałby otwarty dla większości własnej przyszłej populacji.
+
+    PODPOWIEDŹ ZE ŚCIEŻKI (`hint`) NIE UDAJE NAZWY: nawiasy kątowe odróżniają ją od kanonu, bo
+    wzięcie „tyle wiem z folderu" za „tak się ten obiekt nazywa" byłoby gorsze niż pusta komórka.
+    Tylko `master_light`, bo light z akwizycji ma własną drogę (szczebel ścieżki S2 PROPONUJE mu
+    kanon). Nic z tego nie trafia do bazy: to warstwa PREZENTACJI, gest osi należy do człowieka.
+
+    Wiersz czytamy `.get`, nie indeksem: `kind`/`path`/`object_source` wchodzą nie z każdego
+    zapytania gridu, a `sqlite3.Row` na brakującym kluczu rzuca."""
+    if row.get("object_canon"):
+        return row["object_canon"], "canon"
+    raw = row.get("object_raw") or ""
+    if row.get("object_source") == "user_cleared":
+        return (f"{CLEARED_MARK} {raw}" if raw else CLEARED_MARK), "cleared"
+    # STAN TŁUMACZY TEKST, więc bez tekstu nie ma czego tłumaczyć — i dlatego pytanie o ZEZNANIE
+    # stoi PRZED pytaniem o rodzaj. Odwrotna kolejność dawała PUSTEJ komórce tooltip „kalibracja
+    # obiektu nie ma z definicji" wszędzie tam, gdzie wiersz nie niesie `kind` (a nie niesie go
+    # z każdego zapytania gridu) — czyli zdanie o rodzaju, którego ten wiersz nie zna. Złapała to
+    # własna bramka tej paczki, nie recenzja.
+    if raw:
+        return raw, "kind" if row.get("kind") not in LIGHT_KINDS else "raw"
+    if row.get("kind") == "master_light":
+        folder = stack_folder(row.get("path"))
+        if folder:
+            return f"⟨{folder}⟩", "hint"
+    return "", "canon"          # nic do powiedzenia — pusta komórka bez stanu do wytłumaczenia
+
+
 def telescope_label(row):
     """JEDYNY właściciel reguły `label → telescop_canon` (P-B; wcześniej ta sama reguła siedziała
     w czterech miejscach warstwy widżetów i rozjeżdżała się o końcowe `or ""`).
@@ -1594,9 +1656,15 @@ def writeback_frame_targets(con, frame_ids):
 def selection_object_state(con, frame_ids):
     """Stan osi OBIEKT dla ZAZNACZENIA — jedyne wejście obu gestów paska Zbiorów (S2b, §4/14c).
 
-    OSOBNY, WĄSKI CZYTNIK, a nie dwie nowe kolumny w `base_rows`: tamten wiersz karmi WSZYSTKIE
-    perspektywy i wchodzi w kolizję z podłogą okna (D-0801-1), a te dwa fakty są potrzebne wyłącznie
-    w chwili gestu. Rozstrzyga TRZY pytania, których widok sam sobie nie odpowie:
+    OSOBNY, WĄSKI CZYTNIK, a nie nowe kolumny WIDOCZNE w gridzie: to `BASE_COLS` wchodzi w kolizję
+    z podłogą okna (D-0801-1), a te fakty są potrzebne wyłącznie w chwili gestu. Zdanie zapisane tu
+    pierwotnie brzmiało „a nie dwie nowe kolumny w `base_rows`" i było prawdą o kolumnach
+    WIDOCZNYCH, ale jako zakaz ogólny okazało się fałszywe: `base_rows` niesie od początku siedem
+    kolumn niepokazywanych (`filetype`, `present`, `superseded_by`…), a paczka R-S3-4 dołożyła
+    dwie kolejne (`object_source`, `object_cleared_id`) po to, żeby POLITYKA KOLUMNY miała czym
+    odróżnić kanon od zeznania. Granica przebiega po `BASE_COLS`, nie po `SELECT`-cie.
+
+    Rozstrzyga TRZY pytania, których widok sam sobie nie odpowie:
 
     * czy jest co robić (`namable`/`clearable` — wygaszenie kontrolki mówi prawdę, a nie „może się
       uda"; pusty zbiór to jedno, a 800 klatek z samego nagłówka — zupełnie co innego);
@@ -1613,14 +1681,20 @@ def selection_object_state(con, frame_ids):
     obiektów, gdy gest odmawia. Bit `conflict` nie wystarczał: komunikat wstawiał literał „2", więc
     zaznaczenie z siedmioma obiektami kazało zawęzić do dwóch i po zawężeniu odmawiało tak samo.
 
-    Zwraca dict: n, lights, stacks, stacks_touchable, namable, overwrite, clearable,
+    TRZECIA POZYCJA MENU (`restorable`, R-S2b-3) LICZY SIĘ TĄ SAMĄ PĘTLĄ i to jest cała jej cena:
+    wiersz i tak niesie `object_cleared_id`, więc bramka „jest co przywracać" jest DARMOWA i przy
+    tym EXAKTNA. Osobne zapytanie w tym miejscu byłoby powrotem do defektu, który zamknęło P-K:
+    ten read-model chodzi przy KAŻDEJ zmianie zaznaczenia, a `Ctrl+A` na 16 tys. klatek robi
+    z każdego dołożonego pytania koszt liczony w sekundach na wątku GUI.
+
+    Zwraca dict: n, lights, stacks, stacks_touchable, namable, overwrite, clearable, restorable,
     expected_object_id, conflict, conflict_n, by_source."""
     rows = con.execute(
-        "SELECT f.kind, f.object_id, f.object_source FROM frame f "
+        "SELECT f.kind, f.object_id, f.object_source, f.object_cleared_id FROM frame f "
         "WHERE f.id IN (SELECT value FROM json_each(?))",
         (json.dumps(list(frame_ids)),)).fetchall()
     by_source, slabe = {}, set()
-    n = lights = stacks = stacks_touchable = namable = overwrite = clearable = 0
+    n = lights = stacks = stacks_touchable = namable = overwrite = clearable = restorable = 0
     for r in rows:
         n += 1
         by_source[r["object_source"]] = by_source.get(r["object_source"], 0) + 1
@@ -1645,6 +1719,11 @@ def selection_object_state(con, frame_ids):
             stacks_touchable += 1
         if do_cofniecia:
             clearable += 1
+        if r["object_cleared_id"] is not None:
+            # NAGROBEK Z PAMIĘCIĄ (0017) — jedyna klatka, którą gest przywracania ma jak ruszyć.
+            # Nagrobek BEZ pamięci (baza-dawca sprzed migracji) świadomie się tu nie liczy: gest
+            # nie miałby czego przywrócić, a aktywna pozycja obiecywałaby robotę, której nie ma.
+            restorable += 1
         if do_nazwania:
             namable += 1
             if r["object_id"] is not None:
@@ -1652,9 +1731,50 @@ def selection_object_state(con, frame_ids):
                 slabe.add(r["object_id"])
     return {"n": n, "lights": lights, "stacks": stacks,
             "stacks_touchable": stacks_touchable, "namable": namable,
-            "overwrite": overwrite, "clearable": clearable, "by_source": by_source,
+            "overwrite": overwrite, "clearable": clearable, "restorable": restorable,
+            "by_source": by_source,
             "expected_object_id": next(iter(slabe)) if len(slabe) == 1 else None,
             "conflict": len(slabe) > 1, "conflict_n": len(slabe)}
+
+
+def restore_targets(con, frame_ids):
+    """GRUPY DO PRZYWRÓCENIA z zaznaczenia (R-S2b-3) — czytane ze STANU, nie z dziennika.
+
+    Zwraca `(grupy, bez_pamieci)`, gdzie grupa to dict `{canon, catalog, kind, frame_ids}` — po
+    jednej na OBIEKT, bo klinga osi przyjmuje jeden kanon na wywołanie, a masowe cofnięcie potrafi
+    objąć klatki kilku różnych obiektów naraz. `bez_pamieci` to liczba nagrobków, których nie da
+    się przywrócić, bo nie pamiętają przedmiotu (baza-dawca sprzed migracji 0017).
+
+    DLACZEGO STAN, A NIE `event`. Pytanie brzmi „co ta klatka odrzuciła" i jest pytaniem o NIĄ,
+    nie o historię. Odpowiadanie skanem dziennika łamie się dwukrotnie: klatka cofnięta dwa razy
+    ma dwa `object.cleared` o różnym `was_object_id` (a payload nie mówi, który jest żywy), zaś
+    `repo.transfer_human_facts` emituje TEN SAM verb bez tego klucza — nagrobek przeniesiony po
+    podmianie pliku miałby ślad, ale bez przedmiotu, więc wyparowałby z OBU liczb naraz. To ta
+    sama figura, którą repo dostało już trzy razy (pamięć `horreum-review-queue-from-state`).
+
+    ŹRÓDŁA W GRUPIE NIE MA ŚWIADOMIE. Cofnąć da się dwa źródła (`user` i `path`), ale przywracamy
+    ZAWSZE jako `user`, bo przywrócenie JEST wskazaniem palcem — człowiek mówi „jednak tak", i to
+    drugi raz świadomie. Awans potwierdzonej propozycji ze ścieżki do wskazania ręki jest tu
+    poprawny, a druga kolumna trzymająca „jakie było źródło" karmiłaby wyłącznie ten jeden gest.
+
+    Kolejność grup po `canon`, żeby zdanie po geście było DETERMINISTYCZNE, a nie zależne od
+    kolejności wierszy w zaznaczeniu."""
+    rows = con.execute(
+        "SELECT f.id AS frame_id, o.id AS object_id, o.canon, o.catalog, o.kind "
+        "FROM frame f LEFT JOIN object o ON o.id = f.object_cleared_id "
+        "WHERE f.id IN (SELECT value FROM json_each(?)) "
+        "  AND f.object_source = 'user_cleared' "
+        "ORDER BY o.canon, f.id",
+        (json.dumps(list(frame_ids)),)).fetchall()
+    grupy, bez_pamieci = {}, 0
+    for r in rows:
+        if r["object_id"] is None:
+            bez_pamieci += 1
+            continue
+        g = grupy.setdefault(r["object_id"], {"canon": r["canon"], "catalog": r["catalog"],
+                                              "kind": r["kind"], "frame_ids": []})
+        g["frame_ids"].append(r["frame_id"])
+    return list(grupy.values()), bez_pamieci
 
 
 def rename_frame_targets(con, frame_ids):
@@ -1745,10 +1865,15 @@ def base_rows(con, frame_ids):
     zostać w gridzie; baza=autorytet). `n_present` = liczba obecnych lokalizacji (perspektywa „Duplikaty"
     = n_present > 1). Teleskop przez config→telescope_canonical→kanon (jak `object_frames`). frame_ids jako
     tablica JSON (`json_each`). Zwraca W TEJ KOLEJNOŚCI: frame_id, kind, filetype, filter_canon,
-    camera_model, telescope_label, telescop_canon, object_canon, object_raw, date_obs, exptime,
-    path, present, last_verified_at, superseded_by, n_present. Wiersze czyta się po NAZWIE
-    (`sqlite3.Row`), ale kolejność w tym zdaniu ma zgadzać się z SELECT-em — rozjazd był zarzutem
-    bramki 0809 i jest tańszy do naprawienia niż do wytłumaczenia następnej sesji.
+    camera_model, telescope_label, telescop_canon, object_canon, object_raw, object_source,
+    object_cleared_id, date_obs, exptime, path, present, last_verified_at, superseded_by,
+    n_present. Wiersze czyta się po NAZWIE (`sqlite3.Row`), ale kolejność w tym zdaniu ma zgadzać
+    się z SELECT-em — rozjazd był zarzutem bramki 0809 i jest tańszy do naprawienia niż do
+    wytłumaczenia następnej sesji.
+
+    `object_source` i `object_cleared_id` KARMIĄ POLITYKĘ KOLUMNY (`object_cell`, R-S3-4), a NIE
+    nową kolumnę na ekranie: `BASE_COLS` gridu zostaje bez zmian, więc podłoga okna się nie rusza
+    (kanon minimalnego wspieranego ekranu). Kosztu nie ma — `frame` jest już w `FROM`.
 
     `superseded_by` JEST KOLUMNĄ Z TEGO SAMEGO POWODU, CO `present` (F3, decyzja Zdzinia 2026-08-09):
     klatka zastąpiona ZOSTAJE w gridzie i ma być WIDOCZNA JAKO ZASTĄPIONA — w każdej perspektywie,
@@ -1763,7 +1888,7 @@ def base_rows(con, frame_ids):
         "SELECT f.id AS frame_id, f.kind, f.filetype, f.filter_canon, "
         "       cam.model_canon AS camera_model, "
         "       t.label AS telescope_label, t.telescop_canon, "
-        "       obj.canon AS object_canon, h.object_raw, "
+        "       obj.canon AS object_canon, h.object_raw, f.object_source, f.object_cleared_id, "
         "       h.date_obs, h.exptime, loc.path, loc.present, loc.last_verified_at, f.superseded_by, "
         "       (SELECT COUNT(*) FROM location lp WHERE lp.frame_id = f.id AND lp.present = 1) AS n_present "
         "FROM frame f "

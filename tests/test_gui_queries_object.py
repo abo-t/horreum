@@ -643,3 +643,114 @@ def test_rozszerzenie_nie_rusza_licznosci_teleskopu(s8_obj):
     con, ids = s8_obj
     counts = {r["id"]: r["frame_count"] for r in queries.active_telescopes(con)}
     assert counts == {ids["A"]: 2, ids["B"]: 3, ids["C"]: 2, ids["D"]: 0}
+
+
+# --- R-S3-4: POLITYKA KOLUMNY „Obiekt" (Qt-wolna, więc dom ma tutaj) ---
+
+def test_object_cell_ODROZNIA_kanon_od_zeznania():
+    """Kolumna niosła jeden napis dla DWÓCH różnych twierdzeń: „ten obiekt tak się nazywa" (kanon
+    osi) i „tyle mówi nagłówek pliku" (surowe zeznanie). Po geście „Cofnij przypisanie" wiersz dalej
+    pokazywał `NGC7023`, a facet Obiekt na tym samym ekranie był już pusty.
+
+    Populacja NIE jest hipotetyczna: zmierzone na żywym archiwum **2364 klatki KALIBRACYJNE**
+    niosą w nagłówku `FlatWizard`/`DARK`/`Target`, a kolumna twierdziła o nich, że to ich obiekt —
+    choć kalibracja obiektu nie ma z DEFINICJI."""
+    assert queries.object_cell({"object_canon": "NGC 7023", "object_raw": "ngc7023",
+                                "kind": "light"}) == ("NGC 7023", "canon")
+    assert queries.object_cell({"object_canon": None, "object_raw": "FlatWizard",
+                                "kind": "flat"}) == ("FlatWizard", "kind")
+    assert queries.object_cell({"object_canon": None, "object_raw": "Jakas Mgla",
+                                "kind": "light"}) == ("Jakas Mgla", "raw")
+
+
+def test_object_cell_NAGROBEK_bije_rodzaj_i_NIGDY_nie_jest_pustka():
+    """DWIE rzeczy naraz, bo obie dałyby się zepsuć osobno.
+
+    PIERWSZEŃSTWO: klatka cofnięta ręką ma dostać zdanie O COFNIĘCIU, także gdy jest gotowym
+    obrazem albo kalibracją — to jej NAJŚWIEŻSZY fakt i to on tłumaczy, dlaczego facet obok jest
+    pusty. Kolejność `if`-ów w `object_cell` JEST tą regułą.
+
+    ZNACZNIK: zmierzone **845 klatek nieba bez `object_raw`** (w tym 757 RAW-ów z lustrzanki,
+    które nie mają go gdzie nieść). Ich komórka jest PUSTA, a kursywa i szarość na pustym stringu
+    są niewidzialne — bez `↺` dług zostałby otwarty dla większości własnej przyszłej populacji.
+
+    Falsyfikator: przenieś gałąź `user_cleared` pod gałąź rodzaju → nagrobek na flacie zacznie
+    twierdzić „kalibracja obiektu nie ma", gubiąc jedyną informację o geście człowieka."""
+    tekst, stan = queries.object_cell({"object_canon": None, "object_raw": None,
+                                       "object_source": "user_cleared", "kind": "light"})
+    assert stan == "cleared" and tekst == queries.CLEARED_MARK, "pusta komórka = stan niewidzialny"
+
+    tekst, stan = queries.object_cell({"object_canon": None, "object_raw": "NGC7023",
+                                       "object_source": "user_cleared", "kind": "master_light",
+                                       "path": r"R:\A\LMC\master\m.xisf"})
+    assert (tekst, stan) == (f"{queries.CLEARED_MARK} NGC7023", "cleared"), "nagrobek bije podpowiedź"
+
+    _, stan = queries.object_cell({"object_canon": None, "object_raw": "FlatWizard",
+                                   "object_source": "user_cleared", "kind": "flat"})
+    assert stan == "cleared", "nagrobek bije rodzaj"
+
+
+def test_object_cell_PODPOWIEDZ_z_folderu_dla_bezimiennego_stosu():
+    """FIRSTHAND ZDZINIA 0808: „nie widzę napisu LMC ani IC443". I nie mógł — nazwy plików generuje
+    WBPP, więc sześć stosów LMC i jeden IC443 czytają się identycznie. Tożsamość siedzi WYŁĄCZNIE
+    w folderze, a folder ma być DZIADKIEM (rodzic to `master` u wszystkich, więc nie rozróżnia nic).
+
+    Podpowiedź NIE UDAJE NAZWY (nawiasy kątowe) i ma WŁASNY stan, bo mówi co innego niż kanon."""
+    stos = {"kind": "master_light", "object_canon": None, "object_raw": None,
+            "path": r"R:\!!ASTROFOTO\OBIEKTY_DNG\A7R3_105_LMC\master\masterLight_BIN-1.xisf"}
+    assert queries.object_cell(stos) == ("⟨A7R3_105_LMC⟩", "hint")
+    assert queries.object_cell(dict(stos, object_canon="LMC")) == ("LMC", "canon")
+
+    light = {"kind": "light", "object_canon": None, "object_raw": None,
+             "path": r"R:\ASTRO_\LIGHTS\IC443\portable\20190110_DSC5559.dng"}
+    assert queries.object_cell(light) == ("", "canon"), "light ma własną drogę (szczebel S2)"
+    # Kolumny `kind`/`path`/`object_source` nie wchodzą z KAŻDEGO zapytania gridu — brak nie ma
+    # prawa wywalić renderu (dlatego `_derive` podaje słownik, nie surowy `sqlite3.Row`).
+    assert queries.object_cell({"object_canon": None, "object_raw": None}) == ("", "canon")
+
+
+def test_stany_komorki_MAJA_LUSTRO_w_stalej():
+    """`OBJECT_CELL_STATES` jest lustrem gałęzi `object_cell` — z niego jedzie bramka parytetu
+    z katalogiem i18n (klucz składany w locie jest dla kolektora literałów NIEWIDZIALNY)."""
+    assert set(queries.OBJECT_CELL_STATES) == {"canon", "cleared", "kind", "raw", "hint"}
+
+
+# --- R-S2b-3: GRUPY DO PRZYWRÓCENIA (ze STANU, nie z dziennika) ---
+
+def test_restore_targets_grupuje_po_OBIEKCIE_i_liczy_nagrobki_bez_pamieci(s8_obj):
+    """Klinga osi przyjmuje JEDEN kanon na wywołanie, a masowe cofnięcie obejmuje bywa klatki kilku
+    obiektów — read-model musi więc oddać grupy, nie płaską listę.
+
+    Nagrobek BEZ pamięci (baza-dawca sprzed migracji 0017) nie wpada do żadnej grupy i liczy się
+    osobno: gest powie o nim wprost, zamiast po cichu pominąć."""
+    con, ids = s8_obj
+    a = _cofnij(con, _nameless_light(con, "sha-rt-a"))
+    b = _cofnij(con, _nameless_light(con, "sha-rt-b"))
+    sierota = _cofnij(con, _nameless_light(con, "sha-rt-c"))
+    con.execute("UPDATE frame SET object_cleared_id = NULL WHERE id = ?", (sierota,))
+    con.commit()
+
+    grupy, bez_pamieci = queries.restore_targets(con, [a, b, sierota])
+    assert bez_pamieci == 1
+    assert [(g["canon"], sorted(g["frame_ids"])) for g in grupy] == [("NGC7000", sorted([a, b]))]
+
+    # Klatka BEZ nagrobka nie jest celem tego gestu, choćby stała w zaznaczeniu.
+    zwykla = _nameless_light(con, "sha-rt-d")
+    assert queries.restore_targets(con, [zwykla]) == ([], 0)
+
+
+def test_selection_object_state_LICZY_restorable_bez_nowego_zapytania(s8_obj):
+    """Bramka trzeciej pozycji menu jedzie TĄ SAMĄ pętlą, co dwie pierwsze — read-model osi chodzi
+    przy KAŻDEJ zmianie zaznaczenia, a osobne zapytanie byłoby powrotem do defektu zamkniętego
+    w P-K (`Ctrl+A` na 16 tys. klatek).
+
+    `restorable` liczy WYŁĄCZNIE nagrobki Z PAMIĘCIĄ: aktywna pozycja bez czego przywracać
+    obiecywałaby robotę, której nie ma."""
+    con, ids = s8_obj
+    fid = _cofnij(con, _nameless_light(con, "sha-rs-a"))
+    stan = queries.selection_object_state(con, [fid])
+    assert (stan["restorable"], stan["clearable"]) == (1, 0)
+
+    con.execute("UPDATE frame SET object_cleared_id = NULL WHERE id = ?", (fid,))
+    con.commit()
+    assert queries.selection_object_state(con, [fid])["restorable"] == 0

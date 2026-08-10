@@ -30,7 +30,8 @@ import uuid
 from datetime import datetime, timezone
 
 from PySide6.QtCore import (
-    QAbstractTableModel, QEvent, QModelIndex, QObject, Qt, QSettings, QThread, QTimer, Signal, Slot,
+    QAbstractTableModel, QEvent, QItemSelection, QItemSelectionModel,
+    QModelIndex, QObject, Qt, QSettings, QThread, QTimer, Signal, Slot,
 )
 from PySide6.QtGui import QColor, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
@@ -63,6 +64,20 @@ BASE_COLS = [
     ("frame.col.filter", "filter_canon"), ("grid.col.dt_delta", "_dt_delta"),
 ]
 _MISSING_TEXT = "—"
+
+# TOOLTIP KOLUMNY „Obiekt" PER STAN (R-S3-4) — mapa, bo powodów jest cztery i każdy niesie inną
+# RECEPTĘ, nie samą diagnozę: „nazwa z nagłówka" poprawia się w PLIKU, nagrobek — drugim gestem
+# ręki, a kalibracji nie poprawia się wcale, bo obiektu nie ma z definicji. Jeden wspólny tooltip
+# („to nie jest przypisany obiekt") mówiłby prawdę i nie dawał nikomu drogi dalej.
+# Stan `canon` klucza NIE MA świadomie: nazwa mówi wtedy sama za siebie, a tooltip na każdej
+# komórce kolumny byłby szumem pod kursorem. Parytet z katalogiem pilnuje bramka w `test_i18n`
+# (klucz składany w locie jest dla kolektora literałów NIEWIDZIALNY — wzorzec `grid.lin.cal.gap.*`).
+_OBJECT_STATE_TIPS = {
+    "cleared": "grid.cell.object_cleared_tip",
+    "kind": "grid.cell.object_kind_tip",
+    "raw": "grid.cell.object_raw_tip",
+    "hint": "grid.cell.object_hint_tip",
+}
 
 
 # Pusty grid mówi DWIE różne rzeczy — filtr nic nie wpuścił vs. w bazie nie ma nic (wiz F5 #8:
@@ -183,32 +198,21 @@ _PRESET_LABELS = {
 }
 
 
-def _obj_label(row):
-    """Nazwa obiektu do kolumny — kanon, inaczej surowe zeznanie, inaczej PODPOWIEDŹ Z FOLDERU.
+_KANONY_W_ZDANIU = 3
+"""Ile nazw obiektów mieści się w zdaniu po geście, zanim reszta pójdzie jako `(+N)`.
 
-    Trzeci szczebel dołożył firsthand Zdzinia 0808 i jest wąski Z POMIARU, nie z ostrożności.
-    Kubełek „bez nazwy, gotowe stosy" daje 18 wierszy, których NIE DA SIĘ ODRÓŻNIĆ na ekranie:
-    nazwy plików generuje WBPP i wyglądają tak (`masterLight_BIN-1_8000x5320_EXPOSURE-121.00s_
-    FILTER-NoFilter__B.xisf`), że sześć stosów LMC i jeden IC443 czyta się identycznie. Tożsamość
-    siedzi WYŁĄCZNIE w folderze — i tam jej nie widać, bo kolumna pokazuje ogon ścieżki. Recepta
-    kubełka brzmi „nazwij ten obraz", a człowiek nie wie, KTÓRY nazywa.
+Masowe cofnięcie potrafi objąć klatki kilku obiektów naraz (gest nie ma bramki jednorodności —
+ma ją tylko NADANIE, bo tam brak jednego przedmiotu znaczy brak jednej nazwy do wpisania).
+Wypisanie wszystkich zamieniłoby pasek stanu w listę; trzy pierwsze plus liczba mówią i CO
+zdjęto, i ŻE było tego więcej."""
 
-    DLACZEGO TYLKO `master_light`: light z akwizycji niesie oznaczenie we WŁASNEJ nazwie i ma
-    osobną drogę (szczebel ścieżki S2 PROPONUJE mu kanon). Stos jej nie ma — dlatego dług E3-1
-    („świadek ścieżki nie sięga drzewa stosów") istnieje. To jego najtańsza połowa: pokazujemy
-    to, co widać w ścieżce, i ANI KROKU DALEJ.
 
-    PODPOWIEDŹ NIE UDAJE NAZWY — nawiasy kątowe odróżniają ją od kanonu, bo kolumna miesza wtedy
-    dwa różne twierdzenia („tak się ten obiekt nazywa" i „tyle wiem ze ścieżki"), a wzięcie
-    drugiego za pierwsze byłoby gorsze niż pusta komórka. Nic z tego nie trafia do bazy: to
-    warstwa PREZENTACJI, gest osi obiektu dalej należy do człowieka."""
-    nazwa = row.get("object_canon") or row.get("object_raw")
-    if nazwa:
-        return nazwa
-    if row.get("kind") != "master_light":
-        return ""
-    folder = queries.stack_folder(row.get("path"))
-    return f"⟨{folder}⟩" if folder else ""
+def _lista_kanonow(canons, maks=_KANONY_W_ZDANIU):
+    """Kanony do zdania: do `maks` nazw po przecinku, reszta jako `(+N)`. Czysta funkcja."""
+    nazwy = list(canons)
+    if len(nazwy) <= maks:
+        return ", ".join(nazwy)
+    return ", ".join(nazwy[:maks]) + i18n.t("grid.sel.object_canons_more", n=len(nazwy) - maks)
 
 
 def _half_away(x):
@@ -233,10 +237,15 @@ def _derive(row):
     """sqlite3.Row → dict z polami pochodnymi (_telescope/_object/_dt_delta) do kolumn bazowych."""
     d = {k: row[k] for k in row.keys()}
     d["_telescope"] = queries.telescope_label(row)
-    # Ze SŁOWNIKA, nie z surowego wiersza: `_obj_label` pyta o `kind`/`path`, a te wchodzą nie
-    # z każdego zapytania gridu — `sqlite3.Row` na brakującym kluczu rzuca, `dict.get` oddaje None.
-    # Ta sama obrona, co przy `_dt_delta_hours` linijkę niżej.
-    d["_object"] = _obj_label(d)
+    # Ze SŁOWNIKA, nie z surowego wiersza: `object_cell` pyta o `kind`/`path`/`object_source`,
+    # a te wchodzą nie z każdego zapytania gridu — `sqlite3.Row` na brakującym kluczu rzuca,
+    # `dict.get` oddaje None. Ta sama obrona, co przy `_dt_delta_hours` linijkę niżej.
+    #
+    # PARA ROZPAKOWANA NA DWA KLUCZE, a `_object` ZOSTAJE STRINGIEM — i to nie jest kosmetyka:
+    # tę samą wartość czytają trzej konsumenci (komórka, klucz sortu i wartość grupowania), a dwaj
+    # ostatni porównują i sklejają napisy. Krotka w `_object` narysowałaby w komórce `('LMC',
+    # 'canon')` i kazała sortowi porównywać pary.
+    d["_object"], d["_object_state"] = queries.object_cell(d)
     d["_dt_delta"] = _dt_delta_hours(d.get("date_obs"), d.get("path"))
     return d
 
@@ -422,6 +431,26 @@ class GridTableModel(QAbstractTableModel):
                 return int(Qt.AlignRight | Qt.AlignVCenter)
             if role == Qt.ToolTipRole and v is not None:
                 return f"DATE-OBS − czas z nazwy = {v!r} h"     # surowy float (kontrola kwantyzacji)
+            return None
+        if key == "_object":
+            # KOLUMNA MÓWI, CZYM JEST TO, CO POKAZUJE (R-S3-4). Do tej paczki jeden napis niósł
+            # DWA różne twierdzenia — „ten obiekt tak się nazywa" i „tyle mówi nagłówek pliku" —
+            # więc po geście „Cofnij przypisanie" wiersz dalej pokazywał `NGC7023`, a facet Obiekt
+            # na tym samym ekranie był już pusty. Stan liczy JEDEN właściciel (`queries.object_cell`),
+            # tutaj zostaje samo malowanie: zeznanie dostaje ten sam zestaw ról, którym grid maluje
+            # brak karty keyworda (kursywa + `missing`), bo „to nie jest przypisany obiekt" jest
+            # brakiem, a nie ostrzeżeniem. Kanon zostaje nietknięty.
+            stan = row.get("_object_state", "canon")
+            if role == Qt.DisplayRole:
+                return row.get("_object") or ""
+            if stan == "canon":
+                return None
+            if role == Qt.ForegroundRole:
+                return _COLORS["missing"]
+            if role == Qt.FontRole:
+                f = QFont(); f.setItalic(True); return f
+            if role == Qt.ToolTipRole:
+                return i18n.t(_OBJECT_STATE_TIPS[stan])
             return None
         if role == Qt.DisplayRole:
             v = row.get(key)
@@ -1640,6 +1669,12 @@ class SelectionBar(QFrame):
         menu = QMenu(self.btn_object)
         self.act_name = menu.addAction(i18n.t("grid.sel.object_name"))
         self.act_clear = menu.addAction(i18n.t("grid.sel.object_clear"))
+        # DROGA POWROTU STOI OBOK GESTU, KTÓRY JEJ WYMAGA (R-S2b-3). Pozycja jest WIDOCZNA ZAWSZE,
+        # nie tylko gdy ma co robić — inaczej user dowiadywałby się o odwracalności dopiero PO
+        # pomyłce, czyli w jedynym momencie, w którym wiedza „to się da cofnąć" jest już spóźniona.
+        # Populacja nagrobków jest z natury rzadka, więc ta pozycja bywa wygaszona przez większość
+        # czasu; powód niesie tooltip KONTROLKI (menu w tym repo nie pokazuje tooltipów pozycji).
+        self.act_restore = menu.addAction(i18n.t("grid.sel.object_restore"))
         # Pula skrótu „ostatnio użyte" (R-S2b-12) — tworzona RAZ; treść i widoczność ustawia
         # `set_recent_objects`. Powód takiego kształtu, a nie dokładania akcji: patrz jej docstring.
         self._recent_sep = menu.addSeparator()
@@ -1669,7 +1704,7 @@ class SelectionBar(QFrame):
     def set_criteria(self, text):
         self.criteria_label.set_full_text(text)
 
-    def set_object_actions(self, *, namable, clearable, stacks=0, reason=None):
+    def set_object_actions(self, *, namable, clearable, stacks=0, restorable=0, reason=None):
         # `stacks` = ILE GEST RUSZY, nie ile ich jest w zaznaczeniu — parametr karmi wyłącznie
         # zdanie o skutku, więc wołający podaje `stacks_touchable` (bramka pakietu 0810, zarzut 1).
         """Uczciwy disabled obu pozycji osi obiektu (S2b, §4/14c-a). Cel gestu to WYŁĄCZNIE
@@ -1684,7 +1719,12 @@ class SelectionBar(QFrame):
         którą pokaże okno, więc user poznaje ją PRZED kliknięciem, a nie po."""
         self.act_name.setEnabled(bool(namable))
         self.act_clear.setEnabled(bool(clearable))
-        aktywna = bool(namable or clearable)
+        self.act_restore.setEnabled(bool(restorable))
+        # `restorable` W WARUNKU JAWNIE, choć dziś jest nadmiarowy: każdy nagrobek jest też
+        # `namable` (`object_id IS NULL` ⇒ do nazwania), więc kontrolka i tak by żyła. Zależność
+        # jest jednak NIEJAWNA i pęknie przy pierwszej zmianie `WEAK_OBJECT_SOURCES` — wtedy
+        # kontrolka gasłaby nad żywą pozycją menu, czyli odbierała jedyną drogę do gestu.
+        aktywna = bool(namable or clearable or restorable)
         self.btn_object.setEnabled(aktywna)
         if not aktywna:
             self.btn_object.setToolTip(i18n.t(reason or "grid.sel.object_tip_empty"))
@@ -1699,6 +1739,11 @@ class SelectionBar(QFrame):
         # nazwę ze źródła mocnego, więc człon liczony „ile stosów jest w zaznaczeniu" kłamałby
         # w 94% przypadków — w tooltipie, który powstał po to, żeby powiedzieć prawdę PRZED gestem.
         tip = i18n.t("grid.sel.object_tip_ready", namable=namable, clearable=clearable)
+        # TRZECIA DROGA MA BYĆ W TYM SAMYM ZDANIU, co dwie pierwsze — inaczej powtórzyłaby klasę
+        # R-S3-8: tooltip zapowiadałby dwie liczby, a menu oferowało trzy akcje. Milczy przy zerze,
+        # bo „do przywrócenia: 0" mówiłoby o czymś, czego w zaznaczeniu nie ma.
+        if restorable:
+            tip += i18n.t("grid.sel.object_tip_restorable", n=restorable)
         if stacks:
             tip += i18n.t_plural("grid.sel.object_stacks", stacks)
         self.btn_object.setToolTip(tip)
@@ -2024,6 +2069,7 @@ class FramesView(QWidget):
         self.sel_bar.btn_lineage.clicked.connect(lambda: self._toggle_panel("lineage"))
         self.sel_bar.act_name.triggered.connect(self._on_object_name)
         self.sel_bar.act_clear.triggered.connect(self._on_object_clear)
+        self.sel_bar.act_restore.triggered.connect(self._on_object_restore)
         # Skrót „ostatnio użyte" (R-S2b-12): lista jest pochodną dziennika, więc odświeża się
         # PRZY OTWARCIU menu, nie raz na budowie widoku — inaczej pokazywałaby stan sprzed gestów.
         self.sel_bar.btn_object.menu().aboutToShow.connect(self._sync_recent_objects)
@@ -2294,11 +2340,18 @@ class FramesView(QWidget):
         return ids
 
     def _po_gescie_osi(self, klucz, gest, **kw):
-        """Wspólny ogon obu gestów: zdanie z ROZBICIEM per fakt + odświeżenie CZTERECH powierzchni.
+        """Wspólny ogon WSZYSTKICH gestów osi: zdanie z ROZBICIEM per fakt + odświeżenie CZTERECH
+        powierzchni + ZACHOWANIE ZAZNACZENIA.
 
         Liczniki idą osobno, bo znaczą co innego: „kalibracja" to ochrona, która zadziałała,
         a „zmieniły się w międzyczasie" to ostrzeżenie, że stan uciekł. Jedno „pominięto N" kazałoby
-        człowiekowi zgadywać, którą z tych dwóch rzeczy właśnie zobaczył."""
+        człowiekowi zgadywać, którą z tych dwóch rzeczy właśnie zobaczył.
+
+        ZAZNACZENIE PRZEŻYWA GEST (R-S2b-3, człon pierwszy). `refresh()` przebudowuje model
+        (`beginResetModel`), więc zaznaczenie 120 klatek szło do zera — a razem z nim JEDYNY tani
+        cel gestu naprawczego. Zmierzone przez wizytację: odtworzenie stanu sprzed pomyłki
+        kosztowało 6-8 interakcji plus pamięć człowieka o tym, co tam stało."""
+        zaznaczone = [r["frame_id"] for r in self._selected_data_rows()]
         msg = i18n.t(klucz, assigned=gest.assigned, total=gest.assigned + gest.skipped, **kw)
         # Skład i kolejność członów ma JEDNEGO właściciela (`ObjectGesture.skipped_breakdown`),
         # a nie literał tutaj: czwarty człon dołożony w S3 („nie było czego cofać") wpadłby
@@ -2312,10 +2365,19 @@ class FramesView(QWidget):
         # zostawiłem". Człon zostaje osobny, bo to jedyny zapis osi, który sięga rodowodu.
         if gest.stacks:
             msg += i18n.t_plural("grid.sel.object_stacks", gest.stacks)
+        # KANONY OSOBNYM CZŁONEM, nie placeholderem w zdaniu bazowym (R-S2b-3, człon drugi).
+        # Zdanie bazowe ma dwóch wołających o RÓŻNYCH kwargach, więc `{canons}` w nim byłoby
+        # `KeyError`-em u tego, który go nie poda — a bramka i18n pyta o komplet PL/EN i istnienie
+        # klucza, nie o parytet placeholderów z wołającym. Osobny człon milczy przy zerze;
+        # placeholder zostawiłby wiszący dwukropek nad pustką. Nadanie go nie dokłada: tam kanon
+        # jest w zdaniu bazowym, bo user sam go przed chwilą wybrał.
+        if gest.canons and "canon" not in kw:
+            msg += i18n.t("grid.sel.object_canons", canons=_lista_kanonow(gest.canons))
         if gest.assigned:
             # CZTERY POWIERZCHNIE: wiersze gridu, facety (Obiekt zmienił zawartość), licznik/pasek
             # oraz kolejka przeglądu w oknie osi — ta ostatnia przez sygnał, bo nie jest nasza.
             self.refresh()
+            self._przywroc_zaznaczenie(zaznaczone)
             self.object_axis_changed.emit()
         # ZDANIE IDZIE PO ODŚWIEŻENIU, nie przed (adjudykacja recenzji S2b). `refresh()` kończy się
         # własnym `status_message` („Grid: N klatek…"), a odbiornikiem jest jeden `showMessage`
@@ -2323,6 +2385,53 @@ class FramesView(QWidget):
         # dokładnie odwrotny do zamierzonego: rozbicie per fakt user widział WYŁĄCZNIE wtedy, gdy
         # gest niczego nie zapisał (bo wtedy `refresh()` nie leci), a po udanym zapisie — nigdy.
         self.status_message.emit(msg)
+
+    def _przywroc_zaznaczenie(self, frame_ids):
+        """Odłóż zaznaczenie po `frame_id` na PRZEBUDOWANYM modelu (R-S2b-3, człon pierwszy).
+
+        PO `frame_id`, NIE PO NUMERZE WIERSZA — i to nie jest ostrożność: gest osi zmienia klucz
+        sortu tej kolumny (`_object` bierze się z kanonu), a filtr perspektywy potrafi klatkę ze
+        zbioru wyrzucić. Numer wiersza po `refresh()` wskazuje więc zupełnie inną klatkę.
+
+        JEDNO WYWOŁANIE `select()`, NIGDY PĘTLA. Każde wywołanie emituje `selectionChanged`, a ten
+        ciągnie `_update_count` → read-model osi (zmierzone 31 ms przy 16 648 klatkach). Pętla po
+        zakresach wracałaby dokładnie do kwadratu, który zdjęło P-K (2 071 ms → 2 ms).
+
+        ZAKRESY ŁAMIĄ SIĘ NA MARKERACH GRUP i to jest zmierzone falsyfikatorem, nie założone:
+        `select()` na zakresie obejmującym wiersz NIESELEKTOWALNY wciąga go do `sm.selection()`
+        (`selectedRows()` go odsiewa, ZAKRESY nie), a `_selected_data_rows` czyta właśnie zakresy.
+        Bez łamania po geście podświetlałby się nagłówek grupy — wiersz, którego gest nie tknął.
+
+        KADR IDZIE ZA ZAZNACZENIEM. Po `endResetModel` widok wraca na górę, więc zaznaczenie
+        odłożone poprawnie byłoby NIEWIDOCZNE: user patrzy na pierwszy wiersz, a jego 120 klatek
+        siedzi w połowie szesnastu tysięcy. `NoUpdate` przy `setCurrentIndex`, bo bieżąca komórka
+        jest tu kotwicą dla Shift, a nie drugim, konkurencyjnym zaznaczeniem.
+
+        Klatka, która po geście wypadła ze zbioru (perspektywa „Do przeglądu" pyta o `object_id
+        IS NULL`, więc PRZYWRÓCONA klatka do niej nie należy), po prostu nie wraca — to uczciwe,
+        bo jej na ekranie nie ma. Dla gestu przywracania jest to przypadek TYPOWY, nie brzegowy,
+        i dlatego zdanie po geście musi być pełne: bywa jedynym potwierdzeniem."""
+        sm = self.table.selectionModel()
+        if sm is None or not frame_ids:
+            return
+        chciane = set(frame_ids)
+        numery = [i for i, row in enumerate(self.model._rows)
+                  if isinstance(row, dict) and row.get("frame_id") in chciane
+                  and "_group" not in row]
+        if not numery:
+            return
+        ostatnia = self.model.columnCount() - 1
+        sel = QItemSelection()
+        start = prev = numery[0]
+        for i in numery[1:] + [None]:
+            if i != prev + 1:                       # koniec ciągu — także gdy przerwał go marker
+                sel.select(self.model.index(start, 0), self.model.index(prev, ostatnia))
+                start = i
+            prev = i
+        sm.select(sel, QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows)
+        pierwszy = self.model.index(numery[0], 0)
+        sm.setCurrentIndex(pierwszy, QItemSelectionModel.NoUpdate)
+        self.table.scrollTo(pierwszy, QAbstractItemView.PositionAtCenter)
 
     def _on_object_name(self, *, preselect_canon=None):
         """„Przypisz obiekt…" ze Zbiorów: nadpisuje WYŁĄCZNIE źródła słabe, przy zamrożonym stanie
@@ -2425,6 +2534,61 @@ class FramesView(QWidget):
             return
         gest = repo.clear_object_assignment(self.con, frame_ids=ids, now=self._now())
         self._po_gescie_osi("grid.sel.object_cleared", gest)
+
+    def _on_object_restore(self):
+        """„Przywróć cofnięte przypisanie" — DROGA POWROTU z masowego cofnięcia (R-S2b-3).
+
+        Dług nazywał trzy człony i to jest ten trzeci: po pomyłkowym geście na 120 klatkach
+        odtworzenie stanu sprzed niej kosztowało 6-8 interakcji PLUS pamięć człowieka o tym, co
+        tam stało. Od 0017 pamięta to baza, więc naprawa kosztuje JEDEN gest — i składa się
+        z członem pierwszym: zaznaczenie po cofnięciu ZOSTAJE, więc cel jest już wskazany.
+
+        CEL = ZAZNACZENIE, jak obie sąsiednie pozycje menu. Wariant „cofnij OSTATNIĄ partię"
+        (z dziennika) odpadł nie z powodu ceny: menu „Obiekt ▾" ma JEDNĄ regułę celu („ta akcja
+        pisze wyłącznie po zaznaczeniu") i pozycja z własną regułą pisałaby po klatkach, których
+        na ekranie nie widać. Cel z zaznaczenia jest przy tym OGÓLNIEJSZY — sięga też nagrobka
+        sprzed tygodnia, nie tylko tego z ostatniej minuty.
+
+        PISZE JEDNA KLINGA OSI (`repo.user_assign_object`, D-OW-2/B), transakcja per GRUPA, bo
+        klinga przyjmuje jeden kanon na wywołanie, a masowe cofnięcie obejmuje bywa kilka obiektów.
+        Wzorzec: `ConfirmPathObjectsDialog._on_confirm` (pętla klingi per nazwa, faza zajętości).
+
+        `expected_source='user_cleared'` to GUARD DRYFU WEWNĄTRZ TRANSAKCJI: klatka, która między
+        odczytem a zapisem przestała być nagrobkiem, liczy się jako pominięta, a nie zostaje
+        przemalowana. Bez niego jedyną obroną byłby filtr w read-modelu, czyli POZA transakcją —
+        obrona słabsza niż u obu sąsiadów (`expected_object_id` jest tu martwy z definicji, bo
+        nagrobek ma `object_id IS NULL`).
+
+        `alias_norm=None`: alias zapisało pierwotne nadanie, a przywrócenie niczego nie nazywa.
+        `object_source='user'` (domyślne): przywrócenie JEST wskazaniem palcem — drugim świadomym
+        gestem tej samej ręki."""
+        ids = self._object_gesture_ids()
+        if not ids:
+            return
+        grupy, bez_pamieci = queries.restore_targets(self.con, ids)
+        if not grupy:
+            # Uczciwe zero zamiast cichego nic: nagrobek bez pamięci (baza-dawca sprzed 0017)
+            # wygląda na ekranie identycznie jak ten z pamięcią, więc milczenie kazałoby userowi
+            # zgadywać, czy gest nie zadziałał, czy nie miał na czym.
+            self.status_message.emit(i18n.t("grid.sel.object_restore_none", n=bez_pamieci))
+            return
+        gest = repo.ObjectGesture()
+        with busy.busy(self.status_message.emit,
+                       i18n.t("busy.restoring", done=0, total=len(grupy))) as faza:
+            for i, g in enumerate(grupy, 1):
+                try:
+                    gest += repo.user_assign_object(
+                        self.con, alias_norm=None, canon=g["canon"], catalog=g["catalog"],
+                        kind=g["kind"], frame_ids=g["frame_ids"], now=self._now(),
+                        overwrite_weak=True, expected_source="user_cleared")
+                except ValueError as e:      # dryf do nieistniejącej klatki / konflikt aliasu
+                    QMessageBox.warning(self, i18n.t("grid.sel.object_restore"), str(e))
+                    break
+                faza.say(i18n.t("busy.restoring", done=i, total=len(grupy)))
+        self._po_gescie_osi("grid.sel.object_restored", gest)
+        if bez_pamieci:
+            self.status_message.emit(
+                i18n.t("grid.sel.object_restore_no_memory", n=bez_pamieci))
 
     # ---- panele kling (F3, PLAN_ux_redesign §4) ----
     def _toggle_panel(self, which):
@@ -2823,6 +2987,7 @@ class FramesView(QWidget):
             namable=stan["namable"] if stan else 0,
             clearable=stan["clearable"] if stan else 0,
             stacks=stan["stacks_touchable"] if stan else 0,
+            restorable=stan["restorable"] if stan else 0,
             reason=_object_gate_reason(stan))
 
     # ---- panel inspekcji daty (G1/G4 — RenameBar) ----

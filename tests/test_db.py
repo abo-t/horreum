@@ -15,7 +15,8 @@ def test_migracja_ustawia_user_version(tmp_path):
     # + 0014 frame.superseded_by (zastąpienie tożsamości po podmianie pliku, #DR2/R4)
     # + 0015 frame.config_source (oś sprzętu wskazana ręką, #DR2/R1)
     # + 0016 integration.utc_offset_min + powód `offset_unknown` (odniesienie czasu, #DR2/R2)
-    assert db._user_version(con) == db.SCHEMA_VERSION == 16
+    # + 0017 frame.object_cleared_id (pamięć nagrobka — co ręka zdjęła, R-S2b-3)
+    assert db._user_version(con) == db.SCHEMA_VERSION == 17
     con.close()
 
 

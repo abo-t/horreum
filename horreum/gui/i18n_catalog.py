@@ -145,6 +145,37 @@ CATALOG = {
 
     # --- oś OBIEKT + filtr + kolejka przeglądu ---
     "object.col.name": {"pl": "Obiekt", "en": "Object"},
+    # STANY KOMÓRKI „Obiekt" (R-S3-4) — kolumna mówi, CZYM jest to, co pokazuje. Każdy tooltip
+    # niesie RECEPTĘ, nie samą diagnozę: gdzie się TĘ nazwę poprawia. Wspólne „to nie jest
+    # przypisany obiekt" byłoby prawdziwe i nie dawałoby nikomu drogi dalej.
+    # Klucze składa `grid._OBJECT_STATE_TIPS`; parytet z tą mapą pinuje bramka w `test_i18n`.
+    "grid.cell.object_cleared_tip": {
+        "pl": "Przypisanie COFNIĘTE ręką — obiekt nie jest przypisany, a przebieg tej klatki "
+              "nie tknie. Obok stoi surowa nazwa z nagłówka pliku, jeśli plik ją niesie. "
+              "Wróć do niej: Obiekt ▾ → „Przywróć cofnięte przypisanie”.",
+        "en": "Assignment UNDONE by hand — no object is assigned and the resolver will skip this "
+              "frame. Next to it stands the raw name from the file header, if the file carries "
+              "one. Go back: Object ▾ → “Restore undone assignment”."},
+    "grid.cell.object_kind_tip": {
+        "pl": "Kalibracja nie ma obiektu z DEFINICJI — to surowa nazwa z nagłówka pliku "
+              "(kamera wpisuje tam cel sesji także darkom i flatom), a nie przypisany obiekt.",
+        "en": "Calibration has no object BY DEFINITION — this is the raw name from the file "
+              "header (the camera writes the session target into darks and flats too), not an "
+              "assigned object."},
+    "grid.cell.object_raw_tip": {
+        "pl": "Nazwa z nagłówka pliku, NIEROZPOZNANA — obiekt nie jest przypisany. "
+              "Poprawia się ją w PLIKU (Porządki → „Napraw nagłówek…”) albo wskazuje ręką "
+              "(Obiekt ▾ → „Przypisz obiekt…”).",
+        "en": "Name from the file header, UNRECOGNISED — no object is assigned. Fix it in the "
+              "FILE (Tasks → “Fix header…”) or point at it by hand (Object ▾ → “Assign "
+              "object…”)."},
+    "grid.cell.object_hint_tip": {
+        "pl": "PODPOWIEDŹ Z FOLDERU, nie nazwa obiektu — tyle mówi ścieżka gotowego obrazu. "
+              "Nazwy plików generuje WBPP i nie niosą tożsamości; nadaj ją "
+              "(Obiekt ▾ → „Przypisz obiekt…”).",
+        "en": "HINT FROM THE FOLDER, not an object name — this is what the finished image's path "
+              "says. WBPP generates the file names and they carry no identity; assign one "
+              "(Object ▾ → “Assign object…”)."},
     "object.col.catalog": {"pl": "Katalog", "en": "Catalog"},
     "frame.col.sha": {"pl": "sha1 danych", "en": "data sha1"},
     "frame.col.telescope": {"pl": "Teleskop", "en": "Telescope"},
@@ -916,6 +947,11 @@ CATALOG = {
     "busy.saving_names": {"pl": "Zapisuję nazwy: {done} z {total}…",
                           "en": "Saving names: {done} of {total}…"},
     "busy.saving_frames": {"pl": "Zapisuję {n} klatek…", "en": "Saving {n} frames…"},
+    # Przywracanie idzie transakcja per OBIEKT, nie per klatka — licznik mówi więc o grupach,
+    # tak jak `saving_names` mówi o nazwach: „zapisuję" bez liczby nie odróżniałoby przebiegu
+    # przez pięć obiektów od zawieszenia się na pierwszym.
+    "busy.restoring": {"pl": "Przywracam przypisania: {done} z {total}…",
+                       "en": "Restoring assignments: {done} of {total}…"},
     "dialog.open_db_title": {"pl": "Otwórz bazę Horreum", "en": "Open Horreum database"},
     "dialog.open_db_filter": {
         "pl": "Bazy SQLite (*.db *.sqlite);;Wszystkie pliki (*)",
@@ -1145,6 +1181,30 @@ CATALOG = {
     "grid.sel.object_cleared": {
         "pl": "Cofnięto przypisanie na {assigned} z {total} klatek",
         "en": "Assignment undone on {assigned} of {total} frames"},
+    # R-S2b-3: cofnięcie MÓWI, CO ZDJĘŁO — dokładnie jak bliźniacze zdanie nadania („…: NGC 7023").
+    # OSOBNY klucz, nie placeholder w zdaniu bazowym: to zdanie ma dwóch wołających o różnych
+    # kwargach, więc `{canons}` w nim byłoby `KeyError`-em u drugiego — a bramka i18n pyta
+    # o komplet PL/EN i istnienie klucza, NIE o parytet placeholderów z wołającym.
+    "grid.sel.object_canons": {"pl": ": {canons}", "en": ": {canons}"},
+    "grid.sel.object_canons_more": {"pl": " (+{n})", "en": " (+{n})"},
+    "grid.sel.object_restore": {"pl": "Przywróć cofnięte przypisanie",
+                                "en": "Restore undone assignment"},
+    "grid.sel.object_restored": {
+        "pl": "Przywrócono przypisanie na {assigned} z {total} klatek",
+        "en": "Assignment restored on {assigned} of {total} frames"},
+    # DWA RÓŻNE ZDANIA O NAGROBKU BEZ PAMIĘCI, bo to dwa różne stany gestu: pierwsze mówi „nie było
+    # czego przywrócić W OGÓLE" (gest nic nie zrobił), drugie dopowiada „część się nie dała" po
+    # geście, który jednak coś zrobił. Jedno zdanie na oba kłamałoby w którymś z nich.
+    "grid.sel.object_restore_none": {
+        "pl": "Nie ma czego przywrócić — nagrobków z zapamiętanym obiektem: 0 "
+              "(bez zapamiętanego obiektu: {n}). Nic nie zapisano.",
+        "en": "Nothing to restore — tombstones with a remembered object: 0 "
+              "(without a remembered object: {n}). Nothing was written."},
+    "grid.sel.object_restore_no_memory": {
+        "pl": "Pominięto {n} klatek bez zapamiętanego obiektu — te nagrobki powstały przed "
+              "wersją, która zapamiętuje, co ręka zdjęła.",
+        "en": "Skipped {n} frames without a remembered object — those tombstones predate the "
+              "version that remembers what the hand removed."},
     # Rozbicie PER FAKT — każda przyczyna osobno, bo znaczą dla człowieka co innego.
     "grid.sel.object_skip_kind": {"pl": " · kalibracja: {n}", "en": " · calibration: {n}"},
     "grid.sel.object_skip_source": {"pl": " · z nagłówka/regionu: {n}",
@@ -1177,6 +1237,10 @@ CATALOG = {
     "grid.sel.object_tip_empty": {
         "pl": "Zaznacz klatki — ta akcja pisze wyłącznie po zaznaczeniu.",
         "en": "Select frames — this action writes only to the selection."},
+    # TRZECIA DROGA W TYM SAMYM ZDANIU, co dwie pierwsze (R-S2b-3) — inaczej tooltip zapowiadałby
+    # dwie liczby przy trzech akcjach w menu, czyli klasa R-S3-8 od nowa.
+    "grid.sel.object_tip_restorable": {"pl": " · do przywrócenia: {n}",
+                                       "en": " · to restore: {n}"},
     "grid.sel.object_tip_no_lights": {
         "pl": "Zaznaczenie nie ma klatek nieba. Kalibracja obiektu nie ma z definicji.",
         "en": "The selection has no sky frames. Calibration has no object by definition."},

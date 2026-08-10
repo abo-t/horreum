@@ -361,7 +361,8 @@ def transfer_human_facts(con, *, frame_id, now, actor="user:local"):
     osi (następczyni ma już swoje) i zwraca `skipped` bez zapisu."""
     with _immediate(con):
         stara = con.execute(
-            "SELECT superseded_by, object_id, object_source, config_id, config_source "
+            "SELECT superseded_by, object_id, object_source, object_cleared_id, "
+            "       config_id, config_source "
             "FROM frame WHERE id = ?", (frame_id,)).fetchone()
         if stara is None:
             raise ValueError(f"frame:{frame_id} nie istnieje")
@@ -432,8 +433,15 @@ def transfer_human_facts(con, *, frame_id, now, actor="user:local"):
                                 else "nastepczyni ma wlasne zrodlo")
 
         if obiekt_do_przeniesienia:
-            con.execute("UPDATE frame SET object_id = ?, object_source = ? WHERE id = ?",
-                        (stara["object_id"], stara["object_source"], nowa_id))
+            # PAMIĘĆ NAGROBKA JEDZIE Z NIM (0017), w tym samym `UPDATE`, co źródło: przeniesienie
+            # ma oddać następczyni CAŁY werdykt ręki, a werdykt brzmi „to nie jest X" — bez `X`
+            # zostałoby z niego samo „to nie jest". Dla klatki z obiektem kolumna jest NULL-em
+            # i przechodzi NULL-em, więc jeden zapis obsługuje obie gałęzie (`CHECK` w DDL i tak
+            # nie przepuściłby pamięci przy niepustym `object_id`).
+            con.execute("UPDATE frame SET object_id = ?, object_source = ?, "
+                        "object_cleared_id = ? WHERE id = ?",
+                        (stara["object_id"], stara["object_source"],
+                         stara["object_cleared_id"], nowa_id))
             if stara["object_id"] is None:
                 emit_event(con, actor=actor, verb="object.cleared", target=f"frame:{nowa_id}",
                            now=now, payload={"przeniesione_z": frame_id,
@@ -1318,6 +1326,36 @@ class ObjectGesture:
                                # `skipped` — to informacja o tym, co gest ruszył, a nie o tym, czego
                                # nie ruszył. Osobno, bo gotowy obraz jest jedyną klatką, przy której
                                # zapis osi może dotknąć rodowodu
+    canons: tuple = ()         # KANONY, których gest DOTKNĄŁ — do zdania „…: NGC 7023". Krotka,
+                               # bo dataclass jest `frozen` (lista byłaby mutowalnym stanem we
+                               # wnętrzu niemutowalnego wyniku). Zdanie nadania zna kanon od
+                               # wołającego (sam go wybrał); zdanie COFNIĘCIA nie ma go skąd wziąć
+                               # inaczej niż od klingi — i przez to milczało o tym, co zdjęło
+
+    def __add__(self, inny):
+        """Suma dwóch gestów — JEDEN właściciel składania, tak jak `skipped_breakdown` jest jedynym
+        właścicielem rozbicia.
+
+        Potrzebna, odkąd jeden gest człowieka bywa N transakcjami: przywracanie idzie klingą per
+        GRUPA (obiekt × zaznaczenie), a zdanie po geście jest jedno. Druga siedziba tej sumy już
+        istnieje i już jest zepsuta — `ConfirmPathObjectsDialog._on_confirm` sumuje ręcznie
+        `assigned` i `skipped`, więc GUBI rozbicie per fakt: user dostaje „przypisano 30 z 40" bez
+        zdania, dlaczego dziesięć zostało. Trzecia siedziba powtórzyłaby ten błąd, a czwarta
+        powtórzyłaby go po raz kolejny — dlatego składanie ma dom w klasie, nie u wołających.
+
+        Kanony sklejają się BEZ POWTÓRZEŃ i w porządku pierwszego wystąpienia: to nazwy do zdania,
+        a nie zbiór do liczenia — powtórzony kanon w komunikacie wygląda jak dwa różne obiekty."""
+        if not isinstance(inny, ObjectGesture):
+            return NotImplemented
+        kanony = list(self.canons) + [c for c in inny.canons if c not in self.canons]
+        return ObjectGesture(
+            assigned=self.assigned + inny.assigned,
+            skipped_kind=self.skipped_kind + inny.skipped_kind,
+            skipped_source=self.skipped_source + inny.skipped_source,
+            skipped_nothing=self.skipped_nothing + inny.skipped_nothing,
+            skipped_drift=self.skipped_drift + inny.skipped_drift,
+            stacks=self.stacks + inny.stacks,
+            canons=tuple(kanony))
 
     @property
     def skipped(self):
@@ -1339,7 +1377,8 @@ class ObjectGesture:
 
 
 def user_assign_object(con, *, alias_norm, canon, catalog, kind, frame_ids, now, uid="local",
-                       object_source="user", expected_object_id=None, overwrite_weak=False):
+                       object_source="user", expected_object_id=None, overwrite_weak=False,
+                       expected_source=None):
     """Przypisanie obiektu GRUPIE klatek GESTEM CZŁOWIEKA (#8, D-P4-4) — JEDNA transakcja
     `_immediate`, DML inline (NIE kompozycja `upsert_object`+`add_object_alias`+`assign_object`:
     każda z nich ma własny `with con:` commitujący przy wyjściu — zawołane wewnątrz zewnętrznej
@@ -1388,7 +1427,13 @@ def user_assign_object(con, *, alias_norm, canon, catalog, kind, frame_ids, now,
       emituje PARĘ verbów, nie samo `object.assigned` (inaczej §5.9 rozjeżdża się cicho).
     * `expected_object_id` to ZAMROŻONY STAN z chwili, gdy user patrzył na okno. Klatka, która
       w międzyczasie trafiła pod inny obiekt, jest pomijana jako dryf — bez tego gest „przemaluj
-      te 30 klatek z `NGC6960`" nadpisałby też klatkę, która właśnie stała się czymś innym."""
+      te 30 klatek z `NGC6960`" nadpisałby też klatkę, która właśnie stała się czymś innym.
+    * `expected_source` to RODZEŃSTWO powyższego dla klatek BEZ obiektu — i istnieje, bo tamten
+      przy nagrobku jest martwy Z DEFINICJI: `object_id IS NULL`, więc jego gałąź się nie wykonuje.
+      Wołający, który przywraca cofnięte przypisanie, żąda `expected_source='user_cleared'`
+      i wtedy klatka, która przestała być nagrobkiem między odczytem a zapisem, liczy się jako
+      dryf. Bez tego jedyną obroną byłby filtr w read-modelu — czyli POZA transakcją, obrona
+      słabsza niż u obu sąsiednich gestów tej samej osi."""
     if alias_norm is not None and not alias_norm:
         raise ValueError("alias_norm pusty — nazwa bez znaków alfanumerycznych nie może być kluczem")
     if object_source not in OBJECT_SOURCES:
@@ -1429,6 +1474,9 @@ def user_assign_object(con, *, alias_norm, canon, catalog, kind, frame_ids, now,
             if fr["kind"] not in LIGHT_KINDS:
                 kind_skip += 1                      # kalibracja: obiektu nie ma z DEFINICJI
                 continue
+            if expected_source is not None and fr["object_source"] != expected_source:
+                drift += 1                          # nie ten stan, co widział read-model wołającego
+                continue
             if fr["object_id"] is not None:
                 if not overwrite_weak:
                     drift += 1                      # dryf: klatka zajęta między dialogiem a zapisem
@@ -1450,8 +1498,12 @@ def user_assign_object(con, *, alias_norm, canon, catalog, kind, frame_ids, now,
                 # tylko jawne „Przypisz obiekt" (`overwrite_weak`) jest drugim gestem człowieka.
                 source_skip += 1
                 continue
+            # PAMIĘĆ NAGROBKA GAŚNIE W TYM SAMYM `UPDATE` (migracja 0017): klatka przestaje
+            # cokolwiek odrzucać, więc wskazanie na odrzucony obiekt traci przedmiot. Nie jest to
+            # uprzejmość wobec czytelników — `CHECK` w DDL odbija zapis, który by o tym zapomniał.
             con.execute(
-                "UPDATE frame SET object_id = ?, object_source = ? WHERE id = ?",
+                "UPDATE frame SET object_id = ?, object_source = ?, object_cleared_id = NULL "
+                "WHERE id = ?",
                 (object_id, object_source, frame_id))
             emit_event(con, actor=actor, verb="object.assigned", target=f"frame:{frame_id}",
                        now=now, payload={"object_id": object_id, "object_source": object_source})
@@ -1461,8 +1513,13 @@ def user_assign_object(con, *, alias_norm, canon, catalog, kind, frame_ids, now,
             # dobór okna jego rodowodu — user ma prawo wiedzieć, że tego właśnie dotknął, zanim
             # zobaczy w Dostawie „pominięto, zapisany dowód mocniejszy".
             stacks += fr["kind"] == "master_light"
+    # Kanon wraca w wyniku TYLKO gdy coś zapisano: gest, który nic nie ruszył, nie ma prawa
+    # powiedzieć „…: NGC 7023" o klatkach, których nie tknął. Wołający-pojedynczy kanon i tak zna
+    # (sam go wybrał), ale wołający-pętla (przywracanie) składa zdanie z sumy N gestów i musi go
+    # dostać STĄD, bo grupy różnią się obiektem.
     return ObjectGesture(assigned=assigned, skipped_kind=kind_skip,
-                         skipped_source=source_skip, skipped_drift=drift, stacks=stacks)
+                         skipped_source=source_skip, skipped_drift=drift, stacks=stacks,
+                         canons=(canon,) if assigned else ())
 
 
 def clear_object_assignment(con, *, frame_ids, now, uid="local"):
@@ -1478,7 +1535,9 @@ def clear_object_assignment(con, *, frame_ids, now, uid="local"):
     z folderu — najbliższy `Rozwiąż` przypisałby klatkę PONOWNIE. Zostawiamy więc
     `object_source='user_cleared'` przy `object_id NULL`; drabina taką klatkę pomija
     (`STICKY_OBJECT_SOURCES`). Nagrobek jest STICKY i gaśnie JEDNYM gestem: writebackiem karty
-    `OBJECT` do pliku (`writeback._clear_object_tombstone`) albo kolejnym „Przypisz obiekt".
+    `OBJECT` do pliku (`clear_object_tombstone`, wołane z `writeback`) albo kolejnym „Przypisz
+    obiekt". Trzecią drogą jest PRZYWRÓCENIE (R-S2b-3) — też przez „Przypisz obiekt", bo pisarz
+    osi jest jeden; różni się wyłącznie tym, że kanon bierze z pamięci nagrobka, a nie z okna.
 
     GOTOWE OBRAZY SĄ W ZASIĘGU (D-OW-7, decyzja Zdzinia 2026-08-03 — odwraca R24#7): gest obejmuje
     `master_light` tak samo jak lighta, a licznik `stacks` mówi, ile ich ruszył. Odwrócenie wolno
@@ -1493,9 +1552,22 @@ def clear_object_assignment(con, *, frame_ids, now, uid="local"):
 
     PARA VERBÓW: `object.unassigned` (co zdjęto) + `object.cleared` (że to WERDYKT, nie brak).
     Dwa, nie jeden, bo pytania są dwa: bilans osi (§5.9) liczy odpięcia, a kolejka przeglądu musi
-    umieć pokazać człon „cofnięte ręką" bez zaglądania w payload. Zwraca `ObjectGesture`."""
+    umieć pokazać człon „cofnięte ręką" bez zaglądania w payload. Zwraca `ObjectGesture`.
+
+    NAGROBEK PAMIĘTA, CO ZDJĄŁ (migracja 0017, R-S2b-3) — `object_cleared_id` zapisywane w TYM
+    SAMYM `UPDATE`, co samo źródło. Bez tego cofnięcie zapisywało FAKT odmowy bez jej PRZEDMIOTU,
+    więc masowy gest na 120 klatkach nie miał drogi powrotu: odtworzenie stanu sprzed pomyłki
+    kosztowało 6-8 interakcji PLUS pamięć człowieka o tym, co tam stało. Pamięć jest STANEM, nie
+    zapisem w dzienniku, bo pytanie „co ta klatka odrzuciła" dotyczy JEJ, a nie historii — a skan
+    `event` łamie się przy drugim cofnięciu tej samej klatki i przy nagrobku przeniesionym
+    (`transfer_human_facts` emituje ten verb bez `was_object_id`).
+
+    KANONY W WYNIKU: zdanie po geście podaje, co zdjęto — dokładnie jak bliźniacze zdanie nadania
+    („Nazwano … : NGC 7023"). Kanon czytamy przez CACHE `object_id → canon`, a nie zapytaniem per
+    klatka: pętla robi już jeden `SELECT` na klatkę, a zaznaczenie bywa liczone w tysiącach."""
     actor = f"user:{uid}"
     cleared = kind_skip = source_skip = nothing_skip = stacks = 0
+    kanony, cache = [], {}
     with _immediate(con):
         for frame_id in frame_ids:
             fr = con.execute(
@@ -1517,8 +1589,16 @@ def clear_object_assignment(con, *, frame_ids, now, uid="local"):
                 source_skip += 1                    # fakt spoza ręki — nagłówek/xref/region
                 continue
             con.execute(
-                "UPDATE frame SET object_id = NULL, object_source = 'user_cleared' WHERE id = ?",
-                (frame_id,))
+                "UPDATE frame SET object_id = NULL, object_source = 'user_cleared', "
+                "object_cleared_id = ? WHERE id = ?",
+                (fr["object_id"], frame_id))
+            if fr["object_id"] not in cache:
+                wiersz = con.execute("SELECT canon FROM object WHERE id = ?",
+                                     (fr["object_id"],)).fetchone()
+                cache[fr["object_id"]] = wiersz["canon"] if wiersz is not None else None
+            kanon = cache[fr["object_id"]]
+            if kanon is not None and kanon not in kanony:
+                kanony.append(kanon)
             emit_event(con, actor=actor, verb="object.unassigned", target=f"frame:{frame_id}",
                        now=now, payload={"object_id": fr["object_id"],
                                          "object_source": fr["object_source"]})
@@ -1528,7 +1608,8 @@ def clear_object_assignment(con, *, frame_ids, now, uid="local"):
             cleared += 1
             stacks += fr["kind"] == "master_light"
     return ObjectGesture(assigned=cleared, skipped_kind=kind_skip,
-                         skipped_source=source_skip, skipped_nothing=nothing_skip, stacks=stacks)
+                         skipped_source=source_skip, skipped_nothing=nothing_skip, stacks=stacks,
+                         canons=tuple(kanony))
 
 
 def clear_object_tombstone(con, *, frame_id, now, actor="user:local"):
@@ -1540,13 +1621,17 @@ def clear_object_tombstone(con, *, frame_id, now, actor="user:local"):
 
     Klatka bez nagrobka → `False` bez zapisu i bez eventu (idempotencja jak reszta repo). Verb jest
     WŁASNY (`object.tombstone_cleared`), nie `object.unassigned`: nic się nie odpina, znika sam
-    zakaz — a bramka §5.9 liczy odpięcia i para bez odpowiednika rozjechałaby jej bilans."""
+    zakaz — a bramka §5.9 liczy odpięcia i para bez odpowiednika rozjechałaby jej bilans.
+
+    PAMIĘĆ GAŚNIE RAZEM Z NAGROBKIEM (0017): znika zakaz, więc znika też wskazanie na to, czego
+    zakaz dotyczył. `CHECK` w DDL i tak nie przepuściłby wiersza bez nagrobka, ale z pamięcią."""
     with _immediate(con):
         row = con.execute(
             "SELECT object_source FROM frame WHERE id = ?", (frame_id,)).fetchone()
         if row is None or row["object_source"] != "user_cleared":
             return False
-        con.execute("UPDATE frame SET object_source = NULL WHERE id = ?", (frame_id,))
+        con.execute("UPDATE frame SET object_source = NULL, object_cleared_id = NULL WHERE id = ?",
+                    (frame_id,))
         emit_event(con, actor=actor, verb="object.tombstone_cleared",
                    target=f"frame:{frame_id}", now=now, payload={"reason": "object_card_written"})
     return True

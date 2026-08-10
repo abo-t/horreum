@@ -315,3 +315,172 @@ def test_parytet_encji_i_eventow_przezywa_oba_gesty():
     assert rows["frame.object_id"].ok, rows["frame.object_id"]
     assert rows["object"].ok and rows["object_alias"].ok
     assert audit.object_source_audit(con).ok               # `user_cleared` JEST w enumie
+
+
+# ═══════════════════════════════════════════ R-S2b-3 — PAMIĘĆ NAGROBKA I DROGA POWROTU
+
+
+def _pamiec(con, fid):
+    return con.execute("SELECT object_cleared_id FROM frame WHERE id = ?", (fid,)).fetchone()[0]
+
+
+def _przywroc(con, fids, canon="LMC"):
+    """Przywrócenie idzie TĄ SAMĄ klingą, co nadanie (D-OW-2/B: jeden pisarz osi dla każdego gestu
+    człowieka) — różni się wyłącznie guardem stanu i tym, skąd bierze kanon."""
+    return repo.user_assign_object(con, alias_norm=None, canon=canon, catalog=None, kind="own",
+                                   frame_ids=fids, now=NOW, overwrite_weak=True,
+                                   expected_source="user_cleared")
+
+
+def test_nagrobek_PAMIETA_co_zdjal_a_przypisanie_te_pamiec_gasi():
+    """SEDNO ODWRACALNOŚCI (migracja 0017). Do tej paczki nagrobek zapisywał sam FAKT odmowy bez
+    jej PRZEDMIOTU, więc masowe cofnięcie nie miało drogi powrotu: odtworzenie stanu sprzed pomyłki
+    kosztowało 6-8 interakcji plus pamięć CZŁOWIEKA o tym, co tam stało.
+
+    Trzy przejścia w jednym teście, bo pamięć musi ginąć dokładnie wtedy, gdy ginie nagrobek —
+    inaczej zostałaby wskazaniem na obiekt, którego ta klatka już nie odrzuca."""
+    con = _baza([("light", "raw", None, rf"{R}\LIGHTS\LMC\a.ARW")])
+    _przypisz(con, [1])
+    oid = con.execute("SELECT object_id FROM frame WHERE id = 1").fetchone()[0]
+    assert _pamiec(con, 1) is None                          # klatka z obiektem niczego nie odrzuca
+
+    repo.clear_object_assignment(con, frame_ids=[1], now=NOW)
+    assert _stan(con, 1) == (None, "user_cleared") and _pamiec(con, 1) == oid
+
+    _przypisz(con, [1], overwrite_weak=True)                # …i pamięć gaśnie razem z nagrobkiem
+    assert _stan(con, 1)[1] == "user" and _pamiec(con, 1) is None
+
+
+def test_pamiec_nagrobka_wskazuje_OSTATNI_zdjety_obiekt():
+    """FALSYFIKATOR WARIANTU „CZYTAJ Z DZIENNIKA": klatka cofnięta DWUKROTNIE ma dwa zdarzenia
+    `object.cleared` o RÓŻNYM `was_object_id`, a payload nie mówi, który jest żywy. Stan mówi —
+    bo jest jeden i opisuje TERAZ.
+
+    To ta sama figura, którą repo dostało już trzy razy (pamięć `horreum-review-queue-from-state`):
+    read-model liczony ze zdarzeń zamiast ze stanu."""
+    con = _baza([("light", "raw", None, rf"{R}\LIGHTS\LMC\a.ARW")])
+    _przypisz(con, [1], canon="LMC")
+    repo.clear_object_assignment(con, frame_ids=[1], now=NOW)
+    _przypisz(con, [1], canon="IC443", overwrite_weak=True)
+    repo.clear_object_assignment(con, frame_ids=[1], now=NOW)
+
+    assert _ev(con, "object.cleared") == 2, "dwa zdarzenia — dziennik ma z czego kłamać"
+    ic = con.execute("SELECT id FROM object WHERE canon = 'IC443'").fetchone()[0]
+    assert _pamiec(con, 1) == ic
+
+
+def test_cofniecie_MOWI_co_zdjelo_takze_przy_kilku_obiektach():
+    """Zdanie po geście podaje kanon — dokładnie jak bliźniacze zdanie nadania. Cofnięcie NIE ma
+    bramki jednorodności (ma ją tylko NADANIE, bo tam brak jednego przedmiotu znaczy brak jednej
+    nazwy do wpisania), więc jeden gest bywa gestem na kilku obiektach i lista musi być KOMPLETNA,
+    a nie „pierwszy napotkany"."""
+    con = _baza([("light", "raw", None, rf"{R}\LIGHTS\a.ARW"),
+                 ("light", "raw", None, rf"{R}\LIGHTS\b.ARW")])
+    _przypisz(con, [1], canon="LMC")
+    _przypisz(con, [2], canon="IC443")
+    g = repo.clear_object_assignment(con, frame_ids=[1, 2], now=NOW)
+    assert sorted(g.canons) == ["IC443", "LMC"] and g.assigned == 2
+
+    # …a gest, który NICZEGO nie zdjął, nie ma prawa nazwać obiektu, którego nie tknął
+    assert repo.clear_object_assignment(con, frame_ids=[1, 2], now=NOW).canons == ()
+
+
+def test_przywrocenie_ODDAJE_obiekt_i_POMIJA_klatke_ktora_nagrobkiem_byc_przestala():
+    """GUARD DRYFU JEST W TRANSAKCJI, nie przed nią (`expected_source`). `expected_object_id` jest
+    tu martwy Z DEFINICJI — nagrobek ma `object_id IS NULL`, więc jego gałąź się nie wykonuje.
+
+    Falsyfikator: zdejmij `expected_source` z `_przywroc` → klatka 2 (nazwana ręką w międzyczasie)
+    zostaje PRZEMALOWANA na cudzy kanon, zamiast policzyć się jako dryf."""
+    con = _baza([("light", "raw", None, rf"{R}\LIGHTS\a.ARW"),
+                 ("light", "raw", None, rf"{R}\LIGHTS\b.ARW")])
+    _przypisz(con, [1, 2], canon="LMC")
+    lmc = con.execute("SELECT id FROM object WHERE canon = 'LMC'").fetchone()[0]
+    repo.clear_object_assignment(con, frame_ids=[1, 2], now=NOW)
+    _przypisz(con, [2], canon="IC443", overwrite_weak=True)     # dryf: 2 przestała być nagrobkiem
+
+    g = _przywroc(con, [1, 2])
+    assert (g.assigned, g.skipped_drift) == (1, 1)
+    assert _stan(con, 1) == (lmc, "user") and _pamiec(con, 1) is None
+    assert con.execute("SELECT canon FROM object WHERE id = ?",
+                       (_stan(con, 2)[0],)).fetchone()[0] == "IC443"
+
+
+def test_przywrocenie_JEST_idempotentne():
+    """Drugi klik nie ma czego przywracać: klatka nie jest już nagrobkiem, więc `expected_source`
+    liczy ją jako dryf i ZERO nowych eventów. Idempotencja jak reszta repo."""
+    con = _baza([("light", "raw", None, rf"{R}\LIGHTS\a.ARW")])
+    _przypisz(con, [1], canon="LMC")
+    repo.clear_object_assignment(con, frame_ids=[1], now=NOW)
+    _przywroc(con, [1])
+    przed = con.execute("SELECT count(*) FROM event").fetchone()[0]
+    g = _przywroc(con, [1])
+    assert (g.assigned, g.skipped_drift) == (0, 1)
+    assert con.execute("SELECT count(*) FROM event").fetchone()[0] == przed
+
+
+def test_suma_gestow_NIE_gubi_rozbicia():
+    """`ObjectGesture.__add__` jest JEDYNYM właścicielem składania — przywracanie idzie transakcja
+    per OBIEKT, a zdanie po geście jest jedno. Druga siedziba tej sumy (`ConfirmPathObjectsDialog`)
+    sumuje ręcznie dwa pola i przez to GUBI rozbicie per fakt; trzecia powtórzyłaby ten błąd.
+
+    Kanony sklejają się bez powtórzeń: ta sama nazwa dwa razy w komunikacie wygląda jak dwa różne
+    obiekty."""
+    a = repo.ObjectGesture(assigned=2, skipped_kind=1, stacks=1, canons=("LMC",))
+    b = repo.ObjectGesture(assigned=3, skipped_drift=4, canons=("IC443", "LMC"))
+    s = a + b
+    assert (s.assigned, s.skipped_kind, s.skipped_drift, s.stacks) == (5, 1, 4, 1)
+    assert s.canons == ("LMC", "IC443")
+    assert dict(s.skipped_breakdown)["drift"] == 4 and s.skipped == 5
+
+
+def test_pamiec_nagrobka_JEDZIE_na_nastepczynie():
+    """Werdykt ręki brzmi „to NIE jest X" — bez X zostałoby z niego samo „to nie jest".
+    `transfer_human_facts` przenosi więc pamięć razem ze źródłem, w tym samym zapisie.
+
+    To DRUGI powód, dla którego dziennik nie mógł być źródłem prawdy: tamta klinga emituje
+    `object.cleared` BEZ klucza `was_object_id`, więc nagrobek przeniesiony miałby ślad
+    w dzienniku, ale bez przedmiotu — wyparowałby z obu liczb naraz."""
+    con = _baza([("light", "raw", None, rf"{R}\LIGHTS\a.ARW"),
+                 ("light", "raw", None, None)])       # następczyni: ta sama ścieżka, nowa treść
+    _przypisz(con, [1], canon="LMC")
+    lmc = con.execute("SELECT id FROM object WHERE canon = 'LMC'").fetchone()[0]
+    repo.clear_object_assignment(con, frame_ids=[1], now=NOW)
+    con.execute("UPDATE frame SET superseded_by = 2 WHERE id = 1")
+    con.commit()
+
+    repo.transfer_human_facts(con, frame_id=1, now=NOW)
+    assert _stan(con, 2) == (None, "user_cleared") and _pamiec(con, 2) == lmc
+
+
+def test_przywrocenie_ZDEJMUJE_populacje_u_WSZYSTKICH_jej_czytelnikow():
+    """Gest zdejmuje stan STICKY, a populację nagrobków liczą TRZY powierzchnie osobno. Bramka pyta
+    o każdą, bo rozjazd którejkolwiek przechodziłby na zielono, gdyby pytać o jedną: spis faktów
+    ręki, kolejka przeglądu i delta przebiegu."""
+    from horreum import audit
+    from horreum.gui import queries
+    con = _baza([("light", "raw", None, rf"{R}\LIGHTS\a.ARW"),
+                 ("light", "raw", None, rf"{R}\LIGHTS\b.ARW")])
+    _przypisz(con, [1, 2], canon="LMC")
+    repo.clear_object_assignment(con, frame_ids=[1, 2], now=NOW)
+
+    przed = audit.human_facts_census(con)
+    assert przed.object_cleared == 2
+    assert len(queries.review_frame_ids(con)) == 2
+    assert resolver.run_resolver(con, now=NOW).objects_user_cleared == 2
+
+    _przywroc(con, [1, 2])
+
+    po = audit.human_facts_census(con)
+    assert po.object_cleared == 0
+    # UBYTEK NA OSI NAGROBKÓW NIE JEST NARUSZENIEM „ręki nietykalnej": warunek broni ręki przed
+    # WJAZDEM MATERIAŁU, a nie przed drugim gestem tej samej ręki, i dokładnie tak zachowuje się
+    # dziś istniejąca droga „Przypisz obiekt" na nagrobku.
+    #
+    # OŚ `object_hand` STOI, i to jest POMIAR, nie założenie: `TRANSFERABLE_OBJECT_SOURCES` =
+    # `STICKY | WEAK`, więc `user_cleared` JUŻ się do niej liczy (docstring `human_facts_census`
+    # mówi to wprost: „`object_hand` już go obejmuje jako źródło"). Przywrócenie przenosi klatkę
+    # między dwoma RODZAJAMI faktu ręki, a nie z niebytu do faktu — suma faktów ręki się nie
+    # rusza. Pierwsza wersja tej bramki twierdziła `+2` i została obalona własnym przebiegiem.
+    assert po.object_hand == przed.object_hand == 2
+    assert not queries.review_frame_ids(con)
+    assert resolver.run_resolver(con, now=NOW).objects_user_cleared == 0

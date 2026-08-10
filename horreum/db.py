@@ -51,6 +51,10 @@ from importlib import resources
 # plus token `offset_unknown` w CHECK-u powodów. Sama kolumna poszłaby ADD COLUMN — CHECK wymusza
 # przebudowę. PIERWSZA przebudowa tabeli z REALNYMI danymi (128 wierszy + 3367 w dziecku), więc
 # INSERT SELECT kopiuje KOMPLET kolumn po obu stronach, a nie podzbiór jak 0012.
+# 0017 to PRZYROST (R-S2b-3): frame.object_cleared_id — PAMIĘĆ nagrobka, czyli obiekt, który ręka
+# zdjęła. Do S2b nagrobek zapisywał sam FAKT odmowy bez jej PRZEDMIOTU, więc masowe cofnięcie nie
+# miało drogi powrotu. STAN, nie dziennik: klatka cofnięta dwukrotnie ma dwa `object.cleared`,
+# a `transfer_human_facts` emituje ten verb bez `was_object_id`. CHECK wiąże pamięć z nagrobkiem.
 MIGRATIONS = [
     (2, "0002_initial.sql"),
     (3, "0003_writeback.sql"),
@@ -67,6 +71,7 @@ MIGRATIONS = [
     (14, "0014_superseded.sql"),
     (15, "0015_config_source.sql"),
     (16, "0016_integration_offset.sql"),
+    (17, "0017_object_cleared_memory.sql"),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 _KNOWN_VERSIONS = frozenset({0} | {v for v, _ in MIGRATIONS})

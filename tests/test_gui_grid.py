@@ -2318,6 +2318,35 @@ def test_przywrocenie_nagrobka_BEZ_pamieci_mowi_prawde_i_nic_nie_pisze(obj_view)
     assert "Nie ma czego przywrócić" in msgs[-1] and "bez zapamiętanego obiektu: 1" in msgs[-1]
 
 
+def test_populacja_MIESZANA_nie_wymazuje_potwierdzenia_gestu(obj_view):
+    """POPULACJA MIESZANA MA JEDNO ZDANIE, NIE DWA (bramka pakietu 0810, zarzut Fable Z#1).
+
+    Odbiornikiem `status_message` jest jeden `showMessage` (`app._flash`), więc druga emisja w tym
+    samym obrocie pętli WYMAZUJE pierwszą — user po UDANYM przywróceniu widziałby wyłącznie
+    „pominięto N bez zapamiętanego obiektu", a potwierdzenia gestu nie widziałby wcale. Kosztuje to
+    akurat zdanie, które przy tym geście bywa JEDYNYM potwierdzeniem: klatka przywrócona wypada
+    z perspektywy „Do przeglądu", więc z ekranu znika.
+
+    Falsyfikator: rozbij `ogon` z powrotem na drugi `status_message.emit` → `msgs[-1]` przestaje
+    nieść „Przywrócono", choć zapis się udał."""
+    v, con = obj_view
+    v.refresh()
+    _zaznacz(v, [1, 2])
+    v._on_object_clear()
+    con.execute("UPDATE frame SET object_cleared_id = NULL WHERE id = 2")   # nagrobek sprzed 0017
+    con.commit()
+
+    msgs = []
+    v.status_message.connect(msgs.append)
+    _zaznacz(v, [1, 2])
+    v._on_object_restore()
+
+    assert con.execute("SELECT object_source FROM frame WHERE id = 1").fetchone()[0] == "user"
+    assert "Przywrócono przypisanie na 1 z 1 klatek" in msgs[-1], "potwierdzenie gestu wymazane"
+    assert "Pominięto 1 klatek bez zapamiętanego obiektu" in msgs[-1], \
+        "drugi fakt zgubiony przy sklejaniu"
+
+
 def test_kolejka_NIE_dostaje_nowego_kubelka_poza_czlonem_cofniecia(obj_view):
     """§4/14c-g: nagrobek NIE tworzy szóstego kubełka — klatka wraca do tego, w którym była, a jej
     partycja dalej się domyka. Falsyfikator: gdyby `user_cleared` wypadło z `review_frame_ids`,

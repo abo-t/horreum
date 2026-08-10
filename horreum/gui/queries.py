@@ -124,8 +124,19 @@ def object_cell(row):
     Tylko `master_light`, bo light z akwizycji ma własną drogę (szczebel ścieżki S2 PROPONUJE mu
     kanon). Nic z tego nie trafia do bazy: to warstwa PREZENTACJI, gest osi należy do człowieka.
 
-    Wiersz czytamy `.get`, nie indeksem: `kind`/`path`/`object_source` wchodzą nie z każdego
-    zapytania gridu, a `sqlite3.Row` na brakującym kluczu rzuca."""
+    WEJŚCIEM JEST SŁOWNIK, NIE `sqlite3.Row` — i to jest kontrakt, nie szczegół (bramka pakietu
+    0810, zarzut A#1): `Row` nie ma metody `.get` W OGÓLE, więc podanie surowego wiersza kończy się
+    `AttributeError` przy pierwszej komórce. Wołający ma go rozpakować (`grid._derive` robi
+    `{k: row[k] for k in row.keys()}`), bo `kind`/`path`/`object_source` wchodzą nie z każdego
+    zapytania gridu, a `Row` na brakującym kluczu rzuca — `dict.get` oddaje `None`.
+
+    WIERSZ NIEMY O RODZAJU NIE DOSTAJE ZDANIA O RODZAJU (bramka pakietu 0810, zarzut zgodny
+    u dwóch soczewek). Gałąź `kind` twierdzi „kalibracja obiektu nie ma z DEFINICJI", więc wolno
+    ją postawić WYŁĄCZNIE przy rodzaju ZNANYM: `row.get("kind")` bez klucza oddaje `None`, a `None
+    not in LIGHT_KINDS` jest prawdą — light u wołającego bez `kind` dostawał tooltip o kalibracji.
+    Dziś populacja jest zerowa (jedyny konsument to `grid._derive` ← `base_rows`, która `kind`
+    niesie zawsze, a `frame.kind` jest `NOT NULL`), ale kontrakt tej funkcji sam zaprasza drugą
+    powierzchnię — więc fallbackiem jest `raw`, który o rodzaju nie twierdzi niczego."""
     if row.get("object_canon"):
         return row["object_canon"], "canon"
     raw = row.get("object_raw") or ""
@@ -137,7 +148,8 @@ def object_cell(row):
     # z każdego zapytania gridu) — czyli zdanie o rodzaju, którego ten wiersz nie zna. Złapała to
     # własna bramka tej paczki, nie recenzja.
     if raw:
-        return raw, "kind" if row.get("kind") not in LIGHT_KINDS else "raw"
+        rodzaj = row.get("kind")
+        return raw, "kind" if rodzaj is not None and rodzaj not in LIGHT_KINDS else "raw"
     if row.get("kind") == "master_light":
         folder = stack_folder(row.get("path"))
         if folder:
@@ -1740,9 +1752,11 @@ def selection_object_state(con, frame_ids):
 def restore_targets(con, frame_ids):
     """GRUPY DO PRZYWRÓCENIA z zaznaczenia (R-S2b-3) — czytane ze STANU, nie z dziennika.
 
-    Zwraca `(grupy, bez_pamieci)`, gdzie grupa to dict `{canon, catalog, kind, frame_ids}` — po
-    jednej na OBIEKT, bo klinga osi przyjmuje jeden kanon na wywołanie, a masowe cofnięcie potrafi
-    objąć klatki kilku różnych obiektów naraz. `bez_pamieci` to liczba nagrobków, których nie da
+    Zwraca `(grupy, bez_pamieci)`, gdzie grupa to dict `{object_id, canon, catalog, kind,
+    frame_ids}` — po jednej na OBIEKT, bo klinga osi przyjmuje jeden kanon na wywołanie, a masowe
+    cofnięcie potrafi objąć klatki kilku różnych obiektów naraz. `object_id` jedzie w grupie nie
+    dla zapisu (klinga pisze po KANONIE), tylko jako ZAMROŻONY STAN dla guardu dryfu
+    (`repo.user_assign_object(expected_cleared_id=…)`, bramka pakietu 0810). `bez_pamieci` to liczba nagrobków, których nie da
     się przywrócić, bo nie pamiętają przedmiotu (baza-dawca sprzed migracji 0017).
 
     DLACZEGO STAN, A NIE `event`. Pytanie brzmi „co ta klatka odrzuciła" i jest pytaniem o NIĄ,
@@ -1771,8 +1785,9 @@ def restore_targets(con, frame_ids):
         if r["object_id"] is None:
             bez_pamieci += 1
             continue
-        g = grupy.setdefault(r["object_id"], {"canon": r["canon"], "catalog": r["catalog"],
-                                              "kind": r["kind"], "frame_ids": []})
+        g = grupy.setdefault(r["object_id"], {"object_id": r["object_id"], "canon": r["canon"],
+                                              "catalog": r["catalog"], "kind": r["kind"],
+                                              "frame_ids": []})
         g["frame_ids"].append(r["frame_id"])
     return list(grupy.values()), bez_pamieci
 

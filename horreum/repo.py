@@ -1378,7 +1378,7 @@ class ObjectGesture:
 
 def user_assign_object(con, *, alias_norm, canon, catalog, kind, frame_ids, now, uid="local",
                        object_source="user", expected_object_id=None, overwrite_weak=False,
-                       expected_source=None):
+                       expected_source=None, expected_cleared_id=None):
     """Przypisanie obiektu GRUPIE klatek GESTEM CZŁOWIEKA (#8, D-P4-4) — JEDNA transakcja
     `_immediate`, DML inline (NIE kompozycja `upsert_object`+`add_object_alias`+`assign_object`:
     każda z nich ma własny `with con:` commitujący przy wyjściu — zawołane wewnątrz zewnętrznej
@@ -1433,7 +1433,15 @@ def user_assign_object(con, *, alias_norm, canon, catalog, kind, frame_ids, now,
       Wołający, który przywraca cofnięte przypisanie, żąda `expected_source='user_cleared'`
       i wtedy klatka, która przestała być nagrobkiem między odczytem a zapisem, liczy się jako
       dryf. Bez tego jedyną obroną byłby filtr w read-modelu — czyli POZA transakcją, obrona
-      słabsza niż u obu sąsiednich gestów tej samej osi."""
+      słabsza niż u obu sąsiednich gestów tej samej osi.
+    * `expected_cleared_id` domyka tamten do PARY (bramka pakietu 0810): `expected_source` pyta
+      o ETYKIETĘ stanu („czy to nadal nagrobek"), a ten o jego TREŚĆ („czy nagrobek nadal odrzuca
+      TEN obiekt"). Sama etykieta przeżywa sekwencję `cofnij X → przywróć → nadaj Y → cofnij Y`,
+      więc bez tego członu przywracanie ze stęchłego odczytu zamalowałoby Y starszym X — i to
+      po cichu, bo obie strony wyglądają na ekranie identycznie. Dziś populacja jest zerowa
+      (handler jest synchroniczny, a `busy.repaint` doręcza zdarzenia z `ExcludeUserInputEvents`,
+      więc drugiego pisarza w obrębie procesu nie ma), ale guard kosztuje jedno porównanie
+      w kolumnie, którą ta pętla i tak już czyta."""
     if alias_norm is not None and not alias_norm:
         raise ValueError("alias_norm pusty — nazwa bez znaków alfanumerycznych nie może być kluczem")
     if object_source not in OBJECT_SOURCES:
@@ -1467,7 +1475,7 @@ def user_assign_object(con, *, alias_norm, canon, catalog, kind, frame_ids, now,
         assigned = kind_skip = source_skip = drift = stacks = 0
         for frame_id in frame_ids:
             fr = con.execute(
-                "SELECT kind, object_id, object_source FROM frame WHERE id = ?",
+                "SELECT kind, object_id, object_source, object_cleared_id FROM frame WHERE id = ?",
                 (frame_id,)).fetchone()
             if fr is None:
                 raise ValueError(f"frame:{frame_id} nie istnieje")
@@ -1476,6 +1484,17 @@ def user_assign_object(con, *, alias_norm, canon, catalog, kind, frame_ids, now,
                 continue
             if expected_source is not None and fr["object_source"] != expected_source:
                 drift += 1                          # nie ten stan, co widział read-model wołającego
+                continue
+            if (expected_cleared_id is not None
+                    and fr["object_cleared_id"] != expected_cleared_id):
+                # GUARD PYTA O TREŚĆ NAGROBKA, NIE O JEGO ETYKIETĘ (bramka pakietu 0810, zarzut B#1).
+                # `expected_source='user_cleared'` sprawdza, że klatka JEST nagrobkiem — ale nie,
+                # że jest nagrobkiem TEGO SAMEGO obiektu, którego widział read-model wołającego.
+                # Sekwencja `cofnij X → przywróć → nadaj Y → cofnij Y` zostawia tę samą etykietę
+                # przy INNYM przedmiocie, więc przywracanie ze stęchłego odczytu zamalowałoby Y
+                # starszym X — po cichu, bo obie strony wyglądają identycznie. `expected_object_id`
+                # tej dziury nie zatka: przy nagrobku jest martwy z definicji (`object_id IS NULL`).
+                drift += 1
                 continue
             if fr["object_id"] is not None:
                 if not overwrite_weak:

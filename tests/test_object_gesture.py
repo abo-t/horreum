@@ -324,12 +324,13 @@ def _pamiec(con, fid):
     return con.execute("SELECT object_cleared_id FROM frame WHERE id = ?", (fid,)).fetchone()[0]
 
 
-def _przywroc(con, fids, canon="LMC"):
+def _przywroc(con, fids, canon="LMC", oczekiwana_pamiec=None):
     """Przywrócenie idzie TĄ SAMĄ klingą, co nadanie (D-OW-2/B: jeden pisarz osi dla każdego gestu
     człowieka) — różni się wyłącznie guardem stanu i tym, skąd bierze kanon."""
     return repo.user_assign_object(con, alias_norm=None, canon=canon, catalog=None, kind="own",
                                    frame_ids=fids, now=NOW, overwrite_weak=True,
-                                   expected_source="user_cleared")
+                                   expected_source="user_cleared",
+                                   expected_cleared_id=oczekiwana_pamiec)
 
 
 def test_nagrobek_PAMIETA_co_zdjal_a_przypisanie_te_pamiec_gasi():
@@ -403,6 +404,34 @@ def test_przywrocenie_ODDAJE_obiekt_i_POMIJA_klatke_ktora_nagrobkiem_byc_przesta
     assert _stan(con, 1) == (lmc, "user") and _pamiec(con, 1) is None
     assert con.execute("SELECT canon FROM object WHERE id = ?",
                        (_stan(con, 2)[0],)).fetchone()[0] == "IC443"
+
+
+def test_guard_pyta_o_TRESC_nagrobka_a_nie_o_jego_ETYKIETE():
+    """`expected_source` sprawdza, czy klatka JEST nagrobkiem; `expected_cleared_id` — czy jest
+    nagrobkiem TEGO SAMEGO obiektu (bramka pakietu 0810, zarzut B#1).
+
+    Sekwencja `cofnij LMC → nadaj IC443 → cofnij IC443` zostawia tę samą ETYKIETĘ (`user_cleared`)
+    przy INNYM przedmiocie, więc przywracanie ze stęchłego odczytu zamalowałoby IC443 starszym
+    LMC — po cichu, bo obie strony wyglądają na ekranie identycznie.
+
+    Falsyfikator: zdejmij `expected_cleared_id` z wywołania → `assigned` rośnie do 1, a klatka
+    kończy z kanonem `LMC`, którego ręka już raz odrzuciła."""
+    con = _baza([("light", "raw", None, rf"{R}\LIGHTS\a.ARW")])
+    _przypisz(con, [1], canon="LMC")
+    lmc = con.execute("SELECT id FROM object WHERE canon = 'LMC'").fetchone()[0]
+    repo.clear_object_assignment(con, frame_ids=[1], now=NOW)   # nagrobek LMC — TO widzi read-model
+    assert _pamiec(con, 1) == lmc
+    _przypisz(con, [1], canon="IC443", overwrite_weak=True)     # ręka wskazała jednak co innego
+    repo.clear_object_assignment(con, frame_ids=[1], now=NOW)   # nagrobek IC443 — ta sama etykieta
+    ic = con.execute("SELECT id FROM object WHERE canon = 'IC443'").fetchone()[0]
+    assert _pamiec(con, 1) == ic and _stan(con, 1)[1] == "user_cleared"
+
+    g = _przywroc(con, [1], oczekiwana_pamiec=lmc)              # gest ze STĘCHŁEGO odczytu
+    assert (g.assigned, g.skipped_drift) == (0, 1)
+    assert _pamiec(con, 1) == ic, "nagrobek IC443 nietknięty — zamalowanie byłoby cichą stratą"
+
+    g = _przywroc(con, [1], canon="IC443", oczekiwana_pamiec=ic)   # świeży odczyt przechodzi
+    assert g.assigned == 1 and _pamiec(con, 1) is None
 
 
 def test_przywrocenie_JEST_idempotentne():

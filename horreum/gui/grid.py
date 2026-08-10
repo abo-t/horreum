@@ -2339,7 +2339,7 @@ class FramesView(QWidget):
             self.status_message.emit(i18n.t("grid.sel.object_empty"))
         return ids
 
-    def _po_gescie_osi(self, klucz, gest, **kw):
+    def _po_gescie_osi(self, klucz, gest, *, ogon="", **kw):
         """Wspólny ogon WSZYSTKICH gestów osi: zdanie z ROZBICIEM per fakt + odświeżenie CZTERECH
         powierzchni + ZACHOWANIE ZAZNACZENIA.
 
@@ -2384,7 +2384,10 @@ class FramesView(QWidget):
         # paska stanu — emisja przed odświeżeniem ginęła w tym samym obrocie pętli. Skutek był
         # dokładnie odwrotny do zamierzonego: rozbicie per fakt user widział WYŁĄCZNIE wtedy, gdy
         # gest niczego nie zapisał (bo wtedy `refresh()` nie leci), a po udanym zapisie — nigdy.
-        self.status_message.emit(msg)
+        # `ogon` to ZDANIE WŁASNE WOŁAJĄCEGO doklejone do tego samego komunikatu — a nie druga
+        # emisja. Ta sama pułapka, co wyżej, tylko od drugiej strony: dwa `emit` w jednym obrocie
+        # pętli trafiają w jeden `showMessage`, więc drugie wymazuje pierwsze (bramka pakietu 0810).
+        self.status_message.emit(msg + ogon)
 
     def _przywroc_zaznaczenie(self, frame_ids):
         """Odłóż zaznaczenie po `frame_id` na PRZEBUDOWANYM modelu (R-S2b-3, człon pierwszy).
@@ -2580,15 +2583,23 @@ class FramesView(QWidget):
                     gest += repo.user_assign_object(
                         self.con, alias_norm=None, canon=g["canon"], catalog=g["catalog"],
                         kind=g["kind"], frame_ids=g["frame_ids"], now=self._now(),
-                        overwrite_weak=True, expected_source="user_cleared")
+                        overwrite_weak=True, expected_source="user_cleared",
+                        expected_cleared_id=g["object_id"])
                 except ValueError as e:      # dryf do nieistniejącej klatki / konflikt aliasu
                     QMessageBox.warning(self, i18n.t("grid.sel.object_restore"), str(e))
                     break
                 faza.say(i18n.t("busy.restoring", done=i, total=len(grupy)))
-        self._po_gescie_osi("grid.sel.object_restored", gest)
-        if bez_pamieci:
-            self.status_message.emit(
-                i18n.t("grid.sel.object_restore_no_memory", n=bez_pamieci))
+        # JEDNA EMISJA, NIE DWIE (bramka pakietu 0810, zarzut Fable Z#1). Odbiornikiem obu jest ten
+        # sam `showMessage`, więc drugie zdanie w tym samym obrocie pętli WYMAZYWAŁO pierwsze —
+        # przy populacji mieszanej user po UDANYM przywróceniu widział wyłącznie „pominięto N bez
+        # zapamiętanego obiektu", a potwierdzenia gestu nie widział wcale. Kosztowało to akurat
+        # zdanie, które przy tym geście „bywa jedynym potwierdzeniem" (klatka przywrócona wypada
+        # z perspektywy „Do przeglądu", więc z ekranu znika). Repo dostało tę klasę już raz, w tym
+        # samym pliku: emisja przed `refresh()` ginęła dokładnie tak samo.
+        self._po_gescie_osi(
+            "grid.sel.object_restored", gest,
+            ogon=(" " + i18n.t("grid.sel.object_restore_no_memory", n=bez_pamieci)
+                  if bez_pamieci else ""))
 
     # ---- panele kling (F3, PLAN_ux_redesign §4) ----
     def _toggle_panel(self, which):

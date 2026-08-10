@@ -709,6 +709,20 @@ def test_object_cell_PODPOWIEDZ_z_folderu_dla_bezimiennego_stosu():
     assert queries.object_cell({"object_canon": None, "object_raw": None}) == ("", "canon")
 
 
+def test_wiersz_NIEMY_o_rodzaju_NIE_dostaje_zdania_o_rodzaju():
+    """Gałąź `kind` twierdzi „kalibracja obiektu nie ma z DEFINICJI" — wolno ją postawić WYŁĄCZNIE
+    przy rodzaju ZNANYM (bramka pakietu 0810, zarzut zgodny u dwóch soczewek).
+
+    Falsyfikator: wróć do `row.get("kind") not in LIGHT_KINDS` → wiersz bez klucza `kind` (`None`)
+    dostaje stan `kind`, czyli tooltip o kalibracji nad klatką, o której nic nie wiadomo."""
+    assert queries.object_cell({"object_canon": None, "object_raw": "NGC7023"}) == \
+        ("NGC7023", "raw"), "bez `kind` fallbackiem jest `raw` — nie twierdzi nic o rodzaju"
+    assert queries.object_cell(
+        {"object_canon": None, "object_raw": "FlatWizard", "kind": "flat"})[1] == "kind"
+    assert queries.object_cell(
+        {"object_canon": None, "object_raw": "NGC7023", "kind": "light"})[1] == "raw"
+
+
 def test_stany_komorki_MAJA_LUSTRO_w_stalej():
     """`OBJECT_CELL_STATES` jest lustrem gałęzi `object_cell` — z niego jedzie bramka parytetu
     z katalogiem i18n (klucz składany w locie jest dla kolektora literałów NIEWIDZIALNY)."""

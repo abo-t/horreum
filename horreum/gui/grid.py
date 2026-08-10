@@ -1670,6 +1670,8 @@ class SelectionBar(QFrame):
         self.criteria_label.set_full_text(text)
 
     def set_object_actions(self, *, namable, clearable, stacks=0, reason=None):
+        # `stacks` = ILE GEST RUSZY, nie ile ich jest w zaznaczeniu — parametr karmi wyłącznie
+        # zdanie o skutku, więc wołający podaje `stacks_touchable` (bramka pakietu 0810, zarzut 1).
         """Uczciwy disabled obu pozycji osi obiektu (S2b, §4/14c-a). Cel gestu to WYŁĄCZNIE
         zaznaczenie, więc przy pustym gaśnie wszystko — fallback „to, co widoczne" jest dla ZAPISU
         osi ZAKAZANY (800 widocznych klatek i jedno chybione kliknięcie to ta sama sekunda).
@@ -1693,6 +1695,9 @@ class SelectionBar(QFrame):
         # z setek klatek), user dowiadywał się dopiero ze zdania po zapisie. Ten sam klucz, co
         # tamto zdanie — jedna fraza, jeden właściciel. Milczy przy zerze: „w tym gotowe obrazy: 0"
         # mówiłoby o czymś, czego w zaznaczeniu nie ma.
+        # ...i liczy WYŁĄCZNIE stosy, które gest ruszy. Zmierzone: 181 ze 193 stosów archiwum ma
+        # nazwę ze źródła mocnego, więc człon liczony „ile stosów jest w zaznaczeniu" kłamałby
+        # w 94% przypadków — w tooltipie, który powstał po to, żeby powiedzieć prawdę PRZED gestem.
         tip = i18n.t("grid.sel.object_tip_ready", namable=namable, clearable=clearable)
         if stacks:
             tip += i18n.t_plural("grid.sel.object_stacks", stacks)
@@ -2817,7 +2822,7 @@ class FramesView(QWidget):
         self.sel_bar.set_object_actions(
             namable=stan["namable"] if stan else 0,
             clearable=stan["clearable"] if stan else 0,
-            stacks=stan["stacks"] if stan else 0,
+            stacks=stan["stacks_touchable"] if stan else 0,
             reason=_object_gate_reason(stan))
 
     # ---- panel inspekcji daty (G1/G4 — RenameBar) ----

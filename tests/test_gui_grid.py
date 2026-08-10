@@ -2455,6 +2455,32 @@ def test_tooltip_AKTYWNEJ_kontrolki_liczy_gotowe_obrazy(obj_view):
         + i18n.t_plural("grid.sel.object_stacks", 1))
 
 
+def test_tooltip_liczy_stosy_TYKALNE_a_nie_wszystkie(obj_view):
+    """BRAMKA PAKIETU 0810, zarzut 1 - REGRESJA ZNACZENIA wniesiona przez R-S3-8.
+
+    Człon „w tym gotowe obrazy" jechał na `stacks`, czyli na „ile stosów JEST w zaznaczeniu",
+    a stoi w zdaniu o SKUTKU, obok „do nazwania / do cofnięcia". Stos z nazwą ze źródła mocnego
+    (`header`, `catalog_xref`, `common_name`) nie jest ani do nazwania, ani do cofnięcia - gest
+    go NIE TKNIE, a tooltip go liczył.
+
+    To nie jest przypadek brzegowy, tylko dominujący: zmierzone na żywym archiwum **181 ze 193
+    stosów jest nietykalnych**, więc człon kłamałby w 94% realnych zaznaczeń - w powierzchni,
+    która powstała po to, żeby powiedzieć prawdę PRZED gestem.
+
+    Falsyfikator: wróć w `_update_count` do `stan["stacks"]` → druga asercja czerwienieje."""
+    from horreum.gui import i18n
+    v, con = obj_view
+    _dodaj_stos(con, 14, src="header")          # nazwa z KARTY - gest jej nie tknie
+    v.refresh()
+
+    _zaznacz(v, [1, 2, 14])
+    v._update_count()
+    stan = queries.selection_object_state(con, [1, 2, 14])
+    assert (stan["stacks"], stan["stacks_touchable"]) == (1, 0),         "read-model musi rozróżniać, ile stosów JEST, od tego, ile gest RUSZY"
+    assert v.sel_bar.btn_object.toolTip() == i18n.t(
+        "grid.sel.object_tip_ready", namable=stan["namable"], clearable=stan["clearable"]),         "tooltip policzył stos, którego gest nie tknie"
+
+
 def test_faza_zajetosci_gridu_NIE_zjada_zdania_koncowego(obj_view):
     """F-1: faza dzieli kanał z raportem TYLKO tam, gdzie po niej pada zdanie końcowe. `refresh()`
     kończy się własnym „Grid: N klatek…", więc opis roboty MUSI zostać przykryty — inaczej

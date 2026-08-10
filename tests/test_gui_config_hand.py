@@ -368,3 +368,29 @@ def test_wiersz_okna_MOWI_o_rodzaju_i_MILCZY_przy_swietle(view):
         tekst = dlg.items.item(i).text()
         assert (czlon in tekst) == (g["folder"] == folder), g["folder"]
     dlg.close()
+
+# --- bramka pakietu 0810, zarzut 2: bliźniak odsiewa zastąpione tak samo jak jego para ---
+
+def test_lista_od_reki_ODSIEWA_zastapione(view):
+    """Para (`config_review_frames`) dostała warunek `superseded_by IS NULL` 0809, z powodem
+    zmierzonym na sierocie 15958. Bliźniak go nie dostał - a `transfer_facts` kopiuje config na
+    następczynię i NIE zeruje `config_source` poprzedniczki, więc wskazanie ręki niosą OBIE
+    tożsamości.
+
+    Bez tego warunku kubełek „zestaw wskazany ręką" liczy JEDEN plik dwa razy, a okno w trybie
+    ZMIANY oferuje gest na tożsamości, której roboty przejęła już następczyni - zapis szedłby
+    na martwą klatkę.
+
+    Populacja na żywym archiwum: **0**. To tripwir, nie naprawa objawu - stąd falsyfikator
+    w drugiej połowie testu, żeby nie był zielony z powodu pustej listy.
+
+    Falsyfikator: zdejmij `AND f.superseded_by IS NULL` → pierwsza asercja czerwienieje."""
+    v, con, ids = view
+    tel = con.execute("SELECT id FROM telescope LIMIT 1").fetchone()[0]
+    klatki = [r["frame_id"] for r in queries.config_review_frames(con) if r["camera_id"] is not None]
+    repo.user_assign_config(con, frame_ids=klatki[:1], telescope_id=tel, now=NOW)
+    assert [r["frame_id"] for r in queries.config_by_hand_frames(con)] == klatki[:1],         "gest nie wszedł - dalsza część testu mierzyłaby pustą listę"
+
+    con.execute("UPDATE frame SET superseded_by = ? WHERE id = ?", (klatki[1], klatki[0]))
+    con.commit()
+    assert queries.config_by_hand_frames(con) == [],         "zastąpiona tożsamość dalej oferuje gest, choć jej robotę przejęła następczyni"

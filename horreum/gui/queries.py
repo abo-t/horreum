@@ -584,7 +584,7 @@ def config_review_frames(con):
     Zmierzone 2026-08-09: bez tego warunku sierota 15958 siedziała w kubełku sprzętu (424 zamiast
     423) i w kubełku RAW-ów jako JEDYNA jego pozycja, oferując robotę na pliku, którego nie ma.
     Zwraca: frame_id,
-    sha1_data, filetype, date_obs, telescope_label, telescop_canon, camera_model, camera_id,
+    sha1_data, filetype, kind, date_obs, telescope_label, telescop_canon, camera_model, camera_id,
     telescop, location_id, path, n_present."""
     return con.execute(
         "SELECT f.id AS frame_id, f.sha1_data, f.filetype, f.kind, h.date_obs, "
@@ -617,7 +617,15 @@ def config_by_hand_frames(con):
     dokładnie tą samą figurą, co „cofnięte ręką" na osi obiektu (S3/R-S3-1): populacja rozłączna
     z kubełkiem, ta sama droga naprawy, własny licznik.
 
-    Kolumny jak w `config_review_frames` — obie listy jadą przez ten sam panel `_fill_frames`."""
+    Kolumny jak w `config_review_frames` — obie listy jadą przez ten sam panel `_fill_frames`.
+
+    KLATKA ZASTĄPIONA WYPADA TAK SAMO JAK U PARY (bramka pakietu 0810, zarzut 2). Para dostała ten
+    warunek 0809 z powodem zmierzonym na sierocie 15958; ten wiersz go nie dostał, choć `transfer_facts`
+    kopiuje config na następczynię i NIE zeruje `config_source` poprzedniczki — obie tożsamości niosą
+    więc wskazanie ręki. Bez warunku kubełek liczył JEDEN plik dwa razy, a okno w trybie ZMIANY
+    oferowało gest na tożsamości, której roboty nikt już nie potrzebuje (zapis szedłby na martwą
+    klatkę). Populacja dziś **0** — to tripwir, nie naprawa objawu; wchodzi, bo diff i tak dotknął
+    tego SELECT-a."""
     return con.execute(
         "SELECT f.id AS frame_id, f.sha1_data, f.filetype, f.kind, h.date_obs, "
         "       t.label AS telescope_label, t.telescop_canon, "
@@ -632,6 +640,7 @@ def config_by_hand_frames(con):
         "LEFT JOIN location l ON l.id = (SELECT MIN(id) FROM location "
         "                                WHERE frame_id = f.id AND present = 1) "
         "WHERE f.config_source IS NOT NULL "
+        "  AND f.superseded_by IS NULL "
         "ORDER BY l.path, f.id").fetchall()
 
 
@@ -1604,14 +1613,14 @@ def selection_object_state(con, frame_ids):
     obiektów, gdy gest odmawia. Bit `conflict` nie wystarczał: komunikat wstawiał literał „2", więc
     zaznaczenie z siedmioma obiektami kazało zawęzić do dwóch i po zawężeniu odmawiało tak samo.
 
-    Zwraca dict: n, lights, stacks, namable, overwrite, clearable, expected_object_id, conflict,
-    conflict_n, by_source."""
+    Zwraca dict: n, lights, stacks, stacks_touchable, namable, overwrite, clearable,
+    expected_object_id, conflict, conflict_n, by_source."""
     rows = con.execute(
         "SELECT f.kind, f.object_id, f.object_source FROM frame f "
         "WHERE f.id IN (SELECT value FROM json_each(?))",
         (json.dumps(list(frame_ids)),)).fetchall()
     by_source, slabe = {}, set()
-    n = lights = stacks = namable = overwrite = clearable = 0
+    n = lights = stacks = stacks_touchable = namable = overwrite = clearable = 0
     for r in rows:
         n += 1
         by_source[r["object_source"]] = by_source.get(r["object_source"], 0) + 1
@@ -1620,15 +1629,29 @@ def selection_object_state(con, frame_ids):
         lights += 1
         if r["kind"] == "master_light":
             stacks += 1        # LICZONY, nie wykluczany (D-OW-7): stos jest w zasięgu obu gestów
-        if (r["object_source"] in CLEARABLE_OBJECT_SOURCES
-                and r["object_id"] is not None):
+        do_cofniecia = (r["object_source"] in CLEARABLE_OBJECT_SOURCES
+                        and r["object_id"] is not None)
+        do_nazwania = r["object_id"] is None or r["object_source"] in WEAK_OBJECT_SOURCES
+        # DWIE LICZBY STOSÓW, BO DWA RÓŻNE PYTANIA (bramka pakietu 0810, zarzut 1). `stacks` mówi
+        # „ILE STOSÓW JEST W ZAZNACZENIU" i tym pytaniem gasi kontrolkę (`lights == stacks`).
+        # `stacks_touchable` mówi „ILE Z NICH GEST REALNIE RUSZY" i tylko ta liczba ma prawo stanąć
+        # w zdaniu o skutku. Rozjazd nie jest teoretyczny: zmierzone na żywym archiwum
+        # **181 ze 193 stosów jest NIETYKALNYCH** (nazwa ze źródła mocnego: `header` 73,
+        # `common_name` 50, `catalog_xref` 46), więc człon liczony `stacks` kłamałby w 94%
+        # realnych zaznaczeń — i to w tooltipie, który powstał PO TO, żeby powiedzieć prawdę
+        # przed gestem. Liczone RAZ, bo klatka bywa naraz do nazwania i do cofnięcia
+        # (źródło `path` z nadanym obiektem).
+        if r["kind"] == "master_light" and (do_nazwania or do_cofniecia):
+            stacks_touchable += 1
+        if do_cofniecia:
             clearable += 1
-        if r["object_id"] is None or r["object_source"] in WEAK_OBJECT_SOURCES:
+        if do_nazwania:
             namable += 1
             if r["object_id"] is not None:
                 overwrite += 1              # ta klatka ma już kanon — gest go PRZEMALUJE
                 slabe.add(r["object_id"])
-    return {"n": n, "lights": lights, "stacks": stacks, "namable": namable,
+    return {"n": n, "lights": lights, "stacks": stacks,
+            "stacks_touchable": stacks_touchable, "namable": namable,
             "overwrite": overwrite, "clearable": clearable, "by_source": by_source,
             "expected_object_id": next(iter(slabe)) if len(slabe) == 1 else None,
             "conflict": len(slabe) > 1, "conflict_n": len(slabe)}

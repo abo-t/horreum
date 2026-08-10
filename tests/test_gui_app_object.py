@@ -925,7 +925,18 @@ def test_BLIZNIACZE_kubelki_cofniete_tez_maja_znacznik(repair):
             _cofnij_reka(con, fid, NOW_PD)
     v.refresh()
 
-    for tag in ("nameless_cleared", "nameless_stacks_cleared"):
+    # TRZECIA rodzina - RAW (`resolver.NO_OBJECT_CARD_FILETYPES`). Bez niej falsyfikator tego testu
+    # był NIEPRAWDZIWY: docstring obiecywał „któregokolwiek z trzech wywołań", a pętla brała dwa
+    # (bramka pakietu 0810, zarzut 3 - obietnica pokrycia szersza niż pokrycie).
+    for sha, cofnij in (("sha-raw-swiezy-znacznik", False), ("sha-raw-cofniety-znacznik", True)):
+        fid, _ = repo.upsert_frame(con, sha1_data=sha, kind="light", filetype="raw",
+                                   camera_id=None, now=NOW_PD)
+        repo.record_header(con, frame_id=fid, raw_json="{}", object_raw=None, now=NOW_PD)
+        if cofnij:
+            _cofnij_reka(con, fid, NOW_PD)
+    v.refresh()
+
+    for tag in ("nameless_cleared", "nameless_stacks_cleared", "nameless_raw_cleared"):
         it = v.review.item(_select_review_tag(v, tag))
         nietknieta = v.review.item(_select_review_tag(v, tag.replace("_cleared", "")))
         assert it.text().startswith("↺"), f"{tag}: brak znacznika na POCZĄTKU wiersza"

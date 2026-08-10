@@ -371,6 +371,12 @@ CATALOG = {
                  "en": "{folder}  ·  {camera}  ·  {n} frames"},
     "cfg.no_folder": {"pl": "(bez kopii na dysku)", "en": "(no copy on disk)"},
     "cfg.no_camera": {"pl": "(kamera nieznana)", "en": "(camera unknown)"},
+    # RODZAJ ODBIEGAJĄCY OD ŚWIATŁA (R1-3) — człon pokazywany WYŁĄCZNIE przy odchyleniu, więc
+    # zdanie nie musi tłumaczyć, czym jest `light`: na wszystkich pozostałych wierszach go nie ma.
+    # Token rodzaju surowy, jak w facecie „Rodzaj" (`facet_kinds` oddaje `kind` bez tłumaczenia)
+    # — jeden słownik nazw rodzajów, nie dwa.
+    "cfg.item_kinds": {"pl": "  ·  rodzaj: {kinds}", "en": "  ·  kind: {kinds}"},
+    "cfg.kind_count": {"pl": "{kind} ({n})", "en": "{kind} ({n})"},
     "cfg.header_says": {"pl": "nagłówek mówi: {telescop}", "en": "header says: {telescop}"},
     "cfg.header_silent": {"pl": "nagłówek milczy o sprzęcie", "en": "header is silent about hardware"},
     "cfg.telescope": {"pl": "Teleskop (Twoje wskazanie):", "en": "Telescope (your indication):"},
@@ -1154,8 +1160,16 @@ CATALOG = {
     # obraz jest jedyną klatką, przy której zapis osi sięga rodowodu, więc user ma prawo wiedzieć,
     # że go dotknął. Dawne brzmienie („· gotowe obrazy: N" wśród pominięć) po odwróceniu decyzji
     # mówiłoby dokładnie odwrotnie do prawdy.
-    "grid.sel.object_stacks": {"pl": " · w tym gotowe obrazy: {n}",
-                               "en": " · including finished images: {n}"},
+    # ODMIENIONY, bo najczęstszy przypadek to JEDEN stos w zaznaczeniu (R-S3-8): „w tym gotowe
+    # obrazy: 1" było widoczne w trzech miejscach naraz — w zdaniu po geście z dwóch powierzchni
+    # i (od R-S3-8) w tooltipie kontrolki przed gestem.
+    "grid.sel.object_stacks": {
+        "pl": {"one": " · w tym gotowy obraz: {n}",
+               "few": " · w tym gotowe obrazy: {n}",
+               "many": " · w tym gotowych obrazów: {n}"},
+        "en": {"one": " · including {n} finished image",
+               "other": " · including {n} finished images"},
+    },
     # POWÓD WYGASZENIA jako tooltip (R-S2b-8) — „wygaszony przycisk tłumaczy się SAM". Każdy powód
     # niesie RECEPTĘ, nie samą diagnozę: user ma się dowiedzieć, gdzie ta nazwa się poprawia, a nie
     # tylko że tutaj nie. Wariant AKTYWNY mówi, ile klatek gest ruszy — to ta sama liczba, którą

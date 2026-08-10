@@ -587,7 +587,7 @@ def config_review_frames(con):
     sha1_data, filetype, date_obs, telescope_label, telescop_canon, camera_model, camera_id,
     telescop, location_id, path, n_present."""
     return con.execute(
-        "SELECT f.id AS frame_id, f.sha1_data, f.filetype, h.date_obs, "
+        "SELECT f.id AS frame_id, f.sha1_data, f.filetype, f.kind, h.date_obs, "
         "       t.label AS telescope_label, t.telescop_canon, "
         "       cam.model_canon AS camera_model, f.camera_id, h.telescop, "
         "       l.id AS location_id, l.path, "
@@ -619,7 +619,7 @@ def config_by_hand_frames(con):
 
     Kolumny jak w `config_review_frames` — obie listy jadą przez ten sam panel `_fill_frames`."""
     return con.execute(
-        "SELECT f.id AS frame_id, f.sha1_data, f.filetype, h.date_obs, "
+        "SELECT f.id AS frame_id, f.sha1_data, f.filetype, f.kind, h.date_obs, "
         "       t.label AS telescope_label, t.telescop_canon, "
         "       cam.model_canon AS camera_model, f.camera_id, h.telescop, "
         "       l.id AS location_id, l.path, "
@@ -639,7 +639,15 @@ def _grupuj_po_folderze_i_kamerze(rows):
     """Wspólny składacz grup **folder × kamera** dla obu list osi sprzętu (SPOT).
 
     Jedna funkcja, bo obie odpowiadają na to samo pytanie („co jest jednostką gestu"), a dwie kopie
-    rozjechałyby się przy pierwszej zmianie klucza — a klucz jest tu kontraktem DDL, nie gustem."""
+    rozjechałyby się przy pierwszej zmianie klucza — a klucz jest tu kontraktem DDL, nie gustem.
+
+    `other_kinds` = RODZAJE ODBIEGAJĄCE OD ŚWIATŁA w grupie, `[(kind, n)]` malejąco (R1-3). Kubełek
+    sprzętu odsiewa wyłącznie `NO_TELESCOPE_KINDS` (dark/bias), więc trafia do niego każdy inny
+    rodzaj — dziś na archiwum jest to jeden XISF-owy masterflat z niezmapowanym `IMAGETYP`
+    (`kind='unknown'`, 1 z 423). Gest go PRZYJMIE i tak ma być (oś opisuje optykę, nie rodzaj
+    klatki), ale okno musi ten fakt nieść: bez niego folder z jedną klatką wygląda identycznie
+    jak RAW z lustrzanki, o który to okno pyta. `light` jest tłem kubełka i dlatego go nie ma
+    na liście — człon ma być SYGNAŁEM odchylenia, a nie etykietą na wszystkich 36 grupach."""
     grupy = {}
     for r in rows:
         folder = os.path.dirname(r["path"]) if r["path"] else None
@@ -649,11 +657,17 @@ def _grupuj_po_folderze_i_kamerze(rows):
             g = grupy[klucz] = {"folder": folder, "camera_id": r["camera_id"],
                                 "camera_model": r["camera_model"], "telescop": r["telescop"],
                                 "telescope_label": r["telescope_label"],
-                                "n_frames": 0, "frame_ids": []}
+                                "n_frames": 0, "frame_ids": [], "_kinds": {}}
         elif g["telescop"] != r["telescop"]:
             g["telescop"] = None                 # folder z dwoma zeznaniami nie ma jednego świadka
+        if r["kind"] != "light":
+            g["_kinds"][r["kind"]] = g["_kinds"].get(r["kind"], 0) + 1
         g["n_frames"] += 1
         g["frame_ids"].append(r["frame_id"])
+    for g in grupy.values():
+        # LICZBA PRZY RODZAJU, NIE SAM RODZAJ: grupa bywa mieszana (folder × kamera nie zna
+        # rodzaju), więc „rodzaj: unknown" bez liczby twierdziłby, że taka jest CAŁA grupa.
+        g["other_kinds"] = sorted(g.pop("_kinds").items(), key=lambda kn: (-kn[1], kn[0]))
     return list(grupy.values())
 
 

@@ -1669,7 +1669,7 @@ class SelectionBar(QFrame):
     def set_criteria(self, text):
         self.criteria_label.set_full_text(text)
 
-    def set_object_actions(self, *, namable, clearable, reason=None):
+    def set_object_actions(self, *, namable, clearable, stacks=0, reason=None):
         """Uczciwy disabled obu pozycji osi obiektu (S2b, §4/14c-a). Cel gestu to WYŁĄCZNIE
         zaznaczenie, więc przy pustym gaśnie wszystko — fallback „to, co widoczne" jest dla ZAPISU
         osi ZAKAZANY (800 widocznych klatek i jedno chybione kliknięcie to ta sama sekunda).
@@ -1684,9 +1684,19 @@ class SelectionBar(QFrame):
         self.act_clear.setEnabled(bool(clearable))
         aktywna = bool(namable or clearable)
         self.btn_object.setEnabled(aktywna)
-        self.btn_object.setToolTip(
-            i18n.t("grid.sel.object_tip_ready", namable=namable, clearable=clearable) if aktywna
-            else i18n.t(reason or "grid.sel.object_tip_empty"))
+        if not aktywna:
+            self.btn_object.setToolTip(i18n.t(reason or "grid.sel.object_tip_empty"))
+            return
+        # CZŁON O GOTOWYCH OBRAZACH PRZED GESTEM, nie po nim (R-S3-8). Powód `object_tip_stacks`
+        # broni wyłącznie zaznaczenia z SAMYCH stosów — tam gasi kontrolkę. Przy zaznaczeniu
+        # MIESZANYM nikt ich nie liczył, więc o tym, że gest ruszył gotowe obrazy (każdy złożony
+        # z setek klatek), user dowiadywał się dopiero ze zdania po zapisie. Ten sam klucz, co
+        # tamto zdanie — jedna fraza, jeden właściciel. Milczy przy zerze: „w tym gotowe obrazy: 0"
+        # mówiłoby o czymś, czego w zaznaczeniu nie ma.
+        tip = i18n.t("grid.sel.object_tip_ready", namable=namable, clearable=clearable)
+        if stacks:
+            tip += i18n.t_plural("grid.sel.object_stacks", stacks)
+        self.btn_object.setToolTip(tip)
 
     def set_recent_objects(self, obiekty):
         """Skrót „ostatnio użyte" na dole menu obiektu (R-S2b-12) — 5 interakcji spada do 2.
@@ -2296,7 +2306,7 @@ class FramesView(QWidget):
         # · gotowe obrazy: 2" znaczy „dwa z tych trzydziestu to obrazy po integracji" — a nie „dwa
         # zostawiłem". Człon zostaje osobny, bo to jedyny zapis osi, który sięga rodowodu.
         if gest.stacks:
-            msg += i18n.t("grid.sel.object_stacks", n=gest.stacks)
+            msg += i18n.t_plural("grid.sel.object_stacks", gest.stacks)
         if gest.assigned:
             # CZTERY POWIERZCHNIE: wiersze gridu, facety (Obiekt zmienił zawartość), licznik/pasek
             # oraz kolejka przeglądu w oknie osi — ta ostatnia przez sygnał, bo nie jest nasza.
@@ -2309,10 +2319,19 @@ class FramesView(QWidget):
         # gest niczego nie zapisał (bo wtedy `refresh()` nie leci), a po udanym zapisie — nigdy.
         self.status_message.emit(msg)
 
-    def _on_object_name(self):
+    def _on_object_name(self, *, preselect_canon=None):
         """„Przypisz obiekt…" ze Zbiorów: nadpisuje WYŁĄCZNIE źródła słabe, przy zamrożonym stanie
         okna. (Do R-S2b-11 pozycja nazywała się „Nazwij zaznaczenie…" — jeden z czterech czasowników
-        na tę samą robotę.)"""
+        na tę samą robotę.)
+
+        `preselect_canon` niesie WYBÓR, KTÓRY JUŻ PADŁ w skrócie „ostatnio użyte" — okno otwiera
+        się wtedy nie po to, żeby zapytać o nazwę, tylko żeby pokazać dysklozurę. Domyślne `None`
+        zostawia drogę pozycji menu nietkniętą (tam wyboru jeszcze nie było).
+
+        PARAMETR JEST KEYWORD-ONLY I TO NIE JEST GUST: ta metoda wisi na `QAction.triggered`,
+        które emituje `checked: bool`, więc parametr pozycyjny łapałby `False` jako nazwę obiektu
+        — cicho, bo pętla po bibliotece po prostu by go nie znalazła. Gwiazdka zamienia tę klasę
+        pomyłki w błąd wywołania (EXPECT), a testem pinujemy, że sam sygnał wchodzi bez argumentu."""
         ids = self._object_gesture_ids()
         if not ids:
             return
@@ -2335,7 +2354,8 @@ class FramesView(QWidget):
         # nie z osobnego zapytania: ten sam dict już wygasza kontrolkę.
         dlg = AssignObjectDialog(self.con, object_raw=None, frame_count=stan["namable"],
                                  selection=stan,
-                                 cleared_n=stan["by_source"].get("user_cleared", 0), parent=self)
+                                 cleared_n=stan["by_source"].get("user_cleared", 0),
+                                 preselect_canon=preselect_canon, parent=self)
         if dlg.exec() != QDialog.Accepted or dlg.selected is None:
             return
         canon, catalog, kind, alias_norm = dlg.selected
@@ -2378,7 +2398,11 @@ class FramesView(QWidget):
             self.status_message.emit(i18n.t("grid.sel.object_conflict", n=stan["conflict_n"]))
             return
         if stan["overwrite"] or stan["by_source"].get("user_cleared"):
-            return self._on_object_name()      # jest co zgasić → okno z pełną dysklozurą
+            # …z WYBOREM, KTÓRY JUŻ PADŁ (firsthand 0810, znalezisko 3): okno pyta o zgodę na
+            # zgaszenie werdyktu, a nie o nazwę — więc wybrany kanon jedzie z nim jako preselekcja.
+            # Bez tego skrót kosztował 5 interakcji zamiast obiecanych 2, i to dokładnie tam, gdzie
+            # naprawa z kolejki jest regułą (nagrobek albo źródło `path`). Dysklozura zostaje.
+            return self._on_object_name(preselect_canon=canon)
         try:
             gest = repo.user_assign_object(
                 self.con, alias_norm=assign_dialog.alias_key(None, canon), canon=canon,
@@ -2793,6 +2817,7 @@ class FramesView(QWidget):
         self.sel_bar.set_object_actions(
             namable=stan["namable"] if stan else 0,
             clearable=stan["clearable"] if stan else 0,
+            stacks=stan["stacks"] if stan else 0,
             reason=_object_gate_reason(stan))
 
     # ---- panel inspekcji daty (G1/G4 — RenameBar) ----

@@ -96,7 +96,8 @@ class AssignObjectDialog(QDialog):
     alias_norm)` (`kind=None` dla obiektu istniejącego — repo go nie INSERTuje, więc pole
     nieużywane; `alias_norm=None` = przypadek trzeci)."""
 
-    def __init__(self, con, *, object_raw, frame_count, selection=None, cleared_n=0, parent=None):
+    def __init__(self, con, *, object_raw, frame_count, selection=None, cleared_n=0,
+                 preselect_canon=None, parent=None):
         super().__init__(parent)
         # KONTRAKT PILNOWANY OD ŚRODKA (R-S4-9, odesłane z adjudykacji S4 i domknięte tutaj).
         # `object_raw` o wartości `""` NIE jest tym samym co `None`: przypadek 1 zwróci wtedy pusty
@@ -168,6 +169,20 @@ class AssignObjectDialog(QDialog):
         for o in self._objects:
             self.combo.addItem(f"{o['canon']}  ·  {o['catalog'] or '—'}",
                                (o["id"], o["canon"], o["catalog"]))
+        # PRESELEKCJA WYBORU, KTÓRY JUŻ PADŁ (firsthand 0810, znalezisko 3). Okno bywa wołane
+        # przez skrót „ostatnio użyte": user WSKAZAŁ tam kanon, a okno otwiera się wyłącznie po
+        # to, żeby pokazać dysklozurę (ile nagrobków zgaśnie, ile cudzych nazw nadpisze). Bez
+        # preselekcji jego wybór przepadał i musiał go powtórzyć w combo — dwie interakcje
+        # zmarnowane dokładnie w przypadku, który przy naprawie z kolejki jest REGUŁĄ, nie
+        # wyjątkiem (nagrobek albo źródło `path`). Dysklozura zostaje na drodze kliknięcia:
+        # preselekcja wypełnia POLE, nie zatwierdza gestu.
+        # Kanon spoza biblioteki zostawia combo na pozycji zerowej — okno zachowuje się wtedy
+        # dokładnie jak przedtem, zamiast twierdzić wybór, którego nie ma czym pokryć.
+        if preselect_canon is not None:
+            for i, o in enumerate(self._objects, start=1):
+                if o["canon"] == preselect_canon:
+                    self.combo.setCurrentIndex(i)
+                    break
         lay.addWidget(self.combo)
 
         lay.addWidget(QLabel(i18n.t("assign.new_designation")))

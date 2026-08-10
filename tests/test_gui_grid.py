@@ -2099,7 +2099,7 @@ def test_D_OW_7_gotowy_obraz_ODBLOKOWUJE_pozycje_Cofnij(obj_view):
     v.status_message.connect(msgs.append)
     v._on_object_clear()
     assert con.execute("SELECT object_source FROM frame WHERE id = 10").fetchone()[0] == "user_cleared"
-    assert "w tym gotowe obrazy: 1" in msgs[-1]
+    assert "w tym gotowy obraz: 1" in msgs[-1]      # JEDEN stos -> liczba pojedyncza
 
 
 def test_licznik_stosow_NIE_sklei_sie_z_klatka_ktora_nie_miala_czego_cofac(obj_view):
@@ -2124,7 +2124,7 @@ def test_licznik_stosow_NIE_sklei_sie_z_klatka_ktora_nie_miala_czego_cofac(obj_v
     assert "Cofnięto przypisanie na 1 z 3 klatek" in msgs[-1]
     assert "· z nagłówka/regionu: 1" in msgs[-1]                # klatka 3 — fakt z pliku
     assert "· nie było czego cofać: 1" in msgs[-1]              # klatka 11 — nie miała obiektu
-    assert "· w tym gotowe obrazy: 1" in msgs[-1]               # ze zmienionych, nie z pominiętych
+    assert "· w tym gotowy obraz: 1" in msgs[-1]                # ze zmienionych, nie z pominiętych
 
 
 def test_gest_odswieza_OS_OBIEKTU_sygnalem(obj_view):
@@ -2206,8 +2206,9 @@ def test_okno_dostaje_LICZBE_DO_ZAPISANIA_i_kontekst_zaznaczenia(obj_view, monke
 
     class _Fake:
         def __init__(self, con, *, object_raw, frame_count, selection=None, cleared_n=0,
-                     parent=None):
-            zapis.update(frame_count=frame_count, selection=selection, cleared_n=cleared_n)
+                     preselect_canon=None, parent=None):
+            zapis.update(frame_count=frame_count, selection=selection, cleared_n=cleared_n,
+                         preselect_canon=preselect_canon)
             self.selected = None
 
         def exec(self):
@@ -2425,6 +2426,33 @@ def test_wygaszona_kontrolka_osi_TLUMACZY_SIE_powodem(obj_view):
     assert v.sel_bar.btn_object.isEnabled()
     assert v.sel_bar.btn_object.toolTip() == i18n.t("grid.sel.object_tip_ready",
                                                     namable=2, clearable=2)
+
+
+def test_tooltip_AKTYWNEJ_kontrolki_liczy_gotowe_obrazy(obj_view):
+    """R-S3-8: powód `object_tip_stacks` broni wyłącznie zaznaczenia z SAMYCH stosów — tam gasi
+    kontrolkę. Przy zaznaczeniu MIESZANYM nikt gotowych obrazów nie liczył, więc o tym, że gest
+    ruszył 128 obrazów złożonych z tysięcy klatek, user dowiadywał się PO zapisie (człon
+    `grid.sel.object_stacks` w zdaniu końcowym), a nie przed nim.
+
+    Człon jedzie tym samym kluczem, co zdanie po geście — jedna fraza, jeden właściciel. Milczy
+    przy zerze: „w tym gotowe obrazy: 0" mówiłoby o czymś, czego w zaznaczeniu nie ma."""
+    from horreum.gui import i18n
+    v, con = obj_view
+    _dodaj_stos(con, 13, src="user")
+    v.refresh()
+
+    _zaznacz(v, [1, 2])                                 # same klatki nieba — człon MILCZY
+    v._update_count()
+    assert v.sel_bar.btn_object.toolTip() == i18n.t("grid.sel.object_tip_ready",
+                                                    namable=2, clearable=2)
+
+    _zaznacz(v, [1, 2, 13])                             # …a przy stosie w zaznaczeniu MÓWI
+    v._update_count()
+    stan = queries.selection_object_state(con, [1, 2, 13])
+    assert stan["stacks"] == 1
+    assert v.sel_bar.btn_object.toolTip() == (
+        i18n.t("grid.sel.object_tip_ready", namable=stan["namable"], clearable=stan["clearable"])
+        + i18n.t_plural("grid.sel.object_stacks", 1))
 
 
 def test_faza_zajetosci_gridu_NIE_zjada_zdania_koncowego(obj_view):
@@ -2712,6 +2740,40 @@ def test_reveal_PRZEZYWA_wiersz_stanu_pustego(qapp):
     rail.hide()
 
 
+def test_sygnal_pozycji_menu_NIE_wciska_checked_jako_nazwy(obj_view, monkeypatch):
+    """PIN NA SZWIE Qt (firsthand 0810, znalezisko 3 — skutek uboczny naprawy).
+
+    `_on_object_name` wisi na `QAction.triggered`, a ten sygnał emituje `checked: bool`. Gdyby
+    nowy parametr był POZYCYJNY, kliknięcie pozycji menu wstawiłoby `False` jako preselektowany
+    kanon — cicho, bo pętla po bibliotece po prostu by go nie znalazła, a okno otwierałoby się
+    z pustym combo tak samo jak przedtem. Defekt byłby więc niewidoczny do chwili, w której ktoś
+    zacząłby na tym parametrze cokolwiek opierać.
+
+    Gwiazdka w sygnaturze zamienia tę klasę pomyłki w `TypeError`; ten test pilnuje, że sam
+    sygnał wchodzi bez argumentu, czyli że gwiazdka nie zepsuła drogi pozycji menu.
+
+    Falsyfikator: zdejmij `*` z `_on_object_name` → `preselect_canon` przyjmuje `False`."""
+    zapis = {}
+
+    class _Fake:
+        def __init__(self, con, *, object_raw, frame_count, selection=None, cleared_n=0,
+                     preselect_canon=None, parent=None):
+            zapis["preselect_canon"] = preselect_canon
+            self.selected = None
+
+        def exec(self):
+            return 0
+
+    v, con = obj_view
+    monkeypatch.setattr("horreum.gui.grid.AssignObjectDialog", _Fake)
+    v.refresh()
+    _zaznacz(v, [1, 2])
+    v._update_count()
+    assert v.sel_bar.act_name.isEnabled(), "pozycja wygaszona — `trigger()` nic by nie zrobił"
+    v.sel_bar.act_name.trigger()
+    assert zapis["preselect_canon"] is None, "sygnał wcisnął `checked` w miejsce nazwy obiektu"
+
+
 def test_skrot_ODDAJE_STER_OKNU_gdy_ma_zgasic_nagrobek(view, monkeypatch):
     """Zarzut 4 bramki: skrót miał komplet bramek technicznych, ale gubił DYSKLOZURĘ — okno mówi,
     ile nagrobków ręki zgaśnie i ile cudzych nazw nadpisze, a dwa kliknięcia robiły to po cichu.
@@ -2722,7 +2784,8 @@ def test_skrot_ODDAJE_STER_OKNU_gdy_ma_zgasic_nagrobek(view, monkeypatch):
     from horreum.gui import queries as q
     v = view[0] if isinstance(view, tuple) else view
     otwarte = []
-    monkeypatch.setattr(v, "_on_object_name", lambda: otwarte.append("okno"))
+    monkeypatch.setattr(v, "_on_object_name",
+                        lambda *, preselect_canon=None: otwarte.append(preselect_canon))
     monkeypatch.setattr(v, "_object_gesture_ids", lambda: [1, 2])
 
     # 1) jest co zgasić (nagrobek) → ster do okna
@@ -2730,7 +2793,10 @@ def test_skrot_ODDAJE_STER_OKNU_gdy_ma_zgasic_nagrobek(view, monkeypatch):
         "conflict": False, "conflict_n": 0, "overwrite": 0, "expected_object_id": None,
         "by_source": {"user_cleared": 2}, "namable": 2})
     v._on_object_recent("NGC6960", "NGC", "deep_sky")
-    assert otwarte == ["okno"]
+    # WYBÓR JEDZIE Z NIM (firsthand 0810, znalezisko 3): okno pyta o zgodę na zgaszenie werdyktu,
+    # nie o nazwę — bez preselekcji user musiał powtórzyć w combo wybór, który przed chwilą
+    # kliknął, i skrót kosztował 5 interakcji zamiast 3.
+    assert otwarte == ["NGC6960"]
 
     # 2) jest co nadpisać (cudza nazwa ze źródła słabego) → też okno
     otwarte.clear()
@@ -2738,4 +2804,4 @@ def test_skrot_ODDAJE_STER_OKNU_gdy_ma_zgasic_nagrobek(view, monkeypatch):
         "conflict": False, "conflict_n": 0, "overwrite": 3, "expected_object_id": None,
         "by_source": {}, "namable": 3})
     v._on_object_recent("NGC6960", "NGC", "deep_sky")
-    assert otwarte == ["okno"]
+    assert otwarte == ["NGC6960"]

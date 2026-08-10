@@ -315,3 +315,56 @@ def test_gest_bez_grup_nie_otwiera_okna(view, monkeypatch):
     v.status_message.connect(msgs.append)
     v._on_set_config()
     assert not otwarte and msgs[-1] == i18n.t("cfg.err_nothing")
+
+
+# --- R1-3: okno nie milczy o rodzaju, który odbiega od światła ---
+
+def _klatka_w_folderze(con, ids, *, sha, kind, folder):
+    """Klatka z nagłówkiem i kopią w podanym folderze — jednostką gestu jest folder × kamera."""
+    fid, _ = repo.upsert_frame(con, sha1_data=sha, kind=kind, filetype="xisf",
+                               camera_id=ids["cam1"], now=NOW)
+    repo.record_header(con, frame_id=fid, raw_json="{}", now=NOW)
+    repo.add_location(con, frame_id=fid, volume="TESTVOL",
+                      path=os.path.join(folder, f"{sha}.xisf"), now=NOW)
+    return fid
+
+
+def test_grupa_niesie_rodzaj_ODBIEGAJACY_od_swiatla(view):
+    """R1-3: kubełek sprzętu odsiewa WYŁĄCZNIE `NO_TELESCOPE_KINDS` (dark/bias), więc trafia do
+    niego każdy inny rodzaj — dziś na archiwum jest to XISF-owy masterflat, którego `IMAGETYP` nie
+    dał się zmapować (`kind='unknown'`, 1 z 423). Gest go PRZYJMIE i to jest w porządku (oś opisuje
+    optykę, nie rodzaj klatki), ale grupa musi ten fakt NIEŚĆ — inaczej okno pokazuje folder
+    z jedną klatką nieodróżnialny od RAW-a z lustrzanki.
+
+    Rodzaj `light` jest domyślnym tłem kubełka, więc go nie wymieniamy: człon ma być SYGNAŁEM
+    odchylenia, a nie etykietą na każdym wierszu."""
+    v, con, ids = view
+    folder = r"R:\ASTRO_\CALIBRATION\masters\flats\A7R3_105\OSC"
+    _klatka_w_folderze(con, ids, sha="sha-unknown-1", kind="unknown", folder=folder)
+    _klatka_w_folderze(con, ids, sha="sha-light-1", kind="light", folder=folder)
+
+    grupa = next(g for g in queries.config_review_groups(con) if g["folder"] == folder)
+    assert grupa["n_frames"] == 2
+    assert grupa["other_kinds"] == [("unknown", 1)], "człon liczy odchylenia, nie całą grupę"
+
+    czysty = r"R:\ASTRO_\LIGHTS\NGC7000\portable"
+    _klatka_w_folderze(con, ids, sha="sha-light-2", kind="light", folder=czysty)
+    swiatlo = next(g for g in queries.config_review_groups(con) if g["folder"] == czysty)
+    assert swiatlo["other_kinds"] == [], "grupa z samych lightów nie ma o czym mówić"
+
+
+def test_wiersz_okna_MOWI_o_rodzaju_i_MILCZY_przy_swietle(view):
+    """Falsyfikator w tej samej parze: człon ma się pokazać dokładnie tam, gdzie jest odchylenie.
+    Bez drugiej połowy test przeszedłby też dla członu doklejanego bezwarunkowo — a to zamieniłoby
+    sygnał w szum na wszystkich 36 grupach archiwum."""
+    v, con, ids = view
+    folder = r"R:\ASTRO_\CALIBRATION\masters\flats\A7R3_105\OSC"
+    _klatka_w_folderze(con, ids, sha="sha-unknown-1", kind="unknown", folder=folder)
+
+    grupy = queries.config_review_groups(con)
+    dlg = AssignConfigDialog(con, groups=grupy)
+    czlon = i18n.t("cfg.item_kinds", kinds=i18n.t("cfg.kind_count", kind="unknown", n=1))
+    for i, g in enumerate(grupy):
+        tekst = dlg.items.item(i).text()
+        assert (czlon in tekst) == (g["folder"] == folder), g["folder"]
+    dlg.close()

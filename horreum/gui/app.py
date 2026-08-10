@@ -194,6 +194,13 @@ _DIM: dict[str, QColor] = {}
 # `gold`: złoto jest akcentem MARKI i w motywie jasnym ma 2,7:1, więc do tekstu się nie nadaje
 # (`theme.py` §akcenty); bursztyn ma 7,4:1 / 6,3:1 i jest tam wprost przeznaczony do tekstu.
 _WERDYKT: dict[str, QColor] = {}
+# Dwa ZNAKI werdyktu ręki, każdy o innym twierdzeniu — trzymane osobno, bo osobno się je stawia
+# (firsthand 0810). `_ZNACZNIK` mówi „to Twój werdykt" i należy się KAŻDEJ cofniętej pozycji,
+# także takiej bez rodzica na ekranie; `_WCIECIE` mówi „jestem połówką wiersza NAD sobą" i wolno
+# je postawić tylko wtedy, gdy ten wiersz naprawdę tam stoi. Sklejenie obu w jeden literał było
+# powodem, dla którego sierota udawała podwiersz obcej nazwy.
+_ZNACZNIK = "↺  "
+_WCIECIE = "        "
 
 
 def use_theme(name):
@@ -1271,6 +1278,7 @@ class ObjectAxisView(QWidget):
         (R#6 — tuple w roli QVariant konwertuje na listę)."""
         q = queries.review_queue(self.con)
         self.review.clear()
+        rodzic = None                    # nazwa OSTATNIEJ nietkniętej połówki — jedyny legalny rodzic wcięcia
         for r in q["object_review"]:
             # CZŁON „cofnięte ręką" (S3/R-S2b-1) niesie TAG, nie payload: dispatch tego widoku stoi
             # na string-tagu właśnie po to, żeby nie wozić krotki w roli QVariant (wraca jako lista,
@@ -1282,8 +1290,24 @@ class ObjectAxisView(QWidget):
             # złoto jest akcentem marki i w jasnym motywie ma 2,7:1, więc do tekstu się nie nadaje
             # (`theme.py` §akcenty). Adnotacja słowna zostaje, ale schodzi do członu trzeciego.
             cofniete = bool(r["cleared"])
+            # WCIĘCIE TWIERDZI PRZYNALEŻNOŚĆ, więc wolno je postawić WYŁĄCZNIE pod własnym
+            # rodzicem (firsthand 0810, znalezisko 1 — blokada odbioru). Zapytanie grupuje po
+            # `(object_raw, cleared)`, więc nazwa, której cofnięto WSZYSTKIE klatki, oddaje
+            # JEDEN wiersz `cleared=1` — a bezwarunkowe wcięcie podwieszało go pod obcą nazwę
+            # stojącą wyżej. Zmierzone na 45 pozycjach: prawdziwe pary DWIE, reszta sierot.
+            # Szkoda jest ta sama, przed którą broniło R-S3-2 („user załatwia rodzica i zostawia
+            # podwiersz"), tylko wprowadzona z drugiej strony. Sierota traci WYŁĄCZNIE wcięcie —
+            # znacznik, kolor i adnotacja zostają, bo werdykt ręki jest faktem niezależnym od
+            # sąsiedztwa. Warunek jest lokalny: sort trzyma nietkniętą połówkę BEZPOŚREDNIO nad
+            # cofniętą (`ORDER BY … , object_raw, cleared`), więc rodzicem może być tylko wiersz
+            # poprzedni.
+            podwiersz = cofniete and rodzic == r["object_raw"]
+            rodzic = None if cofniete else r["object_raw"]
+            etykieta = r["object_raw"]
+            if cofniete:
+                etykieta = (_WCIECIE if podwiersz else "") + _ZNACZNIK + etykieta
             self._add_review_item(
-                f"        ↺  {r['object_raw']}" if cofniete else r["object_raw"],
+                etykieta,
                 count=i18n.t_plural("object.review_count", r["n"]),
                 mark=i18n.t("object.review_cleared_mark") if cofniete else None,
                 fg=_WERDYKT["fg"] if cofniete else None,
@@ -1302,9 +1326,16 @@ class ObjectAxisView(QWidget):
         # i w tej samej formie. Klatka trafia tu, gdy nazwę zdjąłeś ręką, a nagłówek o obiekcie
         # MILCZY (nazwa przyszła z regionu/ścieżki/xref, nie z karty). QUIET — wiersza nie ma,
         # dopóki nic nie cofnięto; na archiwum bez ani jednego nagrobka ekran wygląda jak przedtem.
+        # ZNACZNIK NALEŻY SIĘ WSZYSTKIM TRZEM BLIŹNIACZYM PAROM, nie tylko pętli wyżej (firsthand
+        # 0810, znalezisko 2). Etykieta połówki cofniętej jest DOSŁOWNIE tym samym zdaniem, co
+        # etykieta połówki nietkniętej (`nameless` ≡ `nameless_cleared` i tak samo dla RAW-a
+        # i stosów) — więc bez `↺` na początku dwa sąsiednie wiersze różnią się wyłącznie kolorem
+        # i adnotacją stojącą w trzeciej kolumnie, czyli tam, gdzie wzrok trafia ostatni. Wcięcia
+        # te wiersze NIE dostają i to jest różnica wobec pętli `object_review`: są bliźniakami
+        # w partycji, a nie połówkami jednej nazwy.
         if q["nameless_cleared_count"] > 0:
             self._add_review_item(
-                i18n.t("object.nameless_cleared_line"),
+                _ZNACZNIK + i18n.t("object.nameless_cleared_line"),
                 count=i18n.t_plural("object.review_count", q["nameless_cleared_count"]), mark=i18n.t("object.review_cleared_mark"),
                 fg=_WERDYKT["fg"], tag="nameless_cleared")
         # Bliźniak kubełka wyżej po drugiej stronie FORMATU (`resolver.NO_OBJECT_CARD_FILETYPES`):
@@ -1322,7 +1353,7 @@ class ObjectAxisView(QWidget):
         # cicho ich nie tykało. QUIET — wiersza nie ma, dopóki nic nie cofnięto.
         if q["nameless_raw_cleared_count"] > 0:
             self._add_review_item(
-                i18n.t("object.nameless_raw_cleared_line"),
+                _ZNACZNIK + i18n.t("object.nameless_raw_cleared_line"),
                 count=i18n.t_plural("object.review_count", q["nameless_raw_cleared_count"]), mark=i18n.t("object.review_cleared_mark"),
                 fg=_WERDYKT["fg"], tag="nameless_raw_cleared")
         # PODZBIÓR kubełka wyżej, nie szósty kubełek (S2, D-OW-2/B): tym klatkom ŚCIEŻKA proponuje
@@ -1357,11 +1388,16 @@ class ObjectAxisView(QWidget):
         # od stosu, o którym nikt nigdy nie decydował.
         if q["nameless_stacks_cleared_count"] > 0:
             self._add_review_item(
-                i18n.t("object.nameless_stacks_cleared_line"),
+                _ZNACZNIK + i18n.t("object.nameless_stacks_cleared_line"),
                 count=i18n.t_plural("object.review_count", q["nameless_stacks_cleared_count"]), mark=i18n.t("object.review_cleared_mark"),
                 fg=_WERDYKT["fg"], tag="nameless_stacks_cleared")
+        # JEDNOSTKA TEGO WIERSZA TO KLATKA, mimo że kubełek nazywa się od KOPII (firsthand 0810,
+        # znalezisko 4 — lekarstwo poprawione po sprawdzeniu rdzenia). `resolver.review_state`
+        # liczy tu `count(DISTINCT f.id)`, czyli klatki z ≥1 kopią oznaczoną nieczytelną, i robi
+        # to świadomie („spójność z resztą liczników"). Odmiana idzie więc TYM SAMYM kluczem, co
+        # każdy sąsiedni kubełek; własny klucz „N kopii" kłamałby o tym, co policzono.
         self._add_review_item(i18n.t("object.unreadable_line"),
-                              count=str(q["unreadable_count"]),
+                              count=i18n.t_plural("object.review_count", q["unreadable_count"]),
                               tag="unreadable" if q["unreadable_count"] > 0 else None,
                               info=i18n.t("object.unreadable_info_empty"))
         # OŚ SPRZĘTU WYCHODZI Z WIERSZA INFORMACYJNEGO (R1) — do tej zmiany była połową licznika
@@ -1386,7 +1422,8 @@ class ObjectAxisView(QWidget):
         # „rozwiązywanie w przygotowaniu" ZAWĘŻONA do klatek bez nagłówka — obiekt-review, kopie
         # i (od R1) oś sprzętu mają już swoje akcje.
         self._add_review_item(
-            i18n.t("object.review_info"), count=str(q["headerless_count"]),
+            i18n.t("object.review_info"),
+            count=i18n.t_plural("object.review_count", q["headerless_count"]),
             info=i18n.t("object.review_info_why"))
         # Wspólna szerokość kolumny adnotacji PO wypełnieniu listy (kontrakt `rows.fit_tertiary`) —
         # dopiero to ustawia „cofnięte ręką" w jedną kolumnę zamiast pozwalać każdemu wierszowi
@@ -1780,7 +1817,7 @@ class ObjectAxisView(QWidget):
         # (`g.stacks`) i wyrzucał — a to kolejka jest naturalną drogą, którą stos trafia pod ten
         # gest. Milczenie znaczyło: jedyny zapis osi sięgający rodowodu przechodził bez śladu.
         if g.stacks:
-            msg += i18n.t("grid.sel.object_stacks", n=g.stacks)
+            msg += i18n.t_plural("grid.sel.object_stacks", g.stacks)
         self.status_message.emit(msg)
         self.refresh(select_canon=canon if assigned else None, select_first=bool(assigned))
 

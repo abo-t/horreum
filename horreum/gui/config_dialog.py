@@ -81,8 +81,18 @@ class AssignConfigDialog(QDialog):
             else:
                 swiadek = (i18n.t("cfg.header_says", telescop=g["telescop"]) if g["telescop"]
                            else i18n.t("cfg.header_silent"))
+            # RODZAJ ODBIEGAJĄCY OD ŚWIATŁA MÓWI SIĘ PRZED GESTEM (R1-3). Kubełek sprzętu odsiewa
+            # wyłącznie dark/bias, więc siedzi w nim też np. masterflat z niezmapowanym `IMAGETYP`
+            # — gest go przyjmie (oś opisuje optykę, nie rodzaj klatki) i to jest w porządku, ale
+            # user ma wiedzieć, że nie patrzy na RAW-a z lustrzanki. Token surowy, dokładnie taki,
+            # jak w facecie „Rodzaj" — druga warstwa nazewnicza dałaby dwa słowniki na jeden fakt.
+            rodzaje = ""
+            if g["other_kinds"]:
+                rodzaje = i18n.t("cfg.item_kinds", kinds=", ".join(
+                    i18n.t("cfg.kind_count", kind=k, n=n) for k, n in g["other_kinds"]))
             it = QListWidgetItem(
-                i18n.t("cfg.item", folder=folder, camera=kamera, n=g["n_frames"]) + f"   [{swiadek}]")
+                i18n.t("cfg.item", folder=folder, camera=kamera, n=g["n_frames"])
+                + rodzaje + f"   [{swiadek}]")
             it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
             # DWIE GRUPY WCHODZĄ ODZNACZONE, każda z innego powodu:
             #  * BEZ KAMERY — nie ma z czego złożyć zestawu (inwariant DDL §1); klinga i tak by ją

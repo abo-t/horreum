@@ -332,6 +332,14 @@ def test_pusty_filtr_nie_wybucha(view):
 
 # --- akcja zapisu „Przypisz obiekt…" (#8/P4) ---
 
+def _select_review_tag_or_none(v, tag):
+    """Numer pozycji o tym tagu albo `None` — pytanie o NIEOBECNOŚĆ wiersza (sierota vs para)."""
+    for r in range(v.review.count()):
+        if v.review.item(r).data(UROLE) == tag:
+            return r
+    return None
+
+
 def _select_review_tag(v, tag):
     for r in range(v.review.count()):
         if v.review.item(r).data(UROLE) == tag:
@@ -890,6 +898,39 @@ def test_polowka_cofnieta_lightow_drazy_i_NAPRAWIA_wlasna_liste(repair, monkeypa
     v._on_repair()
     assert [r["frame_id"] for r in _StubNaprawa.rows] == [cofniety]
     assert nietkniety not in [r["frame_id"] for r in _StubNaprawa.rows]
+
+
+def test_BLIZNIACZE_kubelki_cofniete_tez_maja_znacznik(repair):
+    """FIRSTHAND 0810, znalezisko 2: trzy z czterech rodzin kubełków dostały tylko DWA sygnały.
+
+    Etykieta połówki cofniętej jest DOSŁOWNIE tym samym zdaniem, co etykieta nietkniętej
+    (`object.nameless_line` ≡ `object.nameless_cleared_line`), więc bez `↺` na początku dwa
+    sąsiednie wiersze różnią się wyłącznie kolorem i adnotacją w trzeciej kolumnie — czyli tam,
+    gdzie wzrok trafia ostatni, a obcięcie pierwszy. Znacznik `↺` miała do dziś wyłącznie pętla
+    `object_review`.
+
+    Wcięcia te wiersze NIE dostają i to jest różnica wobec tamtej pętli: są bliźniakami
+    w partycji, a nie połówkami jednej nazwy — nie ma czego podwieszać.
+
+    Falsyfikator: zdejmij `_ZNACZNIK` z któregokolwiek z trzech wywołań → jego asercja pada."""
+    v, con, files, _open = repair
+    _cofnij_reka(con, [r["frame_id"] for r in queries.nameless_frames(con)][0], NOW_PD)
+    # DWA stosy, bo porównujemy etykiety obu połówek: wiersz nietknięty znika przy zerze (QUIET),
+    # a wtedy test nie miałby z czym zestawić bliźniaka.
+    for sha, cofnij in (("sha-stack-swiezy-znacznik", False), ("sha-stack-cofniety-znacznik", True)):
+        fid, _ = repo.upsert_frame(con, sha1_data=sha, kind="master_light",
+                                   filetype="xisf", camera_id=None, now=NOW_PD)
+        repo.record_header(con, frame_id=fid, raw_json="{}", object_raw=None, now=NOW_PD)
+        if cofnij:
+            _cofnij_reka(con, fid, NOW_PD)
+    v.refresh()
+
+    for tag in ("nameless_cleared", "nameless_stacks_cleared"):
+        it = v.review.item(_select_review_tag(v, tag))
+        nietknieta = v.review.item(_select_review_tag(v, tag.replace("_cleared", "")))
+        assert it.text().startswith("↺"), f"{tag}: brak znacznika na POCZĄTKU wiersza"
+        assert not it.text().startswith(" "), f"{tag}: bliźniak nie jest podwierszem — bez wcięcia"
+        assert it.text().lstrip("↺ ") == nietknieta.text(),             f"{tag}: etykiety przestały być tym samym zdaniem — test mierzy już co innego"
 
 
 def test_polowka_cofnieta_gotowych_stosow_ma_WLASNY_wiersz_i_wlasna_liste(repair, monkeypatch):
@@ -1659,6 +1700,57 @@ def test_polowka_cofnieta_ma_znacznik_NA_POCZATKU_i_kolor(view):
     swiezy = v.review.item(_select_review_tag(v, "object_raw"))
     assert it.foreground().color() != swiezy.foreground().color(), \
         "połówka cofnięta ma ten sam kolor co nietknięta — werdykt nie jest widoczny"
+
+
+def test_DWA_OSTATNIE_liczniki_kolejki_tez_sa_odmienione(view):
+    """FIRSTHAND 0810, znalezisko 4: R-S3-10 odmieniło sześć wierszy i przeoczyło dwa.
+
+    „— bez nagłówka · 1" i „— kopie nieczytelne · 1" jechały gołym `str(...)`, więc sąsiadowały
+    z odmienionym „1 klatka" w tej samej kolumnie — rozjazd widoczny obok siebie.
+
+    JEDNOSTKĄ OBU JEST KLATKA, mimo że drugi kubełek nazywa się od KOPII: `resolver.review_state`
+    liczy tam `count(DISTINCT f.id)` (klatki z ≥1 kopią oznaczoną nieczytelną) i robi to
+    świadomie — „spójność z resztą liczników". Dlatego klucz jest ten sam, co u sąsiadów, a nie
+    własny „N kopii": ten mówiłby o czymś, czego nie policzono.
+
+    Falsyfikator: wróć do `count=str(...)` → obie asercje czerwienieją."""
+    from horreum.gui import i18n
+    v, con, ids = view
+    v._load_review()
+    teksty = {v.review.item(r).data(UROLE): (v.review.item(r).data(SECONDARY) or "")
+              for r in range(v.review.count())}
+    liczby = [v.review.item(r).data(SECONDARY) or "" for r in range(v.review.count())
+              if v.review.item(r).data(UROLE) is None]
+    q = queries.review_queue(con)
+    assert any(i18n.t_plural("object.review_count", q["headerless_count"]) in t for t in liczby),         "wiersz bez nagłówka podaje liczbę bez odmiany"
+    assert any(i18n.t_plural("object.review_count", q["unreadable_count"]) in t
+               for t in list(liczby) + [teksty.get("unreadable", "")]),         "wiersz kopii nieczytelnych podaje liczbę bez odmiany"
+
+
+def test_SIEROTA_cofnieta_nie_udaje_podwiersza_obcej_nazwy(view):
+    """FIRSTHAND 0810, znalezisko 1 (blokada odbioru): wcięcie było bezwarunkowe.
+
+    Nazwa, której cofnięto WSZYSTKIE klatki, oddaje jeden wiersz `cleared=1` bez połówki
+    nietkniętej — a wcięcie podwieszało go wzrokowo pod OBCĄ nazwą stojącą wyżej. Zmierzone
+    przez wizytatora na 45 pozycjach: prawdziwe pary DWIE, reszta sierot. To ta sama szkoda,
+    przed którą broniło R-S3-2 („user załatwia rodzica i zostawia podwiersz"), tylko wpuszczona
+    z drugiej strony — i przypadek CZĘSTSZY od pary, bo gest z kolejki zdejmuje nazwę CAŁEJ
+    grupie naraz.
+
+    Sierota traci WYŁĄCZNIE wcięcie: znacznik i kolor zostają, bo werdykt ręki jest faktem
+    niezależnym od sąsiedztwa.
+
+    Falsyfikator: wróć do bezwarunkowego prefiksu → druga asercja czerwienieje."""
+    v, con, ids = view
+    _cofnij_reka(con, ids["frames"]["objrev1"], NOW_S3)
+    _cofnij_reka(con, ids["frames"]["objrev2"], NOW_S3)     # ...i druga połowa tej samej nazwy
+    v._load_review()
+
+    assert _select_review_tag_or_none(v, "object_raw") is None,         "fikstura nie oddała sieroty — została połówka nietknięta, czyli to dalej para"
+    nazwa, _, trzeci = _wiersz_kolejki(v, "object_raw_cleared")
+    assert nazwa.startswith("↺"), "znacznik należy się KAŻDEJ cofniętej pozycji"
+    assert not nazwa.startswith(" "), "sierota nie ma rodzica na ekranie — wcięcie by go zmyśliło"
+    assert "cofnięte ręką" in trzeci
 
 
 def test_polowki_tej_samej_nazwy_sasiaduja_w_widoku(view):

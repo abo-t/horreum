@@ -308,6 +308,79 @@ def test_scan_tree_telemetria_wykluczonych(tmp_path):
     assert [Path(d).name for d in s.excluded_dirs] == ["_WBPP"]
 
 
+def _walk_z_zerwanym_share(monkeypatch, brakujacy):
+    """Podstaw `os.walk`, który melduje JEDEN nieprzeczytany katalog i idzie dalej — dokładnie to
+    robi zerwany SMB w połowie drzewa. Odebranie uprawnień na Windowsie byłoby testem ACL, nie
+    testem skanu; sprawdzamy KLASYFIKACJĘ błędu (jak `test_presence.py:13`)."""
+    prawdziwy = os.walk
+
+    def _walk(top, *a, **kw):
+        onerror = kw.get("onerror")
+        if onerror is not None:
+            blad = OSError("share zerwany")
+            blad.filename = str(Path(top) / brakujacy)
+            onerror(blad)
+        return prawdziwy(top, *a, **kw)
+
+    monkeypatch.setattr(scan_module.os, "walk", _walk)
+
+
+def test_scan_tree_melduje_katalog_NIEPRZECZYTANY(tmp_path, monkeypatch):
+    """E4-6: droga GŁÓWNA połykała nieprzeczytane katalogi. `iter_headers` umiało zbierać błędy
+    `os.walk` od początku (D-V-11), ale ze wszystkich wołających podawał mu listę WYŁĄCZNIE pass
+    obecności — skan archiwum szedł bez niej, więc zerwany share dawał przebieg z zaniżonymi
+    liczbami, nie do odróżnienia od zdrowego doskanu, w którym nic nie przybyło.
+
+    `incomplete` mówi o ZAKRESIE (nie zobaczyliśmy drzewa), nie o pliku — i to na nim CLI liczy
+    kod wyjścia, żeby bramka biegu 1 etapu 4 („skan widzi 128 nowych lokacji") nie wzięła
+    niekompletnego przejścia za dowód."""
+    con = _db(tmp_path)
+    tree = tmp_path / "tree"; tree.mkdir()
+    _write_fits(tree / "light.fits",
+                cards=[("INSTRUME", "ZWO ASI2600MM Pro"), ("XPIXSZ", 3.76), ("IMAGETYP", "LIGHT")],
+                data=np.zeros((4, 4), np.uint16))
+    _walk_z_zerwanym_share(monkeypatch, "poddrzewo")
+    s = scan_tree(con, tree, volume="VOL1", now=NOW)
+    assert s.unreadable_dirs and s.incomplete is True
+    assert [Path(d).name for d in s.unreadable_dirs] == ["poddrzewo"]
+    # ROZSTRZYGNIĘCIE E4-6: niekompletność NIE przerywa wciągania. To, co widać, wchodzi normalnie
+    # — etapy po skanie liczą ze STANU bazy i tylko dopisują wiedzę o klatkach widzianych, a brama
+    # przyrostowa jest per plik, więc następny przebieg dobierze pominięte bez żadnego gestu.
+    assert (s.files, s.frames_new, s.locations_new) == (1, 1, 1)
+    con.close()
+
+
+def test_scan_tree_kompletny_przebieg_nie_jest_niekompletny(tmp_path):
+    """FALSYFIKATOR do testu wyżej: bez błędu `os.walk` flaga MUSI milczeć, inaczej kod wyjścia CLI
+    świeciłby na czerwono przy każdym zdrowym przebiegu i przestałby cokolwiek znaczyć."""
+    con = _db(tmp_path)
+    tree = tmp_path / "tree"; tree.mkdir()
+    _write_fits(tree / "light.fits",
+                cards=[("INSTRUME", "ZWO ASI2600MM Pro"), ("XPIXSZ", 3.76), ("IMAGETYP", "LIGHT")],
+                data=np.zeros((4, 4), np.uint16))
+    s = scan_tree(con, tree, volume="VOL1", now=NOW)
+    assert s.unreadable_dirs == [] and s.incomplete is False
+    con.close()
+
+
+def test_cli_scan_niekompletny_przebieg_ma_kod_wyjscia_1(tmp_path, monkeypatch, capsys):
+    """Kod wyjścia niesie NIEKOMPLETNOŚĆ (E4-6) — skrypt biegu 1 etapu 4 nie ma czytać prozy,
+    żeby dowiedzieć się, że skan nie objął całego drzewa. Para z falsyfikatorem: zdrowy przebieg
+    po tym samym drzewie musi dać 0."""
+    from horreum import cli
+    dbp = str(tmp_path / "cli.db")
+    db.open_db(dbp).close()
+    tree = tmp_path / "tree"; tree.mkdir()
+    _write_fits(tree / "light.fits",
+                cards=[("INSTRUME", "ZWO ASI2600MM Pro"), ("XPIXSZ", 3.76), ("IMAGETYP", "LIGHT")],
+                data=np.zeros((4, 4), np.uint16))
+    assert cli.main(["scan", str(tree), dbp, "--volume", "VOL1"]) == 0
+    capsys.readouterr()
+    _walk_z_zerwanym_share(monkeypatch, "poddrzewo")
+    assert cli.main(["scan", str(tree), dbp, "--volume", "VOL1"]) == 1
+    assert "PRZEBIEG NIEKOMPLETNY" in capsys.readouterr().out
+
+
 def test_read_header_dyspozytor_po_rozszerzeniu(tmp_path):
     """read_header kieruje .xisf → czytnik XISF (wartość STRING), .fits → astropy (typ natywny)."""
     xf = _write_xisf(tmp_path / "x.xisf", keywords=[("XPIXSZ", "3.76")])
@@ -1505,17 +1578,7 @@ def test_scan_stacks_melduje_katalog_NIEPRZECZYTANY(tmp_path, monkeypatch):
     t = tmp_path / "obrobka"
     t.mkdir()
     _stack(t / "masterLight_A.xisf", n=1)
-    prawdziwy_walk = os.walk
-
-    def _walk_z_bledem(top, *a, **kw):
-        onerror = kw.get("onerror")
-        if onerror is not None:
-            blad = OSError("share zerwany")
-            blad.filename = str(Path(top) / "poddrzewo")
-            onerror(blad)
-        return prawdziwy_walk(top, *a, **kw)
-
-    monkeypatch.setattr(scan_module.os, "walk", _walk_z_bledem)
+    _walk_z_zerwanym_share(monkeypatch, "poddrzewo")        # ta sama atrapa co dla drogi głównej (E4-6)
     s = scan_stacks(con, t, now=NOW)
     assert s.unreadable_dirs and s.incomplete is True
     assert s.ingested == 1                      # to, co widać, dalej wciągamy

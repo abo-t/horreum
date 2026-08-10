@@ -225,6 +225,19 @@ def test_pasek_ukryty_w_spoczynku_blad_w_osobnym_wierszu(qapp, tmp_path):
     assert "scan" not in view.lbl_summary.text()         # błąd NIE zaśmieca panelu wyników
 
 
+def test_linia_skanu_melduje_PRZEBIEG_NIEKOMPLETNY(qapp, tmp_path):
+    """E4-6: zerwany share w połowie archiwum dawał linię raportu nie do odróżnienia od zdrowego
+    doskanu, w którym nic nie przybyło — same niższe liczby. GUI jest JEDYNĄ powierzchnią użytkową
+    (wydanie onefile nie ma CLI), więc naprawa żyjąca w konsoli nie naprawia nic dla człowieka,
+    który patrzy na ekran. Para z falsyfikatorem: zdrowy przebieg milczy (QUIET)."""
+    from horreum.scan import ScanSummary
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    zdrowy = ScanSummary(files=2, frames_new=2)
+    assert "NIEKOMPLETNY" not in view._format_result("scan", zdrowy)
+    niepelny = ScanSummary(files=2, frames_new=2, unreadable_dirs=[r"R:\ASTRO_\LIGHTS\CTB1"])
+    assert "NIEKOMPLETNY" in view._format_result("scan", niepelny)
+
+
 def test_view_przetworz_wszystko_w_watku(qapp, tmp_path):
     """Pełny łańcuch z okna w PRAWDZIWYM wątku: panel akumuluje 5 sekcji (skan/grupuj/rozwiąż/
     kalibracja/delta), running wraca do False po sprzątnięciu."""

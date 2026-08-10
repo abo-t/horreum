@@ -1185,6 +1185,33 @@ class ScanSummary:
     dirs_excluded: int = 0    # podkatalogi z listy odcięte (drzewa robocze: _WBPP/_Review — nie schodzone)
     excluded_dirs: list = field(default_factory=list)   # ich ścieżki (diagnostyka — nie cichy licznik)
     cancelled: bool = False   # skan przerwany kooperatywnie (should_cancel) na granicy pliku
+    unreadable_dirs: list = field(default_factory=list)
+    """Katalogi, których `os.walk` NIE PRZECZYTAŁ (E4-6). Do 0810 `iter_headers` przyjmowało
+    `errors_out`, ale ze wszystkich trzech wołających podawał go WYŁĄCZNIE pass obecności — droga
+    GŁÓWNA (16 711 lokacji) szła bez listy, więc zerwany SMB w połowie drzewa dawał przebieg
+    z zaniżonymi liczbami i ani słowa o niekompletności. Czyta ją `incomplete`."""
+
+    @property
+    def incomplete(self):
+        """Czy przebieg NIE zobaczył całego drzewa — nieprzeczytany katalog albo anulowanie.
+
+        Osobno od `frame_review`: tam plik był widziany i nie dał się przeczytać (fakt o PLIKU,
+        z markerem `unreadable_since` i własną drogą naprawy), tu całego poddrzewa nie było
+        w listingu (fakt o ZAKRESIE — nie ma czego markować, bo nie wiadomo, co tam leży).
+
+        CO WOLNO NA NIEKOMPLETNYM PRZEJŚCIU (rozstrzygnięcie E4-6 — łańcuch NIE jest przerywany):
+        przebieg wciąga to, co zobaczył, a etapy po nim (group/resolve/calibrate/lineage/delta)
+        liczą ze STANU BAZY i tylko DOPISUJĄ wiedzę o klatkach widzianych — żaden z nich nie
+        orzeka o NIEOBECNOŚCI, więc luka w listingu ich nie fałszuje, a jedynie odracza. Brama
+        przyrostowa jest per plik (`volume, path, mtime`), nie per przebieg, więc następny skan
+        dobiera pominięte bez żadnego gestu — niekompletność jest samonaprawialna.
+        JEDYNY etap, który z listingu wyprowadza NIEOBECNOŚĆ, to pass obecności — i on ma własne
+        `errors_out` oraz traktuje takie poddrzewa jak prune (`presence.py:186-200`, D-V-11),
+        więc zerwany share nie zamienia się w zniknięcia. Dlatego `incomplete` nie blokuje niczego
+        w bazie; jego jedyną robotą jest ODEBRANIE PRZEBIEGOWI POZORU KOMPLETU — w raporcie
+        (GUI + CLI) i w kodzie wyjścia, żeby bramka etapu 4 („po przenosinach skan widzi 128
+        nowych lokacji") nie wzięła zaniżonego przejścia za dowód."""
+        return bool(self.unreadable_dirs) or self.cancelled
 
 
 def _filetype(path):
@@ -1687,7 +1714,11 @@ def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now,
     summary = ScanSummary()
     excluded = []
     root = canonize_root(root)                             # forma literowa + casing z dysku; UNC → odmowa (§0)
-    paths = iter_headers(root, excluded_out=excluded)      # drzewa robocze odcięte (EXCLUDED_DIR_NAMES: _WBPP/_Review)
+    # `errors_out` (E4-6): katalogi NIEPRZECZYTANE przez `os.walk` (zerwany SMB, odebrane prawa).
+    # Bez tej listy przebieg po zerwanym share'ie jest nie do odróżnienia od przebiegu po drzewie,
+    # w którym po prostu nic nie przybyło — a to droga główna, nie boczna. Semantyka → `incomplete`.
+    paths = iter_headers(root, excluded_out=excluded,      # drzewa robocze odcięte (EXCLUDED_DIR_NAMES: _WBPP/_Review)
+                         errors_out=summary.unreadable_dirs)
     summary.excluded_dirs = excluded
     summary.dirs_excluded = len(excluded)
     stacks_prefix = _stacks_prefix(root)

@@ -1747,6 +1747,10 @@ CATALOG = {
         "pl": "pochodne obróbki pod STACKS pominięte {n}",
         "en": "derived files under STACKS skipped {n}",
     },
+    "pipeline.fmt.scan_unreadable": {
+        "pl": "PRZEBIEG NIEKOMPLETNY: katalogi nieprzeczytane {n}",
+        "en": "RUN INCOMPLETE: unreadable directories {n}",
+    },
     "pipeline.fmt.group": {
         "pl": "[grupuj] nagłówki {headers} · teleskopy {telescopes} · bez TELESCOP {no_tel} · "
               "kalibracja poza osią {off_axis}{unassigned}{by_hand} · "

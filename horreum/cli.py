@@ -61,6 +61,8 @@ def main(argv=None):
     p_scan.add_argument("--volume", default="?",
                         help="trwały identyfikator wolumenu (domyślnie placeholder '?')")
     p_scan.add_argument("--tier", default=None, help="cold|scratch")
+    p_scan.add_argument("--limit", type=int, default=10,
+                        help="ile nieprzeczytanych katalogów wypisać (domyślnie 10)")
 
     # Droga „Stosy" (I-2b, P-I / D-P-I-1 wariant A) — OSOBNA od `scan` z decyzji, nie z wygody:
     # drzewo obróbki nie jest archiwum, więc wskazuje się je świadomym gestem, a standing-op
@@ -253,7 +255,19 @@ def main(argv=None):
                             drive_letter=(Path(args.root).drive or None), tier=args.tier, now=now)
         con.close()
         print(f"Horreum scan {args.root} -> {args.db}: {summary}")   # ASCII: konsola Windows = cp1250
-        return 0
+        if summary.unreadable_dirs:
+            # ZAKRES, nie plik (E4-6): zaniżone liczby po zerwanym share'ie wygladaja dokladnie
+            # jak „nic nie przybylo". Repr summary te sciezki niesie, ale utopione miedzy
+            # kilkunastoma licznikami — bramka etapu 4 ma je zobaczyc, nie wypatrzec.
+            print(f"  NIEPRZECZYTANE katalogi: {len(summary.unreadable_dirs)} "
+                  f"-- PRZEBIEG NIEKOMPLETNY, liczby nizsze niz stan drzewa")
+            for d in summary.unreadable_dirs[:args.limit]:
+                print(f"    {d}")
+            if len(summary.unreadable_dirs) > args.limit:
+                print(f"    ... i {len(summary.unreadable_dirs) - args.limit} wiecej")
+        # Kod wyjscia niesie NIEKOMPLETNOSC (jak w `stacks`): skrypt biegu 1 etapu 4 sprawdza
+        # „skan widzi 128 nowych lokacji" i nie ma prawa wziac zanizonego przejscia za dowod.
+        return 1 if summary.incomplete else 0
     if args.cmd == "stacks":
         from .scan import scan_stacks                    # lazy: nie ładuj astropy dla init/--version
         now = datetime.now(timezone.utc).isoformat()

@@ -945,6 +945,11 @@ class PipelineView(QWidget):
         # „wykluczenie WIDOCZNE, nie cichy licznik", a jedyna powierzchnia użytkowa go nie pokazywała.
         if s.derived_skipped:
             linia += " · " + i18n.t("pipeline.fmt.scan_derived", n=s.derived_skipped)
+        # PRZEBIEG NIEKOMPLETNY (E4-6) — ten sam człon, który dostała droga „Stosy", tyle że tu
+        # broni drogi GŁÓWNEJ. Bez niego zerwany share w połowie archiwum daje linię raportu nie
+        # do odróżnienia od zdrowego doskanu, w którym nic nie przybyło: same niższe liczby.
+        if s.unreadable_dirs:
+            linia += " · " + i18n.t("pipeline.fmt.scan_unreadable", n=len(s.unreadable_dirs))
         return linia
 
     def _format_group(self, s):

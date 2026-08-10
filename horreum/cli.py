@@ -264,7 +264,9 @@ def main(argv=None):
         print(_format_stacks(args.root, args.db, s, limit=args.limit))   # ASCII (cp1250)
         # Odmowa NIE jest błędem drogi (plik po prostu nie jest stackiem), ale kod wyjścia ma ją
         # nieść: skrypt, który woła tę komendę, nie ma czytać prozy, żeby dowiedzieć się o brakach.
-        return 1 if (s.rejected_kind or s.rejected_unreadable or s.failed) else 0
+        # `incomplete` dokłada drugi powód i CIĘŻSZY: tam brakuje wyniku o PLIKU, tu o całym
+        # poddrzewie, którego listing nie objął (E4-1 pkt 4).
+        return 1 if (s.rejected_kind or s.rejected_unreadable or s.failed or s.incomplete) else 0
     if args.cmd == "group":
         from .grouper import run_grouper                 # lazy: nie ładuj resolve/astropy dla init
         now = datetime.now(timezone.utc).isoformat()
@@ -1030,6 +1032,15 @@ def _format_stacks(root, db_path, s, limit=10):
         lines.append(f"  BLEDY I/O (zero zapisu): {s.failed}")
         for p in s.failed_paths[:limit]:
             lines.append(f"    {p}")
+    if s.unreadable_dirs:
+        # ZAKRES, nie plik: „0 kandydatow" po zerwanym share'ie wyglada dokladnie jak „nic tam
+        # nie ma". Ta linia jest jedyna roznica miedzy tymi zdaniami (E4-1 pkt 4).
+        lines.append(f"  NIEPRZECZYTANE katalogi: {len(s.unreadable_dirs)} "
+                     f"-- PRZEBIEG NIEKOMPLETNY, liczby nizsze niz stan drzewa")
+        for d in s.unreadable_dirs[:limit]:
+            lines.append(f"    {d}")
+        if len(s.unreadable_dirs) > limit:
+            lines.append(f"    ... i {len(s.unreadable_dirs) - limit} wiecej")
     if s.cancelled:
         lines.append("  PRZERWANE na granicy pliku — baza spojna, ponowny przebieg dokonczy")
     return "\n".join(lines)

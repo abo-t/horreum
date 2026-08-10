@@ -4,6 +4,7 @@ Buduje REALNE pliki FITS przez astropy (pierwsza zależność runtime) i czyta j
 """
 import hashlib
 import json
+import os
 import shutil
 import struct
 from pathlib import Path
@@ -13,10 +14,11 @@ import pytest
 from astropy.io import fits
 
 from horreum import db
+from horreum import scan as scan_module
 from horreum.scan import (
     ScanRecord, ScanSummary, _already_scanned, backfill_xisf_headers, header_dict_from_cards,
-    ingest_record, iter_fits, iter_headers, iter_stacks, locate_value_span, quote_fits,
-    read_fits_header, read_fits_meta, read_header, read_xisf_header, read_xisf_meta,
+    ingest_record, is_derived_name, iter_fits, iter_headers, iter_stacks, locate_value_span,
+    quote_fits, read_fits_header, read_fits_meta, read_header, read_xisf_header, read_xisf_meta,
     read_xisf_meta_full, scan_file, scan_stacks, scan_tree, xml_parsable,
 )
 
@@ -1435,6 +1437,91 @@ def test_iter_stacks_dwa_sita_nazwa_i_pochodne(tmp_path):
     assert got == ["masterLight_FILTER-H_mono.xisf", "MASTERLIGHT_wielkie.xisf"]
     assert sorted(Path(p).name for p in derived) == [
         "masterLight_FILTER-H_mono_autocrop.xisf", "masterLight_FILTER-O_mono_starless.xisf"]
+
+
+def test_sito_pochodnych_tnie_po_TOKENIE_nie_po_substringu():
+    """E4-1 pkt 2 — pułapka utajona, naprawiona ZANIM sito weszło do drogi całego archiwum.
+
+    Dawne `"_abe" in name` łapało `_Abell 2151`, a `Abell` jest u nas katalogiem rozpoznawanym.
+    W drzewie stosów Abella nie było (0/193 w planie 0802), więc pułapka nigdy nie wystrzeliła —
+    ale wariant A+ wpuszcza to sito na drogę, którą jedzie CAŁE archiwum.
+
+    Druga połowa asercji pilnuje ceny tej naprawy: PixInsight skleja kroki bez separatora
+    (`SPCCBXTc`, `StarsBack`), więc sama równość tokenu przepuszczałaby realne pochodne. Obie
+    listy zmierzone na 11 346 plikach XISF obu drzew (0810), nie wymyślone."""
+    for name in ("masterLight_x_ABE.xisf", "masterLight_x_autocrop.xisf",
+                 "masterLight_x_SPCC_starless.xisf", "masterLight_x_stars.xisf",
+                 "NGC5907_LPRO_OSC_crop_SPCCBXTc.xisf", "Sh2-188_RGB_starsSTR.xisf",
+                 "HOO1_MAS_StarsBack.xisf", "starless_HOO_BN_NBN.xisf"):
+        assert is_derived_name(name) is True, name
+    for name in ("masterLight_Abell 2151_600s.xisf", "masterLight_ABELL1656.xisf",
+                 "CTB1_2025-08-30_A140R_2600MM_Ha_600s_mono_ast.xisf",
+                 "masterLight_BIN-1_EXPOSURE-600.00s_FILTER-H_mono.xisf"):
+        assert is_derived_name(name) is False, name
+
+
+def test_scan_tree_odsiewa_pochodne_TYLKO_pod_STACKS(tmp_path):
+    """E4-1 pkt 1 (wariant A+): właścicielem `STACKS` jest zwykły skan, więc to ON musi nieść
+    granicę plików pochodnych — ale WYŁĄCZNIE tam, i wyłącznie dla katalogu bezpośrednio pod
+    korzeniem. `…\\LIGHTS\\NGC7000\\stacks\\` to czyjś folder roboczy przy obiekcie, nie archiwum
+    stosów: odsianie go byłoby cichą utratą klatek, o którą nikt nie prosił.
+
+    Odsiane ścieżki są WIDOCZNE w raporcie (`derived_paths`) — ta sama zasada, co przy
+    `excluded_dirs`: wykluczenie schowane w różnicy liczników jest twierdzeniem bez dowodu."""
+    con = _db(tmp_path)
+    root = tmp_path / "ASTRO_"
+    (root / "STACKS" / "CTB1").mkdir(parents=True)
+    (root / "LIGHTS" / "NGC7000" / "stacks").mkdir(parents=True)
+    _stack(root / "STACKS" / "CTB1" / "CTB1_A140R_Ha_600s.xisf", n=1)
+    _stack(root / "STACKS" / "CTB1" / "CTB1_A140R_Ha_600s_ABE.xisf", n=2)      # pochodna — odsiew
+    _stack(root / "LIGHTS" / "NGC7000" / "stacks" / "x_ABE.xisf", n=3)        # NIE pod STACKS
+
+    s = scan_tree(con, root, now=NOW)
+    assert s.derived_skipped == 1
+    assert [Path(p).name for p in s.derived_paths] == ["CTB1_A140R_Ha_600s_ABE.xisf"]
+    nazwy = {Path(r[0]).name for r in con.execute("SELECT path FROM location")}
+    assert nazwy == {"CTB1_A140R_Ha_600s.xisf", "x_ABE.xisf"}
+    con.close()
+
+
+def test_scan_stacks_melduje_katalog_NIEPRZECZYTANY(tmp_path, monkeypatch):
+    """E4-1 pkt 4: zerwany share w połowie drzewa dawał ciche „0 kandydatów" — raport nie do
+    odróżnienia od „nic tam nie ma". `iter_stacks` umiało zbierać błędy `os.walk` od początku,
+    tylko nikt mu listy nie podawał.
+
+    `incomplete` mówi o ZAKRESIE (nie zobaczyliśmy drzewa), nie o pliku — i to na nim CLI liczy
+    kod wyjścia, żeby skrypt etapu 4 nie wziął niekompletnego przebiegu za sukces."""
+    con = _db(tmp_path)
+    t = tmp_path / "obrobka"
+    t.mkdir()
+    _stack(t / "masterLight_A.xisf", n=1)
+    prawdziwy_walk = os.walk
+
+    def _walk_z_bledem(top, *a, **kw):
+        onerror = kw.get("onerror")
+        if onerror is not None:
+            blad = OSError("share zerwany")
+            blad.filename = str(Path(top) / "poddrzewo")
+            onerror(blad)
+        return prawdziwy_walk(top, *a, **kw)
+
+    monkeypatch.setattr(scan_module.os, "walk", _walk_z_bledem)
+    s = scan_stacks(con, t, now=NOW)
+    assert s.unreadable_dirs and s.incomplete is True
+    assert s.ingested == 1                      # to, co widać, dalej wciągamy
+    con.close()
+
+
+def test_scan_stacks_kompletny_przebieg_nie_jest_niekompletny(tmp_path):
+    """FALSYFIKATOR do testu wyżej: bez błędu `os.walk` flaga MUSI milczeć, inaczej kod wyjścia
+    CLI świeciłby na czerwono przy każdym zdrowym przebiegu i przestałby cokolwiek znaczyć."""
+    con = _db(tmp_path)
+    t = tmp_path / "obrobka"
+    t.mkdir()
+    _stack(t / "masterLight_A.xisf", n=1)
+    s = scan_stacks(con, t, now=NOW)
+    assert s.unreadable_dirs == [] and s.incomplete is False
+    con.close()
 
 
 def test_scan_stacks_wciaga_tylko_zeznane_stacki(tmp_path):

@@ -137,8 +137,82 @@ EXCLUDED_DIR_NAMES = frozenset({"_wbpp", "_review"})
 # `scan_tree` i standing-op doskanu zostają NIETKNIĘTE. Odrzucone świadomie: rozszerzenie skanu
 # (wciągnęłoby setki plików pośrednich obróbki, które nie są klatkami).
 STACK_NAME_PREFIX = "masterlight"       # konwencja WBPP; porównanie na `name.lower()`
-# Znaczniki PLIKU POCHODNEGO obróbki — granica §5 briefu P-I. Kolejność bez znaczenia (test `in`).
-DERIVED_NAME_MARKERS = ("_autocrop", "_abe", "_dbe", "_spcc", "_starless", "_stars")
+
+# Znaczniki PLIKU POCHODNEGO obróbki — granica §5 briefu P-I. Od 0810 (E4-1 wariant A+) obowiązują
+# w DWÓCH drogach: w „Stosach" (całe wskazane drzewo) i w zwykłym skanie (wyłącznie poddrzewo
+# `STACKS`), więc mają JEDNEGO właściciela — `is_derived_name`.
+#
+# TOKENY, NIE SUBSTRINGI — i to jest naprawa pułapki utajonej, nie kosmetyka. Dawne dopasowanie
+# `"_abe" in name` łapie `_Abell 2151`, a `Abell` jest u nas KATALOGIEM rozpoznawanym
+# (`resolve/catalog.py`). W planie przenosin 0802 Abella nie ma (0/193), więc pułapka nigdy nie
+# wystrzeliła — ale sito wchodzi właśnie do drogi, którą jedzie CAŁE archiwum, a tam nazwa obiektu
+# jest normalna. Token = maksymalny ciąg alfanumeryczny nazwy; `_Abell 2151` daje `abell`, `2151`
+# i nie trafia w `abe`.
+DERIVED_NAME_TOKENS = frozenset({"autocrop", "abe", "dbe", "spcc", "starless", "stars"})
+_NAME_TOKEN_SPLIT = re.compile(r"[^0-9a-z]+")
+
+# Próg, od którego znacznik wolno dopasować jako PRZEDROSTEK tokenu, nie tylko jako cały token.
+# Wymuszony pomiarem, nie gustem (0810, 11 346 plików XISF obu drzew): PixInsight skleja kolejne
+# kroki bez separatora — `SPCCBXTc`, `StarsBack`, `starsSTR` — więc sama równość tokenu przepuszcza
+# 6 realnych pochodnych. Zarazem znaczniki TRZYLITEROWE (`abe`, `dbe`) są przedrostkiem prawdziwych
+# słów: `Abell` to KATALOG (`resolve/catalog.py`), a odsianie klatki Abella byłoby cichą utratą
+# pozycji archiwum — czyli błędem cięższym niż wciągnięcie pliku pochodnego, który i tak jest
+# widoczny w siatce. Stąd asymetria: krótkie znaczniki tylko jako całe tokeny, dłuższe także jako
+# przedrostek.
+_DERIVED_PREFIX_MIN = 4
+
+
+def is_derived_name(name):
+    """Czy nazwa pliku niesie znacznik POCHODNEJ OBRÓBKI (`…_ABE`, `…_autocrop`, `…StarsBack`).
+
+    JEDEN WŁAŚCICIEL granicy §5 briefu P-I — woła go droga „Stosy" (`iter_stacks`) i zwykły skan
+    w poddrzewie `STACKS` (`scan_tree`). Druga kopia tej reguły znaczyłaby dwie definicje tego,
+    co jest klatką, na jednym woluminie — dokładnie stan, przed którym broni rozstrzygnięcie E4-1.
+
+    DOPASOWANIE PO TOKENIE, NIE PO SUBSTRINGU — naprawa pułapki utajonej (E4-1 pkt 2). Dawne
+    `"_abe" in name` łapało `_Abell 2151`; w drzewie stosów Abella nie było (0/193 w planie 0802),
+    ale sito wchodzi teraz do drogi, którą jedzie CAŁE archiwum, a tam nazwa obiektu jest normalna.
+    Rozszerzenie odcinamy przed tokenizacją, żeby `.xisf` nie wnosiło własnego tokenu.
+
+    Asymetria progu `_DERIVED_PREFIX_MIN` jest ZMIERZONA — powód i liczby przy stałej."""
+    stem = name.rsplit(".", 1)[0] if "." in name else name
+    for token in _NAME_TOKEN_SPLIT.split(stem.lower()):
+        if not token:
+            continue
+        if token in DERIVED_NAME_TOKENS:
+            return True
+        if any(len(m) >= _DERIVED_PREFIX_MIN and token.startswith(m)
+               for m in DERIVED_NAME_TOKENS):
+            return True
+    return False
+
+
+# Katalog archiwum, do którego trafiają GOTOWE OBRAZY po konsolidacji (etap 4). Rozpoznawany
+# WYŁĄCZNIE bezpośrednio pod korzeniem skanu — nie jako dowolny segment o tej nazwie, bo
+# `…\LIGHTS\NGC7000\stacks\` to czyjś folder roboczy, a nie archiwum stosów.
+STACKS_DIR_NAME = "stacks"
+
+
+def _stacks_prefix(root):
+    """Prefiks poddrzewa `STACKS` DLA TEGO korzenia — albo `None`, gdy korzeń go nie ma.
+
+    Zwracamy PREFIKS ŚCIEŻKI, nie samą nazwę, bo kontrakt E4-1 brzmi „bezpośrednio pod korzeniem
+    skanu". Dopasowanie po nazwie segmentu obejmowałoby każdy `stacks` w drzewie, a taki folder
+    bywa czyimś katalogiem roboczym przy obiekcie — sito odsiewałoby wtedy pliki, których nikt
+    nie prosił o odsianie, i to bez śladu w konfiguracji.
+
+    ŚCIEŻKI W KODZIE NIE MA I BYĆ NIE MOŻE (repo publiczne, `git-workflow §6`): korzeń przychodzi
+    od wołającego, my dokładamy do niego jeden segment ze stałej."""
+    return os.path.join(str(root), STACKS_DIR_NAME) + os.sep
+
+
+def _under(path, prefix):
+    """Czy `path` leży pod prefiksem. `casefold`, bo NTFS nie rozróżnia wielkości liter, a `root`
+    przychodzi po `canonize_root` (casing z dysku) — porównanie wrażliwe na wielkość gubiłoby
+    `STACKS` zapisane inaczej niż w stałej."""
+    return prefix is not None and path.casefold().startswith(prefix.casefold())
+
+
 # Rodzaj, który droga „Stosy" wpuszcza do bazy — JEDYNY. Zeznanie (`IMAGETYP`), nie nazwa.
 STACK_KIND = "master_light"
 
@@ -255,11 +329,12 @@ def iter_stacks(root, derived_out=None, errors_out=None):
     DWA SITA, bo mają dwa różne zadania:
       1. `STACK_NAME_PREFIX` — konwencja WBPP dla produktu integracji. Sito TANIE: zawęża
          7383 plików XISF drzewa obróbki do 259 bez otwierania choćby jednego.
-      2. `DERIVED_NAME_MARKERS` — granica §5 briefu P-I („nie wciągamy plików pochodnych
+      2. `is_derived_name` — granica §5 briefu P-I („nie wciągamy plików pochodnych
          obróbki"). `masterLight…_autocrop` to ten sam stack po kadrowaniu, `…_ABE`/`…_starless`
          to kolejne kroki obróbki — obrazy, nie klatki archiwum. Zmierzone na realnym drzewie
          2026-08-01: 259 nazw pasuje sicie 1, z tego 131 niesie znacznik pochodnej → **128
-         kandydatów** (kotwica D-P-I-6; 85 to liczba INTEGRACJI, nie plików).
+         kandydatów** (kotwica D-P-I-6; 85 to liczba INTEGRACJI, nie plików). Od 0810 to sito
+         ma drugiego wołającego (`scan_tree` w poddrzewie `STACKS`) i wspólnego właściciela.
 
     Nazwa NIE jest jednak dowodem, że plik jest stackiem — rozstrzyga ZEZNANIE (`IMAGETYP`),
     które sprawdza dopiero `scan_stacks`. To sito wyznacza ZAKRES (§5), tamta bramka TOŻSAMOŚĆ.
@@ -279,7 +354,7 @@ def iter_stacks(root, derived_out=None, errors_out=None):
         name = p.name.lower()
         if not name.startswith(STACK_NAME_PREFIX):
             continue
-        if any(m in name for m in DERIVED_NAME_MARKERS):
+        if is_derived_name(name):
             if derived_out is not None:
                 derived_out.append(str(p))
             continue
@@ -1079,6 +1154,8 @@ def scan_file(path):
 class ScanSummary:
     """Zliczenia jednego przebiegu `scan_tree` — do firsthand-weryfikacji integralności."""
     files: int = 0
+    derived_skipped: int = 0  # pliki pochodne obróbki odsiane w poddrzewie STACKS (E4-1 wariant A+)
+    derived_paths: list = field(default_factory=list)   # ich ścieżki — wykluczenie WIDOCZNE, nie cichy licznik
     frames_new: int = 0
     frames_existing: int = 0
     locations_new: int = 0
@@ -1477,8 +1554,22 @@ class StackScanSummary:
     derived_paths: list = field(default_factory=list)
     rejected_paths: list = field(default_factory=list)
     failed_paths: list = field(default_factory=list)
+    unreadable_dirs: list = field(default_factory=list)
+    """Katalogi, których `os.walk` NIE PRZECZYTAŁ (E4-1 pkt 4). Do 0810 `iter_stacks` przyjmowało
+    `errors_out`, ale `scan_stacks` go nie podawało, więc zerwany SMB w połowie drzewa dawał ciche
+    „0 kandydatów" — raport nie do odróżnienia od „nic tam nie ma". Ta lista jest jedyną różnicą
+    między tymi dwoma zdaniami; czyta ją `incomplete`."""
     cancelled: bool = False
     scan: ScanSummary = field(default_factory=ScanSummary)  # eventy/odświeżenia z `ingest_record`
+
+    @property
+    def incomplete(self):
+        """Czy przebieg NIE zobaczył całego drzewa — nieprzeczytany katalog albo anulowanie.
+
+        Osobno od `failed`: tam plik był widziany i nie dał się przeczytać (fakt o PLIKU), tu
+        całego poddrzewa nie było w listingu (fakt o ZAKRESIE). Konsument liczy na tym kod wyjścia,
+        bo „wciągnięto 0" po zerwanym share'ze nie ma prawa wyglądać na sukces."""
+        return bool(self.unreadable_dirs) or self.cancelled
 
 
 def scan_stacks(con, root, *, volume="?", drive_letter=None, tier=None, now,
@@ -1519,7 +1610,7 @@ def scan_stacks(con, root, *, volume="?", drive_letter=None, tier=None, now,
     s = StackScanSummary()
     derived = []
     root = canonize_root(root)
-    paths = iter_stacks(root, derived_out=derived)
+    paths = iter_stacks(root, derived_out=derived, errors_out=s.unreadable_dirs)
     s.derived_paths = derived
     s.derived_skipped = len(derived)
     s.candidates = len(paths)
@@ -1586,14 +1677,19 @@ def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now,
     paths = iter_headers(root, excluded_out=excluded)      # drzewa robocze odcięte (EXCLUDED_DIR_NAMES: _WBPP/_Review)
     summary.excluded_dirs = excluded
     summary.dirs_excluded = len(excluded)
+    stacks_prefix = _stacks_prefix(root)
     total = len(paths)
     gate_on = volume != "?"
     for path in paths:
         if should_cancel is not None and should_cancel():
             summary.cancelled = True
             break
-        summary.files += 1
         spath = str(path)
+        if _under(spath, stacks_prefix) and is_derived_name(path.name):
+            summary.derived_skipped += 1
+            summary.derived_paths.append(spath)
+            continue
+        summary.files += 1
         try:
             skip = gate_on and _already_scanned(con, volume, spath, _mtime_iso(path.stat()))
             if skip:

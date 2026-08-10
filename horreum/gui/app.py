@@ -30,12 +30,22 @@ from PySide6.QtWidgets import (
 )
 
 from horreum import db, macro as macro_mod, repo, resolver
-from horreum.gui import busy, i18n, mapproj, queries, theme
+from horreum.gui import busy, i18n, mapproj, queries, rows, theme
 from horreum.gui.assign_dialog import AssignObjectDialog
 from horreum.gui.config_dialog import AssignConfigDialog
 from horreum.gui.map_view import SitesMapView
+from horreum.gui.rows import TwoPartDelegate
 from horreum.resolve._text import norm_alnum
 from horreum.resolve.catalog import catalog_canon
+
+# ROLE POZYCJI KOLEJKI PRZEGLĄDU — świadomie POZA pasmem `rows` (SECONDARY/TERTIARY/STRONG zajmują
+# `UserRole+1…+3`). Kolejka trzymała payload pod `UserRole+1`, a powód pod `UserRole+2`, czyli
+# DOKŁADNIE tam, skąd delegat czyta człon drugi i trzeci: podpięcie `TwoPartDelegate` bez tego
+# przesunięcia wypisałoby `object_raw` w kolumnie liczby, a tooltip wiersza informacyjnego —
+# w kolumnie adnotacji. Nazwane stałe, bo ta kolizja jest niewidoczna w miejscu użycia.
+_REVIEW_TAG = Qt.UserRole                   # dispatch (`_selected_review`) — kontrakt sprzed zmiany
+_REVIEW_PAYLOAD = Qt.UserRole + 4
+_REVIEW_INFO = Qt.UserRole + 5
 
 # Kolumny listy głównej — indeksy nazwane (czytelne handlery zamiast magicznych liczb).
 # Nagłówek = telescop_canon (tożsamość osi po przejściu fitsmirror); Etykieta = nazwa usera.
@@ -180,12 +190,17 @@ def apply_theme(app, name):
 # Szarość pozycji kolejki przeglądu, które NIE prowadzą nigdzie (informacyjne albo z zerem).
 # Wzorzec `tasks._DIM`: QBrush, nie QSS — QSS nie sięga pojedynczej pozycji `QListWidget`.
 _DIM: dict[str, QColor] = {}
+# Kolor połówki kubełka z NAGROBKIEM (R-S3-3) — „to Twój werdykt, nie brak wiedzy". `warn`, nie
+# `gold`: złoto jest akcentem MARKI i w motywie jasnym ma 2,7:1, więc do tekstu się nie nadaje
+# (`theme.py` §akcenty); bursztyn ma 7,4:1 / 6,3:1 i jest tam wprost przeznaczony do tekstu.
+_WERDYKT: dict[str, QColor] = {}
 
 
 def use_theme(name):
-    """Kolor wygaszenia Z MOTYWU (wzorzec `tasks.use_theme`) — nigdy literałem, bo sztywna szarość
-    przeszła kiedyś w motywie jasnym z kontrastem 3,54:1, poniżej AA."""
+    """Kolory pozycji kolejki Z MOTYWU (wzorzec `tasks.use_theme`) — nigdy literałem, bo sztywna
+    szarość przeszła kiedyś w motywie jasnym z kontrastem 3,54:1, poniżej AA."""
     _DIM["fg"] = QColor(theme.accents(name)["secondary_text"])
+    _WERDYKT["fg"] = QColor(theme.accents(name)["warn"])
 
 
 use_theme(theme.DEFAULT)             # init przy imporcie (QColor bez QApplication — jak stałe modułu)
@@ -1085,9 +1100,20 @@ class ObjectAxisView(QWidget):
 
         lv.addWidget(QLabel(i18n.t("object.review_queue")))
         self.review = QListWidget()
+        # WIERSZ WIELOCZŁONOWY (R-S3-3): nazwa od lewej (elidowana), liczba i adnotacja przy prawej
+        # krawędzi. Do tej zmiany kolejka doklejała oba człony do tekstu, więc przy wąskim oknie
+        # lista jechała poziomym scrollem i pierwsze ginęło to, co niesie ZNACZENIE („cofnięte
+        # ręką"). `ScrollBarAlwaysOff` jest częścią kontraktu delegata, nie kosmetyką: bez niego
+        # Qt rozciąga viewport pod `sizeHint` najdłuższej nazwy i elizja nigdy nie dochodzi do głosu.
+        self.review.setItemDelegate(TwoPartDelegate(self.review))
+        self.review.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.review.itemSelectionChanged.connect(self._on_review_selected)
         # DRUGI sygnał, bo wiersz informacyjny nie jest zaznaczalny i pierwszego nie wyzwala (F-2).
         self.review.itemClicked.connect(self._on_review_clicked)
+        # TRZECI: dwuklik = akcja pozycji bez wędrówki do rzędu przycisków (R-S3-6). Gest, którego
+        # nie było, choć lista go sugeruje samym drążeniem; naprawa kubełka cofniętych spada z 6
+        # interakcji na 5.
+        self.review.itemDoubleClicked.connect(self._on_review_double_clicked)
         lv.addWidget(self.review)
         # Akcja #8/P4: przypisz obiekt zaznaczonej pozycji review (aktywna TYLKO przy tagu
         # „object_raw" — obie listy wzajemnie czyszczą selekcję, przycisk śledzi obie).
@@ -1249,17 +1275,27 @@ class ObjectAxisView(QWidget):
             # CZŁON „cofnięte ręką" (S3/R-S2b-1) niesie TAG, nie payload: dispatch tego widoku stoi
             # na string-tagu właśnie po to, żeby nie wozić krotki w roli QVariant (wraca jako lista,
             # R#6). Para (`object_raw`, cleared) rozkłada się więc na tag + payload, a nie na tuple.
+            #
+            # POŁÓWKA COFNIĘTA JEST PODWIERSZEM SWOJEJ NAZWY (R-S3-2/R-S3-3), nie osobną pozycją:
+            # zapytanie stawia ją zaraz pod połówką nietkniętą, a wcięcie i znacznik `↺` na
+            # POCZĄTKU mówią to samo oku — zanim cokolwiek się utnie. Kolor `warn`, nie `gold`:
+            # złoto jest akcentem marki i w jasnym motywie ma 2,7:1, więc do tekstu się nie nadaje
+            # (`theme.py` §akcenty). Adnotacja słowna zostaje, ale schodzi do członu trzeciego.
+            cofniete = bool(r["cleared"])
             self._add_review_item(
-                i18n.t("object.review_item_cleared" if r["cleared"] else "object.review_item",
-                       name=r["object_raw"], n=r["n"]),
-                tag="object_raw_cleared" if r["cleared"] else "object_raw",
+                f"        ↺  {r['object_raw']}" if cofniete else r["object_raw"],
+                count=i18n.t_plural("object.review_count", r["n"]),
+                mark=i18n.t("object.review_cleared_mark") if cofniete else None,
+                fg=_WERDYKT["fg"] if cofniete else None,
+                tag="object_raw_cleared" if cofniete else "object_raw",
                 payload=r["object_raw"])
         # Bezimienne (T5a): grid „Do przeglądu" je pokazuje, kolejka do dziś o nich milczała — bez
         # `object_raw` nie ma klucza grupowania, więc idą własnym licznikiem. Od P-D pozycja DRĄŻY
         # do klatek i niesie akcję „Napraw nagłówek…" (nazwa wraca do PLIKU, nie do bazy). Tag
         # nadawany WYŁĄCZNIE przy n>0: kubełek pusty ma zostać informacyjny, żeby zaznaczenie nie
         # otwierało okna bez treści.
-        self._add_review_item(i18n.t("object.nameless_line", n=q["nameless_count"]),
+        self._add_review_item(i18n.t("object.nameless_line"),
+                              count=i18n.t_plural("object.review_count", q["nameless_count"]),
                               tag="nameless" if q["nameless_count"] > 0 else None,
                               info=i18n.t("object.nameless_info_empty"))
         # Druga połowa tego kubełka (R-S3-1) — lustro wiersza RAW-owego niżej, z tego samego powodu
@@ -1268,8 +1304,9 @@ class ObjectAxisView(QWidget):
         # dopóki nic nie cofnięto; na archiwum bez ani jednego nagrobka ekran wygląda jak przedtem.
         if q["nameless_cleared_count"] > 0:
             self._add_review_item(
-                i18n.t("object.nameless_cleared_line", n=q["nameless_cleared_count"]),
-                tag="nameless_cleared")
+                i18n.t("object.nameless_cleared_line"),
+                count=i18n.t_plural("object.review_count", q["nameless_cleared_count"]), mark=i18n.t("object.review_cleared_mark"),
+                fg=_WERDYKT["fg"], tag="nameless_cleared")
         # Bliźniak kubełka wyżej po drugiej stronie FORMATU (`resolver.NO_OBJECT_CARD_FILETYPES`):
         # RAW nie ma karty `OBJECT` z natury, więc „Napraw nagłówek…" go nie dotyczy — drogą
         # naprawy jest RĘKA. Do S4 wiersz był INFORMACYJNY i to była luka, nie decyzja: akcja
@@ -1277,15 +1314,17 @@ class ObjectAxisView(QWidget):
         # NIE MA z definicji formatu, więc jedyna droga naprawy nie miała powierzchni.
         # Pokazywany TYLKO gdy populacja istnieje: na archiwum bez lustrzanki to stałe „0".
         if q["nameless_raw_count"] > 0:
-            self._add_review_item(i18n.t("object.nameless_raw_line", n=q["nameless_raw_count"]),
-                                  tag="nameless_raw")
+            self._add_review_item(i18n.t("object.nameless_raw_line"),
+                                  count=i18n.t_plural("object.review_count", q["nameless_raw_count"]),
+                                  mark=i18n.t("object.mark_by_hand"), tag="nameless_raw")
         # Druga połowa tego samego kubełka — klatki, którym nazwę ZDJĄŁEŚ. Osobny wiersz, nie
         # dopisek: do rozszczepienia wracały nieodróżnialne od nietkniętych, a „Przypisz obiekt…"
         # cicho ich nie tykało. QUIET — wiersza nie ma, dopóki nic nie cofnięto.
         if q["nameless_raw_cleared_count"] > 0:
             self._add_review_item(
-                i18n.t("object.nameless_raw_cleared_line", n=q["nameless_raw_cleared_count"]),
-                tag="nameless_raw_cleared")
+                i18n.t("object.nameless_raw_cleared_line"),
+                count=i18n.t_plural("object.review_count", q["nameless_raw_cleared_count"]), mark=i18n.t("object.review_cleared_mark"),
+                fg=_WERDYKT["fg"], tag="nameless_raw_cleared")
         # PODZBIÓR kubełka wyżej, nie szósty kubełek (S2, D-OW-2/B): tym klatkom ŚCIEŻKA proponuje
         # kanon, a zapis czeka na gest człowieka. Wiersz stoi ZARAZ POD RAW-em, bo opisuje jego
         # drogę wyjścia — i świadomie NIE wchodzi do partycji, która już je policzyła.
@@ -1297,9 +1336,10 @@ class ObjectAxisView(QWidget):
                                   info=i18n.t("object.path_proposed_broken_info"))
         elif q["path_proposed_frames"] > 0:
             self._add_review_item(
-                i18n.t("object.path_proposed_line", names=q["path_proposed_names"],
-                       frames=q["path_proposed_frames"]),
-                tag="path_proposals")
+                i18n.t("object.path_proposed_line"),
+                count=i18n.t("object.path_proposed_count", names=q["path_proposed_names"],
+                             frames=q["path_proposed_frames"]),
+                mark=i18n.t("object.mark_to_confirm"), tag="path_proposals")
         # TRZECI kubełek tej samej partycji (I-2b/D-P-I-5): gotowy obraz po integracji, wciągnięty
         # drogą „Stosy". Do 2026-08-02 był INFORMACYJNY, bo pisarz XISF nie umiał dopisać karty
         # (D-X-12) — wiersz z akcją obiecywałby zapis, który kończy się 'blocked' na każdej pozycji.
@@ -1308,25 +1348,28 @@ class ObjectAxisView(QWidget):
         # partycji), nie dlatego, że droga naprawy jest inna — jest ta sama.
         if q["nameless_stacks_count"] > 0:
             self._add_review_item(
-                i18n.t("object.nameless_stacks_line", n=q["nameless_stacks_count"]),
-                tag="nameless_stacks")
+                i18n.t("object.nameless_stacks_line"),
+                count=i18n.t_plural("object.review_count", q["nameless_stacks_count"]),
+                mark=i18n.t("object.mark_by_card"), tag="nameless_stacks")
         # Czwarta i ostatnia połówka (R-S3-1). Ten wiersz nie jest teoretyczny: D-OW-7 wpuściło
         # gest osi obiektu na GOTOWY OBRAZ, więc cofnięcie na stosie jest jednym kliknięciem —
         # a bez własnego wiersza stos z werdyktem ręki wracał nad kubełek wyżej nieodróżnialny
         # od stosu, o którym nikt nigdy nie decydował.
         if q["nameless_stacks_cleared_count"] > 0:
             self._add_review_item(
-                i18n.t("object.nameless_stacks_cleared_line",
-                       n=q["nameless_stacks_cleared_count"]),
-                tag="nameless_stacks_cleared")
-        self._add_review_item(i18n.t("object.unreadable_line", n=q["unreadable_count"]),
+                i18n.t("object.nameless_stacks_cleared_line"),
+                count=i18n.t_plural("object.review_count", q["nameless_stacks_cleared_count"]), mark=i18n.t("object.review_cleared_mark"),
+                fg=_WERDYKT["fg"], tag="nameless_stacks_cleared")
+        self._add_review_item(i18n.t("object.unreadable_line"),
+                              count=str(q["unreadable_count"]),
                               tag="unreadable" if q["unreadable_count"] > 0 else None,
                               info=i18n.t("object.unreadable_info_empty"))
         # OŚ SPRZĘTU WYCHODZI Z WIERSZA INFORMACYJNEGO (R1) — do tej zmiany była połową licznika
         # z notą „rozwiązywanie w przygotowaniu". Nota mówiła prawdę i dlatego musiała zniknąć
         # razem z drogą: gest istnieje, więc wiersz DRĄŻY i niesie akcję. Reguła pustego kubełka
         # ta sama, co u sąsiadów: zero nie ma dokąd prowadzić, więc zostaje informacyjne.
-        self._add_review_item(i18n.t("object.config_review_line", n=q["config_review_count"]),
+        self._add_review_item(i18n.t("object.config_review_line"),
+                              count=i18n.t_plural("object.review_count", q["config_review_count"]),
                               tag="config_review" if q["config_review_count"] > 0 else None,
                               info=i18n.t("object.config_review_info_empty"))
         # DRUGA POŁOWA TEGO KUBEŁKA — klatki, którym zestaw NADAŁA RĘKA (bramka pakietu 3a,
@@ -1337,17 +1380,30 @@ class ObjectAxisView(QWidget):
         # QUIET — wiersza nie ma, dopóki nikt niczego nie wskazał.
         if q["config_by_hand_count"] > 0:
             self._add_review_item(
-                i18n.t("object.config_by_hand_line", n=q["config_by_hand_count"]),
-                tag="config_by_hand")
+                i18n.t("object.config_by_hand_line"),
+                count=i18n.t_plural("object.review_count", q["config_by_hand_count"]), tag="config_by_hand")
         # licznik POZOSTAŁEGO kanału jako pozycja informacyjna (bez tagu → nieklikana); nota
         # „rozwiązywanie w przygotowaniu" ZAWĘŻONA do klatek bez nagłówka — obiekt-review, kopie
         # i (od R1) oś sprzętu mają już swoje akcje.
         self._add_review_item(
-            i18n.t("object.review_info", headerless=q["headerless_count"]),
+            i18n.t("object.review_info"), count=str(q["headerless_count"]),
             info=i18n.t("object.review_info_why"))
+        # Wspólna szerokość kolumny adnotacji PO wypełnieniu listy (kontrakt `rows.fit_tertiary`) —
+        # dopiero to ustawia „cofnięte ręką" w jedną kolumnę zamiast pozwalać każdemu wierszowi
+        # rysować się na własnej szerokości. Lista bez ani jednego nagrobka dostaje 0 = układ
+        # dwuczłonowy, czyli dokładnie to, co było przed R-S3-3.
+        self.review.itemDelegate().fit_tertiary(
+            [self.review.item(i).data(rows.TERTIARY) for i in range(self.review.count())])
 
-    def _add_review_item(self, text, *, tag=None, payload=None, info=None):
+    def _add_review_item(self, text, *, tag=None, payload=None, info=None,
+                         count=None, mark=None, fg=None):
         """Jedna pozycja kolejki przeglądu — JEDEN producent wiersza dla wszystkich kubełków.
+
+        WIERSZ JEST TRÓJCZŁONOWY (R-S3-3): `text` = nazwa (człon pierwszy, elidowany), `count` =
+        liczba klatek (człon drugi, przy prawej krawędzi, razem ze znacznikiem drogi „›"), `mark` =
+        adnotacja typu „cofnięte ręką" (człon trzeci, własna kolumna). `fg` maluje CAŁY wiersz —
+        używa go połówka z nagrobkiem, bo kolor jest tam TREŚCIĄ (werdykt człowieka), a nie ozdobą.
+        Kubełki bez własnej liczby podają sam `text` i zachowują się dokładnie jak przedtem.
 
         WIZ #11: pięć wierszy miało identyczny krój i kolor, a klikalne były dwa — nic na ekranie
         nie mówiło, który z nich prowadzi dalej. Wiersz z drogą dostaje znacznik „›" (ten sam co
@@ -1372,25 +1428,53 @@ class ObjectAxisView(QWidget):
         ten wiersz jest opisem i dlaczego nie prowadzi dalej. Domyślne `info` jest świadome:
         wiersz bez własnego wytłumaczenia i tak ma odpowiedzieć cokolwiek, bo cisza jest tu
         gorsza od zdania ogólnego."""
-        it = QListWidgetItem(f"{text}  ›" if tag else text)
+        it = QListWidgetItem(text)
+        # ZNACZNIK DROGI I LICZBA IDĄ W CZŁON DRUGI (R-S3-3, wzorzec `tasks.py`): „›" doklejone do
+        # tekstu jechało za długością nazwy, więc w liście o zmiennych nazwach nie było kolumny,
+        # którą dałoby się skanować wzrokiem. Człon drugi rysuje się od prawej i NIE jest elidowany.
+        czlon2 = " ".join(filter(None, (count, "›" if tag else "")))
+        it.setData(rows.SECONDARY, czlon2)
+        if mark:                               # adnotacja („cofnięte ręką") — własna kolumna z separatorem
+            it.setData(rows.TERTIARY, f"  ·  {mark}")
         if tag:
-            it.setData(Qt.UserRole, tag)
-            it.setData(Qt.UserRole + 1, payload)
+            it.setData(_REVIEW_TAG, tag)
+            it.setData(_REVIEW_PAYLOAD, payload)
         else:
             it.setFlags(Qt.ItemIsEnabled)      # informacyjny, nie do zaznaczenia
             it.setForeground(_DIM["fg"])
             powod = info or i18n.t("object.review_info_generic")
-            it.setData(Qt.UserRole + 2, powod)
+            it.setData(_REVIEW_INFO, powod)
             it.setToolTip(powod)
+        if fg is not None:
+            it.setForeground(fg)
         self.review.addItem(it)
 
     def _on_review_clicked(self, item):
         """Klik w wiersz kolejki. Wiersz Z DROGĄ obsługuje `_on_review_selected` (przez zaznaczenie);
         tu zostaje WYŁĄCZNIE wiersz informacyjny — jedyny, który sam z siebie nie odpowiada niczym
         (F-2). `itemClicked` leci także dla wierszy niezaznaczalnych, bo są `ItemIsEnabled`."""
-        if item is not None and item.data(Qt.UserRole) is None:
-            self.status_message.emit(item.data(Qt.UserRole + 2)
+        if item is not None and item.data(_REVIEW_TAG) is None:
+            self.status_message.emit(item.data(_REVIEW_INFO)
                                      or i18n.t("object.review_info_generic"))
+
+    def _on_review_double_clicked(self, item):
+        """Dwuklik w pozycję kolejki = jej AKCJA (R-S3-6). Skrót gestu, nie druga ścieżka zapisu.
+
+        Akcję wybiera stan przycisków, a nie własna mapa tag→akcja: `_sync_assign_enabled` jest
+        JEDYNYM właścicielem tego przypisania (cztery rozłączne zbiory tagów), więc druga
+        wyliczanka rozjechałaby się z nim przy pierwszym nowym kubełku (SPOT). Skutek uboczny jest
+        pożądany: dwuklik nie zrobi nigdy niczego, czego nie da się zrobić przyciskiem — w tym
+        podczas biegu pipeline'u, kiedy wszystkie cztery są wygaszone.
+
+        Wiersz informacyjny nie jest zaznaczalny, więc `itemDoubleClicked` na nim nie zmieni
+        zaznaczenia — przyciski patrzą wtedy na POPRZEDNIĄ pozycję. Stąd jawny warunek na tagu:
+        bez niego dwuklik w wiersz bez drogi odpalałby akcję sąsiada."""
+        if item is None or item.data(_REVIEW_TAG) is None:
+            return
+        for btn in (self.assign_btn, self.repair_btn, self.confirm_path_btn, self.set_config_btn):
+            if btn.isEnabled():
+                btn.click()
+                return
 
     def _set_obj_cell(self, r, c, text, *, data=None, align=None):
         item = QTableWidgetItem(text)
@@ -1410,12 +1494,13 @@ class ObjectAxisView(QWidget):
         return item.data(Qt.UserRole) if item else None
 
     def _selected_review(self):
-        """Zaznaczona pozycja kolejki jako para (tag, payload) albo (None, None). Tag z
-        `Qt.UserRole`, payload z `Qt.UserRole+1` (string-tag dispatch, R#6)."""
+        """Zaznaczona pozycja kolejki jako para (tag, payload) albo (None, None). Role nazwane
+        (`_REVIEW_TAG`/`_REVIEW_PAYLOAD`) — payload NIE mieszka już pod `UserRole+1`, bo tę rolę
+        zajmuje człon drugi delegata (R-S3-3; string-tag dispatch bez zmian, R#6)."""
         sel = self.review.selectedItems()
         if not sel:
             return None, None
-        return sel[0].data(Qt.UserRole), sel[0].data(Qt.UserRole + 1)
+        return sel[0].data(_REVIEW_TAG), sel[0].data(_REVIEW_PAYLOAD)
 
     def _sync_assign_enabled(self):
         """Akcje kolejki aktywne WYŁĄCZNIE przy swojej pozycji i poza biegiem pipeline (szczery

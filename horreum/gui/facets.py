@@ -39,10 +39,19 @@ _GROUPS = [("object", "facets.group.object", True), ("filter", "facets.group.fil
 # motywu wymaga `FacetRail.refresh_theme` (repaint sam nie odświeży wypalonego foregroundu).
 _COLORS: dict[str, QColor] = {}
 
+# WŁASNY tooltip wiersza z chwili budowy (godziny portfela, F7) — zapamiętany, bo szukajka dokleja
+# nad nim zdanie o trafionym aliasie (R-S3-9) i musi mieć do czego wrócić po skasowaniu frazy.
+# Rola poza pasmem `rows` (+1…+3) i poza `UserRole` (tam siedzi trójka facet/value/label).
+_TIP_BASE = Qt.UserRole + 4
+
 
 def use_theme(name):
     """Przeładuj kolory facetów z motywu (Qt-wolny `theme.facet_colors`)."""
     _COLORS.update({k: QColor(v) for k, v in theme.facet_colors(name).items()})
+    # Wiersz stanu pustego (R-S3-5) to TEKST DRUGORZĘDNY, więc bierze rolę, która już istnieje —
+    # nie własny kolor w `facet_colors`. Nowa nazwa dla tego samego odcienia byłaby drugim
+    # właścicielem faktu i rozjechałaby się przy pierwszej korekcie palety (SPOT).
+    _COLORS["placeholder"] = QColor(theme.accents(name)["secondary_text"])
 
 
 use_theme(theme.DEFAULT)
@@ -74,7 +83,16 @@ class FacetRail(QWidget):
             if facet == "object":
                 self.search = QLineEdit()
                 self.search.setPlaceholderText(i18n.t("facets.search_object"))
+                # Skasowanie frazy kosztowało Ctrl+A+Del — trzy klawisze na cofnięcie jednego
+                # gestu (R-S3-5). Natywny „×" `QLineEdit` robi to jednym kliknięciem i pojawia się
+                # sam dopiero, gdy jest co czyścić.
+                self.search.setClearButtonEnabled(True)
                 self.search.textChanged.connect(self._filter_objects)
+                # Enter = weź PIERWSZE trafienie (R-S3-6). Bez tego fraza tylko chowała wiersze,
+                # a wybór i tak wymagał sięgnięcia po mysz: „wpisz nazwę i pokaż mi to" kosztowało
+                # 3 interakcje zamiast 2. Precedens w repo: `grid.py` — Enter w polu wartości
+                # filtra znaczy „zastosuj".
+                self.search.returnPressed.connect(self._on_search_enter)
                 outer.addWidget(self.search)
             lw = QListWidget()
             lw.setSelectionMode(QAbstractItemView.NoSelection)
@@ -124,7 +142,7 @@ class FacetRail(QWidget):
 
         `aliases` = dict `canon → {alias_norm}` (S3): DRUGIE NAZWY obiektów, po których wolno szukać.
         Jeden kwarg, a nie import rdzenia do listwy — dopasowanie liczy Qt-wolny
-        `facet_model.matches_search`, bo to logika (normalizacja + reguła), a listwa jest głupim
+        `facet_model.search_hit`, bo to logika (normalizacja + reguła), a listwa jest głupim
         widżetem. Mapa TRZYMA SIĘ przez przeładowania: szukajka filtruje przy każdym wpisanym znaku,
         a `set_data` woła się przy każdym `refresh` — gdyby `None` znaczyło „wyczyść", pierwszy
         refresh po wpisaniu litery gasiłby aliasy w środku pisania. `None` znaczy więc „bez zmian",
@@ -169,6 +187,7 @@ class FacetRail(QWidget):
                         hours.append(third)
                     if tooltip:
                         it.setToolTip(tooltip)
+                    it.setData(_TIP_BASE, tooltip or "")     # baza dla doklejki szukajki (R-S3-9)
                     if sel == "in":
                         f = QFont(); f.setBold(True); it.setFont(f)
                     elif sel == "ex":
@@ -177,6 +196,11 @@ class FacetRail(QWidget):
                 # Wspólna szerokość kolumny godzin PO wypełnieniu listy — dopiero to ustawia liczby
                 # w jedną kolumnę. Grupa bez adnotacji (Filtr/Rodzaj/…) dostaje 0 = układ dwuczłonowy.
                 lw.itemDelegate().fit_tertiary(hours)
+                # STAN PUSTY DOTYCZY KAŻDEJ GRUPY, NIE TYLKO SZUKAJKI (R-S3-5): zawężenie do
+                # jednego obiektu potrafi opróżnić Filtr, Teleskop i Noc naraz — zmierzone cztery
+                # nieme prostokąty w jednym widoku. Grupa „object" dostanie zaraz potem własny
+                # przebieg z frazą (`_filter_objects`), który tę decyzję nadpisze.
+                self._set_empty_row(lw, pusto=lw.count() == 0, fraza="")
             if aliases is not None:
                 self._aliases = aliases
             self._filter_objects(self.search.text())
@@ -192,7 +216,12 @@ class FacetRail(QWidget):
         nieobecna na liście = brak ruchu: pin aktywnego wyboru gwarantuje obecność, ale gdyby
         wołający podał wartość spoza facetu, cichy no-op jest lepszy niż skok w losowe miejsce.
         `PositionAtCenter`, nie `EnsureVisible` — wybór ma być WIDOCZNY, a nie doklejony do brzegu
-        w miejscu, w którym oko go nie szuka."""
+        w miejscu, w którym oko go nie szuka.
+
+        CZWARTE przejście po itemach w tym module i czwarty raz ta sama bramka (R-S3-5): wiersz
+        stanu pustego nie niesie wartości facetu. Bez tego członu obietnica „cichy no-op" z akapitu
+        wyżej byłaby `TypeError` — a to jest publiczny seam dla wejść Z ZEWNĄTRZ (most z planera),
+        czyli dokładnie ta droga, na której wołający może podać wartość spoza listy."""
         if not reveal:
             return
         facet, value = reveal
@@ -201,37 +230,79 @@ class FacetRail(QWidget):
             return
         for i in range(lw.count()):
             it = lw.item(i)
-            if it.data(Qt.UserRole)[1] == value:
+            dane = it.data(Qt.UserRole)
+            if dane is not None and dane[1] == value:
                 lw.scrollToItem(it, QAbstractItemView.PositionAtCenter)
                 return
 
     def refresh_theme(self):
         """Przemaluj wykluczenia po zmianie motywu. Kolor ⊖ jest WYPALONY w itemie przy `set_data`
         (nie czytany z modelu na żywo jak grid), więc podmiana `_COLORS` + repaint go nie odświeży —
-        chodzimy po itemach i re-ustawiamy foreground wg bieżącego stanu (F6 recenzja #2)."""
+        chodzimy po itemach i re-ustawiamy foreground wg bieżącego stanu (F6 recenzja #2).
+
+        Wiersz stanu pustego (R-S3-5) ma WŁASNY kolor z motywu i nie niesie wartości facetu, więc
+        przechodzi tą samą bramką co reszta jego obsługi — brakiem danych — i dostaje odświeżony
+        odcień drugorzędny. Bez tego członu zmiana motywu wywracała CAŁE okno wyjątkiem, gdy tylko
+        któraś grupa była pusta; złapała to dopiero pełna bateria (`test_menu_widok_przelacza_motyw`),
+        bo testy listwy nie przełączają skórki."""
         default = QBrush()                          # foreground z palety (dla nie-⊖)
         for facet, lw in self._lists.items():
             for i in range(lw.count()):
                 it = lw.item(i)
-                f, value, _label = it.data(Qt.UserRole)
+                dane = it.data(Qt.UserRole)
+                if dane is None:
+                    it.setForeground(_COLORS["placeholder"])
+                    continue
+                f, value, _label = dane
                 ex = facet_model.selection(self._state, f, value) == "ex"
                 it.setForeground(_COLORS["exclusion"] if ex else default)
 
     # ---- interakcja ----
     def _on_item_clicked(self, item):
+        """Klik w WARTOŚĆ cykluje facet. Wiersz bez wartości (stan pusty, R-S3-5) jest bez skutku.
+
+        `NoItemFlags` sprawia, że Qt sam nie wyśle tu placeholdera, ale SLOT wolno zawołać skądinąd
+        — i wtedy rozpakowanie `None` wywalało widżet wyjątkiem. Ta sama lekcja, co przy wierszu
+        informacyjnym kolejki: brak danych rozstrzyga dispatch, nie dobra wola wołającego."""
         if self._loading:
             return
-        facet, value, label = item.data(Qt.UserRole)
+        dane = item.data(Qt.UserRole) if item is not None else None
+        if dane is None:
+            return
+        facet, value, label = dane
         self._state = facet_model.cycle(self._state, facet, value, label)
         self.facetsChanged.emit(self._state)
 
+    def _on_search_enter(self):
+        """Enter w szukajce = cykl na PIERWSZYM widocznym trafieniu (R-S3-6).
+
+        „Pierwsze widoczne", nie „pierwsze pasujące": user patrzy na przefiltrowaną listę i to jej
+        górny wiersz jest tym, co Enter ma potwierdzić. Fraza bez trafień nie robi NIC — wiersz
+        stanu pustego nie niesie wartości, więc nie ma czego cyklować (i tak samo milczy klik).
+
+        Gest kończy w `_on_item_clicked`, czyli w tej samej normalizacji, co mysz — Enter jest
+        skrótem do istniejącej ścieżki stanu, nie drugą ścieżką."""
+        lw = self._lists["object"]
+        for i in range(lw.count()):
+            it = lw.item(i)
+            if not it.isHidden() and it.data(Qt.UserRole) is not None:
+                self._on_item_clicked(it)
+                return
+
+    def focus_search(self):
+        """Kursor w szukajkę obiektów (Ctrl+F z widoku „Zbiory", R-S3-6). Zaznacza dotychczasową
+        frazę, więc drugie Ctrl+F pozwala pisać od nowa bez kasowania — zachowanie, którego user
+        oczekuje po każdym innym „znajdź"."""
+        self.search.setFocus()
+        self.search.selectAll()
+
     def _on_item_right_clicked(self, lw, pos):
         """Prawy klik na wartości = ⊖ wprost (P-C; dotąd 2 kliki przez `in`). Klik w PUSTE miejsce
-        listy jest bez skutku — gest celuje we wartość, nie w listę."""
+        listy — i w wiersz stanu pustego (R-S3-5) — jest bez skutku: gest celuje we WARTOŚĆ."""
         if self._loading:
             return
         item = lw.itemAt(pos)
-        if item is None:
+        if item is None or item.data(Qt.UserRole) is None:
             return
         facet, value, label = item.data(Qt.UserRole)
         self._state = facet_model.toggle_exclude(self._state, facet, value, label)
@@ -240,13 +311,66 @@ class FacetRail(QWidget):
     def _filter_objects(self, text):
         """Szukajka obiektów: chowa niepasujące wiersze (prezentacja; aktywne wybory ZAWSZE widoczne).
 
-        Dopasowanie liczy `facet_model.matches_search` — normalizacja igły i siana plus DRUGIE NAZWY
+        Dopasowanie liczy `facet_model.search_hit` — normalizacja igły i siana plus DRUGIE NAZWY
         obiektu (S3). Dawne `needle not in label.lower()` porównywało surowy tekst do surowej
         etykiety, więc `M 42` nie znajdowało `M42`, a „Large Magellanic Cloud" nie znajdowało nic:
-        kanon `LMC` nie ma z tą frazą ani jednej wspólnej litery."""
+        kanon `LMC` nie ma z tą frazą ani jednej wspólnej litery.
+
+        WIERSZ TRAFIONY CUDZĄ NAZWĄ MÓWI TO W TOOLTIPIE (R-S3-9): wpisujesz „Large Magellanic
+        Cloud", dostajesz `LMC` i bez tego zdania nie wiesz, dlaczego pasuje. Tooltip wraca do
+        wspólnego („oba kliki"), gdy wiersz trafia własną nazwą — inaczej po skasowaniu frazy
+        na liście zostałyby wyjaśnienia dopasowań, których już nie ma.
+
+        STAN PUSTY MA WŁASNY WIERSZ (R-S3-5): fraza bez trafień zostawiała cztery nieme prostokąty
+        po ~180 px i nic nie mówiło, czy to brak danych, czy zbyt wąska fraza."""
         lw = self._lists["object"]
+        trafione = 0
         for i in range(lw.count()):
             it = lw.item(i)
-            facet, value, label = it.data(Qt.UserRole)
+            dane = it.data(Qt.UserRole)
+            if dane is None:                     # wiersz-placeholder poprzedniego przebiegu
+                continue
+            facet, value, label = dane
             active = facet_model.selection(self._state, facet, value) is not None
-            it.setHidden(not active and not facet_model.matches_search(text, label, self._aliases))
+            hit = facet_model.search_hit(text, label, self._aliases)
+            it.setHidden(not active and hit is None)
+            trafione += 0 if it.isHidden() else 1
+            # Zdanie o aliasie DOKLEJA SIĘ nad własnym tooltipem wiersza, nie zamazuje go: godziny
+            # portfela (F7) i wyjaśnienie trafienia to dwie różne informacje i obie są potrzebne
+            # w tym samym momencie. Po skasowaniu frazy wiersz wraca do samej bazy — pusta baza
+            # znaczy „dziedzicz tooltip listy", więc `setToolTip("")` jest tu wartością, nie brakiem.
+            baza = it.data(_TIP_BASE) or ""
+            if hit not in (None, facet_model.HIT_LABEL):
+                zdanie = i18n.t("facets.tip.alias_hit", alias=hit)
+                it.setToolTip(f"{zdanie}\n{baza}" if baza else zdanie)
+            else:
+                it.setToolTip(baza)
+        self._set_empty_row(lw, pusto=trafione == 0, fraza=text)
+
+    def _set_empty_row(self, lw, *, pusto, fraza):
+        """Wiersz-placeholder stanu pustego — pokazany, gdy fraza nie trafiła NICZEGO (R-S3-5).
+
+        Bez niego lista zostawała niemym prostokątem ~180 px i nie mówiła, czy obiektów nie ma,
+        czy fraza jest za wąska. Wiersz NIE jest klikalny (`NoItemFlags`) i nie niesie `UserRole`,
+        więc `_on_item_clicked`/`_filter_objects` same go omijają — nie potrzebuje własnej gałęzi
+        w dispatchu, tylko braku danych, których dispatch wymaga.
+
+        Trzymamy JEDEN placeholder na listę i przestawiamy mu treść; kasowanie i wstawianie na
+        nowo przy każdej literze frazy szarpałoby scrollem sąsiednich wierszy."""
+        istniejacy = None
+        for i in range(lw.count()):
+            if lw.item(i).data(Qt.UserRole) is None:
+                istniejacy = lw.item(i)
+                break
+        if not pusto:
+            if istniejacy is not None:
+                lw.takeItem(lw.row(istniejacy))
+            return
+        tekst = i18n.t("facets.empty_search", fraza=fraza) if fraza else i18n.t("facets.empty_group")
+        if istniejacy is None:
+            istniejacy = QListWidgetItem()
+            istniejacy.setFlags(Qt.NoItemFlags)
+            lw.addItem(istniejacy)
+        istniejacy.setText(tekst)
+        istniejacy.setForeground(_COLORS["placeholder"])
+        istniejacy.setHidden(False)

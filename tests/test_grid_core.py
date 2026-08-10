@@ -615,7 +615,7 @@ def test_run_bez_filtra_oddaje_uniwersum_wprost():
     assert wynik is uniwersum
 
 
-# ---------- S3: szukanie po nazwach (facet_model.matches_search) ----------
+# ---------- S3: szukanie po nazwach (facet_model.search_hit) ----------
 # Predykat mieszka w module Qt-WOLNYM, więc bramka też — listwa dostaje go gotowego, a jej rolą jest
 # już tylko `setHidden`. To dlatego te człony da się postawić bez okna, na czystej funkcji.
 
@@ -624,10 +624,10 @@ def test_szukajka_normalizuje_IGLE_I_SIANO():
     """Obietnica §1 zaczyna się od tego, że user wpisuje nazwę tak, JAK JĄ MÓWI, a kanon zapisany
     jest tak, jak dyktuje gramatyka katalogu. Dawne `needle in label.lower()` porównywało surowy
     tekst do surowej etykiety, więc `M 42` nie znajdowało `M42`, a `sh2 155` — `Sh2-155`."""
-    assert facet_model.matches_search("M 42", "M42")
-    assert facet_model.matches_search("sh2 155", "Sh2-155")
-    assert facet_model.matches_search("ngc", "NGC6960")          # fragment dalej działa
-    assert not facet_model.matches_search("M43", "M42")
+    assert facet_model.search_hit("M 42", "M42")
+    assert facet_model.search_hit("sh2 155", "Sh2-155")
+    assert facet_model.search_hit("ngc", "NGC6960")          # fragment dalej działa
+    assert None is facet_model.search_hit("M43", "M42")
 
 
 def test_szukajka_widzi_DRUGIE_NAZWY_obiektu():
@@ -635,17 +635,34 @@ def test_szukajka_widzi_DRUGIE_NAZWY_obiektu():
     Kanon nie ma z tą frazą ANI JEDNEJ wspólnej litery, więc bez mapy aliasów szukajka jest ślepa
     dokładnie na klasę obiektów, dla której powstała ta paczka."""
     aliasy = {"LMC": {"LARGEMAGELLANICCLOUD"}}
-    assert facet_model.matches_search("Large Magellanic Cloud", "LMC", aliasy)
-    assert facet_model.matches_search("magellanic", "LMC", aliasy)      # fragment aliasu też
-    assert not facet_model.matches_search("Large Magellanic Cloud", "M42", aliasy)
+    assert facet_model.search_hit("Large Magellanic Cloud", "LMC", aliasy)
+    assert facet_model.search_hit("magellanic", "LMC", aliasy)      # fragment aliasu też
+    assert None is facet_model.search_hit("Large Magellanic Cloud", "M42", aliasy)
     # Obiekt spoza mapy = „nie ma innych nazw", nigdy „nie wiadomo" — bez tego członu brak wpisu
     # dałoby się zaimplementować jako „przepuść wszystko" i bramka wyżej dalej by przechodziła.
-    assert not facet_model.matches_search("cokolwiek", "NGC6960", aliasy)
+    assert None is facet_model.search_hit("cokolwiek", "NGC6960", aliasy)
 
 
 def test_szukajka_PUSTA_przepuszcza_wszystko():
     """Falsyfikator dla implementacji „pusta igła = brak dopasowań": wołający chowa wiersz po
-    `False`, więc pusta szukajka schowałaby CAŁĄ listę obiektów."""
-    assert facet_model.matches_search("", "M42")
-    assert facet_model.matches_search("   ", "M42")
-    assert facet_model.matches_search(None, "M42")
+    `None`, więc pusta szukajka schowałaby CAŁĄ listę obiektów."""
+    assert facet_model.search_hit("", "M42")
+    assert facet_model.search_hit("   ", "M42")
+    assert facet_model.search_hit(None, "M42")
+
+
+def test_szukajka_MOWI_CZYM_trafila():
+    """R-S3-9: predykat wiedział, że trafienie poszło przez alias, i tę wiedzę wyrzucał.
+
+    Wpisujesz „Large Magellanic Cloud", dostajesz `LMC` i bez tej informacji nie masz jak się
+    dowiedzieć, dlaczego wiersz pasuje. Trafienie własną nazwą MUSI być odróżnialne od trafienia
+    cudzą, inaczej tooltip tłumaczyłby wiersze, które niczego nie wymagają.
+
+    Falsyfikator: wróć do `return True` w gałęzi aliasu → pierwsza asercja czerwienieje."""
+    aliasy = {"LMC": {"LARGEMAGELLANICCLOUD", "WIELKIOBLOKMAGELLANA"}}
+    assert facet_model.search_hit("magellanic", "LMC", aliasy) == "LARGEMAGELLANICCLOUD"
+    assert facet_model.search_hit("LMC", "LMC", aliasy) == facet_model.HIT_LABEL
+    assert facet_model.search_hit("", "LMC", aliasy) == facet_model.HIT_LABEL
+    # Alias wybierany DETERMINISTYCZNIE — igła pasująca do dwóch aliasów nie może dawać tooltipa
+    # skaczącego między przebiegami (zbiór nie ma kolejności).
+    assert facet_model.search_hit("magellan", "LMC", aliasy) == "LARGEMAGELLANICCLOUD"

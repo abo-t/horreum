@@ -32,7 +32,7 @@ from datetime import datetime, timezone
 from PySide6.QtCore import (
     QAbstractTableModel, QEvent, QModelIndex, QObject, Qt, QSettings, QThread, QTimer, Signal, Slot,
 )
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtGui import QColor, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
     QLayout,
@@ -46,6 +46,7 @@ from horreum import (filter_engine, lineage, macro as macro_mod, naming, pivot a
                      stacks, writeback)
 from horreum.gui import busy, facet_model, i18n, portfolio, queries, rows, theme
 from horreum.gui.facets import RAIL_MIN_W as _FIELDS_MIN_W, FacetRail
+from horreum.gui import assign_dialog
 from horreum.gui.assign_dialog import AssignObjectDialog
 from horreum.gui.projection_dialog import ProjectionDialog
 from horreum.gui.rows import TwoPartDelegate
@@ -1596,6 +1597,11 @@ class SelectionBar(QFrame):
 
     _PROJ_TIP = "grid.sel.proj_tip"   # KLUCZ (rozwiązywany i18n.t w use-site — nie zamrożony PL)
 
+    # Skrót „ostatnio użyte" (R-S2b-12) niesie KOMPLET pól klingi, nie sam kanon: `user_assign_object`
+    # INSERTuje obiekt, gdy kanon nowy, więc `catalog`/`kind` muszą dojechać razem z nazwą.
+    objectRecentPicked = Signal(str, object, object)
+    _RECENT_MAX = 5                   # sufit listy skrótu (dług mówi „3-5"); tyle samo pyta read-model
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFrameShape(QFrame.StyledPanel)
@@ -1626,13 +1632,29 @@ class SelectionBar(QFrame):
         # pasek trzyma już sześć, a siódmy i ósmy przewróciłyby go do drugiego rzędu. Obie pozycje
         # są tą samą sprawą („co to za obiekt"), więc menu jest tu grupowaniem, nie chowaniem.
         self.btn_object = QToolButton()
+        # JEDEN CHEVRON, NIE DWA (R-S2b-11): tekst niósł własne „▾", a `InstantPopup` dokłada do
+        # tego natywny wskaźnik menu — kontrolka zapowiadała rozwinięcie dwa razy. Strzałkę rysuje
+        # styl, więc to ona zostaje: zna platformę i motyw, a literał w stringu nie.
         self.btn_object.setText(i18n.t("grid.sel.object"))
         self.btn_object.setPopupMode(QToolButton.InstantPopup)
         menu = QMenu(self.btn_object)
         self.act_name = menu.addAction(i18n.t("grid.sel.object_name"))
         self.act_clear = menu.addAction(i18n.t("grid.sel.object_clear"))
+        # Pula skrótu „ostatnio użyte" (R-S2b-12) — tworzona RAZ; treść i widoczność ustawia
+        # `set_recent_objects`. Powód takiego kształtu, a nie dokładania akcji: patrz jej docstring.
+        self._recent_sep = menu.addSeparator()
+        self._recent_sep.setVisible(False)
+        self._recent_acts = [menu.addAction("") for _ in range(self._RECENT_MAX)]
+        for act in self._recent_acts:
+            act.setVisible(False)
+            act.triggered.connect(lambda _checked=False, a=act: self.objectRecentPicked.emit(*a.data()))
         self.btn_object.setMenu(menu)
         self.btn_save = QPushButton(i18n.t("grid.sel.save_view"))
+        # RÓWNA WYSOKOŚĆ W RZĘDZIE (R-S2b-11): `QToolButton` liczy `sizeHint` inaczej niż
+        # `QPushButton` i wychodził o 1 px niższy od sześciu sąsiadów — jedyny widżet innej klasy
+        # w rzędzie wyglądał jak wpadka układu. Wysokość bierzemy z SĄSIADA, nie z liczby: stała
+        # rozjechałaby się przy pierwszej zmianie motywu albo skali DPI.
+        self.btn_object.setFixedHeight(self.btn_save.sizeHint().height())
         lay.addWidget(self.count_label); lay.addSpacing(8)
         lay.addWidget(self.criteria_label, 1)
         # Złota akcja WYJĘTA z klastra pomocniczych (wizytacja P-C #6): sam bold przegrywał wzrokowo
@@ -1665,6 +1687,39 @@ class SelectionBar(QFrame):
         self.btn_object.setToolTip(
             i18n.t("grid.sel.object_tip_ready", namable=namable, clearable=clearable) if aktywna
             else i18n.t(reason or "grid.sel.object_tip_empty"))
+
+    def set_recent_objects(self, obiekty):
+        """Skrót „ostatnio użyte" na dole menu obiektu (R-S2b-12) — 5 interakcji spada do 2.
+
+        Najczęstszy gest brzmi „te klatki to ZNOWU NGC6960" i kosztował: Obiekt ▾ · Przypisz… ·
+        rozwiń combo · wybierz · Przypisz. Skrót nie jest drugą ścieżką zapisu — kończy w tej samej
+        klindze i z tym samym kluczem aliasu (`assign_dialog.alias_key`), pomija wyłącznie WYBÓR.
+
+        Treść odświeża się przy każdym pokazaniu menu: lista jest pochodną dziennika i zmienia się
+        po każdym geście, więc zbudowana raz kłamałaby dokładnie tam, gdzie ma pomagać.
+        Wygaszone razem z „Przypisz obiekt…" — skrót nie może omijać bramki, którą ta pozycja stoi.
+
+        PULA STAŁA, NIE TWORZENIE-I-USUWANIE — i to jest poprawka po awarii, nie mikrooptymalizacja.
+        Pierwsza wersja dokładała `QAction` na każde otwarcie menu; bramka pakietu słusznie wytknęła
+        rosnące sieroty (`removeAction` zdejmuje z menu, ale nie zwalnia), a zaproponowane lekarstwo
+        — `deleteLater()` — **wywaliło Qt access violation** w losowym późniejszym teście kręcącym
+        pętlą zdarzeń: usunięcie jest ODROCZONE, a menu bywa do tego czasu zebrane przez Pythona.
+        Zmierzone: pełna bateria kończyła się `Fatal Python error: Aborted`, bez `deleteLater` jest
+        czysta. Pula tworzona RAZ w konstruktorze nie ma ani sierot, ani odroczonych usunięć —
+        pozycje nadmiarowe po prostu znikają (`setVisible(False)`).
+
+        `_RECENT_MAX` jest sufitem listy: read-model i tak pyta o tyle samo, a menu z dwudziestoma
+        pozycjami przestałoby być skrótem."""
+        obiekty = list(obiekty)[:self._RECENT_MAX]
+        self._recent_sep.setVisible(bool(obiekty))
+        for act, o in zip(self._recent_acts, obiekty + [None] * self._RECENT_MAX):
+            if o is None:
+                act.setVisible(False)
+                continue
+            act.setText(i18n.t("grid.sel.object_recent", canon=o["canon"]))
+            act.setData((o["canon"], o["catalog"], o["kind"]))
+            act.setEnabled(self.act_name.isEnabled())
+            act.setVisible(True)
 
     def set_clearable(self, on):
         """Uczciwy disabled „× Wyczyść zbiór": aktywny TYLKO gdy jest co zdjąć (facety/filtr)."""
@@ -1922,6 +1977,12 @@ class FramesView(QWidget):
         # to inna troska niż zawężanie zbioru (COHESION), oba zostają widoczne.
         self.facet_rail = FacetRail()
         self.facet_rail.facetsChanged.connect(self._on_facet_change)
+        # Ctrl+F → szukajka obiektów (R-S3-6). `QKeySequence.Find`, nie literał: sekwencję „znajdź"
+        # zna platforma i to ona ma o niej decydować. Kontekst WIDGET-Z-DZIEĆMI, nie okno — Ctrl+F
+        # wciśnięty w Porządkach albo w planerze nie ma prawa przerzucać kursora do listwy Zbiorów.
+        self._sc_find = QShortcut(QKeySequence.Find, self)
+        self._sc_find.setContext(Qt.WidgetWithChildrenShortcut)
+        self._sc_find.activated.connect(self.facet_rail.focus_search)
         self.fields = FieldsPanel()
         self.fields.columnsChanged.connect(self._on_columns)
         left = QSplitter(Qt.Vertical)
@@ -1948,6 +2009,10 @@ class FramesView(QWidget):
         self.sel_bar.btn_lineage.clicked.connect(lambda: self._toggle_panel("lineage"))
         self.sel_bar.act_name.triggered.connect(self._on_object_name)
         self.sel_bar.act_clear.triggered.connect(self._on_object_clear)
+        # Skrót „ostatnio użyte" (R-S2b-12): lista jest pochodną dziennika, więc odświeża się
+        # PRZY OTWARCIU menu, nie raz na budowie widoku — inaczej pokazywałaby stan sprzed gestów.
+        self.sel_bar.btn_object.menu().aboutToShow.connect(self._sync_recent_objects)
+        self.sel_bar.objectRecentPicked.connect(self._on_object_recent)
         rv.addWidget(self.sel_bar)
 
         self.macro_bar = MacroBar([])
@@ -2276,6 +2341,46 @@ class FramesView(QWidget):
             gest = repo.user_assign_object(
                 self.con, alias_norm=alias_norm, canon=canon, catalog=catalog, kind=kind,
                 frame_ids=ids, now=self._now(), overwrite_weak=True,
+                expected_object_id=stan["expected_object_id"])
+        except ValueError as e:                # konflikt aliasu / dryf do nieistniejącej klatki
+            QMessageBox.warning(self, i18n.t("grid.sel.object_name"), str(e))
+            return
+        self._po_gescie_osi("grid.sel.object_named", gest, canon=canon)
+
+    def _sync_recent_objects(self):
+        """Zasil skrót „ostatnio użyte" przed pokazaniem menu (R-S2b-12)."""
+        self.sel_bar.set_recent_objects(queries.recent_hand_objects(self.con))
+
+    def _on_object_recent(self, canon, catalog, kind):
+        """Skrót „ostatnio użyte": ten sam zapis co „Przypisz obiekt…", z pominiętym WYBOREM.
+
+        Wszystkie guardy zostają i to jest cała różnica między skrótem a obejściem: pusty cel,
+        konflikt dwóch obiektów w zaznaczeniu, zamrożony `expected_object_id` i klucz aliasu liczony
+        JEDNYM właścicielem (`assign_dialog.alias_key`). Pomijamy okno, nie bramki — inaczej skrót
+        byłby drugą, słabszą ścieżką zapisu tej samej osi.
+
+        `object_raw=None`, bo cel bierze się z ZAZNACZENIA, a nie z grupy o wspólnym zeznaniu —
+        dokładnie jak w `_on_object_name`, którego to jest skrót.
+
+        SKRÓT ODDAJE STER OKNU, GDY MA COŚ ZGASIĆ (bramka pakietu, zarzut 4). Bramki techniczne
+        skrót miał komplet, ale gubił jedyną DYSKLOZURĘ: okno mówi, ile nagrobków ręki zgaśnie
+        (`assign.cleared_warning`) i ile cudzych nazw nadpisze (`assign.selection_overwrite`).
+        Kontrakt `AssignObjectDialog` stawia to zdanie na DRODZE KLIKNIĘCIA, nie w tooltipie —
+        więc dwa kliknięcia nie mogą po cichu skasować werdyktu człowieka. Gdy nie ma czego gasić
+        (zwykły przypadek: świeże klatki), skrót pisze wprost i zostaje przy obiecanych 2 gestach."""
+        ids = self._object_gesture_ids()
+        if not ids:
+            return
+        stan = queries.selection_object_state(self.con, ids)
+        if stan["conflict"]:
+            self.status_message.emit(i18n.t("grid.sel.object_conflict", n=stan["conflict_n"]))
+            return
+        if stan["overwrite"] or stan["by_source"].get("user_cleared"):
+            return self._on_object_name()      # jest co zgasić → okno z pełną dysklozurą
+        try:
+            gest = repo.user_assign_object(
+                self.con, alias_norm=assign_dialog.alias_key(None, canon), canon=canon,
+                catalog=catalog, kind=kind, frame_ids=ids, now=self._now(), overwrite_weak=True,
                 expected_object_id=stan["expected_object_id"])
         except ValueError as e:                # konflikt aliasu / dryf do nieistniejącej klatki
             QMessageBox.warning(self, i18n.t("grid.sel.object_name"), str(e))

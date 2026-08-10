@@ -524,6 +524,102 @@ def test_facets_teleskop_kanoniczne_i_filtry(s8_obj):
     assert filt == ["Ha", "OIII"]                     # distinct, posortowane
 
 
+# --- R-S3-2: obie połówki nazwy stoją OBOK SIEBIE ---
+
+def _light_z_nazwa(con, sha, object_raw):
+    """Light z zeznaniem, którego drabina nie rozwiąże — surowiec obu połówek `object_review`."""
+    fid, _ = repo.upsert_frame(con, sha1_data=sha, kind="light", filetype="fits",
+                               camera_id=None, now=NOW)
+    repo.record_header(con, frame_id=fid, raw_json="{}", object_raw=object_raw, now=NOW)
+    return fid
+
+
+def test_polowki_tej_samej_nazwy_stoja_obok_siebie(s8_obj):
+    """R-S3-2: kolejność prowadzi NAZWĄ (sumą obu połówek), nie pojedynczą połówką.
+
+    Odtworzony rozjazd zmierzony na żywej bazie: `ORDER BY n DESC` wpuszczał między połówki
+    obcy kubełek (`LDN 1174 · 9` → `IC 1805 · 7` → `LDN 1174 · 5 · cofnięte ręką`), więc user
+    „załatwiał" pierwszą połówkę i zostawiał drugą, nie wiedząc, że istnieje.
+
+    Falsyfikator: przywróć `ORDER BY n DESC, object_raw, cleared` → nazwy przeplatają się
+    i asercja o sąsiedztwie czerwienieje."""
+    con, _ = s8_obj
+    for i in range(5):                                    # „LDN 1174" nietknięte ×5
+        _light_z_nazwa(con, f"sha-ldn-{i}", "LDN 1174")
+    for i in range(4):                                    # „IC 1805" nietknięte ×4
+        _light_z_nazwa(con, f"sha-ic-{i}", "IC 1805")
+    cofniete = [_light_z_nazwa(con, f"sha-ldn-c-{i}", "LDN 1174") for i in range(2)]
+    for fid in cofniete:                                  # …i ×2 z NAGROBKIEM (druga połówka)
+        repo.user_assign_object(con, alias_norm=None, canon="NGC7000", catalog="NGC",
+                                kind="deep_sky", frame_ids=[fid], now=NOW)
+    assert repo.clear_object_assignment(con, frame_ids=cofniete, now=NOW).assigned == 2
+
+    wiersze = [(r["object_raw"], r["cleared"], r["n"])
+               for r in queries.review_queue(con)["object_review"]]
+    # Suma „LDN 1174" = 7 bije „IC 1805" = 4, a POŁÓWKA cofnięta (2) NIE spada pod „IC 1805",
+    # choć jest od niego DWUKROTNIE mniej liczna — o pozycji decyduje nazwa, nie połówka.
+    # Dokładnie to psuł stary klucz: przy `n DESC` wiersz cofniętych spadał na sam dół.
+    assert wiersze[:3] == [("LDN 1174", 0, 5), ("LDN 1174", 1, 2), ("IC 1805", 0, 4)]
+    # …i to samo powiedziane wprost: każda nazwa zajmuje SPÓJNY blok wierszy.
+    nazwy = [w[0] for w in wiersze]
+    for nazwa in set(nazwy):
+        pozycje = [i for i, n in enumerate(nazwy) if n == nazwa]
+        assert pozycje == list(range(pozycje[0], pozycje[0] + len(pozycje)))
+
+
+# --- R-S2b-12: „ostatnio użyte" wyprowadzone z DZIENNIKA ---
+
+def test_ostatnio_uzyte_to_gesty_RĘKI_najswiezsze_pierwsze(s8_obj):
+    """R-S2b-12: skrót podaje kanony, które CZŁOWIEK realnie wskazał — nie to, co zrobił automat.
+
+    Kolejność jest odwrotna do zapisu (najświeższe na górze), a powtórzenie tego samego kanonu
+    NIE dubluje pozycji: `GROUP BY` po obiekcie czyni listę idempotentną wobec liczby zdarzeń
+    (ta sama pułapka, którą `count(event)` zastawił na kubełkach — memory `review-queue-from-state`).
+
+    Falsyfikator: zdejmij filtr `object_source='user'` → w wyniku pojawia się kanon nadany
+    ścieżką, którego ręka nigdy nie wskazała."""
+    con, ids = s8_obj
+    a = _light_z_nazwa(con, "sha-recent-a", "RAW-A")
+    b = _light_z_nazwa(con, "sha-recent-b", "RAW-B")
+    c = _light_z_nazwa(con, "sha-recent-c", "RAW-C")
+    repo.user_assign_object(con, alias_norm=None, canon="NGC7000", catalog="NGC",
+                            kind="deep_sky", frame_ids=[a], now=NOW)
+    repo.user_assign_object(con, alias_norm=None, canon="IC1805", catalog="IC",
+                            kind="deep_sky", frame_ids=[b], now=NOW)
+    repo.user_assign_object(con, alias_norm=None, canon="NGC7000", catalog="NGC",
+                            kind="deep_sky", frame_ids=[c], now=NOW)   # ten sam kanon PONOWNIE
+
+    kanony = [r["canon"] for r in queries.recent_hand_objects(con)]
+    assert kanony[:2] == ["NGC7000", "IC1805"]          # najświeższy pierwszy, bez duplikatu
+    assert kanony.count("NGC7000") == 1
+
+    # ŚCIEŻKA to nie gest palcem — potwierdzona propozycja nie wchodzi do „ostatnio użytych".
+    d = _light_z_nazwa(con, "sha-recent-d", "RAW-D")
+    repo.user_assign_object(con, alias_norm=None, canon="M42", catalog="Messier",
+                            kind="deep_sky", frame_ids=[d], now=NOW, object_source="path")
+    assert "M42" not in [r["canon"] for r in queries.recent_hand_objects(con)]
+
+
+def test_ostatnio_uzyte_niesie_pola_wymagane_przez_klinge(s8_obj):
+    """Skrót woła `user_assign_object`, która INSERTuje obiekt przy nowym kanonie — sam string
+    zostawiłby zapis bez `catalog`/`kind`."""
+    con, ids = s8_obj
+    fid = _light_z_nazwa(con, "sha-recent-pola", "RAW-P")
+    repo.user_assign_object(con, alias_norm=None, canon="IC1805", catalog="IC",
+                            kind="deep_sky", frame_ids=[fid], now=NOW)
+    wiersz = queries.recent_hand_objects(con)[0]
+    assert (wiersz["canon"], wiersz["catalog"], wiersz["kind"]) == ("IC1805", "IC", "deep_sky")
+
+
+def test_ostatnio_uzyte_respektuje_limit(s8_obj):
+    con, ids = s8_obj
+    for i, canon in enumerate(("NGC7000", "IC1805", "M42")):
+        fid = _light_z_nazwa(con, f"sha-recent-lim-{i}", f"RAW-L{i}")
+        repo.user_assign_object(con, alias_norm=None, canon=canon, catalog="NGC",
+                                kind="deep_sky", frame_ids=[fid], now=NOW)
+    assert len(queries.recent_hand_objects(con, limit=2)) == 2
+
+
 # --- odczyt nie pisze ---
 
 def test_object_read_model_nie_emituje_eventow(s8_obj):

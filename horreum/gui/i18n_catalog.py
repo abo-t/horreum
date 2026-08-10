@@ -195,17 +195,25 @@ CATALOG = {
         "pl": "Brak obiektów dla tego filtra — zeskanuj i rozwiąż (horreum resolve) lub zmień filtr.",
         "en": "No objects for this filter — scan and resolve (horreum resolve) or change the filter.",
     },
-    "object.review_item": {"pl": "{name}  ·  {n} klatek", "en": "{name}  ·  {n} frames"},
+    # WIERSZ KOLEJKI JEST TRÓJCZŁONOWY (R-S3-3, `rows.TwoPartDelegate`): nazwa | liczba | adnotacja.
+    # Do R-S3-10 liczba jechała w tekście jedną formą („NGC7023 · 1 klatek") — stąd `t_plural`.
+    "object.review_count": {
+        "pl": {"one": "{n} klatka", "few": "{n} klatki", "many": "{n} klatek"},
+        "en": {"one": "{n} frame", "other": "{n} frames"},
+    },
     # CZŁON „cofnięte ręką" (S3/R-S2b-1). Klatka, której zdjąłeś nazwę, wraca do TEGO SAMEGO
     # kubełka — bo przeglądu wymaga tak samo jak nietknięta — ale wraca z INNĄ historią: to Twój
     # werdykt, nie brak zeznania. Bez tego rozróżnienia pozycja wyglądała identycznie, a akcja
     # ręki po cichu jej nie tykała (klinga chroni werdykt przed przypadkowym wskrzeszeniem).
-    "object.review_item_cleared": {
-        "pl": "{name}  ·  {n} klatek  ·  cofnięte ręką",
-        "en": "{name}  ·  {n} frames  ·  undone by hand"},
+    #
+    # DO R-S3-3 RÓŻNICOWNIKIEM BYŁY DWA SZARE SŁOWA NA KOŃCU OBCINANEJ LINII — bez ikony, bez
+    # koloru, a lista obcina poziomo, więc przy wąskim oknie ginęły pierwsze. Odtąd znacznik `↺`
+    # stoi na POCZĄTKU wiersza (widoczny zanim cokolwiek się utnie), a te dwa słowa jadą CZŁONEM
+    # TRZECIM delegata — własną kolumną przy prawej krawędzi, ze stałym brzegiem.
+    "object.review_cleared_mark": {"pl": "cofnięte ręką", "en": "undone by hand"},
     "object.nameless_raw_cleared_line": {
-        "pl": "— bez nazwy, format bez karty (RAW): {n}  ·  cofnięte ręką",
-        "en": "— nameless, format has no card (RAW): {n}  ·  undone by hand"},
+        "pl": "— bez nazwy, format bez karty (RAW)",
+        "en": "— nameless, format has no card (RAW)"},
     "object.frames_review_cleared": {
         "pl": "Klatki z cofniętym przypisaniem: {name}",
         "en": "Frames with the assignment undone: {name}"},
@@ -219,34 +227,43 @@ CATALOG = {
         "pl": "Sam cofnąłeś tu nazwę — przypisanie ręką nadpisze ten werdykt",
         "en": "You undid the name here — assigning by hand overrides that verdict",
     },
-    "object.nameless_line": {"pl": "— bez nazwy w nagłówku: {n}",
-                             "en": "— no name in header: {n}"},
+    # WIERSZE KUBEŁKÓW SĄ TRÓJCZŁONOWE JAK RESZTA KOLEJKI (zarzut 2 bramki pakietu): etykieta
+    # niesie SAMĄ nazwę, liczba idzie w człon drugi (`object.review_count`, odmieniona), a droga
+    # naprawy i „cofnięte ręką" w człon trzeci. Do tej poprawki liczba siedziała w członie
+    # PIERWSZYM - czyli w tym, który delegat ELIDUJE - a lista straciła poziomy scroll, więc
+    # jedyna treść tych wierszy ucinała się bez drogi powrotu.
+    "object.nameless_line": {"pl": "— bez nazwy w nagłówku",
+                             "en": "— no name in header"},
     # R-S3-1: te dwa wiersze to lustro pary RAW-owej wyżej. Klatka trafia tu, gdy nazwę ZDJĄŁEŚ,
     # a nagłówek o obiekcie milczy (nazwa przyszła z regionu\ścieżki\xref) — werdykt człowieka,
     # nie brak wiedzy. Człon dopisany po myślniku, jak w obu wierszach, które go już miały.
     "object.nameless_cleared_line": {
-        "pl": "— bez nazwy w nagłówku: {n}  ·  cofnięte ręką",
-        "en": "— no name in header: {n}  ·  undone by hand"},
+        "pl": "— bez nazwy w nagłówku", "en": "— no name in header"},
     "object.nameless_stacks_cleared_line": {
-        "pl": "— bez nazwy, gotowe stosy: {n}  ·  cofnięte ręką",
-        "en": "— nameless, finished stacks: {n}  ·  undone by hand"},
+        "pl": "— bez nazwy, gotowe stosy", "en": "— nameless, finished stacks"},
     # RAW/DSLR: format nie zna karty OBJECT, więc te klatki czekają na RĘCZNE przypisanie —
     # dlatego wiersz mówi DROGĘ naprawy, nie sam objaw (kubełek wyżej otwiera okno zapisu karty,
     # ten nie ma czego otworzyć).
-    "object.nameless_raw_line": {"pl": "— bez nazwy, format bez karty (RAW): {n}  ·  do przypisania ręcznie",
-                                 "en": "— nameless, format has no card (RAW): {n}  ·  assign by hand"},
+    "object.nameless_raw_line": {"pl": "— bez nazwy, format bez karty (RAW)",
+                                 "en": "— nameless, format has no card (RAW)"},
+    # Droga naprawy = ADNOTACJA (człon trzeci), bo tym te kubełki się od siebie różnią.
+    "object.mark_by_hand": {"pl": "do przypisania ręcznie", "en": "assign by hand"},
+    "object.mark_by_card": {"pl": "do naprawy kartą", "en": "repair with a card"},
+    "object.mark_to_confirm": {"pl": "do potwierdzenia", "en": "to confirm"},
     # Gotowe stosy: od D-0802-1 droga naprawy jest ta sama co u lightów (karta OBJECT do pliku),
     # więc wiersz przestał zapowiadać read-only i nazywa POPULACJĘ — tym różni się od kubełka
     # wyżej, nie drogą.
     "object.nameless_stacks_line": {
-        "pl": "— bez nazwy, gotowe stosy: {n}  ·  do naprawy kartą",
-        "en": "— nameless, finished stacks: {n}  ·  repair with a card"},
+        "pl": "— bez nazwy, gotowe stosy", "en": "— nameless, finished stacks"},
     # Ścieżka PROPONUJE (D-OW-2/B): wiersz stoi POD kubełkiem RAW, bo opisuje jego PODZBIÓR —
     # drogę wyjścia, nie nową populację. Dwie liczby, bo jednostką przeglądu jest NAZWA, a jednostką
     # skutku KLATKA; sama liczba klatek kazałaby userowi myśleć, że czeka go 707 decyzji.
+    # Dwie liczby zostają RAZEM w członie drugim: jednostką przeglądu jest NAZWA, a jednostką
+    # skutku KLATKA - rozdzielenie ich między człony kazałoby czytać wiersz od środka.
     "object.path_proposed_line": {
-        "pl": "— …z tego ze ścieżki: {names} nazw / {frames} klatek  ·  do potwierdzenia",
-        "en": "— …of which from path: {names} names / {frames} frames  ·  to confirm"},
+        "pl": "— …z tego ze ścieżki", "en": "— …of which from path"},
+    "object.path_proposed_count": {
+        "pl": "{names} nazw / {frames} klatek", "en": "{names} names / {frames} frames"},
     "object.path_proposed_broken": {
         "pl": "— ze ścieżki: NIE POLICZONO · słownik obiektów własnych ma błąd "
               "(objects_own.json) — popraw plik i odśwież",
@@ -287,15 +304,15 @@ CATALOG = {
         "en": "Confirmed {names} names · assigned {assigned} of {total} frames."},
     "path.skipped": {"pl": " ({n} pominięte — zajęte między oknem a zapisem)",
                      "en": " ({n} skipped — taken between the dialog and the write)"},
-    "object.unreadable_line": {"pl": "— kopie nieczytelne: {n}", "en": "— unreadable copies: {n}"},
+    "object.unreadable_line": {"pl": "— kopie nieczytelne", "en": "— unreadable copies"},
     # KUBEŁEK OSI SPRZĘTU (R1) — do tej pory był POŁOWĄ wiersza informacyjnego z notą
     # „rozwiązywanie w przygotowaniu". Nota była uczciwa i dlatego musiała zniknąć razem z drogą:
     # od R1 gest istnieje, więc wiersz prowadzi do klatek i niesie własną akcję. Jednostką pozycji
     # jest KLATKA (tak liczy `resolver.review_state`), a jednostką GESTU folder × kamera — dlatego
     # zdanie mówi „klatek", a okno pokazuje foldery.
     "object.config_review_line": {
-        "pl": "— bez zestawu (teleskop × kamera): {n} klatek",
-        "en": "— without a setup (telescope × camera): {n} frames"},
+        "pl": "— bez zestawu (teleskop × kamera)",
+        "en": "— without a setup (telescope × camera)"},
     "object.config_review_info_empty": {
         "pl": "Ten kubełek jest pusty — każda klatka na osi teleskopu ma zestaw. Wiersz zapali "
               "się, gdy pojawi się plik, który o sprzęcie nie zeznaje (typowo RAW z lustrzanki).",
@@ -307,7 +324,7 @@ CATALOG = {
     # Bez niej klatka po geście wypadała z kubełka i nie było jak jej już dotknąć: automat odmawia
     # (guard lepkości), a okno otwiera się z kubełka, w którym jej nie ma.
     "object.config_by_hand_line": {
-        "pl": "— zestaw wskazany ręką: {n} klatek", "en": "— setup indicated by hand: {n} frames"},
+        "pl": "— zestaw wskazany ręką", "en": "— setup indicated by hand"},
     "object.frames_config_by_hand": {
         "pl": "Klatki z zestawem wskazanym ręką ({n})",
         "en": "Frames with a setup indicated by hand ({n})"},
@@ -336,8 +353,8 @@ CATALOG = {
         "pl": "Zaznacz w kolejce pozycję „bez zestawu (teleskop × kamera)”",
         "en": "Select the “without a setup (telescope × camera)” entry in the queue"},
     "object.review_info": {
-        "pl": "— bez nagłówka: {headerless}  (rozwiązywanie w przygotowaniu)",
-        "en": "— headerless: {headerless}  (resolution in preparation)",
+        "pl": "— bez nagłówka  (rozwiązywanie w przygotowaniu)",
+        "en": "— headerless  (resolution in preparation)",
     },
     # ---- okno „Przypisz zestaw…" (R1)
     "cfg.check_all": {"pl": "Zaznacz / odznacz wszystkie",
@@ -1095,9 +1112,21 @@ CATALOG = {
     "grid.sel.tidy_names": {"pl": "Uporządkuj nazwy plików…", "en": "Tidy file names…"},
     "grid.sel.save_view": {"pl": "★ Zapisz widok", "en": "★ Save view"},
     # Oś obiektu na zaznaczeniu (S2b) — JEDNA kontrolka, dwie pozycje menu.
-    "grid.sel.object": {"pl": "Obiekt ▾", "en": "Object ▾"},
-    "grid.sel.object_name": {"pl": "Nazwij zaznaczenie…", "en": "Name selection…"},
+    # Strzałkę rozwinięcia rysuje STYL (`QToolButton.InstantPopup`) — tekst jej nie powtarza
+    # (R-S2b-11: kontrolka miała dwa chevrony, własny i natywny).
+    "grid.sel.object": {"pl": "Obiekt", "en": "Object"},
+    # JEDNA ROBOTA, JEDEN CZASOWNIK (R-S2b-11). Ta sama sprawa nazywała się po drodze na cztery
+    # sposoby: „Nazwij zaznaczenie…" (menu) → „Przypisz obiekt" (tytuł okna) → „Przypisz N klatek"
+    # (akcept) → „Przypisz obiekt…" (kolejka). Wygrywa „przypisz", i to nie z przewagi liczebnej:
+    # tak nazywa tę robotę KANON (`repo.user_assign_object`, event `object.assigned`), a w tym
+    # samym menu stoi jej cofnięcie — „Cofnij przypisanie". Para gest↔cofnięcie musi mówić jednym
+    # czasownikiem, inaczej user nie widzi, że to dwie strony tej samej rzeczy.
+    # Fakt „pisze po ZAZNACZENIU, nie po tym, co widać" niesie tooltip i nagłówek okna, nie etykieta.
+    "grid.sel.object_name": {"pl": "Przypisz obiekt…", "en": "Assign object…"},
     "grid.sel.object_clear": {"pl": "Cofnij przypisanie", "en": "Undo assignment"},
+    # R-S2b-12: pozycja skrótu. Sam kanon ze strzałką — to nie polecenie („przypisz…"), tylko
+    # CEL, w który gest od razu trafi; wielokropka nie ma, bo nic się już nie otworzy.
+    "grid.sel.object_recent": {"pl": "→ {canon}", "en": "→ {canon}"},
     "grid.sel.object_empty": {
         "pl": "Zaznacz klatki — ta akcja pisze WYŁĄCZNIE po zaznaczeniu, nie po tym, co widać.",
         "en": "Select frames — this action writes ONLY to the selection, not to what is visible."},
@@ -2033,12 +2062,28 @@ CATALOG = {
     "facets.group.kind": {"pl": "Rodzaj", "en": "Kind"},
     "facets.group.telescope": {"pl": "Teleskop", "en": "Telescope"},
     "facets.group.night": {"pl": "Noc", "en": "Night"},
-    "facets.search_object": {"pl": "szukaj obiektu…", "en": "search object…"},
+    # Skrót nazwany WPROST w podpowiedzi pola: `QShortcut` jest w GUI niewidoczny, a „3 interakcje
+    # → 2" nie zadziała dla kogoś, kto nie wie, że skrót istnieje (bramka pakietu, zarzut 14).
+    "facets.search_object": {"pl": "szukaj obiektu (Ctrl+F)…", "en": "search object (Ctrl+F)…"},
     "facets.tip.clicks": {
         "pl": "Klik: uwzględnij → wyklucz → wyczyść   ·   Prawy klik: wyklucz wprost",
         "en": "Click: include → exclude → clear   ·   Right click: exclude directly",
     },
     "facets.hidden": {"pl": "(+{n} ukryte)", "en": "(+{n} hidden)"},
+    # R-S3-9: wiersz trafiony CUDZĄ nazwą mówi którą — bez tego „Large Magellanic Cloud" dawało
+    # `LMC` i nic nie tłumaczyło, dlaczego pasuje. Alias jest w formie znormalizowanej, bo tylko
+    # taka istnieje w bazie (`object_alias.alias_norm`) — user rozpoznaje w niej własną frazę.
+    "facets.tip.alias_hit": {
+        "pl": "Pasuje przez inną nazwę tego obiektu: {alias}",
+        "en": "Matched by another name of this object: {alias}",
+    },
+    # R-S3-5: stan pusty miał projekt „niemy prostokąt ~180 px". Dwa zdania, bo to dwie różne
+    # prawdy: „fraza nic nie znalazła" (zawęź inaczej) vs „ta grupa nie ma nic do pokazania przy
+    # obecnym zawężeniu" (poluzuj INNY facet).
+    "facets.empty_search": {
+        "pl": "Brak trafień dla „{fraza}”", "en": "No matches for “{fraza}”"},
+    "facets.empty_group": {
+        "pl": "Brak wartości przy tym zawężeniu", "en": "No values with the current narrowing"},
 
     # --- portfolio.py (Qt-wolny agregat godzin): _NO_FILTER trzyma KLUCZ ---
     "portfolio.no_filter": {"pl": "(bez filtra)", "en": "(no filter)"},

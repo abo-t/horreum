@@ -80,3 +80,75 @@ def test_xref_brak_wpisu_bez_zmiany():
 ])
 def test_catalog_label(canon, label):
     assert catalog_label(canon) == label
+
+
+# --- K-1: trzy gramatyki, które asset celów już wypisuje (Green SNR / ESO / HCG) ---
+
+@pytest.mark.parametrize("tekst, canon", [
+    # Green (SNR) — wariant zapisany tak, jak stoi w assecie, i tak, jak pisze go człowiek.
+    ("G012.2+00.3", "G012.2+00.3"), ("G12.2+0.3", "G012.2+00.3"),
+    ("G 12.2 + 0.3", "G012.2+00.3"), ("g000.0+00.0", "G000.0+00.0"),
+    ("G001.4-00.1", "G001.4-00.1"), ("G1.4-0.1", "G001.4-00.1"),
+    # ESO — pole i obiekt w polu, obie liczby stałoszerokościowe.
+    ("ESO056-115", "ESO056-115"), ("ESO 56-115", "ESO056-115"), ("eso 056 - 115", "ESO056-115"),
+    # HCG — grupa zwarta Hicksona.
+    ("HCG092", "HCG092"), ("HCG 92", "HCG092"), ("hcg92", "HCG092"),
+])
+def test_K1_trzy_nowe_gramatyki(tekst, canon):
+    assert catalog_canon(tekst) == canon
+
+
+@pytest.mark.parametrize("canon, label", [
+    ("G012.2+00.3", "Green"), ("ESO056-115", "ESO"), ("HCG092", "HCG"),
+])
+def test_K1_etykiety(canon, label):
+    assert catalog_label(canon) == label
+
+
+@pytest.mark.parametrize("tekst", [
+    "PN G012.2+00.3",       # mgławica planetarna — IDENTYCZNY kształt liczbowy, INNY obiekt
+    "PNG012.2+00.3",
+    "PN_G012.2+00.3",       # …także po gałęzi cięcia dwuczłonowego
+])
+def test_K1_gramatyka_G_NIE_POLYKA_mgławicy_planetarnej(tekst):
+    """Druga pułapka z długu K-1: `PN G###.#±##.#` ma ten sam kształt liczbowy co Green.
+
+    Wpuszczenie go zrobiłoby z mgławicy planetarnej pozostałość po supernowej — błąd, którego
+    nikt by nie zobaczył, bo kanon wyglądałby poprawnie.
+
+    Falsyfikator ZMIERZONY, i wynik jest ciekawszy niż zapis w długu: obrona jest PODWÓJNA i każda
+    połowa wystarcza sama. Zdjęcie `^` z regexa nie zmienia nic (bo `_match_rules` woła `rx.match`,
+    które kotwiczy początek), a podmiana `match`→`search` też nie (bo zostaje `^`). Dopiero OBIE
+    naraz wpuszczają wszystkie trzy warianty — sprawdzone. Test pinuje SKUTEK, więc przeżyje
+    usunięcie którejkolwiek z połówek i zaczerwieni się dopiero, gdy zniknie ochrona jako taka."""
+    assert catalog_canon(tekst) is None
+
+
+@pytest.mark.parametrize("tekst, canon", [
+    ("Ced214", "Ced214"), ("Cr399", "Cr399"), ("CTB1", "CTB1"),
+])
+def test_K1_krotkie_G_nie_zjada_sasiadow(tekst, canon):
+    """Pierwsza pułapka z długu K-1: `G` jest krótkie i nie może odebrać nazw sąsiadom.
+
+    Regresja na trójce, którą dług wymienia z nazwiska (`Ced`/`Cr`/`CTB`)."""
+    assert catalog_canon(tekst) == canon
+    assert catalog_label(catalog_canon(tekst)) != "Green"
+
+
+def test_K1_kanon_zgadza_sie_z_ASSETEM_celow():
+    """SENS CAŁEGO K-1: kanon osi obiektu ma trafiać w to, co planer wypisuje jako cel.
+
+    Gdyby gramatyka zdjęła zera wiodące (`G12.2+0.3`), nazwa z nagłówka rozwiązałaby się na kanon,
+    którego asset nie zna — i szew planer↔oś obiektu zostałby otwarty mimo zielonych testów wyżej.
+    Dlatego bramka pyta ASSET, a nie listę literałów."""
+    import json
+    from importlib import resources
+    surowe = json.loads(resources.files("horreum.data")
+                        .joinpath("targets_core.json").read_text(encoding="utf-8"))
+    cele = [t["c"] for t in surowe["targets"]
+            if t.get("c", "").startswith(("G0", "G1", "G2", "G3", "ESO", "HCG"))]
+    # 297 = liczba zmierzona przy zakładaniu długu K-1 („szew na 297 celach"). Próg, nie
+    # równość: asset rośnie, a bramka ma pilnować, że gramatyki nie WYPADŁY.
+    assert len(cele) >= 297, f"asset stracił cele tych gramatyk (jest {len(cele)})"
+    rozjazd = [c for c in cele if catalog_canon(c) != c]
+    assert rozjazd == [], f"kanon rozjeżdża się z assetem dla: {rozjazd[:5]}"

@@ -27,6 +27,10 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QDialog
 
 UROLE = 0x0100   # Qt.UserRole
+# Liczba wyszła z etykiety do CZŁONU DRUGIEGO delegata (bramka pakietu 3a, zarzut 2):
+# w członie pierwszym była elidowana bez drogi powrotu, odkąd lista kolejki straciła
+# poziomy scrollbar.
+SECONDARY = UROLE + 1
 NOW = "2026-08-08T10:00:00+00:00"
 
 
@@ -263,10 +267,10 @@ def test_pomylka_reki_MA_DROGE_POWROTNA(view, monkeypatch):
     v.refresh()
 
     # 1. wiersz powrotny ISTNIEJE i prowadzi dalej
-    wiersz = [(v.review.item(i).text(), v.review.item(i).data(UROLE))
+    wiersz = [(v.review.item(i).text(), v.review.item(i).data(SECONDARY))
               for i in range(v.review.count())
               if v.review.item(i).data(UROLE) == "config_by_hand"]
-    assert wiersz and str(len(cel)) in wiersz[0][0]
+    assert wiersz and str(len(cel)) in wiersz[0][1]
     assert len(queries.config_by_hand_frames(con)) == len(cel)
 
     # 2. akcja zapala się nad NIM, a okno wchodzi w trybie ZMIANY (nic nie zaznaczone domyślnie)

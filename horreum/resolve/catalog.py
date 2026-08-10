@@ -44,6 +44,36 @@ _RULES = [
     (re.compile(r"^(?:VDB|VAN\s*DEN\s*BERGH)\s*0*(\d{1,4})$"), lambda m: f"vdB{int(m.group(1))}"),
     (re.compile(r"^CED(?:ERBLAD)?\s*0*(\d{1,4})$"), lambda m: f"Ced{int(m.group(1))}"),
     (re.compile(r"^(?:CR|COLLINDER)\s*0*(\d{1,4})$"), lambda m: f"Cr{int(m.group(1))}"),
+    # ── K-1: trzy gramatyki, które ASSET CELÓW JUŻ WYPISUJE, a oś obiektu ich nie znała.
+    # Skala jest w teście (`test_K1_kanon_zgadza_sie_z_ASSETEM_celow` liczy ją z assetu, a nie
+    # z tego komentarza) — asset rośnie, więc liczba wpisana tutaj byłaby fałszem od pierwszej
+    # aktualizacji katalogu.
+    #
+    # NA DZISIEJSZYM ARCHIWUM TE GRAMATYKI NIE RUSZAJĄ NICZEGO — zmierzone przed scaleniem, bo
+    # nowy szczebel drabiny stoi NAD aliasem i nad słownikiem, więc mógłby po cichu przenieść
+    # klatki spod nazwy nadanej ręką: 0 ze 74 rozpoznanych `object_raw` i 0 aliasów trafia te
+    # kształty, a `resolve` na kopii żywej bazy dał `objects_new=0`, `objects_assigned=0`,
+    # `own_alias_conflicts=0` przy `human-facts --baseline` bez ubytków. Wchodzą więc pod PRZYSZŁY
+    # materiał i pod most planera, nie pod przemalowanie archiwum.
+    #
+    # ZERA WIODĄCE ZOSTAJĄ — i to jest ŚWIADOME odstępstwo od reguły „bez zer wiodących" trzy
+    # akapity wyżej. Tam liczba jest PORZĄDKOWA (M82 = 82. obiekt Messiera), więc `M082` to ten
+    # sam obiekt zapisany inaczej. Tu liczba jest WSPÓŁRZĘDNĄ o stałej szerokości: `G012.2+00.3`
+    # znaczy l=12,2° b=+0,3°, a `ESO056-115` to pole 056 i obiekt 115 w tym polu. Zdjęcie zera
+    # zmieniłoby identyfikator, nie zapis — i rozjechało kanon z assetem, czyli otworzyło dokładnie
+    # ten szew, który ta zmiana zamyka.
+    #
+    # PUŁAPKA `PN G###.#±##.#` (mgławice planetarne mają oznaczenie o IDENTYCZNYM kształcie
+    # liczbowym). Broni przed nią DOPASOWANIE OD POCZĄTKU TOKENU: `_match_rules` woła `rx.match`,
+    # więc „PN G012.2+00.3" nie trafia tej reguły i wychodzi jako None, zamiast udawać pozostałość
+    # supernowej. Obrona jest więc własnością WOŁAJĄCEGO, nie widocznym warunkiem tutaj — i tym
+    # bardziej wymaga pinu: dzień, w którym `_match_rules` przejdzie na `search`, zamieni 286 celów
+    # Green w cichy fałsz. Test pinuje oba końce (regex ma `$`, wołający ma `match`).
+    (re.compile(r"^G\s*(\d{1,3})\.(\d)\s*([+-])\s*(\d{1,2})\.(\d)$"),
+     lambda m: f"G{int(m.group(1)):03d}.{m.group(2)}{m.group(3)}{int(m.group(4)):02d}.{m.group(5)}"),
+    (re.compile(r"^ESO\s*(\d{1,3})\s*-\s*(\d{1,3})$"),
+     lambda m: f"ESO{int(m.group(1)):03d}-{int(m.group(2)):03d}"),
+    (re.compile(r"^HCG\s*(\d{1,3})$"), lambda m: f"HCG{int(m.group(1)):03d}"),
 ]
 
 
@@ -111,6 +141,12 @@ _LABELS = [
     (re.compile(r"^Abell\d"), "Abell"), (re.compile(r"^vdB\d"), "vdB"),
     (re.compile(r"^Ced\d"), "Ced"), (re.compile(r"^Cr\d"), "Collinder"),
     (re.compile(r"^CTB\d"), "CTB"), (re.compile(r"^B\d"), "Barnard"),
+    # K-1. `ESO`/`HCG` przed skrótami jednoliterowymi z tej samej litery nie kolidują, ale `G\d`
+    # jest KRÓTKIE i stoi tu świadomie po `Ced`/`Cr`/`CTB` — reguła „dłuższe/specyficzne prefiksy
+    # przed krótszymi" z nagłówka tej listy. `Green` to nazwa katalogu (jak `Collinder`/`Barnard`),
+    # nie skrót — `G` jako etykieta nie powiedziałoby użytkownikowi niczego.
+    (re.compile(r"^ESO\d"), "ESO"), (re.compile(r"^HCG\d"), "HCG"),
+    (re.compile(r"^G\d"), "Green"),
     (re.compile(r"^M\d"), "Messier"), (re.compile(r"^C\d"), "Caldwell"),
 ]
 

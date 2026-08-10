@@ -1266,7 +1266,7 @@ def test_en_render_grid_z_katalogu(qapp, tmp_path):
         assert v.combo_persp.currentData() == ("preset", "Duplikaty")
         # facety (rollout drobne): _GROUPS tytuły + szukajka trzymają KLUCZE → EN z katalogu
         from PySide6.QtWidgets import QLabel
-        assert v.facet_rail.search.placeholderText() == "search object…"
+        assert v.facet_rail.search.placeholderText() == "search object (Ctrl+F)…"
         titles = {lb.text() for lb in v.facet_rail.findChildren(QLabel)}
         assert {"Object", "Filter", "Kind", "Telescope", "Night"} <= titles
     finally:
@@ -2018,7 +2018,10 @@ def test_pasek_ma_JEDNA_kontrolke_osi_z_dwiema_pozycjami(obj_view):
     v, _ = obj_view
     assert v.sel_bar.btn_object.menu() is not None
     from horreum.gui import i18n
-    assert [a.text() for a in v.sel_bar.btn_object.menu().actions()] == [
+    # WIDOCZNE pozycje: pula skrótu „ostatnio użyte" (R-S2b-12) żyje w tym samym menu, ale jest
+    # ukryta, dopóki dziennik nie ma czego pokazać — stała pula zamiast dokładania akcji, bo
+    # `deleteLater` na QAction wywalał Qt (bramka pakietu, zarzut 8).
+    assert [a.text() for a in v.sel_bar.btn_object.menu().actions() if a.isVisible()] == [
         i18n.t("grid.sel.object_name"), i18n.t("grid.sel.object_clear")]
 
 
@@ -2447,3 +2450,292 @@ def test_kursor_oczekiwania_WRACA_takze_po_wyjatku(qapp):
         with busy_mod.busy(lambda _t: None, "robota"):
             raise RuntimeError("bum")
     assert QApplication.overrideCursor() is None
+
+
+# ═════════════════════════ R-S3-5 / R-S3-9 — LISTWA: STAN PUSTY, CZYSZCZENIE, TRAFIONY ALIAS
+
+
+def _rail_z_obiektami(qapp, aliases=None):
+    from horreum.gui.facets import FacetRail
+    rail = FacetRail()
+    rail.resize(260, 500)
+    rail.show()
+    counts = {"object": [(1, "LMC", 3), (2, "NGC7000", 5)],
+              "filter": [], "kind": [], "telescope": [], "night": []}
+    rail.set_data(counts, {}, aliases=aliases)
+    qapp.processEvents()
+    return rail
+
+
+def _widoczne(lw):
+    """Wiersze REALNE (bez placeholdera) i niepochowane — to, co user widzi jako wartości."""
+    from PySide6.QtCore import Qt
+    return [lw.item(i).text() for i in range(lw.count())
+            if not lw.item(i).isHidden() and lw.item(i).data(Qt.UserRole) is not None]
+
+
+def _placeholder(lw):
+    from PySide6.QtCore import Qt
+    for i in range(lw.count()):
+        if lw.item(i).data(Qt.UserRole) is None:
+            return lw.item(i)
+    return None
+
+
+def test_fraza_bez_trafien_ma_WIERSZ_zamiast_niemego_prostokata(qapp):
+    """R-S3-5: fraza bez trafień zostawiała ~180 px pustki i nic nie mówiło, co się stało.
+
+    Falsyfikator: usuń wywołanie `_set_empty_row` z `_filter_objects` → placeholder znika."""
+    rail = _rail_z_obiektami(qapp)
+    lw = rail._lists["object"]
+    assert _placeholder(lw) is None                       # przy trafieniach wiersza NIE MA
+
+    rail.search.setText("nic-takiego-nie-ma")
+    qapp.processEvents()
+    assert _widoczne(lw) == []
+    ph = _placeholder(lw)
+    assert ph is not None and "nic-takiego-nie-ma" in ph.text()
+
+    rail.search.setText("")                               # i znika, gdy trafienia wracają
+    qapp.processEvents()
+    assert _placeholder(lw) is None and len(_widoczne(lw)) == 2
+    rail.hide()
+
+
+def test_grupa_pusta_przy_zawezeniu_tez_mowi_dlaczego(qapp):
+    """R-S3-5, druga połowa: zawężenie do jednego obiektu opróżnia Filtr/Teleskop/Noc NARAZ —
+    zmierzone cztery nieme prostokąty w jednym widoku. Placeholder nie jest własnością szukajki."""
+    rail = _rail_z_obiektami(qapp)
+    for facet in ("filter", "kind", "telescope"):
+        ph = _placeholder(rail._lists[facet])
+        assert ph is not None, f"pusta grupa {facet} nie mówi nic"
+        assert ph.text()
+    rail.hide()
+
+
+def test_placeholder_NIE_JEST_klikalny(qapp):
+    """Wiersz stanu pustego nie może wpaść w dispatch cyklu — nie niesie wartości facetu."""
+    from PySide6.QtCore import Qt
+    rail = _rail_z_obiektami(qapp)
+    lw = rail._lists["object"]
+    rail.search.setText("nic-takiego-nie-ma")
+    qapp.processEvents()
+    ph = _placeholder(lw)
+    assert ph.flags() == Qt.NoItemFlags
+    assert ph.data(Qt.UserRole) is None
+    zlapane = []
+    rail.facetsChanged.connect(zlapane.append)
+    rail._on_item_clicked(ph)                             # gest wprost w placeholder
+    assert zlapane == [], "klik w wiersz stanu pustego zmienił stan facetów"
+    rail.hide()
+
+
+def test_szukajka_ma_przycisk_czyszczenia(qapp):
+    """R-S3-5: skasowanie frazy kosztowało Ctrl+A+Del zamiast jednego kliknięcia."""
+    rail = _rail_z_obiektami(qapp)
+    assert rail.search.isClearButtonEnabled()
+    rail.hide()
+
+
+def test_wiersz_trafiony_ALIASEM_tlumaczy_sie_w_tooltipie(qapp):
+    """R-S3-9: wpisujesz „Large Magellanic Cloud", dostajesz `LMC` i nie wiesz dlaczego.
+
+    Falsyfikator: przywróć `search_hit` zwracające `bool` → tooltip nie ma czego pokazać."""
+    rail = _rail_z_obiektami(qapp, aliases={"LMC": {"LARGEMAGELLANICCLOUD"}})
+    lw = rail._lists["object"]
+    rail.search.setText("Large Magellanic Cloud")
+    qapp.processEvents()
+    assert _widoczne(lw) == ["LMC"]
+    tip = lw.item(0).toolTip()
+    assert "LARGEMAGELLANICCLOUD" in tip
+
+    rail.search.setText("LMC")                            # trafienie WŁASNĄ nazwą się nie tłumaczy
+    qapp.processEvents()
+    assert "LARGEMAGELLANICCLOUD" not in lw.item(0).toolTip()
+    rail.hide()
+
+
+# ═════════════════════════ R-S3-6 — ŚCIEŻKA KLAWIATURY
+
+
+def test_enter_w_szukajce_bierze_PIERWSZE_trafienie(qapp):
+    """R-S3-6: fraza tylko chowała wiersze — wybór i tak wymagał myszy (3 interakcje zamiast 2).
+
+    Falsyfikator: rozłącz `returnPressed` → stan facetów zostaje pusty."""
+    rail = _rail_z_obiektami(qapp)
+    rail.search.setText("NGC7000")
+    qapp.processEvents()
+    zlapane = []
+    rail.facetsChanged.connect(zlapane.append)
+    rail.search.returnPressed.emit()
+    assert zlapane and zlapane[-1]["object"]["in"] == [[2, "NGC7000"]]
+    rail.hide()
+
+
+def test_enter_bez_trafien_NIE_ROBI_NIC(qapp):
+    """Fraza bez trafień nie ma czego potwierdzić — Enter nie może wziąć wiersza stanu pustego."""
+    rail = _rail_z_obiektami(qapp)
+    rail.search.setText("nic-takiego-nie-ma")
+    qapp.processEvents()
+    zlapane = []
+    rail.facetsChanged.connect(zlapane.append)
+    rail.search.returnPressed.emit()
+    assert zlapane == []
+    rail.hide()
+
+
+def test_focus_search_zaznacza_dotychczasowa_fraze(qapp):
+    """Ctrl+F woła `focus_search`: kursor w polu, stara fraza ZAZNACZONA (pisanie ją zastępuje)."""
+    rail = _rail_z_obiektami(qapp)
+    rail.search.setText("LMC")
+    rail.focus_search()
+    qapp.processEvents()
+    assert rail.search.hasFocus()
+    assert rail.search.selectedText() == "LMC"
+    rail.hide()
+
+
+# ═════════════════════════ R-S2b-11 / R-S2b-12 — PASEK ZBIORÓW: JEDEN CZASOWNIK, SKRÓT
+
+
+def test_kontrolka_obiektu_ma_JEDEN_chevron_i_rowna_wysokosc(qapp):
+    """R-S2b-11: tekst niósł własne „▾" obok natywnego wskaźnika `InstantPopup` (dwa chevrony),
+    a `QToolButton` wychodził o 1 px niższy od sześciu sąsiadów-`QPushButton`.
+
+    Falsyfikatory: wróć do „Obiekt ▾" → pierwsza asercja; zdejmij `setFixedHeight` → druga."""
+    from horreum.gui.grid import SelectionBar
+    bar = SelectionBar()
+    bar.show()
+    qapp.processEvents()
+    assert "▾" not in bar.btn_object.text()
+    assert bar.btn_object.height() == bar.btn_save.height()
+    bar.close()
+
+
+def test_jedna_robota_JEDEN_czasownik(qapp):
+    """R-S2b-11: ta sama sprawa nazywała się „Nazwij zaznaczenie…", „Przypisz obiekt", „Przypisz
+    N klatek" i „Przypisz obiekt…". Para gest↔cofnięcie musi mówić jednym czasownikiem."""
+    from horreum.gui import i18n
+    i18n.set_lang("pl")
+    czasownik = "Przypisz"
+    assert i18n.t("grid.sel.object_name").startswith(czasownik)      # menu Zbiorów
+    assert i18n.t("assign.title").startswith(czasownik)              # tytuł okna
+    assert i18n.t("object.assign_btn").startswith(czasownik)         # kolejka przeglądu
+    assert i18n.t_plural("assign.accept_btn", 3).startswith(czasownik)   # akcept
+    assert i18n.t("grid.sel.object_clear") == "Cofnij przypisanie"   # …i jego cofnięcie
+
+
+def _pozycje_skrotu(bar):
+    """WIDOCZNE pozycje skrótu — pula jest stała, nadmiar tylko się chowa."""
+    return [a for a in bar.btn_object.menu().actions()
+            if a.isVisible() and a.text().startswith("→")]
+
+
+def test_skrot_ostatnio_uzytych_niesie_KOMPLET_pol(qapp):
+    """R-S2b-12: „te klatki to znowu NGC6960" kosztowało 5 interakcji, spada do 2.
+
+    Pozycja skrótu musi wieźć `catalog` i `kind` razem z kanonem: klinga INSERTuje obiekt, gdy
+    kanon jest nowy, więc sam string zostawiłby zapis bez pól, których wymaga schemat.
+
+    Falsyfikator: zawęź sygnał do samego kanonu → asercja o krotce czerwienieje."""
+    from horreum.gui.grid import SelectionBar
+    bar = SelectionBar()
+    bar.set_object_actions(namable=3, clearable=0)
+    bar.set_recent_objects([{"canon": "NGC6960", "catalog": "NGC", "kind": "deep_sky"},
+                            {"canon": "LMC", "catalog": None, "kind": "own"}])
+    zlapane = []
+    bar.objectRecentPicked.connect(lambda *a: zlapane.append(a))
+    pozycje = _pozycje_skrotu(bar)
+    assert [a.text() for a in pozycje] == ["→ NGC6960", "→ LMC"]
+    pozycje[0].trigger()
+    assert zlapane == [("NGC6960", "NGC", "deep_sky")]
+    bar.close()
+
+
+def test_skrot_gasnie_razem_z_akcja_ktora_skraca(qapp):
+    """Skrót nie może omijać bramki, którą stoi „Przypisz obiekt…" — puste zaznaczenie gasi oba."""
+    from horreum.gui.grid import SelectionBar
+    bar = SelectionBar()
+    bar.set_object_actions(namable=0, clearable=0)          # nie ma czego nazwać
+    bar.set_recent_objects([{"canon": "NGC6960", "catalog": "NGC", "kind": "deep_sky"}])
+    pozycje = _pozycje_skrotu(bar)
+    assert pozycje and not any(a.isEnabled() for a in pozycje)
+    bar.close()
+
+
+def test_lista_skrotu_przebudowuje_sie_a_nie_ROSNIE(qapp):
+    """Pozycje powstają na nowo przy każdym pokazaniu menu — inaczej doklejałyby się w nieskończoność."""
+    from horreum.gui.grid import SelectionBar
+    bar = SelectionBar()
+    bar.set_object_actions(namable=3, clearable=0)
+    for _ in range(3):
+        bar.set_recent_objects([{"canon": "NGC6960", "catalog": "NGC", "kind": "deep_sky"}])
+    assert len(_pozycje_skrotu(bar)) == 1
+    bar.set_recent_objects([])                              # pusta historia = czyste menu
+    assert not _pozycje_skrotu(bar)
+    # …i ŻADNA akcja nie przybyła: pula jest stała, bo `deleteLater` na QAction wywalał Qt
+    # (bramka pakietu, zarzut 8 - lekarstwo gorsze od choroby, zmierzone na pełnej baterii).
+    assert len(bar.btn_object.menu().actions()) == 2 + 1 + bar._RECENT_MAX
+    bar.close()
+
+
+def test_zmiana_motywu_PRZEZYWA_pusta_grupe(qapp):
+    """Regresja złapana pełną baterią: `refresh_theme` rozpakowywał dane KAŻDEGO wiersza, więc
+    placeholder (`UserRole is None`) wywracał przełączenie skórki wyjątkiem — a testy listwy
+    motywu nie ruszają.
+
+    To TRZECI konsument roli `UserRole` w tym pliku, który zakładał, że wiersz zawsze niesie
+    wartość facetu (po `_on_item_clicked` i `_on_item_right_clicked`). Pin jest na KLASĘ: każde
+    przejście po itemach ma przeżyć wiersz bez danych.
+
+    Falsyfikator: zdejmij guard `dane is None` z `refresh_theme` → TypeError."""
+    rail = _rail_z_obiektami(qapp)
+    assert _placeholder(rail._lists["filter"]) is not None, "fikstura nie ma pustej grupy"
+    rail.refresh_theme()                                   # nie może rzucić
+    rail.search.setText("nic-takiego-nie-ma")
+    qapp.processEvents()
+    rail.refresh_theme()                                   # …także przy pustej szukajce obiektów
+    rail.hide()
+
+
+def test_reveal_PRZEZYWA_wiersz_stanu_pustego(qapp):
+    """Zarzut 3 bramki: CZWARTA pętla po itemach (`_reveal`) rozpakowywała dane każdego wiersza.
+
+    Docstring obiecuje „cichy no-op" dla wartości spoza listy, a od R-S3-5 był to `TypeError` —
+    i to na SEAMIE dla wejść z zewnątrz (most „Pokaż klatki celu" z planera).
+
+    Falsyfikator: zdejmij `dane is not None` z `_reveal` → TypeError."""
+    rail = _rail_z_obiektami(qapp)
+    assert _placeholder(rail._lists["filter"]) is not None
+    rail.set_data({"object": [(1, "LMC", 3)], "filter": [], "kind": [],
+                   "telescope": [], "night": []}, {}, reveal=("filter", "nie-ma-mnie"))
+    rail.hide()
+
+
+def test_skrot_ODDAJE_STER_OKNU_gdy_ma_zgasic_nagrobek(view, monkeypatch):
+    """Zarzut 4 bramki: skrót miał komplet bramek technicznych, ale gubił DYSKLOZURĘ — okno mówi,
+    ile nagrobków ręki zgaśnie i ile cudzych nazw nadpisze, a dwa kliknięcia robiły to po cichu.
+
+    Kontrakt `AssignObjectDialog` stawia to zdanie na DRODZE KLIKNIĘCIA, nie w tooltipie.
+
+    Falsyfikator: zdejmij gałąź `overwrite or user_cleared` → skrót pisze wprost i okno nie wstaje."""
+    from horreum.gui import queries as q
+    v = view[0] if isinstance(view, tuple) else view
+    otwarte = []
+    monkeypatch.setattr(v, "_on_object_name", lambda: otwarte.append("okno"))
+    monkeypatch.setattr(v, "_object_gesture_ids", lambda: [1, 2])
+
+    # 1) jest co zgasić (nagrobek) → ster do okna
+    monkeypatch.setattr(q, "selection_object_state", lambda con, ids: {
+        "conflict": False, "conflict_n": 0, "overwrite": 0, "expected_object_id": None,
+        "by_source": {"user_cleared": 2}, "namable": 2})
+    v._on_object_recent("NGC6960", "NGC", "deep_sky")
+    assert otwarte == ["okno"]
+
+    # 2) jest co nadpisać (cudza nazwa ze źródła słabego) → też okno
+    otwarte.clear()
+    monkeypatch.setattr(q, "selection_object_state", lambda con, ids: {
+        "conflict": False, "conflict_n": 0, "overwrite": 3, "expected_object_id": None,
+        "by_source": {}, "namable": 3})
+    v._on_object_recent("NGC6960", "NGC", "deep_sky")
+    assert otwarte == ["okno"]

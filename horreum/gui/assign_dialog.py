@@ -14,6 +14,47 @@ from horreum.gui import i18n, queries
 from horreum.resolve._text import norm_alnum
 
 
+def broni_sie_sama(text):
+    """Czy drabina rozwiąże tę nazwę BEZ aliasu. `lookup` zawsze pusty, więc alias nie ma głosu.
+
+    Uszkodzony słownik ⇒ `False`: nie wiemy, czy nazwa broni się sama, więc ani nie obiecujemy
+    noty, ani nie odbieramy klucza. Sam błąd melduje `_sync_accept_enabled` — tu byłby drugim
+    komunikatem o tej samej awarii."""
+    try:
+        return resolver.resolve_name(lambda _key: None, text)[0] is not None
+    except ValueError:
+        return False
+
+
+def alias_key(object_raw, canon):
+    """Klucz równoważności dla gestu ręki — TRZY PRZYPADKI, JEDEN WŁAŚCICIEL.
+
+    Reguła mieszkała w metodzie okna, dopóki okno było jedyną drogą do `repo.user_assign_object`.
+    R-S2b-12 dołożyło drugą (skrót „ostatnio użyte" w menu Zbiorów, który okna nie otwiera), więc
+    reguła musiała wyjść wyżej — inaczej skrót miałby WŁASNĄ kopię i pierwsza korekta rozjechałaby
+    zapisy z dwóch powierzchni (SIN-DUP na kluczu, którego konflikt pilnuje guard w repo).
+
+      1. **zeznanie JEST** → `norm_alnum(object_raw)`; alias zapamiętuje nazwę z nagłówka NA
+         PRZYSZŁOŚĆ („FlatWizard" → M42) i tego nie wolno stracić;
+      2. **brak zeznania, nazwa SPOZA gramatyki** (`LMC`) → `norm_alnum(kanon)`; jedyna droga,
+         którą przyszły nagłówek z tą nazwą trafi ten obiekt;
+      3. **brak zeznania, nazwa Z gramatyki** (`NGC7635`) → BRAK klucza (`None`). Alias z kanonu
+         byłby samozwrotny: gramatyka katalogowa stoi w drabinie NAD aliasem, więc nikt nigdy
+         o taki klucz nie zapyta, a diff-first słownika by go nie usunął (`source='user'`).
+
+    Przypadek 2 vs 3 rozstrzyga WŁAŚCICIEL DRABINY, nie jeden jej szczebel (`broni_sie_sama`).
+    Dyskryminator na samym `catalog_canon` łapał JEDEN z czterech szczebli i wywracał przy tym
+    odwracalność, którą S2 dopiero co zbudował (R-S1-4): ręka na kanonie SŁOWNIKA zakładała alias
+    `source='user'`, przez co `sync_own_aliases` nie zasiewał już własnego, a
+    `retire_alias_and_unassign` — który wycofuje WYŁĄCZNIE `curated` — przestawał widzieć kanon
+    jako zdjęty."""
+    if object_raw is not None:
+        return norm_alnum(object_raw)
+    if broni_sie_sama(canon):
+        return None
+    return norm_alnum(canon) or None
+
+
 class AssignObjectDialog(QDialog):
     """Dialog ręcznego przypisania obiektu grupie review (#8, P4, D-P4-3): wybór ISTNIEJĄCEGO obiektu
     z biblioteki (combo `canon · catalog`) ALBO nowa NAZWA rozwiązywana TĄ SAMĄ drabiną, którą pójdzie
@@ -163,18 +204,7 @@ class AssignObjectDialog(QDialog):
     def _fail(self, msg):
         self.error.setText(msg)
 
-    @staticmethod
-    def _broni_sie_sama(text):
-        """Czy drabina rozwiąże tę nazwę BEZ aliasu — jedno pytanie, dwaj wołający (nota katalogowa
-        w konstruktorze i dyskryminator klucza aliasu). `lookup` zawsze pusty, więc alias nie ma głosu.
-
-        Uszkodzony słownik ⇒ `False`: nie wiemy, czy nazwa broni się sama, więc ani nie obiecujemy
-        noty, ani nie odbieramy klucza. Sam błąd melduje `_sync_accept_enabled` — tu byłby drugim
-        komunikatem o tej samej awarii."""
-        try:
-            return resolver.resolve_name(lambda _key: None, text)[0] is not None
-        except ValueError:
-            return False
+    _broni_sie_sama = staticmethod(broni_sie_sama)     # funkcja modułowa (R-S2b-12) — jeden właściciel
 
     def _sync_accept_enabled(self):
         """Akcja wymaga JAWNEGO celu; wpisaną nazwę walidujemy na żywo, żeby disabled miał powód.
@@ -211,24 +241,9 @@ class AssignObjectDialog(QDialog):
             self.own_note.setText(i18n.t("assign.own_object_note", canon=ident.canon))
 
     def _alias_key(self, canon):
-        """Klucz równoważności dla TEGO gestu — trzy przypadki (kontrakt w nagłówku klasy).
-
-        Przypadek 2 vs 3 rozstrzyga WŁAŚCICIEL DRABINY, nie jeden jej szczebel: pytamy `resolve_name`
-        z pustym `lookup`, czyli „czy kanon broni się BEZ aliasu". Odpowiedź twierdząca ⇒ alias byłby
-        samozwrotny, bo każdy szczebel drabiny stoi NAD aliasem — nikt o taki klucz nigdy nie zapyta.
-
-        Dyskryminator na samym `catalog_canon` łapał JEDEN z czterech szczebli i wywracał przy tym
-        odwracalność, którą S2 dopiero co zbudował (R-S1-4): ręka na kanonie SŁOWNIKA zakładała alias
-        `source='user'`, przez co `sync_own_aliases` nie zasiewał już własnego (`istniejace == oid`
-        ⇒ `continue`), a `retire_alias_and_unassign` — który wycofuje WYŁĄCZNIE `curated` — przestawał
-        widzieć kanon jako zdjęty. Skutek: usunięcie wpisu ze słownika zostawiało klatki przypięte do
-        obiektu, którego słownik już nie zna, przy `§5.9` ZIELONEJ. Ta sama klasa, którą S2 zamknął,
-        otwarta z drugiej strony."""
-        if self.object_raw is not None:
-            return norm_alnum(self.object_raw)
-        if self._broni_sie_sama(canon):
-            return None
-        return norm_alnum(canon) or None
+        """Klucz równoważności dla TEGO gestu — reguła i jej uzasadnienie: `alias_key` (moduł).
+        Okno wnosi tu wyłącznie własny kontekst (`object_raw`), a nie drugą kopię reguły."""
+        return alias_key(self.object_raw, canon)
 
     def _validate_and_accept(self):
         """Waliduj wybór; poprawny → `self.selected` + accept, błąd → nota i dialog zostaje."""

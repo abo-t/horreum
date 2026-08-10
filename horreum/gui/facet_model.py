@@ -20,7 +20,7 @@ nieosiągalny; dla facetu bez aktywnego wyboru sibling == stan pełny, D-UX-3(a)
 from __future__ import annotations
 
 # Jedyny import rdzenia w tym module — i celowy: szukajka MUSI liczyć igłę tą samą
-# normalizacją, którą przebieg liczy klucze równoważności (`matches_search`). Moduł
+# normalizacją, którą przebieg liczy klucze równoważności (`search_hit`). Moduł
 # zostaje Qt-wolny, więc bramka izolacji §7.2 się nie rusza.
 from horreum.resolve._text import norm_alnum
 
@@ -115,8 +115,24 @@ def compose(state: dict, advanced) -> dict | None:
     return {"op": "AND", "conditions": conds}
 
 
-def matches_search(needle: str, label, aliases=None) -> bool:
-    """Czy wiersz facetu „Obiekt" pasuje do igły szukajki — S3, obietnica §1 („szukanie po nazwach").
+# Trafienie BEZ aliasu — wiersz pasuje własną nazwą albo igła jest pusta. Sentinel, a nie `True`,
+# bo wołający rozróżnia trzy stany, nie dwa: „nie pasuje" (chowaj), „pasuje sobą" (pokaż) i „pasuje
+# CUDZĄ nazwą" (pokaż i powiedz, którą). Pusty string byłby falsy i skasowałby to rozróżnienie
+# przy pierwszym `if hit:` napisanym z rozpędu.
+HIT_LABEL = "__label__"
+
+
+def search_hit(needle: str, label, aliases=None):
+    """CZYM wiersz facetu „Obiekt" trafił igłę szukajki — `None` (nie trafił), `HIT_LABEL` (własną
+    nazwą) albo znormalizowany ALIAS, którym trafił. S3, obietnica §1 („szukanie po nazwach").
+
+    DO R-S3-9 FUNKCJA ZWRACAŁA `bool` I TO BYŁ CAŁY DEFEKT: wpisujesz „Large Magellanic Cloud",
+    dostajesz wiersz `LMC` i nie masz jak się dowiedzieć, dlaczego pasuje — kanon nie ma z tą frazą
+    ani jednej wspólnej litery. Predykat wiedział to w chwili dopasowania i wyrzucał.
+
+    Alias wraca w formie ZNORMALIZOWANEJ, bo tylko taka istnieje: `object_alias` przechowuje
+    `alias_norm` z chwili zapisu, surowego brzmienia baza nie zna. Dla tooltipa to wystarcza —
+    user rozpoznaje własną frazę — a udawanie, że mamy oryginał, byłoby zmyślaniem.
 
     Trzy fakty w jednym predykacie, i każdy z nich sam by nie wystarczył:
 
@@ -127,7 +143,7 @@ def matches_search(needle: str, label, aliases=None) -> bool:
     * **ALIASY** — kanon `LMC` nie zawiera w sobie ani jednej litery z „Large Magellanic Cloud".
       Nazwa potoczna żyje w `object_alias`, więc bez mapy `canon → {alias_norm}` szukajka jest ślepa
       dokładnie na tę klasę obiektów, dla której powstała cała ta paczka (obiekty własne).
-    * **PUSTA IGŁA PASUJE ZAWSZE** — wołający chowa wiersz dopiero po `False`, a „nic nie wpisano"
+    * **PUSTA IGŁA PASUJE ZAWSZE** — wołający chowa wiersz dopiero po `None`, a „nic nie wpisano"
       nie jest pytaniem.
 
     Predykat mieszka TU, nie w listwie: `FacetRail` jest głupim widżetem (NARROW), a to jest logika
@@ -135,10 +151,14 @@ def matches_search(needle: str, label, aliases=None) -> bool:
 
     `aliases` = dict `canon → set(alias_norm)`; brak wpisu (albo brak mapy) znaczy „ten obiekt nie
     ma innych nazw", nigdy „nie wiadomo".
+
+    PIERWSZEŃSTWO MA WŁASNA NAZWA: wiersz, który trafia sobą, nie tłumaczy się cudzą nazwą, nawet
+    gdy jakiś alias też by pasował. Alias wybieramy DETERMINISTYCZNIE (`sorted`) — zbiór nie ma
+    kolejności, a tooltip skaczący między przebiegami byłby własną usterką.
     """
     igla = norm_alnum(needle or "")
     if not igla:
-        return True
+        return HIT_LABEL
     if igla in norm_alnum(str(label)):
-        return True
-    return any(igla in a for a in (aliases or {}).get(str(label), ()))
+        return HIT_LABEL
+    return next((a for a in sorted((aliases or {}).get(str(label), ())) if igla in a), None)

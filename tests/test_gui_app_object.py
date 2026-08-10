@@ -28,7 +28,14 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QDialog, QHeaderView, QTableWidget,
                                QTableWidgetItem)
 
-UROLE = 0x0100   # Qt.UserRole
+UROLE = 0x0100   # Qt.UserRole — tag pozycji kolejki
+# PAYLOAD ODJECHAŁ Z `UserRole+1` (R-S3-3): tę rolę zajmuje CZŁON DRUGI delegata (`rows.SECONDARY`),
+# a `+2` człon trzeci. Test pyta o role po tych samych stałych, których używa widok — inaczej
+# pinowałby adres, nie zachowanie.
+SECONDARY = UROLE + 1            # „5 klatek  ›" — liczba + znacznik drogi, rysowane od prawej
+TERTIARY = UROLE + 2             # „  ·  cofnięte ręką" — adnotacja we własnej kolumnie
+UPAYLOAD = UROLE + 4
+UINFO = UROLE + 5
 
 
 @pytest.fixture(scope="session")
@@ -167,11 +174,11 @@ def test_pusty_stan_nota_widoczna_w_widoku(view):
 
 def test_kolejka_review_drazenie(view):
     v, con, ids = view
-    # pozycja obiekt-review: dispatch po string-tagu (R#6) — UserRole=tag, UserRole+1=payload
+    # pozycja obiekt-review: dispatch po string-tagu (R#6) — UserRole=tag, UserRole+4=payload
     target = None
     for r in range(v.review.count()):
         if v.review.item(r).data(UROLE) == "object_raw" \
-                and v.review.item(r).data(UROLE + 1) == "FlatWizard":
+                and v.review.item(r).data(UPAYLOAD) == "FlatWizard":
             target = r
             break
     assert target is not None
@@ -197,24 +204,34 @@ def test_kolejka_liczniki_informacyjne(view):
     # drążenie w zero otwierało tabelę bez ani jednego wiersza i bez zdania, a wyszarzony wiersz
     # zaznaczalny spadał na podświetleniu do 1,84:1 kontrastu (T2 N3). Jedna reguła dla wszystkich
     # kubełków — `nameless` zachowywał się tak od początku. Klikalny wraca przy n>0 (#13/Z6).
-    assert any(t.startswith("— kopie nieczytelne: 0") and tag is None for t, tag in items)
+    assert any(t.startswith("— kopie nieczytelne") and tag is None for t, tag in items)
     # nota „rozwiązywanie w przygotowaniu" zawężona do JEDNEGO kanału bez akcji (R#9 → R1)
-    assert any("bez nagłówka: 1" in t and "config-review" not in t
+    assert any("bez nagłówka" in t and "config-review" not in t
                and "rozwiązywanie w przygotowaniu" in t and tag is None for t, tag in items)
     # …a oś sprzętu ma odtąd własny wiersz Z DROGĄ (fixture §8: 4 klatki bez zestawu)
-    assert any(t.startswith("— bez zestawu (teleskop × kamera): 4 klatek")
+    assert any(t.startswith("— bez zestawu (teleskop × kamera)")
                and tag == "config_review" for t, tag in items)
+    # LICZBA MIESZKA W CZŁONIE DRUGIM (bramka pakietu, zarzut 2): w członie pierwszym była
+    # elidowana bez drogi powrotu, odkąd lista straciła poziomy scroll. I jest ODMIENIONA (5).
+    wiersz = _wiersz_kolejki(v, "config_review")
+    assert wiersz[1].startswith("4 klatki") and "klatek" not in wiersz[0]
 
 
 def test_kolejka_pokazuje_ktora_pozycja_prowadzi_dalej(view):
     """WIZ #11: pięć wierszy kolejki miało identyczny krój i kolor, a klikalne były dwa — nic na
     ekranie nie mówiło, który prowadzi dalej („do przypisania ręcznie" wzywało do akcji i nie
     prowadziło nigdzie). Znacznik „›" niesie WYŁĄCZNIE wiersz z drogą; jest pochodną tagu, więc
-    nie może się z dispatchem rozjechać."""
+    nie może się z dispatchem rozjechać.
+
+    OD R-S3-3 ZNACZNIK MIESZKA W CZŁONIE DRUGIM, nie w tekście: doklejony do nazwy jechał za jej
+    długością, więc kolumny „co prowadzi dalej" nie dało się skanować wzrokiem. Pinowane jest
+    ZACHOWANIE (znacznik ⇔ tag), nie miejsce, w którym string siedzi."""
     v, con, ids = view
     for r in range(v.review.count()):
         it = v.review.item(r)
-        assert it.text().endswith("›") == (it.data(UROLE) is not None)
+        czlon2 = it.data(SECONDARY) or ""
+        assert czlon2.endswith("›") == (it.data(UROLE) is not None)
+        assert not it.text().endswith("›")        # …i NIE został w członie pierwszym
 
 
 # --- F-2: wiersz informacyjny tłumaczy się sam (firsthand Zdzinia 0804) ---
@@ -627,7 +644,10 @@ def test_kopie_nieczytelne_drazenie_do_dokladnych_kopii(view, qapp):
                                      now="2026-07-21T12:00:00")
     v.refresh()
     r = _select_review_tag(v, "unreadable")
-    assert "kopie nieczytelne: 1" in v.review.item(r).text()
+    # Liczba mieszka w CZŁONIE DRUGIM (bramka pakietu, zarzut 2) — w pierwszym była elidowana
+    # bez drogi powrotu, odkąd lista straciła poziomy scrollbar.
+    assert "kopie nieczytelne" in v.review.item(r).text()
+    assert v.review.item(r).data(SECONDARY).startswith("1")
     hdrs = [v.frames.horizontalHeaderItem(c).text() for c in range(v.frames.columnCount())]
     assert hdrs == ["Ścieżka", "Wolumen", "Obecna", "Oznaczona", "Powód"]  # PL (stałe = klucze)
     assert v.frames.rowCount() == 1
@@ -1603,3 +1623,135 @@ def test_przeladowanie_tabeli_nie_jest_kwadratowe(qapp):
     assert t.rowCount() == N
     assert dt < BUDZET_S, f"przeładowanie {N}×{KOLUMN} trwało {dt:.1f} s (budżet {BUDZET_S} s)"
     t.close()
+
+
+# ═════════════════════════ R-S3-3 / R-S3-10 — WIERSZ KOLEJKI JEST TRÓJCZŁONOWY
+
+NOW_S3 = "2026-08-10T12:00:00Z"
+
+
+def _wiersz_kolejki(v, tag):
+    """Pozycja kolejki o danym tagu jako trójka członów (nazwa, liczba+znacznik, adnotacja)."""
+    it = v.review.item(_select_review_tag(v, tag))
+    return it.text(), (it.data(SECONDARY) or ""), (it.data(TERTIARY) or "")
+
+
+def test_polowka_cofnieta_ma_znacznik_NA_POCZATKU_i_kolor(view):
+    """R-S3-3: różnicownikiem połówek były DWA SZARE SŁOWA na końcu obcinanej linii.
+
+    Lista obcina poziomo (nie elizją), więc przy wąskim oknie ginęło dokładnie to, co niesie
+    znaczenie. Odtąd sygnałów są trzy i wszystkie przeżywają obcięcie: znacznik `↺` na POCZĄTKU,
+    kolor werdyktu na CAŁYM wierszu i adnotacja we WŁASNEJ kolumnie (człon trzeci).
+
+    Falsyfikatory: zdejmij `↺` z prefiksu → pierwsza asercja; zdejmij `fg` → druga; przenieś
+    „cofnięte ręką" z powrotem do tekstu → trzecia."""
+    v, con, ids = view
+    _cofnij_reka(con, ids["frames"]["objrev1"], NOW_S3)
+    v._load_review()
+
+    nazwa, drugi, trzeci = _wiersz_kolejki(v, "object_raw_cleared")
+    assert nazwa.lstrip().startswith("↺"), "znacznik nie stoi na POCZĄTKU wiersza"
+    assert nazwa.startswith(" "), "podwiersz nie jest wcięty pod swoją nazwą"
+    assert "cofnięte ręką" in trzeci and "cofnięte ręką" not in nazwa
+    assert "›" in drugi
+
+    it = v.review.item(_select_review_tag(v, "object_raw_cleared"))
+    swiezy = v.review.item(_select_review_tag(v, "object_raw"))
+    assert it.foreground().color() != swiezy.foreground().color(), \
+        "połówka cofnięta ma ten sam kolor co nietknięta — werdykt nie jest widoczny"
+
+
+def test_polowki_tej_samej_nazwy_sasiaduja_w_widoku(view):
+    """R-S3-2 na powierzchni: podwiersz stoi ZARAZ POD swoją połówką, nie ekran dalej."""
+    v, con, ids = view
+    _cofnij_reka(con, ids["frames"]["objrev1"], NOW_S3)
+    v._load_review()
+    swiezy = _select_review_tag(v, "object_raw")
+    cofniety = _select_review_tag(v, "object_raw_cleared")
+    assert cofniety == swiezy + 1
+    # …i obie połówki mówią o TEJ SAMEJ nazwie (payload), więc sąsiedztwo nie jest przypadkiem
+    assert v.review.item(swiezy).data(UPAYLOAD) == v.review.item(cofniety).data(UPAYLOAD)
+
+
+def test_liczba_klatek_jest_ODMIENIONA(view):
+    """R-S3-10: kolejka pisała „NGC7023 · 1 klatek" jedną formą dla każdej liczby.
+
+    Falsyfikator: wróć do `i18n.t(...)` ze stałym „{n} klatek" → forma pojedyncza czerwienieje."""
+    from horreum.gui import i18n
+    v, con, ids = view
+    i18n.set_lang("pl")
+    _cofnij_reka(con, ids["frames"]["objrev1"], NOW_S3)      # zostawia 1 klatkę w połówce świeżej
+    v._load_review()
+    assert "1 klatka" in _wiersz_kolejki(v, "object_raw")[1]
+    assert "1 klatka" in _wiersz_kolejki(v, "object_raw_cleared")[1]
+
+
+# ═════════════════════════ R-S3-6 — DWUKLIK W KOLEJCE ODPALA AKCJĘ POZYCJI
+
+
+def test_dwuklik_w_pozycje_odpala_JEJ_akcje(view, monkeypatch):
+    """R-S3-6: naprawa kubełka kosztowała wędrówkę do rzędu przycisków (6 interakcji → 5).
+
+    Akcja bierze się ze STANU PRZYCISKÓW, nie z własnej mapy tag→akcja: `_sync_assign_enabled`
+    jest jej jedynym właścicielem, więc dwuklik nie może się z nim rozjechać.
+
+    Falsyfikator: rozłącz `itemDoubleClicked` → `odpalone` zostaje puste."""
+    v, con, ids = view
+    odpalone = []
+    monkeypatch.setattr(v, "_on_assign", lambda: odpalone.append("assign"))
+    v.assign_btn.clicked.disconnect()
+    v.assign_btn.clicked.connect(v._on_assign)
+
+    r = _select_review_tag(v, "object_raw")
+    assert v.assign_btn.isEnabled(), "fikstura nie ustawiła pozycji z akcją"
+    v.review.itemDoubleClicked.emit(v.review.item(r))
+    assert odpalone == ["assign"]
+
+
+def test_dwuklik_w_wiersz_BEZ_DROGI_nie_odpala_akcji_sasiada(view, monkeypatch):
+    """Wiersz informacyjny nie jest zaznaczalny, więc dwuklik w niego NIE zmienia zaznaczenia —
+    bez jawnego warunku na tagu odpaliłby akcję pozycji zaznaczonej wcześniej."""
+    v, con, ids = view
+    odpalone = []
+    monkeypatch.setattr(v, "_on_assign", lambda: odpalone.append("assign"))
+    v.assign_btn.clicked.disconnect()
+    v.assign_btn.clicked.connect(v._on_assign)
+
+    _select_review_tag(v, "object_raw")                  # akcja WŁĄCZONA…
+    assert v.assign_btn.isEnabled()
+    informacyjny = next(v.review.item(i) for i in range(v.review.count())
+                        if v.review.item(i).data(UROLE) is None)
+    v.review.itemDoubleClicked.emit(informacyjny)        # …ale dwuklik pada w wiersz bez drogi
+    assert odpalone == []
+
+
+# ═════════════════════════ BRAMKA PAKIETU 3a — NAPRAWY PRZYJĘTYCH ZARZUTÓW
+
+
+def test_KAZDY_wiersz_kolejki_trzyma_liczbe_w_czlonie_DRUGIM(view):
+    """Zarzut 2 bramki: R-S3-3 przeniósł licznik tylko dla `object_review`, a `ScrollBarAlwaysOff`
+    odebrał poziomy scroll CAŁEJ liście — więc w pozostałych 11 wierszach liczba (często jedyna
+    treść) zaczęła się ucinać elizją BEZ drogi powrotu. Naprawa odwrotna do zamierzenia paczki
+    była tu gorsza niż stan sprzed niej.
+
+    Falsyfikator: wróć z liczbą do `{n}` w którymkolwiek `*_line` → człon pierwszy znów ją niesie."""
+    v, con, ids = view
+    for r in range(v.review.count()):
+        it = v.review.item(r)
+        pierwszy = it.text()
+        assert "klatek" not in pierwszy and "klatki" not in pierwszy, \
+            f"liczba została w członie ELIDOWANYM: {pierwszy!r}"
+        # …a każdy wiersz o niezerowej treści liczbowej ma ją w członie drugim
+        if it.data(UROLE) is not None:
+            assert (it.data(SECONDARY) or "").strip(), f"wiersz z drogą bez członu drugiego: {pierwszy!r}"
+
+
+def test_liczby_kubelkow_sa_ODMIENIONE(view):
+    """Zarzut 5 bramki: R-S3-10 zamknięto dla JEDNEGO z trzech producentów tej samej listy, więc
+    na jednym ekranie stało „1 klatka" nad „1 klatek"."""
+    from horreum.gui import i18n
+    i18n.set_lang("pl")
+    v, con, ids = view
+    v._load_review()
+    czlony = [(v.review.item(r).data(SECONDARY) or "") for r in range(v.review.count())]
+    assert not any("1 klatek" in c for c in czlony), czlony

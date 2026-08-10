@@ -352,7 +352,15 @@ def review_queue(con):
         "WHERE f.kind IN ('light','master_light') AND f.object_id IS NULL "
         "  AND f.superseded_by IS NULL "
         "  AND h.object_raw IS NOT NULL "
-        "GROUP BY h.object_raw, cleared ORDER BY n DESC, object_raw, cleared"
+        "GROUP BY h.object_raw, cleared "
+        # KOLEJNOŚĆ PROWADZI NAZWĄ, NIE POŁÓWKĄ (R-S3-2). `ORDER BY n DESC` sortował POŁÓWKAMI,
+        # więc obie połowy tej samej nazwy rozdzielał obcy kubełek: zmierzone `LDN 1174 · 9` →
+        # `IC 1805 · 7` → `LDN 1174 · 5 · cofnięte ręką`. Przy 42 obiektach dzieli je cały ekran,
+        # a user „załatwia LDN 1174" i zostawia drugą połówkę, nie wiedząc, że istnieje.
+        # Klucz pierwszy = SUMA obu połówek (okno nad agregatem — pozycja waży tym, ile roboty
+        # niesie NAZWA), klucz drugi = nazwa, więc połówki zawsze stoją obok siebie; `cleared`
+        # na końcu trzyma nietkniętą PRZED cofniętą, bo podwiersz ma iść pod swoim wierszem.
+        "ORDER BY SUM(COUNT(*)) OVER (PARTITION BY h.object_raw) DESC, object_raw, cleared"
     ).fetchall()
     # Lustro `object_review` po drugiej stronie NULL-a: JOIN header = „zeznanie JEST", brak
     # `object_raw` = „nie mówi o obiekcie". Bez tego kubełka klatki wpadały między predykaty.
@@ -983,7 +991,7 @@ def object_alias_index(con):
     Kanon `LMC` nie zawiera ani jednej litery z „Large Magellanic Cloud", więc bez tej mapy szukajka
     jest ślepa dokładnie na klasę obiektów, dla której powstała ta paczka. Klucze są JUŻ znormalizowane
     (`object_alias.alias_norm` to `norm_alnum` z chwili zapisu), więc dopasowanie liczy się bez
-    dotykania rdzenia po stronie widżetu — predykat mieszka w `facet_model.matches_search`.
+    dotykania rdzenia po stronie widżetu — predykat mieszka w `facet_model.search_hit`.
 
     Zakres = CAŁA biblioteka aliasów, nie tylko obiekty widocznego zbioru: szukajka chowa wiersze
     listy, a ta lista przychodzi z sibling-setu — filtrowanie mapy po zbiorze nic by nie oszczędziło,
@@ -994,6 +1002,44 @@ def object_alias_index(con):
             "FROM object_alias a JOIN object o ON o.id = a.object_id").fetchall():
         idx.setdefault(canon, set()).add(alias)
     return idx
+
+
+def recent_hand_objects(con, limit=5):
+    """Kanony, którym RĘKA nadała obiekt ostatnio — skrót „ostatnio użyte" w menu Zbiorów (R-S2b-12).
+
+    Zwraca listę Row(canon, catalog, kind), najświeższe pierwsze, najwyżej `limit` pozycji.
+
+    ŹRÓDŁEM JEST DZIENNIK, I TO JEST TU WŁAŚCIWY WYBÓR — nie wyłom w regule „read-model ze STANU"
+    (memory `horreum-review-queue-from-state`). Tamta reguła broni LICZNIKÓW pracy do zrobienia:
+    `count(event)` rośnie z liczbą przebiegów, więc kubełek liczony ze zdarzeń kłamie. Tu pytanie
+    brzmi inaczej — „co ostatnio robiłem" — i jest z natury pytaniem o historię, której stan tabel
+    nie pamięta (`frame.object_id` mówi CO jest, nie KIEDY to wskazałem). Powtórzenia nie szkodzą:
+    `GROUP BY` po obiekcie i `MAX(id)` czynią wynik idempotentnym wobec liczby zdarzeń.
+
+    Filtr `object_source='user'` jest WĄSKI CELOWO: skrót ma podawać nazwy, które człowiek REALNIE
+    wskazał palcem. `path` (potwierdzona propozycja ze ścieżki) i szczeble automatu odpadają — menu
+    „ostatnio użyte" ma odtwarzać gest, a nie streszczać przebieg.
+
+    Zapis ręki nie zna dziś `kind` przy istniejącym obiekcie (repo go nie INSERTuje), więc bierzemy
+    go z tabeli `object` — skrót woła tę samą klingę co okno i musi mieć komplet pól.
+
+    KOSZT ZMIERZONY, nie oszacowany (bramka pakietu, zarzut 6): pełny skan `event` bez indeksu na
+    `verb`, na żywej `pf4` ze 137 059 zdarzeniami, wołany synchronicznie przy każdym otwarciu menu
+    — **mediana 23 ms** (próg akceptacji 100 ms). Mieści się z zapasem, więc indeks byłby migracją
+    bez odbiorcy. Wartość rośnie z dziennikiem, nie z archiwum: gdy `SELECT count(*) FROM event`
+    przekroczy ~500 tys., zmierz ponownie i dopiero wtedy sięgaj po `CREATE INDEX event(verb, id)`.
+
+    ZNA TYLKO NADANIA, nie cofnięcia — świadomie, ale to nie jest darmowe: kanon zdjęty przed
+    chwilą („Cofnij przypisanie") zostaje na szczycie listy. Broni przed przypadkowym wskrzeszeniem
+    dysklozura po stronie gestu (skrót oddaje ster oknu, gdy ma zgasić nagrobek — `grid.py`), a nie
+    ten read-model; gdyby ta obrona kiedyś padła, TU jest drugie miejsce do naprawy."""
+    return con.execute(
+        "SELECT o.canon AS canon, o.catalog AS catalog, o.kind AS kind "
+        "FROM event e JOIN object o ON o.id = json_extract(e.payload, '$.object_id') "
+        "WHERE e.verb = 'object.assigned' "
+        "  AND json_extract(e.payload, '$.object_source') = 'user' "
+        "GROUP BY o.id ORDER BY MAX(e.id) DESC LIMIT ?",
+        (int(limit),)).fetchall()
 
 
 def facet_filters(con, frame_ids):

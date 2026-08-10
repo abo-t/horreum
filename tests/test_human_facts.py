@@ -25,8 +25,28 @@ def _baza():
 def _spis(**nadpisz):
     """`HumanFacts` z zerami poza tym, co test nazywa — porównanie ma być czytelne w asercji."""
     pola = {"object_hand": 0, "object_cleared": 0, "config_hand": 0, "lineage_inputs": 0,
-            "lineage_excluded": 0, "calibration_facts": 0, "calibration_links": 0}
+            "lineage_excluded": 0, "calibration_facts": 0, "calibration_links": 0,
+            "offset_hand": 0}
     return audit.HumanFacts(**{**pola, **nadpisz})
+
+
+def test_spis_zna_KAZDA_os_gestu_ktora_repo_ma():
+    """Bramka pakietu 3a, zarzut 4: spis z dziurą jest gorszy niż brak spisu, bo melduje
+    „ubytków BRAK" o osi, której nie liczy. Ten test jest ROLL-CALLEM osi — dokładając nowy gest
+    człowieka dopisz go tu i w `human_facts_census`, inaczej regresja na nim będzie cicha."""
+    assert set(_spis().counts) == {
+        "object_hand", "object_cleared", "config_hand", "lineage_inputs", "lineage_excluded",
+        "calibration_facts", "calibration_links", "offset_hand"}
+
+
+def test_odniesienie_bez_nowej_osi_wczytuje_sie_jako_zero():
+    """Spis zapisany PRZED dołożeniem ósmej osi nie ma jej klucza. Kierunek błędu jest jeden
+    i świadomy: zero po stronie „przed" może ukryć WZROST, nigdy ubytek."""
+    stare = audit.HumanFacts(object_hand=1, object_cleared=0, config_hand=0, lineage_inputs=0,
+                             lineage_excluded=0, calibration_facts=0, calibration_links=0)
+    assert stare.offset_hand == 0
+    assert _spis(object_hand=1, offset_hand=7).spadki(stare) == {}      # wzrost to nie ubytek
+    assert _spis(offset_hand=0).spadki(_spis(offset_hand=3)) == {"offset_hand": (3, 0)}
 
 
 # ---------------------------------------------------------------- sam spis

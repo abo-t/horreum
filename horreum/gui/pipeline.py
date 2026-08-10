@@ -873,6 +873,11 @@ class PipelineView(QWidget):
             czesci.append(i18n.t("pipeline.fmt.stacks.rejected_unreadable", n=s.rejected_unreadable))
         if s.failed:
             czesci.append(i18n.t("pipeline.fmt.stacks.failed", n=s.failed))
+        # PRZEBIEG NIEKOMPLETNY musi dojść TU, nie tylko do CLI (bramka pakietu 3a, zarzut 2):
+        # GUI jest jedyną powierzchnią użytkową, więc naprawa „zerwany share ≠ pusto" żyjąca
+        # wyłącznie w konsoli nie naprawia niczego dla człowieka, który patrzy na ekran.
+        if s.unreadable_dirs:
+            czesci.append(i18n.t("pipeline.fmt.stacks.unreadable", n=len(s.unreadable_dirs)))
         return i18n.t("pipeline.fmt.stacks.prefix") + " · ".join(czesci)
 
     def _format_presence(self, s):
@@ -929,12 +934,18 @@ class PipelineView(QWidget):
         self._sync_actions()
 
     def _format_scan(self, s):
-        return i18n.t(
+        linia = i18n.t(
             "pipeline.fmt.scan", files=s.files, new=s.frames_new, existing=s.frames_existing,
             skipped=s.skipped, excluded=s.dirs_excluded, loc_new=s.locations_new,
             loc_ref=s.locations_refreshed, hdr_ref=s.headers_refreshed, rebound=s.locations_rebound,
             headers=s.headers, frame_review=s.frame_review, camera_review=s.camera_review,
             kind=s.kind_unmapped)
+        # Odsiew pochodnych pod `STACKS` — człon warunkowy (QUIET: zero pochodnych to cisza), ale
+        # gdy jest, MUSI być widoczny (bramka pakietu 3a, zarzut 3). Komentarz przy polu obiecuje
+        # „wykluczenie WIDOCZNE, nie cichy licznik", a jedyna powierzchnia użytkowa go nie pokazywała.
+        if s.derived_skipped:
+            linia += " · " + i18n.t("pipeline.fmt.scan_derived", n=s.derived_skipped)
+        return linia
 
     def _format_group(self, s):
         unassigned = (i18n.t("pipeline.fmt.group_unassigned", n=s.configs_unassigned)

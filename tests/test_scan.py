@@ -1452,7 +1452,11 @@ def test_sito_pochodnych_tnie_po_TOKENIE_nie_po_substringu():
     for name in ("masterLight_x_ABE.xisf", "masterLight_x_autocrop.xisf",
                  "masterLight_x_SPCC_starless.xisf", "masterLight_x_stars.xisf",
                  "NGC5907_LPRO_OSC_crop_SPCCBXTc.xisf", "Sh2-188_RGB_starsSTR.xisf",
-                 "HOO1_MAS_StarsBack.xisf", "starless_HOO_BN_NBN.xisf"):
+                 "HOO1_MAS_StarsBack.xisf", "starless_HOO_BN_NBN.xisf",
+                 # SUFIKS CYFROWY krótkiego znacznika (bramka pakietu 3a, zarzut 7): druga
+                 # iteracja tego samego kroku obróbki. `SPCC2` odsiewał próg prefiksu, `ABE2`
+                 # nie — sito było niespójne między własnymi znacznikami.
+                 "masterLight_x_ABE2.xisf", "masterLight_x_DBE3.xisf"):
         assert is_derived_name(name) is True, name
     for name in ("masterLight_Abell 2151_600s.xisf", "masterLight_ABELL1656.xisf",
                  "CTB1_2025-08-30_A140R_2600MM_Ha_600s_mono_ast.xisf",
@@ -1476,11 +1480,17 @@ def test_scan_tree_odsiewa_pochodne_TYLKO_pod_STACKS(tmp_path):
     _stack(root / "STACKS" / "CTB1" / "CTB1_A140R_Ha_600s_ABE.xisf", n=2)      # pochodna — odsiew
     _stack(root / "LIGHTS" / "NGC7000" / "stacks" / "x_ABE.xisf", n=3)        # NIE pod STACKS
 
-    s = scan_tree(con, root, now=NOW)
+    postep = []
+    s = scan_tree(con, root, now=NOW,
+                  progress=lambda done, total, _p, _s: postep.append((done, total)))
     assert s.derived_skipped == 1
     assert [Path(p).name for p in s.derived_paths] == ["CTB1_A140R_Ha_600s_ABE.xisf"]
     nazwy = {Path(r[0]).name for r in con.execute("SELECT path FROM location")}
     assert nazwy == {"CTB1_A140R_Ha_600s.xisf", "x_ABE.xisf"}
+    # POSTĘP DOMYKA SIĘ MIMO ODSIEWU (bramka pakietu 3a, zarzut 6). `gui.progress.should_emit`
+    # kończy pasek dopiero przy `done == total`, a `continue` przed wołaniem `progress` zostawiał
+    # go na wieczne 99% w każdym drzewie z choćby jedną pochodną.
+    assert postep[-1] == (3, 3) and len(postep) == 3
     con.close()
 
 

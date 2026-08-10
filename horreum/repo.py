@@ -283,6 +283,11 @@ class FactTransfer:
     object_moved: bool = False
     config_moved: bool = False
     lineage_moved: int = 0
+    lineage_dropped: int = 0
+    """ILE martwych wskaźników rodowodu zdjęto, bo następczyni miała już WŁASNY werdykt (0810).
+    Osobno od `lineage_moved`, bo to inna robota i inny skutek: tam werdykt przechodzi, tu znika
+    wiersz, który po geście człowieka przestał cokolwiek wskazywać. Sklejenie ich w jedną liczbę
+    kazałoby raportowi mówić „przeniesiono", gdy nic nie przeszło."""
     skipped: str = ""          # "" = nic nie pominięto (konwencja liczników z `ObjectGesture`)
 
 
@@ -344,6 +349,14 @@ def transfer_human_facts(con, *, frame_id, now, actor="user:local"):
     (`window`/`history`) następczyni jest natomiast PODNOSZONY do `user`, bo to nie werdykt,
     tylko dopasowanie — ta sama precedencja, co w `RANGA_ASSERT`.
 
+    …ALE POMINIĘCIE NIE ZNACZY „ZOSTAW" (`lineage_dropped`). Stary wskaźnik w takiej integracji
+    jest ZDEJMOWANY, bo inaczej nie ma z niego żadnego wyjścia: przeniesienie go omija,
+    `unlink_integration_input` omija `user`, a `pending_transfer` wyrzuca parę z kubełka. Stos
+    liczyłby wtedy wejście klatki BEZ PLIKU na zawsze, a panel Rodowód pokazywałby wiersz z pustą
+    ścieżką — ten sam defekt, który Zdzin zgłosił 0809 na osi obiektu („widzę plik bez ścieżki").
+    Zdjęcie jest bezpieczne, bo o TEJ SAMEJ treści człowiek wypowiedział się drugi raz, po stronie
+    następczyni; historia obu wypowiedzi zostaje w dzienniku.
+
     Zwraca `FactTransfer`. Idempotentne: powtórzenie po udanym przeniesieniu trafia w guardy trzech
     osi (następczyni ma już swoje) i zwraca `skipped` bez zapisu."""
     with _immediate(con):
@@ -398,8 +411,18 @@ def transfer_human_facts(con, *, frame_id, now, actor="user:local"):
             "SELECT integration_id FROM integration_input "
             "WHERE input_frame_id = ? AND asserted_by = 'user'", (nowa_id,))}
         rodowod_do_przeniesienia = [r for r in rodowod if r["integration_id"] not in wlasne]
+        # …a STARY wskaźnik w takiej integracji trzeba ZDJĄĆ, nie zostawić (bramka pakietu 3a,
+        # zarzut 1 — jedyny POWAŻNY, który przeżył adjudykację co do kodu). Zostawiony był stanem
+        # BEZ WYJŚCIA: przeniesienie go omija (następczyni ma swoje), `unlink_integration_input`
+        # omija `user`, a `pending_transfer` wyrzuca parę z kubełka — więc stos liczyłby wejście
+        # klatki BEZ PLIKU na zawsze, a panel Rodowód pokazywał wiersz z pustą ścieżką. To jest
+        # co do joty defekt, który Zdzin zgłosił 0809 („widzę plik bez ścieżki"), tyle że na innej
+        # osi. Zdjęcie jest tu bezpieczne i jedyne sensowne: `integration_input` to WSKAŹNIK
+        # bieżącego dopasowania (§4.2), a bieżącym dopasowaniem jest następczyni — o tej samej
+        # treści człowiek wypowiedział się drugi raz i to jego zdanie zostaje.
+        rodowod_do_zdjecia = [r for r in rodowod if r["integration_id"] in wlasne]
         if (not obiekt_do_przeniesienia and not config_do_przeniesienia
-                and not rodowod_do_przeniesienia):
+                and not rodowod_do_przeniesienia and not rodowod_do_zdjecia):
             # POWÓD MA BYĆ PRAWDZIWY, nie jeden dla wszystkich odmów: „następczyni ma własne
             # źródło" i „zestaw do niej nie pasuje" to dwa różne stany i dwie różne dalsze drogi
             # (w pierwszym nie ma nic do roboty, w drugim ręka musi wskazać zestaw od nowa).
@@ -454,9 +477,18 @@ def transfer_human_facts(con, *, frame_id, now, actor="user:local"):
             emit_event(con, actor=actor, verb="integration.unlinked", target=f"integration:{iid}",
                        now=now, payload={"input_frame_id": frame_id,
                                          "przeniesione_na": nowa_id})
+        for r in rodowod_do_zdjecia:
+            iid = r["integration_id"]
+            con.execute(
+                "DELETE FROM integration_input WHERE integration_id = ? AND input_frame_id = ?",
+                (iid, frame_id))
+            emit_event(con, actor=actor, verb="integration.unlinked", target=f"integration:{iid}",
+                       now=now, payload={"input_frame_id": frame_id, "nastepczyni": nowa_id},
+                       reason="następczyni ma własny werdykt — stary wskaźnik nic nie wskazuje")
     return FactTransfer(object_moved=obiekt_do_przeniesienia,
                         config_moved=config_do_przeniesienia,
-                        lineage_moved=len(rodowod_do_przeniesienia))
+                        lineage_moved=len(rodowod_do_przeniesienia),
+                        lineage_dropped=len(rodowod_do_zdjecia))
 
 
 def clear_superseded(con, *, frame_id, now, actor="scan"):
@@ -2059,12 +2091,20 @@ def link_calibration(con, *, light_frame_id, master_frame_id, relation, now,
             con.execute(
                 "UPDATE calibration SET master_frame_id = ?, asserted_by = ?, confidence = ? "
                 "WHERE id = ?", (master_frame_id, asserted_by, confidence, row["id"]))
-            emit_event(con, actor=actor, verb="calibration.unlinked",
-                       target=f"frame:{light_frame_id}", now=now,
-                       payload={"relation": relation, "master_frame_id": row["master_frame_id"]})
+            # `.unlinked` TYLKO przy realnej zmianie kalibratora (bramka pakietu 3a, zarzut 8).
+            # Od 0810 idempotencja pyta o PARĘ (kalibrator, źródło), więc istnieje nowa ścieżka:
+            # ręka potwierdza ten sam master, który wybrał automat. Bezwarunkowa emisja robiła
+            # z tego w dzienniku bezsensowne przepięcie `X → X` i milczała o jedynej rzeczy,
+            # która się zmieniła.
+            if row["master_frame_id"] != master_frame_id:
+                emit_event(con, actor=actor, verb="calibration.unlinked",
+                           target=f"frame:{light_frame_id}", now=now,
+                           payload={"relation": relation,
+                                    "master_frame_id": row["master_frame_id"]})
         emit_event(con, actor=actor, verb="calibration.linked",
                    target=f"frame:{light_frame_id}", now=now,
-                   payload={"relation": relation, "master_frame_id": master_frame_id})
+                   payload={"relation": relation, "master_frame_id": master_frame_id,
+                            "asserted_by": asserted_by})
     return True
 
 

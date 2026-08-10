@@ -160,6 +160,12 @@ _NAME_TOKEN_SPLIT = re.compile(r"[^0-9a-z]+")
 # widoczny w siatce. Stąd asymetria: krótkie znaczniki tylko jako całe tokeny, dłuższe także jako
 # przedrostek.
 _DERIVED_PREFIX_MIN = 4
+# Znacznik KRÓTKI z sufiksem CYFROWYM (`_ABE2`, `_DBE3`) — druga iteracja tego samego kroku
+# obróbki, typowy nawyk przy powtórnym przejściu tła. Sam próg prefiksu go nie łapie (token
+# `abe2` nie jest równy `abe` i jest krótszy niż próg), a `SPCC2` odsiewa — czyli sito było
+# niespójne między znacznikami (bramka pakietu 3a, zarzut 7). Cyfry są bezpieczne tam, gdzie
+# litery nie są: `abell` to nazwa katalogu, `abe2` nie jest niczyją nazwą.
+_DERIVED_DIGIT_SUFFIX = re.compile(r"\d+\Z")
 
 
 def is_derived_name(name):
@@ -181,9 +187,12 @@ def is_derived_name(name):
             continue
         if token in DERIVED_NAME_TOKENS:
             return True
-        if any(len(m) >= _DERIVED_PREFIX_MIN and token.startswith(m)
-               for m in DERIVED_NAME_TOKENS):
-            return True
+        for m in DERIVED_NAME_TOKENS:
+            if not token.startswith(m) or token == m:
+                continue
+            reszta = token[len(m):]
+            if len(m) >= _DERIVED_PREFIX_MIN or _DERIVED_DIGIT_SUFFIX.match(reszta):
+                return True
     return False
 
 
@@ -194,12 +203,16 @@ STACKS_DIR_NAME = "stacks"
 
 
 def _stacks_prefix(root):
-    """Prefiks poddrzewa `STACKS` DLA TEGO korzenia — albo `None`, gdy korzeń go nie ma.
+    """Prefiks poddrzewa `STACKS` dla TEGO korzenia — zawsze string, także gdy katalogu nie ma.
 
     Zwracamy PREFIKS ŚCIEŻKI, nie samą nazwę, bo kontrakt E4-1 brzmi „bezpośrednio pod korzeniem
     skanu". Dopasowanie po nazwie segmentu obejmowałoby każdy `stacks` w drzewie, a taki folder
     bywa czyimś katalogiem roboczym przy obiekcie — sito odsiewałoby wtedy pliki, których nikt
     nie prosił o odsianie, i to bez śladu w konfiguracji.
+
+    Istnienia katalogu NIE SPRAWDZAMY i nie ma po co: gdy go nie ma, żadna ścieżka z przejścia nie
+    zacznie się tym prefiksem i sito nie ma czego odsiać. Guard na `None` byłby ochroną stanu
+    nieosiągalnego (bramka pakietu 3a, zarzut 5 — docstring obiecywał `None`, kod go nie zwracał).
 
     ŚCIEŻKI W KODZIE NIE MA I BYĆ NIE MOŻE (repo publiczne, `git-workflow §6`): korzeń przychodzi
     od wołającego, my dokładamy do niego jeden segment ze stałej."""
@@ -210,7 +223,7 @@ def _under(path, prefix):
     """Czy `path` leży pod prefiksem. `casefold`, bo NTFS nie rozróżnia wielkości liter, a `root`
     przychodzi po `canonize_root` (casing z dysku) — porównanie wrażliwe na wielkość gubiłoby
     `STACKS` zapisane inaczej niż w stałej."""
-    return prefix is not None and path.casefold().startswith(prefix.casefold())
+    return path.casefold().startswith(prefix.casefold())
 
 
 # Rodzaj, który droga „Stosy" wpuszcza do bazy — JEDYNY. Zeznanie (`IMAGETYP`), nie nazwa.
@@ -1680,7 +1693,7 @@ def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now,
     stacks_prefix = _stacks_prefix(root)
     total = len(paths)
     gate_on = volume != "?"
-    for path in paths:
+    for i, path in enumerate(paths, 1):
         if should_cancel is not None and should_cancel():
             summary.cancelled = True
             break
@@ -1688,6 +1701,12 @@ def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now,
         if _under(spath, stacks_prefix) and is_derived_name(path.name):
             summary.derived_skipped += 1
             summary.derived_paths.append(spath)
+            # POSTĘP LICZY PRZEJŚCIE, NIE WCIĄGNIĘCIE (bramka pakietu 3a, zarzut 6). Docstring
+            # obiecuje wołanie po KAŻDYM pliku, a `gui.progress.should_emit` domyka pasek dopiero
+            # przy `done == total` — `continue` przed tą linią zostawiał pasek na wieczne 99%
+            # w każdym drzewie z choćby jedną pochodną pod `STACKS`.
+            if progress is not None:
+                progress(i, total, spath, summary)
             continue
         summary.files += 1
         try:
@@ -1729,5 +1748,8 @@ def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now,
                 repo.flag_frame_review(con, sha1="?", path=spath, reason=reason, now=now)
                 summary.frame_review += 1
         if progress is not None:
-            progress(summary.files, total, spath, summary)
+            # `i`, nie `summary.files`: do 0810 były równe (jeden plik = jeden przyrost), ale odsiew
+            # pochodnych rozdzielił te dwie liczby. `total` to długość PRZEJŚCIA, więc licznikiem
+            # postępu musi być indeks przejścia — inaczej pasek nie domyka się do 100%.
+            progress(i, total, spath, summary)
     return summary

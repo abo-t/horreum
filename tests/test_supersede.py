@@ -530,9 +530,19 @@ def test_werdykt_rodowodu_nie_nadpisuje_wlasnego_werdyktu_nastepczyni():
 
     assert supersede.pending_transfer(con) == []
     wynik = repo.transfer_human_facts(con, frame_id=a, now=NOW)
-    assert wynik.lineage_moved == 0 and wynik.skipped == "nastepczyni ma wlasne zrodlo"
+    assert wynik.lineage_moved == 0
     assert con.execute("SELECT excluded FROM integration_input WHERE integration_id = ? "
                        "AND input_frame_id = ?", (iid, b)).fetchone()[0] == 1
+    # …A STARY WSKAŹNIK ZNIKA (bramka pakietu 3a, zarzut 1). Pierwsza wersja tego testu asertowała
+    # WYŁĄCZNIE wiersz następczyni i przechodziła mimo defektu: stary wiersz `user` zostawał
+    # w tabeli BEZ DROGI WYJŚCIA (przeniesienie go omija, `unlink_integration_input` omija `user`,
+    # kubełek podmiany go nie widzi), więc stos liczyłby wejście klatki bez pliku na zawsze.
+    assert wynik.lineage_dropped == 1
+    assert [tuple(r) for r in con.execute(
+        "SELECT input_frame_id, asserted_by FROM integration_input WHERE integration_id = ?",
+        (iid,))] == [(b, "user")]
+    assert con.execute(
+        "SELECT count(*) FROM event WHERE verb = 'integration.unlinked'").fetchone()[0] == 1
 
 
 def test_werdykt_rodowodu_podnosi_wiersz_automatu_nastepczyni():

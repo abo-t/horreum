@@ -341,6 +341,16 @@ class HumanFacts:
     lineage_excluded: int
     calibration_facts: int
     calibration_links: int
+    offset_hand: int = 0
+    """ODNIESIENIE CZASU stosu (`integration.utc_offset_min`, gest R2) — ósma oś, dołożona po
+    bramce pakietu 3a (zarzut 4). Bez niej spis miał dziurę dokładnie tej klasy, którą deklaruje
+    domykać: offsetu broni dziś WYŁĄCZNIE rozdział pisarzy (kolumny nie ma na literalnej liście
+    pól `upsert_integration`), a to obrona konwencją, nie mechanizmem — dopisanie kolumny do tamtej
+    listy wyzerowałoby gest ręki przy pierwszym przebiegu, a spis zameldowałby „ubytków BRAK".
+
+    WARTOŚĆ DOMYŚLNA 0 jest świadoma i ma jeden kierunek błędu: odniesienie zapisane PRZED tą
+    zmianą nie ma tego klucza, więc wczyta się jako zero. Zero po stronie „przed" może co najwyżej
+    ukryć WZROST (a wzrost naruszeniem nie jest) — ubytku nie ukryje nigdy."""
 
     @property
     def counts(self):
@@ -349,7 +359,8 @@ class HumanFacts:
                 "config_hand": self.config_hand, "lineage_inputs": self.lineage_inputs,
                 "lineage_excluded": self.lineage_excluded,
                 "calibration_facts": self.calibration_facts,
-                "calibration_links": self.calibration_links}
+                "calibration_links": self.calibration_links,
+                "offset_hand": self.offset_hand}
 
     def spadki(self, wczesniej):
         """Osie, na których fakt ręki UBYŁ wobec wcześniejszego spisu — `{oś: (było, jest)}`.
@@ -391,4 +402,6 @@ def human_facts_census(con):
             "SELECT count(*) FROM calibration_fact WHERE source = 'user'").fetchone()[0],
         calibration_links=con.execute(
             "SELECT count(*) FROM calibration WHERE asserted_by = 'user'").fetchone()[0],
+        offset_hand=con.execute(
+            "SELECT count(*) FROM integration WHERE utc_offset_min IS NOT NULL").fetchone()[0],
     )

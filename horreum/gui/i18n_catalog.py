@@ -1737,6 +1737,16 @@ CATALOG = {
     "pipeline.fmt.stacks.failed": {
         "pl": "błędy odczytu, bez zapisu {n}", "en": "read errors, nothing written {n}",
     },
+    # PRZEBIEG NIEKOMPLETNY, nie „błąd": drzewa nie było widać w całości, więc liczby wyżej są
+    # dolnym oszacowaniem. Bez tego członu zerwany share wygląda na puste drzewo (E4-1 pkt 4).
+    "pipeline.fmt.stacks.unreadable": {
+        "pl": "PRZEBIEG NIEKOMPLETNY: katalogi nieprzeczytane {n}",
+        "en": "RUN INCOMPLETE: unreadable directories {n}",
+    },
+    "pipeline.fmt.scan_derived": {
+        "pl": "pochodne obróbki pod STACKS pominięte {n}",
+        "en": "derived files under STACKS skipped {n}",
+    },
     "pipeline.fmt.group": {
         "pl": "[grupuj] nagłówki {headers} · teleskopy {telescopes} · bez TELESCOP {no_tel} · "
               "kalibracja poza osią {off_axis}{unassigned}{by_hand} · "

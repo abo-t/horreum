@@ -2310,7 +2310,9 @@ class FramesView(QWidget):
         self.status_message.emit(msg)
 
     def _on_object_name(self):
-        """„Nazwij zaznaczenie…": nadpisuje WYŁĄCZNIE źródła słabe, przy zamrożonym stanie okna."""
+        """„Przypisz obiekt…" ze Zbiorów: nadpisuje WYŁĄCZNIE źródła słabe, przy zamrożonym stanie
+        okna. (Do R-S2b-11 pozycja nazywała się „Nazwij zaznaczenie…" — jeden z czterech czasowników
+        na tę samą robotę.)"""
         ids = self._object_gesture_ids()
         if not ids:
             return

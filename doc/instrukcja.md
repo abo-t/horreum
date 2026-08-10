@@ -299,7 +299,8 @@ i zatwierdź resztę.
 
 Nie musisz iść przez kolejkę. W **Zbiory** zaznacz dowolne klatki i użyj **Obiekt ▾**:
 
-- **Nazwij zaznaczenie…** — to samo okno co wyżej,
+- **Przypisz obiekt…** — to samo okno co wyżej,
+- **→ NAZWA** — skrót do nazw, których użyłeś ostatnio: przypisuje od razu, bez okna,
 - **Cofnij przypisanie** — zdejmuje nazwę, którą postawiła Twoja ręka albo folder.
 
 > **Cofnięcie nie kasuje faktów z plików.** Nazwa odczytana z nagłówka albo z pozycji na niebie
@@ -437,7 +438,8 @@ zapamiętany) → przechodzi w kilkanaście sekund, bo stare pliki są pomijane,
 | Nazwać teleskop | **Porządki → Teleskopy bez etykiety → dwuklik w Etykieta** |
 | Nazwać miejsce | **Porządki → Stanowiska bez nazwy → dwuklik w Nazwa** |
 | Nazwać klatki, których automat nie rozpoznał | **Porządki → Klatki bez obiektu → wiersz kolejki → Przypisz obiekt…** |
-| Nazwać klatki, które właśnie widzę | **Zbiory → zaznacz → Obiekt ▾ → Nazwij zaznaczenie…** |
+| Nazwać klatki, które właśnie widzę | **Zbiory → zaznacz → Obiekt ▾ → Przypisz obiekt…** |
+| Nadać znowu tę samą nazwę, co przed chwilą | **Zbiory → zaznacz → Obiekt ▾ → → NAZWA** |
 | Cofnąć własną pomyłkę w nazwie | **Zbiory → zaznacz → Obiekt ▾ → Cofnij przypisanie** |
 | Przyjąć nazwy podpowiedziane przez foldery | **Porządki → Klatki bez obiektu → …z tego ze ścieżki → Zatwierdź ze ścieżki…** |
 | Wpisać nazwę na stałe do pliku | **Porządki → Klatki bez obiektu → bez nazwy w nagłówku → Napraw nagłówek…** |

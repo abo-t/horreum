@@ -256,7 +256,7 @@ def test_cofniecie_ROZROZNIA_brak_obiektu_od_faktu_z_pliku():
 
 def test_nagrobka_NIE_wskrzesza_gest_bez_jawnego_nadpisania():
     """Kubełkowe „Przypisz obiekt…" (bez `overwrite_weak`) nie ma prawa po cichu odwołać werdyktu:
-    zdejmuje go wyłącznie DRUGI świadomy gest — „Nazwij zaznaczenie" albo karta w pliku."""
+    zdejmuje go wyłącznie DRUGI świadomy gest — „Przypisz obiekt" albo karta w pliku."""
     con = _baza([("light", "raw", None, None)])
     _przypisz(con, [1])
     repo.clear_object_assignment(con, frame_ids=[1], now=NOW)

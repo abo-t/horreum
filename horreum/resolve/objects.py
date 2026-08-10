@@ -71,7 +71,7 @@ OBJECT_SOURCES = ALIAS_SOURCES | {"alias", "region", "path", "user_cleared"}
 # przegłosować ręki. Różni je tylko kierunek werdyktu (wskazał obiekt / zdjął obiekt).
 STICKY_OBJECT_SOURCES = frozenset({"user", "user_cleared"})
 
-# Źródła SŁABE — rozpoznania, które „Nazwij zaznaczenie" wolno NADPISAĆ (S2b). Świadkiem jest tu
+# Źródła SŁABE — rozpoznania, które „Przypisz obiekt" wolno NADPISAĆ (S2b). Świadkiem jest tu
 # ścieżka, czyli zeznanie o pliku, a nie o niebie: folder mógł zostać nazwany byle jak i to jest
 # dokładnie ta klasa pomyłki, którą gest ręki ma naprawiać. Nagłówek, xref i region ZOSTAJĄ poza —
 # ich nadpisanie byłoby cichym zamalowaniem faktu z pliku albo z geometrii.

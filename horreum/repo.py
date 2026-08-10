@@ -1447,7 +1447,7 @@ def user_assign_object(con, *, alias_norm, canon, catalog, kind, frame_ids, now,
             elif fr["object_source"] is not None and not overwrite_weak:
                 # NAGROBEK bez nadpisania: `object_id IS NULL` przy niepustym źródle to werdykt
                 # ręki (`user_cleared`). Gest z kubełka nie ma prawa go po cichu wskrzesić —
-                # tylko jawne „Nazwij zaznaczenie" (`overwrite_weak`) jest drugim gestem człowieka.
+                # tylko jawne „Przypisz obiekt" (`overwrite_weak`) jest drugim gestem człowieka.
                 source_skip += 1
                 continue
             con.execute(
@@ -1478,7 +1478,7 @@ def clear_object_assignment(con, *, frame_ids, now, uid="local"):
     z folderu — najbliższy `Rozwiąż` przypisałby klatkę PONOWNIE. Zostawiamy więc
     `object_source='user_cleared'` przy `object_id NULL`; drabina taką klatkę pomija
     (`STICKY_OBJECT_SOURCES`). Nagrobek jest STICKY i gaśnie JEDNYM gestem: writebackiem karty
-    `OBJECT` do pliku (`writeback._clear_object_tombstone`) albo kolejnym „Nazwij zaznaczenie".
+    `OBJECT` do pliku (`writeback._clear_object_tombstone`) albo kolejnym „Przypisz obiekt".
 
     GOTOWE OBRAZY SĄ W ZASIĘGU (D-OW-7, decyzja Zdzinia 2026-08-03 — odwraca R24#7): gest obejmuje
     `master_light` tak samo jak lighta, a licznik `stacks` mówi, ile ich ruszył. Odwrócenie wolno

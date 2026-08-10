@@ -3553,3 +3553,8 @@ class FramesView(QWidget):
         self.drawer.set_count(0, result=i18n.t("grid.rename.rejected", n=n))
         self._sync_staging_mutex()
         self.status_message.emit(i18n.t("grid.rename.rejected", n=n))
+
+# --- TODO-DŁUG (z kolejki sesji, dieta 2026-08-10; pełne brzmienia: archiwum aa) ---
+# TODO-DŁUG(G2-3d): zakres offsetu (UTC_OFFSET_MAX_MIN) to bramka na NONSENS, nie na pomyłkę -
+#   literówka 600 zamiast 60 przechodzi, a stos melduje potem no_candidates bez wskazania
+#   przyczyny. Panel po zapisie ma mówić, ILE kandydatów wpadło do okna (liczba już policzona).

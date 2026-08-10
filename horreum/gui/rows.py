@@ -157,3 +157,7 @@ class TwoPartDelegate(QStyledItemDelegate):
         elided = QFontMetrics(opt.font).elidedText(primary, Qt.ElideRight, max(0, prim.width()))
         painter.drawText(prim, Qt.AlignLeft | Qt.AlignVCenter, elided)
         painter.restore()
+
+# --- TODO-DŁUG (z kolejki sesji, dieta 2026-08-10; pełne brzmienia: archiwum aa) ---
+# TODO-DŁUG(W-5): wcięcie podwiersza kolejki jest SPACJAMI w DisplayRole - jedzie do schowka
+#   i wersji EN, a przy elizji marnuje 26 px. Wcięcie jako indent delegata, nie znak w tekście.

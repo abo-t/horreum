@@ -374,3 +374,10 @@ class FacetRail(QWidget):
         istniejacy.setText(tekst)
         istniejacy.setForeground(_COLORS["placeholder"])
         istniejacy.setHidden(False)
+
+# --- TODO-DŁUG (z kolejki sesji, dieta 2026-08-10; pełne brzmienia: archiwum aa) ---
+# TODO-DŁUG(W-6): _SHORT_MAX_H=72 przy rowH=16 ucina piąty wiersz grupy krótkiej w połowie
+#   (4,375 wiersza). Sufit licz jako wielokrotność sizeHintForRow: 4*rowH + 2*frameWidth.
+# TODO-DŁUG(W-7): aktywny wybór facetu bywa poza kadrem (wiersz z ✓ przy rect.y=80 vs viewport
+#   70 px); pin _reveal działa tylko dla wartości spoza counts. Po przeliczeniu:
+#   scrollToItem(PositionAtCenter) na klikniętej wartości - mechanizm już jest. Razem z W-6.

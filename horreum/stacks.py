@@ -894,3 +894,11 @@ def inputs_of(con, master_frame_id):
         "FROM integration_input ii JOIN integration i ON i.id = ii.integration_id "
         "WHERE i.master_frame_id = ? ORDER BY ii.input_frame_id",
         (master_frame_id,)).fetchall()
+
+# --- TODO-DŁUG (z kolejki sesji, dieta 2026-08-10; pełne brzmienia: archiwum aa) ---
+# TODO-DŁUG(E4-9): 26 stosów history_mismatch (0810) to werdykt UCZCIWY - wejścia najpewniej nie
+#   leżą w archiwum (drzewo obróbki bez pokrycia z bazą). NIE gasić rozluźnieniem okna; sonda:
+#   ile nazw wejść z historii ma odpowiednik w bazie (0 = teza potwierdzona, >0 = okno za wąskie).
+# TODO-DŁUG(E2-1): docstring run_stack_lineage obiecuje „ZERO eventów" przy powtórce, a
+#   lineage_summary leci bezwarunkowo co przebieg. Zdanie ma mówić prawdę: zero wierszy, jedno
+#   zdarzenie zbiorcze per przebieg (licz DISTINCT target).

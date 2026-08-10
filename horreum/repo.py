@@ -2622,3 +2622,8 @@ def save_perspective(con, *, name, spec, now, uid="local"):
 # miała (rejestr też nie dawał drogi z okna), a pisarz bez ekranu byłby kodem dla nikogo. Dług
 # nazwany w kolejce: kasowanie ma sens dopiero razem z listą perspektyw do zarządzania, a to jest
 # ekran, nie funkcja.
+
+# --- TODO-DŁUG (z kolejki sesji, dieta 2026-08-10; pełne brzmienia: archiwum aa) ---
+# TODO-DŁUG(P4-2): marker location.unreadable_since niesie sam CZAS - powierzchnia nie odróżnia
+#   „nie da się otworzyć" od „nagłówek nie przechodzi parsera" i zdaniem „kopia nieczytelna"
+#   oskarża plik. Powód awarii obok znacznika (kolumna/payload) - przy pierwszej nieczytelnej kopii.

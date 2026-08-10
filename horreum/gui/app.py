@@ -2874,3 +2874,11 @@ def main(argv=None):
         busy.repaint()
         win.open_path(start)
     return app.exec()
+
+# --- TODO-DŁUG (z kolejki sesji, dieta 2026-08-10; pełne brzmienia: archiwum aa) ---
+# TODO-DŁUG(W-3): lista kolejki na stronie przeglądu obiektów - 340 px ramki na 80 px treści
+#   (76% pustki); tasks.py ten sam dług zamknęło _fit_task_list. Ten sam pomiar z SUFITEM
+#   (kolejka rośnie do ~45 pozycji) albo stretch 2:1 na rzecz tabeli „Biblioteka".
+# TODO-DŁUG(P-K/0xC0000409): proces kończy się STATUS_STACK_BUFFER_OVERRUN przy finalizacji
+#   interpretera, gdy MainWindow powstaje nad realną bazą bez app.exec() - zastane, widoczne
+#   wyłącznie w sondach bez pętli zdarzeń. Przy najbliższym dotknięciu closeEvent/teardownu.

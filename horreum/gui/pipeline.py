@@ -1074,3 +1074,8 @@ class PipelineView(QWidget):
 
     def _sync_actions(self):
         self._refresh_buttons(self._thread is not None, self._cancellable)
+
+# --- TODO-DŁUG (z kolejki sesji, dieta 2026-08-10; pełne brzmienia: archiwum aa) ---
+# TODO-DŁUG(E4-7): raport niekompletnego przebiegu mówi ILE, nie KTÓRE - ścieżki nieprzeczytanych
+#   katalogów ma tylko CLI, a wydanie onefile CLI nie ma. Nośnik jak box_vanished: sekcja przy
+#   niezerowej liście + akcja „skanuj ponownie"; jeden właściciel dla GUI i _format_stacks.

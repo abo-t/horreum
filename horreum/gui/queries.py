@@ -1903,3 +1903,12 @@ def base_rows(con, frame_ids):
         "ORDER BY f.id",
         (json.dumps(list(frame_ids)),),
     ).fetchall()
+
+# --- TODO-DŁUG (z kolejki sesji, dieta 2026-08-10; pełne brzmienia: archiwum aa) ---
+# TODO-DŁUG(W-4): sort kolejki obiektów przy remisie sum jest stringowy (Caldwell 12 przed
+#   Caldwell 3). Przy remisie sortuj naturalnie (rozbicie nazwy na człony liczbowe).
+# TODO-DŁUG(P4-1): unresolved_reason to werdykt ZAMROŻONY - 11 stosów niosło no_object dobę po
+#   nadaniu obiektów ręką. Kubełek liczyć ze STANU (obiekt jest => no_object nie ma prawa się
+#   pokazać) albo gest zmieniający fakt sam proponuje przeliczenie (wzorzec taktu 3, b803b5d).
+# TODO-DŁUG(R-S4-10): filetype IS NULL wypada z OBU kubełków bezimiennych (NULL IN/NOT IN dają
+#   NULL), zostając w review_frame_ids - partycja pękłaby po cichu. Dziś nieosiągalne (tripwire).

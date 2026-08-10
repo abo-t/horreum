@@ -363,6 +363,26 @@ def test_scan_tree_kompletny_przebieg_nie_jest_niekompletny(tmp_path):
     con.close()
 
 
+def test_scan_tree_anulowanie_TEZ_jest_niekompletnoscia(tmp_path):
+    """DRUGI człon `incomplete` (bramka pakietu, zarzut 9): własność wiąże nieprzeczytany katalog
+    ALBO anulowanie, a pin miała tylko pierwsza połowa. Oba znaczą to samo dla wołającego —
+    przebieg NIE zobaczył całego drzewa, więc jego liczby nie są zdaniem o komplecie.
+
+    Powierzchnie rozróżniają te przypadki same: GUI ma osobny sygnał `cancelled` (anulowany skan
+    nie dochodzi do linii raportu), a CLI `should_cancel` w ogóle nie podaje."""
+    con = _db(tmp_path)
+    tree = tmp_path / "tree"; tree.mkdir()
+    for i in range(3):
+        _write_fits(tree / f"l{i}.fits",
+                    cards=[("INSTRUME", "ZWO ASI2600MM Pro"), ("XPIXSZ", 3.76), ("IMAGETYP", "LIGHT")],
+                    data=np.full((4, 4), i + 1, np.uint16))
+    s = scan_tree(con, tree, volume="VOL1", now=NOW, should_cancel=lambda: True)
+    assert s.cancelled is True and s.unreadable_dirs == []
+    assert s.incomplete is True                 # anulowanie NIE jest kompletem
+    assert s.files == 0                         # przerwane na granicy pliku, przed pierwszym
+    con.close()
+
+
 def test_cli_scan_niekompletny_przebieg_ma_kod_wyjscia_1(tmp_path, monkeypatch, capsys):
     """Kod wyjścia niesie NIEKOMPLETNOŚĆ (E4-6) — skrypt biegu 1 etapu 4 nie ma czytać prozy,
     żeby dowiedzieć się, że skan nie objął całego drzewa. Para z falsyfikatorem: zdrowy przebieg

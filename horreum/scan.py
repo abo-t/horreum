@@ -1206,8 +1206,9 @@ class ScanSummary:
         przyrostowa jest per plik (`volume, path, mtime`), nie per przebieg, więc następny skan
         dobiera pominięte bez żadnego gestu — niekompletność jest samonaprawialna.
         JEDYNY etap, który z listingu wyprowadza NIEOBECNOŚĆ, to pass obecności — i on ma własne
-        `errors_out` oraz traktuje takie poddrzewa jak prune (`presence.py:186-200`, D-V-11),
-        więc zerwany share nie zamienia się w zniknięcia. Dlatego `incomplete` nie blokuje niczego
+        `errors_out` oraz traktuje takie poddrzewa jak prune (`presence.check`, bariery liczone
+        z `excluded_dirs + unreadable_dirs`; D-V-11), więc zerwany share nie zamienia się
+        w zniknięcia. Dlatego `incomplete` nie blokuje niczego
         w bazie; jego jedyną robotą jest ODEBRANIE PRZEBIEGOWI POZORU KOMPLETU — w raporcie
         (GUI + CLI) i w kodzie wyjścia, żeby bramka etapu 4 („po przenosinach skan widzi 128
         nowych lokacji") nie wzięła zaniżonego przejścia za dowód."""

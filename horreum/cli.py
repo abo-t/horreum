@@ -259,8 +259,11 @@ def main(argv=None):
             # ZAKRES, nie plik (E4-6): zaniżone liczby po zerwanym share'ie wygladaja dokladnie
             # jak „nic nie przybylo". Repr summary te sciezki niesie, ale utopione miedzy
             # kilkunastoma licznikami — bramka etapu 4 ma je zobaczyc, nie wypatrzec.
+            # „MOGA byc nizsze", nie „sa": nieprzeczytany katalog bywa pusty albo bez klatek,
+            # a wtedy liczby sa rowne stanowi drzewa. Wiersz, ktory istnieje po to, zeby liczbom
+            # mozna bylo ufac, nie ma prawa sam twierdzic wiecej, niz wie (bramka pakietu, zarzut 6).
             print(f"  NIEPRZECZYTANE katalogi: {len(summary.unreadable_dirs)} "
-                  f"-- PRZEBIEG NIEKOMPLETNY, liczby nizsze niz stan drzewa")
+                  f"-- PRZEBIEG NIEKOMPLETNY, liczby MOGA byc nizsze niz stan drzewa")
             for d in summary.unreadable_dirs[:args.limit]:
                 print(f"    {d}")
             if len(summary.unreadable_dirs) > args.limit:
@@ -1050,7 +1053,7 @@ def _format_stacks(root, db_path, s, limit=10):
         # ZAKRES, nie plik: „0 kandydatow" po zerwanym share'ie wyglada dokladnie jak „nic tam
         # nie ma". Ta linia jest jedyna roznica miedzy tymi zdaniami (E4-1 pkt 4).
         lines.append(f"  NIEPRZECZYTANE katalogi: {len(s.unreadable_dirs)} "
-                     f"-- PRZEBIEG NIEKOMPLETNY, liczby nizsze niz stan drzewa")
+                     f"-- PRZEBIEG NIEKOMPLETNY, liczby MOGA byc nizsze niz stan drzewa")
         for d in s.unreadable_dirs[:limit]:
             lines.append(f"    {d}")
         if len(s.unreadable_dirs) > limit:

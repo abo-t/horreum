@@ -446,3 +446,71 @@ def test_cli_target_bez_statusu_nie_zgaduje(tmp_path, capsys, con):
     path = con.execute("PRAGMA database_list").fetchone()["file"]
     assert cli.main(["target", path, "CTB1"]) == 2
     assert "podaj --status" in capsys.readouterr().out
+
+
+# ───────────────────────────────────────────── sierota kurateli (R-S0-7)
+#
+# Oznaczenie na kanonie, którego asset nie zna, jest w planerze NIEWIDOCZNE (wiersze powstają
+# z puli katalogu, kuratela dokleja się przez `marks.get(t.canon)`) I NIEUSUWALNE (GUI kasuje
+# wyłącznie z zaznaczonego wiersza). Generatorem jest przebudowa assetu — a ta częściej nazwę
+# PRZENOSI, niż usuwa, więc predykat ma dwa stany, nie jeden.
+
+def _mark_wprost(con, canon, status="planned", priority=None, note=None):
+    """Oznaczenie wstawione Z POMINIĘCIEM walidacji nazwy — bo dokładnie tak powstaje sierota:
+    kanon był w asecie w chwili zapisu, a wypadł z niego później."""
+    con.execute("INSERT INTO target_plan(canon, status, priority, note, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)", (canon, status, priority, note, NOW, NOW))
+    con.commit()
+
+
+def test_sierota_nieznana_i_przeniesiona_to_dwa_rozne_stany(con):
+    _mark_wprost(con, "NGC0000_NIEISTNIEJE")
+    _mark_wprost(con, "LBN529")            # żywy ALIAS KATALOGOWY rekordu C9 (asset, ALL_LAYERS)
+    _mark_wprost(con, "CTB1")              # zwykły kanon — sierotą NIE jest
+    out = targets.orphan_marks(con)
+    assert set(out) == {"NGC0000_NIEISTNIEJE", "LBN529"}
+    assert out["NGC0000_NIEISTNIEJE"][0] == targets.ORPHAN_UNKNOWN
+    assert out["NGC0000_NIEISTNIEJE"][2] is None
+    # SEDNO DŁUGU: dla tego wiersza kasacja NIE jest jedyną odpowiedzią — cel żyje pod inną nazwą.
+    assert out["LBN529"][0] == targets.ORPHAN_MOVED
+    assert out["LBN529"][2] == "C9"
+
+
+def test_sierota_niesie_caly_wiersz_a_nie_sam_kanon(con):
+    """Bez statusu, priorytetu i noty nie da się ani PRZENIEŚĆ oznaczenia, ani go COFNĄĆ —
+    a obie drogi powrotu stoją na tym, że nic z decyzji człowieka nie ginie."""
+    _mark_wprost(con, "LBN576", status="active", priority=3, note="SII")
+    _stan, row, gdzie = targets.orphan_marks(con)["LBN576"]
+    assert (row["status"], row["priority"], row["note"], gdzie) == ("active", 3, "SII", "CTB1")
+
+
+def test_sierota_liczona_wobec_PELNEGO_katalogu_nie_wczytanych_warstw(con):
+    """`LDN825` leży w cirrusie. Predykat na DEFAULT_LAYERS ogłosiłby sierotą cel, który istnieje —
+    ta sama granica, którą trzyma `PlanResult.unmatched`."""
+    _mark_wprost(con, "LDN825")
+    assert targets.orphan_marks(con)["LDN825"][0] == targets.ORPHAN_MOVED
+
+
+def test_plan_wystawia_sieroty_bo_lista_nie_ma_jak(con):
+    _park_ready(con)
+    _mark_wprost(con, "NGC0000_NIEISTNIEJE")
+    res = targets.plan(con, night=date(2026, 1, 2))
+    assert set(res.orphan_marks) == {"NGC0000_NIEISTNIEJE"}
+    assert not [r for r in res.rows if r.target.canon == "NGC0000_NIEISTNIEJE"]
+
+
+def test_plan_bez_sierot_daje_pusty_slownik(con):
+    _park_ready(con)
+    assert targets.plan(con, night=date(2026, 1, 2)).orphan_marks == {}
+
+
+def test_cli_target_rozroznia_dwa_stany_sieroctwa(capsys, con):
+    path = con.execute("PRAGMA database_list").fetchone()["file"]
+    _mark_wprost(con, "NGC0000_NIEISTNIEJE")
+    _mark_wprost(con, "LBN529")
+    assert cli.main(["target", path]) == 0
+    out = capsys.readouterr().out
+    assert "[poza katalogiem]" in out
+    # Do S0 lista mówiła „poza katalogiem" także o TYM wierszu — czyli o celu, który stoi
+    # w katalogu obok, pod swoją nową nazwą.
+    assert "[w katalogu jako C9]" in out

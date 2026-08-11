@@ -855,9 +855,15 @@ def _cmd_target(args):
     na losowym rekordzie. Cel oznaczony, którego katalog już nie zna (podmiana assetu), zostaje
     na liście z etykietą — kasowanie cudzej decyzji to nie sprzątanie.
 
+    LISTA ROZRÓŻNIA DWA STANY SIEROCTWA (R-S0-7, `targets.orphan_marks`): `[poza katalogiem]` =
+    pełny katalog tej nazwy nie zna wcale, `[w katalogu jako X]` = kanon żyje dziś jako alias
+    katalogowy rekordu X (przebudowa assetu częściej PRZENOSI nazwy, niż je usuwa). Drugi stan
+    ma inną naprawę niż pierwszy i do S0 był nierozróżnialny — lista mówiła „poza katalogiem"
+    o celu, który stoi w katalogu obok, pod swoją nową nazwą.
+
     `--clear` DOSTAJE FALLBACK: walidacja wobec assetu broni ZAPISU przed zgadywaniem, ale przy
     KASOWANIU zamykała jedyne drzwi — oznaczenie na kanonie, którego katalog już nie zna, widać
-    na liście (wywołanie BEZ argumentu `canon`) z etykietą `[poza katalogiem]`, a
+    na liście (wywołanie BEZ argumentu `canon`) z etykietą sieroctwa, a
     `resolve_plan_canon` zwraca dla niego `(None, …)`, czyli kod 2. Nie dało się zdjąć własnej
     decyzji o celu, który wypadł z assetu. Kolejność zostaje: NAJPIERW asset (żeby `M42` dalej
     trafiało w `NGC1976` — normalizacji nie wycinamy), a dopiero przy `(None, …)` DOKŁADNE
@@ -906,8 +912,12 @@ def _cmd_target(args):
         return 0
     rows = con.execute(
         "SELECT canon, status, priority, note FROM target_plan ORDER BY canon").fetchall()
+    # Sieroctwo liczy JEDEN właściciel (`targets.orphan_marks`, R-S0-7) — do tej pory ten predykat
+    # żył inline TUTAJ, czyli w warstwie prezentacji, i znał tylko połowę prawdy: kanon PRZENIESIONY
+    # pod aliasy katalogowe innego rekordu wyglądał jak nieznany. Rachunek stoi PRZED `con.close()`,
+    # bo czyta z tego samego połączenia.
+    orphans = targets.orphan_marks(con)
     con.close()
-    known = {t.canon for t in targets.load_targets(targets.ALL_LAYERS)}
     rows = [r for r in rows if args.status is None or r["status"] == args.status]
     if not rows:
         print(f"Horreum target {args.db}: brak oznaczonych celow.")
@@ -915,7 +925,13 @@ def _cmd_target(args):
     lines = [f"Horreum target {args.db}: {len(rows)} oznaczonych",
              f"  {'cel':<16}{'status':<9}{'prio':>5}  nota"]
     for r in rows:
-        orphan = "" if r["canon"] in known else "  [poza katalogiem]"
+        stan = orphans.get(r["canon"])
+        if stan is None:
+            orphan = ""
+        elif stan[0] == targets.ORPHAN_MOVED:
+            orphan = f"  [w katalogu jako {stan[2]}]"
+        else:
+            orphan = "  [poza katalogiem]"
         prio = "-" if r["priority"] is None else str(r["priority"])
         lines.append(f"  {r['canon']:<16}{r['status']:<9}{prio:>5}  {r['note'] or ''}{orphan}")
     print("\n".join(lines))

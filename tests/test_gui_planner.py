@@ -506,3 +506,97 @@ def test_watek_tla_liczy_i_sprzata_bez_zawisu(qapp, tmp_path, settings_store):
     finally:
         v.close()
         con.close()
+
+
+# ───────────────────────────────────────── sekcja sierot kurateli (R-S0-7)
+#
+# Populacja tej sekcji jest w żywym archiwum ZEROWA i ma prawo taka zostać — powstaje dopiero przy
+# przebudowie assetu katalogu. Dlatego bateria jest tu jedyną obroną kodu, a każdy test wytwarza
+# sierotę wprost w bazie (inaczej się nie da: obie drogi zapisu walidują nazwę wobec assetu).
+
+def _osierocone(view, canon, status="planned", priority=None, note=None):
+    view.con.execute(
+        "INSERT INTO target_plan(canon, status, priority, note, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)", (canon, status, priority, note, NOW, NOW))
+    view.con.commit()
+    view.replan()
+
+
+def test_sekcja_sierot_milczy_przy_zerze(view):
+    """Zero pikseli, dopóki nie ma o czym mówić — ekran planera nie ma zapasu w pionie (D-0801-1).
+
+    `isHidden()`, nie `isVisible()`: przy oknie bez `show()` to drugie jest ZAWSZE False, więc
+    asercja przechodziłaby także dla sekcji, którą kod pokazał (konwencja repo — STANDING)."""
+    assert view._orphan_box.isHidden()
+    assert view.orphan_list.count() == 0
+
+
+def test_sekcja_pokazuje_sie_dopiero_z_populacja(view):
+    _osierocone(view, "NGC0000_NIEISTNIEJE")
+    assert not view._orphan_box.isHidden()
+    assert view.orphan_list.count() == 1
+    assert "NGC0000_NIEISTNIEJE" in view.orphan_list.item(0).text()
+
+
+def test_zdejmij_kasuje_wlasny_kanon_a_nie_zaznaczony_wiersz_listy(view):
+    """SEDNO: `_selected_canon()` czyta zaznaczenie TABELI planu. Gdyby sekcja go współdzieliła,
+    gest kasowałby kuratelę CUDZEGO celu — tego zaznaczonego na liście nocy."""
+    view.table.selectRow(0)
+    view.panel_status.setCurrentIndex(view.panel_status.findData("planned"))
+    view._on_save_mark()
+    zywy = view.selected_row().canon
+    _osierocone(view, "NGC0000_NIEISTNIEJE")
+    view.table.selectRow(0)
+    view.orphan_list.setCurrentRow(0)
+    view._on_orphan_clear()
+    assert view.con.execute("SELECT count(*) FROM target_plan WHERE canon = ?",
+                            ("NGC0000_NIEISTNIEJE",)).fetchone()[0] == 0
+    assert view.con.execute("SELECT count(*) FROM target_plan WHERE canon = ?",
+                            (zywy,)).fetchone()[0] == 1
+
+
+def test_zdjecie_sieroty_ma_droge_powrotu_z_kompletem_pol(view):
+    """Bez tego paczka domykająca grupę „gest bez drogi powrotu" wnosiłaby własny taki gest:
+    sieroty NIE DA SIĘ odtworzyć inaczej, bo każdy zapis waliduje nazwę wobec assetu."""
+    _osierocone(view, "NGC0000_NIEISTNIEJE", status="active", priority=3, note="SII")
+    view.orphan_list.setCurrentRow(0)
+    assert view.orphan_undo_btn.isEnabled() is False      # nie ma jeszcze czego cofać
+    view._on_orphan_clear()
+    assert view.orphan_undo_btn.isEnabled() is True
+    view._on_orphan_undo()
+    row = view.con.execute("SELECT * FROM target_plan WHERE canon = ?",
+                           ("NGC0000_NIEISTNIEJE",)).fetchone()
+    assert (row["status"], row["priority"], row["note"]) == ("active", 3, "SII")
+    assert view.orphan_undo_btn.isEnabled() is False      # pamięć skonsumowana
+
+
+def test_sekcja_zostaje_widoczna_gdy_jest_co_cofnac(view):
+    """Inaczej „Cofnij zdjęcie" znikałoby razem z ostatnią sierotą — czyli dokładnie w chwili,
+    w której bywa potrzebne."""
+    _osierocone(view, "NGC0000_NIEISTNIEJE")
+    view.orphan_list.setCurrentRow(0)
+    view._on_orphan_clear()
+    assert view.orphan_list.count() == 0
+    assert not view._orphan_box.isHidden()
+
+
+def test_przeniesienie_zywe_tylko_dla_kanonu_ktory_katalog_przejal(view):
+    _osierocone(view, "NGC0000_NIEISTNIEJE")
+    view.orphan_list.setCurrentRow(0)
+    assert view.orphan_move_btn.isEnabled() is False
+    view.con.execute("DELETE FROM target_plan")
+    _osierocone(view, "LBN529")                          # żywy alias katalogowy rekordu C9
+    view.orphan_list.setCurrentRow(0)
+    assert view.orphan_move_btn.isEnabled() is True
+
+
+def test_przeniesienie_zachowuje_cala_decyzje_czlowieka(view):
+    """Przenosimy CUDZĄ decyzję, a nie zakładamy nowej — status, priorytet i nota idą w komplecie."""
+    _osierocone(view, "LBN529", status="active", priority=1, note="domknac SII")
+    view.orphan_list.setCurrentRow(0)
+    view._on_orphan_move()
+    assert view.con.execute("SELECT count(*) FROM target_plan WHERE canon = 'LBN529'"
+                            ).fetchone()[0] == 0
+    row = view.con.execute("SELECT * FROM target_plan WHERE canon = 'C9'").fetchone()
+    assert (row["status"], row["priority"], row["note"]) == ("active", 1, "domknac SII")
+    assert view._orphan_box.isHidden()                    # populacja zeszła do zera

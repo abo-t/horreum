@@ -899,6 +899,58 @@ CATALOG = {
     "planner.mark_saved": {"pl": "Zapisano oznaczenie: {canon}.", "en": "Mark saved: {canon}."},
     "planner.mark_cleared": {"pl": "Zdjęto oznaczenie: {canon}.", "en": "Mark cleared: {canon}."},
     "planner.mark_same": {"pl": "Bez zmian: {canon}.", "en": "No change: {canon}."},
+
+    # --- sierota kurateli (R-S0-7): oznaczenie, którego lista planu nie ma jak pokazać ---
+    "planner.orphans": {
+        "pl": "Oznaczenia bez celu w katalogu ({n})",
+        "en": "Marks with no catalogue target ({n})",
+    },
+    "planner.orphans_hint": {
+        "pl": "Te oznaczenia nie mają jak trafić na listę powyżej — katalog nie zna ich nazwy "
+              "albo przeniósł ją pod inny rekord. Lista planu ich NIE pokazuje.",
+        "en": "These marks cannot reach the list above — the catalogue does not know their name "
+              "or has moved it under another record. The plan list does NOT show them.",
+    },
+    "planner.orphan_row": {
+        "pl": "{canon} · {status} · {where}  {note}",
+        "en": "{canon} · {status} · {where}  {note}",
+    },
+    "planner.orphan_unknown": {"pl": "poza katalogiem", "en": "outside the catalogue"},
+    "planner.orphan_moved_to": {
+        "pl": "w katalogu jako {where}",
+        "en": "in the catalogue as {where}",
+    },
+    "planner.orphan_move": {"pl": "Przenieś", "en": "Move"},
+    "planner.orphan_move_tip": {
+        "pl": "Przenieś oznaczenie (status, priorytet i notatkę) na {where} — rekord, "
+              "który przejął tę nazwę.",
+        "en": "Move the mark (status, priority and note) to {where} — the record that took "
+              "over this name.",
+    },
+    "planner.orphan_move_tip_none": {
+        "pl": "Przeniesienie ma sens tylko wtedy, gdy katalog zna tę nazwę pod innym rekordem.",
+        "en": "Moving only makes sense when the catalogue knows this name under another record.",
+    },
+    "planner.orphan_clear": {"pl": "Zdejmij", "en": "Clear"},
+    "planner.orphan_undo": {"pl": "Cofnij zdjęcie", "en": "Undo clearing"},
+    "planner.orphan_undo_tip": {
+        "pl": "Przywraca ostatnio zdjęte oznaczenie z tej sesji. Sieroty NIE DA SIĘ odtworzyć "
+              "inaczej — zapis wymaga nazwy, którą zna katalog.",
+        "en": "Restores the mark cleared last in this session. An orphan CANNOT be recreated "
+              "any other way — writing requires a name the catalogue knows.",
+    },
+    "planner.orphan_cleared": {
+        "pl": "Zdjęto osierocone oznaczenie: {canon}. Możesz to cofnąć.",
+        "en": "Orphaned mark cleared: {canon}. You can undo this.",
+    },
+    "planner.orphan_moved": {
+        "pl": "Przeniesiono oznaczenie {canon} → {where}.",
+        "en": "Mark moved: {canon} → {where}.",
+    },
+    "planner.orphan_undone": {
+        "pl": "Przywrócono oznaczenie: {canon}.",
+        "en": "Mark restored: {canon}.",
+    },
     "planner.park_btn": {"pl": "Park…", "en": "Park…"},
     "planner.park_title": {"pl": "Park teleskopów", "en": "Telescope park"},
     "planner.park_hint": {

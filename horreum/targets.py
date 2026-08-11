@@ -225,6 +225,10 @@ class PlanResult:
     park: tuple = ()
     park_source: str = "none"      # arg (jawne wołanie) | db (telescope.in_park) | none
     park_without_rigs: tuple = ()
+    # Oznaczenia kurateli, których lista NIE POKAŻE (R-S0-7) — `{kanon: (stan, wiersz, gdzie)}`.
+    # Stoją OBOK `rows`, a nie w nich: wiersz planera niesie okno, kadrowanie i koszt liczone
+    # z rekordu katalogu, a sierota rekordu nie ma. Pusty słownik = wszystko widać.
+    orphan_marks: dict = field(default_factory=dict)
 
 
 # ─────────────────────────────────────────────────────── asset
@@ -355,6 +359,50 @@ def plan_marks(con):
     zapytanie per cel dałoby 777 zapytań na listę, którą i tak trzymamy w pamięci."""
     return {r["canon"]: r for r in con.execute(
         "SELECT canon, status, priority, note FROM target_plan").fetchall()}
+
+
+# Stany oznaczenia, którego planer NIE POKAŻE — nazwane, bo każdy ma INNĄ naprawę (R-S0-7).
+ORPHAN_UNKNOWN = "unknown"   # pełny katalog tej nazwy nie zna wcale → jedyna akcja: zdejmij
+ORPHAN_MOVED = "moved"       # kanon żyje dziś jako alias katalogowy rekordu X → przenieś na X
+
+
+def orphan_marks(con):
+    """Oznaczenia kurateli, których planer nie ma jak pokazać — `{kanon: (stan, wiersz, gdzie)}`.
+
+    JEDEN WŁAŚCICIEL PREDYKATU dla obu powierzchni (`cli._cmd_target` liczył go dotąd inline,
+    w warstwie prezentacji). `plan` dokleja kuratelę przez `marks.get(t.canon)`, więc wiersz
+    `target_plan` na kanonie, którego asset nie zna, jest po cichu porzucany — niewidoczny
+    i nieusuwalny z GUI.
+
+    DWA STANY, BO DWIE RÓŻNE NAPRAWY, i to jest sedno tego długu. Przebudowa assetu
+    (`scripts/build_catalog.py`) nie tylko USUWA kanony — częściej je PRZENOSI: nazwa, która była
+    kanonem rekordu, staje się jego `catalog_alias` albo aliasem katalogowym rekordu SĄSIEDNIEGO.
+    Oznaczenie jest wtedy niewidoczne dokładnie tak samo, ale CEL ŻYJE — a sekcja, która oferuje
+    w tym stanie samą kasację, namawia do utraty cudzej decyzji w jedynym realnym scenariuszu,
+    który ten stan tworzy. `gdzie` niesie kanon nowego właściciela dla `moved`, `None` dla
+    `unknown`.
+
+    `ALL_LAYERS`, nie wczytane warstwy: „nie ma celu w katalogu" to co innego niż „nie wczytałem
+    warstwy, w której leży" (ta sama granica, co przy `PlanResult.unmatched` — `LDN1152` siedzi
+    w cirrusie i przy domyślnym rdzeniu wyglądałby na sierotę).
+
+    Klucz `target_plan` to ZAWSZE kanon rekordu: jedyna droga zapisu prowadzi przez
+    `resolve_plan_canon`, który zwraca wyłącznie `t.canon`, a `repo.set_target_plan` niczego nie
+    normalizuje. Dlatego `unknown` liczy się wobec zbioru KANONÓW, a `moved` dobiera właściciela
+    z `coverage_index` (kanon + aliasy katalogowe, z rozstrzygnięciem kolizji `curated`)."""
+    pool = load_targets(ALL_LAYERS)
+    canons = {t.canon for t in pool}
+    owner = coverage_index(pool)
+    out = {}
+    for canon, row in plan_marks(con).items():
+        if canon in canons:
+            continue
+        t = owner.get(canon)
+        if t is None:
+            out[canon] = (ORPHAN_UNKNOWN, row, None)
+        else:
+            out[canon] = (ORPHAN_MOVED, row, t.canon)
+    return out
 
 
 def coverage_index(targets):
@@ -732,7 +780,8 @@ def plan(con, *, night=None, site=None, park=None, layers=DEFAULT_LAYERS,
                       rigs=rigs, skipped_rigs=skipped, unmatched=unmatched, counts=counts,
                       unfiltered_mono=unfiltered_mono, hidden=hidden,
                       park=tuple(park or ()), park_source=park_source,
-                      park_without_rigs=park_without_rigs)
+                      park_without_rigs=park_without_rigs,
+                      orphan_marks=orphan_marks(con))
 
 
 def _night_moon(site, nw, *, v_zen, k_ext):

@@ -25,9 +25,9 @@ from PySide6.QtCore import (QAbstractTableModel, QDate, QModelIndex, QObject, QS
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QDateEdit,
                                QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QGroupBox,
-                               QHBoxLayout, QHeaderView, QLabel, QLineEdit, QProgressBar,
-                               QPushButton, QSpinBox, QTableView, QTableWidget, QTableWidgetItem,
-                               QToolButton, QVBoxLayout, QWidget)
+                               QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
+                               QListWidgetItem, QProgressBar, QPushButton, QSpinBox, QTableView,
+                               QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget)
 
 from horreum import db, repo, targets
 from horreum.gui import i18n, planner_model as pm, queries, theme
@@ -82,6 +82,11 @@ _THRESHOLDS = {"min_size": ("planner.min_size", 6.0, 0.0, 600.0, 1.0),
                "min_hours": ("planner.min_hours", 1.0, 0.0, 100.0, 0.5)}
 _MAX_COST_DEFAULT = 3.0
 _SETTINGS_PREFIX = "planner/"
+
+# Sufit wysokości sekcji sierot kurateli (R-S0-7) — ok. trzy wiersze. Sekcja jest wtrętem między
+# planem nocy a panelem wiersza i przy dłuższej liście ma się scrollować, a nie rosnąć: ekran
+# planera nie ma zapasu w pionie (D-0801-1).
+_ORPHAN_LIST_H = 88
 
 # Wartownik pozycji „nie wypowiedziałeś się" w combo parku: `QComboBox.itemData(None)` jest
 # nierozróżnialne od pustych danych, a trójstan `in_park` musi przejść przez UI bez zlania stanów.
@@ -311,6 +316,10 @@ class PlannerView(QWidget):
         self._thread = None
         self._result = None
         self._keep_canon = None          # cel, na który zaznaczenie ma wrócić po re-planie
+        # PAMIĘĆ ZDJĘTEJ SIEROTY (R-S0-7) — `(kanon, status, priorytet, nota)` albo None. Żyje
+        # w SESJI, nie w bazie: to droga powrotu z pomyłki sprzed sekundy, a nie druga historia
+        # obok dziennika (`event(target_plan.cleared)` niesie cały wiersz sprzed kasacji).
+        self._orphan_undo = None
         self._rig_chip = None            # None = soczewka „najlepsze dopasowanie" (D-0731-13)
         self._order = pm.ORDER_CORE      # porządek listy — prezentacja, klucz rdzenia nietknięty
         self._settings = QSettings("Horreum", "Horreum")
@@ -415,6 +424,7 @@ class PlannerView(QWidget):
         self.empty_note.setWordWrap(True)
         self.empty_note.setVisible(False)
         outer.addWidget(self.empty_note, 1)
+        outer.addWidget(self._build_orphan_box())
         outer.addWidget(self._build_row_panel())
         self.table.selectionModel().selectionChanged.connect(self._on_row_selected)
         self._sync_panel()
@@ -473,6 +483,141 @@ class PlannerView(QWidget):
         """„Zapisz oznaczenie" żyje TYLKO przy wybranym statusie — przy „(bez oznaczenia)" nie ma
         czego zapisać, a szczery disabled mówi to bez komunikatu (wiz T5 #1)."""
         self.save_btn.setEnabled(self.panel_status.currentData() is not None)
+
+    # ---------------------------------------------------------------- sierota kurateli (R-S0-7)
+
+    def _build_orphan_box(self):
+        """Sekcja „oznaczenia bez celu w katalogu" — jedyna powierzchnia tej populacji (R-S0-7).
+
+        DO S0 OZNACZENIE OSIEROCONE BYŁO NIEWIDOCZNE **I** NIEUSUWALNE: `targets.plan` dokleja
+        kuratelę przez `marks.get(t.canon)`, więc wiersz `target_plan` na kanonie, którego asset
+        nie zna, nie ma jak stać się `TargetRow`; a `_on_clear_mark` kasuje wyłącznie z ZAZNACZONEGO
+        wiersza listy. Jedyną drogą była konsola (`horreum target <db> <kanon> --clear`).
+
+        UKRYTA PRZY ZERZE, świadomie: podłoga tego ekranu (D-0801-1) nie ma zapasu w pionie, a stan
+        pojawia się raz na przebudowę assetu. Sekcja kosztuje zero pikseli, dopóki nie ma o czym
+        mówić — i to jest cała różnica wobec noty w nagłówku, której tu NIE MA (byłaby drugą
+        siedzibą tej samej liczby).
+
+        TRZY AKCJE, BO STANY SĄ DWA I OBA MUSZĄ MIEĆ DROGĘ POWROTU:
+
+        * **Przenieś** — żywy wyłącznie dla `moved`, czyli gdy kanon oznaczenia jest dziś ALIASEM
+          KATALOGOWYM innego rekordu. Bez tej pozycji sekcja namawiałaby do skasowania kuratelii
+          celu, który stoi w katalogu obok, pod nową nazwą (SIN-DOWNGRADE).
+        * **Zdejmij** — kasacja wiersza; jedyna akcja dla `unknown`.
+        * **Cofnij zdjęcie** — DROGA POWROTU, bez której ta paczka wnosiłaby dokładnie ten dług,
+          który domyka. Dla sieroty odtworzenie inną drogą jest NIEMOŻLIWE: i GUI, i CLI walidują
+          kanon wobec assetu (`resolve_plan_canon`), a tej nazwy w asecie nie ma. Pozycja jest
+          WIDOCZNA ZAWSZE, wygaszona gdy nie ma czego cofać — wzorzec `act_restore` z paska Zbiorów
+          (o odwracalności trzeba wiedzieć PRZED pomyłką, nie po niej)."""
+        box = QGroupBox(i18n.t("planner.orphans", n=0))
+        box.setVisible(False)
+        lay = QVBoxLayout(box)
+        hint = QLabel(i18n.t("planner.orphans_hint"))
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+        self.orphan_list = QListWidget()
+        # Sufit wysokości, reszta scrollem: sekcja jest wtrętem między listą a panelem i nie ma
+        # prawa zjeść ekranu, który należy do planu nocy. Liczba, nie `sizeHintForRow` — na PUSTEJ
+        # liście ten rachunek zwraca -1, więc karmiłby `setMaximumHeight` liczbą ujemną.
+        self.orphan_list.setMaximumHeight(_ORPHAN_LIST_H)
+        self.orphan_list.itemSelectionChanged.connect(self._sync_orphan_buttons)
+        lay.addWidget(self.orphan_list)
+        row = QHBoxLayout()
+        self.orphan_move_btn = QPushButton(i18n.t("planner.orphan_move"))
+        self.orphan_move_btn.clicked.connect(self._on_orphan_move)
+        row.addWidget(self.orphan_move_btn)
+        self.orphan_clear_btn = QPushButton(i18n.t("planner.orphan_clear"))
+        self.orphan_clear_btn.clicked.connect(self._on_orphan_clear)
+        row.addWidget(self.orphan_clear_btn)
+        self.orphan_undo_btn = QPushButton(i18n.t("planner.orphan_undo"))
+        self.orphan_undo_btn.setFlat(True)
+        self.orphan_undo_btn.setToolTip(i18n.t("planner.orphan_undo_tip"))
+        self.orphan_undo_btn.clicked.connect(self._on_orphan_undo)
+        row.addWidget(self.orphan_undo_btn)
+        row.addStretch(1)
+        lay.addLayout(row)
+        self._orphan_box = box
+        # Stan przycisków USTAWIAMY WPROST na starcie, nie licząc na sygnał zaznaczenia: pusta lista
+        # nie emituje `itemSelectionChanged`, więc trzy przyciski stałyby aktywne nad niczym (ta sama
+        # pułapka, którą `_sync_save_enabled` łapie przy `setCurrentIndex(0)`, wiz T5 R1).
+        self._sync_orphan_buttons()
+        return box
+
+    def _render_orphans(self, result):
+        """Przepisz sekcję z `PlanResult`. Zaznaczenie NIE przeżywa przeliczenia świadomie: lista
+        jest krótka, a po każdej akcji jej skład się zmienia — trzymanie kursora na pozycji, której
+        już nie ma, byłoby obietnicą bez pokrycia."""
+        marks = dict(getattr(result, "orphan_marks", {}) or {}) if result is not None else {}
+        self.orphan_list.clear()
+        for canon in sorted(marks):
+            stan, row, gdzie = marks[canon]
+            opis = (i18n.t("planner.orphan_moved_to", where=gdzie)
+                    if stan == targets.ORPHAN_MOVED else i18n.t("planner.orphan_unknown"))
+            it = QListWidgetItem(i18n.t(
+                "planner.orphan_row", canon=canon, status=row["status"],
+                note=row["note"] or "", where=opis))
+            it.setData(Qt.UserRole, (canon, stan, gdzie,
+                                     row["status"], row["priority"], row["note"]))
+            self.orphan_list.addItem(it)
+        self._orphan_box.setTitle(i18n.t("planner.orphans", n=len(marks)))
+        # Sekcja żyje, dopóki JEST populacja ALBO jest co cofnąć — inaczej „Cofnij zdjęcie"
+        # znikałoby razem z ostatnią sierotą, czyli dokładnie w chwili, w której bywa potrzebne.
+        self._orphan_box.setVisible(bool(marks) or self._orphan_undo is not None)
+        self._sync_orphan_buttons()
+
+    def _selected_orphan(self):
+        """Dane zaznaczonej sieroty albo None. WŁASNE źródło celu, nie `_selected_canon()`: tamta
+        metoda czyta zaznaczenie TABELI planu, a sierota w tabeli nie stoi z definicji — wspólna
+        metoda wpisywałaby gest na cudzy cel (klasa wiz T5 #1)."""
+        items = self.orphan_list.selectedItems()
+        return items[0].data(Qt.UserRole) if items else None
+
+    def _sync_orphan_buttons(self):
+        dane = self._selected_orphan()
+        self.orphan_clear_btn.setEnabled(dane is not None)
+        self.orphan_move_btn.setEnabled(dane is not None and dane[1] == targets.ORPHAN_MOVED)
+        self.orphan_move_btn.setToolTip(
+            i18n.t("planner.orphan_move_tip", where=dane[2]) if dane and dane[2]
+            else i18n.t("planner.orphan_move_tip_none"))
+        self.orphan_undo_btn.setEnabled(self._orphan_undo is not None)
+
+    def _on_orphan_clear(self):
+        dane = self._selected_orphan()
+        if dane is None:
+            return
+        canon, _stan, _gdzie, status, priority, note = dane
+        if repo.clear_target_plan(self.con, canon=canon, now=self._now()):
+            # PAMIĘĆ ZDJĘCIA zapisana PO udanej kasacji, nie przed: gdyby wiersz zniknął w międzyczasie
+            # inną drogą (konsola równolegle), „Cofnij" odtwarzałby oznaczenie, którego nikt nie zdejmował.
+            self._orphan_undo = (canon, status, priority, note)
+            self.status_message.emit(i18n.t("planner.orphan_cleared", canon=canon))
+            self.replan()
+
+    def _on_orphan_move(self):
+        """Przeniesienie kuratelii na rekord, który przejął kanon — JEDNA decyzja człowieka, dwa
+        zapisy klingi. Status, priorytet i nota przechodzą w komplecie: przenosimy CUDZĄ decyzję,
+        a nie zakładamy nowej."""
+        dane = self._selected_orphan()
+        if dane is None or dane[1] != targets.ORPHAN_MOVED:
+            return
+        canon, _stan, gdzie, status, priority, note = dane
+        repo.set_target_plan(self.con, canon=gdzie, status=status, priority=priority,
+                             note=note, now=self._now())
+        repo.clear_target_plan(self.con, canon=canon, now=self._now())
+        self._orphan_undo = None       # oznaczenie nie zginęło — nie ma czego cofać
+        self.status_message.emit(i18n.t("planner.orphan_moved", canon=canon, where=gdzie))
+        self._replan_keeping(gdzie)
+
+    def _on_orphan_undo(self):
+        if self._orphan_undo is None:
+            return
+        canon, status, priority, note = self._orphan_undo
+        repo.set_target_plan(self.con, canon=canon, status=status, priority=priority,
+                             note=note, now=self._now())
+        self._orphan_undo = None
+        self.status_message.emit(i18n.t("planner.orphan_undone", canon=canon))
+        self.replan()
 
     def _build_controls(self):
         """Progi w ZWIJANYM pasku. Zwijamy PRZYCISKIEM ze strzałką, nie `checkable QGroupBox`
@@ -791,6 +936,7 @@ class PlannerView(QWidget):
         self._shown_gen = gen
         self._rebuild_chips(result)
         self._render_header(result)
+        self._render_orphans(result)
         self._render_rows()
 
     @Slot(int, str)
@@ -804,6 +950,9 @@ class PlannerView(QWidget):
         self.counts_label.setText("")
         self.warn_label.setText("")
         self.notes_label.setText("")
+        # Sekcja sierot znika razem z wynikiem: przy nieudanym rachunku (baza bez stanowiska GPS)
+        # nie wiemy NIC o kurateli, a stara lista udawałaby świeży pomiar.
+        self._render_orphans(None)
         self.empty_note.setVisible(False)
         self.table.setVisible(True)
         self.status_message.emit(message)

@@ -204,9 +204,13 @@ def _partycja(con):
     archiwum i cofnięty stos wypadały z LEWEJ strony, zostając w prawej (`review_frame_ids` pyta
     o sam brak obiektu). Równanie domykało się tylko dopóki żaden taki nagrobek nie istniał."""
     q = queries.review_queue(con)
+    # DWIE KLASY UCIECZKI, obie po prawej stronie równania (`review_frame_ids` niesie oba
+    # guardy): klatka ZASTĄPIONA i WYCOFANA nie są robotą. Bez nich jedyny walidator partycji
+    # w repo jest ślepy dokładnie tam, gdzie równanie się rozjeżdża (bramka pakietu, Fable Z1).
     headerless_lights = con.execute(
         "SELECT count(*) FROM frame f WHERE f.kind IN ('light','master_light') "
         "AND f.object_id IS NULL "
+        "AND f.superseded_by IS NULL AND f.retired_at IS NULL "
         "AND NOT EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id)").fetchone()[0]
     return (sum(r["n"] for r in q["object_review"])
             + q["nameless_count"] + q["nameless_cleared_count"]

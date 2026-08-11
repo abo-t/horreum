@@ -962,6 +962,12 @@ CATALOG = {
         "en": "in the catalogue as {where}",
     },
     "planner.orphan_move": {"pl": "Przenieś", "en": "Move"},
+    "planner.orphan_move_taken": {
+        "pl": "{where} ma już własne oznaczenie — przeniesienie nadpisałoby je. "
+              "Zdejmij je najpierw albo zdejmij tę sierotę.",
+        "en": "{where} already has its own mark — moving would overwrite it. "
+              "Clear it first, or clear this orphan instead.",
+    },
     "planner.orphan_move_tip": {
         "pl": "Przenieś oznaczenie (status, priorytet i notatkę) na {where} — rekord, "
               "który przejął tę nazwę.",

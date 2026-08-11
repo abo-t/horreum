@@ -602,6 +602,15 @@ class PlannerView(QWidget):
         if dane is None or dane[1] != targets.ORPHAN_MOVED:
             return
         canon, _stan, gdzie, status, priority, note = dane
+        # ⛔ CEL DOCELOWY MOŻE JUŻ MIEĆ WŁASNĄ, ŚWIEŻSZĄ KURATELĘ — i to nie jest przypadek
+        # brzegowy, tylko GŁÓWNY scenariusz tego stanu: przebudowa assetu przenosi nazwę, człowiek
+        # oznacza cel od nowa pod nazwą BIEŻĄCĄ, a stara sierota zostaje. `set_target_plan` pisze
+        # po kanonie, więc bez tego guarda „Przenieś" nadpisałoby jego świeższą decyzję STARSZYM
+        # wierszem — bezgłośnie i bez drogi powrotu w GUI. Paczka domykająca grupę „gest bez drogi
+        # powrotu" nie ma prawa wnieść gestu, który NISZCZY cudzy zapis (bramka pakietu, Fable Z2).
+        if targets.plan_marks(self.con).get(gdzie) is not None:
+            self.status_message.emit(i18n.t("planner.orphan_move_taken", where=gdzie))
+            return
         repo.set_target_plan(self.con, canon=gdzie, status=status, priority=priority,
                              note=note, now=self._now())
         repo.clear_target_plan(self.con, canon=canon, now=self._now())

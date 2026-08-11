@@ -600,3 +600,23 @@ def test_przeniesienie_zachowuje_cala_decyzje_czlowieka(view):
     row = view.con.execute("SELECT * FROM target_plan WHERE canon = 'C9'").fetchone()
     assert (row["status"], row["priority"], row["note"]) == ("active", 1, "domknac SII")
     assert view._orphan_box.isHidden()                    # populacja zeszła do zera
+
+
+def test_przeniesienie_NIE_nadpisuje_zywej_kurateli_celu(view):
+    """SEDNO, złapane bramką pakietu (Fable Z2): cel docelowy może mieć WŁASNĄ, świeższą kuratelę —
+    i to jest GŁÓWNY scenariusz tego stanu, nie brzeg. Przebudowa assetu przenosi nazwę, człowiek
+    oznacza cel od nowa pod nazwą bieżącą, a stara sierota zostaje. `set_target_plan` pisze po
+    kanonie, więc bez guarda „Przenieś" nadpisałoby świeższą decyzję STARSZYM wierszem —
+    bezgłośnie i bez drogi powrotu w GUI."""
+    view.con.execute(
+        "INSERT INTO target_plan(canon, status, priority, note, created_at, updated_at) "
+        "VALUES ('C9', 'active', 1, 'swieza decyzja', ?, ?)", (NOW, NOW))
+    view.con.commit()
+    _osierocone(view, "LBN529", status="planned", priority=9, note="stara sierota")
+    view.orphan_list.setCurrentRow(0)
+    view._on_orphan_move()
+    row = view.con.execute("SELECT * FROM target_plan WHERE canon = 'C9'").fetchone()
+    assert (row["status"], row["priority"], row["note"]) == ("active", 1, "swieza decyzja")
+    # …a sierota ZOSTAJE — gest odmówił, więc niczego nie zgubił
+    assert view.con.execute("SELECT count(*) FROM target_plan WHERE canon = 'LBN529'"
+                            ).fetchone()[0] == 1

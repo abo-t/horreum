@@ -280,6 +280,7 @@ def path_proposals(con):
         "                                WHERE frame_id = f.id AND present = 1) "
         "WHERE f.kind = 'light' AND f.object_id IS NULL "
         "  AND f.superseded_by IS NULL "
+        "  AND f.retired_at IS NULL "
         "  AND h.object_raw IS NULL "
         "  AND f.object_source IS NULL "
         "  AND f.filetype IN (SELECT value FROM json_each(?)) "
@@ -530,26 +531,31 @@ def review_state(con):
     no_config = con.execute(
         "SELECT count(*) FROM frame f WHERE f.config_id IS NULL "
         "AND f.superseded_by IS NULL "
+        "AND f.retired_at IS NULL "
         "AND f.kind NOT IN (SELECT value FROM json_each(?)) "
         "AND EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id)", (off_axis,)).fetchone()[0]
     headerless = con.execute(
         "SELECT count(*) FROM frame f WHERE f.superseded_by IS NULL "
+        "AND f.retired_at IS NULL "
         "AND NOT EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id)").fetchone()[0]
     no_camera = con.execute(
         "SELECT count(*) FROM frame f WHERE f.camera_id IS NULL "
         "AND f.superseded_by IS NULL "
+        "AND f.retired_at IS NULL "
         "AND EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id)").fetchone()[0]
     kind_unknown = con.execute(
         "SELECT count(*) FROM frame f WHERE f.kind = 'unknown' "
         "AND f.superseded_by IS NULL "
+        "AND f.retired_at IS NULL "
         "AND EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id)").fetchone()[0]
     # #13: DISTINCT klatek z ≥1 kopią oznaczoną nieczytelną (fakt o KOPII zliczony po klatkach —
     # spójność z resztą liczników). Join po location; DISTINCT bo frame 1:N location.
     unreadable = con.execute(
         "SELECT count(DISTINCT f.id) FROM frame f JOIN location l ON l.frame_id = f.id "
-        "WHERE f.superseded_by IS NULL AND l.unreadable_since IS NOT NULL").fetchone()[0]
+        "WHERE f.superseded_by IS NULL AND f.retired_at IS NULL "
+        "AND l.unreadable_since IS NOT NULL").fetchone()[0]
     total = con.execute(
-        "SELECT count(*) FROM frame f WHERE f.superseded_by IS NULL AND ("
+        "SELECT count(*) FROM frame f WHERE f.superseded_by IS NULL AND f.retired_at IS NULL AND ("
         "NOT EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id) "
         "OR (((f.config_id IS NULL "
         "      AND f.kind NOT IN (SELECT value FROM json_each(?))) "
@@ -632,6 +638,7 @@ def nameless_lights(con):
         "SELECT count(*) FROM frame f JOIN header h ON h.frame_id = f.id "
         "WHERE f.kind = 'light' AND f.object_id IS NULL "
         "AND f.superseded_by IS NULL "
+        "AND f.retired_at IS NULL "
         "AND h.object_raw IS NULL "
         "AND f.filetype NOT IN (SELECT value FROM json_each(?))",
         (json.dumps(list(NO_OBJECT_CARD_FILETYPES)),)).fetchone()[0]
@@ -657,6 +664,7 @@ def nameless_raw_lights(con):
         "SELECT count(*) FROM frame f JOIN header h ON h.frame_id = f.id "
         "WHERE f.kind = 'light' AND f.object_id IS NULL "
         "AND f.superseded_by IS NULL "
+        "AND f.retired_at IS NULL "
         "AND h.object_raw IS NULL "
         "AND f.filetype IN (SELECT value FROM json_each(?))",
         (json.dumps(list(NO_OBJECT_CARD_FILETYPES)),)).fetchone()[0]
@@ -683,6 +691,7 @@ def nameless_stacks(con):
         "SELECT count(*) FROM frame f JOIN header h ON h.frame_id = f.id "
         "WHERE f.kind = 'master_light' AND f.object_id IS NULL "
         "AND f.superseded_by IS NULL "
+        "AND f.retired_at IS NULL "
         "AND h.object_raw IS NULL").fetchone()[0]
 
 
@@ -759,20 +768,24 @@ def delta_report(con, top=30):
     resolved = con.execute(
         "SELECT count(*) FROM frame f JOIN header h ON h.frame_id = f.id "
         "WHERE f.kind IN ('light','master_light') AND f.object_id IS NOT NULL "
+        "AND f.retired_at IS NULL "
         "AND h.object_raw IS NOT NULL").fetchone()[0]
     resolved_no_raw = con.execute(
         "SELECT count(*) FROM frame f LEFT JOIN header h ON h.frame_id = f.id "
         "WHERE f.kind IN ('light','master_light') AND f.object_id IS NOT NULL "
+        "AND f.retired_at IS NULL "
         "AND h.object_raw IS NULL").fetchone()[0]
     unresolved = con.execute(
         "SELECT count(*) FROM frame f JOIN header h ON h.frame_id = f.id "
         "WHERE f.kind IN ('light','master_light') AND f.object_id IS NULL "
+        "AND f.retired_at IS NULL "
         "AND h.object_raw IS NOT NULL").fetchone()[0]
     total = resolved + unresolved
     pct = round(100.0 * resolved / total, 1) if total else 0.0
     delta = con.execute(
         "SELECT h.object_raw AS raw, count(*) AS n FROM frame f JOIN header h ON h.frame_id = f.id "
         "WHERE f.kind IN ('light','master_light') AND f.object_id IS NULL "
+        "AND f.retired_at IS NULL "
         "AND h.object_raw IS NOT NULL GROUP BY h.object_raw ORDER BY n DESC, raw LIMIT ?",
         (top,)).fetchall()
     # Nagrobki rozbite po TEJ SAMEJ granicy, którą raport trzyma wyżej (`object_raw` obecny czy nie),
@@ -783,7 +796,8 @@ def delta_report(con, top=30):
         "SELECT count(*) FILTER (WHERE h.object_raw IS NOT NULL), "
         "       count(*) FILTER (WHERE h.object_raw IS NULL) "
         "FROM frame f LEFT JOIN header h ON h.frame_id = f.id "
-        "WHERE f.kind IN ('light','master_light') AND f.object_source = 'user_cleared'"
+        "WHERE f.kind IN ('light','master_light') AND f.retired_at IS NULL "
+        "AND f.object_source = 'user_cleared'"
     ).fetchone()
     filters_canon = con.execute(
         "SELECT count(*) FROM frame WHERE filter_canon IS NOT NULL").fetchone()[0]

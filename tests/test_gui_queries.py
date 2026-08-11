@@ -145,7 +145,14 @@ def test_tasks_state_liczniki_na_s8_obj(s8_obj):
     jest właściwa odpowiedź: brak przebiegu rodowodu to nie to samo, co robota do zrobienia —
     a `superseded_frames` doszedł 0809 z perspektywą „Zastąpione" i też jest ZEREM, bo fixture nie
     zna podmiany treści. Zero jest tu WŁAŚCIWE dwa razy z różnych powodów i oba są wypowiedziane,
-    żeby przyszła zmiana nie wzięła braku populacji za dowód poprawności predykatu."""
+    żeby przyszła zmiana nie wzięła braku populacji za dowód poprawności predykatu.
+
+    Od D-OW-3/R2 kluczy jest DZIEWIĘĆ: doszły `retired_frames` (perspektywa „Wycofane" — zapis
+    historii) i `retired_conflict_frames` („wycofana, a plik wrócił" — jedyny z dwóch, który JEST
+    robotą). Oba są tu ZEREM z trzeciego, znowu innego powodu: fixture nie zna gestu wycofania.
+    ⚠ Zero w `retired_conflict_frames` jest przy tym NIETRYWIALNE — `vanished_frames` liczy w tej
+    fixture klatkę `present0`, więc gdyby guard wycofania pomylił kierunek, ta sama klatka wpadłaby
+    tutaj i licznik pokazałby 1."""
     con, ids = s8_obj
     st = queries.tasks_state(con)
     assert st == {
@@ -155,6 +162,8 @@ def test_tasks_state_liczniki_na_s8_obj(s8_obj):
         "telescopes_unlabeled": 4,
         "observatories_unnamed": 0,
         "vanished_frames": 1,
+        "retired_frames": 0,
+        "retired_conflict_frames": 0,
         "superseded_frames": 0,
     }
 

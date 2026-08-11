@@ -39,14 +39,17 @@ _GRID = {
         # superseded_bg sepia: klatka ZASTĄPIONA nie jest awarią (czerwień „zniknięte") ani
         # osobliwością do rozstrzygnięcia (błękit „duplikaty") — jest ZAPISEM HISTORII, więc dostaje
         # ton archiwalny. Oś ciepła też ją oddziela od obu neutrali (group_bg\skipped_bg).
+        # retired_bg fiolet: klatka WYCOFANA to też zapis historii, ale zamknięty CZYJĄŚ DECYZJĄ,
+        # nie faktem o świecie — a ta różnica jest robocza (wycofanie ręka cofa jednym gestem,
+        # zastąpienia nie cofa nikt), więc ton ma być odróżnialny od sepii, nie jej odcieniem.
         "missing": "#8A8A8A", "vanished_bg": "#4A2A2A", "dup_bg": "#22344A",
         "group_bg": "#3C3C3C", "touched_bg": "#274427", "skipped_bg": "#2C2C2C",
-        "superseded_bg": "#403524",
+        "superseded_bg": "#403524", "retired_bg": "#33294A",
     },
     "light": {
         "missing": "#999999", "vanished_bg": "#FFE5E5", "dup_bg": "#E5F0FF",
         "group_bg": "#E4E4E4", "touched_bg": "#E3F6E3", "skipped_bg": "#F2F2F2",
-        "superseded_bg": "#F3EBD8",
+        "superseded_bg": "#F3EBD8", "retired_bg": "#EDE7F6",
     },
 }
 
@@ -99,7 +102,7 @@ def palette_spec(name):
 
 def grid_colors(name):
     """Kolory stanów gridu → hex.
-    Klucze: missing/vanished_bg/dup_bg/group_bg/touched_bg/skipped_bg/superseded_bg."""
+    Klucze: missing/vanished_bg/dup_bg/group_bg/touched_bg/skipped_bg/superseded_bg/retired_bg."""
     return _spec(_GRID, name)
 
 

@@ -30,7 +30,8 @@ from horreum.gui import i18n, queries, rows, theme
 from horreum.gui.app import (
     ObjectAxisView, ObservatoryAxisView, TelescopeAxisView, _utc_now_iso,
 )
-from horreum.gui.grid import PRESET_DUPS, PRESET_LINEAGE, PRESET_SUPERSEDED, PRESET_VANISHED
+from horreum.gui.grid import (PRESET_DUPS, PRESET_LINEAGE, PRESET_RETIRED, PRESET_SUPERSEDED,
+                              PRESET_VANISHED)
 from horreum.gui.rows import TwoPartDelegate
 
 # Definicja listy zadań: (klucz stanu z `tasks_state`, etykieta, akcja). Akcja: numer podstrony
@@ -82,6 +83,14 @@ _TASKS = [
     # treść przejęła następczyni. Stoi tu, bo od 0809 wypadła z WSZYSTKICH kubełków kolejki
     # (nie jest robotą), a bez tej pozycji jedyną drogą do niej byłby przypadek w gridzie pełnym.
     ("superseded_frames", "tasks.superseded_frames", PRESET_SUPERSEDED),
+    # Dwa wiersze jednej kolumny (D-OW-3/R2), o RÓŻNEJ naturze — i to rozróżnienie jest tu całą
+    # treścią. „Wycofane" to zapis historii jak „Zastąpione": klatka nie wymaga niczego, stoi na
+    # liście po to, żeby dało się ją znaleźć i PRZYWRÓCIĆ. „Wycofane, a plik wrócił" jest ROBOTĄ,
+    # bo to jedyny stan, w którym ŻYWA klatka wypada ze wszystkich kubełków — gdyby i on był
+    # informacyjny, gest wycofania cicho ukrywałby materiał, który wrócił na dysk, czyli wnosiłby
+    # dokładnie ten defekt, który ta paczka leczy.
+    ("retired_frames", "tasks.retired_frames", PRESET_RETIRED),
+    ("retired_conflict_frames", "tasks.retired_conflict_frames", PRESET_RETIRED),
 ]
 
 # TRZECI STAN WIERSZA: KLIKALNY, ALE NIE ROBOTA. Do 0809 lista znała dwa — informacyjny (cel `None`,
@@ -91,7 +100,7 @@ _TASKS = [
 # drzwiami odtwarzał dokładnie ten defekt, który pakiet kolejki wyleczył w kubełkach (bramka 3a
 # 0809, zarzut `kimi` #4). Klucz, nie flaga w krotce: krotka opisuje POZYCJĘ, a to jest fakt o jej
 # NATURZE, i tak samo czyta go badge, jak i pogrubienie.
-_BEZ_ROBOTY = frozenset({"superseded_frames"})
+_BEZ_ROBOTY = frozenset({"superseded_frames", "retired_frames"})
 
 
 class TasksView(QWidget):

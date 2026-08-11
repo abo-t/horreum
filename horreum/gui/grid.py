@@ -123,6 +123,16 @@ def _vanished_tip(row):
     return i18n.t("grid.tip.vanished_at", ts=str(ts)[:16].replace("T", " "))
 
 
+def _retired_tip(row):
+    """Człon tooltipu ścieżki dla klatki WYCOFANEJ RĘKĄ — ZAWSZE z datą i ZAWSZE z drogą powrotu.
+
+    Data jest tu treścią, nie ozdobą: to jedyny fakt o wycofaniu, którego po geście nie da się
+    odtworzyć skądinąd (`retired_at` jest jego jedynym nośnikiem). Wzmianka o powrocie stoi
+    w tooltipie, a nie tylko w menu, bo tooltip czyta się DOKŁADNIE w chwili wątpliwości
+    („czemu ten wiersz jest inny") — a wtedy wiedza „to się cofa" jest najwięcej warta."""
+    return i18n.t("grid.tip.retired", ts=str(row.get("retired_at"))[:16].replace("T", " "))
+
+
 def _superseded_tip(row):
     """Człon tooltipu ścieżki dla klatki ZASTĄPIONEJ — ZAWSZE z adresem następczyni.
 
@@ -172,6 +182,11 @@ PRESET_LINEAGE = "Rodowód"
 # byłaby wyłącznie w gridzie pełnym — czyli do znalezienia tylko przez przypadek. Stała współdzielona
 # z TasksView po nazwie, jak trzej sąsiedzi wyżej.
 PRESET_SUPERSEDED = "Zastąpione"
+# PRESET_RETIRED — piąty bliźniak (D-OW-3/R2). Klatka WYCOFANA ręką wypada z kubełków roboczych
+# dokładnie tak jak zastąpiona, więc bez własnej perspektywy nie byłoby ani jak jej znaleźć, ani
+# — co ważniejsze — jak jej PRZYWRÓCIĆ: gest powrotu bierze cel z zaznaczenia, a zaznaczyć można
+# tylko to, co widać. Perspektywa nie jest tu więc wygodą, tylko drugą połową odwracalności.
+PRESET_RETIRED = "Wycofane"
 PRESETS = {
     "Przegląd": {"filter": None, "group_by": None},
     "Kalibracja": {"filter": {"op": "OR", "conditions": [
@@ -183,6 +198,7 @@ PRESETS = {
     PRESET_VANISHED: {"filter": None, "group_by": None, "only_vanished": True},
     PRESET_LINEAGE: {"filter": None, "group_by": None, "only_lineage": True},
     PRESET_SUPERSEDED: {"filter": None, "group_by": None, "only_superseded": True},
+    PRESET_RETIRED: {"filter": None, "group_by": None, "only_retired": True},
     "Do przeglądu": {"filter": None, "group_by": None, "only_review": True},
 }
 # Etykieta WYŚWIETLANIA presetu (tekst) osobno od TOŻSAMOŚCI (klucz PRESETS w `itemData` — używany przez
@@ -194,6 +210,7 @@ _PRESET_LABELS = {
     PRESET_VANISHED: "perspective.vanished",
     PRESET_LINEAGE: "perspective.lineage",
     PRESET_SUPERSEDED: "perspective.superseded",
+    PRESET_RETIRED: "perspective.retired",
     "Do przeglądu": "perspective.to_review",
 }
 
@@ -386,8 +403,15 @@ class GridTableModel(QAbstractTableModel):
         # ZASTĄPIONA bije ZNIKNIĘTĄ, bo to nie są dwa odcienie jednego stanu: klatka bez ani jednej
         # kopii wygląda tak samo w obu, ale w pierwszym przypadku jest robota (znajdź plik), a w
         # drugim nie ma żadnej — treść przejęła następczyni. Kolejność `if`-ów JEST tą regułą.
+        #
+        # WYCOFANA (D-OW-3/R2) wchodzi POMIĘDZY, i ta sama reguła to dyktuje: „nie ma tu roboty"
+        # bije „jest robota", a spośród dwóch stanów bez roboty pierwszeństwo ma ten, który mówi,
+        # DOKĄD poszła treść. Pełna hierarchia: zastąpiona > wycofana > zniknięta > duplikat.
+        # Bez tego wiersz w perspektywie „Wycofane" byłby pomalowany i opisany jako ZNIKNIĘTY,
+        # czyli ekran wołałby o robotę, którą człowiek przed chwilą zamknął.
         superseded = row.get("superseded_by") is not None
-        vanished = (not superseded and row.get("present") == 0
+        retired = not superseded and row.get("retired_at") is not None
+        vanished = (not superseded and not retired and row.get("present") == 0
                     and (row.get("n_present") or 0) == 0)
         dup = (row.get("n_present") or 0) > 1
         if role == Qt.BackgroundRole:
@@ -398,6 +422,8 @@ class GridTableModel(QAbstractTableModel):
                 return _COLORS["skipped_bg"] if "skipped" in pv else _COLORS["touched_bg"]
             if superseded:
                 return _COLORS["superseded_bg"]
+            if retired:
+                return _COLORS["retired_bg"]
             if vanished:
                 return _COLORS["vanished_bg"]
             if dup:
@@ -412,12 +438,18 @@ class GridTableModel(QAbstractTableModel):
                 # a ten wiersz ma się tłumaczyć sam — inaczej wygląda jak plik, który zginął.
                 if superseded:
                     return i18n.t("grid.cell.superseded", id=row.get("superseded_by"))
+                # Wycofana MÓWI TO W KOMÓRCE z tego samego powodu, co zastąpiona: tło niesie kolor
+                # (a user bywa daltonistą albo ma inny motyw), tooltip wymaga najechania — a ten
+                # wiersz ma się tłumaczyć sam, inaczej wygląda jak plik, którego ktoś jeszcze szuka.
+                if retired:
+                    return i18n.t("grid.cell.retired", name=name)
                 # Prefiks „×N" PRZED nazwą (P2-2): sufiks ginął przy elizji długich ścieżek.
                 return f"×{row['n_present']}  {name}" if dup else name
             if role == Qt.ToolTipRole:
                 extra = _superseded_tip(row) if superseded else (
+                    _retired_tip(row) if retired else (
                     _vanished_tip(row) if vanished else (
-                        i18n.t("grid.tip.dup_locs", n=row['n_present']) if dup else ""))
+                        i18n.t("grid.tip.dup_locs", n=row['n_present']) if dup else "")))
                 return (path or i18n.t("object.no_location")) + extra
             return None
         if key == "_dt_delta":
@@ -1596,6 +1628,20 @@ def _lineage_flags(head):
     return " · ".join(ostrz), " · ".join(info)
 
 
+def _frame_gate_reason(n, alive):
+    """POWÓD wygaszenia kontrolki „Klatka ▾" jako klucz i18n — schodzi od najwęższego, jak
+    `_object_gate_reason`.
+
+    Rozróżnienie „nic nie zaznaczono" od „zaznaczyłeś klatki, których pliki żyją" jest tu całą
+    treścią: drugi przypadek to OCHRONA, która zadziałała, i user ma prawo wiedzieć, że gest go
+    nie zawiódł, tylko odmówił — inaczej wyszarzona kontrolka wygląda na usterkę."""
+    if not n:
+        return "grid.sel.frame_tip_empty"
+    if alive:
+        return "grid.sel.frame_tip_alive"
+    return "grid.sel.frame_tip_none"
+
+
 def _object_gate_reason(stan):
     """POWÓD wygaszenia kontrolki „Obiekt ▾" jako klucz i18n; `None` = jest co robić (R-S2b-8).
 
@@ -1684,12 +1730,29 @@ class SelectionBar(QFrame):
             act.setVisible(False)
             act.triggered.connect(lambda _checked=False, a=act: self.objectRecentPicked.emit(*a.data()))
         self.btn_object.setMenu(menu)
+        # OŚ ŻYWOTNOŚCI KLATKI (D-OW-3/R2) — druga kontrolka z menu, tym samym argumentem co
+        # „Obiekt ▾" (D-OW-6): obie pozycje to jedna sprawa („czy ta klatka jest jeszcze robotą"),
+        # a dwa osobne przyciski rozsypałyby pasek. ⛔ Do menu obiektu tego NIE wkładamy: tamto
+        # menu ma własny słownik powodów (`_object_gate_reason` → klucze `grid.sel.object_tip_*`),
+        # więc wspólna kontrolka kazałaby jednemu tooltipowi tłumaczyć dwie różne osie.
+        self.btn_frame = QToolButton()
+        self.btn_frame.setText(i18n.t("grid.sel.frame"))
+        self.btn_frame.setPopupMode(QToolButton.InstantPopup)
+        fmenu = QMenu(self.btn_frame)
+        self.act_retire = fmenu.addAction(i18n.t("grid.sel.frame_retire"))
+        # DROGA POWROTU STOI OBOK GESTU, KTÓRY JEJ WYMAGA — ta sama reguła, co przy `act_restore`
+        # osi obiektu: pozycja widoczna ZAWSZE, także wygaszona, bo o odwracalności trzeba wiedzieć
+        # PRZED pomyłką. Tu waży to podwójnie: wycofanie zdejmuje klatkę z oczu, więc bez tej
+        # pozycji user nie miałby skąd wiedzieć, że gest w ogóle się cofa.
+        self.act_frame_restore = fmenu.addAction(i18n.t("grid.sel.frame_restore"))
+        self.btn_frame.setMenu(fmenu)
         self.btn_save = QPushButton(i18n.t("grid.sel.save_view"))
         # RÓWNA WYSOKOŚĆ W RZĘDZIE (R-S2b-11): `QToolButton` liczy `sizeHint` inaczej niż
         # `QPushButton` i wychodził o 1 px niższy od sześciu sąsiadów — jedyny widżet innej klasy
         # w rzędzie wyglądał jak wpadka układu. Wysokość bierzemy z SĄSIADA, nie z liczby: stała
         # rozjechałaby się przy pierwszej zmianie motywu albo skali DPI.
         self.btn_object.setFixedHeight(self.btn_save.sizeHint().height())
+        self.btn_frame.setFixedHeight(self.btn_save.sizeHint().height())
         lay.addWidget(self.count_label); lay.addSpacing(8)
         lay.addWidget(self.criteria_label, 1)
         # Złota akcja WYJĘTA z klastra pomocniczych (wizytacja P-C #6): sam bold przegrywał wzrokowo
@@ -1699,7 +1762,8 @@ class SelectionBar(QFrame):
         lay.addSpacing(12); lay.addWidget(self.btn_proj); lay.addSpacing(12)
         lay.addWidget(self.btn_macro)
         lay.addWidget(self.btn_rename); lay.addWidget(self.btn_lineage)
-        lay.addWidget(self.btn_object); lay.addWidget(self.btn_save)
+        lay.addWidget(self.btn_object); lay.addWidget(self.btn_frame)
+        lay.addWidget(self.btn_save)
 
     def set_criteria(self, text):
         self.criteria_label.set_full_text(text)
@@ -1747,6 +1811,25 @@ class SelectionBar(QFrame):
         if stacks:
             tip += i18n.t_plural("grid.sel.object_stacks", stacks)
         self.btn_object.setToolTip(tip)
+
+    def set_frame_actions(self, *, retirable, restorable, reason=None):
+        """Uczciwy disabled osi żywotności klatki (D-OW-3/R2) — wzorzec `set_object_actions`.
+
+        Powód wygaszenia liczy `_frame_gate_reason` i niesie go tooltip KONTROLKI: menu w tym repo
+        nie pokazuje tooltipów pozycji, a szara kontrolka bez powodu odbiera jedyną powierzchnię,
+        która mogła cokolwiek wytłumaczyć (dług R-S2b-8, zamknięty na sąsiedniej osi).
+
+        Liczby biorą się z WIERSZY, które i tak są na ekranie (`base_rows` niesie `retired_at`,
+        `present`, `n_present`, `superseded_by`) — bez nowego zapytania w gorącej pętli zaznaczenia.
+        To jest PREZENTACJA, nie prawda: prawdę rozstrzyga klinga wewnątrz transakcji, bo między
+        zaznaczeniem a zapisem plik może wrócić na dysk."""
+        self.act_retire.setEnabled(bool(retirable))
+        self.act_frame_restore.setEnabled(bool(restorable))
+        aktywna = bool(retirable or restorable)
+        self.btn_frame.setEnabled(aktywna)
+        self.btn_frame.setToolTip(
+            i18n.t("grid.sel.frame_tip_ready", retirable=retirable, restorable=restorable)
+            if aktywna else i18n.t(reason or "grid.sel.frame_tip_empty"))
 
     def set_recent_objects(self, obiekty):
         """Skrót „ostatnio użyte" na dole menu obiektu (R-S2b-12) — 5 interakcji spada do 2.
@@ -1977,6 +2060,7 @@ class FramesView(QWidget):
         self._only_vanished = False
         self._only_lineage = False
         self._only_superseded = False
+        self._only_retired = False
         self._reveal_facet = None   # (facet, wartość) do odsłonięcia w listwie — patrz `apply_object_facet`
         self._frame_ids = []      # frame_id widoczne w gridzie (cel makra) — aktualizowane w refresh()
         self._run_id = None       # JEDEN run_id sesji makra (R#5 lifecycle: stage→commit/reject zwalnia)
@@ -2070,6 +2154,8 @@ class FramesView(QWidget):
         self.sel_bar.act_name.triggered.connect(self._on_object_name)
         self.sel_bar.act_clear.triggered.connect(self._on_object_clear)
         self.sel_bar.act_restore.triggered.connect(self._on_object_restore)
+        self.sel_bar.act_retire.triggered.connect(self._on_frame_retire)
+        self.sel_bar.act_frame_restore.triggered.connect(self._on_frame_restore)
         # Skrót „ostatnio użyte" (R-S2b-12): lista jest pochodną dziennika, więc odświeża się
         # PRZY OTWARCIU menu, nie raz na budowie widoku — inaczej pokazywałaby stan sprzed gestów.
         self.sel_bar.btn_object.menu().aboutToShow.connect(self._sync_recent_objects)
@@ -2219,6 +2305,7 @@ class FramesView(QWidget):
         self._only_vanished = bool(spec.get("only_vanished"))
         self._only_lineage = bool(spec.get("only_lineage"))
         self._only_superseded = bool(spec.get("only_superseded"))
+        self._only_retired = bool(spec.get("only_retired"))
         self._filter_tree = spec.get("filter")
         # F4R#2: stan facetów resetowany dla KAŻDEJ perspektywy (preset ORAZ zapisana) — perspektywa
         # definiuje CAŁY zbiór; stara zapisana bez klucza "facets" MUSI zerować stan, inaczej facety
@@ -2253,6 +2340,7 @@ class FramesView(QWidget):
         przeładowanie listwy."""
         self._only_dups = self._only_review = self._only_vanished = self._only_lineage = False
         self._only_superseded = False
+        self._only_retired = False
         self._filter_tree = None
         self.filter_panel.set_tree(None)
         self._facet_state = {"object": {"in": [[oid, canon] for oid, canon in pairs]}} \
@@ -2290,6 +2378,7 @@ class FramesView(QWidget):
             "only_dups": self._only_dups, "only_review": self._only_review,
             "only_vanished": self._only_vanished, "only_lineage": self._only_lineage,
             "only_superseded": self._only_superseded,
+            "only_retired": self._only_retired,
             "facets": self._facet_state,   # OSOBNO od "filter" (nota R2) — set_tree nigdy ich nie widzi
         }
         # Zapis idzie do BAZY (I-1) — perspektywa jedzie z archiwum, nie z tą maszyną. Czasownik
@@ -2791,6 +2880,8 @@ class FramesView(QWidget):
             parts.append(i18n.t("grid.criteria.only_lineage"))
         if self._only_superseded:
             parts.append(i18n.t("grid.criteria.only_superseded"))
+        if self._only_retired:
+            parts.append(i18n.t("grid.criteria.only_retired"))
         return " · ".join(parts)
 
     # ---- reakcje ----
@@ -2848,11 +2939,12 @@ class FramesView(QWidget):
         gone_ids = queries.vanished_frame_ids(self.con) if self._only_vanished else None
         lin_ids = queries.lineage_pending_frame_ids(self.con) if self._only_lineage else None
         sup_ids = queries.superseded_frame_ids(self.con) if self._only_superseded else None
+        ret_ids = queries.retired_frame_ids(self.con) if self._only_retired else None
         # NOWY set, NIGDY `&=`: przy pustym filtrze `filter_engine.run` zwraca uniwersum WPROST
         # (`filter_engine.py:171`), a to jest ZAPAMIĘTANY obiekt memoizacji (`_memo_leaf_fns`).
         # `&=` przycinało go W MIEJSCU, więc kolejne `universe_fn()` widziało już przycięty zbiór —
         # perspektywa z trimem potrafiła pokazać „Baza pusta" na pełnej bazie (wizytator P5 #2).
-        for trim in (dup_ids, review_ids, gone_ids, lin_ids, sup_ids):
+        for trim in (dup_ids, review_ids, gone_ids, lin_ids, sup_ids, ret_ids):
             if trim is not None:
                 frame_ids = frame_ids & trim
         base = [_derive(r) for r in queries.base_rows(self.con, list(frame_ids))]
@@ -3000,6 +3092,70 @@ class FramesView(QWidget):
             stacks=stan["stacks_touchable"] if stan else 0,
             restorable=stan["restorable"] if stan else 0,
             reason=_object_gate_reason(stan))
+        # OŚ ŻYWOTNOŚCI liczy się z TYCH SAMYCH wierszy, bez drugiego zapytania: `base_rows` niesie
+        # komplet (`retired_at`, `superseded_by`, `present`, `n_present`). Predykat jest lustrem
+        # guardów klingi (`repo._retire_verdict`) — a rozstrzyga i tak klinga, w transakcji.
+        retirable = sum(1 for r in rows
+                        if r.get("retired_at") is None and r.get("superseded_by") is None
+                        and r.get("present") == 0 and (r.get("n_present") or 0) == 0)
+        restorable = sum(1 for r in rows if r.get("retired_at") is not None)
+        alive = sum(1 for r in rows if (r.get("n_present") or 0) > 0)
+        self.sel_bar.set_frame_actions(retirable=retirable, restorable=restorable,
+                                       reason=_frame_gate_reason(len(rows), alive))
+
+    # ---- oś ŻYWOTNOŚCI klatki (D-OW-3/R2) ----
+
+    def _on_frame_retire(self):
+        """„Wycofaj klatkę…": zamyka sprawę klatki, której pliku już nie ma na dysku.
+
+        POTWIERDZENIE, w odróżnieniu od sąsiadów z osi obiektu, i to z jednego powodu: skutek tego
+        gestu jest NIEWIDOCZNY NATYCHMIAST — klatka wypada z kubełków i z bieżącej perspektywy,
+        więc ekran po geście nie pokazuje tego, co się właśnie stało. Okno podaje liczbę, którą
+        gest realnie ruszy (tę samą, co tooltip kontrolki), zanim cokolwiek zostanie zapisane.
+
+        Cel = ZAZNACZENIE, jak wszystkie gesty pasków w tym widoku. Klatki żywe, zastąpione
+        i już wycofane odsiewa KLINGA (`repo._retire_verdict`), nie ten slot: filtr w read-modelu
+        stałby POZA transakcją, więc plik, który wrócił między oknem a zapisem, przeszedłby."""
+        ids = self._object_gesture_ids()
+        if not ids:
+            return
+        if QMessageBox.question(
+                self, i18n.t("grid.sel.frame_retire"),
+                i18n.t("grid.sel.frame_retire_ask", n=len(ids))) != QMessageBox.Yes:
+            return
+        gest = repo.retire_frames(self.con, frame_ids=ids, now=self._now())
+        self._po_gescie_klatki("grid.sel.frame_retired", gest)
+
+    def _on_frame_restore(self):
+        """„Przywróć klatkę" — DROGA POWROTU z wycofania. Bez potwierdzenia, bo gest jest
+        NIEDESTRUKCYJNY i odwraca cudzy skutek: pytanie o zgodę na naprawę pomyłki byłoby
+        kolejną przeszkodą dokładnie tam, gdzie człowiek już raz się pomylił."""
+        ids = self._object_gesture_ids()
+        if not ids:
+            return
+        gest = repo.restore_frames(self.con, frame_ids=ids, now=self._now())
+        self._po_gescie_klatki("grid.sel.frame_restored", gest)
+
+    def _po_gescie_klatki(self, klucz, gest):
+        """Ogon gestów osi żywotności: zdanie z ROZBICIEM per powód + odświeżenie + zaznaczenie.
+
+        Rozbicie idzie z `RetireGesture.skipped_breakdown` (JEDEN właściciel składu), nie z literału
+        tutaj — ta sama lekcja, którą repo dostało już na osi obiektu: człon dołożony później
+        wpadał do sumy „z M" i znikał z rozbicia, czyli z jedynego miejsca, gdzie tłumaczył."""
+        zaznaczone = [r["frame_id"] for r in self._selected_data_rows()]
+        msg = i18n.t(klucz, done=gest.done, total=gest.done + gest.skipped)
+        for sufiks, n in gest.skipped_breakdown:
+            if n:
+                msg += i18n.t(f"grid.sel.frame_skip_{sufiks}", n=n)
+        if gest.done:
+            self.refresh()
+            self._przywroc_zaznaczenie(zaznaczone)
+        # ZDANIE PO ODŚWIEŻENIU I TYLKO JEDNO — repo dostało tę klasę już DWA RAZY na sąsiedniej
+        # osi: `refresh()` kończy własnym `status_message`, a odbiornikiem obu jest jeden
+        # `showMessage`, więc emisja przed odświeżeniem ginie w tym samym obrocie pętli zdarzeń.
+        # Waży to tu podwójnie: po udanym wycofaniu klatka ZNIKA z perspektywy, więc to zdanie
+        # bywa jedynym śladem, że gest się odbył.
+        self.status_message.emit(msg)
 
     # ---- panel inspekcji daty (G1/G4 — RenameBar) ----
     def _selected_data_rows(self):

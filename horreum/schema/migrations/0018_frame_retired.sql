@@ -1,0 +1,37 @@
+-- 0018 — WYCOFANIE KLATKI RĘKĄ: frame.retired_at (D-OW-3/R2, paczka G2 „gest bez drogi powrotu").
+--
+-- PRZYROST (ADD COLUMN, jak 0004/0006/0010/0014/0015/0017) — zero zmian istniejących tabel, zero
+-- wierszy ruszonych. Kolumna WCHODZI PUSTA: wypełnia ją KLINGA (`repo.retire_frames`), nie ta
+-- migracja i nie przebieg. Kanon repo (0004:3, `db.py`): migracja nakłada KSZTAŁT, fakty nakłada
+-- klinga. Backfillu NIE MA i mieć nie może — wycofanie jest WERDYKTEM CZŁOWIEKA, a werdyktu nie
+-- da się wyprowadzić z danych bez zgadywania, czyje by był.
+--
+-- CO ZNACZY: „człowiek zamknął sprawę tej klatki — jej pliku już nie szukam". Do tej migracji
+-- klatka bez ANI JEDNEJ obecnej kopii (`vanished_frame_ids`) miała w GUI perspektywę i licznik
+-- Porządków, i na tym się kończyło: tkwiła w kubełkach roboczych NA ZAWSZE, a jedynym wyjściem
+-- była kasacja wierszy — czyli utrata historii (C3, wyjątek z czterema strażnikami, 7 klatek).
+--
+-- ZNACZNIK CZASU, NIE FLAGA: „kiedy ręka to zamknęła" jest częścią historii i jedynym faktem,
+-- którego po wycofaniu nie da się odtworzyć skądinąd. `NULL` = klatka żywa albo przywrócona;
+-- trójstanu tu nie ma i mieć nie powinno — „nie wiem" i „nie wycofana" wyglądają dla każdego
+-- konsumenta tak samo (wzorzec `location.unreadable_since`, `repo.py:225-227`).
+--
+-- ⛔ STRAŻNIKA W DDL NIE MA — I TO JEST DECYZJA, NIE PRZEOCZENIE.
+-- Warunek, którego pilnuje klinga, brzmi „wolno wycofać wyłącznie klatkę bez OBECNEJ kopii", czyli
+-- jest zdaniem o tabeli `location`. `CHECK` widzi kolumny WŁASNEGO wiersza, więc go nie wyrazi
+-- (inaczej niż 0017, gdzie pamięć nagrobka wiąże się z `object_source` w tym samym wierszu).
+-- Triggera też nie stawiamy: w całej historii migracji tego repo nie ma ANI JEDNEGO
+-- (`grep TRIGGER horreum/schema/migrations/*` = 0), a trigger na `location` wywracałby skan za
+-- cudzy werdykt — plik wracający na dysk jest zwykłym faktem, nie naruszeniem.
+--
+-- STRAŻNIKIEM DEKLARATYWNYM JEST W TYM REPO INWARIANT AUDYTU. Precedens stoi obok i pilnuje
+-- BLIŹNIACZEGO zdania: `audit.supersede_invariants` (`audit.py`, kryterium akceptacji §5.15) liczy
+-- m.in. „zastąpiona z obecną kopią". Tą samą drogą idzie `audit.retire_invariants` (§5.17):
+--   * `wycofana_z_obecna_kopia` — PLIK WRÓCIŁ po wycofaniu. Nie awaria: powrót unieważnia
+--     PRZESŁANKĘ werdyktu, ale unieważnić sam werdykt może wyłącznie człowiek (warunek stały
+--     „ręka nietykalna" — wjazd materiału nie cofa gestu ręki). Dlatego stan ma być GŁOŚNY
+--     (własny, AKCYJNY wiersz Porządków), a nie naprawiany po cichu w którąkolwiek stronę.
+--   * `wycofana_bez_lokacji` — wycofano coś, co nie miało czego stracić: złamany guard klingi.
+--
+-- FK NIE MA, bo kolumna nie wskazuje na nic — niesie CZAS, nie tożsamość.
+ALTER TABLE frame ADD COLUMN retired_at TEXT;

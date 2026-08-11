@@ -15,7 +15,7 @@ Zasady:
 """
 import json
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .resolve._text import norm_alnum          # kierunek repo → resolve (liść; COHESION §2b)
 from .resolve.catalog import catalog_canon      # gramatyka katalogowa — CZYSTA, bez assetu (liść)
@@ -520,6 +520,126 @@ def clear_superseded(con, *, frame_id, now, actor="scan"):
         emit_event(con, actor=actor, verb="frame.supersede_cleared", target=f"frame:{frame_id}",
                    now=now, payload={"superseded_by_before": row["superseded_by"]})
     return True
+
+
+@dataclass(frozen=True)
+class RetireGesture:
+    """Wynik GESTU WYCOFANIA/PRZYWRÓCENIA klatki (D-OW-3/R2) — liczniki PER POWÓD, wzorem
+    `ObjectGesture`.
+
+    Jeden licznik „pominięto N" byłby prawdą bezużyteczną: zaznaczenie z paska Zbiorów bywa
+    mieszane, a cztery powody znaczą dla człowieka co INNEGO — „ochrona zadziałała, bo plik żyje"
+    to zupełnie inna wiadomość niż „to już było wycofane"."""
+    done: int = 0                  # klatki realnie wycofane albo przywrócone
+    skipped_present: int = 0       # ma OBECNĄ kopię — plik żyje, więc robota jest prawdziwa
+    skipped_no_location: int = 0   # bez ŻADNEJ lokacji (sierota po `rebind_location`) — inny stan
+    skipped_superseded: int = 0    # zastąpiona: jej sprawę zamknęła NASTĘPCZYNI, nie ta ręka
+    skipped_already: int = 0       # już w docelowym stanie (idempotencja)
+
+    @property
+    def skipped(self):
+        """Suma pominięć — właścicielem składu jest TA suma, żeby nowy człon nie wpadał do „z M"
+        i nie znikał z rozbicia (lekcja `ObjectGesture.skipped`)."""
+        return (self.skipped_present + self.skipped_no_location + self.skipped_superseded
+                + self.skipped_already)
+
+    @property
+    def skipped_breakdown(self):
+        """Rozbicie jako [(sufiks klucza i18n, n)] — JEDEN właściciel kolejności i składu."""
+        return [("present", self.skipped_present), ("no_location", self.skipped_no_location),
+                ("superseded", self.skipped_superseded), ("already", self.skipped_already)]
+
+
+def _retire_verdict(row):
+    """Który powód pomijania łapie tę klatkę przy WYCOFANIU — albo None, gdy wolno ją wycofać.
+
+    JEDEN właściciel kolejności guardów. Kolejność JEST regułą, tak jak przy tłowaniu gridu:
+    `superseded` bije `no_location`, bo klatka zastąpiona jest sierotą Z WYJAŚNIENIEM (jej treść
+    niesie następczyni), a sierota bez ogniwa to otwarte pytanie — zlanie ich w jeden powód
+    kazałoby ekranowi powiedzieć „bez lokalizacji" o klatce, o której wiadomo wszystko."""
+    if row["retired_at"] is not None:
+        return "skipped_already"
+    if row["superseded_by"] is not None:
+        return "skipped_superseded"
+    if row["n_locations"] == 0:
+        return "skipped_no_location"
+    if row["n_present"] > 0:
+        return "skipped_present"
+    return None
+
+
+def _retire_rows(con, frame_ids):
+    """Stan klatek potrzebny obu gestom, czytany JEDNYM literałem WEWNĄTRZ transakcji (TOCTOU).
+
+    Klatki spoza bazy po prostu nie wracają — gest opisuje to, co zastał, a nie to, o co pytał."""
+    return con.execute(
+        "SELECT f.id, f.retired_at, f.superseded_by, "
+        "       (SELECT COUNT(*) FROM location l WHERE l.frame_id = f.id) AS n_locations, "
+        "       (SELECT COUNT(*) FROM location l WHERE l.frame_id = f.id AND l.present = 1) "
+        "           AS n_present "
+        "FROM frame f WHERE f.id IN (SELECT value FROM json_each(?))",
+        (json.dumps([int(i) for i in frame_ids]),)).fetchall()
+
+
+def retire_frames(con, *, frame_ids, now, uid="local"):
+    """WYCOFANIE klatek gestem człowieka (D-OW-3/R2): `frame.retired_at` + `event(frame.retired)`.
+
+    Zamyka sprawę klatki, której PLIK ZNIKNĄŁ Z DYSKU. Do tej klingi jedynym wyjściem była kasacja
+    wierszy (C3) — czyli utrata nagłówka, kart, rodowodu i werdyktów ręki. Wycofana klatka wypada
+    z kubełków ROBOCZYCH, a **zostaje w archiwum i w godzinach**: została naświetlona naprawdę,
+    a następczyni, która by te godziny przejęła, nie ma (inaczej niż przy `superseded_by`).
+
+    CZTERY POWODY POMIJANIA, nie wyjątek (`_retire_verdict`) — cel gestu to ZAZNACZENIE z widoku,
+    więc wpadną w nie klatki żywe. Guard obecnej kopii jest tym samym guardem, którym broni się
+    `mark_superseded`: gest, który ukrywa klatkę z żywym plikiem, chowa realną robotę.
+
+    ⚠️ GUARD NIE JEST OSTATNIM SŁOWEM ŚWIATA, tylko chwilą zapisu. Plik może wrócić na dysk PO
+    commicie — zwykłym re-skanem (`refresh_location` zapala `present = 1`). Powstaje wtedy stan
+    sprzeczny „wycofana, a kopia obecna" i tej sprzeczności **nie gasimy automatycznie**: byłoby to
+    cofnięcie gestu ręki przez wjazd materiału (warunek stały „ręka nietykalna"). Ma być GŁOŚNA —
+    liczy ją `audit.retire_invariants` (§5.17) i pokazuje własny, AKCYJNY wiersz Porządków.
+
+    Idempotencja jak reszta repo: powtórzenie → wszystkie klatki w `skipped_already`, zero eventów.
+    Payload niesie OSTATNIE ZNANE ŚCIEŻKI: po wycofaniu żaden kubełek ich nie pokaże, a „gdzie ten
+    plik leżał" jest jedynym pytaniem, które człowiek zada po fakcie."""
+    g = RetireGesture()
+    with _immediate(con):
+        for row in _retire_rows(con, frame_ids):
+            powod = _retire_verdict(row)
+            if powod is not None:
+                g = replace(g, **{powod: getattr(g, powod) + 1})
+                continue
+            paths = [r["path"] for r in con.execute(
+                "SELECT path FROM location WHERE frame_id = ? ORDER BY id", (row["id"],))]
+            con.execute("UPDATE frame SET retired_at = ? WHERE id = ?", (now, row["id"]))
+            emit_event(con, actor=f"user:{uid}", verb="frame.retired",
+                       target=f"frame:{row['id']}", now=now, payload={"paths": paths})
+            g = replace(g, done=g.done + 1)
+    return g
+
+
+def restore_frames(con, *, frame_ids, now, uid="local"):
+    """PRZYWRÓCENIE klatki wycofanej: `retired_at = NULL` + `event(frame.unretired)`.
+
+    DROGA POWROTU jest tu WARUNKIEM, nie ozdobą — wycofanie jest werdyktem CZŁOWIEKA (a nie faktem
+    o świecie, jak `superseded_by`), a paczka, która dokłada nieodwracalny gest, wnosi dokładnie
+    ten dług, który domyka (grupa G2).
+
+    JEDEN guard, bo jeden warunek ma sens: klatka nie wycofana → `skipped_already`. Obecność kopii
+    NIE jest tu powodem pominięcia i to jest sedno — powrót pliku to najczęstszy powód, dla którego
+    człowiek sięga po ten gest."""
+    g = RetireGesture()
+    with _immediate(con):
+        for row in _retire_rows(con, frame_ids):
+            if row["retired_at"] is None:
+                g = replace(g, skipped_already=g.skipped_already + 1)
+                continue
+            con.execute("UPDATE frame SET retired_at = NULL WHERE id = ?", (row["id"],))
+            emit_event(con, actor=f"user:{uid}", verb="frame.unretired",
+                       target=f"frame:{row['id']}", now=now,
+                       payload={"retired_at_before": row["retired_at"]})
+            g = replace(g, done=g.done + 1)
+    return g
 
 
 def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_hash,

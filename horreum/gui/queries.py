@@ -425,6 +425,7 @@ def review_queue(con):
         "FROM frame f JOIN header h ON h.frame_id = f.id "
         "WHERE f.kind IN ('light','master_light') AND f.object_id IS NULL "
         "  AND f.superseded_by IS NULL "
+        "  AND f.retired_at IS NULL "
         "  AND h.object_raw IS NOT NULL "
         "GROUP BY h.object_raw, cleared "
         # KOLEJNOŚĆ PROWADZI NAZWĄ, NIE POŁÓWKĄ (R-S3-2). `ORDER BY n DESC` sortował POŁÓWKAMI,
@@ -576,6 +577,7 @@ def nameless_frames(con, cleared=False):
         "                                WHERE frame_id = f.id AND present = 1) "
         "WHERE f.kind = 'light' AND f.object_id IS NULL "
         "  AND f.superseded_by IS NULL "
+        "  AND f.retired_at IS NULL "
         "  AND h.object_raw IS NULL "
         "  AND f.filetype NOT IN (SELECT value FROM json_each(?)) "
         "  AND (f.object_source IS 'user_cleared') = ? "
@@ -628,6 +630,7 @@ def nameless_raw_frames(con, cleared=False):
         "                                WHERE frame_id = f.id AND present = 1) "
         "WHERE f.kind = 'light' AND f.object_id IS NULL "
         "  AND f.superseded_by IS NULL "
+        "  AND f.retired_at IS NULL "
         "  AND h.object_raw IS NULL "
         "  AND f.filetype IN (SELECT value FROM json_each(?)) "
         "  AND (f.object_source IS 'user_cleared') = ? "
@@ -675,6 +678,7 @@ def config_review_frames(con):
         "                                WHERE frame_id = f.id AND present = 1) "
         "WHERE f.config_id IS NULL "
         "  AND f.superseded_by IS NULL "
+        "  AND f.retired_at IS NULL "
         "  AND f.kind NOT IN (SELECT value FROM json_each(?)) "
         "ORDER BY l.path, f.id",
         (json.dumps(sorted(NO_TELESCOPE_KINDS)),)
@@ -715,6 +719,7 @@ def config_by_hand_frames(con):
         "                                WHERE frame_id = f.id AND present = 1) "
         "WHERE f.config_source IS NOT NULL "
         "  AND f.superseded_by IS NULL "
+        "  AND f.retired_at IS NULL "
         "ORDER BY l.path, f.id").fetchall()
 
 
@@ -831,6 +836,7 @@ def nameless_stack_frames(con, cleared=False):
         "                                WHERE frame_id = f.id AND present = 1) "
         "WHERE f.kind = 'master_light' AND f.object_id IS NULL "
         "  AND f.superseded_by IS NULL "
+        "  AND f.retired_at IS NULL "
         "  AND h.object_raw IS NULL "
         "  AND (f.object_source IS 'user_cleared') = ? "
         "ORDER BY l.path, f.id",
@@ -1202,7 +1208,8 @@ def vanished_frame_ids(con):
     zarówno licznik Porządków (`tasks_state`), jak i trim gridu — jak `dup_frame_ids`. Zwraca set[int]."""
     return {int(r[0]) for r in con.execute(
         "SELECT f.id FROM frame f "
-        "WHERE EXISTS (SELECT 1 FROM location l WHERE l.frame_id = f.id) "
+        "WHERE f.retired_at IS NULL "
+        "  AND EXISTS (SELECT 1 FROM location l WHERE l.frame_id = f.id) "
         "  AND NOT EXISTS (SELECT 1 FROM location l WHERE l.frame_id = f.id AND l.present = 1)"
     ).fetchall()}
 
@@ -1229,6 +1236,50 @@ def superseded_frame_ids(con):
     i `dup_frame_ids`. Zwraca set[int]."""
     return {int(r[0]) for r in con.execute(
         "SELECT f.id FROM frame f WHERE f.superseded_by IS NOT NULL"
+    ).fetchall()}
+
+
+def retired_frame_ids(con):
+    """Zbiór frame_id WYCOFANYCH ręką (perspektywa „Wycofane", D-OW-3/R2): `retired_at IS NOT NULL`.
+
+    CZWARTY STAN, nie odmiana trzech poprzednich, i różnica znów jest ROBOCZA:
+      * ZNIKNIĘTA — plik zniknął z dysku, robota jest DO ZROBIENIA (znaleźć albo wycofać);
+      * ZASTĄPIONA — treść przejęła następczyni, robota jest CUDZA;
+      * BEZ LOKACJI OD ZAWSZE — klatka szkieletowa, inna robota;
+      * WYCOFANA — **człowiek powiedział, że tej roboty nie ma**. Jedyny z czterech, który jest
+        WERDYKTEM, a nie faktem o świecie — i dlatego jedyny, który MUSI mieć drogę powrotu
+        (`repo.restore_frames`).
+
+    Godziny wycofanej klatki ZOSTAJĄ w `object_exposure` i to jest granica, nie przeoczenie: klatka
+    została naświetlona naprawdę, a następczyni, która by je przejęła, nie ma. Odjęcie ich byłoby
+    kasowaniem historii — czyli tym, przed czym `retired_at` ma bronić.
+
+    JEDEN właściciel predykatu dla licznika Porządków i trimu gridu. Zwraca set[int]."""
+    return {int(r[0]) for r in con.execute(
+        "SELECT f.id FROM frame f WHERE f.retired_at IS NOT NULL"
+    ).fetchall()}
+
+
+def retired_conflict_frame_ids(con):
+    """Zbiór frame_id WYCOFANYCH, KTÓRYCH PLIK WRÓCIŁ na dysk — jedyny stan, w którym ŻYWA klatka
+    wypada ze WSZYSTKICH kubełków roboczych.
+
+    Powstaje bez niczyjej pomyłki: wycofanie jest werdyktem o chwili zapisu, a plik może wrócić
+    później zwykłym re-skanem (`repo.refresh_location` zapala `present = 1`). Werdykt nie gaśnie
+    wtedy sam — i NIE MA gasnąć: cofnięcie gestu ręki przez wjazd materiału łamie warunek stały
+    „ręka nietykalna". Powrót pliku unieważnia PRZESŁANKĘ werdyktu, ale unieważnić sam werdykt może
+    wyłącznie człowiek.
+
+    Dlatego stan ma być GŁOŚNY, a nie naprawiany po cichu w którąkolwiek stronę: liczy go AKCYJNY
+    wiersz Porządków (prowadzi do gestu „Przywróć klatkę") oraz inwariant `audit.retire_invariants`
+    (kryterium akceptacji §5.17). Bez tej pary paczka leczyłaby jeden ślepy zaułek i tylnymi
+    drzwiami wnosiła drugi, cichszy.
+
+    Predykat jest LUSTREM członu `wycofana_z_obecna_kopia` z audytu — znak w znak, dwie warstwy,
+    równość pinuje test (wzorzec `nameless_*` / bramka 13). Zwraca set[int]."""
+    return {int(r[0]) for r in con.execute(
+        "SELECT f.id FROM frame f WHERE f.retired_at IS NOT NULL "
+        "AND EXISTS (SELECT 1 FROM location l WHERE l.frame_id = f.id AND l.present = 1)"
     ).fetchall()}
 
 
@@ -1265,6 +1316,7 @@ def review_frame_ids(con):
     Zwraca set[int]."""
     return {int(r[0]) for r in con.execute(
         "SELECT id FROM frame WHERE object_id IS NULL AND superseded_by IS NULL "
+        "AND retired_at IS NULL "
         "AND kind IN ('light','master_light')"
     ).fetchall()}
 
@@ -1327,7 +1379,9 @@ def _lineage_reason_rows(con):
         "       (SELECT f.object_id FROM frame f WHERE f.id = i.master_frame_id) AS object_now, "
         "       (SELECT COUNT(*) FROM integration_input ii "
         "         WHERE ii.integration_id = i.id AND ii.excluded = 0) AS inputs "
-        "FROM integration i WHERE i.unresolved_reason IS NOT NULL"
+        "FROM integration i WHERE i.unresolved_reason IS NOT NULL "
+        "  AND EXISTS (SELECT 1 FROM frame f WHERE f.id = i.master_frame_id "
+        "                AND f.retired_at IS NULL)"
     ).fetchall()
 
 
@@ -1614,6 +1668,13 @@ def tasks_state(con):
         "observatories_unnamed": observatories_unnamed,
         "vanished_frames": len(vanished_frame_ids(con)),
         "superseded_frames": len(superseded_frame_ids(con)),
+        # Ta sama figura po raz PIĄTY i SZÓSTY (D-OW-3/R2), ale o RÓŻNEJ naturze — i to jest cała
+        # rzecz: „Wycofane" są zapisem historii (wiersz informacyjny, jak „Zastąpione"), a
+        # „wycofana, a plik wrócił" JEST robotą, bo tylko w tym stanie żywa klatka wypada ze
+        # wszystkich kubełków. Gdyby drugi licznik był informacyjny, gest wycofania cicho ukrywałby
+        # materiał, który wrócił — czyli wnosiłby dokładnie ten defekt, który paczka leczy.
+        "retired_frames": len(retired_frame_ids(con)),
+        "retired_conflict_frames": len(retired_conflict_frame_ids(con)),
     }
 
 
@@ -1881,7 +1942,7 @@ def base_rows(con, frame_ids):
     = n_present > 1). Teleskop przez config→telescope_canonical→kanon (jak `object_frames`). frame_ids jako
     tablica JSON (`json_each`). Zwraca W TEJ KOLEJNOŚCI: frame_id, kind, filetype, filter_canon,
     camera_model, telescope_label, telescop_canon, object_canon, object_raw, object_source,
-    object_cleared_id, date_obs, exptime, path, present, last_verified_at, superseded_by,
+    object_cleared_id, date_obs, exptime, path, present, last_verified_at, superseded_by, retired_at,
     n_present. Wiersze czyta się po NAZWIE (`sqlite3.Row`), ale kolejność w tym zdaniu ma zgadzać
     się z SELECT-em — rozjazd był zarzutem bramki 0809 i jest tańszy do naprawienia niż do
     wytłumaczenia następnej sesji.
@@ -1905,6 +1966,7 @@ def base_rows(con, frame_ids):
         "       t.label AS telescope_label, t.telescop_canon, "
         "       obj.canon AS object_canon, h.object_raw, f.object_source, f.object_cleared_id, "
         "       h.date_obs, h.exptime, loc.path, loc.present, loc.last_verified_at, f.superseded_by, "
+        "       f.retired_at, "
         "       (SELECT COUNT(*) FROM location lp WHERE lp.frame_id = f.id AND lp.present = 1) AS n_present "
         "FROM frame f "
         "LEFT JOIN header h ON h.frame_id = f.id "

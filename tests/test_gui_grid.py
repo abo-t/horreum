@@ -3037,3 +3037,91 @@ def test_skrot_ODDAJE_STER_OKNU_gdy_ma_zgasic_nagrobek(view, monkeypatch):
         "by_source": {}, "namable": 3})
     v._on_object_recent("NGC6960", "NGC", "deep_sky")
     assert otwarte == ["NGC6960"]
+
+
+# ───────────────────────────── oś ŻYWOTNOŚCI klatki (D-OW-3/R2)
+
+def test_wycofana_ma_wlasne_tlo_wlasna_komorke_i_swoje_miejsce_w_hierarchii():
+    """Kolejność `if`-ów w `_base_cell` JEST regułą, a nie szczegółem: pełna hierarchia brzmi
+    **zastąpiona > wycofana > zniknięta > duplikat** i wynika z jednego pytania — czy tu jest
+    robota. Bez tego wiersz w perspektywie „Wycofane" byłby pomalowany i OPISANY jako zniknięty,
+    czyli ekran wołałby o robotę, którą człowiek przed chwilą zamknął."""
+    from horreum.gui.grid import GridTableModel, BASE_COLS
+    from horreum.gui import grid as grid_mod
+    wspolne = {"kind": "light", "camera_model": None, "telescope_label": None,
+               "telescop_canon": None, "object_canon": None, "object_raw": None,
+               "filter_canon": None, "date_obs": None, "exptime": None, "filetype": "fits",
+               "object_source": None, "object_cleared_id": None, "last_verified_at": None}
+    base = [
+        {"frame_id": 1, "path": "/a/zywa.fits", "present": 1, "n_present": 1,
+         "superseded_by": None, "retired_at": None, **wspolne},
+        {"frame_id": 2, "path": "/a/znikla.fits", "present": 0, "n_present": 0,
+         "superseded_by": None, "retired_at": None, **wspolne},
+        {"frame_id": 3, "path": "/a/wycofana.fits", "present": 0, "n_present": 0,
+         "superseded_by": None, "retired_at": "2026-08-11T10:00:00+00:00", **wspolne},
+        # klatka JEDNOCZEŚNIE zastąpiona i wycofana — stan możliwy, więc hierarchia musi go
+        # rozstrzygnąć: pierwszeństwo ma to, co mówi DOKĄD poszła treść
+        {"frame_id": 4, "path": None, "present": None, "n_present": 0,
+         "superseded_by": 99, "retired_at": "2026-08-11T10:00:00+00:00", **wspolne},
+    ]
+    m = GridTableModel()
+    m.set_data(base, pivot_mod.build_pivot([1, 2, 3, 4], [], []), [])
+    kol = [k for _, k in BASE_COLS].index("path")
+    teksty = [m.data(m.index(i, kol), Qt.DisplayRole) for i in range(m.rowCount())]
+
+    i_wyc = next(i for i, t in enumerate(teksty) if t and "wycofana.fits" in t)
+    i_znik = teksty.index("znikla.fits")
+    i_zast = teksty.index("zastąpiona przez #99")
+    i_zywa = teksty.index("zywa.fits")
+
+    # MÓWI TO W KOMÓRCE, nie tylko tłem (user bywa daltonistą albo ma inny motyw)
+    assert "(wycofana)" in teksty[i_wyc]
+    assert m.data(m.index(i_wyc, 0), Qt.BackgroundRole) == grid_mod._COLORS["retired_bg"]
+    # …i NIE jest malowana jak zniknięta, choć obecnej kopii nie ma tak samo
+    assert m.data(m.index(i_wyc, 0), Qt.BackgroundRole) != grid_mod._COLORS["vanished_bg"]
+    # tooltip niesie DATĘ (jedyny fakt o wycofaniu nie do odtworzenia skądinąd) i drogę powrotu
+    tip = m.data(m.index(i_wyc, kol), Qt.ToolTipRole)
+    assert "2026-08-11 10:00" in tip and "Przywróć" in tip
+    # ZASTĄPIONA bije WYCOFANĄ: obie mówią „nie ma tu roboty", ale tylko jedna mówi DOKĄD
+    assert m.data(m.index(i_zast, 0), Qt.BackgroundRole) == grid_mod._COLORS["superseded_bg"]
+    # regresja obu sąsiadów
+    assert m.data(m.index(i_znik, 0), Qt.BackgroundRole) == grid_mod._COLORS["vanished_bg"]
+    assert m.data(m.index(i_zywa, 0), Qt.BackgroundRole) is None
+
+
+def test_perspektywa_wycofane_jest_jedyna_droga_do_gestu_powrotu(view, gcon):
+    """Perspektywa nie jest tu wygodą, tylko DRUGĄ POŁOWĄ ODWRACALNOŚCI: gest przywrócenia bierze
+    cel z zaznaczenia, a zaznaczyć można wyłącznie to, co widać."""
+    from horreum.gui.grid import PRESET_RETIRED
+    from horreum import repo
+    gcon.execute("UPDATE frame SET retired_at = ? WHERE id = 4", ("2026-08-11T10:00:00+00:00",))
+    gcon.commit()
+    view.apply_perspective(PRESET_RETIRED)
+    assert view._frame_ids == [4]
+    # …a klatka wycofana wypadła z perspektywy, w której dotąd tkwiła
+    view.apply_perspective("Zniknięte")
+    assert view._frame_ids == []
+
+
+def test_pasek_gasnie_UCZCIWIE_gdy_pliki_zaznaczonych_klatek_zyja(view):
+    """Wygaszona kontrolka bez powodu wygląda na usterkę. Rozróżnienie „nic nie zaznaczono" od
+    „zaznaczyłeś klatki, których pliki żyją" jest tu całą treścią: drugie to OCHRONA, która
+    zadziałała, i user ma prawo to wiedzieć."""
+    from horreum.gui.grid import _frame_gate_reason
+    assert _frame_gate_reason(0, 0) == "grid.sel.frame_tip_empty"
+    assert _frame_gate_reason(3, 3) == "grid.sel.frame_tip_alive"
+    assert _frame_gate_reason(3, 0) == "grid.sel.frame_tip_none"
+    view.sel_bar.set_frame_actions(retirable=0, restorable=0, reason="grid.sel.frame_tip_alive")
+    assert view.sel_bar.btn_frame.isEnabled() is False
+    assert "istnieją na dysku" in view.sel_bar.btn_frame.toolTip()
+
+
+def test_droga_powrotu_jest_WIDOCZNA_take_gdy_nie_ma_czego_przywrocic(view):
+    """Ta sama reguła, co przy „Przywróć cofnięte przypisanie": pozycja widoczna ZAWSZE, wygaszona
+    gdy pusta — o odwracalności trzeba wiedzieć PRZED pomyłką. Tu waży podwójnie, bo wycofanie
+    zdejmuje klatkę z oczu, więc bez tej pozycji nie ma skąd wiedzieć, że gest się cofa."""
+    view.sel_bar.set_frame_actions(retirable=2, restorable=0)
+    assert view.sel_bar.act_frame_restore.isVisible() is True   # QAction: isVisible, nie isHidden
+    assert view.sel_bar.act_frame_restore.isEnabled() is False
+    assert view.sel_bar.act_retire.isEnabled() is True
+    assert view.sel_bar.btn_frame.isEnabled() is True

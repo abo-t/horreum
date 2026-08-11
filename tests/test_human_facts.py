@@ -36,7 +36,7 @@ def test_spis_zna_KAZDA_os_gestu_ktora_repo_ma():
     człowieka dopisz go tu i w `human_facts_census`, inaczej regresja na nim będzie cicha."""
     assert set(_spis().counts) == {
         "object_hand", "object_cleared", "config_hand", "lineage_inputs", "lineage_excluded",
-        "calibration_facts", "calibration_links", "offset_hand"}
+        "calibration_facts", "calibration_links", "offset_hand", "retired_hand"}
 
 
 def test_odniesienie_bez_nowej_osi_wczytuje_sie_jako_zero():

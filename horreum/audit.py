@@ -157,10 +157,12 @@ class LightClosure:
     buckets: dict
     headerless: int          # light/master_light bez wiersza `header` I bez obiektu
     filetype_unknown: int    # …i te z zeznaniem, ale bez `filetype` (baza sprzed kolumny)
+    retired: int = 0         # …i te WYCOFANE ręką (D-OW-3/R2) — trzecia klasa ucieczki
 
     @property
     def counted(self):
-        return sum(self.buckets.values()) + self.headerless + self.filetype_unknown
+        return (sum(self.buckets.values()) + self.headerless + self.filetype_unknown
+                + self.retired)
 
     @property
     def ok(self):
@@ -183,7 +185,7 @@ def light_population_closure(con, rep):
         "SELECT count(*) FROM frame WHERE kind IN ('light','master_light')").fetchone()[0]
     headerless = con.execute(
         "SELECT count(*) FROM frame f WHERE f.kind IN ('light','master_light') "
-        "AND f.object_id IS NULL "
+        "AND f.object_id IS NULL AND f.retired_at IS NULL "
         "AND NOT EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id)").fetchone()[0]
     # DRUGA klasa ucieczki, obok bezgłowej: predykaty `nameless_*` dzielą populację warunkiem
     # `filetype IN/NOT IN (…)`, a `NULL` nie spełnia ŻADNEGO z nich (SQL: `NULL NOT IN` → NULL).
@@ -197,7 +199,7 @@ def light_population_closure(con, rep):
     # regresję.
     filetype_unknown = con.execute(
         "SELECT count(*) FROM frame f JOIN header h ON h.frame_id = f.id "
-        "WHERE f.kind = 'light' AND f.object_id IS NULL "
+        "WHERE f.kind = 'light' AND f.object_id IS NULL AND f.retired_at IS NULL "
         "AND h.object_raw IS NULL AND f.filetype IS NULL").fetchone()[0]
     buckets = {"resolved": rep.object_resolved,
                "resolved_no_raw": rep.object_resolved_no_raw,
@@ -205,8 +207,16 @@ def light_population_closure(con, rep):
                "nameless": rep.object_nameless,
                "nameless_raw": rep.object_nameless_raw,
                "nameless_stacks": rep.object_nameless_stacks}
+    # TRZECIA KLASA UCIECZKI (D-OW-3/R2). Sześć kubełków raportu niesie `retired_at IS NULL`,
+    # a `total` nie niesie ŻADNEGO guardu — bez tej liczby rozkład przestałby się domykać przy
+    # PIERWSZYM geście wycofania, czyli bramka §5.7a zapaliłaby się na prawidłowej pracy programu.
+    # Liczona BEZ warunku na obiekt i nagłówek, bo obie sąsiednie klasy dostały `retired_at IS NULL`
+    # — inaczej wycofana klatka bezgłowa liczyłaby się dwa razy i suma przestrzeliłaby `total`.
+    retired = con.execute(
+        "SELECT count(*) FROM frame WHERE kind IN ('light','master_light') "
+        "AND retired_at IS NOT NULL").fetchone()[0]
     return LightClosure(total=total, buckets=buckets, headerless=headerless,
-                        filetype_unknown=filetype_unknown)
+                        filetype_unknown=filetype_unknown, retired=retired)
 
 
 def supersede_invariants(con):
@@ -238,6 +248,42 @@ def supersede_invariants(con):
             "SELECT count(*) FROM frame f JOIN frame n ON n.id = f.superseded_by "
             "WHERE n.superseded_by IS NULL "
             "AND NOT EXISTS (SELECT 1 FROM location l WHERE l.frame_id = n.id)"
+        ).fetchone()[0],
+    }
+
+
+def retire_invariants(con):
+    """Dwa inwarianty kolumny `frame.retired_at` (D-OW-3/R2) — `{nazwa: liczba naruszeń}`.
+
+    ⚠️ **TO JEST STRAŻNIK, KTÓREGO MIGRACJA 0018 NIE MOGŁA POSTAWIĆ.** Warunek „wolno wycofać
+    wyłącznie klatkę bez OBECNEJ kopii" jest zdaniem o tabeli `location`, a `CHECK` widzi kolumny
+    własnego wiersza; triggera w tym repo nie ma ani jednego i nie zaczynamy od takiego, który
+    wywracałby skan za cudzy werdykt. Zostaje ta droga — dokładnie ta sama, którą bliźniaczej
+    kolumny pilnuje `supersede_invariants` (kryterium §5.15). Stąd kryterium §5.17.
+
+    * `wycofana_z_obecna_kopia` — **PLIK WRÓCIŁ PO WYCOFANIU**. To NIE jest awaria i nie jest
+      pomyłką człowieka: wycofanie jest werdyktem o chwili zapisu, a plik wraca zwykłym re-skanem
+      (`repo.refresh_location` zapala `present = 1`). Powrót unieważnia PRZESŁANKĘ werdyktu, ale
+      unieważnić sam werdykt może wyłącznie człowiek — automatyczne zgaszenie kolumny byłoby
+      cofnięciem gestu ręki przez wjazd materiału (warunek stały „ręka nietykalna").
+      Dlatego liczba > 0 znaczy „jest co rozstrzygnąć gestem", a nie „baza jest chora"; ten sam
+      predykat prowadzi AKCYJNY wiersz Porządków (`gui.queries.retired_conflict_frame_ids`).
+      Bez tej pary gest wycofania cicho ukrywałby materiał, który wrócił.
+    * `wycofana_bez_lokacji` — wycofano klatkę, która nie miała ŻADNEJ lokacji, czyli nie miała
+      czego stracić. Tu liczba > 0 znaczy ZŁAMANY GUARD KLINGI (`repo._retire_verdict` odmawia
+      takiej klatce z powodem `skipped_no_location`): sierota po `rebind_location` to inny stan
+      i inna robota, a wycofanie zabrałoby ją z pola widzenia `supersede.orphans`.
+
+    Rozjazdu z dziennikiem nie liczymy — `retired_at` jest STANEM, a `event(frame.retired)` bywa
+    wielokrotny dla jednej klatki (wycofana, przywrócona, wycofana znowu)."""
+    return {
+        "wycofana_z_obecna_kopia": con.execute(
+            "SELECT count(*) FROM frame f WHERE f.retired_at IS NOT NULL "
+            "AND EXISTS (SELECT 1 FROM location l WHERE l.frame_id = f.id AND l.present = 1)"
+        ).fetchone()[0],
+        "wycofana_bez_lokacji": con.execute(
+            "SELECT count(*) FROM frame f WHERE f.retired_at IS NOT NULL "
+            "AND NOT EXISTS (SELECT 1 FROM location l WHERE l.frame_id = f.id)"
         ).fetchone()[0],
     }
 
@@ -352,6 +398,16 @@ class HumanFacts:
     zmianą nie ma tego klucza, więc wczyta się jako zero. Zero po stronie „przed" może co najwyżej
     ukryć WZROST (a wzrost naruszeniem nie jest) — ubytku nie ukryje nigdy."""
 
+    retired_hand: int = 0
+    """WYCOFANIE KLATKI (`frame.retired_at`, gest D-OW-3/R2) — dziewiąta oś. Wycofanie jest
+    WERDYKTEM RĘKI („pliku tej klatki już nie szukam"), więc bez tej liczby `horreum human-facts
+    --baseline` przepuściłby jego cichy ubytek — a warunek Zdzinia mówi o KAŻDYM fakcie ustawionym
+    ręcznie, nie o wybranych osiach. Ryzyko jest przy tym realne, nie teoretyczne: `retired_at`
+    nie ma strażnika w DDL (0018), więc jedyną obroną jest rozdział pisarzy — czyli znowu
+    konwencja, dokładnie ta sama sytuacja, która kazała dołożyć `offset_hand`.
+
+    Wartość domyślna 0 z tego samego powodu i z tym samym kierunkiem błędu, co przy `offset_hand`."""
+
     @property
     def counts(self):
         """Spis jako `{oś: liczba}` — do porównania i do raportu, w jednej kolejności."""
@@ -360,7 +416,8 @@ class HumanFacts:
                 "lineage_excluded": self.lineage_excluded,
                 "calibration_facts": self.calibration_facts,
                 "calibration_links": self.calibration_links,
-                "offset_hand": self.offset_hand}
+                "offset_hand": self.offset_hand,
+                "retired_hand": self.retired_hand}
 
     def spadki(self, wczesniej):
         """Osie, na których fakt ręki UBYŁ wobec wcześniejszego spisu — `{oś: (było, jest)}`.
@@ -404,4 +461,6 @@ def human_facts_census(con):
             "SELECT count(*) FROM calibration WHERE asserted_by = 'user'").fetchone()[0],
         offset_hand=con.execute(
             "SELECT count(*) FROM integration WHERE utc_offset_min IS NOT NULL").fetchone()[0],
+        retired_hand=con.execute(
+            "SELECT count(*) FROM frame WHERE retired_at IS NOT NULL").fetchone()[0],
     )

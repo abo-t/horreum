@@ -61,7 +61,7 @@ from horreum import db                                              # noqa: E402
 from horreum import supersede                                     # noqa: E402
 from horreum.audit import (config_review_reason_gap, config_source_invariants,  # noqa: E402
                            entity_event_parity, light_population_closure, object_source_audit,
-                           supersede_invariants)
+                           retire_invariants, supersede_invariants)
 from horreum.calibration import KIND_RECIPE, run_calibration      # noqa: E402
 from horreum.lineage import run_lineage                           # noqa: E402
 from horreum.grouper import NO_TELESCOPE_KINDS, run_grouper       # noqa: E402
@@ -683,6 +683,7 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
     closure = light_population_closure(con, rep)
     out(f"    rozkład: {' + '.join(f'{k} {v}' for k, v in closure.buckets.items())}"
         f" + bez nagłówka {closure.headerless} + bez filetype {closure.filetype_unknown}"
+        f" + wycofane {closure.retired}"
         f" = {closure.counted} / {closure.total}")
     crit(f"§5.7a rozkład lightów domyka się do populacji "
          f"({closure.counted} == {closure.total})", closure.ok)
@@ -866,6 +867,26 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
     # bez lokacji, o której nikt dotąd nie wiedział — wtedy diagnoza, nie podnoszenie progu.
     crit("§5.15 zero sierot nierozstrzygniętych (frame bez lokacji i bez `superseded_by`)",
          len(sieroty) == 0)
+
+    # §5.17 WYCOFANIE KLATKI RĘKĄ (D-OW-3/R2) — strażnik kolumny, której migracja 0018 nie mogła
+    # dać ani `CHECK`-a (warunek jest zdaniem o `location`), ani triggera (nie ma ani jednego
+    # w historii tego repo). Pyta o INWARIANTY, nie o liczbę: populacja wycofanych jest na świeżej
+    # bazie dawcy z definicji ZEROWA, więc kotwica na liczbie pinowałaby zero i milczała.
+    #
+    # ⚠ PIERWSZY CZŁON NIE JEST AWARIĄ BAZY, tylko ROBOTĄ DO ZROBIENIA: „wycofana, a plik wrócił"
+    # powstaje bez niczyjej pomyłki (zwykły re-skan zapala `present = 1`), a werdyktu ręki nie
+    # gasimy automatycznie — warunek stały „ręka nietykalna". Czerwony wiersz znaczy więc „idź do
+    # Porządków i rozstrzygnij gestem", nie „diagnozuj kod".
+    ret = retire_invariants(con)
+    n_wycofanych = con.execute(
+        "SELECT count(*) FROM frame WHERE retired_at IS NOT NULL").fetchone()[0]
+    out(f"\n§5.17 wycofanie klatki: wycofanych={n_wycofanych} "
+        f"plik_wrocil={ret['wycofana_z_obecna_kopia']} "
+        f"bez_lokacji={ret['wycofana_bez_lokacji']}")
+    crit("§5.17 zero wycofanych z OBECNĄ kopią (plik wrócił — rozstrzygnij gestem Przywróć)",
+         ret["wycofana_z_obecna_kopia"] == 0)
+    crit("§5.17 zero wycofanych BEZ lokacji (złamany guard klingi — sierota to inny stan)",
+         ret["wycofana_bez_lokacji"] == 0)
 
     # §5.16 OŚ SPRZĘTU WSKAZANA RĘKĄ (R1, #DR2) — bramka GO-1, zbudowana jak §5.15 i z tego samego
     # powodu: na świeżej bazie dawcy populacja ręcznych zestawów jest ZEROWA (gest robi człowiek

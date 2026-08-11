@@ -900,6 +900,47 @@ CATALOG = {
     "planner.mark_cleared": {"pl": "Zdjęto oznaczenie: {canon}.", "en": "Mark cleared: {canon}."},
     "planner.mark_same": {"pl": "Bez zmian: {canon}.", "en": "No change: {canon}."},
 
+    # --- oś ŻYWOTNOŚCI klatki na pasku Zbiorów (D-OW-3/R2) ---
+    "grid.sel.frame": {"pl": "Klatka", "en": "Frame"},
+    "grid.sel.frame_retire": {"pl": "Wycofaj klatkę…", "en": "Retire frame…"},
+    "grid.sel.frame_restore": {"pl": "Przywróć klatkę", "en": "Restore frame"},
+    "grid.sel.frame_retire_ask": {
+        "pl": "Wycofać {n} zaznaczonych klatek?  Wycofanie zamyka sprawę klatki, której pliku "
+              "już nie ma na dysku: wypadnie z kolejek roboczych, ale ZOSTANIE w archiwum "
+              "i w godzinach. Gest można cofnąć (Klatka ▾ → Przywróć klatkę).",
+        "en": "Retire {n} selected frames?  Retiring closes the case of a frame whose file is "
+              "gone from disk: it drops out of the work queues but STAYS in the archive and in "
+              "the exposure hours. You can undo this (Frame ▾ → Restore frame).",
+    },
+    "grid.sel.frame_retired": {
+        "pl": "Wycofano {done} z {total} klatek", "en": "Retired {done} of {total} frames"},
+    "grid.sel.frame_restored": {
+        "pl": "Przywrócono {done} z {total} klatek", "en": "Restored {done} of {total} frames"},
+    "grid.sel.frame_skip_present": {"pl": " · plik istnieje: {n}", "en": " · file exists: {n}"},
+    "grid.sel.frame_skip_no_location": {
+        "pl": " · bez lokalizacji: {n}", "en": " · no location: {n}"},
+    "grid.sel.frame_skip_superseded": {"pl": " · zastąpione: {n}", "en": " · superseded: {n}"},
+    "grid.sel.frame_skip_already": {
+        "pl": " · już w tym stanie: {n}", "en": " · already in that state: {n}"},
+    "grid.sel.frame_tip_ready": {
+        "pl": "Do wycofania: {retirable} · do przywrócenia: {restorable}",
+        "en": "To retire: {retirable} · to restore: {restorable}",
+    },
+    "grid.sel.frame_tip_empty": {
+        "pl": "Zaznacz klatki, żeby je wycofać albo przywrócić.",
+        "en": "Select frames to retire or restore them.",
+    },
+    "grid.sel.frame_tip_alive": {
+        "pl": "Pliki zaznaczonych klatek istnieją na dysku — wycofać można tylko klatkę, "
+              "której pliku już nie ma.",
+        "en": "The selected frames' files exist on disk — only a frame whose file is gone "
+              "can be retired.",
+    },
+    "grid.sel.frame_tip_none": {
+        "pl": "W zaznaczeniu nie ma ani klatki do wycofania, ani wycofanej do przywrócenia.",
+        "en": "The selection has neither a frame to retire nor a retired one to restore.",
+    },
+
     # --- sierota kurateli (R-S0-7): oznaczenie, którego lista planu nie ma jak pokazać ---
     "planner.orphans": {
         "pl": "Oznaczenia bez celu w katalogu ({n})",
@@ -1037,6 +1078,13 @@ CATALOG = {
     "perspective.vanished": {"pl": "Zniknięte", "en": "Vanished"},
     "perspective.lineage": {"pl": "Rodowód do potwierdzenia", "en": "Lineage to confirm"},
     "perspective.superseded": {"pl": "Zastąpione", "en": "Superseded"},
+    "perspective.retired": {"pl": "Wycofane", "en": "Retired"},
+    "grid.criteria.only_retired": {"pl": "wycofane ręką", "en": "retired by hand"},
+    "grid.cell.retired": {"pl": "{name}  (wycofana)", "en": "{name}  (retired)"},
+    "grid.tip.retired": {
+        "pl": "\n(wycofana ręką {ts} — pliku już nie szukamy; można to cofnąć: Klatka ▾ → Przywróć)",
+        "en": "\n(retired by hand {ts} — the file is no longer looked for; undo: Frame ▾ → Restore)",
+    },
     "perspective.to_review": {"pl": "Do przeglądu", "en": "To review"},
 
     # --- pusty grid (rozwiązywane w USE-site; stałe _EMPTY_* trzymają KLUCZ) ---
@@ -2181,6 +2229,9 @@ CATALOG = {
     "tasks.unresolved_lights": {"pl": "Klatki bez obiektu", "en": "Frames without object"},
     "tasks.stacks_lineage": {"pl": "Obrazy bez rodowodu", "en": "Images without lineage"},
     "tasks.superseded_frames": {"pl": "Zastąpione (historia)", "en": "Superseded (history)"},
+    "tasks.retired_frames": {"pl": "Wycofane (historia)", "en": "Retired (history)"},
+    "tasks.retired_conflict_frames": {
+        "pl": "Wycofane, a plik wrócił", "en": "Retired, but the file is back"},
     "tasks.telescopes_unlabeled": {"pl": "Teleskopy bez etykiety", "en": "Telescopes without a label"},
     "tasks.observatories_unnamed": {"pl": "Stanowiska bez nazwy", "en": "Sites without a name"},
     "tasks.dup_frames": {"pl": "Duplikaty (>1 kopia)", "en": "Duplicates (>1 copy)"},

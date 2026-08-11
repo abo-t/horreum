@@ -264,8 +264,13 @@ def orphans(con):
 
     To jest predykat bramki G1-7 i przyszłego kubełka podmiany: sierota z ogniwem jest
     WYJAŚNIONA (wiadomo, kto niesie jej plik), sierota bez ogniwa to otwarte pytanie.
+
+    SIEROTA WYCOFANA RĘKĄ JEST WYJAŚNIONA TAK SAMO (D-OW-3/R2) — pytanie „gdzie jest ten plik"
+    ma wtedy odpowiedź człowieka („już go nie szukam"), więc kubełek nie ma czego pokazywać.
+    Bez tego guardu wycofanie, po którym `rebind_location` zabiera klatce ostatnią lokację,
+    zaczerwieniłoby §5.15 i to bez ŻADNEGO gestu naprawy — bo gest naprawy właśnie się odbył.
     Sama sierota z bazy NIE ZNIKA (D-DR-4) — kasowanie klatki byłoby drugim wyjątkiem C3,
     a wyjątek ma pozostać wyjątkiem."""
     return [r["id"] for r in con.execute(
-        "SELECT f.id FROM frame f WHERE f.superseded_by IS NULL "
+        "SELECT f.id FROM frame f WHERE f.superseded_by IS NULL AND f.retired_at IS NULL "
         "AND NOT EXISTS (SELECT 1 FROM location l WHERE l.frame_id = f.id) ORDER BY f.id")]

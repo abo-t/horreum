@@ -55,6 +55,11 @@ from importlib import resources
 # zdjęła. Do S2b nagrobek zapisywał sam FAKT odmowy bez jej PRZEDMIOTU, więc masowe cofnięcie nie
 # miało drogi powrotu. STAN, nie dziennik: klatka cofnięta dwukrotnie ma dwa `object.cleared`,
 # a `transfer_human_facts` emituje ten verb bez `was_object_id`. CHECK wiąże pamięć z nagrobkiem.
+# 0018 to PRZYROST (D-OW-3/R2): frame.retired_at — WERDYKT RĘKI „pliku tej klatki już nie szukam".
+# Klatka wypada z kubełków roboczych, ZOSTAJE w archiwum i w godzinach (nie ma następczyni, która
+# by je przejęła — inaczej niż przy `superseded_by`). Kolumna wchodzi PUSTA; strażnika w DDL nie
+# ma i mieć nie może (warunek jest zdaniem o `location`), więc pilnuje go klinga, a deklaratywnie
+# `audit.retire_invariants` + kryterium §5.17 — wzorem `supersede_invariants`/§5.15.
 MIGRATIONS = [
     (2, "0002_initial.sql"),
     (3, "0003_writeback.sql"),
@@ -72,6 +77,7 @@ MIGRATIONS = [
     (15, "0015_config_source.sql"),
     (16, "0016_integration_offset.sql"),
     (17, "0017_object_cleared_memory.sql"),
+    (18, "0018_frame_retired.sql"),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 _KNOWN_VERSIONS = frozenset({0} | {v for v, _ in MIGRATIONS})

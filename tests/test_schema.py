@@ -93,14 +93,14 @@ def test_szkielet_przyszly_pusty(tmp_path):
     con.close()
 
 
-def test_user_version_v17_po_migracji(tmp_path):
-    """0017 podnosi user_version do 17 (świeża baza leci 0002→…→0017 sekwencyjnie; pamięć nagrobka).
+def test_user_version_v18_po_migracji(tmp_path):
+    """0018 podnosi user_version do 18 (świeża baza leci 0002→…→0018 sekwencyjnie; wycofanie klatki).
 
     Pin JEST intencją: każda nowa migracja ma ten test PRZEWRÓCIĆ imiennie, żeby podniesienie
     wersji było gestem, a nie skutkiem ubocznym."""
     con = db.open_db(str(tmp_path / "h.db"))
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 17
-    assert db.SCHEMA_VERSION == 17
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 18
+    assert db.SCHEMA_VERSION == 18
     con.close()
 
 

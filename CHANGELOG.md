@@ -6,6 +6,106 @@ schemat i API mogą się jeszcze zmieniać.
 
 ## [Niewydane]
 
+## [0.8.0] — 2026-08-11
+
+Wydanie o **odwracalności** — o tym, żeby żaden gest w Horreum nie był ślepym zaułkiem. Do tej pory
+trzy miejsca w programie potrafiły zamknąć Cię bez drogi powrotu: masowe „Cofnij przypisanie" nie
+dawało się cofnąć drugi raz, kuratela celu osierocona po przebudowie katalogu była w planerze
+niewidoczna i nieusuwalna, a klatka, której wszystkie kopie zniknęły z dysku, tkwiła w kolejkach
+roboczych na zawsze — jedynym wyjściem było skasowanie wiersza razem z jego historią. Wszystkie
+trzy dostały teraz gest powrotny. Osobno: kolumna „Obiekt" przestała kłamać o tym, co się właśnie
+stało, klatka zastąpiona po edycji RAW-a stała się widoczną historią zamiast zaległej roboty,
+a skan przestał cicho połykać katalogi, do których stracił dostęp w trakcie pracy.
+
+### Dodane
+
+- **Cofnięcie ma drogę powrotu.** Menu „Obiekt ▾" dostało trzecią pozycję — **„Przywróć cofnięte
+  przypisanie"** — dla klatek, którym zdjąłeś nazwę przez pomyłkę. Program pamięta, CO zdjął (nowa
+  kolumna w bazie, migracja **0017**), więc przywrócenie nie jest zgadywaniem z dziennika: dostajesz
+  z powrotem dokładnie ten obiekt, który klatka miała. Pozycja jest widoczna zawsze — wygaszona, gdy
+  nie ma czego przywracać — żebyś wiedział, że odwracalność istnieje, zanim jej będziesz potrzebować,
+  nie dopiero po pomyłce. Zaznaczenie przeżywa też samo odświeżenie listy, więc gest naprawczy ma na
+  czym pracować.
+- **Sierota kurateli dostaje miejsce w planerze i dwie drogi powrotu.** Gdy przebudowa katalogu celów
+  usunie albo przemianuje nazwę, którą oznaczyłeś („zaplanowany", „zrobiony"...), Twoja decyzja
+  wcześniej znikała z ekranu — została w bazie, ale nie było jej ani widać, ani jak zdjąć inaczej niż
+  z konsoli. Planer pokazuje teraz osobną sekcję z takimi celami i rozróżnia **dwa stany osierocenia**:
+  nazwa zniknęła całkiem (**zdejmujesz** oznaczenie) albo katalog tylko ją przeniósł pod nowym kanonem
+  (**przenosisz** kuratelę na właściwe miejsce, zamiast zostać z martwym wpisem) — a trzeci gest,
+  **„Cofnij zdjęcie"**, odwraca pomyłkowe zdjęcie oznaczenia. „Przenieś" pyta przy tym, czy cel
+  docelowy nie ma już WŁASNEJ, świeższej decyzji — jeśli ma, program odmawia zamiast po cichu
+  nadpisać ją starszym wierszem.
+- **Klatka, której ostatnia kopia zniknęła z dysku, ma teraz gest wycofania.** Do tej pory taka
+  klatka tkwiła w kolejkach roboczych bez końca, a jedynym wyjściem było skasowanie wiersza razem
+  z nagłówkiem, kartami i rodowodem. Nowy gest **„Wycofaj"** (migracja **0018**) zdejmuje ją
+  z kolejek — ale zostaje w archiwum, w godzinach naświetlenia i w rodowodzie stosów: została
+  naświetlona naprawdę, więc jej historii program nie kasuje. Jeśli plik wróci (dysk odłączony,
+  ścieżka naprawiona), Porządki dostają osobny, klikalny wiersz, który to zauważa — powrót pliku
+  **nie** gasi wycofania automatycznie, bo to byłoby cofnięciem Twojej decyzji przez zwykły re-skan.
+  Komórka w siatce mówi to wprost, własnym kolorem i dopiskiem, nie tylko tłem.
+- **Foldery „STACKS" wchodzą do zwykłego skanu.** Jeśli w katalogu `STACKS` bezpośrednio w korzeniu
+  archiwum trzymasz gotowe obrazy, zwykły skan (nie tylko osobna droga „Stosy") wciąga je teraz
+  normalnie — z tym samym sitem wersji pochodnych (kadrowane, po ABE, bez gwiazd), które chroni
+  resztę archiwum. Folder o tej samej nazwie gdzie indziej w drzewie — Twój własny roboczy podfolder
+  przy obiekcie — sito świadomie omija.
+- **Trzy nowe gramatyki katalogowe.** Pozostałości supernowych z katalogu Greena, obiekty ESO
+  i zwarte grupy galaktyk Hicksona (HCG) są odtąd rozpoznawane po nazwie — 297 kanonów sprawdzonych
+  wobec katalogu celów, zero kolizji z tym, co już było.
+- **Szybsza droga do częstych gestów w Zbiorach.** `Enter` w szukajce bierze pierwsze widoczne
+  trafienie, `Ctrl+F` stawia w niej kursor, dwuklik na pozycji kolejki przeglądu odpala jej akcję
+  wprost. Menu „Obiekt ▾" pamięta **ostatnio użyte kanony** z dziennika, więc powtórne przypisanie
+  tego samego obiektu to dwa kliknięcia zamiast pięciu.
+
+### Zmienione
+
+- **Klatka zastąpiona (po edycji pliku RAW) przestaje być traktowana jak zaległa robota.** Kolejka
+  przeglądu, panel rodowodu stosu i godziny obiektu liczyły ją tak, jakby czekała na Ciebie — a to
+  ta sama fotografia po edycji w Lightroomie czy Camera Raw, nie nowa klatka do rozpoznania. Dostaje
+  teraz własną perspektywę **„Zastąpione"**, wiersz informacyjny w Porządkach (widoczny, ale bez
+  odznaki „tu jest robota") i mówi o sobie wprost w siatce: „zastąpiona przez #N", własne tło,
+  tooltip z adresem następczyni.
+- **Program nie cofa ręcznych decyzji, gdy dojeżdża nowy materiał — domknięte na kolejnych trzech
+  osiach.** Rodowód stosu mieszanego (część klatek ręką, część automatem) rozróżnia teraz, CO
+  automat wolno mu dotknąć, od tego, KTO naprawdę ustalił materiał — stos mieszany przestał meldować
+  się jako „cała robota automatu". To samo dla wskazanej ręką kalibracji (nowy dark czy flat nie
+  przepina już ogniwa, które wskazałeś) i dla przenoszenia faktów po podmianie pliku.
+
+### Naprawione
+
+- **Kolumna „Obiekt" mówi wprost, CZYM jest to, co pokazuje — pięć stanów zamiast jednego napisu.**
+  Jeden tekst niósł dotąd dwa różne twierdzenia: „ten obiekt tak się nazywa" i „tyle mówi surowy
+  nagłówek pliku" — po „Cofnij przypisanie" wiersz dalej pokazywał starą nazwę, a filtr obok już jej
+  nie widział. Każdy z pięciu stanów (rozpoznany kanon, nagrobek po cofnięciu, surowe zeznanie
+  nagłówka, klatka kalibracyjna, brak) ma teraz własny wygląd i własny tooltip z RECEPTĄ — gdzie
+  i jak to poprawić, nie tylko z diagnozą.
+- **Panel „Rodowód" przestał pokazywać wpis bez pliku.** Gdy następczyni klatki (po edycji RAW-a)
+  miała już własny werdykt ręki co do materiału stosu, stary wpis w rodowodzie nie był sprzątany —
+  stos liczyłby wejście klatki, której plik już nie istnieje, a panel pokazywał wiersz z pustą
+  ścieżką.
+- **Skan przestaje cicho połykać katalogi, do których stracił dostęp w trakcie pracy.** Zerwane
+  połączenie z dyskiem sieciowym w połowie drzewa dawało przebieg z zaniżonymi liczbami i ani słowa
+  o tym, że coś przepadło — nie do odróżnienia od zdrowego doskanu, w którym po prostu nic nie
+  przybyło. Program (GUI i wiersz poleceń, obie drogi — zwykły skan i „Stosy") mówi teraz wprost, że
+  przebieg jest niekompletny, i wypisuje które katalogi ominął; następny skan sam dobiera pominięte,
+  bez żadnego dodatkowego gestu.
+- **Plik z nielegalnym znakiem w nagłówku XISF przestaje znikać z archiwum.** PixInsight potrafi
+  zapisać w historii przetwarzania ścieżkę źródłową z bajtem sterującym w nazwie folderu — taki
+  nagłówek jest technicznie niepoprawnym XML-em, choć sam plik otwiera się bez zarzutu. Program
+  czytał go wcześniej jako „kopię nieczytelną"; teraz neutralizuje niedozwolone bajty przy odczycie
+  (tożsamość pliku liczy się dalej z oryginalnych, nieoczyszczonych bajtów) i klatka wraca do swoich
+  sióstr z tego samego katalogu.
+- **Obraz z materiału RAW przestaje słyszeć, że archiwum jest puste, gdy naprawdę ma z czego
+  powstać.** Kilka obrazów dostawało zdanie „archiwum nie ma ani jednej pasującej klatki", choć
+  w archiwum stały dziesiątki klatek przechodzących każdą oś zgodności — wypadały wyłącznie dlatego,
+  że obraz nie miał jeszcze wskazanego odniesienia czasu, więc klatek z aparatu (czas lokalny) nie
+  dało się umieścić w nocy obrazu (czas UTC). Gest naprawczy — „Wskaż odniesienie czasu…" — był przy
+  tym niedostępny z tego samego, błędnego powodu. Program pokazuje teraz materiał i podpowiada
+  wartość odniesienia, zamiast milczeć o obu naraz.
+- **Listy przestały ucinać treść.** W kolejce przeglądu i w listwie facetów pasek przewijania obcinał
+  ostatnią pozycję — w części wierszy jedyną treść, jaką miały. Wiersz po cofnięciu nazwy ma teraz
+  trzy czytelne sygnały zamiast dwóch szarych słów (znacznik, wcięcie, kolor ostrzegawczy) i sortuje
+  się razem z resztą swojej nazwy, nie na końcu listy.
+
 ## [0.7.0] — 2026-08-08
 
 Wydanie o **materiale zdjęcia** — o tym, żeby program umiał powiedzieć, z czego powstał gotowy
@@ -547,7 +647,8 @@ Fundament: przejście na model „baza = autorytet, `sha1` = tożsamość".
 - **Import zasilający** świeżej bazy z bazy‑dawcy (read‑only).
 - **CLI**: `init` / `scan` / `group` / `resolve` / `delta`.
 
-[Niewydane]: https://github.com/abo-t/horreum/compare/v0.7.0...HEAD
+[Niewydane]: https://github.com/abo-t/horreum/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/abo-t/horreum/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/abo-t/horreum/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/abo-t/horreum/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/abo-t/horreum/compare/v0.5.0...v0.5.1

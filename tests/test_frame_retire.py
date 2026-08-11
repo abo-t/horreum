@@ -312,3 +312,17 @@ def test_wycofanie_wchodzi_do_spisu_faktow_reki():
     assert (przed.retired_hand, po.retired_hand) == (0, 1)
     assert "retired_hand" in po.counts
     assert przed.spadki(po) == {"retired_hand": (1, 0)}      # ubytek osi JEST naruszeniem
+
+
+def test_inwariant_NIE_zapala_sie_na_legalnym_przepieciu_lokacji():
+    """REGRESJA WŁASNA, złapana bramką pakietu (`sol`, zarzut blokujący). Pierwsza wersja
+    `retire_invariants` miała człon „wycofana bez lokacji" z uzasadnieniem „to znaczy złamany guard
+    klingi" — a myliła stan W CHWILI ZAPISU ze stanem BIEŻĄCYM. Sekwencja niżej jest LEGALNA
+    (i pokrywa ją test `test_wypada_z_sierot_bez_ogniwa` w tym samym pliku), więc bramka §5.17
+    zapalałaby się na prawidłowej pracy programu — zmierzone: 1 naruszenie."""
+    con = _baza()
+    fid, lid = _zniknieta(con)
+    nastepczyni = _klatka(con, "nowa")
+    repo.retire_frames(con, frame_ids=[fid], now=NOW)
+    repo.rebind_location(con, location_id=lid, frame_after=nastepczyni, now=NOW)
+    assert audit.retire_invariants(con) == {"wycofana_z_obecna_kopia": 0}

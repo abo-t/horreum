@@ -253,7 +253,7 @@ def supersede_invariants(con):
 
 
 def retire_invariants(con):
-    """Dwa inwarianty kolumny `frame.retired_at` (D-OW-3/R2) — `{nazwa: liczba naruszeń}`.
+    """Inwariant kolumny `frame.retired_at` (D-OW-3/R2) — `{nazwa: liczba naruszeń}`.
 
     ⚠️ **TO JEST STRAŻNIK, KTÓREGO MIGRACJA 0018 NIE MOGŁA POSTAWIĆ.** Warunek „wolno wycofać
     wyłącznie klatkę bez OBECNEJ kopii" jest zdaniem o tabeli `location`, a `CHECK` widzi kolumny
@@ -269,10 +269,19 @@ def retire_invariants(con):
       Dlatego liczba > 0 znaczy „jest co rozstrzygnąć gestem", a nie „baza jest chora"; ten sam
       predykat prowadzi AKCYJNY wiersz Porządków (`gui.queries.retired_conflict_frame_ids`).
       Bez tej pary gest wycofania cicho ukrywałby materiał, który wrócił.
-    * `wycofana_bez_lokacji` — wycofano klatkę, która nie miała ŻADNEJ lokacji, czyli nie miała
-      czego stracić. Tu liczba > 0 znaczy ZŁAMANY GUARD KLINGI (`repo._retire_verdict` odmawia
-      takiej klatce z powodem `skipped_no_location`): sierota po `rebind_location` to inny stan
-      i inna robota, a wycofanie zabrałoby ją z pola widzenia `supersede.orphans`.
+    ⛔ CZŁONU „wycofana bez lokacji" TU NIE MA — I TO JEST WYNIK POMIARU, nie przeoczenie.
+    Pierwsza wersja tej funkcji go miała, z uzasadnieniem „liczba > 0 znaczy złamany guard klingi"
+    (`_retire_verdict` odmawia klatce bez lokacji). Uzasadnienie było FAŁSZYWE, bo myliło stan
+    W CHWILI ZAPISU ze stanem BIEŻĄCYM: klatkę wolno wycofać, gdy ma lokację nieobecną, a późniejszy
+    `rebind_location` może jej tę ostatnią lokację ZABRAĆ — sekwencja legalna, opisana wprost
+    w `supersede.orphans` i pokryta testem tej paczki. Zmierzone: inwariant zapalał się na
+    PRAWIDŁOWEJ pracy programu (1 naruszenie po `retire` + `rebind`).
+    Ze STANU tego pytania nie da się zadać: „wycofana i bez lokacji" wygląda identycznie po
+    złamanym guardzie i po legalnym przepięciu. Odpowiedź siedziałaby wyłącznie w DZIENNIKU
+    (payload `frame.retired` niesie ścieżki) — a read-model liczony ze zdarzeń zamiast ze stanu
+    to figura, którą repo dostało już trzy razy [pamięć `horreum-review-queue-from-state`].
+    Guard klingi broni się więc BATERIĄ (`test_guard_odmawia_sierocie_bez_zadnej_lokacji`),
+    nie inwariantem — i to jest właściwe miejsce dla twierdzenia o chwili zapisu.
 
     Rozjazdu z dziennikiem nie liczymy — `retired_at` jest STANEM, a `event(frame.retired)` bywa
     wielokrotny dla jednej klatki (wycofana, przywrócona, wycofana znowu)."""
@@ -280,10 +289,6 @@ def retire_invariants(con):
         "wycofana_z_obecna_kopia": con.execute(
             "SELECT count(*) FROM frame f WHERE f.retired_at IS NOT NULL "
             "AND EXISTS (SELECT 1 FROM location l WHERE l.frame_id = f.id AND l.present = 1)"
-        ).fetchone()[0],
-        "wycofana_bez_lokacji": con.execute(
-            "SELECT count(*) FROM frame f WHERE f.retired_at IS NOT NULL "
-            "AND NOT EXISTS (SELECT 1 FROM location l WHERE l.frame_id = f.id)"
         ).fetchone()[0],
     }
 

@@ -881,12 +881,9 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
     n_wycofanych = con.execute(
         "SELECT count(*) FROM frame WHERE retired_at IS NOT NULL").fetchone()[0]
     out(f"\n§5.17 wycofanie klatki: wycofanych={n_wycofanych} "
-        f"plik_wrocil={ret['wycofana_z_obecna_kopia']} "
-        f"bez_lokacji={ret['wycofana_bez_lokacji']}")
+        f"plik_wrocil={ret['wycofana_z_obecna_kopia']}")
     crit("§5.17 zero wycofanych z OBECNĄ kopią (plik wrócił — rozstrzygnij gestem Przywróć)",
          ret["wycofana_z_obecna_kopia"] == 0)
-    crit("§5.17 zero wycofanych BEZ lokacji (złamany guard klingi — sierota to inny stan)",
-         ret["wycofana_bez_lokacji"] == 0)
 
     # §5.16 OŚ SPRZĘTU WSKAZANA RĘKĄ (R1, #DR2) — bramka GO-1, zbudowana jak §5.15 i z tego samego
     # powodu: na świeżej bazie dawcy populacja ręcznych zestawów jest ZEROWA (gest robi człowiek

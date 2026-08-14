@@ -214,7 +214,8 @@ EXP_STACKS_REJECTED = 0        # …i ma tak zostać: >0 znaczy, że konwencja n
 # ZMIERZONA, bo stack przechodzi przez grouper i resolver jak każda klatka i jego skutki nie są
 # dodawaniem.
 EXP_XISF_KINDS_STACKS = dict(EXP_XISF_KINDS, master_light=EXP_STACKS_INGESTED)
-# ZMIERZONE przebiegiem `--stacks-root R:\!!ASTROFOTO` 2026-08-02, nie policzone z rachunku.
+# ZMIERZONE przebiegiem `--stacks-root <korzeń drzewa obróbki>` 2026-08-02, nie policzone
+# z rachunku. (Konkretny korzeń trzyma kolejka sesji - poza gitem; tu liczy się TRYB pomiaru.)
 EXP_TELESCOPES_STACKS = 14     # 12 z FULL + DWIE etykiety, które żyją WYŁĄCZNIE w drzewie obróbki:
 # `ED` (4 klatki) — etykieta ZDJĘTA z archiwum writebackiem P6 (2026-07-22), ale pliki po integracji
 # noszą ją dalej, bo powstały przed naprawą i nikt ich nie przepisywał; oraz `EQMOD HEQ5/6` (4) —
@@ -227,7 +228,7 @@ EXP_NAMELESS_STACKS = 18       # gotowe stosy bez karty `OBJECT` i bez obiektu (
 #
 # ⚠️ KOTWICE STOSÓW SĄ RUCHOME INACZEJ NIŻ RESZTA (D-0802-1 + P6d, 2026-08-02). Kotwice FULL stoją
 # na ZAMROŻONYM dawcy, więc naprawa plików na `R:` ich nie rusza („BAZA AKCEPTACJI NIE WIDZI NAPRAW
-# NA R:" — kolejka). Stosy przychodzą z ŻYWEGO skanu `R:\!!ASTROFOTO`, a writeback od D-0802-1 ich
+# NA R:" — kolejka). Stosy przychodzą z ŻYWEGO skanu drzewa obróbki, a writeback od D-0802-1 ich
 # SIĘGA — więc pierwsza naprawa kart `OBJECT` w drzewie obróbki ZBIJE tę liczbę i bramka zaświeci
 # czerwono ZGODNIE Z PRAWDĄ. To NIE jest regresja: wtedy podbij kotwicę i dopisz, ile plików
 # dostało kartę. Ta sama uwaga dotyczy `EXP_CONFIG_REVIEW_STACKS` (7 stosów bez `TELESCOP`).

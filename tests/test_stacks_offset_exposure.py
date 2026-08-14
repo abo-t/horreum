@@ -20,7 +20,7 @@ from horreum.stacks import (EXP_TOL_CEILING_S, REASON_NO_CANDIDATES, REASON_OFFS
 
 NOW = "2026-08-08T12:00:00+00:00"
 LATER = "2026-08-08T13:00:00+00:00"
-STOS = r"R:\!!ASTROFOTO\RC8R\IC443\WBPP\master\masterLight_IC443.xisf"
+STOS = r"R:\ARCHIWUM\RC8R\IC443\WBPP\master\masterLight_IC443.xisf"
 
 
 @pytest.fixture

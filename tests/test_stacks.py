@@ -15,7 +15,7 @@ from horreum.stacks import REASON_DEGENERATE, REASON_MISMATCH, REASON_NO_OBJECT,
 
 NOW = "2026-08-02T12:00:00+00:00"
 LATER = "2026-08-02T13:00:00+00:00"
-STOS = r"R:\!!ASTROFOTO\A140R\CTB1\WBPP\master\masterLight_EXPOSURE-600.00s_FILTER-H.xisf"
+STOS = r"R:\ARCHIWUM\A140R\CTB1\WBPP\master\masterLight_EXPOSURE-600.00s_FILTER-H.xisf"
 
 # Nazwa WBPP w wariancie PEŁNYM (z temperaturą) — jedyna, na której da się sprawdzić TOŻSAMOŚĆ
 # zbioru, nie sam licznik (`resolve.stack.inputs_contained`).

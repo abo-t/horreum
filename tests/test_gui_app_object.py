@@ -823,7 +823,7 @@ def test_kolumna_sciezki_pokazuje_SCIEZKE_bo_nazwa_pliku_nie_rozroznia(repair):
     repo.record_header(con, frame_id=fid, raw_json="{}", object_raw=None, now=NOW_PD)
     repo.add_location(
         con, frame_id=fid, volume="V", drive_letter="R",
-        path=r"R:\!!ASTROFOTO\OBIEKTY_DNG\A7R3_105_LMC\master\masterLight_BIN-1.xisf",
+        path=r"R:\ARCHIWUM\OBIEKTY_DNG\A7R3_105_LMC\master\masterLight_BIN-1.xisf",
         now=NOW_PD)
     v.refresh()
 
@@ -831,7 +831,7 @@ def test_kolumna_sciezki_pokazuje_SCIEZKE_bo_nazwa_pliku_nie_rozroznia(repair):
     tekst = v.frames.item(0, FRAME_COL_PATH).text()
     assert "A7R3_105_LMC" in tekst, "katalog jest JEDYNYM rozróżnikiem tych wierszy"
     assert "masterLight_BIN-1.xisf" in tekst, "nazwa pliku nie ma zniknąć, ma dostać kontekst"
-    assert "!!ASTROFOTO" not in tekst, "korzeń archiwum jest wspólny wszystkim — sam szum"
+    assert "ARCHIWUM" not in tekst, "korzeń archiwum jest wspólny wszystkim — sam szum"
 
     _select_review_tag(v, "nameless")
     swiatlo = v.frames.item(0, FRAME_COL_PATH).text()

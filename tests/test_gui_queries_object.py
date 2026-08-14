@@ -749,7 +749,7 @@ def test_object_cell_PODPOWIEDZ_z_folderu_dla_bezimiennego_stosu():
 
     Podpowiedź NIE UDAJE NAZWY (nawiasy kątowe) i ma WŁASNY stan, bo mówi co innego niż kanon."""
     stos = {"kind": "master_light", "object_canon": None, "object_raw": None,
-            "path": r"R:\!!ASTROFOTO\OBIEKTY_DNG\A7R3_105_LMC\master\masterLight_BIN-1.xisf"}
+            "path": r"R:\ARCHIWUM\OBIEKTY_DNG\A7R3_105_LMC\master\masterLight_BIN-1.xisf"}
     assert queries.object_cell(stos) == ("⟨A7R3_105_LMC⟩", "hint")
     assert queries.object_cell(dict(stos, object_canon="LMC")) == ("LMC", "canon")
 

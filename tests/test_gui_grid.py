@@ -3076,6 +3076,13 @@ def test_wycofana_ma_wlasne_tlo_wlasna_komorke_i_swoje_miejsce_w_hierarchii():
 
     # MÓWI TO W KOMÓRCE, nie tylko tłem (user bywa daltonistą albo ma inny motyw)
     assert "(wycofana)" in teksty[i_wyc]
+    # …i mówi to PRZED nazwą, bo inaczej NIE MÓWI TEGO WCALE. Kolumna „Ścieżka" startuje na
+    # domyślnej szerokości sekcji, a nazwa pliku archiwum jest od niej kilkakrotnie szersza,
+    # więc marker doklejony z tyłu ginął w elizji ZAWSZE (firsthand 0811, wizytator-qt) —
+    # dokładnie tak, jak zginął kiedyś sufiks „×N" duplikatów, zanim stał się prefiksem.
+    # Sam `in` tego nie pinuje: przechodzi też dla sufiksu, czyli dla wersji z defektem.
+    assert teksty[i_wyc].startswith("(wycofana)"), (
+        "marker wycofania musi stać PRZED nazwą — jako sufiks nie dociera do ekranu")
     assert m.data(m.index(i_wyc, 0), Qt.BackgroundRole) == grid_mod._COLORS["retired_bg"]
     # …i NIE jest malowana jak zniknięta, choć obecnej kopii nie ma tak samo
     assert m.data(m.index(i_wyc, 0), Qt.BackgroundRole) != grid_mod._COLORS["vanished_bg"]

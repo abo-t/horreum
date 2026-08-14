@@ -1086,7 +1086,15 @@ CATALOG = {
     "perspective.superseded": {"pl": "Zastąpione", "en": "Superseded"},
     "perspective.retired": {"pl": "Wycofane", "en": "Retired"},
     "grid.criteria.only_retired": {"pl": "wycofane ręką", "en": "retired by hand"},
-    "grid.cell.retired": {"pl": "{name}  (wycofana)", "en": "{name}  (retired)"},
+    # PREFIKS, nie sufiks — ta sama lekcja, którą repo odrobiło już raz dla duplikatów
+    # (`grid.py`: „Prefiks »×N« PRZED nazwą (P2-2): sufiks ginął przy elizji długich ścieżek").
+    # Marker wycofania wszedł jako sufiks i powtórzył ten błąd: kolumna „Ścieżka" startuje na
+    # domyślnej szerokości sekcji, a realna nazwa pliku archiwum jest od niej kilkakrotnie
+    # szersza, więc `(wycofana)` było elidowane ZAWSZE i obietnica z `grid.py` („ten wiersz ma
+    # się tłumaczyć sam, bo user bywa daltonistą albo ma inny motyw") nie docierała do ekranu
+    # ani razu w układzie domyślnym. Zmierzone firsthandem 0811 (wizytator-qt).
+    # Sort jest na to obojętny: `_sort_key` czyta surowe `row["path"]`, nie `DisplayRole`.
+    "grid.cell.retired": {"pl": "(wycofana)  {name}", "en": "(retired)  {name}"},
     "grid.tip.retired": {
         "pl": "\n(wycofana ręką {ts} — pliku już nie szukamy; można to cofnąć: Klatka ▾ → Przywróć)",
         "en": "\n(retired by hand {ts} — the file is no longer looked for; undo: Frame ▾ → Restore)",

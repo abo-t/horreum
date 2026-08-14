@@ -768,24 +768,24 @@ def delta_report(con, top=30):
     resolved = con.execute(
         "SELECT count(*) FROM frame f JOIN header h ON h.frame_id = f.id "
         "WHERE f.kind IN ('light','master_light') AND f.object_id IS NOT NULL "
-        "AND f.retired_at IS NULL "
+        "AND f.retired_at IS NULL AND f.superseded_by IS NULL "
         "AND h.object_raw IS NOT NULL").fetchone()[0]
     resolved_no_raw = con.execute(
         "SELECT count(*) FROM frame f LEFT JOIN header h ON h.frame_id = f.id "
         "WHERE f.kind IN ('light','master_light') AND f.object_id IS NOT NULL "
-        "AND f.retired_at IS NULL "
+        "AND f.retired_at IS NULL AND f.superseded_by IS NULL "
         "AND h.object_raw IS NULL").fetchone()[0]
     unresolved = con.execute(
         "SELECT count(*) FROM frame f JOIN header h ON h.frame_id = f.id "
         "WHERE f.kind IN ('light','master_light') AND f.object_id IS NULL "
-        "AND f.retired_at IS NULL "
+        "AND f.retired_at IS NULL AND f.superseded_by IS NULL "
         "AND h.object_raw IS NOT NULL").fetchone()[0]
     total = resolved + unresolved
     pct = round(100.0 * resolved / total, 1) if total else 0.0
     delta = con.execute(
         "SELECT h.object_raw AS raw, count(*) AS n FROM frame f JOIN header h ON h.frame_id = f.id "
         "WHERE f.kind IN ('light','master_light') AND f.object_id IS NULL "
-        "AND f.retired_at IS NULL "
+        "AND f.retired_at IS NULL AND f.superseded_by IS NULL "
         "AND h.object_raw IS NOT NULL GROUP BY h.object_raw ORDER BY n DESC, raw LIMIT ?",
         (top,)).fetchall()
     # Nagrobki rozbite po TEJ SAMEJ granicy, którą raport trzyma wyżej (`object_raw` obecny czy nie),
@@ -796,7 +796,7 @@ def delta_report(con, top=30):
         "SELECT count(*) FILTER (WHERE h.object_raw IS NOT NULL), "
         "       count(*) FILTER (WHERE h.object_raw IS NULL) "
         "FROM frame f LEFT JOIN header h ON h.frame_id = f.id "
-        "WHERE f.kind IN ('light','master_light') AND f.retired_at IS NULL "
+        "WHERE f.kind IN ('light','master_light') AND f.retired_at IS NULL AND f.superseded_by IS NULL "
         "AND f.object_source = 'user_cleared'"
     ).fetchone()
     filters_canon = con.execute(

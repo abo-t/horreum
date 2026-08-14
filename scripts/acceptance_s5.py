@@ -684,7 +684,7 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
     closure = light_population_closure(con, rep)
     out(f"    rozkład: {' + '.join(f'{k} {v}' for k, v in closure.buckets.items())}"
         f" + bez nagłówka {closure.headerless} + bez filetype {closure.filetype_unknown}"
-        f" + wycofane {closure.retired}"
+        f" + wycofane {closure.retired} + zastąpione {closure.superseded}"
         f" = {closure.counted} / {closure.total}")
     crit(f"§5.7a rozkład lightów domyka się do populacji "
          f"({closure.counted} == {closure.total})", closure.ok)

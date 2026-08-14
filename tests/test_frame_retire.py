@@ -39,9 +39,9 @@ def _kopia(con, frame_id, path, *, now=NOW):
     return lid
 
 
-def _zniknieta(con, sha="aaa", *, kind="light", path=r"R:\ASTRO_\x.fit"):
+def _zniknieta(con, sha="aaa", *, kind="light", filetype="fits", path=r"R:\ASTRO_\x.fit"):
     """Klatka, której JEDYNA kopia zniknęła z dysku — cel gestu wycofania."""
-    fid = _klatka(con, sha, kind=kind)
+    fid = _klatka(con, sha, kind=kind, filetype=filetype)
     lid = _kopia(con, fid, path)
     repo.mark_location_vanished(con, location_id=lid, expected_path=path,
                                 root=r"R:\ASTRO_", run_id="test-retire", now=NOW)
@@ -270,6 +270,81 @@ def test_rozklad_populacji_domyka_sie_po_wycofaniu(wariant):
     zamkniecie = audit.light_population_closure(con, resolver.delta_report(con))
     assert zamkniecie.ok, f"rozkład się rozjechał: {zamkniecie.counted} != {zamkniecie.total}"
     assert zamkniecie.retired == 1
+
+
+@pytest.mark.parametrize("wariant", ["resolved", "unresolved", "nameless", "nameless_raw",
+                                     "headerless", "filetype_unknown"])
+def test_rozklad_populacji_domyka_sie_po_zastapieniu(wariant):
+    """CZWARTA klasa ucieczki (G2-5d) - bliźniaczo do `retired` wyżej i z tego samego powodu.
+
+    ⚠ TO NIE JEST TRIPWIR NA PRZYSZŁOŚĆ: §5.7a świeciło CZERWONO na żywej bazie, zanim ta klasa
+    powstała (`counted=14530`, `total=14531`). Winowajcą był wariant `nameless_raw` - klatka RAW
+    bez obiektu i bez `object_raw`, ZASTĄPIONA po edycji; kształtem należy do kubełka
+    `nameless_raw`, a wypycha ją stamtąd guard zastąpienia. Słusznie wypycha (klatka, której treść
+    żyje dalej w następczyni, nie jest ROBOTĄ) - nie miała tylko gdzie się podziać.
+
+    `headerless` i `filetype_unknown` są nietrywialne z tego samego powodu, co przy wycofaniu: to
+    SĄSIEDNIE klasy ucieczki, więc gdyby nie dostały guardu, klatka liczyłaby się DWA RAZY i suma
+    przestrzeliłaby `total` - bramka zapaliłaby się w drugą stronę."""
+    con = _baza()
+    oid = repo.upsert_object(con, canon="NGC7000", catalog="NGC", kind=None, now=NOW)[0]
+    nastepczyni = _klatka(con, "nastepczyni")
+    fid, _ = _zniknieta(con, wariant, filetype="raw" if wariant == "nameless_raw" else "fits")
+    if wariant == "resolved":
+        _naglowek(con, fid, object_raw="NGC7000")
+        repo.assign_object(con, frame_id=fid, object_id=oid, object_source="user", now=NOW)
+    elif wariant == "unresolved":
+        _naglowek(con, fid, object_raw="COS_NIEZNANEGO")
+    elif wariant in ("nameless", "nameless_raw"):
+        _naglowek(con, fid)
+    elif wariant == "filetype_unknown":
+        _naglowek(con, fid)
+        con.execute("UPDATE frame SET filetype = NULL WHERE id = ?", (fid,))
+        con.commit()
+    # `headerless` = bez wiersza `header` (nic nie robimy)
+
+    assert audit.light_population_closure(con, resolver.delta_report(con)).ok
+    repo.mark_superseded(con, frame_id=fid, superseded_by=nastepczyni, now=NOW)
+    zamkniecie = audit.light_population_closure(con, resolver.delta_report(con))
+    assert zamkniecie.ok, f"rozkład się rozjechał: {zamkniecie.counted} != {zamkniecie.total}"
+    assert zamkniecie.superseded == 1
+
+
+def test_wycofana_i_zastapiona_naraz_liczy_sie_RAZ():
+    """ROZŁĄCZNOŚĆ dwóch klas ucieczki, a nie ostrożność. `retired` liczy wycofane BEZ warunku na
+    zastąpienie, więc klatka będąca OBIEMA naraz wpadłaby do obu i suma PRZESTRZELIŁABY `total` -
+    czyli naprawa czerwonej bramki zapaliłaby ją z powrotem, tylko z drugiej strony. Stąd
+    `retired_at IS NULL` w klasie `superseded`."""
+    con = _baza()
+    nastepczyni = _klatka(con, "nastepczyni")
+    fid, _ = _zniknieta(con, "oba")
+    _naglowek(con, fid)
+    repo.retire_frames(con, frame_ids=[fid], now=NOW)
+    repo.mark_superseded(con, frame_id=fid, superseded_by=nastepczyni, now=NOW)
+
+    z = audit.light_population_closure(con, resolver.delta_report(con))
+    assert z.ok, f"rozkład się rozjechał: {z.counted} != {z.total}"
+    assert (z.retired, z.superseded) == (1, 0), "klatka ma być policzona RAZ, po stronie wycofania"
+
+
+def test_zastapiona_wypada_z_procentu_i_z_listy_delty():
+    """Pięć literałów `delta_report` (`resolved`, `resolved_no_raw`, `unresolved`, lista delty,
+    para `cleared_*`) niosło `retired_at IS NULL` i NIE niosło guardu zastąpienia - a `cleared_*`
+    są UDOKUMENTOWANYMI podzbiorami kubełków, więc bez guardu podzbiór przestawał się zawierać
+    w nadzbiorze. Test pilnuje SKUTKU: zastąpiona klatka z nierozpoznaną nazwą znika z mianownika
+    procentu ORAZ z listy nazw do zrobienia - bo nie ma na niej roboty."""
+    con = _baza()
+    nastepczyni = _klatka(con, "nastepczyni")
+    fid, _ = _zniknieta(con, "delta")
+    _naglowek(con, fid, object_raw="COS_NIEZNANEGO")
+    przed = resolver.delta_report(con)
+    assert przed.object_unresolved == 1
+    assert any(raw == "COS_NIEZNANEGO" for raw, _n in przed.object_delta)
+
+    repo.mark_superseded(con, frame_id=fid, superseded_by=nastepczyni, now=NOW)
+    po = resolver.delta_report(con)
+    assert po.object_unresolved == 0, "zastąpiona nie jest robotą - wypada z mianownika"
+    assert not any(raw == "COS_NIEZNANEGO" for raw, _n in po.object_delta), "…i z listy nazw do zrobienia"
 
 
 def test_inwariant_lapie_powrot_pliku_po_wycofaniu():

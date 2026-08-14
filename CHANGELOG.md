@@ -17,6 +17,11 @@ schemat i API mogą się jeszcze zmieniać.
   a gdy żadnej nie ma, wiersz dalej pokazuje swój ostatni znany adres i dalej jest oznaczony jako
   zniknięty - bo wtedy właśnie ta ścieżka jest wskazówką, gdzie szukać kopii zapasowej. Ta sama
   poprawka objęła panel „Klatki obiektu" i listę klatek do przypisania nazwy.
+- **Klatka zastąpiona przestała liczyć się jako robota do zrobienia.** Gdy edycja RAW-a tworzy nową
+  tożsamość, stara klatka zostaje w bazie jako historia - ale wewnętrzna kontrola spójności liczyła
+  ją dalej do populacji „do przerobienia", więc bilans nie domykał się o jedną klatkę i kontrola
+  świeciła na czerwono niezależnie od tego, czy coś naprawdę jest nie tak. Teraz zastąpiona ma
+  własną, jawną pozycję w rozkładzie - tak samo jak wycofana ręką.
 - **Stary adres przestał być śmieciem i stał się historią przeprowadzki.** Najechanie na ścieżkę
   takiego obrazu pokazuje teraz dodatkowo, gdzie leżał wcześniej - odpowiedź na pytanie „przecież
   to było w innym folderze, gdzie się podziało" jest na ekranie, a nie tylko w bazie.

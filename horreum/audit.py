@@ -158,11 +158,12 @@ class LightClosure:
     headerless: int          # light/master_light bez wiersza `header` I bez obiektu
     filetype_unknown: int    # …i te z zeznaniem, ale bez `filetype` (baza sprzed kolumny)
     retired: int = 0         # …i te WYCOFANE ręką (D-OW-3/R2) — trzecia klasa ucieczki
+    superseded: int = 0      # …i te ZASTĄPIONE (G2-5d) - czwarta, z tego samego powodu co trzecia
 
     @property
     def counted(self):
         return (sum(self.buckets.values()) + self.headerless + self.filetype_unknown
-                + self.retired)
+                + self.retired + self.superseded)
 
     @property
     def ok(self):
@@ -185,7 +186,7 @@ def light_population_closure(con, rep):
         "SELECT count(*) FROM frame WHERE kind IN ('light','master_light')").fetchone()[0]
     headerless = con.execute(
         "SELECT count(*) FROM frame f WHERE f.kind IN ('light','master_light') "
-        "AND f.object_id IS NULL AND f.retired_at IS NULL "
+        "AND f.object_id IS NULL AND f.retired_at IS NULL AND f.superseded_by IS NULL "
         "AND NOT EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id)").fetchone()[0]
     # DRUGA klasa ucieczki, obok bezgłowej: predykaty `nameless_*` dzielą populację warunkiem
     # `filetype IN/NOT IN (…)`, a `NULL` nie spełnia ŻADNEGO z nich (SQL: `NULL NOT IN` → NULL).
@@ -200,6 +201,7 @@ def light_population_closure(con, rep):
     filetype_unknown = con.execute(
         "SELECT count(*) FROM frame f JOIN header h ON h.frame_id = f.id "
         "WHERE f.kind = 'light' AND f.object_id IS NULL AND f.retired_at IS NULL "
+        "AND f.superseded_by IS NULL "
         "AND h.object_raw IS NULL AND f.filetype IS NULL").fetchone()[0]
     buckets = {"resolved": rep.object_resolved,
                "resolved_no_raw": rep.object_resolved_no_raw,
@@ -215,8 +217,28 @@ def light_population_closure(con, rep):
     retired = con.execute(
         "SELECT count(*) FROM frame WHERE kind IN ('light','master_light') "
         "AND retired_at IS NOT NULL").fetchone()[0]
+    # CZWARTA KLASA UCIECZKI (G2-5d) - bliźniaczo do wycofanych i z tego samego powodu: sześć
+    # kubełków raportu niesie `superseded_by IS NULL`, a `total` nie niesie ŻADNEGO guardu.
+    # ⚠ TO KRYTERIUM ŚWIECIŁO CZERWONO NA ŻYWEJ BAZIE, ZANIM POWSTAŁA TA KLASA (`counted=14530`,
+    # `total=14531`): jedna klatka (light, RAW, bez obiektu, bez `object_raw`, ZASTĄPIONA) należy
+    # kształtem do `nameless_raw`, a wypycha ją stamtąd guard zastąpienia - słusznie, bo klatka,
+    # której treść żyje dalej w następczyni, nie jest ROBOTĄ. Nie miała tylko gdzie się podziać.
+    #
+    # OBIE SĄSIEDNIE KLASY UCIECZKI (`headerless`, `filetype_unknown`) DOSTAŁY `superseded_by IS
+    # NULL` W TEJ SAMEJ TURZE - i to nie było przewidywanie, tylko ZŁAPANY BŁĄD: bez tego klatka
+    # zastąpiona i bezgłowa naraz liczyła się DWA RAZY, a bramka §5.7a zapalała się z drugiej
+    # strony (`counted > total`). Ta sama figura, co przy `retired_at` - dowód w
+    # `test_rozklad_populacji_domyka_sie_po_zastapieniu[headerless]`.
+    #
+    # `retired_at IS NULL` NIE JEST OSTROŻNOŚCIĄ, tylko warunkiem rozłączności: klasa `retired`
+    # wyżej liczy wycofane BEZ warunku na zastąpienie, więc klatka i wycofana, i zastąpiona
+    # wpadłaby do obu i suma przestrzeliłaby `total` - czyli bramka zapaliłaby się w drugą stronę.
+    superseded = con.execute(
+        "SELECT count(*) FROM frame WHERE kind IN ('light','master_light') "
+        "AND superseded_by IS NOT NULL AND retired_at IS NULL").fetchone()[0]
     return LightClosure(total=total, buckets=buckets, headerless=headerless,
-                        filetype_unknown=filetype_unknown, retired=retired)
+                        filetype_unknown=filetype_unknown, retired=retired,
+                        superseded=superseded)
 
 
 def supersede_invariants(con):

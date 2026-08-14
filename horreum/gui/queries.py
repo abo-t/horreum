@@ -325,7 +325,11 @@ def library_objects(con, *, telescope_id=None, camera_id=None, filter_canon=None
 
 def object_frames(con, object_id, *, telescope_id=None, camera_id=None, filter_canon=None):
     """Klatki danego obiektu (light/master_light) z tymi samymi filtrami co biblioteka. Location przez
-    `MIN(id)` (R#3: frame 1:N location — bez tego N lokalizacji zduplikowałoby klatkę). `present` to
+    `MIN(id)` SPOŚRÓD OBECNYCH, z powrotem do dowolnej (R#3: frame 1:N location - bez tego N lokalizacji
+    zduplikowałoby klatkę; D-V-9: spośród kopii wygrywa ŻYWA, nie ta, która wjechała pierwsza - inaczej
+    panel pokazywał martwy adres i kolumnę „Obecna: Nie" dla klatki, której plik leży na dysku).
+    Reguła wyboru adresu jest ZNAK W ZNAK ta sama, co w `base_rows` (tam pełne uzasadnienie i pomiar) -
+    ten sam fakt renderowany na dwóch powierzchniach ma dwa razy znaczyć to samo. `present` to
     KOLUMNA statusu, NIE predykat (R#7: frame, którego wszystkie lokalizacje mają present=0, MUSI być
     widoczny — tożsamość = sha1_data, nie obecność; „baza=autorytet"). `telescope_label` +
     `telescop_canon` z kanonicznego teleskopu (canon = fallback etykiety, gdy teleskop nienazwany).
@@ -342,7 +346,9 @@ def object_frames(con, object_id, *, telescope_id=None, camera_id=None, filter_c
         "LEFT JOIN telescope_canonical tc ON tc.id = c.telescope_id "
         "LEFT JOIN telescope t ON t.id = tc.canon_id "
         "LEFT JOIN camera cam ON cam.id = f.camera_id "
-        "LEFT JOIN location loc ON loc.id = (SELECT MIN(id) FROM location WHERE frame_id = f.id) "
+        "LEFT JOIN location loc ON loc.id = COALESCE("
+        "        (SELECT MIN(id) FROM location WHERE frame_id = f.id AND present = 1), "
+        "        (SELECT MIN(id) FROM location WHERE frame_id = f.id)) "
         "WHERE f.object_id = ? "
         "  AND f.kind IN ('light','master_light') "
         "  AND (? IS NULL OR tc.canon_id = ?) "
@@ -487,6 +493,10 @@ def object_review_frames(con, object_raw, cleared=False):
     """Drążenie pojedynczej pozycji obiekt-review: klatki o danym `object_raw`, wciąż nierozwiązane
     (`object_id IS NULL`). JOIN header (object_raw mieszka w header, R#3).
 
+    Adres przez `MIN(id)` SPOŚRÓD OBECNYCH, z powrotem do dowolnej - reguła ZNAK W ZNAK jak
+    w `base_rows` (D-V-9; tam pomiar i pełne uzasadnienie). Tu waży podwójnie: to lista, z której
+    człowiek WYBIERA klatki do zapisu, więc adres martwy przy żywym pliku myli w chwili decyzji.
+
     KLUCZ JEST PARĄ (`object_raw`, `cleared`) — S3/R-S2b-1. Klatka z NAGROBKIEM (`user_cleared`)
     wraca do tego samego kubełka co nietknięta, bo predykat pyta o sam brak obiektu; do rozszczepienia
     wyglądała identycznie, a akcja „Przypisz obiekt…" cicho ją pomijała (klinga chroni werdykt ręki
@@ -508,7 +518,9 @@ def object_review_frames(con, object_raw, cleared=False):
         "LEFT JOIN telescope_canonical tc ON tc.id = c.telescope_id "
         "LEFT JOIN telescope t ON t.id = tc.canon_id "
         "LEFT JOIN camera cam ON cam.id = f.camera_id "
-        "LEFT JOIN location loc ON loc.id = (SELECT MIN(id) FROM location WHERE frame_id = f.id) "
+        "LEFT JOIN location loc ON loc.id = COALESCE("
+        "        (SELECT MIN(id) FROM location WHERE frame_id = f.id AND present = 1), "
+        "        (SELECT MIN(id) FROM location WHERE frame_id = f.id)) "
         "WHERE f.kind IN ('light','master_light') AND f.object_id IS NULL AND h.object_raw = ? "
         "  AND (f.object_source IS 'user_cleared') = ? "
         "ORDER BY f.id",
@@ -1907,9 +1919,9 @@ def location_cards(con, location_id):
 def present_locations(con, frame_ids):
     """ŹRÓDŁO linku PROJEKCJI (krok 6) — dla zbioru frame_id KAŻDA OBECNA (`present=1`) location z
     `path`+`volume`+`drive_letter`+`size_bytes`. Rozszerza wzorzec `writeback_frame_targets` (już
-    `present=1`) o `volume`/`drive_letter` (R#1: `base_rows` daje `MIN(id)` BEZ `present`/`volume` →
-    ścieżka bywa `present=0` → `os.link` na nieistniejące źródło; brak `volume` → EXDEV nierozstrzygalny
-    z góry → NIE nadaje się na cel linku) oraz o `size_bytes` (F2 redesignu: suma rozmiaru kopii po TEJ
+    `present=1`) o `volume`/`drive_letter` (R#1: `base_rows` NIE nadaje się na cel linku - od D-V-9
+    preferuje kopię obecną, ale gałąź powrotu ODDAJE `present=0` dla klatki, której wszystkie kopie
+    zniknęły → `os.link` na nieistniejące źródło; brak `volume` → EXDEV nierozstrzygalny z góry) oraz o `size_bytes` (F2 redesignu: suma rozmiaru kopii po TEJ
     SAMEJ lokacji, którą wybiera plan — R#5). Frame BEZ obecnej kopii → wiersz z location_id NULL (silnik
     projekcji: `skipped`-kwarantanna). Wiele obecnych → wiele wierszy; silnik bierze pierwszą (D-P5).
     `base_rows` zostaje TYLKO do segmentów layoutu (object/filter/telescope). frame_ids jako TABLICA
@@ -1937,15 +1949,48 @@ def db_path_of(con):
 
 def base_rows(con, frame_ids):
     """Kolumny BAZOWE gridu (warstwa interpretacji NAD lustrem cards) dla zbioru frame_id. Location przez
-    `MIN(id)` BEZ odsiewania po `present` — `present` to KOLUMNA, nie predykat (F3: klatka zniknięta MUSI
-    zostać w gridzie; baza=autorytet). `n_present` = liczba obecnych lokalizacji (perspektywa „Duplikaty"
-    = n_present > 1). Teleskop przez config→telescope_canonical→kanon (jak `object_frames`). frame_ids jako
+    `MIN(id)` **SPOŚRÓD OBECNYCH**, z powrotem do dowolnej, gdy żadna nie jest obecna (D-V-9, decyzja
+    Zdzinia 2026-08-14). `present` zostaje KOLUMNĄ, nie predykatem - i to nie jest odejście od F3, tylko
+    jego dotrzymanie: klatka bez ANI JEDNEJ żywej kopii dalej pokazuje swój adres (gałąź powrotu) i dalej
+    dostaje znacznik zniknięcia. Zmienia się wyłącznie klatka, która ma OBIE kopie: ekran przestaje
+    pokazywać martwy adres tylko dlatego, że ten wjechał do bazy pierwszy.
+    **Zmierzone `?mode=ro` na żywej bazie 2026-08-11 i 2026-08-14:** goły `MIN(id)` wskazywał martwy
+    adres dla **128 masterów** (gotowe obrazy - adres w starym drzewie archiwum wjechał przed nowym,
+    uporządkowanym) i robił to PO CICHU, bo znacznik zniknięcia wymaga `n_present == 0`, a te klatki
+    mają żywą kopię. Kierunek odwrotny: 0 klatek. Zmiana dotyka 128 wierszy z 16 901 - reszta
+    archiwum widzi dokładnie to, co przed nią.
+
+    **KOSZT ZMIERZONY na pełnym zakresie** (bramka pakietu żądała liczby, nie oczekiwania): całe
+    archiwum w jednym wywołaniu **76,7 ms → 109,3 ms**. To ~3% operacji `grid.refresh`, która na tym
+    samym zbiorze trwa ~1000 ms i idzie pod nazwaną fazą zajętości. Wariant z grupowanym `LEFT JOIN`
+    zamiast dwóch podzapytań zmierzył 92,6 ms i został ODRZUCONY: 17 ms nie kupuje dwóch dodatkowych
+    złączeń ani niespójności z `n_present`, który stoi obok jako podzapytanie.
+
+    **`id` NIESIE KOLEJNOŚĆ WJAZDU WPISU, NIE BIOGRAFIĘ ŚCIEŻKI** (bramka pakietu, Z6). Wiersz
+    `location` nigdy nie jest kasowany (zero `DELETE FROM location` w `repo`), więc niższe `id` to
+    rzeczywiście wcześniejszy wpis - ale `relocate_location` zmienia `path` W MIEJSCU, a
+    `rebind_location` przepina wpis pod inną klatkę. `vanished_path` znaczy więc „ostatnia znana
+    ścieżka najstarszego martwego wpisu", nie „pierwszy adres w historii obrazu".
+
+    **`MIN`, NIE `MAX`, spośród martwych - decyzja, nie przypadek:** przy łańcuchu przeprowadzek
+    A→B→C `MIN` odpowiada „gdzie to leżało NA POCZĄTKU", `MAX` - „skąd tu przyjechało". Populacja
+    z więcej niż jednym martwym adresem jest dziś ZEROWA, więc pytanie jest teoretyczne; tooltip
+    nazywa swój wybór wprost („pierwszy: …"), a przełączenie na `MAX` ma czekać na człowieka, który
+    naprawdę o ten drugi adres zapyta.
+
+    `n_present` = liczba obecnych lokalizacji (perspektywa „Duplikaty" = n_present > 1).
+    `n_vanished` + `vanished_path` (MIN(id) spośród MARTWYCH) niosą HISTORIĘ PRZEPROWADZKI dla tooltipu
+    (`grid._former_tip`): skoro klatka zna oba adresy, stary przestaje być śmieciem do ukrycia i staje się
+    widoczną odpowiedzią na pytanie „gdzie to leżało wcześniej". Karmią TOOLTIP, nie nową kolumnę -
+    z tego samego powodu, co `object_source` niżej.
+
+    Teleskop przez config→telescope_canonical→kanon (jak `object_frames`). frame_ids jako
     tablica JSON (`json_each`). Zwraca W TEJ KOLEJNOŚCI: frame_id, kind, filetype, filter_canon,
     camera_model, telescope_label, telescop_canon, object_canon, object_raw, object_source,
     object_cleared_id, date_obs, exptime, path, present, last_verified_at, superseded_by, retired_at,
-    n_present. Wiersze czyta się po NAZWIE (`sqlite3.Row`), ale kolejność w tym zdaniu ma zgadzać
-    się z SELECT-em — rozjazd był zarzutem bramki 0809 i jest tańszy do naprawienia niż do
-    wytłumaczenia następnej sesji.
+    n_present, n_vanished, vanished_path. Wiersze czyta się po NAZWIE (`sqlite3.Row`), ale kolejność
+    w tym zdaniu ma zgadzać się z SELECT-em - rozjazd był zarzutem bramki 0809 i jest tańszy do
+    naprawienia niż do wytłumaczenia następnej sesji.
 
     `object_source` i `object_cleared_id` KARMIĄ POLITYKĘ KOLUMNY (`object_cell`, R-S3-4), a NIE
     nową kolumnę na ekranie: `BASE_COLS` gridu zostaje bez zmian, więc podłoga okna się nie rusza
@@ -1967,7 +2012,10 @@ def base_rows(con, frame_ids):
         "       obj.canon AS object_canon, h.object_raw, f.object_source, f.object_cleared_id, "
         "       h.date_obs, h.exptime, loc.path, loc.present, loc.last_verified_at, f.superseded_by, "
         "       f.retired_at, "
-        "       (SELECT COUNT(*) FROM location lp WHERE lp.frame_id = f.id AND lp.present = 1) AS n_present "
+        "       (SELECT COUNT(*) FROM location lp WHERE lp.frame_id = f.id AND lp.present = 1) AS n_present, "
+        "       (SELECT COUNT(*) FROM location lv WHERE lv.frame_id = f.id AND lv.present = 0) AS n_vanished, "
+        "       (SELECT lw.path FROM location lw WHERE lw.frame_id = f.id AND lw.present = 0 "
+        "         ORDER BY lw.id LIMIT 1) AS vanished_path "
         "FROM frame f "
         "LEFT JOIN header h ON h.frame_id = f.id "
         "LEFT JOIN config c ON c.id = f.config_id "
@@ -1975,7 +2023,9 @@ def base_rows(con, frame_ids):
         "LEFT JOIN telescope t ON t.id = tc.canon_id "
         "LEFT JOIN camera cam ON cam.id = f.camera_id "
         "LEFT JOIN object obj ON obj.id = f.object_id "
-        "LEFT JOIN location loc ON loc.id = (SELECT MIN(id) FROM location WHERE frame_id = f.id) "
+        "LEFT JOIN location loc ON loc.id = COALESCE("
+        "        (SELECT MIN(id) FROM location WHERE frame_id = f.id AND present = 1), "
+        "        (SELECT MIN(id) FROM location WHERE frame_id = f.id)) "
         "WHERE f.id IN (SELECT value FROM json_each(?)) "
         "ORDER BY f.id",
         (json.dumps(list(frame_ids)),),

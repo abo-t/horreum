@@ -98,6 +98,54 @@ def test_object_frames_present0_wciaz_widoczny(s8_obj):
     assert p0["path"] == "/astro/present0.fits"
 
 
+def test_object_frames_adres_zywej_kopii_nie_pierwszej(s8_obj):
+    """D-V-9 na DRUGIEJ powierzchni: panel „Klatki obiektu" renderuje ten sam fakt co grid i ma
+    znaczyć to samo. Tu kłamstwo było głośniejsze - obok martwej ścieżki stała kolumna „Obecna: Nie"
+    dla klatki, której plik leży na dysku."""
+    con, ids = s8_obj
+    a1 = ids["frames"]["a1"]
+    con.execute("UPDATE location SET present = 0 WHERE frame_id = ? AND id = "
+                "(SELECT MIN(id) FROM location WHERE frame_id = ?)", (a1, a1))
+    con.commit()
+    r = next(x for x in queries.object_frames(con, ids["objects"]["NGC7000"]) if x["frame_id"] == a1)
+    # POZYTYWNIE, nie przez `!=` (bramka pakietu Z5): `!=` przechodziło także przy `path=None`,
+    # czyli przy pustym JOIN-ie - dowód domykała dopiero druga asercja.
+    assert r["path"] == "/backup/a1.fits"         # martwy adres schodzi z ekranu, żywy wchodzi
+    assert r["present"] == 1                      # a kolumna statusu przestaje przeczyć dyskowi
+
+
+def test_trzy_powierzchnie_pokazuja_TEN_SAM_adres(s8_obj):
+    """PIN RÓWNOŚCI trzech read-modeli (bramka pakietu: Z1 + F3 wariant b). Docstringi deklarują
+    regułę wyboru adresu jako „ZNAK W ZNAK tę samą" - do tej bramki była to wyłącznie obietnica
+    prozy, a `object_review_frames` NIE MIAŁ ani jednego testu przechodzącego przez `COALESCE`
+    (klatki jego drążenia nie dostają w fiksturze żadnej lokacji).
+
+    Bramka tekstowa (`test_gui_queries.test_wybor_adresu_ma_dokladnie_trzech_wlascicieli`) pilnuje
+    LITERAŁU; ta pilnuje SKUTKU - obie są potrzebne, bo literał można zachować i zepsuć predykat
+    dookoła niego. Rozjazd znaczyłby, że ekran i lista do zapisu wskazują RÓŻNE kopie tej samej
+    klatki.
+
+    Jedna klatka nie obsłuży wszystkich trzech: `object_frames` żąda obiektu, a `object_review_frames`
+    jego BRAKU - stąd dwie."""
+    con, ids = s8_obj
+    a1 = ids["frames"]["a1"]
+    con.execute("UPDATE location SET present = 0 WHERE id = "
+                "(SELECT MIN(id) FROM location WHERE frame_id = ?)", (a1,))
+    # objrev1 (bez obiektu, `object_raw='FlatWizard'`) dostaje dopiero tu dwa adresy - martwy pierwszy
+    for path, present in (("/stare/objrev1.fits", 0), ("/nowe/objrev1.fits", 1)):
+        con.execute("INSERT INTO location (frame_id, volume, path, present) VALUES (?,?,?,?)",
+                    (ids["frames"]["objrev1"], "volX", path, present))
+    con.commit()
+
+    z_gridu = {r["frame_id"]: r["path"] for r in queries.base_rows(con, [a1, ids["frames"]["objrev1"]])}
+    z_panelu = next(r["path"] for r in queries.object_frames(con, ids["objects"]["NGC7000"])
+                    if r["frame_id"] == a1)
+    z_drazenia = next(r["path"] for r in queries.object_review_frames(con, "FlatWizard")
+                      if r["frame_id"] == ids["frames"]["objrev1"])
+    assert z_gridu[a1] == z_panelu == "/backup/a1.fits"
+    assert z_gridu[ids["frames"]["objrev1"]] == z_drazenia == "/nowe/objrev1.fits"
+
+
 def test_object_frames_telescope_label_i_filtr(s8_obj):
     con, ids = s8_obj
     A = ids["A"]

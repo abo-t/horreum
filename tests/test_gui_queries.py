@@ -6,6 +6,7 @@ poza sumą, `frame_count=0` dla teleskopu bez klatek), roll-up po scaleniu + zni
 `merged_under`, audyt eventów (cała oś vs jeden teleskop), oraz że odczyt nie pisze do bazy."""
 import ast
 import json
+import re
 from pathlib import Path
 
 import horreum
@@ -436,3 +437,48 @@ def test_regula_label_canon_ma_jednego_wlasciciela():
                         and value.slice.value == "telescop_canon"):
                     offenders.append(f"{path.relative_to(pkg)}:{node.lineno}")
     assert not offenders, f"reguła label→telescop_canon poza `queries.telescope_label`: {offenders}"
+
+
+# ---------- D-V-9: jeden wybór adresu, trzy powierzchnie (SPOT) ----------
+
+_ADRES_ZYWEJ_KOPII = ("COALESCE("
+                      "(SELECT MIN(id) FROM location WHERE frame_id = f.id AND present = 1), "
+                      "(SELECT MIN(id) FROM location WHERE frame_id = f.id))")
+_WLASCICIELE_ADRESU = {"object_frames", "object_review_frames", "base_rows"}
+
+
+def _sql_wykonywany(zrodlo):
+    """SQL-literały podane do `.execute(...)`, znormalizowane białymi znakami, per funkcja.
+    AST, nie regex - docstring opisujący regułę (jak ten) nie ma prawa dać trafienia."""
+    drzewo = ast.parse(zrodlo)
+    rodzic = {}
+    for fn in ast.walk(drzewo):
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for w in ast.walk(fn):
+                rodzic.setdefault(id(w), fn.name)
+    out = []
+    for node in ast.walk(drzewo):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr in ("execute", "executemany")):
+            continue
+        arg = node.args[0] if node.args else None
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            sql = re.sub(r"\s+", " ", arg.value).replace("( ", "(").replace(" )", ")")
+            out.append((rodzic.get(id(node), "<modul>"), sql))
+    return out
+
+
+def test_wybor_adresu_ma_dokladnie_trzech_wlascicieli():
+    """BRAMKA D-V-9 (SIN-DUP, wzorzec bramki `telescop_canon` wyżej): regułę „spośród kopii wygrywa
+    ŻYWA, z powrotem do dowolnej" trzy read-modele deklarują jako „ZNAK W ZNAK tę samą" - i do tej
+    bramki była to WYŁĄCZNIE obietnica prozy w docstringu (zarzut Z1 bramki pakietu 2026-08-14).
+    Edycja jednego literału z trzech nie łamała niczego, a rozjazd znaczyłby, że ekran i lista do
+    zapisu pokazują RÓŻNE kopie tej samej klatki.
+
+    Stała modułu ODPADA jako lekarstwo: bramka AST zapisu (`test_repo_safety.py`) żąda SQL-a
+    LITERAŁOWEGO, więc sklejanie go ze stałej zrobiłoby z tych zapytań „SQL dynamiczny" poza
+    `repo.py`. Skoro duplikat jest wymuszony, pilnuje go kontrola, nie dobra wola."""
+    zrodlo = (Path(horreum.__file__).parent / "gui" / "queries.py").read_text(encoding="utf-8")
+    trafienia = [fn for fn, sql in _sql_wykonywany(zrodlo) if _ADRES_ZYWEJ_KOPII in sql]
+    assert set(trafienia) == _WLASCICIELE_ADRESU, f"właściciele reguły adresu rozjechali się: {trafienia}"
+    assert len(trafienia) == len(_WLASCICIELE_ADRESU), f"reguła adresu powtórzona poza spisem: {trafienia}"

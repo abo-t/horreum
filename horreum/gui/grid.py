@@ -123,6 +123,34 @@ def _vanished_tip(row):
     return i18n.t("grid.tip.vanished_at", ts=str(ts)[:16].replace("T", " "))
 
 
+def _former_tip(row):
+    """Człon tooltipu ścieżki dla klatki, która ma ŻYWĄ kopię i zna też adres MARTWY - historia przeprowadzki.
+
+    Wariant rozwojowy D-V-9 (decyzja Zdzinia 2026-08-14). Sama naprawa adresu ucisza kłamstwo, ale
+    KASUJE Z EKRANU fakt, który baza zna: że ten obraz leżał wcześniej gdzie indziej. Klatka zna OBA
+    adresy, więc stary przestaje być śmieciem do ukrycia i staje się odpowiedzią na pytanie zadawane
+    w chwili wątpliwości - „przecież to leżało w starym drzewie, gdzie się podziało". Zmierzona
+    populacja to 128 gotowych obrazów po uporządkowaniu drzewa stosów.
+
+    Człon DOKLEJA SIĘ do werdyktu wiersza, nie konkuruje z nim: „×2 obecne lokalizacje" i „wcześniejszy
+    adres" to dwa różne fakty o tej samej klatce. Wołający pilnuje jedynego warunku sensu - że POKAZANY
+    adres jest żywy, bo inaczej „wcześniejszy" wskazywałby to, co user właśnie czyta w komórce.
+
+    DWA STANY SPEŁNIAJĄ TEN WARUNEK I OBA DOSTAJĄ CZŁON ŚWIADOMIE (bramka pakietu, Z3/F5): klatka
+    z kilkoma kopiami, z których część zniknęła, oraz klatka WYCOFANA, KTÓREJ PLIK WRÓCIŁ
+    (`queries.retired_conflict_frame_ids` - stan modelowany, z własnym wierszem Porządków). W drugim
+    przypadku tooltip mówi naraz „wycofana ręką" i „wcześniejszy adres" - to dwa prawdziwe fakty
+    o tej samej klatce, nie sprzeczność. Milczą natomiast stany BEZ żywej kopii (zniknięta, wycofana
+    bez powrotu, zastąpiona): tam pokazany adres SAM jest tym martwym."""
+    path = row.get("vanished_path")
+    if not path:
+        return ""
+    n = row.get("n_vanished") or 0
+    if n > 1:
+        return i18n.t("grid.tip.former_paths", n=n, path=path)
+    return i18n.t("grid.tip.former_path", path=path)
+
+
 def _retired_tip(row):
     """Człon tooltipu ścieżki dla klatki WYCOFANEJ RĘKĄ — ZAWSZE z datą i ZAWSZE z drogą powrotu.
 
@@ -450,6 +478,11 @@ class GridTableModel(QAbstractTableModel):
                     _retired_tip(row) if retired else (
                     _vanished_tip(row) if vanished else (
                         i18n.t("grid.tip.dup_locs", n=row['n_present']) if dup else "")))
+                # Historia przeprowadzki DOKLEJA SIĘ do werdyktu (patrz `_former_tip`), a warunek
+                # `present == 1` jest warunkiem SENSU zdania, nie ostrożnością: pokazany adres musi
+                # być żywy, żeby „wcześniejszy" znaczyło coś innego niż on sam.
+                if row.get("present") == 1:
+                    extra += _former_tip(row)
                 return (path or i18n.t("object.no_location")) + extra
             return None
         if key == "_dt_delta":

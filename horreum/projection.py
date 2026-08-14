@@ -98,8 +98,9 @@ def _segment(row, spec):
 
 def plan(con, frame_ids, layout="po-obiektach"):
     """Zbuduj PLAN projekcji (czysty odczyt DB, ZERO filesystemu). Dla każdego frame'a: ŹRÓDŁO linku =
-    pierwsza OBECNA location (`present_locations`, R#1 — NIE `base_rows`, które daje `MIN(id)` bez
-    `present`/`volume`) + SEGMENTY layoutu z `base_rows` (tylko do kategorii). Frame bez obecnej kopii
+    pierwsza OBECNA location (`present_locations`, R#1 - NIE `base_rows`: od D-V-9 preferuje ono
+    kopię obecną, ale gałęzią powrotu potrafi oddać `present=0`, i wciąż nie zna `volume`)
+    + SEGMENTY layoutu z `base_rows` (tylko do kategorii). Frame bez obecnej kopii
     → `skipped` (kwarantanna, raport). Wiele obecnych → pierwsza, `multi_present++`. `layout` ∈ LAYOUTS."""
     if layout not in LAYOUTS:
         raise ValueError(f"nieznany layout: {layout!r} (dostępne: {sorted(LAYOUTS)})")

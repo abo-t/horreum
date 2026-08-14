@@ -6,6 +6,21 @@ schemat i API mogą się jeszcze zmieniać.
 
 ## [Niewydane]
 
+### Naprawione
+
+- **Lista klatek pokazuje adres kopii, KTÓRA ISTNIEJE.** Gdy jeden obraz leży na dysku w dwóch
+  miejscach i jedno z nich zniknie - a tak stało się przy uporządkowaniu drzewa gotowych stosów -
+  program pokazywał ten adres, który wjechał do bazy PIERWSZY, nawet jeśli plik spod niego dawno
+  przepadł. Robił to po cichu: znacznik „zniknięta" zapala się dopiero, gdy nie ma ANI JEDNEJ
+  żywej kopii, więc taki wiersz wyglądał zupełnie zwyczajnie. Na Twoim archiwum dotyczyło to
+  **128 gotowych obrazów** - najcenniejszej części zbioru. Teraz spośród kopii wygrywa ta obecna,
+  a gdy żadnej nie ma, wiersz dalej pokazuje swój ostatni znany adres i dalej jest oznaczony jako
+  zniknięty - bo wtedy właśnie ta ścieżka jest wskazówką, gdzie szukać kopii zapasowej. Ta sama
+  poprawka objęła panel „Klatki obiektu" i listę klatek do przypisania nazwy.
+- **Stary adres przestał być śmieciem i stał się historią przeprowadzki.** Najechanie na ścieżkę
+  takiego obrazu pokazuje teraz dodatkowo, gdzie leżał wcześniej - odpowiedź na pytanie „przecież
+  to było w innym folderze, gdzie się podziało" jest na ekranie, a nie tylko w bazie.
+
 ## [0.8.0] — 2026-08-11
 
 Wydanie o **odwracalności** — o tym, żeby żaden gest w Horreum nie był ślepym zaułkiem. Do tej pory

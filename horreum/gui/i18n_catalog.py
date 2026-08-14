@@ -1146,6 +1146,18 @@ CATALOG = {
     "grid.tip.dup_locs": {
         "pl": "\n({n} obecnych lokalizacji)", "en": "\n({n} present locations)",
     },
+    # HISTORIA PRZEPROWADZKI, nie ostrzeżenie (D-V-9, wariant rozwojowy). Zdanie jest w czasie
+    # przeszłym i bez wykrzyknika, bo nic tu nie wymaga roboty: plik ŻYJE pod adresem z komórki,
+    # a stary adres jest odpowiedzią na „przecież to leżało gdzie indziej", nie zgłoszeniem awarii.
+    # Wariant mnogi podaje LICZBĘ i pierwszy adres zamiast sklejać listę - tooltip ma się przeczytać
+    # jednym spojrzeniem, a pełny wykaz kopii ma własną powierzchnię.
+    "grid.tip.former_path": {
+        "pl": "\n(wcześniejszy adres: {path})", "en": "\n(former address: {path})",
+    },
+    "grid.tip.former_paths": {
+        "pl": "\n(wcześniejsze adresy ({n}), pierwszy: {path})",
+        "en": "\n(former addresses ({n}), first: {path})",
+    },
 
     # --- FilterBuilder ---
     "grid.filter.join": {"pl": "Łącz:", "en": "Join:"},

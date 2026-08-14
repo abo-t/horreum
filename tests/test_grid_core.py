@@ -224,6 +224,68 @@ def test_base_rows_duplikaty(grid_db):
     assert rows[1]["path"]  # MIN(id) location, niezależnie od present
 
 
+# ---------- D-V-9: spośród kopii wygrywa ŻYWA, nie ta, która wjechała pierwsza ----------
+
+def _dwa_adresy(con, stary="/stare/masterLight_BIN-1.xisf", nowy="/nowe/Cr464_2023-05-07.xisf"):
+    """Klatka z DWOMA adresami: martwym (wjechał pierwszy → niższy `location.id`) i żywym.
+    Kolejność INSERT-ów JEST treścią fikstury - odwrócona, test przestaje cokolwiek dowodzić,
+    dlatego zaraz niżej stoi przed nią asercja, a nie sama uwaga w prozie."""
+    con.execute("INSERT INTO frame (id, sha1_data, kind, filetype, first_seen_at) "
+                "VALUES (5, 'd5', 'master_light', 'xisf', ?)", (NOW,))
+    con.executemany(
+        "INSERT INTO location (frame_id, volume, path, present) VALUES (?,?,?,?)",
+        [(5, "V", stary, 0), (5, "V", nowy, 1)])
+    con.commit()
+    martwa, zywa = con.execute(
+        "SELECT MIN(CASE WHEN present = 0 THEN id END), MIN(CASE WHEN present = 1 THEN id END) "
+        "FROM location WHERE frame_id = 5").fetchone()
+    assert martwa < zywa, "fikstura nie odtwarza pułapki: martwa kopia MUSI mieć niższe id"
+    return {r["frame_id"]: r for r in queries.base_rows(con, [5])}[5]
+
+
+def test_base_rows_adres_zywej_kopii_nie_pierwszej(grid_db):
+    """D-V-9 (decyzja Zdzinia 2026-08-14): grid pokazuje adres OBECNEJ kopii. Zmierzona populacja to
+    128 gotowych obrazów, którym wjazd stosów dał drugi adres - i robiło się to PO CICHU, bo znacznik
+    zniknięcia wymaga `n_present == 0`, a te klatki mają żywą kopię, więc wiersz wyglądał zwyczajnie."""
+    r = _dwa_adresy(grid_db)
+    assert r["path"] == "/nowe/Cr464_2023-05-07.xisf"
+    assert r["present"] == 1                       # kolumna statusu zgadza się z ekranem i z dyskiem
+    assert r["n_present"] == 1                     # NIE „Duplikaty": żywa kopia jest jedna
+
+
+def test_base_rows_niesie_stary_adres_jako_historie(grid_db):
+    """Wariant rozwojowy D-V-9: martwy adres nie znika z wiedzy, tylko przestaje udawać bieżący.
+    Bez tych dwóch kolumn naprawa KASOWAŁABY z ekranu fakt, który baza zna (gdzie obraz leżał)."""
+    r = _dwa_adresy(grid_db)
+    assert r["vanished_path"] == "/stare/masterLight_BIN-1.xisf"
+    assert r["n_vanished"] == 1
+
+
+def test_base_rows_bez_zywej_kopii_dalej_ma_adres(grid_db):
+    """F3 NIETKNIĘTE - to jest cena, której naprawa D-V-9 nie ma prawa zapłacić: klatka bez ANI JEDNEJ
+    obecnej kopii dalej pokazuje swój adres (gałąź powrotu COALESCE) i dalej jest ZNIKNIĘTA.
+    Bez tej gałęzi `present = 1` w JOIN-ie zabrałoby jej ścieżkę i wiersz zamilkłby o tym, czego szukać."""
+    r = {x["frame_id"]: x for x in queries.base_rows(grid_db, [4])}[4]
+    assert r["path"] == "/a/f4.fits" and r["present"] == 0 and r["n_present"] == 0
+    assert r["vanished_path"] == "/a/f4.fits"     # ta sama kopia - dlatego tooltip pyta o `present`
+
+
+def test_hint_obiektu_idzie_za_zywym_adresem(grid_db):
+    """Zarzut F1 bramki pakietu: kolumna „Obiekt" dla stosu BEZ obiektu jest POCHODNĄ ścieżki
+    (`stack_folder`), więc naprawa adresu zmienia WIDOCZNY tekst, nie tylko tooltip. Populacja na
+    żywym archiwum zmierzona 2026-08-14: **0** klatek (`master_light` bez obiektu nie ma wcale) -
+    mechanizm jest jednak realny i to fikstura tej paczki go wytwarza, więc dostaje bramkę.
+
+    Podpowiedź czyta DZIADKA, gdy rodzicem jest `master` - stąd oba adresy w kształcie WBPP."""
+    _dwa_adresy(grid_db, stary="/arch/test 2023-05-07/master/masterLight_BIN-1.xisf",
+                nowy="/arch/STACKS/Cr464/76EDPH_2600MM/CLS/Cr464_2023-05-07.xisf")
+    r = {x["frame_id"]: x for x in queries.base_rows(grid_db, [5])}[5]
+    assert queries.object_cell({k: r[k] for k in r.keys()}) == ("⟨CLS⟩", "hint")
+    # DŁUG UJAWNIONY, NIE WPROWADZONY (→ kolejka): w nowym drzewie na pozycji podpowiedzi stoi FILTR,
+    # a w starym stała nazwa sesji. Naprawa adresu tego nie psuje - odsłania, bo przedtem ta sama
+    # kolumna czytała z martwej ścieżki. Rozstrzygnięcie należy do osobnego GO.
+
+
 def test_base_rows_xisf_kolumny(grid_db):
     rows = {r["frame_id"]: r for r in queries.base_rows(grid_db, [3])}
     assert rows[3]["kind"] == "master_flat"

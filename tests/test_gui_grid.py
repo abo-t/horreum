@@ -1088,6 +1088,65 @@ def test_tooltip_znikietej_bez_daty_nie_zmysla(view, gcon):
     assert "zniknięta" in tip and "2026" not in tip.split("f4.fits")[-1]
 
 
+# ---------- D-V-9: adres żywej kopii + stary adres jako HISTORIA (wariant rozwojowy) ----------
+
+def _zasiej_dwa_adresy(con):
+    """Klatka z martwym adresem (wjechał pierwszy) i żywym - kształt 128 masterów z żywej bazy."""
+    con.execute("INSERT INTO frame (id, sha1_data, kind, filetype, first_seen_at) "
+                "VALUES (5, 'd5', 'master_light', 'xisf', ?)", (NOW,))
+    con.executemany(
+        "INSERT INTO location (frame_id, volume, path, present) VALUES (?,?,?,?)",
+        [(5, "V", "/stare/masterLight_BIN-1.xisf", 0), (5, "V", "/nowe/Cr464_2023-05-07.xisf", 1)])
+    con.commit()
+    martwa, zywa = con.execute(
+        "SELECT MIN(CASE WHEN present = 0 THEN id END), MIN(CASE WHEN present = 1 THEN id END) "
+        "FROM location WHERE frame_id = 5").fetchone()
+    assert martwa < zywa, "fikstura nie odtwarza pułapki: martwa kopia MUSI mieć niższe id"
+
+
+def test_komorka_sciezki_pokazuje_zywa_kopie(view, gcon):
+    """D-V-9 na EKRANIE: komórka „Ścieżka" niesie nazwę pliku, który istnieje. Do naprawy wiersz
+    pokazywał martwy adres i nie mówił o tym niczym - znacznik zniknięcia wymaga `n_present == 0`."""
+    _zasiej_dwa_adresy(gcon)
+    view.refresh()
+    r = next(i for i, row in enumerate(view.model._rows) if row.get("frame_id") == 5)
+    assert view.model.data(view.model.index(r, 0), Qt.DisplayRole) == "Cr464_2023-05-07.xisf"
+
+
+def test_tooltip_niesie_wczesniejszy_adres(view, gcon):
+    """Wariant rozwojowy: stary adres przestaje być śmieciem i staje się widoczną historią
+    przeprowadzki. Człon DOKLEJA SIĘ do bieżącej ścieżki, nie zastępuje jej."""
+    _zasiej_dwa_adresy(gcon)
+    view.refresh()
+    tip = _path_tip(view, 5)
+    assert "/nowe/Cr464_2023-05-07.xisf" in tip                  # bieżący adres dalej na górze
+    assert "wcześniejszy adres" in tip and "/stare/masterLight_BIN-1.xisf" in tip
+
+
+def test_tooltip_znikietej_nie_mowi_o_wczesniejszym_adresie(view, gcon):
+    """Warunek SENSU, nie ostrożność: przy klatce znikniętej pokazany adres SAM jest tym martwym,
+    więc „miała wcześniej adres X" wskazywałoby to, co user właśnie czyta w komórce."""
+    view.refresh()
+    tip = _path_tip(view, 4)                                     # f4: jedyna kopia present=0
+    assert "zniknięta" in tip and "wcześniejszy adres" not in tip
+
+
+def test_tooltip_dwa_martwe_adresy_podaje_liczbe_i_pierwszy(view, gcon):
+    """Gałąź MNOGA `_former_tip` - jedyna nieprzetestowana ścieżka nowej funkcji (bramka pakietu Z4).
+    Populacja żywej bazy: 0 klatek z dwoma martwymi adresami, więc broni jej wyłącznie ten test.
+    Tooltip podaje LICZBĘ i pierwszy adres zamiast sklejać listę: ma się przeczytać jednym
+    spojrzeniem, a pełny wykaz kopii ma własną powierzchnię."""
+    _zasiej_dwa_adresy(gcon)
+    gcon.execute("INSERT INTO location (frame_id, volume, path, present) "
+                 "VALUES (5, 'V', '/jeszcze-starsze/master.xisf', 0)")
+    gcon.commit()
+    view.refresh()
+    tip = _path_tip(view, 5)
+    assert "wcześniejsze adresy (2)" in tip
+    assert "/stare/masterLight_BIN-1.xisf" in tip           # PIERWSZY martwy, nie ostatni dopisany
+    assert "/nowe/Cr464_2023-05-07.xisf" in tip             # bieżący adres dalej na górze
+
+
 # ---------- F3: pasek zbioru + panele kling (PLAN_ux_redesign §4) ----------
 
 def test_panele_ekskluzywne_i_checkable(view):

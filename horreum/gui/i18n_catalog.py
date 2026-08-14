@@ -1099,6 +1099,7 @@ CATALOG = {
         "pl": "\n(wycofana ręką {ts} — pliku już nie szukamy; można to cofnąć: Klatka ▾ → Przywróć)",
         "en": "\n(retired by hand {ts} — the file is no longer looked for; undo: Frame ▾ → Restore)",
     },
+    "perspective.missing_copy": {"pl": "Brakujące kopie", "en": "Missing copies"},
     "perspective.to_review": {"pl": "Do przeglądu", "en": "To review"},
 
     # --- pusty grid (rozwiązywane w USE-site; stałe _EMPTY_* trzymają KLUCZ) ---
@@ -1672,6 +1673,8 @@ CATALOG = {
     "grid.criteria.only_review": {"pl": "tylko do przeglądu", "en": "only to review"},
     "grid.criteria.only_vanished": {"pl": "tylko zniknięte", "en": "only vanished"},
     "grid.criteria.only_superseded": {"pl": "tylko zastąpione", "en": "only superseded"},
+    "grid.criteria.only_missing_copy": {
+        "pl": "tylko z brakującą kopią", "en": "only with a missing copy"},
     "grid.criteria.only_lineage": {
         "pl": "tylko obrazy bez rodowodu",
         "en": "only images without lineage",
@@ -2262,6 +2265,12 @@ CATALOG = {
     "tasks.observatories_unnamed": {"pl": "Stanowiska bez nazwy", "en": "Sites without a name"},
     "tasks.dup_frames": {"pl": "Duplikaty (>1 kopia)", "en": "Duplicates (>1 copy)"},
     "tasks.vanished_frames": {"pl": "Zniknięte z dysku", "en": "Vanished from disk"},
+    # NAZWA MÓWI O UBYTKU, NIE O AWARII (D-V-9a). Wiersz stoi obok „Zniknięte z dysku" i musi się
+    # od niego odróżniać JEDNYM spojrzeniem: tam nie ma ani jednej żywej kopii i jest robota, tu
+    # klatka żyje i nie ma nic do zrobienia. Stąd „kopie", nie „klatki", i człon w nawiasie, który
+    # nazywa naturę wiersza dokładnie tak, jak robią to dwaj sąsiedzi z historii.
+    "tasks.missing_copy_frames": {
+        "pl": "Brakujące kopie (historia)", "en": "Missing copies (history)"},
 
     # --- facets.py (listwa facetów): _GROUPS tytuły trzymają KLUCZE ---
     "facets.group.object": {"pl": "Obiekt", "en": "Object"},

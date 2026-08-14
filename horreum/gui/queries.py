@@ -1226,6 +1226,39 @@ def vanished_frame_ids(con):
     ).fetchall()}
 
 
+def missing_copy_frame_ids(con):
+    """Zbiór frame_id, które MAJĄ żywą kopię i JEDNOCZEŚNIE znają adres martwy (perspektywa
+    „Brakujące kopie", D-V-9a).
+
+    CZWARTY STAN, nie odmiana trzech poprzednich - i różnica jest robocza, nie taksonomiczna:
+      * ZNIKNIĘTA (`vanished_frame_ids`) - nie ma ANI JEDNEJ żywej kopii, robota jest DO ZROBIENIA;
+      * DUPLIKAT (`dup_frame_ids`) - ma WIĘCEJ NIŻ JEDNĄ żywą kopię, czyli nadmiar, nie ubytek;
+      * ZASTĄPIONA / WYCOFANA - historia, którą zamknął gest albo następczyni;
+      * BRAKUJĄCA KOPIA - klatka żyje, ale jedna z jej kopii zniknęła. Nic nie zginęło i nic nie
+        wymaga pośpiechu; to jest ślad po przeprowadzce albo po utraconej kopii zapasowej.
+
+    DLACZEGO OSOBNA POWIERZCHNIA, A NIE SAM TOOLTIP (bramka pakietu D-V-9, soczewka repo F4).
+    Do naprawy D-V-9 siatka pokazywała takim klatkom adres MARTWY - i robiła to po cichu, bo
+    znacznik zniknięcia wymaga `n_present == 0`. Naprawa uciszyła kłamstwo, ale zostawiła fakt
+    widoczny WYŁĄCZNIE pod kursorem: żaden kubełek, licznik ani filtr nie pokazywał go razem.
+    Zmierzona populacja: **128 gotowych obrazów** - najcenniejsza część archiwum. Fakt o tylu
+    klatkach, którego nie da się zobaczyć inaczej niż jeden po drugim, jest faktem schowanym.
+
+    ⚠ ZAWĘŻENIE DO KLATEK ŻYWYCH JEST TREŚCIĄ PREDYKATU, nie ostrożnością. Bez `EXISTS(present=1)`
+    zbiór wchłonąłby klatki ZNIKNIĘTE (wszystkie kopie martwe), czyli powielił perspektywę
+    „Zniknięte" i zamienił listę „nic nie zginęło" w listę „poszukaj plików". Zastąpione i wycofane
+    wypadają z tego samego powodu, co z kubełków roboczych: ich historię zamknął już inny zapis,
+    a ten wiersz ma mówić o klatkach ŻYWYCH.
+
+    Zwraca set[int]."""
+    return {int(r[0]) for r in con.execute(
+        "SELECT f.id FROM frame f "
+        "WHERE f.superseded_by IS NULL AND f.retired_at IS NULL "
+        "AND EXISTS (SELECT 1 FROM location l WHERE l.frame_id = f.id AND l.present = 1) "
+        "AND EXISTS (SELECT 1 FROM location l WHERE l.frame_id = f.id AND l.present = 0)"
+    ).fetchall()}
+
+
 def superseded_frame_ids(con):
     """Zbiór frame_id ZASTĄPIONYCH: `frame.superseded_by IS NOT NULL` (perspektywa „Zastąpione", R4).
 
@@ -1680,6 +1713,7 @@ def tasks_state(con):
         "observatories_unnamed": observatories_unnamed,
         "vanished_frames": len(vanished_frame_ids(con)),
         "superseded_frames": len(superseded_frame_ids(con)),
+        "missing_copy_frames": len(missing_copy_frame_ids(con)),
         # Ta sama figura po raz PIĄTY i SZÓSTY (D-OW-3/R2), ale o RÓŻNEJ naturze — i to jest cała
         # rzecz: „Wycofane" są zapisem historii (wiersz informacyjny, jak „Zastąpione"), a
         # „wycofana, a plik wrócił" JEST robotą, bo tylko w tym stanie żywa klatka wypada ze

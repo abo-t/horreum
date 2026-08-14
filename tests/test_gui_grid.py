@@ -3,6 +3,7 @@ sort + grupowanie; FilterPanel → drzewo; FramesView refresh/filtr/perspektywa.
 modułu (§9.4): bez PySide6 plik się POMIJA (pełny pytest bez Qt zostaje prawdziwy)."""
 import json
 import os
+import pathlib
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -11,7 +12,9 @@ import pytest
 pytest.importorskip("PySide6")
 
 from horreum import db, naming, pivot as pivot_mod, writeback
-from horreum.gui import queries, rows as rows_mod
+from horreum.gui import grid as grid_mod, queries, rows as rows_mod, tasks as tasks_mod
+
+_ZRODLO_GRIDU = pathlib.Path(grid_mod.__file__).read_text(encoding='utf-8')
 
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtWidgets import QApplication
@@ -3191,3 +3194,63 @@ def test_droga_powrotu_jest_WIDOCZNA_take_gdy_nie_ma_czego_przywrocic(view):
     assert view.sel_bar.act_frame_restore.isEnabled() is False
     assert view.sel_bar.act_retire.isEnabled() is True
     assert view.sel_bar.btn_frame.isEnabled() is True
+
+
+# ---------- D-V-9a: perspektywa „Brakujące kopie" + bramka na enumerację przełączników ----------
+
+def test_predykat_brakujacej_kopii_odroznia_sie_od_trzech_sasiadow(gcon):
+    """Czwarty stan, nie odmiana trzech poprzednich. Fikstura ma wszystkie naraz: f1 = DWIE żywe
+    kopie (duplikat, nadmiar), f4 = jedyna kopia martwa (zniknięta, robota), f5 = żywa + martwa
+    (brakująca kopia). Gdyby predykat pytał tylko o `present=0`, wchłonąłby f4 i zamienił listę
+    „nic nie zginęło" w drugą listę „poszukaj plików"."""
+    _zasiej_dwa_adresy(gcon)
+    assert queries.missing_copy_frame_ids(gcon) == {5}
+    assert queries.vanished_frame_ids(gcon) == {4}, "zniknięta ZOSTAJE u siebie"
+    assert queries.dup_frame_ids(gcon) == {1}, "duplikat ZOSTAJE u siebie"
+
+
+def test_zastapiona_i_wycofana_wypadaja_z_brakujacych_kopii(gcon):
+    """Historię zamknął już inny zapis - wiersz ma mówić o klatkach ŻYWYCH. Bez tych dwóch guardów
+    ta sama klatka stałaby na trzech listach naraz i każda kazałaby zrobić co innego."""
+    _zasiej_dwa_adresy(gcon)
+    gcon.execute("UPDATE frame SET superseded_by = 1 WHERE id = 5"); gcon.commit()
+    assert queries.missing_copy_frame_ids(gcon) == set()
+    gcon.execute("UPDATE frame SET superseded_by = NULL, retired_at = '2026-08-14T10:00:00' "
+                 "WHERE id = 5"); gcon.commit()
+    assert queries.missing_copy_frame_ids(gcon) == set()
+
+
+def test_perspektywa_brakujacych_kopii_przycina_grid(view, gcon):
+    """Przełącznik `only_missing_copy` przepięty KOŃCEM DO KOŃCA: preset → flaga → trim w refresh.
+    Test celuje w preset PO STAŁEJ, nie po napisie - dokładnie tak, jak robi to klik w Porządkach."""
+    _zasiej_dwa_adresy(gcon)
+    view.apply_perspective(grid_mod.PRESET_MISSING_COPY)
+    assert [r["frame_id"] for r in view.model._data_rows] == [5]
+    assert "brakującą kopią" in view.sel_bar.criteria_label.toolTip()
+
+
+def test_wiersz_porzadkow_jest_KLIKALNY_ale_NIE_ROBOTA(gcon):
+    """Trzeci stan wiersza (jak „Zastąpione"/„Wycofane"): MA dokąd prowadzić, ale jego liczba nigdy
+    nie jest zadaniem - klatka żyje, nic nie zginęło i nic się nie pali. Gdyby wpadł do odznaki
+    sidebara, 128 gotowych obrazów wołałoby o robotę, której nie ma."""
+    _zasiej_dwa_adresy(gcon)
+    assert queries.tasks_state(gcon)["missing_copy_frames"] == 1
+    assert "missing_copy_frames" in tasks_mod._BEZ_ROBOTY
+    cel = next(cel for klucz, _et, cel in tasks_mod._TASKS if klucz == "missing_copy_frames")
+    assert cel == grid_mod.PRESET_MISSING_COPY, "wiersz musi celować w preset PO STAŁEJ"
+
+
+def test_KAZDY_preset_ma_etykiete_i_zuzyta_flage():
+    """BRAMKA NA ENUMERACJĘ (D-V-9a). Rodzina `only_*` ma UDOKUMENTOWANĄ historię regresji: rozjazd
+    enumeracji wyprodukował kiedyś „Baza pusta" na pełnej bazie (`483df93`). Ta paczka POWTÓRZYŁA
+    tę klasę błędu - przełącznik wpięty w osiem miejsc i pominięty w dziewiątym (`_PRESET_LABELS`),
+    co wywaliło 116 testów `KeyError`-em. Znalezisko jednostkowe podniesione do kontroli:
+
+      1. każdy preset ma etykietę wyświetlania - inaczej `KeyError` przy pierwszym renderze listy;
+      2. każdy klucz `only_*` ze specyfikacji presetu jest ZUŻYWANY przez `_apply_preset`, czyli ma
+         swój atrybut `_only_*` - inaczej perspektywa cicho pokazuje pełny grid zamiast przyciętego,
+         a to jest awaria BEZ komunikatu, więc gorsza od `KeyError`."""
+    for nazwa, spec in grid_mod.PRESETS.items():
+        assert nazwa in grid_mod._PRESET_LABELS, f"preset bez etykiety wyświetlania: {nazwa!r}"
+        for klucz in (k for k in spec if k.startswith("only_")):
+            assert f"self._{klucz}" in _ZRODLO_GRIDU, f"flaga {klucz!r} presetu {nazwa!r} nieużywana"

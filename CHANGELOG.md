@@ -6,6 +6,18 @@ schemat i API mogą się jeszcze zmieniać.
 
 ## [Niewydane]
 
+### Dodane
+
+- **Obrazy, którym zniknęła jedna z kopii, mają wreszcie swoje miejsce - „Brakujące kopie".** Gdy
+  ten sam obraz leżał w dwóch miejscach i jedno z nich przepadło, program wiedział o tym, ale nie
+  miał jak Ci tego pokazać inaczej niż po najechaniu myszą na pojedynczy wiersz. Przy 128 takich
+  obrazach to znaczyło: fakt jest w bazie, a zobaczyć go nie sposób. Teraz Porządki mają osobną
+  pozycję, a Zbiory - własną perspektywę, więc widzisz je wszystkie naraz i możesz filtrować jak
+  każdy inny zbiór. **Ta pozycja celowo NIE liczy się do odznaki „tu jest robota"** i nie jest
+  pogrubiona: klatka żyje, plik jest na dysku, nic nie zginęło - to zapis historii, nie zadanie.
+  Odróżnia się przy tym od dwóch sąsiadów, z którymi łatwo ją pomylić: „Zniknięte z dysku" to
+  klatki BEZ ani jednej żywej kopii (tam robota jest), a „Duplikaty" to nadmiar kopii, nie ubytek.
+
 ### Naprawione
 
 - **Lista klatek pokazuje adres kopii, KTÓRA ISTNIEJE.** Gdy jeden obraz leży na dysku w dwóch

@@ -30,8 +30,8 @@ from horreum.gui import i18n, queries, rows, theme
 from horreum.gui.app import (
     ObjectAxisView, ObservatoryAxisView, TelescopeAxisView, _utc_now_iso,
 )
-from horreum.gui.grid import (PRESET_DUPS, PRESET_LINEAGE, PRESET_RETIRED, PRESET_SUPERSEDED,
-                              PRESET_VANISHED)
+from horreum.gui.grid import (PRESET_DUPS, PRESET_LINEAGE, PRESET_MISSING_COPY, PRESET_RETIRED,
+                              PRESET_SUPERSEDED, PRESET_VANISHED)
 from horreum.gui.rows import TwoPartDelegate
 
 # Definicja listy zadań: (klucz stanu z `tasks_state`, etykieta, akcja). Akcja: numer podstrony
@@ -91,6 +91,11 @@ _TASKS = [
     # dokładnie ten defekt, który ta paczka leczy.
     ("retired_frames", "tasks.retired_frames", PRESET_RETIRED),
     ("retired_conflict_frames", "tasks.retired_conflict_frames", PRESET_RETIRED),
+    # Wiersz KLIKALNY, ale NIE ROBOTA (D-V-9a) - trzeci stan, jak "Zastapione" i "Wycofane".
+    # Klatka zyje; zniknela jej JEDNA z kopii, wiec nie ma tu nic do zrobienia i nic sie nie
+    # pali. Stoi na liscie, bo po naprawie D-V-9 ten fakt widac bylo wylacznie pod kursorem,
+    # jeden wiersz naraz - a dotyczy 128 gotowych obrazow.
+    ("missing_copy_frames", "tasks.missing_copy_frames", PRESET_MISSING_COPY),
 ]
 
 # TRZECI STAN WIERSZA: KLIKALNY, ALE NIE ROBOTA. Do 0809 lista znała dwa — informacyjny (cel `None`,
@@ -100,7 +105,7 @@ _TASKS = [
 # drzwiami odtwarzał dokładnie ten defekt, który pakiet kolejki wyleczył w kubełkach (bramka 3a
 # 0809, zarzut `kimi` #4). Klucz, nie flaga w krotce: krotka opisuje POZYCJĘ, a to jest fakt o jej
 # NATURZE, i tak samo czyta go badge, jak i pogrubienie.
-_BEZ_ROBOTY = frozenset({"superseded_frames", "retired_frames"})
+_BEZ_ROBOTY = frozenset({"superseded_frames", "retired_frames", "missing_copy_frames"})
 
 
 class TasksView(QWidget):

@@ -215,6 +215,12 @@ PRESET_SUPERSEDED = "Zastąpione"
 # — co ważniejsze — jak jej PRZYWRÓCIĆ: gest powrotu bierze cel z zaznaczenia, a zaznaczyć można
 # tylko to, co widać. Perspektywa nie jest tu więc wygodą, tylko drugą połową odwracalności.
 PRESET_RETIRED = "Wycofane"
+# PRESET_MISSING_COPY - szósty bliźniak (D-V-9a). Klatka ŻYJE, ale jedna z jej kopii zniknęła:
+# stan, którego do tej paczki NIE WIDZIAŁA żadna powierzchnia. „Zniknięte" go nie obejmują (żądają
+# BRAKU żywej kopii), „Duplikaty" też nie (liczą wyłącznie obecne, więc widzą nadmiar, nie ubytek),
+# a po naprawie D-V-9 fakt ten dało się zobaczyć WYŁĄCZNIE w tooltipie - jeden wiersz naraz, przy
+# populacji 128. Stała współdzielona z TasksView po nazwie, jak pięciu sąsiadów wyżej.
+PRESET_MISSING_COPY = "Brakujące kopie"
 PRESETS = {
     "Przegląd": {"filter": None, "group_by": None},
     "Kalibracja": {"filter": {"op": "OR", "conditions": [
@@ -227,6 +233,7 @@ PRESETS = {
     PRESET_LINEAGE: {"filter": None, "group_by": None, "only_lineage": True},
     PRESET_SUPERSEDED: {"filter": None, "group_by": None, "only_superseded": True},
     PRESET_RETIRED: {"filter": None, "group_by": None, "only_retired": True},
+    PRESET_MISSING_COPY: {"filter": None, "group_by": None, "only_missing_copy": True},
     "Do przeglądu": {"filter": None, "group_by": None, "only_review": True},
 }
 # Etykieta WYŚWIETLANIA presetu (tekst) osobno od TOŻSAMOŚCI (klucz PRESETS w `itemData` — używany przez
@@ -239,6 +246,7 @@ _PRESET_LABELS = {
     PRESET_LINEAGE: "perspective.lineage",
     PRESET_SUPERSEDED: "perspective.superseded",
     PRESET_RETIRED: "perspective.retired",
+    PRESET_MISSING_COPY: "perspective.missing_copy",
     "Do przeglądu": "perspective.to_review",
 }
 
@@ -2094,6 +2102,7 @@ class FramesView(QWidget):
         self._only_lineage = False
         self._only_superseded = False
         self._only_retired = False
+        self._only_missing_copy = False
         self._reveal_facet = None   # (facet, wartość) do odsłonięcia w listwie — patrz `apply_object_facet`
         self._frame_ids = []      # frame_id widoczne w gridzie (cel makra) — aktualizowane w refresh()
         self._run_id = None       # JEDEN run_id sesji makra (R#5 lifecycle: stage→commit/reject zwalnia)
@@ -2339,6 +2348,7 @@ class FramesView(QWidget):
         self._only_lineage = bool(spec.get("only_lineage"))
         self._only_superseded = bool(spec.get("only_superseded"))
         self._only_retired = bool(spec.get("only_retired"))
+        self._only_missing_copy = bool(spec.get("only_missing_copy"))
         self._filter_tree = spec.get("filter")
         # F4R#2: stan facetów resetowany dla KAŻDEJ perspektywy (preset ORAZ zapisana) — perspektywa
         # definiuje CAŁY zbiór; stara zapisana bez klucza "facets" MUSI zerować stan, inaczej facety
@@ -2374,6 +2384,7 @@ class FramesView(QWidget):
         self._only_dups = self._only_review = self._only_vanished = self._only_lineage = False
         self._only_superseded = False
         self._only_retired = False
+        self._only_missing_copy = False
         self._filter_tree = None
         self.filter_panel.set_tree(None)
         self._facet_state = {"object": {"in": [[oid, canon] for oid, canon in pairs]}} \
@@ -2412,6 +2423,7 @@ class FramesView(QWidget):
             "only_vanished": self._only_vanished, "only_lineage": self._only_lineage,
             "only_superseded": self._only_superseded,
             "only_retired": self._only_retired,
+            "only_missing_copy": self._only_missing_copy,
             "facets": self._facet_state,   # OSOBNO od "filter" (nota R2) — set_tree nigdy ich nie widzi
         }
         # Zapis idzie do BAZY (I-1) — perspektywa jedzie z archiwum, nie z tą maszyną. Czasownik
@@ -2915,6 +2927,8 @@ class FramesView(QWidget):
             parts.append(i18n.t("grid.criteria.only_superseded"))
         if self._only_retired:
             parts.append(i18n.t("grid.criteria.only_retired"))
+        if self._only_missing_copy:
+            parts.append(i18n.t("grid.criteria.only_missing_copy"))
         return " · ".join(parts)
 
     # ---- reakcje ----
@@ -2973,11 +2987,12 @@ class FramesView(QWidget):
         lin_ids = queries.lineage_pending_frame_ids(self.con) if self._only_lineage else None
         sup_ids = queries.superseded_frame_ids(self.con) if self._only_superseded else None
         ret_ids = queries.retired_frame_ids(self.con) if self._only_retired else None
+        mis_ids = queries.missing_copy_frame_ids(self.con) if self._only_missing_copy else None
         # NOWY set, NIGDY `&=`: przy pustym filtrze `filter_engine.run` zwraca uniwersum WPROST
         # (`filter_engine.py:171`), a to jest ZAPAMIĘTANY obiekt memoizacji (`_memo_leaf_fns`).
         # `&=` przycinało go W MIEJSCU, więc kolejne `universe_fn()` widziało już przycięty zbiór —
         # perspektywa z trimem potrafiła pokazać „Baza pusta" na pełnej bazie (wizytator P5 #2).
-        for trim in (dup_ids, review_ids, gone_ids, lin_ids, sup_ids, ret_ids):
+        for trim in (dup_ids, review_ids, gone_ids, lin_ids, sup_ids, ret_ids, mis_ids):
             if trim is not None:
                 frame_ids = frame_ids & trim
         base = [_derive(r) for r in queries.base_rows(self.con, list(frame_ids))]

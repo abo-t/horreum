@@ -166,6 +166,10 @@ def test_tasks_state_liczniki_na_s8_obj(s8_obj):
         "retired_frames": 0,
         "retired_conflict_frames": 0,
         "superseded_frames": 0,
+        # D-V-9a: fikstura ma klatkę `present0` z JEDYNĄ kopią martwą (czyli zniknętą),
+        # a nie żywą obok martwej - więc ten licznik ma tu być 0. Gdyby predykat zgubił
+        # warunek istnienia żywej kopii, wchłonąłby `present0` i pokazał 1.
+        "missing_copy_frames": 0,
     }
 
 

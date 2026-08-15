@@ -100,9 +100,33 @@ def _cleared_tip(row):
 
 def _object_tip(row, stan):
     """Zdanie stanu kolumny „Obiekt" — JEDEN wybór dla komórki i dla nagłówka grupy (FC-3).
-    Nagłówek dostaje zdanie SWOJEGO wiersza wzorcowego, więc mówi dokładnie to, co komórka pod nim;
-    dwa osobne wybory rozjechałyby się przy pierwszej zmianie któregoś zdania."""
+    Belka bierze zdanie z wiersza wzorcowego kubełka, ale wolno jej to zrobić dopiero wtedy, gdy
+    kubełek mówi jednym głosem — rozstrzyga `GridTableModel._group_tip_mode`, nie ta funkcja."""
     return _cleared_tip(row) if stan == "cleared" else i18n.t(_OBJECT_STATE_TIPS[stan])
+
+
+def _group_tip(marker, stan):
+    """Zdanie BELKI grupy — trzy tryby, bo kubełek nie zawsze mówi jednym głosem (bramka pakietu
+    0815, zarzut zgodny u DWÓCH soczewek).
+
+    Kubełek zbiera się po TEKŚCIE komórki, a tekst nagrobka jest ten sam niezależnie od tego, czy
+    klatka niesie zeznanie nagłówka i czy baza pamięta zdjęty obiekt. Belka cytująca `bucket[0]`
+    orzekała więc o całej grupie to, co jest prawdą o JEDNEJ klatce — a przy pierwszym masowym
+    cofnięciu obejmującym klatki z nagłówkiem i bez (845 klatek nieba nie ma `object_raw`) zdanie
+    zmieniałoby się jeszcze po kliknięciu w nagłówek kolumny, bo `bucket[0]` zależy od sortu.
+
+    - `exact` — wszystkie wiersze mają te same fakty: belka mówi dokładnie to, co komórki pod nią;
+    - `base`  — wszystkie pamiętają zdjęty obiekt, ale różnią się zeznaniem: zdanie BEZ klauzuli
+      o nagłówku, bo klauzula z jednej klatki byłaby o pozostałych nieprawdą;
+    - `None`  — kubełek miesza nagrobki z pamięcią i bez: belka MILCZY. Wariantu bazowego użyć tu
+      nie wolno (twierdzi „baza pamięta"), a wariant bez pamięci mówi „nie ma czego przywracać" —
+      obie wersje są fałszem o połowie wierszy. To ta sama reguła, którą stosuje `_group_state`."""
+    tryb = marker.get("_group_tip")
+    if tryb is None:
+        return None
+    if tryb == "base":
+        return i18n.t("grid.cell.object_cleared_tip")
+    return _object_tip(marker["_group_row"], stan)
 
 
 # Pusty grid mówi DWIE różne rzeczy — filtr nic nie wpuścił vs. w bazie nie ma nic (wiz F5 #8:
@@ -439,7 +463,7 @@ class GridTableModel(QAbstractTableModel):
             if role == Qt.ForegroundRole:
                 return _COLORS["missing"]
             if role == Qt.ToolTipRole:
-                return _object_tip(row["_group_row"], stan)
+                return _group_tip(row, stan)
             return None
 
         if col == self._preview_col():
@@ -623,15 +647,32 @@ class GridTableModel(QAbstractTableModel):
         Grupowanie po czymkolwiek innym niż kolumna „Obiekt" stanu nie ma — belka „▸ fits (900)"
         nie jest o obiekcie i wyciszenie jej byłoby zdaniem o niczym.
 
-        Niejednorodny kubełek dostaje `None` zamiast stanu WIĘKSZOŚCI: klucz grupy to TEKST komórki,
-        a od FC-8 każdy stan niekanoniczny niesie własny znacznik (`↺`, `⟨…⟩`, `?`), więc kubełek
-        mieszany jest dziś nieosiągalny — ale gdyby powstał, belka miałaby mówić o stanie, którego
-        część jej wierszy nie ma. Wtedy uczciwiej milczeć."""
+        Niejednorodny kubełek dostaje `None` zamiast stanu WIĘKSZOŚCI: belka mówiłaby wtedy o stanie,
+        którego część jej wierszy nie ma. Klucz grupy to TEKST komórki, a znaczniki z FC-8 (`↺`,
+        `⟨…⟩`, `?`) rozdzielają stany niekanoniczne między sobą — ale NIE rozdzielają `canon` od
+        `kind`, bo żaden z tych dwóch znacznika nie niesie (bramka pakietu 0815, zarzut 4). Wystarczy
+        flat, któremu kamera wpisała w `OBJECT` dokładnie tę nazwę, którą oś zna jako kanon lightów,
+        i jeden kubełek zbierze oba stany. Belka jest wtedy neutralna, a komórki pod nią i tak mówią
+        każda za siebie."""
         if self._group_by != "_object":
             return None
         stany = {r.get("_object_state", "canon") for r in bucket}
         stan = stany.pop() if len(stany) == 1 else None
         return stan if stan in _OBJECT_STATE_TIPS else None
+
+    def _group_tip_mode(self, bucket, stan):
+        """Czy belka MOŻE zacytować wiersz wzorcowy — `exact` / `base` / `None` (opis: `_group_tip`).
+
+        Tylko `cleared` zależy od danych WIERSZA (pamięć nagrobka + zeznanie nagłówka); pozostałe
+        stany mają zdanie stałe per stan, więc wiersz wzorcowy jest dla nich obojętny."""
+        if stan is None:
+            return None
+        if stan != "cleared":
+            return "exact"
+        fakty = {(bool(r.get("object_cleared_canon")), bool(r.get("object_raw"))) for r in bucket}
+        if len(fakty) == 1:
+            return "exact"
+        return "base" if all(pamiec for pamiec, _ in fakty) else None
 
     def _group_value(self, row):
         if self._group_by in (None, ""):
@@ -666,9 +707,10 @@ class GridTableModel(QAbstractTableModel):
             bucket = []
             def flush():
                 if bucket:
+                    stan = self._group_state(bucket)
                     self._rows.append({"_group": cur, "_count": len(bucket),
-                                       "_group_state": self._group_state(bucket),
-                                       "_group_row": bucket[0]})
+                                       "_group_state": stan, "_group_row": bucket[0],
+                                       "_group_tip": self._group_tip_mode(bucket, stan)})
                     self._rows.extend(bucket)
             for r in rows:
                 g = self._group_value(r)

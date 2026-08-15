@@ -1560,6 +1560,58 @@ def test_ZADNA_kontrolka_nie_pokazuje_surowego_klucza_i18n(view):
     assert not surowe, f"kontrolka pokazuje KLUCZ zamiast napisu: {surowe}"
     assert "Obiekt" in napisy, "bramka byłaby ślepa, gdyby nic nie zebrała"
 
+    # DRUGA POŁOWA KLASY (bramka pakietu 0815, zarzut zgodny u dwóch soczewek): powyższa pętla widzi
+    # wyłącznie klucz, który W KATALOGU JEST. Klucz z literówką renderuje się surowo przez fallback
+    # `i18n.t` i przechodziłby, a kolektor literałów też go nie widzi, bo `BASE_COLS` idzie do `t()`
+    # ZMIENNĄ. Parytet źródła z katalogiem zamyka tę połowę - wzorzec: bramka `PRESETS`/`_PRESET_LABELS`.
+    from horreum.gui.grid import BASE_COLS
+    obce = [k for k, _ in BASE_COLS if k not in CATALOG]
+    assert not obce, f"nagłówek kolumny spoza katalogu i18n (renderuje się surowo): {obce}"
+
+
+def test_belka_grupy_NIE_cytuje_wiersza_ktory_nie_reprezentuje_kubelka(gcon):
+    """BRAMKA PAKIETU 0815, zarzut zgodny u DWÓCH soczewek (obcy silnik + recenzent z dostępem
+    do repo). Kubełek zbiera się po TEKŚCIE komórki, a tekst nagrobka jest ten sam niezależnie od
+    tego, czy klatka niesie zeznanie nagłówka i czy baza pamięta zdjęty obiekt — belka cytująca
+    `bucket[0]` orzekała więc o całej grupie to, co jest prawdą o JEDNEJ klatce.
+
+    Populacja nie jest teoretyczna: 845 klatek nieba nie ma `object_raw`, więc pierwsze masowe
+    cofnięcie obejmujące klatki z nagłówkiem i bez wytwarza kubełek mieszany. Gorzej: `bucket[0]`
+    zależy od bieżącego SORTU, więc zdanie belki zmieniałoby się po kliknięciu w nagłówek kolumny.
+
+    Trzy tryby, po jednym na prawdę kubełka. Falsyfikator: wróć do `_object_tip(row["_group_row"])`
+    → trzeci przypadek zacznie twierdzić „baza go pamięta" nad wierszem, który nie ma czego
+    przywrócić."""
+    from horreum.gui.grid import GridTableModel
+
+    wspolne = {"path": "p", "kind": "light", "_telescope": "", "_object": "↺ NGC2903",
+               "_object_state": "cleared", "object_source": "user_cleared"}
+    z_pamiecia = dict(wspolne, object_cleared_canon="NGC2903")
+
+    def belka(rows):
+        m = GridTableModel()
+        m.set_data(rows, pivot_mod.build_pivot([r["frame_id"] for r in rows], [], []), [],
+                   group_by="_object")
+        i = next(i for i, r in enumerate(m._rows) if "_group" in r)
+        return m.data(m.index(i, 0), Qt.ToolTipRole), m.data(m.index(i, 0), Qt.FontRole)
+
+    jednorodny, _ = belka([dict(z_pamiecia, frame_id=1, object_raw=None),
+                           dict(z_pamiecia, frame_id=2, object_raw=None)])
+    assert "ZDJĘŁA" in jednorodny, "kubełek jednogłosy dostaje zdanie dokładne"
+
+    rozne_zeznania, _ = belka([dict(z_pamiecia, frame_id=1, object_raw="ngc2903x"),
+                               dict(z_pamiecia, frame_id=2, object_raw=None)])
+    assert "ZDJĘŁA" in rozne_zeznania, "pamięć mają wszystkie — o niej wolno mówić"
+    assert "ngc2903x" not in rozne_zeznania, \
+        "zeznanie JEDNEJ klatki nie ma prawa stać się zdaniem o całej grupie"
+
+    mieszana_pamiec, font = belka([dict(z_pamiecia, frame_id=1, object_raw="ngc2903x"),
+                                   dict(wspolne, frame_id=2, object_cleared_canon=None,
+                                        object_raw="NGC2903")])
+    assert mieszana_pamiec is None, \
+        "przy mieszanej pamięci OBA zdania są fałszem o połowie wierszy — belka milczy"
+    assert font.italic(), "…ale stan zostaje: wiersze są nagrobkami i belka ma to pokazywać"
+
 
 def test_nagrobek_z_pamiecia_i_BEZ_niej_mowia_ROZNE_zdania(gcon):
     """FC-1: po tym, jak komórka zaczęła pokazywać obiekt ZDJĘTY RĘKĄ, jedno wspólne zdanie stałoby

@@ -109,6 +109,13 @@ zostaje jeden i mówi „tu nie ma nic do zrobienia". Populacja `raw` w archiwum
 (zmierzone `?mode=ro` 2026-08-15: `kind` 2364, `canon` 14537, reszta 0), więc dzisiejszy ekran ta
 zmiana nie rusza - zapala się przy pierwszym pliku z nazwą, której drabina nie rozpozna."""
 
+HINT_MARK = ("⟨", "⟩")
+"""Nawiasy PODPOWIEDZI ze ścieżki - trzeci znak alfabetu stanów, obok `CLEARED_MARK` i `RAW_MARK`.
+
+Stała, a nie literał w f-stringu, bo alfabet ma być ROZŁĄCZNY i pilnuje tego bramka - a bramka
+trzymająca własny egzemplarz glifu nie pilnuje niczego (bramka pakietu 0815, zarzut 5): zmiana
+znaku w jednym miejscu zostawiłaby ją zieloną."""
+
 
 def object_cell(row):
     """Komórka „Obiekt" jako para `(tekst, stan)` — JEDEN właściciel polityki tej kolumny.
@@ -137,7 +144,9 @@ def object_cell(row):
     NAGROBEK POKAZUJE TO, CO ZDJĘŁA RĘKA (FC-1) — `object_cleared_canon` przed `object_raw`.
     Migracja 0017 dołożyła `frame.object_cleared_id` po to, żeby cofnięcie miało drogę powrotu, ale
     read-model tej pamięci nie czytał: firsthand zmierzył **411 z 417 nagrobków renderujących się
-    ZNAK W ZNAK identycznie** (sam `↺`), choć baza pamiętała trzy różne obiekty. Klatka bez zeznania
+    ZNAK W ZNAK identycznie** (sam `↺`), choć baza pamiętała trzy różne obiekty — populacja
+    DOMALOWANA na kopii, bo w archiwum nagrobków jest **zero** (akapit o `RAW_MARK` wyżej podaje
+    komplet pomiaru; ta paczka zapala się dopiero przy pierwszym cofnięciu). Klatka bez zeznania
     w nagłówku - a takich jest większość, patrz akapit wyżej - nie miała w komórce ANI JEDNEJ
     litery, po której dałoby się poznać, czego dotyczy. Odwrotna kolejność (raw przed pamięcią)
     byłaby gorsza podwójnie: raw jest tym, co drabina ODRZUCIŁA, a pamięć tym, co ręka zdjęła.
@@ -182,7 +191,7 @@ def object_cell(row):
     if row.get("kind") == "master_light":
         folder = stack_folder(row.get("path"))
         if folder:
-            return f"⟨{folder}⟩", "hint"
+            return f"{HINT_MARK[0]}{folder}{HINT_MARK[1]}", "hint"
     return "", "canon"          # nic do powiedzenia — pusta komórka bez stanu do wytłumaczenia
 
 

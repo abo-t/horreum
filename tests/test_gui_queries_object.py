@@ -815,9 +815,13 @@ def test_dwa_stany_o_PRZECIWNYCH_receptach_roznia_sie_SAMYM_TEKSTEM():
                                             "kind": "light"})
     assert kalibracja == "FlatWizard", "stan BEZ roboty zostaje bez znacznika"
     assert nierozpoznana.startswith(queries.RAW_MARK), "stan Z robotą niesie znacznik"
-    # ALFABET JEST ROZŁĄCZNY: każdy stan niekanoniczny da się poznać po samym tekście.
-    znaczniki = {queries.CLEARED_MARK, queries.RAW_MARK, "⟨"}
+    # ALFABET JEST ROZŁĄCZNY: każdy stan niekanoniczny da się poznać po samym tekście. Glify bierzemy
+    # od WŁAŚCICIELA (bramka pakietu 0815, zarzut 5) — bramka trzymająca własny egzemplarz znaku nie
+    # pilnuje niczego, bo zmiana w kodzie zostawiłaby ją zieloną.
+    znaczniki = {queries.CLEARED_MARK, queries.RAW_MARK, queries.HINT_MARK[0]}
     assert len(znaczniki) == 3, "dwa stany na jednym znaczniku = ten dług od nowa"
+    assert queries.object_cell({"object_canon": None, "object_raw": None, "kind": "master_light",
+                                "path": r"R:\A\LMC\master\m.xisf"})[0].startswith(queries.HINT_MARK[0])
 
 
 def test_stany_komorki_MAJA_LUSTRO_w_stalej():

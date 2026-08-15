@@ -126,6 +126,52 @@ def test_theme_jest_jedynym_wlascicielem_kolorow():
     assert not offenders, "kolor poza `theme.py`: " + "; ".join(offenders)
 
 
+def _luminancja(hex_):
+    """Względna luminancja sRGB wg WCAG 2.1 (§1.4.3) - wzór, nie tabela."""
+    kanaly = [int(hex_.lstrip("#")[i:i + 2], 16) / 255 for i in (0, 2, 4)]
+    kanaly = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in kanaly]
+    return 0.2126 * kanaly[0] + 0.7152 * kanaly[1] + 0.0722 * kanaly[2]
+
+
+def _kontrast(a, b):
+    la, lb = _luminancja(a), _luminancja(b)
+    return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+
+
+def test_kontrast_wzoru_zgadza_sie_ze_znanymi_parami():
+    """Falsyfikator bramki niżej - wzór sprawdzany na parach o znanej wartości, żeby zielona bramka
+    kontrastu nie brała się z zepsutej arytmetyki. Czerń-biel = 21:1 (maksimum skali), kolor sam ze
+    sobą = 1:1 (minimum)."""
+    assert round(_kontrast("#000000", "#FFFFFF"), 2) == 21.0
+    assert round(_kontrast("#777777", "#777777"), 2) == 1.0
+
+
+@pytest.mark.parametrize("name", _THEMES)
+def test_szarosc_braku_ma_kontrast_AA_na_kazdym_tle(name):
+    """BRAMKA KLASY (FC-5): szarość BRAKU czyta się na KAŻDYM tle, na którym ląduje - nie tylko na
+    bazie okna.
+
+    Znalezisko jednostkowe podniesione do kontroli: firsthand zmierzył `missing` w motywie jasnym na
+    **2,64:1** przy wymaganym AA 4,5:1 (a to jest kolor 2364 komórek kalibracji ORAZ znacznika `↺`,
+    który dla nagrobka bywa jedyną treścią komórki). Wersja tej bramki licząca tylko `base`
+    przepuściłaby dwa z siedmiu teł stanów, a od FC-3 także belkę grupy - więc liczy się PEŁNY
+    iloczyn: `missing` × (base, alt_base, wszystkie `*_bg`).
+
+    Selekcji tu NIE MA i to jest treść, nie dziura: `QStyledItemDelegate` przy zaznaczeniu maluje
+    `HighlightedText` z palety i ForegroundRole modelu wtedy nie obowiązuje (`initStyleOption`
+    ustawia wyłącznie `QPalette.Text`). Wciągnięcie `highlight` do tej pętli pinowałoby wymaganie,
+    którego Qt nigdy nie egzekwuje.
+
+    Falsyfikator: wpisz w `theme` poprzednie `#8A8A8A`/`#999999` - bramka pada na `touched_bg`."""
+    grid = theme.grid_colors(name)
+    paleta = theme.palette_spec(name)
+    tla = {"base": paleta["base"], "alt_base": paleta["alt_base"]}
+    tla.update({k: v for k, v in grid.items() if k.endswith("_bg")})
+    slabe = {k: round(_kontrast(grid["missing"], v), 2)
+             for k, v in tla.items() if _kontrast(grid["missing"], v) < 4.5}
+    assert not slabe, f"[{name}] missing={grid['missing']} poniżej AA 4,5:1 na: {slabe}"
+
+
 def test_warn_jest_osobny_od_gold():
     """Bursztyn ZNACZENIA (`warn`) nie jest złotem MARKI (`gold`) — złoto w jasnym motywie ma 2,7:1
     i jako tekst nie dochodzi do progu AA (wiz T5 N5). Zlanie tych dwóch kluczy wróciłoby po ten

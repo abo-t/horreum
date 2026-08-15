@@ -80,6 +80,31 @@ _OBJECT_STATE_TIPS = {
 }
 
 
+def _cleared_tip(row):
+    """Zdanie nagrobka zależy od tego, CO STOI W KOMÓRCE (FC-1) — a to rozstrzyga pamięć z 0017.
+
+    Trzy zdania, bo są trzy różne prawdy, a jedno wspólne kłamałoby w dwóch z nich:
+    z pamięcią komórka pokazuje obiekt ZDJĘTY RĘKĄ (i wtedy warto dopowiedzieć, co niesie nagłówek
+    pliku, bo to jest droga do naprawy trwałej); bez pamięci pokazuje nazwę Z NAGŁÓWKA, więc zdanie
+    „to zdjęła ręka" byłoby o niej fałszem, a gest „Przywróć" nie ma czego odtworzyć i mówi o tym
+    wprost („bez zapamiętanego obiektu: N", `queries.restore_targets`).
+
+    Nagrobek bez pamięci nie jest hipotezą: baza-dawca sprzed migracji 0017 wwozi je legalnie
+    (migracja 0017:29) — odmowa ich wpuszczenia byłaby utratą werdyktu ręki."""
+    if not row.get("object_cleared_canon"):
+        return i18n.t("grid.cell.object_cleared_nomem_tip")
+    raw = row.get("object_raw")
+    return (i18n.t("grid.cell.object_cleared_raw_tip", raw=raw) if raw
+            else i18n.t("grid.cell.object_cleared_tip"))
+
+
+def _object_tip(row, stan):
+    """Zdanie stanu kolumny „Obiekt" — JEDEN wybór dla komórki i dla nagłówka grupy (FC-3).
+    Nagłówek dostaje zdanie SWOJEGO wiersza wzorcowego, więc mówi dokładnie to, co komórka pod nim;
+    dwa osobne wybory rozjechałyby się przy pierwszej zmianie któregoś zdania."""
+    return _cleared_tip(row) if stan == "cleared" else i18n.t(_OBJECT_STATE_TIPS[stan])
+
+
 # Pusty grid mówi DWIE różne rzeczy — filtr nic nie wpuścił vs. w bazie nie ma nic (wiz F5 #8:
 # „zmień filtr lub perspektywę" na pustej bazie wysyła usera w ślepy zaułek zamiast po dostawę).
 # Stałe trzymają KLUCZ (nie string) — rozwiązywane `i18n.t` w USE-site (D-L1; string zamroziłby PL).
@@ -396,12 +421,25 @@ class GridTableModel(QAbstractTableModel):
         col = index.column()
 
         if "_group" in row:  # marker grupy
+            # NAGŁÓWEK ZNA STAN, KTÓRY ZNA KOMÓRKA (FC-3). Bez tego „Grupuj wg: Obiekt" malowało
+            # `▸ DARK (14)` białym pogrubieniem — dokładnie tak, jak `▸ CTB1 (901)` — choć komórki
+            # pod belką były kursywą i szare: jeden ekran mówił o tych samych klatkach dwie różne
+            # rzeczy, a naprawa polityki kolumny (R-S3-4) objęła komórkę i ominęła belkę.
+            # Pogrubienie ZOSTAJE (belka jest belką); kursywa i szarość mówią „to nie jest
+            # przypisany obiekt". Zmierzone na żywym archiwum: 79 grup, największa 2344 klatki.
+            stan = row.get("_group_state")
             if role == Qt.DisplayRole and col == 0:
                 return f"▸ {row['_group']}  ({row['_count']})"
             if role == Qt.BackgroundRole:
                 return _COLORS["group_bg"]
             if role == Qt.FontRole and col == 0:
-                f = QFont(); f.setBold(True); return f
+                f = QFont(); f.setBold(True); f.setItalic(stan is not None); return f
+            if stan is None or col != 0:
+                return None
+            if role == Qt.ForegroundRole:
+                return _COLORS["missing"]
+            if role == Qt.ToolTipRole:
+                return _object_tip(row["_group_row"], stan)
             return None
 
         if col == self._preview_col():
@@ -523,7 +561,7 @@ class GridTableModel(QAbstractTableModel):
             if role == Qt.FontRole:
                 f = QFont(); f.setItalic(True); return f
             if role == Qt.ToolTipRole:
-                return i18n.t(_OBJECT_STATE_TIPS[stan])
+                return _object_tip(row, stan)
             return None
         if role == Qt.DisplayRole:
             v = row.get(key)
@@ -579,6 +617,22 @@ class GridTableModel(QAbstractTableModel):
             return (0, cell.num)
         return (1, "" if cell.raw is None else str(cell.raw).lower())
 
+    def _group_state(self, bucket):
+        """Stan belki grupy = stan JEJ WIERSZY, i tylko gdy mówią jednym głosem (FC-3).
+
+        Grupowanie po czymkolwiek innym niż kolumna „Obiekt" stanu nie ma — belka „▸ fits (900)"
+        nie jest o obiekcie i wyciszenie jej byłoby zdaniem o niczym.
+
+        Niejednorodny kubełek dostaje `None` zamiast stanu WIĘKSZOŚCI: klucz grupy to TEKST komórki,
+        a od FC-8 każdy stan niekanoniczny niesie własny znacznik (`↺`, `⟨…⟩`, `?`), więc kubełek
+        mieszany jest dziś nieosiągalny — ale gdyby powstał, belka miałaby mówić o stanie, którego
+        część jej wierszy nie ma. Wtedy uczciwiej milczeć."""
+        if self._group_by != "_object":
+            return None
+        stany = {r.get("_object_state", "canon") for r in bucket}
+        stan = stany.pop() if len(stany) == 1 else None
+        return stan if stan in _OBJECT_STATE_TIPS else None
+
     def _group_value(self, row):
         if self._group_by in (None, ""):
             return None
@@ -612,7 +666,9 @@ class GridTableModel(QAbstractTableModel):
             bucket = []
             def flush():
                 if bucket:
-                    self._rows.append({"_group": cur, "_count": len(bucket)})
+                    self._rows.append({"_group": cur, "_count": len(bucket),
+                                       "_group_state": self._group_state(bucket),
+                                       "_group_row": bucket[0]})
                     self._rows.extend(bucket)
             for r in rows:
                 g = self._group_value(r)

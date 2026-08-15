@@ -286,6 +286,22 @@ def test_hint_obiektu_idzie_za_zywym_adresem(grid_db):
     # kolumna czytała z martwej ścieżki. Rozstrzygnięcie należy do osobnego GO.
 
 
+def test_base_rows_niesie_PAMIEC_nagrobka_jako_kanon_nie_klucz(grid_db):
+    """SZEW, na którym FC-1 realnie siedział: polityka kolumny była gotowa czytać pamięć nagrobka,
+    a zapytanie podawało jej goły FK (`object_cleared_id`), z którego nie da się narysować NAZWY.
+    Zapis w docstringu `base_rows` twierdził przy tym, że kolumna „karmi politykę" — i był fałszem
+    przez całą paczkę odwracalności.
+
+    Bramka jedzie PRZEZ `object_cell`, a nie po samej nazwie kolumny: pyta o to, co user zobaczy."""
+    grid_db.execute("INSERT INTO object (id, canon, catalog, kind) VALUES (7, 'NGC 7023', 'NGC', 'deep_sky')")
+    grid_db.execute("UPDATE frame SET object_source = 'user_cleared', object_cleared_id = 7 WHERE id = 1")
+    grid_db.commit()
+    r = {x["frame_id"]: x for x in queries.base_rows(grid_db, [1])}[1]
+    assert r["object_cleared_canon"] == "NGC 7023"
+    assert queries.object_cell({k: r[k] for k in r.keys()}) == \
+        (f"{queries.CLEARED_MARK} NGC 7023", "cleared"), "komórka mówi, CO ręka zdjęła"
+
+
 def test_base_rows_xisf_kolumny(grid_db):
     rows = {r["frame_id"]: r for r in queries.base_rows(grid_db, [3])}
     assert rows[3]["kind"] == "master_flat"

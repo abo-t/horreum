@@ -149,13 +149,36 @@ CATALOG = {
     # niesie RECEPTĘ, nie samą diagnozę: gdzie się TĘ nazwę poprawia. Wspólne „to nie jest
     # przypisany obiekt" byłoby prawdziwe i nie dawałoby nikomu drogi dalej.
     # Klucze składa `grid._OBJECT_STATE_TIPS`; parytet z tą mapą pinuje bramka w `test_i18n`.
+    # NAGROBEK MA TRZY ZDANIA, NIE JEDNO (FC-1) - bo komórka pokazuje raz obiekt ZDJĘTY RĘKĄ
+    # (pamięć z migracji 0017), a raz nazwę z NAGŁÓWKA (nagrobek bez pamięci, baza-dawca sprzed
+    # tej migracji). Wspólne zdanie byłoby w drugim przypadku fałszem o werdykcie ręki, a to
+    # dokładnie ten fałsz, który paczka odwracalności miała usunąć. Wybiera `grid._cleared_tip`;
+    # w `_OBJECT_STATE_TIPS` (bramka parytetu stanów) stoi wariant BAZOWY.
     "grid.cell.object_cleared_tip": {
-        "pl": "Przypisanie COFNIĘTE ręką — obiekt nie jest przypisany, a przebieg tej klatki "
-              "nie tknie. Obok stoi surowa nazwa z nagłówka pliku, jeśli plik ją niesie. "
-              "Wróć do niej: Obiekt ▾ → „Przywróć cofnięte przypisanie”.",
-        "en": "Assignment UNDONE by hand — no object is assigned and the resolver will skip this "
-              "frame. Next to it stands the raw name from the file header, if the file carries "
-              "one. Go back: Object ▾ → “Restore undone assignment”."},
+        "pl": "Przypisanie COFNIĘTE ręką - pokazana nazwa to obiekt, który ręka ZDJĘŁA (baza go "
+              "pamięta), a nie obiekt przypisany; przebieg tej klatki nie tknie. "
+              "Wróć do niego: Obiekt ▾ → „Przywróć cofnięte przypisanie”.",
+        "en": "Assignment UNDONE by hand - the name shown is the object your hand REMOVED (the "
+              "database remembers it), not an assigned object; the resolver will skip this frame. "
+              "Go back: Object ▾ → “Restore undone assignment”."},
+    "grid.cell.object_cleared_raw_tip": {
+        "pl": "Przypisanie COFNIĘTE ręką - pokazana nazwa to obiekt, który ręka ZDJĘŁA (baza go "
+              "pamięta), a nie obiekt przypisany; przebieg tej klatki nie tknie. "
+              "Nagłówek pliku niesie: {raw}. "
+              "Wróć do niego: Obiekt ▾ → „Przywróć cofnięte przypisanie”.",
+        "en": "Assignment UNDONE by hand - the name shown is the object your hand REMOVED (the "
+              "database remembers it), not an assigned object; the resolver will skip this frame. "
+              "The file header carries: {raw}. "
+              "Go back: Object ▾ → “Restore undone assignment”."},
+    "grid.cell.object_cleared_nomem_tip": {
+        "pl": "Przypisanie COFNIĘTE ręką, BEZ zapamiętanego obiektu (nagrobek z bazy sprzed "
+              "migracji pamięci) - pokazana nazwa, jeśli jest, pochodzi z nagłówka pliku, nie "
+              "z werdyktu ręki. „Przywróć cofnięte przypisanie” nie ma tu czego odtworzyć; "
+              "obiekt wskazuje się ręką (Obiekt ▾ → „Przypisz obiekt…”).",
+        "en": "Assignment UNDONE by hand, with NO remembered object (a tombstone from a database "
+              "predating the memory migration) - the name shown, if any, comes from the file "
+              "header, not from your verdict. “Restore undone assignment” has nothing to restore "
+              "here; point at the object by hand (Object ▾ → “Assign object…”)."},
     "grid.cell.object_kind_tip": {
         "pl": "Kalibracja nie ma obiektu z DEFINICJI — to surowa nazwa z nagłówka pliku "
               "(kamera wpisuje tam cel sesji także darkom i flatom), a nie przypisany obiekt.",

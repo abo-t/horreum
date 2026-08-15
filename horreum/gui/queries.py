@@ -94,6 +94,21 @@ CLEARED_MARK = "↺"
 """Znacznik cofnięcia — TEN SAM, którym kolejka przeglądu znaczy wiersze cofnięte (paczka G3).
 Jeden alfabet dla jednego faktu; drugi znak kazałby uczyć się dwa razy tego samego."""
 
+RAW_MARK = "?"
+"""Znacznik nazwy NIEROZPOZNANEJ (FC-8) — jedyny z czterech stanów niekanonicznych, który JEST
+robotą do wzięcia.
+
+Powód jest z pomiaru, nie z gustu: `kind` (kalibracja, recepta „nie poprawia się wcale") i `raw`
+(nazwa nierozpoznana, recepta „popraw w pliku albo wskaż ręką") renderowały się ZNAK W ZNAK tak
+samo - ta sama kursywa, ta sama szarość, oba bez znacznika - a rozróżniała je wyłącznie sąsiednia
+kolumna „Rodzaj". Dwa stany o PRZECIWNYCH receptach wyglądały identycznie.
+
+Znacznik dostaje `raw`, a nie `kind`, bo alfabet ma znaczyć ROBOTĘ: `↺` (ręka cofnęła), `⟨…⟩`
+(podpowiedź ze ścieżki) i `?` (nie wiem, co to jest) niosą po jednym stanie, a stan BEZ znacznika
+zostaje jeden i mówi „tu nie ma nic do zrobienia". Populacja `raw` w archiwum jest dziś ZERO
+(zmierzone `?mode=ro` 2026-08-15: `kind` 2364, `canon` 14537, reszta 0), więc dzisiejszy ekran ta
+zmiana nie rusza - zapala się przy pierwszym pliku z nazwą, której drabina nie rozpozna."""
+
 
 def object_cell(row):
     """Komórka „Obiekt" jako para `(tekst, stan)` — JEDEN właściciel polityki tej kolumny.
@@ -119,6 +134,17 @@ def object_cell(row):
     komórka jest pusta, a kursywa i szarość na pustym stringu są niewidzialne — bez znacznika dług
     zostałby otwarty dla większości własnej przyszłej populacji.
 
+    NAGROBEK POKAZUJE TO, CO ZDJĘŁA RĘKA (FC-1) — `object_cleared_canon` przed `object_raw`.
+    Migracja 0017 dołożyła `frame.object_cleared_id` po to, żeby cofnięcie miało drogę powrotu, ale
+    read-model tej pamięci nie czytał: firsthand zmierzył **411 z 417 nagrobków renderujących się
+    ZNAK W ZNAK identycznie** (sam `↺`), choć baza pamiętała trzy różne obiekty. Klatka bez zeznania
+    w nagłówku - a takich jest większość, patrz akapit wyżej - nie miała w komórce ANI JEDNEJ
+    litery, po której dałoby się poznać, czego dotyczy. Odwrotna kolejność (raw przed pamięcią)
+    byłaby gorsza podwójnie: raw jest tym, co drabina ODRZUCIŁA, a pamięć tym, co ręka zdjęła.
+    Nagrobek BEZ pamięci zostaje legalny (baza-dawca sprzed 0017, migracja 0017:29) i spada na raw -
+    ale wtedy komórka mówi co innego niż w przypadku z pamięcią, więc TOOLTIP rozróżnia oba
+    (`grid._cleared_tip`), zamiast twierdzić o nazwie z nagłówka, że to werdykt ręki.
+
     PODPOWIEDŹ ZE ŚCIEŻKI (`hint`) NIE UDAJE NAZWY: nawiasy kątowe odróżniają ją od kanonu, bo
     wzięcie „tyle wiem z folderu" za „tak się ten obiekt nazywa" byłoby gorsze niż pusta komórka.
     Tylko `master_light`, bo light z akwizycji ma własną drogę (szczebel ścieżki S2 PROPONUJE mu
@@ -141,7 +167,8 @@ def object_cell(row):
         return row["object_canon"], "canon"
     raw = row.get("object_raw") or ""
     if row.get("object_source") == "user_cleared":
-        return (f"{CLEARED_MARK} {raw}" if raw else CLEARED_MARK), "cleared"
+        nazwa = row.get("object_cleared_canon") or raw       # FC-1: pamięć ręki bije zeznanie pliku
+        return (f"{CLEARED_MARK} {nazwa}" if nazwa else CLEARED_MARK), "cleared"
     # STAN TŁUMACZY TEKST, więc bez tekstu nie ma czego tłumaczyć — i dlatego pytanie o ZEZNANIE
     # stoi PRZED pytaniem o rodzaj. Odwrotna kolejność dawała PUSTEJ komórce tooltip „kalibracja
     # obiektu nie ma z definicji" wszędzie tam, gdzie wiersz nie niesie `kind` (a nie niesie go
@@ -149,7 +176,9 @@ def object_cell(row):
     # własna bramka tej paczki, nie recenzja.
     if raw:
         rodzaj = row.get("kind")
-        return raw, "kind" if rodzaj is not None and rodzaj not in LIGHT_KINDS else "raw"
+        if rodzaj is not None and rodzaj not in LIGHT_KINDS:
+            return raw, "kind"                     # kalibracja: bez znacznika, bo nie ma tu roboty
+        return f"{RAW_MARK} {raw}", "raw"          # FC-8: jedyny stan, który JEST robotą, ma znacznik
     if row.get("kind") == "master_light":
         folder = stack_folder(row.get("path"))
         if folder:
@@ -2030,14 +2059,20 @@ def base_rows(con, frame_ids):
     Teleskop przez config→telescope_canonical→kanon (jak `object_frames`). frame_ids jako
     tablica JSON (`json_each`). Zwraca W TEJ KOLEJNOŚCI: frame_id, kind, filetype, filter_canon,
     camera_model, telescope_label, telescop_canon, object_canon, object_raw, object_source,
-    object_cleared_id, date_obs, exptime, path, present, last_verified_at, superseded_by, retired_at,
-    n_present, n_vanished, vanished_path. Wiersze czyta się po NAZWIE (`sqlite3.Row`), ale kolejność
-    w tym zdaniu ma zgadzać się z SELECT-em - rozjazd był zarzutem bramki 0809 i jest tańszy do
-    naprawienia niż do wytłumaczenia następnej sesji.
+    object_cleared_canon, date_obs, exptime, path, present, last_verified_at, superseded_by,
+    retired_at, n_present, n_vanished, vanished_path. Wiersze czyta się po NAZWIE (`sqlite3.Row`),
+    ale kolejność w tym zdaniu ma zgadzać się z SELECT-em - rozjazd był zarzutem bramki 0809 i jest
+    tańszy do naprawienia niż do wytłumaczenia następnej sesji.
 
-    `object_source` i `object_cleared_id` KARMIĄ POLITYKĘ KOLUMNY (`object_cell`, R-S3-4), a NIE
+    `object_source` i `object_cleared_canon` KARMIĄ POLITYKĘ KOLUMNY (`object_cell`, R-S3-4), a NIE
     nową kolumnę na ekranie: `BASE_COLS` gridu zostaje bez zmian, więc podłoga okna się nie rusza
     (kanon minimalnego wspieranego ekranu). Kosztu nie ma — `frame` jest już w `FROM`.
+
+    KANON, NIE `object_cleared_id` (FC-1): do tej paczki jechał tu goły FK i zapis ten twierdził,
+    że KARMI politykę kolumny - a polityka go nie czytała, bo do narysowania nagrobka potrzebna jest
+    NAZWA, nie klucz. Efekt: 417 nagrobków renderowało się jednakowo, choć baza pamiętała, co każdy
+    z nich zdjął. JOIN po kluczu głównym `object`, więc kosztu na 16 901 wierszach nie widać;
+    `object_cleared_id` nie miał w tym zapytaniu ANI JEDNEGO czytelnika (grep `horreum/` + testy).
 
     `superseded_by` JEST KOLUMNĄ Z TEGO SAMEGO POWODU, CO `present` (F3, decyzja Zdzinia 2026-08-09):
     klatka zastąpiona ZOSTAJE w gridzie i ma być WIDOCZNA JAKO ZASTĄPIONA — w każdej perspektywie,
@@ -2052,7 +2087,8 @@ def base_rows(con, frame_ids):
         "SELECT f.id AS frame_id, f.kind, f.filetype, f.filter_canon, "
         "       cam.model_canon AS camera_model, "
         "       t.label AS telescope_label, t.telescop_canon, "
-        "       obj.canon AS object_canon, h.object_raw, f.object_source, f.object_cleared_id, "
+        "       obj.canon AS object_canon, h.object_raw, f.object_source, "
+        "       ocl.canon AS object_cleared_canon, "
         "       h.date_obs, h.exptime, loc.path, loc.present, loc.last_verified_at, f.superseded_by, "
         "       f.retired_at, "
         "       (SELECT COUNT(*) FROM location lp WHERE lp.frame_id = f.id AND lp.present = 1) AS n_present, "
@@ -2066,6 +2102,7 @@ def base_rows(con, frame_ids):
         "LEFT JOIN telescope t ON t.id = tc.canon_id "
         "LEFT JOIN camera cam ON cam.id = f.camera_id "
         "LEFT JOIN object obj ON obj.id = f.object_id "
+        "LEFT JOIN object ocl ON ocl.id = f.object_cleared_id "
         "LEFT JOIN location loc ON loc.id = COALESCE("
         "        (SELECT MIN(id) FROM location WHERE frame_id = f.id AND present = 1), "
         "        (SELECT MIN(id) FROM location WHERE frame_id = f.id)) "

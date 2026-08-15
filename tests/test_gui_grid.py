@@ -176,6 +176,43 @@ def test_model_grupowanie_naglowki(gcon):
     assert light["_count"] == 2
 
 
+def test_belka_grupy_ZNA_STAN_ktory_zna_komorka(gcon):
+    """FC-3: „Grupuj wg: Obiekt" malowało `▸ DARK (14)` białym pogrubieniem — dokładnie tak, jak
+    `▸ CTB1 (901)` — choć komórki pod belką były kursywą i szare. Jeden ekran mówił o tych samych
+    klatkach dwie różne rzeczy; naprawa polityki kolumny (R-S3-4) objęła komórkę i ominęła belkę.
+
+    Populacja realna: 2364 klatki kalibracji, 79 grup, największa 2344 klatki (zmierzone 0815).
+
+    Bramka pilnuje też GRANICY: belka grupowania po czymkolwiek innym niż obiekt stanu nie ma —
+    „▸ fits (900)" nie jest o obiekcie i wyciszenie jej byłoby zdaniem o niczym."""
+    from horreum.gui.grid import BASE_COLS, GridTableModel
+
+    base = [
+        {"frame_id": 1, "path": "a", "kind": "light", "_telescope": "",
+         "_object": "CTB1", "_object_state": "canon"},
+        {"frame_id": 2, "path": "b", "kind": "flat", "_telescope": "",
+         "_object": "FlatWizard", "_object_state": "kind", "object_raw": "FlatWizard"},
+    ]
+    m = GridTableModel()
+    m.set_data(base, pivot_mod.build_pivot([1, 2], [], []), [], group_by="_object")
+    belki = {r["_group"]: m._rows.index(r) for r in m._rows if "_group" in r}
+    kanon, kalibracja = m.index(belki["CTB1"], 0), m.index(belki["FlatWizard"], 0)
+
+    assert m.data(kanon, Qt.FontRole).bold() and not m.data(kanon, Qt.FontRole).italic()
+    assert m.data(kanon, Qt.ForegroundRole) is None
+    assert m.data(kanon, Qt.ToolTipRole) is None
+
+    assert m.data(kalibracja, Qt.FontRole).bold(), "belka zostaje belką"
+    assert m.data(kalibracja, Qt.FontRole).italic(), "…ale mówi to samo, co komórki pod nią"
+    assert m.data(kalibracja, Qt.ForegroundRole) is not None
+    assert "DEFINICJI" in m.data(kalibracja, Qt.ToolTipRole), "belka niesie zdanie SWOJEGO stanu"
+
+    m.set_data(base, pivot_mod.build_pivot([1, 2], [], []), [], group_by="kind")
+    obce = [r for r in m._rows if "_group" in r]
+    assert all(r["_group_state"] is None for r in obce), "grupowanie nie po obiekcie nie ma stanu"
+    assert all(not m.data(m.index(m._rows.index(r), 0), Qt.FontRole).italic() for r in obce)
+
+
 # ---------- FilterPanel ----------
 
 def test_filterpanel_buduje_drzewo(qapp):
@@ -1488,6 +1525,37 @@ def test_komorka_obiektu_KAZDY_stan_ma_WLASNY_tooltip(gcon):
     tips = {m.data(m.index(i, kol), Qt.ToolTipRole) for i in range(len(stany))}
     assert len(tips) == len(stany), f"stany dzielą tooltip: {tips}"
     assert all(t and not t.startswith("grid.cell.") for t in tips), "surowy klucz na ekranie"
+
+
+def test_nagrobek_z_pamiecia_i_BEZ_niej_mowia_ROZNE_zdania(gcon):
+    """FC-1: po tym, jak komórka zaczęła pokazywać obiekt ZDJĘTY RĘKĄ, jedno wspólne zdanie stałoby
+    się fałszem w połowie przypadków. Nagrobek BEZ pamięci (baza-dawca sprzed migracji 0017 —
+    wpuszczana świadomie, `0017:29`) pokazuje nazwę z NAGŁÓWKA, więc zdanie „to zdjęła ręka" byłoby
+    o niej nieprawdą, a gest „Przywróć" nie ma tam czego odtworzyć i mówi o tym wprost.
+
+    Trzeci wariant niesie zeznanie nagłówka, którego komórka już nie pokazuje — bo to ono jest drogą
+    do naprawy TRWAŁEJ (karta `OBJECT` w pliku), a nie ginie tylko dlatego, że zeszło z ekranu.
+
+    Falsyfikator: podepnij jeden tooltip pod wszystkie trzy → zbiór zdań się skurczy."""
+    from horreum.gui.grid import BASE_COLS, GridTableModel
+
+    wspolne = {"path": "p", "kind": "light", "_telescope": "", "_object": "↺ x",
+               "_object_state": "cleared"}
+    m = GridTableModel()
+    m.set_data([
+        {"frame_id": 1, "object_cleared_canon": "NGC 7023", "object_raw": None, **wspolne},
+        {"frame_id": 2, "object_cleared_canon": "NGC 7023", "object_raw": "ngc7023x", **wspolne},
+        {"frame_id": 3, "object_cleared_canon": None, "object_raw": "ngc7023x", **wspolne},
+    ], pivot_mod.build_pivot([1, 2, 3], [], []), [])
+    kol = [k for _, k in BASE_COLS].index("_object")
+    z_pamiecia, z_zeznaniem, bez_pamieci = [m.data(m.index(i, kol), Qt.ToolTipRole) for i in range(3)]
+
+    assert len({z_pamiecia, z_zeznaniem, bez_pamieci}) == 3, "trzy różne prawdy, trzy zdania"
+    assert "ZDJĘŁA" in z_pamiecia and "Przywróć" in z_pamiecia
+    assert "ngc7023x" in z_zeznaniem, "zeznanie nagłówka schodzi do tooltipa, nie znika"
+    assert "ZDJĘŁA" not in bez_pamieci, "bez pamięci nie wolno twierdzić, że to werdykt ręki"
+    assert "nie ma tu czego odtworzyć" in bez_pamieci
+    assert all(not t.startswith("grid.cell.") for t in (z_pamiecia, z_zeznaniem, bez_pamieci))
 
 
 def test_panel_nie_powtarza_powodu_ktory_zwietrzal(view, gcon):

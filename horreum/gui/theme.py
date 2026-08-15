@@ -42,12 +42,19 @@ _GRID = {
         # retired_bg fiolet: klatka WYCOFANA to też zapis historii, ale zamknięty CZYJĄŚ DECYZJĄ,
         # nie faktem o świecie — a ta różnica jest robocza (wycofanie ręka cofa jednym gestem,
         # zastąpienia nie cofa nikt), więc ton ma być odróżnialny od sepii, nie jej odcieniem.
-        "missing": "#8A8A8A", "vanished_bg": "#4A2A2A", "dup_bg": "#22344A",
+        # missing: szarość BRAKU liczona pod AA 4,5:1 na KAŻDYM tle tego motywu, nie tylko na
+        # bazie - ta sama komórka ląduje na siedmiu tłach stanów, a od FC-3 także na belce grupy.
+        # Dobór wiąże najciaśniejsze tło (`touched_bg` 4,55:1, `group_bg` 4,64:1); poprzednie
+        # #8A8A8A dawało 4,38:1 na alt_base i 3,13:1 na touched_bg. Bramka: `test_theme`.
+        "missing": "#A8A8A8", "vanished_bg": "#4A2A2A", "dup_bg": "#22344A",
         "group_bg": "#3C3C3C", "touched_bg": "#274427", "skipped_bg": "#2C2C2C",
         "superseded_bg": "#403524", "retired_bg": "#33294A",
     },
     "light": {
-        "missing": "#999999", "vanished_bg": "#FFE5E5", "dup_bg": "#E5F0FF",
+        # Jasny motyw miał tu najgorszą liczbę CAŁEJ palety: #999999 na alt_base to 2,64:1, czyli
+        # poniżej nawet AA-large 3:1 - a niesie ją 2364 komórki kalibracji i każdy znacznik `↺`,
+        # który bywa jedyną treścią komórki. #666666 daje 5,31:1 na alt_base i 4,52:1 na belce grupy.
+        "missing": "#666666", "vanished_bg": "#FFE5E5", "dup_bg": "#E5F0FF",
         "group_bg": "#E4E4E4", "touched_bg": "#E3F6E3", "skipped_bg": "#F2F2F2",
         "superseded_bg": "#F3EBD8", "retired_bg": "#EDE7F6",
     },

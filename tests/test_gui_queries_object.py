@@ -712,7 +712,7 @@ def test_object_cell_ODROZNIA_kanon_od_zeznania():
     assert queries.object_cell({"object_canon": None, "object_raw": "FlatWizard",
                                 "kind": "flat"}) == ("FlatWizard", "kind")
     assert queries.object_cell({"object_canon": None, "object_raw": "Jakas Mgla",
-                                "kind": "light"}) == ("Jakas Mgla", "raw")
+                                "kind": "light"}) == (f"{queries.RAW_MARK} Jakas Mgla", "raw")
 
 
 def test_object_cell_NAGROBEK_bije_rodzaj_i_NIGDY_nie_jest_pustka():
@@ -768,11 +768,56 @@ def test_wiersz_NIEMY_o_rodzaju_NIE_dostaje_zdania_o_rodzaju():
     Falsyfikator: wróć do `row.get("kind") not in LIGHT_KINDS` → wiersz bez klucza `kind` (`None`)
     dostaje stan `kind`, czyli tooltip o kalibracji nad klatką, o której nic nie wiadomo."""
     assert queries.object_cell({"object_canon": None, "object_raw": "NGC7023"}) == \
-        ("NGC7023", "raw"), "bez `kind` fallbackiem jest `raw` — nie twierdzi nic o rodzaju"
+        (f"{queries.RAW_MARK} NGC7023", "raw"), "bez `kind` fallbackiem jest `raw` — nie twierdzi nic o rodzaju"
     assert queries.object_cell(
         {"object_canon": None, "object_raw": "FlatWizard", "kind": "flat"})[1] == "kind"
     assert queries.object_cell(
         {"object_canon": None, "object_raw": "NGC7023", "kind": "light"})[1] == "raw"
+
+
+def test_nagrobek_POKAZUJE_CO_ZDJELA_REKA_a_nie_zeznanie_naglowka():
+    """FC-1: migracja 0017 zapisuje, CO ten nagrobek zdjął — read-model tego nie czytał.
+
+    Firsthand zmierzył **411 z 417 nagrobków renderujących się znak w znak identycznie** (sam `↺`),
+    choć baza pamiętała trzy różne obiekty: komórka jechała `object_raw`, a klatka bez zeznania
+    w nagłówku (większość — 845 klatek nieba go nie ma) nie miała w niej ANI JEDNEJ litery, po
+    której dałoby się poznać, czego dotyczy.
+
+    Pamięć BIJE zeznanie, bo to dwa różne fakty: raw jest tym, co drabina ODRZUCIŁA, a pamięć tym,
+    co ręka ZDJĘŁA. Nagrobek bez pamięci (baza-dawca sprzed 0017) spada na raw i zostaje legalny.
+
+    Falsyfikator: wróć do `CLEARED_MARK + raw` → pierwsza asercja pokaże `↺ ngc7023x`, czyli nazwę,
+    której ręka nigdy nie widziała."""
+    nagrobek = {"object_canon": None, "object_raw": "ngc7023x", "object_source": "user_cleared",
+                "kind": "light"}
+    assert queries.object_cell(dict(nagrobek, object_cleared_canon="NGC 7023")) == \
+        (f"{queries.CLEARED_MARK} NGC 7023", "cleared")
+    assert queries.object_cell(dict(nagrobek, object_raw=None, object_cleared_canon="NGC 7023")) == \
+        (f"{queries.CLEARED_MARK} NGC 7023", "cleared"), "pamięć niesie komórkę bez zeznania"
+    assert queries.object_cell(nagrobek) == (f"{queries.CLEARED_MARK} ngc7023x", "cleared"), \
+        "nagrobek BEZ pamięci (dawca sprzed 0017) spada na zeznanie, nie na pustkę"
+    assert queries.object_cell(dict(nagrobek, object_raw=None)) == \
+        (queries.CLEARED_MARK, "cleared"), "bez obu — sam znacznik, nigdy pustka"
+
+
+def test_dwa_stany_o_PRZECIWNYCH_receptach_roznia_sie_SAMYM_TEKSTEM():
+    """FC-8: `kind` („kalibracja — nie poprawia się wcale") i `raw` („nazwa nierozpoznana — popraw
+    w pliku albo wskaż ręką") renderowały się identycznie: ta sama kursywa, ta sama szarość, oba bez
+    znacznika. Rozróżniała je WYŁĄCZNIE sąsiednia kolumna „Rodzaj".
+
+    Bramka pyta o TEKST, a nie o role Qt, i to jest jej treść: znacznik ma nieść różnicę sam,
+    bez pomocy koloru (który dla obu stanów zostaje wyciszony) i bez pomocy sąsiedniej kolumny.
+
+    Falsyfikator: zdejmij `RAW_MARK` → oba napisy zlewają się w `FlatWizard`/`CTB 1` bez różnicy."""
+    kalibracja, _ = queries.object_cell({"object_canon": None, "object_raw": "FlatWizard",
+                                         "kind": "flat"})
+    nierozpoznana, _ = queries.object_cell({"object_canon": None, "object_raw": "CTB 1",
+                                            "kind": "light"})
+    assert kalibracja == "FlatWizard", "stan BEZ roboty zostaje bez znacznika"
+    assert nierozpoznana.startswith(queries.RAW_MARK), "stan Z robotą niesie znacznik"
+    # ALFABET JEST ROZŁĄCZNY: każdy stan niekanoniczny da się poznać po samym tekście.
+    znaczniki = {queries.CLEARED_MARK, queries.RAW_MARK, "⟨"}
+    assert len(znaczniki) == 3, "dwa stany na jednym znaczniku = ten dług od nowa"
 
 
 def test_stany_komorki_MAJA_LUSTRO_w_stalej():

@@ -4,7 +4,21 @@ Format wzorowany na [Keep a Changelog](https://keepachangelog.com/pl/1.1.0/).
 Wersjonowanie [semantyczne](https://semver.org/lang/pl/). Projekt jest we wczesnym rozwoju —
 schemat i API mogą się jeszcze zmieniać.
 
-## [Niewydane]
+## [0.9.0] - 2026-08-15
+
+Wydanie o **czytelności ekranu** - o tym, żeby to, co widzisz, zgadzało się z tym, co program
+naprawdę wie. Każda pozycja niżej ma ten sam kształt: fakt siedział w bazie, a ekran mówił coś
+innego albo milczał. Lista klatek pokazywała adres kopii, której na dysku dawno nie ma (**128
+gotowych obrazów** Twojego archiwum), liczby przy filtrach liczyły na całym katalogu zamiast na
+zawężonym widoku, znacznik „wycofana" ucinał się poza krawędź kolumny, a szarość stanów w jasnym
+motywie miała kontrast poniżej progu czytelności. Doszła też jedna nowa powierzchnia: obrazy,
+którym zniknęła jedna z dwóch kopii, mają wreszcie własne miejsce zamiast wpisu widocznego tylko
+po najechaniu myszą.
+
+Osobny wątek tego wydania: **kolumna „Obiekt" zaczęła mówić pełnym zdaniem.** Do tej pory kilka
+różnych stanów wyglądało w niej znak w znak tak samo, a nazwa zdjęta Twoją ręką znikała bez śladu
+tego, co zdjęła. Teraz każdy stan ma własny znacznik i własną receptę - opisuje je nowa tabela
+w [instrukcji](doc/instrukcja.md).
 
 ### Dodane
 
@@ -44,6 +58,43 @@ schemat i API mogą się jeszcze zmieniać.
 - **Stary adres przestał być śmieciem i stał się historią przeprowadzki.** Najechanie na ścieżkę
   takiego obrazu pokazuje teraz dodatkowo, gdzie leżał wcześniej - odpowiedź na pytanie „przecież
   to było w innym folderze, gdzie się podziało" jest na ekranie, a nie tylko w bazie.
+- **Znacznik „wycofana" znowu widać.** Klatka, którą wycofałeś ręką, miała mówić o tym tekstem,
+  a nie samym kolorem tła - żeby wiersz tłumaczył się sam także w drugim motywie i komuś, kto nie
+  rozróżnia odcieni. W układzie domyślnym nie mówił ANI RAZU: dopisek stał na końcu ścieżki, a
+  ścieżka pliku z archiwum jest kilka razy szersza niż kolumna, więc dopisek zawsze wpadał
+  w wielokropek. Teraz stoi z przodu, tak samo jak licznik kopii przy duplikatach.
+- **Kolumna „Obiekt" mówi, CO zdjęła Twoja ręka.** Po cofnięciu przypisania komórka pokazywała
+  sam znaczek `↺` bez nazwy, jeśli nazwa nie stała w nagłówku pliku - a przy plikach RAW nie stoi
+  tam prawie nigdy. Wychodziła z tego kolumna kilkudziesięciu identycznych znaczków, po której nie
+  dało się poznać, którą klatkę zdjęto z czego. Program pamięta zdjęty obiekt w bazie od poprzedniego
+  wydania, ale ekran o tę pamięć nie pytał - teraz pyta i pokazuje `↺ NGC2903`. Klatki wjechane
+  jeszcze przed tą pamięcią zachowują się jak dotąd i mają własne wyjaśnienie w podpowiedzi, bo
+  wspólne kłamałoby o werdykcie ręki tam, gdzie go nie ma.
+- **Szare stany daje się przeczytać w jasnym motywie.** Kolor, którym program wygasza stany bez
+  roboty (kalibracja, brak wartości, cofnięte przypisanie), miał w motywie jasnym kontrast **2,64:1**
+  przy progu czytelności 4,5:1 - czyli poniżej nawet łagodniejszego progu dla dużego tekstu. Nowe
+  odcienie sprawdzono na KAŻDYM tle, na które ten kolor pada: zwykły wiersz, wiersz naprzemienny,
+  siedem teł stanów i belka grupowania.
+- **Nagłówek grupy przestał udawać, że kalibracja ma przypisany obiekt.** Przy „Grupuj wg: Obiekt"
+  belka `▸ DARK (14)` była malowana białym pogrubieniem dokładnie tak samo jak `▸ CTB1`, choć
+  komórki pod nią były szarą kursywą - stan znała komórka, a belka nie. Teraz belka niesie ten sam
+  stan i tę samą podpowiedź co wiersz pod nią, a gdy grupa jest niejednorodna, milczy zamiast
+  zgadywać stan większości.
+- **Nazwa, której program nie rozpoznał, ma własny znacznik.** Klatka z nazwą nie do rozpoznania
+  („popraw ją w pliku albo wskaż obiekt ręką") wyglądała znak w znak tak samo jak klatka
+  kalibracyjna („tu nie ma czego poprawiać") - różniła je wyłącznie sąsiednia kolumna „Rodzaj".
+  Teraz nierozpoznana nazwa dostaje `?`, więc każdy znacznik w tej kolumnie znaczy dokładnie jedną
+  rzecz: `↺` zdjęte ręką, `⟨…⟩` podpowiedź z nazwy folderu, `?` nazwa nierozpoznana, brak znacznika
+  - nie ma tu roboty.
+- **Lista „Grupuj wg" pokazywała wewnętrzne klucze zamiast nazw kolumn.** Sześć z siedmiu pozycji
+  wyświetlało się jako `grid.col.kind` czy `object.col.name` - nagłówki tych samych kolumn w tabeli
+  były przy tym poprawne, więc rozjazd łatwo było przeoczyć. Program pilnuje teraz sam, że żaden
+  napis widoczny w oknie Zbiorów nie jest kluczem wewnętrznym.
+- **Podpowiedź nad grupą przestała orzekać o całej grupie na podstawie jednego wiersza.** Zdanie
+  wyjaśniające stan grupy brało treść z pierwszej klatki w kubełku, a pierwsza zależy od tego, jak
+  akurat posortowałeś tabelę - więc po kliknięciu w nagłówek kolumny zdanie potrafiło się zmienić,
+  choć grupa była ta sama. Teraz mówi tylko to, co jest prawdą o wszystkich wierszach grupy, a gdy
+  wiersze się różnią - milczy.
 
 ## [0.8.0] — 2026-08-11
 
@@ -686,7 +737,7 @@ Fundament: przejście na model „baza = autorytet, `sha1` = tożsamość".
 - **Import zasilający** świeżej bazy z bazy‑dawcy (read‑only).
 - **CLI**: `init` / `scan` / `group` / `resolve` / `delta`.
 
-[Niewydane]: https://github.com/abo-t/horreum/compare/v0.8.0...HEAD
+[0.9.0]: https://github.com/abo-t/horreum/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/abo-t/horreum/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/abo-t/horreum/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/abo-t/horreum/compare/v0.5.1...v0.6.0

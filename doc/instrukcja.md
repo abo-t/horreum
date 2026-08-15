@@ -327,6 +327,26 @@ zapiszesz przyciskiem **★ Zapisz widok** jako nową perspektywę — zapisane 
 więc jadą razem z nią, gdy przeniesiesz plik `.db` na inny komputer. Motyw **Ciemny/Jasny**
 przełączysz w menu **Widok**.
 
+### Co mówi kolumna „Obiekt"
+
+Ta jedna kolumna niesie **pięć różnych odpowiedzi**, a każda ma inną receptę. Znacznik przed nazwą
+mówi, skąd ta nazwa się wzięła - i czy jest tu dla Ciebie robota. To samo wyjaśnienie dostaniesz
+po najechaniu myszą na komórkę.
+
+| Co widzisz | Co to znaczy | Co z tym zrobić |
+|---|---|---|
+| **NGC7000** - zwykła nazwa | Obiekt rozpoznany. Nazwa jest w bazie na stałe | Nic. To jest stan docelowy |
+| **↺ NGC7000** | Ta nazwa była przypisana, ale **Twoja ręka ją zdjęła**. Program pamięta, co zdjął | Jeśli to była pomyłka: **Obiekt ▾ → Przywróć cofnięte przypisanie**. Jeśli nie - zostaw, program sam jej nie przywróci |
+| **? Mgławica Ameryka** | W pliku jest nazwa, której **program nie rozpoznał** - to jedyny stan, który JEST robotą | Albo **Obiekt ▾ → Przypisz obiekt…** (decyzja zostaje w bazie), albo **Popraw nagłówki…** (nazwa idzie do samego pliku, na zawsze) |
+| **⟨NGC7000⟩** w nawiasach kątowych | To **propozycja z nazwy folderu**, nie fakt z pliku. Dotyczy gotowych obrazów, które nagłówka o obiekcie nie mają | Potwierdź ją gestem (**Obiekt ▾**), jeśli się zgadza. Do czasu potwierdzenia jest tylko podpowiedzią |
+| **dark**, **flat** - nazwa bez znacznika, szarą kursywą | Klatka **kalibracyjna**: obiektu nie ma z definicji, bo nie fotografowała nieba | Nic. Tu nie ma czego poprawiać - dlatego program to wygasza |
+
+Pusta komórka znaczy dokładnie tyle: plik nie mówi nic o obiekcie i program niczego nie zgaduje.
+
+> Nagłówek grupy (przy **Grupuj wg: Obiekt**) mówi to samo co komórki pod nim - jest wygaszony
+> tam, gdzie wygaszone są wiersze. Gdy grupa zbiera klatki w różnych stanach, nagłówek **milczy**,
+> zamiast zgadywać stan większości.
+
 **Szukanie po nazwie, jaką znasz.** Nad listą obiektów jest pole szukania. Wpisz cokolwiek —
 `Ameryka Północna`, `NGC 7000`, `ngc7000` — trafi tak samo. Program zna nazwy potoczne, skróty
 katalogowe i nie czepia się spacji, kropek ani wielkości liter.
@@ -550,15 +570,21 @@ publikowany jako `Horreum-<wersja>-windows-x64.exe`. Instalator NSIS i przenośn
 Numer wersji ma jednego właściciela (`pyproject.toml`), widać go w tytule okna — bramka
 `tests/test_version.py`, sonda tytułu w buildzie.
 
-**Status dokumentu:** opisuje stan **0.6.0**. Dopisane w tym przebiegu: onefile zamiast zip+`_internal`,
-czwarte miejsce nawigacji (Planer), cztery drogi nadania obiektu i cofnięcie, propozycje ze ścieżki,
-rodowód stosów, szukanie po nazwach potocznych, perspektywy w bazie.
+**Status dokumentu:** trzon opisuje stan **0.6.0** (onefile zamiast zip+`_internal`, czwarte miejsce
+nawigacji — Planer, cztery drogi nadania obiektu i cofnięcie, propozycje ze ścieżki, rodowód stosów,
+szukanie po nazwach potocznych, perspektywy w bazie). Dopisane w wydaniu **0.9.0**: tabela
+**„Co mówi kolumna »Obiekt«"** w Kroku 5 — pięć stanów kolumny z receptą do każdego.
 
-> **Instrukcja jest o jedno wydanie z tyłu.** Wersja **0.7.0** dołożyła cztery rzeczy, których
-> ten dokument jeszcze nie opisuje: wiersz **„Obrazy bez rodowodu"** w Porządkach z perspektywą
-> „Rodowód do potwierdzenia", **propozycję materiału** w panelu „Rodowód" (klatki nocy obrazu
-> z wyborem innej nocy), **ręczne wskazanie zestawu** teleskop × kamera dla zdjęć z lustrzanki
-> oraz **odniesienie czasu** dla stosów z aparatu. Pełny opis zmian → `CHANGELOG.md`.
+> **Instrukcja jest o dwa wydania z tyłu.** Trzy rzeczy z **0.7.0**, których ten dokument nie
+> opisuje krok po kroku: wiersz **„Obrazy bez rodowodu"** w Porządkach z perspektywą „Rodowód do
+> potwierdzenia", **propozycja materiału** w panelu „Rodowód" (klatki nocy obrazu z wyborem innej
+> nocy), **ręczne wskazanie zestawu** teleskop × kamera dla zdjęć z lustrzanki oraz **odniesienie
+> czasu** dla stosów z aparatu. Z **0.8.0** dochodzą trzy drogi powrotu: **sierota kurateli**
+> w Planerze (zdejmij albo przenieś oznaczenie, gdy katalog celów zmienił nazwę), **„Wycofaj"**
+> dla klatki, której wszystkie kopie zniknęły z dysku, oraz wciąganie folderów **`STACKS`**
+> zwykłym skanem. Z **0.9.0** — perspektywa **„Brakujące kopie"** (obraz stracił jedną z dwóch
+> kopii). Gest **„Przywróć cofnięte przypisanie"** z 0.8.0 jest już opisany, w tabeli w Kroku 5.
+> Pełny opis zmian → `CHANGELOG.md`.
 
 **Nadal BEZ własnego opisu** (wskazane w instrukcji, ale nieopisane krok po kroku): **Wydaj na
 stół…** (projekcje pod WBPP), **Uporządkuj nazwy plików…** (rename z faktów), **Popraw nagłówki…**

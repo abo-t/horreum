@@ -59,6 +59,14 @@ Horreum odwraca klasyczny model „folder = prawda". Tutaj:
 
 Horreum rozpoznaje obiekty niezależnie od zapisu w nagłówku: katalogi krzyżowe (Messier / Caldwell → NGC / IC, polityka NGC-wins), nazwy potoczne oraz fakt sprzętowy kamery (np. warianty ZWO ASI2600). Działa na czystym drzewie każdego użytkownika, bez zależności od żadnego zewnętrznego narzędzia.
 
+**Rozpoznane i nierozpoznane wyglądają inaczej - i to jest celowe.** Kolumna „Obiekt" w Zbiorach
+niesie pięć różnych odpowiedzi i każda ma własny znacznik oraz własną receptę: nazwa bez znacznika
+to obiekt rozpoznany, `↺` to nazwa zdjęta ręką (z pamięcią, CO zdjęto - da się przywrócić), `?` to
+nazwa, której resolver nie rozpoznał (jedyny stan, który jest robotą), `⟨…⟩` to niepotwierdzona
+propozycja z nazwy folderu, a wygaszony szary wiersz to klatka kalibracyjna, która obiektu nie ma
+z definicji. Pusta komórka znaczy „plik nie mówi nic i program niczego nie zgaduje". Tabela
+„co widzisz - co to znaczy - co z tym zrobić" jest w [instrukcji](doc/instrukcja.md#co-mówi-kolumna-obiekt).
+
 ## Stos technologiczny
 
 Python 3.9+ · PySide6 (GUI desktop) · SQLite · astropy (czytnik nagłówków FITS). Rdzeń bazy jest

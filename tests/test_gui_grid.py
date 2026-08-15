@@ -3240,6 +3240,27 @@ def test_wiersz_porzadkow_jest_KLIKALNY_ale_NIE_ROBOTA(gcon):
     assert cel == grid_mod.PRESET_MISSING_COPY, "wiersz musi celować w preset PO STAŁEJ"
 
 
+def test_wiersz_historii_jest_WYSZARZONY_mimo_wlasnej_liczby(qapp, gcon):
+    """Druga połowa stanu „nie robota" (bramka pakietu D-V-9a): `_BEZ_ROBOTY` gasiło odznakę
+    i pogrubienie, ale KOLOR zależał wyłącznie od `n > 0`, więc wiersz historii stał na liście
+    w pełnej czerni - a przy 128 jest tam największą liczbą i wzrok czyta go jako największy
+    problem. Wyszarzenie znaczy w tej liście „nie ma tu roboty", nie „nie da się kliknąć":
+    sąsiedni test dowodzi, że wiersz dalej prowadzi do perspektywy."""
+    from horreum.gui import rows
+    _zasiej_dwa_adresy(gcon)
+    tv = tasks_mod.TasksView(gcon)
+    try:
+        tv.refresh_counts()
+        it = next(tv.tasks.item(i) for i in range(tv.tasks.count())
+                  if tv.tasks.item(i).data(Qt.UserRole) == "missing_copy_frames")
+        assert it.data(rows.SECONDARY) == "1  ›", "wiersz ma NIEZEROWĄ liczbę i mimo to ma być szary"
+        assert it.foreground().color() == tasks_mod._DIM["fg"]
+        assert it.data(rows.STRONG) is False
+        assert it.flags() & Qt.ItemIsEnabled, "szary NIE znaczy nieklikalny - to jest cała różnica"
+    finally:
+        tv.close()
+
+
 def test_KAZDY_preset_ma_etykiete_i_zuzyta_flage():
     """BRAMKA NA ENUMERACJĘ (D-V-9a). Rodzina `only_*` ma UDOKUMENTOWANĄ historię regresji: rozjazd
     enumeracji wyprodukował kiedyś „Baza pusta" na pełnej bazie (`483df93`). Ta paczka POWTÓRZYŁA
@@ -3247,10 +3268,50 @@ def test_KAZDY_preset_ma_etykiete_i_zuzyta_flage():
     co wywaliło 116 testów `KeyError`-em. Znalezisko jednostkowe podniesione do kontroli:
 
       1. każdy preset ma etykietę wyświetlania - inaczej `KeyError` przy pierwszym renderze listy;
-      2. każdy klucz `only_*` ze specyfikacji presetu jest ZUŻYWANY przez `_apply_preset`, czyli ma
-         swój atrybut `_only_*` - inaczej perspektywa cicho pokazuje pełny grid zamiast przyciętego,
-         a to jest awaria BEZ komunikatu, więc gorsza od `KeyError`."""
+      2. etykieta jest KLUCZEM KATALOGU i18n - `_PRESET_LABELS` idzie do `i18n.t()` ZMIENNĄ, więc
+         bramka kluczy literalnych (`test_klucze_call_site_podzbior_katalogu`) jest tu ślepa,
+         a `i18n.t` na nieznanym kluczu nie rzuca - renderuje surowe `perspective.foo` na ekranie;
+      3. każdy klucz `only_*` ze specyfikacji presetu jest ZUŻYWANY przez trim w `_refresh`, a nie
+         tylko wyzerowany w `__init__` - inaczej perspektywa cicho pokazuje pełny grid zamiast
+         przyciętego, a to jest awaria BEZ komunikatu, więc gorsza od `KeyError`.
+
+    Punkt 3 pilnuje TRZECH miejsc naraz, bo każde z nich samo w sobie przepuszcza cichą awarię:
+    ustawienia flagi w `_on_perspective`, derywacji trimu w `_refresh` i przekazania go listwie
+    facetów. Czwarte miejsce - serializacja spec-a - ma własny test wyżej."""
+    zrodlo_trimu = _ZRODLO_GRIDU.split("def _refresh(")[1]
     for nazwa, spec in grid_mod.PRESETS.items():
         assert nazwa in grid_mod._PRESET_LABELS, f"preset bez etykiety wyświetlania: {nazwa!r}"
+        from horreum.gui.i18n_catalog import CATALOG
+        assert grid_mod._PRESET_LABELS[nazwa] in CATALOG, (
+            f"etykieta presetu {nazwa!r} spoza katalogu i18n: {grid_mod._PRESET_LABELS[nazwa]!r}")
         for klucz in (k for k in spec if k.startswith("only_")):
             assert f"self._{klucz}" in _ZRODLO_GRIDU, f"flaga {klucz!r} presetu {nazwa!r} nieużywana"
+            assert f"self._{klucz}" in zrodlo_trimu, (
+                f"flaga {klucz!r} presetu {nazwa!r} nie derywuje trimu w `_refresh` - perspektywa "
+                f"pokaże PEŁNY grid zamiast przyciętego, bez żadnego komunikatu")
+
+
+def test_listwa_facetow_dostaje_KOMPLET_trimow_perspektywy():
+    """BRAMKA NA SIBLING-SET (bramka pakietu D-V-9a). Rodzina `only_*` rozjechała się tu po raz
+    DRUGI, w miejscu, którego pierwsza bramka nie widzi: `_refresh` przycinał zbiór główny siedmioma
+    setami, a listwie facetów podawał DWA (`dup_ids`, `review_ids`). Skutek był widoczny gołym okiem:
+    w perspektywie „Brakujące kopie" (128 wierszy) kliknięcie wartości w listwie liczyło licznik
+    facetu i godziny portfela na zbiorze BEZ przycięcia, więc listwa mówiła „NGC7000 · 60 h" obok
+    siatki na trzy wiersze - UI kłamał dokładnie w chwili zawężania.
+
+    Bramka jest STRUKTURALNA, bo defekt jest strukturalny: obie strony mają czytać JEDNĄ derywację
+    (`trims`), a nie dwie listy nazwanych setów, które trzeba pamiętać, żeby zaktualizować."""
+    import inspect
+    zrodlo = inspect.getsource(grid_mod.FramesView._refresh)
+    wywolanie = [w for w in zrodlo.splitlines() if "_reload_facet_rail(" in w]
+    assert wywolanie, "nie znalazłem wywołania listwy w `_refresh`"
+    assert "trims" in wywolanie[0], (
+        "listwa facetów musi dostać KOMPLET trimów jedną derywacją (`trims`), nie wybrane sety - "
+        f"jest: {wywolanie[0].strip()!r}")
+    rail = inspect.getsource(grid_mod.FramesView._reload_facet_rail)
+    assert "for trim in trims" in rail, "sibling-set musi przecinać się z KAŻDYM trimem perspektywy"
+    # Wzorzec, nie sam operator: `&=` pada też w KOMENTARZU, który ostrzega przed tą pułapką,
+    # a bramka łapiąca własną dokumentację nie pilnuje niczego.
+    assert "sib &=" not in rail, (
+        "`&=` na sibling-secie przycina MEMOIZOWANE uniwersum w miejscu (`_memo_leaf_fns`), "
+        "więc kolejny facet tej samej pętli liczy na zbiorze przyciętym przez poprzednika")

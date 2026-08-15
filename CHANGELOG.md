@@ -20,6 +20,13 @@ schemat i API mogą się jeszcze zmieniać.
 
 ### Naprawione
 
+- **Liczby przy filtrach po lewej przestały kłamać w zawężonych widokach.** Gdy patrzyłeś na
+  wybraną perspektywę - „Duplikaty", „Zniknięte", „Brakujące kopie" i cztery pozostałe - i klikałeś
+  wartość w liście filtrów, liczby przy pozostałych wartościach oraz godziny przy obiektach liczyły
+  się na CAŁYM katalogu, a nie na tym, co masz przed sobą. Wychodziło z tego zdanie sprzeczne samo
+  ze sobą: „NGC7000 · 60 h" obok listy na trzy pozycje. Teraz obie strony ekranu liczą to samo.
+  Dotyczyło pięciu z siedmiu perspektyw; dwie najstarsze („Duplikaty", „Do przeglądu") liczyły
+  dobrze od początku.
 - **Lista klatek pokazuje adres kopii, KTÓRA ISTNIEJE.** Gdy jeden obraz leży na dysku w dwóch
   miejscach i jedno z nich zniknie - a tak stało się przy uporządkowaniu drzewa gotowych stosów -
   program pokazywał ten adres, który wjechał do bazy PIERWSZY, nawet jeśli plik spod niego dawno

@@ -238,7 +238,12 @@ class TasksView(QWidget):
             live = action is not None and n > 0 and key not in _BEZ_ROBOTY
             it.setData(rows.STRONG, live)
             if action is not None:
-                it.setForeground(QBrush() if n > 0 else _DIM["fg"])   # n=0 → wyszarzone, wciąż klikalne
+                # n=0 → wyszarzone, wciąż klikalne. TO SAMO dla wierszy HISTORII (`_BEZ_ROBOTY`)
+                # niezależnie od liczby: samo zdjęcie pogrubienia ich nie odróżnia, a „Brakujące
+                # kopie 128" stoi obok „Zniknięte z dysku 3" i jest największą liczbą na liście —
+                # wzrok czyta większą liczbę jako większy problem, czyli dokładnie odwrotnie do
+                # tego, po co ten stan powstał. Szare = „nie ma tu roboty", nie „nie da się kliknąć".
+                it.setForeground(QBrush() if n > 0 and key not in _BEZ_ROBOTY else _DIM["fg"])
             if live:
                 badge += 1
         self._fit_task_list()          # metryki fontu są prawdziwe dopiero po `show()`

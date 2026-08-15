@@ -516,12 +516,18 @@ Dostawie" znaczą od 2026-08-01 to samo. „Przyjmij nowe" = stage `all` na zapa
 (QSettings). Skan przyrostowy: brama `(volume, path, mtime)`; ponowny skan pomija znane pliki;
 tożsamość = `sha1_data`.
 
-**Zadania Porządków** (`horreum/gui/tasks.py`, `_TASKS`): `unresolved_lights` / `telescopes_unlabeled`
-/ `observatories_unnamed` / `dup_frames` (perspektywa `Duplikaty`, flaga `only_dups`) — akcyjne;
-`xisf_frames` / `vanished_frames` — informacyjne (wyszarzone).
+**Zadania Porządków** (`horreum/gui/tasks.py`, `_TASKS`) — dziesięć wierszy, każdy prowadzi na
+powierzchnię (podstronę osi albo perspektywę Zbiorów), ale tylko część z nich jest ROBOTĄ:
+`unresolved_lights` / `stacks_lineage_pending` / `telescopes_unlabeled` / `observatories_unnamed` /
+`dup_frames` / `vanished_frames` / `retired_conflict_frames` — akcyjne (liczba pogrubiona, wchodzą
+do odznaki sidebara); `superseded_frames` / `retired_frames` / `missing_copy_frames` — HISTORIA
+(`_BEZ_ROBOTY`: wyszarzone i poza odznaką niezależnie od liczby, bo nic nie zginęło — dalej
+klikalne).
 
 **Perspektywy Zbiorów** (`horreum/gui/grid.py`, `PRESETS`): `Przegląd` / `Kalibracja` / `Duplikaty` /
-`Do przeglądu` + zapisane w QSettings.
+`Zniknięte` / `Rodowód` / `Zastąpione` / `Wycofane` / `Brakujące kopie` / `Do przeglądu`, plus
+zapisane przez użytkownika — te od migracji `0013` mieszkają w BAZIE (`saved_query`), nie
+w QSettings, więc jadą razem z katalogiem na inną maszynę.
 
 **Ścieżka ze źródła / CLI** (dla zaawansowanych, `horreum/cli.py`):
 

@@ -2988,13 +2988,19 @@ class FramesView(QWidget):
         sup_ids = queries.superseded_frame_ids(self.con) if self._only_superseded else None
         ret_ids = queries.retired_frame_ids(self.con) if self._only_retired else None
         mis_ids = queries.missing_copy_frame_ids(self.con) if self._only_missing_copy else None
+        # JEDNA derywacja trimu dla zbioru głównego I dla sibling-setów listwy (SPOT, F4R2#2) —
+        # lista powstaje RAZ i idzie w obie strony. Dwie kopie tej enumeracji rozjechały się
+        # dokładnie tak, jak zapowiada historia rodziny `only_*`: listwa dostawała `dup_ids`
+        # i `review_ids`, a pięciu młodszych braci nie widziała w ogóle, więc w perspektywie
+        # z trimem liczniki facetów i godziny portfela liczyły się na zbiorze BEZ przycięcia.
+        trims = [t for t in (dup_ids, review_ids, gone_ids, lin_ids, sup_ids, ret_ids, mis_ids)
+                 if t is not None]
         # NOWY set, NIGDY `&=`: przy pustym filtrze `filter_engine.run` zwraca uniwersum WPROST
         # (`filter_engine.py:171`), a to jest ZAPAMIĘTANY obiekt memoizacji (`_memo_leaf_fns`).
         # `&=` przycinało go W MIEJSCU, więc kolejne `universe_fn()` widziało już przycięty zbiór —
         # perspektywa z trimem potrafiła pokazać „Baza pusta" na pełnej bazie (wizytator P5 #2).
-        for trim in (dup_ids, review_ids, gone_ids, lin_ids, sup_ids, ret_ids, mis_ids):
-            if trim is not None:
-                frame_ids = frame_ids & trim
+        for trim in trims:
+            frame_ids = frame_ids & trim
         base = [_derive(r) for r in queries.base_rows(self.con, list(frame_ids))]
         base_ids = [b["frame_id"] for b in base]
         self._frame_ids = base_ids     # cel makra = to, co WIDAĆ (po filtrach dups/review), doktryna §5
@@ -3017,18 +3023,23 @@ class FramesView(QWidget):
         self.sel_bar.set_have_frames(bool(base_ids))         # pusty zbiór gasi „Wydaj na stół…" (F3R#2)
         self.sel_bar.set_criteria(self._describe_criteria()) # kryteria zbioru SŁOWAMI (F3)
         self.sel_bar.set_clearable(bool(self._facet_state) or self._filter_tree is not None)
-        self._reload_facet_rail(leaf_fn, universe_fn, dup_ids, review_ids, base_ids)   # listwa (F4)
+        self._reload_facet_rail(leaf_fn, universe_fn, trims, base_ids)   # listwa (F4)
         self._sync_staging_mutex()                           # staging jednej klingi wyłącza „Do stagingu" drugiej
         self._refresh_date_echo()                            # panel daty odbija świeże widoczne (echo warunkowe)
         self._refresh_lineage()                              # …i panel rodowodu, tak samo warunkowo
         self.status_message.emit(
             i18n.t("grid.status.loaded", frames=i18n.t_plural('grid.frames', n), cols=len(keywords)))
 
-    def _reload_facet_rail(self, leaf_fn, universe_fn, dup_ids, review_ids, current_ids):
+    def _reload_facet_rail(self, leaf_fn, universe_fn, trims, current_ids):
         """Liczniki listwy facetów per SIBLING-SET (F4R#1): zbiór facetu F = compose bez CAŁEJ własnej
         grupy F (in+ex) — liczniki na pełnym zbiorze samo-zawężałyby facet i OR-wewnątrz byłby
         nieosiągalny. Facet BEZ aktywnego wyboru → sibling == zbiór bieżący (już policzony;
-        D-UX-3(a)). Trimy dups/review = przecięcie z gotowymi setami (F4R2#2, bez base_rows)."""
+        D-UX-3(a)). Trim perspektywy = przecięcie z gotowymi setami (F4R2#2, bez base_rows).
+
+        `trims` przychodzi z `_refresh` GOTOWĄ LISTĄ, a nie jako dwa nazwane sety: enumeracja
+        rodziny `only_*` ma tu jednego właściciela, więc dołożenie siódmej perspektywy nie może
+        po cichu ominąć liczników listwy (to jest ta sama klasa rozjazdu, którą rodzina
+        przechodziła już dwa razy)."""
         counts, extras = {}, {}
         for facet in facet_model.FACETS:
             if facet not in self._facet_state:
@@ -3037,10 +3048,13 @@ class FramesView(QWidget):
                 tree = facet_model.compose(facet_model.sibling_state(self._facet_state, facet),
                                            self._filter_tree)
                 sib = filter_engine.run(tree, leaf_fn=leaf_fn, universe_fn=universe_fn)
-                if dup_ids is not None:
-                    sib &= dup_ids
-                if review_ids is not None:
-                    sib &= review_ids
+                # NOWY set, NIGDY `&=` — z tego samego powodu, co w `_refresh`: sibling-set powstaje
+                # z drzewa BEZ własnej grupy facetu, więc przy jednym aktywnym facecie i pustym
+                # filtrze `compose` daje `None`, a `run` oddaje MEMOIZOWANE uniwersum. `&=` przycinało
+                # je w miejscu, czyli kolejny facet tej samej pętli liczył licznik na zbiorze
+                # przyciętym przez poprzednika.
+                for trim in trims:
+                    sib = sib & trim
                 ids = list(sib)
             counts[facet] = self._facet_counts(facet, ids)
             if facet == "object":

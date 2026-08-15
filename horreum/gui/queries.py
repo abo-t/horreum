@@ -1244,6 +1244,15 @@ def missing_copy_frame_ids(con):
     Zmierzona populacja: **128 gotowych obrazów** - najcenniejsza część archiwum. Fakt o tylu
     klatkach, którego nie da się zobaczyć inaczej niż jeden po drugim, jest faktem schowanym.
 
+    ⚠ TA LICZBA OPISUJE DZISIEJSZĄ POPULACJĘ, NIE PREDYKAT (bramka pakietu D-V-9a). Predykat jest
+    świadomie KIND-AGNOSTYCZNY: utrata jednej z dwóch kopii jest tym samym faktem dla mastera,
+    lighta i darka, więc zawężenie do `light/master_light` odebrałoby powierzchni część jej własnej
+    treści. Że dziś wychodzi z niego 128 samych `master_light`, jest własnością ARCHIWUM po
+    uporządkowaniu drzewa stosów - zmierzone kodem produkcyjnym na snapshocie żywej bazy
+    2026-08-15 (`GROUP BY kind` → jeden wiersz). Gdy kiedyś wejdzie tu inny rodzaj, wiersz Porządków
+    pokaże większą liczbę i będzie to POPRAWNE; nieprawdą stanie się wtedy słowo „obrazów"
+    w tekście dla użytkownika, nie ten SQL.
+
     ⚠ ZAWĘŻENIE DO KLATEK ŻYWYCH JEST TREŚCIĄ PREDYKATU, nie ostrożnością. Bez `EXISTS(present=1)`
     zbiór wchłonąłby klatki ZNIKNIĘTE (wszystkie kopie martwe), czyli powielił perspektywę
     „Zniknięte" i zamienił listę „nic nie zginęło" w listę „poszukaj plików". Zastąpione i wycofane

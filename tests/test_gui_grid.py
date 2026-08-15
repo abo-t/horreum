@@ -1527,6 +1527,40 @@ def test_komorka_obiektu_KAZDY_stan_ma_WLASNY_tooltip(gcon):
     assert all(t and not t.startswith("grid.cell.") for t in tips), "surowy klucz na ekranie"
 
 
+def test_ZADNA_kontrolka_nie_pokazuje_surowego_klucza_i18n(view):
+    """BRAMKA KLASY: napis widoczny w oknie nie ma prawa BYĆ kluczem katalogu.
+
+    Znalezione sondą na żywym archiwum, nie recenzją: listwa „Grupuj wg" pokazywała
+    `object.col.name`, `frame.col.camera`, `grid.col.dt_delta` — SZEŚĆ z siedmiu pozycji było
+    kluczem wewnętrznym, bo `BASE_COLS` niesie klucze, a rozwiązywał je wyłącznie `headerData`
+    tabeli. Istniejące bramki i18n tego nie łapały i nie mogły: pilnują, żeby klucz ISTNIAŁ
+    w katalogu (`test_klucze_call_site_podzbior_katalogu`) i żeby stan MIAŁ klucz — żadna nie pyta,
+    czy napis PRZESZEDŁ przez `t()`. Ta pyta o to od strony ekranu.
+
+    Zbiór kluczy bierzemy z katalogu, więc bramka rośnie razem z nim, a fałszywy trafiony jest
+    strukturalnie niemożliwy: klucze mają kropki, etykiety nie.
+
+    Falsyfikator: wróć do `addItem(label, key)` bez `t()` → padają wszystkie pozycje listwy."""
+    from PySide6.QtGui import QAction
+    from PySide6.QtWidgets import QAbstractButton, QComboBox, QLabel
+
+    from horreum.gui.i18n_catalog import CATALOG
+
+    napisy = set()
+    for w in view.findChildren(QLabel) + view.findChildren(QAbstractButton):
+        napisy.add(w.text())
+    for c in view.findChildren(QComboBox):
+        napisy |= {c.itemText(i) for i in range(c.count())}
+    for a in view.findChildren(QAction):
+        napisy.add(a.text())
+    napisy |= {view.model.headerData(c, Qt.Horizontal, Qt.DisplayRole)
+               for c in range(view.model.columnCount())}
+
+    surowe = sorted(napisy & set(CATALOG))
+    assert not surowe, f"kontrolka pokazuje KLUCZ zamiast napisu: {surowe}"
+    assert "Obiekt" in napisy, "bramka byłaby ślepa, gdyby nic nie zebrała"
+
+
 def test_nagrobek_z_pamiecia_i_BEZ_niej_mowia_ROZNE_zdania(gcon):
     """FC-1: po tym, jak komórka zaczęła pokazywać obiekt ZDJĘTY RĘKĄ, jedno wspólne zdanie stałoby
     się fałszem w połowie przypadków. Nagrobek BEZ pamięci (baza-dawca sprzed migracji 0017 —

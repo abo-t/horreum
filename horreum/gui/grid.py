@@ -2208,7 +2208,10 @@ class FramesView(QWidget):
         self.combo_group.addItem(i18n.t("grid.top.no_group"), None)
         for label, key in BASE_COLS:
             if key not in ("path",):
-                self.combo_group.addItem(label, key)
+                # `BASE_COLS` niesie KLUCZE i18n, nie napisy (rozwiązuje je `headerData`) — bez `t()`
+                # listwa pokazywała `object.col.name` zamiast „Obiekt". Znalezione sondą FC-3 na
+                # żywym archiwum: SZEŚĆ z siedmiu pozycji renderowało klucz wewnętrzny.
+                self.combo_group.addItem(i18n.t(label), key)
         self.combo_group.currentIndexChanged.connect(self._on_group)
         bar.addWidget(self.combo_group)
         bar.addStretch(1)

@@ -3,3 +3,11 @@
 # blame planner.py. Ten plik broni przed powtorka z KAZDEGO narzedzia: git normalizuje *.py
 # do LF przy stage'owaniu niezaleznie od tego, co narzedzie zapisalo na dysku.
 *.py text eol=lf
+
+# Rozszerzenie bramki na `.md` i `.toml` (2026-08-16, sesja ak). Ta sama klasa co D-0731-16
+# uderzyla znowu, tym razem z pliku Pythona podbijajacego numer wersji: `Path.write_text` na
+# Windows tlumaczy `\n` na `\r\n`, wiec commit „chore(wydanie)" miał 1551 zmienionych linii
+# przy 3 realnych i zresetowalby blame CHANGELOG-a. Bramka na `*.py` tego nie lapala, bo
+# przestawione pliki byly dokumentacja i konfiguracja.
+*.md text eol=lf
+*.toml text eol=lf

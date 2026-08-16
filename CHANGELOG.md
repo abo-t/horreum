@@ -4,6 +4,30 @@ Format wzorowany na [Keep a Changelog](https://keepachangelog.com/pl/1.1.0/).
 Wersjonowanie [semantyczne](https://semver.org/lang/pl/). Projekt jest we wczesnym rozwoju —
 schemat i API mogą się jeszcze zmieniać.
 
+## [Niewydane]
+
+### Naprawione
+
+- **Cofnięcie przypisania przestało gubić klatki bez słowa.** Gdy zawęziłeś widok do jednego
+  obiektu i zdjąłeś mu nazwę, klatki znikały z ekranu w tej samej chwili - bo lista szuka po
+  nazwie, którą właśnie zdjęła Twoja ręka. Zostawał pusty widok i pytanie, czy gest w ogóle się
+  udał. Teraz zdanie po geście mówi, ile klatek wyszło poza widok, i podaje JEDNO kliknięcie,
+  które je odsłoni. Recepta zależy od tego, czym widok jest zawężony: gdy trzyma go perspektywa,
+  zdanie wskazuje perspektywę „Przegląd" - przycisk „Wyczyść zbiór" by tu nie pomógł, bo flag
+  perspektywy nie tyka. Ten sam człon dostały gesty żywotności klatki, gdzie zniknięcie celu
+  z widoku jest wręcz regułą: wycofana klatka wypada z „Zniknięte" natychmiast po geście.
+
+- **Po cofnięciu przypisania widać, że da się je przywrócić - i kiedy.** Droga powrotu istniała
+  od dawna, ale dowiadywałeś się o niej dopiero po najechaniu myszą na kontrolkę, czyli nie wtedy,
+  kiedy jest potrzebna. Teraz podaje ją zdanie po geście. Gdy klatki wyszły z widoku, zdanie mówi
+  „potem przywrócisz…", bo dopóki nie wrócą na ekran, nie ma czego zaznaczyć - a kontrolka jest
+  w tej chwili wyszarzona. Kolejność w zdaniu jest kolejnością, w której da się te gesty wykonać.
+
+- **Cofnięcie i przywrócenie mówią o tych samych obiektach w tej samej kolejności.** Oba zdania
+  wypisują trzy nazwy i liczbę reszty, ale robiły to w dwóch różnych porządkach - jedno w kolejności
+  klatek, drugie alfabetycznie. Przy siedmiu obiektach dawało to dwie rozłączne trójki, więc nie
+  dało się wzrokiem sprawdzić, czy przywrócenie objęło to samo, co cofnięcie.
+
 ## [0.9.0] - 2026-08-15
 
 Wydanie o **czytelności ekranu** - o tym, żeby to, co widzisz, zgadzało się z tym, co program

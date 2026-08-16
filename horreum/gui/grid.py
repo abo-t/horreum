@@ -298,6 +298,12 @@ _PRESET_LABELS = {
     PRESET_MISSING_COPY: "perspective.missing_copy",
     "Do przeglądu": "perspective.to_review",
 }
+# PERSPEKTYWA BEZ ZAWĘŻENIA - jedyny preset, który nie niesie ani filtra, ani flagi `only_*`
+# (`PRESETS` wyżej), więc przejście na nią odsłania KAŻDY zbiór: `_on_perspective` przepisuje
+# z niej także facety i filtr. Recepta powrotu po geście osi (FC-2) wskazuje ją imiennie, więc
+# nazwa nie może być literałem w dwóch miejscach - a bramka pilnuje, że ten preset naprawdę
+# jest czysty (`test_gui_grid`, `_PRESET_CZYSTY`).
+_PRESET_CZYSTY = "Przegląd"
 
 
 _KANONY_W_ZDANIU = 3
@@ -310,8 +316,19 @@ zdjęto, i ŻE było tego więcej."""
 
 
 def _lista_kanonow(canons, maks=_KANONY_W_ZDANIU):
-    """Kanony do zdania: do `maks` nazw po przecinku, reszta jako `(+N)`. Czysta funkcja."""
-    nazwy = list(canons)
+    """Kanony do zdania: do `maks` nazw po przecinku, reszta jako `(+N)`. Czysta funkcja.
+
+    PORZĄDEK ROZSTRZYGA SIĘ TUTAJ, NIE U KLINGI (FC-7) - bo obcięcie do trzech jest własnością
+    ZDANIA, a nie zapisu. Dwie klingi jednej pary gestów zbierały kanony w dwóch różnych
+    porządkach: cofnięcie w kolejności KLATEK (`repo.clear_object_assignment`), przywrócenie
+    alfabetycznie (`queries.restore_targets`, `ORDER BY o.canon`). Przy siedmiu obiektach oba
+    zdania pokazywały więc ROZŁĄCZNE trójki tego samego zbioru - „NGC6960, NGC5194, NGC3623 (+4)"
+    kontra „IC434, LMC, Moon (+4)" - i nie dawały się zestawić wzrokiem, choć mówiły o tym samym.
+
+    Sortowanie tutaj domyka to dla WSZYSTKICH gestów naraz, także przyszłych: kolejność zbierania
+    zostaje prywatną sprawą klingi, a zdanie ma jeden porządek. `sorted()` zgadza się z `ORDER BY`
+    SQLite dla tych nazw (domyślna kolacja BINARY porównuje bajty UTF-8, czyli po code poincie)."""
+    nazwy = sorted(canons)
     if len(nazwy) <= maks:
         return ", ".join(nazwy)
     return ", ".join(nazwy[:maks]) + i18n.t("grid.sel.object_canons_more", n=len(nazwy) - maks)
@@ -2201,6 +2218,7 @@ class FramesView(QWidget):
         self._only_superseded = False
         self._only_retired = False
         self._only_missing_copy = False
+        self._trim_active = False   # czy trim perspektywy przyciął zbiór - liczone RAZ w refresh() (FC-2)
         self._reveal_facet = None   # (facet, wartość) do odsłonięcia w listwie — patrz `apply_object_facet`
         self._frame_ids = []      # frame_id widoczne w gridzie (cel makra) — aktualizowane w refresh()
         self._run_id = None       # JEDEN run_id sesji makra (R#5 lifecycle: stage→commit/reject zwalnia)
@@ -2574,7 +2592,7 @@ class FramesView(QWidget):
             self.status_message.emit(i18n.t("grid.sel.object_empty"))
         return ids
 
-    def _po_gescie_osi(self, klucz, gest, *, ogon="", **kw):
+    def _po_gescie_osi(self, klucz, gest, *, ogon="", odwracalny=False, **kw):
         """Wspólny ogon WSZYSTKICH gestów osi: zdanie z ROZBICIEM per fakt + odświeżenie CZTERECH
         powierzchni + ZACHOWANIE ZAZNACZENIA.
 
@@ -2608,12 +2626,32 @@ class FramesView(QWidget):
         # jest w zdaniu bazowym, bo user sam go przed chwilą wybrał.
         if gest.canons and "canon" not in kw:
             msg += i18n.t("grid.sel.object_canons", canons=_lista_kanonow(gest.canons))
+        poza = 0
         if gest.assigned:
             # CZTERY POWIERZCHNIE: wiersze gridu, facety (Obiekt zmienił zawartość), licznik/pasek
             # oraz kolejka przeglądu w oknie osi — ta ostatnia przez sygnał, bo nie jest nasza.
             self.refresh()
-            self._przywroc_zaznaczenie(zaznaczone)
+            wrocilo = self._przywroc_zaznaczenie(zaznaczone)
             self.object_axis_changed.emit()
+            # CEL GESTU BYWA WYPCHNIĘTY Z WIDOKU PRZEZ SAM GEST (FC-2) - i to nie jest przypadek
+            # brzegowy: przy facecie `Obiekt=NGC3623` cofnięcie zostawia widok 43 → 0 klatek
+            # (zmierzone na kopii żywej bazy), bo `facet_objects` JOIN-uje po `f.object_id`,
+            # a nagrobek z niego wypada. Ta sama figura od drugiej strony jest przy przywracaniu
+            # TYPOWA: klatka z obiektem nie należy już do perspektywy „Do przeglądu".
+            # Liczba jest POMIAREM (ile z zaznaczonych wróciło na przebudowany model), nie
+            # domysłem z liczników klingi - a recepta schodzi od stanu zawężenia, żeby nie
+            # obiecywać kliknięcia, które akurat tego zbioru nie odsłoni.
+            poza = len(zaznaczone) - wrocilo
+            msg += self._czlon_poza_widokiem(poza)
+        # RECEPTA ODWRACALNOŚCI SKŁADA SIĘ TUTAJ, NIE U WOŁAJĄCEGO (bramka pakietu, zarzut
+        # blokujący) - bo jej treść zależy od tego, czy cel został na ekranie, a to wie dopiero
+        # ten kod. Gdy klatki wyszły z widoku, zaznaczenie po `refresh()` jest puste, więc
+        # `_sync_object_actions` gasi całą kontrolkę „Obiekt": zdanie „przywrócisz: Obiekt → …"
+        # wskazywałoby wtedy napis wyszarzony w tej samej chwili. Wariant „potem" ustawia oba
+        # gesty w kolejności, w której da się je WYKONAĆ.
+        if odwracalny and gest.assigned:
+            msg += i18n.t("grid.sel.object_clear_undo_after" if poza else "grid.sel.object_clear_undo",
+                          menu=i18n.t("grid.sel.object"), action=i18n.t("grid.sel.object_restore"))
         # ZDANIE IDZIE PO ODŚWIEŻENIU, nie przed (adjudykacja recenzji S2b). `refresh()` kończy się
         # własnym `status_message` („Grid: N klatek…"), a odbiornikiem jest jeden `showMessage`
         # paska stanu — emisja przed odświeżeniem ginęła w tym samym obrocie pętli. Skutek był
@@ -2623,6 +2661,46 @@ class FramesView(QWidget):
         # emisja. Ta sama pułapka, co wyżej, tylko od drugiej strony: dwa `emit` w jednym obrocie
         # pętli trafiają w jeden `showMessage`, więc drugie wymazuje pierwsze (bramka pakietu 0810).
         self.status_message.emit(msg + ogon)
+
+    def _czlon_poza_widokiem(self, poza):
+        """Człon „poza widokiem: N" wraz z receptą - WSPÓLNY DLA OBU OSI zaznaczenia (FC-2).
+
+        Obie osie mają ten sam problem i to nie jest analogia: na osi obiektu gest wypycha cel przy
+        aktywnym facecie „Obiekt", a na osi żywotności klatki wypchnięcie jest wręcz REGUŁĄ, bo
+        wycofanie zdejmuje klatkę z kubełków roboczych. Dwie kopie tej frazy rozjechałyby się przy
+        pierwszej poprawce, a trzecia oś dołożyłaby trzecią (bramka pakietu, soczewka repo).
+
+        Pusty łańcuch przy zerze, żeby wołający nie musiał pytać - milczenie jest tu poprawną
+        odpowiedzią: zdanie o zerze klatek poza widokiem mówiłoby o czymś, co się nie stało."""
+        if not poza:
+            return ""
+        czlon = i18n.t("grid.sel.out_of_view", n=poza)
+        recepta = self._recepta_powrotu_do_widoku()
+        if recepta:
+            klucz, kwargi = recepta
+            czlon += i18n.t(klucz, **kwargi)
+        return czlon
+
+    def _recepta_powrotu_do_widoku(self):
+        """Którym JEDNYM gestem user odsłoni klatki wypchnięte z widoku - ze STANU zawężenia, nie
+        z domysłu (FC-2). Zwraca `(klucz, kwargi)` albo `None`, gdy nie ma czego doradzić.
+
+        RECEPTA MUSI BYĆ WYKONALNA, i to jest tu jedyne kryterium. „× Wyczyść zbiór" zdejmuje
+        facety i filtr, ale flag perspektywy NIE tyka (`_on_clear_selection` - są własnością
+        perspektywy), więc wskazanie go przy aktywnym trimie byłoby receptą, po której nic się nie
+        odsłoni. Repo dostało już tę klasę raz, przy komunikacie o konflikcie („zawęź do dwóch",
+        gdy zawężenie nic nie zmieniało).
+
+        PIERWSZEŃSTWO MA PERSPEKTYWA, GDY TRIM DZIAŁA - bo przełączenie perspektywy zeruje TAKŻE
+        facety i filtr (`_on_perspective`), a „Przegląd" nie niesie ani trimu, ani filtra. Przy obu
+        zawężeniach naraz jeden gest odsłania więc wszystko; wariant „zdejmij oba" kazałby zrobić
+        dwa gesty tam, gdzie wystarcza jeden (bramka pakietu, zarzut o nadmiarową receptę).
+        Gdy trimu nie ma, wygrywa gest WĘŻSZY: przycisk zbioru zostawia perspektywę na miejscu."""
+        if self._trim_active:
+            return "grid.sel.out_of_view_persp", {"perspective": i18n.t(_PRESET_LABELS[_PRESET_CZYSTY])}
+        if self._zbior_zawezony():
+            return "grid.sel.out_of_view_set", {"action": i18n.t("grid.sel.clear_set")}
+        return None
 
     def _przywroc_zaznaczenie(self, frame_ids):
         """Odłóż zaznaczenie po `frame_id` na PRZEBUDOWANYM modelu (R-S2b-3, człon pierwszy).
@@ -2648,16 +2726,20 @@ class FramesView(QWidget):
         Klatka, która po geście wypadła ze zbioru (perspektywa „Do przeglądu" pyta o `object_id
         IS NULL`, więc PRZYWRÓCONA klatka do niej nie należy), po prostu nie wraca — to uczciwe,
         bo jej na ekranie nie ma. Dla gestu przywracania jest to przypadek TYPOWY, nie brzegowy,
-        i dlatego zdanie po geście musi być pełne: bywa jedynym potwierdzeniem."""
+        i dlatego zdanie po geście musi być pełne: bywa jedynym potwierdzeniem.
+
+        ZWRACA, ILE WIERSZY REALNIE ODŁOŻONO - bo dopiero różnica wobec celu mówi, ile klatek gest
+        wypchnął z widoku (FC-2). Liczba jest tu darmowa (lista i tak powstaje), a policzona
+        u wołającego wymagałaby drugiego przebiegu po modelu."""
         sm = self.table.selectionModel()
         if sm is None or not frame_ids:
-            return
+            return 0
         chciane = set(frame_ids)
         numery = [i for i, row in enumerate(self.model._rows)
                   if isinstance(row, dict) and row.get("frame_id") in chciane
                   and "_group" not in row]
         if not numery:
-            return
+            return 0
         ostatnia = self.model.columnCount() - 1
         sel = QItemSelection()
         start = prev = numery[0]
@@ -2670,6 +2752,7 @@ class FramesView(QWidget):
         pierwszy = self.model.index(numery[0], 0)
         sm.setCurrentIndex(pierwszy, QItemSelectionModel.NoUpdate)
         self.table.scrollTo(pierwszy, QAbstractItemView.PositionAtCenter)
+        return len(numery)
 
     def _on_object_name(self, *, preselect_canon=None):
         """„Przypisz obiekt…" ze Zbiorów: nadpisuje WYŁĄCZNIE źródła słabe, przy zamrożonym stanie
@@ -2766,12 +2849,22 @@ class FramesView(QWidget):
         self._po_gescie_osi("grid.sel.object_named", gest, canon=canon)
 
     def _on_object_clear(self):
-        """„Cofnij przypisanie": zdejmuje wyłącznie to, co postawiła ręka albo ścieżka."""
+        """„Cofnij przypisanie": zdejmuje wyłącznie to, co postawiła ręka albo ścieżka.
+
+        ZDANIE NIESIE DROGĘ POWROTU (FC-9). Odwracalność tego gestu jest w aplikacji od R-S2b-3,
+        ale widać ją wyłącznie w tooltipie kontrolki („do przywrócenia: 46") i w pozycji menu za
+        kliknięciem - czyli nigdzie w chwili, w której się przydaje. Człon idzie TYLKO po udanym
+        zapisie: przy zerze mówiłby, jak cofnąć coś, co się nie stało. Etykiety cytujemy z KLUCZY
+        i18n, nie literałem - recepta wskazująca napis, którego na ekranie nie ma, jest gorsza
+        niż jej brak (klasa pilnowana bramką „surowego klucza").
+
+        SAMĄ RECEPTĘ SKŁADA `_po_gescie_osi`, a ten gest tylko deklaruje, że jest odwracalny -
+        bo jej treść zależy od tego, czy cel gestu został na ekranie (tam jest ten pomiar)."""
         ids = self._object_gesture_ids()
         if not ids:
             return
         gest = repo.clear_object_assignment(self.con, frame_ids=ids, now=self._now())
-        self._po_gescie_osi("grid.sel.object_cleared", gest)
+        self._po_gescie_osi("grid.sel.object_cleared", gest, odwracalny=True)
 
     def _on_object_restore(self):
         """„Przywróć cofnięte przypisanie" — DROGA POWROTU z masowego cofnięcia (R-S2b-3).
@@ -3032,6 +3125,16 @@ class FramesView(QWidget):
             parts.append(i18n.t("grid.criteria.only_missing_copy"))
         return " · ".join(parts)
 
+    def _zbior_zawezony(self):
+        """Czy zbiór trzyma coś, co ZDEJMUJE „× Wyczyść zbiór" - facety albo filtr zaawansowany.
+
+        JEDEN WŁAŚCICIEL TEGO PREDYKATU: karmi i uczciwy disabled przycisku, i receptę powrotu po
+        geście osi (FC-2). Dwie kopie rozjechałyby się dokładnie tak, jak rozjechała się rodzina
+        `only_*` - a tu cena rozjazdu jest wyższa niż wygaszony przycisk: zdanie po geście
+        wskazywałoby gest, który zawężenia nie zdejmuje. Flagi perspektywy są POZA tym predykatem
+        świadomie, bo ten przycisk ich nie tyka (`_on_clear_selection`)."""
+        return bool(self._facet_state) or self._filter_tree is not None
+
     # ---- reakcje ----
     def _on_filter(self, tree):
         self._filter_tree = tree
@@ -3096,6 +3199,11 @@ class FramesView(QWidget):
         # z trimem liczniki facetów i godziny portfela liczyły się na zbiorze BEZ przycięcia.
         trims = [t for t in (dup_ids, review_ids, gone_ids, lin_ids, sup_ids, ret_ids, mis_ids)
                  if t is not None]
+        # Czy trim perspektywy w ogóle działa - czytane z TEJ SAMEJ listy, którą refresh już zbudował
+        # (FC-2). Ósma kopia enumeracji `only_*` byłaby dokładnie tym, na czym ta rodzina wykłada się
+        # od `483df93`: siedem flag wpiętych w osiem miejsc i jedno pominięte. Karmi receptę powrotu
+        # po geście osi, która musi wiedzieć, czy „× Wyczyść zbiór" wystarczy.
+        self._trim_active = bool(trims)
         # NOWY set, NIGDY `&=`: przy pustym filtrze `filter_engine.run` zwraca uniwersum WPROST
         # (`filter_engine.py:171`), a to jest ZAPAMIĘTANY obiekt memoizacji (`_memo_leaf_fns`).
         # `&=` przycinało go W MIEJSCU, więc kolejne `universe_fn()` widziało już przycięty zbiór —
@@ -3123,7 +3231,7 @@ class FramesView(QWidget):
         self.rename_bar.set_actions_enabled(bool(base_ids))  # bliźniaczo dla renamu
         self.sel_bar.set_have_frames(bool(base_ids))         # pusty zbiór gasi „Wydaj na stół…" (F3R#2)
         self.sel_bar.set_criteria(self._describe_criteria()) # kryteria zbioru SŁOWAMI (F3)
-        self.sel_bar.set_clearable(bool(self._facet_state) or self._filter_tree is not None)
+        self.sel_bar.set_clearable(self._zbior_zawezony())
         self._reload_facet_rail(leaf_fn, universe_fn, trims, base_ids)   # listwa (F4)
         self._sync_staging_mutex()                           # staging jednej klingi wyłącza „Do stagingu" drugiej
         self._refresh_date_echo()                            # panel daty odbija świeże widoczne (echo warunkowe)
@@ -3304,7 +3412,11 @@ class FramesView(QWidget):
 
         Rozbicie idzie z `RetireGesture.skipped_breakdown` (JEDEN właściciel składu), nie z literału
         tutaj — ta sama lekcja, którą repo dostało już na osi obiektu: człon dołożony później
-        wpadał do sumy „z M" i znikał z rozbicia, czyli z jedynego miejsca, gdzie tłumaczył."""
+        wpadał do sumy „z M" i znikał z rozbicia, czyli z jedynego miejsca, gdzie tłumaczył.
+
+        CZŁON „POZA WIDOKIEM" TA SAMA FUNKCJA, CO NA OSI OBIEKTU (FC-2, bramka pakietu): tutaj
+        wypchnięcie celu jest wręcz REGUŁĄ, bo wycofanie zdejmuje klatkę z kubełków roboczych -
+        a zdanie, które „bywa jedynym śladem", milczało o tym, gdzie te klatki się podziały."""
         zaznaczone = [r["frame_id"] for r in self._selected_data_rows()]
         msg = i18n.t(klucz, done=gest.done, total=gest.done + gest.skipped)
         for sufiks, n in gest.skipped_breakdown:
@@ -3312,7 +3424,7 @@ class FramesView(QWidget):
                 msg += i18n.t(f"grid.sel.frame_skip_{sufiks}", n=n)
         if gest.done:
             self.refresh()
-            self._przywroc_zaznaczenie(zaznaczone)
+            msg += self._czlon_poza_widokiem(len(zaznaczone) - self._przywroc_zaznaczenie(zaznaczone))
         # ZDANIE PO ODŚWIEŻENIU I TYLKO JEDNO — repo dostało tę klasę już DWA RAZY na sąsiedniej
         # osi: `refresh()` kończy własnym `status_message`, a odbiornikiem obu jest jeden
         # `showMessage`, więc emisja przed odświeżeniem ginie w tym samym obrocie pętli zdarzeń.

@@ -1337,6 +1337,36 @@ CATALOG = {
     # o komplet PL/EN i istnienie klucza, NIE o parytet placeholderów z wołającym.
     "grid.sel.object_canons": {"pl": ": {canons}", "en": ": {canons}"},
     "grid.sel.object_canons_more": {"pl": " (+{n})", "en": " (+{n})"},
+    # FC-9: droga powrotu W ZDANIU, nie tylko w tooltipie kontrolki. Recepta cytuje etykiety
+    # kontrolki i pozycji menu, więc zmiana któregokolwiek napisu przenosi się tu sama.
+    # DWA WARIANTY, BO GEST BYWA WYKONALNY DOPIERO PO INNYM GEŚCIE (bramka pakietu, zarzut
+    # blokujący). Gdy cel wyszedł z widoku, zaznaczenie po `refresh()` jest puste, więc
+    # `_sync_object_actions` gasi CAŁĄ kontrolkę „Obiekt" - recepta bez słowa „potem" wskazywałaby
+    # wtedy napis wyszarzony w tej samej chwili, czyli produkowała dokładnie tę klasę, którą ta
+    # paczka zamyka. Kolejność w zdaniu jest kolejnością W CZASIE: najpierw odsłoń, potem przywróć.
+    "grid.sel.object_clear_undo": {
+        "pl": " · przywrócisz: {menu} → {action}",
+        "en": " · to undo this: {menu} → {action}"},
+    "grid.sel.object_clear_undo_after": {
+        "pl": " · potem przywrócisz: {menu} → {action}",
+        "en": " · then undo it: {menu} → {action}"},
+    # FC-2: gest bywa gestem, który WYPYCHA własny cel z widoku - przy facecie „Obiekt" cofnięcie
+    # zostawia widok pusty (zmierzone: 43 → 0 klatek), bo facet liczy po `f.object_id`. Klucz jest
+    # WSPÓLNY DLA OBU OSI zaznaczenia (obiekt i żywotność klatki): na osi klatki wypchnięcie celu
+    # jest wręcz regułą, bo wycofanie zdejmuje klatkę z kubełków roboczych. Trzecia oś ma odtąd
+    # gotową frazę zamiast trzeciej kopii.
+    "grid.sel.out_of_view": {
+        "pl": " · poza widokiem: {n}", "en": " · out of view: {n}"},
+    # DWIE RECEPTY, NIE TRZY - i to jest pomiar, nie skrót. Przełączenie perspektywy zeruje TAKŻE
+    # facety i filtr (`_on_perspective`), a „Przegląd" nie ma ani trimu, ani filtra, więc przy obu
+    # zawężeniach naraz jeden gest odsłania wszystko. Wariant „zdejmij oba" kazałby zrobić dwa
+    # gesty tam, gdzie wystarcza jeden. „× Wyczyść zbiór" zostaje tam, gdzie user ma ZACHOWAĆ
+    # perspektywę - jest wtedy węższy, czyli tańszy dla jego zbioru.
+    "grid.sel.out_of_view_set": {
+        "pl": " (odsłoni je „{action}”)", "en": " (reveal with \"{action}\")"},
+    "grid.sel.out_of_view_persp": {
+        "pl": " (odsłoni je perspektywa „{perspective}”)",
+        "en": " (reveal with the \"{perspective}\" perspective)"},
     "grid.sel.object_restore": {"pl": "Przywróć cofnięte przypisanie",
                                 "en": "Restore undone assignment"},
     "grid.sel.object_restored": {

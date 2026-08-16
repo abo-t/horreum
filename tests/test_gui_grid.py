@@ -2470,6 +2470,274 @@ def test_zdanie_po_cofnieciu_MOWI_co_zdjelo(obj_view):
     assert "NGC6960" not in msgs[-1] and "nie było czego cofać: 2" in msgs[-1]
 
 
+def _lighty_z_obiektami(con, kanony, start_id=11):
+    """Po jednym lighcie na kanon, nadanym RĘKĄ - kolejność klatek celowo inna niż alfabetyczna."""
+    for i, canon in enumerate(kanony):
+        oid, fid = 100 + i, start_id + i
+        con.execute("INSERT INTO object(id, canon, catalog, kind) "
+                    "VALUES (?,?,'NGC','deep_sky')", (oid, canon))
+        con.execute("INSERT INTO frame(id, kind, filetype, sha1_data, first_seen_at, "
+                    "object_id, object_source) VALUES (?, 'light', 'raw', ?, ?, ?, 'user')",
+                    (fid, f"sha-{fid}", NOW, oid))
+        con.execute("INSERT INTO header(frame_id, raw_json) VALUES (?, '{}')", (fid,))
+    con.commit()
+    return [start_id + i for i in range(len(kanony))]
+
+
+def test_para_gestow_CYTUJE_te_same_kanony_w_TYM_SAMYM_porzadku(obj_view):
+    """FC-7. Cofnięcie i przywrócenie mówiły o TYM SAMYM zbiorze obiektów, a pokazywały różne
+    trójki: klinga cofnięcia zbiera kanony w kolejności KLATEK, `queries.restore_targets` sortuje
+    `ORDER BY o.canon`. Przy siedmiu obiektach dawało to „NGC6960, NGC5194, NGC3623 (+4)" kontra
+    „IC434, LMC, Moon (+4)" - dwa zdania o jednej sprawie, nie do zestawienia wzrokiem.
+
+    Porządek jest własnością ZDANIA, więc rozstrzyga go `_lista_kanonow`, nie żadna z dwóch kling.
+
+    Falsyfikator: zamień `sorted(canons)` na `list(canons)` → zdanie cofnięcia wraca do porządku
+    klatek („NGC7000, NGC1499, NGC6888") i przestaje się zgadzać z przywróceniem."""
+    v, con = obj_view
+    ids = _lighty_z_obiektami(con, ["NGC7000", "NGC1499", "NGC6888", "NGC2237"])
+    v.refresh()
+    msgs = []
+    v.status_message.connect(msgs.append)
+
+    _zaznacz(v, ids)
+    v._on_object_clear()
+    po_cofnieciu = msgs[-1]
+    _zaznacz(v, ids)
+    v._on_object_restore()
+    po_przywroceniu = msgs[-1]
+
+    trojka = "NGC1499, NGC2237, NGC6888 (+1)"      # alfabetycznie, nie w kolejności klatek
+    assert trojka in po_cofnieciu, po_cofnieciu
+    assert trojka in po_przywroceniu, po_przywroceniu
+
+
+def test_zdanie_po_cofnieciu_PODAJE_droge_powrotu(obj_view):
+    """FC-9. Odwracalność gestu jest w aplikacji od R-S2b-3, ale w chwili, w której się przydaje,
+    była niewidoczna: licznik „do przywrócenia: 46" siedzi w tooltipie kontrolki, a pozycja menu
+    za kliknięciem. Recepta idzie więc do zdania - i cytuje ETYKIETY z katalogu i18n, żeby zmiana
+    napisu nie zostawiła w komunikacie wskazania, którego na ekranie nie ma.
+
+    Gest, który NICZEGO nie zdjął, recepty nie dostaje: mówiłaby, jak cofnąć coś, co się nie stało.
+
+    Falsyfikator: zdejmij człon `object_clear_undo` z `_po_gescie_osi` → pierwsza asercja
+    czerwienieje."""
+    from horreum.gui import i18n
+    v, con = obj_view
+    v.refresh()
+    _zaznacz(v, [1, 2])
+    msgs = []
+    v.status_message.connect(msgs.append)
+
+    v._on_object_clear()
+    assert i18n.t("grid.sel.object_restore") in msgs[-1], msgs[-1]
+    assert i18n.t("grid.sel.object") in msgs[-1]
+    # Cel ZOSTAŁ na ekranie (brak zawężenia), więc gest jest wykonalny OD RAZU - i zdanie nie
+    # każe czekać na inny gest. Wariant „potem" ma własną bramkę niżej.
+    assert "potem" not in msgs[-1], msgs[-1]
+
+    msgs.clear()
+    v._on_object_clear()                       # drugi raz: nie ma czego cofać ⇒ nie ma czego cofać wstecz
+    assert i18n.t("grid.sel.object_restore") not in msgs[-1], msgs[-1]
+
+
+def test_gest_MOWI_ze_wypchnal_wlasny_cel_z_widoku_I_JAK_go_odzyskac(obj_view):
+    """FC-2. Cofnięcie przy aktywnym facecie „Obiekt" zostawia widok pusty - `facet_objects`
+    JOIN-uje po `f.object_id`, a nagrobek z niego wypada (zmierzone na kopii żywej bazy:
+    43 → 0 klatek). Cel gestu wychodzi z widoku dokładnie w chwili, w której człowiek patrzy,
+    czy gest się udał.
+
+    RECEPTA JEST TU WYKONYWANA, NIE TYLKO CYTOWANA (bramka pakietu, soczewka obca): test klika
+    to, co zdanie każe kliknąć, i sprawdza, że klatki wracają. Bramka pytająca wyłącznie o TREŚĆ
+    komunikatu przeszłaby także dla recepty, która nic nie odsłania - czyli dla dokładnie tej wady,
+    którą ta paczka zamyka.
+
+    Falsyfikator: zdejmij człon `out_of_view` z `_czlon_poza_widokiem` → zdanie znów potwierdza
+    zapis na klatkach, których na ekranie nie ma, i milczy o tym, gdzie się podziały."""
+    from horreum.gui import i18n
+    v, con = obj_view
+    v.apply_object_facet([(5, "NGC6960")])         # zawężenie do obiektu, który zaraz zdejmiemy
+    _zaznacz(v, [1, 2])
+    msgs = []
+    v.status_message.connect(msgs.append)
+    v._on_object_clear()
+
+    widoczne = {r["frame_id"] for r in v.model._rows if isinstance(r, dict) and "frame_id" in r}
+    assert not ({1, 2} & widoczne), "facet nie wypchnął nagrobków - test nie odtwarza defektu"
+    assert "poza widokiem: 2" in msgs[-1], msgs[-1]
+    assert i18n.t("grid.sel.clear_set") in msgs[-1], msgs[-1]
+    # …i to jest recepta WĘŻSZA, nie perspektywa: trimu tu nie ma, więc zbiór usera ma zostać.
+    assert i18n.t("perspective.review") not in msgs[-1], msgs[-1]
+    # Droga powrotu ustawiona w kolejności, w której da się ją WYKONAĆ: kontrolka „Obiekt" jest
+    # w tej chwili wygaszona (zaznaczenie puste), więc zdanie mówi „potem", nie „teraz".
+    assert "potem" in msgs[-1], msgs[-1]
+    assert not v.sel_bar.btn_object.isEnabled(), "kontrolka żywa - bramka nie odtwarza sytuacji"
+
+    v._on_clear_selection()                        # …wykonaj receptę
+    widoczne = {r["frame_id"] for r in v.model._rows if isinstance(r, dict) and "frame_id" in r}
+    assert {1, 2} <= widoczne, "recepta wykonana, a klatki się nie odsłoniły"
+
+
+def test_recepta_powrotu_NIE_wskazuje_gestu_ktory_zawezenia_NIE_zdejmie(obj_view):
+    """GRANICA FC-2 - recepta musi być WYKONALNA. „× Wyczyść zbiór" zdejmuje facety i filtr,
+    ale flagi perspektywy zostawia (`_on_clear_selection`), więc w perspektywie z trimem
+    wskazanie tego przycisku byłoby receptą, po której nic się nie odsłoni. Repo dostało tę klasę
+    już raz, przy komunikacie o konflikcie („zawęź do dwóch", gdy zawężenie nic nie dawało).
+
+    Przypadek jest TYPOWY, nie brzegowy: klatka po przywróceniu ma obiekt, więc do „Do przeglądu"
+    nie należy - zdanie po geście bywa wtedy jedynym potwierdzeniem, że zapis się udał.
+
+    Falsyfikator: zwróć w `_recepta_powrotu_do_widoku` zawsze `..._set` → asercja o nieobecności
+    przycisku czerwienieje."""
+    from horreum.gui import i18n
+    v, con = obj_view
+    v.refresh()
+    _zaznacz(v, [1, 2])
+    v._on_object_clear()
+
+    v.apply_perspective("Do przeglądu")            # trim, którego przycisk zbioru nie tyka
+    _zaznacz(v, [1, 2])
+    msgs = []
+    v.status_message.connect(msgs.append)
+    v._on_object_restore()
+
+    assert "poza widokiem: 2" in msgs[-1], msgs[-1]
+    assert i18n.t("perspective.review") in msgs[-1], msgs[-1]
+    assert i18n.t("grid.sel.clear_set") not in msgs[-1], msgs[-1]
+
+    v.apply_perspective("Przegląd")                # …wykonaj receptę
+    widoczne = {r["frame_id"] for r in v.model._rows if isinstance(r, dict) and "frame_id" in r}
+    assert {1, 2} <= widoczne, "recepta wykonana, a klatki się nie odsłoniły"
+
+
+def test_przy_DWOCH_zawezeniach_recepta_podaje_JEDEN_gest_ktory_zdejmuje_oba(obj_view):
+    """Perspektywa z trimem PLUS facet - układ, w którym pierwsza wersja tej paczki kazała zrobić
+    dwa gesty. Przełączenie perspektywy przepisuje także facety i filtr (`_on_perspective`),
+    a „Przegląd" nie niesie ani trimu, ani filtra, więc jeden gest odsłania wszystko.
+
+    Bramka pilnuje przy okazji, że recepta nie proponuje wtedy przycisku zbioru: on zdejmuje
+    połowę zawężenia, więc po jego kliknięciu klatki DALEJ by nie wróciły.
+
+    Falsyfikator: w `_recepta_powrotu_do_widoku` postaw `_zbior_zawezony()` przed `_trim_active`
+    → recepta wraca do wariantu, który nie odsłania."""
+    from horreum.gui import i18n
+    v, con = obj_view
+    v.refresh()
+    _zaznacz(v, [1, 2])
+    v._on_object_clear()
+
+    v.apply_perspective("Do przeglądu")
+    # Facet NA WIERZCHU trimu, i celowo po INNEJ osi niż obiekt: gdyby zawężał po obiekcie,
+    # nagrobek (object_id NULL) wypadłby z widoku już przed gestem i układu by nie było.
+    v._facet_state = {"kind": {"in": [["light", "light"]]}}
+    v.refresh()
+    _zaznacz(v, [1, 2])
+    assert len(v._selected_data_rows()) == 2, "oba zawężenia zjadły cel - bramka nie odtwarza układu"
+    msgs = []
+    v.status_message.connect(msgs.append)
+    v._on_object_restore()
+
+    assert "poza widokiem: 2" in msgs[-1], msgs[-1]
+    assert i18n.t("perspective.review") in msgs[-1], msgs[-1]
+    assert i18n.t("grid.sel.clear_set") not in msgs[-1], msgs[-1]
+
+    v.apply_perspective("Przegląd")
+    widoczne = {r["frame_id"] for r in v.model._rows if isinstance(r, dict) and "frame_id" in r}
+    assert {1, 2} <= widoczne, "jeden gest miał zdjąć OBA zawężenia"
+
+
+def test_liczba_poza_widokiem_liczy_CZESC_zaznaczenia_nie_wszystko(obj_view):
+    """Liczba ma być POMIAREM, nie sygnałem zero-jedynkowym. Bramka wytwarza układ, w którym część
+    zaznaczenia zostaje na ekranie, a część wypada - błędne liczenie (np. „wszystko albo nic"
+    czy pomyłka o markery grup) daje wtedy inną liczbę, a przy pełnym wypchnięciu przechodzi.
+
+    Klatka 3 ma obiekt z NAGŁÓWKA, więc gest jej nie tyka i zostaje w facecie; nagrobki 1 i 2
+    z niego wypadają.
+
+    Falsyfikator: policz `poza` jako `len(zaznaczone)` zamiast różnicy → asercja o „: 2"
+    czerwienieje na „: 3"."""
+    v, con = obj_view
+    v.apply_object_facet([(5, "NGC6960")])
+    _zaznacz(v, [1, 2, 3])
+    msgs = []
+    v.status_message.connect(msgs.append)
+    v._on_object_clear()
+
+    widoczne = {r["frame_id"] for r in v.model._rows if isinstance(r, dict) and "frame_id" in r}
+    assert 3 in widoczne and not ({1, 2} & widoczne), "układ mieszany nie powstał"
+    assert "poza widokiem: 2" in msgs[-1], msgs[-1]
+
+
+def test_KAZDA_recepta_powrotu_ma_klucz_w_katalogu(obj_view):
+    """BRAMKA KLASY, nie sztuki (bramka pakietu, soczewka repo). Recepty wracają jako KLUCZE
+    z gałęzi `_recepta_powrotu_do_widoku`, a kolektor bramki i18n zbiera wyłącznie literały
+    podane wprost do `i18n.t(...)` - więc literówka w którejkolwiek gałęzi renderuje na pasku
+    stanu surowy klucz i żadna istniejąca bramka tego nie łapie.
+
+    Falsyfikator: przekręć literę w którymkolwiek zwrocie `_recepta_powrotu_do_widoku`
+    → ten test czerwienieje, zanim zobaczy to użytkownik."""
+    from horreum.gui.i18n_catalog import CATALOG
+    v, _ = obj_view
+    warianty = [(False, False), (True, False), (False, True), (True, True)]
+    zebrane = set()
+    for trim, zbior in warianty:
+        v._trim_active = trim
+        v._facet_state = {"object": {"in": [[5, "NGC6960"]]}} if zbior else {}
+        wynik = v._recepta_powrotu_do_widoku()
+        if wynik is None:
+            assert not trim and not zbior, "brak recepty przy realnym zawężeniu"
+            continue
+        klucz, kwargi = wynik
+        assert klucz in CATALOG, f"recepta pokazałaby surowy klucz: {klucz}"
+        assert i18n_t_bez_wyjatku(klucz, kwargi) != klucz
+        zebrane.add(klucz)
+    assert len(zebrane) == 2, f"gałęzie recepty zeszły się do: {zebrane}"
+
+
+def i18n_t_bez_wyjatku(klucz, kwargi):
+    from horreum.gui import i18n
+    return i18n.t(klucz, **kwargi)
+
+
+def test_OS_ZYWOTNOSCI_tez_mowi_gdzie_podzialy_sie_klatki(obj_view, monkeypatch):
+    """Ten sam człon na DRUGIEJ osi zaznaczenia (bramka pakietu, soczewka repo). Tu wypchnięcie
+    celu nie jest przypadkiem brzegowym, tylko REGUŁĄ: wycofanie zdejmuje klatkę z kubełków
+    roboczych i z perspektywy „Zniknięte", czyli dokładnie z widoku, w którym się jej szukało.
+    Zdanie po geście „bywa jedynym śladem, że gest się odbył" - i milczało o tym, gdzie klatka
+    się podziała.
+
+    Falsyfikator: zdejmij `_czlon_poza_widokiem` z `_po_gescie_klatki` → asercja czerwienieje,
+    a zdanie wraca do potwierdzania zapisu na klatce, której na ekranie nie ma."""
+    from PySide6.QtWidgets import QMessageBox
+    from horreum.gui import i18n
+    v, con = obj_view
+    con.execute("UPDATE location SET present = 0 WHERE frame_id = 3")   # plik zniknął z dysku
+    con.commit()
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+
+    v.apply_perspective(grid_mod.PRESET_VANISHED)
+    _zaznacz(v, [3])
+    assert len(v._selected_data_rows()) == 1, "klatka nie weszła do perspektywy - bramka nie odtwarza układu"
+    msgs = []
+    v.status_message.connect(msgs.append)
+    v._on_frame_retire()
+
+    assert con.execute("SELECT retired_at FROM frame WHERE id = 3").fetchone()[0] is not None
+    assert "poza widokiem: 1" in msgs[-1], msgs[-1]
+    assert i18n.t("perspective.review") in msgs[-1], msgs[-1]
+
+
+def test_PRESET_wskazywany_przez_recepte_jest_naprawde_bez_zawezenia():
+    """Recepta obiecuje, że „Przegląd" odsłoni WSZYSTKO. Obietnica stoi na tym, że ten preset nie
+    niesie ani filtra, ani żadnej flagi `only_*` - a rodzina `only_*` ma w tym repo udokumentowaną
+    historię rozjazdów. Bramka pilnuje przesłanki, nie skutku.
+
+    Falsyfikator: dopisz `only_review: True` do wskazywanego presetu → test czerwienieje."""
+    spec = grid_mod.PRESETS[grid_mod._PRESET_CZYSTY]
+    assert spec.get("filter") is None, "preset recepty niesie filtr"
+    assert not [k for k in spec if k.startswith("only_")], f"preset recepty niesie trim: {spec}"
+
+
 def test_przywrocenie_ODDAJE_obiekt_JEDNYM_gestem_po_masowym_cofnieciu(obj_view):
     """DROGA POWROTU (R-S2b-3, człon trzeci) — pełny przepływ przez POWIERZCHNIĘ: cofnij masowo,
     a potem przywróć jednym kliknięciem. Składa się z członem pierwszym: zaznaczenie po cofnięciu

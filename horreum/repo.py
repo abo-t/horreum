@@ -1464,7 +1464,12 @@ class ObjectGesture:
         powtórzyłaby go po raz kolejny — dlatego składanie ma dom w klasie, nie u wołających.
 
         Kanony sklejają się BEZ POWTÓRZEŃ i w porządku pierwszego wystąpienia: to nazwy do zdania,
-        a nie zbiór do liczenia — powtórzony kanon w komunikacie wygląda jak dwa różne obiekty."""
+        a nie zbiór do liczenia - powtórzony kanon w komunikacie wygląda jak dwa różne obiekty.
+        ⛔ PORZĄDEK DO ZDANIA ROZSTRZYGA `gui.grid._lista_kanonow`, nie ta metoda: tutaj zostaje
+        wyłącznie deduplikacja. Dwie klingi tej samej pary gestów zbierają nazwy inaczej (ta -
+        w kolejności klatek, `restore_targets` - alfabetycznie), więc obcięcie „trzy plus reszta"
+        pokazywało rozłączne trójki jednego zbioru; naprawa siedzi w warstwie zdania i sortowanie
+        tutaj byłoby jej drugą siedzibą (FC-7)."""
         if not isinstance(inny, ObjectGesture):
             return NotImplemented
         kanony = list(self.canons) + [c for c in inny.canons if c not in self.canons]

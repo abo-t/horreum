@@ -562,3 +562,344 @@ def test_start_aplikacji_POKAZUJE_OKNO_ZANIM_czyta_baze(qapp, tmp_path, monkeypa
     finally:
         for w in okna:
             w.close()
+
+
+# ═════════════════════════ FH-2 — ZDANIE PO GEŚCIE I JEGO NOŚNIK
+
+
+def _pokazane(win):
+    """Okno z REALNĄ geometrią i WYCZERPANĄ kolejką zdarzeń.
+
+    Elizja mierzy się do szerokości paska, a ta przed `show()` jest zastępcza (domyślne 640 px) -
+    bramka bez tego mierzyłaby okno, którego nie ma.
+
+    ⚠ DWA OBROTY PĘTLI, NIE JEDEN, i to jest pomiar, nie ostrożność: montaż widoków zostawia
+    OPÓŹNIONE komunikaty (planer melduje „baza nie ma stanowiska z pozycją GPS…"), które docierają
+    dopiero w drugim obrocie. Pierwsza wersja tych bramek przyjmowała jeden - i pierwszy raport
+    testu gasła recepta, którą przed chwilą postawiła, bo cudzy komunikat wchodził w środek.
+    Ta sama pułapka przewróciła wcześniej sondę pomiarową na platformie natywnej."""
+    win.resize(1400, 800)
+    win.show()
+    QApplication.processEvents()
+    QApplication.processEvents()
+    return win
+
+
+def test_dlugi_raport_dostaje_WIELOKROPEK_i_pelna_tresc_w_podpowiedzi(qapp, tmp_path):
+    """FH-2, człon (a). `QStatusBar` przy nadmiarze tnie BEZ znaku i w środku słowa: zmierzone
+    zdanie po geście osi miało 252 znaki = 1336 px przy 1459 px dostępnych (przy skalowaniu 125 %
+    1695/1672), a na zrzucie kończyło się na „…Przywróć c" - czyli wyglądało na kompletne.
+
+    Elizja nie odzyskuje treści i nie ma udawać, że odzyskuje; zdejmuje CICHE kłamstwo, a pełne
+    zdanie oddaje podpowiedź. Bramka pyta o oba człony naraz, bo sam wielokropek bez tooltipu
+    zamieniłby ciche ucięcie na jawne, ale dalej bezpowrotne.
+
+    Falsyfikator: zwróć w `_zwezone` sam `msg` → obie asercje czerwienieją."""
+    win = _pokazane(MainWindow(_seeded_db(tmp_path)))
+    try:
+        dlugie = "Cofnięto przypisanie na 229 z 711 klatek" + " · kalibracja: 6" * 40
+        win._flash(dlugie)
+        widoczne = win.statusBar().currentMessage()
+
+        assert widoczne != dlugie and len(widoczne) < len(dlugie), "raport nie został przycięty"
+        assert widoczne.endswith("…"), f"przycięcie bez znaku - ciche kłamstwo: {widoczne!r}"
+        assert win.statusBar().toolTip() == dlugie, "pełna treść przepadła bezpowrotnie"
+
+        # …a zdanie, które się MIEŚCI, zostaje nietknięte - PODPOWIEDŹ ZOSTAJE MIMO TO. Bramka
+        # pakietu (obie soczewki) wskazała trzy drogi, którymi treść ginęła przy warunkowym
+        # tooltipie: gałąź „za wąsko na elizję", zwężenie okna w trakcie życia komunikatu
+        # i recepta przezroczysta dla myszy. Podpowiedź bezwarunkowa zdejmuje wszystkie trzy.
+        win._flash("Nazwano 12 z 12 klatek: NGC 7000")
+        assert win.statusBar().currentMessage() == "Nazwano 12 z 12 klatek: NGC 7000"
+        assert win.statusBar().toolTip() == "Nazwano 12 z 12 klatek: NGC 7000"
+    finally:
+        win.close()
+
+
+def test_recepta_ma_WLASNY_nosnik_i_ZABIERA_szerokosc_raportowi(qapp, tmp_path):
+    """FH-2, człon (b) WRAZ z pomiarem, który wiąże go z członem (a). `addPermanentWidget` zabiera
+    szerokość jedynemu `showMessage`, więc sam rozdział sprawiłby, że raport ucina się WCZEŚNIEJ
+    niż przed naprawą - dlatego elizja liczy się PONOWNIE, gdy recepta wchodzi na pasek.
+
+    Falsyfikator: zdejmij ponowny `showMessage` z `_pokaz_recepte` → raport zostaje przycięty do
+    zapasu SPRZED recepty i wystaje pod nią, czyli wraca ucięcie bez znaku."""
+    win = _pokazane(MainWindow(_seeded_db(tmp_path)))
+    try:
+        dlugie = "Cofnięto przypisanie na 229 z 711 klatek" + " · kalibracja: 6" * 40
+        win._flash(dlugie)
+        bez_recepty = win.statusBar().currentMessage()
+
+        recepta = "potem przywrócisz: Obiekt → Przywróć cofnięte przypisanie"
+        win._pokaz_recepte(recepta)
+        assert win.recipe_label.isVisible(), "recepta nie ma nośnika"
+        assert "Przywróć cofnięte przypisanie" in win.recipe_label.text()
+        assert len(win.statusBar().currentMessage()) < len(bez_recepty), \
+            "raport nie oddał miejsca recepcie - przy realnym zdaniu wystawałby pod nią"
+        # PODPOWIEDŹ PASKA NIESIE OBA CZŁONY, a recepta nie ma własnej: jest przezroczysta dla
+        # myszy (uczciwy „nieklikalny"), więc `QEvent::ToolTip` do niej nie dociera i własna
+        # podpowiedź byłaby na niej martwa - bramka pakietu, soczewka repo.
+        assert win.statusBar().toolTip() == f"{dlugie} · {recepta}", "pełne zdanie przepadło"
+        assert win.recipe_label.toolTip() == "", "martwa podpowiedź udaje spełnioną obietnicę"
+    finally:
+        win.close()
+
+
+def test_recepta_NIE_KLIKA_dopoki_niczego_nie_wykonuje(qapp, tmp_path):
+    """FH-2, granica wariantu „e". Nośnik jest `QToolButton`em, żeby dopięcie akcji było później
+    jedną zmianą - ale DZIŚ nie prowadzi nigdzie, więc nie ma prawa zachowywać się jak przycisk.
+    Kontrolka, która podnosi się pod kursorem i nic nie robi, kłamie bardziej niż etykieta.
+
+    Falsyfikator: zdejmij `WA_TransparentForMouseEvents` przed podpięciem akcji → bramka
+    czerwienieje i przypomina, że obie połowy wariantu „e" idą razem."""
+    from PySide6.QtWidgets import QToolButton
+    win = MainWindow(_seeded_db(tmp_path))
+    try:
+        assert isinstance(win.recipe_label, QToolButton), "nośnik nie jest gotowy pod wariant e"
+        assert win.recipe_label.testAttribute(Qt.WA_TransparentForMouseEvents), \
+            "przycisk bez akcji ma być nieklikalny"
+        assert win.recipe_label.focusPolicy() == Qt.NoFocus, "recepta nie jest przystankiem Taba"
+        # …i ma WYGLĄDAĆ na tekst, nie na przycisk. Firsthand zmierzył ramkę 31,31,31 z gradientem
+        # 79-81 na kontrolce całkowicie bezwładnej: wypukłość obiecywała klik, którego nie ma.
+        assert win.recipe_label.autoRaise(), "recepta rysuje się jako przycisk, którym nie jest"
+        # Własność roli byłaby tu MARTWA (selektor motywu to `QLabel[role=…]`), a gdyby ożyła,
+        # zeszłaby recepcie do 3,67:1 - poniżej progu 4,5:1. Nie zostawiamy jej naładowanej.
+        assert win.recipe_label.property("role") is None, "martwa własność roli czeka na ożywienie"
+    finally:
+        win.close()
+
+
+def test_recepta_STOI_PRZY_RAPORCIE_a_faza_przy_uchwycie(qapp, tmp_path):
+    """FH-2, kolejność na belce. Widżety stałe idą OD LEWEJ w kolejności dodawania, więc faza
+    dodana pierwsza wchodziła MIĘDZY raport a receptę - dwa człony jednego zdania rozdzielone
+    komunikatem trzeciej sprawy (firsthand, `K_faza.png`). Recepta ma się kleić do swojego raportu.
+
+    Falsyfikator: zamień kolejność `addPermanentWidget` → recepta odjeżdża na prawo od fazy."""
+    win = _pokazane(MainWindow(_seeded_db(tmp_path)))
+    try:
+        win._flash("Cofnięto przypisanie na 2 z 2 klatek")
+        win._pokaz_recepte("przywrócisz: Obiekt → Przywróć cofnięte przypisanie")
+        win._say_phase("Odświeżam widoki po etapie…")
+        QApplication.processEvents()
+
+        assert win.recipe_label.x() < win.phase_label.x(), \
+            "faza rozdziela raport od jego recepty"
+    finally:
+        win.close()
+
+
+def test_recepta_GASNIE_razem_ze_swoim_raportem_I_przy_cudzym(qapp, tmp_path):
+    """FH-2. Recepta należy do JEDNEGO gestu: zdanie po nim znika po 5 s, a instrukcja powrotu
+    wisząca dłużej mówiłaby o czymś, po czym nie ma już śladu na ekranie. Oba wyjścia mają
+    właściciela - wygaśnięcie łapie `messageChanged` z pustym łańcuchem, cudzy raport gasi ją
+    w `_flash`.
+
+    Falsyfikator: zdejmij `_ustaw_recepte("")` z `_flash` → recepta przeżywa cudzy komunikat."""
+    win = _pokazane(MainWindow(_seeded_db(tmp_path)))
+    try:
+        win._flash("Cofnięto przypisanie na 2 z 2 klatek")
+        win._pokaz_recepte("przywrócisz: Obiekt → Przywróć cofnięte przypisanie")
+        assert win.recipe_label.isVisible()
+
+        win.statusBar().clearMessage()                 # …to samo robi timeout 5 s
+        assert not win.recipe_label.isVisible(), "recepta przeżyła swój raport"
+        assert win.statusBar().toolTip() == ""
+
+        win._flash("Cofnięto przypisanie na 2 z 2 klatek")
+        win._pokaz_recepte("przywrócisz: Obiekt → Przywróć cofnięte przypisanie")
+        win._flash("Grid: 16 901 klatek, 0 kolumn-keywordów")
+        assert not win.recipe_label.isVisible(), "recepta przeżyła CUDZY raport"
+    finally:
+        win.close()
+
+
+def test_gest_osi_dowozi_recepte_NA_PASEK_przez_gospodarza(qapp, tmp_path):
+    """SZEW, nie widok. Rozdział członów robi `FramesView`, a nośnik trzyma `MainWindow` - bramki
+    po obu stronach przechodziłyby także wtedy, gdyby sygnał nie był podpięty. Ten test emituje
+    kanał recepty z gridu i patrzy na PASEK OKNA.
+
+    Falsyfikator: zdejmij `grid.status_recipe.connect(...)` z `_mount_views` → recepta nigdzie nie
+    dojeżdża, choć oba końce działają."""
+    win = _pokazane(MainWindow(_seeded_db(tmp_path, object_axis=True)))
+    try:
+        win._show_view(NAV_ZBIORY)
+        win.grid_view.status_recipe.emit("przywrócisz: Obiekt → Przywróć cofnięte przypisanie")
+        assert win.recipe_label.isVisible()
+        assert "Przywróć cofnięte przypisanie" in win.recipe_label.text()
+    finally:
+        win.close()
+
+
+def test_recepta_PRZEZYWA_otwarcie_menu_ktore_sama_wskazuje(qapp, tmp_path):
+    """FH-2, pułapka ZMIERZONA w bramce pakietu (soczewka architektury, hipoteza potwierdzona).
+
+    Każda pozycja menu wysyła przy podświetleniu `QStatusTipEvent`, a pozycja bez własnego opisu -
+    a takich w tym repo są wszystkie, `setStatusTip` nie pada ani razu - wysyła go PUSTEGO. Okno
+    przepisuje to na `showMessage("")`, pasek melduje `messageChanged("")` i wygląda to identycznie
+    jak timeout. Zmierzone przed naprawą: gest → `QStatusTipEvent("")` → recepta gaśnie.
+
+    Trafiało to najdotkliwiej w receptę „Obiekt ▾ → Przywróć cofnięte przypisanie", bo jej
+    WYKONANIE zaczyna się od otwarcia tego właśnie menu: instrukcja znikała w trakcie celowania
+    w pozycję, którą nazywa. Otwarty popup jest jedynym dostępnym rozróżnieniem - stan paska mają
+    te dwa zdarzenia identyczny.
+
+    Falsyfikator: zdejmij warunek `activePopupWidget()` z `_on_status_changed` → recepta gaśnie
+    przy pierwszym dotknięciu menu, choć gest wciąż czeka na dokończenie."""
+    from PySide6.QtGui import QStatusTipEvent
+    from PySide6.QtWidgets import QMenu
+
+    win = _pokazane(MainWindow(_seeded_db(tmp_path)))
+    popup = QMenu(win)
+    try:
+        win._flash("Cofnięto przypisanie na 2 z 2 klatek")
+        win._pokaz_recepte("przywrócisz: Obiekt → Przywróć cofnięte przypisanie")
+        assert win.recipe_label.isVisible()
+
+        popup.addAction("Przywróć cofnięte przypisanie")
+        popup.popup(win.mapToGlobal(win.rect().center()))
+        QApplication.processEvents()
+        assert QApplication.activePopupWidget() is not None, "popup się nie otworzył - brak układu"
+
+        QApplication.sendEvent(win, QStatusTipEvent(""))
+        QApplication.processEvents()
+        assert win.recipe_label.isVisible(), "recepta zgasła w trakcie otwierania własnego menu"
+
+        # …a warunek jest WĄSKI: to samo zdarzenie BEZ otwartego menu gasi receptę jak dawniej.
+        # Bez tej połowy bramka przepuściłaby „wyłączmy gaszenie w ogóle", czyli receptę wiszącą
+        # nad nieistniejącym raportem.
+        popup.close()
+        QApplication.processEvents()
+        assert QApplication.activePopupWidget() is None, "menu się nie zamknęło - brak układu"
+        win._flash("Cofnięto przypisanie na 2 z 2 klatek")
+        win._pokaz_recepte("przywrócisz: Obiekt → Przywróć cofnięte przypisanie")
+        QApplication.sendEvent(win, QStatusTipEvent(""))
+        QApplication.processEvents()
+        assert not win.recipe_label.isVisible(), "warunek popupu wyłączył gaszenie w ogóle"
+    finally:
+        popup.deleteLater()
+        win.close()
+
+
+def test_recepta_MA_SUFIT_szerokosci_i_nie_zjada_pola_raportu(qapp, tmp_path):
+    """FH-2. Sufit recepty jest strażnikiem na przyszłość, nie ograniczeniem stanu dzisiejszego:
+    bez niego długość instrukcji zależy wyłącznie od zawartości katalogu i18n, więc dłuższa
+    etykieta menu w kolejnym tłumaczeniu zjadłaby pole raportu bez żadnego sygnału (bramka
+    pakietu, soczewka architektury).
+
+    Falsyfikator: zdejmij elizję z `_ustaw_recepte` → widżet rośnie z tekstem bez granicy."""
+    from horreum.gui.app import _PASEK_UDZIAL_RECEPTY
+    win = _pokazane(MainWindow(_seeded_db(tmp_path)))
+    try:
+        win._flash("Cofnięto przypisanie na 2 z 2 klatek")
+        win._pokaz_recepte("przywrócisz: " + "bardzo długa etykieta pozycji menu " * 20)
+
+        sufit = int(win.statusBar().width() * _PASEK_UDZIAL_RECEPTY)
+        assert win.recipe_label.sizeHint().width() <= sufit + 4, "recepta przebiła swój sufit"
+        assert win.recipe_label.text().endswith("…"), "przycięcie recepty bez znaku"
+        assert win.statusBar().currentMessage(), "raport zniknął z paska przez szerokość recepty"
+    finally:
+        win.close()
+
+
+# ═════════════════════════ W-3 — KOLEJKA PRZEGLĄDU NIE REZERWUJE PUSTKI
+
+
+def test_kolejka_przegladu_ZWIJA_SIE_do_tresci_z_sufitem(qapp, tmp_path):
+    """W-3. Lista dostawała 340 px ramki na 80 px treści (76 % pustki), stojąc nad tabelą
+    „Biblioteka", której tego pionu brakowało. Bliźniacza lista Porządków zamknęła ten sam dług
+    pomiarem (`tasks._fit_task_list`) - tu dochodzi SUFIT, bo kolejka rośnie do ~45 pozycji
+    i dopasowanie bez niego zabrałoby bibliotekę w całości.
+
+    Falsyfikator: zdejmij `_dopasuj_kolejke()` z `_load_review` → wysokość wraca do sufitu widżetu
+    (bardzo duża liczba) i pierwsza asercja czerwienieje."""
+    from horreum.gui.app import _KOLEJKA_SUFIT_WIERSZY
+    win = _pokazane(MainWindow(_seeded_db(tmp_path, object_axis=True)))
+    try:
+        v = win.object_view
+        v.refresh()
+        lista = v.review
+        n = lista.count()
+        assert n, "kolejka pusta - bramka nie ma czego mierzyć"
+
+        def _wysokosci(ile):
+            return sum(lista.sizeHintForIndex(lista.model().index(i, 0)).height()
+                       for i in range(min(ile, lista.count())))
+
+        assert lista.maximumHeight() == _wysokosci(_KOLEJKA_SUFIT_WIERSZY) + 2 * lista.frameWidth(), \
+            "lista nie zeszła do wysokości swojej treści"
+
+        # …a SUFIT jest realny: lista dłuższa niż próg przestaje rosnąć i dostaje przewijanie
+        for i in range(_KOLEJKA_SUFIT_WIERSZY * 2):
+            lista.addItem(QListWidgetItem(f"dopisana pozycja {i}"))
+        v._dopasuj_kolejke()
+        assert lista.count() > _KOLEJKA_SUFIT_WIERSZY
+        assert lista.maximumHeight() == _wysokosci(_KOLEJKA_SUFIT_WIERSZY) + 2 * lista.frameWidth(), \
+            "sufit nie zadziałał - długa kolejka zabiera pion bibliotece"
+    finally:
+        win.close()
+
+
+# ═════════════════════════ BP-1 — SUROWY KLUCZ i18n NA CAŁYM OKNIE
+
+
+def _napisy_okna(win):
+    """Wszystko, co okno POKAZUJE słowami - z KOMPLETU widoków, nie z jednego (BP-1).
+
+    Bramka klasy „napis widoczny w oknie nie jest kluczem" mieszkała dotąd w `FramesView`, bo tam
+    siedział defekt, który ją wywołał. Widoków jest jednak sześć, a `i18n.t` na nieznanym kluczu
+    nie rzuca - renderuje surowe `object.foo` na ekranie. Fikstura całego okna jest przy tej paczce
+    darmowa, więc bramka schodzi tam, gdzie klasa naprawdę żyje.
+
+    DWIE POWIERZCHNIE DOŁOŻONE do zbioru z `test_gui_grid`: `placeholderText()` (napis W POLU, przez
+    `text()` niewidoczny) i statyczne `toolTip()` (podpowiedź bywa jedynym miejscem, gdzie recepta
+    jest zapisana - patrz cztery tooltipy-recepty paczki „Cofnij"). Tooltipy liczone per indeks
+    modelu zostają poza zbiorem: nie są własnością widżetu i mają własne bramki."""
+    from PySide6.QtGui import QAction
+    from PySide6.QtWidgets import (
+        QAbstractButton, QComboBox, QLabel, QLineEdit, QListWidget, QWidget,
+    )
+
+    napisy = set()
+    for w in win.findChildren(QLabel) + win.findChildren(QAbstractButton):
+        napisy.add(w.text())
+    for w in win.findChildren(QLineEdit):
+        napisy.add(w.placeholderText())
+    for c in win.findChildren(QComboBox):
+        napisy |= {c.itemText(i) for i in range(c.count())}
+    # POZYCJE LIST TEŻ SĄ NAPISAMI - i to nie jest dopełnienie dla kompletu: tą drogą mówią do usera
+    # sidebar nawigacji, kolejka przeglądu i lista zadań, czyli trzy powierzchnie, których żadna
+    # z pozostałych pętli nie widzi (`QListWidgetItem` nie jest widżetem).
+    for lw in win.findChildren(QListWidget):
+        napisy |= {lw.item(i).text() for i in range(lw.count())}
+    for a in win.findChildren(QAction):
+        napisy.add(a.text())
+    for w in win.findChildren(QWidget):
+        napisy.add(w.toolTip())
+    napisy.add(win.windowTitle())
+    return {n for n in napisy if n}
+
+
+def test_ZADNE_okno_nie_pokazuje_surowego_klucza_i18n(qapp, tmp_path):
+    """BRAMKA KLASY NAD CAŁYM OKNEM (BP-1). Bliźniaczka bramki z `test_gui_grid`, tylko że tamta
+    chodzi po JEDNYM widoku z sześciu i nie zna ani placeholderów, ani tooltipów - a klucz
+    z literówką renderuje się surowo przez fallback `i18n.t` i przechodzi obok kolektora literałów,
+    gdy klucz idzie do `t()` zmienną.
+
+    Zbiór kluczy bierzemy z katalogu, więc bramka rośnie razem z nim, a fałszywy trafiony jest
+    strukturalnie niemożliwy: klucze mają kropki i ASCII, etykiety nie.
+
+    Falsyfikator: podmień w dowolnym widoku `i18n.t("object.library")` na goły literał klucza
+    → bramka czerwienieje, zanim zobaczy to użytkownik."""
+    from horreum.gui.i18n_catalog import CATALOG
+
+    win = MainWindow(_seeded_db(tmp_path, object_axis=True))
+    try:
+        win._show_view(NAV_PORZADKI)               # …podstrony osi też mają być zbudowane
+        napisy = _napisy_okna(win)
+
+        surowe = sorted(napisy & set(CATALOG))
+        assert not surowe, f"kontrolka pokazuje KLUCZ zamiast napisu: {surowe}"
+        # …i bramka NIE JEST ŚLEPA: zbiera realne napisy z co najmniej dwóch różnych widoków
+        assert "Dostawa" in napisy or "Zbiory" in napisy, "kolektor nie widzi nawigacji"
+        assert any("Horreum" in n for n in napisy), "kolektor nie widzi tytułu okna"
+    finally:
+        win.close()

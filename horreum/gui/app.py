@@ -21,12 +21,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QLocale, QSettings, QUrl, Signal
-from PySide6.QtGui import QActionGroup, QColor, QDesktopServices, QPalette
+from PySide6.QtGui import QActionGroup, QColor, QDesktopServices, QFontMetrics, QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
     QMessageBox, QProgressBar, QPushButton, QScrollArea, QSplitter, QStackedWidget, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget,
+    QTableWidgetItem, QToolButton, QVBoxLayout, QWidget,
 )
 
 from horreum import db, macro as macro_mod, repo, resolver
@@ -50,6 +50,36 @@ _REVIEW_INFO = Qt.UserRole + 5
 # Kolumny listy głównej — indeksy nazwane (czytelne handlery zamiast magicznych liczb).
 # Nagłówek = telescop_canon (tożsamość osi po przejściu fitsmirror); Etykieta = nazwa usera.
 COL_ID, COL_CANON, COL_LABEL, COL_STATUS, COL_FRATIO, COL_FOCAL, COL_FRAMES = range(7)
+# ZAPAS PASKA STANU dla elizji raportu (FH-2). `QStatusBar` nie wystawia szerokości swojego pola
+# komunikatu, więc odliczamy od szerokości paska to, czego nie zajmuje: własne marginesy układu
+# i uchwyt zmiany rozmiaru w prawym rogu (`_PASEK_MARGINES`), odstęp przed każdym widżetem stałym
+# (`_PASEK_ODSTEP`). Poniżej `_PASEK_MIN_KOMUNIKATU` nie tniemy w ogóle — na tak wąskim pasku
+# elizja zostawiłaby sam wielokropek, czyli mniej niż ucięte zdanie.
+#
+# OBIE LICZBY ZMIERZONE, NIE OSZACOWANE (firsthand, 39 pomiarów na trzech skalowaniach): odstęp
+# układu to dokładnie 6 px, a pole komunikatu kończy się na `pierwszy_stały.x() − 2` przy lewym
+# marginesie 6, czyli zapas = `x − 8`. Wersja z 24 dawała `x − 6` i przebijała pole o stałe 2 px -
+# ostatnia kolumna pikseli wielokropka bywała przez to ucięta. Falsyfikator: `zapas` policzony tą
+# arytmetyką ma się równać `pierwszy_widoczny_stały.x() − 8`.
+_PASEK_MARGINES = 26
+_PASEK_ODSTEP = 6
+_PASEK_MIN_KOMUNIKATU = 80
+# SUFIT RECEPTY jako UDZIAŁ paska, nie liczba pikseli - bo rośnie ona z fontem i ze skalowaniem
+# DPI, a chroni przed nią raport, który skaluje się tak samo. Dzisiejsza najdłuższa recepta PL
+# (~94 znaki) mieści się z zapasem; sufit jest strażnikiem na przyszłe tłumaczenia i dłuższe
+# etykiety menu, nie ograniczeniem stanu bieżącego.
+_PASEK_UDZIAL_RECEPTY = 0.45
+# SUFIT KOLEJKI PRZEGLĄDU W WIERSZACH, nie w pikselach (W-3) — bo wiersz maluje delegat i jego
+# wysokość zależy od fontu i skalowania DPI. Lista dostawała 340 px ramki na 80 px treści (76 %
+# pustki), stojąc nad tabelą „Biblioteka", której tego pionu brakowało. Sufit jest potrzebny, bo
+# kolejka rośnie do ~45 pozycji: bez niego dopasowanie do treści zabrałoby bibliotekę w całości.
+#
+# LICZBA WZIĘTA Z POMIARU, NIE Z GŁOWY: wiersz ma 18 px (zmierzone na platformie natywnej), więc
+# stara ramka 340 px pokazywała ich osiemnaście. Niższy sufit odbierałby pion dokładnie tam, gdzie
+# roboty jest najwięcej - przy pełnej kolejce user widziałby MNIEJ niż przed naprawą (bramka
+# pakietu, soczewka repo). Przy tej wartości krótka kolejka zwija się (5 pozycji: 340 → 94 px),
+# a długa nie traci ani wiersza.
+_KOLEJKA_SUFIT_WIERSZY = 18
 # Tagi kolejki przeglądu, które niosą akcję RĘKI, i te z nich, które opisują klatki z NAGROBKIEM
 # (S3/R-S2b-1). Jeden właściciel obu zbiorów, bo pytają o nie CZTERY miejsca — wygaszenie przycisku,
 # tooltip, drążenie i zapis — a wyliczanka powtórzona cztery razy rozjedzie się przy pierwszym
@@ -1095,7 +1125,10 @@ class ObjectAxisView(QWidget):
         self.objects.setEditTriggers(QAbstractItemView.NoEditTriggers)   # read-only
         self.objects.verticalHeader().setVisible(False)
         self.objects.itemSelectionChanged.connect(self._on_object_selected)
-        lv.addWidget(self.objects)
+        # NADMIAR PIONU NALEŻY DO BIBLIOTEKI (W-3): kolejka pod nią bierze tyle, ile ma treści
+        # (`_dopasuj_kolejke`), więc bez tego współczynnika zwolniony pion zostałby pustką
+        # rozłożoną po obu kontrolkach zamiast trafić do tabeli, która wierszy ma setki.
+        lv.addWidget(self.objects, 1)
         # Nota pustego stanu W WIDOKU (wizytator P1 #2): pusty filtr nie może komunikować się tylko
         # ulotnym flashem na statusbarze — user patrzy na pustą bibliotekę i pełną kolejkę i nie wie,
         # czy to błąd. Nota jest odkrywalna w obszarze tabeli, chowana gdy są obiekty.
@@ -1431,6 +1464,34 @@ class ObjectAxisView(QWidget):
         # dwuczłonowy, czyli dokładnie to, co było przed R-S3-3.
         self.review.itemDelegate().fit_tertiary(
             [self.review.item(i).data(rows.TERTIARY) for i in range(self.review.count())])
+        self._dopasuj_kolejke()
+
+    def _dopasuj_kolejke(self):
+        """Zetnij wysokość kolejki przeglądu DO TREŚCI, z sufitem w wierszach (W-3).
+
+        Wzorzec `tasks._fit_task_list`, z jedną różnicą, która jest tu sednem: tam lista ma pięć
+        pozycji i sufit byłby zbędny, a kolejka przeglądu rośnie do ~45 — dopasowanie bez sufitu
+        zabrałoby cały pion tabeli „Biblioteka", czyli zamieniło jeden dług na drugi. Stąd
+        `setMaximumHeight` (nie `setFixedHeight`) i suma po `_KOLEJKA_SUFIT_WIERSZY` wierszach:
+        krótka kolejka nie zostawia pustki, długa dostaje pasek przewijania.
+
+        WYSOKOŚĆ SUMUJEMY PRZEZ DELEGATA, nie mnożymy jednej podpowiedzi — wiersze `TwoPartDelegate`
+        nie muszą być równe, a `sizeHintForRow(0)` kłamało już raz w bliźniaczej liście (WIZ #14).
+        Metryki fontu są prawdziwe dopiero po `show()`, więc wołane jest to z `_load_review`, czyli
+        przy każdym napełnieniu listy, a nie raz w budowie."""
+        n = self.review.count()
+        if not n:
+            # Strukturalnie nieosiągalne (wiersz informacyjny `review_info` wchodzi bezwarunkowo),
+            # więc lista bez treści zwija się do ramki zamiast rezerwować pion na nic.
+            self.review.setMaximumHeight(2 * self.review.frameWidth())
+            return
+        model = self.review.model()
+        # Pytamy delegata TYLKO o wiersze pod sufitem: przy pełnej kolejce reszta i tak nie wpływa
+        # na wynik, a `refresh()` osi leci po KAŻDYM geście gridu (`object_axis_changed`).
+        self.review.setMaximumHeight(
+            sum(self.review.sizeHintForIndex(model.index(i, 0)).height()
+                for i in range(min(n, _KOLEJKA_SUFIT_WIERSZY)))
+            + 2 * self.review.frameWidth())
 
     def _add_review_item(self, text, *, tag=None, payload=None, info=None,
                          count=None, mark=None, fg=None):
@@ -2483,7 +2544,7 @@ class MainWindow(QMainWindow):
         NIE wołamy `i18n.set_lang` na żywo: `_LANG` mutowany w trakcie sesji rozdarłby raport
         liczony off-thread (R-i18n #6). Nota w statusbarze mówi userowi, że trzeba zrestartować."""
         QSettings("Horreum", "Horreum").setValue("ui/lang", code)
-        self.statusBar().showMessage(i18n.t("lang.restart_note"), 8000)
+        self._flash(i18n.t("lang.restart_note"), ms=8000)   # jedno wejście na pasek (FH-2)
 
     def _on_theme(self, name):
         """Przełącz motyw: zastosuj do aplikacji, POTEM utrwal (F6 recenzja #7 — nie zapisuj skórki,
@@ -2540,9 +2601,49 @@ class MainWindow(QMainWindow):
         # („Odświeżam widoki po etapie…") wypychałby z niego raport, który właśnie padł („Etap
         # Rozwiąż zakończony") — a raport jest tym, po co user czekał. Pusty w spoczynku, więc
         # w bezczynności nie zabiera ani piksela.
+        # WŁASNY KANAŁ RECEPTY (FH-2) — ta sama konieczność, co przy fazie niżej, tylko od strony
+        # DŁUGOŚCI: zdanie po geście osi urosło do 252 znaków = 1336 px przy 1459 px dostępnych
+        # (przy skalowaniu 125 % 1695/1672, przy 150 % 1947/1814), a `QStatusBar` tnie BEZ
+        # wielokropka i w środku słowa. Ucinany był człon OSTATNI, czyli instrukcja powrotu —
+        # jedyna część zdania, po którą user faktycznie sięga.
+        #
+        # `QToolButton`, nie `QLabel`, choć dziś nic nie robi: docelowo recepta ma powrót WYKONAĆ,
+        # a nie opisać (FH-2 wariant „e"), i wtedy wystarczy zdjąć przezroczystość dla myszy oraz
+        # podpiąć akcję, którą recepta nazywa. Przezroczystość jest tu warunkiem UCZCIWOŚCI:
+        # przycisk, który podnosi się pod kursorem i nic nie robi, kłamie bardziej niż etykieta.
+        #
+        # ⚠ `autoRaise` MUSI BYĆ WŁĄCZONE, DOPÓKI RECEPTA NIC NIE ROBI, i to jest pomiar firsthandu,
+        # nie estetyka: bez niego `QToolButton` rysuje się jako przycisk WYPUKŁY (ramka 31,31,31,
+        # gradient 79-81), czyli wygląda na aktywny i kłamie afordancją - a jest całkowicie bezwładny
+        # (`bar.childAt(środek) is None`). Płaski rysunek czyta się jako tekst. Przy dopięciu akcji
+        # wariantu „e" ta linia wraca do `False` RAZEM ze zdjęciem przezroczystości - obie naraz.
+        #
+        # BEZ `role=secondary`: selektor motywu to wyłącznie `QLabel[role=…]` (`theme.py`), więc na
+        # `QToolButton` własność jest MARTWA - i dobrze, bo gdyby działała, recepta zeszłaby do
+        # 3,67:1, poniżej progu 4,5:1 (zmierzone). Rozróżnienie wizualne niesie płaski rysunek,
+        # nie przygaszony kolor; własność zdjęta, żeby pierwszy „naprawiacz" jej nie ożywił.
+        self.recipe_label = QToolButton()
+        self.recipe_label.setAutoRaise(True)
+        self.recipe_label.setFocusPolicy(Qt.NoFocus)
+        self.recipe_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.statusBar().addPermanentWidget(self.recipe_label)
+        self.recipe_label.setVisible(False)     # po dodaniu — `addPermanentWidget` pokazuje widżet
+        # FAZA DOPIERO PO RECEPCIE - kolejność dodawania jest kolejnością OD LEWEJ, więc faza dodana
+        # pierwsza wchodziła MIĘDZY raport a receptę i rozdzielała dwa człony jednego zdania
+        # komunikatem trzeciej sprawy (firsthand, zrzut `K_faza.png`). Recepta przykleja się teraz
+        # do raportu, a faza siada przy uchwycie zmiany rozmiaru.
         self.phase_label = QLabel("")
         self.phase_label.setProperty("role", "secondary")
         self.statusBar().addPermanentWidget(self.phase_label)
+        self._pelny_komunikat = ""              # treść przed elizją (podpowiedź + ponowny pomiar)
+        self._pelna_recepta = ""                # …i jej człon drugi, bo podpowiedź niesie OBA
+        self._ms_komunikatu = 5000              # timeout żywego raportu (0 = bez wygasania)
+        self._ostatnio_pokazany = ""            # tekst POSTAWIONY przez nas - strażnik cudzych zdań
+        # RECEPTA ŻYJE DOKŁADNIE TYLE, CO JEJ RAPORT. `messageChanged` z pustym łańcuchem to jedyny
+        # sygnał wygaśnięcia komunikatu (timeout 5 s albo cudzy `showMessage`), więc drugi timer
+        # byłby drugim właścicielem tego samego zdarzenia — i rozjechałby się z nim przy pierwszej
+        # zmianie czasu. Recepta przy cudzym raporcie mówiłaby o geście, którego już nie widać.
+        self.statusBar().messageChanged.connect(self._on_status_changed)
 
     def _show_view(self, idx):
         """Przełącz miejsce nawigacji (seam dla kodu i testów) — sidebar prowadzi stack."""
@@ -2586,6 +2687,7 @@ class MainWindow(QMainWindow):
 
         grid = FramesView(self.con, now_fn=self._now)
         grid.status_message.connect(self._flash)
+        grid.status_recipe.connect(self._pokaz_recepte)   # recepta ma własny nośnik (FH-2)
         grid.writeback_busy.connect(self._on_writeback_busy)
         self.grid_view = grid
 
@@ -2782,6 +2884,7 @@ class MainWindow(QMainWindow):
         Etykieta, nie `showMessage` — patrz komentarz przy `phase_label`: raport i faza nie mogą
         dzielić jednego miejsca, bo wtedy jedno kasuje drugie."""
         self.phase_label.setText(text)
+        self._przelicz_pasek()          # faza zabiera szerokość żywemu raportowi (FH-2)
         if not self.stack.isVisible():
             self.empty_note.setText(text)
             self.empty_note.setVisible(True)
@@ -2790,6 +2893,7 @@ class MainWindow(QMainWindow):
         """Koniec fazy okna: etykieta gaśnie, a środek wraca do zdania o STANIE (nie o robocie).
         Bez tego pasek zostawałby z opisem operacji, która już się skończyła — czyli kłamał."""
         self.phase_label.setText("")
+        self._przelicz_pasek()          # …i oddaje ją z powrotem (FH-2)
         self._sync_db_state()
 
     def _sync_db_state(self):
@@ -2801,11 +2905,139 @@ class MainWindow(QMainWindow):
         # został, kolejne otwarcie bazy z menu zaczynałoby się od zdania o poprzednim otwarciu.
         self.empty_note.setText(i18n.t("main.no_db"))
         if not has:
-            # bez timeoutu — to trwała podpowiedź pustego stanu, nie ulotny komunikat akcji
-            self.statusBar().showMessage(i18n.t("main.no_db"))
+            # bez timeoutu — to trwała podpowiedź pustego stanu, nie ulotny komunikat akcji.
+            # Przez `_flash`, nie gołym `showMessage`: bez tego recepta poprzedniej bazy wisiała
+            # tu BEZ KOŃCA nad zdemontowanymi widokami, wskazując menu, którego już nie ma.
+            self._flash(i18n.t("main.no_db"), ms=0)
 
-    def _flash(self, msg):
-        self.statusBar().showMessage(msg, 5000)
+    def _flash(self, msg, ms=5000):
+        """Raport na pasek — Z ELIZJĄ (FH-2). KAŻDY raport gasi receptę poprzedniego gestu.
+
+        JEDYNE WEJŚCIE NA PASEK - i to jest wymóg, nie wygoda (bramka pakietu, zarzut zgodny
+        u dwóch soczewek). Gołe `showMessage` obok tej drogi zostawiało receptę poprzedniego gestu
+        nad zdemontowanymi widokami (komunikat „brak bazy" idzie BEZ timeoutu, więc wisiała bez
+        końca) i nie odświeżało podpowiedzi, która niosła wtedy treść cudzego, wygasłego zdania.
+        `ms=0` znaczy „bez timeoutu" - kontrakt `QStatusBar.showMessage`.
+
+        Gaszenie stoi TUTAJ, a nie u wołającego, bo raport bez recepty przychodzi też stamtąd,
+        gdzie o recepcie nikt nie słyszał (etapy Dostawy, odświeżenie gridu). Instrukcja powrotu
+        wisząca przy cudzym zdaniu mówiłaby o geście, po którym nie ma już śladu na ekranie."""
+        self._ustaw_recepte("")
+        self._pelny_komunikat = msg
+        self._ms_komunikatu = ms
+        self._wyswietl(msg)
+
+    def _pokaz_recepte(self, tekst):
+        """Recepta ostatniego gestu na własny widżet — i PONOWNY pomiar elizji raportu (FH-2).
+
+        Kolejność jest wymuszona: raport leci pierwszy (`_po_gescie_osi`), więc gdy przychodzi tu
+        recepta, komunikat jest już przycięty do zapasu SPRZED jej pojawienia się. Widżet recepty
+        zabiera szerokość (`addPermanentWidget`), więc bez tego ponowienia raport wystawałby pod
+        nią - czyli sam rozdział członów wyprodukowałby to ucięcie, które miał zdjąć."""
+        self._ustaw_recepte(tekst)
+        if tekst and self._pelny_komunikat:
+            self._przelicz_pasek()
+
+    def _wyswietl(self, msg):
+        """Wyrenderuj raport na pasek i ZAPAMIĘTAJ, co dokładnie tam postawiliśmy."""
+        self._ostatnio_pokazany = self._zwezone(msg)
+        self.statusBar().showMessage(self._ostatnio_pokazany, self._ms_komunikatu)
+
+    def _przelicz_pasek(self):
+        """Przemierz elizję ŻYWEGO raportu - po każdej zmianie szerokości widżetów stałych.
+
+        Wołają to trzy powierzchnie, bo wszystkie trzy zabierają miejsce komunikatowi: recepta,
+        wejście w fazę i jej koniec. Bez tego broniła się przed własną szerokością tylko recepta,
+        a faza („Odświeżam widoki po etapie…") wpychała żywy raport pod siebie - ten sam defekt,
+        tyle że z drugiej strony paska (bramka pakietu, soczewka repo).
+
+        ⚠ NIE NADPISUJEMY CUDZEGO ZDANIA. Ten warunek jest tu po tym, jak przeliczenie WSKRZESIŁO
+        raport sprzed chwili: pasek niósł już komunikat postawiony z pominięciem `_flash`, a faza
+        wepchnęła na jego miejsce nasz zapamiętany tekst. Porównanie z tym, co sami postawiliśmy,
+        rozstrzyga to bez zgadywania - i jest odporne na kolejnego pisarza spoza tej drogi."""
+        if not self._pelny_komunikat:
+            return
+        if self.statusBar().currentMessage() != self._ostatnio_pokazany:
+            return
+        self._wyswietl(self._pelny_komunikat)
+
+    def _ustaw_recepte(self, tekst):
+        """Wpisz receptę na jej widżet, PRZYCIĘTĄ do swojego sufitu (pusta = widżet znika).
+
+        SUFIT SZEROKOŚCI JEST STRAŻNIKIEM, NIE OZDOBĄ (bramka pakietu, soczewka architektury):
+        bez niego recepta jest bezpieczna wyłącznie przez dzisiejszą zawartość katalogu i18n -
+        dłuższa etykieta menu w przyszłym tłumaczeniu zjadłaby pole raportu bez żadnego sygnału.
+        Pełna treść nie ginie: niesie ją podpowiedź PASKA (`_zwezone`), a nie tego widżetu -
+        kontrolka przezroczysta dla myszy nie dostaje `QEvent::ToolTip`, więc własna podpowiedź
+        byłaby na niej martwa."""
+        bar, przycisk = self.statusBar(), self.recipe_label
+        self._pelna_recepta = tekst
+        przycisk.setVisible(bool(tekst))
+        if not tekst:
+            przycisk.setText("")
+            return
+        # NADDATEK WIDŻETU MIERZONY, NIE ZGADYWANY: `QToolButton` dokłada do tekstu własne obramowanie
+        # i marginesy, więc elizja liczona wprost do sufitu przebijała go o te kilkadziesiąt pikseli
+        # (zmierzone: 944 px przy sufcie 914). Stawiamy pełny tekst, odczytujemy różnicę między
+        # podpowiedzią rozmiaru a szerokością samego tekstu i dopiero wtedy tniemy - dzięki temu
+        # próg trzyma się także po zmianie motywu, fontu i skalowania DPI.
+        fm = QFontMetrics(bar.font())
+        przycisk.setText(tekst)
+        naddatek = przycisk.sizeHint().width() - fm.horizontalAdvance(tekst)
+        sufit = int(bar.width() * _PASEK_UDZIAL_RECEPTY) - naddatek
+        przycisk.setText(fm.elidedText(tekst, Qt.ElideRight, max(sufit, 0)))
+
+    def _on_status_changed(self, msg):
+        """Wygasł komunikat ⇒ gaśnie jego recepta i podpowiedź z pełną treścią.
+
+        ⚠ PUSTY KOMUNIKAT Z OTWARTEGO MENU TO NIE WYGAŚNIĘCIE. Każda pozycja menu wysyła przy
+        podświetleniu `QStatusTipEvent`, a pozycja bez własnego opisu wysyła go PUSTEGO - okno
+        przepisuje to na `showMessage("")` i pasek melduje `messageChanged("")`, nie do odróżnienia
+        od timeoutu. Zmierzone: gest → `QStatusTipEvent("")` → recepta gaśnie. Trafiało to
+        dokładnie w receptę „Obiekt ▾ → Przywróć cofnięte przypisanie", bo jej WYKONANIE zaczyna
+        się od otwarcia tego menu: instrukcja znikała w trakcie celowania w pozycję, którą nazywa.
+
+        Otwarty popup jest tu jedynym dostępnym rozróżnieniem - stanu paska te dwa zdarzenia mają
+        identyczny. Ogon klasy zostaje: samo najechanie na MENUBAR (bez otwierania) receptę dalej
+        gasi. Nie leczymy tego szerzej, bo lekarstwem jest oparcie recepty o STAN, nie o czas życia
+        komunikatu - i to jest robota wariantu „e" (→ TODO-DŁUG(FH-2e))."""
+        if msg or QApplication.activePopupWidget() is not None:
+            return
+        self._ustaw_recepte("")
+        self._pelny_komunikat = ""
+        self.statusBar().setToolTip("")
+
+    def _zwezone(self, msg):
+        """Przytnij raport do REALNEGO zapasu paska, jawnym wielokropkiem, z pełną treścią w podpowiedzi.
+
+        `QStatusBar` nie ma elizji: przy nadmiarze ucina w środku słowa i nie zostawia po tym
+        żadnego znaku, więc zdanie kończące się na „…Przywróć c" wygląda na kompletne. Wielokropek
+        zdejmuje to CICHE kłamstwo, a tooltip oddaje treść, której nie da się już zmieścić.
+
+        MIERZYMY DO WIDŻETÓW STAŁYCH, nie do szerokości paska: `addPermanentWidget` zabiera miejsce
+        komunikatowi, więc faza i recepta odliczają się od zapasu — bez tego sam rozdział z FH-2
+        kazałby zdaniu ucinać się WCZEŚNIEJ niż przed naprawą.
+
+        PODPOWIEDŹ STOI ZAWSZE, NIE TYLKO PRZY CIĘCIU, i to jest odpowiedź na trzy dziury naraz
+        (bramka pakietu, oba silniki): gałąź „za wąsko na elizję" oddawała pełny tekst Qt do
+        cichego ucięcia i przy okazji KASOWAŁA podpowiedź; zwężenie okna w trakcie życia
+        komunikatu tnie zdanie, które przy pomiarze się mieściło; a recepta nie ma jak pokazać
+        własnej podpowiedzi, bo jest przezroczysta dla myszy. Jedna podpowiedź z całym zdaniem -
+        raport plus recepta - zdejmuje wszystkie trzy bez ani jednej gałęzi.
+
+        PRZED POKAZANIEM OKNA NIE TNIEMY: geometria jest wtedy zastępcza (domyślne 640 px), więc
+        elizja liczona z niej okroiłaby zdanie, które w prawdziwym oknie mieści się w całości."""
+        bar = self.statusBar()
+        bar.setToolTip(" · ".join(x for x in (msg, self._pelna_recepta) if x))
+        if not bar.isVisible():
+            return msg
+        stale = sum(w.sizeHint().width() + _PASEK_ODSTEP
+                    for w in (self.phase_label, self.recipe_label) if w.isVisible())
+        zapas = bar.width() - stale - _PASEK_MARGINES
+        fm = QFontMetrics(bar.font())
+        if zapas < _PASEK_MIN_KOMUNIKATU or fm.horizontalAdvance(msg) <= zapas:
+            return msg
+        return fm.elidedText(msg, Qt.ElideRight, zapas)
 
     def closeEvent(self, event):
         # Top-level apka jest właścicielem połączenia — zamyka je przy zamknięciu okna.
@@ -2876,9 +3108,18 @@ def main(argv=None):
     return app.exec()
 
 # --- TODO-DŁUG (z kolejki sesji, dieta 2026-08-10; pełne brzmienia: archiwum aa) ---
-# TODO-DŁUG(W-3): lista kolejki na stronie przeglądu obiektów - 340 px ramki na 80 px treści
-#   (76% pustki); tasks.py ten sam dług zamknęło _fit_task_list. Ten sam pomiar z SUFITEM
-#   (kolejka rośnie do ~45 pozycji) albo stretch 2:1 na rzecz tabeli „Biblioteka".
+# TODO-DŁUG(FH-2e): recepta na pasku OPISUJE powrót, zamiast go WYKONAĆ - `recipe_label` jest już
+#   `QToolButton`, więc zostaje zdjęcie `WA_TransparentForMouseEvents` i podpięcie akcji, którą
+#   recepta nazywa. Trzy różne mechanizmy celu (akcja menu „Obiekt", przycisk „× Wyczyść zbiór",
+#   pozycja listy perspektyw), a wariant „potem" celuje w gest jeszcze NIEwykonalny - klikalny
+#   przycisk musi wtedy zostać wygaszony, nie zniknąć.
+#   ⚠ WARIANT „e" MUSI PRZY OKAZJI PRZENIEŚĆ RECEPTĘ Z CZASU NA STAN - i to jest jego właściwy
+#   powód, nazwany przez bramkę pakietu (obie soczewki), nie kosmetyka. Dziś recepta żyje tyle,
+#   co jej raport: 5 s, a przy dwóch członach umiera po wykonaniu PIERWSZEGO, bo `refresh()`
+#   emituje własny status i gasi ją dokładnie wtedy, gdy człon drugi staje się wykonalny.
+#   Odwracalność jest faktem o STANIE (trwa, dopóki jest co przywracać), więc recepta ma się
+#   składać w `refresh()` ze stanu i gasnąć, gdy przestaje być prawdziwa. Świadomy koszt paczki
+#   `A`: nie jest to regresja (przed nią całe zdanie ginęło tak samo), ale nie jest to wzorzec.
 # TODO-DŁUG(P-K/0xC0000409): proces kończy się STATUS_STACK_BUFFER_OVERRUN przy finalizacji
 #   interpretera, gdy MainWindow powstaje nad realną bazą bez app.exec() - zastane, widoczne
 #   wyłącznie w sondach bez pętli zdarzeń. Przy najbliższym dotknięciu closeEvent/teardownu.

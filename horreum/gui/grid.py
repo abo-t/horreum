@@ -304,6 +304,30 @@ _PRESET_LABELS = {
 # nazwa nie może być literałem w dwóch miejscach - a bramka pilnuje, że ten preset naprawdę
 # jest czysty (`test_gui_grid`, `_PRESET_CZYSTY`).
 _PRESET_CZYSTY = "Przegląd"
+# PARA FLAGA → ZAPYTANIE MA JEDNO MIEJSCE (BP-4): `refresh()` buduje z tej tabeli listę trimów,
+# a `_trim_aktywny()` odpowiada z niej recepcie powrotu. Wcześniej recepcie odpowiadał atrybut
+# instancji stawiany RAZ w `refresh()`: poprawny wyłącznie przez kolejność wywołań, bez strażnika.
+# Ta rodzina wykłada się dokładnie na kopiach enumeracji (`483df93`: siedem flag wpiętych w osiem
+# miejsc i jedno pominięte), więc lekarstwem nie jest ósma kopia, tylko brak drugiej.
+#
+# ⚠ TO NIE JEST JESZCZE JEDYNA ENUMERACJA RODZINY - i zapis ma o tym mówić prawdę, bo następna
+# sesja przeczyta go jako gwarancję (bramka pakietu, zarzut zgodny u dwóch soczewek). Ręczna lista
+# siedmiu flag żyje dalej w `__init__`, `_on_perspective`, `apply_object_facet`, serializacji
+# spec-a i `_describe_criteria`. BP-4 zdjął DWÓCH konsumentów z siedmiu; dokończenie (jeden dict
+# flag karmiony tą tabelą) należy do paczki `D`, która i tak w tę rodzinę wchodzi i idzie SAMA.
+#
+# NAZWY ZAPYTAŃ, NIE OBIEKTY FUNKCJI: wiązanie późne zostawia drogę podmianie w teście
+# (`monkeypatch.setattr(queries, …)`) i nie zamraża referencji z chwili importu. Koszt zerowy,
+# a literał `dup_frame_ids` dalej jest greppowalny.
+_TRIMY = (
+    ("_only_dups", "dup_frame_ids"),
+    ("_only_review", "review_frame_ids"),
+    ("_only_vanished", "vanished_frame_ids"),
+    ("_only_lineage", "lineage_pending_frame_ids"),
+    ("_only_superseded", "superseded_frame_ids"),
+    ("_only_retired", "retired_frame_ids"),
+    ("_only_missing_copy", "missing_copy_frame_ids"),
+)
 
 
 _KANONY_W_ZDANIU = 3
@@ -332,6 +356,19 @@ def _lista_kanonow(canons, maks=_KANONY_W_ZDANIU):
     if len(nazwy) <= maks:
         return ", ".join(nazwy)
     return ", ".join(nazwy[:maks]) + i18n.t("grid.sel.object_canons_more", n=len(nazwy) - maks)
+
+
+def _zlacz_recepty(czlony):
+    """Człony recepty w jedno zdanie własnego nośnika paska (FH-2). Czysta funkcja.
+
+    KOLEJNOŚĆ CZŁONÓW JEST KOLEJNOŚCIĄ W CZASIE, nie ważnością: najpierw „odsłoni je …", potem
+    „potem przywrócisz: …" - drugi gest bywa wykonalny dopiero po pierwszym, bo wypchnięcie celu
+    z widoku gasi całą kontrolkę „Obiekt" (FC-9). Wołający dokłada człony w tym porządku i to on
+    jest kontraktem; ta funkcja tylko odsiewa milczące i skleja.
+
+    Separator ten sam, co w raporcie, bo oba zdania czyta się jednym ruchem oka wzdłuż paska -
+    dwa różne rozdzielniki na jednej belce wyglądałyby jak dwa różne rejestry."""
+    return " · ".join(x for x in czlony if x)
 
 
 def _half_away(x):
@@ -1395,6 +1432,10 @@ class LineageBar(QWidget):
         self.items.clear()
         self.items.setMaximumHeight(_LINEAGE_LIST_MAX_H)   # oś kalibracji zaniża sufit do treści
         self._head = head
+        # NOCE GASNĄ TU, A ZAPALAJĄ SIĘ WYŁĄCZNIE W `_set_candidates` - jedna droga w każdą stronę,
+        # wzorem `_sync_visible` dla `night_row` (G2-3d). Bez tego `_nights` przeżywało wyjście
+        # z trybu propozycji i licznik kandydatów mówiłby o POPRZEDNIM obrazie.
+        self._nights = ()
         self._raw_bez_odniesienia = raw_unreferenced
         if head is None:
             # Brak materiału ZAWSZE mówi zdaniem — także w stanie startowym, zanim ktokolwiek
@@ -1462,6 +1503,22 @@ class LineageBar(QWidget):
         self.combo_night.blockSignals(False)
         self._fill_night(0)
 
+    def klatki_bez_odniesienia(self):
+        """Ile klatek CZEKA NA ZEGAR tego obrazu - populacja, którą gest odniesienia odblokowuje.
+
+        To jest liczba, na którą gest realnie działa: kandydat RAW bez wskazanego odniesienia nie
+        wchodzi do okna, bo nie wiadomo, do której NOCY należy (`stacks.propose_lineage_candidates`,
+        druga wartość zwrotu). Zero odróżnia „zegar nie miał czego odblokować" od „materiał czekał
+        i właśnie ruszył" - a dokładnie tej różnicy brakowało, gdy stos meldował potem
+        `no_candidates` bez wskazania przyczyny (G2-3d).
+
+        ⚠ CZYTAJ PRZED `_refresh_lineage()`, nigdy po. Zapis offsetu czyni powód ZWIETRZAŁYM
+        (`queries.lineage_reason_stale`: dla `offset_unknown` wietrzeje, gdy `utc_offset_min`
+        przestaje być NULL), więc odświeżenie po zapisie NIE liczy już propozycji i każda liczba
+        wzięta z panelu po nim jest strukturalnie zerem. Bramka pakietu złapała tu człon martwy
+        w chwili narodzin - liczony po odświeżeniu mówił „0" nad stosem, pod którym stało 36 klatek."""
+        return self._raw_bez_odniesienia
+
     def _on_night(self, idx):
         if idx >= 0:
             self._fill_night(idx)
@@ -1512,6 +1569,10 @@ class LineageBar(QWidget):
         FAKT (nastawę, kartę), nie przegłosowując wynik. Wiersz akcji chowa się w całości."""
         self.items.clear()
         self._head = None
+        # OŚ KALIBRACJI TO WYJŚCIE Z TRYBU PROPOZYCJI (G2-3d) - obie wartości gasną, bo obie opisują
+        # materiał POPRZEDNIEGO obrazu. `set_lineage` zeruje je swoją drogą; ta metoda go nie woła.
+        self._nights = ()
+        self._raw_bez_odniesienia = 0
         powiazane = [r for r in relations if r["master_frame_id"] is not None]
         for r in relations:
             it = QListWidgetItem(_calibration_item_text(r))
@@ -2199,6 +2260,18 @@ class FramesView(QWidget):
     # (dialog „Napraw nagłówek…"). Dwa równoległe commity spotkałyby się na `BEGIN IMMEDIATE`
     # z `busy_timeout` 5 s i jeden wróciłby jako 'failed' — bez powodu widocznego dla usera.
     writeback_busy = Signal(bool)
+    # RECEPTA MA WŁASNY KANAŁ (FH-2), bo dostała własny nośnik na pasku. Zdanie po geście przestało
+    # się mieścić w `showMessage` - zmierzone 252 znaki = 1336 px przy 1459 px dostępnych (przy
+    # skalowaniu 125 % już 1695/1672), a `QStatusBar` tnie BEZ wielokropka, w środku słowa, i ucina
+    # człon OSTATNI, czyli receptę. Rozdział jest tu koniecznością, nie estetyką - lustro
+    # `phase_label`: raport („co się stało") i recepta („co możesz teraz zrobić") konkurowały
+    # o jedno pole, więc ginęła ta druga, choć to po nią user sięga.
+    #
+    # RAPORT ZOSTAJE NA `status_message` I TO JEST CELOWE: wydzielenie CAŁEGO zdania na nowy sygnał
+    # przepięłoby kanał, którym mówią wszystkie inne gesty widoku, a raport gestu osi niczym się od
+    # nich nie różni. Osobny kanał należy się temu członowi, który ma osobny nośnik - i tylko jemu.
+    # Recepta leci ZARAZ PO raporcie (nigdy przed), więc pusta gasi cudzą z poprzedniego gestu.
+    status_recipe = Signal(str)
 
     def __init__(self, con, now_fn=None, parent=None):
         super().__init__(parent)
@@ -2218,7 +2291,6 @@ class FramesView(QWidget):
         self._only_superseded = False
         self._only_retired = False
         self._only_missing_copy = False
-        self._trim_active = False   # czy trim perspektywy przyciął zbiór - liczone RAZ w refresh() (FC-2)
         self._cel_gestu = []        # klatki wypchnięte z widoku przez ostatni gest - wracają do
                                     # zaznaczenia przy najbliższym przeładowaniu zbioru (FC-2)
         self._reveal_facet = None   # (facet, wartość) do odsłonięcia w listwie — patrz `apply_object_facet`
@@ -2608,6 +2680,7 @@ class FramesView(QWidget):
         cel gestu naprawczego. Zmierzone przez wizytację: odtworzenie stanu sprzed pomyłki
         kosztowało 6-8 interakcji plus pamięć człowieka o tym, co tam stało."""
         zaznaczone = [r["frame_id"] for r in self._selected_data_rows()]
+        recepty = []                    # człony „co teraz zrobić" — własny nośnik paska (FH-2)
         msg = i18n.t(klucz, assigned=gest.assigned, total=gest.assigned + gest.skipped, **kw)
         # Skład i kolejność członów ma JEDNEGO właściciela (`ObjectGesture.skipped_breakdown`),
         # a nie literał tutaj: czwarty człon dołożony w S3 („nie było czego cofać") wpadłby
@@ -2645,7 +2718,9 @@ class FramesView(QWidget):
             # domysłem z liczników klingi - a recepta schodzi od stanu zawężenia, żeby nie
             # obiecywać kliknięcia, które akurat tego zbioru nie odsłoni.
             poza = len(zaznaczone) - wrocilo
-            msg += self._czlon_poza_widokiem(poza, zaznaczone)
+            fakt, recepta_widoku = self._czlon_poza_widokiem(poza, zaznaczone)
+            msg += fakt
+            recepty.append(recepta_widoku)
         # RECEPTA ODWRACALNOŚCI SKŁADA SIĘ TUTAJ, NIE U WOŁAJĄCEGO (bramka pakietu, zarzut
         # blokujący) - bo jej treść zależy od tego, czy cel został na ekranie, a to wie dopiero
         # ten kod. Gdy klatki wyszły z widoku, zaznaczenie po `refresh()` jest puste, więc
@@ -2653,8 +2728,9 @@ class FramesView(QWidget):
         # wskazywałoby wtedy napis wyszarzony w tej samej chwili. Wariant „potem" ustawia oba
         # gesty w kolejności, w której da się je WYKONAĆ.
         if odwracalny and gest.assigned:
-            msg += i18n.t("grid.sel.object_clear_undo_after" if poza else "grid.sel.object_clear_undo",
-                          menu=i18n.t("grid.sel.object"), action=i18n.t("grid.sel.object_restore"))
+            recepty.append(
+                i18n.t("grid.sel.object_clear_undo_after" if poza else "grid.sel.object_clear_undo",
+                       menu=i18n.t("grid.sel.object"), action=i18n.t("grid.sel.object_restore")))
         # ZDANIE IDZIE PO ODŚWIEŻENIU, nie przed (adjudykacja recenzji S2b). `refresh()` kończy się
         # własnym `status_message` („Grid: N klatek…"), a odbiornikiem jest jeden `showMessage`
         # paska stanu — emisja przed odświeżeniem ginęła w tym samym obrocie pętli. Skutek był
@@ -2664,29 +2740,35 @@ class FramesView(QWidget):
         # emisja. Ta sama pułapka, co wyżej, tylko od drugiej strony: dwa `emit` w jednym obrocie
         # pętli trafiają w jeden `showMessage`, więc drugie wymazuje pierwsze (bramka pakietu 0810).
         self.status_message.emit(msg + ogon)
+        self.status_recipe.emit(_zlacz_recepty(recepty))
 
     def _czlon_poza_widokiem(self, poza, cel=None):
-        """Człon „poza widokiem: N" wraz z receptą - WSPÓLNY DLA OBU OSI zaznaczenia (FC-2).
+        """Człon „poza widokiem: N" ORAZ jego recepta - WSPÓLNY DLA OBU OSI zaznaczenia (FC-2).
 
         Obie osie mają ten sam problem i to nie jest analogia: na osi obiektu gest wypycha cel przy
         aktywnym facecie „Obiekt", a na osi żywotności klatki wypchnięcie jest wręcz REGUŁĄ, bo
         wycofanie zdejmuje klatkę z kubełków roboczych. Dwie kopie tej frazy rozjechałyby się przy
         pierwszej poprawce, a trzecia oś dołożyłaby trzecią (bramka pakietu, soczewka repo).
 
-        Pusty łańcuch przy zerze, żeby wołający nie musiał pytać - milczenie jest tu poprawną
-        odpowiedzią: zdanie o zerze klatek poza widokiem mówiłoby o czymś, co się nie stało."""
+        ZWRACA PARĘ `(fakt, recepta)`, bo te dwa człony jadą na pasek OSOBNYMI kanałami (FH-2):
+        „poza widokiem: N" jest POMIAREM i należy do raportu, a „odsłoni je …" jest INSTRUKCJĄ
+        i dostaje własny widżet, którego długość raportu już nie zdmuchnie.
+
+        Para pustych łańcuchów przy zerze, żeby wołający nie musiał pytać - milczenie jest tu
+        poprawną odpowiedzią: zdanie o zerze klatek poza widokiem mówiłoby o czymś, co się nie
+        stało."""
         if not poza:
-            return ""
+            return "", ""
         # …i zapamiętaj CEL, żeby recepta odsłaniająca oddała go w zaznaczeniu (`refresh`).
         # Bez tego odsłonięcie jest tylko połową drogi: zbiór wraca, a klatki gestu toną w nim
         # bez śladu - zmierzone firsthandem na 43 klatkach w widoku 16 901 wierszy.
         self._cel_gestu = list(cel or [])
-        czlon = i18n.t("grid.sel.out_of_view", n=poza)
+        fakt = i18n.t("grid.sel.out_of_view", n=poza)
         recepta = self._recepta_powrotu_do_widoku()
-        if recepta:
-            klucz, kwargi = recepta
-            czlon += i18n.t(klucz, **kwargi)
-        return czlon
+        if recepta is None:
+            return fakt, ""
+        klucz, kwargi = recepta
+        return fakt, i18n.t(klucz, **kwargi)
 
     def _recepta_powrotu_do_widoku(self):
         """Którym JEDNYM gestem user odsłoni klatki wypchnięte z widoku - ze STANU zawężenia, nie
@@ -2703,7 +2785,7 @@ class FramesView(QWidget):
         zawężeniach naraz jeden gest odsłania więc wszystko; wariant „zdejmij oba" kazałby zrobić
         dwa gesty tam, gdzie wystarcza jeden (bramka pakietu, zarzut o nadmiarową receptę).
         Gdy trimu nie ma, wygrywa gest WĘŻSZY: przycisk zbioru zostawia perspektywę na miejscu."""
-        if self._trim_active:
+        if self._trim_aktywny():
             return "grid.sel.out_of_view_persp", {"perspective": i18n.t(_PRESET_LABELS[_PRESET_CZYSTY])}
         if self._zbior_zawezony():
             return "grid.sel.out_of_view_set", {"action": i18n.t("grid.sel.clear_set")}
@@ -3073,6 +3155,17 @@ class FramesView(QWidget):
         iid = self.lineage_bar.integration_id()
         if iid is None:
             return
+        # ILE KLATEK CZEKAŁO NA TEN ZEGAR (G2-3d) - CZYTANE PRZED ZAPISEM, nie po. Zakres offsetu
+        # jest bramką na NONSENS, nie na pomyłkę: wskazanie o dobę obok przechodzi walidację,
+        # a jedynym śladem był potem powód `no_candidates` bez słowa o przyczynie. Człon stoi
+        # ZAWSZE, także przy zerze - to właśnie zero mówi „ten zegar nie miał czego odblokować".
+        #
+        # ⚠ KOLEJNOŚĆ JEST TU CAŁYM MECHANIZMEM (bramka pakietu, zarzut blokujący). Zapis czyni
+        # powód ZWIETRZAŁYM (`queries.lineage_reason_stale`), więc `_refresh_lineage()` po nim nie
+        # liczy już propozycji: liczba wzięta stamtąd byłaby strukturalnym zerem, czyli członem
+        # martwym w chwili narodzin - i to nad stosem, pod którym stoi 36 klatek.
+        czekalo = i18n.t("grid.lin.offset_waiting",
+                         n=self.lineage_bar.klatki_bez_odniesienia())
         repo.set_integration_offset(self.con, master_frame_id=self._lineage_frame_id,
                                     utc_offset_min=minutes, now=self._now())
         self._refresh_lineage()
@@ -3082,12 +3175,12 @@ class FramesView(QWidget):
         # o wciąganiu plików z dysku. Odmowa (etap już biegnie / brak bazy) NIE jest błędem gestu:
         # zapis się udał, więc mówimy prawdę o obu połówkach i zostawiamy zdanie z receptą.
         if self.run_stage_fn is None:
-            self.status_message.emit(i18n.t("grid.lin.offset_saved", hours=godziny))
+            self.status_message.emit(i18n.t("grid.lin.offset_saved", hours=godziny) + czekalo)
             return
         powod = self.run_stage_fn()
         self.status_message.emit(
-            i18n.t("grid.lin.offset_saved_counting", hours=godziny) if powod is None
-            else i18n.t("grid.lin.offset_saved_busy", hours=godziny, reason=powod))
+            (i18n.t("grid.lin.offset_saved_counting", hours=godziny) if powod is None
+             else i18n.t("grid.lin.offset_saved_busy", hours=godziny, reason=powod)) + czekalo)
 
     def _on_lineage_judged(self, frame_ids, excluded):
         """Werdykt ręki → jedna klinga (`repo.judge_integration_input`), potem odświeżenie panelu
@@ -3143,6 +3236,19 @@ class FramesView(QWidget):
         świadomie, bo ten przycisk ich nie tyka (`_on_clear_selection`)."""
         return bool(self._facet_state) or self._filter_tree is not None
 
+    def _trim_aktywny(self):
+        """Czy trim perspektywy przycina zbiór - LICZONE W MIEJSCU UŻYCIA, nie zapamiętane (BP-4).
+
+        Bliźniak `_zbior_zawezony` i tak samo jedyny właściciel swojego predykatu. Do tej zmiany
+        odpowiadał atrybut `_trim_active` stawiany raz w `refresh()`: klasa „recepta czyta stan
+        nieaktualny" była pusta wyłącznie dlatego, że KAŻDA ścieżka zmieniająca zbiór kończy się
+        `refresh()` - czyli przez kolejność wywołań, bez żadnego strażnika. Pierwszy czytelnik
+        spoza tej kolejności dostałby stan sprzed gestu, a recepta wskazałaby gest, który niczego
+        nie odsłania.
+
+        Zero SQL i zero kosztu: czytamy same flagi, a nie zbiory, które one wybierają."""
+        return any(getattr(self, atrybut) for atrybut, _ in _TRIMY)
+
     # ---- reakcje ----
     def _on_filter(self, tree):
         self._filter_tree = tree
@@ -3193,25 +3299,15 @@ class FramesView(QWidget):
         leaf_fn, universe_fn = self._memo_leaf_fns()
         self._effective_tree = facet_model.compose(self._facet_state, self._filter_tree)
         frame_ids = filter_engine.run(self._effective_tree, leaf_fn=leaf_fn, universe_fn=universe_fn)
-        dup_ids = queries.dup_frame_ids(self.con) if self._only_dups else None
-        review_ids = queries.review_frame_ids(self.con) if self._only_review else None
-        gone_ids = queries.vanished_frame_ids(self.con) if self._only_vanished else None
-        lin_ids = queries.lineage_pending_frame_ids(self.con) if self._only_lineage else None
-        sup_ids = queries.superseded_frame_ids(self.con) if self._only_superseded else None
-        ret_ids = queries.retired_frame_ids(self.con) if self._only_retired else None
-        mis_ids = queries.missing_copy_frame_ids(self.con) if self._only_missing_copy else None
         # JEDNA derywacja trimu dla zbioru głównego I dla sibling-setów listwy (SPOT, F4R2#2) —
         # lista powstaje RAZ i idzie w obie strony. Dwie kopie tej enumeracji rozjechały się
         # dokładnie tak, jak zapowiada historia rodziny `only_*`: listwa dostawała `dup_ids`
         # i `review_ids`, a pięciu młodszych braci nie widziała w ogóle, więc w perspektywie
         # z trimem liczniki facetów i godziny portfela liczyły się na zbiorze BEZ przycięcia.
-        trims = [t for t in (dup_ids, review_ids, gone_ids, lin_ids, sup_ids, ret_ids, mis_ids)
-                 if t is not None]
-        # Czy trim perspektywy w ogóle działa - czytane z TEJ SAMEJ listy, którą refresh już zbudował
-        # (FC-2). Ósma kopia enumeracji `only_*` byłaby dokładnie tym, na czym ta rodzina wykłada się
-        # od `483df93`: siedem flag wpiętych w osiem miejsc i jedno pominięte. Karmi receptę powrotu
-        # po geście osi, która musi wiedzieć, czy „× Wyczyść zbiór" wystarczy.
-        self._trim_active = bool(trims)
+        # Skład rodziny czytamy z `_TRIMY` (BP-4), więc dołożenie ósmej flagi jest wpisem w tabelę,
+        # a nie ósmym miejscem do zapamiętania.
+        trims = [getattr(queries, nazwa)(self.con) for atrybut, nazwa in _TRIMY
+                 if getattr(self, atrybut)]
         # NOWY set, NIGDY `&=`: przy pustym filtrze `filter_engine.run` zwraca uniwersum WPROST
         # (`filter_engine.py:171`), a to jest ZAPAMIĘTANY obiekt memoizacji (`_memo_leaf_fns`).
         # `&=` przycinało go W MIEJSCU, więc kolejne `universe_fn()` widziało już przycięty zbiór —
@@ -3442,16 +3538,19 @@ class FramesView(QWidget):
         for sufiks, n in gest.skipped_breakdown:
             if n:
                 msg += i18n.t(f"grid.sel.frame_skip_{sufiks}", n=n)
+        recepta = ""
         if gest.done:
             self.refresh()
-            msg += self._czlon_poza_widokiem(
+            fakt, recepta = self._czlon_poza_widokiem(
                 len(zaznaczone) - self._przywroc_zaznaczenie(zaznaczone), zaznaczone)
+            msg += fakt
         # ZDANIE PO ODŚWIEŻENIU I TYLKO JEDNO — repo dostało tę klasę już DWA RAZY na sąsiedniej
         # osi: `refresh()` kończy własnym `status_message`, a odbiornikiem obu jest jeden
         # `showMessage`, więc emisja przed odświeżeniem ginie w tym samym obrocie pętli zdarzeń.
         # Waży to tu podwójnie: po udanym wycofaniu klatka ZNIKA z perspektywy, więc to zdanie
         # bywa jedynym śladem, że gest się odbył.
         self.status_message.emit(msg)
+        self.status_recipe.emit(recepta)
 
     # ---- panel inspekcji daty (G1/G4 — RenameBar) ----
     def _selected_data_rows(self):
@@ -4016,8 +4115,3 @@ class FramesView(QWidget):
         self.drawer.set_count(0, result=i18n.t("grid.rename.rejected", n=n))
         self._sync_staging_mutex()
         self.status_message.emit(i18n.t("grid.rename.rejected", n=n))
-
-# --- TODO-DŁUG (z kolejki sesji, dieta 2026-08-10; pełne brzmienia: archiwum aa) ---
-# TODO-DŁUG(G2-3d): zakres offsetu (UTC_OFFSET_MAX_MIN) to bramka na NONSENS, nie na pomyłkę -
-#   literówka 600 zamiast 60 przechodzi, a stos melduje potem no_candidates bez wskazania
-#   przyczyny. Panel po zapisie ma mówić, ILE kandydatów wpadło do okna (liczba już policzona).

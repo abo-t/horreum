@@ -1352,12 +1352,14 @@ CATALOG = {
     # `_sync_object_actions` gasi CAŁĄ kontrolkę „Obiekt" - recepta bez słowa „potem" wskazywałaby
     # wtedy napis wyszarzony w tej samej chwili, czyli produkowała dokładnie tę klasę, którą ta
     # paczka zamyka. Kolejność w zdaniu jest kolejnością W CZASIE: najpierw odsłoń, potem przywróć.
+    # BEZ WIODĄCEGO „ · ": te dwa człony nie stoją już w zdaniu raportu, tylko na WŁASNYM widżecie
+    # paska (FH-2), a separator dokłada `_zlacz_recepty`, gdy członów jest więcej niż jeden.
     "grid.sel.object_clear_undo": {
-        "pl": " · przywrócisz: {menu} → {action}",
-        "en": " · to undo this: {menu} → {action}"},
+        "pl": "przywrócisz: {menu} → {action}",
+        "en": "to undo this: {menu} → {action}"},
     "grid.sel.object_clear_undo_after": {
-        "pl": " · potem przywrócisz: {menu} → {action}",
-        "en": " · then undo it: {menu} → {action}"},
+        "pl": "potem przywrócisz: {menu} → {action}",
+        "en": "then undo it: {menu} → {action}"},
     # FC-2: gest bywa gestem, który WYPYCHA własny cel z widoku - przy facecie „Obiekt" cofnięcie
     # zostawia widok pusty (zmierzone: 43 → 0 klatek), bo facet liczy po `f.object_id`. Klucz jest
     # WSPÓLNY DLA OBU OSI zaznaczenia (obiekt i żywotność klatki): na osi klatki wypchnięcie celu
@@ -1370,11 +1372,13 @@ CATALOG = {
     # zawężeniach naraz jeden gest odsłania wszystko. Wariant „zdejmij oba" kazałby zrobić dwa
     # gesty tam, gdzie wystarcza jeden. „× Wyczyść zbiór" zostaje tam, gdzie user ma ZACHOWAĆ
     # perspektywę - jest wtedy węższy, czyli tańszy dla jego zbioru.
+    # RECEPTA WYSZŁA Z NAWIASU RAZEM Z WYJŚCIEM ZE ZDANIA (FH-2): na własnym widżecie nie jest już
+    # wtrętem w raporcie, tylko samodzielną instrukcją, a nawias sugerowałby uwagę na marginesie.
     "grid.sel.out_of_view_set": {
-        "pl": " (odsłoni je „{action}”)", "en": " (reveal with \"{action}\")"},
+        "pl": "odsłoni je „{action}”", "en": "reveal with \"{action}\""},
     "grid.sel.out_of_view_persp": {
-        "pl": " (odsłoni je perspektywa „{perspective}”)",
-        "en": " (reveal with the \"{perspective}\" perspective)"},
+        "pl": "odsłoni je perspektywa „{perspective}”",
+        "en": "reveal with the \"{perspective}\" perspective"},
     "grid.sel.object_restore": {"pl": "Przywróć cofnięte przypisanie",
                                 "en": "Restore undone assignment"},
     "grid.sel.object_restored": {
@@ -1659,6 +1663,14 @@ CATALOG = {
     "grid.lin.offset_saved_busy": {
         "pl": "Odniesienie zapisane: {hours} h. Rodowód NIE policzony: {reason}",
         "en": "Time reference saved: {hours} h. Lineage NOT computed: {reason}",
+    },
+    # NA CO GEST ZADZIAŁAŁ (G2-3d): wskazanie zegara o dobę obok przechodzi walidację zakresu,
+    # więc jedynym sprawdzianem jest to, ile materiału ten zegar odblokował. Człon dokleja się
+    # do KAŻDEGO z trzech zdań wyżej i mówi też zero - to ono odróżnia „zegar nie miał czego
+    # odblokować" od „materiał czekał i właśnie ruszył".
+    "grid.lin.offset_waiting": {
+        "pl": " · klatek czekało na zegar: {n}",
+        "en": " · frames were waiting for a clock: {n}",
     },
     # Powód, który przestał być prawdą, zanim ktokolwiek policzył go ponownie (firsthand 0808).
     # Nie udajemy, że wiemy więcej: mówimy, że TEN ZAPIS jest starszy niż zmiana, i gdzie go odświeżyć.

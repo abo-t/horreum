@@ -1974,6 +1974,60 @@ def test_gest_odniesienia_DOMYKA_SIE_sam(view, gcon):
         "odmowa przeliczenia nie ma prawa cofnąć ZAPISU — to dwa różne zdarzenia"
 
 
+def test_zdanie_po_odniesieniu_MOWI_ILE_KLATEK_CZEKALO_na_ten_zegar(view, gcon):
+    """G2-3d. Zakres offsetu (`UTC_OFFSET_MAX_MIN`) jest bramką na NONSENS, nie na pomyłkę:
+    wskazanie o dobę obok mieści się w zegarach świata i przechodzi, a jedynym śladem był potem
+    powód `no_candidates` na innym ekranie, bez słowa o przyczynie. Gest zostawiał więc człowieka
+    z pytaniem, na które panel przed chwilą policzył odpowiedź.
+
+    MATERIAŁ REALNY, NIE ATRAPA (bramka pakietu, zarzut blokujący). Pierwsza wersja tej bramki
+    porównywała komunikat z wynikiem tej samej funkcji i podmieniała ją `lambda: 7` - była zielona
+    także wtedy, gdy licznik ZAWSZE zwracał zero, czyli nie odróżniała działającego mechanizmu od
+    martwego. Trzy klatki RAW bez odniesienia dają liczbę znaną CO DO SZTUKI i niezerową.
+
+    ⚠ LICZBA JEST CZYTANA PRZED ZAPISEM i to jest cały mechanizm: zapis offsetu czyni powód
+    zwietrzałym (`queries.lineage_reason_stale`), więc odświeżenie po nim nie liczy już propozycji.
+    Bramka pilnuje tego pomiarem, nie zaufaniem - stąd druga tura na tym samym stosie.
+
+    Falsyfikator: przenieś `czekalo = …` pod `set_integration_offset` → pierwsza asercja spada
+    z „3" na „0", czyli dokładnie tam, gdzie ten człon był martwy w chwili narodzin."""
+    _seed_stos_z_kandydatami(gcon, reason="offset_unknown", filetype="raw")
+    assert _zaznacz_frame(view, 10)
+    view._toggle_panel("lineage")
+    assert view.lineage_bar.klatki_bez_odniesienia() == 3, "fikstura nie dała materiału bez zegara"
+    komunikaty = []
+    view.status_message.connect(komunikaty.append)
+
+    view.lineage_bar.offset_asked.emit(60)
+    assert "klatek czekało na zegar: 3" in komunikaty[-1], komunikaty[-1]
+
+    # …a DRUGI gest na tym samym stosie mówi zero i to też jest prawda: zegar jest już wskazany,
+    # więc żadna klatka na niego nie czeka. Ta para asercji odróżnia licznik żywy od zamrożonego.
+    view.lineage_bar.offset_asked.emit(120)
+    assert "klatek czekało na zegar: 0" in komunikaty[-1], komunikaty[-1]
+
+
+def test_licznik_materialu_NIE_PRZEZYWA_wyjscia_z_trybu_propozycji(view, gcon):
+    """GRANICA poprzedniej bramki - i ta sama klasa co BP-4, tylko na drugim stanie. Panel trzymał
+    `_nights` zapalane w `_set_candidates` i niegasnące NIGDZIE, a `_raw_bez_odniesienia` nie było
+    zerowane przy wejściu w oś kalibracji: przy następnym obrazie licznik mówiłby o materiale
+    POPRZEDNIEGO. Dopóki liczby nikt nie czytał, było to poprawne przez przypadek; gest odniesienia
+    właśnie zrobił z niej treść komunikatu.
+
+    Falsyfikator: zdejmij zerowanie z `set_calibration` → druga asercja czerwienieje."""
+    _seed_stos_z_kandydatami(gcon, reason="offset_unknown", filetype="raw")
+    assert _zaznacz_frame(view, 10)
+    view._toggle_panel("lineage")
+    assert view.lineage_bar.klatki_bez_odniesienia() == 3
+
+    view.lineage_bar.set_lineage(None, [], hint="cokolwiek")
+    assert view.lineage_bar.klatki_bez_odniesienia() == 0, "materiał przeżył wyjście z trybu"
+
+    view.lineage_bar._raw_bez_odniesienia = 5          # …i ta sama granica na osi kalibracji
+    view.lineage_bar.set_calibration([])
+    assert view.lineage_bar.klatki_bez_odniesienia() == 0, "materiał przeżył wejście w kalibrację"
+
+
 def test_gest_odniesienia_milknie_na_czas_przebiegu(view, gcon):
     """Ta sama bramka, co dla werdyktu ręki: etap pipeline'u pisze do `integration` w tle, więc
     druga powierzchnia zapisu tego samego stołu musi wtedy zamilknąć."""
@@ -2512,6 +2566,18 @@ def test_para_gestow_CYTUJE_te_same_kanony_w_TYM_SAMYM_porzadku(obj_view):
     assert trojka in po_przywroceniu, po_przywroceniu
 
 
+def _sluchaj_paska(v):
+    """Podłącz się pod OBA kanały paska stanu (FH-2) — zwraca `(raporty, recepty)`.
+
+    Raport („co się stało") i recepta („co możesz teraz zrobić") jadą osobno, bo mają osobne
+    nośniki: raport idzie w `showMessage`, recepta na własny widżet stały. Bramka czytająca sam
+    `status_message` byłaby po tej zmianie ślepa dokładnie na ten człon, o który pyta."""
+    raporty, recepty = [], []
+    v.status_message.connect(raporty.append)
+    v.status_recipe.connect(recepty.append)
+    return raporty, recepty
+
+
 def test_zdanie_po_cofnieciu_PODAJE_droge_powrotu(obj_view):
     """FC-9. Odwracalność gestu jest w aplikacji od R-S2b-3, ale w chwili, w której się przydaje,
     była niewidoczna: licznik „do przywrócenia: 46" siedzi w tooltipie kontrolki, a pozycja menu
@@ -2520,25 +2586,30 @@ def test_zdanie_po_cofnieciu_PODAJE_droge_powrotu(obj_view):
 
     Gest, który NICZEGO nie zdjął, recepty nie dostaje: mówiłaby, jak cofnąć coś, co się nie stało.
 
+    OD FH-2 RECEPTA NIE STOI JUŻ W RAPORCIE i to jest druga połowa tej bramki: człon dopisany na
+    końcu zdania był ucinany przez `QStatusBar` bez wielokropka (zmierzone 252 znaki na 1459 px),
+    więc test pyta osobno o to, że recepta JEST na swoim nośniku, i o to, że raportu już nie
+    obciąża.
+
     Falsyfikator: zdejmij człon `object_clear_undo` z `_po_gescie_osi` → pierwsza asercja
     czerwienieje."""
     from horreum.gui import i18n
     v, con = obj_view
     v.refresh()
     _zaznacz(v, [1, 2])
-    msgs = []
-    v.status_message.connect(msgs.append)
+    raporty, recepty = _sluchaj_paska(v)
 
     v._on_object_clear()
-    assert i18n.t("grid.sel.object_restore") in msgs[-1], msgs[-1]
-    assert i18n.t("grid.sel.object") in msgs[-1]
+    assert i18n.t("grid.sel.object_restore") in recepty[-1], recepty[-1]
+    assert i18n.t("grid.sel.object") in recepty[-1]
+    assert i18n.t("grid.sel.object_restore") not in raporty[-1], raporty[-1]
     # Cel ZOSTAŁ na ekranie (brak zawężenia), więc gest jest wykonalny OD RAZU - i zdanie nie
     # każe czekać na inny gest. Wariant „potem" ma własną bramkę niżej.
-    assert "potem" not in msgs[-1], msgs[-1]
+    assert "potem" not in recepty[-1], recepty[-1]
 
-    msgs.clear()
+    recepty.clear()
     v._on_object_clear()                       # drugi raz: nie ma czego cofać ⇒ nie ma czego cofać wstecz
-    assert i18n.t("grid.sel.object_restore") not in msgs[-1], msgs[-1]
+    assert recepty[-1] == "", recepty[-1]      # …a pusta recepta GASI tę z poprzedniego gestu
 
 
 def test_gest_MOWI_ze_wypchnal_wlasny_cel_z_widoku_I_JAK_go_odzyskac(obj_view):
@@ -2558,19 +2629,20 @@ def test_gest_MOWI_ze_wypchnal_wlasny_cel_z_widoku_I_JAK_go_odzyskac(obj_view):
     v, con = obj_view
     v.apply_object_facet([(5, "NGC6960")])         # zawężenie do obiektu, który zaraz zdejmiemy
     _zaznacz(v, [1, 2])
-    msgs = []
-    v.status_message.connect(msgs.append)
+    raporty, recepty = _sluchaj_paska(v)
     v._on_object_clear()
 
     widoczne = {r["frame_id"] for r in v.model._rows if isinstance(r, dict) and "frame_id" in r}
     assert not ({1, 2} & widoczne), "facet nie wypchnął nagrobków - test nie odtwarza defektu"
-    assert "poza widokiem: 2" in msgs[-1], msgs[-1]
-    assert i18n.t("grid.sel.clear_set") in msgs[-1], msgs[-1]
+    # POMIAR ZOSTAJE W RAPORCIE, INSTRUKCJA IDZIE NA SWÓJ NOŚNIK (FH-2) - „poza widokiem: 2" mówi,
+    # co się stało, a „odsłoni je …" mówi, co z tym zrobić.
+    assert "poza widokiem: 2" in raporty[-1], raporty[-1]
+    assert i18n.t("grid.sel.clear_set") in recepty[-1], recepty[-1]
     # …i to jest recepta WĘŻSZA, nie perspektywa: trimu tu nie ma, więc zbiór usera ma zostać.
-    assert i18n.t("perspective.review") not in msgs[-1], msgs[-1]
+    assert i18n.t("perspective.review") not in recepty[-1], recepty[-1]
     # Droga powrotu ustawiona w kolejności, w której da się ją WYKONAĆ: kontrolka „Obiekt" jest
     # w tej chwili wygaszona (zaznaczenie puste), więc zdanie mówi „potem", nie „teraz".
-    assert "potem" in msgs[-1], msgs[-1]
+    assert "potem" in recepty[-1], recepty[-1]
     assert not v.sel_bar.btn_object.isEnabled(), "kontrolka żywa - bramka nie odtwarza sytuacji"
 
     v._on_clear_selection()                        # …wykonaj receptę
@@ -2645,13 +2717,12 @@ def test_recepta_powrotu_NIE_wskazuje_gestu_ktory_zawezenia_NIE_zdejmie(obj_view
 
     v.apply_perspective("Do przeglądu")            # trim, którego przycisk zbioru nie tyka
     _zaznacz(v, [1, 2])
-    msgs = []
-    v.status_message.connect(msgs.append)
+    raporty, recepty = _sluchaj_paska(v)
     v._on_object_restore()
 
-    assert "poza widokiem: 2" in msgs[-1], msgs[-1]
-    assert i18n.t("perspective.review") in msgs[-1], msgs[-1]
-    assert i18n.t("grid.sel.clear_set") not in msgs[-1], msgs[-1]
+    assert "poza widokiem: 2" in raporty[-1], raporty[-1]
+    assert i18n.t("perspective.review") in recepty[-1], recepty[-1]
+    assert i18n.t("grid.sel.clear_set") not in recepty[-1], recepty[-1]
 
     v.apply_perspective("Przegląd")                # …wykonaj receptę
     widoczne = {r["frame_id"] for r in v.model._rows if isinstance(r, dict) and "frame_id" in r}
@@ -2681,13 +2752,12 @@ def test_przy_DWOCH_zawezeniach_recepta_podaje_JEDEN_gest_ktory_zdejmuje_oba(obj
     v.refresh()
     _zaznacz(v, [1, 2])
     assert len(v._selected_data_rows()) == 2, "oba zawężenia zjadły cel - bramka nie odtwarza układu"
-    msgs = []
-    v.status_message.connect(msgs.append)
+    raporty, recepty = _sluchaj_paska(v)
     v._on_object_restore()
 
-    assert "poza widokiem: 2" in msgs[-1], msgs[-1]
-    assert i18n.t("perspective.review") in msgs[-1], msgs[-1]
-    assert i18n.t("grid.sel.clear_set") not in msgs[-1], msgs[-1]
+    assert "poza widokiem: 2" in raporty[-1], raporty[-1]
+    assert i18n.t("perspective.review") in recepty[-1], recepty[-1]
+    assert i18n.t("grid.sel.clear_set") not in recepty[-1], recepty[-1]
 
     v.apply_perspective("Przegląd")
     widoczne = {r["frame_id"] for r in v.model._rows if isinstance(r, dict) and "frame_id" in r}
@@ -2729,7 +2799,9 @@ def test_KAZDA_recepta_powrotu_ma_klucz_w_katalogu(obj_view):
     warianty = [(False, False), (True, False), (False, True), (True, True)]
     zebrane = set()
     for trim, zbior in warianty:
-        v._trim_active = trim
+        # PRAWDZIWA FLAGA PERSPEKTYWY, nie zapamiętany wynik (BP-4): trim liczy się od tej zmiany
+        # w miejscu użycia, więc bramka ustawia to, co ustawiłaby perspektywa.
+        v._only_review = trim
         v._facet_state = {"object": {"in": [[5, "NGC6960"]]}} if zbior else {}
         wynik = v._recepta_powrotu_do_widoku()
         if wynik is None:
@@ -2766,13 +2838,12 @@ def test_OS_ZYWOTNOSCI_tez_mowi_gdzie_podzialy_sie_klatki(obj_view, monkeypatch)
     v.apply_perspective(grid_mod.PRESET_VANISHED)
     _zaznacz(v, [3])
     assert len(v._selected_data_rows()) == 1, "klatka nie weszła do perspektywy - bramka nie odtwarza układu"
-    msgs = []
-    v.status_message.connect(msgs.append)
+    raporty, recepty = _sluchaj_paska(v)
     v._on_frame_retire()
 
     assert con.execute("SELECT retired_at FROM frame WHERE id = 3").fetchone()[0] is not None
-    assert "poza widokiem: 1" in msgs[-1], msgs[-1]
-    assert i18n.t("perspective.review") in msgs[-1], msgs[-1]
+    assert "poza widokiem: 1" in raporty[-1], raporty[-1]
+    assert i18n.t("perspective.review") in recepty[-1], recepty[-1]
 
 
 def test_PRESET_wskazywany_przez_recepte_jest_naprawde_bez_zawezenia():
@@ -3741,14 +3812,26 @@ def test_KAZDY_preset_ma_etykiete_i_zuzyta_flage():
       2. etykieta jest KLUCZEM KATALOGU i18n - `_PRESET_LABELS` idzie do `i18n.t()` ZMIENNĄ, więc
          bramka kluczy literalnych (`test_klucze_call_site_podzbior_katalogu`) jest tu ślepa,
          a `i18n.t` na nieznanym kluczu nie rzuca - renderuje surowe `perspective.foo` na ekranie;
-      3. każdy klucz `only_*` ze specyfikacji presetu jest ZUŻYWANY przez trim w `_refresh`, a nie
-         tylko wyzerowany w `__init__` - inaczej perspektywa cicho pokazuje pełny grid zamiast
+      3. każdy klucz `only_*` ze specyfikacji presetu ma WIERSZ W `_TRIMY`, a nie jest tylko
+         wyzerowany w `__init__` - inaczej perspektywa cicho pokazuje pełny grid zamiast
          przyciętego, a to jest awaria BEZ komunikatu, więc gorsza od `KeyError`.
+
+    PUNKT 3 PYTA OD BP-4 O TABELĘ **ORAZ O JEJ KONSUMENTÓW**. Wcześniej szukał literału
+    `self._only_X` w źródle `_refresh` - a to wiązało bramkę z jednym KSZTAŁTEM kodu: enumeracja
+    zeszła do `_TRIMY`, derywacja została ta sama, a bramka czerwieniała.
+
+    ⚠ SAMO PYTANIE O WIERSZ W TABELI JEST ZA SŁABE i to jest zarzut zgodny u DWÓCH soczewek bramki
+    pakietu, nie teoria: wiersz w tabeli nic nie znaczy, dopóki ktoś tabelę czyta, więc podmiana
+    `trims` w `_refresh` na pustą listę przechodziłaby na zielono i produkowała dokładnie tę cichą
+    awarię („perspektywa pokazuje pełny grid"), którą ten docstring nazywa gorszą od `KeyError`.
+    Stąd dwa asserty o KONSUMENTACH - jeden per oś, bo osie są dwie i rozjeżdżają się osobno:
+    `_refresh` przycina zbiór, `_trim_aktywny` karmi receptę powrotu.
 
     Punkt 3 pilnuje TRZECH miejsc naraz, bo każde z nich samo w sobie przepuszcza cichą awarię:
     ustawienia flagi w `_on_perspective`, derywacji trimu w `_refresh` i przekazania go listwie
     facetów. Czwarte miejsce - serializacja spec-a - ma własny test wyżej."""
-    zrodlo_trimu = _ZRODLO_GRIDU.split("def _refresh(")[1]
+    import inspect
+    atrybuty_trimu = {atrybut for atrybut, _ in grid_mod._TRIMY}
     for nazwa, spec in grid_mod.PRESETS.items():
         assert nazwa in grid_mod._PRESET_LABELS, f"preset bez etykiety wyświetlania: {nazwa!r}"
         from horreum.gui.i18n_catalog import CATALOG
@@ -3756,9 +3839,22 @@ def test_KAZDY_preset_ma_etykiete_i_zuzyta_flage():
             f"etykieta presetu {nazwa!r} spoza katalogu i18n: {grid_mod._PRESET_LABELS[nazwa]!r}")
         for klucz in (k for k in spec if k.startswith("only_")):
             assert f"self._{klucz}" in _ZRODLO_GRIDU, f"flaga {klucz!r} presetu {nazwa!r} nieużywana"
-            assert f"self._{klucz}" in zrodlo_trimu, (
-                f"flaga {klucz!r} presetu {nazwa!r} nie derywuje trimu w `_refresh` - perspektywa "
+            assert f"_{klucz}" in atrybuty_trimu, (
+                f"flaga {klucz!r} presetu {nazwa!r} nie ma wiersza w `_TRIMY` - perspektywa "
                 f"pokaże PEŁNY grid zamiast przyciętego, bez żadnego komunikatu")
+    for metoda in (grid_mod.FramesView._refresh, grid_mod.FramesView._trim_aktywny):
+        assert "_TRIMY" in inspect.getsource(metoda), (
+            f"`{metoda.__name__}` przestał czytać `_TRIMY` - tabela z wierszami, których nikt nie "
+            f"konsumuje, jest bramką na dane zamiast na zachowanie")
+    # …a tabela nie ma prawa opisywać flagi, której widok nie zna: martwy wiersz kazałby
+    # `_trim_aktywny` pytać o atrybut, którego `__init__` nie stawia (AttributeError w recepcie).
+    # Pytamy INSTANCJI, nie źródła: zapis `a = b = False` jest w tym pliku w użyciu (`_on_clear…`),
+    # więc bramka tekstowa czerwieniałaby fałszywie przy pierwszym takim skróceniu.
+    from horreum.gui import queries as queries_mod
+    for atrybut, nazwa_zapytania in grid_mod._TRIMY:
+        assert hasattr(grid_mod.FramesView, "_trim_aktywny")
+        assert hasattr(queries_mod, nazwa_zapytania), (
+            f"wiersz `_TRIMY` wskazuje nieistniejące zapytanie: {nazwa_zapytania!r}")
 
 
 def test_listwa_facetow_dostaje_KOMPLET_trimow_perspektywy():

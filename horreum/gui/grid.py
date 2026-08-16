@@ -2219,6 +2219,8 @@ class FramesView(QWidget):
         self._only_retired = False
         self._only_missing_copy = False
         self._trim_active = False   # czy trim perspektywy przyciął zbiór - liczone RAZ w refresh() (FC-2)
+        self._cel_gestu = []        # klatki wypchnięte z widoku przez ostatni gest - wracają do
+                                    # zaznaczenia przy najbliższym przeładowaniu zbioru (FC-2)
         self._reveal_facet = None   # (facet, wartość) do odsłonięcia w listwie — patrz `apply_object_facet`
         self._frame_ids = []      # frame_id widoczne w gridzie (cel makra) — aktualizowane w refresh()
         self._run_id = None       # JEDEN run_id sesji makra (R#5 lifecycle: stage→commit/reject zwalnia)
@@ -2592,7 +2594,8 @@ class FramesView(QWidget):
             self.status_message.emit(i18n.t("grid.sel.object_empty"))
         return ids
 
-    def _po_gescie_osi(self, klucz, gest, *, ogon="", odwracalny=False, **kw):
+    def _po_gescie_osi(self, klucz, gest, *, ogon="", odwracalny=False,
+                       canons_key="grid.sel.object_canons", **kw):
         """Wspólny ogon WSZYSTKICH gestów osi: zdanie z ROZBICIEM per fakt + odświeżenie CZTERECH
         powierzchni + ZACHOWANIE ZAZNACZENIA.
 
@@ -2625,7 +2628,7 @@ class FramesView(QWidget):
         # placeholder zostawiłby wiszący dwukropek nad pustką. Nadanie go nie dokłada: tam kanon
         # jest w zdaniu bazowym, bo user sam go przed chwilą wybrał.
         if gest.canons and "canon" not in kw:
-            msg += i18n.t("grid.sel.object_canons", canons=_lista_kanonow(gest.canons))
+            msg += i18n.t(canons_key, canons=_lista_kanonow(gest.canons))
         poza = 0
         if gest.assigned:
             # CZTERY POWIERZCHNIE: wiersze gridu, facety (Obiekt zmienił zawartość), licznik/pasek
@@ -2642,7 +2645,7 @@ class FramesView(QWidget):
             # domysłem z liczników klingi - a recepta schodzi od stanu zawężenia, żeby nie
             # obiecywać kliknięcia, które akurat tego zbioru nie odsłoni.
             poza = len(zaznaczone) - wrocilo
-            msg += self._czlon_poza_widokiem(poza)
+            msg += self._czlon_poza_widokiem(poza, zaznaczone)
         # RECEPTA ODWRACALNOŚCI SKŁADA SIĘ TUTAJ, NIE U WOŁAJĄCEGO (bramka pakietu, zarzut
         # blokujący) - bo jej treść zależy od tego, czy cel został na ekranie, a to wie dopiero
         # ten kod. Gdy klatki wyszły z widoku, zaznaczenie po `refresh()` jest puste, więc
@@ -2662,7 +2665,7 @@ class FramesView(QWidget):
         # pętli trafiają w jeden `showMessage`, więc drugie wymazuje pierwsze (bramka pakietu 0810).
         self.status_message.emit(msg + ogon)
 
-    def _czlon_poza_widokiem(self, poza):
+    def _czlon_poza_widokiem(self, poza, cel=None):
         """Człon „poza widokiem: N" wraz z receptą - WSPÓLNY DLA OBU OSI zaznaczenia (FC-2).
 
         Obie osie mają ten sam problem i to nie jest analogia: na osi obiektu gest wypycha cel przy
@@ -2674,6 +2677,10 @@ class FramesView(QWidget):
         odpowiedzią: zdanie o zerze klatek poza widokiem mówiłoby o czymś, co się nie stało."""
         if not poza:
             return ""
+        # …i zapamiętaj CEL, żeby recepta odsłaniająca oddała go w zaznaczeniu (`refresh`).
+        # Bez tego odsłonięcie jest tylko połową drogi: zbiór wraca, a klatki gestu toną w nim
+        # bez śladu - zmierzone firsthandem na 43 klatkach w widoku 16 901 wierszy.
+        self._cel_gestu = list(cel or [])
         czlon = i18n.t("grid.sel.out_of_view", n=poza)
         recepta = self._recepta_powrotu_do_widoku()
         if recepta:
@@ -2926,6 +2933,7 @@ class FramesView(QWidget):
         # samym pliku: emisja przed `refresh()` ginęła dokładnie tak samo.
         self._po_gescie_osi(
             "grid.sel.object_restored", gest,
+            canons_key="grid.sel.object_canons_restored",
             ogon=(" " + i18n.t("grid.sel.object_restore_no_memory", n=bez_pamieci)
                   if bez_pamieci else ""))
 
@@ -3217,6 +3225,18 @@ class FramesView(QWidget):
         rows = queries.cards_pivot(self.con, base_ids, keywords) if (base_ids and keywords) else []
         pv = pivot_mod.build_pivot(base_ids, keywords, rows)
         self.model.set_data(base, pv, keywords, group_by=self.combo_group.currentData())
+        # CEL OSTATNIEGO GESTU WRACA RAZEM ZE ZBIOREM (FC-2, firsthand). Recepta powrotu odsłania
+        # zbiór, ale sama nie ODNAJDUJE w nim celu: zmierzone na żywym archiwum - po wykonaniu
+        # recepty widok miał 16 901 wierszy, zaznaczenie 0 i wygaszoną kontrolkę, więc 43 klatki
+        # gestu były nie do wyłuskania. Recepta prowadziła w ślepy zaułek dokładnie tam, gdzie
+        # miała pomóc. Cel odkłada się więc sam przy najbliższym przeładowaniu zbioru.
+        # JEDNORAZOWO, wzorem `_reveal_facet`: stan konsumuje PIERWSZY refresh po geście, także
+        # gdy niczego nie odłożył. Bez wygaszania zaznaczenie wracałoby przy dowolnym późniejszym
+        # odświeżeniu (zmiana kolumn, sortu) - czyli tam, gdzie user o nie nie prosił, a granica
+        # „zaznaczenie przeżywa GEST, nie każdy refresh" jest w tym repo pinowana od R-S2b-3.
+        if self._cel_gestu:
+            cel, self._cel_gestu = self._cel_gestu, []
+            self._przywroc_zaznaczenie(cel)
         n = len(base)
         self._n_total = n
         self._update_count()
@@ -3424,7 +3444,8 @@ class FramesView(QWidget):
                 msg += i18n.t(f"grid.sel.frame_skip_{sufiks}", n=n)
         if gest.done:
             self.refresh()
-            msg += self._czlon_poza_widokiem(len(zaznaczone) - self._przywroc_zaznaczenie(zaznaczone))
+            msg += self._czlon_poza_widokiem(
+                len(zaznaczone) - self._przywroc_zaznaczenie(zaznaczone), zaznaczone)
         # ZDANIE PO ODŚWIEŻENIU I TYLKO JEDNO — repo dostało tę klasę już DWA RAZY na sąsiedniej
         # osi: `refresh()` kończy własnym `status_message`, a odbiornikiem obu jest jeden
         # `showMessage`, więc emisja przed odświeżeniem ginie w tym samym obrocie pętli zdarzeń.

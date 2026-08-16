@@ -1335,7 +1335,15 @@ CATALOG = {
     # OSOBNY klucz, nie placeholder w zdaniu bazowym: to zdanie ma dwóch wołających o różnych
     # kwargach, więc `{canons}` w nim byłoby `KeyError`-em u drugiego — a bramka i18n pyta
     # o komplet PL/EN i istnienie klucza, NIE o parytet placeholderów z wołającym.
-    "grid.sel.object_canons": {"pl": ": {canons}", "en": ": {canons}"},
+    # ⚠ CZŁON MUSI NAZWAĆ SWÓJ PRZEDMIOT, bo nie stoi już przy zdaniu bazowym (firsthand). Goły
+    # dwukropek przyklejał się do OSTATNIEGO członu rozbicia: „…· z nagłówka/regionu: 482: IC434,
+    # LMC, Moon (+4)" czyta się jako nazwy tych 482 POMINIĘTYCH, a nazywa 229 ZDJĘTYCH. Zmierzone
+    # na żywym archiwum przy zaznaczeniu 711 klatek.
+    # …a czasownik należy do GESTU, nie do członu: „zdjęto" przy przywracaniu byłoby nieprawdą
+    # o kierunku zapisu. Domyślny klucz opisuje cofnięcie, przywracanie podaje własny.
+    "grid.sel.object_canons": {"pl": " · zdjęto z: {canons}", "en": " · removed from: {canons}"},
+    "grid.sel.object_canons_restored": {
+        "pl": " · oddano: {canons}", "en": " · given back: {canons}"},
     "grid.sel.object_canons_more": {"pl": " (+{n})", "en": " (+{n})"},
     # FC-9: droga powrotu W ZDANIU, nie tylko w tooltipie kontrolki. Recepta cytuje etykiety
     # kontrolki i pozycji menu, więc zmiana któregokolwiek napisu przenosi się tu sama.

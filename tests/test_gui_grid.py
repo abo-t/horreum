@@ -2576,6 +2576,54 @@ def test_gest_MOWI_ze_wypchnal_wlasny_cel_z_widoku_I_JAK_go_odzyskac(obj_view):
     v._on_clear_selection()                        # …wykonaj receptę
     widoczne = {r["frame_id"] for r in v.model._rows if isinstance(r, dict) and "frame_id" in r}
     assert {1, 2} <= widoczne, "recepta wykonana, a klatki się nie odsłoniły"
+    # …i cel gestu WRACA W ZAZNACZENIU, więc drugi krok recepty da się wykonać. Bez tego
+    # odsłonięcie jest połową drogi: firsthand zmierzył widok 16 901 wierszy z zaznaczeniem 0,
+    # w którym 43 klatki gestu były nie do wyłuskania, a kontrolka „Obiekt" stała wygaszona.
+    assert {r["frame_id"] for r in v._selected_data_rows()} == {1, 2}, "cel gestu zgubiony"
+    assert v.sel_bar.btn_object.isEnabled(), "druga połowa recepty dalej niewykonalna"
+
+
+def test_cel_gestu_wraca_TYLKO_RAZ_a_nie_przy_kazdym_odswiezeniu(obj_view):
+    """GRANICA poprzedniej bramki. Zaznaczenie przeżywa GEST i gest odsłaniający po nim - a nie
+    każdy późniejszy `refresh()`: zmiana kolumn, sortu czy filtra to zdarzenia, po których
+    zaznaczenie ginąć POWINNO, bo user zmienił ZBIÓR, a nie stan tych klatek (R-S2b-3).
+
+    Falsyfikator: zdejmij konsumpcję `_cel_gestu` w `refresh()` (zostaw samo odczytanie)
+    → zaznaczenie wraca po każdym odświeżeniu i ta bramka czerwienieje."""
+    v, con = obj_view
+    v.apply_object_facet([(5, "NGC6960")])
+    _zaznacz(v, [1, 2])
+    v._on_object_clear()
+    v._on_clear_selection()
+    assert len(v._selected_data_rows()) == 2      # …pierwszy refresh po geście oddaje cel
+
+    v.table.selectionModel().clearSelection()
+    v.refresh()                                    # …a drugi już nie ma czego oddawać
+    assert not v._selected_data_rows(), "zaznaczenie wraca po odświeżeniu, które go nie dotyczy"
+
+
+def test_czlon_kanonow_NAZYWA_swoj_przedmiot_a_nie_przykleja_sie_do_sasiada(obj_view):
+    """Człon kanonów stoi na końcu zdania, za rozbiciem pominięć, więc goły dwukropek przyklejał
+    się do CUDZEJ liczby: „· z nagłówka/regionu: 482: IC434, LMC, Moon" czyta się jako nazwy tych
+    482 pominiętych, a nazywa klatki ZDJĘTE. Zmierzone firsthandem na zaznaczeniu 711 klatek.
+
+    Czasownik należy do GESTU: przywrócenie „oddaje" obiekt, więc „zdjęto z" byłoby tam nieprawdą
+    o kierunku zapisu.
+
+    Falsyfikator: przywróć w katalogu `object_canons` samo `": {canons}"` → pierwsza asercja
+    czerwienieje; podaj przywracaniu ten sam klucz co cofnięciu → czerwienieje druga."""
+    v, con = obj_view
+    v.refresh()
+    _zaznacz(v, [1, 2, 3])                        # 3 = light z nagłówka, gest go NIE tknie
+    msgs = []
+    v.status_message.connect(msgs.append)
+    v._on_object_clear()
+    assert "z nagłówka/regionu: 1 · zdjęto z: NGC6960" in msgs[-1], msgs[-1]
+
+    _zaznacz(v, [1, 2])
+    v._on_object_restore()
+    assert "oddano: NGC6960" in msgs[-1], msgs[-1]
+    assert "zdjęto z" not in msgs[-1], msgs[-1]
 
 
 def test_recepta_powrotu_NIE_wskazuje_gestu_ktory_zawezenia_NIE_zdejmie(obj_view):

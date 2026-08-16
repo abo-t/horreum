@@ -4,7 +4,7 @@ Format wzorowany na [Keep a Changelog](https://keepachangelog.com/pl/1.1.0/).
 Wersjonowanie [semantyczne](https://semver.org/lang/pl/). Projekt jest we wczesnym rozwoju —
 schemat i API mogą się jeszcze zmieniać.
 
-## [Niewydane]
+## [0.9.1] - 2026-08-16
 
 ### Naprawione
 
@@ -761,6 +761,7 @@ Fundament: przejście na model „baza = autorytet, `sha1` = tożsamość".
 - **Import zasilający** świeżej bazy z bazy‑dawcy (read‑only).
 - **CLI**: `init` / `scan` / `group` / `resolve` / `delta`.
 
+[0.9.1]: https://github.com/abo-t/horreum/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/abo-t/horreum/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/abo-t/horreum/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/abo-t/horreum/compare/v0.6.0...v0.7.0

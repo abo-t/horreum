@@ -19,10 +19,12 @@ nieosiągalny; dla facetu bez aktywnego wyboru sibling == stan pełny, D-UX-3(a)
 
 from __future__ import annotations
 
-# Jedyny import rdzenia w tym module — i celowy: szukajka MUSI liczyć igłę tą samą
-# normalizacją, którą przebieg liczy klucze równoważności (`search_hit`). Moduł
-# zostaje Qt-wolny, więc bramka izolacji §7.2 się nie rusza.
+# Importy rdzenia w tym module - oba celowe i oba dla `search_hit`: szukajka MUSI liczyć igłę tą
+# samą normalizacją, którą przebieg liczy klucze równoważności, a frazę-OZNACZENIE rozpoznawać tą
+# samą gramatyką katalogową (`catalog_canon` + `xref`, B1/C6 2026-09-26). Moduł zostaje Qt-wolny,
+# więc bramka izolacji §7.2 się nie rusza.
 from horreum.resolve._text import norm_alnum
+from horreum.resolve.catalog import catalog_canon, xref
 
 # Stała kolejność facetów: deterministyczne drzewo (testy, describe) i kolejność grup w listwie.
 FACETS = ("object", "filter", "kind", "telescope", "night")
@@ -145,6 +147,12 @@ def search_hit(needle: str, label, aliases=None):
       dokładnie na tę klasę obiektów, dla której powstała cała ta paczka (obiekty własne).
     * **PUSTA IGŁA PASUJE ZAWSZE** — wołający chowa wiersz dopiero po `None`, a „nic nie wpisano"
       nie jest pytaniem.
+    * **OZNACZENIE KATALOGOWE TRAFIA DOKŁADNIE** (C6, 2026-09-26) - fraza, którą rozpoznaje
+      `catalog_canon` (`C4`, `Caldwell 4`, `M 106`), trafia wyłącznie wiersz TEGO kanonu (przed
+      albo po `xref`) albo wiersz, który ma to oznaczenie wśród aliasów. Podciąg był tu fałszywym
+      tropem: `C4` zawiera się w `NGC4258`. Fraza nie-katalogowa (nazwa potoczna, obiekt własny,
+      sam skrót `NGC`) dalej trafia podciągiem. Ta sama reguła służy szukajce okna „Przypisz
+      obiekt" (`assign_dialog`) - jeden predykat, dwaj wołający.
 
     Predykat mieszka TU, nie w listwie: `FacetRail` jest głupim widżetem (NARROW), a to jest logika
     — z normalizacją rdzenia i regułą, którą trzeba móc przetestować bez Qt.
@@ -159,6 +167,15 @@ def search_hit(needle: str, label, aliases=None):
     igla = norm_alnum(needle or "")
     if not igla:
         return HIT_LABEL
+    wlasne = (aliases or {}).get(str(label), ())
+    cc = catalog_canon(needle, split=False)
+    if cc is not None:
+        if str(label) == cc:
+            return HIT_LABEL
+        # Trafienie przez równoważność mówi, KTÓRĄ nazwą trafiło (`C4` przy `NGC7023`) - tą samą
+        # drogą co alias, bo dla usera to jest druga nazwa wiersza, nie jego etykieta.
+        klucz = norm_alnum(cc)
+        return klucz if str(label) == xref(cc) or klucz in wlasne else None
     if igla in norm_alnum(str(label)):
         return HIT_LABEL
-    return next((a for a in sorted((aliases or {}).get(str(label), ())) if igla in a), None)
+    return next((a for a in sorted(wlasne) if igla in a), None)

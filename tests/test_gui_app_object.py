@@ -1220,13 +1220,14 @@ def test_wiersz_cofnietych_MOWI_co_stanie_sie_z_werdyktem(repair):
 def test_propozycja_z_dwoch_swiadkow_i_domyslne_zaznaczenie(repair):
     """D-PD-2: folder po `LIGHTS` i nazwa pliku mówią to samo → pole wypełnione, grupa ZAZNACZONA
     (bez tego obietnica „≤ 4 interakcje" jest nieprawdziwa). Podgląd pokazuje DOKŁADNIE to, co
-    pójdzie do pliku — z `repr`."""
+    pójdzie do pliku - z `repr`. Od Q6 (2026-09-26) to FORMA NAGŁÓWKA kanonu (`NGC 7635`), a pole
+    edycji dalej pokazuje propozycję ze ścieżki."""
     v, con, files, _open = repair
     dlg = _open()
     assert len(dlg._groups) == 1                      # jeden folder = jedna grupa, dwie klatki
     g = dlg._groups[0]
     assert g["edit"].text() == "NGC7635" and g["check"].isChecked()
-    assert g["preview"].text() == "do pliku: OBJECT = 'NGC7635'"
+    assert g["preview"].text() == "do pliku: OBJECT = 'NGC 7635'"
     assert dlg.save_btn.isEnabled() and "2" in dlg.save_btn.text()
     dlg.reject()
 
@@ -1248,19 +1249,24 @@ def test_rozjazd_swiadkow_zostawia_pole_puste(repair, tmp_path):
 
 
 def test_walidacja_kanonu_bramki_odmowy(repair):
-    """D-PD-4: kolejność `strip` → `catalog_canon` → bramki. Do pliku idzie forma KANONICZNA
-    (kolaps spacji + upper), nigdy surowy segment; nie-ASCII, przepełnienie rekordu i nazwa
-    nierozpoznawalna przez resolver są ODMOWĄ (zero zapisu), nie 'failed' po commicie."""
+    """D-PD-4: kolejność `strip` → `catalog_canon` → `xref` → `header_form` → bramki. Do pliku
+    idzie FORMA NAGŁÓWKA kanonu Horreum (Q6 2026-09-26, D-PD-9 odwrócone: `M 42` → `NGC 1976`),
+    nigdy surowy segment; nie-ASCII, przepełnienie rekordu i nazwa nierozpoznawalna przez resolver
+    są ODMOWĄ (zero zapisu), nie 'failed' po commicie."""
     from horreum.gui.app import _validate_object_value as val
     v, con, files, _open = repair
-    assert val(con, "  ngc 7635 ")[0] == "NGC7635"           # normalizacja PRZED zapisem
-    assert val(con, "M 42")[0] == "M42"
+    assert val(con, "  ngc 7635 ")[0] == "NGC 7635"          # forma nagłówka PRZED zapisem
+    assert val(con, "M 42")[0] == "NGC 1976"                 # po `xref` (NGC-wins), ze spacją
+    assert val(con, "M82")[0] == "NGC 3034"                  # folder `M82` → karta `NGC 3034`
+    assert val(con, "Sh2 131")[0] == "Sh2-131"               # dywiz jest częścią oznaczenia
     assert val(con, "")[1] and val(con, "   ")[1]            # pusto
     assert val(con, "Mgławica Serce")[1]                     # nie-ASCII
     assert val(con, "NGC" + "7" * 70)[1]                     # dłuższe niż rekord nagłówka
     assert val(con, "Wesolinka Kosmiczna 7")[1]              # ani katalog, ani znana nazwa
-    # nazwa potoczna, którą resolver ZNA, przechodzi (i idzie do pliku w formie usera)
-    assert val(con, "Bubble Nebula")[0] == "Bubble Nebula"
+    # D2: nazwa zwyczajowa, którą resolver ZNA, idzie jako forma nagłówka kanonu (jedna wersja
+    # na obiekt), a nazwa po polsku ze słownika własnego zdejmuje przy okazji znak spoza ASCII
+    assert val(con, "Bubble Nebula")[0] == "NGC 7635"
+    assert val(con, "Wielki Obłok Magellana")[0] == "LMC"
 
 
 def test_czwarta_bramka_pyta_cala_drabina_nazwy(repair):
@@ -1278,13 +1284,15 @@ def test_czwarta_bramka_pyta_cala_drabina_nazwy(repair):
     from horreum import resolver
     v, con, files, _open = repair
     assert val(con, "Moon")[0] == "Moon"                     # szczebel solar
-    assert val(con, "C/2023 A3")[0] == "C/2023 A3"           # kometa (IAU-desig)
+    assert val(con, "C/2023 A3")[0] == "C/2023 A3 (Tsuchinshan-ATLAS)"   # kometa → kanon (D2)
     assert val(con, "WR134")[0] == "WR134"                   # szczebel SŁOWNIKA (S1) — bez nauki
     assert val(con, "Zupelnie Wymyslona 77")[1]              # nieznana NIKOMU → odmowa
     oid, _ = repo.upsert_object(con, canon="ZW77", catalog=None, kind="deep_sky", now=NOW_PD)
     repo.add_object_alias(con, alias_norm="ZUPELNIEWYMYSLONA77", object_id=oid, source="user",
                           now=NOW_PD)
-    assert val(con, "Zupelnie Wymyslona 77")[0] == "Zupelnie Wymyslona 77"   # user nauczył → przejdzie
+    # user nauczył → przejdzie; kanon `ZW77` z własnego zapisu NIE wraca (zna go tylko alias),
+    # więc do pliku idzie tekst usera, nie kanon (`forma_karty_object` → None)
+    assert val(con, "Zupelnie Wymyslona 77")[0] == "Zupelnie Wymyslona 77"
     assert not resolver.name_resolves(con, "---")            # pusty klucz aliasu NIE łapie wszystkiego
 
 
@@ -1297,12 +1305,12 @@ def test_dwa_takty_zapis_do_pliku_i_kolejka_pusta(repair):
     before = {r["frame_id"]: r["sha1_data"] for r in queries.nameless_frames(con)}
     dlg = _open()
     dlg._on_save()
-    assert [fits.getheader(str(p))["OBJECT"] for p in files] == ["NGC7635", "NGC7635"]
+    assert [fits.getheader(str(p))["OBJECT"] for p in files] == ["NGC 7635", "NGC 7635"]
     after = con.execute(
         "SELECT f.id, f.sha1_data, h.object_raw, f.object_id FROM frame f "
         "JOIN header h ON h.frame_id = f.id").fetchall()
     assert {r["id"]: r["sha1_data"] for r in after} == before      # tożsamość przeżyła zapis
-    assert {r["object_raw"] for r in after} == {"NGC7635"}         # zeznanie odświeżone re-syncem
+    assert {r["object_raw"] for r in after} == {"NGC 7635"}        # zeznanie odświeżone re-syncem
     assert {r["object_id"] for r in after} == {None}               # oś czeka na takt 3
     assert queries.review_queue(con)["nameless_count"] == 0
     assert not dlg.undo_btn.isHidden() and not dlg.resolve_btn.isHidden()   # okno bez show(): isVisible() zawodne
@@ -2322,3 +2330,505 @@ def test_oba_zdania_osi_w_oknie_skladaja_czlony_JEDNYM_domem(sciezka, monkeypatc
     v._on_assign()
     assert msgs[-1].endswith(" · <dom>"), msgs[-1]
     assert len(wolane) == 2
+
+
+# ═══════════════════ ALIASY W OKNIE „Przypisz obiekt" + FORMA NAGŁÓWKA (decyzja usera 2026-09-26)
+
+NOW_AL = "2026-09-26T12:00:00Z"
+
+
+def _dopisz_obiekt(con, canon, catalog, kind, aliasy=()):
+    """Obiekt z JEDNĄ klatką light (lista okna = `library_objects`, a ta ma `JOIN frame`) i aliasami
+    w `object_alias` jako `(alias_norm, source)`."""
+    oid, _ = repo.upsert_object(con, canon=canon, catalog=catalog, kind=kind, now=NOW_AL)
+    fid, _ = repo.upsert_frame(con, sha1_data=f"sha-al-{canon}", kind="light", filetype="fits",
+                               camera_id=None, now=NOW_AL)
+    repo.assign_object(con, frame_id=fid, object_id=oid, object_source="header", now=NOW_AL)
+    for alias_norm, source in aliasy:
+        repo.add_object_alias(con, alias_norm=alias_norm, object_id=oid, source=source, now=NOW_AL)
+    return oid
+
+
+@pytest.fixture
+def aliasy(view):
+    """Fixture §8 + cztery obiekty, które pokrywają źródła aliasów okna: xref w bazie (NGC4258 ←
+    M106), xref WYŁĄCZNIE z assetu (NGC7023 ← C4, LDN1174 - bez wiersza w `object_alias`), nazwa
+    potoczna (Sh2-131) i obiekt własny ze słownika (LMC). Aliasy techniczne (zapis kanonu) celowo
+    obecne - okno ma je pominąć."""
+    v, con, ids = view
+    _dopisz_obiekt(con, "NGC4258", "NGC", "deep_sky",
+                   [("M106", "catalog_xref"), ("NGC4258", "header")])
+    _dopisz_obiekt(con, "NGC7023", "NGC", "deep_sky", [("NGC7023", "header")])
+    _dopisz_obiekt(con, "Sh2-131", "Sh2", "deep_sky",
+                   [("SH2131", "header"), ("ELEPHANTSTRUNKNEBULA", "common_name")])
+    _dopisz_obiekt(con, "LMC", None, "own",
+                   [("LMC", "curated"), ("LARGEMAGELLANICCLOUD", "curated")])
+    return v, con, ids
+
+
+def _pozycje(dlg):
+    """Tekst każdej pozycji combo poza zerową, kluczowany kanonem z danych pozycji."""
+    return {dlg.combo.itemData(i)[1]: dlg.combo.itemText(i) for i in range(1, dlg.combo.count())}
+
+
+def test_lista_pokazuje_kanon_katalog_i_aliasy_bez_technicznych(aliasy):
+    v, con, ids = aliasy
+    dlg = AssignObjectDialog(con, object_raw="FlatWizard", frame_count=2, parent=v)
+    poz = _pozycje(dlg)
+    assert poz["NGC4258"] == "NGC4258  ·  NGC  ·  M106"          # `NGC4258` z nagłówka pominięty
+    assert poz["NGC7023"] == "NGC7023  ·  NGC  ·  C4, LDN1174"     # równoważność z assetu
+    assert poz["Sh2-131"] == "Sh2-131  ·  Sh2  ·  ELEPHANTSTRUNKNEBULA"
+    # Obiekt własny: brzmienie ze słownika zamiast `alias_norm`, pusty katalog jako `-`.
+    assert poz["LMC"] == "LMC  ·  -  ·  Large Magellanic Cloud"
+    assert poz["NGC7000"] == "NGC7000  ·  NGC"                     # bez aliasów - bez ogona
+    dlg.close()
+
+
+def test_szukajka_zaweza_liste_po_aliasie_i_zachowuje_wybor(aliasy):
+    """`M 106` (i `m106`) znajduje NGC4258 przez alias; fraza bez trafień mówi to w pozycji zerowej;
+    wybór przeżywa zawężenie, a schowany wybór gaśnie (akcja nie celuje w niewidoczny obiekt)."""
+    v, con, ids = aliasy
+    dlg = AssignObjectDialog(con, object_raw="FlatWizard", frame_count=2, parent=v)
+    dlg.search.setText("M 106")
+    assert list(_pozycje(dlg)) == ["NGC4258"]
+    dlg.search.setText("m106")
+    assert list(_pozycje(dlg)) == ["NGC4258"]
+    dlg.search.setText("magellanic")
+    assert list(_pozycje(dlg)) == ["LMC"]
+    dlg.search.setText("xyz 123")
+    assert list(_pozycje(dlg)) == []
+    assert dlg.combo.itemText(0) == "(żaden obiekt nie pasuje do „xyz 123”)"
+    assert not dlg.accept_btn.isEnabled()
+    dlg.search.setText("LDN 1174")                     # alias WYŁĄCZNIE z assetu xref
+    assert list(_pozycje(dlg)) == ["NGC7023"]
+    dlg.combo.setCurrentIndex(1)
+    assert dlg.accept_btn.isEnabled()
+    dlg.search.setText("NGC")                          # szersza fraza - wybór zostaje
+    assert dlg.combo.currentData()[1] == "NGC7023"
+    dlg.search.setText("LMC")                          # fraza chowa wybór - combo wraca na zero
+    assert dlg.combo.currentData() is None
+    assert not dlg.accept_btn.isEnabled()
+    dlg.search.setText("")
+    assert len(_pozycje(dlg)) == 6                     # M42, NGC7000 + cztery dopisane
+    dlg.close()
+
+
+@pytest.mark.parametrize("fraza, trafione", [
+    ("C4", ["NGC7023"]),                   # podciąg trafiłby też `NGC4258` („NGC4…") - dokładnie
+    ("Caldwell 4", ["NGC7023"]),           # inna pisownia tego samego oznaczenia
+    ("M 106", ["NGC4258"]),
+    ("Messier 106", ["NGC4258"]),
+    ("NGC 4258", ["NGC4258"]),
+    ("NGC 42", []),                        # oznaczenie bez obiektu - nie podciąg `NGC4258`
+    ("Sh2 131", ["Sh2-131"]),
+    ("NGC", ["NGC4258", "NGC7000", "NGC7023"]),   # sam skrót nie jest oznaczeniem - podciąg
+    ("elephant", ["Sh2-131"]),             # nazwa potoczna - podciąg
+    ("magellanic", ["LMC"]),               # obiekt własny - podciąg
+])
+def test_szukajka_oznaczenie_katalogowe_DOKLADNIE_reszta_podciagiem(aliasy, fraza, trafione):
+    """B1: fraza rozpoznana przez `catalog_canon` przechodzi przez kanon i `xref` i trafia obiekt
+    TEGO kanonu; nazwy nie-katalogowe dalej trafiają podciągiem."""
+    v, con, ids = aliasy
+    dlg = AssignObjectDialog(con, object_raw="FlatWizard", frame_count=2, parent=v)
+    dlg.search.setText(fraza)
+    assert sorted(_pozycje(dlg)) == trafione
+    dlg.close()
+
+
+@pytest.mark.parametrize("wpisane, zdanie", [
+    ("M 106", "M 106 → NGC4258 · w nagłówku: NGC 4258"),
+    ("M106", "M106 → NGC4258 · w nagłówku: NGC 4258"),
+    ("Heart Nebula", "Heart Nebula → IC1805 · w nagłówku: IC 1805"),
+    ("Large Magellanic Cloud", "Large Magellanic Cloud → LMC · w nagłówku: LMC"),
+    ("Sh2 131", "Sh2 131 → Sh2-131 · w nagłówku: Sh2-131"),
+])
+def test_zdanie_na_zywo_kanon_i_forma_naglowka(aliasy, wpisane, zdanie):
+    """Pod polem nazwy stoi „wpisane → kanon · w nagłówku: forma" PRZED kliknięciem - z tej samej
+    tożsamości, którą zapisze okno. Warunek widoczności czytamy przez `isHidden()`, bo okno nie
+    jest pokazane (`isVisible()` zwraca wtedy False niezależnie od `setVisible`)."""
+    v, con, ids = aliasy
+    dlg = AssignObjectDialog(con, object_raw="FlatWizard", frame_count=2, parent=v)
+    assert dlg.canon_preview.isHidden()
+    dlg.designation.setText(wpisane)
+    assert not dlg.canon_preview.isHidden()
+    assert dlg.canon_preview.text() == zdanie
+    dlg._validate_and_accept()
+    assert dlg.selected[0] == zdanie.split(" → ")[1].split(" · ")[0]   # zapis = kanon ze zdania
+    dlg.close()
+
+
+def test_zdanie_na_zywo_gasnie_dla_nazwy_nierozpoznanej(aliasy):
+    v, con, ids = aliasy
+    dlg = AssignObjectDialog(con, object_raw="FlatWizard", frame_count=2, parent=v)
+    dlg.designation.setText("M 106")
+    assert not dlg.canon_preview.isHidden()
+    dlg.designation.setText("???")
+    assert dlg.canon_preview.isHidden()
+    assert "Nie rozpoznaję nazwy" in dlg.error.text()   # dzisiejszy komunikat, bez zmian
+    dlg.designation.setText("")
+    assert dlg.canon_preview.isHidden()
+    dlg.close()
+
+
+# ═══════════ O3 krok 1: „Zatwierdź ze ścieżki…" dopisuje kartę OBJECT = header_form(kanon) do PLIKU
+# Realne pliki FITS w tmp (writeback rusza bajty - atrapa nie dowodzi niczego), worker inline.
+
+NOW_O3 = "2026-09-26T14:00:00Z"
+LATER_O3 = "2026-09-26T15:00:00Z"
+
+
+def _stos_fits(root, obj, nazwa, *, seed, object_card=None):
+    """Gotowy stos FITS pod `STACKS\\<obj>\\RC8_2600MC\\Ha` BEZ zeznania o obiekcie
+    (`object_card=''` = karta JEST, ale pusta - nagłówek dalej milczy)."""
+    import numpy as np
+    from astropy.io import fits
+    d = root / "STACKS" / obj / "RC8_2600MC" / "Ha"
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / nazwa
+    hdu = fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.int16) + seed)
+    hdu.header["IMAGETYP"] = "Master Light"
+    hdu.header["TELESCOP"] = "RC8"
+    if object_card is not None:
+        hdu.header["OBJECT"] = object_card
+    hdu.writeto(str(p), overwrite=True)
+    return p
+
+
+@pytest.fixture
+def sciezka_karty(qapp, tmp_path):
+    """Cztery klatki jednej propozycji `NGC7635`, każda z innym losem karty:
+    `zapis` (plik czysty - karta pójdzie), `pusta` (karta OBJECT jest, pusta - pominięta, nie
+    nadpisana), `dwie` (dwie obecne kopie - bramka D-W1), `raw` (RAW - read-only)."""
+    from horreum import scan
+    pliki = {
+        "zapis": _stos_fits(tmp_path, "NGC7635", "NGC7635_Ha_a.fits", seed=1),
+        "pusta": _stos_fits(tmp_path, "NGC7635", "NGC7635_Ha_b.fits", seed=2, object_card=""),
+        "dwie": _stos_fits(tmp_path, "NGC7635", "NGC7635_Ha_c.fits", seed=3),
+    }
+    con = db.open_db(str(tmp_path / "o3.db"))
+    for p in pliki.values():
+        scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW_O3,
+                           summary=scan.ScanSummary())
+    fid = {k: con.execute("SELECT frame_id FROM location WHERE path = ?", (str(p),)).fetchone()[0]
+           for k, p in pliki.items()}
+    kopia = tmp_path / "STACKS" / "NGC7635" / "kopia" / "NGC7635_Ha_c.fits"
+    repo.add_location(con, frame_id=fid["dwie"], volume="V", header_hash="h-kopia", now=NOW_O3,
+                      path=str(kopia))
+    raw, _ = repo.upsert_frame(con, sha1_data="sha-o3-raw", kind="light", filetype="raw",
+                               camera_id=None, now=NOW_O3)
+    repo.record_header(con, frame_id=raw, raw_json="{}", object_raw=None, now=NOW_O3)
+    repo.add_location(con, frame_id=raw, volume="V", header_hash="h-raw", now=NOW_O3,
+                      path=str(tmp_path / "LIGHTS" / "NGC7635" / "A7R3" / "_7R38821.ARW"))
+    fid["raw"] = raw
+    v = ObjectAxisView(con, now_fn=lambda: NOW_O3)
+    yield v, con, pliki, fid
+    v.close()
+    con.close()
+
+
+def _okno_sciezki(v, con):
+    dlg = ConfirmPathObjectsDialog(con, proposals=resolver.path_proposals(con),
+                                   now_fn=lambda: NOW_O3, db_path=queries.db_path_of(con), parent=v)
+    dlg._runner.async_ok = False            # inline: commit/undo synchronicznie, bez QThread
+    return dlg
+
+
+def _karta_object(path):
+    from astropy.io import fits
+    with fits.open(str(path)) as h:
+        return h[0].header.get("OBJECT")
+
+
+def _stan_obiektu(con, fid):
+    return tuple(con.execute(
+        "SELECT o.canon, f.object_source, h.object_raw FROM frame f "
+        "LEFT JOIN object o ON o.id = f.object_id LEFT JOIN header h ON h.frame_id = f.id "
+        "WHERE f.id = ?", (fid,)).fetchone())
+
+
+def test_okno_mowi_PRZED_kliknieciem_ile_kart_i_dlaczego_reszta_bez(sciezka_karty):
+    v, con, pliki, fid = sciezka_karty
+    dlg = _okno_sciezki(v, con)
+    try:
+        stos = next(it for it in dlg._items if it["proposal"].stack_tree)
+        assert stos["value"] == "NGC 7635" and stos["n_cards"] == 1     # forma nagłówka, 1 z 3
+        powody = [dlg.cards_skipped.item(i).text() for i in range(dlg.cards_skipped.count())]
+        assert len(powody) == 3, powody
+        assert any("juz istnieje" in p for p in powody)                  # pusta karta: nie nadpisujemy
+        assert any("wiele obecnych kopii" in p for p in powody)
+        assert any("RAW" in p for p in powody)
+        assert "zapisane w plikach" not in dlg.status.text()        # zero zapisu przed klikiem
+        assert _karta_object(pliki["zapis"]) is None
+    finally:
+        dlg.reject()
+
+
+def test_zatwierdzenie_zapisuje_BAZE_i_KARTE_a_Rozwiaz_przenosi_na_naglowek_przy_TYM_SAMYM_obiekcie(
+        sciezka_karty):
+    """Jeden klik: wszystkie cztery klatki nazwane w bazie (`path`), karta `OBJECT = 'NGC 7635'`
+    tylko w pliku, który bramki przepuszczają; re-sync w commicie odczytuje zeznanie. Po `Rozwiąż`
+    ta klatka ma źródło z nagłówka i TEN SAM obiekt; reszta zostaje przy folderze, pliki nietknięte."""
+    v, con, pliki, fid = sciezka_karty
+    bajty_pustej = pliki["pusta"].read_bytes()
+    dlg = _okno_sciezki(v, con)
+    dlg._on_confirm()
+    assert dlg.assigned == 4
+    assert "karty OBJECT zapisane w plikach: 1" in dlg.status.text()
+    assert dlg.undo_btn.isVisibleTo(dlg) and not dlg.confirm_btn.isEnabled()
+    assert _karta_object(pliki["zapis"]) == "NGC 7635"
+    assert pliki["pusta"].read_bytes() == bajty_pustej                    # pusta karta NIE nadpisana
+    assert _stan_obiektu(con, fid["zapis"]) == ("NGC7635", "path", "NGC 7635")   # re-sync zeznania
+    for k in ("pusta", "dwie", "raw"):
+        assert _stan_obiektu(con, fid[k])[:2] == ("NGC7635", "path"), k
+    assert con.execute("SELECT count(*) FROM pending_changes WHERE status = 'pending'"
+                       ).fetchone()[0] == 0
+    dlg.reject()
+
+    resolver.run_resolver(con, LATER_O3)
+    assert _stan_obiektu(con, fid["zapis"])[:2] == ("NGC7635", "header")
+    for k in ("pusta", "dwie", "raw"):
+        assert _stan_obiektu(con, fid[k])[:2] == ("NGC7635", "path"), k
+
+
+def test_cofnij_karty_przywraca_plik_a_potwierdzenie_z_folderu_zostaje(sciezka_karty):
+    v, con, pliki, fid = sciezka_karty
+    przed = pliki["zapis"].read_bytes()
+    dlg = _okno_sciezki(v, con)
+    dlg._on_confirm()
+    assert _karta_object(pliki["zapis"]) == "NGC 7635"
+    dlg._on_undo()
+    assert pliki["zapis"].read_bytes() == przed
+    assert not dlg.undo_btn.isVisibleTo(dlg)
+    assert _stan_obiektu(con, fid["zapis"])[:2] == ("NGC7635", "path")
+    dlg.reject()
+
+
+def test_bez_plikow_do_zapisu_okno_zachowuje_sie_jak_przed_kartami(sciezka_karty):
+    """Pozycja wyłącznie z RAW-ów: zero stagingu, okno zamyka się po zapisie bazy jak dawniej."""
+    v, con, pliki, fid = sciezka_karty
+    raw = [p for p in resolver.path_proposals(con) if not p.stack_tree]
+    dlg = ConfirmPathObjectsDialog(con, proposals=raw, now_fn=lambda: NOW_O3, parent=v)
+    dlg._runner.async_ok = False
+    dlg._on_confirm()
+    assert dlg.result() == QDialog.Accepted and dlg.assigned == 1
+    assert con.execute("SELECT count(*) FROM pending_changes").fetchone()[0] == 0
+
+
+def test_przycisk_zatwierdzania_gasnie_gdy_druga_powierzchnia_pisze_do_plikow(sciezka_karty):
+    v, con, pliki, fid = sciezka_karty
+    v.refresh()
+    _select_review_tag(v, "path_proposals")
+    assert v.confirm_path_btn.isEnabled()
+    v.set_writeback_busy(True)
+    assert not v.confirm_path_btn.isEnabled()
+    v.set_writeback_busy(False)
+    assert v.confirm_path_btn.isEnabled()
+
+
+# ═══════════ Tura naprawcza po bramce 0926 (C1, C2, C4) - oba okna piszące karty
+
+
+class _WorkerWBiegu:
+    """Atrapa workera w locie: `WritebackRunner.is_busy` patrzy na `_thread`, `cancel()` na
+    `_worker.request_cancel()` - więcej stanu straż zamknięcia nie czyta."""
+
+    def __init__(self):
+        self.anulowano = False
+
+    def request_cancel(self):
+        self.anulowano = True
+
+
+@pytest.mark.parametrize("ktore", ["sciezka", "naprawa"])
+def test_okno_NIE_zamyka_sie_w_biegu_zapisu_tylko_przerywa(ktore, request):
+    """C1: `WritebackRunner` i jego `QThread` są dziećmi okna, więc zamknięcie w biegu niszczyło
+    wątek w locie. KAŻDA droga zamknięcia (`done`) w biegu = żądanie anulowania + zdanie w oknie,
+    okno zostaje; po biegu zamyka się normalnie i sprząta staging. Jeden kod dla obu okien."""
+    if ktore == "sciezka":
+        v, con, pliki, fid = request.getfixturevalue("sciezka_karty")
+        dlg = _okno_sciezki(v, con)
+    else:
+        v, con, files, _open = request.getfixturevalue("repair")
+        dlg = _open()
+    repo.stage_pending(con, run_id="r-c1", location_id=1, keyword="OBJECT", idx=None, op="add",
+                       old_value=None, new_value="X", new_type="str", new_comment=None,
+                       expected_header_hash="h")
+    dlg._run_id = "r-c1"
+    worker = _WorkerWBiegu()
+    dlg._runner._thread, dlg._runner._worker = object(), worker        # „w biegu"
+    for zamknij in (dlg.reject, dlg.accept, lambda: dlg.done(QDialog.Accepted)):
+        zamknij()
+        assert dlg.result() == 0, "okno zamknęło się nad działającym wątkiem"
+    assert worker.anulowano
+    assert "przerywam" in dlg.error.text()
+    assert con.execute("SELECT count(*) FROM pending_changes WHERE run_id='r-c1'").fetchone()[0] == 1
+    dlg._runner._thread, dlg._runner._worker = None, None              # bieg się skończył
+    dlg.accept()
+    assert dlg.result() == QDialog.Accepted
+    assert con.execute("SELECT count(*) FROM pending_changes WHERE run_id='r-c1'").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("ktore", ["sciezka", "naprawa"])
+def test_wyjatek_workera_sprzata_staging_od_razu(ktore, request):
+    """C1: po `_on_failed` staging runu był sierotą aż do zamknięcia okna."""
+    if ktore == "sciezka":
+        v, con, pliki, fid = request.getfixturevalue("sciezka_karty")
+        dlg = _okno_sciezki(v, con)
+    else:
+        v, con, files, _open = request.getfixturevalue("repair")
+        dlg = _open()
+    repo.stage_pending(con, run_id="r-fail", location_id=1, keyword="OBJECT", idx=None, op="add",
+                       old_value=None, new_value="X", new_type="str", new_comment=None,
+                       expected_header_hash="h")
+    dlg._run_id = "r-fail"
+    dlg._on_failed("commit", "OSError: dysk zniknął")
+    assert con.execute("SELECT count(*) FROM pending_changes").fetchone()[0] == 0
+    assert "dysk zniknął" in dlg.error.text()
+    dlg.reject()
+
+
+@pytest.mark.parametrize("ktore", ["sciezka", "naprawa"])
+def test_cofnij_dostepne_gdy_failed_z_kopia_naglowka(ktore, request):
+    """C4: rdzeń nadaje `commit_id`, gdy plik został PODMIENIONY - także przy `failed` z
+    `backup_text`. Dawny warunek „`applied` niepuste" zostawiał taki plik bez „Cofnij"."""
+    from horreum import writeback
+    if ktore == "sciezka":
+        v, con, pliki, fid = request.getfixturevalue("sciezka_karty")
+        dlg = _okno_sciezki(v, con)
+    else:
+        v, con, files, _open = request.getfixturevalue("repair")
+        dlg = _open()
+    res = writeback.CommitResult(
+        run_id="r", commit_id=7, applied=[], blocked=[], skipped=[],
+        failed=[writeback.FileResult(1, "x.fits", "failed", "weryfikacja po podmianie")])
+    dlg._after_commit("commit", res)
+    assert not dlg.undo_btn.isHidden() and dlg._commit_id == 7
+    assert "commit 7" in dlg.status.text()
+    dlg._commit_id = None                                  # nie cofamy atrapy przy zamknięciu
+    dlg.reject()
+
+
+def test_cofnij_karty_pokazuje_pasek_postepu(sciezka_karty, monkeypatch):
+    """C4: undo w oknie ścieżki szło bez paska (wzorzec `_begin_progress` z „Napraw nagłówek…")."""
+    v, con, pliki, fid = sciezka_karty
+    dlg = _okno_sciezki(v, con)
+    dlg._on_confirm()
+    widziane = {}
+    prawdziwy = dlg._runner.start
+
+    def start(op, *a, **k):
+        widziane[op] = (not dlg.bar.isHidden(), dlg.undo_btn.isEnabled())
+        return prawdziwy(op, *a, **k)
+
+    monkeypatch.setattr(dlg._runner, "start", start)
+    dlg._on_undo()
+    assert widziane["undo"] == (True, False)               # pasek widoczny, akcje wygaszone
+    assert dlg.bar.isHidden()                              # po biegu pasek znika
+    dlg.reject()
+
+
+def test_CYKL_zatwierdz_cofnij_powtorz_dopisuje_karty_ponownie(sciezka_karty):
+    """C2: po „Cofnij karty" klatki zostają nazwane z folderu bez karty - i do tej zmiany bez
+    drogi do niej. „Zatwierdź" wraca, a powtórka dopisuje karty, choć klinga liczy klatki jako
+    dryf (obiekt już mają, `assigned` = 0)."""
+    v, con, pliki, fid = sciezka_karty
+    dlg = _okno_sciezki(v, con)
+    dlg._on_confirm()
+    assert _karta_object(pliki["zapis"]) == "NGC 7635"
+    assert not dlg.confirm_btn.isEnabled()
+    dlg._on_undo()
+    assert _karta_object(pliki["zapis"]) is None
+    assert "Zatwierdź” dopisze karty ponownie" in dlg.status.text()
+    assert dlg.confirm_btn.isEnabled()
+    dlg._on_confirm()                                      # powtórka
+    assert _karta_object(pliki["zapis"]) == "NGC 7635"
+    assert dlg.assigned == 4                               # suma gestów okna, nie ostatni klik
+    assert _stan_obiektu(con, fid["zapis"]) == ("NGC7635", "path", "NGC 7635")
+    dlg.reject()
+
+
+def test_commit_BEZ_podmiany_oddaje_Zatwierdz(sciezka_karty):
+    """C2: commit z samymi `blocked` nie ma commit_id - karta nie stoi w pliku, więc „Zatwierdź"
+    wraca (powtórka ma czym dopisać), a „Cofnij" się nie pokazuje."""
+    from horreum import writeback
+    v, con, pliki, fid = sciezka_karty
+    dlg = _okno_sciezki(v, con)
+    dlg._domkniety = True
+    dlg._after_commit("commit", writeback.CommitResult(
+        run_id="r", commit_id=None, applied=[], failed=[], skipped=[],
+        blocked=[writeback.FileResult(1, "x.fits", "blocked", "header_hash zmieniony")]))
+    assert dlg.confirm_btn.isEnabled() and dlg.undo_btn.isHidden()
+    dlg.reject()
+
+
+def test_karty_dla_pozycji_nazwanej_mimo_bledu_INNEJ_pozycji(qapp, tmp_path, monkeypatch):
+    """C2: klinga padła na drugiej pozycji - pierwsza (nazwana w tym samym kliknięciu) dostaje
+    kartę, a błąd drugiej zostaje widoczny w oknie."""
+    from horreum import scan
+    a = _stos_fits(tmp_path, "NGC7635", "NGC7635_Ha.fits", seed=11)
+    b = _stos_fits(tmp_path, "Sh2-131", "Sh2-131_Ha.fits", seed=12)
+    con = db.open_db(str(tmp_path / "c2.db"))
+    for p in (a, b):
+        scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW_O3,
+                           summary=scan.ScanSummary())
+    prawdziwa = repo.user_assign_object
+
+    def klinga(con_, **kw):
+        if kw["canon"] == "Sh2-131":
+            raise ValueError("konflikt aliasu - zero zapisu")
+        return prawdziwa(con_, **kw)
+
+    monkeypatch.setattr(repo, "user_assign_object", klinga)
+    v = ObjectAxisView(con, now_fn=lambda: NOW_O3)
+    dlg = _okno_sciezki(v, con)
+    dlg._on_confirm()
+    assert _karta_object(a) == "NGC 7635" and _karta_object(b) is None
+    assert "konflikt aliasu" in dlg.error.text()
+    dlg.reject()
+    v.close()
+    con.close()
+
+
+# ═══════════ D2: jedna forma karty OBJECT dla obu gestów (`forma_karty_object`)
+
+
+def test_forma_karty_object_kanon_wraca_do_siebie_albo_None(repair):
+    """Jeden punkt wyliczenia formy: `header_form(kanon)`, o ile drabina sprowadza ją z powrotem do
+    tego kanonu. Kanon znany wyłącznie aliasem z własnego zapisu nie wraca → None."""
+    from horreum.gui.app import forma_karty_object
+    v, con, files, _open = repair
+    assert forma_karty_object(con, "NGC7635") == "NGC 7635"
+    assert forma_karty_object(con, "NGC1976") == "NGC 1976"
+    assert forma_karty_object(con, "Sh2-131") == "Sh2-131"
+    assert forma_karty_object(con, "LMC") == "LMC"                  # słownik własny
+    assert forma_karty_object(con, "Moon") == "Moon"                # solar
+    oid, _ = repo.upsert_object(con, canon="ZW77", catalog=None, kind="deep_sky", now=NOW_PD)
+    repo.add_object_alias(con, alias_norm="ZUPELNIEWYMYSLONA77", object_id=oid, source="user",
+                          now=NOW_PD)
+    assert forma_karty_object(con, "ZW77") is None
+
+
+def test_naprawa_nazwa_zwyczajowa_idzie_do_pliku_jako_oznaczenie(repair):
+    """D2: podgląd „do pliku" pokazuje formę KOŃCOWĄ - `Bubble Nebula` → `'NGC 7635'`, a plik dostaje
+    to samo co podgląd. Nazwa zwyczajowa zostaje w bazie aliasem, nie w nagłówku."""
+    from astropy.io import fits
+    v, con, files, _open = repair
+    dlg = _open()
+    g = dlg._groups[0]
+    g["edit"].setText("Bubble Nebula")
+    assert g["preview"].text() == "do pliku: OBJECT = 'NGC 7635'"
+    dlg._on_save()
+    assert [fits.getheader(str(p))["OBJECT"] for p in files] == ["NGC 7635", "NGC 7635"]
+    dlg.reject()
+
+
+def test_oba_gesty_licza_forme_TA_SAMA_funkcja(sciezka_karty, monkeypatch):
+    """SPOT: „Zatwierdź ze ścieżki…" i „Napraw nagłówek…" biorą formę karty z `forma_karty_object` -
+    podmiana tej jednej funkcji zmienia wartość w OBU planach."""
+    from horreum.gui import app as app_mod
+    v, con, pliki, fid = sciezka_karty
+    # Znacznik musi być nazwą, którą drabina rozpoznaje - walidacja naprawy ma czwartą bramkę.
+    monkeypatch.setattr(app_mod, "forma_karty_object", lambda con_, canon: "NGC 7000")
+    value, _touched, _skipped = app_mod.plan_kart_sciezki(con, "NGC7635", [fid["zapis"]])
+    assert value == "NGC 7000"
+    assert app_mod._validate_object_value(con, "NGC 7635")[0] == "NGC 7000"

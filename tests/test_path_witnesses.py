@@ -166,8 +166,10 @@ def test_propozycja_dialogu_dla_STOSU_ta_sama_regula_dwoch_swiadkow():
 
 
 def test_propozycja_dialogu_NIE_normalizuje_przez_xref():
-    """Do PLIKU idzie konwencja USERA (D-PD-9), a nie kanon bazy: zgodne `M42` zostaje `M42`,
-    choć drabina nazwy mapuje je na `NGC1976`. Druga z dwóch różnic wypisanych jawnie w §4/16."""
+    """PROPOZYCJA (pole edycji dialogu) zostaje w konwencji USERA: zgodne `M42` zostaje `M42`,
+    choć drabina nazwy mapuje je na `NGC1976`. Druga z dwóch różnic wypisanych jawnie w §4/16.
+    Do PLIKU idzie jednak od Q6 (2026-09-26, D-PD-9 odwrócone) forma nagłówka kanonu - `NGC 1976`;
+    przekształcenie robi walidacja dialogu (`gui.app._validate_object_value`), nie propozycja."""
     con = _con()
     assert resolver.path_proposal(con, rf"{R}\LIGHTS\M42\RC8\Ha\M42_0001.fit") == "M42"
 

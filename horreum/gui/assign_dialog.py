@@ -10,8 +10,55 @@ from PySide6.QtWidgets import (
 )
 
 from horreum import resolver
-from horreum.gui import i18n, queries
+from horreum.gui import facet_model, i18n, queries
 from horreum.resolve._text import norm_alnum
+from horreum.resolve.catalog import catalog_canon, header_form, xref_aliases
+from horreum.resolve.objects import load_own_objects
+
+
+def nazwy_slownika():
+    """`norm_alnum(nazwa)` → nazwa w brzmieniu ze `objects_own.json` (kanon i każde `n`).
+
+    Służy WYŁĄCZNIE do czytelnego pokazania aliasu, który JUŻ jest w `object_alias`: baza trzyma
+    tylko `alias_norm` (`LARGEMAGELLANICCLOUD`), a dla wpisów słownika oryginał istnieje w assecie.
+    Nie dokłada nowych aliasów. Uszkodzony plik (JSON) ⇒ pusty słownik: pokazujemy wtedy formę
+    znormalizowaną, a samą awarię melduje walidacja nazwy (`assign.dictionary_broken`) - drugi
+    komunikat o tej samej awarii byłby szumem."""
+    try:
+        rekordy = load_own_objects()
+    except ValueError:
+        return {}
+    out = {}
+    for rec in rekordy:
+        for name in (rec.get("c"), *(rec.get("n") or ())):
+            if name and norm_alnum(name):
+                out.setdefault(norm_alnum(name), str(name))
+    return out
+
+
+def aliasy_obiektu(canon, alias_norms, pretty=None):
+    """Aliasy obiektu DO POKAZANIA na liście okna (decyzja usera 2026-09-26: kto grzebie w nazwach,
+    musi widzieć aliasy). Źródła: `object_alias` (`alias_norms`) i równoważność `catalog_xref.json`
+    czytana wstecz (`xref_aliases`).
+
+    Każdy alias dostaje najczytelniejszą formę, jaką znamy, bez zmyślania brzmienia:
+      * oznaczenie katalogowe → forma kanoniczna gramatyki (`CALDWELL3` → `C3`, `SH2184` → `Sh2-184`);
+      * nazwa ze słownika obiektów własnych → brzmienie z assetu (`pretty`);
+      * reszta → `alias_norm`, bo tylko taka forma istnieje w bazie (jak w `facet_model.search_hit`).
+    Aliasy TECHNICZNE odpadają: te, które są zapisem samego kanonu (`NGC4258`, `SH2131`,
+    `COLLINDER464` przy `Cr464`) - niczego userowi nie mówią. Duplikaty (ten sam `norm_alnum`
+    z bazy i z xref) scala forma. Kolejność: oznaczenia katalogowe przed nazwami, potem alfabet."""
+    klucz_kanonu = norm_alnum(canon)
+    pretty = pretty or {}
+    formy = {}
+    for forma in (*xref_aliases(canon),
+                  *((catalog_canon(a, split=False) or pretty.get(a) or a)
+                    for a in sorted(alias_norms or ()))):
+        klucz = norm_alnum(forma)
+        if klucz and klucz != klucz_kanonu and catalog_canon(forma, split=False) != canon:
+            formy.setdefault(klucz, forma)
+    return sorted(formy.values(),
+                  key=lambda s: (catalog_canon(s, split=False) is None, s.casefold()))
 
 
 def broni_sie_sama(text):
@@ -57,9 +104,10 @@ def alias_key(object_raw, canon):
 
 class AssignObjectDialog(QDialog):
     """Dialog ręcznego przypisania obiektu grupie review (#8, P4, D-P4-3): wybór ISTNIEJĄCEGO obiektu
-    z biblioteki (combo `canon · catalog`) ALBO nowa NAZWA rozwiązywana TĄ SAMĄ drabiną, którą pójdzie
-    przebieg. Świadomie BEZ wolnego tekstu jako canon: `object.canon` nie ma deduplikacji semantycznej,
-    a śmieciowego obiektu nic by nie posprzątało. Cofnięcie SAMEGO PRZYPISANIA istnieje od S2b
+    z biblioteki (combo `canon · catalog · aliasy`, zawężane szukajką po kanonie i aliasie) ALBO nowa
+    NAZWA rozwiązywana TĄ SAMĄ drabiną, którą pójdzie przebieg - pod polem nazwy zdanie na żywo
+    „wpisane → kanon · w nagłówku: forma" (`catalog.header_form`). Świadomie BEZ wolnego tekstu
+    jako canon: `object.canon` nie ma deduplikacji semantycznej, a śmieciowego obiektu nic by nie posprzątało. Cofnięcie SAMEGO PRZYPISANIA istnieje od S2b
     („Obiekt ▾ → Cofnij przypisanie" w Zbiorach); sprzątanie osieroconego OBIEKTU to osobna sprawa
     i czeka na ekran Porządków (`retired_at`, nie `DELETE`).
 
@@ -163,12 +211,25 @@ class AssignObjectDialog(QDialog):
             lay.addWidget(note)
 
         lay.addWidget(QLabel(i18n.t("assign.existing_object")))
+        # SZUKAJKA LISTY (2026-09-26): wzorzec listwy facetów - pole tekstowe + predykat
+        # `facet_model.search_hit` - JEDEN predykat z listwą (C6): oznaczenie katalogowe trafia
+        # dokładnie przez kanon i `xref`, reszta podciągiem z DRUGIMI NAZWAMI - a nie edytowalne
+        # combo: tamto mieszałoby wpisaną frazę z wyborem celu, a akcja tego okna wymaga JAWNEGO
+        # celu. Mapa aliasów do szukania = te z bazy ORAZ formy pokazane na liście (xref wstecz),
+        # więc wszystko, co user widzi przy obiekcie, da się też wpisać.
+        self.search = QLineEdit()
+        self.search.setPlaceholderText(i18n.t("assign.search_placeholder"))
+        self.search.setClearButtonEnabled(True)
+        lay.addWidget(self.search)
         self.combo = QComboBox()
-        self.combo.addItem(i18n.t("assign.pick_object"), None)
         self._objects = queries.library_objects(con)          # bez filtra — pełna biblioteka
-        for o in self._objects:
-            self.combo.addItem(f"{o['canon']}  ·  {o['catalog'] or '—'}",
-                               (o["id"], o["canon"], o["catalog"]))
+        alias_idx = queries.object_alias_index(con)
+        pretty = nazwy_slownika()
+        self._aliasy = {o["canon"]: aliasy_obiektu(o["canon"], alias_idx.get(o["canon"]), pretty)
+                        for o in self._objects}
+        self._szukaj = {canon: set(alias_idx.get(canon, ())) | {norm_alnum(a) for a in aliasy}
+                        for canon, aliasy in self._aliasy.items()}
+        self._fill_combo("")
         # PRESELEKCJA WYBORU, KTÓRY JUŻ PADŁ (firsthand 0810, znalezisko 3). Okno bywa wołane
         # przez skrót „ostatnio użyte": user WSKAZAŁ tam kanon, a okno otwiera się wyłącznie po
         # to, żeby pokazać dysklozurę (ile nagrobków zgaśnie, ile cudzych nazw nadpisze). Bez
@@ -179,8 +240,8 @@ class AssignObjectDialog(QDialog):
         # Kanon spoza biblioteki zostawia combo na pozycji zerowej — okno zachowuje się wtedy
         # dokładnie jak przedtem, zamiast twierdzić wybór, którego nie ma czym pokryć.
         if preselect_canon is not None:
-            for i, o in enumerate(self._objects, start=1):
-                if o["canon"] == preselect_canon:
+            for i in range(1, self.combo.count()):
+                if self.combo.itemData(i)[1] == preselect_canon:
                     self.combo.setCurrentIndex(i)
                     break
         lay.addWidget(self.combo)
@@ -189,6 +250,15 @@ class AssignObjectDialog(QDialog):
         self.designation = QLineEdit()
         self.designation.setPlaceholderText(i18n.t("assign.designation_placeholder"))
         lay.addWidget(self.designation)
+
+        # ZDANIE NA ŻYWO (2026-09-26): „wpisane → kanon Horreum · w nagłówku: forma nagłówka".
+        # User widzi, CO zapisze (`M 106` → `NGC4258`) i jak ta nazwa brzmi w karcie `OBJECT`,
+        # zanim kliknie. Nazwa nierozpoznana nie dostaje zdania - mówi za nią komunikat błędu.
+        self.canon_preview = QLabel("")
+        self.canon_preview.setWordWrap(True)
+        self.canon_preview.setToolTip(i18n.t("assign.canon_preview_tip"))
+        self.canon_preview.setVisible(False)
+        lay.addWidget(self.canon_preview)
 
         # Nazwa spoza katalogów wygląda w bibliotece INACZEJ (kolumna „Katalog" zostaje pusta) —
         # i to jest stan poprawny, nie brak danych. Nota mówi to ZANIM user kliknie, żeby pusta
@@ -214,6 +284,42 @@ class AssignObjectDialog(QDialog):
         lay.addWidget(buttons)
         self.combo.currentIndexChanged.connect(self._sync_accept_enabled)
         self.designation.textChanged.connect(self._sync_accept_enabled)
+        self.search.textChanged.connect(self._on_search)
+        self._sync_accept_enabled()
+
+    def _item_text(self, o):
+        """Pozycja listy: `kanon · katalog · aliasy` (`NGC4258  ·  NGC  ·  M106`)."""
+        tekst = f"{o['canon']}  ·  {o['catalog'] or '-'}"
+        aliasy = self._aliasy.get(o["canon"])
+        return f"{tekst}  ·  {', '.join(aliasy)}" if aliasy else tekst
+
+    def _fill_combo(self, text):
+        """Przeładuj listę do obiektów trafionych frazą `text` (pusta fraza = cała biblioteka).
+
+        Wybór PRZEŻYWA zawężenie, gdy wybrany obiekt nadal jest na liście; gdy fraza go chowa,
+        combo wraca na pozycję zerową - akcja nie może celować w obiekt, którego user nie widzi.
+        Sygnały zablokowane na czas przeładunku: `clear()` emituje zmianę indeksu dla każdej
+        pozycji po drodze, a stan akcji liczy wołający raz, po wszystkim."""
+        wybrany = self.combo.currentData()
+        trafione = [o for o in self._objects
+                    if facet_model.search_hit(text, o["canon"], self._szukaj) is not None]
+        fraza = (text or "").strip()
+        self.combo.blockSignals(True)
+        try:
+            self.combo.clear()
+            self.combo.addItem(i18n.t("assign.search_empty", text=fraza)
+                               if fraza and not trafione else i18n.t("assign.pick_object"), None)
+            indeks = 0
+            for o in trafione:
+                self.combo.addItem(self._item_text(o), (o["id"], o["canon"], o["catalog"]))
+                if wybrany is not None and wybrany[0] == o["id"]:
+                    indeks = self.combo.count() - 1
+            self.combo.setCurrentIndex(indeks)
+        finally:
+            self.combo.blockSignals(False)
+
+    def _on_search(self, text):
+        self._fill_combo(text)
         self._sync_accept_enabled()
 
     def _fail(self, msg):
@@ -241,10 +347,18 @@ class AssignObjectDialog(QDialog):
             # więc dziedziczy jej tryb awarii. Akcja gaśnie: nie wiemy, czy nazwa się rozwiąże.
             self.accept_btn.setEnabled(False)
             self.own_note.setVisible(False)
+            self.canon_preview.setVisible(False)
             return self._fail(i18n.t("assign.dictionary_broken"))
         self.accept_btn.setEnabled(valid_name if text else self.combo.currentData() is not None)
         if text and not valid_name:
             self._fail(i18n.t("assign.unknown_name", text=text))
+        # Zdanie na żywo z TEJ SAMEJ tożsamości, którą zapisze `_validate_and_accept`; warunek na
+        # zmiennej lokalnej, nie na `isVisible()` (ta sama lekcja, co przy nocie niżej).
+        podglad = ident is not None
+        self.canon_preview.setVisible(podglad)
+        self.canon_preview.setText(
+            i18n.t("assign.canon_preview", text=text, canon=ident.canon,
+                   header=header_form(ident.canon)) if podglad else "")
         # Nota po RODZAJU, nie po pustym katalogu: `catalog IS NULL` mają też obiekty z REGIONU
         # (`Veil`), a nazwanie ich „obiektem własnym" byłoby nieprawdą o pochodzeniu kanonu.
         wlasny = ident is not None and ident.kind == "own"

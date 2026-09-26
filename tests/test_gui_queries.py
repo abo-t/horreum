@@ -158,6 +158,9 @@ def test_tasks_state_liczniki_na_s8_obj(s8_obj):
     st = queries.tasks_state(con)
     assert st == {
         "unresolved_lights": 3,
+        # E5-2: fikstura nie zna potwierdzenia ze ścieżki (`object_source='path'`), więc zero -
+        # brak populacji, nie dowód predykatu; ten pinuje `test_path_header.py` na własnych danych.
+        "path_header_conflict_frames": 0,
         "stacks_lineage_pending": 0,
         "dup_frames": 1,
         # 0021: duplikat `a1` ma dwie kopie, ale żadna nie ma ZEBRANEGO zeznania (fikstura wkłada

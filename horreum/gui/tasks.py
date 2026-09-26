@@ -31,7 +31,8 @@ from horreum.gui.app import (
     ObjectAxisView, ObservatoryAxisView, TelescopeAxisView, _utc_now_iso,
 )
 from horreum.gui.grid import (PRESET_COPY_CONFLICT, PRESET_DUPS, PRESET_LINEAGE,
-                              PRESET_MISSING_COPY, PRESET_ORPHAN_TESTIMONY, PRESET_RETIRED,
+                              PRESET_MISSING_COPY, PRESET_ORPHAN_TESTIMONY,
+                              PRESET_PATH_HEADER_CONFLICT, PRESET_RETIRED,
                               PRESET_RETIRED_CONFLICT, PRESET_STACK_VERSIONS, PRESET_SUPERSEDED,
                               PRESET_VANISHED)
 from horreum.gui.rows import TwoPartDelegate
@@ -76,6 +77,14 @@ _LIST_MAX_W = 400
 # etykieta = KLUCZ i18n rozwiązywany w budowie/refresh (nie zamrażać PL przy imporcie).
 _TASKS = [
     ("unresolved_lights", "tasks.unresolved_lights", _PAGE_OBJECTS),
+    # Wiersz AKCYJNY i ROBOTA (E5-2) - stoi pod „Obiektami do przeglądu", bo to ta sama oś, ale
+    # odwrotny stan: tam klatka obiektu NIE MA, tu MA go z zatwierdzonego folderu, a karta `OBJECT`
+    # w pliku mówi co innego (albo coś nierozpoznanego). Prowadzi do PERSPEKTYWY, bo gesty
+    # („Przypisz obiekt", makro karty w pliku) działają z zaznaczenia w Zbiorach - „Napraw
+    # nagłówek…" tej klatki nie widzi (bierze wyłącznie klatki bez obiektu). Liczba i lista
+    # czytają jeden predykat (`queries.path_header_conflict_frame_ids`).
+    ("path_header_conflict_frames", "tasks.path_header_conflict_frames",
+     PRESET_PATH_HEADER_CONFLICT),
     ("stacks_lineage_pending", "tasks.stacks_lineage", PRESET_LINEAGE),
     ("telescopes_unlabeled", "tasks.telescopes_unlabeled", _PAGE_TELESCOPE),
     ("observatories_unnamed", "tasks.observatories_unnamed", _PAGE_OBSERVATORY),

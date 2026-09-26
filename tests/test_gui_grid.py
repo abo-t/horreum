@@ -1071,6 +1071,20 @@ def test_macro_stage_then_commit_edits_file(wb_view):
     assert fits.getheader(str(p))["TELESCOP"] == "RC8"   # przywrócone
 
 
+def test_szuflada_daje_Cofnij_gdy_commit_ma_failed_z_kopia_naglowka(wb_view):
+    """Z11/D3: ta sama reguła „Cofnij" co w oknach piszących karty (`wb_worker.commit_do_cofniecia`)
+    - rdzeń nadaje `commit_id`, gdy plik został PODMIENIONY, także przy `failed` z kopią nagłówka.
+    Dawny warunek „`applied` niepuste" zostawiał taki plik zmieniony bez przycisku cofnięcia."""
+    from horreum import writeback
+    view, con, p = wb_view
+    res = writeback.CommitResult(
+        run_id="r", commit_id=9, applied=[], blocked=[], skipped=[],
+        failed=[writeback.FileResult(1, str(p), "failed", "weryfikacja po podmianie")])
+    view._after_commit("commit", res)
+    assert view._last_commit_id == 9
+    assert "commit 9" in view.drawer.result.text()
+
+
 def test_macro_reject_clears_staging(wb_view):
     view, con, p = wb_view
     view.macro_bar.asg_kw.setCurrentText("TELESCOP")
@@ -3982,6 +3996,33 @@ def test_wiersz_trafiony_ALIASEM_tlumaczy_sie_w_tooltipie(qapp):
     rail.search.setText("LMC")                            # trafienie WŁASNĄ nazwą się nie tłumaczy
     qapp.processEvents()
     assert "LARGEMAGELLANICCLOUD" not in lw.item(0).toolTip()
+    rail.hide()
+
+
+def test_listwa_OZNACZENIE_trafia_DOKLADNIE_i_mowi_ktora_nazwa(qapp):
+    """C6 (bramka 0926): `C4` w szukajce listwy pokazywało `NGC4258` (podciąg „NGC4…"). Teraz
+    oznaczenie idzie przez kanon i `xref`: `C4` → tylko `NGC7023`, a tooltip mówi, którą nazwą
+    trafiło. Fraza nie-katalogowa (`NGC`) dalej zawęża podciągiem."""
+    from horreum.gui.facets import FacetRail
+    rail = FacetRail()
+    rail.resize(260, 500)
+    rail.show()
+    counts = {"object": [(1, "NGC4258", 3), (2, "NGC7023", 5), (3, "LMC", 1)],
+              "filter": [], "kind": [], "telescope": [], "night": []}
+    rail.set_data(counts, {}, aliases={})
+    qapp.processEvents()
+    lw = rail._lists["object"]
+    rail.search.setText("C4")
+    qapp.processEvents()
+    assert _widoczne(lw) == ["NGC7023"]
+    assert "C4" in next(lw.item(i) for i in range(lw.count())
+                        if lw.item(i).text() == "NGC7023").toolTip()
+    rail.search.setText("Caldwell 4")
+    qapp.processEvents()
+    assert _widoczne(lw) == ["NGC7023"]
+    rail.search.setText("NGC")
+    qapp.processEvents()
+    assert _widoczne(lw) == ["NGC4258", "NGC7023"]
     rail.hide()
 
 

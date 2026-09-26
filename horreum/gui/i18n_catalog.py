@@ -356,14 +356,51 @@ CATALOG = {
     # mówiło „powierzchnia cofania dochodzi w kolejnym kroku", co było wtedy faktem; po S2b ta sama
     # ostrożność stała się kłamstwem w drugą stronę — droga odwrotu ISTNIEJE i user ma o niej
     # wiedzieć, zanim zatwierdzi 707 klatek. Zdanie mówi więc, GDZIE jej szukać.
+    # O3 krok 1 (2026-09-26): gest pisze też kartę `OBJECT` do PLIKÓW tam, gdzie plik na to
+    # pozwala - dawne „zapis idzie do BAZY, nie do plików" stało się nieprawdą.
     "path.head": {
         "pl": "{names} nazw · {frames} klatek. Nazwa pochodzi z FOLDERU na pozycji obiektu; "
-              "zapis idzie do BAZY, nie do plików. Odznacz to, czego nie chcesz zapisać; "
-              "zatwierdzone cofniesz w Zbiorach przez „Obiekt ▾ → Cofnij przypisanie”.",
+              "zapis idzie do BAZY, a tam, gdzie plik na to pozwala, także jako karta OBJECT "
+              "do PLIKU - nagłówek i folder powiedzą to samo. Odznacz to, czego nie chcesz "
+              "zapisać; zatwierdzone cofniesz w Zbiorach przez „Obiekt ▾ → Cofnij przypisanie”, "
+              "karty - przyciskiem „Cofnij karty” do zamknięcia okna.",
         "en": "{names} names · {frames} frames. The name comes from the FOLDER at the object "
-              "position; the write goes to the DATABASE, not the files. Uncheck whatever you do not "
-              "want written; confirmed names can be undone in Frames via “Object ▾ → Undo "
-              "assignment”."},
+              "position; the write goes to the DATABASE and, where the file allows it, also as an "
+              "OBJECT card into the FILE - the header and the folder will say the same. Uncheck "
+              "whatever you do not want written; confirmed names can be undone in Frames via "
+              "“Object ▾ → Undo assignment”, cards - with „Undo cards” until the window closes."},
+    "path.card_item": {"pl": "do pliku: OBJECT = {value} · {n} z {total}",
+                       "en": "into file: OBJECT = {value} · {n} of {total}"},
+    "path.card_item_none": {"pl": "tylko baza - plik bez karty",
+                            "en": "database only - no card in the file"},
+    "path.cards_skipped_head": {
+        "pl": "Bez karty w pliku, tylko potwierdzenie w bazie ({n}) - powód i liczba klatek:",
+        "en": "No card in the file, database confirmation only ({n}) - reason and frame count:"},
+    "path.cards_skipped_item": {"pl": "{reason}: {n}", "en": "{reason}: {n}"},
+    "path.card_skip.invalid": {
+        "pl": "wartość {value} łamie reguły karty FITS ({reason})",
+        "en": "value {value} breaks the FITS card rules ({reason})"},
+    "path.card_skip.no_roundtrip": {
+        "pl": "nagłówek „{value}” nie wróciłby do kanonu {canon} - karta przeniosłaby klatkę",
+        "en": "header „{value}” would not resolve back to canon {canon} - the card would move "
+              "the frame"},
+    "path.undo_cards_btn": {"pl": "Cofnij karty", "en": "Undo cards"},
+    "path.cards_applied": {"pl": "karty OBJECT zapisane w plikach: {n}",
+                           "en": "OBJECT cards written to files: {n}"},
+    # Po „Cofnij karty" baza zostaje przy folderze, a pliki wracają bez karty - zdanie mówi to
+    # i drogę powrotu (C2): „Zatwierdź" dopisze karty ponownie.
+    "path.cards_restored_note": {
+        "pl": " - klatki zostają nazwane z folderu (w bazie), pliki są bez karty; "
+              "„Zatwierdź” dopisze karty ponownie.",
+        "en": " - frames stay named from the folder (in the database), files have no card; "
+              "„Confirm” writes the cards again."},
+    # Straż zamknięcia okna w biegu zapisu do plików (C1, `WritebackRunner.refuse_close`).
+    "wb.close_refused": {
+        "pl": "Zapis do plików trwa - przerywam po bieżącym pliku. Okno zamkniesz, gdy zapis się "
+              "zatrzyma i pokaże wynik.",
+        "en": "Writing to files is in progress - stopping after the current file. You can close "
+              "the window once the write stops and shows its result."},
+    "wb.cancelled_note": {"pl": " - przerwano na żądanie", "en": " - stopped on request"},
     "path.item": {"pl": "{canon}  ·  {n} klatek", "en": "{canon}  ·  {n} frames"},
     "path.new_badge": {"pl": "NOWA w bazie", "en": "NEW in the database"},
     "path.known_badge": {"pl": "kanon znany", "en": "canon known"},
@@ -753,6 +790,30 @@ CATALOG = {
     },
     "assign.existing_object": {"pl": "Istniejący obiekt:", "en": "Existing object:"},
     "assign.pick_object": {"pl": "— wybierz obiekt —", "en": "— pick object —"},
+    # Szukajka listy obiektów (2026-09-26): user grzebiący w nazwach MUSI widzieć aliasy, a lista
+    # ma się dać zawęzić po każdej nazwie obiektu, nie tylko po kanonie (`M106` znajduje NGC4258).
+    "assign.search_placeholder": {
+        "pl": "Szukaj na liście po kanonie albo aliasie, np. M106",
+        "en": "Search the list by canon or alias, e.g. M106",
+    },
+    # Stan pusty szukajki mówi to w miejscu wyboru - inaczej combo z samym placeholderem nie
+    # odróżnia „fraza za wąska" od „biblioteka pusta" (wzorzec listwy facetów, R-S3-5).
+    "assign.search_empty": {
+        "pl": "(żaden obiekt nie pasuje do „{text}”)",
+        "en": "(no object matches „{text}”)",
+    },
+    # Zdanie na żywo pod polem nazwy: co wpisano → jaki kanon zapisze Horreum → jaka forma stanie
+    # w nagłówku (`catalog.header_form`). Mówi to PRZED kliknięciem „Przypisz".
+    "assign.canon_preview": {
+        "pl": "{text} → {canon} · w nagłówku: {header}",
+        "en": "{text} → {canon} · in the header: {header}",
+    },
+    "assign.canon_preview_tip": {
+        "pl": "Kanon Horreum (bez spacji) trafia do bazy i do nazw folderów; forma ze spacją "
+              "to zapis nazwy obiektu w nagłówku pliku (karta OBJECT).",
+        "en": "The Horreum canon (no space) goes to the database and to folder names; the form "
+              "with a space is how the object name is written in the file header (OBJECT card).",
+    },
     # Od S4 pole przyjmuje KAŻDĄ nazwę, którą rozpozna przebieg (oznaczenie katalogowe, nazwa
     # potoczna, słownik obiektów własnych, nazwa nauczona aliasem) — etykieta mówiąca „oznaczenie
     # katalogowe" kłamałaby o regule i odstraszała od jedynej drogi dla `LMC`.
@@ -1183,6 +1244,8 @@ CATALOG = {
     "perspective.copy_conflict": {"pl": "Kopie niezgodne", "en": "Disagreeing copies"},
     "perspective.orphan_testimony": {
         "pl": "Zeznanie z nieobecnej kopii", "en": "Testimony from a missing copy"},
+    "perspective.path_header_conflict": {
+        "pl": "Nagłówek inny niż folder", "en": "Header differs from folder"},
     "perspective.to_review": {"pl": "Do przeglądu", "en": "To review"},
 
     # --- pusty grid (rozwiązywane w USE-site; stałe _EMPTY_* trzymają KLUCZ) ---
@@ -1864,6 +1927,9 @@ CATALOG = {
         "pl": "tylko kopie niezgodne ze sobą", "en": "only copies that disagree"},
     "grid.criteria.only_orphan_testimony": {
         "pl": "tylko zeznanie z nieobecnej kopii", "en": "only testimony from a missing copy"},
+    "grid.criteria.only_path_header_conflict": {
+        "pl": "tylko nagłówek inny niż zatwierdzony folder",
+        "en": "only header differing from the confirmed folder"},
     "grid.criteria.only_lineage": {
         "pl": "tylko obrazy bez rodowodu",
         "en": "only images without lineage",
@@ -2273,6 +2339,28 @@ CATALOG = {
               "rozstrzygnij ręcznie",
         "en": "  ⚠ {n} dictionary names already belong to another object — skipped, "
               "resolve by hand"},
+    # E5-1: nagłówek wygrywa z potwierdzeniem ze ścieżki (header-primary), ale głośno. Dwie
+    # doklejki, każda tylko gdy niezerowa (QUIET): inny obiekt = gest człowieka przegrał z plikiem
+    # (ostrzeżenie), ten sam obiekt = zmieniło się tylko źródło (informacja).
+    # Frazy odmieniane przez liczbę (`i18n.t_plural`) - „przepiął 1 klatkę / 2 klatki / 5 klatek".
+    "pipeline.fmt.resolve_path_overridden": {
+        "pl": {"one": "  ⚠ nagłówek przepiął {n} klatkę z zatwierdzonego folderu na INNY obiekt",
+               "few": "  ⚠ nagłówek przepiął {n} klatki z zatwierdzonego folderu na INNY obiekt",
+               "many": "  ⚠ nagłówek przepiął {n} klatek z zatwierdzonego folderu na INNY obiekt"},
+        "en": {"one": "  ⚠ the header moved {n} frame off the confirmed folder to ANOTHER object",
+               "other": "  ⚠ the header moved {n} frames off the confirmed folder to ANOTHER "
+                        "object"}},
+    "pipeline.fmt.resolve_path_to_header": {
+        "pl": {"one": "  (nagłówek potwierdził zatwierdzony folder: {n} klatka - ten sam obiekt, "
+                      "źródło z nagłówka)",
+               "few": "  (nagłówek potwierdził zatwierdzony folder: {n} klatki - ten sam obiekt, "
+                      "źródło z nagłówka)",
+               "many": "  (nagłówek potwierdził zatwierdzony folder: {n} klatek - ten sam obiekt, "
+                       "źródło z nagłówka)"},
+        "en": {"one": "  (the header confirmed the approved folder: {n} frame - same object, "
+                      "source now the header)",
+               "other": "  (the header confirmed the approved folder: {n} frames - same object, "
+                        "source now the header)"}},
     "pipeline.fmt.calibrate": {
         "pl": "[kalibracja] klatki {frames} · przepisy {prof_prop}/{prof_assign} · "
               "fakty ze ścieżki {facts} · bez kompletu {incomplete}",
@@ -2501,6 +2589,10 @@ CATALOG = {
     "tasks.observatory_axis": {"pl": "Oś obserwatorium", "en": "Observatory axis"},
     "tasks.object_review": {"pl": "Przegląd obiektów", "en": "Object review"},
     "tasks.unresolved_lights": {"pl": "Klatki bez obiektu", "en": "Frames without object"},
+    # E5-2: klatka MA obiekt z zatwierdzonego folderu, a karta `OBJECT` w pliku mówi co innego.
+    "tasks.path_header_conflict_frames": {
+        "pl": "Nagłówek inny niż zatwierdzony folder",
+        "en": "Header differs from the confirmed folder"},
     "tasks.stacks_lineage": {"pl": "Obrazy bez rodowodu", "en": "Images without lineage"},
     "tasks.superseded_frames": {"pl": "Zastąpione (historia)", "en": "Superseded (history)"},
     "tasks.retired_frames": {"pl": "Wycofane (historia)", "en": "Retired (history)"},

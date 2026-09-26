@@ -515,18 +515,39 @@ def main(argv=None):
         # kazałoby liczyć na bazie innej niż ta, o którą pytamy.
         con = db.connect(args.db)
         spis = audit.human_facts_census(con)
-        con.close()
-        spadki = {}
+        spadki, rozbior = {}, None
         if args.baseline:
             with open(args.baseline, encoding="utf-8") as fh:
-                spadki = spis.spadki(audit.HumanFacts(**json.load(fh)))
+                odniesienie = audit.HumanFacts(**json.load(fh))
+            # E5-1: dowod przejscia `path -> naglowek` czytany z dziennika PO znaku wodnym
+            # odniesienia; stare odniesienie bez znaku = pusty zbior (nic nie wyjasniamy).
+            przejete = audit.path_to_header_since(con, odniesienie.event_watermark)
+            spadki = spis.spadki(odniesienie, przejete)
+            rozbior = spis.reka_obiektu(odniesienie, przejete)
+        con.close()
         if args.json:
-            print(json.dumps(spis.counts, indent=2))
+            # Odniesienie niesie migawke tozsamosci osi obiektu i znak wodny dziennika - bez nich
+            # porownanie wraca do sum i niczego nie wyjasnia.
+            print(json.dumps(spis.snapshot, indent=2))
         else:
             lines = [f"Horreum human-facts {args.db}:"]
             lines += [f"  {k:<18} {v}" for k, v in spis.counts.items()]
             if args.baseline:
                 lines.append(f"  odniesienie: {args.baseline}")
+                if rozbior is None:
+                    lines.append("  odniesienie bez migawki klatek - porownanie po sumach")
+                else:
+                    utracone, przeszly = rozbior
+                    # Przejscie `path -> naglowek` bez zmiany obiektu NIE jest ubytkiem, ale ma
+                    # wlasny wiersz - bez niego spadek `object_hand` bez UBYTKU bylby niewyjasniony.
+                    if przeszly:
+                        lines.append(f"  potwierdzenia ze sciezki przejete przez naglowek "
+                                     f"(ten sam obiekt, nie ubytek): {len(przeszly)}")
+                    if utracone:
+                        lines.append(f"  klatki, ktore stracily fakt reki osi obiektu "
+                                     f"({len(utracone)}): "
+                                     f"{', '.join(str(i) for i in utracone[:20])}"
+                                     f"{' ...' if len(utracone) > 20 else ''}")
                 lines += ([f"  UBYTEK {k}: {bylo} -> {jest}" for k, (bylo, jest) in spadki.items()]
                           or ["  ubytkow: BRAK — warunek dotrzymany"])
             print("\n".join(lines))

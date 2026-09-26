@@ -15,11 +15,11 @@ własnych świecił czerwono z powodu, który nie jest regresją — a taką cze
 podniesieniem kotwicy, po czym bramka przestaje łapać regresję prawdziwą.
 """
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .repo import CONFIG_SOURCES, STICKY_CONFIG_SOURCES   # słowniki osi sprzętu — właściciel (R1)
 from .resolve.objects import (ALIAS_SOURCES, OBJECT_KINDS, OBJECT_SOURCES,
-                              TRANSFERABLE_OBJECT_SOURCES)
+                              TRANSFERABLE_OBJECT_SOURCES, WEAK_OBJECT_SOURCES)
 
 
 @dataclass(frozen=True)
@@ -424,6 +424,32 @@ class HumanFacts:
 
     Wartość domyślna 0 z tego samego powodu i z tym samym kierunkiem błędu, co przy `offset_hand`."""
 
+    object_hand_frames: tuple | None = None
+    """MIGAWKA TOŻSAMOŚCI osi obiektu (E5-1, bramka `sol` Z1): posortowane `frame_id` klatek
+    z faktem ręki (`TRANSFERABLE_OBJECT_SOURCES`) - te same klatki, które liczy `object_hand`.
+
+    Po co tożsamość, skoro jest liczba: od E5-1 spadek `object_hand` bywa UPRAWNIONY (karta
+    `OBJECT` w pliku potwierdziła zatwierdzony folder, źródło przeszło z `path` na nagłówek).
+    Rozstrzygnięcie na SUMACH przepuszczało wtedy prawdziwy ubytek: klatka A przechodzi uprawnienie,
+    klatka B traci gest człowieka, nowa klatka C dostaje rękę - suma spada o 1, przejść jest 1,
+    „ubytków BRAK". Po tożsamości B zostaje ubytkiem, bo wyjaśnić można wyłącznie KONKRETNĄ klatkę
+    konkretnym śladem w dzienniku (`path_to_header_since`).
+
+    `None` = odniesienie zapisane PRZED tą migawką: porównanie wraca do sum i niczego nie wyjaśnia
+    (zachowanie sprzed E5-1 - przejście uprawnione pokaże się jako ubytek, prawdziwy nie zniknie)."""
+
+    event_watermark: int | None = field(default=None, compare=False)
+    """`max(event.id)` w chwili spisu - granica, od której dziennik może WYJAŚNIĆ zniknięcie faktu
+    ręki (`path_to_header_since`). Poza porównaniem równości spisów: dwa spisy o tych samych
+    faktach ręki są równe, choćby między nimi przybyło zdarzeń bez związku z ręką."""
+
+    def __post_init__(self):
+        # Odniesienie z JSON-a niesie listę; spis z bazy krotkę. Jedna postać, żeby równość spisów
+        # mówiła o faktach, a nie o drodze, którą przyszły.
+        if self.object_hand_frames is not None:
+            object.__setattr__(self, "object_hand_frames",
+                               tuple(sorted(int(i) for i in self.object_hand_frames)))
+
     @property
     def counts(self):
         """Spis jako `{oś: liczba}` — do porównania i do raportu, w jednej kolejności."""
@@ -435,13 +461,66 @@ class HumanFacts:
                 "offset_hand": self.offset_hand,
                 "retired_hand": self.retired_hand}
 
-    def spadki(self, wczesniej):
+    @property
+    def snapshot(self):
+        """Spis do zapisu jako ODNIESIENIE (`human-facts --json`): liczby osi + migawka tożsamości
+        osi obiektu + znak wodny dziennika. `HumanFacts(**snapshot)` odtwarza spis w całości."""
+        return {**self.counts,
+                "object_hand_frames": (None if self.object_hand_frames is None
+                                       else list(self.object_hand_frames)),
+                "event_watermark": self.event_watermark}
+
+    def reka_obiektu(self, wczesniej, przejete=frozenset()):
+        """Rozbiór zniknięć faktu ręki osi obiektu PO TOŻSAMOŚCI - `(utracone, przejete_przez_naglowek)`
+        jako posortowane krotki `frame_id`, albo `None`, gdy któryś spis nie niesie migawki.
+
+        Zniknięcie = klatka z migawki `wczesniej`, której nie ma w migawce bieżącej. Wyjaśnione
+        (nie ubytek) wyłącznie wtedy, gdy klatka jest w `przejete` - czyli dziennik PO znaku
+        wodnym odniesienia niesie dowód przejścia `path → nagłówek` z TYM SAMYM obiektem."""
+        if wczesniej.object_hand_frames is None or self.object_hand_frames is None:
+            return None
+        zniknely = set(wczesniej.object_hand_frames) - set(self.object_hand_frames)
+        return tuple(sorted(zniknely - przejete)), tuple(sorted(zniknely & przejete))
+
+    def spadki(self, wczesniej, przejete=frozenset()):
         """Osie, na których fakt ręki UBYŁ wobec wcześniejszego spisu — `{oś: (było, jest)}`.
 
         Pusty słownik == warunek dotrzymany. WZROST NIE JEST NARUSZENIEM: nowy materiał wolno
         opatrzyć ręką, a przeniesienie faktu na następczynię (`repo.transfer_human_facts`) też
-        podnosi licznik osi obiektu. Pytamy wyłącznie o UBYTEK, bo tylko on jest wycofaniem."""
-        return {k: (v, self.counts[k]) for k, v in wczesniej.counts.items() if self.counts[k] < v}
+        podnosi licznik osi obiektu. Pytamy wyłącznie o UBYTEK, bo tylko on jest wycofaniem.
+
+        OŚ OBIEKTU PO TOŻSAMOŚCI, gdy oba spisy niosą migawkę (E5-1): ubytkiem jest KAŻDA klatka,
+        która fakt ręki straciła, poza wyjaśnionymi śladem przejścia (`reka_obiektu`) - także gdy
+        suma nie spadła, bo nowa ręka gdzie indziej nie oddaje utraconej. Bez migawki (stare
+        odniesienie) - sumy, jak przed E5-1, bez żadnego tłumienia. Para `(było, jest)` to liczby
+        osi; listę klatek podaje `reka_obiektu`."""
+        ubytki = {k: (v, self.counts[k]) for k, v in wczesniej.counts.items() if self.counts[k] < v}
+        rozbior = self.reka_obiektu(wczesniej, przejete)
+        if rozbior is not None:
+            ubytki.pop("object_hand", None)
+            if rozbior[0]:
+                ubytki["object_hand"] = (wczesniej.object_hand, self.object_hand)
+        return ubytki
+
+
+def path_to_header_since(con, watermark):
+    """Klatki, których potwierdzenie ze ścieżki przeszło do nagłówka BEZ zmiany obiektu PO znaku
+    wodnym `watermark` - `frozenset(frame_id)`. READ-ONLY. `None` (odniesienie bez znaku) → pusty
+    zbiór: nie wiadomo, od kiedy czytać, więc niczego nie wyjaśniamy.
+
+    JEDYNY DOWÓD to ślad zapisany W CHWILI przepięcia przez klingę (`repo.assign_object`, w tej
+    samej transakcji): `object.unassigned` ze źródłem słabym i stanem PO w `next_object_id`,
+    równym obiektowi sprzed. Rekonstrukcja z ogólnego odpięcia i BIEŻĄCEGO stanu (bramka `sol` Z2)
+    brała za przejście późniejsze `nagłówek:B → nagłówek:A` i odpięcie słownikowe - tamte
+    zdarzenia kluczy stanu PO nie niosą."""
+    if watermark is None:
+        return frozenset()
+    return frozenset(int(r[0]) for r in con.execute(
+        "SELECT DISTINCT CAST(substr(target, 7) AS INTEGER) FROM event "
+        "WHERE id > ? AND verb = 'object.unassigned' AND target LIKE 'frame:%' "
+        "AND json_extract(payload, '$.object_source') IN (SELECT value FROM json_each(?)) "
+        "AND json_extract(payload, '$.next_object_id') = json_extract(payload, '$.object_id')",
+        (watermark, json.dumps(sorted(WEAK_OBJECT_SOURCES)))).fetchall())
 
 
 def human_facts_census(con):
@@ -457,10 +536,16 @@ def human_facts_census(con):
     identycznie jak zniknięcie przypisania — a to dwie różne szkody i dwie różne drogi naprawy."""
     zrodla_obiektu = json.dumps(sorted(TRANSFERABLE_OBJECT_SOURCES))
     zrodla_configu = json.dumps(sorted(STICKY_CONFIG_SOURCES))
+    # Znak wodny PRZED migawką: zdarzenie dopisane między dwoma odczytami trafi najwyżej do okna
+    # następnego porównania, a nie wypadnie z obu (spis bywa robiony na żywej bazie).
+    znak = con.execute("SELECT COALESCE(max(id), 0) FROM event").fetchone()[0]
+    reka = tuple(int(r[0]) for r in con.execute(
+        "SELECT id FROM frame WHERE object_source IN (SELECT value FROM json_each(?)) ORDER BY id",
+        (zrodla_obiektu,)).fetchall())
     return HumanFacts(
-        object_hand=con.execute(
-            "SELECT count(*) FROM frame WHERE object_source IN (SELECT value FROM json_each(?))",
-            (zrodla_obiektu,)).fetchone()[0],
+        object_hand=len(reka),                    # liczba i migawka z JEDNEGO odczytu (SPOT)
+        object_hand_frames=reka,
+        event_watermark=znak,
         object_cleared=con.execute(
             "SELECT count(*) FROM frame WHERE object_source = 'user_cleared'").fetchone()[0],
         config_hand=con.execute(

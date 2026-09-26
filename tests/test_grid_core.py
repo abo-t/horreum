@@ -745,3 +745,25 @@ def test_szukajka_MOWI_CZYM_trafila():
     # Alias wybierany DETERMINISTYCZNIE — igła pasująca do dwóch aliasów nie może dawać tooltipa
     # skaczącego między przebiegami (zbiór nie ma kolejności).
     assert facet_model.search_hit("magellan", "LMC", aliasy) == "LARGEMAGELLANICCLOUD"
+
+
+@pytest.mark.parametrize("igla, label, aliasy, wynik", [
+    ("C4", "NGC4258", None, None),                         # podciąg „NGC4…" - już NIE trafia
+    ("C4", "NGC7023", None, "C4"),                         # xref: Caldwell 4 → NGC7023, mówi czym
+    ("Caldwell 4", "NGC7023", None, "C4"),                 # inna pisownia tego samego oznaczenia
+    ("M 106", "NGC4258", None, "M106"),
+    ("NGC 4258", "NGC4258", None, "__label__"),            # własną nazwą
+    ("M 42", "M42", None, "__label__"),                    # kanon PRZED xref też jest własną nazwą
+    ("NGC 42", "NGC4258", None, None),                     # oznaczenie innego obiektu - nie podciąg
+    ("Collinder 464", "Cr464", None, "__label__"),
+    ("Sh2 184", "NGC281", None, "SH2184"),
+    ("CTB 1", "X", {"X": {"CTB1"}}, "CTB1"),               # oznaczenie wśród aliasów bazy
+    ("NGC", "NGC4258", None, "__label__"),                 # sam skrót nie jest oznaczeniem - podciąg
+    ("NGC4631_PGC42637", "NGC4631PGC42637", None, "__label__"),   # `split=False`: sklejka = podciąg
+])
+def test_szukajka_OZNACZENIE_trafia_DOKLADNIE_reszta_podciagiem(igla, label, aliasy, wynik):
+    """C6 (bramka 0926): fraza rozpoznana przez `catalog_canon` trafia WYŁĄCZNIE wiersz tego kanonu
+    (przed albo po `xref`) albo wiersz z tym oznaczeniem wśród aliasów; `C4` przestało trafiać
+    `NGC4258`. Ten sam predykat służy oknu „Przypisz obiekt" - jeden właściciel reguły."""
+    wynik = facet_model.HIT_LABEL if wynik == "__label__" else wynik
+    assert facet_model.search_hit(igla, label, aliasy) == wynik

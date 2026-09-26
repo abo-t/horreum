@@ -37,6 +37,10 @@ def test_spis_zna_KAZDA_os_gestu_ktora_repo_ma():
     assert set(_spis().counts) == {
         "object_hand", "object_cleared", "config_hand", "lineage_inputs", "lineage_excluded",
         "calibration_facts", "calibration_links", "offset_hand", "retired_hand"}
+    # E5-1: odniesienie niesie też migawkę TOŻSAMOŚCI osi obiektu i znak wodny dziennika - to nie
+    # są osie (nie ma ich w `counts`), tylko materiał rozstrzygnięcia po klatkach.
+    assert set(_spis().snapshot) == set(_spis().counts) | {"object_hand_frames",
+                                                           "event_watermark"}
 
 
 def test_odniesienie_bez_nowej_osi_wczytuje_sie_jako_zero():

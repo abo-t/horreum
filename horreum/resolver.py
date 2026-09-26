@@ -59,6 +59,13 @@ class ResolveSummary:
     # wiersza osi obiektu z tego tytułu; te dwie liczby są jedynym śladem szczebla w raporcie.
     path_proposed_frames: int = 0         # klatki, którym ścieżka proponuje kanon (do potwierdzenia)
     path_proposed_names: int = 0          # …zgrupowane po NAZWIE (jednostka przeglądu człowieka)
+    # NAGŁÓWEK PRZEGŁOSOWAŁ POTWIERDZENIE ZE ŚCIEŻKI (E5-1) - header-primary zostaje, ale GŁOŚNO.
+    # Dwie liczby, bo to dwie różne wiadomości dla człowieka: plik wskazał INNY obiekt niż folder,
+    # który zatwierdził (jego gest przegrał), albo TEN SAM (zmieniło się tylko źródło - karta
+    # w pliku potwierdza to, co ręka zatwierdziła, więc nic nie przepadło). Ślad per klatka
+    # zapisuje `repo.assign_object` (`reason` + `next_object_*` w `object.unassigned`).
+    objects_path_overridden: int = 0      # klatki ze ścieżki przepięte nagłówkiem na INNY obiekt
+    objects_path_to_header: int = 0       # …na TEN SAM obiekt (źródło `path` → nagłówek)
 
 
 def sync_own_aliases(con, now, s=None):
@@ -383,10 +390,12 @@ def path_proposal(con, path, kind="light"):
     zeznania DWÓCH świadków (folder obiektu ∧ człon nazwy pliku). Szczebel przebiegu tylko
     PROPONUJE do bazy, więc stać go na jednego świadka — dwaj zgodni łapią 31 klatek z 763.
 
-    ZWRACA FORMĘ SPRZED `xref` — to druga zamierzona różnica wobec szczebla (§4 wiersz 16 wypisuje
-    obie jawnie): do PLIKU idzie konwencja USERA (folder `M82` → karta `M82`), a nie kanon bazy
-    (`NGC3034`). Drabina odpowiada tu na pytanie „czy ta nazwa się rozwiąże", a nie „jak ją zapisać"
-    — inaczej naprawa nagłówka przepisywałaby użytkownikowi jego własne archiwum (D-PD-9)."""
+    ZWRACA FORMĘ SPRZED `xref` - to druga zamierzona różnica wobec szczebla (§4 wiersz 16 wypisuje
+    obie jawnie): PROPOZYCJA (pole edycji dialogu) zostaje w konwencji folderu usera (`M82`), żeby
+    user widział, skąd wzięła się nazwa. Do PLIKU idzie jednak od decyzji Q6/D2 (2026-09-26, D-PD-9
+    odwrócone) forma nagłówka kanonu - `header_form` po drabinie nazwy (`M82` → `NGC 3034`); liczy
+    ją walidacja dialogu (`gui.app._validate_object_value` → `forma_karty_object`), nie ta funkcja.
+    Drabina odpowiada tu na pytanie „czy ta nazwa się rozwiąże", a nie „jak ją zapisać"."""
     seg = object_from_path(path, kind=kind)
     if not seg:
         return None
@@ -416,7 +425,16 @@ def run_resolver(con, now):
     SŁOWNIK OBIEKTÓW WŁASNYCH siedzi WEWNĄTRZ `resolve_object` (ostatni jego szczebel), więc stoi
     przed aliasem i regionem — jest jawną wiedzą o NAZWIE, jak `_COMMON`, a nie inferencją. Dzięki
     temu widzi go też `name_resolves`, czyli walidacja dialogu „Napraw nagłówek…". Zasiew nazw
-    potocznych tego słownika domyka przebieg (`sync_own_aliases`)."""
+    potocznych tego słownika domyka przebieg (`sync_own_aliases`).
+
+    POTWIERDZENIE ZE ŚCIEŻKI (`WEAK_OBJECT_SOURCES`) NIE jest lepkie: nagłówek, który zeznaje
+    rozpoznawalną nazwę, wygrywa (header-primary, decyzja Zdzinia 2026-09-26 pod E5-1) - ale
+    GŁOŚNO. Każde takie przepięcie niesie w `object.unassigned` powód i stan PO (`next_object_id`,
+    `next_object_source`), zapisane klingą w transakcji przepięcia, a przebieg liczy je w dwóch
+    licznikach (`objects_path_overridden` - inny obiekt, `objects_path_to_header` - ten sam
+    obiekt, zmieniło się tylko źródło). Nazwa nierozpoznana
+    zostawia klatkę przy obiekcie z folderu (region nad potwierdzeniem nie gra); ten rozjazd liczy
+    ze STANU `gui.queries.path_header_conflict_frame_ids` (E5-2), nie przebieg."""
     s = ResolveSummary()
     rows = con.execute(
         "SELECT f.id AS fid, f.kind AS kind, f.object_id AS oid, f.object_source AS osrc, "
@@ -430,6 +448,7 @@ def run_resolver(con, now):
 
     unresolved = {}        # object_raw -> liczba (tylko light/master_light, obecny-nierozpoznany)
     filter_items = []      # (frame_id, filter_canon) do backfillu zbiorczego
+    przeglosowane = []     # [frame_id, było, jest] (object_id) - przepięte ze źródła SŁABEGO (E5-1)
     for r in rows:
         # --- oś OBIEKT: kind-aware (kalibracja nie ma obiektu z definicji) ---
         if r["kind"] in LIGHT_KINDS:
@@ -455,7 +474,8 @@ def run_resolver(con, now):
                 # nazwę z folderu, a region jest najsłabszym szczeblem automatu - stos pod
                 # `STACKS\\NGC6992` z RA/DEC w promieniu Veil zostaje `NGC6992`. Zakres = sam
                 # region: nagłówek, który zeznaje rozpoznawalną nazwę, wygrywa dalej (header-primary).
-                if ident is None and alias_oid is None and r["osrc"] not in WEAK_OBJECT_SOURCES:
+                slabe = r["osrc"] in WEAK_OBJECT_SOURCES
+                if ident is None and alias_oid is None and not slabe:
                     ident = resolve_region(r["ra"], r["dec"])
                 if alias_oid is not None:
                     # Trafienie aliasu: obiekt i alias ISTNIEJĄ z definicji — BEZ upsert_object i
@@ -465,6 +485,8 @@ def run_resolver(con, now):
                                           object_source="alias", now=now):
                         s.objects_assigned += 1
                         s.objects_by_alias += 1
+                        if slabe:                   # E5-1: potwierdzenie ręki przegłosowane
+                            przeglosowane.append([r["fid"], r["oid"], alias_oid])
                 elif ident is not None:
                     oid, created = repo.upsert_object(
                         con, canon=ident.canon, catalog=ident.catalog, kind=ident.kind, now=now)
@@ -476,6 +498,8 @@ def run_resolver(con, now):
                                           object_source=ident.source, now=now):
                         s.objects_assigned += 1
                         s.objects_by_region += ident.source == "region"
+                        if slabe:                   # E5-1: potwierdzenie ręki przegłosowane
+                            przeglosowane.append([r["fid"], r["oid"], oid])
                 elif r["oid"] is None:
                     # D5: delta ze STANU (`object_id IS NULL`), nie z rederywacji — frame przypisany
                     # (ręcznie lub wcześniej), którego nagłówek dziś się nie rozwiązuje, NIE wraca
@@ -496,6 +520,12 @@ def run_resolver(con, now):
     repo.backfill_filter_canon(con, filter_items, now=now)        # no-op gdy pusto
     repo.flag_object_review_summary(
         con, sorted(unresolved.items(), key=lambda kv: (-kv[1], kv[0])), now=now)  # no-op gdy pusto
+    # E5-1: powód przejścia `path → nagłówek` zapisuje KLINGA przy każdej klatce, w transakcji
+    # przepięcia (`repo.assign_object`: `reason` + `next_object_*` w `object.unassigned`). Tu
+    # zostają wyłącznie liczniki do raportu Dostawy - zdarzenie zbiorcze byłoby drugim zapisem tego
+    # samego faktu, a po przerwanym przebiegu mówiłoby mniej niż dziennik klatek.
+    s.objects_path_overridden = sum(1 for _, bylo, jest in przeglosowane if bylo != jest)
+    s.objects_path_to_header = len(przeglosowane) - s.objects_path_overridden
 
     # SZCZEBEL ŚCIEŻKI — POLICZONY, NIE ZAPISANY (D-OW-2/B). Przebieg mówi, ile klatek CZEKA na
     # gest człowieka; sam nie pisze do osi obiektu ani jednego wiersza. Liczony PO pętli i osobnym

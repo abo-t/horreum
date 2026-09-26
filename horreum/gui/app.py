@@ -32,11 +32,12 @@ from PySide6.QtWidgets import (
 from horreum import db, macro as macro_mod, repo, resolver
 from horreum.gui import busy, i18n, mapproj, queries, rows, theme
 from horreum.gui.assign_dialog import AssignObjectDialog
+from horreum.gui.wb_worker import zdanie_commitu_kart, zdanie_undo_kart
 from horreum.gui.config_dialog import AssignConfigDialog
 from horreum.gui.map_view import SitesMapView
 from horreum.gui.rows import TwoPartDelegate
 from horreum.resolve._text import norm_alnum
-from horreum.resolve.catalog import catalog_canon
+from horreum.resolve.catalog import header_form
 from horreum.resolve.paths import STACK_KIND, object_folder
 
 # ROLE POZYCJI KOLEJKI PRZEGLĄDU — świadomie POZA pasmem `rows` (SECONDARY/TERTIARY/STRONG zajmują
@@ -609,6 +610,62 @@ def path_proposals_for(con, payload):
     return tuple(p for p in resolver.path_proposals(con) if p.stack_tree == stosy)
 
 
+def forma_karty_object(con, canon):
+    """Kanon Horreum → wartość karty `OBJECT` do PLIKU albo None - JEDEN punkt wyliczenia formy dla
+    obu gestów piszących kartę („Zatwierdź ze ścieżki…", „Napraw nagłówek…"; decyzje Q6 i D2
+    2026-09-26: jedna wersja na obiekt, nazwy zwyczajowe → oznaczenie katalogowe).
+
+    Forma = `header_form(canon)` (`NGC 7635`; kanon spoza gramatyk bez zmian), ale TYLKO gdy drabina
+    resolvera sprowadza ją z powrotem do TEGO SAMEGO kanonu. Kanon nauczony wyłącznie aliasem
+    (`ZW77` znany tylko jako „Zupelnie Wymyslona 77") nie wraca z własnego zapisu - karta z nim
+    przeniosłaby klatkę po re-syncu do „nierozpoznanych". Wtedy None: wołający decyduje, co dalej
+    (ścieżka pomija kartę z powodem, naprawa zostawia tekst usera, który się rozwiązuje).
+    Uszkodzony słownik (`ValueError`) = nie wiadomo, więc też None."""
+    value = header_form(canon)
+    try:
+        wraca = resolver.resolve_name(resolver.alias_lookup(con), value)[0]
+    except ValueError:
+        return None
+    return value if wraca is not None and wraca.canon == canon else None
+
+
+def plan_kart_sciezki(con, canon, frame_ids):
+    """Plan karty `OBJECT` dla klatek zatwierdzanych ze ścieżki (O3 krok 1, decyzja usera
+    2026-09-26: nagłówek i folder mają mówić to samo) → `(wartość, touched, skipped)`.
+
+    ZERO ZAPISU: to jest ten sam silnik makr i te same bramki celu (`macro.resolve_target`: RAW
+    read-only, brak obecnej kopii, wiele obecnych kopii, skompresowany master, degenerat, brak
+    `header_hash`), którymi idzie „Napraw nagłówek…" - lista pominiętych nie jest drugą regułą.
+    Operacja `add`: karta, która już JEST (także z inną wartością), nie zostanie nadpisana, tylko
+    pominięta z powodem („karta juz istnieje") - rozjazd pliku z folderem rozstrzyga człowiek.
+
+    Wartość = `header_form(canon)` (`NGC 7635`), SPOT formy nagłówka. Dwie bramki PRZED silnikiem
+    pomijają całą pozycję z jednym powodem: wartość łamiąca reguły karty FITS (ten sam właściciel,
+    `writeback.card_violation`, co przy zapisie) oraz wartość, której drabina resolvera NIE sprowadza
+    z powrotem do `canon` - karta z taką nazwą przeniosłaby klatkę po re-syncu z potwierdzonego
+    obiektu do innego albo do „nierozpoznanych" (np. kanon z aliasu folderu, którego nagłówek nie
+    zna). `touched` = `PendingPreview` do `repo.stage_pending`; `skipped` = `[(frame_id, path,
+    powód)]`."""
+    from horreum import writeback        # lazy: astropy - jak w `_validate_object_value`
+    forma = forma_karty_object(con, canon)
+    value = forma if forma is not None else header_form(canon)
+    naruszenie = writeback.card_violation("OBJECT", value, new_card=True)
+    powod = None
+    if naruszenie is not None:
+        powod = i18n.t("path.card_skip.invalid", value=value, reason=naruszenie.reason)
+    elif forma is None:
+        powod = i18n.t("path.card_skip.no_roundtrip", value=value, canon=canon)
+    if powod is not None:
+        return value, [], [(fid, "", powod) for fid in frame_ids]
+    md = macro_mod.MacroDef(assign=macro_mod.Assign(
+        keyword="OBJECT", op="add", expr=repr(value), value_type="str"))
+    run = macro_mod.run_macro(
+        md, list(frame_ids),
+        targets_fn=lambda ids: queries.writeback_frame_targets(con, ids),
+        cards_fn=lambda fid: queries.frame_cards(con, fid))
+    return value, list(run.touched), [(s.frame_id, s.path, s.reason) for s in run.skipped]
+
+
 class ConfirmPathObjectsDialog(QDialog):
     """„Zatwierdź ze ścieżki…" — POWIERZCHNIA POTWIERDZANIA propozycji szczebla ścieżki (S2,
     D-OW-2/**B**). To jest cena wariantu B i bez niej segment nie istnieje: przebieg resolvera
@@ -627,16 +684,41 @@ class ConfirmPathObjectsDialog(QDialog):
     ZAPIS IDZIE TĄ SAMĄ KLINGĄ, KTÓRĄ PISZE RĘKA (`repo.user_assign_object`), ze źródłem `path`
     i BEZ aliasu: jeden pisarz osi, nie dwóch — inaczej „Cofnij" z S2b widziałby jedną populację
     z dwóch. Alias z segmentu ścieżki nie powstaje, bo segment nie trafi żadnego przyszłego
-    `object_raw` (D-OW-2 pkt 4); nazwy potoczne wpisu słownika zasieje najbliższy `Rozwiąż`."""
+    `object_raw` (D-OW-2 pkt 4); nazwy potoczne wpisu słownika zasieje najbliższy `Rozwiąż`.
+
+    KARTA DO PLIKU (O3 krok 1, decyzja usera 2026-09-26): nagłówek i folder mają mówić to samo,
+    więc ten sam klik dopisuje też kartę `OBJECT = header_form(kanon)` tam, gdzie plik na to
+    pozwala. WZORZEC „Napraw nagłówek…" (`RepairHeaderDialog`) 1:1, bez nowej drogi zapisu: plan
+    silnikiem makr (`plan_kart_sciezki`, bramki celu `macro.resolve_target`), staging
+    `repo.stage_pending`, commit `WritebackRunner` z re-syncem zeznania w `writeback.commit`,
+    jednorazowe „Cofnij" do zamknięcia okna i „Rozwiąż teraz" delegowane do Dostawy. Gest
+    commituje sam, bo tak robi gest wzorcowy (staging bez commitu osierociłby `run_id`).
+    KOLEJNOŚĆ: najpierw baza (klinga pyta o przesłankę „nagłówek milczy", więc karta zapisana
+    przed nią zamieniłaby potwierdzenie w dryf), potem pliki - i tylko te klatki, które klinga
+    REALNIE nazwała tym kanonem ze źródłem `path`. Klatki, których bramka nie przepuszcza (RAW,
+    wiele kopii, karta już jest…), zostają przy samym potwierdzeniu z folderu - okno mówi PRZED
+    kliknięciem ile i dlaczego. Po karcie i `Rozwiąż` źródło klatki przechodzi z `path` na nagłówek
+    przy TYM SAMYM obiekcie (E5-1: przejście uprawnione, nie przepięcie)."""
 
     changed = Signal()          # zapis doszedł do skutku → gospodarz odświeża kolejkę i bibliotekę
+    busy_changed = Signal(bool)  # okno pisze do plików → mutex drugiej powierzchni (D-PD-3)
 
-    def __init__(self, con, *, proposals, now_fn, parent=None):
+    def __init__(self, con, *, proposals, now_fn, db_path=None, run_stage_fn=None, parent=None):
         super().__init__(parent)
+        # Lazy jak w `RepairHeaderDialog`: `wb_worker` ciągnie `writeback` → astropy.
+        from horreum.gui.wb_worker import WritebackRunner
+
         self.con = con
         self._now = now_fn
-        self._items = []        # [{proposal, check}]
+        self._run_stage = run_stage_fn
+        self._run_id = None
+        self._commit_id = None
+        self._items = []        # [{proposal, check, value, n_cards}]
         self.assigned = 0
+        self._domkniety = False   # gest zapisał bazę i karty - drugi klik nie ma czego robić
+        self._runner = WritebackRunner(db_path if db_path is not None else queries.db_path_of(con),
+                                       now_fn=now_fn, parent=self)
+        self._runner.busy_changed.connect(self.busy_changed)
         self.setWindowTitle(i18n.t("path.title"))
         self._build_ui(proposals)
         self._sync_action()
@@ -652,7 +734,11 @@ class ConfirmPathObjectsDialog(QDialog):
         area.setWidgetResizable(True)
         inner = QWidget()
         gl = QVBoxLayout(inner)
+        pominiete = {}          # powód -> liczba klatek (bez karty, tylko potwierdzenie w bazie)
         for p in proposals:
+            value, touched, skipped = plan_kart_sciezki(self.con, p.canon, p.frame_ids)
+            for _fid, _path, powod in skipped:
+                pominiete[powod] = pominiete.get(powod, 0) + 1
             row = QHBoxLayout()
             check = QCheckBox(i18n.t("path.item", canon=p.canon, n=p.n_frames))
             check.setChecked(True)
@@ -668,14 +754,37 @@ class ConfirmPathObjectsDialog(QDialog):
             folder = QLabel(p.folder or "")
             folder.setTextInteractionFlags(Qt.TextSelectableByMouse)
             row.addWidget(folder, 3)
+            # Co pójdzie do PLIKU przy tej nazwie - dokładna wartość karty i ile klatek ją dostanie.
+            karta = QLabel(i18n.t("path.card_item", value=repr(value), n=len(touched),
+                                  total=p.n_frames) if touched
+                           else i18n.t("path.card_item_none"))
+            karta.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            row.addWidget(karta, 3)
             gl.addLayout(row)
-            self._items.append({"proposal": p, "check": check})
+            self._items.append({"proposal": p, "check": check, "value": value,
+                                "n_cards": len(touched)})
         gl.addStretch(1)
         area.setWidget(inner)
         lay.addWidget(area, 1)
 
+        # ILE I DLACZEGO bez karty - przed kliknięciem, pogrupowane po powodzie: 700 RAW-ów to
+        # jeden wiersz „plik RAW…: 700", nie 700 wierszy z tą samą treścią.
+        self.cards_skipped = None
+        if pominiete:
+            lay.addWidget(QLabel(i18n.t("path.cards_skipped_head",
+                                        n=sum(pominiete.values()))))
+            self.cards_skipped = QListWidget()
+            for powod, n in sorted(pominiete.items(), key=lambda kv: (-kv[1], kv[0])):
+                self.cards_skipped.addItem(i18n.t("path.cards_skipped_item", reason=powod, n=n))
+            self.cards_skipped.setMaximumHeight(90)
+            lay.addWidget(self.cards_skipped)
+
+        self.bar = QProgressBar()
+        self.bar.setVisible(False)
+        lay.addWidget(self.bar)
         self.status = QLabel("")
         self.status.setWordWrap(True)
+        self.status.setTextInteractionFlags(Qt.TextSelectableByMouse)   # `commit_id` do skopiowania
         lay.addWidget(self.status)
         self.error = QLabel("")
         self.error.setProperty("role", "error")
@@ -687,6 +796,14 @@ class ConfirmPathObjectsDialog(QDialog):
         _f = self.confirm_btn.font(); _f.setBold(True); self.confirm_btn.setFont(_f)
         self.confirm_btn.clicked.connect(self._on_confirm)
         actions.addWidget(self.confirm_btn)
+        self.undo_btn = QPushButton(i18n.t("path.undo_cards_btn"))
+        self.undo_btn.setVisible(False)
+        self.undo_btn.clicked.connect(self._on_undo)
+        actions.addWidget(self.undo_btn)
+        self.resolve_btn = QPushButton(i18n.t("repair.resolve_btn"))
+        self.resolve_btn.setVisible(False)
+        self.resolve_btn.clicked.connect(self._on_resolve)
+        actions.addWidget(self.resolve_btn)
         actions.addStretch(1)
         close_btn = QPushButton(i18n.t("path.close_btn"))
         close_btn.clicked.connect(self.reject)
@@ -701,8 +818,16 @@ class ConfirmPathObjectsDialog(QDialog):
         n = len(self._checked())
         self.confirm_btn.setText(i18n.t("path.confirm_btn_n", n=n) if n
                                  else i18n.t("path.confirm_btn"))
-        self.confirm_btn.setEnabled(n > 0)
+        self._sync_confirm()
         self.error.clear()
+
+    def _sync_confirm(self):
+        """Stan „Zatwierdź" BEZ czyszczenia błędu (wołają go też końce zapisu, a odmowa klingi
+        z tego samego kliknięcia ma zostać widoczna). Po zapisie z kartami okno zostaje otwarte
+        (Cofnij / Rozwiąż teraz), a drugie „Zatwierdź" nie ma czego zapisać, dopóki karty stoją
+        w plikach - wraca po „Cofnij karty" i po commicie, który nie podmienił żadnego pliku."""
+        n = len(self._checked())
+        self.confirm_btn.setEnabled(n > 0 and not self._domkniety and not self._runner.is_busy)
 
     def _on_confirm(self):
         """Zapis zaznaczonych pozycji — JEDNA klinga na pozycję (transakcja per nazwa, bo obiekt
@@ -745,13 +870,151 @@ class ConfirmPathObjectsDialog(QDialog):
                         skipped_failed=sum(w["proposal"].n_frames for w in wybrane[i - 1:]))
                     break
                 faza.say(i18n.t("busy.saving_names", done=i, total=len(wybrane)))
-        self.assigned = gest.assigned
+        self.assigned += gest.assigned
         self.status.setText(
             i18n.t("path.done", names=len(wybrane), assigned=gest.assigned,
                    total=gest.assigned + gest.skipped) + grid.zdanie_pominiec(gest))
         self.changed.emit()
-        if gest.assigned and not self.error.text():
-            self.accept()
+        # KARTY DO PLIKÓW NIE ZALEŻĄ OD `assigned` TEGO KLIKNIĘCIA (C2, bramka 0926): pętla idzie
+        # po klatkach, które SĄ nazwane tym kanonem ze źródłem `path` - także gdy klinga padła na
+        # innej pozycji albo gdy to jest POWTÓRKA po „Cofnij karty" / po commicie z samymi
+        # `blocked`/`failed` (wtedy klinga liczy klatki jako dryf, bo obiekt już mają, a karty dalej
+        # nie ma). Bez tego taka klatka zostawała nazwana z folderu bez karty i bez drogi do niej.
+        run_id, staged = self._stage_karty(wybrane)
+        if staged == 0:
+            if gest.assigned and not self.error.text():
+                self.accept()                                # zachowanie sprzed kart, 1:1
+            return
+        self._run_id = run_id
+        self._domkniety = True
+        self._begin_progress(staged)
+        self._runner.start("commit", run_id, on_progress=self._on_progress,
+                           on_done=self._after_commit, on_failed=self._on_failed)
+
+    def _stage_karty(self, wybrane):
+        """Staging kart dla zaznaczonych pozycji → `(run_id, liczba)`. Plan na ŚWIEŻO, wyłącznie
+        dla klatek nazwanych TYM kanonem ze źródłem `path` (dryf, kalibracja, odmowa klingi
+        i cudzy obiekt odpadają tu, nie w pisarzu). Zero wpisów → run sprzątnięty od razu."""
+        run_id, staged = uuid.uuid4().hex, 0
+        for it in wybrane:
+            p = it["proposal"]
+            nazwane = [r["frame_id"] for r in queries.base_rows(self.con, list(p.frame_ids))
+                       if r["object_canon"] == p.canon and r["object_source"] == "path"]
+            if not nazwane:
+                continue
+            _value, touched, _skipped = plan_kart_sciezki(self.con, p.canon, nazwane)
+            for t in touched:
+                repo.stage_pending(
+                    self.con, run_id=run_id, location_id=t.location_id, keyword=t.keyword,
+                    idx=t.idx, op=t.op, old_value=t.old_value, new_value=t.new_value,
+                    new_type=t.new_type, new_comment=t.comment,
+                    expected_header_hash=t.expected_header_hash)
+            staged += len(touched)
+        if staged == 0:
+            repo.clear_pending_for_run(self.con, run_id)   # nic do plików → run nie zostaje otwarty
+        return run_id, staged
+
+    def _begin_progress(self, total):
+        """Pasek na czas commitu i undo (wzorzec `RepairHeaderDialog._begin_progress`); `total=0`
+        = pasek nieokreślony (undo nie zna liczby plików z góry). Akcje zapisu gasną."""
+        self.bar.setRange(0, total)
+        self.bar.setValue(0)
+        self.bar.setVisible(True)
+        self.confirm_btn.setEnabled(False)
+        self.undo_btn.setEnabled(False)
+        self.resolve_btn.setEnabled(False)
+
+    def _end_progress(self):
+        self.bar.setVisible(False)
+        self.undo_btn.setEnabled(True)
+        self.resolve_btn.setEnabled(True)
+        self._sync_confirm()
+
+    def _on_progress(self, done, total, path, status):
+        if self.bar.maximum() != total:
+            self.bar.setRange(0, total)
+        self.bar.setValue(done)
+
+    def _after_commit(self, op, res):
+        """Po commicie kart (wątek główny): zdanie bazy + zdanie plików, „Cofnij karty" i „Rozwiąż
+        teraz". `commit_id` widoczny - po zamknięciu okna to jedyny uchwyt do cofnięcia z ręki
+        (ta sama umowa co w „Napraw nagłówek…"). Commit, który NIE podmienił żadnego pliku (same
+        `blocked`/`failed` bez kopii), oddaje „Zatwierdź" - powtórka ma czym dopisać karty."""
+        summary, cofnij = zdanie_commitu_kart(res, "path.cards_applied")
+        if cofnij is not None:
+            self._commit_id = cofnij
+            self.undo_btn.setVisible(True)
+            self.resolve_btn.setVisible(True)
+        self._domkniety = cofnij is not None
+        if res.cancelled:
+            self._porzuc_staging()               # reszta runu to sierota - nikt jej nie dokończy
+        self._run_id = None                      # run domknięty commitem (R#5) - nie kasuj przy zamknięciu
+        self.status.setText(self.status.text() + "\n" + summary)
+        self._end_progress()
+        self.changed.emit()
+
+    def _on_failed(self, op, msg):
+        """Wyjątek workera: staging tego runu jest sierotą (C1) - sprzątamy go od razu, nie przy
+        zamknięciu okna. „Zatwierdź" wraca, bo nie wiemy, czy karty stoją w plikach."""
+        self._porzuc_staging()
+        self._domkniety = self._commit_id is not None
+        self._end_progress()
+        self.error.setText(i18n.t("grid.wb.error", msg=msg))
+        self.changed.emit()
+
+    def _porzuc_staging(self):
+        if self._run_id is not None:
+            repo.clear_pending_for_run(self.con, self._run_id)
+            self._run_id = None
+
+    def _on_undo(self):
+        """Cofnięcie KART (bajty plików), nie potwierdzenia w bazie: klatki zostają nazwane
+        z folderu (źródło `path`), a pliki wracają do stanu sprzed commitu - bez karty. Commit
+        zużyty, więc „Zatwierdź" wraca: powtórka dopisze karty tym samym planem (C2)."""
+        if self._commit_id is None or self._runner.is_busy:
+            return
+        self.error.clear()
+        self._begin_progress(0)
+        self._runner.start("undo", self._commit_id, on_progress=self._on_progress,
+                           on_done=self._after_undo, on_failed=self._on_failed)
+
+    def _after_undo(self, op, res):
+        self.status.setText(self.status.text() + "\n" + zdanie_undo_kart(res)
+                            + i18n.t("path.cards_restored_note"))
+        self.undo_btn.setVisible(False)
+        self.resolve_btn.setVisible(False)
+        self._commit_id = None
+        self._domkniety = False
+        self._end_progress()
+        self.changed.emit()
+
+    def _on_resolve(self):
+        """„Rozwiąż teraz" = istniejący etap Dostawy (jak w „Napraw nagłówek…"). Odmowa zostawia
+        okno otwarte razem z „Cofnij"."""
+        if self._run_stage is None:
+            return self.error.setText(i18n.t("repair.err.no_host"))
+        reason = self._run_stage()
+        if reason:
+            return self.error.setText(reason)
+        self.accept()
+
+    def set_pipeline_busy(self, busy):
+        """Etap pipeline'u w biegu → akcje zapisu gasną (okno modalne, poza `set_busy` widoku)."""
+        self.undo_btn.setEnabled(not busy)
+        self.resolve_btn.setEnabled(not busy)
+        if busy:
+            self.confirm_btn.setEnabled(False)
+        else:
+            self._sync_confirm()
+
+    def done(self, r):
+        """KAŻDA droga zamknięcia (Zamknij, Esc, X, accept) przechodzi tędy. W biegu zapisu okno
+        ZOSTAJE (`WritebackRunner.refuse_close`, C1) - wątek zapisu jest dzieckiem okna. Po biegu
+        staging bez commitu jest sierotą (`run_id` zna tylko to okno) i znika."""
+        if self._runner.refuse_close(self.error.setText):
+            return
+        self._porzuc_staging()
+        super().done(r)
 
 
 # ---------------------------------------------------------------- P-D: nazwa wraca do NAGŁÓWKA
@@ -772,10 +1035,17 @@ class ConfirmPathObjectsDialog(QDialog):
 def _validate_object_value(con, text):
     """Walidacja PRZED zapisem (D-PD-4) → `(wartość_do_pliku | None, powód_odmowy | None)`.
 
-    Kolejność: `strip()` → `catalog_canon()` → bramki. Do pliku idzie forma PO `catalog_canon`
-    (kolaps spacji + upper), nigdy surowy segment ścieżki — inaczej „podgląd == plik" rozjechałoby
-    się o białe znaki. Forma jest PRZED `xref` (D-PD-9): zapis po `xref` przepisywałby konwencję
-    użytkownika w JEGO plikach (folder `M82` → karta `NGC3034`).
+    Kolejność: `strip()` → drabina `resolver.resolve_name` → `forma_karty_object(kanon)` → bramki.
+    Tekst, który drabina rozpoznaje jako obiekt (oznaczenie, nazwa zwyczajowa, słownik własny,
+    alias nauczony), idzie do pliku w FORMIE NAGŁÓWKA kanonu Horreum - tą samą funkcją, którą liczy
+    „Zatwierdź ze ścieżki…" (`plan_kart_sciezki`), nigdy surowy segment ścieżki (inaczej „podgląd
+    == plik" rozjechałoby się o białe znaki). Tekst nierozpoznany zostaje, jaki jest, i odmawia go
+    czwarta bramka niżej.
+    ZASADA D-PD-9 ODWRÓCONA decyzjami usera 2026-09-26 (Q6, D2): dawniej do pliku szła forma PRZED
+    `xref` („konwencja usera w JEGO plikach", folder `M82` → karta `M82`); dziś nagłówek niesie
+    JEDNĄ formę na obiekt: folder `M82` → karta `NGC 3034`, „Bubble Nebula" → `NGC 7635` (nazwa
+    zwyczajowa zostaje aliasem w bazie). Wyjątek: kanon, który z własnego zapisu nie wraca do siebie
+    (znany tylko aliasem), zostawia tekst usera - ten się rozwiązuje, kanon by nie.
 
     Bramki odmowy (zero zapisu): pusto po `strip()`; REGUŁY KARTY FITS - znak spoza drukowalnego
     ASCII albo wartość dłuższa niż rekord. Te drugie pyta `writeback.card_violation`, czyli TEN
@@ -792,7 +1062,15 @@ def _validate_object_value(con, text):
     raw = (text or "").strip()
     if not raw:
         return None, i18n.t("repair.err.empty")
-    value = catalog_canon(raw) or raw
+    # Forma do pliku z TEJ SAMEJ drabiny, którą pójdzie przebieg (D2): tekst rozpoznany jako obiekt
+    # - oznaczenie, nazwa zwyczajowa, słownik własny, alias nauczony - idzie jako `forma_karty_object`
+    # kanonu (`Bubble Nebula` → `NGC 7635`, `M82` → `NGC 3034`); tekst nierozpoznany zostaje, jaki
+    # jest, i odmawia go bramka niżej. Kanon, który z własnego zapisu nie wraca, zostawia tekst usera.
+    try:
+        ident = resolver.resolve_name(resolver.alias_lookup(con), raw)[0] if con else None
+    except ValueError:
+        ident = None
+    value = (forma_karty_object(con, ident.canon) if ident is not None else None) or raw
     # Lazy jak `wb_worker` w dialogu: `writeback` ciągnie astropy, a dialog, który tu pyta, i tak
     # już go załadował. Dialog zapisuje kartę przez `add` - stąd `new_card=True`.
     from horreum import writeback
@@ -1062,27 +1340,20 @@ class RepairHeaderDialog(QDialog):
         self.status.setText(f"{done}/{total} · {os.path.basename(path)}")
 
     def _after_commit(self, op, res):
-        """Post-processing commitu (wątek główny). Udany zapis → jednorazowe „Cofnij" + „Rozwiąż
-        teraz"; `commit_id` WIDOCZNY, bo po zamknięciu okna to jedyny uchwyt do cofnięcia z ręki."""
+        """Post-processing commitu (wątek główny). Plik podmieniony → jednorazowe „Cofnij" + „Rozwiąż
+        teraz"; `commit_id` WIDOCZNY, bo po zamknięciu okna to jedyny uchwyt do cofnięcia z ręki.
+        Zdanie i regułę „kiedy wolno cofnąć" daje `zdanie_commitu_kart` - wspólne z oknem
+        „Zatwierdź ze ścieżki…" (C4: także `failed` z kopią nagłówka ma „Cofnij")."""
         self.bar.setVisible(False)
-        parts = [i18n.t("grid.wb.applied", n=len(res.applied))]
-        if res.blocked:
-            parts.append(i18n.t("grid.wb.blocked", n=len(res.blocked)))
-        if res.failed:
-            parts.append(i18n.t("grid.wb.errors", n=len(res.failed)))
-        if res.skipped:
-            parts.append(i18n.t("grid.wb.skipped", n=len(res.skipped)))
-        summary = " · ".join(parts)
-        detail = next((fr.reason for fr in (res.blocked + res.failed) if fr.reason), None)
-        if detail:
-            summary += i18n.t("grid.wb.detail_sep", detail=detail)
-        if res.applied and res.commit_id is not None:
-            self._commit_id = res.commit_id
+        summary, cofnij = zdanie_commitu_kart(res, "grid.wb.applied")
+        if cofnij is not None:
+            self._commit_id = cofnij
             self._committed = True
-            summary += i18n.t("grid.wb.commit_id", id=res.commit_id)
             self.undo_btn.setVisible(True)
             self.resolve_btn.setVisible(True)
-            self._run_id = None                  # run domknięty commitem (R#5) — nie kasuj przy zamknięciu
+        if res.cancelled or cofnij is None:
+            self._porzuc_staging()               # reszta runu to sierota - nikt jej nie dokończy
+        self._run_id = None                      # run domknięty commitem (R#5) - nie kasuj przy zamknięciu
         self.undo_btn.setEnabled(True)
         self.resolve_btn.setEnabled(True)
         self._sync_preview()
@@ -1090,12 +1361,19 @@ class RepairHeaderDialog(QDialog):
         self.changed.emit()
 
     def _on_failed(self, op, msg):
+        """Wyjątek workera: staging runu jest sierotą (C1) - sprzątany od razu, nie przy zamknięciu."""
+        self._porzuc_staging()
         self.bar.setVisible(False)
         self.undo_btn.setEnabled(True)
         self.resolve_btn.setEnabled(True)
         self._sync_preview()                     # PRZED `_fail`: podgląd czyści pole błędu
         self._fail(i18n.t("grid.wb.error", msg=msg))
         self.changed.emit()
+
+    def _porzuc_staging(self):
+        if self._run_id is not None:
+            repo.clear_pending_for_run(self.con, self._run_id)
+            self._run_id = None
 
     # ---------------------------------------------------------------- cofanie (OKNO do zamknięcia)
     def _on_undo(self):
@@ -1108,12 +1386,11 @@ class RepairHeaderDialog(QDialog):
 
     def _after_undo(self, op, res):
         self.bar.setVisible(False)
-        msg = i18n.t("grid.wb.restored", n=len(res.restored))
-        if res.blocked:
-            msg += " · " + i18n.t("grid.wb.blocked", n=len(res.blocked))
-        self.status.setText(msg)
-        self.undo_btn.setVisible(False)          # commit ZUŻYTY — drugi undo nie ma czego cofać
+        msg = zdanie_undo_kart(res)
+        self.undo_btn.setVisible(False)          # commit ZUŻYTY - drugi undo nie ma czego cofać
         self.resolve_btn.setVisible(False)
+        self.undo_btn.setEnabled(True)
+        self.resolve_btn.setEnabled(True)
         self._commit_id = None
         self._committed = False                  # karty zdjęte → zapis znów ma sens
         self._sync_preview()
@@ -1142,13 +1419,16 @@ class RepairHeaderDialog(QDialog):
         else:
             self._sync_preview()
 
-    def reject(self):
-        """Zamknięcie okna: staging BEZ commitu jest sierotą (`run_id` zna tylko to okno), więc
-        znika. Po udanym commicie `_run_id` jest już None — wierszy 'applied' nie ruszamy."""
-        if self._run_id is not None:
-            repo.clear_pending_for_run(self.con, self._run_id)
-            self._run_id = None
-        super().reject()
+    def done(self, r):
+        """KAŻDA droga zamknięcia (Zamknij, Esc, X, accept) przechodzi tędy. W biegu zapisu okno
+        ZOSTAJE (`WritebackRunner.refuse_close`, C1 - ten sam kod co w „Zatwierdź ze ścieżki…"):
+        wątek zapisu jest dzieckiem okna. Po biegu staging BEZ commitu jest sierotą (`run_id` zna
+        tylko to okno), więc znika; po udanym commicie `_run_id` jest już None - wierszy 'applied'
+        nie ruszamy."""
+        if self._runner.refuse_close(self._fail):
+            return
+        self._porzuc_staging()
+        super().done(r)
 
 
 class ObjectAxisView(QWidget):
@@ -1179,7 +1459,9 @@ class ObjectAxisView(QWidget):
         self._foreign_wb = False              # DRUGA powierzchnia writebacku pisze (mutex, D-PD-3)
         self._copies_mode = False             # prawy panel w trybie „kopie" (Z6)
         self._loading = False                 # tłumi sygnały selekcji podczas programowego wypełniania
-        self._repair_dlg = None               # otwarte okno naprawy nagłówka (modalne — poza set_busy)
+        # Otwarte okno piszące karty do plików: „Napraw nagłówek…" albo „Zatwierdź ze ścieżki…"
+        # (modalne - poza zasięgiem `set_busy`, więc bieg pipeline'u przekazujemy mu wprost).
+        self._repair_dlg = None
         # Takt 3 (`Rozwiąż`) należy do Dostawy: gospodarz wstrzykuje wywołanie ISTNIEJĄCEJ,
         # bramkowanej drogi (`PipelineView.run_stage`). None = widok bez gospodarza (testy samego
         # widoku) → okno naprawy powie wprost, że taktu 3 nie ma stąd jak uruchomić.
@@ -1749,9 +2031,10 @@ class ObjectAxisView(QWidget):
         # jedną połówką i gasi nad drugą, choć obie prowadzą do tego samego okna.
         self.repair_btn.setEnabled(tag in _CARD_TAGS
                                    and not self._busy and not self._foreign_wb)
-        # Potwierdzanie propozycji pisze do BAZY, nie do plików — mutex writebacku (`_foreign_wb`)
-        # jej NIE dotyczy; bramką jest sam bieg pipeline'u, jak przy „Przypisz obiekt…".
-        self.confirm_path_btn.setEnabled(tag == "path_proposals" and not self._busy)
+        # Potwierdzanie propozycji pisze do BAZY i (od O3 kroku 1) kartę `OBJECT` do PLIKÓW - więc
+        # mutex writebacku (`_foreign_wb`, D-PD-3) dotyczy go tak samo jak „Napraw nagłówek…".
+        self.confirm_path_btn.setEnabled(tag == "path_proposals"
+                                         and not self._busy and not self._foreign_wb)
         # Wygaszony przycisk tłumaczy się SAM (ta sama lekcja co WIZ #12 pięć linii wyżej): przy
         # swoim kubełku mówi, CO zrobi; poza nim — czego brakuje, żeby dało się go kliknąć.
         self.confirm_path_btn.setToolTip(i18n.t(
@@ -2039,11 +2322,19 @@ class ObjectAxisView(QWidget):
             self.status_message.emit(i18n.t("path.err.nothing"))
             return
         dlg = ConfirmPathObjectsDialog(self.con, proposals=propozycje, now_fn=self._now,
-                                       parent=self)
+                                       db_path=queries.db_path_of(self.con),
+                                       run_stage_fn=self.run_stage_fn, parent=self)
         # Zapis CZĘŚCIOWY przerwany odmową klingi zostawia okno otwarte, a kolejkę pod spodem
         # nieaktualną — sygnał odświeża ją natychmiast (lustro `_on_repair_changed`).
         dlg.changed.connect(self._on_confirm_path_changed)
-        dlg.exec()
+        # Od O3 kroku 1 okno pisze też karty do PLIKÓW - ten sam mutex i ta sama bramka biegu
+        # pipeline'u, co okno „Napraw nagłówek…" (`_repair_dlg` = otwarte okno piszące do plików).
+        dlg.busy_changed.connect(self.writeback_busy)
+        self._repair_dlg = dlg
+        try:
+            dlg.exec()
+        finally:
+            self._repair_dlg = None
         if dlg.assigned:
             self.status_message.emit(dlg.status.text())
             self.refresh(select_first=True)

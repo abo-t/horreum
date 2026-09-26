@@ -17,13 +17,14 @@ import re
 
 from horreum.grouper import NO_TELESCOPE_KINDS      # jeden właściciel zbioru rodzajów poza osią
 from horreum.naming import header_dt
-from horreum.resolve._coerce import _to_float, _to_int
+from horreum.resolve._coerce import _to_float, _to_int, _to_text
 from horreum.resolve.frames import LIGHT_KINDS
 from horreum.resolve.headers import COPY_TESTIMONY_KEYWORDS, copy_testimony
 from horreum.resolve.objects import CLEARABLE_OBJECT_SOURCES, WEAK_OBJECT_SOURCES
 from horreum.resolve.paths import STACK_KIND, STACKS_DIR, object_from_path
 from horreum.resolve.stack import signature_timestamp
-from horreum.resolver import NO_OBJECT_CARD_FILETYPES, path_proposals, review_state
+from horreum.resolver import (NO_OBJECT_CARD_FILETYPES, alias_snapshot, path_proposals,
+                              resolve_name, review_state)
 from horreum.stacks import REASON_NO_OBJECT, REASON_OFFSET_UNKNOWN
 
 
@@ -1746,6 +1747,50 @@ def orphan_testimony_frame_ids(con):
         (json.dumps(sorted(czlowiek)),)).fetchall()}
 
 
+def path_header_conflict_frame_ids(con):
+    """NAGŁÓWEK MÓWI CO INNEGO NIŻ ZATWIERDZONY FOLDER (E5-2): klatki z obiektem potwierdzonym ze
+    ścieżki (`object_source IN WEAK_OBJECT_SOURCES`), których `header.object_raw` jest niepusty,
+    a drabina nazwy przebiegu (`resolver.resolve_name`) nie daje TEGO SAMEGO obiektu - daje inny
+    albo żaden. JEDEN właściciel predykatu dla licznika Porządków i trimu gridu. Zwraca set[int].
+
+    DLACZEGO ZE STANU, A NIE Z PRZEBIEGU. Nazwa NIEROZPOZNANA zostawia klatkę przy obiekcie
+    z folderu (gałąź przeglądu przebiegu wymaga `object_id IS NULL`, a region nad potwierdzeniem nie
+    gra), więc żaden kubełek jej nie widział - rozjazd pliku z bazą był niewidoczny. Nazwa
+    rozpoznana jako INNY obiekt jest tu tylko do najbliższego „Rozwiąż", który ją przepina
+    (header-primary, głośno - ślad w `object.unassigned`); po nim wypada, bo źródło przestaje być
+    słabe. Nazwa, która daje TEN SAM obiekt, nie jest rozjazdem i nie wchodzi.
+
+    PORÓWNANIE PO KANONIE, bo tak tożsamość buduje przebieg (`upsert_object` po `canon`); trafienie
+    aliasu też niesie kanon. Drabina ta sama, co w przebiegu i w dialogu (SPOT `resolve_name`),
+    na migawce aliasów z JEDNEGO SELECT-a - zero zapytań w pętli. Region świadomie poza: przebieg
+    nie pyta go o klatkę ze źródłem słabym, więc predykat też nie.
+
+    RODZAJ = `LIGHT_KINDS`, bo tylko tam przebieg rozstrzyga obiekt: kalibracja nie ma obiektu
+    z definicji, więc jej karta `OBJECT` niczemu nie przeczy (źródło `path` na kalibracji to osobny
+    defekt - następczyni w `repo.transfer_human_facts` - nie robota dla tego wiersza).
+
+    Guardy listy roboty jak w sąsiadach: wycofana i zastąpiona wypadają."""
+    rows = con.execute(
+        "SELECT f.id AS fid, h.object_raw AS raw, o.canon AS canon "
+        "FROM frame f JOIN header h ON h.frame_id = f.id JOIN object o ON o.id = f.object_id "
+        "WHERE f.object_source IN (SELECT value FROM json_each(?)) "
+        "AND f.kind IN (SELECT value FROM json_each(?)) "
+        "AND h.object_raw IS NOT NULL "
+        "AND f.retired_at IS NULL AND f.superseded_by IS NULL",
+        (json.dumps(sorted(WEAK_OBJECT_SOURCES)), json.dumps(sorted(LIGHT_KINDS)))).fetchall()
+    if not rows:
+        return set()
+    lookup = alias_snapshot(con).get
+    wynik = set()
+    for r in rows:
+        if _to_text(r["raw"]) is None:              # pusta karta nie zeznaje (jak w przebiegu)
+            continue
+        ident, _ = resolve_name(lookup, r["raw"])
+        if ident is None or ident.canon != r["canon"]:
+            wynik.add(int(r["fid"]))
+    return wynik
+
+
 def review_frame_ids(con):
     """Zbiór frame_id perspektywy „Do przeglądu": light/master_light z `object_id IS NULL`
     (równoważne trimowi `object_canon is None` — `object.canon` NOT NULL, LEFT JOIN daje NULL
@@ -2405,6 +2450,10 @@ def tasks_state(con):
     ).fetchone()[0]
     return {
         "unresolved_lights": len(review_frame_ids(con)),
+        # Nagłówek mówi co innego niż zatwierdzony folder (E5-2) - robota: plik przeczy gestowi
+        # człowieka, a rozstrzyga człowiek (makro karty w pliku albo „Przypisz obiekt"). Ten sam
+        # predykat, co trim perspektywy.
+        "path_header_conflict_frames": len(path_header_conflict_frame_ids(con)),
         "stacks_lineage_pending": len(lineage_pending_frame_ids(con)),
         "dup_frames": len(dup_frame_ids(con)),
         # Kopie niezgodne ze sobą (0021) - podzbiór duplikatów, ten sam predykat co trim perspektywy.

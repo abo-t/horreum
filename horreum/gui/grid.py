@@ -51,7 +51,7 @@ from horreum.gui import assign_dialog
 from horreum.gui.assign_dialog import AssignObjectDialog
 from horreum.gui.projection_dialog import ProjectionDialog
 from horreum.gui.rows import TwoPartDelegate
-from horreum.gui.wb_worker import WritebackRunner
+from horreum.gui.wb_worker import WritebackRunner, commit_do_cofniecia, zdanie_wyniku_zapisu
 from horreum.resolve.headers import COPY_TESTIMONY_KEYWORDS
 
 # Kolumny bazowe: (nagłówek, klucz). Klucze `_telescope`/`_object`/`_dt_delta` = pochodne. `_dt_delta`
@@ -331,6 +331,13 @@ PRESET_COPY_CONFLICT = "Kopie niezgodne"
 # o jednej kopii i zeznaniu spoza ręki naprawia Dostawa, więc tu ich nie ma. Stała współdzielona
 # z TasksView po nazwie, jak dziewięciu sąsiadów.
 PRESET_ORPHAN_TESTIMONY = "Zeznanie z nieobecnej kopii"
+# PRESET_PATH_HEADER_CONFLICT - jedenasty bliźniak (E5-2). Obiekt klatki zatwierdził człowiek
+# z folderu (`object_source='path'`), a karta `OBJECT` w pliku mówi co innego albo coś, czego
+# drabina nie zna. „Do przeglądu" tego nie widzi (klatka MA obiekt), więc bez tej perspektywy
+# rozjazd pliku z bazą nie miał żadnej powierzchni. Predykat
+# `queries.path_header_conflict_frame_ids`. Stała współdzielona z TasksView po nazwie, jak
+# dziesięciu sąsiadów.
+PRESET_PATH_HEADER_CONFLICT = "Nagłówek inny niż folder"
 # Klucz grupowania po GRUPIE WERSJI - pochodna wiersza (`_adnotuj_wersje`), nie kolumna bazowa:
 # `BASE_COLS` zostaje bez zmian, więc podłoga okna się nie rusza. Pozycja listy „Grupuj wg" działa
 # w każdej perspektywie (stosy spoza grup bliźniaków lądują w „(brak)"), a preset ją ustawia.
@@ -352,6 +359,8 @@ PRESETS = {
     PRESET_STACK_VERSIONS: {"filter": None, "group_by": _GRUPA_WERSJI, "only_stack_versions": True},
     PRESET_COPY_CONFLICT: {"filter": None, "group_by": None, "only_copy_conflict": True},
     PRESET_ORPHAN_TESTIMONY: {"filter": None, "group_by": None, "only_orphan_testimony": True},
+    PRESET_PATH_HEADER_CONFLICT: {"filter": None, "group_by": None,
+                                  "only_path_header_conflict": True},
     "Do przeglądu": {"filter": None, "group_by": None, "only_review": True},
 }
 # Etykieta WYŚWIETLANIA presetu (tekst) osobno od TOŻSAMOŚCI (klucz PRESETS w `itemData` — używany przez
@@ -369,6 +378,7 @@ _PRESET_LABELS = {
     PRESET_STACK_VERSIONS: "perspective.stack_versions",
     PRESET_COPY_CONFLICT: "perspective.copy_conflict",
     PRESET_ORPHAN_TESTIMONY: "perspective.orphan_testimony",
+    PRESET_PATH_HEADER_CONFLICT: "perspective.path_header_conflict",
     "Do przeglądu": "perspective.to_review",
 }
 # PERSPEKTYWA BEZ ZAWĘŻENIA - jedyny preset, który nie niesie ani filtra, ani flagi `only_*`
@@ -407,6 +417,7 @@ _TRIMY = (
     ("_only_stack_versions", "stack_version_frame_ids"),
     ("_only_copy_conflict", "copy_conflict_frame_ids"),
     ("_only_orphan_testimony", "orphan_testimony_frame_ids"),
+    ("_only_path_header_conflict", "path_header_conflict_frame_ids"),
 )
 
 # FLAGA, OD KTÓREJ ZALEŻY ZACHOWANIE WIDOKU, NIE TYLKO ZBIÓR: w perspektywie „Wersje stosów" model
@@ -4528,12 +4539,6 @@ class FramesView(QWidget):
         self._preview_owner = None
         self.status_message.emit(i18n.t("grid.macro.preview_cleared"))
 
-    @staticmethod
-    def _first_reason(res):
-        """Reprezentatywny powód blokady/błędu do summary — user na ścianie blocked pyta „czemu?",
-        nie chce samego licznika (wizytator #4). Pierwszy niepusty `reason` z blocked/failed."""
-        return next((fr.reason for fr in (res.blocked + res.failed) if fr.reason), None)
-
     def _pending_count(self):
         if self._run_id is None:
             return 0
@@ -4631,18 +4636,7 @@ class FramesView(QWidget):
     def _commit_summary(self, res, noun_key):
         """Podsumowanie CommitResult: „N {noun} · M zablokowanych · …" + pierwszy powód (wiz #4).
         `noun_key` = klucz frazy głównej (`grid.wb.applied`/`grid.wb.renamed`) — DANE, nie string PL."""
-        parts = [i18n.t(noun_key, n=len(res.applied))]
-        if res.blocked:
-            parts.append(i18n.t("grid.wb.blocked", n=len(res.blocked)))
-        if res.failed:
-            parts.append(i18n.t("grid.wb.errors", n=len(res.failed)))
-        if res.skipped:
-            parts.append(i18n.t("grid.wb.skipped", n=len(res.skipped)))
-        summary = " · ".join(parts)
-        detail = self._first_reason(res)                 # powód, nie tylko liczba (wiz #4)
-        if detail:
-            summary += i18n.t("grid.wb.detail_sep", detail=detail)
-        return summary
+        return zdanie_wyniku_zapisu(res, noun_key)       # jedno zdanie dla trzech powierzchni (Z11)
 
     def _on_commit(self):
         if self._rename_pending_count() > 0:             # szuflada aktywnej klingi (staging mutex)
@@ -4661,7 +4655,7 @@ class FramesView(QWidget):
         if remaining > 0:                                # przerwane anulowaniem
             summary += i18n.t("grid.wb.interrupted", n=remaining)
             self.drawer.set_count(remaining, result=summary)
-        elif res.commit_id is not None and res.applied:
+        elif commit_do_cofniecia(res) is not None:       # także `failed` z kopią nagłówka (Z11)
             summary += i18n.t("grid.wb.commit_id", id=res.commit_id)
             self._last_commit_id = res.commit_id
             self._install_undo(res.commit_id, summary, applied=len(res.applied))

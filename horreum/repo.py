@@ -1446,7 +1446,16 @@ def assign_object(con, *, frame_id, object_id, object_source, now, actor="resolv
     wychodzi wcześnie po PARZE (obiekt, źródło), więc zmiana samego ŹRÓDŁA przy tym samym obiekcie
     (`region` → `alias`, realna po dołożeniu szczebla słownika) dotarłaby tutaj i przy porównaniu
     obiektów wyemitowałaby `assigned` bez `unassigned`. `NULL→A`, `A→B` i `A(src1)→A(src2)`
-    domykają się wtedy identycznie."""
+    domykają się wtedy identycznie.
+
+    PRZEGŁOSOWANIE POTWIERDZENIA ZE ŚCIEŻKI (E5-1) NIESIE ŚLAD W TEJ SAMEJ TRANSAKCJI. Gdy klatka
+    schodzi ze źródła SŁABEGO (`WEAK_OBJECT_SOURCES`) na źródło automatu, `object.unassigned`
+    dostaje `reason` i dwa klucze stanu PO (`next_object_id`, `next_object_source`). To jest
+    jedyny dowód przejścia, który czyta spis faktów ręki (`audit.path_to_header_since`):
+    zapisany w CHWILI przepięcia, atomowo z nim - przerwany przebieg nie gubi śladu klatek już
+    przepiętych, a późniejsze przepięcie nagłówek→nagłówek ani odpięcie słownikowe
+    (`retire_alias_and_unassign`) tych kluczy nie mają, więc nie udają przejścia. Osobnego verbu
+    nie ma: para już jest, a trzecie zdarzenie per klatka byłoby drugim zapisem tego samego faktu."""
     row = con.execute(
         "SELECT object_id, object_source FROM frame WHERE id = ?", (frame_id,)).fetchone()
     if row is not None and row[0] == object_id and row[1] == object_source:
@@ -1456,8 +1465,13 @@ def assign_object(con, *, frame_id, object_id, object_source, now, actor="resolv
         con.execute("UPDATE frame SET object_id = ?, object_source = ? WHERE id = ?",
                     (object_id, object_source, frame_id))
         if row is not None and row[0] is not None:   # re-przypisanie: ślad zostaje (append-only)
+            przed = {"object_id": row[0], "object_source": row[1]}
+            powod = None
+            if row[1] in WEAK_OBJECT_SOURCES and object_source not in WEAK_OBJECT_SOURCES:
+                przed.update(next_object_id=object_id, next_object_source=object_source)
+                powod = "nagłówek przegłosował potwierdzenie ze ścieżki (header-primary)"
             emit_event(con, actor=actor, verb="object.unassigned", target=f"frame:{frame_id}",
-                       now=now, payload={"object_id": row[0], "object_source": row[1]})
+                       now=now, payload=przed, reason=powod)
         emit_event(con, actor=actor, verb="object.assigned", target=f"frame:{frame_id}", now=now,
                    payload={"object_id": object_id, "object_source": object_source})
     return True

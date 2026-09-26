@@ -1,12 +1,14 @@
 """Oś OBIEKT — uniwersalia katalogowe: rozpoznanie oznaczenia + równoważność (NGC-wins).
 
-Trzy czyste funkcje (zero zapisu):
+Czyste funkcje (zero zapisu):
   - `catalog_canon(text)` — rozpoznaj oznaczenie katalogowe i znormalizuj zapis
     (`NGC 4736`→`NGC4736`, `Sh2 131`→`Sh2-131`, zera wiodące precz). None, gdy to NIE oznaczenie
     (nazwa potoczna „Heart Nebula" NIE przechodzi jako kanon — koniec cichego śmieciowego kanonu).
   - `xref(canon)` — równoważność międzykatalogowa (Messier/Caldwell/Sh2 → NGC/IC, polityka NGC-wins),
     DANYMI z `catalog_xref.json` (nie precedencją). Brak wpisu → kanon bez zmian (M45 zostaje M45).
   - `catalog_label(canon)` — etykieta katalogu z formy kanonicznej (NGC|IC|Sh2|Messier|…).
+  - `header_form(canon)` - forma do karty `OBJECT` nagłówka (`NGC7000` → `NGC 7000`), odwracalna
+    przez `catalog_canon`; `xref_aliases(canon)` - równoważność czytana wstecz (`NGC4258` → `M106`).
 
 Reguły rozpoznania przeniesione z `custos/resolve/catalog.py` (zamrożony Custos) — formy gramatyk
 katalogowych to UNIWERSALIA nieba, nie dane per-archiwum. `catalog_xref.json` = jedyny ASSET danych
@@ -160,3 +162,54 @@ def catalog_label(canon):
         if rx.match(canon):
             return label
     return None
+
+
+@functools.lru_cache(maxsize=1)
+def _xref_reverse():
+    """Odwrócona równoważność: kanon preferowany → posortowana krotka oznaczeń, które na niego
+    wskazują (`NGC7023` → `('C4', 'LDN1174')`). Liczona raz z `_xref_flat` - to ten sam asset."""
+    rev = {}
+    for alias, target in _xref_flat().items():
+        rev.setdefault(target, []).append(alias)
+    return {target: tuple(sorted(aliases)) for target, aliases in rev.items()}
+
+
+def xref_aliases(canon):
+    """Oznaczenia z `catalog_xref.json`, które `xref` sprowadza do `canon` (`NGC4258` → `('M106',)`).
+    Pusta krotka, gdy kanon nie jest celem żadnej równoważności. Forma = forma kanoniczna aliasu,
+    czyli ta, którą zna gramatyka (`M106`, nie `M 106`)."""
+    return _xref_reverse().get(canon, ())
+
+
+# FORMA NAGŁÓWKA (karta FITS/XISF `OBJECT`) - decyzja usera 2026-09-26: folder i `object.canon`
+# są BEZ spacji (`NGC7000`), a nagłówek niesie JEDNĄ formę na obiekt, ZE SPACJĄ między skrótem
+# katalogu a numerem (`NGC 7000`). Tabela obejmuje skróty, po których stoi numer PORZĄDKOWY albo
+# pole katalogu (ESO/HCG zachowują zera wiodące kanonu K-1 - forma wstawia spację, nie przelicza
+# numeru). Poza tabelą ŚWIADOMIE:
+#   * `Sh2-131` - dywiz jest częścią oznaczenia, nie separatorem, więc forma = kanon;
+#   * `G012.2+00.3` (Green) - `G` nie jest skrótem katalogu stojącym przed numerem, tylko
+#     przedrostkiem WSPÓŁRZĘDNEJ galaktycznej (l, b); oznaczenie pisze się łącznie.
+# Dłuższe skróty stoją przed krótszymi z tej samej litery (`CTB`/`Ced`/`Cr` przed `C`) - wymóg
+# cyfry tuż po skrócie i tak rozstrzyga, ale kolejność czyni to czytelnym bez liczenia nawrotów.
+# Test pinuje, że KAŻDA etykieta z `_LABELS` ma tu decyzję (spacja albo świadomy wyjątek), więc
+# nowa gramatyka nie przejdzie po cichu z formą nagłówka równą kanonowi.
+_HEADER_SPACED = re.compile(
+    r"^(NGC|IC|UGC|PGC|LBN|LDN|CTB|Ced|Cr|Abell|vdB|ESO|HCG|M|C|B)(\d.*)$")
+_HEADER_UNSPACED_LABELS = frozenset({"Sh2", "Green"})
+
+
+def header_form(canon):
+    """Kanon Horreum → forma do karty `OBJECT` w nagłówku (`NGC7000` → `NGC 7000`, `M45` → `M 45`,
+    `Sh2-131` bez zmian). SPOT formy nagłówka dla całego kodu.
+
+    Kanon spoza gramatyk katalogowych (obiekt własny `LMC`, solar `Moon`, region `Veil`, kometa)
+    wraca BEZ ZMIAN - takiego kanonu nie ma jak rozbić na skrót i numer, a zgadywanie spacji
+    w nazwie własnej zmieniłoby nazwę. O przynależności do gramatyki rozstrzyga `catalog_canon`
+    (z `split=False`: kanon ma być oznaczeniem W CAŁOŚCI, nie pierwszym członem sklejki).
+
+    Kontrakt odwracalności: `catalog_canon(header_form(c)) == c` dla każdego kanonu gramatyki -
+    nagłówek zapisany tą formą wraca przez drabinę do TEGO SAMEGO kanonu."""
+    if not canon or catalog_canon(canon, split=False) != canon:
+        return canon
+    m = _HEADER_SPACED.match(canon)
+    return f"{m.group(1)} {m.group(2)}" if m else canon

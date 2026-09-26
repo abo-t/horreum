@@ -1120,6 +1120,14 @@ class PipelineView(QWidget):
         if s.path_proposed_frames:
             linia += i18n.t("pipeline.fmt.resolve_path", names=s.path_proposed_names,
                             frames=s.path_proposed_frames)
+        # E5-1: nagłówek przegłosował potwierdzenie ze ścieżki. Inny obiekt = gest człowieka
+        # przegrał z plikiem (ostrzeżenie); ten sam = zmieniło się tylko źródło. Zero = cisza.
+        if s.objects_path_overridden:
+            linia += i18n.t_plural("pipeline.fmt.resolve_path_overridden",
+                                   s.objects_path_overridden)
+        if s.objects_path_to_header:
+            linia += i18n.t_plural("pipeline.fmt.resolve_path_to_header",
+                                   s.objects_path_to_header)
         return linia
 
     def _format_calibrate(self, s):

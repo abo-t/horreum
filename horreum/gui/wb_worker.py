@@ -23,6 +23,7 @@ import threading
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 
 from horreum import db, writeback
+from horreum.gui import i18n
 
 
 class WritebackWorker(QObject):
@@ -145,6 +146,22 @@ class WritebackRunner(QObject):
         if self._worker is not None:
             self._worker.request_cancel()
 
+    def refuse_close(self, say):
+        """Straż zamknięcia OKNA-WŁAŚCICIELA tego uchwytu: `True` = operacja trwa, okno ma ZOSTAĆ.
+
+        Uchwyt i jego `QThread` są dziećmi okna, więc zamknięcie okna w biegu niszczyłoby wątek,
+        który jeszcze pracuje („QThread: Destroyed while thread is still running" = twardy abort).
+        Wzorzec `projection_dialog.done` (wydanie w biegu): zamknięcie = ŻĄDANIE ANULOWANIA, okno
+        zostaje - czekanie z timeoutem byłoby zakładem o czas jednego pliku po SMB, a raport
+        przerwanego zapisu (ile plików zmieniono, `commit_id` do cofnięcia) musi mieć dokąd trafić.
+        Drugie zamknięcie, już po biegu, zamyka. `say(tekst)` = gdzie okno mówi, co się dzieje.
+        Jeden kod dla każdego okna z tym uchwytem (SPOT) - nie kopia warunku w każdym `done`."""
+        if self._thread is None:
+            return False
+        self.cancel()
+        say(i18n.t("wb.close_refused"))
+        return True
+
     def _cleanup(self):
         # wait() PRZED thread.deleteLater(): worker.deleteLater() doręcza się w teardown wątku
         # (Shiboken::Object::destroy → PyGILState_Ensure); bez wait() ~QThread mógłby czekać na
@@ -154,3 +171,60 @@ class WritebackRunner(QObject):
         self._worker.deleteLater(); self._thread.wait(); self._thread.deleteLater()
         self._worker = None; self._thread = None
         self.busy_changed.emit(False)
+
+
+# ------------------------------------------------ zdania wyniku - wspólne dla KAŻDEJ powierzchni zapisu
+# Trzech wołających (szuflada gridu, „Napraw nagłówek…", „Zatwierdź ze ścieżki…") mówiło to samo
+# zdanie trzema kopiami, a reguła „kiedy wolno cofnąć" już raz się między nimi rozjechała (Z11).
+# Mieszkają TU, bo ten moduł importują wszystkie trzy bez cyklu (`app` → `grid` → `wb_worker`).
+
+
+def zdanie_wyniku_zapisu(res, noun_key):
+    """„N {noun} · M zablokowanych · …" + pierwszy powód blokady/błędu (wiz #4: user na ścianie
+    `blocked` pyta „czemu?", nie chce samego licznika). `noun_key` = klucz frazy głównej
+    (`grid.wb.applied`/`grid.wb.renamed`/`path.cards_applied`) - DANE, nie string PL."""
+    parts = [i18n.t(noun_key, n=len(res.applied))]
+    if res.blocked:
+        parts.append(i18n.t("grid.wb.blocked", n=len(res.blocked)))
+    if res.failed:
+        parts.append(i18n.t("grid.wb.errors", n=len(res.failed)))
+    if res.skipped:
+        parts.append(i18n.t("grid.wb.skipped", n=len(res.skipped)))
+    summary = " · ".join(parts)
+    detail = next((fr.reason for fr in (res.blocked + res.failed) if fr.reason), None)
+    if detail:
+        summary += i18n.t("grid.wb.detail_sep", detail=detail)
+    return summary
+
+
+def commit_do_cofniecia(res):
+    """`commit_id`, który wolno cofnąć, albo None - JEDNA reguła dla wszystkich powierzchni (C4/Z11).
+
+    Rdzeń nadaje `commit_id`, gdy choć jeden plik został PODMIENIONY - także przy `failed`
+    z `backup_text` (weryfikacja po podmianie padła, plik jest zmieniony, kopia nagłówka leży
+    w `header_backups`). Dawny warunek „`applied` niepuste" zostawiał taki plik zmieniony bez
+    przycisku cofnięcia. Rename (`commit_renames`) `commit_id` nie nadaje - jego cofnięcie idzie
+    po `run_id` i ma własną regułę w gridzie."""
+    return res.commit_id
+
+
+def zdanie_commitu_kart(res, applied_key):
+    """Zdanie commitu okna piszącego karty → `(tekst, commit_id do cofnięcia | None)`: zdanie
+    wyniku + nota przerwania + `commit_id` (po zamknięciu okna to jedyny uchwyt do cofnięcia)."""
+    summary = zdanie_wyniku_zapisu(res, applied_key)
+    if res.cancelled:
+        summary += i18n.t("wb.cancelled_note")
+    cofnij = commit_do_cofniecia(res)
+    if cofnij is not None:
+        summary += i18n.t("grid.wb.commit_id", id=cofnij)
+    return summary, cofnij
+
+
+def zdanie_undo_kart(res):
+    """Zdanie wyniku cofnięcia - wspólne dla okien piszących karty."""
+    msg = i18n.t("grid.wb.restored", n=len(res.restored))
+    if res.blocked:
+        msg += " · " + i18n.t("grid.wb.blocked", n=len(res.blocked))
+    if res.failed:
+        msg += " · " + i18n.t("grid.wb.errors", n=len(res.failed))
+    return msg

@@ -3,7 +3,7 @@ rozpoznanie oznaczenia (`catalog_canon`), równoważność (`xref`) i etykieta (
 import pytest
 
 from horreum.resolve.catalog import (
-    catalog_canon, catalog_label, load_catalog_xref, xref,
+    catalog_canon, catalog_label, header_form, load_catalog_xref, xref, xref_aliases,
 )
 
 
@@ -152,3 +152,66 @@ def test_K1_kanon_zgadza_sie_z_ASSETEM_celow():
     assert len(cele) >= 297, f"asset stracił cele tych gramatyk (jest {len(cele)})"
     rozjazd = [c for c in cele if catalog_canon(c) != c]
     assert rozjazd == [], f"kanon rozjeżdża się z assetem dla: {rozjazd[:5]}"
+
+
+# --- header_form: kanon Horreum → forma karty OBJECT (decyzja usera 2026-09-26) ---
+
+@pytest.mark.parametrize("canon, naglowek", [
+    ("NGC7000", "NGC 7000"), ("IC1805", "IC 1805"), ("UGC1234", "UGC 1234"),
+    ("PGC42637", "PGC 42637"), ("M45", "M 45"), ("C14", "C 14"),
+    ("LDN1152", "LDN 1152"), ("LBN807", "LBN 807"), ("CTB1", "CTB 1"), ("Cr464", "Cr 464"),
+    ("vdB1", "vdB 1"), ("Abell85", "Abell 85"), ("B33", "B 33"), ("Ced214", "Ced 214"),
+    ("ESO056-115", "ESO 056-115"), ("HCG079", "HCG 079"),     # K-1: zera wiodące ZOSTAJĄ
+    ("Sh2-131", "Sh2-131"),                                    # dywiz = część oznaczenia
+    ("G012.2+00.3", "G012.2+00.3"),                            # współrzędna, nie skrót + numer
+])
+def test_header_form_per_gramatyka_i_odwracalnosc(canon, naglowek):
+    """Jedna forma nagłówka na gramatykę ORAZ kontrakt odwracalności: nagłówek zapisany tą formą
+    wraca przez `catalog_canon` do TEGO SAMEGO kanonu (inaczej zapis nagłówka przenosiłby klatki)."""
+    assert header_form(canon) == naglowek
+    assert catalog_canon(header_form(canon)) == canon
+
+
+@pytest.mark.parametrize("canon", ["LMC", "Orion", "WR134", "Moon", "Jupiter", "Veil",
+                                   "C/2023 A3 (Tsuchinshan-ATLAS)", "21P/Giacobini-Zinner", "", None])
+def test_header_form_kanon_spoza_gramatyk_bez_zmian(canon):
+    """Obiekty własne, solar, region, komety: kanonu nie ma jak rozbić na skrót i numer."""
+    assert header_form(canon) == canon
+
+
+def test_header_form_KAZDA_etykieta_katalogu_ma_decyzje():
+    """Nowa gramatyka w `_LABELS` nie może przejść po cichu z formą nagłówka równą kanonowi: albo
+    dostaje spację (`_HEADER_SPACED`), albo jest świadomym wyjątkiem (`_HEADER_UNSPACED_LABELS`)."""
+    from horreum.resolve import catalog as cat
+    przyklad = {"NGC": "NGC1", "IC": "IC1", "Sh2": "Sh2-1", "UGC": "UGC1", "PGC": "PGC1",
+                "LBN": "LBN1", "LDN": "LDN1", "Abell": "Abell1", "vdB": "vdB1", "Ced": "Ced1",
+                "Collinder": "Cr1", "CTB": "CTB1", "Barnard": "B1", "ESO": "ESO001-001",
+                "HCG": "HCG001", "Green": "G001.0+00.0", "Messier": "M1", "Caldwell": "C1"}
+    assert {label for _rx, label in cat._LABELS} == set(przyklad), "nowa etykieta bez przykładu"
+    for label, canon in przyklad.items():
+        assert catalog_label(canon) == label and catalog_canon(canon) == canon, canon
+        spacja = header_form(canon) != canon
+        assert spacja != (label in cat._HEADER_UNSPACED_LABELS), label
+        assert catalog_canon(header_form(canon)) == canon, canon
+
+
+def test_header_form_odwracalny_na_calym_ASSECIE_celow():
+    """Korpus realnych kanonów (asset planera): każdy kanon gramatyki wraca do siebie, każdy spoza
+    gramatyk zostaje bez zmian. Bramka pyta asset, nie listę literałów - asset rośnie."""
+    import json
+    from importlib import resources
+    surowe = json.loads(resources.files("horreum.data")
+                        .joinpath("targets_core.json").read_text(encoding="utf-8"))
+    kanony = {t["c"] for t in surowe["targets"] if t.get("c")}
+    gramatyka = {c for c in kanony if catalog_canon(c, split=False) == c}
+    assert len(gramatyka) > 1000, len(gramatyka)
+    assert [c for c in gramatyka if catalog_canon(header_form(c)) != c] == []
+    assert [c for c in kanony - gramatyka if header_form(c) != c] == []
+
+
+def test_xref_aliases_czyta_rownowaznosc_wstecz():
+    assert xref_aliases("NGC4258") == ("M106",)
+    assert xref_aliases("NGC7023") == ("C4", "LDN1174")
+    assert xref_aliases("IC1805") == ("Sh2-190",)
+    assert xref_aliases("M45") == ()                   # brak wpisu = brak aliasu, nie błąd
+    assert all(xref(a) == "NGC7023" for a in xref_aliases("NGC7023"))

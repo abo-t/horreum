@@ -4,6 +4,58 @@ Format wzorowany na [Keep a Changelog](https://keepachangelog.com/pl/1.1.0/).
 Wersjonowanie [semantyczne](https://semver.org/lang/pl/). Projekt jest we wczesnym rozwoju —
 schemat i API mogą się jeszcze zmieniać.
 
+## [Niewydane]
+
+### Dodane
+
+- **Gotowy stos bez nazwy dostaje propozycję z folderu.** Stos leżący w drzewie
+  `STACKS\<obiekt>\<zestaw>\<filtr>`, którego plik nie zapisał obiektu, trafiał do kubełka „bez
+  nazwy, gotowe stosy" i każdy kosztował ręczne wpisanie nazwy. Teraz program czyta nazwę z folderu
+  obiektu i podaje ją jako propozycję: w Przeglądzie obiektów pod kubełkiem stosów stoi wiersz
+  „…z tego ze ścieżki", a „Zatwierdź ze ścieżki…" nadaje nazwę jednym gestem. Propozycja nigdy nie
+  zapisuje się sama, nie powstaje, gdy plik mówi coś o obiekcie albo gdy nazwę zdjąłeś ręką, i milknie,
+  gdy dwie kopie tego samego stosu leżą w folderach różnych obiektów. Potwierdzonej nazwy nie
+  przepisze później dopasowanie po współrzędnych. Dialog „Napraw nagłówek…" grupuje stosy po folderze
+  obiektu, a nie po folderze filtra.
+
+- **Perspektywa „Wycofane, a plik wrócił".** Klatka, którą wycofałeś, a której plik znów jest na
+  dysku, ma własną listę i własne zdanie w kolumnie „Ścieżka" („wycofana, plik wrócił") z drogą
+  powrotu w podpowiedzi. Dotąd wiersz Porządków prowadził do wszystkich wycofanych naraz i nie dało
+  się odróżnić tej jednej od klatek, których pliku naprawdę nie ma.
+
+- **Stos z mieszanym materiałem mówi o RAW-ach, których nie umie umieścić w czasie.** Gdy obraz ma
+  już rodowód z plików FITS, a obok leżą zdjęcia z lustrzanki bez znanego zegara, panel rodowodu
+  mówi „a tych N nie umiem umieścić w czasie" i podsuwa wskazanie odniesienia - tylko wtedy, gdy
+  to wskazanie naprawdę może je wciągnąć. Schemat bazy rośnie do wersji 20; migracja przy pierwszym
+  otwarciu, bez ruszania istniejących wierszy.
+
+### Naprawione
+
+- **Podpowiedź obiektu gotowego stosu pokazuje obiekt, nie filtr.** Dla stosu bez nazwy kolumna
+  „Obiekt" podpowiadała nazwę folderu rodzica, czyli w drzewie `STACKS` nazwę filtra (`⟨Ha⟩`,
+  `⟨NoFilter⟩`) - dotyczyłoby to 182 ze 193 stosów archiwum. Teraz podpowiada folder obiektu.
+
+- **„Brakujące kopie" pokazują także klatkę wycofaną**, której jedna z kopii zniknęła - to fakt
+  o pliku, prawdziwy niezależnie od wycofania. **„Duplikaty" nie pokazują klatki wycofanej ani
+  zastąpionej** - lista i gest scalania mówią teraz to samo.
+
+- **Perspektywa zapisana nowszą wersją nie udaje, że działa.** Otwarta w wersji, która nie zna
+  któregoś jej warunku, pokazywała szerszy zbiór pod tą samą nazwą. Teraz pasek kryteriów mówi
+  „zapisana w nowszej wersji - N warunków pominiętych" i nazywa je, a ponowny zapis tej samej
+  perspektywy ich nie kasuje.
+
+- **Plakietka „Porządki (N)" zmienia się od razu po geście.** Po „Przywróć" albo „Wycofaj"
+  w Zbiorach i po gestach panelu rodowodu liczba przy Porządkach zostawała stara, dopóki nie
+  wszedłeś w Porządki.
+
+- **„Przenieś" w planerze nie obiecuje gestu, który zaraz odmówi.** Gdy cel sieroty ma już własne
+  oznaczenie, przycisk jest wygaszony, a podpowiedź mówi dlaczego.
+
+- **Propozycja rodowodu wskazuje materiał także przy karcie teleskopu do naprawy.** Stos, którego
+  karta teleskopu jest przestarzała (albo niesie nazwę montażu), dostawał w propozycji pustkę -
+  teraz widzi noc zapisaną jednym innym teleskopem, z ostrzeżeniem o rozjeździe, tak jak gotowy
+  rodowód.
+
 ## [0.10.0] - 2026-09-26
 
 Wydanie o **ekranie zaraz po geście** - o chwili, w której kliknąłeś i patrzysz, co się stało.

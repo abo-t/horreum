@@ -4,6 +4,46 @@ Format wzorowany na [Keep a Changelog](https://keepachangelog.com/pl/1.1.0/).
 Wersjonowanie [semantyczne](https://semver.org/lang/pl/). Projekt jest we wczesnym rozwoju —
 schemat i API mogą się jeszcze zmieniać.
 
+## [Niewydane]
+
+### Naprawione
+
+- **Pusty ekran mówi, co zasłania klatki - i jednym kliknięciem je odsłania.** Gdy gest zdjął
+  z widoku wszystkie klatki (na przykład cofnąłeś nazwę przy widoku zawężonym do jednego obiektu),
+  pasek stanu podawał „odsłoni je „× Wyczyść zbiór”", a kiedy zdanie zgasło, środek ekranu mówił
+  ogólne „zmień filtr lub perspektywę" - przy zawężeniu listwą filtrów to nie był ruch, który
+  cokolwiek odsłania. Teraz pusty ekran mówi, czym widok jest zawężony, i ma pod zdaniem przycisk,
+  który wykonuje właściwy gest: gdy perspektywa ma klatki, a zasłaniają je filtry, przycisk zdejmuje
+  tylko filtry i zostawia Cię w tej perspektywie (na przykład w „Do przeglądu" przy pozostałych
+  klatkach); gdy perspektywa nie ma ani jednej klatki, przełącza na „Przegląd". Klatki gestu, które
+  wrócą do widoku, są zaznaczone.
+
+- **Zaznaczona wartość w listwie filtrów nie ucieka z oczu.** Po cofnięciu nazwy obiektu, który
+  był wybrany w listwie, znacznik `✓` przeskakiwał na górę listy, a lista zostawała przewinięta
+  w dół - zaznaczenie znikało z widoku, choć dalej zawężało zbiór. Teraz lista idzie za wyborem,
+  który widziałeś albo właśnie kliknąłeś. Wybór widoczny choćby częściowo zostaje dokładnie tam,
+  gdzie był, więc drugie kliknięcie w cyklu `✓` / `⊖` trafia w ten sam wiersz.
+
+- **Krótkie grupy listwy filtrów pokazują całe wiersze.** Filtr, Rodzaj i Teleskop ucinały piąty
+  wiersz w połowie. Wysokość grupy liczy się teraz z realnej wysokości wiersza, więc mieści cztery
+  pełne wiersze także przy innym skalowaniu ekranu.
+
+- **Nazwa perspektywy opisuje zbiór, który naprawdę oglądasz.** Lista perspektyw zostawała przy
+  starej nazwie w kilku sytuacjach: po „× Wyczyść zbiór" albo „Wyczyść" w panelu filtra
+  w „Kalibracji" (nazwa „Kalibracja" nad pełnym zbiorem), po „Pokaż klatki celu" z planera, gdy
+  widok był w „Duplikatach", po kliknięciu w listwie wartości, która definiowała zapisaną
+  perspektywę, i po każdym etapie Dostawy (wtedy wracała do „Przeglądu" nad zawężonym zbiorem).
+  Teraz nazwa idzie za zbiorem: przechodzi na perspektywę, która go opisuje, albo zostaje, gdy
+  zbiór nadal jest jej zbiorem (na przykład „Duplikaty" po wyczyszczeniu filtrów). Grupowanie
+  zostaje takie, jakie ustawiłeś, a „Wydaj na stół…" zapisuje w manifeście właściwą nazwę.
+
+- **Wskazówka po geście ma własne miejsce na pasku stanu i nie ucina się.** Raport gestu
+  i wskazówka „co teraz zrobić" konkurowały o jedno pole paska - przy długim raporcie wskazówka
+  znikała za krawędzią. Teraz stoi obok raportu, a pełne zdanie zawsze jest w podpowiedzi paska.
+
+- **Kolejka przeglądu obiektów nie rezerwuje pustego miejsca.** Lista kolejki zwija się do swojej
+  treści, a „Biblioteka" obiektów pokazuje prawie dwa razy więcej wierszy (19 zamiast 10).
+
 ## [0.9.1] - 2026-08-16
 
 ### Naprawione

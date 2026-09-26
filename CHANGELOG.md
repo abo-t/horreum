@@ -4,7 +4,16 @@ Format wzorowany na [Keep a Changelog](https://keepachangelog.com/pl/1.1.0/).
 Wersjonowanie [semantyczne](https://semver.org/lang/pl/). Projekt jest we wczesnym rozwoju —
 schemat i API mogą się jeszcze zmieniać.
 
-## [Niewydane]
+## [0.10.0] - 2026-09-26
+
+Wydanie o **ekranie zaraz po geście** - o chwili, w której kliknąłeś i patrzysz, co się stało.
+Gest potrafił zdjąć z widoku wszystkie klatki i zostawić pusty ekran z ogólnikiem, zaznaczenie
+w listwie filtrów uciekało poza kadr, nazwa perspektywy zostawała przy zbiorze, którego już nie
+oglądałeś, a trzy sąsiednie gesty osi obiektu liczyły każdy po swojemu. Teraz pusty ekran mówi, co
+zasłania klatki, i jednym przyciskiem je odsłania; wybór zostaje tam, gdzie go widziałeś; nazwa
+idzie za zbiorem; gesty mówią jedną gramatyką liczb. Doszła jedna nowa rzecz: kopia nieczytelna
+mówi, czy zawiódł dysk, czy plik. Schemat bazy rośnie do wersji 19 - migracja wjeżdża sama przy
+pierwszym otwarciu, bez ruszania istniejących wierszy.
 
 ### Dodane
 
@@ -845,6 +854,7 @@ Fundament: przejście na model „baza = autorytet, `sha1` = tożsamość".
 - **Import zasilający** świeżej bazy z bazy‑dawcy (read‑only).
 - **CLI**: `init` / `scan` / `group` / `resolve` / `delta`.
 
+[0.10.0]: https://github.com/abo-t/horreum/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/abo-t/horreum/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/abo-t/horreum/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/abo-t/horreum/compare/v0.7.0...v0.8.0

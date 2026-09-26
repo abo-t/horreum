@@ -107,7 +107,8 @@ horreum --help               # linia poleceń
    regiony po współrzędnych, propozycje z nazwy folderu).
 5. **Przegląd** — co wymaga ręcznej decyzji, trafia na listę. Stamtąd nazwiesz klatki ręką,
    potwierdzisz propozycję z folderu albo dopiszesz kartę `OBJECT` wprost do pliku; każdą własną
-   decyzję da się cofnąć.
+   decyzję da się cofnąć. Kopia, której nie dało się odczytać, mówi, co zawiodło: dysk (dostęp),
+   plik (nagłówek) czy program (baza).
 
 Poza tą drogą: **Stosy** (gotowe obrazy po integracji wchodzą do biblioteki razem z rodowodem —
 z czego powstały), **Planer** (co warto sfotografować dziś, z pokryciem materiału), **Wydaj na

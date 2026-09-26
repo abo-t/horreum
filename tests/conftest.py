@@ -20,6 +20,35 @@ def _reset_i18n_lang():
     yield
 
 
+@pytest.fixture(autouse=True)
+def _izoluj_qsettings(tmp_path_factory, monkeypatch):
+    """Żaden test nie pisze do PRAWDZIWYCH ustawień usera (Windows: rejestr
+    `HKCU\\Software\\Horreum\\Horreum`). Dowód defektu 2026-09-26: `ostatnia_baza` wskazywała bazę
+    z katalogu pytesta, bo `main()` w teście zapamiętał ją w rejestrze - zwykły start Horreum
+    otwierał potem śmieć z `C:\\Temp`.
+
+    Podmiana `QSettings.__init__`, a nie `setDefaultFormat`+`setPath` ani
+    `QStandardPaths.setTestModeEnabled`: konstruktor `QSettings(org, app)` na Windows idzie do
+    rejestru i oba te mechanizmy ignoruje (sonda 2026-09-26, PySide6 6.9.2). Podmiana łapie KAŻDE
+    utworzenie - w każdym module, także importowanym leniwie - i kieruje je do pliku INI w katalogu
+    TEGO testu (świeże ustawienia per test, poza `tmp_path`, żeby nie mieszać testom listingu
+    katalogu). Monkeypatch wartości na klasie w pojedynczych testach działa dalej. Bramka:
+    `test_main_NIE_rusza_rejestru_usera`."""
+    try:
+        from PySide6.QtCore import QSettings
+    except ImportError:                 # `.venv` bez Qt - nie ma czego izolować
+        yield
+        return
+    ini = str(tmp_path_factory.mktemp("qsettings") / "horreum.ini")
+    prawdziwy_init = QSettings.__init__
+
+    def _init_w_pliku(self, *args, **kwargs):
+        prawdziwy_init(self, ini, QSettings.Format.IniFormat)
+
+    monkeypatch.setattr(QSettings, "__init__", _init_w_pliku)
+    yield
+
+
 @pytest.fixture
 def s8(tmp_path):
     """(con, ids) świeżej bazy §8. `ids` = dict id-ków (A/B/C/D, cam1/cam2, cfg_*, frames)."""

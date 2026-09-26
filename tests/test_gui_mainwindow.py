@@ -637,6 +637,69 @@ def test_start_aplikacji_POKAZUJE_OKNO_ZANIM_czyta_baze(qapp, tmp_path, monkeypa
             w.close()
 
 
+def _rejestr_horreum():
+    """Pełny zrzut `HKCU\\Software\\Horreum\\Horreum` (wartości + podklucze rekurencyjnie);
+    `None`, gdy klucza nie ma."""
+    import winreg
+
+    def _zrzut(klucz):
+        n_pod, n_wart, _ = winreg.QueryInfoKey(klucz)
+        wartosci = {winreg.EnumValue(klucz, i)[0]: winreg.EnumValue(klucz, i)[1:] for i in range(n_wart)}
+        pod = {}
+        for i in range(n_pod):
+            nazwa = winreg.EnumKey(klucz, i)
+            with winreg.OpenKey(klucz, nazwa) as k:
+                pod[nazwa] = _zrzut(k)
+        return wartosci, pod
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Horreum\Horreum") as k:
+            return _zrzut(k)
+    except FileNotFoundError:
+        return None
+
+
+@pytest.mark.skipif(os.name != "nt", reason="rejestr = natywne QSettings tylko na Windows")
+def test_main_NIE_rusza_rejestru_usera(qapp, tmp_path, monkeypatch):
+    """Bateria pisała do PRAWDZIWYCH ustawień usera: 2026-09-26 `ostatnia_baza` w rejestrze
+    wskazywała `...\\pytest-1976\\test_start_aplikacji_POKAZUJE_0\\s8.db`, więc zwykły start
+    Horreum otwierał bazę z katalogu pytesta. Izolację trzyma autouse `_izoluj_qsettings`
+    (`conftest.py`); ta bramka mierzy JEJ skutek na żywym rejestrze, a nie lekturą kodu.
+
+    Ścieżka: `main()` z bazą (zapis `ostatnia_baza`) + zmiana języka i motywu z menu (zapis
+    `ui/lang`, `ui/theme`). Druga połowa dowodu: zapis REALNIE zaszedł - w ustawieniach testu.
+    Falsyfikator: zdejmij fixture `_izoluj_qsettings` → zrzut rejestru po ≠ przed."""
+    from horreum.gui import app as app_mod, theme
+
+    okna = []
+    prawdziwy_show = app_mod.MainWindow.show
+
+    def _show(self):
+        okna.append(self)
+        return prawdziwy_show(self)
+
+    monkeypatch.setattr(app_mod.MainWindow, "show", _show)
+    monkeypatch.setattr(app_mod.QApplication, "exec", lambda self: 0)
+
+    przed = _rejestr_horreum()
+    baza = _seeded_db(tmp_path)
+    try:
+        app_mod.main([baza])
+        (win,) = okna
+        win._on_lang("en")
+        win._on_theme(theme.DEFAULT)
+        assert _rejestr_horreum() == przed, "test zapisał do prawdziwych ustawień usera (rejestr)"
+
+        from PySide6.QtCore import QSettings
+        ustawienia = QSettings("Horreum", "Horreum")
+        assert ustawienia.value("ostatnia_baza") == baza, "zapis ostatniej bazy w ogóle nie zaszedł"
+        assert ustawienia.value("ui/lang") == "en"
+        assert not ustawienia.fileName().startswith("\\HKEY_"), ustawienia.fileName()
+    finally:
+        for w in okna:
+            w.close()
+
+
 # ═════════════════════════ FH-2 — ZDANIE PO GEŚCIE I JEGO NOŚNIK
 
 

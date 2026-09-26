@@ -377,6 +377,79 @@ def test_stage_finished_odswieza_liczniki_zadan(qapp, tmp_path):
         win.close()
 
 
+def test_gest_osi_zywotnosci_w_Zbiorach_odswieza_plakietke_Porzadkow(qapp, tmp_path):
+    """Plakietka nawigacji „Porządki (N)" jest stanem widocznym BEZ klikania, więc ma iść za gestem,
+    który zmienił jej populację - także za gestem osi żywotności klatki. Zmierzone na realnym oknie:
+    po „Przywróć" plakietka zostawała przy starej liczbie i poprawiała się dopiero po wejściu
+    w Porządki, bo odświeżenie wisiało wyłącznie na sygnale osi OBIEKTU.
+
+    Stan drogą programu, przed otwarciem okna: jedyna kopia `present0` zniknęła (fikstura), ręka
+    wycofuje klatkę, a re-skan znajduje plik pod nową ścieżką - wiersz akcyjny „Wycofane, a plik
+    wrócił" liczy 1. Gest „Przywróć" z Zbiorów zamyka go; plakietka ma spaść o jeden, choć
+    Porządków nikt nie otworzył.
+
+    Falsyfikator: zdejmij emisję `stan_porzadkow_changed` z `_po_gescie_klatki` - plakietka
+    zostaje przy (4)."""
+    from horreum.gui import grid as grid_mod
+    path = _seeded_db(tmp_path, object_axis=True)
+    con = db.open_db(path)
+    (fid,) = queries.vanished_frame_ids(con)
+    assert repo.retire_frames(con, frame_ids=[fid], now=NOW).done == 1
+    repo.add_location(con, frame_id=fid, volume="vol3", path="/astro/wrocil/present0.fits", now=NOW)
+    con.close()
+
+    win = MainWindow(path)
+    try:
+        # klatki bez obiektu + teleskopy + duplikaty + „a plik wrócił" (zniknięte spadły do 0)
+        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (4)"
+        win._show_view(NAV_ZBIORY)
+        grid = win.grid_view
+        grid.apply_perspective(grid_mod.PRESET_RETIRED_CONFLICT)
+        assert grid._frame_ids == [fid]
+        grid.table.selectRow(0)
+        grid._on_frame_restore()
+
+        assert win.con.execute("SELECT retired_at FROM frame WHERE id = ?",
+                               (fid,)).fetchone()[0] is None, "gest się odbył"
+        assert win.stack.currentIndex() == NAV_ZBIORY, "Porządków nikt nie otworzył"
+        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (3)"
+    finally:
+        win.close()
+
+
+def test_gest_osi_obiektu_odswieza_plakietke_JEDEN_raz(qapp, tmp_path):
+    """Druga strona tej samej zmiany: plakietka wisi teraz na JEDNYM sygnale stanu Porządków,
+    a gest osi obiektu emituje oba swoje sygnały (kolejka przeglądu osi + stan Porządków).
+    Gdyby stare podpięcie pod `object_axis_changed` zostało obok nowego, każdy gest osi obiektu
+    liczyłby `tasks_state` dwa razy - pełny koszt zapytań za nic. Liczymy emisje `counts_changed`,
+    czyli wykonania `refresh_counts`."""
+    path = _seeded_db(tmp_path, object_axis=True)
+    con = db.open_db(path)
+    # cel gestu: light z obiektem nadanym RĘKĄ - „Cofnij przypisanie" zdejmuje tylko rękę i ścieżkę
+    fid = con.execute(
+        "SELECT id FROM frame WHERE object_id IS NULL AND kind IN ('light', 'master_light') "
+        "ORDER BY id LIMIT 1").fetchone()[0]
+    repo.user_assign_object(con, alias_norm=None, canon="NGC7000", catalog="NGC",
+                            kind="deep_sky", frame_ids=[fid], now=NOW)
+    con.close()
+    win = MainWindow(path)
+    try:
+        win._show_view(NAV_ZBIORY)
+        grid = win.grid_view
+        grid.refresh()
+        wiersz = next(i for i, r in enumerate(grid.model._rows)
+                      if isinstance(r, dict) and r.get("frame_id") == fid)
+        grid.table.selectRow(wiersz)
+        odswiezenia = []
+        win.tasks_view.counts_changed.connect(odswiezenia.append)
+        grid._on_object_clear()
+        assert win.con.execute("SELECT object_id FROM frame WHERE id = ?",
+                               (fid,)).fetchone()[0] is None, "gest się odbył"
+        assert len(odswiezenia) == 1, f"plakietka liczona {len(odswiezenia)} razy"
+    finally:
+        win.close()
+
+
 def test_zadanie_zniknietych_otwiera_perspektywe(qapp, tmp_path):
     """P5c: klik w „Zniknięte z dysku" prowadzi do Zbiorów z perspektywą `PRESET_VANISHED`, a grid
     pokazuje DOKŁADNIE klatki bez ani jednej obecnej kopii. Bez tego licznik byłby liczbą, której

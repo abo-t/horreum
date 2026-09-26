@@ -2291,6 +2291,27 @@ def test_noc_mastera_z_rozjazdem_teleskopu_mowi_zdaniem_gotowego_rodowodu(view, 
     assert bar.warn.full_text() == ""
 
 
+def test_gesty_rodowodu_odswiezaja_plakietke_Porzadkow(view, gcon):
+    """Oba gesty rodowodu zmieniają populację `stacks_lineage_pending` (zapis czyni powód
+    zwietrzałym), więc emitują sygnał plakietki SAME - nie czekają na etap, który przy odmowie
+    albo bez `run_stage_fn` nie ruszy. Werdykt, który niczego nie zmienił (0), milczy."""
+    _seed_stos(gcon, reason="offset_unknown")
+    assert _zaznacz_frame(view, 10)
+    view._toggle_panel("lineage")
+    emisje = []
+    view.stan_porzadkow_changed.connect(lambda: emisje.append(1))
+
+    view.lineage_bar.offset_asked.emit(60)
+    assert len(emisje) == 1, "zapis odniesienia odświeża plakietkę"
+
+    view.lineage_bar.judged.emit([1], False)       # klinga wstawia werdykt ręki: zapis
+    assert gcon.execute("SELECT count(*) FROM integration_input WHERE integration_id = 5 "
+                        "AND asserted_by = 'user'").fetchone()[0] == 1
+    assert len(emisje) == 2, "werdykt, który zapisał, odświeża plakietkę"
+    view.lineage_bar.judged.emit([1], False)       # ten sam werdykt: klinga idempotentna, 0
+    assert len(emisje) == 2, "powtórzony werdykt (0 zmian) milczy"
+
+
 def test_gest_odniesienia_zapisuje_i_zostawia_droge_powrotu(view, gcon):
     """Zapis idzie KLINGĄ (`repo.set_integration_offset`), a panel po nim NIE gaśnie: przycisk
     zostaje, niosąc wskazaną wartość — bo pierwsza pomyłka ręki nie ma być wieczna (ta sama

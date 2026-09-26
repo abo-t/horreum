@@ -2850,7 +2850,11 @@ class MainWindow(QMainWindow):
         # populację, którą oba gesty zmieniają — bez tej linii licznik zadań pokazywał stan sprzed
         # gestu aż do wejścia w Porządki, więc „stan widoczny bez klikania" przestawał być prawdą
         # zaraz po akcji, która go zmieniła (adjudykacja recenzji S2b).
-        grid.object_axis_changed.connect(tasks.refresh_counts)
+        # Podpięte pod sygnał STANU PORZĄDKÓW, nie pod `object_axis_changed`: ten drugi milczał
+        # przy gestach osi żywotności klatki („Przywróć"/„Wycofaj"), więc plakietka zostawała przy
+        # starej liczbie. Jeden sygnał z ogona każdego gestu gridu, jedno podpięcie tutaj - bez
+        # drugiego podpięcia pod `object_axis_changed`, które odświeżałoby plakietkę dwa razy.
+        grid.stan_porzadkow_changed.connect(tasks.refresh_counts)
         for v in (tasks.axis_view, tasks.observatory_view, tasks.object_view):
             v.status_message.connect(self._flash)
         tasks.open_collection.connect(self._on_open_collection)

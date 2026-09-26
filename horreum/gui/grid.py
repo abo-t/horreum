@@ -2425,6 +2425,15 @@ class FramesView(QWidget):
     # Gest osi obiektu z paska Zbiorów zmienia stan, który pokazuje INNE okno (kolejka przeglądu
     # osi obiektu). Sygnał, nie wołanie: grid nie zna gospodarza i nie ma go poznawać (NARROW).
     object_axis_changed = Signal()
+    # STAN LICZONY PRZEZ PORZĄDKI SIĘ ZMIENIŁ - jeden sygnał z końca drogi KAŻDEGO gestu gridu,
+    # który rusza populację `queries.tasks_state`; gospodarz podpina go RAZ pod `refresh_counts`
+    # (plakietka nawigacji). Osobno od `object_axis_changed`, bo ten mówi o INNEJ powierzchni
+    # (kolejka przeglądu osi obiektu) i nie odpala przy gestach osi żywotności klatki - a właśnie
+    # przez to plakietka zostawała przy liczbie sprzed „Przywróć"/„Wycofaj" do wejścia w Porządki.
+    # Dopinanie odświeżenia przy każdym geście osobno to figura, która w tym repo rozjeżdżała się
+    # już kilka razy („etykieta kłamie"); właściciel emisji jest jeden - ogon gestu. Emitują:
+    # `_po_gescie_osi` i `_po_gescie_klatki`, wyłącznie gdy gest coś zapisał.
+    stan_porzadkow_changed = Signal()
     # Mutex DWÓCH powierzchni writebacku (D-PD-3): gospodarz przekazuje ten fakt drugiej powierzchni
     # (dialog „Napraw nagłówek…"). Dwa równoległe commity spotkałyby się na `BEGIN IMMEDIATE`
     # z `busy_timeout` 5 s i jeden wróciłby jako 'failed' — bez powodu widocznego dla usera.
@@ -2992,6 +3001,7 @@ class FramesView(QWidget):
             self.refresh()
             wrocilo = self._przywroc_zaznaczenie(zaznaczone)
             self.object_axis_changed.emit()
+            self.stan_porzadkow_changed.emit()     # plakietka Porządków (patrz definicja sygnału)
             # CEL GESTU BYWA WYPCHNIĘTY Z WIDOKU PRZEZ SAM GEST (FC-2) - i to nie jest przypadek
             # brzegowy: przy facecie `Obiekt=NGC3623` cofnięcie zostawia widok 43 → 0 klatek
             # (zmierzone na kopii żywej bazy), bo `facet_objects` JOIN-uje po `f.object_id`,
@@ -3558,6 +3568,10 @@ class FramesView(QWidget):
         repo.set_integration_offset(self.con, master_frame_id=self._lineage_frame_id,
                                     utc_offset_min=minutes, now=self._now())
         self._refresh_lineage()
+        # Zapis czyni powód `offset_unknown` zwietrzałym, a ten liczy się do plakietki Porządków
+        # (`stacks_lineage_pending`) - odświeżenie nie może czekać na etap, który przy odmowie
+        # albo bez `run_stage_fn` w ogóle nie ruszy.
+        self.stan_porzadkow_changed.emit()
         godziny = f"{minutes / 60.0:+.1f}"
         # TAKT 3: gest sam się domyka. Bez tego user musiał przejść na inny ekran i znaleźć tam
         # przycisk stojący obok wyboru katalogu — akcja domykająca gest mieszkała w sekcji
@@ -3588,6 +3602,9 @@ class FramesView(QWidget):
         # od nowa (wiz #8). Zwracamy te same klatki, nie te same indeksy — kolejność wierszy
         # należy do zapytania.
         self._refresh_lineage(select_frame_ids=frame_ids)
+        if n:
+            # Potwierdzone wejście czyni powód stosu zwietrzałym, a ten liczy się do plakietki.
+            self.stan_porzadkow_changed.emit()
         # Klinga jest idempotentna, więc powtórzony ten sam werdykt daje 0 — a „Potwierdzono 0"
         # brzmi jak porażka zapisu, którym nie jest (QUIET: brak zmiany mówi o braku zmiany).
         klucz = ("grid.lin.judged_none" if not n else
@@ -3961,6 +3978,10 @@ class FramesView(QWidget):
             fakt, recepta = self._czlon_poza_widokiem(
                 len(zaznaczone) - self._przywroc_zaznaczenie(zaznaczone), zaznaczone)
             msg += fakt
+            # Wycofanie i przywrócenie ruszają cztery liczniki Porządków naraz (wycofane,
+            # „a plik wrócił", zniknięte, brakujące kopie) - plakietka ma to wiedzieć bez wejścia
+            # w Porządki. Przed zdaniem: `refresh_counts` nie mówi na pasek stanu.
+            self.stan_porzadkow_changed.emit()
         # ZDANIE PO ODŚWIEŻENIU I TYLKO JEDNO — repo dostało tę klasę już DWA RAZY na sąsiedniej
         # osi: `refresh()` kończy własnym `status_message`, a odbiornikiem obu jest jeden
         # `showMessage`, więc emisja przed odświeżeniem ginie w tym samym obrocie pętli zdarzeń.

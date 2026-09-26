@@ -977,9 +977,9 @@ def inputs_of(con, master_frame_id):
         (master_frame_id,)).fetchall()
 
 # --- TODO-DŁUG (z kolejki sesji, dieta 2026-08-10; pełne brzmienia: archiwum aa) ---
-# TODO-DŁUG(E4-9): 26 stosów history_mismatch (0810) to werdykt UCZCIWY - wejścia najpewniej nie
-#   leżą w archiwum (drzewo obróbki bez pokrycia z bazą). NIE gasić rozluźnieniem okna; sonda:
-#   ile nazw wejść z historii ma odpowiednik w bazie (0 = teza potwierdzona, >0 = okno za wąskie).
+# TODO-DŁUG(E4-9): 26 stosów history_mismatch (0810). Dawna teza „wejść nie ma w archiwum" jest
+#   OBALONA pomiarem niżej - rozjazd bierze się z okna doboru (przeważnie ZA SZEROKIEGO), nie
+#   z braku materiału. NIE gasić rozluźnieniem okna; kierunek naprawy czeka na decyzję Zdzinia.
 #   POMIAR 2026-09-26 (pf4 read-only, historia 26 plików z R:, 1559 nazw wejść): wynik >0, a TEZA
 #   UPADA W OBU CZŁONACH. (a) Nazwa: 12/1559 ma odpowiednik w `location` co do rdzenia nazwy -
 #   wszystkie z JEDNEGO stosu (NGC5907 Ha 300s, 12/12; historia niesie tam nazwy archiwum).

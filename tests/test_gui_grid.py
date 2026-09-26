@@ -3406,15 +3406,21 @@ def test_NIEZMIENNIK_trzy_gesty_osi_licza_CALE_zaznaczenie(obj_view, monkeypatch
     assert gesty[0][1].assigned == 6 and gesty[2][1].assigned > 0, "gesty nic nie ruszyły"
 
 
-def test_przywrocenie_po_BLEDZIE_grupy_liczy_reszte_jako_dryf(obj_view, monkeypatch):
+def test_przywrocenie_po_BLEDZIE_grupy_liczy_reszte_jako_odmowe_klingi(obj_view, monkeypatch):
     """FC-6, drugi człon defektu: po `break` na `ValueError` klatki grupy, która padła, i grup po
     niej nie liczyły się nigdzie. Grupa, która padła, wycofała się w całości (`_immediate`),
-    a dalsze do klingi nie doszły - stan jest inny, niż widział read-model, więc to DRYF.
+    a dalsze do klingi nie doszły - żadna z nich nie jest zapisana.
+
+    R-S2b-13 (bramka pakietu): do tej poprawki ta bramka pinowała je jako DRYF („zmieniły się
+    w międzyczasie"). `ValueError` klingi to jednak także konflikt aliasu - nic się nie zmieniło,
+    klinga odmówiła - więc zdanie kłamało o stanie. Liczą się jako `skipped_failed` („nie zapisano,
+    klinga odmówiła"), a dryf zostaje przy zerze.
 
     Grupy idą po kanonie (IC443, LMC, M42); klinga pada na LMC → IC443 zapisany, LMC (2) i M42 (1)
-    liczą się jako dryf.
+    liczą się jako odmowa klingi.
 
-    Falsyfikator: zdejmij doliczenie `skipped_drift` przed `break` → „1 z 1" zamiast „1 z 4"."""
+    Falsyfikator: zdejmij doliczenie przed `break` → „1 z 1" zamiast „1 z 4"; dolicz resztę
+    z powrotem do `skipped_drift` → wraca człon dryfu i asercja jego braku czerwienieje."""
     from PySide6.QtWidgets import QMessageBox
     v, con = obj_view
     ids = _zaznaczenie_do_przywrocenia(con, pamiec=["IC443", "LMC", "LMC", "M42"])
@@ -3436,7 +3442,8 @@ def test_przywrocenie_po_BLEDZIE_grupy_liczy_reszte_jako_dryf(obj_view, monkeypa
 
     assert ostrzezenia, "błąd klingi przeszedł bez słowa"
     assert "Przywrócono przypisanie na 1 z 4 klatek" in msgs[-1], msgs[-1]
-    assert "· zmieniły się w międzyczasie: 3" in msgs[-1], msgs[-1]
+    assert "· nie zapisano, klinga odmówiła: 3" in msgs[-1], msgs[-1]
+    assert "zmieniły się w międzyczasie" not in msgs[-1], msgs[-1]
 
 
 def test_kolejka_NIE_dostaje_nowego_kubelka_poza_czlonem_cofniecia(obj_view):

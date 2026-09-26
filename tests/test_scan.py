@@ -1459,7 +1459,15 @@ def _raise_oserror(msg):
 def test_backstop_znana_sciezka_open_failure_marker(tmp_path, monkeypatch):
     """Z1 (#13): plik ZNANY przestaje się OTWIERAĆ (błąd I/O w `scan_file` — hasze są POZA try W1,
     propagują do backstopu `scan_tree`) → backstop oznacza marker `unreadable_since` PRZEZ KLINGĘ
-    (idempotentnie), NIE flaguje sha1='?' co skan. Target eventu = REALNE sha1 (tożsamość znana)."""
+    (idempotentnie), NIE flaguje sha1='?' co skan. Target eventu = REALNE sha1 (tożsamość znana).
+
+    P4-2: rodzaj zostaje NULL, a nie `'io'`. Symulacja rzuca `OSError("…")` BEZ kodu systemu,
+    a taki wyjątek jest niejednoznaczny - tak samo wygląda odmowa parsera astropy i wyprany przez
+    nią błąd I/O; prawdziwy błąd systemu niesie `errno`. Bliźniak z kodem systemu
+    (`PermissionError(errno.EACCES)` → `'io'`) to `test_backstop_rodzaj_z_obiektu_wyjatku`.
+
+    Falsyfikator: w `unreadable_kind_of` daj gołemu `OSError` `'io'` (samo `isinstance`) albo
+    `'parse'` (kontrakt sprzed tej naprawy) → asercja rodzaju czerwienieje."""
     con = _db(tmp_path)
     tree = tmp_path / "t"; tree.mkdir()
     _light(tree / "l.fits", 1)
@@ -1467,8 +1475,9 @@ def test_backstop_znana_sciezka_open_failure_marker(tmp_path, monkeypatch):
     monkeypatch.setattr("horreum.scan.scan_file", _raise_oserror("NAS otwarcie odmowione"))
     s = scan_tree(con, tree, now="2027-01-01T00:00:00+00:00")   # gate OFF (volume='?') → scan_file wołany → boom
     assert s.frame_review == 1
-    loc = con.execute("SELECT mtime, unreadable_since FROM location").fetchone()
+    loc = con.execute("SELECT mtime, unreadable_since, unreadable_kind FROM location").fetchone()
     assert loc["unreadable_since"] == "2027-01-01T00:00:00+00:00"     # marker ustawiony
+    assert loc["unreadable_kind"] is None                             # goły OSError - rodzaj nieznany
     ev = con.execute(
         "SELECT target, reason FROM event WHERE verb='frame.review' ORDER BY id DESC LIMIT 1").fetchone()
     assert ev["target"].startswith("sha1:") and ev["target"] != "sha1:?"   # tożsamość znana, nie backstop-'?'
@@ -1514,30 +1523,67 @@ def _stan_markera(con):
                              "FROM location").fetchone())
 
 
-def test_unreadable_kind_of_rozstrzyga_kod_systemu_nie_typ():
-    """P4-2: `'io'` wyłącznie dla `OSError` Z KODEM SYSTEMU (`errno`); goły `OSError("komunikat")`
-    - tak astropy odmawia zepsutego FITS-a - oraz każdy nie-`OSError` to `'parse'`.
+def test_goly_OSError_czytnika_przy_czytelnych_bajtach_to_parse(tmp_path, monkeypatch):
+    """P4-2, droga (a): czytnik nagłówka rzuca GOŁY `OSError` (bez kodu systemu), a hasz czyta
+    cały plik bez błędu → `error_kind == 'parse'`. Sam wyjątek tego nie rozstrzyga -
+    `unreadable_kind_of` oddaje dla niego `None`, bo tak samo wygląda odmowa parsera astropy
+    i wyprany przez nią błąd I/O. Rozstrzyga świadek bajtów: plik dał się przeczytać, więc odmówił
+    parser.
 
-    Falsyfikator: zamień warunek `unreadable_kind_of` na samo `isinstance(exc, OSError)` →
-    asercja na gołym `OSError` czerwienieje."""
-    import errno
-    kind_of = scan_module.unreadable_kind_of
-    assert kind_of(PermissionError(errno.EACCES, "Permission denied")) == "io"
-    assert kind_of(FileNotFoundError(errno.ENOENT, "No such file or directory")) == "io"
-    assert kind_of(TimeoutError(errno.ETIMEDOUT, "SMB timeout")) == "io"
-    assert kind_of(OSError(errno.EIO, "Input/output error")) == "io"
-    assert kind_of(OSError("Empty or corrupt FITS file")) == "parse"
-    assert kind_of(ValueError("nie XISF monolithic")) == "parse"
+    Falsyfikator: usuń w `scan_file` podniesienie `error_kind = "parse"` po haszu → rodzaj `None`
+    i asercja rodzaju czerwienieje; przywróć w `unreadable_kind_of` `'parse'` dla gołego `OSError`
+    (klasyfikator zgaduje z typu) → asercja na klasyfikatorze czerwienieje."""
+    f = _light(tmp_path / "l.fits", 1)
+
+    def odmowa(path):
+        raise OSError("Header missing END card.")
+    monkeypatch.setattr("horreum.scan.read_fits_meta", odmowa)
+    assert scan_module.unreadable_kind_of(OSError("Header missing END card.")) is None
+    rec = scan_file(str(f))
+    assert rec.header is None and rec.error == "OSError: Header missing END card."
+    assert rec.error_kind == "parse"
+    assert rec.file_sha1 == hashlib.sha1(f.read_bytes()).hexdigest()   # świadek: bajty SĄ
+
+
+def test_goly_OSError_haszowania_na_znanej_kopii_zostawia_rodzaj_nieznany(tmp_path, monkeypatch):
+    """P4-2, droga (b): czytnik nagłówka rzuca goły `OSError` I hasz pliku też pada gołym
+    `OSError` → rekord nie powstaje, wyjątek haszu idzie do backstopu `scan_tree`, a tam - bez
+    dowodu bajtów - rodzaj zostaje NULL. „Nagłówek nie przechodzi parsera" byłoby tu zgadywaniem,
+    „dysk/dostęp" też: kodu systemu nie ma, a bajtów nie udało się przeczytać.
+
+    Falsyfikator: przywróć w `unreadable_kind_of` `'parse'` dla gołego `OSError` (kontrakt sprzed
+    naprawy) albo daj mu `'io'` → asercja rodzaju czerwienieje."""
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    _light(tree / "l.fits", 1)
+    scan_tree(con, tree, now=NOW)
+
+    def odmowa(path):
+        raise OSError("Header missing END card.")
+
+    def hasz_pada(path, span):
+        raise OSError("odczyt przerwany")
+    monkeypatch.setattr("horreum.scan.read_fits_meta", odmowa)
+    monkeypatch.setattr("horreum.scan.sha1_of_span", hasz_pada)
+    s = scan_tree(con, tree, now="2027-01-01T00:00:00+00:00")
+    assert s.frame_review == 1
+    since, kind, reason = _stan_markera(con)
+    assert (since, kind) == ("2027-01-01T00:00:00+00:00", None)
+    assert reason == "OSError: odczyt przerwany"
+    con.close()
 
 
 def test_scan_file_error_kind_parse_zepsuty_fits_i_xisf(tmp_path):
     """P4-2: bajty przyszły, parser odmówił → `error_kind == 'parse'` - dla FITS także wtedy, gdy
-    astropy rzuca GOŁY `OSError` („No SIMPLE card found"). To ten przypadek przesądził, że
-    klasyfikacja idzie po `errno`, a nie po typie: po samym typie zepsuty FITS dostałby etykietę
-    „dysk/dostęp" i wysłał usera na dysk z plikiem do zgłoszenia. Czytelny plik rodzaju nie ma.
+    astropy rzuca GOŁY `OSError` („No SIMPLE card found"). Ten przypadek jest drogą (a) na
+    prawdziwym pliku: klasyfikator oddaje dla gołego `OSError` `None`, a do `'parse'` podnosi go
+    dopiero hasz, który przeczytał bajty. Po samym typie zepsuty FITS dostałby etykietę
+    „dysk/dostęp" i wysłał usera na dysk z plikiem do zgłoszenia. XISF odmawia `ValueError`-em,
+    więc `'parse'` daje mu sam klasyfikator. Czytelny plik rodzaju nie ma.
 
-    Falsyfikator: `unreadable_kind_of` = samo `isinstance(exc, OSError)` → asercja FITS
-    czerwienieje; usuń `error_kind = unreadable_kind_of(exc)` ze `scan_file` → obie."""
+    Falsyfikator: usuń w `scan_file` podniesienie `error_kind = "parse"` po haszu → asercja FITS
+    czerwienieje; `unreadable_kind_of` = samo `isinstance(exc, OSError)` → też; usuń
+    `error_kind = unreadable_kind_of(exc)` ze `scan_file` → obie."""
     zly_fits = tmp_path / "zly.fits"
     zly_fits.write_bytes(b"NOTFITS!" + b"\x00" * 2872)
     rec = scan_file(str(zly_fits))
@@ -1613,9 +1659,13 @@ def test_scan_tree_znana_kopia_zepsuty_naglowek_rodzaj_parse_w_kolumnach(tmp_pat
 def test_backstop_rodzaj_z_obiektu_wyjatku(tmp_path, monkeypatch):
     """P4-2: backstop `scan_tree` (hasze poza try W1 → otwarcie pliku pada błędem systemu)
     klasyfikuje wyjątek WPROST i klinga zapisuje `unreadable_kind='io'` + diagnozę w kolumnach.
+    Bliźniak z KODEM SYSTEMU testu `test_backstop_znana_sciezka_open_failure_marker` (tam goły
+    `OSError` → rodzaj NULL). Diagnoza backstopu idzie przez `unreadable_reason_of`, więc nie
+    powtarza ścieżki, którą `str()` wyjątku doklejał (F6).
 
     Falsyfikator: zamień `unreadable_kind_of(exc)` w backstopie na stałą `'parse'` → asercja
-    rodzaju czerwienieje."""
+    rodzaju czerwienieje; wróć w backstopie do `f"{type(blad).__name__}: {blad}"` → ścieżka
+    wraca do powodu i asercja równości czerwienieje."""
     import errno
     con = _db(tmp_path)
     tree = tmp_path / "t"; tree.mkdir()
@@ -1629,7 +1679,7 @@ def test_backstop_rodzaj_z_obiektu_wyjatku(tmp_path, monkeypatch):
     assert s.frame_review == 1
     since, kind, reason = _stan_markera(con)
     assert (since, kind) == ("2027-01-01T00:00:00+00:00", "io")
-    assert reason.startswith("PermissionError: ")
+    assert reason == f"PermissionError: [Errno {errno.EACCES}] Permission denied"
     con.close()
 
 
@@ -1637,11 +1687,14 @@ def test_backstop_wyjatek_ZAPISU_nie_jest_faktem_o_pliku(tmp_path, monkeypatch):
     """P4-2/Z2: backstop rozdziela ODCZYT i ZAPIS. Dwie znane kopie w jednym przebiegu:
     `a.fits` - `scan_file` pada błędem systemu (errno 13) → `'io'`, jak dotąd; `b.fits` - plik
     przeczytany, a `ingest_record` rzuca `RuntimeError` (bug u nas) → marker stoi (wymusza ponowny
-    zapis przez bramę), ale rodzaj zostaje NULL, a powód niesie „RuntimeError". Z jednym `try`
-    `b.fits` dostawało `'parse'`, czyli „nagłówek nie przechodzi parsera" o zdrowym pliku.
+    zapis przez bramę), rodzaj to `'db'` (fakt o NAS, nie o pliku), a powód niesie „RuntimeError".
+    Z jednym `try` `b.fits` dostawało `'parse'`, czyli „nagłówek nie przechodzi parsera" o zdrowym
+    pliku. `RuntimeError`, a nie `sqlite3.Error`, bo blok zapisu daje `'db'` ZAWSZE - bez
+    klasyfikatora, który dla wyjątku spoza bazy powiedziałby `'parse'`.
 
     Falsyfikator: scal oba bloki `try` w backstopie z powrotem w jeden (albo klasyfikuj wyjątek
-    zapisu przez `unreadable_kind_of`) → `b.fits` dostaje `'parse'` i asercja rodzaju czerwienieje."""
+    zapisu przez `unreadable_kind_of`) → `b.fits` dostaje `'parse'` i asercja rodzaju czerwienieje;
+    zostaw blokowi zapisu rodzaj `None` → też."""
     import errno
     con = _db(tmp_path)
     tree = tmp_path / "t"; tree.mkdir()
@@ -1669,9 +1722,51 @@ def test_backstop_wyjatek_ZAPISU_nie_jest_faktem_o_pliku(tmp_path, monkeypatch):
     since_b, kind_b, reason_b = stan[str(fb)]
     assert (since_a, kind_a) == ("2027-01-01T00:00:00+00:00", "io")
     assert reason_a.startswith("PermissionError: ")
-    assert (since_b, kind_b) == ("2027-01-01T00:00:00+00:00", None)   # rodzaj NIEZNANY, nie 'parse'
+    assert (since_b, kind_b) == ("2027-01-01T00:00:00+00:00", "db")   # fakt o NAS, nie 'parse'
     assert reason_b == "RuntimeError: bug w ingest"
     con.close()
+
+
+def test_backstop_blad_bazy_na_BRAMIE_to_rodzaj_db(tmp_path, monkeypatch):
+    """P4-2, droga (c): brama przyrostowa (`_already_scanned`) siedzi w bloku ODCZYTU backstopu,
+    więc jej `sqlite3.OperationalError` („database is locked") idzie przez klasyfikator. Błąd bazy
+    nie jest faktem o pliku - rodzaj `'db'`, a nie `'parse'`, który posłałby usera zgłaszać zdrowy
+    plik. Marker stoi, bo wymusza re-odczyt przy następnym skanie.
+
+    Falsyfikator: zdejmij gałąź `sqlite3.Error` z `unreadable_kind_of` → rodzaj `'parse'`
+    i asercja czerwienieje."""
+    import sqlite3
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    _light(tree / "l.fits", 1)
+    scan_tree(con, tree, volume="VOL1", now=NOW)
+
+    def brama_pada(*a, **kw):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr("horreum.scan._already_scanned", brama_pada)
+    s = scan_tree(con, tree, volume="VOL1", now="2027-01-01T00:00:00+00:00")   # brama ON
+    assert s.frame_review == 1
+    since, kind, reason = _stan_markera(con)
+    assert (since, kind) == ("2027-01-01T00:00:00+00:00", "db")
+    assert reason == "OperationalError: database is locked"
+    con.close()
+
+
+def test_diagnoza_OSError_z_kodem_systemu_nie_powtarza_sciezki():
+    """F6 (P4-2): `unreadable_reason_of` - jedyny właściciel tekstu diagnozy - dla `OSError`
+    Z KODEM SYSTEMU składa kod i opis BEZ nazwy pliku, którą dokleja `str()` wyjątku. Ścieżkę
+    niosą kolumna „Ścieżka", payload zdarzenia i tooltip; powtórzona w powodzie rozpychała komórkę
+    „Powód" poza panel (firsthand na kopii pf4: 150 znaków, 963 px w panelu 571 px). Reszta
+    wyjątków bez zmian - komunikat parsera bywa jedynym opisem odmowy.
+
+    Falsyfikator: wróć w `unreadable_reason_of` do samego `f"{type(exc).__name__}: {exc}"` →
+    pierwsza asercja dostaje „…: '/x/y.fits'" i czerwienieje."""
+    reason_of = scan_module.unreadable_reason_of
+    assert (reason_of(PermissionError(13, "Permission denied", "/x/y.fits"))
+            == "PermissionError: [Errno 13] Permission denied")
+    assert reason_of(ValueError("zły nagłówek")) == "ValueError: zły nagłówek"
+    assert (reason_of(OSError("Header missing END card."))           # bez kodu: jak dotąd
+            == "OSError: Header missing END card.")
 
 
 # ---------------------------------------------------------------------------------------------------

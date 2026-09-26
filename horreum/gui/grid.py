@@ -396,7 +396,7 @@ def zdanie_pominiec(gest, *, nothing_key="grid.sel.object_skip_nothing"):
 
     CZASOWNIK CZŁONU „nothing" NALEŻY DO GESTU, NIE DO CZŁONU (FC-6) - dlatego `nothing_key`:
     „nie było czego cofać" przy przywracaniu kłamałoby o kierunku zapisu. Pozostałe człony (rodzaj,
-    źródło, pamięć, dryf) są neutralne wobec kierunku, więc zostają wspólne.
+    źródło, pamięć, dryf, odmowa klingi) są neutralne wobec kierunku, więc zostają wspólne.
 
     Gotowe obrazy NIE stoją w pętli pominięć (D-OW-7): od chwili, gdy stos jest w zasięgu gestów,
     ta liczba mówi o tym, co gest ZROBIŁ, a nie czego nie tknął - „nazwano 30 · w tym gotowe
@@ -3246,11 +3246,12 @@ class FramesView(QWidget):
                     except ValueError as e:  # dryf do nieistniejącej klatki / konflikt aliasu
                         QMessageBox.warning(self, i18n.t("grid.sel.object_restore"), str(e))
                         # Grupa, która padła, wycofała się w całości (`_immediate`), a grupy po
-                        # niej do klingi nie doszły - ich klatki liczą się jako DRYF (stan inny,
-                        # niż widział read-model), bo inaczej nie liczyłyby się nigdzie i „z M"
-                        # znów kłamałoby o zaznaczeniu.
+                        # niej do klingi nie doszły - ich klatki liczą się jako ODMOWA KLINGI
+                        # (`skipped_failed`), bo inaczej nie liczyłyby się nigdzie i „z M" znów
+                        # kłamałoby o zaznaczeniu. Nie jako dryf: konflikt aliasu nie znaczy, że
+                        # stan się zmienił, a „zmieniły się w międzyczasie" mówiłoby właśnie to.
                         gest += repo.ObjectGesture(
-                            skipped_drift=sum(len(r["frame_ids"]) for r in grupy[i:]))
+                            skipped_failed=sum(len(r["frame_ids"]) for r in grupy[i:]))
                         break
                     faza.say(i18n.t("busy.restoring", done=i + 1, total=len(grupy)))
         self._po_gescie_osi(

@@ -216,6 +216,8 @@ CATALOG = {
     "copy.reason_io": {"pl": "dysk/dostęp: {reason}", "en": "disk/access: {reason}"},
     "copy.reason_parse": {"pl": "nagłówek nie przechodzi parsera: {reason}",
                           "en": "header fails the parser: {reason}"},
+    # P4-2: trzeci rodzaj nie jest faktem o pliku - zawiódł zapis albo brama po naszej stronie.
+    "copy.reason_db": {"pl": "baza danych: {reason}", "en": "database: {reason}"},
     "filter.telescope": {"pl": "Teleskop:", "en": "Telescope:"},
     "filter.filter": {"pl": "Filtr:", "en": "Filter:"},
     "filter.all": {"pl": "(wszystkie)", "en": "(all)"},
@@ -502,10 +504,13 @@ CATALOG = {
         "en": "No copy is marked unreadable — there is nothing to show."},
     # P4-2: rozbicie kubełka po RODZAJU awarii. Jednostką są KOPIE (nie klatki jak w liczniku
     # wiersza) i fraza mówi to wprost, bo tylko liczba kopii sumuje się do drążenia - klatka
-    # z dwiema kopiami może mieć dwa rodzaje. „Rodzaj nieznany" = kopie oznaczone przed 0019.
+    # z dwiema kopiami może mieć dwa rodzaje. „Baza" = błąd bazy po naszej stronie, nie fakt
+    # o pliku. „Rodzaj nieznany" = kopie oznaczone przed 0019 albo wyjątek bez kodu systemu,
+    # którego nie dało się rozstrzygnąć.
     "object.unreadable_kinds": {"pl": "kopie: {parts}", "en": "copies: {parts}"},
     "object.unreadable_kind_io": {"pl": "dysk/dostęp {n}", "en": "disk/access {n}"},
     "object.unreadable_kind_parse": {"pl": "nagłówek {n}", "en": "header {n}"},
+    "object.unreadable_kind_db": {"pl": "baza {n}", "en": "database {n}"},
     "object.unreadable_kind_unknown": {"pl": "rodzaj nieznany {n}", "en": "kind unknown {n}"},
     "object.path_proposed_broken_info": {
         "pl": "Propozycji ze ścieżki NIE POLICZONO, bo słownik obiektów własnych "
@@ -585,14 +590,16 @@ CATALOG = {
         "en": "This bucket already has a proposed name — the way is “Confirm from path…”, "
               "not header repair."},
     # P4-2: dawne „odzyskaj plik" OSKARŻAŁO plik także wtedy, gdy zawiódł dysk albo dostęp. Zdanie
-    # kieruje do kolumny „Powód" i nazywa obie sytuacje - każda ma inną drogę naprawy.
+    # kieruje do kolumny „Powód" i nazywa wszystkie trzy sytuacje - każda ma inną drogę naprawy.
     "repair.tip_unreadable": {
         "pl": "Tych kopii nie przeczytano, więc nie ma do czego dopisać karty. Kolumna „Powód” "
               "mówi, dlaczego: „dysk/dostęp” - plik może być zdrowy, sprawdź wolumin i uprawnienia; "
-              "„nagłówek nie przechodzi parsera” - plik jest do zgłoszenia albo naprawy.",
+              "„nagłówek nie przechodzi parsera” - plik jest do zgłoszenia albo naprawy; "
+              "„baza danych” - błąd po naszej stronie, powtórz skan, a jeśli wraca - zgłoś go.",
         "en": "These copies were not read, so there is nothing to add a card to. The “Reason” "
               "column says why: “disk/access” - the file may be healthy, check the volume and "
-              "permissions; “header fails the parser” - the file needs reporting or repair."},
+              "permissions; “header fails the parser” - the file needs reporting or repair; "
+              "“database” - an error on our side, repeat the scan and report it if it comes back."},
     "repair.tip_busy": {
         "pl": "Druga powierzchnia właśnie pisze do plików — poczekaj na jej koniec.",
         "en": "Another surface is writing to files right now — wait for it to finish."},
@@ -1443,6 +1450,11 @@ CATALOG = {
                                        "en": " · without a remembered object: {n}"},
     "grid.sel.object_skip_drift": {"pl": " · zmieniły się w międzyczasie: {n}",
                                    "en": " · changed meanwhile: {n}"},
+    # Osobno od `_drift`: klinga ODMÓWIŁA (`ValueError` - konflikt aliasu, klatka spoza bazy), więc
+    # „zmieniły się w międzyczasie" kłamałoby o stanie, który się nie ruszył. Człon liczy transakcję,
+    # która padła, i te, do których gest już nie doszedł - żadna z nich nie jest zapisana.
+    "grid.sel.object_skip_failed": {"pl": " · nie zapisano, klinga odmówiła: {n}",
+                                    "en": " · not written, the blade refused: {n}"},
     # NIE pominięcie, tylko skład tego, co zapisano (D-OW-7) — „w tym", nie „poza tym". Gotowy
     # obraz jest jedyną klatką, przy której zapis osi sięga rodowodu, więc user ma prawo wiedzieć,
     # że go dotknął. Dawne brzmienie („· gotowe obrazy: N" wśród pominięć) po odwróceniu decyzji

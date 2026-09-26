@@ -20,7 +20,7 @@ from horreum import db, repo, resolver
 from horreum.gui import i18n, queries
 from horreum.gui.app import (
     AssignObjectDialog, ConfirmPathObjectsDialog, ObjectAxisView, COPY_COL_PATH, COPY_COL_REASON,
-    FRAME_COL_PATH, OBJ_COL_CANON, OBJ_COL_FRAMES)
+    COPY_PATH_MAX_PX, FRAME_COL_PATH, OBJ_COL_CANON, OBJ_COL_FRAMES)
 
 from fixture_s8 import seed_object_axis
 
@@ -647,14 +647,27 @@ def test_przypisanie_zmniejsza_kolejke_i_zapisuje_user(view):
 
 def test_kopie_nieczytelne_drazenie_do_dokladnych_kopii(view, qapp):
     """Z6: klik pozycji „kopie nieczytelne" → prawy panel w trybie „kopie" (COPY_HEADERS, dokładne
-    location z markerem); wybór obiektu przywraca tabelę klatek (tryb kopii znika, D-P4-5)."""
+    location z markerem); wybór obiektu przywraca tabelę klatek (tryb kopii znika, D-P4-5).
+
+    P4-2 (F6): bramka dopasowania karmiona powodem o REALNEJ długości. Firsthand 2026-09-26 na
+    kopii pf4: 150-znakowy powód (`PermissionError` z pełną ścieżką - takie wiersze zostają
+    w bazach oznaczonych przed naprawą u źródła) przy `ResizeToContents` dawał „Powodowi" 963 px
+    w panelu 571 px, a „Ścieżka" ze `Stretch` spadała do 86 px. Siedmioznakowe „OSError" tego nie
+    widziało.
+
+    Falsyfikator: wróć `Stretch` na „Ścieżkę", a „Powodowi" daj `ResizeToContents` → asercje
+    trybów i szerokości ścieżki czerwienieją; zdejmij sufit → ścieżka przekracza
+    `COPY_PATH_MAX_PX` i „Powód" wypada za prawą krawędź; zdejmij zdjęcie sufitu
+    w `_restore_frames_mode` → tryb klatek dziedziczy sufit i ostatnia asercja czerwienieje."""
     v, con, ids = view
     loc = con.execute("SELECT id FROM location WHERE volume = 'vol2'").fetchone()
     long_path = "/backup/" + "/".join(["bardzo-dlugi-segment"] * 20) + "/a1.fits"
+    powod = f"PermissionError: [Errno 13] Permission denied: '{long_path}'"
+    assert len(powod) >= 120
     with con:
         con.execute("UPDATE location SET path = ? WHERE id = ?", (long_path, loc["id"]))
     repo.refresh_location_unreadable(con, location_id=loc["id"], sha1_data="sha-a1",
-                                     path=long_path, mtime="t2", reason="OSError", kind="io",
+                                     path=long_path, mtime="t2", reason=powod, kind="io",
                                      now="2026-07-21T12:00:00")
     v.refresh()
     r = _select_review_tag(v, "unreadable")
@@ -667,12 +680,12 @@ def test_kopie_nieczytelne_drazenie_do_dokladnych_kopii(view, qapp):
     assert v.frames.rowCount() == 1
     assert v.frames.item(0, 0).text() == long_path           # dokładna location w komórce
     assert v.frames.item(0, 0).toolTip() == long_path
-    # Ścieżka bierze resztę i elidować się jej wolno; „Powód" MUSI zmieścić się w panelu (firsthand
-    # 2026-08-01 na żywej pf4: przy `ResizeToContents` 100-znakowa ścieżka wypychała diagnozę poza
-    # prawą krawędź — kolumna, dla której powstał cały Z6, była nie do przeczytania bez scrolla).
+    # „Powód" bierze RESZTĘ, „Ścieżka" treść z sufitem, a „Powód" MUSI zmieścić się w panelu
+    # (firsthand 2026-08-01 na żywej pf4: przy `ResizeToContents` 100-znakowa ścieżka wypychała
+    # diagnozę poza prawą krawędź; firsthand 2026-09-26: 150-znakowy powód zgniatał ścieżkę).
     hh = v.frames.horizontalHeader()
-    assert hh.sectionResizeMode(COPY_COL_PATH) == QHeaderView.Stretch
-    assert hh.sectionResizeMode(COPY_COL_REASON) == QHeaderView.ResizeToContents
+    assert hh.sectionResizeMode(COPY_COL_REASON) == QHeaderView.Stretch
+    assert hh.sectionResizeMode(COPY_COL_PATH) == QHeaderView.ResizeToContents
     # Zawijanie WYŁĄCZONE — inaczej elizja ścieżki (jedno słowo, zero spacji) tnie ją do „R:..."
     # niezależnie od szerokości sekcji i kolumna jest równie nieczytelna, co przed zmianą.
     assert not v.frames.wordWrap()
@@ -682,18 +695,19 @@ def test_kopie_nieczytelne_drazenie_do_dokladnych_kopii(view, qapp):
     qapp.processEvents()
     assert (hh.sectionPosition(COPY_COL_REASON) + hh.sectionSize(COPY_COL_REASON)
             <= v.frames.viewport().width())
+    assert 120 <= hh.sectionSize(COPY_COL_PATH) <= COPY_PATH_MAX_PX   # ścieżka nie jest zgnieciona
     assert v.frames.item(0, 1).text() == "vol2"
     assert v.frames.item(0, 2).text() == "tak"               # kopia nadal obecna
     # Powód ze STANU kopii (Z6, P4-2): rodzaj PRZED diagnozą, tooltip = diagnoza dosłowna
-    assert v.frames.item(0, 4).text() == "dysk/dostęp: OSError"
-    assert v.frames.item(0, 4).toolTip() == "OSError"
+    assert v.frames.item(0, 4).text() == f"dysk/dostęp: {powod}"
+    assert v.frames.item(0, 4).toolTip() == powod
     assert v.frames_label.text() == "Kopie nieczytelne (1)"
     # kopia przemianowana po awarii NIE gubi powodu (P4-2 - defekt dawnego źródła w dzienniku)
     with con:
         con.execute("UPDATE location SET path = ? WHERE id = ?", ("/backup/a1-NOWA.fits", loc["id"]))
     v.refresh()
     _select_review_tag(v, "unreadable")
-    assert v.frames.item(0, 4).text() == "dysk/dostęp: OSError"
+    assert v.frames.item(0, 4).text() == f"dysk/dostęp: {powod}"
     # wiersz sprzed 0019 (marker bez rodzaju i powodu) → myślnik `copy.no_reason`, nie pustka:
     # „nie wiem, dlaczego" jest faktem, a pusta komórka czyta się jak brak danych w kolumnie
     with con:
@@ -708,26 +722,42 @@ def test_kopie_nieczytelne_drazenie_do_dokladnych_kopii(view, qapp):
     hdrs = [v.frames.horizontalHeaderItem(c).text() for c in range(v.frames.columnCount())]
     assert hdrs == ["sha1 danych", "Teleskop", "Kamera", "Filtr", "Data", "Obecny", "Ścieżka"]
     assert v.frames.rowCount() == 5
+    assert hh.maximumSectionSize() > COPY_PATH_MAX_PX       # sufit trybu „kopie" nie przecieka
 
 
-def test_komorka_powod_mowi_KTORA_to_sytuacja_PL_i_EN():
+@pytest.mark.parametrize("lang", ["pl", "en"])
+@pytest.mark.parametrize("kind, reason, klucz", [
+    ("io", "OSError: [Errno 5] Input/output error", "copy.reason_io"),
+    ("parse", "ParseError: line 4", "copy.reason_parse"),
+    ("db", "OperationalError: database is locked", "copy.reason_db"),
+    (None, "ParseError: line 4", None),          # rodzaj nieznany → sama diagnoza
+    (None, None, None),                          # nic nie wiadomo → myślnik
+    ("io", None, "copy.reason_io"),              # rodzaj bez diagnozy → myślnik w miejscu opisu
+], ids=["io", "parse", "db", "bez_rodzaju", "bez_niczego", "rodzaj_bez_diagnozy"])
+def test_komorka_powod_mowi_KTORA_to_sytuacja_PL_i_EN(kind, reason, klucz, lang):
     """P4-2: `_copy_reason` - jedyny właściciel komórki „Powód" - stawia RODZAJ przed diagnozą, bo
     to on mówi, gdzie szukać winy (dysk/dostęp → plik może być zdrowy; parser → plik do
-    zgłoszenia). Brak rodzaju (wiersz sprzed 0019) → sama diagnoza; brak obu → myślnik; rodzaj bez
-    diagnozy nie znika. Oba języki z katalogu.
+    zgłoszenia; baza danych → błąd po naszej stronie). Brak rodzaju (rodzaj nieznany: wiersz sprzed
+    0019 albo wyjątek bez kodu systemu) → sama diagnoza; brak obu → myślnik; rodzaj bez diagnozy
+    nie znika.
 
-    Falsyfikator: wróć do `_copy_reason(raw)` bez rodzaju → komórka mówi samo „OSError" i dwie
-    pierwsze asercje czerwienieją."""
+    Każda gałąź w OBU językach, a oczekiwany tekst idzie z WPISU katalogu dla tego języka
+    (`CATALOG[klucz][lang]`), nie z literału i nie przez `i18n.t`: ten spada na PL, gdy wpisu EN
+    brak, więc porównanie z nim byłoby zielone dokładnie wtedy, gdy EN jest dziurawy. Do tej
+    poprawki EN sprawdzał tylko `io` i `parse`.
+
+    Falsyfikator: zdejmij `en` z `copy.no_reason` albo `copy.reason_db` → odpowiedni wariant EN
+    czerwienieje (`KeyError` na wpisie); wróć do `_copy_reason(raw)` bez rodzaju → komórka mówi
+    samą diagnozę i warianty z kluczem czerwienieją; zdejmij gałąź `'db'` → wariant `db` dostaje
+    samą diagnozę."""
     from horreum.gui.app import _copy_reason
-    assert _copy_reason("io", "OSError: [Errno 5]") == "dysk/dostęp: OSError: [Errno 5]"
-    assert (_copy_reason("parse", "ParseError: line 4")
-            == "nagłówek nie przechodzi parsera: ParseError: line 4")
-    assert _copy_reason(None, "ParseError: line 4") == "ParseError: line 4"
-    assert _copy_reason(None, None) == i18n.t("copy.no_reason")
-    assert _copy_reason("io", None) == f"dysk/dostęp: {i18n.t('copy.no_reason')}"
-    i18n.set_lang("en")
-    assert _copy_reason("io", "OSError") == "disk/access: OSError"
-    assert _copy_reason("parse", "ParseError") == "header fails the parser: ParseError"
+    from horreum.gui.i18n_catalog import CATALOG
+    i18n.set_lang(lang)
+    diagnoza = reason if reason is not None else CATALOG["copy.no_reason"][lang]
+    oczekiwane = CATALOG[klucz][lang].format(reason=diagnoza) if klucz else diagnoza
+    if klucz:                                  # etykieta rodzaju naprawdę stoi przed diagnozą
+        assert oczekiwane.endswith(diagnoza) and oczekiwane != diagnoza
+    assert _copy_reason(kind, reason) == oczekiwane
 
 
 def test_wiersz_kopii_nieczytelnych_podpowiada_rozbicie_po_rodzaju(view):
@@ -754,6 +784,25 @@ def test_wiersz_kopii_nieczytelnych_podpowiada_rozbicie_po_rodzaju(view):
     r = _select_review_tag(v, "unreadable")
     assert v.review.item(r).toolTip() == "kopie: dysk/dostęp 1 · nagłówek 1"
     assert v.review.item(r).data(SECONDARY).startswith("1")      # licznik wiersza = KLATKI
+
+
+def test_podpowiedz_kopii_nieczytelnych_liczy_blad_bazy_OSOBNO(view):
+    """P4-2 (F1): błąd bazy po naszej stronie (`'db'`) ma własny człon podpowiedzi, pokazywany jak
+    „rodzaj nieznany" tylko przy liczbie > 0. Wpadnięcie do rodzajów plikowych kazałoby szukać winy
+    w pliku, a do „nieznanego" - ukryłoby, że wiadomo, co zawiodło.
+
+    Falsyfikator: zdejmij człon `'db'` z `_unreadable_kinds_tip` → podpowiedź nie ma „baza 1"
+    i asercja czerwienieje."""
+    v, con, ids = view
+    loc = con.execute("SELECT id, path FROM location WHERE frame_id = ? ORDER BY id",
+                      (ids["frames"]["a1"],)).fetchone()
+    repo.refresh_location_unreadable(con, location_id=loc["id"], sha1_data="sha-a1",
+                                     path=loc["path"], mtime="t2",
+                                     reason="OperationalError: database is locked", kind="db",
+                                     now="2026-07-21T12:00:00")
+    v._load_review()
+    r = _select_review_tag(v, "unreadable")
+    assert v.review.item(r).toolTip() == "kopie: dysk/dostęp 0 · nagłówek 0 · baza 1"
 
 
 # --- i18n: EN renderuje z katalogu (§4 rollout `app`) ---
@@ -2024,16 +2073,21 @@ def test_zatwierdzenie_ze_sciezki_mowi_ROZBICIEM_per_fakt(sciezka):
     assert dlg.assigned == 2 and dlg.result() == QDialog.Accepted
 
 
-def test_zatwierdzenie_po_BLEDZIE_pozycji_liczy_reszte_jako_dryf(sciezka, monkeypatch):
+def test_zatwierdzenie_po_BLEDZIE_pozycji_liczy_reszte_jako_odmowe_klingi(sciezka, monkeypatch):
     """R-S2b-13, drugi człon: po `break` na `ValueError` klatki pozycji, która padła, i pozycji
     po niej nie liczyły się nigdzie - „z M" mówiło o samych pozycjach zapisanych. Pozycja, która
-    padła, wycofała się w całości (`_immediate`), a dalsze do klingi nie doszły: stan jest inny,
-    niż widziało okno, więc to DRYF - ta sama reguła, co przy przywracaniu w Zbiorach.
+    padła, wycofała się w całości (`_immediate`), a dalsze do klingi nie doszły - ta sama reguła,
+    co przy przywracaniu w Zbiorach.
 
-    Trzy pozycje (2 + 1 + 1 klatka), klinga pada na DRUGIEJ: pierwsza zapisana, dryf 2,
+    Bramka pakietu: do tej poprawki ta bramka pinowała je jako DRYF („zmieniły się
+    w międzyczasie"), a klinga pada tu na KONFLIKCIE ALIASU - nic się nie zmieniło, klinga
+    odmówiła. Liczą się więc jako `skipped_failed` („nie zapisano, klinga odmówiła").
+
+    Trzy pozycje (2 + 1 + 1 klatka), klinga pada na DRUGIEJ: pierwsza zapisana, odmowa 2,
     a `assigned + skipped` równa się liczbie klatek zaznaczonych pozycji.
 
-    Falsyfikator: zdejmij doliczenie `skipped_drift` przed `break` → „2 z 2" zamiast „2 z 4"."""
+    Falsyfikator: zdejmij doliczenie przed `break` → „2 z 2" zamiast „2 z 4"; dolicz resztę
+    z powrotem do `skipped_drift` → zdanie kończy się dryfem i asercja końcówki czerwienieje."""
     v, con = sciezka
     lmc = next(p for p in resolver.path_proposals(con) if p.canon == "LMC")
     pozycje = [_pozycja(lmc, "LMC", (1, 2)), _pozycja(lmc, "NGC6960", (3,)),
@@ -2054,7 +2108,7 @@ def test_zatwierdzenie_po_BLEDZIE_pozycji_liczy_reszte_jako_dryf(sciezka, monkey
     assert wolania == ["LMC", "NGC6960"], "po błędzie klinga nie ma prawa pisać dalej"
     razem = sum(p.n_frames for p in pozycje)
     assert dlg.status.text().endswith(
-        f"przypisano 2 z {razem} klatek · zmieniły się w międzyczasie: 2"), dlg.status.text()
+        f"przypisano 2 z {razem} klatek · nie zapisano, klinga odmówiła: 2"), dlg.status.text()
     assert dlg.assigned == 2
     assert "konflikt" in dlg.error.text() and dlg.result() != QDialog.Accepted
     zapisane = con.execute("SELECT id FROM frame WHERE object_id IS NOT NULL ORDER BY id")

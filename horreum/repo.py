@@ -790,10 +790,11 @@ def refresh_location_unreadable(con, *, location_id, sha1_data, path, mtime, rea
     z markerem, czyli w hybrydzie zakazanej przez inwariant `present=0 ⇒ unreadable_since IS NULL`.
 
     RODZAJ I POWÓD (P4-2): `kind` (`'io'` - system nie oddał bajtów, `'parse'` - bajty przyszły, parser
-    nagłówka odmówił) i `reason` („Typ: opis") idą do kolumn `unreadable_kind`/`unreadable_reason`,
-    żeby powierzchnia umiała powiedzieć, KTÓRA to sytuacja, zamiast oskarżać plik. Klasyfikuje
-    wołający, w miejscu, gdzie żyje obiekt wyjątku (`scan.unreadable_kind_of`) - tu nie ma czego
-    zgadywać z tekstu. `kind=None` jest legalne (rodzaj nieznany, jak w wierszach sprzed 0019).
+    nagłówka odmówił, `'db'` - błąd bazy po naszej stronie) i `reason` („Typ: opis") idą do kolumn
+    `unreadable_kind`/`unreadable_reason`, żeby powierzchnia umiała powiedzieć, KTÓRA to sytuacja,
+    zamiast oskarżać plik. Klasyfikuje wołający, w miejscu, gdzie żyje obiekt wyjątku
+    (`scan.unreadable_kind_of`) - tu nie ma czego zgadywać z tekstu. `kind=None` jest legalne: rodzaj
+    nieznany - wiersz sprzed 0019 ALBO wyjątek bez kodu systemu, którego nie dało się rozstrzygnąć.
     ASYMETRIA CZASU, świadoma: marker trzyma PIERWSZĄ awarię, a rodzaj i powód opisują OSTATNIĄ próbę.
     Marker znaczy „kopia JEST nieczytelna" - bieżący fakt - więc przyczyna ma być bieżąca: przyczyna
     sprzed tygodnia przy dzisiejszym timeoucie SMB odesłałaby usera do złego winnego.
@@ -1495,6 +1496,13 @@ class ObjectGesture:
                                # ręką nic tu się nie naprawi. Liczy go wyłącznie przywracanie
                                # (`queries.restore_targets`); klingi zostawiają go na zerze
     skipped_drift: int = 0     # stan inny niż oczekiwany w chwili zapisu (TOCTOU)
+    skipped_failed: int = 0    # NIE ZAPISANO, BO KLINGA ODMÓWIŁA (`ValueError`: konflikt aliasu,
+                               # klatka spoza bazy) - osobno od `skipped_drift`, bo odmowa nie
+                               # znaczy, że stan się zmienił: przy konflikcie aliasu nic się nie
+                               # ruszyło. Liczy go wyłącznie WOŁAJĄCY gestu wielotransakcyjnego
+                               # (przywracanie w Zbiorach, zatwierdzanie ze ścieżki): transakcja,
+                               # która padła, i te, do których pętla już nie doszła; klingi
+                               # zostawiają go na zerze
     stacks: int = 0            # …z ZAPISANYCH: ile było gotowych obrazów. NIE jest pominięciem
                                # (D-OW-7: stos jest w zasięgu OBU gestów) i dlatego stoi POZA sumą
                                # `skipped` — to informacja o tym, co gest ruszył, a nie o tym, czego
@@ -1535,6 +1543,7 @@ class ObjectGesture:
             skipped_nothing=self.skipped_nothing + inny.skipped_nothing,
             skipped_no_memory=self.skipped_no_memory + inny.skipped_no_memory,
             skipped_drift=self.skipped_drift + inny.skipped_drift,
+            skipped_failed=self.skipped_failed + inny.skipped_failed,
             stacks=self.stacks + inny.stacks,
             canons=tuple(kanony))
 
@@ -1546,7 +1555,7 @@ class ObjectGesture:
         powtarzać wyliczankę: czwarty człon (`skipped_nothing`) dołożony w S3 wszedłby inaczej
         do „z M", a nie do rozbicia — czyli zniknąłby dokładnie tam, gdzie ma tłumaczyć."""
         return (self.skipped_kind + self.skipped_source + self.skipped_nothing
-                + self.skipped_no_memory + self.skipped_drift)
+                + self.skipped_no_memory + self.skipped_drift + self.skipped_failed)
 
     @property
     def skipped_breakdown(self):
@@ -1555,7 +1564,7 @@ class ObjectGesture:
         GUI powtarzało tę listę literałem, więc każdy nowy człon wpadał do sumy, a z ekranu znikał."""
         return [("kind", self.skipped_kind), ("source", self.skipped_source),
                 ("nothing", self.skipped_nothing), ("no_memory", self.skipped_no_memory),
-                ("drift", self.skipped_drift)]
+                ("drift", self.skipped_drift), ("failed", self.skipped_failed)]
 
 
 def user_assign_object(con, *, alias_norm, canon, catalog, kind, frame_ids, now, uid="local",

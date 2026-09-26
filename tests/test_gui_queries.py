@@ -436,12 +436,15 @@ def test_unreadable_kind_counts_po_kopiach_sumuje_sie_do_drazenia(s8_obj):
     """P4-2: rozbicie kubełka po rodzaju liczy KOPIE - klatka `a1` z dwiema kopiami o RÓŻNYCH
     rodzajach wchodzi do obu przegródek, a suma równa się długości drążenia (`unreadable_copies`),
     czyli temu, co user zobaczy po kliknięciu. Kopia sprzed 0019 (marker bez rodzaju) → „unknown".
-    Licznik wiersza (`unreadable_count`) zostaje przy klatkach - to inna jednostka.
+    Błąd bazy po naszej stronie (`'db'`) ma WŁASNĄ przegródkę - nie jest faktem o pliku, więc nie
+    wolno mu wpaść ani do „unknown", ani do rodzajów plikowych. Licznik wiersza
+    (`unreadable_count`) zostaje przy klatkach - to inna jednostka.
 
     Falsyfikator: licz `count(DISTINCT frame_id)` → klatka `a1` znika z jednej przegródki i suma
-    rozjeżdża się z drążeniem."""
+    rozjeżdża się z drążeniem; zdejmij `"db"` ze słownika startowego → rozbicie nie ma przegródki
+    `db` przy zerze i pierwsza asercja czerwienieje."""
     con, ids = s8_obj
-    assert queries.unreadable_kind_counts(con) == {"io": 0, "parse": 0, "unknown": 0}
+    assert queries.unreadable_kind_counts(con) == {"io": 0, "parse": 0, "db": 0, "unknown": 0}
     locs = con.execute("SELECT id, path FROM location WHERE frame_id = ? ORDER BY id",
                        (ids["frames"]["a1"],)).fetchall()
     repo.refresh_location_unreadable(con, location_id=locs[0]["id"], sha1_data="sha-a1",
@@ -454,10 +457,62 @@ def test_unreadable_kind_counts_po_kopiach_sumuje_sie_do_drazenia(s8_obj):
                        (ids["frames"]["a1"],)).fetchone()
     with con:                                                   # wiersz sprzed 0019: marker bez rodzaju
         con.execute("UPDATE location SET unreadable_since = ? WHERE id = ?", (NOW, inna["id"]))
+    a2, _ = repo.add_location(con, frame_id=ids["frames"]["a2"], volume="vol1",
+                              path="/astro/a2.fits", now=NOW)
+    repo.refresh_location_unreadable(con, location_id=a2, sha1_data="sha-a2",
+                                     path="/astro/a2.fits", mtime="t2",
+                                     reason="OperationalError: database is locked", kind="db",
+                                     now=NOW)
     counts = queries.unreadable_kind_counts(con)
-    assert counts == {"io": 1, "parse": 1, "unknown": 1}
+    assert counts == {"io": 1, "parse": 1, "db": 1, "unknown": 1}
     assert sum(counts.values()) == len(queries.unreadable_copies(con))
-    assert queries.review_queue(con)["unreadable_count"] == 2   # KLATKI: a1 + ta druga
+    assert queries.review_queue(con)["unreadable_count"] == 3   # KLATKI: a1 + a2 + ta druga
+
+
+def test_drazenie_i_rozbicie_nieczytelnych_licza_TE_SAME_klatki_co_licznik():
+    """P4-2 (bramka pakietu): licznik kubełka „kopie nieczytelne" (`resolver.review_state.unreadable`)
+    pomija klatki zastąpione i wycofane - kubełek jest listą ROBOTY, a robotę zastąpionej przejęła
+    następczyni, wycofanej zamknęła ręka (argument `G2-6d`). Drążenie (`unreadable_copies`)
+    i rozbicie po rodzaju (`unreadable_kind_counts`) muszą liczyć te same klatki, inaczej wiersz
+    mówi „1 klatka", a pod kliknięciem stoją kopie trzech. Stan jest osiągalny zwykłą drogą:
+    klatkę zastąpiono albo wycofano po zniknięciu jej kopii, plik potem wrócił, ale nie dał się
+    przeczytać - backstop skanu stawia marker, nie pytając o los klatki.
+
+    Falsyfikator: zdejmij `AND f.superseded_by IS NULL AND f.retired_at IS NULL` z
+    `unreadable_copies` → drążenie ma trzy klatki przy liczniku 1 i asercje drążenia czerwienieją;
+    to samo w `unreadable_kind_counts` → rozbicie ma `parse`/`db` i suma 3 zamiast 1."""
+    from horreum import db, resolver
+
+    con = db.open_db(":memory:")
+    root = r"R:\ASTRO_"
+    kopie = {}
+    for nazwa in ("zywa", "zastapiona", "wycofana"):
+        fid, _ = repo.upsert_frame(con, sha1_data=f"sha-{nazwa}", kind="light", filetype="fits",
+                                   camera_id=None, now=NOW)
+        path = rf"{root}\{nazwa}.fit"
+        lid, _ = repo.add_location(con, frame_id=fid, volume="TESTVOL", path=path, now=NOW)
+        kopie[nazwa] = (fid, lid, path)
+    nastepczyni, _ = repo.upsert_frame(con, sha1_data="sha-nastepczyni", kind="light",
+                                       filetype="fits", camera_id=None, now=NOW)
+    for nazwa in ("zastapiona", "wycofana"):                   # kopia znika - dopiero wtedy
+        _fid, lid, path = kopie[nazwa]                          # klingi przyjmują klatkę
+        repo.mark_location_vanished(con, location_id=lid, expected_path=path, root=root,
+                                    run_id="p4-2", now=NOW)
+    assert repo.mark_superseded(con, frame_id=kopie["zastapiona"][0], superseded_by=nastepczyni,
+                                now=NOW) is True
+    assert repo.retire_frames(con, frame_ids=[kopie["wycofana"][0]], now=NOW).done == 1
+    for nazwa, kind in (("zywa", "io"), ("zastapiona", "parse"), ("wycofana", "db")):
+        _fid, lid, path = kopie[nazwa]                          # plik wrócił nieczytelny
+        repo.refresh_location_unreadable(con, location_id=lid, sha1_data=f"sha-{nazwa}",
+                                         path=path, mtime="t2", reason="X: y", kind=kind, now=NOW)
+
+    wiersze = queries.unreadable_copies(con)
+    assert {r["frame_id"] for r in wiersze} == {kopie["zywa"][0]}
+    assert resolver.review_state(con).unreadable == len({r["frame_id"] for r in wiersze}) == 1
+    counts = queries.unreadable_kind_counts(con)
+    assert counts == {"io": 1, "parse": 0, "db": 0, "unknown": 0}
+    assert sum(counts.values()) == len(wiersze)
+    con.close()
 
 
 # --- telescope_label: JEDEN właściciel reguły label→canon (P-B) ---

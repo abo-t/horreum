@@ -25,6 +25,9 @@ REGUŁA CZYTANIA LICZNIKÓW: `ObjectGesture` rozbija pominięcia PER FAKT. Test,
 `skipped`, przechodzi także wtedy, gdy klinga pominęła klatkę z ZUPEŁNIE innego powodu — dlatego
 każdy człon niżej pyta o konkretne pole.
 """
+import dataclasses
+import re
+
 import pytest
 
 from horreum import db, repo, resolver
@@ -254,9 +257,10 @@ def test_cofniecie_ROZROZNIA_brak_obiektu_od_faktu_z_pliku():
     assert (g.assigned, g.skipped_source, g.skipped_nothing) == (1, 1, 1)
     assert g.skipped == 2                                # suma zna OBA człony
     # Pełna lista pinuje skład i KOLEJNOŚĆ członów; `no_memory` doszedł w FC-6 (nagrobek bez
-    # pamięci przy przywracaniu) - klinga cofnięcia zostawia go na zerze.
+    # pamięci przy przywracaniu), `failed` w R-S2b-13 (odmowa klingi liczona przez wołającego
+    # gestu wielotransakcyjnego) - klinga cofnięcia zostawia oba na zerze.
     assert g.skipped_breakdown == [("kind", 0), ("source", 1), ("nothing", 1), ("no_memory", 0),
-                                   ("drift", 0)]
+                                   ("drift", 0), ("failed", 0)]
 
 
 def test_nagrobka_NIE_wskrzesza_gest_bez_jawnego_nadpisania():
@@ -468,30 +472,42 @@ def test_suma_gestow_NIE_gubi_rozbicia():
     assert dict(s.skipped_breakdown)["drift"] == 4 and s.skipped == 5
 
 
-def test_nagrobek_BEZ_PAMIECI_jest_czlonem_sumy_skladania_i_rozbicia():
-    """FC-6: `skipped_no_memory` wchodzi do WSZYSTKICH trzech właścicieli naraz - sumy `skipped`
-    (mianownik „z M"), składania `__add__` (przywracanie to N transakcji i jedno zdanie) i rozbicia
-    `skipped_breakdown` (człon na ekranie). Pole obecne w jednym, a brakujące w drugim to dokładnie
-    klasa, dla której ci właściciele istnieją: liczba wpada do „z M" i znika z rozbicia albo
-    odwrotnie.
+@pytest.mark.parametrize("klasa, kolejnosc", [
+    (repo.ObjectGesture, ["kind", "source", "nothing", "no_memory", "drift", "failed"]),
+    (repo.RetireGesture, ["present", "no_location", "superseded", "already"]),
+], ids=["ObjectGesture", "RetireGesture"])
+def test_KAZDE_pole_skipped_jest_czlonem_sumy_skladania_i_rozbicia(klasa, kolejnosc):
+    """FC-6, R-S2b-13: każde pole `skipped_*` gestu wchodzi do WSZYSTKICH właścicieli naraz - sumy
+    `skipped` (mianownik „z M"), składania `__add__` (przywracanie i zatwierdzanie ze ścieżki to
+    N transakcji i jedno zdanie; ma je dziś tylko `ObjectGesture`) i rozbicia `skipped_breakdown`
+    (człon na ekranie). Pole obecne w jednym, a brakujące w drugim to dokładnie klasa, dla której
+    ci właściciele istnieją: liczba wpada do „z M" i znika z rozbicia albo odwrotnie.
 
-    Pozycja członu jest ustalona: między `nothing` a `drift` - dwie przyczyny „nie było czego"
-    stoją obok siebie, a dryf (jedyny licznik TOCTOU) zamyka listę.
+    Pola bierzemy z `dataclasses.fields`, nie z listy w teście: bramka budowana z pól wymienionych
+    z nazwy nie widzi pola dołożonego później, więc szóste pole mogło siedzieć w dwóch właścicielach
+    z trzech i test dalej był zielony. Każde pole dostaje INNĄ wartość (kolejne potęgi dwójki), więc
+    suma zdradza, KTÓREGO członu brakuje, a nie tylko, że jakiegoś.
 
-    Falsyfikator: zdejmij `skipped_no_memory` z `__add__` → suma gubi 2; z `skipped` → 7 zamiast 9;
-    z `skipped_breakdown` → rozbicie nie ma członu `no_memory`."""
-    a = repo.ObjectGesture(skipped_nothing=3, skipped_no_memory=2)
-    b = repo.ObjectGesture(assigned=1, skipped_no_memory=2, skipped_drift=2)
-    s = a + b
-    assert s.skipped_no_memory == 4
-    assert s.skipped == 3 + 4 + 2
-    assert [k for k, _n in s.skipped_breakdown] == ["kind", "source", "nothing", "no_memory",
-                                                    "drift"]
-    assert dict(s.skipped_breakdown)["no_memory"] == 4
-    assert sum(n for _k, n in s.skipped_breakdown) == s.skipped
+    Kolejność członów jest ustalona: dwie przyczyny „nie było czego" stoją obok siebie, dryf (jedyny
+    licznik TOCTOU) i odmowa klingi (liczy ją wołający gestu wielotransakcyjnego) zamykają listę.
+
+    Falsyfikator: zdejmij `skipped_failed` z `skipped_breakdown` → zbiór sufiksów i suma rozbicia
+    czerwienieją; z `skipped` → suma rozbicia ≠ `skipped`; z `__add__` → `(g + g).skipped` ≠ 2×."""
+    pola = [f.name for f in dataclasses.fields(klasa) if f.name.startswith("skipped_")]
+    g = klasa(**{p: 2 ** i for i, p in enumerate(pola)})
+    assert g.skipped == 2 ** len(pola) - 1                  # KAŻDE pole w sumie, każde raz
+    assert sum(n for _k, n in g.skipped_breakdown) == g.skipped
+    assert {k for k, _n in g.skipped_breakdown} == {p[len("skipped_"):] for p in pola}
+    assert [k for k, _n in g.skipped_breakdown] == kolejnosc
+    if "__add__" in vars(klasa):
+        assert (g + g).skipped == 2 * g.skipped
+        assert (g + g).skipped_breakdown == [(k, 2 * n) for k, n in g.skipped_breakdown]
 
 
 @pytest.mark.parametrize("gest, prefiks, klucze_z_kwargu", [
+    # JAWNA BIAŁA LISTA drugiego kierunku: jedyny żywy klucz rodziny spoza `{prefiks}{sufiks}`.
+    # Człon „nothing" przywracania jedzie kwargiem `nothing_key` (FC-6), bo czasownik należy do
+    # gestu, nie do członu - ten sam sufiks ma więc drugi klucz poza prefiksem rozbicia.
     (repo.ObjectGesture(), "grid.sel.object_skip_", ("grid.sel.object_restore_skip_nothing",)),
     (repo.RetireGesture(), "grid.sel.frame_skip_", ()),
 ], ids=["ObjectGesture", "RetireGesture"])
@@ -507,13 +523,32 @@ def test_KAZDY_czlon_rozbicia_ma_klucz_w_katalogu(gest, prefiks, klucze_z_kwargu
     pominięcia czerwieniłby się dopiero na ekranie. Jeden test po parze (klasa, prefiks), bo
     pytanie jest to samo, a dwie kopie bramki rozjechałyby się przy pierwszej poprawce jednej.
 
+    DWA KIERUNKI. Kod → katalog łapie człon bez klucza. Katalog → kod łapie klucz OSIEROCONY: człon
+    zdjęty z `skipped_breakdown` zostawiał swój klucz w katalogu i bramka była zielona, a martwy
+    tekst czekał, aż ktoś przywróci człon pod starą nazwą z innym znaczeniem. Rodzinę kluczy
+    wyznacza powierzchnia (`grid.sel.object_…skip_…`, `grid.sel.frame_…skip_…`), więc klucz spoza
+    prefiksu rozbicia też wpada pod kontrolę i przejść może wyłącznie przez białą listę. Sufiksy
+    idą z `skipped_breakdown` klasy, nie z literału - człon dołożony w kodzie (`failed`, R-S2b-13)
+    test widzi sam.
+
     Falsyfikator: usuń z katalogu `grid.sel.object_skip_no_memory`,
     `grid.sel.object_restore_skip_nothing` albo `grid.sel.frame_skip_superseded` → odpowiedni
-    wariant tego testu czerwienieje."""
+    wariant tego testu czerwienieje; dopisz do katalogu `grid.sel.object_skip_xyz` (albo zdejmij
+    `failed` z `skipped_breakdown`, zostawiając klucz) → czerwienieje kierunek zwrotny."""
     from horreum.gui.i18n_catalog import CATALOG
-    klucze = [f"{prefiks}{k}" for k, _n in gest.skipped_breakdown] + list(klucze_z_kwargu)
+    sufiksy = {k for k, _n in gest.skipped_breakdown}
+    klucze = [f"{prefiks}{k}" for k in sufiksy] + list(klucze_z_kwargu)
     braki = [k for k in klucze if k not in CATALOG]
     assert not braki, f"człony rozbicia bez klucza w katalogu: {braki}"
+    # kierunek zwrotny: katalog → kod
+    rdzen = prefiks[:-len("skip_")]                             # „grid.sel.object_"
+    rodzina = [k for k in CATALOG if re.match(re.escape(rdzen) + r"(?:[a-z_]+_)?skip_", k)]
+    assert set(klucze) <= set(rodzina), "kolektor rodziny ślepy"
+    sieroty = [k for k in rodzina if k not in klucze_z_kwargu
+               and not (k.startswith(prefiks) and k[len(prefiks):] in sufiksy)]
+    assert not sieroty, f"klucze rodziny bez członu w klasie: {sieroty}"
+    # biała lista nie trzyma przy życiu członu, którego klasa już nie ma
+    assert all(k.rsplit("skip_", 1)[1] in sufiksy for k in klucze_z_kwargu)
 
 
 def test_pamiec_nagrobka_JEDZIE_na_nastepczynie():

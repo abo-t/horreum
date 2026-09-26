@@ -114,15 +114,18 @@ def _loc_0019(con, lid, since):
 
 
 def test_0019_CHECK_rodzaj_i_powod_tylko_przy_markerze(tmp_path):
-    """STRAŻNIK W DDL (P4-2): rodzaj spoza słownika ('io'|'parse') i rodzaj/powód BEZ markera to
+    """STRAŻNIK W DDL (P4-2): rodzaj spoza słownika ('io'|'parse'|'db') i rodzaj/powód BEZ markera to
     sprzeczność, którą baza odbija - pisarz, który zgasi marker i zapomni zdjąć diagnozę, nie
     zostawi jej przy zdrowej kopii. Kolumny wchodzą przez `ADD COLUMN`, więc test dowodzi, że SQLite
-    realnie egzekwuje oba CHECK-i dołożone tą drogą.
+    realnie egzekwuje oba CHECK-i dołożone tą drogą. Trzecia wartość słownika, `'db'` (błąd bazy
+    po naszej stronie), przechodzi - pisze ją backstop skanu.
 
-    Kierunek odwrotny (marker BEZ rodzaju) zostaje legalny: wiersz sprzed 0019 nie ma skąd go wziąć.
+    Kierunek odwrotny (marker BEZ rodzaju) zostaje legalny: rodzaj nieznany - wiersz sprzed 0019
+    nie ma skąd go wziąć, a goły `OSError` bez dowodu bajtów zostaje nierozstrzygnięty.
 
     Falsyfikator: zdejmij którykolwiek `CHECK` z `0019_location_unreadable_reason.sql` → odpowiadający
-    mu `raises` czerwienieje."""
+    mu `raises` czerwienieje; zdejmij `'db'` ze słownika w CHECK → zapis `'db'` rzuca
+    `IntegrityError`."""
     con = db.open_db(str(tmp_path / "h.db"))
     _loc_0019(con, 1, None)                                  # kopia czytelna
     _loc_0019(con, 2, "2026-09-26T10:00:00")                 # kopia oznaczona
@@ -137,6 +140,9 @@ def test_0019_CHECK_rodzaj_i_powod_tylko_przy_markerze(tmp_path):
         con.execute("UPDATE location SET unreadable_since = NULL WHERE id = 2")
     con.execute("UPDATE location SET unreadable_kind = 'parse', unreadable_reason = 'ParseError: x' "
                 "WHERE id = 2")                              # przy markerze - legalne
+    con.execute("UPDATE location SET unreadable_kind = 'db', "
+                "unreadable_reason = 'OperationalError: database is locked' "
+                "WHERE id = 2")                              # trzecia wartość słownika - legalna
     con.execute("UPDATE location SET unreadable_since = NULL, unreadable_kind = NULL, "
                 "unreadable_reason = NULL WHERE id = 2")    # gaśnie RAZEM - legalne
     _loc_0019(con, 3, "2026-09-26T11:00:00")                 # marker bez rodzaju - legalny

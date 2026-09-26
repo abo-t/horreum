@@ -501,14 +501,23 @@ def test_kazdy_UPDATE_location_z_markerem_dotyka_rodzaju_i_powodu():
     gaszeniu, odbije się o CHECK 0019 dopiero w produkcji). AST, nie regex: sklejone literały
     Pythona są jednym `ast.Constant`, a docstringi opisujące UPDATE nie dają fałszywych trafień.
 
+    DWA KORZENIE, bo pisarz bazy nie mieszka wyłącznie w pakiecie: `scripts/` (akceptacja,
+    budowanie katalogu) otwiera tę samą bazę i jego `UPDATE location` przeszedłby obok strażnika,
+    który patrzył tylko pod `horreum/`. Korzeń musi istnieć - brakujący katalog dałby pustą
+    iterację, czyli strażnika ślepego po cichu.
+
     Falsyfikator: usuń `unreadable_kind = ?` z UPDATE-u dowolnej klingi markera → ten test
-    wymienia ją z nazwy; usuń kolektor (pusta lista literałów) → asercja pozytywna czerwienieje."""
+    wymienia ją z nazwy; usuń kolektor (pusta lista literałów) → asercja pozytywna czerwienieje;
+    zdejmij korzeń `scripts/` → UPDATE markera bez rodzaju dopisany w skrypcie przechodzi."""
     import ast
     from pathlib import Path
 
     import horreum
+    pakiet = Path(horreum.__file__).parent
+    korzenie = (pakiet, pakiet.parent / "scripts")
+    assert all(k.is_dir() for k in korzenie), korzenie
     literaly, braki = [], []
-    for src in sorted(Path(horreum.__file__).parent.rglob("*.py")):
+    for src in sorted(p for k in korzenie for p in k.rglob("*.py")):
         tree = ast.parse(src.read_text(encoding="utf-8"))
         for call in (n for n in ast.walk(tree) if isinstance(n, ast.Call)):
             f = call.func

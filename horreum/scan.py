@@ -49,6 +49,7 @@ import json
 import math
 import os
 import re
+import sqlite3
 import struct
 import sys
 import xml.etree.ElementTree as ET
@@ -1113,18 +1114,47 @@ def _mtime_iso(st):
 
 def unreadable_kind_of(exc):
     """Rodzaj niemożności odczytu (P4-2) z OBIEKTU wyjątku - jedyny właściciel tej klasyfikacji
-    (miękkie lądowanie `scan_file` i backstop `scan_tree`); wyżej zostaje już sam tekst, a z tekstu
-    rodzaju się nie zgaduje.
+    (miękkie lądowanie `scan_file` i blok odczytu backstopu `scan_tree`); wyżej zostaje już sam
+    tekst, a z tekstu rodzaju się nie zgaduje.
 
-    `'io'` = system operacyjny nie oddał bajtów: `OSError` Z KODEM SYSTEMU (`errno` - brak dostępu,
-    plik znikł między listowaniem a odczytem, timeout SMB, katalog zamiast pliku). `'parse'` = bajty
-    przyszły, a czytnik nagłówka odmówił - w tym GOŁY `OSError("komunikat")` bez kodu systemu, bo
-    tak właśnie astropy odmawia zepsutego FITS-a („Empty or corrupt FITS file", „Header missing END
-    card", „No SIMPLE card found" - zmierzone sondą na `.venv-build` 2026-09-26). Samo
-    `isinstance(exc, OSError)` posłałoby więc usera sprawdzać dysk z plikiem, który jest do
-    zgłoszenia - dokładnie ten błąd, który rodzaj ma usunąć. `errno` to atrybut obiektu ustawiany
-    wyłącznie przy błędzie zgłoszonym przez system, nie wniosek z komunikatu."""
-    return "io" if isinstance(exc, OSError) and exc.errno is not None else "parse"
+    - `'io'` = system operacyjny nie oddał bajtów: `OSError` Z KODEM SYSTEMU (`errno` - brak
+      dostępu, plik znikł między listowaniem a odczytem, timeout SMB, katalog zamiast pliku).
+      `errno` to atrybut obiektu ustawiany wyłącznie przy błędzie zgłoszonym przez system, nie
+      wniosek z komunikatu.
+    - `None` = GOŁY `OSError("komunikat")` bez kodu systemu - rodzaj NIEROZSTRZYGNIĘTY. Nie jest
+      dowodem treści: astropy tak odmawia zepsutego FITS-a („Empty or corrupt FITS file", „Header
+      missing END card", „No SIMPLE card found" - sonda na `.venv-build` 2026-09-26), ale tym
+      samym zdaniem potrafi WYPRAĆ przejściowy błąd I/O. Na strumieniu gzip `_File.read` zamienia
+      `OSError` odczytu w koniec pliku (`astropy/io/fits/file.py:313-324`, astropy 8.0.0), a parser
+      nagłówka odmawia potem gołym `OSError("Header missing END card.")` (`header.py:612-615`).
+      Nie jest też dowodem dysku: prawdziwy błąd systemu niesie `errno`, a tu go nie ma - albo
+      zginął w praniu, albo nie było go wcale. Z samego wyjątku nie wiadomo, więc klasyfikator
+      nie zgaduje; rozstrzyga świadek spoza wyjątku - `scan_file` podnosi rodzaj do `'parse'`,
+      gdy bajty pliku DAŁO SIĘ przeczytać.
+    - `'db'` = `sqlite3.Error` - błąd bazy po NASZEJ stronie (brama przyrostowa siedzi w bloku
+      odczytu backstopu); o pliku nie mówi nic.
+    - `'parse'` = każdy inny wyjątek: bajty przyszły, a parser odmówił (XISF: `ParseError`/
+      `ValueError`, `struct.error`, `UnicodeDecodeError`…)."""
+    if isinstance(exc, sqlite3.Error):
+        return "db"
+    if isinstance(exc, OSError):
+        return "io" if exc.errno is not None else None
+    return "parse"
+
+
+def unreadable_reason_of(exc):
+    """Diagnoza „Typ: opis" z OBIEKTU wyjątku (P4-2) - jedyny właściciel składania tego tekstu dla
+    miękkiego lądowania `scan_file` i backstopu `scan_tree`. Idzie do `location.unreadable_reason`
+    i, z prefiksem, do `event.reason`.
+
+    `OSError` Z KODEM SYSTEMU dostaje kod i opis BEZ ścieżki: `str()` takiego wyjątku dokleja nazwę
+    pliku, a ścieżkę niosą już kolumna „Ścieżka", payload zdarzenia i tooltip. Powtórzona w powodzie
+    była szumem, który na realnym archiwum rozpychał komórkę „Powód" poza panel (pomiar przy
+    `ObjectAxisView._show_copies`). Reszta wyjątków zostaje przy `str()`: komunikat parsera bywa
+    jedynym opisem tego, czego nie przyjął."""
+    if isinstance(exc, OSError) and exc.errno is not None:
+        return f"{type(exc).__name__}: [Errno {exc.errno}] {exc.strerror}"
+    return f"{type(exc).__name__}: {exc}"
 
 
 def scan_file(path):
@@ -1165,7 +1195,7 @@ def scan_file(path):
             span = (meta.datloc, meta.datspan)
         error = error_kind = None
     except Exception as exc:              # W1: dowolny błąd czytnika → review, nie crash pętli
-        error = f"{type(exc).__name__}: {exc}"
+        error = unreadable_reason_of(exc)
         error_kind = unreadable_kind_of(exc)   # P4-2: rodzaj TERAZ, póki żyje obiekt wyjątku
     if compressed:
         file_sha1 = sha1_of(spath)
@@ -1175,6 +1205,16 @@ def scan_file(path):
             sha1_data = None              # sha1 pliku + flaga — składa ingest_record)
     else:
         file_sha1, sha1_data = sha1_of_span(spath, span)
+    if error is not None and error_kind is None:
+        # ŚWIADEK BAJTÓW (P4-2): goły `OSError` czytnika nie mówi, czy zawiodła treść, czy wyprany
+        # błąd I/O (`unreadable_kind_of`). Hasz wyżej przeczytał właśnie CAŁY plik bez błędu, więc
+        # bajty SĄ czytelne, a parser mimo to odmówił - to `'parse'`. Wyścig zostaje: udział mógł
+        # wrócić między odczytem nagłówka a haszem i wtedy etykieta kłamie, ale żyje jeden skan -
+        # marker `unreadable_since` wyłącza oznaczoną kopię z pominięcia przez bramę przyrostową,
+        # więc następny skan czyta ją od nowa. Gdy hasz sam rzuca, rekord nie powstaje: wyjątek
+        # idzie do backstopu `scan_tree` i tam klasyfikuje się od nowa, bez dowodu bajtów (goły
+        # `OSError` zostaje `None`).
+        error_kind = "parse"
     return ScanRecord(
         path=spath, size_bytes=st.st_size, mtime=mtime,
         header=header, error=error, error_kind=error_kind,
@@ -1723,8 +1763,8 @@ def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now,
     zależy od tego, czy ścieżka jest ZNANA (#13): ZNANA → `refresh_location_unreadable` (marker
     `unreadable_since`, idempotentnie — powtórna awaria to cichy no-op, nie spam review); NIEZNANA →
     `flag_frame_review(sha1='?')` (backstop bez tożsamości — brak kotwicy UNIQUE, może się powtórzyć).
-    Rodzaj awarii (P4-2) nadaje WYŁĄCZNIE strona odczytu; wyjątek z `ingest_record` zostawia rodzaj
-    nieznany, bo nie jest faktem o pliku.
+    Rodzaj awarii (P4-2) strony odczytu nadaje klasyfikator z obiektu wyjątku; wyjątek z
+    `ingest_record` dostaje `'db'`, bo jest faktem o nas, nie o pliku.
     `now` jawny (ISO-8601) — deterministyczne testy. Zwraca `ScanSummary`.
 
     BRAMA PRZYROSTOWA (§3.B) — aktywna ⟺ `volume != '?'`. Gdy znamy trwały serial woluminu,
@@ -1769,13 +1809,15 @@ def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now,
                 progress(i, total, spath, summary)
             continue
         summary.files += 1
-        # DWA BLOKI, BO RODZAJ JEST FAKTEM O PLIKU (P4-2). Wyjątek z ODCZYTU (`stat`, brama,
-        # `scan_file`) mówi, czego plik nie oddał, i `unreadable_kind_of` klasyfikuje go z obiektu.
-        # Wyjątek z ZAPISU (`ingest_record`: błąd bazy, bug w naszym kodzie) przychodzi PO udanym
-        # odczycie, więc jest faktem o NAS, nie o pliku - rodzaj zostaje `None` („nieznany"). Jeden
-        # `try` na oba kroki dawał mu `'parse'`, czyli „nagłówek nie przechodzi parsera", i user
-        # zgłaszał zdrowy plik. Marker przy nieudanym zapisie i tak stawiamy: wymusza re-odczyt przez
-        # bramę, więc zapis ponawia się sam przy następnym skanie, zamiast utknąć pod pominięciem.
+        # DWA BLOKI, BO RODZAJ MÓWI, GDZIE SZUKAĆ WINY (P4-2). Wyjątek z ODCZYTU (`stat`, brama,
+        # `scan_file`) klasyfikuje `unreadable_kind_of` z obiektu: kod systemu → `'io'`,
+        # `sqlite3.Error` z bramy przyrostowej → `'db'`, goły `OSError` z haszowania (bez dowodu
+        # bajtów, którym `scan_file` rozstrzyga goły `OSError` czytnika) → `None`. Wyjątek z ZAPISU
+        # (`ingest_record`: błąd bazy, bug w naszym kodzie) przychodzi PO udanym odczycie, więc jest
+        # faktem o NAS, nie o pliku - rodzaj `'db'` ZAWSZE, bez klasyfikatora. Jeden `try` na oba
+        # kroki dawał mu `'parse'`, czyli „nagłówek nie przechodzi parsera", i user zgłaszał zdrowy
+        # plik. Marker przy nieudanym zapisie i tak stawiamy: wymusza re-odczyt przez bramę, więc
+        # zapis ponawia się sam przy następnym skanie, zamiast utknąć pod pominięciem.
         blad = kind = rec = None
         try:
             skip = gate_on and _already_scanned(con, volume, spath, _mtime_iso(path.stat()))
@@ -1789,8 +1831,8 @@ def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now,
             try:
                 ingest_record(con, rec, volume=volume, drive_letter=drive_letter, tier=tier,
                               now=now, summary=summary)
-            except Exception as exc:                       # backstop W1, strona ZAPISU - rodzaj None
-                blad = exc
+            except Exception as exc:                       # backstop W1, strona ZAPISU - fakt o nas
+                blad, kind = exc, "db"
         if blad is not None:                               # backstop W1: pojedynczy plik nie wywala skanu
             # Błąd I/O w scan_file (hasze są POZA try W1 — otwarcie/odczyt pliku propaguje) na ZNANEJ
             # ścieżce: oznacz marker `unreadable_since` przez klingę (#13) zamiast flagować sha1='?'
@@ -1804,8 +1846,9 @@ def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now,
             # `present=0` byłoby hybrydą zakazaną przez inwariant D-V-5. Rozstrzyga `_gone` (lstat +
             # errno), nie domysł; zniknięcie idzie do `mark_location_vanished` (ta sama klinga).
             #
-            # RODZAJ (P4-2) sklasyfikowany wyżej, przy obiekcie wyjątku - tu zostaje sam tekst.
-            reason = f"{type(blad).__name__}: {blad}"
+            # RODZAJ (P4-2) nadany wyżej, przy obiekcie wyjątku; diagnozę składa ten sam właściciel,
+            # co w `scan_file` (`unreadable_reason_of`), więc obie drogi mówią jednym formatem.
+            reason = unreadable_reason_of(blad)
             row = con.execute(
                 "SELECT l.id, l.mtime, f.sha1_data FROM location l JOIN frame f ON f.id = l.frame_id "
                 "WHERE l.volume = ? AND l.path = ?",

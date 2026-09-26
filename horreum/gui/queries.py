@@ -994,37 +994,50 @@ def unreadable_copies(con):
     ORDER: najnowsze oznaczenie na górze, potem ścieżka. Zwraca: frame_id, sha1_data, volume,
     path, present, unreadable_since, kind, reason.
 
-    `kind` (`'io'|'parse'|None`) i `reason` („Typ: opis") czytamy z KOLUMN kopii (P4-2,
+    TEN SAM ZAKRES KLATEK CO LICZNIK KUBEŁKA (`resolver.review_state.unreadable`): klatka zastąpiona
+    albo wycofana nie wchodzi. Kubełek jest listą ROBOTY, a robotę zastąpionej przejęła następczyni,
+    wycofanej zamknęła ręka (ten sam argument, co przy `G2-6d`). Bez tego predykatu drążenie
+    pokazywało kopie klatek, których licznik wiersza nie liczył - „1 klatka", a pod kliknięciem
+    dwie różne.
+
+    `kind` (`'io'|'parse'|'db'|None`) i `reason` („Typ: opis") czytamy z KOLUMN kopii (P4-2,
     `location.unreadable_kind`/`unreadable_reason`) - kolumna jest JEDYNYM właścicielem tego faktu.
     Do P4-2 powód szukano w dzienniku, ostatnim `frame.review` po parze `sha1:` + `payload.path`,
     i to źródło gubiło się dokładnie tam, gdzie powód był najbardziej potrzebny: payload trzyma
     ścieżkę z CHWILI awarii, więc kopia przemianowana po oznaczeniu traciła powód, a rodzaju awarii
     dziennik nie niósł wcale. Stan przeżywa przemianowanie, bo `path` i powód mieszkają w jednym
-    wierszu. `None` w obu = wiersz oznaczony przed migracją 0019 (powierzchnia pokazuje wtedy
-    myślnik `copy.no_reason`)."""
+    wierszu. `kind` `None` = rodzaj nieznany: wiersz sprzed 0019 ALBO wyjątek bez kodu systemu,
+    którego nie dało się rozstrzygnąć; `None` w obu = wiersz sprzed 0019 (powierzchnia pokazuje
+    wtedy myślnik `copy.no_reason`)."""
     return con.execute(
         "SELECT l.frame_id, f.sha1_data, l.volume, l.path, l.present, l.unreadable_since, "
         "       l.unreadable_kind AS kind, l.unreadable_reason AS reason "
         "FROM location l JOIN frame f ON f.id = l.frame_id "
         "WHERE l.unreadable_since IS NOT NULL "
+        "AND f.superseded_by IS NULL AND f.retired_at IS NULL "
         "ORDER BY l.unreadable_since DESC, l.path"
     ).fetchall()
 
 
 def unreadable_kind_counts(con):
     """Rozbicie oznaczonych kopii po RODZAJU awarii (P4-2) dla wiersza kubełka „kopie nieczytelne":
-    `{"io": n, "parse": n, "unknown": n}` - „unknown" to kopie oznaczone przed migracją 0019, które
-    rodzaj dostaną przy najbliższym re-odczycie.
+    `{"io": n, "parse": n, "db": n, "unknown": n}`. „db" to błąd bazy po naszej stronie (zapis
+    wyniku odczytu albo brama przyrostowa) - osobno, bo nie mówi nic o pliku i ma własną drogę
+    naprawy. „unknown" to rodzaj nieznany: kopie oznaczone przed migracją 0019 ALBO wyjątek bez kodu
+    systemu, którego nie dało się rozstrzygnąć - rodzaj może się pojawić przy najbliższym re-odczycie.
 
     Liczone PO KOPIACH, choć licznik kubełka (`unreadable_count`) liczy KLATKI: klatka z dwiema
     kopiami może mieć dwa różne rodzaje (jedna na zerwanym udziale, druga z zepsutym nagłówkiem),
     więc rozbicie klatek po rodzaju nie sumowałoby się do niczego. Liczba kopii jest jedyną, która
-    się sumuje - i to do długości drążenia (`unreadable_copies`, ten sam predykat markera), czyli
-    do tego, co user zobaczy po kliknięciu."""
-    counts = {"io": 0, "parse": 0, "unknown": 0}
+    się sumuje - i to do długości drążenia (`unreadable_copies`, ten sam predykat markera i ten sam
+    zakres klatek: bez zastąpionych i wycofanych), czyli do tego, co user zobaczy po kliknięciu."""
+    counts = {"io": 0, "parse": 0, "db": 0, "unknown": 0}
     for row in con.execute(
-            "SELECT unreadable_kind AS kind, count(*) AS n FROM location "
-            "WHERE unreadable_since IS NOT NULL GROUP BY unreadable_kind"):
+            "SELECT l.unreadable_kind AS kind, count(*) AS n "
+            "FROM location l JOIN frame f ON f.id = l.frame_id "
+            "WHERE l.unreadable_since IS NOT NULL "
+            "AND f.superseded_by IS NULL AND f.retired_at IS NULL "
+            "GROUP BY l.unreadable_kind"):
         counts[row["kind"] or "unknown"] = row["n"]
     return counts
 

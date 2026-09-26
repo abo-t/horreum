@@ -60,10 +60,12 @@ from importlib import resources
 # by je przejęła — inaczej niż przy `superseded_by`). Kolumna wchodzi PUSTA; strażnika w DDL nie
 # ma i mieć nie może (warunek jest zdaniem o `location`), więc pilnuje go klinga, a deklaratywnie
 # `audit.retire_invariants` + kryterium §5.17 — wzorem `supersede_invariants`/§5.15.
-# 0019 to PRZYROST (P4-2): location.unreadable_kind ('io'|'parse') + location.unreadable_reason -
+# 0019 to PRZYROST (P4-2): location.unreadable_kind ('io'|'parse'|'db') + location.unreadable_reason -
 # marker 0006 niósł sam CZAS, więc powierzchnia oskarżała plik także wtedy, gdy zawiódł dysk. STAN,
-# nie dziennik: powód szukany w `event` po ścieżce gubił się przy przemianowanej kopii. CHECK wiąże
-# oba fakty z markerem (powód bez markera = sprzeczność); marker bez nich zostaje legalny (sprzed 0019).
+# nie dziennik: powód szukany w `event` po ścieżce gubił się przy przemianowanej kopii. 'db' = błąd
+# bazy po naszej stronie (zapis albo brama), nie fakt o pliku - marker stoi, bo wymusza re-odczyt.
+# CHECK wiąże oba fakty z markerem (powód bez markera = sprzeczność); marker bez rodzaju zostaje
+# legalny: rodzaj nieznany - wiersz sprzed 0019 albo wyjątek bez kodu systemu, nierozstrzygnięty.
 MIGRATIONS = [
     (2, "0002_initial.sql"),
     (3, "0003_writeback.sql"),

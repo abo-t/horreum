@@ -270,25 +270,33 @@ def _copy_reason(kind, reason):
     RODZAJ STOI PRZED DIAGNOZĄ, bo to on mówi, gdzie szukać winy: „dysk/dostęp: …" (system nie
     oddał bajtów - plik może być zdrowy) albo „nagłówek nie przechodzi parsera: …" (plik do
     zgłoszenia). Samo „kopia nieczytelna" oskarżało plik i wysłało Zdzinia na dysk po zdrowy plik.
+    Trzeci rodzaj, „baza danych: …", nie jest faktem o pliku: zawiódł zapis albo brama po naszej
+    stronie, a bez etykiety sama diagnoza („OperationalError…") też kierowałaby winę na plik.
     Diagnoza przychodzi z kolumny bez prefiksu dziennika (lista i tak nazywa się „Kopie
-    nieczytelne"). Brak rodzaju (wiersz oznaczony przed 0019) → sama diagnoza; brak diagnozy →
-    myślnik: „nie wiem" jest faktem, pusta komórka wygląda na brak danych. Rodzaj bez diagnozy
-    dostaje myślnik w miejscu opisu - rodzaj jest wtedy jedynym faktem, więc nie znika."""
+    nieczytelne"). Brak rodzaju (rodzaj nieznany: wiersz sprzed 0019 albo wyjątek bez kodu systemu,
+    którego nie dało się rozstrzygnąć) → sama diagnoza; brak diagnozy → myślnik: „nie wiem" jest
+    faktem, pusta komórka wygląda na brak danych. Rodzaj bez diagnozy dostaje myślnik w miejscu
+    opisu - rodzaj jest wtedy jedynym faktem, więc nie znika."""
     diagnoza = reason or i18n.t("copy.no_reason")
     if kind == "io":
         return i18n.t("copy.reason_io", reason=diagnoza)
     if kind == "parse":
         return i18n.t("copy.reason_parse", reason=diagnoza)
+    if kind == "db":
+        return i18n.t("copy.reason_db", reason=diagnoza)
     return diagnoza
 
 
 def _unreadable_kinds_tip(counts):
     """Podpowiedź wiersza „kopie nieczytelne" (P4-2): rozbicie po RODZAJU z
-    `queries.unreadable_kind_counts`. Oba rodzaje zawsze, także z zerem - „dysk/dostęp 0" jest
-    odpowiedzią (winy nie ma w dysku), nie szumem. „Rodzaj nieznany" tylko gdy są takie kopie:
-    to przejściowy ogon sprzed migracji 0019, nie stała kategoria."""
+    `queries.unreadable_kind_counts`. Oba rodzaje o PLIKU zawsze, także z zerem - „dysk/dostęp 0"
+    jest odpowiedzią (winy nie ma w dysku), nie szumem. „Baza" i „rodzaj nieznany" tylko gdy są
+    takie kopie: pierwsza to błąd po naszej stronie, który następny skan zwykle zdejmuje, druga -
+    ogon sprzed migracji 0019 albo wyjątek bez kodu systemu; żadna nie jest stałą kategorią pliku."""
     parts = [i18n.t("object.unreadable_kind_io", n=counts["io"]),
              i18n.t("object.unreadable_kind_parse", n=counts["parse"])]
+    if counts["db"]:
+        parts.append(i18n.t("object.unreadable_kind_db", n=counts["db"]))
     if counts["unknown"]:
         parts.append(i18n.t("object.unreadable_kind_unknown", n=counts["unknown"]))
     return i18n.t("object.unreadable_kinds", parts=" · ".join(parts))
@@ -575,6 +583,13 @@ FRAME_HEADERS = ["frame.col.sha", "frame.col.telescope", "frame.col.camera", "fr
 COPY_COL_PATH, COPY_COL_VOLUME, COPY_COL_PRESENT, COPY_COL_MARKED, COPY_COL_REASON = range(5)
 COPY_HEADERS = ["col.path", "copy.col.volume", "copy.col.present", "copy.col.marked",
                 "copy.col.reason"]
+# Sufit szerokości „Ścieżki" w trybie „kopie" (P4-2): resztę panelu bierze „Powód", a pełną
+# ścieżkę niesie tooltip - dlaczego tak, mówi `ObjectAxisView._show_copies`. Wartość z pomiaru
+# na prawdziwym foncie (Segoe UI 9 pt, 2026-09-26): trzy krótkie kolumny zajmują 215 px, panel
+# ma 581 px przy oknie 1310 i 472 px przy podłodze 1073. Sufit 320 zostawiał „Powodowi" 46 px
+# w domyślnym oknie i przepychał go za prawą krawędź na podłodze; 200 daje mu 166 px i 57 px
+# i nie łamie gwarancji „Powód bez przewijania na podłodze".
+COPY_PATH_MAX_PX = 200
 
 
 class ConfirmPathObjectsDialog(QDialog):
@@ -705,11 +720,12 @@ class ConfirmPathObjectsDialog(QDialog):
                 except ValueError as e:
                     self.error.setText(str(e))
                     # Pozycja, która padła, wycofała się w całości (`_immediate`), a pozycje po niej
-                    # do klingi nie doszły - ich klatki liczą się jako DRYF (stan inny, niż widziało
-                    # okno), tak jak przy przywracaniu w Zbiorach. Inaczej nie liczyłyby się nigdzie
-                    # i „z M" kłamałoby o tym, co user zatwierdził.
+                    # do klingi nie doszły - ich klatki liczą się jako ODMOWA KLINGI
+                    # (`skipped_failed`), tak jak przy przywracaniu w Zbiorach. Inaczej nie
+                    # liczyłyby się nigdzie i „z M" kłamałoby o tym, co user zatwierdził. Nie jako
+                    # dryf: konflikt aliasu nie znaczy, że stan uciekł oknu.
                     gest += repo.ObjectGesture(
-                        skipped_drift=sum(w["proposal"].n_frames for w in wybrane[i - 1:]))
+                        skipped_failed=sum(w["proposal"].n_frames for w in wybrane[i - 1:]))
                     break
                 faza.say(i18n.t("busy.saving_names", done=i, total=len(wybrane)))
         self.assigned = gest.assigned
@@ -1833,20 +1849,29 @@ class ObjectAxisView(QWidget):
     def _show_copies(self):
         """Prawy panel w trybie „kopie": DOKŁADNE location z markerem `unreadable_since` (#13/Z6).
         Tryb znika przy `refresh()` i przy wyborze obiektu/pozycji review (powrót do klatek
-        zaznaczenia — świadomie, udokumentowane w D-P4-5)."""
+        zaznaczenia - świadomie, udokumentowane w D-P4-5).
+
+        RESZTĘ PANELU BIERZE „POWÓD", bo to dla tej kolumny tryb istnieje; „Ścieżka" dostaje szerokość
+        treści z sufitem `COPY_PATH_MAX_PX`, a pełną wartość niesie tooltip komórki. Dwa pomiary
+        na pf4 pokazały dwie strony tego samego błędu. Firsthand 2026-08-01 mierzył 100-znakową
+        ŚCIEŻKĘ przy `ResizeToContents`: wypychała diagnozę za prawą krawędź, więc `Stretch` poszedł
+        na ścieżkę. Firsthand 2026-09-26 (kopia pf4, skale 100/125/150 %) zmierzył 150-znakowy POWÓD
+        (`PermissionError` z `open()` niósł pełną ścieżkę archiwum): „Powód" wyszedł na 963 px
+        w panelu 571 px, a „Ścieżka" ze `Stretch` spadła do 86 px (`R:\\ASTRO_\\LI...`). `Stretch`
+        na kolumnie pomocniczej oddaje ją na łaskę najdłuższej treści sąsiada - ma iść za kolumną,
+        dla której tryb istnieje, a sufit chroni ścieżkę przed zjedzeniem panelu. Powtórkę ścieżki
+        w powodzie zdjęto przy tym u źródła (`scan.unreadable_reason_of`)."""
         rows = queries.unreadable_copies(self.con)
         self._copies_mode = True
         self.frames.setColumnCount(len(COPY_HEADERS))
         self.frames.setHorizontalHeaderLabels(_headers(COPY_HEADERS))
         fh = self.frames.horizontalHeader()
         fh.setSectionResizeMode(QHeaderView.ResizeToContents)
-        # Ścieżka bierze RESZTĘ i elidować się jej wolno (lustro trybu klatek — `FRAME_COL_PATH`
-        # wyżej): przy `ResizeToContents` realna ścieżka archiwum (100 znaków) zjadała cały panel
-        # i „Powód" — jedyna kolumna, dla której ten tryb powstał — stał za prawą krawędzią.
-        # Firsthand 2026-08-01 na żywej pf4: jedyna nieczytelna kopia to master flat XISF,
-        # a diagnozy („ParseError…") nie dało się przeczytać bez scrolla w poziomie.
-        # Pełna ścieżka nie ginie: niesie ją tooltip komórki (niżej) i poziomy scroll.
-        fh.setSectionResizeMode(COPY_COL_PATH, QHeaderView.Stretch)
+        # Sufit działa na cały nagłówek, ale poza ścieżką żadna kolumna treści go nie sięga,
+        # a sekcji `Stretch` Qt nim nie przycina (sonda offscreen 2026-09-26). Zdejmuje go
+        # `_restore_frames_mode` - tryb klatek ma własny układ.
+        fh.setMaximumSectionSize(COPY_PATH_MAX_PX)
+        fh.setSectionResizeMode(COPY_COL_REASON, QHeaderView.Stretch)
         self.frames.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         _przeladuj_wiersze(self.frames, len(rows))
         for r, row in enumerate(rows):
@@ -1873,6 +1898,7 @@ class ObjectAxisView(QWidget):
         self.frames.setColumnCount(len(FRAME_HEADERS))
         self.frames.setHorizontalHeaderLabels(_headers(FRAME_HEADERS))
         fh = self.frames.horizontalHeader()
+        fh.setMaximumSectionSize(-1)          # sufit trybu „kopie" zdjęty (-1 = domyślny Qt)
         fh.setSectionResizeMode(QHeaderView.ResizeToContents)
         fh.setSectionResizeMode(FRAME_COL_PATH, QHeaderView.Stretch)
 

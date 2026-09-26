@@ -4229,8 +4229,8 @@ def test_BP5_wyczysc_zbior_w_Kalibracji_przestawia_etykiete_na_Przeglad(view):
     Grupowanie ZOSTAJE: nie należy do definicji zbioru, a lista przeskakuje bez sygnału -
     `_on_perspective` zresetowałby grupowanie i przeładował zbiór drugi raz.
 
-    Falsyfikator: zdejmij wołanie `_etykieta_perspektywy_za_stanem` z `_on_clear_selection`
-    → lista zostaje na „Kalibracji"; zdejmij `blockSignals` → grupowanie spada do „bez grupowania"."""
+    Falsyfikator: zdejmij wołanie `_etykieta_perspektywy_za_stanem` z `_refresh` → lista zostaje
+    na „Kalibracji"; zdejmij `blockSignals` → grupowanie spada do „bez grupowania"."""
     view.apply_perspective("Kalibracja")
     assert view.combo_persp.currentData() == ("preset", "Kalibracja")
     assert view.combo_group.currentData() == "kind", "preset nie ustawił grupowania - układ nie powstał"
@@ -4281,8 +4281,8 @@ def test_BP5_zapisana_z_facetem_schodzi_na_preset_zgodny_a_bez_dopasowania_NIE_z
     (każdy preset niesie najwyżej jedną flagę, a `_save_perspective` bierze flagi ze stanu, więc taka
     powstaje tylko spoza GUI) - etykieta zostaje, zamiast udawać dopasowanie.
 
-    Falsyfikator: zdejmij wołanie właściciela etykiety z `_on_clear_selection` → czerwienieje
-    pierwsza połowa; przestaw przy braku dopasowania na `_PRESET_CZYSTY` → druga."""
+    Falsyfikator: zdejmij wołanie właściciela etykiety z `_refresh` → czerwienieje pierwsza
+    połowa; przestaw przy braku dopasowania na `_PRESET_CZYSTY` → druga."""
     from PySide6.QtWidgets import QInputDialog
 
     from horreum import repo
@@ -4315,7 +4315,7 @@ def test_BP5_BLIZNIAK_most_planera_nie_zostawia_etykiety_poprzedniej_perspektywy
     Facet mostu NIE blokuje dopasowania do presetu: to zawężenie W RAMACH perspektywy, jak klik
     w listwie. Ta sama reguła zdejmuje po „× Wyczyść zbiór" etykietę zapisanej perspektywy.
 
-    Falsyfikator: zdejmij wołanie właściciela etykiety z `apply_object_facet` → lista zostaje na
+    Falsyfikator: zdejmij wołanie właściciela etykiety z `_refresh` → lista zostaje na
     „Duplikatach"; porównuj facety dokładnie zamiast przez zawieranie → żaden preset nie pasuje
     i etykieta też zostaje."""
     gcon.execute("INSERT INTO object (id, canon, kind) VALUES (1, 'IC410', 'deep_sky')")
@@ -4332,11 +4332,13 @@ def test_BP5_BLIZNIAK_most_planera_nie_zostawia_etykiety_poprzedniej_perspektywy
 def test_FH4_pusty_stan_ma_warianty_a_przycisk_TYLKO_przy_recepcie(obj_view, tmp_path):
     """FH-4 (firsthand 0816, P2): pusty stan podawał receptę SPRZECZNĄ z tą, którą zdanie po geście
     podało pięć sekund wcześniej - pasek mówił „odsłoni je „× Wyczyść zbiór”", a centrum ekranu
-    trwale „zmień filtr lub perspektywę". Niepusta baza bierze odtąd zdanie i gest z TEJ SAMEJ
-    decyzji co pasek (`_rodzaj_recepty_powrotu`), a przycisk stoi tylko tam, gdzie jest gest:
+    trwale „zmień filtr lub perspektywę". Niepusta baza bierze odtąd zdanie i gest z decyzji recepty
+    (`_rodzaj_recepty_powrotu`) pytanej o klatki WIDOKU, a przycisk stoi tylko tam, gdzie jest gest:
 
-      - trim perspektywy - zdanie o perspektywie + przełączenie na „Przegląd";
-      - zawężony zbiór - zdanie o zbiorze + „× Wyczyść zbiór", TA SAMA etykieta co na pasku zbioru;
+      - perspektywa bez ani jednej klatki (pusta populacja trimu) - zdanie o perspektywie
+        + przełączenie na „Przegląd";
+      - zawężony zbiór - zdanie o zbiorze + „× Wyczyść zbiór", TA SAMA etykieta co na pasku zbioru
+        (także w trimie, który klatki ma - osobne bramki niżej);
       - brak recepty przy niepustej bazie (dziś nieosiągalny) - uczciwe zdanie, bez obietnicy gestu;
       - pusta baza - kierunek po dostawę, bez przycisku (nie ma czego odsłaniać).
 
@@ -4367,7 +4369,7 @@ def test_FH4_pusty_stan_ma_warianty_a_przycisk_TYLKO_przy_recepcie(obj_view, tmp
 
         # Wariant dziś nieosiągalny (niepusta baza bez zawężenia pokazuje klatki) - wymuszony
         # cieniem decyzji na instancji, żeby przejść przez PRAWDZIWY `_refresh`.
-        v._rodzaj_recepty_powrotu = lambda: None
+        v._rodzaj_recepty_powrotu = lambda *, cel: None
         v.refresh()
         QApplication.processEvents()
         assert v.empty.isVisible() and v.empty.text() == i18n.t(grid_mod._EMPTY_VIEW)
@@ -4392,12 +4394,16 @@ def test_FH4_pusty_stan_ma_warianty_a_przycisk_TYLKO_przy_recepcie(obj_view, tmp
         con.close()
 
 
-def test_FH4_pusty_stan_i_pasek_podaja_TEN_SAM_gest_w_kazdym_ukladzie(obj_view):
-    """JEDNA DECYZJA, DWIE POWIERZCHNIE. Pusty stan i recepta paska mają własne brzmienia (pasek
-    mówi o klatkach wypchniętych gestem, pusty stan nie ma się do czego odnieść), ale gest wybiera
-    jedna metoda. Bramka przechodzi przez trzy układy zawężeń, w tym OBA naraz - tam kolejność
-    ma znaczenie (przełączenie perspektywy zdejmuje też facety, więc wygrywa), a druga kopia
-    predykatu w innej kolejności rozjechałaby powierzchnie właśnie tu.
+def test_FH4_pusty_stan_i_pasek_podaja_TEN_SAM_gest_tam_gdzie_cele_sie_pokrywaja(obj_view):
+    """JEDNA DECYZJA, DWA CELE. Pasek pyta o klatki GESTU, pusty stan o klatki WIDOKU - to dwa różne
+    pytania (FH-4, poprawka po firsthandzie: w trimie, który ma klatki, odpowiedzi są różne i obie
+    prawdziwe - osobne bramki niżej). Pokrywają się tam, gdzie pustkę robi to samo, co wypycha
+    klatki gestu: bez trimu (zawężony zbiór) oraz w trimie o PUSTEJ populacji, także z facetem na
+    wierzchu. Tam obie powierzchnie muszą wskazać JEDEN gest, a druga kopia wyboru w innej kolejności
+    rozjechałaby je właśnie w układzie „oba".
+
+    Do poprawki po firsthandzie ta bramka nazywała się „…w każdym układzie" i kodowała przesłankę,
+    którą firsthand obalił: jeden gest dla obu pytań w KAŻDYM układzie zawężeń.
 
     Falsyfikator: zastąp w `_ustaw_pusty_stan` wołanie decyzji własnym łańcuchem
     `_zbior_zawezony()` przed `_trim_aktywny()` → układ „oba" podaje dwa różne gesty."""
@@ -4418,6 +4424,8 @@ def test_FH4_pusty_stan_i_pasek_podaja_TEN_SAM_gest_w_kazdym_ukladzie(obj_view):
         v._facet_state, v._filter_tree = facety, filtr
         v.refresh()
         assert v._n_total == 0, f"{nazwa}: układ nie opróżnił widoku"
+        if v._trim_aktywny():
+            assert not v._populacja_trimu(), f"{nazwa}: trim ma klatki - tu cele się NIE pokrywają"
         klucz, _ = v._recepta_powrotu_do_widoku()
         assert v.empty_btn.text() == gest_dla_recepty_paska[klucz], (
             f"{nazwa}: pusty stan ({v.empty_btn.text()!r}) i pasek ({klucz}) wskazują różne gesty")
@@ -4429,10 +4437,11 @@ def test_FH4_przycisk_pustego_stanu_WYKONUJE_recepte_obu_rodzajow(obj_view):
     zdanie każe kliknąć). Oba rodzaje, bo mają różne mechanizmy celu: lista perspektyw i przycisk
     zbioru.
 
-    Wykonawca jest JEDEN (`wykonaj_recepte_powrotu`) - ten sam, którego doczeka przycisk recepty
-    paska stanu (TODO-DŁUG(FH-2e) w `app.py`).
+    Wykonawca jest JEDEN (`wykonaj_recepte_powrotu`), a CEL podaje wołający: przycisk pustego stanu
+    pyta o klatki widoku, przycisk recepty paska stanu (TODO-DŁUG(FH-2e) w `app.py`) zapyta o klatki
+    gestu. Klik przez `clicked` sprawdza przy okazji, że `checked: bool` nie wpada w cel.
 
-    Falsyfikator: podepnij przycisk pod `_on_clear_selection` wprost → w perspektywie z trimem
+    Falsyfikator: podepnij przycisk pod `_on_clear_selection` wprost → w perspektywie bez klatek
     klik niczego nie odsłania, bo flag perspektywy ten gest nie tyka."""
     v, _ = obj_view
     wszystkie = len(v._frame_ids)
@@ -4551,15 +4560,15 @@ def _przycisk_panelu_filtra(view, klucz):
 def test_BP5_R1_panelowe_Wyczysc_w_Kalibracji_przestawia_etykiete_na_Przeglad(view):
     """BP-5, bliźniak INNĄ DROGĄ, potwierdzony sondą: przycisk „Wyczyść" W PANELU filtra
     nie przechodzi przez `_on_clear_selection` (`FilterPanel._clear` → `filterApplied` →
-    `_on_filter`), więc po naprawie BP-5 dalej zostawiał „Kalibrację" nad pełnym zbiorem. Właściciel
-    etykiety stoi odtąd także na końcu `_on_filter` - jedynego odbiorcy sygnału panelu.
+    `_on_filter`), więc po naprawie BP-5 dalej zostawiał „Kalibrację" nad pełnym zbiorem. Etykietę
+    rozstrzyga odtąd właściciel na końcu `_refresh`, więc żadna droga przeładowania go nie omija.
 
     Klik idzie w PRAWDZIWY przycisk panelu (po etykiecie z katalogu), nie w slot: bramka wołająca
     slot przeszłaby także wtedy, gdyby przycisk był podpięty gdzie indziej. Przy okazji pinuje, że
     przełączenie perspektywy NIE wysyła sygnału panelu (`set_tree` go nie emituje) - inaczej
     właściciel etykiety działałby w środku `_on_perspective`, zanim stan jest kompletny.
 
-    Falsyfikator: zdejmij wołanie `_etykieta_perspektywy_za_stanem` z `_on_filter` → lista zostaje
+    Falsyfikator: zdejmij wołanie `_etykieta_perspektywy_za_stanem` z `_refresh` → lista zostaje
     na „Kalibracji"."""
     emisje = []
     view.filter_panel.filterApplied.connect(emisje.append)
@@ -4576,13 +4585,14 @@ def test_BP5_R1_panelowe_Wyczysc_w_Kalibracji_przestawia_etykiete_na_Przeglad(vi
 
 
 def test_BP5_R1_zmieniony_filtr_NIE_przestawia_etykiety_dopiero_zdjety_do_zera(view):
-    """Granica R1: właściciel etykiety na końcu `_on_filter` słyszy KAŻDE „Zastosuj", także takie,
-    które filtr perspektywy tylko zmienia. Zmieniony (niepusty) filtr „Kalibracji" nie jest definicją
-    żadnego presetu, więc etykieta zostaje - brak dopasowania to brak zgadywania. Przeskok następuje
-    dopiero wtedy, gdy filtr zejdzie do zera, bo stan jest wtedy definicją „Przeglądu".
+    """Granica BP-5 na drodze panelu: właściciel etykiety w `_refresh` słyszy KAŻDE „Zastosuj",
+    także takie, które filtr perspektywy tylko zmienia. Zmieniony (niepusty) filtr „Kalibracji" nie
+    jest definicją żadnego presetu, więc etykieta zostaje - brak dopasowania to brak zgadywania.
+    Przeskok następuje dopiero wtedy, gdy filtr zejdzie do zera, bo stan jest wtedy definicją
+    „Przeglądu".
 
-    Falsyfikator: zdejmij wołanie z `_on_filter` → czerwienieje druga połowa; przestawiaj
-    w `_on_filter` zawsze na `_PRESET_CZYSTY` → pierwsza."""
+    Falsyfikator: zdejmij wołanie właściciela z `_refresh` → czerwienieje druga połowa;
+    przestawiaj etykietę po każdym przeładowaniu na `_PRESET_CZYSTY` → pierwsza."""
     view.apply_perspective("Kalibracja")
     view.filter_panel._rows[0]["val"].setText("light")                # „dark" → „light"
     _przycisk_panelu_filtra(view, "grid.filter.apply").click()
@@ -4595,13 +4605,14 @@ def test_BP5_R1_zmieniony_filtr_NIE_przestawia_etykiety_dopiero_zdjety_do_zera(v
 
 
 def test_BP5_R1_trim_z_filtrem_panelu_zostaje_a_zapisana_schodzi_na_preset_Z_TA_FLAGA(view, monkeypatch):
-    """Granica R1 przy trimie: filtr z panelu nałożony na „Duplikaty" to zawężenie W RAMACH
-    perspektywy - etykieta zostaje, a trim dalej przycina (flag `_on_filter` nie tyka). Druga połowa
-    idzie tą samą drogą co bliźniak: zapisana perspektywa „duplikaty + filtr" traci filtr panelowym
-    „Wyczyść" i schodzi na preset Z TĄ FLAGĄ, nie na „Przegląd".
+    """Granica BP-5 przy trimie na drodze panelu: filtr z panelu nałożony na „Duplikaty" to zawężenie
+    W RAMACH perspektywy - etykieta zostaje, a trim dalej przycina (flag `_on_filter` nie tyka). Druga
+    połowa idzie tą samą drogą co bliźniak: zapisana perspektywa „duplikaty + filtr" traci filtr
+    panelowym „Wyczyść" i schodzi na preset Z TĄ FLAGĄ, nie na „Przegląd".
 
-    Falsyfikator: zdejmij wołanie z `_on_filter` → druga połowa zostaje na zapisanej nazwie;
-    przestawiaj w `_on_filter` zawsze na `_PRESET_CZYSTY` → pierwsza gubi „Duplikaty"."""
+    Falsyfikator: zdejmij wołanie właściciela z `_refresh` → druga połowa zostaje na zapisanej
+    nazwie; przestawiaj etykietę po każdym przeładowaniu na `_PRESET_CZYSTY` → pierwsza gubi
+    „Duplikaty"."""
     from PySide6.QtWidgets import QInputDialog
     view.apply_perspective(grid_mod.PRESET_DUPS)
     wiersz = view.filter_panel._rows[0]
@@ -4619,3 +4630,179 @@ def test_BP5_R1_trim_z_filtrem_panelu_zostaje_a_zapisana_schodzi_na_preset_Z_TA_
     _przycisk_panelu_filtra(view, "grid.filter.clear").click()
     assert view.combo_persp.currentData() == ("preset", grid_mod.PRESET_DUPS), view.combo_persp.currentText()
     assert view._only_dups and view.count_label.text() == "1 klatka"
+
+
+def _przeglad_z_populacja(con):
+    """Trzy lighty BEZ obiektu - populacja perspektywy „Do przeglądu" - z kartą OBJECT: dwa
+    „LBN 807", jeden „M31". Karta, nie sam nagłówek, bo filtr panelu czyta `cards` (tak jak
+    w firsthandzie, gdzie widok zawężał filtr OBJECT)."""
+    for fid, nazwa in ((21, "LBN 807"), (22, "LBN 807"), (23, "M31")):
+        con.execute("INSERT INTO frame(id, kind, filetype, sha1_data, first_seen_at) "
+                    "VALUES (?, 'light', 'fits', ?, ?)", (fid, f"sha-kolejka{fid}", NOW))
+        con.execute("INSERT INTO header(frame_id, raw_json, object_raw) VALUES (?, '{}', ?)",
+                    (fid, nazwa))
+        con.execute("INSERT INTO cards(frame_id, keyword, idx, value_raw, value_num, value_type) "
+                    "VALUES (?, 'OBJECT', 0, ?, NULL, 'str')", (fid, nazwa))
+        con.execute("INSERT INTO location(frame_id, volume, path, present) VALUES (?, 'V', ?, 1)",
+                    (fid, rf"R:\ASTRO_\LIGHTS\KOLEJKA\k{fid}.fits"))
+    con.commit()
+    return [21, 22, 23]
+
+
+def test_FH4_pusty_stan_w_trimie_Z_KLATKAMI_zdejmuje_zbior_i_zostawia_perspektywe(obj_view):
+    """FH-4, poprawka po firsthandzie (blokada P1, regresja wobec `89ed8bf`). „Do przeglądu" MA
+    klatki, a filtr opróżnia widok - pustkę robi ZBIÓR, nie perspektywa. Pusty stan mówił „Brak
+    klatek w tej perspektywie" i prowadził na „Przegląd", czyli wyrzucał z kolejki na całe archiwum
+    (zmierzone na kopii żywej bazy: 16 901 klatek, a w kolejce czekało 8; powrót kosztował trzy
+    interakcje zamiast jednej). Recepta WIDOKU to „× Wyczyść zbiór": perspektywa zostaje, jej
+    klatki wracają.
+
+    Falsyfikator: pomiń w `_rodzaj_recepty_powrotu` gałąź celu „widok" (trim wygrywa zawsze) →
+    pusty stan wraca do zdania o perspektywie i przejścia na „Przegląd"."""
+    from horreum.gui import i18n
+    v, con = obj_view
+    kolejka = _przeglad_z_populacja(con)
+    v.apply_perspective("Do przeglądu")
+    assert sorted(v._frame_ids) == kolejka, "fikstura nie zbudowała kolejki - brak układu"
+    v.filter_panel.filterApplied.emit({"keyword": "OBJECT", "operator": "eq", "value": "BRAK"})
+    assert v._n_total == 0
+    assert v.empty.text() == i18n.t(grid_mod._EMPTY_FILTER), v.empty.text()
+    assert v.empty_btn.text() == i18n.t("grid.sel.clear_set"), v.empty_btn.text()
+
+    v.empty_btn.click()
+    assert v.combo_persp.currentData() == ("preset", "Do przeglądu"), v.combo_persp.currentText()
+    assert v._only_review and v._filter_tree is None
+    assert sorted(v._frame_ids) == kolejka, "kolejka nie wróciła po recepcie widoku"
+
+
+def test_FH4_po_GESCIE_w_trimie_z_klatkami_pasek_i_pusty_stan_podaja_rozne_PRAWDZIWE_gesty(obj_view):
+    """Układ z firsthandu po REALNYM geście: „Do przeglądu" (3) → filtr OBJECT = LBN 807 (2) →
+    przypisanie obiektu. Nadane klatki wypadają z trimu (kolejka to klatki BEZ obiektu), więc widok
+    jest pusty, a w kolejce czeka trzecia.
+
+    Pasek i pusty stan odpowiadają na DWA pytania i obie odpowiedzi są prawdziwe: pasek mówi
+    o klatkach GESTU - te są już tylko w „Przeglądzie"; pusty stan mówi o klatkach WIDOKU - kolejka
+    ma jeszcze robotę, więc „× Wyczyść zbiór" ją oddaje i perspektywy nie rusza. Test WYKONUJE obie
+    recepty (pustego stanu przyciskiem, paska wykonawcą z celem „gest" - drogą, którą pójdzie
+    FH-2e), bo bramka pytająca o sam napis przepuściłaby receptę, po której nic się nie odsłania.
+
+    Falsyfikator: pomiń gałąź celu „widok" → pusty stan znów wyrzuca z kolejki; każ celowi „gest"
+    też pytać o populację → pasek obiecuje „× Wyczyść zbiór", po którym klatki gestu nie wracają."""
+    from horreum.gui import i18n
+    v, con = obj_view
+    _przeglad_z_populacja(con)
+    v.apply_perspective("Do przeglądu")
+    v.filter_panel.filterApplied.emit({"keyword": "OBJECT", "operator": "eq", "value": "LBN 807"})
+    assert sorted(v._frame_ids) == [21, 22], "filtr nie zawęził kolejki - brak układu"
+    _zaznacz(v, [21, 22])
+    raporty, recepty = _sluchaj_paska(v)
+    v._on_object_recent("LBN807", "LBN", "deep_sky")
+
+    assert v._n_total == 0, "gest nie wypchnął celu z kolejki - brak układu"
+    assert "poza widokiem: 2" in raporty[-1], raporty[-1]
+    assert i18n.t("grid.sel.out_of_view_persp", perspective=i18n.t("perspective.review")) \
+        in recepty[-1], recepty[-1]
+    assert v.empty.text() == i18n.t(grid_mod._EMPTY_FILTER), v.empty.text()
+    assert v.empty_btn.text() == i18n.t("grid.sel.clear_set"), v.empty_btn.text()
+
+    v.empty_btn.click()                                              # recepta WIDOKU
+    assert v.combo_persp.currentData() == ("preset", "Do przeglądu")
+    assert v._frame_ids == [23], "reszta kolejki nie wróciła"
+
+    v.wykonaj_recepte_powrotu(cel=grid_mod._CEL_GEST)                # recepta GESTU (droga FH-2e)
+    assert v.combo_persp.currentData() == ("preset", grid_mod._PRESET_CZYSTY)
+    assert {21, 22} <= set(v._frame_ids), "recepta paska wykonana, a klatki gestu się nie odsłoniły"
+
+
+def test_FH4_wariant_pustego_stanu_idzie_za_POPULACJA_trimu_a_nie_za_samym_trimem(obj_view):
+    """Granica poprawki po firsthandzie. Pustkę robi PERSPEKTYWA, gdy jej populacja jest pusta -
+    wtedy „× Wyczyść zbiór" niczego by nie odsłonił i jedynym gestem jest przejście na „Przegląd",
+    choć facet też zawęża. Ta sama perspektywa z tym samym facetem przechodzi na wariant zbioru,
+    gdy tylko populacja przestaje być pusta: wariant idzie za PRZYCZYNĄ pustki, nie za samą
+    obecnością trimu.
+
+    Falsyfikator: wybieraj wariant zbioru przy każdym zawężeniu zbioru, bez pytania o populację →
+    pierwsza połowa podaje przycisk, po którym nic się nie odsłania; pomiń gałąź celu „widok" →
+    druga połowa zostaje przy perspektywie."""
+    from horreum.gui import i18n
+    v, con = obj_view
+    lighty = {"kind": {"in": [["light", "light"]]}}
+    v.apply_perspective(grid_mod.PRESET_VANISHED)                    # nic jeszcze nie zniknęło
+    v._facet_state = lighty
+    v.refresh()
+    assert v._n_total == 0
+    assert v.empty.text() == i18n.t(grid_mod._EMPTY_PERSP), v.empty.text()
+    assert v.empty_btn.text() == i18n.t("grid.empty_persp_action",
+                                        perspective=i18n.t("perspective.review"))
+    v.empty_btn.click()
+    assert v.combo_persp.currentData() == ("preset", grid_mod._PRESET_CZYSTY) and v._n_total == 4
+
+    con.execute("UPDATE location SET present = 0 WHERE frame_id = 4")  # dark znika z dysku
+    con.commit()
+    v.apply_perspective(grid_mod.PRESET_VANISHED)
+    v._facet_state = lighty                                           # facet wyklucza zniknięty dark
+    v.refresh()
+    assert v._n_total == 0
+    assert v.empty.text() == i18n.t(grid_mod._EMPTY_FILTER), v.empty.text()
+    assert v.empty_btn.text() == i18n.t("grid.sel.clear_set"), v.empty_btn.text()
+    v.empty_btn.click()
+    assert v.combo_persp.currentData() == ("preset", grid_mod.PRESET_VANISHED)
+    assert v._frame_ids == [4], "zniknięta klatka perspektywy nie wróciła"
+
+
+def test_BP5_klik_w_listwie_zdejmujacy_facet_definicji_przestawia_etykiete_zapisanej(obj_view, monkeypatch):
+    """BP-5 domknięty w `_refresh`: zapisana perspektywa zdefiniowana facetem („★ Lighty" =
+    `kind in light`) po jednym kliknięciu `✓ light` (in → ex) pokazywała DOPEŁNIENIE swojej definicji
+    pod swoją nazwą, a `ProjectionDialog` bierze tę nazwę do manifestu. Klik w listwie
+    (`_on_facet_change`) nie wołał właściciela etykiety - od tej zmiany woła go KAŻDE przeładowanie
+    zbioru, więc żadna droga go nie omija.
+
+    Granice, obie z reguły zawierania facetów: klik w INNEJ grupie dokłada zawężenie w ramach
+    „★ Lighty" (jej facet dalej stoi), a klik facetu pod presetem nie ma czego przestawiać.
+
+    Falsyfikator: zdejmij wołanie właściciela z `_refresh` → etykieta zostaje na „★ Lighty" nad
+    dopełnieniem jej definicji."""
+    from PySide6.QtWidgets import QInputDialog
+    v, _ = obj_view
+    v.facet_rail._on_item_clicked(_rail_item(v, "kind", "light"))
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("Lighty", True)))
+    v._save_perspective()
+    assert v.combo_persp.currentData() == ("saved", "Lighty")
+
+    v.facet_rail._on_item_clicked(_rail_item(v, "object", 5))       # INNA grupa: zawężenie w ramach
+    assert "object" in v._facet_state
+    assert v.combo_persp.currentData() == ("saved", "Lighty"), v.combo_persp.currentText()
+
+    v.facet_rail._on_item_clicked(_rail_item(v, "kind", "light"))   # ✓ light: in → ex
+    assert v._facet_state["kind"] == {"ex": [["light", "light"]]}
+    assert v.combo_persp.currentData() == ("preset", grid_mod._PRESET_CZYSTY), \
+        f"dopełnienie definicji pod jej nazwą: {v.combo_persp.currentText()!r}"
+
+    v.facet_rail._on_item_clicked(_rail_item(v, "kind", "light"))   # pod presetem: ex → brak
+    assert "kind" not in v._facet_state
+    assert v.combo_persp.currentData() == ("preset", grid_mod._PRESET_CZYSTY)
+
+
+def test_BP5_BLIZNIAK_odbudowa_listy_perspektyw_zostawia_BIEZACA_pozycje(view, monkeypatch):
+    """Bliźniak BP-5 w `_load_facets`: odbudowa listy perspektyw pod `blockSignals` zostawiała indeks
+    0, a po etapie Dostawy gospodarz woła właśnie `_load_facets()` + `refresh()`
+    (`app._on_stage_finished`). Combo mówiło wtedy „Przegląd" nad zbiorem z trimem - a pusty stan
+    potrafił pod nim proponować przejście na „Przegląd". Pozycja wraca PO DANYCH, także zapisana:
+    jej nazwy nie da się odtworzyć ze stanu, bo właściciel etykiety zna tylko presety.
+
+    Falsyfikator: zdejmij odtwarzanie pozycji w `_load_facets` → „Duplikaty" ratuje jeszcze
+    właściciel w `_refresh`, ale zapisana perspektywa spada na preset."""
+    from PySide6.QtWidgets import QInputDialog
+    view.apply_perspective(grid_mod.PRESET_DUPS)
+    view._load_facets()
+    view.refresh()
+    assert view.combo_persp.currentData() == ("preset", grid_mod.PRESET_DUPS), view.combo_persp.currentText()
+    assert view._only_dups and view.count_label.text() == "1 klatka"
+
+    view.apply_perspective(grid_mod._PRESET_CZYSTY)
+    view.facet_rail._on_item_clicked(_rail_item(view, "kind", "light"))
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("Lighty", True)))
+    view._save_perspective()
+    view._load_facets()
+    view.refresh()
+    assert view.combo_persp.currentData() == ("saved", "Lighty"), view.combo_persp.currentText()

@@ -1126,10 +1126,13 @@ CATALOG = {
     "perspective.to_review": {"pl": "Do przeglądu", "en": "To review"},
 
     # --- pusty grid (rozwiązywane w USE-site; stałe _EMPTY_* trzymają KLUCZ) ---
-    # FH-4: wariant niepustej bazy wybiera TA SAMA decyzja, która składa receptę paska stanu
-    # (`grid._rodzaj_recepty_powrotu`), a przycisk pod zdaniem nosi nazwę tego samego gestu (przy
-    # zbiorze: napis przycisku paska zbioru, `grid.sel.clear_set`). Zdanie gestu nie cytuje - robi to
-    # przycisk. Dawne „zmień filtr lub perspektywę" przy facecie wskazywało gest, który nic nie odsłaniał.
+    # FH-4: wariant niepustej bazy idzie za PRZYCZYNĄ pustki - wybiera go decyzja recepty
+    # (`grid._rodzaj_recepty_powrotu`) pytana o klatki WIDOKU; pasek stanu pyta tę samą metodę
+    # o klatki GESTU i w trimie, który ma klatki, dostaje inną odpowiedź (poprawka po firsthandzie).
+    # Przycisk pod zdaniem nosi nazwę gestu (przy zbiorze: napis przycisku paska zbioru,
+    # `grid.sel.clear_set`), więc zdanie gestu nie cytuje. „Brak klatek w tej perspektywie" pada
+    # wyłącznie wtedy, gdy perspektywa nie ma ani jednej klatki. Dawne „zmień filtr lub
+    # perspektywę" przy facecie wskazywało gest, który nic nie odsłaniał.
     "grid.empty_filter": {
         "pl": "Brak klatek w tym zbiorze - zawężają go facety albo filtr.",
         "en": "No frames in this set - it is narrowed by facets or the filter.",

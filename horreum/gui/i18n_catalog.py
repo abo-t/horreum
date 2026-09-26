@@ -1126,10 +1126,25 @@ CATALOG = {
     "perspective.to_review": {"pl": "Do przeglądu", "en": "To review"},
 
     # --- pusty grid (rozwiązywane w USE-site; stałe _EMPTY_* trzymają KLUCZ) ---
+    # FH-4: wariant niepustej bazy wybiera TA SAMA decyzja, która składa receptę paska stanu
+    # (`grid._rodzaj_recepty_powrotu`), a przycisk pod zdaniem nosi nazwę tego samego gestu (przy
+    # zbiorze: napis przycisku paska zbioru, `grid.sel.clear_set`). Zdanie gestu nie cytuje - robi to
+    # przycisk. Dawne „zmień filtr lub perspektywę" przy facecie wskazywało gest, który nic nie odsłaniał.
     "grid.empty_filter": {
-        "pl": "Brak klatek dla tego filtra — zmień filtr lub perspektywę.",
-        "en": "No frames for this filter — change the filter or perspective.",
+        "pl": "Brak klatek w tym zbiorze - zawężają go facety albo filtr.",
+        "en": "No frames in this set - it is narrowed by facets or the filter.",
     },
+    "grid.empty_persp": {
+        "pl": "Brak klatek w tej perspektywie.",
+        "en": "No frames in this perspective.",
+    },
+    "grid.empty_persp_action": {
+        "pl": "Przełącz na perspektywę „{perspective}”",
+        "en": "Switch to the \"{perspective}\" perspective",
+    },
+    # Brak recepty przy niepustej bazie jest dziś nieosiągalny (bez zawężenia widać wszystko), więc
+    # zdanie nie obiecuje żadnego gestu - przycisk bez gestu kłamałby tak samo jak zła recepta.
+    "grid.empty_view": {"pl": "Brak klatek w tym widoku.", "en": "No frames in this view."},
     "grid.empty_db": {
         "pl": "Baza pusta — przyjmij dostawę (miejsce „Dostawa” w lewym pasku).",
         "en": "Database empty — take a delivery (the „Intake” place in the left bar).",

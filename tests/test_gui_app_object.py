@@ -36,6 +36,7 @@ SECONDARY = UROLE + 1            # „5 klatek  ›" — liczba + znacznik drogi
 TERTIARY = UROLE + 2             # „  ·  cofnięte ręką" — adnotacja we własnej kolumnie
 UPAYLOAD = UROLE + 4
 UINFO = UROLE + 5
+UINDENT = UROLE + 6               # rola `rows.INDENT` (W-5) - poziom wcięcia członu pierwszego (int)
 
 
 @pytest.fixture(scope="session")
@@ -1695,19 +1696,28 @@ def test_polowka_cofnieta_ma_znacznik_NA_POCZATKU_i_kolor(view):
     znaczenie. Odtąd sygnałów są trzy i wszystkie przeżywają obcięcie: znacznik `↺` na POCZĄTKU,
     kolor werdyktu na CAŁYM wierszu i adnotacja we WŁASNEJ kolumnie (człon trzeci).
 
-    Falsyfikatory: zdejmij `↺` z prefiksu → pierwsza asercja; zdejmij `fg` → druga; przenieś
+    ZMIANA W-5 (wizytacja 0810): przynależność podwiersza do rodzica nie jest już spacjami
+    w `DisplayRole` (jechały do schowka/EN i kradły miejsce nazwie przy elizji) - to rola
+    `rows.INDENT` (int), którą delegat zamienia na px z metryki fontu. Do W-5 druga asercja
+    sprawdzała `nazwa.startswith(" ")`; ta prawda ZNIKNĘŁA (sierota i podwiersz mają identyczny
+    `DisplayRole`, różni je wyłącznie dana wcięcia) - zastępuje ją odczyt roli. Pierwsza asercja
+    ZAOSTRZONA z `nazwa.lstrip().startswith(...)` na goły `startswith(...)`: `lstrip()` maskowałby
+    dokładnie regresję, którą W-5 usuwa (powrót wiodącej spacji w tekście).
+
+    Falsyfikatory: zdejmij `↺` z prefiksu → pierwsza asercja; przestań ustawiać `rows.INDENT` dla
+    podwiersza (`_add_review_item(..., indent=0)`) → druga; zdejmij `fg` → czwarta; przenieś
     „cofnięte ręką" z powrotem do tekstu → trzecia."""
     v, con, ids = view
     _cofnij_reka(con, ids["frames"]["objrev1"], NOW_S3)
     v._load_review()
 
     nazwa, drugi, trzeci = _wiersz_kolejki(v, "object_raw_cleared")
-    assert nazwa.lstrip().startswith("↺"), "znacznik nie stoi na POCZĄTKU wiersza"
-    assert nazwa.startswith(" "), "podwiersz nie jest wcięty pod swoją nazwą"
+    assert nazwa.startswith("↺"), "znacznik nie stoi na POCZĄTKU wiersza"
+    it = v.review.item(_select_review_tag(v, "object_raw_cleared"))
+    assert it.data(UINDENT), "podwiersz nie niesie poziomu wcięcia w danych delegata (rows.INDENT)"
     assert "cofnięte ręką" in trzeci and "cofnięte ręką" not in nazwa
     assert "›" in drugi
 
-    it = v.review.item(_select_review_tag(v, "object_raw_cleared"))
     swiezy = v.review.item(_select_review_tag(v, "object_raw"))
     assert it.foreground().color() != swiezy.foreground().color(), \
         "połówka cofnięta ma ten sam kolor co nietknięta — werdykt nie jest widoczny"
@@ -1751,7 +1761,13 @@ def test_SIEROTA_cofnieta_nie_udaje_podwiersza_obcej_nazwy(view):
     Sierota traci WYŁĄCZNIE wcięcie: znacznik i kolor zostają, bo werdykt ręki jest faktem
     niezależnym od sąsiedztwa.
 
-    Falsyfikator: wróć do bezwarunkowego prefiksu → druga asercja czerwienieje."""
+    W-5 DOPISEK (wizytacja 0810): wcięcie od W-5 jest rolą `rows.INDENT`, nie tekstem - asercja
+    tekstowa niżej zostaje (wciąż prawdziwa: `DisplayRole` nigdy nie niesie wiodącej spacji), ale
+    sama w sobie nie łapałaby już regresji „sierota dostała wcięcie", bo tekst sieroty i podwiersza
+    są dziś IDENTYCZNE. Dlatego dochodzi asercja o roli - TA jest właściwym falsyfikatorem.
+
+    Falsyfikatory: wróć do bezwarunkowego prefiksu TEKSTEM → druga asercja czerwienieje; wróć do
+    bezwarunkowego `indent=1` w `_load_review` (rola zamiast tekstu) → trzecia."""
     v, con, ids = view
     _cofnij_reka(con, ids["frames"]["objrev1"], NOW_S3)
     _cofnij_reka(con, ids["frames"]["objrev2"], NOW_S3)     # ...i druga połowa tej samej nazwy
@@ -1761,7 +1777,56 @@ def test_SIEROTA_cofnieta_nie_udaje_podwiersza_obcej_nazwy(view):
     nazwa, _, trzeci = _wiersz_kolejki(v, "object_raw_cleared")
     assert nazwa.startswith("↺"), "znacznik należy się KAŻDEJ cofniętej pozycji"
     assert not nazwa.startswith(" "), "sierota nie ma rodzica na ekranie — wcięcie by go zmyśliło"
+    it = v.review.item(_select_review_tag(v, "object_raw_cleared"))
+    assert not it.data(UINDENT), "sierota nie ma rodzica na ekranie - rola rows.INDENT (W-5) by go zmyśliła"
     assert "cofnięte ręką" in trzeci
+
+
+def test_podwiersz_display_role_bez_wiodacych_bialych_znakow(view):
+    """W-5: `DisplayRole` podwiersza NIE MOŻE zaczynać się białym znakiem w ŻADNYM języku -
+    inaczej wraca dokładnie ten sam dług (kopiuj-wklej ze schowka i wersja EN niosłyby wcięcie
+    tekstem, tak jak dawne `app._WCIECIE`). Sprawdzone w PL i EN, bo `i18n.set_lang` przełącza
+    WSZYSTKIE stałe renderowane przez `_load_review` - literał wcięcia, gdyby wrócił choćby dla
+    jednego języka, jest tu złapany w obu (autouse `_reset_i18n_lang` z `conftest.py` wraca na PL
+    po teście).
+
+    Falsyfikator: w `_load_review` wróć do `etykieta = ("        " if podwiersz else "") +
+    _etykieta_cofnieta(etykieta)` → obie iteracje pętli czerwienieją na pierwszej asercji."""
+    v, con, ids = view
+    _cofnij_reka(con, ids["frames"]["objrev1"], NOW_S3)
+    for lang in ("pl", "en"):
+        i18n.set_lang(lang)
+        v._load_review()
+        nazwa, _, _ = _wiersz_kolejki(v, "object_raw_cleared")
+        assert nazwa == nazwa.lstrip(), \
+            f"[{lang}] DisplayRole podwiersza niesie wiodące białe znaki: {nazwa!r}"
+        it = v.review.item(_select_review_tag(v, "object_raw_cleared"))
+        assert it.data(UINDENT) == 1, \
+            f"[{lang}] podwiersz nie niesie poziomu wcięcia w roli rows.INDENT"
+
+
+def test_BP2_jeden_wlasciciel_glifu_cofniecia(view, monkeypatch):
+    """BP-2 (bramka pakietu, wizytacja 0810): znacznik cofnięcia miał DWÓCH właścicieli -
+    `queries.CLEARED_MARK` i niezależny literał `app._ZNACZNIK`. Podmiana `queries.CLEARED_MARK`
+    MUSI przełożyć się na etykietę kolejki - inaczej `app` wciąż trzyma WŁASNĄ kopię glifu i drugi
+    właściciel żyje dalej pod inną nazwą.
+
+    WIĄZANIE MUSI CZYTAĆ `queries.CLEARED_MARK` PRZEZ ATRYBUT MODUŁU w momencie wołania, nie
+    importem nazwy: `from horreum.gui.queries import CLEARED_MARK` na poziomie modułu związałby
+    wartość PRZED tym monkeypatchem (import kopiuje referencję raz, przy starcie procesu) i ten
+    test pozostałby zielony dla ZEPSUTEJ (podwójnej) implementacji - dlatego `app._etykieta_cofnieta`
+    woła `queries.CLEARED_MARK`, a `queries` jest zaimportowany jako MODUŁ (`from horreum.gui import
+    …, queries, …`), nie jako pojedyncza nazwa.
+
+    Falsyfikator: przywróć w `app.py` niezależny literał (np. `_ZNACZNIK = "↺  "` i użycie go
+    zamiast `_etykieta_cofnieta`) → ta asercja czerwienieje, bo etykieta nie widzi podmiany."""
+    v, con, ids = view
+    monkeypatch.setattr(queries, "CLEARED_MARK", "*")
+    _cofnij_reka(con, ids["frames"]["objrev1"], NOW_S3)
+    v._load_review()
+    nazwa, _, _ = _wiersz_kolejki(v, "object_raw_cleared")
+    assert nazwa.startswith("*"), f"etykieta nie widzi podmiany queries.CLEARED_MARK: {nazwa!r}"
+    assert "↺" not in nazwa, "stary glif przeżył podmianę - drugi właściciel wciąż żyje"
 
 
 def test_polowki_tej_samej_nazwy_sasiaduja_w_widoku(view):

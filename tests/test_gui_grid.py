@@ -524,6 +524,328 @@ def test_facet_rail_zachowuje_scroll_po_przeladowaniu(qapp):
     rail.hide()
 
 
+# ---- listwa: kadr po przeładowaniu (W-6 sufit z wiersza · W-7 + FH-5 wybór w kadrze) ----
+
+def _pompuj(qapp):
+    """Dwa obroty pętli, nie jeden: opóźnione komunikaty układu (nowy sufit grupy, geometria
+    viewportu) wchodzą dopiero w drugim - sonda z jednym `processEvents()` mierzy fikcję. Wzorzec:
+    `_pokazane` w `test_gui_mainwindow`."""
+    qapp.processEvents()
+    qapp.processEvents()
+
+
+def _kadr_rail(qapp, counts, state=None, wys=500):
+    """Listwa POKAZANA (geometria viewportu jest prawdziwa dopiero po `show()`), z pętlą gestu jak
+    we FramesView: `facetsChanged` → `set_data` nowym stanem. Wołający chowa ją w `finally`."""
+    from horreum.gui.facets import FacetRail
+    rail = FacetRail()
+    rail.resize(260, wys)
+    rail.show()
+    rail.facetsChanged.connect(lambda st: rail.set_data(counts, st))
+    rail.set_data(counts, state or {})
+    _pompuj(qapp)
+    return rail
+
+
+def _wiersz_listwy(rail, facet, value):
+    """Wiersz listwy po wartości (`UserRole`), z pominięciem wiersza stanu pustego."""
+    lw = rail._lists[facet]
+    for i in range(lw.count()):
+        dane = lw.item(i).data(Qt.UserRole)
+        if dane is not None and dane[1] == value:
+            return lw.item(i)
+    raise AssertionError(f"brak wartości {value!r} w facecie {facet}")
+
+
+def _w_kadrze(rail, facet, value):
+    """Wiersz wartości W CAŁOŚCI w kadrze listy. Liczony w teście OSOBNO od predykatu listwy -
+    bramka pytająca produkcyjnym predykatem zgodziłaby się z każdym jego błędem. Tylko pion:
+    `visualItemRect` długiej nazwy ma szerokość treści, nie viewportu."""
+    lw = rail._lists[facet]
+    r, kadr = lw.visualItemRect(_wiersz_listwy(rail, facet, value)), lw.viewport().rect()
+    return r.isValid() and r.top() >= kadr.top() and r.bottom() <= kadr.bottom()
+
+
+def _widac_wiersz(rail, facet, value):
+    """Wiersz wartości choćby CZĘŚCIOWO w kadrze - też liczony w teście, osobno od listwy."""
+    lw = rail._lists[facet]
+    r, kadr = lw.visualItemRect(_wiersz_listwy(rail, facet, value)), lw.viewport().rect()
+    return r.isValid() and r.bottom() >= kadr.top() and r.top() <= kadr.bottom()
+
+
+def _kadr_z_ucietym_brzegiem(lw, pelnych=7):
+    """Kadr listy = `pelnych` całych wierszy + POŁOWA następnego, czyli dolny wiersz ucięty na
+    brzegu - zwykły stan długiej grupy, której wysokość daje layout, a nie wielokrotność wiersza.
+    Wysokość z realnego wiersza, nie stała px: układ ma powstać przy każdym foncie."""
+    wiersz = lw.sizeHintForRow(0)
+    lw.setFixedHeight(2 * lw.frameWidth() + pelnych * wiersz + wiersz // 2)
+
+
+def test_facet_rail_krotka_grupa_miesci_CALE_wiersze_przy_kazdym_foncie(qapp):
+    """W-6 (wizytacja 0810): sufit grupy krótkiej był stałą 72 px, a przy wierszu 16 px to 4,375
+    wiersza - Rodzaj pokazywał połówkę `master_dark`, która czyta się jak ostatni wiersz, a nie jak
+    zapowiedź dalszych. Sufit ma być wielokrotnością REALNEGO wiersza, więc bramka mierzy DWA fonty:
+    stała px trafia w całe wiersze najwyżej przy jednym (tu 12 i 19 px, na pulpicie 16 px). Na
+    liście stoi `✓` - pogrubiony wiersz ma mieć tę samą wysokość co reszta.
+
+    Listwa jest WYSOKA, żeby grupy krótkie stały na suficie: bramka mierzy sufit, a nie ściskanie
+    przez layout przy niskim oknie.
+
+    Falsyfikator: przywróć w `_dopasuj_sufit` stałą 72 px → viewport 70 px przy wierszu 12 px
+    (5,83 wiersza); licz sufit tylko w konstruktorze → pada drugi font (48 px przy wierszu 19 px)."""
+    from PySide6.QtGui import QFont
+    from horreum.gui.facets import _SHORT_ROWS
+    wartosci = [(f"W{i}", f"W{i}", 9 - i) for i in range(7)]
+    counts = {"object": [(1, "M31", 1)], "filter": wartosci, "kind": wartosci,
+              "telescope": wartosci, "night": [("2025-01-01", "2025-01-01", 1)]}
+    rail = _kadr_rail(qapp, counts, wys=900)
+    try:
+        bazowy = rail.font()
+        wiersze = set()
+        for skala in (1.0, 1.6):
+            font = QFont(bazowy)
+            font.setPointSizeF(bazowy.pointSizeF() * skala)
+            rail.setFont(font)
+            rail.set_data(counts, {"kind": {"in": [["W0", "W0"]]}})
+            _pompuj(qapp)
+            for facet in ("filter", "kind", "telescope"):
+                lw = rail._lists[facet]
+                wiersz, vp = lw.sizeHintForRow(0), lw.viewport().height()
+                assert lw.height() == lw.maximumHeight(), f"{facet}: grupa nie stoi na suficie"
+                assert vp % wiersz == 0, f"{facet} ×{skala}: viewport {vp} px = {vp / wiersz:.3f} wiersza"
+                assert vp // wiersz == _SHORT_ROWS
+                wiersze.add(wiersz)
+        assert len(wiersze) == 2, f"oba fonty dały wiersz {wiersze} - bramka nie zmierzyła dwóch metryk"
+    finally:
+        rail.hide()
+
+
+def test_facet_rail_klik_SPOZA_kadru_stawia_wybor_w_kadrze(qapp):
+    """W-7 (wizytacja 0810): po kliku `Rodzaj = unknown` wiersz `✓ unknown` stał na y=80 przy
+    viewporcie 70 px - niewidoczny bez scrolla, bo listwa odtwarza scroll sprzed kliku. Klik spoza
+    kadru przychodzi gestem programowym (tak kliknęła wizytacja) albo Enterem szukajki (bramka
+    niżej); przeładowanie wywołane gestem ma postawić klikniętą wartość w kadrze.
+
+    Falsyfikator: zdejmij w `_dopilnuj_kadru` gałąź klikniętej wartości (i `klik` z widzianych)
+    → `✓ unknown` zostaje pod kadrem."""
+    rodzaje = ["light", "dark", "flat", "bias", "master_dark", "master_flat", "unknown"]
+    counts = {"object": [], "filter": [], "telescope": [], "night": [],
+              "kind": [(k, k, 9 - i) for i, k in enumerate(rodzaje)]}
+    rail = _kadr_rail(qapp, counts)
+    try:
+        assert not _w_kadrze(rail, "kind", "unknown"), "wiersz w kadrze już przed klikiem - brak układu"
+        rail._on_item_clicked(_wiersz_listwy(rail, "kind", "unknown"))
+        _pompuj(qapp)
+        assert rail.state() == {"kind": {"in": [["unknown", "unknown"]]}}
+        assert _wiersz_listwy(rail, "kind", "unknown").text() == "✓ unknown"
+        assert _w_kadrze(rail, "kind", "unknown"), "kliknięty wybór poza kadrem"
+    finally:
+        rail.hide()
+
+
+def test_facet_rail_WIDZIANY_wybor_przesuniety_przeladowaniem_wraca_do_kadru(qapp):
+    """W-7, człon „widziany": wybór stał w kadrze, a przeładowanie przesunęło jego wiersz. Tu nad
+    wyborem przybywa 30 wierszy - tak zmienia się sibling-set Obiektu po kliku w sąsiedniej grupie.
+    Scroll wraca na starą pozycję, więc `✓`, na który user patrzył, wypadał pod kadr.
+
+    Falsyfikator: zdejmij w `_dopilnuj_kadru` człon widzianych wyborów → wiersz zostaje pod kadrem."""
+    przed = [(i, f"OBJ{i:03d}", 1) for i in range(60)]
+    po = [(100 + i, f"AAA{i:03d}", 1) for i in range(30)] + przed
+    counts = {"object": przed, "filter": [], "kind": [], "telescope": [], "night": []}
+    stan = {"object": {"in": [[30, "OBJ030"]]}}
+    rail = _kadr_rail(qapp, counts, stan)
+    try:
+        rail._lists["object"].verticalScrollBar().setValue(28)   # user przewinął do wyboru
+        _pompuj(qapp)
+        assert _w_kadrze(rail, "object", 30), "wybór poza kadrem już przed przeładowaniem"
+        rail.set_data(dict(counts, object=po), stan)
+        _pompuj(qapp)
+        assert _w_kadrze(rail, "object", 30), "widziany wybór wypadł z kadru po przeładowaniu"
+    finally:
+        rail.hide()
+
+
+def test_facet_rail_enter_szukajki_na_trafieniu_SPOZA_kadru_odslania_je(qapp):
+    """W-7, droga Enter (R-S3-6): Enter bierze PIERWSZE widoczne trafienie, a ono bywa NAD kadrem -
+    fraza schowała wiersze, scroll został przy końcu listy, więc górne trafienia leżą nad
+    viewportem. Enter kończy w `_on_item_clicked`, więc obowiązuje go reguła klikniętej wartości.
+
+    Falsyfikator: zdejmij w `_dopilnuj_kadru` gałąź klikniętej wartości → `✓ B000` zostaje nad
+    kadrem, choć właśnie ją wybrałeś."""
+    from PySide6.QtTest import QTest
+    obiekty = [(i, f"A{i:03d}", 1) for i in range(50)] + [(100 + i, f"B{i:03d}", 1) for i in range(50)]
+    counts = {"object": obiekty, "filter": [], "kind": [], "telescope": [], "night": []}
+    rail = _kadr_rail(qapp, counts)
+    try:
+        bar = rail._lists["object"].verticalScrollBar()
+        bar.setValue(bar.maximum())
+        rail.search.setText("B")
+        _pompuj(qapp)
+        assert not _w_kadrze(rail, "object", 100), "pierwsze trafienie w kadrze - brak układu"
+        QTest.keyClick(rail.search, Qt.Key_Return)
+        _pompuj(qapp)
+        assert rail.state() == {"object": {"in": [[100, "B000"]]}}
+        assert _w_kadrze(rail, "object", 100), "Enter wybrał wartość, której nie widać"
+    finally:
+        rail.hide()
+
+
+def test_facet_rail_deliberatny_scroll_POZA_wybor_zostaje_po_przeladowaniu(qapp):
+    """Granica W-7: wybór, od którego user SAM odjechał scrollem, nie był widziany ani kliknięty,
+    więc przeładowanie (klik w innej grupie, refresh po geście) nie ściąga listy z powrotem - inaczej
+    odbierałoby userowi listę, którą przed chwilą przewinął.
+
+    Falsyfikator: licz w `_dopilnuj_kadru` każdy aktywny wybór jako widziany → lista wraca do `✓`
+    i pozycja scrolla się zmienia."""
+    counts = {"object": [(i, f"OBJ{i:03d}", 1) for i in range(60)],
+              "filter": [], "kind": [], "telescope": [], "night": []}
+    stan = {"object": {"in": [[5, "OBJ005"]]}}
+    rail = _kadr_rail(qapp, counts, stan)
+    try:
+        assert _w_kadrze(rail, "object", 5)
+        bar = rail._lists["object"].verticalScrollBar()
+        bar.setValue(bar.maximum())                  # user odjeżdża od wyboru
+        _pompuj(qapp)
+        pos = bar.value()
+        assert not _w_kadrze(rail, "object", 5), "wybór dalej w kadrze - brak układu"
+        rail.set_data(counts, stan)                  # przeładowanie bez gestu w tej liście
+        _pompuj(qapp)
+        assert bar.value() == pos
+        assert not _w_kadrze(rail, "object", 5)
+    finally:
+        rail.hide()
+
+
+def test_facet_rail_klik_w_WIDOCZNA_wartosc_w_srodku_listy_nie_rusza_scrolla(qapp):
+    """Granica W-7 od strony kursora (firsthand F4): klik w wartość, która stoi W CAŁOŚCI w kadrze,
+    nie przewija listy przez cały cykl none → in → ex → none - user klika tę samą wartość ponownie
+    i lista nie może uciec spod kursora. Wartość celowo w PIERWSZYM wierszu kadru, nie w jego
+    środku: przewinięcie „na środek" zmieniłoby pozycję.
+
+    Falsyfikator: przewijaj w `_dopilnuj_kadru` klikniętą wartość bez pytania o kadr → pozycja
+    scrolla zmienia się już po pierwszym kliku."""
+    counts = {"object": [(i, f"OBJ{i:03d}", 1) for i in range(60)],
+              "filter": [], "kind": [], "telescope": [], "night": []}
+    rail = _kadr_rail(qapp, counts)
+    try:
+        bar = rail._lists["object"].verticalScrollBar()
+        bar.setValue(20)
+        _pompuj(qapp)
+        assert _w_kadrze(rail, "object", 20)
+        for _ in range(3):
+            rail._on_item_clicked(_wiersz_listwy(rail, "object", 20))
+            _pompuj(qapp)
+            assert bar.value() == 20
+            assert _w_kadrze(rail, "object", 20)
+        assert rail.state() == {}                    # cykl domknięty - trzy kliki, trzy przeładowania
+    finally:
+        rail.hide()
+
+
+def test_facet_rail_klik_w_wiersz_UCIETY_na_brzegu_nie_ucieka_spod_kursora(qapp):
+    """Granica W-7 na brzegu kadru: klik w wiersz UCIĘTY dolną krawędzią długiej listy nie przewija
+    jej. Lista przewija się per WIERSZ (scroll 36 = wiersz 36), więc każde dociągnięcie takiego
+    wiersza do kadru - na środek czy „tylko tyle, ile trzeba" - przesuwa ją o cały wiersz, a drugi
+    klik cyklu ⊖ w TE SAME współrzędne trafia w sąsiada. Wiersz widoczny choćby częściowo jest
+    w kadrze. Kliki idą myszą (`QTest.mouseClick`) w jeden punkt, nie w wartość.
+
+    Falsyfikator: przywróć w `_dopilnuj_kadru` kryterium „w całości" → scroll zmienia się po
+    pierwszym kliku, a pod kursorem staje inna wartość."""
+    from PySide6.QtTest import QTest
+    counts = {"object": [(i, f"OBJ{i:03d}", 1) for i in range(60)],
+              "filter": [], "kind": [], "telescope": [], "night": []}
+    rail = _kadr_rail(qapp, counts)
+    try:
+        lw = rail._lists["object"]
+        _kadr_z_ucietym_brzegiem(lw)
+        _pompuj(qapp)
+        bar = lw.verticalScrollBar()
+        bar.setValue(10)
+        _pompuj(qapp)
+        pos = bar.value()
+        punkt = QPoint(10, lw.viewport().rect().bottom())     # ostatni piksel kadru = wiersz ucięty
+        value = lw.itemAt(punkt).data(Qt.UserRole)[1]
+        assert _widac_wiersz(rail, "object", value) and not _w_kadrze(rail, "object", value), \
+            "dolny wiersz nie jest ucięty - brak układu"
+        QTest.mouseClick(lw.viewport(), Qt.LeftButton, Qt.NoModifier, punkt)
+        _pompuj(qapp)
+        assert rail.state() == {"object": {"in": [[value, f"OBJ{value:03d}"]]}}
+        assert bar.value() == pos, "klik w ucięty wiersz przewinął listę"
+        assert lw.itemAt(punkt).data(Qt.UserRole)[1] == value, "pod kursorem stoi już inna wartość"
+        QTest.mouseClick(lw.viewport(), Qt.LeftButton, Qt.NoModifier, punkt)   # drugi klik cyklu
+        _pompuj(qapp)
+        assert rail.state() == {"object": {"ex": [[value, f"OBJ{value:03d}"]]}}
+        assert bar.value() == pos
+    finally:
+        rail.hide()
+
+
+def test_facet_rail_wybor_UCIETY_na_brzegu_zostaje_przy_kliku_w_INNEJ_grupie(qapp):
+    """Lista, w której nic się nie zmieniło, nie rusza się tylko dlatego, że jej aktywny wybór stoi
+    ucięty na brzegu kadru. Klik w Rodzaju przeładowuje CAŁĄ listwę; Obiekt z wyborem na dolnym
+    brzegu ma zostać tam, gdzie user go zostawił - wybór WIDAĆ, więc nie ma czego przywracać.
+
+    Falsyfikator: przywróć w `_dopilnuj_kadru` kryterium „w całości" → lista Obiekt przewija się
+    na środek po kliku w cudzej grupie."""
+    counts = {"object": [(i, f"OBJ{i:03d}", 1) for i in range(60)],
+              "kind": [("light", "light", 50), ("dark", "dark", 10)],
+              "filter": [], "telescope": [], "night": []}
+    stan = {"object": {"in": [[17, "OBJ017"]]}}
+    rail = _kadr_rail(qapp, counts, stan)
+    try:
+        lw = rail._lists["object"]
+        _kadr_z_ucietym_brzegiem(lw)
+        _pompuj(qapp)
+        bar = lw.verticalScrollBar()
+        bar.setValue(10)                               # 7 całych wierszy: OBJ017 ucięty na dole
+        _pompuj(qapp)
+        pos = bar.value()
+        assert _widac_wiersz(rail, "object", 17) and not _w_kadrze(rail, "object", 17), \
+            "wybór nie stoi ucięty na brzegu - brak układu"
+        rail._on_item_clicked(_wiersz_listwy(rail, "kind", "light"))
+        _pompuj(qapp)
+        assert rail.state() == {"object": {"in": [[17, "OBJ017"]]},
+                                "kind": {"in": [["light", "light"]]}}
+        assert bar.value() == pos, "lista Obiekt uciekła po kliku w innej grupie"
+    finally:
+        rail.hide()
+
+
+def test_facet_rail_po_gescie_osi_wybor_w_PINIE_zostaje_w_kadrze(view, gcon, qapp):
+    """FH-5 (firsthand 0816) na realnym geście osi. Widok zawężony do `NGC3623` mostem z planera
+    (odsłonięcie ustawia scroll pod wybór), potem „Obiekt ▾ → Cofnij przypisanie" na jego klatce:
+    obiekt traci klatki w sibling-secie, więc `✓` schodzi do PINU na wierszu 0, a listwa
+    odtwarzała scroll z chwili odsłonięcia - zmierzone y −576, listwa pokazywała NGC281…NGC4565
+    i ani śladu wyboru.
+
+    Droga: REALNY gest (`_on_object_clear` na zaznaczeniu, jak bramki osi niżej), nie podmiana
+    danych - i bez zmiany w `grid.py`, bo reguła mieszka w listwie.
+
+    Falsyfikator: zdejmij w `_dopilnuj_kadru` człon widzianych wyborów → `✓ NGC3623` na wierszu 0
+    zostaje nad kadrem."""
+    kanony = sorted({f"NGC{1000 + 97 * i}" for i in range(60)} | {"NGC3623"})
+    ids = _lighty_z_obiektami(gcon, kanony)
+    i = kanony.index("NGC3623")
+    oid, fid = 100 + i, ids[i]
+    view.resize(1400, 800)
+    view.show()
+    try:
+        _pompuj(qapp)
+        view.apply_object_facet([(oid, "NGC3623")])
+        _pompuj(qapp)
+        rail, lw = view.facet_rail, view.facet_rail._lists["object"]
+        assert lw.verticalScrollBar().value() > 0, "odsłonięcie nie przewinęło - brak układu FH-5"
+        assert _w_kadrze(rail, "object", oid)
+        _zaznacz(view, [fid])
+        view._on_object_clear()
+        _pompuj(qapp)
+        assert lw.item(0).data(Qt.UserRole)[1] == oid, "wybór nie zszedł do pinu - brak układu FH-5"
+        assert (lw.item(0).text(), lw.item(0).data(rows_mod.SECONDARY)) == ("✓ NGC3623", "(0)")
+        assert _w_kadrze(rail, "object", oid), "✓ po geście osi poza kadrem listwy"
+    finally:
+        view.hide()
+
+
 def test_facet_object_godziny_sufiks_i_guard_ex(qapp):
     """F7 §8: wiersz obiektu „in"/none niesie sufiks godzin (extras) + tooltip per filtr. Guard
     DD-render (recenzja #1): obiekt ⊖ JEST w extras (sibling-set obiektu ZAWIERA wykluczone), a MIMO
@@ -1315,9 +1637,10 @@ def test_pusty_zbior_gasi_wydaj_nie_panele(view):
 
 
 def test_pustostan_rozroznia_filtr_od_pustej_bazy(qapp, tmp_path, monkeypatch):
-    """Wiz F5 #8: pusty grid mówi DWIE różne rzeczy. Na bazie z klatkami „zmień filtr lub
-    perspektywę" jest prawdą; na PUSTEJ bazie wysyłałoby usera w ślepy zaułek (nie ma czego
-    filtrować) — tam komunikat kieruje po dostawę."""
+    """Wiz F5 #8: pusty grid mówi DWIE różne rzeczy. Na bazie z klatkami komunikat wskazuje
+    zawężenie, które nie wpuściło klatek (od FH-4 tym samym gestem co recepta paska); na PUSTEJ
+    bazie takie wskazanie wysyłałoby usera w ślepy zaułek (nie ma czego filtrować) - tam
+    komunikat kieruje po dostawę."""
     from PySide6.QtCore import QSettings
     monkeypatch.setattr(QSettings, "value", lambda self, k, d=None: d)
     monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: None)
@@ -2737,7 +3060,7 @@ def test_przy_DWOCH_zawezeniach_recepta_podaje_JEDEN_gest_ktory_zdejmuje_oba(obj
     Bramka pilnuje przy okazji, że recepta nie proponuje wtedy przycisku zbioru: on zdejmuje
     połowę zawężenia, więc po jego kliknięciu klatki DALEJ by nie wróciły.
 
-    Falsyfikator: w `_recepta_powrotu_do_widoku` postaw `_zbior_zawezony()` przed `_trim_active`
+    Falsyfikator: w `_rodzaj_recepty_powrotu` postaw `_zbior_zawezony()` przed `_trim_aktywny()`
     → recepta wraca do wariantu, który nie odsłania."""
     from horreum.gui import i18n
     v, con = obj_view
@@ -3881,3 +4204,418 @@ def test_listwa_facetow_dostaje_KOMPLET_trimow_perspektywy():
     assert "sib &=" not in rail, (
         "`&=` na sibling-secie przycina MEMOIZOWANE uniwersum w miejscu (`_memo_leaf_fns`), "
         "więc kolejny facet tej samej pętli liczy na zbiorze przyciętym przez poprzednika")
+
+
+# ═════════════════════════ PACZKA B - FH-4 (pusty stan czyta receptę) · BP-5 (etykieta perspektywy)
+
+
+def _pokazany(v):
+    """Widok z REALNĄ widocznością. `isVisible()` niepokazanego okna jest zawsze fałszem, więc
+    pytanie „czy przycisk pustego stanu widać" bez `show()` przechodziłoby niezależnie od kodu.
+    Dwa obroty pętli, nie jeden - wzorzec `_pokazane()` z `test_gui_mainwindow`."""
+    v.resize(1200, 800)
+    v.show()
+    QApplication.processEvents()
+    QApplication.processEvents()
+    return v
+
+
+def test_BP5_wyczysc_zbior_w_Kalibracji_przestawia_etykiete_na_Przeglad(view):
+    """BP-5 (bramka pakietu 0816) - hipoteza POTWIERDZONA tym testem na kodzie sprzed poprawki.
+    Preset „Kalibracja" zawęża FILTREM, nie trimem (`PRESETS`), więc „× Wyczyść zbiór" zdejmuje
+    właśnie jego definicję, a lista perspektyw dalej mówiła „Kalibracja" nad pełnym zbiorem.
+    Etykieta idzie też w świat (`ProjectionDialog(perspektywa=combo.currentText())`).
+
+    Grupowanie ZOSTAJE: nie należy do definicji zbioru, a lista przeskakuje bez sygnału -
+    `_on_perspective` zresetowałby grupowanie i przeładował zbiór drugi raz.
+
+    Falsyfikator: zdejmij wołanie `_etykieta_perspektywy_za_stanem` z `_on_clear_selection`
+    → lista zostaje na „Kalibracji"; zdejmij `blockSignals` → grupowanie spada do „bez grupowania"."""
+    view.apply_perspective("Kalibracja")
+    assert view.combo_persp.currentData() == ("preset", "Kalibracja")
+    assert view.combo_group.currentData() == "kind", "preset nie ustawił grupowania - układ nie powstał"
+    assert view._filter_tree is not None
+
+    view.sel_bar.btn_clear.click()
+    assert view._filter_tree is None and view._facet_state == {}
+    assert view.count_label.text() == "4 klatki"
+    assert view.combo_persp.currentData() == ("preset", grid_mod._PRESET_CZYSTY), \
+        f"etykieta kłamie o zbiorze: {view.combo_persp.currentText()!r}"
+    assert view.combo_group.currentData() == "kind", "przestawienie etykiety zresetowało grupowanie"
+
+
+def test_BP5_z_trimem_etykieta_trafia_w_preset_Z_TA_FLAGA_a_nie_w_Przeglad(view, monkeypatch):
+    """Doprecyzowanie BP-5: dosłowne „po wyczyszczeniu zawsze Przegląd" kłamałoby od drugiej strony.
+    „× Wyczyść zbiór" NIE tyka flag perspektywy (kontrakt `_on_clear_selection` - od niego zależy
+    recepta powrotu), więc po geście w „Duplikatach" zbiór dalej JEST duplikatami.
+
+    Dwie połowy: preset z trimem zostaje sobą, a ZAPISANA perspektywa z tym samym trimem i facetem
+    przestaje pasować (facet zdjęty) i schodzi na preset Z TĄ FLAGĄ - jedyny, którego definicja
+    zgadza się ze stanem.
+
+    Falsyfikator: przestawiaj po wyczyszczeniu zawsze na `_PRESET_CZYSTY` → czerwienieje pierwsza
+    połowa; zdejmij wołanie właściciela etykiety → druga."""
+    from PySide6.QtWidgets import QInputDialog
+    view.apply_perspective(grid_mod.PRESET_DUPS)
+    view.facet_rail._on_item_clicked(_rail_item(view, "kind", "light"))
+    view.sel_bar.btn_clear.click()
+    assert view.combo_persp.currentData() == ("preset", grid_mod.PRESET_DUPS), view.combo_persp.currentText()
+    assert view._only_dups and view.count_label.text() == "1 klatka"      # trim dalej przycina
+
+    view.facet_rail._on_item_clicked(_rail_item(view, "kind", "light"))
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("Duble lightów", True)))
+    view._save_perspective()
+    assert view.combo_persp.currentData() == ("saved", "Duble lightów")
+    view.sel_bar.btn_clear.click()
+    assert view.combo_persp.currentData() == ("preset", grid_mod.PRESET_DUPS), view.combo_persp.currentText()
+    assert view._only_dups and view.count_label.text() == "1 klatka"
+
+
+def test_BP5_zapisana_z_facetem_schodzi_na_preset_zgodny_a_bez_dopasowania_NIE_zgaduje(
+        view, monkeypatch, gcon):
+    """Zapisana perspektywa niesie facety w DEFINICJI (`_save_perspective`), więc „× Wyczyść zbiór"
+    zdejmuje ją całą - „★ Lighty" nad pełnym zbiorem mówiłoby o widoku, którego już nie ma. Stan bez
+    flag i bez filtra to definicja „Przeglądu".
+
+    Druga połowa pinuje „nie zgaduj": perspektywa z DWIEMA flagami nie ma presetu o tej definicji
+    (każdy preset niesie najwyżej jedną flagę, a `_save_perspective` bierze flagi ze stanu, więc taka
+    powstaje tylko spoza GUI) - etykieta zostaje, zamiast udawać dopasowanie.
+
+    Falsyfikator: zdejmij wołanie właściciela etykiety z `_on_clear_selection` → czerwienieje
+    pierwsza połowa; przestaw przy braku dopasowania na `_PRESET_CZYSTY` → druga."""
+    from PySide6.QtWidgets import QInputDialog
+
+    from horreum import repo
+    view.facet_rail._on_item_clicked(_rail_item(view, "kind", "light"))
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("Lighty", True)))
+    view._save_perspective()
+    assert view.combo_persp.currentData() == ("saved", "Lighty")
+    view.sel_bar.btn_clear.click()
+    assert view.count_label.text() == "4 klatki"
+    assert view.combo_persp.currentData() == ("preset", grid_mod._PRESET_CZYSTY), view.combo_persp.currentText()
+
+    repo.save_perspective(gcon, name="Dwie flagi", now=NOW, spec={
+        "filter": None, "group_by": None, "only_dups": True, "only_review": True,
+        "facets": {"kind": {"in": [["light", "light"]]}}})
+    view._load_facets()
+    view.combo_persp.setCurrentIndex(next(i for i in range(view.combo_persp.count())
+                                          if view.combo_persp.itemData(i) == ("saved", "Dwie flagi")))
+    assert view._only_dups and view._only_review and view._facet_state, "perspektywa się nie nałożyła"
+    view.sel_bar.btn_clear.click()
+    assert view._only_dups and view._only_review                          # flagi nietknięte
+    assert view.combo_persp.currentData() == ("saved", "Dwie flagi"), view.combo_persp.currentText()
+
+
+def test_BP5_BLIZNIAK_most_planera_nie_zostawia_etykiety_poprzedniej_perspektywy(view, gcon):
+    """Bliźniak bez ID, znaleziony przy planowaniu paczki i POTWIERDZONY tym testem przed poprawką:
+    most „Pokaż klatki celu" (`apply_object_facet`) zeruje flagi i filtr - jego docstring od początku
+    obiecuje powrót do perspektywy pełnej - a listę zostawiał. Z „Duplikatów" most pokazywał klatki
+    celu pod etykietą „Duplikaty".
+
+    Facet mostu NIE blokuje dopasowania do presetu: to zawężenie W RAMACH perspektywy, jak klik
+    w listwie. Ta sama reguła zdejmuje po „× Wyczyść zbiór" etykietę zapisanej perspektywy.
+
+    Falsyfikator: zdejmij wołanie właściciela etykiety z `apply_object_facet` → lista zostaje na
+    „Duplikatach"; porównuj facety dokładnie zamiast przez zawieranie → żaden preset nie pasuje
+    i etykieta też zostaje."""
+    gcon.execute("INSERT INTO object (id, canon, kind) VALUES (1, 'IC410', 'deep_sky')")
+    gcon.execute("UPDATE frame SET object_id = 1 WHERE id IN (1, 2)")
+    gcon.commit()
+    view.apply_perspective(grid_mod.PRESET_DUPS)
+    view.apply_object_facet([(1, "IC410")])
+    assert view.count_label.text() == "2 klatki"                          # klatki celu, nie duplikaty
+    assert view._facet_state == {"object": {"in": [[1, "IC410"]]}}       # facet mostu nietknięty
+    assert view.combo_persp.currentData() == ("preset", grid_mod._PRESET_CZYSTY), \
+        f"most pokazuje klatki celu pod cudzą etykietą: {view.combo_persp.currentText()!r}"
+
+
+def test_FH4_pusty_stan_ma_warianty_a_przycisk_TYLKO_przy_recepcie(obj_view, tmp_path):
+    """FH-4 (firsthand 0816, P2): pusty stan podawał receptę SPRZECZNĄ z tą, którą zdanie po geście
+    podało pięć sekund wcześniej - pasek mówił „odsłoni je „× Wyczyść zbiór”", a centrum ekranu
+    trwale „zmień filtr lub perspektywę". Niepusta baza bierze odtąd zdanie i gest z TEJ SAMEJ
+    decyzji co pasek (`_rodzaj_recepty_powrotu`), a przycisk stoi tylko tam, gdzie jest gest:
+
+      - trim perspektywy - zdanie o perspektywie + przełączenie na „Przegląd";
+      - zawężony zbiór - zdanie o zbiorze + „× Wyczyść zbiór", TA SAMA etykieta co na pasku zbioru;
+      - brak recepty przy niepustej bazie (dziś nieosiągalny) - uczciwe zdanie, bez obietnicy gestu;
+      - pusta baza - kierunek po dostawę, bez przycisku (nie ma czego odsłaniać).
+
+    Widżety mierzone na POKAZANYM widoku, a przy zbiorze niepustym pusty stan znika razem z przyciskiem.
+
+    Falsyfikator: podaj pustemu stanowi przy niepustej bazie zawsze `_EMPTY_FILTER` bez przycisku
+    (stan sprzed poprawki) → czerwienieją warianty trimu i zbioru."""
+    from horreum.gui import i18n
+    from horreum.gui.grid import FramesView
+    v, _ = obj_view
+    _pokazany(v)
+    try:
+        assert not v.empty.isVisible() and not v.empty_btn.isVisible() and v.table.isVisible()
+
+        v.apply_perspective(grid_mod.PRESET_VANISHED)                    # baza bez zniknięć
+        QApplication.processEvents()
+        assert v._n_total == 0 and v.empty.isVisible() and not v.table.isVisible()
+        assert v.empty.text() == i18n.t(grid_mod._EMPTY_PERSP)
+        assert v.empty_btn.isVisible()
+        assert v.empty_btn.text() == i18n.t("grid.empty_persp_action",
+                                            perspective=i18n.t("perspective.review"))
+
+        v.apply_perspective(grid_mod._PRESET_CZYSTY)
+        v.filter_panel.filterApplied.emit({"keyword": "OBJECT", "operator": "eq", "value": "BRAK"})
+        QApplication.processEvents()
+        assert v._n_total == 0 and v.empty.text() == i18n.t(grid_mod._EMPTY_FILTER)
+        assert v.empty_btn.isVisible() and v.empty_btn.text() == v.sel_bar.btn_clear.text()
+
+        # Wariant dziś nieosiągalny (niepusta baza bez zawężenia pokazuje klatki) - wymuszony
+        # cieniem decyzji na instancji, żeby przejść przez PRAWDZIWY `_refresh`.
+        v._rodzaj_recepty_powrotu = lambda: None
+        v.refresh()
+        QApplication.processEvents()
+        assert v.empty.isVisible() and v.empty.text() == i18n.t(grid_mod._EMPTY_VIEW)
+        assert not v.empty_btn.isVisible(), "przycisk bez recepty obiecuje gest, którego nie ma"
+        del v._rodzaj_recepty_powrotu
+
+        v.apply_perspective(grid_mod._PRESET_CZYSTY)
+        QApplication.processEvents()
+        assert v._n_total == 4 and not v.empty.isVisible() and not v.empty_btn.isVisible()
+    finally:
+        v.close()
+
+    con = db.open_db(str(tmp_path / "pusta.db"))           # QSettings izoluje już fikstura
+    try:
+        pusty = _pokazany(FramesView(con, now_fn=None))
+        try:
+            assert pusty.empty.isVisible() and pusty.empty.text() == i18n.t(grid_mod._EMPTY_DB)
+            assert not pusty.empty_btn.isVisible(), "pusta baza nie ma czego odsłaniać"
+        finally:
+            pusty.close()
+    finally:
+        con.close()
+
+
+def test_FH4_pusty_stan_i_pasek_podaja_TEN_SAM_gest_w_kazdym_ukladzie(obj_view):
+    """JEDNA DECYZJA, DWIE POWIERZCHNIE. Pusty stan i recepta paska mają własne brzmienia (pasek
+    mówi o klatkach wypchniętych gestem, pusty stan nie ma się do czego odnieść), ale gest wybiera
+    jedna metoda. Bramka przechodzi przez trzy układy zawężeń, w tym OBA naraz - tam kolejność
+    ma znaczenie (przełączenie perspektywy zdejmuje też facety, więc wygrywa), a druga kopia
+    predykatu w innej kolejności rozjechałaby powierzchnie właśnie tu.
+
+    Falsyfikator: zastąp w `_ustaw_pusty_stan` wołanie decyzji własnym łańcuchem
+    `_zbior_zawezony()` przed `_trim_aktywny()` → układ „oba" podaje dwa różne gesty."""
+    from horreum.gui import i18n
+    v, _ = obj_view
+    gest_dla_recepty_paska = {
+        "grid.sel.out_of_view_persp": i18n.t("grid.empty_persp_action",
+                                             perspective=i18n.t("perspective.review")),
+        "grid.sel.out_of_view_set": i18n.t("grid.sel.clear_set"),
+    }
+    uklady = {
+        "trim": (grid_mod.PRESET_VANISHED, {}, None),
+        "zbior": (grid_mod._PRESET_CZYSTY, {}, {"keyword": "OBJECT", "operator": "eq", "value": "BRAK"}),
+        "oba": (grid_mod.PRESET_VANISHED, {"kind": {"in": [["light", "light"]]}}, None),
+    }
+    for nazwa, (perspektywa, facety, filtr) in uklady.items():
+        v.apply_perspective(perspektywa)
+        v._facet_state, v._filter_tree = facety, filtr
+        v.refresh()
+        assert v._n_total == 0, f"{nazwa}: układ nie opróżnił widoku"
+        klucz, _ = v._recepta_powrotu_do_widoku()
+        assert v.empty_btn.text() == gest_dla_recepty_paska[klucz], (
+            f"{nazwa}: pusty stan ({v.empty_btn.text()!r}) i pasek ({klucz}) wskazują różne gesty")
+
+
+def test_FH4_przycisk_pustego_stanu_WYKONUJE_recepte_obu_rodzajow(obj_view):
+    """Przycisk nie tylko cytuje receptę, ale ją WYKONUJE - bramka pytająca o sam napis przeszłaby
+    także dla przycisku, po którym nic się nie odsłania (lekcja recepty paska: test klika to, co
+    zdanie każe kliknąć). Oba rodzaje, bo mają różne mechanizmy celu: lista perspektyw i przycisk
+    zbioru.
+
+    Wykonawca jest JEDEN (`wykonaj_recepte_powrotu`) - ten sam, którego doczeka przycisk recepty
+    paska stanu (TODO-DŁUG(FH-2e) w `app.py`).
+
+    Falsyfikator: podepnij przycisk pod `_on_clear_selection` wprost → w perspektywie z trimem
+    klik niczego nie odsłania, bo flag perspektywy ten gest nie tyka."""
+    v, _ = obj_view
+    wszystkie = len(v._frame_ids)
+    assert wszystkie == 4
+
+    v.apply_perspective(grid_mod.PRESET_VANISHED)
+    assert v._n_total == 0
+    v.empty_btn.click()
+    assert v.combo_persp.currentData() == ("preset", grid_mod._PRESET_CZYSTY)
+    assert len(v._frame_ids) == wszystkie, "recepta perspektywy wykonana, a zbiór się nie odsłonił"
+
+    v.filter_panel.filterApplied.emit({"keyword": "OBJECT", "operator": "eq", "value": "BRAK"})
+    assert v._n_total == 0
+    v.empty_btn.click()
+    assert v._filter_tree is None and len(v._frame_ids) == wszystkie, \
+        "recepta zbioru wykonana, a zbiór się nie odsłonił"
+
+
+def test_FH4_firsthand_facet_gest_pusty_stan_klik_i_klatki_wracaja_ZAZNACZONE(obj_view):
+    """Scenariusz z firsthandu 0816 odtworzony krok po kroku. Facet „Obiekt" zawęża widok do dwóch
+    klatek, cofnięcie przypisania wypycha OBIE (nagrobek wypada z facetu, bo ten JOIN-uje po
+    `f.object_id`), więc widok jest pusty. Pasek mówi „odsłoni je „× Wyczyść zbiór”" - a pusty
+    stan, który zostaje na ekranie po zgaśnięciu paska, podaje TEN SAM gest, przyciskiem.
+
+    Klik kończy drogę, nie jej połowę: klatki gestu wracają ZAZNACZONE (mechanizm `_cel_gestu`,
+    FC-2), więc drugi człon recepty - „potem przywrócisz: Obiekt → …" - jest od razu wykonalny.
+
+    Falsyfikator: podaj pustemu stanowi przy niepustej bazie zawsze `_EMPTY_FILTER` bez przycisku
+    → brak gestu paska na ekranie; zdejmij odłożenie celu w `_refresh` → klatki wracają
+    niezaznaczone, a kontrolka „Obiekt" stoi wygaszona."""
+    from horreum.gui import i18n
+    v, con = obj_view
+    con.execute("INSERT INTO object(id, canon, catalog, kind) VALUES (6, 'M42', 'M', 'deep_sky')")
+    con.execute("UPDATE frame SET object_id = 6 WHERE id = 3")     # facet NGC6960 = klatki 1 i 2
+    con.commit()
+    _pokazany(v)
+    try:
+        v.apply_object_facet([(5, "NGC6960")])
+        assert v._n_total == 2
+        _zaznacz(v, [1, 2])
+        raporty, recepty = _sluchaj_paska(v)
+        v._on_object_clear()
+        QApplication.processEvents()
+
+        assert v._n_total == 0, "gest nie wypchnął celu - bramka nie odtwarza firsthandu"
+        assert "poza widokiem: 2" in raporty[-1], raporty[-1]
+        gest = i18n.t("grid.sel.clear_set")
+        assert gest in recepty[-1], recepty[-1]
+        assert v.empty.isVisible() and v.empty.text() == i18n.t(grid_mod._EMPTY_FILTER), v.empty.text()
+        assert v.empty_btn.isVisible() and v.empty_btn.text() == gest, v.empty_btn.text()
+
+        v.empty_btn.click()
+        QApplication.processEvents()
+        assert not v.empty.isVisible() and v.table.isVisible()
+        assert {r["frame_id"] for r in v._selected_data_rows()} == {1, 2}, "cel gestu zgubiony"
+        assert v.sel_bar.btn_object.isEnabled(), "drugi człon recepty dalej niewykonalny"
+    finally:
+        v.close()
+
+
+def test_FH4_pusty_stan_renderuje_EN_z_katalogu(qapp, tmp_path, monkeypatch):
+    """Rollout i18n: zdania i gesty pustego stanu idą z KATALOGU. Pod EN oba warianty z receptą
+    mówią po angielsku, a przycisk zbioru nosi tę samą etykietę co przycisk paska zbioru także
+    w drugim języku - jedna nazwa gestu nie może się rozjechać przy tłumaczeniu.
+
+    Falsyfikator: wpisz zdanie pustego stanu literałem zamiast przez `i18n.t` → pod EN zostaje
+    polskie."""
+    from PySide6.QtCore import QSettings
+    monkeypatch.setattr(QSettings, "value", lambda self, k, d=None: d)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: None)
+    from horreum.gui import i18n
+    from horreum.gui.grid import FramesView
+    i18n.set_lang("en")
+    con = db.open_db(str(tmp_path / "en_pusty.db"))
+    _seed(con)
+    try:
+        v = FramesView(con, now_fn=None)
+        v.apply_perspective(grid_mod.PRESET_RETIRED)                     # nikt niczego nie wycofał
+        assert v._n_total == 0
+        assert v.empty.text() == "No frames in this perspective."
+        assert v.empty_btn.text() == 'Switch to the "Review" perspective'
+
+        v.apply_perspective(grid_mod._PRESET_CZYSTY)
+        v.filter_panel.filterApplied.emit({"keyword": "OBJECT", "operator": "eq", "value": "NONE"})
+        assert v._n_total == 0
+        assert v.empty.text() == "No frames in this set - it is narrowed by facets or the filter."
+        assert v.empty_btn.text() == "× Clear set" == v.sel_bar.btn_clear.text()
+    finally:
+        con.close()
+
+
+def test_FH4_KAZDE_zdanie_pustego_stanu_ma_klucz_w_katalogu():
+    """BRAMKA KLASY. Zdania pustego stanu idą do `i18n.t` ZMIENNĄ (stałe `_EMPTY_*`), a kolektor
+    bramki i18n zbiera wyłącznie literały. Literówka w stałej renderowałaby surowy klucz - a testy
+    porównujące `empty.text()` z `i18n.t(stała)` PRZESZŁYBY, bo obie strony rozwiązują ten sam
+    błędny klucz na ten sam surowy napis.
+
+    Falsyfikator: przekręć literę w którejkolwiek stałej `_EMPTY_*` → test czerwienieje."""
+    from horreum.gui.i18n_catalog import CATALOG
+    for stala in ("_EMPTY_DB", "_EMPTY_FILTER", "_EMPTY_PERSP", "_EMPTY_VIEW"):
+        klucz = getattr(grid_mod, stala)
+        assert klucz in CATALOG, f"{stala} wskazuje klucz spoza katalogu: {klucz!r}"
+
+
+def _przycisk_panelu_filtra(view, klucz):
+    """Przycisk panelu filtra po ETYKIECIE z katalogu - ta sama droga co klik w GUI. Panel trzyma
+    „Zastosuj" i „Wyczyść" w zmiennych lokalnych konstruktora, więc szukamy ich wśród dzieci."""
+    from PySide6.QtWidgets import QPushButton
+
+    from horreum.gui import i18n
+    trafione = [b for b in view.filter_panel.findChildren(QPushButton) if b.text() == i18n.t(klucz)]
+    assert len(trafione) == 1, f"panel ma {len(trafione)} przycisków „{i18n.t(klucz)}”"
+    return trafione[0]
+
+
+def test_BP5_R1_panelowe_Wyczysc_w_Kalibracji_przestawia_etykiete_na_Przeglad(view):
+    """BP-5, bliźniak INNĄ DROGĄ, potwierdzony sondą: przycisk „Wyczyść" W PANELU filtra
+    nie przechodzi przez `_on_clear_selection` (`FilterPanel._clear` → `filterApplied` →
+    `_on_filter`), więc po naprawie BP-5 dalej zostawiał „Kalibrację" nad pełnym zbiorem. Właściciel
+    etykiety stoi odtąd także na końcu `_on_filter` - jedynego odbiorcy sygnału panelu.
+
+    Klik idzie w PRAWDZIWY przycisk panelu (po etykiecie z katalogu), nie w slot: bramka wołająca
+    slot przeszłaby także wtedy, gdyby przycisk był podpięty gdzie indziej. Przy okazji pinuje, że
+    przełączenie perspektywy NIE wysyła sygnału panelu (`set_tree` go nie emituje) - inaczej
+    właściciel etykiety działałby w środku `_on_perspective`, zanim stan jest kompletny.
+
+    Falsyfikator: zdejmij wołanie `_etykieta_perspektywy_za_stanem` z `_on_filter` → lista zostaje
+    na „Kalibracji"."""
+    emisje = []
+    view.filter_panel.filterApplied.connect(emisje.append)
+    view.apply_perspective("Kalibracja")
+    assert emisje == [], "przełączenie perspektywy wysłało sygnał panelu"
+    assert view.combo_group.currentData() == "kind", "preset nie ustawił grupowania - układ nie powstał"
+
+    _przycisk_panelu_filtra(view, "grid.filter.clear").click()
+    assert emisje == [None], "przycisk panelu nie poszedł drogą sygnału"
+    assert view._filter_tree is None and view.count_label.text() == "4 klatki"
+    assert view.combo_persp.currentData() == ("preset", grid_mod._PRESET_CZYSTY), \
+        f"etykieta kłamie o zbiorze: {view.combo_persp.currentText()!r}"
+    assert view.combo_group.currentData() == "kind", "przestawienie etykiety zresetowało grupowanie"
+
+
+def test_BP5_R1_zmieniony_filtr_NIE_przestawia_etykiety_dopiero_zdjety_do_zera(view):
+    """Granica R1: właściciel etykiety na końcu `_on_filter` słyszy KAŻDE „Zastosuj", także takie,
+    które filtr perspektywy tylko zmienia. Zmieniony (niepusty) filtr „Kalibracji" nie jest definicją
+    żadnego presetu, więc etykieta zostaje - brak dopasowania to brak zgadywania. Przeskok następuje
+    dopiero wtedy, gdy filtr zejdzie do zera, bo stan jest wtedy definicją „Przeglądu".
+
+    Falsyfikator: zdejmij wołanie z `_on_filter` → czerwienieje druga połowa; przestawiaj
+    w `_on_filter` zawsze na `_PRESET_CZYSTY` → pierwsza."""
+    view.apply_perspective("Kalibracja")
+    view.filter_panel._rows[0]["val"].setText("light")                # „dark" → „light"
+    _przycisk_panelu_filtra(view, "grid.filter.apply").click()
+    assert view._filter_tree is not None
+    assert view._filter_tree != grid_mod.PRESETS["Kalibracja"]["filter"], "filtr się nie zmienił - brak układu"
+    assert view.combo_persp.currentData() == ("preset", "Kalibracja"), view.combo_persp.currentText()
+
+    _przycisk_panelu_filtra(view, "grid.filter.clear").click()
+    assert view.combo_persp.currentData() == ("preset", grid_mod._PRESET_CZYSTY), view.combo_persp.currentText()
+
+
+def test_BP5_R1_trim_z_filtrem_panelu_zostaje_a_zapisana_schodzi_na_preset_Z_TA_FLAGA(view, monkeypatch):
+    """Granica R1 przy trimie: filtr z panelu nałożony na „Duplikaty" to zawężenie W RAMACH
+    perspektywy - etykieta zostaje, a trim dalej przycina (flag `_on_filter` nie tyka). Druga połowa
+    idzie tą samą drogą co bliźniak: zapisana perspektywa „duplikaty + filtr" traci filtr panelowym
+    „Wyczyść" i schodzi na preset Z TĄ FLAGĄ, nie na „Przegląd".
+
+    Falsyfikator: zdejmij wołanie z `_on_filter` → druga połowa zostaje na zapisanej nazwie;
+    przestawiaj w `_on_filter` zawsze na `_PRESET_CZYSTY` → pierwsza gubi „Duplikaty"."""
+    from PySide6.QtWidgets import QInputDialog
+    view.apply_perspective(grid_mod.PRESET_DUPS)
+    wiersz = view.filter_panel._rows[0]
+    wiersz["kw"].setCurrentText("OBJECT")
+    wiersz["op"].setCurrentIndex([opc for _, opc in grid_mod.OPERATORS].index("eq"))
+    wiersz["val"].setText("M51")
+    _przycisk_panelu_filtra(view, "grid.filter.apply").click()
+    assert view._filter_tree is not None
+    assert view.combo_persp.currentData() == ("preset", grid_mod.PRESET_DUPS), view.combo_persp.currentText()
+    assert view._only_dups and view.count_label.text() == "1 klatka"      # bez trimu M51 = 2 klatki
+
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("Duble M51", True)))
+    view._save_perspective()
+    assert view.combo_persp.currentData() == ("saved", "Duble M51")
+    _przycisk_panelu_filtra(view, "grid.filter.clear").click()
+    assert view.combo_persp.currentData() == ("preset", grid_mod.PRESET_DUPS), view.combo_persp.currentText()
+    assert view._only_dups and view.count_label.text() == "1 klatka"

@@ -12,15 +12,20 @@ tekstu wiersza przepycha go poza szerokość listy i zlewa się z nazwą.
 - wiz P1 #4 (listwa facetów, RESZTKA po sklejeniu w jeden run): licznik jechał za szerokością
   ogona godzin → człon TRZECI, niżej.
 - wiz P1 #6 (lista zadań): pogrubienie liczby było ustawieniem CAŁEJ listy → rola `STRONG`, niżej.
+- W-5 (wizytacja 0810, kolejka przeglądu obiektu): wcięcie podwiersza było SPACJAMI w `DisplayRole`
+  - jechało do schowka i do wersji EN, a przy elizji zjadało miejsce nazwie zamiast być nią wolne
+  → rola `INDENT`, niżej.
 
 Kontrakt: `DisplayRole` = człon PIERWSZY (nazwa — rysowany od lewej, ELIDOWANY do wolnego miejsca),
 rola `SECONDARY` = człon DRUGI (liczba — rysowany od prawej, NIGDY nie elidowany), rola `TERTIARY`
 = człon TRZECI (adnotacja — własna KOLUMNA przy prawej krawędzi, WRAZ z własnym separatorem:
-„ · 12.3 h", nie „· 12.3 h"). Dzięki temu nazwa oddaje szerokość liczbie, nie odwrotnie: licznik jest
-ostatnią rzeczą, którą widać. Separator należy do adnotacji, a nie do delegata, bo to jedyny układ,
-w którym wiersz NAJSZERSZY rysuje się dokładnie tak jak przed rozdzieleniem członów — wyrównanie
-kosztuje wtedy wyłącznie nieuniknioną cenę kolumny na wierszach węższych (zmierzone, Segoe UI 9 pt:
-pas nazwy 132 px jak dotąd; dokładany `_GAP` zjadałby dodatkowe 9 px w KAŻDYM wierszu).
+„ · 12.3 h", nie „· 12.3 h"), rola `INDENT` = poziom wcięcia CZŁONU PIERWSZEGO (int, PIKSELE liczone
+z metryki fontu - nigdy znak w tekście, W-5). Dzięki temu nazwa oddaje szerokość liczbie, nie
+odwrotnie: licznik jest ostatnią rzeczą, którą widać. Separator należy do adnotacji, a nie do
+delegata, bo to jedyny układ, w którym wiersz NAJSZERSZY rysuje się dokładnie tak jak przed
+rozdzieleniem członów - wyrównanie kosztuje wtedy wyłącznie nieuniknioną cenę kolumny na wierszach
+węższych (zmierzone, Segoe UI 9 pt: pas nazwy 132 px jak dotąd; dokładany `_GAP` zjadałby dodatkowe
+9 px w KAŻDYM wierszu).
 
 Człon TRZECI zamyka wiz P1 #4: gdy godziny szły w tym samym runie co „(n)", zmienna szerokość ogona
 przesuwała licznik — „(301) · 60.4 h" kończyło „(n)" 108 px od prawej, a „(60) · 3.0 h" 96 px
@@ -54,9 +59,18 @@ from horreum.gui import theme
 SECONDARY = Qt.UserRole + 1
 TERTIARY = Qt.UserRole + 2     # adnotacja w KOLUMNIE (godziny portfela) — szerokość z `fit_tertiary`
 STRONG = Qt.UserRole + 3       # nadpisuje `strong` listy dla TEGO wiersza (None → wartość listy)
+# `+4`/`+5` NIE SĄ WOLNE mimo że MODUŁ ich nie używa: na listach, które i tak biorą ten delegat,
+# siedzi tam CUDZA dana per-item - `facets._TIP_BASE` (+4, baza szukajki) i `app._REVIEW_PAYLOAD`/
+# `_REVIEW_INFO` (+4/+5, dispatch kolejki przeglądu). `paint` czytałby ją jako poziom wcięcia, gdyby
+# czwarta rola modułu wylądowała na którymkolwiek z tych numerów (W-5) - stąd +6, PIERWSZY numer
+# wolny na przeglądzie WSZYSTKICH konsumentów delegata (`grep -rn "UserRole\|TwoPartDelegate"
+# horreum/gui`, 2026-09-26: nikt nie sięga dalej niż +5). Powtórz ten grep, zanim dodasz kolejną
+# rolę tutaj - pasmo modułu to zbiór {+1, +2, +3, +6}, nie przedział ciągły.
+INDENT = Qt.UserRole + 6      # poziom wcięcia (int; 0/None = brak) - px liczy `_indent_px` z fontu
 
 _GAP = 12          # odstęp nazwa↔liczba; poniżej ~8 px człony się sklejają przy wąskiej listwie
 _PAD = 6           # zapas przy prawej ramce; bez niego ink „›" dotyka krawędzi (wizytator P1 #3)
+_INDENT_UNIT_SPACES = 8    # PARYTET z dawnym tekstowym `app._WCIECIE` (W-5) - patrz `_indent_px`
 
 # Kolor tekstu drugorzędnego z motywu (F6 §7, SPOT). Czytany NA ŻYWO w `paint` (nie wypalany w item
 # jak wykluczenia facetów), więc zmiana motywu = `use_theme` + zwykły repaint — bez `refresh_theme`.
@@ -84,6 +98,24 @@ class TwoPartDelegate(QStyledItemDelegate):
         wiersz bez roboty (Porządki, n=0) gasi pogrubienie razem z wyszarzeniem (wiz P1 #6)."""
         own = index.data(STRONG)
         return self._strong if own is None else bool(own)
+
+    def _indent_px(self, index, font):
+        """Px JEDNEGO poziomu wcięcia (rola `INDENT`; brak/0 → 0) w METRYCE fontu WIERSZA - skaluje
+        się z DPI i rozmiarem czcionki zamiast być stałą (W-5). Jednostka to PARYTET z dawnym
+        tekstowym wcięciem `app._WCIECIE` (8 spacji): ta sama miara na tym samym foncie daje tę samą
+        szerokość, więc x startu nazwy nie rusza się względem stanu SPRZED zmiany (zmierzone przed/po
+        w `tests/test_gui_app_object.py`)."""
+        level = index.data(INDENT) or 0
+        if not level:
+            return 0
+        return QFontMetrics(font).horizontalAdvance(" " * (_INDENT_UNIT_SPACES * int(level)))
+
+    def primary_rect(self, rect, index, font):
+        """Prostokąt CZŁONU PIERWSZEGO (nazwa) po odjęciu wcięcia - WYŁĄCZNIE lewa krawędź; prawą
+        (miejsce zajęte przez człon drugi/trzeci) liczy `paint` osobno przez `tail`. Czysta funkcja
+        geometrii (bez paintera/stylu), żeby test zmierzył x startu nazwy bez odpalania `paint` na
+        realnym obrazie (W-5)."""
+        return rect.adjusted(self._indent_px(index, font), 0, 0, 0)
 
     def fit_tertiary(self, texts):
         """Ustal szerokość KOLUMNY trzeciego członu na najszerszej adnotacji listy (wiz P1 #4).
@@ -153,11 +185,7 @@ class TwoPartDelegate(QStyledItemDelegate):
                 tail += fm.horizontalAdvance(secondary) + _GAP
         painter.setFont(opt.font)
         painter.setPen(text_color)
-        prim = rect.adjusted(0, 0, -tail, 0)
+        prim = self.primary_rect(rect, index, opt.font).adjusted(0, 0, -tail, 0)
         elided = QFontMetrics(opt.font).elidedText(primary, Qt.ElideRight, max(0, prim.width()))
         painter.drawText(prim, Qt.AlignLeft | Qt.AlignVCenter, elided)
         painter.restore()
-
-# --- TODO-DŁUG (z kolejki sesji, dieta 2026-08-10; pełne brzmienia: archiwum aa) ---
-# TODO-DŁUG(W-5): wcięcie podwiersza kolejki jest SPACJAMI w DisplayRole - jedzie do schowka
-#   i wersji EN, a przy elizji marnuje 26 px. Wcięcie jako indent delegata, nie znak w tekście.

@@ -55,11 +55,46 @@ def use_theme(name):
 
 
 use_theme(theme.DEFAULT)
-_SHORT_MAX_H = 72                          # ~3 wiersze; krótka grupa nie zjada pionu długim (wiz F4 #1)
+# Sufit grupy krótkiej liczony w WIERSZACH, nie w pikselach (W-6, wizytacja 0810): stała 72 px przy
+# wierszu 16 px dawała 4,375 wiersza, więc Rodzaj pokazywał połówkę `master_dark` - ucięty wiersz
+# czyta się jak ostatni, a nie jak zapowiedź dalszych. Piksele liczy `FacetRail._dopasuj_sufit`
+# z REALNEGO wiersza, bo jego wysokość zależy od fontu i DPI: Segoe UI 9 pt na pulpicie 16 px,
+# offscreen 12 px, offscreen z fontem ×1,6 19 px - żadna stała px nie mieści całych wierszy we
+# wszystkich trzech.
+_SHORT_ROWS = 4                            # krótka grupa nie zjada pionu długim (wiz F4 #1)
+_KROTKIE = frozenset(facet for facet, _tytul, dluga in _GROUPS if not dluga)   # z `_GROUPS` (SPOT)
 _LONG_MIN_H = 140                          # ~6 wierszy; Obiekt/Noc (47/173 wartości) wygrywają pion (wiz F4 #1)
 # Próg czytelności LEWEJ KOLUMNY okna (wiz F4 #2) — publiczny, bo panel „Pola" w `grid.py` dzieli
 # to samo minimum (wiz F3 #4); dwie liczby rozjechałyby się przy pierwszej korekcie (SPOT).
 RAIL_MIN_W = 220
+
+
+def _wiersze_z_wartoscia(lw):
+    """Wiersze, które NIOSĄ wartość facetu i są na liście pokazane: bez wiersza stanu pustego (brak
+    `UserRole`, R-S3-5) i bez schowanych szukajką. Wspólne sito obu połówek pilnowania kadru (W-7):
+    czego nie widać, tego user nie widział, a do schowanego wiersza nie ma czego przewijać."""
+    for i in range(lw.count()):
+        it = lw.item(i)
+        dane = it.data(Qt.UserRole)
+        if dane is not None and not it.isHidden():
+            yield it, dane
+
+
+def _widac(lw, it):
+    """Wiersz choćby CZĘŚCIOWO w kadrze listy - JEDNA definicja „widać go" dla obu stron
+    przeładowania: przed nim (`_widziane` - co user mógł zobaczyć) i po nim (`_dopilnuj_kadru` -
+    czy jest po co przewijać). Dwie definicje rozjechałyby się dokładnie na brzegu kadru, a tam
+    rozstrzyga się, czy lista ucieka spod kursora.
+
+    Tylko PION: lista przewija się wyłącznie w pionie, a szerokość `visualItemRect` to szerokość
+    TREŚCI, nie kadru (zmierzone: 1686 px przy viewporcie 258 px dla długiej nazwy)."""
+    r, kadr = lw.visualItemRect(it), lw.viewport().rect()
+    return r.isValid() and r.bottom() >= kadr.top() and r.top() <= kadr.bottom()
+
+
+def _widziane(lw):
+    """Wartości wierszy, które WIDAĆ (`_widac`) - to, co user mógł zobaczyć (W-7/FH-5)."""
+    return {dane[1] for it, dane in _wiersze_z_wartoscia(lw) if _widac(lw, it)}
 
 
 class FacetRail(QWidget):
@@ -73,6 +108,9 @@ class FacetRail(QWidget):
         self._loading = False
         self._lists = {}
         self._aliases = {}          # canon → {alias_norm}; dowozi `set_data` (S3)
+        # (facet, wartość) ostatniego gestu W listwie - JEDNORAZOWY: gasi go najbliższe `set_data`,
+        # także gdy niczego nie przewinął (wzorzec `FramesView._reveal_facet`; W-7, `_dopilnuj_kadru`).
+        self._klik = None
         self.setMinimumWidth(RAIL_MIN_W)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -114,10 +152,12 @@ class FacetRail(QWidget):
             lw.setToolTip(i18n.t("facets.tip.clicks"))
             if long_list:
                 lw.setMinimumHeight(_LONG_MIN_H)
-            else:
-                lw.setMaximumHeight(_SHORT_MAX_H)
             self._lists[facet] = lw
             outer.addWidget(lw, 1 if long_list else 0)
+            if not long_list:
+                # Sufit PO wpięciu w listwę: wiersz ma się zmierzyć fontem, który lista dziedziczy
+                # od rodzica, a nie tym, który miała jako sierota.
+                self._dopasuj_sufit(lw)
 
     # ---- API (FramesView) ----
     def state(self):
@@ -132,6 +172,20 @@ class FacetRail(QWidget):
         advanced). Pozycja scrolla KAŻDEJ listy przeżywa przeładowanie (firsthand F4: klik wartości
         w środku długiej listy nie może odrzucać widoku na górę — user klika tę samą wartość
         ponownie w cyklu ⊖).
+
+        ODTWORZONY SCROLL NIE MA PRAWA ZGUBIĆ AKTYWNEGO WYBORU (W-7 + FH-5 - jeden defekt zmierzony
+        dwa razy). Wiersz wyboru potrafi w przeładowaniu zmienić miejsce, a scroll zostaje stary:
+        po geście osi `✓ NGC3623` zszedł do pinu (wiersz 0), scroll wrócił na 36 i wiersz stanął na
+        y −576 (firsthand 0816); po kliku `Rodzaj = unknown` spoza kadru `✓ unknown` stało na y=80
+        przy viewporcie 70 px (wizytacja 0810). Dlatego po odtworzeniu scrolla `_dopilnuj_kadru`
+        przywraca na środek wybór, który user WIDZIAŁ przed przeładowaniem albo właśnie KLIKNĄŁ -
+        ale wyłącznie taki, który wypadł z kadru CAŁY. Wiersz widoczny choćby częściowo zostaje,
+        gdzie stoi: lista przewija się per WIERSZ (scroll 36 = wiersz 36, y −576 = 36 × 16 px), więc
+        dociągnięcie wiersza uciętego na brzegu przesuwa listę o cały wiersz i drugi klik cyklu ⊖
+        w to samo miejsce trafiałby w sąsiada.
+        Reguła mieszka tu, a nie u wołającego, bo listwa nie musi wiedzieć, który gest ją
+        przeładował: ta sama reguła obejmuje gest osi obiektu, gest żywotności klatki (oba kończą
+        w `FramesView.refresh`) i klik w sąsiedniej grupie.
 
         `reveal` = `(facet, value)` ODWRACA tę regułę dla JEDNEJ listy: zbiór przyszedł Z ZEWNĄTRZ
         (most „Pokaż klatki celu" z planera), więc nie ma pozycji scrolla do uszanowania — jest
@@ -149,6 +203,9 @@ class FacetRail(QWidget):
         pusty dict — „ta baza nie ma aliasów"."""
         self._loading = True
         scroll_pos = {facet: lw.verticalScrollBar().value() for facet, lw in self._lists.items()}
+        # Co user WIDZIAŁ - liczone PRZED `clear()`, bo po nim wierszy już nie ma (W-7/FH-5).
+        widziane = {facet: _widziane(lw) for facet, lw in self._lists.items()}
+        klik, self._klik = self._klik, None        # jednorazowy: gaśnie tu, także gdy nic nie przewinie
         try:
             self._state = state or facet_model.empty_state()
             for facet, lw in self._lists.items():
@@ -201,6 +258,8 @@ class FacetRail(QWidget):
                 # nieme prostokąty w jednym widoku. Grupa „object" dostanie zaraz potem własny
                 # przebieg z frazą (`_filter_objects`), który tę decyzję nadpisze.
                 self._set_empty_row(lw, pusto=lw.count() == 0, fraza="")
+                if facet in _KROTKIE:
+                    self._dopasuj_sufit(lw)        # W-6: z wiersza, który właśnie stanął na liście
             if aliases is not None:
                 self._aliases = aliases
             self._filter_objects(self.search.text())
@@ -208,6 +267,9 @@ class FacetRail(QWidget):
                 lw.doItemsLayout()                         # przelicz zakres scrolla PRZED restore
                 lw.verticalScrollBar().setValue(scroll_pos[facet])   # setValue sam klampuje do zakresu
             self._reveal(reveal)
+            for facet, lw in self._lists.items():
+                if not (reveal and reveal[0] == facet):   # lista odsłonięta z zewnątrz ma już swój cel
+                    self._dopilnuj_kadru(facet, lw, widziane[facet], klik)
         finally:
             self._loading = False
 
@@ -234,6 +296,62 @@ class FacetRail(QWidget):
             if dane is not None and dane[1] == value:
                 lw.scrollToItem(it, QAbstractItemView.PositionAtCenter)
                 return
+
+    def _dopilnuj_kadru(self, facet, lw, widziane, klik):
+        """Aktywny wybór, który user WIDZIAŁ przed przeładowaniem albo właśnie KLIKNĄŁ, a który po
+        nim wypadł z kadru CAŁY, wraca na środek listy (W-7 + FH-5, reguła opisana w `set_data`).
+        Wołane PO odtworzeniu scrolla i po zewnętrznym `_reveal` - listę odsłoniętą z zewnątrz
+        wołający pomija, ona ma już cel.
+
+        Dwa przypadki, w tej kolejności:
+
+        * **kliknięta wartość** jest nadal aktywna i nie widać jej wcale → środek listy. Kliknięte
+          liczy się jak widziane także spoza kadru: Enter szukajki bierze PIERWSZE trafienie, a ono
+          bywa nad kadrem, gdy fraza schowała wiersze powyżej;
+        * **wybory widziane przed przeładowaniem** - gdy nie widać ŻADNEGO, środek listy na
+          pierwszym z nich (FH-5: wybór zszedł do pinu na wierszu 0, a scroll wrócił na 36).
+
+        WIERSZ WIDOCZNY CHOĆBY CZĘŚCIOWO = ZERO RUCHU, także ucięty na brzegu kadru. Pierwsza
+        wersja dociągała wybór do kadru „w całości" i łamała kontrakt `set_data`: lista przewija się
+        per WIERSZ, więc dociągnięcie wiersza uciętego na brzegu przesuwało ją o cały wiersz i drugi
+        klik cyklu ⊖ w to samo miejsce trafiał w sąsiada (zmierzone: scroll 10 → 14 po kliku w ucięty
+        wiersz), a lista, w której nic się nie zmieniło, uciekała po kliku w INNEJ grupie tylko
+        dlatego, że jej wybór stał na brzegu. Defekty, które ta reguła zamyka (y=80 przy viewporcie
+        70 px, pin na wierszu 0 przy scrollu 36, trafienie Entera nad kadrem), to wiersze w CAŁOŚCI
+        poza kadrem - węższe kryterium żadnego z nich nie gubi.
+
+        Wybór, od którego user SAM odjechał scrollem, nie był widziany i nie jest kliknięty, więc
+        zostaje poza kadrem: to decyzja usera, nie defekt. Własna droga, nie `self._reveal` - tamten
+        jest publicznym seamem wejść z zewnątrz i jego kontrakt pinuje test mostu z planera.
+        `PositionAtCenter` z tego samego powodu co tam: wybór ma stanąć tam, gdzie oko go szuka."""
+        aktywne = [(dane[1], it) for it, dane in _wiersze_z_wartoscia(lw)
+                   if facet_model.selection(self._state, dane[0], dane[1]) is not None]
+        for value, it in aktywne:
+            if (facet, value) == klik and not _widac(lw, it):
+                lw.scrollToItem(it, QAbstractItemView.PositionAtCenter)
+                return
+        widziane_aktywne = [it for value, it in aktywne if value in widziane or (facet, value) == klik]
+        if widziane_aktywne and not any(_widac(lw, it) for it in widziane_aktywne):
+            lw.scrollToItem(widziane_aktywne[0], QAbstractItemView.PositionAtCenter)
+
+    def _dopasuj_sufit(self, lw):
+        """Sufit grupy krótkiej = `_SHORT_ROWS` PEŁNYCH wierszy + ramka z obu stron (W-6).
+
+        Wysokość wiersza daje REALNY wiersz (`sizeHintForRow` - delegat i font listy), nie stała:
+        wołane przy każdym przeładowaniu, więc sufit idzie za fontem i DPI, które mogą się zmienić
+        między przeładowaniami. Viewport = wysokość − 2·ramka (zmierzone: sufit 72 → viewport 70
+        przy ramce 1 px). Jedna wysokość starcza na całą listę, bo pogrubienie `✓` nie zmienia
+        wysokości wiersza: `FontRole` rozwiązuje się względem fontu listy, a wiersz pogrubiony ma
+        tyle co zwykły (zmierzone: offscreen 12/12 px, natywnie Segoe UI 9 pt 16/16 px - sufit 66).
+
+        Lista pusta (konstruktor - wierszy jeszcze nie ma, a `sizeHintForRow` zwraca wtedy -1) mierzy
+        wiersz-sondę: wstawiony i zdjęty w tym samym przebiegu, zanim cokolwiek się narysuje."""
+        wiersz = lw.sizeHintForRow(0)
+        if wiersz <= 0:
+            lw.addItem(QListWidgetItem("Xg"))
+            wiersz = lw.sizeHintForRow(0)
+            lw.takeItem(0)
+        lw.setMaximumHeight(_SHORT_ROWS * wiersz + 2 * lw.frameWidth())
 
     def refresh_theme(self):
         """Przemaluj wykluczenia po zmianie motywu. Kolor ⊖ jest WYPALONY w itemie przy `set_data`
@@ -263,13 +381,17 @@ class FacetRail(QWidget):
 
         `NoItemFlags` sprawia, że Qt sam nie wyśle tu placeholdera, ale SLOT wolno zawołać skądinąd
         — i wtedy rozpakowanie `None` wywalało widżet wyjątkiem. Ta sama lekcja, co przy wierszu
-        informacyjnym kolejki: brak danych rozstrzyga dispatch, nie dobra wola wołającego."""
+        informacyjnym kolejki: brak danych rozstrzyga dispatch, nie dobra wola wołającego.
+
+        Gest zostawia JEDNORAZOWY ślad `_klik`: przeładowanie, które sam wywoła, stawia klikniętą
+        wartość w kadrze, także gdy klik przyszedł spoza niego (W-7, `_dopilnuj_kadru`)."""
         if self._loading:
             return
         dane = item.data(Qt.UserRole) if item is not None else None
         if dane is None:
             return
         facet, value, label = dane
+        self._klik = (facet, value)
         self._state = facet_model.cycle(self._state, facet, value, label)
         self.facetsChanged.emit(self._state)
 
@@ -305,6 +427,7 @@ class FacetRail(QWidget):
         if item is None or item.data(Qt.UserRole) is None:
             return
         facet, value, label = item.data(Qt.UserRole)
+        self._klik = (facet, value)                  # ten sam ślad co lewy klik (W-7)
         self._state = facet_model.toggle_exclude(self._state, facet, value, label)
         self.facetsChanged.emit(self._state)
 
@@ -374,10 +497,3 @@ class FacetRail(QWidget):
         istniejacy.setText(tekst)
         istniejacy.setForeground(_COLORS["placeholder"])
         istniejacy.setHidden(False)
-
-# --- TODO-DŁUG (z kolejki sesji, dieta 2026-08-10; pełne brzmienia: archiwum aa) ---
-# TODO-DŁUG(W-6): _SHORT_MAX_H=72 przy rowH=16 ucina piąty wiersz grupy krótkiej w połowie
-#   (4,375 wiersza). Sufit licz jako wielokrotność sizeHintForRow: 4*rowH + 2*frameWidth.
-# TODO-DŁUG(W-7): aktywny wybór facetu bywa poza kadrem (wiersz z ✓ przy rect.y=80 vs viewport
-#   70 px); pin _reveal działa tylko dla wartości spoza counts. Po przeliczeniu:
-#   scrollToItem(PositionAtCenter) na klikniętej wartości - mechanizm już jest. Razem z W-6.

@@ -132,7 +132,13 @@ def _group_tip(marker, stan):
 # Pusty grid mówi DWIE różne rzeczy — filtr nic nie wpuścił vs. w bazie nie ma nic (wiz F5 #8:
 # „zmień filtr lub perspektywę" na pustej bazie wysyła usera w ślepy zaułek zamiast po dostawę).
 # Stałe trzymają KLUCZ (nie string) — rozwiązywane `i18n.t` w USE-site (D-L1; string zamroziłby PL).
-_EMPTY_FILTER = "grid.empty_filter"
+# NIEPUSTA BAZA MÓWI TYM, CO RECEPTA POWROTU (FH-4): wariant wybiera `_rodzaj_recepty_powrotu`,
+# ta sama decyzja, która składa receptę na pasku stanu. Jedno ogólne „zmień filtr lub perspektywę"
+# zostawało na ekranie po zgaśnięciu paska i przy facecie wskazywało gest, który niczego nie
+# odsłania - trwały komunikat przeczył ulotnemu, który mówił prawdę.
+_EMPTY_FILTER = "grid.empty_filter"   # zbiór zawężony facetami albo filtrem - gest: „× Wyczyść zbiór"
+_EMPTY_PERSP = "grid.empty_persp"     # zbiór przycina trim perspektywy - gest: przejście na „Przegląd"
+_EMPTY_VIEW = "grid.empty_view"       # brak recepty (dziś nieosiągalny) - zdanie bez obietnicy gestu
 _EMPTY_DB = "grid.empty_db"
 
 # Kolory stanów gridu — z motywu (F6 §7, SPOT). Model czyta `_COLORS` NA ŻYWO w `data()`
@@ -328,6 +334,13 @@ _TRIMY = (
     ("_only_retired", "retired_frame_ids"),
     ("_only_missing_copy", "missing_copy_frame_ids"),
 )
+# RODZAJ RECEPTY POWROTU - wynik JEDNEJ decyzji (`FramesView._rodzaj_recepty_powrotu`), którą czyta
+# każda powierzchnia mówiąca „jak odsłonić to, czego nie widać" (FH-4). Rodzaj nazywa GEST, nie
+# zdanie: pasek stanu mówi o klatkach wypchniętych gestem („odsłoni je …"), pusty stan nie ma się
+# do czego odnieść - brzmienia są własne, wybór gestu wspólny. Dwie kopie wyboru rozjechały się
+# już raz dokładnie tak (FH-4: pasek wskazywał „× Wyczyść zbiór", pusty stan „zmień filtr").
+_POWROT_PERSPEKTYWA = "perspektywa"   # przejście na `_PRESET_CZYSTY` - zdejmuje trim, facety i filtr
+_POWROT_ZBIOR = "zbior"               # „× Wyczyść zbiór" - zdejmuje facety i filtr, perspektywa zostaje
 
 
 _KANONY_W_ZDANIU = 3
@@ -2450,9 +2463,23 @@ class FramesView(QWidget):
         self.table.horizontalHeader().setStretchLastSection(True)
         rv.addWidget(self.table, 1)   # stretch: nadmiar pionu należy do TABELI, nie do panelu (N1)
 
+        # PUSTY STAN = ZDANIE + GEST (FH-4). `self.empty` zostaje etykietą z tekstem (kontrakt testów
+        # i sond: `empty.text()`, `empty.isVisible()`), a przycisk stoi obok niej w jednym pojemniku,
+        # który przejmuje stretch - oba jadą razem na środek pustej przestrzeni. Przycisk WYKONUJE
+        # receptę, którą pusty stan podaje (`wykonaj_recepte_powrotu`), zamiast ją tylko opisywać.
+        self.empty_box = QWidget()
+        eb = QVBoxLayout(self.empty_box); eb.setContentsMargins(0, 0, 0, 0)
+        eb.addStretch(1)
         self.empty = QLabel(i18n.t(_EMPTY_FILTER))
         self.empty.setAlignment(Qt.AlignCenter); self.empty.setWordWrap(True); self.empty.setVisible(False)
-        rv.addWidget(self.empty, 1)   # stretch: pusty stan zbiera leftover — SelectionBar/panel nie balonieją (wiz F3 #1)
+        eb.addWidget(self.empty)
+        self.empty_btn = QPushButton()
+        self.empty_btn.clicked.connect(self.wykonaj_recepte_powrotu)
+        self.empty_btn.setVisible(False)
+        eb.addWidget(self.empty_btn, 0, Qt.AlignHCenter)
+        eb.addStretch(1)
+        self.empty_box.setVisible(False)
+        rv.addWidget(self.empty_box, 1)   # stretch: pusty stan zbiera leftover - SelectionBar/panel nie balonieją (wiz F3 #1)
 
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 1)
@@ -2527,7 +2554,7 @@ class FramesView(QWidget):
         if not data:
             return
         kind, name = data
-        spec = PRESETS.get(name) if kind == "preset" else self._load_saved(name)
+        spec = self._spec_pozycji(data)
         if spec is None:
             # Perspektywa jest, ale nie umiemy jej zastosować (stary `sql_text` z migracji 0013).
             # MÓWIMY to wprost: zastosowanie pustego spec-a zdjęłoby filtr i wyglądałoby na
@@ -2567,8 +2594,13 @@ class FramesView(QWidget):
 
         Reużywa ISTNIEJĄCY facet Obiekt (liść `rel_object` + `facet_model.compose`) zamiast składać
         drzewo filtra po swojemu — druga ścieżka składania złamałaby SPOT i rozjechałaby się
-        z cyklem facetów przy pierwszej zmianie. Perspektywa wraca do „Wszystkie" (zbiór definiuje
+        z cyklem facetów przy pierwszej zmianie. Perspektywa wraca do pełnej (zbiór definiuje
         wejście, nie poprzedni widok), advanced-filtr znika — jak przy każdej perspektywie.
+
+        ETYKIETA IDZIE ZA ZBIOREM (bliźniak BP-5, potwierdzony testem): flagi i filtr były tu zerowane
+        od początku, ale lista perspektyw zostawała, więc z „Duplikatów" most pokazywał klatki celu
+        pod etykietą „Duplikaty". Rozstrzyga ten sam właściciel, co po „× Wyczyść zbiór"; facet mostu
+        dopasowania nie blokuje, bo jest zawężeniem W RAMACH perspektywy (`_stan_zgodny_z`).
 
         ZAZNACZENIE MUSI BYĆ WIDOCZNE: listwa domyślnie odtwarza pozycję scrolla (słusznie dla kliku
         W listwie), więc wejście z zewnątrz zostawiało `✓` poza viewportem — zmierzone: pozycja 36
@@ -2584,6 +2616,7 @@ class FramesView(QWidget):
             if pairs else facet_model.empty_state()
         self._reveal_facet = ("object", pairs[0][0]) if pairs else None
         self.refresh()
+        self._etykieta_perspektywy_za_stanem()
 
     def apply_perspective(self, name):
         """Ustaw perspektywę PO NAZWIE — publiczny seam dla wejść spoza widoku (F5: klik w zadanie
@@ -2603,6 +2636,65 @@ class FramesView(QWidget):
 
     def _load_saved(self, name):
         return dict(self._saved_perspectives()).get(name)
+
+    def _spec_pozycji(self, data):
+        """Definicja pozycji listy perspektyw - `data` = `(rodzaj, nazwa)` z `itemData`. Preset czyta
+        się z kodu, zapisana z BAZY; `None` = pozycja, której nie umiemy zastosować (stary `sql_text`).
+        Jedno miejsce, bo pytają o to dwaj: przełączenie perspektywy i właściciel jej etykiety."""
+        kind, name = data
+        return PRESETS.get(name) if kind == "preset" else self._load_saved(name)
+
+    def _stan_zgodny_z(self, spec):
+        """Czy ZBIÓR widoku jest tym, który definiuje perspektywa `spec` (BP-5).
+
+        Definicję zbioru niosą trzy rzeczy: flagi `only_*`, filtr zaawansowany i facety. Grupowanie
+        i kolumny zmieniają WYGLĄD zbioru, nie jego skład, więc nie są porównywane.
+
+        Flagi i filtr zgadzają się DOKŁADNIE. Facety perspektywy muszą w stanie STAĆ, ale stan może
+        mieć ich więcej: facet dołożony ponad definicję (klik w listwie, most planera) jest zawężeniem
+        W RAMACH perspektywy, nie jej zmianą. Ta jedna reguła rozstrzyga obu wołających bez rozróżniania
+        ich: preset (bez facetów) pasuje do stanu z facetem mostu, a zapisana perspektywa z facetem
+        przestaje pasować, gdy „× Wyczyść zbiór" ten facet zdjął.
+
+        Flagi biorą skład z `_TRIMY` (BP-4), a spec niesie je bez podkreślnika (`only_dups` ↔
+        `_only_dups`) - konwencja pinowana bramką `test_KAZDY_preset_ma_etykiete_i_zuzyta_flage`."""
+        flagi_spec = {atrybut for atrybut, _ in _TRIMY if spec.get(atrybut[1:])}
+        flagi_stanu = {atrybut for atrybut, _ in _TRIMY if getattr(self, atrybut)}
+        if flagi_spec != flagi_stanu or spec.get("filter") != self._filter_tree:
+            return False
+        return all(self._facet_state.get(facet) == wybor
+                   for facet, wybor in (spec.get("facets") or {}).items())
+
+    def _etykieta_perspektywy_za_stanem(self):
+        """JEDEN WŁAŚCICIEL ETYKIETY STANU (BP-5): gdy zbiór przestał być tym, który definiuje bieżąca
+        pozycja listy perspektyw, lista przeskakuje na PRESET, którego definicja się ze stanem zgadza.
+
+        Wołają ją gesty, które zdejmują część definicji bez przełączania perspektywy: „× Wyczyść
+        zbiór" (preset „Kalibracja" zawęża FILTREM, więc przycisk zdejmował całą jego definicję,
+        a lista mówiła „Kalibracja" nad pełnym zbiorem), każda zmiana filtra z panelu (`_on_filter`
+        - panelowe „Wyczyść" omija przycisk zbioru) i most planera (`apply_object_facet`).
+        Flag żaden z nich nie tyka, więc z trimem trafiamy w preset Z TĄ FLAGĄ („Duplikaty"
+        zostają „Duplikatami"), a bez trimu w `_PRESET_CZYSTY`. Dosłowne „zawsze Przegląd" kłamałoby
+        od drugiej strony: pokazywałoby duplikaty pod etykietą perspektywy bez zawężenia.
+
+        BEZ SYGNAŁU: stan jest już właściwy, a `_on_perspective` przepisałby grupowanie z presetu
+        (i kolumny, gdy spec je niesie) i przeładował zbiór drugi raz. Kandydatami są wyłącznie
+        presety - nazwa zapisana przez człowieka nie jest nasza do zgadywania. Brak dopasowania
+        (dwie flagi naraz, możliwe tylko w specyfikacji spoza GUI - `_save_perspective` bierze flagi
+        ze stanu, a preset niesie najwyżej jedną) zostawia etykietę: lepiej nieprecyzyjna nazwa niż
+        wymyślona."""
+        data = self.combo_persp.currentData()
+        if data:
+            spec = self._spec_pozycji(data)
+            if spec is not None and self._stan_zgodny_z(spec):
+                return
+        for i in range(self.combo_persp.count()):
+            kandydat = self.combo_persp.itemData(i)
+            if kandydat and kandydat[0] == "preset" and self._stan_zgodny_z(PRESETS[kandydat[1]]):
+                self.combo_persp.blockSignals(True)
+                self.combo_persp.setCurrentIndex(i)
+                self.combo_persp.blockSignals(False)
+                return
 
     def _save_perspective(self):
         name, ok = QInputDialog.getText(self, i18n.t("grid.persp.save_title"), i18n.t("grid.persp.save_prompt"))
@@ -2770,9 +2862,14 @@ class FramesView(QWidget):
         klucz, kwargi = recepta
         return fakt, i18n.t(klucz, **kwargi)
 
-    def _recepta_powrotu_do_widoku(self):
-        """Którym JEDNYM gestem user odsłoni klatki wypchnięte z widoku - ze STANU zawężenia, nie
-        z domysłu (FC-2). Zwraca `(klucz, kwargi)` albo `None`, gdy nie ma czego doradzić.
+    def _rodzaj_recepty_powrotu(self):
+        """Którym JEDNYM gestem user odsłoni to, czego nie widać - ze STANU zawężenia, nie z domysłu
+        (FC-2). Zwraca RODZAJ recepty (`_POWROT_*`) albo `None`, gdy nie ma czego doradzić.
+
+        JEDYNY WŁAŚCICIEL TEJ DECYZJI (FH-4): czytają ją recepta na pasku stanu, pusty stan i ich
+        wspólny wykonawca. Każda powierzchnia mapuje rodzaj na WŁASNE brzmienie, ale żadna nie
+        wybiera gestu sama - do FH-4 pusty stan miał własny, ogólny tekst i po geście przy facecie
+        przeczył zdaniu, które pasek podał pięć sekund wcześniej.
 
         RECEPTA MUSI BYĆ WYKONALNA, i to jest tu jedyne kryterium. „× Wyczyść zbiór" zdejmuje
         facety i filtr, ale flag perspektywy NIE tyka (`_on_clear_selection` - są własnością
@@ -2786,10 +2883,67 @@ class FramesView(QWidget):
         dwa gesty tam, gdzie wystarcza jeden (bramka pakietu, zarzut o nadmiarową receptę).
         Gdy trimu nie ma, wygrywa gest WĘŻSZY: przycisk zbioru zostawia perspektywę na miejscu."""
         if self._trim_aktywny():
-            return "grid.sel.out_of_view_persp", {"perspective": i18n.t(_PRESET_LABELS[_PRESET_CZYSTY])}
+            return _POWROT_PERSPEKTYWA
         if self._zbior_zawezony():
+            return _POWROT_ZBIOR
+        return None
+
+    def _recepta_powrotu_do_widoku(self):
+        """Brzmienie recepty na PASKU STANU - `(klucz, kwargi)` albo `None`, gdy nie ma czego doradzić.
+        Gest wybiera `_rodzaj_recepty_powrotu`; tu zostaje wyłącznie zdanie, które mówi o klatkach
+        wypchniętych gestem („odsłoni je …"), więc pasuje tylko do paska. Recepta cytuje etykietę
+        gestu z katalogu (nazwa presetu, napis przycisku zbioru), żeby zmiana napisu przenosiła się
+        tu sama."""
+        rodzaj = self._rodzaj_recepty_powrotu()
+        if rodzaj == _POWROT_PERSPEKTYWA:
+            return "grid.sel.out_of_view_persp", {"perspective": i18n.t(_PRESET_LABELS[_PRESET_CZYSTY])}
+        if rodzaj == _POWROT_ZBIOR:
             return "grid.sel.out_of_view_set", {"action": i18n.t("grid.sel.clear_set")}
         return None
+
+    def wykonaj_recepte_powrotu(self):
+        """WYKONAJ receptę powrotu - ten gest, który wybiera `_rodzaj_recepty_powrotu`, liczony
+        w chwili kliknięcia, nie zapamiętany z chwili podania recepty (stan mógł się zmienić).
+
+        JEDEN WYKONAWCA DLA KAŻDEJ POWIERZCHNI: dziś woła go przycisk pustego stanu (FH-4), a ten sam
+        czeka na przycisk recepty paska stanu (TODO-DŁUG(FH-2e) w `app.py`) - tam zostaje już tylko
+        podpięcie, bez trzeciej kopii wyboru mechanizmu. Mechanizmy celu są dwa i różne: lista
+        perspektyw (przez `apply_perspective`, więc pozycja listy idzie za stanem) i przycisk zbioru.
+
+        Cel ostatniego gestu osi wraca po wykonaniu SAM: oba gesty kończą się `refresh()`, który
+        odkłada `_cel_gestu` w zaznaczeniu (FC-2) - bez tego odsłonięty zbiór topiłby klatki gestu."""
+        rodzaj = self._rodzaj_recepty_powrotu()
+        if rodzaj == _POWROT_PERSPEKTYWA:
+            self.apply_perspective(_PRESET_CZYSTY)
+        elif rodzaj == _POWROT_ZBIOR:
+            self._on_clear_selection()
+
+    def _ustaw_pusty_stan(self, baza_ma_klatki):
+        """Zdanie i gest PUSTEGO GRIDU (FH-4) - wołane z `_refresh`, gdy zbiór jest pusty.
+
+        Pusta baza nie ma czego odsłaniać: zdanie kieruje po dostawę, przycisku nie ma (wiz F5 #8).
+        Niepusta baza bierze wariant z TEJ SAMEJ decyzji co recepta paska (`_rodzaj_recepty_powrotu`),
+        a przycisk nosi nazwę tego samego gestu: przy zbiorze to dosłownie napis przycisku paska
+        zbioru, żeby gest miał jedną nazwę na całym ekranie. Brak recepty przy niepustej bazie jest
+        dziś nieosiągalny (bez zawężenia widać wszystkie klatki) - zostaje zdanie bez przycisku, bo
+        przycisk bez gestu obiecywałby coś, czego nie ma.
+
+        NIE woła `_czlon_poza_widokiem`: tamten zapamiętuje cel gestu (`_cel_gestu`), a pusty stan
+        powstaje także bez gestu - wybór brzmienia nie ma prawa ruszać stanu zaznaczenia."""
+        if not baza_ma_klatki:
+            zdanie, gest = _EMPTY_DB, ""
+        else:
+            rodzaj = self._rodzaj_recepty_powrotu()
+            if rodzaj == _POWROT_PERSPEKTYWA:
+                zdanie = _EMPTY_PERSP
+                gest = i18n.t("grid.empty_persp_action", perspective=i18n.t(_PRESET_LABELS[_PRESET_CZYSTY]))
+            elif rodzaj == _POWROT_ZBIOR:
+                zdanie, gest = _EMPTY_FILTER, i18n.t("grid.sel.clear_set")
+            else:
+                zdanie, gest = _EMPTY_VIEW, ""
+        self.empty.setText(i18n.t(zdanie))
+        self.empty_btn.setText(gest)
+        self.empty_btn.setVisible(bool(gest))
 
     def _przywroc_zaznaczenie(self, frame_ids):
         """Odłóż zaznaczenie po `frame_id` na PRZEBUDOWANYM modelu (R-S2b-3, człon pierwszy).
@@ -3251,8 +3405,17 @@ class FramesView(QWidget):
 
     # ---- reakcje ----
     def _on_filter(self, tree):
+        """Jedyny odbiorca `filterApplied` panelu - „Zastosuj", Enter w polu wartości i „Wyczyść"
+        panelu (także pośrednio przez `_on_clear_selection`). `set_tree` sygnału nie emituje, więc
+        przełączenie perspektywy tędy nie przechodzi.
+
+        ETYKIETA IDZIE ZA ZBIOREM (BP-5, bliźniak przez panel filtra): panelowe „Wyczyść" omija
+        `_on_clear_selection`, więc „Kalibracja" zostawała nad pełnym zbiorem. Filtr ZMIENIONY
+        etykiety nie rusza (żaden preset go nie definiuje, a właściciel nie zgaduje); przeskok
+        następuje dopiero, gdy stan znów jest definicją presetu - w praktyce po zdjęciu filtra."""
         self._filter_tree = tree
         self.refresh()
+        self._etykieta_perspektywy_za_stanem()
 
     def _on_columns(self, cols):
         self._columns = cols
@@ -3339,9 +3502,11 @@ class FramesView(QWidget):
         if n == 0:
             # Rozróżnienie „filtr nic nie wpuścił" vs „w bazie NIC nie ma" (wiz F5 #8). Uniwersum
             # bierzemy z memoizowanego `universe_fn` TEGO refreshu — na niepustym gridzie zapytania
-            # nie ma w ogóle, a gdy filtr już go dotknął, jest z cache'u.
-            self.empty.setText(i18n.t(_EMPTY_FILTER) if universe_fn() else i18n.t(_EMPTY_DB))
-        self.empty.setVisible(n == 0)
+            # nie ma w ogóle, a gdy filtr już go dotknął, jest z cache'u. Wariant niepustej bazy
+            # wybiera decyzja recepty powrotu (FH-4) - patrz `_ustaw_pusty_stan`.
+            self._ustaw_pusty_stan(bool(universe_fn()))
+        self.empty_box.setVisible(n == 0)    # pojemnik i etykieta RAZEM: `empty.isVisible()` zostaje
+        self.empty.setVisible(n == 0)        # kontraktem, a etykieta nie wisi widoczna w ukrytym pudle
         self.table.setVisible(n > 0)
         self.macro_bar.set_actions_enabled(bool(base_ids))   # szczery disabled makra na pustym gridzie (#4)
         self.rename_bar.set_actions_enabled(bool(base_ids))  # bliźniaczo dla renamu
@@ -3423,9 +3588,17 @@ class FramesView(QWidget):
     def _on_clear_selection(self):
         """„× Wyczyść zbiór" (wiz F4 #3): zdejmij facety + filtr advanced JEDNYM klikiem. Flagi
         perspektywy (`only_dups`/`only_review`) zostają — są własnością perspektywy, nie filtra.
-        `_clear` panelu emituje `filterApplied(None)` → `_on_filter` → jeden refresh."""
+        `_clear` panelu emituje `filterApplied(None)` → `_on_filter` → jeden refresh.
+
+        ETYKIETA PERSPEKTYWY IDZIE ZA ZBIOREM (BP-5): preset „Kalibracja" zawęża filtrem, więc ten
+        gest zdejmuje całą jego definicję, a zapisana perspektywa traci swoje facety. Po odświeżeniu
+        rozstrzyga `_etykieta_perspektywy_za_stanem`; kontrakt wobec flag zostaje bez zmian, bo od
+        niego zależy wykonalność recepty powrotu (`_rodzaj_recepty_powrotu`). Właściciel etykiety
+        stoi też w `_on_filter`, dokąd prowadzi sygnał panelu - wołanie tutaj zostaje świadomie:
+        jest idempotentne i nie zależy od tego, czy `_clear` panelu emituje sygnał."""
         self._facet_state = facet_model.empty_state()
         self.filter_panel._clear()
+        self._etykieta_perspektywy_za_stanem()
 
     def _on_selection_changed(self):
         self._update_count()

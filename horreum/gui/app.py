@@ -224,13 +224,28 @@ _DIM: dict[str, QColor] = {}
 # `gold`: złoto jest akcentem MARKI i w motywie jasnym ma 2,7:1, więc do tekstu się nie nadaje
 # (`theme.py` §akcenty); bursztyn ma 7,4:1 / 6,3:1 i jest tam wprost przeznaczony do tekstu.
 _WERDYKT: dict[str, QColor] = {}
-# Dwa ZNAKI werdyktu ręki, każdy o innym twierdzeniu — trzymane osobno, bo osobno się je stawia
-# (firsthand 0810). `_ZNACZNIK` mówi „to Twój werdykt" i należy się KAŻDEJ cofniętej pozycji,
-# także takiej bez rodzica na ekranie; `_WCIECIE` mówi „jestem połówką wiersza NAD sobą" i wolno
-# je postawić tylko wtedy, gdy ten wiersz naprawdę tam stoi. Sklejenie obu w jeden literał było
-# powodem, dla którego sierota udawała podwiersz obcej nazwy.
-_ZNACZNIK = "↺  "
-_WCIECIE = "        "
+# Dwa SYGNAŁY werdyktu ręki, każdy o innym twierdzeniu - trzymane osobno, bo osobno się je stawia
+# (firsthand 0810): znacznik `↺` mówi „to Twój werdykt" i należy się KAŻDEJ cofniętej pozycji, także
+# takiej bez rodzica na ekranie; wcięcie mówi „jestem połówką wiersza NAD sobą" i wolno je postawić
+# tylko wtedy, gdy ten wiersz naprawdę tam stoi.
+#
+# BP-2 (bramka pakietu, wizytacja 0810): glif miał tu WŁASNY literał `_ZNACZNIK` obok
+# `queries.CLEARED_MARK` - dwóch właścicieli jednego faktu. Czytamy go teraz PRZEZ ATRYBUT modułu
+# (`queries.CLEARED_MARK` - `queries` jest importowany jako moduł, nie `from queries import
+# CLEARED_MARK`): import nazwy zamroziłby wartość przy starcie procesu, a podmiana w teście
+# (`monkeypatch.setattr(queries, "CLEARED_MARK", …)`) nie miałaby wtedy czego zmienić.
+#
+# W-5 (wizytacja 0810): wcięcie przestało być spacjami w tekście (jechało do schowka i wersji EN,
+# a przy elizji zjadało miejsce nazwie) - poziom niesie teraz rola `rows.INDENT` (int), którą delegat
+# zamienia na px z metryki fontu przy malowaniu (`rows.TwoPartDelegate.primary_rect`).
+
+
+def _etykieta_cofnieta(etykieta):
+    """Etykieta cofniętej pozycji kolejki: znacznik + odstęp + tekst - JEDNO miejsce formatowania
+    dla wszystkich CZTERECH wołających (BP-2): pętla `object_review` i trzy `*_cleared_line`.
+    WCIĘCIE nie wchodzi do tego stringa (rola `rows.INDENT`, W-5) - sierota bez rodzica dostaje TEN
+    SAM tekst co połówka w parze, różni je wyłącznie dana wcięcia, którą ustawia wołający."""
+    return f"{queries.CLEARED_MARK}  {etykieta}"
 
 
 def use_theme(name):
@@ -1334,18 +1349,23 @@ class ObjectAxisView(QWidget):
             # sąsiedztwa. Warunek jest lokalny: sort trzyma nietkniętą połówkę BEZPOŚREDNIO nad
             # cofniętą (`ORDER BY … , object_raw, cleared`), więc rodzicem może być tylko wiersz
             # poprzedni.
+            #
+            # WCIĘCIE JEST DANĄ, NIE TEKSTEM (W-5): poziom idzie rolą `rows.INDENT`, którą delegat
+            # zamienia na px z metryki fontu przy malowaniu - `DisplayRole` obu połówek niesie TĘ
+            # SAMĄ etykietę (`_etykieta_cofnieta`) i różni je wyłącznie ta rola.
             podwiersz = cofniete and rodzic == r["object_raw"]
             rodzic = None if cofniete else r["object_raw"]
             etykieta = r["object_raw"]
             if cofniete:
-                etykieta = (_WCIECIE if podwiersz else "") + _ZNACZNIK + etykieta
+                etykieta = _etykieta_cofnieta(etykieta)
             self._add_review_item(
                 etykieta,
                 count=i18n.t_plural("object.review_count", r["n"]),
                 mark=i18n.t("object.review_cleared_mark") if cofniete else None,
                 fg=_WERDYKT["fg"] if cofniete else None,
                 tag="object_raw_cleared" if cofniete else "object_raw",
-                payload=r["object_raw"])
+                payload=r["object_raw"],
+                indent=1 if podwiersz else 0)
         # Bezimienne (T5a): grid „Do przeglądu" je pokazuje, kolejka do dziś o nich milczała — bez
         # `object_raw` nie ma klucza grupowania, więc idą własnym licznikiem. Od P-D pozycja DRĄŻY
         # do klatek i niesie akcję „Napraw nagłówek…" (nazwa wraca do PLIKU, nie do bazy). Tag
@@ -1368,7 +1388,7 @@ class ObjectAxisView(QWidget):
         # w partycji, a nie połówkami jednej nazwy.
         if q["nameless_cleared_count"] > 0:
             self._add_review_item(
-                _ZNACZNIK + i18n.t("object.nameless_cleared_line"),
+                _etykieta_cofnieta(i18n.t("object.nameless_cleared_line")),
                 count=i18n.t_plural("object.review_count", q["nameless_cleared_count"]), mark=i18n.t("object.review_cleared_mark"),
                 fg=_WERDYKT["fg"], tag="nameless_cleared")
         # Bliźniak kubełka wyżej po drugiej stronie FORMATU (`resolver.NO_OBJECT_CARD_FILETYPES`):
@@ -1386,7 +1406,7 @@ class ObjectAxisView(QWidget):
         # cicho ich nie tykało. QUIET — wiersza nie ma, dopóki nic nie cofnięto.
         if q["nameless_raw_cleared_count"] > 0:
             self._add_review_item(
-                _ZNACZNIK + i18n.t("object.nameless_raw_cleared_line"),
+                _etykieta_cofnieta(i18n.t("object.nameless_raw_cleared_line")),
                 count=i18n.t_plural("object.review_count", q["nameless_raw_cleared_count"]), mark=i18n.t("object.review_cleared_mark"),
                 fg=_WERDYKT["fg"], tag="nameless_raw_cleared")
         # PODZBIÓR kubełka wyżej, nie szósty kubełek (S2, D-OW-2/B): tym klatkom ŚCIEŻKA proponuje
@@ -1421,7 +1441,7 @@ class ObjectAxisView(QWidget):
         # od stosu, o którym nikt nigdy nie decydował.
         if q["nameless_stacks_cleared_count"] > 0:
             self._add_review_item(
-                _ZNACZNIK + i18n.t("object.nameless_stacks_cleared_line"),
+                _etykieta_cofnieta(i18n.t("object.nameless_stacks_cleared_line")),
                 count=i18n.t_plural("object.review_count", q["nameless_stacks_cleared_count"]), mark=i18n.t("object.review_cleared_mark"),
                 fg=_WERDYKT["fg"], tag="nameless_stacks_cleared")
         # JEDNOSTKA TEGO WIERSZA TO KLATKA, mimo że kubełek nazywa się od KOPII (firsthand 0810,
@@ -1494,7 +1514,7 @@ class ObjectAxisView(QWidget):
             + 2 * self.review.frameWidth())
 
     def _add_review_item(self, text, *, tag=None, payload=None, info=None,
-                         count=None, mark=None, fg=None):
+                         count=None, mark=None, fg=None, indent=0):
         """Jedna pozycja kolejki przeglądu — JEDEN producent wiersza dla wszystkich kubełków.
 
         WIERSZ JEST TRÓJCZŁONOWY (R-S3-3): `text` = nazwa (człon pierwszy, elidowany), `count` =
@@ -1502,6 +1522,12 @@ class ObjectAxisView(QWidget):
         adnotacja typu „cofnięte ręką" (człon trzeci, własna kolumna). `fg` maluje CAŁY wiersz —
         używa go połówka z nagrobkiem, bo kolor jest tam TREŚCIĄ (werdykt człowieka), a nie ozdobą.
         Kubełki bez własnej liczby podają sam `text` i zachowują się dokładnie jak przedtem.
+
+        `indent` (W-5, int poziom) niesie rolę `rows.INDENT` - WYŁĄCZNIE dla podwiersza pod własnym
+        rodzicem (pętla `object_review`, `_load_review`). `0`/domyślny NIE ustawia roli wcale, więc
+        wszystkie pozostałe kubełki zachowują się bez zmian. `text` nigdy nie niesie wcięcia
+        spacjami - to był dług W-5 (jechało do schowka i do wersji EN, a przy elizji zjadało miejsce
+        nazwie).
 
         WIZ #11: pięć wierszy miało identyczny krój i kolor, a klikalne były dwa — nic na ekranie
         nie mówiło, który z nich prowadzi dalej. Wiersz z drogą dostaje znacznik „›" (ten sam co
@@ -1534,6 +1560,8 @@ class ObjectAxisView(QWidget):
         it.setData(rows.SECONDARY, czlon2)
         if mark:                               # adnotacja („cofnięte ręką") — własna kolumna z separatorem
             it.setData(rows.TERTIARY, f"  ·  {mark}")
+        if indent:                              # poziom wcięcia (W-5) - 0/domyślny nie stawia roli wcale
+            it.setData(rows.INDENT, indent)
         if tag:
             it.setData(_REVIEW_TAG, tag)
             it.setData(_REVIEW_PAYLOAD, payload)

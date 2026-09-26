@@ -10,6 +10,7 @@ pytest.importorskip("PySide6")
 
 from horreum.gui import rows, theme
 
+from PySide6.QtCore import QRect
 from PySide6.QtGui import QBrush, QColor, QFontMetrics, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QListWidget, QListWidgetItem, QStyleOptionViewItem
 
@@ -19,7 +20,7 @@ def qapp():
     yield QApplication.instance() or QApplication([])
 
 
-def _list_with(text, secondary, *, strong=False, tertiary=None):
+def _list_with(text, secondary, *, strong=False, tertiary=None, indent=None):
     lw = QListWidget()
     lw.setItemDelegate(rows.TwoPartDelegate(lw, strong=strong))
     it = QListWidgetItem(text)
@@ -27,6 +28,8 @@ def _list_with(text, secondary, *, strong=False, tertiary=None):
         it.setData(rows.SECONDARY, secondary)
     if tertiary is not None:
         it.setData(rows.TERTIARY, tertiary)
+    if indent is not None:
+        it.setData(rows.INDENT, indent)
     lw.addItem(it)
     return lw, it
 
@@ -162,3 +165,100 @@ def test_use_theme_przelacza_kolor_czlonu_drugiego(qapp):
             assert rows._COLORS["secondary"].name().lower() == theme.accents(name)["secondary_text"].lower()
     finally:
         rows.use_theme(theme.DEFAULT)      # przywróć globalny stan modułu dla innych testów
+
+
+# ═════════════════════════ W-5 - WCIĘCIE PODWIERSZA JEST ROLĄ DELEGATA, NIE ZNAKIEM W TEKŚCIE
+#
+# Dawny dług: wcięcie podwiersza kolejki przeglądu żyło jako 8 spacji w `DisplayRole`
+# (`app._WCIECIE`) - jechało do schowka i do wersji EN, a przy elizji zjadało miejsce nazwie.
+# Rola `INDENT` (int, poziom) przenosi je do delegata: `_indent_px` liczy piksele z METRYKI FONTU
+# wiersza (skaluje się z DPI/rozmiarem czcionki), `primary_rect` je stosuje do lewej krawędzi
+# członu pierwszego, `paint` woła oba bez zmiany reszty zachowania.
+
+def test_indent_px_zero_bez_poziomu(qapp):
+    """Rola nieustawiona (None) i rola `0` dają 0 px - brak wcięcia jest DOMYŚLNY, nie czymś, co
+    trzeba osobno wyłączyć.
+
+    Falsyfikator: zwróć z `_indent_px` stałą > 0 niezależnie od roli → obie asercje czerwienieją."""
+    lw, it = _list_with("M51", None)
+    d, idx = lw.itemDelegate(), lw.model().index(0, 0)
+    assert d._indent_px(idx, lw.font()) == 0
+    it.setData(rows.INDENT, 0)
+    assert d._indent_px(idx, lw.font()) == 0
+
+
+def test_indent_px_ma_parytet_z_dawnym_wcieciem_spacjami(qapp):
+    """W-5: `_indent_px` dla poziomu 1 ma dać DOKŁADNIE tę szerokość, którą dawniej zajmowało
+    tekstowe `app._WCIECIE` (8 spacji) na TYM SAMYM foncie - inaczej x startu nazwy podwiersza
+    rusza się i przynależność do rodzica przestaje czytać się jednym rzutem oka.
+
+    ZMIERZONE PRZED wdrożeniem (2026-09-26, offscreen, font domyślny nowego `QListWidget()` =
+    "Sans Serif" 9 pt): szerokość 8 spacji = 96 px. Liczba jest DOWODEM pomiaru, nie asercją:
+    test porównuje obie strony NA ŻYWO, bo szerokość spacji zależy od fontu i platformy QPA
+    (offscreen na tej maszynie nie ma bazy fontów), a bramka na piksele środowiska mierzyłaby
+    fikcję i pękała między maszynami.
+
+    Falsyfikator: zmień `_INDENT_UNIT_SPACES` w `rows.py` na inną wartość niż 8 → pierwsza asercja
+    czerwienieje (parytet z dawnym wcięciem pęka)."""
+    lw, _it = _list_with("M51", None, indent=1)
+    d, idx = lw.itemDelegate(), lw.model().index(0, 0)
+    stary_px = QFontMetrics(lw.font()).horizontalAdvance(" " * 8)     # dawny _WCIECIE, ta sama miara
+    assert d._indent_px(idx, lw.font()) == stary_px
+    assert d._indent_px(idx, lw.font()) > 0
+
+
+def test_indent_px_rosnie_liniowo_z_poziomem(qapp):
+    """Poziom 2 to DWA razy jednostka poziomu 1 - kontrakt roli jest `int`, nie `bool`, więc
+    ewentualne wielopoziomowe zagnieżdżenie (dziś nieużywane) skaluje się przewidywalnie.
+
+    Falsyfikator: podstaw w `_indent_px` `unit` stałe zamiast `level * unit` (ignorując poziom) →
+    obie asercje czerwienieją, bo poziom 2 przestałby się różnić od poziomu 1."""
+    lw1, _ = _list_with("M51", None, indent=1)
+    lw2, _ = _list_with("M51", None, indent=2)
+    d1, d2 = lw1.itemDelegate(), lw2.itemDelegate()
+    px1 = d1._indent_px(lw1.model().index(0, 0), lw1.font())
+    px2 = d2._indent_px(lw2.model().index(0, 0), lw2.font())
+    assert px2 == 2 * px1
+    assert px2 > px1 > 0
+
+
+def test_primary_rect_przesuwa_lewa_krawedz_o_wciecie(qapp):
+    """Mała czysta metoda GEOMETRII (bez paintera/stylu) - test mierzy x startu członu pierwszego
+    bez odpalania `paint` na realnym obrazie (wymóg W-5, pomiar rysowanego tekstu jest w teście
+    nieosiągalny bez realnego okna). Poziom 0/brak zostawia prostokąt CAŁKOWICIE NIETKNIĘTY -
+    sierota i wiersz zwykły nie płacą niczego za samo istnienie roli. Prawa krawędź (miejsce na
+    człon drugi/trzeci) jest sprawą `paint`/`tail`, nie tej metody - `primary_rect` rusza WYŁĄCZNIE
+    lewą.
+
+    Falsyfikator: zwróć z `primary_rect` goły `QRect(rect)` (zignoruj `_indent_px`) → pierwsza i
+    trzecia asercja czerwienieją."""
+    base = QRect(10, 0, 200, 20)
+    lw0, _ = _list_with("M51", None, indent=0)
+    lw1, _ = _list_with("M51", None, indent=1)
+    d0, d1 = lw0.itemDelegate(), lw1.itemDelegate()
+    idx0, idx1 = lw0.model().index(0, 0), lw1.model().index(0, 0)
+    r0 = d0.primary_rect(base, idx0, lw0.font())
+    r1 = d1.primary_rect(base, idx1, lw1.font())
+
+    assert r1.left() > r0.left(), "wcięcie nie przesunęło lewej krawędzi członu pierwszego"
+    assert r0 == base, "poziom 0 ma zostawić prostokąt CAŁKOWICIE nietknięty"
+    assert r1.left() == base.left() + d1._indent_px(idx1, lw1.font())
+    assert r1.right() == base.right(), "wcięcie rusza WYŁĄCZNIE lewą krawędź - prawa jest sprawą `paint`/`tail`"
+
+
+def test_paint_z_wcieciem_nie_wysypuje_sie(qapp):
+    """Smoke (offscreen): `paint` na realnym painterze przechodzi z rolą `INDENT` ustawioną - obok
+    reszty członów i bez nich. Nie mierzy pikseli (to `primary_rect`/`_indent_px` wyżej) - pilnuje
+    WYŁĄCZNIE, że dodanie roli nie wysadza rysowania.
+
+    Falsyfikator: ten test wymaga istnienia `rows.INDENT` - bez roli (stan SPRZED W-5) `_list_with`
+    rzuca `AttributeError` przy `it.setData(rows.INDENT, indent)`, więc test pada już na starcie."""
+    for indent in (0, 1, 2):
+        lw, _it = _list_with("NGC 7000", "(3)  ›", tertiary="  ·  cofnięte ręką", indent=indent)
+        lw.resize(200, 40)
+        pm = QPixmap(200, 20)
+        painter = QPainter(pm)
+        opt = QStyleOptionViewItem()
+        opt.rect = pm.rect()
+        lw.itemDelegate().paint(painter, opt, lw.model().index(0, 0))
+        painter.end()

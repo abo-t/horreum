@@ -141,6 +141,31 @@ def test_brak_bloku_stanu_to_blad():
     assert any("brak bloku `## STAN`" in b for b in rozbior(blok("A-1")).bledy)
 
 
+@pytest.mark.parametrize("wciecie", [" ", "   ", "\t"])
+def test_wciety_naglowek_to_blad_a_nie_cichy_zanik_id(wciecie):
+    # Zarzut bramki K (kimi Z1): wcięty `## B-2` bez pól wpadał do prozy A-1 - `sprawdz` 0,
+    # B-2 znikał z generatu. Markdown renderuje go jak nagłówek, więc oko niczego nie widzi.
+    tekst = rejestr(blok("A-1")) + f"\n{wciecie}## B-2 · tytuł B-2\nProza B-2.\n"
+    assert any("wcięty" in b for b in rozbior(tekst).bledy)
+
+
+def test_wciety_naglowek_w_plotku_kodu_nie_jest_bledem():
+    proza = "Przykład:\n\n```\n  ## X-1 · ilustracja\n```"
+    assert rozbior(rejestr(blok("A-1", proza=proza))).bledy == []
+
+
+def test_nazwa_paczki_wygladajaca_na_id_to_blad_schematu():
+    # Zarzut bramki K (kimi Z3): `K7` w backtickach indeksu czyta się jak ID i kontrola
+    # kompletności generatu pękała RuntimeError na zdrowym rejestrze.
+    stan = STAN.replace("paczki: D E", "paczki: D K7")
+    rej = rozbior(rejestr(blok("A-1"), blok("B-2", paczka="K7"), stan=stan))
+    assert any("wygląda na ID" in b for b in rej.bledy)
+
+
+def test_bom_na_poczatku_rejestru_to_blad():
+    assert any("BOM" in b for b in rozbior("﻿" + rejestr(blok("A-1"))).bledy)
+
+
 # --- kompletność względem kodu -----------------------------------------------------------------
 
 def test_todo_dlug_bez_bloku_to_blad(repo, capsys):

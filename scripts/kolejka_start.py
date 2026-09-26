@@ -122,7 +122,7 @@ def plotek(linia: str) -> bool:
 
 
 def _higiena(tekst: str, bledy: list) -> None:
-    if tekst.startswith("﻿"):
+    if tekst.startswith("\ufeff"):
         bledy.append("linia 1: rejestr ma BOM - zapis ma być UTF-8 bez BOM")
     if "\r" in tekst:
         nr = tekst[:tekst.index("\r")].count("\n") + 1
@@ -151,6 +151,11 @@ def rozbierz(tekst: str) -> Rejestr:
             if m:
                 sekcje.append([m.group(1).strip(), nr, []])
                 continue
+            if linia.lstrip(" \t").startswith("## "):
+                # Markdown renderuje wcięty `## ` jako nagłówek, a parser widzi prozę - blok
+                # wpadłby do poprzedniego i jego ID zniknęłoby z generatu bez sygnału.
+                rej.bledy.append(f"linia {nr}: nagłówek `## ` wcięty - zacznij go od kolumny 0, "
+                                 "inaczej wpis znika z rejestru")
         if sekcje:
             sekcje[-1][2].append((nr, linia, w_plotku or plotek(linia)))
     if w_plotku:
@@ -261,6 +266,12 @@ def _sprawdz_stan(pola, reszta, nr, bledy):
     if len(set(paczki)) != len(paczki) or set(paczki) & set(PACZKI_STALE):
         bledy.append(f"linia {nr}: STAN: `paczki:` z powtórzeniem albo z członem "
                      f"{'/'.join(PACZKI_STALE)} (te są stałe, dopisuje je generator)")
+    jak_id = [p for p in paczki if ID_RE.fullmatch(p)]
+    if jak_id:
+        # Etykieta paczki stoi w indeksie w backtickach jak ID, więc `K7` wyglądałby tam na
+        # identyfikator i kontrola kompletności generatu pękłaby na zdrowym rejestrze.
+        bledy.append(f"linia {nr}: STAN: nazwa paczki wygląda na ID ({' '.join(jak_id)}) - "
+                     "paczka to litera albo słowo bez cyfry i dywizu")
     if any(l.strip() for _, l, _ in reszta):
         bledy.append(f"linia {nr}: STAN nie niesie prozy - treść idzie w pola")
     return stan

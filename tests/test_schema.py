@@ -17,6 +17,8 @@ EXPECTED_TABLES = {
     "observatory",
     # 0011 — kuratela celów planera (T4)
     "target_plan",
+    # 0022 - dziennik zapisu w miejscu (O5/Q8)
+    "inplace_op",
 }
 
 
@@ -93,15 +95,15 @@ def test_szkielet_przyszly_pusty(tmp_path):
     con.close()
 
 
-def test_user_version_v21_po_migracji(tmp_path):
-    """0021 podnosi user_version do 21 (świeża baza leci 0002→…→0021 sekwencyjnie; fakty kopii
-    z jej nagłówka na `location` - liczba i role obrazów, zeznanie pól osi, kotwica `hdr_hash`).
+def test_user_version_v22_po_migracji(tmp_path):
+    """0022 podnosi user_version do 22 (świeża baza leci 0002→…→0022 sekwencyjnie; dziennik zapisu
+    w miejscu `inplace_op` - faza operacji i izolacja lokacji od skanu).
 
     Pin JEST intencją: każda nowa migracja ma ten test PRZEWRÓCIĆ imiennie, żeby podniesienie
     wersji było gestem, a nie skutkiem ubocznym."""
     con = db.open_db(str(tmp_path / "h.db"))
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 21
-    assert db.SCHEMA_VERSION == 21
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 22
+    assert db.SCHEMA_VERSION == 22
     con.close()
 
 
@@ -678,4 +680,28 @@ def test_0008_fakt_nie_dubluje_zeznania(tmp_path):
     with pytest.raises(sqlite3.IntegrityError):         # ten sam fakt drugi raz
         con.execute("INSERT INTO calibration_fact(frame_id, key, value, source, actor, created_at) "
                     "VALUES (1, 'gain', '0', 'user', 'user:local', 't')")
+    con.close()
+
+
+def _op_0022(con, lid, phase, region=b"ab"):
+    con.execute(
+        "INSERT INTO inplace_op(location_id, kind, fmt, region_offset, region_length, old_region_z, "
+        "new_region_z, write_start, write_end, file_size, file_ino, pre_hash, post_hash, phase, "
+        "started_at) VALUES (?, 'commit', 'fits', 0, ?, x'00', x'00', 0, 1, 10, 1, 'a', 'b', ?, 't')",
+        (lid, len(region), phase))
+
+
+def test_0022_jedna_otwarta_operacja_na_lokacje(tmp_path):
+    """STRAŻNIK W DDL (0022): na jednej lokacji najwyżej JEDNA operacja otwarta (`writing`/
+    `unverified`) - druga oznaczałaby zapis na pliku o nieznanym stanie. Zamknięte mogą się mnożyć.
+    Falsyfikator: zdejmij `uq_inplace_op_otwarta` → drugi INSERT przechodzi."""
+    con = db.open_db(str(tmp_path / "h.db"))
+    _loc_0021(con, 1)
+    _op_0022(con, 1, "synced")
+    _op_0022(con, 1, "recovered")
+    _op_0022(con, 1, "writing")
+    with pytest.raises(sqlite3.IntegrityError):
+        _op_0022(con, 1, "unverified")
+    with pytest.raises(sqlite3.IntegrityError):
+        _op_0022(con, 1, "nieznana")
     con.close()

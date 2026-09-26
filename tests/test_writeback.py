@@ -136,13 +136,15 @@ def test_stale_pending_blocked_after_external_change(tmp_path):
     con.close()
 
 
-def test_porazka_backupu_po_zapisie_daje_failed_nie_wyjatek(tmp_path, monkeypatch):
-    """D-X-14: backup wstawiany jest PO `os.replace`. Gdy padnie (dawniej: `hdu_index NOT NULL`
-    kontra NULL dla XISF), pętla commitu NIE MOŻE wybuchnąć — plik jest już zmieniony. Kontrakt:
-    baza re-syncowana do bajtów z dysku + status `failed` z powodem; reszta przebiegu leci dalej."""
+def test_porazka_backupu_zatrzymuje_podmiane_plik_nietkniety(tmp_path, monkeypatch):
+    """Z3 (2026-09-26, odwraca D-X-14): backup powstaje PRZED `os.replace`. Gdy padnie (tu: `hdu_index
+    NOT NULL` kontra NULL dla XISF sprzed 0007), podmiany NIE MA - plik bajtowo nietknięty, baza
+    bez re-syncu, bez backupu, status `failed` z powodem, pętla commitu bez wyjątku. Dawniej ten test
+    pinował odwrotny porządek: plik zmieniony, a backupu brak - czyli zapis bez drogi powrotu."""
     con = db.open_db(str(tmp_path / "h.db"))
     p = tmp_path / "f.fits"
     _write_fits(p, TELESCOP="RC8", IMAGETYP="Light")
+    przed = p.read_bytes()
     fr = _scan_in(con, p)
     lid = _loc_id(con, p)
     hh = con.execute("SELECT header_hash FROM location WHERE id=?", (lid,)).fetchone()["header_hash"]
@@ -154,11 +156,11 @@ def test_porazka_backupu_po_zapisie_daje_failed_nie_wyjatek(tmp_path, monkeypatc
 
     res = writeback.commit(con, "R", now=NOW)                 # ZERO wyjątku z pętli
     assert len(res.failed) == 1 and not res.applied
-    assert "backup do undo NIE powstal" in res.failed[0].reason.replace("ł", "l")
-    assert fits.getheader(str(p))["TELESCOP"] == "EQ6"        # plik ZMIENIONY (to nie jest rollback)
-    # baza opisuje bajty z dysku: re-sync przeszedł mimo braku backupu
+    assert "NIE powstał" in res.failed[0].reason and "nietknięty" in res.failed[0].reason
+    assert p.read_bytes() == przed                            # podmiany NIE było
+    assert not list(tmp_path.glob("*.tmp"))                   # plik tymczasowy sprzątnięty
     assert con.execute("SELECT telescop FROM header WHERE frame_id=?",
-                       (fr["id"],)).fetchone()["telescop"] == "EQ6"
+                       (fr["id"],)).fetchone()["telescop"] == "RC8"
     assert con.execute("SELECT count(*) FROM header_backups").fetchone()[0] == 0
     st = con.execute("SELECT status, reason FROM pending_changes WHERE run_id='R'").fetchone()
     assert st["status"] == "failed" and st["reason"]
@@ -290,7 +292,8 @@ def test_xisf_rekonstrukcja_dokladna_przy_zmianie_dlugosci(tmp_path):
     assert res.status == "applied"
     assert nowy == stary[:start] + b"'ED120R'" + stary[end:] and len(nowy) == len(stary) + 4
     assert res.post_hash == hashlib.sha1(nowy).hexdigest()     # hash z ZAPISANEGO pliku (T3)
-    assert res.backup_text.encode("utf-8") == stary            # backup = oryginalny XML (D-X-9)
+    env = writeback.RegionBackup.decode(res.backup_text)       # backup = surowy region (Z7)
+    assert env.header_text().encode("utf-8") == stary and env.offset == 0
 
 
 def test_xisf_rezerwa_jest_sufitem_a_nie_sugestia(tmp_path):
@@ -622,11 +625,14 @@ def test_xisf_weryfikacja_nowego_xml_przed_plikiem_tymczasowym(tmp_path, monkeyp
 
 
 def _naglowek_przed(p, fmt):
-    """Materiał undo, jaki pisarz MA oddać: FITS - pełny nagłówek wybranego HDU, XISF - oryginalny XML."""
+    """Materiał undo, jaki pisarz MA oddać: SUROWY region nagłówka sprzed zapisu (`RegionBackup`,
+    Z7) - FITS `[0, datLoc)`, XISF `[0, first_attachment)`."""
     if fmt == "fits":
         with fits.open(str(p)) as hdul:
-            return hdul[0].header.tostring()
-    return scan.read_xisf_meta_full(str(p)).xml_bytes.decode("utf-8")
+            koniec = hdul.fileinfo(0)["datLoc"]
+    else:
+        koniec = scan.read_xisf_meta_full(str(p)).first_attachment
+    return p.read_bytes()[:koniec]
 
 
 @pytest.mark.parametrize("fmt", ["fits", "xisf"])
@@ -649,7 +655,7 @@ def test_weryfikacja_po_podmianie_padla_wynik_niesie_backup(tmp_path, monkeypatc
     res = writeback.write_changes(str(p), [writeback.WriteOp("TELESCOP", "set", "EQ6", "str")], None)
 
     assert res.status == "failed" and "PODMIENIONY" in res.reason
-    assert res.backup_text == backup
+    assert writeback.RegionBackup.decode(res.backup_text).region == backup
     assert _sha_pliku(p) != przed                                      # to NIE jest rollback
     assert res.post_hash == prawdziwy(str(p))                          # kotwica = bajty na dysku
 

@@ -37,10 +37,10 @@ Przykłady akceptacyjne:
 from __future__ import annotations
 
 import uuid
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 
-from . import expr
+from . import expr, writeback
 
 
 @dataclass(frozen=True)
@@ -382,6 +382,56 @@ def run_macro(macro_def, frame_ids, *, targets_fn, cards_fn, run_id=None) -> Mac
         ))
 
     return MacroRun(run_id=run_id, touched=touched, skipped=skipped)
+
+
+@dataclass(frozen=True)
+class CardFormPlan:
+    """Plan ujednolicenia karty `OBJECT` (O5) = podgląd przed stagingiem. `run` ma kształt makra
+    (`touched` idzie do `repo.stage_pending_many`, `skipped` niesie powody), `swaps` = zamiany
+    `(stara, nowa, liczba)` malejąco, `in_place`/`fallback` = PRZEWIDYWANA droga zapisu
+    (`writeback.inplace_route`; ostatnie słowo ma pisarz na pliku), `fallback_reasons` = powody
+    drogi dotychczasowej z liczbami."""
+    run: MacroRun
+    swaps: list[tuple[str, str, int]]
+    in_place: int
+    fallback: int
+    fallback_reasons: list[tuple[str, int]]
+
+
+def plan_object_card_form(rows, *, run_id=None) -> CardFormPlan:
+    """Wiersze `queries.object_card_form_rows` → `CardFormPlan`. CZYSTA funkcja (zero DB, zero
+    zapisu): klatka z powodem pominięcia → `skipped`; reszta → jeden `set` karty `OBJECT` (idx 0,
+    typ `str`, komentarz BEZ zmian - `None`) na formę nagłówka, z kotwicą `header_hash` kopii.
+    Wykonanie to istniejący staging i commit writebacku: `repo.stage_pending_many` +
+    `writeback.commit(..., inplace=True)`. Drugi plan po udanym wykonaniu jest pusty z konstrukcji
+    predykatu (karta == forma nie wchodzi)."""
+    run_id = run_id or uuid.uuid4().hex
+    touched: list[PendingPreview] = []
+    skipped: list[SkippedFrame] = []
+    swaps: Counter = Counter()
+    routes: Counter = Counter()
+    in_place = 0
+    for r in rows:
+        if r["skip"] is not None:
+            skipped.append(SkippedFrame(r["frame_id"], r["path"], r["skip"]))
+            continue
+        touched.append(PendingPreview(
+            location_id=int(r["location_id"]), path=r["path"], keyword="OBJECT", idx=0, op="set",
+            old_value=r["card"], new_value=r["form"], new_type="str", comment=None,
+            expected_header_hash=r["header_hash"]))
+        swaps[(r["card"], r["form"])] += 1
+        powod = writeback.inplace_route(r["filetype"], "OBJECT", r["form"], r["value_type"],
+                                        r["comment"])
+        if powod is None:
+            in_place += 1
+        else:
+            routes[powod] += 1
+    return CardFormPlan(
+        run=MacroRun(run_id=run_id, touched=touched, skipped=skipped),
+        swaps=[(stara, nowa, n) for (stara, nowa), n in
+               sorted(swaps.items(), key=lambda kv: (-kv[1], kv[0]))],
+        in_place=in_place, fallback=sum(routes.values()),
+        fallback_reasons=sorted(routes.items(), key=lambda kv: (-kv[1], kv[0])))
 
 
 @dataclass(frozen=True)

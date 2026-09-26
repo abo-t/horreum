@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 )
 
 from horreum import db, macro as macro_mod, repo, resolver
+from horreum.resolver import forma_karty_object   # SPOT formy karty OBJECT (Qt-wolny)
 from horreum.gui import busy, i18n, mapproj, queries, rows, theme
 from horreum.gui.assign_dialog import AssignObjectDialog
 from horreum.gui.wb_worker import zdanie_commitu_kart, zdanie_undo_kart
@@ -608,25 +609,6 @@ def path_proposals_for(con, payload):
     przy nim kłamałoby o tym, co zatwierdza gest."""
     stosy = payload == PATH_STACKS_PAYLOAD
     return tuple(p for p in resolver.path_proposals(con) if p.stack_tree == stosy)
-
-
-def forma_karty_object(con, canon):
-    """Kanon Horreum → wartość karty `OBJECT` do PLIKU albo None - JEDEN punkt wyliczenia formy dla
-    obu gestów piszących kartę („Zatwierdź ze ścieżki…", „Napraw nagłówek…"; decyzje Q6 i D2
-    2026-09-26: jedna wersja na obiekt, nazwy zwyczajowe → oznaczenie katalogowe).
-
-    Forma = `header_form(canon)` (`NGC 7635`; kanon spoza gramatyk bez zmian), ale TYLKO gdy drabina
-    resolvera sprowadza ją z powrotem do TEGO SAMEGO kanonu. Kanon nauczony wyłącznie aliasem
-    (`ZW77` znany tylko jako „Zupelnie Wymyslona 77") nie wraca z własnego zapisu - karta z nim
-    przeniosłaby klatkę po re-syncu do „nierozpoznanych". Wtedy None: wołający decyduje, co dalej
-    (ścieżka pomija kartę z powodem, naprawa zostawia tekst usera, który się rozwiązuje).
-    Uszkodzony słownik (`ValueError`) = nie wiadomo, więc też None."""
-    value = header_form(canon)
-    try:
-        wraca = resolver.resolve_name(resolver.alias_lookup(con), value)[0]
-    except ValueError:
-        return None
-    return value if wraca is not None and wraca.canon == canon else None
 
 
 def plan_kart_sciezki(con, canon, frame_ids):

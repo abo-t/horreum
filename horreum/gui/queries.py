@@ -17,14 +17,15 @@ import re
 
 from horreum.grouper import NO_TELESCOPE_KINDS      # jeden właściciel zbioru rodzajów poza osią
 from horreum.naming import header_dt
+from horreum.repo import INPLACE_OPEN_PHASES   # fazy otwarte zapisu w miejscu (0022)
 from horreum.resolve._coerce import _to_float, _to_int, _to_text
 from horreum.resolve.frames import LIGHT_KINDS
 from horreum.resolve.headers import COPY_TESTIMONY_KEYWORDS, copy_testimony
 from horreum.resolve.objects import CLEARABLE_OBJECT_SOURCES, WEAK_OBJECT_SOURCES
 from horreum.resolve.paths import STACK_KIND, STACKS_DIR, object_from_path
 from horreum.resolve.stack import signature_timestamp
-from horreum.resolver import (NO_OBJECT_CARD_FILETYPES, alias_snapshot, path_proposals,
-                              resolve_name, review_state)
+from horreum.resolver import (NO_OBJECT_CARD_FILETYPES, alias_snapshot, forma_karty_object,
+                              path_proposals, resolve_name, review_state)
 from horreum.stacks import REASON_NO_OBJECT, REASON_OFFSET_UNKNOWN
 
 
@@ -1791,6 +1792,148 @@ def path_header_conflict_frame_ids(con):
     return wynik
 
 
+def torn_write_frame_ids(con):
+    """PLIK PO PRZERWANYM ZAPISIE (0022, Q8): klatki, których kopia ma OTWARTĄ operację zapisu
+    w miejscu (`inplace_op.phase` w `repo.INPLACE_OPEN_PHASES`) - nagłówek mógł zostać rozdarty,
+    więc kopia jest izolowana od skanu (`scan._isolated`). Robota człowieka: odzysk
+    (`writeback.recover_torn`) albo jawne zwolnienie (`repo.release_inplace_op`) po własnym
+    rozstrzygnięciu. JEDEN właściciel predykatu dla licznika Porządków i trimu gridu. Guardów
+    żywotności (wycofana, zastąpiona) brak świadomie: rozdarty plik jest faktem o dysku, nie
+    o liście roboty klatki. Zwraca set[int]."""
+    return {int(r[0]) for r in con.execute(
+        "SELECT DISTINCT l.frame_id FROM inplace_op o JOIN location l ON l.id = o.location_id "
+        "WHERE o.phase IN (SELECT value FROM json_each(?))",
+        (json.dumps(list(INPLACE_OPEN_PHASES)),)).fetchall()}
+
+
+def object_card_form_rows(con):
+    """KARTA `OBJECT` W INNEJ FORMIE (O5, 2026-09-26): klatki, których karta `OBJECT` wskazuje TEN
+    SAM obiekt co klatka, ale innym zapisem niż jedna forma karty (`resolver.forma_karty_object` -
+    ta sama funkcja, której używają gesty GUI piszące kartę):
+    `NGC6992` → `NGC 6992`, `M 106` → `NGC 4258`, `ksiezyc` → `Moon`. JEDEN właściciel predykatu
+    dla planu ujednolicenia (`macro.plan_object_card_form`) i dla wiersza Porządków
+    (`object_card_form_frame_ids`).
+
+    PREDYKAT (klatka wchodzi): rodzaj z `LIGHT_KINDS`, obiekt przypisany, karta `OBJECT` niepusta,
+    drabina nazwy przebiegu (`resolver.resolve_name` na migawce aliasów - ta sama co w przebiegu
+    i w `path_header_conflict_frame_ids`) daje TEN SAM kanon co obiekt klatki, a karta różni się od
+    formy karty kanonu. Karta wskazująca INNY obiekt albo nierozpoznana nie jest „inną formą",
+    tylko innym zeznaniem - tu nie wchodzi (to robota E5-2). Wycofana i zastąpiona wypadają.
+    Wchodzą też komety, Księżyc, nazwy zwyczajowe i klatki z obiektem nadanym ręką - decyzja
+    usera 2026-09-26: „jedna wersja na obiekt", „przestaw jednakowo" (odwrócone D-PD-9).
+
+    BRAMKI CELU (klatka zostaje w wyniku z `skip` = powód, żeby podgląd powiedział, czego NIE
+    ruszamy) - wzorzec `macro.resolve_target`, plus trzy własne:
+      * RAW (read-only, #2), obiekt z REGIONU (współrzędne, nie karta), brak obecnej kopii albo
+        wiele obecnych (D-W1), skompresowany master (T6), degenerat tożsamości (D-X-13), brak
+        `header_hash` (brak kontroli zapisu);
+      * kopia oznaczona jako nieczytelna (`unreadable_since`, #13) - jej `header_hash` jest
+        z ostatniego UDANEGO odczytu, więc kotwica zapisu mogłaby kłamać;
+      * więcej niż jedna karta `OBJECT` - zeznanie bierze ostatnią (`_put`), a zapis musiałby
+        zgadywać, którą ujednolicić;
+      * kopia zeznaje INNĄ kartę niż klatka (`location.hdr_object`, gdy fakty kopii są zebrane) -
+        karty w `cards` należą do KLATKI i mogą pochodzić z innej kopii;
+      * forma nie wraca do kanonu (`forma_karty_object` → None: kanon znany tylko z aliasu) -
+        karta z nią wypchnęłaby klatkę do nierozpoznanych (kimi Z1);
+      * sklejka oznaczeń (`NGC4631_PGC42637`), której NIE KAŻDY człon wskazuje ten sam kanon -
+        forma zastąpiłaby zeznanie o dwóch obiektach jednym (kimi Z2c);
+      * karta `OBJECT` nietekstowa (`value_type` ≠ 'str') - forma jest tekstem (kimi Z5);
+      * FITS z kartą `CHECKSUM`/`DATASUM` - zapis nagłówka unieważniłby sumę (astra Z5).
+
+    Karta i komentarz pochodzą z `cards` (idx 0), bo tam jest też `value_type` i komentarz, z których
+    plan przewiduje drogę zapisu. Zwraca listę dict: `frame_id`, `location_id`, `path`,
+    `filetype`, `header_hash`, `canon`, `card`, `form`, `value_type`, `comment`, `skip`."""
+    rows = con.execute(
+        "SELECT f.id AS fid, f.filetype, f.sha1_data_uncomputable AS degen, "
+        "       f.object_source AS osrc, o.canon AS canon, "
+        "       c.value_raw AS card, c.value_type AS vtype, c.comment AS comment, "
+        "       (SELECT count(*) FROM cards c2 WHERE c2.frame_id = f.id "
+        "          AND c2.keyword = 'OBJECT') AS n_cards, "
+        "       (SELECT count(*) FROM location l2 WHERE l2.frame_id = f.id "
+        "          AND l2.present = 1) AS n_present, "
+        "       (SELECT count(*) FROM cards c3 WHERE c3.frame_id = f.id "
+        "          AND c3.keyword IN ('CHECKSUM', 'DATASUM')) AS n_sum, "
+        "       l.id AS lid, l.path, l.header_hash, l.compressed, l.unreadable_since, "
+        "       l.hdr_hash, l.hdr_object "
+        "FROM frame f "
+        "JOIN object o ON o.id = f.object_id "
+        "JOIN cards c ON c.frame_id = f.id AND c.keyword = 'OBJECT' AND c.idx = 0 "
+        "LEFT JOIN location l ON l.frame_id = f.id AND l.present = 1 "
+        "WHERE f.kind IN (SELECT value FROM json_each(?)) "
+        "  AND f.retired_at IS NULL AND f.superseded_by IS NULL "
+        "ORDER BY f.id, l.id",
+        (json.dumps(sorted(LIGHT_KINDS)),)).fetchall()
+    if not rows:
+        return []
+    lookup = alias_snapshot(con).get
+    formy: dict[str, str | None] = {}
+
+    def _kanon(tekst):
+        trafienie = resolve_name(lookup, tekst)[0] if tekst else None
+        return trafienie.canon if trafienie is not None else None
+
+    wynik, widziane = [], set()
+    for r in rows:
+        fid = int(r["fid"])
+        if fid in widziane:                     # druga obecna kopia - klatka już opisana
+            continue
+        widziane.add(fid)
+        card = _to_text(r["card"])
+        if card is None:                        # pusta karta nie zeznaje (jak w przebiegu)
+            continue
+        ident, _ = resolve_name(lookup, card)
+        if ident is None or ident.canon != r["canon"]:
+            continue
+        if r["canon"] not in formy:
+            formy[r["canon"]] = forma_karty_object(con, r["canon"], lookup=lookup)
+        form = formy[r["canon"]]
+        if form is not None and card == form:
+            continue
+        czlony = [c.strip() for c in card.split("_")] if "_" in card else []
+        if r["filetype"] == "raw":
+            skip = "plik RAW (DSLR) - Horreum go nie zapisuje"
+        elif r["osrc"] == "region":
+            skip = "obiekt z regionu (współrzędne), nie z karty"
+        elif r["n_present"] == 0:
+            skip = "brak obecnej kopii"
+        elif r["n_present"] > 1:
+            skip = f"wiele obecnych kopii ({r['n_present']})"
+        elif r["compressed"]:
+            skip = "skompresowany master"
+        elif r["degen"]:
+            skip = "tożsamość nieobliczalna (degenerat) - zapis rozdwoiłby klatkę"
+        elif r["header_hash"] is None:
+            skip = "brak header_hash - brak kontroli zapisu"
+        elif r["unreadable_since"] is not None:
+            skip = "kopia oznaczona jako nieczytelna"
+        elif r["n_cards"] > 1:
+            skip = f"wiele kart OBJECT ({r['n_cards']})"
+        elif r["hdr_hash"] is not None and _to_text(r["hdr_object"]) != card:
+            skip = "kopia zeznaje inną kartę OBJECT niż klatka"
+        elif form is None:
+            skip = "forma karty nie wraca do kanonu (kanon znany tylko z aliasu)"
+        elif czlony and not all(_kanon(c) == r["canon"] for c in czlony):
+            skip = "sklejka oznaczeń - nie każdy człon wskazuje ten obiekt"
+        elif r["vtype"] != "str":
+            skip = f"karta OBJECT nietekstowa ({r['vtype']})"
+        elif r["filetype"] == "fits" and r["n_sum"]:
+            skip = "FITS z sumą kontrolną (CHECKSUM/DATASUM)"
+        else:
+            skip = None
+        wynik.append({
+            "frame_id": fid, "location_id": r["lid"], "path": r["path"] or "",
+            "filetype": r["filetype"], "header_hash": r["header_hash"], "canon": r["canon"],
+            "card": card, "form": form, "value_type": r["vtype"], "comment": r["comment"],
+            "skip": skip})
+    return wynik
+
+
+def object_card_form_frame_ids(con):
+    """Klatki do ujednolicenia karty `OBJECT` - wiersze `object_card_form_rows` BEZ powodu
+    pominięcia (licznik i trim wiersza Porządków „Karta OBJECT w innej formie"). Zwraca set[int]."""
+    return {r["frame_id"] for r in object_card_form_rows(con) if r["skip"] is None}
+
+
 def review_frame_ids(con):
     """Zbiór frame_id perspektywy „Do przeglądu": light/master_light z `object_id IS NULL`
     (równoważne trimowi `object_canon is None` — `object.canon` NOT NULL, LEFT JOIN daje NULL
@@ -2454,6 +2597,9 @@ def tasks_state(con):
         # człowieka, a rozstrzyga człowiek (makro karty w pliku albo „Przypisz obiekt"). Ten sam
         # predykat, co trim perspektywy.
         "path_header_conflict_frames": len(path_header_conflict_frame_ids(con)),
+        # 0022/Q8: kopia po przerwanym zapisie w miejscu - izolowana od skanu do odzysku albo
+        # zwolnienia ręką. Ten sam predykat co trim perspektywy.
+        "torn_write_frames": len(torn_write_frame_ids(con)),
         "stacks_lineage_pending": len(lineage_pending_frame_ids(con)),
         "dup_frames": len(dup_frame_ids(con)),
         # Kopie niezgodne ze sobą (0021) - podzbiór duplikatów, ten sam predykat co trim perspektywy.

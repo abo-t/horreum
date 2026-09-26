@@ -1339,6 +1339,8 @@ class ScanSummary:
     camera_review: int = 0
     kind_unmapped: int = 0
     skipped: int = 0          # pliki POMINIĘTE bramą przyrostową (NIEczytane — bez sha1/nagłówka/DML)
+    isolated: int = 0         # kopie IZOLOWANE po przerwanym zapisie w miejscu (0022) - NIEczytane
+    isolated_paths: list = field(default_factory=list)   # ich ścieżki - wykluczenie widoczne
     vanished: int = 0         # kopie znikłe MIĘDZY listowaniem a odczytem (backstop D-V-8; nie pass)
     dirs_excluded: int = 0    # podkatalogi z listy odcięte (drzewa robocze: _WBPP/_Review — nie schodzone)
     excluded_dirs: list = field(default_factory=list)   # ich ścieżki (diagnostyka — nie cichy licznik)
@@ -1432,6 +1434,22 @@ def _already_scanned(con, volume, path, mtime):
         "AND unreadable_since IS NULL AND present = 1",
         (volume, path, mtime),
     ).fetchone()
+    return row is not None
+
+
+def _isolated(con, path, volume=None):
+    """IZOLACJA PO PRZERWANYM ZAPISIE W MIEJSCU (0022, Q8): czy kopia pod `path` (na `volume`, gdy
+    podany) ma OTWARTĄ operację `inplace_op` (`repo.INPLACE_OPEN_PHASES`). Taka kopia może mieć
+    rozdarty nagłówek - skan uznałby ją za podmianę treści i rozdwoił klatkę, a marker
+    `unreadable_*` wymusiłby ponowny odczyt. Wszystkie drogi czytające pliki kopii (skan drzewa,
+    skan stosów, uzupełnienia faktów, przejęcie zeznania) pomijają ją BEZWARUNKOWO - także przy
+    wyłączonej bramie przyrostowej - aż do odzysku (`writeback.recover_torn`) albo jawnego
+    zwolnienia (`repo.release_inplace_op`). Czysta funkcja `con→bool`, stały literał SELECT."""
+    row = con.execute(
+        "SELECT 1 FROM location l JOIN inplace_op o ON o.location_id = l.id "
+        "WHERE l.path = ? AND (? IS NULL OR l.volume = ?) "
+        "AND o.phase IN (SELECT value FROM json_each(?)) LIMIT 1",
+        (path, volume, volume, json.dumps(list(repo.INPLACE_OPEN_PHASES)))).fetchone()
     return row is not None
 
 
@@ -1752,6 +1770,8 @@ def backfill_xisf_headers(con, *, now, progress=None):
     for i, row in enumerate(rows, 1):
         path = row["path"]
         try:
+            if _isolated(con, path):
+                raise OSError("kopia izolowana po przerwanym zapisie w miejscu (0022)")
             rec = scan_file(path)
         except Exception as exc:               # brak pliku / I/O — raport, nie zapis (patrz docstring)
             s.failed += 1
@@ -1846,6 +1866,8 @@ def backfill_copy_facts(con, *, now, root=None, progress=None, should_cancel=Non
             break
         path = row["path"]
         try:
+            if _isolated(con, path):
+                raise OSError("kopia izolowana po przerwanym zapisie w miejscu (0022)")
             header, _cards, header_hash, _hdu, _comp, _span, image_roles = _read_meta(
                 path, os.stat(path).st_size)
         except Exception as exc:               # I/O albo parser - raport, nie zapis (docstring)
@@ -1951,6 +1973,8 @@ def adopt_orphan_testimony(con, *, now, root=None, progress=None, should_cancel=
             break
         path = kopia["path"]
         try:
+            if _isolated(con, path):
+                raise OSError("kopia izolowana po przerwanym zapisie w miejscu (0022)")
             rec = scan_file(path)
         except Exception as exc:               # I/O - raport, nie zapis (docstring)
             s.failed += 1
@@ -2088,8 +2112,9 @@ def scan_stacks(con, root, *, volume="?", drive_letter=None, tier=None, now,
             break
         spath = str(path)
         try:
-            if gate_on and _already_scanned(con, volume, spath, _mtime_iso(path.stat())):
-                s.skipped += 1
+            if _isolated(con, spath, volume if gate_on else None) or (
+                    gate_on and _already_scanned(con, volume, spath, _mtime_iso(path.stat()))):
+                s.skipped += 1                        # izolowana (0022) albo bez zmian
             else:
                 rec = scan_file(spath)
                 if rec.header is None:                     # W1: nie ma czym potwierdzić tożsamości
@@ -2179,10 +2204,15 @@ def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now,
         # zapis ponawia się sam przy następnym skanie, zamiast utknąć pod pominięciem.
         blad = kind = rec = None
         try:
-            skip = gate_on and _already_scanned(con, volume, spath, _mtime_iso(path.stat()))
-            if skip:
-                summary.skipped += 1
+            if _isolated(con, spath, volume if gate_on else None):   # 0022: rozdarty zapis
+                summary.isolated += 1
+                summary.isolated_paths.append(spath)
+                skip = True
             else:
+                skip = gate_on and _already_scanned(con, volume, spath, _mtime_iso(path.stat()))
+                if skip:
+                    summary.skipped += 1
+            if not skip:
                 rec = scan_file(spath)
         except Exception as exc:                           # backstop W1, strona ODCZYTU
             blad, kind = exc, unreadable_kind_of(exc)

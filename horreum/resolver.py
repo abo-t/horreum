@@ -20,7 +20,7 @@ from . import repo
 from .grouper import NO_TELESCOPE_KINDS
 from .resolve._coerce import _to_text
 from .resolve._text import norm_alnum
-from .resolve.catalog import catalog_canon
+from .resolve.catalog import catalog_canon, header_form
 from .resolve.filters import normalize_filter
 from .resolve.objects import (STICKY_OBJECT_SOURCES, WEAK_OBJECT_SOURCES, ObjectIdentity,
                               load_own_objects, resolve_object)
@@ -218,6 +218,28 @@ def alias_lookup(con):
             "FROM object_alias a JOIN object o ON o.id = a.object_id "
             "WHERE a.alias_norm = ?", (key,)).fetchone()
     return _lookup
+
+
+def forma_karty_object(con, canon, *, lookup=None):
+    """Kanon Horreum → wartość karty `OBJECT` do PLIKU albo None - JEDEN punkt wyliczenia formy dla
+    wszystkich dróg piszących kartę: gestów GUI („Zatwierdź ze ścieżki…", „Napraw nagłówek…";
+    decyzje Q6 i D2 2026-09-26: jedna wersja na obiekt, nazwy zwyczajowe → oznaczenie katalogowe)
+    i wsadu ujednolicenia (`gui.queries.object_card_form_rows`, O5). Mieszka tu, a nie w GUI, bo
+    wsad jest Qt-wolny (kimi Z1, 2026-09-26).
+
+    Forma = `header_form(canon)` (`NGC 7635`; kanon spoza gramatyk bez zmian), ale TYLKO gdy drabina
+    resolvera sprowadza ją z powrotem do TEGO SAMEGO kanonu. Kanon nauczony wyłącznie aliasem
+    (`ZW77` znany tylko jako „Zupelnie Wymyslona 77") nie wraca z własnego zapisu - karta z nim
+    przeniosłaby klatkę po re-syncu do „nierozpoznanych". Wtedy None: wołający decyduje, co dalej
+    (ścieżka pomija kartę z powodem, naprawa zostawia tekst usera, wsad pomija klatkę z powodem).
+    Uszkodzony słownik (`ValueError`) = nie wiadomo, więc też None. `lookup` = migawka aliasów
+    (`alias_snapshot(con).get`) dla wołań w pętli; domyślnie jeden SELECT na nazwę."""
+    value = header_form(canon)
+    try:
+        wraca = resolve_name(lookup or alias_lookup(con), value)[0]
+    except ValueError:
+        return None
+    return value if wraca is not None and wraca.canon == canon else None
 
 
 def alias_snapshot(con):

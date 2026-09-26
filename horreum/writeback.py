@@ -18,6 +18,14 @@ Dwie warstwy:
    Od P6c writer ma DWA formaty: FITS (astropy) i XISF (łata bajtowa — sekcja „PISARZ XISF").
    Dyspozycja po rozszerzeniu w `write_changes`/`write_full_header`/`_post_hash`, więc
    ORKIESTRACJA (niżej) o formacie nie wie — commit i undo są dla obu identyczne.
+   Od O5 (2026-09-26) writer ma DRUGĄ DROGĘ: ZAPIS W MIEJSCU (`write_changes_inplace`, sekcja
+   „ZAPIS W MIEJSCU") - podmiana samego regionu nagłówka na uchwycie z BLOKADĄ zapisu innych
+   (`_exclusive`: `CreateFileW` z `FILE_SHARE_READ`), bez pliku tymczasowego, z backupem PRZED
+   zapisem i weryfikacją po nim. Commit wybiera ją jawnie (`commit(inplace=True)`), undo - zawsze,
+   gdy przywracany nagłówek mieści się w tych samych bajtach. Rozdarty nagłówek naprawia
+   `restore_region`/`recover_torn` z backupu regionu, bez parsowania.
+   BACKUP (obie drogi, od 2026-09-26) = `RegionBackup`: surowy region nagłówka + offset, rozmiar,
+   `st_ino`, próbki poza regionem, hash - w kolumnie tekstowej `header_backups.header_text`.
 2. ORKIESTRACJA (`commit`/`undo`): grupuje `pending_changes` po LOCATION, per plik zapisuje i
    RE-SYNCUJE bazę przez `scan.ingest_record(actor="user:local")` — REUŻYWA znanej-ścieżki skanu
    (SPOT, brief §3/R#2): `refresh_location` odświeża fakty kopii + zeznanie + WYMIANĘ `cards` +
@@ -25,22 +33,33 @@ Dwie warstwy:
    → config na stęchłej kamerze. KAŻDY re-sync emituje eventy (fakt domenowy = mutacja pliku);
    staging (backup/status/commit) jest transient, BEZ eventu (brief §3/R#1).
 
-Kolejność PLIK→DB (brief T8): `os.replace` PIERWSZY, potem re-sync DB; crash pomiędzy → plik
-zmieniony, DB stęchłe, kotwicą naprawy jest RE-SKAN (`header_hash` mismatch → refresh). Backup undo
-zapisany PO udanym `os.replace`. Utrwalanie per plik (funkcje stagingu `repo` commitują od razu),
+Kolejność BAZA→PLIK→BAZA: backup undo PIERWSZY (w obu drogach - przed `os.replace` i przed
+pierwszym bajtem zapisu w miejscu; Z3 2026-09-26, dawniej backup szedł PO podmianie), potem plik,
+potem re-sync; crash między plikiem a re-synciem → plik zmieniony, DB stęchłe, kotwicą naprawy jest
+RE-SKAN (`header_hash` mismatch → refresh), a dla zapisu w miejscu przerwanego w połowie - odzysk
+z backupu regionu. Utrwalanie per plik (funkcje stagingu `repo` commitują od razu),
 więc anulowanie na granicy pliku jest bezpieczne: pliki już zapisane zostają 'applied', reszta
 'pending' (wznawialne).
 """
 
 from __future__ import annotations
 
+import base64
+import contextlib
+import ctypes
 import dataclasses
 import hashlib
+import json
 import os
 import re
 import shutil
 import sqlite3
+import struct
+import sys
 import tempfile
+import time
+import warnings
+import zlib
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
 
@@ -69,11 +88,17 @@ class WriteResult:
     leżą na dysku, więc wołający musi dostać materiał do cofnięcia, inaczej undo traci go na zawsze.
     `post_hash` przy takim 'failed' to hash nagłówka, który pisarz ZAPISAŁ (nie odczytał) - kotwica
     undo przepuści cofnięcie tylko wtedy, gdy na dysku leży dokładnie to, co zapisaliśmy.
-    'blocked' i 'failed' sprzed podmiany mają oba pola `None` i plik bajtowo nietknięty."""
+    'blocked' i 'failed' sprzed podmiany mają oba pola `None` i plik bajtowo nietknięty.
+
+    `in_place=True` = droga ZAPISU W MIEJSCU (sekcja „ZAPIS W MIEJSCU"): plik ma tę samą tożsamość
+    (`st_ino`) i te same bajty danych, a backup (przy commicie) powstał PRZED zapisem - wołający go
+    już NIE wstawia. Przy 'failed' w tej drodze `backup_text is not None` znaczy „backup leży
+    w bazie, a zapis mógł ruszyć bajty"."""
     status: str            # 'applied' | 'blocked' | 'failed'
     reason: str | None
     post_hash: str | None  # header_hash PO zapisie (z ZAPISANEGO pliku) — kontrola undo + kolejny zapis
     backup_text: str | None = None  # pełny nagłówek SPRZED zapisu (undo)
+    in_place: bool = False
 
 
 # ============================================================ REGUŁY KARTY (jeden właściciel)
@@ -272,20 +297,27 @@ def _post_hash(path: str) -> str:
     return scan.read_fits_meta(path).header_hash
 
 
-def write_changes(path, ops: list[WriteOp], expected_hash: str | None) -> WriteResult:
+def write_changes(path, ops: list[WriteOp], expected_hash: str | None, *,
+                  persist_backup: Callable[[str, str], None] | None = None) -> WriteResult:
     """Atomowo zapisz zmiany w nagłówku wybranego HDU. Kontrola `header_hash`: nagłówek na dysku ≠
     `expected_hash` → 'blocked', NIE pisze. Treść łamiąca reguły karty FITS 4.0 (`card_violation`)
     → 'blocked' z powodem, NIE pisze - zamiast angielskiego wyjątku astropy albo cichego CONTINUE,
     ucięcia komentarza czy karty HIERARCH. Plik tymczasowy jest czytany PRZED podmianą (plik
     nieczytelny nie zastąpi oryginału), a jego hash jest kotwicą weryfikacji po podmianie
-    (`_after_replace`). Zwraca `post_hash` z zapisanego pliku + `backup_text` (pełny nagłówek sprzed
-    zmian → undo) - także przy 'failed' PO podmianie. Port dawcy `fits_io.write_changes`.
+    (`_after_replace`). Zwraca `post_hash` z zapisanego pliku + `backup_text` - także przy 'failed'
+    PO podmianie. Port dawcy `fits_io.write_changes`.
     `.xisf` → `write_xisf_changes` (inny format, TEN SAM kontrakt `WriteResult`).
-    `.dng/.arw/.cr2` → ODMOWA (#2): RAW jest read-only (rename dozwolony osobno)."""
+    `.dng/.arw/.cr2` → ODMOWA (#2): RAW jest read-only (rename dozwolony osobno).
+
+    BACKUP PRZED PODMIANĄ (Z3, 2026-09-26): `backup_text` = `RegionBackup` (surowy region nagłówka
+    sprzed zmian + metadane), a `persist_backup(backup_text, post_hash)` - gdy podany - utrwala go
+    w bazie PRZED `os.replace`. Porażka backupu → 'failed', oryginał nietknięty, plik tymczasowy
+    sprzątnięty. Dawniej backup powstawał PO podmianie, więc jego porażka zostawiała plik zmieniony
+    bez drogi powrotu."""
     if _is_raw(path):
         return WriteResult("blocked", "format RAW jest read-only (#2)", None)
     if _is_xisf(path):
-        return write_xisf_changes(path, ops, expected_hash)
+        return write_xisf_changes(path, ops, expected_hash, persist_backup=persist_backup)
     path = os.fspath(path)
     tmp: str | None = None
     try:
@@ -301,7 +333,8 @@ def write_changes(path, ops: list[WriteOp], expected_hash: str | None) -> WriteR
                 ops, lambda op: op.op == "add" or _count_keyword(hdr, op.keyword) == 0)
             if powod is not None:
                 return WriteResult("blocked", powod, None)
-            backup_text = hdr.tostring()  # pełny nagłówek SPRZED zmian → undo
+            info = hdul.fileinfo(index)
+            start, data_start = info["hdrLoc"], info["datLoc"]
             for op in ops:
                 _apply_op(hdr, op)
             fd, tmp = tempfile.mkstemp(suffix=".tmp", dir=os.path.dirname(os.path.abspath(path)))
@@ -311,9 +344,17 @@ def write_changes(path, ops: list[WriteOp], expected_hash: str | None) -> WriteR
         # formułą co skan, zanim zastąpi oryginał: nieczytelny → 'failed' i oryginał nietknięty;
         # czytelny → hash tego, co za chwilę będzie na dysku (kotwica `_after_replace`).
         written_hash = scan.read_fits_meta(tmp).header_hash
+        backup_text = _region_backup(path, "fits", start, data_start - start, current).encode()
+        if persist_backup is not None:
+            try:
+                persist_backup(backup_text, written_hash)
+            except Exception as exc:  # noqa: BLE001 - bez backupu nie podmieniamy
+                return WriteResult("failed", f"backup do cofnięcia NIE powstał, więc podmiany nie "
+                                             f"było - plik nietknięty: {type(exc).__name__}: {exc}",
+                                   None)
         os.replace(tmp, path)
         tmp = None
-    except Exception as exc:  # noqa: BLE001 — raport zamiast wyjątku w warstwie zapisu
+    except Exception as exc:  # noqa: BLE001 - raport zamiast wyjątku w warstwie zapisu
         return WriteResult("failed", f"{type(exc).__name__}: {exc}", None)
     finally:
         if tmp is not None and os.path.exists(tmp):
@@ -325,17 +366,21 @@ def write_changes(path, ops: list[WriteOp], expected_hash: str | None) -> WriteR
 
 
 def write_full_header(path, header_text: str, expected_hash: str | None) -> WriteResult:
-    """Atomowo przepisz CAŁY nagłówek wybranego HDU z `header_text` (ścieżka undo). Kontrola
-    `header_hash` jak w `write_changes` (dysk ≠ `expected_hash` → 'blocked'). `header_text` =
-    wcześniejszy `hdr.tostring()`; odtwarzamy przez `Header.fromstring`. Dane nietknięte (zmienia
-    się `file_sha1`, `sha1_data` zostaje). Port dawcy `fits_io.write_full_header`.
-    `.xisf` → `write_xisf_full_header` (tam `header_text` = oryginalny XML).
-    `.dng/.arw/.cr2` → ODMOWA (#2): RAW jest read-only."""
+    """Atomowo przywróć nagłówek z backupu (ścieżka undo): plik tymczasowy + `os.replace`. Kontrola
+    `header_hash` jak w `write_changes` (dysk ≠ `expected_hash` → 'blocked'). `header_text` = backup
+    dowolnej generacji: koperta `RegionBackup` (od 2026-09-26) albo tekst sprzed niej
+    (`hdr.tostring()` dla FITS, XML dla XISF). Dane nietknięte (`sha1_data` zostaje).
+    `.dng/.arw/.cr2` → ODMOWA (#2).
+
+    Cofnięcie W MIEJSCU to osobna droga (`restore_inplace`) - wyłącznie dla commitu zapisanego
+    w miejscu, z operacją w dzienniku `inplace_op` (astra Z12): tylko wtedy przerwane cofnięcie ma
+    materiał odzysku. Stare backupy tekstowe i commity atomowe cofają się tu, atomowo."""
     if _is_raw(path):
         return WriteResult("blocked", "format RAW jest read-only (#2)", None)
-    if _is_xisf(path):
-        return write_xisf_full_header(path, header_text, expected_hash)
     path = os.fspath(path)
+    tekst = _backup_header_text(header_text)
+    if _is_xisf(path):
+        return _xisf_full_header_atomic(path, tekst, expected_hash, header_text)
     tmp: str | None = None
     try:
         with fits.open(path, mode="readonly", memmap=False) as hdul:
@@ -343,7 +388,7 @@ def write_full_header(path, header_text: str, expected_hash: str | None) -> Writ
             current = scan._header_hash(hdu.header)
             if expected_hash is not None and current != expected_hash:
                 return WriteResult("blocked", "header_hash mismatch", None)
-            hdu.header = fits.Header.fromstring(header_text)
+            hdu.header = fits.Header.fromstring(tekst)
             fd, tmp = tempfile.mkstemp(suffix=".tmp", dir=os.path.dirname(os.path.abspath(path)))
             os.close(fd)
             hdul.writeto(tmp, overwrite=True)
@@ -597,8 +642,9 @@ def _xisf_backup_text(meta) -> str:
 def _write_xisf_file(path: str, region: bytes, tail_start: int) -> None:
     """Atomowa podmiana pliku XISF: temp w TYM SAMYM katalogu (ten sam wolumen → `os.replace` jest
     atomowy), nowy region nagłówka + OGON verbatim od pierwszego bloku danych. Kopiujemy cały plik
-    — parytet z FITS, gdzie `hdul.writeto(tmp)` robi dokładnie to samo. Łata w miejscu (`r+b`) jest
-    odrzucona: NIEATOMOWA, więc przerwa zostawiłaby uszkodzonego mastera."""
+    - parytet z FITS, gdzie `hdul.writeto(tmp)` robi dokładnie to samo. Łata w miejscu (`r+b`) była
+    tu odrzucona jako NIEATOMOWA; od O5 (2026-09-26) istnieje obok jako osobna droga z backupem
+    PRZED zapisem (sekcja „ZAPIS W MIEJSCU"), a ta zostaje drogą `commit(inplace=False)`."""
     tmp: str | None = None
     try:
         fd, tmp = tempfile.mkstemp(suffix=".tmp", dir=os.path.dirname(os.path.abspath(path)))
@@ -677,65 +723,87 @@ def _xisf_verify(meta, ops, patches, new_xml: bytes) -> None:
                          f"({rozjazd[0]!r} != {rozjazd[1]!r})")
 
 
-def write_xisf_changes(path, ops: list[WriteOp], expected_hash: str | None) -> WriteResult:
-    """Łata bajtowa nagłówka XISF — bliźniak `write_changes` z tym samym kontraktem `WriteResult`.
+def _xisf_prepare(path: str, ops: list[WriteOp], expected_hash: str | None):
+    """Wszystko, co pisarz XISF liczy PRZED dotknięciem pliku, wspólne dla drogi atomowej
+    (`write_xisf_changes`) i zapisu w miejscu (`_xisf_inplace_plan`) - jedna kolejność bramek,
+    więc obie drogi odmawiają tych samych plików tymi samymi słowami.
 
-    Kolejność (brief §5): odczyt → kontrola `header_hash` (≠ → 'blocked', NIE pisze) → bramki
-    D-X-11/13 → REGUŁY KARTY (`card_violation`, spec §11.6) → lokalizacja i podmiana wycinków
-    (karta + zmapowana własność + komentarz) → WERYFIKACJA nowego XML-a (`_xisf_verify`: §9.5
-    i round-trip kart) → round-trip backupu (D-X-9) → BRAMKA MIESZCZENIA SIĘ (D-X-2) → temp +
-    `os.replace` → weryfikacja po podmianie (`_after_replace`: `post_hash` z ZAPISANEGO pliku ==
-    sha1 złożonego XML-a). `backup_text` = oryginalny XML (wejście `write_xisf_full_header` przy
-    undo) - także przy 'failed' PO podmianie, bo wtedy plik jest już zmieniony.
+    Zwraca `(meta, new_xml, backup_text, region)`; odmowa to `_XisfRefusal` (w tym niezgodny
+    `header_hash` - powód „header_hash mismatch", jak w FITS), awaria - każdy inny wyjątek."""
+    meta = _read_xisf_or_refuse(path)
+    if expected_hash is not None and meta.header_hash != expected_hash:
+        raise _XisfRefusal("header_hash mismatch")
+    _xisf_gates(meta)
+    powod = _ops_violation(ops, lambda op: op.op == "add")   # `set` nie zakłada karty (niżej)
+    if powod is not None:
+        raise _XisfRefusal(powod)
+    patches = _xisf_patches(meta, ops)
+    new_xml = _xisf_apply(meta.xml_bytes, patches)
+    _xisf_verify(meta, ops, patches, new_xml)      # §9.5 + round-trip: PRZED jakimkolwiek zapisem
+    backup_text = _xisf_backup_text(meta)          # D-X-9: PRZED mutacją, nie przy undo
+    try:
+        region = scan.build_xisf_header_region(meta, new_xml)      # D-X-1/2
+    except ValueError as exc:                      # nie mieści się / plik przeczy sam sobie
+        raise _XisfRefusal(str(exc)) from exc
+    return meta, new_xml, backup_text, region
 
-    Odmowa ('blocked') zostawia plik bajtowo nietknięty — wszystkie bramki liczą się PRZED
+
+def write_xisf_changes(path, ops: list[WriteOp], expected_hash: str | None, *,
+                       persist_backup: Callable[[str, str], None] | None = None) -> WriteResult:
+    """Łata bajtowa nagłówka XISF - bliźniak `write_changes` z tym samym kontraktem `WriteResult`.
+
+    Kolejność (brief §5, `_xisf_prepare`): odczyt → kontrola `header_hash` (≠ → 'blocked', NIE
+    pisze) → bramki D-X-11/13 → REGUŁY KARTY (`card_violation`, spec §11.6) → lokalizacja
+    i podmiana wycinków (karta + zmapowana własność + komentarz) → WERYFIKACJA nowego XML-a
+    (`_xisf_verify`: §9.5 i round-trip kart) → round-trip backupu (D-X-9) → BRAMKA MIESZCZENIA SIĘ
+    (D-X-2) → backup (`RegionBackup` całego regionu `[0, first_attachment)`, utrwalony przez
+    `persist_backup` PRZED podmianą - Z3) → temp + `os.replace` → weryfikacja po podmianie
+    (`_after_replace`: `post_hash` z ZAPISANEGO pliku == sha1 złożonego XML-a).
+
+    Odmowa ('blocked') zostawia plik bajtowo nietknięty - wszystkie bramki liczą się PRZED
     stworzeniem pliku tymczasowego. Awaria ('failed') to każdy inny wyjątek, w tym rozejście się
     skanu bajtowego z parserem (guard `locate_value_span`) i nieudana weryfikacja nowego XML-a: tam
     nie wiemy, co byśmy zapisali, więc nie piszemy, ale to usterka do zbadania, nie polityka odmowy."""
     path = os.fspath(path)
     try:
-        meta = _read_xisf_or_refuse(path)
-        if expected_hash is not None and meta.header_hash != expected_hash:
-            return WriteResult("blocked", "header_hash mismatch", None)
-        _xisf_gates(meta)
-        powod = _ops_violation(ops, lambda op: op.op == "add")   # `set` nie zakłada karty (niżej)
-        if powod is not None:
-            raise _XisfRefusal(powod)
-        patches = _xisf_patches(meta, ops)
-        new_xml = _xisf_apply(meta.xml_bytes, patches)
-        _xisf_verify(meta, ops, patches, new_xml)      # §9.5 + round-trip: PRZED plikiem tymczasowym
-        backup_text = _xisf_backup_text(meta)          # D-X-9: PRZED mutacją, nie przy undo
-        try:
-            region = scan.build_xisf_header_region(meta, new_xml)      # D-X-1/2
-        except ValueError as exc:                      # nie mieści się / plik przeczy sam sobie
-            raise _XisfRefusal(str(exc)) from exc
+        meta, new_xml, _, region = _xisf_prepare(path, ops, expected_hash)
+        backup_text = _region_backup(path, "xisf", 0, meta.first_attachment,
+                                     meta.header_hash).encode()
+        # Header_hash XISF to sha1 bajtów XML (D-X-3), a pisarz zapisuje je 1:1 - więc hash tego,
+        # co zapiszemy, znamy bez odczytu, a odczyt (T3) ma go tylko potwierdzić.
+        written_hash = hashlib.sha1(new_xml).hexdigest()
+        if persist_backup is not None:
+            try:
+                persist_backup(backup_text, written_hash)
+            except Exception as exc:  # noqa: BLE001 - bez backupu nie podmieniamy
+                return WriteResult("failed", f"backup do cofnięcia NIE powstał, więc podmiany nie "
+                                             f"było - plik nietknięty: {type(exc).__name__}: {exc}",
+                                   None)
         _write_xisf_file(path, region, meta.first_attachment)          # tu następuje os.replace
     except _XisfRefusal as ref:
         return WriteResult("blocked", ref.reason, None)
-    except Exception as exc:  # noqa: BLE001 — raport zamiast wyjątku w warstwie zapisu
+    except Exception as exc:  # noqa: BLE001 - raport zamiast wyjątku w warstwie zapisu
         return WriteResult("failed", f"{type(exc).__name__}: {exc}", None)
-    # Header_hash XISF to sha1 bajtów XML (D-X-3), a pisarz zapisuje je 1:1 - więc hash tego, co
-    # zapisaliśmy, znamy bez odczytu, a odczyt (T3) ma go tylko potwierdzić.
-    return _after_replace(path, hashlib.sha1(new_xml).hexdigest(), backup_text)
+    return _after_replace(path, written_hash, backup_text)
 
 
 def write_xisf_full_header(path, header_text: str, expected_hash: str | None) -> WriteResult:
-    """Przepisz CAŁY nagłówek XISF z `header_text` (ścieżka undo, D-X-9) — bliźniak
-    `write_full_header`. Ta sama kontrola `header_hash` (tu `post_hash` z backupu) i TA SAMA bramka
-    mieszczenia się: undo skraca nagłówek, więc mieści się zawsze, ale bramki nie omijamy.
-    Attachmenty nietknięte → `sha1_data` stoi.
+    """Przywróć nagłówek XISF z backupu (ścieżka undo, D-X-9) - to samo co `write_full_header`
+    dla pliku `.xisf` (najpierw w miejscu pod blokadą, zob. tam). Nazwa zostaje dla wołających."""
+    return write_full_header(path, header_text, expected_hash)
 
-    Wypełnienie po undo: bajty, które nadpisał dłuższy nagłówek, wracają jako ZERA (wskrzesić się
-    ich nie da). Nagłówek wraca BAJTOWO — a że wypełnienie jest w archiwum zerowe (330/330 plików),
-    w praktyce wraca bajtowo CAŁY plik, czego writeback FITS nie potrafi (astropy kanonizuje karty
-    strukturalne przy `writeto`)."""
-    path = os.fspath(path)
+
+def _xisf_full_header_atomic(path: str, xml_text: str, expected_hash: str | None,
+                             backup_text: str) -> WriteResult:
+    """Droga atomowa przywrócenia XISF (plik tymczasowy + `os.replace`) - spadek, gdy koperta
+    regionu nie pasuje do bieżących adresów bloków. Ta sama bramka mieszczenia się co zapis;
+    wypełnienie po skróceniu wraca jako ZERA."""
     try:
         meta = _read_xisf_or_refuse(path)
         if expected_hash is not None and meta.header_hash != expected_hash:
             return WriteResult("blocked", "header_hash mismatch", None)
         try:
-            region = scan.build_xisf_header_region(meta, header_text.encode("utf-8"))
+            region = scan.build_xisf_header_region(meta, xml_text.encode("utf-8"))
         except ValueError as exc:
             raise _XisfRefusal(str(exc)) from exc
         _write_xisf_file(path, region, meta.first_attachment)
@@ -744,7 +812,657 @@ def write_xisf_full_header(path, header_text: str, expected_hash: str | None) ->
         return WriteResult("blocked", ref.reason, None)
     except Exception as exc:  # noqa: BLE001
         return WriteResult("failed", f"{type(exc).__name__}: {exc}", None)
-    return WriteResult("applied", None, post, header_text)
+    return WriteResult("applied", None, post, backup_text)
+
+
+# ============================================================ ZAPIS W MIEJSCU (O5, 2026-09-26)
+# Decyzja usera 2026-09-26 (wariant O5, ujednolicenie kart `OBJECT`): podmiana SAMEGO nagłówka
+# w miejscu, zamiast przepisywania całego pliku przez plik tymczasowy i `os.replace`. Powód jest
+# ilościowy: dla populacji ujednolicenia droga atomowa to ~420 GB zapisu po SMB, a `os.replace`
+# zrywa twarde dowiązania projekcji `_WBPP` (stary nagłówek zostaje w projekcji; `st_nlink` po SMB
+# kłamie, dowodem tożsamości pliku jest `st_ino`). Zapis w miejscu zachowuje `st_ino`, nie dotyka
+# danych i pisze kilkadziesiąt bajtów.
+#
+# Ceną jest ATOMOWOŚĆ - przerwa w trakcie zapisu może zostawić nagłówek rozdarty. Stąd kolejność
+# inna niż w drodze atomowej, każdy krok z własnym testem:
+#   0. BLOKADA (`_exclusive`): uchwyt otwarty przez `CreateFileW` z trybem współdzielenia
+#      `FILE_SHARE_READ` - bez `FILE_SHARE_WRITE` i `FILE_SHARE_DELETE`. Od tej chwili do końca
+#      weryfikacji nikt inny nie otworzy pliku do zapisu ani go nie podmieni/nie usunie (odmowa
+#      systemu), a proces, który JUŻ trzyma plik do zapisu, sprawia, że blokada się nie uda - wtedy
+#      krótki ponów z przerwą (błąd współdzielenia bywa przejściowy: antywirus, indeksowanie), a po
+#      nim 'failed' bez zapisu. Czytać plik wolno dalej, także nam (astropy, weryfikacja).
+#   1. PLAN pod blokadą: kontrola `header_hash`, reguły karty (`card_violation`), nowy region
+#      o TEJ SAMEJ długości, weryfikacja łaty przed zapisem. REGION STARY CZYTANY Z UCHWYTU BLOKADY
+#      sam przechodzi kontrolę oczekiwanego hasha, granic nagłówka (karta `END` w ostatnim bloku
+#      regionu) i układu danych - offsety z odczytu parsera nie są przyjmowane na wiarę.
+#   2. DZIENNIK w bazie (`journal.begin`) PRZED pierwszym bajtem zapisu, jedną transakcją:
+#      backup `RegionBackup` (surowy region, do undo) i operacja `inplace_op` (0022) w fazie
+#      `writing` - region stary i planowany wynikowy, zakres zapisu, rozmiar i `st_ino` pliku.
+#      Porażka to 'failed' z plikiem nietkniętym. Operacja otwarta izoluje lokację od skanu.
+#   3. JEDEN `write` jednego spójnego zakresu (od pierwszego do ostatniego różnego bajtu regionu)
+#      + `flush` + `os.fsync`.
+#   4. WERYFIKACJA (odczyt KLIENTA - osobny uchwyt, ale ta sama maszyna i jej pamięć podręczna;
+#      niezależnej kontroli po stronie NAS to nie zastępuje, zob. `scripts/kontrola_pilotazu.py`):
+#      rozmiar pliku, bajty regionu, odcisk próbek danych, `header_hash` formułą skanu. Zgodna →
+#      faza `written` (re-sync orkiestracji → `synced`), rozjazd albo przerwa → `unverified`.
+#
+# DANE: zakres zapisu leży w regionie nagłówka z konstrukcji, a pisany jest jednym `write` od adresu
+# wewnątrz regionu - jedyne dane, które usterka arytmetyki mogłaby nadpisać, to bajty TUŻ ZA
+# regionem, a zapis poza koniec pliku zmieniłby jego rozmiar. Stąd próbki: 64 KiB przed regionem,
+# 64 KiB od początku danych, 64 KiB końca pliku + rozmiar. Pełny dowód `sha1_data` daje re-sync
+# orkiestracji (`_resync(expect_sha1_data=)` czyta cały plik) - obejmuje wybrane HDU FITS albo
+# pierwszy obraz XISF, nie pozostałe HDU/obrazy.
+#
+# ODZYSK ROZDARTEGO NAGŁÓWKA (`recover_region`, orkiestracja `recover_torn`): wyłącznie dla
+# OTWARTEJ operacji z dziennika i wyłącznie wtedy, gdy region pod blokadą jest stanem pośrednim TEJ
+# operacji (każdy bajt zakresu zapisu = stary albo nowy, poza zakresem = stary) w tym samym pliku.
+# Bez parsowania bieżącego nagłówka. Zgodność rozmiaru i próbek nie jest dowodem (astra Z11).
+#
+# UNDO W MIEJSCU (`restore_inplace`) wyłącznie dla commitu zapisanego w miejscu, z operacją
+# w dzienniku, na tym samym pliku i z CAŁYM regionem równym regionowi wynikowemu commitu (Z12/Z13);
+# każde inne undo idzie drogą atomową (`write_full_header`).
+#
+# SPADEK NA DROGĘ DOTYCHCZASOWĄ (`Fallback`) wyłącznie PRZED jakimkolwiek zapisem i backupem:
+# FITS, gdy łata nie mieści się w tym samym 80-bajtowym rekordzie z zastanym komentarzem, gdy
+# karta występuje więcej niż raz, gdy operacja to `add` albo wartość nietekstowa. FITS z kartą
+# `CHECKSUM`/`DATASUM` to ODMOWA ('blocked'), nie spadek: zapis w miejscu unieważniłby sumę, a obie
+# drogi jej dziś nie przeliczają. XISF spadku NIE MA: region nagłówka XISF ma stały rozmiar w obu
+# drogach, więc brak rezerwy odmawia tak samo tu, jak w pliku tymczasowym.
+
+_PROBE_BYTES = 1 << 16    # próbka: przed regionem, początek danych, koniec pliku (po 64 KiB)
+# Karty układu danych FITS (+ `NAXISn`): przywrócenie w miejscu wymaga, żeby były TE SAME - inaczej
+# te same bajty danych znaczyłyby co innego. Zapis w miejscu ich nie łata w ogóle (tylko wartości
+# tekstowe), więc dla commitu to asercja, a dla undo - bramka.
+_FITS_LAYOUT_KEYWORDS = frozenset({"SIMPLE", "XTENSION", "BITPIX", "NAXIS", "EXTEND", "PCOUNT",
+                                   "GCOUNT", "GROUPS", "BZERO", "BSCALE", "BLANK"})
+# Karty bez wartości albo z wartością, której układ nie jest „keyword = 'tekst' / komentarz".
+_FITS_NOT_INPLACE = frozenset({"", "COMMENT", "HISTORY", "CONTINUE", "END"})
+# Sumy kontrolne FITS (standard 4.0, dodatek J): zmiana bajtu nagłówka unieważnia CHECKSUM.
+_FITS_SUM_KEYWORDS = ("CHECKSUM", "DATASUM")
+_FITS_END_RECORD = b"END" + b" " * 77
+# Blokada: przerwy między próbami otwarcia przy błędzie współdzielenia (32) / blokady (33).
+_LOCK_RETRY_DELAYS = (0.2, 0.5, 1.0, 2.0)
+_LOCK_TRANSIENT = frozenset({32, 33})
+_BACKUP_MAGIC = "HORREUM-REGION/1 "
+
+
+@dataclasses.dataclass(frozen=True)
+class Fallback:
+    """Plik nie nadaje się do zapisu w miejscu - wołający idzie drogą dotychczasową. Powstaje
+    WYŁĄCZNIE przed jakimkolwiek zapisem i przed backupem (plik nietknięty, baza nietknięta)."""
+    reason: str
+
+
+@dataclasses.dataclass(frozen=True)
+class RegionBackup:
+    """Backup nagłówka jako SUROWY REGION bajtów pliku + metadane (od 2026-09-26, obie drogi zapisu).
+
+    Tekst w `header_backups.header_text` (kolumna TEKSTOWA): `HORREUM-REGION/1 {json}`, nowa linia,
+    base64 z `zlib` regionu. `offset`/`region` = gdzie i co leżało; `size`/`ino` = plik w chwili
+    backupu; `pre_hash` = `header_hash` nagłówka w regionie.
+
+    Region FITS = `[hdrLoc, datLoc)` wybranego HDU, XISF = `[0, first_attachment)`: sygnatura, pole
+    długości, `reserved`, XML i CAŁE wypełnienie - więc undo w miejscu odtwarza bajt w bajt także
+    niezerowe wypełnienie i zera po `END`. Backupy sprzed tej zmiany (gołe `hdr.tostring()` / XML)
+    tego nie obiecują i cofają się wyłącznie drogą atomową. Materiałem ODZYSKU rozdartego zapisu
+    nie jest ta koperta, tylko operacja `inplace_op` (0022) - koperta mówi, co było, operacja mówi,
+    co się działo."""
+    fmt: str               # 'fits' | 'xisf'
+    offset: int
+    region: bytes
+    size: int
+    ino: int               # 0 = system nie podał
+    pre_hash: str
+
+    def encode(self) -> str:
+        meta = {"fmt": self.fmt, "offset": self.offset, "length": len(self.region),
+                "size": self.size, "ino": self.ino, "pre_hash": self.pre_hash}
+        body = base64.b64encode(zlib.compress(self.region, 9)).decode("ascii")
+        return f"{_BACKUP_MAGIC}{json.dumps(meta, sort_keys=True)}\n{body}"
+
+    @staticmethod
+    def decode(text: str) -> RegionBackup | None:
+        """`None` dla backupu tekstowego sprzed 2026-09-26; uszkodzona koperta → `ValueError`."""
+        if not text.startswith(_BACKUP_MAGIC):
+            return None
+        head, _, body = text[len(_BACKUP_MAGIC):].partition("\n")
+        meta = json.loads(head)
+        region = zlib.decompress(base64.b64decode(body))
+        if len(region) != meta["length"]:
+            raise ValueError("RegionBackup: długość regionu nie zgadza się z metadanymi")
+        return RegionBackup(meta["fmt"], meta["offset"], region, meta["size"], meta["ino"],
+                            meta["pre_hash"])
+
+    def header_text(self) -> str:
+        """Nagłówek jako tekst dla drogi atomowej undo: FITS - region, XISF - XML z regionu."""
+        if self.fmt == "fits":
+            return self.region.decode("latin-1")
+        (hlen,) = struct.unpack("<I", self.region[8:12])
+        return self.region[scan.XISF_XML_OFFSET:scan.XISF_XML_OFFSET + hlen].decode("utf-8")
+
+
+def _backup_header_text(backup_text: str) -> str:
+    """Tekst nagłówka z backupu dowolnej generacji (koperta regionu albo tekst sprzed 2026-09-26)."""
+    env = RegionBackup.decode(backup_text)
+    return env.header_text() if env is not None else backup_text
+
+
+def _backup_pre_hash(path: str, backup_text: str) -> str:
+    """`header_hash` nagłówka zapisanego w backupie - tą samą formułą co skan."""
+    env = RegionBackup.decode(backup_text)
+    if env is not None:
+        return env.pre_hash
+    if _is_xisf(path):
+        return hashlib.sha1(backup_text.encode("utf-8")).hexdigest()
+    return scan._header_hash(fits.Header.fromstring(backup_text))
+
+
+def _probe(fh, offset: int, length: int, size: int) -> tuple:
+    """Odcisk próbek POZA regionem `[offset, offset+length)`: 64 KiB przed nim, 64 KiB od jego końca
+    (początek danych) i 64 KiB końca pliku - sha1 hex każdej."""
+    end = offset + length
+    odcinki = ((max(0, offset - _PROBE_BYTES), offset),
+               (end, min(size, end + _PROBE_BYTES)),
+               (max(end, size - _PROBE_BYTES), size))
+    wynik = []
+    for a, b in odcinki:
+        fh.seek(a)
+        wynik.append(hashlib.sha1(fh.read(max(0, b - a))).hexdigest())
+    return tuple(wynik)
+
+
+def _region_backup(path: str, fmt: str, offset: int, length: int, pre_hash: str) -> RegionBackup:
+    """`RegionBackup` z pliku przez zwykły uchwyt odczytu (droga atomowa)."""
+    with open(path, "rb") as fh:
+        st = os.fstat(fh.fileno())
+        fh.seek(offset)
+        region = fh.read(length)
+        if len(region) != length:
+            raise ValueError(f"region {offset}:{offset + length} niekompletny ({len(region)} B)")
+        return RegionBackup(fmt, offset, region, st.st_size, st.st_ino, pre_hash)
+
+
+@contextlib.contextmanager
+def _exclusive(path: str):
+    """Uchwyt `r+b` z BLOKADĄ ZAPISU INNYCH (krok 0 sekcji): `CreateFileW(GENERIC_READ |
+    GENERIC_WRITE, FILE_SHARE_READ, OPEN_EXISTING)`. Zmierzone 2026-09-26: na NTFS (tmp) i na
+    udziale SMB (`R:\\_test_blokady`, poza archiwum) przy trzymanym uchwycie zapis z INNEGO procesu,
+    drugie otwarcie do zapisu, usunięcie i `os.replace` na ten plik → odmowa; odczyt osobnym
+    uchwytem i zapis własnym działają; `st_ino` stabilny (niezerowy) między otwarciami i po zapisie.
+    Niezmierzone: drugi komputer.
+    Błąd współdzielenia/blokady przy otwarciu → ponów z przerwami `_LOCK_RETRY_DELAYS`, potem
+    `OSError` (zapis się nie zaczął). Poza Windows → `OSError` (zapis w miejscu niedostępny).
+
+    WŁASNOŚĆ DESKRYPTORA (astra Z14): deskryptor CRT należy do tej funkcji i jest zamykany dokładnie
+    raz w zewnętrznym `finally`; obiekt pliku dostaje go z `closefd=False`, więc wyjątek przy jego
+    budowie ani przy jego zamknięciu nie zostawia uchwytu (a z nim blokady) otwartego."""
+    if sys.platform != "win32":
+        raise OSError("zapis w miejscu wymaga blokady współdzielenia Windows (CreateFileW)")
+    import msvcrt
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateFileW.restype = wintypes.HANDLE
+    k32.CreateFileW.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                                wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
+    k32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    invalid = wintypes.HANDLE(-1).value
+    generic_rw, share_read, open_existing, normal = 0xC0000000, 0x1, 3, 0x80
+    for pauza in (*_LOCK_RETRY_DELAYS, None):
+        handle = k32.CreateFileW(path, generic_rw, share_read, None, open_existing, normal, None)
+        if handle not in (None, invalid):
+            break
+        err = ctypes.get_last_error()
+        if err not in _LOCK_TRANSIENT or pauza is None:
+            raise ctypes.WinError(err)
+        time.sleep(pauza)
+    try:
+        fd = msvcrt.open_osfhandle(handle, os.O_RDWR | os.O_BINARY)
+    except Exception:
+        k32.CloseHandle(handle)
+        raise
+    try:
+        fh = os.fdopen(fd, "r+b", closefd=False)
+        try:
+            yield fh
+        finally:
+            fh.close()
+    finally:
+        os.close(fd)
+
+
+@dataclasses.dataclass(frozen=True)
+class _InplacePlan:
+    """Wszystko, co zapis w miejscu wie przed dotknięciem pliku. `old_region`/`new_region` mają
+    TĘ SAMĄ długość i zaczynają się w `region_start`; `old_region` przeczytany Z UCHWYTU BLOKADY
+    i sprawdzony; `pre_hash`/`post_hash` = header_hash przed/po formułą skanu."""
+    fmt: str
+    path: str
+    region_start: int
+    old_region: bytes
+    new_region: bytes
+    pre_hash: str
+    post_hash: str
+
+
+def _fits_layout(hdr) -> list:
+    return [(c.keyword, c.value) for c in hdr.cards
+            if c.keyword in _FITS_LAYOUT_KEYWORDS or re.fullmatch(r"NAXIS\d+", c.keyword)]
+
+
+def _fits_region_checked(fh, start: int, data_start: int, expected_hash: str | None, uklad):
+    """Region nagłówka FITS `[start, data_start)` PRZECZYTANY Z UCHWYTU BLOKADY i sprawdzony sam
+    w sobie (Z1): długość = wielokrotność 2880 kończąca się blokiem z kartą `END` (granice HDU
+    z bajtów, nie z offsetów parsera), `header_hash` == oczekiwany, układ danych == `uklad`.
+    Zwraca `(raw, hash)` albo `WriteResult('blocked')` przy innym hashu; niespójne granice/układ
+    → `ValueError` ('failed', zero zapisu)."""
+    fh.seek(start)
+    raw = fh.read(data_start - start)
+    if len(raw) != data_start - start or not raw or len(raw) % 2880:
+        raise ValueError(f"FITS: region nagłówka {start}:{data_start} niekompletny ({len(raw)} B)")
+    rekordy = [raw[i:i + _FITS_RECORD] for i in range(0, len(raw), _FITS_RECORD)]
+    koniec = next((i for i, r in enumerate(rekordy) if r == _FITS_END_RECORD), None)
+    if koniec is None or len(raw) != -(-(koniec + 1) * _FITS_RECORD // 2880) * 2880:
+        raise ValueError("FITS: granice nagłówka z uchwytu nie zgadzają się z kartą END")
+    hdr = fits.Header.fromstring(raw.decode("latin-1"))
+    biezacy = scan._header_hash(hdr)
+    if expected_hash is not None and biezacy != expected_hash:
+        return WriteResult("blocked", "header_hash mismatch", None)
+    if _fits_layout(hdr) != uklad:
+        raise ValueError("FITS: układ danych z uchwytu inny niż z parsera")
+    return raw, biezacy
+
+
+def _fits_card_image(keyword: str, value: str, comment: str) -> tuple[bytes | None, str | None]:
+    """Obraz 80 bajtów karty tekstowej `keyword = 'value' / comment` w układzie astropy (pole
+    wartości stałego formatu, §4.2) albo `(None, powód)`. Round-trip: karta odczytana z obrazu
+    ma dać tę samą nazwę, wartość i komentarz - astropy przy za długim komentarzu UCINA go po cichu
+    (ostrzeżenie), a przy za długiej wartości składa CONTINUE; oba przypadki łapie ta kontrola."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        image = fits.Card(keyword, value, comment).image
+        back = fits.Card.fromstring(image)
+        zgodna = (len(image) == _FITS_RECORD and back.keyword == keyword
+                  and back.value == value.rstrip() and (back.comment or "") == (comment or ""))
+    if not zgodna:
+        return None, (f"karta {keyword} z zastanym komentarzem nie mieści się w jednym rekordzie "
+                      f"80 znaków")
+    return image.encode("ascii"), None
+
+
+def _fits_hdu_bounds(path: str, expected_hash: str | None):
+    """Odczyt parserem (pod blokadą wołającego): `(hdr, start, data_start, hash)` albo
+    `WriteResult('blocked')`/`Fallback`. Offsety są tu KANDYDATEM - rozstrzyga `_fits_region_checked`."""
+    with fits.open(path, mode="readonly", memmap=False) as hdul:
+        index, hdu = scan._select_hdu(hdul)
+        hdr = hdu.header
+        biezacy = scan._header_hash(hdr)
+        if expected_hash is not None and biezacy != expected_hash:
+            return WriteResult("blocked", "header_hash mismatch", None)
+        if isinstance(hdu, fits.CompImageHDU):
+            return Fallback("skompresowany master - nagłówek kafelkowy układa astropy")
+        info = hdul.fileinfo(index)
+        return hdr, info["hdrLoc"], info["datLoc"], biezacy
+
+
+def _fits_inplace_plan(path: str, fh, ops: list[WriteOp], expected_hash: str | None):
+    """Plan zapisu w miejscu dla FITS (pod blokadą) → `_InplacePlan` | `Fallback` | `WriteResult`.
+
+    Kwalifikuje się wyłącznie `set` WARTOŚCI TEKSTOWEJ na karcie tekstowej występującej dokładnie
+    raz, której nowy obraz (z ZASTANYM komentarzem - dług AR-7: tu komentarz nie ginie) mieści
+    się w jednym rekordzie. Karta jest podmieniana w TYM SAMYM 80-bajtowym slocie, więc liczba
+    kart, bloków 2880 B i długość nagłówka zostają. Kontrola hasha i reguły karty stoją PRZED
+    kwalifikacją, więc odmawiają tak samo jak droga atomowa; `CHECKSUM`/`DATASUM` → odmowa."""
+    granice = _fits_hdu_bounds(path, expected_hash)
+    if not isinstance(granice, tuple):
+        return granice
+    hdr, start, data_start, biezacy = granice
+    powod = _ops_violation(ops, lambda op: op.op == "add" or _count_keyword(hdr, op.keyword) == 0)
+    if powod is not None:
+        return WriteResult("blocked", powod, None)
+    sumy = [k for k in _FITS_SUM_KEYWORDS if k in hdr]
+    if sumy:
+        return WriteResult("blocked", f"FITS z sumą kontrolną ({', '.join(sumy)}) - zapis nagłówka "
+                                      f"unieważniłby ją, a pisarz jej nie przelicza", None)
+    obrazy: dict[str, tuple[bytes, str]] = {}
+    for op in ops:
+        kw = op.keyword.strip().upper()
+        if op.op != "set" or op.value_type != "str":
+            return Fallback(f"operacja {op.op}/{op.value_type} na {kw} - układ karty zostaje "
+                            f"przy astropy")
+        if kw in _FITS_NOT_INPLACE or kw in _FITS_LAYOUT_KEYWORDS or kw in obrazy:
+            return Fallback(f"karta {kw} nie jest zwykłą kartą tekstową")
+        ile = _count_keyword(hdr, kw)
+        if ile != 1 or op.idx not in (None, 0):
+            return Fallback(f"karta {kw} występuje {ile} razy")
+        card = hdr.cards[kw]
+        if not isinstance(card.value, str):
+            return Fallback(f"zastana wartość {kw} nie jest tekstem")
+        image, powod = _fits_card_image(kw, str(op.value), card.comment)
+        if image is None:
+            return Fallback(powod)
+        obrazy[kw] = (image, str(op.value))
+    want = [dataclasses.replace(c, value_raw=obrazy[c.keyword][1].rstrip())
+            if c.keyword in obrazy else c for c in scan._parse_cards(hdr)]
+    uklad = _fits_layout(hdr)
+    sprawdzony = _fits_region_checked(fh, start, data_start, biezacy, uklad)
+    if isinstance(sprawdzony, WriteResult):
+        return sprawdzony
+    raw, _ = sprawdzony
+    records = [raw[i:i + _FITS_RECORD] for i in range(0, len(raw), _FITS_RECORD)]
+    for kw, (image, _) in obrazy.items():
+        nazwa = kw.ljust(8).encode("ascii")
+        trafienia = [i for i, r in enumerate(records) if r[:8] == nazwa and r[8:10] == b"= "]
+        if len(trafienia) != 1:
+            return Fallback(f"karta {kw} stoi w {len(trafienia)} rekordach wartości")
+        i = trafienia[0]
+        if i + 1 < len(records) and records[i + 1][:8] == b"CONTINUE":
+            return Fallback(f"karta {kw} ma kontynuację CONTINUE")
+        records[i] = image
+    new_raw = b"".join(records)
+    # Weryfikacja łaty PRZED zapisem (bliźniak `_xisf_verify`): karty z nowego nagłówka, wyłuskane
+    # TĄ SAMĄ funkcją co skan, == karty sprzed łaty z podmienioną wartością; układ danych bez zmian.
+    new_hdr = fits.Header.fromstring(new_raw.decode("latin-1"))
+    if scan._parse_cards(new_hdr) != want or _fits_layout(new_hdr) != uklad:
+        raise ValueError("FITS: karty po łacie w miejscu rozjechały się z oczekiwanymi")
+    return _InplacePlan("fits", path, start, raw, new_raw, biezacy, scan._header_hash(new_hdr))
+
+
+def _xisf_region_from_handle(fh, meta, expected: bytes) -> None:
+    """Region `[0, first_attachment)` Z UCHWYTU BLOKADY musi być bajt w bajt tym, co parser widział
+    (a więc mieć oczekiwany hash XML-a i te same adresy bloków); inaczej `ValueError`, zero zapisu."""
+    fh.seek(0)
+    if fh.read(len(expected)) != expected:
+        raise ValueError("XISF: region nagłówka z uchwytu inny niż odczytany parserem")
+    if hashlib.sha1(expected[scan.XISF_XML_OFFSET:
+                             scan.XISF_XML_OFFSET + len(meta.xml_bytes)]).hexdigest() \
+            != meta.header_hash:
+        raise ValueError("XISF: hash nagłówka z uchwytu inny niż z parsera")
+
+
+def _xisf_inplace_plan(path: str, fh, ops: list[WriteOp], expected_hash: str | None):
+    """Plan zapisu w miejscu dla XISF (pod blokadą) → `_InplacePlan` | `WriteResult('blocked')`.
+    Wszystkie bramki i weryfikacja nowego XML-a to `_xisf_prepare` - ta sama droga co plik
+    tymczasowy. Region sprzed łaty składa ta sama funkcja co region po łacie
+    (`build_xisf_header_region` z bieżącym XML-em), a zgodność z uchwytem blokady sprawdza
+    `_xisf_region_from_handle`."""
+    try:
+        meta, new_xml, _, region = _xisf_prepare(path, ops, expected_hash)
+    except _XisfRefusal as ref:
+        return WriteResult("blocked", ref.reason, None)
+    old = scan.build_xisf_header_region(meta, meta.xml_bytes)
+    _xisf_region_from_handle(fh, meta, old)
+    return _InplacePlan("xisf", path, 0, old, region, meta.header_hash,
+                        hashlib.sha1(new_xml).hexdigest())
+
+
+def _diff_range(old: bytes, new: bytes) -> tuple[int, int] | None:
+    """Najmniejszy spójny zakres `[a, b)`, poza którym `old` i `new` są identyczne; `None` przy
+    braku różnic. Długości MUSZĄ być równe (EXPECT - zapis w miejscu nie przesuwa bajtów)."""
+    if len(old) != len(new):
+        raise ValueError(f"zapis w miejscu: regiony różnej długości ({len(old)} != {len(new)})")
+    if old == new:
+        return None
+    a = 0
+    while old[a:a + 4096] == new[a:a + 4096]:
+        a += 4096
+    while old[a] == new[a]:
+        a += 1
+    b = len(old)
+    while b - 4096 > a and old[b - 4096:b] == new[b - 4096:b]:
+        b -= 4096
+    while old[b - 1] == new[b - 1]:
+        b -= 1
+    return a, b
+
+
+@dataclasses.dataclass(frozen=True)
+class OpSpec:
+    """Operacja zapisu w miejscu tak, jak ją utrwala dziennik `inplace_op` (0022) PRZED pierwszym
+    bajtem: region stary i planowany wynikowy (ta sama długość, od `region_offset`), zakres zapisu
+    `[write_start, write_end)` względem regionu, plik w chwili zapisu (`file_size`, `file_ino`),
+    hash nagłówka przed i po."""
+    fmt: str
+    region_offset: int
+    old_region: bytes
+    new_region: bytes
+    write_start: int
+    write_end: int
+    file_size: int
+    file_ino: int
+    pre_hash: str
+    post_hash: str
+
+
+class _NullJournal:
+    """Dziennik bez zapisu - odzysk (pisze pod operacją, która już jest w dzienniku) i wołania
+    bezpośrednie w testach pisarza."""
+
+    def begin(self, spec, backup_text):
+        pass
+
+    def phase(self, faza, reason=None):
+        pass
+
+
+def _faza(journal, faza, reason=None) -> str | None:
+    """Przejście fazy w dzienniku; porażka NIE zmienia wyniku zapisu, tylko dopisuje się do powodu
+    (operacja zostaje w fazie `writing` - czyli izolowana, strona bezpieczna)."""
+    try:
+        journal.phase(faza, reason)
+    except Exception as exc:  # noqa: BLE001
+        return f"faza '{faza}' NIE zapisana w dzienniku ({type(exc).__name__}: {exc}) - lokacja " \
+               f"zostaje izolowana"
+    return None
+
+
+def _apply_inplace(plan: _InplacePlan, fh, journal) -> WriteResult:
+    """Kroki 2-4 zapisu w miejscu na uchwycie blokady `fh`. `journal.begin(spec, backup_text)`
+    utrwala operację (a przy commicie także backup) PRZED zapisem; jego porażka → 'failed', plik
+    nietknięty. Po zapisie `journal.phase('written'|'unverified')`. Wynik `in_place=True`
+    wyłącznie wtedy, gdy zapis mógł ruszyć bajty."""
+    ruszony = False
+    backup_text = None
+    try:
+        st = os.fstat(fh.fileno())
+        size = st.st_size
+        fh.seek(plan.region_start)
+        if fh.read(len(plan.old_region)) != plan.old_region:
+            return WriteResult("blocked", "nagłówek na dysku zmienił się między odczytem "
+                                          "a zapisem - plik nietknięty", None)
+        probka = _probe(fh, plan.region_start, len(plan.old_region), size)
+        zakres = _diff_range(plan.old_region, plan.new_region) or (0, 0)
+        spec = OpSpec(plan.fmt, plan.region_start, plan.old_region, plan.new_region, zakres[0],
+                      zakres[1], size, st.st_ino, plan.pre_hash, plan.post_hash)
+        backup_text = RegionBackup(plan.fmt, plan.region_start, plan.old_region, size, st.st_ino,
+                                   plan.pre_hash).encode()
+        try:
+            journal.begin(spec, backup_text)
+        except Exception as exc:  # noqa: BLE001 - bez dziennika i backupu nie piszemy
+            return WriteResult("failed", f"backup/dziennik operacji NIE powstał, więc zapisu nie "
+                                         f"było - plik nietknięty: {type(exc).__name__}: {exc}",
+                               None)
+        ruszony = True
+        if zakres != (0, 0):
+            fh.seek(plan.region_start + zakres[0])
+            fh.write(plan.new_region[zakres[0]:zakres[1]])
+        fh.flush()
+        os.fsync(fh.fileno())
+    except Exception as exc:  # noqa: BLE001 - raport zamiast wyjątku w warstwie zapisu
+        if not ruszony:
+            return WriteResult("failed", f"{type(exc).__name__}: {exc}", None)
+        powod = f"zapis w miejscu przerwany - bajty nagłówka mogły się zmienić: " \
+                f"{type(exc).__name__}: {exc}"
+        dopisek = _faza(journal, "unverified", powod)
+        return WriteResult("failed", f"{powod}; {dopisek}" if dopisek else powod,
+                           plan.post_hash, backup_text, in_place=True)
+    wynik = _verify_inplace(plan, size, probka, backup_text)
+    dopisek = _faza(journal, "written" if wynik.status == "applied" else "unverified", wynik.reason)
+    if dopisek:
+        wynik = dataclasses.replace(wynik, reason=f"{wynik.reason}; {dopisek}" if wynik.reason
+                                    else dopisek)
+    return wynik
+
+
+def _verify_inplace(plan: _InplacePlan, size: int, probka, backup_text) -> WriteResult:
+    """Krok 4: osobny uchwyt odczytu (blokada nadal trzymana przez wołającego) - rozmiar, bajty
+    regionu, próbki poza regionem, hash nagłówka formułą skanu. To odczyt KLIENTA: może przyjść
+    z pamięci podręcznej systemu, więc nie jest niezależnym potwierdzeniem bajtów na serwerze.
+    Każde „nie" → 'failed' z backupem (plik ZMIENIONY)."""
+    try:
+        with open(plan.path, "rb") as fh:
+            size_po = os.fstat(fh.fileno()).st_size
+            fh.seek(plan.region_start)
+            region_po = fh.read(len(plan.new_region))
+            probka_po = _probe(fh, plan.region_start, len(plan.new_region), size_po)
+        post = _post_hash(plan.path)
+    except Exception as exc:  # noqa: BLE001
+        return WriteResult("failed", f"plik ZMIENIONY w miejscu, ale odczyt kontrolny klienta "
+                                     f"padł - {type(exc).__name__}: {exc}",
+                           plan.post_hash, backup_text, in_place=True)
+    rozjazdy = [nazwa for nazwa, zgodne in (
+        ("rozmiar pliku", size_po == size), ("bajty nagłówka", region_po == plan.new_region),
+        ("próbka danych", probka_po == probka), ("header_hash", post == plan.post_hash))
+        if not zgodne]
+    if rozjazdy:
+        return WriteResult("failed", f"plik ZMIENIONY w miejscu, ale odczyt kontrolny klienta "
+                                     f"nie zgadza się: {', '.join(rozjazdy)}",
+                           plan.post_hash, backup_text, in_place=True)
+    return WriteResult("applied", None, post, backup_text, in_place=True)
+
+
+def inplace_route(filetype, keyword: str, value: str, value_type, comment) -> str | None:
+    """PRZEWIDYWANIE drogi zapisu `set` jednej karty tekstowej z faktów bazy, bez otwierania pliku
+    (podgląd planu): `None` = w miejscu, tekst = powód drogi dotychczasowej. Reguła mieszczenia się
+    karty FITS jest TA SAMA, której używa pisarz (`_fits_card_image`), więc podgląd i zapis nie mogą
+    się rozjechać co do rekordu 80 znaków; resztę (liczba kart, CONTINUE, sumy kontrolne)
+    rozstrzyga pisarz na pliku. XISF → `None`: brak rezerwy odmawia tak samo w obu drogach."""
+    if filetype == "xisf":
+        return None
+    if value_type != "str":
+        return f"zastana wartość {keyword} nie jest tekstem"
+    return _fits_card_image(keyword, value, comment or "")[1]
+
+
+def _pod_blokada(path: str, dzialanie) -> WriteResult | Fallback:
+    """Wykonaj `dzialanie(fh)` pod `_exclusive` i oddaj jego wynik także wtedy, gdy ZAMKNIĘCIE
+    uchwytu rzuci (astra Z15): wynik z backupem i flagą mutacji przeżywa, a błąd zamknięcia
+    dopisuje się do powodu. Wyjątek przed wynikiem (blokada, plan) → 'failed' bez zapisu."""
+    wynik = None
+    try:
+        with _exclusive(path) as fh:
+            wynik = dzialanie(fh)
+    except Exception as exc:  # noqa: BLE001
+        if wynik is None:
+            return WriteResult("failed", f"{type(exc).__name__}: {exc}", None)
+        if isinstance(wynik, WriteResult):
+            dopisek = f"zamknięcie uchwytu padło - {type(exc).__name__}: {exc}"
+            return dataclasses.replace(
+                wynik, reason=f"{wynik.reason}; {dopisek}" if wynik.reason else dopisek)
+    return wynik
+
+
+def write_changes_inplace(path, ops: list[WriteOp], expected_hash: str | None, *,
+                          journal=None) -> WriteResult | Fallback:
+    """Zapis nagłówka W MIEJSCU (O5) - kontrakt `WriteResult` jak `write_changes`, plus `Fallback`,
+    gdy plik się nie kwalifikuje. Cały przebieg od planu po weryfikację trzyma blokadę
+    `_exclusive`. `journal` (obiekt z `begin(spec, backup_text)` i `phase(faza, reason)`) MUSI
+    utrwalić backup i operację przed pierwszym bajtem - orkiestracja podaje dziennik `inplace_op`;
+    `None` = bez dziennika (testy pisarza). RAW → odmowa (#2)."""
+    if _is_raw(path):
+        return WriteResult("blocked", "format RAW jest read-only (#2)", None)
+    path = os.fspath(path)
+    journal = journal or _NullJournal()
+
+    def _dzialanie(fh):
+        plan = (_xisf_inplace_plan(path, fh, ops, expected_hash) if _is_xisf(path)
+                else _fits_inplace_plan(path, fh, ops, expected_hash))
+        if not isinstance(plan, _InplacePlan):
+            return plan
+        return _apply_inplace(plan, fh, journal)
+    return _pod_blokada(path, _dzialanie)
+
+
+def restore_inplace(path, backup: RegionBackup, *, op_new_region: bytes, op_file_size: int,
+                    op_file_ino: int, op_post_hash: str, journal=None) -> WriteResult | Fallback:
+    """UNDO W MIEJSCU (astra Z12/Z13) commitu zapisanego w miejscu: pod blokadą plik musi być TYM
+    SAMYM plikiem (`st_ino`, rozmiar z operacji commitu), a CAŁY region pod offsetem backupu -
+    bajt w bajt regionem wynikowym tej operacji (`op_new_region`). Wtedy wraca region z koperty.
+    Inny inode/rozmiar → `Fallback` (plik podmieniony od commitu - droga atomowa rozstrzyga po
+    hashu); region = stan sprzed commitu → 'blocked' „już cofnięte"; inny region → 'blocked'."""
+    if _is_raw(path):
+        return WriteResult("blocked", "format RAW jest read-only (#2)", None)
+    path = os.fspath(path)
+    journal = journal or _NullJournal()
+
+    def _dzialanie(fh):
+        st = os.fstat(fh.fileno())
+        if st.st_size != op_file_size or (op_file_ino and st.st_ino and st.st_ino != op_file_ino):
+            return Fallback("plik podmieniony od commitu (rozmiar/st_ino) - cofnięcie atomowe")
+        fh.seek(backup.offset)
+        biezacy = fh.read(len(backup.region))
+        if biezacy == backup.region:
+            return WriteResult("blocked", "już cofnięte - region nagłówka jest stanem sprzed commitu",
+                               None)
+        if biezacy != op_new_region:
+            return WriteResult("blocked", "plik zmienił się od commitu - region nagłówka nie jest "
+                                          "tym, który commit zapisał", None)
+        plan = _InplacePlan(backup.fmt, path, backup.offset, biezacy, backup.region, op_post_hash,
+                            backup.pre_hash)
+        return _apply_inplace(plan, fh, journal)
+    return _pod_blokada(path, _dzialanie)
+
+
+def _stan_posredni(biezacy: bytes, spec: OpSpec) -> bool:
+    """Czy region jest STANEM POŚREDNIM operacji `spec`: poza zakresem zapisu = stary, w zakresie
+    każdy bajt równy staremu ALBO nowemu. Tylko taki stan mógł zostawić przerwany zapis tej
+    operacji (jeden `write` spójnego zakresu, odzysk pisze wyłącznie ten zakres)."""
+    a, b = spec.write_start, spec.write_end
+    stary, nowy = spec.old_region, spec.new_region
+    if len(biezacy) != len(stary) or biezacy[:a] != stary[:a] or biezacy[b:] != stary[b:]:
+        return False
+    return all(x == s or x == n for x, s, n in zip(biezacy[a:b], stary[a:b], nowy[a:b]))
+
+
+def recover_region(path, spec: OpSpec) -> WriteResult:
+    """ODZYSK ROZDARTEGO NAGŁÓWKA (astra Z11): przywróć region stary OTWARTEJ operacji `spec` pod
+    jej offset, BEZ parsowania bieżącego pliku. Dowodem rozdarcia jest wyłącznie to, że region pod
+    blokadą jest stanem pośrednim TEJ operacji (`_stan_posredni`) w tym samym pliku (rozmiar,
+    `st_ino`). Zgodność rozmiaru i próbek niczego tu nie dowodzi - poprawna późniejsza przebudowa
+    w miejscu może mieć ten sam rozmiar, inode i próbki, a stary region nadpisałby jej piksele.
+
+    Odmowy ('blocked'): inny rozmiar/inode - nierozstrzygalne, instrukcja ręczna; region nie jest
+    stanem pośrednim - „to nie jest rozdarcie tej operacji" (czytelny: obca zmiana; nieczytelny:
+    nierozstrzygalne, instrukcja ręczna). Zapis dotyka wyłącznie zakresu operacji, więc przerwany
+    odzysk zostawia znów stan pośredni i da się go ponowić."""
+    if _is_raw(path):
+        return WriteResult("blocked", "format RAW jest read-only (#2)", None)
+    path = os.fspath(path)
+    reczna = ("nierozstrzygalne - przywróć plik z pełnej kopii ręcznie, potem zwolnij izolację "
+              "(`repo.release_inplace_op`)")
+
+    def _dzialanie(fh):
+        st = os.fstat(fh.fileno())
+        if st.st_size != spec.file_size or (spec.file_ino and st.st_ino
+                                            and st.st_ino != spec.file_ino):
+            return WriteResult("blocked", f"inny plik niż w chwili zapisu (rozmiar/st_ino); {reczna}",
+                               None)
+        fh.seek(spec.region_offset)
+        biezacy = fh.read(len(spec.old_region))
+        if not _stan_posredni(biezacy, spec):
+            try:
+                _post_hash(path)
+                czytelny = True
+            except Exception:  # noqa: BLE001
+                czytelny = False
+            if czytelny:
+                return WriteResult("blocked", "to nie jest rozdarcie tej operacji - nagłówek jest "
+                                              "czytelny, ale to nie jest żaden stan pośredni "
+                                              "zapisu (obca zmiana); odzysk odmawia", None)
+            return WriteResult("blocked", f"to nie jest rozdarcie tej operacji; {reczna}", None)
+        plan = _InplacePlan(spec.fmt, path, spec.region_offset, biezacy, spec.old_region, "",
+                            spec.pre_hash)
+        return _apply_inplace(plan, fh, _NullJournal())
+    return _pod_blokada(path, _dzialanie)
 
 
 # ============================================================ odczyty stagingu (core — literały)
@@ -770,10 +1488,12 @@ def backups_for_commit(con, commit_id):
 
 
 def _location(con, location_id):
-    """Wiersz location potrzebny do zapisu: path, volume, header_hash, hdu_index, compressed, present."""
+    """Wiersz location potrzebny do zapisu: path, volume, header_hash, hdu_index, compressed, present
+    + `sha1_data` klatki (kotwica re-syncu po zapisie w miejscu - `_resync(expect_sha1_data=)`)."""
     return con.execute(
-        "SELECT id, frame_id, volume, path, header_hash, hdu_index, compressed, present "
-        "FROM location WHERE id = ?",
+        "SELECT l.id, l.frame_id, l.volume, l.path, l.header_hash, l.hdu_index, l.compressed, "
+        "       l.present, l.mtime, f.sha1_data "
+        "FROM location l JOIN frame f ON f.id = l.frame_id WHERE l.id = ?",
         (location_id,),
     ).fetchone()
 
@@ -798,6 +1518,9 @@ class CommitResult:
     failed: list[FileResult]
     skipped: list[FileResult]
     cancelled: bool = False
+    # Podzbiór `applied` zapisany W MIEJSCU (`commit(inplace=True)`); reszta `applied` poszła drogą
+    # dotychczasową, a jej `FileResult.reason` mówi, czemu (`Fallback.reason`).
+    in_place: list[FileResult] = dataclasses.field(default_factory=list)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -822,38 +1545,60 @@ def _group_by_location(rows) -> list[tuple[int, list]]:
     return [(lid, groups[lid]) for lid in order]
 
 
-def _resync(con, path, volume, *, now, actor="user:local"):
-    """RE-SYNC bazy po mutacji pliku — REUŻYWA znanej-ścieżki skanu (SPOT, R#2). `scan_file`
+def _resync(con, path, volume, *, now, actor="user:local", expect_sha1_data=None):
+    """RE-SYNC bazy po mutacji pliku - REUŻYWA znanej-ścieżki skanu (SPOT, R#2). `scan_file`
     (read-only, świeże hasze/nagłówek/karty) → `ingest_record`: `refresh_location` odświeża fakty
     kopii + zeznanie + `cards` + `frame.camera_id/kind` z eventami (actor="user:local"). Wymaga
-    BRAKU otwartej transakcji (refresh bierze BEGIN IMMEDIATE) — funkcje stagingu `repo` commitują
-    same, więc jest czysto."""
+    BRAKU otwartej transakcji (refresh bierze BEGIN IMMEDIATE) - funkcje stagingu `repo` commitują
+    same, więc jest czysto.
+
+    `expect_sha1_data` (zapis w miejscu): tożsamość danych, którą plik MA mieć po zapisie. Re-sync
+    i tak czyta cały plik, więc to pełny dowód nietkniętych danych za darmo. Rozjazd → zwraca powód
+    i NIE wciąga rekordu: `ingest_record` uznałby go za podmianę treści i rozdwoił klatkę
+    (nowy frame + osierocony stary z zeznaniem i obiektem). Zwraca `None`, gdy wciągnął."""
     rec = scan.scan_file(path)
+    if expect_sha1_data is not None and rec.sha1_data != expect_sha1_data:
+        return (f"plik ZMIENIONY, ale sha1_data po zapisie ({rec.sha1_data}) różni się od "
+                f"tożsamości klatki - baza NIE zsynchronizowana")
     scan.ingest_record(con, rec, volume=volume, now=now, summary=scan.ScanSummary(), actor=actor)
+    return None
 
 
 def commit(con, run_id, *, now, clock=None,
            progress: Callable[[int, int, str, str], None] | None = None,
-           should_cancel: Callable[[], bool] | None = None) -> CommitResult:
+           should_cancel: Callable[[], bool] | None = None,
+           inplace: bool = False, fallback: bool = True) -> CommitResult:
     """Zapisz `pending_changes` (status 'pending') przebiegu do plików. Grupuje po LOCATION, per plik:
-    kontrola `header_hash` (kotwica `expected_header_hash` ze stagingu, R#7) → `write_changes`
-    (`os.replace`) → backup + `post_hash` → RE-SYNC (`refresh_location` przez `ingest_record`) →
-    status 'applied'. Utrwalanie per plik (funkcje `repo` commitują), więc anulowanie
-    (`should_cancel` PRZED plikiem) zostawia zapisane 'applied', resztę 'pending'. `progress(done,
-    total, path, status)` po KAŻDYM pliku. Callbacki Qt-wolne (GUI podaje je z wątku roboczego).
+    kontrola `header_hash` (kotwica `expected_header_hash` ze stagingu, R#7) → BACKUP w bazie →
+    zapis pliku → RE-SYNC (`refresh_location` przez `ingest_record`) → status 'applied'. Utrwalanie
+    per plik (funkcje `repo` commitują), więc anulowanie (`should_cancel` PRZED plikiem) zostawia
+    zapisane 'applied', resztę 'pending'. `progress(done, total, path, status)` po KAŻDYM pliku.
+    Callbacki Qt-wolne (GUI podaje je z wątku roboczego).
 
     Bramki defensywne (makro już odsiało przy stagingu, ale stan mógł się zmienić): brak location /
     `present=0` / `compressed` → skipped z powodem, wpisy 'skipped'. `clock` = źródło `applied_at`
     commitu (domyślnie `now`).
 
-    PORAŻKA BACKUPU po udanym zapisie (D-X-14) → 'failed' z powodem, NIE wyjątek: plik jest już
-    zmieniony, więc pętla musi go domknąć (re-sync + status), a nie zostawić przebiegu w połowie.
+    BACKUP PRZED ZAPISEM W OBU DROGACH (Z3, 2026-09-26): pisarz woła `_persist` (wiersz `commits`
+    przy pierwszym pliku + `header_backups` z `RegionBackup`) przed `os.replace` albo przed
+    pierwszym bajtem zapisu w miejscu. Porażka backupu → 'failed', plik nietknięty. Dawna
+    kolejność (backup PO podmianie, D-X-14) zostawiała plik zmieniony bez drogi powrotu.
 
-    WERYFIKACJA PO PODMIANIE PADŁA (`WriteResult` 'failed' z `backup_text`) → backup do
-    `header_backups` jak przy 'applied' (undo commitu cofnie i ten plik), status 'failed' z powodem
-    i numerem commitu, ale BEZ re-syncu i bez gaszenia nagrobka: bajtów na dysku nie potwierdzono,
-    więc bazę naprawi re-skan (T8). Kryterium „plik podmieniony" to `backup_text is not None`, nie
-    status - tak brzmi kontrakt `WriteResult`."""
+    ZAPIS POTWIERDZONY TYLKO CZĘŚCIOWO (`WriteResult` 'failed' z `backup_text`: weryfikacja po
+    podmianie albo po zapisie w miejscu padła, zapis przerwany) → status 'failed' z numerem commitu,
+    BEZ re-syncu i bez gaszenia nagrobka: bajtów na dysku nie potwierdzono. Plik ZAPISANY W MIEJSCU
+    może być rozdarty - drogą naprawy jest `recover_torn` (backup regionu), nie re-skan.
+
+    RE-SYNC sprawdza, że `sha1_data` pliku jest tożsamością klatki (rozjazd → 'failed' bez
+    wciągania, zamiast rozdwojenia klatki), a jego wyjątek (czkawka SMB przy pełnym odczycie) daje
+    'failed' dla tego pliku - wsad idzie dalej.
+
+    `inplace=True` (O5): per plik najpierw ZAPIS W MIEJSCU pod blokadą (`write_changes_inplace`)
+    z dziennikiem `inplace_op` (backup + operacja jedną transakcją przed pierwszym bajtem; faza
+    `written` po weryfikacji, `synced` po re-syncu). Plik niekwalifikujący się (`Fallback`) idzie
+    drogą atomową, a jego `FileResult.reason` mówi dlaczego - chyba że `fallback=False` (tryb
+    pilotażu, warunek 6 astry): wtedy 'blocked' z powodem i ZERO zapisu. `CommitResult.in_place` =
+    pliki zapisane w miejscu."""
     clock = clock or (lambda: now)
     pending = [r for r in pending_for_run(con, run_id) if r["status"] == "pending"]
     groups = _group_by_location(pending)
@@ -863,6 +1608,7 @@ def commit(con, run_id, *, now, clock=None,
     blocked: list[FileResult] = []
     failed: list[FileResult] = []
     skipped: list[FileResult] = []
+    in_place: list[FileResult] = []
     commit_id: int | None = None
     cancelled = False
     done = 0
@@ -905,68 +1651,97 @@ def commit(con, run_id, *, now, clock=None,
                        value_type=r["new_type"], idx=r["idx"], comment=r["new_comment"])
                for r in rows]
         expected = rows[0]["expected_header_hash"]  # kotwica stagingu (R#7)
-        res = write_changes(path, ops, expected)  # tu następuje os.replace
 
-        if res.backup_text is not None:   # plik PODMIENIONY: 'applied' albo 'failed' PO os.replace
-            assert res.post_hash
+        def _persist(backup_text, post_hash, _lid=location_id, _hdu=loc["hdu_index"]):
+            # Backup PRZED podmianą (droga atomowa): commit powstaje przy pierwszym pliku, który
+            # naprawdę ma być ruszony.
+            nonlocal commit_id
             if commit_id is None:
                 commit_id = repo.insert_commit(con, run_id=run_id, now=clock(),
                                                summary=f"run {run_id}")
-            # Backup PO mutacji pliku — jego porażka NIE może wywalić pętli (D-X-14): plik jest już
-            # zmieniony, więc wyjątek zostawiłby resztę przebiegu nietkniętą, a TEN plik bez re-syncu
-            # i bez statusu. Zamiast tego: re-sync (baza MUSI opisywać bajty, które leżą na dysku)
-            # + status 'failed' z powodem — „zapisane, ale nieodwracalne" jest faktem do zobaczenia,
-            # nie do zgadnięcia. (`hdu_index` NULL dla XISF już nie wybucha — migracja 0007.)
-            backup_error = None
-            try:
-                repo.insert_header_backup(
-                    con, commit_id=commit_id, location_id=location_id, hdu_index=loc["hdu_index"],
-                    header_text=res.backup_text, post_hash=res.post_hash)
-            except sqlite3.Error as exc:
-                backup_error = f"plik ZAPISANY, ale backup do undo NIE powstał: {type(exc).__name__}: {exc}"
-            if res.status != "applied":
-                # Weryfikacja PO podmianie padła (`_after_replace`): backup JEST, więc undo tego
-                # commitu cofnie plik, o ile leży na nim dokładnie to, co zapisaliśmy (`post_hash`).
-                # Re-syncu NIE robimy: baza opisuje bajty POTWIERDZONE, a tych nie potwierdziliśmy.
-                # Odczyt albo padł - padłby i w `scan_file`, a jego miękkie lądowanie przy XISF nie
-                # ma tożsamości (`sha1_data` z obrazu) i rozdwoiłoby klatkę - albo pokazał nie to,
-                # co zapisaliśmy (ktoś pisał równolegle). Kotwicą naprawy zostaje re-skan (T8), tak
-                # jak przy crashu między plikiem a bazą.
-                # Nagrobek ręki też zostaje - gaśnie przy wpisanej karcie, a wpisu nie potwierdzono.
-                reason = f"{res.reason}; backup do cofnięcia zapisany w commicie {commit_id}"
-                if backup_error is not None:
-                    reason = f"{res.reason}; {backup_error}"
-                _mark(rows, "failed", reason)
-                failed.append(FileResult(location_id, path, "failed", reason))
-                _report(path, "failed")
-                continue
-            _resync(con, path, loc["volume"], now=now)      # PLIK→DB (T8)
-            # NAGROBEK RĘKI GAŚNIE TU, a nie w ścieżce skanu (S2b, §4/14b-c). Klatka cofnięta ma
-            # `object_source='user_cleared'` i drabina ją POMIJA — bez tego gestu zostałaby poza
-            # osią na zawsze, nawet po dopisaniu karty. Wyzwalaczem jest WPISANIE `OBJECT` do TEGO
-            # pliku, nie samo odświeżenie zeznania: klatka cofnięta MAJĄC już kartę ma zostać
-            # cofnięta, dopóki człowiek tej karty nie zmieni — a każdy skan odświeża zeznanie i
-            # gasiłby werdykt, którego nikt nie odwołał.
-            if any(op.keyword == "OBJECT" for op in ops):
-                repo.clear_object_tombstone(con, frame_id=loc["frame_id"], now=now)
-            if backup_error is not None:
-                _mark(rows, "failed", backup_error)
-                failed.append(FileResult(location_id, path, "failed", backup_error))
-                _report(path, "failed")
-                continue
-            _mark(rows, "applied", None)
-            applied.append(FileResult(location_id, path, "applied"))
-            _report(path, "applied")
-        elif res.status == "blocked":
-            _mark(rows, "blocked", res.reason)
-            blocked.append(FileResult(location_id, path, "blocked", res.reason))
-            _report(path, "blocked")
-        else:
-            _mark(rows, "failed", res.reason)
-            failed.append(FileResult(location_id, path, "failed", res.reason))
-            _report(path, "failed")
+            repo.insert_header_backup(con, commit_id=commit_id, location_id=_lid,
+                                      hdu_index=_hdu, header_text=backup_text,
+                                      post_hash=post_hash)
 
-    return CommitResult(run_id, commit_id, applied, blocked, failed, skipped, cancelled)
+        class _Dziennik:
+            """Dziennik commitu w miejscu: backup + commit + operacja jedną transakcją."""
+            op_id = None
+
+            def begin(self, spec, backup_text, _lid=location_id, _hdu=loc["hdu_index"]):
+                nonlocal commit_id
+                commit_id, self.op_id = repo.begin_inplace_commit(
+                    con, run_id=run_id, commit_id=commit_id, location_id=_lid, hdu_index=_hdu,
+                    header_text=backup_text, spec=spec, now=clock())
+
+            def phase(self, faza, reason=None):
+                repo.set_inplace_op_phase(con, op_id=self.op_id, phase=faza, now=now,
+                                          reason=reason)
+
+        droga = None                                 # powód drogi atomowej w trybie `inplace`
+        res = None
+        dziennik = _Dziennik()
+        if inplace:
+            res = write_changes_inplace(path, ops, expected, journal=dziennik)
+            if isinstance(res, Fallback):
+                if not fallback:
+                    res = WriteResult("blocked", f"nie mieści się w miejscu (tryb bez spadku): "
+                                                 f"{res.reason}", None)
+                else:
+                    droga = f"droga dotychczasowa: {res.reason}"
+                    res = None
+        if res is None:
+            res = write_changes(path, ops, expected, persist_backup=_persist)  # os.replace
+
+        if res.backup_text is None:       # zapisu nie było: odmowa albo awaria przed plikiem
+            status = "blocked" if res.status == "blocked" else "failed"
+            _mark(rows, status, res.reason)
+            (blocked if status == "blocked" else failed).append(
+                FileResult(location_id, path, status, res.reason))
+            _report(path, status)
+            continue
+        if res.status != "applied":
+            # Backup JEST (powstał przed zapisem), więc undo cofnie plik, o ile leży na nim to, co
+            # zapisaliśmy (`post_hash`); plik rozdarty w miejscu naprawia `recover_torn`. Re-syncu
+            # NIE robimy - baza opisuje bajty POTWIERDZONE. Nagrobek ręki też zostaje.
+            naprawa = (f"; lokacja IZOLOWANA od skanu, odzysk: recover_torn({dziennik.op_id})"
+                       if res.in_place else "")
+            reason = (f"{res.reason}; backup do cofnięcia zapisany w commicie {commit_id}"
+                      f"{naprawa}")
+            _mark(rows, "failed", reason)
+            failed.append(FileResult(location_id, path, "failed", reason))
+            _report(path, "failed")
+            continue
+        try:                              # PLIK→DB (T8); pełny odczyt pliku
+            niezgodne = _resync(con, path, loc["volume"], now=now,
+                                expect_sha1_data=loc["sha1_data"])
+        except Exception as exc:  # noqa: BLE001 - plik zapisany, pętla idzie dalej
+            # Wsad to tysiące pełnych odczytów po SMB - jedna czkawka udziału nie może zatrzymać
+            # przebiegu z plikiem zapisanym, a bez statusu. Bazę naprawi ponowny re-skan (T8).
+            niezgodne = f"plik ZMIENIONY, ale re-sync padł - {type(exc).__name__}: {exc}"
+        if niezgodne is not None:
+            reason = f"{niezgodne}; backup do cofnięcia zapisany w commicie {commit_id}"
+            _mark(rows, "failed", reason)
+            failed.append(FileResult(location_id, path, "failed", reason))
+            _report(path, "failed")
+            continue
+        # NAGROBEK RĘKI GAŚNIE TU, a nie w ścieżce skanu (S2b, §4/14b-c). Klatka cofnięta ma
+        # `object_source='user_cleared'` i drabina ją POMIJA - bez tego gestu zostałaby poza osią na
+        # zawsze, nawet po dopisaniu karty. Wyzwalaczem jest WPISANIE `OBJECT` do TEGO pliku, nie
+        # samo odświeżenie zeznania: każdy skan odświeża zeznanie i gasiłby werdykt, którego nikt
+        # nie odwołał.
+        if any(op.keyword == "OBJECT" for op in ops):
+            repo.clear_object_tombstone(con, frame_id=loc["frame_id"], now=now)
+        if res.in_place:
+            _faza(dziennik, "synced")
+        _mark(rows, "applied", None)
+        wynik = FileResult(location_id, path, "applied", droga)
+        applied.append(wynik)
+        if res.in_place:
+            in_place.append(wynik)
+        _report(path, "applied")
+
+    return CommitResult(run_id, commit_id, applied, blocked, failed, skipped, cancelled,
+                        in_place)
 
 
 # ============================================================ RENAME "Nazwy z faktów" (trzecia operacja)
@@ -1159,13 +1934,40 @@ def undo_renames(con, run_id, *, now,
     return UndoResult(run_id, restored, blocked, failed, cancelled)
 
 
+def _ostatnia_operacja(con, commit_id, location_id, kind):
+    """Ostatnia operacja `inplace_op` danego rodzaju dla pliku w commicie (albo None)."""
+    return con.execute(
+        "SELECT * FROM inplace_op WHERE commit_id = ? AND location_id = ? AND kind = ? "
+        "ORDER BY id DESC LIMIT 1", (commit_id, location_id, kind)).fetchone()
+
+
+def _spec_z_operacji(row) -> OpSpec:
+    return OpSpec(row["fmt"], row["region_offset"], zlib.decompress(row["old_region_z"]),
+                  zlib.decompress(row["new_region_z"]), row["write_start"], row["write_end"],
+                  row["file_size"], row["file_ino"], row["pre_hash"], row["post_hash"])
+
+
 def undo(con, commit_id, *, now,
          progress: Callable[[int, int, str, str], None] | None = None,
          should_cancel: Callable[[], bool] | None = None) -> UndoResult:
-    """Cofnij commit: przepisz pełne nagłówki z `header_backups` (obsługuje set I add BEZ delete).
-    Kontrola `header_hash` = `post_hash` z backupu (plik zmieniony od commitu → 'blocked'; dwukrotne
-    undo naturalnie 'blocked'). Po udanym zapisie RE-SYNC bazy (refresh). `progress`/`should_cancel`
-    jak w `commit` (per plik, granica bezpieczna)."""
+    """Cofnij commit: przywróć nagłówki z `header_backups` (obsługuje set I add BEZ delete). Po
+    udanym zapisie RE-SYNC bazy z kontrolą `sha1_data`. `progress`/`should_cancel` jak w `commit`
+    (per plik, granica bezpieczna). Wyjątek re-syncu daje 'failed' dla pliku, pętla idzie dalej.
+
+    DWIE DROGI, WYBÓR Z DZIENNIKA `inplace_op` (astra Z12/Z13):
+      * W MIEJSCU (`restore_inplace`) - wyłącznie commit zapisany w miejscu (operacja `commit`
+        w fazie `written`/`synced`), backup-koperta, ten sam plik i CAŁY region równy regionowi
+        wynikowemu commitu. Cofnięcie ma własną operację `undo` w dzienniku (izolacja + odzysk).
+      * ATOMOWO (`write_full_header`) - wszystko inne: stare backupy tekstowe, commity atomowe,
+        plik podmieniony od commitu. Plik tymczasowy nie zostawia rozdarcia, więc nie trzeba odzysku.
+
+    STAN „JUŻ COFNIĘTE" / „ZOSTAŁA SYNCHRONIZACJA":
+      * droga w miejscu - z FAZY operacji `undo`: `written` → sam re-sync (faza `synced`),
+        `synced` → 'blocked' „już cofnięte"; operacja otwarta (commitu albo cofnięcia) → 'failed'
+        z numerem operacji do odzysku (lokacja izolowana);
+      * droga atomowa - z pliku i kompletu faktów bazy: nagłówek na dysku = backup (dla koperty:
+        CAŁY region bajt w bajt, dla backupu tekstowego: hash) i baza opisuje ten plik (`header_hash`
+        ORAZ `mtime`) → 'blocked' „już cofnięte"; plik = backup, a baza nie → sam re-sync."""
     backups = backups_for_commit(con, commit_id)
     total = len(backups)
     restored: list[FileResult] = []
@@ -1180,6 +1982,29 @@ def undo(con, commit_id, *, now,
         if progress is not None:
             progress(done, total, path, status)
 
+    def _sync(loc, path, expect, powod, op_id=None):
+        try:
+            niezgodne = _resync(con, path, loc["volume"], now=now, expect_sha1_data=expect)
+        except Exception as exc:  # noqa: BLE001 - nagłówek przywrócony, pętla idzie dalej
+            niezgodne = (f"nagłówek PRZYWRÓCONY, ale re-sync padł - {type(exc).__name__}: {exc}; "
+                         f"ponowne undo dokończy samą synchronizację")
+        if niezgodne is not None:
+            failed.append(FileResult(loc["id"], path, "failed", niezgodne))
+            _report(path, "failed")
+            return
+        if op_id is not None:
+            repo.set_inplace_op_phase(con, op_id=op_id, phase="synced", now=now)
+        restored.append(FileResult(loc["id"], path, "restored", powod))
+        _report(path, "restored")
+
+    def _blok(loc, path, powod):
+        blocked.append(FileResult(loc["id"], path, "blocked", powod))
+        _report(path, "blocked")
+
+    def _pad(loc, path, powod):
+        failed.append(FileResult(loc["id"], path, "failed", powod))
+        _report(path, "failed")
+
     for b in backups:
         if should_cancel is not None and should_cancel():
             cancelled = True
@@ -1190,16 +2015,114 @@ def undo(con, commit_id, *, now,
             _report("", "failed")
             continue
         path = loc["path"]
+        op_c = _ostatnia_operacja(con, commit_id, loc["id"], "commit")
+        op_u = _ostatnia_operacja(con, commit_id, loc["id"], "undo")
+        otwarta = next((o for o in (op_u, op_c)
+                        if o is not None and o["phase"] in repo.INPLACE_OPEN_PHASES), None)
+        if otwarta is not None:
+            _pad(loc, path, f"przerwany zapis w miejscu (operacja {otwarta['id']}, "
+                            f"{otwarta['kind']}) - lokacja izolowana; najpierw "
+                            f"recover_torn({otwarta['id']})")
+            continue
+        if op_u is not None and op_u["phase"] == "written":
+            _sync(loc, path, loc["sha1_data"], "nagłówek był już przywrócony - dokończono "
+                                               "synchronizację bazy", op_u["id"])
+            continue
+        if op_u is not None and op_u["phase"] == "synced":
+            _blok(loc, path, "już cofnięte (operacja cofnięcia zamknięta)")
+            continue
+        try:
+            env = RegionBackup.decode(b["header_text"])
+        except ValueError as exc:
+            _pad(loc, path, f"uszkodzona koperta backupu: {exc}")
+            continue
+
+        if env is not None and op_c is not None and op_c["phase"] in ("written", "synced"):
+            class _Dziennik:
+                op_id = None
+
+                def begin(self, spec, backup_text, _lid=loc["id"]):
+                    self.op_id = repo.begin_inplace_undo(con, commit_id=commit_id,
+                                                         location_id=_lid, spec=spec, now=now)
+
+                def phase(self, faza, reason=None):
+                    repo.set_inplace_op_phase(con, op_id=self.op_id, phase=faza, now=now,
+                                              reason=reason)
+            dziennik = _Dziennik()
+            spec_c = _spec_z_operacji(op_c)
+            res = restore_inplace(path, env, op_new_region=spec_c.new_region,
+                                  op_file_size=spec_c.file_size, op_file_ino=spec_c.file_ino,
+                                  op_post_hash=spec_c.post_hash, journal=dziennik)
+            if not isinstance(res, Fallback):
+                if res.status == "applied":
+                    _sync(loc, path, loc["sha1_data"], None, dziennik.op_id)
+                elif res.status == "blocked":
+                    _blok(loc, path, res.reason)
+                else:
+                    dopisek = (f"; lokacja IZOLOWANA od skanu, odzysk: recover_torn({dziennik.op_id})"
+                               if res.in_place else "")
+                    _pad(loc, path, f"{res.reason}{dopisek}")
+                continue
+
+        # Droga atomowa: najpierw rozpoznanie „już przywrócone" z pliku i kompletu faktów bazy.
+        try:
+            if env is not None:
+                with open(path, "rb") as fh:
+                    fh.seek(env.offset)
+                    na_miejscu = fh.read(len(env.region)) == env.region
+            else:
+                na_miejscu = _post_hash(path) == _backup_pre_hash(path, b["header_text"])
+        except Exception:  # noqa: BLE001 - rozpoznanie tylko pomaga; decyduje pisarz niżej
+            na_miejscu = False
+        if na_miejscu:
+            przywrocony = env.pre_hash if env is not None else _post_hash(path)
+            try:
+                mtime = scan._mtime_iso(os.stat(path))
+            except OSError:
+                mtime = None
+            if loc["header_hash"] == przywrocony and loc["mtime"] == mtime:
+                _blok(loc, path, "już cofnięte - nagłówek i baza opisują stan sprzed commitu")
+            else:
+                _sync(loc, path, loc["sha1_data"],
+                      "nagłówek był już przywrócony - dokończono synchronizację bazy")
+            continue
         res = write_full_header(path, b["header_text"], b["post_hash"])
         if res.status == "applied":
-            _resync(con, path, loc["volume"], now=now)
-            restored.append(FileResult(loc["id"], path, "restored"))
-            _report(path, "restored")
+            _sync(loc, path, None, None)
         elif res.status == "blocked":
-            blocked.append(FileResult(loc["id"], path, "blocked", res.reason))
-            _report(path, "blocked")
+            _blok(loc, path, res.reason)
         else:
-            failed.append(FileResult(loc["id"], path, "failed", res.reason))
-            _report(path, "failed")
+            _pad(loc, path, res.reason)
 
     return UndoResult(commit_id, restored, blocked, failed, cancelled)
+
+
+def recover_torn(con, op_id, *, now) -> FileResult:
+    """ODZYSK ROZDARTEGO NAGŁÓWKA po operacji `inplace_op.id` (astra Z11): tylko operacja OTWARTA
+    (`writing`/`unverified`), tylko gdy region pliku pod blokadą jest jej stanem pośrednim
+    (`recover_region`). Sukces → faza `recovered` (izolacja lokacji zdjęta) i re-sync z kontrolą
+    `sha1_data`. Zwraca `FileResult` ('restored' | 'blocked' | 'failed')."""
+    op = con.execute("SELECT * FROM inplace_op WHERE id = ?", (op_id,)).fetchone()
+    if op is None:
+        return FileResult(0, "", "failed", f"brak operacji {op_id}")
+    loc = _location(con, int(op["location_id"]))
+    if loc is None:
+        return FileResult(int(op["location_id"]), "", "failed", "brak location w bazie")
+    path = loc["path"]
+    if op["phase"] not in repo.INPLACE_OPEN_PHASES:
+        return FileResult(loc["id"], path, "blocked",
+                          f"operacja {op_id} nie jest otwarta ({op['phase']}) - odzysk dotyczy "
+                          f"wyłącznie przerwanego zapisu")
+    res = recover_region(path, _spec_z_operacji(op))
+    if res.status != "applied":
+        return FileResult(loc["id"], path, res.status, res.reason)
+    repo.set_inplace_op_phase(con, op_id=op_id, phase="recovered", now=now,
+                              reason="region stary przywrócony (recover_torn)")
+    try:
+        niezgodne = _resync(con, path, loc["volume"], now=now, expect_sha1_data=loc["sha1_data"])
+    except Exception as exc:  # noqa: BLE001
+        niezgodne = f"region przywrócony, ale re-sync padł - {type(exc).__name__}: {exc}"
+    if niezgodne is not None:
+        return FileResult(loc["id"], path, "failed", niezgodne)
+    return FileResult(loc["id"], path, "restored", None)
+

@@ -74,6 +74,9 @@ from importlib import resources
 # zeznanie pól, które karmią osie klatki (`hdr_*`), z kotwicą `hdr_hash` (CHECK: NULL albo równa
 # `header_hash`, więc zmiana odcisku bez odświeżenia faktów jest błędem, nie cichą nieprawdą).
 # Kolumny wchodzą PUSTE; wiersze sprzed migracji uzupełnia etap Dostawy `scan.backfill_copy_facts`.
+# 0022 to PRZYROST (nowa tabela, O5/Q8): dziennik zapisu nagłówka w miejscu `inplace_op` - faza
+# operacji z regionem starym i wynikowym (odzysk rozdartego nagłówka bez parsowania pliku) i zarazem
+# izolacja lokacji z operacją otwartą od zwykłego skanu. Tabela wchodzi PUSTA.
 MIGRATIONS = [
     (2, "0002_initial.sql"),
     (3, "0003_writeback.sql"),
@@ -95,6 +98,7 @@ MIGRATIONS = [
     (19, "0019_location_unreadable_reason.sql"),
     (20, "0020_integration_raw_unreferenced.sql"),
     (21, "0021_location_copy_facts.sql"),
+    (22, "0022_inplace_op.sql"),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 _KNOWN_VERSIONS = frozenset({0} | {v for v, _ in MIGRATIONS})
@@ -112,6 +116,11 @@ def connect(path):
     con.execute("PRAGMA foreign_keys = ON")
     con.execute("PRAGMA journal_mode = WAL")
     con.execute("PRAGMA busy_timeout = 5000")
+    # TRWAŁOŚĆ BACKUPU (astra, warunek 5): backup nagłówka i faza zapisu w miejscu MUSZĄ przetrwać
+    # utratę zasilania zaraz po commicie transakcji - dopiero wtedy wolno ruszyć plik. W WAL tylko
+    # FULL synchronizuje commit na dysk (NORMAL może zgubić ostatnie transakcje). Domyślna wartość
+    # bundlowanego SQLite to dziś FULL, ale domyślna to cudza decyzja kompilacji - ustawiamy jawnie.
+    con.execute("PRAGMA synchronous = FULL")
     return con
 
 

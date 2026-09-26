@@ -20,7 +20,8 @@ def test_migracja_ustawia_user_version(tmp_path):
     # + 0019 location.unreadable_kind + unreadable_reason (rodzaj i powód nieczytelności, P4-2)
     # + 0020 integration.raw_unreferenced (uwaga obok werdyktu rodowodu, G2-1d)
     # + 0021 location: liczba/role obrazów + zeznanie nagłówka kopii z kotwicą hdr_hash
-    assert db._user_version(con) == db.SCHEMA_VERSION == 21
+    # + 0022 inplace_op (dziennik zapisu w miejscu: faza operacji i izolacja lokacji, O5/Q8)
+    assert db._user_version(con) == db.SCHEMA_VERSION == 22
     con.close()
 
 
@@ -48,4 +49,14 @@ def test_przedpotopowa_baza_v1_jawny_blad(tmp_path):
 def test_foreign_keys_on(tmp_path):
     con = db.connect(str(tmp_path / "h.db"))
     assert con.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    con.close()
+
+
+def test_polaczenie_ma_synchronous_full(tmp_path):
+    """Warunek 5 astry: backup nagłówka i faza zapisu w miejscu muszą przetrwać utratę zasilania
+    zaraz po commicie - w WAL tylko FULL synchronizuje commit na dysk. Ustawione jawnie w `connect`,
+    nie zostawione domyślnej wartości kompilacji SQLite."""
+    con = db.connect(str(tmp_path / "s.db"))
+    assert con.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    assert con.execute("PRAGMA synchronous").fetchone()[0] == 2        # 2 = FULL
     con.close()

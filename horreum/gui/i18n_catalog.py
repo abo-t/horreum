@@ -1244,6 +1244,8 @@ CATALOG = {
     "perspective.copy_conflict": {"pl": "Kopie niezgodne", "en": "Disagreeing copies"},
     "perspective.orphan_testimony": {
         "pl": "Zeznanie z nieobecnej kopii", "en": "Testimony from a missing copy"},
+    "perspective.torn_write": {
+        "pl": "Plik po przerwanym zapisie", "en": "File after an interrupted write"},
     "perspective.path_header_conflict": {
         "pl": "Nagłówek inny niż folder", "en": "Header differs from folder"},
     "perspective.to_review": {"pl": "Do przeglądu", "en": "To review"},
@@ -1927,6 +1929,8 @@ CATALOG = {
         "pl": "tylko kopie niezgodne ze sobą", "en": "only copies that disagree"},
     "grid.criteria.only_orphan_testimony": {
         "pl": "tylko zeznanie z nieobecnej kopii", "en": "only testimony from a missing copy"},
+    "grid.criteria.only_torn_write": {
+        "pl": "tylko pliki po przerwanym zapisie", "en": "only files after an interrupted write"},
     "grid.criteria.only_path_header_conflict": {
         "pl": "tylko nagłówek inny niż zatwierdzony folder",
         "en": "only header differing from the confirmed folder"},
@@ -2590,6 +2594,9 @@ CATALOG = {
     "tasks.object_review": {"pl": "Przegląd obiektów", "en": "Object review"},
     "tasks.unresolved_lights": {"pl": "Klatki bez obiektu", "en": "Frames without object"},
     # E5-2: klatka MA obiekt z zatwierdzonego folderu, a karta `OBJECT` w pliku mówi co innego.
+    # 0022/Q8: zapis nagłówka w miejscu przerwany albo niepotwierdzony - kopia izolowana od skanu.
+    "tasks.torn_write_frames": {
+        "pl": "Plik po przerwanym zapisie", "en": "File after an interrupted write"},
     "tasks.path_header_conflict_frames": {
         "pl": "Nagłówek inny niż zatwierdzony folder",
         "en": "Header differs from the confirmed folder"},

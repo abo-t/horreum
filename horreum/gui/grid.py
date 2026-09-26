@@ -338,6 +338,10 @@ PRESET_ORPHAN_TESTIMONY = "Zeznanie z nieobecnej kopii"
 # `queries.path_header_conflict_frame_ids`. Stała współdzielona z TasksView po nazwie, jak
 # dziesięciu sąsiadów.
 PRESET_PATH_HEADER_CONFLICT = "Nagłówek inny niż folder"
+# PRESET_TORN_WRITE - dwunasty bliźniak (0022, Q8). Kopia, której zapis nagłówka w miejscu przerwano
+# albo nie przeszedł weryfikacji: nagłówek mógł zostać rozdarty, więc kopia jest izolowana od skanu.
+# Predykat `queries.torn_write_frame_ids`. Stała współdzielona z TasksView po nazwie.
+PRESET_TORN_WRITE = "Plik po przerwanym zapisie"
 # Klucz grupowania po GRUPIE WERSJI - pochodna wiersza (`_adnotuj_wersje`), nie kolumna bazowa:
 # `BASE_COLS` zostaje bez zmian, więc podłoga okna się nie rusza. Pozycja listy „Grupuj wg" działa
 # w każdej perspektywie (stosy spoza grup bliźniaków lądują w „(brak)"), a preset ją ustawia.
@@ -361,6 +365,7 @@ PRESETS = {
     PRESET_ORPHAN_TESTIMONY: {"filter": None, "group_by": None, "only_orphan_testimony": True},
     PRESET_PATH_HEADER_CONFLICT: {"filter": None, "group_by": None,
                                   "only_path_header_conflict": True},
+    PRESET_TORN_WRITE: {"filter": None, "group_by": None, "only_torn_write": True},
     "Do przeglądu": {"filter": None, "group_by": None, "only_review": True},
 }
 # Etykieta WYŚWIETLANIA presetu (tekst) osobno od TOŻSAMOŚCI (klucz PRESETS w `itemData` — używany przez
@@ -379,6 +384,7 @@ _PRESET_LABELS = {
     PRESET_COPY_CONFLICT: "perspective.copy_conflict",
     PRESET_ORPHAN_TESTIMONY: "perspective.orphan_testimony",
     PRESET_PATH_HEADER_CONFLICT: "perspective.path_header_conflict",
+    PRESET_TORN_WRITE: "perspective.torn_write",
     "Do przeglądu": "perspective.to_review",
 }
 # PERSPEKTYWA BEZ ZAWĘŻENIA - jedyny preset, który nie niesie ani filtra, ani flagi `only_*`
@@ -418,6 +424,7 @@ _TRIMY = (
     ("_only_copy_conflict", "copy_conflict_frame_ids"),
     ("_only_orphan_testimony", "orphan_testimony_frame_ids"),
     ("_only_path_header_conflict", "path_header_conflict_frame_ids"),
+    ("_only_torn_write", "torn_write_frame_ids"),
 )
 
 # FLAGA, OD KTÓREJ ZALEŻY ZACHOWANIE WIDOKU, NIE TYLKO ZBIÓR: w perspektywie „Wersje stosów" model

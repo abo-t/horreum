@@ -32,7 +32,7 @@ from horreum.gui.app import (
 )
 from horreum.gui.grid import (PRESET_COPY_CONFLICT, PRESET_DUPS, PRESET_LINEAGE,
                               PRESET_MISSING_COPY, PRESET_ORPHAN_TESTIMONY,
-                              PRESET_PATH_HEADER_CONFLICT, PRESET_RETIRED,
+                              PRESET_PATH_HEADER_CONFLICT, PRESET_RETIRED, PRESET_TORN_WRITE,
                               PRESET_RETIRED_CONFLICT, PRESET_STACK_VERSIONS, PRESET_SUPERSEDED,
                               PRESET_VANISHED)
 from horreum.gui.rows import TwoPartDelegate
@@ -102,6 +102,9 @@ _TASKS = [
     # wiersz liczy wyłącznie te, przy których kopię wiodącą wskazuje człowiek (AR-4): ≥2 obecne
     # kopie albo zeznanie, które napisała ręka („Napraw nagłówek…").
     ("orphan_testimony_frames", "tasks.orphan_testimony_frames", PRESET_ORPHAN_TESTIMONY),
+    # Wiersz AKCYJNY (0022, Q8): kopia po przerwanym zapisie nagłówka w miejscu, izolowana od skanu.
+    # Robota człowieka: odzysk z dziennika operacji albo zwolnienie po własnym rozstrzygnięciu.
+    ("torn_write_frames", "tasks.torn_write_frames", PRESET_TORN_WRITE),
     ("vanished_frames", "tasks.vanished_frames", PRESET_VANISHED),
     # Wiersz INFORMACYJNY, nie zadanie: klatka zastąpiona nie ma czego wymagać od użytkownika —
     # treść przejęła następczyni. Stoi tu, bo od 0809 wypadła z WSZYSTKICH kubełków kolejki

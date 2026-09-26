@@ -14,6 +14,7 @@ Zasady:
 - `now` podawany jawnie (ISO-8601) — deterministyczne testy, jak `now_fn` w Custosie.
 """
 import json
+import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 
@@ -2336,18 +2337,35 @@ def unmerge_observatory(con, *, observatory_id, now, uid="local"):
 # otwarta transakcja nie może wisieć (inaczej „transaction within a transaction").
 
 
+def _insert_pending(con, row):
+    """JEDEN literał INSERT stagingu dla obu wołających (kimi Z4) - nowa kolumna `pending_changes`
+    zmienia się tu raz. Bez własnej transakcji: obejmuje ją wołający. Zwraca kursor."""
+    return con.execute(
+        "INSERT INTO pending_changes(run_id, location_id, keyword, idx, op, old_value, "
+        "new_value, new_type, new_comment, expected_header_hash, status) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')", row)
+
+
 def stage_pending(con, *, run_id, location_id, keyword, idx, op, old_value, new_value,
                   new_type, new_comment, expected_header_hash):
     """Dopisz JEDEN wpis stagingu (status 'pending'). Kluczowany LOCATION (fizyczny plik). Zwraca id
-    wiersza. Transient — bez eventu. `expected_header_hash` = kotwica anty-stale (R#7)."""
+    wiersza. Transient - bez eventu. `expected_header_hash` = kotwica anty-stale (R#7)."""
     with con:
-        cur = con.execute(
-            "INSERT INTO pending_changes(run_id, location_id, keyword, idx, op, old_value, "
-            "new_value, new_type, new_comment, expected_header_hash, status) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')",
-            (run_id, location_id, keyword, idx, op, old_value, new_value, new_type, new_comment,
-             expected_header_hash))
+        cur = _insert_pending(con, (run_id, location_id, keyword, idx, op, old_value, new_value,
+                                    new_type, new_comment, expected_header_hash))
     return cur.lastrowid
+
+
+def stage_pending_many(con, *, run_id, previews):
+    """Dopisz komplet wpisów stagingu JEDNĄ transakcją - wsad (ujednolicenie karty `OBJECT`, O5:
+    ~7,5 tys. wierszy) zamiast tysięcy osobnych commitów `stage_pending`. `previews` = obiekty
+    z polami `macro.PendingPreview`. Wszystko albo nic: przerwany staging nie zostawia połowy
+    przebiegu. Transient - bez eventu. Zwraca liczbę wpisów."""
+    with con:
+        for p in previews:
+            _insert_pending(con, (run_id, p.location_id, p.keyword, p.idx, p.op, p.old_value,
+                                  p.new_value, p.new_type, p.comment, p.expected_header_hash))
+    return len(previews)
 
 
 def set_pending_status(con, *, pending_id, status, reason=None):
@@ -2383,6 +2401,86 @@ def insert_header_backup(con, *, commit_id, location_id, hdu_index, header_text,
             "INSERT INTO header_backups(commit_id, location_id, hdu_index, header_text, post_hash) "
             "VALUES (?, ?, ?, ?, ?)",
             (commit_id, location_id, hdu_index, header_text, post_hash))
+
+
+# ============================================================ DZIENNIK ZAPISU W MIEJSCU (0022, O5/Q8)
+# `inplace_op` = faza operacji zapisu nagłówka w miejscu i zarazem izolacja lokacji od skanu (opis
+# w `0022_inplace_op.sql`). Pisze WYŁĄCZNIE pisarz `writeback` (pod blokadą pliku) przez te funkcje.
+# Staging zapisu (backup, commit, faza) jest transient - bez eventu; zdarzeniem jest dopiero gest
+# człowieka (zwolnienie izolacji) i mutacja pliku opisana przez re-sync.
+
+# Fazy OTWARTE = lokacja izolowana od zwykłego skanu (`scan._isolated`), odzysk dozwolony. Jeden
+# właściciel zbioru dla skanu, odczytów Porządków i pisarza.
+INPLACE_OPEN_PHASES = ("writing", "unverified")
+_INPLACE_PHASES = ("writing", "unverified", "written", "synced", "recovered", "released")
+
+
+def _inplace_op_values(location_id, commit_id, kind, spec, now):
+    return (location_id, commit_id, kind, spec.fmt, spec.region_offset, len(spec.old_region),
+            zlib.compress(spec.old_region, 9), zlib.compress(spec.new_region, 9),
+            spec.write_start, spec.write_end, spec.file_size, spec.file_ino, spec.pre_hash,
+            spec.post_hash, now)
+
+
+_INSERT_INPLACE_OP = (
+    "INSERT INTO inplace_op(location_id, commit_id, kind, fmt, region_offset, region_length, "
+    "old_region_z, new_region_z, write_start, write_end, file_size, file_ino, pre_hash, "
+    "post_hash, phase, started_at) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'writing', ?)")
+
+
+def begin_inplace_commit(con, *, run_id, commit_id, location_id, hdu_index, header_text, spec,
+                         now):
+    """JEDNA transakcja przed pierwszym bajtem zapisu w miejscu (commit): wiersz `commits` (gdy
+    `commit_id` None), backup nagłówka do undo i operacja `inplace_op` w fazie `writing`. Wszystko
+    albo nic - backup bez operacji zostawiłby zapis bez izolacji, operacja bez backupu - bez undo.
+    `spec` = obiekt z polami `writeback.OpSpec`. Zwraca `(commit_id, op_id)`."""
+    with con:
+        if commit_id is None:
+            commit_id = con.execute(
+                "INSERT INTO commits(run_id, applied_at, summary) VALUES (?, ?, ?)",
+                (run_id, now, f"run {run_id}")).lastrowid
+        con.execute(
+            "INSERT INTO header_backups(commit_id, location_id, hdu_index, header_text, post_hash) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (commit_id, location_id, hdu_index, header_text, spec.post_hash))
+        op_id = con.execute(_INSERT_INPLACE_OP,
+                            _inplace_op_values(location_id, commit_id, "commit", spec, now)).lastrowid
+    return commit_id, op_id
+
+
+def begin_inplace_undo(con, *, commit_id, location_id, spec, now):
+    """Operacja `inplace_op` rodzaju `undo` w fazie `writing` - przed pierwszym bajtem cofnięcia
+    w miejscu. Materiałem cofnięcia jest backup commitu, więc nowego backupu nie ma. Zwraca op_id."""
+    with con:
+        return con.execute(_INSERT_INPLACE_OP,
+                           _inplace_op_values(location_id, commit_id, "undo", spec, now)).lastrowid
+
+
+def set_inplace_op_phase(con, *, op_id, phase, now, reason=None):
+    """Przejście fazy operacji (`written`/`unverified`/`synced`/`recovered`). `closed_at` stawia
+    każda faza poza `writing`. Transient - bez eventu (mutację pliku opisuje re-sync)."""
+    if phase not in _INPLACE_PHASES:
+        raise ValueError(f"nieznana faza operacji w miejscu: {phase!r}")
+    with con:
+        con.execute("UPDATE inplace_op SET phase = ?, reason = ?, closed_at = ? WHERE id = ?",
+                    (phase, reason, now, op_id))
+
+
+def release_inplace_op(con, *, op_id, now, reason, actor="user:local"):
+    """JAWNE ZWOLNIENIE izolacji lokacji ręką (Q8): operacja otwarta → `released`, lokacja wraca do
+    zwykłego skanu. Gest człowieka po własnym rozstrzygnięciu (np. plik przywrócony z pełnej kopii)
+    - stąd zdarzenie `location.writeback_released` z powodem. Operacja nieotwarta → `ValueError`."""
+    with con:
+        row = con.execute("SELECT location_id, phase FROM inplace_op WHERE id = ?",
+                          (op_id,)).fetchone()
+        if row is None or row["phase"] not in INPLACE_OPEN_PHASES:
+            raise ValueError(f"operacja {op_id} nie jest otwarta - nie ma czego zwalniać")
+        con.execute("UPDATE inplace_op SET phase = 'released', reason = ?, closed_at = ? "
+                    "WHERE id = ?", (reason, now, op_id))
+        emit_event(con, actor=actor, verb="location.writeback_released",
+                   target=f"location:{row['location_id']}", now=now,
+                   payload={"inplace_op": op_id, "phase_before": row["phase"]}, reason=reason)
 
 
 # ============================================================ RENAME "Nazwy z faktów" (krok "nazwy")

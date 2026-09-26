@@ -451,6 +451,118 @@ def test_slownikowe_zrodla_maja_jednego_wlasciciela():
     assert {"alias", "curated", "path"} == repo._SLOWNIKOWE
 
 
+# ═══════════════════════════════════════════════════ E3-1 - świadek ścieżki w DRZEWIE STOSÓW
+# Populacja naśladuje archiwum: gotowy obraz XISF (`master_light`) w układzie
+# `STACKS\<OBIEKT>\<TELESKOP_KAMERA>\<FILTR>\plik`, jedna obecna kopia. Stan wytwarzają klingi
+# (`upsert_frame`/`record_header`/`add_location`), przebieg resolvera i gesty ręki.
+
+
+def _stos(con, sha, path, object_raw=None):
+    fid, _ = repo.upsert_frame(con, sha1_data=sha, kind="master_light", filetype="xisf",
+                               camera_id=None, now=NOW)
+    repo.record_header(con, frame_id=fid, raw_json="{}", object_raw=object_raw, now=NOW)
+    repo.add_location(con, frame_id=fid, volume="VOL", path=path, now=NOW)
+    return fid
+
+
+def _pusta():
+    con = db.connect(":memory:")
+    db.migrate(con)
+    return con
+
+
+def test_stos_bez_OBJECT_pod_STACKS_dostaje_propozycje_z_folderu_OBIEKTU():
+    """FC-4 po stronie resolvera: obiektem jest segment po `STACKS`, nie rodzic pliku (FILTR).
+    Pozycja niesie populację (`stack_tree`), bo kolejka liczy ją pod kubełkiem stosów."""
+    con = _pusta()
+    fid = _stos(con, "st1", rf"{R}\STACKS\vdB30\A140R_2600MM\G\vdB30_2026-03-06_G_5s_mono.xisf")
+    prop = resolver.path_proposals(con)
+    assert [(p.canon, p.frame_ids, p.folder, p.stack_tree) for p in prop] == \
+        [("vdB30", (fid,), rf"{R}\STACKS\vdB30", True)]
+
+
+def test_stos_przebieg_NIE_pisze_a_drugi_przebieg_to_cisza():
+    """Bliźniak §4/1b i idempotencji S2 dla drzewa stosów: przebieg LICZY propozycję, nie zapisuje
+    ani jednego wiersza osi obiektu, a drugi przebieg nie dokłada ani jednego zdarzenia."""
+    con = _pusta()
+    for i, filtr in enumerate(("Ha", "OIII", "SII")):
+        _stos(con, f"st{i}", rf"{R}\STACKS\NGC7000\RC8_2600MM\{filtr}\NGC7000_{filtr}.xisf")
+    s = resolver.run_resolver(con, NOW)
+    assert (s.path_proposed_names, s.path_proposed_frames) == (1, 3)
+    assert con.execute("SELECT count(*) FROM frame WHERE object_id IS NOT NULL").fetchone()[0] == 0
+    assert _ev(con, "object.assigned") == 0
+    przed = con.execute("SELECT count(*) FROM event").fetchone()[0]
+    s2 = resolver.run_resolver(con, NOW)
+    assert con.execute("SELECT count(*) FROM event").fetchone()[0] == przed
+    assert (s2.path_proposed_names, s2.path_proposed_frames) == (1, 3)
+
+
+def test_stos_z_OBJECT_naglowek_wygrywa_z_folderem():
+    """Header-primary: nagłówek zeznaje `NGC 7000`, folder mówi `Veil` - stos NIE jest kandydatem
+    szczebla (zeznanie JEST), a przebieg nazywa go z nagłówka."""
+    con = _pusta()
+    fid = _stos(con, "st1", rf"{R}\STACKS\Veil\76EDPH_2600MM\R\x.xisf", object_raw="NGC 7000")
+    assert resolver.path_proposals(con) == ()
+    resolver.run_resolver(con, NOW)
+    kanon, zrodlo = con.execute(
+        "SELECT o.canon, f.object_source FROM frame f JOIN object o ON o.id = f.object_id "
+        "WHERE f.id = ?", (fid,)).fetchone()
+    assert (kanon, zrodlo) == ("NGC7000", "header")
+    assert resolver.path_proposals(con) == ()
+
+
+def test_stos_w_ukladzie_WBPP_master_MILCZY():
+    """Poza drzewem `STACKS` szczebel milczy: dziadek przy `master` bywa nazwą SESJI, a żaden
+    stały segment tego układu obiektu nie niesie. Podpowiedź w kolumnie zostaje (GUI)."""
+    con = _pusta()
+    _stos(con, "st1", r"R:\ARCHIWUM\OBIEKTY_DNG\LMC\master\masterLight_BIN-1.xisf")
+    assert resolver.path_proposals(con) == ()
+
+
+def test_stos_plik_wprost_pod_STACKS_MILCZY():
+    """Segment po kotwicy musi być KATALOGIEM - nazwa pliku świadkiem nie jest (kanon modułu)."""
+    con = _pusta()
+    _stos(con, "st1", rf"{R}\STACKS\M31_final.xisf")
+    assert resolver.path_proposals(con) == ()
+
+
+def test_stos_z_nazwa_zdjeta_REKA_nie_wraca_propozycja():
+    """Ręka nietykalna: stos nazwany z propozycji, potem COFNIĘTY gestem - nagrobek wyklucza
+    propozycję (inaczej „Zatwierdź wszystko" cofałoby cofnięcie), przebieg go nie tyka, a spis
+    faktów ręki po przebiegu nie traci ani jednego."""
+    con = _pusta()
+    fid = _stos(con, "st1", rf"{R}\STACKS\vdB30\A140R_2600MM\G\x.xisf")
+    p = resolver.path_proposals(con)[0]
+    g = repo.user_assign_object(con, alias_norm=None, canon=p.canon, catalog=p.catalog,
+                                kind=p.kind, frame_ids=list(p.frame_ids), now=NOW,
+                                object_source="path")
+    assert (g.assigned, g.stacks) == (1, 1)
+    assert repo.clear_object_assignment(con, frame_ids=[fid], now=NOW).assigned == 1
+    assert resolver.path_proposals(con) == ()
+    przed = audit.human_facts_census(con)
+    resolver.run_resolver(con, NOW)
+    resolver.run_resolver(con, NOW)
+    assert audit.human_facts_census(con) == przed
+    assert con.execute("SELECT object_id, object_source FROM frame WHERE id = ?",
+                       (fid,)).fetchone()[:] == (None, "user_cleared")
+    assert resolver.path_proposals(con) == ()
+
+
+def test_stos_i_RAW_tej_samej_nazwy_to_DWIE_pozycje():
+    """Każda populacja pod swoim kubełkiem: ta sama nazwa z obu drzew nie zlewa się w jedną pozycję
+    (inaczej liczba „z tego" pod RAW-em liczyłaby stosy). Kolejka rozbija liczniki tak samo."""
+    con = _baza(_lmc(2))
+    _stos(con, "st1", rf"{R}\STACKS\LMC\A7R3_105\OSC\LMC_stack.xisf")
+    prop = resolver.path_proposals(con)
+    assert [(p.canon, p.stack_tree, p.n_frames) for p in prop] == \
+        [("LMC", False, 2), ("LMC", True, 1)]
+    q = queries.review_queue(con)
+    assert (q["path_proposed_names"], q["path_proposed_frames"]) == (1, 2)
+    assert (q["path_proposed_stack_names"], q["path_proposed_stack_frames"]) == (1, 1)
+    assert q["nameless_stacks_count"] == 1
+    assert _partycja(con) == len(queries.review_frame_ids(con))
+
+
 def test_zrodlo_path_jest_zadeklarowane():
     """Audyt 5b chodzi po `OBJECT_SOURCES`; wartość, którą paczka wnosi, musi tam być — inaczej
     bramka czerwieni się na własnym kodzie."""

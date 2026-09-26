@@ -64,6 +64,7 @@ from . import exif, repo
 from .hashing import sha1_of, sha1_of_span
 from .resolve.cameras import camera_identity
 from .resolve.frames import kind_from_path, normalize_kind
+from .resolve.paths import STACK_KIND, STACKS_DIR
 from .resolve.headers import extract_header
 
 # Rozszerzenia nagłówkonośne (PLAN §1.1: jeden mechanizm, format = opakowanie). DSLR/RAW
@@ -200,7 +201,13 @@ def is_derived_name(name):
 # Katalog archiwum, do którego trafiają GOTOWE OBRAZY po konsolidacji (etap 4). Rozpoznawany
 # WYŁĄCZNIE bezpośrednio pod korzeniem skanu — nie jako dowolny segment o tej nazwie, bo
 # `…\LIGHTS\NGC7000\stacks\` to czyjś folder roboczy, a nie archiwum stosów.
-STACKS_DIR_NAME = "stacks"
+#
+# NAZWA KATALOGU i RODZAJ stosu mają JEDNEGO właściciela: `resolve.paths` (`STACKS_DIR`,
+# `STACK_KIND` - jedyny rodzaj, który droga „Stosy" wpuszcza do bazy; zeznanie `IMAGETYP`, nie
+# nazwa), bo o to samo drzewo pyta świadek ścieżki na osi obiektu. Tutaj żyje tylko
+# reguła POŁOŻENIA sita (prefiks pod korzeniem skanu) - świadek ścieżki kotwiczy na pierwszym
+# segmencie `STACKS` od korzenia, bo pyta wyłącznie o `master_light`, który do bazy wpuszcza
+# właśnie to sito; dwie reguły położenia to dwa różne pytania, nie kopia jednej odpowiedzi.
 
 
 def _stacks_prefix(root):
@@ -217,7 +224,7 @@ def _stacks_prefix(root):
 
     ŚCIEŻKI W KODZIE NIE MA I BYĆ NIE MOŻE (repo publiczne, `git-workflow §6`): korzeń przychodzi
     od wołającego, my dokładamy do niego jeden segment ze stałej."""
-    return os.path.join(str(root), STACKS_DIR_NAME) + os.sep
+    return os.path.join(str(root), STACKS_DIR) + os.sep
 
 
 def _under(path, prefix):
@@ -225,10 +232,6 @@ def _under(path, prefix):
     przychodzi po `canonize_root` (casing z dysku) — porównanie wrażliwe na wielkość gubiłoby
     `STACKS` zapisane inaczej niż w stałej."""
     return path.casefold().startswith(prefix.casefold())
-
-
-# Rodzaj, który droga „Stosy" wpuszcza do bazy — JEDYNY. Zeznanie (`IMAGETYP`), nie nazwa.
-STACK_KIND = "master_light"
 
 
 @dataclass(frozen=True)

@@ -25,7 +25,7 @@ from .resolve.filters import normalize_filter
 from .resolve.objects import (STICKY_OBJECT_SOURCES, ObjectIdentity, load_own_objects,
                               resolve_object)
 from .resolve.observatory import site_coords
-from .resolve.paths import object_folder, object_from_path, filename_tokens
+from .resolve.paths import STACK_KIND, object_folder, object_from_path, filename_tokens
 from .resolve.regions import resolve_region
 from .resolve.solar import resolve_solar
 
@@ -237,6 +237,11 @@ class PathProposal:
     folder: str          # folder OBIEKTU pierwszej klatki grupy — skąd wzięła się nazwa
     frame_ids: tuple
     is_new: bool         # kanonu NIE MA jeszcze w bazie (to te pozycje mają przejść przez oko)
+    # Populacja pozycji (E3-1): False = RAW-owe lighty (podzbiór kubełka RAW), True = gotowe stosy
+    # z drzewa `STACKS` (podzbiór kubełka stosów). Osobne pozycje, nie wspólna grupa po kanonie:
+    # kolejka pokazuje każdą populację POD jej kubełkiem („…z tego ze ścieżki"), więc liczba spod
+    # kubełka RAW nie może zawierać stosów, a folder przy pozycji ma być świadkiem TEJ populacji.
+    stack_tree: bool = False
 
     @property
     def n_frames(self):
@@ -271,7 +276,23 @@ def path_proposals(con):
 
     Klatka-szkielet (bez wiersza `header`) nie odezwie się nigdy — `JOIN header` jak w kubełku,
     którego ta populacja jest podzbiorem. Dziś koszt 0 (763/763 RAW ma `header`); nazwane, bo to ta
-    sama klasa cichej luki, co marker korzenia."""
+    sama klasa cichej luki, co marker korzenia.
+
+    DRUGA POPULACJA: GOTOWE STOSY Z DRZEWA `STACKS` (E3-1). Warunek dowodowy jest INNY niż u RAW-a
+    i to jest sedno: XISF stosu MOŻE nieść `OBJECT`, więc o propozycji nie rozstrzyga format, tylko
+    FAKT milczenia nagłówka. Człony: `kind='master_light'`, `object_raw IS NULL` (nagłówek NIE
+    zeznaje; zeznanie nierozpoznane idzie do `object_review`, nie tutaj), `object_id IS NULL`
+    (STICKY jak wyżej, także obiekt z REGIONU, który stoi w drabinie przed ścieżką),
+    `object_source IS NULL` (nagrobek ręki wyklucza propozycję, jak wyżej) oraz kotwica `STACKS`
+    w ścieżce OBECNEJ kopii (`paths.object_from_path(…, kind=STACK_KIND)` milczy poza tym drzewem:
+    układ WBPP `…\\master\\…` nazwy obiektu nie niesie w żadnym stałym segmencie). Zmierzone na 193
+    stosach: segment po `STACKS` zgadza się z kanonem osi 187 razy, rozjeżdża 0 razy.
+    RÓŻNICA WOBEC LIGHTÓW FITS JEST ŚWIADOMA: tam szczebel milczy, żeby kotwica `nameless_lights`
+    pilnowała naprawy PLIKU. Stos dostaje propozycję, bo drzewo `STACKS` jest jedną regułą
+    pozycyjną z pomiarem bez rozjazdu, a nie dowolnym folderem archiwum. Cena nazwana: gest
+    potwierdzenia nazywa stos w BAZIE, a plik dalej milczy - droga karty („Napraw nagłówek…")
+    zostaje otwarta, a karta wpisana później WYGRYWA, bo `path` nie jest STICKY i przebieg
+    rozstrzyga nagłówkiem przed ścieżką."""
     lookup = alias_snapshot(con).get
     kanony = {r["canon"] for r in con.execute("SELECT canon FROM object").fetchall()}
     rows = con.execute(
@@ -286,27 +307,47 @@ def path_proposals(con):
         "  AND f.filetype IN (SELECT value FROM json_each(?)) "
         "ORDER BY f.id",
         (json.dumps(list(NO_OBJECT_CARD_FILETYPES)),)).fetchall()
+    stosy = con.execute(
+        "SELECT f.id AS fid, l.path AS path FROM frame f JOIN header h ON h.frame_id = f.id "
+        "LEFT JOIN location l ON l.id = (SELECT MIN(id) FROM location "
+        "                                WHERE frame_id = f.id AND present = 1) "
+        "WHERE f.kind = 'master_light' AND f.object_id IS NULL "
+        "  AND f.superseded_by IS NULL "
+        "  AND f.retired_at IS NULL "
+        "  AND h.object_raw IS NULL "
+        "  AND f.object_source IS NULL "
+        "ORDER BY f.id").fetchall()
 
-    grupy = {}                       # kanon -> [ident, folder, [frame_id, …]]
-    for r in rows:
-        seg = object_from_path(r["path"])
-        if not seg:
-            continue
-        ident, _ = resolve_name(lookup, seg, from_path=True)
-        if ident is None:
-            continue
-        wpis = grupy.get(ident.canon)
-        if wpis is None:            # folder liczymy RAZ na grupę, nie raz na klatkę (763 wywołania
-            wpis = grupy[ident.canon] = [ident, object_folder(r["path"]), []]   # na odświeżenie)
-        wpis[2].append(r["fid"])
+    grupy = {}                       # (drzewo stosów?, kanon) -> [ident, folder, [frame_id, …]]
+    for drzewo, rodzaj, wiersze in ((False, "light", rows), (True, STACK_KIND, stosy)):
+        for r in wiersze:
+            seg = object_from_path(r["path"], kind=rodzaj)
+            if not seg:
+                continue
+            ident, _ = resolve_name(lookup, seg, from_path=True)
+            if ident is None:
+                continue
+            klucz = (drzewo, ident.canon)
+            wpis = grupy.get(klucz)
+            if wpis is None:        # folder liczymy RAZ na grupę, nie raz na klatkę (763 wywołania
+                wpis = grupy[klucz] = [ident, object_folder(r["path"], kind=rodzaj), []]  # na odśw.)
+            wpis[2].append(r["fid"])
+    # Porządek po NAZWIE, populacja drugim kluczem: ta sama nazwa z obu drzew stoi obok siebie.
     return tuple(
         PathProposal(canon=canon, catalog=ident.catalog, kind=ident.kind, folder=folder,
-                     frame_ids=tuple(fids), is_new=canon not in kanony)
-        for canon, (ident, folder, fids) in sorted(grupy.items()))
+                     frame_ids=tuple(fids), is_new=canon not in kanony, stack_tree=drzewo)
+        for (drzewo, canon), (ident, folder, fids)
+        in sorted(grupy.items(), key=lambda kv: (kv[0][1], kv[0][0])))
 
 
-def path_proposal(con, path):
+def path_proposal(con, path, kind="light"):
     """Propozycja kanonu ze ścieżki dla dialogu „Napraw nagłówek…" (P-D) — albo None.
+
+    `kind` wybiera DRZEWO świadka folderu (`paths.object_from_path`): light czyta pozycję po
+    markerze rodzaju, `master_light` segment po `STACKS`. Drugi świadek (człon nazwy pliku) i reguła
+    zgodności są dla obu drzew TE SAME - stos nazwany `vdB30_…xisf` w `STACKS\\vdB30\\…` dostaje
+    propozycję dokładnie tak, jak light. Domyślny light zostawia dotychczasowych wołających
+    bez zmian.
 
     TA SAMA DRABINA co szczebel przebiegu (SPOT — do S2 repo miało DWIE reguły ścieżki i ekran
     odpowiadał inaczej niż baza), ale reguła świadka jest OSTRZEJSZA i to jest różnica ZAMIERZONA:
@@ -318,7 +359,7 @@ def path_proposal(con, path):
     obie jawnie): do PLIKU idzie konwencja USERA (folder `M82` → karta `M82`), a nie kanon bazy
     (`NGC3034`). Drabina odpowiada tu na pytanie „czy ta nazwa się rozwiąże", a nie „jak ją zapisać"
     — inaczej naprawa nagłówka przepisywałaby użytkownikowi jego własne archiwum (D-PD-9)."""
-    seg = object_from_path(path)
+    seg = object_from_path(path, kind=kind)
     if not seg:
         return None
     lookup = alias_lookup(con)

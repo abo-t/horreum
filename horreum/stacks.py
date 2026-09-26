@@ -283,11 +283,12 @@ def _in_window(rows, *, start, end, filter_canon, telescope_id, exptime, utc_off
     powiedzieć `offset_unknown` zamiast `no_candidates`. To rozróżnienie jest całym sensem R2:
     „kandydaci są, tylko liczą w innym zegarze" to inna recepta niż „kandydatów nie ma".
 
-    GRANICA NAZWANA: gdy okno domknie się z materiału NIE-RAW, a obok stały nieosądzalne RAW-y,
-    stos dostaje rodowód i trzeciej wartości nikt nie czyta — czyli RAW-y milkną. Warunkiem jest
-    pula MIESZANA (ten sam obiekt i zbliżona ekspozycja w obu formatach); zmierzona populacja na
-    żywym archiwum: **0**. Wraca do rozstrzygnięcia przy pierwszym takim stosie — dziś kod na nią
-    byłby zgadywaniem kształtu powierzchni, która ma to pokazać."""
+    PULA MIESZANA NIE UCISZA RAW-ÓW (G2-1d): gdy okno domknie się z materiału NIE-RAW, a obok
+    stały nieosądzalne RAW-y, trzecia wartość ma czytelnika mimo rodowodu - `_plan` odkłada ją
+    jako UWAGĘ obok werdyktu (`integration.raw_unreferenced`, migracja 0020), a panel mówi „a tych
+    N nie umiem umieścić w czasie". Werdykt zostaje jednowartościowy; uwaga go nie dubluje
+    (CHECK 0020 odbija ją przy `offset_unknown`, który mówi to samo). Zmierzona populacja na żywym
+    archiwum: **0** - droga stoi na teście syntetycznej puli mieszanej, nie na żywym stosie."""
     okno = []
     raw_bez_odniesienia = 0
     for r in rows:
@@ -314,14 +315,27 @@ def _in_window(rows, *, start, end, filter_canon, telescope_id, exptime, utc_off
         if not (start <= t < end):
             continue
         okno.append(r)
+    wybrane, rozjazd = _telescope_rule(okno, telescope_id)
+    return wybrane, rozjazd, raw_bez_odniesienia
+
+
+def _telescope_rule(okno, telescope_id):
+    """Reguła TRZYGAŁĘZIOWA osi teleskopu → `(wybrane, rozjazd)` - JEDYNY właściciel (B3a-2).
+
+    Uzasadnienie gałęzi i pomiar stoją w `_in_window`; tu mieszka sam mechanizm, bo woła go też
+    `propose_lineage_candidates`. Dwie kopie tej reguły rozjechałyby się przy pierwszej poprawce
+    jednej z nich, a rozjazd byłby niewidoczny: panel proponowałby co innego, niż dobrałby automat.
+
+    `okno` = klatki JEDNEJ serii tej samej nocy, już przycięte czasem, filtrem i progiem
+    ekspozycji. Master, który sam nie zna teleskopu, i puste okno → bez zmian, bez rozjazdu."""
     if telescope_id is None or not okno:
-        return okno, False, raw_bez_odniesienia
+        return okno, False
     zgodne = [r for r in okno if r["telescope_id"] == telescope_id]
     if zgodne:
-        return zgodne, False, raw_bez_odniesienia
+        return zgodne, False
     if len({r["telescope_id"] for r in okno}) == 1:
-        return okno, True, raw_bez_odniesienia
-    return [], True, raw_bez_odniesienia
+        return okno, True
+    return [], True
 
 
 def propose_offset_minutes(con, master_frame_id):
@@ -378,10 +392,15 @@ i jedyną, przy której jedna sesja zostaje jedną pozycją listy."""
 class CandidateNight:
     """Jedna noc obserwacyjna z materiałem pod PROPOZYCJĘ rodowodu. `master_night` wyróżnia tę,
     o której mówi sam obraz (`DATE-OBS`) — powierzchnia otwiera się na niej i tylko ona jest
-    zeznaniem pliku; pozostałe są ofertą dla oka człowieka."""
+    zeznaniem pliku; pozostałe są ofertą dla oka człowieka.
+
+    `telescope_mismatch` niesie ROZJAZD reguły teleskopu (`_telescope_rule`) - wyłącznie na nocy
+    mastera, bo tylko tam klatki innego teleskopu są „drugim zeznaniem o tej samej nocy" (B3a-2).
+    Pole z wartością domyślną, żeby konstrukcja z trzech pól (testy, wołający) działała dalej."""
     night: str
     master_night: bool
     frames: tuple
+    telescope_mismatch: bool = False
 
 
 def propose_lineage_candidates(con, master_frame_id):
@@ -392,20 +411,27 @@ def propose_lineage_candidates(con, master_frame_id):
     23 z 84 masterów starszego rocznika). Zepsuty jest KONIEC; początek zostaje początkiem pierwszego
     suba. Propozycja bierze więc tę samą oś co okno, tylko zamiast końca stawia NOC.
 
-    OSIE ZGODNOŚCI TE SAME, CO W DOBORZE (z JEDNYM wyjątkiem nazwanym niżej), i to jest cały
-    warunek uczciwości tej listy: obiekt,
+    OSIE ZGODNOŚCI TE SAME, CO W DOBORZE, i to jest cały warunek uczciwości tej listy: obiekt,
     filtr, teleskop, próg ekspozycji (`exposure_matches`, D-DR-2). Oś, której master NIE ZNA, nie
     zawęża — dokładnie jak w `_in_window`. Luźniejsza reguła bez tych osi nie byłaby propozycją,
     tylko spisem klatek obiektu.
 
-    JEDNA RÓŻNICA WOBEC DOBORU, NAZWANA ZAMIAST PRZEMILCZANEJ (bramka pakietu 3a, 0808): oś
-    teleskopu odsiewa TU per klatkę, a `_in_window` ma na niej regułę TRZYGAŁĘZIOWĄ i jej gałąź
-    środkowa (okno JEDNORODNE, ale z innego teleskopu → bierz i podnieś `rozjazd`) istnieje po to,
-    by master z kartą przestarzałą albo śmieciową („ED", „EQMOD HEQ5/6" — nazwa MONTAŻU) dostał
-    materiał do naprawy. Propozycja tej gałęzi nie ma, więc dla takiego mastera pokaże pustkę
-    zamiast wskazać kartę do poprawienia. Zmierzona populacja na żywym archiwum: **0** (rozjazdy
-    teleskopu zamknięto w etapie 3), dlatego kod na to byłby dziś zgadywaniem — ale granica ma być
-    NAZWANA, a nie brana za równość. Wraca przy pierwszym takim stosie.
+    OŚ TELESKOPU NA NOCY MASTERA IDZIE TĄ SAMĄ REGUŁĄ CO DOBÓR (B3a-2) - `_telescope_rule`, wołana,
+    nie kopiowana. Jej gałąź środkowa (seria JEDNORODNA, ale z innego teleskopu → bierz i podnieś
+    rozjazd) istnieje po to, by master z kartą przestarzałą albo śmieciową („ED", „EQMOD HEQ5/6" -
+    nazwa MONTAŻU) dostał materiał do naprawy; odsiew per klatkę pokazywał takiemu masterowi pustkę
+    zamiast wskazać kartę. Rozjazd wraca na `CandidateNight.telescope_mismatch`, a panel mówi go
+    tym samym zdaniem, co przy gotowym rodowodzie (`grid.lin.flag.telescope`).
+    POZOSTAŁE NOCE ODSIEWAJĄ PER KLATKĘ I TO JEST ŚWIADOME: gałąź środkowa stoi na tym, że klatki
+    innego teleskopu to drugie zeznanie o TEJ SAMEJ nocy, co master. Inna noc tej przesłanki nie
+    ma - obiekt bywa fotografowany kilkoma teleskopami przez lata, więc reguła puszczona na każdą
+    noc zapalałaby „karta do naprawy" nad poprawną kartą każdego mastera z wieloletnim obiektem.
+    Zmierzona populacja żywego archiwum z rozjazdem teleskopu: **0** (rozjazdy zamknięto w etapie 3)
+    - droga stoi na teście syntetycznym.
+    GRANICA NAZWANA: licznik RAW-ów bez zegara odsiewa teleskop PER KLATKĘ (jak przed B3a-2), bo
+    klatki bez odniesienia nie da się przypisać do nocy, a tylko na nocy mastera reguła umie
+    wpuścić inny teleskop. Master ze śmieciową kartą i materiałem RAW bez zegara policzy więc 0 -
+    populacja: 0.
 
     NIE ZAPISUJE I NIE UDAJE FAKTU (lustro `propose_offset_minutes` i szczebla ścieżki S2): zwraca
     KANDYDATÓW, a rodowód powstaje dopiero werdyktem ręki (`repo.judge_integration_input`,
@@ -472,8 +498,8 @@ def propose_lineage_candidates(con, master_frame_id):
             continue                       # SQL dał NADZBIÓR (pas ± sufit) — próg rozstrzyga tu
         if row["filter_canon"] and r["filter_canon"] != row["filter_canon"]:
             continue
-        if row["telescope_id"] and r["telescope_id"] != row["telescope_id"]:
-            continue
+        # TELESKOP NIE ODSIEWA TU - rozstrzyga go reguła niżej, po podziale na noce (B3a-2).
+        obcy = row["telescope_id"] is not None and r["telescope_id"] != row["telescope_id"]
         czas = header_dt(r["date_obs"])
         if czas is None:
             continue
@@ -486,13 +512,23 @@ def propose_lineage_candidates(con, master_frame_id):
             # oba czytały nazwę tokenu jako wartość offsetu i proponowały strażnika na stan
             # nieosiągalny (lustro pinu przy `exptime is None` w `_window_candidates`).
             if row["utc_offset_min"] is None:
-                raw_bez_odniesienia += 1      # NIE `continue` po cichu — patrz docstring
+                if not obcy:                  # licznik odsiewa teleskop per klatkę - granica wyżej
+                    raw_bez_odniesienia += 1  # NIE `continue` po cichu - patrz docstring
                 continue
             czas -= timedelta(minutes=row["utc_offset_min"])
         wg_nocy.setdefault(_night_key(czas), []).append(r)
+    rozjazd_mastera = False
+    for n in list(wg_nocy):
+        if n == noc_mastera:
+            wg_nocy[n], rozjazd_mastera = _telescope_rule(wg_nocy[n], row["telescope_id"])
+        elif row["telescope_id"] is not None:
+            wg_nocy[n] = [r for r in wg_nocy[n] if r["telescope_id"] == row["telescope_id"]]
+        if not wg_nocy[n] and n != noc_mastera:
+            del wg_nocy[n]               # noc bez materiału po osi teleskopu nie jest ofertą
     wg_nocy.setdefault(noc_mastera, [])
     return tuple(
-        CandidateNight(night=n, master_night=(n == noc_mastera), frames=tuple(wg_nocy[n]))
+        CandidateNight(night=n, master_night=(n == noc_mastera), frames=tuple(wg_nocy[n]),
+                       telescope_mismatch=(n == noc_mastera and rozjazd_mastera))
         for n in sorted(wg_nocy, key=lambda n: (n != noc_mastera,
                                                 abs((_date(n) - _date(noc_mastera)).days), n))
     ), raw_bez_odniesienia
@@ -585,7 +621,7 @@ def _plan(con, row, *, xml_reader):
         "frame_id": row["frame_id"], "testimony": t, "start": start, "end": end,
         "history_unread": unread, "no_location": brak_lokacji,
         "inputs": [], "asserted_by": None, "reason": None,
-        "telescope_mismatch": False, "exptime": exptime,
+        "telescope_mismatch": False, "exptime": exptime, "raw_unreferenced": None,
         # PÓŁKA BEZ EKSPOZYCJI (R3) — zgodność ekspozycji rozstrzyga test PARY w `_shelf_ambiguous`,
         # bo próg D-DR-2 nie jest przechodni, a klucz słownika zakłada równoważność (powód tam).
         "shelf": (row["object_id"], row["filter_canon"], row["telescope_id"]),
@@ -609,6 +645,11 @@ def _plan(con, row, *, xml_reader):
         start=start, end=end, filter_canon=row["filter_canon"], telescope_id=row["telescope_id"],
         exptime=exptime, utc_offset_min=row["utc_offset_min"])
     plan["telescope_mismatch"] = rozjazd
+    # UWAGA OBOK WERDYKTU (G2-1d): RAW-y, których nie da się umieścić w czasie, mówią ZAWSZE -
+    # także gdy rodowód domknął się z innego materiału albo werdykt brzmi inaczej. Jedyny wyjątek
+    # to werdykt `offset_unknown`, który mówi dokładnie to samo (niżej; CHECK 0020 pilnuje).
+    # Zero znaczy „brak uwagi", więc idzie jako NULL - stan bez uwagi ma jedną postać.
+    plan["raw_unreferenced"] = raw_bez_odniesienia or None
     if not kand:
         # KOLEJNOŚĆ POWODÓW = KOLEJNOŚĆ RECEPT, nie hierarchia ważności. Rozjazd teleskopu idzie
         # pierwszy, bo kandydaci BYLI i odrzuciła ich oś — recepta („napraw kartę") jest wtedy
@@ -618,6 +659,7 @@ def _plan(con, row, *, xml_reader):
             plan["reason"] = REASON_TELESCOPE
         elif raw_bez_odniesienia:
             plan["reason"] = REASON_OFFSET_UNKNOWN
+            plan["raw_unreferenced"] = None     # werdykt mówi to samo - uwaga byłaby dublem
         else:
             plan["reason"] = REASON_NO_CANDIDATES
         return plan
@@ -634,7 +676,14 @@ def _plan(con, row, *, xml_reader):
 
 def run_stack_lineage(con, *, now, actor="stacks", xml_reader=None, progress=None):
     """Przebieg rodowodu stosów — idempotentny: drugi przebieg na niezmienionych danych daje ZERO
-    nowych wierszy i ZERO eventów (UNIQUE z 0012 trzyma idempotencję, nie kod).
+    nowych wierszy i ZERO eventów ZAPISU (`integration.recorded`/`updated`/`linked`/`unlinked`) -
+    UNIQUE z 0012 trzyma idempotencję wierszy, porównanie kompletu faktów w klindze - głowy.
+
+    ZDARZENIE ZBIORCZE LECI PRZY KAŻDEJ POWTÓRCE I TO JEST ZAMIERZONE (E2-1): jedno
+    `integration.lineage_summary` na przebieg, gdy są stosy bez rodowodu albo pominięte
+    (`repo.flag_stack_lineage_summary`). Opisuje STAN po przebiegu, nie deltę, więc powtórka
+    je powiela - licznik z dziennika rośnie z liczbą PRZEBIEGÓW. Kto liczy sprawy, liczy STAN
+    tabel albo `count(DISTINCT target)`, nigdy `count(event)` (873 zdarzenia na 440 spraw).
 
     Kolejność faz jest istotna: NAJPIERW plan dla wszystkich stosów (bo nierozłączność okien to
     fakt o PARZE integracji, nie o pojedynczej), POTEM zapis. `xml_reader` wstrzykiwalny — testy
@@ -763,7 +812,8 @@ def run_stack_lineage(con, *, now, actor="stacks", xml_reader=None, progress=Non
             declared_rows=rows_v, drizzle_inputs=driz_v, disabled_inputs=dis_v,
             degenerate=int(t.degenerate), ambiguous=int(p["frame_id"] in ambi),
             telescope_mismatch=int(p["telescope_mismatch"]),
-            unresolved_reason=p["reason"], now=now, actor=actor)
+            unresolved_reason=p["reason"], raw_unreferenced=p["raw_unreferenced"],
+            now=now, actor=actor)
         if chroniony:
             _bump_kept(s, p)            # głowa zaktualizowana, WIERSZE nietknięte
             pominiete.append(p["frame_id"])
@@ -899,6 +949,16 @@ def inputs_of(con, master_frame_id):
 # TODO-DŁUG(E4-9): 26 stosów history_mismatch (0810) to werdykt UCZCIWY - wejścia najpewniej nie
 #   leżą w archiwum (drzewo obróbki bez pokrycia z bazą). NIE gasić rozluźnieniem okna; sonda:
 #   ile nazw wejść z historii ma odpowiednik w bazie (0 = teza potwierdzona, >0 = okno za wąskie).
-# TODO-DŁUG(E2-1): docstring run_stack_lineage obiecuje „ZERO eventów" przy powtórce, a
-#   lineage_summary leci bezwarunkowo co przebieg. Zdanie ma mówić prawdę: zero wierszy, jedno
-#   zdarzenie zbiorcze per przebieg (licz DISTINCT target).
+#   POMIAR 2026-09-26 (pf4 read-only, historia 26 plików z R:, 1559 nazw wejść): wynik >0, a TEZA
+#   UPADA W OBU CZŁONACH. (a) Nazwa: 12/1559 ma odpowiednik w `location` co do rdzenia nazwy -
+#   wszystkie z JEDNEGO stosu (NGC5907 Ha 300s, 12/12; historia niesie tam nazwy archiwum).
+#   (b) Pokrycie: 1402/1402 nazw z temperaturą ma odpowiednik w puli obiektu (obiekt+filtr+
+#   ekspozycja+teleskop, każda noc) - wejścia LEŻĄ w archiwum; licznością pula pokrywa 1558/1559.
+#   (c) Kierunek rozjazdu: 21/26 okno za SZEROKIE (deklarowany zbiór mieści się w oknie, nadwyżka
+#   1..34 klatek - WBPP użył podzbioru; okno 1670 wobec 1559 deklarowanych), 4/26 za wąskie
+#   (IC405 SII, IC5070 OIII, NGC2237 OIII/SII: 4/5/6/6 wejść poza oknem, obecne w puli), 1/26
+#   zgodne z tezą (IC405 Ha 600s: 3 deklarowane, w puli archiwum 2). Rozluźnienie okna dalej NIE
+#   jest naprawą - psułoby 21 stosów, żeby łatać 4. Temperatura to słaby świadek (635/1559 nazw
+#   ma -10,00), więc (b) to zgodność wielozbioru, nie tożsamość klatki. Wariant rozwojowy do
+#   rozstrzygnięcia: dopasowanie PO NAZWIE tam, gdzie historia niesie nazwy archiwum (NGC5907:
+#   12 wejść `history` z dowodem), i test PODZBIORU dla okna szerszego od zeznania.

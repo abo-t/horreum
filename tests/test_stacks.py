@@ -250,6 +250,32 @@ def test_drugi_przebieg_nie_pisze_nic(con):
     assert con.execute("SELECT count(*) FROM integration").fetchone()[0] == 1
 
 
+def test_powtorka_to_zero_wierszy_i_JEDNO_zdarzenie_zbiorcze_na_przebieg(con):
+    """Pin zdania z docstringu `run_stack_lineage` (E2-1): powtórka na niezmienionych danych daje
+    zero wierszy i zero zdarzeń ZAPISU, ale `integration.lineage_summary` leci RAZ na KAŻDY
+    przebieg, gdy jest stos bez rodowodu - bo opisuje STAN, nie deltę. Stare zdanie („ZERO
+    eventów") było prawdą tylko dla archiwum bez ani jednego powodu.
+
+    Stąd reguła dla liczących: sprawy liczy się ze STANU albo `count(DISTINCT target)` -
+    `count(event)` rośnie z liczbą przebiegów (tu: 1 sprawa, 2 zdarzenia po dwóch przebiegach)."""
+    _master(con)                                         # bez klatek → `no_candidates`
+    run_stack_lineage(con, now=NOW, xml_reader=_brak_xml)
+    wiersze = [con.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
+               for t in ("integration", "integration_input")]
+    zapis = con.execute("SELECT count(*) FROM event WHERE verb IN ('integration.recorded', "
+                        "'integration.updated', 'integration.linked', "
+                        "'integration.unlinked')").fetchone()[0]
+
+    run_stack_lineage(con, now=LATER, xml_reader=_brak_xml)
+    assert [con.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
+            for t in ("integration", "integration_input")] == wiersze
+    assert con.execute("SELECT count(*) FROM event WHERE verb IN ('integration.recorded', "
+                       "'integration.updated', 'integration.linked', "
+                       "'integration.unlinked')").fetchone()[0] == zapis
+    assert con.execute("SELECT count(*), count(DISTINCT target) FROM event "
+                       "WHERE verb = 'integration.lineage_summary'").fetchone()[:] == (2, 1)
+
+
 def test_reconcile_zdejmuje_wypadle_wejscie_ale_nie_rusza_reki(con):
     """Zmiana dopasowania w modelu append-only: wiersz relacji znika, ślad zostaje w dzienniku
     (`integration.unlinked`). Relacji potwierdzonej RĘKĄ automat nie cofa — to warunek nierozłączny

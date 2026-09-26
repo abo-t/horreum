@@ -1552,6 +1552,7 @@ class LineageBar(QWidget):
         self._nights = ()               # propozycje z rdzenia (`stacks.propose_lineage_candidates`)
         self._raw_bez_odniesienia = 0   # druga wartość tamtego zwrotu — kandydaci bez zegara
         self._note_base = ""            # nota sprzed trybu propozycji (combo jej nie zjada)
+        self._warn_base = ""            # ostrzeżenie sprzed trybu propozycji (noc dokłada swoje)
         self.set_lineage(None, [])
 
     def set_lineage(self, head, inputs, *, hint=None, candidates=(), raw_unreferenced=0):
@@ -1633,6 +1634,7 @@ class LineageBar(QWidget):
         przerysowuje listę z pamięci."""
         self._nights = tuple(nights)
         self._note_base = self.note.full_text()
+        self._warn_base = self.warn.full_text()
         self.combo_night.blockSignals(True)
         self.combo_night.clear()
         for n in self._nights:
@@ -1686,6 +1688,15 @@ class LineageBar(QWidget):
         else:
             podpowiedz = i18n.t("grid.lin.cand.empty_all", n=0)
         self.note.set_full_text(" · ".join(x for x in (self._note_base, podpowiedz) if x))
+        # ROZJAZD TELESKOPU NOCY (B3a-2) - to samo zdanie, co przy gotowym rodowodzie, bo to ten
+        # sam fakt z tej samej reguły (`stacks._telescope_rule`): klatki tej nocy zapisał inny
+        # teleskop niż karta obrazu. Stoi przy NOCY, nie przy obrazie - przełączenie na inną noc
+        # ma je zgasić, więc składamy je z bazy sprzed trybu propozycji przy każdym przerysowaniu.
+        teleskop = i18n.t("grid.lin.flag.telescope")
+        if not (0 <= idx < len(self._nights) and self._nights[idx].telescope_mismatch) \
+                or teleskop in self._warn_base:
+            teleskop = ""
+        self.warn.set_full_text(" · ".join(x for x in (self._warn_base, teleskop) if x))
         self.night_row.setVisible(True)
         self.items.setVisible(bool(klatki))
         self.action_row.setVisible(bool(klatki))
@@ -1973,6 +1984,11 @@ def _lineage_flags(head):
             ostrz.append(i18n.t("grid.lin.flag.ambiguous"))
         if head["telescope_mismatch"]:
             ostrz.append(i18n.t("grid.lin.flag.telescope"))
+    # UWAGA OBOK WERDYKTU (G2-1d) STOI POZA GUARDEM LISTY: mówi o klatkach, których na liście nie ma
+    # z definicji (RAW-y bez zegara nie weszły), więc przy zerze wejść jest tak samo prawdziwa.
+    n_raw = _lineage_raw_note(head)
+    if n_raw:
+        ostrz.append(i18n.t_plural("grid.lin.flag.raw_unreferenced", n_raw))
     if head["twins"]:
         # NIE ostrzeżenie: ten sam zbiór wejść pod inną nazwą pliku to WARIANT tego samego obrazu
         # (`_ast`, `_drizzle_1x`, `_integration`), a nie kolizja. Zmierzone: 51 z 62 oflagowanych.
@@ -1982,6 +1998,20 @@ def _lineage_flags(head):
     if head["excluded"]:
         info.append(i18n.t("grid.lin.flag.excluded", n=head["excluded"]))
     return " · ".join(ostrz), " · ".join(info)
+
+
+def _lineage_raw_note(head):
+    """Ile RAW-ów obrazu CZEKA NA ZEGAR wg uwagi przebiegu (`integration.raw_unreferenced`, G2-1d)
+    - `0`, gdy uwagi nie ma albo ZWIETRZAŁA. Jeden właściciel dla flagi panelu i dla bramki gestu
+    odniesienia (`FramesView._refresh_lineage`), żeby oba mówiły o tej samej liczbie.
+
+    WIETRZEJE PO WSKAZANIU ZEGARA: liczba pochodzi z przebiegu sprzed gestu, a gest odpowiada
+    dokładnie na jej pytanie - lustro członu `offset_unknown` w `queries.lineage_reason_stale`.
+    Powtarzanie „nie umiem umieścić N klatek" nad obrazem z już wskazanym zegarem byłoby zdaniem
+    starszym niż zmiana; bieżący stan pokaże najbliższy przebieg rodowodu."""
+    if head["utc_offset_min"] is not None:
+        return 0
+    return head["raw_unreferenced"] or 0
 
 
 def _frame_gate_reason(n, alive):
@@ -3470,6 +3500,11 @@ class FramesView(QWidget):
         if head["unresolved_reason"] and not head["inputs"] \
                 and not queries.lineage_reason_stale(head):
             kandydaci, raw_bez_zegara = stacks.propose_lineage_candidates(self.con, fid)
+        # TRZECI ŚWIADEK ZEGARA (G2-1d): uwaga przebiegu o RAW-ach bez zegara przy obrazie, którego
+        # werdykt mówi co innego - także przy GOTOWYM rodowodzie z puli mieszanej, gdzie propozycji
+        # nie liczymy wcale. Bez tego członu flaga mówiłaby „nie umiem umieścić N klatek", a gest,
+        # który je umieszcza, zostałby schowany (bramka niżej i `_sync_offset_visible`).
+        raw_bez_zegara = raw_bez_zegara or _lineage_raw_note(head)
         # PROPOZYCJA ODNIESIENIA LICZONA TYLKO TAM, GDZIE JEST PYTANIEM (R2): dla 121 masterów
         # FITS/ASI zegar nie jest problemem, a zapytanie chodzi po całym materiale obiektu, więc
         # liczenie go przy każdym zaznaczeniu byłoby kosztem bez odbiorcy.

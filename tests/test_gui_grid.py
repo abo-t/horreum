@@ -2249,6 +2249,48 @@ def test_gest_odniesienia_wchodzi_tylko_tam_gdzie_jest_pytaniem(view, gcon):
     assert "odniesienie" in view.lineage_bar.btn_offset.text().lower()
 
 
+def test_uwaga_o_RAW_ach_bez_zegara_mowi_obok_GOTOWEGO_rodowodu(view, gcon):
+    """G2-1d: pula mieszana - rodowód stoi (dwa wejścia), a przebieg zostawił uwagę „3 RAW-ów nie
+    umiem umieścić w czasie". Panel ma ją powiedzieć jako OSTRZEŻENIE (żąda decyzji) i zapalić
+    gest, który na nią odpowiada - flaga bez gestu byłaby receptą bez drogi.
+
+    Po wskazaniu zegara uwaga WIETRZEJE (liczba pochodzi z przebiegu sprzed gestu) i milknie,
+    a przycisk zostaje jako droga powrotu z wartością. Falsyfikator: usuń człon
+    `_lineage_raw_note(head)` z `_refresh_lineage` → przycisk zostaje schowany."""
+    _seed_stos(gcon)
+    gcon.execute("UPDATE integration SET raw_unreferenced = 3 WHERE id = 5")
+    gcon.commit()
+    assert _zaznacz_frame(view, 10)
+    view._toggle_panel("lineage")
+    bar = view.lineage_bar
+    assert "Weszły 2 klatki" in bar.head.text()          # werdykt i nagłówek bez zmian
+    assert "3 pasujących klatek z lustrzanki" in bar.warn.full_text()
+    assert not bar.btn_offset.isHidden()
+    assert bar.klatki_bez_odniesienia() == 3
+
+    bar.offset_asked.emit(60)
+    assert "lustrzanki" not in bar.warn.full_text(), "uwaga sprzed gestu ma zwietrzeć"
+    assert not bar.btn_offset.isHidden() and "+1.0" in bar.btn_offset.text()
+
+
+def test_noc_mastera_z_rozjazdem_teleskopu_mowi_zdaniem_gotowego_rodowodu(view, gcon):
+    """B3a-2: propozycja niesie rozjazd reguły teleskopu na NOCY MASTERA, a panel mówi go tym
+    samym kluczem, co przy gotowym rodowodzie (`grid.lin.flag.telescope`). Przełączenie na noc
+    bez rozjazdu ma zdanie ZGASIĆ - ostrzeżenie należy do nocy, nie do obrazu."""
+    from horreum.stacks import CandidateNight
+    _seed_stos(gcon, reason="degenerate_window")
+    assert _zaznacz_frame(view, 10)
+    view._toggle_panel("lineage")
+    bar = view.lineage_bar
+    bar.set_lineage(queries.stack_lineage_head(gcon, 10), [], candidates=(
+        CandidateNight("2023-04-21", True, (), telescope_mismatch=True),
+        CandidateNight("2023-04-22", False, ())))
+    tekst = grid_mod.i18n.t("grid.lin.flag.telescope")
+    assert bar.warn.full_text() == tekst
+    bar.combo_night.setCurrentIndex(1)
+    assert bar.warn.full_text() == ""
+
+
 def test_gest_odniesienia_zapisuje_i_zostawia_droge_powrotu(view, gcon):
     """Zapis idzie KLINGĄ (`repo.set_integration_offset`), a panel po nim NIE gaśnie: przycisk
     zostaje, niosąc wskazaną wartość — bo pierwsza pomyłka ręki nie ma być wieczna (ta sama

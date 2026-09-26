@@ -400,3 +400,61 @@ def test_pas_sql_jest_nadzbiorem_progu():
         for delta in (0.0, 0.4, 0.6, 1.0, 2.9, 3.0, 3.1, 12.0):
             if exposure_matches(a, a + delta):
                 assert delta <= EXP_TOL_CEILING_S
+
+
+# ============================================ G2-1d · pula MIESZANA nie ucisza RAW-ów
+
+def _zdarzenia_zapisu(con):
+    return con.execute("SELECT count(*) FROM event WHERE verb IN ('integration.recorded', "
+                       "'integration.updated', 'integration.linked', "
+                       "'integration.unlinked')").fetchone()[0]
+
+
+def test_pula_mieszana_daje_rodowod_Z_UWAGA_o_RAW_ach_bez_zegara(con):
+    """Okno domyka się z FITS-ów, a obok stoją RAW-y tej samej serii w zegarze aparatu. Do G2-1d
+    trzecia wartość `_in_window` nie miała wtedy czytelnika i RAW-y milkły; teraz stos dostaje
+    rodowód ORAZ uwagę „a tych dwóch nie umiem umieścić w czasie". Werdykt zostaje pusty -
+    uwaga niczego w nim nie zmienia, więc perspektywy i liczniki czytające `unresolved_reason`
+    widzą ten sam stan co przed zmianą.
+
+    Druga połowa: powtórka na niezmienionych danych = zero wierszy i zero zdarzeń zapisu (uwaga
+    stoi w porównaniu kompletu faktów klingi). Trzecia: po wskazaniu zegara RAW-y wchodzą do
+    rodowodu, a uwaga GAŚNIE (NULL, nie zero - brak uwagi ma jedną postać, CHECK 0020).
+
+    Falsyfikator: usuń `raw_unreferenced=` z wołania `upsert_integration` w `run_stack_lineage`
+    → pierwsza asercja uwagi czerwienieje."""
+    m = _master(con)
+    fits = [_light(con, "f1", date_obs="2019-01-10T20:41:00", filetype="fits"),
+            _light(con, "f2", date_obs="2019-01-10T20:43:00", filetype="fits")]
+    raw = [_light(con, "r1", date_obs="2019-01-10T21:45:00"),       # lokalny, +1 h wobec okna
+           _light(con, "r2", date_obs="2019-01-10T21:47:00")]
+    s = run_stack_lineage(con, now=NOW, xml_reader=_brak_xml)
+
+    row = _integracja(con, m)
+    assert row["unresolved_reason"] is None and s.reasons == {}
+    assert [r["input_frame_id"] for r in inputs_of(con, m)] == fits
+    assert row["raw_unreferenced"] == 2, "RAW-y bez zegara mają przemówić obok rodowodu"
+
+    wiersze = con.execute("SELECT count(*) FROM integration_input").fetchone()[0]
+    przed = _zdarzenia_zapisu(con)
+    run_stack_lineage(con, now=LATER, xml_reader=_brak_xml)
+    assert (con.execute("SELECT count(*) FROM integration_input").fetchone()[0],
+            _zdarzenia_zapisu(con)) == (wiersze, przed)
+
+    repo.set_integration_offset(con, master_frame_id=m, utc_offset_min=60, now=LATER)
+    run_stack_lineage(con, now=LATER, xml_reader=_brak_xml)
+    assert _integracja(con, m)["raw_unreferenced"] is None
+    assert [r["input_frame_id"] for r in inputs_of(con, m)] == sorted(fits + raw)
+
+
+def test_werdykt_offset_unknown_NIE_dostaje_uwagi_obok(con):
+    """Gdy RAW-y bez zegara SĄ werdyktem (`offset_unknown`), uwaga byłaby dublem tego samego
+    zdania - panel powiedziałby je dwa razy. Kod zostawia ją pustą, a CHECK 0020 odbija wstrzyk
+    z pominięciem klingi (test schematu)."""
+    m = _master(con)
+    _light(con, "r1", date_obs="2019-01-10T21:41:00")
+    run_stack_lineage(con, now=NOW, xml_reader=_brak_xml)
+
+    row = _integracja(con, m)
+    assert row["unresolved_reason"] == REASON_OFFSET_UNKNOWN
+    assert row["raw_unreferenced"] is None

@@ -23,6 +23,15 @@ konsumowane przez `kind_dir_segments()` — ta sama mapa, z której bierze się 
 **reguła** (pozycja + kategorie) jest tutaj. Rozdzielenie ich na kod i asset dałoby dwóch
 właścicieli jednego faktu, a dwuelementowa taksonomia drzewa skanu nie ma uzasadnienia regexami
 zmiennymi w czasie, jakie ma `recipe.py`.
+
+DRUGIE DRZEWO, TA SAMA FIGURA (FC-4/D-V-9b, E3-1): gotowe obrazy leżą w układzie
+`STACKS\\<OBIEKT>\\<TELESKOP_KAMERA>\\<FILTR>\\plik` i markera rodzaju NIE MAJĄ - kotwicą jest tam
+segment `STACKS`, a obiekt stoi BEZPOŚREDNIO po nim. Reguła jest KIND-AWARE: drzewo akwizycji
+odpowiada lightowi, drzewo stosów `master_light`owi, kalibracja nie dostaje żadnego. Pytanie
+„który segment ścieżki stosu nazywa obiekt" zadają dwie warstwy (kolumna „Obiekt" w GUI i szczebel
+ścieżki resolvera), więc odpowiedź mieszka tu, jedna. Zmierzone `?mode=ro` na 193 stosach: segment
+po `STACKS` zgadza się z kanonem osi 187 razy, milczy 6 (`Veil` - kanon regionu, drabina nazwy go
+nie zna), ROZJEŻDŻA się 0. Rodzic pliku (dawna reguła GUI) trafiał w FILTR 182 razy na 193.
 """
 from ._text import path_segments
 from .frames import kind_dir_segments
@@ -32,6 +41,14 @@ from .frames import kind_dir_segments
 #: robocze (skan ich nie widzi), a `_COMETS`/`_SOLAR` to realne lighty. Odtwarza dokładnie
 #: 674 (segment po markerze) + 33 (27 Moon + 2 Jupiter + 4 21P) = 707 klatek żywego archiwum.
 CATEGORY_DIRS = frozenset({"_SOLAR", "_COMETS"})
+
+#: Kotwica drzewa GOTOWYCH OBRAZÓW (porównanie bez wielkości liter, jak marker rodzaju). Kategorie
+#: `CATEGORY_DIRS` pod nią NIE działają: w zmierzonym drzewie stosów ich nie ma, a zejście o poziom
+#: niżej bez pomiaru byłoby zgadywaniem cudzej konwencji.
+STACKS_DIR = "stacks"
+
+#: Rodzaj, któremu odpowiada drzewo stosów - jedyny (droga „Stosy" wpuszcza wyłącznie ten rodzaj).
+STACK_KIND = "master_light"
 
 # Separator segmentów ma JEDNEGO właściciela (`_text.path_segments`, R-S0-12): dawny
 # `_witness_filename` ciął przez `os.path.basename`, więc poza Windows nie rozpoznałby `\`, jego
@@ -44,7 +61,7 @@ def _dirs(path):
     return list(path_segments(path))[:-1]
 
 
-def _object_index(path):
+def _object_index(path, kind="light"):
     """Indeks segmentu na pozycji obiektu w `_dirs(path)` albo None (helper obu funkcji niżej).
 
     Kotwicą jest segment, który nadaje klatce RODZAJ (`kind_dir_segments()` zna `light` ORAZ
@@ -55,8 +72,21 @@ def _object_index(path):
     Rodzaj musi być LIGHTEM: `CALIBRATION\\dark\\…` nie ma obiektu z definicji (kind-awareness osi),
     więc segment po markerze darka nie jest kandydatem na nic.
 
-    Pierwszy pasujący marker od korzenia wygrywa — ta sama reguła, co w `kind_from_path`."""
+    `kind=STACK_KIND` przełącza kotwicę na `STACKS_DIR` (drzewo gotowych obrazów, docstring
+    modułu). Każdy inny rodzaj niż light i `master_light` milczy: kalibracja obiektu nie ma, więc
+    pytanie o jej pozycję obiektu nie ma odpowiedzi innej niż None.
+
+    Pierwszy pasujący marker od korzenia wygrywa - ta sama reguła, co w `kind_from_path`, w OBU
+    drzewach. Segment po kotwicy musi być KATALOGIEM: `STACKS\\plik.xisf` milczy, bo nazwa pliku
+    świadkiem nie jest (kanon modułu)."""
     dirs = _dirs(path)
+    if kind == STACK_KIND:
+        for i, seg in enumerate(dirs):
+            if seg.strip().lower() == STACKS_DIR:
+                return i + 1 if i + 1 < len(dirs) else None
+        return None
+    if kind != "light":
+        return None
     markers = kind_dir_segments()
     for i, seg in enumerate(dirs):
         if markers.get(seg.strip().lower()) != "light" or i + 1 >= len(dirs):
@@ -67,26 +97,30 @@ def _object_index(path):
     return None
 
 
-def object_from_path(path):
+def object_from_path(path, kind="light"):
     """Segment na pozycji obiektu — SUROWY tekst folderu albo None. Czysta funkcja.
 
     Zwraca ŚWIADKA, nie kanon: `LIGHTS\\NGC 7635\\…` da `'NGC 7635'`, a nie `'NGC7635'`. Kanon
     powstaje WYŁĄCZNIE z drabiny nazwy (`resolver.resolve_name`, `from_path=True`) — nigdy z
     surowego segmentu, inaczej każdy folder o dowolnej nazwie zakładałby obiekt.
 
-    None znaczy „ścieżka nie stoi na pozycji obiektu": brak markera rodzaju, marker jako ostatni
-    katalog, kategoria bez zejścia. Milczenie jest tu odpowiedzią POPRAWNĄ, nie brakiem."""
-    i = _object_index(path)
+    `kind` wybiera DRZEWO (light → marker rodzaju, `master_light` → `STACKS`); domyślny light
+    zachowuje kontrakt sprzed drzewa stosów dla wszystkich dotychczasowych wołających.
+
+    None znaczy „ścieżka nie stoi na pozycji obiektu": brak kotwicy, kotwica jako ostatni
+    katalog, kategoria bez zejścia, rodzaj bez obiektu. Milczenie jest tu odpowiedzią POPRAWNĄ,
+    nie brakiem."""
+    i = _object_index(path, kind)
     return None if i is None else _dirs(path)[i]
 
 
-def object_folder(path):
+def object_folder(path, kind="light"):
     """Ścieżka do folderu OBIEKTU (prefiks kończący się na segmencie z `object_from_path`) albo
-    None — czym powierzchnia potwierdzania pokazuje ŹRÓDŁO propozycji.
+    None - czym powierzchnia potwierdzania pokazuje ŹRÓDŁO propozycji. `kind` jak wyżej.
 
     Pełna ścieżka pliku byłaby złym dowodem: pozycje są grupowane PO NAZWIE (≈35 na 707 klatek),
     więc user ogląda folder wspólny dla grupy, nie 36 razy ten sam katalog z inną nazwą pliku."""
-    i = _object_index(path)
+    i = _object_index(path, kind)
     if i is None:
         return None
     return "\\".join(_dirs(path)[:i + 1])

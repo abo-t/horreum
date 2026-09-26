@@ -66,6 +66,10 @@ from importlib import resources
 # bazy po naszej stronie (zapis albo brama), nie fakt o pliku - marker stoi, bo wymusza re-odczyt.
 # CHECK wiąże oba fakty z markerem (powód bez markera = sprzeczność); marker bez rodzaju zostaje
 # legalny: rodzaj nieznany - wiersz sprzed 0019 albo wyjątek bez kodu systemu, nierozstrzygnięty.
+# 0020 to PRZYROST (G2-1d): integration.raw_unreferenced - UWAGA obok jednowartościowego werdyktu
+# rodowodu: ile RAW-ów przebieg nie umiał umieścić w czasie przy stosie, którego werdykt mówi co
+# innego (pula mieszana RAW+FITS). Kolumna wchodzi PUSTA, pisze ją przebieg przez klingę. CHECK:
+# `> 0` (brak uwagi ma jedną postać - NULL) i nie przy `offset_unknown` (werdykt mówi to samo).
 MIGRATIONS = [
     (2, "0002_initial.sql"),
     (3, "0003_writeback.sql"),
@@ -85,6 +89,7 @@ MIGRATIONS = [
     (17, "0017_object_cleared_memory.sql"),
     (18, "0018_frame_retired.sql"),
     (19, "0019_location_unreadable_reason.sql"),
+    (20, "0020_integration_raw_unreferenced.sql"),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 _KNOWN_VERSIONS = frozenset({0} | {v for v, _ in MIGRATIONS})

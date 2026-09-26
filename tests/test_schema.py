@@ -93,15 +93,69 @@ def test_szkielet_przyszly_pusty(tmp_path):
     con.close()
 
 
-def test_user_version_v19_po_migracji(tmp_path):
-    """0019 podnosi user_version do 19 (świeża baza leci 0002→…→0019 sekwencyjnie; rodzaj i powód
-    nieczytelności kopii, P4-2).
+def test_user_version_v20_po_migracji(tmp_path):
+    """0020 podnosi user_version do 20 (świeża baza leci 0002→…→0020 sekwencyjnie; uwaga
+    `integration.raw_unreferenced` obok werdyktu rodowodu, G2-1d).
 
     Pin JEST intencją: każda nowa migracja ma ten test PRZEWRÓCIĆ imiennie, żeby podniesienie
     wersji było gestem, a nie skutkiem ubocznym."""
     con = db.open_db(str(tmp_path / "h.db"))
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 19
-    assert db.SCHEMA_VERSION == 19
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 20
+    assert db.SCHEMA_VERSION == 20
+    con.close()
+
+
+def _integ_0020(con, iid, reason):
+    """Klatka mastera + głowa integracji z zadanym werdyktem - surowy INSERT, bo test pyta BAZĘ."""
+    con.execute("INSERT INTO frame(id, kind, filetype, sha1_data, first_seen_at) "
+                "VALUES (?, 'master_light', 'xisf', ?, '2026-09-26T00:00:00Z')", (iid, f"m{iid}"))
+    con.execute("INSERT INTO integration(id, master_frame_id, created_at, unresolved_reason) "
+                "VALUES (?, ?, 't', ?)", (iid, iid, reason))
+
+
+def test_0020_CHECK_uwaga_dodatnia_i_nie_dubluje_werdyktu(tmp_path):
+    """STRAŻNIK W DDL (G2-1d): uwaga `raw_unreferenced` ma JEDNĄ postać braku (NULL, nie zero)
+    i nie stoi obok werdyktu `offset_unknown`, który mówi to samo. Przy rodowodzie (werdykt NULL)
+    i przy INNYM werdykcie jest legalna - to cała jej treść: pula mieszana RAW+FITS mówi wtedy
+    o RAW-ach, których nie umie umieścić w czasie.
+
+    Falsyfikator: zdejmij którykolwiek `CHECK` z `0020_integration_raw_unreferenced.sql` →
+    odpowiadający mu `raises` czerwienieje."""
+    con = db.open_db(str(tmp_path / "h.db"))
+    _integ_0020(con, 1, None)                                # rodowód bez powodu
+    _integ_0020(con, 2, "offset_unknown")
+    _integ_0020(con, 3, "telescope_mismatch")
+    with pytest.raises(sqlite3.IntegrityError):              # zero to nie uwaga
+        con.execute("UPDATE integration SET raw_unreferenced = 0 WHERE id = 1")
+    with pytest.raises(sqlite3.IntegrityError):              # dubel werdyktu
+        con.execute("UPDATE integration SET raw_unreferenced = 3 WHERE id = 2")
+    con.execute("UPDATE integration SET raw_unreferenced = 3 WHERE id = 1")   # obok rodowodu
+    con.execute("UPDATE integration SET raw_unreferenced = 2 WHERE id = 3")   # obok innego powodu
+    with pytest.raises(sqlite3.IntegrityError):              # werdykt nie przeskoczy na dubel
+        con.execute("UPDATE integration SET unresolved_reason = 'offset_unknown' WHERE id = 3")
+    con.close()
+
+
+def test_0020_przyrost_na_bazie_v19_z_integracja(tmp_path):
+    """Baza v19 z gotową integracją przechodzi 0020 bez odmowy (kolumna wchodzi PUSTA, bez
+    backfillu - liczbę ustawia najbliższy przebieg), wiersz zostaje nietknięty, a druga migracja
+    to no-op.
+
+    Falsyfikator: dopisz do 0020 `NOT NULL`/`DEFAULT 0` → migracja wybucha albo kolumna przestaje
+    być NULL."""
+    path = str(tmp_path / "v19.db")
+    con = db.connect(path)
+    for version, filename in db.MIGRATIONS:
+        if version <= 19:
+            con.executescript(db._migration_sql(filename))
+            con.execute(f"PRAGMA user_version = {int(version)}")
+    _integ_0020(con, 1, "offset_unknown")
+    con.commit()
+    assert db.migrate(con) == 20
+    row = con.execute("SELECT unresolved_reason, raw_unreferenced FROM integration "
+                      "WHERE id = 1").fetchone()
+    assert tuple(row) == ("offset_unknown", None)
+    assert db.migrate(con) == 20                             # idempotencja
     con.close()
 
 
@@ -164,11 +218,11 @@ def test_0019_przyrost_na_bazie_v18_z_oznaczona_kopia(tmp_path):
             con.execute(f"PRAGMA user_version = {int(version)}")
     _loc_0019(con, 1, "2026-07-21T12:00:00")
     con.commit()
-    assert db.migrate(con) == 19
+    assert db.migrate(con) == db.SCHEMA_VERSION              # 0019 + każda kolejna
     row = con.execute("SELECT unreadable_since, unreadable_kind, unreadable_reason FROM location "
                       "WHERE id = 1").fetchone()
     assert tuple(row) == ("2026-07-21T12:00:00", None, None)
-    assert db.migrate(con) == 19                             # idempotencja
+    assert db.migrate(con) == db.SCHEMA_VERSION              # idempotencja
     con.close()
 
 

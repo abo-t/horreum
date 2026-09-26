@@ -212,3 +212,66 @@ def test_RAW_bez_odniesienia_NIE_PRZEPADA_PO_CICHU_tylko_wraca_druga_wartoscia(c
     noce, bez_zegara = propose_lineage_candidates(con, fid)
     assert bez_zegara == 0
     assert sum(len(n.frames) for n in noce) == 4
+
+
+# ================================ B3a-2 · oś teleskopu w PROPOZYCJI = ta sama reguła co w DOBORZE
+
+def _karta_smieciowa(con):
+    """Teleskop-śmieć z realnego archiwum (`EQMOD HEQ5/6` = nazwa MONTAŻU) i jego zestaw (id 3)."""
+    con.execute("INSERT INTO telescope(telescop_canon, status, created_at) "
+                "VALUES ('EQMOD HEQ5/6', 'proposed', ?)", (NOW,))
+    con.execute("INSERT INTO config(telescope_id, camera_id, status, created_at) "
+                "VALUES (3, 1, 'proposed', ?)", (NOW,))
+    con.commit()
+    return 3
+
+
+def test_karta_smieciowa_dostaje_material_nocy_mastera_z_rozjazdem(con):
+    """Gałąź środkowa reguły (`stacks._telescope_rule`): noc mastera JEDNORODNA, ale z innego
+    teleskopu niż karta → materiał wchodzi i niesie rozjazd, żeby panel wskazał kartę do naprawy.
+    Odsiew per klatkę pokazywał tu pustkę - master z kartą-śmieciem nie miał czym się naprawić.
+
+    INNA NOC tego samego teleskopu NIE wchodzi: gałąź środkowa stoi na „drugim zeznaniu o tej samej
+    nocy", a inna noc tej przesłanki nie ma.
+
+    Falsyfikator: przywróć w `propose_lineage_candidates` odsiew `telescope_id` per klatkę przed
+    podziałem na noce → noc mastera wraca pusta i bez rozjazdu."""
+    fid = _master(con, config_id=_karta_smieciowa(con))
+    _integracja(con, fid)
+    seria = [_light(con, f"ed{i}", date_obs=f"2023-04-21T2{i}:00:00", config_id=2)
+             for i in range(3)]
+    _light(con, "ed_inna_noc", date_obs="2023-04-25T21:00:00", config_id=2)
+    noce, _ = propose_lineage_candidates(con, fid)
+
+    assert len(noce) == 1 and noce[0].master_night
+    assert [r["frame_id"] for r in noce[0].frames] == seria
+    assert noce[0].telescope_mismatch is True
+
+
+def test_noc_mastera_MIESZANA_bez_teleskopu_mastera_jest_pusta_z_rozjazdem(con):
+    """Gałąź trzecia: noc miesza dwa obce teleskopy i żaden nie jest masterowy - nie ma czym
+    rozstrzygnąć, więc lista milczy, ale rozjazd zostaje (kandydaci BYLI, odrzuciła ich oś -
+    lustro powodu `telescope_mismatch` w doborze)."""
+    fid = _master(con, config_id=_karta_smieciowa(con))
+    _integracja(con, fid)
+    _light(con, "rc8", date_obs="2023-04-21T20:00:00", config_id=1)
+    _light(con, "ed", date_obs="2023-04-21T21:00:00", config_id=2)
+    noce, _ = propose_lineage_candidates(con, fid)
+
+    assert len(noce) == 1 and noce[0].frames == ()
+    assert noce[0].telescope_mismatch is True
+
+
+def test_poprawna_karta_NIE_dostaje_rozjazdu_z_obcej_nocy(con):
+    """Regresja, której reguła puszczona na KAŻDĄ noc by nie przeżyła: obiekt fotografowany przez
+    lata dwoma teleskopami. Noc innego teleskopu nie jest ofertą dla mastera z poprawną kartą,
+    a noc mastera - z klatkami jego teleskopu - nie niesie rozjazdu."""
+    fid = _master(con)                                    # karta RC8R, poprawna
+    _integracja(con, fid)
+    wlasna = _light(con, "rc8", date_obs="2023-04-21T20:00:00", config_id=1)
+    _light(con, "ed_obok", date_obs="2023-04-21T20:30:00", config_id=2)
+    _light(con, "ed_rok_pozniej", date_obs="2024-04-21T21:00:00", config_id=2)
+    noce, _ = propose_lineage_candidates(con, fid)
+
+    assert [(n.night, [r["frame_id"] for r in n.frames], n.telescope_mismatch)
+            for n in noce] == [("2023-04-21", [wlasna], False)]

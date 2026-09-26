@@ -95,6 +95,40 @@ def test_folder_obiektu_to_prefiks_do_segmentu():
     assert object_folder(rf"{R}\CALIBRATION\dark\x.fit") is None
 
 
+# ─────────────────────────────────────────── drzewo STOSÓW (FC-4/D-V-9b, E3-1) - ta sama figura
+
+#: Układ zmierzony na 193 stosach archiwum; rodzic pliku to FILTR (NoFilter/Ha/OIII/RGB/SII…).
+_STOS = rf"{R}\STACKS\vdB30\A140R_2600MM\G\vdB30_2026-03-06_A140R_2600MM_G_5s_mono.xisf"
+
+
+def test_drzewo_stosow_obiekt_to_segment_PO_kotwicy():
+    assert object_from_path(_STOS, kind="master_light") == "vdB30"
+    assert object_folder(_STOS, kind="master_light") == rf"{R}\STACKS\vdB30"
+    for filtr in ("NoFilter", "Ha", "OIII", "SII", "R"):
+        assert object_from_path(rf"{R}\STACKS\Veil\76EDPH_2600MC\{filtr}\x.xisf",
+                                kind="master_light") == "Veil", "filtr nie udaje obiektu"
+    # kotwica bez względu na wielkość liter i separator (R-S0-12)
+    assert object_from_path(r"R:\astro_\Stacks\M31\x\y\z.xisf", kind="master_light") == "M31"
+    assert object_from_path("/mnt/astro/STACKS/M31/cfg/L/z.xisf", kind="master_light") == "M31"
+
+
+def test_drzewo_stosow_galezie_milczenia():
+    """Milczenie jest odpowiedzią POPRAWNĄ: plik wprost pod kotwicą (nazwa pliku świadkiem nie
+    jest), brak kotwicy (układ WBPP `master`), rodzaj bez drzewa."""
+    assert object_from_path(rf"{R}\STACKS\M31_final.xisf", kind="master_light") is None
+    assert object_folder(rf"{R}\STACKS\M31_final.xisf", kind="master_light") is None
+    assert object_from_path(r"R:\A\LMC\master\masterLight.xisf", kind="master_light") is None
+    assert object_from_path(_STOS, kind="dark") is None, "kalibracja obiektu nie ma"
+
+
+def test_drzewa_sa_KIND_AWARE_i_domyslny_kontrakt_nietkniety():
+    """Light pyta o drzewo akwizycji, stos o drzewo stosów - pytanie w cudzym drzewie milczy.
+    Wołający bez `kind` dostaje DOKŁADNIE dawną odpowiedź (reguła lightów)."""
+    assert object_from_path(_STOS) is None                       # light w drzewie stosów
+    assert object_from_path(rf"{R}\LIGHTS\LMC\A7R3\OSC\x.xisf", kind="master_light") is None
+    assert object_from_path(rf"{R}\LIGHTS\LMC\A7R3\OSC\x.ARW") == "LMC"
+
+
 def test_czlony_nazwy_pliku():
     """Drugi świadek iteruje po członach `_` — i to jest jego RDZEŃ: po rename v2 oznaczenie ląduje
     w ŚRODKU nazwy. Zakaz cięcia z D-OW-2 pkt 5a dotyczy segmentu KATALOGOWEGO, nie tego."""
@@ -116,6 +150,19 @@ def test_propozycja_dialogu_wymaga_DWOCH_zgodnych_swiadkow():
     assert resolver.path_proposal(con, rf"{R}\LIGHTS\NGC7635\RC8\Ha\M42_Ha_0001.fit") is None
     # drugi świadek milczy → brak propozycji (stąd 31 z 763 dla RAW-ów)
     assert resolver.path_proposal(con, rf"{R}\LIGHTS\NGC1976\RC8\L\x.fit") is None
+
+
+def test_propozycja_dialogu_dla_STOSU_ta_sama_regula_dwoch_swiadkow():
+    """Stos w drzewie `STACKS` dostaje świadka folderu z segmentu po kotwicy (`kind` wiersza),
+    a regułę zgodności z członem nazwy pliku - tę samą co light. Bez `kind` stos milczy, jak
+    przedtem (domyślny kontrakt nietknięty)."""
+    con = _con()
+    stos = rf"{R}\STACKS\vdB30\A140R_2600MM\G\vdB30_2026-03-06_A140R_2600MM_G_5s_mono.xisf"
+    assert resolver.path_proposal(con, stos, kind="master_light") == "vdB30"
+    assert resolver.path_proposal(con, stos) is None
+    # rozjazd świadków i milczący drugi świadek - pole puste, jak u lightów
+    assert resolver.path_proposal(con, rf"{R}\STACKS\vdB30\A\G\M42_G.xisf", kind="master_light") is None
+    assert resolver.path_proposal(con, rf"{R}\STACKS\vdB30\A\G\final.xisf", kind="master_light") is None
 
 
 def test_propozycja_dialogu_NIE_normalizuje_przez_xref():

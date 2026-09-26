@@ -1771,6 +1771,21 @@ CATALOG = {
         "pl": "⚠ obraz zapisał inny teleskop niż jego klatki (karta do naprawy)",
         "en": "⚠ the image records a different telescope than its frames (header to fix)",
     },
+    # UWAGA OBOK WERDYKTU (G2-1d): pula mieszana RAW+FITS - rodowód (albo inny powód) stoi, a obok
+    # leżą RAW-y, których nie da się umieścić w czasie. Zdanie niesie LICZBĘ i RECEPTĘ (gest
+    # odniesienia stoi pod nim), jak `grid.lin.cand.no_reference`.
+    "grid.lin.flag.raw_unreferenced": {
+        "pl": {"one": "⚠ {n} pasującej klatki z lustrzanki nie umiem umieścić w czasie - "
+                      "wskaż odniesienie zegara",
+               "few": "⚠ {n} pasujących klatek z lustrzanki nie umiem umieścić w czasie - "
+                      "wskaż odniesienie zegara",
+               "many": "⚠ {n} pasujących klatek z lustrzanki nie umiem umieścić w czasie - "
+                       "wskaż odniesienie zegara"},
+        "en": {"one": "⚠ {n} matching DSLR frame cannot be placed in time - "
+                      "point the clock reference",
+               "other": "⚠ {n} matching DSLR frames cannot be placed in time - "
+                        "point the clock reference"},
+    },
     "grid.lin.flag.declared": {
         "pl": "plik deklaruje {n} klatek", "en": "the file declares {n} frames",
     },

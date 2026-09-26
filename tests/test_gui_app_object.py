@@ -912,6 +912,90 @@ def test_kubelek_gotowych_stosow_drazy_wlasna_lista(repair):
     assert [r["frame_id"] for r in queries.nameless_stack_frames(con)] == [fid]
 
 
+def _stary_podzial(con, rows):
+    """Reguła `_split_rows` SPRZED drzewa stosów, przepisana znak w znak - świadek niezależny dla
+    bramki niżej. Grupuje po RODZICU pliku i pyta `path_proposal` BEZ rodzaju."""
+    import os as _os
+    from horreum import macro as macro_mod
+    targets = {}
+    for t in queries.writeback_frame_targets(con, [r["frame_id"] for r in rows]):
+        targets.setdefault(int(t["frame_id"]), []).append(t)
+    groups, skipped = {}, []
+    for r in rows:
+        trows = targets.get(int(r["frame_id"]))
+        if not trows:
+            skipped.append((r["path"] or "", i18n.t("repair.skip.gone")))
+            continue
+        target, reason = macro_mod.resolve_target(trows)
+        if target is None:
+            skipped.append((r["path"] or "", reason or ""))
+            continue
+        groups.setdefault(_os.path.dirname(target["path"]), []).append(
+            dict(frame_id=r["frame_id"], path=target["path"]))
+    out = []
+    for folder, items in groups.items():
+        proposals = {resolver.path_proposal(con, it["path"]) for it in items}
+        out.append((folder, items, proposals.pop() if len(proposals) == 1 else None))
+    return out, skipped
+
+
+def test_naprawa_LIGHTOW_bez_zmian_co_do_bajtu(repair):
+    """Grupowanie stosu po folderze obiektu nie ma prawa ruszyć lightów: grupy (folder, wiersze,
+    propozycja) i lista pominiętych są IDENTYCZNE jak przy regule sprzed zmiany. Wiersz RAW-owy
+    (format bez karty) odpada przed grupowaniem - też tak samo jak przedtem."""
+    v, con, files, _open = repair
+    raw_id, _ = repo.upsert_frame(con, sha1_data="sha-raw-pd", kind="light", filetype="raw",
+                                  camera_id=None, now=NOW_PD)
+    repo.record_header(con, frame_id=raw_id, raw_json="{}", object_raw=None, now=NOW_PD)
+    repo.add_location(con, frame_id=raw_id, volume="V", header_hash="h-raw", now=NOW_PD,
+                      path=str(files[0].parent / "_7R38821.ARW"))
+    wiersze = list(queries.nameless_frames(con)) + list(queries.nameless_raw_frames(con))
+    stare_grupy, stare_pominiete = _stary_podzial(con, wiersze)
+    from horreum.gui.app import RepairHeaderDialog
+    dlg = RepairHeaderDialog(con, rows=wiersze, db_path=queries.db_path_of(con),
+                             now_fn=lambda: NOW_PD, parent=v)
+    try:
+        assert [(g["folder"], g["rows"], g["proposal"]) for g in dlg._groups] == stare_grupy
+        assert dlg._skipped == stare_pominiete and len(stare_pominiete) == 1
+        assert stare_grupy[0][2] == "NGC7635"              # dwaj zgodni świadkowie, jak przedtem
+    finally:
+        dlg.reject()
+
+
+def _stos_pd(con, sha, path):
+    fid, _ = repo.upsert_frame(con, sha1_data=sha, kind="master_light", filetype="xisf",
+                               camera_id=None, now=NOW_PD)
+    repo.record_header(con, frame_id=fid, raw_json="{}", object_raw=None, now=NOW_PD)
+    repo.add_location(con, frame_id=fid, volume="V", header_hash=f"h-{sha}", now=NOW_PD, path=path)
+    return fid
+
+
+def test_naprawa_STOSU_grupuje_po_folderze_OBIEKTU_z_propozycja(qapp, tmp_path):
+    """FC-4 w oknie „Napraw nagłówek…": w `STACKS\\<OBIEKT>\\<KONFIG>\\<FILTR>\\plik` rodzicem jest
+    FILTR, więc trzy stosy vdB30 dawały trzy grupy `Ha`/`OIII`/`SII` bez propozycji. Teraz: jedna
+    grupa pod folderem obiektu, etykieta `vdB30`, propozycja z DWÓCH zgodnych świadków (folder po
+    `STACKS` + człon nazwy pliku) - ta sama reguła co u lightów. Układ WBPP (poza `STACKS`) zostaje
+    przy rodzicu i bez propozycji."""
+    from horreum.gui.app import RepairHeaderDialog
+    con = db.open_db(str(tmp_path / "st.db"))
+    R = r"R:\ASTRO_\STACKS\vdB30\A140R_2600MM"
+    for filtr in ("Ha", "OIII", "SII"):
+        _stos_pd(con, f"st-{filtr}", rf"{R}\{filtr}\vdB30_2026-03-06_A140R_2600MM_{filtr}_5s_mono.xisf")
+    wbpp = r"R:\ARCHIWUM\A7R3_105_LMC\master"
+    _stos_pd(con, "st-wbpp", rf"{wbpp}\masterLight_BIN-1_6024x4024_EXPOSURE-60.00s.xisf")
+    dlg = RepairHeaderDialog(con, rows=queries.nameless_stack_frames(con),
+                             db_path=queries.db_path_of(con), now_fn=lambda: NOW_PD)
+    try:
+        grupy = {g["folder"]: (len(g["rows"]), g["proposal"]) for g in dlg._groups}
+        assert grupy == {r"R:\ASTRO_\STACKS\vdB30": (3, "vdB30"), wbpp: (1, None)}
+        etykieta = next(g["check"].text() for g in dlg._groups
+                        if g["folder"] == r"R:\ASTRO_\STACKS\vdB30")
+        assert "vdB30" in etykieta and "Ha" not in etykieta
+    finally:
+        dlg.reject()
+        con.close()
+
+
 def test_kolumna_sciezki_pokazuje_SCIEZKE_bo_nazwa_pliku_nie_rozroznia(repair):
     """FIRSTHAND ZDZINIA 0808 — DWA zgłoszenia tej samej klasy: najpierw „nie widzę napisu IC443
     ani LMC" (kubełek stosów), potem „nie widzę ścieżki" (kubełek RAW).
@@ -1394,6 +1478,36 @@ def test_zatwierdzenie_pisze_klinga_reki_ze_zrodlem_path(sciezka):
     assert _events(con) > przed
     # kubełek gaśnie razem z populacją — kolejka mówi świeżą prawdę po zapisie
     assert queries.review_queue(con)["path_proposed_frames"] == 0
+
+
+def test_propozycja_STOSU_ma_wiersz_pod_stosami_i_wlasna_populacje(sciezka):
+    """E3-1: stos z drzewa `STACKS` bez `OBJECT` dostaje wiersz „…z tego ze ścieżki" POD kubełkiem
+    stosów, z liczbą WYŁĄCZNIE swojej populacji. Ten sam tag i ta sama akcja co pod RAW-em; payload
+    rozdziela drążenie i okno, więc żaden wiersz nie otwiera klatek drugiej populacji."""
+    from horreum.gui.app import PATH_STACKS_PAYLOAD, path_proposals_for
+    v, con = sciezka
+    fid, _ = repo.upsert_frame(con, sha1_data="sha-stos", kind="master_light", filetype="xisf",
+                               camera_id=None, now=NOW_S2)
+    repo.record_header(con, frame_id=fid, raw_json="{}", object_raw=None, now=NOW_S2)
+    repo.add_location(con, frame_id=fid, volume="V", now=NOW_S2,
+                      path=rf"{R_S2}\STACKS\LMC\A7R3_105\OSC\LMC_stack.xisf")
+    v.refresh()
+
+    wiersze = [(v.review.item(r).data(UROLE), r) for r in range(v.review.count())]
+    stos_r = [r for tag, r in wiersze if tag == "nameless_stacks"]
+    prop_r = [r for tag, r in wiersze if tag == "path_proposals"]
+    assert len(stos_r) == 1 and len(prop_r) == 2, "jeden wiersz propozycji pod KAŻDYM kubełkiem"
+    assert prop_r[1] > stos_r[0], "propozycja stosu stoi pod kubełkiem stosów"
+
+    v.review.setCurrentRow(prop_r[1])
+    assert v._selected_review() == ("path_proposals", PATH_STACKS_PAYLOAD)
+    assert v.confirm_path_btn.isEnabled()
+    assert v.frames.rowCount() == 1                       # drążenie: sam stos, bez RAW-ów
+    assert [p.frame_ids for p in path_proposals_for(con, PATH_STACKS_PAYLOAD)] == [(fid,)]
+
+    v.review.setCurrentRow(prop_r[0])
+    assert v.frames.rowCount() == 3                       # RAW-owy wiersz bez zmian: 3 klatki LMC
+    assert all(not p.stack_tree for p in path_proposals_for(con, None))
 
 
 def test_kubelek_raw_ma_tag_drazenie_i_akcje(sciezka):

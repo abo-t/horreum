@@ -853,6 +853,23 @@ def test_object_cell_PODPOWIEDZ_z_folderu_dla_bezimiennego_stosu():
     assert queries.object_cell({"object_canon": None, "object_raw": None}) == ("", "canon")
 
 
+def test_podpowiedz_stosu_w_drzewie_STACKS_czyta_OBIEKT_nie_filtr():
+    """FC-4/D-V-9b: w układzie `STACKS\\<OBIEKT>\\<KONFIG>\\<FILTR>\\plik` rodzic pliku to FILTR -
+    dawna reguła dawała `⟨NoFilter⟩`/`⟨Ha⟩` dla 182 ze 193 stosów archiwum. Reguła WBPP (dziadek
+    przy `master`) i reguła rodzica zostają dla układów spoza drzewa stosów."""
+    for filtr in ("NoFilter", "Ha", "OIII", "SII", "G"):
+        assert queries.stack_folder(
+            rf"R:\ASTRO_\STACKS\vdB30\A140R_2600MM\{filtr}\vdB30_{filtr}.xisf") == "vdB30"
+    stos = {"kind": "master_light", "object_canon": None, "object_raw": None,
+            "path": r"R:\ASTRO_\STACKS\Veil\76EDPH_2600MC\NoFilter\Veil_x.xisf"}
+    assert queries.object_cell(stos) == ("⟨Veil⟩", "hint")
+    assert queries.stack_folder(r"R:\A\A7R3_105_LMC\master\masterLight.xisf") == "A7R3_105_LMC"
+    assert queries.stack_folder(r"R:\A\IC443\masterLight.xisf") == "IC443"
+    assert queries.stack_folder(r"R:\master\masterLight.xisf") is None     # korzeń-litera dysku
+    # KOTWICA NIE JEST FOLDEREM OBIEKTU: plik wprost pod `STACKS` milczy, zamiast mówić `⟨STACKS⟩`
+    assert queries.stack_folder(r"R:\ASTRO_\STACKS\M31_final.xisf") is None
+
+
 def test_wiersz_NIEMY_o_rodzaju_NIE_dostaje_zdania_o_rodzaju():
     """Gałąź `kind` twierdzi „kalibracja obiektu nie ma z DEFINICJI" — wolno ją postawić WYŁĄCZNIE
     przy rodzaju ZNANYM (bramka pakietu 0810, zarzut zgodny u dwóch soczewek).

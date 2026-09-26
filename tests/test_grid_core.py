@@ -276,14 +276,15 @@ def test_hint_obiektu_idzie_za_zywym_adresem(grid_db):
     żywym archiwum zmierzona 2026-08-14: **0** klatek (`master_light` bez obiektu nie ma wcale) -
     mechanizm jest jednak realny i to fikstura tej paczki go wytwarza, więc dostaje bramkę.
 
-    Podpowiedź czyta DZIADKA, gdy rodzicem jest `master` - stąd oba adresy w kształcie WBPP."""
+    Stary adres ma kształt WBPP (dziadek przy `master`), nowy - drzewa stosów. Pin do FC-4/D-V-9b
+    trzymał tu `⟨CLS⟩`, czyli FILTR na pozycji podpowiedzi (dług ujawniony tą bramką); od naprawy
+    podpowiedź czyta segment po `STACKS` (`resolve.paths`), więc żywy adres daje OBIEKT."""
     _dwa_adresy(grid_db, stary="/arch/test 2023-05-07/master/masterLight_BIN-1.xisf",
                 nowy="/arch/STACKS/Cr464/76EDPH_2600MM/CLS/Cr464_2023-05-07.xisf")
     r = {x["frame_id"]: x for x in queries.base_rows(grid_db, [5])}[5]
-    assert queries.object_cell({k: r[k] for k in r.keys()}) == ("⟨CLS⟩", "hint")
-    # DŁUG UJAWNIONY, NIE WPROWADZONY (→ kolejka): w nowym drzewie na pozycji podpowiedzi stoi FILTR,
-    # a w starym stała nazwa sesji. Naprawa adresu tego nie psuje - odsłania, bo przedtem ta sama
-    # kolumna czytała z martwej ścieżki. Rozstrzygnięcie należy do osobnego GO.
+    assert queries.object_cell({k: r[k] for k in r.keys()}) == ("⟨Cr464⟩", "hint")
+    # Martwy adres (układ WBPP) dałby nazwę SESJI z dziadka - komórka idzie za żywym, nie za nim.
+    assert queries.stack_folder(r["vanished_path"]) == "test 2023-05-07"
 
 
 def test_base_rows_niesie_PAMIEC_nagrobka_jako_kanon_nie_klucz(grid_db):

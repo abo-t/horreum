@@ -2424,8 +2424,14 @@ def flag_calibration_lineage_summary(con, items, now, actor="lineage"):
 
 def upsert_integration(con, *, master_frame_id, integ_hash, tool, window_start, window_end,
                        declared_rows, drizzle_inputs, disabled_inputs, degenerate, ambiguous,
-                       telescope_mismatch, unresolved_reason, now, actor="stacks"):
+                       telescope_mismatch, unresolved_reason, now, actor="stacks",
+                       raw_unreferenced=None):
     """Wiersz `integration` dla klatki mastera — `(integration_id, zmienione)`.
+
+    `raw_unreferenced` (G2-1d, migracja 0020) to UWAGA obok werdyktu, nie drugi werdykt: ile
+    RAW-ów przebieg widział i nie umiał umieścić w czasie. Jedzie w TEJ liście pól, bo jest
+    wyliczana z bazy co przebieg (lustro `telescope_mismatch`), a nie werdyktem ręki (jak offset).
+    Domyślne `None` = „brak uwagi"; CHECK 0020 odbija zero i dubel z `offset_unknown`.
 
     Idempotentny na UNIQUE(master_frame_id) z 0012: identyczny komplet faktów → `False` BEZ eventu
     (drugi przebieg nie ma prawa puchnąć dziennika). Inaczej INSERT `integration.recorded` albo
@@ -2443,19 +2449,21 @@ def upsert_integration(con, *, master_frame_id, integ_hash, tool, window_start, 
               "window_end": window_end, "declared_rows": declared_rows,
               "drizzle_inputs": drizzle_inputs, "disabled_inputs": disabled_inputs,
               "degenerate": degenerate, "ambiguous": ambiguous,
-              "telescope_mismatch": telescope_mismatch, "unresolved_reason": unresolved_reason}
+              "telescope_mismatch": telescope_mismatch, "unresolved_reason": unresolved_reason,
+              "raw_unreferenced": raw_unreferenced}
     wartosci = list(fields.values())
     with _immediate(con):
         row = con.execute(
             "SELECT id, integ_hash, tool, window_start, window_end, declared_rows, drizzle_inputs, "
-            "disabled_inputs, degenerate, ambiguous, telescope_mismatch, unresolved_reason "
+            "disabled_inputs, degenerate, ambiguous, telescope_mismatch, unresolved_reason, "
+            "raw_unreferenced "
             "FROM integration WHERE master_frame_id = ?", (master_frame_id,)).fetchone()
         if row is None:
             cur = con.execute(
                 "INSERT INTO integration(master_frame_id, created_at, integ_hash, tool, "
                 "window_start, window_end, declared_rows, drizzle_inputs, disabled_inputs, "
-                "degenerate, ambiguous, telescope_mismatch, unresolved_reason) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "degenerate, ambiguous, telescope_mismatch, unresolved_reason, raw_unreferenced) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [master_frame_id, now] + wartosci)
             iid = cur.lastrowid
             emit_event(con, actor=actor, verb="integration.recorded",
@@ -2468,8 +2476,8 @@ def upsert_integration(con, *, master_frame_id, integ_hash, tool, window_start, 
         con.execute(
             "UPDATE integration SET updated_at = ?, integ_hash = ?, tool = ?, window_start = ?, "
             "window_end = ?, declared_rows = ?, drizzle_inputs = ?, disabled_inputs = ?, "
-            "degenerate = ?, ambiguous = ?, telescope_mismatch = ?, unresolved_reason = ? "
-            "WHERE id = ?", [now] + wartosci + [row["id"]])
+            "degenerate = ?, ambiguous = ?, telescope_mismatch = ?, unresolved_reason = ?, "
+            "raw_unreferenced = ? WHERE id = ?", [now] + wartosci + [row["id"]])
         emit_event(con, actor=actor, verb="integration.updated",
                    target=f"frame:{master_frame_id}", now=now,
                    payload={"integration_id": row["id"],

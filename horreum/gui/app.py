@@ -37,6 +37,7 @@ from horreum.gui.map_view import SitesMapView
 from horreum.gui.rows import TwoPartDelegate
 from horreum.resolve._text import norm_alnum
 from horreum.resolve.catalog import catalog_canon
+from horreum.resolve.paths import STACK_KIND, object_folder
 
 # ROLE POZYCJI KOLEJKI PRZEGLĄDU — świadomie POZA pasmem `rows` (SECONDARY/TERTIARY/STRONG zajmują
 # `UserRole+1…+3`). Kolejka trzymała payload pod `UserRole+1`, a powód pod `UserRole+2`, czyli
@@ -592,6 +593,22 @@ COPY_HEADERS = ["col.path", "copy.col.volume", "copy.col.present", "copy.col.mar
 COPY_PATH_MAX_PX = 200
 
 
+PATH_STACKS_PAYLOAD = "stacks"
+"""Payload wiersza „…z tego ze ścieżki" spod kubełka GOTOWYCH STOSÓW (E3-1). Ten sam tag
+`path_proposals` co pod RAW-em, bo akcja jest ta sama (okno potwierdzania, klinga ręki ze źródłem
+`path`); payload mówi, KTÓRĄ populację wiersz liczy - drążenie i okno pokazują dokładnie ją."""
+
+
+def path_proposals_for(con, payload):
+    """Propozycje szczebla ścieżki populacji ZAZNACZONEGO wiersza kolejki (E3-1).
+
+    Jeden filtr dla drążenia i okna: liczba przy wierszu, lista klatek w panelu i pozycje w oknie
+    mają opisywać ten sam zbiór. Bez niego wiersz spod stosów otwierałby też RAW-y, a „z tego"
+    przy nim kłamałoby o tym, co zatwierdza gest."""
+    stosy = payload == PATH_STACKS_PAYLOAD
+    return tuple(p for p in resolver.path_proposals(con) if p.stack_tree == stosy)
+
+
 class ConfirmPathObjectsDialog(QDialog):
     """„Zatwierdź ze ścieżki…" — POWIERZCHNIA POTWIERDZANIA propozycji szczebla ścieżki (S2,
     D-OW-2/**B**). To jest cena wariantu B i bez niej segment nie istnieje: przebieg resolvera
@@ -833,12 +850,21 @@ class RepairHeaderDialog(QDialog):
         """Wiersze read-modelu → grupy po FOLDERZE + lista pominiętych z powodem. Grupowanie
         SŁOWNIKIEM (kolejność pierwszego wystąpienia), bo porządek po pełnej ścieżce przeplata
         katalog z podkatalogiem. Folder bierzemy z celu writebacku, nie z `path` read-modelu —
-        żeby grupa opisywała dokładnie ten plik, który zostanie zapisany."""
+        żeby grupa opisywała dokładnie ten plik, który zostanie zapisany.
+
+        GOTOWY STOS GRUPUJE SIĘ PO FOLDERZE OBIEKTU, nie po rodzicu pliku (FC-4, ta sama wada co
+        w kolumnie „Obiekt"): w układzie `STACKS\\<OBIEKT>\\<KONFIG>\\<FILTR>\\plik` rodzicem jest
+        FILTR, więc etykiety grup brzmiały `NoFilter`/`Ha`, a jeden obiekt rozpadał się na tyle grup,
+        ile ma filtrów. Folder obiektu daje `resolve.paths.object_folder(…, kind=STACK_KIND)`;
+        poza drzewem `STACKS` (układ WBPP) i dla każdego lighta zostaje rodzic, znak w znak jak
+        przedtem. Rodzaj wiersza wybiera też drzewo świadka propozycji (`path_proposal(…, kind=…)`),
+        a reguła dwóch zgodnych świadków jest dla obu drzew ta sama."""
         ids = [r["frame_id"] for r in rows]
         targets = {}
         for t in queries.writeback_frame_targets(self.con, ids):
             targets.setdefault(int(t["frame_id"]), []).append(t)
         groups = {}
+        rodzaj = {}             # frame_id -> kind (drzewo świadka), poza słownikiem wiersza grupy
         for r in rows:
             trows = targets.get(int(r["frame_id"]))
             if not trows:                       # klatka zniknęła z bazy między odczytem a otwarciem
@@ -848,10 +874,15 @@ class RepairHeaderDialog(QDialog):
             if target is None:
                 self._skipped.append((r["path"] or "", reason or ""))
                 continue
-            groups.setdefault(os.path.dirname(target["path"]), []).append(
+            rodzaj[r["frame_id"]] = r["kind"]
+            folder = os.path.dirname(target["path"])
+            if r["kind"] == STACK_KIND:
+                folder = object_folder(target["path"], kind=STACK_KIND) or folder
+            groups.setdefault(folder, []).append(
                 dict(frame_id=r["frame_id"], path=target["path"]))
         for folder, items in groups.items():
-            proposals = {resolver.path_proposal(self.con, it["path"]) for it in items}
+            proposals = {resolver.path_proposal(self.con, it["path"], kind=rodzaj[it["frame_id"]])
+                         for it in items}
             common = proposals.pop() if len(proposals) == 1 else None
             self._groups.append({"folder": folder, "rows": items, "proposal": common})
 
@@ -1488,6 +1519,16 @@ class ObjectAxisView(QWidget):
                 _etykieta_cofnieta(i18n.t("object.nameless_stacks_cleared_line")),
                 count=i18n.t_plural("object.review_count", q["nameless_stacks_cleared_count"]), mark=i18n.t("object.review_cleared_mark"),
                 fg=_WERDYKT["fg"], tag="nameless_stacks_cleared")
+        # PODZBIÓR kubełka stosów (E3-1) - lustro wiersza propozycji spod RAW-a: stos z drzewa
+        # `STACKS`, którego nagłówek milczy, dostaje nazwę z folderu na POTWIERDZENIE. `None`
+        # (słownik z błędem) nie ma tu własnego wiersza: zgłasza go już wiersz spod RAW-a.
+        if q["path_proposed_stack_frames"]:
+            self._add_review_item(
+                i18n.t("object.path_proposed_line"),
+                count=i18n.t("object.path_proposed_count", names=q["path_proposed_stack_names"],
+                             frames=q["path_proposed_stack_frames"]),
+                mark=i18n.t("object.mark_to_confirm"), tag="path_proposals",
+                payload=PATH_STACKS_PAYLOAD)
         # JEDNOSTKA TEGO WIERSZA TO KLATKA, mimo że kubełek nazywa się od KOPII (firsthand 0810,
         # znalezisko 4 — lekarstwo poprawione po sprawdzeniu rdzenia). `resolver.review_state`
         # liczy tu `count(DISTINCT f.id)`, czyli klatki z ≥1 kopią oznaczoną nieczytelną, i robi
@@ -1824,7 +1865,7 @@ class ObjectAxisView(QWidget):
             # — NAZWĘ — pokazuje dopiero okno potwierdzania. Id-y bierzemy od JEDNEGO właściciela
             # predykatu; read-model tylko je dekoruje kolumnami panelu.
             self._restore_frames_mode()
-            ids = [fid for p in resolver.path_proposals(self.con) for fid in p.frame_ids]
+            ids = [fid for p in path_proposals_for(self.con, payload) for fid in p.frame_ids]
             rows = queries.path_proposal_frames(self.con, ids)
             self.frames_label.setText(i18n.t("object.frames_path_proposed", n=len(rows)))
             self._fill_frames(rows, present_col=False)
@@ -1986,7 +2027,9 @@ class ObjectAxisView(QWidget):
         a kliknięciem mógł przebiec `Rozwiąż` z workera i lista byłaby o niego starsza. Klinga
         pomija klatki, które w międzyczasie dostały obiekt (dryf), więc podwójne liczenie kosztuje
         jeden SELECT, a jego brak kosztowałby zapis pod nieaktualną listą."""
-        propozycje = resolver.path_proposals(self.con)   # 16 ms zmierzone — bez fazy (F-1)
+        # Populacja ZAZNACZONEGO wiersza (E3-1): RAW-y spod RAW-a, stosy spod stosów.
+        _, payload = self._selected_review()
+        propozycje = path_proposals_for(self.con, payload)   # 16 ms zmierzone - bez fazy (F-1)
         if not propozycje:
             self.status_message.emit(i18n.t("path.err.nothing"))
             return

@@ -18,7 +18,8 @@ def test_migracja_ustawia_user_version(tmp_path):
     # + 0017 frame.object_cleared_id (pamięć nagrobka — co ręka zdjęła, R-S2b-3)
     # + 0018 frame.retired_at (wycofanie klatki ręką — D-OW-3/R2)
     # + 0019 location.unreadable_kind + unreadable_reason (rodzaj i powód nieczytelności, P4-2)
-    assert db._user_version(con) == db.SCHEMA_VERSION == 19
+    # + 0020 integration.raw_unreferenced (uwaga obok werdyktu rodowodu, G2-1d)
+    assert db._user_version(con) == db.SCHEMA_VERSION == 20
     con.close()
 
 

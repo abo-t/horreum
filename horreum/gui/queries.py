@@ -18,6 +18,7 @@ import re
 from horreum.grouper import NO_TELESCOPE_KINDS      # jeden właściciel zbioru rodzajów poza osią
 from horreum.resolve.frames import LIGHT_KINDS
 from horreum.resolve.objects import CLEARABLE_OBJECT_SOURCES, WEAK_OBJECT_SOURCES
+from horreum.resolve.paths import STACK_KIND, STACKS_DIR, object_from_path
 from horreum.resolver import NO_OBJECT_CARD_FILETYPES, path_proposals, review_state
 from horreum.stacks import REASON_NO_OBJECT, REASON_OFFSET_UNKNOWN
 
@@ -58,22 +59,37 @@ def path_tail(path, dirs=PATH_TAIL_DIRS):
 def stack_folder(path):
     """Folder OBRAZU ze ścieżki gotowego stosu — albo `None`. Czysta funkcja, zero SQL.
 
-    DZIADEK, NIE RODZIC — i to jest zmierzone, nie estetyczne: drzewo WBPP kończy się katalogiem
-    `master`, więc rodzic brzmi tak samo u WSZYSTKICH stosów i nie rozróżnia niczego
-    (`…\\A7R3_105_LMC\\master\\masterLight_….xisf`). Gdy `master` nie występuje, właściwą
+    DRZEWO STOSÓW NAJPIERW (FC-4/D-V-9b): w układzie `STACKS\\<OBIEKT>\\<KONFIG>\\<FILTR>\\plik`
+    obiektem jest segment po `STACKS`, a rodzic pliku to FILTR - dawna reguła dawała w podpowiedzi
+    `⟨NoFilter⟩`/`⟨Ha⟩`/`⟨OIII⟩` dla 182 ze 193 stosów archiwum. Właścicielem tej reguły jest
+    `resolve.paths.object_from_path(…, kind=STACK_KIND)`, bo to samo pytanie zadaje szczebel
+    ścieżki resolvera; tutaj jest WOŁANA, nie powtórzona (SPOT - dwie kopie rozjechałyby się przy
+    pierwszej zmianie układu drzewa, a podpowiedź mówiłaby co innego niż propozycja do potwierdzenia).
+
+    POZA DRZEWEM STOSÓW: DZIADEK, NIE RODZIC, i to jest zmierzone, nie estetyczne: drzewo WBPP
+    kończy się katalogiem `master`, więc rodzic brzmi tak samo u WSZYSTKICH stosów i nie rozróżnia
+    niczego (`…\\A7R3_105_LMC\\master\\masterLight_….xisf`). Gdy `master` nie występuje, właściwą
     odpowiedzią jest rodzic — stąd warunek, a nie stałe piętro w górę.
 
     Powstało z firsthandu 0808: kubełek „bez nazwy, gotowe stosy" daje 18 wierszy, których nie da
     się odróżnić, bo nazwy plików generuje WBPP i sześć stosów LMC czyta się identycznie.
     Tożsamość siedzi WYŁĄCZNIE w tym segmencie ścieżki. JEDEN właściciel reguły, bo pytają o nią
     dwie powierzchnie (kolumna Obiekt w Zbiorach i lista drążenia w Przeglądzie obiektów) —
-    dwie kopie rozjechałyby się przy pierwszej zmianie układu drzewa."""
+    dwie kopie rozjechałyby się przy pierwszej zmianie układu drzewa.
+
+    KOTWICA NIE JEST FOLDEREM OBIEKTU: `STACKS\\plik.xisf` (plik wprost pod kotwicą) milczy tak
+    samo jak litera dysku niżej - rodzic `STACKS` byłby podpowiedzią bez treści, udającą nazwę."""
     if not path:
         return None
+    obiekt = object_from_path(str(path), kind=STACK_KIND)
+    if obiekt:
+        return obiekt
     czesci = [c for c in re.split(r"[\\/]", str(path)) if c]
     if len(czesci) < 2:
         return None
     rodzic = czesci[-2]
+    if rodzic.strip().lower() == STACKS_DIR:
+        return None
     if rodzic.lower() == "master" and len(czesci) >= 3:
         dziadek = czesci[-3]
         # KORZEŃ NIE JEST FOLDEREM OBIEKTU (bramka pakietu, zarzut 9): przy układzie
@@ -158,6 +174,9 @@ def object_cell(row):
     wzięcie „tyle wiem z folderu" za „tak się ten obiekt nazywa" byłoby gorsze niż pusta komórka.
     Tylko `master_light`, bo light z akwizycji ma własną drogę (szczebel ścieżki S2 PROPONUJE mu
     kanon). Nic z tego nie trafia do bazy: to warstwa PREZENTACJI, gest osi należy do człowieka.
+    Od E3-1 stos w drzewie `STACKS` też dostaje propozycję szczebla ścieżki - podpowiedź czyta
+    TEN SAM segment (`stack_folder` → `resolve.paths`), więc komórka i okno „Zatwierdź ze
+    ścieżki…" mówią o tym samym folderze: komórka surowy tekst, okno kanon z drabiny nazwy.
 
     WEJŚCIEM JEST SŁOWNIK, NIE `sqlite3.Row` — i to jest kontrakt, nie szczegół (bramka pakietu
     0810, zarzut A#1): `Row` nie ma metody `.get` W OGÓLE, więc podanie surowego wiersza kończy się
@@ -478,11 +497,15 @@ def review_queue(con):
         klatki, które zmienią stan po zatwierdzeniu (≈707). Jeden właściciel derywacji —
         `resolver.path_proposals`. **`None` znaczy „nie policzono"** (słownik obiektów własnych ma
         błąd), a `0` — „nie ma czego liczyć"; wołający ma te dwa stany rozróżnić.
+      - `path_proposed_stack_*`: bliźniak powyższego dla GOTOWYCH STOSÓW z drzewa `STACKS` (E3-1),
+        PODZBIÓR `nameless_stacks_count`, tak samo poza partycją. Osobna para, bo wiersz stoi pod
+        kubełkiem stosów, a „z tego" ma liczyć wyłącznie jego populację (`PathProposal.stack_tree`).
 
     Zwraca dict: {object_review: [Row(object_raw, cleared, n, total)], nameless_count: int,
     nameless_cleared_count: int, nameless_raw_count: int, nameless_raw_cleared_count: int,
     nameless_stacks_count: int, nameless_stacks_cleared_count: int,
     path_proposed_names: int, path_proposed_frames: int,
+    path_proposed_stack_names: int, path_proposed_stack_frames: int,
     config_review_count: int, headerless_count: int, unreadable_count: int}."""
     object_review = sorted(con.execute(
         "SELECT h.object_raw AS object_raw, "
@@ -535,11 +558,16 @@ def review_queue(con):
     # plikiem CZŁOWIEKA i jego edycja to operacja wspierana. Literówka w assecie ma zostać
     # ZGŁOSZONA, nie wywalić widok tracebackiem przy samym otwarciu — i NIE ma udawać zera:
     # `None` znaczy „nie policzono", `0` znaczy „nie ma czego liczyć". Dwie różne prawdy.
+    # Dwie populacje propozycji (E3-1), każda PODZBIOREM swojego kubełka: RAW-owe lighty pod RAW-em,
+    # stosy z drzewa `STACKS` pod stosami. Jedna suma pod RAW-em kłamałaby „z tego" o stosach.
     try:
-        propozycje = path_proposals(con)        # PODZBIÓR kubełka RAW, poza partycją (wyżej)
-        prop_names, prop_frames = len(propozycje), sum(p.n_frames for p in propozycje)
+        propozycje = path_proposals(con)        # PODZBIORY kubełków RAW i stosów, poza partycją
+        raw_p = [p for p in propozycje if not p.stack_tree]
+        stos_p = [p for p in propozycje if p.stack_tree]
+        prop_names, prop_frames = len(raw_p), sum(p.n_frames for p in raw_p)
+        prop_s_names, prop_s_frames = len(stos_p), sum(p.n_frames for p in stos_p)
     except ValueError:
-        prop_names = prop_frames = None
+        prop_names = prop_frames = prop_s_names = prop_s_frames = None
     st = review_state(con)
     # Bliźniak kubełka sprzętu po drugiej stronie gestu (R1, bramka 3a zarzut 1): DROGA POWROTNA
     # dla pomyłki ręki. Licznik = długość drążenia (D-PD-10), jak u kubełków bezimiennych.
@@ -553,6 +581,8 @@ def review_queue(con):
             "nameless_stacks_cleared_count": len(stosy_cleared),
             "path_proposed_names": prop_names,
             "path_proposed_frames": prop_frames,
+            "path_proposed_stack_names": prop_s_names,
+            "path_proposed_stack_frames": prop_s_frames,
             "config_review_count": st.no_config,
             "headerless_count": st.headerless, "unreadable_count": st.unreadable}
 
@@ -650,9 +680,14 @@ def nameless_frames(con, cleared=False):
     `ORDER BY l.path, f.id` daje stabilność i wypycha `n_present=0` na górę (NULL sortuje się
     pierwszy); grupowanie po folderze robi wołający SŁOWNIKIEM (kolejność pierwszego wystąpienia),
     bo porządek po PEŁNEJ ścieżce przeplata katalog z podkatalogiem. Zwraca: frame_id, sha1_data,
-    filetype, date_obs, telescope_label, telescop_canon, camera_model, location_id, path, n_present."""
+    filetype, kind, date_obs, telescope_label, telescop_canon, camera_model, location_id, path,
+    n_present.
+
+    `kind` wchodzi do WYNIKU jak w bliźniaku `nameless_stack_frames`: dialog „Napraw nagłówek…"
+    wybiera po nim drzewo świadka folderu (`resolver.path_proposal(…, kind=…)`), a oba drążenia
+    karmią to samo okno, więc mają nieść tę samą kolumnę."""
     return con.execute(
-        "SELECT f.id AS frame_id, f.sha1_data, f.filetype, h.date_obs, "
+        "SELECT f.id AS frame_id, f.sha1_data, f.filetype, f.kind, h.date_obs, "
         "       t.label AS telescope_label, t.telescop_canon, "
         "       cam.model_canon AS camera_model, "
         "       l.id AS location_id, l.path, "
@@ -1764,14 +1799,17 @@ def stack_lineage_head(con, frame_id):
     „nie wiem" od „to jest UTC" — dwa różne zdania, których jedna kolumna bez trójstanu nie
     umiałaby powiedzieć.
 
+    `raw_unreferenced` (G2-1d, 0020) to UWAGA obok werdyktu: ile RAW-ów przebieg nie umiał
+    umieścić w czasie przy stosie, którego werdykt mówi co innego (pula mieszana RAW+FITS).
+
     Zwraca: integration_id, unresolved_reason, degenerate, ambiguous, telescope_mismatch,
     declared_rows, drizzle_inputs, disabled_inputs, tool, window_start, window_end,
-    utc_offset_min, inputs, excluded, secs, sources (rozdzielone przecinkiem źródła pewności
-    wejść), twins, shared."""
+    utc_offset_min, raw_unreferenced, inputs, excluded, secs, sources (rozdzielone przecinkiem
+    źródła pewności wejść), twins, shared."""
     return con.execute(
         "SELECT i.id AS integration_id, i.unresolved_reason, i.degenerate, i.ambiguous, "
         "       i.telescope_mismatch, i.declared_rows, i.drizzle_inputs, i.disabled_inputs, "
-        "       i.tool, i.window_start, i.window_end, i.utc_offset_min, "
+        "       i.tool, i.window_start, i.window_end, i.utc_offset_min, i.raw_unreferenced, "
         "       (SELECT f.object_id FROM frame f WHERE f.id = i.master_frame_id) AS object_now, "
         "       (SELECT COUNT(*) FROM integration b WHERE b.integ_hash IS NOT NULL "
         "         AND b.integ_hash = i.integ_hash AND b.id <> i.id) AS twins, "

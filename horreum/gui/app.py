@@ -264,16 +264,34 @@ def _fmt_event_ts(ts):
     return ts[:16].replace("T", " ") if ts and "T" in ts else (ts or "")
 
 
-def _copy_reason(raw):
-    """Powód nieczytelności do komórki (Z6): zdejmij prefiks dziennika — lista sama nazywa się
-    „Kopie nieczytelne", więc powtórzony wstęp tylko odsuwa to, po co user tu przyszedł
-    („ParseError: …"). Fraza ma JEDNEGO właściciela — `repo.UNREADABLE_REASON_PREFIX`; event bez
-    prefiksu (miękkie lądowanie W1) idzie w całości. Brak eventu dla tej kopii → myślnik: „nie
-    wiem" jest faktem, pusta komórka wygląda na brak danych."""
-    if not raw:
-        return i18n.t("copy.no_reason")
-    prefix = repo.UNREADABLE_REASON_PREFIX
-    return raw[len(prefix):] if raw.startswith(prefix) else raw
+def _copy_reason(kind, reason):
+    """Powód nieczytelności do komórki (Z6, P4-2) - JEDYNY właściciel formatowania tej komórki.
+
+    RODZAJ STOI PRZED DIAGNOZĄ, bo to on mówi, gdzie szukać winy: „dysk/dostęp: …" (system nie
+    oddał bajtów - plik może być zdrowy) albo „nagłówek nie przechodzi parsera: …" (plik do
+    zgłoszenia). Samo „kopia nieczytelna" oskarżało plik i wysłało Zdzinia na dysk po zdrowy plik.
+    Diagnoza przychodzi z kolumny bez prefiksu dziennika (lista i tak nazywa się „Kopie
+    nieczytelne"). Brak rodzaju (wiersz oznaczony przed 0019) → sama diagnoza; brak diagnozy →
+    myślnik: „nie wiem" jest faktem, pusta komórka wygląda na brak danych. Rodzaj bez diagnozy
+    dostaje myślnik w miejscu opisu - rodzaj jest wtedy jedynym faktem, więc nie znika."""
+    diagnoza = reason or i18n.t("copy.no_reason")
+    if kind == "io":
+        return i18n.t("copy.reason_io", reason=diagnoza)
+    if kind == "parse":
+        return i18n.t("copy.reason_parse", reason=diagnoza)
+    return diagnoza
+
+
+def _unreadable_kinds_tip(counts):
+    """Podpowiedź wiersza „kopie nieczytelne" (P4-2): rozbicie po RODZAJU z
+    `queries.unreadable_kind_counts`. Oba rodzaje zawsze, także z zerem - „dysk/dostęp 0" jest
+    odpowiedzią (winy nie ma w dysku), nie szumem. „Rodzaj nieznany" tylko gdy są takie kopie:
+    to przejściowy ogon sprzed migracji 0019, nie stała kategoria."""
+    parts = [i18n.t("object.unreadable_kind_io", n=counts["io"]),
+             i18n.t("object.unreadable_kind_parse", n=counts["parse"])]
+    if counts["unknown"]:
+        parts.append(i18n.t("object.unreadable_kind_unknown", n=counts["unknown"]))
+    return i18n.t("object.unreadable_kinds", parts=" · ".join(parts))
 
 
 def _fmt_obs_date(s):
@@ -660,12 +678,19 @@ class ConfirmPathObjectsDialog(QDialog):
         wszystko" znaczy „wszystko, co zostawiłeś zaznaczone", nie „wszystko, co widzisz".
 
         Konflikt aliasu / dryf grupy wraca `ValueError` z klingi — okno zostaje otwarte z powodem,
-        a pozycje zapisane wcześniej ZOSTAJĄ zapisane (każda ma własną transakcję)."""
+        a pozycje zapisane wcześniej ZOSTAJĄ zapisane (każda ma własną transakcję).
+
+        JEDEN GEST, N TRANSAKCJI, JEDNO ZDANIE (R-S2b-13): wyniki pozycji składa `ObjectGesture`
+        (`+=`), nie ręczna suma dwóch liczb - ta gubiła rozbicie per fakt i zdanie mówiło
+        „pominięte - zajęte między oknem a zapisem" także o darku, którego nikt nie zajął.
+        Niezmiennik jak u trzech gestów Zbiorów: `assigned + skipped` == liczba klatek zaznaczonych
+        pozycji, więc „z M" mówi o tym, co user zatwierdził, także gdy klinga padła w połowie."""
+        from horreum.gui import grid       # lazy - wzorzec `apply_theme`/`_mount_views`
         wybrane = self._checked()
         if not wybrane:
             self.error.setText(i18n.t("path.err.nothing"))
             return
-        assigned = skipped = 0
+        gest = repo.ObjectGesture()
         # FAZA Z LICZNIKIEM (F-1): zapis idzie transakcja per NAZWA, więc „zapisuję" bez liczby
         # nie odróżniałoby przebiegu przez 34 pozycje od zawieszenia się na pierwszej. Licznik
         # bierze się z tej samej listy, którą user zaznaczył — nie z liczby propozycji w ogóle.
@@ -674,22 +699,25 @@ class ConfirmPathObjectsDialog(QDialog):
             for i, it in enumerate(wybrane, 1):
                 p = it["proposal"]
                 try:
-                    g = repo.user_assign_object(
+                    gest += repo.user_assign_object(
                         self.con, alias_norm=None, canon=p.canon, catalog=p.catalog, kind=p.kind,
                         frame_ids=list(p.frame_ids), now=self._now(), object_source="path")
                 except ValueError as e:
                     self.error.setText(str(e))
+                    # Pozycja, która padła, wycofała się w całości (`_immediate`), a pozycje po niej
+                    # do klingi nie doszły - ich klatki liczą się jako DRYF (stan inny, niż widziało
+                    # okno), tak jak przy przywracaniu w Zbiorach. Inaczej nie liczyłyby się nigdzie
+                    # i „z M" kłamałoby o tym, co user zatwierdził.
+                    gest += repo.ObjectGesture(
+                        skipped_drift=sum(w["proposal"].n_frames for w in wybrane[i - 1:]))
                     break
-                assigned, skipped = assigned + g.assigned, skipped + g.skipped
                 faza.say(i18n.t("busy.saving_names", done=i, total=len(wybrane)))
-        self.assigned = assigned
-        msg = i18n.t("path.done", names=len(wybrane), assigned=assigned,
-                     total=assigned + skipped)
-        if skipped:
-            msg += i18n.t("path.skipped", n=skipped)
-        self.status.setText(msg)
+        self.assigned = gest.assigned
+        self.status.setText(
+            i18n.t("path.done", names=len(wybrane), assigned=gest.assigned,
+                   total=gest.assigned + gest.skipped) + grid.zdanie_pominiec(gest))
         self.changed.emit()
-        if assigned and not self.error.text():
+        if gest.assigned and not self.error.text():
             self.accept()
 
 
@@ -1347,8 +1375,8 @@ class ObjectAxisView(QWidget):
             # podwiersz"), tylko wprowadzona z drugiej strony. Sierota traci WYŁĄCZNIE wcięcie —
             # znacznik, kolor i adnotacja zostają, bo werdykt ręki jest faktem niezależnym od
             # sąsiedztwa. Warunek jest lokalny: sort trzyma nietkniętą połówkę BEZPOŚREDNIO nad
-            # cofniętą (`ORDER BY … , object_raw, cleared`), więc rodzicem może być tylko wiersz
-            # poprzedni.
+            # cofniętą (klucz `review_queue`: suma, nazwa naturalnie, nazwa, `cleared` - od W-4
+            # w Pythonie, nie w `ORDER BY`), więc rodzicem może być tylko wiersz poprzedni.
             #
             # WCIĘCIE JEST DANĄ, NIE TEKSTEM (W-5): poziom idzie rolą `rows.INDENT`, którą delegat
             # zamienia na px z metryki fontu przy malowaniu - `DisplayRole` obu połówek niesie TĘ
@@ -1449,10 +1477,15 @@ class ObjectAxisView(QWidget):
         # liczy tu `count(DISTINCT f.id)`, czyli klatki z ≥1 kopią oznaczoną nieczytelną, i robi
         # to świadomie („spójność z resztą liczników"). Odmiana idzie więc TYM SAMYM kluczem, co
         # każdy sąsiedni kubełek; własny klucz „N kopii" kłamałby o tym, co policzono.
+        # ROZBICIE PO RODZAJU (P4-2) idzie do podpowiedzi wiersza, liczone PO KOPIACH: kubełek
+        # z samą liczbą nie mówił, czy szukać winy w dysku, czy w pliku. Pusty kubełek go nie
+        # dostaje - zero nie ma czego rozbijać, a jego zdanie niesie `info`.
         self._add_review_item(i18n.t("object.unreadable_line"),
                               count=i18n.t_plural("object.review_count", q["unreadable_count"]),
                               tag="unreadable" if q["unreadable_count"] > 0 else None,
-                              info=i18n.t("object.unreadable_info_empty"))
+                              info=i18n.t("object.unreadable_info_empty"),
+                              tip=_unreadable_kinds_tip(queries.unreadable_kind_counts(self.con))
+                              if q["unreadable_count"] > 0 else None)
         # OŚ SPRZĘTU WYCHODZI Z WIERSZA INFORMACYJNEGO (R1) — do tej zmiany była połową licznika
         # z notą „rozwiązywanie w przygotowaniu". Nota mówiła prawdę i dlatego musiała zniknąć
         # razem z drogą: gest istnieje, więc wiersz DRĄŻY i niesie akcję. Reguła pustego kubełka
@@ -1514,7 +1547,7 @@ class ObjectAxisView(QWidget):
             + 2 * self.review.frameWidth())
 
     def _add_review_item(self, text, *, tag=None, payload=None, info=None,
-                         count=None, mark=None, fg=None, indent=0):
+                         count=None, mark=None, fg=None, indent=0, tip=None):
         """Jedna pozycja kolejki przeglądu — JEDEN producent wiersza dla wszystkich kubełków.
 
         WIERSZ JEST TRÓJCZŁONOWY (R-S3-3): `text` = nazwa (człon pierwszy, elidowany), `count` =
@@ -1551,7 +1584,12 @@ class ObjectAxisView(QWidget):
         `info`: tooltip pod kursorem ORAZ zdanie w pasku statusu po kliknięciu — mówiące, CZEGO
         ten wiersz jest opisem i dlaczego nie prowadzi dalej. Domyślne `info` jest świadome:
         wiersz bez własnego wytłumaczenia i tak ma odpowiedzieć cokolwiek, bo cisza jest tu
-        gorsza od zdania ogólnego."""
+        gorsza od zdania ogólnego.
+
+        `tip` (P4-2) to podpowiedź wiersza Z DROGĄ - osobno od `info`, bo `info` opisuje wiersz,
+        który NIE prowadzi dalej (i trafia też do paska statusu), a `tip` dopowiada szczegół
+        wierszowi, który prowadzi (rozbicie kopii nieczytelnych po rodzaju awarii). Wiersz bez
+        drogi `tip` ignoruje: tam podpowiedzią jest `info` i dwa zdania by się przykrywały."""
         it = QListWidgetItem(text)
         # ZNACZNIK DROGI I LICZBA IDĄ W CZŁON DRUGI (R-S3-3, wzorzec `tasks.py`): „›" doklejone do
         # tekstu jechało za długością nazwy, więc w liście o zmiennych nazwach nie było kolumny,
@@ -1565,6 +1603,8 @@ class ObjectAxisView(QWidget):
         if tag:
             it.setData(_REVIEW_TAG, tag)
             it.setData(_REVIEW_PAYLOAD, payload)
+            if tip:
+                it.setToolTip(tip)
         else:
             it.setFlags(Qt.ItemIsEnabled)      # informacyjny, nie do zaznaczenia
             it.setForeground(_DIM["fg"])
@@ -1818,9 +1858,10 @@ class ObjectAxisView(QWidget):
                                  i18n.t("common.yes") if row["present"] else i18n.t("common.no"))
             self._set_frame_cell(r, COPY_COL_MARKED, _fmt_event_ts(row["unreadable_since"]),
                                  tooltip=row["unreadable_since"])
-            # Powód z dziennika (Z6): stan mówi KTÓRA kopia, ten człon — CZEGO nie da się
-            # przeczytać. Tooltip niesie zapis dosłowny (z prefiksem), komórka — samą diagnozę.
-            self._set_frame_cell(r, COPY_COL_REASON, _copy_reason(row["reason"]),
+            # Powód ze STANU kopii (Z6, P4-2): marker mówi KTÓRA kopia, ten człon - CZEGO nie da
+            # się przeczytać i GDZIE szukać winy (rodzaj przed diagnozą). Tooltip niesie diagnozę
+            # dosłownie, bez etykiety rodzaju - to ją kopiuje się do zgłoszenia.
+            self._set_frame_cell(r, COPY_COL_REASON, _copy_reason(row["kind"], row["reason"]),
                                  tooltip=row["reason"] or None)
         self.frames_label.setText(i18n.t("object.unreadable_title", n=len(rows)))
 
@@ -1839,8 +1880,9 @@ class ObjectAxisView(QWidget):
 
     def _on_assign(self):
         """„Przypisz obiekt…": dialog wyboru obiektu → JEDNA klinga `repo.user_assign_object`.
-        Raport „przypisano N z M" (R#8: dryf grupy = klatka zajęta między dialogiem a zapisem jest
-        pomijana), potem refresh.
+        Raport „przypisano N z M" z rozbiciem pominięć PER FAKT (R#8: dryf grupy = klatka zajęta
+        między dialogiem a zapisem jest pomijana; R-S2b-13: dryf to tylko jeden z członów), potem
+        refresh.
 
         DWA WEJŚCIA, JEDNA DROGA ZAPISU (S4): `object_raw` = grupa nierozpoznanej nazwy z nagłówka;
         `nameless_raw` = kubełek klatek w formacie bez karty `OBJECT`. Grupa idzie dalej jako LISTA
@@ -1897,18 +1939,16 @@ class ObjectAxisView(QWidget):
         except ValueError as e:                # konflikt aliasu / dryf do nieistniejącej klatki
             QMessageBox.warning(self, i18n.t("assign.title"), str(e))
             return
-        assigned, skipped = g.assigned, g.skipped
-        msg = i18n.t("object.assigned_report", assigned=assigned, total=assigned + skipped, canon=canon)
-        if skipped:
-            msg += i18n.t("object.assigned_skipped", n=skipped)
-        # TEN SAM FAKT MUSI BRZMIEĆ TAK SAMO NA OBU POWIERZCHNIACH (wizytacja S3). Zapis ze Zbiorów
-        # mówił „w tym gotowe obrazy: N", a bliźniaczy zapis z kolejki tę liczbę miał w ręku
-        # (`g.stacks`) i wyrzucał — a to kolejka jest naturalną drogą, którą stos trafia pod ten
-        # gest. Milczenie znaczyło: jedyny zapis osi sięgający rodowodu przechodził bez śladu.
-        if g.stacks:
-            msg += i18n.t_plural("grid.sel.object_stacks", g.stacks)
-        self.status_message.emit(msg)
-        self.refresh(select_canon=canon if assigned else None, select_first=bool(assigned))
+        # TEN SAM FAKT MUSI BRZMIEĆ TAK SAMO NA OBU POWIERZCHNIACH (wizytacja S3, R-S2b-13). Zapis
+        # z kolejki najpierw wyrzucał `g.stacks`, które Zbiory mówiły („w tym gotowe obrazy: N"),
+        # a potem spłaszczał pominięcia do „pominięte - zajęte między dialogiem a zapisem", choć
+        # klinga oddaje rozbicie per fakt - i to kolejka jest naturalną drogą, którą stos trafia
+        # pod ten gest. Człony składa więc ten sam dom, co zdanie Zbiorów.
+        from horreum.gui import grid       # lazy - wzorzec `apply_theme`/`_mount_views`
+        self.status_message.emit(
+            i18n.t("object.assigned_report", assigned=g.assigned, total=g.assigned + g.skipped,
+                   canon=canon) + grid.zdanie_pominiec(g))
+        self.refresh(select_canon=canon if g.assigned else None, select_first=bool(g.assigned))
 
     # ------------------------------------------------ akcja potwierdzania propozycji (S2)
 

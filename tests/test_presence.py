@@ -234,7 +234,7 @@ def test_7_marker_gasnie_a_stara_wartosc_zostaje_w_evencie(tree):
     sha = con.execute("SELECT f.sha1_data FROM frame f JOIN location l ON l.frame_id = f.id "
                       "WHERE l.id = ?", (loc["id"],)).fetchone()[0]
     repo.refresh_location_unreadable(con, location_id=loc["id"], sha1_data=sha, path=paths[0],
-                                     mtime="2026-07-22T09:00:00", reason="I/O", now=NOW)
+                                     mtime="2026-07-22T09:00:00", reason="I/O", kind="io", now=NOW)
     assert resolver.review_state(con).unreadable == 1
     os.remove(paths[0])
     presence.check(con, root, volume=vol, apply=True, now=LATER)
@@ -253,12 +253,16 @@ def test_9_inwariant_present0_implikuje_brak_markera(tree):
     sha = con.execute("SELECT sha1_data FROM frame WHERE id = "
                       "(SELECT frame_id FROM location WHERE id = ?)", (loc["id"],)).fetchone()[0]
     repo.refresh_location_unreadable(con, location_id=loc["id"], sha1_data=sha, path=paths[0],
-                                     mtime="2026-07-22T09:00:00", reason="I/O", now=NOW)
+                                     mtime="2026-07-22T09:00:00", reason="I/O", kind="io", now=NOW)
     os.remove(paths[0])
     presence.check(con, root, volume=vol, apply=True, now=LATER)
     scan_tree(con, root, volume=vol, now=LATER)
     assert con.execute("SELECT COUNT(*) FROM location "
                        "WHERE present = 0 AND unreadable_since IS NOT NULL").fetchone()[0] == 0
+    # P4-2: inwariant obejmuje rodzaj i powód - kopia, której nie ma, nie nosi diagnozy
+    assert con.execute("SELECT COUNT(*) FROM location WHERE present = 0 AND "
+                       "(unreadable_kind IS NOT NULL OR unreadable_reason IS NOT NULL)"
+                       ).fetchone()[0] == 0
 
 
 def test_17_powrot_kopii_nieczytelnej_przywraca_obecnosc(tree):
@@ -273,7 +277,7 @@ def test_17_powrot_kopii_nieczytelnej_przywraca_obecnosc(tree):
                       "(SELECT frame_id FROM location WHERE id = ?)", (loc["id"],)).fetchone()[0]
     zmieniono = repo.refresh_location_unreadable(
         con, location_id=loc["id"], sha1_data=sha, path=paths[0], mtime="2026-07-23T09:00:00",
-        reason="I/O po powrocie", now=LATER)
+        reason="I/O po powrocie", kind="io", now=LATER)
     after = _loc(con, paths[0])
     assert zmieniono and after["present"] == 1 and after["unreadable_since"] == LATER
 

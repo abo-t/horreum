@@ -276,7 +276,8 @@ def test_refresh_location_bez_zmian_zero_eventow(tmp_path):
     before = con.execute("SELECT count(*) FROM event").fetchone()[0]
     out = repo.refresh_location(con, location_id=lid, frame_id=fid, mtime="t1",
                                 file_sha1="f1", header_hash="h1", hdu_index=0, compressed=0,
-                                size_bytes=100, unreadable_since=None, present=1, now=NOW)
+                                size_bytes=100, unreadable_since=None, unreadable_kind=None,
+                                unreadable_reason=None, present=1, now=NOW)
     assert out == {"facts": False, "header": False, "rederived": False}
     assert con.execute("SELECT count(*) FROM event").fetchone()[0] == before
     con.close()
@@ -289,7 +290,8 @@ def test_refresh_location_mtime_dlug_domkniety(tmp_path):
     fid, lid = _frame_with_location(con)
     out = repo.refresh_location(con, location_id=lid, frame_id=fid, mtime="t2",
                                 file_sha1="f1", header_hash="h1", hdu_index=0, compressed=0,
-                                size_bytes=100, unreadable_since=None, present=1, now=NOW)
+                                size_bytes=100, unreadable_since=None, unreadable_kind=None,
+                                unreadable_reason=None, present=1, now=NOW)
     assert out["facts"] is True and out["header"] is False
     assert con.execute("SELECT mtime FROM location WHERE id=?", (lid,)).fetchone()[0] == "t2"
     ev = con.execute("SELECT payload FROM event WHERE verb='location.refreshed'").fetchall()
@@ -312,7 +314,8 @@ def test_refresh_location_header_hash_odswieza_zeznanie_i_pochodne(tmp_path):
                                    is_mono_source="model", raw_instrume="x", now=NOW)
     out = repo.refresh_location(
         con, location_id=lid, frame_id=fid, mtime="t2", file_sha1="f2", header_hash="h2",
-        hdu_index=0, compressed=0, size_bytes=102, unreadable_since=None, present=1, now=NOW,
+        hdu_index=0, compressed=0, size_bytes=102, unreadable_since=None, unreadable_kind=None,
+        unreadable_reason=None, present=1, now=NOW,
         raw_json='{"OBJECT": "M33"}',
         cards=[Card("OBJECT", 0, "M33", None, "str", None),
                Card("FILTER", 0, "Ha", None, "str", None)],
@@ -356,15 +359,23 @@ def test_rebind_location_przepina_i_zostawia_stary_frame(tmp_path):
 def test_refresh_location_unreadable_mtime_marker_i_review(tmp_path):
     """R3-b1 (#13): znana kopia nieczytelna (bajty bez zmian) → refresh mtime + MARKER
     `unreadable_since` (znacznik czytelności w STANIE) + event(frame.review „kopia nieczytelna");
-    zwraca True; zero nowych frame'ów."""
+    zwraca True; zero nowych frame'ów. P4-2: klinga pisze też RODZAJ i POWÓD do kolumn kopii
+    (powód bez prefiksu dziennika), a alarm niesie rodzaj w payloadzie.
+
+    Falsyfikator: zdejmij `unreadable_kind = ?, unreadable_reason = ?` z UPDATE-u klingi → kolumny
+    zostają NULL i asercja na nich czerwienieje."""
     con = _fresh(tmp_path)
     fid, lid = _frame_with_location(con)
     assert repo.refresh_location_unreadable(con, location_id=lid, sha1_data="d1", path="x.fits",
-                                            mtime="t9", reason="OSError: NAS timeout", now=NOW) is True
-    row = con.execute("SELECT mtime, unreadable_since FROM location WHERE id=?", (lid,)).fetchone()
+                                            mtime="t9", reason="OSError: NAS timeout", kind="io",
+                                            now=NOW) is True
+    row = con.execute("SELECT mtime, unreadable_since, unreadable_kind, unreadable_reason "
+                      "FROM location WHERE id=?", (lid,)).fetchone()
     assert row["mtime"] == "t9" and row["unreadable_since"] == NOW      # marker = timestamp awarii
-    ev = con.execute("SELECT target, reason FROM event WHERE verb='frame.review'").fetchone()
+    assert (row["unreadable_kind"], row["unreadable_reason"]) == ("io", "OSError: NAS timeout")
+    ev = con.execute("SELECT target, reason, payload FROM event WHERE verb='frame.review'").fetchone()
     assert ev["target"] == "sha1:d1" and "kopia nieczytelna" in ev["reason"]
+    assert json.loads(ev["payload"]) == {"path": "x.fits", "unreadable_kind": "io"}
     assert con.execute("SELECT count(*) FROM frame").fetchone()[0] == 1
     con.close()
 
@@ -375,36 +386,145 @@ def test_refresh_location_unreadable_powtorka_cichy_noop(tmp_path):
     con = _fresh(tmp_path)
     fid, lid = _frame_with_location(con)   # mtime="t1"
     assert repo.refresh_location_unreadable(con, location_id=lid, sha1_data="d1", path="x.fits",
-                                            mtime="t9", reason="OSError", now="n1") is True
-    # druga awaria z TYM SAMYM mtime "t9" (już w bazie) → marker stoi → cichy no-op
+                                            mtime="t9", reason="OSError", kind="io",
+                                            now="n1") is True
+    ev_przed = con.execute("SELECT count(*) FROM event").fetchone()[0]
+    # druga awaria z TYM SAMYM mtime "t9" (już w bazie) i TĄ SAMĄ diagnozą → marker stoi → cichy no-op
     assert repo.refresh_location_unreadable(con, location_id=lid, sha1_data="d1", path="x.fits",
-                                            mtime="t9", reason="OSError", now="n2") is False
+                                            mtime="t9", reason="OSError", kind="io",
+                                            now="n2") is False
     assert con.execute("SELECT unreadable_since FROM location WHERE id=?",
                        (lid,)).fetchone()[0] == "n1"                    # PIERWSZY timestamp trzyma
     assert con.execute("SELECT count(*) FROM event WHERE verb='frame.review'").fetchone()[0] == 1
+    assert con.execute("SELECT count(*) FROM event").fetchone()[0] == ev_przed   # ZERO eventów
     con.close()
 
 
 def test_refresh_location_udany_odczyt_gasi_marker(tmp_path):
     """#13: udany odczyt GASI marker `unreadable_since` NAWET gdy pozostałe fakty kopii identyczne
     (przejście markera jest w `_LOCATION_FACTS`, więc samo w sobie jest zmianą — inaczej early-return
-    `not changed` nigdy by go nie zgasił). Ślad wyzdrowienia w payloadzie `location.refreshed`."""
+    `not changed` nigdy by go nie zgasił). Ślad wyzdrowienia w payloadzie `location.refreshed`.
+    P4-2: rodzaj i powód gasną TYM SAMYM UPDATE-em (inaczej CHECK 0019 odbiłby zgaszenie markera),
+    a ich przejście stoi w tym samym payloadzie."""
     con = _fresh(tmp_path)
     fid, lid = _frame_with_location(con)   # mtime="t1", file_sha1="f1", header_hash="h1", ...
     # oznacz kopię nieczytelną (mtime bez zmiany "t1", ale marker był NULL → change; marker=NOW)
     repo.refresh_location_unreadable(con, location_id=lid, sha1_data="d1", path="x.fits",
-                                     mtime="t1", reason="OSError", now=NOW)
+                                     mtime="t1", reason="OSError", kind="io", now=NOW)
     assert con.execute("SELECT unreadable_since FROM location WHERE id=?", (lid,)).fetchone()[0] == NOW
     # udany odczyt: unreadable_since=None, WSZYSTKIE inne fakty IDENTYCZNE jak przy add_location
     out = repo.refresh_location(con, location_id=lid, frame_id=fid, mtime="t1", file_sha1="f1",
                                 header_hash="h1", hdu_index=0, compressed=0, size_bytes=100,
-                                now="t2", unreadable_since=None, present=1)
+                                now="t2", unreadable_since=None, unreadable_kind=None,
+                                unreadable_reason=None, present=1)
     assert out["facts"] is True                                        # przejście markera = zmiana faktu
-    assert con.execute("SELECT unreadable_since FROM location WHERE id=?", (lid,)).fetchone()[0] is None
+    row = con.execute("SELECT unreadable_since, unreadable_kind, unreadable_reason FROM location "
+                      "WHERE id=?", (lid,)).fetchone()
+    assert tuple(row) == (None, None, None)
     ev = con.execute("SELECT payload FROM event WHERE verb='location.refreshed'").fetchall()
     assert len(ev) == 1
-    assert json.loads(ev[0]["payload"]) == {"unreadable_since": {"before": NOW, "after": None}}
+    assert json.loads(ev[0]["payload"]) == {
+        "unreadable_since": {"before": NOW, "after": None},
+        "unreadable_kind": {"before": "io", "after": None},
+        "unreadable_reason": {"before": "OSError", "after": None}}
     con.close()
+
+
+def test_refresh_location_unreadable_zmiana_samej_diagnozy_to_slad_nie_alarm(tmp_path):
+    """P4-2: ta sama kopia, ten sam mtime, marker stoi - a próba odczytu pada Z INNEGO POWODU
+    (timeout SMB, potem parser). Rodzaj i powód opisują OSTATNIĄ próbę, więc to zmiana FAKTU:
+    UPDATE kolumn + ślad `location.refreshed` z samymi zmienionymi polami. Drugiego `frame.review`
+    NIE MA (dziennik już alarmuje o tej kopii), marker trzyma PIERWSZĄ awarię, a klinga zwraca
+    False - `summary.frame_review` liczy alarmy, nie zmiany tekstu wyjątku.
+
+    Falsyfikator: usuń warunek `and not diagnoza` z wczesnego wyjścia → kolumny zostają przy
+    starym powodzie i asercja na `unreadable_reason` czerwienieje; usuń gałąź `if alarm_stoi` →
+    leci drugi `frame.review` i licznik alarmów czerwienieje."""
+    con = _fresh(tmp_path)
+    fid, lid = _frame_with_location(con)
+    assert repo.refresh_location_unreadable(con, location_id=lid, sha1_data="d1", path="x.fits",
+                                            mtime="t9", reason="TimeoutError: [Errno 60] SMB",
+                                            kind="io", now="n1") is True
+    assert repo.refresh_location_unreadable(con, location_id=lid, sha1_data="d1", path="x.fits",
+                                            mtime="t9", reason="OSError: Header missing END card.",
+                                            kind="parse", now="n2") is False
+    row = con.execute("SELECT unreadable_since, unreadable_kind, unreadable_reason FROM location "
+                      "WHERE id=?", (lid,)).fetchone()
+    assert tuple(row) == ("n1", "parse", "OSError: Header missing END card.")
+    assert con.execute("SELECT count(*) FROM event WHERE verb='frame.review'").fetchone()[0] == 1
+    ev = con.execute("SELECT target, payload FROM event WHERE verb='location.refreshed'").fetchall()
+    assert len(ev) == 1 and ev[0]["target"] == f"location:{lid}"
+    assert json.loads(ev[0]["payload"]) == {
+        "unreadable_kind": {"before": "io", "after": "parse"},
+        "unreadable_reason": {"before": "TimeoutError: [Errno 60] SMB",
+                              "after": "OSError: Header missing END card."}}
+    # zmiana SAMEGO tekstu przy tym samym rodzaju → ślad tylko tego pola
+    repo.refresh_location_unreadable(con, location_id=lid, sha1_data="d1", path="x.fits",
+                                     mtime="t9", reason="OSError: No SIMPLE card found",
+                                     kind="parse", now="n3")
+    ostatni = con.execute("SELECT payload FROM event WHERE verb='location.refreshed' "
+                          "ORDER BY id DESC LIMIT 1").fetchone()
+    assert json.loads(ostatni["payload"]) == {
+        "unreadable_reason": {"before": "OSError: Header missing END card.",
+                              "after": "OSError: No SIMPLE card found"}}
+    con.close()
+
+
+def test_mark_location_vanished_gasi_marker_rodzaj_i_powod(tmp_path):
+    """P4-2: inwariant `present=0 ⇒ marker NULL` obejmuje rodzaj i powód - kopia, której nie ma,
+    nie może nosić diagnozy „dysk/dostęp" ani „parser". Stare wartości idą do payloadu obok
+    `unreadable_since_before`, żeby dziennik nie zgubił, z czym kopia zniknęła.
+
+    Falsyfikator: zdejmij `unreadable_kind = NULL, unreadable_reason = NULL` z UPDATE-u
+    `mark_location_vanished` → CHECK 0019 odbija zgaszenie markera (IntegrityError)."""
+    con = _fresh(tmp_path)
+    fid, lid = _frame_with_location(con)
+    repo.refresh_location_unreadable(con, location_id=lid, sha1_data="d1", path="x.fits",
+                                     mtime="t9", reason="PermissionError: [Errno 13]", kind="io",
+                                     now=NOW)
+    assert repo.mark_location_vanished(con, location_id=lid, expected_path="x.fits", root="/",
+                                       run_id=None, now="n2") is True
+    row = con.execute("SELECT present, unreadable_since, unreadable_kind, unreadable_reason "
+                      "FROM location WHERE id=?", (lid,)).fetchone()
+    assert tuple(row) == (0, None, None, None)
+    p = json.loads(con.execute("SELECT payload FROM event WHERE verb='location.vanished'")
+                   .fetchone()[0])
+    assert (p["unreadable_since_before"], p["unreadable_kind_before"],
+            p["unreadable_reason_before"]) == (NOW, "io", "PermissionError: [Errno 13]")
+    con.close()
+
+
+def test_kazdy_UPDATE_location_z_markerem_dotyka_rodzaju_i_powodu():
+    """Strażnik literałów (P4-2): każdy `UPDATE location` w pakiecie, który pisze
+    `unreadable_since`, pisze też `unreadable_kind` i `unreadable_reason`. Marker i jego diagnoza
+    żyją razem - pisarz, który przestawi sam marker, zostawi powód z innej epoki (albo, przy
+    gaszeniu, odbije się o CHECK 0019 dopiero w produkcji). AST, nie regex: sklejone literały
+    Pythona są jednym `ast.Constant`, a docstringi opisujące UPDATE nie dają fałszywych trafień.
+
+    Falsyfikator: usuń `unreadable_kind = ?` z UPDATE-u dowolnej klingi markera → ten test
+    wymienia ją z nazwy; usuń kolektor (pusta lista literałów) → asercja pozytywna czerwienieje."""
+    import ast
+    from pathlib import Path
+
+    import horreum
+    literaly, braki = [], []
+    for src in sorted(Path(horreum.__file__).parent.rglob("*.py")):
+        tree = ast.parse(src.read_text(encoding="utf-8"))
+        for call in (n for n in ast.walk(tree) if isinstance(n, ast.Call)):
+            f = call.func
+            if not (isinstance(f, ast.Attribute) and f.attr in ("execute", "executemany")
+                    and call.args and isinstance(call.args[0], ast.Constant)
+                    and isinstance(call.args[0].value, str)):
+                continue
+            sql = " ".join(call.args[0].value.split())
+            if not sql.upper().startswith("UPDATE LOCATION") or "unreadable_since" not in sql:
+                continue
+            literaly.append(sql)
+            for kol in ("unreadable_kind", "unreadable_reason"):
+                if f"{kol} =" not in sql:
+                    braki.append(f"{src.name}: brak `{kol}` w: {sql[:90]}")
+    assert len(literaly) >= 3, f"kolektor ślepy - złapał {len(literaly)} literałów markera"
+    assert not braki, braki
 
 
 # --- telescope / config ---

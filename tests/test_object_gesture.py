@@ -25,6 +25,8 @@ REGUŁA CZYTANIA LICZNIKÓW: `ObjectGesture` rozbija pominięcia PER FAKT. Test,
 `skipped`, przechodzi także wtedy, gdy klinga pominęła klatkę z ZUPEŁNIE innego powodu — dlatego
 każdy człon niżej pyta o konkretne pole.
 """
+import pytest
+
 from horreum import db, repo, resolver
 
 NOW = "2026-08-03T18:00:00Z"
@@ -251,7 +253,10 @@ def test_cofniecie_ROZROZNIA_brak_obiektu_od_faktu_z_pliku():
     g = repo.clear_object_assignment(con, frame_ids=[1, 2, 3], now=NOW)
     assert (g.assigned, g.skipped_source, g.skipped_nothing) == (1, 1, 1)
     assert g.skipped == 2                                # suma zna OBA człony
-    assert g.skipped_breakdown == [("kind", 0), ("source", 1), ("nothing", 1), ("drift", 0)]
+    # Pełna lista pinuje skład i KOLEJNOŚĆ członów; `no_memory` doszedł w FC-6 (nagrobek bez
+    # pamięci przy przywracaniu) - klinga cofnięcia zostawia go na zerze.
+    assert g.skipped_breakdown == [("kind", 0), ("source", 1), ("nothing", 1), ("no_memory", 0),
+                                   ("drift", 0)]
 
 
 def test_nagrobka_NIE_wskrzesza_gest_bez_jawnego_nadpisania():
@@ -449,8 +454,9 @@ def test_przywrocenie_JEST_idempotentne():
 
 def test_suma_gestow_NIE_gubi_rozbicia():
     """`ObjectGesture.__add__` jest JEDYNYM właścicielem składania — przywracanie idzie transakcja
-    per OBIEKT, a zdanie po geście jest jedno. Druga siedziba tej sumy (`ConfirmPathObjectsDialog`)
-    sumuje ręcznie dwa pola i przez to GUBI rozbicie per fakt; trzecia powtórzyłaby ten błąd.
+    per OBIEKT, a zdanie po geście jest jedno. Druga siedziba (`ConfirmPathObjectsDialog`) do
+    R-S2b-13 sumowała ręcznie dwa pola i przez to GUBIŁA rozbicie per fakt; dziś składa `+=`
+    tak samo, a trzecia ręczna suma powtórzyłaby tamten błąd.
 
     Kanony sklejają się bez powtórzeń: ta sama nazwa dwa razy w komunikacie wygląda jak dwa różne
     obiekty."""
@@ -460,6 +466,54 @@ def test_suma_gestow_NIE_gubi_rozbicia():
     assert (s.assigned, s.skipped_kind, s.skipped_drift, s.stacks) == (5, 1, 4, 1)
     assert s.canons == ("LMC", "IC443")
     assert dict(s.skipped_breakdown)["drift"] == 4 and s.skipped == 5
+
+
+def test_nagrobek_BEZ_PAMIECI_jest_czlonem_sumy_skladania_i_rozbicia():
+    """FC-6: `skipped_no_memory` wchodzi do WSZYSTKICH trzech właścicieli naraz - sumy `skipped`
+    (mianownik „z M"), składania `__add__` (przywracanie to N transakcji i jedno zdanie) i rozbicia
+    `skipped_breakdown` (człon na ekranie). Pole obecne w jednym, a brakujące w drugim to dokładnie
+    klasa, dla której ci właściciele istnieją: liczba wpada do „z M" i znika z rozbicia albo
+    odwrotnie.
+
+    Pozycja członu jest ustalona: między `nothing` a `drift` - dwie przyczyny „nie było czego"
+    stoją obok siebie, a dryf (jedyny licznik TOCTOU) zamyka listę.
+
+    Falsyfikator: zdejmij `skipped_no_memory` z `__add__` → suma gubi 2; z `skipped` → 7 zamiast 9;
+    z `skipped_breakdown` → rozbicie nie ma członu `no_memory`."""
+    a = repo.ObjectGesture(skipped_nothing=3, skipped_no_memory=2)
+    b = repo.ObjectGesture(assigned=1, skipped_no_memory=2, skipped_drift=2)
+    s = a + b
+    assert s.skipped_no_memory == 4
+    assert s.skipped == 3 + 4 + 2
+    assert [k for k, _n in s.skipped_breakdown] == ["kind", "source", "nothing", "no_memory",
+                                                    "drift"]
+    assert dict(s.skipped_breakdown)["no_memory"] == 4
+    assert sum(n for _k, n in s.skipped_breakdown) == s.skipped
+
+
+@pytest.mark.parametrize("gest, prefiks, klucze_z_kwargu", [
+    (repo.ObjectGesture(), "grid.sel.object_skip_", ("grid.sel.object_restore_skip_nothing",)),
+    (repo.RetireGesture(), "grid.sel.frame_skip_", ()),
+], ids=["ObjectGesture", "RetireGesture"])
+def test_KAZDY_czlon_rozbicia_ma_klucz_w_katalogu(gest, prefiks, klucze_z_kwargu):
+    """BRAMKA KLASY, JEDNA DLA OBU GESTÓW Z ROZBICIEM: zdanie po geście składa klucz członu W LOCIE
+    (`{prefiks}{sufiks}`), a kolektor bramki i18n zbiera wyłącznie literały - więc człon dołożony
+    do `skipped_breakdown` bez wpisu w katalogu renderowałby na pasku stanu SUROWY KLUCZ i żadna
+    bramka by tego nie złapała. FC-6 dołożył człon (`no_memory`) i klucz przywracania dla
+    `nothing` (`nothing_key`), który też jedzie kwargiem, a nie literałem w `i18n.t(...)`.
+
+    `RetireGesture` (D-OW-3/R2) ma tę samą figurę - `_po_gescie_klatki` składa
+    `grid.sel.frame_skip_{sufiks}` - i do tej pory nie miał żadnej bramki: jego nowy powód
+    pominięcia czerwieniłby się dopiero na ekranie. Jeden test po parze (klasa, prefiks), bo
+    pytanie jest to samo, a dwie kopie bramki rozjechałyby się przy pierwszej poprawce jednej.
+
+    Falsyfikator: usuń z katalogu `grid.sel.object_skip_no_memory`,
+    `grid.sel.object_restore_skip_nothing` albo `grid.sel.frame_skip_superseded` → odpowiedni
+    wariant tego testu czerwienieje."""
+    from horreum.gui.i18n_catalog import CATALOG
+    klucze = [f"{prefiks}{k}" for k, _n in gest.skipped_breakdown] + list(klucze_z_kwargu)
+    braki = [k for k in klucze if k not in CATALOG]
+    assert not braki, f"człony rozbicia bez klucza w katalogu: {braki}"
 
 
 def test_pamiec_nagrobka_JEDZIE_na_nastepczynie():

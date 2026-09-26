@@ -269,7 +269,11 @@ def _partycja(con):
 
 def test_review_queue_partycja_pokrywa_perspektywe_gridu(s8_obj):
     """Szew z kolejki (rozjazd `queries.py:215` vs `:477`): kubełki kolejki MUSZĄ sumować się do
-    zbioru, który grid pokazuje w perspektywie „Do przeglądu"."""
+    zbioru, który grid pokazuje w perspektywie „Do przeglądu".
+
+    Od R-S4-10 równanie dostaje też klatkę BEZ formatu (`filetype IS NULL`). Falsyfikator: cofnij
+    `COALESCE(f.filetype, '')` w `nameless_frames` - klatka wypada z obu kubełków bezimiennych,
+    zostając w `review_frame_ids`, i ostatnia asercja czerwienieje (4 != 5)."""
     con, ids = s8_obj
     # stan wyjściowy: objrev1+objrev2 (nazwane) + nullcfg (light bez nagłówka) = 3
     assert len(queries.review_frame_ids(con)) == 3
@@ -282,6 +286,9 @@ def test_review_queue_partycja_pokrywa_perspektywe_gridu(s8_obj):
     repo.assign_object(con, frame_id=ids["frames"]["objrev1"],
                        object_id=ids["objects"]["NGC7000"], object_source="user", now=NOW)
     assert _partycja(con) == len(queries.review_frame_ids(con)) == 4
+    # R-S4-10: format NIEZNANY wchodzi po OBU stronach równania, nie tylko po prawej
+    _nameless_light(con, "sha-nameless-bez-formatu", filetype=None)
+    assert _partycja(con) == len(queries.review_frame_ids(con)) == 5
 
 
 # --- P-D: drążenie kubełka bezimiennych (D-PD-11) ---
@@ -323,7 +330,11 @@ def test_nameless_frames_klatka_bez_lokacji_zostaje_w_wyniku(s8_obj):
 def test_nameless_count_jest_dlugoscia_read_modelu(s8_obj):
     """D-PD-10 — JEDEN właściciel predykatu na TRZECH powierzchniach: kubełek kolejki, drążenie
     do klatek i raport dostawy (`resolver.nameless_lights`, literał rdzenia) muszą dawać tę samą
-    liczbę. Rozjazd znaczyłby, że kubełek otwiera listę innej długości, niż zapowiada."""
+    liczbę. Rozjazd znaczyłby, że kubełek otwiera listę innej długości, niż zapowiada.
+
+    Od R-S4-10 pin obejmuje klatkę BEZ formatu (`filetype IS NULL`) - `COALESCE` stoi po OBU
+    stronach lustra. Falsyfikator: cofnij go w `nameless_frames` albo w `resolver.nameless_lights` -
+    ostatnia równość się rozjeżdża (2 po jednej stronie, 3 po drugiej)."""
     from horreum.resolver import nameless_lights
 
     con, ids = s8_obj
@@ -338,6 +349,10 @@ def test_nameless_count_jest_dlugoscia_read_modelu(s8_obj):
                        object_source="header", now=NOW)
     assert (queries.review_queue(con)["nameless_count"] == len(queries.nameless_frames(con))
             == nameless_lights(con) == 2)
+    # R-S4-10: format NIEZNANY - kotwica rdzenia i drążenie GUI liczą go RAZEM
+    _nameless_light(con, "sha-nl-bez-formatu", filetype=None)
+    assert (queries.review_queue(con)["nameless_count"] == len(queries.nameless_frames(con))
+            == nameless_lights(con) == 3)
 
 
 def test_nameless_swiadomy_formatu_raw_ma_wlasny_kubelek(s8_obj):
@@ -563,6 +578,24 @@ def test_trzy_kubelki_bezimiennych_sa_rozlaczne(s8_obj):
     assert (nameless_lights(con), nameless_raw_lights(con), nameless_stacks(con)) == (1, 1, 1)
 
 
+def test_klatka_BEZ_formatu_idzie_do_kubelka_karty_nie_do_RAW(s8_obj):
+    """R-S4-10: `NO_OBJECT_CARD_FILETYPES` jest ZAMKNIĘTYM zbiorem formatów, o których wiadomo, że
+    karty nie mają - a o formacie nieznanym (`filetype IS NULL`) tego nie wiadomo. Klatka idzie więc
+    do `nameless_frames` (droga naprawy: karta albo ręka), a kubełek RAW jej nie widzi. Goły
+    `NULL NOT IN` i `NULL IN` dają NULL, więc do naprawy wypadała z OBU kubełków naraz, zostając
+    w `review_frame_ids`. Dziś stan nieosiągalny (`scan.ingest_record` zawsze liczy format), więc
+    wiersz wstawiamy wprost, jak sąsiednie testy read-modelu.
+
+    Falsyfikator: cofnij `COALESCE(f.filetype, '')` w `nameless_frames` - klatka znika z drążenia
+    i druga asercja czerwienieje."""
+    con, _ = s8_obj
+    fid = _nameless_light(con, "sha-bez-formatu", filetype=None)
+    assert con.execute("SELECT filetype FROM frame WHERE id = ?", (fid,)).fetchone()[0] is None
+    assert fid in {r["frame_id"] for r in queries.nameless_frames(con)}
+    assert fid not in {r["frame_id"] for r in queries.nameless_raw_frames(con)}
+    assert fid not in {r["frame_id"] for r in queries.nameless_stack_frames(con)}
+
+
 # --- facets ---
 
 def test_facets_teleskop_kanoniczne_i_filtry(s8_obj):
@@ -593,8 +626,8 @@ def test_polowki_tej_samej_nazwy_stoja_obok_siebie(s8_obj):
     obcy kubełek (`LDN 1174 · 9` → `IC 1805 · 7` → `LDN 1174 · 5 · cofnięte ręką`), więc user
     „załatwiał" pierwszą połówkę i zostawiał drugą, nie wiedząc, że istnieje.
 
-    Falsyfikator: przywróć `ORDER BY n DESC, object_raw, cleared` → nazwy przeplatają się
-    i asercja o sąsiedztwie czerwienieje."""
+    Falsyfikator: zamień pierwszy człon klucza sortu `object_review` z `-total` na `-n` (połówka
+    zamiast sumy nazwy) - nazwy przeplatają się i asercja o sąsiedztwie czerwienieje."""
     con, _ = s8_obj
     for i in range(5):                                    # „LDN 1174" nietknięte ×5
         _light_z_nazwa(con, f"sha-ldn-{i}", "LDN 1174")
@@ -617,6 +650,65 @@ def test_polowki_tej_samej_nazwy_stoja_obok_siebie(s8_obj):
     for nazwa in set(nazwy):
         pozycje = [i for i, n in enumerate(nazwy) if n == nazwa]
         assert pozycje == list(range(pozycje[0], pozycje[0] + len(pozycje)))
+
+
+def test_remis_sum_rozstrzyga_klucz_NATURALNY_nazwy(s8_obj):
+    """W-4: przy równych sumach stringowy porządek stawiał `Caldwell 100` i `Caldwell 12` przed
+    `Caldwell 3` - kolejność, której oko nie czyta jako porządek. Remis rozstrzyga teraz klucz
+    naturalny; SUMA dalej prowadzi (treść R-S3-2), więc `Zeta 1` z największą sumą stoi PIERWSZA
+    mimo litery, a `FlatWizard` z fikstury (2 klatki) przed trzema nazwami po jednej klatce.
+    Nazwy wstawiane są w odwrotnej kolejności, żeby wynik nie był echem kolejności zapisu.
+
+    Falsyfikator: zamień `natural_key(r["object_raw"])` w kluczu sortu `review_queue` na surowe
+    `r["object_raw"]` - trójka Caldwelli wraca do porządku 100, 12, 3 i asercja czerwienieje."""
+    con, _ = s8_obj
+    for nazwa in ("Caldwell 100", "Caldwell 12", "Caldwell 3"):
+        _light_z_nazwa(con, f"sha-w4-{nazwa}", nazwa)
+    for i in range(3):
+        _light_z_nazwa(con, f"sha-w4-zeta-{i}", "Zeta 1")
+
+    wiersze = [(r["object_raw"], r["n"]) for r in queries.review_queue(con)["object_review"]]
+    assert wiersze == [("Zeta 1", 3), ("FlatWizard", 2),
+                       ("Caldwell 3", 1), ("Caldwell 12", 1), ("Caldwell 100", 1)]
+
+
+def test_polowki_nazw_rownych_bez_wielkosci_liter_NIE_przeplataja_sie(s8_obj):
+    """W-4 × R-S3-2: klucz naturalny jest ślepy na wielkość liter, a `GROUP BY` nie - `NGC 700`
+    i `ngc 700` to dwie pozycje o RÓWNYM kluczu i równej sumie. Para połówek każdej z nich ma dalej
+    stać obok siebie, nietknięta (0) nad cofniętą (1); to pin R-S3-2, nie nowa cecha.
+
+    Falsyfikator: usuń surową nazwę `r["object_raw"]` z klucza sortu `review_queue` (człon za
+    `natural_key`) - połówki obu nazw przeplatają się po `cleared` i asercja czerwienieje."""
+    con, _ = s8_obj
+    cofniete = []
+    for nazwa in ("ngc 700", "NGC 700"):
+        _light_z_nazwa(con, f"sha-w4-{nazwa}-0", nazwa)
+        cofniete.append(_light_z_nazwa(con, f"sha-w4-{nazwa}-1", nazwa))
+    for fid in cofniete:
+        repo.user_assign_object(con, alias_norm=None, canon="NGC7000", catalog="NGC",
+                                kind="deep_sky", frame_ids=[fid], now=NOW)
+    assert repo.clear_object_assignment(con, frame_ids=cofniete, now=NOW).assigned == 2
+
+    wiersze = [(r["object_raw"], r["cleared"]) for r in queries.review_queue(con)["object_review"]]
+    assert wiersze == [("FlatWizard", 0), ("NGC 700", 0), ("NGC 700", 1),
+                       ("ngc 700", 0), ("ngc 700", 1)]
+
+
+def test_natural_key_liczby_jako_liczby_tekst_bez_wielkosci_liter():
+    """W-4: człony liczbowe porównują się jako liczby, tekst bez wielkości liter. Naprzemienność
+    członów (tekst na pozycji parzystej, liczba na nieparzystej) czyni krotki porównywalnymi bez
+    `TypeError` także dla nazw zaczynających się cyfrą albo bez cyfr w ogóle.
+
+    Falsyfikator: zdejmij `int(...)` z `natural_key` - `M 101` wraca przed `M 31`, a `Caldwell 12`
+    przed `Caldwell 3`, i druga asercja czerwienieje (pierwsza nie: `700` jest prefiksem `7000`
+    także jako tekst)."""
+    k = queries.natural_key
+    assert k("NGC 700") < k("NGC 7000")
+    assert k("M 31") < k("M 101")
+    assert k("Caldwell 3") < k("Caldwell 12") < k("Caldwell 100")
+    assert k("ngc 7000") == k("NGC 7000")
+    assert k("IC 1805") < k("ldn 1174") < k("LDN 1175")
+    assert sorted(["12", "Sh2-101", "", "3C 273"], key=k) == ["", "3C 273", "12", "Sh2-101"]
 
 
 # --- R-S2b-12: „ostatnio użyte" wyprowadzone z DZIENNIKA ---
@@ -837,7 +929,10 @@ def test_restore_targets_grupuje_po_OBIEKCIE_i_liczy_nagrobki_bez_pamieci(s8_obj
     obiektów — read-model musi więc oddać grupy, nie płaską listę.
 
     Nagrobek BEZ pamięci (baza-dawca sprzed migracji 0017) nie wpada do żadnej grupy i liczy się
-    osobno: gest powie o nim wprost, zamiast po cichu pominąć."""
+    osobno: gest powie o nim wprost, zamiast po cichu pominąć.
+
+    Kształt wyniku zmienił FC-6: druga pozycja to już nie goła liczba nagrobków bez pamięci, tylko
+    rozbicie CAŁEGO zaznaczenia pod nazwami pól `ObjectGesture` - stąd asercje po kluczach."""
     con, ids = s8_obj
     a = _cofnij(con, _nameless_light(con, "sha-rt-a"))
     b = _cofnij(con, _nameless_light(con, "sha-rt-b"))
@@ -845,13 +940,68 @@ def test_restore_targets_grupuje_po_OBIEKCIE_i_liczy_nagrobki_bez_pamieci(s8_obj
     con.execute("UPDATE frame SET object_cleared_id = NULL WHERE id = ?", (sierota,))
     con.commit()
 
-    grupy, bez_pamieci = queries.restore_targets(con, [a, b, sierota])
-    assert bez_pamieci == 1
+    grupy, pominiete = queries.restore_targets(con, [a, b, sierota])
+    assert pominiete["skipped_no_memory"] == 1
     assert [(g["canon"], sorted(g["frame_ids"])) for g in grupy] == [("NGC7000", sorted([a, b]))]
 
-    # Klatka BEZ nagrobka nie jest celem tego gestu, choćby stała w zaznaczeniu.
+    # Klatka BEZ nagrobka nie jest celem tego gestu, choćby stała w zaznaczeniu - ale LICZY SIĘ
+    # (FC-6): zdanie „z M" mówi o całym zaznaczeniu, więc nie ma prawa jej zgubić.
     zwykla = _nameless_light(con, "sha-rt-d")
-    assert queries.restore_targets(con, [zwykla]) == ([], 0)
+    assert queries.restore_targets(con, [zwykla]) == (
+        [], {"skipped_kind": 0, "skipped_nothing": 1, "skipped_no_memory": 0})
+
+
+def test_restore_targets_ROZBIJA_cale_zaznaczenie_per_fakt(s8_obj):
+    """FC-6 / R-S2b-13: przywracanie mówi tą samą gramatyką, co dwa sąsiednie gesty osi - każda
+    klatka zaznaczenia ląduje DOKŁADNIE w jednym miejscu: w grupie albo w jednym liczniku.
+
+    Zaznaczenie mieszane: nagrobek z pamięcią, nagrobek bez pamięci, light z obiektem ręki, light
+    bez obiektu i bez nagrobka, dark. Dark nie jest nagrobkiem, więc łapie się też pod „nie było
+    czego przywrócić" - i dlatego pinuje KOLEJNOŚĆ guardów: rodzaj rozstrzyga pierwszy, jak u obu
+    sąsiadów w klindze.
+
+    Falsyfikator: przywróć filtr `f.object_source = 'user_cleared'` w WHERE → `skipped_nothing`
+    i `skipped_kind` spadają do 0; przestaw guard rodzaju za guard nagrobka → dark ląduje
+    w `skipped_nothing` (3 zamiast 2) i `skipped_kind` spada do 0."""
+    con, ids = s8_obj
+    z_pamiecia = _cofnij(con, _nameless_light(con, "sha-rtm-a"))
+    bez_pamieci = _cofnij(con, _nameless_light(con, "sha-rtm-b"))
+    con.execute("UPDATE frame SET object_cleared_id = NULL WHERE id = ?", (bez_pamieci,))
+    con.commit()
+    z_obiektem = _nameless_light(con, "sha-rtm-c")
+    repo.user_assign_object(con, alias_norm=None, canon="M42", catalog="M", kind="deep_sky",
+                            frame_ids=[z_obiektem], now=NOW)
+    bez_obiektu = _nameless_light(con, "sha-rtm-d")
+    dark, _ = repo.upsert_frame(con, sha1_data="sha-rtm-e", kind="dark", filetype="fits",
+                                camera_id=None, now=NOW)
+
+    zaznaczenie = [z_pamiecia, bez_pamieci, z_obiektem, bez_obiektu, dark]
+    grupy, pominiete = queries.restore_targets(con, zaznaczenie)
+    assert pominiete == {"skipped_kind": 1, "skipped_nothing": 2, "skipped_no_memory": 1}
+    assert [(g["canon"], g["frame_ids"]) for g in grupy] == [("NGC7000", [z_pamiecia])]
+    # Klucze są NAZWAMI PÓL gestu - wołający składa z nich `ObjectGesture(**pominiete)`,
+    # a niezmiennik „N z M" liczy M po całym zaznaczeniu.
+    gest = repo.ObjectGesture(**pominiete)
+    assert sum(len(g["frame_ids"]) for g in grupy) + gest.skipped == len(zaznaczenie)
+
+
+def test_restore_targets_id_SPOZA_frame_jest_bledem_a_nie_cisza(s8_obj):
+    """FC-6, EXPECT: niezmiennik `assigned + skipped == len(ids)` nie ma prawa trzymać się na id,
+    którego baza nie zna - obie sąsiednie klingi osi rzucają przy nim `ValueError`, więc read-model
+    przywracania robi to samo, zamiast po cichu wyciąć je z obu stron równania. Komunikat nazywa
+    KTÓRE id, a nie ile: sama liczba nie pozwoliłaby znaleźć zbłąkanej klatki. Powtórzony id
+    w zaznaczeniu nie jest brakiem - guard liczy id UNIKALNE.
+
+    Falsyfikator: zdejmij guard `len(rows) < len(set(ids))` → pierwsze wywołanie wraca bez wyjątku;
+    policz `len(ids)` zamiast unikalnych → drugie rzuca na zaznaczeniu, któremu nic nie brakuje."""
+    import pytest
+    con, ids = s8_obj
+    fid = _cofnij(con, _nameless_light(con, "sha-rt-spoza"))
+    widmo = con.execute("SELECT max(id) FROM frame").fetchone()[0] + 1000
+    with pytest.raises(ValueError, match=rf"\b{widmo}\b"):
+        queries.restore_targets(con, [fid, widmo])
+    grupy, _pominiete = queries.restore_targets(con, [fid, fid])
+    assert [g["frame_ids"] for g in grupy] == [[fid]]
 
 
 def test_selection_object_state_LICZY_restorable_bez_nowego_zapytania(s8_obj):

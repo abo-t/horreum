@@ -561,7 +561,9 @@ def test_uszkodzony_slownik_melduje_sie_zamiast_wywalac_okno(view, monkeypatch):
 
 
 def test_on_assign_po_sukcesie_zaznacza_cel(view, monkeypatch):
-    """Po zapisie grupa znika, a widok pokazuje obiekt docelowy zamiast pierwszego alfabetycznie."""
+    """Po zapisie grupa znika, a widok pokazuje obiekt docelowy zamiast pierwszego alfabetycznie.
+    Zdanie bez kropki na końcu (R-S2b-13): człony rozbicia doklejają się do niego „ · …", jak
+    w zdaniach Zbiorów."""
     v, con, ids = view
 
     class AcceptedM42:
@@ -587,12 +589,15 @@ def test_on_assign_po_sukcesie_zaznacza_cel(view, monkeypatch):
     assert v.combo_tel.currentData() is None and v.combo_filter.currentData() is None
     assert v._selected_object_id() == ids["objects"]["M42"]
     assert v.frames.rowCount() == 5                           # 3 istniejące + 2 przypisane
-    assert msgs[-1] == "Przypisano 2 z 2 klatek → M42."
+    assert msgs[-1] == "Przypisano 2 z 2 klatek → M42"
     assert not any("FlatWizard" in v.review.item(r).text() for r in range(v.review.count()))
 
 
 def test_on_assign_zero_assigned_nie_udaje_wyboru_celu(view, monkeypatch):
-    """Gdy cała grupa zdryfowała, komunikat jest szczery, ale widok nie udaje sukcesu wyborem celu."""
+    """Gdy cała grupa zdryfowała, komunikat jest szczery, ale widok nie udaje sukcesu wyborem celu.
+
+    Zdanie porównujemy W CAŁOŚCI (R-S2b-13): dawny `startswith` przepuszczał każdy ogon, także
+    płaskie „(2 pominięte - zajęte…)", więc nie pilnował, JAKIM członem dryf trafia na ekran."""
     v, con, ids = view
 
     class AcceptedM42:
@@ -614,7 +619,7 @@ def test_on_assign_zero_assigned_nie_udaje_wyboru_celu(view, monkeypatch):
 
     assert v._selected_object_id() is None
     assert not v.objects.selectedItems() and v.frames.rowCount() == 0
-    assert msgs[-1].startswith("Przypisano 0 z 2 klatek → M42.")
+    assert msgs[-1] == "Przypisano 0 z 2 klatek → M42 · zmieniły się w międzyczasie: 2"
 
 
 def test_przypisanie_zmniejsza_kolejke_i_zapisuje_user(view):
@@ -649,7 +654,7 @@ def test_kopie_nieczytelne_drazenie_do_dokladnych_kopii(view, qapp):
     with con:
         con.execute("UPDATE location SET path = ? WHERE id = ?", (long_path, loc["id"]))
     repo.refresh_location_unreadable(con, location_id=loc["id"], sha1_data="sha-a1",
-                                     path=long_path, mtime="t2", reason="OSError",
+                                     path=long_path, mtime="t2", reason="OSError", kind="io",
                                      now="2026-07-21T12:00:00")
     v.refresh()
     r = _select_review_tag(v, "unreadable")
@@ -679,14 +684,21 @@ def test_kopie_nieczytelne_drazenie_do_dokladnych_kopii(view, qapp):
             <= v.frames.viewport().width())
     assert v.frames.item(0, 1).text() == "vol2"
     assert v.frames.item(0, 2).text() == "tak"               # kopia nadal obecna
-    # Powód z dziennika (Z6): komórka bez prefiksu, tooltip = zapis dosłowny
-    assert v.frames.item(0, 4).text() == "OSError"
-    assert v.frames.item(0, 4).toolTip() == "kopia nieczytelna: OSError"
+    # Powód ze STANU kopii (Z6, P4-2): rodzaj PRZED diagnozą, tooltip = diagnoza dosłowna
+    assert v.frames.item(0, 4).text() == "dysk/dostęp: OSError"
+    assert v.frames.item(0, 4).toolTip() == "OSError"
     assert v.frames_label.text() == "Kopie nieczytelne (1)"
-    # kopia bez pokrycia w dzienniku (przemianowana po awarii) → „—", nie pustka: „nie wiem,
-    # dlaczego" jest faktem, a pusta komórka czyta się jak brak danych w kolumnie
+    # kopia przemianowana po awarii NIE gubi powodu (P4-2 - defekt dawnego źródła w dzienniku)
     with con:
         con.execute("UPDATE location SET path = ? WHERE id = ?", ("/backup/a1-NOWA.fits", loc["id"]))
+    v.refresh()
+    _select_review_tag(v, "unreadable")
+    assert v.frames.item(0, 4).text() == "dysk/dostęp: OSError"
+    # wiersz sprzed 0019 (marker bez rodzaju i powodu) → myślnik `copy.no_reason`, nie pustka:
+    # „nie wiem, dlaczego" jest faktem, a pusta komórka czyta się jak brak danych w kolumnie
+    with con:
+        con.execute("UPDATE location SET unreadable_kind = NULL, unreadable_reason = NULL "
+                    "WHERE id = ?", (loc["id"],))
     v.refresh()
     _select_review_tag(v, "unreadable")
     assert v.frames.item(0, 4).text() == "—"
@@ -696,6 +708,52 @@ def test_kopie_nieczytelne_drazenie_do_dokladnych_kopii(view, qapp):
     hdrs = [v.frames.horizontalHeaderItem(c).text() for c in range(v.frames.columnCount())]
     assert hdrs == ["sha1 danych", "Teleskop", "Kamera", "Filtr", "Data", "Obecny", "Ścieżka"]
     assert v.frames.rowCount() == 5
+
+
+def test_komorka_powod_mowi_KTORA_to_sytuacja_PL_i_EN():
+    """P4-2: `_copy_reason` - jedyny właściciel komórki „Powód" - stawia RODZAJ przed diagnozą, bo
+    to on mówi, gdzie szukać winy (dysk/dostęp → plik może być zdrowy; parser → plik do
+    zgłoszenia). Brak rodzaju (wiersz sprzed 0019) → sama diagnoza; brak obu → myślnik; rodzaj bez
+    diagnozy nie znika. Oba języki z katalogu.
+
+    Falsyfikator: wróć do `_copy_reason(raw)` bez rodzaju → komórka mówi samo „OSError" i dwie
+    pierwsze asercje czerwienieją."""
+    from horreum.gui.app import _copy_reason
+    assert _copy_reason("io", "OSError: [Errno 5]") == "dysk/dostęp: OSError: [Errno 5]"
+    assert (_copy_reason("parse", "ParseError: line 4")
+            == "nagłówek nie przechodzi parsera: ParseError: line 4")
+    assert _copy_reason(None, "ParseError: line 4") == "ParseError: line 4"
+    assert _copy_reason(None, None) == i18n.t("copy.no_reason")
+    assert _copy_reason("io", None) == f"dysk/dostęp: {i18n.t('copy.no_reason')}"
+    i18n.set_lang("en")
+    assert _copy_reason("io", "OSError") == "disk/access: OSError"
+    assert _copy_reason("parse", "ParseError") == "header fails the parser: ParseError"
+
+
+def test_wiersz_kopii_nieczytelnych_podpowiada_rozbicie_po_rodzaju(view):
+    """P4-2: wiersz kubełka „kopie nieczytelne" z drogą niesie w podpowiedzi rozbicie PO KOPIACH
+    na rodzaje - sama liczba klatek nie mówiła, czy szukać winy w dysku, czy w pliku. Pusty kubełek
+    zostaje przy swoim zdaniu informacyjnym (rozbijać nie ma czego).
+
+    Falsyfikator: usuń `tip=` z wołania `_add_review_item` dla tego kubełka (albo `setToolTip(tip)`
+    w gałęzi z tagiem) → podpowiedź wiersza jest pusta i asercja czerwienieje."""
+    v, con, ids = view
+    v._load_review()
+    pusty = next(v.review.item(r) for r in range(v.review.count())
+                 if "kopie nieczytelne" in v.review.item(r).text())
+    assert pusty.toolTip() == i18n.t("object.unreadable_info_empty")
+    locs = con.execute("SELECT id, path FROM location WHERE frame_id = ? ORDER BY id",
+                       (ids["frames"]["a1"],)).fetchall()
+    repo.refresh_location_unreadable(con, location_id=locs[0]["id"], sha1_data="sha-a1",
+                                     path=locs[0]["path"], mtime="t2", reason="OSError: x",
+                                     kind="io", now="2026-07-21T12:00:00")
+    repo.refresh_location_unreadable(con, location_id=locs[1]["id"], sha1_data="sha-a1",
+                                     path=locs[1]["path"], mtime="t2", reason="ParseError: y",
+                                     kind="parse", now="2026-07-21T12:00:00")
+    v._load_review()
+    r = _select_review_tag(v, "unreadable")
+    assert v.review.item(r).toolTip() == "kopie: dysk/dostęp 1 · nagłówek 1"
+    assert v.review.item(r).data(SECONDARY).startswith("1")      # licznik wiersza = KLATKI
 
 
 # --- i18n: EN renderuje z katalogu (§4 rollout `app`) ---
@@ -1429,7 +1487,7 @@ def test_on_assign_raw_przypisuje_grupe_podana_parametrem(sciezka, monkeypatch):
     """Cała droga gestu: kubełek RAW → dialog → klinga ręki. Grupa jedzie do zapisu jako LISTA
     `frame_ids` z drążenia tego kubełka (nie z tagu), więc znika CAŁA — łącznie z klatką z folderu
     ad-hoc, której szczebel ścieżki nie umiał zaproponować. To jest droga awaryjna dla wszystkiego, czego
-    ścieżka nie domknie."""
+    ścieżka nie domknie. (Zdanie bez kropki - R-S2b-13, człony rozbicia doklejają się „ · …".)"""
     v, con = sciezka
 
     class AcceptedLMC:
@@ -1449,7 +1507,7 @@ def test_on_assign_raw_przypisuje_grupe_podana_parametrem(sciezka, monkeypatch):
     v._on_assign()
 
     assert AcceptedLMC.seen["object_raw"] is None and AcceptedLMC.seen["frame_count"] == 4
-    assert msgs[-1] == "Przypisano 4 z 4 klatek → LMC."
+    assert msgs[-1] == "Przypisano 4 z 4 klatek → LMC"
     stan = con.execute("SELECT object_source, count(*) AS n FROM frame "
                        "WHERE object_id IS NOT NULL GROUP BY object_source").fetchall()
     assert [(r["object_source"], r["n"]) for r in stan] == [("user", 4)]
@@ -1554,7 +1612,7 @@ def test_akcja_kubelka_cofnietych_gasi_nagrobek_PRZEZ_SLOT_nie_obok_niego(sciezk
     kolejka trzyma jako lekcję STANDING: „bramka pyta klingę, defekt siedzi w powierzchni".
 
     Falsyfikator: skasuj `overwrite_weak=cofniete` z `gui/app.py` → komunikat spada na
-    „Przypisano 0 z 2" i asercja stanu bazy czerwienieje."""
+    „Przypisano 0 z 2" i asercja stanu bazy czerwienieje. (Zdanie bez kropki - R-S2b-13.)"""
     v, con = sciezka
 
     class AcceptedNGC:
@@ -1580,7 +1638,7 @@ def test_akcja_kubelka_cofnietych_gasi_nagrobek_PRZEZ_SLOT_nie_obok_niego(sciezk
     v._on_assign()
 
     # SKUTEK W BAZIE, nie „slot się wykonał": nagrobek zgasł i klatki mają obiekt.
-    assert msgs[-1] == "Przypisano 2 z 2 klatek → NGC7000."
+    assert msgs[-1] == "Przypisano 2 z 2 klatek → NGC7000"
     assert con.execute(
         "SELECT count(*) FROM frame WHERE id IN (?,?) AND object_id IS NOT NULL "
         "AND object_source = 'user'", ids).fetchone()[0] == 2
@@ -1923,3 +1981,155 @@ def test_liczby_kubelkow_sa_ODMIENIONE(view):
     v._load_review()
     czlony = [(v.review.item(r).data(SECONDARY) or "") for r in range(v.review.count())]
     assert not any("1 klatek" in c for c in czlony), czlony
+
+
+# ═════════════════════════ R-S2b-13 - JEDNA GRAMATYKA ZDANIA OSI OBIEKTU NA TRZECH POWIERZCHNIACH
+
+
+def _pozycja(wzor, canon, frame_ids):
+    """Pozycja okna zatwierdzania: tożsamość propozycji `wzor`, inny kanon i klatki. Testy niżej
+    pytają o ZDANIE i niezmiennik liczb, nie o derywację propozycji (tę pinują testy wyżej)."""
+    from dataclasses import replace
+    return replace(wzor, canon=canon, frame_ids=tuple(frame_ids))
+
+
+def test_zatwierdzenie_ze_sciezki_mowi_ROZBICIEM_per_fakt(sciezka):
+    """R-S2b-13: okno sumowało ręcznie `assigned` i `skipped`, więc gubiło rozbicie per fakt
+    i o KAŻDEJ pominiętej klatce mówiło „pominięte - zajęte między oknem a zapisem", także
+    o darku, którego nikt nie zajął. Zdanie niesie teraz te same człony, co gesty Zbiorów.
+
+    Pozycja: trzy lighty LMC, z których jeden dostał obiekt z nagłówka między otwarciem okna
+    a zapisem (klinga bez `overwrite_weak` liczy go jako dryf), plus dark - kalibracja obiektu
+    nie ma z definicji. Porównujemy KONIEC zdania, bo pytanie brzmi też „czego w nim nie ma".
+
+    Falsyfikator: przywróć w `_on_confirm` ręczną sumę `assigned, skipped` z płaskim ogonem albo
+    zdejmij `grid.zdanie_pominiec(gest)` → zdanie traci „kalibracja: 1" i „zmieniły się
+    w międzyczasie: 1"."""
+    v, con = sciezka
+    con.execute("INSERT INTO frame(id, kind, filetype, sha1_data, first_seen_at) "
+                "VALUES (10, 'dark', 'raw', 'sha10', ?)", (NOW_S2,))
+    con.commit()
+    lmc = next(p for p in resolver.path_proposals(con) if p.canon == "LMC")
+    dlg = ConfirmPathObjectsDialog(con, proposals=[_pozycja(lmc, "LMC", lmc.frame_ids + (10,))],
+                                   now_fn=lambda: NOW_S2, parent=v)
+    oid, _ = repo.upsert_object(con, canon="NGC7000", catalog="NGC", kind="deep_sky", now=NOW_S2)
+    repo.assign_object(con, frame_id=lmc.frame_ids[0], object_id=oid, object_source="header",
+                       now=NOW_S2)
+    dlg._on_confirm()
+
+    assert dlg.status.text().endswith(
+        "przypisano 2 z 4 klatek · kalibracja: 1 · zmieniły się w międzyczasie: 1"), \
+        dlg.status.text()
+    assert "pominięte" not in dlg.status.text()
+    assert dlg.assigned == 2 and dlg.result() == QDialog.Accepted
+
+
+def test_zatwierdzenie_po_BLEDZIE_pozycji_liczy_reszte_jako_dryf(sciezka, monkeypatch):
+    """R-S2b-13, drugi człon: po `break` na `ValueError` klatki pozycji, która padła, i pozycji
+    po niej nie liczyły się nigdzie - „z M" mówiło o samych pozycjach zapisanych. Pozycja, która
+    padła, wycofała się w całości (`_immediate`), a dalsze do klingi nie doszły: stan jest inny,
+    niż widziało okno, więc to DRYF - ta sama reguła, co przy przywracaniu w Zbiorach.
+
+    Trzy pozycje (2 + 1 + 1 klatka), klinga pada na DRUGIEJ: pierwsza zapisana, dryf 2,
+    a `assigned + skipped` równa się liczbie klatek zaznaczonych pozycji.
+
+    Falsyfikator: zdejmij doliczenie `skipped_drift` przed `break` → „2 z 2" zamiast „2 z 4"."""
+    v, con = sciezka
+    lmc = next(p for p in resolver.path_proposals(con) if p.canon == "LMC")
+    pozycje = [_pozycja(lmc, "LMC", (1, 2)), _pozycja(lmc, "NGC6960", (3,)),
+               _pozycja(lmc, "NGC6992", (4,))]
+    prawdziwa = repo.user_assign_object
+    wolania = []
+
+    def _pada_na_drugiej(con_, **kw):
+        wolania.append(kw["canon"])
+        if len(wolania) == 2:
+            raise ValueError("alias 'X' wskazuje już object:1 - konflikt, zero zapisu")
+        return prawdziwa(con_, **kw)
+
+    monkeypatch.setattr(repo, "user_assign_object", _pada_na_drugiej)
+    dlg = ConfirmPathObjectsDialog(con, proposals=pozycje, now_fn=lambda: NOW_S2, parent=v)
+    dlg._on_confirm()
+
+    assert wolania == ["LMC", "NGC6960"], "po błędzie klinga nie ma prawa pisać dalej"
+    razem = sum(p.n_frames for p in pozycje)
+    assert dlg.status.text().endswith(
+        f"przypisano 2 z {razem} klatek · zmieniły się w międzyczasie: 2"), dlg.status.text()
+    assert dlg.assigned == 2
+    assert "konflikt" in dlg.error.text() and dlg.result() != QDialog.Accepted
+    zapisane = con.execute("SELECT id FROM frame WHERE object_id IS NOT NULL ORDER BY id")
+    assert [r["id"] for r in zapisane] == [1, 2]
+
+
+def test_nadanie_z_kolejki_mowi_ROZBICIEM_per_fakt(view, monkeypatch):
+    """R-S2b-13: bliźniak zdania Zbiorów po nadaniu z kolejki spłaszczał pominięcia do
+    „(N pominięte - zajęte między dialogiem a zapisem)", choć klinga oddaje rozbicie per fakt -
+    więc klatka kalibracyjna w zaznaczeniu szła na ekran jako „zajęta". Zaznaczenie z drążenia
+    rozszerzamy o flat z fikstury: drążenie kubełka jest kind-scoped, więc inną drogą kalibracja
+    do celu nie wejdzie, a pytamy o ZDANIE, nie o dobór celu.
+
+    Falsyfikator: zdejmij `grid.zdanie_pominiec(g)` z `_on_assign` → zdanie gubi
+    „ · kalibracja: 1" i asercja równości czerwienieje."""
+    v, con, ids = view
+
+    class AcceptedM42:
+        selected = ("M42", "Messier", None, "FLATWIZARD")
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def exec(self):
+            return QDialog.Accepted
+
+    monkeypatch.setattr("horreum.gui.app.AssignObjectDialog", AcceptedM42)
+    _select_review_tag(v, "object_raw")
+    cel = v._selected_frame_ids() + [ids["frames"]["calib_flat"]]
+    monkeypatch.setattr(v, "_selected_frame_ids", lambda: cel)
+    msgs = []
+    v.status_message.connect(msgs.append)
+    v._on_assign()
+
+    assert msgs[-1] == "Przypisano 2 z 3 klatek → M42 · kalibracja: 1", msgs[-1]
+
+
+def test_oba_zdania_osi_w_oknie_skladaja_czlony_JEDNYM_domem(sciezka, monkeypatch):
+    """SPOT (R-S2b-13): pętla „iteruj `skipped_breakdown`, doklej człon" żyła w trzech siedzibach,
+    a dwie z nich (`gui.app`) mówiły płasko. Trzy siedziby jednej pętli to trzy okazje, żeby
+    człon dołożony do rozbicia pojawił się na jednym ekranie, a z dwóch pozostałych zniknął.
+    Dlatego pytamy, czy oba zdania okna osi idą przez `grid.zdanie_pominiec`, a nie tylko, jak
+    brzmią - brzmienie zgodziłoby się też z wierną kopią pętli, która rozjedzie się przy pierwszym
+    nowym członie.
+
+    Falsyfikator: wpisz w `_on_confirm` albo `_on_assign` własną pętlę po `skipped_breakdown`
+    zamiast wołania helpera → znacznik nie trafia do zdania tego handlera."""
+    from horreum.gui import grid
+    v, con = sciezka
+    wolane = []
+
+    def _znacznik(gest, **kw):
+        wolane.append(gest)
+        return " · <dom>"
+
+    monkeypatch.setattr(grid, "zdanie_pominiec", _znacznik)
+    dlg = ConfirmPathObjectsDialog(con, proposals=resolver.path_proposals(con),
+                                   now_fn=lambda: NOW_S2, parent=v)
+    dlg._on_confirm()
+    assert dlg.status.text().endswith(" · <dom>"), dlg.status.text()
+
+    class AcceptedLMC:
+        selected = ("LMC", None, "own", None)
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def exec(self):
+            return QDialog.Accepted
+
+    monkeypatch.setattr("horreum.gui.app.AssignObjectDialog", AcceptedLMC)
+    v._load_review()
+    _select_review_tag(v, "nameless_raw")
+    msgs = []
+    v.status_message.connect(msgs.append)
+    v._on_assign()
+    assert msgs[-1].endswith(" · <dom>"), msgs[-1]
+    assert len(wolane) == 2

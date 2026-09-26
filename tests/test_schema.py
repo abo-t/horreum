@@ -93,14 +93,76 @@ def test_szkielet_przyszly_pusty(tmp_path):
     con.close()
 
 
-def test_user_version_v18_po_migracji(tmp_path):
-    """0018 podnosi user_version do 18 (świeża baza leci 0002→…→0018 sekwencyjnie; wycofanie klatki).
+def test_user_version_v19_po_migracji(tmp_path):
+    """0019 podnosi user_version do 19 (świeża baza leci 0002→…→0019 sekwencyjnie; rodzaj i powód
+    nieczytelności kopii, P4-2).
 
     Pin JEST intencją: każda nowa migracja ma ten test PRZEWRÓCIĆ imiennie, żeby podniesienie
     wersji było gestem, a nie skutkiem ubocznym."""
     con = db.open_db(str(tmp_path / "h.db"))
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 18
-    assert db.SCHEMA_VERSION == 18
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 19
+    assert db.SCHEMA_VERSION == 19
+    con.close()
+
+
+def _loc_0019(con, lid, since):
+    """Klatka + kopia z zadanym markerem - surowy INSERT, bo test pyta BAZĘ, nie klingę."""
+    con.execute("INSERT INTO frame(id, kind, filetype, sha1_data, first_seen_at) "
+                "VALUES (?, 'light', 'fits', ?, '2026-09-26T00:00:00Z')", (lid, f"sha{lid}"))
+    con.execute("INSERT INTO location(id, frame_id, volume, path, unreadable_since) "
+                "VALUES (?, ?, 'V', ?, ?)", (lid, lid, f"/a/{lid}.fits", since))
+
+
+def test_0019_CHECK_rodzaj_i_powod_tylko_przy_markerze(tmp_path):
+    """STRAŻNIK W DDL (P4-2): rodzaj spoza słownika ('io'|'parse') i rodzaj/powód BEZ markera to
+    sprzeczność, którą baza odbija - pisarz, który zgasi marker i zapomni zdjąć diagnozę, nie
+    zostawi jej przy zdrowej kopii. Kolumny wchodzą przez `ADD COLUMN`, więc test dowodzi, że SQLite
+    realnie egzekwuje oba CHECK-i dołożone tą drogą.
+
+    Kierunek odwrotny (marker BEZ rodzaju) zostaje legalny: wiersz sprzed 0019 nie ma skąd go wziąć.
+
+    Falsyfikator: zdejmij którykolwiek `CHECK` z `0019_location_unreadable_reason.sql` → odpowiadający
+    mu `raises` czerwienieje."""
+    con = db.open_db(str(tmp_path / "h.db"))
+    _loc_0019(con, 1, None)                                  # kopia czytelna
+    _loc_0019(con, 2, "2026-09-26T10:00:00")                 # kopia oznaczona
+    with pytest.raises(sqlite3.IntegrityError):              # rodzaj bez markera
+        con.execute("UPDATE location SET unreadable_kind = 'io' WHERE id = 1")
+    with pytest.raises(sqlite3.IntegrityError):              # powód bez markera
+        con.execute("UPDATE location SET unreadable_reason = 'OSError: x' WHERE id = 1")
+    with pytest.raises(sqlite3.IntegrityError):              # rodzaj spoza słownika
+        con.execute("UPDATE location SET unreadable_kind = 'xyz' WHERE id = 2")
+    with pytest.raises(sqlite3.IntegrityError):              # zgaszenie SAMEGO markera
+        con.execute("UPDATE location SET unreadable_kind = 'parse' WHERE id = 2")
+        con.execute("UPDATE location SET unreadable_since = NULL WHERE id = 2")
+    con.execute("UPDATE location SET unreadable_kind = 'parse', unreadable_reason = 'ParseError: x' "
+                "WHERE id = 2")                              # przy markerze - legalne
+    con.execute("UPDATE location SET unreadable_since = NULL, unreadable_kind = NULL, "
+                "unreadable_reason = NULL WHERE id = 2")    # gaśnie RAZEM - legalne
+    _loc_0019(con, 3, "2026-09-26T11:00:00")                 # marker bez rodzaju - legalny
+    con.close()
+
+
+def test_0019_przyrost_na_bazie_v18_z_oznaczona_kopia(tmp_path):
+    """Baza v18 z kopią JUŻ oznaczoną przechodzi 0019 bez odmowy (CHECK nie odbija istniejących
+    wierszy - nowe kolumny wchodzą PUSTE), wiersz zostaje nietknięty, a druga migracja to no-op.
+    Backfillu nie ma: rodzaj takiej kopii pojawi się dopiero przy re-odczycie.
+
+    Falsyfikator: dopisz do 0019 `NOT NULL` albo backfill z tekstu → `migrate` wybucha na tym
+    wierszu albo kolumna przestaje być NULL."""
+    path = str(tmp_path / "v18.db")
+    con = db.connect(path)
+    for version, filename in db.MIGRATIONS:
+        if version <= 18:
+            con.executescript(db._migration_sql(filename))
+            con.execute(f"PRAGMA user_version = {int(version)}")
+    _loc_0019(con, 1, "2026-07-21T12:00:00")
+    con.commit()
+    assert db.migrate(con) == 19
+    row = con.execute("SELECT unreadable_since, unreadable_kind, unreadable_reason FROM location "
+                      "WHERE id = 1").fetchone()
+    assert tuple(row) == ("2026-07-21T12:00:00", None, None)
+    assert db.migrate(con) == 19                             # idempotencja
     con.close()
 
 

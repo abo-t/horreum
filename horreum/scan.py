@@ -251,7 +251,9 @@ class ScanRecord:
 
     `header is None` + `error` ustawione = plik nieczytelny/nierozpoznany (miękkie lądowanie W1):
     namiary (`path`/`size`/`mtime`) i `file_sha1` są, lecz nagłówka/odcisków sekcji brak →
-    degeneracja tożsamości + review wyżej.
+    degeneracja tożsamości + review wyżej. `error_kind` (P4-2) mówi, KTÓRA to niemożność: `'io'`
+    (system nie oddał bajtów) albo `'parse'` (parser nagłówka odmówił) - klasyfikowany tu, bo tylko
+    tu żyje obiekt wyjątku; wyżej zostaje już sam tekst, a z tekstu rodzaju się nie zgaduje.
 
     Odciski (brief §2):
       - `sha1_data`: sha1 sekcji DANYCH HDU (FITS) / bajtów attachmentu (XISF) — TOŻSAMOŚĆ
@@ -270,6 +272,7 @@ class ScanRecord:
     mtime: str                        # ISO-8601 UTC (brama przyrostowa)
     header: dict = field(default_factory=dict)   # pełny nagłówek, JSON-owalny; None gdy error
     error: object = None              # None gdy OK; tekst "Typ: opis" gdy nagłówek nieczytelny (W1)
+    error_kind: object = None         # None gdy OK; 'io' | 'parse' obok `error` (P4-2, `unreadable_kind_of`)
     sha1_data: object = None          # tożsamość frame'a; None = nieobliczalne (degeneracja wyżej)
     file_sha1: object = None          # sha1 całego pliku (fakt kopii)
     header_hash: object = None        # sha1 tekstu nagłówka; None dla XISF/W1
@@ -1108,14 +1111,30 @@ def _mtime_iso(st):
     return datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat()
 
 
+def unreadable_kind_of(exc):
+    """Rodzaj niemożności odczytu (P4-2) z OBIEKTU wyjątku - jedyny właściciel tej klasyfikacji
+    (miękkie lądowanie `scan_file` i backstop `scan_tree`); wyżej zostaje już sam tekst, a z tekstu
+    rodzaju się nie zgaduje.
+
+    `'io'` = system operacyjny nie oddał bajtów: `OSError` Z KODEM SYSTEMU (`errno` - brak dostępu,
+    plik znikł między listowaniem a odczytem, timeout SMB, katalog zamiast pliku). `'parse'` = bajty
+    przyszły, a czytnik nagłówka odmówił - w tym GOŁY `OSError("komunikat")` bez kodu systemu, bo
+    tak właśnie astropy odmawia zepsutego FITS-a („Empty or corrupt FITS file", „Header missing END
+    card", „No SIMPLE card found" - zmierzone sondą na `.venv-build` 2026-09-26). Samo
+    `isinstance(exc, OSError)` posłałoby więc usera sprawdzać dysk z plikiem, który jest do
+    zgłoszenia - dokładnie ten błąd, który rodzaj ma usunąć. `errno` to atrybut obiektu ustawiany
+    wyłącznie przy błędzie zgłoszonym przez system, nie wniosek z komunikatu."""
+    return "io" if isinstance(exc, OSError) and exc.errno is not None else "parse"
+
+
 def scan_file(path):
     """Zeskanuj jeden plik (FITS lub XISF) → `ScanRecord` (odciski + stat + nagłówek + karty).
     Czysty odczyt.
 
     Miękkie lądowanie (W1): nagłówek nieczytelny/nierozpoznany NIE przerywa skanu — czytnik meta
-    rzuca, my łapiemy i zwracamy `ScanRecord(header=None, error="Typ: opis")`; odciski sekcji
-    (`sha1_data`/`header_hash`/`cards`) wtedy None, ale `file_sha1` i namiary są wypełnione
-    (degeneracja tożsamości + frame/location powstaną; review nagłówka — wyżej).
+    rzuca, my łapiemy i zwracamy `ScanRecord(header=None, error="Typ: opis", error_kind='io'|'parse')`;
+    odciski sekcji (`sha1_data`/`header_hash`/`cards`) wtedy None, ale `file_sha1` i namiary są
+    wypełnione (degeneracja tożsamości + frame/location powstaną; review nagłówka - wyżej).
 
     Hasze (brief §2): plik NIEskompresowany → `file_sha1` i `sha1_data` JEDNYM przebiegiem
     (`sha1_of_span`; pozycje sekcji z nagłówków przed odczytem treści); CompImageHDU →
@@ -1144,9 +1163,10 @@ def scan_file(path):
             header, cards = meta.header, meta.cards
             header_hash, hdu_index, compressed = meta.header_hash, meta.hdu_index, meta.compressed
             span = (meta.datloc, meta.datspan)
-        error = None
+        error = error_kind = None
     except Exception as exc:              # W1: dowolny błąd czytnika → review, nie crash pętli
         error = f"{type(exc).__name__}: {exc}"
+        error_kind = unreadable_kind_of(exc)   # P4-2: rodzaj TERAZ, póki żyje obiekt wyjątku
     if compressed:
         file_sha1 = sha1_of(spath)
         try:
@@ -1157,7 +1177,7 @@ def scan_file(path):
         file_sha1, sha1_data = sha1_of_span(spath, span)
     return ScanRecord(
         path=spath, size_bytes=st.st_size, mtime=mtime,
-        header=header, error=error,
+        header=header, error=error, error_kind=error_kind,
         sha1_data=sha1_data, file_sha1=file_sha1,
         header_hash=header_hash, hdu_index=hdu_index, compressed=compressed, cards=cards,
     )
@@ -1411,7 +1431,7 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
         summary.frames_existing += 1
         if repo.refresh_location_unreadable(
                 con, location_id=loc["id"], sha1_data=frame_row["sha1_data"], path=rec.path,
-                mtime=rec.mtime, reason=rec.error, now=now, actor=actor):
+                mtime=rec.mtime, reason=rec.error, kind=rec.error_kind, now=now, actor=actor):
             summary.frame_review += 1
         return
 
@@ -1419,7 +1439,11 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
     # Marker czytelności kopii (#13) dla OBU gałęzi refresh_location: udany odczyt (readable) gasi
     # marker (None); rekord nieczytelny wpadający tu przez DEGENERACJĘ (podmiana treści na
     # nieczytelną) trzyma/zakłada marker (istniejący timestamp albo `now`) — marker ma zostać, nie zgasnąć.
+    # Rodzaj i powód (P4-2) idą za markerem: udany odczyt podaje None/None (potwierdzenie, że nie ma
+    # czego tłumaczyć), degeneracja - rodzaj i diagnozę TEJ próby z rekordu.
     unreadable_after = None if readable else (loc["unreadable_since"] or now)
+    kind_after = None if readable else rec.error_kind
+    reason_after = None if readable else rec.error
     if sha1_data != frame_row["sha1_data"]:            # PODMIANA TREŚCI pod znaną ścieżką
         frame_id, created = repo.upsert_frame(
             con, sha1_data=sha1_data, sha1_data_uncomputable=uncomputable,
@@ -1451,6 +1475,7 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
             con, location_id=loc["id"], frame_id=frame_id, mtime=rec.mtime,
             file_sha1=rec.file_sha1, header_hash=rec.header_hash, hdu_index=rec.hdu_index,
             compressed=rec.compressed, size_bytes=rec.size_bytes, unreadable_since=unreadable_after,
+            unreadable_kind=kind_after, unreadable_reason=reason_after,
             present=1, now=now, actor=actor)
         summary.locations_refreshed += refreshed["facts"]
         return
@@ -1461,6 +1486,7 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
         con, location_id=loc["id"], frame_id=frame_id, mtime=rec.mtime,
         file_sha1=rec.file_sha1, header_hash=rec.header_hash, hdu_index=rec.hdu_index,
         compressed=rec.compressed, size_bytes=rec.size_bytes, unreadable_since=unreadable_after,
+        unreadable_kind=kind_after, unreadable_reason=reason_after,
         present=1, now=now, actor=actor,
         raw_json=json.dumps(rec.header, ensure_ascii=False) if readable else None,
         cards=rec.cards, hot_fields=extract_header(rec.header) if readable else None,
@@ -1697,6 +1723,8 @@ def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now,
     zależy od tego, czy ścieżka jest ZNANA (#13): ZNANA → `refresh_location_unreadable` (marker
     `unreadable_since`, idempotentnie — powtórna awaria to cichy no-op, nie spam review); NIEZNANA →
     `flag_frame_review(sha1='?')` (backstop bez tożsamości — brak kotwicy UNIQUE, może się powtórzyć).
+    Rodzaj awarii (P4-2) nadaje WYŁĄCZNIE strona odczytu; wyjątek z `ingest_record` zostawia rodzaj
+    nieznany, bo nie jest faktem o pliku.
     `now` jawny (ISO-8601) — deterministyczne testy. Zwraca `ScanSummary`.
 
     BRAMA PRZYROSTOWA (§3.B) — aktywna ⟺ `volume != '?'`. Gdy znamy trwały serial woluminu,
@@ -1741,15 +1769,29 @@ def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now,
                 progress(i, total, spath, summary)
             continue
         summary.files += 1
+        # DWA BLOKI, BO RODZAJ JEST FAKTEM O PLIKU (P4-2). Wyjątek z ODCZYTU (`stat`, brama,
+        # `scan_file`) mówi, czego plik nie oddał, i `unreadable_kind_of` klasyfikuje go z obiektu.
+        # Wyjątek z ZAPISU (`ingest_record`: błąd bazy, bug w naszym kodzie) przychodzi PO udanym
+        # odczycie, więc jest faktem o NAS, nie o pliku - rodzaj zostaje `None` („nieznany"). Jeden
+        # `try` na oba kroki dawał mu `'parse'`, czyli „nagłówek nie przechodzi parsera", i user
+        # zgłaszał zdrowy plik. Marker przy nieudanym zapisie i tak stawiamy: wymusza re-odczyt przez
+        # bramę, więc zapis ponawia się sam przy następnym skanie, zamiast utknąć pod pominięciem.
+        blad = kind = rec = None
         try:
             skip = gate_on and _already_scanned(con, volume, spath, _mtime_iso(path.stat()))
             if skip:
                 summary.skipped += 1
             else:
                 rec = scan_file(spath)
+        except Exception as exc:                           # backstop W1, strona ODCZYTU
+            blad, kind = exc, unreadable_kind_of(exc)
+        if rec is not None:
+            try:
                 ingest_record(con, rec, volume=volume, drive_letter=drive_letter, tier=tier,
                               now=now, summary=summary)
-        except Exception as exc:                           # backstop W1: pojedynczy plik nie wywala skanu
+            except Exception as exc:                       # backstop W1, strona ZAPISU - rodzaj None
+                blad = exc
+        if blad is not None:                               # backstop W1: pojedynczy plik nie wywala skanu
             # Błąd I/O w scan_file (hasze są POZA try W1 — otwarcie/odczyt pliku propaguje) na ZNANEJ
             # ścieżce: oznacz marker `unreadable_since` przez klingę (#13) zamiast flagować sha1='?'
             # co skan. Bez tego marker znosi bramę → plik, który przestał się OTWIERAĆ, generowałby
@@ -1761,7 +1803,9 @@ def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now,
             # przeczytaj ją ponownie" — dla nieistniejącego pliku to kłamstwo bez wyjścia, a przy
             # `present=0` byłoby hybrydą zakazaną przez inwariant D-V-5. Rozstrzyga `_gone` (lstat +
             # errno), nie domysł; zniknięcie idzie do `mark_location_vanished` (ta sama klinga).
-            reason = f"{type(exc).__name__}: {exc}"
+            #
+            # RODZAJ (P4-2) sklasyfikowany wyżej, przy obiekcie wyjątku - tu zostaje sam tekst.
+            reason = f"{type(blad).__name__}: {blad}"
             row = con.execute(
                 "SELECT l.id, l.mtime, f.sha1_data FROM location l JOIN frame f ON f.id = l.frame_id "
                 "WHERE l.volume = ? AND l.path = ?",
@@ -1774,7 +1818,7 @@ def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now,
             elif row is not None:
                 if repo.refresh_location_unreadable(
                         con, location_id=row["id"], sha1_data=row["sha1_data"], path=spath,
-                        mtime=row["mtime"], reason=reason, now=now):
+                        mtime=row["mtime"], reason=reason, kind=kind, now=now):
                     summary.frame_review += 1
             else:
                 repo.flag_frame_review(con, sha1="?", path=spath, reason=reason, now=now)

@@ -60,6 +60,10 @@ from importlib import resources
 # by je przejęła — inaczej niż przy `superseded_by`). Kolumna wchodzi PUSTA; strażnika w DDL nie
 # ma i mieć nie może (warunek jest zdaniem o `location`), więc pilnuje go klinga, a deklaratywnie
 # `audit.retire_invariants` + kryterium §5.17 — wzorem `supersede_invariants`/§5.15.
+# 0019 to PRZYROST (P4-2): location.unreadable_kind ('io'|'parse') + location.unreadable_reason -
+# marker 0006 niósł sam CZAS, więc powierzchnia oskarżała plik także wtedy, gdy zawiódł dysk. STAN,
+# nie dziennik: powód szukany w `event` po ścieżce gubił się przy przemianowanej kopii. CHECK wiąże
+# oba fakty z markerem (powód bez markera = sprzeczność); marker bez nich zostaje legalny (sprzed 0019).
 MIGRATIONS = [
     (2, "0002_initial.sql"),
     (3, "0003_writeback.sql"),
@@ -78,6 +82,7 @@ MIGRATIONS = [
     (16, "0016_integration_offset.sql"),
     (17, "0017_object_cleared_memory.sql"),
     (18, "0018_frame_retired.sql"),
+    (19, "0019_location_unreadable_reason.sql"),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 _KNOWN_VERSIONS = frozenset({0} | {v for v, _ in MIGRATIONS})

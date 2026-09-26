@@ -1398,7 +1398,9 @@ def test_brama_nie_pomija_kopii_oznaczonej_nieczytelnej(tmp_path):
 
 def test_ingest_nieczytelna_potem_wyzdrowienie_gasi_marker(tmp_path):
     """#13: kopia nieczytelna → później znów czytelna przy TYM SAMYM mtime → marker ZGASZONY
-    (`location.refreshed` z diffem `unreadable_since`), mimo że pozostałe fakty kopii są identyczne."""
+    (`location.refreshed` z diffem `unreadable_since`), mimo że pozostałe fakty kopii są identyczne.
+    P4-2: rodzaj i powód z rekordu lądują w kolumnach kopii i gasną razem z markerem - ich przejście
+    stoi w tym samym payloadzie wyzdrowienia."""
     con = _db(tmp_path)
     tree = tmp_path / "t"; tree.mkdir()
     f = _light(tree / "l.fits", 1)
@@ -1406,18 +1408,25 @@ def test_ingest_nieczytelna_potem_wyzdrowienie_gasi_marker(tmp_path):
     good = scan_file(str(f))
     # 1) staje się nieczytelna (bajty bez zmian) → marker ustawiony
     bad = ScanRecord(path=good.path, size_bytes=good.size_bytes, mtime=good.mtime,
-                     header=None, error="OSError: NAS timeout", file_sha1=good.file_sha1)
+                     header=None, error="OSError: NAS timeout", error_kind="io",
+                     file_sha1=good.file_sha1)
     ingest_record(con, bad, volume="VOL1", now="2027-01-01T00:00:00+00:00", summary=ScanSummary())
-    assert con.execute("SELECT unreadable_since FROM location").fetchone()[0] == "2027-01-01T00:00:00+00:00"
+    row = con.execute("SELECT unreadable_since, unreadable_kind, unreadable_reason FROM location"
+                      ).fetchone()
+    assert tuple(row) == ("2027-01-01T00:00:00+00:00", "io", "OSError: NAS timeout")
     # 2) wyzdrowienie: czytelna znów, TEN SAM mtime i te same bajty → marker gaśnie
     s = ScanSummary()
     ingest_record(con, good, volume="VOL1", now="2028-01-01T00:00:00+00:00", summary=s)
-    assert con.execute("SELECT unreadable_since FROM location").fetchone()[0] is None
+    row = con.execute("SELECT unreadable_since, unreadable_kind, unreadable_reason FROM location"
+                      ).fetchone()
+    assert tuple(row) == (None, None, None)
     assert (s.frames_existing, s.locations_refreshed) == (1, 1)
     ev = con.execute(
         "SELECT payload FROM event WHERE verb='location.refreshed' ORDER BY id DESC LIMIT 1").fetchone()
     assert json.loads(ev["payload"]) == {
-        "unreadable_since": {"before": "2027-01-01T00:00:00+00:00", "after": None}}
+        "unreadable_since": {"before": "2027-01-01T00:00:00+00:00", "after": None},
+        "unreadable_kind": {"before": "io", "after": None},
+        "unreadable_reason": {"before": "OSError: NAS timeout", "after": None}}
     con.close()
 
 
@@ -1495,6 +1504,173 @@ def test_backstop_nieznana_sciezka_flag_sha1_placeholder(tmp_path, monkeypatch):
     assert s.frame_review == 1
     assert con.execute("SELECT target FROM event WHERE verb='frame.review'").fetchone()["target"] == "sha1:?"
     assert con.execute("SELECT count(*) FROM location").fetchone()[0] == 0    # nic nie powstało
+    con.close()
+
+
+# --- P4-2: RODZAJ nieczytelności kopii - klasyfikacja z OBIEKTU wyjątku, nie z tekstu ---
+
+def _stan_markera(con):
+    return tuple(con.execute("SELECT unreadable_since, unreadable_kind, unreadable_reason "
+                             "FROM location").fetchone())
+
+
+def test_unreadable_kind_of_rozstrzyga_kod_systemu_nie_typ():
+    """P4-2: `'io'` wyłącznie dla `OSError` Z KODEM SYSTEMU (`errno`); goły `OSError("komunikat")`
+    - tak astropy odmawia zepsutego FITS-a - oraz każdy nie-`OSError` to `'parse'`.
+
+    Falsyfikator: zamień warunek `unreadable_kind_of` na samo `isinstance(exc, OSError)` →
+    asercja na gołym `OSError` czerwienieje."""
+    import errno
+    kind_of = scan_module.unreadable_kind_of
+    assert kind_of(PermissionError(errno.EACCES, "Permission denied")) == "io"
+    assert kind_of(FileNotFoundError(errno.ENOENT, "No such file or directory")) == "io"
+    assert kind_of(TimeoutError(errno.ETIMEDOUT, "SMB timeout")) == "io"
+    assert kind_of(OSError(errno.EIO, "Input/output error")) == "io"
+    assert kind_of(OSError("Empty or corrupt FITS file")) == "parse"
+    assert kind_of(ValueError("nie XISF monolithic")) == "parse"
+
+
+def test_scan_file_error_kind_parse_zepsuty_fits_i_xisf(tmp_path):
+    """P4-2: bajty przyszły, parser odmówił → `error_kind == 'parse'` - dla FITS także wtedy, gdy
+    astropy rzuca GOŁY `OSError` („No SIMPLE card found"). To ten przypadek przesądził, że
+    klasyfikacja idzie po `errno`, a nie po typie: po samym typie zepsuty FITS dostałby etykietę
+    „dysk/dostęp" i wysłał usera na dysk z plikiem do zgłoszenia. Czytelny plik rodzaju nie ma.
+
+    Falsyfikator: `unreadable_kind_of` = samo `isinstance(exc, OSError)` → asercja FITS
+    czerwienieje; usuń `error_kind = unreadable_kind_of(exc)` ze `scan_file` → obie."""
+    zly_fits = tmp_path / "zly.fits"
+    zly_fits.write_bytes(b"NOTFITS!" + b"\x00" * 2872)
+    rec = scan_file(str(zly_fits))
+    assert rec.header is None and rec.error.startswith("OSError: ")
+    assert rec.error_kind == "parse"
+    zly_xisf = tmp_path / "zly.xisf"
+    zly_xisf.write_bytes(b"NOTXISF!" + b"\x00" * 20)
+    rec = scan_file(str(zly_xisf))
+    assert rec.header is None and rec.error_kind == "parse"
+    assert scan_file(str(_light(tmp_path / "ok.fits", 1))).error_kind is None
+
+
+def test_scan_file_error_kind_io_gdy_system_nie_oddal_bajtow(tmp_path, monkeypatch):
+    """P4-2: czytnik nagłówka pada na błędzie SYSTEMU (udział zablokował plik na chwilę odczytu
+    nagłówka), a hasze przechodzą → rekord z `error_kind == 'io'` obok tekstu diagnozy.
+
+    Falsyfikator: usuń `error_kind = unreadable_kind_of(exc)` ze `scan_file` → `error_kind` None."""
+    import errno
+    f = _light(tmp_path / "l.fits", 1)
+
+    def odmowa(path):
+        raise PermissionError(errno.EACCES, "Permission denied", path)
+    monkeypatch.setattr("horreum.scan.read_fits_meta", odmowa)
+    rec = scan_file(str(f))
+    assert rec.header is None and rec.error.startswith("PermissionError: ")
+    assert rec.error_kind == "io"
+    assert rec.file_sha1 == hashlib.sha1(f.read_bytes()).hexdigest()   # bajty SĄ - zawiódł dostęp
+
+
+def test_scan_tree_znana_kopia_blad_systemu_rodzaj_io_w_kolumnach(tmp_path, monkeypatch):
+    """P4-2, gałąź „bajty bez zmian": znana kopia, nagłówek pada błędem systemu → klinga zapisuje
+    `unreadable_kind='io'` i diagnozę BEZ prefiksu dziennika w kolumnach kopii.
+
+    Falsyfikator: usuń `kind=rec.error_kind` z wołania klingi w `ingest_record` → TypeError
+    (parametr wymagany); podaj tam stałą → asercja rodzaju czerwienieje."""
+    import errno
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    _light(tree / "l.fits", 1)
+    scan_tree(con, tree, now=NOW)
+
+    def odmowa(path):
+        raise PermissionError(errno.EACCES, "Permission denied", path)
+    monkeypatch.setattr("horreum.scan.read_fits_meta", odmowa)
+    scan_tree(con, tree, now="2027-01-01T00:00:00+00:00")
+    since, kind, reason = _stan_markera(con)
+    assert (since, kind) == ("2027-01-01T00:00:00+00:00", "io")
+    assert reason.startswith("PermissionError: ") and "kopia nieczytelna" not in reason
+    con.close()
+
+
+def test_scan_tree_znana_kopia_zepsuty_naglowek_rodzaj_parse_w_kolumnach(tmp_path):
+    """P4-2, gałąź DEGENERACJI: znana kopia dostaje nowe bajty z zepsutym nagłówkiem (bajty SĄ,
+    parser odmawia) → `refresh_location` zakłada marker i zapisuje `unreadable_kind='parse'` +
+    diagnozę z rekordu. Koniec do końca przez `scan_tree`, na prawdziwym pliku.
+
+    Falsyfikator: podaj w gałęzi podmiany `unreadable_kind=None` zamiast `kind_after` →
+    asercja rodzaju czerwienieje."""
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    f = _light(tree / "l.fits", 1)
+    scan_tree(con, tree, now=NOW)
+    f.write_bytes(b"NOTFITS!" + b"\x00" * 2872)
+    st = f.stat()
+    os.utime(f, (st.st_atime, st.st_mtime + 100))
+    scan_tree(con, tree, now="2027-01-01T00:00:00+00:00")
+    since, kind, reason = _stan_markera(con)
+    assert (since, kind) == ("2027-01-01T00:00:00+00:00", "parse")
+    assert reason.startswith("OSError: ")
+    con.close()
+
+
+def test_backstop_rodzaj_z_obiektu_wyjatku(tmp_path, monkeypatch):
+    """P4-2: backstop `scan_tree` (hasze poza try W1 → otwarcie pliku pada błędem systemu)
+    klasyfikuje wyjątek WPROST i klinga zapisuje `unreadable_kind='io'` + diagnozę w kolumnach.
+
+    Falsyfikator: zamień `unreadable_kind_of(exc)` w backstopie na stałą `'parse'` → asercja
+    rodzaju czerwienieje."""
+    import errno
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    _light(tree / "l.fits", 1)
+    scan_tree(con, tree, now=NOW)
+
+    def boom(path):
+        raise PermissionError(errno.EACCES, "Permission denied", path)
+    monkeypatch.setattr("horreum.scan.scan_file", boom)
+    s = scan_tree(con, tree, now="2027-01-01T00:00:00+00:00")
+    assert s.frame_review == 1
+    since, kind, reason = _stan_markera(con)
+    assert (since, kind) == ("2027-01-01T00:00:00+00:00", "io")
+    assert reason.startswith("PermissionError: ")
+    con.close()
+
+
+def test_backstop_wyjatek_ZAPISU_nie_jest_faktem_o_pliku(tmp_path, monkeypatch):
+    """P4-2/Z2: backstop rozdziela ODCZYT i ZAPIS. Dwie znane kopie w jednym przebiegu:
+    `a.fits` - `scan_file` pada błędem systemu (errno 13) → `'io'`, jak dotąd; `b.fits` - plik
+    przeczytany, a `ingest_record` rzuca `RuntimeError` (bug u nas) → marker stoi (wymusza ponowny
+    zapis przez bramę), ale rodzaj zostaje NULL, a powód niesie „RuntimeError". Z jednym `try`
+    `b.fits` dostawało `'parse'`, czyli „nagłówek nie przechodzi parsera" o zdrowym pliku.
+
+    Falsyfikator: scal oba bloki `try` w backstopie z powrotem w jeden (albo klasyfikuj wyjątek
+    zapisu przez `unreadable_kind_of`) → `b.fits` dostaje `'parse'` i asercja rodzaju czerwienieje."""
+    import errno
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    fa, fb = _light(tree / "a.fits", 1), _light(tree / "b.fits", 2)
+    scan_tree(con, tree, now=NOW)
+    prawdziwy_odczyt, prawdziwy_zapis = scan_module.scan_file, scan_module.ingest_record
+
+    def odczyt(path):
+        if path == str(fa):
+            raise PermissionError(errno.EACCES, "Permission denied", path)
+        return prawdziwy_odczyt(path)
+
+    def zapis(con_, rec, **kw):
+        if rec.path == str(fb):
+            raise RuntimeError("bug w ingest")
+        return prawdziwy_zapis(con_, rec, **kw)
+    monkeypatch.setattr("horreum.scan.scan_file", odczyt)
+    monkeypatch.setattr("horreum.scan.ingest_record", zapis)
+    s = scan_tree(con, tree, now="2027-01-01T00:00:00+00:00")
+    assert s.frame_review == 2
+    stan = {r["path"]: (r["unreadable_since"], r["unreadable_kind"], r["unreadable_reason"])
+            for r in con.execute("SELECT path, unreadable_since, unreadable_kind, "
+                                 "unreadable_reason FROM location")}
+    since_a, kind_a, reason_a = stan[str(fa)]
+    since_b, kind_b, reason_b = stan[str(fb)]
+    assert (since_a, kind_a) == ("2027-01-01T00:00:00+00:00", "io")
+    assert reason_a.startswith("PermissionError: ")
+    assert (since_b, kind_b) == ("2027-01-01T00:00:00+00:00", None)   # rodzaj NIEZNANY, nie 'parse'
+    assert reason_b == "RuntimeError: bug w ingest"
     con.close()
 
 

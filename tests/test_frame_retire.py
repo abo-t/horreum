@@ -113,7 +113,9 @@ def test_guard_odmawia_klatce_ZASTAPIONEJ_wlasnym_powodem():
 
 def test_rozbicie_powodow_sumuje_sie_do_pominietych():
     """Właścicielem składu jest `RetireGesture.skipped_breakdown`, nie literał w GUI — człon
-    dołożony później wpadałby do sumy „z M" i znikał z rozbicia, czyli stamtąd, gdzie tłumaczy."""
+    dołożony później wpadałby do sumy „z M" i znikał z rozbicia, czyli stamtąd, gdzie tłumaczy.
+    Klucz i18n każdego członu pilnuje bramka wspólna z `ObjectGesture`:
+    `test_object_gesture.py::test_KAZDY_czlon_rozbicia_ma_klucz_w_katalogu[RetireGesture]`."""
     con = _baza()
     zniknieta, _ = _zniknieta(con, "aaa")
     zywa = _klatka(con, "bbb")
@@ -246,9 +248,10 @@ def test_PIN_rdzen_i_GUI_licza_to_samo_po_wycofaniu(rdzen, gui):
                                      "filetype_unknown"])
 def test_rozklad_populacji_domyka_sie_po_wycofaniu(wariant):
     """`total` NIE MA żadnego guardu, a sześć kubełków ma — bez klasy ucieczki `retired` bramka
-    §5.7a zapaliłaby się na PRAWIDŁOWEJ pracy programu. Dwa warianty są tu nietrywialne:
-    `headerless` i `filetype_unknown` to SĄSIEDNIE klasy ucieczki, więc gdyby nie dostały guardu,
-    wycofana klatka liczyłaby się DWA RAZY i suma przestrzeliłaby `total`."""
+    §5.7a zapaliłaby się na PRAWIDŁOWEJ pracy programu. Wariant `headerless` jest tu nietrywialny:
+    to SĄSIEDNIA klasa ucieczki, więc gdyby nie dostała guardu, wycofana klatka liczyłaby się DWA
+    RAZY i suma przestrzeliłaby `total`. Wariant `filetype_unknown` (light bez formatu) od R-S4-10
+    siedzi w kubełku `nameless` - pilnuje, że format nieznany liczy się w rozkładzie RAZ."""
     con = _baza()
     oid = repo.upsert_object(con, canon="NGC7000", catalog="NGC", kind=None, now=NOW)[0]
     fid, _ = _zniknieta(con, wariant)
@@ -283,9 +286,10 @@ def test_rozklad_populacji_domyka_sie_po_zastapieniu(wariant):
     `nameless_raw`, a wypycha ją stamtąd guard zastąpienia. Słusznie wypycha (klatka, której treść
     żyje dalej w następczyni, nie jest ROBOTĄ) - nie miała tylko gdzie się podziać.
 
-    `headerless` i `filetype_unknown` są nietrywialne z tego samego powodu, co przy wycofaniu: to
-    SĄSIEDNIE klasy ucieczki, więc gdyby nie dostały guardu, klatka liczyłaby się DWA RAZY i suma
-    przestrzeliłaby `total` - bramka zapaliłaby się w drugą stronę."""
+    `headerless` jest nietrywialny z tego samego powodu, co przy wycofaniu: to SĄSIEDNIA klasa
+    ucieczki, więc gdyby nie dostała guardu, klatka liczyłaby się DWA RAZY i suma przestrzeliłaby
+    `total` - bramka zapaliłaby się w drugą stronę. `filetype_unknown` od R-S4-10 jest wariantem
+    kubełka `nameless` (format nieznany), nie osobną klasą."""
     con = _baza()
     oid = repo.upsert_object(con, canon="NGC7000", catalog="NGC", kind=None, now=NOW)[0]
     nastepczyni = _klatka(con, "nastepczyni")

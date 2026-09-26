@@ -193,11 +193,14 @@ def add_location(con, *, frame_id, volume, path, drive_letter=None, tier=None, m
 # jest zmianą faktu kopii — bez tego early-return `not changed` nigdy by markera nie zgasił.
 # `present` TU (P5/D-V-6): udany re-odczyt DOWODZI obecności, więc powrót kopii (0→1) jest zmianą
 # faktu i idzie do payloadu `location.refreshed` — ślad zmartwychwstania bez osobnego czasownika.
+# `unreadable_kind`/`unreadable_reason` TU (P4-2): rodzaj i powód żyją i gasną RAZEM z markerem
+# (CHECK 0019 odbija powód bez markera), więc wyzdrowienie musi je zdjąć tym samym UPDATE-em,
+# a ich przejście - jak przejście markera - jest śladem w payloadzie `location.refreshed`.
 # SPOT: każda nazwa z tej krotki MUSI występować w literale UPDATE niżej (pinuje test strukturalny
 # `test_presence.py::test_location_facts_pokrywaja_update`) — inaczej diff wykrywa zmianę, której
 # UPDATE nie zapisuje, i event leci w nieskończoność co skan.
 _LOCATION_FACTS = ("mtime", "file_sha1", "header_hash", "hdu_index", "compressed", "size_bytes",
-                   "unreadable_since", "present")
+                   "unreadable_since", "unreadable_kind", "unreadable_reason", "present")
 
 
 def rebind_location(con, *, location_id, frame_after, now, actor="scan"):
@@ -643,7 +646,8 @@ def restore_frames(con, *, frame_ids, now, uid="local"):
 
 
 def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_hash,
-                     hdu_index, compressed, size_bytes, unreadable_since, present, now,
+                     hdu_index, compressed, size_bytes, unreadable_since, unreadable_kind,
+                     unreadable_reason, present, now,
                      actor="scan", raw_json=None, cards=None, hot_fields=None, camera_id=None,
                      kind=None):
     """Re-odczyt ZNANEJ `(volume, path)` o NIEZMIENIONEJ tożsamości frame'a — kontrakt pełny
@@ -664,6 +668,12 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
       idzie do payloadu `location.refreshed` jako `{unreadable_since: {before, after}}`. Parametr
       WYMAGANY (bez domyślnego): `None` znaczy „POTWIERDZAM udany odczyt pliku", nie „nie wiem" —
       domyślne `None` byłoby cichym wektorem gaszenia alarmu, gdyby wołający zapomniał go policzyć.
+    - **`unreadable_kind`/`unreadable_reason` (P4-2)**: rodzaj (`'io'|'parse'`) i diagnoza bieżącej
+      awarii - TEN SAM reżim dowodowy co marker i dlatego też WYMAGANE: udany odczyt podaje `None`/`None`
+      („potwierdzam, że nie ma czego tłumaczyć"), degeneracja podaje rodzaj i tekst z rekordu. Gasną
+      RAZEM z markerem (CHECK 0019 odbija powód bez markera), a ich przejście idzie do payloadu
+      `location.refreshed` tak samo jak przejście markera. Nazwy z prefiksem, bo `kind` niżej to
+      rodzaj KLATKI z nowego zeznania - inna oś.
     - **`present` (P5, D-V-6)**: obecność kopii — TEN SAM reżim dowodowy co `unreadable_since`.
       Parametr WYMAGANY: `1` znaczy „POTWIERDZAM, że plik pod tą ścieżką ISTNIEJE" (wołający właśnie
       go zestatował/przeczytał), nie „pewnie jest". Zmartwychwstanie (0→1) jest zmianą faktu, więc
@@ -680,12 +690,14 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
     historia mieszka w `event`."""
     after = {"mtime": mtime, "file_sha1": file_sha1, "header_hash": header_hash,
              "hdu_index": hdu_index, "compressed": compressed, "size_bytes": size_bytes,
-             "unreadable_since": unreadable_since, "present": present}
+             "unreadable_since": unreadable_since, "unreadable_kind": unreadable_kind,
+             "unreadable_reason": unreadable_reason, "present": present}
     result = {"facts": False, "header": False, "rederived": False}
     with _immediate(con):
         row = con.execute(
             "SELECT mtime, file_sha1, header_hash, hdu_index, compressed, size_bytes, "
-            "unreadable_since, present FROM location WHERE id = ?", (location_id,)).fetchone()
+            "unreadable_since, unreadable_kind, unreadable_reason, present "
+            "FROM location WHERE id = ?", (location_id,)).fetchone()
         if row is None:
             raise ValueError(f"location:{location_id} nie istnieje")
         changed = {k: {"before": row[k], "after": after[k]}
@@ -694,10 +706,10 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
             return result
         con.execute(
             "UPDATE location SET mtime = ?, file_sha1 = ?, header_hash = ?, hdu_index = ?, "
-            "compressed = ?, size_bytes = ?, unreadable_since = ?, present = ?, "
-            "last_verified_at = ? WHERE id = ?",
+            "compressed = ?, size_bytes = ?, unreadable_since = ?, unreadable_kind = ?, "
+            "unreadable_reason = ?, present = ?, last_verified_at = ? WHERE id = ?",
             (mtime, file_sha1, header_hash, hdu_index, compressed, size_bytes, unreadable_since,
-             present, now, location_id))
+             unreadable_kind, unreadable_reason, present, now, location_id))
         emit_event(con, actor=actor, verb="location.refreshed",
                    target=f"location:{location_id}", now=now, payload=changed)
         result["facts"] = True
@@ -746,13 +758,14 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
     return result
 
 
-# Prefiks powodu w dzienniku przy oznaczeniu kopii (#13) — JEDEN właściciel frazy. Powierzchnia,
-# która sama nazywa się „Kopie nieczytelne", zdejmuje go przy wyświetlaniu (`gui.app._copy_reason`,
-# Z6), żeby to diagnoza („ParseError: …") zajmowała kolumnę, nie powtórzony wstęp.
+# Prefiks powodu w dzienniku przy oznaczeniu kopii (#13) - JEDEN właściciel frazy. Od P4-2 żyje
+# WYŁĄCZNIE w `event.reason`: kolumna `location.unreadable_reason` niesie samą diagnozę („Typ: opis"),
+# bo powierzchnia i tak nazywa się „Kopie nieczytelne", a prefiks w stanie trzeba by zdejmować przy
+# każdym odczycie.
 UNREADABLE_REASON_PREFIX = "kopia nieczytelna: "
 
 
-def refresh_location_unreadable(con, *, location_id, sha1_data, path, mtime, reason,
+def refresh_location_unreadable(con, *, location_id, sha1_data, path, mtime, reason, kind,
                                 now, actor="scan"):
     """Znana ścieżka, plik NIECZYTELNY, bajty NIEZMIENIONE (R3-b1, #13): refresh mtime + ZNACZNIK
     `unreadable_since` (marker czytelności kopii w STANIE) + `event(frame.review, „kopia
@@ -776,24 +789,54 @@ def refresh_location_unreadable(con, *, location_id, sha1_data, path, mtime, rea
     Bez tego kopia, która wróciła po zniknięciu i znów padła na odczycie, zostawałaby `present=0`
     z markerem, czyli w hybrydzie zakazanej przez inwariant `present=0 ⇒ unreadable_since IS NULL`.
 
-    ZWRACA bool (czy coś zmieniono). Zmiana zachodzi gdy `mtime` się różni LUB marker jest NULL
-    (pierwsze oznaczenie) LUB kopia była oznaczona jako zniknięta (`present=0` → powrót). QUIET:
-    powtórna awaria bez zmiany mtime na już-oznaczonej i obecnej kopii = cichy no-op (`False`, BEZ
-    eventu) — stan już alarmuje, dziennik bez spamu review co skan."""
+    RODZAJ I POWÓD (P4-2): `kind` (`'io'` - system nie oddał bajtów, `'parse'` - bajty przyszły, parser
+    nagłówka odmówił) i `reason` („Typ: opis") idą do kolumn `unreadable_kind`/`unreadable_reason`,
+    żeby powierzchnia umiała powiedzieć, KTÓRA to sytuacja, zamiast oskarżać plik. Klasyfikuje
+    wołający, w miejscu, gdzie żyje obiekt wyjątku (`scan.unreadable_kind_of`) - tu nie ma czego
+    zgadywać z tekstu. `kind=None` jest legalne (rodzaj nieznany, jak w wierszach sprzed 0019).
+    ASYMETRIA CZASU, świadoma: marker trzyma PIERWSZĄ awarię, a rodzaj i powód opisują OSTATNIĄ próbę.
+    Marker znaczy „kopia JEST nieczytelna" - bieżący fakt - więc przyczyna ma być bieżąca: przyczyna
+    sprzed tygodnia przy dzisiejszym timeoucie SMB odesłałaby usera do złego winnego.
+
+    ZMIANA SAMEJ DIAGNOZY przy stojącym alarmie (ten sam mtime, marker jest, kopia obecna) to zmiana
+    FAKTU, więc UPDATE - ale bez drugiego `frame.review`: dziennik już alarmuje o tej kopii, a review
+    co zmianę tekstu wyjątku byłoby spamem, którego QUIET zakazuje. Ślad idzie jako
+    `location.refreshed` `{unreadable_kind: {before, after}, unreadable_reason: {...}}` (tylko pola
+    zmienione) - ten sam kształt, którym `refresh_location` opisuje fakty kopii. Każdy inny zapis
+    (pierwsze oznaczenie, nowy mtime, powrót po zniknięciu) podnosi alarm `frame.review`, który
+    niesie diagnozę w `reason` (z prefiksem) i rodzaj w payloadzie - dziennik zostaje kompletny także
+    wtedy, gdy stan przestawi się kolejną próbą.
+
+    ZWRACA bool: czy podniesiono ALARM (nowy `frame.review`) - to jedyne, co wołający liczy
+    (`summary.frame_review`). Alarm zachodzi, gdy `mtime` się różni LUB marker jest NULL (pierwsze
+    oznaczenie) LUB kopia była oznaczona jako zniknięta (`present=0` → powrót). `False` znaczy albo
+    cichy no-op (powtórna awaria z tą samą diagnozą - BEZ eventu, stan już alarmuje), albo zapis
+    samej diagnozy ze śladem `location.refreshed` - licznik review nie ma wtedy rosnąć."""
     with _immediate(con):
         row = con.execute(
-            "SELECT mtime, unreadable_since, present FROM location WHERE id = ?",
-            (location_id,)).fetchone()
+            "SELECT mtime, unreadable_since, unreadable_kind, unreadable_reason, present "
+            "FROM location WHERE id = ?", (location_id,)).fetchone()
         if row is None:
             raise ValueError(f"location:{location_id} nie istnieje")
-        if row["mtime"] == mtime and row["unreadable_since"] is not None and row["present"]:
+        alarm_stoi = (row["mtime"] == mtime and row["unreadable_since"] is not None
+                      and row["present"])
+        diagnoza = {k: {"before": row[k], "after": v}
+                    for k, v in (("unreadable_kind", kind), ("unreadable_reason", reason))
+                    if row[k] != v}
+        if alarm_stoi and not diagnoza:
             return False                              # powtórna awaria bez zmiany — cichy no-op (QUIET)
         con.execute(
             "UPDATE location SET mtime = ?, last_verified_at = ?, present = 1, "
-            "unreadable_since = COALESCE(unreadable_since, ?) WHERE id = ?",
-            (mtime, now, now, location_id))
+            "unreadable_since = COALESCE(unreadable_since, ?), unreadable_kind = ?, "
+            "unreadable_reason = ? WHERE id = ?",
+            (mtime, now, now, kind, reason, location_id))
+        if alarm_stoi:                                # sama diagnoza - ślad faktu, nie drugi alarm
+            emit_event(con, actor=actor, verb="location.refreshed",
+                       target=f"location:{location_id}", now=now, payload=diagnoza)
+            return False
         emit_event(con, actor=actor, verb="frame.review", target=f"sha1:{sha1_data}", now=now,
-                   reason=f"{UNREADABLE_REASON_PREFIX}{reason}", payload={"path": path})
+                   reason=f"{UNREADABLE_REASON_PREFIX}{reason}",
+                   payload={"path": path, "unreadable_kind": kind})
     return True
 
 
@@ -811,6 +854,9 @@ def mark_location_vanished(con, *, location_id, expected_path, root, run_id, now
     do payloadu. Kubełek `unreadable` to KOLEJKA ROBOTY („przeczytaj tę kopię ponownie") — kopia,
     której nie ma, nie ma czego czytać i wisiałaby w nim bez wyjścia (marker gaśnie WYŁĄCZNIE po
     udanym odczycie). Inwariant całego pnia: `present = 0 ⇒ unreadable_since IS NULL`.
+    Od P4-2 inwariant obejmuje rodzaj i powód: `present = 0 ⇒ unreadable_kind IS NULL AND
+    unreadable_reason IS NULL` - gasną tym samym UPDATE-em co marker (CHECK 0019 i tak odbiłby
+    zgaszenie samego markera), a stare wartości idą do payloadu obok `unreadable_since_before`.
 
     KOTWICA ANTY-STALE (`expected_path`): pass planuje na migawce, a między planem a zapisem GUI może
     zrobić rename (`relocate_location` zmienia `path` TEGO wiersza) — wtedy ścieżka w bazie wskazuje
@@ -821,8 +867,8 @@ def mark_location_vanished(con, *, location_id, expected_path, root, run_id, now
     powtórnego przebiegu — bez UPDATE i bez eventu, QUIET)."""
     with _immediate(con):
         row = con.execute(
-            "SELECT volume, path, present, unreadable_since FROM location WHERE id = ?",
-            (location_id,)).fetchone()
+            "SELECT volume, path, present, unreadable_since, unreadable_kind, unreadable_reason "
+            "FROM location WHERE id = ?", (location_id,)).fetchone()
         if row is None:
             raise ValueError(f"location:{location_id} nie istnieje")
         if row["path"] != expected_path:
@@ -830,12 +876,14 @@ def mark_location_vanished(con, *, location_id, expected_path, root, run_id, now
         if not row["present"]:
             return False                              # już zniknięta — idempotencja, bez eventu
         con.execute(
-            "UPDATE location SET present = 0, unreadable_since = NULL, last_verified_at = ? "
-            "WHERE id = ?", (now, location_id))
+            "UPDATE location SET present = 0, unreadable_since = NULL, unreadable_kind = NULL, "
+            "unreadable_reason = NULL, last_verified_at = ? WHERE id = ?", (now, location_id))
         emit_event(
             con, actor=actor, verb="location.vanished", target=f"location:{location_id}", now=now,
             payload={"path": row["path"], "volume": row["volume"], "root": root, "run_id": run_id,
-                     "unreadable_since_before": row["unreadable_since"], "forced": forced})
+                     "unreadable_since_before": row["unreadable_since"],
+                     "unreadable_kind_before": row["unreadable_kind"],
+                     "unreadable_reason_before": row["unreadable_reason"], "forced": forced})
     return True
 
 
@@ -1440,6 +1488,12 @@ class ObjectGesture:
                                # („kryterium nie ma prawa sklejać dwóch faktów"), a D-OW-7 podniosło
                                # jej trafialność: stos bez obiektu wpadał przedtem do własnego
                                # licznika, a od wejścia stosów w zasięg gestu — właśnie tutaj
+    skipped_no_memory: int = 0 # NAGROBEK BEZ PAMIĘCI (baza-dawca sprzed 0017) - osobno od
+                               # `skipped_nothing` (FC-6), bo to inna przyczyna o innej recepcie:
+                               # „nie było czego przywrócić" mówi, że klatka nagrobkiem nie jest,
+                               # a ten licznik - że jest, tylko nie pamięta, co ręka zdjęła, więc
+                               # ręką nic tu się nie naprawi. Liczy go wyłącznie przywracanie
+                               # (`queries.restore_targets`); klingi zostawiają go na zerze
     skipped_drift: int = 0     # stan inny niż oczekiwany w chwili zapisu (TOCTOU)
     stacks: int = 0            # …z ZAPISANYCH: ile było gotowych obrazów. NIE jest pominięciem
                                # (D-OW-7: stos jest w zasięgu OBU gestów) i dlatego stoi POZA sumą
@@ -1457,11 +1511,12 @@ class ObjectGesture:
         właścicielem rozbicia.
 
         Potrzebna, odkąd jeden gest człowieka bywa N transakcjami: przywracanie idzie klingą per
-        GRUPA (obiekt × zaznaczenie), a zdanie po geście jest jedno. Druga siedziba tej sumy już
-        istnieje i już jest zepsuta — `ConfirmPathObjectsDialog._on_confirm` sumuje ręcznie
-        `assigned` i `skipped`, więc GUBI rozbicie per fakt: user dostaje „przypisano 30 z 40" bez
-        zdania, dlaczego dziesięć zostało. Trzecia siedziba powtórzyłaby ten błąd, a czwarta
-        powtórzyłaby go po raz kolejny — dlatego składanie ma dom w klasie, nie u wołających.
+        GRUPA (obiekt × zaznaczenie), a zdanie po geście jest jedno. Druga siedziba tej sumy
+        (`ConfirmPathObjectsDialog._on_confirm`) do R-S2b-13 sumowała ręcznie `assigned`
+        i `skipped`, więc GUBIŁA rozbicie per fakt: user dostawał „przypisano 30 z 40" bez zdania,
+        dlaczego dziesięć zostało - dziś składa `+=` jak przywracanie. Trzecia siedziba powtórzyłaby
+        ten błąd, a czwarta powtórzyłaby go po raz kolejny - dlatego składanie ma dom w klasie,
+        nie u wołających.
 
         Kanony sklejają się BEZ POWTÓRZEŃ i w porządku pierwszego wystąpienia: to nazwy do zdania,
         a nie zbiór do liczenia - powtórzony kanon w komunikacie wygląda jak dwa różne obiekty.
@@ -1478,6 +1533,7 @@ class ObjectGesture:
             skipped_kind=self.skipped_kind + inny.skipped_kind,
             skipped_source=self.skipped_source + inny.skipped_source,
             skipped_nothing=self.skipped_nothing + inny.skipped_nothing,
+            skipped_no_memory=self.skipped_no_memory + inny.skipped_no_memory,
             skipped_drift=self.skipped_drift + inny.skipped_drift,
             stacks=self.stacks + inny.stacks,
             canons=tuple(kanony))
@@ -1490,7 +1546,7 @@ class ObjectGesture:
         powtarzać wyliczankę: czwarty człon (`skipped_nothing`) dołożony w S3 wszedłby inaczej
         do „z M", a nie do rozbicia — czyli zniknąłby dokładnie tam, gdzie ma tłumaczyć."""
         return (self.skipped_kind + self.skipped_source + self.skipped_nothing
-                + self.skipped_drift)
+                + self.skipped_no_memory + self.skipped_drift)
 
     @property
     def skipped_breakdown(self):
@@ -1498,7 +1554,8 @@ class ObjectGesture:
 
         GUI powtarzało tę listę literałem, więc każdy nowy człon wpadał do sumy, a z ekranu znikał."""
         return [("kind", self.skipped_kind), ("source", self.skipped_source),
-                ("nothing", self.skipped_nothing), ("drift", self.skipped_drift)]
+                ("nothing", self.skipped_nothing), ("no_memory", self.skipped_no_memory),
+                ("drift", self.skipped_drift)]
 
 
 def user_assign_object(con, *, alias_norm, canon, catalog, kind, frame_ids, now, uid="local",
@@ -2766,8 +2823,3 @@ def save_perspective(con, *, name, spec, now, uid="local"):
 # miała (rejestr też nie dawał drogi z okna), a pisarz bez ekranu byłby kodem dla nikogo. Dług
 # nazwany w kolejce: kasowanie ma sens dopiero razem z listą perspektyw do zarządzania, a to jest
 # ekran, nie funkcja.
-
-# --- TODO-DŁUG (z kolejki sesji, dieta 2026-08-10; pełne brzmienia: archiwum aa) ---
-# TODO-DŁUG(P4-2): marker location.unreadable_since niesie sam CZAS - powierzchnia nie odróżnia
-#   „nie da się otworzyć" od „nagłówek nie przechodzi parsera" i zdaniem „kopia nieczytelna"
-#   oskarża plik. Powód awarii obok znacznika (kolumna/payload) - przy pierwszej nieczytelnej kopii.

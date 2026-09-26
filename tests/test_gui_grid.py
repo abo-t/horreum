@@ -3227,7 +3227,10 @@ def test_pozycja_przywracania_GASNIE_gdy_nie_ma_czego_przywrocic(obj_view):
 
 def test_przywrocenie_nagrobka_BEZ_pamieci_mowi_prawde_i_nic_nie_pisze(obj_view):
     """Nagrobek sprzed migracji 0017 (baza-dawca) wygląda na ekranie identycznie jak ten z pamięcią,
-    więc milczenie kazałoby userowi zgadywać, czy gest nie zadziałał, czy nie miał na czym."""
+    więc milczenie kazałoby userowi zgadywać, czy gest nie zadziałał, czy nie miał na czym.
+
+    Od FC-6 uczciwe zero mówi GRAMATYKĄ SĄSIADÓW („0 z N" plus rozbicie), a nie osobnym zdaniem
+    „Nie ma czego przywrócić" - stąd zmiana asercji; fakt (zero zapisu, nazwana przyczyna) ten sam."""
     v, con = obj_view
     v.refresh()
     _zaznacz(v, [1])
@@ -3241,7 +3244,8 @@ def test_przywrocenie_nagrobka_BEZ_pamieci_mowi_prawde_i_nic_nie_pisze(obj_view)
     _zaznacz(v, [1])
     v._on_object_restore()
     assert con.execute("SELECT count(*) FROM event").fetchone()[0] == przed
-    assert "Nie ma czego przywrócić" in msgs[-1] and "bez zapamiętanego obiektu: 1" in msgs[-1]
+    assert "Przywrócono przypisanie na 0 z 1 klatek" in msgs[-1], msgs[-1]
+    assert "bez zapamiętanego obiektu: 1" in msgs[-1], msgs[-1]
 
 
 def test_populacja_MIESZANA_nie_wymazuje_potwierdzenia_gestu(obj_view):
@@ -3253,8 +3257,11 @@ def test_populacja_MIESZANA_nie_wymazuje_potwierdzenia_gestu(obj_view):
     akurat zdanie, które przy tym geście bywa JEDYNYM potwierdzeniem: klatka przywrócona wypada
     z perspektywy „Do przeglądu", więc z ekranu znika.
 
-    Falsyfikator: rozbij `ogon` z powrotem na drugi `status_message.emit` → `msgs[-1]` przestaje
-    nieść „Przywrócono", choć zapis się udał."""
+    Od FC-6 nagrobek bez pamięci jest CZŁONEM rozbicia w tym jednym zdaniu, a mianownik liczy całe
+    zaznaczenie - stąd „1 z 2" zamiast dawnego „1 z 1" i człon zamiast zdania „Pominięto N…".
+
+    Falsyfikator: wyślij nagrobki bez pamięci drugim `status_message.emit` zamiast członem
+    rozbicia → `msgs[-1]` przestaje nieść „Przywrócono", choć zapis się udał."""
     v, con = obj_view
     v.refresh()
     _zaznacz(v, [1, 2])
@@ -3268,9 +3275,168 @@ def test_populacja_MIESZANA_nie_wymazuje_potwierdzenia_gestu(obj_view):
     v._on_object_restore()
 
     assert con.execute("SELECT object_source FROM frame WHERE id = 1").fetchone()[0] == "user"
-    assert "Przywrócono przypisanie na 1 z 1 klatek" in msgs[-1], "potwierdzenie gestu wymazane"
-    assert "Pominięto 1 klatek bez zapamiętanego obiektu" in msgs[-1], \
-        "drugi fakt zgubiony przy sklejaniu"
+    assert "Przywrócono przypisanie na 1 z 2 klatek" in msgs[-1], "potwierdzenie gestu wymazane"
+    assert "· bez zapamiętanego obiektu: 1" in msgs[-1], "drugi fakt zgubiony przy sklejaniu"
+
+
+def _zaznaczenie_do_przywrocenia(con, *, pamiec=(), bez_pamieci=0, z_obiektem=0, darki=0,
+                                 bez_obiektu=0, start_id=20):
+    """Zaznaczenie o ZNANYM składzie per fakt dla gestu przywracania (FC-6). Surowy SQL, jak
+    `_lighty_z_obiektami`. `pamiec` = kanony: po jednym nagrobku Z PAMIĘCIĄ na pozycję (powtórzony
+    kanon = kilka klatek w jednej grupie). Obiekt z RĘKI dostaje `NGC6960` z fikstury `obj_view`.
+    Zwraca id wszystkich klatek w kolejności wstawienia."""
+    wiersze = ([("light", None, "user_cleared", kanon) for kanon in pamiec]
+               + [("light", None, "user_cleared", None)] * bez_pamieci
+               + [("light", 5, "user", None)] * z_obiektem
+               + [("dark", None, None, None)] * darki
+               + [("light", None, None, None)] * bez_obiektu)
+    oid = {}
+    for kanon in dict.fromkeys(pamiec):
+        oid[kanon] = 200 + len(oid)
+        con.execute("INSERT INTO object(id, canon, catalog, kind) VALUES (?,?,'NGC','deep_sky')",
+                    (oid[kanon], kanon))
+    ids = []
+    for fid, (kind, object_id, source, kanon) in enumerate(wiersze, start=start_id):
+        con.execute("INSERT INTO frame(id, kind, filetype, sha1_data, first_seen_at, object_id, "
+                    "object_source, object_cleared_id) VALUES (?, ?, 'raw', ?, ?, ?, ?, ?)",
+                    (fid, kind, f"sha-fc6-{fid}", NOW, object_id, source, oid.get(kanon)))
+        con.execute("INSERT INTO header(frame_id, raw_json) VALUES (?, '{}')", (fid,))
+        ids.append(fid)
+    con.commit()
+    return ids
+
+
+def test_przywrocenie_liczy_CALE_zaznaczenie_z_rozbiciem_per_fakt(obj_view):
+    """FC-6 / R-S2b-13 - defekt zmierzony na ekranie: pasek „120 zaznaczonych", a zdanie po geście
+    „Przywrócono przypisanie na 30 z 30 klatek", podczas gdy sąsiedni gest tej samej osi w tej
+    samej sytuacji mówi „6 z 354 · z nagłówka/regionu: 348". Klatki spoza grup nie liczyły się
+    nigdzie, więc „z M" kłamało o zaznaczeniu.
+
+    Skład (pomniejszony, kształt ten sam): nagrobki z pamięcią w DWÓCH grupach, nagrobki bez
+    pamięci, klatki z obiektem ręki, darki, lighty bez obiektu. Człon „nothing" mówi czasownikiem
+    GESTU („przywrócić"), nie cofnięcia.
+
+    Falsyfikator: składaj gest od `repo.ObjectGesture()` zamiast `ObjectGesture(**pominiete)`
+    → zdanie wraca do „6 z 6" i gubi trzy człony rozbicia."""
+    v, con = obj_view
+    ids = _zaznaczenie_do_przywrocenia(con, pamiec=["NGC7000"] * 4 + ["IC443"] * 2,
+                                       bez_pamieci=2, z_obiektem=5, darki=2, bez_obiektu=3)
+    v.refresh()
+    _zaznacz(v, ids)
+    assert len(v._selected_data_rows()) == len(ids) == 18, "fikstura nie weszła do widoku"
+    msgs = []
+    v.status_message.connect(msgs.append)
+    v._on_object_restore()
+
+    assert "Przywrócono przypisanie na 6 z 18 klatek" in msgs[-1], msgs[-1]
+    assert "· nie było czego przywrócić: 8" in msgs[-1], msgs[-1]      # 5 z obiektem + 3 bez
+    assert "· bez zapamiętanego obiektu: 2" in msgs[-1], msgs[-1]
+    assert "· kalibracja: 2" in msgs[-1], msgs[-1]
+    assert "cofać" not in msgs[-1], "czasownik cofnięcia pod zdaniem przywracania"
+    assert "oddano: IC443, NGC7000" in msgs[-1], msgs[-1]
+
+
+def test_przywrocenie_przy_ZERZE_grup_mowi_zdaniem_sasiadow(obj_view):
+    """FC-6: zero grup nie ma już osobnego zdania („Nie ma czego przywrócić…"). Sąsiad w tej samej
+    sytuacji mówi „Cofnięto … 0 z N · nie było czego cofać: N", więc przywracanie mówi „0 z N"
+    z rozbiciem - jedna gramatyka osi, jeden właściciel zdania (`_po_gescie_osi`).
+
+    Fikstura bez nagrobków: dwa lighty ze ścieżki, jeden z nagłówka, dark. Zdanie porównujemy
+    W CAŁOŚCI, bo pytanie brzmi też „czego w nim NIE MA" - drugiej emisji ani ogona.
+
+    Falsyfikator: przywróć wczesny `return` przy `not grupy` z osobnym zdaniem → asercja równości
+    czerwienieje."""
+    v, con = obj_view
+    v.refresh()
+    _zaznacz(v, [1, 2, 3, 4])
+    przed = con.execute("SELECT count(*) FROM event").fetchone()[0]
+    msgs = []
+    v.status_message.connect(msgs.append)
+    v._on_object_restore()
+
+    assert msgs[-1] == ("Przywrócono przypisanie na 0 z 4 klatek · kalibracja: 1"
+                        " · nie było czego przywrócić: 3"), msgs[-1]
+    assert con.execute("SELECT count(*) FROM event").fetchone()[0] == przed
+
+
+def test_NIEZMIENNIK_trzy_gesty_osi_licza_CALE_zaznaczenie(obj_view, monkeypatch):
+    """FC-6: dla KAŻDEGO zaznaczenia `assigned + skipped == len(ids)` u wszystkich trzech gestów
+    osi - to jest treść „jednej gramatyki", a nie zbieżność napisów. Gesty idą przez HANDLERY
+    powierzchni (okno nadania podmienione atrapą, która akceptuje), a gest łapiemy na wejściu
+    do `_po_gescie_osi`, czyli tam, gdzie z niego powstaje zdanie.
+
+    Kolejność gestów przeprowadza zaznaczenie przez różne stany (nagrobki z pamięcią i bez,
+    obiekt ręki, ścieżka, nagłówek, kalibracja, klatki bez obiektu), więc niezmiennik jest pytany
+    w każdym z nich, a nie w jednym wygodnym.
+
+    Falsyfikator: zdejmij doliczanie `pominiete` w `_on_object_restore` → pierwszy gest łamie
+    niezmiennik (6 zamiast 22)."""
+    from PySide6.QtWidgets import QDialog
+    v, con = obj_view
+
+    class _Okno:
+        def __init__(self, *a, **kw):
+            self.selected = ("NGC6960", "NGC", "deep_sky", None)
+
+        def exec(self):
+            return QDialog.Accepted
+
+    monkeypatch.setattr("horreum.gui.grid.AssignObjectDialog", _Okno)
+    gesty = []
+    oryginal = v._po_gescie_osi
+
+    def _podsluch(klucz, gest, **kw):
+        gesty.append((klucz, gest))
+        return oryginal(klucz, gest, **kw)
+
+    monkeypatch.setattr(v, "_po_gescie_osi", _podsluch)
+    ids = [1, 2, 3, 4] + _zaznaczenie_do_przywrocenia(
+        con, pamiec=["NGC7000"] * 4 + ["IC443"] * 2, bez_pamieci=2, z_obiektem=5, darki=2,
+        bez_obiektu=3)
+    v.refresh()
+    for gest_handler in (v._on_object_restore, v._on_object_clear, v._on_object_restore,
+                         v._on_object_name):
+        _zaznacz(v, ids)
+        assert len(v._selected_data_rows()) == len(ids), "cel gestu nie jest całym zaznaczeniem"
+        gest_handler()
+    assert [k for k, _g in gesty] == ["grid.sel.object_restored", "grid.sel.object_cleared",
+                                      "grid.sel.object_restored", "grid.sel.object_named"]
+    for klucz, g in gesty:
+        assert g.assigned + g.skipped == len(ids), (klucz, g)
+    assert gesty[0][1].assigned == 6 and gesty[2][1].assigned > 0, "gesty nic nie ruszyły"
+
+
+def test_przywrocenie_po_BLEDZIE_grupy_liczy_reszte_jako_dryf(obj_view, monkeypatch):
+    """FC-6, drugi człon defektu: po `break` na `ValueError` klatki grupy, która padła, i grup po
+    niej nie liczyły się nigdzie. Grupa, która padła, wycofała się w całości (`_immediate`),
+    a dalsze do klingi nie doszły - stan jest inny, niż widział read-model, więc to DRYF.
+
+    Grupy idą po kanonie (IC443, LMC, M42); klinga pada na LMC → IC443 zapisany, LMC (2) i M42 (1)
+    liczą się jako dryf.
+
+    Falsyfikator: zdejmij doliczenie `skipped_drift` przed `break` → „1 z 1" zamiast „1 z 4"."""
+    from PySide6.QtWidgets import QMessageBox
+    v, con = obj_view
+    ids = _zaznaczenie_do_przywrocenia(con, pamiec=["IC443", "LMC", "LMC", "M42"])
+    v.refresh()
+    prawdziwa = grid_mod.repo.user_assign_object
+
+    def _pada_na_lmc(con_, **kw):
+        if kw["canon"] == "LMC":
+            raise ValueError("frame:0 nie istnieje")
+        return prawdziwa(con_, **kw)
+
+    monkeypatch.setattr(grid_mod.repo, "user_assign_object", _pada_na_lmc)
+    ostrzezenia = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: ostrzezenia.append(a))
+    _zaznacz(v, ids)
+    msgs = []
+    v.status_message.connect(msgs.append)
+    v._on_object_restore()
+
+    assert ostrzezenia, "błąd klingi przeszedł bez słowa"
+    assert "Przywrócono przypisanie na 1 z 4 klatek" in msgs[-1], msgs[-1]
+    assert "· zmieniły się w międzyczasie: 3" in msgs[-1], msgs[-1]
 
 
 def test_kolejka_NIE_dostaje_nowego_kubelka_poza_czlonem_cofniecia(obj_view):
@@ -4806,3 +4972,25 @@ def test_BP5_BLIZNIAK_odbudowa_listy_perspektyw_zostawia_BIEZACA_pozycje(view, m
     view._load_facets()
     view.refresh()
     assert view.combo_persp.currentData() == ("saved", "Lighty"), view.combo_persp.currentText()
+
+
+def test_zdanie_pominiec_JEDEN_dom_czlonow_zdania_osi_obiektu():
+    """R-S2b-13: `zdanie_pominiec` jest jedynym domem pętli rozbicia dla trzech powierzchni osi
+    obiektu (gesty Zbiorów, zatwierdzanie ze ścieżki, nadanie z kolejki). Pytamy o cztery rzeczy:
+    KAŻDY człon rozbicia w kolejności `skipped_breakdown`, czasownik członu „nothing" z GESTU
+    (FC-6), „w tym gotowy obraz" POZA pętlą pominięć i na jej końcu (D-OW-7) oraz ciszę przy
+    zerze - gest bez pominięć nie dostaje ani separatora, ani pustego członu.
+
+    Falsyfikator: zdejmij człon `stacks` z helpera → pierwsza asercja; zignoruj `nothing_key`
+    przy wyborze klucza → druga; zdejmij warunek `if n` z pętli → trzecia (człony „: 0")."""
+    from horreum import repo
+    g = repo.ObjectGesture(assigned=3, skipped_kind=1, skipped_source=2, skipped_nothing=3,
+                           skipped_no_memory=4, skipped_drift=5, stacks=1)
+    assert grid_mod.zdanie_pominiec(g) == (
+        " · kalibracja: 1 · z nagłówka/regionu: 2 · nie było czego cofać: 3"
+        " · bez zapamiętanego obiektu: 4 · zmieniły się w międzyczasie: 5"
+        " · w tym gotowy obraz: 1")
+    przywracanie = grid_mod.zdanie_pominiec(
+        g, nothing_key="grid.sel.object_restore_skip_nothing")
+    assert "· nie było czego przywrócić: 3" in przywracanie and "cofać" not in przywracanie
+    assert grid_mod.zdanie_pominiec(repo.ObjectGesture(assigned=7)) == ""

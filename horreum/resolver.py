@@ -621,6 +621,8 @@ def nameless_lights(con):
     ŚWIADOMA FORMATU od 2026-08-01: bez tego warunku kotwica mieszała 25 klatek FITS (naprawialnych
     kartą) z 763 RAW-ami, których naprawić się NIE DA — jedna liczba na dwie populacje nie pilnuje
     żadnej z nich, bo ruch jednej maskuje ruch drugiej. RAW liczy `nameless_raw_lights`.
+    Format NIEZNANY (`filetype IS NULL`) liczy się TUTAJ, stąd `COALESCE` (R-S4-10; uzasadnienie
+    w `gui.queries.nameless_frames`): goły `NOT IN` wyrzucał NULL z obu kubełków naraz.
 
     Drążenie do klatek (grupy, cel writebacku) daje `gui.queries.nameless_frames` — TEN SAM
     predykat, znak w znak. Dwa literały, bo warstwy są dwie i zależność idzie w jedną stronę
@@ -640,7 +642,7 @@ def nameless_lights(con):
         "AND f.superseded_by IS NULL "
         "AND f.retired_at IS NULL "
         "AND h.object_raw IS NULL "
-        "AND f.filetype NOT IN (SELECT value FROM json_each(?))",
+        "AND COALESCE(f.filetype, '') NOT IN (SELECT value FROM json_each(?))",
         (json.dumps(list(NO_OBJECT_CARD_FILETYPES)),)).fetchone()[0]
 
 

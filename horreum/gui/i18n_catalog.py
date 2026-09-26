@@ -211,6 +211,11 @@ CATALOG = {
     "copy.col.marked": {"pl": "Oznaczona", "en": "Marked"},
     "copy.col.reason": {"pl": "Powód", "en": "Reason"},
     "copy.no_reason": {"pl": "—", "en": "—"},
+    # P4-2: rodzaj awarii stoi PRZED diagnozą, bo to on mówi, gdzie szukać winy - samo „kopia
+    # nieczytelna" oskarżało plik i wysyłało na dysk po zdrowy plik, gdy zawiódł dostęp.
+    "copy.reason_io": {"pl": "dysk/dostęp: {reason}", "en": "disk/access: {reason}"},
+    "copy.reason_parse": {"pl": "nagłówek nie przechodzi parsera: {reason}",
+                          "en": "header fails the parser: {reason}"},
     "filter.telescope": {"pl": "Teleskop:", "en": "Telescope:"},
     "filter.filter": {"pl": "Filtr:", "en": "Filter:"},
     "filter.all": {"pl": "(wszystkie)", "en": "(all)"},
@@ -353,11 +358,13 @@ CATALOG = {
     "path.close_btn": {"pl": "Zamknij", "en": "Close"},
     "path.err.nothing": {"pl": "Nic nie zaznaczono — zero zapisu.",
                          "en": "Nothing selected — nothing written."},
+    # R-S2b-13: zdanie nie ma już własnego ogona pominięć („N pominięte - zajęte między oknem
+    # a zapisem" mówiło to samo o darku i o klatce zajętej w międzyczasie). Człony rozbicia
+    # dokleja `grid.zdanie_pominiec` - te same, co w zdaniach Zbiorów - więc zdanie kończy się BEZ
+    # KROPKI: „klatek. · kalibracja: 1" byłoby drugą gramatyką w jednym zdaniu.
     "path.done": {
-        "pl": "Zatwierdzono {names} nazw · przypisano {assigned} z {total} klatek.",
-        "en": "Confirmed {names} names · assigned {assigned} of {total} frames."},
-    "path.skipped": {"pl": " ({n} pominięte — zajęte między oknem a zapisem)",
-                     "en": " ({n} skipped — taken between the dialog and the write)"},
+        "pl": "Zatwierdzono {names} nazw · przypisano {assigned} z {total} klatek",
+        "en": "Confirmed {names} names · assigned {assigned} of {total} frames"},
     "object.unreadable_line": {"pl": "— kopie nieczytelne", "en": "— unreadable copies"},
     # KUBEŁEK OSI SPRZĘTU (R1) — do tej pory był POŁOWĄ wiersza informacyjnego z notą
     # „rozwiązywanie w przygotowaniu". Nota była uczciwa i dlatego musiała zniknąć razem z drogą:
@@ -493,6 +500,13 @@ CATALOG = {
     "object.unreadable_info_empty": {
         "pl": "Żadna kopia nie jest oznaczona jako nieczytelna — nie ma czego pokazać.",
         "en": "No copy is marked unreadable — there is nothing to show."},
+    # P4-2: rozbicie kubełka po RODZAJU awarii. Jednostką są KOPIE (nie klatki jak w liczniku
+    # wiersza) i fraza mówi to wprost, bo tylko liczba kopii sumuje się do drążenia - klatka
+    # z dwiema kopiami może mieć dwa rodzaje. „Rodzaj nieznany" = kopie oznaczone przed 0019.
+    "object.unreadable_kinds": {"pl": "kopie: {parts}", "en": "copies: {parts}"},
+    "object.unreadable_kind_io": {"pl": "dysk/dostęp {n}", "en": "disk/access {n}"},
+    "object.unreadable_kind_parse": {"pl": "nagłówek {n}", "en": "header {n}"},
+    "object.unreadable_kind_unknown": {"pl": "rodzaj nieznany {n}", "en": "kind unknown {n}"},
     "object.path_proposed_broken_info": {
         "pl": "Propozycji ze ścieżki NIE POLICZONO, bo słownik obiektów własnych "
               "(objects_own.json) ma błąd — wiersz nie udaje zera i nie prowadzi nigdzie, "
@@ -503,13 +517,11 @@ CATALOG = {
     "object.no_path": {"pl": "(brak ścieżki)", "en": "(no path)"},
     "object.unreadable_title": {"pl": "Kopie nieczytelne ({n})", "en": "Unreadable copies ({n})"},
     "object.no_location": {"pl": "(brak lokalizacji)", "en": "(no location)"},
+    # R-S2b-13: bez kropki i bez własnego ogona pominięć - człony rozbicia dokleja
+    # `grid.zdanie_pominiec`, ten sam dom, co zdań Zbiorów (powód przy `path.done`).
     "object.assigned_report": {
-        "pl": "Przypisano {assigned} z {total} klatek → {canon}.",
-        "en": "Assigned {assigned} of {total} frames → {canon}.",
-    },
-    "object.assigned_skipped": {
-        "pl": " ({n} pominięte — zajęte między dialogiem a zapisem)",
-        "en": " ({n} skipped — taken between dialog and write)",
+        "pl": "Przypisano {assigned} z {total} klatek → {canon}",
+        "en": "Assigned {assigned} of {total} frames → {canon}",
     },
     "object.assign_nothing": {
         "pl": "Nic nie zaznaczono w panelu klatek — zero zapisu.",
@@ -572,11 +584,15 @@ CATALOG = {
               "nie naprawa nagłówka.",
         "en": "This bucket already has a proposed name — the way is “Confirm from path…”, "
               "not header repair."},
+    # P4-2: dawne „odzyskaj plik" OSKARŻAŁO plik także wtedy, gdy zawiódł dysk albo dostęp. Zdanie
+    # kieruje do kolumny „Powód" i nazywa obie sytuacje - każda ma inną drogę naprawy.
     "repair.tip_unreadable": {
-        "pl": "Tych kopii nie da się odczytać, więc nie ma do czego dopisać karty. "
-              "Najpierw odzyskaj plik albo podłącz nośnik.",
-        "en": "These copies cannot be read, so there is nothing to add a card to. "
-              "Recover the file or connect the medium first."},
+        "pl": "Tych kopii nie przeczytano, więc nie ma do czego dopisać karty. Kolumna „Powód” "
+              "mówi, dlaczego: „dysk/dostęp” - plik może być zdrowy, sprawdź wolumin i uprawnienia; "
+              "„nagłówek nie przechodzi parsera” - plik jest do zgłoszenia albo naprawy.",
+        "en": "These copies were not read, so there is nothing to add a card to. The “Reason” "
+              "column says why: “disk/access” - the file may be healthy, check the volume and "
+              "permissions; “header fails the parser” - the file needs reporting or repair."},
     "repair.tip_busy": {
         "pl": "Druga powierzchnia właśnie pisze do plików — poczekaj na jej koniec.",
         "en": "Another surface is writing to files right now — wait for it to finish."},
@@ -1402,19 +1418,6 @@ CATALOG = {
     "grid.sel.object_restored": {
         "pl": "Przywrócono przypisanie na {assigned} z {total} klatek",
         "en": "Assignment restored on {assigned} of {total} frames"},
-    # DWA RÓŻNE ZDANIA O NAGROBKU BEZ PAMIĘCI, bo to dwa różne stany gestu: pierwsze mówi „nie było
-    # czego przywrócić W OGÓLE" (gest nic nie zrobił), drugie dopowiada „część się nie dała" po
-    # geście, który jednak coś zrobił. Jedno zdanie na oba kłamałoby w którymś z nich.
-    "grid.sel.object_restore_none": {
-        "pl": "Nie ma czego przywrócić — nagrobków z zapamiętanym obiektem: 0 "
-              "(bez zapamiętanego obiektu: {n}). Nic nie zapisano.",
-        "en": "Nothing to restore — tombstones with a remembered object: 0 "
-              "(without a remembered object: {n}). Nothing was written."},
-    "grid.sel.object_restore_no_memory": {
-        "pl": "Pominięto {n} klatek bez zapamiętanego obiektu — te nagrobki powstały przed "
-              "wersją, która zapamiętuje, co ręka zdjęła.",
-        "en": "Skipped {n} frames without a remembered object — those tombstones predate the "
-              "version that remembers what the hand removed."},
     # Rozbicie PER FAKT — każda przyczyna osobno, bo znaczą dla człowieka co innego.
     "grid.sel.object_skip_kind": {"pl": " · kalibracja: {n}", "en": " · calibration: {n}"},
     "grid.sel.object_skip_source": {"pl": " · z nagłówka/regionu: {n}",
@@ -1424,6 +1427,20 @@ CATALOG = {
     # nie da się wykonać — user czytał „z nagłówka/regionu" o klatce bez nagłówka.
     "grid.sel.object_skip_nothing": {"pl": " · nie było czego cofać: {n}",
                                      "en": " · nothing to undo: {n}"},
+    # FC-6: ten sam fakt przy PRZYWRACANIU - klatka nie jest nagrobkiem. Osobny klucz, bo czasownik
+    # należy do GESTU, nie do członu (ten sam powód, co `object_canons_restored`): „nie było czego
+    # cofać" pod zdaniem „Przywrócono…" byłoby nieprawdą o kierunku zapisu. Podaje go wołający
+    # (`nothing_key`), pozostałe człony rozbicia są neutralne wobec kierunku i zostają wspólne.
+    "grid.sel.object_restore_skip_nothing": {"pl": " · nie było czego przywrócić: {n}",
+                                             "en": " · nothing to restore: {n}"},
+    # FC-6: nagrobek BEZ pamięci (baza-dawca sprzed 0017) jest CZŁONEM rozbicia, nie osobnym
+    # zdaniem. Dwa dawne zdania („nie ma czego przywrócić" przy zerze, „pominięto N…" jako ogon)
+    # były drugą gramatyką tej samej osi: sąsiedni gest w tej samej sytuacji mówi „0 z N"
+    # z rozbiciem. Osobno od „nie było czego przywrócić", bo klatka JEST nagrobkiem, tylko nie
+    # pamięta, co ręka zdjęła - ręką nic tu się nie naprawi. Jeden klucz wystarcza: człon pojawia
+    # się wyłącznie przy przywracaniu (klingi zostawiają licznik na zerze).
+    "grid.sel.object_skip_no_memory": {"pl": " · bez zapamiętanego obiektu: {n}",
+                                       "en": " · without a remembered object: {n}"},
     "grid.sel.object_skip_drift": {"pl": " · zmieniły się w międzyczasie: {n}",
                                    "en": " · changed meanwhile: {n}"},
     # NIE pominięcie, tylko skład tego, co zapisano (D-OW-7) — „w tym", nie „poza tym". Gotowy

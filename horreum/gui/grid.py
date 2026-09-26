@@ -377,6 +377,38 @@ def _lista_kanonow(canons, maks=_KANONY_W_ZDANIU):
     return ", ".join(nazwy[:maks]) + i18n.t("grid.sel.object_canons_more", n=len(nazwy) - maks)
 
 
+def zdanie_pominiec(gest, *, nothing_key="grid.sel.object_skip_nothing"):
+    """Człony zdania po geście osi obiektu: rozbicie pominięć PER FAKT plus „w tym gotowe obrazy".
+    Czysta funkcja; pusty łańcuch, gdy gest nie ma czego dopowiedzieć.
+
+    JEDEN DOM PĘTLI DLA TRZECH POWIERZCHNI (R-S2b-13). O tym samym `repo.ObjectGesture` mówią gesty
+    paska Zbiorów (`_po_gescie_osi`), zatwierdzanie propozycji ze ścieżki i nadanie z kolejki
+    przeglądu (oba w `gui.app`). Dwie ostatnie miały własne ogony i spłaszczały pominięcia do
+    „pominięte N - zajęte między oknem a zapisem", także o darku, którego nikt nie zajął, choć
+    klinga oddaje rozbicie per fakt. Trzy siedziby jednej pętli to trzy okazje, żeby człon
+    dołożony do `skipped_breakdown` pojawił się na jednym ekranie, a z dwóch pozostałych zniknął -
+    dokładnie ta klasa, dla której rozbicie ma jednego właściciela w klasie gestu.
+
+    Liczniki idą osobno, bo znaczą co innego: „kalibracja" to ochrona, która zadziałała, a „zmieniły
+    się w międzyczasie" to ostrzeżenie, że stan uciekł. SKŁAD I KOLEJNOŚĆ członów bierzemy
+    z `skipped_breakdown`, nie z literału tutaj: człon dołożony później wpadłby do sumy „z M"
+    i zniknął z rozbicia, czyli dokładnie stamtąd, gdzie ma tłumaczyć.
+
+    CZASOWNIK CZŁONU „nothing" NALEŻY DO GESTU, NIE DO CZŁONU (FC-6) - dlatego `nothing_key`:
+    „nie było czego cofać" przy przywracaniu kłamałoby o kierunku zapisu. Pozostałe człony (rodzaj,
+    źródło, pamięć, dryf) są neutralne wobec kierunku, więc zostają wspólne.
+
+    Gotowe obrazy NIE stoją w pętli pominięć (D-OW-7): od chwili, gdy stos jest w zasięgu gestów,
+    ta liczba mówi o tym, co gest ZROBIŁ, a nie czego nie tknął - „nazwano 30 · w tym gotowe
+    obrazy: 2" znaczy „dwa z tych trzydziestu to obrazy po integracji". Człon zostaje osobny, bo to
+    jedyny zapis osi, który sięga rodowodu - i należy do tego samego zdania na KAŻDEJ powierzchni."""
+    czlony = [i18n.t(nothing_key if sufiks == "nothing" else f"grid.sel.object_skip_{sufiks}", n=n)
+              for sufiks, n in gest.skipped_breakdown if n]
+    if gest.stacks:
+        czlony.append(i18n.t_plural("grid.sel.object_stacks", gest.stacks))
+    return "".join(czlony)
+
+
 def _zlacz_recepty(czlony):
     """Człony recepty w jedno zdanie własnego nośnika paska (FH-2). Czysta funkcja.
 
@@ -2781,8 +2813,9 @@ class FramesView(QWidget):
             self.status_message.emit(i18n.t("grid.sel.object_empty"))
         return ids
 
-    def _po_gescie_osi(self, klucz, gest, *, ogon="", odwracalny=False,
-                       canons_key="grid.sel.object_canons", **kw):
+    def _po_gescie_osi(self, klucz, gest, *, odwracalny=False,
+                       canons_key="grid.sel.object_canons",
+                       nothing_key="grid.sel.object_skip_nothing", **kw):
         """Wspólny ogon WSZYSTKICH gestów osi: zdanie z ROZBICIEM per fakt + odświeżenie CZTERECH
         powierzchni + ZACHOWANIE ZAZNACZENIA.
 
@@ -2797,18 +2830,9 @@ class FramesView(QWidget):
         zaznaczone = [r["frame_id"] for r in self._selected_data_rows()]
         recepty = []                    # człony „co teraz zrobić" — własny nośnik paska (FH-2)
         msg = i18n.t(klucz, assigned=gest.assigned, total=gest.assigned + gest.skipped, **kw)
-        # Skład i kolejność członów ma JEDNEGO właściciela (`ObjectGesture.skipped_breakdown`),
-        # a nie literał tutaj: czwarty człon dołożony w S3 („nie było czego cofać") wpadłby
-        # do sumy „z M" i zniknął z rozbicia, czyli dokładnie stamtąd, gdzie miał tłumaczyć.
-        for sufiks, n in gest.skipped_breakdown:
-            if n:
-                msg += i18n.t(f"grid.sel.object_skip_{sufiks}", n=n)
-        # Gotowe obrazy NIE stoją w pętli pominięć (D-OW-7): od chwili, gdy stos jest w zasięgu obu
-        # gestów, ta liczba mówi o tym, co gest ZROBIŁ, a nie czego nie tknął. Zdanie „nazwano 30
-        # · gotowe obrazy: 2" znaczy „dwa z tych trzydziestu to obrazy po integracji" — a nie „dwa
-        # zostawiłem". Człon zostaje osobny, bo to jedyny zapis osi, który sięga rodowodu.
-        if gest.stacks:
-            msg += i18n.t_plural("grid.sel.object_stacks", gest.stacks)
+        # Rozbicie pominięć i gotowe obrazy składa JEDEN dom (`zdanie_pominiec`), wspólny z dwiema
+        # powierzchniami osi w `gui.app` - `nothing_key` idzie za gestem (FC-6), jak `canons_key`.
+        msg += zdanie_pominiec(gest, nothing_key=nothing_key)
         # KANONY OSOBNYM CZŁONEM, nie placeholderem w zdaniu bazowym (R-S2b-3, człon drugi).
         # Zdanie bazowe ma dwóch wołających o RÓŻNYCH kwargach, więc `{canons}` w nim byłoby
         # `KeyError`-em u tego, który go nie poda — a bramka i18n pyta o komplet PL/EN i istnienie
@@ -2851,10 +2875,11 @@ class FramesView(QWidget):
         # paska stanu — emisja przed odświeżeniem ginęła w tym samym obrocie pętli. Skutek był
         # dokładnie odwrotny do zamierzonego: rozbicie per fakt user widział WYŁĄCZNIE wtedy, gdy
         # gest niczego nie zapisał (bo wtedy `refresh()` nie leci), a po udanym zapisie — nigdy.
-        # `ogon` to ZDANIE WŁASNE WOŁAJĄCEGO doklejone do tego samego komunikatu — a nie druga
-        # emisja. Ta sama pułapka, co wyżej, tylko od drugiej strony: dwa `emit` w jednym obrocie
-        # pętli trafiają w jeden `showMessage`, więc drugie wymazuje pierwsze (bramka pakietu 0810).
-        self.status_message.emit(msg + ogon)
+        # KAŻDY FAKT GESTU JEDZIE W TYM JEDNYM ZDANIU, nie drugą emisją. Ta sama pułapka, co wyżej,
+        # tylko od drugiej strony: dwa `emit` w jednym obrocie pętli trafiają w jeden `showMessage`,
+        # więc drugie wymazuje pierwsze (bramka pakietu 0810). Dlatego nagrobek bez pamięci jest
+        # członem rozbicia (FC-6), a nie osobnym zdaniem doklejanym przez wołającego.
+        self.status_message.emit(msg)
         self.status_recipe.emit(_zlacz_recepty(recepty))
 
     def _czlon_poza_widokiem(self, poza, cel=None):
@@ -3194,43 +3219,44 @@ class FramesView(QWidget):
 
         `alias_norm=None`: alias zapisało pierwotne nadanie, a przywrócenie niczego nie nazywa.
         `object_source='user'` (domyślne): przywrócenie JEST wskazaniem palcem — drugim świadomym
-        gestem tej samej ręki."""
+        gestem tej samej ręki.
+
+        TRZY GESTY JEDNEJ OSI, JEDNA GRAMATYKA (FC-6, R-S2b-13): `assigned + skipped == len(ids)`.
+        Sąsiednie gesty dostają całe zaznaczenie i odsiewają je licznikami klingi, a ten podawał
+        klindze wyłącznie grupy - więc „z M" liczyło same nagrobki z pamięcią (firsthand: „30 z 30"
+        przy 120 zaznaczonych), a reszta zaznaczenia nie liczyła się nigdzie. Gest startuje więc od
+        rozbicia z read-modelu i mówi ZAWSZE przez `_po_gescie_osi`, także przy zerze grup: osobne
+        zdanie „nie ma czego przywrócić" było drugą gramatyką tej samej osi, podczas gdy sąsiad
+        w tej samej sytuacji mówi „Cofnięto … 0 z N · nie było czego cofać: N"."""
         ids = self._object_gesture_ids()
         if not ids:
             return
-        grupy, bez_pamieci = queries.restore_targets(self.con, ids)
-        if not grupy:
-            # Uczciwe zero zamiast cichego nic: nagrobek bez pamięci (baza-dawca sprzed 0017)
-            # wygląda na ekranie identycznie jak ten z pamięcią, więc milczenie kazałoby userowi
-            # zgadywać, czy gest nie zadziałał, czy nie miał na czym.
-            self.status_message.emit(i18n.t("grid.sel.object_restore_none", n=bez_pamieci))
-            return
-        gest = repo.ObjectGesture()
-        with busy.busy(self.status_message.emit,
-                       i18n.t("busy.restoring", done=0, total=len(grupy))) as faza:
-            for i, g in enumerate(grupy, 1):
-                try:
-                    gest += repo.user_assign_object(
-                        self.con, alias_norm=None, canon=g["canon"], catalog=g["catalog"],
-                        kind=g["kind"], frame_ids=g["frame_ids"], now=self._now(),
-                        overwrite_weak=True, expected_source="user_cleared",
-                        expected_cleared_id=g["object_id"])
-                except ValueError as e:      # dryf do nieistniejącej klatki / konflikt aliasu
-                    QMessageBox.warning(self, i18n.t("grid.sel.object_restore"), str(e))
-                    break
-                faza.say(i18n.t("busy.restoring", done=i, total=len(grupy)))
-        # JEDNA EMISJA, NIE DWIE (bramka pakietu 0810, zarzut Fable Z#1). Odbiornikiem obu jest ten
-        # sam `showMessage`, więc drugie zdanie w tym samym obrocie pętli WYMAZYWAŁO pierwsze —
-        # przy populacji mieszanej user po UDANYM przywróceniu widział wyłącznie „pominięto N bez
-        # zapamiętanego obiektu", a potwierdzenia gestu nie widział wcale. Kosztowało to akurat
-        # zdanie, które przy tym geście „bywa jedynym potwierdzeniem" (klatka przywrócona wypada
-        # z perspektywy „Do przeglądu", więc z ekranu znika). Repo dostało tę klasę już raz, w tym
-        # samym pliku: emisja przed `refresh()` ginęła dokładnie tak samo.
+        grupy, pominiete = queries.restore_targets(self.con, ids)
+        gest = repo.ObjectGesture(**pominiete)
+        if grupy:                            # faza „0 z 0" zapowiadałaby robotę, której nie ma
+            with busy.busy(self.status_message.emit,
+                           i18n.t("busy.restoring", done=0, total=len(grupy))) as faza:
+                for i, g in enumerate(grupy):
+                    try:
+                        gest += repo.user_assign_object(
+                            self.con, alias_norm=None, canon=g["canon"], catalog=g["catalog"],
+                            kind=g["kind"], frame_ids=g["frame_ids"], now=self._now(),
+                            overwrite_weak=True, expected_source="user_cleared",
+                            expected_cleared_id=g["object_id"])
+                    except ValueError as e:  # dryf do nieistniejącej klatki / konflikt aliasu
+                        QMessageBox.warning(self, i18n.t("grid.sel.object_restore"), str(e))
+                        # Grupa, która padła, wycofała się w całości (`_immediate`), a grupy po
+                        # niej do klingi nie doszły - ich klatki liczą się jako DRYF (stan inny,
+                        # niż widział read-model), bo inaczej nie liczyłyby się nigdzie i „z M"
+                        # znów kłamałoby o zaznaczeniu.
+                        gest += repo.ObjectGesture(
+                            skipped_drift=sum(len(r["frame_ids"]) for r in grupy[i:]))
+                        break
+                    faza.say(i18n.t("busy.restoring", done=i + 1, total=len(grupy)))
         self._po_gescie_osi(
             "grid.sel.object_restored", gest,
             canons_key="grid.sel.object_canons_restored",
-            ogon=(" " + i18n.t("grid.sel.object_restore_no_memory", n=bez_pamieci)
-                  if bez_pamieci else ""))
+            nothing_key="grid.sel.object_restore_skip_nothing")
 
     # ---- panele kling (F3, PLAN_ux_redesign §4) ----
     def _toggle_panel(self, which):

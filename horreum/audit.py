@@ -156,14 +156,12 @@ class LightClosure:
     total: int
     buckets: dict
     headerless: int          # light/master_light bez wiersza `header` I bez obiektu
-    filetype_unknown: int    # …i te z zeznaniem, ale bez `filetype` (baza sprzed kolumny)
-    retired: int = 0         # …i te WYCOFANE ręką (D-OW-3/R2) — trzecia klasa ucieczki
-    superseded: int = 0      # …i te ZASTĄPIONE (G2-5d) - czwarta, z tego samego powodu co trzecia
+    retired: int = 0         # …i te WYCOFANE ręką (D-OW-3/R2) - druga klasa ucieczki
+    superseded: int = 0      # …i te ZASTĄPIONE (G2-5d) - trzecia, z tego samego powodu co druga
 
     @property
     def counted(self):
-        return (sum(self.buckets.values()) + self.headerless + self.filetype_unknown
-                + self.retired + self.superseded)
+        return sum(self.buckets.values()) + self.headerless + self.retired + self.superseded
 
     @property
     def ok(self):
@@ -180,6 +178,12 @@ def light_population_closure(con, rep):
     jest pusta (zmierzone), więc kryterium jest tripwirem na przyszłość, nie naprawą bieżącego
     błędu; jego wartość polega na tym, że przestanie być zielone w milczeniu.
 
+    Klasy „light z zeznaniem, ale bez `filetype`" NIE MA od R-S4-10: była tu, bo goły `NOT IN`
+    w `nameless_lights` wyrzucał NULL, a lustrzany `IN` w `nameless_raw_lights` go nie łapał.
+    Oba predykaty `nameless_*` czytają dziś format nieznany jako „nie bez karty"
+    (`COALESCE(f.filetype, '')`), więc taki light liczy się w kubełku `nameless` - osobna liczba
+    liczyłaby go DRUGI raz i bramka zapaliłaby się z drugiej strony (`counted > total`).
+
     `rep` = `resolver.DeltaReport` z tej samej bazy (nie liczymy predykatów drugi raz — dwie kopie
     tej samej definicji rozjechałyby się dokładnie tak, jak rozjechał się enum źródeł)."""
     total = con.execute(
@@ -188,21 +192,6 @@ def light_population_closure(con, rep):
         "SELECT count(*) FROM frame f WHERE f.kind IN ('light','master_light') "
         "AND f.object_id IS NULL AND f.retired_at IS NULL AND f.superseded_by IS NULL "
         "AND NOT EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id)").fetchone()[0]
-    # DRUGA klasa ucieczki, obok bezgłowej: predykaty `nameless_*` dzielą populację warunkiem
-    # `filetype IN/NOT IN (…)`, a `NULL` nie spełnia ŻADNEGO z nich (SQL: `NULL NOT IN` → NULL).
-    # Light z zeznaniem, bez obiektu, bez `object_raw` i bez `filetype` wypadał więc z sumy i
-    # wysadzałby to kryterium na bazie sprzed kolumny `filetype`. Dostaje własną liczbę, żeby
-    # klasa się POKAZAŁA — świadomie NIE ruszamy `nameless_lights`, bo to kotwica nawrotu P-D
-    # i zmiana jej predykatu przesunęłaby liczbę, którą tamta bramka pilnuje.
-    # `kind='light'` WYŁĄCZNIE — i to nie jest zawężenie z ostrożności: `nameless_stacks` pyta sam
-    # o `master_light` bez warunku na `filetype`, więc gotowy stos z NULL-em JUŻ tam wpada.
-    # Objęcie go tutaj liczyłoby tę samą klatkę dwa razy i zamieniło kryterium sumy w jego własną
-    # regresję.
-    filetype_unknown = con.execute(
-        "SELECT count(*) FROM frame f JOIN header h ON h.frame_id = f.id "
-        "WHERE f.kind = 'light' AND f.object_id IS NULL AND f.retired_at IS NULL "
-        "AND f.superseded_by IS NULL "
-        "AND h.object_raw IS NULL AND f.filetype IS NULL").fetchone()[0]
     buckets = {"resolved": rep.object_resolved,
                "resolved_no_raw": rep.object_resolved_no_raw,
                "unresolved": rep.object_unresolved,
@@ -224,8 +213,9 @@ def light_population_closure(con, rep):
     # kształtem do `nameless_raw`, a wypycha ją stamtąd guard zastąpienia - słusznie, bo klatka,
     # której treść żyje dalej w następczyni, nie jest ROBOTĄ. Nie miała tylko gdzie się podziać.
     #
-    # OBIE SĄSIEDNIE KLASY UCIECZKI (`headerless`, `filetype_unknown`) DOSTAŁY `superseded_by IS
-    # NULL` W TEJ SAMEJ TURZE - i to nie było przewidywanie, tylko ZŁAPANY BŁĄD: bez tego klatka
+    # SĄSIEDNIA KLASA UCIECZKI (`headerless`) DOSTAŁA `superseded_by IS NULL` W TEJ SAMEJ TURZE
+    # (razem z wchłoniętą od R-S4-10 klasą „bez `filetype`") - i to nie było przewidywanie,
+    # tylko ZŁAPANY BŁĄD: bez tego klatka
     # zastąpiona i bezgłowa naraz liczyła się DWA RAZY, a bramka §5.7a zapalała się z drugiej
     # strony (`counted > total`). Ta sama figura, co przy `retired_at` - dowód w
     # `test_rozklad_populacji_domyka_sie_po_zastapieniu[headerless]`.
@@ -237,8 +227,7 @@ def light_population_closure(con, rep):
         "SELECT count(*) FROM frame WHERE kind IN ('light','master_light') "
         "AND superseded_by IS NOT NULL AND retired_at IS NULL").fetchone()[0]
     return LightClosure(total=total, buckets=buckets, headerless=headerless,
-                        filetype_unknown=filetype_unknown, retired=retired,
-                        superseded=superseded)
+                        retired=retired, superseded=superseded)
 
 
 def supersede_invariants(con):

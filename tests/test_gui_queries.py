@@ -173,6 +173,42 @@ def test_tasks_state_liczniki_na_s8_obj(s8_obj):
     }
 
 
+def test_znikniete_NIE_pokazuja_klatki_zastapionej_ktorej_gest_nie_zamknie():
+    """G2-6d: perspektywa „Zniknięte" jest listą ROBOTY, a jej gestem jest wycofanie - klinga
+    (`repo._retire_verdict`) klatkę zastąpioną odrzuca. Stan jest osiągalny zwykłą drogą:
+    `repo.mark_superseded` odmawia tylko przy kopii OBECNEJ, więc zastąpiona z martwą kopią
+    istnieje. Bliźniaczka o tym samym kształcie, ale NIEzastąpiona, ZOSTAJE - guard ma wyciąć
+    zastąpienie, nie zniknięcie. Licznik Porządków czyta ten sam predykat i mówi to samo.
+
+    Falsyfikator: zdejmij `AND f.superseded_by IS NULL` z `vanished_frame_ids` - zastąpiona wraca
+    do zbioru i asercja na `vanished_frame_ids` czerwienieje (a licznik Porządków pokazuje 2)."""
+    from horreum import db
+
+    con = db.open_db(":memory:")
+
+    def _zniknieta(sha, path):
+        fid, _ = repo.upsert_frame(con, sha1_data=sha, kind="light", filetype="fits",
+                                   camera_id=None, now=NOW)
+        lid, _ = repo.add_location(con, frame_id=fid, volume="TESTVOL", path=path, now=NOW)
+        repo.mark_location_vanished(con, location_id=lid, expected_path=path,
+                                    root=r"R:\ASTRO_", run_id="g2-6d", now=NOW)
+        return fid
+
+    zastapiona = _zniknieta("sha-zastapiona", r"R:\ASTRO_\a.fit")
+    blizniaczka = _zniknieta("sha-blizniaczka", r"R:\ASTRO_\b.fit")
+    nastepczyni, _ = repo.upsert_frame(con, sha1_data="sha-nastepczyni", kind="light",
+                                       filetype="fits", camera_id=None, now=NOW)
+    assert repo.mark_superseded(con, frame_id=zastapiona, superseded_by=nastepczyni,
+                                now=NOW) is True
+
+    assert queries.vanished_frame_ids(con) == {blizniaczka}
+    assert queries.tasks_state(con)["vanished_frames"] == 1
+    # Powierzchnia i klinga mówią to samo: gest tej listy tej klatki nie przyjmuje.
+    g = repo.retire_frames(con, frame_ids=[zastapiona], now=NOW)
+    assert (g.done, g.skipped_superseded) == (0, 1)
+    assert zastapiona in queries.superseded_frame_ids(con)       # nie znika z oczu - ma swoją listę
+
+
 def _seed_stosy_z_powodami(con):
     """Pięć gotowych obrazów pokrywających WSZYSTKIE stany rodowodu: dwa czekające na gest, dwa ze
     zwietrzałym powodem (obiekt / odniesienie nadane PO przebiegu) i jeden z gotowym rodowodem."""
@@ -306,10 +342,11 @@ def test_unreadable_copies_per_kopia_nie_per_klatka(s8_obj):
         (ids["frames"]["a1"],)).fetchall()
     assert len(locs) == 2                                           # a1: vol1 + vol2 (fixture R#3)
     repo.refresh_location_unreadable(con, location_id=locs[0]["id"], sha1_data="sha-a1",
-                                     path="/astro/a1.fits", mtime="t2", reason="OSError", now=NOW)
+                                     path="/astro/a1.fits", mtime="t2", reason="OSError",
+                                     kind="io", now=NOW)
     repo.refresh_location_unreadable(con, location_id=locs[1]["id"], sha1_data="sha-a1",
                                      path="/backup/a1.fits", mtime="t2", reason="OSError",
-                                     now="2026-06-29T13:00:01")
+                                     kind="io", now="2026-06-29T13:00:01")
     rows = queries.unreadable_copies(con)
     assert len(rows) == 2                                           # DWIE kopie tej samej klatki
     assert [r["volume"] for r in rows] == ["vol2", "vol1"]          # nowsze oznaczenie na górze
@@ -328,29 +365,34 @@ def test_unreadable_copies_czysta_kopia_poza_lista(s8_obj):
     con, ids = s8_obj
     loc = con.execute("SELECT id FROM location WHERE volume = 'vol2'").fetchone()
     repo.refresh_location_unreadable(con, location_id=loc["id"], sha1_data="sha-a1",
-                                     path="/backup/a1.fits", mtime="t2", reason="OSError", now=NOW)
+                                     path="/backup/a1.fits", mtime="t2", reason="OSError",
+                                     kind="io", now=NOW)
     rows = queries.unreadable_copies(con)
     assert len(rows) == 1 and rows[0]["volume"] == "vol2"
     # review_queue niesie ten sam fakt licznikiem per-KLATKA (DISTINCT, spójność z resolverem)
     assert queries.review_queue(con)["unreadable_count"] == 1
 
 
-def test_unreadable_copies_powod_z_dziennika_per_KOPIA(s8_obj):
-    """Z6: `reason` opisuje TĘ kopię, nie klatkę. Obie kopie `a1` mają ten sam `target sha1:`,
-    więc rozstrzyga `payload.path` — po samym sha1 każdy wiersz dostałby powód drugiej kopii."""
+def test_unreadable_copies_rodzaj_i_powod_z_kolumny_per_KOPIA(s8_obj):
+    """Z6/P4-2: `kind`/`reason` opisują TĘ kopię, nie klatkę - obie kopie `a1` mają tę samą
+    tożsamość, a każda niesie własną diagnozę, bo mieszka ona w wierszu `location`. Powód bez
+    prefiksu dziennika (to kolumna, nie `event.reason`).
+
+    Falsyfikator: wróć do powodu z dziennika (podzapytanie po `event`) → `kind` znika, a powód
+    wraca z prefiksem - obie asercje czerwienieją."""
     con, ids = s8_obj
     locs = con.execute("SELECT id, path FROM location WHERE frame_id = ? ORDER BY id",
                        (ids["frames"]["a1"],)).fetchall()
     repo.refresh_location_unreadable(con, location_id=locs[0]["id"], sha1_data="sha-a1",
                                      path=locs[0]["path"], mtime="t2",
-                                     reason="OSError: [Errno 5] I/O error", now=NOW)
+                                     reason="OSError: [Errno 5] I/O error", kind="io", now=NOW)
     repo.refresh_location_unreadable(con, location_id=locs[1]["id"], sha1_data="sha-a1",
                                      path=locs[1]["path"], mtime="t2",
-                                     reason="ParseError: line 4, column 5322",
+                                     reason="ParseError: line 4, column 5322", kind="parse",
                                      now="2026-06-29T13:00:01")
-    powody = {r["path"]: r["reason"] for r in queries.unreadable_copies(con)}
-    assert powody[locs[0]["path"]] == "kopia nieczytelna: OSError: [Errno 5] I/O error"
-    assert powody[locs[1]["path"]] == "kopia nieczytelna: ParseError: line 4, column 5322"
+    diagnozy = {r["path"]: (r["kind"], r["reason"]) for r in queries.unreadable_copies(con)}
+    assert diagnozy[locs[0]["path"]] == ("io", "OSError: [Errno 5] I/O error")
+    assert diagnozy[locs[1]["path"]] == ("parse", "ParseError: line 4, column 5322")
 
 
 def test_unreadable_copies_powod_najswiezszy_bije_starszy(s8_obj):
@@ -359,29 +401,63 @@ def test_unreadable_copies_powod_najswiezszy_bije_starszy(s8_obj):
     con, ids = s8_obj
     loc = con.execute("SELECT id, path FROM location WHERE volume = 'vol2'").fetchone()
     repo.refresh_location_unreadable(con, location_id=loc["id"], sha1_data="sha-a1",
-                                     path=loc["path"], mtime="t2", reason="OSError", now=NOW)
-    # nowa próba: inny mtime (inaczej repo robi cichy no-op bez eventu) i inna diagnoza
+                                     path=loc["path"], mtime="t2", reason="OSError", kind="io",
+                                     now=NOW)
+    # nowa próba: inny mtime i inna diagnoza (P4-2: ten sam mtime też przestawia kolumny)
     repo.refresh_location_unreadable(con, location_id=loc["id"], sha1_data="sha-a1",
                                      path=loc["path"], mtime="t3", reason="ParseError",
-                                     now="2026-06-30T09:00:00")
+                                     kind="parse", now="2026-06-30T09:00:00")
     row = queries.unreadable_copies(con)[0]
-    assert row["reason"] == "kopia nieczytelna: ParseError"
+    assert (row["kind"], row["reason"]) == ("parse", "ParseError")
     assert row["unreadable_since"] == NOW                       # marker trzyma PIERWSZĄ awarię
 
 
-def test_unreadable_copies_kopia_przemianowana_bez_powodu(s8_obj):
-    """Payload dziennika trzyma ścieżkę Z CHWILI awarii. Po przemianowaniu kopii para (sha1, path)
-    nie ma pokrycia → `reason IS NULL`, bo powód pożyczony od innej kopii byłby zmyśleniem;
-    powierzchnia pokazuje wtedy „—" (`app._copy_reason`)."""
+def test_unreadable_copies_kopia_przemianowana_zachowuje_powod(s8_obj):
+    """P4-2 - defekt starego źródła: payload dziennika trzymał ścieżkę Z CHWILI awarii, więc kopia
+    przemianowana po oznaczeniu gubiła powód (powierzchnia pokazywała myślnik przy kopii, o której
+    wiadomo, co jej jest). Powód w kolumnie mieszka w tym samym wierszu co `path`, więc
+    przemianowanie go nie rusza.
+
+    Falsyfikator: wróć do podzapytania po `event` z `json_extract(payload, '$.path') = l.path` →
+    po przemianowaniu `reason IS NULL` i asercja czerwienieje."""
     con, ids = s8_obj
     loc = con.execute("SELECT id, path FROM location WHERE volume = 'vol2'").fetchone()
     repo.refresh_location_unreadable(con, location_id=loc["id"], sha1_data="sha-a1",
-                                     path=loc["path"], mtime="t2", reason="OSError", now=NOW)
-    assert queries.unreadable_copies(con)[0]["reason"] == "kopia nieczytelna: OSError"
+                                     path=loc["path"], mtime="t2", reason="OSError", kind="io",
+                                     now=NOW)
     with con:
         con.execute("UPDATE location SET path = ? WHERE id = ?", ("/backup/a1-NOWA.fits", loc["id"]))
     row = queries.unreadable_copies(con)[0]
-    assert row["path"] == "/backup/a1-NOWA.fits" and row["reason"] is None
+    assert row["path"] == "/backup/a1-NOWA.fits"
+    assert (row["kind"], row["reason"]) == ("io", "OSError")
+
+
+def test_unreadable_kind_counts_po_kopiach_sumuje_sie_do_drazenia(s8_obj):
+    """P4-2: rozbicie kubełka po rodzaju liczy KOPIE - klatka `a1` z dwiema kopiami o RÓŻNYCH
+    rodzajach wchodzi do obu przegródek, a suma równa się długości drążenia (`unreadable_copies`),
+    czyli temu, co user zobaczy po kliknięciu. Kopia sprzed 0019 (marker bez rodzaju) → „unknown".
+    Licznik wiersza (`unreadable_count`) zostaje przy klatkach - to inna jednostka.
+
+    Falsyfikator: licz `count(DISTINCT frame_id)` → klatka `a1` znika z jednej przegródki i suma
+    rozjeżdża się z drążeniem."""
+    con, ids = s8_obj
+    assert queries.unreadable_kind_counts(con) == {"io": 0, "parse": 0, "unknown": 0}
+    locs = con.execute("SELECT id, path FROM location WHERE frame_id = ? ORDER BY id",
+                       (ids["frames"]["a1"],)).fetchall()
+    repo.refresh_location_unreadable(con, location_id=locs[0]["id"], sha1_data="sha-a1",
+                                     path=locs[0]["path"], mtime="t2", reason="OSError: x",
+                                     kind="io", now=NOW)
+    repo.refresh_location_unreadable(con, location_id=locs[1]["id"], sha1_data="sha-a1",
+                                     path=locs[1]["path"], mtime="t2", reason="ParseError: y",
+                                     kind="parse", now=NOW)
+    inna = con.execute("SELECT id FROM location WHERE frame_id <> ? ORDER BY id LIMIT 1",
+                       (ids["frames"]["a1"],)).fetchone()
+    with con:                                                   # wiersz sprzed 0019: marker bez rodzaju
+        con.execute("UPDATE location SET unreadable_since = ? WHERE id = ?", (NOW, inna["id"]))
+    counts = queries.unreadable_kind_counts(con)
+    assert counts == {"io": 1, "parse": 1, "unknown": 1}
+    assert sum(counts.values()) == len(queries.unreadable_copies(con))
+    assert queries.review_queue(con)["unreadable_count"] == 2   # KLATKI: a1 + ta druga
 
 
 # --- telescope_label: JEDEN właściciel reguły label→canon (P-B) ---

@@ -219,14 +219,14 @@ def test_review_unreadable_ze_stanu_i_total_distinct(tmp_path):
     assert (st0.unreadable, st0.no_config, st0.no_camera, st0.total) == (0, 1, 1, 1)
     # kopia staje się nieczytelna → marker w STANIE
     repo.refresh_location_unreadable(con, location_id=lid, sha1_data="d1", path="x.fits",
-                                     mtime="t2", reason="OSError", now=NOW)
+                                     mtime="t2", reason="OSError", kind="io", now=NOW)
     st1 = review_state(con)
     assert st1.unreadable == 1                          # kubełek liczy ze STANU
     assert (st1.no_config, st1.no_camera) == (1, 1)     # klatka nadal w tamtych kubełkach
     assert st1.total == 1                               # DISTINCT — ta sama klatka, nie 3
     # powtórna awaria (marker stoi, ten sam mtime) → stan stabilny (idempotencja)
     repo.refresh_location_unreadable(con, location_id=lid, sha1_data="d1", path="x.fits",
-                                     mtime="t2", reason="OSError", now=NOW)
+                                     mtime="t2", reason="OSError", kind="io", now=NOW)
     st2 = review_state(con)
     assert (st2.unreadable, st2.total) == (1, 1)
     con.close()
@@ -245,9 +245,9 @@ def test_review_unreadable_distinct_po_kopiach(tmp_path):
     l2, _ = repo.add_location(con, frame_id=fid, volume="V2", path="b.fits", mtime="t1",
                               file_sha1="f1", now=NOW)
     repo.refresh_location_unreadable(con, location_id=l1, sha1_data="d1", path="a.fits",
-                                     mtime="t2", reason="e", now=NOW)
+                                     mtime="t2", reason="e", kind="io", now=NOW)
     repo.refresh_location_unreadable(con, location_id=l2, sha1_data="d1", path="b.fits",
-                                     mtime="t2", reason="e", now=NOW)
+                                     mtime="t2", reason="e", kind="parse", now=NOW)
     assert review_state(con).unreadable == 1            # DWIE kopie, JEDNA klatka
     con.close()
 

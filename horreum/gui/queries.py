@@ -397,6 +397,27 @@ def object_frames(con, object_id, *, telescope_id=None, camera_id=None, filter_c
     ).fetchall()
 
 
+_CZLONY_LICZBOWE = re.compile(r"(\d+)")
+
+
+def natural_key(s):
+    """Klucz NATURALNY nazwy: człony liczbowe porównywane jako liczby, tekst bez wielkości liter
+    (W-4). Czysta funkcja, zero SQL, zero Qt.
+
+    Istnieje, bo nazwy katalogowe niosą numer, a porządek znaków go nie widzi: `Caldwell 12` stoi
+    stringowo przed `Caldwell 3`, `NGC 700` przed `NGC 7000` - kolejność, której oko nie czyta
+    jako porządek. SQLite naturalnego sortu nie ma, więc klucz liczy wołający po stronie Pythona.
+
+    `re.split` z grupą przechwytującą zwraca człony NAPRZEMIENNIE, zawsze od tekstu (także
+    pustego): tekst, liczba, tekst… Pozycja parzysta jest więc zawsze tekstem, a nieparzysta
+    liczbą, i dwa klucze porównują się pozycja w pozycję typ z typem - bez `TypeError` między
+    `int` a `str`, bez znaczników typu w krotce. Klucz jest ślepy na wielkość liter, więc dwie
+    RÓŻNE nazwy mogą dać klucz równy (`NGC 700` / `ngc 700`) - wołający, który potrzebuje
+    porządku całkowitego, dokłada surową nazwę jako człon następny."""
+    return tuple(int(czlon) if i % 2 else czlon.casefold()
+                 for i, czlon in enumerate(_CZLONY_LICZBOWE.split(s)))
+
+
 def review_queue(con):
     """Kolejka przeglądu osi obiektu ze STANU (NIE z `count(event)` — R#2/R#4: `flag_config_review`/
     `object.review_summary` mnożą eventy przy re-skanie, stan jest idempotentny). Kanały:
@@ -458,29 +479,38 @@ def review_queue(con):
         `resolver.path_proposals`. **`None` znaczy „nie policzono"** (słownik obiektów własnych ma
         błąd), a `0` — „nie ma czego liczyć"; wołający ma te dwa stany rozróżnić.
 
-    Zwraca dict: {object_review: [Row(object_raw, cleared, n)], nameless_count: int,
+    Zwraca dict: {object_review: [Row(object_raw, cleared, n, total)], nameless_count: int,
     nameless_cleared_count: int, nameless_raw_count: int, nameless_raw_cleared_count: int,
     nameless_stacks_count: int, nameless_stacks_cleared_count: int,
     path_proposed_names: int, path_proposed_frames: int,
     config_review_count: int, headerless_count: int, unreadable_count: int}."""
-    object_review = con.execute(
+    object_review = sorted(con.execute(
         "SELECT h.object_raw AS object_raw, "
-        "       (f.object_source IS 'user_cleared') AS cleared, COUNT(*) AS n "
+        "       (f.object_source IS 'user_cleared') AS cleared, COUNT(*) AS n, "
+        "       SUM(COUNT(*)) OVER (PARTITION BY h.object_raw) AS total "
         "FROM frame f JOIN header h ON h.frame_id = f.id "
         "WHERE f.kind IN ('light','master_light') AND f.object_id IS NULL "
         "  AND f.superseded_by IS NULL "
         "  AND f.retired_at IS NULL "
         "  AND h.object_raw IS NOT NULL "
-        "GROUP BY h.object_raw, cleared "
+        "GROUP BY h.object_raw, cleared"
+    ).fetchall(),
         # KOLEJNOŚĆ PROWADZI NAZWĄ, NIE POŁÓWKĄ (R-S3-2). `ORDER BY n DESC` sortował POŁÓWKAMI,
         # więc obie połowy tej samej nazwy rozdzielał obcy kubełek: zmierzone `LDN 1174 · 9` →
         # `IC 1805 · 7` → `LDN 1174 · 5 · cofnięte ręką`. Przy 42 obiektach dzieli je cały ekran,
         # a user „załatwia LDN 1174" i zostawia drugą połówkę, nie wiedząc, że istnieje.
-        # Klucz pierwszy = SUMA obu połówek (okno nad agregatem — pozycja waży tym, ile roboty
-        # niesie NAZWA), klucz drugi = nazwa, więc połówki zawsze stoją obok siebie; `cleared`
-        # na końcu trzyma nietkniętą PRZED cofniętą, bo podwiersz ma iść pod swoim wierszem.
-        "ORDER BY SUM(COUNT(*)) OVER (PARTITION BY h.object_raw) DESC, object_raw, cleared"
-    ).fetchall()
+        # Klucz pierwszy = SUMA obu połówek (okno nad agregatem, kolumna `total` - pozycja waży
+        # tym, ile roboty niesie NAZWA), klucz drugi = nazwa, więc połówki zawsze stoją obok siebie;
+        # `cleared` na końcu trzyma nietkniętą PRZED cofniętą, bo podwiersz ma iść pod swoim wierszem.
+        #
+        # REMIS SUM ROZSTRZYGA KLUCZ NATURALNY NAZWY (W-4), nie porządek znaków: stringowo
+        # `Caldwell 12` stał przed `Caldwell 3`, a `NGC 700` przed `NGC 7000` w kolejności, której
+        # oko nie czyta jako porządek. SQLite naturalnego sortu nie ma, więc sortuje Python - i SAM
+        # (bez `ORDER BY` w literale: dwa miejsca na jedną regułę rozjechałyby się przy pierwszej
+        # zmianie). Surowa nazwa stoi ZA kluczem naturalnym, bo ten jest ślepy na wielkość liter:
+        # `NGC 700` i `ngc 700` to dwie pozycje GROUP BY o równym kluczu, a bez tego członu ich
+        # połówki przeplotłyby się po `cleared` - czyli wróciłby defekt R-S3-2 inną drogą.
+        key=lambda r: (-r["total"], natural_key(r["object_raw"]), r["object_raw"], r["cleared"]))
     # Lustro `object_review` po drugiej stronie NULL-a: JOIN header = „zeznanie JEST", brak
     # `object_raw` = „nie mówi o obiekcie". Bez tego kubełka klatki wpadały między predykaty.
     # JEDEN właściciel predykatu (D-PD-10): licznik to DŁUGOŚĆ read-modelu drążenia, nie osobny
@@ -589,6 +619,15 @@ def nameless_frames(con, cleared=False):
     okno „Napraw nagłówek…" otwierałoby się z listą, której KAŻDA pozycja jest pominięta. Populacja
     nie znika z kolejki: liczy ją własny kubełek (`resolver.nameless_raw_lights`).
 
+    FORMAT NIEZNANY (`filetype IS NULL`) NALEŻY TUTAJ (R-S4-10) - stąd `COALESCE(f.filetype, '')`.
+    `NO_OBJECT_CARD_FILETYPES` jest ZAMKNIĘTYM zbiorem formatów, o których WIADOMO, że karty nie
+    mają; o formacie nieznanym tego nie wiadomo, więc jego drogą naprawy jest karta albo ręka, jak
+    u każdego lighta. Goły `NOT IN` dawał dla NULL-a NULL, lustrzany `IN` w `nameless_raw_frames`
+    też: klatka wypadała z OBU kubełków, zostając w `review_frame_ids`, i partycja `review_queue`
+    pękała po cichu. `IN` po stronie RAW zostaje bez `COALESCE` - NULL nie pasuje tam nigdy
+    i tak ma być. Dziś populacja 0 (`scan.ingest_record` zawsze liczy format), więc to tripwir.
+    Lustro rdzenia (`resolver.nameless_lights`) niesie ten sam zapis, bo równość obu pinuje test.
+
     ŚWIADOMY ŹRÓDŁA od I-2b (D-P-I-5): `kind='light'` zamiast `IN ('light','master_light')` —
     gotowe stacki mają WŁASNE drążenie (`nameless_stack_frames`), bo są własnym kubełkiem kolejki.
     Od D-0802-1 (2026-08-02) nie chodzi już o to, że writeback ich nie tyka — tyka — tylko o to,
@@ -629,7 +668,7 @@ def nameless_frames(con, cleared=False):
         "  AND f.superseded_by IS NULL "
         "  AND f.retired_at IS NULL "
         "  AND h.object_raw IS NULL "
-        "  AND f.filetype NOT IN (SELECT value FROM json_each(?)) "
+        "  AND COALESCE(f.filetype, '') NOT IN (SELECT value FROM json_each(?)) "
         "  AND (f.object_source IS 'user_cleared') = ? "
         "ORDER BY l.path, f.id",
         (json.dumps(list(NO_OBJECT_CARD_FILETYPES)), int(cleared))
@@ -638,7 +677,8 @@ def nameless_frames(con, cleared=False):
 
 def nameless_raw_frames(con, cleared=False):
     """Drążenie kubełka „bez nazwy, format bez karty (RAW)" (S4) — bliźniak `nameless_frames`
-    o jednym słowie różnicy: `filetype IN NO_OBJECT_CARD_FILETYPES` zamiast `NOT IN`.
+    o jednym członie różnicy: `filetype IN NO_OBJECT_CARD_FILETYPES` zamiast
+    `COALESCE(filetype, '') NOT IN` (format nieznany zostaje po tamtej stronie - R-S4-10).
 
     Do S4 ten kubełek był wierszem INFORMACYJNYM: droga naprawy istniała (ręczne „Przypisz
     obiekt…"), ale wisiała przy pozycji `object_raw`, a RAW `object_raw` NIE MA z definicji —
@@ -952,27 +992,41 @@ def unreadable_copies(con):
     pokazane per kopia: oznaczona kopia może być `present=0` (znikła po oznaczeniu — forward-guard
     #13) i to MA być widoczne. `sha1_data` = kontekst tożsamości klatki (UI skraca do 12).
     ORDER: najnowsze oznaczenie na górze, potem ścieżka. Zwraca: frame_id, sha1_data, volume,
-    path, present, unreadable_since, reason.
+    path, present, unreadable_since, kind, reason.
 
-    `reason` (Z6) = OSTATNI `event(frame.review)` TEJ kopii: stan mówi, KTÓRA kopia wypadła,
-    dziennik — CZEGO nie da się przeczytać (żywa pf4: „ParseError: not well-formed…"). Atrybucja
-    idzie PARĄ (`target = 'sha1:'||sha1_data` ORAZ `payload.path == location.path`), bo target
-    jest per KLATKA, a klatka bywa wielokopiowa — po samym sha1 obie kopie dostałyby cudzy powód.
-    BEZ filtra po prefiksie: `frame.review` emitują DWA miejsca (`flag_frame_review` przy miękkim
-    lądowaniu W1 i `refresh_location_unreadable` przy markerze) i oba opisują tę samą niemożność
-    odczytu, więc rozstrzyga ŚWIEŻOŚĆ, nie autor. Kopia przemianowana po oznaczeniu zostawia
-    w payloadzie STARĄ ścieżkę → `reason IS NULL` i powierzchnia pokazuje „—": brak dowodu jest
-    uczciwszy niż powód pożyczony od innej kopii."""
+    `kind` (`'io'|'parse'|None`) i `reason` („Typ: opis") czytamy z KOLUMN kopii (P4-2,
+    `location.unreadable_kind`/`unreadable_reason`) - kolumna jest JEDYNYM właścicielem tego faktu.
+    Do P4-2 powód szukano w dzienniku, ostatnim `frame.review` po parze `sha1:` + `payload.path`,
+    i to źródło gubiło się dokładnie tam, gdzie powód był najbardziej potrzebny: payload trzyma
+    ścieżkę z CHWILI awarii, więc kopia przemianowana po oznaczeniu traciła powód, a rodzaju awarii
+    dziennik nie niósł wcale. Stan przeżywa przemianowanie, bo `path` i powód mieszkają w jednym
+    wierszu. `None` w obu = wiersz oznaczony przed migracją 0019 (powierzchnia pokazuje wtedy
+    myślnik `copy.no_reason`)."""
     return con.execute(
         "SELECT l.frame_id, f.sha1_data, l.volume, l.path, l.present, l.unreadable_since, "
-        "       (SELECT e.reason FROM event e "
-        "         WHERE e.verb = 'frame.review' AND e.target = 'sha1:' || f.sha1_data "
-        "           AND json_extract(e.payload, '$.path') = l.path "
-        "         ORDER BY e.id DESC LIMIT 1) AS reason "
+        "       l.unreadable_kind AS kind, l.unreadable_reason AS reason "
         "FROM location l JOIN frame f ON f.id = l.frame_id "
         "WHERE l.unreadable_since IS NOT NULL "
         "ORDER BY l.unreadable_since DESC, l.path"
     ).fetchall()
+
+
+def unreadable_kind_counts(con):
+    """Rozbicie oznaczonych kopii po RODZAJU awarii (P4-2) dla wiersza kubełka „kopie nieczytelne":
+    `{"io": n, "parse": n, "unknown": n}` - „unknown" to kopie oznaczone przed migracją 0019, które
+    rodzaj dostaną przy najbliższym re-odczycie.
+
+    Liczone PO KOPIACH, choć licznik kubełka (`unreadable_count`) liczy KLATKI: klatka z dwiema
+    kopiami może mieć dwa różne rodzaje (jedna na zerwanym udziale, druga z zepsutym nagłówkiem),
+    więc rozbicie klatek po rodzaju nie sumowałoby się do niczego. Liczba kopii jest jedyną, która
+    się sumuje - i to do długości drążenia (`unreadable_copies`, ten sam predykat markera), czyli
+    do tego, co user zobaczy po kliknięciu."""
+    counts = {"io": 0, "parse": 0, "unknown": 0}
+    for row in con.execute(
+            "SELECT unreadable_kind AS kind, count(*) AS n FROM location "
+            "WHERE unreadable_since IS NOT NULL GROUP BY unreadable_kind"):
+        counts[row["kind"] or "unknown"] = row["n"]
+    return counts
 
 
 def park_overview(con):
@@ -1255,10 +1309,21 @@ def vanished_frame_ids(con):
     """Zbiór frame_id ZNIKNIĘTYCH: klatka MA lokacje, ale ŻADNEJ obecnej (perspektywa „Zniknięte",
     P5/#7). Guard `EXISTS` odróżnia „zniknęła" od „nigdy nie miała lokalizacji" (frame osierocony
     przez `rebind_location` — inny stan, inna robota). JEDEN właściciel predykatu: liczy z niego
-    zarówno licznik Porządków (`tasks_state`), jak i trim gridu — jak `dup_frame_ids`. Zwraca set[int]."""
+    zarówno licznik Porządków (`tasks_state`), jak i trim gridu - jak `dup_frame_ids`. Zwraca set[int].
+
+    KLATKA ZASTĄPIONA WYPADA (G2-6d) z tego samego powodu, co wycofana: perspektywa jest listą
+    ROBOTY, a jej gestem jest wycofanie - klinga (`repo._retire_verdict`) klatkę zastąpioną
+    ODRZUCA, bo jej treść niesie następczyni. Bez guardu powierzchnia pokazywała klatkę, której
+    jedyny gest tej listy nie zamknie. Stan jest osiągalny, nie hipotetyczny: `repo.mark_superseded`
+    odmawia wyłącznie przy kopii OBECNEJ, więc „zastąpiona z martwą kopią" powstaje zwykłą drogą.
+    Guard dostają za darmo wszyscy trzej konsumenci predykatu (trim gridu, licznik Porządków
+    i `frames_without_copy` w podsumowaniu passa obecności), a klatka nie znika z oczu - ma własną
+    perspektywę „Zastąpione" (`superseded_frame_ids`). Ten sam guard niosą od G2-5d
+    `delta_report` i `LightClosure`."""
     return {int(r[0]) for r in con.execute(
         "SELECT f.id FROM frame f "
         "WHERE f.retired_at IS NULL "
+        "  AND f.superseded_by IS NULL "
         "  AND EXISTS (SELECT 1 FROM location l WHERE l.frame_id = f.id) "
         "  AND NOT EXISTS (SELECT 1 FROM location l WHERE l.frame_id = f.id AND l.present = 1)"
     ).fetchall()}
@@ -1906,12 +1971,30 @@ def selection_object_state(con, frame_ids):
 def restore_targets(con, frame_ids):
     """GRUPY DO PRZYWRÓCENIA z zaznaczenia (R-S2b-3) — czytane ze STANU, nie z dziennika.
 
-    Zwraca `(grupy, bez_pamieci)`, gdzie grupa to dict `{object_id, canon, catalog, kind,
+    Zwraca `(grupy, pominiete)`, gdzie grupa to dict `{object_id, canon, catalog, kind,
     frame_ids}` — po jednej na OBIEKT, bo klinga osi przyjmuje jeden kanon na wywołanie, a masowe
     cofnięcie potrafi objąć klatki kilku różnych obiektów naraz. `object_id` jedzie w grupie nie
     dla zapisu (klinga pisze po KANONIE), tylko jako ZAMROŻONY STAN dla guardu dryfu
-    (`repo.user_assign_object(expected_cleared_id=…)`, bramka pakietu 0810). `bez_pamieci` to liczba nagrobków, których nie da
-    się przywrócić, bo nie pamiętają przedmiotu (baza-dawca sprzed migracji 0017).
+    (`repo.user_assign_object(expected_cleared_id=…)`, bramka pakietu 0810). `pominiete` to dict
+    `{skipped_kind, skipped_nothing, skipped_no_memory}` - reszta zaznaczenia rozbita per fakt.
+
+    KLASYFIKUJE CAŁE ZAZNACZENIE, NIE SAME NAGROBKI (FC-6, R-S2b-13). Oba sąsiednie gesty tej osi
+    dostają całe zaznaczenie i odsiewają je licznikami klingi, więc ich „N z M" liczy M po
+    zaznaczeniu. Ten gest podawał klindze wyłącznie klatki z grup, więc jego „z M" liczyło same
+    nagrobki z pamięcią - firsthand zmierzył na jednym zrzucie „120 zaznaczonych" obok „30 z 30",
+    gdy sąsiad w tej samej sytuacji mówi „6 z 354". Klatki spoza grup nie liczyły się nigdzie.
+    Klasyfikacja siedzi TUTAJ, a nie w klindze, bo do klingi przywracania trafiają wyłącznie grupy.
+    Kolejność guardów jak u obu sąsiadów: rodzaj rozstrzyga PIERWSZY (kalibracja obiektu nie ma
+    z definicji, więc pytanie o nagrobek byłoby przy niej bez przedmiotu), potem „czy to nagrobek"
+    (`skipped_nothing` - nie było czego przywrócić), potem „czy pamięta przedmiot"
+    (`skipped_no_memory` - baza-dawca sprzed migracji 0017).
+
+    DICT, NIE `repo.ObjectGesture`: read-model nie importuje warstwy zapisu, więc oddaje same
+    liczby pod NAZWAMI PÓL gestu, a wołający składa z nich gest (`ObjectGesture(**pominiete)`).
+
+    ID SPOZA `frame` TO `ValueError`, NIE CISZA (EXPECT): niezmiennik `assigned + skipped ==
+    len(ids)` nie ma prawa trzymać się na id, którego baza nie zna - i obie sąsiednie klingi osi
+    rzucają przy takim id ten sam wyjątek.
 
     DLACZEGO STAN, A NIE `event`. Pytanie brzmi „co ta klatka odrzuciła" i jest pytaniem o NIĄ,
     nie o historię. Odpowiadanie skanem dziennika łamie się dwukrotnie: klatka cofnięta dwa razy
@@ -1927,23 +2010,34 @@ def restore_targets(con, frame_ids):
 
     Kolejność grup po `canon`, żeby zdanie po geście było DETERMINISTYCZNE, a nie zależne od
     kolejności wierszy w zaznaczeniu."""
+    ids = list(frame_ids)
     rows = con.execute(
-        "SELECT f.id AS frame_id, o.id AS object_id, o.canon, o.catalog, o.kind "
+        "SELECT f.id AS frame_id, f.kind AS frame_kind, f.object_source, "
+        "       o.id AS object_id, o.canon, o.catalog, o.kind "
         "FROM frame f LEFT JOIN object o ON o.id = f.object_cleared_id "
         "WHERE f.id IN (SELECT value FROM json_each(?)) "
-        "  AND f.object_source = 'user_cleared' "
         "ORDER BY o.canon, f.id",
-        (json.dumps(list(frame_ids)),)).fetchall()
-    grupy, bez_pamieci = {}, 0
+        (json.dumps(ids),)).fetchall()
+    if len(rows) < len(set(ids)):
+        brak = sorted(set(ids) - {r["frame_id"] for r in rows})
+        raise ValueError(f"frame nie istnieje - id: {', '.join(str(i) for i in brak)}")
+    grupy = {}
+    pominiete = {"skipped_kind": 0, "skipped_nothing": 0, "skipped_no_memory": 0}
     for r in rows:
+        if r["frame_kind"] not in LIGHT_KINDS:
+            pominiete["skipped_kind"] += 1
+            continue
+        if r["object_source"] != "user_cleared":
+            pominiete["skipped_nothing"] += 1
+            continue
         if r["object_id"] is None:
-            bez_pamieci += 1
+            pominiete["skipped_no_memory"] += 1
             continue
         g = grupy.setdefault(r["object_id"], {"object_id": r["object_id"], "canon": r["canon"],
                                               "catalog": r["catalog"], "kind": r["kind"],
                                               "frame_ids": []})
         g["frame_ids"].append(r["frame_id"])
-    return list(grupy.values()), bez_pamieci
+    return list(grupy.values()), pominiete
 
 
 def rename_frame_targets(con, frame_ids):
@@ -2121,10 +2215,6 @@ def base_rows(con, frame_ids):
     ).fetchall()
 
 # --- TODO-DŁUG (z kolejki sesji, dieta 2026-08-10; pełne brzmienia: archiwum aa) ---
-# TODO-DŁUG(W-4): sort kolejki obiektów przy remisie sum jest stringowy (Caldwell 12 przed
-#   Caldwell 3). Przy remisie sortuj naturalnie (rozbicie nazwy na człony liczbowe).
 # TODO-DŁUG(P4-1): unresolved_reason to werdykt ZAMROŻONY - 11 stosów niosło no_object dobę po
 #   nadaniu obiektów ręką. Kubełek liczyć ze STANU (obiekt jest => no_object nie ma prawa się
 #   pokazać) albo gest zmieniający fakt sam proponuje przeliczenie (wzorzec taktu 3, b803b5d).
-# TODO-DŁUG(R-S4-10): filetype IS NULL wypada z OBU kubełków bezimiennych (NULL IN/NOT IN dają
-#   NULL), zostając w review_frame_ids - partycja pękłaby po cichu. Dziś nieosiągalne (tripwire).

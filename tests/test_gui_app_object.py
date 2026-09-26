@@ -912,6 +912,27 @@ def test_kubelek_gotowych_stosow_drazy_wlasna_lista(repair):
     assert [r["frame_id"] for r in queries.nameless_stack_frames(con)] == [fid]
 
 
+def test_zdanie_podpowiedzi_ROZNE_dla_drzewa_STACKS_i_ukladu_WBPP():
+    """Tooltip `⟨…⟩` mówi prawdę o SWOIM układzie: w drzewie `STACKS` folder niesie nazwę i jest
+    droga potwierdzenia ze ścieżki, w układzie WBPP nazwy nie niesie nic (zdanie bez zmian). Belka
+    grupy mieszającej oba układy milczy, bo żadne z dwóch zdań nie jest prawdą o całej grupie.
+
+    Scenariusz jedzie przez politykę komórki (`queries.object_cell`) i wybór zdania gridu."""
+    from horreum.gui import grid
+    stos = {"kind": "master_light", "object_canon": None, "object_raw": None,
+            "path": r"R:\ASTRO_\STACKS\vdB30\A140R_2600MM\G\vdB30_G.xisf"}
+    wbpp = {"kind": "master_light", "object_canon": None, "object_raw": None,
+            "path": r"R:\ARCHIWUM\vdB30\master\masterLight_BIN-1.xisf"}
+    assert queries.object_cell(stos) == queries.object_cell(wbpp) == ("⟨vdB30⟩", "hint")
+    assert grid._object_tip(stos, "hint") == i18n.t("grid.cell.object_hint_stacks_tip")
+    assert grid._object_tip(wbpp, "hint") == i18n.t("grid.cell.object_hint_tip")
+    assert "Zatwierdź ze ścieżki" in i18n.t("grid.cell.object_hint_stacks_tip")
+    model = grid.GridTableModel.__new__(grid.GridTableModel)
+    assert model._group_tip_mode([stos, dict(stos)], "hint") == "exact"
+    assert model._group_tip_mode([stos, wbpp], "hint") is None
+    assert model._group_tip_mode([wbpp], "hint") == "exact"
+
+
 def _stary_podzial(con, rows):
     """Reguła `_split_rows` SPRZED drzewa stosów, przepisana znak w znak - świadek niezależny dla
     bramki niżej. Grupuje po RODZICU pliku i pyta `path_proposal` BEZ rodzaju."""

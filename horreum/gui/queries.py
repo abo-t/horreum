@@ -99,6 +99,13 @@ def stack_folder(path):
     return rodzic
 
 
+def hint_from_stacks_tree(path):
+    """Czy podpowiedź `stack_folder` dla tej ścieżki pochodzi z drzewa `STACKS` - pytanie zdania
+    podpowiedzi w gridzie. Ta sama reguła, którą `stack_folder` wybiera gałąź (SPOT): w drzewie
+    stosów folder NIESIE nazwę i szczebel ścieżki ma propozycję; w układzie WBPP nie niesie."""
+    return bool(path) and object_from_path(str(path), kind=STACK_KIND) is not None
+
+
 OBJECT_CELL_STATES = ("canon", "cleared", "kind", "raw", "hint")
 """Stany komórki „Obiekt" — LUSTRO gałęzi `object_cell`, do bramki parytetu z katalogiem i18n.
 

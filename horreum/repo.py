@@ -1602,6 +1602,8 @@ def user_assign_object(con, *, alias_norm, canon, catalog, kind, frame_ids, now,
     dostała `object_id NOT NULL` (resolve z workera / inne przypisanie), jest POMIJANA i zliczana.
     Zwraca `ObjectGesture` — GUI pokazuje „przypisano N z M" plus rozbicie. Idempotencja jak reszta
     repo: powtórzenie tego samego przypisania → wszystkie klatki pominięte, ZERO nowych eventów.
+    Przy `object_source='path'` dryfem jest też klatka, której PRZESŁANKA propozycji przestała
+    zachodzić (nagłówek zaczął zeznawać, brak wiersza `header`, wycofanie, zastąpienie).
 
     GUARD RODZAJU STOI TU, NIE W GEŚCIE (S2b, §4/14c-b): od paska Zbiorów zaznaczenie bierze się
     z widoku, więc wpadną w nie darki i flaty. Kalibracja obiektu nie ma z DEFINICJI (memory
@@ -1673,6 +1675,24 @@ def user_assign_object(con, *, alias_norm, canon, catalog, kind, frame_ids, now,
             if fr["kind"] not in LIGHT_KINDS:
                 kind_skip += 1                      # kalibracja: obiektu nie ma z DEFINICJI
                 continue
+            if object_source == "path":
+                # POTWIERDZENIE PROPOZYCJI ŚCIEŻKI PYTA PONOWNIE O JEJ PRZESŁANKĘ, w tej transakcji.
+                # Propozycja (`resolver.path_proposals`) powstała z „nagłówek milczy, klatka żywa";
+                # między oknem a zapisem re-skan mógł wczytać kartę `OBJECT` (writeback z drugiej
+                # powierzchni), a wycofanie/zastąpienie zdjąć klatkę z roboty. Zapis nazwy z FOLDERU
+                # nad zeznaniem PLIKU odwracałby header-primary, więc taka klatka jest DRYFEM - tym
+                # samym kanałem co zajęcie między oknem a zapisem. Nagrobek łapie gałąź niżej
+                # (`source_skip`), a `object_id` - gałąź dryfu; tu tylko to, czego klinga nie czytała.
+                # Zakres = WYŁĄCZNIE źródło `path`: ręka (`user`) wolno nazwać klatkę mimo zeznania.
+                przeslanka = con.execute(
+                    "SELECT h.frame_id AS hid, h.object_raw AS raw, f.retired_at AS ret, "
+                    "       f.superseded_by AS sup "
+                    "FROM frame f LEFT JOIN header h ON h.frame_id = f.id WHERE f.id = ?",
+                    (frame_id,)).fetchone()
+                if (przeslanka["hid"] is None or przeslanka["raw"] is not None
+                        or przeslanka["ret"] is not None or przeslanka["sup"] is not None):
+                    drift += 1
+                    continue
             if expected_source is not None and fr["object_source"] != expected_source:
                 drift += 1                          # nie ten stan, co widział read-model wołającego
                 continue

@@ -2273,6 +2273,42 @@ def test_uwaga_o_RAW_ach_bez_zegara_mowi_obok_GOTOWEGO_rodowodu(view, gcon):
     assert not bar.btn_offset.isHidden() and "+1.0" in bar.btn_offset.text()
 
 
+def test_RAW_obcego_teleskopu_obok_FITS_mastera_NIE_zapala_gestu(view, gcon):
+    """Scenariusz wykonany przebiegiem, nie wstrzykiem: master teleskopu A, w oknie FITS z A, obok
+    RAW z teleskopu B bez zegara. Po geście reguła osi odrzuciłaby ten RAW (jest kandydat A), więc
+    panel nie ma prawa mówić o klatkach bez zegara ani zapalać gestu, który nic nie odblokuje."""
+    from horreum.stacks import run_stack_lineage
+    gcon.execute("INSERT INTO camera(id, model_canon, created_at) VALUES (900, 'CAM', ?)", (NOW,))
+    for tid, nazwa in ((900, "RC8R"), (901, "ED120R")):
+        gcon.execute("INSERT INTO telescope(id, telescop_canon, status, created_at) "
+                     "VALUES (?, ?, 'proposed', ?)", (tid, nazwa, NOW))
+        gcon.execute("INSERT INTO config(id, telescope_id, camera_id, status, created_at) "
+                     "VALUES (?, ?, 900, 'proposed', ?)", (tid, tid, NOW))
+    gcon.execute("INSERT INTO object(id, canon, catalog, kind) "
+                 "VALUES (900, 'IC443', 'catalog', 'deep_sky')")
+    raw = {"IMAGETYP": "Master Light", "EXPTIME": 90.0, "DATE-OBS": "2019-01-10T20:40:38",
+           "DATE-END": "2019-01-10T21:45:00"}
+    for fid, kind, typ, cfg, czas in ((910, "master_light", "xisf", 900, "2019-01-10T20:40:38"),
+                                      (911, "light", "fits", 900, "2019-01-10T20:41:00"),
+                                      (912, "light", "raw", 901, "2019-01-10T21:45:00")):
+        gcon.execute("INSERT INTO frame(id, sha1_data, kind, filetype, camera_id, config_id, "
+                     "object_id, first_seen_at) VALUES (?, ?, ?, ?, 900, ?, 900, ?)",
+                     (fid, f"s{fid}", kind, typ, cfg, NOW))
+        gcon.execute("INSERT INTO header(frame_id, raw_json, date_obs, exptime) VALUES (?, ?, ?, 90.0)",
+                     (fid, json.dumps(raw) if kind == "master_light" else "{}", czas))
+    gcon.execute("INSERT INTO location(frame_id, volume, path, present) "
+                 "VALUES (910, 'V', '/a/masterLight_IC443.xisf', 1)")
+    gcon.commit()
+    run_stack_lineage(gcon, now=NOW, xml_reader=lambda _p: None)
+
+    assert _zaznacz_frame(view, 910)
+    view._toggle_panel("lineage")
+    bar = view.lineage_bar
+    assert "Weszła 1 klatka" in bar.head.text()
+    assert "lustrzanki" not in bar.warn.full_text()
+    assert bar.btn_offset.isHidden() and bar.klatki_bez_odniesienia() == 0
+
+
 def test_noc_mastera_z_rozjazdem_teleskopu_mowi_zdaniem_gotowego_rodowodu(view, gcon):
     """B3a-2: propozycja niesie rozjazd reguły teleskopu na NOCY MASTERA, a panel mówi go tym
     samym kluczem, co przy gotowym rodowodzie (`grid.lin.flag.telescope`). Przełączenie na noc

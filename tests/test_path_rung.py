@@ -548,6 +548,117 @@ def test_stos_z_nazwa_zdjeta_REKA_nie_wraca_propozycja():
     assert resolver.path_proposals(con) == ()
 
 
+def _zatwierdz(con, p):
+    return repo.user_assign_object(con, alias_norm=None, canon=p.canon, catalog=p.catalog,
+                                   kind=p.kind, frame_ids=list(p.frame_ids), now=NOW,
+                                   object_source="path")
+
+
+def test_region_NIE_nadpisuje_potwierdzenia_ze_sciezki():
+    """Stos pod `STACKS\\NGC6992` z RA/DEC w promieniu Veil, nagłówek bez `OBJECT`: zatwierdzony ze
+    ścieżki zostaje `NGC6992`/`path` po „Rozwiąż" - region, najsłabszy szczebel automatu, nie
+    zamalowuje potwierdzenia człowieka. Przebieg nie dokłada zdarzeń, spis faktów ręki bez ubytku.
+
+    Falsyfikator: zdejmij warunek `WEAK_OBJECT_SOURCES` przed `resolve_region` → klatka przechodzi
+    na `Veil`/`region` i para `object.unassigned`+`object.assigned` ląduje w dzienniku."""
+    con = _pusta()
+    fid, _ = repo.upsert_frame(con, sha1_data="st-veil", kind="master_light", filetype="xisf",
+                               camera_id=None, now=NOW)
+    repo.record_header(con, frame_id=fid, raw_json="{}", object_raw=None,
+                       ra_deg=313.9, dec_deg=31.2, now=NOW)       # w promieniu Veil (1,8°)
+    repo.add_location(con, frame_id=fid, volume="VOL", now=NOW,
+                      path=rf"{R}\STACKS\NGC6992\RC8_2600MM\Ha\NGC6992_Ha.xisf")
+    p = resolver.path_proposals(con)[0]              # propozycja PRZED pierwszym przebiegiem
+    assert (p.canon, p.stack_tree) == ("NGC6992", True)
+    assert _zatwierdz(con, p).assigned == 1
+    przed_ev = con.execute("SELECT count(*) FROM event").fetchone()[0]
+    przed_fakty = audit.human_facts_census(con)
+    resolver.run_resolver(con, NOW)
+    resolver.run_resolver(con, NOW)
+    stan = con.execute("SELECT o.canon, f.object_source FROM frame f JOIN object o "
+                       "ON o.id = f.object_id WHERE f.id = ?", (fid,)).fetchone()
+    assert tuple(stan) == ("NGC6992", "path")
+    assert con.execute("SELECT count(*) FROM event").fetchone()[0] == przed_ev
+    assert audit.human_facts_census(con) == przed_fakty
+
+
+def test_region_dalej_dziala_dla_klatki_BEZ_potwierdzenia():
+    """Obrona wąska: stos bez żadnego źródła z tymi samymi RA/DEC dostaje region jak dotąd."""
+    con = _pusta()
+    fid, _ = repo.upsert_frame(con, sha1_data="st-veil2", kind="master_light", filetype="xisf",
+                               camera_id=None, now=NOW)
+    repo.record_header(con, frame_id=fid, raw_json="{}", object_raw=None,
+                       ra_deg=313.9, dec_deg=31.2, now=NOW)
+    resolver.run_resolver(con, NOW)
+    stan = con.execute("SELECT o.canon, f.object_source FROM frame f JOIN object o "
+                       "ON o.id = f.object_id WHERE f.id = ?", (fid,)).fetchone()
+    assert tuple(stan) == ("Veil", "region")
+
+
+@pytest.mark.parametrize("kolejnosc", [("vdB30", "NGC7000"), ("NGC7000", "vdB30")])
+def test_stos_z_KOPIAMI_pod_roznymi_obiektami_MILCZY(kolejnosc):
+    """Świadkiem są WSZYSTKIE obecne kopie, nie `MIN(id)`: dwie kopie pod różnymi obiektami to
+    sprzeczność świadków, więc szczebel milczy - w OBU kolejnościach wjazdu (dawna reguła dawała
+    propozycję zależną od tego, która kopia wjechała pierwsza)."""
+    con = _pusta()
+    fid = _stos(con, "st1", rf"{R}\STACKS\{kolejnosc[0]}\A\G\x.xisf")
+    repo.add_location(con, frame_id=fid, volume="VOL2", now=NOW,
+                      path=rf"{R}\STACKS\{kolejnosc[1]}\A\G\x.xisf")
+    assert resolver.path_proposals(con) == ()
+
+
+@pytest.mark.parametrize("stacks_pierwsza", [True, False])
+def test_stos_kopia_POZA_STACKS_nie_blokuje_kopii_pod_STACKS(stacks_pierwsza):
+    """Kopia w układzie WBPP nie zeznaje o obiekcie, więc nie przeczy kopii pod `STACKS` - ta
+    świadczy w obu kolejnościach wjazdu, a folder pozycji to folder obiektu z drzewa stosów."""
+    con = _pusta()
+    w_stacks = rf"{R}\STACKS\vdB30\A140R_2600MM\G\vdB30_G.xisf"
+    wbpp = r"R:\ARCHIWUM\sesja 2026-03-06\master\masterLight_BIN-1.xisf"
+    pierwsza, druga = (w_stacks, wbpp) if stacks_pierwsza else (wbpp, w_stacks)
+    fid = _stos(con, "st1", pierwsza)
+    repo.add_location(con, frame_id=fid, volume="VOL2", path=druga, now=NOW)
+    assert [(p.canon, p.frame_ids, p.folder) for p in resolver.path_proposals(con)] == \
+        [("vdB30", (fid,), rf"{R}\STACKS\vdB30")]
+
+
+def test_zatwierdzenie_ze_sciezki_POMIJA_klatke_ktorej_naglowek_zaczal_zeznawac():
+    """Przesłanka propozycji sprawdzana W TRANSAKCJI klingi: między oknem a zapisem re-skan wczytał
+    kartę `OBJECT`, więc nazwa z folderu nie ma prawa przykryć zeznania pliku - dryf, zero zapisu.
+    Stan wytwarza klinga skanu (`refresh_location` z nowym `header_hash`), nie surowy UPDATE."""
+    con = _pusta()
+    fid = _stos(con, "st1", rf"{R}\STACKS\vdB30\A140R_2600MM\G\x.xisf")
+    p = resolver.path_proposals(con)[0]
+    lid, hh = con.execute("SELECT id, header_hash FROM location WHERE frame_id = ?",
+                          (fid,)).fetchone()
+    repo.refresh_location(con, location_id=lid, frame_id=fid, mtime=1.0, file_sha1="f2",
+                          header_hash="h-nowy", hdu_index=None, compressed=None, size_bytes=None,
+                          unreadable_since=None, unreadable_kind=None, unreadable_reason=None,
+                          present=1, now=NOW, raw_json="{}", hot_fields={"object_raw": "NGC 7000"},
+                          kind="master_light")
+    assert con.execute("SELECT object_raw FROM header WHERE frame_id = ?",
+                       (fid,)).fetchone()[0] == "NGC 7000"
+    g = _zatwierdz(con, p)
+    assert (g.assigned, g.skipped_drift) == (0, 1)
+    assert con.execute("SELECT object_id, object_source FROM frame WHERE id = ?",
+                       (fid,)).fetchone()[:] == (None, None)
+    assert _ev(con, "object.assigned") == 0
+
+
+def test_zatwierdzenie_ze_sciezki_POMIJA_klatke_wycofana():
+    """Ta sama przesłanka od strony stanu klatki: kopia zniknęła i klatkę wycofano gestem między
+    oknem a zapisem - dryf, zero zapisu (klingi obecności i wycofania, nie surowy UPDATE)."""
+    con = _pusta()
+    sciezka = rf"{R}\STACKS\vdB30\A140R_2600MM\G\x.xisf"
+    fid = _stos(con, "st1", sciezka)
+    p = resolver.path_proposals(con)[0]
+    lid = con.execute("SELECT id FROM location WHERE frame_id = ?", (fid,)).fetchone()[0]
+    assert repo.mark_location_vanished(con, location_id=lid, expected_path=sciezka, root=R,
+                                       run_id="t", now=NOW)
+    assert repo.retire_frames(con, frame_ids=[fid], now=NOW).done == 1
+    g = _zatwierdz(con, p)
+    assert (g.assigned, g.skipped_drift) == (0, 1)
+
+
 def test_stos_i_RAW_tej_samej_nazwy_to_DWIE_pozycje():
     """Każda populacja pod swoim kubełkiem: ta sama nazwa z obu drzew nie zlewa się w jedną pozycję
     (inaczej liczba „z tego" pod RAW-em liczyłaby stosy). Kolejka rozbija liczniki tak samo."""

@@ -101,7 +101,13 @@ def _cleared_tip(row):
 def _object_tip(row, stan):
     """Zdanie stanu kolumny „Obiekt" — JEDEN wybór dla komórki i dla nagłówka grupy (FC-3).
     Belka bierze zdanie z wiersza wzorcowego kubełka, ale wolno jej to zrobić dopiero wtedy, gdy
-    kubełek mówi jednym głosem — rozstrzyga `GridTableModel._group_tip_mode`, nie ta funkcja."""
+    kubełek mówi jednym głosem - rozstrzyga `GridTableModel._group_tip_mode`, nie ta funkcja.
+
+    Podpowiedź `hint` ma DWA zdania: w drzewie `STACKS` folder niesie nazwę i istnieje droga
+    potwierdzenia ze ścieżki, w układzie WBPP nie - jedno wspólne zdanie byłoby o stosach
+    z drzewa nieprawdą („nazwy nie niosą tożsamości")."""
+    if stan == "hint" and queries.hint_from_stacks_tree(row.get("path")):
+        return i18n.t("grid.cell.object_hint_stacks_tip")
     return _cleared_tip(row) if stan == "cleared" else i18n.t(_OBJECT_STATE_TIPS[stan])
 
 
@@ -856,10 +862,16 @@ class GridTableModel(QAbstractTableModel):
     def _group_tip_mode(self, bucket, stan):
         """Czy belka MOŻE zacytować wiersz wzorcowy — `exact` / `base` / `None` (opis: `_group_tip`).
 
-        Tylko `cleared` zależy od danych WIERSZA (pamięć nagrobka + zeznanie nagłówka); pozostałe
-        stany mają zdanie stałe per stan, więc wiersz wzorcowy jest dla nich obojętny."""
+        Od danych WIERSZA zależą `cleared` (pamięć nagrobka + zeznanie nagłówka) i `hint` (układ
+        ścieżki: drzewo `STACKS` albo WBPP); pozostałe stany mają zdanie stałe per stan, więc
+        wiersz wzorcowy jest dla nich obojętny."""
         if stan is None:
             return None
+        if stan == "hint":
+            # Zdanie podpowiedzi zależy od UKŁADU ścieżki (`_object_tip`): kubełek mieszający drzewo
+            # `STACKS` z układem WBPP pod jednym tekstem komórki nie ma jednego zdania - belka milczy.
+            drzewa = {queries.hint_from_stacks_tree(r.get("path")) for r in bucket}
+            return "exact" if len(drzewa) == 1 else None
         if stan != "cleared":
             return "exact"
         fakty = {(bool(r.get("object_cleared_canon")), bool(r.get("object_raw"))) for r in bucket}

@@ -22,8 +22,8 @@ from .resolve._coerce import _to_text
 from .resolve._text import norm_alnum
 from .resolve.catalog import catalog_canon
 from .resolve.filters import normalize_filter
-from .resolve.objects import (STICKY_OBJECT_SOURCES, ObjectIdentity, load_own_objects,
-                              resolve_object)
+from .resolve.objects import (STICKY_OBJECT_SOURCES, WEAK_OBJECT_SOURCES, ObjectIdentity,
+                              load_own_objects, resolve_object)
 from .resolve.observatory import site_coords
 from .resolve.paths import STACK_KIND, object_folder, object_from_path, filename_tokens
 from .resolve.regions import resolve_region
@@ -292,7 +292,22 @@ def path_proposals(con):
     pozycyjną z pomiarem bez rozjazdu, a nie dowolnym folderem archiwum. Cena nazwana: gest
     potwierdzenia nazywa stos w BAZIE, a plik dalej milczy - droga karty („Napraw nagłówek…")
     zostaje otwarta, a karta wpisana później WYGRYWA, bo `path` nie jest STICKY i przebieg
-    rozstrzyga nagłówkiem przed ścieżką."""
+    rozstrzyga nagłówkiem przed ścieżką.
+
+    ŚWIADKIEM STOSU SĄ WSZYSTKIE OBECNE KOPIE, NIE `MIN(id)`. Stos bywa w archiwum dwa razy (128
+    gotowych obrazów dostało drugi adres przy wjeździe stosów, D-V-9), a kopia o najniższym id to
+    kolejność WJAZDU, nie prawda o obiekcie - dwie kopie pod `STACKS\\vdB30` i `STACKS\\NGC7000`
+    dawałyby propozycję zależną od tego, która wjechała pierwsza. Reguła:
+      * głos oddaje kopia, której segment po `STACKS` ROZWIĄZUJE się drabiną nazwy;
+      * kopie o RÓŻNYCH kanonach = sprzeczność świadków, szczebel MILCZY (decyzja zostaje u
+        człowieka - ręka albo karta w pliku);
+      * kopia bez kotwicy `STACKS` (układ WBPP, `_WBPP`, dowolny folder roboczy) głosu NIE oddaje
+        i nie blokuje: poza drzewem stosów żaden stały segment nie niesie nazwy obiektu, więc taka
+        kopia nie zeznaje niczego, czemu segment po `STACKS` mógłby przeczyć. Tak samo kopia pod
+        `STACKS` z nazwą, której drabina nie zna - milczy, jak jedyna kopia z takim folderem;
+      * folderem pozycji jest folder obiektu pierwszej głosującej kopii (`ORDER BY f.id, l.id`).
+    Droga RAW zostaje przy `MIN(id)` wśród obecnych - lighty z lustrzanki nie mają drugich kopii
+    w zmierzonym archiwum, a zmiana jej reguły nie należy do tej poprawki."""
     lookup = alias_snapshot(con).get
     kanony = {r["canon"] for r in con.execute("SELECT canon FROM object").fetchall()}
     rows = con.execute(
@@ -307,31 +322,44 @@ def path_proposals(con):
         "  AND f.filetype IN (SELECT value FROM json_each(?)) "
         "ORDER BY f.id",
         (json.dumps(list(NO_OBJECT_CARD_FILETYPES)),)).fetchall()
-    stosy = con.execute(
+    kopie_stosow = con.execute(
         "SELECT f.id AS fid, l.path AS path FROM frame f JOIN header h ON h.frame_id = f.id "
-        "LEFT JOIN location l ON l.id = (SELECT MIN(id) FROM location "
-        "                                WHERE frame_id = f.id AND present = 1) "
+        "JOIN location l ON l.frame_id = f.id AND l.present = 1 "
         "WHERE f.kind = 'master_light' AND f.object_id IS NULL "
         "  AND f.superseded_by IS NULL "
         "  AND f.retired_at IS NULL "
         "  AND h.object_raw IS NULL "
         "  AND f.object_source IS NULL "
-        "ORDER BY f.id").fetchall()
+        "ORDER BY f.id, l.id").fetchall()
 
     grupy = {}                       # (drzewo stosów?, kanon) -> [ident, folder, [frame_id, …]]
-    for drzewo, rodzaj, wiersze in ((False, "light", rows), (True, STACK_KIND, stosy)):
-        for r in wiersze:
-            seg = object_from_path(r["path"], kind=rodzaj)
-            if not seg:
-                continue
-            ident, _ = resolve_name(lookup, seg, from_path=True)
-            if ident is None:
-                continue
-            klucz = (drzewo, ident.canon)
-            wpis = grupy.get(klucz)
-            if wpis is None:        # folder liczymy RAZ na grupę, nie raz na klatkę (763 wywołania
-                wpis = grupy[klucz] = [ident, object_folder(r["path"], kind=rodzaj), []]  # na odśw.)
-            wpis[2].append(r["fid"])
+
+    def _dopisz(drzewo, fid, ident, folder):
+        wpis = grupy.get((drzewo, ident.canon))
+        if wpis is None:            # folder liczymy RAZ na grupę, nie raz na klatkę (763 wywołania
+            wpis = grupy[(drzewo, ident.canon)] = [ident, folder(), []]          # na odświeżenie)
+        wpis[2].append(fid)
+
+    for r in rows:
+        seg = object_from_path(r["path"])
+        if not seg:
+            continue
+        ident, _ = resolve_name(lookup, seg, from_path=True)
+        if ident is not None:
+            _dopisz(False, r["fid"], ident, lambda p=r["path"]: object_folder(p))
+
+    glosy = {}                       # frame_id -> {kanon: (ident, ścieżka pierwszej kopii)}
+    for r in kopie_stosow:
+        seg = object_from_path(r["path"], kind=STACK_KIND)
+        ident = resolve_name(lookup, seg, from_path=True)[0] if seg else None
+        glos = glosy.setdefault(r["fid"], {})
+        if ident is not None and ident.canon not in glos:
+            glos[ident.canon] = (ident, r["path"])
+    for fid, glos in glosy.items():
+        if len(glos) != 1:          # zero głosów = milczenie; dwa kanony = sprzeczność = milczenie
+            continue
+        ident, sciezka = next(iter(glos.values()))
+        _dopisz(True, fid, ident, lambda p=sciezka: object_folder(p, kind=STACK_KIND))
     # Porządek po NAZWIE, populacja drugim kluczem: ta sama nazwa z obu drzew stoi obok siebie.
     return tuple(
         PathProposal(canon=canon, catalog=ident.catalog, kind=ident.kind, folder=folder,
@@ -423,7 +451,11 @@ def run_resolver(con, now):
                 ident, alias_oid = resolve_name(lookup, r["obj"])
                 # REGION = OSTATNI szczebel (#5, P3): dopiero gdy zeznanie nagłówka i alias nic nie
                 # dały — 547 klatek `NGC6992` leży WEWNĄTRZ promienia Veil i chroni je kolejność.
-                if ident is None and alias_oid is None:
+                # …i NIE nad potwierdzeniem ze ŚCIEŻKI (`WEAK_OBJECT_SOURCES`): człowiek zatwierdził
+                # nazwę z folderu, a region jest najsłabszym szczeblem automatu - stos pod
+                # `STACKS\\NGC6992` z RA/DEC w promieniu Veil zostaje `NGC6992`. Zakres = sam
+                # region: nagłówek, który zeznaje rozpoznawalną nazwę, wygrywa dalej (header-primary).
+                if ident is None and alias_oid is None and r["osrc"] not in WEAK_OBJECT_SOURCES:
                     ident = resolve_region(r["ra"], r["dec"])
                 if alias_oid is not None:
                     # Trafienie aliasu: obiekt i alias ISTNIEJĄ z definicji — BEZ upsert_object i

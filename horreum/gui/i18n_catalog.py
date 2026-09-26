@@ -199,6 +199,18 @@ CATALOG = {
         "en": "HINT FROM THE FOLDER, not an object name — this is what the finished image's path "
               "says. WBPP generates the file names and they carry no identity; assign one "
               "(Object ▾ → “Assign object…”)."},
+    # Stos w drzewie STACKS: tu folder NIESIE nazwę (segment po STACKS), a szczebel ścieżki ma dla
+    # niej propozycję - zdanie o WBPP byłoby nieprawdą i odsyłało do drogi dłuższej niż istniejąca.
+    "grid.cell.object_hint_stacks_tip": {
+        "pl": "PODPOWIEDŹ Z FOLDERU OBIEKTU, jeszcze nie przypisany obiekt - stos leży w drzewie "
+              "STACKS, więc nazwę niesie folder zaraz po STACKS. Gdy program tę nazwę zna, czeka "
+              "ona na Twoje potwierdzenie: Porządki → Klatki bez obiektu → „…z tego ze ścieżki” → "
+              "Zatwierdź ze ścieżki…; gdy nie zna, nadaj ją (Obiekt ▾ → „Przypisz obiekt…”).",
+        "en": "HINT FROM THE OBJECT FOLDER, not yet an assigned object - the stack sits in the "
+              "STACKS tree, so the folder right after STACKS carries the name. If the program "
+              "knows that name, it awaits your confirmation: Housekeeping → Frames without object "
+              "→ “…of which from path” → Confirm from path…; if not, assign one "
+              "(Object ▾ → “Assign object…”)."},
     "object.col.catalog": {"pl": "Katalog", "en": "Catalog"},
     "frame.col.sha": {"pl": "sha1 danych", "en": "data sha1"},
     "frame.col.telescope": {"pl": "Teleskop", "en": "Telescope"},

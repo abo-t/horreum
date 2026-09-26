@@ -288,9 +288,14 @@ def _in_window(rows, *, start, end, filter_canon, telescope_id, exptime, utc_off
     jako UWAGĘ obok werdyktu (`integration.raw_unreferenced`, migracja 0020), a panel mówi „a tych
     N nie umiem umieścić w czasie". Werdykt zostaje jednowartościowy; uwaga go nie dubluje
     (CHECK 0020 odbija ją przy `offset_unknown`, który mówi to samo). Zmierzona populacja na żywym
-    archiwum: **0** - droga stoi na teście syntetycznej puli mieszanej, nie na żywym stosie."""
+    archiwum: **0** - droga stoi na teście syntetycznej puli mieszanej, nie na żywym stosie.
+
+    TRZECIA WARTOŚĆ LICZY TYLKO RAW-Y, KTÓRE PRZEŻYŁYBY OŚ TELESKOPU po wskazaniu zegara - obrona
+    tak szeroka jak źródło faktu, bo ta liczba jest obietnicą gestu (uzasadnienie przy kodzie niżej).
+    Przy oknie nie-RAW pustym i RAW-ach mieszających obce teleskopy rozjazd reguły wraca drugą
+    wartością, więc werdykt brzmi `telescope_mismatch` zamiast fałszywego `offset_unknown`."""
     okno = []
-    raw_bez_odniesienia = 0
+    raw_bez_zegara = []
     for r in rows:
         if not exposure_matches(r["exptime"], exptime):
             continue                       # SQL dał NADZBIÓR (pas ± sufit) — próg rozstrzyga tu
@@ -309,14 +314,40 @@ def _in_window(rows, *, start, end, filter_canon, telescope_id, exptime, utc_off
                 # człowieka do gestu, który nie ma prawa zadziałać.
                 if (start - timedelta(minutes=repo.UTC_OFFSET_MAX_MIN)
                         <= t < end + timedelta(minutes=repo.UTC_OFFSET_MAX_MIN)):
-                    raw_bez_odniesienia += 1
+                    raw_bez_zegara.append(r)
                 continue
             t -= timedelta(minutes=utc_offset_min)
         if not (start <= t < end):
             continue
         okno.append(r)
     wybrane, rozjazd = _telescope_rule(okno, telescope_id)
-    return wybrane, rozjazd, raw_bez_odniesienia
+    if not raw_bez_zegara:
+        return wybrane, rozjazd, 0
+    # RAW BEZ ZEGARA LICZY SIĘ TYLKO WTEDY, GDY PRZEŻYŁBY OŚ TELESKOPU - pytamy o DECYZJĘ reguły,
+    # nie kopiujemy jej logiki. Licznik zasila receptę „wskaż zegar", więc ma mówić, ile klatek ten
+    # gest REALNIE odblokuje: RAW teleskopu B przy kandydacie FITS teleskopu mastera A zostałby po
+    # geście odrzucony gałęzią pierwszą, a panel obiecywałby go mimo to.
+    #
+    # WARIANT ŁĄCZNY (okno + WSZYSTKIE RAW-y bez zegara naraz), nie „każdy RAW osobno z oknem",
+    # bo tak liczy przebieg po geście: offset jest jeden dla całego obrazu, więc wszystkie RAW-y
+    # wchodzą do okna RAZEM i reguła widzi je jednocześnie. Wariant osobny przepuszczałby RAW
+    # teleskopu B obok RAW-u teleskopu A (każdy sam z pustym oknem jest „jednorodny"), a po geście
+    # A wypiera B. Granica nazwana: pas ±14 h jest szerszy niż okno, więc RAW, który po geście
+    # wypadnie poza okno, i tak głosuje tu o jednorodności - skutek to co najwyżej ostrożniejszy
+    # licznik (0 zamiast N) przy mieszance teleskopów w samym paśmie.
+    #
+    # TEN SAM LICZNIK ZASILA WERDYKT `offset_unknown` i tam też musi pytać regułę: przy pustym
+    # oknie nie-RAW i RAW-ach JEDNORODNIE innego teleskopu reguła je przyjmuje (gałąź środkowa),
+    # więc werdykt zostaje i jest prawdą - gest dobierze klatki, z flagą rozjazdu. Fałszem był
+    # wyłącznie przypadek RAW-ów MIESZAJĄCYCH obce teleskopy: `offset_unknown` obiecywał „klatki się
+    # dobiorą", a po geście reguła odrzuciłaby wszystkie. Wtedy rozjazd reguły idzie do wołającego
+    # i `_plan` mówi `telescope_mismatch` (kandydaci byli, odrzuciła ich oś), a nie `no_candidates`.
+    ids = {id(r) for r in raw_bez_zegara}
+    przezyli, rozjazd_z_raw = _telescope_rule(okno + raw_bez_zegara, telescope_id)
+    ile = sum(1 for r in przezyli if id(r) in ids)
+    if not okno and not ile:
+        rozjazd = rozjazd_z_raw
+    return wybrane, rozjazd, ile
 
 
 def _telescope_rule(okno, telescope_id):

@@ -458,3 +458,88 @@ def test_werdykt_offset_unknown_NIE_dostaje_uwagi_obok(con):
     row = _integracja(con, m)
     assert row["unresolved_reason"] == REASON_OFFSET_UNKNOWN
     assert row["raw_unreferenced"] is None
+
+
+def _teleskopy_obce(con):
+    """Dwa obce teleskopy z zestawami (config 2 = ED120R, config 3 = A140R) obok RC8R mastera."""
+    for nr, nazwa in ((2, "ED120R"), (3, "A140R")):
+        con.execute("INSERT INTO telescope(telescop_canon, status, created_at) "
+                    "VALUES (?, 'proposed', ?)", (nazwa, NOW))
+        con.execute("INSERT INTO config(telescope_id, camera_id, status, created_at) "
+                    "VALUES (?, 1, 'proposed', ?)", (nr, NOW))
+    con.commit()
+
+
+def test_RAW_innego_teleskopu_obok_FITS_mastera_NIE_jest_obietnica_gestu(con):
+    """Uwaga G2-1d liczy tylko RAW-y, które PRZEŻYŁYBY oś teleskopu po wskazaniu zegara. FITS
+    teleskopu mastera stoi w oknie, więc RAW obcego teleskopu i tak odpadłby gałęzią pierwszą
+    reguły - panel nie ma prawa go obiecywać. RAW teleskopu mastera w tym samym oknie liczy się
+    dalej (uwaga stoi).
+
+    Scenariusz wykonany do końca: po wskazaniu zegara rodowód bierze RAW teleskopu mastera,
+    a obcego NIE - czyli licznik sprzed gestu mówił prawdę o tym, co gest odblokuje.
+
+    Falsyfikator: zamień w `_in_window` licznik z powrotem na liczenie każdego RAW-u w paśmie →
+    `raw_unreferenced` = 2 zamiast 1."""
+    _teleskopy_obce(con)
+    m = _master(con)
+    fits = _light(con, "f1", date_obs="2019-01-10T20:41:00", filetype="fits")
+    swoj = _light(con, "rA", date_obs="2019-01-10T21:43:00")                  # RC8R, lokalny +1 h
+    _light(con, "rB", date_obs="2019-01-10T21:45:00", config_id=2)            # ED120R
+    run_stack_lineage(con, now=NOW, xml_reader=_brak_xml)
+    assert _integracja(con, m)["raw_unreferenced"] == 1
+
+    repo.set_integration_offset(con, master_frame_id=m, utc_offset_min=60, now=LATER)
+    run_stack_lineage(con, now=LATER, xml_reader=_brak_xml)
+    assert [r["input_frame_id"] for r in inputs_of(con, m)] == [fits, swoj]
+    assert _integracja(con, m)["raw_unreferenced"] is None
+
+
+def test_sam_RAW_obcego_teleskopu_obok_FITS_mastera_daje_uwage_PUSTA(con):
+    """FITS teleskopu A + RAW teleskopu B, zegar nieznany: po wskazaniu offsetu reguła osi
+    teleskopu i tak odrzuci RAW, więc uwaga „1 klatki nie umiem umieścić w czasie" i gest
+    odniesienia obiecywałyby coś, czego gest nie zrobi - uwaga ma być pusta."""
+    _teleskopy_obce(con)
+    m = _master(con)
+    _light(con, "f1", date_obs="2019-01-10T20:41:00", filetype="fits")
+    _light(con, "rB", date_obs="2019-01-10T21:45:00", config_id=2)
+    run_stack_lineage(con, now=NOW, xml_reader=_brak_xml)
+
+    row = _integracja(con, m)
+    assert row["unresolved_reason"] is None and row["raw_unreferenced"] is None
+
+
+def test_offset_unknown_przy_RAW_ach_JEDNORODNIE_obcych_zostaje_i_gest_go_dotrzymuje(con):
+    """Werdykt `offset_unknown` stoi na TYM SAMYM liczniku, więc też pyta regułę. Okno nie-RAW
+    puste, RAW-y jednego obcego teleskopu: gałąź środkowa je przyjmuje, więc werdykt zostaje -
+    i jest prawdą, bo po geście rodowód powstaje (z flagą rozjazdu, karta do naprawy)."""
+    _teleskopy_obce(con)
+    m = _master(con)
+    rb = [_light(con, f"rB{i}", date_obs=f"2019-01-10T21:4{i}:00", config_id=2) for i in (1, 3)]
+    run_stack_lineage(con, now=NOW, xml_reader=_brak_xml)
+    assert _integracja(con, m)["unresolved_reason"] == REASON_OFFSET_UNKNOWN
+
+    repo.set_integration_offset(con, master_frame_id=m, utc_offset_min=60, now=LATER)
+    run_stack_lineage(con, now=LATER, xml_reader=_brak_xml)
+    row = _integracja(con, m)
+    assert row["unresolved_reason"] is None and row["telescope_mismatch"] == 1
+    assert [r["input_frame_id"] for r in inputs_of(con, m)] == rb
+
+
+def test_RAW_y_MIESZAJACE_obce_teleskopy_to_telescope_mismatch_nie_offset_unknown(con):
+    """Jedyna zmiana werdyktu i jedyny przypadek, w którym stary był FAŁSZYWY: RAW-y dwóch obcych
+    teleskopów przy pustym oknie nie-RAW. `offset_unknown` obiecywał „wskaż zegar, a klatki się
+    dobiorą", a po geście reguła odrzuca mieszankę bez teleskopu mastera. Teraz werdykt mówi to,
+    co powie przebieg po geście: `telescope_mismatch` (kandydaci byli, odrzuciła ich oś)."""
+    _teleskopy_obce(con)
+    m = _master(con)
+    _light(con, "rB", date_obs="2019-01-10T21:41:00", config_id=2)
+    _light(con, "rC", date_obs="2019-01-10T21:43:00", config_id=3)
+    run_stack_lineage(con, now=NOW, xml_reader=_brak_xml)
+    row = _integracja(con, m)
+    assert row["unresolved_reason"] == "telescope_mismatch" and row["raw_unreferenced"] is None
+
+    repo.set_integration_offset(con, master_frame_id=m, utc_offset_min=60, now=LATER)
+    run_stack_lineage(con, now=LATER, xml_reader=_brak_xml)
+    assert _integracja(con, m)["unresolved_reason"] == "telescope_mismatch", \
+        "werdykt sprzed gestu ma być tym, który przebieg powie po geście"

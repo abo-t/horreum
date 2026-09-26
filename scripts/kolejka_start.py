@@ -58,6 +58,7 @@ SZEROKOSC = 120
 # dywiz ALBO cyfra (`FH-6`, `D-OW-3/R1`, `P-J`, `C3`); goły wyraz (`STAN`, `Grupy`) ID nie jest.
 ID_RE = re.compile(r"(?=\S*[-0-9])[A-Z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*(?:/[A-Za-z0-9]+)*")
 NAGLOWEK_RE = re.compile(r"^## (.*)$")
+WCIETY_NAGLOWEK_RE = re.compile(r"^ {1,3}## ")
 POLE_RE = re.compile(r"^([a-z][a-z-]*):(.*)$")
 TODO_RE = re.compile(r"TODO-DŁUG\(([^)\s]+)\)")
 KOD_W_BACKTICKU = re.compile(r"`([^`]+)`")
@@ -151,9 +152,10 @@ def rozbierz(tekst: str) -> Rejestr:
             if m:
                 sekcje.append([m.group(1).strip(), nr, []])
                 continue
-            if linia.lstrip(" \t").startswith("## "):
-                # Markdown renderuje wcięty `## ` jako nagłówek, a parser widzi prozę - blok
-                # wpadłby do poprzedniego i jego ID zniknęłoby z generatu bez sygnału.
+            if WCIETY_NAGLOWEK_RE.match(linia):
+                # Markdown renderuje `## ` wcięty o 1-3 spacje jako nagłówek, a parser widzi prozę -
+                # blok wpadłby do poprzedniego i jego ID zniknęłoby z generatu bez sygnału. Cztery
+                # spacje albo tabulator to już blok kodu, czyli legalna proza.
                 rej.bledy.append(f"linia {nr}: nagłówek `## ` wcięty - zacznij go od kolumny 0, "
                                  "inaczej wpis znika z rejestru")
         if sekcje:

@@ -141,7 +141,7 @@ def test_brak_bloku_stanu_to_blad():
     assert any("brak bloku `## STAN`" in b for b in rozbior(blok("A-1")).bledy)
 
 
-@pytest.mark.parametrize("wciecie", [" ", "   ", "\t"])
+@pytest.mark.parametrize("wciecie", [" ", "  ", "   "])
 def test_wciety_naglowek_to_blad_a_nie_cichy_zanik_id(wciecie):
     # Zarzut bramki K (kimi Z1): wcięty `## B-2` bez pól wpadał do prozy A-1 - `sprawdz` 0,
     # B-2 znikał z generatu. Markdown renderuje go jak nagłówek, więc oko niczego nie widzi.
@@ -149,9 +149,18 @@ def test_wciety_naglowek_to_blad_a_nie_cichy_zanik_id(wciecie):
     assert any("wcięty" in b for b in rozbior(tekst).bledy)
 
 
-def test_wciety_naglowek_w_plotku_kodu_nie_jest_bledem():
-    proza = "Przykład:\n\n```\n  ## X-1 · ilustracja\n```"
+@pytest.mark.parametrize("wciecie", ["    ", "\t"])
+def test_blok_kodu_wciety_czterema_spacjami_albo_tabem_jest_legalna_proza(wciecie):
+    # Runda 2 bramki K (sol Z1): pierwsza naprawa odrzucała legalny blok kodu markdown.
+    proza = f"Przykład:\n\n{wciecie}## X-1 · ilustracja, nie wpis"
     assert rozbior(rejestr(blok("A-1", proza=proza))).bledy == []
+
+
+def test_wciety_naglowek_w_plotku_kodu_nie_jest_bledem_a_poza_nim_jest():
+    w_plotku = "Przykład:\n\n```\n  ## X-1 · ilustracja\n```"
+    poza = "Przykład:\n\n  ## X-1 · ilustracja"
+    assert rozbior(rejestr(blok("A-1", proza=w_plotku))).bledy == []
+    assert any("wcięty" in b for b in rozbior(rejestr(blok("A-1", proza=poza))).bledy)
 
 
 def test_nazwa_paczki_wygladajaca_na_id_to_blad_schematu():
@@ -163,7 +172,13 @@ def test_nazwa_paczki_wygladajaca_na_id_to_blad_schematu():
 
 
 def test_bom_na_poczatku_rejestru_to_blad():
-    assert any("BOM" in b for b in rozbior("﻿" + rejestr(blok("A-1"))).bledy)
+    assert any("BOM" in b for b in rozbior("\ufeff" + rejestr(blok("A-1"))).bledy)
+
+
+def test_zrodla_nie_niosa_niewidzialnego_bom():
+    # Runda 2 bramki K (sol Z2): literał U+FEFF w źródle znika przy normalizacji edytora.
+    for plik in (SKRYPT, Path(__file__)):
+        assert "\ufeff" not in plik.read_text(encoding="utf-8"), plik.name
 
 
 # --- kompletność względem kodu -----------------------------------------------------------------

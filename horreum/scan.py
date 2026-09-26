@@ -65,7 +65,7 @@ from .hashing import sha1_of, sha1_of_span
 from .resolve.cameras import camera_identity
 from .resolve.frames import kind_from_path, normalize_kind
 from .resolve.paths import STACK_KIND, STACKS_DIR
-from .resolve.headers import extract_header
+from .resolve.headers import copy_testimony, extract_header
 
 # Rozszerzenia nagłówkonośne (PLAN §1.1: jeden mechanizm, format = opakowanie). DSLR/RAW
 # (.dng/.arw/.cr2, czytnik EXIF `exif.py`) DOŁĄCZONY do JEDNEGO passa skanu (#2, D-R-3 —
@@ -286,7 +286,9 @@ class ScanRecord:
       - `hdu_index`/`compressed`: fakty kopii FITS; None dla XISF (D-X-7 — pojęcia obce formatowi)
         i przy W1;
       - `cards`: pełne lustro nagłówka (lista `Card`) — FITS z astropy, XISF z `<FITSKeyword>`
-        (P6a/D-X-4); None przy W1.
+        (P6a/D-X-4); None przy W1;
+      - `image_roles`: role wszystkich obrazów kopii (0021, `XisfMeta.image_roles`) - tylko XISF;
+        None dla FITS/RAW (liczba HDU wymagałaby dodatkowego I/O) i przy W1.
     """
     path: str                         # ścieżka bezwzględna (str — spójnie z sha1_of/repo)
     size_bytes: int                   # fakt kopii (→ location.size_bytes; R2#6)
@@ -300,6 +302,7 @@ class ScanRecord:
     hdu_index: object = None          # HDU naukowe; None dla XISF/W1
     compressed: object = None         # 0/1 (CompImageHDU); None dla XISF/W1
     cards: object = None              # list[Card] - lustro nagłówka (FITS i XISF); None przy W1
+    image_roles: object = None        # tuple ról obrazów (XISF, 0021); None dla FITS/RAW i przy W1
 
 
 def _iter_suffixes(root, suffixes, excluded_out=None, errors_out=None):
@@ -633,7 +636,11 @@ def encode_xisf_value(value, xml_bytes, span):
 
 def _escape_xml(text, *, attribute):
     """Escape XML dla wartości wstawianej do łaty. `&` MUSI iść pierwszy (inaczej podwójny escape).
-    `"` tylko w atrybucie (w tekście elementu jest legalny surowy, a escape zmieniłby bajty)."""
+    `"` tylko w atrybucie (w tekście elementu jest legalny surowy, a escape zmieniłby bajty).
+
+    Znaków sterujących tu NIE MA czym zakodować - XML 1.0 zabrania ich nawet jako referencji
+    (`&#7;`), więc escape ich nie legalizuje. Odmawia ich wcześniej pisarz (`writeback.card_violation`,
+    reguły karty FITS 4.0), zanim wartość dojdzie do łaty."""
     out = text.replace("&", "&amp;").replace("<", "&lt;")
     return out.replace('"', "&quot;") if attribute else out
 
@@ -927,6 +934,31 @@ def _xisf_value_num(text):
     return num if math.isfinite(num) else None
 
 
+def xisf_cards(root):
+    """Karty `<FITSKeyword>` z drzewa nagłówka XISF, w kolejności dokumentu - JEDYNA derywacja kart
+    XISF (D-X-4/4a). Pytają ją czytnik (`read_xisf_meta_full`) i weryfikacja pisarza po łacie
+    (`writeback._xisf_verify`), więc „karty, które zobaczy skan" i „karty, które pisarz sprawdził
+    przed zapisem" to z konstrukcji to samo zdanie. `root` = drzewo PO `xml_parsable`.
+
+    `value_type` ZAWSZE `'str'` (XISF trzyma wartości jako tekst), `value_num` to projekcja liczbowa
+    (D-X-4); `comment` z atrybutu `comment` (D-X-5 - COMMENT/HISTORY mają `value=""`, treść siedzi
+    w komentarzu). Karta bez nazwy nie ma adresu, więc jej nie ma."""
+    cards, counts = [], {}
+    for elem in root.iter():
+        if _local_name(elem.tag) != "FITSKeyword":
+            continue
+        name = elem.get("name")
+        if not name:
+            continue
+        keyword = name.strip().upper()
+        value_raw = _unquote_fits(elem.get("value", ""))
+        idx = counts.get(keyword, 0)
+        counts[keyword] = idx + 1
+        cards.append(Card(keyword, idx, value_raw, _xisf_value_num(value_raw), "str",
+                          elem.get("comment") or None))
+    return cards
+
+
 @dataclass(frozen=True)
 class XisfMeta:
     """Komplet zeznania + odcisków + MATERIAŁU ŁATY z jednego otwarcia pliku XISF (P6a).
@@ -954,6 +986,10 @@ class XisfMeta:
     first_attachment: object          # int | None — brak bloku attachment (degenerat, D-X-13)
     image_span: object                # (start, size) | None — wejście sha1_data
     keyword_images: int               # ile <Image> NIESIE karty — >1 = cel niejednoznaczny (D-X-11)
+    # Role WSZYSTKICH `<Image>` w kolejności dokumentu (0021): `imageType`, a gdy brak - `id`, a gdy
+    # i tego brak - None. Długość krotki = liczba obrazów kopii. Fakt KOPII, nie klatki: tożsamość
+    # bierze pierwszy obraz, więc dwie kopie jednej klatki mogą nieść różną liczbę obrazów.
+    image_roles: tuple = ()
 
     @property
     def padding_complete(self):
@@ -972,11 +1008,11 @@ class XisfMeta:
 def read_xisf_meta_full(path):
     """Odczytaj nagłówek XISF (monolithic) jako `XisfMeta` — jedno przejście, wszystkie fakty.
 
-    Karty (D-X-4/4a) powstają w TEJ SAMEJ pętli co dict zeznania, z tego samego filtra i tej samej
-    wartości — lustro 1:1 nie jest tu obietnicą, tylko konstrukcją: rozjazd wymagałby dwóch pętli,
-    a jest jedna. `value_type` ZAWSZE `'str'` (XISF trzyma wartości jako tekst), `value_num` to
-    projekcja liczbowa (D-X-4); `comment` z atrybutu `comment` (D-X-5 — COMMENT/HISTORY mają
-    `value=""`, treść siedzi w komentarzu; dict zeznania zostaje NIETKNIĘTY).
+    Karty (D-X-4/4a) wyłuskuje `xisf_cards` - ta sama funkcja, którą pisarz sprawdza nagłówek po
+    łacie - a dict zeznania powstaje Z TYCH KART, więc lustro 1:1 nie jest tu obietnicą, tylko
+    konstrukcją: rozjazd wymagałby drugiej derywacji, a jest jedna. Komentarz karty (D-X-5 -
+    COMMENT/HISTORY mają `value=""`, treść siedzi w komentarzu) trafia do kart, dict zeznania
+    zostaje bez niego, jak dotąd.
 
     `header_hash` = sha1 bajtów `[16, 16+hlen)`, BEZ wypełnienia (D-X-3) — odpowiednik
     `sha1(hdr.tostring())` z FITS.
@@ -1002,32 +1038,21 @@ def read_xisf_meta_full(path):
         # bo z nich liczy się `header_hash` i z nich pisze pisarz. ParseError na tym, czego nawet to
         # nie ratuje → łapie `scan_file` (miękkie lądowanie W1).
         root = ET.fromstring(xml_parsable(xml_bytes))
-        header, cards = {}, []
-        counts = {}
+        cards = xisf_cards(root)
+        header = {}
+        for card in cards:                # dict zeznania Z KART - lustro 1:1 z konstrukcji
+            _put(header, card.keyword, card.value_raw)
         image_span = None
         first_attachment = None
         for elem in root.iter():
-            local = _local_name(elem.tag)
             loc = (elem.get("location") or "").split(":")
             if len(loc) == 3 and loc[0] == "attachment":
                 pos = int(loc[1])
                 # sufit nagłówka = MIN po WSZYSTKICH blokach (D-X-2); kolejność dokumentu pokrywa
                 # się dziś z bajtową w 330/330 plików, ale to POMIAR, nie gwarancja formatu.
                 first_attachment = pos if first_attachment is None else min(first_attachment, pos)
-                if local == "Image" and image_span is None:
+                if _local_name(elem.tag) == "Image" and image_span is None:
                     image_span = (pos, int(loc[2]))
-            if local != "FITSKeyword":
-                continue
-            name = elem.get("name")
-            if not name:                  # FITSKeyword bez nazwy — nic do zaadresowania, pomiń
-                continue
-            keyword = name.strip().upper()
-            value_raw = _unquote_fits(elem.get("value", ""))
-            idx = counts.get(keyword, 0)
-            counts[keyword] = idx + 1
-            cards.append(Card(keyword, idx, value_raw, _xisf_value_num(value_raw), "str",
-                              elem.get("comment") or None))
-            _put(header, keyword, value_raw)
 
         # Wypełnienie czytamy BEST-EFFORT i NIGDY nie wywracamy na nim odczytu: bajty LEŻĄCE ZA
         # nagłówkiem nie mogą unieważnić samego nagłówka. Plik z deklaracją bloku wchodzącą
@@ -1047,12 +1072,18 @@ def read_xisf_meta_full(path):
     # mieć jedną odpowiedź i pisarz musi odmówić, zamiast wybrać za usera.
     keyword_images = sum(1 for e in root.iter() if _local_name(e.tag) == "Image"
                          and any(_local_name(k.tag) == "FITSKeyword" for k in e.iter()))
+    # Role obrazów (0021) - każdy `<Image>`, nie tylko ten z attachmentem: pytanie brzmi „ile obrazów
+    # niesie TA kopia", a obraz `inline`/`embedded` też jest obrazem. Rola wg specyfikacji to
+    # `imageType` (§11.5.1, opcjonalny); gdy go brak, `id` (tak nazywa obrazy WBPP: `integration`,
+    # `rejection_low`…). Zmierzone 2026-09-26: 248 z 550 plików ma pojedynczy obraz bez obu - None.
+    image_roles = tuple(e.get("imageType") or e.get("id") or None
+                        for e in root.iter() if _local_name(e.tag) == "Image")
 
     return XisfMeta(header=header, cards=cards,
                     header_hash=hashlib.sha1(xml_bytes).hexdigest(),
                     xml_bytes=xml_bytes, padding=padding, reserved=reserved,
                     first_attachment=first_attachment, image_span=image_span,
-                    keyword_images=keyword_images)
+                    keyword_images=keyword_images, image_roles=image_roles)
 
 
 def build_xisf_header_region(meta, new_xml):
@@ -1215,23 +1246,10 @@ def scan_file(path):
     mtime = _mtime_iso(st)
     spath = str(p)
     header = None
-    cards = header_hash = hdu_index = compressed = span = None
+    cards = header_hash = hdu_index = compressed = span = image_roles = None
     try:
-        suffix = p.suffix.lower()
-        if suffix in exif.RAW_SUFFIXES:
-            emeta = exif.read_exif_meta(spath)
-            header, header_hash = emeta.header, emeta.header_hash
-            cards = [Card(*row) for row in emeta.card_rows]   # opakuj krotki (unikamy cyklu importu)
-            span = (0, st.st_size)        # D-R-1: tożsamość RAW = sha1 CAŁEGO pliku → sha1_data==file_sha1
-        elif suffix in XISF_SUFFIXES:
-            xmeta = read_xisf_meta_full(spath)
-            header, cards, header_hash = xmeta.header, xmeta.cards, xmeta.header_hash
-            span = xmeta.image_span       # `hdu_index`/`compressed` zostają None (D-X-7: obce formatowi)
-        else:
-            meta = read_fits_meta(spath)
-            header, cards = meta.header, meta.cards
-            header_hash, hdu_index, compressed = meta.header_hash, meta.hdu_index, meta.compressed
-            span = (meta.datloc, meta.datspan)
+        header, cards, header_hash, hdu_index, compressed, span, image_roles = _read_meta(
+            spath, st.st_size)
         error = error_kind = None
     except Exception as exc:              # W1: dowolny błąd czytnika → review, nie crash pętli
         error = unreadable_reason_of(exc)
@@ -1259,7 +1277,48 @@ def scan_file(path):
         header=header, error=error, error_kind=error_kind,
         sha1_data=sha1_data, file_sha1=file_sha1,
         header_hash=header_hash, hdu_index=hdu_index, compressed=compressed, cards=cards,
+        image_roles=image_roles,
     )
+
+
+def _read_meta(spath, size):
+    """JEDNA dyspozycja czytnika nagłówka po sufiksie - dla `scan_file` i dla uzupełnienia faktów
+    kopii (`backfill_copy_facts`), które czyta SAM nagłówek, bez haszowania pliku. Dwie kopie tej
+    dyspozycji rozjechałyby się przy pierwszym nowym formacie: skan widziałby go, a uzupełnienie nie.
+
+    Zwraca krotkę `(header, cards, header_hash, hdu_index, compressed, span, image_roles)`;
+    wyjątek czytnika propaguje (miękkie lądowanie robi wołający). `size` = rozmiar pliku ze `stat`
+    (span RAW-a: D-R-1, tożsamość RAW = sha1 CAŁEGO pliku → `sha1_data == file_sha1`)."""
+    suffix = Path(spath).suffix.lower()
+    if suffix in exif.RAW_SUFFIXES:
+        emeta = exif.read_exif_meta(spath)
+        cards = [Card(*row) for row in emeta.card_rows]   # opakuj krotki (unikamy cyklu importu)
+        return emeta.header, cards, emeta.header_hash, None, None, (0, size), None
+    if suffix in XISF_SUFFIXES:
+        # `hdu_index`/`compressed` zostają None (D-X-7: pojęcia obce formatowi)
+        xmeta = read_xisf_meta_full(spath)
+        return (xmeta.header, xmeta.cards, xmeta.header_hash, None, None, xmeta.image_span,
+                xmeta.image_roles)
+    meta = read_fits_meta(spath)
+    return (meta.header, meta.cards, meta.header_hash, meta.hdu_index, meta.compressed,
+            (meta.datloc, meta.datspan), None)
+
+
+def copy_header_facts(header, header_hash, image_roles):
+    """Fakty KOPII z jej nagłówka (0021) → słownik pod klingę kopii (klucze `repo.COPY_FACTS`).
+
+    Kotwica `hdr_hash` = odcisk tego nagłówka. Bez nagłówka (W1) albo bez odcisku (import z dawcy
+    bez `header_hash`) faktów nie ma czym zakotwiczyć, więc wszystkie są NULL - CHECK 0021 i tak nie
+    przyjąłby faktu bez kotwicy. Role jadą jako lista JSON w kolejności dokumentu (`ensure_ascii`
+    wyłączone, `json.dumps` deterministyczny), więc porównanie dwóch kopii to porównanie tekstu."""
+    if header is None or header_hash is None:
+        return dict.fromkeys(repo.COPY_FACTS)
+    facts = copy_testimony(header)
+    facts["image_count"] = None if image_roles is None else len(image_roles)
+    facts["image_roles"] = (None if image_roles is None
+                            else json.dumps(list(image_roles), ensure_ascii=False))
+    facts["hdr_hash"] = header_hash
+    return facts
 
 
 @dataclass
@@ -1448,9 +1507,16 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
     podają `present=1` — to DOWÓD obecności, nie domysł. Kopia wracająca po zniknięciu wraca tą
     drogą (brama jej nie pomija, D-V-6) i dostaje `location.refreshed` z `{present:{0→1}}`.
 
+    FAKTY KOPII Z JEJ NAGŁÓWKA (0021) idą do klingi KOPII w każdej gałęzi, która pisze fakty kopii
+    (`add_location`, obie gałęzie `refresh_location`): liczba/role obrazów i zeznanie pól osi TEGO
+    pliku - także przy drugiej kopii istniejącej klatki, dla której zeznania `header` celowo NIE
+    nagrywamy (reguła N-lokacji). Dzięki temu rozjazd kopii jest wyliczalny ze stanu, a `header`
+    klatki zostaje przy swojej regule (pierwsza kopia, potem ta, której odcisk zmienił się ostatnio).
+
     NIE łapie wyjątków — backstop bez tożsamości (sha1 nieznany → `frame.review`, sha1='?') należy
     do wołającego (`scan_tree` / import), bo to on wie, jak zidentyfikować rekord do review."""
     readable = rec.header is not None
+    copy_facts = copy_header_facts(rec.header, rec.header_hash, rec.image_roles)
     is_raw = _filetype(rec.path) == "raw"          # #2: FAKT formatu (→ raw_format, kind z folderu)
     # `kind` WYPRZEDZA oś kamery (kolejność zmieniona 2026-08-02, I-2b): `camera_identity` bierze go
     # do bramki `NO_PIXEL_KINDS` — gotowy stack powołuje kamerę, ale nie wnosi `XPIXSZ`. Derywacja
@@ -1488,7 +1554,8 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
             con, frame_id=frame_id, volume=volume, drive_letter=drive_letter,
             path=rec.path, tier=tier, mtime=rec.mtime,
             file_sha1=rec.file_sha1, header_hash=rec.header_hash, hdu_index=rec.hdu_index,
-            compressed=rec.compressed, size_bytes=rec.size_bytes, now=now, actor=actor)
+            compressed=rec.compressed, size_bytes=rec.size_bytes, copy_facts=copy_facts,
+            now=now, actor=actor)
         if loc_created:
             summary.locations_new += 1
         if created:                                    # header 1:1 z frame → tylko dla nowego
@@ -1555,7 +1622,7 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
             file_sha1=rec.file_sha1, header_hash=rec.header_hash, hdu_index=rec.hdu_index,
             compressed=rec.compressed, size_bytes=rec.size_bytes, unreadable_since=unreadable_after,
             unreadable_kind=kind_after, unreadable_reason=reason_after,
-            present=1, now=now, actor=actor)
+            present=1, now=now, actor=actor, copy_facts=copy_facts)
         summary.locations_refreshed += refreshed["facts"]
         return
 
@@ -1569,7 +1636,7 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
         present=1, now=now, actor=actor,
         raw_json=json.dumps(rec.header, ensure_ascii=False) if readable else None,
         cards=rec.cards, hot_fields=extract_header(rec.header) if readable else None,
-        camera_id=camera_id, kind=kind)
+        camera_id=camera_id, kind=kind, copy_facts=copy_facts)
     summary.locations_refreshed += refreshed["facts"]
     summary.headers_refreshed += refreshed["header"]
     if loc["present"] == 0 and repo.clear_superseded(con, frame_id=frame_id, now=now, actor=actor):
@@ -1677,6 +1744,106 @@ def backfill_xisf_headers(con, *, now, progress=None):
         if progress is not None:
             progress(i, total, path)
     s.remaining = len(_xisf_backfill_rows(con))
+    return s
+
+
+@dataclass
+class CopyFactsSummary:
+    """Zliczenia jednego przebiegu `backfill_copy_facts` - kotwica idempotencji w `remaining`.
+
+    Każdy licznik ODMOWY niesie ścieżki: „uzupełniono 540 z 550" bez „10 zmieniło się na dysku"
+    byłoby raportem, który zataja, dlaczego reszta czeka."""
+    rows: int = 0             # kopie wybrane sterownikiem (kandydaci pod korzeniem)
+    read: int = 0             # nagłówek przeczytany
+    written: int = 0          # fakty zapisane (`repo.record_copy_facts` → True)
+    stale: int = 0            # nagłówek na dysku ≠ znany odcisk kopii → ZERO zapisu (dogoni skan)
+    failed: int = 0           # odczyt nagłówka padł → ZERO zapisu
+    remaining: int = 0        # kandydaci PO przebiegu (0 = komplet)
+    cancelled: bool = False
+    failed_paths: list = field(default_factory=list)
+    stale_paths: list = field(default_factory=list)
+
+
+def copy_facts_candidates(con, root=None):
+    """Kandydaci uzupełnienia faktów kopii (0021): kopie OBECNE, o znanym odcisku nagłówka, bez
+    zebranych faktów (`hdr_hash IS NULL`) - XISF wszystkie (liczba i role obrazów żyją tylko tam)
+    plus KAŻDA kopia klatki, która ma >1 obecną kopię (tylko tam jest z czym porównywać zeznanie).
+    Reszta archiwum dostaje fakty przy najbliższym odczycie skanem - uzupełnienie nie czyta 15 tys.
+    FITS-ów po to, żeby zapisać fakty, których nikt nie porówna.
+
+    `header_hash IS NOT NULL` odcina kopie nieczytelne (W1): bez odcisku nie ma kotwicy, a sterownik
+    wracałby do nich przy każdej dostawie. STAŁY literał SELECT - ten sam liczy `remaining`, więc
+    „pusto po przebiegu" znaczy dokładnie „nie ma czego uzupełniać" (wzorzec `_xisf_backfill_rows`).
+
+    `root` (opcjonalny) zawęża do kopii pod korzeniem - jak każdy etap Dostawy, który dotyka dysku:
+    „Przetwórz wszystko" na wskazanym katalogu nie ma prawa czytać plików spoza niego. Porównanie
+    przez `canonize_root` + `_under`, ta sama forma literowa, którą skan zapisał `location.path`."""
+    rows = con.execute(
+        "SELECT l.id, l.path, l.header_hash FROM location l JOIN frame f ON f.id = l.frame_id "
+        "WHERE l.present = 1 AND l.header_hash IS NOT NULL AND l.hdr_hash IS NULL "
+        "  AND (f.filetype = 'xisf' OR l.frame_id IN ("
+        "       SELECT frame_id FROM location WHERE present = 1 "
+        "       GROUP BY frame_id HAVING COUNT(*) > 1)) "
+        "ORDER BY l.id").fetchall()
+    if root is None:
+        return rows
+    prefix = canonize_root(root).rstrip("\\/") + os.sep
+    return [r for r in rows if _under(r["path"], prefix)]
+
+
+def backfill_copy_facts(con, *, now, root=None, progress=None, should_cancel=None,
+                        actor="backfill:copies"):
+    """STEROWNIK CELOWANY (0021): dociągnij liczbę/role obrazów i zeznanie nagłówka do kopii, które
+    powstały PRZED migracją. Zwraca `CopyFactsSummary`. Wzorzec `backfill_xisf_headers` (pyta bazę
+    o dokładnie te wiersze, których dotyczy brak; po przebiegu ten sam SELECT jest pusty - drugie
+    wywołanie to no-op BEZ czytania dysku), z jedną różnicą, która jest całą jego ceną:
+
+    CZYTA SAM NAGŁÓWEK, NIE HASZUJE PLIKU. `scan_file` liczy sha1 całej treści (tożsamość + odcisk
+    kopii), a 550 plików XISF archiwum to 108,9 GB (zmierzone 2026-09-26) - nagłówki tych samych
+    plików czytają się po SMB w sekundy. Ceną braku hasza jest brak dowodu, że treść się nie
+    zmieniła - i tego dowodu nie potrzebujemy: fakty kopii pochodzą z NAGŁÓWKA, a tożsamość nagłówka
+    niesie jego odcisk. Zapis idzie więc wyłącznie wtedy, gdy odcisk przeczytanego nagłówka równa się
+    `location.header_hash` (kotwica w `repo.record_copy_facts`, CAS). Inny odcisk = kopia zmieniła się
+    od ostatniego skanu → `stale`, ZERO zapisu: należy do skanu, który odświeży razem z faktami kopii
+    także `header` klatki, `cards` i pochodne.
+
+    ZEZNANIA KLATKI NIE RUSZA. W odróżnieniu od `backfill_xisf_headers` (które szło przez
+    `ingest_record` i przełączało `header` na OSTATNIĄ przeczytaną kopię - świadomie, raz) ten
+    sterownik pisze wyłącznie kolumny 0021 na `location`: które zeznanie trzyma `header`, zostaje
+    rozstrzygnięte tak, jak było.
+
+    Plik nieczytelny / nieosiągalny → `failed` + ścieżka, ZERO zapisu (nie stawiamy markerów, nie
+    zdejmujemy obecności - od tego są `scan_tree` i `presence`); zostaje w `remaining`.
+
+    Hooki `progress(done, total, path, summary)` / `should_cancel()` - kontrakt jak w `scan_tree`
+    (anulowanie na GRANICY PLIKU; przerwany przebieg zostawia bazę spójną, bo każda kopia to osobna
+    transakcja, a następny przebieg dobiera resztę)."""
+    rows = copy_facts_candidates(con, root)
+    s = CopyFactsSummary(rows=len(rows))
+    total = len(rows)
+    for i, row in enumerate(rows, 1):
+        if should_cancel is not None and should_cancel():
+            s.cancelled = True
+            break
+        path = row["path"]
+        try:
+            header, _cards, header_hash, _hdu, _comp, _span, image_roles = _read_meta(
+                path, os.stat(path).st_size)
+        except Exception as exc:               # I/O albo parser - raport, nie zapis (docstring)
+            s.failed += 1
+            s.failed_paths.append(f"{path}: {type(exc).__name__}: {exc}")
+        else:
+            s.read += 1
+            facts = copy_header_facts(header, header_hash, image_roles)
+            if header_hash != row["header_hash"] or not repo.record_copy_facts(
+                    con, location_id=row["id"], copy_facts=facts, now=now, actor=actor):
+                s.stale += 1
+                s.stale_paths.append(path)
+            else:
+                s.written += 1
+        if progress is not None:
+            progress(i, total, path, s)
+    s.remaining = len(copy_facts_candidates(con, root))
     return s
 
 

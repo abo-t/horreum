@@ -19,7 +19,8 @@ def test_migracja_ustawia_user_version(tmp_path):
     # + 0018 frame.retired_at (wycofanie klatki ręką — D-OW-3/R2)
     # + 0019 location.unreadable_kind + unreadable_reason (rodzaj i powód nieczytelności, P4-2)
     # + 0020 integration.raw_unreferenced (uwaga obok werdyktu rodowodu, G2-1d)
-    assert db._user_version(con) == db.SCHEMA_VERSION == 20
+    # + 0021 location: liczba/role obrazów + zeznanie nagłówka kopii z kotwicą hdr_hash
+    assert db._user_version(con) == db.SCHEMA_VERSION == 21
     con.close()
 
 

@@ -486,6 +486,231 @@ def test_xisf_awaria_io_to_failed_nie_blocked(tmp_path):
     assert res.status == "failed" and "FileNotFoundError" in res.reason
 
 
+# ============================================================ REGUŁY KARTY I WERYFIKACJA ŁATY
+# Jeden właściciel reguł karty FITS 4.0 (`writeback.card_violation`) dla OBU formatów: XISF przejmuje
+# je wprost (spec XISF 1.0 Rev. 1 §11.6), a nagłówek XISF musi zostać poprawnym XML 1.0 (§9.5).
+# Przed tą bramką FITS dawał na te same przypadki cztery różne skutki (angielski `ValueError` jako
+# 'failed', ciche CONTINUE, ciche ucięcie komentarza, karta HIERARCH), a XISF zapisywał znak
+# sterujący surowo - czytnik Horreum go neutralizuje, więc odczyt po zapisie tego nie widział.
+
+def _plik(tmp_path, fmt, name="r"):
+    """Plik testowy w danym formacie z kartą TELESCOP (z atrybutem komentarza w XISF) i rezerwą
+    na dłuższy nagłówek - bramka ma odmawiać z powodu REGUŁY, nie braku miejsca."""
+    if fmt == "fits":
+        p = tmp_path / f"{name}.fits"
+        _write_fits(p, TELESCOP="RC8", IMAGETYP="Light")
+        return p
+    return _xisf(tmp_path, f"{name}.xisf", props="", pad=512)
+
+
+@pytest.mark.parametrize("fmt", ["fits", "xisf"])
+@pytest.mark.parametrize("nazwa, op, keyword, value, comment, fragment", [
+    ("znak sterujący w wartości", "set", "TELESCOP", "ED\x07120R", None, "spoza drukowalnego ASCII"),
+    ("DEL w wartości", "set", "TELESCOP", "ED\x7f", None, "spoza drukowalnego ASCII"),
+    ("nie-ASCII w wartości", "set", "TELESCOP", "Zażółć", None, "spoza drukowalnego ASCII"),
+    ("znak sterujący w komentarzu", "set", "TELESCOP", "ED120R", "zle\x07", "spoza drukowalnego"),
+    ("nie-ASCII w komentarzu", "set", "TELESCOP", "ED120R", "optyka łamana", "spoza drukowalnego"),
+    ("wartość dłuższa niż rekord", "set", "TELESCOP", "X" * 69, None, "rekord FITS"),
+    ("apostrof liczy się podwójnie", "set", "TELESCOP", "'" + "X" * 67, None, "rekord FITS"),
+    ("komentarz poza rekordem", "set", "TELESCOP", "ED120R", "c" * 48, "rekord FITS"),
+    ("nazwa ze spacją przy add", "add", "BAD KW", "x", None, "nazwa karty"),
+    ("nazwa dłuższa niż 8 przy add", "add", "OBJECTNAM", "x", None, "nazwa karty"),
+    ("nazwa z kropką przy add", "add", "OBJ.NAME", "x", None, "nazwa karty"),
+])
+def test_tresc_lamiaca_reguly_karty_to_odmowa_bez_tkniecia(tmp_path, fmt, nazwa, op, keyword,
+                                                           value, comment, fragment):
+    """Treść łaty łamiąca reguły karty → 'blocked' z czytelnym powodem i plik BAJTOWO nietknięty -
+    w obu formatach tak samo, bo właściciel reguł jest jeden."""
+    p = _plik(tmp_path, fmt)
+    przed = _sha_pliku(p)
+    res = writeback.write_changes(str(p), [writeback.WriteOp(keyword, op, value, "str",
+                                                             comment=comment)], None)
+    assert res.status == "blocked", f"{nazwa}: {res}"
+    assert fragment in res.reason and _sha_pliku(p) == przed
+    assert res.backup_text is None and res.post_hash is None
+
+
+def test_fits_set_na_nieobecnej_karcie_tez_wnosi_nazwe(tmp_path):
+    """FITS `set` na karcie, której nie ma, DOPISUJE ją (semantyka astropy) - więc jej nazwa też jest
+    treścią wniesioną przez łatę. Bez tego zła nazwa przeszłaby bokiem jako karta HIERARCH."""
+    p = _plik(tmp_path, "fits")
+    przed = _sha_pliku(p)
+    res = writeback.write_changes(str(p), [writeback.WriteOp("BAD KW", "set", "x", "str")], None)
+    assert res.status == "blocked" and "nazwa karty" in res.reason and _sha_pliku(p) == przed
+
+
+def test_set_nie_sprawdza_nazwy_istniejacej_karty(tmp_path):
+    """Reguły pilnują treści ŁATY, nie pliku: `set` na istniejącej karcie o nazwie spoza reguł FITS
+    nie wnosi nazwy, więc przechodzi. Odmowa uderzyłaby w cudzą treść, której łata nie dotyka."""
+    p = _xisf(tmp_path, "nazwa.xisf", keywords=[("TELESCOP", "'ED'"), ("LONGNAME12", "'x'")],
+              props="")
+    res = writeback.write_changes(str(p), [writeback.WriteOp("LONGNAME12", "set", "y", "str")], None)
+    assert res.status == "applied", res.reason
+    assert [(c.keyword, c.value_raw) for c in scan.read_xisf_meta_full(str(p)).cards] == [
+        ("TELESCOP", "ED"), ("LONGNAME12", "y")]
+
+
+@pytest.mark.parametrize("fmt", ["fits", "xisf"])
+@pytest.mark.parametrize("value, comment", [
+    ("X" * writeback.FITS_STRING_MAX, None),     # wartość na styk rekordu
+    ("ED120R", "c" * 47),                        # komentarz na styk przy krótkiej wartości (pole 20)
+    ("V" * 40, "k" * 25),                        # komentarz na styk przy długiej wartości
+])
+def test_karta_na_styk_rekordu_przechodzi_bez_ciecia(tmp_path, fmt, value, comment):
+    """Granica długości, przypięta do zachowania astropy: karta dokładnie na styk JEDNEGO rekordu
+    przechodzi, a odczyt oddaje ją BEZ kontynuacji CONTINUE i BEZ uciętego komentarza. Znak więcej
+    to odmowa (poprzedni test) - para pinuje `<=` w obu regułach długości."""
+    p = _plik(tmp_path, fmt)
+    res = writeback.write_changes(str(p), [writeback.WriteOp("TELESCOP", "set", value, "str",
+                                                             comment=comment)], None)
+    assert res.status == "applied", res.reason
+    if fmt == "fits":
+        hdr = fits.getheader(str(p))
+        assert "CONTINUE" not in [c.keyword for c in hdr.cards]
+        assert hdr["TELESCOP"] == value and len(hdr.cards["TELESCOP"].image) == 80
+        if comment is not None:
+            assert hdr.comments["TELESCOP"] == comment
+    else:
+        karta = next(c for c in scan.read_xisf_meta_full(str(p)).cards if c.keyword == "TELESCOP")
+        assert karta.value_raw == value and karta.comment == comment
+
+
+def test_xisf_zastana_nielegalna_tresc_nie_blokuje_legalnej_laty(tmp_path):
+    """Archiwum ma plik z bajtem 0x07 w historii przetwarzania (ścieżka źródłowa z bajtem sterującym
+    w nazwie katalogu). Bramka pilnuje, żeby ŁATA nie wniosła NOWEJ nielegalnej treści - zastanej
+    nie liczy łacie. Podmiana i dopisanie karty przechodzą, a cudzy bajt zostaje, jaki był
+    (pisarz nie naprawia treści, o którą go nikt nie prosił)."""
+    hist = ('<Property id="PixInsight:ProcessingHistory" type="String">'
+            'zrodla/CTB1\x07O3/light_001.xisf</Property>')
+    p = _xisf(tmp_path, "hist.xisf", props=_PROPS_ED + hist, pad=256)
+    assert scan.read_xisf_meta_full(str(p)).xml_bytes.count(b"\x07") == 1
+
+    res = writeback.write_changes(str(p), [writeback.WriteOp("TELESCOP", "set", "ED120R", "str")],
+                                  None)
+    assert res.status == "applied", res.reason
+    res2 = writeback.write_changes(str(p), [writeback.WriteOp("OBJECT", "add", "NGC 7000", "str")],
+                                   None)
+    assert res2.status == "applied", res2.reason
+    po = scan.read_xisf_meta_full(str(p))
+    assert po.xml_bytes.count(b"\x07") == 1                        # zastany bajt nietknięty
+    assert b"CTB1\x07O3" in po.xml_bytes
+    assert {c.keyword: c.value_raw for c in po.cards}["TELESCOP"] == "ED120R"
+    assert {c.keyword: c.value_raw for c in po.cards}["OBJECT"] == "NGC 7000"
+
+
+@pytest.mark.parametrize("zly_blob, fragment", [
+    (b"'ED\x07120R'", "bajt nielegalny"),                              # pkt 1: bajt sterujący w wycinku
+    (b"'ED<120R'", "nie jest poprawnym XML"),                          # pkt 2: dokument się nie parsuje
+    (b"'ED120X'", "rozjechały się"),                                   # pkt 3: inna wartość niż żądana
+    (b"'ED120R'\"/><FITSKeyword name=\"EVIL\" value=\"'1'", "rozjechały się"),  # pkt 3: wstrzyknięta karta
+])
+def test_xisf_weryfikacja_nowego_xml_przed_plikiem_tymczasowym(tmp_path, monkeypatch, zly_blob,
+                                                               fragment):
+    """Weryfikacja nagłówka po łacie, PRZED plikiem tymczasowym: symulujemy usterkę kodera wartości
+    (`scan.quote_fits` oddaje złe bajty mimo legalnej wartości żądanej) i sprawdzamy, że każde z trzech
+    pytań `_xisf_verify` ją łapie. Wynik 'failed' (usterka pisarza, nie werdykt o pliku), plik
+    bajtowo nietknięty. Przypadek wstrzykniętej karty to dokładnie to, czego sam parse nie złapie:
+    dokument jest poprawnym XML-em, tylko mówi co innego, niż zamierzaliśmy."""
+    p = _xisf(tmp_path, "koder.xisf", props="", pad=512)
+    przed = _sha_pliku(p)
+    monkeypatch.setattr(scan, "quote_fits", lambda value, original: zly_blob)
+    res = writeback.write_xisf_changes(str(p), [writeback.WriteOp("TELESCOP", "set", "ED120R", "str")],
+                                       None)
+    assert res.status == "failed" and fragment in res.reason, res
+    assert _sha_pliku(p) == przed and res.backup_text is None
+    assert not list(tmp_path.glob("*.tmp"))                            # pliku tymczasowego nie było
+
+
+def _naglowek_przed(p, fmt):
+    """Materiał undo, jaki pisarz MA oddać: FITS - pełny nagłówek wybranego HDU, XISF - oryginalny XML."""
+    if fmt == "fits":
+        with fits.open(str(p)) as hdul:
+            return hdul[0].header.tostring()
+    return scan.read_xisf_meta_full(str(p)).xml_bytes.decode("utf-8")
+
+
+@pytest.mark.parametrize("fmt", ["fits", "xisf"])
+@pytest.mark.parametrize("awaria", ["odczyt", "rozjazd"])
+def test_weryfikacja_po_podmianie_padla_wynik_niesie_backup(tmp_path, monkeypatch, fmt, awaria):
+    """Odczyt po `os.replace` pada (zerwany udział) albo pokazuje inny nagłówek niż zapisany. Plik
+    JEST już podmieniony, więc 'failed' bez backupu zostawiłby go bez drogi powrotu: wynik niesie
+    `backup_text` (nagłówek sprzed zapisu) i `post_hash` = hash tego, co pisarz ZAPISAŁ - na nim
+    stoi kotwica undo."""
+    p = _plik(tmp_path, fmt)
+    backup = _naglowek_przed(p, fmt)
+    przed = _sha_pliku(p)
+    prawdziwy = writeback._post_hash
+
+    def _padl(path):
+        if awaria == "odczyt":
+            raise OSError(5, "zerwany udział")
+        return "0" * 40
+    monkeypatch.setattr(writeback, "_post_hash", _padl)
+    res = writeback.write_changes(str(p), [writeback.WriteOp("TELESCOP", "set", "EQ6", "str")], None)
+
+    assert res.status == "failed" and "PODMIENIONY" in res.reason
+    assert res.backup_text == backup
+    assert _sha_pliku(p) != przed                                      # to NIE jest rollback
+    assert res.post_hash == prawdziwy(str(p))                          # kotwica = bajty na dysku
+
+
+@pytest.mark.parametrize("fmt", ["fits", "xisf"])
+def test_commit_po_awarii_weryfikacji_zapisuje_backup_i_undo_cofa(tmp_path, monkeypatch, fmt):
+    """Orkiestracja dla 'failed' Z backupem: backup ląduje w `header_backups` (commit powstaje),
+    status 'failed' z powodem i numerem commitu, baza BEZ re-syncu (bajtów nie potwierdzono - naprawi
+    je re-skan), a undo tego commitu cofa plik, bo leży na nim dokładnie to, co zapisaliśmy."""
+    con = db.open_db(str(tmp_path / "h.db"))
+    p = _plik(tmp_path, fmt, name="c")
+    przed = p.read_bytes()
+    fr = _scan_in(con, p)
+    lid = _loc_id(con, p)
+    hh = con.execute("SELECT header_hash FROM location WHERE id=?", (lid,)).fetchone()["header_hash"]
+    tel = con.execute("SELECT telescop FROM header WHERE frame_id=?", (fr["id"],)).fetchone()[0]
+    _stage(con, "R", lid, "TELESCOP", "set", "EQ6", "str", expected=hh)
+
+    prawdziwy = writeback._post_hash
+    def _padl(path):
+        raise OSError(5, "zerwany udział")
+    monkeypatch.setattr(writeback, "_post_hash", _padl)
+    res = writeback.commit(con, "R", now=NOW)
+
+    assert len(res.failed) == 1 and not res.applied and res.commit_id is not None
+    assert f"commicie {res.commit_id}" in res.failed[0].reason
+    assert p.read_bytes() != przed                                     # plik PODMIENIONY
+    assert con.execute("SELECT count(*) FROM header_backups WHERE commit_id=?",
+                       (res.commit_id,)).fetchone()[0] == 1
+    assert con.execute("SELECT header_hash FROM location WHERE id=?",
+                       (lid,)).fetchone()["header_hash"] == hh          # bez re-syncu
+    assert con.execute("SELECT telescop FROM header WHERE frame_id=?",
+                       (fr["id"],)).fetchone()[0] == tel
+    st = con.execute("SELECT status FROM pending_changes WHERE run_id='R'").fetchone()["status"]
+    assert st == "failed"
+
+    monkeypatch.setattr(writeback, "_post_hash", prawdziwy)            # udział wrócił
+    ures = writeback.undo(con, res.commit_id, now=NOW)
+    assert len(ures.restored) == 1 and not ures.blocked, ures
+    if fmt == "xisf":
+        assert p.read_bytes() == przed                                 # XISF wraca bajtowo
+    else:
+        assert fits.getheader(str(p))["TELESCOP"] == "RC8"
+    con.close()
+
+
+def test_dialog_naprawy_pyta_tego_samego_wlasciciela_regul():
+    """SPOT: dialog „Napraw nagłówek…" nie ma własnej reguły karty - pyta `card_violation` i tylko
+    tłumaczy odpowiedź na swój język (i18n). Znak sterujący to ASCII (`str.isascii()` go
+    przepuszczał), a pisarz by go odrzucił; dialog odmawia teraz TYM SAMYM zdaniem, zanim dojdzie
+    do resolvera (stąd `con=None`). Limit długości to limit pisarza, nie osobna stała dialogu."""
+    pytest.importorskip("PySide6")
+    from horreum.gui import i18n
+    from horreum.gui.app import _validate_object_value as val
+
+    assert val(None, "M\x0742") == (None, i18n.t("repair.err.ascii", text="M\x0742"))
+    n = writeback.FITS_STRING_MAX + 1
+    assert val(None, "X" * n) == (None, i18n.t("repair.err.too_long", n=n,
+                                               max=writeback.FITS_STRING_MAX))
+
+
 def test_gone_copy_skipped(tmp_path):
     con = db.open_db(str(tmp_path / "h.db"))
     p = tmp_path / "e.fits"

@@ -16,9 +16,13 @@ import os
 import re
 
 from horreum.grouper import NO_TELESCOPE_KINDS      # jeden właściciel zbioru rodzajów poza osią
+from horreum.naming import header_dt
+from horreum.resolve._coerce import _to_float, _to_int
 from horreum.resolve.frames import LIGHT_KINDS
+from horreum.resolve.headers import COPY_TESTIMONY_KEYWORDS
 from horreum.resolve.objects import CLEARABLE_OBJECT_SOURCES, WEAK_OBJECT_SOURCES
 from horreum.resolve.paths import STACK_KIND, STACKS_DIR, object_from_path
+from horreum.resolve.stack import signature_timestamp
 from horreum.resolver import NO_OBJECT_CARD_FILETYPES, path_proposals, review_state
 from horreum.stacks import REASON_NO_OBJECT, REASON_OFFSET_UNKNOWN
 
@@ -1524,6 +1528,85 @@ def dup_frame_ids(con):
     ).fetchall()}
 
 
+# POLA, W KTÓRYCH KOPIE JEDNEJ KLATKI MOGĄ MÓWIĆ RÓŻNIE (0021) - kolumna `location` → etykieta.
+# Etykietą zeznania jest nazwa KEYWORDA z pliku (fakt domenowy, nie napis UI - D-L3), a faktów
+# obrazów - klucz sentinelowy `COPY_IMAGES`, który powierzchnia tłumaczy sama. Kolejność = kolejność
+# pokazywania w podpowiedzi.
+COPY_IMAGES = "images"
+_COPY_DIVERGENCE_FIELDS = (*COPY_TESTIMONY_KEYWORDS,
+                           ("image_count", COPY_IMAGES), ("image_roles", COPY_IMAGES))
+
+
+def present_copy_facts(con, frame_ids):
+    """OBECNE kopie klatek z ich faktami z nagłówka (0021) - jedno wejście dla predykatu Porządków
+    (`copy_conflict_frame_ids`) i dla podpowiedzi „×N" w Zbiorach, więc liczba wiersza i opis
+    pod kursorem czytają ten sam stan. frame_ids jako TABLICA JSON (`json_each`, jeden param).
+    ORDER BY frame_id, id - kolejność kopii jest kolejnością WJAZDU wpisu, ta sama, którą
+    `base_rows` wybiera adres pokazywany w komórce. Zwraca: frame_id, location_id, path,
+    image_count, image_roles, hdr_filter, hdr_imagetyp, hdr_object, hdr_telescop, hdr_instrume,
+    hdr_exptime, hdr_xbinning, hdr_date_obs, hdr_hash."""
+    return con.execute(
+        "SELECT l.frame_id, l.id AS location_id, l.path, l.image_count, l.image_roles, "
+        "       l.hdr_filter, l.hdr_imagetyp, l.hdr_object, l.hdr_telescop, l.hdr_instrume, "
+        "       l.hdr_exptime, l.hdr_xbinning, l.hdr_date_obs, l.hdr_hash "
+        "FROM location l "
+        "WHERE l.present = 1 AND l.frame_id IN (SELECT value FROM json_each(?)) "
+        "ORDER BY l.frame_id, l.id",
+        (json.dumps(list(frame_ids)),),
+    ).fetchall()
+
+
+def copy_divergence(copies):
+    """Rozjazd zeznań KOPII jednej klatki - czysta funkcja, zero SQL. `copies` = wiersze
+    `present_copy_facts` jednej klatki. Zwraca `{location_id: (etykieta, …)}` - pola, w których
+    kopie się NIE ZGADZAJĄ, przypięte do KAŻDEJ kopii (każda pokaże w nich własną wartość); pusty
+    słownik = kopie mówią to samo.
+
+    JEDEN WŁAŚCICIEL REGUŁY dla dwóch wołających o różnych stawkach: wiersz Porządków pyta, CZY
+    klatka należy do listy, podpowiedź „×N" - CO i gdzie się różni. Reguła w Pythonie, nie w SQL,
+    z tego samego powodu co `lineage_reason_stale`: literału nie da się współdzielić, a druga
+    siedziba reguły rozjechałaby się przy pierwszym nowym polu.
+
+    PORÓWNUJEMY WYŁĄCZNIE KOPIE Z ZEBRANYM ZEZNANIEM (`hdr_hash` niepusty). Kopia bez faktów nie
+    mówi „inaczej" - mówi „nie wiem", a lista rozjazdów ma nieść wyłącznie rozjazd DOWIEDZIONY.
+    Mniej niż dwie takie kopie = nie ma czego z czym porównać.
+
+    Wartość obecna obok brakującej (NULL) JEST rozjazdem: nagłówek, który zeznaje `OBJECT`, i nagłówek,
+    który go nie ma, mówią o klatce różne rzeczy. Porównanie idzie po wartościach PO koercji
+    (`copy_testimony`), więc XISF-owy tekst i FITS-owa liczba tego samego pomiaru nie rozjeżdżają się.
+
+    FAKTÓW Z NAZWY I ŚCIEŻKI KOPII (token filtra, folder filtra, token FLATGRP) TU NIE MA - Horreum
+    nie ma dla tych tokenów parsera (`naming`, `resolve.paths`, `resolve.recipe` ich nie znają),
+    a drugi, pisany obok, byłby drugim źródłem prawdy o tej samej nazwie. Luka opisana w raporcie
+    toru, nie załatana tutaj."""
+    zeznane = [c for c in copies if c["hdr_hash"] is not None]
+    if len(zeznane) < 2:
+        return {}
+    rozne = []
+    for kolumna, etykieta in _COPY_DIVERGENCE_FIELDS:
+        if len({c[kolumna] for c in zeznane}) > 1 and etykieta not in rozne:
+            rozne.append(etykieta)
+    if not rozne:
+        return {}
+    return {c["location_id"]: tuple(rozne) for c in zeznane}
+
+
+def copy_conflict_frame_ids(con):
+    """Zbiór frame_id perspektywy „Kopie niezgodne ze sobą" (0021): klatki z ≥2 OBECNYMI kopiami,
+    których zeznania nagłówków różnią się w którymkolwiek przechowanym polu (`copy_divergence`).
+
+    PODZBIÓR `dup_frame_ids` Z KONSTRUKCJI - kandydaci biorą się z tamtego predykatu, więc guardy
+    żywotności (wycofana i zastąpiona wypadają) są te same, a „niezgodne" nigdy nie pokażą klatki,
+    której nie ma na liście „Duplikaty". Druga kopia tych guardów byłaby SIN-DUP-em.
+
+    JEDEN właściciel predykatu dla licznika Porządków i trimu gridu - jak `dup_frame_ids`.
+    Zwraca set[int]."""
+    kopie = {}
+    for r in present_copy_facts(con, dup_frame_ids(con)):
+        kopie.setdefault(int(r["frame_id"]), []).append(r)
+    return {fid for fid, rows in kopie.items() if copy_divergence(rows)}
+
+
 def review_frame_ids(con):
     """Zbiór frame_id perspektywy „Do przeglądu": light/master_light z `object_id IS NULL`
     (równoważne trimowi `object_canon is None` — `object.canon` NOT NULL, LEFT JOIN daje NULL
@@ -1638,6 +1721,289 @@ def lineage_pending_frame_ids(con):
     Zwraca set[int]."""
     return {int(r["master_frame_id"]) for r in _lineage_reason_rows(con)
             if not lineage_reason_stale(r)}
+
+
+# ============================================================ WERSJE STOSÓW (perspektywa „Wersje stosów")
+# Ten sam materiał zintegrowany kilka razy. Duplikatami w sensie Horreum te pliki NIE są - inne
+# piksele to inna klatka (`sha1_data`), więc „Duplikaty" ich nie widzą - a user chce je sprzątać.
+# Horreum niczego nie kasuje ani nie przenosi: read-model ustawia wersje obok siebie z faktami do
+# decyzji, a usuwa człowiek, poza programem.
+
+WERSJA_INNA = "inna"
+"""Rodzaj członka grupy: jest DOWÓD odrębnego przebiegu integracji względem co najmniej jednego sąsiada."""
+WERSJA_POCHODNA = "pochodna"
+"""Rodzaj członka: dowodu odrębności brak, jest dowód wspólnego pochodzenia z sąsiadem."""
+WERSJA_NIEUSTALONA = "nieustalone"
+"""Rodzaj członka: baza nie niesie świadka ani odrębności, ani pochodzenia."""
+
+# ŚWIADKOWIE - tokeny zdania powierzchni (`grid.version.why.<token>`), w porządku SIŁY: gdy
+# członek ma kilku, pokazujemy najmocniejszego. Parytet z katalogiem pinuje test.
+SWIADEK_HISTORIA = "declared"
+SWIADEK_SYGNATURA = "tool"
+SWIADEK_POMIARY = "measure"
+SWIADEK_TA_SAMA_SYGNATURA = "same_tool"
+SWIADEK_TE_SAME_POMIARY = "same_measure"
+VERSION_WITNESSES = (SWIADEK_HISTORIA, SWIADEK_SYGNATURA, SWIADEK_POMIARY,
+                     SWIADEK_TA_SAMA_SYGNATURA, SWIADEK_TE_SAME_POMIARY)
+
+_POMIAR_RX = re.compile(r"^(NOISE|PSF)")
+_KANAL_RX = re.compile(r"(\d\d)$")
+
+
+def _pomiary_obrazu(raw_json):
+    """Pomiary obrazu z nagłówka - karty `NOISE*`/`PSF*` o wartości LICZBOWEJ, `{karta: float}`.
+
+    Te karty pisze proces, który MIERZY piksele (szum i sygnał PSF integracji), a procesy pochodne
+    (łączenie kanałów, wyrównanie, przycięcie) przepisują je bez zmian. Stąd ich siła jako świadka
+    - zmierzona na 112 parach bliźniaków żywego archiwum (2026-09-26): 101 par różni się we
+    WSZYSTKICH wspólnych kartach, 10 zgadza się we wszystkich, a jedyna para mieszana (29 z 30
+    różnych) ma jedną zbieżność przypadkową. Etykiety algorytmu (`NOISEA00 = MRS`,
+    `PSFSGTYP = Moffat4`) nie są pomiarem i odpadają same, bo nie są liczbą.
+
+    KOERCJA PRZY WEJŚCIU (`_to_float`), nie porównanie tekstów: nagłówek XISF niesie liczby jako
+    napisy (`'1.4035e+03'`), a ten sam pomiar zapisany inną drogą mógłby przyjść jako `1403.5` -
+    słownik napisów rozjechałby dwie identyczne wartości w „różne pomiary". Nieczytelny JSON
+    → `{}` (brak świadka, nie wyjątek)."""
+    try:
+        karty = json.loads(raw_json or "{}")
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(karty, dict):
+        return {}
+    out = {}
+    for klucz, wartosc in karty.items():
+        if _POMIAR_RX.match(str(klucz)):
+            liczba = _to_float(wartosc)
+            if liczba is not None:
+                out[str(klucz)] = liczba
+    return out
+
+
+def _kanaly(pomiary):
+    """Kanały, na których zmierzono obraz - sufiksy `00`/`01`/`02` kart pomiaru (`frozenset`)."""
+    return frozenset(m.group(1) for m in (_KANAL_RX.search(k) for k in pomiary) if m)
+
+
+def _ten_sam_kanal(a, b, mono):
+    """Czy dwa stosy grupy przedstawiają TEN SAM kanał - warunek każdego dowodu odrębności.
+
+    Kamera MONO: kanałem jest filtr, a filtr stoi w kluczu grupy - więc zawsze tak. Kamera
+    KOLOROWA rozbija jedną sesję na kanały: zmierzone na NGC4826 (2025-04) - trzy stosy `R`/`G`/`B`
+    mają trzy RÓŻNE sygnatury integracji w odstępie dwóch minut i tę samą liczbę wejść (190), bo
+    WBPP integruje każdy kanał osobno. Różne sygnatury znaczą tam „trzy kanały", nie „trzy
+    wersje", a nagłówek nie mówi, który kanał jest który. Dla kamery kolorowej wiemy to wyłącznie
+    o obrazach PEŁNOKOLOROWYCH: oba zmierzone na tych samych co najmniej dwóch kanałach.
+    Kamera nieznana (`is_mono` NULL) idzie drogą kolorowej - brak faktu nie może poszerzać dowodu."""
+    if mono:
+        return True
+    return len(a["kanaly"]) >= 2 and a["kanaly"] == b["kanaly"]
+
+
+def _para_pochodna(a, b):
+    """Świadek WSPÓLNEGO POCHODZENIA dwóch stosów - token albo `None`.
+
+    Ta sama sygnatura integracji to ten sam przebieg (dziś populacja zerowa: 71 sygnatur
+    w archiwum, wszystkie różne). Identyczne pomiary to nagłówek skopiowany z jednego obrazu -
+    zmierzone na parach `R` + `combined_RGB` (LMC, NGC1976, NGC7635): obraz połączony dziedziczy
+    karty kanału `R` znak w znak, razem z pomiarem szumu, którego żadna odrębna integracja nie
+    powtórzy co do czwartej cyfry."""
+    if a["tool"] and a["tool"] == b["tool"]:
+        return SWIADEK_TA_SAMA_SYGNATURA
+    if a["pomiary"] and a["pomiary"] == b["pomiary"]:
+        return SWIADEK_TE_SAME_POMIARY
+    return None
+
+
+def _para_odrebna(a, b, mono):
+    """Świadek ODRĘBNEGO PRZEBIEGU integracji dwóch stosów tego samego kanału - token albo `None`.
+
+    Trzej świadkowie, każdy z bazy, żaden z nazwy pliku:
+      * HISTORIA - `declared_rows` różne: plik zeznaje inny zbiór wejść, więc to inna integracja
+        (IC1795 Ha: 33 wejścia wobec 31);
+      * SYGNATURA - różne `tool` (`PCL:Signature:Integration`): dwa przebiegi ImageIntegration;
+      * POMIARY - różne karty szumu i PSF: dwa różne zdarzenia pomiaru na dwóch różnych obrazach.
+        Jedyny świadek stosów sprzed modułu XISF 1.1.2 (marzec 2025), które sygnatury nie mają.
+        Zgadza się z sygnaturą i historią tam, gdzie są wszystkie trzy (IC1795 Ha i OIII).
+
+    POCHODZENIE BIJE ODRĘBNOŚĆ: gdy para ma świadka wspólnego pochodzenia, odrębności nie
+    orzekamy - pomyłka w tę stronę chowa grupę, a w przeciwną podsuwa do skasowania pochodną
+    zostawianej wersji."""
+    if _para_pochodna(a, b) or not _ten_sam_kanal(a, b, mono):
+        return None
+    if a["declared"] is not None and b["declared"] is not None and a["declared"] != b["declared"]:
+        return SWIADEK_HISTORIA
+    if a["tool"] and b["tool"] and a["tool"] != b["tool"]:
+        return SWIADEK_SYGNATURA
+    if a["pomiary"] and b["pomiary"] and a["pomiary"] != b["pomiary"]:
+        return SWIADEK_POMIARY
+    return None
+
+
+def classify_stack_versions(czlonkowie, *, mono):
+    """Rodzaj każdego członka jednej grupy bliźniaków - `{frame_id: (rodzaj, świadek|None)}`.
+
+    Czysta funkcja, zero SQL. `czlonkowie` = dicty z kluczami `frame_id`, `tool`, `declared`
+    (int albo None - koercja jest sprawą wołającego), `pomiary` (`_pomiary_obrazu`) i `kanaly`
+    (`_kanaly`). Rodzaj jest PARAMI, nie po cesze członka: „inna integracja" znaczy „odrębna od
+    co najmniej jednego sąsiada", a relacja odrębności jest symetryczna - dlatego grupa ma albo
+    zero, albo co najmniej dwóch członków tego rodzaju. Świadek to najmocniejszy z par
+    (`VERSION_WITNESSES` w porządku siły)."""
+    wynik = {}
+    for a in czlonkowie:
+        inni = [b for b in czlonkowie if b["frame_id"] != a["frame_id"]]
+        odrebne = [s for s in (_para_odrebna(a, b, mono) for b in inni) if s]
+        if odrebne:
+            wynik[a["frame_id"]] = (WERSJA_INNA, min(odrebne, key=VERSION_WITNESSES.index))
+            continue
+        pochodne = [s for s in (_para_pochodna(a, b) for b in inni) if s]
+        wynik[a["frame_id"]] = ((WERSJA_POCHODNA, min(pochodne, key=VERSION_WITNESSES.index))
+                                if pochodne else (WERSJA_NIEUSTALONA, None))
+    return wynik
+
+
+def _rodzaj_grupy(rodzaje):
+    """Rodzaj CAŁEJ grupy: wersje, gdy są co najmniej dwie z dowodem odrębności; pochodna, gdy dowodu
+    odrębności nie ma, a jest dowód pochodzenia; w pozostałych przypadkach nieustalone."""
+    if sum(1 for r in rodzaje if r == WERSJA_INNA) >= 2:
+        return WERSJA_INNA
+    if WERSJA_POCHODNA in rodzaje:
+        return WERSJA_POCHODNA
+    return WERSJA_NIEUSTALONA
+
+
+def _stack_version_rows(con):
+    """Stosy-kandydaci do grup wersji: gotowy obraz z integracją, żywy (nie wycofany, nie zastąpiony)
+    i z OBECNĄ kopią. Warunek obecności jest treścią, nie ostrożnością: po usunięciu wersji poza
+    programem i skanie jej klatka traci ostatnią kopię, a grupa ma wtedy zniknąć z listy roboty.
+    Klatka bez kopii ma własną perspektywę („Zniknięte") i tam jest jej gest.
+    Zwraca: frame_id, object_id, object_canon, camera_id, is_mono, filter_canon, exptime, raw_json,
+    window_start, window_end, tool, declared_rows."""
+    return con.execute(
+        "SELECT f.id AS frame_id, f.object_id, obj.canon AS object_canon, f.camera_id, "
+        "       cam.is_mono, f.filter_canon, h.exptime, h.raw_json, "
+        "       i.window_start, i.window_end, i.tool, i.declared_rows "
+        "FROM frame f JOIN integration i ON i.master_frame_id = f.id "
+        "LEFT JOIN header h ON h.frame_id = f.id "
+        "LEFT JOIN camera cam ON cam.id = f.camera_id "
+        "LEFT JOIN object obj ON obj.id = f.object_id "
+        "WHERE f.retired_at IS NULL AND f.superseded_by IS NULL "
+        "  AND i.window_start IS NOT NULL AND i.window_end IS NOT NULL "
+        "  AND EXISTS (SELECT 1 FROM location l WHERE l.frame_id = f.id AND l.present = 1) "
+        "ORDER BY f.id").fetchall()
+
+
+def _grupy_wersji(con):
+    """Grupy bliźniaków z co najmniej dwoma stosami - `[(wiersze, mono, członkowie, rodzaje)]`.
+
+    KLUCZ = (obiekt, kamera, filtr, ekspozycja, początek okna, koniec okna). Okno co do sekundy
+    przypina zbiór subów; kamera chroni przed zestawem podwójnym (dwa teleskopy tej samej nocy).
+
+    EKSPOZYCJA PRZEZ KOERCJĘ I RÓWNOŚĆ, NIE PRZEZ `stacks.exposure_matches`. Próg D-DR-2 nie jest
+    przechodni (`90~91`, `91~92`, a `90≁92`), więc grupowanie po nim zlepiałoby łańcuchem stosy,
+    które się nie dopasowują - jego właściciel zakazuje tego wprost. Próg odpowiada też na inne
+    pytanie (sub-lustrzanki wobec mastera: pomiar), a tu po obu stronach stoi zeznanie mastera
+    z tych samych subów. Zmierzone 2026-09-26: w 31 grupach (obiekt, kamera, filtr, okno) nie ma
+    ANI JEDNEJ różnicy ekspozycji, więc równość i próg dają dziś ten sam podział. Koercja zostaje
+    bramką na pułapkę formatu: nagłówek XISF niesie `'600.00'`, a porównanie SQLite z kolumną to
+    maskuje, słownik Pythona - nie.
+
+    Okno idzie przez `naming.header_dt` (SPOT parsera ISO): zapis z ułamkiem sekundy i bez niego
+    ma dać ten sam klucz."""
+    grupy = {}
+    for r in _stack_version_rows(con):
+        start, koniec = header_dt(r["window_start"]), header_dt(r["window_end"])
+        if start is None or koniec is None:
+            continue
+        klucz = (r["object_id"], r["camera_id"], r["filter_canon"], _to_float(r["exptime"]),
+                 start, koniec)
+        grupy.setdefault(klucz, []).append(r)
+    out = []
+    for wiersze in grupy.values():
+        if len(wiersze) < 2:
+            continue
+        mono = bool(wiersze[0]["is_mono"])
+        czlonkowie = []
+        for r in wiersze:
+            pomiary = _pomiary_obrazu(r["raw_json"])
+            czlonkowie.append({"frame_id": int(r["frame_id"]), "tool": r["tool"] or None,
+                               "declared": _to_int(r["declared_rows"]),
+                               "pomiary": pomiary, "kanaly": _kanaly(pomiary)})
+        out.append((wiersze, mono, czlonkowie, classify_stack_versions(czlonkowie, mono=mono)))
+    return out
+
+
+def stack_version_groups(con):
+    """Grupy bliźniaków (ten sam materiał, co najmniej dwa stosy) z rodzajem grupy i członków.
+
+    Zwraca listę dictów, po grupie: `object_canon`, `filter_canon`, `exptime` (float), `window_start`,
+    `window_end` (surowe napisy z `integration`), `mono`, `kind` (`WERSJA_*`) oraz `members` - dicty
+    `frame_id`, `kind`, `witness` (token `VERSION_WITNESSES` albo None), `timestamp` (chwila
+    integracji z sygnatury albo None), `declared_rows`. Porządek: obiekt, filtr, ekspozycja, okno -
+    ten sam, w którym powierzchnia ustawia nagłówki grup.
+
+    Read-model milczy tekstem UI (zdanie składa widok z katalogu i18n) i nie filtruje po rodzaju:
+    perspektywa bierze grupy wersji, raport pomiaru bierze wszystkie."""
+    out = []
+    for wiersze, mono, czlonkowie, rodzaje in _grupy_wersji(con):
+        r0 = wiersze[0]
+        out.append({
+            "object_canon": r0["object_canon"], "filter_canon": r0["filter_canon"],
+            "exptime": _to_float(r0["exptime"]),
+            "window_start": r0["window_start"], "window_end": r0["window_end"], "mono": mono,
+            "kind": _rodzaj_grupy([rodzaje[c["frame_id"]][0] for c in czlonkowie]),
+            "members": [{"frame_id": c["frame_id"], "kind": rodzaje[c["frame_id"]][0],
+                         "witness": rodzaje[c["frame_id"]][1],
+                         "timestamp": signature_timestamp(c["tool"]),
+                         "declared_rows": c["declared"]} for c in czlonkowie],
+        })
+    out.sort(key=lambda g: (natural_key(g["object_canon"] or ""), g["filter_canon"] or "",
+                            g["exptime"] if g["exptime"] is not None else -1.0,
+                            str(g["window_start"])))
+    return out
+
+
+def stack_version_frame_ids(con):
+    """Zbiór frame_id perspektywy „Wersje stosów": WSZYSCY członkowie grup, w których co najmniej dwa
+    stosy mają dowód odrębnej integracji.
+
+    JEDEN właściciel predykatu dla trimu gridu i licznika Porządków - jak `dup_frame_ids`. Członek
+    bez dowodu (pochodna, nieustalony) zostaje w zbiorze, bo NALEŻY do grupy: człowiek decyduje
+    o całej grupie i ma widzieć także to, czego maszyna nie umiała rozstrzygnąć. Grupy wyłącznie
+    pochodne i nieustalone wypadają - rozbicie jednej integracji na kanały (LMC: `R`/`G`/`B`,
+    `combined_RGB`, `drizzle`) nie jest wersją do sprzątania. Zwraca set[int]."""
+    return {c["frame_id"] for _w, _m, czlonkowie, rodzaje in _grupy_wersji(con)
+            if _rodzaj_grupy([rodzaje[c["frame_id"]][0] for c in czlonkowie]) == WERSJA_INNA
+            for c in czlonkowie}
+
+
+def keep_version_plan(con, frame_id):
+    """Plan gestu „Zostaw tę wersję": ścieżki OBECNYCH kopii pozostałych wersji z grupy stosu
+    `frame_id` - albo `None`, gdy stos nie należy do żadnej grupy bliźniaków.
+
+    „Pozostała wersja" to członek z dowodem odrębności WZGLĘDEM ZOSTAWIANEGO (`_para_odrebna`), nie
+    członek z etykietą „inna integracja" w ogóle: pochodna zostawianej wersji należy do niej i do
+    schowka nie trafia, a członek bez dowodu względem niej też nie - ścieżka w schowku jest
+    podpowiedzią do skasowania, a podpowiadać wolno wyłącznie z dowodem. Pominiętych liczymy, żeby
+    zdanie po geście powiedziało, czego NIE skopiowano i dlaczego.
+
+    Wszystkie obecne kopie, nie jedna: wersja z dwiema kopiami zostaje na dysku, dopóki leży
+    którakolwiek z nich. Zwraca dict: `paths` (w porządku frame_id, location.id), `stacks` (ile
+    stosów pozostałych wersji), `unknown` (ilu członków bez dowodu względem zostawianego),
+    `derived` (ile pochodnych zostawianej wersji)."""
+    for _wiersze, mono, czlonkowie, _rodzaje in _grupy_wersji(con):
+        zostaje = next((c for c in czlonkowie if c["frame_id"] == frame_id), None)
+        if zostaje is None:
+            continue
+        inni = [c for c in czlonkowie if c["frame_id"] != frame_id]
+        wersje = [c["frame_id"] for c in inni if _para_odrebna(zostaje, c, mono)]
+        pochodne = sum(1 for c in inni if _para_pochodna(zostaje, c))
+        sciezki = [r["path"] for r in con.execute(
+            "SELECT path FROM location WHERE present = 1 "
+            "AND frame_id IN (SELECT value FROM json_each(?)) ORDER BY frame_id, id",
+            (json.dumps(wersje),)).fetchall()]
+        return {"paths": sciezki, "stacks": len(wersje), "derived": pochodne,
+                "unknown": len(inni) - len(wersje) - pochodne}
+    return None
 
 
 # ============================================================ PORTFEL NAŚWIETLEŃ (F7, PLAN_ux_redesign §8)
@@ -1902,6 +2268,10 @@ def tasks_state(con):
         "unresolved_lights": len(review_frame_ids(con)),
         "stacks_lineage_pending": len(lineage_pending_frame_ids(con)),
         "dup_frames": len(dup_frame_ids(con)),
+        # Kopie niezgodne ze sobą (0021) - podzbiór duplikatów, ten sam predykat co trim perspektywy.
+        # JEST robotą (poza `tasks._BEZ_ROBOTY`): oś klatki zależy od tego, która kopia wygrała
+        # w `header`, a sprzeczność rozstrzyga wyłącznie człowiek.
+        "copy_conflict_frames": len(copy_conflict_frame_ids(con)),
         "telescopes_unlabeled": telescopes_unlabeled,
         "observatories_unnamed": observatories_unnamed,
         "vanished_frames": len(vanished_frame_ids(con)),
@@ -1914,6 +2284,10 @@ def tasks_state(con):
         # materiał, który wrócił — czyli wnosiłby dokładnie ten defekt, który paczka leczy.
         "retired_frames": len(retired_frame_ids(con)),
         "retired_conflict_frames": len(retired_conflict_frame_ids(con)),
+        # Wersje stosów - liczba STOSÓW perspektywy (ten sam predykat, co trim), nie liczba grup:
+        # wiersz i lista pod klikiem liczą to samo. Natura wiersza (poza plakietką) mieszka
+        # w `tasks._BEZ_ROBOTY`, nie tutaj - licznik mówi, ile jest, nie czy to robota.
+        "stack_versions": len(stack_version_frame_ids(con)),
     }
 
 
@@ -2244,9 +2618,14 @@ def base_rows(con, frame_ids):
     tablica JSON (`json_each`). Zwraca W TEJ KOLEJNOŚCI: frame_id, kind, filetype, filter_canon,
     camera_model, telescope_label, telescop_canon, object_canon, object_raw, object_source,
     object_cleared_canon, date_obs, exptime, path, present, last_verified_at, superseded_by,
-    retired_at, n_present, n_vanished, vanished_path. Wiersze czyta się po NAZWIE (`sqlite3.Row`),
-    ale kolejność w tym zdaniu ma zgadzać się z SELECT-em - rozjazd był zarzutem bramki 0809 i jest
-    tańszy do naprawienia niż do wytłumaczenia następnej sesji.
+    retired_at, n_present, n_vanished, vanished_path, image_count. Wiersze czyta się po NAZWIE
+    (`sqlite3.Row`), ale kolejność w tym zdaniu ma zgadzać się z SELECT-em - rozjazd był zarzutem
+    bramki 0809 i jest tańszy do naprawienia niż do wytłumaczenia następnej sesji.
+
+    `image_count` (0021) to liczba obrazów POKAZANEJ kopii - karmi kolumnę „Obrazy". Klatka z kilkoma
+    obecnymi kopiami dostaje w gridzie wszystkie różne wartości z `present_copy_facts` (osobne, wąskie
+    zapytanie tylko o duplikaty), więc ta kolumna mówi prawdę dla reszty archiwum bez drugiego
+    podzapytania na 16 tys. wierszy.
 
     `object_source` i `object_cleared_canon` KARMIĄ POLITYKĘ KOLUMNY (`object_cell`, R-S3-4), a NIE
     nową kolumnę na ekranie: `BASE_COLS` gridu zostaje bez zmian, więc podłoga okna się nie rusza
@@ -2278,7 +2657,8 @@ def base_rows(con, frame_ids):
         "       (SELECT COUNT(*) FROM location lp WHERE lp.frame_id = f.id AND lp.present = 1) AS n_present, "
         "       (SELECT COUNT(*) FROM location lv WHERE lv.frame_id = f.id AND lv.present = 0) AS n_vanished, "
         "       (SELECT lw.path FROM location lw WHERE lw.frame_id = f.id AND lw.present = 0 "
-        "         ORDER BY lw.id LIMIT 1) AS vanished_path "
+        "         ORDER BY lw.id LIMIT 1) AS vanished_path, "
+        "       loc.image_count "
         "FROM frame f "
         "LEFT JOIN header h ON h.frame_id = f.id "
         "LEFT JOIN config c ON c.id = f.config_id "

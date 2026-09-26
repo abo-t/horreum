@@ -11,6 +11,10 @@ Dwie warstwy:
    `header_hash` PRZED zapisem (niezgodny → 'blocked', NIE pisze). Hash PO zapisie liczony z
    ZAPISANEGO pliku przez `scan.read_fits_meta` (astropy normalizuje formatowanie przy `writeto`
    — hash „z pamięci" nie pasowałby do pliku; brief T3, lekcja dawcy `fits_io.py:289`).
+   Treść łaty przechodzi PRZED zapisem reguły karty FITS 4.0 (`card_violation` - jeden właściciel
+   dla obu formatów, sekcja „REGUŁY KARTY"); łamiąca → 'blocked', plik nietknięty. Weryfikacja PO
+   `os.replace`, która padnie, daje 'failed' Z `backup_text` - plik jest już zmieniony, więc undo
+   nie może stracić materiału (`_after_replace`).
    Od P6c writer ma DWA formaty: FITS (astropy) i XISF (łata bajtowa — sekcja „PISARZ XISF").
    Dyspozycja po rozszerzeniu w `write_changes`/`write_full_header`/`_post_hash`, więc
    ORKIESTRACJA (niżej) o formacie nie wie — commit i undo są dla obu identyczne.
@@ -31,10 +35,13 @@ więc anulowanie na granicy pliku jest bezpieczne: pliki już zapisane zostają 
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import os
+import re
 import shutil
 import sqlite3
 import tempfile
+import xml.etree.ElementTree as ET
 from collections.abc import Callable
 
 from astropy.io import fits
@@ -57,10 +64,143 @@ class WriteOp:
 
 @dataclasses.dataclass(frozen=True)
 class WriteResult:
+    """Wynik jednego zapisu. `backup_text is not None` ⇔ plik na dysku JEST PODMIENIONY: przy
+    'applied' zawsze, a przy 'failed' wtedy, gdy padła weryfikacja PO `os.replace` - bajty już
+    leżą na dysku, więc wołający musi dostać materiał do cofnięcia, inaczej undo traci go na zawsze.
+    `post_hash` przy takim 'failed' to hash nagłówka, który pisarz ZAPISAŁ (nie odczytał) - kotwica
+    undo przepuści cofnięcie tylko wtedy, gdy na dysku leży dokładnie to, co zapisaliśmy.
+    'blocked' i 'failed' sprzed podmiany mają oba pola `None` i plik bajtowo nietknięty."""
     status: str            # 'applied' | 'blocked' | 'failed'
     reason: str | None
     post_hash: str | None  # header_hash PO zapisie (z ZAPISANEGO pliku) — kontrola undo + kolejny zapis
     backup_text: str | None = None  # pełny nagłówek SPRZED zapisu (undo)
+
+
+# ============================================================ REGUŁY KARTY (jeden właściciel)
+# Treść, którą ŁATA wnosi do nagłówka, spełnia reguły karty FITS 4.0 (§4.1-4.2) - w OBU formatach:
+# XISF przejmuje je wprost (spec XISF 1.0 Rev. 1 §11.6: dane `<FITSKeyword>` spełniają wymagania
+# FITS 4.0 dla kart). Właściciel jest JEDEN - `card_violation`: woła go pisarz FITS, pisarz XISF
+# i dialog naprawy nagłówka (`gui/app.py`), który pyta go przed stagingiem, żeby odmowa padła
+# wcześniej, a nie inną regułą.
+#
+# Dlaczego tu, a nie w astropy czy w czytniku - zmierzone na astropy 8.0.0: znak sterujący
+# i nie-ASCII odrzuca już przypisanie karty, ale angielskim `ValueError`, czyli dawniej 'failed'
+# („coś się zepsuło") zamiast odmowy; wartość dłuższa niż rekord przechodzi po cichu jako CONTINUE,
+# za długi komentarz jest po cichu UCINANY, a zła nazwa przy `add` zakłada kartę HIERARCH. Przy XISF
+# nie odmawiał nikt: znak sterujący szedł do nagłówka surowo, a nagłówek przestawał być poprawnym
+# XML 1.0 (spec §9.5 - PixInsight takiego pliku nie otworzy). Czytnik Horreum ten znak neutralizuje
+# (`scan.xml_parsable`), więc odczyt po zapisie tego nie widział.
+#
+# Reguły pilnują TREŚCI ŁATY, nie pliku: zastana nielegalna treść (w archiwum jest plik z bajtem
+# 0x07 w historii przetwarzania) nie blokuje łaty legalnej wartości. Nazwę sprawdzamy tylko wtedy,
+# gdy łata ją WNOSI (nowa karta) - `set` na istniejącej karcie jej nazwy nie zmienia.
+
+_FITS_NAME = re.compile(r"[A-Z0-9_-]{1,8}")   # §4.1.2.1: do 8 znaków z tego zbioru
+FITS_STRING_MAX = 68      # tekst w apostrofach w JEDNYM rekordzie: 80 - nazwa 8 - "= " 2 - apostrofy 2
+_FITS_RECORD = 80
+_FITS_VALUE_START = 10    # nazwa (8) + wskaźnik wartości "= " (2)
+_FITS_FIXED_FIELD = 20    # stały format (§4.2): pole wartości zajmuje co najmniej kolumny 11-30
+_FITS_COMMENT_SEP = 3     # " / "
+
+
+@dataclasses.dataclass(frozen=True)
+class CardViolation:
+    """Naruszenie reguł karty wniesione przez łatę. `reason` idzie do raportu pisarza; `kind`
+    ('name' | 'chars' | 'length') oraz `length`/`limit` służą powierzchniom, które mówią własnym
+    językiem (i18n dialogu naprawy nagłówka)."""
+    kind: str
+    reason: str
+    length: int | None = None
+    limit: int | None = None
+
+
+def _first_illegal(text):
+    """Pierwszy znak spoza drukowalnego ASCII (0x20-0x7E) albo `None`. FITS 4.0 dopuszcza w wartości
+    tekstowej (§4.2.1.1) i w komentarzu (§4.1.2.3) wyłącznie ten zbiór; XML 1.0 jest od niego
+    szerszy, więc zbiór FITS domyka też legalność nagłówka XISF."""
+    return next((ch for ch in text if not " " <= ch <= "~"), None)
+
+
+def card_violation(keyword, value, comment=None, *, new_card=False) -> CardViolation | None:
+    """Czy karta `keyword = value / comment` łamie reguły FITS 4.0 → `CardViolation` albo `None`.
+
+    Trzy reguły, w tej kolejności:
+    1. **Nazwa** (tylko `new_card=True`, bo tylko nowa karta wnosi nazwę): po `strip().upper()` -
+       tak ją zapisują oba pisarze - do 8 znaków `A-Z 0-9 _ -`.
+    2. **Znaki** wartości i komentarza: drukowalne ASCII 0x20-0x7E. Znak sterujący w XISF łamie też
+       XML 1.0, i to bez ratunku: nie ma go jak zakodować (`scan._escape_xml`).
+    3. **Długość** - karta mieści się w JEDNYM rekordzie 80 znaków. Wartość liczona jak tekst
+       w apostrofach z podwojonym apostrofem wewnątrz (tak ją zapisuje FITS i `scan.quote_fits`),
+       limit `FITS_STRING_MAX`; dla liczby limit jest o dwa znaki luźniejszy, a liczba tej długości
+       nie istnieje, więc reguła jest jedna. Dłuższa wartość wymagałaby kontynuacji CONTINUE (astropy
+       robi ją po cichu), a XISF-owy `<FITSKeyword>` nie ma rekordów, na które mógłby się rozpaść.
+       Komentarz mieści się w reszcie rekordu po ` / ` przy polu wartości STAŁEGO formatu
+       (co najmniej 20 znaków) - tak kartę układa astropy, więc dla FITS reguła jest dokładna
+       (poza nią astropy ucina komentarz po cichu), a dla XISF ostrożna. Liczymy komentarz
+       WNOSZONY przez łatę; zastany komentarz karty przy `set` bez komentarza zostaje poza regułą
+       (XISF go nie rusza, a FITS przy zmianie wartości układa kartę od nowa i potrafi go uciąć -
+       to osobny dług pisarza FITS, nie reguła treści łaty).
+
+    Wartość sprawdzamy w postaci TEKSTOWEJ (`str(value)`) - dokładnie tej, która stoi w stagingu
+    i którą pisarz XISF wstawia do pliku."""
+    name = str(keyword).strip().upper()
+    comment = None if comment is None else str(comment)
+    if new_card and not _FITS_NAME.fullmatch(name):
+        return CardViolation(
+            "name", f"nazwa karty {name!r} łamie reguły FITS 4.0 - do 8 znaków spośród A-Z, 0-9, "
+                    f"'_' i '-'")
+    text = str(value)
+    for pole, tresc in (("wartość", text), ("komentarz", comment)):
+        znak = _first_illegal(tresc) if tresc is not None else None
+        if znak is not None:
+            return CardViolation(
+                "chars", f"{pole} karty {name} ma znak {znak!r} spoza drukowalnego ASCII - karta "
+                         f"FITS go nie przyjmie, a w nagłówku XISF łamie XML 1.0")
+    pole_wartosci = len(text.replace("'", "''"))
+    if pole_wartosci > FITS_STRING_MAX:
+        return CardViolation(
+            "length", f"wartość karty {name} ma {pole_wartosci} znaków, a jeden rekord FITS mieści "
+                      f"{FITS_STRING_MAX}", length=pole_wartosci, limit=FITS_STRING_MAX)
+    if comment:
+        limit = (_FITS_RECORD - _FITS_VALUE_START - _FITS_COMMENT_SEP
+                 - max(pole_wartosci + 2, _FITS_FIXED_FIELD))
+        if len(comment) > limit:
+            return CardViolation(
+                "length", f"komentarz karty {name} ma {len(comment)} znaków, a przy tej wartości "
+                          f"rekord FITS mieści {max(limit, 0)}", length=len(comment),
+                limit=max(limit, 0))
+    return None
+
+
+def _ops_violation(ops, is_new: Callable[[WriteOp], bool]) -> str | None:
+    """Powód pierwszego naruszenia reguł karty w komplecie operacji albo `None`. Czy operacja
+    ZAKŁADA kartę (`is_new`), wie tylko pisarz danego formatu: FITS `set` na nieobecnej karcie
+    dopisuje ją po cichu (astropy), XISF odmawia."""
+    for op in ops:
+        naruszenie = card_violation(op.keyword, op.value, op.comment, new_card=is_new(op))
+        if naruszenie is not None:
+            return naruszenie.reason
+    return None
+
+
+def _after_replace(path: str, written_hash: str, backup_text: str) -> WriteResult:
+    """Weryfikacja PO `os.replace` - wspólna dla FITS i XISF. Plik JEST już podmieniony, więc KAŻDY
+    wynik stąd niesie `backup_text`: 'failed' bez backupu zostawiłby zapisany plik bez drogi powrotu.
+
+    `written_hash` = hash nagłówka, który pisarz ZAPISAŁ (XISF: sha1 złożonego XML-a; FITS: odczyt
+    pliku tymczasowego przed podmianą). Odczyt po zapisie (T3) musi dać dokładnie ten hash - te same
+    bajty, ta sama formuła. Rozjazd albo nieudany odczyt → 'failed' z `post_hash=written_hash`:
+    undo porównuje dysk z tym hashem, więc cofnie wyłącznie plik, na którym leży to, co zapisaliśmy,
+    a plik zmieniony w międzyczasie przez kogoś innego zostawi jako 'blocked'."""
+    try:
+        post = _post_hash(path)
+    except Exception as exc:  # noqa: BLE001 - raport zamiast wyjątku w warstwie zapisu
+        return WriteResult("failed", f"plik PODMIENIONY, ale odczyt po zapisie padł - "
+                                     f"{type(exc).__name__}: {exc}", written_hash, backup_text)
+    if post != written_hash:
+        return WriteResult("failed", "plik PODMIENIONY, ale odczyt po zapisie pokazuje inny nagłówek "
+                                     "niż zapisany", written_hash, backup_text)
+    return WriteResult("applied", None, post, backup_text)
 
 
 def _coerce(value, value_type: str):
@@ -134,8 +274,12 @@ def _post_hash(path: str) -> str:
 
 def write_changes(path, ops: list[WriteOp], expected_hash: str | None) -> WriteResult:
     """Atomowo zapisz zmiany w nagłówku wybranego HDU. Kontrola `header_hash`: nagłówek na dysku ≠
-    `expected_hash` → 'blocked', NIE pisze. Po zapisie zwraca `post_hash` z zapisanego pliku +
-    `backup_text` (pełny nagłówek sprzed zmian → undo). Port dawcy `fits_io.write_changes`.
+    `expected_hash` → 'blocked', NIE pisze. Treść łamiąca reguły karty FITS 4.0 (`card_violation`)
+    → 'blocked' z powodem, NIE pisze - zamiast angielskiego wyjątku astropy albo cichego CONTINUE,
+    ucięcia komentarza czy karty HIERARCH. Plik tymczasowy jest czytany PRZED podmianą (plik
+    nieczytelny nie zastąpi oryginału), a jego hash jest kotwicą weryfikacji po podmianie
+    (`_after_replace`). Zwraca `post_hash` z zapisanego pliku + `backup_text` (pełny nagłówek sprzed
+    zmian → undo) - także przy 'failed' PO podmianie. Port dawcy `fits_io.write_changes`.
     `.xisf` → `write_xisf_changes` (inny format, TEN SAM kontrakt `WriteResult`).
     `.dng/.arw/.cr2` → ODMOWA (#2): RAW jest read-only (rename dozwolony osobno)."""
     if _is_raw(path):
@@ -151,16 +295,24 @@ def write_changes(path, ops: list[WriteOp], expected_hash: str | None) -> WriteR
             current = scan._header_hash(hdr)
             if expected_hash is not None and current != expected_hash:
                 return WriteResult("blocked", "header_hash mismatch", None)
+            # Nowa karta = `add` ALBO `set` na karcie nieobecnej - tę `_apply_op` dopisuje po
+            # cichu (semantyka astropy), więc jej nazwa też jest treścią wniesioną przez łatę.
+            powod = _ops_violation(
+                ops, lambda op: op.op == "add" or _count_keyword(hdr, op.keyword) == 0)
+            if powod is not None:
+                return WriteResult("blocked", powod, None)
             backup_text = hdr.tostring()  # pełny nagłówek SPRZED zmian → undo
             for op in ops:
                 _apply_op(hdr, op)
             fd, tmp = tempfile.mkstemp(suffix=".tmp", dir=os.path.dirname(os.path.abspath(path)))
             os.close(fd)
             hdul.writeto(tmp, overwrite=True)
-        # Poza `with`: uchwyt oryginału zwolniony (Windows) → podmiana.
+        # Poza `with`: uchwyt oryginału zwolniony (Windows). Odczyt pliku tymczasowego TĄ SAMĄ
+        # formułą co skan, zanim zastąpi oryginał: nieczytelny → 'failed' i oryginał nietknięty;
+        # czytelny → hash tego, co za chwilę będzie na dysku (kotwica `_after_replace`).
+        written_hash = scan.read_fits_meta(tmp).header_hash
         os.replace(tmp, path)
         tmp = None
-        post = _post_hash(path)  # T3: hash z ZAPISANEGO pliku, nie z pamięci
     except Exception as exc:  # noqa: BLE001 — raport zamiast wyjątku w warstwie zapisu
         return WriteResult("failed", f"{type(exc).__name__}: {exc}", None)
     finally:
@@ -169,7 +321,7 @@ def write_changes(path, ops: list[WriteOp], expected_hash: str | None) -> WriteR
                 os.remove(tmp)
             except OSError:
                 pass
-    return WriteResult("applied", None, post, backup_text)
+    return _after_replace(path, written_hash, backup_text)   # T3: hash z ZAPISANEGO pliku
 
 
 def write_full_header(path, header_text: str, expected_hash: str | None) -> WriteResult:
@@ -465,37 +617,106 @@ def _write_xisf_file(path: str, region: bytes, tail_start: int) -> None:
                 pass
 
 
+def _xisf_expected_cards(meta, ops) -> list[tuple]:
+    """Karty, które nagłówek MA mieć po łacie, jako `(keyword, idx, value_raw, comment)` - policzone
+    z kart SPRZED łaty i z operacji, a NIE z bajtów łaty. Tylko wtedy porównanie z kartami
+    odczytanymi z nowego XML-a sprawdza łatę, zamiast powtarzać ją drugi raz.
+
+    Wartość w postaci, w jakiej odda ją czytnik: w karcie tekstowej (apostrofy w oryginale) bez
+    końcowych spacji - FITS 4.0 §4.2.1.1 ma je za nieznaczące i czytnik je zdejmuje; w karcie gołej
+    dosłownie. Karta dopisana (`add`) jest zawsze tekstowa (wzorzec w apostrofach) i staje NA KOŃCU
+    bloku kart. `set` bez komentarza komentarza nie rusza."""
+    want = [[c.keyword, c.idx, c.value_raw, c.comment] for c in meta.cards]
+    by_addr = {(c[0], c[1]): c for c in want}
+    for op in ops:
+        keyword, idx, text = op.keyword.strip().upper(), op.idx or 0, str(op.value)
+        if op.op == "add":
+            want.append([keyword, 0, text.rstrip(), op.comment or None])
+            continue
+        start, end = scan.locate_value_span(meta.xml_bytes, keyword=keyword, idx=idx)
+        orig = meta.xml_bytes[start:end]
+        tekstowa = len(orig) >= 2 and orig.startswith(b"'") and orig.endswith(b"'")
+        card = by_addr[(keyword, idx)]
+        card[2] = text.rstrip() if tekstowa else text
+        if op.comment is not None:
+            card[3] = op.comment or None
+    return [tuple(c) for c in want]
+
+
+def _xisf_verify(meta, ops, patches, new_xml: bytes) -> None:
+    """WERYFIKACJA nowego nagłówka PRZED plikiem tymczasowym - trzy pytania, każde o co innego:
+
+    1. **Łata nie wnosi bajtu nielegalnego w XML 1.0** (spec §9.5). Pytamy o WYCINKI, nie o cały
+       nagłówek: zastany bajt sterujący w cudzej treści (archiwum ma plik z 0x07 w historii
+       przetwarzania) nie jest winą łaty i nie blokuje zapisu. Wartości i komentarze przeszły już
+       `card_violation`, więc ta bramka łapie to, czego tamta nie widzi - bajty skopiowane z pliku
+       przy `add` (wcięcie, wzorzec karty).
+    2. **Nowy nagłówek się parsuje.** Z neutralizacją `scan.xml_parsable`, jak w czytniku - z tego
+       samego powodu co pkt 1 (zastanego 0x07 nie liczymy łacie).
+    3. **Round-trip kart:** karty wyłuskane z nowego XML-a TĄ SAMĄ funkcją co skan
+       (`scan.xisf_cards`) == karty oczekiwane po łacie (`_xisf_expected_cards`). Łapie łatę
+       w złym miejscu, escape, który zmienia sens, wstrzykniętą albo zgubioną kartę.
+
+    Każde „nie" to `ValueError` → 'failed', nie 'blocked' - ten sam kontrakt co guard
+    `locate_value_span`: pisarz złożył nagłówek, który nie mówi tego, co zamierzał, a to usterka
+    do zbadania, nie werdykt o pliku (plik i tak zostaje nietknięty - pliku tymczasowego jeszcze
+    nie ma). Treść łamiącą reguły karty odsiewa wcześniej `card_violation` jako 'blocked'."""
+    for start, end, blob in patches:
+        if scan.xml_parsable(blob) != blob:
+            raise ValueError(f"XISF: łata wnosi bajt nielegalny w XML 1.0 (wycinek {start}:{end})")
+    try:
+        root = ET.fromstring(scan.xml_parsable(new_xml))
+    except ET.ParseError as exc:
+        raise ValueError(f"XISF: nagłówek po łacie nie jest poprawnym XML 1.0 ({exc})") from exc
+    got = [(c.keyword, c.idx, c.value_raw, c.comment) for c in scan.xisf_cards(root)]
+    want = _xisf_expected_cards(meta, ops)
+    if got != want:
+        rozjazd = next(((g, w) for g, w in zip(got, want) if g != w),
+                       (f"{len(got)} kart", f"{len(want)} kart"))
+        raise ValueError(f"XISF: karty odczytane po łacie rozjechały się z oczekiwanymi "
+                         f"({rozjazd[0]!r} != {rozjazd[1]!r})")
+
+
 def write_xisf_changes(path, ops: list[WriteOp], expected_hash: str | None) -> WriteResult:
     """Łata bajtowa nagłówka XISF — bliźniak `write_changes` z tym samym kontraktem `WriteResult`.
 
     Kolejność (brief §5): odczyt → kontrola `header_hash` (≠ → 'blocked', NIE pisze) → bramki
-    D-X-11/13 → lokalizacja i podmiana wycinków (karta + zmapowana własność + komentarz) →
-    round-trip backupu (D-X-9) → BRAMKA MIESZCZENIA SIĘ (D-X-2) → temp + `os.replace` → `post_hash`
-    z ZAPISANEGO pliku. `backup_text` = oryginalny XML (wejście `write_xisf_full_header` przy undo).
+    D-X-11/13 → REGUŁY KARTY (`card_violation`, spec §11.6) → lokalizacja i podmiana wycinków
+    (karta + zmapowana własność + komentarz) → WERYFIKACJA nowego XML-a (`_xisf_verify`: §9.5
+    i round-trip kart) → round-trip backupu (D-X-9) → BRAMKA MIESZCZENIA SIĘ (D-X-2) → temp +
+    `os.replace` → weryfikacja po podmianie (`_after_replace`: `post_hash` z ZAPISANEGO pliku ==
+    sha1 złożonego XML-a). `backup_text` = oryginalny XML (wejście `write_xisf_full_header` przy
+    undo) - także przy 'failed' PO podmianie, bo wtedy plik jest już zmieniony.
 
     Odmowa ('blocked') zostawia plik bajtowo nietknięty — wszystkie bramki liczą się PRZED
     stworzeniem pliku tymczasowego. Awaria ('failed') to każdy inny wyjątek, w tym rozejście się
-    skanu bajtowego z parserem (guard `locate_value_span`): tam nie wiemy, gdzie pisać, więc nie
-    piszemy, ale to usterka do zbadania, nie polityka odmowy."""
+    skanu bajtowego z parserem (guard `locate_value_span`) i nieudana weryfikacja nowego XML-a: tam
+    nie wiemy, co byśmy zapisali, więc nie piszemy, ale to usterka do zbadania, nie polityka odmowy."""
     path = os.fspath(path)
     try:
         meta = _read_xisf_or_refuse(path)
         if expected_hash is not None and meta.header_hash != expected_hash:
             return WriteResult("blocked", "header_hash mismatch", None)
         _xisf_gates(meta)
-        new_xml = _xisf_apply(meta.xml_bytes, _xisf_patches(meta, ops))
+        powod = _ops_violation(ops, lambda op: op.op == "add")   # `set` nie zakłada karty (niżej)
+        if powod is not None:
+            raise _XisfRefusal(powod)
+        patches = _xisf_patches(meta, ops)
+        new_xml = _xisf_apply(meta.xml_bytes, patches)
+        _xisf_verify(meta, ops, patches, new_xml)      # §9.5 + round-trip: PRZED plikiem tymczasowym
         backup_text = _xisf_backup_text(meta)          # D-X-9: PRZED mutacją, nie przy undo
         try:
             region = scan.build_xisf_header_region(meta, new_xml)      # D-X-1/2
         except ValueError as exc:                      # nie mieści się / plik przeczy sam sobie
             raise _XisfRefusal(str(exc)) from exc
         _write_xisf_file(path, region, meta.first_attachment)          # tu następuje os.replace
-        post = _post_hash(path)                        # T3: hash z ZAPISANEGO pliku
     except _XisfRefusal as ref:
         return WriteResult("blocked", ref.reason, None)
     except Exception as exc:  # noqa: BLE001 — raport zamiast wyjątku w warstwie zapisu
         return WriteResult("failed", f"{type(exc).__name__}: {exc}", None)
-    return WriteResult("applied", None, post, backup_text)
+    # Header_hash XISF to sha1 bajtów XML (D-X-3), a pisarz zapisuje je 1:1 - więc hash tego, co
+    # zapisaliśmy, znamy bez odczytu, a odczyt (T3) ma go tylko potwierdzić.
+    return _after_replace(path, hashlib.sha1(new_xml).hexdigest(), backup_text)
 
 
 def write_xisf_full_header(path, header_text: str, expected_hash: str | None) -> WriteResult:
@@ -571,7 +792,7 @@ class FileResult:
 @dataclasses.dataclass(frozen=True)
 class CommitResult:
     run_id: str
-    commit_id: int | None  # None gdy nic nie zapisano
+    commit_id: int | None  # None gdy żaden plik nie został podmieniony (applied ani failed po podmianie)
     applied: list[FileResult]
     blocked: list[FileResult]
     failed: list[FileResult]
@@ -626,7 +847,13 @@ def commit(con, run_id, *, now, clock=None,
     commitu (domyślnie `now`).
 
     PORAŻKA BACKUPU po udanym zapisie (D-X-14) → 'failed' z powodem, NIE wyjątek: plik jest już
-    zmieniony, więc pętla musi go domknąć (re-sync + status), a nie zostawić przebiegu w połowie."""
+    zmieniony, więc pętla musi go domknąć (re-sync + status), a nie zostawić przebiegu w połowie.
+
+    WERYFIKACJA PO PODMIANIE PADŁA (`WriteResult` 'failed' z `backup_text`) → backup do
+    `header_backups` jak przy 'applied' (undo commitu cofnie i ten plik), status 'failed' z powodem
+    i numerem commitu, ale BEZ re-syncu i bez gaszenia nagrobka: bajtów na dysku nie potwierdzono,
+    więc bazę naprawi re-skan (T8). Kryterium „plik podmieniony" to `backup_text is not None`, nie
+    status - tak brzmi kontrakt `WriteResult`."""
     clock = clock or (lambda: now)
     pending = [r for r in pending_for_run(con, run_id) if r["status"] == "pending"]
     groups = _group_by_location(pending)
@@ -680,8 +907,8 @@ def commit(con, run_id, *, now, clock=None,
         expected = rows[0]["expected_header_hash"]  # kotwica stagingu (R#7)
         res = write_changes(path, ops, expected)  # tu następuje os.replace
 
-        if res.status == "applied":
-            assert res.backup_text and res.post_hash
+        if res.backup_text is not None:   # plik PODMIENIONY: 'applied' albo 'failed' PO os.replace
+            assert res.post_hash
             if commit_id is None:
                 commit_id = repo.insert_commit(con, run_id=run_id, now=clock(),
                                                summary=f"run {run_id}")
@@ -697,6 +924,22 @@ def commit(con, run_id, *, now, clock=None,
                     header_text=res.backup_text, post_hash=res.post_hash)
             except sqlite3.Error as exc:
                 backup_error = f"plik ZAPISANY, ale backup do undo NIE powstał: {type(exc).__name__}: {exc}"
+            if res.status != "applied":
+                # Weryfikacja PO podmianie padła (`_after_replace`): backup JEST, więc undo tego
+                # commitu cofnie plik, o ile leży na nim dokładnie to, co zapisaliśmy (`post_hash`).
+                # Re-syncu NIE robimy: baza opisuje bajty POTWIERDZONE, a tych nie potwierdziliśmy.
+                # Odczyt albo padł - padłby i w `scan_file`, a jego miękkie lądowanie przy XISF nie
+                # ma tożsamości (`sha1_data` z obrazu) i rozdwoiłoby klatkę - albo pokazał nie to,
+                # co zapisaliśmy (ktoś pisał równolegle). Kotwicą naprawy zostaje re-skan (T8), tak
+                # jak przy crashu między plikiem a bazą.
+                # Nagrobek ręki też zostaje - gaśnie przy wpisanej karcie, a wpisu nie potwierdzono.
+                reason = f"{res.reason}; backup do cofnięcia zapisany w commicie {commit_id}"
+                if backup_error is not None:
+                    reason = f"{res.reason}; {backup_error}"
+                _mark(rows, "failed", reason)
+                failed.append(FileResult(location_id, path, "failed", reason))
+                _report(path, "failed")
+                continue
             _resync(con, path, loc["volume"], now=now)      # PLIK→DB (T8)
             # NAGROBEK RĘKI GAŚNIE TU, a nie w ścieżce skanu (S2b, §4/14b-c). Klatka cofnięta ma
             # `object_source='user_cleared'` i drabina ją POMIJA — bez tego gestu zostałaby poza

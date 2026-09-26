@@ -160,6 +160,10 @@ def test_tasks_state_liczniki_na_s8_obj(s8_obj):
         "unresolved_lights": 3,
         "stacks_lineage_pending": 0,
         "dup_frames": 1,
+        # 0021: duplikat `a1` ma dwie kopie, ale żadna nie ma ZEBRANEGO zeznania (fikstura wkłada
+        # kopie klingą bez faktów z nagłówka) - „nie wiem" nie jest rozjazdem, więc zero. Predykat
+        # na danych z rozjazdem pinują `test_copy_facts.py` (stan) i `test_gui_copy_facts.py` (wiersz).
+        "copy_conflict_frames": 0,
         "telescopes_unlabeled": 4,
         "observatories_unnamed": 0,
         "vanished_frames": 1,
@@ -170,6 +174,10 @@ def test_tasks_state_liczniki_na_s8_obj(s8_obj):
         # a nie żywą obok martwej - więc ten licznik ma tu być 0. Gdyby predykat zgubił
         # warunek istnienia żywej kopii, wchłonąłby `present0` i pokazał 1.
         "missing_copy_frames": 0,
+        # Wersje stosów: fikstura nie ma ani jednej integracji, więc nie ma grup bliźniaków -
+        # zero z czwartego powodu (brak populacji, nie dowód poprawności predykatu; ten pinują
+        # testy `test_gui_stack_versions.py` na własnych danych).
+        "stack_versions": 0,
     }
 
 

@@ -33,7 +33,7 @@ from PySide6.QtCore import (
     QAbstractTableModel, QEvent, QItemSelection, QItemSelectionModel,
     QModelIndex, QObject, Qt, QSettings, QThread, QTimer, Signal, Slot,
 )
-from PySide6.QtGui import QColor, QFont, QKeySequence, QShortcut
+from PySide6.QtGui import QColor, QFont, QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
     QLayout,
@@ -52,6 +52,7 @@ from horreum.gui.assign_dialog import AssignObjectDialog
 from horreum.gui.projection_dialog import ProjectionDialog
 from horreum.gui.rows import TwoPartDelegate
 from horreum.gui.wb_worker import WritebackRunner
+from horreum.resolve.headers import COPY_TESTIMONY_KEYWORDS
 
 # Kolumny bazowe: (nagłówek, klucz). Klucze `_telescope`/`_object`/`_dt_delta` = pochodne. `_dt_delta`
 # (Δh nagłówek−nazwa) liczone w `_derive` z `naming.header_dt`/`filename_dt` — `base_rows` zwraca już
@@ -62,6 +63,10 @@ BASE_COLS = [
     ("col.path", "path"), ("grid.col.kind", "kind"), ("frame.col.camera", "camera_model"),
     ("frame.col.telescope", "_telescope"), ("object.col.name", "_object"),
     ("frame.col.filter", "filter_canon"), ("grid.col.dt_delta", "_dt_delta"),
+    # „Obrazy" (0021) - liczba obrazów KOPII; przy kilku kopiach wszystkie różne wartości („3 | 1",
+    # `_dolacz_kopie`). Na końcu listy: kolumny szukane po kluczu nie przesuwają się, a tabela
+    # przewija się w poziomie, więc podłoga okna (D-0801-1) zostaje, gdzie była.
+    ("grid.col.images", "_images"),
 ]
 _MISSING_TEXT = "—"
 
@@ -307,6 +312,22 @@ PRESET_MISSING_COPY = "Brakujące kopie"
 # Predykat istniał (`queries.retired_conflict_frame_ids`, ten sam, który liczy wiersz) - brakowało
 # perspektywy, która go używa. Stała współdzielona z TasksView po nazwie, jak sześciu sąsiadów.
 PRESET_RETIRED_CONFLICT = "Wycofane, a plik wrócił"
+# PRESET_STACK_VERSIONS - ósmy bliźniak. Ten sam materiał zintegrowany kilka razy: inne piksele,
+# więc „Duplikaty" tych plików nie widzą, a user chce je sprzątać. Perspektywa ustawia wersje obok
+# siebie (grupowanie `_GRUPA_WERSJI`) z faktami do decyzji w kolumnie „Wersja"; Horreum niczego nie
+# kasuje - gest „Zostaw tę wersję" kopiuje ścieżki pozostałych do schowka. Stała współdzielona
+# z TasksView po nazwie, jak siedmiu sąsiadów.
+PRESET_STACK_VERSIONS = "Wersje stosów"
+# PRESET_COPY_CONFLICT - dziewiąty bliźniak (0021). Kopie JEDNEJ klatki (te same piksele pierwszego
+# obrazu) mówią różnie: inny FILTER w nagłówku, inna liczba obrazów. „Duplikaty" widzą nadmiar kopii,
+# nie widzą sprzeczności między nimi - a to od niej zależy, co oś klatki pokazuje. Podzbiór
+# „Duplikatów" z konstrukcji (`queries.copy_conflict_frame_ids`). Stała współdzielona z TasksView po
+# nazwie, jak ośmiu sąsiadów.
+PRESET_COPY_CONFLICT = "Kopie niezgodne"
+# Klucz grupowania po GRUPIE WERSJI - pochodna wiersza (`_adnotuj_wersje`), nie kolumna bazowa:
+# `BASE_COLS` zostaje bez zmian, więc podłoga okna się nie rusza. Pozycja listy „Grupuj wg" działa
+# w każdej perspektywie (stosy spoza grup bliźniaków lądują w „(brak)"), a preset ją ustawia.
+_GRUPA_WERSJI = "_wersja_grupa"
 PRESETS = {
     "Przegląd": {"filter": None, "group_by": None},
     "Kalibracja": {"filter": {"op": "OR", "conditions": [
@@ -321,6 +342,8 @@ PRESETS = {
     PRESET_RETIRED: {"filter": None, "group_by": None, "only_retired": True},
     PRESET_RETIRED_CONFLICT: {"filter": None, "group_by": None, "only_retired_conflict": True},
     PRESET_MISSING_COPY: {"filter": None, "group_by": None, "only_missing_copy": True},
+    PRESET_STACK_VERSIONS: {"filter": None, "group_by": _GRUPA_WERSJI, "only_stack_versions": True},
+    PRESET_COPY_CONFLICT: {"filter": None, "group_by": None, "only_copy_conflict": True},
     "Do przeglądu": {"filter": None, "group_by": None, "only_review": True},
 }
 # Etykieta WYŚWIETLANIA presetu (tekst) osobno od TOŻSAMOŚCI (klucz PRESETS w `itemData` — używany przez
@@ -335,6 +358,8 @@ _PRESET_LABELS = {
     PRESET_RETIRED: "perspective.retired",
     PRESET_RETIRED_CONFLICT: "perspective.retired_conflict",
     PRESET_MISSING_COPY: "perspective.missing_copy",
+    PRESET_STACK_VERSIONS: "perspective.stack_versions",
+    PRESET_COPY_CONFLICT: "perspective.copy_conflict",
     "Do przeglądu": "perspective.to_review",
 }
 # PERSPEKTYWA BEZ ZAWĘŻENIA - jedyny preset, który nie niesie ani filtra, ani flagi `only_*`
@@ -370,7 +395,16 @@ _TRIMY = (
     ("_only_retired", "retired_frame_ids"),
     ("_only_retired_conflict", "retired_conflict_frame_ids"),
     ("_only_missing_copy", "missing_copy_frame_ids"),
+    ("_only_stack_versions", "stack_version_frame_ids"),
+    ("_only_copy_conflict", "copy_conflict_frame_ids"),
 )
+
+# FLAGA, OD KTÓREJ ZALEŻY ZACHOWANIE WIDOKU, NIE TYLKO ZBIÓR: w perspektywie „Wersje stosów" model
+# pokazuje kolumnę „Wersja", a tabela menu z gestem „Zostaw tę wersję". Nazwa atrybutu jako stała,
+# nie literał `self._only_…` w źródle - bramka `test_KAZDY_preset_ma_etykiete_i_zuzyta_flage`
+# pilnuje, żeby rodzina nie dostała drugiej, ręcznej enumeracji; to jest JEDNO odwołanie do jednej
+# flagi, a jej obecność w `_TRIMY` pinuje test perspektywy.
+_FLAGA_WERSJI = "_only_stack_versions"
 
 
 def _klucz_spec(atrybut):
@@ -536,7 +570,124 @@ def _derive(row):
     # 'canon')` i kazała sortowi porównywać pary.
     d["_object"], d["_object_state"] = queries.object_cell(d)
     d["_dt_delta"] = _dt_delta_hours(d.get("date_obs"), d.get("path"))
+    # Liczba obrazów POKAZANEJ kopii (0021) jako tekst komórki - klatkę z kilkoma kopiami nadpisuje
+    # `_dolacz_kopie` wartościami wszystkich kopii. `.get`, bo nie każde zapytanie gridu ją niesie.
+    n = d.get("image_count")
+    d["_images"] = "" if n is None else str(n)
     return d
+
+
+def _dolacz_kopie(base, kopie):
+    """Dołóż wierszom gridu fakty ICH OBECNYCH KOPII (0021) - czysta funkcja nad gotowymi danymi
+    (`queries.present_copy_facts`), zero SQL; mutuje dicty `base` w miejscu, jak `_derive` buduje je
+    dla modelu.
+
+    Dwa klucze, dwóch czytelników:
+      * `_copies` - lista kopii (dict wiersza + `_rozne`, pola rozjazdu z `queries.copy_divergence`)
+        dla podpowiedzi „×N"; JEDEN właściciel reguły rozjazdu z wierszem Porządków, więc opis pod
+        kursorem i liczba na liście mówią o tych samych polach;
+      * `_images` - WSZYSTKIE różne liczby obrazów w kolejności kopii („3 | 1"); kopia bez zebranych
+        faktów (NULL) nie wnosi wartości, bo „nie wiem" nie jest liczbą. Jedna wspólna wartość zostaje
+        jedną liczbą - rozjazd ma być widoczny, zgodność ma nie hałasować.
+    Wiersz bez kilku kopii zostaje nietknięty (liczbę jego jedynej kopii ustawił `_derive`)."""
+    per_klatka = {}
+    for r in kopie:
+        per_klatka.setdefault(r["frame_id"], []).append(r)
+    for row in base:
+        rows = per_klatka.get(row.get("frame_id"))
+        if not rows:
+            continue
+        rozne = queries.copy_divergence(rows)
+        row["_copies"] = [{**{k: r[k] for k in r.keys()}, "_rozne": rozne.get(r["location_id"], ())}
+                          for r in rows]
+        liczby = []
+        for r in rows:
+            if r["image_count"] is not None and r["image_count"] not in liczby:
+                liczby.append(r["image_count"])
+        row["_images"] = " | ".join(str(n) for n in liczby)
+
+
+# Kolumna `location` → keyword nagłówka (0021) - do zdania „FILTER=CLS" w podpowiedzi kopii.
+_KOPIA_KEYWORD_KOLUMNA = {kw: kol for kol, kw in COPY_TESTIMONY_KEYWORDS}
+
+
+def _wartosc_zeznania(v):
+    """Wartość pola zeznania kopii do podpowiedzi: brak → „∅" (jak podgląd klingi), liczba
+    zmiennoprzecinkowa bez ogona zer (`1.34`, `300`), reszta tekstem."""
+    if v is None:
+        return "∅"
+    if isinstance(v, float):
+        return f"{v:g}"
+    return str(v)
+
+
+def _dup_tip(row):
+    """Człon podpowiedzi ścieżki dla klatki z KILKOMA obecnymi kopiami: liczba kopii, a pod nią każda
+    kopia - pełna ścieżka, liczba i role obrazów, pola, w których jej zeznanie odbiega od pozostałych
+    (z jej własną wartością). Do 0021 podpowiedź mówiła samo „N obecnych lokalizacji", a baza nie
+    wiedziała, czym kopie się różnią - teraz wie, więc mówi.
+
+    Role pokazujemy, gdy którakolwiek jest znana; pojedynczy obraz bez `imageType` i bez `id` (248
+    plików archiwum) dostaje samą liczbę - lista „(?)" nie niesie informacji. Kopia bez zebranego
+    zeznania mówi to wprost, zamiast milczeć jak kopia zgodna."""
+    tip = i18n.t("grid.tip.dup_locs", n=row["n_present"])
+    for c in row.get("_copies") or ():
+        tip += i18n.t("grid.tip.copy_path", path=c["path"])
+        if c["image_count"] is not None:
+            tip += i18n.t("grid.tip.copy_images", n=c["image_count"])
+            role = json.loads(c["image_roles"]) if c["image_roles"] else []
+            if any(r is not None for r in role):
+                tip += f" ({', '.join('?' if r is None else str(r) for r in role)})"
+        if c["hdr_hash"] is None:
+            tip += i18n.t("grid.tip.copy_unread")
+        elif c["_rozne"]:
+            pola = [i18n.t("grid.tip.copy_field_images") if e == queries.COPY_IMAGES
+                    else f"{e}={_wartosc_zeznania(c[_KOPIA_KEYWORD_KOLUMNA[e]])}"
+                    for e in c["_rozne"]]
+            tip += i18n.t("grid.tip.copy_diff", fields=", ".join(pola))
+    return tip
+
+
+def _chwila(iso):
+    """Znacznik ISO do zdania na ekranie - do MINUT, bez „T" (wzorzec `_vanished_tip`); `None` → None."""
+    return str(iso)[:16].replace("T", " ") if iso else None
+
+
+def _okno(iso):
+    """Brzeg okna stosu do zdania - CO DO SEKUNDY, bo tak stoi w kluczu grupy wersji
+    (`queries._grupy_wersji`): zapis do minut potrafiłby pokazać dwie grupy o oknach różnych
+    o sekundy pod jednakowym opisem. Jeden format dla belki i dla tooltipu komórki."""
+    return str(iso)[:19].replace("T", " ") if iso else "?"
+
+
+def _etykieta_grupy_wersji(grupa):
+    """Nagłówek grupy bliźniaków: obiekt · filtr · ekspozycja · okno - czyli dokładnie klucz, który
+    czyni stosy tym samym materiałem (kamery w nim nie ma: okno co do sekundy już ją przypina)."""
+    exp = grupa["exptime"]
+    return i18n.t("grid.version.group",
+                  object=grupa["object_canon"] or i18n.t("grid.version.no_object"),
+                  filter=grupa["filter_canon"] or i18n.t("portfolio.no_filter"),
+                  exp=f"{exp:g}" if exp is not None else "?",
+                  start=_okno(grupa["window_start"]), end=_okno(grupa["window_end"]))
+
+
+def _adnotuj_wersje(base, grupy):
+    """Dołóż wierszom gridu fakty grupy wersji: `_wersja_grupa` (etykieta belki, klucz grupowania
+    `_GRUPA_WERSJI`) i `_wersja` (fakty członka dla kolumny „Wersja"). Wiersz spoza grup zostaje
+    bez kluczy - grupuje się wtedy do „(brak)", a komórka milczy. Czysta funkcja nad gotowymi
+    danymi (`queries.stack_version_groups`), zero SQL; mutuje dicty `base` w miejscu, jak `_derive`
+    buduje je dla modelu."""
+    fakty = {}
+    for g in grupy:
+        etykieta = _etykieta_grupy_wersji(g)
+        for m in g["members"]:
+            fakty[m["frame_id"]] = (etykieta, {**m, "group_kind": g["kind"],
+                                               "window_start": g["window_start"],
+                                               "window_end": g["window_end"]})
+    for row in base:
+        f = fakty.get(row.get("frame_id"))
+        if f is not None:
+            row["_wersja_grupa"], row["_wersja"] = f
 
 
 class GridTableModel(QAbstractTableModel):
@@ -555,6 +706,7 @@ class GridTableModel(QAbstractTableModel):
         self._numeric_kw = set() # keywordy z choć jedną komórką liczbową → MISSING „—" też prawo (P3-7)
         self._preview = {}       # frame_id → {'keyword','old','new'} | {'skipped': reason} (podgląd makra/renamu)
         self._preview_label = i18n.t("grid.preview.macro")   # etykieta efemerycznej kolumny (klinga-zależna, R1 #4)
+        self._version_col_on = False   # kolumna „Wersja" - wyłącznie w perspektywie „Wersje stosów"
 
     def set_preview(self, preview, *, label=None):
         """Podgląd klingi (doktryna §5: „grid = podgląd"): frame_id → zmiana (stara→nowa) albo
@@ -569,8 +721,14 @@ class GridTableModel(QAbstractTableModel):
     def _preview_active(self):
         return bool(self._preview)
 
-    def set_data(self, base_rows, pivot, keywords, group_by=None):
-        """base_rows: list[dict] (z `_derive`); pivot: horreum.pivot.Pivot; keywords: list[str]."""
+    def set_data(self, base_rows, pivot, keywords, group_by=None, version_col=False):
+        """base_rows: list[dict] (z `_derive`); pivot: horreum.pivot.Pivot; keywords: list[str].
+
+        `version_col` dokłada kolumnę „Wersja" (fakty `_wersja` z `_adnotuj_wersje`) zaraz po
+        kolumnach bazowych (`_version_col`). Kolumna jest własnością perspektywy „Wersje stosów",
+        nie wiersza: te same stosy w „Przeglądzie" niosą fakty (grupowanie „Wersja stosu" działa
+        wszędzie), ale kolumna pojawia się tylko tam, gdzie wybór wersji jest robotą ekranu."""
+        self._version_col_on = bool(version_col)
         cells = {r.frame_id: r.cells for r in pivot.rows}
         for d in base_rows:
             d["cells"] = cells.get(d["frame_id"], {})
@@ -595,11 +753,26 @@ class GridTableModel(QAbstractTableModel):
     def columnCount(self, parent=QModelIndex()):
         if parent.isValid():
             return 0
-        return len(BASE_COLS) + len(self._keywords) + (1 if self._preview_active() else 0)
+        return (len(BASE_COLS) + len(self._keywords) + (1 if self._version_col_on else 0)
+                + (1 if self._preview_active() else 0))
+
+    def _version_col(self):
+        """Indeks kolumny „Wersja" albo None, gdy perspektywa jej nie chce.
+
+        ZARAZ PO KOLUMNACH BAZOWYCH, PRZED KEYWORDAMI - zmierzone zrzutem offscreen na kopii żywej
+        bazy: postawiona za sześcioma domyślnymi keywordami lądowała poza prawą krawędzią okna
+        1400 px, czyli fakty, po które ta perspektywa istnieje, wymagały przewijania w bok."""
+        return len(BASE_COLS) if self._version_col_on else None
+
+    def _kw_off(self):
+        """Przesunięcie kolumn-keywordów o kolumnę „Wersja" (0 poza jej perspektywą)."""
+        return 1 if self._version_col_on else 0
 
     def _preview_col(self):
         """Indeks efemerycznej kolumny podglądu makra (ostatnia) albo None, gdy podgląd nieaktywny."""
-        return len(BASE_COLS) + len(self._keywords) if self._preview_active() else None
+        if not self._preview_active():
+            return None
+        return len(BASE_COLS) + self._kw_off() + len(self._keywords)
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
         if role != Qt.DisplayRole:
@@ -607,16 +780,18 @@ class GridTableModel(QAbstractTableModel):
         if orientation == Qt.Horizontal:
             if section == self._preview_col():
                 return self._preview_label
+            if section == self._version_col():
+                return i18n.t("grid.col.version")
             if section < len(BASE_COLS):
                 return i18n.t(BASE_COLS[section][0])
-            return self._keywords[section - len(BASE_COLS)]
+            return self._keywords[section - len(BASE_COLS) - self._kw_off()]
         return section + 1
 
     def _col_key(self, col):
         return BASE_COLS[col][1] if col < len(BASE_COLS) else None
 
     def _kw_for_col(self, col):
-        return None if col < len(BASE_COLS) else self._keywords[col - len(BASE_COLS)]
+        return None if col < len(BASE_COLS) else self._keywords[col - len(BASE_COLS) - self._kw_off()]
 
     # ---- komórki ----
     def flags(self, index):
@@ -655,9 +830,38 @@ class GridTableModel(QAbstractTableModel):
 
         if col == self._preview_col():
             return self._preview_cell(row, role)
+        if col == self._version_col():
+            return self._version_cell(row, role)
         if col < len(BASE_COLS):
             return self._base_cell(row, self._col_key(col), role)
         return self._kw_cell(row, self._kw_for_col(col), role)
+
+    def _version_cell(self, row, role):
+        """Komórka „Wersja": rodzaj członka · chwila integracji · liczba wejść - fakty, po których
+        człowiek wybiera wersję do zostawienia. Tooltip niesie ŚWIADKA (dlaczego ten rodzaj) i okno.
+
+        Brak faktu MILCZY zamiast udawać: stosy sprzed modułu XISF 1.1.2 nie mają sygnatury, więc
+        nie mają daty integracji - człon po prostu nie staje (data pliku nie jest datą integracji:
+        zapis nagłówka przez Horreum ją przestawia). Rodzaj jest zawsze, bo zawsze jest werdyktem
+        read-modelu, także „nieustalone"."""
+        f = row.get("_wersja")
+        if not f:
+            return None
+        if role == Qt.DisplayRole:
+            czlony = [i18n.t(f"grid.version.kind.{f['kind']}")]
+            if f.get("timestamp"):
+                czlony.append(_chwila(f["timestamp"]))
+            if f.get("declared_rows") is not None:
+                czlony.append(i18n.t_plural("grid.version.inputs", f["declared_rows"]))
+            return " · ".join(czlony)
+        if role == Qt.ToolTipRole:
+            swiadek = f.get("witness")
+            return (i18n.t(f"grid.version.why.{swiadek}" if swiadek else "grid.version.why.none")
+                    + i18n.t("grid.version.window", start=_okno(f.get("window_start")),
+                             end=_okno(f.get("window_end"))))
+        if role == Qt.ForegroundRole and f["kind"] != queries.WERSJA_INNA:
+            return _COLORS["missing"]      # bez dowodu wersji - wyciszone, jak brak karty
+        return None
 
     def _preview_cell(self, row, role):
         """Komórka podglądu makra: dotknięty frame → „stara → nowa" (tooltip pełny); pominięty →
@@ -746,7 +950,7 @@ class GridTableModel(QAbstractTableModel):
                     _retired_back_tip(row) if retired_back else
                     _retired_tip(row) if retired else (
                     _vanished_tip(row) if vanished else (
-                        i18n.t("grid.tip.dup_locs", n=row['n_present']) if dup else "")))
+                        _dup_tip(row) if dup else "")))
                 # Historia przeprowadzki DOKLEJA SIĘ do werdyktu (patrz `_former_tip`), a warunek
                 # `present == 1` jest warunkiem SENSU zdania, nie ostrożnością: pokazany adres musi
                 # być żywy, żeby „wcześniejszy" znaczyło coś innego niż on sam.
@@ -823,8 +1027,15 @@ class GridTableModel(QAbstractTableModel):
 
     def _sort_key(self, row):
         col = self._sort_col
-        if col >= len(BASE_COLS) + len(self._keywords):   # kolumna podglądu makra → sort neutralny
-            return (0, "")
+        if col == self._version_col():
+            # Po CHWILI INTEGRACJI (ISO sortuje się chronologicznie), potem po liczbie wejść;
+            # wiersz bez faktów - na koniec, jak MISSING (kierunek sortu go nie przenosi).
+            f = row.get("_wersja")
+            if not f:
+                return (2, "")
+            return (0, f.get("timestamp") or "", f.get("declared_rows") or 0)
+        if col >= len(BASE_COLS) + self._kw_off() + len(self._keywords):   # podgląd makra / indeks
+            return (0, "")                                   # spoza bieżących kolumn → sort neutralny
         kw = self._kw_for_col(col)
         if kw is None:
             key = self._col_key(col)
@@ -2530,6 +2741,8 @@ class FramesView(QWidget):
                 # listwa pokazywała `object.col.name` zamiast „Obiekt". Znalezione sondą FC-3 na
                 # żywym archiwum: SZEŚĆ z siedmiu pozycji renderowało klucz wewnętrzny.
                 self.combo_group.addItem(i18n.t(label), key)
+        # Grupowanie po GRUPIE WERSJI (perspektywa „Wersje stosów") - pochodna wiersza, nie kolumna.
+        self.combo_group.addItem(i18n.t("grid.top.group_version"), _GRUPA_WERSJI)
         self.combo_group.currentIndexChanged.connect(self._on_group)
         bar.addWidget(self.combo_group)
         bar.addStretch(1)
@@ -2632,6 +2845,22 @@ class FramesView(QWidget):
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.table.horizontalHeader().setStretchLastSection(True)
+        # MENU KONTEKSTOWE TABELI - dom gestu „Zostaw tę wersję" (perspektywa „Wersje stosów").
+        # Nie pasek zbioru: `sel_bar` trzyma już osiem przycisków, a podłoga okna jest mierzona
+        # - dziewiąty poszerzałby ją w KAŻDEJ perspektywie dla gestu, który ma sens w jednej.
+        # Nie menu „Klatka": tamto jest osią żywotności z własnym słownikiem powodów wygaszenia,
+        # a wspólna kontrolka kazałaby jednemu tooltipowi tłumaczyć dwie osie (argument D-OW-6).
+        # Gest działa na JEDNYM wierszu („tę wersję"), więc prawy klik na wierszu jest jego
+        # naturalnym miejscem. Menu powstaje RAZ (wzorzec puli `set_recent_objects`: tworzenie
+        # i kasowanie menu per klik zostawiało sieroty albo odroczone usunięcia), a stan akcji
+        # ustawia `_sync_menu_wersji` tuż przed pokazaniem. Poza tą perspektywą menu się nie
+        # pokazuje - prawy klik zostaje tym, czym był (niczym).
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._on_table_menu)
+        self._menu_wersji = QMenu(self.table)
+        self._menu_wersji.setToolTipsVisible(True)   # powód wygaszenia niesie tooltip POZYCJI
+        self.act_keep_version = self._menu_wersji.addAction(i18n.t("grid.version.keep"))
+        self.act_keep_version.triggered.connect(self._on_keep_version)
         rv.addWidget(self.table, 1)   # stretch: nadmiar pionu należy do TABELI, nie do panelu (N1)
 
         # PUSTY STAN = ZDANIE + GEST (FH-4). `self.empty` zostaje etykietą z tekstem (kontrakt testów
@@ -3690,6 +3919,12 @@ class FramesView(QWidget):
         self.refresh()
 
     def _on_group(self):
+        # Grupa wersji jest pochodną liczoną w `_refresh` tylko wtedy, gdy ktoś o nią pyta
+        # (`_potrzebne_wersje`) - wybór tej pozycji musi więc przeładować zbiór, inaczej każdy
+        # wiersz wylądowałby w „(brak)". Pozostałe klucze model przegrupowuje sam, bez SQL.
+        if self.combo_group.currentData() == _GRUPA_WERSJI:
+            self.refresh()
+            return
         self.model.set_group_by(self.combo_group.currentData())
 
     # ---- odczyt → widok ----
@@ -3746,12 +3981,25 @@ class FramesView(QWidget):
         for trim in trims:
             frame_ids = frame_ids & trim
         base = [_derive(r) for r in queries.base_rows(self.con, list(frame_ids))]
+        if self._potrzebne_wersje():
+            _adnotuj_wersje(base, queries.stack_version_groups(self.con))
+        # Fakty KOPII (0021) - pytamy wyłącznie o klatki z kilkoma obecnymi kopiami: kolumna
+        # „Obrazy" i podpowiedź „×N" potrzebują wtedy każdej kopii, a reszta archiwum ma jedną
+        # i jej liczbę niesie już `base_rows`. Wąskie zapytanie zamiast podzapytania na 16 tys. wierszy.
+        _dolacz_kopie(base, queries.present_copy_facts(
+            self.con, [b["frame_id"] for b in base if (b.get("n_present") or 0) > 1]))
         base_ids = [b["frame_id"] for b in base]
         self._frame_ids = base_ids     # cel makra = to, co WIDAĆ (po filtrach dups/review), doktryna §5
         keywords = list(self._columns)
         rows = queries.cards_pivot(self.con, base_ids, keywords) if (base_ids and keywords) else []
         pv = pivot_mod.build_pivot(base_ids, keywords, rows)
-        self.model.set_data(base, pv, keywords, group_by=self.combo_group.currentData())
+        self.model.set_data(base, pv, keywords, group_by=self.combo_group.currentData(),
+                            version_col=self._perspektywa_wersji())
+        if self.model._version_col() is not None:
+            # Domyślne 100 px elidowało „inna integracja · 2026-02-21 12:43 · 33 wejścia", czyli
+            # właśnie te fakty, po które perspektywa istnieje. Koszt znikomy: perspektywa ma na
+            # kopii żywego archiwum 40 stosów (2026-09-26).
+            self.table.resizeColumnToContents(self.model._version_col())
         # CEL OSTATNIEGO GESTU WRACA RAZEM ZE ZBIOREM (FC-2, firsthand). Recepta powrotu odsłania
         # zbiór, ale sama nie ODNAJDUJE w nim celu: zmierzone na żywym archiwum - po wykonaniu
         # recepty widok miał 16 901 wierszy, zaznaczenie 0 i wygaszoną kontrolkę, więc 43 klatki
@@ -4001,6 +4249,84 @@ class FramesView(QWidget):
         # bywa jedynym śladem, że gest się odbył.
         self.status_message.emit(msg)
         self.status_recipe.emit(recepta)
+
+    # ---- WERSJE STOSÓW (perspektywa „Wersje stosów") ----
+
+    def _perspektywa_wersji(self):
+        """Czy widok stoi w perspektywie „Wersje stosów" - flaga z `_TRIMY` pod stałą `_FLAGA_WERSJI`."""
+        return bool(getattr(self, _FLAGA_WERSJI))
+
+    def _potrzebne_wersje(self):
+        """Czy przeładowanie ma policzyć grupy wersji - tylko gdy ktoś o nie pyta: perspektywa
+        (kolumna „Wersja") albo grupowanie „Wersja stosu". Poza tym `_refresh` nie płaci za read-model
+        (zmierzone 17 ms na 193 stosach żywego archiwum, przy każdym kliknięciu w listwie)."""
+        return self._perspektywa_wersji() or self.combo_group.currentData() == _GRUPA_WERSJI
+
+    def _on_table_menu(self, pos):
+        """Prawy klik na tabeli: w perspektywie „Wersje stosów" menu z gestem „Zostaw tę wersję".
+
+        Wiersz pod kursorem, którego nie ma w zaznaczeniu, staje się zaznaczeniem - konwencja
+        platformy, a zarazem jedyny sposób, żeby „tę" wskazywało to, na co człowiek kliknął.
+        Kliknięcie W zaznaczenie zostawia je, jak jest: przy kilku zaznaczonych gest odmówi
+        z powodem w tooltipie pozycji, zamiast po cichu wybrać jeden z nich."""
+        if not self._perspektywa_wersji():
+            return
+        idx = self.table.indexAt(pos)
+        sm = self.table.selectionModel()
+        if idx.isValid() and sm is not None and not sm.isRowSelected(idx.row(), QModelIndex()):
+            self.table.selectRow(idx.row())
+        self._sync_menu_wersji()
+        # `popup`, nie `exec`: menu nie trzyma własnej pętli zdarzeń, a wybór i tak dochodzi
+        # sygnałem `triggered`. Blokujący `exec` zawiesza każdy przebieg bez człowieka przy myszy.
+        self._menu_wersji.popup(self.table.viewport().mapToGlobal(pos))
+
+    def _sync_menu_wersji(self):
+        """Uczciwy disabled gestu „Zostaw tę wersję" - z planu liczonego w chwili pokazania menu.
+
+        Pozycja żyje wyłącznie wtedy, gdy jest co skopiować: dokładnie jeden zaznaczony stos, który
+        ma w grupie co najmniej jedną wersję z dowodem odrębności względem siebie. Tooltip mówi, ile
+        ścieżek pójdzie do schowka - tę samą liczbę, którą potwierdzi pasek po geście - albo
+        dlaczego nie ma czego kopiować."""
+        wiersze = self._selected_data_rows()
+        plan = (queries.keep_version_plan(self.con, wiersze[0]["frame_id"])
+                if len(wiersze) == 1 else None)
+        if len(wiersze) != 1:
+            self.act_keep_version.setEnabled(False)
+            self.act_keep_version.setToolTip(i18n.t("grid.version.select_one"))
+        elif not plan or not plan["paths"]:
+            self.act_keep_version.setEnabled(False)
+            self.act_keep_version.setToolTip(i18n.t("grid.version.nothing"))
+        else:
+            self.act_keep_version.setEnabled(True)
+            self.act_keep_version.setToolTip(
+                i18n.t_plural("grid.version.keep_tip", len(plan["paths"])))
+
+    def _on_keep_version(self):
+        """„Zostaw tę wersję": ścieżki obecnych kopii POZOSTAŁYCH wersji grupy idą do schowka,
+        a pasek mówi, ile ich skopiowano. BEZ ZAPISU - Horreum niczego nie kasuje ani nie przenosi:
+        usuwa człowiek, poza programem, a skan po usunięciu zdejmie grupę z tej listy (predykat
+        wymaga obecnej kopii). Dlatego gest nie woła `stan_porzadkow_changed`: stan bazy się nie
+        zmienił.
+
+        Plan liczony OD NOWA w chwili gestu, nie wzięty z menu - między pokazaniem a kliknięciem
+        mógł przejść skan. Do schowka trafiają wyłącznie stosy z DOWODEM odrębności względem
+        zostawianego (`queries.keep_version_plan`); pochodne tej wersji i członkowie bez dowodu
+        zostają, a zdanie liczy tych drugich, żeby cisza schowka o nich nie udawała, że ich nie ma.
+        Separator `\\n` - Qt zamienia go w schowku Windows na CRLF."""
+        wiersze = self._selected_data_rows()
+        if len(wiersze) != 1:
+            self.status_message.emit(i18n.t("grid.version.select_one"))
+            return
+        plan = queries.keep_version_plan(self.con, wiersze[0]["frame_id"])
+        if not plan or not plan["paths"]:
+            self.status_message.emit(i18n.t("grid.version.nothing"))
+            return
+        QGuiApplication.clipboard().setText("\n".join(plan["paths"]))
+        msg = (i18n.t_plural("grid.version.copied", len(plan["paths"]))
+               + i18n.t_plural("grid.version.copied_stacks", plan["stacks"]))
+        if plan["unknown"]:
+            msg += i18n.t("grid.version.skipped_unknown", n=plan["unknown"])
+        self.status_message.emit(msg + i18n.t("grid.version.no_delete"))
 
     # ---- panel inspekcji daty (G1/G4 — RenameBar) ----
     def _selected_data_rows(self):

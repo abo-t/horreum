@@ -761,9 +761,6 @@ class ConfirmPathObjectsDialog(QDialog):
 # WBPP/PixInsight dalej nie wiedzą, czym jest klatka, a każda przyszła baza z tego drzewa wymagałaby
 # powtórzenia decyzji (D-PD-1).
 
-_OBJECT_CARD_MAX = 68     # rekord nagłówka FITS: powyżej astropy wchodzi w CONTINUE (nagłówek ASCII)
-
-
 # ZEJŚCIE DWÓCH REGUŁ ŚCIEŻKI DO JEDNEJ (S2, D-OW-2 pkt 6b). Do S2 ten plik miał WŁASNĄ regułę
 # ścieżki — literał `LIGHTS` zamiast markera rodzaju i `catalog_canon` zamiast drabiny nazwy — więc
 # ekran i baza odpowiadały RÓŻNIE na to samo pytanie: przebieg nazywał `LMC` i `_SOLAR\Moon`,
@@ -780,9 +777,11 @@ def _validate_object_value(con, text):
     się o białe znaki. Forma jest PRZED `xref` (D-PD-9): zapis po `xref` przepisywałby konwencję
     użytkownika w JEGO plikach (folder `M82` → karta `NGC3034`).
 
-    Bramki odmowy (zero zapisu): pusto po `strip()`; nie-ASCII (nagłówek FITS jest ASCII);
-    dłuższe niż rekord. Bez nich taki kanon padłby dopiero w `writeto` i wrócił jako 'failed'
-    („coś się zepsuło") zamiast czystej odmowy. CZWARTA bramka — nazwa NIEROZPOZNAWALNA przez
+    Bramki odmowy (zero zapisu): pusto po `strip()`; REGUŁY KARTY FITS - znak spoza drukowalnego
+    ASCII albo wartość dłuższa niż rekord. Te drugie pyta `writeback.card_violation`, czyli TEN
+    SAM właściciel, który odmówi przy zapisie (SPOT): dialog mówi tylko wcześniej i własnym językiem
+    (i18n), nie inną regułą. Bez tego taki kanon padłby dopiero w pisarzu jako 'blocked' po commicie
+    zamiast odmowy przed nim. CZWARTA bramka - nazwa NIEROZPOZNAWALNA przez
     resolver — jest dodana ponad brief świadomie: cały wariant C stoi na tym, że po zapisie oś
     wypełni się sama, a nazwa, której przebieg nie zna, przeniosłaby klatkę tylko z kubełka
     „bez nazwy" do „nierozpoznane" — po nieodwracalnej mutacji pliku.
@@ -794,10 +793,16 @@ def _validate_object_value(con, text):
     if not raw:
         return None, i18n.t("repair.err.empty")
     value = catalog_canon(raw) or raw
-    if not value.isascii():
-        return None, i18n.t("repair.err.ascii", text=value)
-    if len(value) > _OBJECT_CARD_MAX:
-        return None, i18n.t("repair.err.too_long", n=len(value), max=_OBJECT_CARD_MAX)
+    # Lazy jak `wb_worker` w dialogu: `writeback` ciągnie astropy, a dialog, który tu pyta, i tak
+    # już go załadował. Dialog zapisuje kartę przez `add` - stąd `new_card=True`.
+    from horreum import writeback
+    naruszenie = writeback.card_violation("OBJECT", value, new_card=True)
+    if naruszenie is not None:
+        if naruszenie.kind == "length":
+            return None, i18n.t("repair.err.too_long", n=naruszenie.length, max=naruszenie.limit)
+        if naruszenie.kind == "chars":
+            return None, i18n.t("repair.err.ascii", text=value)
+        return None, naruszenie.reason          # nazwa: nieosiągalne dla stałej `OBJECT`
     if not resolver.name_resolves(con, value):
         return None, i18n.t("repair.err.unresolvable", text=raw)
     return value, None

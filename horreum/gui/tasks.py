@@ -30,8 +30,10 @@ from horreum.gui import i18n, queries, rows, theme
 from horreum.gui.app import (
     ObjectAxisView, ObservatoryAxisView, TelescopeAxisView, _utc_now_iso,
 )
-from horreum.gui.grid import (PRESET_DUPS, PRESET_LINEAGE, PRESET_MISSING_COPY, PRESET_RETIRED,
-                              PRESET_RETIRED_CONFLICT, PRESET_SUPERSEDED, PRESET_VANISHED)
+from horreum.gui.grid import (PRESET_COPY_CONFLICT, PRESET_DUPS, PRESET_LINEAGE,
+                              PRESET_MISSING_COPY, PRESET_RETIRED,
+                              PRESET_RETIRED_CONFLICT, PRESET_STACK_VERSIONS, PRESET_SUPERSEDED,
+                              PRESET_VANISHED)
 from horreum.gui.rows import TwoPartDelegate
 
 # Definicja listy zadań: (klucz stanu z `tasks_state`, etykieta, akcja). Akcja: numer podstrony
@@ -78,6 +80,13 @@ _TASKS = [
     ("telescopes_unlabeled", "tasks.telescopes_unlabeled", _PAGE_TELESCOPE),
     ("observatories_unnamed", "tasks.observatories_unnamed", _PAGE_OBSERVATORY),
     ("dup_frames", "tasks.dup_frames", PRESET_DUPS),
+    # Wiersz AKCYJNY i ROBOTA (0021) - świadomie POZA `_BEZ_ROBOTY`, inaczej niż sąsiad „Wersje
+    # stosów". Tam dwie wersje to dwa prawowite obrazy i „zostawiam obie" jest odpowiedzią; tu dwie
+    # kopie JEDNEJ klatki mówią sprzeczne rzeczy (inny FILTER, inna liczba obrazów), a oś klatki
+    # pokazuje zeznanie tej, która wygrała w `header` - więc jedna z nich wprowadza w błąd i ktoś
+    # musi rozstrzygnąć, która. Stoi pod „Duplikatami", bo jest ich podzbiorem. Liczba i lista
+    # czytają jeden predykat (`queries.copy_conflict_frame_ids`).
+    ("copy_conflict_frames", "tasks.copy_conflict_frames", PRESET_COPY_CONFLICT),
     ("vanished_frames", "tasks.vanished_frames", PRESET_VANISHED),
     # Wiersz INFORMACYJNY, nie zadanie: klatka zastąpiona nie ma czego wymagać od użytkownika —
     # treść przejęła następczyni. Stoi tu, bo od 0809 wypadła z WSZYSTKICH kubełków kolejki
@@ -101,6 +110,13 @@ _TASKS = [
     # pali. Stoi na liscie, bo po naprawie D-V-9 ten fakt widac bylo wylacznie pod kursorem,
     # jeden wiersz naraz - a dotyczy 128 gotowych obrazow.
     ("missing_copy_frames", "tasks.missing_copy_frames", PRESET_MISSING_COPY),
+    # Wiersz KLIKALNY, ALE NIE ROBOTA - czwarty w `_BEZ_ROBOTY`. Wersje stosów to decyzja, którą
+    # człowiek ma prawo podjąć „zostawiam obie" i nigdy do niej nie wracać, a Horreum nie ma
+    # werdyktu, który by ten wybór zapisał: jedyną drogą do zera jest skasowanie pliku poza
+    # programem. Wiersz liczony do plakietki świeciłby więc wiecznie - dokładnie ten szum, który
+    # `_BEZ_ROBOTY` zdejmuje z historii. Liczba i lista czytają jeden predykat
+    # (`queries.stack_version_frame_ids`).
+    ("stack_versions", "tasks.stack_versions", PRESET_STACK_VERSIONS),
 ]
 
 # TRZECI STAN WIERSZA: KLIKALNY, ALE NIE ROBOTA. Do 0809 lista znała dwa — informacyjny (cel `None`,
@@ -110,7 +126,8 @@ _TASKS = [
 # drzwiami odtwarzał dokładnie ten defekt, który pakiet kolejki wyleczył w kubełkach (bramka 3a
 # 0809, zarzut `kimi` #4). Klucz, nie flaga w krotce: krotka opisuje POZYCJĘ, a to jest fakt o jej
 # NATURZE, i tak samo czyta go badge, jak i pogrubienie.
-_BEZ_ROBOTY = frozenset({"superseded_frames", "retired_frames", "missing_copy_frames"})
+_BEZ_ROBOTY = frozenset({"superseded_frames", "retired_frames", "missing_copy_frames",
+                         "stack_versions"})
 
 
 class TasksView(QWidget):

@@ -38,3 +38,35 @@ def extract_header(header):
         "dec_deg": _to_float(g("DEC")),            # stopnie dziesiętne (DEC, nie OBJCTDEC); 0 = wartość
         "object_raw": _to_text(g("OBJECT")),       # "plotka" — resolver obiektu §Etap 6
     }
+
+
+# ZEZNANIE KOPII (migracja 0021): kolumna `location` → keyword nagłówka, w kolejności pokazywania.
+# Jedno źródło dla zapisu (`copy_testimony`) i dla powierzchni, która nazywa rozbieżne pole
+# nazwą z pliku (`FILTER`, nie `hdr_filter`) - nazwa keyworda jest faktem domenowym, nie etykietą UI.
+# Dobór pól i powód („karmią oś klatki albo wybór po wartości") - w nagłówku migracji 0021.
+COPY_TESTIMONY_KEYWORDS = (
+    ("hdr_filter", "FILTER"), ("hdr_imagetyp", "IMAGETYP"), ("hdr_object", "OBJECT"),
+    ("hdr_telescop", "TELESCOP"), ("hdr_instrume", "INSTRUME"), ("hdr_exptime", "EXPTIME"),
+    ("hdr_xbinning", "XBINNING"), ("hdr_date_obs", "DATE-OBS"),
+)
+
+
+def copy_testimony(header):
+    """Nagłówek JEDNEJ KOPII (dict ze skanu) → dict pól `hdr_*` na `location` (0021).
+
+    Koercja NIE jest tu pisana drugi raz: siedem z ośmiu pól bierzemy z `extract_header`, czyli z TEJ
+    SAMEJ derywacji, która karmi `header` klatki - inaczej zeznanie kopii i zeznanie klatki mogłyby
+    różnić się samym rzutem (XISF-owy tekst `'1.34'` obok FITS-owego `1.34`) i porównanie kopii
+    widziałoby rozjazd, którego w plikach nie ma. `IMAGETYP` nie jest polem gorącym `header` (rodzaj
+    klatki liczy `normalize_kind`), więc dostaje ten sam rzut tekstowy, co pozostałe pola tekstowe."""
+    hot = extract_header(header)
+    return {
+        "hdr_filter": hot["filter_raw"],
+        "hdr_imagetyp": _to_text(header.get("IMAGETYP")),
+        "hdr_object": hot["object_raw"],
+        "hdr_telescop": hot["telescop"],
+        "hdr_instrume": hot["instrume"],
+        "hdr_exptime": hot["exptime"],
+        "hdr_xbinning": hot["xbinning"],
+        "hdr_date_obs": hot["date_obs"],
+    }

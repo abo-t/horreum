@@ -151,21 +151,45 @@ def upsert_frame(con, *, sha1_data, sha1_data_uncomputable=0, kind, filetype, ca
     return frame_id, True
 
 
+# FAKTY KOPII Z JEJ NAGŁÓWKA (0021) - kolumny `location` w kolejności literałów SQL tego modułu.
+# Słownik `copy_facts` (skład: `scan.copy_header_facts`) niesie DOKŁADNIE te klucze: literał SQL
+# wymienia kolumny po nazwie, więc brak klucza byłby cichym NULL-em, a nadmiar - zgubionym faktem.
+# `hdr_hash` jest KOTWICĄ (CHECK 0021: NULL albo `== header_hash`) - opis w nagłówku migracji.
+COPY_FACTS = ("image_count", "image_roles", "hdr_filter", "hdr_imagetyp", "hdr_object",
+              "hdr_telescop", "hdr_instrume", "hdr_exptime", "hdr_xbinning", "hdr_date_obs",
+              "hdr_hash")
+
+
+def _copy_facts_checked(copy_facts):
+    """EXPECT na kształcie słownika faktów kopii - jeden strażnik dla trzech pisarzy (dodanie,
+    odświeżenie, uzupełnienie). Zwraca słownik z kompletem kluczy; `None` → same NULL-e."""
+    if copy_facts is None:
+        return dict.fromkeys(COPY_FACTS)
+    if set(copy_facts) != set(COPY_FACTS):
+        raise ValueError(f"fakty kopii: klucze {sorted(copy_facts)} != {sorted(COPY_FACTS)}")
+    return copy_facts
+
+
 def add_location(con, *, frame_id, volume, path, drive_letter=None, tier=None, mtime=None,
                  file_sha1=None, header_hash=None, hdu_index=None, compressed=None,
-                 size_bytes=None, now, actor="scan"):
+                 size_bytes=None, copy_facts=None, now, actor="scan"):
     """Dołóż lokalizację frame'a po `UNIQUE(volume, path)` wraz z faktami KOPII (file_sha1/
     header_hash/hdu_index/compressed/size_bytes — brief §2; `hdu_index`/`compressed` NULL dla XISF,
     wszystkie odciski NULL przy W1). Już znana →
     (id, False) bez eventu i BEZ dotykania faktów (odświeżenie = `refresh_location`, osobny
     kontrakt). Nowa → INSERT + `event(location.added)`; (id, True). `volume` = trwały
     identyfikator wolumenu; placeholder '?' NIE blokuje skanu (to nie tożsamość frame'a, §7.5).
-    `drive_letter` to efemeryczny cache wyświetlania."""
+    `drive_letter` to efemeryczny cache wyświetlania.
+
+    `copy_facts` (0021) - fakty z nagłówka TEJ kopii (klucze `COPY_FACTS`); `None` = nie zebrane
+    (kolumny NULL, kopię dobierze uzupełnienie). Kotwica `hdr_hash` musi równać się `header_hash`
+    - pilnuje tego CHECK w bazie, nie ten kod."""
     row = con.execute(
         "SELECT id FROM location WHERE volume = ? AND path = ?", (volume, path)).fetchone()
     if row is not None:
         return row[0], False
 
+    cf = _copy_facts_checked(copy_facts)
     with con:  # atomowo: INSERT location + INSERT event
         # FORWARD-GUARD (#13): `unreadable_since` NIE ustawiane tu — DEFAULT NULL (czytelna do
         # dowodu). Ścieżka NIEZNANA-nieczytelna ma już ślad w STANIE: frame-szkielet bez `header`
@@ -176,10 +200,13 @@ def add_location(con, *, frame_id, volume, path, drive_letter=None, tier=None, m
         # przy bramie ON pominie ją (marker NULL → brama skipuje). Issue zakresuje #13 do re-odczytu, nie tu.
         cur = con.execute(
             "INSERT INTO location(frame_id, volume, drive_letter, path, tier, mtime, "
-            "file_sha1, header_hash, hdu_index, compressed, size_bytes, last_verified_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "file_sha1, header_hash, hdu_index, compressed, size_bytes, last_verified_at, "
+            "image_count, image_roles, hdr_filter, hdr_imagetyp, hdr_object, hdr_telescop, "
+            "hdr_instrume, hdr_exptime, hdr_xbinning, hdr_date_obs, hdr_hash) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (frame_id, volume, drive_letter, path, tier, mtime,
-             file_sha1, header_hash, hdu_index, compressed, size_bytes, now),
+             file_sha1, header_hash, hdu_index, compressed, size_bytes, now,
+             *(cf[k] for k in COPY_FACTS)),
         )
         location_id = cur.lastrowid
         emit_event(
@@ -200,8 +227,12 @@ def add_location(con, *, frame_id, volume, path, drive_letter=None, tier=None, m
 # SPOT: każda nazwa z tej krotki MUSI występować w literale UPDATE niżej (pinuje test strukturalny
 # `test_presence.py::test_location_facts_pokrywaja_update`) — inaczej diff wykrywa zmianę, której
 # UPDATE nie zapisuje, i event leci w nieskończoność co skan.
+# `COPY_FACTS` TU (0021): liczba/role obrazów i zeznanie nagłówka kopii są faktami KOPII jak odcisk
+# nagłówka - ich przejście idzie do tego samego payloadu `location.refreshed`, a zmiana odcisku
+# i zmiana faktów lecą JEDNYM UPDATE-em (kotwica `hdr_hash == header_hash`, CHECK 0021).
 _LOCATION_FACTS = ("mtime", "file_sha1", "header_hash", "hdu_index", "compressed", "size_bytes",
-                   "unreadable_since", "unreadable_kind", "unreadable_reason", "present")
+                   "unreadable_since", "unreadable_kind", "unreadable_reason", "present",
+                   *COPY_FACTS)
 
 
 def rebind_location(con, *, location_id, frame_after, now, actor="scan"):
@@ -650,7 +681,7 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
                      hdu_index, compressed, size_bytes, unreadable_since, unreadable_kind,
                      unreadable_reason, present, now,
                      actor="scan", raw_json=None, cards=None, hot_fields=None, camera_id=None,
-                     kind=None):
+                     kind=None, copy_facts=None):
     """Re-odczyt ZNANEJ `(volume, path)` o NIEZMIENIONEJ tożsamości frame'a — kontrakt pełny
     brief §2 (R1#10 + R2#2/#7 + R3-b), domyka dług „mtime po re-odczycie nieaktualizowany":
 
@@ -682,6 +713,11 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
       Domyślnej wartości NIE dodawać: przesłanka „każdy wołający właśnie czytał plik" jest prawdziwa
       przez przypadek, nie przez kontrakt (`import_fitsmirror` karmi `ingest_record` z cache'u dawcy).
       Zdejmowanie obecności (1→0) NIE należy tu — to `mark_location_vanished` (dowód nieobecności).
+    - **`copy_facts` (0021)**: liczba/role obrazów i zeznanie nagłówka TEJ kopii (klucze `COPY_FACTS`)
+      - wołający, który przeczytał plik, podaje je zawsze (także same NULL-e przy nagłówku
+      nieczytelnym). `None` znaczy „faktów kopii NIE czytałem" i zostawia je, jakie są - to NIE jest
+      cichy wektor zwietrzenia, bo kotwica `hdr_hash == header_hash` (CHECK 0021) odbija zmianę
+      odcisku nagłówka bez odświeżenia faktów IntegrityError-em.
 
     `hot_fields` = dict kolumn `header` (jak `extract_header`); `camera_id`/`kind` = pochodne
     POLICZONE przez wołającego z nowego dictu (emergencja kamery = osobny, idempotentny
@@ -693,14 +729,19 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
              "hdu_index": hdu_index, "compressed": compressed, "size_bytes": size_bytes,
              "unreadable_since": unreadable_since, "unreadable_kind": unreadable_kind,
              "unreadable_reason": unreadable_reason, "present": present}
+    cf = None if copy_facts is None else _copy_facts_checked(copy_facts)
     result = {"facts": False, "header": False, "rederived": False}
     with _immediate(con):
         row = con.execute(
             "SELECT mtime, file_sha1, header_hash, hdu_index, compressed, size_bytes, "
-            "unreadable_since, unreadable_kind, unreadable_reason, present "
+            "unreadable_since, unreadable_kind, unreadable_reason, present, "
+            "image_count, image_roles, hdr_filter, hdr_imagetyp, hdr_object, hdr_telescop, "
+            "hdr_instrume, hdr_exptime, hdr_xbinning, hdr_date_obs, hdr_hash "
             "FROM location WHERE id = ?", (location_id,)).fetchone()
         if row is None:
             raise ValueError(f"location:{location_id} nie istnieje")
+        # Faktów kopii nieczytanych (`None`) nie ruszamy: zostają wartościami z wiersza.
+        after.update(cf if cf is not None else {k: row[k] for k in COPY_FACTS})
         changed = {k: {"before": row[k], "after": after[k]}
                    for k in _LOCATION_FACTS if row[k] != after[k]}
         if not changed:
@@ -708,9 +749,13 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
         con.execute(
             "UPDATE location SET mtime = ?, file_sha1 = ?, header_hash = ?, hdu_index = ?, "
             "compressed = ?, size_bytes = ?, unreadable_since = ?, unreadable_kind = ?, "
-            "unreadable_reason = ?, present = ?, last_verified_at = ? WHERE id = ?",
+            "unreadable_reason = ?, present = ?, last_verified_at = ?, "
+            "image_count = ?, image_roles = ?, hdr_filter = ?, hdr_imagetyp = ?, hdr_object = ?, "
+            "hdr_telescop = ?, hdr_instrume = ?, hdr_exptime = ?, hdr_xbinning = ?, "
+            "hdr_date_obs = ?, hdr_hash = ? WHERE id = ?",
             (mtime, file_sha1, header_hash, hdu_index, compressed, size_bytes, unreadable_since,
-             unreadable_kind, unreadable_reason, present, now, location_id))
+             unreadable_kind, unreadable_reason, present, now,
+             *(after[k] for k in COPY_FACTS), location_id))
         emit_event(con, actor=actor, verb="location.refreshed",
                    target=f"location:{location_id}", now=now, payload=changed)
         result["facts"] = True
@@ -757,6 +802,48 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
                                 "after": {"camera_id": camera_id, "kind": kind}})
             result["rederived"] = True
     return result
+
+
+def record_copy_facts(con, *, location_id, copy_facts, now, actor="backfill:copies"):
+    """UZUPEŁNIENIE faktów kopii z jej nagłówka (0021) dla wiersza sprzed migracji - droga
+    `scan.backfill_copy_facts`, która czyta SAM nagłówek pliku, bez haszowania całości (550 plików
+    XISF to 108,9 GB treści, a nagłówki czytają się w sekundy).
+
+    DWIE KOTWICE W JEDNYM WARUNKU (CAS pod `BEGIN IMMEDIATE`): zapis zachodzi wyłącznie, gdy
+      * odcisk przeczytanego nagłówka (`copy_facts['hdr_hash']`) jest równy `header_hash` wiersza -
+        plik niesie DOKŁADNIE ten nagłówek, który baza zna. Inny odcisk znaczy, że kopia zmieniła się
+        na dysku od ostatniego skanu; wtedy fakty należą do skanu, który odświeży też `header`
+        klatki, `cards` i pochodne - uzupełnienie nie ma prawa go wyprzedzić częściową prawdą;
+      * `hdr_hash IS NULL` - faktów jeszcze nie ma. Uzupełnienie nie nadpisuje tego, co zebrał skan.
+    Ta sama para chroni przed wyścigiem z równoległym skanem (WAL - GUI i CLI naraz).
+
+    Ślad: `location.refreshed` z `{pole: {before, after}}` - ten sam kształt, którym `refresh_location`
+    opisuje każdą inną zmianę faktów kopii, a `actor` odróżnia drogę w dzienniku.
+
+    ZWRACA bool: `True` = zapisano; `False` = odmowa kotwicy (odcisk inny albo fakty już są) - wtedy
+    ZERO UPDATE i ZERO eventu."""
+    cf = _copy_facts_checked(copy_facts)
+    if cf["hdr_hash"] is None:
+        raise ValueError("uzupełnienie faktów kopii bez odcisku nagłówka - nie ma czego kotwiczyć")
+    with _immediate(con):
+        row = con.execute(
+            "SELECT header_hash, image_count, image_roles, hdr_filter, hdr_imagetyp, hdr_object, "
+            "hdr_telescop, hdr_instrume, hdr_exptime, hdr_xbinning, hdr_date_obs, hdr_hash "
+            "FROM location WHERE id = ?", (location_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"location:{location_id} nie istnieje")
+        if row["hdr_hash"] is not None or row["header_hash"] != cf["hdr_hash"]:
+            return False
+        changed = {k: {"before": row[k], "after": cf[k]} for k in COPY_FACTS if row[k] != cf[k]}
+        con.execute(
+            "UPDATE location SET image_count = ?, image_roles = ?, hdr_filter = ?, "
+            "hdr_imagetyp = ?, hdr_object = ?, hdr_telescop = ?, hdr_instrume = ?, "
+            "hdr_exptime = ?, hdr_xbinning = ?, hdr_date_obs = ?, hdr_hash = ? "
+            "WHERE id = ? AND hdr_hash IS NULL AND header_hash = ?",
+            (*(cf[k] for k in COPY_FACTS), location_id, cf["hdr_hash"]))
+        emit_event(con, actor=actor, verb="location.refreshed",
+                   target=f"location:{location_id}", now=now, payload=changed)
+    return True
 
 
 # Prefiks powodu w dzienniku przy oznaczeniu kopii (#13) - JEDEN właściciel frazy. Od P4-2 żyje

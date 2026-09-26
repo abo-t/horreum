@@ -93,15 +93,84 @@ def test_szkielet_przyszly_pusty(tmp_path):
     con.close()
 
 
-def test_user_version_v20_po_migracji(tmp_path):
-    """0020 podnosi user_version do 20 (świeża baza leci 0002→…→0020 sekwencyjnie; uwaga
-    `integration.raw_unreferenced` obok werdyktu rodowodu, G2-1d).
+def test_user_version_v21_po_migracji(tmp_path):
+    """0021 podnosi user_version do 21 (świeża baza leci 0002→…→0021 sekwencyjnie; fakty kopii
+    z jej nagłówka na `location` - liczba i role obrazów, zeznanie pól osi, kotwica `hdr_hash`).
 
     Pin JEST intencją: każda nowa migracja ma ten test PRZEWRÓCIĆ imiennie, żeby podniesienie
     wersji było gestem, a nie skutkiem ubocznym."""
     con = db.open_db(str(tmp_path / "h.db"))
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 20
-    assert db.SCHEMA_VERSION == 20
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 21
+    assert db.SCHEMA_VERSION == 21
+    con.close()
+
+
+def _loc_0021(con, lid, header_hash="hh"):
+    """Klatka + kopia z zadanym odciskiem nagłówka - surowy INSERT, bo test pyta BAZĘ, nie klingę."""
+    con.execute("INSERT INTO frame(id, kind, filetype, sha1_data, first_seen_at) "
+                "VALUES (?, 'master_flat', 'xisf', ?, '2026-09-26T00:00:00Z')", (lid, f"s{lid}"))
+    con.execute("INSERT INTO location(id, frame_id, volume, path, header_hash) "
+                "VALUES (?, ?, 'V', ?, ?)", (lid, lid, f"/a/{lid}.xisf", header_hash))
+
+
+def test_0021_CHECK_kotwica_i_para_obrazow(tmp_path):
+    """STRAŻNIKI W DDL (0021): fakty kopii opisują nagłówek o odcisku `hdr_hash`, więc
+      * kotwica różna od `header_hash` wiersza jest sprzecznością - pisarz, który zmieni odcisk
+        kopii i nie odświeży jej faktów, dostaje IntegrityError zamiast cichej nieprawdy;
+      * fakt bez kotwicy jest sprzecznością (wzorzec 0019);
+      * liczba obrazów i lista ról występują RAZEM, a długość listy = liczba;
+      * pola liczbowe nie przyjmą tekstu (ostatnia bramka W3).
+    Kolumny wchodzą przez `ADD COLUMN`, więc test dowodzi, że SQLite realnie egzekwuje te CHECK-i.
+
+    Falsyfikator: zdejmij którykolwiek `CHECK` z `0021_location_copy_facts.sql` → odpowiadający mu
+    `raises` czerwienieje."""
+    con = db.open_db(str(tmp_path / "h.db"))
+    _loc_0021(con, 1)
+    _loc_0021(con, 2, header_hash=None)
+    with pytest.raises(sqlite3.IntegrityError):              # kotwica cudzego nagłówka
+        con.execute("UPDATE location SET hdr_hash = 'inny' WHERE id = 1")
+    with pytest.raises(sqlite3.IntegrityError):              # fakt bez kotwicy
+        con.execute("UPDATE location SET hdr_filter = 'Ha' WHERE id = 1")
+    with pytest.raises(sqlite3.IntegrityError):              # liczba bez listy
+        con.execute("UPDATE location SET hdr_hash = 'hh', image_count = 2 WHERE id = 1")
+    with pytest.raises(sqlite3.IntegrityError):              # lista krótsza niż liczba
+        con.execute("UPDATE location SET hdr_hash = 'hh', image_count = 2, "
+                    "image_roles = '[\"integration\"]' WHERE id = 1")
+    with pytest.raises(sqlite3.IntegrityError):              # lista, która nie jest tablicą
+        con.execute("UPDATE location SET hdr_hash = 'hh', image_count = 1, "
+                    "image_roles = '\"integration\"' WHERE id = 1")
+    with pytest.raises(sqlite3.IntegrityError):              # tekst w polu liczbowym
+        con.execute("UPDATE location SET hdr_hash = 'hh', hdr_exptime = 'abc' WHERE id = 1")
+    with pytest.raises(sqlite3.IntegrityError):              # kotwica przy kopii bez odcisku
+        con.execute("UPDATE location SET hdr_hash = 'hh' WHERE id = 2")
+    con.execute("UPDATE location SET hdr_hash = 'hh', image_count = 2, "
+                "image_roles = '[\"integration\", null]', hdr_filter = 'Ha', hdr_exptime = 1.5, "
+                "hdr_xbinning = 1 WHERE id = 1")             # komplet z kotwicą - legalny
+    with pytest.raises(sqlite3.IntegrityError):              # odcisk zmieniony BEZ faktów
+        con.execute("UPDATE location SET header_hash = 'nowy' WHERE id = 1")
+    con.execute("UPDATE location SET header_hash = 'nowy', hdr_hash = 'nowy' WHERE id = 1")
+    con.close()
+
+
+def test_0021_przyrost_na_bazie_v20_z_kopia(tmp_path):
+    """Baza v20 z kopią o znanym odcisku przechodzi 0021 bez odmowy (CHECK-i testowane na
+    istniejących wierszach - nowe kolumny wchodzą PUSTE), wiersz zostaje nietknięty, a druga
+    migracja to no-op. Backfillu w migracji nie ma: fakty są w pliku, SQL ich nie zna.
+
+    Falsyfikator: dopisz do 0021 `NOT NULL`/`DEFAULT` → migracja wybucha albo kolumna przestaje być NULL."""
+    path = str(tmp_path / "v20.db")
+    con = db.connect(path)
+    for version, filename in db.MIGRATIONS:
+        if version <= 20:
+            con.executescript(db._migration_sql(filename))
+            con.execute(f"PRAGMA user_version = {int(version)}")
+    _loc_0021(con, 1)
+    con.commit()
+    assert db.migrate(con) == db.SCHEMA_VERSION              # 0021 + każda kolejna
+    row = con.execute("SELECT header_hash, image_count, image_roles, hdr_filter, hdr_hash "
+                      "FROM location WHERE id = 1").fetchone()
+    assert tuple(row) == ("hh", None, None, None, None)
+    assert db.migrate(con) == db.SCHEMA_VERSION              # idempotencja
     con.close()
 
 
@@ -151,11 +220,11 @@ def test_0020_przyrost_na_bazie_v19_z_integracja(tmp_path):
             con.execute(f"PRAGMA user_version = {int(version)}")
     _integ_0020(con, 1, "offset_unknown")
     con.commit()
-    assert db.migrate(con) == 20
+    assert db.migrate(con) == db.SCHEMA_VERSION              # 0020 + każda kolejna
     row = con.execute("SELECT unresolved_reason, raw_unreferenced FROM integration "
                       "WHERE id = 1").fetchone()
     assert tuple(row) == ("offset_unknown", None)
-    assert db.migrate(con) == 20                             # idempotencja
+    assert db.migrate(con) == db.SCHEMA_VERSION              # idempotencja
     con.close()
 
 

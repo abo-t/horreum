@@ -802,11 +802,16 @@ def test_xisf_span_pierwszy_image_w_dokumencie(tmp_path):
 
 def _do_stanu_sprzed_p6a(con, *paths):
     """Cofnij lokacje do stanu SPRZED P6a: `header_hash` NULL i zero kart — dokładnie tak wygląda
-    331 lokacji XISF w żywej bazie (skan zwracał wtedy dla XISF `None`)."""
+    331 lokacji XISF w żywej bazie (skan zwracał wtedy dla XISF `None`). Fakty kopii z 0021 schodzą
+    razem z odciskiem: stan sprzed P6a jest też stanem sprzed 0021, a CHECK kotwicy (`hdr_hash IS
+    header_hash`) nie przyjąłby faktów opisujących nagłówek, którego odcisku baza nie zna."""
     for p in paths:
         con.execute("DELETE FROM cards WHERE frame_id IN "
                     "(SELECT frame_id FROM location WHERE path = ?)", (str(p),))
-        con.execute("UPDATE location SET header_hash = NULL WHERE path = ?", (str(p),))
+        con.execute("UPDATE location SET header_hash = NULL, hdr_hash = NULL, image_count = NULL, "
+                    "image_roles = NULL, hdr_filter = NULL, hdr_imagetyp = NULL, hdr_object = NULL, "
+                    "hdr_telescop = NULL, hdr_instrume = NULL, hdr_exptime = NULL, "
+                    "hdr_xbinning = NULL, hdr_date_obs = NULL WHERE path = ?", (str(p),))
     con.commit()
 
 

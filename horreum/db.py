@@ -70,6 +70,10 @@ from importlib import resources
 # rodowodu: ile RAW-ów przebieg nie umiał umieścić w czasie przy stosie, którego werdykt mówi co
 # innego (pula mieszana RAW+FITS). Kolumna wchodzi PUSTA, pisze ją przebieg przez klingę. CHECK:
 # `> 0` (brak uwagi ma jedną postać - NULL) i nie przy `offset_unknown` (werdykt mówi to samo).
+# 0021 to PRZYROST: fakty KOPII z jej nagłówka na `location` - liczba i role obrazów (XISF) oraz
+# zeznanie pól, które karmią osie klatki (`hdr_*`), z kotwicą `hdr_hash` (CHECK: NULL albo równa
+# `header_hash`, więc zmiana odcisku bez odświeżenia faktów jest błędem, nie cichą nieprawdą).
+# Kolumny wchodzą PUSTE; wiersze sprzed migracji uzupełnia etap Dostawy `scan.backfill_copy_facts`.
 MIGRATIONS = [
     (2, "0002_initial.sql"),
     (3, "0003_writeback.sql"),
@@ -90,6 +94,7 @@ MIGRATIONS = [
     (18, "0018_frame_retired.sql"),
     (19, "0019_location_unreadable_reason.sql"),
     (20, "0020_integration_raw_unreferenced.sql"),
+    (21, "0021_location_copy_facts.sql"),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 _KNOWN_VERSIONS = frozenset({0} | {v for v, _ in MIGRATIONS})

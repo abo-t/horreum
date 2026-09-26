@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from horreum import db, presence
+from horreum import db, presence, scan
 from horreum.calibration import run_calibration
 from horreum.lineage import run_lineage
 from horreum.gui import i18n, queries
@@ -206,6 +206,8 @@ class PipelineWorker(QObject):
         PO kalibracji, bo dopasowuje light do profili, które `calibrate` dopiero wyłania."""
         if not self._scan(con):
             return
+        if not self._copy_facts(con):
+            return
         self._bulk(con, "group")
         self._bulk(con, "resolve")
         self._bulk(con, "calibrate")
@@ -220,6 +222,39 @@ class PipelineWorker(QObject):
             # Cisza czytałaby się jak „sprawdzone, nic nie znikło" — a to jest „nie sprawdzone".
             self.stage_done.emit("presence", presence.PresenceSummary(
                 aborted=i18n.t("pipeline.presence.skipped_no_volume")))
+
+    def _copy_facts(self, con):
+        """Uzupełnienie faktów KOPII z nagłówków (0021) - etap „Przyjmij nowe" zaraz po skanie.
+
+        DLACZEGO TU, a nie osobny przycisk ani CLI: wydanie jedzie jako sam GUI (onefile - CLI
+        nie powstaje), a kopie sprzed migracji skan z bramą przyrostową POMIJA (mtime bez zmian),
+        więc bez tego etapu żywa baza nie dostałaby liczby obrazów ani zeznań kopii nigdy. Koszt
+        jest jednorazowy: sterownik czyta SAME nagłówki (550 plików XISF archiwum ≈ 9 s po SMB
+        zamiast 108,9 GB treści), a po pierwszym przebiegu jego SELECT jest pusty - wtedy etap
+        milczy całkowicie (QUIET): ani „w toku", ani linii raportu, bo nie ma czego ogłaszać.
+
+        ZAKRES = korzeń TEJ dostawy (jak pass obecności): „Przetwórz wszystko" na wskazanym
+        katalogu nie czyta plików spoza niego. Anulowanie PRZERYWA łańcuch jak przy skanie - każda
+        kopia to osobna transakcja, więc baza zostaje spójna, a następna dostawa dobierze resztę.
+        Zwraca `False`, gdy anulowano."""
+        root = self._params.get("root")
+        if not scan.copy_facts_candidates(con, root):
+            return True
+        self.stage_started.emit("copy_facts")
+        s = scan.backfill_copy_facts(con, now=self._now(), root=root,
+                                     progress=self._on_copy_facts_progress,
+                                     should_cancel=self._cancel.is_set)
+        if s.cancelled:
+            self.cancelled.emit("copy_facts", s)
+            return False
+        self.stage_done.emit("copy_facts", s)
+        return True
+
+    def _on_copy_facts_progress(self, done, total, path, s):
+        # Migawka jak przy skanie (dict przez granicę wątku, nigdy żywy obiekt); znacznik `etap`
+        # mówi slotowi, której etykiety liczników użyć - liczniki skanu nie mają tu sensu.
+        if should_emit(done, total):
+            self.progress.emit(done, total, path, {**counts_snapshot(s), "etap": "copy_facts"})
 
     def _on_progress(self, done, total, path, summary):
         # wołane SYNCHRONICZNIE w wątku workera przez scan_tree; przerzedź i wyślij MIGAWKĘ (dict),
@@ -237,7 +272,8 @@ _STAGE_LABEL = {"scan": "pipeline.stage.scan", "stacks": "pipeline.stage.stacks"
                 "resolve": "pipeline.stage.resolve", "calibrate": "pipeline.stage.calibrate",
                 "lineage": "pipeline.stage.lineage", "delta": "pipeline.stage.delta",
                 "presence": "pipeline.stage.presence",
-                "stack_lineage": "pipeline.stage.stack_lineage"}
+                "stack_lineage": "pipeline.stage.stack_lineage",
+                "copy_facts": "pipeline.stage.copy_facts"}
 
 # Kolejność i klucze powodów przeglądu w raporcie dostawy (rdzeń niesie same liczby — wording należy
 # do powierzchni; konsolowy `cli._format_delta` ma własne, ASCII-owe).
@@ -752,6 +788,10 @@ class PipelineView(QWidget):
             self.bar.setRange(0, total)
         self.bar.setValue(done)
         tail = path.rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
+        if counts.get("etap") == "copy_facts":        # uzupełnienie faktów kopii (0021)
+            self.lbl_counts.setText(i18n.t("pipeline.counts_copy_facts", done=done, total=total,
+                                           written=counts["written"], tail=tail))
+            return
         do_przegladu = counts["frame_review"] + counts["camera_review"]
         self.lbl_counts.setText(i18n.t(
             "pipeline.counts", done=done, total=total, new=counts["frames_new"],
@@ -823,7 +863,22 @@ class PipelineView(QWidget):
             return self._format_stacks(r)
         if name == "stack_lineage":
             return self._format_stack_lineage(r)
+        if name == "copy_facts":
+            return self._format_copy_facts(r)
         return str(r)
+
+    def _format_copy_facts(self, s):
+        """Linia raportu uzupełnienia faktów kopii (0021). Odmowy tylko, gdy są (QUIET), ale gdy są,
+        stoją obok liczby uzupełnionych, a `czeka` mówi, ile zostało na następną dostawę - „uzupełniono
+        540 z 550" bez przyczyny reszty byłoby raportem, który zataja, dlaczego reszta czeka."""
+        czesci = [i18n.t("pipeline.fmt.copy_facts.written", n=s.written, rows=s.rows)]
+        if s.stale:
+            czesci.append(i18n.t("pipeline.fmt.copy_facts.stale", n=s.stale))
+        if s.failed:
+            czesci.append(i18n.t("pipeline.fmt.copy_facts.failed", n=s.failed))
+        if s.remaining:
+            czesci.append(i18n.t("pipeline.fmt.copy_facts.remaining", n=s.remaining))
+        return i18n.t("pipeline.fmt.copy_facts.prefix") + " · ".join(czesci)
 
     def _format_stack_lineage(self, s):
         """Linia raportu rodowodu stosów (I-2d). Mówi TRZY rzeczy naraz i żadnej nie da się pominąć:

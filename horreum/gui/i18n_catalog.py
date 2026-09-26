@@ -655,8 +655,8 @@ CATALOG = {
     },
     "repair.err.empty": {"pl": "pusto — wpisz oznaczenie", "en": "empty — type a designation"},
     "repair.err.ascii": {
-        "pl": "„{text}” ma znaki spoza ASCII — nagłówek FITS ich nie przyjmie",
-        "en": "„{text}” has non-ASCII characters — a FITS header will not take them",
+        "pl": "„{text}” ma znaki spoza drukowalnego ASCII - nagłówek FITS ich nie przyjmie",
+        "en": "„{text}” has characters outside printable ASCII - a FITS header will not take them",
     },
     "repair.err.too_long": {
         "pl": "za długie ({n} znaków, limit {max})", "en": "too long ({n} characters, limit {max})",
@@ -1128,6 +1128,7 @@ CATALOG = {
     # --- kolumny bazowe (reszta reużyta: col.path/frame.col.*/object.col.name) ---
     "grid.col.kind": {"pl": "Rodzaj", "en": "Kind"},
     "grid.col.dt_delta": {"pl": "Δh (hdr−nazwa)", "en": "Δh (hdr−name)"},
+    "grid.col.images": {"pl": "Obrazy", "en": "Images"},
 
     # --- operatory filtra (etykieta; klucz-op to DANE) ---
     "grid.op.eq": {"pl": "= równe", "en": "= equal"},
@@ -1179,6 +1180,7 @@ CATALOG = {
               "decision: Frame ▾ → Restore)",
     },
     "perspective.missing_copy": {"pl": "Brakujące kopie", "en": "Missing copies"},
+    "perspective.copy_conflict": {"pl": "Kopie niezgodne", "en": "Disagreeing copies"},
     "perspective.to_review": {"pl": "Do przeglądu", "en": "To review"},
 
     # --- pusty grid (rozwiązywane w USE-site; stałe _EMPTY_* trzymają KLUCZ) ---
@@ -1243,6 +1245,19 @@ CATALOG = {
     },
     "grid.tip.dup_locs": {
         "pl": "\n({n} obecnych lokalizacji)", "en": "\n({n} present locations)",
+    },
+    # KOPIE POD KURSOREM (0021): każda obecna kopia własnym wierszem - pełna ścieżka, liczba obrazów
+    # (role dokleja kod, bo to wartości z pliku, nie napis UI) i pola, w których jej nagłówek mówi
+    # co innego niż pozostałe. Nazwy pól to keywordy z pliku (`FILTER=CLS`) - fakt domenowy, D-L3.
+    "grid.tip.copy_path": {"pl": "\n• {path}", "en": "\n• {path}"},
+    "grid.tip.copy_images": {"pl": " · obrazy: {n}", "en": " · images: {n}"},
+    "grid.tip.copy_diff": {
+        "pl": "\n    mówi inaczej: {fields}", "en": "\n    says otherwise: {fields}",
+    },
+    "grid.tip.copy_field_images": {"pl": "obrazy", "en": "images"},
+    "grid.tip.copy_unread": {
+        "pl": "\n    zeznanie nagłówka jeszcze niezebrane (uzupełni je „Przyjmij nowe”)",
+        "en": "\n    header testimony not collected yet (“Take new” will fill it in)",
     },
     # HISTORIA PRZEPROWADZKI, nie ostrzeżenie (D-V-9, wariant rozwojowy). Zdanie jest w czasie
     # przeszłym i bez wykrzyknika, bo nic tu nie wymaga roboty: plik ŻYJE pod adresem z komórki,
@@ -1843,6 +1858,8 @@ CATALOG = {
     "grid.criteria.only_superseded": {"pl": "tylko zastąpione", "en": "only superseded"},
     "grid.criteria.only_missing_copy": {
         "pl": "tylko z brakującą kopią", "en": "only with a missing copy"},
+    "grid.criteria.only_copy_conflict": {
+        "pl": "tylko kopie niezgodne ze sobą", "en": "only copies that disagree"},
     "grid.criteria.only_lineage": {
         "pl": "tylko obrazy bez rodowodu",
         "en": "only images without lineage",
@@ -1931,6 +1948,24 @@ CATALOG = {
     "pipeline.stage.presence": {"pl": "Obecność", "en": "Presence"},
     "pipeline.stage.stacks": {"pl": "Stosy", "en": "Stacks"},
     "pipeline.stage.stack_lineage": {"pl": "Rodowód stosów", "en": "Stack lineage"},
+    "pipeline.stage.copy_facts": {"pl": "Fakty kopii", "en": "Copy facts"},
+    # Linia raportu uzupełnienia faktów kopii (0021) - człony odmów tylko, gdy są (QUIET), ale gdy
+    # są, stoją obok liczby uzupełnionych: „uzupełniono 540 z 550" bez „zmienione na dysku 10"
+    # zatajałoby, dlaczego reszta czeka.
+    "pipeline.fmt.copy_facts.prefix": {"pl": "Fakty kopii: ", "en": "Copy facts: "},
+    "pipeline.fmt.copy_facts.written": {
+        "pl": "uzupełniono {n} z {rows}", "en": "filled in {n} of {rows}",
+    },
+    "pipeline.fmt.copy_facts.stale": {
+        "pl": "zmienione na dysku od skanu {n} (dogoni je skan)",
+        "en": "changed on disk since the scan {n} (the scan will catch up)",
+    },
+    "pipeline.fmt.copy_facts.failed": {"pl": "nieczytelne {n}", "en": "unreadable {n}"},
+    "pipeline.fmt.copy_facts.remaining": {"pl": "czeka {n}", "en": "waiting {n}"},
+    "pipeline.counts_copy_facts": {
+        "pl": "Nagłówki kopii {done}/{total} · uzupełnione {written} · {tail}",
+        "en": "Copy headers {done}/{total} · filled in {written} · {tail}",
+    },
 
     # --- powody przeglądu w raporcie delty: _REVIEW_REASONS trzyma KLUCZE ---
     "pipeline.reason.no_config": {"pl": "bez konfiguracji", "en": "no config"},
@@ -2442,6 +2477,8 @@ CATALOG = {
     "tasks.telescopes_unlabeled": {"pl": "Teleskopy bez etykiety", "en": "Telescopes without a label"},
     "tasks.observatories_unnamed": {"pl": "Stanowiska bez nazwy", "en": "Sites without a name"},
     "tasks.dup_frames": {"pl": "Duplikaty (>1 kopia)", "en": "Duplicates (>1 copy)"},
+    # 0021: podzbiór „Duplikatów", więc nazwa mówi o KOPIACH, nie o klatkach, i stoi tuż pod nimi.
+    "tasks.copy_conflict_frames": {"pl": "Kopie niezgodne ze sobą", "en": "Copies that disagree"},
     "tasks.vanished_frames": {"pl": "Zniknięte z dysku", "en": "Vanished from disk"},
     # NAZWA MÓWI O UBYTKU, NIE O AWARII (D-V-9a). Wiersz stoi obok „Zniknięte z dysku" i musi się
     # od niego odróżniać JEDNYM spojrzeniem: tam nie ma ani jednej żywej kopii i jest robota, tu
@@ -2449,6 +2486,83 @@ CATALOG = {
     # nazywa naturę wiersza dokładnie tak, jak robią to dwaj sąsiedzi z historii.
     "tasks.missing_copy_frames": {
         "pl": "Brakujące kopie (historia)", "en": "Missing copies (history)"},
+
+    # --- perspektywa „Wersje stosów" (grid.py + tasks.py): ten sam materiał zintegrowany kilka razy.
+    # Rodzaje członka i świadkowie to klucze SKŁADANE w locie (`grid.version.kind.<rodzaj>`,
+    # `grid.version.why.<świadek>`) - parytet z tokenami read-modelu pinuje test perspektywy.
+    "perspective.stack_versions": {"pl": "Wersje stosów", "en": "Stack versions"},
+    "grid.criteria.only_stack_versions": {"pl": "tylko wersje stosów", "en": "only stack versions"},
+    "tasks.stack_versions": {"pl": "Wersje stosów", "en": "Stack versions"},
+    "grid.top.group_version": {"pl": "Wersja stosu", "en": "Stack version"},
+    "grid.col.version": {"pl": "Wersja", "en": "Version"},
+    "grid.version.group": {
+        "pl": "{object} · {filter} · {exp} s · okno {start} - {end}",
+        "en": "{object} · {filter} · {exp} s · window {start} - {end}"},
+    "grid.version.no_object": {"pl": "(bez obiektu)", "en": "(no object)"},
+    "grid.version.kind.inna": {"pl": "inna integracja", "en": "separate integration"},
+    "grid.version.kind.pochodna": {
+        "pl": "pochodna tej samej integracji", "en": "derived from the same integration"},
+    "grid.version.kind.nieustalone": {"pl": "nieustalone", "en": "undetermined"},
+    "grid.version.inputs": {
+        "pl": {"one": "{n} wejście", "few": "{n} wejścia", "many": "{n} wejść"},
+        "en": {"one": "{n} input", "other": "{n} inputs"},
+    },
+    "grid.version.why.declared": {
+        "pl": "Dowód odrębnej integracji: historia pliku deklaruje inną liczbę wejść niż wersja obok.",
+        "en": "Evidence of a separate integration: the file history declares a different number "
+              "of inputs than the version next to it."},
+    "grid.version.why.tool": {
+        "pl": "Dowód odrębnej integracji: inna sygnatura przebiegu (PCL:Signature:Integration).",
+        "en": "Evidence of a separate integration: a different run signature "
+              "(PCL:Signature:Integration)."},
+    "grid.version.why.measure": {
+        "pl": "Dowód odrębnej integracji: inne pomiary szumu i PSF zapisane w nagłówku obrazu "
+              "tego samego kanału.",
+        "en": "Evidence of a separate integration: different noise and PSF measurements in the "
+              "header of an image of the same channel."},
+    "grid.version.why.same_tool": {
+        "pl": "Pochodna: ta sama sygnatura integracji co stos obok.",
+        "en": "Derived: the same integration signature as the stack next to it."},
+    "grid.version.why.same_measure": {
+        "pl": "Pochodna: identyczne pomiary szumu i PSF - nagłówek skopiowany z jednego obrazu.",
+        "en": "Derived: identical noise and PSF measurements - the header was copied from one image."},
+    "grid.version.why.none": {
+        "pl": "Nieustalone: baza nie ma świadka - brak sygnatury, historii i porównywalnych pomiarów.",
+        "en": "Undetermined: the database has no witness - no signature, no history and no "
+              "comparable measurements."},
+    "grid.version.window": {"pl": "\nOkno: {start} - {end}", "en": "\nWindow: {start} - {end}"},
+    "grid.version.keep": {"pl": "Zostaw tę wersję", "en": "Keep this version"},
+    "grid.version.keep_tip": {
+        "pl": {"one": "Kopiuje do schowka {n} ścieżkę pozostałych wersji. Horreum niczego nie usuwa.",
+               "few": "Kopiuje do schowka {n} ścieżki pozostałych wersji. Horreum niczego nie usuwa.",
+               "many": "Kopiuje do schowka {n} ścieżek pozostałych wersji. Horreum niczego nie usuwa."},
+        "en": {"one": "Copies {n} path of the other versions to the clipboard. Horreum deletes nothing.",
+               "other": "Copies {n} paths of the other versions to the clipboard. "
+                        "Horreum deletes nothing."},
+    },
+    "grid.version.select_one": {
+        "pl": "Zaznacz dokładnie jeden stos - wersję, którą zostawiasz.",
+        "en": "Select exactly one stack - the version you keep."},
+    "grid.version.nothing": {
+        "pl": "Ten stos nie ma w grupie wersji z dowodem odrębnej integracji - schowek bez zmian.",
+        "en": "This stack has no version with evidence of a separate integration in its group - "
+              "the clipboard is unchanged."},
+    "grid.version.copied": {
+        "pl": {"one": "Skopiowano do schowka {n} ścieżkę", "few": "Skopiowano do schowka {n} ścieżki",
+               "many": "Skopiowano do schowka {n} ścieżek"},
+        "en": {"one": "Copied {n} path to the clipboard", "other": "Copied {n} paths to the clipboard"},
+    },
+    "grid.version.copied_stacks": {
+        "pl": {"one": " (pozostałe wersje: {n} stos)", "few": " (pozostałe wersje: {n} stosy)",
+               "many": " (pozostałe wersje: {n} stosów)"},
+        "en": {"one": " (other versions: {n} stack)", "other": " (other versions: {n} stacks)"},
+    },
+    "grid.version.skipped_unknown": {
+        "pl": " · bez dowodu wersji, pominięte: {n}", "en": " · no version evidence, skipped: {n}"},
+    "grid.version.no_delete": {
+        "pl": " · Horreum niczego nie usuwa - pliki usuwasz sam, a skan zdejmie je z tej listy",
+        "en": " · Horreum deletes nothing - you delete the files yourself, and a scan takes them "
+              "off this list"},
 
     # --- facets.py (listwa facetów): _GROUPS tytuły trzymają KLUCZE ---
     "facets.group.object": {"pl": "Obiekt", "en": "Object"},

@@ -151,6 +151,28 @@ def _signature(xml_text):
     return m.group(1).strip() if m else None
 
 
+def signature_timestamp(tool):
+    """Chwila przebiegu integracji z sygnatury `PCL:Signature:Integration` - albo `None`.
+
+    Ten moduł czyta sygnaturę z pliku (`_signature`), więc tu mieszka też JEJ FORMAT: pary
+    `klucz=wartość` rozdzielone przecinkiem (`process=ImageIntegration,version=1.7.1,
+    timestamp=2026-02-21T12:43:42.945Z`). Druga siedziba tej wiedzy - perspektywa „Wersje stosów",
+    która pokazuje datę integracji obok każdej wersji - rozjechałaby się z pierwszą przy pierwszej
+    zmianie formatu u dostawcy.
+
+    Zwraca surowy napis znacznika czasu (ISO, jak w pliku), bez interpretacji strefy: sygnatura
+    pisze UTC z sufiksem `Z`, a powierzchnia potrzebuje go do porządku i do pokazania, nie do
+    arytmetyki. Sygnatura bez pola `timestamp`, pusta albo `None` → `None` (brak faktu nie udaje
+    faktu). Własność zapisuje moduł XISF od 1.1.2 - starsze stosy mają `tool` NULL."""
+    if not tool:
+        return None
+    for czlon in str(tool).split(","):
+        klucz, _, wartosc = czlon.partition("=")
+        if klucz.strip() == "timestamp" and wartosc.strip():
+            return wartosc.strip()
+    return None
+
+
 def read_testimony(header, xml_text=None):
     """Słownik nagłówka (klucze jak karty FITS) + tekst XML → `StackTestimony`.
 

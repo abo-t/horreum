@@ -777,7 +777,8 @@ def test_quote_fits_escape_xml_bez_gt():
 def test_xisf_span_pierwszy_image_w_dokumencie(tmp_path):
     """Master WBPP niesie kilka obrazów (integration + rejection_*); `span` bierze PIERWSZY
     `<Image>` w porządku dokumentu = integration (kontrakt Custosa). Obraz bez attachmentu
-    (inline/brak location) nie łapie się — wtedy span None."""
+    (embedded/brak location; inline jest dla `<Image>` zakazany, spec §11.5) nie łapie się — wtedy
+    span None."""
     xml = ('<?xml version="1.0" encoding="UTF-8"?>'
            '<xisf version="1.0" xmlns="http://www.pixinsight.com/xisf">'
            '<Image id="integration" location="attachment:1000:64"/>'

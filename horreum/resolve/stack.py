@@ -108,7 +108,11 @@ class StackTestimony:
 
 def parse_history(xml_text):
     """`(rows, inputs, tool)` z własności `PixInsight:ProcessingHistory`; `(None, (), None)`,
-    gdy własności nie ma. Treść jest w XML‑u zaescape'owana — rozpakowujemy ją przed parsowaniem.
+    gdy własności nie ma ALBO trzyma ją blok danych (`location=`, dozwolone dla String, spec XISF
+    §11.1.6) - tej postaci parser tekstowy nie czyta; zmierzone 2026-09-26: historia jako tekst
+    w 100% plików, które ją niosą. `PixInsight:` to przestrzeń dostawcy, nie spec (standardem jest
+    `Processing:History`, §11.5.3.6). Treść jest w XML‑u zaescape'owana — rozpakowujemy ją przed
+    parsowaniem.
 
     Zakres wierszy ZAWĘŻONY do tabeli `images` (pułapka 2): `imageData` niesie własne `<tr>`
     i własne `enabled`, więc parser bez zawężenia melduje odrzucone wejścia, których nie ma."""

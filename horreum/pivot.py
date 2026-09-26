@@ -6,7 +6,7 @@ w `gui/queries.py:cards_pivot`, pivot tylko składa wide. `frame_id` zamiast `fi
 (kolumny bazowe idą osobno przez `queries.base_rows`, bo frame 1:N location — PLAN_gui_grid §3).
 
 TRZY stany komórki (rozróżnialne):
-- BRAK karty w klatce → sentinel `MISSING` (klatka nie ma tej karty; XISF ma 0 cards → wszystkie MISSING),
+- BRAK karty w klatce → sentinel `MISSING` (klatka nie ma tej karty; klatka W1 ma 0 cards → wszystkie MISSING),
 - karta z pustą wartością → `PivotCell(raw=None, num=None)`,
 - karta z wartością → `PivotCell(raw=..., num=...)`.
 

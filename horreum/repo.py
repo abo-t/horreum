@@ -155,7 +155,8 @@ def add_location(con, *, frame_id, volume, path, drive_letter=None, tier=None, m
                  file_sha1=None, header_hash=None, hdu_index=None, compressed=None,
                  size_bytes=None, now, actor="scan"):
     """Dołóż lokalizację frame'a po `UNIQUE(volume, path)` wraz z faktami KOPII (file_sha1/
-    header_hash/hdu_index/compressed/size_bytes — brief §2; NULL-e dla XISF/W1). Już znana →
+    header_hash/hdu_index/compressed/size_bytes — brief §2; `hdu_index`/`compressed` NULL dla XISF,
+    wszystkie odciski NULL przy W1). Już znana →
     (id, False) bez eventu i BEZ dotykania faktów (odświeżenie = `refresh_location`, osobny
     kontrakt). Nowa → INSERT + `event(location.added)`; (id, True). `volume` = trwały
     identyfikator wolumenu; placeholder '?' NIE blokuje skanu (to nie tożsamość frame'a, §7.5).

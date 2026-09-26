@@ -225,7 +225,10 @@ def write_full_header(path, header_text: str, expected_hash: str | None) -> Writ
 # Karta ↔ własność `<Property>` (D-X-10). Mapa jest JAWNA i wąska: to dwa fakty, które PixInsight
 # trzyma podwójnie, więc zapis samej karty zostawiłby plik SPRZECZNY ze sobą. Reguła przelicza
 # wartość karty na wartość własności — `FOCALLEN` jest w MILIMETRACH, a `Instrument:Telescope:
-# FocalLength` w METRACH (XISF 1.0), więc identyczność bajtów tu nie zachodzi i trzeba liczyć.
+# FocalLength` w METRACH (spec XISF 1.0 §11.5.3.4, typ Float32 - stąd artefakty w rodzaju
+# `0.1049999967217445`), więc identyczność bajtów tu nie zachodzi i trzeba liczyć. Mapa jest wąska
+# ŚWIADOMIE: inne fakty trzymane podwójnie (APTDIA↔Aperture, też w metrach; EXPTIME↔ExposureTime;
+# FILTER↔Filter:Name) NIE są łatane, więc edycja ich karty zostawi plik sprzeczny ze sobą.
 _XISF_PROPERTY_TARGETS = {
     "TELESCOP": ("Instrument:Telescope:Name", str),
     "FOCALLEN": ("Instrument:Telescope:FocalLength", lambda v: repr(float(v) / 1000.0)),

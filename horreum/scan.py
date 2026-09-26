@@ -80,9 +80,24 @@ HEADER_SUFFIXES = FITS_SUFFIXES + XISF_SUFFIXES + exif.RAW_SUFFIXES
 # zeznanie było 1:1 (nie gubimy powtórzeń przez kolizję klucza w dict). Wspólne FITS↔XISF.
 _MULTI_KEYWORDS = ("COMMENT", "HISTORY", "")
 
-_XISF_SIGNATURE = b"XISF0100"        # monolithic XISF 1.0; po nim uint32 LE = długość nagłówka XML
-_XISF_LENGTH_LEN = 4                 # uint32 LE — długość nagłówka XML
-_XISF_RESERVED_LEN = 4               # 4 B reserved (wg specyfikacji zerowe; kopiowane verbatim)
+# SPECYFIKACJA: „XISF 1.0 Specification", Revision 1 (dokument 1.01, wrzesień 2026; poprzednie
+# wydanie 1.00 z 17.04.2017). Rewizja NIE zmienia wersji formatu - sygnatura dalej `XISF0100`,
+# a każdy plik zgodny z wydaniem 2017 zostaje zgodny. Nowości: kodeki zstd (§10.6.9-10), sekcja
+# zgodności (§7: nieobsługiwany obiekt ma być niedostępny, reszta pliku dostępna), karty FITS bez
+# dopełniania spacjami (§11.6), reguły podpisu XML (§9.5), doprecyzowane bloki skompresowane
+# (§10.6.1).
+# POMIAR ARCHIWUM 2026-09-26 (550 obecnych plików XISF, PixInsight 1.8.9..1.9.4, moduł XISF
+# 1.0.13..1.1.3): sygnatura i reserved zgodne w 550/550, wolne miejsce zerowe w 549/549
+# sprawdzalnych; nagłówek XML poprawny
+# w 549/550 (jeden z bajtem sterującym - `xml_parsable`); ZERO kompresji, sum kontrolnych, podpisów
+# XML i obrazów poza `attachment:`. Tego czytnik ŚWIADOMIE nie obsługuje, bo archiwum tego nie ma:
+# kompresja bloku (§10.6) i `checksum` (§10.5) zmieniłyby tożsamość bez słowa, podpis XML (§9.5)
+# i pozycja zapisana nie dziesiętnie (§8.3.2) spychają plik do W1, obraz `embedded` (§10.3) jest
+# pomijany przy tożsamości. Populacja > 0 którejkolwiek z tych cech = sygnał do przeglądu.
+_XISF_SIGNATURE = b"XISF0100"        # monolithic XISF 1.0 (§9.2); po nim uint32 LE = długość XML
+_XISF_LENGTH_LEN = 4                 # uint32 LE - długość nagłówka XML
+_XISF_RESERVED_LEN = 4               # 4 B reserved (§9.2: MUSZĄ być zerowe; kopiowane verbatim -
+                                     # pisarz nie naprawia cudzej niezgodności)
 
 # Bajt, na którym ZACZYNA SIĘ nagłówek XML. WYLICZONY, nigdy literał (P6/§0): pomyłka o 4 B przy
 # zapisie nadpisuje pierwszy blok danych mastera. JEDNO źródło dla czytnika i pisarza XISF.
@@ -99,9 +114,11 @@ def xml_parsable(xml_bytes):
     """Nagłówek XISF w postaci, którą PRZYJMIE parser — znak nielegalny w XML 1.0 na spację,
     BAJT ZA BAJT. Zwraca bajty; oryginał zostaje nietknięty u wołającego.
 
-    DLACZEGO ISTNIEJE — plik bywa poprawnym XISF-em, którego nagłówek NIE JEST poprawnym XML-em.
-    PixInsight zapisuje w nagłówku historię przetwarzania, a w niej ścieżki źródłowe; gdy katalog
-    na dysku ma w nazwie bajt sterujący, trafia on do nagłówka WPROST i `ET.fromstring` odmawia
+    DLACZEGO ISTNIEJE - zdarza się plik, którego nagłówek NIE JEST poprawnym XML-em, choć spec XISF
+    1.0 tego wymaga (§9.5), a zeznanie niesie zdrowe. Neutralizacja jest TOLERANCJĄ czytnika wobec
+    błędu kodera, nie uznaniem pliku za zgodny ze specyfikacją. PixInsight zapisuje w nagłówku
+    historię przetwarzania, a w niej ścieżki źródłowe; gdy katalog na dysku ma w nazwie bajt
+    sterujący, trafia on do nagłówka WPROST i `ET.fromstring` odmawia
     całości. Zmierzone na żywym archiwum (2026-08-09): `MASTERFLAT_FLATGRP_202509210_FILTER_OIII_`
     niósł **100× U+0007** w jednej ścieżce (`…/CTB1_zbiera␇O3/…`, raz na każdą skalibrowaną klatkę)
     i był JEDYNĄ z 16 770 klatek bez nagłówka — a po neutralizacji czyta się w całości: 26 kart,
@@ -279,10 +296,10 @@ class ScanRecord:
     error_kind: object = None         # None gdy OK; 'io' | 'parse' obok `error` (P4-2, `unreadable_kind_of`)
     sha1_data: object = None          # tożsamość frame'a; None = nieobliczalne (degeneracja wyżej)
     file_sha1: object = None          # sha1 całego pliku (fakt kopii)
-    header_hash: object = None        # sha1 tekstu nagłówka; None dla XISF/W1
+    header_hash: object = None        # odcisk nagłówka (FITS: tekst, XISF: bajty XML); None przy W1
     hdu_index: object = None          # HDU naukowe; None dla XISF/W1
     compressed: object = None         # 0/1 (CompImageHDU); None dla XISF/W1
-    cards: object = None              # list[Card] — lustro nagłówka; None dla XISF/W1
+    cards: object = None              # list[Card] - lustro nagłówka (FITS i XISF); None przy W1
 
 
 def _iter_suffixes(root, suffixes, excluded_out=None, errors_out=None):
@@ -589,6 +606,9 @@ def quote_fits(value, original):
     w apostrofach (z podwojeniem apostrofu wewnątrz — escape FITS); było gołe → piszemy gołe.
     **Paddingu spacjami NIE dokładamy** — w tym archiwum go nie ma, a dokładanie łamałoby zapis
     tożsamościowy (kryterium §6 pkt 1: przepisanie wartości AKTUALNEJ nie zmienia ani bajtu).
+    Zgodne ze spec od Revision 1 (§11.6): nazw się nie dopełnia, dopełnianie wartości jest
+    odradzane. Apostrofu nie escape'ujemy, bo atrybut stoi w `"` (zmierzone) - przy atrybucie w apostrofach
+    łata złamałaby XML.
 
     Escape XML: `&` `<` `"`. **`>` zostaje surowy** — jest legalny wewnątrz wartości atrybutu,
     a escape'owanie go zmieniłoby bajty pliku, który go niesie."""
@@ -915,9 +935,16 @@ class XisfMeta:
     a pierwszym blokiem danych, `reserved` = 4 B [12,16) — OBA kopiowane verbatim przy zapisie
     (D-X-1: wypełnienie jest zerowe w 330/330 plików, ale kopia nie kosztuje nic i nie zakłada
     niczego). `first_attachment` = MIN pozycji po WSZYSTKICH blokach `attachment:` (D-X-2) — sufit
-    nagłówka; `image_span` = attachment PIERWSZEGO `<Image>` w kolejności dokumentu, czyli
-    TOŻSAMOŚĆ klatki (`sha1_data`). To DWA różne fakty: sufit bierze minimum ze wszystkiego,
-    tożsamość bierze pierwszy obraz."""
+    nagłówka; `image_span` = attachment PIERWSZEGO `<Image>` Z LOKALIZACJĄ `attachment:`
+    w kolejności dokumentu, czyli TOŻSAMOŚĆ klatki (`sha1_data`). To DWA różne fakty: sufit bierze
+    minimum ze wszystkiego, tożsamość bierze pierwszy obraz.
+
+    „PIERWSZY = OBRAZ GŁÓWNY" TO KONWENCJA WBPP, NIE GWARANCJA FORMATU: spec nie zna obrazu głównego
+    ani nie nadaje kolejności znaczenia (§11.5), a rolę obrazu niesie opcjonalny `imageType`
+    (§11.5.1). Zmierzone 2026-09-26: w 230/230 plikach wieloobrazowych pierwszy jest integracją
+    (`integration` + `rejection_low`/`rejection_high` ×222, `integration` + `weightImage` ×6).
+    Obraz `embedded` (dozwolony, §10.3) jest pomijany - tożsamością zostałby blok NASTĘPNEGO obrazu;
+    populacja 0."""
     header: dict
     cards: list
     header_hash: str
@@ -1038,8 +1065,10 @@ def build_xisf_header_region(meta, new_xml):
     RUSZAJĄ, a wypełnienie kurczy się/rośnie dokładnie o deltę długości nagłówka. Zmiana dzieje się
     na POCZĄTKU wypełnienia (tam, gdzie XML w nie wchodzi); ogon — ten stykający się z nieruchomym
     blokiem danych — zostaje verbatim (D-X-1). Skrócenie dokłada ZERA: bajtów, które nadpisał
-    dłuższy nagłówek, nie da się wskrzesić, a wypełnienie z definicji nie niesie treści (zmierzone:
-    zerowe w 330/330 plików).
+    dłuższy nagłówek, nie da się wskrzesić, a wolne miejsce MA być zerowe (spec §9.2; zmierzone:
+    zerowe w 549/549 sprawdzalnych plików, 2026-09-26). Bloki się nie ruszają, więc ich `checksum` (§10.5)
+    zostałby ważny; łata UNIEWAŻNIA natomiast podpis XML (§9.5) - dziś plik podpisany nie przechodzi
+    czytnika (W1), a gdy czytnik nauczy się go czytać, pisarz musi dostać bramkę odmowy.
 
     `ValueError` (wołający → `blocked`) gdy: brak bloku attachment (nie wiadomo, gdzie kończy się
     nagłówek), plik przeczy sam sobie (`padding_complete`), nagłówek nie mieści się w rezerwie
@@ -1068,16 +1097,23 @@ def read_xisf_meta(path):
     `span` = `(start, size)` bajtów attachmentu PIERWSZEGO `<Image location="attachment:s:n">`
     w porządku dokumentu — dla masterów WBPP to obraz `integration` (właściwy stack; kolejne to
     rejection_low/high/slope_map). Wejście `sha1_of_span` → `sha1_data` XISF = sha1 bajtów
-    attachmentu (brief §2; wzorzec `integ_hash` Custosa; postać kanoniczna przy kompresji = decyzja
-    D-B na progu PF-4). None gdy brak obrazu-attachmentu (tożsamość nieobliczalna → degeneracja).
+    attachmentu W POSTACI PRZECHOWYWANEJ (brief §2; wzorzec `integ_hash` Custosa). Decyzja D-B
+    każe przejść na postać kanoniczną PRZY WYKRYTEJ KOMPRESJI - tej gałęzi NIE MA: atrybutu
+    `compression` (§10.6) nikt nie czyta, a archiwum ma 0 bloków skompresowanych (550/550 plików,
+    2026-09-26). Blok skompresowany dałby odcisk zależny od kodeka, nie od pikseli. None gdy brak
+    obrazu-attachmentu (tożsamość nieobliczalna → degeneracja).
 
-    Format (XISF 1.0 monolithic): sygnatura `XISF0100` (8 B) · uint32 LE długość nagłówka XML
-    (4 B) · 4 B reserved · nagłówek XML (UTF-8). Czytamy WYŁĄCZNIE nagłówek (nie dotykamy bloków
-    danych) → na Windowsie bez uchwytu blokującego (inwariant append-only, jak przy FITS).
+    Format (spec §9.2): sygnatura `XISF0100` (8 B) · uint32 LE długość nagłówka XML (4 B) ·
+    4 B reserved (zera) · nagłówek XML UTF-8 od bajtu 16 · opcjonalne wolne miejsce (zera) · bloki
+    `attachment:` w dowolnej kolejności, pozycje liczone od początku pliku. Czytamy WYŁĄCZNIE
+    nagłówek (nie dotykamy bloków danych) → na Windowsie bez uchwytu blokującego (inwariant
+    append-only, jak przy FITS).
 
-    Wyłuskuje wszystkie `<FITSKeyword name= value=>` (oryginalne karty FITS, które PixInsight
-    zachowuje 1:1; dopasowanie po nazwie lokalnej — odporne na namespace). `<Property>` (metadane
-    natywne XISF) świadomie POMIJAMY w pierwszym przebiegu — pola gorące mieszkają w FITSKeyword.
+    Wyłuskuje wszystkie `<FITSKeyword name= value=>` - warstwę zgodności z FITS (§11.6), nie
+    komplet kart 1:1: geometrię obrazu trzyma obowiązkowy atrybut `geometry` (§11.5.1), a karty
+    NAXIS* niesie tylko część plików (26 z 545 klatek XISF z kartami, 2026-09-26). Dopasowanie po
+    nazwie lokalnej - odporne na namespace. `<Property>` (metadane natywne XISF) świadomie POMIJAMY w pierwszym
+    przebiegu — pola gorące mieszkają w FITSKeyword.
 
     Podnosi wyjątek przy złej sygnaturze / uciętym nagłówku / niepoprawnym XML — skan nie zgaduje;
     łapie to `scan_file` (miękkie lądowanie W1), nie użytkownik.

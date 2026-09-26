@@ -64,10 +64,6 @@ def gcon(tmp_path):
 
 @pytest.fixture
 def view(qapp, gcon, tmp_path, monkeypatch):
-    # Izolacja QSettings (perspektywy) — nie dotykaj realnego rejestru użytkownika.
-    from PySide6.QtCore import QSettings
-    monkeypatch.setattr(QSettings, "value", lambda self, k, d=None: d)
-    monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: None)
     from horreum.gui.grid import FramesView
     v = FramesView(gcon, now_fn=None)
     v._writeback_async = False   # test: worker.run() inline (sync-seam), bez QThread
@@ -920,12 +916,7 @@ def test_facet_preset_zeruje_stan(view):
 
 @pytest.fixture
 def view_settings(qapp, gcon, monkeypatch):
-    """FramesView z QSettings na SŁOWNIKU (round-trip perspektyw wymaga realnego zapisu/odczytu,
-    nie no-op jak w `view`; nadal zero dotykania rejestru usera)."""
-    from PySide6.QtCore import QSettings
-    store = {}
-    monkeypatch.setattr(QSettings, "value", lambda self, k, d=None: store.get(k, d))
-    monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: store.__setitem__(k, v))
+    """FramesView do round-tripu perspektyw (zapis i odczyt realne; ustawienia izoluje conftest)."""
     from horreum.gui.grid import FramesView
     v = FramesView(gcon, now_fn=None)
     v._writeback_async = False
@@ -983,18 +974,14 @@ def test_perspektywa_ladujaca_z_bazy_przezywa_nowe_okno(view_settings, monkeypat
     assert drugie._facet_state == {"kind": {"in": [["light", "light"]]}}
 
 
-def test_perspektywy_z_rejestru_wciagaja_sie_raz_i_nie_puchna(qapp, gcon, monkeypatch):
+def test_perspektywy_z_rejestru_wciagaja_sie_raz_i_nie_puchna(qapp, gcon, ustawienia):
     """Wydanie publiczne trzymało perspektywy w `QSettings` (D-B), więc przeniesienie kanonu do
     bazy BEZ importu skasowałoby użytkownikom nazwane widoki — regresja, nie sprzątanie (FORWARD).
     Import jest idempotentny, bo woła się przy KAŻDYM otwarciu widoku: drugie okno nie ma prawa
     dopisać ani wiersza, ani eventu."""
-    from PySide6.QtCore import QSettings
-
     from horreum.gui.grid import FramesView
-    store = {"grid/perspectives": json.dumps(
-        {"Stara": {"filter": None, "columns": ["OBJECT"], "only_dups": True}})}
-    monkeypatch.setattr(QSettings, "value", lambda self, k, d=None: store.get(k, d))
-    monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: store.__setitem__(k, v))
+    ustawienia.setValue("grid/perspectives", json.dumps(
+        {"Stara": {"filter": None, "columns": ["OBJECT"], "only_dups": True}}))
 
     FramesView(gcon, now_fn=None)
     assert dict(queries.perspectives(gcon))["Stara"]["only_dups"] is True
@@ -1004,7 +991,7 @@ def test_perspektywy_z_rejestru_wciagaja_sie_raz_i_nie_puchna(qapp, gcon, monkey
     assert len(queries.perspectives(gcon)) == 1
     assert gcon.execute("SELECT count(*) FROM event").fetchone()[0] == ev
     # Rejestru NIE czyścimy — kopia ratuje kogoś, kto wróci na starsze wydanie
-    assert "grid/perspectives" in store
+    assert ustawienia.contains("grid/perspectives")
 
 
 def test_perspektywa_w_starym_formacie_nie_udaje_pustego_filtra(view_settings):
@@ -1030,11 +1017,8 @@ def wb_view(qapp, tmp_path, monkeypatch):
     """FramesView nad bazą z JEDNYM realnym plikiem FITS (writeback rusza dysk — potrzebny prawdziwy)."""
     import numpy as np
     from astropy.io import fits
-    from PySide6.QtCore import QSettings
     from horreum import scan
     from horreum.gui.grid import FramesView
-    monkeypatch.setattr(QSettings, "value", lambda self, k, d=None: d)
-    monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: None)
     p = tmp_path / "wb.fits"
     hdu = fits.PrimaryHDU(data=np.zeros((4, 4), dtype=np.int16))
     hdu.header["TELESCOP"] = "RC8"; hdu.header["IMAGETYP"] = "Light"
@@ -1243,11 +1227,8 @@ def rn_view(qapp, tmp_path, monkeypatch):
     renamu I makra). Rename rusza dysk — pliki w tmp_path, NIGDY R:."""
     import numpy as np
     from astropy.io import fits
-    from PySide6.QtCore import QSettings
     from horreum import scan
     from horreum.gui.grid import FramesView
-    monkeypatch.setattr(QSettings, "value", lambda self, k, d=None: d)
-    monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: None)
     con = db.open_db(str(tmp_path / "rn.db"))
     files = []
     for i, (obj, dobs) in enumerate([("NGC7000", "2024-03-15T21:30:45"),
@@ -1641,9 +1622,6 @@ def test_pustostan_rozroznia_filtr_od_pustej_bazy(qapp, tmp_path, monkeypatch):
     zawężenie, które nie wpuściło klatek (od FH-4 tym samym gestem co recepta paska); na PUSTEJ
     bazie takie wskazanie wysyłałoby usera w ślepy zaułek (nie ma czego filtrować) - tam
     komunikat kieruje po dostawę."""
-    from PySide6.QtCore import QSettings
-    monkeypatch.setattr(QSettings, "value", lambda self, k, d=None: d)
-    monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: None)
     from horreum.gui.grid import _EMPTY_DB, _EMPTY_FILTER, FramesView
     from horreum.gui import i18n                          # _EMPTY_* to KLUCZE (rollout i18n) — rozwiąż t()
 
@@ -2693,10 +2671,7 @@ def test_panel_odroznia_wariant_obrazu_od_realnego_wspoldzielenia(view, gcon):
 @pytest.fixture
 def obj_view(qapp, tmp_path, monkeypatch):
     """FramesView nad bazą: 2 lighty ze ŚCIEŻKI (źródło słabe), 1 z NAGŁÓWKA, 1 dark."""
-    from PySide6.QtCore import QSettings
     from horreum.gui.grid import FramesView
-    monkeypatch.setattr(QSettings, "value", lambda self, k, d=None: d)
-    monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: None)
     con = db.open_db(str(tmp_path / "obj.db"))
     con.execute("INSERT INTO object(id, canon, catalog, kind) VALUES (5,'NGC6960','NGC','deep_sky')")
     for i, (kind, src) in enumerate([("light", "path"), ("light", "path"),
@@ -3679,10 +3654,7 @@ def test_szukajka_PRZEZYWA_odswiezenie_listwy(obj_view):
 
 def _grid_z_iloscia(qapp, tmp_path, monkeypatch, n):
     """FramesView nad bazą o ZADANEJ liczbie lightów — fikstura bramek wydajności."""
-    from PySide6.QtCore import QSettings
     from horreum.gui.grid import FramesView
-    monkeypatch.setattr(QSettings, "value", lambda self, k, d=None: d)
-    monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: None)
     con = db.open_db(str(tmp_path / "perf.db"))
     con.execute("INSERT INTO object(id, canon, catalog, kind) VALUES (5,'NGC6960','NGC','deep_sky')")
     con.executemany(
@@ -5076,9 +5048,6 @@ def test_FH4_pusty_stan_renderuje_EN_z_katalogu(qapp, tmp_path, monkeypatch):
 
     Falsyfikator: wpisz zdanie pustego stanu literałem zamiast przez `i18n.t` → pod EN zostaje
     polskie."""
-    from PySide6.QtCore import QSettings
-    monkeypatch.setattr(QSettings, "value", lambda self, k, d=None: d)
-    monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: None)
     from horreum.gui import i18n
     from horreum.gui.grid import FramesView
     i18n.set_lang("en")

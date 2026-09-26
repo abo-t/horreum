@@ -60,20 +60,7 @@ def _seed(path):
 
 
 @pytest.fixture
-def settings_store(monkeypatch):
-    """QSettings na SŁOWNIKU (wzorzec `test_gui_grid`). Od czasu, gdy progi są pamiętane między
-    sesjami, ekran REALNIE pisze do rejestru — bez tej izolacji bateria wstawiłaby użytkownikowi
-    swoje wartości skrajne (zmierzone: `min_size=600`, `min_hours=0`) i sama zaczęłaby czytać je
-    zamiast domyślnych, więc test progów przechodziłby albo nie zależnie od poprzedniego przebiegu."""
-    from PySide6.QtCore import QSettings
-    store = {}
-    monkeypatch.setattr(QSettings, "value", lambda self, k, d=None: store.get(k, d))
-    monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: store.__setitem__(k, v))
-    return store
-
-
-@pytest.fixture
-def view(qapp, tmp_path, settings_store):
+def view(qapp, tmp_path, ustawienia):
     """Ekran INLINE (bez `db_path`) — plan liczy się synchronicznie, więc test widzi wynik od razu."""
     con = _seed(str(tmp_path / "planer.db"))
     v = PlannerView(con, db_path=None)
@@ -94,7 +81,7 @@ def test_plan_liczy_sie_i_lista_niepusta(view):
     assert first.canon and first.cost and first.rig
 
 
-def test_noc_wybiera_rdzen_dopoki_user_nie_tknie_daty(qapp, tmp_path, settings_store):
+def test_noc_wybiera_rdzen_dopoki_user_nie_tknie_daty(qapp, tmp_path, ustawienia):
     """Wartość specjalna kalendarza = „bieżąca noc": `night=None` → dobę liczy `targets.default_night`
     z DŁUGOŚCI stanowiska. Podstawienie dzisiejszej daty w widżecie byłoby DRUGIM właścicielem faktu."""
     con = _seed(str(tmp_path / "auto.db"))
@@ -171,7 +158,7 @@ def test_pasek_progow_zwija_sie_i_niesie_stan(view):
     assert body.isHidden() is False
 
 
-def test_progi_przezywaja_zamkniecie_ekranu(qapp, tmp_path, settings_store):
+def test_progi_przezywaja_zamkniecie_ekranu(qapp, tmp_path, ustawienia):
     """Dług P-A #5: progi są PAMIĘTANE między sesjami (`QSettings`, klasa D-B). D-0731-10 zabrania
     pieczenia ich w ASSECIE — nie zapamiętywania w profilu maszyny; zerowanie co start kazało
     powtarzać te same ruchy każdego wieczoru."""
@@ -180,7 +167,7 @@ def test_progi_przezywaja_zamkniecie_ekranu(qapp, tmp_path, settings_store):
     first.min_size.setValue(9.0)
     first.max_cost_on.setChecked(True)
     first.close()
-    assert settings_store["planner/min_size"] == 9.0
+    assert float(ustawienia.value("planner/min_size")) == 9.0
 
     second = PlannerView(con, db_path=None)
     try:
@@ -285,7 +272,7 @@ def test_stara_generacja_nie_trafia_na_ekran(view):
     assert view.night_label.text() != "stary błąd"
 
 
-def test_baza_bez_stanowiska_mowi_wprost(qapp, tmp_path, settings_store):
+def test_baza_bez_stanowiska_mowi_wprost(qapp, tmp_path, ustawienia):
     """`targets.plan` rzuca `ValueError` bez stanowiska z GPS — ekran ma to POWIEDZIEĆ, nie paść
     (podstawienie „środka Polski" byłoby kłamstwem)."""
     con = db.open_db(str(tmp_path / "pusta.db"))
@@ -484,7 +471,7 @@ def test_most_emituje_kanony_celu_z_pokryciem(view):
 
 # ─────────────────────────────────────────────────────────────── wątek tła
 
-def test_watek_tla_liczy_i_sprzata_bez_zawisu(qapp, tmp_path, settings_store):
+def test_watek_tla_liczy_i_sprzata_bez_zawisu(qapp, tmp_path, ustawienia):
     """Realny `QThread` (jak w oknie): plan przychodzi sygnałem, a cleanup idzie ŚWIĘTĄ kolejnością
     `worker.deleteLater()` → `thread.wait()` → `thread.deleteLater()` (deadlock AB-BA, `08992c4`)."""
     from PySide6.QtCore import QDeadlineTimer, QEventLoop, QTimer

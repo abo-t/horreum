@@ -258,15 +258,6 @@ def test_view_przetworz_wszystko_w_watku(qapp, tmp_path):
 
 # --- F5 (Dostawa): świeży serial, „Przyjmij nowe", guard mieszania serialu ---
 
-def _qsettings_dict(monkeypatch, store=None):
-    """QSettings na słowniku (wzorzec test_gui_grid) — bez tykania rejestru użytkownika."""
-    from PySide6.QtCore import QSettings
-    store = {} if store is None else store
-    monkeypatch.setattr(QSettings, "value", lambda self, k, d=None: store.get(k, d))
-    monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: store.__setitem__(k, v))
-    return store
-
-
 def test_scan_params_liczy_serial_swiezo(qapp, tmp_path, monkeypatch):
     """R#7+R2-3: wartość do bramy `(volume,path,mtime)` ZAWSZE ze startu sekwencji — nigdy
     z montażu/pamięci (stale po przepięciu dysku w trakcie sesji)."""
@@ -279,10 +270,10 @@ def test_scan_params_liczy_serial_swiezo(qapp, tmp_path, monkeypatch):
     assert view._scan_params()["volume"] == "?"        # nieustalony → pełny skan (kontrakt bramy)
 
 
-def test_receive_z_pamiecia_startuje_cala_sekwencje(qapp, tmp_path, monkeypatch):
+def test_receive_z_pamiecia_startuje_cala_sekwencje(qapp, tmp_path, monkeypatch, ustawienia):
     """„Przyjmij nowe" z zapamiętanym źródłem (D-UX-5): zero pytań, cała sekwencja „all"."""
     tree = _tree(tmp_path, 2)
-    store = _qsettings_dict(monkeypatch, {"pipeline/last_source": tree})
+    ustawienia.setValue("pipeline/last_source", tree)
     view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
     running = []
     loop = QEventLoop()
@@ -294,13 +285,12 @@ def test_receive_z_pamiecia_startuje_cala_sekwencje(qapp, tmp_path, monkeypatch)
     loop.exec()
     txt = view.lbl_summary.text()
     assert "[skan]" in txt and "[delta]" in txt        # cała sekwencja
-    assert view._root == tree and store["pipeline/last_source"] == tree
+    assert view._root == tree and ustawienia.value("pipeline/last_source") == tree
 
 
-def test_receive_bez_pamieci_pyta_zapisuje_i_syncuje_memo(qapp, tmp_path, monkeypatch):
+def test_receive_bez_pamieci_pyta_zapisuje_i_syncuje_memo(qapp, tmp_path, monkeypatch, ustawienia):
     """Pierwsza dostawa: pytanie o katalog, zapis pamięci, memo z JEDNEJ funkcji (F5R#10/R2#6)."""
     tree = _tree(tmp_path, 1)
-    store = _qsettings_dict(monkeypatch)
     from PySide6.QtWidgets import QFileDialog
     monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: tree))
     view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
@@ -310,12 +300,11 @@ def test_receive_bez_pamieci_pyta_zapisuje_i_syncuje_memo(qapp, tmp_path, monkey
     QTimer.singleShot(20000, loop.quit)
     view._on_receive()
     loop.exec()
-    assert store["pipeline/last_source"] == tree
+    assert ustawienia.value("pipeline/last_source") == tree
     assert tree in view.lbl_source_memo.text()
 
 
-def test_receive_anulowany_dialog_nie_startuje(qapp, tmp_path, monkeypatch):
-    _qsettings_dict(monkeypatch)                       # brak pamięci źródła
+def test_receive_anulowany_dialog_nie_startuje(qapp, tmp_path, monkeypatch, ustawienia):
     from PySide6.QtWidgets import QFileDialog
     monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: ""))
     view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
@@ -323,15 +312,14 @@ def test_receive_anulowany_dialog_nie_startuje(qapp, tmp_path, monkeypatch):
     assert view._thread is None                        # anuluj → nic nie rusza
 
 
-def test_pick_dir_zapisuje_last_source(qapp, tmp_path, monkeypatch):
+def test_pick_dir_zapisuje_last_source(qapp, tmp_path, monkeypatch, ustawienia):
     """D-UX-5: jedna pamięć ostatniego katalogu — „Wskaż katalog…" też ją zapisuje."""
     tree = _tree(tmp_path, 1)
-    store = _qsettings_dict(monkeypatch)
     from PySide6.QtWidgets import QFileDialog
     monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: tree))
     view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
     view._on_pick_dir()
-    assert store["pipeline/last_source"] == tree and tree in view.lbl_source_memo.text()
+    assert ustawienia.value("pipeline/last_source") == tree and tree in view.lbl_source_memo.text()
 
 
 def test_serial_guard_wstrzymuje_skan_mieszany(qapp, tmp_path, monkeypatch):
@@ -612,13 +600,12 @@ def test_dwa_rodowody_maja_ROZNE_nazwy(qapp):
     assert "stos" in stos.lower(), "etap stosów ma się nazwać stosami"
 
 
-def test_stacks_pamieta_korzen_i_podpowiada_go(qapp, tmp_path, monkeypatch):
+def test_stacks_pamieta_korzen_i_podpowiada_go(qapp, tmp_path, monkeypatch, ustawienia):
     """Korzeń drogi jest ZAPAMIĘTYWANY (`stacks/last_root`, QSettings per maszyna) i PODPOWIADANY
     przy kolejnym uruchomieniu — dialog dostaje go jako katalog startowy. Osobna pamięć od
     `pipeline/last_source`: to inny korzeń i inny gest, więc jedna pamięć kłamałaby na przemian
     o obu."""
     tree = _stack_tree(tmp_path)
-    store = _qsettings_dict(monkeypatch)
     from PySide6.QtWidgets import QFileDialog
     widziane = []
 
@@ -634,16 +621,15 @@ def test_stacks_pamieta_korzen_i_podpowiada_go(qapp, tmp_path, monkeypatch):
     QTimer.singleShot(20000, loop.quit)
     view._on_stacks()
     loop.exec()
-    assert store["stacks/last_root"] == tree
+    assert ustawienia.value("stacks/last_root") == tree
     assert tree in view.lbl_stacks_memo.text()
     assert widziane == [""]                            # pierwszy raz: brak podpowiedzi
     view._on_stacks()                                  # drugi raz: dialog startuje OD zapamiętanego
     assert widziane[-1] == tree
-    assert "pipeline/last_source" not in store         # pamięci są ROZDZIELNE
+    assert not ustawienia.contains("pipeline/last_source")   # pamięci są ROZDZIELNE
 
 
-def test_stacks_anulowany_dialog_nie_startuje(qapp, tmp_path, monkeypatch):
-    _qsettings_dict(monkeypatch)
+def test_stacks_anulowany_dialog_nie_startuje(qapp, tmp_path, monkeypatch, ustawienia):
     from PySide6.QtWidgets import QFileDialog
     monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: ""))
     view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)

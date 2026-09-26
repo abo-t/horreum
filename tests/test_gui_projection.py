@@ -5,7 +5,7 @@ pasek `done/total`, „Anuluj" na granicy pliku, zamrożone parametry, abort son
 po serialach wolumenów (R#4+R2-1), licznik generacji stale-DRY (R2-2), słownictwo per tryb (wiz #5),
 rozmiar przy kopii (R#5), „Utwórz…" na PRAWDZIWYCH plikach. Czyste pomocniki (chosen_present/
 volume_decision/size_summary) testowane wprost. `importorskip` — bez PySide6 plik pomijany.
-Realny R: NIGDY nie dotykany; QSettings izolowane od rejestru (fake_settings)."""
+Realny R: NIGDY nie dotykany; QSettings izolowane od rejestru (conftest, fixture `ustawienia`)."""
 
 import json
 import os
@@ -36,16 +36,6 @@ def qapp():
     yield QApplication.instance() or QApplication([])
 
 
-@pytest.fixture
-def fake_settings(monkeypatch):
-    """Izolacja QSettings (cele wydania) — pamięć w dict zamiast realnego rejestru użytkownika."""
-    store = {}
-    from PySide6.QtCore import QSettings
-    monkeypatch.setattr(QSettings, "value", lambda self, k, d=None: store.get(k, d))
-    monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: store.__setitem__(k, v))
-    return store
-
-
 def _seed_files(con, tmp_path, n=2, sizes=None, volume="V"):
     """`n` frame'ów z PRAWDZIWYMI plikami (do os.link/copy w „Utwórz"). Bez header/object/filter →
     segmenty _UNSET (test plumbingu dialogu). `sizes` = size_bytes per plik (None = brak rozmiaru).
@@ -66,10 +56,10 @@ def _seed_files(con, tmp_path, n=2, sizes=None, volume="V"):
     return ids
 
 
-def _target(fake_settings, root, name="feed"):
-    """Zapamiętany cel w fake-QSettings PRZED otwarciem dialogu (otwarcie → auto-DRY)."""
-    fake_settings["projection/targets"] = json.dumps([{"name": name, "path": str(root)}])
-    fake_settings["projection/last_target"] = str(root)
+def _target(ustawienia, root, name="feed"):
+    """Zapamiętany cel w ustawieniach PRZED otwarciem dialogu (otwarcie → auto-DRY)."""
+    ustawienia.setValue("projection/targets", json.dumps([{"name": name, "path": str(root)}]))
+    ustawienia.setValue("projection/last_target", str(root))
 
 
 def _dlg(con, ids):
@@ -116,14 +106,14 @@ def test_eta_text_dopiero_po_rozgrzewce():
 
 # ---------- dialog: auto-DRY + hardlink ----------
 
-def test_dialog_cel_z_pamieci_auto_dry_1_klik(qapp, tmp_path, fake_settings, monkeypatch):
+def test_dialog_cel_z_pamieci_auto_dry_1_klik(qapp, tmp_path, ustawienia, monkeypatch):
     """Cel z pamięci → otwarcie dialogu SAMO robi DRY (zdarzenie dyskretne #1) i uzbraja „Utwórz
     N linków" — ścieżka wydania 1-klik. Apply tworzy prawdziwe hardlinki + manifest."""
     monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
     con = db.open_db(str(tmp_path / "g.db"))
     ids = _seed_files(con, tmp_path, 2)
     root = tmp_path / "_WBPP" / "feed"
-    _target(fake_settings, root)
+    _target(ustawienia, root)
     dlg = _dlg(con, ids)
     assert "do zlinkowania: 2" in dlg.report.toPlainText()
     assert dlg.btn_apply.isEnabled()
@@ -142,11 +132,11 @@ def test_dialog_cel_z_pamieci_auto_dry_1_klik(qapp, tmp_path, fake_settings, mon
     assert not dlg.btn_apply.isEnabled()                  # po Utwórz → wymaga nowego DRY
     assert dlg.btn_apply.text() == "Utworzono ✓"          # przycisk nie głosi zaszłej akcji (wiz K2)
     assert dlg.btn_dry.isEnabled()                        # ręczny re-DRY dostępny po biegu (wiz W2/K5)
-    assert fake_settings["projection/last_target"] == str(root)
+    assert ustawienia.value("projection/last_target") == str(root)
     con.close()
 
 
-def test_dry_mowi_o_innym_ukladzie_w_korzeniu(qapp, tmp_path, fake_settings, monkeypatch):
+def test_dry_mowi_o_innym_ukladzie_w_korzeniu(qapp, tmp_path, ustawienia, monkeypatch):
     """Resztka z recenzji P2: manifest niósł `segments`, ale nikt ich nie czytał. Auto-DRY na
     otwarciu ma powiedzieć, że w korzeniu stoi drzewo o INNYM kształcie — stare pozycje leżą pod
     inną ścieżką, więc `conflict` = 0 i raport bez tej linii wygląda czysto. Ostrzeżenie, nie
@@ -160,7 +150,7 @@ def test_dry_mowi_o_innym_ukladzie_w_korzeniu(qapp, tmp_path, fake_settings, mon
         {"layout": "wbpp-feed", "segments": [["object_canon"],
                                              ["telescope_label", "telescop_canon"],
                                              ["filter_canon"]]}), encoding="utf-8")
-    _target(fake_settings, root)
+    _target(ustawienia, root)
     dlg = _dlg(con, ids)
     rep = dlg.report.toPlainText()
     assert "innym układzie" in rep and "wbpp-feed" in rep
@@ -168,14 +158,14 @@ def test_dry_mowi_o_innym_ukladzie_w_korzeniu(qapp, tmp_path, fake_settings, mon
     con.close()
 
 
-def test_dialog_auto_kopia_inny_wolumen(qapp, tmp_path, fake_settings, monkeypatch):
+def test_dialog_auto_kopia_inny_wolumen(qapp, tmp_path, ustawienia, monkeypatch):
     """Seriale źródeł ≠ serial celu → auto-KOPIA całości: słownictwo per tryb (wiz #5), rozmiar
     z kubełkiem NULL (R#5), nota „inny wolumen" na karcie; pliki po apply NIE są hardlinkami."""
     monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "INNY")
     con = db.open_db(str(tmp_path / "g2.db"))
     ids = _seed_files(con, tmp_path, 2, sizes=[100, None])
     root = tmp_path / "_WBPP" / "kopie"
-    _target(fake_settings, root)
+    _target(ustawienia, root)
     dlg = _dlg(con, ids)
     rep = dlg.report.toPlainText()
     assert "do skopiowania: 2" in rep
@@ -193,7 +183,7 @@ def test_dialog_auto_kopia_inny_wolumen(qapp, tmp_path, fake_settings, monkeypat
     con.close()
 
 
-def test_dialog_zniknieta_klatka_nie_przelacza_na_kopie(qapp, tmp_path, fake_settings, monkeypatch):
+def test_dialog_zniknieta_klatka_nie_przelacza_na_kopie(qapp, tmp_path, ustawienia, monkeypatch):
     """R2-1: frame bez obecnej kopii idzie do `pominięto` i NIE uczestniczy w decyzji — reszta na
     wolumenie celu zostaje przy hardlinkach."""
     monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
@@ -204,7 +194,7 @@ def test_dialog_zniknieta_klatka_nie_przelacza_na_kopie(qapp, tmp_path, fake_set
     con.execute("INSERT INTO location (frame_id, volume, path, present, size_bytes) VALUES (?,?,?,?,?)",
                 (99, "X", str(tmp_path / "lib" / "gone.fits"), 0, None))   # tylko zniknięta kopia
     con.commit()
-    _target(fake_settings, tmp_path / "_WBPP" / "feed")
+    _target(ustawienia, tmp_path / "_WBPP" / "feed")
     dlg = _dlg(con, ids + [99])
     rep = dlg.report.toPlainText()
     assert "do zlinkowania: 1" in rep
@@ -213,12 +203,12 @@ def test_dialog_zniknieta_klatka_nie_przelacza_na_kopie(qapp, tmp_path, fake_set
     con.close()
 
 
-def test_dialog_wymus_kopie_checkbox(qapp, tmp_path, fake_settings, monkeypatch):
+def test_dialog_wymus_kopie_checkbox(qapp, tmp_path, ustawienia, monkeypatch):
     """Tryb zaawansowany: „wymuś kopię" nadpisuje auto-decyzję hardlink (SMB-niewiadoma)."""
     monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
     con = db.open_db(str(tmp_path / "g4.db"))
     ids = _seed_files(con, tmp_path, 1)
-    _target(fake_settings, tmp_path / "_Review" / "x")
+    _target(ustawienia, tmp_path / "_Review" / "x")
     dlg = _dlg(con, ids)
     assert "do zlinkowania: 1" in dlg.report.toPlainText()
     dlg.chk_copy.setChecked(True)                         # zdarzenie dyskretne → świeży DRY
@@ -262,14 +252,14 @@ def _spy_progress(monkeypatch, hook=None):
     return seen
 
 
-def test_apply_offthread_postep_i_pasek(qapp, tmp_path, fake_settings, monkeypatch):
+def test_apply_offthread_postep_i_pasek(qapp, tmp_path, ustawienia, monkeypatch):
     """W1: apply idzie przez `ApplyWorker` z postępem per plik (pasek DETERMINOWANY `done/total` —
     apply zna liczbę z planu). Po biegu pasek wraca do postaci DRY (nieokreślony, schowany)."""
     monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
     con = db.open_db(str(tmp_path / "a1.db"))
     ids = _seed_files(con, tmp_path, 3)
     root = tmp_path / "_WBPP" / "feed"
-    _target(fake_settings, root)
+    _target(ustawienia, root)
     in_run = []
     seen = _spy_progress(monkeypatch, hook=lambda n, w: in_run.append(dlg.report.toPlainText()))
     dlg = _dlg(con, ids)
@@ -288,14 +278,14 @@ def test_apply_offthread_postep_i_pasek(qapp, tmp_path, fake_settings, monkeypat
     con.close()
 
 
-def test_apply_anulowanie_na_granicy_pliku(qapp, tmp_path, fake_settings, monkeypatch):
+def test_apply_anulowanie_na_granicy_pliku(qapp, tmp_path, ustawienia, monkeypatch):
     """„Anuluj" po pierwszym pliku: rdzeń przerywa PRZED kolejnym → na dysku 1 plik, raport mówi
     „Przerwano" (nie „Utworzono"), „Utwórz" gaśnie — kolejne wydanie wymaga świeżego DRY."""
     monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
     con = db.open_db(str(tmp_path / "a2.db"))
     ids = _seed_files(con, tmp_path, 3)
     root = tmp_path / "_WBPP" / "feed"
-    _target(fake_settings, root)
+    _target(ustawienia, root)
     _spy_progress(monkeypatch, hook=lambda n, w: w.request_cancel() if n == 1 else None)
     dlg = _dlg(con, ids)
     dlg._on_apply()
@@ -309,13 +299,13 @@ def test_apply_anulowanie_na_granicy_pliku(qapp, tmp_path, fake_settings, monkey
     con.close()
 
 
-def test_apply_zamraza_parametry_w_biegu(qapp, tmp_path, fake_settings, monkeypatch):
+def test_apply_zamraza_parametry_w_biegu(qapp, tmp_path, ustawienia, monkeypatch):
     """Parametry (cel/układ/kopia/„Odśwież") ZABLOKOWANE w biegu — inaczej klik wywołałby
     `_invalidate` i wyzerował `self._plan`, który worker właśnie materializuje."""
     monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
     con = db.open_db(str(tmp_path / "a3.db"))
     ids = _seed_files(con, tmp_path, 2)
-    _target(fake_settings, tmp_path / "_WBPP" / "feed")
+    _target(ustawienia, tmp_path / "_WBPP" / "feed")
     frozen = []
     _spy_progress(monkeypatch, hook=lambda n, w: frozen.append((
         dlg.combo_layout.isEnabled(), dlg.chk_copy.isEnabled(), dlg.btn_dry.isEnabled(),
@@ -328,14 +318,14 @@ def test_apply_zamraza_parametry_w_biegu(qapp, tmp_path, fake_settings, monkeypa
     con.close()
 
 
-def test_apply_abort_sondy_osobnym_sygnalem(qapp, tmp_path, fake_settings, monkeypatch):
+def test_apply_abort_sondy_osobnym_sygnalem(qapp, tmp_path, ustawienia, monkeypatch):
     """Sonda pierwszego linku pada (SMB oddał kopię) → `ProjectionAbort` z wątku wraca sygnałem
     `aborted`: raport ABORT + wynik CZĘŚCIOWY, żadnego crashu, parametry odmrożone."""
     monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
     monkeypatch.setattr(projection, "_verify_content", lambda src, dst, nbytes=65536: False)
     con = db.open_db(str(tmp_path / "a4.db"))
     ids = _seed_files(con, tmp_path, 3)
-    _target(fake_settings, tmp_path / "_WBPP" / "feed")
+    _target(ustawienia, tmp_path / "_WBPP" / "feed")
     dlg = _dlg(con, ids)
     dlg._on_apply()
     rep = dlg.report.toPlainText()
@@ -347,13 +337,13 @@ def test_apply_abort_sondy_osobnym_sygnalem(qapp, tmp_path, fake_settings, monke
     con.close()
 
 
-def test_apply_blad_nie_zabija_dialogu(qapp, tmp_path, fake_settings, monkeypatch):
+def test_apply_blad_nie_zabija_dialogu(qapp, tmp_path, ustawienia, monkeypatch):
     """Wyjątek w klindze → sygnał `failed` (raport, nie crash); „Utwórz" gaśnie, bo dysk mógł się
     zmienić częściowo — kolejna próba przez „Odśwież podgląd"."""
     monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
     con = db.open_db(str(tmp_path / "a5.db"))
     ids = _seed_files(con, tmp_path, 1)
-    _target(fake_settings, tmp_path / "_WBPP" / "feed")
+    _target(ustawienia, tmp_path / "_WBPP" / "feed")
     dlg = _dlg(con, ids)
 
     def boom(*a, **kw):
@@ -369,7 +359,7 @@ def test_apply_blad_nie_zabija_dialogu(qapp, tmp_path, fake_settings, monkeypatc
     con.close()
 
 
-def test_apply_realny_qthread_pelny_cykl(qapp, tmp_path, fake_settings, monkeypatch):
+def test_apply_realny_qthread_pelny_cykl(qapp, tmp_path, ustawienia, monkeypatch):
     """Jedyny test na PRAWDZIWYM `QThread` (reszta jedzie inline): DRY i apply przechodzą przez
     `moveToThread` + sygnały kolejkowane + `_cleanup_apply_thread`. Bez niego cała maszyneria
     wątkowa byłaby niepokryta, a nazwa „off-thread" — obietnicą bez dowodu."""
@@ -377,7 +367,7 @@ def test_apply_realny_qthread_pelny_cykl(qapp, tmp_path, fake_settings, monkeypa
     con = db.open_db(str(tmp_path / "t1.db"))
     ids = _seed_files(con, tmp_path, 3)
     root = tmp_path / "_WBPP" / "feed"
-    _target(fake_settings, root)
+    _target(ustawienia, root)
     dlg = ProjectionDialog(con, ids, now_fn=lambda: NOW, off_thread=True)
     assert _wait_until(lambda: dlg.btn_apply.isEnabled())          # auto-DRY na własnym wątku
     dlg._on_apply()
@@ -389,7 +379,7 @@ def test_apply_realny_qthread_pelny_cykl(qapp, tmp_path, fake_settings, monkeypa
     con.close()
 
 
-def test_zamkniecie_w_biegu_anuluje_i_zostawia_okno(qapp, tmp_path, fake_settings, monkeypatch):
+def test_zamkniecie_w_biegu_anuluje_i_zostawia_okno(qapp, tmp_path, ustawienia, monkeypatch):
     """Zamknięcie (Zamknij/Esc/X) W BIEGU wydania = ŻĄDANIE ANULOWANIA, okno ZOSTAJE: nie ma
     czekania z timeoutem (kopia przez SMB przekracza każdy limit → wątek-sierota pod skasowanym
     rodzicem = „QThread: Destroyed while thread is still running"), a raport „Przerwano" ma dokąd
@@ -398,7 +388,7 @@ def test_zamkniecie_w_biegu_anuluje_i_zostawia_okno(qapp, tmp_path, fake_setting
     con = db.open_db(str(tmp_path / "t2.db"))
     ids = _seed_files(con, tmp_path, 3)
     root = tmp_path / "_WBPP" / "feed"
-    _target(fake_settings, root)
+    _target(ustawienia, root)
     dlg = _dlg(con, ids)
     dlg.show()
     _spy_progress(monkeypatch, hook=lambda n, w: dlg.done(0) if n == 1 else None)
@@ -412,13 +402,13 @@ def test_zamkniecie_w_biegu_anuluje_i_zostawia_okno(qapp, tmp_path, fake_setting
     con.close()
 
 
-def test_apply_blad_w_polowie_mowi_ile_powstalo(qapp, tmp_path, fake_settings, monkeypatch):
+def test_apply_blad_w_polowie_mowi_ile_powstalo(qapp, tmp_path, ustawienia, monkeypatch):
     """Błąd w POŁOWIE biegu: ścieżka anulowania mówi „nietknięte: N", ścieżka błędu musi powiedzieć,
     ile już powstało — inaczej user widzi samą awarię i nie wie o częściowym drzewie w celu."""
     monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
     con = db.open_db(str(tmp_path / "a6.db"))
     ids = _seed_files(con, tmp_path, 4)
-    _target(fake_settings, tmp_path / "_WBPP" / "feed")
+    _target(ustawienia, tmp_path / "_WBPP" / "feed")
     real_link = projection._link_to
 
     def boom_after_two(src, dst, *, do_apply, copy):
@@ -437,13 +427,13 @@ def test_apply_blad_w_polowie_mowi_ile_powstalo(qapp, tmp_path, fake_settings, m
     con.close()
 
 
-def test_apply_zamraza_caly_wiersz_karty(qapp, tmp_path, fake_settings, monkeypatch):
+def test_apply_zamraza_caly_wiersz_karty(qapp, tmp_path, ustawienia, monkeypatch):
     """Zamrożenie bierze CAŁY wiersz karty (`holder`), nie samo radio — inaczej nota trybu zostaje
     w pełnej jasności i blokada czyta się plamiasto."""
     monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
     con = db.open_db(str(tmp_path / "a7.db"))
     ids = _seed_files(con, tmp_path, 2)
-    _target(fake_settings, tmp_path / "_WBPP" / "feed")
+    _target(ustawienia, tmp_path / "_WBPP" / "feed")
     notes = []
     dlg = _dlg(con, ids)
     _spy_progress(monkeypatch, hook=lambda n, w: notes.append(dlg._cards[0]["note"].isEnabled()))
@@ -455,13 +445,13 @@ def test_apply_zamraza_caly_wiersz_karty(qapp, tmp_path, fake_settings, monkeypa
 
 # ---------- dialog: inwalidacja / generacje ----------
 
-def test_dialog_zmiana_ukladu_swiezy_dry_pod_nowe_parametry(qapp, tmp_path, fake_settings, monkeypatch):
+def test_dialog_zmiana_ukladu_swiezy_dry_pod_nowe_parametry(qapp, tmp_path, ustawienia, monkeypatch):
     """Zmiana układu = zdarzenie dyskretne: inwalidacja (generacja ++) + auto-DRY pod DOKŁADNIE nowe
     parametry; kontrakt `_invalidate` (bez świeżego DRY „Utwórz" gaśnie) zachowany."""
     monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
     con = db.open_db(str(tmp_path / "g5.db"))
     ids = _seed_files(con, tmp_path, 1)
-    _target(fake_settings, tmp_path / "_WBPP" / "a")
+    _target(ustawienia, tmp_path / "_WBPP" / "a")
     dlg = _dlg(con, ids)
     assert dlg._plan.layout == "po-obiektach"
     gen0 = dlg._gen
@@ -475,13 +465,13 @@ def test_dialog_zmiana_ukladu_swiezy_dry_pod_nowe_parametry(qapp, tmp_path, fake
     con.close()
 
 
-def test_dialog_stale_dry_odrzucony_i_retrigger(qapp, tmp_path, fake_settings, monkeypatch):
+def test_dialog_stale_dry_odrzucony_i_retrigger(qapp, tmp_path, ustawienia, monkeypatch):
     """R2-2: wynik DRY ze STARĄ generacją jest odrzucany (nie uzbraja „Utwórz" pod stare parametry)
     i planuje re-trigger; świeży przebieg uzbraja pod bieżące."""
     monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
     con = db.open_db(str(tmp_path / "g6.db"))
     ids = _seed_files(con, tmp_path, 2)
-    _target(fake_settings, tmp_path / "_WBPP" / "a")
+    _target(ustawienia, tmp_path / "_WBPP" / "a")
     dlg = _dlg(con, ids)
     dlg._invalidate()                                     # otwarte okno stale: gen++ bez DRY
     stale = {"plan": "STALE", "res": None, "auto_copy": False, "copy": False,
@@ -499,7 +489,7 @@ def test_dialog_stale_dry_odrzucony_i_retrigger(qapp, tmp_path, fake_settings, m
 
 # ---------- dialog: cele (dodawanie, walidacja, pamięć) ----------
 
-def test_dialog_walidacja_celu_przy_dodawaniu(qapp, tmp_path, fake_settings, monkeypatch):
+def test_dialog_walidacja_celu_przy_dodawaniu(qapp, tmp_path, ustawienia, monkeypatch):
     """Walidacja segmentu _WBPP/_Review przy DODAWANIU (raz — brief §3): zły cel nie powstaje;
     dobry powstaje, jest zaznaczony i auto-DRY startuje."""
     monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
@@ -516,7 +506,7 @@ def test_dialog_walidacja_celu_przy_dodawaniu(qapp, tmp_path, fake_settings, mon
     con.close()
 
 
-def test_dialog_cel_pamietany_miedzy_otwarciami(qapp, tmp_path, fake_settings, monkeypatch):
+def test_dialog_cel_pamietany_miedzy_otwarciami(qapp, tmp_path, ustawienia, monkeypatch):
     """Wiz #8: cel dodany w jednym otwarciu wraca jako domyślna karta w następnym (3→1 interakcji)."""
     monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
     con = db.open_db(str(tmp_path / "g8.db"))
@@ -530,7 +520,7 @@ def test_dialog_cel_pamietany_miedzy_otwarciami(qapp, tmp_path, fake_settings, m
     con.close()
 
 
-def test_dialog_bez_celu_szczery_komunikat(qapp, tmp_path, fake_settings):
+def test_dialog_bez_celu_szczery_komunikat(qapp, tmp_path, ustawienia):
     """Bez zapamiętanych celów dialog prosi o cel — zero DRY, „Utwórz" i „Odśwież" wyłączone (K5),
     wskaźnik biegu schowany (W2)."""
     con = db.open_db(str(tmp_path / "g9.db"))
@@ -559,7 +549,7 @@ def test_framesview_projekcja_pusta_perspektywa(qapp, tmp_path):
 
 # --- i18n: EN renderuje z katalogu (§4 rollout `projection_dialog`) ---
 
-def test_en_render_projekcja_z_katalogu(qapp, tmp_path, fake_settings, monkeypatch):
+def test_en_render_projekcja_z_katalogu(qapp, tmp_path, ustawienia, monkeypatch):
     """§5 (rollout projekcji): `set_lang('en')` PRZED budową → tytuł/etykiety/przyciski ORAZ raport
     DRY+apply (`_format`, `eta_text`) renderują EN z katalogu; `t_plural` przycisku „Create N links".
     Realny hardlink jak w teście 1-klik. Autouse-fixture `_reset_i18n_lang` wraca na PL."""
@@ -568,7 +558,7 @@ def test_en_render_projekcja_z_katalogu(qapp, tmp_path, fake_settings, monkeypat
     con = db.open_db(str(tmp_path / "en.db"))
     ids = _seed_files(con, tmp_path, 2)
     root = tmp_path / "_WBPP" / "feed"
-    _target(fake_settings, root)
+    _target(ustawienia, root)
     dlg = _dlg(con, ids)
     assert dlg.windowTitle() == "Serve to table"
     assert dlg.btn_add.text() == "+ another target…" and dlg.btn_apply.text() == "Create 2 links"
@@ -611,14 +601,14 @@ def test_report_outcome_zielono_tylko_przy_pelnym_sukcesie():
         assert pd_mod.report_outcome(_Res({**ok, bad: 1}), partial=False) == "warn", bad
 
 
-def test_show_report_koloruje_naglowek_nie_ruszajac_tekstu(qapp, tmp_path, fake_settings, monkeypatch):
+def test_show_report_koloruje_naglowek_nie_ruszajac_tekstu(qapp, tmp_path, ustawienia, monkeypatch):
     """Kolor to warstwa FORMATU: `toPlainText()` oddaje dokładnie to, co weszło (kontrakt „raport
     zaczyna się od «Przerwano»" trzyma), a pierwszy blok dostaje kolor roli i bold. Drugi blok
     zostaje bez koloru — inaczej kolorowałby się cały słupek liczb."""
     monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
     con = db.open_db(str(tmp_path / "col.db"))
     ids = _seed_files(con, tmp_path, 1)
-    _target(fake_settings, tmp_path / "_WBPP" / "feed")
+    _target(ustawienia, tmp_path / "_WBPP" / "feed")
     dlg = _dlg(con, ids)
     dlg._show_report("Utworzono\nzlinkowano: 1", "ok")
     assert dlg.report.toPlainText() == "Utworzono\nzlinkowano: 1"
@@ -630,13 +620,13 @@ def test_show_report_koloruje_naglowek_nie_ruszajac_tekstu(qapp, tmp_path, fake_
     con.close()
 
 
-def test_show_report_bez_werdyktu_nie_maluje(qapp, tmp_path, fake_settings, monkeypatch):
+def test_show_report_bez_werdyktu_nie_maluje(qapp, tmp_path, ustawienia, monkeypatch):
     """`outcome=None` (sonda, plan, podgląd) zostaje w kolorze tekstu — neutralność też jest
     komunikatem, a pomalowanie planu na zielono obiecywałoby skutek, którego nie było."""
     monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
     con = db.open_db(str(tmp_path / "col2.db"))
     ids = _seed_files(con, tmp_path, 1)
-    _target(fake_settings, tmp_path / "_WBPP" / "feed")
+    _target(ustawienia, tmp_path / "_WBPP" / "feed")
     dlg = _dlg(con, ids)
     dlg._show_report("Sonduję cel…")
     head = _block_fmt(dlg.report, 0)
@@ -652,13 +642,13 @@ def test_use_theme_przelacza_kolory_naglowka():
     assert pd_mod._COLORS["error"].name().lower() == theme.accents("dark")["exclusion_red"].lower()
 
 
-def test_zlota_akcja_ma_wage_wizualna(qapp, tmp_path, fake_settings, monkeypatch):
+def test_zlota_akcja_ma_wage_wizualna(qapp, tmp_path, ustawienia, monkeypatch):
     """Wiz F3 #3: terminalna akcja dialogu odróżnia się od dwóch pomocniczych obok (bold + wysokość
     jak „Przyjmij nowe" Dostawy). Bez tego [Odśwież][Utwórz][Zamknij] czytało się jak trzy bliźniaki."""
     monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
     con = db.open_db(str(tmp_path / "gold.db"))
     ids = _seed_files(con, tmp_path, 1)
-    _target(fake_settings, tmp_path / "_WBPP" / "feed")
+    _target(ustawienia, tmp_path / "_WBPP" / "feed")
     dlg = _dlg(con, ids)
     assert dlg.btn_apply.font().bold() and dlg.btn_apply.minimumHeight() == 34
     assert not dlg.btn_dry.font().bold()                  # pomocnicza zostaje pomocniczą
@@ -682,13 +672,13 @@ def test_report_head_key_powtorka_nie_glosi_utworzenia():
     assert pd_mod.report_outcome(_Res({"linked": 0, "exists": 4}), partial=False) == "ok"
 
 
-def test_powtorne_wydanie_mowi_nic_nowego(qapp, tmp_path, fake_settings, monkeypatch):
+def test_powtorne_wydanie_mowi_nic_nowego(qapp, tmp_path, ustawienia, monkeypatch):
     """Pełna droga na PRAWDZIWYCH plikach: wydanie → świeży DRY → wydanie na ten sam cel."""
     monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
     con = db.open_db(str(tmp_path / "rep.db"))
     ids = _seed_files(con, tmp_path, 2)
     root = tmp_path / "_WBPP" / "feed"
-    _target(fake_settings, root)
+    _target(ustawienia, root)
     dlg = _dlg(con, ids)
     dlg._on_apply()
     assert dlg.report.toPlainText().startswith("Utworzono")
@@ -700,7 +690,7 @@ def test_powtorne_wydanie_mowi_nic_nowego(qapp, tmp_path, fake_settings, monkeyp
     con.close()
 
 
-def test_wydanie_zostawia_slad_po_zamknieciu(qapp, tmp_path, fake_settings, monkeypatch):
+def test_wydanie_zostawia_slad_po_zamknieciu(qapp, tmp_path, ustawienia, monkeypatch):
     """Wizytacja P-C #4: po `exec()` okno główne nie niosło ANI SŁOWA o wydaniu — jedynym trwałym
     zapisem był `_PROJEKCJA.json` w celu, czyli poza aplikacją. Zdanie składa dialog (tam liczby
     są świeże), `grid` je tylko przekazuje na statusbar."""
@@ -708,7 +698,7 @@ def test_wydanie_zostawia_slad_po_zamknieciu(qapp, tmp_path, fake_settings, monk
     con = db.open_db(str(tmp_path / "slad.db"))
     ids = _seed_files(con, tmp_path, 2)
     root = tmp_path / "_WBPP" / "feed"
-    _target(fake_settings, root)
+    _target(ustawienia, root)
     dlg = _dlg(con, ids)
     assert dlg.summary is None                             # przed wydaniem nie ma czego głosić
     dlg._on_apply()

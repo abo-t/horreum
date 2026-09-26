@@ -32,8 +32,9 @@ def _izoluj_qsettings(tmp_path_factory, monkeypatch):
     rejestru i oba te mechanizmy ignoruje (sonda 2026-09-26, PySide6 6.9.2). Podmiana łapie KAŻDE
     utworzenie - w każdym module, także importowanym leniwie - i kieruje je do pliku INI w katalogu
     TEGO testu (świeże ustawienia per test, poza `tmp_path`, żeby nie mieszać testom listingu
-    katalogu). Monkeypatch wartości na klasie w pojedynczych testach działa dalej. Bramka:
-    `test_main_NIE_rusza_rejestru_usera`."""
+    katalogu). Test, który chce czytać albo wstawiać ustawienia, bierze fixture `ustawienia`.
+    Bramki: `test_main_NIE_rusza_rejestru_usera` (ścieżka `main()`) i `_straznik_rejestru_usera`
+    (cała bateria)."""
     try:
         from PySide6.QtCore import QSettings
     except ImportError:                 # `.venv` bez Qt - nie ma czego izolować
@@ -47,6 +48,62 @@ def _izoluj_qsettings(tmp_path_factory, monkeypatch):
 
     monkeypatch.setattr(QSettings, "__init__", _init_w_pliku)
     yield
+
+
+@pytest.fixture
+def ustawienia(_izoluj_qsettings):
+    """Ustawienia aplikacji widziane przez test - te same, które czyta i pisze kod produktu
+    (`QSettings("Horreum", "Horreum")`), już w pliku INI tego testu. Zamiast słownika podstawionego
+    pod `value`/`setValue`: test przechodzi przez prawdziwy zapis i odczyt Qt."""
+    from PySide6.QtCore import QSettings
+    return QSettings("Horreum", "Horreum")
+
+
+def _rejestr_horreum():
+    """Płaski zrzut `HKCU\\Software\\Horreum\\Horreum` z podkluczami: `{"ui/theme": (wartość, typ)}`;
+    `{}`, gdy klucza nie ma albo system nie ma rejestru."""
+    try:
+        import winreg
+    except ImportError:
+        return {}
+
+    def _zbierz(klucz, prefiks, out):
+        n_pod, n_wart, _ = winreg.QueryInfoKey(klucz)
+        for i in range(n_wart):
+            nazwa, wartosc, typ = winreg.EnumValue(klucz, i)
+            out[prefiks + nazwa] = (wartosc, typ)
+        for i in range(n_pod):
+            nazwa = winreg.EnumKey(klucz, i)
+            with winreg.OpenKey(klucz, nazwa) as k:
+                _zbierz(k, prefiks + nazwa + "/", out)
+
+    out = {}
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Horreum\Horreum") as k:
+            _zbierz(k, "", out)
+    except FileNotFoundError:
+        pass
+    return out
+
+
+@pytest.fixture
+def zrzut_rejestru():
+    """Funkcja zrzutu rejestru usera dla bramek, które mierzą go przed i po geście."""
+    return _rejestr_horreum
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _straznik_rejestru_usera():
+    """Strażnik CAŁEJ baterii: rejestr usera po ostatnim teście ma być taki jak przed pierwszym.
+    Łapie wyciek z dowolnego testu, także przyszłego i omijającego `_izoluj_qsettings`; porażka
+    wychodzi jako ERROR przy teardownie ostatniego testu, z nazwami zmienionych kluczy.
+    Fałszywy alarm: prawdziwy Horreum uruchomiony W TRAKCIE baterii też zapisuje rejestr."""
+    przed = _rejestr_horreum()
+    yield
+    po = _rejestr_horreum()
+    zmiany = {k: (przed.get(k), po.get(k)) for k in sorted(przed.keys() | po.keys())
+              if przed.get(k) != po.get(k)}
+    assert not zmiany, f"bateria zmieniła prawdziwe ustawienia usera (klucz: przed, po): {zmiany}"
 
 
 @pytest.fixture

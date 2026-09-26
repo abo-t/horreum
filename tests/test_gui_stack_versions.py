@@ -267,10 +267,7 @@ def qapp():
 
 @pytest.fixture
 def view(qapp, wcon, monkeypatch):
-    from PySide6.QtCore import QSettings
     from horreum.gui.grid import FramesView
-    monkeypatch.setattr(QSettings, "value", lambda self, k, d=None: d)
-    monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: None)
     v = FramesView(wcon, now_fn=lambda: NOW)
     v._writeback_async = False
     v.komunikaty = []

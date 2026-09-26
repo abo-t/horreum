@@ -168,15 +168,11 @@ def test_etap_pipeline_wylacza_akcje_osi_R5(qapp, tmp_path):
         win.close()
 
 
-def test_menu_widok_przelacza_motyw(qapp, tmp_path, monkeypatch):
+def test_menu_widok_przelacza_motyw(qapp, tmp_path, ustawienia):
     """F6 §7: menu Widok odbija bieżący motyw bez klikania (default ciemny — recenzja #6);
     `_on_theme` podmienia kolory stanów gridu na żywo i utrwala wybór w QSettings (recenzja #7)."""
-    from PySide6.QtCore import QSettings
     from PySide6.QtGui import QColor
     from horreum.gui import grid as grid_mod, theme
-    store = {}
-    monkeypatch.setattr(QSettings, "value", lambda self, k, d=None: store.get(k, d))
-    monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: store.__setitem__(k, v))
     win = MainWindow(_seeded_db(tmp_path))
     try:
         # menu odbija DEFAULT (ciemny) — zaznaczony „Ciemny", nie „Jasny"
@@ -185,7 +181,7 @@ def test_menu_widok_przelacza_motyw(qapp, tmp_path, monkeypatch):
         # przełącz na jasny: kolory gridu podmienione, wybór utrwalony (po apply — recenzja #7)
         win._on_theme("light")
         assert grid_mod._COLORS["group_bg"] == QColor(theme.grid_colors("light")["group_bg"])
-        assert store["ui/theme"] == "light"
+        assert ustawienia.value("ui/theme") == "light"
         # P-C: `apply_theme` przełącza TEŻ kolory nagłówka raportu projekcji — moduł ma własne
         # `_COLORS` (QSS ról nie sięga QPlainTextEdit), więc pominięcie go w apply zostawiłoby
         # dialog na kolorach ciemnych w jasnej skórce (ta sama pułapka co planer, wiz T5 R2).
@@ -194,20 +190,16 @@ def test_menu_widok_przelacza_motyw(qapp, tmp_path, monkeypatch):
         # z powrotem na ciemny — kolory wracają, facet refresh_theme nie wybucha
         win._on_theme("dark")
         assert grid_mod._COLORS["group_bg"] == QColor(theme.grid_colors("dark")["group_bg"])
-        assert store["ui/theme"] == "dark"
+        assert ustawienia.value("ui/theme") == "dark"
     finally:
         win.close()
         grid_mod.use_theme(theme.DEFAULT)              # przywróć globalny stan modułu dla innych testów
 
 
-def test_menu_widok_wybor_jezyka(qapp, tmp_path, monkeypatch):
+def test_menu_widok_wybor_jezyka(qapp, tmp_path, ustawienia):
     """#1: menu &Widok niesie sekcję języka (endonimy), zaznaczenie odbija ŻYWY język sesji
     (D-L1 restart-required: `_on_lang` utrwala `ui/lang`, NIE stosuje na żywo — nota w statusbarze)."""
-    from PySide6.QtCore import QSettings
     from horreum.gui import i18n
-    store = {}
-    monkeypatch.setattr(QSettings, "value", lambda self, k, d=None: store.get(k, d))
-    monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: store.__setitem__(k, v))
     i18n.set_lang("pl")                                  # symuluj żywy język sesji (ustawia go `main`)
     win = MainWindow(_seeded_db(tmp_path))
     try:
@@ -215,7 +207,7 @@ def test_menu_widok_wybor_jezyka(qapp, tmp_path, monkeypatch):
         assert win._lang_actions["pl"].isChecked()       # menu odbija żywy PL bez klikania
         assert not win._lang_actions["en"].isChecked()
         win._on_lang("en")                               # wybór EN — utrwalony, sesja NIE przełącza
-        assert store["ui/lang"] == "en"
+        assert ustawienia.value("ui/lang") == "en"
         assert i18n.current_lang() == "pl"               # D-L1: zmiana zadziała po restarcie
     finally:
         win.close()
@@ -637,30 +629,8 @@ def test_start_aplikacji_POKAZUJE_OKNO_ZANIM_czyta_baze(qapp, tmp_path, monkeypa
             w.close()
 
 
-def _rejestr_horreum():
-    """Pełny zrzut `HKCU\\Software\\Horreum\\Horreum` (wartości + podklucze rekurencyjnie);
-    `None`, gdy klucza nie ma."""
-    import winreg
-
-    def _zrzut(klucz):
-        n_pod, n_wart, _ = winreg.QueryInfoKey(klucz)
-        wartosci = {winreg.EnumValue(klucz, i)[0]: winreg.EnumValue(klucz, i)[1:] for i in range(n_wart)}
-        pod = {}
-        for i in range(n_pod):
-            nazwa = winreg.EnumKey(klucz, i)
-            with winreg.OpenKey(klucz, nazwa) as k:
-                pod[nazwa] = _zrzut(k)
-        return wartosci, pod
-
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Horreum\Horreum") as k:
-            return _zrzut(k)
-    except FileNotFoundError:
-        return None
-
-
 @pytest.mark.skipif(os.name != "nt", reason="rejestr = natywne QSettings tylko na Windows")
-def test_main_NIE_rusza_rejestru_usera(qapp, tmp_path, monkeypatch):
+def test_main_NIE_rusza_rejestru_usera(qapp, tmp_path, monkeypatch, ustawienia, zrzut_rejestru):
     """Bateria pisała do PRAWDZIWYCH ustawień usera: 2026-09-26 `ostatnia_baza` w rejestrze
     wskazywała `...\\pytest-1976\\test_start_aplikacji_POKAZUJE_0\\s8.db`, więc zwykły start
     Horreum otwierał bazę z katalogu pytesta. Izolację trzyma autouse `_izoluj_qsettings`
@@ -681,17 +651,15 @@ def test_main_NIE_rusza_rejestru_usera(qapp, tmp_path, monkeypatch):
     monkeypatch.setattr(app_mod.MainWindow, "show", _show)
     monkeypatch.setattr(app_mod.QApplication, "exec", lambda self: 0)
 
-    przed = _rejestr_horreum()
+    przed = zrzut_rejestru()
     baza = _seeded_db(tmp_path)
     try:
         app_mod.main([baza])
         (win,) = okna
         win._on_lang("en")
         win._on_theme(theme.DEFAULT)
-        assert _rejestr_horreum() == przed, "test zapisał do prawdziwych ustawień usera (rejestr)"
+        assert zrzut_rejestru() == przed, "test zapisał do prawdziwych ustawień usera (rejestr)"
 
-        from PySide6.QtCore import QSettings
-        ustawienia = QSettings("Horreum", "Horreum")
         assert ustawienia.value("ostatnia_baza") == baza, "zapis ostatniej bazy w ogóle nie zaszedł"
         assert ustawienia.value("ui/lang") == "en"
         assert not ustawienia.fileName().startswith("\\HKEY_"), ustawienia.fileName()

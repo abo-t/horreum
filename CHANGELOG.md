@@ -6,6 +6,19 @@ schemat i API mogą się jeszcze zmieniać.
 
 ## [Niewydane]
 
+### Dodane
+
+- **Kopia nieczytelna mówi, KTÓRA to sytuacja: dysk czy plik.** Wiersz „kopie nieczytelne" mówił
+  jedną liczbą i tym samym zdaniem oskarżał plik - także wtedy, gdy zawiódł dostęp do dysku, a plik
+  był zdrowy. Teraz baza zapamiętuje przy każdej oznaczonej kopii rodzaj awarii i diagnozę ostatniej
+  próby odczytu: „dysk/dostęp: …" (system nie oddał bajtów - sprawdź wolumin i uprawnienia),
+  „nagłówek nie przechodzi parsera: …" (plik do zgłoszenia albo naprawy) albo „baza danych: …"
+  (błąd po stronie programu - powtórz skan). Podpowiedź wiersza w kolejce przeglądu podaje rozbicie
+  po rodzaju, kolumna „Powód" w panelu kopii stawia rodzaj przed diagnozą, a podpowiedź naprawy
+  kieruje do tej kolumny zamiast kazać „odzyskać plik". Kopia przemianowana po oznaczeniu nie gubi
+  już powodu (dotąd szukany był w dzienniku po starej ścieżce). Schemat bazy rośnie do wersji 19;
+  migracja przy pierwszym otwarciu, bez ruszania istniejących wierszy.
+
 ### Naprawione
 
 - **Pusty ekran mówi, co zasłania klatki - i jednym kliknięciem je odsłania.** Gdy gest zdjął
@@ -43,6 +56,37 @@ schemat i API mogą się jeszcze zmieniać.
 
 - **Kolejka przeglądu obiektów nie rezerwuje pustego miejsca.** Lista kolejki zwija się do swojej
   treści, a „Biblioteka" obiektów pokazuje prawie dwa razy więcej wierszy (19 zamiast 10).
+
+- **„Przywróć cofnięte przypisanie" liczy tak samo, jak dwa sąsiednie gesty.** Przy 120
+  zaznaczonych klatkach, z których 30 było cofniętych, zdanie mówiło „Przywrócono przypisanie na
+  30 z 30 klatek" - reszta zaznaczenia nie liczyła się nigdzie, a nagrobki bez zapamiętanego obiektu
+  dostawały osobne zdanie. Teraz trzy gesty osi obiektu mówią jedną gramatyką: „Przywrócono
+  przypisanie na 30 z 120 klatek · kalibracja: N · nie było czego przywrócić: N · bez zapamiętanego
+  obiektu: N", a gdy nie ma czego przywrócić - „0 z N" z tym samym rozbiciem, bez osobnego
+  komunikatu. To samo rozbicie dostały „Zatwierdź ze ścieżki…" (dotąd sumowało liczby bez powodów)
+  i „Przypisz obiekt…" z kolejki (dotąd płaskie „pominięto N"). Klatki, których klinga nie zapisała
+  przez własny błąd (na przykład konflikt nazwy), mają własny człon zamiast udawać „zmieniły się
+  w międzyczasie".
+
+- **Remis w kolejce przeglądu rozstrzyga porządek naturalny nazwy.** Pozycje o równej liczbie
+  klatek stały w porządku znaków: „Caldwell 12" przed „Caldwell 3", „NGC 700" przed „NGC 7000".
+  Teraz liczba w nazwie liczy się jak liczba; suma klatek dalej prowadzi, a obie połówki tej samej
+  nazwy (nietknięta i cofnięta ręką) stoją obok siebie.
+
+- **„Zniknięte" nie pokazuje klatki, której gest wycofania nie zamknie.** Klatka zastąpiona
+  następczynią, której jedyna kopia zniknęła z dysku, trafiała do listy roboty „Zniknięte", a
+  „Wycofaj" ją odrzucał. Teraz zostaje wyłącznie w „Zastąpione"; licznik w Porządkach i podsumowanie
+  passa obecności liczą to samo.
+
+- **Klatka bez rozpoznanego formatu nie wypada z kolejki po cichu.** Light bez zapisanego formatu
+  pliku nie trafiał ani do „bez nazwy w nagłówku", ani do „format bez karty (RAW)", choć widok
+  „Do przeglądu" go pokazywał - suma kubełków kolejki nie zgadzała się z widokiem. Teraz format
+  nieznany liczy się jak każdy light z kartą (droga naprawy: karta w nagłówku albo ręka).
+
+- **Kolumna „Powód" w panelu kopii mieści się bez przewijania.** Realna diagnoza błędu dostępu
+  powtarzała pełną ścieżkę pliku i rozpychała kolumnę na dwie szerokości panelu, zgniatając
+  „Ścieżkę" do kilkunastu znaków. Diagnoza nie powtarza już ścieżki (niesie ją własna kolumna
+  i podpowiedź), a resztę miejsca dostaje „Powód".
 
 ## [0.9.1] - 2026-08-16
 

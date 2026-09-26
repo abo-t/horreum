@@ -762,46 +762,126 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
 
         if "header_hash" not in changed or raw_json is None:
             return result
-        hot = dict(hot_fields or {})
-        g = hot.get
-        cur = con.execute(
-            "UPDATE header SET raw_json = ?, date_obs = ?, exptime = ?, filter_raw = ?, "
-            "instrume = ?, telescop = ?, focallen = ?, focratio_raw = ?, xpixsz = ?, ypixsz = ?, "
-            "gain = ?, offset_adu = ?, ccd_temp = ?, usblimit = ?, xbinning = ?, ybinning = ?, "
-            "bayerpat = ?, ra_deg = ?, dec_deg = ?, object_raw = ? WHERE frame_id = ?",
-            (raw_json, g("date_obs"), g("exptime"), g("filter_raw"), g("instrume"),
-             g("telescop"), g("focallen"), g("focratio_raw"), g("xpixsz"), g("ypixsz"),
-             g("gain"), g("offset_adu"), g("ccd_temp"), g("usblimit"), g("xbinning"),
-             g("ybinning"), g("bayerpat"), g("ra_deg"), g("dec_deg"), g("object_raw"),
-             frame_id))
-        if cur.rowcount == 0:                         # frame bez zeznania (brzeg) → INSERT
-            con.execute(
-                "INSERT INTO header(frame_id, raw_json, date_obs, exptime, filter_raw, "
-                "instrume, telescop, focallen, focratio_raw, xpixsz, ypixsz, gain, offset_adu, "
-                "ccd_temp, usblimit, xbinning, ybinning, bayerpat, ra_deg, dec_deg, object_raw) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (frame_id, raw_json, g("date_obs"), g("exptime"), g("filter_raw"), g("instrume"),
-                 g("telescop"), g("focallen"), g("focratio_raw"), g("xpixsz"), g("ypixsz"),
-                 g("gain"), g("offset_adu"), g("ccd_temp"), g("usblimit"), g("xbinning"),
-                 g("ybinning"), g("bayerpat"), g("ra_deg"), g("dec_deg"), g("object_raw")))
-        con.execute("DELETE FROM cards WHERE frame_id = ?", (frame_id,))
-        if cards:
-            _insert_cards(con, frame_id, cards)
-        emit_event(con, actor=actor, verb="header.refreshed", target=f"frame:{frame_id}",
-                   now=now, payload={"header_hash_before": row["header_hash"],
-                                     "header_hash_after": header_hash})
         result["header"] = True
-
-        fr = con.execute("SELECT camera_id, kind FROM frame WHERE id = ?", (frame_id,)).fetchone()
-        if (fr["camera_id"], fr["kind"]) != (camera_id, kind):
-            con.execute("UPDATE frame SET camera_id = ?, kind = ? WHERE id = ?",
-                        (camera_id, kind, frame_id))
-            emit_event(con, actor=actor, verb="frame.rederived", target=f"frame:{frame_id}",
-                       now=now,
-                       payload={"before": {"camera_id": fr["camera_id"], "kind": fr["kind"]},
-                                "after": {"camera_id": camera_id, "kind": kind}})
-            result["rederived"] = True
+        result["rederived"] = _rewrite_testimony(
+            con, frame_id=frame_id, raw_json=raw_json, cards=cards, hot_fields=hot_fields,
+            camera_id=camera_id, kind=kind, now=now, actor=actor, verb="header.refreshed",
+            payload={"header_hash_before": row["header_hash"], "header_hash_after": header_hash})
     return result
+
+
+# Pola gorące `header` w kolejności literału niżej - JEDNA lista dla przepisania zeznania i dla
+# payloadu przejęcia (`adopt_testimony` opisuje, które z nich zmieniło wartość).
+_HEADER_HOT = ("date_obs", "exptime", "filter_raw", "instrume", "telescop", "focallen",
+               "focratio_raw", "xpixsz", "ypixsz", "gain", "offset_adu", "ccd_temp", "usblimit",
+               "xbinning", "ybinning", "bayerpat", "ra_deg", "dec_deg", "object_raw")
+
+
+def _rewrite_testimony(con, *, frame_id, raw_json, cards, hot_fields, camera_id, kind, now,
+                       actor, verb, payload):
+    """RDZEŃ PRZEPISANIA ZEZNANIA klatki - wspólny dla odświeżenia po zmianie odcisku nagłówka
+    (`refresh_location`, `header.refreshed`) i dla przejęcia zeznania ocalałej kopii
+    (`adopt_testimony`, `header.adopted`). Dwie kopie tego ciągu rozjechałyby się przy pierwszej
+    nowej kolumnie `header`: jedna droga pisałaby ją, druga zostawiała stęchłą.
+
+    Wołane WEWNĄTRZ transakcji wołającego. Pełny re-record `header` (raw_json + WSZYSTKIE pola
+    gorące; frame bez zeznania → INSERT), WYMIANA `cards` (lustro bieżącego zeznania, nie historia),
+    event `verb` z `payload`, a po nim przeliczenie pochodnych frame'a (`camera_id`/`kind` →
+    `frame.rederived`) - kolejność zdarzeń jest ta sama, co przed wydzieleniem. Zwraca bool:
+    czy pochodne się zmieniły."""
+    hot = dict(hot_fields or {})
+    g = hot.get
+    cur = con.execute(
+        "UPDATE header SET raw_json = ?, date_obs = ?, exptime = ?, filter_raw = ?, "
+        "instrume = ?, telescop = ?, focallen = ?, focratio_raw = ?, xpixsz = ?, ypixsz = ?, "
+        "gain = ?, offset_adu = ?, ccd_temp = ?, usblimit = ?, xbinning = ?, ybinning = ?, "
+        "bayerpat = ?, ra_deg = ?, dec_deg = ?, object_raw = ? WHERE frame_id = ?",
+        (raw_json, *(g(k) for k in _HEADER_HOT), frame_id))
+    if cur.rowcount == 0:                         # frame bez zeznania (brzeg) → INSERT
+        con.execute(
+            "INSERT INTO header(frame_id, raw_json, date_obs, exptime, filter_raw, "
+            "instrume, telescop, focallen, focratio_raw, xpixsz, ypixsz, gain, offset_adu, "
+            "ccd_temp, usblimit, xbinning, ybinning, bayerpat, ra_deg, dec_deg, object_raw) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (frame_id, raw_json, *(g(k) for k in _HEADER_HOT)))
+    con.execute("DELETE FROM cards WHERE frame_id = ?", (frame_id,))
+    if cards:
+        _insert_cards(con, frame_id, cards)
+    emit_event(con, actor=actor, verb=verb, target=f"frame:{frame_id}", now=now, payload=payload)
+
+    fr = con.execute("SELECT camera_id, kind FROM frame WHERE id = ?", (frame_id,)).fetchone()
+    if (fr["camera_id"], fr["kind"]) == (camera_id, kind):
+        return False
+    con.execute("UPDATE frame SET camera_id = ?, kind = ? WHERE id = ?",
+                (camera_id, kind, frame_id))
+    emit_event(con, actor=actor, verb="frame.rederived", target=f"frame:{frame_id}", now=now,
+               payload={"before": {"camera_id": fr["camera_id"], "kind": fr["kind"]},
+                        "after": {"camera_id": camera_id, "kind": kind}})
+    return True
+
+
+def adopt_testimony(con, *, location_id, sha1_data, header_hash, raw_json, cards, hot_fields,
+                    camera_id, kind, now, actor):
+    """PRZEJĘCIE ZEZNANIA klatki przez WSKAZANĄ kopię: `header` + `cards` + pochodne frame'a
+    (`camera_id`/`kind`) z nagłówka pliku tej kopii, przeczytanego przed chwilą przez wołającego.
+
+    DLACZEGO OSOBNA KLINGA, A NIE `refresh_location`: tamta przepisuje zeznanie wyłącznie przy
+    zmianie odcisku nagłówka TEJ lokacji (reguła N-lokacji: pierwsza kopia, potem ta, której nagłówek
+    zmienił się ostatnio). Gdy znika kopia, z której zeznanie pochodzi, ocalała kopia ma odcisk bez
+    zmian i skan ją pomija - `header` niósłby do końca świata zeznanie pliku, którego nie ma.
+    Rdzeń przepisania jest wspólny (`_rewrite_testimony`), różni się tylko przesłanka i ślad.
+
+    KTÓRA KOPIA - ROZSTRZYGA WOŁAJĄCY, NIE KLINGA. Wejście to `location_id` wskazanej kopii i jej
+    odczytany rekord; klinga nie zna reguły wyboru. Dziś woła ją etap Dostawy dla klatek o jednej
+    obecnej kopii (`scan.adopt_orphan_testimony`), jutro gest człowieka „ta kopia prowadzi" (AR-4)
+    przy kopiach, które mówią różnie - bez zmiany tej funkcji.
+
+    STRAŻNICY (pod `BEGIN IMMEDIATE`, TOCTOU wobec równoległego skanu):
+      * EXPECT: `sha1_data` rekordu (tożsamość liczona regułą skanu, z degeneracją) MUSI równać się
+        tożsamości klatki tej lokacji - inaczej wołający przeczytał plik cudzej klatki, a przejęcie
+        byłoby kłamstwem. Błąd wołania, nie stan danych → `ValueError`;
+      * kopia OBECNA (`present = 1`) i odcisk nagłówka rekordu == `location.header_hash`: plik niesie
+        dokładnie ten nagłówek, który baza zna. Inny odcisk = kopia zmieniła się od skanu i należy
+        do skanu (odświeży fakty kopii razem z zeznaniem); nieobecna = nie ma czego przejmować.
+        Oba → `'drift'`, ZERO zapisu.
+    Zeznanie już identyczne (`raw_json` i pola gorące bez zmian) → `'unchanged'`, ZERO zapisu i ZERO
+    eventu (idempotencja: drugi przebieg nie dopisuje dziennika).
+
+    Ślad: `event(header.adopted)` na `frame:` z payloadem „skąd → dokąd": `location_id`, `path`
+    i odcisk przejmującej kopii oraz `{pole: {before, after}}` pól gorących, które zmieniły wartość.
+    `actor` idzie do każdego eventu przejęcia (etap i gest ręki mają się w dzienniku odróżniać).
+
+    ZWRACA `'adopted'` | `'unchanged'` | `'drift'`."""
+    hot = dict(hot_fields or {})
+    with _immediate(con):
+        loc = con.execute(
+            "SELECT l.frame_id, l.path, l.present, l.header_hash, f.sha1_data "
+            "FROM location l JOIN frame f ON f.id = l.frame_id WHERE l.id = ?",
+            (location_id,)).fetchone()
+        if loc is None:
+            raise ValueError(f"location:{location_id} nie istnieje")
+        if loc["sha1_data"] != sha1_data:
+            raise ValueError(f"location:{location_id}: tożsamość rekordu {sha1_data!r} != "
+                             f"tożsamość klatki {loc['sha1_data']!r} - to nie jest ta klatka")
+        if not loc["present"] or header_hash is None or loc["header_hash"] != header_hash:
+            return "drift"
+        frame_id = loc["frame_id"]
+        before = con.execute(
+            "SELECT raw_json, date_obs, exptime, filter_raw, instrume, telescop, focallen, "
+            "focratio_raw, xpixsz, ypixsz, gain, offset_adu, ccd_temp, usblimit, xbinning, "
+            "ybinning, bayerpat, ra_deg, dec_deg, object_raw FROM header WHERE frame_id = ?",
+            (frame_id,)).fetchone()
+        changed = {k: {"before": None if before is None else before[k], "after": hot.get(k)}
+                   for k in _HEADER_HOT
+                   if (None if before is None else before[k]) != hot.get(k)}
+        if before is not None and before["raw_json"] == raw_json and not changed:
+            return "unchanged"
+        _rewrite_testimony(
+            con, frame_id=frame_id, raw_json=raw_json, cards=cards, hot_fields=hot,
+            camera_id=camera_id, kind=kind, now=now, actor=actor, verb="header.adopted",
+            payload={"location_id": location_id, "path": loc["path"], "header_hash": header_hash,
+                     "changed": changed})
+    return "adopted"
 
 
 def record_copy_facts(con, *, location_id, copy_facts, now, actor="backfill:copies"):

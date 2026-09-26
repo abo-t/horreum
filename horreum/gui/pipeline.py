@@ -96,7 +96,10 @@ class PipelineWorker(QObject):
             elif self._stage == "delta":
                 self._bulk(con, "delta")
             elif self._stage in ("presence", "presence-apply"):
-                self._presence(con, apply=self._stage.endswith("apply"))
+                apply = self._stage.endswith("apply")
+                s = self._presence(con, apply=apply)
+                if apply and not s.cancelled and s.aborted is None:
+                    self._after_vanished(con)
             elif self._stage == "all":
                 self._run_all(con)
             else:
@@ -174,9 +177,25 @@ class PipelineWorker(QObject):
             now=self._now(), should_cancel=self._cancel.is_set)
         if s.cancelled:
             self.cancelled.emit(name, s)
-            return False
-        self.stage_done.emit(name, s)
-        return True
+        else:
+            self.stage_done.emit(name, s)
+        return s
+
+    def _after_vanished(self, con):
+        """Ogon gestu „Oznacz zniknięte" (AR-5): przejęcie zeznania i - gdy coś przejęto - pochodne
+        (`group` → `resolve` → `calibrate` → `lineage`), w tej samej kolejności co w Dostawie.
+
+        DLACZEGO TU, a nie dopiero w następnej dostawie: oznaczenie zniknięcia jest dokładnie tą
+        chwilą, w której klatka zaczyna mówić głosem nieobecnego pliku. Bez ogona stan trwał do
+        najbliższego „Przyjmij nowe" i był NIEWIDOCZNY - wiersz Porządków liczy tylko to, czego etap
+        nie naprawi sam. Pochodne idą wyłącznie po realnym przejęciu: bez niego zeznania nic nie
+        ruszyło, więc przeliczanie całego archiwum byłoby kosztem bez skutku. Zakres = korzeń
+        zamrożony przy DRY (`root` z parametrów gestu), jak sam zapis obecności."""
+        a = self._adopt_testimony(con)
+        if a is None or a.cancelled or not a.adopted:
+            return
+        for name in ("group", "resolve", "calibrate", "lineage"):
+            self._bulk(con, name)
 
     def _bulk(self, con, name):
         """Etap masowy (group/resolve/calibrate/lineage/delta) — bezobsługowy, sekundy–minuty, bez
@@ -203,10 +222,18 @@ class PipelineWorker(QObject):
         Kalibracja stoi PO resolverze, bo przepis flata bierze `frame.filter_canon`, a wypełnia go
         dopiero `run_resolver` (`resolver.py:137`) — odwrotna kolejność wyłoniłaby przepisy flatów
         z pustym filtrem, a następny przebieg przepiąłby te klatki do innego profilu. Rodowód stoi
-        PO kalibracji, bo dopasowuje light do profili, które `calibrate` dopiero wyłania."""
+        PO kalibracji, bo dopasowuje light do profili, które `calibrate` dopiero wyłania.
+
+        Przejęcie zeznania (AR-5) stoi PO faktach kopii i PRZED `group`: predykat porównuje zeznanie
+        klatki z faktami kopii, więc bez uzupełnienia nie ma czego porównać, a każdy etap od `group`
+        w górę czyta `header` (oś teleskopu, `filter_canon`, przepis flata, rodowód). Przejęcie po nich
+        zostawiłoby pochodne policzone z głosu nieobecnego pliku do NASTĘPNEJ dostawy."""
         if not self._scan(con):
             return
         if not self._copy_facts(con):
+            return
+        a = self._adopt_testimony(con)
+        if a is not None and a.cancelled:
             return
         self._bulk(con, "group")
         self._bulk(con, "resolve")
@@ -250,6 +277,36 @@ class PipelineWorker(QObject):
         self.stage_done.emit("copy_facts", s)
         return True
 
+    def _adopt_testimony(self, con):
+        """Przejęcie zeznania ocalałej kopii (AR-5) - etap „Przyjmij nowe" zaraz po faktach kopii.
+
+        Sterowany STANEM (`scan.adopt_candidates`): klatki, których `header` pochodzi z kopii już
+        nieobecnej, a jedyna obecna kopia mówi co innego. Bez kandydatów etap milczy całkowicie
+        (QUIET, wzorzec `_copy_facts`) - a milczy prawie zawsze, bo kandydatów jest tyle, ile
+        skasowanych kopii. Klatki o dwóch i więcej obecnych kopiach albo z zeznaniem napisanym ręką
+        etap zostawia człowiekowi (AR-4) - widać je w Porządkach („Zeznanie z nieobecnej kopii").
+
+        ZAKRES = korzeń TEJ dostawy (jak `_copy_facts`). Anulowanie PRZERYWA łańcuch - każda klatka
+        to osobna transakcja, więc baza zostaje spójna. Wołają go Dostawa (`_run_all`) i ogon gestu
+        „Oznacz zniknięte" (`_after_vanished`). Zwraca `AdoptSummary` (wołający czyta `cancelled`
+        i `adopted`) albo `None`, gdy kandydatów nie było."""
+        root = self._params.get("root")
+        if not scan.adopt_candidates(con, root):
+            return None
+        self.stage_started.emit("adopt_testimony")
+        s = scan.adopt_orphan_testimony(con, now=self._now(), root=root,
+                                        progress=self._on_adopt_progress,
+                                        should_cancel=self._cancel.is_set)
+        if s.cancelled:
+            self.cancelled.emit("adopt_testimony", s)
+        else:
+            self.stage_done.emit("adopt_testimony", s)
+        return s
+
+    def _on_adopt_progress(self, done, total, path, s):
+        if should_emit(done, total):
+            self.progress.emit(done, total, path, {**counts_snapshot(s), "etap": "adopt_testimony"})
+
     def _on_copy_facts_progress(self, done, total, path, s):
         # Migawka jak przy skanie (dict przez granicę wątku, nigdy żywy obiekt); znacznik `etap`
         # mówi slotowi, której etykiety liczników użyć - liczniki skanu nie mają tu sensu.
@@ -273,7 +330,8 @@ _STAGE_LABEL = {"scan": "pipeline.stage.scan", "stacks": "pipeline.stage.stacks"
                 "lineage": "pipeline.stage.lineage", "delta": "pipeline.stage.delta",
                 "presence": "pipeline.stage.presence",
                 "stack_lineage": "pipeline.stage.stack_lineage",
-                "copy_facts": "pipeline.stage.copy_facts"}
+                "copy_facts": "pipeline.stage.copy_facts",
+                "adopt_testimony": "pipeline.stage.adopt_testimony"}
 
 # Kolejność i klucze powodów przeglądu w raporcie dostawy (rdzeń niesie same liczby — wording należy
 # do powierzchni; konsolowy `cli._format_delta` ma własne, ASCII-owe).
@@ -792,6 +850,10 @@ class PipelineView(QWidget):
             self.lbl_counts.setText(i18n.t("pipeline.counts_copy_facts", done=done, total=total,
                                            written=counts["written"], tail=tail))
             return
+        if counts.get("etap") == "adopt_testimony":   # przejęcie zeznania (AR-5)
+            self.lbl_counts.setText(i18n.t("pipeline.counts_adopt", done=done, total=total,
+                                           adopted=counts["adopted"], tail=tail))
+            return
         do_przegladu = counts["frame_review"] + counts["camera_review"]
         self.lbl_counts.setText(i18n.t(
             "pipeline.counts", done=done, total=total, new=counts["frames_new"],
@@ -865,7 +927,25 @@ class PipelineView(QWidget):
             return self._format_stack_lineage(r)
         if name == "copy_facts":
             return self._format_copy_facts(r)
+        if name == "adopt_testimony":
+            return self._format_adopt(r)
         return str(r)
+
+    def _format_adopt(self, s):
+        """Linia raportu przejęcia zeznania (AR-5). Odmowy tylko, gdy są (QUIET), każda z przyczyną;
+        `czeka` mówi, ile klatek dalej mówi głosem nieobecnej kopii po tym przebiegu."""
+        czesci = [i18n.t("pipeline.fmt.adopt.adopted", n=s.adopted, rows=s.rows)]
+        if s.identity:
+            czesci.append(i18n.t("pipeline.fmt.adopt.identity", n=s.identity))
+        if s.stale:
+            czesci.append(i18n.t("pipeline.fmt.adopt.stale", n=s.stale))
+        if s.raced:
+            czesci.append(i18n.t("pipeline.fmt.adopt.raced", n=s.raced))
+        if s.failed:
+            czesci.append(i18n.t("pipeline.fmt.adopt.failed", n=s.failed))
+        if s.remaining:
+            czesci.append(i18n.t("pipeline.fmt.adopt.remaining", n=s.remaining))
+        return i18n.t("pipeline.fmt.adopt.prefix") + " · ".join(czesci)
 
     def _format_copy_facts(self, s):
         """Linia raportu uzupełnienia faktów kopii (0021). Odmowy tylko, gdy są (QUIET), ale gdy są,

@@ -1181,6 +1181,8 @@ CATALOG = {
     },
     "perspective.missing_copy": {"pl": "Brakujące kopie", "en": "Missing copies"},
     "perspective.copy_conflict": {"pl": "Kopie niezgodne", "en": "Disagreeing copies"},
+    "perspective.orphan_testimony": {
+        "pl": "Zeznanie z nieobecnej kopii", "en": "Testimony from a missing copy"},
     "perspective.to_review": {"pl": "Do przeglądu", "en": "To review"},
 
     # --- pusty grid (rozwiązywane w USE-site; stałe _EMPTY_* trzymają KLUCZ) ---
@@ -1860,6 +1862,8 @@ CATALOG = {
         "pl": "tylko z brakującą kopią", "en": "only with a missing copy"},
     "grid.criteria.only_copy_conflict": {
         "pl": "tylko kopie niezgodne ze sobą", "en": "only copies that disagree"},
+    "grid.criteria.only_orphan_testimony": {
+        "pl": "tylko zeznanie z nieobecnej kopii", "en": "only testimony from a missing copy"},
     "grid.criteria.only_lineage": {
         "pl": "tylko obrazy bez rodowodu",
         "en": "only images without lineage",
@@ -1949,6 +1953,34 @@ CATALOG = {
     "pipeline.stage.stacks": {"pl": "Stosy", "en": "Stacks"},
     "pipeline.stage.stack_lineage": {"pl": "Rodowód stosów", "en": "Stack lineage"},
     "pipeline.stage.copy_facts": {"pl": "Fakty kopii", "en": "Copy facts"},
+    "pipeline.stage.adopt_testimony": {"pl": "Przejęcie zeznania", "en": "Testimony adoption"},
+    # Linia raportu przejęcia zeznania (AR-5). Odmowy tylko, gdy są (QUIET); każda nazywa przyczynę,
+    # bo „przejęto 1 z 3" bez niej zatajałoby, dlaczego dwie klatki dalej mówią głosem nieobecnej kopii.
+    "pipeline.fmt.adopt.prefix": {
+        "pl": "Zeznanie z nieobecnej kopii: ", "en": "Testimony from a missing copy: "},
+    "pipeline.fmt.adopt.adopted": {
+        "pl": "przejęte od ocalałej kopii {n} z {rows}",
+        "en": "adopted from the surviving copy {n} of {rows}",
+    },
+    "pipeline.fmt.adopt.identity": {
+        "pl": "plik to inna klatka {n} (bez zapisu)", "en": "file is another frame {n} (not written)",
+    },
+    "pipeline.fmt.adopt.stale": {
+        "pl": "zmienione na dysku od skanu {n} (dogoni je skan)",
+        "en": "changed on disk since the scan {n} (the scan will catch up)",
+    },
+    # Stan w BAZIE przesunął się między odczytem a zapisem (drugi skan, gest ręki, druga kopia) -
+    # to nie jest fakt o pliku, więc bez ścieżek i bez obietnicy „dogoni je skan".
+    "pipeline.fmt.adopt.raced": {
+        "pl": "stan zmienił się w trakcie {n} (zapyta następna dostawa)",
+        "en": "state changed meanwhile {n} (the next delivery will ask again)",
+    },
+    "pipeline.fmt.adopt.failed": {"pl": "nieczytelne {n}", "en": "unreadable {n}"},
+    "pipeline.fmt.adopt.remaining": {"pl": "czeka {n}", "en": "waiting {n}"},
+    "pipeline.counts_adopt": {
+        "pl": "Ocalałe kopie {done}/{total} · przejęte {adopted} · {tail}",
+        "en": "Surviving copies {done}/{total} · adopted {adopted} · {tail}",
+    },
     # Linia raportu uzupełnienia faktów kopii (0021) - człony odmów tylko, gdy są (QUIET), ale gdy
     # są, stoją obok liczby uzupełnionych: „uzupełniono 540 z 550" bez „zmienione na dysku 10"
     # zatajałoby, dlaczego reszta czeka.
@@ -2479,6 +2511,10 @@ CATALOG = {
     "tasks.dup_frames": {"pl": "Duplikaty (>1 kopia)", "en": "Duplicates (>1 copy)"},
     # 0021: podzbiór „Duplikatów", więc nazwa mówi o KOPIACH, nie o klatkach, i stoi tuż pod nimi.
     "tasks.copy_conflict_frames": {"pl": "Kopie niezgodne ze sobą", "en": "Copies that disagree"},
+    # AR-5: klatka mówi głosem pliku, którego nie ma. Nazwa niesie przyczynę, nie objaw („niezgodne"
+    # już zajęte przez sąsiada wyżej, a tu obecne kopie bywają zgodne ze sobą).
+    "tasks.orphan_testimony_frames": {
+        "pl": "Zeznanie z nieobecnej kopii", "en": "Testimony from a missing copy"},
     "tasks.vanished_frames": {"pl": "Zniknięte z dysku", "en": "Vanished from disk"},
     # NAZWA MÓWI O UBYTKU, NIE O AWARII (D-V-9a). Wiersz stoi obok „Zniknięte z dysku" i musi się
     # od niego odróżniać JEDNYM spojrzeniem: tam nie ma ani jednej żywej kopii i jest robota, tu

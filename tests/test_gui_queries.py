@@ -164,6 +164,9 @@ def test_tasks_state_liczniki_na_s8_obj(s8_obj):
         # kopie klingą bez faktów z nagłówka) - „nie wiem" nie jest rozjazdem, więc zero. Predykat
         # na danych z rozjazdem pinują `test_copy_facts.py` (stan) i `test_gui_copy_facts.py` (wiersz).
         "copy_conflict_frames": 0,
+        # AR-5: ten sam powód, co wyżej - bez zebranych faktów kopii predykat mówi „nie wiem",
+        # nie „zeznanie z nieobecnej kopii". Stan z rozjazdem pinuje `test_orphan_testimony.py`.
+        "orphan_testimony_frames": 0,
         "telescopes_unlabeled": 4,
         "observatories_unnamed": 0,
         "vanished_frames": 1,

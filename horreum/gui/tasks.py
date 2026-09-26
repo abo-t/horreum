@@ -31,7 +31,7 @@ from horreum.gui.app import (
     ObjectAxisView, ObservatoryAxisView, TelescopeAxisView, _utc_now_iso,
 )
 from horreum.gui.grid import (PRESET_COPY_CONFLICT, PRESET_DUPS, PRESET_LINEAGE,
-                              PRESET_MISSING_COPY, PRESET_RETIRED,
+                              PRESET_MISSING_COPY, PRESET_ORPHAN_TESTIMONY, PRESET_RETIRED,
                               PRESET_RETIRED_CONFLICT, PRESET_STACK_VERSIONS, PRESET_SUPERSEDED,
                               PRESET_VANISHED)
 from horreum.gui.rows import TwoPartDelegate
@@ -87,6 +87,12 @@ _TASKS = [
     # musi rozstrzygnąć, która. Stoi pod „Duplikatami", bo jest ich podzbiorem. Liczba i lista
     # czytają jeden predykat (`queries.copy_conflict_frame_ids`).
     ("copy_conflict_frames", "tasks.copy_conflict_frames", PRESET_COPY_CONFLICT),
+    # Wiersz AKCYJNY i ROBOTA (AR-5) - stoi pod „Kopiami niezgodnymi", bo to ta sama rodzina pytań.
+    # Tam kopie kłócą się ze sobą; tu zgadzać się mogą, ale `header` mówi głosem kopii, której już
+    # nie ma. Klatki o jednej obecnej kopii i zeznaniu spoza ręki naprawia Dostawa bez pytania, więc
+    # wiersz liczy wyłącznie te, przy których kopię wiodącą wskazuje człowiek (AR-4): ≥2 obecne
+    # kopie albo zeznanie, które napisała ręka („Napraw nagłówek…").
+    ("orphan_testimony_frames", "tasks.orphan_testimony_frames", PRESET_ORPHAN_TESTIMONY),
     ("vanished_frames", "tasks.vanished_frames", PRESET_VANISHED),
     # Wiersz INFORMACYJNY, nie zadanie: klatka zastąpiona nie ma czego wymagać od użytkownika —
     # treść przejęła następczyni. Stoi tu, bo od 0809 wypadła z WSZYSTKICH kubełków kolejki

@@ -324,6 +324,13 @@ PRESET_STACK_VERSIONS = "Wersje stosów"
 # „Duplikatów" z konstrukcji (`queries.copy_conflict_frame_ids`). Stała współdzielona z TasksView po
 # nazwie, jak ośmiu sąsiadów.
 PRESET_COPY_CONFLICT = "Kopie niezgodne"
+# PRESET_ORPHAN_TESTIMONY - dziesiąty bliźniak (AR-5). Zeznanie klatki pochodzi z kopii, której już
+# nie ma, a obecne kopie mówią co innego. „Kopie niezgodne" tego nie widzą (porównują obecne kopie
+# ze sobą, a te bywają zgodne), „Duplikaty" też nie. Lista pytań do człowieka
+# (`queries.orphan_testimony_frame_ids`): ≥2 obecne kopie albo zeznanie napisane ręką - klatki
+# o jednej kopii i zeznaniu spoza ręki naprawia Dostawa, więc tu ich nie ma. Stała współdzielona
+# z TasksView po nazwie, jak dziewięciu sąsiadów.
+PRESET_ORPHAN_TESTIMONY = "Zeznanie z nieobecnej kopii"
 # Klucz grupowania po GRUPIE WERSJI - pochodna wiersza (`_adnotuj_wersje`), nie kolumna bazowa:
 # `BASE_COLS` zostaje bez zmian, więc podłoga okna się nie rusza. Pozycja listy „Grupuj wg" działa
 # w każdej perspektywie (stosy spoza grup bliźniaków lądują w „(brak)"), a preset ją ustawia.
@@ -344,6 +351,7 @@ PRESETS = {
     PRESET_MISSING_COPY: {"filter": None, "group_by": None, "only_missing_copy": True},
     PRESET_STACK_VERSIONS: {"filter": None, "group_by": _GRUPA_WERSJI, "only_stack_versions": True},
     PRESET_COPY_CONFLICT: {"filter": None, "group_by": None, "only_copy_conflict": True},
+    PRESET_ORPHAN_TESTIMONY: {"filter": None, "group_by": None, "only_orphan_testimony": True},
     "Do przeglądu": {"filter": None, "group_by": None, "only_review": True},
 }
 # Etykieta WYŚWIETLANIA presetu (tekst) osobno od TOŻSAMOŚCI (klucz PRESETS w `itemData` — używany przez
@@ -360,6 +368,7 @@ _PRESET_LABELS = {
     PRESET_MISSING_COPY: "perspective.missing_copy",
     PRESET_STACK_VERSIONS: "perspective.stack_versions",
     PRESET_COPY_CONFLICT: "perspective.copy_conflict",
+    PRESET_ORPHAN_TESTIMONY: "perspective.orphan_testimony",
     "Do przeglądu": "perspective.to_review",
 }
 # PERSPEKTYWA BEZ ZAWĘŻENIA - jedyny preset, który nie niesie ani filtra, ani flagi `only_*`
@@ -397,6 +406,7 @@ _TRIMY = (
     ("_only_missing_copy", "missing_copy_frame_ids"),
     ("_only_stack_versions", "stack_version_frame_ids"),
     ("_only_copy_conflict", "copy_conflict_frame_ids"),
+    ("_only_orphan_testimony", "orphan_testimony_frame_ids"),
 )
 
 # FLAGA, OD KTÓREJ ZALEŻY ZACHOWANIE WIDOKU, NIE TYLKO ZBIÓR: w perspektywie „Wersje stosów" model

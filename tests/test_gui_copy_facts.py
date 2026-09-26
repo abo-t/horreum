@@ -1,6 +1,7 @@
 """Fakty KOPII (0021) na powierzchniach GUI: wiersz Porządków „Kopie niezgodne ze sobą" (liczba,
 plakietka, klik → Zbiory z tymi klatkami), kolumna „Obrazy" i podpowiedź „×N" w Zbiorach, etap
-uzupełnienia w łańcuchu „Przyjmij nowe". Okno offscreen, pliki syntetyczne w `tmp_path`."""
+uzupełnienia w łańcuchu „Przyjmij nowe", a od AR-5 także przejęcie zeznania ocalałej kopii w tym
+łańcuchu i wiersz „Zeznanie z nieobecnej kopii". Okno offscreen, pliki syntetyczne w `tmp_path`."""
 import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -189,5 +190,154 @@ def test_linia_raportu_faktow_kopii(qapp, tmp_path):
             rows=5, read=4, written=3, stale=1, failed=1, remaining=2))
         assert "zmienione na dysku od skanu 1" in brudno and "nieczytelne 1" in brudno
         assert "czeka 2" in brudno
+    finally:
+        v.close()
+
+
+# ═════════════════════════ zeznanie z nieobecnej kopii (AR-5)
+
+
+def _po_skasowaniu_zrodla(tmp_path, *, trzecia=False):
+    """Baza plikowa: klatka, której `header` pochodzi z kopii L-Pro (skasowanej i nieobecnej),
+    a obecna kopia mówi CLS (opcjonalnie druga obecna - OSC). Zwraca (ścieżka bazy, korzeń, fid)."""
+    from test_orphan_testimony import _MASTER, _cls, _lpro, _zniknij
+    root = tmp_path / "ARCH"
+    a = _lpro(root)
+    _cls(root)
+    if trzecia:
+        _xisf(root / "C_OSC" / "m.xisf", _MASTER + (("FILTER", "'OSC'"),), payload=b"\x05" * 32)
+    path = str(tmp_path / "p.db")
+    con = db.open_db(path)
+    scan.scan_tree(con, root, volume="?", now=NOW)
+    fid = con.execute("SELECT frame_id FROM location WHERE path = ?", (str(a),)).fetchone()[0]
+    _zniknij(con, a)
+    con.close()
+    return path, root, fid
+
+
+def test_etap_Dostawy_przejmuje_zeznanie_przed_pochodnymi_i_potem_milczy(qapp, tmp_path):
+    """„Przyjmij nowe": skan → fakty kopii → PRZEJĘCIE ZEZNANIA → group → resolve… W TYM SAMYM
+    przebiegu `filter_canon` przechodzi na głos ocalałej kopii - przejęcie stoi przed etapami, które
+    czytają `header`. Drugi przebieg nie ma kandydatów, więc etap milczy całkowicie."""
+    from horreum.resolve.filters import normalize_filter
+    path, root, fid = _po_skasowaniu_zrodla(tmp_path)
+
+    def _przebieg():
+        w = PipelineWorker(path, now_fn=lambda: NOW)
+        w.configure("all", root=str(root), volume="?", drive_letter=None, tier=None)
+        started, done = [], {}
+        w.stage_started.connect(started.append)
+        w.stage_done.connect(lambda n, r: done.__setitem__(n, r))
+        w.run()
+        return started, done
+
+    started, done = _przebieg()
+    assert started[:3] == ["scan", "adopt_testimony", "group"]
+    assert started.index("adopt_testimony") < started.index("resolve")
+    s = done["adopt_testimony"]
+    assert (s.rows, s.adopted, s.remaining) == (1, 1, 0)
+    con = db.open_db(path)
+    assert con.execute("SELECT filter_raw FROM header WHERE frame_id = ?",
+                       (fid,)).fetchone()[0] == "CLS"
+    assert con.execute("SELECT filter_canon FROM frame WHERE id = ?",
+                       (fid,)).fetchone()[0] == normalize_filter("CLS")
+    con.close()
+    started2, done2 = _przebieg()
+    assert "adopt_testimony" not in started2 and "adopt_testimony" not in done2
+
+
+def test_linia_raportu_przejecia_zeznania(qapp, tmp_path):
+    """Raport mówi, ile przejęto z ilu; odmowy (inna klatka pod ścieżką, zmienione od skanu,
+    nieczytelne) i to, co czeka, dopisuje tylko, gdy są (QUIET)."""
+    from horreum.gui.pipeline import PipelineView
+    path = str(tmp_path / "p.db")
+    db.open_db(path).close()
+    v = PipelineView(path, now_fn=lambda: NOW)
+    try:
+        czysto = v._format_result("adopt_testimony", scan.AdoptSummary(rows=2, read=2, adopted=2))
+        assert czysto == "Zeznanie z nieobecnej kopii: przejęte od ocalałej kopii 2 z 2"
+        brudno = v._format_result("adopt_testimony", scan.AdoptSummary(
+            rows=4, read=3, adopted=1, identity=1, stale=1, failed=1, remaining=3))
+        assert "plik to inna klatka 1" in brudno and "zmienione na dysku od skanu 1" in brudno
+        assert "nieczytelne 1" in brudno and "czeka 3" in brudno
+    finally:
+        v.close()
+
+
+def test_wiersz_porzadkow_zeznanie_z_nieobecnej_kopii(qapp, tmp_path, monkeypatch):
+    """Wiersz AKCYJNY i ROBOTA (poza `_BEZ_ROBOTY`): liczy klatki o ≥2 obecnych kopiach, których
+    `header` mówi głosem nieobecnej - tu kopię wiodącą wskazuje człowiek. Klik prowadzi do Zbiorów
+    z perspektywą pokazującą dokładnie te klatki; pasek kryteriów nazywa zawężenie."""
+    monkeypatch.setattr(QSettings, "value", lambda self, k, d=None: d)
+    monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: None)
+    path, _root, fid = _po_skasowaniu_zrodla(tmp_path, trzecia=True)
+    con = db.open_db(path)
+    view = grid_mod.FramesView(con, now_fn=None)
+    tv = tasks_mod.TasksView(con)
+    tv.open_collection.connect(view.apply_perspective)
+    try:
+        assert "orphan_testimony_frames" not in tasks_mod._BEZ_ROBOTY
+        tv.refresh_counts()
+        wiersz = next(tv.tasks.item(i) for i in range(tv.tasks.count())
+                      if tv.tasks.item(i).data(Qt.UserRole) == "orphan_testimony_frames")
+        assert wiersz.text() == i18n.t("tasks.orphan_testimony_frames")
+        assert wiersz.data(rows.SECONDARY) == "1  ›" and wiersz.data(rows.STRONG) is True
+        tv._on_task_clicked(wiersz)
+        assert view._frame_ids == [fid]
+        assert len(view._frame_ids) == queries.tasks_state(con)["orphan_testimony_frames"]
+        assert i18n.t("grid.criteria.only_orphan_testimony") in view.sel_bar.criteria_label.toolTip()
+    finally:
+        tv.close()
+        view.close()
+        con.close()
+
+
+def test_gest_oznacz_znikniete_puszcza_przejecie_i_pochodne(qapp, tmp_path, monkeypatch):
+    """„Oznacz zniknięte" (presence-apply) to chwila, w której klatka zaczyna mówić głosem
+    nieobecnego pliku - więc w tym samym wątku tła idą przejęcie zeznania i pochodne (group →
+    resolve → calibrate → lineage). Bez tego stan trwał niewidoczny do następnej dostawy."""
+    from horreum import presence
+    from horreum.resolve.filters import normalize_filter
+    from test_orphan_testimony import _cls, _lpro
+    monkeypatch.setattr(presence, "volume_serial", lambda p: "VOL1")
+    root = tmp_path / "ARCH"
+    a = _lpro(root)
+    _cls(root)
+    path = str(tmp_path / "p.db")
+    con = db.open_db(path)
+    scan.scan_tree(con, root, volume="VOL1", now=NOW)
+    fid = con.execute("SELECT frame_id FROM location WHERE path = ?", (str(a),)).fetchone()[0]
+    con.close()
+    os.remove(a)
+    w = PipelineWorker(path, now_fn=lambda: NOW)
+    w.configure("presence-apply", root=str(root), volume="VOL1", drive_letter=None, tier=None)
+    started, done = [], {}
+    w.stage_started.connect(started.append)
+    w.stage_done.connect(lambda n, r: done.__setitem__(n, r))
+    w.run()
+    assert started == ["presence", "adopt_testimony", "group", "resolve", "calibrate", "lineage"]
+    assert done["presence"].vanished == 1 and done["adopt_testimony"].adopted == 1
+    con = db.open_db(path)
+    assert con.execute("SELECT filter_canon FROM frame WHERE id = ?",
+                       (fid,)).fetchone()[0] == normalize_filter("CLS")
+    con.close()
+    w2 = PipelineWorker(path, now_fn=lambda: NOW)                # nic nowego: sam pass, bez ogona
+    w2.configure("presence-apply", root=str(root), volume="VOL1", drive_letter=None, tier=None)
+    started2 = []
+    w2.stage_started.connect(started2.append)
+    w2.run()
+    assert started2 == ["presence"]
+
+
+def test_linia_raportu_liczy_wyscig_osobno(qapp, tmp_path):
+    """Werdykt „stan zmienił się w trakcie" nie udaje „zmienione na dysku od skanu" - to fakt
+    o bazie, nie o pliku."""
+    from horreum.gui.pipeline import PipelineView
+    path = str(tmp_path / "p.db")
+    db.open_db(path).close()
+    v = PipelineView(path, now_fn=lambda: NOW)
+    try:
+        linia = v._format_result("adopt_testimony", scan.AdoptSummary(rows=1, read=1, raced=1))
+        assert "stan zmienił się w trakcie 1" in linia and "zmienione na dysku" not in linia
     finally:
         v.close()

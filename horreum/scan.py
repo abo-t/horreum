@@ -1470,6 +1470,39 @@ def _derive_kind(rec, *, readable, is_raw):
     return normalize_kind(rec.header.get("IMAGETYP")), "header"
 
 
+def _derive_axes(con, rec, *, now, actor):
+    """Pochodne klatki z rekordu - `(kind, kind_source, ident, camera_id)` - JEDNA derywacja dla
+    wjazdu (`ingest_record`) i przejęcia zeznania (`adopt_orphan_testimony`): dwie kopie rozjechałyby
+    się przy pierwszej zmianie reguły rodzaju albo kamery i ta sama treść dostawałaby inne pochodne
+    zależnie od drogi. Oś kamery powołuje `repo.upsert_camera` (idempotentny) - stąd `con`.
+
+    `kind` WYPRZEDZA oś kamery (kolejność zmieniona 2026-08-02, I-2b): `camera_identity` bierze go
+    do bramki `NO_PIXEL_KINDS` - gotowy stack powołuje kamerę, ale nie wnosi `XPIXSZ`. Derywacja
+    rodzaju od kamery NIE zależy (`_derive_kind` czyta rekord i format), więc zamiana jest bezpieczna.
+    Nieczytelny nagłówek (W1) → `unknown`/None, bez kamery."""
+    readable = rec.header is not None
+    is_raw = _filetype(rec.path) == "raw"          # #2: FAKT formatu (→ raw_format, kind z folderu)
+    kind, kind_source = _derive_kind(rec, readable=readable, is_raw=is_raw)
+    ident = camera_identity(rec.header, raw_format=is_raw, kind=kind) if readable else None
+    camera_id = None
+    if ident is not None:
+        camera_id, _ = repo.upsert_camera(
+            con, model_canon=ident.model_canon, pixel_um=ident.pixel_um,
+            is_mono=ident.is_mono, is_mono_source=ident.is_mono_source,
+            raw_instrume=ident.raw_instrume, now=now, actor=actor)
+    return kind, kind_source, ident, camera_id
+
+
+def _record_identity(rec):
+    """Tożsamość klatki z rekordu - `(sha1_data, uncomputable)`: odcisk sekcji danych, a gdy
+    nieobliczalny, DEGENERACJA (sha1 całego pliku + flaga). Jedna reguła dla wjazdu i dla sprawdzenia
+    tożsamości przy przejęciu zeznania - inna reguła po jednej stronie kazałaby uznać plik za cudzą
+    klatkę albo, gorzej, cudzą klatkę za tę samą."""
+    if rec.sha1_data is not None:
+        return rec.sha1_data, 0
+    return rec.file_sha1, 1
+
+
 def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, summary,
                   actor="scan"):
     """Wciągnij JEDEN `ScanRecord` przez jedną klingę (`repo`) — JĄDRO wspólne dla skanu drzewa
@@ -1517,22 +1550,8 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
     do wołającego (`scan_tree` / import), bo to on wie, jak zidentyfikować rekord do review."""
     readable = rec.header is not None
     copy_facts = copy_header_facts(rec.header, rec.header_hash, rec.image_roles)
-    is_raw = _filetype(rec.path) == "raw"          # #2: FAKT formatu (→ raw_format, kind z folderu)
-    # `kind` WYPRZEDZA oś kamery (kolejność zmieniona 2026-08-02, I-2b): `camera_identity` bierze go
-    # do bramki `NO_PIXEL_KINDS` — gotowy stack powołuje kamerę, ale nie wnosi `XPIXSZ`. Derywacja
-    # rodzaju od kamery NIE zależy (`_derive_kind` czyta rekord i format), więc zamiana jest bezpieczna.
-    kind, kind_source = _derive_kind(rec, readable=readable, is_raw=is_raw)
-    ident = camera_identity(rec.header, raw_format=is_raw, kind=kind) if readable else None
-    camera_id = None
-    if ident is not None:
-        camera_id, _ = repo.upsert_camera(
-            con, model_canon=ident.model_canon, pixel_um=ident.pixel_um,
-            is_mono=ident.is_mono, is_mono_source=ident.is_mono_source,
-            raw_instrume=ident.raw_instrume, now=now, actor=actor)
-    if rec.sha1_data is not None:
-        sha1_data, uncomputable = rec.sha1_data, 0
-    else:                                              # degeneracja: sha1 pliku + flaga
-        sha1_data, uncomputable = rec.file_sha1, 1
+    kind, kind_source, ident, camera_id = _derive_axes(con, rec, now=now, actor=actor)
+    sha1_data, uncomputable = _record_identity(rec)
 
     loc = con.execute(
         # `present` dołożone dla R4: gałąź „ta sama tożsamość" musi wiedzieć, czy kopia WŁAŚNIE
@@ -1845,6 +1864,140 @@ def backfill_copy_facts(con, *, now, root=None, progress=None, should_cancel=Non
             progress(i, total, path, s)
     s.remaining = len(copy_facts_candidates(con, root))
     return s
+
+
+@dataclass
+class AdoptSummary:
+    """Zliczenia jednego przebiegu `adopt_orphan_testimony` - kotwica idempotencji w `remaining`.
+    Każdy licznik ODMOWY niesie ścieżki (wzorzec `CopyFactsSummary`): „przejęto 1 z 3" bez
+    przyczyny reszty zatajałoby, dlaczego dwie klatki dalej mówią głosem nieobecnej kopii."""
+    rows: int = 0             # kandydaci: klatki predykatu o JEDNEJ obecnej kopii pod korzeniem
+    read: int = 0             # plik ocalałej kopii przeczytany (nagłówek + tożsamość)
+    adopted: int = 0          # zeznanie przejęte (`repo.adopt_testimony` → 'adopted')
+    identity: int = 0         # plik niesie INNĄ tożsamość danych niż klatka → ZERO zapisu
+    stale: int = 0            # odcisk nagłówka pliku ≠ znany (kopia zmieniona od skanu) → ZERO zapisu
+    raced: int = 0            # stan w bazie zmienił się między odczytem a zapisem (równoległy skan,
+                              # gest ręki, druga kopia) albo zeznanie już przejęte → ZERO zapisu;
+                              # bez ścieżek - to nie jest fakt o pliku, następna dostawa zapyta od nowa
+    failed: int = 0           # odczyt padł albo nagłówek nieczytelny → ZERO zapisu
+    remaining: int = 0        # kandydaci PO przebiegu (0 = komplet)
+    cancelled: bool = False
+    identity_paths: list = field(default_factory=list)
+    stale_paths: list = field(default_factory=list)
+    failed_paths: list = field(default_factory=list)
+
+
+def adopt_candidates(con, root=None):
+    """Kandydaci przejęcia zeznania: połowa „dla etapu" podziału `queries.orphan_testimony_routes`
+    (jeden właściciel) - klatki o DOKŁADNIE JEDNEJ obecnej kopii, których zeznania NIE napisała ręka.
+    Przy dwóch i więcej kopiach albo zeznaniu z ręki wybiera człowiek (AR-4) i etap ich nie dotyka.
+    Lista `(frame_id, kopia)`, kopia = wiersz z `location_id`, `path`, `header_hash`.
+
+    `root` (opcjonalny) zawęża do kopii pod korzeniem - jak każdy etap Dostawy, który dotyka dysku
+    (wzorzec `copy_facts_candidates`: `canonize_root` + `_under`, forma literowa skanu).
+
+    Import `gui.queries` LENIWY: moduł jest Qt-wolny, ale ciągnie resolver/stacks/grouper, a rdzeń
+    skanu importują oni sami albo ich sąsiedzi - wiązanie na górze pliku otwierałoby drogę cyklowi
+    przy pierwszym imporcie `scan` z tamtej strony (precedens `stacks.py`, import `scan` w funkcji)."""
+    from .gui import queries
+    dla_etapu, _czlowiek = queries.orphan_testimony_routes(con)
+    rows = sorted(dla_etapu.items())
+    if root is None:
+        return rows
+    prefix = canonize_root(root).rstrip("\\/") + os.sep
+    return [(fid, k) for fid, k in rows if _under(k["path"], prefix)]
+
+
+def adopt_orphan_testimony(con, *, now, root=None, progress=None, should_cancel=None,
+                           actor="adopt:testimony"):
+    """ETAP STEROWANY STANEM (AR-5): klatka, której zeznanie pochodzi z kopii już nieobecnej,
+    a jedyna obecna kopia mówi co innego, przejmuje zeznanie tej kopii - o ile bieżącego zeznania nie
+    napisała ręka (wtedy pyta człowiek, `queries.orphan_testimony_routes`). Zwraca `AdoptSummary`.
+
+    DLACZEGO ETAP, A NIE ZDARZENIE „kopia zniknęła": pass obecności oznacza zniknięcie jednym
+    gestem, skan mija ocalałą kopię (mtime bez zmian), a `header` zostaje przy głosie pliku, którego
+    nie ma. Etap pyta STAN (`adopt_candidates`) - więc naprawia także zaległości sprzed tej zmiany
+    i nie zależy od tego, czy ktoś widział moment zniknięcia. Po przebiegu ten sam predykat jest
+    pusty dla przejętych klatek: drugie wywołanie to no-op BEZ czytania dysku.
+
+    ODCZYT = `scan_file` (pełny: nagłówek + tożsamość danych). Tańszej drogi z `sha1_data` nie ma:
+    tożsamość wymaga przeczytania treści, a kandydatów jest tyle, ile skasowanych kopii - nie
+    archiwum. Dla każdego kandydata:
+      * wyjątek odczytu albo nagłówek nieczytelny (W1) → `failed`, ZERO zapisu (nie stawiamy markerów
+        i nie zdejmujemy obecności - od tego są `scan_tree` i `presence`);
+      * tożsamość danych pliku (reguła `_record_identity`) ≠ tożsamość klatki → `identity`, ZERO
+        zapisu: pod tą ścieżką leży INNA treść, a to jest robota skanu (przepięcie lokacji), nie
+        przejęcia;
+      * odcisk nagłówka pliku ≠ `location.header_hash` → `stale`, ZERO zapisu: kopia zmieniła się od
+        skanu, a skan odświeży zeznanie sam (`refresh_location`, zmiana odcisku);
+      * inaczej → pochodne tą samą derywacją co wjazd (`_derive_axes`) i klinga
+        `repo.adopt_testimony` (header + cards + camera/kind + `header.adopted`). Drift klingi
+        (równoległy skan przestawił kopię) i zeznanie już identyczne liczą się jako `raced`.
+    Przed zapisem kandydat jest pytany ponownie, czy nadal należy do etapu: odczyt pliku trwa,
+    a w tym czasie równoległy skan mógł dołożyć drugą kopię albo ręka poprawić nagłówek - wtedy
+    wybór należy do człowieka (AR-4), nie do etapu (`raced`). Okno między tym pytaniem a zapisem
+    zostaje, ale nie produkuje nieprawdy: zapisane zeznanie jest zeznaniem obecnej kopii o tej samej
+    tożsamości.
+
+    Hooki `progress(done, total, path, summary)` / `should_cancel()` - kontrakt `backfill_copy_facts`
+    (anulowanie na GRANICY PLIKU; każda klatka to osobna transakcja, więc przerwany przebieg zostawia
+    bazę spójną, a następny dobiera resztę)."""
+    rows = adopt_candidates(con, root)
+    s = AdoptSummary(rows=len(rows))
+    total = len(rows)
+    for i, (frame_id, kopia) in enumerate(rows, 1):
+        if should_cancel is not None and should_cancel():
+            s.cancelled = True
+            break
+        path = kopia["path"]
+        try:
+            rec = scan_file(path)
+        except Exception as exc:               # I/O - raport, nie zapis (docstring)
+            s.failed += 1
+            s.failed_paths.append(f"{path}: {type(exc).__name__}: {exc}")
+        else:
+            s.read += 1
+            werdykt = _adopt_one(con, frame_id, kopia, rec, now=now, actor=actor)
+            if werdykt == "adopted":
+                s.adopted += 1
+            elif werdykt == "failed":
+                s.failed += 1
+                s.failed_paths.append(f"{path}: {rec.error}")
+            elif werdykt == "identity":
+                s.identity += 1
+                s.identity_paths.append(path)
+            elif werdykt == "stale":
+                s.stale += 1
+                s.stale_paths.append(path)
+            else:                              # 'raced' / klinga: 'drift' / 'unchanged' - bez zapisu
+                s.raced += 1
+        if progress is not None:
+            progress(i, total, path, s)
+    s.remaining = len(adopt_candidates(con, root))
+    return s
+
+
+def _adopt_one(con, frame_id, kopia, rec, *, now, actor):
+    """Werdykt i zapis jednego kandydata `adopt_orphan_testimony` - kolejność bramek z docstringu
+    etapu. Zwraca `'adopted'` | `'failed'` | `'identity'` | `'stale'` | `'raced'` (albo werdykt
+    klingi `'drift'` / `'unchanged'`)."""
+    if rec.header is None:
+        return "failed"
+    sha1_data, _ = _record_identity(rec)
+    frame_sha1 = con.execute("SELECT sha1_data FROM frame WHERE id = ?", (frame_id,)).fetchone()
+    if frame_sha1 is None or frame_sha1[0] != sha1_data:
+        return "identity"
+    if rec.header_hash != kopia["header_hash"]:
+        return "stale"
+    teraz = dict(adopt_candidates(con)).get(frame_id)    # stan pod nami mógł się zmienić (docstring)
+    if teraz is None or teraz["location_id"] != kopia["location_id"]:
+        return "raced"
+    kind, _kind_source, _ident, camera_id = _derive_axes(con, rec, now=now, actor=actor)
+    return repo.adopt_testimony(
+        con, location_id=kopia["location_id"], sha1_data=sha1_data, header_hash=rec.header_hash,
+        raw_json=json.dumps(rec.header, ensure_ascii=False), cards=rec.cards,
+        hot_fields=extract_header(rec.header), camera_id=camera_id, kind=kind, now=now,
+        actor=actor)
 
 
 @dataclass

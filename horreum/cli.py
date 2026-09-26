@@ -484,6 +484,9 @@ def main(argv=None):
             con.close()
             print(f"Horreum presence: blad -- {exc}")
             return 1
+        # TODO-DŁUG(AR-5-CLI): `--apply` nie puszcza przejęcia zeznania (`scan.adopt_orphan_testimony`)
+        # ani pochodnych, jak robi to gest GUI „Oznacz zniknięte" - CLI nie ma łańcucha etapów, więc
+        # klatka z jedną kopią mówi głosem skasowanego pliku do „Przyjmij nowe" w GUI.
         con.close()
         print(_format_presence(args.db, s, apply=args.apply, limit=args.limit))
         # Kod wyjscia mowi o WERDYKCIE, nie o zapisie: 1 = przebieg go NIE WYDAL (abort przeslanki

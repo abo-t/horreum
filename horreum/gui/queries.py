@@ -19,7 +19,7 @@ from horreum.grouper import NO_TELESCOPE_KINDS      # jeden właściciel zbioru 
 from horreum.naming import header_dt
 from horreum.resolve._coerce import _to_float, _to_int
 from horreum.resolve.frames import LIGHT_KINDS
-from horreum.resolve.headers import COPY_TESTIMONY_KEYWORDS
+from horreum.resolve.headers import COPY_TESTIMONY_KEYWORDS, copy_testimony
 from horreum.resolve.objects import CLEARABLE_OBJECT_SOURCES, WEAK_OBJECT_SOURCES
 from horreum.resolve.paths import STACK_KIND, STACKS_DIR, object_from_path
 from horreum.resolve.stack import signature_timestamp
@@ -1607,6 +1607,145 @@ def copy_conflict_frame_ids(con):
     return {fid for fid, rows in kopie.items() if copy_divergence(rows)}
 
 
+def orphan_testimony_copies(con):
+    """ZEZNANIE Z NIEOBECNEJ KOPII: `{frame_id: [obecne kopie]}` klatek, których `header` nie zgadza
+    się z ŻADNĄ obecną kopią. JEDEN właściciel predykatu dla etapu przejęcia zeznania w Dostawie
+    (`scan.adopt_orphan_testimony`) i dla wiersza Porządków (`orphan_testimony_frame_ids`) - podział
+    między nie robi `orphan_testimony_routes`. Kopie: `location_id`, `path`, `header_hash`,
+    w kolejności wjazdu (`ORDER BY l.id`).
+
+    SKĄD TEN STAN (dług AR-5, zmierzony 2026-09-26): `header` pochodzi z JEDNEJ kopii (reguła
+    N-lokacji). Skasowanie tej kopii zdejmuje jej obecność (`presence`), ale zeznanie zostaje, a skan
+    pomija ocalałą kopię (mtime bez zmian) - więc klatka pokazuje filtr pliku, którego nie ma, a lista
+    „Kopie niezgodne ze sobą" pustoszeje, bo porównuje wyłącznie kopie obecne.
+
+    PORÓWNANIE - OSIEM PÓL ZEZNANIA KOPII (`COPY_TESTIMONY_KEYWORDS`: FILTER, IMAGETYP, OBJECT,
+    TELESCOP, INSTRUME, EXPTIME, XBINNING, DATE-OBS) liczonych JEDNĄ derywacją po obu stronach:
+    strona kopii to kolumny `hdr_*` (`copy_testimony` przy odczycie pliku), strona klatki to
+    `copy_testimony(raw_json)` - ten sam kod na tym samym nagłówku, więc typ (XISF-owy tekst vs FITS-owa
+    liczba) i normalizacja (`''` → None) nie mogą udawać rozjazdu. Kolumny gorące `header` nie są
+    drugim źródłem: zmierzone 2026-09-26 na 16 900 zeznaniach żywej bazy - zero różnic między nimi
+    a `extract_header(raw_json)`. IMAGETYP nie ma kolumny w `header`, stąd `raw_json`.
+
+    Dwa etapy, jeden werdykt: SQL wybiera kandydatów po kolumnach gorących (`IS` - równość świadoma
+    NULL-a) i IMAGETYP z `json_extract` - zbiór NADMIAROWY, bo SQL nie zna rzutu `_to_text`; Python
+    rozstrzyga `copy_testimony`. Pełna derywacja na 16,9 tys. zeznań kosztowałaby ~0,26 s przy każdym
+    odświeżeniu Porządków, a kandydatów po SQL jest tyle, ile realnych rozjazdów.
+
+    KLATKA WCHODZI WYŁĄCZNIE, GDY KAŻDA OBECNA KOPIA MA ZEBRANE ZEZNANIE (`hdr_hash`). Kopia bez
+    faktów mówi „nie wiem", a nie „inaczej" - mogła być źródłem `header`, więc klatka z taką kopią
+    nie należy do predykatu (ta sama zasada co `copy_divergence`). Brak obecnej kopii = inna robota
+    („Zniknięte"); brak `header` = frame-szkielet (kubełek `headerless` kolejki przeglądu).
+
+    Guardów żywotności (wycofana, zastąpiona) predykat NIE nosi: mówi o prawdzie zeznania, a nie
+    o liście roboty. Zastąpiona obecnej kopii mieć nie powinna (skan gasi oznaczenie), a wycofanej
+    z plikiem na dysku przejęcie niczego nie odbiera - poprawia fakt z pliku, werdykt ręki zostaje.
+    Guardy listy roboty niesie `orphan_testimony_frame_ids`."""
+    kandydaci = {int(r["frame_id"]): r["raw_json"] for r in con.execute(
+        "SELECT h.frame_id, h.raw_json FROM header h "
+        "WHERE EXISTS (SELECT 1 FROM location l WHERE l.frame_id = h.frame_id AND l.present = 1) "
+        "  AND NOT EXISTS (SELECT 1 FROM location l WHERE l.frame_id = h.frame_id "
+        "                   AND l.present = 1 AND l.hdr_hash IS NULL) "
+        "  AND NOT EXISTS (SELECT 1 FROM location l WHERE l.frame_id = h.frame_id "
+        "                   AND l.present = 1 "
+        "                   AND l.hdr_filter IS h.filter_raw AND l.hdr_object IS h.object_raw "
+        "                   AND l.hdr_telescop IS h.telescop AND l.hdr_instrume IS h.instrume "
+        "                   AND l.hdr_exptime IS h.exptime AND l.hdr_xbinning IS h.xbinning "
+        "                   AND l.hdr_date_obs IS h.date_obs "
+        "                   AND l.hdr_imagetyp IS NULLIF(json_extract(h.raw_json, '$.IMAGETYP'), ''))"
+    ).fetchall()}
+    if not kandydaci:
+        return {}
+    kopie = {}
+    for r in con.execute(
+            "SELECT l.frame_id, l.id AS location_id, l.path, l.header_hash, "
+            "       l.hdr_filter, l.hdr_imagetyp, l.hdr_object, l.hdr_telescop, l.hdr_instrume, "
+            "       l.hdr_exptime, l.hdr_xbinning, l.hdr_date_obs "
+            "FROM location l "
+            "WHERE l.present = 1 AND l.frame_id IN (SELECT value FROM json_each(?)) "
+            "ORDER BY l.frame_id, l.id",
+            (json.dumps(list(kandydaci)),)):
+        kopie.setdefault(int(r["frame_id"]), []).append(r)
+    wynik = {}
+    for fid, rows in kopie.items():
+        zeznanie = copy_testimony(json.loads(kandydaci[fid]))
+        if not any(all(r[k] == v for k, v in zeznanie.items()) for r in rows):
+            wynik[fid] = rows
+    return wynik
+
+
+def hand_testimony_frame_ids(con, frame_ids):
+    """Które z `frame_ids` mają zeznanie napisane RĘKĄ - najnowszy zapis `header` w dzienniku
+    (target `frame:<id>`) ma aktora `user:*`. Zwraca set[int]. Nowa droga zapisu `header` musi
+    dopisać swój czasownik do literału niżej - inaczej jej zapis nie przesłoni wcześniejszego
+    zapisu ręki i klatka zostanie „z ręki" na zawsze.
+
+    SKĄD TO WIADOMO (zmierzone 2026-09-26 na kopii żywej bazy, 137 486 zdarzeń): `header` piszą
+    wyłącznie trzy klingi i każda zostawia jedno zdarzenie w tej samej transakcji - `header.recorded`
+    (skan `scan`, drogi stosów `stacks`, import `import:fitsmirror`), `header.refreshed` (skan przy
+    zmianie odcisku, `backfill:xisf` i RE-SYNC writebacku z aktorem `user:local`: 606 zdarzeń -
+    „Napraw nagłówek…", zapis makra i ich cofnięcia, `writeback._resync`) oraz `header.adopted`
+    (etap przejęcia, a jutro gest „ta kopia prowadzi"). Najnowsze po `id` jest więc bieżącym
+    zeznaniem, a aktor mówi, czyj to był gest. Cofnięcie zapisu (`writeback.undo`) też liczy się jako
+    ręka - to także decyzja człowieka o treści nagłówka, więc etap ma jej nie przestawiać.
+
+    Zapytanie po indeksie `idx_event_target` (target = `frame:<id>` ze stałego literału `json_each`),
+    wołane wyłącznie dla klatek predykatu - czyli dla garstki, nie dla archiwum."""
+    if not frame_ids:
+        return set()
+    return {int(r[0]) for r in con.execute(
+        "SELECT CAST(substr(e.target, 7) AS INTEGER) FROM event e "
+        "WHERE e.id IN (SELECT MAX(id) FROM event "
+        "               WHERE target IN (SELECT 'frame:' || value FROM json_each(?)) "
+        "                 AND verb IN ('header.recorded', 'header.refreshed', 'header.adopted') "
+        "               GROUP BY target) "
+        "  AND e.actor LIKE 'user:%'",
+        (json.dumps(sorted(frame_ids)),)).fetchall()}
+
+
+def orphan_testimony_routes(con):
+    """PODZIAŁ predykatu `orphan_testimony_copies` na dwie drogi naprawy - JEDEN właściciel tej
+    decyzji dla etapu Dostawy i dla wiersza Porządków. Zwraca `(dla_etapu, dla_czlowieka)`:
+    `dla_etapu` = `{frame_id: jedyna obecna kopia}`, `dla_czlowieka` = set[int].
+
+    ETAP (`scan.adopt_orphan_testimony`) dostaje klatkę WYŁĄCZNIE, gdy ma jedną obecną kopię ORAZ jej
+    zeznania nie napisała ręka. Wtedy jest dokładnie jedna prawdziwa odpowiedź i nikt jej nie wybierał.
+    CZŁOWIEK dostaje resztę (AR-4: „gdy kopie mówią różnie, Horreum pyta, zaznacza człowiek"):
+      * ≥2 obecne kopie - kopię wiodącą wskazuje człowiek;
+      * zeznanie z RĘKI (`hand_testimony_frame_ids`) - nawet przy jednej obecnej kopii. „Napraw
+        nagłówek…" pisze plik kopii A i `header`; kopia B, która doszła później albo wróciła po
+        zniknięciu, niesie stary głos (reguła N-lokacji). Gdy potem zniknie A, etap przepisałby
+        zeznanie głosem B i poprawka ręki przepadłaby bez śladu - więc to jest pytanie, nie robota
+        etapu.
+    Guardów żywotności podział nie nosi - niesie je lista roboty (`orphan_testimony_frame_ids`)."""
+    kopie = orphan_testimony_copies(con)
+    reka = hand_testimony_frame_ids(con, kopie)
+    dla_etapu = {fid: rows[0] for fid, rows in kopie.items() if len(rows) == 1 and fid not in reka}
+    return dla_etapu, set(kopie) - set(dla_etapu)
+
+
+def orphan_testimony_frame_ids(con):
+    """Zbiór frame_id wiersza Porządków „Zeznanie z nieobecnej kopii": klatki predykatu, których
+    etap Dostawy NIE naprawi sam - druga połowa podziału `orphan_testimony_routes` (≥2 obecne kopie
+    albo zeznanie napisane ręką).
+
+    DLACZEGO NIE WSZYSTKIE. Przy jednej obecnej kopii i zeznaniu spoza ręki jest dokładnie jedna
+    prawdziwa odpowiedź i etap przejęcia daje ją przy najbliższej dostawie bez pytania - wiersz
+    liczony do plakietki świeciłby za robotę, której człowiek nie ma jak wykonać.
+
+    GUARDY ŻYWOTNOŚCI jak w „Duplikatach" (`dup_frame_ids`): wycofana i zastąpiona wypadają - ich
+    robotą jest werdykt ręki albo następczyni. Klatka z zeznaniem z ręki i jedną kopią NIE jest
+    duplikatem, więc guard stoi tu jako warunek, nie jako przecięcie z `dup_frame_ids`.
+    JEDEN właściciel dla licznika Porządków i trimu gridu. Zwraca set[int]."""
+    _etap, czlowiek = orphan_testimony_routes(con)
+    if not czlowiek:
+        return set()
+    return {int(r[0]) for r in con.execute(
+        "SELECT id FROM frame WHERE id IN (SELECT value FROM json_each(?)) "
+        "AND retired_at IS NULL AND superseded_by IS NULL",
+        (json.dumps(sorted(czlowiek)),)).fetchall()}
+
+
 def review_frame_ids(con):
     """Zbiór frame_id perspektywy „Do przeglądu": light/master_light z `object_id IS NULL`
     (równoważne trimowi `object_canon is None` — `object.canon` NOT NULL, LEFT JOIN daje NULL
@@ -2272,6 +2411,10 @@ def tasks_state(con):
         # JEST robotą (poza `tasks._BEZ_ROBOTY`): oś klatki zależy od tego, która kopia wygrała
         # w `header`, a sprzeczność rozstrzyga wyłącznie człowiek.
         "copy_conflict_frames": len(copy_conflict_frame_ids(con)),
+        # Zeznanie z nieobecnej kopii - robota: `header` mówi głosem pliku, którego nie ma, a która
+        # kopia ma prowadzić, rozstrzyga człowiek (AR-4) - przy ≥2 obecnych kopiach albo zeznaniu
+        # z ręki. Klatki o jednej kopii i zeznaniu spoza ręki naprawia etap Dostawy, więc tu ich nie ma.
+        "orphan_testimony_frames": len(orphan_testimony_frame_ids(con)),
         "telescopes_unlabeled": telescopes_unlabeled,
         "observatories_unnamed": observatories_unnamed,
         "vanished_frames": len(vanished_frame_ids(con)),

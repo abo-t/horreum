@@ -1024,6 +1024,12 @@ CATALOG = {
         "pl": "Przeniesienie ma sens tylko wtedy, gdy katalog zna tę nazwę pod innym rekordem.",
         "en": "Moving only makes sense when the catalogue knows this name under another record.",
     },
+    "planner.orphan_move_tip_taken": {
+        "pl": "{where} ma już własne oznaczenie - przeniesienie nadpisałoby je. "
+              "Zdejmij je najpierw albo zdejmij tę sierotę.",
+        "en": "{where} already has its own mark - moving would overwrite it. "
+              "Clear it first, or clear this orphan instead.",
+    },
     "planner.orphan_clear": {"pl": "Zdejmij", "en": "Clear"},
     "planner.orphan_undo": {"pl": "Cofnij zdjęcie", "en": "Undo clearing"},
     "planner.orphan_undo_tip": {
@@ -1144,6 +1150,21 @@ CATALOG = {
     "grid.tip.retired": {
         "pl": "\n(wycofana ręką {ts} — pliku już nie szukamy; można to cofnąć: Klatka ▾ → Przywróć)",
         "en": "\n(retired by hand {ts} — the file is no longer looked for; undo: Frame ▾ → Restore)",
+    },
+    # G2-7d: wycofana, a plik wrócił. Własne zdanie komórki i tooltipa, bo zdanie zwykłej
+    # wycofanej („pliku już nie szukamy") jest o niej nieprawdą. Znacznik jest PREFIKSEM z tego
+    # samego powodu, co `grid.cell.retired` wyżej - sufiks ginie w elizji kolumny „Ścieżka".
+    "perspective.retired_conflict": {
+        "pl": "Wycofane, a plik wrócił", "en": "Retired, but the file is back"},
+    "grid.criteria.only_retired_conflict": {
+        "pl": "wycofane, a plik wrócił", "en": "retired, but the file is back"},
+    "grid.cell.retired_back": {
+        "pl": "(wycofana, plik wrócił)  {name}", "en": "(retired, file is back)  {name}"},
+    "grid.tip.retired_back": {
+        "pl": "\n(wycofana ręką {ts}, ale plik jest znów na dysku - werdykt czeka na decyzję: "
+              "Klatka ▾ → Przywróć)",
+        "en": "\n(retired by hand {ts}, but the file is on disk again - the verdict awaits a "
+              "decision: Frame ▾ → Restore)",
     },
     "perspective.missing_copy": {"pl": "Brakujące kopie", "en": "Missing copies"},
     "perspective.to_review": {"pl": "Do przeglądu", "en": "To review"},
@@ -1798,6 +1819,16 @@ CATALOG = {
     "grid.criteria.only_lineage": {
         "pl": "tylko obrazy bez rodowodu",
         "en": "only images without lineage",
+    },
+    # D-V-9f: perspektywa zapisana NOWSZYM wydaniem niesie warunki, których ten build nie zna.
+    # Pominięcie ich poszerza zbiór, więc pasek mówi to wprost i nazywa klucze - bez nazw nie
+    # dałoby się sprawdzić, czego brakuje.
+    "grid.criteria.unknown_keys": {
+        "pl": {"one": "zapisana w nowszej wersji - {n} warunek pominięty ({keys})",
+               "few": "zapisana w nowszej wersji - {n} warunki pominięte ({keys})",
+               "many": "zapisana w nowszej wersji - {n} warunków pominiętych ({keys})"},
+        "en": {"one": "saved by a newer version - {n} condition skipped ({keys})",
+               "other": "saved by a newer version - {n} conditions skipped ({keys})"},
     },
     "grid.status.loaded": {
         "pl": "Grid: {frames}, {cols} kolumn-keywordów",

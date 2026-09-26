@@ -620,3 +620,30 @@ def test_przeniesienie_NIE_nadpisuje_zywej_kurateli_celu(view):
     # …a sierota ZOSTAJE — gest odmówił, więc niczego nie zgubił
     assert view.con.execute("SELECT count(*) FROM target_plan WHERE canon = 'LBN529'"
                             ).fetchone()[0] == 1
+
+
+def test_guzik_przeniesienia_gasnie_gdy_cel_ma_wlasna_kuratele(view):
+    """G2-9d - zapowiedź nie ma prawa obiecywać gestu, który guard zaraz odmówi (rejestr długów):
+    do S0 guzik stał aktywny nawet nad kolizją z `test_przeniesienie_NIE_nadpisuje_zywej_kurateli_celu`
+    powyżej, a tooltip obiecywał przeniesienie, które `_on_orphan_move` i tak odrzuca. Teraz
+    `_sync_orphan_buttons` czyta TEN SAM predykat co guard (`_orphan_move_blocked`) i gasi guzik
+    z powodem, zanim dojdzie do kliknięcia."""
+    from horreum.gui import i18n
+    view.con.execute(
+        "INSERT INTO target_plan(canon, status, priority, note, created_at, updated_at) "
+        "VALUES ('C9', 'active', 1, 'swieza decyzja', ?, ?)", (NOW, NOW))
+    view.con.commit()
+    _osierocone(view, "LBN529", status="planned", priority=9, note="stara sierota")
+    view.orphan_list.setCurrentRow(0)
+    assert view.orphan_move_btn.isEnabled() is False
+    assert view.orphan_move_btn.toolTip() == i18n.t("planner.orphan_move_tip_taken", where="C9")
+
+
+def test_guzik_przeniesienia_aktywny_bez_kolizji_niesie_zapowiedz_gestu(view):
+    """Kontrast do testu powyżej: gdy cel `gdzie` NIE ma własnej kurateli, guzik zostaje aktywny
+    jak dotąd, a tooltip niesie zapowiedź gestu (`planner.orphan_move_tip`), nie powód odmowy."""
+    from horreum.gui import i18n
+    _osierocone(view, "LBN529", status="planned", priority=9, note="sierota bez kolizji")
+    view.orphan_list.setCurrentRow(0)
+    assert view.orphan_move_btn.isEnabled() is True
+    assert view.orphan_move_btn.toolTip() == i18n.t("planner.orphan_move_tip", where="C9")

@@ -31,7 +31,7 @@ from horreum.gui.app import (
     ObjectAxisView, ObservatoryAxisView, TelescopeAxisView, _utc_now_iso,
 )
 from horreum.gui.grid import (PRESET_DUPS, PRESET_LINEAGE, PRESET_MISSING_COPY, PRESET_RETIRED,
-                              PRESET_SUPERSEDED, PRESET_VANISHED)
+                              PRESET_RETIRED_CONFLICT, PRESET_SUPERSEDED, PRESET_VANISHED)
 from horreum.gui.rows import TwoPartDelegate
 
 # Definicja listy zadań: (klucz stanu z `tasks_state`, etykieta, akcja). Akcja: numer podstrony
@@ -89,8 +89,13 @@ _TASKS = [
     # bo to jedyny stan, w którym ŻYWA klatka wypada ze wszystkich kubełków — gdyby i on był
     # informacyjny, gest wycofania cicho ukrywałby materiał, który wrócił na dysk, czyli wnosiłby
     # dokładnie ten defekt, który ta paczka leczy.
+    # Każdy z dwóch wierszy prowadzi do WŁASNEJ perspektywy (G2-7d): lista pod klikiem ma liczyć
+    # to samo, co liczba obok. Wspólny cel „Wycofane" pokazywał pod „a plik wrócił 1" także
+    # klatki bez pliku, malowane identycznie - a „Przywróć" na nich cofało werdykt ręki o klatce,
+    # której pliku naprawdę nie ma. Liczba i perspektywa czytają ten sam predykat
+    # (`queries.retired_conflict_frame_ids`), równość pinuje test.
     ("retired_frames", "tasks.retired_frames", PRESET_RETIRED),
-    ("retired_conflict_frames", "tasks.retired_conflict_frames", PRESET_RETIRED),
+    ("retired_conflict_frames", "tasks.retired_conflict_frames", PRESET_RETIRED_CONFLICT),
     # Wiersz KLIKALNY, ale NIE ROBOTA (D-V-9a) - trzeci stan, jak "Zastapione" i "Wycofane".
     # Klatka zyje; zniknela jej JEDNA z kopii, wiec nie ma tu nic do zrobienia i nic sie nie
     # pali. Stoi na liscie, bo po naprawie D-V-9 ten fakt widac bylo wylacznie pod kursorem,

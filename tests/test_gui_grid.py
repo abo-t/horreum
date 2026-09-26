@@ -4246,15 +4246,87 @@ def test_predykat_brakujacej_kopii_odroznia_sie_od_trzech_sasiadow(gcon):
     assert queries.dup_frame_ids(gcon) == {1}, "duplikat ZOSTAJE u siebie"
 
 
-def test_zastapiona_i_wycofana_wypadaja_z_brakujacych_kopii(gcon):
-    """Historię zamknął już inny zapis - wiersz ma mówić o klatkach ŻYWYCH. Bez tych dwóch guardów
-    ta sama klatka stałaby na trzech listach naraz i każda kazałaby zrobić co innego."""
-    _zasiej_dwa_adresy(gcon)
-    gcon.execute("UPDATE frame SET superseded_by = 1 WHERE id = 5"); gcon.commit()
-    assert queries.missing_copy_frame_ids(gcon) == set()
-    gcon.execute("UPDATE frame SET superseded_by = NULL, retired_at = '2026-08-14T10:00:00' "
-                 "WHERE id = 5"); gcon.commit()
-    assert queries.missing_copy_frame_ids(gcon) == set()
+_NOW_KLINGI = "2026-08-14T10:00:00+00:00"
+
+
+def _klatka_klinga(con, sha, zywe=(), martwe=()):
+    """Klatka z kopiami ŻYWYMI i MARTWYMI - wyłącznie KLINGĄ (`repo`), nigdy `UPDATE`-em (D-V-9e).
+
+    Konwencja domu (`test_frame_retire.py`): stan budujemy drogą, którą idzie program, bo inaczej
+    test pinuje własny SQL zamiast zachowania - a fikstura potrafi wtedy wytworzyć stan, którego
+    klinga ODMAWIA (zastąpiona z obecną kopią), i przetestować ukrywanie złamanego inwariantu."""
+    from horreum import repo
+    fid, _ = repo.upsert_frame(con, sha1_data=sha, kind="master_light", filetype="xisf",
+                               camera_id=None, now=_NOW_KLINGI)
+    for path in martwe:
+        lid, _ = repo.add_location(con, frame_id=fid, volume="V", path=path, now=_NOW_KLINGI)
+        repo.mark_location_vanished(con, location_id=lid, expected_path=path, root="/",
+                                    run_id="test-klinga", now=_NOW_KLINGI)
+    for path in zywe:
+        repo.add_location(con, frame_id=fid, volume="V", path=path, now=_NOW_KLINGI)
+    return fid
+
+
+def _wycofana_z_powrotem(con, sha, *, martwa, wrocily=()):
+    """Klatka WYCOFANA, której plik wrócił - stan „a plik wrócił" (G2-7d) drogą programu: jedyna
+    kopia znika, ręka wycofuje, a re-skan znajduje tę samą treść pod NOWĄ ścieżką (`add_location`
+    - reguła N-lokacji; wycofania nic nie gasi, bo „ręka nietykalna"). Martwa kopia zostaje."""
+    from horreum import repo
+    fid = _klatka_klinga(con, sha, martwe=[martwa])
+    assert repo.retire_frames(con, frame_ids=[fid], now=_NOW_KLINGI).done == 1
+    for path in wrocily:
+        repo.add_location(con, frame_id=fid, volume="V", path=path, now=_NOW_KLINGI)
+    return fid
+
+
+def test_zastapiona_wypada_z_brakujacych_kopii_na_stanie_z_klingi(gcon):
+    """D-V-9e: guard zastąpienia pinowany na stanie, który program REALNIE umie wyprodukować.
+
+    Do tej zmiany fikstura stawiała `superseded_by` UPDATE-em na klatce z obecną kopią - stan,
+    którego `repo.mark_superseded` odmawia, a `audit.supersede_invariants` liczy jako naruszenie.
+    Tu zastąpienie przychodzi klingą PO zgaszeniu kopii, więc inwariant jest czysty (asercja
+    niżej to pinuje), a klatka nie trafia do „Brakujących kopii": nie ma żywej kopii, której
+    brakowałoby rodzeństwa, a jej historię zamknęła następczyni."""
+    from horreum import audit, repo
+    fid = _klatka_klinga(gcon, "zast", martwe=["/stare/a.xisf", "/stare/b.xisf"])
+    assert repo.mark_superseded(gcon, frame_id=fid, superseded_by=1, now=_NOW_KLINGI) is True
+    assert audit.supersede_invariants(gcon)["zastapiona_z_obecna_kopia"] == 0
+    assert fid not in queries.missing_copy_frame_ids(gcon)
+    assert fid in queries.superseded_frame_ids(gcon), "nie znika z oczu - ma swoją listę"
+
+
+def test_wycofana_z_brakujaca_kopia_ZOSTAJE_w_brakujacych_kopiach(gcon):
+    """D-V-9d: tooltip „wcześniejszy adres" i perspektywa „Brakujące kopie" liczą TEN SAM zbiór.
+
+    Klatka wycofana, której plik wrócił pod nowym adresem, a stary dalej leży martwy, JEST klatką
+    z brakującą kopią - fakt o kopii nie zależy od gestu ręki. Guard `retired_at IS NULL` wycinał
+    ją z perspektywy, choć tooltip pokazywał jej historię przeprowadzki. Licznik Porządków czyta
+    ten sam predykat, więc liczba i lista mówią to samo.
+
+    Falsyfikator: przywróć `AND f.retired_at IS NULL` w `missing_copy_frame_ids` - klatka wypada
+    i pierwsza asercja czerwienieje (a licznik Porządków pokazuje 0 przy niepustym tooltipie)."""
+    fid = _wycofana_z_powrotem(gcon, "wyc", martwa="/stare/m.xisf", wrocily=["/nowe/m.xisf"])
+    assert queries.missing_copy_frame_ids(gcon) == {fid}
+    assert queries.tasks_state(gcon)["missing_copy_frames"] == 1
+    assert queries.retired_conflict_frame_ids(gcon) == {fid}, "i dalej jest robotą konfliktu"
+    # wycofana BEZ powrotu pliku (jedyna kopia martwa) do „Brakujących kopii" nie wchodzi -
+    # nie ma żywej kopii, więc to nie jest ubytek jednej z kilku
+    bez_pliku = _wycofana_z_powrotem(gcon, "wyc2", martwa="/stare/n.xisf")
+    assert bez_pliku not in queries.missing_copy_frame_ids(gcon)
+
+
+def test_brakujace_kopie_pokazuja_wycofana_Z_JEJ_znacznikiem(view, gcon):
+    """D-V-9d na EKRANIE: wiersz w perspektywie „Brakujące kopie" tłumaczy się sam - znacznik
+    wycofania stoi w komórce, a tooltip niesie i werdykt ręki, i wcześniejszy adres (dwa fakty
+    o tej samej klatce, nie sprzeczność). Test idzie przez preset PO STAŁEJ, jak klik w Porządkach."""
+    fid = _wycofana_z_powrotem(gcon, "wyc", martwa="/stare/m.xisf", wrocily=["/nowe/m.xisf"])
+    view.apply_perspective(grid_mod.PRESET_MISSING_COPY)
+    assert view._frame_ids == [fid]
+    r = next(i for i, row in enumerate(view.model._rows) if row.get("frame_id") == fid)
+    assert view.model.data(view.model.index(r, 0), Qt.DisplayRole).startswith(
+        "(wycofana, plik wrócił)")
+    tip = _path_tip(view, fid)
+    assert "plik jest znów na dysku" in tip and "wcześniejszy adres: /stare/m.xisf" in tip
 
 
 def test_perspektywa_brakujacych_kopii_przycina_grid(view, gcon):
@@ -4325,23 +4397,44 @@ def test_KAZDY_preset_ma_etykiete_i_zuzyta_flage():
 
     Punkt 3 pilnuje TRZECH miejsc naraz, bo każde z nich samo w sobie przepuszcza cichą awarię:
     ustawienia flagi w `_on_perspective`, derywacji trimu w `_refresh` i przekazania go listwie
-    facetów. Czwarte miejsce - serializacja spec-a - ma własny test wyżej."""
+    facetów. Czwarte miejsce - serializacja spec-a - ma własny test wyżej.
+
+    OD G2-7d `_TRIMY` JEST JEDYNĄ ENUMERACJĄ RODZINY - i bramka pyta o to wprost (punkt 4):
+    WSZYSCY konsumenci czytają tabelę, a w źródle nie ma ani jednej ręcznie wpisanej flagi
+    (`self._only_…`). Dawny punkt „literał `self._only_X` jest w źródle" odwrócił znaczenie: był
+    dowodem, że flaga jest gdzieś użyta, a dziś byłby dowodem powrotu drugiej listy. Klucz paska
+    kryteriów składany jest z konwencji, więc kolektor literałów i18n go nie widzi - parytet
+    z katalogiem trzyma punkt 5, a zachowanie całości test WYKONANIA niżej
+    (`test_KAZDA_flaga_rodziny_przechodzi_caly_cykl_widoku`)."""
     import inspect
+    import re
+    from horreum.gui.i18n_catalog import CATALOG
     atrybuty_trimu = {atrybut for atrybut, _ in grid_mod._TRIMY}
     for nazwa, spec in grid_mod.PRESETS.items():
         assert nazwa in grid_mod._PRESET_LABELS, f"preset bez etykiety wyświetlania: {nazwa!r}"
-        from horreum.gui.i18n_catalog import CATALOG
         assert grid_mod._PRESET_LABELS[nazwa] in CATALOG, (
             f"etykieta presetu {nazwa!r} spoza katalogu i18n: {grid_mod._PRESET_LABELS[nazwa]!r}")
         for klucz in (k for k in spec if k.startswith("only_")):
-            assert f"self._{klucz}" in _ZRODLO_GRIDU, f"flaga {klucz!r} presetu {nazwa!r} nieużywana"
             assert f"_{klucz}" in atrybuty_trimu, (
                 f"flaga {klucz!r} presetu {nazwa!r} nie ma wiersza w `_TRIMY` - perspektywa "
                 f"pokaże PEŁNY grid zamiast przyciętego, bez żadnego komunikatu")
-    for metoda in (grid_mod.FramesView._refresh, grid_mod.FramesView._trim_aktywny):
+    for metoda in (grid_mod.FramesView._refresh, grid_mod.FramesView._trim_aktywny,
+                   grid_mod.FramesView._on_perspective, grid_mod.FramesView._save_perspective,
+                   grid_mod.FramesView._describe_criteria, grid_mod.FramesView._stan_zgodny_z,
+                   grid_mod.FramesView._zeruj_flagi):
         assert "_TRIMY" in inspect.getsource(metoda), (
             f"`{metoda.__name__}` przestał czytać `_TRIMY` - tabela z wierszami, których nikt nie "
             f"konsumuje, jest bramką na dane zamiast na zachowanie")
+    for metoda in (grid_mod.FramesView.__init__, grid_mod.FramesView.apply_object_facet):
+        assert "_zeruj_flagi" in inspect.getsource(metoda), (
+            f"`{metoda.__name__}` zeruje flagi po swojemu - druga enumeracja rodziny")
+    # 4. żadnej ręcznej listy: literał `self._only_…` w źródle to powrót kopii enumeracji
+    reczne = re.findall(r"self\._only_\w+", _ZRODLO_GRIDU)
+    assert not reczne, f"ręcznie wpisane flagi rodziny obok `_TRIMY`: {sorted(set(reczne))}"
+    # 5. każda flaga ma zdanie na pasku kryteriów - klucz składany, więc kolektor i18n jest ślepy
+    for atrybut, _ in grid_mod._TRIMY:
+        assert grid_mod._klucz_kryterium(atrybut) in CATALOG, (
+            f"flaga {atrybut!r} bez zdania na pasku kryteriów: {grid_mod._klucz_kryterium(atrybut)!r}")
     # …a tabela nie ma prawa opisywać flagi, której widok nie zna: martwy wiersz kazałby
     # `_trim_aktywny` pytać o atrybut, którego `__init__` nie stawia (AttributeError w recepcie).
     # Pytamy INSTANCJI, nie źródła: zapis `a = b = False` jest w tym pliku w użyciu (`_on_clear…`),
@@ -4377,6 +4470,208 @@ def test_listwa_facetow_dostaje_KOMPLET_trimow_perspektywy():
     assert "sib &=" not in rail, (
         "`&=` na sibling-secie przycina MEMOIZOWANE uniwersum w miejscu (`_memo_leaf_fns`), "
         "więc kolejny facet tej samej pętli liczy na zbiorze przyciętym przez poprzednika")
+
+
+def test_KAZDA_flaga_rodziny_przechodzi_caly_cykl_widoku(view, gcon, monkeypatch):
+    """BRAMKA WYKONANIA na enumerację (G2-7d) - bliźniak bramki strukturalnej wyżej, bo tamta czyta
+    źródło, a rozjazd tej rodziny był zawsze awarią ZACHOWANIA („Baza pusta" na pełnej bazie,
+    `483df93`). Dla KAŻDEGO presetu z flagą: przełączenie stawia dokładnie jego flagę, pasek
+    kryteriów ją nazywa, recepta widzi trim, zapis do bazy niesie ją pod kluczem spec-a (a resztę
+    rodziny jawnie wyłączoną), a wejście z mostu planera zdejmuje wszystkie. Nowa flaga dopisana
+    do `_TRIMY` wchodzi tu sama - bez dopisywania testu."""
+    from PySide6.QtWidgets import QInputDialog
+    from horreum.gui import i18n
+    presety = [(nazwa, klucz) for nazwa, spec in grid_mod.PRESETS.items()
+               for klucz in spec if klucz.startswith("only_")]
+    assert len(presety) == len(grid_mod._TRIMY), "każda flaga rodziny ma dokładnie jeden preset"
+    for nazwa, klucz in presety:
+        view.apply_perspective(nazwa)
+        wlaczone = [a for a, _ in grid_mod._TRIMY if getattr(view, a)]
+        assert wlaczone == [f"_{klucz}"], f"{nazwa!r}: zapalone flagi {wlaczone}"
+        assert i18n.t(f"grid.criteria.{klucz}") in view.sel_bar.criteria_label.toolTip(), nazwa
+        assert view._trim_aktywny(), nazwa
+        monkeypatch.setattr(QInputDialog, "getText",
+                            staticmethod(lambda *a, _n=f"kopia {nazwa}", **k: (_n, True)))
+        view._save_perspective()
+        zapisana = dict(queries.perspectives(gcon))[f"kopia {nazwa}"]
+        assert {grid_mod._klucz_spec(a): zapisana.get(grid_mod._klucz_spec(a))
+                for a, _ in grid_mod._TRIMY} == {
+            grid_mod._klucz_spec(a): a == f"_{klucz}" for a, _ in grid_mod._TRIMY}, nazwa
+        assert grid_mod._nieznane_warunki(zapisana) == [], "spec TEGO buildu nie może ostrzegać"
+        view.apply_object_facet([])
+        assert not any(getattr(view, a) for a, _ in grid_mod._TRIMY), nazwa
+
+
+# ═════════════════════════ G2-7d - „Wycofane, a plik wrócił" dostaje własną perspektywę
+
+
+def test_wiersz_a_plik_wrocil_prowadzi_do_listy_TYLKO_swoich_klatek(view, gcon):
+    """G2-7d, dowiedziony firsthandem 0811: przy populacji 2 (wycofana z plikiem + wycofana bez
+    pliku) wiersz mówił „a plik wrócił 1", a klik prowadził do DWÓCH wierszy. Test idzie drogą
+    człowieka - klik w wiersz Porządków, sygnał do Zbiorów - i pyta o stan widoku po nim.
+
+    Falsyfikator: przywróć w `tasks._TASKS` cel `PRESET_RETIRED` - lista pokaże dwie klatki
+    i asercja o `[wrocila]` czerwienieje."""
+    from horreum.gui import rows
+    wrocila = _wycofana_z_powrotem(gcon, "wroc", martwa="/stare/w.xisf", wrocily=["/nowe/w.xisf"])
+    bez_pliku = _wycofana_z_powrotem(gcon, "bez", martwa="/stare/b.xisf")
+    tv = tasks_mod.TasksView(gcon)
+    tv.open_collection.connect(view.apply_perspective)
+    try:
+        tv.refresh_counts()
+
+        def _wiersz(klucz):
+            return next(tv.tasks.item(i) for i in range(tv.tasks.count())
+                        if tv.tasks.item(i).data(Qt.UserRole) == klucz)
+
+        konflikt = _wiersz("retired_conflict_frames")
+        assert konflikt.data(rows.SECONDARY) == "1  ›"
+        tv._on_task_clicked(konflikt)
+        assert view._frame_ids == [wrocila], "lista pod klikiem liczy to samo, co liczba obok"
+        assert len(view._frame_ids) == queries.tasks_state(gcon)["retired_conflict_frames"]
+        assert "wycofane, a plik wrócił" in view.sel_bar.criteria_label.toolTip()
+        # wiersz HISTORII dalej prowadzi do wszystkich wycofanych - to jego treść
+        tv._on_task_clicked(_wiersz("retired_frames"))
+        assert sorted(view._frame_ids) == sorted([wrocila, bez_pliku])
+    finally:
+        tv.close()
+
+
+def test_dwie_wycofane_NIE_wygladaja_identycznie(view, gcon):
+    """Druga połowa G2-7d: nawet na liście „Wycofane" (gdzie stoją obie) wiersz z plikiem na dysku
+    musi się odróżniać. Zdanie zwykłej wycofanej („pliku już nie szukamy") jest o nim nieprawdą.
+    Znacznik jest PREFIKSEM - sufiks ginie w elizji kolumny „Ścieżka" (lekcja `grid.cell.retired`)."""
+    wrocila = _wycofana_z_powrotem(gcon, "wroc", martwa="/stare/w.xisf", wrocily=["/nowe/w.xisf"])
+    bez_pliku = _wycofana_z_powrotem(gcon, "bez", martwa="/stare/b.xisf")
+    view.apply_perspective(grid_mod.PRESET_RETIRED)
+
+    def _tekst(fid):
+        r = next(i for i, row in enumerate(view.model._rows) if row.get("frame_id") == fid)
+        return view.model.data(view.model.index(r, 0), Qt.DisplayRole)
+
+    assert _tekst(wrocila) == "(wycofana, plik wrócił)  w.xisf"
+    assert _tekst(bez_pliku) == "(wycofana)  b.xisf"
+    tip_wrocila, tip_bez = _path_tip(view, wrocila), _path_tip(view, bez_pliku)
+    assert "znów na dysku" in tip_wrocila and "nie szukamy" not in tip_wrocila
+    assert "nie szukamy" in tip_bez and "znów na dysku" not in tip_bez
+    assert "2026-08-14 10:00" in tip_wrocila, "data werdyktu - jedyny jego nośnik"
+
+
+def test_przywroc_w_perspektywie_konfliktu_NIE_dotyka_klatki_bez_pliku(view, gcon):
+    """Pomyłka, której G2-7d miało zapobiec, nie była niewinna: „Przywróć" na zaznaczeniu listy
+    cofało werdykt ręki o klatce, której pliku naprawdę nie ma. W nowej perspektywie gest na
+    CAŁYM widoku trafia wyłącznie w klatkę, której przesłanka wycofania upadła."""
+    wrocila = _wycofana_z_powrotem(gcon, "wroc", martwa="/stare/w.xisf", wrocily=["/nowe/w.xisf"])
+    bez_pliku = _wycofana_z_powrotem(gcon, "bez", martwa="/stare/b.xisf")
+    view.apply_perspective(grid_mod.PRESET_RETIRED_CONFLICT)
+    _zaznacz(view, view._frame_ids)
+    view._on_frame_restore()
+    stan = dict(gcon.execute("SELECT id, retired_at FROM frame WHERE id IN (?, ?)",
+                             (wrocila, bez_pliku)).fetchall())
+    assert stan[wrocila] is None, "klatka z plikiem przywrócona"
+    assert stan[bez_pliku] is not None, "werdykt o klatce bez pliku NIETKNIĘTY"
+    assert queries.retired_conflict_frame_ids(gcon) == set()
+
+
+# ═════════════════════════ D-V-9f - perspektywa z nowszej wersji mówi, czego nie zastosowała
+
+
+def test_nieznane_warunki_liczy_tylko_to_czego_build_nie_zna():
+    """Funkcja NIE zna żadnej konkretnej przyszłej flagi - pyta wyłącznie o to, czego ten build nie
+    umie. Pusta wartość to nie warunek (nowsze wydanie zapisuje każdą flagę, także wyłączoną),
+    a facet spoza `FACETS` pomija `compose` tak samo cicho, jak nieznany klucz `only_*`."""
+    spec = {"filter": None, "columns": [], "group_by": None, "only_dups": True,
+            "only_z_przyszlosci": True, "only_wylaczona": False, "sortuj_po": "date_obs",
+            "facets": {"kind": {"in": [["light", "light"]]},
+                       "planeta": {"in": [[1, "Mars"]]}, "pusty": {"in": [], "ex": []}}}
+    assert grid_mod._nieznane_warunki(spec) == ["facets.planeta", "only_z_przyszlosci",
+                                                 "sortuj_po"]
+    assert grid_mod._nieznane_warunki({"filter": None, "facets": {}}) == []
+
+
+def test_perspektywa_z_nowszej_wersji_MOWI_ze_pominela_warunki(view, gcon):
+    """D-V-9f: spec z kluczem, którego ten build nie zna, czytał się jako „pokaż wszystko" pod
+    nazwą własnej perspektywy - bez sygnału. Teraz pasek kryteriów nazywa pominięte warunki,
+    a zbiór jest szerszy JAWNIE. Przejście na inną perspektywę gasi ostrzeżenie, bo przestaje ono
+    dotyczyć tego, co widać.
+
+    Falsyfikator: zdejmij człon `_nieznane_warunki` z `_describe_criteria` - pasek milczy, a liczba
+    klatek (pełna baza) wygląda jak wynik perspektywy."""
+    from horreum import repo
+    repo.save_perspective(gcon, name="Z przyszłości", now=NOW, spec={
+        "filter": None, "group_by": None, "only_z_przyszlosci": True,
+        "facets": {"planeta": {"in": [[1, "Mars"]]}}})
+    view._load_facets()
+    view.apply_perspective("Z przyszłości")
+    assert view.combo_persp.currentData() == ("saved", "Z przyszłości")
+    kryteria = view.sel_bar.criteria_label.toolTip()
+    assert "zapisana w nowszej wersji - 2 warunki pominięte" in kryteria, kryteria
+    assert "only_z_przyszlosci" in kryteria and "facets.planeta" in kryteria
+    assert view.count_label.text() == "4 klatki", "zbiór szerszy - i właśnie dlatego pasek mówi"
+    view.apply_perspective(grid_mod._PRESET_CZYSTY)
+    assert "nowszej wersji" not in view.sel_bar.criteria_label.toolTip()
+
+
+_SPEC_Z_PRZYSZLOSCI = {"filter": None, "group_by": None, "only_z_przyszlosci": True,
+                       "sortuj_po": "date_obs", "facets": {"planeta": {"in": [[1, "Mars"]]}}}
+
+
+def _otworz_z_przyszlosci(view, gcon, monkeypatch, nazwa_zapisu):
+    """Perspektywa nowszej wersji otwarta w tym buildzie; `QInputDialog` odpowie `nazwa_zapisu`."""
+    from PySide6.QtWidgets import QInputDialog
+    from horreum import repo
+    repo.save_perspective(gcon, name="Z przyszłości", now=NOW, spec=_SPEC_Z_PRZYSZLOSCI)
+    view._load_facets()
+    view.apply_perspective("Z przyszłości")
+    monkeypatch.setattr(QInputDialog, "getText",
+                        staticmethod(lambda *a, **k: (nazwa_zapisu, True)))
+
+
+def test_zapis_TEJ_SAMEJ_perspektywy_NIE_kasuje_warunkow_nowszej_wersji(view, gcon, monkeypatch):
+    """D-V-9f, druga połowa: pasek ostrzegał, a zapis i tak gubił warunek - spec składa się ze stanu,
+    a stan zna tylko to, co ten build umie. Zapis pod TĄ SAMĄ nazwą z widoku, który wciąż JEST tą
+    perspektywą, scala obce klucze i facety ze świeżym stanem: poprawka człowieka (tu grupowanie)
+    wchodzi, warunek nowszego wydania zostaje - i ostrzeżenie po ponownym otwarciu też.
+
+    Falsyfikator: zdejmij `**klucze_obce` / `facety_obce` z `_save_perspective` - zapisany spec
+    traci `only_z_przyszlosci` i `facets.planeta`, więc nowsze wydanie pokaże zbiór szerszy."""
+    _otworz_z_przyszlosci(view, gcon, monkeypatch, "Z przyszłości")
+    view.combo_group.setCurrentIndex(view.combo_group.findData("kind"))   # poprawka człowieka
+    view._save_perspective()
+    zapisana = dict(queries.perspectives(gcon))["Z przyszłości"]
+    assert zapisana["group_by"] == "kind", "poprawka widoku weszła"
+    assert zapisana["only_z_przyszlosci"] is True and zapisana["sortuj_po"] == "date_obs"
+    assert zapisana["facets"]["planeta"] == {"in": [[1, "Mars"]]}
+    assert grid_mod._nieznane_warunki(zapisana) == grid_mod._nieznane_warunki(_SPEC_Z_PRZYSZLOSCI)
+    view.apply_perspective(grid_mod._PRESET_CZYSTY)
+    view.apply_perspective("Z przyszłości")
+    assert "3 warunki pominięte" in view.sel_bar.criteria_label.toolTip()
+
+
+def test_zapis_pod_NOWA_nazwa_niesie_tylko_to_co_widok_zna(view, gcon, monkeypatch):
+    """Druga strona reguły: nowa nazwa to nowa perspektywa TEGO buildu. Obcego warunku nikt tu nie
+    widział ani nie wybrał (ten build go nie stosuje), więc nie ma prawa odziedziczyć go nowa
+    perspektywa - także obcego facetu, który leży w stanie widoku po otwarciu źródła."""
+    _otworz_z_przyszlosci(view, gcon, monkeypatch, "Kopia")
+    view._save_perspective()
+    kopia = dict(queries.perspectives(gcon))["Kopia"]
+    assert grid_mod._nieznane_warunki(kopia) == []
+    assert "planeta" not in kopia["facets"] and "sortuj_po" not in kopia
+    zrodlo = dict(queries.perspectives(gcon))["Z przyszłości"]
+    assert zrodlo == _SPEC_Z_PRZYSZLOSCI, "źródło nietknięte"
+
+
+def test_zapis_z_widoku_ktory_PRZESTAL_byc_perspektywa_nie_dokleja_obcych_warunkow(
+        view, gcon, monkeypatch):
+    """Trzecia gałąź reguły: „× Wyczyść zbiór" zdejmuje facety, więc zbiór przestaje być tą
+    perspektywą (`_stan_zgodny_z`) i etykieta odchodzi z niej. Nadpisanie starej nazwy jest wtedy
+    ŚWIADOMĄ wymianą zbioru - doklejenie warunku sprzed wymiany zrobiłoby z niego trzeci, niczyj."""
+    _otworz_z_przyszlosci(view, gcon, monkeypatch, "Z przyszłości")
+    view._on_clear_selection()
+    assert view.combo_persp.currentData() != ("saved", "Z przyszłości")
+    view._save_perspective()
+    zapisana = dict(queries.perspectives(gcon))["Z przyszłości"]
+    assert grid_mod._nieznane_warunki(zapisana) == []
 
 
 # ═════════════════════════ PACZKA B - FH-4 (pusty stan czyta receptę) · BP-5 (etykieta perspektywy)

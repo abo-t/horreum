@@ -209,6 +209,45 @@ def test_znikniete_NIE_pokazuja_klatki_zastapionej_ktorej_gest_nie_zamknie():
     assert zastapiona in queries.superseded_frame_ids(con)       # nie znika z oczu - ma swoją listę
 
 
+def test_duplikaty_NIE_pokazuja_klatki_wycofanej_ktorej_pliki_wrocily():
+    """G2-10d - bliźniak G2-6d na „Duplikatach". Wycofanie wymaga braku obecnej kopii tylko
+    w chwili zapisu; re-skan potrafi potem znaleźć tę samą treść pod DWIEMA nowymi ścieżkami
+    (`add_location` - reguła N-lokacji), a werdyktu nic nie gasi („ręka nietykalna"). Bez guardu
+    taka klatka trafiała do „Duplikatów", których gest („która kopia zbędna") dotyczy klatek
+    żywych - a jej pierwszą robotą jest werdykt ręki, którego przesłanka upadła. Bliźniaczka
+    o tym samym kształcie, ale NIEwycofana, ZOSTAJE - guard ma wyciąć wycofanie, nie duplikat.
+    Licznik Porządków czyta ten sam predykat i mówi to samo.
+
+    Guard zastąpienia stoi obok z tego samego powodu, ale jego stanu nie budujemy: zastąpiona
+    z obecną kopią jest naruszeniem inwariantu (`audit.supersede_invariants`), którego skan nie
+    wytwarza (`repo.clear_superseded`) - test pinowałby ukrywanie złamanego stanu (D-V-9e).
+
+    Falsyfikator: zdejmij `AND f.retired_at IS NULL` z `dup_frame_ids` - wycofana wraca do zbioru
+    (a licznik Porządków pokazuje 2)."""
+    from horreum import db
+
+    con = db.open_db(":memory:")
+
+    def _z_kopiami(sha, *sciezki):
+        fid, _ = repo.upsert_frame(con, sha1_data=sha, kind="light", filetype="fits",
+                                   camera_id=None, now=NOW)
+        return fid, [repo.add_location(con, frame_id=fid, volume="TESTVOL", path=p, now=NOW)[0]
+                     for p in sciezki]
+
+    wycofana, (lid,) = _z_kopiami("sha-wycofana", r"R:\ASTRO_\stary.fit")
+    repo.mark_location_vanished(con, location_id=lid, expected_path=r"R:\ASTRO_\stary.fit",
+                                root=r"R:\ASTRO_", run_id="g2-10d", now=NOW)
+    assert repo.retire_frames(con, frame_ids=[wycofana], now=NOW).done == 1
+    for p in (r"R:\ASTRO_\wrocil_a.fit", r"R:\ASTRO_\wrocil_b.fit"):   # re-skan: dwie kopie wracają
+        repo.add_location(con, frame_id=wycofana, volume="TESTVOL", path=p, now=NOW)
+    blizniaczka, _ = _z_kopiami("sha-blizniaczka", r"R:\ASTRO_\a.fit", r"R:\ASTRO_\b.fit")
+
+    assert queries.dup_frame_ids(con) == {blizniaczka}
+    assert queries.tasks_state(con)["dup_frames"] == 1
+    # klatka nie znika z oczu: prowadzi do niej wiersz AKCYJNY „Wycofane, a plik wrócił"
+    assert queries.retired_conflict_frame_ids(con) == {wycofana}
+
+
 def _seed_stosy_z_powodami(con):
     """Pięć gotowych obrazów pokrywających WSZYSTKIE stany rodowodu: dwa czekające na gest, dwa ze
     zwietrzałym powodem (obiekt / odniesienie nadane PO przebiegu) i jeden z gotowym rodowodem."""

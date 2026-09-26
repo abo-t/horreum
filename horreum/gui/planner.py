@@ -573,13 +573,30 @@ class PlannerView(QWidget):
         items = self.orphan_list.selectedItems()
         return items[0].data(Qt.UserRole) if items else None
 
+    def _orphan_move_blocked(self, gdzie):
+        """JEDEN predykat odmowy „Przenieś" - ten sam warunek czyta guard w `_on_orphan_move`
+        i wygaszenie guzika w `_sync_orphan_buttons` (G2-9d). Cel `gdzie` ma już WŁASNĄ kuratelę
+        (`targets.plan_marks`), więc przeniesienie nadpisałoby świeższą decyzję STARSZYM wierszem -
+        dwie kopie tego samego warunku rozjechałyby się przy pierwszej zmianie jednej z nich, a
+        wtedy zapowiedź guzika znów kłamałaby wobec odmowy gestu."""
+        return gdzie is not None and targets.plan_marks(self.con).get(gdzie) is not None
+
     def _sync_orphan_buttons(self):
         dane = self._selected_orphan()
         self.orphan_clear_btn.setEnabled(dane is not None)
-        self.orphan_move_btn.setEnabled(dane is not None and dane[1] == targets.ORPHAN_MOVED)
-        self.orphan_move_btn.setToolTip(
-            i18n.t("planner.orphan_move_tip", where=dane[2]) if dane and dane[2]
-            else i18n.t("planner.orphan_move_tip_none"))
+        moved = dane is not None and dane[1] == targets.ORPHAN_MOVED
+        # ZAPOWIEDŹ NIE MA PRAWA OBIECYWAĆ GESTU, KTÓRY GUARD ZARAZ ODMÓWI (G2-9d, treść rejestru):
+        # gdy cel `gdzie` ma już własną kuratelę, guzik gaśnie z POWODEM w tooltipie zamiast stać
+        # aktywny nad kliknięciem, które i tak skończy się odmową. Guard w `_on_orphan_move`
+        # ZOSTAJE - to obrona w głąb, nie duplikat do usunięcia.
+        blocked = moved and self._orphan_move_blocked(dane[2])
+        self.orphan_move_btn.setEnabled(moved and not blocked)
+        if blocked:
+            self.orphan_move_btn.setToolTip(i18n.t("planner.orphan_move_tip_taken", where=dane[2]))
+        elif dane and dane[2]:
+            self.orphan_move_btn.setToolTip(i18n.t("planner.orphan_move_tip", where=dane[2]))
+        else:
+            self.orphan_move_btn.setToolTip(i18n.t("planner.orphan_move_tip_none"))
         self.orphan_undo_btn.setEnabled(self._orphan_undo is not None)
 
     def _on_orphan_clear(self):
@@ -608,7 +625,10 @@ class PlannerView(QWidget):
         # po kanonie, więc bez tego guarda „Przenieś" nadpisałoby jego świeższą decyzję STARSZYM
         # wierszem — bezgłośnie i bez drogi powrotu w GUI. Paczka domykająca grupę „gest bez drogi
         # powrotu" nie ma prawa wnieść gestu, który NISZCZY cudzy zapis (bramka pakietu, Fable Z2).
-        if targets.plan_marks(self.con).get(gdzie) is not None:
+        # OBRONA W GŁĄB, ZOSTAJE (G2-9d): `_orphan_move_blocked` gasi guzik z powodem PRZED tym
+        # kliknięciem w normalnym biegu, ale ten guard broni też ścieżek, którym `_sync_orphan_buttons`
+        # nie stał na drodze (wywołanie programowe, wyścig z konsolą równoległą).
+        if self._orphan_move_blocked(gdzie):
             self.status_message.emit(i18n.t("planner.orphan_move_taken", where=gdzie))
             return
         repo.set_target_plan(self.con, canon=gdzie, status=status, priority=priority,

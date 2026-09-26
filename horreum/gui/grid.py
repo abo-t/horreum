@@ -195,9 +195,15 @@ def _former_tip(row):
     DWA STANY SPEŁNIAJĄ TEN WARUNEK I OBA DOSTAJĄ CZŁON ŚWIADOMIE (bramka pakietu, Z3/F5): klatka
     z kilkoma kopiami, z których część zniknęła, oraz klatka WYCOFANA, KTÓREJ PLIK WRÓCIŁ
     (`queries.retired_conflict_frame_ids` - stan modelowany, z własnym wierszem Porządków). W drugim
-    przypadku tooltip mówi naraz „wycofana ręką" i „wcześniejszy adres" - to dwa prawdziwe fakty
-    o tej samej klatce, nie sprzeczność. Milczą natomiast stany BEZ żywej kopii (zniknięta, wycofana
-    bez powrotu, zastąpiona): tam pokazany adres SAM jest tym martwym."""
+    przypadku tooltip mówi naraz „wycofana, a plik wrócił" i „wcześniejszy adres" - to dwa prawdziwe
+    fakty o tej samej klatce, nie sprzeczność. Milczą natomiast stany BEZ żywej kopii (zniknięta,
+    wycofana bez powrotu, zastąpiona): tam pokazany adres SAM jest tym martwym.
+
+    TEN CZŁON I PERSPEKTYWA „Brakujące kopie" LICZĄ TEN SAM ZBIÓR (D-V-9d). Do tej zmiany
+    `queries.missing_copy_frame_ids` wycinał klatkę wycofaną guardem `retired_at IS NULL`, a ten
+    człon ją pokazywał - wiersz obiecywał „wszystkie naraz", a jednej nie oddawał. Rozstrzygnięcie
+    idzie za FAKTEM: kopia zniknęła niezależnie od gestu ręki, więc predykat zdjął guard, a wiersz
+    tłumaczy się własnym znacznikiem wycofania w komórce."""
     path = row.get("vanished_path")
     if not path:
         return ""
@@ -215,6 +221,17 @@ def _retired_tip(row):
     w tooltipie, a nie tylko w menu, bo tooltip czyta się DOKŁADNIE w chwili wątpliwości
     („czemu ten wiersz jest inny") — a wtedy wiedza „to się cofa" jest najwięcej warta."""
     return i18n.t("grid.tip.retired", ts=str(row.get("retired_at"))[:16].replace("T", " "))
+
+
+def _retired_back_tip(row):
+    """Człon tooltipu ścieżki dla klatki WYCOFANEJ, KTÓREJ PLIK WRÓCIŁ (G2-7d) - bliźniak `_retired_tip`.
+
+    Zdanie zwykłej wycofanej („pliku już nie szukamy") jest o tej klatce NIEPRAWDĄ: plik leży na
+    dysku i to właśnie czyni ten stan robotą. Człon mówi więc trzy rzeczy: kiedy ręka wycofała
+    (data - jak u bliźniaka, jedyny nośnik tego faktu), że przesłanka werdyktu upadła, i którędy
+    ją zamknąć. Werdykt NIE gaśnie sam, bo wjazd materiału nie cofa gestu ręki („ręka
+    nietykalna") - dlatego tooltip wskazuje gest, a nie obiecuje, że stan minie."""
+    return i18n.t("grid.tip.retired_back", ts=str(row.get("retired_at"))[:16].replace("T", " "))
 
 
 def _superseded_tip(row):
@@ -277,6 +294,13 @@ PRESET_RETIRED = "Wycofane"
 # a po naprawie D-V-9 fakt ten dało się zobaczyć WYŁĄCZNIE w tooltipie - jeden wiersz naraz, przy
 # populacji 128. Stała współdzielona z TasksView po nazwie, jak pięciu sąsiadów wyżej.
 PRESET_MISSING_COPY = "Brakujące kopie"
+# PRESET_RETIRED_CONFLICT - siódmy bliźniak (G2-7d). Wiersz Porządków „Wycofane, a plik wrócił"
+# jest ROBOTĄ i do tej zmiany prowadził do „Wycofanych", czyli do listy SZERSZEJ niż jego liczba:
+# przy populacji 2 (wycofana z plikiem + wycofana bez pliku) ekran mówił „1" i pokazywał dwa
+# wiersze, a „Przywróć" na tym drugim cofało werdykt ręki o klatce, której pliku naprawdę nie ma.
+# Predykat istniał (`queries.retired_conflict_frame_ids`, ten sam, który liczy wiersz) - brakowało
+# perspektywy, która go używa. Stała współdzielona z TasksView po nazwie, jak sześciu sąsiadów.
+PRESET_RETIRED_CONFLICT = "Wycofane, a plik wrócił"
 PRESETS = {
     "Przegląd": {"filter": None, "group_by": None},
     "Kalibracja": {"filter": {"op": "OR", "conditions": [
@@ -289,6 +313,7 @@ PRESETS = {
     PRESET_LINEAGE: {"filter": None, "group_by": None, "only_lineage": True},
     PRESET_SUPERSEDED: {"filter": None, "group_by": None, "only_superseded": True},
     PRESET_RETIRED: {"filter": None, "group_by": None, "only_retired": True},
+    PRESET_RETIRED_CONFLICT: {"filter": None, "group_by": None, "only_retired_conflict": True},
     PRESET_MISSING_COPY: {"filter": None, "group_by": None, "only_missing_copy": True},
     "Do przeglądu": {"filter": None, "group_by": None, "only_review": True},
 }
@@ -302,6 +327,7 @@ _PRESET_LABELS = {
     PRESET_LINEAGE: "perspective.lineage",
     PRESET_SUPERSEDED: "perspective.superseded",
     PRESET_RETIRED: "perspective.retired",
+    PRESET_RETIRED_CONFLICT: "perspective.retired_conflict",
     PRESET_MISSING_COPY: "perspective.missing_copy",
     "Do przeglądu": "perspective.to_review",
 }
@@ -317,11 +343,14 @@ _PRESET_CZYSTY = "Przegląd"
 # Ta rodzina wykłada się dokładnie na kopiach enumeracji (`483df93`: siedem flag wpiętych w osiem
 # miejsc i jedno pominięte), więc lekarstwem nie jest ósma kopia, tylko brak drugiej.
 #
-# ⚠ TO NIE JEST JESZCZE JEDYNA ENUMERACJA RODZINY - i zapis ma o tym mówić prawdę, bo następna
-# sesja przeczyta go jako gwarancję (bramka pakietu, zarzut zgodny u dwóch soczewek). Ręczna lista
-# siedmiu flag żyje dalej w `__init__`, `_on_perspective`, `apply_object_facet`, serializacji
-# spec-a i `_describe_criteria`. BP-4 zdjął DWÓCH konsumentów z siedmiu; dokończenie (jeden dict
-# flag karmiony tą tabelą) należy do paczki `D`, która i tak w tę rodzinę wchodzi i idzie SAMA.
+# OD G2-7d TO JEST JEDYNA ENUMERACJA RODZINY. BP-4 zdjął z ręcznej listy dwóch konsumentów
+# z siedmiu, a pięciu (`__init__`, `_on_perspective`, `apply_object_facet`, serializacja spec-a,
+# `_describe_criteria`) trzymało dalej własną kopię - i ósma flaga musiałaby trafić w dziewięć
+# miejsc. Teraz każdy z nich iteruje tę tabelę, a trzy nazwy jednej flagi wynikają z JEDNEJ
+# konwencji zamiast z trzech list: atrybut widoku `_only_X`, klucz spec-a `only_X` (bez
+# podkreślnika - tak zapisują go bazy użytkowników, więc tej nazwy nie wolno zmieniać) i klucz
+# paska kryteriów `grid.criteria.only_X`. Konwencję i komplet pinuje bramka
+# `test_KAZDY_preset_ma_etykiete_i_zuzyta_flage`, łącznie z parytetem kluczy katalogu i18n.
 #
 # NAZWY ZAPYTAŃ, NIE OBIEKTY FUNKCJI: wiązanie późne zostawia drogę podmianie w teście
 # (`monkeypatch.setattr(queries, …)`) i nie zamraża referencji z chwili importu. Koszt zerowy,
@@ -333,8 +362,55 @@ _TRIMY = (
     ("_only_lineage", "lineage_pending_frame_ids"),
     ("_only_superseded", "superseded_frame_ids"),
     ("_only_retired", "retired_frame_ids"),
+    ("_only_retired_conflict", "retired_conflict_frame_ids"),
     ("_only_missing_copy", "missing_copy_frame_ids"),
 )
+
+
+def _klucz_spec(atrybut):
+    """Klucz flagi w spec-u perspektywy (`_only_dups` → `only_dups`) - JEDNO miejsce konwencji."""
+    return atrybut[1:]
+
+
+def _klucz_kryterium(atrybut):
+    """Klucz i18n flagi na pasku kryteriów (`_only_dups` → `grid.criteria.only_dups`)."""
+    return "grid.criteria." + _klucz_spec(atrybut)
+
+
+# Klucze spec-a, które TEN build umie zastosować. Flagi `only_*` dochodzą z `_TRIMY`, więc nowa
+# perspektywa nie ma tu drugiego miejsca do dopisania.
+_ZNANE_KLUCZE_SPECU = frozenset({"filter", "columns", "group_by", "facets"}
+                                | {_klucz_spec(atrybut) for atrybut, _ in _TRIMY})
+
+
+def _nieznane_warunki(spec):
+    """Które ustawienia perspektywy `spec` ten build POMIJA - lista nazw, posortowana (D-V-9f).
+
+    Perspektywa mieszka w BAZIE i jedzie z archiwum, więc bazę zapisaną NOWSZYM wydaniem otworzy
+    kiedyś starsze. Spec czytamy przez `.get`, a nieznany klucz nie rzuca - więc flaga `only_*`,
+    której ten build nie zna, znikała bez śladu i perspektywa pokazywała zbiór SZERSZY niż zapisany,
+    pod własną nazwą. Migracja `0013_saved_query_spec.sql` nazywa tę pułapkę wprost. Starszych
+    wydań już nie zmienimy; zabezpieczamy przyszłe, więc funkcja NIE zna żadnej konkretnej flagi -
+    pyta wyłącznie o to, czego ten build nie umie.
+
+    Liczy dwie rzeczy, bo mechanizm cichego pominięcia jest ten sam:
+      * klucz najwyższego poziomu spoza `_ZNANE_KLUCZE_SPECU` - każdy, nie tylko `only_*`, bo
+        nowsze wydanie może nazwać zawężenie inaczej, a starsze nie ma jak tego rozróżnić;
+      * facet spoza `facet_model.FACETS` - `compose` iteruje wyłącznie znane facety, więc wybór
+        w nieznanym też cicho poszerza zbiór.
+
+    Wartość PUSTA (`False`, `None`, `[]`, `{}`) nie jest warunkiem: tak nowsze wydanie zapisuje flagę
+    wyłączoną (`_save_perspective` zapisuje KAŻDĄ flagę, także fałszywą), a jej pominięcie nie
+    zmienia zbioru. Zliczanie jej kazałoby ostrzegać przy każdej perspektywie z nowszej wersji."""
+    nieznane = [k for k, v in spec.items() if k not in _ZNANE_KLUCZE_SPECU and v]
+    facety = spec.get("facets")
+    if isinstance(facety, dict):
+        nieznane += [f"facets.{f}" for f, wybor in facety.items()
+                     if f not in facet_model.FACETS and wybor
+                     and ((wybor.get("in") or wybor.get("ex")) if isinstance(wybor, dict) else True)]
+    return sorted(nieznane)
+
+
 # RODZAJ RECEPTY POWROTU - wynik JEDNEJ decyzji (`FramesView._rodzaj_recepty_powrotu`), którą czyta
 # każda powierzchnia mówiąca „jak odsłonić to, czego nie widać" (FH-4). Rodzaj nazywa GEST, nie
 # zdanie: brzmienia są własne (pasek mówi „odsłoni je …", pusty stan nie ma się do czego odnieść),
@@ -612,8 +688,17 @@ class GridTableModel(QAbstractTableModel):
         # DOKĄD poszła treść. Pełna hierarchia: zastąpiona > wycofana > zniknięta > duplikat.
         # Bez tego wiersz w perspektywie „Wycofane" byłby pomalowany i opisany jako ZNIKNIĘTY,
         # czyli ekran wołałby o robotę, którą człowiek przed chwilą zamknął.
+        #
+        # WYCOFANA, A PLIK WRÓCIŁ (G2-7d) to odmiana wycofanej, ale z INNYM zdaniem, nie z innym
+        # tłem: tło mówi „werdykt ręki", a to dalej prawda. Różnią się tym, co wiersz ma
+        # powiedzieć człowiekowi - „pliku już nie szukamy" jest o tej klatce NIEPRAWDĄ, bo plik
+        # leży na dysku. Bez własnego zdania dwa wiersze „Wycofanych" wyglądały identycznie,
+        # a „Przywróć" na niewłaściwym cofało werdykt o klatce, której pliku naprawdę nie ma.
+        # Predykat to lustro `queries.retired_conflict_frame_ids` na polach, które `base_rows`
+        # i tak niesie (`n_present` = liczba OBECNYCH kopii).
         superseded = row.get("superseded_by") is not None
         retired = not superseded and row.get("retired_at") is not None
+        retired_back = retired and (row.get("n_present") or 0) > 0
         vanished = (not superseded and not retired and row.get("present") == 0
                     and (row.get("n_present") or 0) == 0)
         dup = (row.get("n_present") or 0) > 1
@@ -644,12 +729,15 @@ class GridTableModel(QAbstractTableModel):
                 # Wycofana MÓWI TO W KOMÓRCE z tego samego powodu, co zastąpiona: tło niesie kolor
                 # (a user bywa daltonistą albo ma inny motyw), tooltip wymaga najechania — a ten
                 # wiersz ma się tłumaczyć sam, inaczej wygląda jak plik, którego ktoś jeszcze szuka.
+                if retired_back:
+                    return i18n.t("grid.cell.retired_back", name=name)
                 if retired:
                     return i18n.t("grid.cell.retired", name=name)
                 # Prefiks „×N" PRZED nazwą (P2-2): sufiks ginął przy elizji długich ścieżek.
                 return f"×{row['n_present']}  {name}" if dup else name
             if role == Qt.ToolTipRole:
                 extra = _superseded_tip(row) if superseded else (
+                    _retired_back_tip(row) if retired_back else
                     _retired_tip(row) if retired else (
                     _vanished_tip(row) if vanished else (
                         i18n.t("grid.tip.dup_locs", n=row['n_present']) if dup else "")))
@@ -2335,13 +2423,7 @@ class FramesView(QWidget):
         # F4R#8). Oba PRZED pierwszym refresh() (F4R2#7).
         self._facet_state = facet_model.empty_state()
         self._effective_tree = None
-        self._only_dups = False
-        self._only_review = False
-        self._only_vanished = False
-        self._only_lineage = False
-        self._only_superseded = False
-        self._only_retired = False
-        self._only_missing_copy = False
+        self._zeruj_flagi()         # flagi perspektyw `_only_*` - skład z `_TRIMY`, jedna enumeracja
         self._cel_gestu = []        # klatki wypchnięte z widoku przez ostatni gest - wracają do
                                     # zaznaczenia przy najbliższym przeładowaniu zbioru (FC-2)
         self._reveal_facet = None   # (facet, wartość) do odsłonięcia w listwie — patrz `apply_object_facet`
@@ -2612,13 +2694,8 @@ class FramesView(QWidget):
             if kind == "saved":
                 self.status_message.emit(i18n.t("grid.persp.unreadable", name=name))
             return
-        self._only_dups = bool(spec.get("only_dups"))
-        self._only_review = bool(spec.get("only_review"))
-        self._only_vanished = bool(spec.get("only_vanished"))
-        self._only_lineage = bool(spec.get("only_lineage"))
-        self._only_superseded = bool(spec.get("only_superseded"))
-        self._only_retired = bool(spec.get("only_retired"))
-        self._only_missing_copy = bool(spec.get("only_missing_copy"))
+        for atrybut, _ in _TRIMY:
+            setattr(self, atrybut, bool(spec.get(_klucz_spec(atrybut))))
         self._filter_tree = spec.get("filter")
         # F4R#2: stan facetów resetowany dla KAŻDEJ perspektywy (preset ORAZ zapisana) — perspektywa
         # definiuje CAŁY zbiór; stara zapisana bez klucza "facets" MUSI zerować stan, inaczej facety
@@ -2657,10 +2734,7 @@ class FramesView(QWidget):
         W listwie), więc wejście z zewnątrz zostawiało `✓` poza viewportem — zmierzone: pozycja 36
         z 48 przy scrollu 0. Stąd JEDNORAZOWY `_reveal_facet`, konsumowany przez najbliższe
         przeładowanie listwy."""
-        self._only_dups = self._only_review = self._only_vanished = self._only_lineage = False
-        self._only_superseded = False
-        self._only_retired = False
-        self._only_missing_copy = False
+        self._zeruj_flagi()
         self._filter_tree = None
         self.filter_panel.set_tree(None)
         self._facet_state = {"object": {"in": [[oid, canon] for oid, canon in pairs]}} \
@@ -2708,7 +2782,7 @@ class FramesView(QWidget):
 
         Flagi biorą skład z `_TRIMY` (BP-4), a spec niesie je bez podkreślnika (`only_dups` ↔
         `_only_dups`) - konwencja pinowana bramką `test_KAZDY_preset_ma_etykiete_i_zuzyta_flage`."""
-        flagi_spec = {atrybut for atrybut, _ in _TRIMY if spec.get(atrybut[1:])}
+        flagi_spec = {atrybut for atrybut, _ in _TRIMY if spec.get(_klucz_spec(atrybut))}
         flagi_stanu = {atrybut for atrybut, _ in _TRIMY if getattr(self, atrybut)}
         if flagi_spec != flagi_stanu or spec.get("filter") != self._filter_tree:
             return False
@@ -2751,20 +2825,60 @@ class FramesView(QWidget):
                 self.combo_persp.blockSignals(False)
                 return
 
+    def _warunki_nowszej_wersji_do_przeniesienia(self, name):
+        """Klucze spec-a, których ten build nie zna, a które zapis pod nazwą `name` ma PRZENIEŚĆ
+        (D-V-9f, druga połowa) - do scalenia z nowym spec-iem, zwykle puste.
+
+        Spec składany jest ze STANU widoku, a stan zna tylko to, co ten build umie. Bez tego członu
+        ponowny zapis perspektywy przyjechanej z nowszej wersji kasował po cichu jej warunek:
+        pierwsza połowa D-V-9f ostrzegała na pasku, a zapis i tak go gubił - i to w bazie, czyli
+        także dla nowszego wydania, które ten warunek umiało zastosować.
+
+        REGUŁA: przenosimy wtedy i tylko wtedy, gdy zapis NADPISUJE TĘ PERSPEKTYWĘ, KTÓRĄ WIDOK
+        POKAZUJE - pozycja listy to `("saved", name)`, a zbiór widoku jest wciąż jej zbiorem
+        (`_stan_zgodny_z`, ta sama reguła, którą właściciel etykiety decyduje, czy widok jest jeszcze
+        tą perspektywą). Tylko wtedy wiemy, że człowiek zapisuje „to samo, może z poprawką", a nie
+        coś innego pod starą nazwą. Zapis pod NOWĄ nazwą niesie wyłącznie to, co widok zna: ten
+        build nie umie zastosować obcego warunku, więc nowa perspektywa odziedziczyłaby zawężenie,
+        którego nikt tu nie widział ani nie wybrał. Tak samo nadpisanie INNEJ nazwy albo zapis
+        z widoku, który przestał być tą perspektywą (np. po „× Wyczyść zbiór") - człowiek zastępuje
+        wtedy zbiór świadomie, a doklejenie cudzego warunku zrobiłoby z niego trzeci, niczyj.
+
+        Zwraca PARĘ `(klucze, facety)`, bo warunki nowszej wersji mieszkają w dwóch miejscach
+        spec-a, a mechanizm ich cichego pominięcia jest ten sam (`_nieznane_warunki`):
+          * klucze NAJWYŻSZEGO poziomu spoza `_ZNANE_KLUCZE_SPECU` - wszystkie, także puste
+            (to zapis nowszego wydania, nie nasz do przycinania);
+          * facety spoza `facet_model.FACETS`. Te leżą już w `self._facet_state`, bo
+            `_on_perspective` przepisuje facety spec-a w całości - i właśnie dlatego wołający
+            ODFILTROWUJE je ze stanu, a wraca je wyłącznie ta funkcja. Bez tego zapis pod nową
+            nazwą przemycałby obcy facet ze stanu, łamiąc regułę wyżej.
+        Format spec-a się nie zmienia: obie połowy wracają pod swoje dotychczasowe miejsca."""
+        if self.combo_persp.currentData() != ("saved", name):
+            return {}, {}
+        spec = self._load_saved(name)
+        if spec is None or not self._stan_zgodny_z(spec):
+            return {}, {}
+        facety = spec.get("facets") if isinstance(spec.get("facets"), dict) else {}
+        return ({k: v for k, v in spec.items() if k not in _ZNANE_KLUCZE_SPECU},
+                {f: g for f, g in facety.items() if f not in facet_model.FACETS})
+
     def _save_perspective(self):
         name, ok = QInputDialog.getText(self, i18n.t("grid.persp.save_title"), i18n.t("grid.persp.save_prompt"))
         if not ok or not name.strip():
             return
         name = name.strip()
+        klucze_obce, facety_obce = self._warunki_nowszej_wersji_do_przeniesienia(name)
         spec = {
             "filter": self._filter_tree, "columns": self._columns,
             "group_by": self.combo_group.currentData(),
-            "only_dups": self._only_dups, "only_review": self._only_review,
-            "only_vanished": self._only_vanished, "only_lineage": self._only_lineage,
-            "only_superseded": self._only_superseded,
-            "only_retired": self._only_retired,
-            "only_missing_copy": self._only_missing_copy,
-            "facets": self._facet_state,   # OSOBNO od "filter" (nota R2) — set_tree nigdy ich nie widzi
+            # KAŻDA flaga, także fałszywa: jawne `False` mówi starszemu wydaniu „tu nic nie ma",
+            # więc `_nieznane_warunki` po tamtej stronie go nie liczy (pusta wartość to nie warunek).
+            **{_klucz_spec(atrybut): getattr(self, atrybut) for atrybut, _ in _TRIMY},
+            # OSOBNO od "filter" (nota R2) - set_tree nigdy ich nie widzi. Ze stanu bierzemy tylko
+            # facety, które ten build zna; obce wracają wyłącznie regułą przeniesienia (D-V-9f).
+            "facets": {**{f: g for f, g in self._facet_state.items() if f in facet_model.FACETS},
+                       **facety_obce},
+            **klucze_obce,
         }
         # Zapis idzie do BAZY (I-1) — perspektywa jedzie z archiwum, nie z tą maszyną. Czasownik
         # z klingi rozstrzyga KOMUNIKAT: nazwa przyjechana z drugiej maszyny z inną treścią zostaje
@@ -3448,23 +3562,27 @@ class FramesView(QWidget):
     def _describe_criteria(self):
         """Opis zbioru słowami do paska: drzewo EFEKTYWNE (facety + advanced — F4R#8, samo
         `_filter_tree` nie widzi facetów) + flagi perspektyw spoza silnika (`only_dups`/`only_review`
-        — grid.py PRESETS; drzewo ich nie koduje, F4R2#7), łączone „ · "."""
+        - grid.py PRESETS; drzewo ich nie koduje, F4R2#7), łączone „ · ".
+
+        OSTATNI CZŁON MÓWI, CZEGO TEN BUILD NIE ZASTOSOWAŁ (D-V-9f): perspektywa zapisana nowszym
+        wydaniem może nieść warunek, którego tu nie znamy, a wtedy zbiór jest szerszy niż zapisany.
+        Pytamy pozycję, która JEST na liście - dlatego `_refresh` woła ten opis PO właścicielu
+        etykiety: gdy zbiór przestał być tą perspektywą, ostrzeżenie o niej też przestaje dotyczyć."""
         parts = [filter_engine.describe(self._effective_tree)]
-        if self._only_dups:
-            parts.append(i18n.t("grid.criteria.only_dups"))
-        if self._only_review:
-            parts.append(i18n.t("grid.criteria.only_review"))
-        if self._only_vanished:
-            parts.append(i18n.t("grid.criteria.only_vanished"))
-        if self._only_lineage:
-            parts.append(i18n.t("grid.criteria.only_lineage"))
-        if self._only_superseded:
-            parts.append(i18n.t("grid.criteria.only_superseded"))
-        if self._only_retired:
-            parts.append(i18n.t("grid.criteria.only_retired"))
-        if self._only_missing_copy:
-            parts.append(i18n.t("grid.criteria.only_missing_copy"))
+        parts += [i18n.t(_klucz_kryterium(atrybut)) for atrybut, _ in _TRIMY
+                  if getattr(self, atrybut)]
+        data = self.combo_persp.currentData()
+        spec = self._spec_pozycji(data) if data and data[0] == "saved" else None
+        pominiete = _nieznane_warunki(spec) if spec is not None else []
+        if pominiete:
+            parts.append(i18n.t_plural("grid.criteria.unknown_keys", len(pominiete),
+                                       keys=", ".join(pominiete)))
         return " · ".join(parts)
+
+    def _zeruj_flagi(self):
+        """Zdejmij WSZYSTKIE flagi perspektyw - skład z `_TRIMY`, jak każda inna enumeracja rodziny."""
+        for atrybut, _ in _TRIMY:
+            setattr(self, atrybut, False)
 
     def _zbior_zawezony(self):
         """Czy zbiór trzyma coś, co ZDEJMUJE „× Wyczyść zbiór" - facety albo filtr zaawansowany.
@@ -3597,7 +3715,6 @@ class FramesView(QWidget):
         self.macro_bar.set_actions_enabled(bool(base_ids))   # szczery disabled makra na pustym gridzie (#4)
         self.rename_bar.set_actions_enabled(bool(base_ids))  # bliźniaczo dla renamu
         self.sel_bar.set_have_frames(bool(base_ids))         # pusty zbiór gasi „Wydaj na stół…" (F3R#2)
-        self.sel_bar.set_criteria(self._describe_criteria()) # kryteria zbioru SŁOWAMI (F3)
         self.sel_bar.set_clearable(self._zbior_zawezony())
         self._reload_facet_rail(leaf_fn, universe_fn, trims, base_ids)   # listwa (F4)
         self._sync_staging_mutex()                           # staging jednej klingi wyłącza „Do stagingu" drugiej
@@ -3609,6 +3726,10 @@ class FramesView(QWidget):
         # zbiór, kończy się tym przeładowaniem, więc właściciel etykiety ma JEDNO miejsce wołania,
         # a nie po jednym przy każdym geście - tamte trzy przegapiły klik w listwie facetów.
         self._etykieta_perspektywy_za_stanem()
+        # Kryteria zbioru SŁOWAMI (F3) - PO etykiecie, bo ostatni człon opisu pyta pozycję listy
+        # perspektyw o warunki, których ten build nie zna (D-V-9f); przed rozstrzygnięciem
+        # etykiety pytałby pozycję, która za chwilę przestanie być bieżąca.
+        self.sel_bar.set_criteria(self._describe_criteria())
 
     def _reload_facet_rail(self, leaf_fn, universe_fn, trims, current_ids):
         """Liczniki listwy facetów per SIBLING-SET (F4R#1): zbiór facetu F = compose bez CAŁEJ własnej

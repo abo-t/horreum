@@ -1371,14 +1371,21 @@ def missing_copy_frame_ids(con):
 
     ⚠ ZAWĘŻENIE DO KLATEK ŻYWYCH JEST TREŚCIĄ PREDYKATU, nie ostrożnością. Bez `EXISTS(present=1)`
     zbiór wchłonąłby klatki ZNIKNIĘTE (wszystkie kopie martwe), czyli powielił perspektywę
-    „Zniknięte" i zamienił listę „nic nie zginęło" w listę „poszukaj plików". Zastąpione i wycofane
-    wypadają z tego samego powodu, co z kubełków roboczych: ich historię zamknął już inny zapis,
-    a ten wiersz ma mówić o klatkach ŻYWYCH.
+    „Zniknięte" i zamienił listę „nic nie zginęło" w listę „poszukaj plików". Zastąpiona wypada,
+    bo jej historię zamknęła następczyni (a z obecną kopią istnieć nie powinna: skan gasi wtedy
+    oznaczenie, `repo.clear_superseded`).
+
+    WYCOFANA ZOSTAJE - świadomie (D-V-9d). Klatka wycofana, której plik wrócił, a jedna z kopii
+    dalej leży martwa, JEST klatką z brakującą kopią: fakt „kopia zniknęła" jest prawdziwy
+    niezależnie od gestu ręki. Guard `retired_at IS NULL` wycinał ją, a tooltip „wcześniejszy
+    adres" (`grid._former_tip`) ją pokazywał - dwie powierzchnie opisywały dwa różne zbiory.
+    Wiersz tłumaczy się na ekranie własnym znacznikiem wycofania w komórce ścieżki, a licznik
+    Porządków czyta ten sam predykat, więc liczba i lista liczą to samo.
 
     Zwraca set[int]."""
     return {int(r[0]) for r in con.execute(
         "SELECT f.id FROM frame f "
-        "WHERE f.superseded_by IS NULL AND f.retired_at IS NULL "
+        "WHERE f.superseded_by IS NULL "
         "AND EXISTS (SELECT 1 FROM location l WHERE l.frame_id = f.id AND l.present = 1) "
         "AND EXISTS (SELECT 1 FROM location l WHERE l.frame_id = f.id AND l.present = 0)"
     ).fetchall()}
@@ -1456,9 +1463,22 @@ def retired_conflict_frame_ids(con):
 def dup_frame_ids(con):
     """Zbiór frame_id z >1 OBECNĄ lokacją (perspektywa „Duplikaty"). JEDNA derywacja trimu dla zbioru
     głównego i sibling-setów facetów (SPOT — trim w Pythonie na `n_present` i ten literał muszą znaczyć
-    to samo; por. `base_rows` n_present). Zwraca set[int]."""
+    to samo; por. `base_rows` n_present). Zwraca set[int].
+
+    KLATKA WYCOFANA I ZASTĄPIONA WYPADAJĄ (G2-10d) - ta sama figura, co `G2-6d` w
+    `vanished_frame_ids`: perspektywa jest listą ROBOTY („która kopia zbędna"), a klatka wycofana
+    ma jedną robotę pierwszeństwa - rozstrzygnąć werdykt ręki, którego przesłanka upadła. Stan
+    jest osiągalny zwykłą drogą: wycofanie wymaga braku obecnej kopii w chwili zapisu, a re-skan
+    potrafi potem przywrócić DWIE. Klatka nie znika z oczu: prowadzi do niej wiersz Porządków
+    „Wycofane, a plik wrócił" (`retired_conflict_frame_ids`). Zastąpiona z obecnymi kopiami
+    istnieć nie powinna (skan gasi oznaczenie, `repo.clear_superseded`; inwariant
+    `audit.supersede_invariants` liczy ją jako naruszenie) - guard stoi, żeby przy takim
+    naruszeniu „Duplikaty" nie podsuwały gestu na klatce, której treść niesie następczyni,
+    i żeby trzy predykaty żywotności miały jeden kształt. Licznik Porządków czyta ten predykat."""
     return {int(r[0]) for r in con.execute(
-        "SELECT frame_id FROM location WHERE present = 1 GROUP BY frame_id HAVING COUNT(*) > 1"
+        "SELECT l.frame_id FROM location l JOIN frame f ON f.id = l.frame_id "
+        "WHERE l.present = 1 AND f.retired_at IS NULL AND f.superseded_by IS NULL "
+        "GROUP BY l.frame_id HAVING COUNT(*) > 1"
     ).fetchall()}
 
 
@@ -1641,7 +1661,8 @@ def perspectives(con):
 
     Nieznane KLUCZE wewnątrz spec-a to co innego i tu ich nie ruszamy: baza z nowszej wersji
     Horreum ma prawo nieść pole, którego ta jeszcze nie zna, a `grid` czyta spec przez `.get`,
-    więc pomija je bez wyjątku (§4.3 briefu)."""
+    więc pomija je bez wyjątku (§4.3 briefu) - ale od D-V-9f NIE bez słowa: pasek kryteriów
+    nazywa pominięte warunki (`grid._nieznane_warunki`), bo pominięcie poszerza zbiór."""
     out = []
     for r in con.execute("SELECT name, spec_json FROM saved_query ORDER BY name").fetchall():
         try:
@@ -1819,7 +1840,9 @@ def tasks_state(con):
     perspektywy, a nie do podstrony. `superseded_frames` = len() zbioru „Zastąpione" (R4) — ta sama
     figura po raz czwarty, ale wiersz jest INFORMACYJNY: zastąpiona klatka nie jest robotą, tylko
     zapisem historii, i po to tu stoi, żeby dało się ją znaleźć, skoro zniknęła z kolejek.
-    Zwraca dict siedmiu liczników.
+    Zwraca dict `{klucz wiersza Porządków: liczba}` - po jednym liczniku na wiersz `tasks._TASKS`
+    (liczby kluczy tu nie podajemy: rośnie z każdym wierszem, a zapisana raz rozjeżdżała się
+    z kodem; komplet pinuje `test_tasks_state_liczniki_na_s8_obj` w `tests/test_gui_queries.py`).
 
     Licznika `xisf_frames` NIE MA od P6c: był informacją „nagłówków XISF nie umiemy zapisać", a ta
     przestała być prawdziwa razem z pisarzem — licznik samego formatu nie jest ani zadaniem, ani

@@ -229,9 +229,10 @@ def test_parytet_drabiny_miejsca_wolania(path, dialog_kanon, szczebel_kanon):
 
       1. **ŚWIADEK** — dialog wymaga dwóch zgodnych (pisze do PLIKU), szczebel jednego (proponuje
          do BAZY, odwracalnie).
-      2. **`xref`** — dialog oddaje formę SPRZED równoważności (konwencja usera w JEGO pliku,
-         D-PD-9), szczebel kanon bazy. Widać ją w wierszu `M42` (osobny test niżej, bo dotyczy
-         WARTOŚCI, nie milczenia).
+      2. **`xref`** - dialog PROPONUJE w polu formę SPRZED równoważności (konwencja folderu
+         usera), szczebel kanon bazy. Do PLIKU idzie od Q6 (2026-09-26, D-PD-9 odwrócone) forma
+         nagłówka kanonu (`M42` → `NGC 1976`). Widać to w wierszu `M42` (osobny test niżej, bo
+         dotyczy WARTOŚCI, nie milczenia).
 
     Reguła czytania: gdzie obie kolumny są niepuste, wartości MUSZĄ się zgadzać — inaczej to nie
     jedna drabina, tylko dwie, które udają jedną."""

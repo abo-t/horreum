@@ -77,6 +77,10 @@ from importlib import resources
 # 0022 to PRZYROST (nowa tabela, O5/Q8): dziennik zapisu nagłówka w miejscu `inplace_op` - faza
 # operacji z regionem starym i wynikowym (odzysk rozdartego nagłówka bez parsowania pliku) i zarazem
 # izolacja lokacji z operacją otwartą od zwykłego skanu. Tabela wchodzi PUSTA.
+# 0023 to PRZYROST (dwie kolumny ADD COLUMN): `inplace_op.anchor_sha1` - kotwica kontroli danych
+# utrwalona przy operacji (dawniej mutowalna `location.file_sha1`) - i `pending_changes.inplace_op_id`
+# - wiersze stagingu zapisane przez operację, które dokończenie oznacza atomowo z fazą. Backfill
+# wyłącznie wiązania dla operacji commitu w fazie `written` (kotwicy SQL nie zna).
 MIGRATIONS = [
     (2, "0002_initial.sql"),
     (3, "0003_writeback.sql"),
@@ -99,6 +103,7 @@ MIGRATIONS = [
     (20, "0020_integration_raw_unreferenced.sql"),
     (21, "0021_location_copy_facts.sql"),
     (22, "0022_inplace_op.sql"),
+    (23, "0023_inplace_anchor_link.sql"),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 _KNOWN_VERSIONS = frozenset({0} | {v for v, _ in MIGRATIONS})

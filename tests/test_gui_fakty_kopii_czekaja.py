@@ -68,7 +68,10 @@ def test_podpowiedz_kopii_bez_zeznania_wskazuje_obie_drogi(qapp, sprzed_migracji
         droga = (f"jeśli pliku nie ma już na dysku - {i18n.t('nav.dostawa')} → "
                  f"„{i18n.t('pipeline.btn.mark_vanished')}”")
         assert tip.count(droga) == 2, tip
-        assert "„Przyjmij nowe”" in tip
+        # Dostawa jest drogą WARUNKOWĄ, nie obietnicą: przy kopii bez pliku „uzupełni je" było
+        # nieprawdą (firsthand: po „Przyjmij nowe" skasowane kopie dalej bez zeznania).
+        assert tip.count(f"gdy plik jest na dysku - {i18n.t('nav.dostawa')} → „Przyjmij nowe”") == 2
+        assert "uzupełni" not in tip, tip
     finally:
         view.close()
 
@@ -85,16 +88,18 @@ def test_podpowiedz_kopii_bez_zeznania_parytet_EN(qapp, sprzed_migracji):
         tip = _podpowiedz_sciezki(view, fid)
         assert "header testimony not collected yet" in tip
         assert "Intake → “Mark vanished”" in tip, tip
+        assert "if the file is on disk - Intake → “Take new”" in tip, tip
+        assert "will fill" not in tip, tip
     finally:
         view.close()
 
 
 def test_zero_porzadkow_przed_Dostawa_mowi_nie_wiem(qapp, sprzed_migracji):
     """Przed pierwszą Dostawą po migracji wiersze, które porównują zeznania kopii, nie mają czego
-    porównać - ich zero znaczy „nie wiem". Wiersz mówi „?" i ile kopii czeka (liczba WOŁANA z
-    predykatu etapu, `scan.copy_facts_candidates`), nie pogrubia się i NIE wchodzi do plakietki:
-    robotą jest Dostawa, nie ten wiersz. Po zebraniu faktów wraca zwykła liczba - tu 1, bo kopie
-    mówią różne FILTER, a wiersz drugi wraca do szarego „0".
+    porównać - ich zero znaczy „nie wiem". Wiersz mówi „?" i ile kopii jest bez zeznania (liczba
+    WOŁANA z predykatu etapu, `scan.copy_facts_candidates`), nie pogrubia się i NIE wchodzi do
+    plakietki: robotą jest Dostawa albo „Oznacz zniknięte", nie ten wiersz. Po zebraniu faktów wraca
+    zwykła liczba - tu 1, bo kopie mówią różne FILTER, a wiersz drugi wraca do szarego „0".
 
     Falsyfikator: zdejmij gałąź „?" z `refresh_counts` → pierwsza asercja widzi „0  ›"."""
     con, _fid, _a, _b = sprzed_migracji
@@ -102,8 +107,8 @@ def test_zero_porzadkow_przed_Dostawa_mowi_nie_wiem(qapp, sprzed_migracji):
     try:
         assert len(scan.copy_facts_candidates(con)) == 2
         plakietka = tv.refresh_counts()
-        czeka = i18n.t_plural("tasks.copies_await_intake", 2)
-        assert czeka == "? · 2 kopie czekają na Dostawę"
+        czeka = i18n.t_plural("tasks.copies_unread", 2)
+        assert czeka == "? · 2 kopie bez zeznania"
         for klucz in ("copy_conflict_frames", "orphan_testimony_frames"):
             w = _wiersz(tv, klucz)
             assert w.data(rows.SECONDARY) == f"{czeka}  ›", klucz
@@ -121,13 +126,83 @@ def test_zero_porzadkow_przed_Dostawa_mowi_nie_wiem(qapp, sprzed_migracji):
         sierota = _wiersz(tv, "orphan_testimony_frames")
         assert sierota.data(rows.SECONDARY) == "0  ›"
         assert sierota.foreground().color() == tasks_mod._DIM["fg"]
+        assert not sierota.toolTip(), "podpowiedź dróg gaśnie razem ze stanem „?”"
         assert plakietka_po == plakietka + 1, "zebrany rozjazd kopii jest robotą"
+    finally:
+        tv.close()
+
+
+def test_wiersz_przy_kopiach_bez_pliku_nie_obiecuje_Dostawy(qapp, sprzed_migracji):
+    """Firsthand: po „Przyjmij nowe" dwie skasowane kopie dalej bez zeznania, a wiersze mówiły, że
+    „czekają na Dostawę" - Dostawa nie uzupełni kopii, której pliku nie ma, więc zdanie było
+    nieprawdą, która prowadziła w pętlę. Wiersz mówi STAN („bez zeznania"), a podpowiedź obie drogi,
+    obie WARUNKOWE: wiersz nie sprawdza dysku, rozstrzyga pass obecności. Tu oba pliki zniknęły
+    z dysku, a baza jeszcze o tym nie wie.
+
+    Falsyfikator: wróć do „czekają na Dostawę" → asercja o członie drugim pada; zdejmij podpowiedź
+    → asercje o drogach padają."""
+    con, _fid, a, b = sprzed_migracji
+    os.remove(a)
+    os.remove(b)
+    tv = tasks_mod.TasksView(con)
+    try:
+        tv.refresh_counts()
+        dostawa, oznacz = i18n.t("nav.dostawa"), i18n.t("pipeline.btn.mark_vanished")
+        for klucz in ("copy_conflict_frames", "orphan_testimony_frames"):
+            w = _wiersz(tv, klucz)
+            assert "Dostaw" not in w.data(rows.SECONDARY), w.data(rows.SECONDARY)
+            assert w.data(rows.SECONDARY).startswith("? · "), klucz
+            tip = w.toolTip()
+            assert f"Gdy plik jest na dysku - {dostawa} → „Przyjmij nowe”" in tip, tip
+            assert f"Jeśli pliku nie ma już na dysku - {dostawa} → „{oznacz}”" in tip, tip
+            # kolejność pytań człowieka: najpierw „plik jest", potem „pliku nie ma"
+            assert tip.index("Gdy plik jest") < tip.index("Jeśli pliku nie ma"), tip
+    finally:
+        tv.close()
+
+
+def test_wiersz_bez_zeznania_parytet_EN(qapp, sprzed_migracji):
+    """Wersja angielska niesie ten sam stan i te same dwie drogi, a pola wstawiane z katalogu stoją
+    w KAŻDEJ formie mnogiej obu języków (forma bez `{mark}` zgubiłaby drugą drogę dla jednej liczby)."""
+    con, _fid, _a, _b = sprzed_migracji
+    wpis = CATALOG["tasks.copies_unread_tip"]
+    for jezyk in ("pl", "en"):
+        for forma, tekst in wpis[jezyk].items():
+            for pole in ("{n}", "{place}", "{mark}"):
+                assert pole in tekst, (jezyk, forma, pole)
+    i18n.set_lang("en")
+    tv = tasks_mod.TasksView(con)
+    try:
+        tv.refresh_counts()
+        w = _wiersz(tv, "copy_conflict_frames")
+        assert w.data(rows.SECONDARY) == "? · 2 copies not yet read  ›"
+        assert "If the file is on disk - Intake → “Take new”" in w.toolTip(), w.toolTip()
+        assert "If the file is no longer on disk - Intake → “Mark vanished”" in w.toolTip()
+    finally:
+        tv.close()
+
+
+def test_czlon_drugi_bez_zeznania_nie_szerszy_niz_dawny(qapp):
+    """Człon drugi listy zadań nie jest elidowany i zabiera miejsce NAZWIE (lista ≤ 400 px), więc
+    poprawka zdania nie ma prawa go poszerzyć. Porównanie WZGLĘDNE z dawnym członem, tym samym
+    fontem, co delegat (pogrubiony, `strong=True`) - bez stałych pikseli."""
+    from PySide6.QtGui import QFont, QFontMetrics
+    tv = tasks_mod.TasksView(db.open_db(":memory:"))
+    try:
+        font = QFont(tv.tasks.font())
+        font.setBold(True)
+        fm = QFontMetrics(font)
+        dawne = {"pl": "? · 22 kopie czekają na Dostawę  ›", "en": "? · 22 copies await Intake  ›"}
+        for jezyk, stare in dawne.items():
+            i18n.set_lang(jezyk)
+            nowe = f"{i18n.t_plural('tasks.copies_unread', 22)}  ›"
+            assert fm.horizontalAdvance(nowe) <= fm.horizontalAdvance(stare), (jezyk, nowe)
     finally:
         tv.close()
 
 
 def test_niewiadome_zero_odmienia_liczbe_kopii():
     """Człon „?" jest frazą odmienianą (PL: one/few/many), bo mówi o liczbie kopii."""
-    assert i18n.t_plural("tasks.copies_await_intake", 1) == "? · 1 kopia czeka na Dostawę"
-    assert i18n.t_plural("tasks.copies_await_intake", 5) == "? · 5 kopii czeka na Dostawę"
-    assert i18n.t_plural("tasks.copies_await_intake", 22) == "? · 22 kopie czekają na Dostawę"
+    assert i18n.t_plural("tasks.copies_unread", 1) == "? · 1 kopia bez zeznania"
+    assert i18n.t_plural("tasks.copies_unread", 5) == "? · 5 kopii bez zeznania"
+    assert i18n.t_plural("tasks.copies_unread", 22) == "? · 22 kopie bez zeznania"

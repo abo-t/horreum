@@ -95,15 +95,16 @@ def test_szkielet_przyszly_pusty(tmp_path):
     con.close()
 
 
-def test_user_version_v22_po_migracji(tmp_path):
-    """0022 podnosi user_version do 22 (świeża baza leci 0002→…→0022 sekwencyjnie; dziennik zapisu
-    w miejscu `inplace_op` - faza operacji i izolacja lokacji od skanu).
+def test_user_version_v23_po_migracji(tmp_path):
+    """0023 podnosi user_version do 23 (świeża baza leci 0002→…→0023 sekwencyjnie; kotwica
+    operacji zapisu w miejscu `inplace_op.anchor_sha1` i wiązanie wpisów stagingu z operacją
+    `pending_changes.inplace_op_id`).
 
     Pin JEST intencją: każda nowa migracja ma ten test PRZEWRÓCIĆ imiennie, żeby podniesienie
     wersji było gestem, a nie skutkiem ubocznym."""
     con = db.open_db(str(tmp_path / "h.db"))
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 22
-    assert db.SCHEMA_VERSION == 22
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 23
+    assert db.SCHEMA_VERSION == 23
     con.close()
 
 
@@ -704,4 +705,42 @@ def test_0022_jedna_otwarta_operacja_na_lokacje(tmp_path):
         _op_0022(con, 1, "unverified")
     with pytest.raises(sqlite3.IntegrityError):
         _op_0022(con, 1, "nieznana")
+    con.close()
+
+
+def test_0023_przyrost_na_bazie_v22_wiaze_tylko_operacje_written(tmp_path):
+    """Baza v22 z dziennikiem zapisu w miejscu przechodzi 0023: `inplace_op.anchor_sha1` wchodzi
+    PUSTA (SQL nie zna bajtów pliku), a wiązanie `pending_changes.inplace_op_id` dostają wyłącznie
+    wpisy 'pending'/'failed' TEGO przebiegu i TEJ lokacji, na której operacja commitu czeka w fazie
+    `written` - tylko te dokończenie ma czym zamknąć. Wpis 'applied' przy operacji `synced`, wpis
+    innego przebiegu i wpis innej lokacji zostają bez wiązania. Druga migracja to no-op.
+
+    Falsyfikator: zdejmij warunek `phase = 'written'` albo `run_id` z backfillu 0023 → wiązanie
+    dostaje wpis przy operacji zamkniętej albo wpis cudzego przebiegu."""
+    path = str(tmp_path / "v22.db")
+    con = db.connect(path)
+    for version, filename in db.MIGRATIONS:
+        if version <= 22:
+            con.executescript(db._migration_sql(filename))
+            con.execute(f"PRAGMA user_version = {int(version)}")
+    _loc_0021(con, 1)
+    _loc_0021(con, 2)
+    con.execute("INSERT INTO commits(id, run_id) VALUES (1, 'R'), (2, 'S')")
+    for lid, commit_id, phase in ((1, 1, "written"), (2, 2, "synced")):
+        con.execute(
+            "INSERT INTO inplace_op(location_id, commit_id, kind, fmt, region_offset, region_length, "
+            "old_region_z, new_region_z, write_start, write_end, file_size, file_ino, pre_hash, "
+            "post_hash, phase, started_at) VALUES (?, ?, 'commit', 'fits', 0, 2, x'00', x'00', 0, 1, "
+            "10, 1, 'a', 'b', ?, 't')", (lid, commit_id, phase))
+    wpisy = ((1, "R", 1, "failed"), (2, "R", 1, "pending"), (3, "R", 1, "applied"),
+             (4, "Q", 1, "failed"), (5, "S", 2, "applied"), (6, "S", 2, "failed"))
+    for pid, run, lid, status in wpisy:
+        con.execute("INSERT INTO pending_changes(id, run_id, location_id, keyword, op, status) "
+                    "VALUES (?, ?, ?, 'OBJECT', 'set', ?)", (pid, run, lid, status))
+    con.commit()
+    assert db.migrate(con) == db.SCHEMA_VERSION
+    assert [r[0] for r in con.execute("SELECT anchor_sha1 FROM inplace_op")] == [None, None]
+    wiazanie = {r[0]: r[1] for r in con.execute("SELECT id, inplace_op_id FROM pending_changes")}
+    assert wiazanie == {1: 1, 2: 1, 3: None, 4: None, 5: None, 6: None}
+    assert db.migrate(con) == db.SCHEMA_VERSION              # idempotencja
     con.close()

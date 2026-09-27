@@ -1778,14 +1778,23 @@ def backfill_xisf_headers(con, *, now, progress=None):
     jest passem obecności ani skanem, więc nie stawia markerów i nie zdejmuje obecności — od tego
     są `scan_tree` i `presence`. Plik czytelny, ale bez parsowalnego nagłówka (XISF z `ParseError`)
     idzie normalną ścieżką `ingest_record` (marker `unreadable_since` — kopia FAKTYCZNIE nieczytelna)
-    i zostaje w `remaining`."""
+    i zostaje w `remaining`.
+
+    IZOLACJA I GENERACJA (astra, 2026-09-27): bramka izolacji pyta o kopię NA WOLUMINIE WIERSZA
+    (izolacja kopii o tej samej ścieżce na innym woluminie tej nie dotyczy), a generację dziennika
+    zapisu w miejscu (`repo.inplace_generation`) sterownik czyta PRZED bramką i podaje do
+    `ingest_record` - zapis w miejscu zaczęty między bramką a zapisem faktów odrzuca rekord
+    (`repo.StaleScanRecord`) w transakcji klingi, zamiast wciągnąć fakty pliku w trakcie zapisu albo
+    przywrócić stare. Taka kopia liczy się jak izolowana: `failed` z powodem, ZERO zapisu, zostaje
+    w `remaining` i wraca po dokończeniu zapisu."""
     rows = _xisf_backfill_rows(con)
     s = BackfillSummary(rows=len(rows))
     total = len(rows)
     for i, row in enumerate(rows, 1):
         path = row["path"]
+        gen = repo.inplace_generation(con)
         try:
-            if _isolated(con, path):
+            if _isolated(con, path, row["volume"]):
                 raise OSError("kopia izolowana po przerwanym zapisie w miejscu (0022)")
             rec = scan_file(path)
         except Exception as exc:               # brak pliku / I/O — raport, nie zapis (patrz docstring)
@@ -1793,8 +1802,12 @@ def backfill_xisf_headers(con, *, now, progress=None):
             s.failed_paths.append(f"{path}: {type(exc).__name__}: {exc}")
         else:
             s.read += 1
-            ingest_record(con, rec, volume=row["volume"], now=now, summary=s.scan,
-                          actor="backfill:xisf")
+            try:
+                ingest_record(con, rec, volume=row["volume"], now=now, summary=s.scan,
+                              actor="backfill:xisf", inplace_gen=gen)
+            except repo.StaleScanRecord as exc:        # zapis w miejscu po bramce - izolacja
+                s.failed += 1
+                s.failed_paths.append(f"{path}: kopia izolowana - {exc}")
         if progress is not None:
             progress(i, total, path)
     s.remaining = len(_xisf_backfill_rows(con))
@@ -1811,9 +1824,9 @@ class CopyFactsSummary:
     read: int = 0             # nagłówek przeczytany
     written: int = 0          # fakty zapisane (`repo.record_copy_facts` → True)
     stale: int = 0            # nagłówek na dysku ≠ znany odcisk kopii → ZERO zapisu (dogoni skan)
-    missing: int = 0          # pliku nie ma w ISTNIEJĄCYM katalogu (skasowany) → ZERO zapisu;
+    missing: int = 0          # pliku nie ma, a korzeń przebiegu stoi (skasowany) → ZERO zapisu;
                               # robota passa obecności („Oznacz zniknięte"), nie „nieczytelne"
-    failed: int = 0           # odczyt nagłówka padł (albo nie ma całego katalogu) → ZERO zapisu
+    failed: int = 0           # odczyt nagłówka padł (albo korzeń nieosiągalny) → ZERO zapisu
     remaining: int = 0        # kandydaci PO przebiegu (0 = komplet)
     cancelled: bool = False
     failed_paths: list = field(default_factory=list)
@@ -1834,19 +1847,38 @@ def copy_facts_candidates(con, root=None):
     faktów na zawsze, a plan ujednolicenia karty `OBJECT` nie miał czym sprawdzić, czy karty klatki
     są jej kartami. Koszt: sama obecna kopia jest czytana (nagłówek), nie jej nieobecne siostry.
 
-    `header_hash IS NOT NULL` odcina kopie nieczytelne (W1): bez odcisku nie ma kotwicy, a sterownik
-    wracałby do nich przy każdej dostawie. STAŁY literał SELECT - ten sam liczy `remaining`, więc
-    „pusto po przebiegu" znaczy dokładnie „nie ma czego uzupełniać" (wzorzec `_xisf_backfill_rows`).
+    `header_hash IS NOT NULL` odcina kopie, których nagłówka NIGDY nie przeczytano (W1 przy pierwszym
+    odczycie): bez odcisku nie ma kotwicy zapisu. Kopii, która była czytelna i PRZESTAŁA, ten warunek
+    nie odcina - jej `header_hash` zostaje z ostatniego udanego odczytu
+    (`repo.refresh_location_unreadable` rusza mtime i marker, nie odcisk). Odcina ją
+    `unreadable_since IS NULL`: taką kopię czyta ponownie skan, bo brama przyrostowa jej nie pomija
+    (`_already_scanned`, guard markera), a udany odczyt idzie przez `ingest_record` do
+    `repo.refresh_location` z faktami kopii i gasi marker tym samym UPDATE-em. Sterownik nie ma przy
+    niej nic do dodania poza wiecznym „?" w Porządkach, dopóki plik jest chory - jej robotą jest
+    kubełek kopii nieczytelnych.
+
+    Kopia IZOLOWANA po zapisie w miejscu (operacja w fazie `repo.INPLACE_ISOLATING_PHASES`, ta sama
+    reguła co `_isolated`) też wypada: żadna droga czytająca jej nie dotyka, a fakty przynosi re-sync
+    pisarza po dokończeniu zapisu (`writeback._resync` → `ingest_record`), po odzysku albo zwolnieniu
+    zaś kopia wraca do tego predykatu sama. Oba warunki siedzą w SELECT-cie, nie w pętli sterownika,
+    bo licznik Porządków pyta tę samą funkcję.
+
+    STAŁY literał SELECT - ten sam liczy `remaining`, więc „pusto po przebiegu" znaczy dokładnie
+    „nie ma czego uzupełniać" (wzorzec `_xisf_backfill_rows`).
 
     `root` (opcjonalny) zawęża do kopii pod korzeniem - jak każdy etap Dostawy, który dotyka dysku:
     „Przetwórz wszystko" na wskazanym katalogu nie ma prawa czytać plików spoza niego. Porównanie
     przez `canonize_root` + `_under`, ta sama forma literowa, którą skan zapisał `location.path`."""
     rows = con.execute(
-        "SELECT l.id, l.path, l.header_hash FROM location l JOIN frame f ON f.id = l.frame_id "
+        "SELECT l.id, l.volume, l.path, l.header_hash FROM location l "
+        "JOIN frame f ON f.id = l.frame_id "
         "WHERE l.present = 1 AND l.header_hash IS NOT NULL AND l.hdr_hash IS NULL "
+        "  AND l.unreadable_since IS NULL "
+        "  AND NOT EXISTS (SELECT 1 FROM inplace_op o WHERE o.location_id = l.id "
+        "                  AND o.phase IN (SELECT value FROM json_each(?))) "
         "  AND (f.filetype = 'xisf' OR l.frame_id IN ("
         "       SELECT frame_id FROM location GROUP BY frame_id HAVING COUNT(*) > 1)) "
-        "ORDER BY l.id").fetchall()
+        "ORDER BY l.id", (json.dumps(list(repo.INPLACE_ISOLATING_PHASES)),)).fetchall()
     if root is None:
         return rows
     prefix = canonize_root(root).rstrip("\\/") + os.sep
@@ -1877,11 +1909,20 @@ def backfill_copy_facts(con, *, now, root=None, progress=None, should_cancel=Non
     Plik nieczytelny / nieosiągalny → `failed` + ścieżka, ZERO zapisu (nie stawiamy markerów, nie
     zdejmujemy obecności - od tego są `scan_tree` i `presence`); zostaje w `remaining`.
 
-    Pliku BRAK (`FileNotFoundError`), a jego katalog istnieje → `missing` + ścieżka, też ZERO zapisu:
-    kopię skasowano z dysku, a baza jeszcze o tym nie wie. To nie jest fakt o czytelności pliku, tylko
-    robota passa obecności - raport nazywa ją osobno, żeby „nieczytelne 2" nie wysyłało człowieka do
-    pliku, którego nie ma. Nie ma CAŁEGO katalogu (zerwany udział, przemianowany folder) → zostaje
-    `failed`: brak katalogu nie dowodzi skasowania, a „Oznacz zniknięte" i tak zweryfikuje zakres sam.
+    Pliku BRAK (`FileNotFoundError`), a KORZEŃ przebiegu jest osiągalny → `missing` + ścieżka, też
+    ZERO zapisu: kopię skasowano z dysku, a baza jeszcze o tym nie wie. To nie jest fakt o czytelności
+    pliku, tylko robota passa obecności - raport nazywa ją osobno, żeby „nieczytelne 2" nie wysyłało
+    człowieka do pliku, którego nie ma. Świadkiem jest korzeń, nie katalog-rodzic: skasowanie CAŁEGO
+    folderu nocy zabiera rodzica razem z plikiem, a to nadal jest skasowanie. Korzeń nieosiągalny
+    (zerwany udział) → `failed`: wtedy brak pliku nie dowodzi niczego. Rozróżnienie musi iść przez
+    świadka, bo Windows zgłasza zerwaną ścieżkę sieciową (`ERROR_BAD_NETPATH`) tym samym
+    `FileNotFoundError` co skasowany plik.
+      * `root` podany → świadek = `canonize_root(root)` (ta sama forma, którą zawęża kandydatów).
+      * `root is None` → świadek = najbliższy ISTNIEJĄCY przodek pliku PONIŻEJ litery dysku albo
+        korzenia udziału (`R:\\`, `\\\\host\\share\\`). Sama litera się nie liczy: istnieje także
+        wtedy, gdy drzewo pod nią zniknęło w całości, więc mówi tylko „coś jest zamontowane", nie
+        „ta gałąź jest żywa". Pomyłka w stronę `missing` niczego
+        nie zapisuje - kieruje do „Oznacz zniknięte", który sprawdza wolumin i zakres sam.
 
     Hooki `progress(done, total, path, summary)` / `should_cancel()` - kontrakt jak w `scan_tree`
     (anulowanie na GRANICY PLIKU; przerwany przebieg zostawia bazę spójną, bo każda kopia to osobna
@@ -1889,18 +1930,41 @@ def backfill_copy_facts(con, *, now, root=None, progress=None, should_cancel=Non
     rows = copy_facts_candidates(con, root)
     s = CopyFactsSummary(rows=len(rows))
     total = len(rows)
+    korzen = None if root is None else canonize_root(root)
+
+    def swiadek_zyje(path):
+        """Czy świadek skasowania stoi (docstring): korzeń przebiegu albo - bez korzenia -
+        istniejący przodek pliku poniżej litery dysku / korzenia udziału."""
+        if korzen is not None:
+            return os.path.isdir(korzen)
+        kotwica = os.path.normcase(os.path.splitdrive(path)[0])     # `R:`, `\\host\share`, ``
+        d = os.path.dirname(path)
+        while os.path.normcase(d.rstrip("\\/")) != kotwica:
+            if os.path.isdir(d):
+                return True
+            rodzic = os.path.dirname(d)
+            if rodzic == d:
+                return False
+            d = rodzic
+        return False
+
     for i, row in enumerate(rows, 1):
         if should_cancel is not None and should_cancel():
             s.cancelled = True
             break
         path = row["path"]
+        # Generacja dziennika zapisu w miejscu PRZED bramką izolacji (kontrakt `scan_tree`): zapis
+        # w miejscu zaczęty po bramce odrzuca fakty w transakcji klingi (`repo.StaleScanRecord`).
+        gen = repo.inplace_generation(con)
         try:
-            if _isolated(con, path):
+            # Wolumin wiersza: izolacja kopii o tej samej ścieżce na INNYM woluminie tej nie dotyczy.
+            # Kandydaci izolowanych już nie niosą - ta bramka łapie zapis w miejscu otwarty w trakcie.
+            if _isolated(con, path, row["volume"]):
                 raise OSError("kopia izolowana po przerwanym zapisie w miejscu (0022)")
             header, _cards, header_hash, _hdu, _comp, _span, image_roles = _read_meta(
                 path, os.stat(path).st_size)
-        except FileNotFoundError as exc:       # skasowany albo nieosiągalny katalog (docstring)
-            if os.path.isdir(os.path.dirname(path)):
+        except FileNotFoundError as exc:       # skasowany albo zerwany udział - rozstrzyga świadek
+            if swiadek_zyje(path):
                 s.missing += 1
                 s.missing_paths.append(path)
             else:
@@ -1912,15 +1976,26 @@ def backfill_copy_facts(con, *, now, root=None, progress=None, should_cancel=Non
         else:
             s.read += 1
             facts = copy_header_facts(header, header_hash, image_roles)
-            if header_hash != row["header_hash"] or not repo.record_copy_facts(
-                    con, location_id=row["id"], copy_facts=facts, now=now, actor=actor):
+            try:
+                zapisane = header_hash == row["header_hash"] and repo.record_copy_facts(
+                    con, location_id=row["id"], copy_facts=facts, now=now, actor=actor,
+                    inplace_gen=gen)
+            except repo.StaleScanRecord:       # zapis w miejscu po bramce - odczyt jest stęchły
+                zapisane = False
+            if not zapisane:
                 s.stale += 1
                 s.stale_paths.append(path)
             else:
                 s.written += 1
         if progress is not None:
             progress(i, total, path, s)
-    s.remaining = len(copy_facts_candidates(con, root))
+    # `remaining` po korzeniu skanonizowanym NA STARCIE: udział zerwany w trakcie wysadziłby ponowne
+    # `canonize_root` już po zapisanych faktach, a raport z kubełkiem `failed` by przepadł.
+    reszta = copy_facts_candidates(con)
+    if korzen is not None:
+        prefix = korzen.rstrip("\\/") + os.sep
+        reszta = [r for r in reszta if _under(r["path"], prefix)]
+    s.remaining = len(reszta)
     return s
 
 
@@ -2008,8 +2083,15 @@ def adopt_orphan_testimony(con, *, now, root=None, progress=None, should_cancel=
             s.cancelled = True
             break
         path = kopia["path"]
+        # Wolumin kopii (wiersz predykatu go nie niesie): izolacja kopii o tej samej ścieżce na
+        # INNYM woluminie tej kopii nie dotyczy - ta sama bramka co w skanie drzewa.
+        volume = con.execute("SELECT volume FROM location WHERE id = ?",
+                             (kopia["location_id"],)).fetchone()[0]
+        # Generacja dziennika zapisu w miejscu PRZED bramką izolacji (kontrakt `scan_tree`): zapis
+        # w miejscu zaczęty po bramce odrzuca przejęcie (`repo.StaleScanRecord` → `raced`).
+        gen = repo.inplace_generation(con)
         try:
-            if _isolated(con, path):
+            if _isolated(con, path, volume):
                 raise OSError("kopia izolowana po przerwanym zapisie w miejscu (0022)")
             rec = scan_file(path)
         except Exception as exc:               # I/O - raport, nie zapis (docstring)
@@ -2017,7 +2099,11 @@ def adopt_orphan_testimony(con, *, now, root=None, progress=None, should_cancel=
             s.failed_paths.append(f"{path}: {type(exc).__name__}: {exc}")
         else:
             s.read += 1
-            werdykt = _adopt_one(con, frame_id, kopia, rec, now=now, actor=actor)
+            try:
+                werdykt = _adopt_one(con, frame_id, kopia, rec, now=now, actor=actor,
+                                     inplace_gen=gen)
+            except repo.StaleScanRecord:       # zapis w miejscu po bramce - odczyt jest stęchły
+                werdykt = "raced"
             if werdykt == "adopted":
                 s.adopted += 1
             elif werdykt == "failed":
@@ -2037,10 +2123,12 @@ def adopt_orphan_testimony(con, *, now, root=None, progress=None, should_cancel=
     return s
 
 
-def _adopt_one(con, frame_id, kopia, rec, *, now, actor):
+def _adopt_one(con, frame_id, kopia, rec, *, now, actor, inplace_gen=None):
     """Werdykt i zapis jednego kandydata `adopt_orphan_testimony` - kolejność bramek z docstringu
     etapu. Zwraca `'adopted'` | `'failed'` | `'identity'` | `'stale'` | `'raced'` (albo werdykt
-    klingi `'drift'` / `'unchanged'`)."""
+    klingi `'drift'` / `'unchanged'`). `inplace_gen` = generacja sprzed bramki izolacji: operacja
+    zapisu w miejscu tej kopii zaczęta po niej → `'raced'` przed derywacją osi, a w wąskim oknie po
+    tym sprawdzeniu klinga odrzuca zapis `repo.StaleScanRecord`-em (liczy go wołający)."""
     if rec.header is None:
         return "failed"
     sha1_data, _ = _record_identity(rec)
@@ -2052,12 +2140,15 @@ def _adopt_one(con, frame_id, kopia, rec, *, now, actor):
     teraz = dict(adopt_candidates(con)).get(frame_id)    # stan pod nami mógł się zmienić (docstring)
     if teraz is None or teraz["location_id"] != kopia["location_id"]:
         return "raced"
+    if inplace_gen is not None and repo.newer_inplace_op(con, location_id=kopia["location_id"],
+                                                         op_id=inplace_gen):
+        return "raced"
     kind, _kind_source, _ident, camera_id = _derive_axes(con, rec, now=now, actor=actor)
     return repo.adopt_testimony(
         con, location_id=kopia["location_id"], sha1_data=sha1_data, header_hash=rec.header_hash,
         raw_json=json.dumps(rec.header, ensure_ascii=False), cards=rec.cards,
         hot_fields=extract_header(rec.header), camera_id=camera_id, kind=kind, now=now,
-        actor=actor)
+        actor=actor, inplace_gen=inplace_gen)
 
 
 @dataclass

@@ -1327,11 +1327,14 @@ CATALOG = {
     # „Przyjmij nowe” prowadziła w ślepy zaułek. Sprawdzenia dysku w podpowiedzi NIE robimy (udział
     # SMB pod kursorem myszy), rozstrzyga pass obecności. Nazwy miejsca i przycisku czytane
     # z katalogu (`{place}`, `{mark}`), żeby zdanie nie rozjechało się z ekranem po zmianie etykiety.
+    # Obie drogi są WARUNKOWE: „uzupełni je Przyjmij nowe" obiecywało wynik, którego Dostawa przy
+    # kopii bez pliku nie da nigdy (firsthand: po „Przyjmij nowe" dwie skasowane kopie dalej bez
+    # zeznania). Kolejność = kolejność pytań człowieka: najpierw „czy plik jest", potem droga.
     "grid.tip.copy_unread": {
-        "pl": "\n    zeznanie nagłówka jeszcze niezebrane (uzupełni je „Przyjmij nowe”; "
-              "jeśli pliku nie ma już na dysku - {place} → „{mark}”)",
-        "en": "\n    header testimony not collected yet (“Take new” will fill it in; "
-              "if the file is no longer on disk - {place} → “{mark}”)",
+        "pl": "\n    zeznanie nagłówka jeszcze niezebrane (gdy plik jest na dysku - "
+              "{place} → „Przyjmij nowe”; jeśli pliku nie ma już na dysku - {place} → „{mark}”)",
+        "en": "\n    header testimony not collected yet (if the file is on disk - "
+              "{place} → “Take new”; if the file is no longer on disk - {place} → “{mark}”)",
     },
     # HISTORIA PRZEPROWADZKI, nie ostrzeżenie (D-V-9, wariant rozwojowy). Zdanie jest w czasie
     # przeszłym i bez wykrzyknika, bo nic tu nie wymaga roboty: plik ŻYJE pod adresem z komórki,
@@ -1358,6 +1361,14 @@ CATALOG = {
 
     # --- FieldPanel ---
     "grid.fields.title": {"pl": "Pola (kolumny)", "en": "Fields (columns)"},
+    # Pokrycie pól liczone w tle: lista pod tytułem zostaje z poprzedniego wyniku, a tytuł mówi,
+    # że liczby są w drodze - pusta lista w tym czasie wyglądałaby jak archiwum bez pól.
+    "grid.fields.title_counting": {"pl": "Pola (kolumny) - liczę pokrycie…",
+                                   "en": "Fields (columns) - counting coverage…"},
+    "grid.fields.title_failed": {"pl": "Pola (kolumny) - pokrycie nieodświeżone",
+                                 "en": "Fields (columns) - coverage not refreshed"},
+    "grid.fields.failed_status": {"pl": "Nie policzyłem pokrycia pól: {msg}",
+                                  "en": "Could not count field coverage: {msg}"},
 
     # --- akcje kling (wspólne makro+rename) ---
     "grid.action.preview": {"pl": "Podgląd", "en": "Preview"},
@@ -2203,6 +2214,10 @@ CATALOG = {
         "pl": "etap w biegu — uruchom „Rozwiąż” po jego zakończeniu",
         "en": "a stage is running — start „Resolve” after it finishes",
     },
+    "pipeline.refuse.writeback": {
+        "pl": "trwa zapis nagłówków do plików - etapy Dostawy ruszą po jego zakończeniu",
+        "en": "header write to files in progress - Intake stages start after it finishes",
+    },
     "pipeline.counts": {
         "pl": "Pliki {done}/{total} · nowe {new} · pominięte {skipped} · przegląd {review} · {tail}",
         "en": "Files {done}/{total} · new {new} · skipped {skipped} · review {review} · {tail}",
@@ -2627,13 +2642,35 @@ CATALOG = {
     # już zajęte przez sąsiada wyżej, a tu obecne kopie bywają zgodne ze sobą).
     "tasks.orphan_testimony_frames": {
         "pl": "Zeznanie z nieobecnej kopii", "en": "Testimony from a missing copy"},
-    # Człon drugi dwóch wierszy wyżej, gdy ich zero znaczy „nie wiem": fakty części kopii czekają
-    # na etap Dostawy, a kopia bez faktów w porównaniu nie bierze udziału. „?" mówi, że liczby nie
-    # ma; reszta mówi, co ją da. Krótko, bo człon drugi nie jest elidowany i zabiera miejsce nazwie.
-    "tasks.copies_await_intake": {
-        "pl": {"one": "? · {n} kopia czeka na Dostawę", "few": "? · {n} kopie czekają na Dostawę",
-               "many": "? · {n} kopii czeka na Dostawę"},
-        "en": {"one": "? · {n} copy awaits Intake", "other": "? · {n} copies await Intake"},
+    # Człon drugi dwóch wierszy wyżej, gdy ich zero znaczy „nie wiem": kopia bez zebranego zeznania
+    # w porównaniu nie bierze udziału. „?" mówi, że liczby nie ma, reszta - dlaczego. Człon mówi
+    # STAN, nie drogę: „czeka na Dostawę" było nieprawdą przy kopii, której pliku już nie ma
+    # (Dostawa jej nie uzupełni nigdy), a zdanie z obiema drogami nie mieści się w wierszu - człon
+    # drugi nie jest elidowany i zabiera miejsce nazwie przy liście 400 px. Drogi niesie podpowiedź.
+    "tasks.copies_unread": {
+        "pl": {"one": "? · {n} kopia bez zeznania", "few": "? · {n} kopie bez zeznania",
+               "many": "? · {n} kopii bez zeznania"},
+        "en": {"one": "? · {n} copy not yet read", "other": "? · {n} copies not yet read"},
+    },
+    # Podpowiedź wiersza w stanie „?": obie drogi WARUNKOWE, w kolejności pytań człowieka („czy plik
+    # jest"), bo wiersz nie sprawdza dysku - rozstrzyga pass obecności. Nazwy z katalogu (`{place}`,
+    # `{mark}`), jak w podpowiedzi kopii w Zbiorach.
+    "tasks.copies_unread_tip": {
+        "pl": {"one": "{n} kopia nie ma jeszcze zebranego zeznania nagłówka, więc ten wiersz nie ma "
+                      "czego porównać.\nGdy plik jest na dysku - {place} → „Przyjmij nowe”.\n"
+                      "Jeśli pliku nie ma już na dysku - {place} → „{mark}”.",
+               "few": "{n} kopie nie mają jeszcze zebranego zeznania nagłówka, więc ten wiersz nie "
+                      "ma czego porównać.\nGdy plik jest na dysku - {place} → „Przyjmij nowe”.\n"
+                      "Jeśli pliku nie ma już na dysku - {place} → „{mark}”.",
+               "many": "{n} kopii nie ma jeszcze zebranego zeznania nagłówka, więc ten wiersz nie "
+                       "ma czego porównać.\nGdy plik jest na dysku - {place} → „Przyjmij nowe”.\n"
+                       "Jeśli pliku nie ma już na dysku - {place} → „{mark}”."},
+        "en": {"one": "{n} copy has no header testimony collected yet, so this row has nothing to "
+                      "compare.\nIf the file is on disk - {place} → “Take new”.\n"
+                      "If the file is no longer on disk - {place} → “{mark}”.",
+               "other": "{n} copies have no header testimony collected yet, so this row has nothing "
+                        "to compare.\nIf the file is on disk - {place} → “Take new”.\n"
+                        "If the file is no longer on disk - {place} → “{mark}”."},
     },
     "tasks.vanished_frames": {"pl": "Zniknięte z dysku", "en": "Vanished from disk"},
     # NAZWA MÓWI O UBYTKU, NIE O AWARII (D-V-9a). Wiersz stoi obok „Zniknięte z dysku" i musi się

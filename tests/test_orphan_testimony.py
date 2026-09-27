@@ -197,6 +197,39 @@ def test_plan_karty_OBJECT_pomija_ocalala_kopie_bez_faktow(tmp_path):
     con.close()
 
 
+def test_plan_karty_OBJECT_pomija_nieczytelna_kopie_bez_faktow_ktorej_dostawa_nie_czeka(tmp_path):
+    """Ocalała kopia bez faktów, która do tego jest oznaczona jako nieczytelna, NIE jest kandydatem
+    uzupełnienia (fakty przyniesie jej skan po wyzdrowieniu), a plan ujednolicenia karty `OBJECT`
+    dalej ją pomija - z powodem „nieczytelna", nie „najpierw Przyjmij nowe", bo dostawa jej nie
+    naprawi. Po udanym odczycie skanem fakty są, marker zgasł i klatka wraca do planu."""
+    from horreum import resolver
+    from test_writeback_inplace import _fits as _light
+    (tmp_path / "A").mkdir()
+    (tmp_path / "B").mkdir()
+    a = _light(tmp_path / "A" / "veil.fits", obj="NGC6992", seed=1)
+    b = _light(tmp_path / "B" / "veil.fits", obj="NGC6992", seed=1)
+    con = db.open_db(str(tmp_path / "h.db"))
+    scan.scan_tree(con, tmp_path, volume="?", now=NOW)
+    resolver.run_resolver(con, NOW)
+    fid = _loc(con, a)["frame_id"]
+    _bez_faktow(con, a, b)
+    _zniknij(con, a)
+    lb = _loc(con, b)
+    sha1 = con.execute("SELECT sha1_data FROM frame WHERE id = ?", (fid,)).fetchone()[0]
+    assert repo.refresh_location_unreadable(
+        con, location_id=lb["id"], sha1_data=sha1, path=str(b), mtime=lb["mtime"],
+        reason="OSError: test", kind="io", now=NOW)
+    assert scan.copy_facts_candidates(con) == []
+    rows = [r for r in queries.object_card_form_rows(con) if r["frame_id"] == fid]
+    assert len(rows) == 1 and rows[0]["skip"] == "kopia oznaczona jako nieczytelna"
+    scan.ingest_record(con, scan.scan_file(str(b)), volume="?", now=LATER,
+                       summary=scan.ScanSummary())
+    lb = _loc(con, b)
+    assert lb["unreadable_since"] is None and lb["hdr_hash"] == lb["header_hash"]
+    assert fid in queries.object_card_form_frame_ids(con)
+    con.close()
+
+
 # ═════════════════════════ etap przejęcia
 
 
@@ -285,6 +318,23 @@ def test_etap_odmawia_kopii_zmienionej_od_skanu_i_nieczytelnej(po_skasowaniu):
     s = scan.adopt_orphan_testimony(con, now=LATER)
     assert (s.adopted, s.failed, s.remaining) == (0, 1, 1) and s.failed_paths[0].startswith(str(b))
     assert _header(con, fid)["filter_raw"] == "L-Pro"
+
+
+def test_izolacja_kopii_na_innym_woluminie_nie_blokuje_przejecia(po_skasowaniu):
+    """Izolacja dotyczy kopii (wolumin + ścieżka): operacja zapisu w toku na lokacji innego
+    woluminu pod tą samą ścieżką nie blokuje przejęcia zeznania ocalałej kopii. Falsyfikator:
+    bramka `_isolated(con, path)` bez woluminu → `failed` „kopia izolowana"."""
+    from test_copy_facts import _operacja
+    con, _root, fid, _a, b = po_skasowaniu
+    inna, _ = repo.upsert_frame(con, sha1_data="inna", kind="master_flat", filetype="xisf",
+                                camera_id=None, now=NOW)
+    lid_w, _ = repo.add_location(con, frame_id=inna, volume="W", path=str(b), header_hash="hW",
+                                 now=NOW)
+    _operacja(con, lid_w, "writing")
+    assert scan._isolated(con, str(b)) and not scan._isolated(con, str(b), "?")
+    s = scan.adopt_orphan_testimony(con, now=LATER)
+    assert (s.rows, s.adopted, s.failed, s.failed_paths) == (1, 1, 0, [])
+    assert _header(con, fid)["filter_raw"] == "CLS"
 
 
 def test_etap_zawezony_do_korzenia(po_skasowaniu):

@@ -409,6 +409,7 @@ class PipelineView(QWidget):
         self._thread = None
         self._worker = None
         self._cancellable = False
+        self._writeback_busy = False       # zapis nagłówków do plików w toku (`set_writeback_busy`)
         self._summary_lines = []
         self._presence_params = None       # ZAMROŻONE parametry ostatniego DRY (apply ich nie liczy)
         self._build_ui()
@@ -791,6 +792,8 @@ class PipelineView(QWidget):
             return i18n.t("pipeline.refuse.no_db")
         if self._thread is not None:
             return i18n.t("pipeline.refuse.running")
+        if self._writeback_busy:
+            return i18n.t("pipeline.refuse.writeback")
         self._begin_run()
         self._start_stage(stage)
         return None
@@ -1207,8 +1210,16 @@ class PipelineView(QWidget):
             filters=r.filters_canon, top=top, review=_review_line(r.review),
             nameless=nameless, no_raw=no_raw)
 
+    def set_writeback_busy(self, busy):
+        """MUTEX W DRUGĄ STRONĘ: zapis nagłówków do plików (grid albo okno naprawy) gasi etapy
+        Dostawy. Przebieg Dostawy gasił już zapis w gridzie (`running_changed`), ale nie odwrotnie -
+        „Przyjmij nowe” w trakcie commitu w miejscu czytało plik zapisywany obok i mogło wciągnąć
+        jego fakty (astra, 2026-09-27). Anulowanie biegnącego etapu zostaje dostępne."""
+        self._writeback_busy = bool(busy)
+        self._sync_actions()
+
     def _refresh_buttons(self, running, cancellable):
-        idle = not running
+        idle = not running and not self._writeback_busy
         has_db = self._db_path is not None
         self.btn_receive.setEnabled(idle and has_db)   # katalog niepotrzebny — przynosi własny (F5)
         self.btn_pick.setEnabled(idle)

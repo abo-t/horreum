@@ -279,16 +279,153 @@ def test_uzupelnienie_odmawia_kopii_zmienionej_i_zgubionej(tmp_path):
     con.close()
 
 
-def test_uzupelnienie_brak_katalogu_to_nieczytelne_nie_brak_pliku(tmp_path):
-    """Nie ma CAŁEGO katalogu kopii (zerwany udział, przemianowany folder) - to nie jest dowód, że
-    plik skasowano, więc zostaje `failed` („nieczytelne"), bez podpowiedzi „Oznacz zniknięte"."""
+@pytest.mark.parametrize("z_korzeniem", [True, False])
+def test_uzupelnienie_skasowany_caly_folder_nocy_to_brak_pliku(tmp_path, z_korzeniem):
+    """Skasowany CAŁY folder nocy zabiera katalog-rodzica razem z plikiem - to nadal skasowanie,
+    nie „nieczytelne". Świadkiem jest korzeń przebiegu (albo, bez korzenia, istniejący przodek
+    poniżej litery dysku), nie rodzic. Falsyfikator: świadek = `isdir(dirname(path))` → `failed`."""
     import shutil
     root, a, b = _dwie_kopie(tmp_path)
     con = _baza_sprzed_0021(tmp_path, [a, b])
     shutil.rmtree(b.parent)
+    s = scan.backfill_copy_facts(con, now=NOW, root=root if z_korzeniem else None)
+    assert (s.written, s.missing, s.failed, s.remaining) == (1, 1, 0, 1)
+    assert s.missing_paths == [str(b)] and s.failed_paths == []
+    con.close()
+
+
+def test_uzupelnienie_zerwany_korzen_w_trakcie_to_nieczytelne(tmp_path):
+    """Korzeń przebiegu znika w trakcie (zerwany udział) - brak pliku niczego wtedy nie dowodzi,
+    więc `failed`, nie `missing`. Przebieg kończy się raportem: `remaining` liczy się po korzeniu
+    skanonizowanym na starcie, bo ponowne `canonize_root` na zerwanym udziale rzuciłoby już po
+    zapisanych faktach."""
+    import shutil
+    root, a, b = _dwie_kopie(tmp_path)
+    con = _baza_sprzed_0021(tmp_path, [a, b])
+
+    def zerwij(done, _total, _path, _s):
+        if done == 1:
+            shutil.rmtree(root)
+    s = scan.backfill_copy_facts(con, now=NOW, root=root, progress=zerwij)
+    assert (s.written, s.missing, s.failed, s.remaining) == (1, 0, 1, 1)
+    assert s.failed_paths[0].startswith(str(b)) and s.missing_paths == []
+    con.close()
+
+
+def test_uzupelnienie_bez_korzenia_nieosiagalny_nosnik_to_nieczytelne(tmp_path):
+    """Bez korzenia świadkiem jest istniejący przodek PONIŻEJ litery dysku: kopia na nośniku, którego
+    nie ma (litera bez udziału), nie ma żadnego - więc `failed`, a nie `missing`."""
+    if os.name != "nt":
+        pytest.skip("litery dysków istnieją tylko na Windows")
+    litera = next((c for c in "QJKLMNOPWXYZ" if not os.path.exists(f"{c}:\\")), None)
+    if litera is None:
+        pytest.skip("brak wolnej litery dysku")
+    root, a, b = _dwie_kopie(tmp_path)
+    con = _baza_sprzed_0021(tmp_path, [a, b])
+    obca = f"{litera}:\\ASTRO_\\LIGHTS\\NOC\\m.xisf"
+    repo.add_location(con, frame_id=_loc(con, a)["frame_id"], volume="V", path=obca,
+                      header_hash=_loc(con, a)["header_hash"], now=NOW)
     s = scan.backfill_copy_facts(con, now=NOW)
-    assert (s.written, s.missing, s.failed) == (1, 0, 1)
-    assert s.failed_paths[0].startswith(str(b))
+    assert (s.written, s.missing, s.failed, s.remaining) == (2, 0, 1, 1)
+    assert s.failed_paths[0].startswith(obca)
+    con.close()
+
+
+# ═════════════════════════ kandydaci, których uzupełnienie nie dogoni
+
+
+def _operacja(con, lid, phase):
+    """Wiersz dziennika zapisu w miejscu (0022) w zadanej fazie - stan izolacji wprost w tabeli."""
+    con.execute(
+        "INSERT INTO inplace_op(location_id, kind, fmt, region_offset, region_length, old_region_z, "
+        "new_region_z, write_start, write_end, file_size, file_ino, pre_hash, post_hash, phase, "
+        "started_at) VALUES (?, 'commit', 'xisf', 0, 2, x'00', x'00', 0, 1, 10, 1, 'a', 'b', ?, ?)",
+        (lid, phase, NOW))
+    con.commit()
+
+
+def test_kopia_nieczytelna_nie_jest_kandydatem_a_fakty_przynosi_jej_skan(tmp_path):
+    """Kopia, która była czytelna i przestała, zachowuje `header_hash` z ostatniego udanego odczytu -
+    warunek na odcisk jej NIE odcina. Odcina ją marker `unreadable_since`: uzupełnienie i tak by
+    jej nie przeczytało, a w Porządkach świeciłaby „?" bez końca. Fakty przynosi skan - brama
+    przyrostowa nie pomija kopii z markerem, a udany odczyt zapisuje fakty i gasi marker."""
+    root, a, b = _dwie_kopie(tmp_path)
+    con = _baza_sprzed_0021(tmp_path, [a, b])
+    lb = _loc(con, b)
+    sha1 = con.execute("SELECT sha1_data FROM frame WHERE id = ?", (lb["frame_id"],)).fetchone()[0]
+    assert repo.refresh_location_unreadable(
+        con, location_id=lb["id"], sha1_data=sha1, path=str(b), mtime=lb["mtime"],
+        reason="OSError: test", kind="io", now=NOW)
+    assert _loc(con, b)["header_hash"] is not None
+    assert [r["path"] for r in scan.copy_facts_candidates(con)] == [str(a)]
+    s = scan.backfill_copy_facts(con, now=NOW)
+    assert (s.rows, s.written, s.failed, s.remaining) == (1, 1, 0, 0)
+    assert not scan._already_scanned(con, "V", str(b), lb["mtime"])
+    scan.ingest_record(con, scan.scan_file(str(b)), volume="V", now=NOW,
+                       summary=scan.ScanSummary())
+    lb = _loc(con, b)
+    assert lb["unreadable_since"] is None and lb["hdr_hash"] == lb["header_hash"]
+    assert lb["hdr_filter"] == "L-Pro"
+    con.close()
+
+
+@pytest.mark.parametrize("faza", repo.INPLACE_ISOLATING_PHASES)
+def test_kopia_izolowana_nie_jest_kandydatem_do_zamkniecia_operacji(tmp_path, faza):
+    """Kopia izolowana po zapisie w miejscu (każda faza izolująca, także `written`) wypada
+    z kandydatów - żadna droga czytająca jej nie dotyka, więc „?" świeciłoby bez końca. Operacja
+    zamknięta (tu: zwolniona) nie izoluje: kopia bez faktów wraca do kandydatów sama."""
+    root, a, b = _dwie_kopie(tmp_path)
+    con = _baza_sprzed_0021(tmp_path, [a, b])
+    _operacja(con, _loc(con, b)["id"], faza)
+    assert [r["path"] for r in scan.copy_facts_candidates(con)] == [str(a)]
+    s = scan.backfill_copy_facts(con, now=NOW)
+    assert (s.rows, s.written, s.failed, s.remaining) == (1, 1, 0, 0)
+    assert _loc(con, b)["hdr_hash"] is None
+    con.execute("UPDATE inplace_op SET phase = 'released'")
+    con.commit()
+    assert [r["path"] for r in scan.copy_facts_candidates(con)] == [str(b)]
+    con.close()
+
+
+def test_izolacja_kopii_na_innym_woluminie_nie_blokuje_tej_samej_sciezki(tmp_path):
+    """Izolacja dotyczy kopii (wolumin + ścieżka), nie samej ścieżki: operacja w toku na kopii
+    woluminu `W` nie blokuje odczytu kopii woluminu `V` pod tą samą ścieżką. Falsyfikator: bramka
+    `_isolated(con, path)` bez woluminu → kopia `V` ląduje w `failed` jako „izolowana"."""
+    root, a, b = _dwie_kopie(tmp_path)
+    con = _baza_sprzed_0021(tmp_path, [a, b])
+    la = _loc(con, a)
+    lid_w, _ = repo.add_location(con, frame_id=la["frame_id"], volume="W", path=str(a),
+                                 header_hash=la["header_hash"], now=NOW)
+    _operacja(con, lid_w, "writing")
+    assert scan._isolated(con, str(a)) and not scan._isolated(con, str(a), "V")
+    s = scan.backfill_copy_facts(con, now=NOW)
+    assert (s.rows, s.written, s.failed, s.failed_paths, s.remaining) == (2, 2, 0, [], 0)
+    wiersze = dict(con.execute("SELECT volume, hdr_hash FROM location WHERE path = ?",
+                               (str(a),)).fetchall())
+    assert wiersze["V"] == la["header_hash"] and wiersze["W"] is None
+    con.close()
+
+
+def test_uzupelnienie_xisf_izolacja_na_innym_woluminie_nie_blokuje_tej_samej_sciezki(tmp_path):
+    """Lustro testu wyżej dla sterownika `backfill_xisf_headers`: kopia XISF sprzed P6a (bez
+    odcisku) na woluminie `V` jest czytana i dostaje odcisk, choć kopia pod TĄ SAMĄ ścieżką na
+    woluminie `W` ma operację zapisu w miejscu w toku; ta druga zostaje w `failed` jako izolowana.
+    Falsyfikator: bramka `_isolated(con, path)` bez woluminu → kopia `V` też ląduje w `failed`."""
+    a = _xisf(tmp_path / "ARCH" / "A" / "m.xisf", _FLAT + (("FILTER", "'CLS'"),))
+    con = db.open_db(str(tmp_path / "h.db"))
+    rec = scan.scan_file(str(a))
+    fid, _ = repo.upsert_frame(con, sha1_data=rec.sha1_data, kind="master_flat",
+                               filetype="xisf", camera_id=None, now=NOW)
+    lid_v, _ = repo.add_location(con, frame_id=fid, volume="V", path=str(a), mtime=rec.mtime,
+                                 now=NOW)
+    lid_w, _ = repo.add_location(con, frame_id=fid, volume="W", path=str(a), now=NOW)
+    _operacja(con, lid_w, "writing")
+    s = scan.backfill_xisf_headers(con, now=NOW)
+    assert (s.rows, s.read, s.failed) == (2, 1, 1), s
+    assert "izolowana" in s.failed_paths[0]
+    wiersze = dict(con.execute("SELECT volume, header_hash FROM location WHERE path = ?",
+                               (str(a),)).fetchall())
+    assert wiersze["V"] == rec.header_hash and wiersze["W"] is None
     con.close()
 
 

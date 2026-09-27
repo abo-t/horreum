@@ -1128,24 +1128,25 @@ def test_nieutrwalona_faza_written_to_operacja_nieukonczona(tmp_path, monkeypatc
 
 
 def test_nieutrwalona_faza_synced_zostawia_izolacje(tmp_path, monkeypatch):
-    """Re-sync udany, ale `synced` nie zapisało się: dawniej 'applied' przy lokacji bez zamkniętej
-    operacji. Teraz 'failed', faza `written` (izolowana), a `finish_inplace` kończy."""
+    """Re-sync udany, ale transakcja zamknięcia (`synced` + wpisy stagingu) nie zapisała się:
+    dawniej 'applied' przy lokacji bez zamkniętej operacji. Teraz 'failed', faza `written`
+    (izolowana), wpis stagingu NIE 'applied', a `finish_inplace` kończy - kontrola danych liczona
+    od nowa wobec kotwicy operacji przechodzi, choć baza opisuje już plik po zapisie."""
     p = _fits(tmp_path / "y.fits")
     con, _ = _baza_z_plikiem(tmp_path, p)
-    prawdziwa = repo.set_inplace_op_phase
 
     def _pada(con_, **kw):
-        if kw["phase"] == "synced":
-            raise sqlite3.OperationalError("database is locked")
-        return prawdziwa(con_, **kw)
-    monkeypatch.setattr(writeback.repo, "set_inplace_op_phase", _pada)
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(writeback.repo, "finish_inplace_op", _pada)
     res = writeback.commit(con, "R", now=NOW, inplace=True)
     monkeypatch.undo()
     assert not res.applied and "'synced' NIE zapisana" in res.failed[0].reason
     op_id = _operacje(con)[0]["id"]
     assert _operacje(con)[0]["phase"] == "written" and scan._isolated(con, str(p))
+    assert _loc(con, p)["header_hash"] == _hash(p)                  # re-sync przeszedł
     assert writeback.finish_inplace(con, op_id, now=NOW).status == "applied"
     assert _operacje(con)[0]["phase"] == "synced"
+    assert [r["status"] for r in writeback.pending_for_run(con, "R")] == ["applied"]
     con.close()
 
 
@@ -1207,6 +1208,418 @@ def test_bramka_izolacji_przed_kazda_mutacja_pliku(tmp_path, monkeypatch):
                                 spec=writeback._spec_z_operacji(
                                     con.execute("SELECT * FROM inplace_op").fetchone()), now=NOW)
     assert p.read_bytes() == zamrozony and p.exists()
+    con.close()
+
+
+# ============================================================ KOTWICA, STAGING, POWRÓT, STRAŻ (2026-09-27)
+# Generacja w każdej drodze czytającej plik kopii, kotwica utrwalona przy operacji, wiązanie wpisów
+# stagingu z operacją, droga powrotu z `written`, tryb ścisły kotwicy i straż podmiany atomowej.
+# Każdy test zarzutu pada na kodzie sprzed tej tury.
+
+
+def _bez_faktow(con, path, *, bez_odcisku=False):
+    """Kopia jak sprzed 0021 (fakty kopii NULL), a z `bez_odcisku` - jak XISF sprzed P6a (także
+    `header_hash` NULL). Tylko test: tak wyglądają wiersze, które sterowniki uzupełnień wybierają."""
+    con.execute("UPDATE location SET hdr_filter = NULL, hdr_imagetyp = NULL, hdr_object = NULL, "
+                "hdr_telescop = NULL, hdr_instrume = NULL, hdr_exptime = NULL, "
+                "hdr_xbinning = NULL, hdr_date_obs = NULL, image_count = NULL, "
+                "image_roles = NULL, hdr_hash = NULL WHERE path = ?", (str(path),))
+    if bez_odcisku:
+        con.execute("UPDATE location SET header_hash = NULL WHERE path = ?", (str(path),))
+    con.commit()
+
+
+def _odczyt_przed_zapisem(monkeypatch, nazwa, p, zapis):
+    """Podmienia `scan.<nazwa>` tak, że PIERWSZY odczyt pliku `p` przez sterownik czyta go, potem
+    w środku odczytu wykonuje `zapis()` (commit w miejscu), a oddaje stan SPRZED zapisu - odczyt
+    przeszedł bramkę izolacji, zanim operacja powstała. Kolejne wołania (re-sync pisarza) - wprost."""
+    prawdziwy = getattr(scan, nazwa)
+    stan = {"raz": True}
+
+    def _przeplot(path, *a, **kw):
+        if not (stan["raz"] and str(path) == str(p)):
+            return prawdziwy(path, *a, **kw)
+        stan["raz"] = False
+        wynik = prawdziwy(path, *a, **kw)
+        zapis()
+        return wynik
+    monkeypatch.setattr(scan, nazwa, _przeplot)
+
+
+def _commit_z_padem_resyncu(monkeypatch, con, run):
+    """Commit w miejscu, którego re-sync pada (czkawka odczytu) - operacja zostaje `written`,
+    baza opisuje plik SPRZED zapisu."""
+    with monkeypatch.context() as m:
+        _zerwany_udzial(m)
+        wynik = writeback.commit(con, run, now=NOW, inplace=True)
+    assert len(wynik.failed) == 1 and _operacje(con)[-1]["phase"] == "written", wynik
+    return wynik
+
+
+def test_uzupelnienie_xisf_przeplatane_z_zapisem_nie_przywraca_starych_faktow(tmp_path,
+                                                                            monkeypatch):
+    """Uzupełnienie XISF przeczytało plik przed zapisem w miejscu, a zapis skończył się (`synced`)
+    przed wciągnięciem rekordu. Dawniej `ingest_record` bez generacji przywracał w bazie stary
+    nagłówek. Teraz generacja sprzed bramki odrzuca rekord - `failed` jako izolowana, baza opisuje
+    plik po zapisie, a kopia wraca w następnym przebiegu tylko wtedy, gdy nadal jest kandydatem."""
+    p = _xisf(tmp_path / "a.xisf")
+    con, loc = _baza_z_plikiem(tmp_path, p)
+    _bez_faktow(con, p, bez_odcisku=True)
+
+    def _zapis():
+        assert len(writeback.commit(con, "R", now=NOW, inplace=True).in_place) == 1
+    _odczyt_przed_zapisem(monkeypatch, "scan_file", p, _zapis)
+    s = scan.backfill_xisf_headers(con, now=NOW)
+    monkeypatch.undo()
+    assert s.failed == 1 and "izolowana" in s.failed_paths[0], s
+    assert _loc(con, p)["header_hash"] == _hash(p) != loc["header_hash"]
+    con.close()
+
+
+def test_uzupelnienie_xisf_nie_wciaga_pliku_uszkodzonego_a_dokonczenie_mu_nie_ufa(tmp_path,
+                                                                                monkeypatch):
+    """Scenariusz recenzji: uzupełnienie XISF przeszło bramkę, zapis w miejscu zmienił przy zapisie
+    bajt drugiego obrazu (kontrola danych → `written`), a uzupełnienie przeczytało plik JUŻ
+    uszkodzony. Dawniej wciągało jego fakty (`location.file_sha1` = sha1 pliku uszkodzonego),
+    a `finish_inplace` brało „sha1 == kotwica" za dowód synchronizacji → 'applied'/`synced`.
+    Teraz rekord odpada na generacji, a dokończenie liczy kontrolę wobec kotwicy operacji."""
+    p, zly = _xisf_dwa_obrazy(tmp_path / "d.xisf")
+    con, loc = _baza_z_plikiem(tmp_path, p)
+    _bez_faktow(con, p, bez_odcisku=True)
+    prawdziwy = scan.scan_file
+    stan = {"raz": True}
+
+    def _przeplot(path):
+        if not (stan["raz"] and str(path) == str(p)):
+            return prawdziwy(path)
+        stan["raz"] = False
+        with monkeypatch.context() as m:
+            _psuj_bajt_przy_fsync(m, zly)
+            wynik = writeback.commit(con, "R", now=NOW, inplace=True)
+        assert len(wynik.failed) == 1 and "POZA regionem" in wynik.failed[0].reason
+        return prawdziwy(path)                         # odczyt PO zapisie - plik uszkodzony
+    monkeypatch.setattr(scan, "scan_file", _przeplot)
+    s = scan.backfill_xisf_headers(con, now=NOW)
+    monkeypatch.undo()
+    assert s.failed == 1, s
+    assert _loc(con, p)["header_hash"] is None                     # fakty uszkodzonego NIE weszły
+    op_id = _operacje(con)[0]["id"]
+    f = writeback.finish_inplace(con, op_id, now=NOW)
+    assert f.status == "failed" and f"recover_torn({op_id})" in f.reason, f
+    assert _operacje(con)[0]["phase"] == "written" and scan._isolated(con, str(p))
+    assert [r["status"] for r in writeback.pending_for_run(con, "R")] == ["failed"]
+    con.close()
+
+
+def test_dokonczenie_nie_ufa_kotwicy_przestawionej_w_bazie(tmp_path, monkeypatch):
+    """Kotwica kontroli danych żyje przy operacji, nie w `location.file_sha1`: obcy zapis faktów
+    (tu `ingest_record` bez generacji - np. import) przestawia kolumnę na sha1 pliku z bajtem
+    zmienionym poza nagłówkiem. Dawniej `finish_inplace` brał równość z nią za dowód → 'applied'
+    i `synced`. Teraz kontrola liczona od nowa wobec kotwicy operacji → 'failed' z drogą powrotu."""
+    p, zly = _fits_dwa_hdu(tmp_path / "k.fits")
+    przed = p.read_bytes()
+    con, loc = _baza_z_plikiem(tmp_path, p)
+    _psuj_bajt_przy_fsync(monkeypatch, zly)
+    res = writeback.commit(con, "R", now=NOW, inplace=True)
+    monkeypatch.undo()
+    assert len(res.failed) == 1 and "POZA regionem" in res.failed[0].reason
+    op_id = _operacje(con)[0]["id"]
+    import hashlib
+    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW,
+                       summary=scan.ScanSummary())                 # kolumna mutowalna przestawiona
+    assert con.execute("SELECT file_sha1 FROM location").fetchone()[0] == hashlib.sha1(
+        p.read_bytes()).hexdigest()
+    f = writeback.finish_inplace(con, op_id, now=NOW)
+    assert f.status == "failed" and "POZA regionem" in f.reason, f
+    assert _operacje(con)[0]["phase"] == "written"
+    assert con.execute("SELECT anchor_sha1 FROM inplace_op").fetchone()[0] == hashlib.sha1(
+        przed).hexdigest()                                         # kotwica przy operacji
+    con.close()
+
+
+def test_uzupelnienie_faktow_kopii_przeplatane_z_zapisem_nie_pisze(tmp_path, monkeypatch):
+    """Uzupełnienie faktów kopii przeczytało nagłówek przed zapisem w miejscu, a zapis zostawił
+    operację `written` (re-sync padł - baza wciąż ma stary odcisk). Kotwica odcisku sama tego nie
+    łapie: dawniej fakty STAREGO nagłówka lądowały na lokacji izolowanej. Teraz generacja odrzuca
+    zapis w klindze → `stale`, fakty zostają puste."""
+    p = _xisf(tmp_path / "c.xisf")
+    con, _ = _baza_z_plikiem(tmp_path, p)
+    _bez_faktow(con, p)
+    _odczyt_przed_zapisem(monkeypatch, "_read_meta", p,
+                          lambda: _commit_z_padem_resyncu(monkeypatch, con, "R"))
+    s = scan.backfill_copy_facts(con, now=NOW)
+    monkeypatch.undo()
+    assert (s.read, s.written, s.stale) == (1, 0, 1), s
+    assert _loc(con, p)["header_hash"] is not None
+    assert con.execute("SELECT hdr_hash FROM location").fetchone()[0] is None
+    con.close()
+
+
+def test_przejecie_zeznania_przeplatane_z_zapisem_nie_przejmuje(tmp_path, monkeypatch):
+    """Przejęcie zeznania ocalałej kopii przeczytało plik przed zapisem w miejscu, a zapis zostawił
+    operację `written` (baza wciąż ma stary odcisk, więc kotwica klingi przepuszcza). Dawniej
+    `header` klatki dostawał zeznanie nagłówka, którego na dysku już nie ma. Teraz generacja →
+    `raced`, zero `header.adopted`."""
+    root = tmp_path / "ARCH"
+    (root / "A").mkdir(parents=True)
+    (root / "B").mkdir()
+    a = _fits(root / "A" / "a.fits", obj="NGC6992")
+    b = _fits(root / "B" / "b.fits", obj="NGC 7000")
+    con = db.open_db(str(tmp_path / "h.db"))
+    scan.scan_tree(con, str(root), volume="V", now=NOW)
+    la, lb = _loc(con, a), _loc(con, b)
+    assert la["frame_id"] == lb["frame_id"]
+    os.remove(a)
+    assert repo.mark_location_vanished(con, location_id=la["id"], expected_path=str(a),
+                                       root=str(root / "A"), run_id="t", now=NOW)
+    assert [f for f, _k in scan.adopt_candidates(con)] == [lb["frame_id"]]
+    _stage(con, "R", lb["id"], "M 42", lb["header_hash"])
+    _odczyt_przed_zapisem(monkeypatch, "scan_file", b,
+                          lambda: _commit_z_padem_resyncu(monkeypatch, con, "R"))
+    s = scan.adopt_orphan_testimony(con, now=NOW)
+    monkeypatch.undo()
+    assert (s.adopted, s.raced) == (0, 1), s
+    assert con.execute("SELECT count(*) FROM event WHERE verb = 'header.adopted'").fetchone()[0] == 0
+    assert con.execute("SELECT object_raw FROM header").fetchone()[0] == "NGC6992"
+    con.close()
+
+
+class _Przerwa(BaseException):
+    """Symulacja przerwania procesu (zabity proces, utrata zasilania) - nie `Exception`, więc żadna
+    obrona `except Exception` pisarza jej nie połknie."""
+
+
+def test_przerwa_po_written_dokonczenie_domyka_staging_i_nagrobek(tmp_path, monkeypatch):
+    """Proces przerwał się po utrwaleniu `written`, przed re-synciem i przed oznaczeniem stagingu:
+    wpis zostaje 'pending', nagrobek ręki stoi. Ponowny commit odbija się od izolacji ('blocked').
+    Dawniej `finish_inplace` dobierał tylko wpisy 'failed': synchronizował bazę i stawiał `synced`,
+    a wpis zostawał, nagrobek nie gasł, kolejny commit dostawał `header_hash mismatch`. Teraz
+    operacja zna SWOJE wpisy (0023) i dokończenie zamyka je atomowo z fazą i nagrobkiem - bez
+    dotykania wpisu innej lokacji tego przebiegu."""
+    p = _fits(tmp_path / "n.fits")
+    q = _fits(tmp_path / "q.fits", seed=5)
+    con, loc = _baza_z_plikiem(tmp_path, p)
+    _scan_in(con, q)
+    _stage(con, "R", _loc(con, q)["id"], "M 42", "zly-odcisk")      # druga lokacja przebiegu
+    con.execute("UPDATE frame SET object_source = 'user_cleared' WHERE id = ?", (loc["frame_id"],))
+    con.commit()
+
+    def _przerwij(*a, **kw):
+        raise _Przerwa()
+    monkeypatch.setattr(writeback, "_dokoncz", _przerwij)
+    with pytest.raises(_Przerwa):
+        writeback.commit(con, "R", now=NOW, inplace=True)
+    monkeypatch.undo()
+    (op_id, _, faza), = [tuple(o) for o in _operacje(con)]
+    assert faza == "written"
+    statusy = lambda: {r["location_id"]: r["status"] for r in writeback.pending_for_run(con, "R")}
+    assert statusy()[loc["id"]] == "pending"
+
+    ponowny = writeback.commit(con, "R", now=NOW, inplace=True)
+    assert [f.path for f in ponowny.blocked] == [str(p), str(q)]
+    assert f"finish_inplace({op_id})" in ponowny.blocked[0].reason
+
+    f = writeback.finish_inplace(con, op_id, now=NOW)
+    assert f.status == "applied", f
+    assert statusy() == {loc["id"]: "applied", _loc(con, q)["id"]: "blocked"}
+    assert con.execute("SELECT object_source FROM frame WHERE id = ?",
+                       (loc["frame_id"],)).fetchone()[0] is None
+    assert con.execute("SELECT count(*) FROM event WHERE verb = 'object.tombstone_cleared'"
+                       ).fetchone()[0] == 1
+    assert _operacje(con)[0]["phase"] == "synced" and _loc(con, p)["header_hash"] == _hash(p)
+    assert fits.getheader(str(p))["OBJECT"] == "NGC 6992"
+    trzeci = writeback.commit(con, "R", now=NOW, inplace=True)
+    assert not (trzeci.applied or trzeci.blocked or trzeci.failed)
+    con.close()
+
+
+def test_ponowny_commit_po_odzysku_przerwy_wiaze_wpisy_na_nowo(tmp_path, monkeypatch):
+    """Legalne ponowienie nie może utknąć na wiązaniu: przerwa PO utrwaleniu operacji (faza
+    `writing`, wpis 'pending' związany z nią), odzysk przywraca plik (`recovered`), a ponowny commit
+    tego samego przebiegu wiąże wpis z NOWĄ operacją i przechodzi."""
+    p = _fits(tmp_path / "po.fits")
+    przed = p.read_bytes()
+    con, loc = _baza_z_plikiem(tmp_path, p)
+
+    def _przerwij(*a, **kw):
+        raise _Przerwa()
+    monkeypatch.setattr(writeback, "_verify_inplace", _przerwij)
+    with pytest.raises(_Przerwa):
+        writeback.commit(con, "R", now=NOW, inplace=True)
+    monkeypatch.undo()
+    (op_id, _, faza), = [tuple(o) for o in _operacje(con)]
+    (wpis,) = writeback.pending_for_run(con, "R")
+    assert faza == "writing" and wpis["status"] == "pending"
+    assert writeback.recover_torn(con, op_id, now=NOW).status == "restored"
+    assert p.read_bytes() == przed
+    res = writeback.commit(con, "R", now=NOW, inplace=True)
+    assert len(res.in_place) == 1, res
+    assert con.execute("SELECT inplace_op_id FROM pending_changes").fetchone()[0] == \
+        _operacje(con)[-1]["id"] != op_id
+    assert [r["status"] for r in writeback.pending_for_run(con, "R")] == ["applied"]
+    con.close()
+
+
+def _dryf_poza_naglowkiem(p, offset):
+    """Plik zmieniony poza nagłówkiem od ostatniego skanu, z ZACHOWANYM `mtime` (narzędzie, które
+    przywraca znacznik czasu, albo zegar serwera) - reguła `mtime` pisarza tego nie widzi."""
+    st = os.stat(p)
+    dane = bytearray(p.read_bytes())
+    dane[offset] ^= 0xFF
+    p.write_bytes(bytes(dane))
+    os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))
+    assert os.stat(p).st_mtime_ns == st.st_mtime_ns
+    return bytes(dane)
+
+
+def test_dryf_przy_tym_samym_mtime_ma_droge_powrotu(tmp_path, monkeypatch):
+    """Plik zmienił się poza nagłówkiem przy zachowanym `mtime`: tryb domyślny pisze, kontrola
+    danych po zapisie wykrywa różnicę → `written`. Dawniej lokacja stała bez drogi wyjścia
+    (dokończenie powtarza błąd, undo wymaga dokończenia, odzysk odmawia `written`, skan pomija).
+    Teraz `recover_torn` przywraca stary nagłówek w miejscu (plik = stan sprzed zapisu z dryfem),
+    faza `recovered`, wpis stagingu 'failed' z prawdziwym powodem, `mtime` lokacji NULL - skan
+    przeczyta plik w całości, a potem nowy commit przechodzi."""
+    kat = tmp_path / "arch"
+    kat.mkdir()
+    p, zly = _fits_dwa_hdu(kat / "d.fits")
+    con, loc = _baza_z_plikiem(tmp_path, p)
+    z_dryfem = _dryf_poza_naglowkiem(p, zly)
+    ino = os.stat(p).st_ino
+    res = writeback.commit(con, "R", now=NOW, inplace=True)
+    assert len(res.failed) == 1 and "POZA regionem" in res.failed[0].reason, res
+    op_id = _operacje(con)[0]["id"]
+    assert f"recover_torn({op_id})" in res.failed[0].reason
+    assert writeback.finish_inplace(con, op_id, now=NOW).status == "failed"
+    assert len(writeback.undo(con, res.commit_id, now=NOW).restored) == 0
+
+    w = writeback.recover_torn(con, op_id, now=NOW)
+    assert w.status == "restored" and "poza nagłówkiem" in w.reason and "przeskanuj" in w.reason, w
+    assert p.read_bytes() == z_dryfem and os.stat(p).st_ino == ino
+    assert _operacje(con)[0]["phase"] == "recovered" and not scan._isolated(con, str(p))
+    assert con.execute("SELECT mtime FROM location").fetchone()[0] is None
+    (wpis,) = writeback.pending_for_run(con, "R")
+    assert wpis["status"] == "failed" and "przeskanuj" in wpis["reason"]
+    ev = con.execute("SELECT reason FROM event WHERE verb = 'location.writeback_reverted'"
+                     ).fetchone()
+    assert ev is not None and "poza nagłówkiem" in ev["reason"]
+    assert writeback.recover_torn(con, op_id, now=NOW).status == "blocked"   # zamknięta
+
+    s = scan.scan_tree(con, str(kat), volume="V", now=NOW)
+    assert s.isolated == 0 and s.locations_refreshed == 1
+    import hashlib
+    assert con.execute("SELECT file_sha1 FROM location").fetchone()[0] == hashlib.sha1(
+        z_dryfem).hexdigest()
+    _stage(con, "R2", loc["id"], "NGC 6992", _hash(p))
+    assert len(writeback.commit(con, "R2", now=NOW, inplace=True).in_place) == 1
+    con.close()
+
+
+def test_powrot_nie_cofa_poprawnego_zapisu(tmp_path, monkeypatch):
+    """Droga powrotu z `written` dotyczy WYŁĄCZNIE nieudanej kontroli danych: operacja `written`
+    po czkawce re-syncu (kontrola przechodzi) → 'blocked' z drogą `finish_inplace`, plik nietknięty,
+    faza bez zmian. Powrót nie jest drugim undo."""
+    p = _fits(tmp_path / "ok.fits")
+    con, _ = _baza_z_plikiem(tmp_path, p)
+    _commit_z_padem_resyncu(monkeypatch, con, "R")
+    po_zapisie = p.read_bytes()
+    op_id = _operacje(con)[0]["id"]
+    w = writeback.recover_torn(con, op_id, now=NOW)
+    assert w.status == "blocked" and f"finish_inplace({op_id})" in w.reason, w
+    assert p.read_bytes() == po_zapisie and _operacje(con)[0]["phase"] == "written"
+    assert writeback.finish_inplace(con, op_id, now=NOW).status == "applied"
+    con.close()
+
+
+def test_przerwany_powrot_da_sie_ponowic(tmp_path, monkeypatch):
+    """Powrót przywrócił stary region, ale transakcja zamknięcia padła: operacja zostaje `written`
+    ze starym regionem (stan pośredni), dokończenie odsyła do powrotu, a ponowiony powrót nie pisze
+    i od razu zamyka operację."""
+    p, zly = _fits_dwa_hdu(tmp_path / "pp.fits")
+    con, _ = _baza_z_plikiem(tmp_path, p)
+    z_dryfem = _dryf_poza_naglowkiem(p, zly)
+    writeback.commit(con, "R", now=NOW, inplace=True)
+    op_id = _operacje(con)[0]["id"]
+
+    def _pada(con_, **kw):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(writeback.repo, "revert_inplace_op", _pada)
+    w1 = writeback.recover_torn(con, op_id, now=NOW)
+    monkeypatch.undo()
+    assert w1.status == "failed" and f"recover_torn({op_id})" in w1.reason, w1
+    assert p.read_bytes() == z_dryfem and _operacje(con)[0]["phase"] == "written"
+    d = writeback.finish_inplace(con, op_id, now=NOW)
+    assert d.status == "blocked" and f"recover_torn({op_id})" in d.reason, d
+    assert writeback.recover_torn(con, op_id, now=NOW).status == "restored"
+    assert _operacje(con)[0]["phase"] == "recovered" and p.read_bytes() == z_dryfem
+    con.close()
+
+
+def test_tryb_scisly_blokuje_dryf_przed_operacja(tmp_path, monkeypatch):
+    """Tryb pilotażu (`fallback=False`) = tryb ścisły kotwicy: pełny odczyt pod blokadą przed
+    `begin_inplace_*` niezależnie od `mtime` → dryf poza nagłówkiem przy tym samym `mtime` to
+    'blocked', bez operacji w dzienniku, plik nietknięty. Dawniej pilotaż pisał i zostawiał
+    `written`. Plik czysty w trybie ścisłym przechodzi, a kotwica z pełnego odczytu trafia do
+    operacji. Tryb domyślny (wsad) przy zgodnym `mtime` NIE czyta całego pliku przed zapisem."""
+    p, zly = _fits_dwa_hdu(tmp_path / "s.fits")
+    con, loc = _baza_z_plikiem(tmp_path, p)
+    z_dryfem = _dryf_poza_naglowkiem(p, zly)
+    res = writeback.commit(con, "R", now=NOW, inplace=True, fallback=False)
+    assert len(res.blocked) == 1 and "od ostatniego skanu" in res.blocked[0].reason, res
+    assert not _operacje(con) and p.read_bytes() == z_dryfem
+
+    import hashlib
+    q = _fits(tmp_path / "czysty.fits", seed=9)
+    przed = q.read_bytes()
+    _scan_in(con, q)
+    lq = _loc(con, q)
+    _stage(con, "S", lq["id"], "NGC 6992", lq["header_hash"])
+    assert len(writeback.commit(con, "S", now=NOW, inplace=True, fallback=False).in_place) == 1
+    assert _operacje(con)[-1]["phase"] == "synced"
+    assert con.execute("SELECT anchor_sha1 FROM inplace_op").fetchone()[0] == hashlib.sha1(
+        przed).hexdigest()
+
+    r = _fits(tmp_path / "wsad.fits", seed=11)
+    _scan_in(con, r)
+    lr = _loc(con, r)
+    _stage(con, "W", lr["id"], "NGC 6992", lr["header_hash"])
+    pelne = []
+    prawdziwy = writeback._sha1_uchwytu
+    monkeypatch.setattr(writeback, "_sha1_uchwytu", lambda fh: pelne.append(1) or prawdziwy(fh))
+    assert len(writeback.commit(con, "W", now=NOW, inplace=True).in_place) == 1
+    assert pelne == []
+    con.close()
+
+
+@pytest.mark.parametrize("faza_b", ["written", "synced"])
+def test_commit_atomowy_przeplatany_z_zapisem_w_miejscu(tmp_path, monkeypatch, faza_b):
+    """Commit atomowy A przeszedł bramkę izolacji i przygotował plik tymczasowy; zanim zrobił
+    `os.replace`, commit B zapisał plik w miejscu (i został `written` albo `synced`). Dawniej A
+    podmieniał plik, ścierając zapis B, i meldował 'applied'. Teraz podmiana idzie pod strażą
+    w transakcji zapisu bazy: operacja B (izolująca albo nowsza niż generacja A) → A 'blocked',
+    plik = wynik B, plik tymczasowy sprzątnięty."""
+    p = _fits(tmp_path / "a.fits")
+    con, loc = _baza_z_plikiem(tmp_path, p)                 # przebieg "R" = zapis w miejscu (B)
+    _stage(con, "A", loc["id"], "M 42", loc["header_hash"])  # przebieg "A" = droga atomowa
+    prawdziwy = repo.insert_header_backup
+    stan = {"raz": True}
+
+    def _przeplot(con_, **kw):
+        if stan["raz"]:
+            stan["raz"] = False
+            if faza_b == "written":
+                _commit_z_padem_resyncu(monkeypatch, con, "R")
+            else:
+                assert len(writeback.commit(con, "R", now=NOW, inplace=True).in_place) == 1
+            stan["po_b"] = p.read_bytes()
+        return prawdziwy(con_, **kw)
+    monkeypatch.setattr(writeback.repo, "insert_header_backup", _przeplot)
+    a = writeback.commit(con, "A", now=NOW)
+    monkeypatch.undo()
+    assert not a.applied and len(a.blocked) == 1, a
+    assert f"operacja {_operacje(con)[0]['id']}" in a.blocked[0].reason
+    assert p.read_bytes() == stan["po_b"] and fits.getheader(str(p))["OBJECT"] == "NGC 6992"
+    assert [x.name for x in tmp_path.iterdir() if x.suffix == ".tmp"] == []
+    assert _operacje(con)[0]["phase"] == faza_b
     con.close()
 
 

@@ -831,7 +831,7 @@ def _rewrite_testimony(con, *, frame_id, raw_json, cards, hot_fields, camera_id,
 
 
 def adopt_testimony(con, *, location_id, sha1_data, header_hash, raw_json, cards, hot_fields,
-                    camera_id, kind, now, actor):
+                    camera_id, kind, now, actor, inplace_gen=None):
     """PRZEJĘCIE ZEZNANIA klatki przez WSKAZANĄ kopię: `header` + `cards` + pochodne frame'a
     (`camera_id`/`kind`) z nagłówka pliku tej kopii, przeczytanego przed chwilą przez wołającego.
 
@@ -861,6 +861,11 @@ def adopt_testimony(con, *, location_id, sha1_data, header_hash, raw_json, cards
     i odcisk przejmującej kopii oraz `{pole: {before, after}}` pól gorących, które zmieniły wartość.
     `actor` idzie do każdego eventu przejęcia (etap i gest ręki mają się w dzienniku odróżniać).
 
+    `inplace_gen` (astra, 2026-09-27) - generacja dziennika zapisu w miejscu z odczytu wołającego
+    (kontrakt jak w `refresh_location`): operacja tej lokacji o większym `id` → `StaleScanRecord`
+    w tej transakcji, zero zapisu. Kotwica odcisku sama tego nie łapie - zapis w miejscu przed
+    re-synciem zostawia w bazie stary odcisk, a odczyt sprzed zapisu niesie ten sam.
+
     ZWRACA `'adopted'` | `'unchanged'` | `'drift'`."""
     hot = dict(hot_fields or {})
     with _immediate(con):
@@ -870,6 +875,7 @@ def adopt_testimony(con, *, location_id, sha1_data, header_hash, raw_json, cards
             (location_id,)).fetchone()
         if loc is None:
             raise ValueError(f"location:{location_id} nie istnieje")
+        _refuse_if_newer_inplace(con, location_id, inplace_gen)
         if loc["sha1_data"] != sha1_data:
             raise ValueError(f"location:{location_id}: tożsamość rekordu {sha1_data!r} != "
                              f"tożsamość klatki {loc['sha1_data']!r} - to nie jest ta klatka")
@@ -894,7 +900,8 @@ def adopt_testimony(con, *, location_id, sha1_data, header_hash, raw_json, cards
     return "adopted"
 
 
-def record_copy_facts(con, *, location_id, copy_facts, now, actor="backfill:copies"):
+def record_copy_facts(con, *, location_id, copy_facts, now, actor="backfill:copies",
+                      inplace_gen=None):
     """UZUPEŁNIENIE faktów kopii z jej nagłówka (0021) dla wiersza sprzed migracji - droga
     `scan.backfill_copy_facts`, która czyta SAM nagłówek pliku, bez haszowania całości (550 plików
     XISF to 108,9 GB treści, a nagłówki czytają się w sekundy).
@@ -911,7 +918,13 @@ def record_copy_facts(con, *, location_id, copy_facts, now, actor="backfill:copi
     opisuje każdą inną zmianę faktów kopii, a `actor` odróżnia drogę w dzienniku.
 
     ZWRACA bool: `True` = zapisano; `False` = odmowa kotwicy (odcisk inny albo fakty już są) - wtedy
-    ZERO UPDATE i ZERO eventu."""
+    ZERO UPDATE i ZERO eventu.
+
+    `inplace_gen` (astra, 2026-09-27) - generacja dziennika zapisu w miejscu zapamiętana przez
+    sterownik PRZED bramką izolacji (kontrakt jak w `refresh_location`): operacja tej lokacji o
+    większym `id` → `StaleScanRecord` w tej transakcji, zero zapisu. Kotwica odcisku sama tego nie
+    łapie: pisarz, którego re-sync jeszcze nie przeszedł, zostawia w bazie stary odcisk, a odczyt
+    sprzed zapisu niesie ten sam."""
     cf = _copy_facts_checked(copy_facts)
     if cf["hdr_hash"] is None:
         raise ValueError("uzupełnienie faktów kopii bez odcisku nagłówka - nie ma czego kotwiczyć")
@@ -922,6 +935,7 @@ def record_copy_facts(con, *, location_id, copy_facts, now, actor="backfill:copi
             "FROM location WHERE id = ?", (location_id,)).fetchone()
         if row is None:
             raise ValueError(f"location:{location_id} nie istnieje")
+        _refuse_if_newer_inplace(con, location_id, inplace_gen)
         if row["hdr_hash"] is not None or row["header_hash"] != cf["hdr_hash"]:
             return False
         changed = {k: {"before": row[k], "after": cf[k]} for k in COPY_FACTS if row[k] != cf[k]}
@@ -2052,14 +2066,21 @@ def clear_object_tombstone(con, *, frame_id, now, actor="user:local"):
     PAMIĘĆ GAŚNIE RAZEM Z NAGROBKIEM (0017): znika zakaz, więc znika też wskazanie na to, czego
     zakaz dotyczył. `CHECK` w DDL i tak nie przepuściłby wiersza bez nagrobka, ale z pamięcią."""
     with _immediate(con):
-        row = con.execute(
-            "SELECT object_source FROM frame WHERE id = ?", (frame_id,)).fetchone()
-        if row is None or row["object_source"] != "user_cleared":
-            return False
-        con.execute("UPDATE frame SET object_source = NULL, object_cleared_id = NULL WHERE id = ?",
-                    (frame_id,))
-        emit_event(con, actor=actor, verb="object.tombstone_cleared",
-                   target=f"frame:{frame_id}", now=now, payload={"reason": "object_card_written"})
+        return _clear_object_tombstone_tx(con, frame_id=frame_id, now=now, actor=actor)
+
+
+def _clear_object_tombstone_tx(con, *, frame_id, now, actor):
+    """Rdzeń `clear_object_tombstone` BEZ własnej transakcji - wspólny dla gestu commitu drogą
+    atomową i dla dokończenia zapisu w miejscu (`finish_inplace_op`), które gasi nagrobek w tej
+    samej transakcji co faza operacji i statusy stagingu. Jedna klinga, dwa zakresy transakcji."""
+    row = con.execute(
+        "SELECT object_source FROM frame WHERE id = ?", (frame_id,)).fetchone()
+    if row is None or row["object_source"] != "user_cleared":
+        return False
+    con.execute("UPDATE frame SET object_source = NULL, object_cleared_id = NULL WHERE id = ?",
+                (frame_id,))
+    emit_event(con, actor=actor, verb="object.tombstone_cleared",
+               target=f"frame:{frame_id}", now=now, payload={"reason": "object_card_written"})
     return True
 
 
@@ -2433,7 +2454,9 @@ def insert_header_backup(con, *, commit_id, location_id, hdu_index, header_text,
 #     (`release_inplace_op`). Dawniej izolacja znikała na `written` PRZED re-synciem, więc porażka
 #     re-syncu zostawiała lokację skanowi, który mógł ją przepiąć na nową klatkę.
 # `recovered` jest końcowa: odzysk zapisuje ją dopiero po udanym re-syncu (do tej chwili operacja
-# zostaje `unverified`, a ponowiony odzysk jest bezpieczny - region stary to też stan pośredni).
+# zostaje `unverified`, a ponowiony odzysk jest bezpieczny - region stary to też stan pośredni),
+# a droga powrotu z `written` (`revert_inplace_op`) - po przywróceniu starego regionu, razem ze
+# zwolnieniem lokacji do pełnego skanu (kontrola danych nie przeszła, więc re-sync nie ma kotwicy).
 INPLACE_OPEN_PHASES = ("writing", "unverified")
 INPLACE_ISOLATING_PHASES = (*INPLACE_OPEN_PHASES, "written")
 _INPLACE_PHASES = ("writing", "unverified", "written", "synced", "recovered", "released")
@@ -2485,28 +2508,73 @@ def _refuse_if_isolated(con, location_id):
                          f"w fazie {op['phase']} - nowej operacji nie zaczynam")
 
 
+class InplaceConflict(Exception):
+    """Podmiana pliku drogą atomową (`os.replace`) trafiła na operację zapisu w miejscu tej lokacji:
+    izolującą albo zaczętą po odczycie pliku, z którego powstał plik tymczasowy
+    (`guard_file_replace`). `op` = wiersz operacji (`id`, `kind`, `phase`, `commit_id`) - wołający
+    buduje z niego powód odmowy. Plik nietknięty."""
+
+    def __init__(self, op):
+        super().__init__(f"operacja zapisu w miejscu {op['id']} ({op['kind']}, faza {op['phase']})")
+        self.op = op
+
+
+@contextmanager
+def guard_file_replace(con, *, location_id, generation):
+    """STRAŻ PODMIANY drogi atomowej (astra, 2026-09-27): `BEGIN IMMEDIATE`, w nim sprawdzenie, że
+    lokacja nie ma operacji izolującej (`isolating_inplace_op`) ani operacji o `id` większym niż
+    `generation` (zapamiętanej przez wołającego PRZED jego bramką izolacji), i dopiero wtedy ciało
+    `with` - `os.replace` pisarza - a po nim `COMMIT`. Operacja na lokacji → `InplaceConflict`,
+    ciało się nie wykonuje.
+
+    DLACZEGO TRANSAKCJA, a nie samo sprawdzenie: bramka izolacji commitu i `os.replace` to dwie
+    chwile, a między nimi (plik tymczasowy, backup) zapis w miejscu mógł zacząć się, zapisać plik
+    i zostać `written` - podmiana starłaby jego bajty, a commit atomowy zgłosiłby 'applied'. Straż
+    trzyma blokadę zapisu bazy przez całą podmianę, a `begin_inplace_commit`/`begin_inplace_undo`
+    biorą ją też (`BEGIN IMMEDIATE`), więc otwarcie operacji i podmiana są uszeregowane: operacja
+    zaczęta przed strażą ma większe `id` niż generacja i odbija podmianę, zaczęta po niej czeka.
+    Straż NIE pisze do bazy: backup drogi atomowej utrwala wołający WCZEŚNIEJ, własną transakcją
+    (kolejność „backup w bazie przed podmianą" zostaje), więc tu nie ma czym się zakleszczyć."""
+    with _immediate(con):
+        op = isolating_inplace_op(con, location_id)
+        if op is None and generation is not None:
+            op = con.execute(
+                "SELECT id, kind, phase, commit_id FROM inplace_op WHERE location_id = ? "
+                "AND id > ? ORDER BY id DESC LIMIT 1", (location_id, generation)).fetchone()
+        if op is not None:
+            raise InplaceConflict(op)
+        yield
+
+
 def _inplace_op_values(location_id, commit_id, kind, spec, now):
     return (location_id, commit_id, kind, spec.fmt, spec.region_offset, len(spec.old_region),
             zlib.compress(spec.old_region, 9), zlib.compress(spec.new_region, 9),
             spec.write_start, spec.write_end, spec.file_size, spec.file_ino, spec.pre_hash,
-            spec.post_hash, now)
+            spec.post_hash, spec.anchor_sha1, now)
 
 
 _INSERT_INPLACE_OP = (
     "INSERT INTO inplace_op(location_id, commit_id, kind, fmt, region_offset, region_length, "
     "old_region_z, new_region_z, write_start, write_end, file_size, file_ino, pre_hash, "
-    "post_hash, phase, started_at) "
-    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'writing', ?)")
+    "post_hash, anchor_sha1, phase, started_at) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'writing', ?)")
 
 
 def begin_inplace_commit(con, *, run_id, commit_id, location_id, hdu_index, header_text, spec,
-                         now):
+                         now, pending_ids=()):
     """JEDNA transakcja przed pierwszym bajtem zapisu w miejscu (commit): wiersz `commits` (gdy
-    `commit_id` None), backup nagłówka do undo i operacja `inplace_op` w fazie `writing`. Wszystko
-    albo nic - backup bez operacji zostawiłby zapis bez izolacji, operacja bez backupu - bez undo.
-    `spec` = obiekt z polami `writeback.OpSpec`. Zwraca `(commit_id, op_id)`.
+    `commit_id` None), backup nagłówka do undo, operacja `inplace_op` w fazie `writing` (z kotwicą
+    `spec.anchor_sha1`, 0023) i WIĄZANIE wpisów stagingu `pending_ids` z operacją
+    (`pending_changes.inplace_op_id`). Wszystko albo nic - backup bez operacji zostawiłby zapis bez
+    izolacji, operacja bez backupu - bez undo, operacja bez wiązania - wiersze, których dokończenie
+    nie znajdzie. `spec` = obiekt z polami `writeback.OpSpec`. Zwraca `(commit_id, op_id)`.
     Lokacja z operacją izolującą (`isolating_inplace_op`) → `ValueError`, zero zapisu: to ostatni
-    szaniec bramki pisarza, w tej samej transakcji co wstawienie operacji."""
+    szaniec bramki pisarza, w tej samej transakcji co wstawienie operacji. Wiązanie dotyka wyłącznie
+    wierszy 'pending' TEJ lokacji; inna liczba niż `pending_ids` → `ValueError` (EXPECT: staging
+    zmienił się pod pisarzem), zero zapisu. Wiersz 'pending' z wiązaniem do operacji ZAMKNIĘTEJ
+    (przerwa przed zapisem → odzysk, zwolnienie ręką) wiąże się na nowo - to legalne ponowienie;
+    wiązania do operacji izolującej tu nie ma, bo taką lokację odbija `_refuse_if_isolated` wyżej."""
+    ids = [int(i) for i in pending_ids]
     with _immediate(con):
         _refuse_if_isolated(con, location_id)
         if commit_id is None:
@@ -2519,6 +2587,15 @@ def begin_inplace_commit(con, *, run_id, commit_id, location_id, hdu_index, head
             (commit_id, location_id, hdu_index, header_text, spec.post_hash))
         op_id = con.execute(_INSERT_INPLACE_OP,
                             _inplace_op_values(location_id, commit_id, "commit", spec, now)).lastrowid
+        if ids:
+            n = con.execute(
+                "UPDATE pending_changes SET inplace_op_id = ? WHERE id IN "
+                "(SELECT value FROM json_each(?)) AND location_id = ? AND status = 'pending'",
+                (op_id, json.dumps(ids), location_id)).rowcount
+            if n != len(set(ids)):
+                raise ValueError(f"operacja {op_id}: związano {n} z {len(set(ids))} wpisów "
+                                 f"stagingu lokacji {location_id} - staging zmienił się pod "
+                                 f"pisarzem, zapisu nie zaczynam")
     return commit_id, op_id
 
 
@@ -2566,6 +2643,71 @@ def set_inplace_op_phase(con, *, op_id, phase, now, reason=None, expect_phase=No
         if cur.rowcount != 1:
             raise ValueError(f"operacja {op_id}: przejście do {phase!r} nie zaszło (oczekiwana "
                              f"faza {expect_phase!r})")
+
+
+def _written_op(con, op_id):
+    """Wiersz operacji w fazie `written` (pod transakcją wołającego) albo `ValueError`."""
+    op = con.execute("SELECT id, kind, location_id, phase FROM inplace_op WHERE id = ?",
+                     (op_id,)).fetchone()
+    if op is None or op["phase"] != "written":
+        raise ValueError(f"operacja {op_id} nie jest w fazie 'written' "
+                         f"({None if op is None else op['phase']}) - nie ma czego zamykać")
+    return op
+
+
+def finish_inplace_op(con, *, op_id, now, actor="user:local"):
+    """DOKOŃCZENIE operacji zapisu w miejscu - JEDNA transakcja (astra, 2026-09-27): faza `written`
+    → `synced` (CAS), wpisy stagingu związane z operacją (`pending_changes.inplace_op_id`, 0023) →
+    'applied' bez powodu, a gdy któryś z nich wpisał `OBJECT` - zgaszenie nagrobka ręki klatki tej
+    lokacji tą samą klingą co commit drogą atomową (`_clear_object_tombstone_tx`).
+
+    Wołane przez pisarza (`writeback._dokoncz`) pod blokadą pliku, PO udanej kontroli danych
+    i re-syncu. Dawniej faza, statusy i nagrobek szły trzema osobnymi transakcjami, a dokończenie
+    szukało wierszy po statusie 'failed': crash po `written` zostawiał wiersze 'pending' na zawsze.
+    Teraz te trzy fakty albo zachodzą razem, albo wcale - i dotyczą DOKŁADNIE wierszy operacji, nie
+    wszystkich wierszy przebiegu. Operacja nie w fazie `written` → `ValueError`, zero zapisu.
+    Transient (faza, staging) bez eventu; nagrobek emituje swój. Zwraca liczbę oznaczonych wpisów."""
+    with _immediate(con):
+        op = _written_op(con, op_id)
+        con.execute("UPDATE inplace_op SET phase = 'synced', reason = NULL, closed_at = ? "
+                    "WHERE id = ? AND phase = 'written'", (now, op_id))
+        rows = con.execute("SELECT keyword FROM pending_changes WHERE inplace_op_id = ?",
+                           (op_id,)).fetchall()
+        con.execute("UPDATE pending_changes SET status = 'applied', reason = NULL "
+                    "WHERE inplace_op_id = ?", (op_id,))
+        if op["kind"] == "commit" and any(r["keyword"] == "OBJECT" for r in rows):
+            loc = con.execute("SELECT frame_id FROM location WHERE id = ?",
+                              (op["location_id"],)).fetchone()
+            _clear_object_tombstone_tx(con, frame_id=loc["frame_id"], now=now, actor=actor)
+    return len(rows)
+
+
+def revert_inplace_op(con, *, op_id, now, reason, actor="user:local"):
+    """DROGA POWROTU z fazy `written` (astra, 2026-09-27) - JEDNA transakcja, wołana przez pisarza
+    (`writeback.recover_torn`) pod blokadą pliku, PO przywróceniu starego regionu w miejscu:
+    faza `written` → `recovered` z powodem (CAS), wpisy stagingu związane z operacją → 'failed'
+    z tym samym powodem (zmiana NIE weszła do pliku) i ZWOLNIENIE lokacji do pełnego skanu.
+
+    ZWOLNIENIE = `location.mtime` → NULL. Brama przyrostowa skanu (`scan._already_scanned`) pomija
+    plik wyłącznie przy równości `(volume, path, mtime)`, a NULL nie równa się niczemu - następny
+    skan przeczyta plik w całości i opisze go od nowa (`ingest_record`), zamiast ufać faktom
+    kopii, które opisywały plik sprzed zmiany poza nagłówkiem. Ten sam brak `mtime` odbija kolejny
+    zapis w miejscu przed skanem (kotwica pisarza nie zgadza się z `mtime` → pełny odczyt → sha1 inny
+    niż w bazie → 'blocked'). Mutacja stanu lokacji niesie ślad `location.writeback_reverted` z
+    `mtime` przed i powodem. Operacja nie w fazie `written` → `ValueError`, zero zapisu."""
+    with _immediate(con):
+        op = _written_op(con, op_id)
+        con.execute("UPDATE inplace_op SET phase = 'recovered', reason = ?, closed_at = ? "
+                    "WHERE id = ? AND phase = 'written'", (reason, now, op_id))
+        con.execute("UPDATE pending_changes SET status = 'failed', reason = ? "
+                    "WHERE inplace_op_id = ?", (reason, op_id))
+        loc = con.execute("SELECT mtime FROM location WHERE id = ?",
+                          (op["location_id"],)).fetchone()
+        con.execute("UPDATE location SET mtime = NULL WHERE id = ?", (op["location_id"],))
+        emit_event(con, actor=actor, verb="location.writeback_reverted",
+                   target=f"location:{op['location_id']}", now=now,
+                   payload={"inplace_op": op_id, "mtime": {"before": loc["mtime"], "after": None}},
+                   reason=reason)
 
 
 def release_inplace_op(con, *, op_id, now, reason, actor="user:local"):

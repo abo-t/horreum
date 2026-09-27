@@ -1100,6 +1100,28 @@ def test_commit_i_cofniecie_makra_odswiezaja_plakietke_Porzadkow(wb_view):
     assert len(emisje) == 2, "commit bez podmiany milczy"
 
 
+def test_cofniecie_zakonczone_samym_failed_odswieza_plakietke_Porzadkow(wb_view):
+    """Cofnięcie w miejscu kończy się czasem SAMYM `failed` - przy kopii izolowanej po przerwanym
+    zapisie - a wtedy zmienia się wiersz Porządków „Plik po przerwanym zapisie". Ogon cofnięcia
+    liczy więc plakietkę ze stanu także przy `failed` (reguła `_on_wb_failed`), nie tylko przy
+    `restored`. Cofnięcie bez żadnego skutku (wszystko zablokowane) milczy.
+
+    Falsyfikator: wróć do warunku `if res.restored` → pierwsza asercja pada."""
+    from horreum import writeback
+    view, _con, p = wb_view
+    emisje = []
+    view.stan_porzadkow_changed.connect(lambda: emisje.append(1))
+    view._ensure_undo_button()
+    padl = writeback.FileResult(location_id=1, path=str(p), status="failed", reason="izolowana")
+    view._after_undo("undo", writeback.UndoResult(commit_id=1, restored=[], blocked=[],
+                                                  failed=[padl]))
+    assert emisje == [1], "cofnięcie z samym `failed` odświeża plakietkę"
+    zablokowany = writeback.FileResult(location_id=1, path=str(p), status="blocked", reason="x")
+    view._after_undo("undo", writeback.UndoResult(commit_id=1, restored=[],
+                                                  blocked=[zablokowany], failed=[]))
+    assert emisje == [1], "cofnięcie bez skutku milczy"
+
+
 def test_szuflada_daje_Cofnij_gdy_commit_ma_failed_z_kopia_naglowka(wb_view):
     """Z11/D3: ta sama reguła „Cofnij" co w oknach piszących karty (`wb_worker.commit_do_cofniecia`)
     - rdzeń nadaje `commit_id`, gdy plik został PODMIENIONY, także przy `failed` z kopią nagłówka.

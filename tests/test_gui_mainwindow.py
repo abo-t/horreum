@@ -33,6 +33,15 @@ def qapp():
     yield QApplication.instance() or QApplication([])
 
 
+@pytest.fixture(autouse=True)
+def _pola_inline(monkeypatch):
+    """Pokrycie pól Zbiorów INLINE (seam `MainWindow._pola_poza_watkiem`): testy tego pliku liczą
+    odświeżenia i wejścia w `refresh`, a pierwszy wynik z wątku tła, doręczony w nieznanej chwili,
+    dokładałby przeładowanie zbioru w środku pomiaru. Drogę produkcyjną (wątek, odcisk kart,
+    sprzątanie przy zamknięciu i przełączeniu bazy) sprawdza `test_gui_pola_w_tle.py`."""
+    monkeypatch.setattr(MainWindow, "_pola_poza_watkiem", False)
+
+
 def _seeded_db(tmp_path, name="s8.db", *, object_axis=False):
     path = str(tmp_path / name)
     if object_axis:
@@ -68,6 +77,26 @@ def test_tytul_okna_niesie_numer_wersji(qapp, tmp_path):
     win = MainWindow(_seeded_db(tmp_path))
     try:
         assert win.windowTitle() == f"Horreum {horreum.__version__}"
+    finally:
+        win.close()
+
+
+def test_zapis_naglowkow_do_plikow_gasi_etapy_Dostawy(qapp, tmp_path):
+    """Trzecia strona mutexu writebacku: zapis z gridu ALBO z okna naprawy nagłówka gasi przyciski
+    etapów Dostawy, a publiczne `run_stage` odmawia z powodem. Bez tego „Przyjmij nowe” czytało plik
+    zapisywany obok w miejscu. Anulowanie biegnącego etapu i powrót po zapisie działają."""
+    from horreum.gui import i18n
+    win = MainWindow(_seeded_db(tmp_path))
+    try:
+        p = win.pipeline_view
+        assert p.btn_group.isEnabled()
+        for zrodlo in (win.grid_view.writeback_busy, win.object_view.writeback_busy):
+            zrodlo.emit(True)
+            assert not p.btn_group.isEnabled() and not p.btn_receive.isEnabled()
+            assert p.run_stage("resolve") == i18n.t("pipeline.refuse.writeback")
+            assert p._thread is None                   # odmowa nie startuje etapu
+            zrodlo.emit(False)
+            assert p.btn_group.isEnabled() and p.btn_receive.isEnabled()
     finally:
         win.close()
 
@@ -459,6 +488,25 @@ def test_przebieg_zakonczony_bledem_tez_odswieza_widoki(qapp, tmp_path, monkeypa
         assert "etap padł" in win.pipeline_view.lbl_error.text()
         assert licznik == {"grid": 1, "obiekt": 1}
         assert win.nav.item(NAV_PORZADKI).text() == "Porządki (3)", "plakietka ze stanu bazy"
+    finally:
+        win.close()
+
+
+def test_wyjatek_w_odswiezeniu_po_przebiegu_gasi_faze(qapp, tmp_path, monkeypatch):
+    """Faza „Odświeżam widoki po etapie…" gaśnie KAŻDĄ drogą: wyjątek w odświeżeniu któregoś
+    widoku zostawiał ją na pasku, czyli opis roboty, która już się skończyła - do następnej fazy.
+    Straż ponownego wejścia też wraca do spoczynku, inaczej kolejny przebieg nie odświeżyłby nic.
+
+    Falsyfikator: wynieś `_end_phase()` z `finally` → asercja o etykiecie fazy pada."""
+    win = MainWindow(_seeded_db(tmp_path))
+    try:
+        def _pada():
+            raise RuntimeError("odświeżenie padło")
+        monkeypatch.setattr(win.grid_view, "refresh", _pada)
+        with pytest.raises(RuntimeError, match="odświeżenie padło"):
+            win._odswiez_widoki_po_przebiegu()
+        assert not win.phase_label.text(), win.phase_label.text()
+        assert win._odswiezam_widoki is False
     finally:
         win.close()
 

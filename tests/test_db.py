@@ -21,7 +21,8 @@ def test_migracja_ustawia_user_version(tmp_path):
     # + 0020 integration.raw_unreferenced (uwaga obok werdyktu rodowodu, G2-1d)
     # + 0021 location: liczba/role obrazów + zeznanie nagłówka kopii z kotwicą hdr_hash
     # + 0022 inplace_op (dziennik zapisu w miejscu: faza operacji i izolacja lokacji, O5/Q8)
-    assert db._user_version(con) == db.SCHEMA_VERSION == 22
+    # + 0023 inplace_op.anchor_sha1 + pending_changes.inplace_op_id (kotwica operacji, wiązanie)
+    assert db._user_version(con) == db.SCHEMA_VERSION == 23
     con.close()
 
 

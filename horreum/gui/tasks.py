@@ -150,10 +150,11 @@ _BEZ_ROBOTY = frozenset({"superseded_frames", "retired_frames", "missing_copy_fr
 
 # WIERSZE, KTÓRYCH ZERO JEST WIEDZĄ DOPIERO PO ZEBRANIU FAKTÓW KOPII (0021). Oba predykaty porównują
 # zeznania kopii, a kopia bez faktów w porównaniu nie bierze udziału - więc przed pierwszą Dostawą
-# po migracji „0" znaczyło „nie wiem", a wyglądało jak „sprawdzone, czysto". Gdy są kopie czekające
-# na fakty, zero tych wierszy mówi „?" i to, co da liczbę. Liczba i lista pod klikiem dalej czytają
-# jeden predykat; zmienia się wyłącznie to, jak wiersz wypowiada swoje zero. „?" nie jest robotą:
-# nie pogrubia się i nie wchodzi do plakietki (robotą jest Dostawa, nie ten wiersz).
+# po migracji „0" znaczyło „nie wiem", a wyglądało jak „sprawdzone, czysto". Gdy są kopie bez
+# faktów, zero tych wierszy mówi „?" i dlaczego, a podpowiedź - co da liczbę. Liczba i lista pod
+# klikiem dalej czytają jeden predykat; zmienia się wyłącznie to, jak wiersz wypowiada swoje zero.
+# „?" nie jest robotą: nie pogrubia się i nie wchodzi do plakietki (robotą jest Dostawa albo
+# „Oznacz zniknięte", nie ten wiersz).
 _CZEKA_NA_FAKTY_KOPII = frozenset({"copy_conflict_frames", "orphan_testimony_frames"})
 
 
@@ -282,8 +283,14 @@ class TasksView(QWidget):
             # Liczba idzie w CZŁON DRUGI (prawa kolumna, `rows.SECONDARY`), nie w tekst etykiety —
             # inaczej liczby nie ustawiają się w kolumnę i nie da się ich skanować (wiz F5 #6).
             it.setText(i18n.t(label))
-            liczba = i18n.t_plural("tasks.copies_await_intake", czeka) if niewiadome else str(n)
+            liczba = i18n.t_plural("tasks.copies_unread", czeka) if niewiadome else str(n)
             it.setData(rows.SECONDARY, f"{liczba}  ›" if action is not None else liczba)
+            # Drogi do liczby niesie PODPOWIEDŹ, nie wiersz: obie są warunkowe (plik jest / pliku
+            # nie ma), a zdanie z obiema nie mieści się w członie drugim listy 400 px.
+            it.setToolTip(i18n.t_plural("tasks.copies_unread_tip", czeka,
+                                        place=i18n.t("nav.dostawa"),
+                                        mark=i18n.t("pipeline.btn.mark_vanished"))
+                          if niewiadome else "")
             # Pogrubienie liczby = „TU JEST ROBOTA", więc jest rolą WIERSZA, nie całej listy
             # (wiz P1 #6): wiersz wyszarzony — informacyjny albo akcyjny z n=0 — dostawał
             # pogrubione „0" mimo wyszarzenia, czyli krzyczał dokładnie tam, gdzie nie ma nic

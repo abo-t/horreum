@@ -26,6 +26,7 @@ import json
 import math
 import os
 import statistics
+import threading
 import uuid
 from datetime import datetime, timezone
 
@@ -43,9 +44,10 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from horreum import (filter_engine, lineage, macro as macro_mod, naming, pivot as pivot_mod, repo,
-                     stacks, writeback)
+from horreum import (db, filter_engine, lineage, macro as macro_mod, naming, pivot as pivot_mod,
+                     repo, stacks, writeback)
 from horreum.gui import busy, facet_model, i18n, portfolio, queries, rows, theme
+from horreum.gui import pola as pola_mod   # `pola` bywa w tym pliku zmienną lokalną (pola zeznania)
 from horreum.gui.facets import RAIL_MIN_W as _FIELDS_MIN_W, FacetRail
 from horreum.gui import assign_dialog
 from horreum.gui.assign_dialog import AssignObjectDialog
@@ -1306,7 +1308,8 @@ class FieldsPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         outer = QVBoxLayout(self); outer.setContentsMargins(0, 0, 0, 0)
-        outer.addWidget(QLabel(i18n.t("grid.fields.title")))
+        self.title = QLabel(i18n.t("grid.fields.title"))
+        outer.addWidget(self.title)
         self.list = QListWidget()
         self.list.setItemDelegate(TwoPartDelegate(self.list))
         self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -1330,6 +1333,17 @@ class FieldsPanel(QWidget):
                 self.list.addItem(it)
         finally:
             self._loading = False
+
+    def set_stan(self, stan):
+        """Stan pokrycia w TYTULE panelu: None = aktualne, "liczy" = liczone w tle, "blad" = nie
+        policzone. Lista pod tytułem zostaje z poprzedniego wyniku - czyszczenie jej na czas
+        liczenia pokazywałoby pustkę, która wygląda jak archiwum bez pól."""
+        if stan == "liczy":
+            self.title.setText(i18n.t("grid.fields.title_counting"))
+        elif stan == "blad":
+            self.title.setText(i18n.t("grid.fields.title_failed"))
+        else:
+            self.title.setText(i18n.t("grid.fields.title"))
 
     def checked_keywords(self):
         out = []
@@ -2666,6 +2680,75 @@ class StagingDrawer(QFrame):
         self.btn_reject.setVisible(on)
 
 
+class PolaWorker(QObject):
+    """Pokrycie panelu „Pola" liczone POZA wątkiem GUI (rdzeń: Qt-wolny `pola`, koszty tam).
+
+    Bliźniak `PlanWorker`: `db_path` → WŁASNE połączenie otwarte w SWOIM wątku (sqlite
+    `check_same_thread`), odcisk i pokrycie w jednej transakcji czytającej; `con` (tryb inline,
+    testy i `:memory:`) → ten sam rdzeń na połączeniu wołającego, bez transakcji, bo bez wątku.
+    `poprzedni_odcisk` równy bieżącemu = karty bez zmian: `keyword_facets` NIE jest wołane,
+    a `done` niesie `None` zamiast pól (listwa zostaje, jaka była).
+
+    ANULOWANIE MUSI UMIEĆ PRZERWAĆ SAMO ZAPYTANIE: pokrycie to jedno zapytanie trwające sekundy,
+    więc flaga sprawdzana „przed następnym krokiem" kazałaby zamknięciu okna czekać do jego końca.
+    `Connection.interrupt` jest w sqlite3 wprost przeznaczone do wołania z INNEGO wątku; zamek
+    pilnuje, żeby nie trafiło w połączenie właśnie zamykane."""
+
+    done = Signal(int, object, object)   # generacja, odcisk, pola (lista słowników) albo None
+    failed = Signal(int, str)            # generacja, komunikat
+    finished = Signal()                  # run() wrócił KAŻDĄ drogą → quit wątku
+
+    def __init__(self, gen, poprzedni_odcisk, *, db_path=None, con=None):
+        super().__init__()
+        self._gen = gen
+        self._poprzedni = poprzedni_odcisk
+        self._db_path = db_path
+        self._con_zewn = con
+        self._con = None
+        self._zamek = threading.Lock()
+        self._cancel = threading.Event()
+
+    def request_cancel(self):
+        """Wołane z wątku GUI: flaga + przerwanie zapytania w locie (patrz docstring klasy)."""
+        self._cancel.set()
+        with self._zamek:
+            if self._con is not None:
+                self._con.interrupt()
+
+    @Slot()
+    def run(self):
+        odcisk = pola = error = None
+        try:
+            if self._con_zewn is not None:
+                odcisk, pola = self._policz(self._con_zewn)
+            else:
+                with self._zamek:
+                    self._con = db.connect(self._db_path)
+                try:
+                    # Migawka WAL na oba zapytania: odcisk opisuje dokładnie dane pokrycia.
+                    self._con.execute("BEGIN")
+                    odcisk, pola = self._policz(self._con)
+                finally:
+                    with self._zamek:
+                        self._con.close()          # PRZED emisją - główny wątek czyta przez swoje
+                        self._con = None
+        except Exception as exc:                   # błąd (także przerwanie) → sygnał, NIE crash
+            error = f"{type(exc).__name__}: {exc}"
+        if error is not None:
+            self.failed.emit(self._gen, error)
+        else:
+            self.done.emit(self._gen, odcisk, pola)
+        self.finished.emit()
+
+    def _policz(self, con):
+        odcisk = pola_mod.odcisk_kart(con)
+        if odcisk == self._poprzedni:
+            return odcisk, None                    # karty bez zmian - liczyć nie ma czego
+        if self._cancel.is_set():
+            raise RuntimeError("przerwano")
+        return odcisk, pola_mod.pokrycie(con)
+
+
 class FramesView(QWidget):
     """Widok „Klatki": panel Pól | (perspektywa + filtr + PASEK ZBIORU + panele kling + grid)
     + poczekalnia zmian (szuflada stagingu). Kontrakt montażu `MainWindow`: `__init__(con, now_fn,
@@ -2708,7 +2791,7 @@ class FramesView(QWidget):
     # Recepta leci ZARAZ PO raporcie (nigdy przed), więc pusta gasi cudzą z poprzedniego gestu.
     status_recipe = Signal(str)
 
-    def __init__(self, con, now_fn=None, parent=None):
+    def __init__(self, con, now_fn=None, parent=None, *, pola_poza_watkiem=False):
         super().__init__(parent)
         self.con = con
         self._db_path = queries.db_path_of(con)   # worker writebacku otwiera WŁASNE połączenie (per-wątek)
@@ -2745,6 +2828,22 @@ class FramesView(QWidget):
         self._wb.busy_changed.connect(self.writeback_busy)   # re-emisja: uchwyt zna oba końce operacji
         self._wb_target_id = None
         self._foreign_wb = False   # DRUGA powierzchnia pisze (mutex; ustawia gospodarz)
+        # POKRYCIE PÓL POZA WĄTKIEM GUI (`PolaWorker`). Zapytanie trwa na żywym archiwum 5,6-5,9 s,
+        # a szło przy otwarciu bazy i po KAŻDYM przebiegu Dostawy - okno stało wtedy jednym blokiem
+        # dłuższym niż próg „Nie odpowiada". `pola_poza_watkiem=False` (domyślne) = ten sam rdzeń
+        # inline: widok zbudowany wprost (testy, `:memory:`) dostaje pola synchronicznie, jak dotąd;
+        # gospodarz (`MainWindow`) włącza wątek. Kolumny zaczynają PUSTE - domyślne wybiera pierwszy
+        # wynik (`_zastosuj_pola`), bo bez pokrycia nie wiadomo, które keywordy są najczęstsze.
+        self._pola_async = pola_poza_watkiem
+        self._columns = []
+        self._pola = None           # ostatnie ZASTOSOWANE pokrycie (lista {"keyword", "n"})
+        self._pola_odcisk = None    # odcisk kart, z którego ono pochodzi (`pola.odcisk_kart`)
+        self._pola_gen = 0          # generacja prośby - wynik starszej ląduje w koszu
+        self._pola_worker = None
+        self._pola_thread = None
+        self._pola_ponow = False    # prośba w trakcie biegu → jeszcze jeden bieg po nim
+        self._pola_stop = False     # widok zamykany - żadnego nowego biegu
+        self._zbudowany = False     # koniec `__init__`: od tej chwili zmiana kolumn przeładowuje zbiór
         self._build_ui()
         # PRZED pierwszym zbudowaniem listy perspektyw: rejestr sprzed I-1 dowozi swoje widoki do
         # bazy, więc combo od razu pokazuje komplet, a nie „gdzie się podziały moje perspektywy".
@@ -2752,6 +2851,7 @@ class FramesView(QWidget):
         self._load_facets()
         self.refresh()
         self._refresh_drawer()
+        self._zbudowany = True
 
     # ---- budowa ----
     def _build_ui(self):
@@ -2930,16 +3030,132 @@ class FramesView(QWidget):
 
     # ---- facety / perspektywy ----
     def _load_facets(self):
-        facets = list(queries.keyword_facets(self.con))
-        # Domyślne kolumny: 6 najczęstszych keywordów (po pokryciu), z pominięciem szumu strukturalnego.
-        default = [f["keyword"] for f in facets if f["keyword"] not in STRUCT_NOISE][:6]
+        """Przeładuj to, co widok wie o SCHEMACIE archiwum: pokrycie pól (zamówione - patrz
+        `_zamow_pola`) i listę perspektyw (synchronicznie, bo to kilka wierszy `saved_query`).
+        Woła gospodarz po przebiegu Dostawy i sam widok przy budowie."""
+        self._zamow_pola()
+        self._odbuduj_perspektywy()
+
+    # ---- pokrycie pól (panel „Pola", keywordy filtra i makra) ----
+    def _zamow_pola(self):
+        """Poproś o pokrycie pól. W trybie wątku wraca od razu; wynik przychodzi do `_on_pola_done`.
+        Prośba w trakcie biegu nie odpala drugiego wątku: bieżący wynik jest już starszy niż prośba
+        (generacja), więc trafia do kosza, a po jego końcu rusza jeden bieg więcej (`_sprzataj_pola`)."""
+        if self._pola_stop:
+            return
+        self._pola_gen += 1
+        if self._pola_worker is not None:
+            self._pola_ponow = True
+            return
+        self._start_pola()
+
+    def _start_pola(self):
+        worker = PolaWorker(self._pola_gen, self._pola_odcisk,
+                            db_path=self._db_path if self._pola_async else None,
+                            con=None if self._pola_async and self._db_path else self.con)
+        worker.done.connect(self._on_pola_done)
+        worker.failed.connect(self._on_pola_failed)
+        self._pola_worker = worker
+        if self._pola_async and self._db_path:
+            # Listwa w trakcie liczenia mówi „liczę", a pokazuje stan POPRZEDNI - pusta lista
+            # udawałaby archiwum bez ani jednego pola.
+            self.fields.set_stan("liczy")
+            self._pola_thread = QThread(self)
+            worker.moveToThread(self._pola_thread)
+            self._pola_thread.started.connect(worker.run)
+            worker.finished.connect(self._pola_thread.quit)
+            self._pola_thread.finished.connect(self._sprzataj_pola)
+            self._pola_thread.start()
+        else:
+            try:
+                worker.run()               # inline: done/failed lecą direct = synchronicznie
+            finally:
+                self._pola_worker = None
+
+    def _sprzataj_pola(self):
+        """Koniec wątku pokrycia. ŚWIĘTA KOLEJNOŚĆ jak w `planner._cleanup_thread` (deadlock AB-BA
+        GIL × ~QThread): worker.deleteLater → wait → thread.deleteLater. Wątek już zebrany przez
+        `zatrzymaj_pola` nie ma tu czego sprzątać - wtedy wracamy od razu."""
+        if self._pola_thread is None:
+            return
+        self._pola_worker.deleteLater()
+        self._pola_thread.wait()
+        self._pola_thread.deleteLater()
+        self._pola_worker = None
+        self._pola_thread = None
+        if self._pola_ponow and not self._pola_stop:
+            self._pola_ponow = False
+            self._start_pola()
+
+    def zatrzymaj_pola(self):
+        """Widok znika (zamknięcie okna, przełączenie bazy): przerwij liczenie i ZBIERZ wątek, zanim
+        rodzic go skasuje - `QThread` niszczony w biegu to twardy abort aplikacji. Wynik, który
+        zdążył wyjść z wątku, trafia do kosza generacją, więc nie dotknie widoku ani zamkniętego
+        połączenia. Przerwanie powtarzamy co 100 ms: `interrupt` trafiony w chwilę między dwoma
+        zapytaniami workera nie działa, a kolejne łapie już zapytanie w locie. Idempotentne."""
+        self._pola_stop = True
+        self._pola_ponow = False
+        self._pola_gen += 1
+        if self._pola_thread is None:
+            return
+        self._pola_worker.request_cancel()
+        self._pola_thread.quit()           # pętla wątku kończy się zaraz po `run()` (quit z góry)
+        self._pola_worker.deleteLater()
+        while not self._pola_thread.wait(100):
+            self._pola_worker.request_cancel()
+        self._pola_thread.deleteLater()
+        self._pola_worker = None
+        self._pola_thread = None
+
+    @Slot(int, object, object)
+    def _on_pola_done(self, gen, odcisk, pola):
+        if gen != self._pola_gen:
+            return                         # starszy niż ostatnia prośba - świeży bieg już zamówiony
+        self._pola_odcisk = odcisk
+        self.fields.set_stan(None)
+        if pola is not None:               # None = karty bez zmian, listwa zostaje, jaka jest
+            self._zastosuj_pola(pola)
+
+    @Slot(int, str)
+    def _on_pola_failed(self, gen, msg):
+        if gen != self._pola_gen:
+            return
+        # Odcisk zostaje przy ostatnim ZASTOSOWANYM wyniku, więc kolejna prośba policzy od nowa.
+        # Listwa trzyma stan poprzedni i mówi, że go nie odświeżyła.
+        self.fields.set_stan("blad")
+        self.status_message.emit(i18n.t("grid.fields.failed_status", msg=msg))
+
+    def _zastosuj_pola(self, facets):
+        """Pokrycie → panel Pól, keywordy filtra i makra. Zaznaczenia usera PRZEŻYWAJĄ przeliczenie:
+        kolumny domyślne (6 najczęstszych keywordów spoza szumu strukturalnego) wybieramy tylko przy
+        PIERWSZYM wyniku, potem odpadają jedynie kolumny, których keywordu nie ma już w żadnej karcie
+        (bez tego zostałaby kolumna bez pola do jej odznaczenia)."""
+        pierwszy = self._pola is None
+        self._pola = facets
         self._all_keywords = [f["keyword"] for f in facets]
-        # Lista Pól: szum strukturalny na DÓŁ (stabilnie w obrębie grup — pokrycie zachowane), P3-6.
-        ordered = sorted(facets, key=lambda f: f["keyword"] in STRUCT_NOISE)
-        self.fields.load(ordered, set(default))
-        self._columns = default
+        if pierwszy and not self._columns:     # puste kolumny PÓŹNIEJ to wybór człowieka, nie brak
+            kolumny = [f["keyword"] for f in facets if f["keyword"] not in STRUCT_NOISE][:6]
+        else:
+            znane = set(self._all_keywords)
+            kolumny = [c for c in self._columns if c in znane]
+        zmiana = kolumny != self._columns
+        self._columns = kolumny
+        self._wypelnij_pola()
         self.filter_panel.set_keywords(self._all_keywords)
         self.macro_bar.set_keywords(self._all_keywords)
+        if zmiana and self._zbudowany:
+            self.refresh()                 # model tabeli niesie kolumny - bez tego zostałyby stare
+
+    def _wypelnij_pola(self):
+        """Lista Pól z OSTATNIEGO pokrycia i bieżących kolumn. Szum strukturalny na DÓŁ (stabilnie
+        w obrębie grup - pokrycie zachowane), P3-6. Bez pokrycia (pierwszy wynik jeszcze w drodze)
+        nie ma czego pokazać - zaznaczenia odda `_zastosuj_pola`, czytając `_columns`."""
+        if self._pola is None:
+            return
+        ordered = sorted(self._pola, key=lambda f: f["keyword"] in STRUCT_NOISE)
+        self.fields.load(ordered, set(self._columns))
+
+    def _odbuduj_perspektywy(self):
         # perspektywy: presety (kod) + zapisane w BAZIE (I-1)
         # POZYCJA PRZEŻYWA ODBUDOWĘ LISTY (bliźniak BP-5 w `_load_facets`): `clear()` zostawiał indeks
         # 0, a gospodarz woła tę metodę z `refresh()` po każdym przebiegu Dostawy - combo mówiło wtedy
@@ -3023,8 +3239,11 @@ class FramesView(QWidget):
         self.combo_group.setCurrentIndex(idx if idx >= 0 else 0)
         self.combo_group.blockSignals(False)
         if "columns" in spec:
+            # Zaznaczenia z OSTATNIEGO pokrycia, nie z nowego zapytania: przełączenie perspektywy
+            # liczyło tu pokrycie całego archiwum na wątku GUI (sekundy na żywej bazie), choć
+            # zmienia wyłącznie to, które pola są zaznaczone.
             self._columns = list(spec["columns"])
-            self.fields.load(queries.keyword_facets(self.con), set(self._columns))
+            self._wypelnij_pola()
         self.refresh()
 
     def apply_object_facet(self, pairs):
@@ -3198,7 +3417,10 @@ class FramesView(QWidget):
         # z klingi rozstrzyga KOMUNIKAT: nazwa przyjechana z drugiej maszyny z inną treścią zostaje
         # NADPISANA, a „zapisano" bez słowa o tym mówiłoby o czymś, co się nie stało (F9).
         _id, verb = repo.save_perspective(self.con, name=name, spec=spec, now=self._now())
-        self._load_facets()
+        # Sama lista perspektyw: zapis nie rusza kart, a pełne `_load_facets` liczyło tu dawniej
+        # pokrycie całego archiwum i przy okazji zerowało kolumny do domyślnych - zaraz po tym,
+        # jak człowiek zapisał je w perspektywie.
+        self._odbuduj_perspektywy()
         # F4R2#6 (pre-existing, ścieżka tykana przez F4): rebuild combo pod blockSignals zostawiał
         # indeks 0 („Przegląd") przy żywym stanie świeżo zapisanej perspektywy — etykieta kłamała.
         # Re-select zapisanej, nadal bez emisji (_on_perspective nie ma czego przeładowywać:
@@ -4741,7 +4963,10 @@ class FramesView(QWidget):
         self.refresh()
         self._refresh_drawer()                           # honest: odbij pending drugiej klingi (wiz #3b)
         self.status_message.emit(i18n.t("grid.wb.undo_status", msg=msg))
-        if res.restored:                                 # lustro commitu: zeznanie wróciło (patrz `_after_commit`)
+        # Lustro commitu: zeznanie wróciło (patrz `_after_commit`). `failed` też rusza plakietkę -
+        # cofnięcie w miejscu kończy się nim przy kopii izolowanej, a wtedy zmienia się wiersz
+        # „Plik po przerwanym zapisie". Licz ze stanu, jak `_on_wb_failed`, zamiast zgadywać.
+        if res.restored or res.failed:
             self.stan_porzadkow_changed.emit()
 
     def _on_reject(self):

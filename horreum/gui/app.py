@@ -2886,6 +2886,10 @@ class MainWindow(QMainWindow):
     Po etapie pipeline'u odświeża read-model osi (WAL → zapisy workera widoczne) i przywraca
     szczere stany akcji osi (`set_busy`)."""
 
+    # Pokrycie pól Zbiorów liczone w wątku tła (`FramesView(pola_poza_watkiem=…)`). Atrybut KLASY,
+    # bo widoki montuje sam `__init__` okna - seam testowy musi stać, zanim okno powstanie.
+    _pola_poza_watkiem = True
+
     def __init__(self, db_path=None, now_fn=_utc_now_iso, on_db_changed=None, parent=None):
         super().__init__(parent)
         self.con = None
@@ -3076,7 +3080,18 @@ class MainWindow(QMainWindow):
         if row == NAV_PORZADKI:         # wejście w Porządki = świeży stan liczników zadań
             self.tasks_view.refresh_counts()
 
+    def _zatrzymaj_watki_widokow(self):
+        """Zbierz wątki tła widoków, ZANIM widoki znikną (przełączenie bazy, zamknięcie okna).
+        `QThread` jest dzieckiem widoku, więc kasowany razem z nim w biegu zabiłby aplikację,
+        a wynik doręczony później trafiłby w zamknięte połączenie. Po kluczu metody, nie po
+        typie: widok bez wątku tła po prostu jej nie ma."""
+        for i in range(self.stack.count()):
+            zatrzymaj = getattr(self.stack.widget(i), "zatrzymaj_pola", None)
+            if zatrzymaj is not None:
+                zatrzymaj()
+
     def _clear_views(self):
+        self._zatrzymaj_watki_widokow()
         self.nav.clear()
         self.nav.setVisible(False)
         while self.stack.count():
@@ -3106,7 +3121,7 @@ class MainWindow(QMainWindow):
         pipeline.open_collection.connect(self._on_open_collection)   # P5b: raport → perspektywa (3→1)
         self.pipeline_view = pipeline
 
-        grid = FramesView(self.con, now_fn=self._now)
+        grid = FramesView(self.con, now_fn=self._now, pola_poza_watkiem=self._pola_poza_watkiem)
         grid.status_message.connect(self._flash)
         grid.status_recipe.connect(self._pokaz_recepte)   # recepta ma własny nośnik (FH-2)
         grid.writeback_busy.connect(self._on_writeback_busy)
@@ -3126,6 +3141,7 @@ class MainWindow(QMainWindow):
         # przycisk stojący obok wyboru katalogu (firsthand 0808).
         grid.run_stage_fn = self._stack_lineage_after_gesture
         tasks.object_view.writeback_busy.connect(grid.set_writeback_busy)   # mutex w drugą stronę
+        tasks.object_view.writeback_busy.connect(pipeline.set_writeback_busy)   # i Dostawa gaśnie
         # CZWARTA POWIERZCHNIA gestu osi obiektu (S2b, §4/14c-f): gest z paska Zbiorów zmienia
         # kolejkę przeglądu w oknie osi — a tamten widok nie ma skąd o tym wiedzieć. Gospodarz zna
         # obie strony, więc to on je łączy (grid nie importuje osi, oś nie importuje gridu).
@@ -3163,7 +3179,9 @@ class MainWindow(QMainWindow):
     def _odswiez_widoki_po_przebiegu(self):
         """Przebieg Dostawy się skończył (worker, własne połączenie) - read-modele w głównym wątku
         odświeżamy DOPIERO TERAZ (WAL → zapisy workera widoczne). Oś obiektu i grid przeładowują też
-        facety (skan/resolver mogły dodać teleskopy/filtry/obiekty/keywordy).
+        facety (skan/resolver mogły dodać teleskopy/filtry/obiekty/keywordy). Pokrycie pól gridu
+        (najdroższe z nich) tylko ZAMAWIAMY: liczy się w wątku tła i wyłącznie wtedy, gdy zmieniły
+        się karty (`FramesView._zamow_pola`), więc ten obrót na nie nie czeka.
 
         RAZ NA PRZEBIEG, NIE RAZ NA ETAP. Do tej zmiany każdy `stage_finished` przeładowywał tu
         wszystkie widoki. Zmierzone na kopii żywej bazy (16 901 klatek, ~1 mln wierszy `cards`):
@@ -3204,7 +3222,9 @@ class MainWindow(QMainWindow):
                     break
         finally:
             self._odswiezam_widoki = False
-        self._end_phase()
+            # Faza gaśnie KAŻDĄ drogą - wyjątek w odświeżeniu zostawiałby na pasku opis roboty,
+            # która już się skończyła (pasek kłamałby „Odświeżam widoki…" do następnej fazy).
+            self._end_phase()
 
     def _on_open_collection(self, name):
         """Zadanie z Porządków prowadzi do Zbiorów z ustawioną perspektywą (Duplikaty = flaga
@@ -3260,8 +3280,10 @@ class MainWindow(QMainWindow):
     def _on_writeback_busy(self, busy):
         """Mutex DWÓCH powierzchni writebacku (D-PD-3). Grid pisze do plików → „Napraw nagłówek…"
         gaśnie; okno naprawy pisze → gaśnie Zatwierdź/Odrzuć/Cofnij gridu. Bez tego oba commity
-        spotkałyby się na `BEGIN IMMEDIATE` (`busy_timeout` 5 s) i jeden wróciłby jako 'failed'."""
+        spotkałyby się na `BEGIN IMMEDIATE` (`busy_timeout` 5 s) i jeden wróciłby jako 'failed'.
+        Trzecia strona mutexu: Dostawa gaśnie przy zapisie Z KAŻDEJ z dwóch powierzchni."""
         self.object_view.set_writeback_busy(busy)
+        self.pipeline_view.set_writeback_busy(busy)
 
     def _on_pipeline_running(self, running):
         """W trakcie etapu wyłącz akcje zapisu osi (szczery disabled). Nawigacja zostaje aktywna —
@@ -3495,7 +3517,9 @@ class MainWindow(QMainWindow):
         return fm.elidedText(msg, Qt.ElideRight, zapas)
 
     def closeEvent(self, event):
-        # Top-level apka jest właścicielem połączenia — zamyka je przy zamknięciu okna.
+        # Top-level apka jest właścicielem połączenia - zamyka je przy zamknięciu okna. Wątki tła
+        # widoków PRZED połączeniem: wynik doręczony po zamknięciu nie ma prawa go dotknąć.
+        self._zatrzymaj_watki_widokow()
         if self.con is not None:
             self.con.close()
             self.con = None

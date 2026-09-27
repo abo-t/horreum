@@ -1812,8 +1812,9 @@ def torn_write_frame_ids(con):
 
 # Powód pominięcia w planie ujednolicenia karty `OBJECT` (`object_card_form_rows`): stała, bo czyta
 # go też test i podpowiedź powierzchni - tekst mówi, co zrobić, żeby klatka wróciła do planu.
-SKIP_COPY_WITHOUT_FACTS = ("kopia bez zebranych faktów przy klatce z nieobecną kopią - "
-                           "najpierw „Przyjmij nowe”")
+SKIP_COPY_WITHOUT_FACTS = ("kopia bez zebranych faktów przy klatce z nieobecną kopią - zbierze je "
+                           "„Przyjmij nowe”, gdy plik jest na dysku i nie czeka na dokończenie "
+                           "przerwanego zapisu")
 
 
 def object_card_form_rows(con):

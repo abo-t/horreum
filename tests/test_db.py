@@ -46,6 +46,46 @@ def test_przedpotopowa_baza_v1_jawny_blad(tmp_path):
     con.close()
 
 
+def _kolumny(con, tabela):
+    return [r[1] for r in con.execute(f"PRAGMA table_info({tabela})")]
+
+
+@pytest.mark.parametrize("wersja_w_tresci", [False, True])
+def test_awaria_w_srodku_migracji_nie_zostawia_polowy_schematu(tmp_path, monkeypatch,
+                                                               wersja_w_tresci):
+    """Migracja pada PO pierwszym `ALTER TABLE` (symulacja: prawdziwy skrypt 0021 z błędną
+    instrukcją na końcu). Wersja i schemat zostają sprzed migracji, a ponowne otwarcie przechodzi
+    całą drogę do końca - dawniej `executescript` zatwierdzał kolumny po jednej, `user_version`
+    zostawało stare i drugie otwarcie wybuchało na `duplicate column name`. Wariant z `PRAGMA
+    user_version` w treści skryptu to wzór starych migracji (0008, 0009, 0012, 0013, 0016): numer
+    ustawiony w środku też musi wrócić razem z resztą."""
+    path = str(tmp_path / "h.db")
+    pelne = list(db.MIGRATIONS)
+    monkeypatch.setattr(db, "MIGRATIONS", [m for m in pelne if m[0] <= 20])
+    con = db.open_db(path)
+    assert db._user_version(con) == 20 and "image_count" not in _kolumny(con, "location")
+    monkeypatch.setattr(db, "MIGRATIONS", pelne)
+    prawdziwy = db._migration_sql
+
+    def _z_awaria(filename):
+        sql = prawdziwy(filename)
+        if filename.startswith("0021"):
+            sql += ("\nPRAGMA user_version = 21;" if wersja_w_tresci else "") + "\nSELECT brak_funkcji();"
+        return sql
+    monkeypatch.setattr(db, "_migration_sql", _z_awaria)
+    with pytest.raises(Exception, match="brak_funkcji"):
+        db.migrate(con)
+    assert not con.in_transaction
+    assert db._user_version(con) == 20
+    assert "image_count" not in _kolumny(con, "location")
+    con.close()
+    monkeypatch.setattr(db, "_migration_sql", prawdziwy)
+    con = db.open_db(path)
+    assert db._user_version(con) == db.SCHEMA_VERSION
+    assert "image_count" in _kolumny(con, "location")
+    con.close()
+
+
 def test_foreign_keys_on(tmp_path):
     con = db.connect(str(tmp_path / "h.db"))
     assert con.execute("PRAGMA foreign_keys").fetchone()[0] == 1

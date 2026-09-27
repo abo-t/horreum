@@ -1071,6 +1071,35 @@ def test_macro_stage_then_commit_edits_file(wb_view):
     assert fits.getheader(str(p))["TELESCOP"] == "RC8"   # przywrócone
 
 
+def test_commit_i_cofniecie_makra_odswiezaja_plakietke_Porzadkow(wb_view):
+    """Lustro `test_gesty_rodowodu_odswiezaja_plakietke_Porzadkow` dla writebacku kart: commit
+    makra zmienia zeznanie klatki (`header`, `cards`), z którego liczą się wiersze Porządków
+    („Nagłówek inny niż folder" i inne), więc ogon commitu emituje sygnał plakietki - i tak samo
+    ogon cofnięcia. Commit, który niczego nie podmienił, milczy.
+
+    Falsyfikator: zdejmij emisję z `_after_commit` → pierwsza asercja; z `_after_undo` → druga."""
+    from astropy.io import fits
+    from horreum import writeback
+    view, con, p = wb_view
+    emisje = []
+    view.stan_porzadkow_changed.connect(lambda: emisje.append(1))
+    view.macro_bar.asg_kw.setCurrentText("TELESCOP")
+    view.macro_bar.asg_op.setCurrentIndex(0)
+    view.macro_bar.asg_expr.setText("EQ6")
+    view.macro_bar._emit_stage()
+    view._on_commit()
+    assert fits.getheader(str(p))["TELESCOP"] == "EQ6", "commit podmienił plik"
+    assert len(emisje) == 1, "commit, który podmienił plik, odświeża plakietkę"
+
+    view._on_undo(view._last_commit_id)
+    assert fits.getheader(str(p))["TELESCOP"] == "RC8", "cofnięcie przywróciło plik"
+    assert len(emisje) == 2, "cofnięcie, które przywróciło plik, odświeża plakietkę"
+
+    view._after_commit("commit", writeback.CommitResult(
+        run_id="r", commit_id=None, applied=[], blocked=[], skipped=[], failed=[]))
+    assert len(emisje) == 2, "commit bez podmiany milczy"
+
+
 def test_szuflada_daje_Cofnij_gdy_commit_ma_failed_z_kopia_naglowka(wb_view):
     """Z11/D3: ta sama reguła „Cofnij" co w oknach piszących karty (`wb_worker.commit_do_cofniecia`)
     - rdzeń nadaje `commit_id`, gdy plik został PODMIENIONY, także przy `failed` z kopią nagłówka.
@@ -1288,6 +1317,22 @@ def test_rename_lifecycle_stage_commit_restage_undo(rn_view):
     # undo skommitowanego runu wciąż osiągalne ścieżką CLI (R2 #7) → przywraca oryginały
     writeback.undo_renames(con, first_run, now=NOW)
     assert all(f.exists() for f in files)            # oryginalne nazwy wróciły
+
+
+def test_commit_i_cofniecie_renamu_odswiezaja_plakietke_Porzadkow(rn_view):
+    """Bliźniak ogona makra: rename zmienia `location.path`, więc jego ogon zapisu też emituje sygnał
+    plakietki - reguła „każdy ogon zapisu" zamiast pamiętania, który wiersz Porządków czyta które
+    pole. Cofnięcie z szuflady - tak samo."""
+    view, con, files = rn_view
+    emisje = []
+    view.stan_porzadkow_changed.connect(lambda: emisje.append(1))
+    view._on_rename_stage(_POL)
+    view._on_commit()
+    assert not any(f.exists() for f in files), "rename się odbył"
+    assert len(emisje) == 1
+    view._dispatch_undo()
+    assert all(f.exists() for f in files), "cofnięcie się odbyło"
+    assert len(emisje) == 2
 
 
 def test_rename_commit_all_blocked_bez_undo(rn_view):
@@ -5362,8 +5407,8 @@ def test_BP5_klik_w_listwie_zdejmujacy_facet_definicji_przestawia_etykiete_zapis
 
 def test_BP5_BLIZNIAK_odbudowa_listy_perspektyw_zostawia_BIEZACA_pozycje(view, monkeypatch):
     """Bliźniak BP-5 w `_load_facets`: odbudowa listy perspektyw pod `blockSignals` zostawiała indeks
-    0, a po etapie Dostawy gospodarz woła właśnie `_load_facets()` + `refresh()`
-    (`app._on_stage_finished`). Combo mówiło wtedy „Przegląd" nad zbiorem z trimem - a pusty stan
+    0, a po przebiegu Dostawy gospodarz woła właśnie `_load_facets()` + `refresh()`
+    (`app._odswiez_widoki_po_przebiegu`). Combo mówiło wtedy „Przegląd" nad zbiorem z trimem - a pusty stan
     potrafił pod nim proponować przejście na „Przegląd". Pozycja wraca PO DANYCH, także zapisana:
     jej nazwy nie da się odtworzyć ze stanu, bo właściciel etykiety zna tylko presety.
 

@@ -583,6 +583,44 @@ def test_region_NIE_nadpisuje_potwierdzenia_ze_sciezki():
     assert audit.human_facts_census(con) == przed_fakty
 
 
+def test_region_NIE_nadpisuje_obiektu_z_naglowka_ktory_zamilkl():
+    """Klatka z obiektem ze źródła `header`, której nagłówek dziś milczy (droga: potwierdzenie ze
+    ścieżki → karta `OBJECT` → przejście na `header` → cofnięcie karty), z RA/DEC w promieniu Veil:
+    region wypełnia tylko pustkę albo sam siebie, więc klatka zostaje `NGC6992`/`header`.
+
+    Falsyfikator: przywróć warunek „samo nie-słabe źródło" przed `resolve_region` → klatka
+    przechodzi na `Veil`/`region`."""
+    con = _pusta()
+    fid, _ = repo.upsert_frame(con, sha1_data="st-veil3", kind="master_light", filetype="xisf",
+                               camera_id=None, now=NOW)
+    repo.record_header(con, frame_id=fid, raw_json="{}", object_raw=None,
+                       ra_deg=313.9, dec_deg=31.2, now=NOW)
+    oid, _ = repo.upsert_object(con, canon="NGC6992", catalog="NGC", kind="deep_sky", now=NOW)
+    repo.assign_object(con, frame_id=fid, object_id=oid, object_source="header", now=NOW)
+    resolver.run_resolver(con, NOW)
+    resolver.run_resolver(con, NOW)
+    stan = con.execute("SELECT o.canon, f.object_source FROM frame f JOIN object o "
+                       "ON o.id = f.object_id WHERE f.id = ?", (fid,)).fetchone()
+    assert tuple(stan) == ("NGC6992", "header")
+
+
+def test_region_przelicza_sam_siebie():
+    """Druga połowa obrony: klatka ze źródłem `region` nadal podlega regionowi przy kolejnym
+    przebiegu (idempotentnie) - obrona nie zamraża szczebla, który sam go nadał."""
+    con = _pusta()
+    fid, _ = repo.upsert_frame(con, sha1_data="st-veil4", kind="master_light", filetype="xisf",
+                               camera_id=None, now=NOW)
+    repo.record_header(con, frame_id=fid, raw_json="{}", object_raw=None,
+                       ra_deg=313.9, dec_deg=31.2, now=NOW)
+    resolver.run_resolver(con, NOW)
+    przed_ev = con.execute("SELECT count(*) FROM event").fetchone()[0]
+    resolver.run_resolver(con, NOW)
+    stan = con.execute("SELECT o.canon, f.object_source FROM frame f JOIN object o "
+                       "ON o.id = f.object_id WHERE f.id = ?", (fid,)).fetchone()
+    assert tuple(stan) == ("Veil", "region")
+    assert con.execute("SELECT count(*) FROM event").fetchone()[0] == przed_ev
+
+
 def test_region_dalej_dziala_dla_klatki_BEZ_potwierdzenia():
     """Obrona wąska: stos bez żadnego źródła z tymi samymi RA/DEC dostaje region jak dotąd."""
     con = _pusta()

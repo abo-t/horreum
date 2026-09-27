@@ -496,8 +496,15 @@ def run_resolver(con, now):
                 # nazwę z folderu, a region jest najsłabszym szczeblem automatu - stos pod
                 # `STACKS\\NGC6992` z RA/DEC w promieniu Veil zostaje `NGC6992`. Zakres = sam
                 # region: nagłówek, który zeznaje rozpoznawalną nazwę, wygrywa dalej (header-primary).
+                # Region wypełnia wyłącznie PUSTKĘ albo przelicza SAM SIEBIE - nie nadpisuje obiektu
+                # z żadnego innego szczebla. Etykieta bieżącego źródła nie niesie historii: klatka
+                # potwierdzona ze ścieżki przechodzi na `header` po dopisaniu karty (E5-1), a po
+                # cofnięciu tej karty nagłówek milczy przy źródle `header` - samo „nie słabe"
+                # oddałoby ją regionowi (recenzja tur D/E, 2026-09-27; na żywej bazie takich klatek
+                # było 0, więc zmiana nie przestawia żadnej istniejącej).
                 slabe = r["osrc"] in WEAK_OBJECT_SOURCES
-                if ident is None and alias_oid is None and not slabe:
+                if (ident is None and alias_oid is None
+                        and (r["oid"] is None or r["osrc"] == "region")):
                     ident = resolve_region(r["ra"], r["dec"])
                 if alias_oid is not None:
                     # Trafienie aliasu: obiekt i alias ISTNIEJĄ z definicji — BEZ upsert_object i

@@ -1612,8 +1612,8 @@ def copy_conflict_frame_ids(con):
 def orphan_testimony_copies(con):
     """ZEZNANIE Z NIEOBECNEJ KOPII: `{frame_id: [obecne kopie]}` klatek, których `header` nie zgadza
     się z ŻADNĄ obecną kopią. JEDEN właściciel predykatu dla etapu przejęcia zeznania w Dostawie
-    (`scan.adopt_orphan_testimony`) i dla wiersza Porządków (`orphan_testimony_frame_ids`) - podział
-    między nie robi `orphan_testimony_routes`. Kopie: `location_id`, `path`, `header_hash`,
+    (`scan.adopt_orphan_testimony`, przez podział `orphan_testimony_routes`) i dla wiersza Porządków
+    (`orphan_testimony_frame_ids`, całość). Kopie: `location_id`, `path`, `header_hash`,
     w kolejności wjazdu (`ORDER BY l.id`).
 
     SKĄD TEN STAN (dług AR-5, zmierzony 2026-09-26): `header` pochodzi z JEDNEJ kopii (reguła
@@ -1707,7 +1707,8 @@ def hand_testimony_frame_ids(con, frame_ids):
 
 def orphan_testimony_routes(con):
     """PODZIAŁ predykatu `orphan_testimony_copies` na dwie drogi naprawy - JEDEN właściciel tej
-    decyzji dla etapu Dostawy i dla wiersza Porządków. Zwraca `(dla_etapu, dla_czlowieka)`:
+    decyzji dla etapu Dostawy (wiersz Porządków liczy całość predykatu, obie drogi - docstring
+    `orphan_testimony_frame_ids`). Zwraca `(dla_etapu, dla_czlowieka)`:
     `dla_etapu` = `{frame_id: jedyna obecna kopia}`, `dla_czlowieka` = set[int].
 
     ETAP (`scan.adopt_orphan_testimony`) dostaje klatkę WYŁĄCZNIE, gdy ma jedną obecną kopię ORAZ jej
@@ -1727,25 +1728,28 @@ def orphan_testimony_routes(con):
 
 
 def orphan_testimony_frame_ids(con):
-    """Zbiór frame_id wiersza Porządków „Zeznanie z nieobecnej kopii": klatki predykatu, których
-    etap Dostawy NIE naprawi sam - druga połowa podziału `orphan_testimony_routes` (≥2 obecne kopie
-    albo zeznanie napisane ręką).
+    """Zbiór frame_id wiersza Porządków „Zeznanie z nieobecnej kopii": WSZYSTKIE klatki predykatu
+    `orphan_testimony_copies` - obie połowy podziału `orphan_testimony_routes`.
 
-    DLACZEGO NIE WSZYSTKIE. Przy jednej obecnej kopii i zeznaniu spoza ręki jest dokładnie jedna
-    prawdziwa odpowiedź i etap przejęcia daje ją przy najbliższej dostawie bez pytania - wiersz
-    liczony do plakietki świeciłby za robotę, której człowiek nie ma jak wykonać.
+    DLACZEGO TEŻ POŁOWA ETAPU. Klatkę o jednej obecnej kopii i zeznaniu spoza ręki naprawia etap
+    przejęcia bez pytania - ale wyłącznie pod korzeniem, po którym właśnie chodzi (Dostawa, droga
+    „Stosy", ogon „Oznacz zniknięte"). Ocalała kopia poza tym korzeniem, a także kopia, której etap
+    odmówił (inna treść pod ścieżką, zmieniona od skanu, nieczytelna), czekałaby NIEWIDOCZNA do
+    dostawy, której nikt nie zrobi. Robota człowieka przy niej jest realna: puścić Dostawę na
+    korzeniu ocalałej kopii albo wskazać kopię wiodącą. W zwykłym przebiegu klatka jest tu chwilę -
+    ogon „Oznacz zniknięte" przejmuje zeznanie w tym samym wątku, w którym zdjął obecność.
 
     GUARDY ŻYWOTNOŚCI jak w „Duplikatach" (`dup_frame_ids`): wycofana i zastąpiona wypadają - ich
-    robotą jest werdykt ręki albo następczyni. Klatka z zeznaniem z ręki i jedną kopią NIE jest
-    duplikatem, więc guard stoi tu jako warunek, nie jako przecięcie z `dup_frame_ids`.
+    robotą jest werdykt ręki albo następczyni. Klatka o jednej kopii NIE jest duplikatem, więc guard
+    stoi tu jako warunek, nie jako przecięcie z `dup_frame_ids`.
     JEDEN właściciel dla licznika Porządków i trimu gridu. Zwraca set[int]."""
-    _etap, czlowiek = orphan_testimony_routes(con)
-    if not czlowiek:
+    kopie = orphan_testimony_copies(con)
+    if not kopie:
         return set()
     return {int(r[0]) for r in con.execute(
         "SELECT id FROM frame WHERE id IN (SELECT value FROM json_each(?)) "
         "AND retired_at IS NULL AND superseded_by IS NULL",
-        (json.dumps(sorted(czlowiek)),)).fetchall()}
+        (json.dumps(sorted(kopie)),)).fetchall()}
 
 
 def path_header_conflict_frame_ids(con):
@@ -1806,6 +1810,12 @@ def torn_write_frame_ids(con):
         (json.dumps(list(INPLACE_OPEN_PHASES)),)).fetchall()}
 
 
+# Powód pominięcia w planie ujednolicenia karty `OBJECT` (`object_card_form_rows`): stała, bo czyta
+# go też test i podpowiedź powierzchni - tekst mówi, co zrobić, żeby klatka wróciła do planu.
+SKIP_COPY_WITHOUT_FACTS = ("kopia bez zebranych faktów przy klatce z nieobecną kopią - "
+                           "najpierw „Przyjmij nowe”")
+
+
 def object_card_form_rows(con):
     """KARTA `OBJECT` W INNEJ FORMIE (O5, 2026-09-26): klatki, których karta `OBJECT` wskazuje TEN
     SAM obiekt co klatka, ale innym zapisem niż jedna forma karty (`resolver.forma_karty_object` -
@@ -1831,6 +1841,9 @@ def object_card_form_rows(con):
         z ostatniego UDANEGO odczytu, więc kotwica zapisu mogłaby kłamać;
       * więcej niż jedna karta `OBJECT` - zeznanie bierze ostatnią (`_put`), a zapis musiałby
         zgadywać, którą ujednolicić;
+      * kopia bez zebranych faktów (`hdr_hash` NULL), gdy klatka ma kopię NIEOBECNĄ
+        (`SKIP_COPY_WITHOUT_FACTS`) - karty klatki mogły przyjść ze skasowanego pliku, a strażnik
+        niżej bez faktów jest ślepy; fakty dociąga etap Dostawy (`scan.backfill_copy_facts`);
       * kopia zeznaje INNĄ kartę niż klatka (`location.hdr_object`, gdy fakty kopii są zebrane) -
         karty w `cards` należą do KLATKI i mogą pochodzić z innej kopii;
       * forma nie wraca do kanonu (`forma_karty_object` → None: kanon znany tylko z aliasu) -
@@ -1851,6 +1864,8 @@ def object_card_form_rows(con):
         "          AND c2.keyword = 'OBJECT') AS n_cards, "
         "       (SELECT count(*) FROM location l2 WHERE l2.frame_id = f.id "
         "          AND l2.present = 1) AS n_present, "
+        "       (SELECT count(*) FROM location l4 WHERE l4.frame_id = f.id "
+        "          AND l4.present = 0) AS n_absent, "
         "       (SELECT count(*) FROM cards c3 WHERE c3.frame_id = f.id "
         "          AND c3.keyword IN ('CHECKSUM', 'DATASUM')) AS n_sum, "
         "       l.id AS lid, l.path, l.header_hash, l.compressed, l.unreadable_since, "
@@ -1908,6 +1923,8 @@ def object_card_form_rows(con):
             skip = "kopia oznaczona jako nieczytelna"
         elif r["n_cards"] > 1:
             skip = f"wiele kart OBJECT ({r['n_cards']})"
+        elif r["hdr_hash"] is None and r["n_absent"]:
+            skip = SKIP_COPY_WITHOUT_FACTS
         elif r["hdr_hash"] is not None and _to_text(r["hdr_object"]) != card:
             skip = "kopia zeznaje inną kartę OBJECT niż klatka"
         elif form is None:
@@ -2606,9 +2623,9 @@ def tasks_state(con):
         # JEST robotą (poza `tasks._BEZ_ROBOTY`): oś klatki zależy od tego, która kopia wygrała
         # w `header`, a sprzeczność rozstrzyga wyłącznie człowiek.
         "copy_conflict_frames": len(copy_conflict_frame_ids(con)),
-        # Zeznanie z nieobecnej kopii - robota: `header` mówi głosem pliku, którego nie ma, a która
-        # kopia ma prowadzić, rozstrzyga człowiek (AR-4) - przy ≥2 obecnych kopiach albo zeznaniu
-        # z ręki. Klatki o jednej kopii i zeznaniu spoza ręki naprawia etap Dostawy, więc tu ich nie ma.
+        # Zeznanie z nieobecnej kopii - robota: `header` mówi głosem pliku, którego nie ma. Kopię
+        # wiodącą wskazuje człowiek (AR-4) przy ≥2 obecnych kopiach albo zeznaniu z ręki; resztę
+        # naprawia etap Dostawy, ale tylko pod swoim korzeniem - więc liczone są wszystkie.
         "orphan_testimony_frames": len(orphan_testimony_frame_ids(con)),
         "telescopes_unlabeled": telescopes_unlabeled,
         "observatories_unnamed": observatories_unnamed,

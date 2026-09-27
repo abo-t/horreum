@@ -615,23 +615,30 @@ def test_undo_po_awarii_resyncu_konczy_sama_synchronizacja(tmp_path, monkeypatch
 
 
 def test_resync_commitu_i_undo_padly_ponowienie_robi_synchronizacje(tmp_path, monkeypatch):
-    """Z13, przypadek 2 (astra): commit bez udanego re-syncu (baza ma hash A sprzed commitu), undo
-    przywraca A, jego re-sync też pada. Rozpoznanie po `header_hash` uznałoby to za „już cofnięte";
-    faza operacji mówi prawdę - ponowienie robi re-sync."""
+    """Z13, przypadek 2 (astra): commit bez udanego re-syncu (baza ma hash A sprzed commitu). Dawniej
+    undo przywracało A obok operacji commitu w fazie `written`, która zostawała tak na zawsze;
+    od 2026-09-27 `written` IZOLUJE lokację, więc undo najpierw DOKAŃCZA commit (kontrola danych
+    + re-sync), a dopiero potem cofa. Re-sync nadal pada → undo 'failed', plik nietknięty (stan po
+    commicie), żadnej operacji cofnięcia. Rozpoznanie po `header_hash` („baza ma A") nie może dać
+    „już cofnięte": ponowienie dokańcza commit i cofa - obie operacje `synced`, baza znów ma A."""
     p = _fits(tmp_path / "v.fits")
+    przed = p.read_bytes()
     con, loc = _baza_z_plikiem(tmp_path, p)
     prawdziwy = scan.scan_file
     monkeypatch.setattr(writeback.scan, "scan_file",
                         lambda path: (_ for _ in ()).throw(OSError(64, "zerwany udział")))
     res = writeback.commit(con, "R", now=NOW, inplace=True)
-    assert len(res.failed) == 1
+    assert len(res.failed) == 1 and "finish_inplace" in res.failed[0].reason
+    po_commicie = p.read_bytes()
     u1 = writeback.undo(con, res.commit_id, now=NOW)
-    assert len(u1.failed) == 1
+    assert len(u1.failed) == 1 and "commit nie jest dokończony" in u1.failed[0].reason
+    assert p.read_bytes() == po_commicie and [o["phase"] for o in _operacje(con)] == ["written"]
     assert _loc(con, p)["header_hash"] == loc["header_hash"]        # baza wciąż ma hash A
     monkeypatch.setattr(writeback.scan, "scan_file", prawdziwy)
     u2 = writeback.undo(con, res.commit_id, now=NOW)
-    assert len(u2.restored) == 1 and "dokończono synchronizację" in u2.restored[0].reason
-    assert [o["phase"] for o in _operacje(con)] == ["written", "synced"]
+    assert len(u2.restored) == 1 and not u2.failed, u2
+    assert [o["phase"] for o in _operacje(con)] == ["synced", "synced"]
+    assert p.read_bytes() == przed and _loc(con, p)["header_hash"] == loc["header_hash"]
     con.close()
 
 
@@ -777,6 +784,430 @@ def test_odzysk_tylko_dla_operacji_otwartej_i_tego_pliku(tmp_path, monkeypatch):
 def _otwarta_operacja_w(katalog, monkeypatch, plik):
     katalog.mkdir(exist_ok=True)
     return _otwarta_operacja(katalog, monkeypatch, plik)
+
+
+# ============================================================ SZWY PISARZA (astra, 2026-09-27)
+# Kontrola danych całego pliku, izolacja do `synced`, generacja skanu, faza pod blokadą,
+# nieutrwalona faza, ponowione cofnięcie i jedna bramka izolacji przed każdą mutacją. Każdy test
+# bez naprawy pada.
+
+
+def _fits_dwa_hdu(path):
+    """FITS z DRUGIM HDU daleko od próbek pisarza: dane główne 128 KiB, rozszerzenie 128 KiB.
+    Zwraca `(ścieżka, offset danych drugiego HDU)`."""
+    prim = fits.PrimaryHDU(data=(np.arange(256 * 256) % 3000).astype(np.int16).reshape(256, 256))
+    prim.header["IMAGETYP"] = "Light"
+    prim.header["OBJECT"] = ("NGC6992", KOMENTARZ)
+    ext = fits.ImageHDU(data=np.full((256, 256), 3, dtype=np.int16), name="DRUGI")
+    fits.HDUList([prim, ext]).writeto(path, overwrite=True)
+    with fits.open(str(path)) as hdul:
+        return path, hdul.fileinfo(1)["datLoc"]
+
+
+def _xisf_dwa_obrazy(path, pad=64):
+    """XISF z kartami pod pierwszym obrazem i DRUGIM obrazem 200 KiB (bez kart). Zwraca
+    `(ścieżka, offset bajtu drugiego obrazu poza próbkami pisarza)`."""
+    p1, p2 = b"\x07" * 32, bytes(range(256)) * 800
+
+    def body(s1, s2):
+        kw = ('<FITSKeyword name="IMAGETYP" value="\'Light\'" comment=""/>'
+              '<FITSKeyword name="OBJECT" value="\'NGC6992\'" comment="nazwa obiektu"/>')
+        return ('<?xml version="1.0" encoding="UTF-8"?>'
+                '<xisf version="1.0" xmlns="http://www.pixinsight.com/xisf">'
+                f'<Image geometry="4:4:1" sampleFormat="UInt16" '
+                f'location="attachment:{s1:08d}:{len(p1)}">{kw}</Image>'
+                f'<Image id="drugi" geometry="320:320:1" sampleFormat="UInt16" '
+                f'location="attachment:{s2:08d}:{len(p2)}"/></xisf>').encode("utf-8")
+    s1 = scan.XISF_XML_OFFSET + len(body(0, 0)) + pad
+    xml = body(s1, s1 + len(p1))
+    with open(path, "wb") as fh:
+        fh.write(b"XISF0100" + struct.pack("<I", len(xml)) + b"\x00" * 4 + xml
+                 + b"\x00" * pad + p1 + p2)
+    return path, s1 + len(p1) + 100 * 1024
+
+
+def _psuj_bajt_przy_fsync(monkeypatch, offset):
+    """Usterka zapisu poza regionem nagłówka: po `fsync` bajt pod `offset` (poza próbkami pisarza)
+    zmienia się NASZYM deskryptorem - pod blokadą nikt inny nie pisze."""
+    prawdziwy = os.fsync
+
+    def _fsync(fd):
+        prawdziwy(fd)
+        os.lseek(fd, offset, os.SEEK_SET)
+        b = os.read(fd, 1)
+        os.lseek(fd, offset, os.SEEK_SET)
+        os.write(fd, bytes([b[0] ^ 0xFF]))
+    monkeypatch.setattr(writeback.os, "fsync", _fsync)
+
+
+def _zerwany_udzial(monkeypatch):
+    """Re-sync pada: pełny odczyt pliku rzuca (czkawka SMB)."""
+    monkeypatch.setattr(writeback.scan, "scan_file",
+                        lambda path: (_ for _ in ()).throw(OSError(64, "zerwany udział")))
+
+
+@pytest.mark.parametrize("fmt", ["fits", "xisf"])
+def test_kontrola_danych_lapie_bajt_poza_naglowkiem_i_probkami(tmp_path, monkeypatch, fmt):
+    """Bajt drugiego HDU FITS / drugiego obrazu XISF zmieniony przy zapisie, poza trzema próbkami
+    i poza `sha1_data` (pierwsze HDU / pierwszy obraz). Dawniej commit zgłaszał 'applied'. Teraz
+    kontrola danych (sha1 pliku z podstawionym starym regionem != kotwica bazy) → 'failed', baza
+    NIE wciąga pliku, operacja zostaje `written` - lokacja izolowana."""
+    p, zly = (_fits_dwa_hdu(tmp_path / "d.fits") if fmt == "fits"
+              else _xisf_dwa_obrazy(tmp_path / "d.xisf"))
+    con, loc = _baza_z_plikiem(tmp_path, p)
+    _psuj_bajt_przy_fsync(monkeypatch, zly)
+    res = writeback.commit(con, "R", now=NOW, inplace=True)
+    monkeypatch.undo()
+    assert not res.applied and len(res.failed) == 1, res
+    assert "POZA regionem" in res.failed[0].reason
+    assert [o["phase"] for o in _operacje(con)] == ["written"] and scan._isolated(con, str(p))
+    assert _loc(con, p)["header_hash"] == loc["header_hash"]         # baza nie wciągnęła pliku
+    con.close()
+
+
+def test_kontrola_danych_przy_cofnieciu_w_miejscu(tmp_path, monkeypatch):
+    """To samo sprawdzenie dla undo w miejscu: region podstawiony = region wynikowy commitu,
+    kotwica = `file_sha1` po commicie."""
+    p, zly = _fits_dwa_hdu(tmp_path / "u.fits")
+    con, loc = _baza_z_plikiem(tmp_path, p)
+    res = writeback.commit(con, "R", now=NOW, inplace=True)
+    assert len(res.in_place) == 1
+    po_commicie = _loc(con, p)["header_hash"]
+    _psuj_bajt_przy_fsync(monkeypatch, zly)
+    u = writeback.undo(con, res.commit_id, now=NOW)
+    monkeypatch.undo()
+    assert not u.restored and len(u.failed) == 1 and "POZA regionem" in u.failed[0].reason
+    assert [(o["kind"], o["phase"]) for o in _operacje(con)] == [("commit", "synced"),
+                                                                 ("undo", "written")]
+    assert _loc(con, p)["header_hash"] == po_commicie and scan._isolated(con, str(p))
+    con.close()
+
+
+def test_kontrola_danych_przy_odzysku(tmp_path, monkeypatch):
+    """Odzysk rozdartego nagłówka: bajt poza regionem zmieniony przy zapisie odzysku → 'failed',
+    operacja zostaje OTWARTA (nie `recovered`), lokacja izolowana."""
+    p, zly = _fits_dwa_hdu(tmp_path / "o.fits")
+    con, op, _ = _otwarta_operacja(tmp_path, monkeypatch, p)
+    _psuj_bajt_przy_fsync(monkeypatch, zly)
+    w = writeback.recover_torn(con, op["id"], now=NOW)
+    monkeypatch.undo()
+    assert w.status == "failed" and "POZA regionem" in w.reason
+    assert _operacje(con)[0]["phase"] == "unverified" and scan._isolated(con, str(p))
+    con.close()
+
+
+def test_kotwica_pusta_liczona_pelnym_odczytem_przed_zapisem(tmp_path, monkeypatch):
+    """`location.file_sha1` NULL → pisarz liczy kotwicę pełnym odczytem uchwytu PRZED pierwszym
+    bajtem i odkłada ją do koperty backupu; kontrola danych działa tak samo (bajt poza nagłówkiem
+    → 'failed'), a bez usterki commit przechodzi."""
+    p, zly = _fits_dwa_hdu(tmp_path / "n.fits")
+    przed = p.read_bytes()
+    con, loc = _baza_z_plikiem(tmp_path, p)
+    con.execute("UPDATE location SET file_sha1 = NULL WHERE id = ?", (loc["id"],))   # tylko test
+    con.commit()
+    _psuj_bajt_przy_fsync(monkeypatch, zly)
+    res = writeback.commit(con, "R", now=NOW, inplace=True)
+    monkeypatch.undo()
+    assert len(res.failed) == 1 and "POZA regionem" in res.failed[0].reason
+    env = writeback.RegionBackup.decode(
+        con.execute("SELECT header_text FROM header_backups").fetchone()[0])
+    import hashlib
+    assert env.file_sha1 == hashlib.sha1(przed).hexdigest()
+
+    q, _ = _fits_dwa_hdu(tmp_path / "n2.fits")
+    con2 = db.open_db(str(tmp_path / "h2.db"))
+    _scan_in(con2, q)
+    l2 = _loc(con2, q)
+    _stage(con2, "R", l2["id"], "NGC 6992", l2["header_hash"])
+    con2.execute("UPDATE location SET file_sha1 = NULL WHERE id = ?", (l2["id"],))
+    con2.commit()
+    assert len(writeback.commit(con2, "R", now=NOW, inplace=True).in_place) == 1
+    con.close()
+    con2.close()
+
+
+def test_kotwica_nieaktualna_blokuje_przed_zapisem(tmp_path):
+    """Baza nie opisuje pliku (bajt drugiego HDU zmieniony po skanie, inny `mtime`) → kontrola
+    danych po zapisie nie miałaby kotwicy: 'blocked' PRZED pierwszym bajtem, bez dziennika."""
+    p, zly = _fits_dwa_hdu(tmp_path / "k.fits")
+    con, loc = _baza_z_plikiem(tmp_path, p)
+    dane = bytearray(p.read_bytes())
+    dane[zly] ^= 0xFF
+    p.write_bytes(bytes(dane))
+    os.utime(p, (1_700_000_000, 1_700_000_000))
+    res = writeback.commit(con, "R", now=NOW, inplace=True)
+    assert len(res.blocked) == 1 and "od ostatniego skanu" in res.blocked[0].reason, res
+    assert p.read_bytes() == bytes(dane) and not _operacje(con)
+    con.close()
+
+
+def test_izolacja_trwa_do_synced_a_finish_inplace_ja_zdejmuje(tmp_path, monkeypatch):
+    """Re-sync commitu w miejscu padł → operacja `written` IZOLUJE lokację (dawniej izolacja znikała
+    na `written`, a skan mógł przepiąć kopię). Skan pomija plik (z bramą i bez), odzysk odsyła do
+    dokończenia, `finish_inplace` robi kontrolę danych i re-sync → `synced`, wpisy stagingu
+    'applied', izolacja zdjęta; drugie dokończenie → 'blocked'."""
+    kat = tmp_path / "arch"
+    kat.mkdir()
+    p = _fits(kat / "a.fits")
+    con, loc = _baza_z_plikiem(tmp_path, p)
+    prawdziwy = scan.scan_file
+    _zerwany_udzial(monkeypatch)
+    res = writeback.commit(con, "R", now=NOW, inplace=True)
+    monkeypatch.setattr(writeback.scan, "scan_file", prawdziwy)
+    (op_id, _, faza), = [tuple(o) for o in _operacje(con)]
+    assert faza == "written" and f"finish_inplace({op_id})" in res.failed[0].reason
+    assert scan._isolated(con, str(p))
+    for vol in ("V", "?"):
+        s = scan.scan_tree(con, str(kat), volume=vol, now=NOW)
+        assert s.isolated == 1, vol
+    assert con.execute("SELECT count(*) FROM location").fetchone()[0] == 1
+    assert _loc(con, p)["header_hash"] == loc["header_hash"]
+    w = writeback.recover_torn(con, op_id, now=NOW)
+    assert w.status == "blocked" and f"finish_inplace({op_id})" in w.reason
+
+    f = writeback.finish_inplace(con, op_id, now=NOW)
+    assert f.status == "applied", f
+    assert _operacje(con)[0]["phase"] == "synced" and not scan._isolated(con, str(p))
+    assert [r["status"] for r in writeback.pending_for_run(con, "R")] == ["applied"]
+    assert _loc(con, p)["header_hash"] == _hash(p) != loc["header_hash"]
+    assert writeback.finish_inplace(con, op_id, now=NOW).status == "blocked"
+    con.close()
+
+
+def test_zwolnienie_reka_dziala_dla_operacji_written(tmp_path, monkeypatch):
+    p = _fits(tmp_path / "zw.fits")
+    con, _ = _baza_z_plikiem(tmp_path, p)
+    _zerwany_udzial(monkeypatch)
+    writeback.commit(con, "R", now=NOW, inplace=True)
+    monkeypatch.undo()
+    op_id = _operacje(con)[0]["id"]
+    repo.release_inplace_op(con, op_id=op_id, now=NOW, reason="sprawdzone ręcznie")
+    assert _operacje(con)[0]["phase"] == "released" and not scan._isolated(con, str(p))
+    con.close()
+
+
+def test_odzysk_z_nieudanym_resynciem_zostaje_otwarty_i_da_sie_ponowic(tmp_path, monkeypatch):
+    """Odzysk przywrócił region, ale re-sync padł: dawniej faza `recovered` padała PRZED re-synciem
+    i zdejmowała izolację. Teraz operacja zostaje `unverified`, a ponowiony odzysk (region stary
+    to też stan pośredni) kończy się `recovered`."""
+    p = _fits(tmp_path / "r.fits")
+    con, op, przed = _otwarta_operacja(tmp_path, monkeypatch, p)
+    prawdziwy = scan.scan_file
+    _zerwany_udzial(monkeypatch)
+    w1 = writeback.recover_torn(con, op["id"], now=NOW)
+    monkeypatch.setattr(writeback.scan, "scan_file", prawdziwy)
+    assert w1.status == "failed" and f"recover_torn({op['id']})" in w1.reason
+    assert p.read_bytes() == przed and _operacje(con)[0]["phase"] == "unverified"
+    assert scan._isolated(con, str(p))
+    w2 = writeback.recover_torn(con, op["id"], now=NOW)
+    assert w2.status == "restored", w2
+    assert _operacje(con)[0]["phase"] == "recovered" and not scan._isolated(con, str(p))
+    con.close()
+
+
+def _skan_z_przeplotem(tmp_path, monkeypatch, *, odczyt_pada):
+    """Skan drzewa, w którym zapis w miejscu (pełny commit) wchodzi PO bramce izolacji, a PRZED
+    ingestem rekordu - rekord skanu niesie stan sprzed zapisu (albo odczyt pada)."""
+    kat = tmp_path / "arch"
+    kat.mkdir()
+    p = _fits(kat / "a.fits")
+    con, loc = _baza_z_plikiem(tmp_path, p)
+    os.utime(p, (1_700_000_000, 1_700_000_000))          # brama przyrostowa musi przeczytać plik
+    prawdziwy = scan.scan_file
+    stan = {"raz": True}
+
+    def _przeplot(path):
+        if not (stan["raz"] and path == str(p)):
+            return prawdziwy(path)                       # m.in. re-sync pisarza w środku
+        stan["raz"] = False
+        rec = prawdziwy(path)                            # odczyt skanu: stan SPRZED zapisu
+        assert len(writeback.commit(con, "R", now=NOW, inplace=True).in_place) == 1
+        if odczyt_pada:
+            raise OSError(64, "The specified network name is no longer available")
+        return rec
+    monkeypatch.setattr(scan, "scan_file", _przeplot)
+    s = scan.scan_tree(con, str(kat), volume="V", now=NOW)
+    monkeypatch.undo()
+    return con, p, loc, s
+
+
+def test_skan_przeplatany_z_zapisem_nie_przywraca_starych_faktow(tmp_path, monkeypatch):
+    """Skan przeczytał plik przed zapisem w miejscu, a zapis zakończył się przed ingestem: dawniej
+    spóźniony ingest przywracał stary nagłówek w bazie. Teraz generacja z bramki odrzuca rekord
+    (operacja ma większe `id`) - liczony jak izolacja, baza opisuje plik po zapisie."""
+    con, p, loc, s = _skan_z_przeplotem(tmp_path, monkeypatch, odczyt_pada=False)
+    assert s.isolated == 1 and s.isolated_paths == [str(p)]
+    assert _loc(con, p)["header_hash"] == _hash(p) != loc["header_hash"]
+    assert con.execute("SELECT header_hash FROM location").fetchone()[0] == _hash(p)
+    con.close()
+
+
+def test_skan_blad_odczytu_w_trakcie_zapisu_bez_markera(tmp_path, monkeypatch):
+    """Odczyt skanu padł w trakcie zapisu w miejscu: bez markera nieczytelności (plik niczym nie
+    zawinił), liczony jak izolacja."""
+    con, p, _, s = _skan_z_przeplotem(tmp_path, monkeypatch, odczyt_pada=True)
+    assert s.isolated == 1 and s.frame_review == 0
+    assert con.execute("SELECT unreadable_since FROM location").fetchone()[0] is None
+    con.close()
+
+
+def test_generacja_odrzuca_w_transakcji_klingi(tmp_path):
+    """Strażnik generacji w klindze faktów kopii (wąskie okno między sprawdzeniem w `ingest_record`
+    a zapisem): operacja nowsza niż generacja → `StaleScanRecord`, zero zapisu."""
+    p = _fits(tmp_path / "g.fits")
+    con, loc = _baza_z_plikiem(tmp_path, p)
+    gen = repo.inplace_generation(con)
+    writeback.commit(con, "R", now=NOW, inplace=True)
+    przed = _loc(con, p)["header_hash"]
+    with pytest.raises(repo.StaleScanRecord):
+        repo.refresh_location_unreadable(
+            con, location_id=loc["id"], sha1_data="x", path=str(p), mtime="m", reason="r",
+            kind="io", now=NOW, inplace_gen=gen)
+    with pytest.raises(repo.StaleScanRecord):
+        scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW,
+                           summary=scan.ScanSummary(), inplace_gen=gen)
+    assert _loc(con, p)["header_hash"] == przed
+    assert con.execute("SELECT unreadable_since FROM location").fetchone()[0] is None
+    con.close()
+
+
+def test_spozniony_odzysk_nie_cofa_nowszego_commitu(tmp_path, monkeypatch):
+    """Drugie wywołanie odzysku widziało operację OTWARTĄ przed blokadą; zanim ją dostało, pierwsze
+    odzyskało plik, a user ponownie zapisał TĘ SAMĄ wartość (region = „stan pośredni" starej
+    operacji). Dawniej spóźniony odzysk cofał ten poprawny commit. Teraz faza i brak nowszej
+    operacji są sprawdzane POD blokadą → 'blocked', plik zostaje po nowym commicie."""
+    p = _fits(tmp_path / "s.fits")
+    con, op, _ = _otwarta_operacja(tmp_path, monkeypatch, p)
+    prawdziwy = writeback._exclusive
+    stan = {"raz": True}
+
+    import contextlib
+
+    @contextlib.contextmanager
+    def _przeplot(path):
+        if stan["raz"]:
+            stan["raz"] = False
+            assert writeback.recover_torn(con, op["id"], now=NOW).status == "restored"
+            _stage(con, "R2", _loc(con, p)["id"], "NGC 6992", _hash(p))
+            assert len(writeback.commit(con, "R2", now=NOW, inplace=True).in_place) == 1
+            stan["po_nowym"] = p.read_bytes()
+        with prawdziwy(path) as fh:
+            yield fh
+    monkeypatch.setattr(writeback, "_exclusive", _przeplot)
+
+    w = writeback.recover_torn(con, op["id"], now=NOW)
+    assert w.status == "blocked", w
+    assert fits.getheader(str(p))["OBJECT"] == "NGC 6992" and p.read_bytes() == stan["po_nowym"]
+    assert [o["phase"] for o in _operacje(con)] == ["recovered", "synced"]
+    con.close()
+
+
+def test_nieutrwalona_faza_written_to_operacja_nieukonczona(tmp_path, monkeypatch):
+    """Zapis zweryfikowany, ale przejście do `written` nie zapisało się w bazie: dawniej 'applied'
+    z dopiskiem. Teraz 'failed' (operacja nieukończona), faza `writing` - izolowana; odzysk wraca
+    do pliku sprzed zapisu."""
+    p = _fits(tmp_path / "w.fits")
+    przed = p.read_bytes()
+    con, _ = _baza_z_plikiem(tmp_path, p)
+    prawdziwa = repo.set_inplace_op_phase
+
+    def _pada(con_, **kw):
+        if kw["phase"] == "written":
+            raise sqlite3.OperationalError("database is locked")
+        return prawdziwa(con_, **kw)
+    monkeypatch.setattr(writeback.repo, "set_inplace_op_phase", _pada)
+    res = writeback.commit(con, "R", now=NOW, inplace=True)
+    monkeypatch.undo()
+    assert not res.applied and len(res.failed) == 1 and "NIEUKOŃCZONA" in res.failed[0].reason
+    (op_id, _, faza), = [tuple(o) for o in _operacje(con)]
+    assert faza == "writing" and scan._isolated(con, str(p))
+    assert f"recover_torn({op_id})" in res.failed[0].reason
+    assert writeback.recover_torn(con, op_id, now=NOW).status == "restored"
+    assert p.read_bytes() == przed
+    con.close()
+
+
+def test_nieutrwalona_faza_synced_zostawia_izolacje(tmp_path, monkeypatch):
+    """Re-sync udany, ale `synced` nie zapisało się: dawniej 'applied' przy lokacji bez zamkniętej
+    operacji. Teraz 'failed', faza `written` (izolowana), a `finish_inplace` kończy."""
+    p = _fits(tmp_path / "y.fits")
+    con, _ = _baza_z_plikiem(tmp_path, p)
+    prawdziwa = repo.set_inplace_op_phase
+
+    def _pada(con_, **kw):
+        if kw["phase"] == "synced":
+            raise sqlite3.OperationalError("database is locked")
+        return prawdziwa(con_, **kw)
+    monkeypatch.setattr(writeback.repo, "set_inplace_op_phase", _pada)
+    res = writeback.commit(con, "R", now=NOW, inplace=True)
+    monkeypatch.undo()
+    assert not res.applied and "'synced' NIE zapisana" in res.failed[0].reason
+    op_id = _operacje(con)[0]["id"]
+    assert _operacje(con)[0]["phase"] == "written" and scan._isolated(con, str(p))
+    assert writeback.finish_inplace(con, op_id, now=NOW).status == "applied"
+    assert _operacje(con)[0]["phase"] == "synced"
+    con.close()
+
+
+def test_ponowione_undo_po_obcej_zmianie_regionu_blokuje(tmp_path, monkeypatch):
+    """Undo w miejscu przywróciło nagłówek, re-sync padł (`written`); potem OBCA zmiana tego samego
+    regionu. Dawniej ponowione undo robiło sam re-sync i wciągało obcy nagłówek jako „cofnięte".
+    Teraz pod blokadą region != wynik cofnięcia → 'blocked', baza nietknięta, izolacja trwa."""
+    p = _fits(tmp_path / "x.fits")
+    con, _ = _baza_z_plikiem(tmp_path, p)
+    res = writeback.commit(con, "R", now=NOW, inplace=True)
+    po_commicie = _loc(con, p)["header_hash"]
+    prawdziwy = scan.scan_file
+    _zerwany_udzial(monkeypatch)
+    assert len(writeback.undo(con, res.commit_id, now=NOW).failed) == 1
+    monkeypatch.setattr(writeback.scan, "scan_file", prawdziwy)
+    dane = bytearray(p.read_bytes())
+    slot = dane.index(b"OBJECT  = ")
+    dane[slot:slot + 80] = fits.Card("OBJECT", "NGC 7000", KOMENTARZ).image.encode("ascii")
+    p.write_bytes(bytes(dane))
+    u2 = writeback.undo(con, res.commit_id, now=NOW)
+    assert not u2.restored and len(u2.blocked) == 1, u2
+    assert "nie jest wynikiem" in u2.blocked[0].reason
+    assert _operacje(con)[-1]["phase"] == "written" and _loc(con, p)["header_hash"] == po_commicie
+    assert fits.getheader(str(p))["OBJECT"] == "NGC 7000"
+    con.close()
+
+
+def test_bramka_izolacji_przed_kazda_mutacja_pliku(tmp_path, monkeypatch):
+    """Lokacja z nieukończonym zapisem w miejscu (`written`) - każda inna mutacja pliku odmawia
+    z drogą naprawy: commit atomowy i w miejscu, undo innego commitu, rename; także otwarcie nowej
+    operacji w klindze. Plik bajt w bajt nietknięty."""
+    p = _fits(tmp_path / "b.fits")
+    con, loc = _baza_z_plikiem(tmp_path, p)
+    _stage(con, "A", loc["id"], "NGC 6992", loc["header_hash"])
+    atomowy = writeback.commit(con, "A", now=NOW)                  # wcześniejszy commit atomowy
+    assert len(atomowy.applied) == 1 and not atomowy.in_place
+    h = _hash(p)
+    _stage(con, "W", loc["id"], "NGC 7000", h)
+    _zerwany_udzial(monkeypatch)
+    assert len(writeback.commit(con, "W", now=NOW, inplace=True).failed) == 1
+    monkeypatch.undo()
+    op_id = _operacje(con)[0]["id"]
+    zamrozony = p.read_bytes()
+
+    for run, inplace in (("B", False), ("B2", True)):
+        _stage(con, run, loc["id"], "M 42", _hash(p))
+        wynik = writeback.commit(con, run, now=NOW, inplace=inplace)
+        assert len(wynik.blocked) == 1 and f"finish_inplace({op_id})" in wynik.blocked[0].reason
+    u = writeback.undo(con, atomowy.commit_id, now=NOW)
+    assert len(u.blocked) == 1 and f"finish_inplace({op_id})" in u.blocked[0].reason
+    repo.stage_rename(con, run_id="N", location_id=loc["id"], old_path=str(p),
+                      new_path=str(tmp_path / "nowa.fits"),
+                      expected_mtime=con.execute("SELECT mtime FROM location WHERE id = ?",
+                                                 (loc["id"],)).fetchone()[0])
+    rn = writeback.commit_renames(con, "N", now=NOW)
+    assert len(rn.blocked) == 1 and "izolowany" in rn.blocked[0].reason
+    with pytest.raises(ValueError):
+        repo.begin_inplace_undo(con, commit_id=None, location_id=loc["id"],
+                                spec=writeback._spec_z_operacji(
+                                    con.execute("SELECT * FROM inplace_op").fetchone()), now=NOW)
+    assert p.read_bytes() == zamrozony and p.exists()
+    con.close()
 
 
 # ============================================================ SKRYPT KONTROLI PILOTAŻU (Z16)

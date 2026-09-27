@@ -1322,9 +1322,16 @@ CATALOG = {
         "pl": "\n    mówi inaczej: {fields}", "en": "\n    says otherwise: {fields}",
     },
     "grid.tip.copy_field_images": {"pl": "obrazy", "en": "images"},
+    # DWIE DROGI W JEDNYM ZDANIU, bo podpowiedź nie wie, która jest prawdziwa: kopia „obecna" w bazie
+    # może już nie mieć pliku na dysku, a wtedy Dostawa jej nie uzupełni nigdy - recepta z samym
+    # „Przyjmij nowe” prowadziła w ślepy zaułek. Sprawdzenia dysku w podpowiedzi NIE robimy (udział
+    # SMB pod kursorem myszy), rozstrzyga pass obecności. Nazwy miejsca i przycisku czytane
+    # z katalogu (`{place}`, `{mark}`), żeby zdanie nie rozjechało się z ekranem po zmianie etykiety.
     "grid.tip.copy_unread": {
-        "pl": "\n    zeznanie nagłówka jeszcze niezebrane (uzupełni je „Przyjmij nowe”)",
-        "en": "\n    header testimony not collected yet (“Take new” will fill it in)",
+        "pl": "\n    zeznanie nagłówka jeszcze niezebrane (uzupełni je „Przyjmij nowe”; "
+              "jeśli pliku nie ma już na dysku - {place} → „{mark}”)",
+        "en": "\n    header testimony not collected yet (“Take new” will fill it in; "
+              "if the file is no longer on disk - {place} → “{mark}”)",
     },
     # HISTORIA PRZEPROWADZKI, nie ostrzeżenie (D-V-9, wariant rozwojowy). Zdanie jest w czasie
     # przeszłym i bez wykrzyknika, bo nic tu nie wymaga roboty: plik ŻYJE pod adresem z komórki,
@@ -2062,6 +2069,12 @@ CATALOG = {
         "pl": "zmienione na dysku od skanu {n} (dogoni je skan)",
         "en": "changed on disk since the scan {n} (the scan will catch up)",
     },
+    # Kopia skasowana z dysku, o której baza jeszcze nie wie - nie „nieczytelna": człon mówi, gdzie
+    # jest gest, który ją zamyka (pass obecności w Dostawie).
+    "pipeline.fmt.copy_facts.missing": {
+        "pl": "brak pliku {n} - Dostawa → „Oznacz zniknięte”",
+        "en": "file missing {n} - Intake → “Mark vanished”",
+    },
     "pipeline.fmt.copy_facts.failed": {"pl": "nieczytelne {n}", "en": "unreadable {n}"},
     "pipeline.fmt.copy_facts.remaining": {"pl": "czeka {n}", "en": "waiting {n}"},
     "pipeline.counts_copy_facts": {
@@ -2614,6 +2627,14 @@ CATALOG = {
     # już zajęte przez sąsiada wyżej, a tu obecne kopie bywają zgodne ze sobą).
     "tasks.orphan_testimony_frames": {
         "pl": "Zeznanie z nieobecnej kopii", "en": "Testimony from a missing copy"},
+    # Człon drugi dwóch wierszy wyżej, gdy ich zero znaczy „nie wiem": fakty części kopii czekają
+    # na etap Dostawy, a kopia bez faktów w porównaniu nie bierze udziału. „?" mówi, że liczby nie
+    # ma; reszta mówi, co ją da. Krótko, bo człon drugi nie jest elidowany i zabiera miejsce nazwie.
+    "tasks.copies_await_intake": {
+        "pl": {"one": "? · {n} kopia czeka na Dostawę", "few": "? · {n} kopie czekają na Dostawę",
+               "many": "? · {n} kopii czeka na Dostawę"},
+        "en": {"one": "? · {n} copy awaits Intake", "other": "? · {n} copies await Intake"},
+    },
     "tasks.vanished_frames": {"pl": "Zniknięte z dysku", "en": "Vanished from disk"},
     # NAZWA MÓWI O UBYTKU, NIE O AWARII (D-V-9a). Wiersz stoi obok „Zniknięte z dysku" i musi się
     # od niego odróżniać JEDNYM spojrzeniem: tam nie ma ani jednej żywej kopii i jest robota, tu

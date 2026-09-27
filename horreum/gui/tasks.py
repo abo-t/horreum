@@ -11,13 +11,13 @@ KIERUNEK IMPORTÓW (F5R2#1): ten moduł importuje widoki osi z `horreum.gui.app`
 na górze `app.py` domknąłby cykl → ImportError na starcie aplikacji.
 
 Kontrakt montażu: `TasksView(con, now_fn, parent)`; pod-widoki osi wystawione jako `.axis_view`/
-`.observatory_view`/`.object_view` (MainWindow ALIASUJE je na sobie — kontrakt `_on_stage_finished`/
-`_on_pipeline_running` przeżywa przemontowanie bez zmian). `now_fn` FORWARDOWANE do pod-widoków
-(F5R#2 — otrzymany argument, nie własny default: akcje osi w podstronach piszą wstrzykniętym
-zegarem, asercja tożsamości `_now` w testach stabilna).
+`.observatory_view`/`.object_view` (MainWindow ALIASUJE je na sobie - kontrakt
+`_odswiez_widoki_po_przebiegu`/`_on_pipeline_running` przeżywa przemontowanie bez zmian).
+`now_fn` FORWARDOWANE do pod-widoków (F5R#2 - otrzymany argument, nie własny default: akcje osi
+w podstronach piszą wstrzykniętym zegarem, asercja tożsamości `_now` w testach stabilna).
 
 Świadomy cykl odświeżania: licznik NIE odświeża się na żywo w trakcie pracy w podstronie —
-`refresh_counts()` woła gospodarz przy montażu / po etapie pipeline'u / na wejściu w Porządki,
+`refresh_counts()` woła gospodarz przy montażu / po przebiegu Dostawy / na wejściu w Porządki,
 a sam widok przy powrocie „← Porządki" (user mógł nazwać teleskopy w podstronie)."""
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QBrush, QColor
@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from horreum import scan
 from horreum.gui import i18n, queries, rows, theme
 from horreum.gui.app import (
     ObjectAxisView, ObservatoryAxisView, TelescopeAxisView, _utc_now_iso,
@@ -98,9 +99,9 @@ _TASKS = [
     ("copy_conflict_frames", "tasks.copy_conflict_frames", PRESET_COPY_CONFLICT),
     # Wiersz AKCYJNY i ROBOTA (AR-5) - stoi pod „Kopiami niezgodnymi", bo to ta sama rodzina pytań.
     # Tam kopie kłócą się ze sobą; tu zgadzać się mogą, ale `header` mówi głosem kopii, której już
-    # nie ma. Klatki o jednej obecnej kopii i zeznaniu spoza ręki naprawia Dostawa bez pytania, więc
-    # wiersz liczy wyłącznie te, przy których kopię wiodącą wskazuje człowiek (AR-4): ≥2 obecne
-    # kopie albo zeznanie, które napisała ręka („Napraw nagłówek…").
+    # nie ma. Kopię wiodącą wskazuje człowiek (AR-4) przy ≥2 obecnych kopiach albo zeznaniu z ręki;
+    # klatki o jednej kopii naprawia etap Dostawy, ale tylko pod korzeniem, po którym chodzi - więc
+    # wiersz liczy wszystkie (`queries.orphan_testimony_frame_ids`), żeby żadna nie czekała niewidoczna.
     ("orphan_testimony_frames", "tasks.orphan_testimony_frames", PRESET_ORPHAN_TESTIMONY),
     # Wiersz AKCYJNY (0022, Q8): kopia po przerwanym zapisie nagłówka w miejscu, izolowana od skanu.
     # Robota człowieka: odzysk z dziennika operacji albo zwolnienie po własnym rozstrzygnięciu.
@@ -146,6 +147,14 @@ _TASKS = [
 # NATURZE, i tak samo czyta go badge, jak i pogrubienie.
 _BEZ_ROBOTY = frozenset({"superseded_frames", "retired_frames", "missing_copy_frames",
                          "stack_versions"})
+
+# WIERSZE, KTÓRYCH ZERO JEST WIEDZĄ DOPIERO PO ZEBRANIU FAKTÓW KOPII (0021). Oba predykaty porównują
+# zeznania kopii, a kopia bez faktów w porównaniu nie bierze udziału - więc przed pierwszą Dostawą
+# po migracji „0" znaczyło „nie wiem", a wyglądało jak „sprawdzone, czysto". Gdy są kopie czekające
+# na fakty, zero tych wierszy mówi „?" i to, co da liczbę. Liczba i lista pod klikiem dalej czytają
+# jeden predykat; zmienia się wyłącznie to, jak wiersz wypowiada swoje zero. „?" nie jest robotą:
+# nie pogrubia się i nie wchodzi do plakietki (robotą jest Dostawa, nie ten wiersz).
+_CZEKA_NA_FAKTY_KOPII = frozenset({"copy_conflict_frames", "orphan_testimony_frames"})
 
 
 class TasksView(QWidget):
@@ -258,18 +267,23 @@ class TasksView(QWidget):
 
     def refresh_counts(self):
         """Przeładuj liczniki zadań ze stanu (`queries.tasks_state`) i wyemituj badge
-        (`counts_changed` = liczba pozycji akcyjnych z n>0). Woła gospodarz (montaż / po etapie /
-        wejście w Porządki) i powrót z podstrony."""
+        (`counts_changed` = liczba pozycji akcyjnych z n>0). Woła gospodarz (montaż / po przebiegu
+        Dostawy / wejście w Porządki / sygnał stanu Porządków z gestu Zbiorów) i powrót z podstrony."""
         state = queries.tasks_state(self.con)
+        # Kopie czekające na fakty - WOŁANE, nie powielane: predykat ma jednego właściciela, a ten
+        # sam SELECT steruje etapem Dostawy, więc „czeka N" znaczy dokładnie „etap ma N do zrobienia".
+        czeka = len(scan.copy_facts_candidates(self.con))
         badge = 0
         for row, (key, label, action) in enumerate(_TASKS):
             n = state[key]
             it = self.tasks.item(row)
+            niewiadome = n == 0 and czeka > 0 and key in _CZEKA_NA_FAKTY_KOPII
             # akcyjne z chevronem „›" — wiersz ZAPRASZA klik; informacyjne bez (wizytator F5 #2).
             # Liczba idzie w CZŁON DRUGI (prawa kolumna, `rows.SECONDARY`), nie w tekst etykiety —
             # inaczej liczby nie ustawiają się w kolumnę i nie da się ich skanować (wiz F5 #6).
             it.setText(i18n.t(label))
-            it.setData(rows.SECONDARY, f"{n}  ›" if action is not None else str(n))
+            liczba = i18n.t_plural("tasks.copies_await_intake", czeka) if niewiadome else str(n)
+            it.setData(rows.SECONDARY, f"{liczba}  ›" if action is not None else liczba)
             # Pogrubienie liczby = „TU JEST ROBOTA", więc jest rolą WIERSZA, nie całej listy
             # (wiz P1 #6): wiersz wyszarzony — informacyjny albo akcyjny z n=0 — dostawał
             # pogrubione „0" mimo wyszarzenia, czyli krzyczał dokładnie tam, gdzie nie ma nic
@@ -283,7 +297,9 @@ class TasksView(QWidget):
                 # kopie 128" stoi obok „Zniknięte z dysku 3" i jest największą liczbą na liście —
                 # wzrok czyta większą liczbę jako większy problem, czyli dokładnie odwrotnie do
                 # tego, po co ten stan powstał. Szare = „nie ma tu roboty", nie „nie da się kliknąć".
-                it.setForeground(QBrush() if n > 0 and key not in _BEZ_ROBOTY else _DIM["fg"])
+                # „?" NIE jest szare: szarość znaczy „nic do zrobienia", a tu jest - Dostawa.
+                it.setForeground(QBrush() if (n > 0 or niewiadome) and key not in _BEZ_ROBOTY
+                                 else _DIM["fg"])
             if live:
                 badge += 1
         self._fit_task_list()          # metryki fontu są prawdziwe dopiero po `show()`

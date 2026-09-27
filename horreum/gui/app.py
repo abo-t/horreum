@@ -2504,8 +2504,8 @@ class ObjectAxisView(QWidget):
 
     def set_busy(self, busy):
         """Pipeline w biegu → wygaszenie akcji zapisu („Przypisz obiekt…" #8/P4, „Napraw nagłówek…"
-        P-D) — szczery disabled. Read-modele odświeża gospodarz DOPIERO po `stage_finished`
-        (WAL → zapisy workera widoczne), więc SELECT w trakcie zapisu tu nie zachodzi.
+        P-D) - szczery disabled. Read-modele odświeża gospodarz DOPIERO po końcu przebiegu
+        (`running_changed(False)`; WAL → zapisy workera widoczne), więc SELECT w trakcie zapisu tu nie zachodzi.
 
         OTWARTE okno naprawy jest MODALNE, więc poza zasięgiem tej metody (gasi widżety WIDOKU) —
         fakt przekazujemy mu wprost, inaczej „Zapisz karty" zostałby klikalny w trakcie biegu."""
@@ -2894,6 +2894,11 @@ class MainWindow(QMainWindow):
         # Wstrzykiwane wywołanie zwrotne „zmieniono bazę" (wzór jak `now_fn`): `main` podpina tu zapis
         # ostatniej ścieżki do trwałych ustawień; testy go nie podają → brak skutków ubocznych.
         self._on_db_changed = on_db_changed
+        # Straż ponownego wejścia w odświeżenie widoków po przebiegu Dostawy (patrz
+        # `_odswiez_widoki_po_przebiegu`): druga prośba w trakcie nie zagnieżdża się, tylko zamawia
+        # jeden obrót więcej po skończeniu bieżącego.
+        self._odswiezam_widoki = False
+        self._odswiez_jeszcze_raz = False
         # Numer wersji W TYTULE, bo wydanie jedzie do użytkownika jako JEDEN plik `horreum-gui.exe`
         # (onefile — CLI `horreum --version` nie powstaje) i okno jest wtedy jedyną powierzchnią,
         # na której da się sprawdzić, co się ma. Numer czytany, nie pisany (`horreum/__init__.py`).
@@ -3095,7 +3100,8 @@ class MainWindow(QMainWindow):
         self._clear_views()
         pipeline = PipelineView(self.db_path, now_fn=self._now)
         pipeline.status_message.connect(self._flash)
-        pipeline.stage_finished.connect(self._on_stage_finished)
+        # `stage_finished` ŚWIADOMIE NIEPODPIĘTE: widoki odświeża koniec PRZEBIEGU
+        # (`running_changed(False)`), nie koniec etapu - patrz `_odswiez_widoki_po_przebiegu`.
         pipeline.running_changed.connect(self._on_pipeline_running)
         pipeline.open_collection.connect(self._on_open_collection)   # P5b: raport → perspektywa (3→1)
         self.pipeline_view = pipeline
@@ -3154,25 +3160,50 @@ class MainWindow(QMainWindow):
         self._show_view(NAV_DOSTAWA)
         tasks.refresh_counts()    # badge żywy od MONTAŻU (F5R#1) — connect i pozycje nav już stoją
 
-    def _on_stage_finished(self, name):
-        """Etap pipeline'u zakończył zapis (worker, własne połączenie). Read-modele osi w głównym
-        wątku odświeżamy DOPIERO TERAZ (nie w trakcie skanu — WAL → zapisy workera widoczne). Oś obiektu
-        przeładowuje też facety (skan/resolver mogły dodać teleskopy/filtry/obiekty).
+    def _odswiez_widoki_po_przebiegu(self):
+        """Przebieg Dostawy się skończył (worker, własne połączenie) - read-modele w głównym wątku
+        odświeżamy DOPIERO TERAZ (WAL → zapisy workera widoczne). Oś obiektu i grid przeładowują też
+        facety (skan/resolver mogły dodać teleskopy/filtry/obiekty/keywordy).
 
-        POD NAZWANĄ FAZĄ (F-1): to sześć przeładowań pod rząd, zmierzone ~1,2 s na żywej `pf4`,
-        i lecą DOKŁADNIE w chwili, w której pasek Dostawy właśnie zgasł — czyli user widzi „etap
-        zakończony" i zaraz potem nieruchome okno. Faza domyka tę lukę."""
-        with busy.busy(self._say_phase, i18n.t("busy.refresh_views")):
-            self.axis_view.refresh()
-            self.observatory_view.refresh()
-            self.object_view._load_facets()
-            self.object_view.refresh()
-            self.grid_view._load_facets()
-            self.grid_view.refresh()
-            self.tasks_view.refresh_counts()    # liczniki zadań + badge ze świeżego stanu (F5)
-            # Planer (T5): świeże klatki zmieniają POKRYCIE celów (godziny per kanał), więc plan nocy
-            # policzony przed dostawą pokazywałby stare luki.
-            self.planner_view.refresh()
+        RAZ NA PRZEBIEG, NIE RAZ NA ETAP. Do tej zmiany każdy `stage_finished` przeładowywał tu
+        wszystkie widoki. Zmierzone na kopii żywej bazy (16 901 klatek, ~1 mln wierszy `cards`):
+        11,7 s na etap, z czego 8,4 s to `_load_facets` gridu (samo zapytanie `keyword_facets`
+        5,4-6,6 s), a „Przyjmij nowe" ma do dziewięciu etapów - okno stało łącznie ~88 s na
+        przebieg. Raport każdego etapu pokazuje sam widok Dostawy, a akcje zapisu pozostałych widoków
+        są w trakcie przebiegu i tak wygaszone (`set_busy`), więc ich odświeżenie w połowie łańcucha
+        nie dawało userowi nic poza nieruchomym oknem.
+
+        STRAŻ PONOWNEGO WEJŚCIA. Faza (`busy`) woła `processEvents`, a to doręcza sygnały zebrane
+        w kolejce - przy odświeżeniu per etap doręczało W ŚRODKU odświeżenia koniec KOLEJNEGO etapu
+        z wątku tła, więc odświeżenia zagnieżdżały się i kończyły w odwróconej kolejności. Po końcu
+        przebiegu wątku tła już nie ma, ale strażnik zostaje: prośba, która przyjdzie w trakcie,
+        nie zagnieżdża się, tylko zamawia jeden pełny obrót więcej PO bieżącym - czyli ostatnie
+        słowo zawsze ma odczyt nowszy niż ostatni zapis.
+
+        POD NAZWANĄ FAZĄ (F-1): przeładowania lecą DOKŁADNIE w chwili, w której pasek Dostawy
+        właśnie zgasł - bez fazy user widzi „zakończono" i zaraz potem nieruchome okno."""
+        if self._odswiezam_widoki:
+            self._odswiez_jeszcze_raz = True
+            return
+        self._odswiezam_widoki = True
+        try:
+            while True:
+                self._odswiez_jeszcze_raz = False
+                with busy.busy(self._say_phase, i18n.t("busy.refresh_views")):
+                    self.axis_view.refresh()
+                    self.observatory_view.refresh()
+                    self.object_view._load_facets()
+                    self.object_view.refresh()
+                    self.grid_view._load_facets()
+                    self.grid_view.refresh()
+                    self.tasks_view.refresh_counts()    # liczniki zadań + badge ze świeżego stanu (F5)
+                    # Planer (T5): świeże klatki zmieniają POKRYCIE celów (godziny per kanał), więc
+                    # plan nocy policzony przed dostawą pokazywałby stare luki.
+                    self.planner_view.refresh()
+                if not self._odswiez_jeszcze_raz:
+                    break
+        finally:
+            self._odswiezam_widoki = False
         self._end_phase()
 
     def _on_open_collection(self, name):
@@ -3241,6 +3272,11 @@ class MainWindow(QMainWindow):
         self.grid_view.set_busy(running)     # grid ma akcje ZAPISU (staging/commit/undo) — gatuj (wizytator C1)
         self.planner_view.set_busy(running)  # planer czyta CAŁE archiwum — nie liczmy nocy na wpół zapisanej bazie
         if not running:
+            # KONIEC PRZEBIEGU = JEDNO odświeżenie wszystkich widoków i plakietki. Bez warunku
+            # „czy etap coś zapisał": przebieg przerwany albo zakończony błędem też mógł zapisać
+            # (etapy łańcucha przed błędem, częściowy skan), a `running_changed(False)` przychodzi
+            # w każdej z tych dróg - `_cleanup_thread` woła je po KAŻDYM końcu wątku.
+            self._odswiez_widoki_po_przebiegu()
             # PANEL RODOWODU CZYTA STAN, KTÓRY ETAP WŁAŚNIE PRZEPISAŁ (bramka pakietu, zarzut 7).
             # Bez tego takt 3 kończył się gorzej, niż zaczynał: gest uruchamiał przeliczenie, panel
             # zostawał z zapisem sprzed niego i etykietą „nieaktualny", a user nie miał jak jej zdjąć

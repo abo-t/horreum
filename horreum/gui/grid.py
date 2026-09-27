@@ -667,7 +667,8 @@ def _dup_tip(row):
             if any(r is not None for r in role):
                 tip += f" ({', '.join('?' if r is None else str(r) for r in role)})"
         if c["hdr_hash"] is None:
-            tip += i18n.t("grid.tip.copy_unread")
+            tip += i18n.t("grid.tip.copy_unread", place=i18n.t("nav.dostawa"),
+                          mark=i18n.t("pipeline.btn.mark_vanished"))
         elif c["_rozne"]:
             pola = [i18n.t("grid.tip.copy_field_images") if e == queries.COPY_IMAGES
                     else f"{e}={_wartosc_zeznania(c[_KOPIA_KEYWORD_KOLUMNA[e]])}"
@@ -2683,7 +2684,12 @@ class FramesView(QWidget):
     # przez to plakietka zostawała przy liczbie sprzed „Przywróć"/„Wycofaj" do wejścia w Porządki.
     # Dopinanie odświeżenia przy każdym geście osobno to figura, która w tym repo rozjeżdżała się
     # już kilka razy („etykieta kłamie"); właściciel emisji jest jeden - ogon gestu. Emitują:
-    # `_po_gescie_osi` i `_po_gescie_klatki`, wyłącznie gdy gest coś zapisał.
+    # `_po_gescie_osi`, `_po_gescie_klatki`, gesty panelu rodowodu i ogony writebacku (makro:
+    # `_after_commit`/`_after_undo`, rename: `_after_commit_rename`/`_after_undo_rename`, błąd:
+    # `_on_wb_failed`), wyłącznie gdy gest coś zapisał (ogon błędu - zawsze, bo nie wie, ile zdążył
+    # zapisać). Rename jest tu dla JEDNEJ reguły, nie dlatego, że dziś wiadomo, który wiersz czyta
+    # `location.path`: „każdy ogon zapisu emituje" nie wymaga pamiętania, który wiersz Porządków
+    # czyta które pole, a kosztuje jedno `tasks_state` po geście.
     stan_porzadkow_changed = Signal()
     # Mutex DWÓCH powierzchni writebacku (D-PD-3): gospodarz przekazuje ten fakt drugiej powierzchni
     # (dialog „Napraw nagłówek…"). Dwa równoległe commity spotkałyby się na `BEGIN IMMEDIATE`
@@ -2936,7 +2942,7 @@ class FramesView(QWidget):
         self.macro_bar.set_keywords(self._all_keywords)
         # perspektywy: presety (kod) + zapisane w BAZIE (I-1)
         # POZYCJA PRZEŻYWA ODBUDOWĘ LISTY (bliźniak BP-5 w `_load_facets`): `clear()` zostawiał indeks
-        # 0, a gospodarz woła tę metodę z `refresh()` po każdym etapie Dostawy - combo mówiło wtedy
+        # 0, a gospodarz woła tę metodę z `refresh()` po każdym przebiegu Dostawy - combo mówiło wtedy
         # „Przegląd" nad zbiorem z trimem. Wracamy na tę samą pozycję PO DANYCH i bez sygnału, bo stan
         # się nie zmienił. Pozycji, której już nie ma, tu nie zgadujemy: rozstrzyga właściciel
         # etykiety na końcu `_refresh`.
@@ -4633,6 +4639,10 @@ class FramesView(QWidget):
         self.refresh()
         self._refresh_drawer()
         self.status_message.emit(i18n.t("grid.wb.failed", op=op, msg=msg))
+        # Wyjątek w ŚRODKU operacji nie mówi, ile plików zdążyło się zmienić (każdy plik to osobny
+        # zapis), a przerwany zapis w miejscu sam jest wierszem Porządków (kopia izolowana) - więc
+        # plakietka liczy się ze stanu także tu, bez zgadywania, czy coś się zapisało.
+        self.stan_porzadkow_changed.emit()
 
     def _on_wb_cancel(self):
         if self._wb.is_busy:
@@ -4674,6 +4684,12 @@ class FramesView(QWidget):
         self.refresh()                                   # baza odświeżona — grid pokazuje nowe wartości
         self._refresh_drawer()
         self.status_message.emit(i18n.t("grid.wb.status", summary=summary))
+        # Karta w pliku to zeznanie klatki (`header`, `cards`), a z niego liczą się wiersze Porządków
+        # („Nagłówek inny niż folder", kopie niezgodne…) - więc commit, który COKOLWIEK podmienił,
+        # rusza plakietkę. Warunek to reguła „Cofnij" (plik zmieniony, także `failed` z kopią
+        # nagłówka) albo niepuste `applied` przy przerwaniu anulowaniem.
+        if res.applied or commit_do_cofniecia(res) is not None:
+            self.stan_porzadkow_changed.emit()
 
     def _install_undo(self, commit_id, summary, applied):
         """Po udanym commicie makra szuflada oferuje jednorazowe „Cofnij" (undo całego commitu). Etykieta
@@ -4725,6 +4741,8 @@ class FramesView(QWidget):
         self.refresh()
         self._refresh_drawer()                           # honest: odbij pending drugiej klingi (wiz #3b)
         self.status_message.emit(i18n.t("grid.wb.undo_status", msg=msg))
+        if res.restored:                                 # lustro commitu: zeznanie wróciło (patrz `_after_commit`)
+            self.stan_porzadkow_changed.emit()
 
     def _on_reject(self):
         if self._rename_pending_count() > 0:             # szuflada aktywnej klingi (staging mutex)
@@ -4860,6 +4878,8 @@ class FramesView(QWidget):
         self.refresh()                                   # baza odświeżona — grid pokazuje nowe ścieżki
         self._refresh_drawer()
         self.status_message.emit(i18n.t("grid.rename.status_summary", summary=summary))
+        if res.applied:                                  # ogon zapisu → plakietka (definicja sygnału)
+            self.stan_porzadkow_changed.emit()
 
     def _install_rename_undo(self, run_id, summary, applied):
         """Po udanym rename szuflada oferuje „Cofnij" (undo_renames przebiegu). Lustro `_install_undo`
@@ -4889,6 +4909,8 @@ class FramesView(QWidget):
         self.refresh()
         self._refresh_drawer()
         self.status_message.emit(i18n.t("grid.rename.undo_status", msg=msg))
+        if res.restored:                                 # lustro commitu renamu
+            self.stan_porzadkow_changed.emit()
 
     def _on_reject_rename(self):
         if self._rename_run_id is None:

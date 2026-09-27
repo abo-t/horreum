@@ -1438,18 +1438,20 @@ def _already_scanned(con, volume, path, mtime):
 
 
 def _isolated(con, path, volume=None):
-    """IZOLACJA PO PRZERWANYM ZAPISIE W MIEJSCU (0022, Q8): czy kopia pod `path` (na `volume`, gdy
-    podany) ma OTWARTĄ operację `inplace_op` (`repo.INPLACE_OPEN_PHASES`). Taka kopia może mieć
-    rozdarty nagłówek - skan uznałby ją za podmianę treści i rozdwoił klatkę, a marker
-    `unreadable_*` wymusiłby ponowny odczyt. Wszystkie drogi czytające pliki kopii (skan drzewa,
-    skan stosów, uzupełnienia faktów, przejęcie zeznania) pomijają ją BEZWARUNKOWO - także przy
-    wyłączonej bramie przyrostowej - aż do odzysku (`writeback.recover_torn`) albo jawnego
+    """IZOLACJA PO ZAPISIE W MIEJSCU (0022, Q8): czy kopia pod `path` (na `volume`, gdy podany) ma
+    operację `inplace_op` w fazie IZOLUJĄCEJ (`repo.INPLACE_ISOLATING_PHASES`): otwartej (nagłówek
+    mógł zostać rozdarty) albo `written` (plik zapisany, ale kontrola danych i re-sync bazy jeszcze
+    się nie udały - astra 2026-09-27; dawniej izolacja znikała przed re-synciem). Skan uznałby taką
+    kopię za podmianę treści i rozdwoił klatkę, a marker `unreadable_*` wymusiłby ponowny odczyt.
+    Wszystkie drogi czytające pliki kopii (skan drzewa, skan stosów, uzupełnienia faktów, przejęcie
+    zeznania) pomijają ją BEZWARUNKOWO - także przy wyłączonej bramie przyrostowej - aż do
+    dokończenia (`writeback.finish_inplace`), odzysku (`writeback.recover_torn`) albo jawnego
     zwolnienia (`repo.release_inplace_op`). Czysta funkcja `con→bool`, stały literał SELECT."""
     row = con.execute(
         "SELECT 1 FROM location l JOIN inplace_op o ON o.location_id = l.id "
         "WHERE l.path = ? AND (? IS NULL OR l.volume = ?) "
         "AND o.phase IN (SELECT value FROM json_each(?)) LIMIT 1",
-        (path, volume, volume, json.dumps(list(repo.INPLACE_OPEN_PHASES)))).fetchone()
+        (path, volume, volume, json.dumps(list(repo.INPLACE_ISOLATING_PHASES)))).fetchone()
     return row is not None
 
 
@@ -1522,7 +1524,7 @@ def _record_identity(rec):
 
 
 def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, summary,
-                  actor="scan"):
+                  actor="scan", inplace_gen=None):
     """Wciągnij JEDEN `ScanRecord` przez jedną klingę (`repo`) — JĄDRO wspólne dla skanu drzewa
     (`scan_tree`) i importu z dawcy (rekord pochodzi z nagłówka pliku ALBO z cache'owanego
     źródła). Mutuje `summary`; zapis WYŁĄCZNIE przez `repo` (zero DML tutaj). `actor` idzie do
@@ -1564,6 +1566,14 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
     nagrywamy (reguła N-lokacji). Dzięki temu rozjazd kopii jest wyliczalny ze stanu, a `header`
     klatki zostaje przy swojej regule (pierwsza kopia, potem ta, której odcisk zmienił się ostatnio).
 
+    GENERACJA ZAPISU W MIEJSCU (`inplace_gen`, astra 2026-09-27): skan czyta generację dziennika
+    (`repo.inplace_generation`) PRZED bramką izolacji, bo bramka i odczyt pliku to osobne chwile -
+    zapis w miejscu mógł zacząć się po bramce. Znana lokacja z operacją o większym `id` →
+    `repo.StaleScanRecord` PRZED jakimkolwiek zapisem tej ścieżki (także przed nową klatką gałęzi
+    podmiany), a klinga faktów kopii sprawdza to samo w transakcji zapisu (wąskie okno między tym
+    sprawdzeniem a zapisem). Wołający liczy to jak izolację, bez markera nieczytelności. `None` =
+    wołający nie jest skanem (re-sync pisarza `writeback._resync`, import) - bez sprawdzenia.
+
     NIE łapie wyjątków — backstop bez tożsamości (sha1 nieznany → `frame.review`, sha1='?') należy
     do wołającego (`scan_tree` / import), bo to on wie, jak zidentyfikować rekord do review."""
     readable = rec.header is not None
@@ -1602,6 +1612,10 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
         return
 
     # ── ścieżka ZNANA: kontrakt świeżości §2 ──
+    if inplace_gen is not None and repo.newer_inplace_op(con, location_id=loc["id"],
+                                                         op_id=inplace_gen):
+        raise repo.StaleScanRecord(f"location:{loc['id']} ma operację zapisu w miejscu nowszą "
+                                   f"niż odczyt skanu (generacja {inplace_gen})")
     frame_row = con.execute(
         "SELECT sha1_data FROM frame WHERE id = ?", (loc["frame_id"],)).fetchone()
 
@@ -1614,7 +1628,8 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
         summary.frames_existing += 1
         if repo.refresh_location_unreadable(
                 con, location_id=loc["id"], sha1_data=frame_row["sha1_data"], path=rec.path,
-                mtime=rec.mtime, reason=rec.error, kind=rec.error_kind, now=now, actor=actor):
+                mtime=rec.mtime, reason=rec.error, kind=rec.error_kind, now=now, actor=actor,
+                inplace_gen=inplace_gen):
             summary.frame_review += 1
         return
 
@@ -1637,7 +1652,7 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
         else:
             summary.frames_existing += 1
         repo.rebind_location(con, location_id=loc["id"], frame_after=frame_id, now=now,
-                             actor=actor)
+                             actor=actor, inplace_gen=inplace_gen)
         summary.locations_rebound += 1
         if not created and repo.clear_superseded(con, frame_id=frame_id, now=now, actor=actor):
             # POWRÓT TREŚCI (#DR2/R4, D-DR-4): pod tą ścieżką znów leży tożsamość, którą wcześniej
@@ -1659,7 +1674,7 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
             file_sha1=rec.file_sha1, header_hash=rec.header_hash, hdu_index=rec.hdu_index,
             compressed=rec.compressed, size_bytes=rec.size_bytes, unreadable_since=unreadable_after,
             unreadable_kind=kind_after, unreadable_reason=reason_after,
-            present=1, now=now, actor=actor, copy_facts=copy_facts)
+            present=1, now=now, actor=actor, copy_facts=copy_facts, inplace_gen=inplace_gen)
         summary.locations_refreshed += refreshed["facts"]
         return
 
@@ -1673,7 +1688,7 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
         present=1, now=now, actor=actor,
         raw_json=json.dumps(rec.header, ensure_ascii=False) if readable else None,
         cards=rec.cards, hot_fields=extract_header(rec.header) if readable else None,
-        camera_id=camera_id, kind=kind, copy_facts=copy_facts)
+        camera_id=camera_id, kind=kind, copy_facts=copy_facts, inplace_gen=inplace_gen)
     summary.locations_refreshed += refreshed["facts"]
     summary.headers_refreshed += refreshed["header"]
     if loc["present"] == 0 and repo.clear_superseded(con, frame_id=frame_id, now=now, actor=actor):
@@ -1796,19 +1811,28 @@ class CopyFactsSummary:
     read: int = 0             # nagłówek przeczytany
     written: int = 0          # fakty zapisane (`repo.record_copy_facts` → True)
     stale: int = 0            # nagłówek na dysku ≠ znany odcisk kopii → ZERO zapisu (dogoni skan)
-    failed: int = 0           # odczyt nagłówka padł → ZERO zapisu
+    missing: int = 0          # pliku nie ma w ISTNIEJĄCYM katalogu (skasowany) → ZERO zapisu;
+                              # robota passa obecności („Oznacz zniknięte"), nie „nieczytelne"
+    failed: int = 0           # odczyt nagłówka padł (albo nie ma całego katalogu) → ZERO zapisu
     remaining: int = 0        # kandydaci PO przebiegu (0 = komplet)
     cancelled: bool = False
     failed_paths: list = field(default_factory=list)
     stale_paths: list = field(default_factory=list)
+    missing_paths: list = field(default_factory=list)
 
 
 def copy_facts_candidates(con, root=None):
     """Kandydaci uzupełnienia faktów kopii (0021): kopie OBECNE, o znanym odcisku nagłówka, bez
     zebranych faktów (`hdr_hash IS NULL`) - XISF wszystkie (liczba i role obrazów żyją tylko tam)
-    plus KAŻDA kopia klatki, która ma >1 obecną kopię (tylko tam jest z czym porównywać zeznanie).
+    plus KAŻDA kopia klatki, która ma >1 lokację OGÓŁEM (tylko tam jest z czym porównywać zeznanie).
     Reszta archiwum dostaje fakty przy najbliższym odczycie skanem - uzupełnienie nie czyta 15 tys.
     FITS-ów po to, żeby zapisać fakty, których nikt nie porówna.
+
+    OGÓŁEM, nie „obecne": ocalała kopia klatki, której siostra zniknęła, porównuje się z zeznaniem
+    `header`, które mogło przyjść ze skasowanego pliku. Warunek „>1 OBECNA" wykluczał dokładnie ją -
+    predykat zeznania z nieobecnej kopii (`queries.orphan_testimony_copies`) milczał przy kopii bez
+    faktów na zawsze, a plan ujednolicenia karty `OBJECT` nie miał czym sprawdzić, czy karty klatki
+    są jej kartami. Koszt: sama obecna kopia jest czytana (nagłówek), nie jej nieobecne siostry.
 
     `header_hash IS NOT NULL` odcina kopie nieczytelne (W1): bez odcisku nie ma kotwicy, a sterownik
     wracałby do nich przy każdej dostawie. STAŁY literał SELECT - ten sam liczy `remaining`, więc
@@ -1821,8 +1845,7 @@ def copy_facts_candidates(con, root=None):
         "SELECT l.id, l.path, l.header_hash FROM location l JOIN frame f ON f.id = l.frame_id "
         "WHERE l.present = 1 AND l.header_hash IS NOT NULL AND l.hdr_hash IS NULL "
         "  AND (f.filetype = 'xisf' OR l.frame_id IN ("
-        "       SELECT frame_id FROM location WHERE present = 1 "
-        "       GROUP BY frame_id HAVING COUNT(*) > 1)) "
+        "       SELECT frame_id FROM location GROUP BY frame_id HAVING COUNT(*) > 1)) "
         "ORDER BY l.id").fetchall()
     if root is None:
         return rows
@@ -1854,6 +1877,12 @@ def backfill_copy_facts(con, *, now, root=None, progress=None, should_cancel=Non
     Plik nieczytelny / nieosiągalny → `failed` + ścieżka, ZERO zapisu (nie stawiamy markerów, nie
     zdejmujemy obecności - od tego są `scan_tree` i `presence`); zostaje w `remaining`.
 
+    Pliku BRAK (`FileNotFoundError`), a jego katalog istnieje → `missing` + ścieżka, też ZERO zapisu:
+    kopię skasowano z dysku, a baza jeszcze o tym nie wie. To nie jest fakt o czytelności pliku, tylko
+    robota passa obecności - raport nazywa ją osobno, żeby „nieczytelne 2" nie wysyłało człowieka do
+    pliku, którego nie ma. Nie ma CAŁEGO katalogu (zerwany udział, przemianowany folder) → zostaje
+    `failed`: brak katalogu nie dowodzi skasowania, a „Oznacz zniknięte" i tak zweryfikuje zakres sam.
+
     Hooki `progress(done, total, path, summary)` / `should_cancel()` - kontrakt jak w `scan_tree`
     (anulowanie na GRANICY PLIKU; przerwany przebieg zostawia bazę spójną, bo każda kopia to osobna
     transakcja, a następny przebieg dobiera resztę)."""
@@ -1870,6 +1899,13 @@ def backfill_copy_facts(con, *, now, root=None, progress=None, should_cancel=Non
                 raise OSError("kopia izolowana po przerwanym zapisie w miejscu (0022)")
             header, _cards, header_hash, _hdu, _comp, _span, image_roles = _read_meta(
                 path, os.stat(path).st_size)
+        except FileNotFoundError as exc:       # skasowany albo nieosiągalny katalog (docstring)
+            if os.path.isdir(os.path.dirname(path)):
+                s.missing += 1
+                s.missing_paths.append(path)
+            else:
+                s.failed += 1
+                s.failed_paths.append(f"{path}: {type(exc).__name__}: {exc}")
         except Exception as exc:               # I/O albo parser - raport, nie zapis (docstring)
             s.failed += 1
             s.failed_paths.append(f"{path}: {type(exc).__name__}: {exc}")
@@ -2112,6 +2148,9 @@ def scan_stacks(con, root, *, volume="?", drive_letter=None, tier=None, now,
             break
         spath = str(path)
         try:
+            # Generacja PRZED bramką izolacji (jak w `scan_tree`): zapis w miejscu zaczęty po
+            # bramce odrzuca ingest (`repo.StaleScanRecord`) - liczony niżej jak pominięcie.
+            gen = repo.inplace_generation(con)
             if _isolated(con, spath, volume if gate_on else None) or (
                     gate_on and _already_scanned(con, volume, spath, _mtime_iso(path.stat()))):
                 s.skipped += 1                        # izolowana (0022) albo bez zmian
@@ -2127,8 +2166,10 @@ def scan_stacks(con, root, *, volume="?", drive_letter=None, tier=None, now,
                     s.rejected_paths.append(f"{spath}: zeznaje '{kind}', nie {STACK_KIND}")
                 else:
                     ingest_record(con, rec, volume=volume, drive_letter=drive_letter, tier=tier,
-                                  now=now, summary=s.scan, actor="stacks")
+                                  now=now, summary=s.scan, actor="stacks", inplace_gen=gen)
                     s.ingested += 1
+        except repo.StaleScanRecord:                       # zapis w miejscu po bramce - izolacja
+            s.skipped += 1
         except Exception as exc:                           # I/O — raport, NIGDY zapis (patrz docstring)
             s.failed += 1
             s.failed_paths.append(f"{spath}: {type(exc).__name__}: {exc}")
@@ -2202,8 +2243,14 @@ def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now,
         # kroki dawał mu `'parse'`, czyli „nagłówek nie przechodzi parsera", i user zgłaszał zdrowy
         # plik. Marker przy nieudanym zapisie i tak stawiamy: wymusza re-odczyt przez bramę, więc
         # zapis ponawia się sam przy następnym skanie, zamiast utknąć pod pominięciem.
-        blad = kind = rec = None
+        blad = kind = rec = gen = None
+        stary = False
         try:
+            # GENERACJA PRZED BRAMKĄ (astra, 2026-09-27): bramka izolacji i odczyt pliku to dwie
+            # chwile, a zapis w miejscu może zacząć się między nimi. Operacja o `id` większym niż
+            # ta generacja odrzuca zapis rekordu w klindze (`repo.StaleScanRecord`) - liczymy to
+            # jak izolację, bez markera nieczytelności.
+            gen = repo.inplace_generation(con)
             if _isolated(con, spath, volume if gate_on else None):   # 0022: rozdarty zapis
                 summary.isolated += 1
                 summary.isolated_paths.append(spath)
@@ -2219,7 +2266,9 @@ def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now,
         if rec is not None:
             try:
                 ingest_record(con, rec, volume=volume, drive_letter=drive_letter, tier=tier,
-                              now=now, summary=summary)
+                              now=now, summary=summary, inplace_gen=gen)
+            except repo.StaleScanRecord:                   # zapis w miejscu po bramce - izolacja
+                stary = True
             except Exception as exc:                       # backstop W1, strona ZAPISU - fakt o nas
                 blad, kind = exc, "db"
         if blad is not None:                               # backstop W1: pojedynczy plik nie wywala skanu
@@ -2248,13 +2297,20 @@ def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now,
                         now=now, actor="scan"):
                     summary.vanished += 1
             elif row is not None:
-                if repo.refresh_location_unreadable(
-                        con, location_id=row["id"], sha1_data=row["sha1_data"], path=spath,
-                        mtime=row["mtime"], reason=reason, kind=kind, now=now):
-                    summary.frame_review += 1
+                try:
+                    if repo.refresh_location_unreadable(
+                            con, location_id=row["id"], sha1_data=row["sha1_data"], path=spath,
+                            mtime=row["mtime"], reason=reason, kind=kind, now=now,
+                            inplace_gen=gen):
+                        summary.frame_review += 1
+                except repo.StaleScanRecord:               # odczyt padł w trakcie zapisu w miejscu
+                    stary = True
             else:
                 repo.flag_frame_review(con, sha1="?", path=spath, reason=reason, now=now)
                 summary.frame_review += 1
+        if stary:
+            summary.isolated += 1
+            summary.isolated_paths.append(spath)
         if progress is not None:
             # `i`, nie `summary.files`: do 0810 były równe (jeden plik = jeden przyrost), ale odsiew
             # pochodnych rozdzielił te dwie liczby. `total` to długość PRZEJŚCIA, więc licznikiem

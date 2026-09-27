@@ -355,16 +355,139 @@ def test_podstrona_osi_i_powrot_odswieza_licznik(qapp, tmp_path):
         win.close()
 
 
-def test_stage_finished_odswieza_liczniki_zadan(qapp, tmp_path):
-    """`_on_stage_finished` (po etapie pipeline'u) przeładowuje też liczniki zadań — badge maleje,
-    gdy stan się poprawił (tu: wszystkie teleskopy nazwane poza GUI)."""
+def test_koniec_przebiegu_odswieza_liczniki_zadan(qapp, tmp_path):
+    """Koniec przebiegu Dostawy (`running_changed(False)`) przeładowuje też liczniki zadań - badge
+    maleje, gdy stan się poprawił (tu: wszystkie teleskopy nazwane poza GUI). Bez żadnego
+    `stage_finished` po drodze: tak kończy się przebieg, którego jedyny etap padł błędem, a zapis
+    sprzed błędu i tak musi dojść do ekranu."""
     win = MainWindow(_seeded_db(tmp_path, object_axis=True))
     try:
+        win._on_pipeline_running(True)
         for row in win.con.execute("SELECT id FROM telescope WHERE merged_into IS NULL").fetchall():
             repo.label_telescope(win.con, telescope_id=row[0], label=f"T{row[0]}", now=NOW)
-        win._on_stage_finished("resolve")
+        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (4)", "w biegu - jeszcze stary stan"
+        win._on_pipeline_running(False)
         assert _task_row(win, "telescopes_unlabeled") == ("Teleskopy bez etykiety", "0  ›")
         assert win.nav.item(NAV_PORZADKI).text() == "Porządki (3)"   # klatki + duplikaty + zniknięte
+    finally:
+        win.close()
+
+
+def _licz_przeladowania(win, monkeypatch):
+    """Licznik wywołań `_load_facets` obu widoków, które je mają (grid, oś obiektu) - to one
+    kosztowały po etapie najwięcej (8,4 s z 11,7 s na kopii żywej bazy)."""
+    licznik = {"grid": 0, "obiekt": 0}
+    for klucz, widok in (("grid", win.grid_view), ("obiekt", win.object_view)):
+        oryginal = widok._load_facets
+
+        def _licz(_k=klucz, _o=oryginal):
+            licznik[_k] += 1
+            _o()
+        monkeypatch.setattr(widok, "_load_facets", _licz)
+    return licznik
+
+
+def _przebieg_w_watku(win, start):
+    """Puść przebieg Dostawy w PRAWDZIWYM wątku i odczekaj jego koniec. Pętla kończy się na
+    `running_changed(False)`, a slot okna jest podpięty PRZED naszym, więc odświeżenie widoków
+    zdążyło się wykonać, zanim wracamy do asercji."""
+    from PySide6.QtCore import QEventLoop, QTimer
+    loop = QEventLoop()
+    win.pipeline_view.running_changed.connect(lambda r: loop.quit() if r is False else None)
+    QTimer.singleShot(60000, loop.quit)                # bezpiecznik, gdyby coś zawisło
+    start()
+    assert win.pipeline_view._thread is not None, "przebieg ruszył w wątku"
+    loop.exec()
+    assert win.pipeline_view._thread is None, "przebieg się skończył (nie bezpiecznik)"
+
+
+def test_przebieg_Dostawy_przeladowuje_widoki_RAZ_nie_raz_na_etap(qapp, tmp_path, monkeypatch):
+    """„Przetwórz wszystko" to łańcuch kilku etapów w jednym wątku. Przeładowanie widoków szło po
+    KAŻDYM etapie: zmierzone na kopii żywej bazy 11,7 s na etap (8,4 s samo `_load_facets` gridu),
+    ~88 s nieruchomego okna na przebieg, a `processEvents` fazy doręczał w środku odświeżenia
+    koniec kolejnego etapu, więc odświeżenia zagnieżdżały się w odwróconej kolejności.
+
+    Pomiar przed/po w jednym teście: liczba `stage_finished` przebiegu to liczba przeładowań
+    SPRZED naprawy (po jednym na sygnał); po naprawie przeładowanie jest jedno. Stan końcowy
+    widoków ma odpowiadać bazie - nic się nie zgubiło po drodze.
+
+    Falsyfikator: podepnij z powrotem `stage_finished` pod przeładowanie widoków → licznik
+    przeładowań równa się liczbie etapów."""
+    from test_copy_facts import _fits
+    root = tmp_path / "ARCH"
+    _fits(root / "Ha" / "a.fits", "Ha", n=1)
+    _fits(root / "OIII" / "b.fits", "OIII", n=2)
+    path = str(tmp_path / "p.db")
+    db.open_db(path).close()
+    win = MainWindow(path)
+    try:
+        assert win.grid_view.count_label.text() == "0 klatek"
+        licznik = _licz_przeladowania(win, monkeypatch)
+        etapy = []
+        win.pipeline_view.stage_finished.connect(etapy.append)
+        win.pipeline_view._set_root(str(root))
+        _przebieg_w_watku(win, win.pipeline_view._on_all)
+
+        assert len(etapy) >= 5, f"łańcuch ma kilka etapów: {etapy}"
+        assert etapy[:2] == ["scan", "group"], "etapy kończą się w kolejności łańcucha"
+        assert licznik == {"grid": 1, "obiekt": 1}, \
+            f"przeładowanie RAZ na przebieg (przed naprawą: {len(etapy)} na widok)"
+        assert win.grid_view.count_label.text() == "2 klatki", "widoki pokazują stan bazy"
+        assert not win.phase_label.text(), "faza zgasła po odświeżeniu"
+    finally:
+        win.close()
+
+
+def test_przebieg_zakonczony_bledem_tez_odswieza_widoki(qapp, tmp_path, monkeypatch):
+    """Błąd etapu nie emituje `stage_finished` - a zapisy sprzed błędu (w łańcuchu: etapy przed
+    nim) są w bazie. Koniec przebiegu przychodzi w tej drodze tak samo (`_cleanup_thread`), więc
+    widoki i plakietka liczą się ze stanu także tu."""
+    from horreum.gui import pipeline as pipeline_mod
+
+    def _pada(con, now):
+        raise RuntimeError("etap padł")
+    monkeypatch.setattr(pipeline_mod, "run_grouper", _pada)
+    win = MainWindow(_seeded_db(tmp_path, object_axis=True))
+    try:
+        licznik = _licz_przeladowania(win, monkeypatch)
+        for row in win.con.execute("SELECT id FROM telescope WHERE merged_into IS NULL").fetchall():
+            repo.label_telescope(win.con, telescope_id=row[0], label=f"T{row[0]}", now=NOW)
+        etapy = []
+        win.pipeline_view.stage_finished.connect(etapy.append)
+        _przebieg_w_watku(win, lambda: win.pipeline_view.run_stage("group"))
+        assert etapy == [], "etap padł - bez sygnału końca etapu"
+        assert "etap padł" in win.pipeline_view.lbl_error.text()
+        assert licznik == {"grid": 1, "obiekt": 1}
+        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (3)", "plakietka ze stanu bazy"
+    finally:
+        win.close()
+
+
+def test_odswiezenie_po_przebiegu_nie_zagniezdza_sie(qapp, tmp_path, monkeypatch):
+    """STRAŻ PONOWNEGO WEJŚCIA. Druga prośba o odświeżenie, doręczona W ŚRODKU pierwszego (tak
+    doręczał je `processEvents` fazy), nie zagnieżdża się: pierwszy obrót kończy się w całości,
+    a druga prośba daje jeden pełny obrót PO nim - ostatni odczyt jest nowszy niż ostatnia prośba.
+
+    Falsyfikator: zdejmij strażnika → wejścia w `grid.refresh` zagnieżdżają się (głębokość 2)."""
+    win = MainWindow(_seeded_db(tmp_path))
+    try:
+        grid = win.grid_view
+        oryginal = grid.refresh
+        stan = {"glebokosc": 0, "max": 0, "wejscia": 0}
+
+        def _refresh():
+            stan["glebokosc"] += 1
+            stan["wejscia"] += 1
+            stan["max"] = max(stan["max"], stan["glebokosc"])
+            if stan["wejscia"] == 1:
+                win._on_pipeline_running(False)        # prośba doręczona w środku odświeżenia
+            oryginal()
+            stan["glebokosc"] -= 1
+        monkeypatch.setattr(grid, "refresh", _refresh)
+        win._on_pipeline_running(False)
+        assert stan["max"] == 1, "odświeżenia nie zagnieżdżają się"
+        assert stan["wejscia"] == 2, "prośba z środka dała jeden obrót więcej, po bieżącym"
+        assert win._odswiezam_widoki is False and not win.phase_label.text()
     finally:
         win.close()
 

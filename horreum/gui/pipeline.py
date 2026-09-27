@@ -139,7 +139,14 @@ class PipelineWorker(QObject):
         (config/obiekt) i bez rodowodu, więc „wciągnąłem" znaczyłoby mniej, niż user widzi na
         ekranie. Po skanie idą więc `group` → `resolve` → **rodowód stosów** — w tej kolejności,
         bo dobór okna stoi na osi obiektu i osi teleskopu, które dopiero tamte dwa etapy powołują.
-        Anulowanie skanu PRZERYWA łańcuch (jak w „Przetwórz wszystko")."""
+        Anulowanie skanu PRZERYWA łańcuch (jak w „Przetwórz wszystko").
+
+        Między skanem a `group` stoją fakty kopii i przejęcie zeznania - lustro `_run_all`, z tego
+        samego powodu (etapy od `group` czytają `header`). Oba są zawężone do korzenia TEJ drogi,
+        a „Przyjmij nowe" chodzi po archiwum, więc bez nich kopie stosów sprzed 0021 nie dostałyby
+        faktów nigdy (skan stosów pomija je bramą przyrostową), a stos, którego kopia-źródło
+        zniknęła, mówiłby głosem skasowanego pliku do końca świata. Anulowanie któregoś z nich też
+        przerywa łańcuch."""
         self.stage_started.emit("stacks")
         s = scan_stacks(
             con, self._params["root"],
@@ -154,6 +161,11 @@ class PipelineWorker(QObject):
             self.cancelled.emit("stacks", s)
             return False
         self.stage_done.emit("stacks", s)
+        if not self._copy_facts(con):
+            return False
+        a = self._adopt_testimony(con)
+        if a is not None and a.cancelled:
+            return False
         self._bulk(con, "group")
         self._bulk(con, "resolve")
         self._bulk(con, "stack_lineage")
@@ -190,7 +202,13 @@ class PipelineWorker(QObject):
         najbliższego „Przyjmij nowe" i był NIEWIDOCZNY - wiersz Porządków liczy tylko to, czego etap
         nie naprawi sam. Pochodne idą wyłącznie po realnym przejęciu: bez niego zeznania nic nie
         ruszyło, więc przeliczanie całego archiwum byłoby kosztem bez skutku. Zakres = korzeń
-        zamrożony przy DRY (`root` z parametrów gestu), jak sam zapis obecności."""
+        zamrożony przy DRY (`root` z parametrów gestu), jak sam zapis obecności.
+
+        Fakty kopii idą PRZED przejęciem (kolejność `_run_all`): ocalała kopia sprzed 0021 nie ma
+        faktów, a predykat zeznania bez nich milczy („nie wiem"), więc przejęcie nie miałoby
+        kandydata. Anulowanie faktów przerywa ogon."""
+        if not self._copy_facts(con):
+            return
         a = self._adopt_testimony(con)
         if a is None or a.cancelled or not a.adopted:
             return
@@ -261,8 +279,10 @@ class PipelineWorker(QObject):
         milczy całkowicie (QUIET): ani „w toku", ani linii raportu, bo nie ma czego ogłaszać.
 
         ZAKRES = korzeń TEJ dostawy (jak pass obecności): „Przetwórz wszystko" na wskazanym
-        katalogu nie czyta plików spoza niego. Anulowanie PRZERYWA łańcuch jak przy skanie - każda
-        kopia to osobna transakcja, więc baza zostaje spójna, a następna dostawa dobierze resztę.
+        katalogu nie czyta plików spoza niego. Wołają go Dostawa (`_run_all`), droga „Stosy"
+        (`_stacks`, korzeń stosów) i ogon „Oznacz zniknięte" (`_after_vanished`). Anulowanie
+        PRZERYWA łańcuch jak przy skanie - każda kopia to osobna transakcja, więc baza zostaje
+        spójna, a następna dostawa dobierze resztę.
         Zwraca `False`, gdy anulowano."""
         root = self._params.get("root")
         if not scan.copy_facts_candidates(con, root):
@@ -287,8 +307,9 @@ class PipelineWorker(QObject):
         etap zostawia człowiekowi (AR-4) - widać je w Porządkach („Zeznanie z nieobecnej kopii").
 
         ZAKRES = korzeń TEJ dostawy (jak `_copy_facts`). Anulowanie PRZERYWA łańcuch - każda klatka
-        to osobna transakcja, więc baza zostaje spójna. Wołają go Dostawa (`_run_all`) i ogon gestu
-        „Oznacz zniknięte" (`_after_vanished`). Zwraca `AdoptSummary` (wołający czyta `cancelled`
+        to osobna transakcja, więc baza zostaje spójna. Wołają go Dostawa (`_run_all`), droga
+        „Stosy" (`_stacks`, korzeń stosów) i ogon gestu „Oznacz zniknięte" (`_after_vanished`) -
+        każdy zaraz po `_copy_facts`. Zwraca `AdoptSummary` (wołający czyta `cancelled`
         i `adopted`) albo `None`, gdy kandydatów nie było."""
         root = self._params.get("root")
         if not scan.adopt_candidates(con, root):
@@ -370,8 +391,10 @@ class PipelineView(QWidget):
     skan `'?'` do bazy z realnymi wolumenami wstrzymuje guard `_serial_guard_ok` (F5R#3).
 
     Sygnały do gospodarza (`MainWindow`): `status_message(str)` (pasek statusu), `stage_finished(str)`
-    (etap zakończył zapis — gospodarz odświeża read-model osi; WAL → widoczne), `running_changed(bool)`
-    (etap w toku — gospodarz wyłącza akcje zapisu osi: szczery disabled, §6)."""
+    (etap zakończył zapis - znacznik etapu dla testów i słuchaczy; gospodarz NIE odświeża na nim
+    widoków, bo pełne przeładowanie po każdym etapie zamrażało okno), `running_changed(bool)` (etap
+    w toku - gospodarz wyłącza akcje zapisu osi, szczery disabled, §6; `False` = koniec przebiegu,
+    także przerwanego albo z błędem, i JEDYNY moment odświeżenia read-modelu widoków; WAL → widoczne)."""
 
     status_message = Signal(str)
     stage_finished = Signal(str)
@@ -874,7 +897,7 @@ class PipelineView(QWidget):
         if name == "presence":
             self._update_vanished_box(result)
         self.status_message.emit(i18n.t("pipeline.stage_done_status", stage=_stage_label(name)))
-        self.stage_finished.emit(name)                  # gospodarz odświeża oś (WAL)
+        self.stage_finished.emit(name)                  # widoki odświeża koniec przebiegu, nie etap
 
     @Slot(str, object)
     def _on_cancelled(self, name, summary):
@@ -889,7 +912,7 @@ class PipelineView(QWidget):
             self._append_summary(i18n.t("pipeline.scan_cancelled", n=summary.files))
         self._append_summary(self._format_result(name, summary))
         self.status_message.emit(i18n.t("pipeline.stage_interrupted", stage=etykieta))
-        self.stage_finished.emit(name)                  # częściowy zapis też trzeba odświeżyć
+        self.stage_finished.emit(name)                  # częściowy zapis odświeży koniec przebiegu
 
     @Slot(str, str)
     def _on_failed(self, name, msg):
@@ -954,6 +977,8 @@ class PipelineView(QWidget):
         czesci = [i18n.t("pipeline.fmt.copy_facts.written", n=s.written, rows=s.rows)]
         if s.stale:
             czesci.append(i18n.t("pipeline.fmt.copy_facts.stale", n=s.stale))
+        if s.missing:                   # skasowane z dysku - robota „Oznacz zniknięte", nie czytelności
+            czesci.append(i18n.t("pipeline.fmt.copy_facts.missing", n=s.missing))
         if s.failed:
             czesci.append(i18n.t("pipeline.fmt.copy_facts.failed", n=s.failed))
         if s.remaining:

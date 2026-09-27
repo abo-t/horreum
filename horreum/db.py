@@ -146,11 +146,39 @@ def migrate(con):
             f"utwórz świeżą bazę (horreum init) i zasil ją ponownie")
     for version, filename in MIGRATIONS:
         if version > current:
-            con.executescript(_migration_sql(filename))
-            # PRAGMA nie przyjmuje bindowania — f-string z literału int (version z MIGRATIONS).
-            con.execute(f"PRAGMA user_version = {int(version)}")
+            _apply_migration(con, version, _migration_sql(filename))
             current = version
     return current
+
+
+def _apply_migration(con, version, sql):
+    """Jedna migracja RAZEM z podniesieniem `user_version` - w JEDNEJ transakcji.
+
+    DLACZEGO: goły `executescript` zatwierdza każdą instrukcję osobno, a `user_version` szło
+    dopiero po nim. Awaria w środku skryptu (brak miejsca, zerwany dysk, zabity proces) zostawiała
+    bazę z częścią `ALTER TABLE` i STARĄ wersją - następne otwarcie powtarzało migrację od początku
+    i wybuchało na `duplicate column name`, czyli baza nie otwierała się wcale. W transakcji albo
+    przechodzi całość razem z numerem wersji, albo nic.
+
+    `BEGIN` stoi WEWNĄTRZ skryptu, bo `executescript` przed startem zatwierdza otwartą transakcję
+    (zewnętrzny `BEGIN` zostałby zamknięty, zanim ruszy pierwsza instrukcja migracji). `IMMEDIATE`
+    bierze blokadę zapisu od razu - równoległy pisarz czeka na `busy_timeout`, zamiast wpaść w środek.
+    Migracje, które same ustawiają `PRAGMA user_version` w treści (0008, 0009, 0012, 0013, 0016),
+    działają tak samo: numer wersji jest częścią nagłówka bazy i wraca razem z `ROLLBACK`, a końcowe
+    ustawienie niżej jest tym samym numerem. Żadna migracja nie niesie instrukcji wrogich transakcji
+    (`VACUUM`, `PRAGMA foreign_keys`, `PRAGMA journal_mode`) - taka musiałaby dostać własną drogę.
+
+    Średnik na osobnym wierszu domyka ostatnią instrukcję skryptu, gdyby plik kończył się bez niego
+    (pusta instrukcja jest dla SQLite no-opem). PRAGMA nie przyjmuje bindowania - f-string z literału
+    int (version z MIGRATIONS). Wyjątek: `ROLLBACK`, gdy transakcja jeszcze stoi, i rzut dalej
+    (EXPECT - wołający dostaje błąd migracji, baza zostaje w wersji sprzed niej)."""
+    script = f"BEGIN IMMEDIATE;\n{sql}\n;\nPRAGMA user_version = {int(version)};\nCOMMIT;\n"
+    try:
+        con.executescript(script)
+    except BaseException:
+        if con.in_transaction:
+            con.rollback()
+        raise
 
 
 def open_db(path):

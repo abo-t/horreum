@@ -189,7 +189,13 @@ def test_linia_raportu_faktow_kopii(qapp, tmp_path):
         brudno = v._format_result("copy_facts", scan.CopyFactsSummary(
             rows=5, read=4, written=3, stale=1, failed=1, remaining=2))
         assert "zmienione na dysku od skanu 1" in brudno and "nieczytelne 1" in brudno
-        assert "czeka 2" in brudno
+        assert "czeka 2" in brudno and "brak pliku" not in brudno
+        # Kopia skasowana z dysku nie udaje „nieczytelnej" - linia mówi, co z nią zrobić.
+        skasowane = v._format_result("copy_facts", scan.CopyFactsSummary(
+            rows=550, read=548, written=548, missing=2, remaining=2))
+        assert skasowane == ("Fakty kopii: uzupełniono 548 z 550 · brak pliku 2 - Dostawa → "
+                             "„Oznacz zniknięte” · czeka 2")
+        assert "nieczytelne" not in skasowane
     finally:
         v.close()
 
@@ -327,6 +333,96 @@ def test_gest_oznacz_znikniete_puszcza_przejecie_i_pochodne(qapp, tmp_path, monk
     w2.stage_started.connect(started2.append)
     w2.run()
     assert started2 == ["presence"]
+
+
+def _bez_faktow(con, *paths):
+    from test_orphan_testimony import _bez_faktow as _zdejmij
+    _zdejmij(con, *paths)
+
+
+def test_gest_oznacz_znikniete_uzupelnia_fakty_ocalalej_przed_przejeciem(qapp, tmp_path,
+                                                                        monkeypatch):
+    """Ocalała kopia sprzed 0021 (bez faktów): ogon „Oznacz zniknięte" najpierw dociąga jej fakty,
+    dopiero potem pyta o przejęcie - lustro „Przyjmij nowe". Bez faktów predykat zeznania milczy
+    („nie wiem"), więc samo przejęcie nie miałoby kandydata, a klatka mówiłaby dalej głosem
+    skasowanego pliku."""
+    from horreum import presence
+    from test_orphan_testimony import _cls, _lpro
+    monkeypatch.setattr(presence, "volume_serial", lambda p: "VOL1")
+    root = tmp_path / "ARCH"
+    a, b = _lpro(root), _cls(root)
+    path = str(tmp_path / "p.db")
+    con = db.open_db(path)
+    scan.scan_tree(con, root, volume="VOL1", now=NOW)
+    fid = con.execute("SELECT frame_id FROM location WHERE path = ?", (str(a),)).fetchone()[0]
+    _bez_faktow(con, a, b)
+    con.close()
+    os.remove(a)
+    w = PipelineWorker(path, now_fn=lambda: NOW)
+    w.configure("presence-apply", root=str(root), volume="VOL1", drive_letter=None, tier=None)
+    started, done = [], {}
+    w.stage_started.connect(started.append)
+    w.stage_done.connect(lambda n, r: done.__setitem__(n, r))
+    w.run()
+    assert started[:3] == ["presence", "copy_facts", "adopt_testimony"]
+    assert done["copy_facts"].written == 1 and done["adopt_testimony"].adopted == 1
+    con = db.open_db(path)
+    assert con.execute("SELECT filter_raw FROM header WHERE frame_id = ?",
+                       (fid,)).fetchone()[0] == "CLS"
+    con.close()
+
+
+def test_droga_Stosy_uzupelnia_fakty_i_przejmuje_zeznanie_pod_swoim_korzeniem(qapp, tmp_path,
+                                                                             monkeypatch):
+    """„Wciągnij stosy…" to jedyna droga, która dotyka drzewa obróbki - „Przyjmij nowe" chodzi po
+    archiwum, a oba etapy są zawężone do korzenia. Kopie stosów sprzed 0021 dostają więc fakty
+    i przejęcie zeznania TU, po skanie stosów i przed `group`; kopia spoza korzenia stosów zostaje
+    nietknięta. Skan stosów podmieniony (brama przyrostowa i tak pominęłaby kopie bez zmian)."""
+    from horreum.gui import pipeline as pipeline_mod
+    from test_orphan_testimony import _cls, _lpro
+    stosy = tmp_path / "STACKS"
+    a, b = _lpro(stosy), _cls(stosy)
+    obca = _xisf(tmp_path / "ARCH" / "inna.xisf", _FLAT, payload=b"\x0a" * 32)
+    path = str(tmp_path / "p.db")
+    con = db.open_db(path)
+    scan.scan_tree(con, stosy, volume="?", now=NOW)
+    scan.scan_tree(con, tmp_path / "ARCH", volume="?", now=NOW)
+    fid = con.execute("SELECT frame_id FROM location WHERE path = ?", (str(a),)).fetchone()[0]
+    _bez_faktow(con, a, b, obca)
+    from test_orphan_testimony import _zniknij
+    _zniknij(con, a)
+    con.close()
+    monkeypatch.setattr(pipeline_mod, "scan_stacks", lambda *a, **k: scan.StackScanSummary())
+    w = PipelineWorker(path, now_fn=lambda: NOW)
+    w.configure("stacks", root=str(stosy), volume="?", drive_letter=None, tier=None)
+    started, done = [], {}
+    w.stage_started.connect(started.append)
+    w.stage_done.connect(lambda n, r: done.__setitem__(n, r))
+    w.run()
+    assert started == ["stacks", "copy_facts", "adopt_testimony", "group", "resolve",
+                       "stack_lineage"]
+    assert (done["copy_facts"].rows, done["copy_facts"].written) == (1, 1)
+    assert done["adopt_testimony"].adopted == 1
+    con = db.open_db(path)
+    assert con.execute("SELECT filter_raw FROM header WHERE frame_id = ?",
+                       (fid,)).fetchone()[0] == "CLS"
+    assert con.execute("SELECT hdr_hash FROM location WHERE path = ?",
+                       (str(obca),)).fetchone()[0] is None
+    con.close()
+
+
+def test_wiersz_porzadkow_nie_chowa_klatki_ktora_naprawi_dopiero_Dostawa(qapp, tmp_path):
+    """Jedna ocalała kopia i zeznanie spoza ręki - to robota etapu, ale etap chodzi wyłącznie pod
+    korzeniem Dostawy (albo stosów). Ocalała poza nim czekałaby niewidoczna do dostawy, której
+    nikt nie zrobi, więc wiersz Porządków liczy także te klatki (liczba = lista w Zbiorach)."""
+    path, _root, fid = _po_skasowaniu_zrodla(tmp_path)
+    con = db.open_db(path)
+    try:
+        assert [f for f, _k in scan.adopt_candidates(con)] == [fid]
+        assert queries.orphan_testimony_frame_ids(con) == {fid}
+        assert queries.tasks_state(con)["orphan_testimony_frames"] == 1
+    finally:
+        con.close()
 
 
 def test_linia_raportu_liczy_wyscig_osobno(qapp, tmp_path):

@@ -266,15 +266,29 @@ def test_uzupelnienie_czyta_same_naglowki_i_jest_idempotentne(tmp_path):
 
 def test_uzupelnienie_odmawia_kopii_zmienionej_i_zgubionej(tmp_path):
     """Nagłówek zmieniony od skanu → `stale` (fakty należą do skanu, który odświeży też `header`
-    i `cards`); plik, którego nie ma → `failed`. Oba ZERO zapisu i oba zostają w `remaining`."""
+    i `cards`); plik, którego nie ma w ISTNIEJĄCYM katalogu → `missing` (skasowany z dysku - robota
+    passa obecności, nie „nieczytelny"). Oba ZERO zapisu i oba zostają w `remaining`."""
     root, a, b = _dwie_kopie(tmp_path)
     con = _baza_sprzed_0021(tmp_path, [a, b])
     _xisf(a, _FLAT + (("FILTER", "'CLX'"),), images=({"imageType": "MasterFlat"},))
     os.remove(b)
     s = scan.backfill_copy_facts(con, now=NOW)
-    assert (s.written, s.stale, s.failed, s.remaining) == (0, 1, 1, 2)
-    assert s.stale_paths == [str(a)] and s.failed_paths[0].startswith(str(b))
+    assert (s.written, s.stale, s.missing, s.failed, s.remaining) == (0, 1, 1, 0, 2)
+    assert s.stale_paths == [str(a)] and s.missing_paths == [str(b)] and s.failed_paths == []
     assert _loc(con, a)["hdr_hash"] is None
+    con.close()
+
+
+def test_uzupelnienie_brak_katalogu_to_nieczytelne_nie_brak_pliku(tmp_path):
+    """Nie ma CAŁEGO katalogu kopii (zerwany udział, przemianowany folder) - to nie jest dowód, że
+    plik skasowano, więc zostaje `failed` („nieczytelne"), bez podpowiedzi „Oznacz zniknięte"."""
+    import shutil
+    root, a, b = _dwie_kopie(tmp_path)
+    con = _baza_sprzed_0021(tmp_path, [a, b])
+    shutil.rmtree(b.parent)
+    s = scan.backfill_copy_facts(con, now=NOW)
+    assert (s.written, s.missing, s.failed) == (1, 0, 1)
+    assert s.failed_paths[0].startswith(str(b))
     con.close()
 
 

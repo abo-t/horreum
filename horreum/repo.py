@@ -236,19 +236,22 @@ _LOCATION_FACTS = ("mtime", "file_sha1", "header_hash", "hdu_index", "compressed
                    *COPY_FACTS)
 
 
-def rebind_location(con, *, location_id, frame_after, now, actor="scan"):
+def rebind_location(con, *, location_id, frame_after, now, actor="scan", inplace_gen=None):
     """PODMIANA TREŚCI pod znaną ścieżką (R3-b1): przepnij `location.frame_id` na nową tożsamość
     + `event(location.rebound)` `{frame_before, frame_after}`. Stary frame ZOSTAJE (append-only,
     historia w eventach) — bez ŻADNEJ lokacji. UWAGA (P5): pass zniknięć takiego frame'a NIE
     podchwyci — działa na LOKACJACH, a tu nie została ani jedna (`vanished_frames` też go wyklucza
     guardem `EXISTS`, `gui/queries.py:516-520`). Licznik `orphan_frames` = osobna, tania decyzja;
     dopóki jej nie ma, osierocone frame'y są widoczne wyłącznie przez `location.rebound`. Już przepięta → False
-    (idempotencja). Guard+UPDATE w `_immediate` (TOCTOU wobec równoległego writera)."""
+    (idempotencja). Guard+UPDATE w `_immediate` (TOCTOU wobec równoległego writera).
+    `inplace_gen` - generacja dziennika zapisu w miejscu z odczytu skanu (`_refuse_if_newer_inplace`,
+    kontrakt jak w `refresh_location`)."""
     with _immediate(con):
         row = con.execute(
             "SELECT frame_id FROM location WHERE id = ?", (location_id,)).fetchone()
         if row is None:
             raise ValueError(f"location:{location_id} nie istnieje")
+        _refuse_if_newer_inplace(con, location_id, inplace_gen)
         frame_before = row["frame_id"]
         if frame_before == frame_after:
             return False
@@ -682,7 +685,7 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
                      hdu_index, compressed, size_bytes, unreadable_since, unreadable_kind,
                      unreadable_reason, present, now,
                      actor="scan", raw_json=None, cards=None, hot_fields=None, camera_id=None,
-                     kind=None, copy_facts=None):
+                     kind=None, copy_facts=None, inplace_gen=None):
     """Re-odczyt ZNANEJ `(volume, path)` o NIEZMIENIONEJ tożsamości frame'a — kontrakt pełny
     brief §2 (R1#10 + R2#2/#7 + R3-b), domyka dług „mtime po re-odczycie nieaktualizowany":
 
@@ -719,6 +722,11 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
       nieczytelnym). `None` znaczy „faktów kopii NIE czytałem" i zostawia je, jakie są - to NIE jest
       cichy wektor zwietrzenia, bo kotwica `hdr_hash == header_hash` (CHECK 0021) odbija zmianę
       odcisku nagłówka bez odświeżenia faktów IntegrityError-em.
+    - **`inplace_gen`** (astra, 2026-09-27): generacja dziennika zapisu w miejscu, którą skan
+      zapamiętał PRZED bramką izolacji (`inplace_generation`). Operacja tej lokacji o większym `id`
+      → `StaleScanRecord` w TEJ SAMEJ transakcji co zapis, zero zapisu: odczyt mógł trafić w zapis
+      w toku albo go wyprzedzić, a spóźniony zapis faktów przywróciłby stan, który pisarz zmienia.
+      `None` = wołający nie jest skanem (re-sync pisarza, import) - bez sprawdzenia.
 
     `hot_fields` = dict kolumn `header` (jak `extract_header`); `camera_id`/`kind` = pochodne
     POLICZONE przez wołającego z nowego dictu (emergencja kamery = osobny, idempotentny
@@ -741,6 +749,7 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
             "FROM location WHERE id = ?", (location_id,)).fetchone()
         if row is None:
             raise ValueError(f"location:{location_id} nie istnieje")
+        _refuse_if_newer_inplace(con, location_id, inplace_gen)
         # Faktów kopii nieczytanych (`None`) nie ruszamy: zostają wartościami z wiersza.
         after.update(cf if cf is not None else {k: row[k] for k in COPY_FACTS})
         changed = {k: {"before": row[k], "after": after[k]}
@@ -935,7 +944,7 @@ UNREADABLE_REASON_PREFIX = "kopia nieczytelna: "
 
 
 def refresh_location_unreadable(con, *, location_id, sha1_data, path, mtime, reason, kind,
-                                now, actor="scan"):
+                                now, actor="scan", inplace_gen=None):
     """Znana ścieżka, plik NIECZYTELNY, bajty NIEZMIENIONE (R3-b1, #13): refresh mtime + ZNACZNIK
     `unreadable_since` (marker czytelności kopii w STANIE) + `event(frame.review, „kopia
     nieczytelna")` — ZERO nowych frame'ów (transient NAS; degeneracja tożsamości legalna wyłącznie
@@ -981,13 +990,17 @@ def refresh_location_unreadable(con, *, location_id, sha1_data, path, mtime, rea
     (`summary.frame_review`). Alarm zachodzi, gdy `mtime` się różni LUB marker jest NULL (pierwsze
     oznaczenie) LUB kopia była oznaczona jako zniknięta (`present=0` → powrót). `False` znaczy albo
     cichy no-op (powtórna awaria z tą samą diagnozą - BEZ eventu, stan już alarmuje), albo zapis
-    samej diagnozy ze śladem `location.refreshed` - licznik review nie ma wtedy rosnąć."""
+    samej diagnozy ze śladem `location.refreshed` - licznik review nie ma wtedy rosnąć.
+
+    `inplace_gen` - generacja dziennika zapisu w miejscu z odczytu skanu (kontrakt jak
+    w `refresh_location`): plik czytany w trakcie zapisu w miejscu nie dostaje markera."""
     with _immediate(con):
         row = con.execute(
             "SELECT mtime, unreadable_since, unreadable_kind, unreadable_reason, present "
             "FROM location WHERE id = ?", (location_id,)).fetchone()
         if row is None:
             raise ValueError(f"location:{location_id} nie istnieje")
+        _refuse_if_newer_inplace(con, location_id, inplace_gen)
         alarm_stoi = (row["mtime"] == mtime and row["unreadable_since"] is not None
                       and row["present"])
         diagnoza = {k: {"before": row[k], "after": v}
@@ -2409,10 +2422,67 @@ def insert_header_backup(con, *, commit_id, location_id, hdu_index, header_text,
 # Staging zapisu (backup, commit, faza) jest transient - bez eventu; zdarzeniem jest dopiero gest
 # człowieka (zwolnienie izolacji) i mutacja pliku opisana przez re-sync.
 
-# Fazy OTWARTE = lokacja izolowana od zwykłego skanu (`scan._isolated`), odzysk dozwolony. Jeden
-# właściciel zbioru dla skanu, odczytów Porządków i pisarza.
+# DWA ZBIORY FAZ, każdy z jednym znaczeniem (astra, 2026-09-27 - dawniej jeden zbiór niósł oba):
+#   * OTWARTE (`INPLACE_OPEN_PHASES`) = zapis mógł zostawić nagłówek ROZDARTY: odzysk
+#     (`writeback.recover_torn`) dozwolony, wiersz Porządków „Plik po przerwanym zapisie", strażnik
+#     DDL `uq_inplace_op_otwarta` (jedna otwarta operacja na lokację).
+#   * IZOLUJĄCE (`INPLACE_ISOLATING_PHASES`) = otwarte + `written`: plik zapisany i zweryfikowany
+#     przez klienta, ale kontrola danych i re-sync bazy jeszcze się nie udały. Lokacja jest wyłączona
+#     ze skanu (`scan._isolated`) i z każdej innej mutacji pliku (`writeback`), a zwolnić ją może
+#     tylko dokończenie (`writeback.finish_inplace` → `synced`), odzysk albo ręka
+#     (`release_inplace_op`). Dawniej izolacja znikała na `written` PRZED re-synciem, więc porażka
+#     re-syncu zostawiała lokację skanowi, który mógł ją przepiąć na nową klatkę.
+# `recovered` jest końcowa: odzysk zapisuje ją dopiero po udanym re-syncu (do tej chwili operacja
+# zostaje `unverified`, a ponowiony odzysk jest bezpieczny - region stary to też stan pośredni).
 INPLACE_OPEN_PHASES = ("writing", "unverified")
+INPLACE_ISOLATING_PHASES = (*INPLACE_OPEN_PHASES, "written")
 _INPLACE_PHASES = ("writing", "unverified", "written", "synced", "recovered", "released")
+
+
+class StaleScanRecord(Exception):
+    """Rekord skanu jest STARSZY niż operacja zapisu w miejscu tej lokacji: skan zapamiętał
+    generację (`inplace_generation`) przed bramką izolacji, a przed zapisem faktów kopii pojawiła się
+    operacja o większym `id`. Plik mógł zostać przeczytany w trakcie zapisu albo przed nim - fakty
+    z takiego odczytu przywróciłyby stan, który pisarz właśnie zmienia. Skan liczy to jak izolację
+    (pominięcie), BEZ markera nieczytelności: plik niczym nie zawinił."""
+
+
+def inplace_generation(con):
+    """GENERACJA dziennika zapisu w miejscu = największe `inplace_op.id` (0, gdy pusto). `id` rośnie
+    monotonicznie, więc to zegar bez zegara: operacja zaczęta po odczycie generacji ma `id` większe.
+    Skan czyta ją PRZED bramką izolacji i podaje do klingi faktów kopii (`refresh_location`,
+    `refresh_location_unreadable`, `rebind_location`), która w tej samej transakcji co zapis odmawia
+    rekordowi starszemu od operacji (`StaleScanRecord`)."""
+    return con.execute("SELECT COALESCE(MAX(id), 0) FROM inplace_op").fetchone()[0]
+
+
+def _refuse_if_newer_inplace(con, location_id, generation):
+    """Strażnik generacji wołany WEWNĄTRZ transakcji zapisu: operacja zapisu w miejscu tej lokacji
+    o `id` > `generation` → `StaleScanRecord`. `generation=None` = wołający nie jest skanem
+    (re-sync pisarza, import) - bez sprawdzenia; własny re-sync pisarza nie odrzuca sam siebie."""
+    if generation is None:
+        return
+    if con.execute("SELECT 1 FROM inplace_op WHERE location_id = ? AND id > ? LIMIT 1",
+                   (location_id, generation)).fetchone() is not None:
+        raise StaleScanRecord(f"location:{location_id} ma operację zapisu w miejscu nowszą niż "
+                              f"odczyt skanu (generacja {generation})")
+
+
+def isolating_inplace_op(con, location_id):
+    """Operacja zapisu w miejscu, która IZOLUJE lokację (`INPLACE_ISOLATING_PHASES`), albo `None`.
+    Jedna bramka przed każdą mutacją pliku lokacji (`writeback`) i przed otwarciem nowej operacji
+    (`begin_inplace_commit`/`begin_inplace_undo`)."""
+    return con.execute(
+        "SELECT id, kind, phase, commit_id FROM inplace_op WHERE location_id = ? "
+        "AND phase IN (SELECT value FROM json_each(?)) ORDER BY id DESC LIMIT 1",
+        (location_id, json.dumps(list(INPLACE_ISOLATING_PHASES)))).fetchone()
+
+
+def _refuse_if_isolated(con, location_id):
+    op = isolating_inplace_op(con, location_id)
+    if op is not None:
+        raise ValueError(f"location:{location_id} ma operację zapisu w miejscu {op['id']} "
+                         f"w fazie {op['phase']} - nowej operacji nie zaczynam")
 
 
 def _inplace_op_values(location_id, commit_id, kind, spec, now):
@@ -2434,8 +2504,11 @@ def begin_inplace_commit(con, *, run_id, commit_id, location_id, hdu_index, head
     """JEDNA transakcja przed pierwszym bajtem zapisu w miejscu (commit): wiersz `commits` (gdy
     `commit_id` None), backup nagłówka do undo i operacja `inplace_op` w fazie `writing`. Wszystko
     albo nic - backup bez operacji zostawiłby zapis bez izolacji, operacja bez backupu - bez undo.
-    `spec` = obiekt z polami `writeback.OpSpec`. Zwraca `(commit_id, op_id)`."""
-    with con:
+    `spec` = obiekt z polami `writeback.OpSpec`. Zwraca `(commit_id, op_id)`.
+    Lokacja z operacją izolującą (`isolating_inplace_op`) → `ValueError`, zero zapisu: to ostatni
+    szaniec bramki pisarza, w tej samej transakcji co wstawienie operacji."""
+    with _immediate(con):
+        _refuse_if_isolated(con, location_id)
         if commit_id is None:
             commit_id = con.execute(
                 "INSERT INTO commits(run_id, applied_at, summary) VALUES (?, ?, ?)",
@@ -2451,31 +2524,60 @@ def begin_inplace_commit(con, *, run_id, commit_id, location_id, hdu_index, head
 
 def begin_inplace_undo(con, *, commit_id, location_id, spec, now):
     """Operacja `inplace_op` rodzaju `undo` w fazie `writing` - przed pierwszym bajtem cofnięcia
-    w miejscu. Materiałem cofnięcia jest backup commitu, więc nowego backupu nie ma. Zwraca op_id."""
-    with con:
+    w miejscu. Materiałem cofnięcia jest backup commitu, więc nowego backupu nie ma. Zwraca op_id.
+    Lokacja z operacją izolującą → `ValueError`, zero zapisu (jak `begin_inplace_commit`)."""
+    with _immediate(con):
+        _refuse_if_isolated(con, location_id)
         return con.execute(_INSERT_INPLACE_OP,
                            _inplace_op_values(location_id, commit_id, "undo", spec, now)).lastrowid
 
 
-def set_inplace_op_phase(con, *, op_id, phase, now, reason=None):
+def inplace_op_phase(con, op_id):
+    """Bieżąca faza operacji (albo `None`, gdy jej nie ma) - pisarz czyta ją POD BLOKADĄ pliku,
+    żeby decyzja o odzysku i dokończeniu nie opierała się na odczycie sprzed blokady."""
+    row = con.execute("SELECT phase FROM inplace_op WHERE id = ?", (op_id,)).fetchone()
+    return None if row is None else row["phase"]
+
+
+def newer_inplace_op(con, *, location_id, op_id):
+    """Czy lokacja ma operację zapisu w miejscu PÓŹNIEJSZĄ niż `op_id` (dowolnej fazy). Odzysk
+    i dokończenie operacji odmawiają wtedy: plik mógł dostać nowszy, poprawny zapis."""
+    return con.execute("SELECT 1 FROM inplace_op WHERE location_id = ? AND id > ? LIMIT 1",
+                       (location_id, op_id)).fetchone() is not None
+
+
+def set_inplace_op_phase(con, *, op_id, phase, now, reason=None, expect_phase=None):
     """Przejście fazy operacji (`written`/`unverified`/`synced`/`recovered`). `closed_at` stawia
-    każda faza poza `writing`. Transient - bez eventu (mutację pliku opisuje re-sync)."""
+    każda faza poza `writing`. Transient - bez eventu (mutację pliku opisuje re-sync).
+
+    `expect_phase` (CAS): przejście zachodzi WYŁĄCZNIE z tej fazy; inna faza w bazie (drugi proces
+    zdążył ją zmienić) → `ValueError`, zero zapisu. Pisarz podaje ją przy każdym przejściu pod
+    blokadą pliku, więc spóźnione drugie wywołanie nie przestawi fazy cudzej decyzji."""
     if phase not in _INPLACE_PHASES:
         raise ValueError(f"nieznana faza operacji w miejscu: {phase!r}")
     with con:
-        con.execute("UPDATE inplace_op SET phase = ?, reason = ?, closed_at = ? WHERE id = ?",
-                    (phase, reason, now, op_id))
+        if expect_phase is None:
+            cur = con.execute("UPDATE inplace_op SET phase = ?, reason = ?, closed_at = ? "
+                              "WHERE id = ?", (phase, reason, now, op_id))
+        else:
+            cur = con.execute("UPDATE inplace_op SET phase = ?, reason = ?, closed_at = ? "
+                              "WHERE id = ? AND phase = ?", (phase, reason, now, op_id,
+                                                             expect_phase))
+        if cur.rowcount != 1:
+            raise ValueError(f"operacja {op_id}: przejście do {phase!r} nie zaszło (oczekiwana "
+                             f"faza {expect_phase!r})")
 
 
 def release_inplace_op(con, *, op_id, now, reason, actor="user:local"):
-    """JAWNE ZWOLNIENIE izolacji lokacji ręką (Q8): operacja otwarta → `released`, lokacja wraca do
-    zwykłego skanu. Gest człowieka po własnym rozstrzygnięciu (np. plik przywrócony z pełnej kopii)
-    - stąd zdarzenie `location.writeback_released` z powodem. Operacja nieotwarta → `ValueError`."""
+    """JAWNE ZWOLNIENIE izolacji lokacji ręką (Q8): operacja izolująca (`INPLACE_ISOLATING_PHASES`,
+    także `written` czekająca na re-sync) → `released`, lokacja wraca do zwykłego skanu. Gest
+    człowieka po własnym rozstrzygnięciu (np. plik przywrócony z pełnej kopii) - stąd zdarzenie
+    `location.writeback_released` z powodem. Operacja nieizolująca → `ValueError`."""
     with con:
         row = con.execute("SELECT location_id, phase FROM inplace_op WHERE id = ?",
                           (op_id,)).fetchone()
-        if row is None or row["phase"] not in INPLACE_OPEN_PHASES:
-            raise ValueError(f"operacja {op_id} nie jest otwarta - nie ma czego zwalniać")
+        if row is None or row["phase"] not in INPLACE_ISOLATING_PHASES:
+            raise ValueError(f"operacja {op_id} nie izoluje lokacji - nie ma czego zwalniać")
         con.execute("UPDATE inplace_op SET phase = 'released', reason = ?, closed_at = ? "
                     "WHERE id = ?", (reason, now, op_id))
         emit_event(con, actor=actor, verb="location.writeback_released",

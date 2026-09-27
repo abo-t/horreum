@@ -37,7 +37,10 @@ Kolejność BAZA→PLIK→BAZA: backup undo PIERWSZY (w obu drogach - przed `os.
 pierwszym bajtem zapisu w miejscu; Z3 2026-09-26, dawniej backup szedł PO podmianie), potem plik,
 potem re-sync; crash między plikiem a re-synciem → plik zmieniony, DB stęchłe, kotwicą naprawy jest
 RE-SKAN (`header_hash` mismatch → refresh), a dla zapisu w miejscu przerwanego w połowie - odzysk
-z backupu regionu. Utrwalanie per plik (funkcje stagingu `repo` commitują od razu),
+z backupu regionu. Zapis w miejscu IZOLUJE lokację od skanu i od innych mutacji aż do udanej
+kontroli danych i re-syncu (faza `synced`, `repo.INPLACE_ISOLATING_PHASES`); porażka re-syncu
+zostawia ją izolowaną, a drogą naprawy jest dokończenie (`finish_inplace`), nie re-skan.
+Utrwalanie per plik (funkcje stagingu `repo` commitują od razu),
 więc anulowanie na granicy pliku jest bezpieczne: pliki już zapisane zostają 'applied', reszta
 'pending' (wznawialne).
 """
@@ -844,14 +847,22 @@ def _xisf_full_header_atomic(path: str, xml_text: str, expected_hash: str | None
 #   4. WERYFIKACJA (odczyt KLIENTA - osobny uchwyt, ale ta sama maszyna i jej pamięć podręczna;
 #      niezależnej kontroli po stronie NAS to nie zastępuje, zob. `scripts/kontrola_pilotazu.py`):
 #      rozmiar pliku, bajty regionu, odcisk próbek danych, `header_hash` formułą skanu. Zgodna →
-#      faza `written` (re-sync orkiestracji → `synced`), rozjazd albo przerwa → `unverified`.
+#      faza `written`, rozjazd albo przerwa → `unverified`. Nieutrwalone przejście fazy to operacja
+#      NIEUKOŃCZONA ('failed', izolacja zostaje), nie dopisek do sukcesu.
+#   5. DOKOŃCZENIE (`_dokoncz`, znów pod blokadą): region na dysku == wynik operacji, brak nowszej
+#      operacji lokacji, KONTROLA DANYCH i re-sync bazy → faza `synced`. Do tej chwili lokacja jest
+#      izolowana; porażka zostawia `written` i drogę ponowienia (`finish_inplace`).
 #
 # DANE: zakres zapisu leży w regionie nagłówka z konstrukcji, a pisany jest jednym `write` od adresu
 # wewnątrz regionu - jedyne dane, które usterka arytmetyki mogłaby nadpisać, to bajty TUŻ ZA
 # regionem, a zapis poza koniec pliku zmieniłby jego rozmiar. Stąd próbki: 64 KiB przed regionem,
-# 64 KiB od początku danych, 64 KiB końca pliku + rozmiar. Pełny dowód `sha1_data` daje re-sync
-# orkiestracji (`_resync(expect_sha1_data=)` czyta cały plik) - obejmuje wybrane HDU FITS albo
-# pierwszy obraz XISF, nie pozostałe HDU/obrazy.
+# 64 KiB od początku danych, 64 KiB końca pliku + rozmiar. Próbki nie widzą reszty pliku (drugie
+# HDU FITS, kolejny obraz albo załącznik XISF), a `sha1_data` obejmuje tylko wybrane HDU / pierwszy
+# obraz - więc PEŁNY DOWÓD daje kontrola danych dokończenia (astra, 2026-09-27): sha1 pliku
+# z PODSTAWIONYM starym regionem operacji == `location.file_sha1` sprzed zapisu (`FileAnchor`,
+# `_resync(kontrola=)`). Kotwicę bazy sprawdza pisarz pod blokadą PRZED pierwszym bajtem: brak
+# (`NULL`) albo inny `mtime` pliku niż w bazie → pełny odczyt uchwytu; sha1 inny niż w bazie →
+# 'blocked' (baza nie opisuje tego pliku), a kotwica z odczytu idzie do koperty backupu.
 #
 # ODZYSK ROZDARTEGO NAGŁÓWKA (`recover_region`, orkiestracja `recover_torn`): wyłącznie dla
 # OTWARTEJ operacji z dziennika i wyłącznie wtedy, gdy region pod blokadą jest stanem pośrednim TEJ
@@ -906,17 +917,24 @@ class RegionBackup:
     niezerowe wypełnienie i zera po `END`. Backupy sprzed tej zmiany (gołe `hdr.tostring()` / XML)
     tego nie obiecują i cofają się wyłącznie drogą atomową. Materiałem ODZYSKU rozdartego zapisu
     nie jest ta koperta, tylko operacja `inplace_op` (0022) - koperta mówi, co było, operacja mówi,
-    co się działo."""
+    co się działo.
+
+    `file_sha1` (opcjonalne, od 2026-09-27) = sha1 CAŁEGO pliku sprzed zapisu, gdy pisarz musiał go
+    policzyć pełnym odczytem (baza nie miała kotwicy) - kontrola danych dokończenia bierze go stąd,
+    gdy `location.file_sha1` jest pusty."""
     fmt: str               # 'fits' | 'xisf'
     offset: int
     region: bytes
     size: int
     ino: int               # 0 = system nie podał
     pre_hash: str
+    file_sha1: str | None = None
 
     def encode(self) -> str:
         meta = {"fmt": self.fmt, "offset": self.offset, "length": len(self.region),
                 "size": self.size, "ino": self.ino, "pre_hash": self.pre_hash}
+        if self.file_sha1 is not None:
+            meta["file_sha1"] = self.file_sha1
         body = base64.b64encode(zlib.compress(self.region, 9)).decode("ascii")
         return f"{_BACKUP_MAGIC}{json.dumps(meta, sort_keys=True)}\n{body}"
 
@@ -931,7 +949,7 @@ class RegionBackup:
         if len(region) != meta["length"]:
             raise ValueError("RegionBackup: długość regionu nie zgadza się z metadanymi")
         return RegionBackup(meta["fmt"], meta["offset"], region, meta["size"], meta["ino"],
-                            meta["pre_hash"])
+                            meta["pre_hash"], meta.get("file_sha1"))
 
     def header_text(self) -> str:
         """Nagłówek jako tekst dla drogi atomowej undo: FITS - region, XISF - XML z regionu."""
@@ -969,6 +987,68 @@ def _probe(fh, offset: int, length: int, size: int) -> tuple:
         fh.seek(a)
         wynik.append(hashlib.sha1(fh.read(max(0, b - a))).hexdigest())
     return tuple(wynik)
+
+
+_SHA1_BUF = 1 << 20
+
+
+def _sha1_uchwytu(fh) -> str:
+    """sha1 CAŁEGO pliku z uchwytu blokady (kotwica sprzed zapisu, gdy baza jej nie ma albo opisuje
+    plik o innym `mtime`) - ten sam plik, który za chwilę zapiszemy, nikt inny go nie zmieni."""
+    h = hashlib.sha1()
+    fh.seek(0)
+    while True:
+        b = fh.read(_SHA1_BUF)
+        if not b:
+            break
+        h.update(b)
+    return h.hexdigest()
+
+
+def _sha1_z_podstawieniem(path: str, offset: int, region: bytes) -> str:
+    """sha1 pliku, w którym bajty `[offset, offset+len(region))` zastąpiono `region` - czyli sha1
+    pliku SPRZED operacji, o ile operacja zmieniła wyłącznie swój region. Porównany z kotwicą bazy
+    (`location.file_sha1` sprzed zapisu) dowodzi, że żaden bajt POZA regionem nagłówka się nie
+    zmienił - także drugie HDU FITS i kolejne obrazy/załączniki XISF, których nie widzą ani próbki,
+    ani `sha1_data`.
+
+    Osobny pełny odczyt (poza strumieniem `scan.scan_file`): jedyny strumień, który i tak czyta cały
+    plik, żyje w `hashing.sha1_of_span`, poza klingą. Wołane pod blokadą pliku, więc oba odczyty
+    widzą te same bajty."""
+    h = hashlib.sha1()
+    koniec = offset + len(region)
+    pos = 0
+    with open(path, "rb") as f:
+        while True:
+            b = f.read(_SHA1_BUF)
+            if not b:
+                break
+            a, e = max(offset, pos), min(koniec, pos + len(b))
+            if a < e:
+                b = b[:a - pos] + region[a - offset:e - offset] + b[e - pos:]
+            h.update(b)
+            pos += len(b)
+    return h.hexdigest()
+
+
+@dataclasses.dataclass(frozen=True)
+class FileAnchor:
+    """KOTWICA BAZY dla zapisu w miejscu: `location.file_sha1` i `location.mtime` sprzed zapisu.
+    Pisarz sprawdza ją pod blokadą przed pierwszym bajtem (brak sha1 albo inny `mtime` → pełny
+    odczyt; inny sha1 → 'blocked'), a kontrola danych dokończenia porównuje z nią plik po zapisie."""
+    file_sha1: str | None
+    mtime: str | None
+
+
+@dataclasses.dataclass(frozen=True)
+class _KontrolaDanych:
+    """Czego re-sync po zapisie w miejscu wymaga od pliku, zanim wciągnie go do bazy: nagłówek
+    `header_hash` (ten, który operacja zapisała) i sha1 pliku z podstawionym starym regionem
+    operacji (`old_region` od `offset`) == `anchor_sha1` (kotwica sprzed zapisu)."""
+    offset: int
+    old_region: bytes
+    anchor_sha1: str | None
+    header_hash: str
 
 
 def _region_backup(path: str, fmt: str, offset: int, length: int, pre_hash: str) -> RegionBackup:
@@ -1245,8 +1325,10 @@ class _NullJournal:
 
 
 def _faza(journal, faza, reason=None) -> str | None:
-    """Przejście fazy w dzienniku; porażka NIE zmienia wyniku zapisu, tylko dopisuje się do powodu
-    (operacja zostaje w fazie `writing` - czyli izolowana, strona bezpieczna)."""
+    """Przejście fazy w dzienniku → `None` albo powód porażki. Porażka znaczy, że operacja zostaje
+    w fazie `writing` (otwarta, izolowana), więc wołający MUSI potraktować zapis jako NIEUKOŃCZONY
+    ('failed'), a nie dopisać powód do sukcesu (astra, 2026-09-27): baza nie wie, że zapis się
+    udał, i jedyną uczciwą drogą dalej jest odzysk."""
     try:
         journal.phase(faza, reason)
     except Exception as exc:  # noqa: BLE001
@@ -1255,11 +1337,17 @@ def _faza(journal, faza, reason=None) -> str | None:
     return None
 
 
-def _apply_inplace(plan: _InplacePlan, fh, journal) -> WriteResult:
+def _apply_inplace(plan: _InplacePlan, fh, journal,
+                   anchor: FileAnchor | None = None) -> WriteResult:
     """Kroki 2-4 zapisu w miejscu na uchwycie blokady `fh`. `journal.begin(spec, backup_text)`
     utrwala operację (a przy commicie także backup) PRZED zapisem; jego porażka → 'failed', plik
-    nietknięty. Po zapisie `journal.phase('written'|'unverified')`. Wynik `in_place=True`
-    wyłącznie wtedy, gdy zapis mógł ruszyć bajty."""
+    nietknięty. Po zapisie `journal.phase('written'|'unverified')`; nieutrwalone `written` → 'failed'
+    (operacja nieukończona). Wynik `in_place=True` wyłącznie wtedy, gdy zapis mógł ruszyć bajty.
+
+    `anchor` (commit, undo): kotwica bazy sprawdzana pod blokadą przed dziennikiem - brak sha1 albo
+    inny `mtime` niż w bazie → pełny odczyt uchwytu; sha1 inny niż w bazie → 'blocked', plik
+    nietknięty. Kotwica z pełnego odczytu trafia do koperty backupu (`RegionBackup.file_sha1`).
+    `None` = bez kotwicy (odzysk, testy pisarza)."""
     ruszony = False
     backup_text = None
     try:
@@ -1269,12 +1357,23 @@ def _apply_inplace(plan: _InplacePlan, fh, journal) -> WriteResult:
         if fh.read(len(plan.old_region)) != plan.old_region:
             return WriteResult("blocked", "nagłówek na dysku zmienił się między odczytem "
                                           "a zapisem - plik nietknięty", None)
+        sha1_przed = None
+        if anchor is not None and (anchor.file_sha1 is None
+                                   or scan._mtime_iso(st) != anchor.mtime):
+            sha1_przed = _sha1_uchwytu(fh)
+            if anchor.file_sha1 is not None and sha1_przed != anchor.file_sha1:
+                return WriteResult("blocked", "plik zmienił się od ostatniego skanu (mtime i sha1 "
+                                              "pliku inne niż w bazie) - kontrola danych po zapisie "
+                                              "nie miałaby kotwicy; najpierw skan, plik nietknięty",
+                                   None)
+            if anchor.file_sha1 is not None:
+                sha1_przed = None               # kotwica bazy potwierdzona - koperta jej nie niesie
         probka = _probe(fh, plan.region_start, len(plan.old_region), size)
         zakres = _diff_range(plan.old_region, plan.new_region) or (0, 0)
         spec = OpSpec(plan.fmt, plan.region_start, plan.old_region, plan.new_region, zakres[0],
                       zakres[1], size, st.st_ino, plan.pre_hash, plan.post_hash)
         backup_text = RegionBackup(plan.fmt, plan.region_start, plan.old_region, size, st.st_ino,
-                                   plan.pre_hash).encode()
+                                   plan.pre_hash, sha1_przed).encode()
         try:
             journal.begin(spec, backup_text)
         except Exception as exc:  # noqa: BLE001 - bez dziennika i backupu nie piszemy
@@ -1297,9 +1396,12 @@ def _apply_inplace(plan: _InplacePlan, fh, journal) -> WriteResult:
                            plan.post_hash, backup_text, in_place=True)
     wynik = _verify_inplace(plan, size, probka, backup_text)
     dopisek = _faza(journal, "written" if wynik.status == "applied" else "unverified", wynik.reason)
+    if dopisek and wynik.status == "applied":
+        return WriteResult("failed", f"plik ZMIENIONY w miejscu i zweryfikowany, ale {dopisek} - "
+                                     f"operacja NIEUKOŃCZONA", plan.post_hash, backup_text,
+                           in_place=True)
     if dopisek:
-        wynik = dataclasses.replace(wynik, reason=f"{wynik.reason}; {dopisek}" if wynik.reason
-                                    else dopisek)
+        wynik = dataclasses.replace(wynik, reason=f"{wynik.reason}; {dopisek}")
     return wynik
 
 
@@ -1362,12 +1464,13 @@ def _pod_blokada(path: str, dzialanie) -> WriteResult | Fallback:
 
 
 def write_changes_inplace(path, ops: list[WriteOp], expected_hash: str | None, *,
-                          journal=None) -> WriteResult | Fallback:
+                          journal=None, anchor: FileAnchor | None = None) -> WriteResult | Fallback:
     """Zapis nagłówka W MIEJSCU (O5) - kontrakt `WriteResult` jak `write_changes`, plus `Fallback`,
     gdy plik się nie kwalifikuje. Cały przebieg od planu po weryfikację trzyma blokadę
     `_exclusive`. `journal` (obiekt z `begin(spec, backup_text)` i `phase(faza, reason)`) MUSI
     utrwalić backup i operację przed pierwszym bajtem - orkiestracja podaje dziennik `inplace_op`;
-    `None` = bez dziennika (testy pisarza). RAW → odmowa (#2)."""
+    `None` = bez dziennika (testy pisarza). `anchor` = kotwica bazy (`FileAnchor`, zob.
+    `_apply_inplace`). RAW → odmowa (#2)."""
     if _is_raw(path):
         return WriteResult("blocked", "format RAW jest read-only (#2)", None)
     path = os.fspath(path)
@@ -1378,17 +1481,19 @@ def write_changes_inplace(path, ops: list[WriteOp], expected_hash: str | None, *
                 else _fits_inplace_plan(path, fh, ops, expected_hash))
         if not isinstance(plan, _InplacePlan):
             return plan
-        return _apply_inplace(plan, fh, journal)
+        return _apply_inplace(plan, fh, journal, anchor)
     return _pod_blokada(path, _dzialanie)
 
 
 def restore_inplace(path, backup: RegionBackup, *, op_new_region: bytes, op_file_size: int,
-                    op_file_ino: int, op_post_hash: str, journal=None) -> WriteResult | Fallback:
+                    op_file_ino: int, op_post_hash: str, journal=None,
+                    anchor: FileAnchor | None = None) -> WriteResult | Fallback:
     """UNDO W MIEJSCU (astra Z12/Z13) commitu zapisanego w miejscu: pod blokadą plik musi być TYM
     SAMYM plikiem (`st_ino`, rozmiar z operacji commitu), a CAŁY region pod offsetem backupu -
     bajt w bajt regionem wynikowym tej operacji (`op_new_region`). Wtedy wraca region z koperty.
     Inny inode/rozmiar → `Fallback` (plik podmieniony od commitu - droga atomowa rozstrzyga po
-    hashu); region = stan sprzed commitu → 'blocked' „już cofnięte"; inny region → 'blocked'."""
+    hashu); region = stan sprzed commitu → 'blocked' „już cofnięte"; inny region → 'blocked'.
+    `anchor` = kotwica bazy jak w `write_changes_inplace`."""
     if _is_raw(path):
         return WriteResult("blocked", "format RAW jest read-only (#2)", None)
     path = os.fspath(path)
@@ -1408,7 +1513,7 @@ def restore_inplace(path, backup: RegionBackup, *, op_new_region: bytes, op_file
                                           "tym, który commit zapisał", None)
         plan = _InplacePlan(backup.fmt, path, backup.offset, biezacy, backup.region, op_post_hash,
                             backup.pre_hash)
-        return _apply_inplace(plan, fh, journal)
+        return _apply_inplace(plan, fh, journal, anchor)
     return _pod_blokada(path, _dzialanie)
 
 
@@ -1437,32 +1542,37 @@ def recover_region(path, spec: OpSpec) -> WriteResult:
     if _is_raw(path):
         return WriteResult("blocked", "format RAW jest read-only (#2)", None)
     path = os.fspath(path)
-    reczna = ("nierozstrzygalne - przywróć plik z pełnej kopii ręcznie, potem zwolnij izolację "
-              "(`repo.release_inplace_op`)")
+    return _pod_blokada(path, lambda fh: _odzysk_pod_blokada(fh, path, spec))
 
-    def _dzialanie(fh):
-        st = os.fstat(fh.fileno())
-        if st.st_size != spec.file_size or (spec.file_ino and st.st_ino
-                                            and st.st_ino != spec.file_ino):
-            return WriteResult("blocked", f"inny plik niż w chwili zapisu (rozmiar/st_ino); {reczna}",
-                               None)
-        fh.seek(spec.region_offset)
-        biezacy = fh.read(len(spec.old_region))
-        if not _stan_posredni(biezacy, spec):
-            try:
-                _post_hash(path)
-                czytelny = True
-            except Exception:  # noqa: BLE001
-                czytelny = False
-            if czytelny:
-                return WriteResult("blocked", "to nie jest rozdarcie tej operacji - nagłówek jest "
-                                              "czytelny, ale to nie jest żaden stan pośredni "
-                                              "zapisu (obca zmiana); odzysk odmawia", None)
-            return WriteResult("blocked", f"to nie jest rozdarcie tej operacji; {reczna}", None)
-        plan = _InplacePlan(spec.fmt, path, spec.region_offset, biezacy, spec.old_region, "",
-                            spec.pre_hash)
-        return _apply_inplace(plan, fh, _NullJournal())
-    return _pod_blokada(path, _dzialanie)
+
+_RECZNA = ("nierozstrzygalne - przywróć plik z pełnej kopii ręcznie, potem zwolnij izolację "
+           "(`repo.release_inplace_op`)")
+
+
+def _odzysk_pod_blokada(fh, path: str, spec: OpSpec) -> WriteResult:
+    """Rdzeń `recover_region` na uchwycie blokady `fh` - wspólny dla pisarza i orkiestracji
+    `recover_torn`, która pod TĄ SAMĄ blokadą sprawdza fazę operacji przed i utrwala ją po."""
+    st = os.fstat(fh.fileno())
+    if st.st_size != spec.file_size or (spec.file_ino and st.st_ino
+                                        and st.st_ino != spec.file_ino):
+        return WriteResult("blocked", f"inny plik niż w chwili zapisu (rozmiar/st_ino); {_RECZNA}",
+                           None)
+    fh.seek(spec.region_offset)
+    biezacy = fh.read(len(spec.old_region))
+    if not _stan_posredni(biezacy, spec):
+        try:
+            _post_hash(path)
+            czytelny = True
+        except Exception:  # noqa: BLE001
+            czytelny = False
+        if czytelny:
+            return WriteResult("blocked", "to nie jest rozdarcie tej operacji - nagłówek jest "
+                                          "czytelny, ale to nie jest żaden stan pośredni "
+                                          "zapisu (obca zmiana); odzysk odmawia", None)
+        return WriteResult("blocked", f"to nie jest rozdarcie tej operacji; {_RECZNA}", None)
+    plan = _InplacePlan(spec.fmt, path, spec.region_offset, biezacy, spec.old_region, "",
+                        spec.pre_hash)
+    return _apply_inplace(plan, fh, _NullJournal())
 
 
 # ============================================================ odczyty stagingu (core — literały)
@@ -1489,10 +1599,11 @@ def backups_for_commit(con, commit_id):
 
 def _location(con, location_id):
     """Wiersz location potrzebny do zapisu: path, volume, header_hash, hdu_index, compressed, present
-    + `sha1_data` klatki (kotwica re-syncu po zapisie w miejscu - `_resync(expect_sha1_data=)`)."""
+    + `sha1_data` klatki (kotwica re-syncu po zapisie w miejscu - `_resync(expect_sha1_data=)`)
+    + `file_sha1`/`mtime` (kotwica bazy kontroli danych - `FileAnchor`)."""
     return con.execute(
         "SELECT l.id, l.frame_id, l.volume, l.path, l.header_hash, l.hdu_index, l.compressed, "
-        "       l.present, l.mtime, f.sha1_data "
+        "       l.present, l.mtime, l.file_sha1, f.sha1_data "
         "FROM location l JOIN frame f ON f.id = l.frame_id WHERE l.id = ?",
         (location_id,),
     ).fetchone()
@@ -1545,7 +1656,7 @@ def _group_by_location(rows) -> list[tuple[int, list]]:
     return [(lid, groups[lid]) for lid in order]
 
 
-def _resync(con, path, volume, *, now, actor="user:local", expect_sha1_data=None):
+def _resync(con, path, volume, *, now, actor="user:local", expect_sha1_data=None, kontrola=None):
     """RE-SYNC bazy po mutacji pliku - REUŻYWA znanej-ścieżki skanu (SPOT, R#2). `scan_file`
     (read-only, świeże hasze/nagłówek/karty) → `ingest_record`: `refresh_location` odświeża fakty
     kopii + zeznanie + `cards` + `frame.camera_id/kind` z eventami (actor="user:local"). Wymaga
@@ -1555,13 +1666,145 @@ def _resync(con, path, volume, *, now, actor="user:local", expect_sha1_data=None
     `expect_sha1_data` (zapis w miejscu): tożsamość danych, którą plik MA mieć po zapisie. Re-sync
     i tak czyta cały plik, więc to pełny dowód nietkniętych danych za darmo. Rozjazd → zwraca powód
     i NIE wciąga rekordu: `ingest_record` uznałby go za podmianę treści i rozdwoił klatkę
-    (nowy frame + osierocony stary z zeznaniem i obiektem). Zwraca `None`, gdy wciągnął."""
+    (nowy frame + osierocony stary z zeznaniem i obiektem). Zwraca `None`, gdy wciągnął.
+
+    `kontrola` (zapis w miejscu, `_KontrolaDanych`, astra 2026-09-27): `sha1_data` obejmuje tylko
+    wybrane HDU / pierwszy obraz, więc przed wciągnięciem rekordu dwa kolejne warunki - nagłówek
+    na dysku to ten, który operacja zapisała (`header_hash`), i plik z PODSTAWIONYM starym regionem
+    operacji ma sha1 kotwicy sprzed zapisu (żaden bajt poza regionem się nie zmienił). Brak kotwicy
+    to też odmowa: bez niej kontrola nie istnieje. Ingest BEZ generacji (`inplace_gen=None`) - to
+    re-sync operacji, która sama izoluje lokację, więc nie może odrzucić sam siebie."""
     rec = scan.scan_file(path)
     if expect_sha1_data is not None and rec.sha1_data != expect_sha1_data:
         return (f"plik ZMIENIONY, ale sha1_data po zapisie ({rec.sha1_data}) różni się od "
                 f"tożsamości klatki - baza NIE zsynchronizowana")
+    if kontrola is not None:
+        if rec.header_hash != kontrola.header_hash:
+            return ("plik ZMIENIONY, ale nagłówek na dysku nie jest tym, który operacja zapisała "
+                    "(header_hash) - baza NIE zsynchronizowana")
+        if kontrola.anchor_sha1 is None:
+            return ("brak kotwicy sha1 pliku sprzed zapisu - kontrola bajtów poza nagłówkiem "
+                    "niemożliwa, baza NIE zsynchronizowana")
+        # `rec.file_sha1 == kotwica`: baza już opisuje DOKŁADNIE ten plik - poprzedni re-sync tej
+        # operacji przeszedł kontrolę i wciągnął go, a padło dopiero utrwalenie fazy. Kotwica to
+        # `location.file_sha1`, którą przy izolowanej lokacji zapisuje wyłącznie ten re-sync (skan
+        # jej nie tknie - izolacja i generacja - a inne mutacje odbija bramka izolacji).
+        if rec.file_sha1 != kontrola.anchor_sha1 and _sha1_z_podstawieniem(
+                path, kontrola.offset, kontrola.old_region) != kontrola.anchor_sha1:
+            return ("plik ZMIENIONY, a bajty POZA regionem nagłówka różnią się od pliku sprzed "
+                    "zapisu (sha1 pliku z podstawionym starym regionem != location.file_sha1) - "
+                    "baza NIE zsynchronizowana")
     scan.ingest_record(con, rec, volume=volume, now=now, summary=scan.ScanSummary(), actor=actor)
     return None
+
+
+def _powod_izolacji(op) -> str:
+    """Powód odmowy mutacji pliku lokacji z operacją izolującą - z drogą naprawy właściwą fazie."""
+    droga = (f"najpierw odzysk: recover_torn({op['id']})"
+             if op["phase"] in repo.INPLACE_OPEN_PHASES
+             else f"najpierw dokończenie: finish_inplace({op['id']})")
+    return (f"lokacja ma nieukończony zapis w miejscu (operacja {op['id']}, {op['kind']}, faza "
+            f"{op['phase']}) - plik jest izolowany; {droga}")
+
+
+def _kotwica_operacji(con, op, loc) -> str | None:
+    """Kotwica kontroli danych operacji: `location.file_sha1` sprzed zapisu (lokacja izolowana od
+    operacji do `synced`, więc nikt jej nie przestawił), a gdy pusty - sha1 z pełnego odczytu
+    pisarza w kopercie backupu commitu (`RegionBackup.file_sha1`). `None` = brak kotwicy."""
+    if loc["file_sha1"] is not None:
+        return loc["file_sha1"]
+    if op["kind"] != "commit" or op["commit_id"] is None:
+        return None
+    row = con.execute(
+        "SELECT header_text FROM header_backups WHERE commit_id = ? AND location_id = ? "
+        "ORDER BY id DESC LIMIT 1", (op["commit_id"], op["location_id"])).fetchone()
+    try:
+        env = RegionBackup.decode(row["header_text"]) if row is not None else None
+    except ValueError:
+        return None
+    return env.file_sha1 if env is not None else None
+
+
+def _dokoncz(con, op_id, *, now) -> WriteResult:
+    """DOKOŃCZENIE operacji zapisu w miejscu w fazie `written` → `synced` (krok 5 sekcji „ZAPIS
+    W MIEJSCU"): wszystko POD BLOKADĄ pliku - faza czytana od nowa (inny proces mógł ją zmienić),
+    brak nowszej operacji lokacji, ten sam plik (rozmiar, `st_ino`), region na dysku == wynik
+    operacji (późniejsza cudza zmiana nie zostanie wciągnięta jako „nasza"), potem re-sync z kontrolą
+    danych (`_resync(kontrola=)`) i CAS fazy `written` → `synced`.
+
+    Jedna droga dla commitu (tuż po zapisie), ponowienia re-syncu commitu (`finish_inplace`),
+    cofnięcia i ponowionego cofnięcia (`undo`). 'failed' = warunki spełnione, ale re-sync, kontrola
+    danych albo utrwalenie fazy padły - operacja zostaje `written` (izolowana) i da się ją ponowić;
+    'blocked' = plik nie jest wynikiem tej operacji albo operacja nie czeka na dokończenie."""
+    op = con.execute("SELECT * FROM inplace_op WHERE id = ?", (op_id,)).fetchone()
+    if op is None:
+        return WriteResult("failed", f"brak operacji {op_id}", None)
+    loc = _location(con, int(op["location_id"]))
+    if loc is None:
+        return WriteResult("failed", "brak location w bazie", None)
+    spec = _spec_z_operacji(op)
+    kontrola = _KontrolaDanych(spec.region_offset, spec.old_region,
+                               _kotwica_operacji(con, op, loc), spec.post_hash)
+
+    def _dzialanie(fh):
+        faza = repo.inplace_op_phase(con, op_id)
+        if faza != "written":
+            return WriteResult("blocked", f"operacja {op_id} jest w fazie {faza}, nie czeka na "
+                                          f"dokończenie", None)
+        if repo.newer_inplace_op(con, location_id=loc["id"], op_id=op_id):
+            return WriteResult("blocked", f"lokacja ma operację nowszą niż {op_id} - dokończenie "
+                                          f"odmawia", None)
+        st = os.fstat(fh.fileno())
+        if st.st_size != spec.file_size or (spec.file_ino and st.st_ino
+                                            and st.st_ino != spec.file_ino):
+            return WriteResult("blocked", f"inny plik niż w chwili zapisu (rozmiar/st_ino); "
+                                          f"{_RECZNA}", None)
+        fh.seek(spec.region_offset)
+        if fh.read(len(spec.new_region)) != spec.new_region:
+            return WriteResult("blocked", f"region nagłówka na dysku nie jest wynikiem operacji "
+                                          f"{op_id} - plik zmienił się od zapisu; {_RECZNA}", None)
+        try:
+            niezgodne = _resync(con, loc["path"], loc["volume"], now=now,
+                                expect_sha1_data=loc["sha1_data"], kontrola=kontrola)
+        except Exception as exc:  # noqa: BLE001 - wsad idzie dalej, operacja zostaje `written`
+            niezgodne = f"plik ZMIENIONY, ale re-sync padł - {type(exc).__name__}: {exc}"
+        if niezgodne is not None:
+            return WriteResult("failed", niezgodne, None)
+        try:
+            repo.set_inplace_op_phase(con, op_id=op_id, phase="synced", now=now,
+                                      expect_phase="written")
+        except Exception as exc:  # noqa: BLE001
+            return WriteResult("failed", f"baza zsynchronizowana, ale faza 'synced' NIE zapisana "
+                                         f"({type(exc).__name__}: {exc})", None)
+        return WriteResult("applied", None, spec.post_hash)
+    return _pod_blokada(loc["path"], _dzialanie)
+
+
+def finish_inplace(con, op_id, *, now) -> FileResult:
+    """PONOWIENIE DOKOŃCZENIA operacji zapisu w miejscu w fazie `written` (zapis zweryfikowany, ale
+    kontrola danych, re-sync albo utrwalenie fazy padły - lokacja izolowana). `_dokoncz` pod
+    blokadą; dla commitu także to, co commit robi po udanym re-syncu: wpisy stagingu tej lokacji
+    w przebiegu commitu 'failed' → 'applied' i zgaszenie nagrobka ręki, gdy łata wpisała `OBJECT`.
+    Zwraca `FileResult` ('applied' | 'blocked' | 'failed')."""
+    op = con.execute("SELECT * FROM inplace_op WHERE id = ?", (op_id,)).fetchone()
+    if op is None:
+        return FileResult(0, "", "failed", f"brak operacji {op_id}")
+    loc = _location(con, int(op["location_id"]))
+    if loc is None:
+        return FileResult(int(op["location_id"]), "", "failed", "brak location w bazie")
+    res = _dokoncz(con, op_id, now=now)
+    if res.status != "applied":
+        return FileResult(loc["id"], loc["path"], res.status, res.reason)
+    if op["kind"] == "commit":
+        rows = con.execute(
+            "SELECT p.id, p.keyword FROM pending_changes p JOIN commits c ON c.run_id = p.run_id "
+            "WHERE c.id = ? AND p.location_id = ? AND p.status = 'failed'",
+            (op["commit_id"], loc["id"])).fetchall()
+        if any(r["keyword"] == "OBJECT" for r in rows):
+            repo.clear_object_tombstone(con, frame_id=loc["frame_id"], now=now)
+        for r in rows:
+            repo.set_pending_status(con, pending_id=r["id"], status="applied", reason=None)
+    return FileResult(loc["id"], loc["path"], "applied", res.reason)
 
 
 def commit(con, run_id, *, now, clock=None,
@@ -1593,9 +1836,15 @@ def commit(con, run_id, *, now, clock=None,
     wciągania, zamiast rozdwojenia klatki), a jego wyjątek (czkawka SMB przy pełnym odczycie) daje
     'failed' dla tego pliku - wsad idzie dalej.
 
-    `inplace=True` (O5): per plik najpierw ZAPIS W MIEJSCU pod blokadą (`write_changes_inplace`)
-    z dziennikiem `inplace_op` (backup + operacja jedną transakcją przed pierwszym bajtem; faza
-    `written` po weryfikacji, `synced` po re-syncu). Plik niekwalifikujący się (`Fallback`) idzie
+    BRAMKA IZOLACJI (obie drogi, astra 2026-09-27): lokacja z nieukończoną operacją zapisu w miejscu
+    (`repo.isolating_inplace_op`) → 'blocked' z drogą naprawy (odzysk albo dokończenie), zero zapisu.
+
+    `inplace=True` (O5): per plik najpierw ZAPIS W MIEJSCU pod blokadą (`write_changes_inplace`,
+    z kotwicą bazy `FileAnchor`) z dziennikiem `inplace_op` (backup + operacja jedną transakcją
+    przed pierwszym bajtem; faza `written` po weryfikacji), a potem DOKOŃCZENIE (`_dokoncz`, znów
+    pod blokadą: kontrola danych całego pliku + re-sync → `synced`). Porażka dokończenia →
+    'failed', lokacja izolowana w fazie `written`, ponowienie `finish_inplace`. Plik
+    niekwalifikujący się (`Fallback`) idzie
     drogą atomową, a jego `FileResult.reason` mówi dlaczego - chyba że `fallback=False` (tryb
     pilotażu, warunek 6 astry): wtedy 'blocked' z powodem i ZERO zapisu. `CommitResult.in_place` =
     pliki zapisane w miejscu."""
@@ -1646,6 +1895,13 @@ def commit(con, run_id, *, now, clock=None,
             skipped.append(FileResult(location_id, path, "skipped", reason))
             _report(path, "skipped")
             continue
+        izolujaca = repo.isolating_inplace_op(con, location_id)
+        if izolujaca is not None:           # obie drogi: plik po nieukończonym zapisie w miejscu
+            reason = _powod_izolacji(izolujaca)
+            _mark(rows, "blocked", reason)
+            blocked.append(FileResult(location_id, path, "blocked", reason))
+            _report(path, "blocked")
+            continue
 
         ops = [WriteOp(keyword=r["keyword"], op=r["op"], value=r["new_value"],
                        value_type=r["new_type"], idx=r["idx"], comment=r["new_comment"])
@@ -1675,13 +1931,14 @@ def commit(con, run_id, *, now, clock=None,
 
             def phase(self, faza, reason=None):
                 repo.set_inplace_op_phase(con, op_id=self.op_id, phase=faza, now=now,
-                                          reason=reason)
+                                          reason=reason, expect_phase="writing")
 
         droga = None                                 # powód drogi atomowej w trybie `inplace`
         res = None
         dziennik = _Dziennik()
         if inplace:
-            res = write_changes_inplace(path, ops, expected, journal=dziennik)
+            res = write_changes_inplace(path, ops, expected, journal=dziennik,
+                                        anchor=FileAnchor(loc["file_sha1"], loc["mtime"]))
             if isinstance(res, Fallback):
                 if not fallback:
                     res = WriteResult("blocked", f"nie mieści się w miejscu (tryb bez spadku): "
@@ -1711,19 +1968,36 @@ def commit(con, run_id, *, now, clock=None,
             failed.append(FileResult(location_id, path, "failed", reason))
             _report(path, "failed")
             continue
-        try:                              # PLIK→DB (T8); pełny odczyt pliku
-            niezgodne = _resync(con, path, loc["volume"], now=now,
-                                expect_sha1_data=loc["sha1_data"])
-        except Exception as exc:  # noqa: BLE001 - plik zapisany, pętla idzie dalej
-            # Wsad to tysiące pełnych odczytów po SMB - jedna czkawka udziału nie może zatrzymać
-            # przebiegu z plikiem zapisanym, a bez statusu. Bazę naprawi ponowny re-skan (T8).
-            niezgodne = f"plik ZMIENIONY, ale re-sync padł - {type(exc).__name__}: {exc}"
-        if niezgodne is not None:
-            reason = f"{niezgodne}; backup do cofnięcia zapisany w commicie {commit_id}"
-            _mark(rows, "failed", reason)
-            failed.append(FileResult(location_id, path, "failed", reason))
-            _report(path, "failed")
-            continue
+        if res.in_place:
+            # PLIK→DB pod blokadą: region == wynik, kontrola danych (bajty poza nagłówkiem) i re-sync
+            # → faza `synced`. Porażka zostawia lokację IZOLOWANĄ w fazie `written` (skan jej nie
+            # ruszy, a nie „naprawi ponownym re-skanem") - drogą dalej jest `finish_inplace`.
+            koniec = _dokoncz(con, dziennik.op_id, now=now)
+            if koniec.status != "applied":
+                droga_dalej = (f"ponów: finish_inplace({dziennik.op_id})"
+                               if koniec.status == "failed" else
+                               f"zwolnienie ręką: repo.release_inplace_op({dziennik.op_id})")
+                reason = (f"{koniec.reason}; backup do cofnięcia zapisany w commicie {commit_id}; "
+                          f"lokacja IZOLOWANA od skanu, {droga_dalej}")
+                _mark(rows, "failed", reason)
+                failed.append(FileResult(location_id, path, "failed", reason))
+                _report(path, "failed")
+                continue
+        else:
+            try:                          # PLIK→DB (T8); pełny odczyt pliku
+                niezgodne = _resync(con, path, loc["volume"], now=now,
+                                    expect_sha1_data=loc["sha1_data"])
+            except Exception as exc:  # noqa: BLE001 - plik zapisany, pętla idzie dalej
+                # Wsad to tysiące pełnych odczytów po SMB - jedna czkawka udziału nie może
+                # zatrzymać przebiegu z plikiem zapisanym, a bez statusu. Bazę drogi atomowej
+                # naprawi ponowny re-skan (T8) - ta droga lokacji nie izoluje.
+                niezgodne = f"plik ZMIENIONY, ale re-sync padł - {type(exc).__name__}: {exc}"
+            if niezgodne is not None:
+                reason = f"{niezgodne}; backup do cofnięcia zapisany w commicie {commit_id}"
+                _mark(rows, "failed", reason)
+                failed.append(FileResult(location_id, path, "failed", reason))
+                _report(path, "failed")
+                continue
         # NAGROBEK RĘKI GAŚNIE TU, a nie w ścieżce skanu (S2b, §4/14b-c). Klatka cofnięta ma
         # `object_source='user_cleared'` i drabina ją POMIJA - bez tego gestu zostałaby poza osią na
         # zawsze, nawet po dopisaniu karty. Wyzwalaczem jest WPISANIE `OBJECT` do TEGO pliku, nie
@@ -1731,8 +2005,6 @@ def commit(con, run_id, *, now, clock=None,
         # nie odwołał.
         if any(op.keyword == "OBJECT" for op in ops):
             repo.clear_object_tombstone(con, frame_id=loc["frame_id"], now=now)
-        if res.in_place:
-            _faza(dziennik, "synced")
         _mark(rows, "applied", None)
         wynik = FileResult(location_id, path, "applied", droga)
         applied.append(wynik)
@@ -1837,6 +2109,13 @@ def commit_renames(con, run_id, *, now,
             skipped.append(FileResult(location_id, old_path, "skipped", reason))
             _report(old_path, "skipped")
             continue
+        izolujaca = repo.isolating_inplace_op(con, location_id)
+        if izolujaca is not None:          # plik po nieukończonym zapisie w miejscu - nie ruszamy
+            reason = _powod_izolacji(izolujaca)
+            repo.set_rename_status(con, rename_id=rid, status="blocked", reason=reason)
+            blocked.append(FileResult(location_id, old_path, "blocked", reason))
+            _report(old_path, "blocked")
+            continue
         # Kotwica anty-stale: plik nietknięty od podglądu (mtime + ścieżka).
         if loc["mtime"] != r["expected_mtime"] or loc["path"] != old_path:
             reason = "plik zmieniony od podglądu (mtime/ścieżka)"
@@ -1912,6 +2191,12 @@ def undo_renames(con, run_id, *, now,
             blocked.append(FileResult(location_id, new_path, "blocked", reason))
             _report(new_path, "blocked")
             continue
+        izolujaca = repo.isolating_inplace_op(con, location_id)
+        if izolujaca is not None:
+            blocked.append(FileResult(location_id, new_path, "blocked",
+                                      _powod_izolacji(izolujaca)))
+            _report(new_path, "blocked")
+            continue
         res = rename_file(new_path, old_path)          # odwrotny os.rename
         if res.status == "applied":
             try:
@@ -1962,12 +2247,18 @@ def undo(con, commit_id, *, now,
         plik podmieniony od commitu. Plik tymczasowy nie zostawia rozdarcia, więc nie trzeba odzysku.
 
     STAN „JUŻ COFNIĘTE" / „ZOSTAŁA SYNCHRONIZACJA":
-      * droga w miejscu - z FAZY operacji `undo`: `written` → sam re-sync (faza `synced`),
-        `synced` → 'blocked' „już cofnięte"; operacja otwarta (commitu albo cofnięcia) → 'failed'
-        z numerem operacji do odzysku (lokacja izolowana);
+      * droga w miejscu - z FAZY operacji `undo`: `written` → dokończenie (`_dokoncz`: pod blokadą
+        region == wynik cofnięcia i brak nowszej operacji, dopiero wtedy re-sync z kontrolą danych
+        → `synced`; inny region → 'blocked', astra 2026-09-27 - dawniej sam re-sync wciągał każdą
+        późniejszą zmianę jako cofnięcie), `synced` → 'blocked' „już cofnięte"; operacja otwarta
+        (commitu albo cofnięcia) → 'failed' z numerem operacji do odzysku (lokacja izolowana);
+        commit w fazie `written` (jego re-sync padł) → najpierw jego dokończenie, potem cofnięcie;
       * droga atomowa - z pliku i kompletu faktów bazy: nagłówek na dysku = backup (dla koperty:
         CAŁY region bajt w bajt, dla backupu tekstowego: hash) i baza opisuje ten plik (`header_hash`
-        ORAZ `mtime`) → 'blocked' „już cofnięte"; plik = backup, a baza nie → sam re-sync."""
+        ORAZ `mtime`) → 'blocked' „już cofnięte"; plik = backup, a baza nie → sam re-sync.
+
+    BRAMKA IZOLACJI: operacja izolująca lokację spoza tego commitu (`repo.isolating_inplace_op`) →
+    'blocked' z drogą naprawy, zero zapisu - w obu drogach."""
     backups = backups_for_commit(con, commit_id)
     total = len(backups)
     restored: list[FileResult] = []
@@ -1982,7 +2273,8 @@ def undo(con, commit_id, *, now,
         if progress is not None:
             progress(done, total, path, status)
 
-    def _sync(loc, path, expect, powod, op_id=None):
+    def _sync(loc, path, expect, powod):
+        """Re-sync drogi atomowej (bez operacji w dzienniku)."""
         try:
             niezgodne = _resync(con, path, loc["volume"], now=now, expect_sha1_data=expect)
         except Exception as exc:  # noqa: BLE001 - nagłówek przywrócony, pętla idzie dalej
@@ -1992,10 +2284,20 @@ def undo(con, commit_id, *, now,
             failed.append(FileResult(loc["id"], path, "failed", niezgodne))
             _report(path, "failed")
             return
-        if op_id is not None:
-            repo.set_inplace_op_phase(con, op_id=op_id, phase="synced", now=now)
         restored.append(FileResult(loc["id"], path, "restored", powod))
         _report(path, "restored")
+
+    def _dokoncz_undo(loc, path, op_id, powod):
+        """Dokończenie operacji cofnięcia w miejscu (`_dokoncz`) z wynikiem undo."""
+        wynik = _dokoncz(con, op_id, now=now)
+        if wynik.status == "applied":
+            restored.append(FileResult(loc["id"], path, "restored", powod))
+            _report(path, "restored")
+        elif wynik.status == "blocked":
+            _blok(loc, path, f"{wynik.reason}; lokacja IZOLOWANA od skanu")
+        else:
+            _pad(loc, path, f"nagłówek PRZYWRÓCONY, ale {wynik.reason}; lokacja IZOLOWANA od "
+                            f"skanu - ponowne undo dokończy samą synchronizację")
 
     def _blok(loc, path, powod):
         blocked.append(FileResult(loc["id"], path, "blocked", powod))
@@ -2025,11 +2327,26 @@ def undo(con, commit_id, *, now,
                             f"recover_torn({otwarta['id']})")
             continue
         if op_u is not None and op_u["phase"] == "written":
-            _sync(loc, path, loc["sha1_data"], "nagłówek był już przywrócony - dokończono "
-                                               "synchronizację bazy", op_u["id"])
+            _dokoncz_undo(loc, path, op_u["id"], "nagłówek był już przywrócony - dokończono "
+                                                 "synchronizację bazy")
             continue
         if op_u is not None and op_u["phase"] == "synced":
             _blok(loc, path, "już cofnięte (operacja cofnięcia zamknięta)")
+            continue
+        if op_c is not None and op_c["phase"] == "written":
+            # Commit zapisał i zweryfikował plik, ale jego re-sync padł (lokacja izolowana). Cofamy
+            # dopiero stan, który baza zna: najpierw dokończenie commitu, potem zwykłe cofnięcie.
+            koniec = _dokoncz(con, op_c["id"], now=now)
+            if koniec.status != "applied":
+                (_pad if koniec.status == "failed" else _blok)(
+                    loc, path, f"commit nie jest dokończony (operacja {op_c['id']}): "
+                               f"{koniec.reason}; lokacja IZOLOWANA od skanu")
+                continue
+            op_c = _ostatnia_operacja(con, commit_id, loc["id"], "commit")
+            loc = _location(con, loc["id"])         # kotwica i mtime po dokończeniu commitu
+        izolujaca = repo.isolating_inplace_op(con, loc["id"])
+        if izolujaca is not None:                   # nieukończony zapis spoza tego commitu
+            _blok(loc, path, _powod_izolacji(izolujaca))
             continue
         try:
             env = RegionBackup.decode(b["header_text"])
@@ -2037,7 +2354,7 @@ def undo(con, commit_id, *, now,
             _pad(loc, path, f"uszkodzona koperta backupu: {exc}")
             continue
 
-        if env is not None and op_c is not None and op_c["phase"] in ("written", "synced"):
+        if env is not None and op_c is not None and op_c["phase"] == "synced":
             class _Dziennik:
                 op_id = None
 
@@ -2047,15 +2364,16 @@ def undo(con, commit_id, *, now,
 
                 def phase(self, faza, reason=None):
                     repo.set_inplace_op_phase(con, op_id=self.op_id, phase=faza, now=now,
-                                              reason=reason)
+                                              reason=reason, expect_phase="writing")
             dziennik = _Dziennik()
             spec_c = _spec_z_operacji(op_c)
             res = restore_inplace(path, env, op_new_region=spec_c.new_region,
                                   op_file_size=spec_c.file_size, op_file_ino=spec_c.file_ino,
-                                  op_post_hash=spec_c.post_hash, journal=dziennik)
+                                  op_post_hash=spec_c.post_hash, journal=dziennik,
+                                  anchor=FileAnchor(loc["file_sha1"], loc["mtime"]))
             if not isinstance(res, Fallback):
                 if res.status == "applied":
-                    _sync(loc, path, loc["sha1_data"], None, dziennik.op_id)
+                    _dokoncz_undo(loc, path, dziennik.op_id, None)
                 elif res.status == "blocked":
                     _blok(loc, path, res.reason)
                 else:
@@ -2100,8 +2418,16 @@ def undo(con, commit_id, *, now,
 def recover_torn(con, op_id, *, now) -> FileResult:
     """ODZYSK ROZDARTEGO NAGŁÓWKA po operacji `inplace_op.id` (astra Z11): tylko operacja OTWARTA
     (`writing`/`unverified`), tylko gdy region pliku pod blokadą jest jej stanem pośrednim
-    (`recover_region`). Sukces → faza `recovered` (izolacja lokacji zdjęta) i re-sync z kontrolą
-    `sha1_data`. Zwraca `FileResult` ('restored' | 'blocked' | 'failed')."""
+    (`_odzysk_pod_blokada`). Zwraca `FileResult` ('restored' | 'blocked' | 'failed').
+
+    CAŁOŚĆ POD JEDNĄ BLOKADĄ PLIKU (astra, 2026-09-27): faza operacji czytana OD NOWA pod blokadą
+    i brak późniejszej operacji tej lokacji - spóźnione drugie wywołanie, które widziało operację
+    otwartą przed blokadą, nie cofnie nowszego, poprawnego zapisu (poprawny ponowny commit tej samej
+    wartości zostawia region, który jest „stanem pośrednim" starej operacji). Po przywróceniu
+    regionu re-sync z kontrolą danych (`sha1_data`, nagłówek sprzed operacji, sha1 całego pliku ==
+    kotwica sprzed zapisu) i dopiero wtedy CAS fazy → `recovered`. Porażka re-syncu albo fazy
+    zostawia operację OTWARTĄ (izolacja trwa), a ponowienie jest bezpieczne: region stary jest też
+    stanem pośrednim, więc drugi odzysk nic nie pisze i powtarza samą kontrolę z re-synciem."""
     op = con.execute("SELECT * FROM inplace_op WHERE id = ?", (op_id,)).fetchone()
     if op is None:
         return FileResult(0, "", "failed", f"brak operacji {op_id}")
@@ -2109,20 +2435,47 @@ def recover_torn(con, op_id, *, now) -> FileResult:
     if loc is None:
         return FileResult(int(op["location_id"]), "", "failed", "brak location w bazie")
     path = loc["path"]
+    if op["phase"] == "written":
+        return FileResult(loc["id"], path, "blocked",
+                          f"operacja {op_id} zapisała i zweryfikowała plik - odzysk nie dotyczy; "
+                          f"dokończ ją: finish_inplace({op_id})")
     if op["phase"] not in repo.INPLACE_OPEN_PHASES:
         return FileResult(loc["id"], path, "blocked",
                           f"operacja {op_id} nie jest otwarta ({op['phase']}) - odzysk dotyczy "
                           f"wyłącznie przerwanego zapisu")
-    res = recover_region(path, _spec_z_operacji(op))
-    if res.status != "applied":
-        return FileResult(loc["id"], path, res.status, res.reason)
-    repo.set_inplace_op_phase(con, op_id=op_id, phase="recovered", now=now,
-                              reason="region stary przywrócony (recover_torn)")
-    try:
-        niezgodne = _resync(con, path, loc["volume"], now=now, expect_sha1_data=loc["sha1_data"])
-    except Exception as exc:  # noqa: BLE001
-        niezgodne = f"region przywrócony, ale re-sync padł - {type(exc).__name__}: {exc}"
-    if niezgodne is not None:
-        return FileResult(loc["id"], path, "failed", niezgodne)
-    return FileResult(loc["id"], path, "restored", None)
+    spec = _spec_z_operacji(op)
+    kontrola = _KontrolaDanych(spec.region_offset, spec.old_region,
+                               _kotwica_operacji(con, op, loc), spec.pre_hash)
+
+    def _dzialanie(fh):
+        faza = repo.inplace_op_phase(con, op_id)
+        if faza not in repo.INPLACE_OPEN_PHASES:
+            return WriteResult("blocked", f"operacja {op_id} przestała być otwarta ({faza}) - "
+                                          f"odzysk odmawia", None)
+        if repo.newer_inplace_op(con, location_id=loc["id"], op_id=op_id):
+            return WriteResult("blocked", f"lokacja ma operację nowszą niż {op_id} - odzysk "
+                                          f"odmawia, żeby nie cofnąć późniejszego zapisu", None)
+        res = _odzysk_pod_blokada(fh, path, spec)
+        if res.status != "applied":
+            return res
+        ponow = f"operacja zostaje otwarta, ponów recover_torn({op_id})"
+        try:
+            niezgodne = _resync(con, path, loc["volume"], now=now,
+                                expect_sha1_data=loc["sha1_data"], kontrola=kontrola)
+        except Exception as exc:  # noqa: BLE001
+            niezgodne = f"region przywrócony, ale re-sync padł - {type(exc).__name__}: {exc}"
+        if niezgodne is not None:
+            return WriteResult("failed", f"{niezgodne}; {ponow}", None)
+        try:
+            repo.set_inplace_op_phase(con, op_id=op_id, phase="recovered", now=now,
+                                      reason="region stary przywrócony (recover_torn)",
+                                      expect_phase=faza)
+        except Exception as exc:  # noqa: BLE001
+            return WriteResult("failed", f"region przywrócony i baza zsynchronizowana, ale faza "
+                                         f"'recovered' NIE zapisana ({type(exc).__name__}: {exc});"
+                                         f" {ponow}", None)
+        return res
+    wynik = _pod_blokada(path, _dzialanie)
+    status = "restored" if wynik.status == "applied" else wynik.status
+    return FileResult(loc["id"], path, status, wynik.reason)
 

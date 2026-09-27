@@ -72,13 +72,13 @@ def po_skasowaniu(tmp_path):
 def test_predykat_zeznanie_z_nieobecnej_kopii(po_skasowaniu):
     """Po zniknięciu kopii-źródła `header` nie zgadza się z JEDYNĄ obecną kopią → predykat ją
     zwraca, a „Kopie niezgodne ze sobą" (porównują wyłącznie obecne) jej nie widzą - dokładnie
-    ta niewidoczność była długiem AR-5. Jedna obecna kopia to robota etapu, nie człowieka: wiersz
-    Porządków jej nie liczy."""
+    ta niewidoczność była długiem AR-5. Jedna obecna kopia to robota etapu, ale etap chodzi tylko
+    pod swoim korzeniem - wiersz Porządków liczy ją też, żeby nie czekała niewidoczna."""
     con, _root, fid, _a, b = po_skasowaniu
     kopie = queries.orphan_testimony_copies(con)
     assert list(kopie) == [fid] and [k["location_id"] for k in kopie[fid]] == [_loc(con, b)["id"]]
     assert queries.copy_conflict_frame_ids(con) == set()
-    assert queries.orphan_testimony_frame_ids(con) == set()
+    assert queries.orphan_testimony_frame_ids(con) == {fid}
     assert [f for f, _k in scan.adopt_candidates(con)] == [fid]
 
 
@@ -127,6 +127,73 @@ def test_wiersz_porzadkow_liczy_klatki_z_dwiema_obecnymi_kopiami(tmp_path):
     con.execute("UPDATE frame SET retired_at = ? WHERE id = ?", (NOW, fid))
     assert queries.orphan_testimony_frame_ids(con) == set()
     assert _loc(con, b)["present"] == 1 and _loc(con, c)["present"] == 1
+    con.close()
+
+
+# ═════════════════════════ ocalała kopia bez faktów (wiersze sprzed 0021)
+
+
+def _bez_faktow(con, *paths):
+    """Stan kopii sprzed 0021: odcisk nagłówka znany, fakty kopii niezebrane."""
+    for p in paths:
+        con.execute("UPDATE location SET hdr_filter = NULL, hdr_imagetyp = NULL, hdr_object = NULL, "
+                    "hdr_telescop = NULL, hdr_instrume = NULL, hdr_exptime = NULL, "
+                    "hdr_xbinning = NULL, hdr_date_obs = NULL, image_count = NULL, "
+                    "image_roles = NULL, hdr_hash = NULL WHERE path = ?", (str(p),))
+    con.commit()
+
+
+def test_ocalala_FITS_bez_faktow_dostaje_je_a_potem_przejecie_dziala(tmp_path):
+    """Ocalała kopia FITS klatki, której siostra zniknęła, jest kandydatem uzupełnienia faktów, choć
+    obecna jest już tylko ona: klatka ma więcej niż jedną lokację OGÓŁEM. Bez tego predykat zeznania
+    z nieobecnej kopii milczałby na zawsze („nie wiem" przy jedynej obecnej), a przejęcie nie
+    miałoby kandydata. Pojedynczy FITS bez siostry dalej kandydatem NIE jest."""
+    from test_copy_facts import _fits
+    root = tmp_path / "ARCH"
+    a = _fits(root / "A" / "m.fits", "L-Pro", n=3)
+    b = _fits(root / "B" / "m.fits", "CLS", n=3)
+    solo = _fits(root / "S" / "solo.fits", "Ha", n=4)
+    con = db.open_db(str(tmp_path / "h.db"))
+    scan.scan_tree(con, root, volume="?", now=NOW)
+    fid = _loc(con, a)["frame_id"]
+    assert _loc(con, b)["frame_id"] == fid and _header(con, fid)["filter_raw"] == "L-Pro"
+    _bez_faktow(con, a, b, solo)
+    _zniknij(con, a)
+    assert queries.orphan_testimony_copies(con) == {}          # „nie wiem" - jeszcze bez faktów
+    assert [r["path"] for r in scan.copy_facts_candidates(con)] == [str(b)]
+    s = scan.backfill_copy_facts(con, now=LATER)
+    assert (s.rows, s.written, s.remaining) == (1, 1, 0)
+    assert _loc(con, b)["hdr_filter"] == "CLS" and _loc(con, solo)["hdr_hash"] is None
+    assert list(queries.orphan_testimony_copies(con)) == [fid]
+    a_s = scan.adopt_orphan_testimony(con, now=LATER)
+    assert (a_s.rows, a_s.adopted) == (1, 1)
+    assert _header(con, fid)["filter_raw"] == "CLS"
+    con.close()
+
+
+def test_plan_karty_OBJECT_pomija_ocalala_kopie_bez_faktow(tmp_path):
+    """Plan ujednolicenia karty `OBJECT` nie pisze do ocalałej kopii bez zebranych faktów, gdy
+    klatka ma kopię nieobecną: karty klatki mogły przyjść ze skasowanego pliku, a strażnik „kopia
+    zeznaje inną kartę" bez faktów jest ślepy. Powód pominięcia mówi, co zrobić. Po uzupełnieniu
+    faktów (tu: kopie zgodne) klatka wraca do planu."""
+    from horreum import resolver
+    from test_writeback_inplace import _fits as _light
+    (tmp_path / "A").mkdir()
+    (tmp_path / "B").mkdir()
+    a = _light(tmp_path / "A" / "veil.fits", obj="NGC6992", seed=1)
+    b = _light(tmp_path / "B" / "veil.fits", obj="NGC6992", seed=1)
+    con = db.open_db(str(tmp_path / "h.db"))
+    scan.scan_tree(con, tmp_path, volume="?", now=NOW)
+    resolver.run_resolver(con, NOW)
+    fid = _loc(con, a)["frame_id"]
+    _bez_faktow(con, a, b)
+    _zniknij(con, a)
+    rows = [r for r in queries.object_card_form_rows(con) if r["frame_id"] == fid]
+    assert len(rows) == 1 and rows[0]["path"] == str(b)
+    assert rows[0]["skip"] == queries.SKIP_COPY_WITHOUT_FACTS
+    assert fid not in queries.object_card_form_frame_ids(con)
+    scan.backfill_copy_facts(con, now=LATER)
+    assert fid in queries.object_card_form_frame_ids(con)
     con.close()
 
 

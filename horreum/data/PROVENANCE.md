@@ -1,4 +1,4 @@
-# Proweniencja assetów DANYCH rdzenia (katalog celów planera)
+# Proweniencja assetów DANYCH rdzenia (katalog celów planera, lista rojów meteorów)
 
 > Kod repozytorium jest na licencji **MIT**. Pliki w tym katalogu to **DANE** i noszą własne
 > licencje — poniżej per źródło. Rozdział jest jawny także w polu `_meta.license` każdego assetu.
@@ -71,6 +71,26 @@ oszacowaniem, a nie pomiarem).
 ani z żadnego źródła CC-BY-SA — rozdział „kod MIT / dane CC-BY-SA" (D-T2-f) go nie obejmuje.
 Wpis, który kiedyś przepisze pozycję z katalogu na tej licencji, musi to odnotować we własnym
 polu `provenance` i wtedy dziedziczy jej warunki.
+
+## `meteor_showers.json` - lista rojów meteorów (test radiantu detektora śladów)
+
+- **Producent:** `scripts/build_showers.py --src <plik MDC>` (dev; bez `--src` pobiera plik z sieci).
+  Aplikacja **nigdy** nie woła sieci - lista odświeża się PODMIANĄ pliku (D-0731-3). Czyta ją
+  `horreum.streaks.load_showers()`.
+- **Źródło:** IAU Meteor Data Center, „Established meteor showers” V.2 (plik
+  `streamestablisheddata2026.txt`, wzorzec adresu w `URL` skryptu). Nagłówek pliku: „Last update:
+  Sep 21, 20:00:00 UTC, 2026, Modified by R. Rudawska, M. Hajdukova and T.J. Jopek”. Kopia lokalna
+  z 2026-09-28 (`est2026.txt`, sha1 `b08c7b92afaf0f612b496588d4bef46be22069e7`, 426 134 B).
+- **Budowa:** 2026-09-29 (`_meta.built`); **112 rojów**, zakres aktywności szacowany 0, dryf
+  radiantu szacowany 1 (COR - zestaw bez `dRa`/`dDe`, `dra`/`ddec` = null). Reguła wyboru zestawu
+  w docstringu skryptu i w `_meta.selection`; problemy pliku (4 pola niebędące liczbą, 1 zestaw bez
+  RA/Dec) skrypt wypisuje z numerem linii - żaden nie zmienia wyboru poza COR (plan meteorów §1a).
+- **Wersja assetu** = para `_meta.built` + `_meta.source_updated`; wchodzi do `config_hash` trybu
+  bazy (plan meteorów §2, manifest przebiegu).
+- **Licencja:** MDC nie deklaruje licencji danych. Warunkiem użycia, który podaje nagłówek pliku
+  („Notes on proper citation of the MDC database”), jest cytowanie: Jenniskens P. i in., 2020,
+  Planetary and Space Science 182, 104821; Jopek T.J., Kanuchova Z., 2017, PSS 143, 3-6 (pełna lista
+  w nagłówku pliku). Ten sam zapis niesie `_meta.license`; kod repozytorium pozostaje MIT.
 
 ## Odczyt w kodzie
 

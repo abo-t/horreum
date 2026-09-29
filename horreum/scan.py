@@ -1092,6 +1092,52 @@ def read_xisf_meta_full(path):
                     keyword_images=keyword_images, image_roles=image_roles)
 
 
+def xisf_image_descriptor(path):
+    """Opis PIERWSZEGO `<Image>` (kolejność dokumentu) potrzebny do zdekodowania pikseli - dla
+    detektora śladów (`horreum.streaks.read_binned`), nie dla skanu. Zwraca dict albo None, gdy
+    nagłówek nie ma ani jednego `<Image>`.
+
+    Klucze (atrybuty `<Image>`, spec XISF 1.0 §11.5.1):
+      - `location` - pierwszy człon atrybutu `location` (`attachment`, `inline`, `embedded`…);
+      - `span` - `(start, size)` bloku, wyłącznie dla `attachment:start:size`, inaczej None;
+      - `geometry` - krotka int `(szer., wys., …, kanały)`: wymiary, a OSTATNI człon to liczba
+        kanałów (obraz 2D mono = `(W, H, 1)`);
+      - `sample_format` - surowy `sampleFormat` (`UInt16`, `Float32`…);
+      - `byte_order` - `little` albo `big` (domyślnie `little`);
+      - `pixel_storage` - `planar` albo `normal`, małymi literami (domyślnie `planar`);
+      - `compression` - surowy atrybut `compression` albo None.
+
+    Nagłówek czyta `read_xisf_meta_full` (ta sama sygnatura, długość i neutralizacja
+    `xml_parsable`, co w skanie) - tu zostaje wyłącznie odczyt atrybutów obrazu z tych bajtów.
+    Brak `geometry`/`sampleFormat` albo wartość spoza specyfikacji → `ValueError` (EXPECT: bez
+    nich pikseli nie da się zdekodować, a zgadnięty format dałby śmieci o wyglądzie danych).
+    Read-only; bloków danych nie dotyka."""
+    meta = read_xisf_meta_full(path)
+    root = ET.fromstring(xml_parsable(meta.xml_bytes))
+    image = next((e for e in root.iter() if _local_name(e.tag) == "Image"), None)
+    if image is None:
+        return None
+    try:
+        geometry = tuple(int(g) for g in (image.get("geometry") or "").split(":"))
+    except ValueError:
+        raise ValueError(f"XISF: geometry={image.get('geometry')!r} to nie liczby całkowite") from None
+    if len(geometry) < 2 or min(geometry) < 1:
+        raise ValueError(f"XISF: geometry={image.get('geometry')!r} poza specyfikacją")
+    sample_format = image.get("sampleFormat")
+    if not sample_format:
+        raise ValueError("XISF: <Image> bez sampleFormat")
+    byte_order = (image.get("byteOrder") or "little").lower()
+    pixel_storage = (image.get("pixelStorage") or "planar").lower()
+    if byte_order not in ("little", "big") or pixel_storage not in ("planar", "normal"):
+        raise ValueError(f"XISF: byteOrder={byte_order!r} / pixelStorage={pixel_storage!r} "
+                         "poza specyfikacją")
+    loc = (image.get("location") or "").split(":")
+    span = (int(loc[1]), int(loc[2])) if len(loc) == 3 and loc[0] == "attachment" else None
+    return {"location": loc[0], "span": span, "geometry": geometry, "sample_format": sample_format,
+            "byte_order": byte_order, "pixel_storage": pixel_storage,
+            "compression": image.get("compression") or None}
+
+
 def build_xisf_header_region(meta, new_xml):
     """Bajty `[0, first_attachment)` po podmianie nagłówka XML — JEDYNE miejsce, gdzie liczy się
     arytmetykę offsetów przy zapisie XISF (§0: pomyłka o 4 B nadpisuje pierwszy blok mastera,

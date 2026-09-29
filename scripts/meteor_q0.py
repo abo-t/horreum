@@ -2,10 +2,11 @@
 # -*- coding: utf-8 -*-
 """meteor_q0.py - bramka metrologiczna Q0 paczki Q (brief/PLAN_meteory.md §3): czy detektor śladów widzi
 meteor na subach o danym czasie naświetlania, ile daje fałszywych alarmów i jak wyrównanie sąsiadów
-zmienia jedno i drugie. Skrypt dev-owy, NIE kod produktu: archiwum tylko czyta, pisze wyłącznie do `--out`.
+zmienia jedno i drugie. Skrypt dev-owy, NIE kod produktu: archiwum tylko czyta, pisze wyłącznie do `--out`;
+`--out` w katalogu któregokolwiek pliku wejścia (albo pod nim) albo pod korzeniem archiwum `R:\\ASTRO_` = odmowa.
 
 Metoda (Gural 2008 przeniesiony z wideo na suby):
-  reszta   = sub - mediana ±2 sąsiadów (wyrównanych korelacją fazową) - tło grube; σ z MAD
+  reszta   = sub - mediana ±N_NB sąsiadów (wyrównanych korelacją fazową) - tło grube; σ z MAD
   wykrycie = próg k·σ + Hough + scalanie współliniowych segmentów
   czułość  = ślady WSTRZYKIWANE w resztę (liniowość: bin(sub + ślad) = bin(sub) + bin(ślad)) z jasnością
              w elektronach na piksel natywny w osi śladu; trzy rodzaje: meteor (zwężenie, końce w kadrze),
@@ -13,14 +14,17 @@ Metoda (Gural 2008 przeniesiony z wideo na suby):
   alarmy   = kontrola negatywna: ta sama detekcja na -reszcie; prawdziwe ślady są tylko dodatnie,
              a resztki gwiazd i szum są symetryczne
   jasność  = punkt zerowy z ASTAP (`-extract2`) + Gaia DR3 (VizieR); magnitudo meteoru przy prędkości
-             kątowej 10°/s (przeliczenie na inną: Δm = 2,5·log10(ω/10))
+             kątowej 10°/s; przeliczenie na inną: m(ω) = m(10) - 2,5·log10(ω/10) - szybszy meteor krócej
+             naświetla piksel, więc przy tym samym progu e⁻/px musi być jaśniejszy (mniejsze magnitudo)
 
 Użycie:
   meteor_q0.py inject --db <baza> --config 9 --exptime 60 --filter R --date 2026-04-22 --n 24 --out <katalog>
   meteor_q0.py inject --folder <katalog> --start 0 --n 40 --out <katalog>
-  meteor_q0.py links --csv <detections.csv prototypu> --out <katalog>
-Wspólne: --align int|sub|both (domyślnie both), --k-sigma 4, --min-len 80 (px natywne), --bin 4, --seed 1,
+  meteor_q0.py links --csv <detections.csv prototypu> --out <katalog> [--max-dist 5]
+Wspólne: --bin 4 (w `links`: skala współrzędnych CSV prototypu), --seed 1.
+`inject`: --align int|sub|both (domyślnie both), --k-sigma 4, --min-len 80 (px natywne),
 --astap <ścieżka astap_cli.exe> (brak = bez jasności w magnitudo).
+`links`: --max-dist = odległość końca śladu od prostej poprzednika w px natywnych (plan §2: 5).
 """
 from __future__ import annotations
 
@@ -28,6 +32,7 @@ import argparse
 import csv
 import glob
 import hashlib
+import io
 import json
 import math
 import os
@@ -46,9 +51,36 @@ from astropy.io import fits
 AMPS_E = (3, 6, 12, 25, 50, 100, 200)          # jasność w osi śladu, e⁻ na piksel natywny
 KINDS = ("meteor", "meteor_edge", "satellite")
 OMEGA_REF = 10.0                               # °/s, prędkość kątowa meteoru do przeliczenia na magnitudo
+N_NB = 2                                       # sąsiedzi z każdej strony klatki; mediana z 2·N_NB klatek
+ARCHIVE_ROOT = r"R:\ASTRO_"                    # korzeń archiwum: `--out` pod nim = odmowa, niezależnie od wejścia
 
 
-# ---------------------------------------------------------------- wejście
+# ---------------------------------------------------------------- wejście i wyjście
+
+def refuse_out_near_inputs(out, files):
+    """Odmowa, gdy `out` leży w katalogu któregoś pliku wejścia albo pod nim, albo pod korzeniem archiwum.
+    Porównanie po `normcase(abspath)`: na Windows wielkość liter nie rozróżnia ścieżek, a surowe `startswith`
+    myli `R:\\A` z `R:\\AB`. `abspath`, nie `realpath` - ten zamienia dysk mapowany na UNC i rozjeżdża porównanie."""
+    def norm(p):
+        return os.path.normcase(os.path.abspath(p))
+    o = norm(out)
+    for root in sorted({norm(os.path.dirname(f)) for f in files} | {norm(ARCHIVE_ROOT)}):
+        try:
+            under = os.path.commonpath([o, root]) == root
+        except ValueError:                     # różne dyski - `out` nie może leżeć pod `root`
+            under = False
+        if under:
+            sys.exit(f"--out {out} leży w {root} albo pod nim - odmowa")
+
+
+def write_atomic(path, text):
+    """Zapis przez `.tmp` + `os.replace`: błąd kodowania nie zostawia uciętego pliku docelowego."""
+    data = text.encode("utf-8")
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as fh:
+        fh.write(data)
+    os.replace(tmp, path)
+
 
 def load(path):
     with fits.open(path, memmap=False) as hd:
@@ -134,9 +166,9 @@ def dilate(m, k=2):
 
 
 def residual(imgs, i, sub):
-    """Reszta klatki i względem mediany ±2 sąsiadów; None gdy sąsiadów < 2 z każdej strony łącznie 4."""
-    nb = [j for j in (i - 2, i - 1, i + 1, i + 2) if 0 <= j < len(imgs)]
-    if len(nb) < 4:
+    """Reszta klatki i względem mediany ±N_NB sąsiadów; None gdy sąsiadów mniej niż 2·N_NB."""
+    nb = [j for j in range(i - N_NB, i + N_NB + 1) if j != i and 0 <= j < len(imgs)]
+    if len(nb) < 2 * N_NB:
         return None
     shifts = [phase_shift(imgs[i], imgs[j], sub) for j in nb]
     stack = [apply_shift(imgs[j], dy, dx, sub) for j, (dy, dx) in zip(nb, shifts)]
@@ -374,12 +406,24 @@ def zero_point(path, hdr, out, astap):
     work = os.path.join(out, "astap")
     os.makedirs(work, exist_ok=True)
     cp = os.path.join(work, "solve.fits")
+    # produkty poprzedniego wywołania: nieudane rozwiązanie tej klatki zostawiłoby cudzy katalog gwiazd jako wynik
+    for ext in (".csv", ".wcs", ".ini"):
+        stale = os.path.join(work, "solve" + ext)
+        if os.path.exists(stale):
+            os.remove(stale)
     shutil.copyfile(path, cp)
     fov = hdr["NAXIS2"] * float(hdr.get("XPIXSZ", 3.76)) * hdr.get("XBINNING", 1) / float(hdr["FOCALLEN"]) * 206.265 / 3600
-    subprocess.run([astap, "-f", cp, "-r", "10", "-fov", f"{fov:.3f}", "-extract2", "10"],
-                   capture_output=True, timeout=600)
+    started = time.time()
+    proc = subprocess.run([astap, "-f", cp, "-r", "10", "-fov", f"{fov:.3f}", "-extract2", "10"],
+                          capture_output=True, timeout=600)
+    if proc.returncode != 0:
+        print(f"ASTAP: kod wyjścia {proc.returncode} dla {os.path.basename(path)} - bez punktu zerowego",
+              file=sys.stderr)
+        return None
     csvp = os.path.join(work, "solve.csv")
-    if not os.path.exists(csvp):
+    if not os.path.exists(csvp) or os.path.getmtime(csvp) < started:
+        print(f"ASTAP: brak solve.csv z tego wywołania dla {os.path.basename(path)} - bez punktu zerowego",
+              file=sys.stderr)
         return None
     stars = list(csv.DictReader(open(csvp, encoding="utf-8")))
     if len(stars) < 20:
@@ -428,7 +472,8 @@ def run_inject(a):
         files = sorted(glob.glob(os.path.join(a.folder, "*.fit*")))[a.start:a.start + a.n]
     else:
         files = files_from_db(a.db, a.config, a.exptime, a.filter, a.date, a.n)
-    if len(files) < 5:
+    refuse_out_near_inputs(a.out, files)
+    if len(files) < 2 * N_NB + 1:
         sys.exit(f"za mało plików: {len(files)}")
     os.makedirs(a.out, exist_ok=True)
     with ThreadPoolExecutor(8) as ex:
@@ -448,18 +493,24 @@ def run_inject(a):
     fwhm = phot["hfd"] if phot else 3.5
     sigma_psf = fwhm / 2.355
     H, W = native_shape
+    modes = ("int", "sub") if a.align == "both" else (a.align,)
+    # tożsamość wejścia = ścieżka + mtime (zmiana pliku pod tą samą ścieżką zmienia hash); rozmiar NIE jest
+    # dyskryminatorem - wszystkie klatki jednej kamery mają ten sam rozmiar
+    stamps = sorted(f"{p}\t{os.stat(p).st_mtime_ns}" for p in files)
     manifest = dict(
         files_sha1=hashlib.sha1("\n".join(files).encode()).hexdigest(), n_files=len(files),
+        inputs_sha1=hashlib.sha1("\n".join(stamps).encode()).hexdigest(),
         code_sha1=hashlib.sha1(open(__file__, "rb").read()).hexdigest(),
         numpy=np.__version__, astropy=__import__("astropy").__version__,
-        k_sigma=a.k_sigma, min_len_native=a.min_len, bin=a.bin, seed=a.seed, amps_e=AMPS_E, kinds=KINDS,
+        k_sigma=a.k_sigma, min_len_native=a.min_len, bin=a.bin, n_neighbours=N_NB, align_modes=modes,
+        seed=a.seed, amps_e=AMPS_E, kinds=KINDS,
         exptime=float(h0["EXPTIME"]), filter=h0.get("FILTER"), egain=egain, pixscale=round(pixscale, 4),
         fwhm_px=fwhm, photometry=phot, first=files[0], last=files[-1], omega_ref=OMEGA_REF)
     summary = dict(manifest=manifest, align={})
     rows = []
-    for mode in (("int", "sub") if a.align == "both" else (a.align,)):
+    for mode in modes:
         sub = mode == "sub"
-        targets = list(range(2, len(imgs) - 2))
+        targets = list(range(N_NB, len(imgs) - N_NB))
 
         def one(i):
             res = residual(imgs, i, sub)
@@ -511,21 +562,23 @@ def run_inject(a):
             positive_segments=pos_total, sigma_e_native_median=round(float(np.median([g[3] for g in got])), 2),
             max_shift_binned=round(max(shifts), 2) if shifts else 0, recall=rec, e50=e50, mag50_at_10deg_s=mag50)
     summary["seconds"] = round(time.time() - t0, 1)
-    with open(os.path.join(a.out, "injections.csv"), "w", newline="", encoding="utf-8") as f:
-        keys = ["mode", "frame", "kind", "amp_e", "hit", "cov", "fragments", "snr", "cv", "end0", "end1", "edge_ends", "masked_frac", "length"]
-        w = csv.DictWriter(f, fieldnames=keys)
-        w.writeheader()
-        w.writerows(rows)
-    with open(os.path.join(a.out, "summary.json"), "w", encoding="utf-8") as f:
-        json.dump(summary, f, ensure_ascii=False, indent=1, default=str)
+    buf = io.StringIO()
+    keys = ["mode", "frame", "kind", "amp_e", "hit", "cov", "fragments", "snr", "cv", "end0", "end1", "edge_ends", "masked_frac", "length"]
+    w = csv.DictWriter(buf, fieldnames=keys)
+    w.writeheader()
+    w.writerows(rows)
+    write_atomic(os.path.join(a.out, "injections.csv"), buf.getvalue())
+    write_atomic(os.path.join(a.out, "summary.json"),
+                 json.dumps(summary, ensure_ascii=False, indent=1, default=str) + "\n")
     print(json.dumps({m: {k: v for k, v in s.items() if k != "recall"} for m, s in summary["align"].items()},
                      ensure_ascii=False, default=str))
 
 
 # ---------------------------------------------------------------- przebieg „links”
 
-def link_tracks(segs, times, cadence):
-    """Tory: kolejne klatki, Δt ≤ 3·kadencja, |Δθ| ≤ 3°, koniec ≤ 5 px natywnych od prostej, przypisanie 1:1."""
+def link_tracks(segs, times, cadence, max_dist):
+    """Tory: kolejne klatki, Δt ≤ 3·kadencja, |Δθ| ≤ 3°, koniec ≤ `max_dist` px natywnych od prostej
+    poprzednika, przypisanie 1:1. Współrzędne `segs` są już natywne - próg nie przechodzi przez binning."""
     by_frame = {}
     for s in segs:
         by_frame.setdefault(s["frame"], []).append(s)
@@ -547,8 +600,8 @@ def link_tracks(segs, times, cadence):
                 c, sn = math.cos(th), math.sin(th)
                 rho = s["x0"] * c + s["y0"] * sn
                 d = min(abs(t["x0"] * c + t["y0"] * sn - rho), abs(t["x1"] * c + t["y1"] * sn - rho))
-                if d <= 5 * 4:          # CSV prototypu: współrzędne binowane ×4 → natywne
-                    cands.append((dth + d / 20, (fa, i), (fb, j)))
+                if d <= max_dist:
+                    cands.append((dth + d / max_dist, (fa, i), (fb, j)))
         for _, a_, b_ in sorted(cands):
             if a_ in has_next or b_ in has_prev:
                 continue
@@ -559,13 +612,16 @@ def link_tracks(segs, times, cadence):
 
 
 def run_links(a):
-    rows = [r for r in csv.DictReader(open(a.csv, encoding="utf-8")) if r["status"].startswith("ok")]
+    def native(v):                   # CSV prototypu: współrzędne binowane → natywne, ta sama konwencja co `measure`
+        return float(v) * a.bin + (a.bin - 1) / 2
+    with open(a.csv, encoding="utf-8") as fh:
+        rows = [r for r in csv.DictReader(fh) if r["status"].startswith("ok")]
     segs = [dict(frame=int(r["idx"]), theta=float(r["theta"]),
-                 x0=float(r["x0"]) * 4, y0=float(r["y0"]) * 4, x1=float(r["x1"]) * 4, y1=float(r["y1"]) * 4,
+                 x0=native(r["x0"]), y0=native(r["y0"]), x1=native(r["x1"]), y1=native(r["y1"]),
                  time=datetime.fromisoformat(r["time"])) for r in rows]
     frames = sorted({s["frame"] for s in segs})
     times = {s["frame"]: s["time"] for s in segs}
-    real = link_tracks(segs, times, 7.0)
+    real = link_tracks(segs, times, 7.0, a.max_dist)
     rng = np.random.default_rng(a.seed)
     false = []
     all_idx = sorted({s["frame"] for s in segs})
@@ -575,11 +631,16 @@ def run_links(a):
         ps = [dict(s, frame=remap[s["frame"]]) for s in segs]
         # permutacja rozrywa ciągłość czasu: klatki stają się „kolejne” przypadkowo; Δt z indeksu
         pt = {f: datetime.fromtimestamp(f * 7.0) for f in all_idx}
-        false.append(len(link_tracks(ps, pt, 7.0)))
-    res = dict(segments=len(segs), frames=len(frames), real_links=[(x[0][0], x[1][0]) for x in real],
-               permuted_links_mean=round(float(np.mean(false)), 3), permuted_links_p95=float(np.percentile(false, 95)))
+        false.append(len(link_tracks(ps, pt, 7.0, a.max_dist)))
+    # model zerowy: każde ogniwo po permutacji jest fałszywe, więc średnia to E[fałszywych ogniw] na noc,
+    # NIE precision (brak etykiet TP/FP); precision przybliżona jako 1 - E[fałszywe] / realne
+    mean_false = float(np.mean(false))
+    res = dict(segments=len(segs), frames=len(frames), bin=a.bin, max_dist_native=a.max_dist,
+               real_links=[(x[0][0], x[1][0]) for x in real], real_links_n=len(real),
+               null_false_links_mean=round(mean_false, 3), null_false_links_p95=float(np.percentile(false, 95)),
+               precision_approx=round(1 - mean_false / len(real), 3) if real else None)
     os.makedirs(a.out, exist_ok=True)
-    json.dump(res, open(os.path.join(a.out, "links.json"), "w", encoding="utf-8"), indent=1)
+    write_atomic(os.path.join(a.out, "links.json"), json.dumps(res, indent=1) + "\n")
     print(json.dumps(res))
 
 
@@ -607,9 +668,9 @@ def main():
     pl.add_argument("--csv", required=True)
     pl.add_argument("--out", required=True)
     pl.add_argument("--seed", type=int, default=1)
+    pl.add_argument("--bin", type=int, default=4)
+    pl.add_argument("--max-dist", type=float, default=5.0)
     a = p.parse_args()
-    if a.cmd == "inject" and os.path.abspath(a.out).startswith(os.path.abspath(a.folder or "\0")):
-        sys.exit("--out wewnątrz katalogu źródłowego - odmowa")
     (run_inject if a.cmd == "inject" else run_links)(a)
 
 

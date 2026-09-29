@@ -32,9 +32,9 @@ from datetime import datetime, timezone
 
 from PySide6.QtCore import (
     QAbstractTableModel, QEvent, QItemSelection, QItemSelectionModel,
-    QModelIndex, QObject, Qt, QSettings, QThread, QTimer, Signal, Slot,
+    QModelIndex, QObject, Qt, QSettings, QSize, QThread, QTimer, Signal, Slot,
 )
-from PySide6.QtGui import QColor, QFont, QGuiApplication, QKeySequence, QShortcut
+from PySide6.QtGui import QColor, QFont, QGuiApplication, QKeySequence, QPainter, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
     QLayout,
@@ -53,7 +53,8 @@ from horreum.gui import assign_dialog
 from horreum.gui.assign_dialog import AssignObjectDialog
 from horreum.gui.projection_dialog import ProjectionDialog
 from horreum.gui.rows import TwoPartDelegate
-from horreum.gui.wb_worker import WritebackRunner, commit_do_cofniecia, zdanie_wyniku_zapisu
+from horreum.gui.wb_worker import (WritebackRunner, commit_do_cofniecia, zdanie_undo_kart,
+                                   zdanie_wyniku_zapisu)
 from horreum.resolve.headers import COPY_TESTIMONY_KEYWORDS
 
 # Kolumny bazowe: (nagłówek, klucz). Klucze `_telescope`/`_object`/`_dt_delta` = pochodne. `_dt_delta`
@@ -591,10 +592,12 @@ def _ogon_sciezki(path):
 
 
 # Status wyniku, który znaczy „gest zrobił swoje", per operacja rdzenia - klucz zdania głównego
-# i status sukcesu. `finish_inplace` oddaje 'applied', `recover_torn` - 'restored'.
+# i status sukcesu. `finish_inplace` oddaje 'applied', `recover_torn` - 'restored',
+# `release_isolation` - 'released'.
 _GESTY_ZAPISU = {
     "finish_inplace": ("grid.inplace.finished", "applied"),
     "recover_torn": ("grid.inplace.restored", "restored"),
+    "release_inplace": ("grid.inplace.released", "released"),
 }
 
 
@@ -606,6 +609,11 @@ def _zdanie_gestu_zapisu(op, res):
     operacji 7 przechodzi - zapis jest poprawny, powrót go nie cofa; dokończ…"); zdanie bez niego
     zostawiałoby człowieka przy „zablokowane 1" bez odpowiedzi „czemu". Pokazujemy PIERWSZY powód
     z nazwą pliku - reszta ma tę samą drogę albo własny wiersz w Porządkach, a pasek jest jeden.
+
+    SUKCES Z POWODEM TEŻ MÓWI (osobnym, drugim członem): rdzeń podaje powód przy sukcesie tylko
+    wtedy, gdy człowiek musi coś wiedzieć - przywrócenie drogą powrotu („plik zmienił się poza
+    nagłówkiem… przeskanuj plik") albo zwolnienie pliku, którego nie dało się otworzyć. Samo
+    „Przywrócono nagłówek w 1 pliku" chowało, że plik ma zmiany poza nagłówkiem i czeka na skan.
     `res` = wynik pętli wykonawcy (`results` = `writeback.FileResult` per operacja, `cancelled`)."""
     klucz, sukces = _GESTY_ZAPISU[op]
     wyniki = list(res.results)
@@ -618,9 +626,11 @@ def _zdanie_gestu_zapisu(op, res):
         msg += i18n.t_plural("grid.inplace.failed", len(bledy))
     if res.cancelled:
         msg += i18n.t("grid.inplace.cancelled")
-    powod = next((w for w in zablokowane + bledy if w.reason), None)
-    if powod is not None:
-        msg += i18n.t("grid.inplace.detail", file=_ogon_sciezki(powod.path), detail=powod.reason)
+    for powod in (next((w for w in zablokowane + bledy if w.reason), None),
+                  next((w for w in wyniki if w.status == sukces and w.reason), None)):
+        if powod is not None:
+            msg += i18n.t("grid.inplace.detail", file=_ogon_sciezki(powod.path),
+                          detail=powod.reason)
     return msg
 
 
@@ -2656,6 +2666,32 @@ class _PanelStack(QStackedWidget):
 
 
 
+class _ZdanieWyniku(QLabel):
+    """Zdanie wyniku szuflady: `text()` i podpowiedź niosą PEŁNĄ treść, render jest elidowany
+    w prawo do bieżącej szerokości, a minimum szerokości NIE zależy od długości zdania.
+
+    Zwykły `QLabel` bez zawijania zgłasza minimum = szerokość całego tekstu i to minimum idzie
+    w górę aż do okna: zdanie porażki gestu (368 znaków, firsthand) podniosło minimum okna do
+    2613 px logicznych - 103 px poza ekranem 2560, bez możliwości zwężenia. Zawijanie odpadło, bo
+    szuflada jest jednym wierszem, a jej wysokość ruszałaby tabelą przy każdym wyniku. Elizja
+    w malowaniu, nie w `setText`: wołający czytają `text()` jako treść wyniku, więc przycięta wersja
+    w tym polu mówiłaby mniej, niż gest powiedział."""
+
+    def setText(self, text):
+        super().setText(text)
+        self.setToolTip(text)
+
+    def minimumSizeHint(self):
+        return QSize(0, super().minimumSizeHint().height())
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        rect = self.contentsRect()
+        tekst = self.fontMetrics().elidedText(self.text(), Qt.ElideRight, rect.width())
+        self.style().drawItemText(painter, rect, int(self.alignment()), self.palette(),
+                                  self.isEnabled(), tekst, self.foregroundRole())
+
+
 class StagingDrawer(QFrame):
     """Stała szuflada dolna stagingu (doktryna §5: „N zmian oczekuje · Przejrzyj · Zatwierdź · Odrzuć").
     Postęp i wynik commitu renderują się TU (nie w łańcuchu modali). Emituje `commit()`/`reject()`."""
@@ -2670,7 +2706,8 @@ class StagingDrawer(QFrame):
         lay = QHBoxLayout(self); lay.setContentsMargins(8, 4, 8, 4)
         self.dot = QLabel("○")
         self.label = QLabel(i18n.t("grid.drawer.empty"))   # słownik F3 (§4)
-        self.result = QLabel(""); self.result.setProperty("role", "secondary")   # F6 §7
+        # Wynik i postęp (nazwa pliku) mają dowolną długość - elidowane, pełne w podpowiedzi.
+        self.result = _ZdanieWyniku(""); self.result.setProperty("role", "secondary")   # F6 §7
         # Postęp writebacku renderuje się TU (nie w modalu): pasek + „Anuluj" wchodzą w miejsce
         # Zatwierdź/Odrzuć na czas commitu/undo (off-thread — GUI nie zamarza; rdzeń commituje per-plik).
         self.bar = QProgressBar(); self.bar.setVisible(False); self.bar.setMaximumWidth(220); self.bar.setTextVisible(False)
@@ -4744,10 +4781,12 @@ class FramesView(QWidget):
     # Kopia z operacją zapisu w fazie izolującej (`repo.INPLACE_ISOLATING_PHASES`) jest pomijana
     # przez skan i przez każdą inną mutację pliku. Rdzeń ma trzy drogi wyjścia; tu dostają gesty:
     # „Dokończ zapis" (`writeback.finish_inplace`), „Przywróć nagłówek sprzed zapisu"
-    # (`writeback.recover_torn`) i „Zwolnij plik do skanu…" (`repo.release_inplace_op`). Dwie
-    # pierwsze czytają i piszą plik, więc idą wątkiem tła przez TEN SAM uchwyt co commit makra
+    # (`writeback.recover_torn`) i „Zwolnij plik do skanu…" (`writeback.release_isolation`).
+    # Wszystkie trzy biorą blokadę pliku, więc idą wątkiem tła przez TEN SAM uchwyt co commit makra
     # (`self._wb`) - a z nim dziedziczą mutex „writeback → Dostawa" i „jeden zapis naraz"
-    # (`busy_changed` → gospodarz). Trzecia jest samą bazą i idzie od razu.
+    # (`busy_changed` → gospodarz). Zwolnienie nie pisze pliku, ale zdejmuje izolację, więc czeka
+    # na blokadę jak pozostałe: bez niej drugi proces w trakcie zapisu zostawiłby skanowi rozdarty
+    # nagłówek.
 
     def _perspektywa_zapisu(self):
         """Czy widok stoi w jednej z dwóch perspektyw izolacji zapisu (flagi z `_TRIMY`)."""
@@ -4812,10 +4851,11 @@ class FramesView(QWidget):
         self._start_gestu_zapisu("recover_torn", self._operacje_gestu(),
                                  pusty=i18n.t("grid.inplace.none"))
 
-    def _start_gestu_zapisu(self, op, ops, *, pusty):
-        """Wspólny start dwóch gestów plikowych: bramka zajętości i pustego celu (druga linia za
+    def _start_gestu_zapisu(self, op, ops, *, pusty, uzasadnienie=None):
+        """Wspólny start trzech gestów plikowych: bramka zajętości i pustego celu (druga linia za
         wygaszeniem - bramka woła slot, nie pozycję menu), potem wątek tła `self._wb`. Cel klatek
-        zapamiętany TU, nie w ogonie: w trakcie biegu człowiek może zmienić zaznaczenie."""
+        zapamiętany TU, nie w ogonie: w trakcie biegu człowiek może zmienić zaznaczenie.
+        `uzasadnienie` = powód człowieka przy zwolnieniu - jedzie do rdzenia razem z operacjami."""
         powod = self._powod_zajetosci()
         if powod is not None:
             self.status_message.emit(i18n.t(powod))
@@ -4824,7 +4864,10 @@ class FramesView(QWidget):
             self.status_message.emit(pusty)
             return
         self._cel_gestu_zapisu = sorted({o["frame_id"] for o in ops})
-        self._start_writeback(op, [o["op_id"] for o in ops], self._after_gestu_zapisu)
+        cel = [o["op_id"] for o in ops]
+        if uzasadnienie is not None:
+            cel = {"ops": cel, "reason": uzasadnienie}
+        self._start_writeback(op, cel, self._after_gestu_zapisu)
 
     @Slot(str, object)
     def _after_gestu_zapisu(self, op, res):
@@ -4836,13 +4879,14 @@ class FramesView(QWidget):
         self._po_gescie_zapisu(_zdanie_gestu_zapisu(op, res), self._cel_gestu_zapisu)
 
     def _on_release_file(self):
-        """„Zwolnij plik do skanu…": jawne zwolnienie izolacji RĘKĄ (`repo.release_inplace_op`).
+        """„Zwolnij plik do skanu…": jawne zwolnienie izolacji RĘKĄ (`writeback.release_isolation`).
 
         To jest rozstrzygnięcie człowieka, że plik jest w porządku (np. przywrócony z pełnej
         kopii), więc okno żąda powodu - bez niego przycisk jest wygaszony - a powód idzie do
-        zdarzenia `location.writeback_released`. Plik nietknięty; samą bazą, więc bez wątku tła.
-        Operacja, która przestała izolować między menu a gestem (inny proces ją domknął), jest
-        liczona osobno z powodem klingi - reszta idzie dalej."""
+        zdarzenia `location.writeback_released`. Plik nietknięty. Rdzeń zwalnia pod blokadą pliku
+        z fazą czytaną pod nią, więc idzie wątkiem tła jak dwa pozostałe gesty. Operacja, która
+        przestała izolować między menu a gestem (inny proces ją domknął), wraca jako zablokowana
+        z powodem rdzenia - reszta idzie dalej."""
         powod = self._powod_zajetosci()
         if powod is not None:
             self.status_message.emit(i18n.t(powod))
@@ -4854,21 +4898,8 @@ class FramesView(QWidget):
         dlg = ReleaseDialog(len(ops), parent=self)
         if dlg.exec() != QDialog.Accepted:
             return
-        uzasadnienie = dlg.reason()
-        zwolnione, odmowy = 0, []
-        for o in ops:
-            try:
-                repo.release_inplace_op(self.con, op_id=o["op_id"], now=self._now(),
-                                        reason=uzasadnienie)
-                zwolnione += 1
-            except ValueError as exc:
-                odmowy.append((o["path"], str(exc)))
-        msg = i18n.t_plural("grid.inplace.released", zwolnione)
-        if odmowy:
-            msg += i18n.t_plural("grid.inplace.refused", len(odmowy))
-            msg += i18n.t("grid.inplace.detail", file=_ogon_sciezki(odmowy[0][0]),
-                          detail=odmowy[0][1])
-        self._po_gescie_zapisu(msg, sorted({o["frame_id"] for o in ops}))
+        self._start_gestu_zapisu("release_inplace", ops, pusty=i18n.t("grid.inplace.none"),
+                                 uzasadnienie=dlg.reason())
 
     def _po_gescie_zapisu(self, msg, cel):
         """Wspólny ogon trzech gestów izolacji: odświeżenie zbioru z celem w zaznaczeniu, człon
@@ -5424,21 +5455,35 @@ class FramesView(QWidget):
         self._start_writeback("undo_rename", run_id, self._after_undo_rename)
 
     def _after_undo_rename(self, op, res):
-        msg = i18n.t("grid.wb.restored", n=len(res.restored))
-        if res.blocked:
-            msg += " · " + i18n.t("grid.wb.blocked", n=len(res.blocked))
+        """Ogon cofnięcia renamu. BŁĄD JEST WIDOCZNY I DA SIĘ GO PONOWIĆ: `failed` bywa rozdarciem
+        plik↔baza („plik PRZENIESIONY…, baza NIE przepięta - przeskanuj katalog") albo czkawką
+        `os.rename` na udziale, a wiersze nieudanego cofnięcia zostają w przebiegu jako 'applied'.
+        Dawniej zdanie mówiło samo „przywrócono: 0", a „Cofnij" gasło - rozjazd znikał z ekranu,
+        a jedyna droga ponowienia (run_id) ginęła razem z przyciskiem. Teraz zdanie niesie liczbę
+        błędów i pierwszy powód (błędu przed blokadą), a przy błędzie „Cofnij" zostaje przy tym
+        samym przebiegu z receptą ponowienia."""
+        msg = zdanie_undo_kart(res)
+        detail = next((fr for fr in res.failed + res.blocked if fr.reason), None)
+        if detail is not None:
+            msg += i18n.t("grid.inplace.detail", file=_ogon_sciezki(detail.path),
+                          detail=detail.reason)
         self.drawer.end_progress()
-        self._undo_rename_run_id = None
-        self._undo_mode = None
-        self._rename_run_id = None
-        self._rename_run_committed = False
-        self._undo_btn.setVisible(False)
-        self.drawer.set_commit_actions_visible(True)     # przywróć akcje po cofnięciu (#5)
-        self.drawer.set_count(0, result=msg)
+        if res.failed:                                   # przebieg zostaje - „Cofnij" ponowi resztę
+            msg += i18n.t("grid.rename.undo_retry", undo=i18n.t("grid.action.undo"))
+            self.drawer.set_commit_actions_visible(False)   # jedyną akcją dalej jest „Cofnij" (#5)
+            self.drawer.set_result(msg)                  # etykieta „Przemianowano…" zostaje
+        else:
+            self._undo_rename_run_id = None
+            self._undo_mode = None
+            self._rename_run_id = None
+            self._rename_run_committed = False
+            self._undo_btn.setVisible(False)
+            self.drawer.set_commit_actions_visible(True)  # przywróć akcje po cofnięciu (#5)
+            self.drawer.set_count(0, result=msg)
         self.refresh()
         self._refresh_drawer()
         self.status_message.emit(i18n.t("grid.rename.undo_status", msg=msg))
-        if res.restored:                                 # lustro commitu renamu
+        if res.restored or res.failed:                   # lustro commitu renamu; błąd mógł przenieść plik
             self.stan_porzadkow_changed.emit()
 
     def _on_reject_rename(self):

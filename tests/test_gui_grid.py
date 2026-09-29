@@ -1482,6 +1482,42 @@ def test_rename_commit_powod_w_summary(rn_view):
     assert "cel już istnieje" in view.drawer.result.text()         # reprezentatywny reason widoczny
 
 
+def test_cofniecie_renamu_z_bledem_pokazuje_powod_i_zostawia_Cofnij(rn_view, monkeypatch):
+    """Cofnięcie renamu, w którym `os.rename` jednego pliku pada (czkawka udziału): dawniej ogon
+    liczył tylko przywrócone i zablokowane - zdanie „1 przywróconych", „Cofnij" gasło, a przebieg
+    (jedyna droga ponowienia) ginął. Teraz zdanie ma liczbę błędów i pierwszy powód, „Cofnij"
+    zostaje przy tym samym przebiegu z receptą, a drugi klik cofa resztę.
+
+    Falsyfikator: przywróć w `_after_undo_rename` bezwarunkowe zgaszenie „Cofnij" → asercja
+    o widoczności pada; zdejmij człon powodu → asercja o „PermissionError" pada."""
+    import os as _os
+    from horreum.gui import i18n
+    view, con, files = rn_view
+    view._on_rename_stage(_POL)
+    run = view._rename_run_id
+    view._on_commit()
+    prawdziwy = _os.rename
+    stan = {"raz": True}
+
+    def _czkawka(src, dst):
+        if stan["raz"]:
+            stan["raz"] = False
+            raise PermissionError(13, "plik zajęty przez inny proces")
+        return prawdziwy(src, dst)
+    monkeypatch.setattr(_os, "rename", _czkawka)
+    view._dispatch_undo()
+    monkeypatch.undo()
+    tekst = view.drawer.result.text()
+    assert "1 przywróconych" in tekst and "1 błędów" in tekst and "PermissionError" in tekst, tekst
+    assert i18n.t("grid.action.undo") in tekst, "recepta ponowienia nazywa przycisk"
+    assert view._undo_btn.isVisibleTo(view) and view._undo_mode == "rename"
+    assert view._undo_rename_run_id == run
+    assert sum(f.exists() for f in files) == 1, "jeden plik wrócił, drugi czeka na ponowienie"
+    view._dispatch_undo()                                # ponowienie cofa resztę
+    assert all(f.exists() for f in files)
+    assert not view._undo_btn.isVisibleTo(view) and view._undo_mode is None
+
+
 # ---------- P-C: „Zniknięte" mówi KIEDY (wiz P5 #11) ----------
 
 def _path_tip(view, frame_id):

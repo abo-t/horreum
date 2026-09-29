@@ -1335,13 +1335,18 @@ CATALOG = {
     # Druga droga ma DWA kroki (AR-28 (a)): „Oznacz zniknięte” pojawia się w Dostawie dopiero po
     # sprawdzeniu obecności, więc w świeżej sesji samo „{mark}” wskazywało przycisk, którego nie
     # ma. „{check}” działa bez wskazanego katalogu (bierze ostatnie źródło „Przyjmij nowe”).
+    # Drugi krok jest WARUNKOWY i zdanie to mówi: przycisk pojawia się tylko, gdy sprawdzenie
+    # POTWIERDZI zniknięcie - hamulec passa (drzewo puste, za dużo kandydatów) potwierdzeń nie
+    # liczy, więc bezwarunkowe „→ {mark}” obiecywało przycisk, którego wtedy nie ma.
     "grid.tip.copy_unread": {
         "pl": "\n    zeznanie nagłówka jeszcze niezebrane (gdy plik jest na dysku - "
               "{place} → „Przyjmij nowe”; jeśli pliku nie ma już na dysku - "
-              "{place} → „{check}” → „{mark}”)",
+              "{place} → „{check}” → „{mark}”, który pojawi się pod wynikiem, gdy sprawdzenie "
+              "potwierdzi zniknięcie)",
         "en": "\n    header testimony not collected yet (if the file is on disk - "
               "{place} → “Take new”; if the file is no longer on disk - "
-              "{place} → “{check}” → “{mark}”)",
+              "{place} → “{check}” → “{mark}”, which appears below the result when the check "
+              "confirms the file is gone)",
     },
     # HISTORIA PRZEPROWADZKI, nie ostrzeżenie (D-V-9, wariant rozwojowy). Zdanie jest w czasie
     # przeszłym i bez wykrzyknika, bo nic tu nie wymaga roboty: plik ŻYJE pod adresem z komórki,
@@ -2028,6 +2033,12 @@ CATALOG = {
     },
     "grid.rename.preview_cleared": {"pl": "Podgląd nazw wyczyszczony", "en": "Name preview cleared"},
     "grid.rename.status_summary": {"pl": "Rename: {summary}", "en": "Rename: {summary}"},
+    # Recepta przy nieudanym cofnięciu renamu: przebieg zostaje przy „Cofnij" (wiersze nieudane są
+    # dalej 'applied'), więc drugi klik ponawia dokładnie je - reszta jest już cofnięta.
+    "grid.rename.undo_retry": {
+        "pl": " · „{undo}” ponowi pliki, których cofnięcie się nie udało",
+        "en": " · “{undo}” retries the files whose undo failed",
+    },
     "grid.rename.undo_status": {"pl": "Undo nazw: {msg}", "en": "Undo names: {msg}"},
     "grid.rename.rejected": {
         "pl": "Odrzucono {n} zmian nazw", "en": "Discarded {n} name changes",
@@ -2193,6 +2204,16 @@ CATALOG = {
     },
     "pipeline.btn.mark_vanished": {"pl": "Oznacz zniknięte", "en": "Mark vanished"},
     "pipeline.btn.show_collections": {"pl": "Pokaż w Zbiorach", "en": "Show in Collections"},
+    # Źródło, którego wątek tła nie zobaczył jako katalogu (odłączony udział, katalog skasowany).
+    # Stan wraca Z WĄTKU TŁA: sprawdzenie w oknie zamrażało je do timeoutu sieci. Pierwsze zdanie
+    # to człon raportu (po „NIE WYKONANO"), drugie stoi w sekcji wyniku obok „Wskaż katalog…".
+    "pipeline.presence.unreachable": {
+        "pl": "źródło niedostępne: {root}", "en": "source unavailable: {root}",
+    },
+    "pipeline.presence.unreachable_pick": {
+        "pl": "Źródło niedostępne: {root} - wskaż katalog.",
+        "en": "Source unavailable: {root} - choose a folder.",
+    },
 
     # --- droga „Stosy" (I-2b, P-I): gotowe obrazy po integracji z drzewa OBRÓBKI ---
     "pipeline.stacks_head": {
@@ -2701,27 +2722,33 @@ CATALOG = {
     # Podpowiedź wiersza w stanie „?": obie drogi WARUNKOWE, w kolejności pytań człowieka („czy plik
     # jest"), bo wiersz nie sprawdza dysku - rozstrzyga pass obecności. Nazwy z katalogu (`{place}`,
     # `{check}`, `{mark}`), jak w podpowiedzi kopii w Zbiorach - z tym samym dwukrokiem drugiej drogi
-    # (AR-28 (a)). Ostatnie zdanie mówi, dokąd prowadzi klik (AR-28 (b)).
+    # (AR-28 (a)) i tym samym warunkiem drugiego kroku (przycisk tylko po potwierdzonym zniknięciu).
+    # Ostatnie zdanie mówi, dokąd prowadzi klik (AR-28 (b)).
     "tasks.copies_unread_tip": {
         "pl": {"one": "{n} kopia nie ma jeszcze zebranego zeznania nagłówka, więc ten wiersz nie ma "
                       "czego porównać.\nGdy plik jest na dysku - {place} → „Przyjmij nowe”.\n"
-                      "Jeśli pliku nie ma już na dysku - {place} → „{check}” → „{mark}”.\n"
+                      "Jeśli pliku nie ma już na dysku - {place} → „{check}” → „{mark}” (pojawi "
+                      "się pod wynikiem, gdy sprawdzenie potwierdzi zniknięcie).\n"
                       "Klik prowadzi do: {place}.",
                "few": "{n} kopie nie mają jeszcze zebranego zeznania nagłówka, więc ten wiersz nie "
                       "ma czego porównać.\nGdy plik jest na dysku - {place} → „Przyjmij nowe”.\n"
-                      "Jeśli pliku nie ma już na dysku - {place} → „{check}” → „{mark}”.\n"
+                      "Jeśli pliku nie ma już na dysku - {place} → „{check}” → „{mark}” (pojawi "
+                      "się pod wynikiem, gdy sprawdzenie potwierdzi zniknięcie).\n"
                       "Klik prowadzi do: {place}.",
                "many": "{n} kopii nie ma jeszcze zebranego zeznania nagłówka, więc ten wiersz nie "
                        "ma czego porównać.\nGdy plik jest na dysku - {place} → „Przyjmij nowe”.\n"
-                       "Jeśli pliku nie ma już na dysku - {place} → „{check}” → „{mark}”.\n"
+                       "Jeśli pliku nie ma już na dysku - {place} → „{check}” → „{mark}” (pojawi "
+                       "się pod wynikiem, gdy sprawdzenie potwierdzi zniknięcie).\n"
                        "Klik prowadzi do: {place}."},
         "en": {"one": "{n} copy has no header testimony collected yet, so this row has nothing to "
                       "compare.\nIf the file is on disk - {place} → “Take new”.\n"
-                      "If the file is no longer on disk - {place} → “{check}” → “{mark}”.\n"
+                      "If the file is no longer on disk - {place} → “{check}” → “{mark}” (appears "
+                      "below the result when the check confirms the file is gone).\n"
                       "A click takes you to: {place}.",
                "other": "{n} copies have no header testimony collected yet, so this row has nothing "
                         "to compare.\nIf the file is on disk - {place} → “Take new”.\n"
-                        "If the file is no longer on disk - {place} → “{check}” → “{mark}”.\n"
+                        "If the file is no longer on disk - {place} → “{check}” → “{mark}” "
+                        "(appears below the result when the check confirms the file is gone).\n"
                         "A click takes you to: {place}."},
     },
     "tasks.vanished_frames": {"pl": "Zniknięte z dysku", "en": "Vanished from disk"},
@@ -2811,7 +2838,7 @@ CATALOG = {
 
     # --- drogi wyjścia z izolacji zapisu w miejscu (grid.py, menu prawego kliku; AR-17 (2)).
     # Kopia z operacją w fazie izolującej jest pomijana przez skan; gesty wołają rdzeń
-    # (`writeback.finish_inplace` / `writeback.recover_torn` / `repo.release_inplace_op`).
+    # (`writeback.finish_inplace` / `writeback.recover_torn` / `writeback.release_isolation`).
     "grid.inplace.finish": {"pl": "Dokończ zapis", "en": "Finish the write"},
     "grid.inplace.restore": {
         "pl": "Przywróć nagłówek sprzed zapisu", "en": "Restore the header from before the write"},
@@ -2892,10 +2919,6 @@ CATALOG = {
     "grid.inplace.failed": {
         "pl": {"one": " · nieudany {n}", "few": " · nieudane {n}", "many": " · nieudanych {n}"},
         "en": {"one": " · failed {n}", "other": " · failed {n}"},
-    },
-    "grid.inplace.refused": {
-        "pl": {"one": " · odmowa {n}", "few": " · odmowy {n}", "many": " · odmów {n}"},
-        "en": {"one": " · refused {n}", "other": " · refused {n}"},
     },
     "grid.inplace.cancelled": {
         "pl": " · przerwano, reszta nietknięta", "en": " · interrupted, the rest untouched"},

@@ -4,7 +4,9 @@
   (5) rename lokacji idzie pod strażą relokacji - bramka izolacji i generacji powtórzona
       w transakcji, która obejmuje `os.rename` i przepięcie `location.path`;
   (6) odzysk operacji OTWARTEJ z nieudaną kontrolą danych ma tę samą drogę powrotu co `written`;
-  (7) sterowniki czytające pliki kopii ponawiają RAZ odczyt odrzucony przez strażnika generacji.
+  (7) sterowniki czytające pliki kopii ponawiają RAZ odczyt odrzucony przez strażnika generacji,
+      a liczniki raportu naliczają raz na kandydata, według próby, której strażnik nie odrzucił;
+  plus zwolnienie izolacji ręką pod blokadą pliku z CAS fazy (`writeback.release_isolation`).
 
 Pliki syntetyczne w `tmp_path` (bateria hermetyczna). Każdy test bez poprawki pada."""
 
@@ -309,4 +311,147 @@ def test_skan_stosow_ponawia_raz(tmp_path, monkeypatch, konflikty, zapis):
     monkeypatch.undo()
     assert len(odczyty) == 2, odczyty
     assert (s.ingested, s.skipped) == ((1, 0) if zapis else (0, 1)), s
+    con.close()
+
+
+# ============================================================ liczniki raz na kandydata przy ponowieniu
+
+
+def _konflikt_w_klindze(monkeypatch, con, path, ile):
+    """Podmienia `repo.refresh_location`: przy pierwszych `ile` wywołaniach dla kopii `path` tuż
+    PRZED transakcją klingi w dzienniku staje zakończona operacja zapisu w miejscu tej lokacji.
+    Wstępne sprawdzenie generacji w `ingest_record` jest już za nami, więc konflikt łapie dopiero
+    klinga - PO tym, jak `ingest_record` naliczył liczniki rekordu (`frames_existing`)."""
+    prawdziwa = repo.refresh_location
+    lid = con.execute("SELECT id FROM location WHERE path = ?", (str(path),)).fetchone()[0]
+    wywolania = []
+
+    def _przeplot(con_, *, location_id, **kw):
+        if location_id == lid:
+            wywolania.append(1)
+            if len(wywolania) <= ile:
+                _operacja(con, lid, "synced")
+        return prawdziwa(con_, location_id=location_id, **kw)
+    monkeypatch.setattr(repo, "refresh_location", _przeplot)
+    return wywolania
+
+
+@pytest.mark.parametrize("konflikty", [1, 3])
+def test_skan_drzewa_liczy_plik_raz_przy_ponowieniu(tmp_path, monkeypatch, konflikty):
+    """Konflikt generacji złapany w klindze (po naliczeniu liczników rekordu) i ponowienie: dawniej
+    oba przebiegi `ingest_record` liczyły na tym samym raporcie - jeden plik dawał „istniejące 2",
+    a przy drugim konflikcie „istniejące 2" RAZEM z „izolowane 1". Teraz liczy wyłącznie próba,
+    której strażnik nie odrzucił.
+
+    Falsyfikator: podaj `ingest_record` w `scan_tree` raport przebiegu (`summary=summary`) zamiast
+    licznika próby → `frames_existing` == 2."""
+    kat = tmp_path / "arch"
+    kat.mkdir()
+    p = _fits(kat / "a.fits")
+    con = db.open_db(str(tmp_path / "h.db"))
+    scan.scan_tree(con, str(kat), volume="V", now=NOW)
+    _fits(p, obj="M 42")                                    # ten sam obraz, nowy mtime i nagłówek
+    wywolania = _konflikt_w_klindze(monkeypatch, con, p, konflikty)
+    s = scan.scan_tree(con, str(kat), volume="V", now=NOW)
+    monkeypatch.undo()
+    assert len(wywolania) == 2, wywolania
+    if konflikty == 1:
+        assert (s.files, s.frames_existing, s.headers_refreshed, s.isolated, s.skipped) == \
+            (1, 1, 1, 0, 0), s
+    else:
+        assert (s.files, s.frames_existing, s.headers_refreshed, s.isolated, s.isolated_paths) == \
+            (1, 0, 0, 1, [str(p)]), s
+    con.close()
+
+
+def test_uzupelnienie_xisf_liczy_plik_raz_przy_ponowieniu(tmp_path, monkeypatch):
+    """Ta sama klasa w sterowniku uzupełnienia XISF: raport `scan` zagnieżdżony w `BackfillSummary`
+    liczył odrzuconą próbę. Falsyfikator: `summary=s.scan` w `backfill_xisf_headers` → 2."""
+    p = _xisf(tmp_path / "a.xisf")
+    con = db.open_db(str(tmp_path / "h.db"))
+    _scan_in(con, p)
+    _bez_faktow(con, p, bez_odcisku=True)
+    wywolania = _konflikt_w_klindze(monkeypatch, con, p, 1)
+    s = scan.backfill_xisf_headers(con, now=NOW)
+    monkeypatch.undo()
+    assert len(wywolania) == 2 and (s.read, s.failed, s.remaining) == (1, 0, 0), s
+    assert (s.scan.frames_existing, s.scan.locations_refreshed) == (1, 1), s.scan
+    con.close()
+
+
+def test_skan_stosow_liczy_plik_raz_przy_ponowieniu(tmp_path, monkeypatch):
+    """Droga „Stosy": `ingested` liczył się raz już wcześniej, ale zagnieżdżony raport skanu - dwa
+    razy. Falsyfikator: `summary=s.scan` w `scan_stacks` → `frames_existing` == 2."""
+    t = tmp_path / "obrobka"
+    t.mkdir()
+    st = _stack(t / "masterLight_A.xisf", n=1)
+    con = db.open_db(str(tmp_path / "h.db"))
+    assert scan.scan_stacks(con, t, now=NOW).ingested == 1
+    wywolania = _konflikt_w_klindze(monkeypatch, con, st, 1)
+    s = scan.scan_stacks(con, t, now=NOW)
+    monkeypatch.undo()
+    assert len(wywolania) == 2 and (s.ingested, s.skipped) == (1, 0), s
+    assert s.scan.frames_existing == 1, s.scan
+    con.close()
+
+
+# ============================================================ zwolnienie ręką pod blokadą pliku
+
+
+def test_zwolnienie_czeka_na_blokade_pliku_innego_zapisu(tmp_path, monkeypatch):
+    """Inny zapis trzyma plik otwarty do zapisu (blokada `_exclusive` - tak trzymają go zapis
+    w miejscu i odzysk). Dawniej zwolnienie było samym UPDATE-em bazy: izolacja znikała w trakcie
+    tamtego zapisu, a skan mógł przeczytać rozdarty nagłówek. Teraz zwolnienie czeka na blokadę
+    i - gdy plik dalej jest trzymany - odmawia bez zmiany fazy; po zwolnieniu blokady przechodzi.
+
+    Falsyfikator: wołaj w `release_isolation` klingę bez `_exclusive` → 'released' mimo blokady."""
+    p = _fits(tmp_path / "z.fits")
+    con, op, _przed = _otwarta_operacja(tmp_path, monkeypatch, p)
+    monkeypatch.setattr(writeback, "_LOCK_RETRY_DELAYS", (0.01,))
+    with writeback._exclusive(str(p)):
+        w = writeback.release_isolation(con, op["id"], now=NOW, reason="przywrócony z kopii")
+    assert w.status == "blocked" and "inny proces" in w.reason, w
+    assert _operacje(con)[0]["phase"] == "unverified" and scan._isolated(con, str(p))
+    assert con.execute("SELECT count(*) FROM event WHERE verb = 'location.writeback_released'"
+                       ).fetchone()[0] == 0
+    w = writeback.release_isolation(con, op["id"], now=NOW, reason="przywrócony z kopii")
+    assert (w.status, w.reason) == ("released", None), w
+    assert _operacje(con)[0]["phase"] == "released" and not scan._isolated(con, str(p))
+    con.close()
+
+
+def test_zwolnienie_trzyma_cas_fazy_przeczytanej_pod_blokada(tmp_path, monkeypatch):
+    """Faza przeczytana pod blokadą idzie do klingi jako CAS: gdy w bazie jest już inna (drugi
+    proces zdążył ją przestawić), klinga odmawia, a orkiestracja oddaje 'blocked' z obiema fazami -
+    zwolnienie nie przestawia fazy, której nie widziało.
+
+    Falsyfikator: zdejmij warunek `AND phase = ?` z UPDATE w `repo.release_inplace_op` → faza
+    `released` mimo rozjazdu."""
+    p = _fits(tmp_path / "c.fits")
+    con, op, _ = _otwarta_operacja(tmp_path, monkeypatch, p)
+    with pytest.raises(ValueError, match="unverified"):
+        repo.release_inplace_op(con, op_id=op["id"], now=NOW, reason="r", expect_phase="writing")
+    monkeypatch.setattr(repo, "inplace_op_phase", lambda con_, op_id: "writing")
+    w = writeback.release_isolation(con, op["id"], now=NOW, reason="r")
+    monkeypatch.undo()
+    assert w.status == "blocked" and "writing" in w.reason and "unverified" in w.reason, w
+    assert _operacje(con)[0]["phase"] == "unverified"
+    con.close()
+
+
+def test_zwolnienie_pliku_ktorego_nie_ma_idzie_bez_blokady(tmp_path, monkeypatch):
+    """Plik skasowany (albo udział odłączony): zwolnienie jest drogą ręki właśnie dla pliku, którego
+    nie ma - nie może zależeć od blokady, której nie da się wziąć. Przechodzi z CAS fazy, a powód
+    wyniku mówi, że pliku nie dało się otworzyć; powód człowieka idzie do dziennika bez zmian.
+
+    Falsyfikator: traktuj każdy błąd otwarcia jak zajęty plik → 'blocked', faza `unverified`."""
+    p = _fits(tmp_path / "s.fits")
+    con, op, _ = _otwarta_operacja(tmp_path, monkeypatch, p)
+    p.unlink()
+    w = writeback.release_isolation(con, op["id"], now=NOW, reason="plik skasowany, jest kopia")
+    assert w.status == "released" and "bez blokady" in w.reason, w
+    assert _operacje(con)[0]["phase"] == "released"
+    ev = con.execute("SELECT reason FROM event WHERE verb = 'location.writeback_released'"
+                     ).fetchone()
+    assert ev["reason"] == "plik skasowany, jest kopia"
     con.close()

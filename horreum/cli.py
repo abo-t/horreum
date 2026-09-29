@@ -732,11 +732,18 @@ def _format_rename_apply(db_path, run, res, run_id):
 
 
 def _format_rename_undo(db_path, run_id, res):
-    """Raport --undo: przywrócone/zablokowane/błędy."""
+    """Raport --undo: przywrócone/zablokowane/błędy - każdy błąd z powodem, jak w raporcie --apply.
+    Błąd bywa rozdarciem plik↔baza („plik PRZENIESIONY…, baza NIE przepięta - przeskanuj katalog"),
+    a sam licznik chował go w „bledy: 1". Wiersze nieudane zostają w przebiegu jako 'applied', więc
+    raport podaje też komendę ponowienia."""
     lines = [f"Horreum rename {db_path} --undo {run_id}:",
              f"  przywrocono: {len(res.restored)}; zablokowane: {len(res.blocked)}; bledy: {len(res.failed)}"]
     for fr in res.blocked:
         lines.append(f"    BLOCKED {Path(fr.path).name}: {fr.reason}")
+    for fr in res.failed:
+        lines.append(f"    FAILED {Path(fr.path).name}: {fr.reason}")
+    if res.failed:
+        lines.append(f"  ponow nieudane: horreum rename {db_path} --undo {run_id}")
     return "\n".join(lines)
 
 

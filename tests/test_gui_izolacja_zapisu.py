@@ -2,7 +2,7 @@
 i recepty wierszy kopii bez zeznania (AR-28).
 
 Kopia z operacją `inplace_op` w fazie izolującej jest pomijana przez skan. Rdzeń ma trzy drogi
-wyjścia (`writeback.finish_inplace`, `writeback.recover_torn`, `repo.release_inplace_op`); tu
+wyjścia (`writeback.finish_inplace`, `writeback.recover_torn`, `writeback.release_isolation`); tu
 sprawdzamy, że GUI je pokazuje: wiersz Porządków „Zapis czeka na dokończenie" z własną
 perspektywą, gesty w menu prawego kliku w Zbiorach (uczciwie wygaszone z powodem), zdanie wyniku
 z powodem rdzenia i odświeżenie licznika tym samym sygnałem, co po innych gestach.
@@ -21,7 +21,7 @@ pytest.importorskip("PySide6")
 
 from astropy.io import fits
 from PySide6.QtCore import QEventLoop, QPoint, Qt, QTimer
-from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtWidgets import QApplication, QDialog, QLabel
 
 from horreum import db, repo, scan, writeback
 from horreum.gui import grid as grid_mod, i18n, queries, rows, tasks as tasks_mod
@@ -284,10 +284,12 @@ def test_przywroc_przy_poprawnym_zapisie_odmawia_i_mowi_powod_rdzenia(qapp, tmp_
 def test_zwolnij_wymaga_powodu_i_zostawia_go_w_dzienniku(qapp, tmp_path, monkeypatch):
     """„Zwolnij plik do skanu…": okno bez powodu ma wygaszony przycisk (to rozstrzygnięcie człowieka),
     Enter nie przechodzi obok bramki, a powód trafia do zdarzenia `location.writeback_released`.
-    Plik nietknięty, faza `released`, licznik 0.
+    Plik nietknięty, faza `released`, licznik 0. Gest idzie uchwytem zapisu gridu jak dwa pozostałe
+    (rdzeń czeka na blokadę pliku), więc emituje `writeback_busy` True → False - mutex z Dostawą.
 
     Falsyfikator: zdejmij `_sync_ok` z okna → asercja o wygaszeniu pada; wołaj
-    `release_inplace_op` z pustym powodem → asercja o treści zdarzenia pada."""
+    `release_inplace_op` z pustym powodem → asercja o treści zdarzenia pada; wołaj rdzeń w slocie
+    wprost, z pominięciem `_start_gestu_zapisu` → asercja o `zajety` pada."""
     dlg = grid_mod.ReleaseDialog(2)
     try:
         assert not dlg.btn_ok.isEnabled() and dlg.btn_ok.toolTip()
@@ -319,7 +321,7 @@ def test_zwolnij_wymaga_powodu_i_zostawia_go_w_dzienniku(qapp, tmp_path, monkeyp
         assert ev["reason"] == "sprawdzony hashem z kopią"
         assert queries.tasks_state(con)["torn_write_frames"] == 0 and view.porzadki
         assert view.komunikaty[-1].startswith("Zwolniono do skanu 1 plik"), view.komunikaty
-        assert view.zajety == [], "zwolnienie jest samą bazą - bez wątku zapisu"
+        assert view.zajety == [True, False], "zwolnienie idzie uchwytem zapisu (blokada pliku)"
     finally:
         view.close()
     con.close()
@@ -403,7 +405,11 @@ def test_gesty_czekaja_na_etap_i_na_inny_zapis(qapp, tmp_path, monkeypatch):
 
 def test_zdanie_wyniku_liczy_statusy_i_przerwanie():
     """Czysta funkcja zdania: człon główny liczy sukcesy statusem właściwym gestowi, człony odmów
-    stoją tylko, gdy są, a przerwanie mówi, że reszta nietknięta."""
+    stoją tylko, gdy są, a przerwanie mówi, że reszta nietknięta. Sukces bez powodu nie dokleja
+    niczego; sukces Z powodem rdzenia (droga powrotu, zwolnienie pliku, którego nie ma) - tak,
+    osobnym członem po powodzie odmowy.
+
+    Falsyfikator: zdejmij drugi człon (`w.status == sukces and w.reason`) → ostatnia asercja pada."""
     from types import SimpleNamespace as NS
     wyniki = [NS(status="applied", path="C:\\a\\x.fits", reason=None),
               NS(status="blocked", path="/b/y.fits", reason="inny plik"),
@@ -412,8 +418,92 @@ def test_zdanie_wyniku_liczy_statusy_i_przerwanie():
     assert zdanie == ("Dokończono 1 zapis · zablokowany 1 · nieudany 1 · przerwano, reszta "
                       "nietknięta - y.fits: inny plik")
     assert grid_mod._zdanie_gestu_zapisu(
-        "recover_torn", NS(results=[NS(status="restored", path="a", reason="ok")] * 2,
+        "recover_torn", NS(results=[NS(status="restored", path="a", reason=None)] * 2,
                            cancelled=False)) == "Przywrócono nagłówek w 2 plikach"
+    assert grid_mod._zdanie_gestu_zapisu(
+        "release_inplace", NS(results=[NS(status="released", path="C:\\a\\x.fits", reason="bez"),
+                                       NS(status="blocked", path="y.fits", reason="zajęty")],
+                              cancelled=False)) == \
+        "Zwolniono do skanu 1 plik · zablokowany 1 - y.fits: zajęty - x.fits: bez"
+
+
+def test_zdanie_commitu_stawia_powod_bledu_przed_blokada():
+    """Bliźniak rozdarcia renamu po stronie commitu (`commit_renames` → szuflada): wsad z blokadą
+    i błędem pokazywał powód PIERWSZEJ blokady, więc „plik PRZENIESIONY…, baza NIE przepięta"
+    chował się za „cel już istnieje". Błąd bywa rozjazdem do naprawy, blokada zostawia plik
+    nietknięty - powód błędu idzie pierwszy.
+
+    Falsyfikator: przywróć `res.blocked + res.failed` w `zdanie_wyniku_zapisu` → asercja pada."""
+    from types import SimpleNamespace as NS
+    from horreum.gui.wb_worker import zdanie_wyniku_zapisu
+    res = NS(applied=[NS(reason=None)],
+             blocked=[NS(reason="cel już istnieje na dysku (anty-clobber)")],
+             failed=[NS(reason="plik PRZENIESIONY na x.fits, ale baza NIE przepięta")],
+             skipped=[])
+    zdanie = zdanie_wyniku_zapisu(res, "grid.wb.renamed")
+    assert zdanie.endswith("plik PRZENIESIONY na x.fits, ale baza NIE przepięta"), zdanie
+    assert "1 zablokowanych" in zdanie and "1 błędów" in zdanie, zdanie
+
+
+def test_przywroc_droga_powrotu_mowi_ze_plik_zmienil_sie_poza_naglowkiem(qapp, tmp_path,
+                                                                           monkeypatch):
+    """Zapis `written`, a dane poza nagłówkiem zmienione na dysku: „Przywróć nagłówek sprzed zapisu"
+    idzie drogą powrotu - stary nagłówek w miejscu, plik zwolniony do pełnego skanu. Rdzeń oddaje
+    'restored' Z POWODEM („plik zmienił się poza nagłówkiem… przeskanuj plik"). Dawniej zdanie
+    brało powód tylko z odmów i błędów, więc człowiek czytał samo „Przywrócono nagłówek w 1 pliku".
+
+    Falsyfikator: zdejmij człon sukcesu z `_zdanie_gestu_zapisu` → asercja o „przeskanuj" pada."""
+    con, [(p, fid)] = _baza(tmp_path)
+    _commit_written(monkeypatch, con)
+    dane = bytearray(p.read_bytes())
+    dane[-1] ^= 0xFF                                    # bajt danych, daleko za nagłówkiem
+    p.write_bytes(bytes(dane))
+    view = _widok(con)
+    try:
+        view.apply_perspective(grid_mod.PRESET_PENDING_FINISH)
+        _zaznacz(view, [fid])
+        view._on_restore_header()
+        assert _fazy(con) == ["recovered"]
+        zdanie = view.komunikaty[-1]
+        assert zdanie.startswith("Przywrócono nagłówek w 1 pliku - a0.fits: "), zdanie
+        assert "poza nagłówkiem" in zdanie and "przeskanuj" in zdanie, zdanie
+        assert "przeskanuj" in view.drawer.result.text()
+    finally:
+        view.close()
+    con.close()
+
+
+def test_dlugie_zdanie_wyniku_nie_podnosi_minimum_okna(qapp, tmp_path, monkeypatch):
+    """Zdanie wyniku w szufladzie (368 znaków, firsthand: porażka „Dokończ zapis") podnosiło
+    minimum szerokości widoku - a za nim okna - do długości zdania (2613 px na ekranie 2560).
+    Teraz zdanie jest elidowane w malowaniu, pełne w `text()` i w podpowiedzi, a minimum szerokości
+    widoku z długim zdaniem równa się minimum bez niego. Bliźniak w tej samej etykiecie: nazwa
+    pliku w postępie (`update_progress`) - też nie rusza minimum.
+
+    Falsyfikator: `self.result = QLabel("")` w `StagingDrawer` → minimum rośnie z długością zdania."""
+    con, _ = _baza(tmp_path)
+    view = _widok(con)
+    view.resize(1400, 800)
+    view.show()                                         # ukryty widok nie liczy minimum z dzieci
+    try:
+        view.drawer.set_result("")
+        QApplication.processEvents()
+        przed = view.minimumSizeHint().width()
+        przed_szuflada = view.drawer.minimumSizeHint().width()
+        dlugie = "Dokończono 0 zapisów · nieudany 1 - " + "NGC281_20211110_LIGHT.fit: " + "x" * 330
+        zwykla = QLabel(dlugie)                         # kontrola: offscreen mierzy tekst szerzej
+        assert zwykla.minimumSizeHint().width() > przed, "sonda nie umiałaby się zaczerwienić"
+        view.drawer.set_result(dlugie)
+        QApplication.processEvents()
+        assert view.minimumSizeHint().width() == przed
+        assert view.drawer.minimumSizeHint().width() == przed_szuflada
+        assert view.drawer.result.text() == dlugie and view.drawer.result.toolTip() == dlugie
+        view.drawer.update_progress(1, 2, "C:\\" + "d" * 300 + ".fits")
+        QApplication.processEvents()
+        assert view.minimumSizeHint().width() == przed
+    finally:
+        view.close()
+    con.close()
 
 
 # ═════════════════════════ AR-28: recepty wierszy kopii bez zeznania
@@ -491,6 +581,45 @@ def test_recepta_kopii_bez_zeznania_ma_wykonalny_dwukrok(qapp):
     assert "Dostawa → „Sprawdź obecność” → „Oznacz zniknięte”" in tip, tip
 
 
+_WARUNEK_PRZYCISKU = {"pl": "gdy sprawdzenie potwierdzi zniknięcie",
+                      "en": "when the check confirms the file is gone"}
+
+
+def test_recepta_mowi_ze_oznacz_znikniete_jest_warunkowe(qapp, tmp_path, ustawienia):
+    """Hamulec passa obecności (drzewo puste, za dużo kandydatów) nie liczy potwierdzeń, więc
+    „Oznacz zniknięte" się wtedy nie pojawia - a recepta obiecywała go bezwarunkowo. Teraz każda
+    forma obu recept w obu językach mówi, że przycisk pojawia się po POTWIERDZONYM zniknięciu,
+    a sprawdzenie pod hamulcem („drzewo puste") rzeczywiście przycisku nie pokazuje.
+
+    Falsyfikator: usuń warunek z którejkolwiek formy `grid.tip.copy_unread` /
+    `tasks.copies_unread_tip` → pierwsza pętla pada."""
+    for klucz in ("grid.tip.copy_unread", "tasks.copies_unread_tip"):
+        for jezyk in ("pl", "en"):
+            formy = CATALOG[klucz][jezyk]
+            for tekst in (formy.values() if isinstance(formy, dict) else [formy]):
+                assert _WARUNEK_PRZYCISKU[jezyk] in tekst[tekst.index("{mark}"):], (klucz, jezyk)
+
+    from horreum.gui.pipeline import PipelineView
+    from horreum.volumes import volume_serial
+    kat = tmp_path / "t"
+    kat.mkdir()
+    plik = _fits(kat / "l0.fits")
+    db_path = str(tmp_path / "p.db")
+    con = db.open_db(db_path)
+    scan.scan_tree(con, str(kat), volume=volume_serial(str(kat)) or "?", now=NOW)
+    con.close()
+    os.remove(str(plik))                                # jedyny plik drzewa - hamulec „drzewo puste"
+    view = PipelineView(db_path, now_fn=lambda: NOW)
+    try:
+        view._set_root(str(kat))
+        view._on_presence()
+        _czekaj_na_etap(view)
+        assert "drzewo puste" in view.lbl_summary.text(), view.lbl_summary.text()
+        assert view.box_vanished.isHidden() or view.btn_mark_vanished.isHidden()
+    finally:
+        view.close()
+
+
 def _czekaj_na_etap(view, timeout_ms=20000):
     loop = QEventLoop()
     view.running_changed.connect(lambda r: loop.quit() if r is False else None)
@@ -550,6 +679,71 @@ def test_sprawdz_obecnosc_bez_zrodla_pyta_o_katalog(qapp, tmp_path, monkeypatch,
             "pipeline.tip.presence_ask", mark=i18n.t("pipeline.btn.mark_vanished"))
         view._on_presence()
         assert view._thread is None and view._root is None
+    finally:
+        view.close()
+
+
+def test_niedostepne_zrodlo_sprawdza_watek_tla_i_daje_droge_do_katalogu(qapp, tmp_path,
+                                                                          monkeypatch, ustawienia):
+    """Ostatnie źródło to odłączony udział (tu: katalog, którego nie ma). Dawniej slot okna robił
+    `is_dir` na tej ścieżce - na zawieszonym SMB okno stało do timeoutu sieci - a potem bez słowa
+    otwierał dialog katalogu. Teraz slot NIE dotyka dysku (ani `is_dir`, ani serialu woluminu):
+    korzeń idzie do wątku tła, który wraca jawnym stanem „źródło niedostępne: <ścieżka> - wskaż
+    katalog" z przyciskiem „Wskaż katalog…" pod wynikiem; dopiero ten przycisk pyta o katalog.
+    Surowego „FileNotFoundError" na czerwono nie ma, a niedostępna ścieżka nie zostaje wskazanym
+    katalogiem.
+
+    Falsyfikator: przywróć w `_on_presence` `Path(source).is_dir()` na ostatnim źródle → lista
+    dotknięć dysku w wątku okna nie jest pusta."""
+    import threading
+    from pathlib import Path
+    from PySide6.QtWidgets import QFileDialog
+    from horreum.gui import pipeline as pipeline_mod
+    brak = str(tmp_path / "odlaczony_udzial" / "ASTRO_")
+    zdrowy = tmp_path / "zdrowy"
+    zdrowy.mkdir()
+    db_path = str(tmp_path / "p.db")
+    db.open_db(db_path).close()
+    ustawienia.setValue("pipeline/last_source", brak)
+
+    w_oknie = []                                        # (co, ścieżka) wołane w wątku okna
+
+    def _szpieg(nazwa, prawdziwa):
+        def _f(sciezka, *a, **kw):
+            if (threading.current_thread() is threading.main_thread()
+                    and "odlaczony_udzial" in str(sciezka)):
+                w_oknie.append((nazwa, str(sciezka)))
+            return prawdziwa(sciezka, *a, **kw)
+        return _f
+    monkeypatch.setattr(os.path, "isdir", _szpieg("isdir", os.path.isdir))
+    monkeypatch.setattr(Path, "is_dir", _szpieg("Path.is_dir", Path.is_dir))
+    monkeypatch.setattr(pipeline_mod, "volume_serial",
+                        _szpieg("volume_serial", pipeline_mod.volume_serial))
+    dialogi = []
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory",
+                        staticmethod(lambda *a, **k: dialogi.append(1) or str(zdrowy)))
+
+    view = pipeline_mod.PipelineView(db_path, now_fn=lambda: NOW)
+    try:
+        assert brak in view.btn_presence.toolTip()
+        view._on_presence()
+        assert w_oknie == [] and dialogi == [], (w_oknie, dialogi)
+        assert view._thread is not None, "etap ruszył na ostatnim źródle"
+        _czekaj_na_etap(view)
+        zdanie = i18n.t("pipeline.presence.unreachable_pick", root=brak)
+        assert not view.box_vanished.isHidden() and view.lbl_vanished.text() == zdanie
+        assert not view.btn_pick_presence.isHidden() and view.btn_pick_presence.isEnabled()
+        assert view.btn_mark_vanished.isHidden() and view.lbl_error.isHidden()
+        assert i18n.t("pipeline.presence.unreachable", root=brak) in view.lbl_summary.text()
+        assert view._root is None and dialogi == []
+        assert w_oknie == [], w_oknie
+
+        view.btn_pick_presence.click()                  # droga dalej - dopiero TERAZ pytanie
+        assert dialogi == [1] and view._thread is not None
+        _czekaj_na_etap(view)
+        assert view._root == str(zdrowy)
+        assert ustawienia.value("pipeline/last_source") == str(zdrowy)
+        assert view.btn_pick_presence.isHidden()
     finally:
         view.close()
 

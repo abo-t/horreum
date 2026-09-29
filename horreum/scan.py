@@ -53,7 +53,7 @@ import sqlite3
 import struct
 import sys
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -1821,7 +1821,27 @@ def _xisf_backfill_rows(con):
 # generacją a odczytem. Każdy sterownik czytający pliki kopii ponawia więc JEDEN raz: nowa generacja,
 # ponowna bramka izolacji, ponowny odczyt i zapis; dopiero drugi konflikt idzie do jego kubełka.
 # Dwie próby, nie pętla - ciągły strumień zapisów w miejscu nie zawiesi sterownika.
+#
+# LICZNIKI RAZ NA KANDYDATA, WEDŁUG WYNIKU OSTATNIEJ PRÓBY: `ingest_record` nalicza liczniki
+# `ScanSummary` (np. `frames_existing`) PRZED zapisem, w którym klinga rzuca `StaleScanRecord`,
+# a sterownik skanu drzewa nalicza w próbie także bramę (`skipped`) i izolację. Ponowienie na tym
+# samym obiekcie liczyło plik dwa razy - „istniejące 2" za jeden plik albo jednocześnie „istniejące"
+# i „pominięte" (kontrakt `skipped` = NIEczytane). Każda próba liczy więc na własnym `ScanSummary`
+# (`_dolicz_probe`), a do raportu wchodzi wyłącznie próba, której strażnik generacji nie odrzucił.
 _PROBY_GENERACJI = 2
+
+
+def _dolicz_probe(cel, proba):
+    """Dolicz liczniki jednej próby (`ScanSummary`) do raportu przebiegu: pola liczbowe sumą, listy
+    ścieżek dopisaniem; flaga `cancelled` należy do przebiegu, nie do próby."""
+    for f in fields(ScanSummary):
+        wartosc = getattr(proba, f.name)
+        if isinstance(wartosc, bool):
+            continue
+        if isinstance(wartosc, int):
+            setattr(cel, f.name, getattr(cel, f.name) + wartosc)
+        elif isinstance(wartosc, list):
+            getattr(cel, f.name).extend(wartosc)
 
 
 def backfill_xisf_headers(con, *, now, progress=None):
@@ -1877,14 +1897,17 @@ def backfill_xisf_headers(con, *, now, progress=None):
                 break
             if proba == 1:                     # plik liczony raz, także gdy ponowienie czyta drugi raz
                 s.read += 1
+            liczniki = ScanSummary()           # próba liczy na swoim - patrz `_dolicz_probe`
             try:
-                ingest_record(con, rec, volume=row["volume"], now=now, summary=s.scan,
+                ingest_record(con, rec, volume=row["volume"], now=now, summary=liczniki,
                               actor="backfill:xisf", inplace_gen=gen)
             except repo.StaleScanRecord as exc:        # zapis w miejscu po generacji
                 if proba < _PROBY_GENERACJI:
                     continue
                 s.failed += 1
                 s.failed_paths.append(f"{path}: kopia izolowana - {exc}")
+            else:
+                _dolicz_probe(s.scan, liczniki)
             break
         if progress is not None:
             progress(i, total, path)
@@ -2345,6 +2368,8 @@ def scan_stacks(con, root, *, volume="?", drive_letter=None, tier=None, now,
             break
         spath = str(path)
         for proba in range(1, _PROBY_GENERACJI + 1):
+            liczniki = ScanSummary()           # próba liczy na swoim - patrz `_dolicz_probe`
+            stary = False
             try:
                 # Generacja PRZED bramką izolacji (jak w `scan_tree`): zapis w miejscu po niej
                 # odrzuca ingest (`repo.StaleScanRecord`) - jedno ponowienie (`_PROBY_GENERACJI`),
@@ -2365,16 +2390,19 @@ def scan_stacks(con, root, *, volume="?", drive_letter=None, tier=None, now,
                         s.rejected_paths.append(f"{spath}: zeznaje '{kind}', nie {STACK_KIND}")
                     else:
                         ingest_record(con, rec, volume=volume, drive_letter=drive_letter,
-                                      tier=tier, now=now, summary=s.scan, actor="stacks",
+                                      tier=tier, now=now, summary=liczniki, actor="stacks",
                                       inplace_gen=gen)
                         s.ingested += 1
             except repo.StaleScanRecord:                   # zapis w miejscu po generacji
+                stary = True
                 if proba < _PROBY_GENERACJI:
                     continue
                 s.skipped += 1
             except Exception as exc:                       # I/O - raport, NIGDY zapis (docstring)
                 s.failed += 1
                 s.failed_paths.append(f"{spath}: {type(exc).__name__}: {exc}")
+            if not stary:
+                _dolicz_probe(s.scan, liczniki)
             break
         if progress is not None:
             progress(i, total, spath, s)
@@ -2449,6 +2477,7 @@ def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now,
         for proba in range(1, _PROBY_GENERACJI + 1):
             blad = kind = rec = gen = None
             stary = False
+            liczniki = ScanSummary()               # próba liczy na swoim - patrz `_dolicz_probe`
             try:
                 # GENERACJA PRZED BRAMKĄ (astra, 2026-09-27): bramka izolacji i odczyt pliku to dwie
                 # chwile, a zapis w miejscu może zacząć się między nimi. Operacja o `id` większym niż
@@ -2457,14 +2486,14 @@ def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now,
                 # markera nieczytelności.
                 gen = repo.inplace_generation(con)
                 if _isolated(con, spath, volume if gate_on else None):   # 0022: rozdarty zapis
-                    summary.isolated += 1
-                    summary.isolated_paths.append(spath)
+                    liczniki.isolated += 1
+                    liczniki.isolated_paths.append(spath)
                     skip = True
                 else:
                     skip = gate_on and _already_scanned(con, volume, spath,
                                                         _mtime_iso(path.stat()))
                     if skip:
-                        summary.skipped += 1
+                        liczniki.skipped += 1
                 if not skip:
                     rec = scan_file(spath)
             except Exception as exc:                       # backstop W1, strona ODCZYTU
@@ -2472,7 +2501,7 @@ def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now,
             if rec is not None:
                 try:
                     ingest_record(con, rec, volume=volume, drive_letter=drive_letter, tier=tier,
-                                  now=now, summary=summary, inplace_gen=gen)
+                                  now=now, summary=liczniki, inplace_gen=gen)
                 except repo.StaleScanRecord:               # zapis w miejscu po generacji
                     stary = True
                 except Exception as exc:                   # backstop W1, strona ZAPISU - fakt o nas
@@ -2504,24 +2533,26 @@ def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now,
                     if repo.mark_location_vanished(
                             con, location_id=row["id"], expected_path=spath, root=root,
                             run_id=None, now=now, actor="scan"):
-                        summary.vanished += 1
+                        liczniki.vanished += 1
                 elif row is not None:
                     try:
                         if repo.refresh_location_unreadable(
                                 con, location_id=row["id"], sha1_data=row["sha1_data"],
                                 path=spath, mtime=row["mtime"], reason=reason, kind=kind,
                                 now=now, inplace_gen=gen):
-                            summary.frame_review += 1
+                            liczniki.frame_review += 1
                     except repo.StaleScanRecord:           # odczyt padł w trakcie zapisu w miejscu
                         stary = True
                 else:
                     repo.flag_frame_review(con, sha1="?", path=spath, reason=reason, now=now)
-                    summary.frame_review += 1
+                    liczniki.frame_review += 1
             if not (stary and proba < _PROBY_GENERACJI):
                 break
-        if stary:
+        if stary:                                          # próba odrzucona - jej liczniki przepadają
             summary.isolated += 1
             summary.isolated_paths.append(spath)
+        else:
+            _dolicz_probe(summary, liczniki)
         if progress is not None:
             # `i`, nie `summary.files`: do 0810 były równe (jeden plik = jeden przyrost), ale odsiew
             # pochodnych rozdzielił te dwie liczby. `total` to długość PRZEJŚCIA, więc licznikiem

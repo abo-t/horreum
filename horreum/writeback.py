@@ -1666,7 +1666,7 @@ def _location(con, location_id):
 class FileResult:
     location_id: int
     path: str
-    status: str  # 'applied' | 'blocked' | 'failed' | 'skipped' | 'restored'
+    status: str  # 'applied' | 'blocked' | 'failed' | 'skipped' | 'restored' | 'released'
     reason: str | None = None
 
 
@@ -2759,4 +2759,73 @@ def _zwolnij_do_skanu(con, op_id, faza, niezgodne, *, now, ponow) -> WriteResult
         return WriteResult("failed", f"stary nagłówek przywrócony, ale faza 'recovered' NIE "
                                      f"zapisana ({type(exc).__name__}: {exc}); {ponow}", None)
     return WriteResult("applied", prawda, None)
+
+
+def release_isolation(con, op_id, *, now, reason) -> FileResult:
+    """ZWOLNIENIE IZOLACJI RĘKĄ (gest „Zwolnij plik do skanu…"): klinga `repo.release_inplace_op`
+    wołana POD TĄ SAMĄ blokadą pliku (`_exclusive`), którą trzymają zapis w miejscu, odzysk
+    (`recover_torn`) i dokończenie (`finish_inplace`), z fazą przeczytaną OD NOWA pod blokadą
+    i podaną klindze jako CAS (`expect_phase`). Zwraca `FileResult` ('released' | 'blocked' |
+    'failed'); plik nietknięty w każdej drodze.
+
+    DLACZEGO BLOKADA: izolacja jest jedyną rzeczą, która trzyma skan z dala od pliku w trakcie
+    zapisu w miejscu. Zwolnienie bez blokady, gdy drugi proces właśnie pisze albo przywraca region,
+    wpuściłoby skan na rozdarty nagłówek, a CAS pisarza zauważyłby zmianę fazy dopiero po fakcie.
+    Pod blokadą zwolnienie czeka na koniec zapisu (ponowienia `_LOCK_RETRY_DELAYS`), a gdy plik
+    dalej jest trzymany - odmawia ('blocked') z drogą dalej.
+
+    PLIK, KTÓREGO NIE DA SIĘ OTWORZYĆ (skasowany, udział odłączony, brak praw): zwolnienie idzie BEZ
+    blokady, bo to droga ręki właśnie dla pliku, którego nie ma - nie może zależeć od tego, że plik
+    da się otworzyć. Blokada broni wyłącznie przed procesem, który trzyma plik otwarty do zapisu,
+    a to Windows zgłasza przy otwarciu naruszeniem współdzielenia (`_LOCK_TRANSIENT`); każdy inny
+    błąd otwarcia znaczy, że pisarz też tego pliku nie otworzy (otwiera go tą samą drogą,
+    `OPEN_EXISTING`), więc nie ma zapisu, który zwolnienie mogłoby przeciąć. Faza idzie przez CAS
+    klingi także wtedy, a wynik niesie błąd otwarcia jako powód - człowiek widzi, że zwolnił plik,
+    którego program nie mógł otworzyć."""
+    op = con.execute("SELECT location_id FROM inplace_op WHERE id = ?", (op_id,)).fetchone()
+    if op is None:
+        return FileResult(0, "", "failed", f"brak operacji {op_id}")
+    loc = _location(con, int(op["location_id"]))
+    if loc is None:
+        return FileResult(int(op["location_id"]), "", "failed", "brak location w bazie")
+    path = loc["path"]
+    wynik = None
+    otwarty = False
+    try:
+        with _exclusive(path):
+            otwarty = True
+            wynik = _zwolnij_reka(con, op_id, now=now, reason=reason)
+    except Exception as exc:  # noqa: BLE001 - raport zamiast wyjątku w warstwie zapisu
+        if otwarty and wynik is None:
+            return FileResult(loc["id"], path, "failed", f"{type(exc).__name__}: {exc}")
+        if not otwarty and getattr(exc, "winerror", None) in _LOCK_TRANSIENT:
+            return FileResult(loc["id"], path, "blocked",
+                              "plik jest otwarty do zapisu przez inny proces (zapis albo odzysk "
+                              "nagłówka w toku) - zwolnienie czeka na jego koniec, żeby skan nie "
+                              "przeczytał rozdartego nagłówka; ponów po zakończeniu tamtego zapisu")
+        if not otwarty:
+            wynik = _zwolnij_reka(con, op_id, now=now, reason=reason,
+                                  bez_blokady=f"{type(exc).__name__}: {exc}")
+        # otwarty z wynikiem: padło dopiero zamknięcie uchwytu - fakt w bazie zostaje (`_pod_blokada`)
+    status, powod = wynik
+    return FileResult(loc["id"], path, status, powod)
+
+
+def _zwolnij_reka(con, op_id, *, now, reason, bez_blokady=None) -> tuple[str, str | None]:
+    """Rdzeń `release_isolation`: faza czytana TERAZ (pod blokadą pliku albo - `bez_blokady` -
+    przy pliku, którego nie da się otworzyć) i klinga z CAS tej fazy. `(status, powód)`; nie rzuca."""
+    try:
+        faza = repo.inplace_op_phase(con, op_id)
+        if faza not in repo.INPLACE_ISOLATING_PHASES:
+            return "blocked", (f"operacja {op_id} nie izoluje już lokacji (faza {faza}) - "
+                               f"nie ma czego zwalniać")
+        repo.release_inplace_op(con, op_id=op_id, now=now, reason=reason, expect_phase=faza)
+    except ValueError as exc:                      # CAS: faza zmieniona w międzyczasie
+        return "blocked", str(exc)
+    except Exception as exc:  # noqa: BLE001
+        return "failed", f"{type(exc).__name__}: {exc}"
+    if bez_blokady is not None:
+        return "released", (f"pliku nie da się otworzyć ({bez_blokady}) - zwolniono bez blokady "
+                            f"pliku")
+    return "released", None
 

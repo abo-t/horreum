@@ -37,7 +37,8 @@ class InplaceGestureResult:
 
 def po_operacjach(con, op_ids, now, progress, should_cancel, krok):
     """Pętla gestu izolacji po liście `inplace_op.id` (gesty „Dokończ zapis" / „Przywróć nagłówek
-    sprzed zapisu" w Zbiorach). `krok` = `writeback.finish_inplace` albo `writeback.recover_torn`:
+    sprzed zapisu" / „Zwolnij plik do skanu…" w Zbiorach). `krok` = `writeback.finish_inplace`,
+    `writeback.recover_torn` albo `writeback.release_isolation` z powodem człowieka:
     każdy działa pod własną blokadą pliku i własną transakcją, więc przerwanie MIĘDZY operacjami
     zostawia stan spójny. Anulowanie sprawdzane PRZED każdą operacją, jak w commicie; postęp po
     każdej, ze statusem rdzenia."""
@@ -64,9 +65,12 @@ class WritebackWorker(QObject):
     failed = Signal(str, str)               # op, msg — wyjątek → sygnał, NIE crash apki
     finished = Signal()                     # run() wrócił KAŻDĄ drogą → quit wątku
 
-    # Sześć pętli-po-plikach dzieli sygnaturę (con, target_id, now=, progress=, should_cancel=).
-    # Dwie ostatnie to gesty izolacji zapisu w miejscu: cel = LISTA `inplace_op.id`, wynik
+    # Siedem pętli-po-plikach dzieli sygnaturę (con, target_id, now=, progress=, should_cancel=).
+    # Trzy ostatnie to gesty izolacji zapisu w miejscu: cel = LISTA `inplace_op.id`, wynik
     # `InplaceGestureResult` (AR-17 (2) - ten sam uchwyt, więc ten sam mutex „writeback → Dostawa").
+    # Zwolnienie ręką niesie też POWÓD człowieka, więc jego cel to `{"ops": [...], "reason": ...}`;
+    # idzie tym uchwytem, bo rdzeń bierze blokadę pliku (`writeback.release_isolation`) i może na
+    # nią czekać - w wątku okna byłoby to zamrożenie, a poza uchwytem - drugi pisarz obok zapisu.
     _OPS = {
         "commit":        lambda con, t, now, pr, sc: writeback.commit(con, t, now=now, progress=pr, should_cancel=sc),
         "commit_rename": lambda con, t, now, pr, sc: writeback.commit_renames(con, t, now=now, progress=pr, should_cancel=sc),
@@ -74,6 +78,9 @@ class WritebackWorker(QObject):
         "undo_rename":   lambda con, t, now, pr, sc: writeback.undo_renames(con, t, now=now, progress=pr, should_cancel=sc),
         "finish_inplace": lambda con, t, now, pr, sc: po_operacjach(con, t, now, pr, sc, writeback.finish_inplace),
         "recover_torn":   lambda con, t, now, pr, sc: po_operacjach(con, t, now, pr, sc, writeback.recover_torn),
+        "release_inplace": lambda con, t, now, pr, sc: po_operacjach(
+            con, t["ops"], now, pr, sc,
+            lambda c, op_id, *, now: writeback.release_isolation(c, op_id, now=now, reason=t["reason"])),
     }
 
     def __init__(self, db_path, op, target_id, *, now_fn):
@@ -209,9 +216,13 @@ class WritebackRunner(QObject):
 
 
 def zdanie_wyniku_zapisu(res, noun_key):
-    """„N {noun} · M zablokowanych · …" + pierwszy powód blokady/błędu (wiz #4: user na ścianie
+    """„N {noun} · M zablokowanych · …" + pierwszy powód błędu/blokady (wiz #4: user na ścianie
     `blocked` pyta „czemu?", nie chce samego licznika). `noun_key` = klucz frazy głównej
-    (`grid.wb.applied`/`grid.wb.renamed`/`path.cards_applied`) - DANE, nie string PL."""
+    (`grid.wb.applied`/`grid.wb.renamed`/`path.cards_applied`) - DANE, nie string PL.
+
+    Powód BŁĘDU ma pierwszeństwo przed powodem blokady: blokada zostawia plik nietknięty, a błąd
+    bywa rozjazdem, który trzeba naprawić („plik PRZENIESIONY…, baza NIE przepięta - przeskanuj
+    katalog"). Przy odwrotnej kolejności jedna blokada w tym samym wsadzie chowała go za sobą."""
     parts = [i18n.t(noun_key, n=len(res.applied))]
     if res.blocked:
         parts.append(i18n.t("grid.wb.blocked", n=len(res.blocked)))
@@ -220,7 +231,7 @@ def zdanie_wyniku_zapisu(res, noun_key):
     if res.skipped:
         parts.append(i18n.t("grid.wb.skipped", n=len(res.skipped)))
     summary = " · ".join(parts)
-    detail = next((fr.reason for fr in (res.blocked + res.failed) if fr.reason), None)
+    detail = next((fr.reason for fr in (res.failed + res.blocked) if fr.reason), None)
     if detail:
         summary += i18n.t("grid.wb.detail_sep", detail=detail)
     return summary

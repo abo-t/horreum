@@ -2726,18 +2726,29 @@ def revert_inplace_op(con, *, op_id, now, reason, expect_phase="written", actor=
                    reason=reason)
 
 
-def release_inplace_op(con, *, op_id, now, reason, actor="user:local"):
+def release_inplace_op(con, *, op_id, now, reason, expect_phase=None, actor="user:local"):
     """JAWNE ZWOLNIENIE izolacji lokacji ręką (Q8): operacja izolująca (`INPLACE_ISOLATING_PHASES`,
     także `written` czekająca na re-sync) → `released`, lokacja wraca do zwykłego skanu. Gest
     człowieka po własnym rozstrzygnięciu (np. plik przywrócony z pełnej kopii) - stąd zdarzenie
-    `location.writeback_released` z powodem. Operacja nieizolująca → `ValueError`."""
-    with con:
+    `location.writeback_released` z powodem. Operacja nieizolująca → `ValueError`.
+
+    CAS FAZY (jak `set_inplace_op_phase`): `expect_phase` = faza, którą wołający przeczytał pod
+    blokadą pliku (`writeback.release_isolation`); inna faza w bazie (drugi proces zdążył ją
+    zmienić - pisarz przestawił `writing` na `written`, odzysk zamknął operację) → `ValueError`
+    z obiema fazami, zero zapisu. `None` = faza przeczytana tu, w tej samej transakcji
+    `BEGIN IMMEDIATE`. UPDATE niesie warunek fazy tak czy tak, więc zwolnienie nigdy nie przestawi
+    fazy, której wołający nie widział."""
+    with _immediate(con):
         row = con.execute("SELECT location_id, phase FROM inplace_op WHERE id = ?",
                           (op_id,)).fetchone()
         if row is None or row["phase"] not in INPLACE_ISOLATING_PHASES:
             raise ValueError(f"operacja {op_id} nie izoluje lokacji - nie ma czego zwalniać")
-        con.execute("UPDATE inplace_op SET phase = 'released', reason = ?, closed_at = ? "
-                    "WHERE id = ?", (reason, now, op_id))
+        oczekiwana = row["phase"] if expect_phase is None else expect_phase
+        cur = con.execute("UPDATE inplace_op SET phase = 'released', reason = ?, closed_at = ? "
+                          "WHERE id = ? AND phase = ?", (reason, now, op_id, oczekiwana))
+        if cur.rowcount != 1:
+            raise ValueError(f"operacja {op_id} jest w fazie {row['phase']}, nie {oczekiwana} - "
+                             f"inny proces zmienił ją po odczycie, zwolnienia nie ma")
         emit_event(con, actor=actor, verb="location.writeback_released",
                    target=f"location:{row['location_id']}", now=now,
                    payload={"inplace_op": op_id, "phase_before": row["phase"]}, reason=reason)
@@ -2752,9 +2763,9 @@ def release_inplace_op(con, *, op_id, now, reason, actor="user:local"):
 
 def relocate_location(con, *, location_id, new_path, now, actor="user:local"):
     """RENAME fizycznego pliku w modelu: UPDATE `location.path` IN-PLACE + `event(location.renamed)`.
-    Przepięcie BEZ straży izolacji: commit renamu idzie `guard_file_rename`, która obejmuje rename
-    i to samo przepięcie jedną transakcją (AR-17 (5)); tę funkcję woła dziś `writeback.undo_renames`
-    PO udanym `os.rename` (PLIK→DB, T8). NIE re-sync/ingest -
+    Przepięcie BEZ straży izolacji: commit i cofnięcie renamu idą `guard_file_rename`, która
+    obejmuje rename i to samo przepięcie jedną transakcją (AR-17 (5)); pisarz tej funkcji dziś nie
+    woła - wołają ją wyłącznie testy (PLIK→DB, T8). NIE re-sync/ingest -
     tożsamość frame przeżywa (rename nie tyka danych). ANTY-CLOBBER W BAZIE (R3 #3): brak INNEGO wiersza
     `location(volume, new_path)` — inaczej UPDATE łamie `UNIQUE(volume, path)` PO renamie = rozjazd
     plik↔DB → `ValueError` (commit oznaczy 'blocked'). Guard+UPDATE w `_immediate` (TOCTOU wobec

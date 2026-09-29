@@ -70,6 +70,36 @@ def test_cli_rename_apply_undo_roundtrip(tmp_path, capsys):
     assert all(f.exists() for f in files)              # oryginalne nazwy wróciły
 
 
+def test_cli_rename_undo_pokazuje_rozdarcie_i_komende_ponowienia(tmp_path, capsys, monkeypatch):
+    """Cofnięcie przeniosło plik, ale przepięcie bazy padło: rdzeń zwraca `failed` z prawdą
+    „plik PRZENIESIONY…, baza NIE przepięta - przeskanuj katalog". Dawniej raport --undo mówił
+    samo „bledy: 1" - rozdarcie plik↔baza znikało z ekranu. Teraz każdy błąd ma wiersz FAILED
+    z powodem, a raport podaje komendę ponowienia (wiersze nieudane zostają w przebiegu).
+
+    Falsyfikator: zdejmij pętlę `res.failed` z `_format_rename_undo` → asercja o „PRZENIESIONY"
+    pada."""
+    import sqlite3
+    from horreum import repo
+    dbp, files = _seed(tmp_path)
+    assert cli.main(["rename", str(dbp), "--apply"]) == 0
+    run_id = re.search(r"run_id: (\w+)", capsys.readouterr().out).group(1)
+    prawdziwa = repo._apply_relocation
+    stan = {"raz": True}
+
+    def _pad_bazy(con, **kw):
+        if stan["raz"]:
+            stan["raz"] = False
+            raise sqlite3.OperationalError("disk I/O error")
+        return prawdziwa(con, **kw)
+    monkeypatch.setattr(repo, "_apply_relocation", _pad_bazy)
+    assert cli.main(["rename", str(dbp), "--undo", run_id]) == 0
+    out = capsys.readouterr().out
+    assert "przywrocono: 1" in out and "bledy: 1" in out, out
+    (wiersz,) = [w for w in out.splitlines() if "FAILED" in w]
+    assert "PRZENIESIONY" in wiersz and "przeskanuj" in wiersz, out
+    assert f"--undo {run_id}" in out.splitlines()[-1], out
+
+
 def test_cli_rename_filter_json_zawezenie(tmp_path, capsys):
     """--filter-json = to samo drzewo co grid (goły warunek OK) → zawęża wsad do jednego obiektu."""
     dbp, _ = _seed(tmp_path)

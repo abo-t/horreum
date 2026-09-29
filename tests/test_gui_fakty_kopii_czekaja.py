@@ -65,7 +65,10 @@ def test_podpowiedz_kopii_bez_zeznania_wskazuje_obie_drogi(qapp, sprzed_migracji
     try:
         tip = _podpowiedz_sciezki(view, fid)
         assert tip.count("zeznanie nagłówka jeszcze niezebrane") == 2
+        # AR-28 (a): „Oznacz zniknięte" pojawia się dopiero po sprawdzeniu obecności - recepta
+        # ma oba kroki, inaczej w świeżej sesji wskazuje przycisk, którego nie ma.
         droga = (f"jeśli pliku nie ma już na dysku - {i18n.t('nav.dostawa')} → "
+                 f"„{i18n.t('pipeline.btn.presence')}” → "
                  f"„{i18n.t('pipeline.btn.mark_vanished')}”")
         assert tip.count(droga) == 2, tip
         # Dostawa jest drogą WARUNKOWĄ, nie obietnicą: przy kopii bez pliku „uzupełni je" było
@@ -80,14 +83,14 @@ def test_podpowiedz_kopii_bez_zeznania_parytet_EN(qapp, sprzed_migracji):
     """Wersja angielska niesie te same dwie drogi i te same pola wstawiane z katalogu."""
     con, fid, _a, _b = sprzed_migracji
     wpis = CATALOG["grid.tip.copy_unread"]
-    for pole in ("{place}", "{mark}"):
+    for pole in ("{place}", "{check}", "{mark}"):
         assert pole in wpis["pl"] and pole in wpis["en"]
     i18n.set_lang("en")
     view = grid_mod.FramesView(con, now_fn=None)
     try:
         tip = _podpowiedz_sciezki(view, fid)
         assert "header testimony not collected yet" in tip
-        assert "Intake → “Mark vanished”" in tip, tip
+        assert "Intake → “Check presence” → “Mark vanished”" in tip, tip
         assert "if the file is on disk - Intake → “Take new”" in tip, tip
         assert "will fill" not in tip, tip
     finally:
@@ -148,13 +151,15 @@ def test_wiersz_przy_kopiach_bez_pliku_nie_obiecuje_Dostawy(qapp, sprzed_migracj
     try:
         tv.refresh_counts()
         dostawa, oznacz = i18n.t("nav.dostawa"), i18n.t("pipeline.btn.mark_vanished")
+        sprawdz = i18n.t("pipeline.btn.presence")
         for klucz in ("copy_conflict_frames", "orphan_testimony_frames"):
             w = _wiersz(tv, klucz)
             assert "Dostaw" not in w.data(rows.SECONDARY), w.data(rows.SECONDARY)
             assert w.data(rows.SECONDARY).startswith("? · "), klucz
             tip = w.toolTip()
             assert f"Gdy plik jest na dysku - {dostawa} → „Przyjmij nowe”" in tip, tip
-            assert f"Jeśli pliku nie ma już na dysku - {dostawa} → „{oznacz}”" in tip, tip
+            assert (f"Jeśli pliku nie ma już na dysku - {dostawa} → „{sprawdz}” → „{oznacz}”"
+                    in tip), tip
             # kolejność pytań człowieka: najpierw „plik jest", potem „pliku nie ma"
             assert tip.index("Gdy plik jest") < tip.index("Jeśli pliku nie ma"), tip
     finally:
@@ -177,7 +182,8 @@ def test_wiersz_bez_zeznania_parytet_EN(qapp, sprzed_migracji):
         w = _wiersz(tv, "copy_conflict_frames")
         assert w.data(rows.SECONDARY) == "? · 2 copies not yet read  ›"
         assert "If the file is on disk - Intake → “Take new”" in w.toolTip(), w.toolTip()
-        assert "If the file is no longer on disk - Intake → “Mark vanished”" in w.toolTip()
+        assert ("If the file is no longer on disk - Intake → “Check presence” → “Mark vanished”"
+                in w.toolTip())
     finally:
         tv.close()
 

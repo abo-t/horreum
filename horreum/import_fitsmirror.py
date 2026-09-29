@@ -414,8 +414,17 @@ def run_import(donor, con, *, now, rng_seed=None, repaired_paths=None, progress=
     pętla → grouper+resolver+kalibracja+rodowód → bramki. Zwraca `ImportSummary`; twarde złamanie
     → `ImportAbort`.
     `progress(done, total, path)` wołany po każdym pliku (CLI: heartbeat; Qt tu nie mieszka).
-    `repaired_paths` → `preflight` (rejestr napraw Horreum, D-0722-2)."""
+    `repaired_paths` → `preflight` (rejestr napraw Horreum, D-0722-2).
+
+    GENERACJA ZAPISU W MIEJSCU (AR-17 (4), dyscyplina skanu): rekord importu to fakty z chwili
+    pre-flightu (`os.stat`, zeznanie dawcy, odczyt podgrupy przeliczanej) - generację dziennika
+    (`repo.inplace_generation`) czytamy PRZED nim i podajemy do `ingest_record`. Na świeżej bazie
+    każda ścieżka jest nowa, więc klinga nie ma czego odrzucać; lokację, którą w trakcie importu
+    założył równoległy skan i zapisał pisarz w miejscu, strażnik odrzuca `repo.StaleScanRecord` -
+    import zasila WYŁĄCZNIE świeżą bazę bez innych piszących, więc to `ImportAbort` (EXPECT),
+    a nie ciche wciągnięcie faktów dawcy sprzed zapisu na plik opisany już po nim."""
     _assert_target_fresh(con)
+    gen = repo.inplace_generation(con)
     pf = preflight(donor, rng_seed=rng_seed, repaired_paths=repaired_paths)
 
     summary = ImportSummary(preflight=pf, scan=ScanSummary(), files_total=pf.files_total)
@@ -465,8 +474,13 @@ def run_import(donor, con, *, now, rng_seed=None, repaired_paths=None, progress=
                     tel_seen.add(_fold_ascii(tel))
                 if tel and cam:
                     cfg_seen.add((_fold_ascii(tel), cam))
-        ingest_record(con, rec, volume=pf.volume, drive_letter=pf.drive_letter, tier=None,
-                      now=now, summary=summary.scan, actor=ACTOR)
+        try:
+            ingest_record(con, rec, volume=pf.volume, drive_letter=pf.drive_letter, tier=None,
+                          now=now, summary=summary.scan, actor=ACTOR, inplace_gen=gen)
+        except repo.StaleScanRecord as exc:
+            raise ImportAbort(
+                f"zapis w miejscu na {path} w trakcie importu ({exc}) - import zasila WYLACZNIE "
+                f"swieza baze bez innych piszacych; powtorz na swiezej bazie") from exc
         if progress is not None:
             progress(done, total, path)
 

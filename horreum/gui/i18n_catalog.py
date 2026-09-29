@@ -1246,6 +1246,8 @@ CATALOG = {
         "pl": "Zeznanie z nieobecnej kopii", "en": "Testimony from a missing copy"},
     "perspective.torn_write": {
         "pl": "Plik po przerwanym zapisie", "en": "File after an interrupted write"},
+    "perspective.pending_finish": {
+        "pl": "Zapis czeka na dokończenie", "en": "Write awaiting completion"},
     "perspective.path_header_conflict": {
         "pl": "Nagłówek inny niż folder", "en": "Header differs from folder"},
     "perspective.to_review": {"pl": "Do przeglądu", "en": "To review"},
@@ -1330,11 +1332,16 @@ CATALOG = {
     # Obie drogi są WARUNKOWE: „uzupełni je Przyjmij nowe" obiecywało wynik, którego Dostawa przy
     # kopii bez pliku nie da nigdy (firsthand: po „Przyjmij nowe" dwie skasowane kopie dalej bez
     # zeznania). Kolejność = kolejność pytań człowieka: najpierw „czy plik jest", potem droga.
+    # Druga droga ma DWA kroki (AR-28 (a)): „Oznacz zniknięte” pojawia się w Dostawie dopiero po
+    # sprawdzeniu obecności, więc w świeżej sesji samo „{mark}” wskazywało przycisk, którego nie
+    # ma. „{check}” działa bez wskazanego katalogu (bierze ostatnie źródło „Przyjmij nowe”).
     "grid.tip.copy_unread": {
         "pl": "\n    zeznanie nagłówka jeszcze niezebrane (gdy plik jest na dysku - "
-              "{place} → „Przyjmij nowe”; jeśli pliku nie ma już na dysku - {place} → „{mark}”)",
+              "{place} → „Przyjmij nowe”; jeśli pliku nie ma już na dysku - "
+              "{place} → „{check}” → „{mark}”)",
         "en": "\n    header testimony not collected yet (if the file is on disk - "
-              "{place} → “Take new”; if the file is no longer on disk - {place} → “{mark}”)",
+              "{place} → “Take new”; if the file is no longer on disk - "
+              "{place} → “{check}” → “{mark}”)",
     },
     # HISTORIA PRZEPROWADZKI, nie ostrzeżenie (D-V-9, wariant rozwojowy). Zdanie jest w czasie
     # przeszłym i bez wykrzyknika, bo nic tu nie wymaga roboty: plik ŻYJE pod adresem z komórki,
@@ -1949,6 +1956,8 @@ CATALOG = {
         "pl": "tylko zeznanie z nieobecnej kopii", "en": "only testimony from a missing copy"},
     "grid.criteria.only_torn_write": {
         "pl": "tylko pliki po przerwanym zapisie", "en": "only files after an interrupted write"},
+    "grid.criteria.only_pending_finish": {
+        "pl": "tylko zapisy czekające na dokończenie", "en": "only writes awaiting completion"},
     "grid.criteria.only_path_header_conflict": {
         "pl": "tylko nagłówek inny niż zatwierdzony folder",
         "en": "only header differing from the confirmed folder"},
@@ -2162,9 +2171,25 @@ CATALOG = {
         "pl": "Powiąż lighty z masterami po przepisie — po „Kalibracja” (potrzebuje osi przepisu)",
         "en": "Link lights to masters by recipe — after „Calibrate” (needs the recipe axis)",
     },
+    # Trzy podpowiedzi „Sprawdź obecność" - po jednej na źródło drzewa, w kolejności wyboru
+    # (`PipelineView._on_presence`, AR-28 (a)): wskazany katalog, ostatnie źródło, pytanie.
     "pipeline.tip.presence": {
-        "pl": "Wskaż katalog powyżej — pass porównuje drzewo z bazą",
-        "en": "Choose a folder above — the pass compares the tree with the database",
+        "pl": "Porówna z bazą wskazany katalog: {root}. Tylko raport - zapis to „{mark}”, "
+              "który pojawi się pod wynikiem.",
+        "en": "Compares the chosen folder with the database: {root}. Report only - writing is "
+              "“{mark}”, which appears below the result.",
+    },
+    "pipeline.tip.presence_last": {
+        "pl": "Katalogu nie wskazano - porówna z bazą ostatnie źródło „Przyjmij nowe”: {source}. "
+              "Tylko raport - zapis to „{mark}”, który pojawi się pod wynikiem.",
+        "en": "No folder chosen - compares the last “Take new” source with the database: "
+              "{source}. Report only - writing is “{mark}”, which appears below the result.",
+    },
+    "pipeline.tip.presence_ask": {
+        "pl": "Zapyta o katalog i porówna go z bazą. Tylko raport - zapis to „{mark}”, który "
+              "pojawi się pod wynikiem.",
+        "en": "Asks for a folder and compares it with the database. Report only - writing is "
+              "“{mark}”, which appears below the result.",
     },
     "pipeline.btn.mark_vanished": {"pl": "Oznacz zniknięte", "en": "Mark vanished"},
     "pipeline.btn.show_collections": {"pl": "Pokaż w Zbiorach", "en": "Show in Collections"},
@@ -2625,6 +2650,27 @@ CATALOG = {
     # 0022/Q8: zapis nagłówka w miejscu przerwany albo niepotwierdzony - kopia izolowana od skanu.
     "tasks.torn_write_frames": {
         "pl": "Plik po przerwanym zapisie", "en": "File after an interrupted write"},
+    # AR-17 (1): plik ma nowy nagłówek i przeszedł weryfikację, baza jeszcze nie - robotą jest
+    # dokończenie. Nazwa bierze czasownik gestu („Dokończ zapis"), żeby wiersz i gest mówiły jednym
+    # słowem.
+    "tasks.pending_finish_frames": {
+        "pl": "Zapis czeka na dokończenie", "en": "Write awaiting completion"},
+    # Podpowiedzi dwóch wierszy izolacji: gest mieszka w menu prawego kliku w Zbiorach, więc
+    # wiersz mówi, gdzie go szukać. Nazwy gestów z katalogu (`{finish}` / `{restore}` / `{release}`).
+    "tasks.torn_write_tip": {
+        "pl": "Zapis nagłówka przerwano - plik może mieć rozdarty nagłówek, skan go pomija.\n"
+              "W Zbiorach: zaznacz klatki, prawy klik → „{restore}” (stary nagłówek wraca "
+              "w miejscu) albo „{release}” (po Twoim sprawdzeniu pliku).",
+        "en": "The header write was interrupted - the file may have a torn header, the scan "
+              "skips it.\nIn Collections: select the frames, right-click → “{restore}” (the old "
+              "header comes back in place) or “{release}” (after you have checked the file).",
+    },
+    "tasks.pending_finish_tip": {
+        "pl": "Plik ma już nowy nagłówek, ale baza jeszcze go nie wciągnęła - skan go pomija.\n"
+              "W Zbiorach: zaznacz klatki, prawy klik → „{finish}”.",
+        "en": "The file already has the new header, but the database has not taken it in yet - "
+              "the scan skips it.\nIn Collections: select the frames, right-click → “{finish}”.",
+    },
     "tasks.path_header_conflict_frames": {
         "pl": "Nagłówek inny niż zatwierdzony folder",
         "en": "Header differs from the confirmed folder"},
@@ -2654,23 +2700,29 @@ CATALOG = {
     },
     # Podpowiedź wiersza w stanie „?": obie drogi WARUNKOWE, w kolejności pytań człowieka („czy plik
     # jest"), bo wiersz nie sprawdza dysku - rozstrzyga pass obecności. Nazwy z katalogu (`{place}`,
-    # `{mark}`), jak w podpowiedzi kopii w Zbiorach.
+    # `{check}`, `{mark}`), jak w podpowiedzi kopii w Zbiorach - z tym samym dwukrokiem drugiej drogi
+    # (AR-28 (a)). Ostatnie zdanie mówi, dokąd prowadzi klik (AR-28 (b)).
     "tasks.copies_unread_tip": {
         "pl": {"one": "{n} kopia nie ma jeszcze zebranego zeznania nagłówka, więc ten wiersz nie ma "
                       "czego porównać.\nGdy plik jest na dysku - {place} → „Przyjmij nowe”.\n"
-                      "Jeśli pliku nie ma już na dysku - {place} → „{mark}”.",
+                      "Jeśli pliku nie ma już na dysku - {place} → „{check}” → „{mark}”.\n"
+                      "Klik prowadzi do: {place}.",
                "few": "{n} kopie nie mają jeszcze zebranego zeznania nagłówka, więc ten wiersz nie "
                       "ma czego porównać.\nGdy plik jest na dysku - {place} → „Przyjmij nowe”.\n"
-                      "Jeśli pliku nie ma już na dysku - {place} → „{mark}”.",
+                      "Jeśli pliku nie ma już na dysku - {place} → „{check}” → „{mark}”.\n"
+                      "Klik prowadzi do: {place}.",
                "many": "{n} kopii nie ma jeszcze zebranego zeznania nagłówka, więc ten wiersz nie "
                        "ma czego porównać.\nGdy plik jest na dysku - {place} → „Przyjmij nowe”.\n"
-                       "Jeśli pliku nie ma już na dysku - {place} → „{mark}”."},
+                       "Jeśli pliku nie ma już na dysku - {place} → „{check}” → „{mark}”.\n"
+                       "Klik prowadzi do: {place}."},
         "en": {"one": "{n} copy has no header testimony collected yet, so this row has nothing to "
                       "compare.\nIf the file is on disk - {place} → “Take new”.\n"
-                      "If the file is no longer on disk - {place} → “{mark}”.",
+                      "If the file is no longer on disk - {place} → “{check}” → “{mark}”.\n"
+                      "A click takes you to: {place}.",
                "other": "{n} copies have no header testimony collected yet, so this row has nothing "
                         "to compare.\nIf the file is on disk - {place} → “Take new”.\n"
-                        "If the file is no longer on disk - {place} → “{mark}”."},
+                        "If the file is no longer on disk - {place} → “{check}” → “{mark}”.\n"
+                        "A click takes you to: {place}."},
     },
     "tasks.vanished_frames": {"pl": "Zniknięte z dysku", "en": "Vanished from disk"},
     # NAZWA MÓWI O UBYTKU, NIE O AWARII (D-V-9a). Wiersz stoi obok „Zniknięte z dysku" i musi się
@@ -2756,6 +2808,135 @@ CATALOG = {
         "pl": " · Horreum niczego nie usuwa - pliki usuwasz sam, a skan zdejmie je z tej listy",
         "en": " · Horreum deletes nothing - you delete the files yourself, and a scan takes them "
               "off this list"},
+
+    # --- drogi wyjścia z izolacji zapisu w miejscu (grid.py, menu prawego kliku; AR-17 (2)).
+    # Kopia z operacją w fazie izolującej jest pomijana przez skan; gesty wołają rdzeń
+    # (`writeback.finish_inplace` / `writeback.recover_torn` / `repo.release_inplace_op`).
+    "grid.inplace.finish": {"pl": "Dokończ zapis", "en": "Finish the write"},
+    "grid.inplace.restore": {
+        "pl": "Przywróć nagłówek sprzed zapisu", "en": "Restore the header from before the write"},
+    "grid.inplace.release": {"pl": "Zwolnij plik do skanu…", "en": "Release the file to the scan…"},
+    "grid.inplace.none": {
+        "pl": "Zaznaczone klatki nie mają przerwanego ani niedokończonego zapisu nagłówka.",
+        "en": "The selected frames have no interrupted or unfinished header write."},
+    "grid.inplace.busy_stage": {
+        "pl": "Trwa etap Dostawy - gest ruszy po jego zakończeniu.",
+        "en": "An Intake stage is running - the gesture starts after it finishes."},
+    "grid.inplace.busy_write": {
+        "pl": "Trwa zapis nagłówków do plików - gest ruszy po jego zakończeniu.",
+        "en": "A header write to files is in progress - the gesture starts after it finishes."},
+    # „Dokończ" nie ma sensu przy zapisie przerwanym - zdanie mówi, która droga jest właściwa.
+    "grid.inplace.finish_open_only": {
+        "pl": "Dokończyć można tylko zapis, który przeszedł weryfikację i czeka na dokończenie. "
+              "Przy zapisie przerwanym: „{restore}”.",
+        "en": "Only a write that passed verification and awaits completion can be finished. "
+              "For an interrupted write: “{restore}”."},
+    "grid.inplace.finish_tip": {
+        "pl": {"one": "Dokończy {n} zapis: kontrola danych pliku i wciągnięcie nagłówka do bazy, "
+                      "potem plik wraca do skanu.",
+               "few": "Dokończy {n} zapisy: kontrola danych pliku i wciągnięcie nagłówka do bazy, "
+                      "potem pliki wracają do skanu.",
+               "many": "Dokończy {n} zapisów: kontrola danych pliku i wciągnięcie nagłówka do "
+                       "bazy, potem pliki wracają do skanu."},
+        "en": {"one": "Finishes {n} write: a data check of the file and taking the header into "
+                      "the database, then the file returns to the scan.",
+               "other": "Finishes {n} writes: a data check of each file and taking the header "
+                        "into the database, then the files return to the scan."},
+    },
+    "grid.inplace.restore_tip": {
+        "pl": {"one": "Przywróci stary nagłówek w {n} pliku, w miejscu, i zdejmie izolację.",
+               "few": "Przywróci stary nagłówek w {n} plikach, w miejscu, i zdejmie izolację.",
+               "many": "Przywróci stary nagłówek w {n} plikach, w miejscu, i zdejmie izolację."},
+        "en": {"one": "Restores the old header in {n} file, in place, and lifts the isolation.",
+               "other": "Restores the old header in {n} files, in place, and lifts the isolation."},
+    },
+    # Dopisek przy zapisie czekającym na dokończenie: rdzeń cofa go WYŁĄCZNIE przy nieudanej
+    # kontroli danych, poprawny zapis odmawia z drogą do dokończenia.
+    "grid.inplace.restore_tip_written": {
+        "pl": " Zapis czekający na dokończenie cofa tylko wtedy, gdy plik nie przechodzi kontroli "
+              "danych - poprawny zapis: „{finish}”.",
+        "en": " A write awaiting completion is undone only when the file fails the data check - "
+              "for a correct write: “{finish}”."},
+    "grid.inplace.release_tip": {
+        "pl": {"one": "Zdejmie izolację {n} pliku bez zmiany pliku i bez sprawdzania - po Twoim "
+                      "rozstrzygnięciu, że plik jest w porządku. Wymaga powodu.",
+               "few": "Zdejmie izolację {n} plików bez zmiany plików i bez sprawdzania - po Twoim "
+                      "rozstrzygnięciu, że pliki są w porządku. Wymaga powodu.",
+               "many": "Zdejmie izolację {n} plików bez zmiany plików i bez sprawdzania - po "
+                       "Twoim rozstrzygnięciu, że pliki są w porządku. Wymaga powodu."},
+        "en": {"one": "Lifts the isolation of {n} file without changing or checking it - after "
+                      "your own decision that the file is fine. Needs a reason.",
+               "other": "Lifts the isolation of {n} files without changing or checking them - "
+                        "after your own decision that the files are fine. Needs a reason."},
+    },
+    # Zdanie wyniku na pasku - człon główny, człony odmów (tylko gdy są) i pierwszy powód rdzenia.
+    "grid.inplace.finished": {
+        "pl": {"one": "Dokończono {n} zapis", "few": "Dokończono {n} zapisy",
+               "many": "Dokończono {n} zapisów"},
+        "en": {"one": "Finished {n} write", "other": "Finished {n} writes"},
+    },
+    "grid.inplace.restored": {
+        "pl": {"one": "Przywrócono nagłówek w {n} pliku", "few": "Przywrócono nagłówek w {n} plikach",
+               "many": "Przywrócono nagłówek w {n} plikach"},
+        "en": {"one": "Restored the header in {n} file", "other": "Restored the header in {n} files"},
+    },
+    "grid.inplace.released": {
+        "pl": {"one": "Zwolniono do skanu {n} plik", "few": "Zwolniono do skanu {n} pliki",
+               "many": "Zwolniono do skanu {n} plików"},
+        "en": {"one": "Released {n} file to the scan", "other": "Released {n} files to the scan"},
+    },
+    "grid.inplace.blocked": {
+        "pl": {"one": " · zablokowany {n}", "few": " · zablokowane {n}", "many": " · zablokowanych {n}"},
+        "en": {"one": " · blocked {n}", "other": " · blocked {n}"},
+    },
+    "grid.inplace.failed": {
+        "pl": {"one": " · nieudany {n}", "few": " · nieudane {n}", "many": " · nieudanych {n}"},
+        "en": {"one": " · failed {n}", "other": " · failed {n}"},
+    },
+    "grid.inplace.refused": {
+        "pl": {"one": " · odmowa {n}", "few": " · odmowy {n}", "many": " · odmów {n}"},
+        "en": {"one": " · refused {n}", "other": " · refused {n}"},
+    },
+    "grid.inplace.cancelled": {
+        "pl": " · przerwano, reszta nietknięta", "en": " · interrupted, the rest untouched"},
+    "grid.inplace.detail": {"pl": " - {file}: {detail}", "en": " - {file}: {detail}"},
+    # Okno „Zwolnij plik do skanu…": skutek słowami + powód człowieka (idzie do dziennika).
+    "grid.inplace.release_ask": {
+        "pl": {"one": "Zwolnienie zdejmie izolację {n} pliku BEZ zmiany pliku i bez żadnego "
+                      "sprawdzenia - skan przeczyta go potem jak każdy inny. Zrób to wtedy, gdy sam "
+                      "sprawdziłeś, że plik jest w porządku (np. przywrócony z pełnej kopii).\n"
+                      "Powód zapisze się w dzienniku:",
+               "few": "Zwolnienie zdejmie izolację {n} plików BEZ zmiany plików i bez żadnego "
+                      "sprawdzenia - skan przeczyta je potem jak każde inne. Zrób to wtedy, gdy sam "
+                      "sprawdziłeś, że pliki są w porządku (np. przywrócone z pełnej kopii).\n"
+                      "Powód zapisze się w dzienniku:",
+               "many": "Zwolnienie zdejmie izolację {n} plików BEZ zmiany plików i bez żadnego "
+                       "sprawdzenia - skan przeczyta je potem jak każde inne. Zrób to wtedy, gdy "
+                       "sam sprawdziłeś, że pliki są w porządku (np. przywrócone z pełnej kopii).\n"
+                       "Powód zapisze się w dzienniku:"},
+        "en": {"one": "Releasing lifts the isolation of {n} file WITHOUT changing it and without "
+                      "any check - the scan will then read it like any other. Do it when you have "
+                      "checked yourself that the file is fine (e.g. restored from a full copy).\n"
+                      "The reason goes into the log:",
+               "other": "Releasing lifts the isolation of {n} files WITHOUT changing them and "
+                        "without any check - the scan will then read them like any other. Do it "
+                        "when you have checked yourself that the files are fine (e.g. restored "
+                        "from a full copy).\nThe reason goes into the log:"},
+    },
+    "grid.inplace.release_placeholder": {
+        "pl": "np. przywrócony z pełnej kopii, porównany hashem",
+        "en": "e.g. restored from a full copy, compared by hash"},
+    "grid.inplace.release_ok": {"pl": "Zwolnij", "en": "Release"},
+    "grid.inplace.release_need_reason": {
+        "pl": "Wpisz powód - zwolnienie to Twoje rozstrzygnięcie i zostaje w dzienniku.",
+        "en": "Enter a reason - releasing is your decision and stays in the log."},
+    # Recepta przy wejściu w perspektywę izolacji: gesty są w menu prawego kliku, którego nie widać.
+    "grid.inplace.recipe_torn": {
+        "pl": "zaznacz klatki, prawy klik → „{restore}” albo „{release}”",
+        "en": "select the frames, right-click → “{restore}” or “{release}”"},
+    "grid.inplace.recipe_pending": {
+        "pl": "zaznacz klatki, prawy klik → „{finish}”",
+        "en": "select the frames, right-click → “{finish}”"},
 
     # --- facets.py (listwa facetów): _GROUPS tytuły trzymają KLUCZE ---
     "facets.group.object": {"pl": "Obiekt", "en": "Object"},

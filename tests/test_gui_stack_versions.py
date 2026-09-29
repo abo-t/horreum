@@ -416,14 +416,17 @@ def test_menu_kontekstowe_tylko_w_perspektywie_wersji_i_poza_paskiem_zbioru(view
     from horreum.gui import grid as grid_mod
     view.apply_perspective("Przegląd")
     view._on_table_menu(QPoint(5, 5))
-    assert not view._menu_wersji.isVisible()
+    assert not view._menu_tabeli.isVisible()
     view.apply_perspective(grid_mod.PRESET_STACK_VERSIONS)
     view._on_table_menu(QPoint(5, 5))
     try:
-        assert view._menu_wersji.isVisible()
-        assert view.act_keep_version in view._menu_wersji.actions()
+        assert view._menu_tabeli.isVisible()
+        assert view.act_keep_version in view._menu_tabeli.actions()
+        assert view.act_keep_version.isVisible()
+        # sekcja izolacji zapisu tylko nad kopią izolowaną - tu jej nie ma
+        assert not view.act_finish_write.isVisible()
     finally:
-        view._menu_wersji.hide()
+        view._menu_tabeli.hide()
     assert view.act_keep_version not in view.sel_bar.findChildren(type(view.act_keep_version))
 
 

@@ -17,7 +17,8 @@ import re
 
 from horreum.grouper import NO_TELESCOPE_KINDS      # jeden właściciel zbioru rodzajów poza osią
 from horreum.naming import header_dt
-from horreum.repo import INPLACE_OPEN_PHASES   # fazy otwarte zapisu w miejscu (0022)
+from horreum.repo import (INPLACE_ISOLATING_PHASES,   # fazy izolujące zapisu w miejscu (0022)
+                          INPLACE_OPEN_PHASES)        # ...i ich podzbiór otwarty
 from horreum.resolve._coerce import _to_float, _to_int, _to_text
 from horreum.resolve.frames import LIGHT_KINDS
 from horreum.resolve.headers import COPY_TESTIMONY_KEYWORDS, copy_testimony
@@ -1810,6 +1811,52 @@ def torn_write_frame_ids(con):
         (json.dumps(list(INPLACE_OPEN_PHASES)),)).fetchall()}
 
 
+# Fazy IZOLUJĄCE, które nie są otwarte: plik zapisany i zweryfikowany, a kontrola danych i re-sync
+# bazy jeszcze się nie udały (dziś jedna faza, `written`). Liczone z dwóch zbiorów `repo`, a nie
+# wpisane literałem: właścicielem nazw faz jest dziennik zapisu, a ten zbiór jest ich RÓŻNICĄ.
+INPLACE_PENDING_FINISH_PHASES = tuple(p for p in INPLACE_ISOLATING_PHASES
+                                      if p not in INPLACE_OPEN_PHASES)
+
+
+def pending_finish_frame_ids(con):
+    """ZAPIS CZEKA NA DOKOŃCZENIE (warunek wsadu AR-17 (1)): klatki, których kopia ma operację zapisu
+    w miejscu w fazie `INPLACE_PENDING_FINISH_PHASES` - plik ma już nowy nagłówek, ale baza jeszcze
+    go nie wciągnęła, więc kopia jest izolowana od skanu tak samo jak po przerwanym zapisie, tylko
+    że robotą jest DOKOŃCZENIE (`writeback.finish_inplace`), nie odzysk. Bez tego wiersza lokacja
+    w tej fazie była dla użytkownika GUI niewidoczna i zablokowana: skan ją pomija, a
+    `torn_write_frame_ids` widzi wyłącznie fazy otwarte.
+
+    JEDEN właściciel predykatu dla licznika Porządków i trimu gridu. Guardów żywotności brak z tego
+    samego powodu co u sąsiada wyżej: izolacja jest faktem o pliku, nie o liście roboty klatki.
+    Zwraca set[int]."""
+    return {int(r[0]) for r in con.execute(
+        "SELECT DISTINCT l.frame_id FROM inplace_op o JOIN location l ON l.id = o.location_id "
+        "WHERE o.phase IN (SELECT value FROM json_each(?))",
+        (json.dumps(list(INPLACE_PENDING_FINISH_PHASES)),)).fetchall()}
+
+
+def isolated_inplace_ops(con, frame_ids):
+    """Operacje zapisu w miejscu, które IZOLUJĄ kopie wskazanych klatek (`INPLACE_ISOLATING_PHASES`)
+    - cel gestów „Dokończ zapis" / „Przywróć nagłówek sprzed zapisu" / „Zwolnij plik do skanu…"
+    w Zbiorach. Lista dict `{op_id, location_id, frame_id, phase, kind, path}` w kolejności klatki
+    i operacji. Lokacja ma najwyżej jedną taką operację (`repo._refuse_if_isolated` nie otwiera
+    nowej przy izolującej), więc wiersz = jedna kopia do rozstrzygnięcia.
+
+    Faza jest tu PREZENTACJĄ (uczciwe wygaszenie gestu): prawdę rozstrzyga pisarz pod blokadą pliku,
+    bo między pokazaniem menu a gestem faza mogła się zmienić."""
+    ids = sorted({int(f) for f in frame_ids})
+    if not ids:
+        return []
+    return [dict(r) for r in con.execute(
+        "SELECT o.id AS op_id, o.location_id AS location_id, l.frame_id AS frame_id, "
+        "o.phase AS phase, o.kind AS kind, l.path AS path "
+        "FROM inplace_op o JOIN location l ON l.id = o.location_id "
+        "WHERE l.frame_id IN (SELECT value FROM json_each(?)) "
+        "AND o.phase IN (SELECT value FROM json_each(?)) "
+        "ORDER BY l.frame_id, o.id",
+        (json.dumps(ids), json.dumps(list(INPLACE_ISOLATING_PHASES)))).fetchall()]
+
+
 # Powód pominięcia w planie ujednolicenia karty `OBJECT` (`object_card_form_rows`): stała, bo czyta
 # go też test i podpowiedź powierzchni - tekst mówi, co zrobić, żeby klatka wróciła do planu.
 SKIP_COPY_WITHOUT_FACTS = ("kopia bez zebranych faktów przy klatce z nieobecną kopią - zbierze je "
@@ -2618,6 +2665,9 @@ def tasks_state(con):
         # 0022/Q8: kopia po przerwanym zapisie w miejscu - izolowana od skanu do odzysku albo
         # zwolnienia ręką. Ten sam predykat co trim perspektywy.
         "torn_write_frames": len(torn_write_frame_ids(con)),
+        # Warunek wsadu AR-17 (1): plik zapisany i zweryfikowany, baza jeszcze nie - kopia izolowana
+        # do dokończenia (albo powrotu / zwolnienia ręką). Ten sam predykat co trim perspektywy.
+        "pending_finish_frames": len(pending_finish_frame_ids(con)),
         "stacks_lineage_pending": len(lineage_pending_frame_ids(con)),
         "dup_frames": len(dup_frame_ids(con)),
         # Kopie niezgodne ze sobą (0021) - podzbiór duplikatów, ten sam predykat co trim perspektywy.

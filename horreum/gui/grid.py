@@ -39,7 +39,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
     QLayout,
     QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QProgressBar, QPushButton,
-    QDialog, QMenu, QMessageBox,
+    QDialog, QDialogButtonBox, QMenu, QMessageBox,
     QScrollArea, QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QTableView, QToolButton,
     QVBoxLayout, QWidget,
 )
@@ -344,6 +344,12 @@ PRESET_PATH_HEADER_CONFLICT = "Nagłówek inny niż folder"
 # albo nie przeszedł weryfikacji: nagłówek mógł zostać rozdarty, więc kopia jest izolowana od skanu.
 # Predykat `queries.torn_write_frame_ids`. Stała współdzielona z TasksView po nazwie.
 PRESET_TORN_WRITE = "Plik po przerwanym zapisie"
+# PRESET_PENDING_FINISH - trzynasty bliźniak (warunek wsadu AR-17 (1)). Kopia, której zapis
+# w miejscu przeszedł weryfikację, ale kontrola danych i re-sync bazy jeszcze się nie udały: plik
+# ma nowy nagłówek, baza stary, a skan kopię pomija. Robotą jest DOKOŃCZENIE, nie odzysk - stąd
+# osobna perspektywa obok przerwanego zapisu. Predykat `queries.pending_finish_frame_ids`. Stała
+# współdzielona z TasksView po nazwie.
+PRESET_PENDING_FINISH = "Zapis czeka na dokończenie"
 # Klucz grupowania po GRUPIE WERSJI - pochodna wiersza (`_adnotuj_wersje`), nie kolumna bazowa:
 # `BASE_COLS` zostaje bez zmian, więc podłoga okna się nie rusza. Pozycja listy „Grupuj wg" działa
 # w każdej perspektywie (stosy spoza grup bliźniaków lądują w „(brak)"), a preset ją ustawia.
@@ -368,6 +374,7 @@ PRESETS = {
     PRESET_PATH_HEADER_CONFLICT: {"filter": None, "group_by": None,
                                   "only_path_header_conflict": True},
     PRESET_TORN_WRITE: {"filter": None, "group_by": None, "only_torn_write": True},
+    PRESET_PENDING_FINISH: {"filter": None, "group_by": None, "only_pending_finish": True},
     "Do przeglądu": {"filter": None, "group_by": None, "only_review": True},
 }
 # Etykieta WYŚWIETLANIA presetu (tekst) osobno od TOŻSAMOŚCI (klucz PRESETS w `itemData` — używany przez
@@ -387,6 +394,7 @@ _PRESET_LABELS = {
     PRESET_ORPHAN_TESTIMONY: "perspective.orphan_testimony",
     PRESET_PATH_HEADER_CONFLICT: "perspective.path_header_conflict",
     PRESET_TORN_WRITE: "perspective.torn_write",
+    PRESET_PENDING_FINISH: "perspective.pending_finish",
     "Do przeglądu": "perspective.to_review",
 }
 # PERSPEKTYWA BEZ ZAWĘŻENIA - jedyny preset, który nie niesie ani filtra, ani flagi `only_*`
@@ -427,6 +435,7 @@ _TRIMY = (
     ("_only_orphan_testimony", "orphan_testimony_frame_ids"),
     ("_only_path_header_conflict", "path_header_conflict_frame_ids"),
     ("_only_torn_write", "torn_write_frame_ids"),
+    ("_only_pending_finish", "pending_finish_frame_ids"),
 )
 
 # FLAGA, OD KTÓREJ ZALEŻY ZACHOWANIE WIDOKU, NIE TYLKO ZBIÓR: w perspektywie „Wersje stosów" model
@@ -435,6 +444,13 @@ _TRIMY = (
 # pilnuje, żeby rodzina nie dostała drugiej, ręcznej enumeracji; to jest JEDNO odwołanie do jednej
 # flagi, a jej obecność w `_TRIMY` pinuje test perspektywy.
 _FLAGA_WERSJI = "_only_stack_versions"
+# Te same zasady dla dwóch perspektyw izolacji zapisu w miejscu: w nich menu tabeli pokazuje drogi
+# wyjścia z izolacji także nad pustym zaznaczeniem (wygaszone z powodem), a wejście w perspektywę
+# podaje receptę gestu (`_RECEPTY_ZAPISU`). Klucz = flaga z `_TRIMY`.
+_RECEPTY_ZAPISU = {
+    "_only_torn_write": "grid.inplace.recipe_torn",
+    "_only_pending_finish": "grid.inplace.recipe_pending",
+}
 
 
 def _klucz_spec(atrybut):
@@ -568,6 +584,46 @@ def _zlacz_recepty(czlony):
     return " · ".join(x for x in czlony if x)
 
 
+def _ogon_sciezki(path):
+    """Nazwa pliku ze ścieżki Windows albo POSIX - do zdania na pasku, gdzie pełna ścieżka zjadłaby
+    powód, po który człowiek patrzy."""
+    return str(path or "").rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
+
+
+# Status wyniku, który znaczy „gest zrobił swoje", per operacja rdzenia - klucz zdania głównego
+# i status sukcesu. `finish_inplace` oddaje 'applied', `recover_torn` - 'restored'.
+_GESTY_ZAPISU = {
+    "finish_inplace": ("grid.inplace.finished", "applied"),
+    "recover_torn": ("grid.inplace.restored", "restored"),
+}
+
+
+def _zdanie_gestu_zapisu(op, res):
+    """Zdanie wyniku gestu plikowego izolacji: „Dokończono N zapisów · zablokowane M · błędy K -
+    plik: powód" (+ przerwanie). Czysta funkcja.
+
+    POWÓD RDZENIA JEDZIE DOSŁOWNIE - jest po polsku i niesie drogę dalej (np. „kontrola danych
+    operacji 7 przechodzi - zapis jest poprawny, powrót go nie cofa; dokończ…"); zdanie bez niego
+    zostawiałoby człowieka przy „zablokowane 1" bez odpowiedzi „czemu". Pokazujemy PIERWSZY powód
+    z nazwą pliku - reszta ma tę samą drogę albo własny wiersz w Porządkach, a pasek jest jeden.
+    `res` = wynik pętli wykonawcy (`results` = `writeback.FileResult` per operacja, `cancelled`)."""
+    klucz, sukces = _GESTY_ZAPISU[op]
+    wyniki = list(res.results)
+    msg = i18n.t_plural(klucz, sum(1 for w in wyniki if w.status == sukces))
+    zablokowane = [w for w in wyniki if w.status == "blocked"]
+    bledy = [w for w in wyniki if w.status not in (sukces, "blocked")]
+    if zablokowane:
+        msg += i18n.t_plural("grid.inplace.blocked", len(zablokowane))
+    if bledy:
+        msg += i18n.t_plural("grid.inplace.failed", len(bledy))
+    if res.cancelled:
+        msg += i18n.t("grid.inplace.cancelled")
+    powod = next((w for w in zablokowane + bledy if w.reason), None)
+    if powod is not None:
+        msg += i18n.t("grid.inplace.detail", file=_ogon_sciezki(powod.path), detail=powod.reason)
+    return msg
+
+
 def _half_away(x):
     """Zaokrąglij do int metodą half-away-from-zero (NIE goły `round()`, który jest half-to-even —
     R2 #5). Używane do przełożenia float-mediany Δ na całkowity offset spinu."""
@@ -670,6 +726,7 @@ def _dup_tip(row):
                 tip += f" ({', '.join('?' if r is None else str(r) for r in role)})"
         if c["hdr_hash"] is None:
             tip += i18n.t("grid.tip.copy_unread", place=i18n.t("nav.dostawa"),
+                          check=i18n.t("pipeline.btn.presence"),
                           mark=i18n.t("pipeline.btn.mark_vanished"))
         elif c["_rozne"]:
             pola = [i18n.t("grid.tip.copy_field_images") if e == queries.COPY_IMAGES
@@ -2679,6 +2736,54 @@ class StagingDrawer(QFrame):
         self.btn_commit.setVisible(on)
         self.btn_reject.setVisible(on)
 
+    def set_result(self, text):
+        """Sam wynik operacji plikowej spoza stagingu (gesty izolacji zapisu w miejscu): postęp szedł
+        przez tę szufladę, więc wynik zastępuje w niej ostatnią linię postępu. Licznika i etykiety
+        poczekalni NIE rusza - gest nie zmienia stagingu, a „Zatwierdzono…" przy żywym „Cofnij"
+        musi przeżyć."""
+        self.result.setText(text)
+
+
+class ReleaseDialog(QDialog):
+    """Okno gestu „Zwolnij plik do skanu…" (`repo.release_inplace_op`): skutek słowami, liczba kopii
+    i POWÓD wpisany przez człowieka. Zwolnienie nie zmienia pliku i niczego nie sprawdza - to jego
+    rozstrzygnięcie, że plik jest w porządku, więc bez powodu „Zwolnij" jest wygaszone, a powód
+    trafia do zdarzenia `location.writeback_released`. Enter nie przejdzie obok bramki: przycisk
+    domyślny jest wygaszony, a `accept` sprawdza powód drugi raz (EXPECT)."""
+
+    def __init__(self, n, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(i18n.t("grid.inplace.release"))
+        lay = QVBoxLayout(self)
+        opis = QLabel(i18n.t_plural("grid.inplace.release_ask", n))
+        opis.setWordWrap(True)
+        lay.addWidget(opis)
+        self.edit = QLineEdit()
+        self.edit.setPlaceholderText(i18n.t("grid.inplace.release_placeholder"))
+        lay.addWidget(self.edit)
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.btn_ok = self.buttons.button(QDialogButtonBox.Ok)
+        self.btn_ok.setText(i18n.t("grid.inplace.release_ok"))
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        lay.addWidget(self.buttons)
+        self.edit.textChanged.connect(self._sync_ok)
+        self._sync_ok()
+
+    def reason(self):
+        """Powód bez białych znaków na brzegach - taki idzie do dziennika."""
+        return self.edit.text().strip()
+
+    def _sync_ok(self):
+        on = bool(self.reason())
+        self.btn_ok.setEnabled(on)
+        self.btn_ok.setToolTip("" if on else i18n.t("grid.inplace.release_need_reason"))
+
+    def accept(self):
+        if not self.reason():
+            return
+        super().accept()
+
 
 class PolaWorker(QObject):
     """Pokrycie panelu „Pola" liczone POZA wątkiem GUI (rdzeń: Qt-wolny `pola`, koszty tam).
@@ -2828,6 +2933,8 @@ class FramesView(QWidget):
         self._wb.busy_changed.connect(self.writeback_busy)   # re-emisja: uchwyt zna oba końce operacji
         self._wb_target_id = None
         self._foreign_wb = False   # DRUGA powierzchnia pisze (mutex; ustawia gospodarz)
+        self._etap_w_biegu = False  # etap Dostawy pisze do bazy (`set_busy`) - gesty izolacji czekają
+        self._cel_gestu_zapisu = []  # klatki ostatniego gestu izolacji - zaznaczenie po jego końcu
         # POKRYCIE PÓL POZA WĄTKIEM GUI (`PolaWorker`). Zapytanie trwa na żywym archiwum 5,6-5,9 s,
         # a szło przy otwarciu bazy i po KAŻDYM przebiegu Dostawy - okno stało wtedy jednym blokiem
         # dłuższym niż próg „Nie odpowiada". `pola_poza_watkiem=False` (domyślne) = ten sam rdzeń
@@ -2987,14 +3094,29 @@ class FramesView(QWidget):
         # Gest działa na JEDNYM wierszu („tę wersję"), więc prawy klik na wierszu jest jego
         # naturalnym miejscem. Menu powstaje RAZ (wzorzec puli `set_recent_objects`: tworzenie
         # i kasowanie menu per klik zostawiało sieroty albo odroczone usunięcia), a stan akcji
-        # ustawia `_sync_menu_wersji` tuż przed pokazaniem. Poza tą perspektywą menu się nie
-        # pokazuje - prawy klik zostaje tym, czym był (niczym).
+        # ustawia `_sync_menu_wersji` tuż przed pokazaniem.
+        # DRUGI DOM W TYM SAMYM MENU: drogi wyjścia z izolacji zapisu w miejscu (warunek wsadu
+        # AR-17 (2)) - „Dokończ zapis", „Przywróć nagłówek sprzed zapisu", „Zwolnij plik do
+        # skanu…". Ten sam argument co wyżej: gesty dotyczą KOPII kilku klatek w dwóch
+        # perspektywach, a dziewiąta kontrolka paska zbioru poszerzałaby podłogę okna w każdej.
+        # Nie menu „Klatka": izolacja jest stanem pliku, nie żywotności klatki (D-OW-6). Sekcja
+        # zapisu pokazuje się w perspektywach „Plik po przerwanym zapisie" / „Zapis czeka na
+        # dokończenie" i nad każdą klatką z kopią izolowaną; poza tym prawy klik zostaje tym, czym
+        # był (niczym). Jedno menu, nie dwa: stos z kopią izolowaną w „Wersjach stosów" ma
+        # dostać obie sekcje naraz.
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._on_table_menu)
-        self._menu_wersji = QMenu(self.table)
-        self._menu_wersji.setToolTipsVisible(True)   # powód wygaszenia niesie tooltip POZYCJI
-        self.act_keep_version = self._menu_wersji.addAction(i18n.t("grid.version.keep"))
+        self._menu_tabeli = QMenu(self.table)
+        self._menu_tabeli.setToolTipsVisible(True)   # powód wygaszenia niesie tooltip POZYCJI
+        self.act_keep_version = self._menu_tabeli.addAction(i18n.t("grid.version.keep"))
         self.act_keep_version.triggered.connect(self._on_keep_version)
+        self._sep_zapisu = self._menu_tabeli.addSeparator()
+        self.act_finish_write = self._menu_tabeli.addAction(i18n.t("grid.inplace.finish"))
+        self.act_finish_write.triggered.connect(self._on_finish_write)
+        self.act_restore_header = self._menu_tabeli.addAction(i18n.t("grid.inplace.restore"))
+        self.act_restore_header.triggered.connect(self._on_restore_header)
+        self.act_release_file = self._menu_tabeli.addAction(i18n.t("grid.inplace.release"))
+        self.act_release_file.triggered.connect(self._on_release_file)
         rv.addWidget(self.table, 1)   # stretch: nadmiar pionu należy do TABELI, nie do panelu (N1)
 
         # PUSTY STAN = ZDANIE + GEST (FH-4). `self.empty` zostaje etykietą z tekstem (kontrakt testów
@@ -3245,6 +3367,14 @@ class FramesView(QWidget):
             self._columns = list(spec["columns"])
             self._wypelnij_pola()
         self.refresh()
+        # Perspektywa izolacji zapisu podaje gest, który ją opróżnia: gesty mieszkają w menu
+        # prawego kliku (nie na pasku zbioru), a menu nie widać, dopóki się go nie otworzy.
+        # Recepta PO `refresh()`, bo raport odświeżenia gasi receptę poprzedniego gestu.
+        recepta = next((k for a, k in _RECEPTY_ZAPISU.items() if getattr(self, a)), None)
+        if recepta is not None and self._frame_ids:
+            self.status_recipe.emit(i18n.t(
+                recepta, finish=i18n.t("grid.inplace.finish"),
+                restore=i18n.t("grid.inplace.restore"), release=i18n.t("grid.inplace.release")))
 
     def apply_object_facet(self, pairs):
         """Ustaw zbiór na WSKAZANE obiekty — publiczny seam dla wejść spoza widoku (T5e: „Pokaż
@@ -4519,22 +4649,48 @@ class FramesView(QWidget):
         return self._perspektywa_wersji() or self.combo_group.currentData() == _GRUPA_WERSJI
 
     def _on_table_menu(self, pos):
-        """Prawy klik na tabeli: w perspektywie „Wersje stosów" menu z gestem „Zostaw tę wersję".
+        """Prawy klik na tabeli: menu z sekcją „Zostaw tę wersję" (perspektywa „Wersje stosów")
+        i sekcją dróg wyjścia z izolacji zapisu w miejscu (perspektywy zapisu albo klatka z kopią
+        izolowaną). Żadna sekcja nie pasuje → menu się nie pokazuje i zaznaczenie zostaje.
 
         Wiersz pod kursorem, którego nie ma w zaznaczeniu, staje się zaznaczeniem - konwencja
         platformy, a zarazem jedyny sposób, żeby „tę" wskazywało to, na co człowiek kliknął.
-        Kliknięcie W zaznaczenie zostawia je, jak jest: przy kilku zaznaczonych gest odmówi
-        z powodem w tooltipie pozycji, zamiast po cichu wybrać jeden z nich."""
-        if not self._perspektywa_wersji():
-            return
+        Kliknięcie W zaznaczenie zostawia je, jak jest: przy kilku zaznaczonych gest wersji odmówi
+        z powodem w tooltipie pozycji, zamiast po cichu wybrać jeden z nich, a gesty zapisu
+        obejmą wszystkie zaznaczone kopie izolowane (liczba stoi w tooltipie).
+
+        Poza perspektywami menu pyta o izolację klatek, na które wskazuje klik (zaznaczenie albo
+        wiersz pod kursorem), ZANIM cokolwiek zaznaczy - prawy klik na zwykłej klatce ma zostać
+        niczym, a nie przestawiać zaznaczenia."""
         idx = self.table.indexAt(pos)
         sm = self.table.selectionModel()
-        if idx.isValid() and sm is not None and not sm.isRowSelected(idx.row(), QModelIndex()):
+        pod_kursorem = (self.model._rows[idx.row()] if idx.isValid() else None)
+        poza_zaznaczeniem = (idx.isValid() and sm is not None
+                             and not sm.isRowSelected(idx.row(), QModelIndex()))
+        wersje = self._perspektywa_wersji()
+        zapis = self._perspektywa_zapisu()
+        if not wersje and not zapis:
+            if poza_zaznaczeniem:
+                cel = ([pod_kursorem["frame_id"]] if isinstance(pod_kursorem, dict)
+                       and "_group" not in pod_kursorem else [])
+            else:
+                cel = [r["frame_id"] for r in self._selected_data_rows()]
+            zapis = bool(queries.isolated_inplace_ops(self.con, cel))
+            if not zapis:
+                return
+        if poza_zaznaczeniem:
             self.table.selectRow(idx.row())
-        self._sync_menu_wersji()
+        self.act_keep_version.setVisible(wersje)
+        self._sep_zapisu.setVisible(wersje and zapis)
+        for act in (self.act_finish_write, self.act_restore_header, self.act_release_file):
+            act.setVisible(zapis)
+        if wersje:
+            self._sync_menu_wersji()
+        if zapis:
+            self._sync_menu_zapisu()
         # `popup`, nie `exec`: menu nie trzyma własnej pętli zdarzeń, a wybór i tak dochodzi
         # sygnałem `triggered`. Blokujący `exec` zawiesza każdy przebieg bez człowieka przy myszy.
-        self._menu_wersji.popup(self.table.viewport().mapToGlobal(pos))
+        self._menu_tabeli.popup(self.table.viewport().mapToGlobal(pos))
 
     def _sync_menu_wersji(self):
         """Uczciwy disabled gestu „Zostaw tę wersję" - z planu liczonego w chwili pokazania menu.
@@ -4583,6 +4739,151 @@ class FramesView(QWidget):
         if plan["unknown"]:
             msg += i18n.t("grid.version.skipped_unknown", n=plan["unknown"])
         self.status_message.emit(msg + i18n.t("grid.version.no_delete"))
+
+    # ---- IZOLACJA ZAPISU W MIEJSCU: drogi wyjścia z GUI (warunek wsadu AR-17 (1)(2)) ----
+    # Kopia z operacją zapisu w fazie izolującej (`repo.INPLACE_ISOLATING_PHASES`) jest pomijana
+    # przez skan i przez każdą inną mutację pliku. Rdzeń ma trzy drogi wyjścia; tu dostają gesty:
+    # „Dokończ zapis" (`writeback.finish_inplace`), „Przywróć nagłówek sprzed zapisu"
+    # (`writeback.recover_torn`) i „Zwolnij plik do skanu…" (`repo.release_inplace_op`). Dwie
+    # pierwsze czytają i piszą plik, więc idą wątkiem tła przez TEN SAM uchwyt co commit makra
+    # (`self._wb`) - a z nim dziedziczą mutex „writeback → Dostawa" i „jeden zapis naraz"
+    # (`busy_changed` → gospodarz). Trzecia jest samą bazą i idzie od razu.
+
+    def _perspektywa_zapisu(self):
+        """Czy widok stoi w jednej z dwóch perspektyw izolacji zapisu (flagi z `_TRIMY`)."""
+        return any(getattr(self, atrybut) for atrybut in _RECEPTY_ZAPISU)
+
+    def _operacje_gestu(self):
+        """Operacje izolujące kopie ZAZNACZONYCH klatek - liczone od nowa (menu i gest pytają w swojej
+        chwili; między nimi mógł przejść inny zapis). Cel to wyłącznie zaznaczenie, jak na osiach."""
+        return queries.isolated_inplace_ops(
+            self.con, [r["frame_id"] for r in self._selected_data_rows()])
+
+    def _powod_zajetosci(self):
+        """Klucz powodu, dla którego gest izolacji nie może ruszyć teraz, albo `None`. Etap Dostawy
+        pisze do bazy w tle, a zapis z tego widoku albo z okna naprawy trzyma pliki - odzysk czy
+        dokończenie w środku byłyby drugim pisarzem obok nich."""
+        if self._etap_w_biegu:
+            return "grid.inplace.busy_stage"
+        if self._wb.is_busy or self._foreign_wb:
+            return "grid.inplace.busy_write"
+        return None
+
+    def _sync_menu_zapisu(self):
+        """Uczciwy disabled trzech gestów izolacji - ze stanu liczonego w chwili pokazania menu.
+
+        Każda pozycja mówi w tooltipie, ile kopii ruszy, albo DLACZEGO nie ruszy żadnej: zajętość
+        (etap, inny zapis), brak kopii izolowanej w zaznaczeniu, faza, w której gest nie ma sensu
+        („Dokończ" wyłącznie przy zapisie, który czeka na dokończenie - przerwany zapis nie ma czego
+        dokańczać). „Przywróć" i „Zwolnij" żyją przy każdej fazie izolującej: przy zapisie
+        czekającym na dokończenie powrót rozstrzyga rdzeń kontrolą danych i odmawia z powodem, gdy
+        zapis jest poprawny - tooltip mówi o tym z góry."""
+        ops = self._operacje_gestu()
+        akcje = (self.act_finish_write, self.act_restore_header, self.act_release_file)
+        powod = self._powod_zajetosci() or (None if ops else "grid.inplace.none")
+        if powod is not None:
+            for act in akcje:
+                act.setEnabled(False)
+                act.setToolTip(i18n.t(powod))
+            return
+        do_dokonczenia = [o for o in ops if o["phase"] in queries.INPLACE_PENDING_FINISH_PHASES]
+        self.act_finish_write.setEnabled(bool(do_dokonczenia))
+        self.act_finish_write.setToolTip(
+            i18n.t_plural("grid.inplace.finish_tip", len(do_dokonczenia)) if do_dokonczenia
+            else i18n.t("grid.inplace.finish_open_only", restore=i18n.t("grid.inplace.restore")))
+        tip = i18n.t_plural("grid.inplace.restore_tip", len(ops))
+        if do_dokonczenia:
+            tip += i18n.t("grid.inplace.restore_tip_written", finish=i18n.t("grid.inplace.finish"))
+        self.act_restore_header.setEnabled(True)
+        self.act_restore_header.setToolTip(tip)
+        self.act_release_file.setEnabled(True)
+        self.act_release_file.setToolTip(i18n.t_plural("grid.inplace.release_tip", len(ops)))
+
+    def _on_finish_write(self):
+        """„Dokończ zapis": kontrola danych i re-sync operacji `written` zaznaczonych kopii."""
+        ops = [o for o in self._operacje_gestu()
+               if o["phase"] in queries.INPLACE_PENDING_FINISH_PHASES]
+        self._start_gestu_zapisu("finish_inplace", ops, pusty=i18n.t(
+            "grid.inplace.finish_open_only", restore=i18n.t("grid.inplace.restore")))
+
+    def _on_restore_header(self):
+        """„Przywróć nagłówek sprzed zapisu": odzysk operacji otwartej albo droga powrotu z fazy
+        czekającej na dokończenie - rozstrzyga rdzeń pod blokadą pliku (`writeback.recover_torn`)."""
+        self._start_gestu_zapisu("recover_torn", self._operacje_gestu(),
+                                 pusty=i18n.t("grid.inplace.none"))
+
+    def _start_gestu_zapisu(self, op, ops, *, pusty):
+        """Wspólny start dwóch gestów plikowych: bramka zajętości i pustego celu (druga linia za
+        wygaszeniem - bramka woła slot, nie pozycję menu), potem wątek tła `self._wb`. Cel klatek
+        zapamiętany TU, nie w ogonie: w trakcie biegu człowiek może zmienić zaznaczenie."""
+        powod = self._powod_zajetosci()
+        if powod is not None:
+            self.status_message.emit(i18n.t(powod))
+            return
+        if not ops:
+            self.status_message.emit(pusty)
+            return
+        self._cel_gestu_zapisu = sorted({o["frame_id"] for o in ops})
+        self._start_writeback(op, [o["op_id"] for o in ops], self._after_gestu_zapisu)
+
+    @Slot(str, object)
+    def _after_gestu_zapisu(self, op, res):
+        """Ogon gestu plikowego na wątku głównym: szuflada wraca ze stanu postępu (bez zdejmowania
+        „Cofnij" poprzedniego commitu), zdanie wyniku idzie do szuflady i na pasek."""
+        self.drawer.end_progress()
+        if self._undo_mode is not None:
+            self.drawer.set_commit_actions_visible(False)
+        self._po_gescie_zapisu(_zdanie_gestu_zapisu(op, res), self._cel_gestu_zapisu)
+
+    def _on_release_file(self):
+        """„Zwolnij plik do skanu…": jawne zwolnienie izolacji RĘKĄ (`repo.release_inplace_op`).
+
+        To jest rozstrzygnięcie człowieka, że plik jest w porządku (np. przywrócony z pełnej
+        kopii), więc okno żąda powodu - bez niego przycisk jest wygaszony - a powód idzie do
+        zdarzenia `location.writeback_released`. Plik nietknięty; samą bazą, więc bez wątku tła.
+        Operacja, która przestała izolować między menu a gestem (inny proces ją domknął), jest
+        liczona osobno z powodem klingi - reszta idzie dalej."""
+        powod = self._powod_zajetosci()
+        if powod is not None:
+            self.status_message.emit(i18n.t(powod))
+            return
+        ops = self._operacje_gestu()
+        if not ops:
+            self.status_message.emit(i18n.t("grid.inplace.none"))
+            return
+        dlg = ReleaseDialog(len(ops), parent=self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        uzasadnienie = dlg.reason()
+        zwolnione, odmowy = 0, []
+        for o in ops:
+            try:
+                repo.release_inplace_op(self.con, op_id=o["op_id"], now=self._now(),
+                                        reason=uzasadnienie)
+                zwolnione += 1
+            except ValueError as exc:
+                odmowy.append((o["path"], str(exc)))
+        msg = i18n.t_plural("grid.inplace.released", zwolnione)
+        if odmowy:
+            msg += i18n.t_plural("grid.inplace.refused", len(odmowy))
+            msg += i18n.t("grid.inplace.detail", file=_ogon_sciezki(odmowy[0][0]),
+                          detail=odmowy[0][1])
+        self._po_gescie_zapisu(msg, sorted({o["frame_id"] for o in ops}))
+
+    def _po_gescie_zapisu(self, msg, cel):
+        """Wspólny ogon trzech gestów izolacji: odświeżenie zbioru z celem w zaznaczeniu, człon
+        „poza widokiem" (w perspektywach zapisu udany gest WYPYCHA klatkę - to jest jego skutek),
+        szuflada, plakietka Porządków i JEDNO zdanie po odświeżeniu (`refresh()` kończy własnym
+        zdaniem, które zjadłoby wcześniejsze - lekcja `_po_gescie_osi`). Plakietka zawsze: gest
+        rozstrzyga rdzeń, a porażka w połowie też mogła zmienić fazę."""
+        self.refresh()
+        fakt, recepta = self._czlon_poza_widokiem(
+            len(cel) - self._przywroc_zaznaczenie(cel), cel)
+        self._refresh_drawer()
+        self.drawer.set_result(msg)
+        self.stan_porzadkow_changed.emit()
+        self.status_message.emit(msg + fakt)
+        self.status_recipe.emit(recepta)
 
     # ---- panel inspekcji daty (G1/G4 — RenameBar) ----
     def _selected_data_rows(self):
@@ -4657,7 +4958,10 @@ class FramesView(QWidget):
     def set_busy(self, busy):
         """Podczas etapu pipeline'u wyłącz akcje ZAPISU grida (makro/rename/staging/commit/undo) — worker
         pisze do bazy w tle (wizytator C1). Po etapie przywróć SZCZERE stany (paski wg widocznych klatek,
-        commit/odrzuć wg liczby oczekujących AKTYWNEJ klingi); nie tykamy etykiet/widoczności szuflady (D2)."""
+        commit/odrzuć wg liczby oczekujących AKTYWNEJ klingi); nie tykamy etykiet/widoczności szuflady (D2).
+        Gesty izolacji zapisu w miejscu nie mają stałej kontrolki - stan menu liczy się przy jego
+        pokazaniu, więc zapamiętujemy sam fakt biegu (`_powod_zajetosci`)."""
+        self._etap_w_biegu = bool(busy)
         if busy:
             self.macro_bar.set_actions_enabled(False)
             self.rename_bar.set_actions_enabled(False)

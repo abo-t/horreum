@@ -18,12 +18,37 @@ osobnym faktem i mieszka w gospodarzu (`MainWindow`) — patrz `app.py`.
 
 from __future__ import annotations
 
+import dataclasses
 import threading
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 
 from horreum import db, writeback
 from horreum.gui import i18n
+
+
+@dataclasses.dataclass(frozen=True)
+class InplaceGestureResult:
+    """Wynik pętli gestu izolacji zapisu w miejscu: `writeback.FileResult` per operacja, w kolejności
+    celu, i czy człowiek przerwał pętlę (operacje po przerwaniu nietknięte)."""
+    results: list
+    cancelled: bool = False
+
+
+def po_operacjach(con, op_ids, now, progress, should_cancel, krok):
+    """Pętla gestu izolacji po liście `inplace_op.id` (gesty „Dokończ zapis" / „Przywróć nagłówek
+    sprzed zapisu" w Zbiorach). `krok` = `writeback.finish_inplace` albo `writeback.recover_torn`:
+    każdy działa pod własną blokadą pliku i własną transakcją, więc przerwanie MIĘDZY operacjami
+    zostawia stan spójny. Anulowanie sprawdzane PRZED każdą operacją, jak w commicie; postęp po
+    każdej, ze statusem rdzenia."""
+    wyniki = []
+    for i, op_id in enumerate(op_ids, start=1):
+        if should_cancel():
+            return InplaceGestureResult(wyniki, cancelled=True)
+        wynik = krok(con, op_id, now=now)
+        wyniki.append(wynik)
+        progress(i, len(op_ids), wynik.path, wynik.status)
+    return InplaceGestureResult(wyniki)
 
 
 class WritebackWorker(QObject):
@@ -35,16 +60,20 @@ class WritebackWorker(QObject):
     slot głównego wątku czytał tylko przez `self.con` (bez nakładania połączeń na tym samym pliku)."""
 
     progress = Signal(int, int, str, str)   # done, total, path, status — MID-commit (Qt-wolny callback rdzenia)
-    done = Signal(str, object)              # op, result (CommitResult|UndoResult) — niemutowany po zwrocie rdzenia
+    done = Signal(str, object)              # op, result (CommitResult|UndoResult|InplaceGestureResult) - niemutowany po zwrocie rdzenia
     failed = Signal(str, str)               # op, msg — wyjątek → sygnał, NIE crash apki
     finished = Signal()                     # run() wrócił KAŻDĄ drogą → quit wątku
 
-    # Cztery pętle-po-plikach dzielą sygnaturę (con, target_id, now=, progress=, should_cancel=).
+    # Sześć pętli-po-plikach dzieli sygnaturę (con, target_id, now=, progress=, should_cancel=).
+    # Dwie ostatnie to gesty izolacji zapisu w miejscu: cel = LISTA `inplace_op.id`, wynik
+    # `InplaceGestureResult` (AR-17 (2) - ten sam uchwyt, więc ten sam mutex „writeback → Dostawa").
     _OPS = {
         "commit":        lambda con, t, now, pr, sc: writeback.commit(con, t, now=now, progress=pr, should_cancel=sc),
         "commit_rename": lambda con, t, now, pr, sc: writeback.commit_renames(con, t, now=now, progress=pr, should_cancel=sc),
         "undo":          lambda con, t, now, pr, sc: writeback.undo(con, t, now=now, progress=pr, should_cancel=sc),
         "undo_rename":   lambda con, t, now, pr, sc: writeback.undo_renames(con, t, now=now, progress=pr, should_cancel=sc),
+        "finish_inplace": lambda con, t, now, pr, sc: po_operacjach(con, t, now, pr, sc, writeback.finish_inplace),
+        "recover_torn":   lambda con, t, now, pr, sc: po_operacjach(con, t, now, pr, sc, writeback.recover_torn),
     }
 
     def __init__(self, db_path, op, target_id, *, now_fn):
@@ -116,7 +145,7 @@ class WritebackRunner(QObject):
         return self._thread is not None
 
     def start(self, op, target_id, *, on_progress, on_done, on_failed) -> bool:
-        """Odpal `op` (commit/commit_rename/undo/undo_rename) na `target_id`. Zwraca False, gdy
+        """Odpal `op` (klucz `WritebackWorker._OPS`) na `target_id`. Zwraca False, gdy
         operacja już trwa (wołający nie ma wtedy prawa liczyć na callbacki). Sloty dostaje wołający
         — TEN moduł nie wie, co jest paskiem, a co przyciskiem."""
         if self._thread is not None:

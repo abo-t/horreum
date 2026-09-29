@@ -33,9 +33,9 @@ from horreum.gui.app import (
 )
 from horreum.gui.grid import (PRESET_COPY_CONFLICT, PRESET_DUPS, PRESET_LINEAGE,
                               PRESET_MISSING_COPY, PRESET_ORPHAN_TESTIMONY,
-                              PRESET_PATH_HEADER_CONFLICT, PRESET_RETIRED, PRESET_TORN_WRITE,
-                              PRESET_RETIRED_CONFLICT, PRESET_STACK_VERSIONS, PRESET_SUPERSEDED,
-                              PRESET_VANISHED)
+                              PRESET_PATH_HEADER_CONFLICT, PRESET_PENDING_FINISH, PRESET_RETIRED,
+                              PRESET_TORN_WRITE, PRESET_RETIRED_CONFLICT, PRESET_STACK_VERSIONS,
+                              PRESET_SUPERSEDED, PRESET_VANISHED)
 from horreum.gui.rows import TwoPartDelegate
 
 # Definicja listy zadań: (klucz stanu z `tasks_state`, etykieta, akcja). Akcja: numer podstrony
@@ -106,6 +106,11 @@ _TASKS = [
     # Wiersz AKCYJNY (0022, Q8): kopia po przerwanym zapisie nagłówka w miejscu, izolowana od skanu.
     # Robota człowieka: odzysk z dziennika operacji albo zwolnienie po własnym rozstrzygnięciu.
     ("torn_write_frames", "tasks.torn_write_frames", PRESET_TORN_WRITE),
+    # Wiersz AKCYJNY i ROBOTA (AR-17 (1)): zapis w miejscu zweryfikowany, a baza jeszcze go nie
+    # wciągnęła - kopia izolowana od skanu tak samo jak po przerwanym zapisie, ale robotą jest
+    # dokończenie („Dokończ zapis" w Zbiorach). Bez tego wiersza taka lokacja była niewidoczna,
+    # a skan ją pomijał. Stoi pod sąsiadem, bo to druga połowa tej samej izolacji.
+    ("pending_finish_frames", "tasks.pending_finish_frames", PRESET_PENDING_FINISH),
     ("vanished_frames", "tasks.vanished_frames", PRESET_VANISHED),
     # Wiersz INFORMACYJNY, nie zadanie: klatka zastąpiona nie ma czego wymagać od użytkownika —
     # treść przejęła następczyni. Stoi tu, bo od 0809 wypadła z WSZYSTKICH kubełków kolejki
@@ -156,6 +161,16 @@ _BEZ_ROBOTY = frozenset({"superseded_frames", "retired_frames", "missing_copy_fr
 # „?" nie jest robotą: nie pogrubia się i nie wchodzi do plakietki (robotą jest Dostawa albo
 # „Oznacz zniknięte", nie ten wiersz).
 _CZEKA_NA_FAKTY_KOPII = frozenset({"copy_conflict_frames", "orphan_testimony_frames"})
+# KLIK W „?" PROWADZI DO DOSTAWY, nie do perspektywy (AR-28 (b)). Lista pod klikiem czyta ten sam
+# predykat co liczba, a liczba „nie wie" - więc perspektywa była pusta („Brak klatek w tej
+# perspektywie"), choć szewron zapraszał. Robotą w tym stanie jest zebranie faktów kopii albo
+# oznaczenie zniknięć, a oba gesty mieszkają w Dostawie (`open_intake`, gospodarz przełącza widok).
+
+# PODPOWIEDZI WIERSZY IZOLACJI ZAPISU W MIEJSCU: klik otwiera perspektywę, ale gest mieszka w menu
+# prawego kliku w Zbiorach, którego nie widać, dopóki się go nie otworzy - więc wiersz mówi, gdzie
+# szukać. Klucz wiersza → klucz podpowiedzi; nazwy gestów czytane z katalogu przy renderze.
+_PODPOWIEDZI_GESTU = {"torn_write_frames": "tasks.torn_write_tip",
+                      "pending_finish_frames": "tasks.pending_finish_tip"}
 
 
 class TasksView(QWidget):
@@ -166,11 +181,13 @@ class TasksView(QWidget):
     (także n=0 — podstrona to jedyna droga do osi po przemontowaniu nawigacji)."""
 
     open_collection = Signal(str)   # nazwa perspektywy Zbiorów (gospodarz przełącza widok)
+    open_intake = Signal()          # klik w wiersz „?" - robota czeka w Dostawie (AR-28 (b))
     counts_changed = Signal(int)    # badge sidebara: liczba pozycji AKCYJNYCH z n>0
 
     def __init__(self, con, now_fn=_utc_now_iso, parent=None):
         super().__init__(parent)
         self.con = con
+        self._niewiadome = set()    # klucze wierszy w stanie „?" z ostatniego `refresh_counts`
         # pod-widoki osi z FORWARDOWANYM now_fn (F5R#2) — wystawione dla aliasów MainWindow
         self.axis_view = TelescopeAxisView(con, now_fn=now_fn)
         self.observatory_view = ObservatoryAxisView(con, now_fn=now_fn)
@@ -275,10 +292,13 @@ class TasksView(QWidget):
         # sam SELECT steruje etapem Dostawy, więc „czeka N" znaczy dokładnie „etap ma N do zrobienia".
         czeka = len(scan.copy_facts_candidates(self.con))
         badge = 0
+        self._niewiadome = set()
         for row, (key, label, action) in enumerate(_TASKS):
             n = state[key]
             it = self.tasks.item(row)
             niewiadome = n == 0 and czeka > 0 and key in _CZEKA_NA_FAKTY_KOPII
+            if niewiadome:
+                self._niewiadome.add(key)
             # akcyjne z chevronem „›" — wiersz ZAPRASZA klik; informacyjne bez (wizytator F5 #2).
             # Liczba idzie w CZŁON DRUGI (prawa kolumna, `rows.SECONDARY`), nie w tekst etykiety —
             # inaczej liczby nie ustawiają się w kolumnę i nie da się ich skanować (wiz F5 #6).
@@ -287,10 +307,18 @@ class TasksView(QWidget):
             it.setData(rows.SECONDARY, f"{liczba}  ›" if action is not None else liczba)
             # Drogi do liczby niesie PODPOWIEDŹ, nie wiersz: obie są warunkowe (plik jest / pliku
             # nie ma), a zdanie z obiema nie mieści się w członie drugim listy 400 px.
-            it.setToolTip(i18n.t_plural("tasks.copies_unread_tip", czeka,
-                                        place=i18n.t("nav.dostawa"),
-                                        mark=i18n.t("pipeline.btn.mark_vanished"))
-                          if niewiadome else "")
+            if niewiadome:
+                tip = i18n.t_plural("tasks.copies_unread_tip", czeka,
+                                    place=i18n.t("nav.dostawa"),
+                                    check=i18n.t("pipeline.btn.presence"),
+                                    mark=i18n.t("pipeline.btn.mark_vanished"))
+            elif key in _PODPOWIEDZI_GESTU and n > 0:   # przy zerze zdanie o pliku byłoby fałszem
+                tip = i18n.t(_PODPOWIEDZI_GESTU[key], finish=i18n.t("grid.inplace.finish"),
+                             restore=i18n.t("grid.inplace.restore"),
+                             release=i18n.t("grid.inplace.release"))
+            else:
+                tip = ""
+            it.setToolTip(tip)
             # Pogrubienie liczby = „TU JEST ROBOTA", więc jest rolą WIERSZA, nie całej listy
             # (wiz P1 #6): wiersz wyszarzony — informacyjny albo akcyjny z n=0 — dostawał
             # pogrubione „0" mimo wyszarzenia, czyli krzyczał dokładnie tam, gdzie nie ma nic
@@ -318,6 +346,9 @@ class TasksView(QWidget):
     def _on_task_clicked(self, item):
         key = item.data(Qt.UserRole)
         if key is None:                                # pozycja informacyjna — nie prowadzi nigdzie
+            return
+        if key in self._niewiadome:                    # „?": robota czeka w Dostawie (AR-28 (b))
+            self.open_intake.emit()
             return
         action = next(a for k, _, a in _TASKS if k == key)
         if isinstance(action, int):

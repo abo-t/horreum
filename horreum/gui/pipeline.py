@@ -441,6 +441,14 @@ class PipelineView(QWidget):
         self.btn_receive.clicked.connect(self._on_receive)
         rec.addWidget(self.btn_receive, 1)
         v.addLayout(rec)
+        # POWÓD WYGASZENIA DOSTAWY W TRAKCIE ZAPISU NAGŁÓWKÓW (AR-28 (c)). Mutex „writeback →
+        # Dostawa" gasi wszystkie etapy naraz, a bez zdania wyglądało to jak zawieszony ekran.
+        # Zdanie stoi pod złotą akcją, bo to ją człowiek próbuje kliknąć; ukryte poza zapisem.
+        # Treść i widoczność ustawia WYŁĄCZNIE `_refresh_buttons` (właściciel stanów przycisków).
+        self.lbl_writeback_busy = QLabel(i18n.t("pipeline.refuse.writeback"))
+        self.lbl_writeback_busy.setWordWrap(True)
+        self.lbl_writeback_busy.setVisible(False)
+        v.addWidget(self.lbl_writeback_busy)
         self.lbl_source_memo = QLabel("")          # treść = WYŁĄCZNIE _sync_source_memo (F5R2#6)
         v.addWidget(self.lbl_source_memo)
         v.addWidget(self._hline())
@@ -486,8 +494,7 @@ class PipelineView(QWidget):
         self.btn_lineage.clicked.connect(self._on_lineage)
         self.btn_delta = QPushButton(i18n.t("pipeline.btn.delta"))
         self.btn_delta.clicked.connect(self._on_delta)
-        self.btn_presence = QPushButton(i18n.t("pipeline.btn.presence"))
-        self.btn_presence.setToolTip(i18n.t("pipeline.tip.presence"))
+        self.btn_presence = QPushButton(i18n.t("pipeline.btn.presence"))   # podpowiedź: _sync_presence_tip
         self.btn_presence.clicked.connect(self._on_presence)
         self.btn_cancel = QPushButton(i18n.t("pipeline.btn.cancel"))
         self.btn_cancel.clicked.connect(self._on_cancel)
@@ -611,6 +618,22 @@ class PipelineView(QWidget):
             self.lbl_source_memo.setText(i18n.t("pipeline.source_last", source=source))
         else:
             self.lbl_source_memo.setText(i18n.t("pipeline.source_first"))
+        self._sync_presence_tip()
+
+    def _sync_presence_tip(self):
+        """Podpowiedź „Sprawdź obecność" mówi, KTÓRE drzewo porówna - zależy od dwóch faktów
+        (wskazany katalog, ostatnie źródło), więc wołają ją oba ich właściciele: `_set_root`
+        i `_sync_source_memo`. Kolejność jak w `_on_presence`: katalog wskazany, potem ostatnie
+        źródło, potem pytanie o katalog."""
+        mark = i18n.t("pipeline.btn.mark_vanished")
+        source = self._settings().value("pipeline/last_source", None)
+        if self._root is not None:
+            tip = i18n.t("pipeline.tip.presence", root=self._root, mark=mark)
+        elif source:
+            tip = i18n.t("pipeline.tip.presence_last", source=source, mark=mark)
+        else:
+            tip = i18n.t("pipeline.tip.presence_ask", mark=mark)
+        self.btn_presence.setToolTip(tip)
 
     def _remember_source(self, path):
         self._settings().setValue("pipeline/last_source", path)
@@ -630,6 +653,7 @@ class PipelineView(QWidget):
             self.lbl_volume.setText(i18n.t("pipeline.volume_unset"))
         else:
             self.lbl_volume.setText(i18n.t("pipeline.volume_ok", serial=serial))
+        self._sync_presence_tip()
         self._sync_actions()
 
     def _on_pick_dir(self):
@@ -814,9 +838,24 @@ class PipelineView(QWidget):
         self.run_stage("delta")
 
     def _on_presence(self):
-        """Etap pojedynczy — ZAWSZE DRY. Zapis idzie wyłącznie przez „Oznacz zniknięte"."""
-        if not self._can_scan() or self._thread is not None:
+        """Etap pojedynczy - ZAWSZE DRY. Zapis idzie wyłącznie przez „Oznacz zniknięte".
+
+        BEZ WSKAZANEGO KATALOGU bierze ostatnie źródło „Przyjmij nowe" (AR-28 (a)), a gdy go nie
+        ma albo zniknął - pyta o katalog, jak złota akcja. Dawniej przycisk był w świeżej sesji
+        wygaszony (`_root` stawia dopiero „Wskaż katalog…" albo przebieg), więc recepta kopii bez
+        zeznania „Dostawa → Oznacz zniknięte" wskazywała przycisk, którego nie było, a jedyna
+        droga do niego szła przez całą sekwencję dostawy. Teraz recepta ma dwa kroki, oba
+        wykonalne od razu: „Sprawdź obecność" → „Oznacz zniknięte" (pojawia się pod wynikiem)."""
+        if self._db_path is None or self._thread is not None:
             return
+        if self._root is None:
+            source = self._settings().value("pipeline/last_source", None)
+            if not source or not Path(source).is_dir():
+                source = QFileDialog.getExistingDirectory(self, i18n.t("pipeline.dlg.pick_scan"))
+                if not source:
+                    return
+                self._remember_source(source)
+            self._set_root(source)
         self._begin_run()
         self._start_stage("presence", **self._scan_params())
 
@@ -1222,6 +1261,11 @@ class PipelineView(QWidget):
         idle = not running and not self._writeback_busy
         has_db = self._db_path is not None
         self.btn_receive.setEnabled(idle and has_db)   # katalog niepotrzebny — przynosi własny (F5)
+        # Wygaszenie przez zapis nagłówków mówi DLACZEGO (AR-28 (c)) - zdaniem pod złotą akcją
+        # i podpowiedzią samej akcji; ten sam klucz, którym odmawia `run_stage`.
+        self.lbl_writeback_busy.setVisible(self._writeback_busy)
+        self.btn_receive.setToolTip(i18n.t("pipeline.refuse.writeback")
+                                    if self._writeback_busy else "")
         self.btn_pick.setEnabled(idle)
         self.combo_tier.setEnabled(idle)
         self.btn_all.setEnabled(idle and self._can_scan())
@@ -1231,7 +1275,9 @@ class PipelineView(QWidget):
         self.btn_calibrate.setEnabled(idle and has_db)
         self.btn_lineage.setEnabled(idle and has_db)
         self.btn_delta.setEnabled(idle and has_db)
-        self.btn_presence.setEnabled(idle and self._can_scan())   # potrzebuje drzewa, nie samej bazy
+        # Obecność przynosi drzewo sama (wskazany katalog → ostatnie źródło → pytanie, AR-28 (a)),
+        # więc jak „Przyjmij nowe" wymaga samej bazy.
+        self.btn_presence.setEnabled(idle and has_db)
         # Stosy przynoszą WŁASNY korzeń (dialog), więc jak „Przyjmij nowe" nie zależą od `_root`
         # trybu zaawansowanego — wymagają samej bazy.
         self.btn_stacks.setEnabled(idle and has_db)

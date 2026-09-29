@@ -3158,6 +3158,8 @@ class MainWindow(QMainWindow):
         for v in (tasks.axis_view, tasks.observatory_view, tasks.object_view):
             v.status_message.connect(self._flash)
         tasks.open_collection.connect(self._on_open_collection)
+        # Wiersz „?" Porządków prowadzi tam, gdzie jest jego robota - do Dostawy (AR-28 (b)).
+        tasks.open_intake.connect(lambda: self._show_view(NAV_DOSTAWA))
         tasks.counts_changed.connect(self._on_tasks_counts)
 
         # Motyw PRZEKAZANY, nie czytany przez widok z rejestru (wiz T5 N4— jeden właściciel faktu).

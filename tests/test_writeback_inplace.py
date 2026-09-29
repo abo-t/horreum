@@ -491,7 +491,8 @@ def test_commit_rozjazd_sha1_data_nie_rozdwaja_klatki(tmp_path, monkeypatch):
     con, loc = _baza_z_plikiem(tmp_path, p)
     prawdziwy = scan.scan_file
     monkeypatch.setattr(writeback.scan, "scan_file",
-                        lambda path: dataclasses.replace(prawdziwy(path), sha1_data="f" * 40))
+                        lambda path, **kw: dataclasses.replace(prawdziwy(path, **kw),
+                                                               sha1_data="f" * 40))
     res = writeback.commit(con, "R", now=NOW, inplace=True)
     assert len(res.failed) == 1 and "sha1_data" in res.failed[0].reason
     assert con.execute("SELECT count(*) FROM frame").fetchone()[0] == 1
@@ -508,10 +509,10 @@ def test_commit_awaria_resyncu_nie_zatrzymuje_wsadu(tmp_path, monkeypatch):
         _stage(con, "R", loc["id"], "NGC 6992", loc["header_hash"])
     prawdziwy = scan.scan_file
 
-    def _czkawka(path):
+    def _czkawka(path, **kw):
         if path == str(pierwszy):
             raise OSError(64, "The specified network name is no longer available")
-        return prawdziwy(path)
+        return prawdziwy(path, **kw)
     monkeypatch.setattr(writeback.scan, "scan_file", _czkawka)
     res = writeback.commit(con, "R", now=NOW, inplace=True)
     assert [f.path for f in res.failed] == [str(pierwszy)] and "re-sync padł" in res.failed[0].reason
@@ -602,7 +603,7 @@ def test_undo_po_awarii_resyncu_konczy_sama_synchronizacja(tmp_path, monkeypatch
     res = writeback.commit(con, "R", now=NOW, inplace=True)
     prawdziwy = scan.scan_file
     monkeypatch.setattr(writeback.scan, "scan_file",
-                        lambda path: (_ for _ in ()).throw(OSError(64, "zerwany udział")))
+                        lambda path, **kw: (_ for _ in ()).throw(OSError(64, "zerwany udział")))
     u1 = writeback.undo(con, res.commit_id, now=NOW)
     assert len(u1.failed) == 1 and "ponowne undo" in u1.failed[0].reason
     assert p.read_bytes() == przed and _operacje(con)[-1]["phase"] == "written"
@@ -626,7 +627,7 @@ def test_resync_commitu_i_undo_padly_ponowienie_robi_synchronizacje(tmp_path, mo
     con, loc = _baza_z_plikiem(tmp_path, p)
     prawdziwy = scan.scan_file
     monkeypatch.setattr(writeback.scan, "scan_file",
-                        lambda path: (_ for _ in ()).throw(OSError(64, "zerwany udział")))
+                        lambda path, **kw: (_ for _ in ()).throw(OSError(64, "zerwany udział")))
     res = writeback.commit(con, "R", now=NOW, inplace=True)
     assert len(res.failed) == 1 and "finish_inplace" in res.failed[0].reason
     po_commicie = p.read_bytes()
@@ -843,7 +844,7 @@ def _psuj_bajt_przy_fsync(monkeypatch, offset):
 def _zerwany_udzial(monkeypatch):
     """Re-sync pada: pełny odczyt pliku rzuca (czkawka SMB)."""
     monkeypatch.setattr(writeback.scan, "scan_file",
-                        lambda path: (_ for _ in ()).throw(OSError(64, "zerwany udział")))
+                        lambda path, **kw: (_ for _ in ()).throw(OSError(64, "zerwany udział")))
 
 
 @pytest.mark.parametrize("fmt", ["fits", "xisf"])
@@ -884,15 +885,23 @@ def test_kontrola_danych_przy_cofnieciu_w_miejscu(tmp_path, monkeypatch):
 
 
 def test_kontrola_danych_przy_odzysku(tmp_path, monkeypatch):
-    """Odzysk rozdartego nagłówka: bajt poza regionem zmieniony przy zapisie odzysku → 'failed',
-    operacja zostaje OTWARTA (nie `recovered`), lokacja izolowana."""
+    """Odzysk rozdartego nagłówka: bajt poza regionem zmieniony przy zapisie odzysku, więc kontrola
+    danych po odzysku NIE przechodzi. Dawniej operacja zostawała OTWARTA z jedynym wyjściem
+    `release_inplace_op` (ponowienie powtarzało tę samą niezgodność). Teraz ta sama droga powrotu
+    co z `written` (AR-17 (6)): stary nagłówek w miejscu, faza `recovered` z powodem, wpis
+    stagingu 'failed', `location.mtime` NULL - lokacja wraca do pełnego skanu."""
     p, zly = _fits_dwa_hdu(tmp_path / "o.fits")
-    con, op, _ = _otwarta_operacja(tmp_path, monkeypatch, p)
+    con, op, przed = _otwarta_operacja(tmp_path, monkeypatch, p)
     _psuj_bajt_przy_fsync(monkeypatch, zly)
     w = writeback.recover_torn(con, op["id"], now=NOW)
     monkeypatch.undo()
-    assert w.status == "failed" and "POZA regionem" in w.reason
-    assert _operacje(con)[0]["phase"] == "unverified" and scan._isolated(con, str(p))
+    assert w.status == "restored" and "POZA regionem" in w.reason and "przeskanuj" in w.reason, w
+    a, n = op["region_offset"], op["region_length"]
+    assert p.read_bytes()[a:a + n] == przed[a:a + n]
+    assert _operacje(con)[0]["phase"] == "recovered" and not scan._isolated(con, str(p))
+    assert con.execute("SELECT mtime FROM location").fetchone()[0] is None
+    (wpis,) = writeback.pending_for_run(con, "R")
+    assert wpis["status"] == "failed" and "przeskanuj" in wpis["reason"]
     con.close()
 
 
@@ -1016,9 +1025,9 @@ def _skan_z_przeplotem(tmp_path, monkeypatch, *, odczyt_pada):
     prawdziwy = scan.scan_file
     stan = {"raz": True}
 
-    def _przeplot(path):
+    def _przeplot(path, **kw):
         if not (stan["raz"] and path == str(p)):
-            return prawdziwy(path)                       # m.in. re-sync pisarza w środku
+            return prawdziwy(path, **kw)                 # m.in. re-sync pisarza w środku
         stan["raz"] = False
         rec = prawdziwy(path)                            # odczyt skanu: stan SPRZED zapisu
         assert len(writeback.commit(con, "R", now=NOW, inplace=True).in_place) == 1
@@ -1034,9 +1043,10 @@ def _skan_z_przeplotem(tmp_path, monkeypatch, *, odczyt_pada):
 def test_skan_przeplatany_z_zapisem_nie_przywraca_starych_faktow(tmp_path, monkeypatch):
     """Skan przeczytał plik przed zapisem w miejscu, a zapis zakończył się przed ingestem: dawniej
     spóźniony ingest przywracał stary nagłówek w bazie. Teraz generacja z bramki odrzuca rekord
-    (operacja ma większe `id`) - liczony jak izolacja, baza opisuje plik po zapisie."""
+    (operacja ma większe `id`), a jedno ponowienie z nową generacją (AR-17 (7)) trafia na bramę
+    przyrostową - plik opisał już re-sync pisarza, więc pominięcie; baza opisuje plik po zapisie."""
     con, p, loc, s = _skan_z_przeplotem(tmp_path, monkeypatch, odczyt_pada=False)
-    assert s.isolated == 1 and s.isolated_paths == [str(p)]
+    assert (s.isolated, s.isolated_paths, s.skipped) == (0, [], 1), s
     assert _loc(con, p)["header_hash"] == _hash(p) != loc["header_hash"]
     assert con.execute("SELECT header_hash FROM location").fetchone()[0] == _hash(p)
     con.close()
@@ -1044,9 +1054,9 @@ def test_skan_przeplatany_z_zapisem_nie_przywraca_starych_faktow(tmp_path, monke
 
 def test_skan_blad_odczytu_w_trakcie_zapisu_bez_markera(tmp_path, monkeypatch):
     """Odczyt skanu padł w trakcie zapisu w miejscu: bez markera nieczytelności (plik niczym nie
-    zawinił), liczony jak izolacja."""
+    zawinił); ponowienie z nową generacją pomija plik opisany już przez re-sync pisarza."""
     con, p, _, s = _skan_z_przeplotem(tmp_path, monkeypatch, odczyt_pada=True)
-    assert s.isolated == 1 and s.frame_review == 0
+    assert (s.isolated, s.skipped, s.frame_review) == (0, 1, 0), s
     assert con.execute("SELECT unreadable_since FROM location").fetchone()[0] is None
     con.close()
 
@@ -1260,8 +1270,8 @@ def test_uzupelnienie_xisf_przeplatane_z_zapisem_nie_przywraca_starych_faktow(tm
                                                                             monkeypatch):
     """Uzupełnienie XISF przeczytało plik przed zapisem w miejscu, a zapis skończył się (`synced`)
     przed wciągnięciem rekordu. Dawniej `ingest_record` bez generacji przywracał w bazie stary
-    nagłówek. Teraz generacja sprzed bramki odrzuca rekord - `failed` jako izolowana, baza opisuje
-    plik po zapisie, a kopia wraca w następnym przebiegu tylko wtedy, gdy nadal jest kandydatem."""
+    nagłówek. Teraz generacja sprzed bramki odrzuca rekord, a jedno ponowienie (AR-17 (7): nowa
+    generacja, bramka, odczyt) wciąga plik PO zapisie - `failed` puste, baza opisuje plik po zapisie."""
     p = _xisf(tmp_path / "a.xisf")
     con, loc = _baza_z_plikiem(tmp_path, p)
     _bez_faktow(con, p, bez_odcisku=True)
@@ -1271,7 +1281,7 @@ def test_uzupelnienie_xisf_przeplatane_z_zapisem_nie_przywraca_starych_faktow(tm
     _odczyt_przed_zapisem(monkeypatch, "scan_file", p, _zapis)
     s = scan.backfill_xisf_headers(con, now=NOW)
     monkeypatch.undo()
-    assert s.failed == 1 and "izolowana" in s.failed_paths[0], s
+    assert (s.read, s.failed, s.remaining) == (1, 0, 0), s
     assert _loc(con, p)["header_hash"] == _hash(p) != loc["header_hash"]
     con.close()
 
@@ -1289,9 +1299,9 @@ def test_uzupelnienie_xisf_nie_wciaga_pliku_uszkodzonego_a_dokonczenie_mu_nie_uf
     prawdziwy = scan.scan_file
     stan = {"raz": True}
 
-    def _przeplot(path):
+    def _przeplot(path, **kw):
         if not (stan["raz"] and str(path) == str(p)):
-            return prawdziwy(path)
+            return prawdziwy(path, **kw)
         stan["raz"] = False
         with monkeypatch.context() as m:
             _psuj_bajt_przy_fsync(m, zly)
@@ -1341,7 +1351,8 @@ def test_uzupelnienie_faktow_kopii_przeplatane_z_zapisem_nie_pisze(tmp_path, mon
     """Uzupełnienie faktów kopii przeczytało nagłówek przed zapisem w miejscu, a zapis zostawił
     operację `written` (re-sync padł - baza wciąż ma stary odcisk). Kotwica odcisku sama tego nie
     łapie: dawniej fakty STAREGO nagłówka lądowały na lokacji izolowanej. Teraz generacja odrzuca
-    zapis w klindze → `stale`, fakty zostają puste."""
+    zapis w klindze, a ponowienie (AR-17 (7)) trafia na bramkę izolacji (`written`) → `failed`
+    „kopia izolowana", fakty zostają puste."""
     p = _xisf(tmp_path / "c.xisf")
     con, _ = _baza_z_plikiem(tmp_path, p)
     _bez_faktow(con, p)
@@ -1349,7 +1360,8 @@ def test_uzupelnienie_faktow_kopii_przeplatane_z_zapisem_nie_pisze(tmp_path, mon
                           lambda: _commit_z_padem_resyncu(monkeypatch, con, "R"))
     s = scan.backfill_copy_facts(con, now=NOW)
     monkeypatch.undo()
-    assert (s.read, s.written, s.stale) == (1, 0, 1), s
+    assert (s.read, s.written, s.stale, s.failed) == (1, 0, 0, 1), s
+    assert "izolowana" in s.failed_paths[0]
     assert _loc(con, p)["header_hash"] is not None
     assert con.execute("SELECT hdr_hash FROM location").fetchone()[0] is None
     con.close()
@@ -1358,8 +1370,9 @@ def test_uzupelnienie_faktow_kopii_przeplatane_z_zapisem_nie_pisze(tmp_path, mon
 def test_przejecie_zeznania_przeplatane_z_zapisem_nie_przejmuje(tmp_path, monkeypatch):
     """Przejęcie zeznania ocalałej kopii przeczytało plik przed zapisem w miejscu, a zapis zostawił
     operację `written` (baza wciąż ma stary odcisk, więc kotwica klingi przepuszcza). Dawniej
-    `header` klatki dostawał zeznanie nagłówka, którego na dysku już nie ma. Teraz generacja →
-    `raced`, zero `header.adopted`."""
+    `header` klatki dostawał zeznanie nagłówka, którego na dysku już nie ma. Teraz generacja
+    odrzuca przejęcie, a ponowienie (AR-17 (7)) trafia na bramkę izolacji (`written`) → `failed`
+    „kopia izolowana", zero `header.adopted`."""
     root = tmp_path / "ARCH"
     (root / "A").mkdir(parents=True)
     (root / "B").mkdir()
@@ -1378,7 +1391,8 @@ def test_przejecie_zeznania_przeplatane_z_zapisem_nie_przejmuje(tmp_path, monkey
                           lambda: _commit_z_padem_resyncu(monkeypatch, con, "R"))
     s = scan.adopt_orphan_testimony(con, now=NOW)
     monkeypatch.undo()
-    assert (s.adopted, s.raced) == (0, 1), s
+    assert (s.adopted, s.raced, s.failed) == (0, 0, 1), s
+    assert "izolowana" in s.failed_paths[0]
     assert con.execute("SELECT count(*) FROM event WHERE verb = 'header.adopted'").fetchone()[0] == 0
     assert con.execute("SELECT object_raw FROM header").fetchone()[0] == "NGC6992"
     con.close()

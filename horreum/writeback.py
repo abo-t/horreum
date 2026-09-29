@@ -1059,32 +1059,6 @@ def _sha1_uchwytu(fh) -> str:
     return h.hexdigest()
 
 
-def _sha1_z_podstawieniem(path: str, offset: int, region: bytes) -> str:
-    """sha1 pliku, w którym bajty `[offset, offset+len(region))` zastąpiono `region` - czyli sha1
-    pliku SPRZED operacji, o ile operacja zmieniła wyłącznie swój region. Porównany z kotwicą bazy
-    (`location.file_sha1` sprzed zapisu) dowodzi, że żaden bajt POZA regionem nagłówka się nie
-    zmienił - także drugie HDU FITS i kolejne obrazy/załączniki XISF, których nie widzą ani próbki,
-    ani `sha1_data`.
-
-    Osobny pełny odczyt (poza strumieniem `scan.scan_file`): jedyny strumień, który i tak czyta cały
-    plik, żyje w `hashing.sha1_of_span`, poza klingą. Wołane pod blokadą pliku, więc oba odczyty
-    widzą te same bajty."""
-    h = hashlib.sha1()
-    koniec = offset + len(region)
-    pos = 0
-    with open(path, "rb") as f:
-        while True:
-            b = f.read(_SHA1_BUF)
-            if not b:
-                break
-            a, e = max(offset, pos), min(koniec, pos + len(b))
-            if a < e:
-                b = b[:a - pos] + region[a - offset:e - offset] + b[e - pos:]
-            h.update(b)
-            pos += len(b)
-    return h.hexdigest()
-
-
 @dataclasses.dataclass(frozen=True)
 class FileAnchor:
     """KOTWICA BAZY dla zapisu w miejscu: `location.file_sha1` i `location.mtime` sprzed zapisu.
@@ -1106,7 +1080,13 @@ class FileAnchor:
 class _KontrolaDanych:
     """Czego re-sync po zapisie w miejscu wymaga od pliku, zanim wciągnie go do bazy: nagłówek
     `header_hash` (ten, który operacja zapisała) i sha1 pliku z podstawionym starym regionem
-    operacji (`old_region` od `offset`) == `anchor_sha1` (kotwica sprzed zapisu)."""
+    operacji (`old_region` od `offset`) == `anchor_sha1` (kotwica sprzed zapisu).
+
+    Podstawiony sha1 to sha1 pliku SPRZED operacji, o ile operacja zmieniła wyłącznie swój region -
+    równość z kotwicą dowodzi, że żaden bajt POZA regionem nagłówka się nie zmienił, także drugie
+    HDU FITS i kolejne obrazy/załączniki XISF, których nie widzą ani próbki, ani `sha1_data`. Liczy
+    go ten sam pełny odczyt, który re-sync i tak robi (`_skan_kontrolny` → `scan_file(substitute=)`,
+    AR-24), pod blokadą pliku - więc hasze pliku, danych i podstawiony opisują te same bajty."""
     offset: int
     old_region: bytes
     anchor_sha1: str | None
@@ -1743,26 +1723,41 @@ def _resync(con, path, volume, *, now, actor="user:local", expect_sha1_data=None
     na dysku to ten, który operacja zapisała (`header_hash`), i plik z PODSTAWIONYM starym regionem
     operacji ma sha1 kotwicy sprzed zapisu (żaden bajt poza regionem się nie zmienił). Brak kotwicy
     to też odmowa: bez niej kontrola nie istnieje. Ingest BEZ generacji (`inplace_gen=None`) - to
-    re-sync operacji, która sama izoluje lokację, więc nie może odrzucić sam siebie."""
-    rec = scan.scan_file(path)
-    niezgodne = _kontrola_danych(path, rec, expect_sha1_data, kontrola)
+    re-sync operacji, która sama izoluje lokację, więc nie może odrzucić sam siebie.
+
+    Z kontrolą plik jest czytany w całości RAZ (`_skan_kontrolny`): sha1 pliku, danych i pliku
+    z podstawionym starym regionem liczy jeden przebieg (AR-24)."""
+    rec = _skan_kontrolny(path, kontrola)
+    niezgodne = _kontrola_danych(rec, expect_sha1_data, kontrola)
     if niezgodne is not None:
         return niezgodne
     scan.ingest_record(con, rec, volume=volume, now=now, summary=scan.ScanSummary(), actor=actor)
     return None
 
 
-def _kontrola_danych(path, rec, expect_sha1_data, kontrola) -> str | None:
+def _skan_kontrolny(path, kontrola):
+    """`scan.scan_file` pod werdykt `_kontrola_danych` - jedyne miejsce, które wiąże kontrolę danych
+    z podstawieniem: z `kontrola` ten sam pełny odczyt liczy też `file_sha1_substituted` (sha1 pliku
+    ze starym regionem operacji w miejscu nowego), bez niej - zwykły skan bez trzeciego hasha. Każda
+    droga pytająca o werdykt (re-sync, powrót z `written`) czyta przez nią plik raz."""
+    if kontrola is None:
+        return scan.scan_file(path)
+    return scan.scan_file(path, substitute=(kontrola.offset, kontrola.old_region))
+
+
+def _kontrola_danych(rec, expect_sha1_data, kontrola) -> str | None:
     """Warunki, które plik po mutacji musi spełnić, zanim re-sync go wciągnie (zob. `_resync`):
     `None` = zgodny, tekst = powód niezgodności. Wspólne dla re-syncu i drogi powrotu z `written`
-    (`_powrot_z_written`), która pyta o werdykt bez wciągania.
+    (`_powrot_z_written`), która pyta o werdykt bez wciągania. `rec` z kontrolą pochodzi
+    z `_skan_kontrolny(path, kontrola)` - rekord bez podstawionego sha1 to błąd wołającego
+    (`ValueError`), nie werdykt o pliku.
 
     Kotwicą jest sha1 pliku SPRZED operacji, utrwalony przy operacji (`inplace_op.anchor_sha1`,
     0023). Równość sha1 pliku z kotwicą NIE jest skrótem (astra, 2026-09-27): dawniej kotwicą była
     mutowalna `location.file_sha1`, a „sha1 == kotwica" przepuszczał każdy plik, którego fakty ktoś
     zdążył wciągnąć - także plik z bajtem zmienionym poza nagłówkiem. Kotwica niezmienna od chwili
-    utrwalenia pozwala liczyć kontrolę od nowa przy każdym ponowieniu - kosztem tego samego pełnego
-    odczytu, który zwykła ścieżka i tak robi."""
+    utrwalenia pozwala liczyć kontrolę od nowa przy każdym ponowieniu - w tym samym pełnym odczycie,
+    który zwykła ścieżka i tak robi (bez osobnego odczytu, AR-24)."""
     if expect_sha1_data is not None and rec.sha1_data != expect_sha1_data:
         return (f"plik ZMIENIONY, ale sha1_data po zapisie ({rec.sha1_data}) różni się od "
                 f"tożsamości klatki - baza NIE zsynchronizowana")
@@ -1774,7 +1769,10 @@ def _kontrola_danych(path, rec, expect_sha1_data, kontrola) -> str | None:
     if kontrola.anchor_sha1 is None:
         return ("brak kotwicy sha1 pliku sprzed zapisu - kontrola bajtów poza nagłówkiem "
                 "niemożliwa, baza NIE zsynchronizowana")
-    if _sha1_z_podstawieniem(path, kontrola.offset, kontrola.old_region) != kontrola.anchor_sha1:
+    if rec.file_sha1_substituted is None:
+        raise ValueError("rekord bez sha1 z podstawionym starym regionem - kontrola danych wymaga "
+                         "skanu przez _skan_kontrolny(path, kontrola)")
+    if rec.file_sha1_substituted != kontrola.anchor_sha1:
         return ("plik ZMIENIONY, a bajty POZA regionem nagłówka różnią się od pliku sprzed "
                 "zapisu (sha1 pliku z podstawionym starym regionem != kotwica operacji) - "
                 "baza NIE zsynchronizowana")
@@ -2150,10 +2148,11 @@ def commit(con, run_id, *, now, clock=None,
 # Rename PLIKU = mutacja → mieszka w tej klindze (jak os.replace writebacku). Prymityw `os.rename`
 # (NIE `os.replace`): na Windows (tor R:/NAS) rzuca `FileExistsError` gdy cel istnieje = twardy backstop.
 # Anty-clobber DWUWARSTWOWY (R3 #1/#3): (1) `os.path.exists(new)` — brama PRZENOŚNA (na POSIX `os.rename`
-# CICHO nadpisuje, więc rename-fail sam nie wystarcza — R3-P2 #3); (2) `repo.relocate_location` re-sprawdza
-# `UNIQUE(volume,new_path)` atomowo. Kolejność commitu: DB/dysk-check → `os.rename` → `relocate_location`
-# (UPDATE path + event, T8: plik-first; crash pomiędzy → re-skan naprawia). Wiersz 'applied' sam jest
-# rekordem undo. `os.rename` żyje TU (meta-test: `rename` ∈ OS_MUTATORS, DOOR=writeback.py).
+# CICHO nadpisuje, więc rename-fail sam nie wystarcza - R3-P2 #3); (2) straż `repo.guard_file_rename`
+# re-sprawdza `UNIQUE(volume,new_path)` pod blokadą zapisu bazy. Commit i undo idą przez `_rename_pod_straza`:
+# DB/dysk-check → w jednej transakcji straż izolacji i generacji → `os.rename` → UPDATE path + event
+# (T8: plik-first; crash pomiędzy → re-skan naprawia). Wiersz 'applied' sam jest rekordem undo.
+# `os.rename` żyje TU (meta-test: `rename` ∈ OS_MUTATORS, DOOR=writeback.py).
 
 
 @dataclasses.dataclass(frozen=True)
@@ -2196,17 +2195,70 @@ def _location_rename(con, location_id):
     ).fetchone()
 
 
+class _RenameNieZaszedl(Exception):
+    """Prymityw renamu odmówił albo padł wewnątrz straży relokacji - wyjątek przerywa jej transakcję
+    (rollback, zero UPDATE) i niesie wynik prymitywu do wołającego."""
+
+    def __init__(self, wynik: RenameFileResult):
+        super().__init__(wynik.reason)
+        self.wynik = wynik
+
+
+def _powod_konfliktu_renamu(op) -> str:
+    """Powód odmowy renamu pod strażą relokacji (`repo.InplaceConflict`)."""
+    if op["phase"] in repo.INPLACE_ISOLATING_PHASES:
+        return _powod_izolacji(op)
+    return (f"lokacja dostała zapis w miejscu (operacja {op['id']}, {op['kind']}, faza "
+            f"{op['phase']}) po bramce renamu - nagłówek, z którego pochodzi nowa nazwa, mógł się "
+            f"zmienić; renamu nie było, plik nietknięty - odśwież podgląd nazw")
+
+
+def _rename_pod_straza(con, *, location_id, old_path, new_path, generation,
+                       now) -> RenameFileResult:
+    """RENAME I RELOKACJA W JEDNEJ TRANSAKCJI (`repo.guard_file_rename`, AR-17 (5)): pod blokadą
+    zapisu bazy lokacja bez operacji izolującej i bez operacji nowszej niż `generation` (zapamiętanej
+    PRZED bramką izolacji wołającego), cel wolny w bazie, potem `rename_file` (`os.rename`) i dopiero
+    po nim UPDATE `location.path` z eventem. Między bramką izolacji a `os.rename` zapis w miejscu mógł
+    otworzyć operację na tym pliku - wtedy 'blocked', renamu nie było.
+
+    Wynik prymitywu inny niż 'applied' przerywa transakcję (zero UPDATE) i wraca bez zmian. Wyjątek
+    po udanym renamie (COMMIT bazy padł) → 'failed' z prawdą o rozjeździe: plik stoi pod nową nazwą,
+    baza pod starą - naprawia to skan (stara ścieżka zniknie, nowa wjedzie jako kopia tej klatki)."""
+    przeniesiony = False
+    try:
+        with repo.guard_file_rename(con, location_id=location_id, new_path=new_path,
+                                    generation=generation, now=now):
+            wynik = rename_file(old_path, new_path)            # tu następuje os.rename
+            if wynik.status != "applied":
+                raise _RenameNieZaszedl(wynik)
+            przeniesiony = True
+    except _RenameNieZaszedl as exc:
+        return exc.wynik
+    except repo.InplaceConflict as exc:
+        return RenameFileResult("blocked", _powod_konfliktu_renamu(exc.op))
+    except Exception as exc:  # noqa: BLE001 - raport zamiast wyjątku w warstwie zapisu
+        if przeniesiony:
+            return RenameFileResult("failed", f"plik PRZENIESIONY na {new_path}, ale baza NIE "
+                                              f"przepięta ({type(exc).__name__}: {exc}) - "
+                                              f"przeskanuj katalog")
+        if isinstance(exc, ValueError):                        # anty-clobber w bazie pod blokadą
+            return RenameFileResult("blocked", str(exc))
+        return RenameFileResult("failed", f"{type(exc).__name__}: {exc}")
+    return RenameFileResult("applied", None)
+
+
 def commit_renames(con, run_id, *, now,
                    progress: Callable[[int, int, str, str], None] | None = None,
                    should_cancel: Callable[[], bool] | None = None) -> CommitResult:
     """Zapisz `pending_renames` (status 'pending') przebiegu na dysk. Per wiersz: kotwica (present +
-    `mtime`==staged + `path`==`old_path` + brak wiersza `location(volume,new_path)` — R3 #3) →
-    `rename_file` (`os.rename`, anty-clobber dyskowy R3 #1) → `repo.relocate_location` (UPDATE + event,
-    NIE ingest — R2 #1). Kotwica-mtime niezmienna po renamie (rename nie tyka treści), więc re-commit
-    po udanym renamie widzi już `path==new_path` → relocate idempotentny. Utrwalanie per plik (funkcje
-    `repo` commitują), więc anulowanie zostawia zrobione 'applied', resztę 'pending'. `progress(done,
-    total, path, status)` po KAŻDYM pliku (Qt-wolne). Zwraca `CommitResult` (`commit_id` zawsze None —
-    rename bez tabeli commitów; wiersz 'applied' sam jest undo-rekordem)."""
+    `mtime`==staged + `path`==`old_path` + brak wiersza `location(volume,new_path)` - R3 #3) →
+    `rename_file` (`os.rename`, anty-clobber dyskowy R3 #1) i UPDATE `location.path` z eventem (NIE
+    ingest - R2 #1) w JEDNEJ transakcji straży relokacji (`_rename_pod_straza`: bramka izolacji
+    i generacji zapisu w miejscu powtórzona pod blokadą bazy, AR-17 (5)). Kotwica-mtime niezmienna po
+    renamie (rename nie tyka treści), więc re-commit po udanym renamie widzi już `path==new_path`.
+    Utrwalanie per plik (funkcje `repo` commitują), więc anulowanie zostawia zrobione 'applied', resztę
+    'pending'. `progress(done, total, path, status)` po KAŻDYM pliku (Qt-wolne). Zwraca `CommitResult`
+    (`commit_id` zawsze None - rename bez tabeli commitów; wiersz 'applied' sam jest undo-rekordem)."""
     pending = [r for r in renames_for_run(con, run_id) if r["status"] == "pending"]
     total = len(pending)
     applied: list[FileResult] = []
@@ -2239,6 +2291,9 @@ def commit_renames(con, run_id, *, now,
             skipped.append(FileResult(location_id, old_path, "skipped", reason))
             _report(old_path, "skipped")
             continue
+        # Generacja dziennika PRZED bramką: straż relokacji odbije operację zaczętą po tej chwili
+        # (`_rename_pod_straza`), także zakończoną, zanim rename się zaczął.
+        gen = repo.inplace_generation(con)
         izolujaca = repo.isolating_inplace_op(con, location_id)
         if izolujaca is not None:          # plik po nieukończonym zapisie w miejscu - nie ruszamy
             reason = _powod_izolacji(izolujaca)
@@ -2264,15 +2319,9 @@ def commit_renames(con, run_id, *, now,
             _report(old_path, "blocked")
             continue
 
-        res = rename_file(old_path, new_path)          # tu następuje os.rename
+        res = _rename_pod_straza(con, location_id=location_id, old_path=old_path,
+                                 new_path=new_path, generation=gen, now=now)
         if res.status == "applied":
-            try:
-                repo.relocate_location(con, location_id=location_id, new_path=new_path, now=now)
-            except ValueError as exc:                  # wyścig DB po renamie (rzadki torn-state)
-                repo.set_rename_status(con, rename_id=rid, status="failed", reason=str(exc))
-                failed.append(FileResult(location_id, new_path, "failed", str(exc)))
-                _report(new_path, "failed")
-                continue
             repo.set_rename_status(con, rename_id=rid, status="applied", reason=None)
             applied.append(FileResult(location_id, new_path, "applied"))
             _report(new_path, "applied")
@@ -2292,7 +2341,8 @@ def undo_renames(con, run_id, *, now,
                  progress: Callable[[int, int, str, str], None] | None = None,
                  should_cancel: Callable[[], bool] | None = None) -> UndoResult:
     """Cofnij rename przebiegu: dla wierszy 'applied' odwrotny `os.rename` (new→old) pod TĄ SAMĄ bramą
-    anty-clobber + `relocate_location` z powrotem na `old_path`. Kolejność odwrotna (jak stos). Gdy plik
+    anty-clobber i tą samą strażą co commit (`_rename_pod_straza`: izolacja, generacja, cel wolny w bazie,
+    relokacja w tej samej transakcji) z powrotem na `old_path`. Kolejność odwrotna (jak stos). Gdy plik
     nie stoi na `new_path` (zmieniony od commitu) → 'blocked'. Udany rewert → status 'skipped' (powód
     „cofnięto") — dwukrotne undo pomija (tylko 'applied' cofane). `commit_id` w wyniku = run przebiegu
     (rename bez tabeli commitów). Bramka bezpieczna per plik."""
@@ -2321,21 +2371,17 @@ def undo_renames(con, run_id, *, now,
             blocked.append(FileResult(location_id, new_path, "blocked", reason))
             _report(new_path, "blocked")
             continue
+        gen = repo.inplace_generation(con)             # PRZED bramką izolacji, jak w `commit_renames`
         izolujaca = repo.isolating_inplace_op(con, location_id)
         if izolujaca is not None:
             blocked.append(FileResult(location_id, new_path, "blocked",
                                       _powod_izolacji(izolujaca)))
             _report(new_path, "blocked")
             continue
-        res = rename_file(new_path, old_path)          # odwrotny os.rename
+        # odwrotny os.rename i relokacja w jednej transakcji pod strażą - to samo okno co przy commicie
+        res = _rename_pod_straza(con, location_id=location_id, old_path=new_path,
+                                 new_path=old_path, generation=gen, now=now)
         if res.status == "applied":
-            try:
-                repo.relocate_location(con, location_id=location_id, new_path=old_path, now=now)
-            except ValueError as exc:
-                repo.set_rename_status(con, rename_id=rid, status="failed", reason=str(exc))
-                failed.append(FileResult(location_id, old_path, "failed", str(exc)))
-                _report(old_path, "failed")
-                continue
             repo.set_rename_status(con, rename_id=rid, status="skipped", reason="cofnięto (undo)")
             restored.append(FileResult(location_id, old_path, "restored"))
             _report(old_path, "restored")
@@ -2562,9 +2608,16 @@ def recover_torn(con, op_id, *, now) -> FileResult:
     otwartą przed blokadą, nie cofnie nowszego, poprawnego zapisu (poprawny ponowny commit tej samej
     wartości zostawia region, który jest „stanem pośrednim" starej operacji). Po przywróceniu
     regionu re-sync z kontrolą danych (`sha1_data`, nagłówek sprzed operacji, sha1 całego pliku ==
-    kotwica sprzed zapisu) i dopiero wtedy CAS fazy → `recovered`. Porażka re-syncu albo fazy
-    zostawia operację OTWARTĄ (izolacja trwa), a ponowienie jest bezpieczne: region stary jest też
-    stanem pośrednim, więc drugi odzysk nic nie pisze i powtarza samą kontrolę z re-synciem.
+    kotwica sprzed zapisu) i dopiero wtedy CAS fazy → `recovered`. Wyjątek re-syncu (czkawka
+    odczytu) albo porażka fazy zostawia operację OTWARTĄ (izolacja trwa), a ponowienie jest
+    bezpieczne: region stary jest też stanem pośrednim, więc drugi odzysk nic nie pisze i powtarza
+    samą kontrolę z re-synciem.
+
+    KONTROLA DANYCH, KTÓRA NIE PRZECHODZI, nie jest czkawką (AR-17 (6)): ponowienie powtórzyłoby tę
+    samą niezgodność, a jedynym wyjściem zostawało ręczne zwolnienie izolacji. Idzie więc tą samą
+    drogą powrotu co faza `written` (`_zwolnij_do_skanu`, CAS fazy przeczytanej pod blokadą): stary
+    nagłówek już stoi w miejscu, faza `recovered` z powodem, wpisy stagingu 'failed',
+    `location.mtime` → NULL, a pełny skan opisze plik razem z tym, co zmieniło się poza nagłówkiem.
 
     OPERACJA `written` → DROGA POWROTU (`_powrot_z_written`, astra 2026-09-27): wyłącznie wtedy,
     gdy kontrola danych tej operacji NIE przechodzi. Inaczej lokacja stałaby zablokowana bez drogi
@@ -2602,10 +2655,11 @@ def recover_torn(con, op_id, *, now) -> FileResult:
         try:
             niezgodne = _resync(con, path, loc["volume"], now=now,
                                 expect_sha1_data=loc["sha1_data"], kontrola=kontrola)
-        except Exception as exc:  # noqa: BLE001
-            niezgodne = f"region przywrócony, ale re-sync padł - {type(exc).__name__}: {exc}"
-        if niezgodne is not None:
-            return WriteResult("failed", f"{niezgodne}; {ponow}", None)
+        except Exception as exc:  # noqa: BLE001 - czkawka odczytu nie jest werdyktem
+            return WriteResult("failed", f"region przywrócony, ale re-sync padł - "
+                                         f"{type(exc).__name__}: {exc}; {ponow}", None)
+        if niezgodne is not None:          # werdykt kontroli danych - droga powrotu, nie ponowienie
+            return _zwolnij_do_skanu(con, op_id, faza, niezgodne, now=now, ponow=ponow)
         try:
             repo.set_inplace_op_phase(con, op_id=op_id, phase="recovered", now=now,
                                       reason="region stary przywrócony (recover_torn)",
@@ -2668,7 +2722,7 @@ def _powrot_z_written(con, op, loc, *, now) -> FileResult:
                                           f"ani stanem pośrednim jej powrotu; {_RECZNA}", None)
         if biezacy == spec.new_region:
             try:
-                niezgodne = _kontrola_danych(path, scan.scan_file(path), loc["sha1_data"],
+                niezgodne = _kontrola_danych(_skan_kontrolny(path, kontrola), loc["sha1_data"],
                                              kontrola)
             except Exception as exc:  # noqa: BLE001 - czkawka odczytu nie jest werdyktem
                 return WriteResult("failed", f"odczyt kontrolny padł - {type(exc).__name__}: "
@@ -2682,16 +2736,27 @@ def _powrot_z_written(con, op, loc, *, now) -> FileResult:
         res = _odzysk_pod_blokada(fh, path, spec)
         if res.status != "applied":
             return WriteResult(res.status, f"{res.reason}; {ponow}", None)
-        prawda = (f"plik zmienił się poza nagłówkiem od ostatniego skanu albo przy zapisie "
-                  f"({niezgodne}) - zapis cofnięty: stary nagłówek przywrócony w miejscu "
-                  f"(operacja {op_id}), przeskanuj plik")
-        try:
-            repo.revert_inplace_op(con, op_id=op_id, now=now, reason=prawda)
-        except Exception as exc:  # noqa: BLE001
-            return WriteResult("failed", f"stary nagłówek przywrócony, ale faza 'recovered' NIE "
-                                         f"zapisana ({type(exc).__name__}: {exc}); {ponow}", None)
-        return WriteResult("applied", prawda, None)
+        return _zwolnij_do_skanu(con, op_id, faza, niezgodne, now=now, ponow=ponow)
     wynik = _pod_blokada(path, _dzialanie)
     status = "restored" if wynik.status == "applied" else wynik.status
     return FileResult(loc["id"], path, status, wynik.reason)
+
+
+def _zwolnij_do_skanu(con, op_id, faza, niezgodne, *, now, ponow) -> WriteResult:
+    """KROK KOŃCOWY DROGI POWROTU, wspólny dla fazy `written` (`_powrot_z_written`) i operacji
+    OTWARTEJ (`recover_torn`, AR-17 (6)) - wołany pod blokadą pliku, gdy stary region JUŻ stoi
+    w miejscu, a kontrola danych nie przeszła (`niezgodne`). JEDNA transakcja
+    `repo.revert_inplace_op` z CAS fazy `faza` przeczytanej pod tą blokadą: `recovered` z powodem,
+    wpisy stagingu operacji 'failed' z tym samym powodem, `location.mtime` → NULL (pełny skan).
+    Porażka transakcji → 'failed' z `ponow`: operacja zostaje w swojej fazie, a ponowienie jest
+    bezpieczne - region stary to też stan pośredni, więc drugi przebieg nic nie pisze."""
+    prawda = (f"plik zmienił się poza nagłówkiem od ostatniego skanu albo przy zapisie "
+              f"({niezgodne}) - zapis cofnięty: stary nagłówek przywrócony w miejscu "
+              f"(operacja {op_id}), przeskanuj plik")
+    try:
+        repo.revert_inplace_op(con, op_id=op_id, now=now, reason=prawda, expect_phase=faza)
+    except Exception as exc:  # noqa: BLE001
+        return WriteResult("failed", f"stary nagłówek przywrócony, ale faza 'recovered' NIE "
+                                     f"zapisana ({type(exc).__name__}: {exc}); {ponow}", None)
+    return WriteResult("applied", prawda, None)
 

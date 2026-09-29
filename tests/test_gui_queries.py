@@ -162,6 +162,9 @@ def test_tasks_state_liczniki_na_s8_obj(s8_obj):
         # brak populacji, nie dowód predykatu; ten pinuje `test_path_header.py` na własnych danych.
         "path_header_conflict_frames": 0,
         "torn_write_frames": 0,
+        # AR-17 (1): fikstura nie zna zapisu w miejscu - zero z braku populacji; predykat na
+        # prawdziwej operacji `written` pinuje `test_gui_izolacja_zapisu.py`.
+        "pending_finish_frames": 0,
         "stacks_lineage_pending": 0,
         "dup_frames": 1,
         # 0021: duplikat `a1` ma dwie kopie, ale żadna nie ma ZEBRANEGO zeznania (fikstura wkłada

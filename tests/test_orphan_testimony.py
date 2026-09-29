@@ -347,6 +347,33 @@ def test_etap_zawezony_do_korzenia(po_skasowaniu):
     assert [f for f, _k in scan.adopt_candidates(con, root / "B_CLS")] == [fid]
 
 
+def test_etap_zerwany_korzen_w_trakcie_konczy_sie_raportem(tmp_path):
+    """AR-25: korzeń etapu znika w trakcie (zerwany udział) po zapisanym przejęciu pierwszej klatki.
+    Dawniej `remaining` wołało ponownie `canonize_root` na nieosiągalnym korzeniu i etap kończył się
+    `FileNotFoundError` - przejęcie zostawało w bazie, a raport z kubełkami ścieżek przepadał.
+    Teraz korzeń kanonizowany raz, na starcie: pierwsza klatka przejęta, druga `failed` ze ścieżką,
+    `remaining` liczony po tym samym prefiksie."""
+    import shutil
+    root = tmp_path / "ARCH"
+    pary = [(_lpro(root / f"K{i}", payload=bytes([i]) * 32),
+             _cls(root / f"K{i}", payload=bytes([i]) * 32)) for i in (1, 2)]
+    con = db.open_db(str(tmp_path / "h.db"))
+    scan.scan_tree(con, root, volume="?", now=NOW)
+    for a, _b in pary:
+        _zniknij(con, a)
+    kolejnosc = [k["path"] for _f, k in scan.adopt_candidates(con, root)]
+
+    def zerwij(done, _total, _path, _s):
+        if done == 1:
+            shutil.rmtree(root)
+    s = scan.adopt_orphan_testimony(con, now=LATER, root=root, progress=zerwij)
+    assert (s.rows, s.adopted, s.failed, s.remaining) == (2, 1, 1, 1), s
+    assert s.failed_paths[0].startswith(kolejnosc[1])
+    glosy = sorted(_header(con, _loc(con, a)["frame_id"])["filter_raw"] for a, _b in pary)
+    assert glosy == ["CLS", "L-Pro"]
+    con.close()
+
+
 # ═════════════════════════ zeznanie z ręki, anulowanie, tożsamość zdegenerowana
 
 

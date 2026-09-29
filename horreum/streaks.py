@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import math
 import os
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 from importlib import resources
@@ -586,7 +587,8 @@ def measure(seg, res):
 class FrameResult:
     """Wynik jednej klatki sekwencji. `status`: `done` · `no_neighbours` · `skipped:no_noise`
     (reszta zerowa - np. ta sama klatka dwa razy) · `skipped:overflow` (zbyt wiele pikseli nad
-    progiem) · statusy `read_binned`. `hough_segments` liczy odcinki PRZED scaleniem - raport
+    progiem) · `error:shape` (kształt danych obcy w oknie albo klatka pusta po binningu) · statusy
+    `read_binned`. `hough_segments` liczy odcinki PRZED scaleniem - raport
     podaje osobno `hough_segments`, `streaks` i `tracks`."""
     index: int
     status: str
@@ -619,7 +621,8 @@ def scan_sequence(count, load, *, n=N_NEIGHBOURS, k_sigma=K_SIGMA, min_len_nativ
     (wołający wie, skąd ją wziąć). W pamięci najwyżej 2n+1 klatek; każda czytana raz, bo okno
     `neighbour_indices` przesuwa się monotonicznie. Klatka nieczytelna nie jest sąsiadem - bierze
     się wtedy mniej sąsiadów, a przy mniej niż `MIN_NEIGHBOURS` klatka dostaje `no_neighbours`.
-    Generator `FrameResult` w kolejności klatek."""
+    Rozjazd kształtu degraduje klatkę, nie sekwencję (`_window_result`). Generator `FrameResult`
+    w kolejności klatek."""
     window = {}
     for i in range(count):
         need = set(neighbour_indices(i, count, n)) | {i}
@@ -632,11 +635,21 @@ def scan_sequence(count, load, *, n=N_NEIGHBOURS, k_sigma=K_SIGMA, min_len_nativ
 
 def _window_result(i, window, n, k_sigma, min_len_native, bin):
     """Wynik klatki `i` z okna. Osobna funkcja, bo lokalne referencje do klatek giną przy powrocie -
-    w pętli generatora przeżyłyby do następnego odczytu i okno trzymałoby o klatkę więcej."""
+    w pętli generatora przeżyłyby do następnego odczytu i okno trzymałoby o klatkę więcej.
+
+    Klucz sekwencji grupuje po wymiarach z nagłówka, a kształt pochodzi z danych pliku (plik
+    podmieniony po skanie, nagłówek inny niż dane), więc w oknie może stanąć klatka obcego kształtu.
+    Klatka dostaje `error:shape`, gdy po binningu nie ma pikseli albo gdy inny kształt ma w oknie
+    więcej czytelnych klatek niż jej własny; sąsiadem jest tylko klatka tego samego kształtu. Obcy
+    to mniejszość okna, nie „inny niż pierwsza klatka" - seria zmieniająca kształt w połowie liczy
+    obie połowy."""
     own = window[i]
     if own.status != "ok":
         return FrameResult(i, own.status)
-    readable = {j: w.data for j, w in window.items() if w.status == "ok"}
+    shapes = Counter(w.data.shape for w in window.values() if w.status == "ok" and w.data.size)
+    if not own.data.size or shapes[own.data.shape] < max(shapes.values()):
+        return FrameResult(i, "error:shape")
+    readable = {j: w.data for j, w in window.items() if w.status == "ok" and w.data.shape == own.data.shape}
     return detect_frame(i, own.data, neighbours(i, readable, n), k_sigma=k_sigma,
                         min_len_native=min_len_native, bin=bin)
 
@@ -684,7 +697,9 @@ class Tracks:
 
 def link_tracks(items, cadence, bin=BIN):
     """Tory satelitów przez kolejne klatki sekwencji. `items` = lista `(klatka, t, Streak)`: numer
-    klatki w sekwencji, czas startu [s] (dowolne zero), ślad. `cadence` = mediana kadencji [s].
+    klatki w sekwencji, czas startu [s] (dowolne zero), ślad. `cadence` = mediana kadencji [s];
+    brak kadencji (None - `cadence()` przy mniej niż dwóch różnych czasach - albo ≤ 0) = brak torów,
+    bo bez niej nie ma progu Δt.
 
     Kandydaci: kolejne klatki ZE śladami, Δt ≤ 3 × kadencja, |Δθ| ≤ 3°, koniec następnika w odległości
     ≤ `link_tolerance(ekstrapolacja)` od prostej poprzednika. Przypisanie zachłanne po koszcie
@@ -695,6 +710,8 @@ def link_tracks(items, cadence, bin=BIN):
     Współrzędne są porównywane w układach klatek bez korekty ditheringu - Δt ≤ 3 kadencje nie
     przepuszcza ogniw przez przerwę na dithering serii krótkich, a na subach długich satelita mieści
     się w jednej klatce (plan §1a ust. 6)."""
+    if cadence is None or not cadence > 0:
+        return Tracks()
     by_frame = {}
     for k, (frame, _, _) in enumerate(items):
         by_frame.setdefault(frame, []).append(k)

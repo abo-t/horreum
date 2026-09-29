@@ -159,6 +159,38 @@ def test_sekwencja_dwuklatkowa_bez_sasiadow():
     assert [r.status for r in streaks.scan_sequence(3, load)] == ["done"] * 3
 
 
+def _ok(j, seed, rows=None):
+    """Klatka czytelna; `rows` przycina dane (nagłówek mówi jedno, plik ma inny kształt)."""
+    a = _native_frame(j, seed)[:rows]
+    return streaks.Binned("ok", streaks._bin_mean(a, 4), 4, a.shape)
+
+
+def test_obcy_ksztalt_degraduje_klatke_nie_sekwencje():
+    """Klucz sekwencji grupuje po nagłówku, kształt pochodzi z danych: klatka obcego kształtu dostaje
+    `error:shape` i wypada z puli sąsiadów, reszta sekwencji liczy się dalej (falsyfikator: bez filtra
+    kształtu `neighbours` rzuca `ValueError` z generatora i klatki od miejsca błędu nie mają wyniku)."""
+    results = list(streaks.scan_sequence(7, lambda j: _ok(j, 10, 600 if j == 3 else None)))
+    assert [r.status for r in results] == ["done"] * 3 + ["error:shape"] + ["done"] * 3
+    assert [r.n_neighbours for r in results] == [3, 3, 3, 0, 3, 3, 3]
+
+
+def test_zmiana_ksztaltu_w_polowie_serii_liczy_obie_polowy():
+    """Obcy = mniejszość okna, nie „inny niż pierwsza klatka" (falsyfikator: kotwica kształtu na
+    pierwszej klatce daje drugiej połowie `error:shape`)."""
+    results = list(streaks.scan_sequence(10, lambda j: _ok(j, 11, 600 if j >= 5 else None)))
+    assert [r.status for r in results] == ["done"] * 10
+    assert results[4].n_neighbours == 2 and results[5].n_neighbours == 2
+
+
+def test_klatka_pusta_po_binningu_to_error_shape():
+    """Klatka mniejsza niż blok binningu nie ma pikseli roboczych: `error:shape`, nie wyjątek
+    (falsyfikator: seria samych takich klatek rzucała `IndexError` z korelacji fazowej)."""
+    empty = streaks.Binned("ok", np.zeros((0, 160), np.float32), 4, (3, 640))
+    assert [r.status for r in streaks.scan_sequence(3, lambda j: empty)] == ["error:shape"] * 3
+    mixed = list(streaks.scan_sequence(5, lambda j: empty if j == 2 else _ok(j, 12)))
+    assert [r.status for r in mixed] == ["done", "done", "error:shape", "done", "done"]
+
+
 # ---------------------------------------------------------------- detekcja i pomiar
 
 @pytest.mark.parametrize("bin_", [2, 4])
@@ -266,6 +298,14 @@ def test_rozrzut_predkosci_w_torze_ponad_20_procent_rwie_ogniwo():
 
 def test_przerwa_ponad_3_kadencje_nie_laczy():
     assert streaks.link_tracks([_sat(0), _sat(4, t=28.0)], cadence=7.0).links == ()
+
+
+def test_brak_kadencji_to_brak_torow():
+    """`cadence()` oddaje None przy mniej niż dwóch różnych czasach - brak kadencji to pusty wynik,
+    nie wyjątek (falsyfikator: `3.0 * None` rzucało `TypeError`)."""
+    assert streaks.cadence([datetime(2026, 8, 12, 22, 0)] * 2) is None
+    for cad in (None, 0.0, -7.0, float("nan")):
+        assert streaks.link_tracks([_sat(0), _sat(1)], cadence=cad) == streaks.Tracks(), cad
 
 
 # Noc Perseidów 2026-08-12 (`outall/detections.csv` prototypu): theta, końce w px binowanych ×4, czas

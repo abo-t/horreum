@@ -195,6 +195,142 @@ def test_przywroc_domyslne_cofa_wszystkie_progi(view):
     assert "6′" in view.controls_toggle.text()         # tytuł zwiniętego paska mówi prawdę
 
 
+def test_filtr_kadru_domyslnie_wylaczony_a_kolumna_wypelnienia_jest(view):
+    """PL-1/PL-2: oba progi domyślnie WYŁĄCZONE (wzór progu kosztu, D-0731-14): rachunek bez
+    nich; kolumna „Wypełnienie" stoi w tabeli i niesie procent soczewki."""
+    from PySide6.QtCore import Qt
+    from horreum.gui import i18n
+    assert view.min_fill_on.isChecked() is False and view.min_fill.isEnabled() is False
+    assert view.max_panels_on.isChecked() is False and view.max_panels.isEnabled() is False
+    p = view._params()
+    assert p["min_fill"] is None and p["max_panels"] is None
+    assert view._result.rig_filter == "off"
+    headers = [view.model.headerData(c, Qt.Horizontal) for c in range(view.model.columnCount())]
+    col = headers.index(i18n.t("planner.col_fill"))
+    assert view.model.data(view.model.index(0, col)).endswith("%")
+    assert view.model.data(view.model.index(0, col), Qt.TextAlignmentRole) is not None
+
+
+def test_filtr_kadru_wlaczony_tnie_liste_i_mowi_to_w_naglowku(view):
+    """Włączenie progu re-planuje z ułamkiem (ekran mówi procentami), licznik zmienia napis,
+    tytuł zwiniętego paska nazywa filtr. Park jawny w bazie: przy nieustawionym filtr nie działa."""
+    repo.set_telescope_park(view.con, telescope_id=1, in_park=1, now=NOW)
+    repo.set_telescope_park(view.con, telescope_id=2, in_park=1, now=NOW)
+    view.replan()
+    base = view.model.rowCount()
+    view.min_fill.setValue(30.0)
+    view.min_fill_on.setChecked(True)
+    view.max_panels_on.setChecked(True)
+    view.replan()
+    assert view._params()["min_fill"] == pytest.approx(0.3) and view._params()["max_panels"] == 1
+    assert view._result.rig_filter == "on"
+    assert 0 < view.model.rowCount() < base
+    assert "twoim sprzętem" in view.counts_label.text()
+    assert "wypełnienie ≥30%" in view.controls_toggle.text()
+
+
+def test_filtr_kadru_przezywa_zamkniecie_i_reset_go_gasi(qapp, tmp_path, ustawienia):
+    """Wartość i przełącznik pamiętane w `QSettings` jak sąsiednie progi; „Przywróć domyślne"
+    wyłącza oba filtry kadru jednym re-planem."""
+    con = _seed(str(tmp_path / "kadr.db"))
+    first = PlannerView(con, db_path=None)
+    first.min_fill.setValue(45.0)
+    first.min_fill_on.setChecked(True)
+    first.max_panels.setValue(2)
+    first.max_panels_on.setChecked(True)
+    first.close()
+    second = PlannerView(con, db_path=None)
+    try:
+        assert second.min_fill.value() == 45.0 and second.min_fill_on.isChecked() is True
+        assert second.max_panels.value() == 2 and second.max_panels.isEnabled() is True
+        gen = second._gen
+        second._on_reset_thresholds()
+        assert second.min_fill_on.isChecked() is False and second.min_fill.isEnabled() is False
+        assert second.max_panels_on.isChecked() is False and second.max_panels.value() == 1
+        assert second._gen == gen + 1
+    finally:
+        second.close()
+        con.close()
+
+
+def test_filtr_kadru_nieczynny_tytul_paska_mowi_to_wprost(view):
+    """Poproszony filtr przy nieustawionym parku NIE tnie (`rig_filter == 'no_park'`), więc tytuł
+    zwiniętego paska nie ma prawa głosić cięcia bez dopisku; przy ustawionym parku dopisek znika."""
+    view.min_fill_on.setChecked(True)
+    view.replan()
+    assert view._result.rig_filter == "no_park"
+    assert "filtr kadru" in view.controls_toggle.text()
+    assert view.controls_toggle.text().endswith("(nieczynny)")
+    repo.set_telescope_park(view.con, telescope_id=1, in_park=1, now=NOW)
+    view.replan()
+    assert view._result.rig_filter == "on"
+    assert "filtr kadru" in view.controls_toggle.text()
+    assert "(nieczynny)" not in view.controls_toggle.text()
+
+
+def test_licznik_przy_soczewce_mowi_ile_wierszy_widac(view):
+    """Licznik nad listą mówi to, co widać: soczewka, która przy filtrze kadru chowa wiersze,
+    dopisuje swoją liczbę; „najlepsze dopasowanie" zostawia napis bez dopisku."""
+    from horreum.gui import planner_model as pm
+    for tel_id in (1, 2, 3):
+        repo.set_telescope_park(view.con, telescope_id=tel_id, in_park=1, now=NOW)
+    view.min_fill_on.setChecked(True)
+    view.max_panels_on.setChecked(True)
+    view.replan()
+    rows = view._result.counts["rows"]
+    hiding = 0
+    for name in pm.rig_choices(view._result):
+        view._on_chip(name)
+        shown = view.model.rowCount()
+        if shown < rows:
+            hiding += 1
+            assert f"w soczewce {name}: {shown})" in view.counts_label.text()
+        else:
+            assert "w soczewce" not in view.counts_label.text()
+    assert hiding, "żadna soczewka nie chowa - test straciłby sens"
+    view._on_chip(None)
+    assert "w soczewce" not in view.counts_label.text()
+
+
+def test_mozaika_w_kolumnie_wypelnienia_przygaszona_z_podpowiedzia(view):
+    """„100%" mozaiki i „100%" idealnego kadru nie mogą wyglądać tak samo: komórka mozaiki dostaje
+    szarość motywu i podpowiedź; komórka jednego kadru - nie."""
+    from PySide6.QtCore import Qt
+    from horreum.gui import i18n
+    from horreum.gui.planner import _COL_FILL
+    m = view.model
+    mosaic = [r for r in range(m.rowCount()) if m.row_at(r).fill_mosaic and m.row_at(r).visible]
+    single = [r for r in range(m.rowCount()) if not m.row_at(r).fill_mosaic and m.row_at(r).visible]
+    assert mosaic and single
+    idx = m.index(mosaic[0], _COL_FILL)
+    assert m.data(idx, Qt.ForegroundRole) is not None
+    assert m.data(idx, Qt.ToolTipRole) == i18n.t("planner.fill_mosaic_tip")
+    idx = m.index(single[0], _COL_FILL)
+    assert m.data(idx, Qt.ForegroundRole) is None and m.data(idx, Qt.ToolTipRole) is None
+
+
+def test_pola_progow_jednej_szerokosci_a_wypelnienie_z_jednostka(view):
+    """Kolumna pól jest kolumną: progi, próg kosztu i oba pola filtra kadru mają TĘ SAMĄ, stałą
+    szerokość (porównanie między polami, nie piksele). Wypełnienie niesie „%" w polu, a etykieta
+    już nie."""
+    from horreum.gui import i18n
+    spins = list(view._spins.values()) + [view.max_cost, view.min_fill, view.max_panels]
+    assert all(w.minimumWidth() == w.maximumWidth() for w in spins)
+    assert len({w.maximumWidth() for w in spins}) == 1
+    assert view.min_fill.suffix() == "%" and "%" in view.min_fill.text()
+    assert "%" not in i18n.t("planner.min_fill")
+
+
+def test_skrocony_naglowek_wypelnienia_niesie_pelna_nazwe_w_podpowiedzi(view):
+    from PySide6.QtCore import Qt
+    from horreum.gui import i18n
+    from horreum.gui.planner import _COL_FILL
+    assert view.model.headerData(_COL_FILL, Qt.Horizontal) == i18n.t("planner.col_fill")
+    assert view.model.headerData(_COL_FILL, Qt.Horizontal, Qt.ToolTipRole) == \
+        i18n.t("planner.col_fill_tip")
+    assert view.model.headerData(0, Qt.Horizontal, Qt.ToolTipRole) is None
+
+
 def test_porzadek_po_soczewce_przestawia_liste_bez_re_planu(view):
     """Dług P-A #3: chip zmieniał radę, ale NIE porządek — „patrzę oczami RC8" zostawiało na górze
     cele wybrane dla A140R. Sort żyje w WIDOKU: `targets._sort_key` (pięć członów, D-T4-c) i CLI
@@ -436,10 +572,9 @@ def test_dialog_parku_pokazuje_nazwe_usera_a_kanon_w_tooltipie(view, qapp):
 
 
 def test_ekran_deklaruje_podloge_szerokosci(view):
-    """Dług P-A #2 (decyzja Zdzinia 2026-08-01): kolumny NIE ustępują, ustępuje okno. Zmierzone
-    realnym fontem: 11 kolumn zajmuje 981 px treści, więc przy dawnej podłodze 1073 px tabela
-    scrollowała się w poziomie o 375 px. Test pilnuje deklaracji, nie pikseli renderu — te zależą
-    od fontu maszyny (offscreen podawał wartości zawyżone o ~45%)."""
+    """Dług P-A #2 (decyzja Zdzinia 2026-08-01): kolumny NIE ustępują, ustępuje okno. Liczby
+    pomiaru (12 kolumn, platforma natywna) stoją przy `_MIN_W`. Test pilnuje deklaracji, nie pikseli
+    renderu - te zależą od fontu maszyny (offscreen podawał wartości zawyżone o ~45%)."""
     from horreum.gui.planner import _MIN_W
     assert view.minimumWidth() == _MIN_W
     assert view.minimumSizeHint().width() >= _MIN_W

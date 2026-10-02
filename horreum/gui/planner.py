@@ -47,6 +47,7 @@ _SPIN_W = 96
 _COLUMNS = (("planner.col_canon", "canon"), ("planner.col_type", "type"),
             ("planner.col_size", "size"), ("planner.col_culmination", "culmination"),
             ("planner.col_window", "window"), ("planner.col_rig", "rig"),
+            ("planner.col_fill", "fill"),
             ("planner.col_coverage", "coverage"), ("planner.col_cost", "cost"),
             ("planner.col_recommend", "recommend"), ("planner.col_plan", "plan"),
             ("planner.col_note", "note"))
@@ -54,17 +55,23 @@ _COLUMNS = (("planner.col_canon", "canon"), ("planner.col_type", "type"),
 # Indeks kolumny „Pokrycie" liczony Z `_COLUMNS`, nie wpisany liczbą: przestawienie kolumn nie ma
 # prawa przenieść tooltipu ze ścieżkami stosów (I-2e) na cudzą komórkę.
 _COL_COVERAGE = next(i for i, (key, _f) in enumerate(_COLUMNS) if key == "planner.col_coverage")
+# Kolumna „Wypełnienie" - tą samą drogą: przygaszenie mozaiki i podpowiedzi nagłówka idą za polem.
+_COL_FILL = next(i for i, (_key, f) in enumerate(_COLUMNS) if f == "fill")
+# Nagłówki SKRÓCONE na rzecz szerokości (podłoga `_MIN_W`) niosą pełną nazwę w podpowiedzi.
+_HEADER_TIPS = {_COL_FILL: "planner.col_fill_tip"}
 
-# PODŁOGA EKRANU — decyzja Zdzinia 2026-08-01 (D-0801-1): kolumny NIE ustępują, ustępuje okno.
-# Zmierzone realnym fontem (Segoe UI 9 pt, żywa pf4, 429 wierszy, planer na wierzchu w oknie):
-# jedenaście kolumn zajmuje 981 px treści, ramka + pionowy scrollbar biorą 36 px, sidebar nawigacji
-# 184 px. Przy oknie 1073 (dawna podłoga, dyktowana przez Zbiory) tabela scrollowała się w poziomie
-# o 375 px, przy 1146 o 55. 1126 px ekranu = 1310 px okna daje 109 px zapasu na dłuższe treści
-# (warstwa cirrus, katalog EN) i mieści się na 1366×768 przy skalowaniu 100%.
-# ⚠ ZNANY KOSZT, zaakceptowany świadomie: przy skalowaniu 125% laptop 1366 raportuje 1093 px
-# logicznych — okno wtedy się NIE MIEŚCI, a prawa krawędź ucieka poza ekran. Falsyfikator tej
-# decyzji: pierwszy firsthand na maszynie ze skalowaniem.
-_MIN_W = 1126
+# PODŁOGA EKRANU - decyzja Zdzinia 2026-08-01 (D-0801-1): kolumny NIE ustępują, ustępuje okno.
+# Pomiar 2026-10-03 platformą NATYWNĄ (Segoe UI 9 pt, kopia pf4, park z bazy, 429 wierszy; offscreen
+# zawyża tekst i do tej liczby się nie nadaje): jedenaście kolumn przed Notatką zajmuje 1049 px (PL;
+# EN 1003), Notatka jako ostatnia rozciągana nie schodzi poniżej 100 px, ramka + pionowy scrollbar
+# biorą 36 px - tabela potrzebuje 1185 px ekranu. Na ekranie 2560 px przy skali 150% te same kolumny
+# mierzą ~2% więcej (1172 + 36 = 1208). Poprzednia podłoga 1126 była za ciasna już PRZED kolumną
+# „Wypełn." (11 kolumn = 1116 px w 1090 px widoku, +26 px przewijania w poziomie), a z nią tabela
+# przewijała się o 105 px. 1240 px ekranu = ~1424 px okna (nawigacja 184 px) zostawia 32-55 px
+# zapasu na dłuższe treści i mieści się z naddatkiem w kanonie MINIMALNEGO WSPIERANEGO EKRANU
+# (1920 logicznych przy 100%, `kolejka_sesji.md`). Nagłówek „Wypełn." jest skrócony właśnie pod tę
+# liczbę (pełna nazwa w podpowiedzi nagłówka): pełne „Wypełnienie" kosztowało 79 px zamiast 54.
+_MIN_W = 1240
 
 _STATUSES = ("planned", "active", "done", "skip")
 
@@ -81,6 +88,10 @@ _THRESHOLDS = {"min_size": ("planner.min_size", 6.0, 0.0, 600.0, 1.0),
                "min_alt": ("planner.min_alt", 30.0, 0.0, 89.0, 5.0),
                "min_hours": ("planner.min_hours", 1.0, 0.0, 100.0, 0.5)}
 _MAX_COST_DEFAULT = 3.0
+# Filtr kadru (dług T5, PL-1, PL-2) - jak próg kosztu: domyślnie WYŁĄCZONY, wartość pamiętana obok
+# przełącznika. Wypełnienie w PROCENTACH na ekranie (kolumna mówi „58%"), w rdzeniu ułamek 0..1.
+_MIN_FILL_DEFAULT = 30.0
+_MAX_PANELS_DEFAULT = 1
 _SETTINGS_PREFIX = "planner/"
 
 # Sufit wysokości sekcji sierot kurateli (R-S0-7) — ok. trzy wiersze. Sekcja jest wtrętem między
@@ -147,7 +158,9 @@ class PlannerTableModel(QAbstractTableModel):
 
     # Kolumny liczbowe wyrównane w PRAWO — kolumna jest do PORÓWNYWANIA między wierszami,
     # a słupek liczb wyrównany do lewej nie da się skanować (wiz T5 #5, wzorzec `grid`/`app`).
-    _NUM_COLS = frozenset({2, 3, 4, 7})     # rozmiar, kulminacja, okno, koszt
+    # Indeksy liczone z PÓL `_COLUMNS`, nie wpisane liczbami: nowa kolumna nie przesuwa wyrównania.
+    _NUM_COLS = frozenset(i for i, (_key, f) in enumerate(_COLUMNS)
+                          if f in ("size", "culmination", "window", "fill", "cost"))
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -179,7 +192,11 @@ class PlannerTableModel(QAbstractTableModel):
         return 0 if parent.isValid() else len(_COLUMNS)
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
-        if role != Qt.DisplayRole or orientation != Qt.Horizontal:
+        if orientation != Qt.Horizontal:
+            return None
+        if role == Qt.ToolTipRole and section in _HEADER_TIPS:
+            return i18n.t(_HEADER_TIPS[section])
+        if role != Qt.DisplayRole:
             return None
         return i18n.t(_COLUMNS[section][0])
 
@@ -191,7 +208,10 @@ class PlannerTableModel(QAbstractTableModel):
             return getattr(row, _COLUMNS[index.column()][1])
         if role == Qt.TextAlignmentRole and index.column() in self._NUM_COLS:
             return int(Qt.AlignRight | Qt.AlignVCenter)
-        if role == Qt.ForegroundRole and not row.visible:
+        # Mozaika ma „100%" jak cel idealnie wypełniający jeden kadr - komórka jest PRZYGASZONA,
+        # żeby te dwie setki nie czytały się jednakowo; podpowiedź mówi dlaczego.
+        mosaic = index.column() == _COL_FILL and row.fill_mosaic
+        if role == Qt.ForegroundRole and (not row.visible or mosaic):
             return self._dim
         if role == Qt.ToolTipRole:
             # Pokrycie ma WŁASNY tooltip (I-2e — gdzie leżą gotowe obrazy) i wygrywa na swojej
@@ -199,6 +219,8 @@ class PlannerTableModel(QAbstractTableModel):
             # tego samego wiersza, a ścieżka do obrazu jest tylko tutaj.
             if index.column() == _COL_COVERAGE and row.coverage_tip:
                 return row.coverage_tip
+            if mosaic:
+                return i18n.t("planner.fill_mosaic_tip")
             if not row.visible:
                 return i18n.t("planner.not_visible_tip")
         return None
@@ -416,7 +438,7 @@ class PlannerView(QWidget):
         hh.setStretchLastSection(True)
         hh.setSectionsClickable(False)   # sort nie istnieje (porządek należy do rdzenia) — martwa
         #                                  afordancja przy 429 wierszach kłamie (wiz T5 #15)
-        self.table.setTextElideMode(Qt.ElideRight)     # 11 kolumn ma elidować, nie podnosić minimum okna
+        self.table.setTextElideMode(Qt.ElideRight)     # tylko komórki przycięte ręcznie (patrz `_COLUMNS`)
         self.table.doubleClicked.connect(self._on_row_double_clicked)   # wiz T5 #19
         outer.addWidget(self.table, 1)
         self.empty_note = QLabel(i18n.t("planner.empty"))
@@ -716,13 +738,27 @@ class PlannerView(QWidget):
         self.max_cost.setSingleStep(0.5)
         self.max_cost.setValue(self._read_setting("max_cost", _MAX_COST_DEFAULT))
         self.max_cost.setEnabled(self.max_cost_on.isChecked())
-        self.max_cost.setMaximumWidth(_SPIN_W)
+        self.max_cost.setFixedWidth(_SPIN_W)
         self.max_cost.valueChanged.connect(self._queue_replan)
         self.max_cost.valueChanged.connect(lambda _v: self._save_thresholds())
         cost_row.addWidget(self.max_cost_on)
         cost_row.addWidget(self.max_cost)
         cost_row.addStretch(1)
         right.addRow(i18n.t("planner.max_cost"), cost_row)
+        # Filtr kadru OBOK progu kosztu i na jego wzór (D-0731-14): przełącznik z etykietą + pole,
+        # domyślnie wyłączony, oba pamiętane w `QSettings`.
+        self.min_fill = QDoubleSpinBox()
+        self.min_fill.setRange(1.0, 100.0)
+        self.min_fill.setSingleStep(5.0)
+        self.min_fill.setDecimals(0)
+        self.min_fill.setSuffix("%")             # jednostka W POLU: „30" bez niej czytało się jak liczba celów
+        self.min_fill.setValue(self._read_setting("min_fill", _MIN_FILL_DEFAULT))
+        self.min_fill_on = self._switched(right, "planner.min_fill", "min_fill_on", self.min_fill)
+        self.max_panels = QSpinBox()
+        self.max_panels.setRange(1, 99)
+        self.max_panels.setValue(int(self._read_setting("max_panels", _MAX_PANELS_DEFAULT)))
+        self.max_panels_on = self._switched(right, "planner.max_panels", "max_panels_on",
+                                            self.max_panels)
         # Powrót do 6′/15′/13 mag jednym klikiem — bez niego zapamiętane progi byłyby drogą
         # w jedną stronę, a user nie ma skąd znać wartości domyślnych (są w kodzie, nie na ekranie).
         self.reset_btn = QPushButton(i18n.t("planner.reset_thresholds"))
@@ -753,6 +789,12 @@ class PlannerView(QWidget):
         self._settings.setValue(_SETTINGS_PREFIX + "max_cost", self.max_cost.value())
         self._settings.setValue(_SETTINGS_PREFIX + "max_cost_on",
                                 1.0 if self.max_cost_on.isChecked() else 0.0)
+        self._settings.setValue(_SETTINGS_PREFIX + "min_fill", self.min_fill.value())
+        self._settings.setValue(_SETTINGS_PREFIX + "min_fill_on",
+                                1.0 if self.min_fill_on.isChecked() else 0.0)
+        self._settings.setValue(_SETTINGS_PREFIX + "max_panels", self.max_panels.value())
+        self._settings.setValue(_SETTINGS_PREFIX + "max_panels_on",
+                                1.0 if self.max_panels_on.isChecked() else 0.0)
 
     def _on_reset_thresholds(self):
         """Wszystkie progi na domyślne + JEDEN re-plan. `_loading` tłumi sygnały pośrednie, więc
@@ -764,9 +806,15 @@ class PlannerView(QWidget):
                 self._spins[name].setValue(default)
             self.max_cost_on.setChecked(False)
             self.max_cost.setValue(_MAX_COST_DEFAULT)
+            self.min_fill_on.setChecked(False)
+            self.min_fill.setValue(_MIN_FILL_DEFAULT)
+            self.max_panels_on.setChecked(False)
+            self.max_panels.setValue(_MAX_PANELS_DEFAULT)
         finally:
             self._loading = False
         self.max_cost.setEnabled(False)
+        self.min_fill.setEnabled(False)
+        self.max_panels.setEnabled(False)
         self._save_thresholds()
         self._sync_controls_title()
         self.replan()
@@ -780,12 +828,41 @@ class PlannerView(QWidget):
         w.setSingleStep(step)
         w.setValue(self._read_setting(name, default))
         self._spins[name] = w
-        w.setMaximumWidth(_SPIN_W)          # spinbox na „1,00" nie ma prawa jechać przez pół ekranu
+        # Szerokość STAŁA, nie tylko sufit: w wierszu formularza pole rosło do sufitu, a w wierszu
+        # z przełącznikiem zostawało przy podpowiedzi rozmiaru - kolumna pól miała trzy szerokości.
+        w.setFixedWidth(_SPIN_W)
         w.valueChanged.connect(self._queue_replan)
         w.valueChanged.connect(lambda _v: self._sync_controls_title())
         w.valueChanged.connect(lambda _v: self._save_thresholds())
         form.addRow(i18n.t(key), w)
         return w
+
+    def _switched(self, form, label_key, on_name, spin):
+        """Wiersz filtra kadru: przełącznik „licz próg" + pole (wzór progu kosztu). Stan przełącznika
+        z `QSettings`; pole aktywne tylko przy włączonym, żeby wartość nie udawała działającego
+        progu. Zwraca przełącznik."""
+        on = QCheckBox(i18n.t("planner.max_cost_on"))
+        on.setChecked(self._read_setting(on_name, 0.0) == 1.0)
+        on.setToolTip(i18n.t("planner.rig_filter_tip"))
+        spin.setEnabled(on.isChecked())
+        spin.setFixedWidth(_SPIN_W)
+        spin.setToolTip(i18n.t("planner.rig_filter_tip"))
+        spin.valueChanged.connect(self._queue_replan)
+        spin.valueChanged.connect(lambda _v: self._sync_controls_title())
+        spin.valueChanged.connect(lambda _v: self._save_thresholds())
+        on.toggled.connect(lambda checked: self._on_rig_filter_toggled(spin, checked))
+        row = QHBoxLayout()
+        row.addWidget(on)
+        row.addWidget(spin)
+        row.addStretch(1)
+        form.addRow(i18n.t(label_key), row)
+        return on
+
+    def _on_rig_filter_toggled(self, spin, on):
+        spin.setEnabled(on)
+        self._save_thresholds()
+        self._sync_controls_title()
+        self._queue_replan()
 
     def _on_max_cost_toggled(self, on):
         self.max_cost.setEnabled(on)
@@ -800,10 +877,26 @@ class PlannerView(QWidget):
     def _sync_controls_title(self):
         """Tytuł paska niesie STAN progów — zwinięty musi mówić, czym tniesz listę, inaczej user
         widzi krótką listę i nie wie dlaczego (wiz T5 #3)."""
-        self.controls_toggle.setText(i18n.t(
+        text = i18n.t(
             "planner.controls_state", size=f"{self.min_size.value():.0f}",
             dark=f"{self.min_dark.value():.0f}", mag=f"{self.max_mag.value():.1f}",
-            alt=f"{self.min_alt.value():.0f}", hours=f"{self.min_hours.value():.1f}"))
+            alt=f"{self.min_alt.value():.0f}", hours=f"{self.min_hours.value():.1f}")
+        # Filtr kadru CHOWA cele, więc zwinięty pasek musi go nazwać - ale tylko włączony:
+        # domyślny tytuł zostaje ten sam co przed filtrem.
+        parts = []
+        if self.min_fill_on.isChecked():
+            parts.append(i18n.t("planner.rig_filter_fill", pct=f"{self.min_fill.value():.0f}"))
+        if self.max_panels_on.isChecked():
+            parts.append(i18n.t("planner.rig_filter_panels", n=self.max_panels.value()))
+        if parts:
+            text += i18n.t("planner.controls_state_rig", filter=", ".join(parts))
+            # Poproszony, ale NIECZYNNY (park nieustawiony, brak zestawu z FOV, tryb szukania) -
+            # stan z POLICZONEGO wyniku, nie z kontrolek: tytuł nie ma prawa głosić cięcia, którego
+            # rachunek nie zrobił. Wynik jeszcze bez filtra (`off`, bieg w locie) dopisku nie daje;
+            # `_on_done` odświeża tytuł, gdy przyjdzie świeży.
+            if self._result is not None and self._result.rig_filter not in ("off", "on"):
+                text += i18n.t("planner.controls_state_rig_off")
+        self.controls_toggle.setText(text)
 
     # ---------------------------------------------------------------- chipy zestawu (soczewka)
 
@@ -845,6 +938,8 @@ class PlannerView(QWidget):
         self.chips_row.addWidget(QLabel(i18n.t("planner.chips_label")))
         # Zaznaczony chip na kolorze zaznaczenia ŻYWEGO motywu (`use_theme`): zmierzone 64 vs 81
         # na tle 43 (różnica 17/255, i to zaznaczony był CIEMNIEJSZY) nie odróżniało soczewki.
+        # Chip wskazuje NAZWĘ zestawu (`RigSet.name`), nie teleskop: optyka z dwiema kamerami ma
+        # dwa chipy z kamerą w etykiecie, a nie dwa „ED120R", z których oba patrzyłyby jednym okiem.
         names = (None,) + pm.rig_choices(result)
         if self._rig_chip not in names:          # zestaw zniknął (inny park) → wracamy do best-fit
             self._rig_chip = None
@@ -854,7 +949,10 @@ class PlannerView(QWidget):
             b.setText(i18n.t("planner.chip_best") if name is None else name)
             b.setChecked(name == self._rig_chip)
             b.setStyleSheet(self._chip_qss)
-            b.setToolTip(i18n.t("planner.chip_tip"))
+            # Przy włączonym filtrze kadru chip CHOWA wiersze - obietnica „żaden cel nie znika"
+            # byłaby wtedy nieprawdą.
+            b.setToolTip(i18n.t("planner.chip_tip_filter" if result.rig_filter == "on"
+                                else "planner.chip_tip"))
             b.clicked.connect(lambda _c=False, n=name: self._on_chip(n))
             self._chip_group.addButton(b)
             self.chips_row.addWidget(b)
@@ -874,6 +972,9 @@ class PlannerView(QWidget):
     def _on_chip(self, name):
         self._rig_chip = name
         self._render_rows()
+        # Nota „soczewka schowała N" zależy od chipa, nie od rachunku - nagłówek idzie za chipem.
+        if self._result is not None:
+            self._render_header(self._result)
 
     def _on_order(self, _index):
         """Zmiana porządku = PRZERYSOWANIE, nie nowy rachunek nocy (jak chip): ten sam `PlanResult`,
@@ -896,7 +997,9 @@ class PlannerView(QWidget):
                 "min_size": self.min_size.value(), "min_dark": self.min_dark.value(),
                 "max_mag": self.max_mag.value(), "min_alt": self.min_alt.value(),
                 "min_hours": self.min_hours.value(),
-                "max_cost": self.max_cost.value() if self.max_cost_on.isChecked() else None}
+                "max_cost": self.max_cost.value() if self.max_cost_on.isChecked() else None,
+                "min_fill": self.min_fill.value() / 100.0 if self.min_fill_on.isChecked() else None,
+                "max_panels": self.max_panels.value() if self.max_panels_on.isChecked() else None}
 
     def _queue_replan(self, *_a):
         if not self._loading:
@@ -963,6 +1066,7 @@ class PlannerView(QWidget):
             return                       # stale — świeży bieg wystartuje w cleanupie
         self._result = result
         self._shown_gen = gen
+        self._sync_controls_title()          # dopisek „nieczynny" zależy od policzonego wyniku
         self._rebuild_chips(result)
         self._render_header(result)
         self._render_orphans(result)
@@ -998,9 +1102,9 @@ class PlannerView(QWidget):
         # W trybie `find` lejek („1560 → 1 po progach") kłamał: progi są pominięte (wiz T5 #7).
         self.counts_label.setText(
             i18n.t_plural("planner.counts_find", len(result.rows), needle=find) if find
-            else pm.counts_text(result))
+            else pm.counts_text(result, self._rig_chip))
         warns, infos = [], []
-        for level, text in pm.header_notes(result):
+        for level, text in pm.header_notes(result, self._rig_chip):
             (warns if level == "warn" else infos).append(text)
         if find:
             infos.insert(0, i18n.t("planner.find_note"))
@@ -1019,7 +1123,9 @@ class PlannerView(QWidget):
         self.model.set_rows(rows)
         empty = not rows
         self.empty_note.setText(i18n.t("planner.empty_find", needle=self.find_edit.text().strip())
-                                if self.find_edit.text().strip() else i18n.t("planner.empty"))
+                                if self.find_edit.text().strip()
+                                else i18n.t("planner.empty_rig" if self._result.rig_filter == "on"
+                                            else "planner.empty"))
         self.empty_note.setVisible(empty)
         self.table.setVisible(not empty)
         # Zaznaczenie wraca na TEN SAM cel, o ile został na liście: `skip` go z niej zdejmuje

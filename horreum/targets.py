@@ -14,6 +14,13 @@ bez żadnego kryterium. Progi są ARGUMENTAMI — asset jest pulą, nie decyzją
 SUFITU ROZMIARU NIE MA (D-0731-8): cel większy od kadru dostaje LICZBĘ PANELI. „Nie mieści się"
 to parametr kadrowania, nie powód do ukrycia celu.
 
+FILTR KADRU JEST NA ŻĄDANIE (dług T5 „podłoga optyki", PL-1, PL-2): `min_fill` (cel za mały dla
+optyki) i `max_panels` (bez mozaik na jedną noc) są DOMYŚLNIE WYŁĄCZONE, jak próg kosztu
+(D-0731-14) - bez nich odpowiedź planera jest ta sama co przed filtrem. Włączone tną PULĘ przed
+oknem widoczności, z kwantyfikatorem LUB po parku („mam czym to zrobić"), a `best_rig` wybierany
+jest wtedy spośród zestawów, które filtr przepuszczają. `max_panels` nie łamie D-0731-8: tamto
+zakazuje sufitu narzuconego, to jest sufit, o który użytkownik prosi wprost.
+
 POKRYCIE KLEI SIĘ PO KANONIE I ALIASACH KATALOGOWYCH, NIGDY PO NAZWIE POTOCZNEJ: „Eastern Veil"
 wskazuje jednocześnie NGC6992 i NGC6995 (5 takich kolizji w assecie), więc nazwa potoczna ma głos
 wyłącznie w `find`. Kanon archiwum, który nie trafi w żaden rekord (region `Veil`, komety), idzie
@@ -38,7 +45,7 @@ from __future__ import annotations
 
 import functools
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from importlib import resources
 
@@ -188,13 +195,23 @@ class RigSet:
     fov_y_arcmin: float | None
     lights: int
     reason: str | None
+    # Etykieta dla człowieka, nadawana przez `rig_sets` (jedyne miejsce, które widzi wszystkie
+    # zestawy naraz): przy DRUGIM zestawie na tej samej optyce (inna kamera = inne pole widzenia)
+    # sama nazwa teleskopu nie mówi, który kadr masz przed oczami. `None` = nazwa teleskopu.
+    label: str | None = None
+
+    @property
+    def name(self):
+        """Nazwa zestawu na powierzchniach (chip, komórka, CLI): teleskop, a przy dwóch zestawach
+        jednego teleskopu teleskop z kamerami. W obrębie jednego `PlanResult.rigs` - unikalna."""
+        return self.label or self.telescope
 
 
 @dataclass(frozen=True)
 class TargetRow:
     target: Target
     window: object                 # sky.Window
-    framing: dict                  # telescope -> sky.Framing
+    framing: dict                  # RigSet.config_id -> sky.Framing (czytaj przez `framing_in`)
     best_rig: RigSet | None
     coverage: Coverage
     cost: dict                     # paleta -> ile razy dłużej dla tego samego S/N
@@ -204,6 +221,16 @@ class TargetRow:
     plan_status: str | None = None      # planned|active|done|skip
     priority: int | None = None         # mniejsza = pilniejsza
     note: str | None = None
+
+    def framing_in(self, rig):
+        """Kadrowanie celu w zestawie `rig`; `None` = brak zestawu albo zestaw bez FOV.
+
+        Słownik jest kluczowany TOŻSAMOŚCIĄ ZESTAWU (`config_id` jego reprezentanta), nie nazwą
+        teleskopu: jedna optyka z dwiema kamerami daje dwa zestawy o różnym polu widzenia, a klucz
+        po teleskopie oddawał kadrowanie zestawu iterowanego później - przy filtrze kadru ekran
+        chował cel pod „najlepszym dopasowaniem", a CLI drukował cudze wypełnienie. Jedna droga
+        odczytu dla rdzenia, CLI i ekranu."""
+        return None if rig is None else self.framing.get(rig.config_id)
 
 
 @dataclass(frozen=True)
@@ -229,6 +256,14 @@ class PlanResult:
     # Stoją OBOK `rows`, a nie w nich: wiersz planera niesie okno, kadrowanie i koszt liczone
     # z rekordu katalogu, a sierota rekordu nie ma. Pusty słownik = wszystko widać.
     orphan_marks: dict = field(default_factory=dict)
+    # Filtr kadru (`min_fill`/`max_panels`) - progi Z WOŁANIA i STAN, w którym zadziałały:
+    # `off` (nie proszono) · `on` (tnie pulę) · `no_park` (park nieustawiony: liczenie po wszystkich
+    # teleskopach bazy, także historycznych, nie odcięłoby uczciwie niczego) · `no_rigs` (park nie
+    # dał zestawu z FOV) · `find` (tryb szukania pomija progi). Powierzchnie czytają progi STĄD -
+    # soczewka ekranu nie ma własnej kopii.
+    min_fill: float | None = None
+    max_panels: int | None = None
+    rig_filter: str = "off"
 
 
 # ─────────────────────────────────────────────────────── asset
@@ -300,24 +335,45 @@ def _target(raw, layer):
                   layer=layer, why=raw.get("why"), size_source=raw.get("size_source"), **fields)
 
 
-def feasible(t, *, min_size=6.0, min_dark=15.0, max_mag=13.0):
-    """Czy cel jest WYKONALNY wg progów typo-zależnych (D-0731-10).
+def feasible(t, rigs=(), *, min_size=6.0, min_dark=15.0, max_mag=13.0, min_fill=None,
+             max_panels=None, overlap=0.10):
+    """Czy cel jest WYKONALNY wg progów typo-zależnych (D-0731-10) i, na żądanie, TWOIM SPRZĘTEM.
 
     Galaktyka bez magnitudo odpada (dla galaktyki jasność JEST kryterium), mgławica bez magnitudo
-    przechodzi (dla niej magnitudo kłamie). Typ spoza taksonomii odpada — patrz `GALAXY_TYPES`."""
+    przechodzi (dla niej magnitudo kłamie). Typ spoza taksonomii odpada - patrz `GALAXY_TYPES`.
+
+    FILTR KADRU (dług T5, PL-1, PL-2): przy niepustym `rigs` i choć jednym z progów `min_fill`/
+    `max_panels` cel przechodzi, gdy JAKIKOLWIEK zestaw parku spełnia OBA progi naraz (`rig_fits`):
+    kwantyfikator LUB: „mam czym to zrobić", nie „zrobi to najsłabsza optyka". Ten sam zestaw musi
+    spełnić oba, bo „wypełnia 50 % w mozaice RC8" i „jeden kadr w A140R przy 8 %" nie składają się
+    w cel wykonalny jednym kadrem przy 30 %. `rigs=()` (domyślnie) = brak odsiewu sprzętowego."""
     if t.major_arcmin is None:
         return False
     if t.type in DARK_TYPES:
-        return t.major_arcmin >= min_dark
-    if t.type not in GALAXY_TYPES and t.type not in NEBULA_TYPES:
+        ok = t.major_arcmin >= min_dark
+    elif t.type not in GALAXY_TYPES and t.type not in NEBULA_TYPES:
         return False                                     # unknown_type — jawnie, nie po cichu
-    if t.major_arcmin < min_size:
+    elif t.major_arcmin < min_size:
         return False
-    if t.type in GALAXY_TYPES:
-        if t.mag is None:
-            return False
-        return (t.mag - B_TO_V if t.mag_from_b else t.mag) <= max_mag
-    return True
+    elif t.type in GALAXY_TYPES:
+        ok = t.mag is not None and (t.mag - B_TO_V if t.mag_from_b else t.mag) <= max_mag
+    else:
+        ok = True
+    if not ok or not rigs or (min_fill is None and max_panels is None):
+        return ok
+    return any(rig_fits(_frame(t, rig, overlap), min_fill=min_fill, max_panels=max_panels)
+               for rig in rigs)
+
+
+def rig_fits(framing, *, min_fill=None, max_panels=None):
+    """JEDYNY predykat filtra kadru: woła go pula rdzenia (`feasible`), wybór `best_rig`
+    (`_framing_for`) i soczewka ekranu (`planner_model`). Brak kadrowania (zestaw bez FOV) nie
+    przechodzi: „nie wiem" nie jest „mieści się". Próg `None` nie tnie."""
+    if framing is None:
+        return False
+    if min_fill is not None and framing.frame_fill < min_fill:
+        return False
+    return max_panels is None or framing.panels <= max_panels
 
 
 def resolve_plan_canon(needle, layers=ALL_LAYERS):
@@ -455,6 +511,16 @@ def rig_sets(con, park=None):
                           fov_y_arcmin=head.fov_y_arcmin,
                           lights=sum(m.lights for m in members), reason=None))
     out.sort(key=lambda s: (-s.lights, s.telescope))
+    # Dwa zestawy jednej optyki (kamery o innej matrycy) dostają etykietę z kamerami. Zbiory kamer
+    # są rozłączne z konstrukcji: config to `UNIQUE(telescope_id, camera_id)` i każdy config siedzi
+    # w dokładnie jednej grupie FOV - więc nazwa jest unikalna, a powierzchnie mogą nią wskazywać.
+    per_telescope = {}
+    for s in out:
+        per_telescope[s.telescope] = per_telescope.get(s.telescope, 0) + 1
+    out = [replace(s, label=f"{s.telescope} ({'/'.join(s.cameras)})")
+           if per_telescope[s.telescope] > 1 else s for s in out]
+    assert len({s.name for s in out}) == len(out), \
+        f"targets: nazwy zestawów nie są unikalne: {[s.name for s in out]}"
     return tuple(out), tuple(skipped)
 
 
@@ -463,16 +529,32 @@ def _mono_cameras(con):
             con.execute("SELECT model_canon FROM camera WHERE is_mono = 1").fetchall()}
 
 
-def _framing_for(t, rigs, overlap):
+def _frame(t, rig, overlap):
+    """Kadrowanie celu `t` w zestawie `rig`: JEDNA droga do `sky.framing` dla rankingu i progu
+    (SIN-DUP: filtr kadru nie liczy wypełnienia po swojemu)."""
+    return sky.framing(t.major_arcmin, _rig_shim(rig), overlap=overlap,
+                       minor_arcmin=t.minor_arcmin)
+
+
+def _framing_for(t, rigs, overlap, *, min_fill=None, max_panels=None):
     """Kadrowanie we wszystkich zestawach + rekomendacja: jeden kadr o największym wypełnieniu,
-    a gdy cel nie mieści się nigdzie — najmniejsza mozaika (D-0731-8: cel ZOSTAJE)."""
+    a gdy cel nie mieści się nigdzie - najmniejsza mozaika (D-0731-8: cel ZOSTAJE).
+
+    Włączony filtr kadru zawęża KANDYDATÓW do `best_rig` (nie słownik `framing`: soczewka ekranu
+    nadal widzi każdy zestaw). Cel przeszedł pulę, bo spełnia go któryś zestaw, więc rekomendacja
+    wskazuje właśnie taki, a nie optykę, której próg nie przepuścił. Bez progów - bez zmian.
+
+    Klucz słownika to `config_id` ZESTAWU (`TargetRow.framing_in`): teleskop z dwiema kamerami
+    to dwa zestawy i dwa różne kadrowania."""
     framing, candidates = {}, []
     for rig in rigs:
-        f = sky.framing(t.major_arcmin, _rig_shim(rig), overlap=overlap,
-                        minor_arcmin=t.minor_arcmin)
+        f = _frame(t, rig, overlap)
         if f is None:
             continue
-        framing[rig.telescope] = f
+        framing[rig.config_id] = f
+        if (min_fill is not None or max_panels is not None) and \
+                not rig_fits(f, min_fill=min_fill, max_panels=max_panels):
+            continue
         candidates.append(((f.panels, -f.fill, rig.config_id), rig))
     if not candidates:
         return framing, None
@@ -663,12 +745,19 @@ def default_night(site, *, now=None, step_min=5):
 def plan(con, *, night=None, site=None, park=None, layers=DEFAULT_LAYERS,
          min_size=6.0, min_dark=15.0, max_mag=13.0, min_alt=30.0, min_hours=1.0,
          max_cost=None, overlap=0.10, v_zen=sky.V_ZEN_DEFAULT, k_ext=sky.K_EXT_DEFAULT,
-         only_gaps=False, only_new=False, status=None, find=None, limit=None, step_min=5):
+         only_gaps=False, only_new=False, status=None, find=None, limit=None, step_min=5,
+         min_fill=None, max_panels=None):
     """Pełna odpowiedź planera dla jednej nocy (READ-ONLY).
 
-    KOLEJNOŚĆ JEST KOLEJNOŚCIĄ KOSZTU: progi typo-zależne (arytmetyka) → przedcięcie deklinacją →
-    okno widoczności (jedyny drogi krok, po jednej siatce Słońca na całą noc) → kadrowanie →
-    pokrycie → koszt → sortowanie.
+    KOLEJNOŚĆ JEST KOLEJNOŚCIĄ KOSZTU: progi typo-zależne (arytmetyka) → filtr kadru na żądanie
+    (arytmetyka, `min_fill`/`max_panels`) → przedcięcie deklinacją → okno widoczności (jedyny drogi
+    krok, po jednej siatce Słońca na całą noc) → kadrowanie → pokrycie → koszt → sortowanie.
+
+    FILTR KADRU zmienia ZNACZENIE licznika `counts['feasible']` z „wykonalne w ogóle" na
+    „wykonalne twoim sprzętem" (powierzchnie zmieniają napis razem z nim, `rig_filter == 'on'`),
+    a `counts['hidden_by_rig']` mówi, ile celów schował - odsiew nie ma prawa wyglądać jak ubogi
+    katalog. Klucz istnieje WYŁĄCZNIE przy włączonym filtrze: domyślna odpowiedź zostaje bit
+    w bit ta sama. `_sort_key` NIETKNIĘTY - kurczy się pula, porządek zostaje.
 
     `find` ma semantykę WYSZUKIWANIA, nie filtra wyniku: pomija progi i przedcięcie (pytasz
     o konkretny obiekt — masz dostać jego okno, nawet gdy nigdy nie wschodzi) i dopasowuje po
@@ -703,6 +792,21 @@ def plan(con, *, night=None, site=None, park=None, layers=DEFAULT_LAYERS,
     known_rigs = {r.telescope for r in rigs} | {r.telescope for r in skipped}
     park_without_rigs = tuple(sorted(c for c in (park or ()) if c not in known_rigs))
 
+    # Filtr kadru działa WYŁĄCZNIE na parku wypowiedzianym przez użytkownika i z realnym zestawem:
+    # park nieustawiony = wszystkie teleskopy bazy, także historyczne, a „mam czym" po sprzęcie,
+    # którego dawno nie ma, nie odcięłoby uczciwie niczego. `find` pomija progi, więc i ten.
+    if min_fill is None and max_panels is None:
+        rig_filter = "off"
+    elif find:
+        rig_filter = "find"
+    elif park_source == "none":
+        rig_filter = "no_park"
+    elif not rigs:
+        rig_filter = "no_rigs"
+    else:
+        rig_filter = "on"
+    fit = {"min_fill": min_fill, "max_panels": max_panels} if rig_filter == "on" else {}
+
     if find:
         needle = find.casefold()
         pool = [t for t in targets
@@ -712,6 +816,11 @@ def plan(con, *, night=None, site=None, park=None, layers=DEFAULT_LAYERS,
     else:
         pool = [t for t in targets
                 if feasible(t, min_size=min_size, min_dark=min_dark, max_mag=max_mag)]
+        after_type = len(pool)
+        if fit:
+            pool = [t for t in pool
+                    if feasible(t, rigs, min_size=min_size, min_dark=min_dark, max_mag=max_mag,
+                                overlap=overlap, **fit)]
         after_thresholds = len(pool)
         pool = [t for t in pool
                 if 90.0 - abs(site.lat_deg - t.dec_deg) >= min_alt - _CUT_MARGIN]
@@ -739,7 +848,7 @@ def plan(con, *, night=None, site=None, park=None, layers=DEFAULT_LAYERS,
             continue
         if only_new and coverage.known:
             continue
-        framing, best = _framing_for(t, rigs, overlap)
+        framing, best = _framing_for(t, rigs, overlap, **fit)
         cost = palette_costs(window)
         channel, reason = recommend_channel(coverage, cost, best)
         if max_cost is not None and channel is not None and \
@@ -762,6 +871,8 @@ def plan(con, *, night=None, site=None, park=None, layers=DEFAULT_LAYERS,
               "visible": sum(1 for r in rows if r.window.visible), "rows": len(rows),
               "marked": sum(1 for r in rows if r.plan_status is not None),
               "hidden_by_status": hidden_by_status}
+    if fit:
+        counts["hidden_by_rig"] = after_type - after_thresholds
     hidden = 0
     if limit is not None and len(rows) > limit:
         hidden = len(rows) - limit
@@ -781,7 +892,8 @@ def plan(con, *, night=None, site=None, park=None, layers=DEFAULT_LAYERS,
                       unfiltered_mono=unfiltered_mono, hidden=hidden,
                       park=tuple(park or ()), park_source=park_source,
                       park_without_rigs=park_without_rigs,
-                      orphan_marks=orphan_marks(con))
+                      orphan_marks=orphan_marks(con),
+                      min_fill=min_fill, max_panels=max_panels, rig_filter=rig_filter)
 
 
 def _night_moon(site, nw, *, v_zen, k_ext):

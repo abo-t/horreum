@@ -190,12 +190,25 @@ def _rig_from_rows(config_id, rows):
 @dataclass(frozen=True)
 class Framing:
     """`panels == 1` znaczy „jeden kadr". Sufitu rozmiaru NIE MA (D-0731-8): cel większy od kadru
-    dostaje liczbę paneli, nie znika z wyników."""
+    dostaje liczbę paneli, nie znika z wyników.
+
+    DWIE MIARY WYPEŁNIENIA, KAŻDA Z JEDNYM ZADANIEM:
+    - `fill` = rozmiar / KRÓTSZY bok kadru, bez cięcia: klucz wyboru `best_rig` i porządku
+      „po soczewce". Zostaje surowy, bo zmiana tej miary przestawiłaby ranking zestawów, a o członie
+      rankingu decyduje właściciel (PL-1). Przy `panels == 1` potrafi przekroczyć 1 (cel 90' na
+      kadrze 103'x69' ma `fill` 1,30 i mieści się w jednym kadrze), dlatego NIE jest miarą dla
+      człowieka ani progu.
+    - `frame_fill` = WYPEŁNIENIE KADRU (PL-1), 0..1: większy z ilorazów `oś dłuższa / dłuższy bok`
+      i `oś krótsza / krótszy bok` - cel leży dłuższą osią wzdłuż dłuższego boku, DOKŁADNIE tak,
+      jak liczy panele `framing`. Przy `panels == 1` miara jest z definicji ≤ 1; cięcie do 1 dotyczy
+      wyłącznie mozaiki (każdy panel jest wypełniony w całości). To ją pokazuje kolumna
+      „Wypełnienie" i ją tnie próg `min_fill` - jedno źródło dla planera, CLI i ekranu (SPOT)."""
     fill: float
     panels_x: int
     panels_y: int
     panels: int
     overlap: float
+    frame_fill: float
 
 
 def _panels_axis(size, fov, overlap):
@@ -217,7 +230,8 @@ def framing(size_arcmin, rig, *, overlap=0.10, minor_arcmin=None):
     px = _panels_axis(size_arcmin, fov_x, overlap)
     py = _panels_axis(across, fov_y, overlap)
     return Framing(fill=size_arcmin / fov_y, panels_x=px, panels_y=py, panels=px * py,
-                   overlap=overlap)
+                   overlap=overlap,
+                   frame_fill=min(1.0, max(size_arcmin / fov_x, across / fov_y)))
 
 
 # ─────────────────────────────────────────────────────────────── stanowisko

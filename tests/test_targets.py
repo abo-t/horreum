@@ -10,7 +10,7 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from horreum import db, sky, targets
+from horreum import db, repo, sky, targets
 
 NOW = "2026-07-31T12:00:00+00:00"
 BEDARGOWO = sky.Site(observatory_id=1, name="Będargowo", lat_deg=53.3890, lon_deg=14.4424,
@@ -50,6 +50,73 @@ def test_magnitudo_z_b_dostaje_korekte():
 def test_galaktyka_bez_magnitudo_odpada_mglawica_nie():
     assert not targets.feasible(_t("NGC4", "G", a=10.0))
     assert targets.feasible(_t("Sh2-2", "HII", a=10.0))
+
+
+# ─────────────────────────────────────────────── filtr kadru (dług T5 „podłoga optyki", PL-1, PL-2)
+
+def _rigset(name, fov_x, fov_y, config_id=1):
+    return targets.RigSet(config_id=config_id, telescope=name, cameras=("ASI2600MM",), mono=True,
+                          fov_x_arcmin=fov_x, fov_y_arcmin=fov_y, lights=10, reason=None)
+
+
+A140R_SET = _rigset("A140R", 103.0, 69.0, 1)
+RC8_SET = _rigset("RC8", 50.5, 33.7, 2)
+
+
+def test_filtr_kadru_bez_parku_albo_bez_progu_nie_odsiewa():
+    """Rozstrzygnięcie ②: domyślne `rigs=()` = brak odsiewu sprzętowego, a park bez progu też
+    niczego nie tnie: stare wołania `feasible(t)` dają to samo co przed filtrem."""
+    kropka = _t("Sh2-85", "HII", a=6.0)
+    assert targets.feasible(kropka, min_fill=0.9, max_panels=1)
+    assert targets.feasible(kropka, (A140R_SET,))
+
+
+def test_filtr_kadru_to_lub_po_parku():
+    """Rozstrzygnięcie ①: „mam czym to zrobić". Cel 15' wypełnia A140R w 22 %, RC8 w 45 %; przy
+    progu 30 % przechodzi z parkiem {A140R, RC8}, odpada z samym A140R."""
+    t = _t("Sh2-112", "HII", a=15.0)
+    assert targets.feasible(t, (A140R_SET, RC8_SET), min_fill=0.3)
+    assert not targets.feasible(t, (A140R_SET,), min_fill=0.3)
+
+
+def test_oba_progi_musi_spelnic_ten_sam_zestaw():
+    """60'x40' w A140R to jeden kadr przy 58 %, w RC8 mozaika (100 %). Próg 70 % + jeden kadr:
+    żaden zestaw nie robi obu naraz, więc cel odpada - choć każdy próg z osobna przepuszcza."""
+    t = _t("Sh2-91", "HII", a=60.0, b=40.0)
+    rigs = (A140R_SET, RC8_SET)
+    assert targets.feasible(t, rigs, min_fill=0.7)
+    assert targets.feasible(t, rigs, max_panels=1)
+    assert not targets.feasible(t, rigs, min_fill=0.7, max_panels=1)
+
+
+def test_filtr_kadru_nie_przepuszcza_tego_co_odcielyby_progi_typu():
+    """Sprzęt ZAWĘŻA, nigdy nie poszerza: galaktyka bez magnitudo odpada przy dowolnym parku."""
+    assert not targets.feasible(_t("NGC4", "G", a=40.0), (A140R_SET,), min_fill=0.1)
+
+
+def test_predykat_kadru_brak_kadrowania_nie_przechodzi():
+    assert not targets.rig_fits(None, min_fill=0.1)
+    assert not targets.rig_fits(None)
+
+
+@pytest.mark.parametrize("maly_pierwszy", [True, False])
+def test_dwa_zestawy_jednego_teleskopu_nie_nadpisuja_kadrowania(maly_pierwszy):
+    """Optyka z dwiema kamerami to DWA zestawy o różnym polu widzenia. Słownik kadrowania po nazwie
+    teleskopu oddawał kadr zestawu iterowanego później - przy filtrze `best_rig` wskazywał mały
+    kadr, a odczyt jego wypełnienia trafiał w duży. W obu kolejnościach iteracji odczyt idzie za
+    tożsamością zestawu."""
+    maly = _rigset("ED120R", 40.0, 30.0, 7)
+    duzy = _rigset("ED120R", 200.0, 140.0, 11)
+    rigs = (maly, duzy) if maly_pierwszy else (duzy, maly)
+    t = _t("Sh2-90", "HII", a=20.0)
+    framing, best = targets._framing_for(t, rigs, 0.10, min_fill=0.3, max_panels=1)
+    assert best is maly and set(framing) == {7, 11}
+    row = targets.TargetRow(target=t, window=None, framing=framing, best_rig=best,
+                            coverage=None, cost={}, recommend=None, recommend_reason=None)
+    assert row.framing_in(best).frame_fill == pytest.approx(20.0 / 30.0)
+    assert row.framing_in(duzy).frame_fill == pytest.approx(20.0 / 140.0)
+    assert row.framing_in(None) is None
+    assert targets.feasible(t, rigs, min_fill=0.3, max_panels=1)
 
 
 def test_koercja_pola_pisanego_recznie():
@@ -469,6 +536,50 @@ def test_limit_nie_jest_cichym_sufitem_a_liczniki_opisuja_noc(con):
     assert uciety.counts["visible"] == pelny.counts["visible"]     # licznik opisuje NIEBO, nie ekran
 
 
+def test_filtr_kadru_domyslnie_wylaczony_i_bez_sladu_w_wyniku(con):
+    """Kryterium nadrzędne paczki: bez progów odpowiedź ta sama co przed filtrem: licznik
+    `hidden_by_rig` nie istnieje, stan `off`."""
+    for i in range(3):
+        _light(con, config_id=1, sha1=f"f{i}", focal=784.0)
+    res = targets.plan(con, night=date(2026, 8, 15), park=["A140R"])
+    assert res.rig_filter == "off" and "hidden_by_rig" not in res.counts
+
+
+def test_filtr_kadru_tnie_pule_przed_oknem_i_liczy_schowanych(con):
+    """Rozstrzygnięcia ① i ④: odsiew w rdzeniu, liczony `sky.framing` przez `rig_fits`; licznik
+    `feasible` + schowani = pula po progach typu; ranking ocalałych nietknięty (podciąg porządku
+    bazowego); `best_rig` każdego wiersza spełnia próg."""
+    for i in range(3):
+        _light(con, config_id=1, sha1=f"a{i}", focal=784.0)
+        _light(con, config_id=3, sha1=f"r{i}", focal=1600.0)
+    park = ["A140R", "RC8"]
+    base = targets.plan(con, night=date(2026, 8, 15), park=park)
+    res = targets.plan(con, night=date(2026, 8, 15), park=park, min_fill=0.3, max_panels=1)
+    assert res.rig_filter == "on" and (res.min_fill, res.max_panels) == (0.3, 1)
+    assert res.counts["hidden_by_rig"] > 0
+    assert res.counts["feasible"] + res.counts["hidden_by_rig"] == base.counts["feasible"]
+    kept = [r.target.canon for r in res.rows]
+    assert kept and kept == [c for c in (r.target.canon for r in base.rows) if c in set(kept)]
+    for row in res.rows:
+        fr = row.framing_in(row.best_rig)
+        assert targets.rig_fits(fr, min_fill=0.3, max_panels=1)
+    assert "NGC6960" not in kept                   # Veil ~210' - mozaika w każdym zestawie
+
+
+def test_filtr_kadru_bez_parku_i_w_szukaniu_nie_dziala(con):
+    """Rozstrzygnięcie ③: park nieustawiony = wszystkie teleskopy bazy, także historyczne, więc filtr
+    WYŁĄCZONY i to jawnie (`no_park`). `--find` pomija progi, więc i ten (`find`)."""
+    for i in range(3):
+        _light(con, config_id=1, sha1=f"n{i}", focal=784.0)
+    base = targets.plan(con, night=date(2026, 8, 15))
+    res = targets.plan(con, night=date(2026, 8, 15), min_fill=0.9)
+    assert res.park_source == "none" and res.rig_filter == "no_park"
+    assert [r.target.canon for r in res.rows] == [r.target.canon for r in base.rows]
+    found = targets.plan(con, night=date(2026, 8, 15), park=["A140R"], find="NGC6960",
+                         max_panels=1)
+    assert found.rig_filter == "find" and [r.target.canon for r in found.rows] == ["NGC6960"]
+
+
 def test_park_zawezaja_zestawy(con):
     for i in range(3):
         _light(con, config_id=1, sha1=f"p{i}", focal=784.0)
@@ -527,6 +638,243 @@ def test_cli_plan_nie_migruje_i_daje_json(con, tmp_path, capsys):
     assert out["night"] == "2026-08-15" and out["site"]["name"] == "Będargowo"
     assert len(out["rows"]) == 3 and out["hidden"] > 0
     assert out["rigs"][0]["telescope"] == "A140R"
+
+
+def test_cli_plan_kolumna_wypelnienia_i_filtr_kadru(con, tmp_path, capsys):
+    """PL-1/PL-2 w CLI: `fill_pct` w każdym wierszu (miara `frame_fill` zestawu `best_rig`), blok
+    `rig_filter` WYŁĄCZNIE przy poproszonym filtrze, napis licznika idzie za semantyką."""
+    from horreum import cli
+    for i in range(3):
+        _light(con, config_id=1, sha1=f"k{i}", focal=784.0)
+    con.commit()
+    path = str(tmp_path / "h.db")
+    assert cli.main(["plan", path, "--night", "2026-08-15", "--json", "--park", "A140R"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert "rig_filter" not in out and "hidden_by_rig" not in out["counts"]
+    assert all(0 < r["fill_pct"] <= 100 for r in out["rows"])
+    assert cli.main(["plan", path, "--night", "2026-08-15", "--json", "--park", "A140R",
+                     "--min-fill", "0.3", "--max-panels", "1"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["rig_filter"] == {"state": "on", "min_fill": 0.3, "max_panels": 1}
+    assert out["counts"]["hidden_by_rig"] > 0
+    assert all(r["fill_pct"] >= 30 and r["framing"]["A140R"]["panels"] == 1 for r in out["rows"])
+    assert cli.main(["plan", path, "--night", "2026-08-15", "--park", "A140R",
+                     "--max-panels", "1"]) == 0
+    text = capsys.readouterr().out
+    assert "wykonalnych twoim sprzetem" in text and "po progach" not in text
+    assert cli.main(["plan", path, "--night", "2026-08-15", "--max-panels", "1"]) == 0
+    assert "filtr kadru (maks. paneli 1) WYLACZONY: park nieustawiony" in capsys.readouterr().out
+
+
+def test_cli_plan_procent_zamiast_ulamka_wybucha_przy_parsowaniu(con, tmp_path, capsys):
+    """`--min-fill 30` (procent) przepuszczone odcięłoby cały katalog po cichu."""
+    from horreum import cli
+    con.commit()
+    with pytest.raises(SystemExit):
+        cli.main(["plan", str(tmp_path / "h.db"), "--min-fill", "30"])
+    assert "0..1" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("mm, mc", [(4, 2), (2, 4)])
+def test_plan_z_dwiema_kamerami_na_jednej_optyce(con, tmp_path, capsys, mm, mc):
+    """A140R z ASI2600MM (784 mm) i z ASI2600MC za reduktorem (400 mm): dwa zestawy, dwie etykiety,
+    dwa kadrowania w każdym wierszu. Liczba lightów odwraca kolejność zestawów - wynik nie może od
+    niej zależeć. CLI czyta wypełnienie TEGO zestawu, który rdzeń wybrał."""
+    from horreum import cli
+    for i in range(mm):
+        _light(con, config_id=1, sha1=f"m{i}", focal=784.0)
+    for i in range(mc):
+        _light(con, config_id=2, sha1=f"k{i}", focal=400.0, camera_id=2)
+    con.commit()
+    rigs, _ = targets.rig_sets(con, park=["A140R"])
+    assert sorted(r.name for r in rigs) == ["A140R (ASI2600MC)", "A140R (ASI2600MM)"]
+    res = targets.plan(con, night=date(2026, 8, 15), park=["A140R"], min_fill=0.3, max_panels=1)
+    assert res.rig_filter == "on" and res.rows
+    for row in res.rows:
+        assert set(row.framing) == {r.config_id for r in res.rigs}
+        assert targets.rig_fits(row.framing_in(row.best_rig), min_fill=0.3, max_panels=1)
+    assert any(len({round(f.frame_fill, 4) for f in row.framing.values()}) == 2
+               for row in res.rows)
+    assert cli.main(["plan", str(tmp_path / "h.db"), "--night", "2026-08-15", "--json", "--all",
+                     "--park", "A140R", "--min-fill", "0.3", "--max-panels", "1"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert [r["canon"] for r in out["rows"]] == [row.target.canon for row in res.rows]
+    for r_json, row in zip(out["rows"], res.rows):
+        assert set(r_json["framing"]) == {r.name for r in res.rigs}
+        assert r_json["best_rig"] == row.best_rig.name
+        assert r_json["fill_pct"] == round(row.framing_in(row.best_rig).frame_fill * 100, 1)
+        assert r_json["fill_pct"] >= 30
+
+
+# ─────────────────────────────────────────────── złoty wynik: domyślny plan sprzed filtra kadru
+# Oczekiwane wartości POLICZONE kodem z HEAD `9b7e522` (sprzed filtra kadru, worktree odłączony,
+# import przypięty `sys.path.insert(0, worktree)` + odpięty finder instalacji edytowalnej, wydruk
+# `horreum.__file__` wskazywał worktree). Test porównuje bieżący kod BEZ progów kadru z tą stałą,
+# nie z samym sobą - dopisane kolumny wypełnienia są jedynym dozwolonym śladem zmiany.
+
+ZLOTY_KATALOG = (
+    _t("SYN-HII-8", "HII", a=8.0, r=300.0, d=40.0),
+    _t("SYN-HII-25", "HII", a=25.0, b=15.0, r=310.0, d=45.0),
+    _t("SYN-SNR-200", "SNR", a=200.0, b=150.0, r=315.0, d=30.0),
+    _t("SYN-G-12", "G", a=12.0, m=9.0, r=10.0, d=41.0),
+    _t("SYN-G-SLABA", "G", a=10.0, m=14.0, r=20.0, d=40.0),
+    _t("SYN-G-B", "G", a=8.0, m=13.6, mb=True, r=190.0, d=60.0),
+    _t("SYN-DRK-20", "DrkN", a=20.0, r=330.0, d=55.0),
+    _t("SYN-DRK-10", "DrkN", a=10.0, r=330.0, d=56.0),
+    _t("SYN-PN-7", "PN", a=7.0, b=5.0, r=283.0, d=33.0),
+    _t("SYN-POLUDNIE", "HII", a=30.0, r=270.0, d=-30.0),
+    _t("SYN-RFN-15", "RfN", a=15.0, r=60.0, d=25.0),
+    _t("SYN-OCL", "OCl", a=30.0, r=100.0, d=20.0),
+    _t("SYN-EMN-90", "EmN", a=90.0, b=50.0, r=305.0, d=50.0),
+    _t("SYN-SNR-60", "SNR", a=60.0, b=40.0, r=250.0, d=65.0),
+)
+
+ZLOTA_PROJEKCJA = {
+    "counts": {"pool": 14, "feasible": 11, "above_horizon": 10, "matched": 3, "visible": 9,
+               "rows": 9, "marked": 1, "hidden_by_status": 1},
+    "hidden": 0,
+    "rigs": (("A140R", ("ASI2600MC", "ASI2600MM"), 103.01, 68.85, 8, True),
+             ("RC8", ("ASI2600MM",), 50.48, 33.74, 3, True)),
+    "unmatched": {"Veil": 0.5},
+    "orphans": ("SYN-ZNIKNAL",),
+    # (kanon, best_rig, panele w A140R/RC8, rada, powód, luki, widoczny, h nad, kulminacja, plan)
+    "rows": (
+        ("SYN-RFN-15", "RC8", (1, 1), "RGB", None, ("RGB",), True, 2.58, 51.5, None),
+        ("SYN-SNR-60", "A140R", (1, 4), "Ha", None, ("RGB", "Ha", "OIII", "SII"), True, 6.92,
+         70.1, None),
+        ("SYN-EMN-90", "A140R", (1, 4), "Ha", None, ("RGB", "Ha", "OIII", "SII"), True, 6.92,
+         86.7, None),
+        ("SYN-HII-25", "RC8", (1, 1), "OIII", None, ("OIII", "SII"), True, 6.92, 81.7, None),
+        ("SYN-HII-8", "RC8", (1, 1), "Ha", None, ("RGB", "Ha", "OIII", "SII"), True, 6.92, 76.7,
+         None),
+        ("SYN-PN-7", "RC8", (1, 1), "Ha", None, ("RGB", "Ha", "OIII", "SII"), True, 5.58, 69.6,
+         "planned"),
+        ("SYN-SNR-200", "A140R", (9, 25), "SII", None, ("RGB", "SII"), True, 6.92, 66.7, None),
+        ("SYN-G-B", "RC8", (1, 1), "RGB", None, ("RGB",), True, 2.58, 43.0, None),
+        ("SYN-G-12", "RC8", (1, 1), None, "no_gap", (), True, 6.92, 77.8, None),
+    ),
+}
+
+# `horreum plan <db> --night 2026-08-24 --park A140R,RC8 --all` z HEAD, ścieżka bazy -> `<db>`.
+ZLOTY_TEKST = (
+    "Horreum plan <db>: noc 2026-08-24, Będargowo (53.39N 14.44E)",
+    "  ciemnosc zeglarska 19:40-02:30 UTC (astronomiczna 20:35-01:35), Ksiezyc 90% alt 6",
+    "  cele: 14 -> 11 po progach -> 10 nad horyzontem -> 9 widocznych",
+    "  zestaw A140R: kadr 103'x69', kamery ASI2600MC/ASI2600MM",
+    "  zestaw RC8: kadr 50'x34', kamery ASI2600MM",
+    "  park (z flagi): A140R, RC8",
+    "  ukrytych jako 'skip': 1 (`--status skip` pokazuje ktore)",
+    "",
+    "  cel           typ     rozm  kulm   h>  zestaw           koszt B/D/N   rada  plan      "
+    "pokrycie",
+    "  SYN-RFN-15    RfN      15'  51.5  2.6  RC8 1 kadr       1.0/1.0/1.0   RGB   -         "
+    "nigdy",
+    "  SYN-SNR-60    SNR      60'  70.1  6.9  A140R 1 kadr     2.2/1.3/1.1   Ha    -         "
+    "nigdy",
+    "  SYN-EMN-90    EmN      90'  86.7  6.9  A140R 1 kadr     2.3/1.3/1.1   Ha    -         "
+    "nigdy",
+    "  SYN-HII-25    HII      25'  81.7  6.9  RC8 1 kadr       2.4/1.4/1.1   OIII  -         "
+    "RGB 2.0h, Ha 2.0h, brak OIII/SII",
+    "  SYN-HII-8     HII       8'  76.7  6.9  RC8 1 kadr       2.6/1.4/1.1   Ha    -         "
+    "nigdy",
+    "  SYN-PN-7      PN        7'  69.6  5.6  RC8 1 kadr       2.7/1.4/1.1   Ha    planned 2 "
+    "nigdy",
+    "  SYN-SNR-200   SNR     200'  66.7  6.9  A140R mozaika 9  2.8/1.5/1.1   SII   -         "
+    "Ha 2.0h, OIII 2.0h, brak RGB/SII",
+    "  SYN-G-B       G         8'  43.0  2.6  RC8 1 kadr       2.9/1.5/1.1   RGB   -         "
+    "nigdy",
+    "  SYN-G-12      G        12'  77.8  6.9  RC8 1 kadr       1.0/1.0/1.0   -     -         "
+    "RGB 2.0h",
+    "  godziny bez celu w katalogu: Veil 0.5h",
+)
+
+# sha256 kanonicznego zrzutu (`sort_keys`, UTF-8) wyjścia `--json` tego samego wołania z HEAD.
+# Pełny JSON ma ~10 kB; strukturę wiersza pinuje projekcja wyżej, tu - każdy bajt poza `fill_pct`.
+ZLOTY_JSON_SHA256 = "cd39af165e7aaa606591da009a783403cce81732c36f8520266e7d470e66a935"
+
+
+def _zloty_park(con, monkeypatch):
+    """Park z dwoma teleskopami (A140R z dwiema kamerami o TYM SAMYM polu widzenia, RC8), pokrycie
+    w trzech paletach, reszta jawna i kuratela z sierotą - każdy człon projekcji ma czym się
+    wykazać. Katalog syntetyczny podmienia `load_targets`, więc asset repo nie rusza złotej liczby."""
+    monkeypatch.setattr(targets, "load_targets",
+                        lambda layers=targets.DEFAULT_LAYERS: ZLOTY_KATALOG)
+    hii = _obiekt(con, "SYN-HII-25")
+    snr = _obiekt(con, "SYN-SNR-200")
+    gal = _obiekt(con, "SYN-G-12")
+    veil = _obiekt(con, "Veil")
+    for i in range(2):
+        _light(con, config_id=1, sha1=f"zh{i}", focal=784.0, object_id=hii, filter_canon="Ha",
+               exptime=3600.0)
+    for i in range(2):
+        _light(con, config_id=2, sha1=f"zs{i}", focal=784.0, camera_id=2, object_id=snr,
+               filter_canon="L-eXtreme", exptime=3600.0)
+    for i in range(2):
+        _light(con, config_id=2, sha1=f"zg{i}", focal=784.0, camera_id=2, object_id=gal,
+               exptime=3600.0)
+        _light(con, config_id=2, sha1=f"zb{i}", focal=784.0, camera_id=2, object_id=hii,
+               exptime=3600.0)
+    for i in range(3):
+        _light(con, config_id=3, sha1=f"zr{i}", focal=1600.0, object_id=veil, filter_canon="Ha")
+    con.commit()                         # `set_target_plan` otwiera własną transakcję
+    repo.set_target_plan(con, canon="SYN-PN-7", status="planned", priority=2, note="zloty",
+                         now=NOW)
+    repo.set_target_plan(con, canon="SYN-DRK-20", status="skip", now=NOW)
+    repo.set_target_plan(con, canon="SYN-ZNIKNAL", status="done", now=NOW)
+    con.commit()
+
+
+def _projekcja(res):
+    fr = [[row.framing_in(r) for r in res.rigs] for row in res.rows]
+    return {
+        "counts": dict(res.counts), "hidden": res.hidden,
+        "rigs": tuple((r.telescope, r.cameras, round(r.fov_x_arcmin, 2),
+                       round(r.fov_y_arcmin, 2), r.lights, r.mono) for r in res.rigs),
+        "unmatched": {k: round(v, 3) for k, v in sorted(res.unmatched.items())},
+        "orphans": tuple(sorted(res.orphan_marks)),
+        "rows": tuple((row.target.canon, row.best_rig.telescope if row.best_rig else None,
+                       tuple(f.panels if f else None for f in fs), row.recommend,
+                       row.recommend_reason, row.coverage.gaps, row.window.visible,
+                       round(row.window.hours_above, 2), round(row.window.max_alt_deg, 1),
+                       row.plan_status)
+                      for row, fs in zip(res.rows, fr)),
+    }
+
+
+def test_zloty_plan_bez_progow_kadru_jak_przed_filtrem(con, monkeypatch):
+    """Kryterium nadrzędne paczki filtra kadru: bez `min_fill`/`max_panels` kanony i kolejność,
+    liczniki, `best_rig`, panele w każdym zestawie, rada i luki są te same co w HEAD."""
+    _zloty_park(con, monkeypatch)
+    res = targets.plan(con, night=date(2026, 8, 24), park=["A140R", "RC8"])
+    assert res.rig_filter == "off"
+    assert _projekcja(res) == ZLOTA_PROJEKCJA
+
+
+def test_zloty_cli_tekst_i_json_bez_progow_kadru_jak_przed_filtrem(con, tmp_path, monkeypatch,
+                                                                    capsys):
+    """Ta sama kotwica dla CLI: tekst po wycięciu WYŁĄCZNIE kolumny `wyp` (4 znaki + 2 spacje
+    zaraz za kolumną zestawu) i JSON po zdjęciu WYŁĄCZNIE `fill_pct` - bajt w bajt jak w HEAD."""
+    import hashlib
+
+    from horreum import cli
+    _zloty_park(con, monkeypatch)
+    path = str(tmp_path / "h.db")
+    argv = ["plan", path, "--night", "2026-08-24", "--park", "A140R,RC8", "--all"]
+    assert cli.main(argv) == 0
+    lines = capsys.readouterr().out.replace(path, "<db>").splitlines()
+    head = next(i for i, line in enumerate(lines) if line.lstrip().startswith("cel "))
+    cut = lines[head].index("zestaw") + 17
+    assert lines[head][cut:cut + 6] == " wyp  "
+    table = [line[:cut] + line[cut + 6:] if i >= head and line.startswith("  ")
+             and not line.startswith("  godziny") else line for i, line in enumerate(lines)]
+    assert tuple(table) == ZLOTY_TEKST
+    assert cli.main(argv + ["--json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert all("fill_pct" in r for r in out["rows"])
+    for r in out["rows"]:
+        r.pop("fill_pct")
+    dump = json.dumps(out, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    assert hashlib.sha256(dump).hexdigest() == ZLOTY_JSON_SHA256
 
 
 def test_cli_plan_odmawia_na_niezgodnym_schemacie(tmp_path, capsys):

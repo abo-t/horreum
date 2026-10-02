@@ -922,6 +922,46 @@ CATALOG = {
         "pl": "Zestaw {name} poza planem: {reason}",
         "en": "Rig {name} outside the plan: {reason}",
     },
+    # Filtr kadru (dług T5, PL-1, PL-2): na żądanie, domyślnie wyłączony. Włączony zmienia
+    # ZNACZENIE licznika „po progach" na „twoim sprzętem" - napis idzie razem z semantyką.
+    "planner.counts_rig": {
+        "pl": "Cele: {pool} → {feasible} wykonalnych twoim sprzętem ({filter}; {hidden})"
+              " → {above} nad horyzontem → {visible} widocznych (wierszy: {rows})",
+        "en": "Targets: {pool} → {feasible} doable with your gear ({filter}; {hidden})"
+              " → {above} above horizon → {visible} visible (rows: {rows})",
+    },
+    # Liczba wierszy przy soczewce, która chowa: wstawiana w `{rows}` licznika, więc bez soczewki
+    # napis zostaje ten sam. Liczba po dwukropku - bez odmiany rzeczownika.
+    "planner.rows_in_lens": {"pl": "{rows}; w soczewce {name}: {shown}",
+                             "en": "{rows}; in the {name} lens: {shown}"},
+    "planner.rig_hidden": {
+        "pl": {"one": "filtr schował {n} cel", "few": "filtr schował {n} cele",
+               "many": "filtr schował {n} celów"},
+        "en": {"one": "the filter hid {n} target", "other": "the filter hid {n} targets"},
+    },
+    "planner.rig_filter_fill": {"pl": "wypełnienie ≥{pct}%", "en": "fill ≥{pct}%"},
+    "planner.rig_filter_panels": {"pl": "maks. paneli {n}", "en": "max panels {n}"},
+    "planner.rig_filter_no_park": {
+        "pl": "Filtr kadru ({filter}) wyłączony: park nieustawiony, a liczenie po wszystkich "
+              "teleskopach bazy, także historycznych, nie odcięłoby uczciwie niczego. Ustaw park.",
+        "en": "Framing filter ({filter}) is off: the park is not set, and counting over every "
+              "telescope in the database, historical ones too, would cut nothing honestly. Set the park.",
+    },
+    "planner.rig_filter_no_rigs": {
+        "pl": "Filtr kadru ({filter}) wyłączony: park nie dał ani jednego zestawu z polem widzenia.",
+        "en": "Framing filter ({filter}) is off: the park gave no rig with a known field of view.",
+    },
+    "planner.lens_hidden": {
+        "pl": {"one": "Soczewka {name}: filtr kadru schował jeszcze {n} cel, którego ten zestaw"
+                      " nie spełnia.",
+               "few": "Soczewka {name}: filtr kadru schował jeszcze {n} cele, których ten zestaw"
+                      " nie spełnia.",
+               "many": "Soczewka {name}: filtr kadru schował jeszcze {n} celów, których ten zestaw"
+                       " nie spełnia."},
+        "en": {"one": "Lens {name}: the framing filter hid {n} more target this rig does not meet.",
+               "other": "Lens {name}: the framing filter hid {n} more targets this rig does not"
+                        " meet."},
+    },
 
     # --- ekran planera (T5c): kolumny listy i panel sterowania --------------------------------
     "planner.col_canon": {"pl": "Cel", "en": "Target"},
@@ -930,6 +970,18 @@ CATALOG = {
     "planner.col_culmination": {"pl": "Kulminacja", "en": "Culmination"},
     "planner.col_window": {"pl": "Okno", "en": "Window"},
     "planner.col_rig": {"pl": "Zestaw i kadr", "en": "Rig and framing"},
+    # Nagłówek SKRÓCONY (podłoga szerokości `planner._MIN_W`), pełna nazwa w podpowiedzi nagłówka.
+    "planner.col_fill": {"pl": "Wypełn.", "en": "Fill"},
+    "planner.col_fill_tip": {
+        "pl": "Wypełnienie kadru: większy z ilorazów osi celu do boków kadru zestawu w soczewce.\n"
+              "Mozaika wypełnia każdy panel, więc ma zawsze 100% (komórka przygaszona).",
+        "en": "Frame fill: the larger ratio of the target's axes to the frame sides of the rig in\n"
+              "the lens. A mosaic fills every panel, so it is always 100% (dimmed cell).",
+    },
+    "planner.fill_mosaic_tip": {
+        "pl": "Mozaika zawsze wypełnia kadr - 100% nie znaczy tu, że cel pasuje do jednego kadru.",
+        "en": "A mosaic always fills the frame - 100% here does not mean the target fits one frame.",
+    },
     "planner.col_coverage": {"pl": "Pokrycie", "en": "Coverage"},
     "planner.col_cost": {"pl": "Koszt B/D/W", "en": "Cost B/D/N"},
     "planner.col_recommend": {"pl": "Rada", "en": "Advice"},
@@ -969,14 +1021,40 @@ CATALOG = {
     "planner.reset_thresholds": {"pl": "Przywróć domyślne", "en": "Restore defaults"},
     "planner.reset_thresholds_tip": {
         "pl": "Progi wracają do 6′ rozmiaru, 15′ dla ciemnych, 13 mag dla galaktyk, 30° wysokości\n"
-              "i 1 h na kanał; próg kosztu Księżyca wyłączony.",
+              "i 1 h na kanał; próg kosztu Księżyca i filtr kadru wyłączone.",
         "en": "Thresholds return to 6′ size, 15′ for dark nebulae, 13 mag for galaxies, 30° altitude\n"
-              "and 1 h per channel; the Moon cost threshold goes off.",
+              "and 1 h per channel; the Moon cost threshold and the framing filter go off.",
     },
     "planner.chips_label": {"pl": "Patrzę oczami zestawu:", "en": "Seen through the rig:"},
     "planner.chip_tip": {
-        "pl": "Soczewka, nie filtr: zmienia kolumny „Zestaw i kadr” oraz „Rada”. Żaden cel nie znika.",
-        "en": "A lens, not a filter: changes the “Rig and framing” and “Advice” columns. No target disappears.",
+        "pl": "Soczewka, nie filtr: zmienia kolumny „Zestaw i kadr”, „Wypełn.” oraz „Rada”."
+              " Żaden cel nie znika.",
+        "en": "A lens, not a filter: changes the “Rig and framing”, “Fill” and “Advice” columns."
+              " No target disappears.",
+    },
+    "planner.chip_tip_filter": {
+        "pl": "Soczewka: zmienia kolumny „Zestaw i kadr”, „Wypełn.” oraz „Rada”. Przy włączonym"
+              " filtrze kadru chowa cele, których TEN zestaw nie spełnia.",
+        "en": "Lens: changes the “Rig and framing”, “Fill” and “Advice” columns. With the framing"
+              " filter on it hides the targets THIS rig does not meet.",
+    },
+    "planner.min_fill": {"pl": "Min. wypełnienie", "en": "Min fill"},
+    "planner.max_panels": {"pl": "Maks. paneli", "en": "Max panels"},
+    "planner.rig_filter_tip": {
+        "pl": "Filtr kadru, domyślnie wyłączony: chowa cele, których ŻADEN zestaw parku nie zrobi\n"
+              "z takim wypełnieniem albo w tylu panelach. Wypełnienie to większy z ilorazów osi celu\n"
+              "do boków kadru (mozaika = 100%). Przy nieustawionym parku filtr nie działa.",
+        "en": "Framing filter, off by default: hides targets that NO rig of the park can shoot\n"
+              "with that fill or in that many panels. Fill is the larger ratio of the target's axes\n"
+              "to the frame sides (mosaic = 100%). With no park set the filter does nothing.",
+    },
+    "planner.controls_state_rig": {"pl": " · filtr kadru: {filter}", "en": " · framing filter: {filter}"},
+    "planner.controls_state_rig_off": {"pl": " (nieczynny)", "en": " (inactive)"},
+    "planner.empty_rig": {
+        "pl": "Żaden cel nie przeszedł bieżących progów i filtra kadru - poluzuj wypełnienie albo"
+              " liczbę paneli.",
+        "en": "No target passed the current thresholds and the framing filter - relax the fill or"
+              " the panel count.",
     },
     "planner.controls_state": {
         "pl": "Progi — rozmiar ≥{size}′, ciemna ≥{dark}′, mag ≤{mag}, wys. ≥{alt}°, {hours} h/kanał",

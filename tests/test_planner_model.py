@@ -14,7 +14,7 @@ from horreum.gui import planner_model as pm
 from horreum.gui import queries
 # Baza T4 (trzy zestawy o różnych ogniskowych + stanowisko) REUŻYTA, nie skopiowana — drugi taki
 # builder rozjechałby się z pierwszym przy najbliższej zmianie schematu (SPOT).
-from test_target_plan import _park_ready, con    # noqa: F401
+from test_target_plan import _light, _park_ready, con    # noqa: F401
 
 NOW = "2026-07-31T12:00:00+00:00"
 
@@ -83,7 +83,7 @@ def test_powod_braku_rady_zamiast_pustej_komorki():
 def test_kadrowanie_i_brak_zestawu(res):
     row = res.rows[0]
     rig = res.rigs[0]
-    assert pm.rig_text(rig, row.framing[rig.telescope]).startswith(rig.telescope)
+    assert pm.rig_text(rig, row.framing_in(rig)).startswith(rig.telescope)
     assert pm.rig_text(None, None) == "—"                        # kreska, nie pustka
 
 
@@ -162,6 +162,128 @@ def test_object_ids_for_canons_bierze_obie_nazwy_celu(con):
     rows = queries.object_ids_for_canons(con, ["IC410", "LBN807", "NIE-MA-TAKIEGO"])
     assert [r["canon"] for r in rows] == ["IC410", "LBN807"]     # nieznany = brak wiersza, nie błąd
     assert queries.object_ids_for_canons(con, []) == []
+
+
+# ─────────────────────────────────────────────────────────── filtr kadru (PL-1, PL-2)
+
+@pytest.fixture
+def res_fill(con):
+    """Plan z filtrem kadru na parku z wywołania: trzy zestawy o różnych ogniskowych."""
+    _park_ready(con)
+    return targets.plan(con, night=date(2026, 8, 15), limit=None,
+                        park=["A140R", "RC8", "ED120R"], min_fill=0.3, max_panels=1)
+
+
+def test_kolumna_wypelnienia_idzie_za_soczewka(res):
+    """Kolumna „Wypełnienie" czyta `frame_fill` TEGO zestawu, którym patrzy soczewka."""
+    for telescope in (None,) + pm.rig_choices(res):
+        for row, v in zip(res.rows, pm.view_rows(res, telescope)):
+            _rig, fr = pm.lens(row, res, telescope)
+            assert v.fill == pm.fill_text(fr) and v.fill.endswith("%")
+    assert pm.fill_text(None) == "-"
+
+
+def test_bez_filtra_licznik_mowi_po_progach(res):
+    assert res.rig_filter == "off"
+    assert "po progach" in pm.counts_text(res) and "sprzętem" not in pm.counts_text(res)
+
+
+def test_filtr_kadru_zmienia_napis_licznika_i_mowi_ile_schowal(res_fill):
+    """Rozstrzygnięcie ④: liczba zmienia znaczenie, więc napis idzie razem z nią, a obok stoi
+    liczba schowanych (odmieniona), żeby odsiew nie wyglądał jak ubogi katalog."""
+    text = pm.counts_text(res_fill)
+    assert "wykonalnych twoim sprzętem" in text and "po progach" not in text
+    assert f"filtr schował {res_fill.counts['hidden_by_rig']} cel" in text
+    assert "wypełnienie ≥30%" in text and "maks. paneli 1" in text
+
+
+def test_bez_soczewki_filtr_rdzenia_wystarcza(res_fill):
+    """`best_rig` wybrany spośród zestawów spełniających próg: widok bez chipa niczego nie chowa."""
+    assert len(pm.view_rows(res_fill)) == len(res_fill.rows)
+    assert pm.lens_hidden(res_fill) == 0
+
+
+def test_soczewka_przy_filtrze_chowa_to_czego_ten_zestaw_nie_spelnia(res_fill):
+    """„Zestaw z soczewki": chip RC8 pokazuje WYŁĄCZNIE cele, które RC8 robi w progu; liczba
+    schowanych trafia do noty nagłówka. Predykat ten sam co w rdzeniu (`targets.rig_fits`)."""
+    hidden = {t: pm.lens_hidden(res_fill, t) for t in pm.rig_choices(res_fill)}
+    assert any(hidden.values()), "fixture bez różnicy między zestawami - test straciłby sens"
+    for telescope, n in hidden.items():
+        shown = pm.view_rows(res_fill, telescope)
+        assert len(shown) == len(res_fill.rows) - n
+        for v in shown:
+            _rig, fr = pm.lens(v.source, res_fill, telescope)
+            assert targets.rig_fits(fr, min_fill=0.3, max_panels=1)
+        notes = " | ".join(t for _l, t in pm.header_notes(res_fill, telescope))
+        assert (f"Soczewka {telescope}" in notes) == bool(n)
+
+
+def test_filtr_bez_parku_ostrzega_zamiast_milczec(con):
+    """Rozstrzygnięcie ③ na ekranie: poproszony filtr przy nieustawionym parku jest JAWNIE
+    wyłączony (`warn`), a nie cicho nieczynny."""
+    _park_ready(con)
+    res = targets.plan(con, night=date(2026, 8, 15), limit=None, min_fill=0.3)
+    notes = [(lvl, t) for lvl, t in pm.header_notes(res) if "Filtr kadru" in t]
+    assert notes and notes[0][0] == "warn" and "park nieustawiony" in notes[0][1]
+    assert "po progach" in pm.counts_text(res)
+
+
+def test_licznik_przy_soczewce_mowi_ile_widac(res_fill):
+    """Licznik opisuje EKRAN: przy soczewce, która chowa, obok liczby wierszy wyniku stoi liczba
+    wierszy na liście („w soczewce RC8: 99"); bez chowania napis ten sam co bez soczewki."""
+    base = pm.counts_text(res_fill)
+    assert f"(wierszy: {res_fill.counts['rows']})" in base
+    hiding = [n for n in pm.rig_choices(res_fill) if pm.lens_hidden(res_fill, n)]
+    assert hiding, "fixture bez soczewki, która chowa - test straciłby sens"
+    for name in pm.rig_choices(res_fill):
+        text = pm.counts_text(res_fill, name)
+        if name in hiding:
+            shown = len(pm.view_rows(res_fill, name))
+            assert shown < res_fill.counts["rows"]
+            assert f"(wierszy: {res_fill.counts['rows']}; w soczewce {name}: {shown})" in text
+        else:
+            assert text == base
+
+
+def test_mozaika_w_kolumnie_wypelnienia_jest_oznaczona(res):
+    """Mozaika ma 100% z definicji (`sky.Framing.frame_fill`), jak cel idealnie wypełniający jeden
+    kadr - widok niesie znacznik, żeby te dwie setki nie czytały się jednakowo. Miara bez zmian."""
+    seen = set()
+    for row, v in zip(res.rows, pm.view_rows(res)):
+        _rig, fr = pm.lens(row, res)
+        assert v.fill_mosaic == (fr is not None and fr.panels > 1)
+        if v.fill_mosaic:
+            assert v.fill == "100%"
+        seen.add(v.fill_mosaic)
+    assert seen == {True, False}
+
+
+@pytest.mark.parametrize("mm, mc", [(4, 2), (2, 4)])
+def test_dwie_kamery_na_jednej_optyce_to_dwa_chipy_i_dwa_kadry(con, mm, mc):
+    """A140R z ASI2600MM (784 mm) i z ASI2600MC za reduktorem (400 mm) to DWA zestawy. Chipy mają
+    dwie różne nazwy (z kamerą), soczewka każdego czyta kadr SWOJEGO zestawu, a „najlepsze
+    dopasowanie" przy filtrze niczego nie chowa - rdzeń wybrał zestaw spełniający próg, więc
+    i jego kadr go spełnia. Liczba lightów odwraca kolejność zestawów; wynik od niej nie zależy."""
+    con.execute("INSERT INTO config(telescope_id, camera_id, status, created_at) "
+                "VALUES (1, 2, 'proposed', ?)", (NOW,))
+    mc_cfg = con.execute("SELECT id FROM config WHERE telescope_id = 1 AND camera_id = 2"
+                         ).fetchone()["id"]
+    for i in range(mm):
+        _light(con, config_id=1, sha1=f"m{i}", focal=784.0)
+    for i in range(mc):
+        _light(con, config_id=mc_cfg, sha1=f"k{i}", focal=400.0, camera_id=2)
+    con.commit()
+    res = targets.plan(con, night=date(2026, 8, 15), limit=None, park=["A140R"], min_fill=0.3,
+                       max_panels=1)
+    names = pm.rig_choices(res)
+    assert sorted(names) == ["A140R (ASI2600MC)", "A140R (ASI2600MM)"]
+    assert res.rows and len(pm.view_rows(res)) == len(res.rows) and pm.lens_hidden(res) == 0
+    for name in names:
+        rig = next(r for r in res.rigs if r.name == name)
+        for row in res.rows:
+            got, fr = pm.lens(row, res, name)
+            assert got is rig and fr is row.framing_in(rig)
+        assert all(v.rig.startswith(name + " · ") for v in pm.view_rows(res, name))
 
 
 # ─────────────────────────────────────────────────────────── nagłówek nocy i noty

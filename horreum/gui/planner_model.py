@@ -14,6 +14,12 @@ zakładał ~87 i jego arytmetyka padła — sama decyzja nie). Chip robi to, co 
 wiersz OCZAMI wybranego zestawu — kadrowanie i rada liczone dla NIEGO, zamiast dla
 najlepszego dopasowania. Nic nie znika, więc chip jest w pełni odwracalny.
 
+WYJĄTEK JEST JEDEN I NA ŻĄDANIE - FILTR KADRU (dług T5, PL-1, PL-2): gdy rdzeń liczył z progiem
+wypełnienia albo paneli (`PlanResult.rig_filter == 'on'`), soczewka konkretnego zestawu chowa
+wiersze, których TEN zestaw nie spełnia - „patrzę oczami RC8, pokaż, co RC8 zrobi w jednym kadrze".
+Progi czyta z `PlanResult` (jedno źródło z rdzeniem), predykat to `targets.rig_fits` (ten sam,
+którym rdzeń tnie pulę), a liczbę schowanych podaje nota nagłówka. Bez filtra - nic nie znika.
+
 PORZĄDEK RDZENIA JEST DOMYŚLNY, SORT SOCZEWKI ŻYJE W WIDOKU (D-T4-c): `targets._sort_key` ma pięć
 członów wywalczonych firsthandem T3 i pozostaje NIETKNIĘTY. `order=ORDER_LENS` przestawia GOTOWE
 wiersze — to prezentacja, tak jak sam chip; rdzeń nadal oddaje jedną, deterministyczną kolejność,
@@ -52,6 +58,7 @@ class ViewRow:
     culmination: str
     window: str
     rig: str
+    fill: str                      # wypełnienie kadru w soczewce (PL-1): `sky.Framing.frame_fill`
     coverage: str
     coverage_tip: str              # gdzie leżą gotowe obrazy (I-2e) — tooltip, nie kolumna
     cost: str
@@ -60,31 +67,37 @@ class ViewRow:
     note: str
     visible: bool
     source: object                 # targets.TargetRow
+    # Mozaika ma `frame_fill` = 100% z definicji (każdy panel wypełniony), więc ta sama liczba co
+    # przy celu idealnie wypełniającym jeden kadr. Widok ją PRZYGASZA i tłumaczy podpowiedzią;
+    # miara w `sky.Framing` zostaje jedna dla ekranu, CLI i progu.
+    fill_mosaic: bool = False
 
 
 def rig_choices(result):
     """Nazwy zestawów do chipów, W PORZĄDKU ZESTAWÓW PO LIGHTACH (kontrakt T4 §8a pkt 3) —
     `PlanResult.rigs` jest już posortowane `(-lights, telescope)`, więc bierzemy je JAK JEST.
     Alfabetyczny raport `sky.park` opisuje park, nie ekran: człowiek szuka na górze sprzętu,
-    którym realnie pracuje."""
-    return tuple(r.telescope for r in result.rigs)
+    którym realnie pracuje.
+
+    Nazwa to `RigSet.name`, nie sam teleskop: optyka z dwiema kamerami daje DWA chipy
+    („ED120R (ASI2600MC/ASI2600MM)", „ED120R (ASI294MC)"), a nie dwa jednakowe, z których oba
+    wskazywałyby pierwszy zestaw. Nazwa jest unikalna w obrębie wyniku (`targets.rig_sets`)."""
+    return tuple(r.name for r in result.rigs)
 
 
-def _rig_by_name(result, telescope):
-    return next((r for r in result.rigs if r.telescope == telescope), None)
+def _rig_by_name(result, name):
+    return next((r for r in result.rigs if r.name == name), None)
 
 
-def lens(row, result, telescope=None):
-    """Para `(zestaw, kadrowanie)` widziana przez chip. `telescope=None` (domyślnie) → najlepsze
-    dopasowanie z rdzenia; nazwa zestawu → TEN zestaw, o ile ma kadrowanie tego celu.
+def lens(row, result, rig_name=None):
+    """Para `(zestaw, kadrowanie)` widziana przez chip. `rig_name=None` (domyślnie) → najlepsze
+    dopasowanie z rdzenia; nazwa zestawu (`rig_choices`) → TEN zestaw, o ile ma kadrowanie tego
+    celu. Kadrowanie po tożsamości zestawu (`TargetRow.framing_in`), nie po nazwie teleskopu.
     Zwraca `(RigSet|None, sky.Framing|None)`."""
-    if telescope is None:
-        rig = row.best_rig
-    else:
-        rig = _rig_by_name(result, telescope)
+    rig = row.best_rig if rig_name is None else _rig_by_name(result, rig_name)
     if rig is None:
         return None, None
-    return rig, row.framing.get(rig.telescope)
+    return rig, row.framing_in(rig)
 
 
 def recommendation(row, rig):
@@ -96,30 +109,47 @@ def recommendation(row, rig):
     return T.recommend_channel(row.coverage, row.cost, rig)
 
 
-def view_rows(result, telescope=None, order=ORDER_CORE):
+def lens_fits(row, result, rig_name=None):
+    """Czy wiersz przechodzi FILTR KADRU w soczewce. Filtr nieczynny (`rig_filter != 'on'`) - zawsze
+    tak. Bez soczewki rozstrzyga `best_rig`, który rdzeń wybrał już spośród zestawów spełniających
+    próg, więc pula i lista mówią jednym głosem."""
+    if result.rig_filter != "on":
+        return True
+    _rig, fr = lens(row, result, rig_name)
+    return T.rig_fits(fr, min_fill=result.min_fill, max_panels=result.max_panels)
+
+
+def lens_hidden(result, rig_name=None):
+    """Ile wierszy wyniku soczewka schowała filtrem kadru - liczba do noty nagłówka."""
+    return sum(1 for r in result.rows if not lens_fits(r, result, rig_name))
+
+
+def view_rows(result, rig_name=None, order=ORDER_CORE):
     """`PlanResult` → krotka `ViewRow`. `order=ORDER_CORE` (domyślnie) zachowuje porządek rdzenia;
-    `ORDER_LENS` przestawia wiersze WEDŁUG KADROWANIA w soczewce (patrz `_lens_key`)."""
-    rows = tuple(_view_row(r, result, telescope) for r in result.rows)
+    `ORDER_LENS` przestawia wiersze WEDŁUG KADROWANIA w soczewce (patrz `_lens_key`). Włączony
+    filtr kadru chowa wiersze, których soczewka nie spełnia (`lens_fits`)."""
+    rows = tuple(_view_row(r, result, rig_name) for r in result.rows
+                 if lens_fits(r, result, rig_name))
     if order != ORDER_LENS:
         return rows
     # `sorted` jest STABILNY, więc remis (ten sam kadr, to samo wypełnienie) zostaje rozstrzygnięty
     # porządkiem rdzenia — dwa przebiegi dają ten sam plik i nie ma tu drugiego klucza do utrzymania.
-    return tuple(sorted(rows, key=lambda v: _lens_key(v, result, telescope)))
+    return tuple(sorted(rows, key=lambda v: _lens_key(v, result, rig_name)))
 
 
-def _lens_key(view_row, result, telescope):
+def _lens_key(view_row, result, rig_name):
     """Klucz sortu „po soczewce": (najpierw JEDEN KADR, potem najlepiej wypełniające) — dokładnie
     te dwa człony, którymi rdzeń wybiera `best_rig` (`targets._framing_for`), więc oko dostaje ten
     sam ranking, który stoi za kolumną „Zestaw i kadr". Cel bez kadrowania w tej soczewce idzie na
     KONIEC (nie na początek jako „0 paneli") — brak odpowiedzi nie ma prawa wygrywać z odpowiedzią."""
-    _rig, fr = lens(view_row.source, result, telescope)
+    _rig, fr = lens(view_row.source, result, rig_name)
     if fr is None:
         return (1, 0, 0.0)
     return (0, fr.panels, -fr.fill)
 
 
-def _view_row(row, result, telescope):
-    rig, fr = lens(row, result, telescope)
+def _view_row(row, result, rig_name):
+    rig, fr = lens(row, result, rig_name)
     channel, reason = recommendation(row, rig)
     t = row.target
     return ViewRow(
@@ -129,6 +159,7 @@ def _view_row(row, result, telescope):
         culmination=f"{row.window.max_alt_deg:.0f}°",
         window=f"{row.window.hours_above:.1f} h",
         rig=rig_text(rig, fr),
+        fill=fill_text(fr),
         coverage=coverage_text(row),
         coverage_tip=coverage_tip(row),
         cost=cost_text(row),
@@ -137,6 +168,7 @@ def _view_row(row, result, telescope):
         note=row.note or "",
         visible=row.window.visible,
         source=row,
+        fill_mosaic=fr is not None and fr.panels > 1,
     )
 
 
@@ -156,7 +188,15 @@ def rig_text(rig, framing):
         return "—"
     panels = (i18n.t("planner.one_frame") if framing.panels == 1
               else i18n.t("planner.mosaic", n=framing.panels))
-    return f"{rig.telescope} · {panels}"
+    return f"{rig.name} · {panels}"
+
+
+def fill_text(framing):
+    """„58%": wypełnienie kadru (PL-1), miara `sky.Framing.frame_fill` (0..1, mozaika = 100%).
+    Brak kadrowania = kreska, jak w kolumnie zestawu: „nie masz czym", nie „nie policzyłem"."""
+    if framing is None:
+        return "-"
+    return f"{framing.frame_fill * 100:.0f}%"
 
 
 def coverage_text(row):
@@ -240,11 +280,34 @@ def can_show_frames(row):
     return bool(row.coverage.archive_canons)
 
 
-def header_notes(result):
+# Filtr kadru poproszony, ale nieczynny (`PlanResult.rig_filter`) → klucz noty. Tryb `find` noty
+# nie dostaje: ekran mówi już, że szukanie pomija progi (`planner.find_note`).
+_RIG_FILTER_OFF_KEYS = {"no_park": "planner.rig_filter_no_park",
+                        "no_rigs": "planner.rig_filter_no_rigs"}
+
+
+def rig_filter_text(result):
+    """Progi filtra kadru jednym napisem („wypełnienie ≥30%, maks. paneli 1") - do licznika,
+    not i tytułu paska. Progi z `PlanResult`, nie z kontrolek: napis opisuje POLICZONY wynik."""
+    parts = []
+    if result.min_fill is not None:
+        parts.append(i18n.t("planner.rig_filter_fill", pct=f"{result.min_fill * 100:.0f}"))
+    if result.max_panels is not None:
+        parts.append(i18n.t("planner.rig_filter_panels", n=result.max_panels))
+    return ", ".join(parts)
+
+
+def header_notes(result, rig_name=None):
     """Noty nagłówka nocy jako pary `(waga, tekst)`; waga `warn` dla stanów, które FAŁSZUJĄ
     rachunek, `info` dla tych, które go tylko zawężają. Każda mówi, czego liczba NIE obejmuje —
-    cichy ubytek zestawu albo celu to ta sama klasa błędu co cichy sufit listy."""
+    cichy ubytek zestawu albo celu to ta sama klasa błędu co cichy sufit listy.
+
+    `rig_name` = bieżąca soczewka: przy włączonym filtrze kadru nota mówi, ile wierszy schowała
+    soczewka PONAD to, co schował rdzeń."""
     notes = []
+    if result.rig_filter in _RIG_FILTER_OFF_KEYS:
+        notes.append(("warn", i18n.t(_RIG_FILTER_OFF_KEYS[result.rig_filter],
+                                     filter=rig_filter_text(result))))
     if result.park_source == "none":
         notes.append(("warn", i18n.t("planner.park_unset")))
     else:
@@ -262,6 +325,9 @@ def header_notes(result):
     for rig in result.skipped_rigs:
         notes.append(("info", i18n.t("planner.rig_skipped", name=rig.telescope,
                                      reason=rig.reason)))
+    hidden = lens_hidden(result, rig_name) if rig_name is not None else 0
+    if hidden:
+        notes.append(("info", i18n.t_plural("planner.lens_hidden", hidden, name=rig_name)))
     return tuple(notes)
 
 
@@ -278,12 +344,29 @@ def night_text(result):
         alt=f"{result.moon.alt_deg:.0f}°")
 
 
-def counts_text(result):
+def counts_text(result, rig_name=None):
     """Lejek celów w jednej linii: pula → po progach → nad horyzontem → widoczne. Liczniki opisują
-    NOC, nie długość ekranu (kontrakt T3 — dlatego liczone przed limitem)."""
+    NOC, nie długość ekranu (kontrakt T3 - dlatego liczone przed limitem).
+
+    Wyjątek to liczba WIERSZY przy soczewce, która chowa (filtr kadru + chip): „wierszy: 222" nad
+    listą 99 wierszy byłoby nieprawdą o ekranie, więc obok stoi to, co widać („w soczewce A140R:
+    99"), a nota nagłówka (`header_notes`) mówi dlaczego. Bez chowania napis jest ten sam co bez
+    soczewki."""
     c = result.counts
+    rows = c["rows"]
+    hidden = lens_hidden(result, rig_name) if rig_name is not None else 0
+    if hidden:
+        rows = i18n.t("planner.rows_in_lens", rows=c["rows"], name=rig_name,
+                      shown=len(result.rows) - hidden)
+    if result.rig_filter == "on":
+        # Filtr kadru zmienia ZNACZENIE licznika („wykonalne twoim sprzętem") - napis idzie razem
+        # z semantyką, a liczba schowanych stoi obok, żeby odsiew nie wyglądał jak ubogi katalog.
+        return i18n.t("planner.counts_rig", pool=c["pool"], feasible=c["feasible"],
+                      filter=rig_filter_text(result),
+                      hidden=i18n.t_plural("planner.rig_hidden", c["hidden_by_rig"]),
+                      above=c["above_horizon"], visible=c["visible"], rows=rows)
     return i18n.t("planner.counts", pool=c["pool"], feasible=c["feasible"],
-                  above=c["above_horizon"], visible=c["visible"], rows=c["rows"])
+                  above=c["above_horizon"], visible=c["visible"], rows=rows)
 
 
 def _hhmm(dt):

@@ -38,6 +38,23 @@ def _layout(name):
     return name
 
 
+def _fraction(text):
+    """Ułamek w (0, 1] - `--min-fill 30` (procent zamiast ułamka) ma wybuchnąć przy parsowaniu,
+    a nie po cichu odciąć cały katalog. Komunikat ASCII (stderr bywa cp1250)."""
+    value = float(text)
+    if not 0.0 < value <= 1.0:
+        raise argparse.ArgumentTypeError(f"oczekiwany ulamek 0..1 (np. 0.3), jest {text!r}")
+    return value
+
+
+def _positive_int(text):
+    """Liczba całkowita ≥ 1 - zero paneli nie ma sensu, a przepuszczone wygasiłoby listę."""
+    value = int(text)
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"oczekiwana liczba >= 1, jest {text!r}")
+    return value
+
+
 def main(argv=None):
     # Konsola Windows bywa cp1250; `delta` wypisuje surowe object_raw (dane usera — mogą mieć znaki
     # spoza cp1250). Przełącz stdout na UTF-8 (best-effort), by `print` nie wywalił się na nazwie
@@ -121,6 +138,14 @@ def main(argv=None):
     p_plan.add_argument("--min-hours", type=float, default=1.0, help="ile godzin kanału to pokrycie")
     p_plan.add_argument("--max-cost", type=float, default=None,
                         help="odetnij cele droższe niż N× (domyślnie BEZ progu — D-0731-14)")
+    # Filtr kadru (dług T5, PL-1, PL-2) - domyślnie WYŁĄCZONY jak `--max-cost`; działa na parku
+    # (jawnym albo z bazy), z kwantyfikatorem LUB po zestawach: „mam czym to zrobić".
+    p_plan.add_argument("--min-fill", type=_fraction, default=None,
+                        help="odetnij cele wypełniające kadr mniej niż N (0..1, np. 0.3) "
+                             "w KAŻDYM zestawie parku (domyślnie BEZ progu)")
+    p_plan.add_argument("--max-panels", type=_positive_int, default=None,
+                        help="odetnij cele wymagające więcej niż N paneli w KAŻDYM zestawie parku "
+                             "(1 = tylko jeden kadr; domyślnie BEZ progu)")
     p_plan.add_argument("--overlap", type=float, default=0.10, help="zakładka mozaiki (0..1)")
     p_plan.add_argument("--gaps", action="store_true", help="tylko cele z luką")
     p_plan.add_argument("--new", action="store_true", help="tylko cele nigdy nie fotografowane")
@@ -352,7 +377,8 @@ def main(argv=None):
                 min_alt=args.min_alt, min_hours=args.min_hours, max_cost=args.max_cost,
                 overlap=args.overlap, only_gaps=args.gaps, only_new=args.new,
                 status=args.status, find=args.find,
-                limit=None if args.all else args.limit)
+                limit=None if args.all else args.limit,
+                min_fill=args.min_fill, max_panels=args.max_panels)
         except ValueError as e:                           # brak stanowiska z GPS / zła warstwa
             con.close()
             print(f"Horreum plan: {e}")
@@ -969,6 +995,25 @@ def _cmd_target(args):
     return 0
 
 
+# Filtr kadru poproszony, ale nieczynny - powód mówi, CO zrobić (`targets.PlanResult.rig_filter`).
+_RIG_FILTER_OFF = {
+    "no_park": "park nieustawiony, liczylby po WSZYSTKICH teleskopach bazy "
+               "(`horreum park <db> --add <teleskop>` albo `--park`)",
+    "no_rigs": "park nie dal ani jednego zestawu z polem widzenia",
+    "find": "tryb --find pomija progi",
+}
+
+
+def _rig_filter_text(res):
+    """Progi filtra kadru jednym napisem ASCII: „wypelnienie >= 30%, maks. 1 panel"."""
+    parts = []
+    if res.min_fill is not None:
+        parts.append(f"wypelnienie >= {res.min_fill * 100:.0f}%")
+    if res.max_panels is not None:
+        parts.append(f"maks. paneli {res.max_panels}")
+    return ", ".join(parts)
+
+
 def _format_plan(db_path, res):
     """Plan nocy do czytelnego ASCII (konsola Windows = cp1250 — bez znaków spoza ASCII)."""
     site = res.site
@@ -980,8 +1025,16 @@ def _format_plan(db_path, res):
     lines.append(f"  ciemnosc zeglarska {_hhmm(nw.dark_start)}-{_hhmm(nw.dark_end)} UTC{astro}, "
                  f"Ksiezyc {res.moon.illumination * 100:.0f}% alt {res.moon.alt_deg:.0f}")
     c = res.counts
-    lines.append(f"  cele: {c['pool']} -> {c['feasible']} po progach -> {c['above_horizon']} "
+    # Filtr kadru zmienia ZNACZENIE licznika (`targets.plan`) - napis idzie razem z semantyką,
+    # a liczba schowanych stoi obok, żeby odsiew nie wyglądał jak ubogi katalog.
+    feasible_txt = (f"{c['feasible']} wykonalnych twoim sprzetem ({_rig_filter_text(res)}: "
+                    f"-{c['hidden_by_rig']})" if res.rig_filter == "on"
+                    else f"{c['feasible']} po progach")
+    lines.append(f"  cele: {c['pool']} -> {feasible_txt} -> {c['above_horizon']} "
                  f"nad horyzontem -> {c['visible']} widocznych")
+    if res.rig_filter in _RIG_FILTER_OFF:
+        lines.append(f"  filtr kadru ({_rig_filter_text(res)}) WYLACZONY: "
+                     f"{_RIG_FILTER_OFF[res.rig_filter]}")
     for rig in res.rigs:
         lines.append(f"  zestaw {rig.telescope}: kadr {rig.fov_x_arcmin:.0f}'x{rig.fov_y_arcmin:.0f}'"
                      f", kamery {'/'.join(rig.cameras)}{'' if rig.mono else ' (tylko OSC)'}")
@@ -1004,12 +1057,13 @@ def _format_plan(db_path, res):
                      f"kubelek RGB moze byc zanieczyszczony")
     lines.append("")
     lines.append(f"  {'cel':<14}{'typ':<6}{'rozm':>6}{'kulm':>6}{'h>':>5}  {'zestaw':<17}"
-                 f"{'koszt B/D/N':<14}{'rada':<6}{'plan':<10}pokrycie")
+                 f"{'wyp':>4}  {'koszt B/D/N':<14}{'rada':<6}{'plan':<10}pokrycie")
     for row in res.rows:
         rig = row.best_rig
-        fr = row.framing.get(rig.telescope) if rig is not None else None
+        fr = row.framing_in(rig)
         rig_txt = "-" if fr is None else (
-            f"{rig.telescope} " + ("1 kadr" if fr.panels == 1 else f"mozaika {fr.panels}"))
+            f"{rig.name} " + ("1 kadr" if fr.panels == 1 else f"mozaika {fr.panels}"))
+        fill_txt = "-" if fr is None else f"{fr.frame_fill * 100:.0f}%"
         cost = row.cost
         cost_txt = (f"{cost['broadband']:.1f}/{cost['duoband']:.1f}/{cost['narrowband']:.1f}")
         plan_txt = "-" if row.plan_status is None else (
@@ -1017,7 +1071,7 @@ def _format_plan(db_path, res):
         lines.append(
             f"  {row.target.canon:<14}{row.target.type:<6}"
             f"{row.target.major_arcmin:>5.0f}'{row.window.max_alt_deg:>6.1f}"
-            f"{row.window.hours_above:>5.1f}  {rig_txt:<17}{cost_txt:<14}"
+            f"{row.window.hours_above:>5.1f}  {rig_txt:<17}{fill_txt:>4}  {cost_txt:<14}"
             f"{row.recommend or '-':<6}{plan_txt:<10}{_coverage_text(row)}")
     if res.hidden:
         lines.append(f"  ... {res.hidden} wierszy ukrytych limitem (--all zdejmuje)")
@@ -1030,8 +1084,13 @@ def _format_plan(db_path, res):
 
 
 def _plan_json(res):
-    """Ten sam materiał maszynowo — wejście dla T5 i dla firsthandu."""
-    return {
+    """Ten sam materiał maszynowo - wejście dla T5 i dla firsthandu.
+
+    `fill_pct` = wypełnienie kadru (`sky.Framing.frame_fill`) w zestawie `best_rig`, w procentach;
+    `null` przy braku zestawu. Blok `rig_filter` pojawia się WYŁĄCZNIE, gdy o filtr kadru proszono -
+    domyślna odpowiedź ma ten sam kształt co przed filtrem."""
+    names = {r.config_id: r.name for r in res.rigs}
+    out = {
         "night": res.night_date.isoformat(),
         "site": {"name": res.site.name, "lat": res.site.lat_deg, "lon": res.site.lon_deg},
         "dark": {"start": res.night.dark_start.isoformat() if res.night.dark_start else None,
@@ -1053,9 +1112,12 @@ def _plan_json(res):
             "ra_deg": row.target.ra_deg, "dec_deg": row.target.dec_deg, "layer": row.target.layer,
             "max_alt_deg": round(row.window.max_alt_deg, 2),
             "hours_above": row.window.hours_above, "visible": row.window.visible,
-            "framing": {k: {"panels": v.panels, "fill": round(v.fill, 3)}
+            # Klucze `framing` i `best_rig` to NAZWA zestawu (`RigSet.name`): teleskop, a przy dwóch
+            # zestawach jednej optyki teleskop z kamerami - dwa kadrowania nie zlewają się w jedno.
+            "framing": {names[k]: {"panels": v.panels, "fill": round(v.fill, 3)}
                         for k, v in row.framing.items()},
-            "best_rig": row.best_rig.telescope if row.best_rig else None,
+            "best_rig": row.best_rig.name if row.best_rig else None,
+            "fill_pct": _fill_pct(row),
             "cost": {k: round(v, 3) for k, v in row.cost.items()},
             "recommend": row.recommend, "recommend_reason": row.recommend_reason,
             "plan_status": row.plan_status, "priority": row.priority, "note": row.note,
@@ -1070,6 +1132,16 @@ def _plan_json(res):
             "gaps": list(row.coverage.gaps),
         } for row in res.rows],
     }
+    if res.rig_filter != "off":
+        out["rig_filter"] = {"state": res.rig_filter, "min_fill": res.min_fill,
+                             "max_panels": res.max_panels}
+    return out
+
+
+def _fill_pct(row):
+    """Wypełnienie kadru `best_rig` w procentach (jedna miara: `sky.Framing.frame_fill`)."""
+    fr = row.framing_in(row.best_rig)
+    return None if fr is None else round(fr.frame_fill * 100, 1)
 
 
 def _format_stacks(root, db_path, s, limit=10):

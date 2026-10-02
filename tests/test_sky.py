@@ -163,6 +163,31 @@ def test_framing_bez_fov_oddaje_none():
     assert sky.framing(20.0, _rig(RC8, reason="no_naxis")) is None
 
 
+# ─────────────────────────────────────────────────────────────── wypełnienie kadru (PL-1)
+
+def test_wypelnienie_celu_w_jednym_kadrze_nie_przekracza_calosci():
+    """Pułapka miary z PL-1: G065.1+00.6 (90'x50') mieści się w JEDNYM kadrze A140R (103'x69'),
+    a surowe `fill` (do krótszego boku) wynosi 1,30. `frame_fill` kładzie oś dłuższą wzdłuż
+    dłuższego boku (tak jak liczą się panele), więc przy jednym kadrze jest ≤ 1."""
+    r = _rig(A140R)
+    f = sky.framing(90.0, r, minor_arcmin=50.0)
+    assert f.panels == 1 and f.fill > 1.0
+    assert f.frame_fill == pytest.approx(max(90.0 / r.fov_x_arcmin, 50.0 / r.fov_y_arcmin))
+    assert f.frame_fill < 1.0
+
+
+def test_wypelnienie_mozaiki_to_caly_kadr():
+    """Mozaika wypełnia każdy panel w całości: miara cięta do 1, nie 4,5."""
+    f = sky.framing(310.0, _rig(A140R))
+    assert f.panels > 1 and f.frame_fill == 1.0
+
+
+def test_wypelnienie_celu_okraglego_to_iloraz_do_krotszego_boku():
+    """Cel bez osi mniejszej jest kołem: rozstrzyga krótszy bok, czyli ta sama liczba co `fill`."""
+    f = sky.framing(25.0, _rig(A140R))
+    assert f.frame_fill == pytest.approx(f.fill) and 0.3 < f.frame_fill < 0.4
+
+
 # ─────────────────────────────────────────────────────────────── czas i widoczność
 
 def test_naiwny_czas_jest_bledem():

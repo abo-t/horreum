@@ -458,6 +458,54 @@ def test_bez_faktow_reki_nie_ma_czego_przenosic():
     assert con.execute("SELECT object_id FROM frame WHERE id=?", (b,)).fetchone()[0] is None
 
 
+@pytest.mark.parametrize("zrodlo", ["path", "user"])
+def test_AR16_obiekt_nie_przechodzi_na_nastepczynie_kalibracje(zrodlo):
+    """AR-16: klatka kalibracyjna z definicji nie ma obiektu (`LIGHT_KINDS`), więc fakt ręki
+    obiektu NIE przechodzi na następczynię-flat. Ręka nietykalna: werdykt zostaje na klatce
+    zastąpionej (append-only), a raport mówi, że został - nie znika bez śladu. Kubełek podmiany
+    nie liczy tej osi, bo gest nie umiałby jej opróżnić (lustro predykatu i klingi)."""
+    con = _baza()
+    oid = repo.upsert_object(con, canon="IC443", catalog="IC", kind=None, now=NOW)[0]
+    a, b = _klatka(con, "aaa"), _klatka(con, "bbb", kind="flat")
+    lid = _kopia(con, a, r"R:\X\plik.fits")
+    _z_obiektem(con, a, oid, zrodlo)
+    _podmiana(con, lid, b)
+    repo.mark_superseded(con, frame_id=a, superseded_by=b, now=NOW)
+
+    assert supersede.pending_transfer(con) == []
+    wynik = repo.transfer_human_facts(con, frame_id=a, now=NOW)
+    assert wynik.object_moved is False and wynik.object_kept is True
+    assert wynik.skipped == "nastepczyni to kalibracja - obiekt zostaje na zrodle"
+    assert con.execute(
+        "SELECT object_id, object_source FROM frame WHERE id=?", (b,)).fetchone()[:] == (None, None)
+    assert con.execute(
+        "SELECT object_id, object_source FROM frame WHERE id=?", (a,)).fetchone()[:] == (oid, zrodlo)
+    assert con.execute(
+        "SELECT count(*) FROM event WHERE verb='object.assigned' AND target=?",
+        (f"frame:{b}",)).fetchone()[0] == 0
+
+
+def test_AR16_kalibracja_zatrzymuje_obiekt_a_rodowod_przechodzi():
+    """Inne osie nie czekają na oś obiektu: werdykt rodowodu przechodzi, a raport niesie, że
+    obiekt został na źródle (`object_kept`), choć `skipped` jest puste."""
+    con = _baza()
+    oid = repo.upsert_object(con, canon="IC443", catalog="IC", kind=None, now=NOW)[0]
+    a, b = _klatka(con, "aaa"), _klatka(con, "bbb", kind="flat")
+    lid = _kopia(con, a, r"R:\X\plik.fits")
+    _z_obiektem(con, a, oid, "path")
+    iid = _integracja(con, _klatka(con, "mmm", kind="master_light"))
+    repo.judge_integration_input(con, integration_id=iid, input_frame_id=a,
+                                 excluded=False, now=NOW)
+    _podmiana(con, lid, b)
+    repo.mark_superseded(con, frame_id=a, superseded_by=b, now=NOW)
+
+    assert supersede.pending_transfer(con) == [(a, b, "rodowod")]
+    wynik = repo.transfer_human_facts(con, frame_id=a, now=NOW)
+    assert (wynik.object_moved, wynik.object_kept, wynik.lineage_moved, wynik.skipped) \
+        == (False, True, 1, "")
+    assert con.execute("SELECT object_id FROM frame WHERE id=?", (a,)).fetchone()[0] == oid
+
+
 def test_przeniesienie_jest_idempotentne_i_wymaga_ogniwa():
     con = _baza()
     oid = repo.upsert_object(con, canon="IC443", catalog="IC", kind=None, now=NOW)[0]

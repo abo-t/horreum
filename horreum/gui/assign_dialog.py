@@ -5,6 +5,8 @@ przeglądu (`gui.app`) i pasek Zbiorów (`gui.grid`) — a `grid` nie może się
 Dopóki wołający był jeden, kontraktu okna pilnował guard w `_on_assign` po stronie tego wołającego;
 drugie wejście ten układ unieważnia (R-S4-9), więc kontrakt przenosi się TU, do konstruktora.
 """
+import unicodedata
+
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QLabel, QLineEdit, QVBoxLayout,
 )
@@ -14,6 +16,35 @@ from horreum.gui import facet_model, i18n, queries
 from horreum.resolve._text import norm_alnum
 from horreum.resolve.catalog import catalog_canon, header_form, xref_aliases
 from horreum.resolve.objects import load_own_objects
+
+# Litery bez rozkładu NFKD: dla Unicode „ł" nie jest „l z kreską", tylko osobną literą, więc
+# `unicodedata.normalize` jej nie rusza i bez tej tablicy „Obłok" zostałby przy „Obok".
+_LITERY_BEZ_ROZKLADU = str.maketrans({"ł": "l", "Ł": "L"})
+
+# Ile pozycji listy obiektów naraz. Styl Fusion domyślnie ignoruje `maxVisibleItems` i rozwija
+# listę na wysokość ekranu (zmierzone: 1778 px przy kilkuset obiektach); `combobox-popup: 0`
+# przełącza go na zwykłą listę z suwakiem, która tę liczbę szanuje.
+_POZYCJI_NARAZ = 10
+
+
+def bez_diakrytykow(text):
+    """`Księżyc` → `Ksiezyc`, `Obłok` → `Oblok`: znaki diakrytyczne złożone do liter bazowych.
+    Czysta funkcja, wyłącznie po stronie okna."""
+    rozlozone = unicodedata.normalize("NFKD", str(text or "").translate(_LITERY_BEZ_ROZKLADU))
+    return "".join(z for z in rozlozone if not unicodedata.combining(z))
+
+
+def klucz_szukania(text):
+    """Klucz porównań SZUKAJKI i deduplikacji listy tego okna: `norm_alnum` po złożeniu
+    diakrytyków.
+
+    `norm_alnum` zostawia wyłącznie `A-Z0-9`, więc litery z ogonkami po prostu WYCINA: „Księżyc"
+    dawało `KSIYC` i nie trafiało aliasu `KSIEZYC`, a „Wielki Obłok Magellana" i „Wielki Oblok
+    Magellana" miały różne klucze (`…OBOK…` i `…OBLOK…`), więc lista pokazywała obie formy obok
+    siebie. Klucze w bazie (`alias_norm`) i klucz zapisu liczy dalej `norm_alnum` BEZ zmian: ich
+    zmiana wymagałaby migracji wszystkich aliasów, a ten klucz służy wyłącznie do porównania
+    tego, co okno pokazuje, z tym, co user wpisuje."""
+    return norm_alnum(bez_diakrytykow(text))
 
 
 def nazwy_slownika():
@@ -36,6 +67,14 @@ def nazwy_slownika():
     return out
 
 
+def formy_aliasow(con):
+    """`alias_norm` → brzmienie do pokazania (AR-15). Dwa źródła, oba już pokazywane gdzie indziej:
+    słownik obiektów własnych (asset, brzmienie ustawione ręką) wygrywa z brzmieniem z karty
+    `OBJECT` (`queries.alias_header_forms` - ta sama kolumna, z której UI pokazuje nazwę z pliku).
+    Klucz zostaje kluczem: szukajka i zapis dalej pracują na `alias_norm`."""
+    return {**queries.alias_header_forms(con), **nazwy_slownika()}
+
+
 def aliasy_obiektu(canon, alias_norms, pretty=None):
     """Aliasy obiektu DO POKAZANIA na liście okna (decyzja usera 2026-09-26: kto grzebie w nazwach,
     musi widzieć aliasy). Źródła: `object_alias` (`alias_norms`) i równoważność `catalog_xref.json`
@@ -43,20 +82,26 @@ def aliasy_obiektu(canon, alias_norms, pretty=None):
 
     Każdy alias dostaje najczytelniejszą formę, jaką znamy, bez zmyślania brzmienia:
       * oznaczenie katalogowe → forma kanoniczna gramatyki (`CALDWELL3` → `C3`, `SH2184` → `Sh2-184`);
-      * nazwa ze słownika obiektów własnych → brzmienie z assetu (`pretty`);
-      * reszta → `alias_norm`, bo tylko taka forma istnieje w bazie (jak w `facet_model.search_hit`).
+      * nazwa ze słownika obiektów własnych albo z karty `OBJECT` → brzmienie z `pretty`
+        (`formy_aliasow`: asset słownika, a za nim `header.object_raw` - AR-15);
+      * reszta → `alias_norm`, bo żadnego brzmienia nie znamy (jak w `facet_model.search_hit`).
     Aliasy TECHNICZNE odpadają: te, które są zapisem samego kanonu (`NGC4258`, `SH2131`,
-    `COLLINDER464` przy `Cr464`) - niczego userowi nie mówią. Duplikaty (ten sam `norm_alnum`
-    z bazy i z xref) scala forma. Kolejność: oznaczenia katalogowe przed nazwami, potem alfabet."""
-    klucz_kanonu = norm_alnum(canon)
+    `COLLINDER464` przy `Cr464`) - niczego userowi nie mówią. Duplikaty scala `klucz_szukania`
+    (ten sam klucz z bazy i z xref, a także ta sama nazwa z ogonkami i bez nich: „Wielki Obłok
+    Magellana" / „Wielki Oblok Magellana" to jedna nazwa w dwóch zapisach). Z dwóch zapisów
+    zostaje ten Z OGONKAMI - pełna pisownia nazwy, a wersja bez nich jest jej uproszczeniem.
+    Kolejność: oznaczenia katalogowe przed nazwami, potem alfabet."""
+    klucz_kanonu = klucz_szukania(canon)
     pretty = pretty or {}
     formy = {}
     for forma in (*xref_aliases(canon),
                   *((catalog_canon(a, split=False) or pretty.get(a) or a)
                     for a in sorted(alias_norms or ()))):
-        klucz = norm_alnum(forma)
+        klucz = klucz_szukania(forma)
         if klucz and klucz != klucz_kanonu and catalog_canon(forma, split=False) != canon:
-            formy.setdefault(klucz, forma)
+            zastana = formy.setdefault(klucz, forma)
+            if zastana == bez_diakrytykow(zastana) and forma != bez_diakrytykow(forma):
+                formy[klucz] = forma
     return sorted(formy.values(),
                   key=lambda s: (catalog_canon(s, split=False) is None, s.casefold()))
 
@@ -222,12 +267,19 @@ class AssignObjectDialog(QDialog):
         self.search.setClearButtonEnabled(True)
         lay.addWidget(self.search)
         self.combo = QComboBox()
+        # Lista ma SUFIT wysokości: bez `combobox-popup: 0` styl Fusion pomija `maxVisibleItems`
+        # i rozwija całą bibliotekę na wysokość ekranu (`_POZYCJI_NARAZ`).
+        self.combo.setStyleSheet("QComboBox { combobox-popup: 0; }")
+        self.combo.setMaxVisibleItems(_POZYCJI_NARAZ)
         self._objects = queries.library_objects(con)          # bez filtra — pełna biblioteka
         alias_idx = queries.object_alias_index(con)
-        pretty = nazwy_slownika()
+        pretty = formy_aliasow(con)
         self._aliasy = {o["canon"]: aliasy_obiektu(o["canon"], alias_idx.get(o["canon"]), pretty)
                         for o in self._objects}
-        self._szukaj = {canon: set(alias_idx.get(canon, ())) | {norm_alnum(a) for a in aliasy}
+        # Siano szukajki: klucze z bazy (`alias_norm`, już bez ogonków) i KLUCZE SZUKANIA form
+        # pokazanych na liście - igła przechodzi tę samą bramkę (`_fill_combo`), więc „Księżyc"
+        # trafia `KSIEZYC`, a „Obłok" - formę z ogonkiem.
+        self._szukaj = {canon: set(alias_idx.get(canon, ())) | {klucz_szukania(a) for a in aliasy}
                         for canon, aliasy in self._aliasy.items()}
         self._fill_combo("")
         # PRESELEKCJA WYBORU, KTÓRY JUŻ PADŁ (firsthand 0810, znalezisko 3). Okno bywa wołane
@@ -301,8 +353,12 @@ class AssignObjectDialog(QDialog):
         Sygnały zablokowane na czas przeładunku: `clear()` emituje zmianę indeksu dla każdej
         pozycji po drodze, a stan akcji liczy wołający raz, po wszystkim."""
         wybrany = self.combo.currentData()
+        # Igła BEZ OGONKÓW: predykat liczy `norm_alnum`, który litery diakrytyczne wycina,
+        # więc złożenie musi nastąpić przed nim (`klucz_szukania`). Predykat zostaje wspólny
+        # z listwą facetów; składanie jest własnością tego okna.
+        igla = bez_diakrytykow(text)
         trafione = [o for o in self._objects
-                    if facet_model.search_hit(text, o["canon"], self._szukaj) is not None]
+                    if facet_model.search_hit(igla, o["canon"], self._szukaj) is not None]
         fraza = (text or "").strip()
         self.combo.blockSignals(True)
         try:

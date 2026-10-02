@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 
 import horreum
-from horreum import repo
+from horreum import repo, resolver
 from horreum.gui import queries
 
 NOW = "2026-06-29T13:00:00"
@@ -501,7 +501,7 @@ def test_unreadable_kind_counts_po_kopiach_sumuje_sie_do_drazenia(s8_obj):
     rozjeżdża się z drążeniem; zdejmij `"db"` ze słownika startowego → rozbicie nie ma przegródki
     `db` przy zerze i pierwsza asercja czerwienieje."""
     con, ids = s8_obj
-    assert queries.unreadable_kind_counts(con) == {"io": 0, "parse": 0, "db": 0, "unknown": 0}
+    assert resolver.unreadable_kind_counts(con) == {"io": 0, "parse": 0, "db": 0, "unknown": 0}
     locs = con.execute("SELECT id, path FROM location WHERE frame_id = ? ORDER BY id",
                        (ids["frames"]["a1"],)).fetchall()
     repo.refresh_location_unreadable(con, location_id=locs[0]["id"], sha1_data="sha-a1",
@@ -520,7 +520,7 @@ def test_unreadable_kind_counts_po_kopiach_sumuje_sie_do_drazenia(s8_obj):
                                      path="/astro/a2.fits", mtime="t2",
                                      reason="OperationalError: database is locked", kind="db",
                                      now=NOW)
-    counts = queries.unreadable_kind_counts(con)
+    counts = resolver.unreadable_kind_counts(con)
     assert counts == {"io": 1, "parse": 1, "db": 1, "unknown": 1}
     assert sum(counts.values()) == len(queries.unreadable_copies(con))
     assert queries.review_queue(con)["unreadable_count"] == 3   # KLATKI: a1 + a2 + ta druga
@@ -566,7 +566,7 @@ def test_drazenie_i_rozbicie_nieczytelnych_licza_TE_SAME_klatki_co_licznik():
     wiersze = queries.unreadable_copies(con)
     assert {r["frame_id"] for r in wiersze} == {kopie["zywa"][0]}
     assert resolver.review_state(con).unreadable == len({r["frame_id"] for r in wiersze}) == 1
-    counts = queries.unreadable_kind_counts(con)
+    counts = resolver.unreadable_kind_counts(con)
     assert counts == {"io": 1, "parse": 0, "db": 0, "unknown": 0}
     assert sum(counts.values()) == len(wiersze)
     con.close()

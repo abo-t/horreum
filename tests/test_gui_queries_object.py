@@ -36,6 +36,50 @@ def test_library_kalibracja_nie_wlicza_sie(s8_obj):
     assert total == 8                       # 5 NGC7000 + 3 M42; kalibracja i obiekt-review poza
 
 
+def test_listy_nazw_w_porzadku_naturalnym(s8_obj):
+    """W-9: biblioteka, facet Obiekt, mapowanie kanonów planera, perspektywy i grupy przywracania
+    sortują się jak kolejka przeglądu - `NGC 891` przed `NGC 7000`, `Caldwell 3` przed
+    `Caldwell 12` - a nie po znakach.
+
+    Falsyfikator: wróć `ORDER BY o.canon` / `ORDER BY name` w którejkolwiek z pięciu funkcji →
+    jej wiersz asercji czerwienieje."""
+    con, ids = s8_obj
+    nazwy = ["NGC 7000", "NGC 891", "Caldwell 12", "Caldwell 3"]
+    oids = {}
+    for n in nazwy:
+        oids[n], _ = repo.upsert_object(con, canon=n, catalog=n.split()[0], kind="deep_sky", now=NOW)
+    frames = {}
+    for i, n in enumerate(nazwy):
+        fid, _ = repo.upsert_frame(con, sha1_data=f"sha-nat-{i}", kind="light", filetype="fits",
+                                   camera_id=None, now=NOW)
+        repo.assign_object(con, frame_id=fid, object_id=oids[n], object_source="header", now=NOW)
+        frames[n] = fid
+    oczekiwane = ["Caldwell 3", "Caldwell 12", "NGC 891", "NGC 7000"]
+    nasze = set(nazwy)
+
+    def _nasze(lista):
+        return [c for c in lista if c in nasze]
+
+    assert _nasze(r["canon"] for r in queries.library_objects(con)) == oczekiwane
+    assert [r["canon"] for r in queries.facet_objects(con, list(frames.values()))] == oczekiwane
+    assert [r["canon"] for r in queries.object_ids_for_canons(con, nazwy)] == oczekiwane
+    with con:
+        for n in ("Plan 10", "Plan 9", "plan 2"):
+            con.execute("INSERT INTO saved_query(name, spec_json, created_at) VALUES (?, '{}', ?)",
+                        (n, NOW))
+    assert [n for n, _ in queries.perspectives(con) if n.lower().startswith("plan")] \
+        == ["plan 2", "Plan 9", "Plan 10"]
+    cofnij = []
+    for i, n in enumerate(nazwy):
+        fid = _nameless_light(con, f"sha-nat-c{i}")
+        repo.user_assign_object(con, alias_norm=None, canon=n, catalog=n.split()[0],
+                                kind="deep_sky", frame_ids=[fid], now=NOW)
+        repo.clear_object_assignment(con, frame_ids=[fid], now=NOW)
+        cofnij.append(fid)
+    grupy, _ = queries.restore_targets(con, cofnij)
+    assert [g["canon"] for g in grupy] == oczekiwane
+
+
 # --- library_objects: filtry (R2 + camera + filter) ---
 
 def test_library_filtr_teleskop_kanoniczny(s8_obj):

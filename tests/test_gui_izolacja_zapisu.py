@@ -746,7 +746,9 @@ def test_niedostepne_zrodlo_sprawdza_watek_tla_i_daje_droge_do_katalogu(qapp, tm
         assert dialogi == [1] and view._thread is not None
         _czekaj_na_etap(view)
         assert view._root == str(zdrowy)
-        assert ustawienia.value("pipeline/last_source") == str(zdrowy)
+        # AR-30 (3): katalog wskazany do sprawdzenia nie przestawia źródła „Przyjmij nowe” -
+        # niedostępne źródło dostawy zgłosi własna droga złotej akcji, z własnym pytaniem.
+        assert ustawienia.value("pipeline/last_source") == brak
         assert view.btn_pick_source.isHidden()
     finally:
         view.close()
@@ -894,3 +896,302 @@ def test_zapis_naglowkow_mowi_czemu_Dostawa_jest_wygaszona(qapp, tmp_path):
         assert view.lbl_writeback_busy.isHidden() and view.btn_receive.toolTip() == ""
     finally:
         view.close()
+
+
+# ═════════════════════════ AR-30: ogony GUI izolacji zapisu w miejscu
+
+
+def test_AR30_1_powod_rdzenia_mowi_gestem_okna_i_wywolaniem(tmp_path, monkeypatch):
+    """AR-30 (1): powody porażki nazywały same FUNKCJE (`recover_torn(N)`, `finish_inplace(N)`),
+    a menu nazywa te drogi gestami. Powód mówi teraz w dwóch formach naraz - „gest” (`wywołanie`) -
+    a nazwy gestów w rdzeniu są tymi z katalogu GUI (rdzeń nie importuje GUI, więc pilnuje test).
+
+    Falsyfikator: przywróć w `_powod_izolacji` samo `recover_torn(N)` → asercja o geście pada;
+    zmień etykietę gestu w katalogu bez rdzenia → pierwsza pętla pada."""
+    for stala, klucz in ((writeback._GEST_DOKONCZ, "grid.inplace.finish"),
+                         (writeback._GEST_PRZYWROC, "grid.inplace.restore"),
+                         (writeback._GEST_ZWOLNIJ, "grid.inplace.release")):
+        assert stala == CATALOG[klucz]["pl"], klucz
+    otwarta = writeback._powod_izolacji({"id": 7, "kind": "commit", "phase": "unverified"})
+    assert f"„{writeback._GEST_PRZYWROC}” (`recover_torn(7)`)" in otwarta, otwarta
+    czeka = writeback._powod_izolacji({"id": 8, "kind": "commit", "phase": "written"})
+    assert f"„{writeback._GEST_DOKONCZ}” (`finish_inplace(8)`)" in czeka, czeka
+    assert f"„{writeback._GEST_PRZYWROC}” (`recover_torn(8)`)" in czeka, czeka
+
+    con, _ = _baza(tmp_path)
+    _commit_written(monkeypatch, con)
+    op_id = con.execute("SELECT id FROM inplace_op").fetchone()[0]
+    odmowa = writeback.recover_torn(con, op_id, now=NOW)       # zapis poprawny - powrót odmawia
+    assert odmowa.status == "blocked"
+    assert f"„{writeback._GEST_DOKONCZ}” (`finish_inplace({op_id})`)" in odmowa.reason, odmowa
+    con.close()
+
+
+def test_AR30_2_podpowiedzi_dokonczenia_mowia_o_powrocie_i_zwolnieniu(qapp, tmp_path, monkeypatch):
+    """AR-30 (2): podpowiedź „Dokończ zapis” (menu) i wiersza „Zapis czeka na dokończenie”
+    (Porządki) mówiły tylko „Dokończ”, choć przy nieudanej kontroli danych drogą jest powrót,
+    a przy pliku skasowanym - zwolnienie. Obie nazywają teraz oba gesty.
+
+    Falsyfikator: zdejmij `finish_tip_else` z `_sync_menu_zapisu` → druga asercja pada."""
+    con, [(_p, fid)] = _baza(tmp_path)
+    _commit_written(monkeypatch, con)
+    view = _widok(con)
+    tv = tasks_mod.TasksView(con)
+    try:
+        view.apply_perspective(grid_mod.PRESET_PENDING_FINISH)
+        _zaznacz(view, [fid])
+        menu = _menu(view)
+        try:
+            tip = view.act_finish_write.toolTip()
+            assert tip.startswith("Dokończy 1 zapis"), tip
+            for gest in ("grid.inplace.restore", "grid.inplace.release"):
+                assert f"„{i18n.t(gest)}”" in tip, tip
+            assert view._sep_zwolnienia.isVisible(), "„Zwolnij…” za własną kreską"
+        finally:
+            menu.hide()
+        tv.refresh_counts()
+        wiersz = _wiersz(tv, "pending_finish_frames").toolTip()
+        for gest in ("grid.inplace.finish", "grid.inplace.restore", "grid.inplace.release"):
+            assert f"„{i18n.t(gest)}”" in wiersz, wiersz
+    finally:
+        tv.close()
+        view.close()
+    con.close()
+
+
+def test_AR30_3_katalog_do_sprawdzenia_nie_zostaje_zrodlem_dostawy(qapp, tmp_path, monkeypatch,
+                                                                    ustawienia):
+    """AR-30 (3): „Wskaż katalog…” obecności zapisywał wskazany katalog jako źródło „Przyjmij nowe” -
+    sprawdzenie korzenia archiwum przestawiało złotą akcję na całe archiwum. Podpowiedź przy
+    ostatnim źródle mówi teraz zakres (tylko kopie pod tym katalogiem) i drogę do korzenia.
+
+    Falsyfikator: przywróć `_remember_source` w `_on_presence_pick` → asercja o pamięci pada."""
+    from PySide6.QtWidgets import QFileDialog
+    from horreum.gui.pipeline import PipelineView
+    dostawa = tmp_path / "dostawa"
+    korzen = tmp_path / "archiwum"
+    dostawa.mkdir()
+    korzen.mkdir()
+    db_path = str(tmp_path / "p.db")
+    db.open_db(db_path).close()
+    ustawienia.setValue("pipeline/last_source", str(dostawa))
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory",
+                        staticmethod(lambda *a, **k: str(korzen)))
+    view = PipelineView(db_path, now_fn=lambda: NOW)
+    try:
+        tip = view.btn_presence.toolTip()
+        assert str(dostawa) in tip and f"„{i18n.t('pipeline.btn.presence_in')}”" in tip, tip
+        view._on_presence_pick()
+        _czekaj_na_etap(view)
+        assert view._root == str(korzen)
+        assert ustawienia.value("pipeline/last_source") == str(dostawa)
+    finally:
+        view.close()
+
+
+def test_sprawdz_obecnosc_W_nie_zapamietuje_zrodla_i_nie_dotyka_dysku_w_oknie(
+        qapp, tmp_path, monkeypatch, ustawienia):
+    """Podpowiedź „Sprawdź obecność" kazała po korzeń archiwum sięgać „Wskaż katalog…", który
+    ZAPAMIĘTUJE źródło „Przyjmij nowe" - złota akcja wciągałaby potem całe archiwum, czyli
+    dokładnie ta szkoda, przed którą chroni `_on_presence_pick`. Jest teraz osobne wejście
+    „Sprawdź obecność w…" obok „Sprawdź obecność": pyta o katalog, sprawdza go, a źródła dostawy
+    nie rusza. Podpowiedź wskazuje to wejście, a sondę katalogu (is_dir, serial) robi wątek tła.
+
+    Falsyfikator: podepnij przycisk pod `_on_pick_dir` albo przywróć `_remember_source`
+    w `_on_presence_pick` → `pipeline/last_source` zmienia się na korzeń; przywróć `_set_root`
+    w `_on_presence_pick` → lista dotknięć dysku w wątku okna nie jest pusta."""
+    import threading
+    from pathlib import Path
+    from PySide6.QtWidgets import QFileDialog
+    from horreum.gui import pipeline as pipeline_mod
+    dostawa = tmp_path / "dostawa"
+    korzen = tmp_path / "archiwum"
+    dostawa.mkdir()
+    korzen.mkdir()
+    db_path = str(tmp_path / "p.db")
+    db.open_db(db_path).close()
+    ustawienia.setValue("pipeline/last_source", str(dostawa))
+    w_oknie = []
+
+    def _szpieg(nazwa, prawdziwa):
+        def _f(sciezka, *a, **kw):
+            if (threading.current_thread() is threading.main_thread()
+                    and "archiwum" in str(sciezka)):
+                w_oknie.append((nazwa, str(sciezka)))
+            return prawdziwa(sciezka, *a, **kw)
+        return _f
+    monkeypatch.setattr(os.path, "isdir", _szpieg("isdir", os.path.isdir))
+    monkeypatch.setattr(Path, "is_dir", _szpieg("Path.is_dir", Path.is_dir))
+    monkeypatch.setattr(pipeline_mod, "volume_serial",
+                        _szpieg("volume_serial", pipeline_mod.volume_serial))
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory",
+                        staticmethod(lambda *a, **k: str(korzen)))
+    view = pipeline_mod.PipelineView(db_path, now_fn=lambda: NOW)
+    try:
+        przycisk = view.btn_presence_in
+        assert przycisk.text() == i18n.t("pipeline.btn.presence_in") and przycisk.isEnabled()
+        assert i18n.t("pipeline.receive") in przycisk.toolTip()
+        assert f"„{przycisk.text()}”" in view.btn_presence.toolTip(), "podpowiedź wskazuje wejście"
+        przycisk.click()
+        assert view._thread is not None, "etap ruszył"
+        assert w_oknie == [], w_oknie
+        _czekaj_na_etap(view)
+        assert view._root == str(korzen), "korzeń wskazany dopiero po sondzie wątku tła"
+        assert ustawienia.value("pipeline/last_source") == str(dostawa), "źródło dostawy nietknięte"
+        assert w_oknie == [], w_oknie
+    finally:
+        view.close()
+
+
+def test_AR30_4_klatka_z_kilkoma_kopiami_w_izolacji_nazywa_pliki(qapp, tmp_path, monkeypatch):
+    """AR-30 (4): cel gestu kluczowany klatką, wykonanie per kopia - przy dwóch kopiach jednej klatki
+    w izolacji gest rusza obie, a ekran nie mówił których. Populacja dziś 0 (zapis w miejscu odmawia
+    przy ≥2 obecnych kopiach), więc stan podstawiony w read-modelu - test pinuje zdanie, nie rdzeń.
+
+    Falsyfikator: zdejmij `_zdanie_kopii_wielokrotnych` z podpowiedzi → asercja o plikach pada."""
+    con, [(_p, fid)] = _baza(tmp_path)
+    _commit_written(monkeypatch, con)
+    view = _widok(con)
+    ops = [{"op_id": 1, "location_id": 1, "frame_id": fid, "phase": "written", "kind": "commit",
+            "path": r"R:\A\a0.fits"},
+           {"op_id": 2, "location_id": 2, "frame_id": fid, "phase": "written", "kind": "commit",
+            "path": r"S:\B\a0_kopia.fits"}]
+    monkeypatch.setattr(view, "_operacje_gestu", lambda: ops)
+    try:
+        view.apply_perspective(grid_mod.PRESET_PENDING_FINISH)
+        _zaznacz(view, [fid])
+        menu = _menu(view)
+        try:
+            for act in (view.act_finish_write, view.act_restore_header, view.act_release_file):
+                assert "a0.fits, a0_kopia.fits" in act.toolTip(), act.toolTip()
+        finally:
+            menu.hide()
+        assert grid_mod._zdanie_kopii_wielokrotnych(grid_mod._kopie_wielokrotne(ops[:1])) == ""
+    finally:
+        view.close()
+    con.close()
+
+
+def test_dopisek_kopii_wielokrotnych_nie_mowi_o_JEDNEJ_klatce_przy_plikach_z_kilku():
+    """Lista `{files}` zbiera kopie WSZYSTKICH zaznaczonych klatek wielokopiowych, a dopisek mówił
+    „Klatka ma kilka kopii…" - jedna klatka przy plikach z dwóch. Zdanie jest teraz neutralne
+    wobec liczby klatek w obu językach, a liczba plików idzie liczebnikiem.
+
+    Falsyfikator: przywróć „Klatka ma kilka kopii" w `grid.inplace.many_copies` → asercja pada."""
+    ops = [{"op_id": i, "frame_id": fid, "path": rf"R:\A\{nazwa}"}
+           for i, (fid, nazwa) in enumerate([(1, "a.fits"), (1, "a_kopia.fits"),
+                                              (2, "b.fits"), (2, "b_kopia.fits")])]
+    zdanie = grid_mod._zdanie_kopii_wielokrotnych(grid_mod._kopie_wielokrotne(ops))
+    assert "4 pliki: a.fits, a_kopia.fits, b.fits, b_kopia.fits" in zdanie, zdanie
+    for forma in CATALOG["grid.inplace.many_copies"]["pl"].values():
+        assert not forma.lstrip().startswith("Klatka ma"), forma
+    for forma in CATALOG["grid.inplace.many_copies"]["en"].values():
+        assert not forma.lstrip().startswith("A frame has"), forma
+
+
+@pytest.mark.parametrize("preset", [grid_mod.PRESET_PENDING_FINISH, grid_mod.PRESET_TORN_WRITE])
+def test_sciezka_w_perspektywach_izolacji_z_trescia_i_elizja_w_srodku(qapp, tmp_path, monkeypatch,
+                                                                      preset):
+    """Perspektywy izolacji pokazywały w kolumnie ścieżki „×2 …" - prefiks klatki wielokopiowej
+    przy domyślnej szerokości i elizji z prawej, czyli bez nazwy pliku. Należą teraz do perspektyw,
+    w których ścieżka bierze szerokość z treści i elizję w środku - ten sam mechanizm co Duplikaty.
+
+    Falsyfikator: zdejmij `_RECEPTY_ZAPISU` z `_FLAGI_SCIEZKI_Z_TRESCI` → delegat kolumny jest
+    domyślny i asercja pada."""
+    con, _pliki = _baza(tmp_path)
+    if preset == grid_mod.PRESET_PENDING_FINISH:
+        _commit_written(monkeypatch, con)
+    else:
+        _commit_przerwany(monkeypatch, con)
+    view = _widok(con)
+    try:
+        view.apply_perspective(preset)
+        kol = view.model.base_col("path")
+        assert isinstance(view.table.itemDelegateForColumn(kol), grid_mod._ElizjaWSrodku)
+        assert view.table.columnWidth(kol) <= grid_mod._SUFIT_KOLUMNY_Z_TRESCI
+        view.apply_perspective("Przegląd")
+        assert not isinstance(view.table.itemDelegateForColumn(kol), grid_mod._ElizjaWSrodku)
+    finally:
+        view.close()
+    con.close()
+
+
+def test_AR30_5_wynik_gestu_nie_stoi_obok_postepu_i_nie_przezywa_perspektywy(qapp, tmp_path,
+                                                                             monkeypatch):
+    """AR-30 (5): szuflada pokazywała wynik poprzedniego gestu obok postępu następnego i niosła go
+    do innej perspektywy. Teraz start postępu czyści pole, a zmiana perspektywy oddaje tekst sprzed
+    gestu - o ile szuflada wciąż pokazuje wynik gestu.
+
+    Falsyfikator: zdejmij `result.setText("")` z `begin_progress` → pierwsza asercja pada; zdejmij
+    `_zdejmij_wynik_gestu_zapisu` z `_on_perspective` → ostatnia asercja pada."""
+    con, [(_p, fid)] = _baza(tmp_path)
+    _commit_written(monkeypatch, con)
+    view = _widok(con)
+    try:
+        view.drawer.set_result("stary wynik")
+        view.drawer.begin_progress(0)
+        assert view.drawer.result.text() == ""
+        view.drawer.end_progress()
+        view.drawer.set_result("Zatwierdzono 1")
+        view.apply_perspective(grid_mod.PRESET_PENDING_FINISH)
+        _zaznacz(view, [fid])
+        view._on_finish_write()
+        assert view.drawer.result.text().startswith("Dokończono 1 zapis")
+        view.apply_perspective("Przegląd")
+        assert view.drawer.result.text() == "Zatwierdzono 1"
+    finally:
+        view.close()
+    con.close()
+
+
+def test_szuflada_po_Przywroc_naglowek_oddaje_PRAWDZIWE_zdanie_commitu(qapp, tmp_path,
+                                                                       monkeypatch):
+    """Podejrzenie z recenzji: po geście „Przywróć nagłówek sprzed zapisu" zmiana perspektywy
+    oddaje szufladzie „Zatwierdzono…" przy „Cofnij" - czy to zdanie nie mówi o zapisie, który gest
+    właśnie cofnął? Nie mówi: commit szuflady idzie drogą ATOMOWĄ (`wb_worker` woła
+    `writeback.commit` bez `inplace`), więc nie ma operacji `inplace_op`, a operacja izolowana
+    pochodzi z INNEGO zapisu (zapis w miejscu poza gridem). Gest cofa tamten zapis do stanu po
+    commicie szuflady - zmiana commitu zostaje w pliku, a „Cofnij" dalej ją cofa.
+
+    Falsyfikator: gdyby gest cofał zmianę commitu szuflady, nagłówek po geście miałby wartość
+    sprzed commitu i pierwsza asercja o pliku padłaby."""
+    con, [(p, fid)] = _baza(tmp_path)
+    view = _widok(con)
+    try:
+        view._run_id = "R"
+        view.refresh()
+        view._on_commit()                                     # commit szuflady - droga atomowa
+        assert _fazy(con) == [], "commit szuflady nie zostawia operacji w miejscu"
+        zdanie_commitu = view.drawer.result.text()
+        assert view._undo_mode == "macro" and not view._undo_btn.isHidden()
+        assert fits.getheader(str(p))["OBJECT"] == "NGC 6992"
+        # Drugi zapis tej kopii W MIEJSCU, poza gridem, przerwany po zapisie (faza otwarta).
+        loc = con.execute("SELECT id, header_hash FROM location WHERE frame_id = ?",
+                          (fid,)).fetchone()
+        repo.stage_pending(con, run_id="R2", location_id=loc["id"], keyword="OBJECT", idx=0,
+                           op="set", old_value="NGC 6992", new_value="NGC 6995", new_type="str",
+                           new_comment=None, expected_header_hash=loc["header_hash"])
+        prawdziwy = os.fsync
+
+        def _fsync(fd):
+            prawdziwy(fd)
+            raise OSError(64, "The specified network name is no longer available")
+        with monkeypatch.context() as m:
+            m.setattr(writeback.os, "fsync", _fsync)
+            writeback.commit(con, "R2", now=NOW, inplace=True)
+        assert _fazy(con) == ["unverified"]
+        assert fits.getheader(str(p))["OBJECT"] == "NGC 6995"
+
+        view.apply_perspective(grid_mod.PRESET_TORN_WRITE)
+        _zaznacz(view, [fid])
+        view._on_restore_header()
+        assert view.drawer.result.text().startswith("Przywrócono"), view.drawer.result.text()
+        assert fits.getheader(str(p))["OBJECT"] == "NGC 6992", "zmiana commitu szuflady została"
+        view.apply_perspective("Przegląd")
+        assert view.drawer.result.text() == zdanie_commitu    # zdanie wraca - i jest prawdziwe
+        assert not view._undo_btn.isHidden()
+        view._dispatch_undo()                                 # „Cofnij" dalej cofa ten commit
+        assert fits.getheader(str(p))["OBJECT"] == "NGC6992", view.drawer.result.text()
+    finally:
+        view.close()
+    con.close()

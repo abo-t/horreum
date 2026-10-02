@@ -2458,6 +2458,21 @@ def test_noc_mastera_z_rozjazdem_teleskopu_mowi_zdaniem_gotowego_rodowodu(view, 
     assert bar.warn.full_text() == ""
 
 
+@pytest.mark.parametrize("n, fraza", [
+    (1, "plik deklaruje 1 klatkę"), (3, "plik deklaruje 3 klatki"),
+    (5, "plik deklaruje 5 klatek"), (33, "plik deklaruje 33 klatki"),
+    (13, "plik deklaruje 13 klatek"), (22, "plik deklaruje 22 klatki")])
+def test_flaga_deklarowanych_klatek_sie_odmienia(n, fraza):
+    """AR-12: „plik deklaruje 33 klatek" bez odmiany (jedna forma, `i18n.t`). Zdanie idzie
+    `t_plural` z formami one/few/many.
+
+    Falsyfikator: wróć `i18n.t("grid.lin.flag.declared", …)` → forma jedna i parametryzacja czerwienieje."""
+    head = {"inputs": [], "shared": 0, "telescope_mismatch": 0, "twins": 0, "excluded": 0,
+            "declared_rows": n, "utc_offset_min": None, "raw_unreferenced": 0}
+    _ostrz, info = grid_mod._lineage_flags(head)
+    assert info == fraza
+
+
 def test_gesty_rodowodu_odswiezaja_plakietke_Porzadkow(view, gcon):
     """Oba gesty rodowodu zmieniają populację `stacks_lineage_pending` (zapis czyni powód
     zwietrzałym), więc emitują sygnał plakietki SAME - nie czekają na etap, który przy odmowie
@@ -3096,8 +3111,8 @@ def test_para_gestow_CYTUJE_te_same_kanony_w_TYM_SAMYM_porzadku(obj_view):
 
     Porządek jest własnością ZDANIA, więc rozstrzyga go `_lista_kanonow`, nie żadna z dwóch kling.
 
-    Falsyfikator: zamień `sorted(canons)` na `list(canons)` → zdanie cofnięcia wraca do porządku
-    klatek („NGC7000, NGC1499, NGC6888") i przestaje się zgadzać z przywróceniem."""
+    Falsyfikator: zdejmij sortowanie z `_lista_kanonow` (`list(canons)`) → zdanie cofnięcia wraca
+    do porządku klatek („NGC7000, NGC1499, NGC6888") i przestaje się zgadzać z przywróceniem."""
     v, con = obj_view
     ids = _lighty_z_obiektami(con, ["NGC7000", "NGC1499", "NGC6888", "NGC2237"])
     v.refresh()
@@ -3114,6 +3129,19 @@ def test_para_gestow_CYTUJE_te_same_kanony_w_TYM_SAMYM_porzadku(obj_view):
     trojka = "NGC1499, NGC2237, NGC6888 (+1)"      # alfabetycznie, nie w kolejności klatek
     assert trojka in po_cofnieciu, po_cofnieciu
     assert trojka in po_przywroceniu, po_przywroceniu
+
+
+def test_lista_kanonow_w_zdaniu_po_gescie_porzadkiem_NATURALNYM():
+    """Zdanie po geście cytowało kanony porządkiem znaków: „NGC700" przed „NGC7000", ale też
+    „C12" przed „C3" i „ngc…" za „NGC…" - inaczej niż biblioteka obiektów i listy facetów, które
+    sortują naturalnie (`queries.natural_key`). Porządek zdania ma jednego właściciela i ten sam
+    klucz co listy, z których user te obiekty wybiera.
+
+    Falsyfikator: wróć do gołego `sorted(canons)` w `_lista_kanonow` → „C12" staje przed „C3"."""
+    assert grid_mod._lista_kanonow(["C12", "C3", "C100"]) == "C3, C12, C100"
+    assert grid_mod._lista_kanonow(["NGC7000", "NGC700", "IC5070", "M31"]) == \
+        "IC5070, M31, NGC700 (+1)"
+    assert grid_mod._lista_kanonow(["ngc 12", "NGC 3"]) == "NGC 3, ngc 12"   # wielkość liter ślepa
 
 
 def _sluchaj_paska(v):
@@ -4014,12 +4042,17 @@ def test_faza_zajetosci_gridu_NIE_zjada_zdania_koncowego(obj_view):
     """F-1: faza dzieli kanał z raportem TYLKO tam, gdzie po niej pada zdanie końcowe. `refresh()`
     kończy się własnym „Grid: N klatek…", więc opis roboty MUSI zostać przykryty — inaczej
     wskaźnik zajętości kasowałby komunikat, po który user czekał (ta sama klasa, którą repo ma
-    zapisaną jako „zdanie idzie PO odświeżeniu")."""
+    zapisaną jako „zdanie idzie PO odświeżeniu").
+
+    Faza i zdanie końcowe jadą WŁASNYM kanałem (`load_report`) - o tym, czy padną na pasek od
+    razu, rozstrzyga gospodarz (raport wczytania poza Zbiorami czeka na wejście w nie)."""
     from horreum.gui import i18n
     v, _ = obj_view
-    zdania = []
-    v.status_message.connect(zdania.append)
+    zdania, gesty = [], []
+    v.load_report.connect(zdania.append)
+    v.status_message.connect(gesty.append)
     v.refresh()
+    assert gesty == [], f"wczytanie zbioru poszło kanałem wyników gestów: {gesty!r}"
     assert i18n.t("busy.read_frames") in zdania, "faza w ogóle się nie odezwała"
     assert zdania[-1].startswith("Grid:"), f"faza przykryła zdanie końcowe: {zdania[-1]!r}"
 
@@ -5551,8 +5584,8 @@ def test_zdanie_pominiec_JEDEN_dom_czlonow_zdania_osi_obiektu():
 def _wiersz_obrazow(fid, tekst, n):
     """Wiersz bazowy modelu z gotową liczbą obrazów (tekst komórki + klucz sortu)."""
     return {"frame_id": fid, "path": f"/a/f{fid}.xisf", "kind": "light", "present": 1,
-            "n_present": 1, "n_vanished": 0, "filetype": "xisf", "_images": tekst,
-            "_images_n": n}
+            "n_present": 1, "n_vanished": 0, "filetype": "xisf", "copy_facts_class": 1,
+            "_images": tekst, "_images_n": n}
 
 
 def test_obrazy_sortuja_sie_liczbowo_a_brak_jest_na_koncu_w_obu_kierunkach():
@@ -5667,19 +5700,25 @@ def test_obrazy_domyslnie_tylko_w_perspektywach_kopii_a_wybor_reki_wygrywa(view)
 
 
 def test_obrazy_pytajnik_tylko_przy_kandydacie_do_faktow():
-    """„?" stoi tylko przy kopii, którą uzupełnienie faktów czyta (XISF albo >1 lokacja ogółem -
-    lustro `scan.copy_facts_candidates`). Stos FITS z jedną kopią faktów nie dostanie nigdy, więc
-    „?" z receptą byłby przy nim obietnicą bez pokrycia."""
+    """„?" stoi tylko przy kopii, którą uzupełnienie faktów czyta (XISF albo >1 lokacja ogółem).
+    Stos FITS z jedną kopią faktów nie dostanie nigdy, więc „?" z receptą byłby przy nim obietnicą
+    bez pokrycia. Klasę niesie flaga read-modelu `copy_facts_class` (jeden literał z etapem
+    Dostawy, `queries.copy_facts_class`, AR-35), nie lustro komórki: wiersz 9 ma pola, które dawne
+    lustro wzięłoby za kandydata (XISF), a flagę 0 - i milczy.
+
+    Falsyfikator: wróć w `_images_cell` do lustra po `filetype`/`n_present`/`n_vanished` - wiersz 9
+    dostaje „?"."""
     from horreum.gui.grid import GridTableModel
-    fits = {**_wiersz_obrazow(7, "", None), "filetype": "fits"}
+    fits = {**_wiersz_obrazow(7, "", None), "filetype": "fits", "copy_facts_class": 0}
     fits_z_siostra = {**_wiersz_obrazow(8, "", None), "filetype": "fits", "n_vanished": 1}
+    poza_klasa = {**_wiersz_obrazow(9, "", None), "copy_facts_class": 0}
     m = GridTableModel()
-    m.set_data([_wiersz_obrazow(6, "", None), fits, fits_z_siostra],
-               pivot_mod.build_pivot([6, 7, 8], [], []), [], images_unknown=True)
+    m.set_data([_wiersz_obrazow(6, "", None), fits, fits_z_siostra, poza_klasa],
+               pivot_mod.build_pivot([6, 7, 8, 9], [], []), [], images_unknown=True)
     kol = m.base_col("_images")
     tekst = {m._rows[i]["frame_id"]: m.data(m.index(i, kol), Qt.DisplayRole)
              for i in range(m.rowCount())}
-    assert tekst == {6: "?", 7: "", 8: "?"}
+    assert tekst == {6: "?", 7: "", 8: "?", 9: ""}
 
 
 def test_sciezka_w_duplikatach_szeroka_z_tresci_z_sufitem_i_elizja_w_srodku(view, qapp):

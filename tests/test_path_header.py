@@ -439,7 +439,7 @@ def test_wiersz_Porzadkow_prowadzi_do_perspektywy_z_tymi_klatkami(tmp_path, monk
 
 def test_Z4_kalibracja_ze_zrodlem_path_i_OBJECT_nie_wchodzi():
     """Z4: przebieg rozstrzyga obiekt wyłącznie na `LIGHT_KINDS`, więc wiersz też. Flat ze źródłem
-    `path` (stan, który dziś wytwarza następczyni-kalibracja w `repo.transfer_human_facts`) i kartą
+    `path` (stan, który do AR-16 wytwarzała następczyni-kalibracja w `repo.transfer_human_facts`) i kartą
     `OBJECT` nie jest robotą tego wiersza. Stan wstawiony surowym SQL - żadna klinga NIE powinna go
     wytworzyć (guard rodzaju w `user_assign_object`), a fikstura odtwarza właśnie defekt."""
     con = _pusta()

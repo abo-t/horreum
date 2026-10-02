@@ -95,16 +95,41 @@ def test_szkielet_przyszly_pusty(tmp_path):
     con.close()
 
 
-def test_user_version_v23_po_migracji(tmp_path):
-    """0023 podnosi user_version do 23 (świeża baza leci 0002→…→0023 sekwencyjnie; kotwica
-    operacji zapisu w miejscu `inplace_op.anchor_sha1` i wiązanie wpisów stagingu z operacją
-    `pending_changes.inplace_op_id`).
+def test_user_version_v24_po_migracji(tmp_path):
+    """0024 podnosi user_version do 24 (świeża baza leci 0002→…→0024 sekwencyjnie; znacznik
+    backupu bez podmiany `header_backups.unreplaced_at`, AR-37).
 
     Pin JEST intencją: każda nowa migracja ma ten test PRZEWRÓCIĆ imiennie, żeby podniesienie
     wersji było gestem, a nie skutkiem ubocznym."""
     con = db.open_db(str(tmp_path / "h.db"))
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 23
-    assert db.SCHEMA_VERSION == 23
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 24
+    assert db.SCHEMA_VERSION == 24
+    con.close()
+
+
+def test_0024_przyrost_na_bazie_v23_z_backupem(tmp_path):
+    """Baza v23 z backupem commitu przechodzi 0024: kolumna `unreplaced_at` wchodzi PUSTA (NULL =
+    cofnięcie jak dotąd - backfillu nie ma, SQL nie wie, który backup poprzedził podmianę), wiersz
+    zostaje nietknięty, a druga migracja to no-op.
+
+    Falsyfikator: dopisz do 0024 `DEFAULT`/backfill → istniejący backup dostaje znacznik
+    i cofnięcie starego commitu by go pominęło."""
+    path = str(tmp_path / "v23.db")
+    con = db.connect(path)
+    for version, filename in db.MIGRATIONS:
+        if version <= 23:
+            con.executescript(db._migration_sql(filename))
+            con.execute(f"PRAGMA user_version = {int(version)}")
+    _loc_0021(con, 1)
+    con.execute("INSERT INTO commits(id, run_id, applied_at) VALUES (1, 'R', 't')")
+    con.execute("INSERT INTO header_backups(commit_id, location_id, hdu_index, header_text, "
+                "post_hash) VALUES (1, 1, NULL, 'xml', 'ph')")
+    con.commit()
+    assert db.migrate(con) == db.SCHEMA_VERSION == 24
+    row = con.execute("SELECT commit_id, location_id, header_text, post_hash, unreplaced_at "
+                      "FROM header_backups").fetchone()
+    assert tuple(row) == (1, 1, "xml", "ph", None)
+    assert db.migrate(con) == db.SCHEMA_VERSION              # idempotencja
     con.close()
 
 

@@ -34,7 +34,13 @@ def _immediate(con):
     równoległego writera (PLAN_gui §2, P1: WAL serializuje writerów, ale NIE zwalnia z atomowości
     czytaj-sprawdź-pisz). Domyślny `with con:` bierze tylko lock przy pierwszym DML, więc SELECT
     guardu i UPDATE mogłyby objąć cudzy commit (TOCTOU). Tu RESERVED lock blokuje innych od razu.
-    Używane przez zapisy usera (label/approve/merge/unmerge), gdzie guard MUSI trzymać do UPDATE."""
+    Używane przez zapisy usera (label/approve/merge/unmerge), gdzie guard MUSI trzymać do UPDATE.
+
+    Wewnątrz zakresu `atomic` na tym połączeniu NIE otwiera własnej transakcji - dołącza do
+    zewnętrznej, która trzyma lock od startu, commit i rollback."""
+    if id(con) in _ATOMIC:
+        yield
+        return
     con.execute("BEGIN IMMEDIATE")
     try:
         yield
@@ -43,6 +49,47 @@ def _immediate(con):
         raise
     else:
         con.commit()
+
+
+# Połączenia, na których trwa zakres `atomic` - po `id` obiektu, bo `sqlite3.Connection` nie przyjmuje
+# atrybutów. Wpis żyje dokładnie tyle, co zakres (połączenie jest wtedy żywe, więc `id` się nie powtórzy).
+_ATOMIC = set()
+
+
+@contextmanager
+def atomic(con):
+    """JEDNA transakcja (`BEGIN IMMEDIATE`) na kilka zapisów klingi - dla wołającego, którego jeden
+    krok domenowy to kilka funkcji tego modułu (wjazd rekordu skanu: kamera, klatka, lokacja,
+    zeznanie, flagi). Każda z nich dalej emituje swój event w tej samej transakcji co swój zapis;
+    zakres dokłada tylko to, że wszystkie zapisy kroku wchodzą razem albo żaden.
+
+    DLACZEGO: osobne transakcje zostawiały po awarii w połowie stan, którego ponowny odczyt nie leczy
+    (P4-8, AR-21): klatka przepięta bez zeznania, nowa klatka bez lokacji albo bez `header`, kamera
+    z rozdartego odczytu po odmowie strażnika generacji.
+
+    Wewnątrz zakresu wolno wołać WYŁĄCZNIE funkcje, które biorą transakcję przez `_immediate` albo
+    `_tx` - te dołączają do zakresu. Goły `with con:` zatwierdziłby zewnętrzną transakcję w połowie.
+    Zagnieżdżony `atomic` dołącza do zewnętrznego."""
+    if id(con) in _ATOMIC:
+        yield
+        return
+    with _immediate(con):
+        _ATOMIC.add(id(con))
+        try:
+            yield
+        finally:
+            _ATOMIC.discard(id(con))
+
+
+@contextmanager
+def _tx(con):
+    """`with con:` (transakcja odroczona: lock przy pierwszym DML), która wewnątrz `atomic` dołącza
+    do zakresu zewnętrznego zamiast zatwierdzać go w połowie."""
+    if id(con) in _ATOMIC:
+        yield
+        return
+    with con:
+        yield
 
 
 def emit_event(con, *, actor, verb, target, now, payload=None, reason=None):
@@ -74,7 +121,7 @@ def upsert_camera(con, *, model_canon, pixel_um, is_mono, is_mono_source,
     row = con.execute(
         "SELECT id, pixel_um FROM camera WHERE model_canon = ?", (model_canon,)).fetchone()
     if row is None:
-        with con:  # atomowo: INSERT camera + INSERT event (albo żadne — rollback)
+        with _tx(con):  # atomowo: INSERT camera + INSERT event (albo żadne - rollback)
             cur = con.execute(
                 "INSERT INTO camera(model_canon, pixel_um, is_mono, is_mono_source, "
                 "raw_instrume, created_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -94,7 +141,7 @@ def upsert_camera(con, *, model_canon, pixel_um, is_mono, is_mono_source,
         return camera_id, False                       # nic do uzupełnienia / zgodne — no-op
 
     if existing_px is None:
-        with con:  # CAS: uzupełnij TYLKO gdy wciąż NULL (bez lost-update między writerami)
+        with _tx(con):  # CAS: uzupełnij TYLKO gdy wciąż NULL (bez lost-update między writerami)
             cur = con.execute(
                 "UPDATE camera SET pixel_um = ? WHERE id = ? AND pixel_um IS NULL",
                 (pixel_um, camera_id))
@@ -109,7 +156,7 @@ def upsert_camera(con, *, model_canon, pixel_um, is_mono, is_mono_source,
         if existing_px == pixel_um:
             return camera_id, False                   # równoległy writer wpisał to samo
 
-    with con:  # rozjazd wartości → STAN pixel_conflict (event raz, na przejściu 0→1)
+    with _tx(con):  # rozjazd wartości → STAN pixel_conflict (event raz, na przejściu 0→1)
         cur = con.execute(
             "UPDATE camera SET pixel_conflict = 1 WHERE id = ? AND pixel_conflict = 0",
             (camera_id,))
@@ -136,7 +183,7 @@ def upsert_frame(con, *, sha1_data, sha1_data_uncomputable=0, kind, filetype, ca
     if row is not None:
         return row[0], False
 
-    with con:  # atomowo: INSERT frame + INSERT event
+    with _tx(con):  # atomowo: INSERT frame + INSERT event
         frame_id = _insert_frame(
             con, sha1_data=sha1_data, sha1_data_uncomputable=sha1_data_uncomputable, kind=kind,
             kind_source=kind_source, filetype=filetype, camera_id=camera_id, now=now, actor=actor)
@@ -183,7 +230,8 @@ def _copy_facts_checked(copy_facts):
 
 def add_location(con, *, frame_id, volume, path, drive_letter=None, tier=None, mtime=None,
                  file_sha1=None, header_hash=None, hdu_index=None, compressed=None,
-                 size_bytes=None, copy_facts=None, now, actor="scan"):
+                 size_bytes=None, copy_facts=None, unreadable_since=None, unreadable_kind=None,
+                 unreadable_reason=None, now, actor="scan"):
     """Dołóż lokalizację frame'a po `UNIQUE(volume, path)` wraz z faktami KOPII (file_sha1/
     header_hash/hdu_index/compressed/size_bytes — brief §2; `hdu_index`/`compressed` NULL dla XISF,
     wszystkie odciski NULL przy W1). Już znana →
@@ -194,35 +242,42 @@ def add_location(con, *, frame_id, volume, path, drive_letter=None, tier=None, m
 
     `copy_facts` (0021) - fakty z nagłówka TEJ kopii (klucze `COPY_FACTS`); `None` = nie zebrane
     (kolumny NULL, kopię dobierze uzupełnienie). Kotwica `hdr_hash` musi równać się `header_hash`
-    - pilnuje tego CHECK w bazie, nie ten kod."""
+    - pilnuje tego CHECK w bazie, nie ten kod.
+
+    MARKER NIECZYTELNOŚCI OD PIERWSZEGO ODCZYTU (P4-7, AR-21 (a)): `unreadable_since` + rodzaj
+    i powód (P4-2) - wołający podaje je, gdy pierwsza próba odczytu NOWEJ kopii padła (W1). Marker
+    znaczy „kopia JEST nieczytelna" (ostatnia próba odczytu nieudana), więc pierwsza porażka jest
+    taką samą przesłanką jak każda następna. Do P4-7 marker stawiał wyłącznie re-odczyt znanej
+    ścieżki, a skutki były dwa: brama przyrostowa przy tym samym `mtime` pomijała kopię bez markera
+    (nikt jej już nie czytał), a szkielet nie niósł rodzaju awarii - kubełek nie mówił, czy winny
+    jest dysk, czy parser. Domyślnie `None` - kopia czytelna (dowód odczytu niesie wołający).
+    Rodzaj i powód bez markera odbija CHECK 0019."""
     row = con.execute(
         "SELECT id FROM location WHERE volume = ? AND path = ?", (volume, path)).fetchone()
     if row is not None:
         return row[0], False
 
     cf = _copy_facts_checked(copy_facts)
-    with con:  # atomowo: INSERT location + INSERT event
-        # FORWARD-GUARD (#13): `unreadable_since` NIE ustawiane tu — DEFAULT NULL (czytelna do
-        # dowodu). Ścieżka NIEZNANA-nieczytelna ma już ślad w STANIE: frame-szkielet bez `header`
-        # (kubełek `headerless`). Marker znaczy „kopia JEST nieczytelna" (BIEŻĄCY fakt — ostatnia
-        # próba odczytu nieudana), NIE „stała się nieczytelna po byciu czytelną": ustawia go WYŁĄCZNIE
-        # re-odczyt ZNANEJ ścieżki (`refresh_location_unreadable`). Skutek świadomy: kubełek `unreadable`
-        # bywa RÓŻNY między trybami bramy — przy `volume='?'` re-skan oznaczy też kopię nigdy-nie-czytelną,
-        # przy bramie ON pominie ją (marker NULL → brama skipuje). Issue zakresuje #13 do re-odczytu, nie tu.
+    with _tx(con):  # atomowo: INSERT location + INSERT event
         cur = con.execute(
             "INSERT INTO location(frame_id, volume, drive_letter, path, tier, mtime, "
             "file_sha1, header_hash, hdu_index, compressed, size_bytes, last_verified_at, "
+            "unreadable_since, unreadable_kind, unreadable_reason, "
             "image_count, image_roles, hdr_filter, hdr_imagetyp, hdr_object, hdr_telescop, "
             "hdr_instrume, hdr_exptime, hdr_xbinning, hdr_date_obs, hdr_hash) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (frame_id, volume, drive_letter, path, tier, mtime,
              file_sha1, header_hash, hdu_index, compressed, size_bytes, now,
+             unreadable_since, unreadable_kind, unreadable_reason,
              *(cf[k] for k in COPY_FACTS)),
         )
         location_id = cur.lastrowid
+        payload = {"volume": volume, "path": path, "tier": tier}
+        if unreadable_since is not None:
+            payload["unreadable_kind"] = unreadable_kind
         emit_event(
             con, actor=actor, verb="location.added", target=f"frame:{frame_id}", now=now,
-            payload={"volume": volume, "path": path, "tier": tier},
+            payload=payload,
         )
     return location_id, True
 
@@ -372,6 +427,10 @@ class FactTransfer:
     Osobno od `lineage_moved`, bo to inna robota i inny skutek: tam werdykt przechodzi, tu znika
     wiersz, który po geście człowieka przestał cokolwiek wskazywać. Sklejenie ich w jedną liczbę
     kazałoby raportowi mówić „przeniesiono", gdy nic nie przeszło."""
+    object_kept: bool = False
+    """Fakt ręki obiektu ZOSTAŁ na klatce zastąpionej, bo następczyni nie jest lightem (AR-16):
+    kalibracja z definicji nie ma obiektu. Osobno od `skipped`, bo inne osie mogły przejść w tym
+    samym geście, a raport ma powiedzieć, że werdykt ręki nie przepadł, tylko nie miał dokąd iść."""
     skipped: str = ""          # "" = nic nie pominięto (konwencja liczników z `ObjectGesture`)
 
 
@@ -393,6 +452,14 @@ def transfer_human_facts(con, *, frame_id, now, actor="user:local"):
     gdy NIC o niej dotąd nie orzeczono. Klatka, która ma już własne źródło (nagłówek, xref, region
     albo drugi gest), przemówiła sama i cudzy werdykt nie ma prawa jej nadpisać. Zwraca wtedy
     `skipped='nastepczyni ma wlasne zrodlo'`.
+
+    NASTĘPCZYNI-KALIBRACJA NIE DOSTAJE OBIEKTU (AR-16, guard `LIGHT_KINDS`): podmieniona treść ma
+    własne zeznanie `IMAGETYP`, więc light ze źródłem `path` może wrócić jako flat - a klatka
+    kalibracyjna z definicji nie ma obiektu i resolver obiektu na niej nie rozstrzyga. Werdykt ręki
+    ZOSTAJE wtedy na klatce zastąpionej (tam i tak zostaje, append-only) i raport mówi o tym
+    `object_kept`; kubełek `supersede.pending_transfer` tej osi nie liczy, bo gest nie umiałby jej
+    opróżnić. Następczyni o rodzaju jeszcze nieustalonym (`unknown`) też nie jest kandydatem -
+    gdy przebieg ustali light, kubełek (liczony ze stanu) pokaże parę ponownie.
 
     PARYTET §5.9 UTRZYMANY: przypisanie obiektu emituje `object.assigned` (stan `frame.object_id`
     rośnie o 1, dziennik też), a NAGROBEK — `object.cleared` BEZ `object.assigned`, bo `object_id`
@@ -472,7 +539,9 @@ def transfer_human_facts(con, *, frame_id, now, actor="user:local"):
             "WHERE id = ?", (nowa_id,)).fetchone()
         if nowa is None:
             raise ValueError(f"frame:{nowa_id} (następczyni) nie istnieje")
-        obiekt_do_przeniesienia = ma_obiekt and nowa["object_source"] is None
+        obiekt_zostaje = ma_obiekt and nowa["kind"] not in LIGHT_KINDS
+        obiekt_do_przeniesienia = (ma_obiekt and not obiekt_zostaje
+                                   and nowa["object_source"] is None)
         # ZESTAW PRZECHODZI TYLKO NA KLATKĘ, KTÓRA GO UNIESIE (bramka pakietu 3a, zarzut 4).
         # Docstring twierdził, że kamera obu tożsamości jest ta sama, „bo to ten sam plik" — i to
         # jest ZAŁOŻENIE, nie sprawdzenie: podmieniona treść ma własne zeznanie, więc może przyjść
@@ -513,8 +582,13 @@ def transfer_human_facts(con, *, frame_id, now, actor="user:local"):
             # (w pierwszym nie ma nic do roboty, w drugim ręka musi wskazać zestaw od nowa).
             nie_pasuje = ma_config and (nowa["config_source"] is None
                                         and nowa["config_id"] is None)
-            return FactTransfer(skipped="zestaw nie pasuje do nastepczyni" if nie_pasuje
-                                else "nastepczyni ma wlasne zrodlo")
+            if obiekt_zostaje:
+                powod = "nastepczyni to kalibracja - obiekt zostaje na zrodle"
+            elif nie_pasuje:
+                powod = "zestaw nie pasuje do nastepczyni"
+            else:
+                powod = "nastepczyni ma wlasne zrodlo"
+            return FactTransfer(object_kept=obiekt_zostaje, skipped=powod)
 
         if obiekt_do_przeniesienia:
             # PAMIĘĆ NAGROBKA JEDZIE Z NIM (0017), w tym samym `UPDATE`, co źródło: przeniesienie
@@ -578,6 +652,7 @@ def transfer_human_facts(con, *, frame_id, now, actor="user:local"):
                        now=now, payload={"input_frame_id": frame_id, "nastepczyni": nowa_id},
                        reason="następczyni ma własny werdykt — stary wskaźnik nic nie wskazuje")
     return FactTransfer(object_moved=obiekt_do_przeniesienia,
+                        object_kept=obiekt_zostaje,
                         config_moved=config_do_przeniesienia,
                         lineage_moved=len(rodowod_do_przeniesienia),
                         lineage_dropped=len(rodowod_do_zdjecia))
@@ -1010,9 +1085,9 @@ def refresh_location_unreadable(con, *, location_id, sha1_data, path, mtime, rea
     dla ścieżki NIEZNANEJ). Target `sha1:` po tożsamości frame'a lokacji (kotwica joinowalna).
 
     SEMANTYKA MARKERA: znaczy „kopia JEST nieczytelna" (BIEŻĄCY fakt — ostatnia próba odczytu nieudana),
-    NIE „stała się nieczytelna po byciu czytelną". Ustawia go re-odczyt ZNANEJ ścieżki, więc przy bramie
-    OFF (`volume='?'`) oznaczy też kopię, która NIGDY nie była czytelna (przy bramie ON pominie ją) —
-    kubełek `unreadable` bywa RÓŻNY między trybami skanu, świadomie.
+    NIE „stała się nieczytelna po byciu czytelną". Ustawia go re-odczyt ZNANEJ ścieżki (tu) albo już
+    pierwszy odczyt nowej kopii (`add_location`, P4-7), więc kubełek `unreadable` jest ten sam przy
+    bramie ON i OFF.
 
     CYKL ŻYCIA MARKERA (#13): `unreadable_since = COALESCE(unreadable_since, now)` — PIERWSZA awaria
     trzyma timestamp (idempotencja: powtórna awaria nie przestawia go). Marker w STANIE robi dwie
@@ -1151,7 +1226,7 @@ def record_header(con, *, frame_id, raw_json, now, actor="scan", cards=None,
     W2/W3); `cards` = pełne lustro EAV nagłówka (None dla XISF do PF-4 / W1). INSERT header +
     `executemany` cards + JEDEN `event(header.recorded)` W TEJ SAMEJ transakcji (brief §4.5 —
     jedno zeznanie = header + cards + jeden event)."""
-    with con:  # atomowo: INSERT header + INSERT cards + INSERT event
+    with _tx(con):  # atomowo: INSERT header + INSERT cards + INSERT event
         con.execute(
             "INSERT INTO header(frame_id, raw_json, date_obs, exptime, filter_raw, instrume, "
             "telescop, focallen, focratio_raw, xpixsz, ypixsz, "
@@ -1174,7 +1249,7 @@ def flag_frame_review(con, *, sha1, path, reason, now, actor="scan"):
       - backstop `scan_tree`: wyjątek przed identyfikacją → sha1='?' (tożsamości brak, frame NIE
         powstał) → może się powtórzyć przy re-skanie (brak kotwicy UNIQUE — nieuniknione).
     Wejście do przyszłego import-legacy/review."""
-    with con:
+    with _tx(con):
         emit_event(con, actor=actor, verb="frame.review", target=f"sha1:{sha1}", now=now,
                    reason=reason, payload={"path": path})
 
@@ -1182,7 +1257,7 @@ def flag_frame_review(con, *, sha1, path, reason, now, actor="scan"):
 def flag_camera_review(con, *, frame_id, reason, now, actor="scan"):
     """Frame powstał (tożsamość sha1 jest), ale osi KAMERA nie dało się złożyć (brak INSTRUME/XPIXSZ
     — np. Sony master flat) → `event(camera.review)`. `camera_id` zostaje NULL; nie zgadujemy."""
-    with con:
+    with _tx(con):
         emit_event(con, actor=actor, verb="camera.review", target=f"frame:{frame_id}", now=now,
                    reason=reason)
 
@@ -1190,7 +1265,7 @@ def flag_camera_review(con, *, frame_id, reason, now, actor="scan"):
 def flag_kind_unmapped(con, *, frame_id, imagetyp, now, actor="scan"):
     """IMAGETYP niepuste, lecz niezmapowane przez `normalize_kind` (kind=unknown) → sygnał do
     rozszerzenia mapy (`event(kind.unmapped)`). Firsthand 2600 się nie zdarza; mechanizm ma być."""
-    with con:
+    with _tx(con):
         emit_event(con, actor=actor, verb="kind.unmapped", target=f"frame:{frame_id}", now=now,
                    payload={"imagetyp": imagetyp})
 
@@ -2474,12 +2549,25 @@ def insert_commit(con, *, run_id, now, summary=None):
 
 def insert_header_backup(con, *, commit_id, location_id, hdu_index, header_text, post_hash):
     """Zapisz backup pełnego nagłówka SPRZED commitu (undo). `post_hash` = header_hash PO commicie
-    (kontrola undo). Append-only: nigdy nie kasowany. Transient — bez eventu."""
+    (kontrola undo). Append-only: nigdy nie kasowany. Transient - bez eventu. Zwraca id backupu
+    (`mark_backup_unreplaced`, gdy pisarz potem pliku nie podmieni)."""
     with con:
-        con.execute(
+        cur = con.execute(
             "INSERT INTO header_backups(commit_id, location_id, hdu_index, header_text, post_hash) "
             "VALUES (?, ?, ?, ?, ?)",
             (commit_id, location_id, hdu_index, header_text, post_hash))
+    return cur.lastrowid
+
+
+def mark_backup_unreplaced(con, *, backup_id, now):
+    """BACKUP BEZ PODMIANY (0024, AR-37): pisarz drogi atomowej utrwalił backup, a potem oddał
+    wynik bez `backup_text`, bo straż podmiany odbiła `os.replace` - plik nietknięty. Wyjątek przy
+    samej podmianie znacznika nie daje (rename mógł zajść mimo błędu). `unreplaced_at` = `now`; cofnięcie commitu taki backup pomija, zamiast meldować
+    blokadę o pliku, którego commit nie ruszył. Wiersz już oznaczony zostaje bez zmian (pierwsza
+    chwila). Backup sam zostaje (append-only). Transient - bez eventu."""
+    with con:
+        con.execute("UPDATE header_backups SET unreplaced_at = ? "
+                    "WHERE id = ? AND unreplaced_at IS NULL", (now, backup_id))
 
 
 # ============================================================ DZIENNIK ZAPISU W MIEJSCU (0022, O5/Q8)

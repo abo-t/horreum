@@ -317,6 +317,44 @@ def test_rejestr_napraw_horreum_to_nota_nie_abort(tmp_path):
     assert any("naprawionym przez Horreum" in n for n in pf.notes)
 
 
+def test_rejestr_napraw_pomija_backup_bez_podmiany_v24_i_czyta_v23(tmp_path):
+    """Backup drogi atomowej powstaje PRZED `os.replace`; gdy straż odbiła podmianę, commit
+    oznacza go `unreplaced_at` (0024) - Horreum pliku NIE zmienił. Rejestr brał każdą ścieżkę
+    z backupem, więc usprawiedliwiał rozjazd pliku zmienionego POZA Horreum, a import wpuszczał
+    stęchłe zeznanie dawcy. Teraz na v24 rejestr pomija backup oznaczony; baza rejestru sprzed
+    0024 (RO, bez migracji) czytana jak dotąd - kolumny tam nie ma.
+
+    Falsyfikator: zdejmij warunek `unreplaced_at IS NULL` - ścieżka B wraca do rejestru; zdejmij
+    wykrycie kolumny - baza v23 daje `no such column`."""
+    a, b = tmp_path / "a.fits", tmp_path / "b.fits"
+    live = _mk_live_registry(tmp_path, [a, b])
+    con = db.open_db(str(live))
+    bid = con.execute("SELECT hb.id FROM header_backups hb JOIN location l "
+                      "ON l.id = hb.location_id WHERE l.path = ?", (str(b),)).fetchone()[0]
+    repo.mark_backup_unreplaced(con, backup_id=bid, now=NOW)
+    con.close()
+    assert read_repaired_registry(str(live)) == frozenset({str(a)})
+
+    v23 = tmp_path / "v23.db"
+    con = db.connect(str(v23))
+    for version, filename in db.MIGRATIONS:
+        if version <= 23:
+            con.executescript(db._migration_sql(filename))
+            con.execute(f"PRAGMA user_version = {int(version)}")
+    con.execute("INSERT INTO frame(id, kind, filetype, sha1_data, first_seen_at) "
+                "VALUES (1, 'light', 'fits', 's1', ?)", (NOW,))
+    con.execute("INSERT INTO location(id, frame_id, volume, path) VALUES (1, 1, 'V', ?)", (str(a),))
+    con.execute("INSERT INTO commits(id, run_id, applied_at) VALUES (1, 'R', ?)", (NOW,))
+    con.execute("INSERT INTO header_backups(commit_id, location_id, hdu_index, header_text, "
+                "post_hash) VALUES (1, 1, 0, 'x', 'y')")
+    con.commit()
+    con.close()
+    assert read_repaired_registry(str(v23)) == frozenset({str(a)})
+    con = db.connect(str(v23))
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 23           # RO: bez migracji
+    con.close()
+
+
 def test_rejestr_napraw_nie_gasi_ostrza_expect(tmp_path):
     """Ostrze EXPECT zostaje: rozjazd faktów kopii POZA rejestrem (i poza późno-naprawianymi
     dawcy) nadal abortuje — rejestr wpisuje ZNANE, nie wycisza nieznanego."""

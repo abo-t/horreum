@@ -81,6 +81,11 @@ from importlib import resources
 # utrwalona przy operacji (dawniej mutowalna `location.file_sha1`) - i `pending_changes.inplace_op_id`
 # - wiersze stagingu zapisane przez operację, które dokończenie oznacza atomowo z fazą. Backfill
 # wyłącznie wiązania dla operacji commitu w fazie `written` (kotwicy SQL nie zna).
+# 0024 to PRZYROST (ADD COLUMN, AR-37): `header_backups.unreplaced_at` - backup drogi atomowej,
+# po którym pisarz pliku NIE podmienił (wyłącznie odmowa straży podmiany - wynik 'blocked'; awaria
+# samego `os.replace` mogła podmienić plik na udziale, więc znacznika nie dostaje). Cofnięcie
+# commitu go pomija. Kolumna wchodzi PUSTA (NULL = jak dotąd); backfillu nie ma - SQL nie wie,
+# który backup poprzedził podmianę.
 MIGRATIONS = [
     (2, "0002_initial.sql"),
     (3, "0003_writeback.sql"),
@@ -104,6 +109,7 @@ MIGRATIONS = [
     (21, "0021_location_copy_facts.sql"),
     (22, "0022_inplace_op.sql"),
     (23, "0023_inplace_anchor_link.sql"),
+    (24, "0024_backup_unreplaced.sql"),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 _KNOWN_VERSIONS = frozenset({0} | {v for v, _ in MIGRATIONS})

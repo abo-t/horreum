@@ -290,21 +290,6 @@ def _copy_reason(kind, reason):
     return diagnoza
 
 
-def _unreadable_kinds_tip(counts):
-    """Podpowiedź wiersza „kopie nieczytelne" (P4-2): rozbicie po RODZAJU z
-    `queries.unreadable_kind_counts`. Oba rodzaje o PLIKU zawsze, także z zerem - „dysk/dostęp 0"
-    jest odpowiedzią (winy nie ma w dysku), nie szumem. „Baza" i „rodzaj nieznany" tylko gdy są
-    takie kopie: pierwsza to błąd po naszej stronie, który następny skan zwykle zdejmuje, druga -
-    ogon sprzed migracji 0019 albo wyjątek bez kodu systemu; żadna nie jest stałą kategorią pliku."""
-    parts = [i18n.t("object.unreadable_kind_io", n=counts["io"]),
-             i18n.t("object.unreadable_kind_parse", n=counts["parse"])]
-    if counts["db"]:
-        parts.append(i18n.t("object.unreadable_kind_db", n=counts["db"]))
-    if counts["unknown"]:
-        parts.append(i18n.t("object.unreadable_kind_unknown", n=counts["unknown"]))
-    return i18n.t("object.unreadable_kinds", parts=" · ".join(parts))
-
-
 def _fmt_obs_date(s):
     """Data klatki do sekund: „…T19:45:02.6075262" → „…T19:45:02" (7 cyfr ułamka to szum wizualny —
     wizytator O2); pełna wartość zostaje w tooltipie. Pusty → ''."""
@@ -830,6 +815,7 @@ class ConfirmPathObjectsDialog(QDialog):
             self.error.setText(i18n.t("path.err.nothing"))
             return
         gest = repo.ObjectGesture()
+        przeszly = 0                 # pozycje, które klinga przyjęła (po `break` nie liczą się następne)
         # FAZA Z LICZNIKIEM (F-1): zapis idzie transakcja per NAZWA, więc „zapisuję" bez liczby
         # nie odróżniałoby przebiegu przez 34 pozycje od zawieszenia się na pierwszej. Licznik
         # bierze się z tej samej listy, którą user zaznaczył — nie z liczby propozycji w ogóle.
@@ -841,6 +827,7 @@ class ConfirmPathObjectsDialog(QDialog):
                     gest += repo.user_assign_object(
                         self.con, alias_norm=None, canon=p.canon, catalog=p.catalog, kind=p.kind,
                         frame_ids=list(p.frame_ids), now=self._now(), object_source="path")
+                    przeszly += 1
                 except ValueError as e:
                     self.error.setText(str(e))
                     # Pozycja, która padła, wycofała się w całości (`_immediate`), a pozycje po niej
@@ -854,8 +841,8 @@ class ConfirmPathObjectsDialog(QDialog):
                 faza.say(i18n.t("busy.saving_names", done=i, total=len(wybrane)))
         self.assigned += gest.assigned
         self.status.setText(
-            i18n.t("path.done", names=len(wybrane), assigned=gest.assigned,
-                   total=gest.assigned + gest.skipped) + grid.zdanie_pominiec(gest))
+            i18n.t_plural("path.done", przeszly, assigned=gest.assigned,
+                          total=gest.assigned + gest.skipped) + grid.zdanie_pominiec(gest))
         self.changed.emit()
         # KARTY DO PLIKÓW NIE ZALEŻĄ OD `assigned` TEGO KLIKNIĘCIA (C2, bramka 0926): pętla idzie
         # po klatkach, które SĄ nazwane tym kanonem ze źródłem `path` - także gdy klinga padła na
@@ -1570,12 +1557,23 @@ class ObjectAxisView(QWidget):
         fh.setSectionResizeMode(QHeaderView.ResizeToContents)
         fh.setSectionResizeMode(FRAME_COL_PATH, QHeaderView.Stretch)
         self.frames.verticalHeader().setVisible(False)
+        self._elizja_sciezki_klatek()
         rv.addWidget(self.frames)
 
         splitter.addWidget(left)
         splitter.addWidget(right)
-        splitter.setStretchFactor(0, 2)
-        splitter.setStretchFactor(1, 3)
+        # NADMIAR POZIOMU NALEŻY DO PRAWEGO PANELU. Przy podziale 2:3 lewa strona brała z nadmiaru
+        # tyle samo co szerokość własnej treści, a biblioteka ma trzy wąskie kolumny - zostawał po
+        # niej pusty pas, a panel kopii obok ucinał „Powód" (wizytacja przy 1400 px). Lewa strona
+        # stoi na swojej podpowiedzi rozmiaru (rząd czterech akcji kolejki), prawa bierze resztę;
+        # uchwyt splittera dalej przesuwa granicę ręką.
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        # …a w bibliotece szerokość, która zostaje, bierze NAZWA obiektu: kolumna, którą
+        # elidowało („21P/Giacobini-…"), zamiast pustego pasa za ostatnią kolumną.
+        oh = self.objects.horizontalHeader()
+        oh.setSectionResizeMode(QHeaderView.ResizeToContents)
+        oh.setSectionResizeMode(OBJ_COL_CANON, QHeaderView.Stretch)
         outer.addWidget(splitter, 1)   # stretch: splitter zjada pionowy nadmiar, pasek filtra nie puchnie w pustkę
 
     # ---------------------------------------------------------------- facety filtra
@@ -1806,11 +1804,12 @@ class ObjectAxisView(QWidget):
         # ROZBICIE PO RODZAJU (P4-2) idzie do podpowiedzi wiersza, liczone PO KOPIACH: kubełek
         # z samą liczbą nie mówił, czy szukać winy w dysku, czy w pliku. Pusty kubełek go nie
         # dostaje - zero nie ma czego rozbijać, a jego zdanie niesie `info`.
+        from horreum.gui.pipeline import unreadable_kinds_text   # lazy: jak montaż Dostawy
         self._add_review_item(i18n.t("object.unreadable_line"),
                               count=i18n.t_plural("object.review_count", q["unreadable_count"]),
                               tag="unreadable" if q["unreadable_count"] > 0 else None,
                               info=i18n.t("object.unreadable_info_empty"),
-                              tip=_unreadable_kinds_tip(queries.unreadable_kind_counts(self.con))
+                              tip=unreadable_kinds_text(resolver.unreadable_kind_counts(self.con))
                               if q["unreadable_count"] > 0 else None)
         # OŚ SPRZĘTU WYCHODZI Z WIERSZA INFORMACYJNEGO (R1) — do tej zmiany była połową licznika
         # z notą „rozwiązywanie w przygotowaniu". Nota mówiła prawdę i dlatego musiała zniknąć
@@ -2187,7 +2186,13 @@ class ObjectAxisView(QWidget):
         _przeladuj_wiersze(self.frames, len(rows))
         for r, row in enumerate(rows):
             path = row["path"] or ""
-            self._set_frame_cell(r, COPY_COL_PATH, path or i18n.t("object.no_path"),
+            # W KOMÓRCE NAZWA PLIKU, pełna ścieżka w podpowiedzi - forma ścieżki z Duplikatów.
+            # Kopie nieczytelne dzielą długi prefiks (`R:\ASTRO_\STACKS\…`), więc pełna ścieżka
+            # w sufit 200 px zostawiała z elizją w środku dwa końce, a człon rozróżniający kopie
+            # wypadał właśnie ze środka (wizytacja na kopii pf4: pięć wierszy „R:\ASTRO_\STAC…").
+            self._set_frame_cell(r, COPY_COL_PATH,
+                                 queries.path_tail(path, dirs=0) if path
+                                 else i18n.t("object.no_path"),
                                  tooltip=path or None)
             self._set_frame_cell(r, COPY_COL_VOLUME, row["volume"])
             self._set_frame_cell(r, COPY_COL_PRESENT,
@@ -2199,6 +2204,10 @@ class ObjectAxisView(QWidget):
             # dosłownie, bez etykiety rodzaju - to ją kopiuje się do zgłoszenia.
             self._set_frame_cell(r, COPY_COL_REASON, _copy_reason(row["kind"], row["reason"]),
                                  tooltip=row["reason"] or None)
+        # Elizja W ŚRODKU i szerokość z treści - ten sam mechanizm co ścieżka w Duplikatach
+        # (FH-14): domyślna elizja z prawej zostawiała „R:\ASTRO_\LI…" bez nazwy pliku.
+        from horreum.gui import grid       # lazy - wzorzec `_on_confirm`
+        grid.kolumna_z_tresci(self.frames, COPY_COL_PATH, sufit=COPY_PATH_MAX_PX)
         self.frames_label.setText(i18n.t("object.unreadable_title", n=len(rows)))
 
     def _restore_frames_mode(self):
@@ -2206,12 +2215,22 @@ class ObjectAxisView(QWidget):
         if not self._copies_mode:
             return
         self._copies_mode = False
+        self.frames.setItemDelegateForColumn(COPY_COL_PATH, None)   # w trybie klatek kolumna 0 to sha
         self.frames.setColumnCount(len(FRAME_HEADERS))
         self.frames.setHorizontalHeaderLabels(_headers(FRAME_HEADERS))
         fh = self.frames.horizontalHeader()
         fh.setMaximumSectionSize(-1)          # sufit trybu „kopie" zdjęty (-1 = domyślny Qt)
         fh.setSectionResizeMode(QHeaderView.ResizeToContents)
         fh.setSectionResizeMode(FRAME_COL_PATH, QHeaderView.Stretch)
+        self._elizja_sciezki_klatek()
+
+    def _elizja_sciezki_klatek(self):
+        """Ścieżka trybu klatek elidowana W ŚRODKU - ten sam delegat co ścieżka trybu „kopie"
+        i Duplikatów (`grid.elizja_w_srodku`). Szerokość zostaje przy `Stretch`; zmienia się
+        wyłącznie miejsce cięcia: elizja z prawej zostawiała z ogona ścieżki katalog i zjadała
+        nazwę pliku (wizytacja: „21P_Giacobini-Zinner\\NOC…" w czterech wierszach naraz)."""
+        from horreum.gui import grid       # lazy - wzorzec `_on_confirm`
+        grid.elizja_w_srodku(self.frames, FRAME_COL_PATH)
 
     # ------------------------------------------------ akcja zapisu (#8/P4)
 
@@ -3063,6 +3082,8 @@ class MainWindow(QMainWindow):
         self._pelna_recepta = ""                # …i jej człon drugi, bo podpowiedź niesie OBA
         self._ms_komunikatu = 5000              # timeout żywego raportu (0 = bez wygasania)
         self._ostatnio_pokazany = ""            # tekst POSTAWIONY przez nas - strażnik cudzych zdań
+        self._miejsce_komunikatu = None         # miejsce nawigacji, do którego raport należy (None = żadne)
+        self._odlozony_raport_gridu = ""        # raport wczytania Zbiorów czekający na wejście w nie
         # RECEPTA ŻYJE DOKŁADNIE TYLE, CO JEJ RAPORT. `messageChanged` z pustym łańcuchem to jedyny
         # sygnał wygaśnięcia komunikatu (timeout 5 s albo cudzy `showMessage`), więc drugi timer
         # byłby drugim właścicielem tego samego zdarzenia — i rozjechałby się z nim przy pierwszej
@@ -3077,7 +3098,17 @@ class MainWindow(QMainWindow):
         if row < 0:                     # nav.clear() przy przemontowaniu emituje -1 (F5R#6)
             return
         self.stack.setCurrentIndex(row)
-        if row == NAV_PORZADKI:         # wejście w Porządki = świeży stan liczników zadań
+        if self._miejsce_komunikatu is not None and self._miejsce_komunikatu != row:
+            # Raport widoku nie przechodzi do cudzego miejsca; `clearMessage` gasi też receptę
+            # (`_on_status_changed`), a tu zerujemy to, co tamta droga zostawia przy cichym pasku.
+            self._miejsce_komunikatu = None
+            self._pelny_komunikat = ""
+            self.statusBar().clearMessage()
+        if row == NAV_ZBIORY and self._odlozony_raport_gridu:
+            # Raport wczytania z chwili, gdy Zbiorów nie było widać - pada teraz, przy nich.
+            msg, self._odlozony_raport_gridu = self._odlozony_raport_gridu, ""
+            self._flash(msg, miejsce=NAV_ZBIORY)
+        if row == NAV_PORZADKI:        # wejście w Porządki = świeży stan liczników zadań
             self.tasks_view.refresh_counts()
 
     def _zatrzymaj_watki_widokow(self):
@@ -3092,6 +3123,7 @@ class MainWindow(QMainWindow):
 
     def _clear_views(self):
         self._zatrzymaj_watki_widokow()
+        self._odlozony_raport_gridu = ""     # raport odłożony mówi o widoku, który właśnie znika
         self.nav.clear()
         self.nav.setVisible(False)
         while self.stack.count():
@@ -3123,7 +3155,8 @@ class MainWindow(QMainWindow):
         self.pipeline_view = pipeline
 
         grid = FramesView(self.con, now_fn=self._now, pola_poza_watkiem=self._pola_poza_watkiem)
-        grid.status_message.connect(self._flash)
+        grid.status_message.connect(self._flash_grid)
+        grid.load_report.connect(self._raport_wczytania_gridu)
         grid.status_recipe.connect(self._pokaz_recepte)   # recepta ma własny nośnik (FH-2)
         grid.writeback_busy.connect(self._on_writeback_busy)
         self.grid_view = grid
@@ -3396,8 +3429,33 @@ class MainWindow(QMainWindow):
             # tu BEZ KOŃCA nad zdemontowanymi widokami, wskazując menu, którego już nie ma.
             self._flash(i18n.t("main.no_db"), ms=0)
 
-    def _flash(self, msg, ms=5000):
+    def _flash_grid(self, msg):
+        """Wynik gestu gridu: związany ze Zbiorami, więc gaśnie przy zmianie miejsca nawigacji
+        (AR-34). Wynik wyemitowany, gdy user jest gdzie indziej (gest panelu rodowodu przełącza
+        widok na Dostawę), nie dostaje powiązania - nie ma z czym gasnąć, a zdanie ma paść."""
+        self._flash(msg, miejsce=NAV_ZBIORY if self.nav.currentRow() == NAV_ZBIORY else None)
+
+    def _raport_wczytania_gridu(self, msg):
+        """Raport WCZYTANIA zbioru („Wczytuję klatki…", „Grid: N klatek…") - na pasek tylko wtedy,
+        gdy Zbiory są widoczne; inaczej czeka na wejście w Zbiory (`_on_nav_changed`).
+
+        Ten raport pada też poza Zbiorami: odświeżenie widoków po przebiegu Dostawy, start okna.
+        Na pasku bez powiązania z miejscem przykrywał wtedy status etapu, po który user patrzy
+        w Dostawie, mówiąc o ekranie, którego nie widać. Odłożony, a nie zgubiony: przy wejściu
+        w Zbiory zdanie „Grid: N klatek…" jest prawdziwe i opisuje to, co właśnie pokazujemy.
+        Nowszy raport zastępuje odłożony - liczy się ostatnie wczytanie."""
+        if self.nav.currentRow() == NAV_ZBIORY:
+            self._odlozony_raport_gridu = ""
+            self._flash(msg, miejsce=NAV_ZBIORY)
+        else:
+            self._odlozony_raport_gridu = msg
+
+    def _flash(self, msg, ms=5000, miejsce=None):
         """Raport na pasek — Z ELIZJĄ (FH-2). KAŻDY raport gasi receptę poprzedniego gestu.
+
+        `miejsce` wiąże raport z miejscem nawigacji: wejście gdzie indziej (`_on_nav_changed`)
+        zdejmuje go z paska razem z receptą. Bez niego komunikat nie gaśnie przy przełączeniu
+        widoku (ani raport „Grid: N klatek…", ani `ms=0`).
 
         JEDYNE WEJŚCIE NA PASEK - i to jest wymóg, nie wygoda (bramka pakietu, zarzut zgodny
         u dwóch soczewek). Gołe `showMessage` obok tej drogi zostawiało receptę poprzedniego gestu
@@ -3411,6 +3469,7 @@ class MainWindow(QMainWindow):
         self._ustaw_recepte("")
         self._pelny_komunikat = msg
         self._ms_komunikatu = ms
+        self._miejsce_komunikatu = miejsce
         self._wyswietl(msg)
 
     def _pokaz_recepte(self, tekst):

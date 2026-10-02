@@ -418,7 +418,14 @@ def write_full_header(path, header_text: str, expected_hash: str | None, *,
     Cofnięcie W MIEJSCU to osobna droga (`restore_inplace`) - wyłącznie dla commitu zapisanego
     w miejscu, z operacją w dzienniku `inplace_op` (astra Z12): tylko wtedy przerwane cofnięcie ma
     materiał odzysku. Stare backupy tekstowe i commity atomowe cofają się tu, atomowo.
-    `replace_guard` = straż podmiany jak w `write_changes` (odmowa → 'blocked', plik nietknięty)."""
+    `replace_guard` = straż podmiany jak w `write_changes` (odmowa → 'blocked', plik nietknięty).
+
+    WERYFIKACJA JAK W ZAPISIE (AR-8): plik tymczasowy FITS jest czytany PRZED podmianą (nieczytelny
+    nie zastąpi oryginału), a odczyt po `os.replace` musi dać hash tego, co zapisaliśmy
+    (`_after_replace`). Awaria odczytu albo rozjazd po podmianie → 'failed' Z `backup_text`
+    i powodem „PODMIENIONY": plik już niesie przywrócony nagłówek, a baza go nie zna - dawniej
+    'failed' bez tej prawdy (odczyt padł) albo 'applied' z re-synciem pliku, którego nagłówka nikt
+    nie porównał z zapisanym (rozjazd)."""
     if _is_raw(path):
         return WriteResult("blocked", "format RAW jest read-only (#2)", None)
     path = os.fspath(path)
@@ -437,9 +444,11 @@ def write_full_header(path, header_text: str, expected_hash: str | None, *,
             fd, tmp = tempfile.mkstemp(suffix=".tmp", dir=os.path.dirname(os.path.abspath(path)))
             os.close(fd)
             hdul.writeto(tmp, overwrite=True)
+        # Poza `with` (uchwyt oryginału zwolniony), jak w `write_changes`: odczyt pliku tymczasowego
+        # TĄ SAMĄ formułą co skan, zanim zastąpi oryginał - kotwica `_after_replace`.
+        written_hash = scan.read_fits_meta(tmp).header_hash
         _podmien(tmp, path, replace_guard)                 # os.replace (pod strażą wołającego)
         tmp = None
-        post = _post_hash(path)
     except repo.InplaceConflict as exc:
         return WriteResult("blocked", _powod_konfliktu(exc.op), None)
     except Exception as exc:  # noqa: BLE001
@@ -450,7 +459,7 @@ def write_full_header(path, header_text: str, expected_hash: str | None, *,
                 os.remove(tmp)
             except OSError:
                 pass
-    return WriteResult("applied", None, post, header_text)
+    return _after_replace(path, written_hash, header_text)   # T3: hash z ZAPISANEGO pliku
 
 
 # ============================================================ PISARZ XISF (P6c — łata bajtowa)
@@ -850,24 +859,27 @@ def _xisf_full_header_atomic(path: str, xml_text: str, expected_hash: str | None
                              backup_text: str, *, replace_guard=None) -> WriteResult:
     """Droga atomowa przywrócenia XISF (plik tymczasowy + `os.replace`) - spadek, gdy koperta
     regionu nie pasuje do bieżących adresów bloków. Ta sama bramka mieszczenia się co zapis;
-    wypełnienie po skróceniu wraca jako ZERA. `replace_guard` = straż podmiany (`_podmien`)."""
+    wypełnienie po skróceniu wraca jako ZERA. `replace_guard` = straż podmiany (`_podmien`).
+    Weryfikacja po podmianie jak w `write_xisf_changes` (AR-8): hash zapisanego XML-a znany bez
+    odczytu (D-X-3), odczyt po `os.replace` ma go potwierdzić (`_after_replace`)."""
     try:
         meta = _read_xisf_or_refuse(path)
         if expected_hash is not None and meta.header_hash != expected_hash:
             return WriteResult("blocked", "header_hash mismatch", None)
+        xml = xml_text.encode("utf-8")
         try:
-            region = scan.build_xisf_header_region(meta, xml_text.encode("utf-8"))
+            region = scan.build_xisf_header_region(meta, xml)
         except ValueError as exc:
             raise _XisfRefusal(str(exc)) from exc
+        written_hash = hashlib.sha1(xml).hexdigest()
         _write_xisf_file(path, region, meta.first_attachment, replace_guard)
-        post = _post_hash(path)
     except _XisfRefusal as ref:
         return WriteResult("blocked", ref.reason, None)
     except repo.InplaceConflict as exc:
         return WriteResult("blocked", _powod_konfliktu(exc.op), None)
     except Exception as exc:  # noqa: BLE001
         return WriteResult("failed", f"{type(exc).__name__}: {exc}", None)
-    return WriteResult("applied", None, post, backup_text)
+    return _after_replace(path, written_hash, backup_text)
 
 
 # ============================================================ ZAPIS W MIEJSCU (O5, 2026-09-26)
@@ -1597,8 +1609,22 @@ def recover_region(path, spec: OpSpec) -> WriteResult:
     return _pod_blokada(path, lambda fh: _odzysk_pod_blokada(fh, path, spec))
 
 
+# Drogi wyjścia z izolacji mają w oknie GESTY (menu prawego kliku w Zbiorach), a w skrypcie
+# WYWOŁANIA. Powód mówi w obu formach naraz (AR-30 (1)): „gest” (`wywołanie`) - jedno zdanie,
+# dwóch czytelników, bez mapowania po stronie GUI. Nazwy gestów = katalog GUI `grid.inplace.*`;
+# rdzeń nie importuje GUI, więc równość pilnuje test (`test_gui_izolacja_zapisu`).
+_GEST_DOKONCZ = "Dokończ zapis"
+_GEST_PRZYWROC = "Przywróć nagłówek sprzed zapisu"
+_GEST_ZWOLNIJ = "Zwolnij plik do skanu…"
+
+
+def _droga(gest, wywolanie) -> str:
+    """Droga dalej w powodzie: „gest okna” (`wywołanie rdzenia`)."""
+    return f"„{gest}” (`{wywolanie}`)"
+
+
 _RECZNA = ("nierozstrzygalne - przywróć plik z pełnej kopii ręcznie, potem zwolnij izolację: "
-           "w Zbiorach zaznacz klatkę i z menu prawego kliku wybierz „Zwolnij plik do skanu…” "
+           f"w Zbiorach zaznacz klatkę i z menu prawego kliku wybierz „{_GEST_ZWOLNIJ}” "
            "(`writeback.release_isolation`)")
 
 
@@ -1642,10 +1668,11 @@ def pending_for_run(con, run_id):
 
 
 def backups_for_commit(con, commit_id):
-    """Backupy nagłówków commitu (do undo)."""
+    """Backupy nagłówków commitu (do undo) - bez backupów, po których pisarz pliku NIE podmienił
+    (`unreplaced_at`, 0024, AR-37): commit go nie ruszył, więc cofnięcie nie ma tam czego cofać."""
     return con.execute(
         "SELECT id, location_id, hdu_index, header_text, post_hash "
-        "FROM header_backups WHERE commit_id = ? ORDER BY id",
+        "FROM header_backups WHERE commit_id = ? AND unreplaced_at IS NULL ORDER BY id",
         (commit_id,),
     ).fetchall()
 
@@ -1786,10 +1813,12 @@ def _kontrola_danych(rec, expect_sha1_data, kontrola) -> str | None:
 
 def _powod_izolacji(op) -> str:
     """Powód odmowy mutacji pliku lokacji z operacją izolującą - z drogą naprawy właściwą fazie."""
-    droga = (f"najpierw odzysk: recover_torn({op['id']})"
+    odzysk = _droga(_GEST_PRZYWROC, f"recover_torn({op['id']})")
+    dokonczenie = _droga(_GEST_DOKONCZ, f"finish_inplace({op['id']})")
+    droga = (f"najpierw odzysk: {odzysk}"
              if op["phase"] in repo.INPLACE_OPEN_PHASES
-             else f"najpierw dokończenie: finish_inplace({op['id']}), a gdy kontrola danych nie "
-                  f"przechodzi - powrót: recover_torn({op['id']})")
+             else f"najpierw dokończenie: {dokonczenie}, a gdy kontrola danych nie przechodzi - "
+                  f"powrót: {odzysk}")
     return (f"lokacja ma nieukończony zapis w miejscu (operacja {op['id']}, {op['kind']}, faza "
             f"{op['phase']}) - plik jest izolowany; {droga}")
 
@@ -1874,27 +1903,28 @@ def _dokoncz(con, op_id, *, now) -> WriteResult:
         fh.seek(spec.region_offset)
         biezacy = fh.read(len(spec.new_region))
         if biezacy != spec.new_region:
-            droga = (f"przerwany powrót tej operacji - ponów: recover_torn({op_id})"
+            droga = (f"przerwany powrót tej operacji - ponów: "
+                     f"{_droga(_GEST_PRZYWROC, f'recover_torn({op_id})')}"
                      if _stan_posredni(biezacy, spec) else _RECZNA)
             return WriteResult("blocked", f"region nagłówka na dysku nie jest wynikiem operacji "
                                           f"{op_id} - plik zmienił się od zapisu; {droga}", None)
+        ponow = f"ponów: {_droga(_GEST_DOKONCZ, f'finish_inplace({op_id})')}"
         try:
             niezgodne = _resync(con, loc["path"], loc["volume"], now=now,
                                 expect_sha1_data=loc["sha1_data"], kontrola=kontrola)
         except Exception as exc:  # noqa: BLE001 - wsad idzie dalej, operacja zostaje `written`
             return WriteResult("failed", f"plik ZMIENIONY, ale re-sync padł - "
-                                         f"{type(exc).__name__}: {exc}; ponów: "
-                                         f"finish_inplace({op_id})", None)
+                                         f"{type(exc).__name__}: {exc}; {ponow}", None)
         if niezgodne is not None:
             return WriteResult("failed", f"{niezgodne}; kontrola danych NIE przeszła - droga "
-                                         f"powrotu: recover_torn({op_id}) przywraca stary nagłówek "
-                                         f"w miejscu i zwalnia plik do pełnego skanu", None)
+                                         f"powrotu: {_droga(_GEST_PRZYWROC, f'recover_torn({op_id})')}"
+                                         f" przywraca stary nagłówek w miejscu i zwalnia plik do "
+                                         f"pełnego skanu", None)
         try:
             repo.finish_inplace_op(con, op_id=op_id, now=now)
         except Exception as exc:  # noqa: BLE001
             return WriteResult("failed", f"baza zsynchronizowana, ale faza 'synced' NIE zapisana "
-                                         f"({type(exc).__name__}: {exc}); ponów: "
-                                         f"finish_inplace({op_id})", None)
+                                         f"({type(exc).__name__}: {exc}); {ponow}", None)
         return WriteResult("applied", None, spec.post_hash)
     return _pod_blokada(loc["path"], _dzialanie)
 
@@ -1934,7 +1964,12 @@ def commit(con, run_id, *, now, clock=None,
     BACKUP PRZED ZAPISEM W OBU DROGACH (Z3, 2026-09-26): pisarz woła `_persist` (wiersz `commits`
     przy pierwszym pliku + `header_backups` z `RegionBackup`) przed `os.replace` albo przed
     pierwszym bajtem zapisu w miejscu. Porażka backupu → 'failed', plik nietknięty. Dawna
-    kolejność (backup PO podmianie, D-X-14) zostawiała plik zmieniony bez drogi powrotu.
+    kolejność (backup PO podmianie, D-X-14) zostawiała plik zmieniony bez drogi powrotu. Backup
+    drogi atomowej, po którym straż odbiła podmianę ('blocked' bez `backup_text`), dostaje znacznik
+    `unreplaced_at` (0024, AR-37) - cofnięcie commitu mieszanego go pomija, zamiast meldować
+    blokadę o pliku, którego commit nie ruszył. Wyjątek przy samej podmianie ('failed' bez
+    `backup_text`) znacznika NIE dostaje: na zerwanym udziale rename mógł zajść, więc backup zostaje
+    kandydatem cofnięcia (kotwica `post_hash` przywróci plik podmieniony albo odbije nietknięty).
 
     ZAPIS POTWIERDZONY TYLKO CZĘŚCIOWO (`WriteResult` 'failed' z `backup_text`: weryfikacja po
     podmianie albo po zapisie w miejscu padła, zapis przerwany) → status 'failed' z numerem commitu,
@@ -2035,16 +2070,19 @@ def commit(con, run_id, *, now, clock=None,
                for r in rows]
         expected = rows[0]["expected_header_hash"]  # kotwica stagingu (R#7)
 
-        def _persist(backup_text, post_hash, _lid=location_id, _hdu=loc["hdu_index"]):
+        backup_pliku: list[int] = []      # id backupu drogi atomowej utrwalonego dla TEGO pliku
+
+        def _persist(backup_text, post_hash, _lid=location_id, _hdu=loc["hdu_index"],
+                     _ids=backup_pliku):
             # Backup PRZED podmianą (droga atomowa): commit powstaje przy pierwszym pliku, który
             # naprawdę ma być ruszony.
             nonlocal commit_id
             if commit_id is None:
                 commit_id = repo.insert_commit(con, run_id=run_id, now=clock(),
                                                summary=f"run {run_id}")
-            repo.insert_header_backup(con, commit_id=commit_id, location_id=_lid,
-                                      hdu_index=_hdu, header_text=backup_text,
-                                      post_hash=post_hash)
+            _ids.append(repo.insert_header_backup(con, commit_id=commit_id, location_id=_lid,
+                                                  hdu_index=_hdu, header_text=backup_text,
+                                                  post_hash=post_hash))
 
         class _Dziennik:
             """Dziennik commitu w miejscu: backup + commit + operacja + wiązanie wpisów stagingu
@@ -2085,9 +2123,20 @@ def commit(con, run_id, *, now, clock=None,
 
         if res.backup_text is None:       # zapisu nie było: odmowa albo awaria przed plikiem
             status = "blocked" if res.status == "blocked" else "failed"
-            _mark(rows, status, res.reason)
+            reason = res.reason
+            if backup_pliku and status == "blocked":
+                # Backup leży, a 'blocked' po nim daje WYŁĄCZNIE odmowa straży podmiany (bramki
+                # pisarza stoją przed backupem): `os.replace` nie ruszył - cofnięcie go pominie.
+                repo.mark_backup_unreplaced(con, backup_id=backup_pliku[0], now=now)
+            elif backup_pliku:
+                # 'failed' po backupie = wyjątek przy samej podmianie: na zerwanym udziale rename
+                # mógł zajść mimo błędu. Backup zostaje kandydatem cofnięcia - kotwica `post_hash`
+                # przywróci plik podmieniony albo odbije nietknięty.
+                reason = (f"{res.reason}; podmiana niepotwierdzona, backup do cofnięcia zapisany "
+                          f"w commicie {commit_id}")
+            _mark(rows, status, reason)
             (blocked if status == "blocked" else failed).append(
-                FileResult(location_id, path, status, res.reason))
+                FileResult(location_id, path, status, reason))
             _report(path, status)
             continue
         podmieniono = True
@@ -2095,7 +2144,8 @@ def commit(con, run_id, *, now, clock=None,
             # Backup JEST (powstał przed zapisem), więc undo cofnie plik, o ile leży na nim to, co
             # zapisaliśmy (`post_hash`); plik rozdarty w miejscu naprawia `recover_torn`. Re-syncu
             # NIE robimy - baza opisuje bajty POTWIERDZONE. Nagrobek ręki też zostaje.
-            naprawa = (f"; lokacja IZOLOWANA od skanu, odzysk: recover_torn({dziennik.op_id})"
+            naprawa = (f"; lokacja IZOLOWANA od skanu, odzysk: "
+                       f"{_droga(_GEST_PRZYWROC, f'recover_torn({dziennik.op_id})')}"
                        if res.in_place else "")
             reason = (f"{res.reason}; backup do cofnięcia zapisany w commicie {commit_id}"
                       f"{naprawa}")
@@ -2518,9 +2568,9 @@ def undo(con, commit_id, *, now,
         otwarta = next((o for o in (op_u, op_c)
                         if o is not None and o["phase"] in repo.INPLACE_OPEN_PHASES), None)
         if otwarta is not None:
+            odzysk = _droga(_GEST_PRZYWROC, f"recover_torn({otwarta['id']})")
             _pad(loc, path, f"przerwany zapis w miejscu (operacja {otwarta['id']}, "
-                            f"{otwarta['kind']}) - lokacja izolowana; najpierw "
-                            f"recover_torn({otwarta['id']})")
+                            f"{otwarta['kind']}) - lokacja izolowana; najpierw {odzysk}")
             continue
         if op_u is not None and op_u["phase"] == "written":
             _dokoncz_undo(loc, path, op_u["id"], "nagłówek był już przywrócony - dokończono "
@@ -2574,7 +2624,8 @@ def undo(con, commit_id, *, now,
                 elif res.status == "blocked":
                     _blok(loc, path, res.reason)
                 else:
-                    dopisek = (f"; lokacja IZOLOWANA od skanu, odzysk: recover_torn({dziennik.op_id})"
+                    odzysk = _droga(_GEST_PRZYWROC, f"recover_torn({dziennik.op_id})")
+                    dopisek = (f"; lokacja IZOLOWANA od skanu, odzysk: {odzysk}"
                                if res.in_place else "")
                     _pad(loc, path, f"{res.reason}{dopisek}")
                 continue
@@ -2606,9 +2657,18 @@ def undo(con, commit_id, *, now,
             replace_guard=lambda _lid=loc["id"], _gen=gen: repo.guard_file_replace(
                 con, location_id=_lid, generation=_gen))
         if res.status == "applied":
-            _sync(loc, path, None, None)
+            # Kontrola tożsamości jak w commicie i w gałęzi „już przywrócone": astropy zapisuje cały
+            # `HDUList`, więc inna serializacja sekcji danych dałaby nowe `sha1_data`, a re-sync bez
+            # kotwicy przepiąłby lokację na nową klatkę, zostawiając fakty ręki na starej.
+            _sync(loc, path, loc["sha1_data"], None)
         elif res.status == "blocked":
             _blok(loc, path, res.reason)
+        elif res.backup_text is not None:
+            # Podmiana zaszła, weryfikacja po niej nie (AR-8): re-syncu NIE ma - baza opisuje bajty
+            # potwierdzone, jak po 'failed' commitu. Drogą naprawy jest skan albo ponowne undo,
+            # które rozpozna przywrócony nagłówek po bajtach regionu.
+            _pad(loc, path, f"{res.reason}; baza NIE zsynchronizowana - przeskanuj plik albo "
+                            f"ponów cofnięcie")
         else:
             _pad(loc, path, res.reason)
 
@@ -2668,7 +2728,8 @@ def recover_torn(con, op_id, *, now) -> FileResult:
         res = _odzysk_pod_blokada(fh, path, spec)
         if res.status != "applied":
             return res
-        ponow = f"operacja zostaje otwarta, ponów recover_torn({op_id})"
+        ponow = (f"operacja zostaje otwarta, ponów "
+                 f"{_droga(_GEST_PRZYWROC, f'recover_torn({op_id})')}")
         try:
             niezgodne = _resync(con, path, loc["volume"], now=now,
                                 expect_sha1_data=loc["sha1_data"], kontrola=kontrola)
@@ -2717,7 +2778,8 @@ def _powrot_z_written(con, op, loc, *, now) -> FileResult:
     spec = _spec_z_operacji(op)
     kontrola = _KontrolaDanych(spec.region_offset, spec.old_region,
                                _kotwica_operacji(con, op, loc), spec.post_hash)
-    ponow = f"operacja zostaje 'written', ponów recover_torn({op_id})"
+    ponow = (f"operacja zostaje 'written', ponów "
+             f"{_droga(_GEST_PRZYWROC, f'recover_torn({op_id})')}")
 
     def _dzialanie(fh):
         faza = repo.inplace_op_phase(con, op_id)
@@ -2747,7 +2809,8 @@ def _powrot_z_written(con, op, loc, *, now) -> FileResult:
             if niezgodne is None:
                 return WriteResult("blocked", f"kontrola danych operacji {op_id} przechodzi - "
                                               f"zapis jest poprawny, powrót go nie cofa; dokończ: "
-                                              f"finish_inplace({op_id})", None)
+                                              f"{_droga(_GEST_DOKONCZ, f'finish_inplace({op_id})')}",
+                                   None)
         else:
             niezgodne = "przerwany wcześniejszy powrót tej operacji"
         res = _odzysk_pod_blokada(fh, path, spec)

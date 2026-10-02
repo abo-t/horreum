@@ -284,6 +284,76 @@ def test_kandydaci_porownywalni_to_kopie_klatek_z_wiecej_niz_jedna_lokacja(tmp_p
     con.close()
 
 
+# Dawny literał kandydatów (sprzed AR-35) - klasa wpisana w SELECT. Zamrożony tu jako wzorzec
+# porównania: nowa droga (klasa z `queries.copy_facts_class`) ma dać na tej samej populacji to samo.
+_KANDYDACI_DAWNI = (
+    "SELECT l.id FROM location l JOIN frame f ON f.id = l.frame_id "
+    "WHERE l.present = 1 AND l.header_hash IS NOT NULL AND l.hdr_hash IS NULL "
+    "  AND l.unreadable_since IS NULL "
+    "  AND NOT EXISTS (SELECT 1 FROM inplace_op o WHERE o.location_id = l.id "
+    "                  AND o.phase IN (SELECT value FROM json_each(?))) "
+    "  AND ((f.filetype = 'xisf' AND ? = 0) OR l.frame_id IN ("
+    "       SELECT frame_id FROM location GROUP BY frame_id HAVING COUNT(*) > 1)) "
+    "ORDER BY l.id")
+
+
+def test_klasa_kandydata_jeden_literal_dla_dostawy_i_komorki_obrazy(tmp_path):
+    """AR-35: „?" w kolumnie „Obrazy" liczył klasę kandydata lustrem po stronie Pythona (XISF albo
+    `n_present + n_vanished > 1`), a etap Dostawy - literałem SQL w `copy_facts_candidates`: jeden
+    fakt w dwóch miejscach. Teraz klasę liczy jeden literał (`queries.copy_facts_class`), a read-model
+    (`queries.base_rows`) oddaje z niego flagę `copy_facts_class`.
+
+    Zachowanie bez zmian, dowód na tej samej populacji (każdy kształt klatki: XISF i FITS, jedna
+    kopia obecna albo zniknięta, dwie obecne, obecna z martwą siostrą): flaga == dawne lustro
+    komórki, a kandydaci == dawny literał, w obu trybach `porownywalne`.
+
+    Falsyfikator: zdejmij kolumnę `copy_facts_class` z `base_rows` - pierwsza asercja pada na
+    brakującym kluczu; wróć z klasą do lustra w gridzie - test komórki w `test_gui_grid` widzi „?"
+    mimo flagi 0."""
+    con = db.open_db(str(tmp_path / "h.db"))
+    # frame_id → (filetype, obecność kolejnych kopii)
+    populacja = {1: ("xisf", [1]), 2: ("fits", [1]), 3: ("fits", [1, 0]), 4: ("fits", [1, 1]),
+                 5: ("xisf", [1, 1]), 6: ("fits", [0]), 7: ("xisf", [0]), 8: ("fits", [0, 0])}
+    lid = 0
+    for fid, (typ, kopie) in populacja.items():
+        con.execute("INSERT INTO frame(id, kind, filetype, sha1_data, first_seen_at) "
+                    "VALUES (?, 'light', ?, ?, ?)", (fid, typ, f"s{fid}", NOW))
+        for obecna in kopie:
+            lid += 1
+            con.execute("INSERT INTO location(id, frame_id, volume, path, header_hash, present) "
+                        "VALUES (?, ?, 'V', ?, 'hh', ?)", (lid, fid, f"/a/{lid}.{typ}", obecna))
+    con.commit()
+
+    wiersze = queries.base_rows(con, list(populacja))
+    dawne_lustro = {r["frame_id"]: r["filetype"] == "xisf"
+                    or (r["n_present"] or 0) + (r["n_vanished"] or 0) > 1 for r in wiersze}
+    flaga = {r["frame_id"]: bool(r["copy_facts_class"]) for r in wiersze}
+    assert flaga == dawne_lustro
+    assert {fid for fid, k in flaga.items() if k} == set(queries.copy_facts_class(con)) == {
+        1, 3, 4, 5, 7, 8}
+    assert queries.copy_facts_class(con, porownywalne=True) == [3, 4, 5, 8]
+    fazy = json.dumps(list(repo.INPLACE_ISOLATING_PHASES))
+    for por in (False, True):
+        dawni = [r[0] for r in con.execute(_KANDYDACI_DAWNI, (fazy, int(por)))]
+        assert [r["id"] for r in scan.copy_facts_candidates(con, porownywalne=por)] == dawni
+    con.close()
+
+
+def test_read_model_nie_ciagnie_astropy():
+    """Konwencja „queries bez astropy": read-model czytają komendy CLI, które nie ładują numpy ani
+    astropy (`sky`, `targets`, `presence`, `projection`). Klasa kandydata faktów kopii mieszka
+    w `queries`, a `scan` sięga po nią leniwie - import read-modelu nie ciągnie skanu.
+
+    Świeży proces, bo w procesie testów `scan` siedzi już w `sys.modules`.
+    Falsyfikator: wróć z importem `copy_facts_class` z `scan` na górę `queries` - astropy wraca."""
+    import subprocess
+    import sys
+    kod = ("import sys, horreum.gui.queries; "
+           "print(sorted(m for m in ('astropy', 'numpy', 'horreum.scan') if m in sys.modules))")
+    wynik = subprocess.run([sys.executable, "-c", kod], capture_output=True, text=True, check=True)
+    assert wynik.stdout.strip() == "[]", wynik.stdout + wynik.stderr
+
+
 def test_uzupelnienie_fakty_zebrane_rownolegle_nie_sa_stale(tmp_path, monkeypatch):
     """Między wyborem kandydatów a zapisem fakty kopii dociągnął ktoś inny (re-sync pisarza po
     zapisie nagłówka idzie przez `ingest_record`, który zapisuje fakty i NOWY odcisk). Ponowienie

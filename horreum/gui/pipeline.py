@@ -464,14 +464,34 @@ def _stage_label(name):
     return i18n.t(key) if key else name
 
 
+def unreadable_kinds_text(counts):
+    """Zdanie rozbicia kopii nieczytelnych po RODZAJU (P4-2, P4-5) z
+    `resolver.unreadable_kind_counts`. Które rodzaje pokazać, rozstrzyga rdzeń
+    (`resolver.unreadable_kinds_shown`: oba rodzaje o PLIKU zawsze, „baza" i „bez kodu awarii"
+    tylko > 0 - ta sama reguła co raport CLI); tu tylko etykiety i18n.
+    Jedyny właściciel zdania: raport Dostawy i podpowiedź kubełka w Porządkach (`app`)."""
+    from horreum.resolver import unreadable_kinds_shown
+    # Klucze LITERAŁAMI, nie składane z rodzaju - bramka „klucze call-site ⊆ katalog" je widzi.
+    etykieta = {"io": lambda n: i18n.t("object.unreadable_kind_io", n=n),
+                "parse": lambda n: i18n.t("object.unreadable_kind_parse", n=n),
+                "db": lambda n: i18n.t("object.unreadable_kind_db", n=n),
+                "unknown": lambda n: i18n.t("object.unreadable_kind_unknown", n=n)}
+    parts = [etykieta[k](n) for k, n in unreadable_kinds_shown(counts)]
+    return i18n.t("object.unreadable_kinds", parts=" · ".join(parts))
+
+
 def _review_line(st):
     """`ReviewState` → jedna linia raportu. Wiodąca liczba to DISTINCT klatek, po niej POWODY, które
     się nakładają (klatka bez kamery jest też bez konfiguracji) — dlatego „powody", nie „w tym":
     suma powodów bywa większa niż klatek i nie wolno jej czytać jak rozbicia. Zerowe powody milczą."""
     if not st.total:
         return i18n.t("pipeline.review.none")
-    powody = ", ".join(f"{i18n.t(key)} {n}" for attr, key in _REVIEW_REASONS
-                       if (n := getattr(st, attr)))
+    # RODZAJ PRZY „kopia nieczytelna" (P4-5): sama liczba oskarżała plik, choć winny bywa dysk albo
+    # baza. W nawiasie, bo to rozbicie TEGO powodu - po kopiach, nie po klatkach (zdanie mówi „kopie").
+    powody = ", ".join(
+        f"{i18n.t(key)} {n}" + (f" ({unreadable_kinds_text(st.unreadable_kinds)})"
+                                if attr == "unreadable" else "")
+        for attr, key in _REVIEW_REASONS if (n := getattr(st, attr)))
     return i18n.t("pipeline.review.line",
                   frames=i18n.t_plural("grid.frames", st.total), reasons=powody)
 
@@ -613,10 +633,21 @@ class PipelineView(QWidget):
         self.btn_delta.clicked.connect(self._on_delta)
         self.btn_presence = QPushButton(i18n.t("pipeline.btn.presence"))   # podpowiedź: _sync_presence_tip
         self.btn_presence.clicked.connect(self._on_presence)
+        # „Sprawdź obecność w…" - obecność na katalogu wskazanym TERAZ, bez zapisywania go jako
+        # źródła „Przyjmij nowe" (`_on_presence_pick`). Osobne wejście, bo do tej zmiany podpowiedź
+        # „Sprawdź obecność" kierowała po korzeń archiwum do „Wskaż katalog…" trybu zaawansowanego,
+        # a ten ZAPAMIĘTUJE źródło dostawy - złota akcja wciągałaby potem całe archiwum. Stoi obok
+        # „Sprawdź obecność", bo to ten sam etap na innym drzewie.
+        self.btn_presence_in = QPushButton(i18n.t("pipeline.btn.presence_in"))
+        self.btn_presence_in.setToolTip(i18n.t("pipeline.tip.presence_in",
+                                               mark=i18n.t("pipeline.btn.mark_vanished"),
+                                               receive=i18n.t("pipeline.receive")))
+        self.btn_presence_in.clicked.connect(self._on_presence_pick)
         self.btn_cancel = QPushButton(i18n.t("pipeline.btn.cancel"))
         self.btn_cancel.clicked.connect(self._on_cancel)
         for b in (self.btn_scan, self.btn_group, self.btn_resolve, self.btn_calibrate,
-                  self.btn_lineage, self.btn_delta, self.btn_presence, self.btn_cancel):
+                  self.btn_lineage, self.btn_delta, self.btn_presence, self.btn_presence_in,
+                  self.btn_cancel):
             stages.addWidget(b)
         stages.addStretch(1)
         v.addLayout(stages)
@@ -756,7 +787,10 @@ class PipelineView(QWidget):
         if self._root is not None:
             tip = i18n.t("pipeline.tip.presence", root=self._root, mark=mark)
         elif source:
-            tip = i18n.t("pipeline.tip.presence_last", source=source, mark=mark)
+            # Droga do korzenia archiwum to „Sprawdź obecność w…", NIE „Wskaż katalog…": tamten
+            # zapamiętuje źródło „Przyjmij nowe", a ta podpowiedź mówi właśnie o tym źródle.
+            tip = i18n.t("pipeline.tip.presence_last", source=source, mark=mark,
+                         pick=i18n.t("pipeline.btn.presence_in"))
         else:
             tip = i18n.t("pipeline.tip.presence_ask", mark=mark)
         self.btn_presence.setToolTip(tip)
@@ -1053,26 +1087,35 @@ class PipelineView(QWidget):
             return
         self._start_presence()
 
-    def _start_presence(self):
-        """Start DRY obecności na wskazanym katalogu albo - bez niego - na ostatnim źródle."""
-        root = self._root
+    def _start_presence(self, root=None):
+        """Start DRY obecności na `root`, a bez niego na wskazanym katalogu albo - bez niego - na
+        ostatnim źródle."""
+        if root is None:
+            root = self._root
         if root is None:
             root = self._settings().value("pipeline/last_source", None)
         self._begin_run()
         self._start_stage("presence", root=root)
 
     def _on_presence_pick(self):
-        """„Wskaż katalog…" dla obecności: pytanie o katalog (brak ostatniego źródła albo źródło
-        niedostępne), zapamiętanie go jak w „Przyjmij nowe" i DRY na nim. Katalog wybrany
-        w dialogu jest pod ręką, więc `_set_root` mierzy jego serial jak w „Wskaż katalog…"."""
+        """„Sprawdź obecność w…" (i „Wskaż katalog…" obecności: brak ostatniego źródła albo źródło
+        niedostępne): pytanie o katalog i DRY na nim.
+
+        KATALOG DO SPRAWDZENIA NIE ZOSTAJE ŹRÓDŁEM „Przyjmij nowe" (AR-30 (3)): sprawdza się
+        zwykle korzeń archiwum (szerzej niż dostawa, żeby kopia spoza podkatalogu dostawy też była
+        kandydatem), a złota akcja wciągnęłaby wtedy przy następnej dostawie całe archiwum. Pamięć
+        `pipeline/last_source` zostaje przy dostawie; obecność zna katalog przez `_root`.
+
+        ZERO DOTKNIĘĆ DYSKU W TYM SLOCIE (jak `_on_presence`): katalog jedzie do etapu bez serialu,
+        a to, czy jest osiągalny, i jego wolumin sprawdza wątek tła (`PipelineWorker._zrodlo`).
+        Wskazanym katalogiem zostaje dopiero PO sondzie (`_on_source_ready`) - dawny `_set_root`
+        mierzył serial tutaj, a katalog z dialogu bywa udziałem sieciowym, który odpadł po wyborze."""
         if self._db_path is None or self._thread is not None:
             return
-        source = QFileDialog.getExistingDirectory(self, i18n.t("pipeline.dlg.pick_scan"))
+        source = QFileDialog.getExistingDirectory(self, i18n.t("pipeline.dlg.pick_presence"))
         if not source:
             return
-        self._remember_source(source)
-        self._set_root(source)
-        self._start_presence()
+        self._start_presence(source)
 
     def _on_source_pick(self):
         """„Wskaż katalog…" pod „Źródło niedostępne": pytanie o katalog i powtórzenie TEGO etapu,
@@ -1560,6 +1603,7 @@ class PipelineView(QWidget):
         # Obecność przynosi drzewo sama (wskazany katalog → ostatnie źródło → pytanie, AR-28 (a)),
         # więc jak „Przyjmij nowe" wymaga samej bazy.
         self.btn_presence.setEnabled(idle and has_db)
+        self.btn_presence_in.setEnabled(idle and has_db)      # drzewo przynosi dialog
         # Stosy przynoszą WŁASNY korzeń (dialog), więc jak „Przyjmij nowe" nie zależą od `_root`
         # trybu zaawansowanego — wymagają samej bazy.
         self.btn_stacks.setEnabled(idle and has_db)

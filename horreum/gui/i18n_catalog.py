@@ -413,9 +413,13 @@ CATALOG = {
     # a zapisem" mówiło to samo o darku i o klatce zajętej w międzyczasie). Człony rozbicia
     # dokleja `grid.zdanie_pominiec` - te same, co w zdaniach Zbiorów - więc zdanie kończy się BEZ
     # KROPKI: „klatek. · kalibracja: 1" byłoby drugą gramatyką w jednym zdaniu.
+    # `{n}` = pozycje, które przeszły klingę (nie zaznaczone: po odmowie reszta nie doszła).
     "path.done": {
-        "pl": "Zatwierdzono {names} nazw · przypisano {assigned} z {total} klatek",
-        "en": "Confirmed {names} names · assigned {assigned} of {total} frames"},
+        "pl": {"one": "Zatwierdzono {n} nazwę · przypisano {assigned} z {total} klatek",
+               "few": "Zatwierdzono {n} nazwy · przypisano {assigned} z {total} klatek",
+               "many": "Zatwierdzono {n} nazw · przypisano {assigned} z {total} klatek"},
+        "en": {"one": "Confirmed {n} name · assigned {assigned} of {total} frames",
+               "other": "Confirmed {n} names · assigned {assigned} of {total} frames"}},
     "object.unreadable_line": {"pl": "— kopie nieczytelne", "en": "— unreadable copies"},
     # KUBEŁEK OSI SPRZĘTU (R1) — do tej pory był POŁOWĄ wiersza informacyjnego z notą
     # „rozwiązywanie w przygotowaniu". Nota była uczciwa i dlatego musiała zniknąć razem z drogą:
@@ -554,13 +558,15 @@ CATALOG = {
     # P4-2: rozbicie kubełka po RODZAJU awarii. Jednostką są KOPIE (nie klatki jak w liczniku
     # wiersza) i fraza mówi to wprost, bo tylko liczba kopii sumuje się do drążenia - klatka
     # z dwiema kopiami może mieć dwa rodzaje. „Baza" = błąd bazy po naszej stronie, nie fakt
-    # o pliku. „Rodzaj nieznany" = kopie oznaczone przed 0019 albo wyjątek bez kodu systemu,
-    # którego nie dało się rozstrzygnąć.
+    # o pliku. „Bez kodu awarii" = kopie oznaczone przed 0019 albo wyjątek bez kodu systemu,
+    # którego nie dało się rozstrzygnąć. Fraza NIE brzmi „rodzaj nieznany": raport Dostawy stawia
+    # to rozbicie w jednej linii z powodem „rodzaj nieznany" (`pipeline.reason.kind_unknown`), który
+    # mówi o rodzaju KLATKI - dwa różne fakty jednym słowem czytały się jak jeden.
     "object.unreadable_kinds": {"pl": "kopie: {parts}", "en": "copies: {parts}"},
     "object.unreadable_kind_io": {"pl": "dysk/dostęp {n}", "en": "disk/access {n}"},
     "object.unreadable_kind_parse": {"pl": "nagłówek {n}", "en": "header {n}"},
     "object.unreadable_kind_db": {"pl": "baza {n}", "en": "database {n}"},
-    "object.unreadable_kind_unknown": {"pl": "rodzaj nieznany {n}", "en": "kind unknown {n}"},
+    "object.unreadable_kind_unknown": {"pl": "bez kodu awarii {n}", "en": "no failure code {n}"},
     "object.path_proposed_broken_info": {
         "pl": "Propozycji ze ścieżki NIE POLICZONO, bo słownik obiektów własnych "
               "(objects_own.json) ma błąd — wiersz nie udaje zera i nie prowadzi nigdzie, "
@@ -2004,7 +2010,9 @@ CATALOG = {
                         "point the clock reference"},
     },
     "grid.lin.flag.declared": {
-        "pl": "plik deklaruje {n} klatek", "en": "the file declares {n} frames",
+        "pl": {"one": "plik deklaruje {n} klatkę", "few": "plik deklaruje {n} klatki",
+               "many": "plik deklaruje {n} klatek"},
+        "en": {"one": "the file declares {n} frame", "other": "the file declares {n} frames"},
     },
     "grid.lin.flag.excluded": {"pl": "odrzuconych: {n}", "en": "rejected: {n}"},
 
@@ -2324,6 +2332,21 @@ CATALOG = {
     },
     "pipeline.btn.delta": {"pl": "Pokaż deltę", "en": "Show delta"},
     "pipeline.btn.presence": {"pl": "Sprawdź obecność", "en": "Check presence"},
+    # Obecność na katalogu wskazanym TERAZ, bez zapamiętania go jako źródła „Przyjmij nowe”
+    # (`PipelineView._on_presence_pick`) - droga do korzenia archiwum z podpowiedzi „Sprawdź obecność”.
+    "pipeline.btn.presence_in": {"pl": "Sprawdź obecność w…", "en": "Check presence in…"},
+    "pipeline.tip.presence_in": {
+        "pl": "Zapyta o katalog (np. korzeń archiwum) i porówna go z bazą. Katalog nie zostaje "
+              "źródłem „{receive}”. Tylko raport - zapis to „{mark}”, który pojawi się pod "
+              "wynikiem, gdy sprawdzenie potwierdzi zniknięcie.",
+        "en": "Asks for a folder (e.g. the archive root) and compares it with the database. The "
+              "folder does not become the “{receive}” source. Report only - writing is “{mark}”, "
+              "which appears below the result when the check confirms a copy is gone.",
+    },
+    "pipeline.dlg.pick_presence": {
+        "pl": "Wskaż katalog do sprawdzenia obecności",
+        "en": "Choose a folder to check presence in",
+    },
     "pipeline.btn.cancel": {"pl": "Anuluj", "en": "Cancel"},
     "pipeline.tip.calibrate": {
         "pl": "Przepis klatek kalibracyjnych — po „Rozwiąż” (przepis flata potrzebuje filtra)",
@@ -2344,13 +2367,21 @@ CATALOG = {
         "en": "Compares the chosen folder with the database: {root}. Report only - writing is "
               "“{mark}”, which appears below the result when the check confirms a copy is gone.",
     },
+    # AR-30 (3): ostatnie źródło bywa podkatalogiem dostawy - kopia spoza niego nie jest wtedy
+    # kandydatem, więc podpowiedź mówi, czym sprawdzić całe archiwum. `{pick}` = „Sprawdź obecność
+    # w…”, które źródła dostawy NIE przestawia (wcześniej wskazywało „Wskaż katalog…”, a ten je
+    # zapamiętuje - podpowiedź prowadziła wprost w tę szkodę, przed którą sama ostrzegała).
     "pipeline.tip.presence_last": {
         "pl": "Katalogu nie wskazano - porówna z bazą ostatnie źródło „Przyjmij nowe”: {source}. "
-              "Tylko raport - zapis to „{mark}”, który pojawi się pod wynikiem, gdy sprawdzenie "
+              "Sprawdza tylko kopie pod tym katalogiem - żeby objąć całe archiwum, użyj "
+              "„{pick}” i wskaż jego korzeń (źródło „Przyjmij nowe” zostaje bez zmian). Tylko "
+              "raport - zapis to „{mark}”, który pojawi się pod wynikiem, gdy sprawdzenie "
               "potwierdzi zniknięcie.",
         "en": "No folder chosen - compares the last “Take new” source with the database: "
-              "{source}. Report only - writing is “{mark}”, which appears below the result when "
-              "the check confirms a copy is gone.",
+              "{source}. It checks only copies under this folder - to cover the whole archive, use "
+              "“{pick}” and choose its root (the “Take new” source stays unchanged). Report only - "
+              "writing is “{mark}”, which appears below the result when the check confirms a copy "
+              "is gone.",
     },
     "pipeline.tip.presence_ask": {
         "pl": "Zapyta o katalog i porówna go z bazą. Tylko raport - zapis to „{mark}”, który "
@@ -2854,11 +2885,18 @@ CATALOG = {
               "skips it.\nIn Collections: select the frames, right-click → “{restore}” (the old "
               "header comes back in place) or “{release}” (after you have checked the file).",
     },
+    # AR-30 (2): „Dokończ" bywa odmową - przy nieudanej kontroli danych drogą jest powrót, przy
+    # pliku skasowanym albo podmienionym zwolnienie. Podpowiedź mówi to z góry, zamiast kazać
+    # przejść przez odmowę, żeby poznać właściwy gest.
     "tasks.pending_finish_tip": {
         "pl": "Plik ma już nowy nagłówek, ale baza jeszcze go nie wciągnęła - skan go pomija.\n"
-              "W Zbiorach: zaznacz klatki, prawy klik → „{finish}”.",
+              "W Zbiorach: zaznacz klatki, prawy klik → „{finish}”. Gdy plik nie przejdzie "
+              "kontroli danych - „{restore}”; gdy pliku nie ma albo to inny plik - „{release}” "
+              "(po Twoim sprawdzeniu).",
         "en": "The file already has the new header, but the database has not taken it in yet - "
-              "the scan skips it.\nIn Collections: select the frames, right-click → “{finish}”.",
+              "the scan skips it.\nIn Collections: select the frames, right-click → “{finish}”. "
+              "When the file fails the data check - “{restore}”; when the file is gone or is a "
+              "different file - “{release}” (after you have checked it).",
     },
     "tasks.path_header_conflict_frames": {
         "pl": "Nagłówek inny niż zatwierdzony folder",
@@ -3076,6 +3114,29 @@ CATALOG = {
                       "the database, then the file returns to the scan.",
                "other": "Finishes {n} writes: a data check of each file and taking the header "
                         "into the database, then the files return to the scan."},
+    },
+    # AR-30 (2): dopisek do `finish_tip` - dokończenie odmawia przy nieudanej kontroli danych
+    # i przy pliku, którego nie ma albo który jest inny; podpowiedź wskazuje wtedy właściwy gest.
+    "grid.inplace.finish_tip_else": {
+        "pl": " Gdy plik nie przejdzie kontroli danych - „{restore}”; gdy pliku nie ma albo to "
+              "inny plik - „{release}”.",
+        "en": " When the file fails the data check - “{restore}”; when the file is gone or is a "
+              "different file - “{release}”."},
+    # AR-30 (4): cel gestu to klatka, wykonanie idzie per kopia - przy kilku kopiach jednej klatki
+    # w izolacji podpowiedź mówi, które pliki gest ruszy. Zdanie NEUTRALNE wobec liczby klatek:
+    # lista `{files}` zbiera kopie WSZYSTKICH zaznaczonych klatek wielokopiowych, a dawne „Klatka
+    # ma kilka kopii” mówiło o jednej klatce przy liście plików z kilku.
+    "grid.inplace.many_copies": {
+        "pl": {"one": " Gest obejmie każdą kopię w izolacji, także kilka kopii tej samej klatki - "
+                      "{n} plik: {files}.",
+               "few": " Gest obejmie każdą kopię w izolacji, także kilka kopii tej samej klatki - "
+                      "{n} pliki: {files}.",
+               "many": " Gest obejmie każdą kopię w izolacji, także kilka kopii tej samej klatki - "
+                       "{n} plików: {files}."},
+        "en": {"one": " The gesture covers every isolated copy, including several copies of the "
+                      "same frame - {n} file: {files}.",
+               "other": " The gesture covers every isolated copy, including several copies of the "
+                        "same frame - {n} files: {files}."},
     },
     "grid.inplace.restore_tip": {
         "pl": {"one": "Przywróci stary nagłówek w {n} pliku, w miejscu, i zdejmie izolację.",

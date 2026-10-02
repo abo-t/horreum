@@ -41,6 +41,7 @@ kodem na populację, która nie ma jak powstać.
 from dataclasses import dataclass, field
 
 from . import repo
+from .resolve.frames import LIGHT_KINDS                    # rodzaje z obiektem (kind-aware, AR-16)
 from .resolve.objects import TRANSFERABLE_OBJECT_SOURCES   # jeden właściciel zbioru (SPOT)
 
 
@@ -222,6 +223,10 @@ def pending_transfer(con):
     werdykt ręki po stronie następczyni. Rola GŁOWY integracji do kubełka nie wchodzi — ponownie
     zapisany master jest nowym przetworzeniem, nie tą samą klatką (granica z `transfer_human_facts`).
 
+    OŚ OBIEKTU TYLKO NA LIGHT (AR-16): następczyni spoza `LIGHT_KINDS` obiektu nie dostanie - klinga
+    zostawia werdykt na klatce zastąpionej (`FactTransfer.object_kept`) - więc para z samą osią
+    obiektu do kubełka nie wchodzi. Kubełek liczony ze stanu pokaże ją, gdy przebieg ustali light.
+
     ODSIEW OSI ROBI SIĘ W PYTHONIE, nie w `WHERE`, i to jest zmiana wobec pierwotnego kształtu:
     trzy warunki w jednym `WHERE` musiałyby powtórzyć te same podzapytania, które pętla i tak liczy
     dla etykiety `co`, a rozjazd DWÓCH kopii tego samego kryterium jest dokładnie tym, przed czym
@@ -232,7 +237,7 @@ def pending_transfer(con):
     `rodowod` i ich sumy) — raport ma mówić, CZEGO gest dotyczy, nie tylko że coś czeka."""
     rows = con.execute(
         "SELECT f.id, f.superseded_by, f.object_source, f.config_source, f.config_id, "
-        "       n.object_source AS n_obj_src, n.config_source AS n_cfg_src, "
+        "       n.kind AS n_kind, n.object_source AS n_obj_src, n.config_source AS n_cfg_src, "
         "       n.config_id AS n_cfg, "
         "       (SELECT count(*) FROM integration_input ii "
         "         WHERE ii.input_frame_id = f.id AND ii.asserted_by = 'user' "
@@ -247,7 +252,8 @@ def pending_transfer(con):
     out = []
     for r in rows:
         osie = []
-        if r["object_source"] in transferowalne and r["n_obj_src"] is None:
+        if (r["object_source"] in transferowalne and r["n_obj_src"] is None
+                and r["n_kind"] in LIGHT_KINDS):
             osie.append("obiekt")
         if (r["config_source"] in lepkie and r["config_id"] is not None
                 and r["n_cfg_src"] is None and r["n_cfg"] is None):

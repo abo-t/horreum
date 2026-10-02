@@ -27,6 +27,45 @@ from PySide6.QtWidgets import QApplication
 NOW = "2026-06-29T15:00:00"
 
 
+def test_raport_dostawy_mowi_rodzaj_kopii_nieczytelnej():
+    """P4-5: linia „do przeglądu" raportu Dostawy mówiła „kopia nieczytelna 2" bez rodzaju. Rozbicie
+    po kopiach stoi w nawiasie przy tym powodzie - tym samym zdaniem co podpowiedź kubełka
+    w Porządkach; „baza" milczy przy zerze, oba rodzaje o pliku mówią zawsze."""
+    from horreum.gui.pipeline import _review_line
+    from horreum.resolver import ReviewState
+    i18n.set_lang("pl")
+    st = ReviewState(headerless=1, unreadable=2, total=2,
+                     unreadable_kinds={"io": 1, "parse": 1, "db": 0, "unknown": 0})
+    linia = _review_line(st)
+    assert "kopia nieczytelna 2 (kopie: dysk/dostęp 1 · nagłówek 1)" in linia
+    assert "baza" not in linia and linia.count("(") == 1      # rozbicie tylko przy swoim powodzie
+
+
+@pytest.mark.parametrize("jezyk, rodzaj_klatki, bez_kodu", [
+    ("pl", "rodzaj nieznany", "bez kodu awarii 2"),
+    ("en", "kind unknown", "no failure code 2"),
+])
+def test_linia_przegladu_nie_mowi_rodzaj_nieznany_o_DWOCH_faktach(jezyk, rodzaj_klatki, bez_kodu):
+    """Linia „do przeglądu" raportu Dostawy niosła „rodzaj nieznany" dwa razy w dwóch znaczeniach:
+    powód klatki (zeznanie jest, rodzaju KLATKI nie dało się zmapować) i człon rozbicia kopii
+    nieczytelnych (awaria odczytu bez kodu systemu albo sprzed 0019). Człon kopii mówi teraz
+    „bez kodu awarii", więc każda fraza w linii znaczy jedno.
+
+    Falsyfikator: przywróć „rodzaj nieznany {n}" w `object.unreadable_kind_unknown` → fraza pada
+    w linii dwa razy."""
+    from horreum.gui.pipeline import _review_line
+    from horreum.resolver import ReviewState
+    i18n.set_lang(jezyk)
+    try:
+        st = ReviewState(kind_unknown=1, unreadable=2, total=3,
+                         unreadable_kinds={"io": 0, "parse": 0, "db": 0, "unknown": 2})
+        linia = _review_line(st)
+        assert linia.count(rodzaj_klatki) == 1, linia
+        assert bez_kodu in linia, linia
+    finally:
+        i18n.set_lang("pl")
+
+
 @pytest.fixture(scope="session")
 def qapp():
     yield QApplication.instance() or QApplication([])

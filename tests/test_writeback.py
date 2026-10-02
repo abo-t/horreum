@@ -702,6 +702,227 @@ def test_commit_po_awarii_weryfikacji_zapisuje_backup_i_undo_cofa(tmp_path, monk
     con.close()
 
 
+def _commit_teleskopu(tmp_path, fmt, name="u"):
+    """Plik po udanym commicie TELESCOP=EQ6 drogą atomową: (con, p, lid, commit_id, bajty po)."""
+    con = db.open_db(str(tmp_path / "h.db"))
+    p = _plik(tmp_path, fmt, name=name)
+    _scan_in(con, p)
+    lid = _loc_id(con, p)
+    hh = con.execute("SELECT header_hash FROM location WHERE id=?", (lid,)).fetchone()["header_hash"]
+    _stage(con, "R", lid, "TELESCOP", "set", "EQ6", "str", expected=hh)
+    res = writeback.commit(con, "R", now=NOW)
+    assert len(res.applied) == 1, res
+    return con, p, lid, res.commit_id, p.read_bytes()
+
+
+@pytest.mark.parametrize("fmt", ["fits", "xisf"])
+@pytest.mark.parametrize("awaria", ["odczyt", "rozjazd"])
+def test_undo_weryfikacja_po_podmianie_padla_mowi_prawde(tmp_path, monkeypatch, fmt, awaria):
+    """AR-8: droga atomowa cofnięcia (`write_full_header`) nie miała weryfikacji po podmianie.
+    Odczyt po `os.replace` padał → 'failed' z gołym wyjątkiem (bez prawdy, że plik JUŻ niesie
+    przywrócony nagłówek), a odczyt pokazujący inny nagłówek niż zapisany przechodził jako
+    'restored' z re-synciem. Teraz oba przypadki to 'failed' z powodem „PODMIENIONY" i bez
+    re-syncu (baza opisuje bajty potwierdzone, jak po 'failed' commitu), a ponowne cofnięcie po
+    powrocie udziału rozpoznaje przywrócony nagłówek i dokańcza samą synchronizację.
+
+    Falsyfikator: wróć do `post = _post_hash(path)` + 'applied' w `write_full_header` (albo
+    w `_xisf_full_header_atomic`) - 'odczyt' traci „PODMIENIONY", 'rozjazd' wraca jako 'restored'."""
+    con, p, lid, commit_id, po_commicie = _commit_teleskopu(tmp_path, fmt)
+    hh_po = con.execute("SELECT header_hash FROM location WHERE id=?", (lid,)).fetchone()[0]
+    prawdziwy = writeback._post_hash
+
+    def _padl(path):
+        if awaria == "odczyt":
+            raise OSError(5, "zerwany udział")
+        return "0" * 40
+    monkeypatch.setattr(writeback, "_post_hash", _padl)
+    ures = writeback.undo(con, commit_id, now=NOW)
+
+    assert not ures.restored and not ures.blocked and len(ures.failed) == 1, ures
+    assert "PODMIENIONY" in ures.failed[0].reason and "NIE zsynchronizowana" in ures.failed[0].reason
+    assert p.read_bytes() != po_commicie                               # podmiana zaszła
+    assert con.execute("SELECT header_hash FROM location WHERE id=?",
+                       (lid,)).fetchone()[0] == hh_po                   # bez re-syncu
+
+    monkeypatch.setattr(writeback, "_post_hash", prawdziwy)            # udział wrócił
+    ponow = writeback.undo(con, commit_id, now=NOW)
+    assert len(ponow.restored) == 1 and not ponow.failed, ponow
+    assert con.execute("SELECT header_hash FROM location WHERE id=?",
+                       (lid,)).fetchone()[0] == prawdziwy(str(p))
+    con.close()
+
+
+def test_undo_fits_nieczytelny_plik_tymczasowy_nie_zastepuje_oryginalu(tmp_path, monkeypatch):
+    """AR-8, parytet z `write_changes`: plik tymczasowy cofnięcia FITS jest czytany PRZED podmianą.
+    Nieczytelny → 'failed', plik na dysku bajtowo taki, jak po commicie (dawniej podmiana szła
+    bez tego odczytu i plik, którego skan nie przeczyta, zastępował czytelny).
+
+    Falsyfikator: zdejmij `scan.read_fits_meta(tmp)` przed `_podmien` - plik zostaje podmieniony."""
+    con, p, lid, commit_id, po_commicie = _commit_teleskopu(tmp_path, "fits")
+    prawdziwy = scan.read_fits_meta
+
+    def _tmp_nieczytelny(path, *a, **kw):
+        if str(path).endswith(".tmp"):
+            raise OSError(5, "plik tymczasowy nieczytelny")
+        return prawdziwy(path, *a, **kw)
+    monkeypatch.setattr(scan, "read_fits_meta", _tmp_nieczytelny)
+    ures = writeback.undo(con, commit_id, now=NOW)
+
+    assert len(ures.failed) == 1 and not ures.restored, ures
+    assert p.read_bytes() == po_commicie                               # oryginał nietknięty
+    assert not list(tmp_path.glob("*.tmp"))
+    con.close()
+
+
+def test_failed_z_karta_OBJECT_i_cofniecie_nie_gasza_nagrobka(tmp_path, monkeypatch):
+    """AR-8, kontrakt nagrobka ręki: gasi go WYŁĄCZNIE potwierdzony zapis karty `OBJECT`. Commit,
+    którego weryfikacja po podmianie padła ('failed' z backupem), nagrobka nie gasi, a cofnięcie
+    tego commitu (droga atomowa z re-synciem) też go nie gasi - w żadną stronę ręka nie traci
+    werdyktu bez potwierdzonego gestu. Pin, nie naprawa: kontrakt trzymał się już przed AR-8."""
+    con = db.open_db(str(tmp_path / "h.db"))
+    p = tmp_path / "tomb.fits"
+    _write_fits(p, TELESCOP="RC8", IMAGETYP="Light")
+    fr = _scan_in(con, p)
+    repo.user_assign_object(con, alias_norm=None, canon="COS", catalog=None, kind="own",
+                            frame_ids=[fr["id"]], now=NOW)
+    repo.clear_object_assignment(con, frame_ids=[fr["id"]], now=NOW)
+    lid = _loc_id(con, p)
+    hh = con.execute("SELECT header_hash FROM location WHERE id=?", (lid,)).fetchone()["header_hash"]
+    _stage(con, "R", lid, "OBJECT", "set", "NGC7000", "str", expected=hh)
+    prawdziwy = writeback._post_hash
+    monkeypatch.setattr(writeback, "_post_hash",
+                        lambda path: (_ for _ in ()).throw(OSError(5, "zerwany udział")))
+    res = writeback.commit(con, "R", now=NOW)
+    assert len(res.failed) == 1 and res.commit_id is not None
+
+    def _zrodlo():
+        return con.execute("SELECT object_source FROM frame WHERE id=?", (fr["id"],)).fetchone()[0]
+    assert _zrodlo() == "user_cleared"                                 # 'failed' nie gasi
+    monkeypatch.setattr(writeback, "_post_hash", prawdziwy)
+    ures = writeback.undo(con, res.commit_id, now=NOW)
+    assert len(ures.restored) == 1, ures
+    assert _zrodlo() == "user_cleared"                                 # cofnięcie nie gasi
+    assert con.execute("SELECT count(*) FROM event WHERE verb='object.tombstone_cleared'"
+                       ).fetchone()[0] == 0
+    con.close()
+
+
+@pytest.mark.parametrize("fmt", ["fits", "xisf"])
+def test_undo_commitu_mieszanego_pomija_plik_bez_podmiany(tmp_path, monkeypatch, fmt):
+    """AR-37: w commicie mieszanym plik A podmieniony, a podmianę pliku B odbiła straż (backup B
+    leży pod tym samym `commit_id`, bo powstaje PRZED podmianą). Cofnięcie meldowało „zablokowany"
+    o pliku B, którego commit nie ruszył. Teraz commit oznacza backup B (`unreplaced_at`, 0024),
+    a cofnięcie go pomija: przywraca A, o B milczy, a postęp liczy jeden plik.
+
+    Falsyfikator: zdejmij `mark_backup_unreplaced` z `commit` albo warunek `unreplaced_at IS NULL`
+    z `backups_for_commit` - cofnięcie znów melduje blokadę pliku B."""
+    con = db.open_db(str(tmp_path / "h.db"))
+    pa, pb = _plik(tmp_path, fmt, name="a"), _plik(tmp_path, fmt, name="b")
+    for p in (pa, pb):
+        _scan_in(con, p)
+        lid = _loc_id(con, p)
+        hh = con.execute("SELECT header_hash FROM location WHERE id=?", (lid,)).fetchone()[0]
+        _stage(con, "R", lid, "TELESCOP", "set", "EQ6", "str", expected=hh)
+    lid_b = _loc_id(con, pb)
+    przed_b = pb.read_bytes()
+    prawdziwa = repo.guard_file_replace
+
+    def _straz(con_, *, location_id, generation):
+        if location_id == lid_b:                       # zapis w miejscu zdążył przed podmianą
+            raise repo.InplaceConflict({"id": 99, "kind": "commit", "phase": "synced",
+                                        "commit_id": None})
+        return prawdziwa(con_, location_id=location_id, generation=generation)
+    monkeypatch.setattr(repo, "guard_file_replace", _straz)
+    res = writeback.commit(con, "R", now=NOW)
+    monkeypatch.setattr(repo, "guard_file_replace", prawdziwa)
+    assert len(res.applied) == 1 and len(res.blocked) == 1 and res.commit_id is not None, res
+    assert pb.read_bytes() == przed_b
+
+    postep = []
+    ures = writeback.undo(con, res.commit_id, now=NOW,
+                          progress=lambda done, total, path, status: postep.append((total, status)))
+    assert len(ures.restored) == 1 and not ures.blocked and not ures.failed, ures
+    assert postep == [(1, "restored")]
+    assert pb.read_bytes() == przed_b
+    znaczniki = dict(con.execute("SELECT location_id, unreplaced_at FROM header_backups "
+                                 "WHERE commit_id = ?", (res.commit_id,)).fetchall())
+    assert znaczniki == {_loc_id(con, pa): None, lid_b: NOW}          # backup B zostaje (append-only)
+    con.close()
+
+
+@pytest.mark.parametrize("fmt", ["fits", "xisf"])
+def test_wyjatek_samej_podmiany_nie_oznacza_backupu_i_undo_cofa(tmp_path, monkeypatch, fmt):
+    """AR-37, granica znacznika: wyjątek z SAMEGO `os.replace` (zerwany udział SMB) nie dowodzi, że
+    plik został nietknięty - rename mógł zajść, a błąd przyszedł dopiero z odpowiedzią serwera.
+    Znacznik `unreplaced_at` należy się wyłącznie odmowie straży ('blocked'); przy 'failed' backup
+    zostaje kandydatem cofnięcia, a kotwica `post_hash` rozstrzyga o pliku.
+
+    Falsyfikator: oznaczaj backup przy KAŻDYM wyniku bez `backup_text` - cofnięcie pomija plik B,
+    który ma na dysku nagłówek commitu, i zostawia go zmienionego."""
+    con = db.open_db(str(tmp_path / "h.db"))
+    pa, pb = _plik(tmp_path, fmt, name="a"), _plik(tmp_path, fmt, name="b")
+    przed = {}
+    for p in (pa, pb):
+        _scan_in(con, p)
+        lid = _loc_id(con, p)
+        hh = con.execute("SELECT header_hash FROM location WHERE id=?", (lid,)).fetchone()[0]
+        _stage(con, "R", lid, "TELESCOP", "set", "EQ6", "str", expected=hh)
+        przed[p] = p.read_bytes()
+    prawdziwy = writeback.os.replace
+
+    def _replace(src, dst):
+        prawdziwy(src, dst)                            # rename zaszedł, odpowiedź udziału padła
+        if str(dst) == str(pb):
+            raise OSError(64, "nazwa sieciowa jest już niedostępna")
+    monkeypatch.setattr(writeback.os, "replace", _replace)
+    res = writeback.commit(con, "R", now=NOW)
+    monkeypatch.setattr(writeback.os, "replace", prawdziwy)
+    assert len(res.applied) == 1 and len(res.failed) == 1 and res.commit_id is not None, res
+    assert f"commicie {res.commit_id}" in res.failed[0].reason
+    assert pb.read_bytes() != przed[pb]                               # plik B JEST podmieniony
+    znaczniki = con.execute("SELECT unreplaced_at FROM header_backups WHERE commit_id = ?",
+                            (res.commit_id,)).fetchall()
+    assert [r[0] for r in znaczniki] == [None, None]
+
+    ures = writeback.undo(con, res.commit_id, now=NOW)
+    assert len(ures.restored) == 2 and not ures.blocked and not ures.failed, ures
+    assert pa.read_bytes() == przed[pa] and pb.read_bytes() == przed[pb]
+    con.close()
+
+
+def test_undo_z_innym_sha1_data_po_podmianie_nie_przepina_lokacji(tmp_path, monkeypatch):
+    """Undo drogi atomowej zapisuje cały `HDUList` - gdy serializacja zmieni sekcję danych, plik
+    po przywróceniu ma inne `sha1_data`. Re-sync bez kotwicy tożsamości uznałby to za podmianę
+    treści i przepiął lokację na NOWĄ klatkę, a fakty ręki zostałyby na starej. Z kotwicą (jak
+    w commicie) re-sync odmawia: 'failed' z powodem, lokacja zostaje przy swojej klatce.
+
+    Falsyfikator: `_sync(loc, path, None, None)` po udanym `write_full_header` - lokacja trafia
+    na nową klatkę, a `frame` ma dwa wiersze."""
+    con, p, lid, commit_id, _po = _commit_teleskopu(tmp_path, "fits")
+    przed = con.execute("SELECT frame_id FROM location WHERE id=?", (lid,)).fetchone()[0]
+    prawdziwy = writeback.write_full_header
+
+    def _inna_sekcja_danych(path, *a, **kw):
+        res = prawdziwy(path, *a, **kw)
+        if res.status == "applied":
+            with fits.open(path, memmap=False) as hdul:
+                dane = hdul.fileinfo(0)["datLoc"]
+            with open(path, "r+b") as fh:          # bajt danych inny niż przed undo
+                fh.seek(dane)
+                b = fh.read(1)
+                fh.seek(dane)
+                fh.write(bytes([b[0] ^ 0xFF]))
+        return res
+    monkeypatch.setattr(writeback, "write_full_header", _inna_sekcja_danych)
+    ures = writeback.undo(con, commit_id, now=NOW)
+
+    assert len(ures.failed) == 1 and not ures.restored, ures
+    assert "sha1_data" in ures.failed[0].reason
+    assert con.execute("SELECT frame_id FROM location WHERE id=?", (lid,)).fetchone()[0] == przed
+    assert con.execute("SELECT count(*) FROM frame").fetchone()[0] == 1
+    con.close()
+
+
 def test_dialog_naprawy_pyta_tego_samego_wlasciciela_regul():
     """SPOT: dialog „Napraw nagłówek…" nie ma własnej reguły karty - pyta `card_violation` i tylko
     tłumaczy odpowiedź na swój język (i18n). Znak sterujący to ASCII (`str.isascii()` go

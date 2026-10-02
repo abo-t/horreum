@@ -202,6 +202,10 @@ def test_menu_widok_przelacza_motyw(qapp, tmp_path, ustawienia):
     `_on_theme` podmienia kolory stanów gridu na żywo i utrwala wybór w QSettings (recenzja #7)."""
     from PySide6.QtGui import QColor
     from horreum.gui import grid as grid_mod, theme
+    # `_on_theme` stosuje motyw do CAŁEJ aplikacji (QSS, paleta, styl) - stan zastany wraca w
+    # `finally`, inaczej arkusz motywu zmienia metryki testom puszczonym później w tej sesji
+    # (rząd facetów liczony pod innym fontem).
+    qss0, paleta0, styl0 = qapp.styleSheet(), qapp.palette(), qapp.style().name()
     win = MainWindow(_seeded_db(tmp_path))
     try:
         # menu odbija DEFAULT (ciemny) — zaznaczony „Ciemny", nie „Jasny"
@@ -223,6 +227,9 @@ def test_menu_widok_przelacza_motyw(qapp, tmp_path, ustawienia):
     finally:
         win.close()
         grid_mod.use_theme(theme.DEFAULT)              # przywróć globalny stan modułu dla innych testów
+        qapp.setStyle(styl0)
+        qapp.setPalette(paleta0)
+        qapp.setStyleSheet(qss0)
 
 
 def test_menu_widok_wybor_jezyka(qapp, tmp_path, ustawienia):
@@ -1000,6 +1007,84 @@ def test_gest_osi_dowozi_recepte_NA_PASEK_przez_gospodarza(qapp, tmp_path):
         win.grid_view.status_recipe.emit("przywrócisz: Obiekt → Przywróć cofnięte przypisanie")
         assert win.recipe_label.isVisible()
         assert "Przywróć cofnięte przypisanie" in win.recipe_label.text()
+    finally:
+        win.close()
+
+
+def test_raport_gridu_GASNIE_przy_zmianie_miejsca_nawigacji(qapp, tmp_path):
+    """AR-34. „Grid: N klatek…" mówi o Zbiorach: po przejściu na Porządki albo do Dostawy wisiał
+    dalej (do timeoutu) nad ekranem, którego nie dotyczy. Raport widoku gaśnie z wyjściem z niego,
+    a cudzy komunikat (bez powiązania z miejscem) przeżywa przełączenie.
+
+    Falsyfikator: zdejmij gaszenie z `_on_nav_changed` albo podepnij grid pod gołe `_flash` →
+    pasek niesie raport gridu po zmianie widoku."""
+    win = _pokazane(MainWindow(_seeded_db(tmp_path)))
+    try:
+        win._show_view(NAV_ZBIORY)
+        win.grid_view.load_report.emit("Grid: 16 901 klatek, 0 kolumn-keywordów")
+        assert win.statusBar().currentMessage().startswith("Grid:")
+        win._show_view(NAV_PORZADKI)
+        assert win.statusBar().currentMessage() == "", "raport gridu przeżył zmianę miejsca"
+        win._show_view(NAV_ZBIORY)
+        win.grid_view.load_report.emit("Grid: 3 klatki, 0 kolumn-keywordów")
+        win._show_view(NAV_DOSTAWA)
+        assert win.statusBar().currentMessage() == ""
+        # raport spoza gridu nie jest związany z miejscem
+        win._flash("Cofnięto przypisanie na 2 z 2 klatek")
+        win._show_view(NAV_ZBIORY)
+        assert win.statusBar().currentMessage().startswith("Cofnięto")
+    finally:
+        win.close()
+
+
+def test_raport_wczytania_gridu_POZA_Zbiorami_nie_przykrywa_statusu_etapu(qapp, tmp_path):
+    """AR-34 domknięte: raport WCZYTANIA zbioru („Grid: N klatek…") pada też wtedy, gdy Zbiorów
+    nie widać - odświeżenie widoków po przebiegu Dostawy. Szedł wtedy na pasek bez powiązania
+    z miejscem i przykrywał status etapu, po który user patrzy w Dostawie (wizytacja: „Grid: 16901
+    klatek" nad Dostawą i nad Porządkami). Teraz czeka na wejście w Zbiory i dopiero tam pada.
+
+    Falsyfikator: podepnij `grid.load_report` pod `_flash_grid` → pasek Dostawy niesie raport
+    gridu zamiast statusu etapu; zdejmij odłożenie z `_on_nav_changed` → wejście w Zbiory nie
+    pokazuje raportu."""
+    from horreum.gui import i18n
+    win = _pokazane(MainWindow(_seeded_db(tmp_path, object_axis=True)))
+    try:
+        win._show_view(NAV_DOSTAWA)
+        pasek = []
+        win.statusBar().messageChanged.connect(pasek.append)
+        _przebieg_w_watku(win, lambda: win.pipeline_view.run_stage("group"))
+        status_etapu = i18n.t("pipeline.stage_done_status", stage=i18n.t("pipeline.stage.group"))
+        assert status_etapu in pasek, pasek
+        # Po statusie etapu odświeżenie widoków przeładowało grid - i jego raport na pasek nie wszedł.
+        # (Inne widoki mówią tam własnymi zdaniami, np. pusta oś stanowisk w tej fiksturze;
+        # ten test pilnuje wyłącznie raportu wczytania Zbiorów.)
+        po_etapie = pasek[pasek.index(status_etapu):]
+        assert not any(m.startswith("Grid:") or m == i18n.t("busy.read_frames")
+                       for m in po_etapie), po_etapie
+        win._show_view(NAV_PORZADKI)
+        assert not win.statusBar().currentMessage().startswith("Grid:")
+        win._show_view(NAV_ZBIORY)
+        assert win.statusBar().currentMessage().startswith("Grid:"), \
+            "raport wczytania czekał na wejście w Zbiory"
+        # odłożony raport pada RAZ - kolejne wejście nie powtarza starego zdania
+        win._show_view(NAV_DOSTAWA)
+        win._flash("inny raport")
+        win._show_view(NAV_ZBIORY)
+        assert win.statusBar().currentMessage() == "inny raport"
+    finally:
+        win.close()
+
+
+def test_wynik_GESTU_gridu_poza_Zbiorami_dalej_pada_na_pasek(qapp, tmp_path):
+    """Granica poprawki raportu wczytania: wynik GESTU gridu (np. gest panelu rodowodu, który sam
+    przełącza widok na Dostawę) zostaje na pasku także poza Zbiorami - to zdanie o akcji usera.
+
+    Falsyfikator: odłóż `status_message` gridu jak raport wczytania → pasek Dostawy milczy."""
+    win = _pokazane(MainWindow(_seeded_db(tmp_path)))
+    try:
+        win._show_view(NAV_DOSTAWA)
+        win.grid_view.status_message.emit("Zapisano odniesienie czasu")
+        assert win.statusBar().currentMessage() == "Zapisano odniesienie czasu"
     finally:
         win.close()
 

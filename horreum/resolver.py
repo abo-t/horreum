@@ -629,6 +629,57 @@ class ReviewState:
     kind_unknown: int = 0     # zeznanie JEST, rodzaju nie dało się zmapować
     unreadable: int = 0       # ≥1 kopia z unreadable_since NOT NULL (kopia stała się nieczytelna; #13)
     total: int = 0            # DISTINCT klatek w KTÓRYMKOLWIEK kubełku (nie suma — kubełki zachodzą)
+    # Rozbicie kubełka `unreadable` po RODZAJU awarii (P4-5) - liczone PO KOPIACH, nie po klatkach:
+    # klatka z dwiema kopiami może mieć dwa rodzaje, więc tylko liczba kopii się sumuje.
+    # Klucze `io`/`parse`/`db`/`unknown` - kontrakt `unreadable_kind_counts`.
+    unreadable_kinds: dict = field(default_factory=lambda: dict.fromkeys(UNREADABLE_KINDS, 0))
+
+
+# Rodzaje awarii odczytu kopii w kolejności raportu (P4-2): `io` dysk/dostęp, `parse` nagłówek,
+# `db` błąd bazy po naszej stronie, `unknown` rodzaj nieznany (wiersz sprzed 0019 albo wyjątek
+# bez kodu systemu).
+UNREADABLE_KINDS = ("io", "parse", "db", "unknown")
+# Rodzaje o PLIKU - pokazywane zawsze, także z zerem („dysk/dostęp 0" to odpowiedź: winy nie ma
+# w dysku). Reszta (`db` - błąd po naszej stronie, który następny skan zwykle zdejmuje, `unknown` -
+# ogon sprzed 0019 albo wyjątek bez kodu systemu) nie jest stałą kategorią pliku: tylko gdy > 0.
+_UNREADABLE_KINDS_ALWAYS = ("io", "parse")
+
+
+def unreadable_kinds_shown(counts):
+    """Które rodzaje rozbicia kopii nieczytelnych pokazać - `[(rodzaj, n)]` w kolejności
+    `UNREADABLE_KINDS`, z `counts` w kształcie `unreadable_kind_counts`. JEDYNY właściciel reguły
+    milczenia (`_UNREADABLE_KINDS_ALWAYS`): CLI (`cli._format_delta`) i GUI
+    (`gui.pipeline.unreadable_kinds_text`) tylko renderują listę swoimi etykietami."""
+    return [(k, counts[k]) for k in UNREADABLE_KINDS
+            if k in _UNREADABLE_KINDS_ALWAYS or counts[k]]
+
+
+def unreadable_kind_counts(con):
+    """Rozbicie oznaczonych kopii po RODZAJU awarii (P4-2, P4-5): `{"io": n, "parse": n, "db": n,
+    "unknown": n}` - ten sam predykat markera i ten sam zakres klatek co kubełek `unreadable`
+    (`review_state`): bez zastąpionych i wycofanych. Liczone PO KOPIACH (docstring
+    `ReviewState.unreadable_kinds`). Jedyny właściciel tej liczby w rdzeniu; CLI i raport Dostawy
+    biorą ją z `ReviewState`, żeby rozbicie i licznik pochodziły z jednej migawki."""
+    return _unreadable_snapshot(con)[1]
+
+
+def _unreadable_snapshot(con):
+    """Kubełek `unreadable` (DISTINCT klatek) i jego rozbicie po rodzaju (po kopiach) JEDNYM
+    zapytaniem - `(klatki, {rodzaj: kopie})`. Jedno zapytanie = jedna migawka bez transakcji: dwa
+    osobne SELECT-y na połączeniu bez otwartej transakcji (GUI, CLI) widziały dwa stany bazy,
+    a równoległy skan gaszący marker między nimi dawał „nieczytelne 1" przy rozbiciu z samych zer.
+    Rodzaj NULL = `unknown` (wiersz sprzed 0019 albo wyjątek bez kodu systemu); innych wartości
+    CHECK 0019 nie wpuszcza."""
+    row = con.execute(
+        "SELECT count(DISTINCT f.id) AS frames, "
+        "       count(CASE WHEN l.unreadable_kind = 'io' THEN 1 END) AS io, "
+        "       count(CASE WHEN l.unreadable_kind = 'parse' THEN 1 END) AS parse, "
+        "       count(CASE WHEN l.unreadable_kind = 'db' THEN 1 END) AS db, "
+        "       count(CASE WHEN l.unreadable_kind IS NULL THEN 1 END) AS unknown "
+        "FROM location l JOIN frame f ON f.id = l.frame_id "
+        "WHERE l.unreadable_since IS NOT NULL "
+        "AND f.superseded_by IS NULL AND f.retired_at IS NULL").fetchone()
+    return row["frames"], {k: row[k] for k in UNREADABLE_KINDS}
 
 
 def review_state(con):
@@ -681,11 +732,9 @@ def review_state(con):
         "AND f.retired_at IS NULL "
         "AND EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id)").fetchone()[0]
     # #13: DISTINCT klatek z ≥1 kopią oznaczoną nieczytelną (fakt o KOPII zliczony po klatkach —
-    # spójność z resztą liczników). Join po location; DISTINCT bo frame 1:N location.
-    unreadable = con.execute(
-        "SELECT count(DISTINCT f.id) FROM frame f JOIN location l ON l.frame_id = f.id "
-        "WHERE f.superseded_by IS NULL AND f.retired_at IS NULL "
-        "AND l.unreadable_since IS NOT NULL").fetchone()[0]
+    # spójność z resztą liczników). Join po location; DISTINCT bo frame 1:N location. Rozbicie po
+    # rodzaju z TEGO SAMEGO zapytania (`_unreadable_snapshot`) - licznik i rozbicie z jednej migawki.
+    unreadable, unreadable_kinds = _unreadable_snapshot(con)
     total = con.execute(
         "SELECT count(*) FROM frame f WHERE f.superseded_by IS NULL AND f.retired_at IS NULL AND ("
         "NOT EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id) "
@@ -696,7 +745,8 @@ def review_state(con):
         "OR EXISTS (SELECT 1 FROM location l WHERE l.frame_id = f.id "
         "           AND l.unreadable_since IS NOT NULL))", (off_axis,)).fetchone()[0]
     return ReviewState(no_config=no_config, headerless=headerless, no_camera=no_camera,
-                       kind_unknown=kind_unknown, unreadable=unreadable, total=total)
+                       kind_unknown=kind_unknown, unreadable=unreadable, total=total,
+                       unreadable_kinds=unreadable_kinds)
 
 
 NO_OBJECT_CARD_FILETYPES = ("raw",)

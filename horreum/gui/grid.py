@@ -467,10 +467,12 @@ _RECEPTY_ZAPISU = {
 # Wybór ręki w „Polach" bije domyślną (`FramesView._obrazy_reka`). Klucz = flaga z `_TRIMY`.
 _FLAGI_OBRAZOW = ("_only_dups", "_only_copy_conflict", _FLAGA_WERSJI)
 # Perspektywy, w których komórka ścieżki niesie prefiks „×N" albo ścieżkę jako przedmiot decyzji
-# (duplikaty, ich podzbiór niezgodnych, wersje stosów): tam kolumna bierze szerokość z treści
-# z sufitem i elizją w środku (`kolumna_z_tresci`). Gdzie indziej zostaje szerokość, którą ustawiła
-# ręka - pamięci szerokości per perspektywa tu nie ma.
-_FLAGI_SCIEZKI_Z_TRESCI = ("_only_dups", "_only_copy_conflict", _FLAGA_WERSJI)
+# (duplikaty, ich podzbiór niezgodnych, wersje stosów, dwie perspektywy izolacji zapisu): tam
+# kolumna bierze szerokość z treści z sufitem i elizją w środku (`kolumna_z_tresci`). Gdzie indziej
+# zostaje szerokość, którą ustawiła ręka - pamięci szerokości per perspektywa tu nie ma.
+# Perspektywy izolacji dochodzą z `_RECEPTY_ZAPISU`, nie z drugiej listy: klatka w izolacji bywa
+# klatką wielokopiową, więc komórka niesie „×2" i domyślne 100 px zostawiało z niej sam prefiks.
+_FLAGI_SCIEZKI_Z_TRESCI = ("_only_dups", "_only_copy_conflict", _FLAGA_WERSJI, *_RECEPTY_ZAPISU)
 # Sufit szerokości kolumny dopasowanej do treści, w px: ścieżka „×2  2026-01-21_…_0001.xisf" mieści
 # się z zapasem, a jedna długa nazwa nie wypycha keywordów poza okno 1400 px.
 _SUFIT_KOLUMNY_Z_TRESCI = 420
@@ -554,9 +556,12 @@ def _lista_kanonow(canons, maks=_KANONY_W_ZDANIU):
     kontra „IC434, LMC, Moon (+4)" - i nie dawały się zestawić wzrokiem, choć mówiły o tym samym.
 
     Sortowanie tutaj domyka to dla WSZYSTKICH gestów naraz, także przyszłych: kolejność zbierania
-    zostaje prywatną sprawą klingi, a zdanie ma jeden porządek. `sorted()` zgadza się z `ORDER BY`
-    SQLite dla tych nazw (domyślna kolacja BINARY porównuje bajty UTF-8, czyli po code poincie)."""
-    nazwy = sorted(canons)
+    zostaje prywatną sprawą klingi, a zdanie ma jeden porządek. Porządek jest NATURALNY
+    (`queries.natural_key`), ten sam co w bibliotece obiektów i w listach facetów: porządek znaków
+    stawiał „NGC700" przed „NGC7000" i „Caldwell 12" przed „Caldwell 3", czyli zdanie po geście
+    czytało się inaczej niż lista, z której user te obiekty wybierał. Surowa nazwa jako człon
+    następny daje porządek całkowity (klucz naturalny jest ślepy na wielkość liter)."""
+    nazwy = sorted(canons, key=lambda c: (queries.natural_key(c), c))
     if len(nazwy) <= maks:
         return ", ".join(nazwy)
     return ", ".join(nazwy[:maks]) + i18n.t("grid.sel.object_canons_more", n=len(nazwy) - maks)
@@ -654,6 +659,25 @@ def _zdanie_gestu_zapisu(op, res):
             msg += i18n.t("grid.inplace.detail", file=_ogon_sciezki(powod.path),
                           detail=powod.reason)
     return msg
+
+
+def _kopie_wielokrotne(ops):
+    """Operacje izolujące klatek, które mają W CELU więcej niż jedną kopię izolowaną (AR-30 (4)).
+    Cel gestu jest kluczowany klatką (zaznaczenie wierszy), a wykonanie idzie per operacja - przy
+    dwóch kopiach jednej klatki gest rusza obie. Populacja dziś 0 (zapis w miejscu odmawia przy
+    ≥2 obecnych kopiach), więc to zdanie jest tripwirem: ekran ma powiedzieć KTÓRE pliki."""
+    na_klatke = {}
+    for o in ops:
+        na_klatke.setdefault(o["frame_id"], []).append(o)
+    return [o for grupa in na_klatke.values() if len(grupa) > 1 for o in grupa]
+
+
+def _zdanie_kopii_wielokrotnych(wiele):
+    """Dopisek podpowiedzi gestu izolacji: ile plików i które, gdy klatka ma kilka kopii w izolacji."""
+    if not wiele:
+        return ""
+    return i18n.t_plural("grid.inplace.many_copies", len(wiele),
+                         files=", ".join(_ogon_sciezki(o["path"]) for o in wiele))
 
 
 def _half_away(x):
@@ -839,21 +863,30 @@ class _ElizjaWSrodku(QStyledItemDelegate):
         option.textElideMode = Qt.ElideMiddle
 
 
+def elizja_w_srodku(table, col):
+    """Kolumna `col` tabeli `table` elidowana W ŚRODKU - bez ruszania jej szerokości. Połowa
+    `kolumna_z_tresci` dla kolumn, których szerokość ustala kto inny (sekcja `Stretch` w panelu
+    Przeglądu obiektów): elizja z prawej zjadała tam ogon ścieżki, czyli nazwę pliku.
+
+    Idempotentna: delegat powstaje raz na tabelę (dziecko tabeli, bezstanowy, więc służy każdej
+    kolumnie) i jest używany ponownie, więc wołanie przy każdym przeładowaniu niczego nie mnoży.
+    Zdjęcie elizji robi wołający (`setItemDelegateForColumn(col, None)`)."""
+    delegat = table.findChild(_ElizjaWSrodku)
+    if delegat is None:
+        delegat = _ElizjaWSrodku(table)
+    if table.itemDelegateForColumn(col) is not delegat:
+        table.setItemDelegateForColumn(col, delegat)
+
+
 def kolumna_z_tresci(table, col, *, sufit=_SUFIT_KOLUMNY_Z_TRESCI):
     """Kolumna `col` tabeli `table` szeroka z treści, nie szersza niż `sufit` px, z elizją
     w środku - JEDEN mechanizm dla każdej kolumny, której treść jest przedmiotem decyzji (ścieżka
     w „Duplikatach" i „Wersjach stosów"). Domyślne 100 px zostawiało z „×2  M31_…_0001.xisf" sam
     prefiks, a elizja z prawej zjadała właśnie nazwę pliku.
 
-    Idempotentna: delegat powstaje raz na tabelę (dziecko tabeli, bezstanowy, więc służy każdej
-    kolumnie) i jest używany ponownie, więc wołanie przy każdym przeładowaniu niczego nie mnoży.
-    Zdjęcie elizji poza perspektywą robi wołający (`setItemDelegateForColumn(col, None)`) - ta
-    funkcja mówi tylko, jak kolumnę ustawić."""
-    delegat = table.findChild(_ElizjaWSrodku)
-    if delegat is None:
-        delegat = _ElizjaWSrodku(table)
-    if table.itemDelegateForColumn(col) is not delegat:
-        table.setItemDelegateForColumn(col, delegat)
+    Idempotentna jak `elizja_w_srodku`. Zdjęcie elizji poza perspektywą robi wołający
+    (`setItemDelegateForColumn(col, None)`) - ta funkcja mówi tylko, jak kolumnę ustawić."""
+    elizja_w_srodku(table, col)
     table.resizeColumnToContents(col)
     if table.columnWidth(col) > sufit:
         table.setColumnWidth(col, sufit)
@@ -1216,11 +1249,12 @@ class GridTableModel(QAbstractTableModel):
         każda kolumna liczb.
 
         BRAK LICZBY MÓWI „?" TYLKO TAM, GDZIE JEST ROBOTĄ (`_obrazy_pytajnik`, perspektywy
-        `_FLAGI_OBRAZOW`), i tylko przy kopii, którą uzupełnienie faktów w ogóle czyta - lustro
-        predykatu `scan.copy_facts_candidates` na polach, które `base_rows` i tak niesie: XISF albo
-        klatka z więcej niż jedną lokacją ogółem. Pojedynczy FITS faktów z założenia nie dostaje,
-        więc „?" z receptą byłby przy nim obietnicą bez pokrycia - zostaje pusty. Poza tymi
-        perspektywami pusta komórka zostaje pusta: tam „nie wiem" jest stanem archiwum, nie robotą."""
+        `_FLAGI_OBRAZOW`), i tylko przy kopii, którą uzupełnienie faktów w ogóle czyta - flaga
+        `copy_facts_class` z read-modelu (`queries.base_rows`), liczona TYM SAMYM literałem co etap
+        Dostawy (`queries.copy_facts_class`, AR-35): XISF albo klatka z więcej niż jedną lokacją ogółem.
+        Pojedynczy FITS faktów z założenia nie dostaje, więc „?" z receptą byłby przy nim obietnicą
+        bez pokrycia - zostaje pusty. Poza tymi perspektywami pusta komórka zostaje pusta: tam
+        „nie wiem" jest stanem archiwum, nie robotą."""
         tekst = row.get("_images") or ""
         if tekst:
             if role == Qt.DisplayRole:
@@ -1228,9 +1262,7 @@ class GridTableModel(QAbstractTableModel):
             if role == Qt.TextAlignmentRole:
                 return int(Qt.AlignRight | Qt.AlignVCenter)
             return None
-        kandydat = (row.get("filetype") == "xisf"
-                    or (row.get("n_present") or 0) + (row.get("n_vanished") or 0) > 1)
-        if not (self._obrazy_pytajnik and kandydat):
+        if not (self._obrazy_pytajnik and row.get("copy_facts_class")):
             return "" if role == Qt.DisplayRole else None
         if role == Qt.DisplayRole:
             return "?"
@@ -2519,7 +2551,7 @@ def _lineage_flags(head):
         # (`_ast`, `_drizzle_1x`, `_integration`), a nie kolizja. Zmierzone: 51 z 62 oflagowanych.
         info.append(i18n.t_plural("grid.lin.flag.twins", head["twins"]))
     if head["declared_rows"] is not None:
-        info.append(i18n.t("grid.lin.flag.declared", n=head["declared_rows"]))
+        info.append(i18n.t_plural("grid.lin.flag.declared", head["declared_rows"]))
     if head["excluded"]:
         info.append(i18n.t("grid.lin.flag.excluded", n=head["excluded"]))
     return " · ".join(ostrz), " · ".join(info)
@@ -2919,6 +2951,9 @@ class StagingDrawer(QFrame):
         """Wejście w tryb postępu (start commitu/undo): pasek + „Anuluj" widoczne, Zatwierdź/Odrzuć
         schowane (nie klikać w biegu). `total=0` → pasek nieokreślony do pierwszego progresu."""
         self.bar.setRange(0, total if total > 0 else 0); self.bar.setValue(0); self.bar.setVisible(True)
+        # Wynik poprzedniej operacji nie stoi obok postępu następnej (AR-30 (5)) - do pierwszego
+        # progresu pole jest puste, potem niesie „done/total · plik".
+        self.result.setText("")
         self.btn_cancel.setVisible(True); self.btn_cancel.setEnabled(True)
         self.btn_commit.setVisible(False); self.btn_reject.setVisible(False)
 
@@ -3091,6 +3126,13 @@ class FramesView(QWidget):
     otwierane z `SelectionBar` (najwyżej jeden widoczny; R#9 w `_toggle_panel`)."""
 
     status_message = Signal(str)
+    # RAPORT WCZYTANIA ZBIORU („Wczytuję klatki…", „Grid: N klatek…") - osobny kanał, bo pada też
+    # wtedy, gdy Zbiorów nie widać: odświeżenie po przebiegu Dostawy, start okna. Na wspólnym
+    # kanale przykrywał na pasku status etapu, po który user patrzy w Dostawie. Gospodarz decyduje,
+    # czy go pokazać teraz, czy odłożyć do wejścia w Zbiory (`MainWindow._raport_wczytania_gridu`).
+    # Wyniki GESTÓW zostają na `status_message`: gest z panelu rodowodu przełącza widok na Dostawę
+    # i jego zdanie ma tam paść.
+    load_report = Signal(str)
     # Gest osi obiektu z paska Zbiorów zmienia stan, który pokazuje INNE okno (kolejka przeglądu
     # osi obiektu). Sygnał, nie wołanie: grid nie zna gospodarza i nie ma go poznawać (NARROW).
     object_axis_changed = Signal()
@@ -3167,6 +3209,10 @@ class FramesView(QWidget):
         self._foreign_wb = False   # DRUGA powierzchnia pisze (mutex; ustawia gospodarz)
         self._etap_w_biegu = False  # etap Dostawy pisze do bazy (`set_busy`) - gesty izolacji czekają
         self._cel_gestu_zapisu = []  # klatki ostatniego gestu izolacji - zaznaczenie po jego końcu
+        # Wynik gestu izolacji w szufladzie należy do perspektywy, w której padł (AR-30 (5)):
+        # `(tekst sprzed gestu, tekst wyniku)`; zmiana perspektywy przywraca pierwszy, o ile szuflada
+        # wciąż pokazuje drugi (inny zapis mógł ją już przejąć).
+        self._wynik_gestu_zapisu = None
         # POKRYCIE PÓL POZA WĄTKIEM GUI (`PolaWorker`). Zapytanie trwa na żywym archiwum 5,6-5,9 s,
         # a szło przy otwarciu bazy i po KAŻDYM przebiegu Dostawy - okno stało wtedy jednym blokiem
         # dłuższym niż próg „Nie odpowiada". `pola_poza_watkiem=False` (domyślne) = ten sam rdzeń
@@ -3353,6 +3399,10 @@ class FramesView(QWidget):
         self.act_finish_write.triggered.connect(self._on_finish_write)
         self.act_restore_header = self._menu_tabeli.addAction(i18n.t("grid.inplace.restore"))
         self.act_restore_header.triggered.connect(self._on_restore_header)
+        # „Zwolnij…" za własną kreską (AR-30): dwa gesty wyżej rozstrzyga rdzeń kontrolą pliku,
+        # zwolnienie jest rozstrzygnięciem człowieka bez sprawdzenia - nie stoi w jednym rzędzie
+        # z bezpiecznymi.
+        self._sep_zwolnienia = self._menu_tabeli.addSeparator()
         self.act_release_file = self._menu_tabeli.addAction(i18n.t("grid.inplace.release"))
         self.act_release_file.triggered.connect(self._on_release_file)
         rv.addWidget(self.table, 1)   # stretch: nadmiar pionu należy do TABELI, nie do panelu (N1)
@@ -3610,6 +3660,7 @@ class FramesView(QWidget):
             self._columns = list(spec["columns"])
             self._wypelnij_pola()
         self.refresh()
+        self._zdejmij_wynik_gestu_zapisu()
         # Perspektywa izolacji zapisu podaje gest, który ją opróżnia: gesty mieszkają w menu
         # prawego kliku (nie na pasku zbioru), a menu nie widać, dopóki się go nie otworzy.
         # Recepta PO `refresh()`, bo raport odświeżenia gasi receptę poprzedniego gestu.
@@ -4653,8 +4704,11 @@ class FramesView(QWidget):
 
         POD NAZWANĄ FAZĄ (F-1): zmierzone **1 000 ms** na 16 648 klatkach, a wołane przy KAŻDEJ
         zmianie facetu, perspektywy i filtra — czyli w reakcji na kliknięcie, po którym user czeka
-        i patrzy w nieruchomy ekran."""
-        with busy.busy(self.status_message.emit, i18n.t("busy.read_frames")):
+        i patrzy w nieruchomy ekran.
+
+        Faza i zdanie końcowe idą kanałem `load_report`, nie `status_message`: odświeżenie bywa
+        wołane, gdy Zbiorów nie widać, a o tym, czy raport ma paść teraz, wie tylko gospodarz."""
+        with busy.busy(self.load_report.emit, i18n.t("busy.read_frames")):
             self._refresh()
 
     def _refresh(self):
@@ -4731,7 +4785,7 @@ class FramesView(QWidget):
         self._sync_staging_mutex()                           # staging jednej klingi wyłącza „Do stagingu" drugiej
         self._refresh_date_echo()                            # panel daty odbija świeże widoczne (echo warunkowe)
         self._refresh_lineage()                              # …i panel rodowodu, tak samo warunkowo
-        self.status_message.emit(
+        self.load_report.emit(
             i18n.t("grid.status.loaded", frames=i18n.t_plural('grid.frames', n), cols=len(keywords)))
         # ETYKIETA PERSPEKTYWY JEST POCHODNĄ STANU (BP-5 domknięty tutaj): każda droga, która zmienia
         # zbiór, kończy się tym przeładowaniem, więc właściciel etykiety ma JEDNO miejsce wołania,
@@ -5029,7 +5083,8 @@ class FramesView(QWidget):
             self.table.selectRow(idx.row())
         self.act_keep_version.setVisible(wersje)
         self._sep_zapisu.setVisible(wersje and zapis)
-        for act in (self.act_finish_write, self.act_restore_header, self.act_release_file):
+        for act in (self.act_finish_write, self.act_restore_header, self._sep_zwolnienia,
+                    self.act_release_file):
             act.setVisible(zapis)
         if wersje:
             self._sync_menu_wersji()
@@ -5136,17 +5191,22 @@ class FramesView(QWidget):
                 act.setToolTip(i18n.t(powod))
             return
         do_dokonczenia = [o for o in ops if o["phase"] in queries.INPLACE_PENDING_FINISH_PHASES]
+        wiele = _kopie_wielokrotne(ops)
         self.act_finish_write.setEnabled(bool(do_dokonczenia))
         self.act_finish_write.setToolTip(
-            i18n.t_plural("grid.inplace.finish_tip", len(do_dokonczenia)) if do_dokonczenia
+            i18n.t_plural("grid.inplace.finish_tip", len(do_dokonczenia))
+            + i18n.t("grid.inplace.finish_tip_else", restore=i18n.t("grid.inplace.restore"),
+                     release=i18n.t("grid.inplace.release"))
+            + _zdanie_kopii_wielokrotnych(_kopie_wielokrotne(do_dokonczenia)) if do_dokonczenia
             else i18n.t("grid.inplace.finish_open_only", restore=i18n.t("grid.inplace.restore")))
         tip = i18n.t_plural("grid.inplace.restore_tip", len(ops))
         if do_dokonczenia:
             tip += i18n.t("grid.inplace.restore_tip_written", finish=i18n.t("grid.inplace.finish"))
         self.act_restore_header.setEnabled(True)
-        self.act_restore_header.setToolTip(tip)
+        self.act_restore_header.setToolTip(tip + _zdanie_kopii_wielokrotnych(wiele))
         self.act_release_file.setEnabled(True)
-        self.act_release_file.setToolTip(i18n.t_plural("grid.inplace.release_tip", len(ops)))
+        self.act_release_file.setToolTip(i18n.t_plural("grid.inplace.release_tip", len(ops))
+                                         + _zdanie_kopii_wielokrotnych(wiele))
 
     def _on_finish_write(self):
         """„Dokończ zapis": kontrola danych i re-sync operacji `written` zaznaczonych kopii."""
@@ -5177,6 +5237,11 @@ class FramesView(QWidget):
         cel = [o["op_id"] for o in ops]
         if uzasadnienie is not None:
             cel = {"ops": cel, "reason": uzasadnienie}
+        # Tekst sprzed PIERWSZEGO gestu serii: drugi gest z rzędu nie ma wracać do wyniku pierwszego.
+        przed = (self._wynik_gestu_zapisu[0] if self._wynik_gestu_zapisu is not None
+                 and self.drawer.result.text() == self._wynik_gestu_zapisu[1]
+                 else self.drawer.result.text())
+        self._wynik_gestu_zapisu = (przed, None)
         self._start_writeback(op, cel, self._after_gestu_zapisu)
 
     @Slot(str, object)
@@ -5222,9 +5287,19 @@ class FramesView(QWidget):
             len(cel) - self._przywroc_zaznaczenie(cel), cel)
         self._refresh_drawer()
         self.drawer.set_result(msg)
+        przed = self._wynik_gestu_zapisu[0] if self._wynik_gestu_zapisu is not None else ""
+        self._wynik_gestu_zapisu = (przed, msg)
         self.stan_porzadkow_changed.emit()
         self.status_message.emit(msg + fakt)
         self.status_recipe.emit(recepta)
+
+    def _zdejmij_wynik_gestu_zapisu(self):
+        """Zmiana perspektywy zdejmuje z szuflady wynik gestu izolacji (AR-30 (5)) i oddaje jej tekst
+        sprzed gestu (np. „Zatwierdzono…" przy żywym „Cofnij"). Tylko gdy szuflada wciąż pokazuje
+        ten wynik - zdanie wpisane później przez commit albo cofnięcie zostaje."""
+        stan, self._wynik_gestu_zapisu = self._wynik_gestu_zapisu, None
+        if stan is not None and stan[1] is not None and self.drawer.result.text() == stan[1]:
+            self.drawer.set_result(stan[0])
 
     # ---- panel inspekcji daty (G1/G4 — RenameBar) ----
     def _selected_data_rows(self):

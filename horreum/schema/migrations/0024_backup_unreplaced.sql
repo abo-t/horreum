@@ -1,0 +1,20 @@
+-- 0024 - BACKUP BEZ PODMIANY (AR-37): `header_backups.unreplaced_at`.
+--
+-- PRZYROST (jedna kolumna `ADD COLUMN`) - zero przebudowy tabeli, zero kasowania wierszy.
+--
+-- Backup drogi atomowej powstaje PRZED `os.replace` (Z3, 2026-09-26), więc wiersz tej tabeli sam
+-- nie mówi, że plik podmieniono: straż podmiany mogła ją odbić (`repo.guard_file_replace`). Commit mieszany (inny plik podmieniony) oddaje `commit_id`, a jego
+-- cofnięcie trafiało w plik nietknięty przez ten commit i meldowało blokadę (niezgodny `post_hash`)
+-- - bezpiecznie, ale szum w wyniku, który mówi „zablokowany" o pliku, którego nikt nie ruszał.
+--
+-- `unreplaced_at` = chwila, w której pisarz oddał 'blocked' BEZ `backup_text` (straż odbiła podmianę,
+-- plik pewnie nietknięty) dla pliku, którego backup już leżał w bazie. Wyjątek samego `os.replace`
+-- znacznika NIE daje: na udziale SMB rename mógł zajść mimo błędu, więc backup zostaje do cofnięcia. Pisze ją WYŁĄCZNIE klinga (`repo.mark_backup_unreplaced`),
+-- wołana przez `writeback.commit` zaraz po wyniku pisarza. Cofnięcie commitu taki backup pomija
+-- (`writeback.backups_for_commit`).
+-- NULL = podmiana zaszła ALBO nie wiadomo (wiersze sprzed 0024, przerwa procesu między backupem
+-- a wynikiem pisarza) - cofnięcie zachowuje się jak dotąd: kotwica `post_hash` odbija plik nietknięty.
+--
+-- BACKFILLU NIE MA: statusy stagingu nie wiążą się z commitem (przebieg może mieć kilka commitów,
+-- a wiersze stagingu bywają czyszczone), więc SQL nie odróżni pliku odbitego od podmienionego.
+ALTER TABLE header_backups ADD COLUMN unreplaced_at TEXT;

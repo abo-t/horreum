@@ -1273,7 +1273,18 @@ def unreadable_reason_of(exc):
     pliku, a ścieżkę niosą już kolumna „Ścieżka", payload zdarzenia i tooltip. Powtórzona w powodzie
     była szumem, który na realnym archiwum rozpychał komórkę „Powód" poza panel (pomiar przy
     `ObjectAxisView._show_copies`). Reszta wyjątków zostaje przy `str()`: komunikat parsera bywa
-    jedynym opisem tego, czego nie przyjął."""
+    jedynym opisem tego, czego nie przyjął.
+
+    KOD WINDOWS PRZED ERRNO (P4-6): `OSError` z `winerror` (zerwany udział SMB, `[WinError 64]`)
+    ma `errno` wyliczone z mapy Windows→POSIX - dla większości kodów sieciowych to `22` (EINVAL),
+    czyli „[Errno 22]" mówił „zły argument" tam, gdzie system powiedział „nazwa sieciowa zniknęła".
+    Kod Windows jest tym, co pokazuje `str()` wyjątku i co da się znaleźć w dokumentacji systemu.
+
+    JEDYNY WŁAŚCICIEL DIAGNOZY W RAPORTACH PRZEBIEGÓW (P4-6): listy `failed_paths` sterowników
+    tego modułu składają wiersz „ścieżka: diagnoza" z TEJ funkcji - `str()` wyjątku `OSError`
+    doklejał ścieżkę drugi raz."""
+    if isinstance(exc, OSError) and getattr(exc, "winerror", None):
+        return f"{type(exc).__name__}: [WinError {exc.winerror}] {exc.strerror}"
     if isinstance(exc, OSError) and exc.errno is not None:
         return f"{type(exc).__name__}: [Errno {exc.errno}] {exc.strerror}"
     return f"{type(exc).__name__}: {exc}"
@@ -1500,7 +1511,8 @@ def _already_scanned(con, volume, path, mtime):
 
 
 def _isolated(con, path, volume=None):
-    """IZOLACJA PO ZAPISIE W MIEJSCU (0022, Q8): czy kopia pod `path` (na `volume`, gdy podany) ma
+    """IZOLACJA PO ZAPISIE W MIEJSCU (0022, Q8): czy kopia pod `path` (na `volume`, gdy podany;
+    `volume=None` izoluje po samej ścieżce na wszystkich woluminach) ma
     operację `inplace_op` w fazie IZOLUJĄCEJ (`repo.INPLACE_ISOLATING_PHASES`): otwartej (nagłówek
     mógł zostać rozdarty) albo `written` (plik zapisany, ale kontrola danych i re-sync bazy jeszcze
     się nie udały - astra 2026-09-27; dawniej izolacja znikała przed re-synciem). Skan uznałby taką
@@ -1508,7 +1520,8 @@ def _isolated(con, path, volume=None):
     Wszystkie drogi czytające pliki kopii (skan drzewa, skan stosów, uzupełnienia faktów, przejęcie
     zeznania) pomijają ją BEZWARUNKOWO - także przy wyłączonej bramie przyrostowej - aż do
     dokończenia (`writeback.finish_inplace`), odzysku (`writeback.recover_torn`) albo jawnego
-    zwolnienia (`repo.release_inplace_op`). Czysta funkcja `con→bool`, stały literał SELECT."""
+    zwolnienia (`writeback.release_isolation`, gest „Zwolnij plik do skanu…”). Czysta funkcja
+    `con→bool`, stały literał SELECT."""
     row = con.execute(
         "SELECT 1 FROM location l JOIN inplace_op o ON o.location_id = l.id "
         "WHERE l.path = ? AND (? IS NULL OR l.volume = ?) "
@@ -1664,8 +1677,30 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
     nieczytelności. `None` = wołający nie jest skanem (re-sync pisarza `writeback._resync`,
     import) - bez sprawdzenia.
 
+    JEDNA TRANSAKCJA NA REKORD (`repo.atomic`, P4-8 / AR-21): kamera, klatka, lokacja, przepięcie,
+    zeznanie, flagi i fakty kopii wchodzą razem albo wcale. Osobne transakcje zostawiały po awarii
+    w połowie stan, którego ponowny odczyt nie leczył: przepięta lokacja bez zeznania nowej klatki
+    (następny skan szedł gałęzią „ta sama tożsamość"), nagłówek identyczny z poprzednim (zeznanie
+    nie przychodziło nigdy), nowa klatka bez lokacji albo bez `header`, kamera z rozdartego odczytu
+    po odmowie strażnika generacji. Liczniki rekordu trafiają do `summary` dopiero po zatwierdzeniu -
+    wycofany zapis nie zostawia w raporcie klatek, których w bazie nie ma.
+
+    ŚCIEŻKA NIEZNANA, NIECZYTELNA (W1) dostaje lokację Z MARKEREM, rodzajem i powodem (P4-7,
+    AR-21 (a)): pierwsza porażka odczytu jest przesłanką markera tak samo jak każda następna. Bez
+    niego brama przyrostowa pomijała kopię przy tym samym `mtime`, a kubełek nie mówił, czy winny
+    jest dysk, czy parser.
+
     NIE łapie wyjątków — backstop bez tożsamości (sha1 nieznany → `frame.review`, sha1='?') należy
     do wołającego (`scan_tree` / import), bo to on wie, jak zidentyfikować rekord do review."""
+    rekord = ScanSummary()
+    with repo.atomic(con):
+        _ingest_in_tx(con, rec, volume=volume, drive_letter=drive_letter, tier=tier, now=now,
+                      summary=rekord, actor=actor, inplace_gen=inplace_gen)
+    _dolicz_probe(summary, rekord)
+
+
+def _ingest_in_tx(con, rec, *, volume, drive_letter, tier, now, summary, actor, inplace_gen):
+    """Ciało `ingest_record` - wołane WYŁĄCZNIE w jego zakresie `repo.atomic` (kontrakt tam)."""
     readable = rec.header is not None
     copy_facts = copy_header_facts(rec.header, rec.header_hash, rec.image_roles)
     sha1_data, uncomputable = _record_identity(rec)
@@ -1696,6 +1731,9 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
             path=rec.path, tier=tier, mtime=rec.mtime,
             file_sha1=rec.file_sha1, header_hash=rec.header_hash, hdu_index=rec.hdu_index,
             compressed=rec.compressed, size_bytes=rec.size_bytes, copy_facts=copy_facts,
+            unreadable_since=None if readable else now,
+            unreadable_kind=None if readable else rec.error_kind,
+            unreadable_reason=None if readable else rec.error,
             now=now, actor=actor)
         if loc_created:
             summary.locations_new += 1
@@ -1789,6 +1827,44 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
         # `loc["present"] == 0` odsiewa BEZ ZAPYTANIA DO BAZY — wiersz lokacji już mamy w ręku,
         # a ożywanie kopii jest rzadkie, więc zwykły przebieg nie płaci tu ani jednej transakcji.
         summary.supersede_cleared += 1
+
+
+def _szkielet_po_awarii_zapisu(con, rec, *, volume, drive_letter, tier, reason, now, summary):
+    """Miękkie lądowanie NIEZNANEJ ścieżki, której wjazd (`ingest_record`) padł PO udanym odczycie:
+    zakres `repo.atomic` wycofał wszystko, więc ścieżka nadal nie ma lokacji, choć tożsamość klatki
+    jest znana z rekordu. Szkielet w OSOBNEJ transakcji klingi: klatka po `sha1_data` (rodzaj
+    'unknown', osie NULL - jak szkielet W1) + lokacja z markerem nieczytelności rodzaju `'db'`
+    (fakt o nas, nie o pliku) + `frame.review` bramkowany powstaniem lokacji (kotwica UNIQUE
+    `(volume, path)`).
+
+    Bez szkieletu deterministyczna awaria wjazdu (bug, CHECK) dawała `frame.review` z `sha1='?'` przy
+    KAŻDYM skanie i znikała z kubełków liczonych ze stanu. Ze szkieletem kopia stoi w kubełku jako
+    „baza", a następny skan przy tej samej awarii trafia w znaną ścieżkę (`refresh_location_unreadable`
+    - cichy no-op). Awaria przejściowa leczy się sama: marker znosi bramę przyrostową, a udany wjazd
+    gasi go przez `refresh_location`. Odcisk nagłówka zostaje NULL (jak przy W1), więc wyzdrowienie
+    nagrywa zeznanie - odcisk z rekordu udawałby, że zeznanie już jest.
+
+    Powrót bez wyjątku = lokacja ścieżki stoi (szkielet albo wiersz dopisany w międzyczasie przez
+    kogoś innego - wtedy bez eventu). Wyjątek (szkielet też nie wchodzi) idzie do wołającego - ten
+    zostaje przy backstopie bez tożsamości."""
+    sha1_data, uncomputable = _record_identity(rec)
+    rekord = ScanSummary()
+    with repo.atomic(con):
+        frame_id, created = repo.upsert_frame(
+            con, sha1_data=sha1_data, sha1_data_uncomputable=uncomputable, kind="unknown",
+            filetype=_filetype(rec.path), camera_id=None, now=now)
+        _, loc_created = repo.add_location(
+            con, frame_id=frame_id, volume=volume, drive_letter=drive_letter, path=rec.path,
+            tier=tier, mtime=rec.mtime, file_sha1=rec.file_sha1, size_bytes=rec.size_bytes,
+            unreadable_since=now, unreadable_kind="db", unreadable_reason=reason, now=now)
+        if loc_created:
+            rekord.locations_new += 1
+            if created:
+                rekord.frames_new += 1
+            repo.flag_frame_review(con, sha1=sha1_data, path=rec.path,
+                                   reason=f"{repo.UNREADABLE_REASON_PREFIX}{reason}", now=now)
+            rekord.frame_review += 1
+    _dolicz_probe(summary, rekord)
 
 
 def canonize_root(root):
@@ -1921,7 +1997,7 @@ def backfill_xisf_headers(con, *, now, progress=None):
                 rec = scan_file(path)
             except Exception as exc:           # brak pliku / I/O - raport, nie zapis (docstring)
                 s.failed += 1
-                s.failed_paths.append(f"{path}: {type(exc).__name__}: {exc}")
+                s.failed_paths.append(f"{path}: {unreadable_reason_of(exc)}")
                 break
             if proba == 1:                     # plik liczony raz, także gdy ponowienie czyta drugi raz
                 s.read += 1
@@ -1969,8 +2045,10 @@ class CopyFactsSummary:
 
 def copy_facts_candidates(con, root=None, *, porownywalne=False):
     """Kandydaci uzupełnienia faktów kopii (0021): kopie OBECNE, o znanym odcisku nagłówka, bez
-    zebranych faktów (`hdr_hash IS NULL`) - XISF wszystkie (liczba i role obrazów żyją tylko tam)
-    plus KAŻDA kopia klatki, która ma >1 lokację OGÓŁEM (tylko tam jest z czym porównywać zeznanie).
+    zebranych faktów (`hdr_hash IS NULL`), klatek z KLASY kandydata (`queries.copy_facts_class`,
+    właściciel predykatu w read-modelu, import leniwy jak w `_adopt_candidates_under`) - XISF
+    wszystkie (liczba i role obrazów żyją tylko tam) plus KAŻDA kopia klatki, która ma >1 lokację
+    OGÓŁEM (tylko tam jest z czym porównywać zeznanie).
     Reszta archiwum dostaje fakty przy najbliższym odczycie skanem - uzupełnienie nie czyta 15 tys.
     FITS-ów po to, żeby zapisać fakty, których nikt nie porówna.
 
@@ -2007,17 +2085,17 @@ def copy_facts_candidates(con, root=None, *, porownywalne=False):
     zmienić predykaty PORÓWNUJĄCE kopie jednej klatki („Kopie niezgodne", „Zeznanie z nieobecnej
     kopii"). Pojedynczy XISF czeka na uzupełnienie (liczba i role obrazów), ale żadnej z tych liczb
     nie ruszy - licznik „nie wiem" przy nich pyta tym trybem, etap Dostawy domyślnym."""
+    from .gui import queries
     rows = con.execute(
         "SELECT l.id, l.volume, l.path, l.header_hash FROM location l "
-        "JOIN frame f ON f.id = l.frame_id "
         "WHERE l.present = 1 AND l.header_hash IS NOT NULL AND l.hdr_hash IS NULL "
         "  AND l.unreadable_since IS NULL "
         "  AND NOT EXISTS (SELECT 1 FROM inplace_op o WHERE o.location_id = l.id "
         "                  AND o.phase IN (SELECT value FROM json_each(?))) "
-        "  AND ((f.filetype = 'xisf' AND ? = 0) OR l.frame_id IN ("
-        "       SELECT frame_id FROM location GROUP BY frame_id HAVING COUNT(*) > 1)) "
+        "  AND l.frame_id IN (SELECT value FROM json_each(?)) "
         "ORDER BY l.id",
-        (json.dumps(list(repo.INPLACE_ISOLATING_PHASES)), int(porownywalne))).fetchall()
+        (json.dumps(list(repo.INPLACE_ISOLATING_PHASES)),
+         json.dumps(queries.copy_facts_class(con, porownywalne=porownywalne)))).fetchall()
     if root is None:
         return rows
     prefix = canonize_root(root).rstrip("\\/") + os.sep
@@ -2135,7 +2213,7 @@ def backfill_copy_facts(con, *, now, root=None, progress=None, should_cancel=Non
                     s.missing_paths.append(path)
                 else:
                     s.failed += 1
-                    s.failed_paths.append(f"{path}: {type(exc).__name__}: {exc}")
+                    s.failed_paths.append(f"{path}: {unreadable_reason_of(exc)}")
                 break
             except Exception as exc:           # I/O albo parser - raport, nie zapis (docstring)
                 # Parser mógł trafić nagłówek rozdarty zapisem w miejscu z innego procesu (AR-17
@@ -2147,7 +2225,7 @@ def backfill_copy_facts(con, *, now, root=None, progress=None, should_cancel=Non
                     s.raced += 1
                 else:
                     s.failed += 1
-                    s.failed_paths.append(f"{path}: {type(exc).__name__}: {exc}")
+                    s.failed_paths.append(f"{path}: {unreadable_reason_of(exc)}")
                 break
             if not przeczytany:                # plik liczony raz, także gdy ponowienie czyta drugi
                 s.read += 1                    # raz, i wtedy, gdy udała się dopiero druga próba
@@ -2300,7 +2378,7 @@ def adopt_orphan_testimony(con, *, now, root=None, progress=None, should_cancel=
                 rec = scan_file(path)
             except Exception as exc:           # I/O - raport, nie zapis (docstring)
                 s.failed += 1
-                s.failed_paths.append(f"{path}: {type(exc).__name__}: {exc}")
+                s.failed_paths.append(f"{path}: {unreadable_reason_of(exc)}")
                 break
             if proba == 1:                     # plik liczony raz, także gdy ponowienie czyta drugi raz
                 s.read += 1
@@ -2489,7 +2567,7 @@ def scan_stacks(con, root, *, volume="?", drive_letter=None, tier=None, now,
                 s.skipped += 1
             except Exception as exc:                       # I/O - raport, NIGDY zapis (docstring)
                 s.failed += 1
-                s.failed_paths.append(f"{spath}: {type(exc).__name__}: {exc}")
+                s.failed_paths.append(f"{spath}: {unreadable_reason_of(exc)}")
             if not stary:
                 _dolicz_probe(s.scan, liczniki)
             break
@@ -2506,8 +2584,10 @@ def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now,
     Per plik: brama przyrostowa → `scan_file` (read-only) → `ingest_record` (jądro). Backstop W1:
     dowolny nieoczekiwany wyjątek per-plik NIE wywala całości — skan leci dalej. Rozstrzygnięcie
     zależy od tego, czy ścieżka jest ZNANA (#13): ZNANA → `refresh_location_unreadable` (marker
-    `unreadable_since`, idempotentnie — powtórna awaria to cichy no-op, nie spam review); NIEZNANA →
-    `flag_frame_review(sha1='?')` (backstop bez tożsamości — brak kotwicy UNIQUE, może się powtórzyć).
+    `unreadable_since`, idempotentnie - powtórna awaria to cichy no-op, nie spam review); NIEZNANA
+    po udanym odczycie (padł wjazd) → szkielet z markerem `'db'` (`_szkielet_po_awarii_zapisu`,
+    tożsamość z rekordu); NIEZNANA bez rekordu → `flag_frame_review(sha1='?')` (backstop bez
+    tożsamości - brak kotwicy UNIQUE, może się powtórzyć).
     Rodzaj awarii (P4-2) strony odczytu nadaje klasyfikator z obiektu wyjątku; wyjątek z
     `ingest_record` dostaje `'db'`, bo jest faktem o nas, nie o pliku.
     `now` jawny (ISO-8601) — deterministyczne testy. Zwraca `ScanSummary`.
@@ -2633,8 +2713,21 @@ def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now,
                     except repo.StaleScanRecord:           # odczyt padł w trakcie zapisu w miejscu
                         stary = True
                 else:
-                    repo.flag_frame_review(con, sha1="?", path=spath, reason=reason, now=now)
-                    liczniki.frame_review += 1
+                    # Ścieżka NIEZNANA. Rekord jest (padł wjazd, nie odczyt) → tożsamość znana:
+                    # szkielet z markerem 'db' w osobnej transakcji, zamiast `sha1='?'` co skan.
+                    # Szkielet też padł albo rekordu brak → backstop bez tożsamości.
+                    szkielet = False
+                    if rec is not None:
+                        try:
+                            _szkielet_po_awarii_zapisu(
+                                con, rec, volume=volume, drive_letter=drive_letter, tier=tier,
+                                reason=reason, now=now, summary=liczniki)
+                            szkielet = True
+                        except Exception:  # noqa: BLE001 - backstop W1, niżej event bez tożsamości
+                            pass
+                    if not szkielet:
+                        repo.flag_frame_review(con, sha1="?", path=spath, reason=reason, now=now)
+                        liczniki.frame_review += 1
             if not (stary and proba < _PROBY_GENERACJI):
                 break
         if stary:                                          # próba odrzucona - jej liczniki przepadają

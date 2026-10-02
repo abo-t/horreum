@@ -656,9 +656,9 @@ def test_kopie_nieczytelne_drazenie_do_dokladnych_kopii(view, qapp):
     widziało.
 
     Falsyfikator: wróć `Stretch` na „Ścieżkę", a „Powodowi" daj `ResizeToContents` → asercje
-    trybów i szerokości ścieżki czerwienieją; zdejmij sufit → ścieżka przekracza
-    `COPY_PATH_MAX_PX` i „Powód" wypada za prawą krawędź; zdejmij zdjęcie sufitu
-    w `_restore_frames_mode` → tryb klatek dziedziczy sufit i ostatnia asercja czerwienieje."""
+    trybów i szerokości ścieżki czerwienieją; zdejmij zdjęcie sufitu w `_restore_frames_mode` →
+    tryb klatek dziedziczy sufit i asercja o nim czerwienieje. Sufit przy DŁUGIEJ nazwie pliku
+    pilnuje `test_kopie_nieczytelne_ze_WSPOLNYM_prefiksem_rozroznia_nazwa_w_komorce`."""
     v, con, ids = view
     loc = con.execute("SELECT id FROM location WHERE volume = 'vol2'").fetchone()
     long_path = "/backup/" + "/".join(["bardzo-dlugi-segment"] * 20) + "/a1.fits"
@@ -678,8 +678,18 @@ def test_kopie_nieczytelne_drazenie_do_dokladnych_kopii(view, qapp):
     hdrs = [v.frames.horizontalHeaderItem(c).text() for c in range(v.frames.columnCount())]
     assert hdrs == ["Ścieżka", "Wolumen", "Obecna", "Oznaczona", "Powód"]  # PL (stałe = klucze)
     assert v.frames.rowCount() == 1
-    assert v.frames.item(0, 0).text() == long_path           # dokładna location w komórce
+    # Komórka niesie NAZWĘ PLIKU, podpowiedź - dokładną location (forma ścieżki z Duplikatów):
+    # kopie dzielą długi prefiks archiwum, a sufit 200 px z elizją w środku gubił człon rozróżniający.
+    assert v.frames.item(0, 0).text() == "a1.fits"
     assert v.frames.item(0, 0).toolTip() == long_path
+    # FH-14: ścieżka elizuje w ŚRODKU (nazwa pliku zostaje), tym samym delegatem co w Duplikatach
+    from horreum.gui import grid as grid_mod
+    from PySide6.QtWidgets import QStyleOptionViewItem
+    delegat = v.frames.itemDelegateForColumn(COPY_COL_PATH)
+    assert isinstance(delegat, grid_mod._ElizjaWSrodku)
+    opcja = QStyleOptionViewItem()
+    delegat.initStyleOption(opcja, v.frames.model().index(0, COPY_COL_PATH))
+    assert opcja.textElideMode == Qt.ElideMiddle
     # „Powód" bierze RESZTĘ, „Ścieżka" treść z sufitem, a „Powód" MUSI zmieścić się w panelu
     # (firsthand 2026-08-01 na żywej pf4: przy `ResizeToContents` 100-znakowa ścieżka wypychała
     # diagnozę poza prawą krawędź; firsthand 2026-09-26: 150-znakowy powód zgniatał ścieżkę).
@@ -695,7 +705,9 @@ def test_kopie_nieczytelne_drazenie_do_dokladnych_kopii(view, qapp):
     qapp.processEvents()
     assert (hh.sectionPosition(COPY_COL_REASON) + hh.sectionSize(COPY_COL_REASON)
             <= v.frames.viewport().width())
-    assert 120 <= hh.sectionSize(COPY_COL_PATH) <= COPY_PATH_MAX_PX   # ścieżka nie jest zgnieciona
+    # nazwa pliku mieści się w sekcji bez elizji, a sekcja nie przebija sufitu
+    assert (v.frames.sizeHintForColumn(COPY_COL_PATH) <= hh.sectionSize(COPY_COL_PATH)
+            <= COPY_PATH_MAX_PX)
     assert v.frames.item(0, 1).text() == "vol2"
     assert v.frames.item(0, 2).text() == "tak"               # kopia nadal obecna
     # Powód ze STANU kopii (Z6, P4-2): rodzaj PRZED diagnozą, tooltip = diagnoza dosłowna
@@ -723,6 +735,72 @@ def test_kopie_nieczytelne_drazenie_do_dokladnych_kopii(view, qapp):
     assert hdrs == ["sha1 danych", "Teleskop", "Kamera", "Filtr", "Data", "Obecny", "Ścieżka"]
     assert v.frames.rowCount() == 5
     assert hh.maximumSectionSize() > COPY_PATH_MAX_PX       # sufit trybu „kopie" nie przecieka
+    assert not isinstance(v.frames.itemDelegateForColumn(COPY_COL_PATH), grid_mod._ElizjaWSrodku)
+    # …a ścieżka trybu klatek elizuje w ŚRODKU tym samym delegatem (nazwa pliku zostaje)
+    assert isinstance(v.frames.itemDelegateForColumn(FRAME_COL_PATH), grid_mod._ElizjaWSrodku)
+
+
+def test_kopie_nieczytelne_ze_WSPOLNYM_prefiksem_rozroznia_nazwa_w_komorce(view):
+    """Wizytacja na kopii pf4: pięć kopii nieczytelnych pod `R:\\ASTRO_\\STACKS\\…` - komórka
+    z pełną ścieżką w sufit 200 px pokazywała pięć razy prawie to samo („R:\\ASTRO_\\STAC…"), bo
+    człon rozróżniający kopie siedział w środku, który zjada elizja. W komórce stoi teraz nazwa
+    pliku, a pełna ścieżka w podpowiedzi - jak w Duplikatach.
+
+    Falsyfikator: wróć do pełnej ścieżki w komórce `COPY_COL_PATH` → teksty komórek zaczynają się
+    od wspólnego prefiksu i asercja o nazwach pada; zdejmij sufit z `_show_copies` → długa nazwa
+    rozpycha kolumnę ponad `COPY_PATH_MAX_PX`."""
+    v, con, ids = view
+    prefiks = r"R:\ASTRO_\STACKS\2026\M31_Andromeda\WBPP_wyniki\master"
+    locs = con.execute("SELECT id, frame_id FROM location ORDER BY id LIMIT 2").fetchall()
+    sciezki = [prefiks + r"\masterLight_A_integration.xisf",
+               prefiks + r"\masterLight_BIN-1_8000x5320_EXPOSURE-121.00s_FILTER-NoFilter_RGB.xisf"]
+    for loc, sciezka in zip(locs, sciezki):
+        with con:
+            con.execute("UPDATE location SET path = ? WHERE id = ?", (sciezka, loc["id"]))
+        sha = con.execute("SELECT sha1_data FROM frame WHERE id = ?", (loc["frame_id"],)).fetchone()[0]
+        repo.refresh_location_unreadable(con, location_id=loc["id"], sha1_data=sha, path=sciezka,
+                                         mtime="t2", reason="ParseError: y", kind="parse",
+                                         now="2026-07-21T12:00:00")
+    v.refresh()
+    _select_review_tag(v, "unreadable")
+    komorki = {v.frames.item(r, COPY_COL_PATH).text(): v.frames.item(r, COPY_COL_PATH).toolTip()
+               for r in range(v.frames.rowCount())}
+    assert komorki == {"masterLight_A_integration.xisf": sciezki[0],
+                       "masterLight_BIN-1_8000x5320_EXPOSURE-121.00s_FILTER-NoFilter_RGB.xisf":
+                           sciezki[1]}, komorki
+    from horreum.gui import grid as grid_mod
+    hh = v.frames.horizontalHeader()
+    assert hh.sectionSize(COPY_COL_PATH) <= COPY_PATH_MAX_PX
+    assert isinstance(v.frames.itemDelegateForColumn(COPY_COL_PATH), grid_mod._ElizjaWSrodku)
+
+
+def test_przeglad_obiektow_nadmiar_szerokosci_bierze_prawy_panel(view, qapp):
+    """Wizytacja przy 1400 px: splitter dzielił nadmiar 2:3, więc biblioteka (trzy wąskie kolumny)
+    zostawiała za sobą pusty pas, a panel kopii obok ucinał „Powód". Nadmiar bierze teraz prawy
+    panel, a w bibliotece resztę szerokości - kolumna nazwy obiektu (bez pustego pasa).
+
+    Pomiar względny, nie w pikselach (szerokości zależą od fontu platformy): przyrost szerokości
+    okna trafia w całości do prawego panelu, a kolumny biblioteki wypełniają jej viewport.
+
+    Falsyfikator: wróć do `setStretchFactor(0, 2)` / `(1, 3)` → lewy panel rośnie razem z oknem
+    i asercja po poszerzeniu pada; zdejmij `Stretch` z kolumny nazwy → za kolumnami biblioteki
+    zostaje pusty pas."""
+    v, con, ids = view
+    v.resize(1400, 800)
+    v.show()
+    qapp.processEvents()
+    try:
+        lewy, prawy = v.objects.parentWidget(), v.frames.parentWidget()
+        lewy_przed, prawy_przed = lewy.width(), prawy.width()
+        przyrost = 400
+        v.resize(1400 + przyrost, 800)
+        qapp.processEvents()
+        assert lewy.width() == lewy_przed, "nadmiar poziomu poszedł do biblioteki"
+        assert prawy.width() - prawy_przed == przyrost, (prawy_przed, prawy.width())
+        oh = v.objects.horizontalHeader()
+        assert oh.length() >= v.objects.viewport().width() - 1, "pusty pas za kolumnami biblioteki"
+    finally:
+        v.hide()
 
 
 @pytest.mark.parametrize("lang", ["pl", "en"])
@@ -791,7 +869,7 @@ def test_podpowiedz_kopii_nieczytelnych_liczy_blad_bazy_OSOBNO(view):
     „rodzaj nieznany" tylko przy liczbie > 0. Wpadnięcie do rodzajów plikowych kazałoby szukać winy
     w pliku, a do „nieznanego" - ukryłoby, że wiadomo, co zawiodło.
 
-    Falsyfikator: zdejmij człon `'db'` z `_unreadable_kinds_tip` → podpowiedź nie ma „baza 1"
+    Falsyfikator: zdejmij człon `'db'` z `pipeline.unreadable_kinds_text` → podpowiedź nie ma „baza 1"
     i asercja czerwienieje."""
     v, con, ids = view
     loc = con.execute("SELECT id, path FROM location WHERE frame_id = ? ORDER BY id",
@@ -2253,9 +2331,23 @@ def test_zatwierdzenie_po_BLEDZIE_pozycji_liczy_reszte_jako_odmowe_klingi(sciezk
     assert dlg.status.text().endswith(
         f"przypisano 2 z {razem} klatek · nie zapisano, klinga odmówiła: 2"), dlg.status.text()
     assert dlg.assigned == 2
+    # R-S2b-14: „nazw" liczy pozycje, które przeszły klingę (1), nie zaznaczone (3), i się odmienia
+    assert dlg.status.text().startswith("Zatwierdzono 1 nazwę · "), dlg.status.text()
     assert "konflikt" in dlg.error.text() and dlg.result() != QDialog.Accepted
     zapisane = con.execute("SELECT id FROM frame WHERE object_id IS NOT NULL ORDER BY id")
     assert [r["id"] for r in zapisane] == [1, 2]
+
+
+def test_zatwierdzenie_odmienia_liczbe_nazw(sciezka):
+    """R-S2b-14: „Zatwierdzono N nazw" bez odmiany (1 nazw). Dwie pozycje → „2 nazwy".
+
+    Falsyfikator: wróć `i18n.t("path.done", names=…)` → „2 nazw"."""
+    v, con = sciezka
+    lmc = next(p for p in resolver.path_proposals(con) if p.canon == "LMC")
+    pozycje = [_pozycja(lmc, "LMC", (1, 2)), _pozycja(lmc, "NGC6960", (3,))]
+    dlg = ConfirmPathObjectsDialog(con, proposals=pozycje, now_fn=lambda: NOW_S2, parent=v)
+    dlg._on_confirm()
+    assert dlg.status.text().startswith("Zatwierdzono 2 nazwy · "), dlg.status.text()
 
 
 def test_nadanie_z_kolejki_mowi_ROZBICIEM_per_fakt(view, monkeypatch):
@@ -2384,6 +2476,36 @@ def test_lista_pokazuje_kanon_katalog_i_aliasy_bez_technicznych(aliasy):
     dlg.close()
 
 
+def test_AR15_alias_z_naglowka_pokazany_brzmieniem_karty_OBJECT(aliasy):
+    """AR-15: alias spoza gramatyk i słownika (`ELEPHANTSTRUNKNEBULA`, `KSIEZYC`) pokazuje się
+    brzmieniem z `header.object_raw` - najczęstszym, remis do pierwszego spotkanego - a klucz
+    zostaje kluczem (szukajka dalej trafia po `alias_norm`)."""
+    v, con, ids = aliasy
+    oid = queries.object_id_by_canon(con, "Sh2-131")
+    for i, raw in enumerate(["Elephant's Trunk Nebula", "Elephant's Trunk Nebula",
+                             "elephants trunk nebula"]):
+        fid, _ = repo.upsert_frame(con, sha1_data=f"sha-et-{i}", kind="light", filetype="fits",
+                                   camera_id=None, now=NOW_AL)
+        repo.record_header(con, frame_id=fid, raw_json="{}", object_raw=raw, now=NOW_AL)
+        repo.assign_object(con, frame_id=fid, object_id=oid, object_source="header", now=NOW_AL)
+    moon = _dopisz_obiekt(con, "Moon", None, "solar_system", [("KSIEZYC", "solar")])
+    fid, _ = repo.upsert_frame(con, sha1_data="sha-ks", kind="light", filetype="fits",
+                               camera_id=None, now=NOW_AL)
+    # Brzmienie z archiwum (pf4: 287 klatek „ksiezyc”); „Księżyc” z ogonkami ma inny klucz
+    # `norm_alnum`, więc do aliasu `KSIEZYC` nie należy.
+    repo.record_header(con, frame_id=fid, raw_json="{}", object_raw="ksiezyc", now=NOW_AL)
+    repo.assign_object(con, frame_id=fid, object_id=moon, object_source="header", now=NOW_AL)
+
+    dlg = AssignObjectDialog(con, object_raw="FlatWizard", frame_count=2, parent=v)
+    poz = _pozycje(dlg)
+    assert poz["Sh2-131"] == "Sh2-131  ·  Sh2  ·  Elephant's Trunk Nebula"
+    assert poz["Moon"] == "Moon  ·  -  ·  ksiezyc"
+    assert "ELEPHANTSTRUNKNEBULA" not in "".join(poz.values())
+    dlg.search.setText("elephants trunk")
+    assert list(_pozycje(dlg)) == ["Sh2-131"]
+    dlg.close()
+
+
 def test_szukajka_zaweza_liste_po_aliasie_i_zachowuje_wybor(aliasy):
     """`M 106` (i `m106`) znajduje NGC4258 przez alias; fraza bez trafień mówi to w pozycji zerowej;
     wybór przeżywa zawężenie, a schowany wybór gaśnie (akcja nie celuje w niewidoczny obiekt)."""
@@ -2411,6 +2533,68 @@ def test_szukajka_zaweza_liste_po_aliasie_i_zachowuje_wybor(aliasy):
     dlg.search.setText("")
     assert len(_pozycje(dlg)) == 6                     # M42, NGC7000 + cztery dopisane
     dlg.close()
+
+
+def test_szukajka_sklada_ogonki_a_lista_nie_dubluje_nazwy_z_ogonkami_i_bez(aliasy):
+    """Wizytacja na kopii pf4: „Księżyc" nie znajdował Księżyca - `norm_alnum` wycina litery
+    z ogonkami („KSIYC"), a alias w bazie to `KSIEZYC`. Lista pokazywała też „Wielki Oblok
+    Magellana, Wielki Obłok Magellana" - jedna nazwa w dwóch zapisach, bo klucze różniły się
+    o wyciętą „ł". Okno składa teraz ogonki po swojej stronie (igła szukajki i deduplikacja form);
+    klucze w bazie zostają bez zmian.
+
+    Falsyfikator: zdejmij `bez_diakrytykow` z igły w `_fill_combo` → „Księżyc" daje pustą listę;
+    wróć do `norm_alnum` w `aliasy_obiektu` → LMC pokazuje obie formy."""
+    from horreum.gui.assign_dialog import aliasy_obiektu
+    from horreum.resolve._text import norm_alnum
+    v, con, ids = aliasy
+    _dopisz_obiekt(con, "Moon", None, "solar_system", [("KSIEZYC", "solar"), ("MOON", "solar")])
+    dlg = AssignObjectDialog(con, object_raw="FlatWizard", frame_count=2, parent=v)
+    try:
+        for fraza in ("Księżyc", "księżyc", "Ksiezyc"):
+            dlg.search.setText(fraza)
+            assert list(_pozycje(dlg)) == ["Moon"], fraza
+        assert norm_alnum("Księżyc") == "KSIYC"       # klucz zapisu i kluczy bazy NIE ruszamy
+    finally:
+        dlg.close()
+    pretty = {"WIELKIOBLOKMAGELLANA": "Wielki Oblok Magellana",
+              "WIELKIOBOKMAGELLANA": "Wielki Obłok Magellana"}
+    formy = aliasy_obiektu("LMC", {"WIELKIOBLOKMAGELLANA", "WIELKIOBOKMAGELLANA"}, pretty)
+    assert formy == ["Wielki Obłok Magellana"], formy     # forma z ogonkami wygrywa
+    # niezależnie od kolejności, w której przyszły
+    odwrotnie = aliasy_obiektu("LMC", {"WIELKIOBOKMAGELLANA", "WIELKIOBLOKMAGELLANA"},
+                               dict(reversed(list(pretty.items()))))
+    assert odwrotnie == ["Wielki Obłok Magellana"], odwrotnie
+
+
+def test_lista_obiektow_ma_sufit_wysokosci(aliasy, qapp):
+    """Wizytacja: rozwinięta lista „Przypisz obiekt" miała 1778 px mimo `maxVisibleItems` 10 -
+    styl Fusion domyślnie rozwija listę na wysokość ekranu. `combobox-popup: 0` w stylu combo
+    przełącza go na listę z suwakiem, która limit szanuje. Pomiar względny: wysokość listy
+    w wierszach, nie w pikselach.
+
+    Falsyfikator: zdejmij `setStyleSheet` z combo w `AssignObjectDialog` → lista rozwija się
+    na wszystkie pozycje i asercja pada."""
+    from PySide6.QtWidgets import QApplication as _App
+    v, con, ids = aliasy
+    for i in range(40):
+        _dopisz_obiekt(con, f"Cr{100 + i}", "Collinder", "deep_sky")
+    stary_styl = _App.style().name()                  # styl aplikacji wraca po teście (sesja)
+    _App.setStyle("Fusion")                           # styl okna aplikacji (`apply_theme`)
+    dlg = AssignObjectDialog(con, object_raw="FlatWizard", frame_count=2, parent=v)
+    try:
+        dlg.show()
+        assert dlg.combo.count() > 40
+        dlg.combo.showPopup()
+        qapp.processEvents()
+        widok = dlg.combo.view()
+        wiersz = widok.sizeHintForRow(0)
+        assert wiersz > 0
+        assert widok.height() <= wiersz * (dlg.combo.maxVisibleItems() + 1), \
+            (widok.height(), wiersz, dlg.combo.maxVisibleItems())
+        dlg.combo.hidePopup()
+    finally:
+        dlg.close()
+        _App.setStyle(stary_styl)
 
 
 @pytest.mark.parametrize("fraza, trafione", [

@@ -376,3 +376,80 @@ def test_20_location_facts_pokrywaja_literal_update():
     src = inspect.getsource(repo.refresh_location)
     for name in repo._LOCATION_FACTS:
         assert f"{name} = ?" in src, f"{name} w _LOCATION_FACTS, ale nie w UPDATE"
+
+
+def _kopia_z_filtrem(path, filtr):
+    """Kopia TEJ SAMEJ klatki (te same piksele) z innym filtrem w nagłówku - dwie kopie, dwa głosy."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    hdu = fits.PrimaryHDU(data=np.full((4, 4), 99, dtype=np.uint16))
+    hdu.header["INSTRUME"] = "ZWO ASI2600MM Pro"
+    hdu.header["IMAGETYP"] = "Light Frame"
+    hdu.header["FILTER"] = filtr
+    hdu.writeto(str(path))
+    return str(path)
+
+
+def test_cli_apply_przejmuje_zeznanie_ocalalej_kopii_i_przelicza_pochodne(tree, capsys):
+    """AR-5-CLI: `presence --apply` zdejmuje obecność kopii, z której pochodzi zeznanie klatki -
+    i ma puścić ten sam ogon co gest GUI „Oznacz zniknięte": przejęcie zeznania ocalałej kopii
+    i pochodne. Do naprawy klatka mówiła głosem skasowanego pliku (`Ha`) aż do najbliższego
+    „Przyjmij nowe" w GUI, a `filter_canon` liczył się z tego głosu."""
+    from horreum import cli
+    from horreum.resolve.filters import normalize_filter
+    con, root, vol, _paths = tree
+    a = _kopia_z_filtrem(Path(root) / "LIGHTS" / "A" / "m.fits", "Ha")
+    b = _kopia_z_filtrem(Path(root) / "LIGHTS" / "B" / "m.fits", "OIII")
+    scan_tree(con, root, volume=vol, now=NOW)
+    resolver.run_resolver(con, NOW)
+    fid = con.execute("SELECT frame_id FROM location WHERE path = ?", (a,)).fetchone()[0]
+    assert con.execute("SELECT frame_id FROM location WHERE path = ?", (b,)).fetchone()[0] == fid
+    assert con.execute("SELECT filter_raw FROM header WHERE frame_id = ?",
+                       (fid,)).fetchone()[0] == "Ha"
+    con.commit()
+    dbp = con.execute("PRAGMA database_list").fetchone()[2]
+    os.remove(a)
+    assert cli.main(["presence", dbp, "--root", root, "--volume", vol, "--apply"]) == 0
+    out = capsys.readouterr().out
+    assert "przejecie zeznania ocalalej kopii: przejete 1 z 1" in out
+    assert con.execute("SELECT filter_raw FROM header WHERE frame_id = ?",
+                       (fid,)).fetchone()[0] == "OIII"
+    assert con.execute("SELECT filter_canon FROM frame WHERE id = ?",
+                       (fid,)).fetchone()[0] == normalize_filter("OIII")
+    # DRY nie ma ogona: bez zapisu obecności nie ma czego przejmować
+    assert cli.main(["presence", dbp, "--root", root, "--volume", vol]) == 0
+    assert "przejecie" not in capsys.readouterr().out
+
+
+def test_cli_apply_awaria_ogona_nie_polyka_raportu_obecnosci(tree, capsys, monkeypatch):
+    """Zdjęcie obecności jest już zapisane, gdy rusza ogon `--apply` - jego awaria nie może połknąć
+    raportu obecności ani zostawić otwartego połączenia. Kolejność: raport obecności, wiersze etapów
+    ogona zapisanych przed awarią, wiersz błędu; kod 2 (werdykt wydany, ogon niedokończony).
+
+    Falsyfikator: wróć z ogonem przed wydruk i poza `try` - wyjątek leci z `cli.main`, raport nie
+    powstaje, połączenie zostaje otwarte."""
+    from horreum import cli
+    con, root, vol, paths = tree
+    con.commit()
+    dbp = con.execute("PRAGMA database_list").fetchone()[2]
+    os.remove(paths[0])
+    otwarte = []
+    prawdziwe = db.open_db
+
+    def _open_db(path):
+        c = prawdziwe(path)
+        otwarte.append(c)
+        return c
+
+    def _ogon(con_, root_, *, now):
+        yield "  fakty kopii: etap przed awaria"
+        raise RuntimeError("zerwany udzial")
+    monkeypatch.setattr(db, "open_db", _open_db)
+    monkeypatch.setattr(cli, "_presence_tail", _ogon)
+    assert cli.main(["presence", dbp, "--root", root, "--volume", vol, "--apply"]) == 2
+    out = capsys.readouterr().out
+    raport = out.index("potwierdzone znikniecia: 1")
+    etap = out.index("etap przed awaria")
+    blad = out.index("blad ogona zapisu -- RuntimeError: zerwany udzial")
+    assert raport < etap < blad
+    with pytest.raises(Exception, match="closed"):
+        otwarte[0].execute("SELECT 1")

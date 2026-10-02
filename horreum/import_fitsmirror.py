@@ -202,15 +202,28 @@ def read_repaired_registry(path):
     instalacji przepisał nagłówek. Dawca o nich nie wie (jego zeznanie jest sprzed naprawy),
     więc bez rejestru losowa próbka falsyfikatora czytała je jako „dawca stęchły z NIEZNANEGO
     powodu" i abortowała import. Baza otwierana WYŁĄCZNIE read-only (jak dawca — rama DAWCA-RO;
-    to cudza żywa baza, import jej nie migruje ani nie tyka)."""
+    to cudza żywa baza, import jej nie migruje ani nie tyka).
+
+    BACKUP BEZ PODMIANY się nie liczy (0024, `header_backups.unreplaced_at`): backup drogi atomowej
+    powstaje PRZED `os.replace`, a straż podmiany mogła ją odbić - plik został nietknięty przez
+    Horreum. Taki wpis w rejestrze usprawiedliwiałby rozjazd pliku zmienionego POZA Horreum,
+    a import wpuściłby stęchłe zeznanie dawcy. Baza rejestru (RO, bez migracji) bywa sprzed 0024
+    - kolumnę wykrywa `PRAGMA table_info`, a każdy wariant ma własny stały literał SELECT."""
     apath = os.path.abspath(str(path))
     if not os.path.isfile(apath):
         raise ImportAbort(f"baza rejestru napraw nie istnieje: {apath}")
     con = sqlite3.connect("file:" + pathname2url(apath) + "?mode=ro", uri=True)
     try:
-        rows = con.execute(
-            "SELECT DISTINCT l.path FROM header_backups hb "
-            "JOIN location l ON l.id = hb.location_id").fetchall()
+        kolumny = {r[1] for r in con.execute("PRAGMA table_info(header_backups)")}
+        if "unreplaced_at" in kolumny:
+            rows = con.execute(
+                "SELECT DISTINCT l.path FROM header_backups hb "
+                "JOIN location l ON l.id = hb.location_id "
+                "WHERE hb.unreplaced_at IS NULL").fetchall()
+        else:
+            rows = con.execute(
+                "SELECT DISTINCT l.path FROM header_backups hb "
+                "JOIN location l ON l.id = hb.location_id").fetchall()
     finally:
         con.close()
     return frozenset(r[0] for r in rows)

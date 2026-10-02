@@ -238,7 +238,10 @@ def main(argv=None):
                         help="trwały serial woluminu — KONFRONTOWANY z zamontowanym dyskiem "
                              "(bez placeholdera '?': pass zdejmuje obecność, musi wiedzieć gdzie)")
     p_pres.add_argument("--apply", action="store_true",
-                        help="WYKONAJ: oznacz potwierdzone zniknięcia (present=0) — bez tego DRY")
+                        help="WYKONAJ: oznacz potwierdzone zniknięcia (present=0), potem ogon: "
+                             "czyta nagłówki FITS/XISF kopii pod korzeniem (fakty kopii), "
+                             "przejmuje zeznanie ocalałej kopii i przy przejęciu przelicza "
+                             "pochodne (group, resolve, calibrate, lineage) - bez tego DRY")
     p_pres.add_argument("--force", type=int, default=None, metavar="N",
                         help="deklaracja intencji: spodziewane N potwierdzonych zniknięć; "
                              "przełamuje hamulec, a rozjazd z dyskiem = abort bez zapisu")
@@ -510,15 +513,28 @@ def main(argv=None):
             con.close()
             print(f"Horreum presence: blad -- {exc}")
             return 1
-        # TODO-DŁUG(AR-5-CLI): `--apply` nie puszcza przejęcia zeznania (`scan.adopt_orphan_testimony`)
-        # ani pochodnych, jak robi to gest GUI „Oznacz zniknięte" - CLI nie ma łańcucha etapów, więc
-        # klatka z jedną kopią mówi głosem skasowanego pliku do „Przyjmij nowe" w GUI.
-        con.close()
+        # OGON ZAPISU (AR-5-CLI): zdjęta obecność to chwila, w której klatka zaczyna mówić głosem
+        # skasowanego pliku - `--apply` puszcza fakty kopii, przejęcie zeznania ocalałej kopii
+        # i pochodne przy realnym przejęciu, tym samym warunkiem co gest GUI „Oznacz zniknięte"
+        # (przebieg dokończony, bez abortu). Bez tego stan trwał do najbliższego „Przyjmij nowe".
+        # Raport obecności IDZIE PIERWSZY: zdjęcie obecności już zapisane, więc awaria ogona nie
+        # może go połknąć. Ogon drukuje wiersz po etapie, a jego wyjątek dostaje własny wiersz
+        # i kod 2 (błąd drogi - werdykt obecności wydany, ogon niedokończony).
         print(_format_presence(args.db, s, apply=args.apply, limit=args.limit))
         # Kod wyjscia mowi o WERDYKCIE, nie o zapisie: 1 = przebieg go NIE WYDAL (abort przeslanki
         # albo hamulec, ktory pominal potwierdzenia). Bez tego skrypt czytajacy `presence` w DRY
         # nie odrozni „nic nie zniklo" od „nie sprawdzilem" -- a to dwie rozne rzeczy.
-        return 1 if (s.aborted is not None or not s.confirmed) else 0
+        kod = 1 if (s.aborted is not None or not s.confirmed) else 0
+        try:
+            if args.apply and not s.cancelled and s.aborted is None:
+                for wiersz in _presence_tail(con, args.root, now=now):
+                    print(wiersz)
+        except Exception as exc:  # noqa: BLE001 - raport zamiast śladu stosu, kod niżej
+            print(f"Horreum presence: blad ogona zapisu -- {type(exc).__name__}: {exc}")
+            kod = 2
+        finally:
+            con.close()
+        return kod
     if args.cmd == "supersede":
         from . import supersede                           # bez astropy — czyta wyłącznie bazę
         now = datetime.now(timezone.utc).isoformat()
@@ -723,6 +739,38 @@ def _format_presence(db_path, s, *, apply, limit):
     if s.drifted:
         lines.append(f"  pominieto przez dryf sciezki: {s.drifted} (rename miedzy planem a zapisem)")
     return "\n".join(lines)
+
+
+def _presence_tail(con, root, *, now):
+    """Ogon `presence --apply` (AR-5-CLI): fakty kopii → przejęcie zeznania ocalałej kopii → - gdy
+    coś przejęto - pochodne `group` → `resolve` → `calibrate` → `lineage`. Ta sama semantyka i te
+    same funkcje rdzenia co ogon gestu GUI „Oznacz zniknięte" (`PipelineWorker._adopt_and_derive`):
+    fakty PRZED przejęciem (bez nich predykat zeznania milczy), pochodne wyłącznie po realnym
+    przejęciu, zakres = korzeń przebiegu obecności. Etap bez kandydatów milczy (QUIET).
+    GENERATOR wierszy raportu (ASCII - konsola Windows = cp1250), wiersz po każdym etapie: wyjątek
+    późniejszego etapu nie połyka raportu etapów już zapisanych."""
+    from . import scan                                # lazy: astropy dopiero tu
+    if scan.copy_facts_candidates(con, root):
+        f = scan.backfill_copy_facts(con, now=now, root=root)
+        yield (f"  fakty kopii: zebrane {f.written} z {f.rows} (zmienione na dysku "
+               f"{f.stale}, brak pliku {f.missing}, blad odczytu {f.failed}, "
+               f"zapis w toku {f.raced}); czeka {f.remaining}")
+    if not scan.adopt_candidates(con, root):
+        return
+    a = scan.adopt_orphan_testimony(con, now=now, root=root)
+    yield (f"  przejecie zeznania ocalalej kopii: przejete {a.adopted} z {a.rows} (inna "
+           f"tozsamosc {a.identity}, zmienione na dysku {a.stale}, blad odczytu {a.failed}, "
+           f"wyscig {a.raced}); czeka {a.remaining}")
+    if not a.adopted:
+        return
+    from .calibration import run_calibration
+    from .grouper import run_grouper
+    from .lineage import run_lineage
+    from .resolver import run_resolver
+    yield f"  group: {run_grouper(con, now)}"
+    yield f"  resolve: {run_resolver(con, now)}"
+    yield f"  calibrate: {run_calibration(con, now=now)}"
+    yield f"  lineage: {run_lineage(con, now=now)}"
 
 
 def _format_rename_dry(db_path, run, *, limit):
@@ -1280,6 +1328,17 @@ def _format_delta(db_path, rep):
                      ("kopia nieczytelna", rv.unreadable)):
         if n:
             lines.append(f"    {label}: {n}")
+    # RODZAJ POD WIERSZEM (P4-5): sama liczba oskarzala plik, choc winny bywa dysk albo baza.
+    # Wciecie 6, bo to rozbicie wiersza wyzej - i to PO KOPIACH, nie po klatkach (klatka z dwiema
+    # kopiami bywa nieczytelna z dwoch powodow), dlatego zdanie mowi „kopie". Ktore rodzaje pokazac,
+    # rozstrzyga rdzen (`resolver.unreadable_kinds_shown`, ta sama regula co podpowiedz w GUI); tu
+    # tylko etykiety ASCII.
+    if rv.unreadable:
+        from .resolver import unreadable_kinds_shown
+        etykiety = {"io": "dysk/dostep", "parse": "naglowek", "db": "baza",
+                    "unknown": "bez kodu awarii"}
+        czesci = [f"{etykiety[k]} {n}" for k, n in unreadable_kinds_shown(rv.unreadable_kinds)]
+        lines.append(f"      kopie: {', '.join(czesci)}")
     return "\n".join(lines)
 
 

@@ -864,7 +864,8 @@ def test_backfill_xisf_nieczytelna_kopia_zostaje_kandydatem_bez_zapisu(tmp_path)
     s = backfill_xisf_headers(con, now=NOW)
 
     assert (s.rows, s.read, s.failed, s.remaining) == (2, 1, 1, 1)
-    assert "gone.xisf" in s.failed_paths[0]
+    # ścieżka RAZ (P4-6): diagnoza z `unreadable_reason_of`, nie `str()` wyjątku z nazwą pliku
+    assert s.failed_paths[0].count("gone.xisf") == 1
     row = con.execute("SELECT id, header_hash, present, unreadable_since FROM location WHERE path = ?",
                       (str(gone),)).fetchone()
     assert (row["header_hash"], row["present"], row["unreadable_since"]) == (None, 1, None)
@@ -1032,21 +1033,22 @@ def test_scan_tree_header_none_frame_szkielet_D1(tmp_path):
 
 
 def test_scan_tree_szkielet_re_skan_idempotentny_D1(tmp_path):
-    """D1 (+#13): re-skan nieczytelnego pliku NIE duplikuje frame'a; stan SETTLUJE, nie rośnie bez
-    końca. Brama OFF (volume='?') re-czyta plik: pierwszy re-odczyt ZAKŁADA marker `unreadable_since`
-    (przejście NULL→marker = jednorazowy frame.review), kolejny re-odczyt to cichy no-op (marker stoi,
-    mtime bez zmian → QUIET). Sha1 UNIQUE trzyma jeden frame; dziennik przestaje puchnąć."""
+    """D1 (+#13, P4-7): re-skan nieczytelnego pliku NIE duplikuje frame'a; stan SETTLUJE, nie rośnie
+    bez końca. Marker `unreadable_since` stawia już pierwsza porażka odczytu nowej ścieżki (P4-7), więc
+    każdy re-odczyt (brama OFF, volume='?') to cichy no-op (marker stoi, mtime bez zmian → QUIET).
+    Sha1 UNIQUE trzyma jeden frame; dziennik przestaje puchnąć."""
     con = _db(tmp_path)
     tree = tmp_path / "t"; tree.mkdir()
     (tree / "broken.xisf").write_bytes(b"NOTXISF!" + b"\x00" * 20)
-    scan_tree(con, tree, now=NOW)                            # skan 1: szkielet + frame.review (ścieżka nieznana)
-    s2 = scan_tree(con, tree, now=NOW)                       # skan 2: brama OFF re-czyta → marker zakładany
-    assert (s2.frames_new, s2.frames_existing, s2.frame_review) == (0, 1, 1)   # jednorazowe założenie markera
+    scan_tree(con, tree, now=NOW)                            # skan 1: szkielet + marker (P4-7) + frame.review
+    s2 = scan_tree(con, tree, now=NOW)                       # skan 2: brama OFF re-czyta → marker już stoi
+    assert (s2.frames_new, s2.frames_existing, s2.frame_review) == (0, 1, 0)   # cichy no-op
     s3 = scan_tree(con, tree, now=NOW)                       # skan 3: marker stoi, mtime bez zmian → cichy no-op
     assert (s3.frames_new, s3.frames_existing, s3.frame_review) == (0, 1, 0)
     assert con.execute("SELECT count(*) FROM frame").fetchone()[0] == 1        # bez duplikatu frame'a
-    # dziennik SETTLUJE: nieznana-ścieżka (1) + założenie markera (1) = 2, dalej stały (nie rośnie)
-    assert con.execute("SELECT count(*) FROM event WHERE verb='frame.review'").fetchone()[0] == 2
+    # dziennik SETTLUJE od pierwszego skanu: marker stawia już pierwsza porażka odczytu (P4-7),
+    # więc re-odczyt nie dopisuje drugiego alarmu - jeden `frame.review` na zawsze
+    assert con.execute("SELECT count(*) FROM event WHERE verb='frame.review'").fetchone()[0] == 1
     con.close()
 
 
@@ -2059,4 +2061,275 @@ def test_stos_nie_konfliktuje_piksela_znanej_kamery(tmp_path):
     assert (row[0], row[1]) == (3.76, 0)            # piksel archiwum NIETKNIĘTY, zero konfliktu
     assert con.execute(
         "SELECT count(*) FROM event WHERE verb='camera.pixel_conflict'").fetchone()[0] == 0
+    con.close()
+
+
+# ═══════════════ jedna transakcja na rekord skanu (P4-8, AR-21) i marker pierwszej porażki (P4-7)
+
+LATER = "2026-06-29T12:00:00"
+LATEST = "2026-06-30T12:00:00"
+
+
+def _pada_raz(monkeypatch, nazwa):
+    """`repo.<nazwa>` rzuca błąd bazy przy PIERWSZYM wołaniu (awaria w połowie wjazdu rekordu),
+    potem woła oryginał - ponowny odczyt idzie już bez awarii."""
+    import sqlite3
+    from horreum import repo
+    oryginal = getattr(repo, nazwa)
+    stan = {"padlo": False}
+
+    def pada(*a, **k):
+        if not stan["padlo"]:
+            stan["padlo"] = True
+            raise sqlite3.OperationalError("disk I/O error")
+        return oryginal(*a, **k)
+
+    monkeypatch.setattr(repo, nazwa, pada)
+
+
+def test_podmiana_przerwana_po_przepieciu_leczy_sie_ponownym_odczytem(tmp_path, monkeypatch):
+    """P4-8: awaria PO przepięciu lokacji, a PRZED zeznaniem nowej klatki. Do naprawy przepięcie
+    zostawało w bazie, następny skan szedł gałęzią „ta sama tożsamość", a przy nagłówku identycznym
+    z poprzednim (podmienione same piksele) zeznanie nie przychodziło nigdy - klatka bez `header`
+    na stałe. Jedna transakcja cofa całość, więc ponowny odczyt powtarza podmianę od początku."""
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    f = _light(tree / "l.fits", 1)
+    scan_tree(con, tree, volume="VOL1", now=NOW)
+    stara = con.execute("SELECT frame_id, header_hash FROM location").fetchone()
+    f.unlink()
+    _light(f, 2)                                       # te same karty, inne piksele
+    os.utime(f, (1_900_000_000, 1_900_000_000))        # mtime na pewno inny niż przy skanie 1
+    assert scan_file(str(f)).header_hash == stara["header_hash"]
+    _pada_raz(monkeypatch, "record_header")
+    scan_tree(con, tree, volume="VOL1", now=LATER)     # awaria w połowie podmiany
+    assert con.execute("SELECT frame_id FROM location").fetchone()[0] == stara["frame_id"]
+    assert con.execute("SELECT count(*) FROM frame").fetchone()[0] == 1   # nowa klatka cofnięta
+    s = scan_tree(con, tree, volume="VOL1", now=LATEST)                   # ponowny odczyt
+    nowa = con.execute("SELECT frame_id, unreadable_since FROM location").fetchone()
+    assert nowa["frame_id"] != stara["frame_id"]
+    assert con.execute("SELECT count(*) FROM header WHERE frame_id = ?",
+                       (nowa["frame_id"],)).fetchone()[0] == 1
+    assert nowa["unreadable_since"] is None            # marker 'db' zgaszony udanym wjazdem
+    assert (s.frames_new, s.locations_rebound, s.headers) == (1, 1, 1)
+    con.close()
+
+
+def test_nowa_sciezka_przerwana_przed_zeznaniem_wjezdza_cala_przy_ponownym_odczycie(
+        tmp_path, monkeypatch):
+    """AR-21 (b): nowa klatka, lokacja i zeznanie były osobnymi transakcjami. Awaria przed
+    zeznaniem zostawiała klatkę z lokacją (odcisk nagłówka już w niej), a ponowny odczyt szedł
+    gałęzią „ta sama tożsamość" - odcisk bez zmian, więc `header` nie powstawał nigdy. Jedna
+    transakcja: nic z połowy wjazdu; po wycofaniu osobną transakcją wchodzi szkielet z markerem
+    'db' BEZ odcisku nagłówka, więc następny skan wciąga zeznanie i gasi marker."""
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    _light(tree / "l.fits", 1)
+    _pada_raz(monkeypatch, "record_header")
+    scan_tree(con, tree, volume="VOL1", now=NOW)
+    assert [con.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
+            for t in ("frame", "location", "header", "camera")] == [1, 1, 0, 0]
+    szk = con.execute("SELECT header_hash, unreadable_kind FROM location").fetchone()
+    assert (szk["header_hash"], szk["unreadable_kind"]) == (None, "db")
+    s = scan_tree(con, tree, volume="VOL1", now=LATER)
+    assert (s.frames_new, s.locations_new, s.headers_refreshed) == (0, 0, 1)
+    assert con.execute("SELECT count(*) FROM header").fetchone()[0] == 1
+    assert con.execute("SELECT unreadable_since FROM location").fetchone()[0] is None
+    assert con.execute("SELECT kind FROM frame").fetchone()[0] != "unknown"
+    con.close()
+
+
+def test_deterministyczna_awaria_wjazdu_szkielet_z_markerem_db_raz(tmp_path, monkeypatch):
+    """Awaria wjazdu NOWEJ ścieżki, która powtarza się przy każdym odczycie (bug, CHECK): zakres
+    `repo.atomic` wycofuje rekord, a backstop dawał `frame.review` z `sha1='?'` przy KAŻDYM skanie,
+    bez lokacji - kopia znikała z kubełków liczonych ze stanu. Teraz tożsamość z rekordu daje
+    szkielet z markerem 'db' (kubełek „baza"), a drugi skan trafia w znaną ścieżkę bez nowego eventu.
+
+    Falsyfikator: zdejmij `_szkielet_po_awarii_zapisu` z backstopu - lokacji brak, eventy `sha1:?`
+    przyrastają co skan."""
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    _light(tree / "l.fits", 1)
+
+    def _bug(*a, **k):
+        raise RuntimeError("bug w derywacji osi")
+    monkeypatch.setattr("horreum.scan._derive_axes", _bug)
+    s1 = scan_tree(con, tree, volume="VOL1", now=NOW)
+    loc = con.execute("SELECT unreadable_since, unreadable_kind, unreadable_reason, header_hash "
+                      "FROM location").fetchall()
+    assert len(loc) == 1 and loc[0]["unreadable_kind"] == "db", [dict(r) for r in loc]
+    assert loc[0]["unreadable_since"] == NOW and "RuntimeError" in loc[0]["unreadable_reason"]
+    assert con.execute("SELECT kind, camera_id FROM frame").fetchall()[0][:] == ("unknown", None)
+    reviews = con.execute("SELECT target FROM event WHERE verb = 'frame.review'").fetchall()
+    assert len(reviews) == 1 and reviews[0][0] != "sha1:?" and s1.frame_review == 1
+    eventy = con.execute("SELECT count(*) FROM event").fetchone()[0]
+
+    s2 = scan_tree(con, tree, volume="VOL1", now=LATER)
+    assert s2.frame_review == 0 and s2.frames_new == 0
+    assert con.execute("SELECT count(*) FROM event").fetchone()[0] == eventy
+    assert con.execute("SELECT count(*) FROM location").fetchone()[0] == 1
+    con.close()
+
+
+def test_odmowa_straznika_generacji_cofa_kamere_z_odczytu(tmp_path, monkeypatch):
+    """Bliźniak AR-21: kamera z derywacji osi powstawała osobną transakcją przed klingą przepięcia,
+    więc odmowa strażnika generacji (zapis w miejscu w toku) zostawiała w bazie kamerę z rozdartego
+    odczytu. W jednej transakcji odmowa cofa także ją."""
+    from horreum import repo
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    f = _light(tree / "l.fits", 1)
+    scan_tree(con, tree, volume="VOL1", now=NOW)
+    f.unlink()
+    _write_fits(f, cards=[("INSTRUME", "QHY268M"), ("XPIXSZ", 3.76), ("IMAGETYP", "LIGHT")],
+                data=np.full((4, 4), 2, np.uint16))
+
+    def odmowa(*a, **k):
+        raise repo.StaleScanRecord("zapis w miejscu nowszy niż odczyt")
+
+    monkeypatch.setattr(repo, "rebind_location_to_identity", odmowa)
+    with pytest.raises(repo.StaleScanRecord):
+        ingest_record(con, scan_file(str(f)), volume="VOL1", now=LATER, summary=ScanSummary(),
+                      inplace_gen=0)
+    assert con.execute("SELECT count(*) FROM camera").fetchone()[0] == 1   # tylko kamera skanu 1
+    con.close()
+
+
+def test_nowa_sciezka_nieczytelna_ma_marker_z_rodzajem_od_pierwszego_odczytu(tmp_path):
+    """P4-7 / AR-21 (a): pierwsza nieudana próba odczytu NOWEJ kopii stawia marker z rodzajem
+    i powodem. Bez markera szkielet nie mówił, czy winny jest dysk, czy parser, a brama przyrostowa
+    przy tym samym `mtime` pomijała kopię, której nikt już nie czytał. Z markerem brama kopię
+    re-czyta, a powtórna awaria z tą samą diagnozą jest cicha (jeden `frame.review` na zawsze)."""
+    from horreum.resolver import review_state
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    bad = tree / "broken.xisf"
+    bad.write_bytes(b"NOTXISF!" + b"\x00" * 20)
+    scan_tree(con, tree, volume="VOL1", now=NOW)
+    row = con.execute("SELECT unreadable_since, unreadable_kind, unreadable_reason "
+                      "FROM location").fetchone()
+    assert tuple(row) == (NOW, "parse", scan_file(str(bad)).error)
+    s2 = scan_tree(con, tree, volume="VOL1", now=LATER)
+    assert (s2.skipped, s2.frames_new, s2.frame_review) == (0, 0, 0)    # re-odczyt, cisza
+    assert con.execute("SELECT count(*) FROM event WHERE verb='frame.review'").fetchone()[0] == 1
+    assert review_state(con).unreadable_kinds == {"io": 0, "parse": 1, "db": 0, "unknown": 0}
+    con.close()
+
+
+def test_diagnoza_niesie_kod_windows_a_powtorka_tej_samej_awarii_nie_pisze_dziennika(
+        tmp_path, monkeypatch):
+    """P4-6: `OSError` z `winerror` (zerwany udział SMB) mówił „[Errno 22]" - kod z mapy
+    Windows→POSIX („zły argument") zamiast tego, co powiedział system. Strażnik: dwa skany tej
+    samej awarii = zero nowych eventów przy drugim (diagnoza stabilna, bez ścieżki)."""
+    exc = OSError(0, "Nazwa sieciowa jest już niedostępna", r"R:\ASTRO_\l.fits", 64)
+    if getattr(exc, "winerror", None) != 64:
+        pytest.skip("`winerror` istnieje wyłącznie na Windows")
+    assert scan_module.unreadable_reason_of(exc) == (
+        "OSError: [WinError 64] Nazwa sieciowa jest już niedostępna")
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    f = _light(tree / "l.fits", 1)
+    scan_tree(con, tree, volume="VOL1", now=NOW)
+
+    def zerwany(path, **_k):
+        raise OSError(0, "Nazwa sieciowa jest już niedostępna", str(path), 64)
+
+    monkeypatch.setattr(scan_module, "scan_file", zerwany)
+    os.utime(f, (1_900_000_000, 1_900_000_000))        # brama nie pomija - plik „zmieniony"
+    scan_tree(con, tree, volume="VOL1", now=LATER)
+    assert con.execute("SELECT unreadable_kind, unreadable_reason FROM location").fetchone()[:] == (
+        "io", "OSError: [WinError 64] Nazwa sieciowa jest już niedostępna")
+    przed = con.execute("SELECT count(*) FROM event").fetchone()[0]
+    scan_tree(con, tree, volume="VOL1", now=LATEST)
+    assert con.execute("SELECT count(*) FROM event").fetchone()[0] == przed
+    con.close()
+
+
+def test_cli_delta_mowi_rodzaj_kopii_nieczytelnej(tmp_path, capsys):
+    """P4-5: raport `delta` mówił „kopia nieczytelna: N" bez rodzaju - user szukał winy w pliku,
+    choć winny bywa dysk. Rozbicie po kopiach stoi pod wierszem; „baza" i „bez kodu awarii"
+    milczą przy zerze, oba rodzaje o pliku mówią zawsze."""
+    from horreum import cli
+    dbp = str(tmp_path / "cli.db")
+    con = db.open_db(dbp)
+    tree = tmp_path / "t"; tree.mkdir()
+    (tree / "broken.xisf").write_bytes(b"NOTXISF!" + b"\x00" * 20)    # nagłówek (parse)
+    f = _light(tree / "l.fits", 1)
+    scan_tree(con, tree, volume="VOL1", now=NOW)
+    good = scan_file(str(f))
+    ingest_record(con, ScanRecord(path=good.path, size_bytes=good.size_bytes, mtime=good.mtime,
+                                  header=None, error="OSError: [Errno 13] Permission denied",
+                                  error_kind="io", file_sha1=good.file_sha1),
+                  volume="VOL1", now=LATER, summary=ScanSummary())     # dysk/dostęp (io)
+    con.close()
+    assert cli.main(["delta", dbp]) == 0
+    out = capsys.readouterr().out
+    assert "    kopia nieczytelna: 2\n      kopie: dysk/dostep 1, naglowek 1" in out
+    assert "baza" not in out and "bez kodu awarii" not in out.split("kopia nieczytelna")[1]
+
+
+def test_regula_milczenia_rodzajow_ma_jednego_wlasciciela(monkeypatch):
+    """Które rodzaje rozbicia kopii nieczytelnych pokazać (oba o pliku zawsze, 'db'/'unknown' tylko
+    > 0) rozstrzyga rdzeń (`resolver.unreadable_kinds_shown`); raport CLI i zdanie GUI tylko
+    renderują listę. Dowód właściciela: zmiana reguły w rdzeniu przestawia obie powierzchnie.
+
+    Falsyfikator: wróć z regułą do `cli._format_delta` albo `pipeline.unreadable_kinds_text` - ta
+    powierzchnia dalej mówi „naglowek 0" po zmianie reguły w rdzeniu."""
+    from types import SimpleNamespace
+
+    from horreum import cli, resolver
+    zero = {"io": 2, "parse": 0, "db": 0, "unknown": 0}
+    assert resolver.unreadable_kinds_shown(zero) == [("io", 2), ("parse", 0)]
+    assert resolver.unreadable_kinds_shown({"io": 0, "parse": 0, "db": 1, "unknown": 3}) == [
+        ("io", 0), ("parse", 0), ("db", 1), ("unknown", 3)]
+
+    monkeypatch.setattr(resolver, "_UNREADABLE_KINDS_ALWAYS", ("io",))
+    rv = resolver.ReviewState(unreadable=1, total=1, unreadable_kinds=zero)
+    rep = SimpleNamespace(**dict.fromkeys(
+        ("object_resolved", "object_unresolved", "object_pct", "object_cleared_named",
+         "object_nameless", "object_resolved_no_raw", "object_cleared_nameless",
+         "object_nameless_raw", "object_nameless_stacks", "filters_canon"), 0),
+        object_delta=[], review=rv)
+    assert cli._format_delta("x.db", rep).endswith("\n      kopie: dysk/dostep 2")
+    pytest.importorskip("PySide6")
+    from horreum.gui import i18n, pipeline
+    assert i18n.t("object.unreadable_kind_parse", n=0) not in pipeline.unreadable_kinds_text(zero)
+
+
+def test_review_state_licznik_i_rozbicie_nieczytelnych_z_jednej_migawki(tmp_path):
+    """Kubełek `unreadable` i jego rozbicie po rodzaju liczyły dwa osobne SELECT-y na połączeniu
+    bez transakcji (GUI, CLI) - równoległy skan gaszący marker między nimi dawał „nieczytelne 1"
+    przy rozbiciu z samych zer. Teraz oba z jednego zapytania.
+
+    Atrapa połączenia: drugi pisarz gasi marker tuż przed zapytaniem następnym po pierwszym
+    zapytaniu o markery. Falsyfikator: wróć do osobnego zapytania o rozbicie - licznik 1,
+    rozbicie 0."""
+    import sqlite3
+
+    from horreum import resolver
+    dbp = str(tmp_path / "m.db")
+    con = db.open_db(dbp)
+    tree = tmp_path / "t"; tree.mkdir()
+    (tree / "broken.xisf").write_bytes(b"NOTXISF!" + b"\x00" * 20)    # kopia z markerem 'parse'
+    scan_tree(con, tree, volume="VOL1", now=NOW)
+    con.commit()
+    pisarz = sqlite3.connect(dbp)
+
+    class _Wyscig:
+        def __init__(self, con_):
+            self._con, self._po_markerze, self._zrobione = con_, False, False
+
+        def execute(self, sql, *a):
+            if self._po_markerze and not self._zrobione:
+                self._zrobione = True
+                pisarz.execute("UPDATE location SET unreadable_since = NULL, "
+                               "unreadable_kind = NULL, unreadable_reason = NULL")
+                pisarz.commit()
+            if "unreadable_since IS NOT NULL" in sql:
+                self._po_markerze = True
+            return self._con.execute(sql, *a)
+
+    st = resolver.review_state(_Wyscig(con))
+    pisarz.close()
+    assert st.unreadable == sum(st.unreadable_kinds.values()) == 1, st
     con.close()

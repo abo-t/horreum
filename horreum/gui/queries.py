@@ -20,6 +20,7 @@ from horreum.naming import header_dt
 from horreum.repo import (INPLACE_ISOLATING_PHASES,   # fazy izolujące zapisu w miejscu (0022)
                           INPLACE_OPEN_PHASES)        # ...i ich podzbiór otwarty
 from horreum.resolve._coerce import _to_float, _to_int, _to_text
+from horreum.resolve._text import norm_alnum
 from horreum.resolve.frames import LIGHT_KINDS
 from horreum.resolve.headers import COPY_TESTIMONY_KEYWORDS, copy_testimony
 from horreum.resolve.objects import CLEARABLE_OBJECT_SOURCES, WEAK_OBJECT_SOURCES
@@ -377,8 +378,9 @@ def library_objects(con, *, telescope_id=None, camera_id=None, filter_canon=None
     kroku 5a — i NIE jest zwracane ani używane jako predykat; widok renderuje `canon`/`catalog`).
     `telescope_id` = id KANONICZNEGO teleskopu (dopasowanie przez `telescope_canonical.canon_id`, więc
     klatki spod scalonych członków rolują się pod kanon). JOIN (nie LEFT) frame→object: obiekt bez
-    klatek po filtrze znika z widoku (poprawne — filtr zawęża). Zwraca: id, canon, catalog, frame_count."""
-    return con.execute(
+    klatek po filtrze znika z widoku (poprawne - filtr zawęża). Zwraca: id, canon, catalog, frame_count.
+    Porządek NATURALNY (`natural_key`, W-9): `NGC 891` przed `NGC 7000`, nie po znakach."""
+    return _po_nazwie_naturalnie(con.execute(
         "SELECT o.id, o.canon, o.catalog, COUNT(f.id) AS frame_count "
         "FROM object o "
         "JOIN frame f ON f.object_id = o.id "
@@ -388,10 +390,9 @@ def library_objects(con, *, telescope_id=None, camera_id=None, filter_canon=None
         "  AND (? IS NULL OR tc.canon_id = ?) "
         "  AND (? IS NULL OR f.camera_id = ?) "
         "  AND (? IS NULL OR f.filter_canon = ?) "
-        "GROUP BY o.id "
-        "ORDER BY o.canon",
+        "GROUP BY o.id",
         (telescope_id, telescope_id, camera_id, camera_id, filter_canon, filter_canon),
-    ).fetchall()
+    ).fetchall(), "canon")
 
 
 def object_frames(con, object_id, *, telescope_id=None, camera_id=None, filter_canon=None):
@@ -449,6 +450,12 @@ def natural_key(s):
     porządku całkowitego, dokłada surową nazwę jako człon następny."""
     return tuple(int(czlon) if i % 2 else czlon.casefold()
                  for i, czlon in enumerate(_CZLONY_LICZBOWE.split(s)))
+
+
+def _po_nazwie_naturalnie(wiersze, pole):
+    """Wiersze posortowane naturalnie po polu `pole` (W-9); surowa nazwa jako człon następny
+    daje porządek całkowity (`natural_key` jest ślepy na wielkość liter)."""
+    return sorted(wiersze, key=lambda r: (natural_key(r[pole] or ""), r[pole] or ""))
 
 
 def review_queue(con):
@@ -1068,29 +1075,6 @@ def unreadable_copies(con):
     ).fetchall()
 
 
-def unreadable_kind_counts(con):
-    """Rozbicie oznaczonych kopii po RODZAJU awarii (P4-2) dla wiersza kubełka „kopie nieczytelne":
-    `{"io": n, "parse": n, "db": n, "unknown": n}`. „db" to błąd bazy po naszej stronie (zapis
-    wyniku odczytu albo brama przyrostowa) - osobno, bo nie mówi nic o pliku i ma własną drogę
-    naprawy. „unknown" to rodzaj nieznany: kopie oznaczone przed migracją 0019 ALBO wyjątek bez kodu
-    systemu, którego nie dało się rozstrzygnąć - rodzaj może się pojawić przy najbliższym re-odczycie.
-
-    Liczone PO KOPIACH, choć licznik kubełka (`unreadable_count`) liczy KLATKI: klatka z dwiema
-    kopiami może mieć dwa różne rodzaje (jedna na zerwanym udziale, druga z zepsutym nagłówkiem),
-    więc rozbicie klatek po rodzaju nie sumowałoby się do niczego. Liczba kopii jest jedyną, która
-    się sumuje - i to do długości drążenia (`unreadable_copies`, ten sam predykat markera i ten sam
-    zakres klatek: bez zastąpionych i wycofanych), czyli do tego, co user zobaczy po kliknięciu."""
-    counts = {"io": 0, "parse": 0, "db": 0, "unknown": 0}
-    for row in con.execute(
-            "SELECT l.unreadable_kind AS kind, count(*) AS n "
-            "FROM location l JOIN frame f ON f.id = l.frame_id "
-            "WHERE l.unreadable_since IS NOT NULL "
-            "AND f.superseded_by IS NULL AND f.retired_at IS NULL "
-            "GROUP BY l.unreadable_kind"):
-        counts[row["kind"] or "unknown"] = row["n"]
-    return counts
-
-
 def park_overview(con):
     """Przegląd parku (T4/T5): kanoniczne teleskopy z licznikiem lightów, ostatnią klatką i stanem
     `in_park` (1 = w parku, 0 = historyczny, NULL = user się nie wypowiedział).
@@ -1121,11 +1105,10 @@ def object_ids_for_canons(con, canons):
     ORAZ `LBN807`, D-T2-d) — most ma pokazać SUMĘ klatek celu, nie jedną z nazw. Lista idzie
     przez `json_each(?)` (literał stały, jeden parametr — reguła nagłówka pliku); kanon nieznany
     bazie po prostu nie ma wiersza, bo „cel bez klatek" to stan, nie błąd."""
-    return con.execute(
-        "SELECT id, canon FROM object WHERE canon IN (SELECT value FROM json_each(?)) "
-        "ORDER BY canon",
+    return _po_nazwie_naturalnie(con.execute(
+        "SELECT id, canon FROM object WHERE canon IN (SELECT value FROM json_each(?))",
         (json.dumps(list(canons)),),
-    ).fetchall()
+    ).fetchall(), "canon")
 
 
 def telescope_facets(con):
@@ -1243,15 +1226,15 @@ def keyword_facets(con):
 
 def facet_objects(con, frame_ids):
     """Kubełki facetu Obiekt: kanoniczne obiekty w zbiorze + liczność. `object_id IS NULL` wypada
-    JOIN-em (kalibracja bez obiektu — poprawnie poza listą). ORDER canon (lista pod szukajkę).
-    Zwraca: id, canon, n."""
-    return con.execute(
+    JOIN-em (kalibracja bez obiektu - poprawnie poza listą). Porządek naturalny po canon (lista
+    pod szukajkę, W-9). Zwraca: id, canon, n."""
+    return _po_nazwie_naturalnie(con.execute(
         "SELECT o.id, o.canon, COUNT(*) AS n "
         "FROM frame f JOIN object o ON o.id = f.object_id "
         "WHERE f.id IN (SELECT value FROM json_each(?)) "
-        "GROUP BY o.id ORDER BY o.canon",
+        "GROUP BY o.id",
         (json.dumps(list(frame_ids)),),
-    ).fetchall()
+    ).fetchall(), "canon")
 
 
 def object_alias_index(con):
@@ -1271,6 +1254,33 @@ def object_alias_index(con):
             "FROM object_alias a JOIN object o ON o.id = a.object_id").fetchall():
         idx.setdefault(canon, set()).add(alias)
     return idx
+
+
+def alias_header_forms(con):
+    """Mapa `alias_norm → brzmienie z nagłówka` dla aliasów, które przyszły z karty `OBJECT` (AR-15).
+
+    `object_alias` trzyma wyłącznie klucz (`ELEPHANTSTRUNKNEBULA`, `KSIEZYC`), a czytelne brzmienie
+    leży w tym samym miejscu, z którego reszta UI pokazuje nazwę obiektu z pliku: `header.object_raw`.
+    Klucz zostaje kluczem - ta mapa służy wyłącznie do pokazania aliasu, niczego nie dopasowuje.
+
+    Forma = brzmienie NAJCZĘSTSZE wśród zeznań o tym kluczu (tak user podpisuje klatki), remis
+    rozstrzyga pierwsze spotkane (`MIN(frame_id)`) - deterministycznie, bez skaczącej etykiety.
+    Normalizacja `norm_alnum` w Pythonie, bo SQL jej nie zna; zakres = klucze obecne w `object_alias`.
+    Alias bez zeznania (gest ręki na RAW, wpis słownika) w mapie nie ma wpisu."""
+    klucze = {r[0] for r in con.execute("SELECT alias_norm FROM object_alias")}
+    if not klucze:
+        return {}
+    najlepsze = {}
+    for raw, n, pierwsza in con.execute(
+            "SELECT object_raw, COUNT(*) AS n, MIN(frame_id) AS pierwsza FROM header "
+            "WHERE object_raw IS NOT NULL GROUP BY object_raw").fetchall():
+        klucz = norm_alnum(str(raw))
+        if klucz not in klucze:
+            continue
+        ranga = (-n, pierwsza)
+        if klucz not in najlepsze or ranga < najlepsze[klucz][0]:
+            najlepsze[klucz] = (ranga, str(raw).strip())
+    return {k: forma for k, (_r, forma) in najlepsze.items()}
 
 
 def recent_hand_objects(con, limit=5):
@@ -2494,7 +2504,8 @@ def perspectives(con):
     więc pomija je bez wyjątku (§4.3 briefu) - ale od D-V-9f NIE bez słowa: pasek kryteriów
     nazywa pominięte warunki (`grid._nieznane_warunki`), bo pominięcie poszerza zbiór."""
     out = []
-    for r in con.execute("SELECT name, spec_json FROM saved_query ORDER BY name").fetchall():
+    for r in _po_nazwie_naturalnie(
+            con.execute("SELECT name, spec_json FROM saved_query").fetchall(), "name"):
         try:
             spec = json.loads(r["spec_json"])
         except (ValueError, TypeError):
@@ -2928,7 +2939,7 @@ def restore_targets(con, frame_ids):
                                               "catalog": r["catalog"], "kind": r["kind"],
                                               "frame_ids": []})
         g["frame_ids"].append(r["frame_id"])
-    return list(grupy.values()), pominiete
+    return _po_nazwie_naturalnie(grupy.values(), "canon"), pominiete
 
 
 def rename_frame_targets(con, frame_ids):
@@ -3013,6 +3024,29 @@ def db_path_of(con):
     return None
 
 
+def copy_facts_class(con, *, porownywalne=False) -> list[int]:
+    """KLASA KANDYDATA uzupełnienia faktów kopii (0021) - id klatek (rosnąco), których kopie
+    uzupełnienie w ogóle czyta: XISF (liczba i role obrazów żyją tylko tam; nie w trybie
+    `porownywalne`) albo klatka z więcej niż jedną lokacją OGÓŁEM (tylko tam jest z czym porównywać
+    zeznanie). Pojedynczy FITS do klasy nie należy - fakty dostaje przy najbliższym odczycie skanem.
+
+    JEDYNY LITERAŁ TEJ REGUŁY (SPOT, AR-35): czyta go `scan.copy_facts_candidates` (etap Dostawy,
+    liczniki „nie wiem") i read-model gridu (`base_rows`, flaga `copy_facts_class` → „?" w kolumnie
+    „Obrazy"). Dawniej komórka liczyła klasę lustrem po stronie Pythona - etap, który fakty zbiera,
+    i komórka, która mówi „jeszcze nie wiem", mogły rozjechać się co do tego, kto czeka.
+
+    Mieszka w read-modelu, nie w `scan`: predykat jest czystym odczytem, a `scan` ciągnie numpy
+    i astropy - import stąd łamałby konwencję „queries bez astropy" (konsumenci CLI: `sky`,
+    `targets`, `presence`, `projection`). `scan` importuje ten moduł leniwie (wzór
+    `orphan_testimony_routes`)."""
+    return [r[0] for r in con.execute(
+        "SELECT f.id FROM frame f "
+        "WHERE (f.filetype = 'xisf' AND ? = 0) OR f.id IN ("
+        "       SELECT frame_id FROM location GROUP BY frame_id HAVING COUNT(*) > 1) "
+        "ORDER BY f.id",
+        (int(porownywalne),))]
+
+
 def base_rows(con, frame_ids):
     """Kolumny BAZOWE gridu (warstwa interpretacji NAD lustrem cards) dla zbioru frame_id. Location przez
     `MIN(id)` **SPOŚRÓD OBECNYCH**, z powrotem do dowolnej, gdy żadna nie jest obecna (D-V-9, decyzja
@@ -3054,9 +3088,15 @@ def base_rows(con, frame_ids):
     tablica JSON (`json_each`). Zwraca W TEJ KOLEJNOŚCI: frame_id, kind, filetype, filter_canon,
     camera_model, telescope_label, telescop_canon, object_canon, object_raw, object_source,
     object_cleared_canon, date_obs, exptime, path, present, last_verified_at, superseded_by,
-    retired_at, n_present, n_vanished, vanished_path, image_count. Wiersze czyta się po NAZWIE
-    (`sqlite3.Row`), ale kolejność w tym zdaniu ma zgadzać się z SELECT-em - rozjazd był zarzutem
-    bramki 0809 i jest tańszy do naprawienia niż do wytłumaczenia następnej sesji.
+    retired_at, n_present, n_vanished, vanished_path, image_count, copy_facts_class. Wiersze czyta
+    się po NAZWIE (`sqlite3.Row`), ale kolejność w tym zdaniu ma zgadzać się z SELECT-em - rozjazd
+    był zarzutem bramki 0809 i jest tańszy do naprawienia niż do wytłumaczenia następnej sesji.
+
+    `copy_facts_class` (0/1, AR-35) = klatka należy do KLASY kandydata uzupełnienia faktów kopii
+    (`copy_facts_class`: XISF albo >1 lokacja ogółem) - komórka „Obrazy" mówi przy niej „?"
+    zamiast pustki. Zbiór klatek liczy JEDEN literał (`copy_facts_class`), tu jest tylko przynależność;
+    dawniej komórka powtarzała ten predykat lustrem po stronie Pythona (SIN-DUP). Koszt: jeden
+    SELECT klasy (~550 klatek kopii archiwum, ~9 ms na kopii żywej bazy) na wywołanie.
 
     `image_count` (0021) to liczba obrazów POKAZANEJ kopii - karmi kolumnę „Obrazy". Klatka z kilkoma
     obecnymi kopiami dostaje w gridzie wszystkie różne wartości z `present_copy_facts` (osobne, wąskie
@@ -3099,7 +3139,8 @@ def base_rows(con, frame_ids):
         "       (SELECT COUNT(*) FROM location lv WHERE lv.frame_id = f.id AND lv.present = 0) AS n_vanished, "
         "       (SELECT lw.path FROM location lw WHERE lw.frame_id = f.id AND lw.present = 0 "
         "         ORDER BY lw.id LIMIT 1) AS vanished_path, "
-        "       CASE WHEN loc.present = 1 THEN loc.image_count END AS image_count "
+        "       CASE WHEN loc.present = 1 THEN loc.image_count END AS image_count, "
+        "       f.id IN (SELECT value FROM json_each(?)) AS copy_facts_class "
         "FROM frame f "
         "LEFT JOIN header h ON h.frame_id = f.id "
         "LEFT JOIN config c ON c.id = f.config_id "
@@ -3113,7 +3154,7 @@ def base_rows(con, frame_ids):
         "        (SELECT MIN(id) FROM location WHERE frame_id = f.id)) "
         "WHERE f.id IN (SELECT value FROM json_each(?)) "
         "ORDER BY f.id",
-        (json.dumps(list(frame_ids)),),
+        (json.dumps(copy_facts_class(con)), json.dumps(list(frame_ids))),
     ).fetchall()
 
 # --- TODO-DŁUG (z kolejki sesji, dieta 2026-08-10; pełne brzmienia: archiwum aa) ---

@@ -258,16 +258,27 @@ def test_view_przetworz_wszystko_w_watku(qapp, tmp_path):
 
 # --- F5 (Dostawa): świeży serial, „Przyjmij nowe", guard mieszania serialu ---
 
-def test_scan_params_liczy_serial_swiezo(qapp, tmp_path, monkeypatch):
-    """R#7+R2-3: wartość do bramy `(volume,path,mtime)` ZAWSZE ze startu sekwencji — nigdy
-    z montażu/pamięci (stale po przepięciu dysku w trakcie sesji)."""
+def test_serial_liczony_swiezo_w_watku_tla_na_starcie_skanu(qapp, tmp_path, monkeypatch):
+    """R#7+R2-3: wartość do bramy `(volume,path,mtime)` ZAWSZE ze startu przebiegu - nigdy
+    z montażu/pamięci (stale po przepięciu dysku w trakcie sesji). AR-31 (3): mierzy ją wątek
+    tła (`_zrodlo`), więc parametry okna woluminu w ogóle nie niosą, a wynik pomiaru wraca do
+    okna sygnałem `source_ready` i ląduje w lokacjach skanu."""
     import horreum.gui.pipeline as pl
     view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
-    view._root = _tree(tmp_path, 1)
-    monkeypatch.setattr(pl, "volume_serial", lambda p: "FRESH")
-    assert view._scan_params()["volume"] == "FRESH"
-    monkeypatch.setattr(pl, "volume_serial", lambda p: None)
-    assert view._scan_params()["volume"] == "?"        # nieustalony → pełny skan (kontrakt bramy)
+    tree = _tree(tmp_path, 1)
+    assert "volume" not in view._scan_params(tree)     # okno nie mierzy serialu
+    for serial, oczekiwany in (("FRESH", "FRESH"), (None, "?")):   # nieustalony → '?' (pełny skan)
+        monkeypatch.setattr(pl, "volume_serial", lambda p, _s=serial: _s)
+        db_path = _fresh_db(tmp_path, name=f"s{oczekiwany == '?'}.db")
+        w = PipelineWorker(db_path, now_fn=lambda: NOW)
+        w.configure("scan", **view._scan_params(tree))
+        gotowe = []
+        w.source_ready.connect(lambda r, v: gotowe.append((r, v)))
+        w.run()
+        assert gotowe == [(tree, oczekiwany)]
+        con = db.open_db(db_path)
+        assert {r[0] for r in con.execute("SELECT volume FROM location")} == {oczekiwany}
+        con.close()
 
 
 def test_receive_z_pamiecia_startuje_cala_sekwencje(qapp, tmp_path, monkeypatch, ustawienia):
@@ -323,8 +334,10 @@ def test_pick_dir_zapisuje_last_source(qapp, tmp_path, monkeypatch, ustawienia):
 
 
 def test_serial_guard_wstrzymuje_skan_mieszany(qapp, tmp_path, monkeypatch):
-    """F5R#3: serial '?' do bazy znającej realny wolumen = STOP przed startem wątku (skan '?' by
-    PODWOIŁ lokacje każdej znanej klatki — brama nie trafi, UNIQUE(volume,path) wpuści drugą)."""
+    """F5R#3: serial '?' do bazy znającej realny wolumen = STOP przed pierwszym plikiem (skan '?' by
+    PODWOIŁ lokacje każdej znanej klatki - brama nie trafi, UNIQUE(volume,path) wpuści drugą).
+    AR-31 (3): serial mierzy wątek tła, więc i guard stoi tam - wstrzymanie wraca `start_refused`
+    i okno pokazuje je tym samym wierszem błędu; baza bez nowej lokacji, raport bez linii skanu."""
     import horreum.gui.pipeline as pl
     from horreum import repo
     db_path = _fresh_db(tmp_path)
@@ -336,9 +349,16 @@ def test_serial_guard_wstrzymuje_skan_mieszany(qapp, tmp_path, monkeypatch):
     view = PipelineView(db_path, now_fn=lambda: NOW)
     view._root = _tree(tmp_path, 1)
     monkeypatch.setattr(pl, "volume_serial", lambda p: None)
+    loop = QEventLoop()
+    view.running_changed.connect(lambda r: loop.quit() if r is False else None)
+    QTimer.singleShot(15000, loop.quit)
     view._on_scan()
-    assert view._thread is None                        # wstrzymane PRZED startem wątku
+    loop.exec()
     assert not view.lbl_error.isHidden() and "wolumen nieustalony" in view.lbl_error.text()
+    assert "[skan]" not in view.lbl_summary.text()
+    con = db.open_db(db_path)
+    assert con.execute("SELECT COUNT(*) FROM location").fetchone()[0] == 1   # tylko VOL1
+    con.close()
 
 
 def test_serial_guard_przepuszcza_czysty_swiat(qapp, tmp_path, monkeypatch):
@@ -658,3 +678,354 @@ def test_stacks_przycisk_wymaga_samej_bazy(qapp, tmp_path):
     view2 = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
     assert view2.btn_stacks.isEnabled() is True        # mimo braku wskazanego katalogu
     assert view2.btn_scan.isEnabled() is False         # …a skan wymaga katalogu
+
+
+def _szpieg_dysku(monkeypatch, fragment):
+    """Lista dotknięć dysku W WĄTKU OKNA na ścieżkach zawierających `fragment` (wzorzec testów
+    AR-31 (3) w `test_gui_izolacja_zapisu.py`): `isdir`, `exists`, `stat`, `Path.is_dir`, serial
+    woluminu i kanonizacja korzenia. Wątek tła dotyka dysku legalnie - nie jest liczony."""
+    import threading
+    import horreum.gui.pipeline as pl
+    from horreum import scan
+    w_oknie = []
+
+    def _szpieg(nazwa, prawdziwa):
+        def _f(sciezka, *a, **kw):
+            if (threading.current_thread() is threading.main_thread()
+                    and fragment in str(sciezka)):
+                w_oknie.append((nazwa, str(sciezka)))
+            return prawdziwa(sciezka, *a, **kw)
+        return _f
+    monkeypatch.setattr(os.path, "isdir", _szpieg("isdir", os.path.isdir))
+    monkeypatch.setattr(os.path, "exists", _szpieg("exists", os.path.exists))
+    monkeypatch.setattr(os, "stat", _szpieg("stat", os.stat))
+    monkeypatch.setattr(Path, "is_dir", _szpieg("Path.is_dir", Path.is_dir))
+    monkeypatch.setattr(pl, "volume_serial", _szpieg("volume_serial", pl.volume_serial))
+    monkeypatch.setattr(scan, "canonize_root", _szpieg("canonize_root", scan.canonize_root))
+    return w_oknie
+
+
+# --- droga „Stosy": serial i guard w wątku tła (AR-31 (3)) ---
+
+def test_stosy_nie_dotykaja_dysku_w_oknie_i_nie_zmieniaja_zrodla(qapp, tmp_path, monkeypatch,
+                                                                   ustawienia):
+    """AR-31 (3), bliźniak „Przyjmij nowe": `_on_stacks` mierzył `volume_serial` korzenia stosów
+    w slocie okna zaraz po dialogu - na odłączonym udziale SMB okno stało do timeoutu sieci. Teraz
+    slot podaje sam napis ścieżki, a serial i guard mieszania robi wątek tła. Korzeń stosów NIE
+    zostaje wskazanym katalogiem trybu zaawansowanego (to drzewo obróbki, nie źródło archiwum).
+
+    Falsyfikator: przywróć w `_on_stacks` `volume_serial(root)` → lista dotknięć nie jest pusta;
+    zdejmij `wskaz=False` w `_stacks` → `_root` dostaje korzeń stosów."""
+    from PySide6.QtWidgets import QFileDialog
+    tree = _stack_tree(tmp_path)
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: tree))
+    w_oknie = _szpieg_dysku(monkeypatch, "obrobka")
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    try:
+        view._on_stacks()
+        assert w_oknie == [], w_oknie
+        assert view._thread is not None
+        _czekaj_na_etap(view)
+        assert "[stosy] wciągnięte 2 z 2" in view.lbl_summary.text(), view.lbl_summary.text()
+        assert view._root is None and view.lbl_root.text() == i18n.t("pipeline.root_none")
+        assert ustawienia.value("stacks/last_root") == tree
+        assert w_oknie == [], w_oknie
+    finally:
+        view.close()
+
+
+def test_stosy_na_niedostepnym_korzeniu_wracaja_stanem_i_pytaja_znow_o_korzen(
+        qapp, tmp_path, monkeypatch, ustawienia):
+    """Korzeń stosów, którego wątek tła nie widzi jako katalogu: własna linia „[stosy] NIE
+    WYKONANO", zdanie „Źródło niedostępne - wskaż katalog" z przyciskiem, a przycisk pyta znów
+    o korzeń STOSÓW (dialog z `stacks/last_root`), nie o źródło archiwum."""
+    from PySide6.QtWidgets import QFileDialog
+    brak = str(tmp_path / "odlaczony" / "obrobka")
+    tree = _stack_tree(tmp_path)
+    odpowiedzi = [brak, tree]
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory",
+                        staticmethod(lambda *a, **k: odpowiedzi.pop(0)))
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    try:
+        view._on_stacks()
+        _czekaj_na_etap(view)
+        linia = i18n.t("pipeline.fmt.stacks_not_done",
+                       reason=i18n.t("pipeline.source.unreachable", root=brak))
+        assert view.lbl_summary.text() == linia, view.lbl_summary.text()
+        assert not view.btn_pick_source.isHidden() and view.btn_pick_source.isEnabled()
+        view.btn_pick_source.click()
+        assert odpowiedzi == [] and view._thread is not None
+        _czekaj_na_etap(view)
+        assert "[stosy] wciągnięte 2 z 2" in view.lbl_summary.text(), view.lbl_summary.text()
+        assert ustawienia.value("stacks/last_root") == tree
+        assert not ustawienia.contains("pipeline/last_source")
+    finally:
+        view.close()
+
+
+def test_stosy_guard_mieszania_serialu_w_watku_tla(qapp, tmp_path, monkeypatch, ustawienia):
+    """F5R#3 dla drogi „Stosy": serial '?' do bazy znającej realny wolumen = STOP przed pierwszym
+    plikiem. Guard przeszedł z okna do wątku tła razem z pomiarem serialu - wstrzymanie wraca
+    `start_refused` tym samym wierszem błędu, baza bez nowej lokacji."""
+    import horreum.gui.pipeline as pl
+    from horreum import repo
+    from PySide6.QtWidgets import QFileDialog
+    db_path = _fresh_db(tmp_path)
+    con = db.open_db(db_path)
+    fid, _ = repo.upsert_frame(con, sha1_data="sha-g", kind="light", filetype="fits",
+                               camera_id=None, now=NOW)
+    repo.add_location(con, frame_id=fid, volume="VOL1", path="/x/g.fits", now=NOW)
+    con.close()
+    tree = _stack_tree(tmp_path)
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: tree))
+    monkeypatch.setattr(pl, "volume_serial", lambda p: None)
+    view = PipelineView(db_path, now_fn=lambda: NOW)
+    try:
+        view._on_stacks()
+        assert view._thread is not None                 # okno nie rozstrzyga - wątek tła
+        _czekaj_na_etap(view)
+        assert not view.lbl_error.isHidden() and "wolumen nieustalony" in view.lbl_error.text()
+        assert "[stosy]" not in view.lbl_summary.text()
+        con = db.open_db(db_path)
+        assert con.execute("SELECT COUNT(*) FROM location").fetchone()[0] == 1
+        con.close()
+    finally:
+        view.close()
+
+
+# --- gest „Zbierz fakty kopii (N)": dwa etapy łańcucha bez skanu ---
+
+def _kopie_bez_faktow(tmp_path):
+    """Jedna klatka, dwie kopie FITS wciągnięte BEZ faktów kopii (jak sprzed 0021) - obie są
+    kandydatami `scan.copy_facts_candidates`. Zwraca (ścieżka bazy, katalog kopii)."""
+    from horreum import repo, scan
+    kat = tmp_path / "kopie"
+    kat.mkdir()
+    db_path = _fresh_db(tmp_path)
+    con = db.open_db(db_path)
+    for nazwa in ("a.fits", "b.fits"):
+        rec = scan.scan_file(str(_fits(kat / nazwa, 7)))
+        fid, _ = repo.upsert_frame(con, sha1_data=rec.sha1_data, kind="light", filetype="fits",
+                                   camera_id=None, now=NOW)
+        repo.add_location(con, frame_id=fid, volume="V", path=rec.path,
+                          header_hash=rec.header_hash, now=NOW)
+    con.close()
+    return db_path, str(kat)
+
+
+def _bez_faktow(db_path):
+    con = db.open_db(db_path)
+    try:
+        return con.execute("SELECT COUNT(*) FROM location WHERE hdr_hash IS NULL").fetchone()[0]
+    finally:
+        con.close()
+
+
+def test_gest_fakty_kopii_widoczny_tylko_gdy_jest_co_zbierac(qapp, tmp_path):
+    """Przycisk „Zbierz fakty kopii (N)" stoi obok złotej akcji WYŁĄCZNIE przy N > 0, z liczbą
+    z tego samego predykatu co wiersz „?" w Porządkach (bez korzenia). Po przebiegu znika.
+
+    Falsyfikator: zdejmij `setVisible(n > 0)` z `_sync_copy_facts` → pierwsza asercja pada."""
+    pusta = PipelineView(_fresh_db(tmp_path, name="pusta.db"), now_fn=lambda: NOW)
+    bez_bazy = PipelineView(None, now_fn=lambda: NOW)
+    try:
+        assert pusta.btn_copy_facts.isHidden() and not pusta.btn_copy_facts.isEnabled()
+        assert bez_bazy.btn_copy_facts.isHidden()
+    finally:
+        pusta.close()
+        bez_bazy.close()
+    db_path, _kat = _kopie_bez_faktow(tmp_path)
+    view = PipelineView(db_path, now_fn=lambda: NOW)
+    try:
+        assert not view.btn_copy_facts.isHidden() and view.btn_copy_facts.isEnabled()
+        assert view.btn_copy_facts.text() == i18n.t("pipeline.btn.copy_facts", n=2)
+        assert view.btn_copy_facts.toolTip() == i18n.t_plural("pipeline.tip.copy_facts", 2)
+        view.btn_copy_facts.click()
+        _czekaj_na_etap(view)
+        assert _bez_faktow(db_path) == 0, (view.lbl_summary.text(), view.lbl_error.text())
+        assert view.btn_copy_facts.isHidden() and not view.btn_copy_facts.isEnabled()
+    finally:
+        view.close()
+
+
+def test_gest_fakty_kopii_woła_dokladnie_fakty_i_przejecie_bez_skanu(qapp, tmp_path, monkeypatch):
+    """Gest idzie drogą ogona „Oznacz zniknięte" (`_adopt_and_derive`): `_copy_facts` →
+    `_adopt_testimony`, te same funkcje rdzenia, bez zawężenia do korzenia (licznik i wiersz „?"
+    liczą bez korzenia). Ani skanu, ani passa obecności, ani sondy źródła; bez przejęcia
+    zeznania także bez etapów masowych (pochodne tylko po realnym przejęciu - osobny test).
+
+    Falsyfikator: dołóż w `_adopt_and_derive` `self._scan(con)` → wołania zawierają skan."""
+    from horreum import scan
+    db_path, _kat = _kopie_bez_faktow(tmp_path)
+    wolane = []
+    for nazwa in ("_adopt_and_derive", "_copy_facts", "_adopt_testimony", "_scan", "_stacks",
+                  "_bulk", "_presence", "_zrodlo"):
+        prawdziwa = getattr(PipelineWorker, nazwa)
+
+        def _f(self, *a, _n=nazwa, _p=prawdziwa, **kw):
+            wolane.append(_n)
+            return _p(self, *a, **kw)
+        monkeypatch.setattr(PipelineWorker, nazwa, _f)
+    korzenie = []
+    prawdziwy_backfill = scan.backfill_copy_facts
+    monkeypatch.setattr(scan, "backfill_copy_facts",
+                        lambda con, **kw: korzenie.append(kw.get("root")) or
+                        prawdziwy_backfill(con, **kw))
+    w = PipelineWorker(db_path, now_fn=lambda: NOW)
+    w.configure("copy_facts")
+    started, done, failed = [], [], []
+    w.stage_started.connect(started.append)
+    w.stage_done.connect(lambda name, s: done.append((name, s)))
+    w.failed.connect(lambda n, m: failed.append((n, m)))
+    w.run()
+    assert failed == []
+    assert wolane == ["_adopt_and_derive", "_copy_facts", "_adopt_testimony"], wolane
+    assert korzenie == [None]
+    assert started == ["copy_facts"] and [n for n, _ in done] == ["copy_facts"]
+    assert (done[0][1].rows, done[0][1].written) == (2, 2)
+    assert _bez_faktow(db_path) == 0
+
+
+@pytest.mark.parametrize("przejecie, pochodne", [
+    (dict(adopted=1), ["group", "resolve", "calibrate", "lineage"]),
+    (dict(adopted=0), []),
+    (dict(adopted=1, cancelled=True), []),
+    (None, []),
+])
+def test_gest_fakty_kopii_pochodne_wylacznie_po_realnym_przejeciu(qapp, tmp_path, monkeypatch,
+                                                                   przejecie, pochodne):
+    """Przejęcie zeznania zmienia `header`, z którego liczą się pochodne - więc po REALNYM
+    przejęciu gest puszcza `group` → `resolve` → `calibrate` → `lineage` (kolejność Dostawy),
+    a bez niego (zero przejętych, anulowanie, brak kandydatów) nie rusza żadnego etapu masowego.
+    Delty i obecności nie ma w żadnym wariancie - to nie dostawa.
+
+    Falsyfikator: zdejmij `not a.adopted` ze straży `_adopt_and_derive` → wariant zero przejętych
+    liczy całe archiwum."""
+    from horreum import scan
+    db_path, _kat = _kopie_bez_faktow(tmp_path)
+    masowe = []
+    monkeypatch.setattr(PipelineWorker, "_bulk", lambda self, con, name: masowe.append(name))
+    monkeypatch.setattr(
+        PipelineWorker, "_adopt_testimony",
+        lambda self, con: None if przejecie is None else scan.AdoptSummary(rows=1, **przejecie))
+    w = PipelineWorker(db_path, now_fn=lambda: NOW)
+    w.configure("copy_facts")
+    w.run()
+    assert masowe == pochodne
+
+
+def test_gest_fakty_kopii_anulowanie_przerywa_przed_przejeciem(qapp, tmp_path, monkeypatch):
+    """Anulowanie tak jak w łańcuchu: `cancelled('copy_facts')`, a przejęcie zeznania i pochodne
+    nie ruszają. W oknie gest jest przerywalny (przycisk „Anuluj" aktywny w trakcie)."""
+    db_path, _kat = _kopie_bez_faktow(tmp_path)
+    adopt, masowe = [], []
+    prawdziwa = PipelineWorker._adopt_testimony
+    monkeypatch.setattr(PipelineWorker, "_adopt_testimony",
+                        lambda self, con: adopt.append(1) or prawdziwa(self, con))
+    prawdziwy_bulk = PipelineWorker._bulk
+    monkeypatch.setattr(PipelineWorker, "_bulk",
+                        lambda self, con, name: masowe.append(name) or
+                        prawdziwy_bulk(self, con, name))
+    w = PipelineWorker(db_path, now_fn=lambda: NOW)
+    w.configure("copy_facts")
+    cancelled, done = [], []
+    w.cancelled.connect(lambda name, s: cancelled.append((name, s)))
+    w.stage_done.connect(lambda name, s: done.append(name))
+    w.request_cancel()
+    w.run()
+    assert [n for n, _ in cancelled] == ["copy_facts"] and cancelled[0][1].cancelled
+    assert done == [] and adopt == [] and masowe == []
+    assert _bez_faktow(db_path) == 2                     # nic nie zapisane
+
+    view = PipelineView(db_path, now_fn=lambda: NOW)
+    try:
+        view._on_copy_facts()
+        assert view._thread is not None and view.btn_cancel.isEnabled()
+        _czekaj_na_etap(view)
+    finally:
+        view.close()
+
+
+def test_gest_fakty_kopii_wykluczony_z_zapisem_naglowkow(qapp, tmp_path):
+    """Straż wzajemnego wykluczenia z zapisem nagłówków (jak `run_stage`): przy zapisie w toku
+    przycisk wygaszony, a slot zawołany wprost nie rusza etapu. W drugą stronę gest idzie przez
+    `running_changed(True)` - ten sam sygnał, którym gospodarz gasi zapis w gridzie.
+
+    Falsyfikator: zdejmij `self._writeback_busy` ze straży `_on_copy_facts` → etap rusza."""
+    db_path, _kat = _kopie_bez_faktow(tmp_path)
+    view = PipelineView(db_path, now_fn=lambda: NOW)
+    try:
+        bieg = []
+        view.running_changed.connect(bieg.append)
+        view.set_writeback_busy(True)
+        assert not view.btn_copy_facts.isHidden() and not view.btn_copy_facts.isEnabled()
+        view._on_copy_facts()
+        assert view._thread is None and bieg == [] and _bez_faktow(db_path) == 2
+        view.set_writeback_busy(False)
+        assert view.btn_copy_facts.isEnabled()
+        view._on_copy_facts()
+        assert bieg == [True]
+        assert not view.btn_receive.isEnabled() and not view.btn_copy_facts.isEnabled()
+        _czekaj_na_etap(view)
+        assert bieg == [True, False] and _bez_faktow(db_path) == 0
+    finally:
+        view.close()
+
+
+def test_gest_fakty_kopii_nie_dotyka_dysku_w_oknie(qapp, tmp_path, monkeypatch):
+    """AR-31 (3): ani licznik N (budowa widoku, odświeżenie), ani slot gestu nie dotykają dysku
+    w wątku okna - N to sam SELECT bez korzenia (bez `canonize_root`), a pliki kopii czyta wątek
+    tła. Na odłączonym udziale okno nie może stać do timeoutu sieci przez przycisk z liczbą.
+
+    Falsyfikator: licz N przez `copy_facts_candidates(con, ostatnie_zrodlo)` → `canonize_root`
+    w oknie; czytaj kopie w slocie → `stat` w oknie."""
+    db_path, kat = _kopie_bez_faktow(tmp_path)
+    w_oknie = _szpieg_dysku(monkeypatch, kat)
+    view = PipelineView(db_path, now_fn=lambda: NOW)
+    try:
+        view.show_reason("copy_facts")
+        view._on_copy_facts()
+        assert w_oknie == [], w_oknie
+        _czekaj_na_etap(view)
+        assert _bez_faktow(db_path) == 0, "wątek tła przeczytał kopie"
+        assert w_oknie == [], w_oknie
+    finally:
+        view.close()
+
+
+def test_powod_wejscia_z_Porzadkow_linia_nad_akcjami(qapp, tmp_path):
+    """Klik w wiersz „?" w Porządkach przenosi do Dostawy; `show_reason` mówi linią nad akcjami,
+    po co człowiek tu jest i który gest to załatwia. Linia gaśnie, gdy robota zrobiona (N = 0)
+    albo przy zwykłym wejściu (`None`). Nieznany powód to błąd programisty (EXPECT)."""
+    from horreum.gui.pipeline import REASON_COPY_FACTS
+    db_path, _kat = _kopie_bez_faktow(tmp_path)
+    view = PipelineView(db_path, now_fn=lambda: NOW)
+    try:
+        assert view.lbl_reason.isHidden()
+        view.show_reason(REASON_COPY_FACTS)
+        gest = i18n.t("pipeline.btn.copy_facts", n=2)
+        assert not view.lbl_reason.isHidden()
+        assert view.lbl_reason.text() == i18n.t_plural("pipeline.why.copy_facts", 2, gest=gest)
+        assert view.lbl_reason.text().startswith("Zebrać fakty kopii: 2 kopie czekają")
+        view.show_reason(None)
+        assert view.lbl_reason.isHidden()
+        with pytest.raises(AssertionError):
+            view.show_reason("cokolwiek")
+        view.show_reason(REASON_COPY_FACTS)
+        view._on_copy_facts()
+        _czekaj_na_etap(view)
+        assert view.lbl_reason.isHidden() and view._reason is None
+    finally:
+        view.close()
+
+
+def test_etykieta_zlotej_akcji_wymienia_fakty_kopii(qapp):
+    """Łańcuch w etykiecie „Przyjmij nowe" wymienia etap faktów kopii (nazwą etapu z katalogu,
+    w obu językach) - przed zmianą jedyną wskazówką, że złota akcja zbiera fakty, był kod."""
+    for jezyk in ("pl", "en"):
+        i18n.set_lang(jezyk)
+        try:
+            assert (i18n.t("pipeline.stage.copy_facts").lower()
+                    in i18n.t("pipeline.receive").lower()), jezyk
+        finally:
+            i18n.set_lang("pl")

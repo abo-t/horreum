@@ -350,7 +350,9 @@ def write_changes(path, ops: list[WriteOp], expected_hash: str | None, *,
     zapisu bazy sprawdza, że od bramki izolacji nikt nie zaczął na tej lokacji zapisu w miejscu.
     Odmowa (`repo.InplaceConflict`) → 'blocked' z powodem, plik nietknięty, plik tymczasowy
     sprzątnięty; backup został utrwalony wcześniej i zostaje (append-only, nigdy nie wskaże bajtów,
-    których nie było - undo takiego backupu rozpozna nagłówek inny niż `post_hash`)."""
+    których nie było - undo takiego backupu rozpozna nagłówek inny niż `post_hash` i odmówi).
+    Wynik bez `backup_text` mówi orkiestracji „pliku nie ruszono": `commit` nie oddaje wtedy
+    `commit_id`, więc przebieg bez żadnej podmiany nie dostaje przycisku cofnięcia."""
     if _is_raw(path):
         return WriteResult("blocked", "format RAW jest read-only (#2)", None)
     if _is_xisf(path):
@@ -1595,8 +1597,9 @@ def recover_region(path, spec: OpSpec) -> WriteResult:
     return _pod_blokada(path, lambda fh: _odzysk_pod_blokada(fh, path, spec))
 
 
-_RECZNA = ("nierozstrzygalne - przywróć plik z pełnej kopii ręcznie, potem zwolnij izolację "
-           "(`repo.release_inplace_op`)")
+_RECZNA = ("nierozstrzygalne - przywróć plik z pełnej kopii ręcznie, potem zwolnij izolację: "
+           "w Zbiorach zaznacz klatkę i z menu prawego kliku wybierz „Zwolnij plik do skanu…” "
+           "(`writeback.release_isolation`)")
 
 
 def _odzysk_pod_blokada(fh, path: str, spec: OpSpec) -> WriteResult:
@@ -1673,7 +1676,9 @@ class FileResult:
 @dataclasses.dataclass(frozen=True)
 class CommitResult:
     run_id: str
-    commit_id: int | None  # None gdy żaden plik nie został podmieniony (applied ani failed po podmianie)
+    # None gdy żaden plik nie został podmieniony (applied ani failed po podmianie) - także wtedy,
+    # gdy wiersz commitu z backupem powstał, a podmianę odbiła straż albo przerwała awaria.
+    commit_id: int | None
     applied: list[FileResult]
     blocked: list[FileResult]
     failed: list[FileResult]
@@ -1974,6 +1979,10 @@ def commit(con, run_id, *, now, clock=None,
     skipped: list[FileResult] = []
     in_place: list[FileResult] = []
     commit_id: int | None = None
+    # Czy choć jeden plik został naprawdę ruszony (`backup_text` w wyniku pisarza). Wiersz commitu
+    # powstaje z backupem PRZED podmianą, więc sam `commit_id` tego nie mówi: podmiana odbita
+    # strażą albo awaria po backupie zostawiają commit z backupem, który niczego nie zmienił.
+    podmieniono = False
     cancelled = False
     done = 0
 
@@ -2081,6 +2090,7 @@ def commit(con, run_id, *, now, clock=None,
                 FileResult(location_id, path, status, res.reason))
             _report(path, status)
             continue
+        podmieniono = True
         if res.status != "applied":
             # Backup JEST (powstał przed zapisem), więc undo cofnie plik, o ile leży na nim to, co
             # zapisaliśmy (`post_hash`); plik rozdarty w miejscu naprawia `recover_torn`. Re-syncu
@@ -2100,8 +2110,13 @@ def commit(con, run_id, *, now, clock=None,
             # re-skanem") - drogę dalej (`finish_inplace` / `recover_torn`) niesie powód.
             koniec = _dokoncz(con, dziennik.op_id, now=now)
             if koniec.status != "applied":
+                # Zwolnienie ręką = gest okna albo rdzeń pod blokadą pliku (`release_isolation`),
+                # nie klinga bazy. Powód z receptą `_RECZNA` już ją niesie - drugi raz nie.
                 droga_dalej = ("" if koniec.status == "failed" or "recover_torn" in koniec.reason
-                               else f", zwolnienie ręką: repo.release_inplace_op({dziennik.op_id})")
+                               or _RECZNA in koniec.reason
+                               else ", zwolnienie ręką: w Zbiorach z menu prawego kliku "
+                                    "„Zwolnij plik do skanu…” albo "
+                                    f"writeback.release_isolation({dziennik.op_id})")
                 reason = (f"{koniec.reason}; backup do cofnięcia zapisany w commicie {commit_id}; "
                           f"lokacja IZOLOWANA od skanu{droga_dalej}")
                 _mark(rows, "failed", reason)
@@ -2140,8 +2155,10 @@ def commit(con, run_id, *, now, clock=None,
         applied.append(FileResult(location_id, path, "applied", droga))
         _report(path, "applied")
 
-    return CommitResult(run_id, commit_id, applied, blocked, failed, skipped, cancelled,
-                        in_place)
+    # `commit_id` wyłącznie przy pliku podmienionym (kontrakt `CommitResult.commit_id`): commit bez
+    # podmiany nie ma czego cofać, a jego wiersz z backupem zostaje w bazie (append-only).
+    return CommitResult(run_id, commit_id if podmieniono else None, applied, blocked, failed,
+                        skipped, cancelled, in_place)
 
 
 # ============================================================ RENAME "Nazwy z faktów" (trzecia operacja)

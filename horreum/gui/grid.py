@@ -40,12 +40,12 @@ from PySide6.QtWidgets import (
     QLayout,
     QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QProgressBar, QPushButton,
     QDialog, QDialogButtonBox, QMenu, QMessageBox,
-    QScrollArea, QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QTableView, QToolButton,
-    QVBoxLayout, QWidget,
+    QScrollArea, QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QStyledItemDelegate,
+    QTableView, QToolButton, QVBoxLayout, QWidget,
 )
 
 from horreum import (db, filter_engine, lineage, macro as macro_mod, naming, pivot as pivot_mod,
-                     repo, stacks, writeback)
+                     repo, scan, stacks, writeback)
 from horreum.gui import busy, facet_model, i18n, portfolio, queries, rows, theme
 from horreum.gui import pola as pola_mod   # `pola` bywa w tym pliku zmienną lokalną (pola zeznania)
 from horreum.gui.facets import RAIL_MIN_W as _FIELDS_MIN_W, FacetRail
@@ -155,6 +155,12 @@ _EMPTY_FILTER = "grid.empty_filter"   # pustkę robi zbiór (facety/filtr) - ges
 _EMPTY_PERSP = "grid.empty_persp"     # perspektywa bez ani jednej klatki - gest: „Przegląd"
 _EMPTY_VIEW = "grid.empty_view"       # brak recepty (dziś nieosiągalny) - zdanie bez obietnicy gestu
 _EMPTY_DB = "grid.empty_db"
+# PERSPEKTYWY, KTÓRYCH PUSTKA BYWA NIEWIEDZĄ: obie porównują zeznania kopii, a kopia bez zebranych
+# faktów w porównaniu nie bierze udziału. Pusta perspektywa przy czekających kandydatach nie znaczy
+# „sprawdzone, czysto" - pusty stan mówi wtedy zdaniem podpowiedzi Porządków (`tasks.copies_unread_tip`,
+# jeden właściciel zdania) i prowadzi do Dostawy. Bliźniak `tasks._CZEKA_NA_FAKTY_KOPII` (te same
+# dwa wiersze Porządków); klucz = flaga z `_TRIMY`.
+_FLAGI_CZEKAJA_NA_FAKTY = ("_only_copy_conflict", "_only_orphan_testimony")
 
 # Kolory stanów gridu — z motywu (F6 §7, SPOT). Model czyta `_COLORS` NA ŻYWO w `data()`
 # (Qt nie cache'uje BackgroundRole), więc `use_theme` przy przełączeniu + `viewport().update()`
@@ -452,6 +458,22 @@ _RECEPTY_ZAPISU = {
     "_only_torn_write": "grid.inplace.recipe_torn",
     "_only_pending_finish": "grid.inplace.recipe_pending",
 }
+# PERSPEKTYWY, W KTÓRYCH KOLUMNA „OBRAZY" MA TREŚĆ - i tylko w nich stoi domyślnie. Fakty kopii
+# zbiera się z założenia dla XISF i klatek wielokopiowych (`scan.copy_facts_candidates`), więc na
+# kopii żywego archiwum kolumna była pusta w 16 901 z 16 901 wierszy „Przeglądu": stała tam jako
+# obietnica bez pokrycia. W tych trzech perspektywach wiersze są kandydatami do zebrania faktów
+# (XISF albo klatka wielokopiowa), więc pusta komórka kandydata znaczy „jeszcze nie wiem" i mówi
+# to znakiem „?" (`_images_cell`).
+# Wybór ręki w „Polach" bije domyślną (`FramesView._obrazy_reka`). Klucz = flaga z `_TRIMY`.
+_FLAGI_OBRAZOW = ("_only_dups", "_only_copy_conflict", _FLAGA_WERSJI)
+# Perspektywy, w których komórka ścieżki niesie prefiks „×N" albo ścieżkę jako przedmiot decyzji
+# (duplikaty, ich podzbiór niezgodnych, wersje stosów): tam kolumna bierze szerokość z treści
+# z sufitem i elizją w środku (`kolumna_z_tresci`). Gdzie indziej zostaje szerokość, którą ustawiła
+# ręka - pamięci szerokości per perspektywa tu nie ma.
+_FLAGI_SCIEZKI_Z_TRESCI = ("_only_dups", "_only_copy_conflict", _FLAGA_WERSJI)
+# Sufit szerokości kolumny dopasowanej do treści, w px: ścieżka „×2  2026-01-21_…_0001.xisf" mieści
+# się z zapasem, a jedna długa nazwa nie wypycha keywordów poza okno 1400 px.
+_SUFIT_KOLUMNY_Z_TRESCI = 420
 
 
 def _klucz_spec(atrybut):
@@ -670,6 +692,7 @@ def _derive(row):
     # `_dolacz_kopie` wartościami wszystkich kopii. `.get`, bo nie każde zapytanie gridu ją niesie.
     n = d.get("image_count")
     d["_images"] = "" if n is None else str(n)
+    d["_images_n"] = n          # klucz SORTU kolumny „Obrazy" - liczba, nie tekst („10" < „2")
     return d
 
 
@@ -684,7 +707,9 @@ def _dolacz_kopie(base, kopie):
         kursorem i liczba na liście mówią o tych samych polach;
       * `_images` - WSZYSTKIE różne liczby obrazów w kolejności kopii („3 | 1"); kopia bez zebranych
         faktów (NULL) nie wnosi wartości, bo „nie wiem" nie jest liczbą. Jedna wspólna wartość zostaje
-        jedną liczbą - rozjazd ma być widoczny, zgodność ma nie hałasować.
+        jedną liczbą - rozjazd ma być widoczny, zgodność ma nie hałasować;
+      * `_images_n` - NAJWIĘKSZA z tych liczb (klucz sortu kolumny): klatka, której któraś kopia
+        niesie więcej obrazów, staje tam, gdzie ta kopia. Brak każdej liczby → None.
     Wiersz bez kilku kopii zostaje nietknięty (liczbę jego jedynej kopii ustawił `_derive`)."""
     per_klatka = {}
     for r in kopie:
@@ -701,6 +726,7 @@ def _dolacz_kopie(base, kopie):
             if r["image_count"] is not None and r["image_count"] not in liczby:
                 liczby.append(r["image_count"])
         row["_images"] = " | ".join(str(n) for n in liczby)
+        row["_images_n"] = max(liczby) if liczby else None
 
 
 # Kolumna `location` → keyword nagłówka (0021) - do zdania „FILTER=CLS" w podpowiedzi kopii.
@@ -758,34 +784,79 @@ def _okno(iso):
     return str(iso)[:19].replace("T", " ") if iso else "?"
 
 
-def _etykieta_grupy_wersji(grupa):
-    """Nagłówek grupy bliźniaków: obiekt · filtr · ekspozycja · okno - czyli dokładnie klucz, który
-    czyni stosy tym samym materiałem (kamery w nim nie ma: okno co do sekundy już ją przypina)."""
+def _etykieta_grupy_wersji(grupa, *, zestaw=False):
+    """Nagłówek grupy bliźniaków: obiekt · filtr · ekspozycja · okno - opis materiału, który człowiek
+    rozpoznaje. Klucz grupy ma jeszcze kamerę i teleskop (`queries._grupy_wersji`), ale ich miejsce
+    na belce zajmują tylko wtedy, gdy są ROZRÓŻNIKIEM (`zestaw=True`): dwa zestawy z kamerą tego
+    samego modelu tej samej nocy dają dwie grupy o identycznym opisie, a belki muszą się różnić
+    tekstem, nie tylko pozycją na liście."""
     exp = grupa["exptime"]
-    return i18n.t("grid.version.group",
+    opis = i18n.t("grid.version.group",
                   object=grupa["object_canon"] or i18n.t("grid.version.no_object"),
                   filter=grupa["filter_canon"] or i18n.t("portfolio.no_filter"),
                   exp=f"{exp:g}" if exp is not None else "?",
                   start=_okno(grupa["window_start"]), end=_okno(grupa["window_end"]))
+    if zestaw:
+        opis += i18n.t("grid.version.group_rig", telescope=grupa["telescope"] or "?",
+                       camera=grupa["camera"] or "?")
+    return opis
 
 
 def _adnotuj_wersje(base, grupy):
-    """Dołóż wierszom gridu fakty grupy wersji: `_wersja_grupa` (etykieta belki, klucz grupowania
-    `_GRUPA_WERSJI`) i `_wersja` (fakty członka dla kolumny „Wersja"). Wiersz spoza grup zostaje
-    bez kluczy - grupuje się wtedy do „(brak)", a komórka milczy. Czysta funkcja nad gotowymi
-    danymi (`queries.stack_version_groups`), zero SQL; mutuje dicty `base` w miejscu, jak `_derive`
-    buduje je dla modelu."""
+    """Dołóż wierszom gridu fakty grupy wersji: `_wersja_grupa` (stabilny identyfikator grupy
+    z read-modelu - klucz grupowania `_GRUPA_WERSJI`), `_wersja_etykieta` (podpis belki) i `_wersja`
+    (fakty członka dla kolumny „Wersja"). Grupowanie po IDENTYFIKATORZE, nie po podpisie: dwie
+    grupy o tym samym opisie zlałyby się pod jedną belką w jedną „grupę" stosów z dwóch zestawów.
+    Podpis dostaje rozróżnik zestawu tylko przy kolizji opisów (`_etykieta_grupy_wersji`).
+    Wiersz spoza grup zostaje bez kluczy - grupuje się wtedy do „(brak)", a komórka milczy. Czysta
+    funkcja nad gotowymi danymi (`queries.stack_version_groups`), zero SQL; mutuje dicty `base`
+    w miejscu, jak `_derive` buduje je dla modelu."""
+    opisy = {}
+    for g in grupy:
+        opis = _etykieta_grupy_wersji(g)
+        opisy[opis] = opisy.get(opis, 0) + 1
     fakty = {}
     for g in grupy:
-        etykieta = _etykieta_grupy_wersji(g)
+        etykieta = _etykieta_grupy_wersji(g, zestaw=opisy[_etykieta_grupy_wersji(g)] > 1)
         for m in g["members"]:
-            fakty[m["frame_id"]] = (etykieta, {**m, "group_kind": g["kind"],
-                                               "window_start": g["window_start"],
-                                               "window_end": g["window_end"]})
+            fakty[m["frame_id"]] = (g["group_id"], etykieta,
+                                    {**m, "group_kind": g["kind"],
+                                     "window_start": g["window_start"],
+                                     "window_end": g["window_end"]})
     for row in base:
         f = fakty.get(row.get("frame_id"))
         if f is not None:
-            row["_wersja_grupa"], row["_wersja"] = f
+            row["_wersja_grupa"], row["_wersja_etykieta"], row["_wersja"] = f
+
+
+class _ElizjaWSrodku(QStyledItemDelegate):
+    """Delegat JEDNEJ kolumny z elizją w środku: tekst traci środek, a zachowuje oba końce -
+    prefiks „×N" i ogon nazwy pliku z rozszerzeniem. `QTableView.setTextElideMode` działa na całą
+    tabelę, więc elizja kolumny żyje w delegacie (`setItemDelegateForColumn`)."""
+
+    def initStyleOption(self, option, index):
+        super().initStyleOption(option, index)
+        option.textElideMode = Qt.ElideMiddle
+
+
+def kolumna_z_tresci(table, col, *, sufit=_SUFIT_KOLUMNY_Z_TRESCI):
+    """Kolumna `col` tabeli `table` szeroka z treści, nie szersza niż `sufit` px, z elizją
+    w środku - JEDEN mechanizm dla każdej kolumny, której treść jest przedmiotem decyzji (ścieżka
+    w „Duplikatach" i „Wersjach stosów"). Domyślne 100 px zostawiało z „×2  M31_…_0001.xisf" sam
+    prefiks, a elizja z prawej zjadała właśnie nazwę pliku.
+
+    Idempotentna: delegat powstaje raz na tabelę (dziecko tabeli, bezstanowy, więc służy każdej
+    kolumnie) i jest używany ponownie, więc wołanie przy każdym przeładowaniu niczego nie mnoży.
+    Zdjęcie elizji poza perspektywą robi wołający (`setItemDelegateForColumn(col, None)`) - ta
+    funkcja mówi tylko, jak kolumnę ustawić."""
+    delegat = table.findChild(_ElizjaWSrodku)
+    if delegat is None:
+        delegat = _ElizjaWSrodku(table)
+    if table.itemDelegateForColumn(col) is not delegat:
+        table.setItemDelegateForColumn(col, delegat)
+    table.resizeColumnToContents(col)
+    if table.columnWidth(col) > sufit:
+        table.setColumnWidth(col, sufit)
 
 
 class GridTableModel(QAbstractTableModel):
@@ -799,8 +870,13 @@ class GridTableModel(QAbstractTableModel):
         self._data_rows = []     # same klatki (bez markerów) — źródło do sortu/grupowania
         self._keywords = []
         self._group_by = None
-        self._sort_col = 0
+        # SORT PAMIĘTANY PO ZNACZENIU, NIE PO NUMERZE KOLUMNY: ("base", klucz) / ("kw", keyword) /
+        # ("version",) albo None (sort neutralny). Numer przestawał znaczyć to samo, gdy perspektywa
+        # dokładała kolumnę „Wersja" przed keywordami - sort po pierwszym keywordzie zamieniał się
+        # wtedy po cichu w sort po „Wersji". Numer bieżącego układu oddaje `sort_column`.
+        self._sort_id = ("base", BASE_COLS[0][1])
         self._sort_desc = False
+        self._obrazy_pytajnik = False   # perspektywa kopii: brak liczby obrazów = „?" (`_images_cell`)
         self._numeric_kw = set() # keywordy z choć jedną komórką liczbową → MISSING „—" też prawo (P3-7)
         self._preview = {}       # frame_id → {'keyword','old','new'} | {'skipped': reason} (podgląd makra/renamu)
         self._preview_label = i18n.t("grid.preview.macro")   # etykieta efemerycznej kolumny (klinga-zależna, R1 #4)
@@ -819,14 +895,19 @@ class GridTableModel(QAbstractTableModel):
     def _preview_active(self):
         return bool(self._preview)
 
-    def set_data(self, base_rows, pivot, keywords, group_by=None, version_col=False):
+    def set_data(self, base_rows, pivot, keywords, group_by=None, version_col=False,
+                 images_unknown=False):
         """base_rows: list[dict] (z `_derive`); pivot: horreum.pivot.Pivot; keywords: list[str].
 
         `version_col` dokłada kolumnę „Wersja" (fakty `_wersja` z `_adnotuj_wersje`) zaraz po
         kolumnach bazowych (`_version_col`). Kolumna jest własnością perspektywy „Wersje stosów",
         nie wiersza: te same stosy w „Przeglądzie" niosą fakty (grupowanie „Wersja stosu" działa
-        wszędzie), ale kolumna pojawia się tylko tam, gdzie wybór wersji jest robotą ekranu."""
+        wszędzie), ale kolumna pojawia się tylko tam, gdzie wybór wersji jest robotą ekranu.
+
+        `images_unknown` - perspektywa, w której brak liczby obrazów jest robotą, nie stanem
+        archiwum (`_FLAGI_OBRAZOW`): komórka kandydata do zebrania faktów mówi wtedy „?"."""
         self._version_col_on = bool(version_col)
+        self._obrazy_pytajnik = bool(images_unknown)
         cells = {r.frame_id: r.cells for r in pivot.rows}
         for d in base_rows:
             d["cells"] = cells.get(d["frame_id"], {})
@@ -891,6 +972,34 @@ class GridTableModel(QAbstractTableModel):
     def _kw_for_col(self, col):
         return None if col < len(BASE_COLS) else self._keywords[col - len(BASE_COLS) - self._kw_off()]
 
+    def _sort_id_for(self, col):
+        """Znaczenie kolumny `col` BIEŻĄCEGO układu jako identyfikator sortu (`_sort_id`) albo None
+        dla kolumny bez sortu (podgląd klingi, indeks spoza układu)."""
+        if col is None or col < 0 or col >= self.columnCount() or col == self._preview_col():
+            return None
+        if col == self._version_col():
+            return ("version",)
+        kw = self._kw_for_col(col)
+        return ("base", self._col_key(col)) if kw is None else ("kw", kw)
+
+    def sort_column(self):
+        """Numer kolumny, po której model sortuje, w BIEŻĄCYM układzie - albo -1, gdy tej kolumny
+        w układzie nie ma (keyword odznaczony w „Polach", „Wersja" poza swoją perspektywą). Widok
+        stawia według niego wskaźnik sortu nagłówka po każdym przeładowaniu."""
+        return next((c for c in range(self.columnCount()) if self._sort_id_for(c) == self._sort_id), -1)
+
+    def sort_order(self):
+        return Qt.DescendingOrder if self._sort_desc else Qt.AscendingOrder
+
+    def base_col(self, key):
+        """Numer kolumny bazowej o kluczu danych `key` (`BASE_COLS`) w bieżącym układzie. Klucz
+        spoza `BASE_COLS` to błąd wołającego (EXPECT)."""
+        col = next((c for c in range(self.columnCount())
+                    if self._sort_id_for(c) == ("base", key)), None)
+        if col is None:
+            raise ValueError(f"nieznana kolumna bazowa: {key!r}")
+        return col
+
     # ---- komórki ----
     def flags(self, index):
         base = super().flags(index)
@@ -935,8 +1044,13 @@ class GridTableModel(QAbstractTableModel):
         return self._kw_cell(row, self._kw_for_col(col), role)
 
     def _version_cell(self, row, role):
-        """Komórka „Wersja": rodzaj członka · chwila integracji · liczba wejść - fakty, po których
-        człowiek wybiera wersję do zostawienia. Tooltip niesie ŚWIADKA (dlaczego ten rodzaj) i okno.
+        """Komórka „Wersja": rodzaj członka · skrót świadka · chwila integracji · liczba wejść -
+        fakty, po których człowiek wybiera wersję do zostawienia. Tooltip niesie pełne zdanie
+        świadka (dlaczego ten rodzaj) i okno.
+
+        SKRÓT ŚWIADKA STOI W KOMÓRCE, nie tylko w tooltipie: dwie wersje stosu bez sygnatury
+        i historii wyglądały na ekranie identycznie („inna integracja"), a jedyny powód werdyktu
+        - inne pomiary szumu i PSF - wymagał najechania na każdą komórkę po kolei.
 
         Brak faktu MILCZY zamiast udawać: stosy sprzed modułu XISF 1.1.2 nie mają sygnatury, więc
         nie mają daty integracji - człon po prostu nie staje (data pliku nie jest datą integracji:
@@ -947,6 +1061,8 @@ class GridTableModel(QAbstractTableModel):
             return None
         if role == Qt.DisplayRole:
             czlony = [i18n.t(f"grid.version.kind.{f['kind']}")]
+            if f.get("witness"):
+                czlony.append(i18n.t(f"grid.version.short.{f['witness']}"))
             if f.get("timestamp"):
                 czlony.append(_chwila(f["timestamp"]))
             if f.get("declared_rows") is not None:
@@ -1088,9 +1204,44 @@ class GridTableModel(QAbstractTableModel):
             if role == Qt.ToolTipRole:
                 return _object_tip(row, stan)
             return None
+        if key == "_images":
+            return self._images_cell(row, role)
         if role == Qt.DisplayRole:
             v = row.get(key)
             return "" if v is None else str(v)
+        return None
+
+    def _images_cell(self, row, role):
+        """Komórka „Obrazy": liczba (albo „3 | 1" przy kopiach różnych) wyrównana do prawej, jak
+        każda kolumna liczb.
+
+        BRAK LICZBY MÓWI „?" TYLKO TAM, GDZIE JEST ROBOTĄ (`_obrazy_pytajnik`, perspektywy
+        `_FLAGI_OBRAZOW`), i tylko przy kopii, którą uzupełnienie faktów w ogóle czyta - lustro
+        predykatu `scan.copy_facts_candidates` na polach, które `base_rows` i tak niesie: XISF albo
+        klatka z więcej niż jedną lokacją ogółem. Pojedynczy FITS faktów z założenia nie dostaje,
+        więc „?" z receptą byłby przy nim obietnicą bez pokrycia - zostaje pusty. Poza tymi
+        perspektywami pusta komórka zostaje pusta: tam „nie wiem" jest stanem archiwum, nie robotą."""
+        tekst = row.get("_images") or ""
+        if tekst:
+            if role == Qt.DisplayRole:
+                return tekst
+            if role == Qt.TextAlignmentRole:
+                return int(Qt.AlignRight | Qt.AlignVCenter)
+            return None
+        kandydat = (row.get("filetype") == "xisf"
+                    or (row.get("n_present") or 0) + (row.get("n_vanished") or 0) > 1)
+        if not (self._obrazy_pytajnik and kandydat):
+            return "" if role == Qt.DisplayRole else None
+        if role == Qt.DisplayRole:
+            return "?"
+        if role == Qt.TextAlignmentRole:
+            return int(Qt.AlignRight | Qt.AlignVCenter)
+        if role == Qt.ForegroundRole:
+            return _COLORS["missing"]
+        if role == Qt.ToolTipRole:
+            return i18n.t("grid.tip.images_unknown") + i18n.t(
+                "grid.tip.copy_unread", place=i18n.t("nav.dostawa"),
+                check=i18n.t("pipeline.btn.presence"), mark=i18n.t("pipeline.btn.mark_vanished"))
         return None
 
     def _kw_cell(self, row, kw, role):
@@ -1119,30 +1270,43 @@ class GridTableModel(QAbstractTableModel):
         self._rebuild()
 
     def sort(self, column, order=Qt.AscendingOrder):
-        self._sort_col = column
+        self._sort_id = self._sort_id_for(column)      # znaczenie kolumny, nie jej numer
         self._sort_desc = order == Qt.DescendingOrder
         self._rebuild()
 
     def _sort_key(self, row):
-        col = self._sort_col
-        if col == self._version_col():
+        sid = self._sort_id
+        # Kolumny sortu nie ma w bieżącym układzie (keyword odznaczony, „Wersja" poza swoją
+        # perspektywą) → sort neutralny; wróci sam, gdy kolumna wróci (`_sort_id` pamięta znaczenie).
+        if (sid is None or (sid[0] == "kw" and sid[1] not in self._keywords)
+                or (sid[0] == "version" and self._version_col() is None)):
+            return (0, "")
+        if sid[0] == "version":
             # Po CHWILI INTEGRACJI (ISO sortuje się chronologicznie), potem po liczbie wejść;
             # wiersz bez faktów - na koniec, jak MISSING (kierunek sortu go nie przenosi).
+            # BRAK CZŁONU TEŻ NA KOŃCU, w obu kierunkach (wzór `_dt_delta`): pusty napis i zero
+            # stawiały stos bez sygnatury PRZED znanymi datami. Znacznik braku zależy od kierunku,
+            # bo `_rebuild` odwraca cały klucz - po odwróceniu ma wylądować za znanymi wartościami.
             f = row.get("_wersja")
             if not f:
                 return (2, "")
-            return (0, f.get("timestamp") or "", f.get("declared_rows") or 0)
-        if col >= len(BASE_COLS) + self._kw_off() + len(self._keywords):   # podgląd makra / indeks
-            return (0, "")                                   # spoza bieżących kolumn → sort neutralny
-        kw = self._kw_for_col(col)
-        if kw is None:
-            key = self._col_key(col)
+            brak = -1 if self._sort_desc else 1
+            ts, n = f.get("timestamp"), f.get("declared_rows")
+            return (0, 0 if ts else brak, ts or "", 0 if n is not None else brak, n or 0)
+        if sid[0] == "base":
+            key = sid[1]
             if key == "_dt_delta":                            # gałąź numeryczna (R1 #6), None na koniec
                 v = row.get("_dt_delta")
                 return (2, 0.0) if v is None else (0, float(v))
+            if key == "_images":
+                # LICZBA, NIE TEKST: „10" stało przed „2", a pusta komórka na górze. Klatka z kilkoma
+                # kopiami sortuje się po największej liczbie (`_images_n`); brak - na koniec w obu
+                # kierunkach, jak MISSING (wzór `_dt_delta`).
+                v = row.get("_images_n")
+                return (2, 0) if v is None else (0, v)
             v = row.get(key)
             return (0, "" if v is None else str(v).lower())
-        cell = row["cells"].get(kw, pivot_mod.MISSING)
+        cell = row["cells"].get(sid[1], pivot_mod.MISSING)
         if cell is pivot_mod.MISSING:
             return (2, "")  # MISSING zawsze na końcu (niezależnie od kierunku)
         if cell.num is not None:
@@ -1198,6 +1362,15 @@ class GridTableModel(QAbstractTableModel):
             return f"{v:g}"                                    # etykieta grupy spójna z komórką („-2")
         return str(v)
 
+    def _group_label(self, row):
+        """Podpis belki kubełka, do którego należy `row`. Zwykle to sama wartość grupowania; grupa
+        wersji ma podpis OSOBNO od klucza (`_adnotuj_wersje`): kubełek wyznacza stabilny
+        identyfikator, a człowiek czyta opis materiału - dwie grupy o jednym opisie zostają dwiema
+        belkami."""
+        if self._group_by == _GRUPA_WERSJI and row.get("_wersja_etykieta"):
+            return row["_wersja_etykieta"]
+        return self._group_value(row)
+
     def _rebuild(self):
         self.beginResetModel()
         # MISSING-na-końcu: rozdziel klucz sortu (0/1 present, 2 missing) — reverse tylko w obrębie present.
@@ -1214,6 +1387,9 @@ class GridTableModel(QAbstractTableModel):
             if self._group_by == "_dt_delta":                 # porządek nagłówków grup NUMERYCZNY (R2 #4):
                 rows = sorted(rows, key=lambda r: (           # inaczej „-1", „-12", „-2"; None-grupa na koniec
                     r.get("_dt_delta") is None, r.get("_dt_delta") or 0.0))
+            elif self._group_by == _GRUPA_WERSJI:            # porządek belek po PODPISIE, kubełek
+                rows = sorted(rows, key=lambda r: (           # po IDENTYFIKATORZE grupy
+                    self._group_label(r).lower(), self._group_value(r)))
             else:
                 rows = sorted(rows, key=lambda r: (self._group_value(r) or "").lower())
             self._rows = []
@@ -1222,7 +1398,7 @@ class GridTableModel(QAbstractTableModel):
             def flush():
                 if bucket:
                     stan = self._group_state(bucket)
-                    self._rows.append({"_group": cur, "_count": len(bucket),
+                    self._rows.append({"_group": self._group_label(bucket[0]), "_count": len(bucket),
                                        "_group_state": stan, "_group_row": bucket[0],
                                        "_group_tip": self._group_tip_mode(bucket, stan)})
                     self._rows.extend(bucket)
@@ -1371,12 +1547,24 @@ class FieldsPanel(QWidget):
     facetów — obie części lewej kolumny mają ten sam próg czytelności."""
 
     columnsChanged = Signal(object)
+    # Kolumna BAZOWA „Obrazy" też ma swój przełącznik - jedyna, której widoczność zależy od
+    # perspektywy (`FramesView._uloz_kolumny`). `clicked`, nie `toggled`: emituje wyłącznie ręka,
+    # więc odbicie stanu perspektywy (`set_images_checked`) nie udaje wyboru człowieka.
+    imagesToggled = Signal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         outer = QVBoxLayout(self); outer.setContentsMargins(0, 0, 0, 0)
         self.title = QLabel(i18n.t("grid.fields.title"))
         outer.addWidget(self.title)
+        self.images = QCheckBox(i18n.t("grid.fields.images", col=i18n.t("grid.col.images")))
+        # Nazwy perspektyw z tej samej tabeli, która o widoczności decyduje - zmiana składu albo
+        # etykiety przenosi się do podpowiedzi sama.
+        self.images.setToolTip(i18n.t("grid.fields.images_tip", perspectives=", ".join(
+            i18n.t(_PRESET_LABELS[nazwa]) for nazwa, spec in PRESETS.items()
+            if any(spec.get(_klucz_spec(atrybut)) for atrybut in _FLAGI_OBRAZOW))))
+        self.images.clicked.connect(self.imagesToggled)
+        outer.addWidget(self.images)
         self.list = QListWidget()
         self.list.setItemDelegate(TwoPartDelegate(self.list))
         self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -1411,6 +1599,10 @@ class FieldsPanel(QWidget):
             self.title.setText(i18n.t("grid.fields.title_failed"))
         else:
             self.title.setText(i18n.t("grid.fields.title"))
+
+    def set_images_checked(self, on):
+        """Odbij widoczność kolumny „Obrazy" - `setChecked` nie emituje `clicked`."""
+        self.images.setChecked(bool(on))
 
     def checked_keywords(self):
         out = []
@@ -2782,8 +2974,8 @@ class StagingDrawer(QFrame):
 
 
 class ReleaseDialog(QDialog):
-    """Okno gestu „Zwolnij plik do skanu…" (`repo.release_inplace_op`): skutek słowami, liczba kopii
-    i POWÓD wpisany przez człowieka. Zwolnienie nie zmienia pliku i niczego nie sprawdza - to jego
+    """Okno gestu „Zwolnij plik do skanu…" (`writeback.release_isolation`): skutek słowami, liczba
+    kopii i POWÓD wpisany przez człowieka. Zwolnienie nie zmienia pliku i niczego nie sprawdza - to jego
     rozstrzygnięcie, że plik jest w porządku, więc bez powodu „Zwolnij" jest wygaszone, a powód
     trafia do zdarzenia `location.writeback_released`. Enter nie przejdzie obok bramki: przycisk
     domyślny jest wygaszony, a `accept` sprawdza powód drugi raz (EXPECT)."""
@@ -2932,6 +3124,9 @@ class FramesView(QWidget):
     # nich nie różni. Osobny kanał należy się temu członowi, który ma osobny nośnik - i tylko jemu.
     # Recepta leci ZARAZ PO raporcie (nigdy przed), więc pusta gasi cudzą z poprzedniego gestu.
     status_recipe = Signal(str)
+    # Pusty stan perspektywy kopii prowadzi do Dostawy (`_ustaw_pusty_stan`) - gospodarz przełącza
+    # widok, jak przy `TasksView.open_intake`. Sygnał, nie wołanie: grid nie zna gospodarza (NARROW).
+    open_intake = Signal()
 
     def __init__(self, con, now_fn=None, parent=None, *, pola_poza_watkiem=False):
         super().__init__(parent)
@@ -2980,6 +3175,7 @@ class FramesView(QWidget):
         # wynik (`_zastosuj_pola`), bo bez pokrycia nie wiadomo, które keywordy są najczęstsze.
         self._pola_async = pola_poza_watkiem
         self._columns = []
+        self._obrazy_reka = None    # wybór ręki dla kolumny „Obrazy" (None = za perspektywą)
         self._pola = None           # ostatnie ZASTOSOWANE pokrycie (lista {"keyword", "n"})
         self._pola_odcisk = None    # odcisk kart, z którego ono pochodzi (`pola.odcisk_kart`)
         self._pola_gen = 0          # generacja prośby - wynik starszej ląduje w koszu
@@ -3039,6 +3235,7 @@ class FramesView(QWidget):
         self._sc_find.activated.connect(self.facet_rail.focus_search)
         self.fields = FieldsPanel()
         self.fields.columnsChanged.connect(self._on_columns)
+        self.fields.imagesToggled.connect(self._on_images_toggled)
         left = QSplitter(Qt.Vertical)
         left.addWidget(self.facet_rail)
         left.addWidget(self.fields)
@@ -3108,6 +3305,10 @@ class FramesView(QWidget):
         self.model = GridTableModel(self)
         self.table = QTableView()
         self.table.setModel(self.model)
+        # Układ belek grup (na całą szerokość) i kolumny „Wersja" (za „Ścieżką") żyje w WIDOKU,
+        # więc odnawia się po KAŻDYM resecie modelu - także po sorcie z nagłówka i po podglądzie
+        # klingi, które nie przechodzą przez `_refresh` (`_uloz_belki_i_wersje`).
+        self.model.modelReset.connect(self._uloz_belki_i_wersje)
         # Debounce panelu daty: `selectionChanged` może sypać setki eventów przy zaznaczeniu wsadu
         # → przelicz echo raz, po 150 ms ciszy (R1 #15).
         self._date_timer = QTimer(self); self._date_timer.setSingleShot(True); self._date_timer.setInterval(150)
@@ -3169,7 +3370,12 @@ class FramesView(QWidget):
         self.empty.setAlignment(Qt.AlignCenter); self.empty.setWordWrap(True); self.empty.setVisible(False)
         eb.addWidget(self.empty)
         self.empty_btn = QPushButton()
-        self.empty_btn.clicked.connect(lambda: self.wykonaj_recepte_powrotu(cel=_CEL_WIDOK))
+        # Gest przycisku ustala `_ustaw_pusty_stan`: recepta powrotu albo Dostawa (perspektywa kopii,
+        # której pustka jest niewiedzą). Flaga czytana W CHWILI KLIKU, jak decyzja recepty.
+        self._pusty_do_dostawy = False
+        self.empty_btn.clicked.connect(
+            lambda: self.open_intake.emit() if self._pusty_do_dostawy
+            else self.wykonaj_recepte_powrotu(cel=_CEL_WIDOK))
         self.empty_btn.setVisible(False)
         eb.addWidget(self.empty_btn, 0, Qt.AlignHCenter)
         eb.addStretch(1)
@@ -3831,19 +4037,39 @@ class FramesView(QWidget):
         coś, czego nie ma.
 
         NIE woła `_czlon_poza_widokiem`: tamten zapamiętuje klatki gestu (`_cel_gestu`), a pusty
-        stan powstaje także bez gestu - wybór brzmienia nie ma prawa ruszać stanu zaznaczenia."""
+        stan powstaje także bez gestu - wybór brzmienia nie ma prawa ruszać stanu zaznaczenia.
+
+        PERSPEKTYWA KOPII, KTÓRA NIE WIE (`_FLAGI_CZEKAJA_NA_FAKTY`): pusta „Kopie niezgodne"
+        mówiła „Brak klatek" i prowadziła na „Przegląd", a Porządki w tym samym stanie mówiły „?".
+        Gdy perspektywa sama jest pusta (recepta: perspektywa, nie zbiór) i czekają kopie, których
+        fakty mogą ją zmienić (`scan.copy_facts_candidates(porownywalne=True)` - ten sam predykat,
+        co liczba Porządków), zdanie bierzemy z podpowiedzi Porządków, a przycisk prowadzi do
+        Dostawy, bo tam mieszkają oba gesty, które dadzą odpowiedź."""
+        self._pusty_do_dostawy = False
         if not baza_ma_klatki:
-            zdanie, gest = _EMPTY_DB, ""
+            zdanie, gest = i18n.t(_EMPTY_DB), ""
         else:
             rodzaj = self._rodzaj_recepty_powrotu(cel=_CEL_WIDOK)
-            if rodzaj == _POWROT_PERSPEKTYWA:
-                zdanie = _EMPTY_PERSP
+            czeka = (len(scan.copy_facts_candidates(self.con, porownywalne=True))
+                     if rodzaj == _POWROT_PERSPEKTYWA
+                     and any(getattr(self, atrybut) for atrybut in _FLAGI_CZEKAJA_NA_FAKTY) else 0)
+            if czeka:
+                self._pusty_do_dostawy = True
+                zdanie = i18n.t_plural("tasks.copies_unread_tip", czeka,
+                                       place=i18n.t("nav.dostawa"),
+                                       stacks=i18n.t("pipeline.btn.stacks"),
+                                       check=i18n.t("pipeline.btn.presence"),
+                                       mark=i18n.t("pipeline.btn.mark_vanished"),
+                                       dest=i18n.t("nav.dostawa"))
+                gest = i18n.t("grid.empty_go_intake")
+            elif rodzaj == _POWROT_PERSPEKTYWA:
+                zdanie = i18n.t(_EMPTY_PERSP)
                 gest = i18n.t("grid.empty_persp_action", perspective=i18n.t(_PRESET_LABELS[_PRESET_CZYSTY]))
             elif rodzaj == _POWROT_ZBIOR:
-                zdanie, gest = _EMPTY_FILTER, i18n.t("grid.sel.clear_set")
+                zdanie, gest = i18n.t(_EMPTY_FILTER), i18n.t("grid.sel.clear_set")
             else:
-                zdanie, gest = _EMPTY_VIEW, ""
-        self.empty.setText(i18n.t(zdanie))
+                zdanie, gest = i18n.t(_EMPTY_VIEW), ""
+        self.empty.setText(zdanie)
         self.empty_btn.setText(gest)
         self.empty_btn.setVisible(bool(gest))
 
@@ -4283,10 +4509,16 @@ class FramesView(QWidget):
         OSTATNI CZŁON MÓWI, CZEGO TEN BUILD NIE ZASTOSOWAŁ (D-V-9f): perspektywa zapisana nowszym
         wydaniem może nieść warunek, którego tu nie znamy, a wtedy zbiór jest szerszy niż zapisany.
         Pytamy pozycję, która JEST na liście - dlatego `_refresh` woła ten opis PO właścicielu
-        etykiety: gdy zbiór przestał być tą perspektywą, ostrzeżenie o niej też przestaje dotyczyć."""
-        parts = [filter_engine.describe(self._effective_tree)]
-        parts += [i18n.t(_klucz_kryterium(atrybut)) for atrybut, _ in _TRIMY
-                  if getattr(self, atrybut)]
+        etykiety: gdy zbiór przestał być tą perspektywą, ostrzeżenie o niej też przestaje dotyczyć.
+
+        CZŁONY ZAWĘŻENIA IDĄ PIERWSZE, „wszystkie klatki" TYLKO BEZ NICH: pasek elidował
+        „wszystkie klatki · tylko duplikaty" do „wszystkie klatki…", czyli mówił odwrotność trimu.
+        Kolejność: trim perspektywy, potem facety i filtr (drzewo efektywne), na końcu ostrzeżenie."""
+        parts = [i18n.t(_klucz_kryterium(atrybut)) for atrybut, _ in _TRIMY
+                 if getattr(self, atrybut)]
+        drzewo = filter_engine.describe(self._effective_tree)
+        if not parts or drzewo != filter_engine.describe(None):
+            parts.append(drzewo)
         data = self.combo_persp.currentData()
         spec = self._spec_pozycji(data) if data and data[0] == "saved" else None
         pominiete = _nieznane_warunki(spec) if spec is not None else []
@@ -4340,6 +4572,48 @@ class FramesView(QWidget):
     def _on_columns(self, cols):
         self._columns = cols
         self.refresh()
+
+    def _perspektywa_obrazow(self):
+        """Czy perspektywa jest jedną z tych, w których kolumna „Obrazy" ma treść (`_FLAGI_OBRAZOW`)."""
+        return any(getattr(self, atrybut) for atrybut in _FLAGI_OBRAZOW)
+
+    def _obrazy_widoczne(self):
+        """Widoczność kolumny „Obrazy": wybór ręki z „Pól", a bez niego - perspektywa."""
+        return self._obrazy_reka if self._obrazy_reka is not None else self._perspektywa_obrazow()
+
+    def _on_images_toggled(self, on):
+        """Ręka w „Polach" włączyła albo wyłączyła kolumnę „Obrazy" - wybór obowiązuje w KAŻDEJ
+        perspektywie do końca sesji widoku (bije domyślną z `_FLAGI_OBRAZOW`). Bez przeładowania
+        zbioru: zmienia się tylko widoczność kolumny, nie dane."""
+        self._obrazy_reka = bool(on)
+        self._uloz_kolumny()
+
+    def _uloz_kolumny(self):
+        """Układ kolumn tabeli po każdym `set_data` - właściciel trzech rzeczy, które Qt pamięta
+        PO NUMERZE kolumny, a numer zmienia się z perspektywą (kolumna „Wersja" wchodzi przed
+        keywordy):
+          * ukrycie kolumny „Obrazy" (`_obrazy_widoczne`) - stan nagłówka przeżywa reset modelu
+            pod starym numerem, więc liczymy go od nowa dla CAŁEGO układu, nie tylko dla jednej;
+          * wskaźnik sortu nagłówka - model pamięta sort po znaczeniu (`sort_column`), a nagłówek
+            po numerze; bez przestawienia strzałka stała nad cudzą kolumną. Bez sygnału, bo model
+            już jest posortowany - emisja kazałaby mu przebudować się drugi raz;
+          * szerokość i elizja kolumny ścieżki w perspektywach `_FLAGI_SCIEZKI_Z_TRESCI`
+            (`kolumna_z_tresci`); poza nimi elizja wraca do domyślnej, a szerokość zostaje ręki."""
+        m = self.model
+        obrazy = m.base_col("_images")
+        widoczne = self._obrazy_widoczne()
+        for c in range(m.columnCount()):
+            self.table.setColumnHidden(c, c == obrazy and not widoczne)
+        self.fields.set_images_checked(widoczne)
+        naglowek = self.table.horizontalHeader()
+        naglowek.blockSignals(True)
+        naglowek.setSortIndicator(m.sort_column(), m.sort_order())
+        naglowek.blockSignals(False)
+        sciezka = m.base_col("path")
+        if any(getattr(self, atrybut) for atrybut in _FLAGI_SCIEZKI_Z_TRESCI):
+            kolumna_z_tresci(self.table, sciezka)
+        else:
+            self.table.setItemDelegateForColumn(sciezka, None)
 
     def _on_group(self):
         # Grupa wersji jest pochodną liczoną w `_refresh` tylko wtedy, gdy ktoś o nią pyta
@@ -4417,7 +4691,9 @@ class FramesView(QWidget):
         rows = queries.cards_pivot(self.con, base_ids, keywords) if (base_ids and keywords) else []
         pv = pivot_mod.build_pivot(base_ids, keywords, rows)
         self.model.set_data(base, pv, keywords, group_by=self.combo_group.currentData(),
-                            version_col=self._perspektywa_wersji())
+                            version_col=self._perspektywa_wersji(),
+                            images_unknown=self._perspektywa_obrazow())
+        self._uloz_kolumny()
         if self.model._version_col() is not None:
             # Domyślne 100 px elidowało „inna integracja · 2026-02-21 12:43 · 33 wejścia", czyli
             # właśnie te fakty, po które perspektywa istnieje. Koszt znikomy: perspektywa ma na
@@ -4685,6 +4961,40 @@ class FramesView(QWidget):
         (zmierzone 17 ms na 193 stosach żywego archiwum, przy każdym kliknięciu w listwie)."""
         return self._perspektywa_wersji() or self.combo_group.currentData() == _GRUPA_WERSJI
 
+    def _uloz_belki_i_wersje(self):
+        """Układ widoku po każdym resecie modelu (sygnał `modelReset`): belki grup i kolumna „Wersja".
+
+        BELKA GRUPY NA CAŁĄ SZEROKOŚĆ (`setSpan`) przy KAŻDYM grupowaniu: podpis belki żył
+        w kolumnie „Ścieżka" i był w niej ucięty - z grupy wersji (obiekt, filtr, ekspozycja, okno
+        co do sekundy) zostawało „IC1795 · Ha ·…", a z długich nazw obiektów i kluczy to samo.
+        Spany są własnością WIDOKU i reset modelu ich nie zdejmuje (zmierzone: span przeżywa
+        `beginResetModel`/`endResetModel` przy zmianie wierszy i liczby kolumn), więc po sorcie
+        wisiałyby na cudzych wierszach, a bez grupowania na wierszach danych - stąd `clearSpans`
+        przed każdym układaniem.
+
+        „WERSJA" ZA „ŚCIEŻKĄ" przesunięciem WIZUALNYM (`moveSection`), nie nowym indeksem w modelu:
+        logiczna pozycja kolumny (`_version_col`) zostaje tam, gdzie liczą ją sort, podgląd klingi
+        i przesunięcie keywordów, a człowiek widzi nazwę pliku i fakty wersji obok siebie. Zmiana
+        liczby kolumn kasuje przesunięcia nagłówka, więc ustawiamy je przy każdym resecie; poza
+        perspektywą wracają na miejsca logiczne (nagłówek nie ma `setSectionsMovable`, więc innych
+        przesunięć niż to nie ma)."""
+        t = self.table
+        t.clearSpans()
+        if self.model._group_by not in (None, ""):
+            n = self.model.columnCount()
+            for i, row in enumerate(self.model._rows):
+                if "_group" in row:
+                    t.setSpan(i, 0, 1, n)
+        h = t.horizontalHeader()
+        kol = self.model._version_col()
+        if kol is not None:
+            if h.visualIndex(kol) != 1:
+                h.moveSection(h.visualIndex(kol), 1)
+        elif h.sectionsMoved():
+            for i in range(h.count()):
+                if h.visualIndex(i) != i:
+                    h.moveSection(h.visualIndex(i), i)
+
     def _on_table_menu(self, pos):
         """Prawy klik na tabeli: menu z sekcją „Zostaw tę wersję" (perspektywa „Wersje stosów")
         i sekcją dróg wyjścia z izolacji zapisu w miejscu (perspektywy zapisu albo klatka z kopią
@@ -4774,7 +5084,7 @@ class FramesView(QWidget):
         msg = (i18n.t_plural("grid.version.copied", len(plan["paths"]))
                + i18n.t_plural("grid.version.copied_stacks", plan["stacks"]))
         if plan["unknown"]:
-            msg += i18n.t("grid.version.skipped_unknown", n=plan["unknown"])
+            msg += i18n.t_plural("grid.version.skipped_unknown", plan["unknown"])
         self.status_message.emit(msg + i18n.t("grid.version.no_delete"))
 
     # ---- IZOLACJA ZAPISU W MIEJSCU: drogi wyjścia z GUI (warunek wsadu AR-17 (1)(2)) ----
@@ -5287,14 +5597,28 @@ class FramesView(QWidget):
         self._start_writeback("undo", commit_id, self._after_undo)
 
     def _after_undo(self, op, res):
-        msg = i18n.t("grid.wb.restored", n=len(res.restored))
-        if res.blocked:
-            msg += " · " + i18n.t("grid.wb.blocked", n=len(res.blocked))
+        """Ogon cofnięcia makra - lustro `_after_undo_rename` (AR-31 (2)). BŁĄD JEST WIDOCZNY I DA
+        SIĘ GO PONOWIĆ: `failed` bywa nagłówkiem przywróconym bez re-syncu bazy albo operacją
+        w miejscu, która zostawiła lokację izolowaną, a rdzeń przy obu mówi „ponowne undo dokończy".
+        Dawniej zdanie liczyło tylko przywrócone i zablokowane, a „Cofnij" gasło razem z jedynym
+        uchwytem ponowienia (`commit_id`). Teraz zdanie niesie liczbę błędów i pierwszy powód
+        (błędu przed blokadą), a przy błędzie „Cofnij" zostaje przy tym samym commicie z receptą.
+        Ponowienie jest bezpieczne: pliki już cofnięte rdzeń odda jako zablokowane „już cofnięte"."""
+        msg = zdanie_undo_kart(res)
+        detail = next((fr for fr in res.failed + res.blocked if fr.reason), None)
+        if detail is not None:
+            msg += i18n.t("grid.inplace.detail", file=_ogon_sciezki(detail.path),
+                          detail=detail.reason)
         self.drawer.end_progress()
-        self._undo_btn.setVisible(False)
-        self._undo_mode = None
-        self.drawer.set_commit_actions_visible(True)     # przywróć akcje po cofnięciu (#5)
-        self.drawer.set_count(0, result=msg)
+        if res.failed:                                   # commit zostaje - „Cofnij" ponowi resztę
+            msg += i18n.t("grid.wb.undo_retry", undo=i18n.t("grid.action.undo"))
+            self.drawer.set_commit_actions_visible(False)   # jedyną akcją dalej jest „Cofnij" (#5)
+            self.drawer.set_result(msg)                  # etykieta „Zatwierdzono…" zostaje
+        else:
+            self._undo_btn.setVisible(False)
+            self._undo_mode = None
+            self.drawer.set_commit_actions_visible(True)  # przywróć akcje po cofnięciu (#5)
+            self.drawer.set_count(0, result=msg)
         self.refresh()
         self._refresh_drawer()                           # honest: odbij pending drugiej klingi (wiz #3b)
         self.status_message.emit(i18n.t("grid.wb.undo_status", msg=msg))
@@ -5469,7 +5793,7 @@ class FramesView(QWidget):
                           detail=detail.reason)
         self.drawer.end_progress()
         if res.failed:                                   # przebieg zostaje - „Cofnij" ponowi resztę
-            msg += i18n.t("grid.rename.undo_retry", undo=i18n.t("grid.action.undo"))
+            msg += i18n.t("grid.wb.undo_retry", undo=i18n.t("grid.action.undo"))
             self.drawer.set_commit_actions_visible(False)   # jedyną akcją dalej jest „Cofnij" (#5)
             self.drawer.set_result(msg)                  # etykieta „Przemianowano…" zostaje
         else:

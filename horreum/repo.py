@@ -137,19 +137,29 @@ def upsert_frame(con, *, sha1_data, sha1_data_uncomputable=0, kind, filetype, ca
         return row[0], False
 
     with con:  # atomowo: INSERT frame + INSERT event
-        cur = con.execute(
-            "INSERT INTO frame(sha1_data, sha1_data_uncomputable, kind, kind_source, filetype, "
-            "camera_id, first_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (sha1_data, sha1_data_uncomputable, kind, kind_source, filetype, camera_id, now),
-        )
-        frame_id = cur.lastrowid
-        emit_event(
-            con, actor=actor, verb="frame.observed", target=f"frame:{frame_id}", now=now,
-            payload={"sha1_data": sha1_data, "uncomputable": sha1_data_uncomputable,
-                     "kind": kind, "kind_source": kind_source, "filetype": filetype,
-                     "camera_id": camera_id},
-        )
+        frame_id = _insert_frame(
+            con, sha1_data=sha1_data, sha1_data_uncomputable=sha1_data_uncomputable, kind=kind,
+            kind_source=kind_source, filetype=filetype, camera_id=camera_id, now=now, actor=actor)
     return frame_id, True
+
+
+def _insert_frame(con, *, sha1_data, sha1_data_uncomputable, kind, kind_source, filetype,
+                  camera_id, now, actor):
+    """INSERT frame + `event(frame.observed)` BEZ własnej transakcji - trzyma ją wołający
+    (`upsert_frame`, `rebind_location_to_identity`). Jeden literał dla obu dróg wyłonienia klatki."""
+    cur = con.execute(
+        "INSERT INTO frame(sha1_data, sha1_data_uncomputable, kind, kind_source, filetype, "
+        "camera_id, first_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (sha1_data, sha1_data_uncomputable, kind, kind_source, filetype, camera_id, now),
+    )
+    frame_id = cur.lastrowid
+    emit_event(
+        con, actor=actor, verb="frame.observed", target=f"frame:{frame_id}", now=now,
+        payload={"sha1_data": sha1_data, "uncomputable": sha1_data_uncomputable,
+                 "kind": kind, "kind_source": kind_source, "filetype": filetype,
+                 "camera_id": camera_id},
+    )
+    return frame_id
 
 
 # FAKTY KOPII Z JEJ NAGŁÓWKA (0021) - kolumny `location` w kolejności literałów SQL tego modułu.
@@ -252,13 +262,48 @@ def rebind_location(con, *, location_id, frame_after, now, actor="scan", inplace
         if row is None:
             raise ValueError(f"location:{location_id} nie istnieje")
         _refuse_if_newer_inplace(con, location_id, inplace_gen)
-        frame_before = row["frame_id"]
-        if frame_before == frame_after:
-            return False
-        con.execute("UPDATE location SET frame_id = ? WHERE id = ?", (frame_after, location_id))
-        emit_event(con, actor=actor, verb="location.rebound", target=f"location:{location_id}",
-                   now=now, payload={"frame_before": frame_before, "frame_after": frame_after})
+        return _rebind(con, location_id=location_id, frame_before=row["frame_id"],
+                       frame_after=frame_after, now=now, actor=actor)
+
+
+def _rebind(con, *, location_id, frame_before, frame_after, now, actor):
+    """UPDATE `location.frame_id` + `event(location.rebound)` BEZ własnej transakcji; ta sama
+    tożsamość → False bez zapisu. Wołają ją `rebind_location` i `rebind_location_to_identity`."""
+    if frame_before == frame_after:
+        return False
+    con.execute("UPDATE location SET frame_id = ? WHERE id = ?", (frame_after, location_id))
+    emit_event(con, actor=actor, verb="location.rebound", target=f"location:{location_id}",
+               now=now, payload={"frame_before": frame_before, "frame_after": frame_after})
     return True
+
+
+def rebind_location_to_identity(con, *, location_id, sha1_data, sha1_data_uncomputable=0, kind,
+                                filetype, camera_id, now, actor="scan", kind_source=None,
+                                inplace_gen=None):
+    """PODMIANA TREŚCI jedną transakcją (AR-31): wyłonienie klatki nowej tożsamości (kontrakt
+    `upsert_frame`) + przepięcie lokacji (kontrakt `rebind_location`). Zwraca
+    `(frame_id, created)`.
+
+    DLACZEGO RAZEM: strażnik generacji (`_refuse_if_newer_inplace`) siedzi w transakcji przepięcia.
+    Klatka wyłoniona OSOBNĄ transakcją przed nim zostawała po `StaleScanRecord` w bazie, a ponowienie
+    skanu widziało ją jako istniejącą (`created=False`) i nie nagrywało zeznania - klatka bez
+    `header` na stałe (także w następnych przebiegach). Tu strażnik stoi PRZED zapisem, a odmowa
+    cofa całość, więc ponowienie widzi `created=True` uczciwie."""
+    with _immediate(con):
+        row = con.execute(
+            "SELECT frame_id FROM location WHERE id = ?", (location_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"location:{location_id} nie istnieje")
+        _refuse_if_newer_inplace(con, location_id, inplace_gen)
+        frame = con.execute("SELECT id FROM frame WHERE sha1_data = ?", (sha1_data,)).fetchone()
+        created = frame is None
+        frame_id = _insert_frame(
+            con, sha1_data=sha1_data, sha1_data_uncomputable=sha1_data_uncomputable, kind=kind,
+            kind_source=kind_source, filetype=filetype, camera_id=camera_id, now=now,
+            actor=actor) if created else frame[0]
+        _rebind(con, location_id=location_id, frame_before=row["frame_id"],
+                frame_after=frame_id, now=now, actor=actor)
+    return frame_id, created
 
 
 def mark_superseded(con, *, frame_id, superseded_by, now, actor="supersede"):
@@ -2474,8 +2519,8 @@ def inplace_generation(con):
     """GENERACJA dziennika zapisu w miejscu = największe `inplace_op.id` (0, gdy pusto). `id` rośnie
     monotonicznie, więc to zegar bez zegara: operacja zaczęta po odczycie generacji ma `id` większe.
     Skan czyta ją PRZED bramką izolacji i podaje do klingi faktów kopii (`refresh_location`,
-    `refresh_location_unreadable`, `rebind_location`), która w tej samej transakcji co zapis odmawia
-    rekordowi starszemu od operacji (`StaleScanRecord`)."""
+    `refresh_location_unreadable`, `rebind_location`, `rebind_location_to_identity`), która w tej
+    samej transakcji co zapis odmawia rekordowi starszemu od operacji (`StaleScanRecord`)."""
     return con.execute("SELECT COALESCE(MAX(id), 0) FROM inplace_op").fetchone()[0]
 
 

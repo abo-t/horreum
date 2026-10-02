@@ -275,7 +275,8 @@ def test_uzupelnienie_faktow_kopii_ponawia_raz(tmp_path, monkeypatch, konflikty,
     if zapis:
         assert (s.written, s.stale, s.remaining) == (1, 0, 0) and hdr is not None, s
     else:
-        assert (s.written, s.stale, s.stale_paths, s.remaining) == (0, 1, [str(p)], 1), s
+        # drugi konflikt generacji = zapis w miejscu w toku, plik zdrowy - nie „zmienione na dysku"
+        assert (s.written, s.raced, s.stale, s.stale_paths, s.remaining) == (0, 1, 0, [], 1), s
         assert hdr is None
     con.close()
 

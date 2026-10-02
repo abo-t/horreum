@@ -159,7 +159,11 @@ _BEZ_ROBOTY = frozenset({"superseded_frames", "retired_frames", "missing_copy_fr
 # faktów, zero tych wierszy mówi „?" i dlaczego, a podpowiedź - co da liczbę. Liczba i lista pod
 # klikiem dalej czytają jeden predykat; zmienia się wyłącznie to, jak wiersz wypowiada swoje zero.
 # „?" nie jest robotą: nie pogrubia się i nie wchodzi do plakietki (robotą jest Dostawa albo
-# „Oznacz zniknięte", nie ten wiersz).
+# „Oznacz zniknięte", nie ten wiersz). Liczba niezerowa przy kopiach bez faktów jest DOLNĄ granicą
+# i mówi „N+" z tą samą receptą - tam robota jest (klatki do obejrzenia), więc wiersz zostaje
+# pogrubiony i klik prowadzi do perspektywy. Kopie bez faktów liczy predykat porównywalnych
+# kandydatów (`scan.copy_facts_candidates(..., porownywalne=True)`): pojedynczy XISF czeka na
+# uzupełnienie, ale żadnej z tych dwóch liczb nie zmieni.
 _CZEKA_NA_FAKTY_KOPII = frozenset({"copy_conflict_frames", "orphan_testimony_frames"})
 # KLIK W „?" PROWADZI DO DOSTAWY, nie do perspektywy (AR-28 (b)). Lista pod klikiem czyta ten sam
 # predykat co liczba, a liczba „nie wie" - więc perspektywa była pusta („Brak klatek w tej
@@ -288,30 +292,40 @@ class TasksView(QWidget):
         (`counts_changed` = liczba pozycji akcyjnych z n>0). Woła gospodarz (montaż / po przebiegu
         Dostawy / wejście w Porządki / sygnał stanu Porządków z gestu Zbiorów) i powrót z podstrony."""
         state = queries.tasks_state(self.con)
-        # Kopie czekające na fakty - WOŁANE, nie powielane: predykat ma jednego właściciela, a ten
-        # sam SELECT steruje etapem Dostawy, więc „czeka N" znaczy dokładnie „etap ma N do zrobienia".
-        czeka = len(scan.copy_facts_candidates(self.con))
+        # Kopie czekające na fakty, które mogą zmienić te wiersze - WOŁANE, nie powielane: predykat
+        # ma jednego właściciela (ten sam SELECT steruje etapem Dostawy), tryb `porownywalne`
+        # odcina kandydatów, których fakty żadnego porównania kopii nie ruszą.
+        czeka = len(scan.copy_facts_candidates(self.con, porownywalne=True))
         badge = 0
         self._niewiadome = set()
         for row, (key, label, action) in enumerate(_TASKS):
             n = state[key]
             it = self.tasks.item(row)
-            niewiadome = n == 0 and czeka > 0 and key in _CZEKA_NA_FAKTY_KOPII
+            czesciowe = czeka > 0 and key in _CZEKA_NA_FAKTY_KOPII
+            niewiadome = czesciowe and n == 0
             if niewiadome:
                 self._niewiadome.add(key)
             # akcyjne z chevronem „›" — wiersz ZAPRASZA klik; informacyjne bez (wizytator F5 #2).
             # Liczba idzie w CZŁON DRUGI (prawa kolumna, `rows.SECONDARY`), nie w tekst etykiety —
             # inaczej liczby nie ustawiają się w kolumnę i nie da się ich skanować (wiz F5 #6).
             it.setText(i18n.t(label))
-            liczba = i18n.t_plural("tasks.copies_unread", czeka) if niewiadome else str(n)
-            it.setData(rows.SECONDARY, f"{liczba}  ›" if action is not None else liczba)
-            # Drogi do liczby niesie PODPOWIEDŹ, nie wiersz: obie są warunkowe (plik jest / pliku
-            # nie ma), a zdanie z obiema nie mieści się w członie drugim listy 400 px.
             if niewiadome:
+                liczba = i18n.t_plural("tasks.copies_unread", czeka)
+            elif czesciowe:                 # dolna granica: kopie bez faktów nie są w porównaniu
+                liczba = i18n.t_plural("tasks.copies_partial", czeka, m=n)
+            else:
+                liczba = str(n)
+            it.setData(rows.SECONDARY, f"{liczba}  ›" if action is not None else liczba)
+            # Drogi do liczby niesie PODPOWIEDŹ, nie wiersz: wszystkie są warunkowe (plik jest /
+            # kopia jest stosem / pliku nie ma), a zdanie z nimi nie mieści się w członie drugim
+            # listy 400 px. Ostatnie zdanie mówi, dokąd prowadzi klik: „?" - Dostawa, „N+" - Zbiory.
+            if czesciowe:
                 tip = i18n.t_plural("tasks.copies_unread_tip", czeka,
                                     place=i18n.t("nav.dostawa"),
+                                    stacks=i18n.t("pipeline.btn.stacks"),
                                     check=i18n.t("pipeline.btn.presence"),
-                                    mark=i18n.t("pipeline.btn.mark_vanished"))
+                                    mark=i18n.t("pipeline.btn.mark_vanished"),
+                                    dest=i18n.t("nav.dostawa" if niewiadome else "nav.zbiory"))
             elif key in _PODPOWIEDZI_GESTU and n > 0:   # przy zerze zdanie o pliku byłoby fałszem
                 tip = i18n.t(_PODPOWIEDZI_GESTU[key], finish=i18n.t("grid.inplace.finish"),
                              restore=i18n.t("grid.inplace.restore"),

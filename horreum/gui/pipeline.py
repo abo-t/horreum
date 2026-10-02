@@ -53,7 +53,9 @@ class PipelineWorker(QObject):
     stage_done = Signal(str, object)       # po (pod)etapie — summary/report
     cancelled = Signal(str, object)
     failed = Signal(str, str)
-    source_unreachable = Signal(str)       # korzeń passa obecności nie jest osiągalnym katalogiem
+    source_unreachable = Signal(str, str)  # (etap, korzeń) - korzeń nie jest osiągalnym katalogiem
+    source_ready = Signal(str, str)        # (korzeń, serial albo '?') - zmierzone w TYM wątku
+    start_refused = Signal(str)            # powód wstrzymania skanu przed pierwszym plikiem
     finished = Signal()                    # run() zakończył (KAŻDĄ drogą) — sygnał do quit() wątku
 
     def __init__(self, db_path, *, now_fn=_utc_now_iso):
@@ -97,11 +99,13 @@ class PipelineWorker(QObject):
                 self._bulk(con, "stack_lineage")
             elif self._stage == "delta":
                 self._bulk(con, "delta")
+            elif self._stage == "copy_facts":
+                self._adopt_and_derive(con)
             elif self._stage in ("presence", "presence-apply"):
                 apply = self._stage.endswith("apply")
                 s = self._presence(con, apply=apply)
                 if apply and s is not None and not s.cancelled and s.aborted is None:
-                    self._after_vanished(con)
+                    self._adopt_and_derive(con)
             elif self._stage == "all":
                 self._run_all(con)
             else:
@@ -113,10 +117,46 @@ class PipelineWorker(QObject):
                 con.close()
             self.finished.emit()                       # zawsze: zwolnij wątek (quit pętli zdarzeń)
 
+    def _zrodlo(self, *, wskaz=True):
+        """Sonda źródła W TYM WĄTKU, nigdy w oknie: czy korzeń jest osiągalnym katalogiem i - gdy
+        wołający nie podał woluminu - jaki ma serial. `is_dir` i odczyt serialu na odłączonym
+        udziale SMB stoją do timeoutu sieci; w slocie okna zamrażały je (AR-31 (3): „Przyjmij
+        nowe", „Skanuj", „Przetwórz wszystko", „Wciągnij stosy…" - jak wcześniej „Sprawdź
+        obecność"). Korzeń nieosiągalny → `source_unreachable(etap, korzeń)` i `False`; serial
+        zmierzony tutaj → `source_ready(korzeń, serial)`, z którego okno robi korzeń wskazanym
+        katalogiem (`PipelineView._on_source_ready`) - dopiero PO sondzie, więc niedostępna ścieżka
+        nigdy nim nie zostaje. Serial liczony ŚWIEŻO na starcie każdego przebiegu (R#7+R2-3:
+        z pamięci albo montażu bywa stale po przepięciu dysku).
+
+        `wskaz=False` - droga „Stosy": jej korzeń to drzewo OBRÓBKI, nie źródło archiwum, więc nie
+        ma prawa zostać wskazanym katalogiem trybu zaawansowanego (skan i obecność poszłyby potem
+        po drzewie obróbki). Serial trafia wtedy wyłącznie do parametrów przebiegu."""
+        root = self._params["root"]
+        if not os.path.isdir(root):
+            self.source_unreachable.emit(self._stage or "?", str(root))
+            return False
+        if self._params.get("volume") is None:
+            serial = volume_serial(root)
+            self._params["volume"] = serial if serial is not None else "?"
+            if wskaz:
+                self.source_ready.emit(str(root), self._params["volume"])
+        return True
+
     def _scan(self, con):
         """Skan z progresem/anulowaniem. Zwraca summary; emituje cancelled/stage_done. `False` =
-        anulowano (wołający przerywa łańcuch „all")."""
+        anulowano albo skan nie ruszył (wołający przerywa łańcuch „all").
+
+        PRZED PIERWSZYM PLIKIEM dwie bramki, obie tutaj, nie w oknie: sonda źródła (`_zrodlo`)
+        i guard mieszania serialu (`powod_mieszania`), który zależy od serialu zmierzonego dopiero
+        przez sondę. Wstrzymanie wraca jako `start_refused(powód)` - okno pokazuje je tak samo jak
+        dawniej guard w slocie (`PipelineView._pokaz_odmowe`)."""
         self.stage_started.emit("scan")
+        if not self._zrodlo():
+            return False
+        powod = powod_mieszania(con, self._params["volume"])
+        if powod is not None:
+            self.start_refused.emit(powod)
+            return False
         summary = scan_tree(
             con, self._params["root"],
             volume=self._params.get("volume", "?"),
@@ -148,8 +188,19 @@ class PipelineWorker(QObject):
         a „Przyjmij nowe" chodzi po archiwum, więc bez nich kopie stosów sprzed 0021 nie dostałyby
         faktów nigdy (skan stosów pomija je bramą przyrostową), a stos, którego kopia-źródło
         zniknęła, mówiłby głosem skasowanego pliku do końca świata. Anulowanie któregoś z nich też
-        przerywa łańcuch."""
+        przerywa łańcuch.
+
+        PRZED PIERWSZYM PLIKIEM te same dwie bramki co w `_scan`, też tutaj, nie w oknie (AR-31
+        (3)): sonda korzenia z serialem (`_zrodlo`, bez wskazywania korzenia - `wskaz=False`)
+        i guard mieszania serialu (`powod_mieszania`). Dawniej serial korzenia stosów mierzył slot
+        okna zaraz po dialogu - na odłączonym udziale okno stało do timeoutu sieci."""
         self.stage_started.emit("stacks")
+        if not self._zrodlo(wskaz=False):
+            return False
+        powod = powod_mieszania(con, self._params["volume"])
+        if powod is not None:
+            self.start_refused.emit(powod)
+            return False
         s = scan_stacks(
             con, self._params["root"],
             volume=self._params.get("volume", "?"),
@@ -185,24 +236,18 @@ class PipelineWorker(QObject):
         pociąć. Anulowanie DZIAŁA (pętla potwierdzeń pyta `should_cancel`), więc zerwany SMB nie
         trzyma okna. `apply` NIGDY nie idzie w złotej akcji - tylko z jawnego przycisku.
 
-        KORZEŃ I WOLUMIN SPRAWDZA TEN WĄTEK, NIE OKNO: przycisk „Sprawdź obecność" podaje sam
-        korzeń (bez `volume`), bo `is_dir` i odczyt serialu na odłączonym udziale SMB stoją do
-        timeoutu sieci - w slocie okna zamrażały je. Korzeń, który nie jest osiągalnym katalogiem,
-        wraca jako `source_unreachable(root)` (okno pokazuje „źródło niedostępne" i drogę do wyboru
-        katalogu) zamiast wyjątku z `canonize_root`, który dawał surowe „FileNotFoundError" na
-        czerwono i żadnej drogi dalej. Zwraca `PresenceSummary` albo `None` (korzeń niedostępny)."""
+        KORZEŃ I WOLUMIN SPRAWDZA TEN WĄTEK, NIE OKNO (`_zrodlo`): przycisk „Sprawdź obecność"
+        podaje sam korzeń (bez `volume`), bo `is_dir` i odczyt serialu na odłączonym udziale SMB
+        stoją do timeoutu sieci - w slocie okna zamrażały je. Korzeń, który nie jest osiągalnym
+        katalogiem, wraca jako `source_unreachable` (okno pokazuje „źródło niedostępne" i drogę do
+        wyboru katalogu) zamiast wyjątku z `canonize_root`, który dawał surowe „FileNotFoundError"
+        na czerwono i żadnej drogi dalej. Zwraca `PresenceSummary` albo `None` (korzeń niedostępny)."""
         name = "presence"
         self.stage_started.emit(name)
-        root = self._params["root"]
-        if not os.path.isdir(root):
-            self.source_unreachable.emit(str(root))
+        if not self._zrodlo():
             return None
-        volume = self._params.get("volume")
-        if volume is None:
-            serial = volume_serial(root)
-            volume = serial if serial is not None else "?"
         s = presence.check(
-            con, root, volume=volume, apply=apply,
+            con, self._params["root"], volume=self._params["volume"], apply=apply,
             now=self._now(), should_cancel=self._cancel.is_set)
         if s.cancelled:
             self.cancelled.emit(name, s)
@@ -210,9 +255,10 @@ class PipelineWorker(QObject):
             self.stage_done.emit(name, s)
         return s
 
-    def _after_vanished(self, con):
-        """Ogon gestu „Oznacz zniknięte" (AR-5): przejęcie zeznania i - gdy coś przejęto - pochodne
-        (`group` → `resolve` → `calibrate` → `lineage`), w tej samej kolejności co w Dostawie.
+    def _adopt_and_derive(self, con):
+        """Fakty kopii → przejęcie zeznania → - gdy coś przejęto - pochodne (`group` → `resolve` →
+        `calibrate` → `lineage`), w tej samej kolejności co w Dostawie. Wspólna droga DWÓCH gestów
+        bez skanu: ogona „Oznacz zniknięte" (AR-5) i „Zbierz fakty kopii (N)".
 
         DLACZEGO TU, a nie dopiero w następnej dostawie: oznaczenie zniknięcia jest dokładnie tą
         chwilą, w której klatka zaczyna mówić głosem nieobecnego pliku. Bez ogona stan trwał do
@@ -223,7 +269,18 @@ class PipelineWorker(QObject):
 
         Fakty kopii idą PRZED przejęciem (kolejność `_run_all`): ocalała kopia sprzed 0021 nie ma
         faktów, a predykat zeznania bez nich milczy („nie wiem"), więc przejęcie nie miałoby
-        kandydata. Anulowanie faktów przerywa ogon."""
+        kandydata. Anulowanie faktów albo przejęcia przerywa drogę przed pochodnymi.
+
+        GEST „Zbierz fakty kopii (N)" idzie tą samą drogą, bo przejęcie zeznania zmienia `header`,
+        z którego liczą się pochodne - bez nich zostałyby policzone z głosu nieobecnego pliku do
+        najbliższej dostawy. Bez skanu: kopie czekające na fakty to te, które brama przyrostowa
+        skanu i tak pomija (mtime bez zmian), więc pełna Dostawa kosztowała minuty skanu po to,
+        żeby dojść do etapów, które trwają sekundy. BEZ ZAWĘŻENIA DO KORZENIA (gest nie niesie
+        `root`; oba etapy przyjmują `None`): licznik przycisku i wiersz „?" w Porządkach liczą ten
+        sam predykat bez korzenia (`scan.copy_facts_candidates(con)`), więc gest zawężony do
+        ostatniego źródła zostawiałby kopie drzewa obróbki i liczba na przycisku nie schodziłaby
+        do zera nigdy. Świadek skasowania bez korzenia to najbliższy istniejący przodek pliku
+        (`backfill_copy_facts`)."""
         if not self._copy_facts(con):
             return
         a = self._adopt_testimony(con)
@@ -297,7 +354,8 @@ class PipelineWorker(QObject):
 
         ZAKRES = korzeń TEJ dostawy (jak pass obecności): „Przetwórz wszystko" na wskazanym
         katalogu nie czyta plików spoza niego. Wołają go Dostawa (`_run_all`), droga „Stosy"
-        (`_stacks`, korzeń stosów) i ogon „Oznacz zniknięte" (`_after_vanished`). Anulowanie
+        (`_stacks`, korzeń stosów) oraz ogon „Oznacz zniknięte" i gest „Zbierz fakty kopii" -
+        oba przez `_adopt_and_derive` (gest bez korzenia - całe archiwum). Anulowanie
         PRZERYWA łańcuch jak przy skanie - każda kopia to osobna transakcja, więc baza zostaje
         spójna, a następna dostawa dobierze resztę.
         Zwraca `False`, gdy anulowano."""
@@ -325,9 +383,10 @@ class PipelineWorker(QObject):
 
         ZAKRES = korzeń TEJ dostawy (jak `_copy_facts`). Anulowanie PRZERYWA łańcuch - każda klatka
         to osobna transakcja, więc baza zostaje spójna. Wołają go Dostawa (`_run_all`), droga
-        „Stosy" (`_stacks`, korzeń stosów) i ogon gestu „Oznacz zniknięte" (`_after_vanished`) -
-        każdy zaraz po `_copy_facts`. Zwraca `AdoptSummary` (wołający czyta `cancelled`
-        i `adopted`) albo `None`, gdy kandydatów nie było."""
+        „Stosy" (`_stacks`, korzeń stosów) oraz ogon gestu „Oznacz zniknięte" i gest „Zbierz
+        fakty kopii" (oba `_adopt_and_derive`) - każdy zaraz po `_copy_facts`.
+        Zwraca `AdoptSummary` (wołający czyta `cancelled` i `adopted`) albo `None`, gdy kandydatów
+        nie było."""
         root = self._params.get("root")
         if not scan.adopt_candidates(con, root):
             return None
@@ -380,6 +439,24 @@ _REVIEW_REASONS = [("no_config", "pipeline.reason.no_config"),
                    ("unreadable", "pipeline.reason.unreadable")]
 
 
+# Powody wejścia do Dostawy z innej powierzchni (`PipelineView.show_reason`). Wartość = identyfikator
+# niesiony sygnałem gospodarza, nie etykieta (wording mieszka w katalogu `pipeline.why.*`).
+REASON_COPY_FACTS = "copy_facts"
+
+
+def powod_mieszania(con, volume):
+    """Guard mieszania serialu (F5R#3) - powód wstrzymania skanu albo `None`. Skan `'?'` do bazy
+    znającej REALNE wolumeny PODWOIŁBY lokacje każdej znanej klatki (brama `(volume,path,mtime)`
+    nie trafi, `UNIQUE(volume,path)` wpuści drugą) → zadanie „Duplikaty" i perspektywa kłamią na
+    masę. Warunek = konserwatywny NADZBIÓR podwojenia (bez bypassa w v1 - decyzja jawna F5R2#3);
+    czysty świat `'?'` (nie-Windows) przechodzi. JEDEN predykat dla obu dróg wciągających pliki
+    (sekwencje skanu i droga „Stosy"); woła go wyłącznie wątek tła, bo serial mierzy dopiero on
+    (AR-31 (3))."""
+    if volume != "?" or not queries.has_real_volume_locations(con):
+        return None
+    return i18n.t("pipeline.guard.mixed")
+
+
 def _stage_label(name):
     """Nazwa etapu w bieżącym języku (klucz z `_STAGE_LABEL`); nieznana → raw `name` (nie wołaj `t`
     na nie-kluczu)."""
@@ -404,8 +481,9 @@ class PipelineView(QWidget):
     baza → „Przyjmij nowe" (złota akcja: cała sekwencja na zapamiętanym źródle, D-UX-5) → tryb
     zaawansowany (katalog + tier + auto-wolumen, etapy pojedyncze) → skan z uczciwym % i anulowaniem
     → panel `ScanSummary` („co przyszło"). Stan widoczny BEZ klikania; UI nie kłamie (disabled gdy
-    nie można). Serial wolumenu do bramy liczony ŚWIEŻO na starcie każdej sekwencji (`_scan_params`);
-    skan `'?'` do bazy z realnymi wolumenami wstrzymuje guard `_serial_guard_ok` (F5R#3).
+    nie można). Serial wolumenu do bramy liczony ŚWIEŻO na starcie każdej sekwencji, w wątku tła
+    (`PipelineWorker._zrodlo`); skan `'?'` do bazy z realnymi wolumenami wstrzymuje guard
+    `powod_mieszania` (F5R#3).
 
     Sygnały do gospodarza (`MainWindow`): `status_message(str)` (pasek statusu), `stage_finished(str)`
     (etap zakończył zapis - znacznik etapu dla testów i słuchaczy; gospodarz NIE odświeża na nim
@@ -429,10 +507,13 @@ class PipelineView(QWidget):
         self._writeback_busy = False       # zapis nagłówków do plików w toku (`set_writeback_busy`)
         self._summary_lines = []
         self._presence_params = None       # ZAMROŻONE parametry ostatniego DRY (apply ich nie liczy)
-        self._presence_memo = None         # ostatnie źródło, na którym biegnie „Sprawdź obecność"
+        self._etap_bez_zrodla = None       # etap, którego źródła wątek tła nie zobaczył („Wskaż katalog…")
+        self._copy_facts_waiting = 0       # kopie czekające na fakty (`_sync_copy_facts`)
+        self._reason = None                # powód wejścia z innej powierzchni (`show_reason`)
         self._build_ui()
         self._sync_source_memo()
         self._sync_stacks_memo()
+        self._sync_copy_facts()
         self._sync_actions()
 
     # ---------------------------------------------------------------- budowa UI
@@ -447,6 +528,15 @@ class PipelineView(QWidget):
         v.addWidget(self.lbl_db)
         v.addWidget(self._hline())
 
+        # 1a. PO CO TU JESTEŚ - linia nad akcjami, gdy do Dostawy przyprowadziła człowieka inna
+        # powierzchnia (klik w wiersz „?" Porządków, `show_reason`). Bez niej klik kończył się
+        # widokiem, w którym nic nie mówiło, która z akcji jest tą robotą. Ukryta bez powodu i gdy
+        # powód wygasł (licznik zszedł do zera); treść = WYŁĄCZNIE `_sync_copy_facts`.
+        self.lbl_reason = QLabel("")
+        self.lbl_reason.setWordWrap(True)
+        self.lbl_reason.setVisible(False)
+        v.addWidget(self.lbl_reason)
+
         # 2. ZŁOTA akcja Dostawy (F5, D-UX-5): „Przyjmij nowe" = cała sekwencja na ZAPAMIĘTANYM
         # źródle (QSettings pipeline/last_source; pierwsza dostawa pyta o katalog). Waga wizualna
         # przejęta od dawnego „Przetwórz wszystko" (jedna złota akcja na miejsce, wzorzec F3 #3).
@@ -458,6 +548,15 @@ class PipelineView(QWidget):
         self.btn_receive.setMinimumHeight(34)
         self.btn_receive.clicked.connect(self._on_receive)
         rec.addWidget(self.btn_receive, 1)
+        # „Zbierz fakty kopii (N)" - dwa etapy łańcucha złotej akcji BEZ skanu (fakty kopii +
+        # przejęcie zeznania), obok niej, bo to ta sama robota w wersji za sekundy zamiast minut.
+        # Zwykła waga (złota akcja zostaje jedna); widoczny wyłącznie, gdy jest co zbierać -
+        # widoczność, liczbę i podpowiedź ustawia WYŁĄCZNIE `_sync_copy_facts`.
+        self.btn_copy_facts = QPushButton("")
+        self.btn_copy_facts.setMinimumHeight(34)
+        self.btn_copy_facts.setVisible(False)
+        self.btn_copy_facts.clicked.connect(self._on_copy_facts)
+        rec.addWidget(self.btn_copy_facts)
         v.addLayout(rec)
         # POWÓD WYGASZENIA DOSTAWY W TRAKCIE ZAPISU NAGŁÓWKÓW (AR-28 (c)). Mutex „writeback →
         # Dostawa" gasi wszystkie etapy naraz, a bez zdania wyglądało to jak zawieszony ekran.
@@ -560,8 +659,9 @@ class PipelineView(QWidget):
         # BEZ zawijania: zdanie ma ~46 znaków (~300 px), a etykieta z `wordWrap` dostaje od Qt małą
         # preferowaną szerokość i łamie się na dwie linie mimo wolnego miejsca — wtedy przycisk stoi
         # przy PIERWSZEJ linii, a reszta zdania wisi pod nim. Cały wiersz (zdanie + 2 przyciski) mieści
-        # się w ~600 px, więc nie podnosi podłogi szerokości okna (dziś **1310 px** — D-0801-1, wcześniej
-        # 1073 zmierzone realnym fontem; zapis „1146" pochodził z sondy offscreen i był zawyżony).
+        # się w ~600 px, więc nie podnosi podłogi szerokości okna (dziś **~1424 px** - wiąże ją planer,
+        # `planner._MIN_W` przy 12 kolumnach; wcześniej 1310, a jeszcze wcześniej 1073 zmierzone realnym
+        # fontem; zapis „1146" pochodził z sondy offscreen i był zawyżony).
         self.lbl_vanished.setWordWrap(False)
         _fv = self.lbl_vanished.font()
         _fv.setBold(True)                # to jedyny komunikat Dostawy o UTRACIE — nie może ważyć
@@ -579,10 +679,11 @@ class PipelineView(QWidget):
         bv.addWidget(self.btn_show_vanished)
         # Droga dalej po „źródło niedostępne" (`_on_source_unreachable`): pytanie o katalog pada
         # dopiero PO wyniku wątku tła, nigdy zamiast niego - okno nie zgaduje, że źródła nie ma.
-        self.btn_pick_presence = QPushButton(i18n.t("pipeline.pick_dir"))
-        self.btn_pick_presence.clicked.connect(self._on_presence_pick)
-        self.btn_pick_presence.setVisible(False)
-        bv.addWidget(self.btn_pick_presence)
+        # Wspólna dla obecności i sekwencji skanu; dokąd prowadzi, rozstrzyga `_on_source_pick`.
+        self.btn_pick_source = QPushButton(i18n.t("pipeline.pick_dir"))
+        self.btn_pick_source.clicked.connect(self._on_source_pick)
+        self.btn_pick_source.setVisible(False)
+        bv.addWidget(self.btn_pick_source)
         bv.addStretch(1)
         self.box_vanished.setVisible(False)
         v.addWidget(self.box_vanished)
@@ -621,6 +722,7 @@ class PipelineView(QWidget):
         nie widzi na ekranie."""
         self._presence_params = None
         self.box_vanished.setVisible(False)
+        self.btn_pick_source.setVisible(False)   # droga po „źródło niedostępne" gaśnie z sekcją
         self._sync_actions()
 
     def _hline(self):
@@ -665,14 +767,16 @@ class PipelineView(QWidget):
 
     def _set_root(self, path):
         """Ustaw źródło skanu + etykiety. Serial na etykiecie jest INFORMACYJNY (stan z tej chwili);
-        wartość do bramy `(volume,path,mtime)` liczy ZAWSZE `_scan_params` na starcie sekwencji
-        (R#7+R2-3 — serial z pamięci/montażu bywa stale po przepięciu dysku w trakcie sesji)."""
+        wartość do bramy `(volume,path,mtime)` liczy ZAWSZE wątek tła na starcie przebiegu
+        (`PipelineWorker._zrodlo`; R#7+R2-3 - serial z pamięci/montażu bywa stale po przepięciu
+        dysku w trakcie sesji). Wołany wyłącznie po dialogu katalogu - katalog wskazany przed
+        chwilą jest pod ręką."""
         self._show_root(path, volume_serial(path))
 
     def _show_root(self, path, serial):
-        """`_set_root` z serialem już zmierzonym - bez dotykania dysku. Woła go koniec „Sprawdź
-        obecność" na ostatnim źródle: serial zmierzył wątek tła, a odczyt go w oknie na odłączonym
-        udziale zamroziłby je do timeoutu sieci."""
+        """`_set_root` z serialem już zmierzonym - bez dotykania dysku. Woła go sonda źródła
+        z wątku tła (`_on_source_ready`): odczyt serialu w oknie na odłączonym udziale zamroziłby
+        je do timeoutu sieci."""
         self._root = path
         self.lbl_root.setText(path)
         self._forget_vanished()      # wynik passa dotyczy STAREGO drzewa — po zmianie źródła kłamie
@@ -724,7 +828,15 @@ class PipelineView(QWidget):
         Dlaczego pytamy za każdym razem, choć „Przyjmij nowe" nie pyta: tam korzeniem jest ustalone
         archiwum, tu — drzewo obróbki, które ŻYJE (foldery wędrują między dyskami i rocznikami).
         Milczące wciągnięcie starego korzenia byłoby zapisem do bazy na podstawie pamięci sprzed
-        miesięcy. Podpowiedź daje jedno kliknięcie różnicy i zero zgadywania."""
+        miesięcy. Podpowiedź daje jedno kliknięcie różnicy i zero zgadywania.
+
+        ZERO DOTKNIĘĆ DYSKU W TYM SLOCIE (AR-31 (3), bliźniak „Przyjmij nowe"): dawniej serial
+        korzenia stosów mierzył slot okna zaraz po dialogu - na odłączonym udziale SMB okno stało
+        do timeoutu sieci. Parametry to sam napis ścieżki (`_scan_params`, bez woluminu); serial
+        ŚWIEŻO dla TEGO korzenia i guard mieszania serialu ('?' do bazy ze znanymi wolumenami
+        podwoiłby lokacje przy drugim przebiegu i zabrałby drodze idempotencję) robi wątek tła
+        (`PipelineWorker._stacks`). Korzeń nieosiągalny wraca jawnym stanem „Źródło niedostępne -
+        wskaż katalog", a przycisk pod nim pyta znów o korzeń stosów (`_on_source_pick`)."""
         if self._db_path is None or self._thread is not None:
             return
         last = str(self._settings().value("stacks/last_root", "") or "")
@@ -733,74 +845,124 @@ class PipelineView(QWidget):
             return
         self._settings().setValue("stacks/last_root", root)
         self._sync_stacks_memo()
-        # Serial ŚWIEŻO dla TEGO korzenia (nie z `_scan_params` — tamten mierzy korzeń archiwum).
-        # Guard mieszania serialu obowiązuje tak samo: '?' do bazy ze znanymi wolumenami podwoiłby
-        # lokacje przy drugim przebiegu i zabrałby drodze idempotencję.
-        serial = volume_serial(root)
-        params = dict(root=root, volume=serial if serial is not None else "?",
-                      drive_letter=(Path(root).drive or None), tier=self.combo_tier.currentData())
-        if not self._serial_guard_ok(params):
+        self._begin_run()
+        self._start_stage("stacks", **self._scan_params(root))
+
+    # ---------------------------------------------------------------- fakty kopii (0021)
+
+    def _sync_copy_facts(self):
+        """JEDYNY właściciel licznika kopii czekających na fakty, przycisku „Zbierz fakty kopii (N)"
+        i linii powodu. Wołane z `__init__`, po każdym przebiegu (`_set_running(False)`), po zapisie
+        nagłówków (`set_writeback_busy`), przy pokazaniu widoku i z `show_reason`.
+
+        LICZBA Z BAZY, NIE Z DYSKU: ten sam predykat co wiersz „?" w Porządkach
+        (`scan.copy_facts_candidates` BEZ korzenia - sam SELECT, bez `canonize_root`), więc slot
+        okna nie dotyka drzewa źródła (AR-31 (3)), a „N" na przycisku znaczy dokładnie „etap ma
+        N do zrobienia". Krótkie WŁASNE połączenie (F5R2#4: baza już zmigrowana → `db.connect`;
+        finally zamyka - wiszący czytelnik WAL)."""
+        n = 0
+        if self._db_path is not None:
+            con = db.connect(self._db_path)
+            try:
+                n = len(scan.copy_facts_candidates(con))
+            finally:
+                con.close()
+        self._copy_facts_waiting = n
+        self.btn_copy_facts.setText(i18n.t("pipeline.btn.copy_facts", n=n))
+        self.btn_copy_facts.setToolTip(i18n.t_plural("pipeline.tip.copy_facts", n))
+        self.btn_copy_facts.setVisible(n > 0)
+        if n == 0:
+            self._reason = None            # robota zrobiona - powód wejścia przestał być prawdą
+        if self._reason == REASON_COPY_FACTS:
+            self.lbl_reason.setText(i18n.t_plural(
+                "pipeline.why.copy_facts", n, gest=i18n.t("pipeline.btn.copy_facts", n=n)))
+        else:
+            self.lbl_reason.setText("")
+        self.lbl_reason.setVisible(self._reason is not None)
+        self._sync_actions()
+
+    def show_reason(self, reason=None):
+        """PUBLICZNE wejście dla powierzchni, która przyprowadza człowieka do Dostawy (Porządki:
+        klik w wiersz „?", `TasksView.open_intake`). `reason` = stała `REASON_*` albo `None`
+        (zwykłe wejście - linia gaśnie). Nieznany powód to błąd programisty, nie stan usera
+        (EXPECT). Licznik liczony od nowa: powód bez aktualnej liczby kłamałby o robocie."""
+        assert reason in (None, REASON_COPY_FACTS), reason
+        self._reason = reason
+        self._sync_copy_facts()
+
+    def showEvent(self, event):
+        # Licznik mógł się zmienić poza Dostawą (zapis nagłówków w Zbiorach dociąga fakty kopii
+        # re-syncem pisarza) - wejście w widok odświeża go tanim SELECT-em.
+        super().showEvent(event)
+        if self._thread is None:
+            self._sync_copy_facts()
+
+    def _on_copy_facts(self):
+        """„Zbierz fakty kopii (N)": fakty kopii, przejęcie zeznania i - wyłącznie po realnym
+        przejęciu - pochodne; te same etapy, ten sam wykonawca, te same raporty i to samo
+        anulowanie co w łańcuchu „Przyjmij nowe" i w ogonie „Oznacz zniknięte"
+        (`PipelineWorker._adopt_and_derive`), bez skanu i bez pytania o katalog. Straż
+        wzajemnego wykluczenia z zapisem nagłówków jak w `run_stage`: przy zapisie w toku
+        przycisk jest wygaszony, a slot wraca, gdyby go ktoś zawołał wprost. Slot nie dotyka
+        dysku - korzenia nie ma, a kandydatów etap czyta z bazy w wątku tła."""
+        if self._db_path is None or self._thread is not None or self._writeback_busy:
             return
         self._begin_run()
-        self._start_stage("stacks", **params)
+        self._start_stage("copy_facts")
 
     # ---------------------------------------------------------------- akcje (worker)
 
-    def _scan_params(self):
-        # Serial ŚWIEŻO na starcie KAŻDEJ sekwencji (all/scan/receive) — nigdy z pamięci ani
-        # z montażu (R#7+R2-3); nieustalony → '?' → pełny skan (kontrakt bramy).
-        serial = volume_serial(self._root)
-        return dict(
-            root=self._root,
-            volume=serial if serial is not None else "?",
-            drive_letter=(Path(self._root).drive or None),
-            tier=self.combo_tier.currentData(),
-        )
+    def _scan_params(self, root):
+        """Parametry dróg wciągających pliki (sekwencje skanu i „Stosy") BEZ DOTYKANIA DYSKU
+        (AR-31 (3)). Wolumin celowo nieobecny: serial ŚWIEŻO na starcie każdego przebiegu
+        (R#7+R2-3) mierzy wątek tła razem z sondą „czy źródło jest katalogiem"
+        (`PipelineWorker._zrodlo`); nieustalony → '?' → pełny skan (kontrakt bramy). Litera dysku
+        to sam napis ścieżki."""
+        return dict(root=root, drive_letter=(Path(root).drive or None),
+                    tier=self.combo_tier.currentData())
 
-    def _serial_guard_ok(self, params):
-        """Guard mieszania serialu (F5R#3): skan `'?'` do bazy znającej REALNE wolumeny PODWOIŁBY
-        lokacje każdej znanej klatki (brama `(volume,path,mtime)` nie trafi, `UNIQUE(volume,path)`
-        wpuści drugą) → zadanie „Duplikaty" i perspektywa kłamią na masę. Warunek = konserwatywny
-        NADZBIÓR podwojenia (bez bypassa w v1 — decyzja jawna F5R2#3); czysty świat `'?'`
-        (nie-Windows) przechodzi. Krótkie WŁASNE połączenie (F5R2#4: baza już zmigrowana →
-        `db.connect`; finally zamyka — wiszący czytelnik WAL)."""
-        if params["volume"] != "?":
-            return True
-        con = db.connect(self._db_path)
-        try:
-            mixed = queries.has_real_volume_locations(con)
-        finally:
-            con.close()
-        if not mixed:
-            return True
-        msg = i18n.t("pipeline.guard.mixed")
+    def _pokaz_odmowe(self, msg):
+        """Wstrzymanie przebiegu przed pierwszym plikiem: konwencja `_on_failed` - `lbl_error`
+        + status (F5R2#5). Jedno wejście: `start_refused` z wątku tła (guard mieszania serialu)."""
         self.lbl_error.setText(i18n.t("pipeline.error_prefix", msg=msg))
         self.lbl_error.setVisible(True)
-        self.status_message.emit(msg)       # konwencja _on_failed: lbl_error + status (F5R2#5)
-        return False
+        self.status_message.emit(msg)
 
-    def _start_scan_sequence(self, stage):
-        """Wspólna sekwencja startu skanujących ścieżek (F5R2#2 — JEDEN pomiar serialu, JEDEN dom
-        guardu): params → guard → begin → start."""
-        params = self._scan_params()
-        if not self._serial_guard_ok(params):
-            return
+    def _start_scan_sequence(self, stage, root):
+        """Wspólna sekwencja startu skanujących ścieżek (F5R2#2 - JEDEN pomiar serialu, JEDEN dom
+        guardu, oba w wątku tła): params → begin → start. Slot okna nie dotyka dysku."""
         self._begin_run()
-        self._start_stage(stage, **params)
+        self._start_stage(stage, **self._scan_params(root))
 
     def _on_receive(self):
-        """„Przyjmij nowe" (F5, D-UX-5): cała sekwencja na ZAPAMIĘTANYM źródle; brak pamięci albo
-        katalog zniknął (plik-nie-katalog wpada w ten sam warunek) → pytanie o katalog + zapis."""
+        """„Przyjmij nowe" (F5, D-UX-5): cała sekwencja na ZAPAMIĘTANYM źródle; brak pamięci →
+        pytanie o katalog + zapis.
+
+        ZERO DOTKNIĘĆ DYSKU W TYM SLOCIE (AR-31 (3), bliźniak „Sprawdź obecność"): dawniej
+        `is_dir` na zapamiętanym źródle i serial woluminu (`_set_root`, `_scan_params`) szły tu,
+        w wątku okna - na odłączonym udziale SMB okno stało do timeoutu sieci. Teraz źródło
+        sprawdza wątek tła; niedostępne wraca jako jawny stan „Źródło niedostępne - wskaż katalog"
+        z przyciskiem (`_on_source_unreachable`), a osiągalne zostaje wskazanym katalogiem
+        z serialem z wątku tła (`_on_source_ready`)."""
         if self._db_path is None or self._thread is not None:
             return
         source = self._settings().value("pipeline/last_source", None)
-        if not source or not Path(source).is_dir():
-            source = QFileDialog.getExistingDirectory(self, i18n.t("pipeline.dlg.pick_delivery"))
-            if not source:
-                return
+        if not source:
+            self._pick_and_scan("all")
+            return
+        self._start_scan_sequence("all", source)
+
+    def _pick_and_scan(self, stage):
+        """Pytanie o katalog (pierwsza dostawa albo źródło niedostępne), zapamiętanie go jak
+        w „Wskaż katalog…" i sekwencja `stage` na nim - bez dotykania dysku w oknie."""
+        if self._db_path is None or self._thread is not None:
+            return
+        tytul = "pipeline.dlg.pick_scan" if stage == "scan" else "pipeline.dlg.pick_delivery"
+        source = QFileDialog.getExistingDirectory(self, i18n.t(tytul))
+        if not source:
+            return
         self._remember_source(source)
-        self._set_root(source)
-        self._start_scan_sequence("all")
+        self._start_scan_sequence(stage, source)
 
     def _begin_run(self):
         """Wyzeruj panel/pasek przed nowym przebiegiem (summary akumuluje per etap, więc czyścimy).
@@ -808,7 +970,7 @@ class PipelineView(QWidget):
         się odnosi, wisiałoby nad wynikiem zupełnie innego etapu (wizytator P5 #9)."""
         self._summary_lines = []
         self._forget_vanished()
-        self._presence_memo = None
+        self._etap_bez_zrodla = None
         self.lbl_summary.setText("")
         self.lbl_error.setVisible(False)
         self.lbl_error.setText("")
@@ -819,12 +981,12 @@ class PipelineView(QWidget):
     def _on_all(self):
         if not self._can_scan() or self._thread is not None:
             return
-        self._start_scan_sequence("all")
+        self._start_scan_sequence("all", self._root)
 
     def _on_scan(self):
         if not self._can_scan() or self._thread is not None:
             return
-        self._start_scan_sequence("scan")
+        self._start_scan_sequence("scan", self._root)
 
     def run_stage(self, stage):
         """PUBLICZNE wejście w etap masowy (group/resolve/calibrate/lineage/delta) — jedyna droga dla
@@ -879,11 +1041,11 @@ class PipelineView(QWidget):
 
         ZERO DOTKNIĘĆ DYSKU W TYM SLOCIE: korzeń (wskazany albo ostatnie źródło) idzie do etapu bez
         serialu, a to, czy jest osiągalnym katalogiem, i jego wolumin sprawdza wątek tła
-        (`PipelineWorker._presence`). Dawniej `is_dir` na zapamiętanym źródle i `volume_serial`
+        (`PipelineWorker._zrodlo`). Dawniej `is_dir` na zapamiętanym źródle i `volume_serial`
         szły tu, w wątku okna - na odłączonym udziale SMB okno stało do timeoutu sieci, a potem
         i tak otwierało dialog katalogu. Źródło niedostępne wraca jako jawny stan z przyciskiem
         „Wskaż katalog…" (`_on_source_unreachable`). Ostatnie źródło zostaje wskazanym katalogiem
-        dopiero PO wyniku, z serialem z wątku tła (`_on_stage_done`)."""
+        dopiero PO sondzie, z serialem z wątku tła (`_on_source_ready`)."""
         if self._db_path is None or self._thread is not None:
             return
         if self._root is None and not self._settings().value("pipeline/last_source", None):
@@ -894,10 +1056,9 @@ class PipelineView(QWidget):
     def _start_presence(self):
         """Start DRY obecności na wskazanym katalogu albo - bez niego - na ostatnim źródle."""
         root = self._root
-        self._begin_run()
         if root is None:
             root = self._settings().value("pipeline/last_source", None)
-            self._presence_memo = root        # PO `_begin_run` - ono zapomina poprzednie
+        self._begin_run()
         self._start_stage("presence", root=root)
 
     def _on_presence_pick(self):
@@ -912,6 +1073,19 @@ class PipelineView(QWidget):
         self._remember_source(source)
         self._set_root(source)
         self._start_presence()
+
+    def _on_source_pick(self):
+        """„Wskaż katalog…" pod „Źródło niedostępne": pytanie o katalog i powtórzenie TEGO etapu,
+        którego źródła wątek tła nie zobaczył - obecność wraca do obecności, sekwencja skanu do
+        tej samej sekwencji („Przyjmij nowe" i „Przetwórz wszystko" = `all`, „Skanuj" = `scan`),
+        droga „Stosy" do dialogu korzenia stosów (pamięć `stacks/last_root`, nie źródła)."""
+        etap = self._etap_bez_zrodla
+        if etap in ("scan", "all"):
+            self._pick_and_scan(etap)
+        elif etap == "stacks":
+            self._on_stacks()
+        else:
+            self._on_presence_pick()
 
     def _on_mark_vanished(self):
         """Jawny gest zapisu na WYNIKU, który user właśnie zobaczył: parametry ZAMROŻONE przy DRY,
@@ -939,11 +1113,13 @@ class PipelineView(QWidget):
         self._worker.cancelled.connect(self._on_cancelled)
         self._worker.failed.connect(self._on_failed)
         self._worker.source_unreachable.connect(self._on_source_unreachable)
+        self._worker.source_ready.connect(self._on_source_ready)
+        self._worker.start_refused.connect(self._on_start_refused)
         # quit DOPIERO gdy run() w całości wróci (`finished`) — przy „all" leci wiele stage_done,
         # więc NIE wolno kończyć wątku na pierwszym z nich.
         self._worker.finished.connect(self._thread.quit)
         self._thread.finished.connect(self._cleanup_thread)
-        self._set_running(True, cancellable=stage in ("scan", "stacks", "all",
+        self._set_running(True, cancellable=stage in ("scan", "stacks", "all", "copy_facts",
                                                       "presence", "presence-apply"))
         self._thread.start()
 
@@ -992,13 +1168,6 @@ class PipelineView(QWidget):
         self.lbl_counts.setText("")
         self._append_summary(self._format_result(name, result))
         if name == "presence":
-            if self._presence_memo is not None:
-                # Ostatnie źródło okazało się osiągalne (inaczej wróciłby `source_unreachable`) -
-                # zostaje wskazanym katalogiem, z serialem zmierzonym w wątku tła, PRZED sekcją
-                # wyniku (`_show_root` ją czyści, a zamrożone parametry „Oznacz zniknięte" czytają
-                # `_root`).
-                memo, self._presence_memo = self._presence_memo, None
-                self._show_root(memo, None if result.volume in ("", "?") else result.volume)
             self._update_vanished_box(result)
         self.status_message.emit(i18n.t("pipeline.stage_done_status", stage=_stage_label(name)))
         self.stage_finished.emit(name)                  # widoki odświeża koniec przebiegu, nie etap
@@ -1018,26 +1187,47 @@ class PipelineView(QWidget):
         self.status_message.emit(i18n.t("pipeline.stage_interrupted", stage=etykieta))
         self.stage_finished.emit(name)                  # częściowy zapis odświeży koniec przebiegu
 
-    @Slot(str)
-    def _on_source_unreachable(self, root):
-        """Wątek tła nie zobaczył korzenia obecności jako katalogu: raport mówi „nie wykonano"
-        z powodem, a sekcja wyniku - to samo zdanie z przyciskiem „Wskaż katalog…". Korzeń NIE
+    @Slot(str, str)
+    def _on_source_ready(self, root, volume):
+        """Sonda wątku tła zobaczyła korzeń jako katalog i zmierzyła jego serial: korzeń zostaje
+        wskazanym katalogiem (etykiety, podpowiedź obecności) BEZ dotykania dysku w oknie. Pada
+        przed wynikiem etapu (ta sama kolejka sygnałów), więc zamrożone parametry „Oznacz
+        zniknięte" (`_update_vanished_box`) czytają już ten `_root`."""
+        self._show_root(root, None if volume in ("", "?") else volume)
+
+    @Slot(str, str)
+    def _on_source_unreachable(self, stage, root):
+        """Wątek tła nie zobaczył korzenia jako katalogu (obecność, sekwencja skanu albo droga
+        „Stosy"): raport mówi „nie wykonano" z powodem, a sekcja wyniku - to samo zdanie
+        z przyciskiem „Wskaż katalog…", który powtórzy TEN etap (`_on_source_pick`). Korzeń NIE
         zostaje wskazanym katalogiem (skan na nim też by nie ruszył), a nic nie zostało zapisane."""
         self.bar.setRange(0, 1)
         self.bar.setValue(0)
         self.lbl_counts.setText("")
-        self._presence_memo = None
-        self._append_summary(i18n.t("pipeline.fmt.presence.not_done",
-                                    reason=i18n.t("pipeline.presence.unreachable", root=root)))
-        zdanie = i18n.t("pipeline.presence.unreachable_pick", root=root)
+        self._etap_bez_zrodla = stage
+        powod = i18n.t("pipeline.source.unreachable", root=root)
+        klucz = {"scan": "pipeline.fmt.scan_not_done", "all": "pipeline.fmt.scan_not_done",
+                 "stacks": "pipeline.fmt.stacks_not_done"}.get(
+                     stage, "pipeline.fmt.presence.not_done")
+        self._append_summary(i18n.t(klucz, reason=powod))
+        zdanie = i18n.t("pipeline.source.unreachable_pick", root=root)
         self._presence_params = None
         self.lbl_vanished.setText(zdanie)
         self.btn_mark_vanished.setVisible(False)
         self.btn_show_vanished.setVisible(False)
-        self.btn_pick_presence.setVisible(True)
+        self.btn_pick_source.setVisible(True)
         self.box_vanished.setVisible(True)
         self._sync_actions()
         self.status_message.emit(zdanie)
+
+    @Slot(str)
+    def _on_start_refused(self, msg):
+        """Guard mieszania serialu wstrzymał skan w wątku tła (przed pierwszym plikiem, zero
+        zapisu) - ten sam wiersz błędu i status co dawniej guard w slocie okna."""
+        self.bar.setRange(0, 1)
+        self.bar.setValue(0)
+        self.lbl_counts.setText("")
+        self._pokaz_odmowe(msg)
 
     @Slot(str, str)
     def _on_failed(self, name, msg):
@@ -1100,10 +1290,16 @@ class PipelineView(QWidget):
         stoją obok liczby uzupełnionych, a `czeka` mówi, ile zostało na następną dostawę - „uzupełniono
         540 z 550" bez przyczyny reszty byłoby raportem, który zataja, dlaczego reszta czeka."""
         czesci = [i18n.t("pipeline.fmt.copy_facts.written", n=s.written, rows=s.rows)]
+        if s.elsewhere:                 # fakty zebrane inną drogą w trakcie - nic nie czeka
+            czesci.append(i18n.t("pipeline.fmt.copy_facts.elsewhere", n=s.elsewhere))
         if s.stale:
             czesci.append(i18n.t("pipeline.fmt.copy_facts.stale", n=s.stale))
+        if s.raced:                     # zapis w miejscu w toku - plik zdrowy, nie „zmieniony"
+            czesci.append(i18n.t("pipeline.fmt.copy_facts.raced", n=s.raced))
         if s.missing:                   # skasowane z dysku - robota „Oznacz zniknięte", nie czytelności
-            czesci.append(i18n.t("pipeline.fmt.copy_facts.missing", n=s.missing))
+            czesci.append(i18n.t("pipeline.fmt.copy_facts.missing", n=s.missing,
+                                 check=i18n.t("pipeline.btn.presence"),
+                                 mark=i18n.t("pipeline.btn.mark_vanished")))
         if s.failed:
             czesci.append(i18n.t("pipeline.fmt.copy_facts.failed", n=s.failed))
         if s.remaining:
@@ -1194,7 +1390,7 @@ class PipelineView(QWidget):
         """Sekcja 4b: co user może ZROBIĆ z wynikiem. Rozróżnienie DRY↔zapis po `run_id` (ustawia go
         wyłącznie faza zapisu) — po oznaczeniu przycisk zapisu znika, bo nie ma już czego oznaczać,
         a wchodzi droga do perspektywy."""
-        self.btn_pick_presence.setVisible(False)       # należy wyłącznie do „źródło niedostępne"
+        self.btn_pick_source.setVisible(False)         # należy wyłącznie do „źródło niedostępne"
         applied = s.run_id is not None
         if applied:
             self._presence_params = None
@@ -1339,6 +1535,8 @@ class PipelineView(QWidget):
         „Przyjmij nowe” w trakcie commitu w miejscu czytało plik zapisywany obok i mogło wciągnąć
         jego fakty (astra, 2026-09-27). Anulowanie biegnącego etapu zostaje dostępne."""
         self._writeback_busy = bool(busy)
+        if not busy and self._thread is None:
+            self._sync_copy_facts()        # re-sync pisarza dociąga fakty kopii - licznik spada
         self._sync_actions()
 
     def _refresh_buttons(self, running, cancellable):
@@ -1366,8 +1564,12 @@ class PipelineView(QWidget):
         # trybu zaawansowanego — wymagają samej bazy.
         self.btn_stacks.setEnabled(idle and has_db)
         self.btn_stack_lineage.setEnabled(idle and has_db)
+        # Fakty kopii nie potrzebują katalogu (kandydaci z bazy, bez korzenia); wygasza je ten sam
+        # mutex zapisu nagłówków co resztę Dostawy - zbieranie czyta nagłówki kopii, które pisarz
+        # właśnie przepisuje.
+        self.btn_copy_facts.setEnabled(idle and has_db and self._copy_facts_waiting > 0)
         self.btn_mark_vanished.setEnabled(idle and self._presence_params is not None)
-        self.btn_pick_presence.setEnabled(idle and has_db)
+        self.btn_pick_source.setEnabled(idle and has_db)
         self.btn_cancel.setEnabled(running and cancellable)
 
     def _set_running(self, running, *, cancellable=False):
@@ -1375,6 +1577,7 @@ class PipelineView(QWidget):
         # ekranu i przejmuje uwagę od zdania, które faktycznie coś mówi (wizytator P5 #6).
         if not running:
             self.bar.setVisible(False)
+            self._sync_copy_facts()        # każdy przebieg mógł dodać albo zebrać fakty kopii
         self._cancellable = cancellable if running else False
         self._refresh_buttons(running, self._cancellable)
         self.running_changed.emit(running)

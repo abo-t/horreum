@@ -2268,14 +2268,23 @@ def _stack_version_rows(con):
     i z OBECNĄ kopią. Warunek obecności jest treścią, nie ostrożnością: po usunięciu wersji poza
     programem i skanie jej klatka traci ostatnią kopię, a grupa ma wtedy zniknąć z listy roboty.
     Klatka bez kopii ma własną perspektywę („Zniknięte") i tam jest jej gest.
-    Zwraca: frame_id, object_id, object_canon, camera_id, is_mono, filter_canon, exptime, raw_json,
-    window_start, window_end, tool, declared_rows."""
+
+    Teleskop KANONICZNY przez `config → telescope_canonical` (jak `base_rows`): scalenie teleskopów
+    nie rozcina grupy, a `telescope_id` NULL znaczy „config nieznany".
+    Zwraca: frame_id, object_id, object_canon, camera_id, camera_model, telescope_id,
+    telescope_label, telescop_canon, is_mono, filter_canon, exptime, raw_json, window_start,
+    window_end, tool, declared_rows."""
     return con.execute(
         "SELECT f.id AS frame_id, f.object_id, obj.canon AS object_canon, f.camera_id, "
+        "       cam.model_canon AS camera_model, tc.canon_id AS telescope_id, "
+        "       t.label AS telescope_label, t.telescop_canon, "
         "       cam.is_mono, f.filter_canon, h.exptime, h.raw_json, "
         "       i.window_start, i.window_end, i.tool, i.declared_rows "
         "FROM frame f JOIN integration i ON i.master_frame_id = f.id "
         "LEFT JOIN header h ON h.frame_id = f.id "
+        "LEFT JOIN config c ON c.id = f.config_id "
+        "LEFT JOIN telescope_canonical tc ON tc.id = c.telescope_id "
+        "LEFT JOIN telescope t ON t.id = tc.canon_id "
         "LEFT JOIN camera cam ON cam.id = f.camera_id "
         "LEFT JOIN object obj ON obj.id = f.object_id "
         "WHERE f.retired_at IS NULL AND f.superseded_by IS NULL "
@@ -2285,10 +2294,15 @@ def _stack_version_rows(con):
 
 
 def _grupy_wersji(con):
-    """Grupy bliźniaków z co najmniej dwoma stosami - `[(wiersze, mono, członkowie, rodzaje)]`.
+    """Grupy bliźniaków z co najmniej dwoma stosami - `[(klucz, wiersze, mono, członkowie, rodzaje)]`.
 
-    KLUCZ = (obiekt, kamera, filtr, ekspozycja, początek okna, koniec okna). Okno co do sekundy
-    przypina zbiór subów; kamera chroni przed zestawem podwójnym (dwa teleskopy tej samej nocy).
+    KLUCZ = (obiekt, kamera, teleskop kanoniczny, filtr, ekspozycja, początek okna, koniec okna).
+    Okno co do sekundy przypina zbiór subów. Zestaw podwójny (dwa teleskopy tej samej nocy) rozcina
+    TELESKOP, nie kamera: tabela `camera` jest per MODEL, nie per egzemplarz, więc dwa zestawy
+    z kamerą tego samego modelu mają ten sam `camera_id` (zmierzone 2026-10-02 na kopii archiwum:
+    4 noce z dwoma configami jednego modelu kamery). Stos z NIEZNANYM configiem nie orzeka
+    wspólnego materiału z nikim - dostaje klucz własny, więc nie trafia do żadnej grupy: podsunięcie
+    do skasowania stosu z innego zestawu jest pomyłką droższą niż przeoczenie wersji.
 
     EKSPOZYCJA PRZEZ KOERCJĘ I RÓWNOŚĆ, NIE PRZEZ `stacks.exposure_matches`. Próg D-DR-2 nie jest
     przechodni (`90~91`, `91~92`, a `90≁92`), więc grupowanie po nim zlepiałoby łańcuchem stosy,
@@ -2306,11 +2320,13 @@ def _grupy_wersji(con):
         start, koniec = header_dt(r["window_start"]), header_dt(r["window_end"])
         if start is None or koniec is None:
             continue
-        klucz = (r["object_id"], r["camera_id"], r["filter_canon"], _to_float(r["exptime"]),
-                 start, koniec)
+        teleskop = (r["telescope_id"] if r["telescope_id"] is not None
+                    else ("bez-configu", r["frame_id"]))
+        klucz = (r["object_id"], r["camera_id"], teleskop, r["filter_canon"],
+                 _to_float(r["exptime"]), start, koniec)
         grupy.setdefault(klucz, []).append(r)
     out = []
-    for wiersze in grupy.values():
+    for klucz, wiersze in grupy.items():
         if len(wiersze) < 2:
             continue
         mono = bool(wiersze[0]["is_mono"])
@@ -2320,25 +2336,39 @@ def _grupy_wersji(con):
             czlonkowie.append({"frame_id": int(r["frame_id"]), "tool": r["tool"] or None,
                                "declared": _to_int(r["declared_rows"]),
                                "pomiary": pomiary, "kanaly": _kanaly(pomiary)})
-        out.append((wiersze, mono, czlonkowie, classify_stack_versions(czlonkowie, mono=mono)))
+        out.append((klucz, wiersze, mono, czlonkowie,
+                    classify_stack_versions(czlonkowie, mono=mono)))
     return out
+
+
+def _id_grupy_wersji(klucz):
+    """Stabilny identyfikator grupy wersji - napis z KLUCZA (`_grupy_wersji`), nie z opisu: dwie
+    grupy o tym samym opisie (obiekt · filtr · ekspozycja · okno, inne zestawy) mają różne id, a ta
+    sama grupa ma to samo id w każdym przeładowaniu. Widok grupuje po nim, belkę podpisuje opisem."""
+    obiekt, kamera, teleskop, filtr, exp, start, koniec = klucz
+    return "|".join(str(v) for v in (obiekt, kamera, teleskop, filtr, exp,
+                                     start.isoformat(), koniec.isoformat()))
 
 
 def stack_version_groups(con):
     """Grupy bliźniaków (ten sam materiał, co najmniej dwa stosy) z rodzajem grupy i członków.
 
-    Zwraca listę dictów, po grupie: `object_canon`, `filter_canon`, `exptime` (float), `window_start`,
-    `window_end` (surowe napisy z `integration`), `mono`, `kind` (`WERSJA_*`) oraz `members` - dicty
-    `frame_id`, `kind`, `witness` (token `VERSION_WITNESSES` albo None), `timestamp` (chwila
-    integracji z sygnatury albo None), `declared_rows`. Porządek: obiekt, filtr, ekspozycja, okno -
-    ten sam, w którym powierzchnia ustawia nagłówki grup.
+    Zwraca listę dictów, po grupie: `group_id` (stabilny identyfikator z klucza, `_id_grupy_wersji`),
+    `object_canon`, `filter_canon`, `exptime` (float), `window_start`, `window_end` (surowe napisy
+    z `integration`), `telescope` (nazwa teleskopu kanonicznego, `telescope_label`), `camera` (model
+    kamery), `mono`, `kind` (`WERSJA_*`) oraz `members` - dicty `frame_id`, `kind`, `witness` (token
+    `VERSION_WITNESSES` albo None), `timestamp` (chwila integracji z sygnatury albo None),
+    `declared_rows`. Porządek: obiekt, filtr, ekspozycja, okno, teleskop, kamera - ten sam,
+    w którym powierzchnia ustawia nagłówki grup.
 
     Read-model milczy tekstem UI (zdanie składa widok z katalogu i18n) i nie filtruje po rodzaju:
     perspektywa bierze grupy wersji, raport pomiaru bierze wszystkie."""
     out = []
-    for wiersze, mono, czlonkowie, rodzaje in _grupy_wersji(con):
+    for klucz, wiersze, mono, czlonkowie, rodzaje in _grupy_wersji(con):
         r0 = wiersze[0]
         out.append({
+            "group_id": _id_grupy_wersji(klucz),
+            "telescope": telescope_label(r0), "camera": r0["camera_model"],
             "object_canon": r0["object_canon"], "filter_canon": r0["filter_canon"],
             "exptime": _to_float(r0["exptime"]),
             "window_start": r0["window_start"], "window_end": r0["window_end"], "mono": mono,
@@ -2350,7 +2380,7 @@ def stack_version_groups(con):
         })
     out.sort(key=lambda g: (natural_key(g["object_canon"] or ""), g["filter_canon"] or "",
                             g["exptime"] if g["exptime"] is not None else -1.0,
-                            str(g["window_start"])))
+                            str(g["window_start"]), g["telescope"] or "", g["camera"] or ""))
     return out
 
 
@@ -2363,7 +2393,7 @@ def stack_version_frame_ids(con):
     o całej grupie i ma widzieć także to, czego maszyna nie umiała rozstrzygnąć. Grupy wyłącznie
     pochodne i nieustalone wypadają - rozbicie jednej integracji na kanały (LMC: `R`/`G`/`B`,
     `combined_RGB`, `drizzle`) nie jest wersją do sprzątania. Zwraca set[int]."""
-    return {c["frame_id"] for _w, _m, czlonkowie, rodzaje in _grupy_wersji(con)
+    return {c["frame_id"] for _k, _w, _m, czlonkowie, rodzaje in _grupy_wersji(con)
             if _rodzaj_grupy([rodzaje[c["frame_id"]][0] for c in czlonkowie]) == WERSJA_INNA
             for c in czlonkowie}
 
@@ -2382,7 +2412,7 @@ def keep_version_plan(con, frame_id):
     którakolwiek z nich. Zwraca dict: `paths` (w porządku frame_id, location.id), `stacks` (ile
     stosów pozostałych wersji), `unknown` (ilu członków bez dowodu względem zostawianego),
     `derived` (ile pochodnych zostawianej wersji)."""
-    for _wiersze, mono, czlonkowie, _rodzaje in _grupy_wersji(con):
+    for _klucz, _wiersze, mono, czlonkowie, _rodzaje in _grupy_wersji(con):
         zostaje = next((c for c in czlonkowie if c["frame_id"] == frame_id), None)
         if zostaje is None:
             continue
@@ -3033,6 +3063,11 @@ def base_rows(con, frame_ids):
     zapytanie tylko o duplikaty), więc ta kolumna mówi prawdę dla reszty archiwum bez drugiego
     podzapytania na 16 tys. wierszy.
 
+    KOPIA NIEOBECNA NIE ZEZNAJE: klatka bez obecnej kopii pokazuje adres martwej (historia
+    przeprowadzki), ale jej `image_count` to zeznanie pliku, którego już nie ma - kolumna „Obrazy"
+    mówiłaby o stanie dysku nieprawdę. Dlatego `CASE present = 1`: wiersz pokazany z martwej kopii
+    dostaje NULL, czyli „nie wiem", a nie liczbę po pliku, który zniknął.
+
     `object_source` i `object_cleared_canon` KARMIĄ POLITYKĘ KOLUMNY (`object_cell`, R-S3-4), a NIE
     nową kolumnę na ekranie: `BASE_COLS` gridu zostaje bez zmian, więc podłoga okna się nie rusza
     (kanon minimalnego wspieranego ekranu). Kosztu nie ma — `frame` jest już w `FROM`.
@@ -3064,7 +3099,7 @@ def base_rows(con, frame_ids):
         "       (SELECT COUNT(*) FROM location lv WHERE lv.frame_id = f.id AND lv.present = 0) AS n_vanished, "
         "       (SELECT lw.path FROM location lw WHERE lw.frame_id = f.id AND lw.present = 0 "
         "         ORDER BY lw.id LIMIT 1) AS vanished_path, "
-        "       loc.image_count "
+        "       CASE WHEN loc.present = 1 THEN loc.image_count END AS image_count "
         "FROM frame f "
         "LEFT JOIN header h ON h.frame_id = f.id "
         "LEFT JOIN config c ON c.id = f.config_id "

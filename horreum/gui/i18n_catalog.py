@@ -1319,7 +1319,8 @@ CATALOG = {
               "decision: Frame ▾ → Restore)",
     },
     "perspective.missing_copy": {"pl": "Brakujące kopie", "en": "Missing copies"},
-    "perspective.copy_conflict": {"pl": "Kopie niezgodne", "en": "Disagreeing copies"},
+    "perspective.copy_conflict": {"pl": "Klatki z niezgodnymi kopiami",
+                                  "en": "Frames with disagreeing copies"},
     "perspective.orphan_testimony": {
         "pl": "Zeznanie z nieobecnej kopii", "en": "Testimony from a missing copy"},
     "perspective.torn_write": {
@@ -1350,6 +1351,9 @@ CATALOG = {
         "pl": "Przełącz na perspektywę „{perspective}”",
         "en": "Switch to the \"{perspective}\" perspective",
     },
+    # Pusta perspektywa kopii przy kopiach bez zebranych faktów: robota mieszka w Dostawie
+    # (`grid._ustaw_pusty_stan`). Dopełniacz w PL, więc nazwa widoku stoi w zdaniu, nie z `nav.dostawa`.
+    "grid.empty_go_intake": {"pl": "Idź do Dostawy", "en": "Go to Intake"},
     # Brak recepty przy niepustej bazie jest dziś nieosiągalny (bez zawężenia widać wszystko), więc
     # zdanie nie obiecuje żadnego gestu - przycisk bez gestu kłamałby tak samo jak zła recepta.
     "grid.empty_view": {"pl": "Brak klatek w tym widoku.", "en": "No frames in this view."},
@@ -1402,6 +1406,9 @@ CATALOG = {
         "pl": "\n    mówi inaczej: {fields}", "en": "\n    says otherwise: {fields}",
     },
     "grid.tip.copy_field_images": {"pl": "obrazy", "en": "images"},
+    # Podpowiedź „?" w kolumnie „Obrazy" (perspektywy kopii): nagłówek zdania, a drogi dokleja
+    # `grid.tip.copy_unread` - jeden właściciel recepty dla kopii bez zebranych faktów.
+    "grid.tip.images_unknown": {"pl": "Liczba obrazów nieznana:", "en": "Number of images unknown:"},
     # DWIE DROGI W JEDNYM ZDANIU, bo podpowiedź nie wie, która jest prawdziwa: kopia „obecna" w bazie
     # może już nie mieć pliku na dysku, a wtedy Dostawa jej nie uzupełni nigdy - recepta z samym
     # „Przyjmij nowe” prowadziła w ślepy zaułek. Sprawdzenia dysku w podpowiedzi NIE robimy (udział
@@ -1451,6 +1458,14 @@ CATALOG = {
 
     # --- FieldPanel ---
     "grid.fields.title": {"pl": "Pola (kolumny)", "en": "Fields (columns)"},
+    # Przełącznik kolumny bazowej „Obrazy" nad listą keywordów: domyślnie idzie za perspektywą,
+    # klik ręki obowiązuje w każdej perspektywie (`FramesView._on_images_toggled`).
+    "grid.fields.images": {"pl": "Kolumna „{col}”", "en": "“{col}” column"},
+    "grid.fields.images_tip": {
+        "pl": "Liczba obrazów w pliku kopii. Domyślnie widoczna tam, gdzie ma treść: "
+              "{perspectives}. Twój wybór tutaj obowiązuje w każdej perspektywie.",
+        "en": "Number of images in the copy's file. Shown by default where it has content: "
+              "{perspectives}. Your choice here applies in every perspective."},
     # Pokrycie pól liczone w tle: lista pod tytułem zostaje z poprzedniego wyniku, a tytuł mówi,
     # że liczby są w drodze - pusta lista w tym czasie wyglądałaby jak archiwum bez pól.
     "grid.fields.title_counting": {"pl": "Pola (kolumny) - liczę pokrycie…",
@@ -2034,7 +2049,7 @@ CATALOG = {
     "grid.criteria.only_missing_copy": {
         "pl": "tylko z brakującą kopią", "en": "only with a missing copy"},
     "grid.criteria.only_copy_conflict": {
-        "pl": "tylko kopie niezgodne ze sobą", "en": "only copies that disagree"},
+        "pl": "tylko klatki z niezgodnymi kopiami", "en": "only frames with disagreeing copies"},
     "grid.criteria.only_orphan_testimony": {
         "pl": "tylko zeznanie z nieobecnej kopii", "en": "only testimony from a missing copy"},
     "grid.criteria.only_torn_write": {
@@ -2111,9 +2126,10 @@ CATALOG = {
     },
     "grid.rename.preview_cleared": {"pl": "Podgląd nazw wyczyszczony", "en": "Name preview cleared"},
     "grid.rename.status_summary": {"pl": "Rename: {summary}", "en": "Rename: {summary}"},
-    # Recepta przy nieudanym cofnięciu renamu: przebieg zostaje przy „Cofnij" (wiersze nieudane są
-    # dalej 'applied'), więc drugi klik ponawia dokładnie je - reszta jest już cofnięta.
-    "grid.rename.undo_retry": {
+    # Recepta przy nieudanym cofnięciu - wspólna dla obu kling szuflady (makro i rename, AR-31 (2)):
+    # commit albo przebieg zostaje przy „Cofnij" (wiersze nieudane czekają), więc drugi klik
+    # ponawia dokładnie je - reszta jest już cofnięta.
+    "grid.wb.undo_retry": {
         "pl": " · „{undo}” ponowi pliki, których cofnięcie się nie udało",
         "en": " · “{undo}” retries the files whose undo failed",
     },
@@ -2179,10 +2195,23 @@ CATALOG = {
         "en": "changed on disk since the scan {n} (the scan will catch up)",
     },
     # Kopia skasowana z dysku, o której baza jeszcze nie wie - nie „nieczytelna": człon mówi, gdzie
-    # jest gest, który ją zamyka (pass obecności w Dostawie).
+    # jest gest, który ją zamyka (pass obecności w Dostawie). Dwa kroki z nazwami z katalogu
+    # (`{check}`, `{mark}`): „Oznacz zniknięte” pojawia się dopiero pod wynikiem sprawdzenia i tylko
+    # po potwierdzonym zniknięciu - ten sam warunek co `pipeline.tip.presence*`.
     "pipeline.fmt.copy_facts.missing": {
-        "pl": "brak pliku {n} - Dostawa → „Oznacz zniknięte”",
-        "en": "file missing {n} - Intake → “Mark vanished”",
+        "pl": "brak pliku {n} - „{check}” → „{mark}” (pojawi się, gdy sprawdzenie potwierdzi "
+              "zniknięcie)",
+        "en": "file missing {n} - “{check}” → “{mark}” (appears when the check confirms the file "
+              "is gone)",
+    },
+    # Fakty dociągnięte w trakcie przebiegu inną drogą (re-sync pisarza, skan) - nic nie czeka.
+    "pipeline.fmt.copy_facts.elsewhere": {
+        "pl": "zebrane równolegle {n}", "en": "collected elsewhere {n}",
+    },
+    # Zapis nagłówka w miejscu trwał przy obu próbach odczytu - plik zdrowy, kopia czeka.
+    "pipeline.fmt.copy_facts.raced": {
+        "pl": "zapis nagłówka w toku {n} (dobierze następna dostawa)",
+        "en": "header write in progress {n} (the next intake will pick it up)",
     },
     "pipeline.fmt.copy_facts.failed": {"pl": "nieczytelne {n}", "en": "unreadable {n}"},
     "pipeline.fmt.copy_facts.remaining": {"pl": "czeka {n}", "en": "waiting {n}"},
@@ -2206,9 +2235,53 @@ CATALOG = {
 
     # --- panel budowy UI ---
     "pipeline.db_none": {"pl": "Baza: (brak)", "en": "Database: (none)"},
+    # Łańcuch w etykiecie wymienia fakty kopii: bez nich człowiek z 550 kopiami „?" w Porządkach
+    # nie miał skąd wiedzieć, że złota akcja jest jedną z dwóch dróg do tej roboty.
     "pipeline.receive": {
-        "pl": "Przyjmij nowe  (skan → grupuj → rozwiąż → kalibracja → delta)",
-        "en": "Take new  (scan → group → resolve → calibrate → delta)",
+        "pl": "Przyjmij nowe  (skan → fakty kopii → grupuj → rozwiąż → kalibracja → delta)",
+        "en": "Take new  (scan → copy facts → group → resolve → calibrate → delta)",
+    },
+    # Gest „Zbierz fakty kopii (N)" (`PipelineView._on_copy_facts`): dwa etapy łańcucha złotej
+    # akcji bez skanu. Liczba w nawiasie nie odmienia rzeczownika - odmiana żyje w podpowiedzi
+    # i w linii powodu.
+    "pipeline.btn.copy_facts": {"pl": "Zbierz fakty kopii ({n})", "en": "Collect copy facts ({n})"},
+    "pipeline.tip.copy_facts": {
+        "pl": {"one": "{n} kopia czeka na fakty (liczba obrazów, zeznanie nagłówka). Gest czyta "
+                      "same nagłówki i przejmuje zeznanie ocalałej kopii, a po przejęciu przelicza "
+                      "pochodne - te same etapy co w „Przyjmij nowe”, bez skanu i bez pytania "
+                      "o katalog, w całym archiwum.",
+               "few": "{n} kopie czekają na fakty (liczba obrazów, zeznanie nagłówka). Gest czyta "
+                      "same nagłówki i przejmuje zeznanie ocalałej kopii, a po przejęciu przelicza "
+                      "pochodne - te same etapy co w „Przyjmij nowe”, bez skanu i bez pytania "
+                      "o katalog, w całym archiwum.",
+               "many": "{n} kopii czeka na fakty (liczba obrazów, zeznanie nagłówka). Gest czyta "
+                       "same nagłówki i przejmuje zeznanie ocalałej kopii, a po przejęciu "
+                       "przelicza pochodne - te same etapy co w „Przyjmij nowe”, bez skanu i bez "
+                       "pytania o katalog, w całym archiwum."},
+        "en": {"one": "{n} copy is waiting for its facts (image count, header testimony). This "
+                      "reads headers only and adopts the surviving copy's testimony, then "
+                      "recomputes what derives from it - the same stages as in “Take new”, with "
+                      "no scan and no folder prompt, across the whole archive.",
+               "other": "{n} copies are waiting for their facts (image count, header testimony). "
+                        "This reads headers only and adopts the surviving copy's testimony, then "
+                        "recomputes what derives from it - the same stages as in “Take new”, "
+                        "with no scan and no folder prompt, across the whole archive."},
+    },
+    # Linia nad akcjami, gdy do Dostawy przyprowadził klik w wiersz „?" Porządków
+    # (`PipelineView.show_reason`): po co człowiek tu jest i która akcja to załatwia.
+    "pipeline.why.copy_facts": {
+        "pl": {"one": "Zebrać fakty kopii: {n} kopia czeka - bez jej zeznania wiersze „?” "
+                      "w Porządkach nie mają czego porównać. „{gest}” zbierze je bez skanu.",
+               "few": "Zebrać fakty kopii: {n} kopie czekają - bez ich zeznań wiersze „?” "
+                      "w Porządkach nie mają czego porównać. „{gest}” zbierze je bez skanu.",
+               "many": "Zebrać fakty kopii: {n} kopii czeka - bez ich zeznań wiersze „?” "
+                       "w Porządkach nie mają czego porównać. „{gest}” zbierze je bez skanu."},
+        "en": {"one": "Collect copy facts: {n} copy is waiting - without its testimony the “?” "
+                      "rows in Housekeeping have nothing to compare. “{gest}” collects it with "
+                      "no scan.",
+               "other": "Collect copy facts: {n} copies are waiting - without their testimony "
+                        "the “?” rows in Housekeeping have nothing to compare. “{gest}” collects "
+                        "them with no scan."},
     },
     "pipeline.source_last": {"pl": "ostatnie źródło: {source}", "en": "last source: {source}"},
     "pipeline.source_first": {
@@ -2262,33 +2335,40 @@ CATALOG = {
     },
     # Trzy podpowiedzi „Sprawdź obecność" - po jednej na źródło drzewa, w kolejności wyboru
     # (`PipelineView._on_presence`, AR-28 (a)): wskazany katalog, ostatnie źródło, pytanie.
+    # Zapis jest WARUNKOWY i podpowiedź to mówi (AR-31 (4), bliźniak recepty `grid.tip.copy_unread`):
+    # „{mark}” pojawia się tylko, gdy sprawdzenie POTWIERDZI zniknięcie - hamulec passa (drzewo
+    # puste, za dużo kandydatów) potwierdzeń nie liczy, a „nic nie znikło” nie ma czego oznaczać.
     "pipeline.tip.presence": {
         "pl": "Porówna z bazą wskazany katalog: {root}. Tylko raport - zapis to „{mark}”, "
-              "który pojawi się pod wynikiem.",
+              "który pojawi się pod wynikiem, gdy sprawdzenie potwierdzi zniknięcie.",
         "en": "Compares the chosen folder with the database: {root}. Report only - writing is "
-              "“{mark}”, which appears below the result.",
+              "“{mark}”, which appears below the result when the check confirms a copy is gone.",
     },
     "pipeline.tip.presence_last": {
         "pl": "Katalogu nie wskazano - porówna z bazą ostatnie źródło „Przyjmij nowe”: {source}. "
-              "Tylko raport - zapis to „{mark}”, który pojawi się pod wynikiem.",
+              "Tylko raport - zapis to „{mark}”, który pojawi się pod wynikiem, gdy sprawdzenie "
+              "potwierdzi zniknięcie.",
         "en": "No folder chosen - compares the last “Take new” source with the database: "
-              "{source}. Report only - writing is “{mark}”, which appears below the result.",
+              "{source}. Report only - writing is “{mark}”, which appears below the result when "
+              "the check confirms a copy is gone.",
     },
     "pipeline.tip.presence_ask": {
         "pl": "Zapyta o katalog i porówna go z bazą. Tylko raport - zapis to „{mark}”, który "
-              "pojawi się pod wynikiem.",
+              "pojawi się pod wynikiem, gdy sprawdzenie potwierdzi zniknięcie.",
         "en": "Asks for a folder and compares it with the database. Report only - writing is "
-              "“{mark}”, which appears below the result.",
+              "“{mark}”, which appears below the result when the check confirms a copy is gone.",
     },
     "pipeline.btn.mark_vanished": {"pl": "Oznacz zniknięte", "en": "Mark vanished"},
     "pipeline.btn.show_collections": {"pl": "Pokaż w Zbiorach", "en": "Show in Collections"},
-    # Źródło, którego wątek tła nie zobaczył jako katalogu (odłączony udział, katalog skasowany).
-    # Stan wraca Z WĄTKU TŁA: sprawdzenie w oknie zamrażało je do timeoutu sieci. Pierwsze zdanie
-    # to człon raportu (po „NIE WYKONANO"), drugie stoi w sekcji wyniku obok „Wskaż katalog…".
-    "pipeline.presence.unreachable": {
+    # Źródło, którego wątek tła nie zobaczył jako katalogu (odłączony udział, katalog skasowany) -
+    # wspólne dla „Sprawdź obecność” i sekwencji skanu („Przyjmij nowe”, „Skanuj”, „Przetwórz
+    # wszystko”, AR-31 (3)). Stan wraca Z WĄTKU TŁA: sprawdzenie w oknie zamrażało je do timeoutu
+    # sieci. Pierwsze zdanie to człon raportu (po „NIE WYKONANO"), drugie stoi w sekcji wyniku obok
+    # „Wskaż katalog…".
+    "pipeline.source.unreachable": {
         "pl": "źródło niedostępne: {root}", "en": "source unavailable: {root}",
     },
-    "pipeline.presence.unreachable_pick": {
+    "pipeline.source.unreachable_pick": {
         "pl": "Źródło niedostępne: {root} - wskaż katalog.",
         "en": "Source unavailable: {root} - choose a folder.",
     },
@@ -2382,6 +2462,16 @@ CATALOG = {
               "excluded folders {excluded} · locations {loc_new} · refreshed {loc_ref} "
               "(testimonies {hdr_ref}, rebound {rebound}) · headers {headers} · "
               "review f/{frame_review} c/{camera_review} kind/{kind}",
+    },
+    # Skan, który nie ruszył, bo wątek tła nie zobaczył źródła jako katalogu (AR-31 (3)) - lustro
+    # `pipeline.fmt.presence.not_done`: brak linii czytałby się jak „nic nie przybyło".
+    "pipeline.fmt.scan_not_done": {
+        "pl": "[skan] NIE WYKONANO - {reason}", "en": "[scan] NOT DONE - {reason}",
+    },
+    # To samo dla drogi „Stosy": sondę korzenia stosów robi wątek tła (AR-31 (3)), więc korzeń
+    # nieosiągalny wraca jej własną linią, a nie linią skanu archiwum ani obecności.
+    "pipeline.fmt.stacks_not_done": {
+        "pl": "[stosy] NIE WYKONANO - {reason}", "en": "[stacks] NOT DONE - {reason}",
     },
     # Rodowód stosów (I-2d) — człony składane w `PipelineView._format_stack_lineage`.
     "pipeline.fmt.slin.prefix": {"pl": "[rodowód stosów] ", "en": "[stack lineage] "},
@@ -2781,8 +2871,11 @@ CATALOG = {
     "tasks.telescopes_unlabeled": {"pl": "Teleskopy bez etykiety", "en": "Telescopes without a label"},
     "tasks.observatories_unnamed": {"pl": "Stanowiska bez nazwy", "en": "Sites without a name"},
     "tasks.dup_frames": {"pl": "Duplikaty (>1 kopia)", "en": "Duplicates (>1 copy)"},
-    # 0021: podzbiór „Duplikatów", więc nazwa mówi o KOPIACH, nie o klatkach, i stoi tuż pod nimi.
-    "tasks.copy_conflict_frames": {"pl": "Kopie niezgodne ze sobą", "en": "Copies that disagree"},
+    # 0021: podzbiór „Duplikatów", stoi tuż pod nimi. Nazwa mówi o KLATKACH, bo liczba obok liczy
+    # klatki (`queries.copy_conflict_frame_ids`) - „Kopie niezgodne ze sobą" obiecywało liczbę kopii.
+    # To samo brzmienie niesie perspektywa i człon paska kryteriów.
+    "tasks.copy_conflict_frames": {"pl": "Klatki z niezgodnymi kopiami",
+                                   "en": "Frames with disagreeing copies"},
     # AR-5: klatka mówi głosem pliku, którego nie ma. Nazwa niesie przyczynę, nie objaw („niezgodne"
     # już zajęte przez sąsiada wyżej, a tu obecne kopie bywają zgodne ze sobą).
     "tasks.orphan_testimony_frames": {
@@ -2797,37 +2890,60 @@ CATALOG = {
                "many": "? · {n} kopii bez zeznania"},
         "en": {"one": "? · {n} copy not yet read", "other": "? · {n} copies not yet read"},
     },
-    # Podpowiedź wiersza w stanie „?": obie drogi WARUNKOWE, w kolejności pytań człowieka („czy plik
-    # jest"), bo wiersz nie sprawdza dysku - rozstrzyga pass obecności. Nazwy z katalogu (`{place}`,
-    # `{check}`, `{mark}`), jak w podpowiedzi kopii w Zbiorach - z tym samym dwukrokiem drugiej drogi
-    # (AR-28 (a)) i tym samym warunkiem drugiego kroku (przycisk tylko po potwierdzonym zniknięciu).
-    # Ostatnie zdanie mówi, dokąd prowadzi klik (AR-28 (b)).
+    # Człon drugi tych samych wierszy, gdy liczba NIE jest zerem, a kopie bez zeznania są: liczba
+    # jest dolną granicą („{m}+"), bo kopie bez faktów w porównaniu nie biorą udziału. Odmiana po
+    # liczbie kopii (`{n}`), jak w „?".
+    "tasks.copies_partial": {
+        "pl": {"one": "{m}+ · {n} kopia bez zeznania", "few": "{m}+ · {n} kopie bez zeznania",
+               "many": "{m}+ · {n} kopii bez zeznania"},
+        "en": {"one": "{m}+ · {n} copy not yet read", "other": "{m}+ · {n} copies not yet read"},
+    },
+    # Podpowiedź wiersza w stanie „?" i „N+": drogi WARUNKOWE, w kolejności pytań człowieka („czy plik
+    # jest"), bo wiersz nie sprawdza dysku - rozstrzyga pass obecności. Kopie stosów spod korzenia
+    # stosów dostają fakty wyłącznie drogą „Stosy" („Przyjmij nowe" chodzi po archiwum), a wiersz nie
+    # zna korzenia stosów - stąd druga droga, też warunkowa. Nazwy z katalogu (`{place}`, `{stacks}`,
+    # `{check}`, `{mark}`), jak w podpowiedzi kopii w Zbiorach - z tym samym dwukrokiem drogi „pliku
+    # nie ma" (AR-28 (a)) i tym samym warunkiem drugiego kroku (przycisk tylko po potwierdzonym
+    # zniknięciu). Ostatnie zdanie mówi, dokąd prowadzi klik (AR-28 (b)): `{dest}` - Dostawa przy
+    # „?", Zbiory przy „N+" (tam są klatki do obejrzenia). To samo zdanie mówi pusty stan pustej
+    # perspektywy kopii w Zbiorach (`grid._ustaw_pusty_stan`, przycisk do Dostawy), więc nie nazywa
+    # swojej powierzchni („ta liczba", nie „liczba tego wiersza") - jeden właściciel zdania.
     "tasks.copies_unread_tip": {
-        "pl": {"one": "{n} kopia nie ma jeszcze zebranego zeznania nagłówka, więc ten wiersz nie ma "
-                      "czego porównać.\nGdy plik jest na dysku - {place} → „Przyjmij nowe”.\n"
+        "pl": {"one": "{n} kopia nie ma jeszcze zebranego zeznania nagłówka, więc ta liczba "
+                      "jej nie obejmuje.\n"
+                      "Gdy plik jest na dysku - {place} → „Przyjmij nowe”.\n"
+                      "Gdy kopia leży pod korzeniem stosów - {place} → „{stacks}”.\n"
                       "Jeśli pliku nie ma już na dysku - {place} → „{check}” → „{mark}” (pojawi "
                       "się pod wynikiem, gdy sprawdzenie potwierdzi zniknięcie).\n"
-                      "Klik prowadzi do: {place}.",
-               "few": "{n} kopie nie mają jeszcze zebranego zeznania nagłówka, więc ten wiersz nie "
-                      "ma czego porównać.\nGdy plik jest na dysku - {place} → „Przyjmij nowe”.\n"
+                      "Klik prowadzi do: {dest}.",
+               "few": "{n} kopie nie mają jeszcze zebranego zeznania nagłówka, więc ta liczba "
+                      "ich nie obejmuje.\n"
+                      "Gdy plik jest na dysku - {place} → „Przyjmij nowe”.\n"
+                      "Gdy kopia leży pod korzeniem stosów - {place} → „{stacks}”.\n"
                       "Jeśli pliku nie ma już na dysku - {place} → „{check}” → „{mark}” (pojawi "
                       "się pod wynikiem, gdy sprawdzenie potwierdzi zniknięcie).\n"
-                      "Klik prowadzi do: {place}.",
-               "many": "{n} kopii nie ma jeszcze zebranego zeznania nagłówka, więc ten wiersz nie "
-                       "ma czego porównać.\nGdy plik jest na dysku - {place} → „Przyjmij nowe”.\n"
+                      "Klik prowadzi do: {dest}.",
+               "many": "{n} kopii nie ma jeszcze zebranego zeznania nagłówka, więc ta liczba "
+                       "ich nie obejmuje.\n"
+                       "Gdy plik jest na dysku - {place} → „Przyjmij nowe”.\n"
+                       "Gdy kopia leży pod korzeniem stosów - {place} → „{stacks}”.\n"
                        "Jeśli pliku nie ma już na dysku - {place} → „{check}” → „{mark}” (pojawi "
                        "się pod wynikiem, gdy sprawdzenie potwierdzi zniknięcie).\n"
-                       "Klik prowadzi do: {place}."},
-        "en": {"one": "{n} copy has no header testimony collected yet, so this row has nothing to "
-                      "compare.\nIf the file is on disk - {place} → “Take new”.\n"
+                       "Klik prowadzi do: {dest}."},
+        "en": {"one": "{n} copy has no header testimony collected yet, so this count does "
+                      "not include it.\n"
+                      "If the file is on disk - {place} → “Take new”.\n"
+                      "If the copy lies under the stacks root - {place} → “{stacks}”.\n"
                       "If the file is no longer on disk - {place} → “{check}” → “{mark}” (appears "
                       "below the result when the check confirms the file is gone).\n"
-                      "A click takes you to: {place}.",
-               "other": "{n} copies have no header testimony collected yet, so this row has nothing "
-                        "to compare.\nIf the file is on disk - {place} → “Take new”.\n"
+                      "A click takes you to: {dest}.",
+               "other": "{n} copies have no header testimony collected yet, so this count "
+                        "does not include them.\n"
+                        "If the file is on disk - {place} → “Take new”.\n"
+                        "If the copy lies under the stacks root - {place} → “{stacks}”.\n"
                         "If the file is no longer on disk - {place} → “{check}” → “{mark}” "
                         "(appears below the result when the check confirms the file is gone).\n"
-                        "A click takes you to: {place}."},
+                        "A click takes you to: {dest}."},
     },
     "tasks.vanished_frames": {"pl": "Zniknięte z dysku", "en": "Vanished from disk"},
     # NAZWA MÓWI O UBYTKU, NIE O AWARII (D-V-9a). Wiersz stoi obok „Zniknięte z dysku" i musi się
@@ -2848,7 +2964,15 @@ CATALOG = {
     "grid.version.group": {
         "pl": "{object} · {filter} · {exp} s · okno {start} - {end}",
         "en": "{object} · {filter} · {exp} s · window {start} - {end}"},
+    "grid.version.group_rig": {
+        "pl": " · zestaw {telescope} + {camera}", "en": " · rig {telescope} + {camera}"},
     "grid.version.no_object": {"pl": "(bez obiektu)", "en": "(no object)"},
+    # Skrót świadka do komórki „Wersja" (pełne zdanie zostaje w `grid.version.why.<świadek>`).
+    "grid.version.short.declared": {"pl": "historia", "en": "history"},
+    "grid.version.short.tool": {"pl": "sygnatura", "en": "signature"},
+    "grid.version.short.measure": {"pl": "szum i PSF", "en": "noise and PSF"},
+    "grid.version.short.same_tool": {"pl": "ta sama sygnatura", "en": "same signature"},
+    "grid.version.short.same_measure": {"pl": "te same pomiary", "en": "same measurements"},
     "grid.version.kind.inna": {"pl": "inna integracja", "en": "separate integration"},
     "grid.version.kind.pochodna": {
         "pl": "pochodna tej samej integracji", "en": "derived from the same integration"},
@@ -2903,12 +3027,17 @@ CATALOG = {
         "en": {"one": "Copied {n} path to the clipboard", "other": "Copied {n} paths to the clipboard"},
     },
     "grid.version.copied_stacks": {
-        "pl": {"one": " (pozostałe wersje: {n} stos)", "few": " (pozostałe wersje: {n} stosy)",
+        "pl": {"one": " (pozostała wersja: {n} stos)", "few": " (pozostałe wersje: {n} stosy)",
                "many": " (pozostałe wersje: {n} stosów)"},
-        "en": {"one": " (other versions: {n} stack)", "other": " (other versions: {n} stacks)"},
+        "en": {"one": " (other version: {n} stack)", "other": " (other versions: {n} stacks)"},
     },
     "grid.version.skipped_unknown": {
-        "pl": " · bez dowodu wersji, pominięte: {n}", "en": " · no version evidence, skipped: {n}"},
+        "pl": {"one": " · bez dowodu wersji pominięty {n} stos",
+               "few": " · bez dowodu wersji pominięte {n} stosy",
+               "many": " · bez dowodu wersji pominiętych {n} stosów"},
+        "en": {"one": " · no version evidence, skipped {n} stack",
+               "other": " · no version evidence, skipped {n} stacks"},
+    },
     "grid.version.no_delete": {
         "pl": " · Horreum niczego nie usuwa - pliki usuwasz sam, a skan zdejmie je z tej listy",
         "en": " · Horreum deletes nothing - you delete the files yourself, and a scan takes them "

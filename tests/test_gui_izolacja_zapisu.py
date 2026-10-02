@@ -553,8 +553,10 @@ def test_klik_w_wiersz_niewiadomy_prowadzi_do_Dostawy(qapp, tmp_path):
 
 
 def test_klik_w_wiersz_niewiadomy_przelacza_okno_na_Dostawe(qapp, tmp_path, monkeypatch):
-    """Gospodarz podpina `open_intake` pod przełączenie widoku - droga człowieka od wiersza do ekranu."""
+    """Gospodarz podpina `open_intake` pod przełączenie widoku - droga człowieka od wiersza do ekranu -
+    i podaje Dostawie powód wejścia: linia nad akcjami mówi, po co człowiek tu jest."""
     from horreum.gui.app import NAV_DOSTAWA, NAV_PORZADKI, MainWindow
+    from horreum.gui.pipeline import REASON_COPY_FACTS
     monkeypatch.setattr(MainWindow, "_pola_poza_watkiem", False)
     _kopie_bez_faktow(tmp_path).close()
     win = MainWindow(str(tmp_path / "k.db"))
@@ -562,6 +564,8 @@ def test_klik_w_wiersz_niewiadomy_przelacza_okno_na_Dostawe(qapp, tmp_path, monk
         win._show_view(NAV_PORZADKI)
         win.tasks_view._on_task_clicked(_wiersz(win.tasks_view, "orphan_testimony_frames"))
         assert win.stack.currentIndex() == NAV_DOSTAWA
+        assert win.pipeline_view._reason == REASON_COPY_FACTS
+        assert win.pipeline_view.lbl_reason.text()
     finally:
         win.close()
 
@@ -730,22 +734,144 @@ def test_niedostepne_zrodlo_sprawdza_watek_tla_i_daje_droge_do_katalogu(qapp, tm
         assert w_oknie == [] and dialogi == [], (w_oknie, dialogi)
         assert view._thread is not None, "etap ruszył na ostatnim źródle"
         _czekaj_na_etap(view)
-        zdanie = i18n.t("pipeline.presence.unreachable_pick", root=brak)
+        zdanie = i18n.t("pipeline.source.unreachable_pick", root=brak)
         assert not view.box_vanished.isHidden() and view.lbl_vanished.text() == zdanie
-        assert not view.btn_pick_presence.isHidden() and view.btn_pick_presence.isEnabled()
+        assert not view.btn_pick_source.isHidden() and view.btn_pick_source.isEnabled()
         assert view.btn_mark_vanished.isHidden() and view.lbl_error.isHidden()
-        assert i18n.t("pipeline.presence.unreachable", root=brak) in view.lbl_summary.text()
+        assert i18n.t("pipeline.source.unreachable", root=brak) in view.lbl_summary.text()
         assert view._root is None and dialogi == []
         assert w_oknie == [], w_oknie
 
-        view.btn_pick_presence.click()                  # droga dalej - dopiero TERAZ pytanie
+        view.btn_pick_source.click()                    # droga dalej - dopiero TERAZ pytanie
         assert dialogi == [1] and view._thread is not None
         _czekaj_na_etap(view)
         assert view._root == str(zdrowy)
         assert ustawienia.value("pipeline/last_source") == str(zdrowy)
-        assert view.btn_pick_presence.isHidden()
+        assert view.btn_pick_source.isHidden()
     finally:
         view.close()
+
+
+@pytest.mark.parametrize("wejscie", ["przyjmij_nowe", "skanuj"])
+def test_sekwencja_skanu_na_niedostepnym_zrodle_nie_dotyka_dysku_w_oknie(
+        qapp, tmp_path, monkeypatch, ustawienia, wejscie):
+    """AR-31 (3), bliźniak „Sprawdź obecność": złota akcja „Przyjmij nowe" robiła `is_dir` na
+    zapamiętanym źródle, a ona i „Skanuj"/„Przetwórz wszystko" mierzyły serial woluminu
+    (`_set_root`, `_scan_params`) w slocie okna - na odłączonym udziale SMB okno stało do timeoutu
+    sieci. Teraz slot nie dotyka dysku: sondę i serial robi wątek tła, a niedostępne źródło wraca
+    jawnym stanem „Źródło niedostępne: <ścieżka> - wskaż katalog" z przyciskiem, linią „[skan] NIE
+    WYKONANO" i bez zmiany wskazanego katalogu. Przycisk pyta o katalog i powtarza TEN etap.
+
+    Falsyfikator: przywróć w `_on_receive` `Path(source).is_dir()` albo w `_scan_params`
+    `volume_serial` → lista dotknięć dysku w wątku okna nie jest pusta."""
+    import threading
+    from pathlib import Path
+    from PySide6.QtWidgets import QFileDialog
+    from horreum.gui import pipeline as pipeline_mod
+    brak = str(tmp_path / "odlaczony_udzial" / "ASTRO_")
+    zdrowy = tmp_path / "zdrowy"
+    zdrowy.mkdir()
+    _fits(zdrowy / "l0.fits")
+    db_path = str(tmp_path / "p.db")
+    db.open_db(db_path).close()
+
+    w_oknie = []                                        # (co, ścieżka) wołane w wątku okna
+
+    def _szpieg(nazwa, prawdziwa):
+        def _f(sciezka, *a, **kw):
+            if (threading.current_thread() is threading.main_thread()
+                    and str(tmp_path) in str(sciezka)):
+                w_oknie.append((nazwa, str(sciezka)))
+            return prawdziwa(sciezka, *a, **kw)
+        return _f
+    monkeypatch.setattr(os.path, "isdir", _szpieg("isdir", os.path.isdir))
+    monkeypatch.setattr(Path, "is_dir", _szpieg("Path.is_dir", Path.is_dir))
+    monkeypatch.setattr(pipeline_mod, "volume_serial",
+                        _szpieg("volume_serial", pipeline_mod.volume_serial))
+    dialogi = []
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory",
+                        staticmethod(lambda *a, **k: dialogi.append(1) or str(zdrowy)))
+
+    view = pipeline_mod.PipelineView(db_path, now_fn=lambda: NOW)
+    try:
+        if wejscie == "przyjmij_nowe":
+            ustawienia.setValue("pipeline/last_source", brak)
+            view._on_receive()
+        else:
+            view._root = brak                           # wskazany wcześniej, udział odpadł potem
+            view._sync_actions()
+            view._on_scan()
+        assert w_oknie == [] and dialogi == [], (w_oknie, dialogi)
+        assert view._thread is not None, "etap ruszył bez pytania o katalog"
+        _czekaj_na_etap(view)
+        zdanie = i18n.t("pipeline.source.unreachable_pick", root=brak)
+        assert not view.box_vanished.isHidden() and view.lbl_vanished.text() == zdanie
+        assert not view.btn_pick_source.isHidden() and view.btn_pick_source.isEnabled()
+        assert view.btn_mark_vanished.isHidden() and view.lbl_error.isHidden()
+        linia = i18n.t("pipeline.fmt.scan_not_done",
+                       reason=i18n.t("pipeline.source.unreachable", root=brak))
+        assert view.lbl_summary.text() == linia, view.lbl_summary.text()
+        assert view._root == (None if wejscie == "przyjmij_nowe" else brak)
+        assert w_oknie == [] and dialogi == [], w_oknie
+
+        view.btn_pick_source.click()                    # droga dalej - dopiero TERAZ pytanie
+        assert dialogi == [1] and view._thread is not None
+        assert w_oknie == [], w_oknie
+        _czekaj_na_etap(view)
+        assert view._root == str(zdrowy) and str(zdrowy) in view.lbl_root.text()
+        assert ustawienia.value("pipeline/last_source") == str(zdrowy)
+        assert "[skan] pliki 1" in view.lbl_summary.text(), view.lbl_summary.text()
+        assert ("[delta]" in view.lbl_summary.text()) == (wejscie == "przyjmij_nowe")
+        assert view.btn_pick_source.isHidden()
+    finally:
+        view.close()
+
+
+def test_podpowiedz_sprawdz_obecnosc_mowi_ze_oznacz_znikniete_jest_warunkowe(qapp, tmp_path,
+                                                                             ustawienia):
+    """AR-31 (4), bliźniak poprawionej recepty kopii bez zeznania: trzy podpowiedzi „Sprawdź
+    obecność" obiecywały „Oznacz zniknięte… pojawi się pod wynikiem" bezwarunkowo, a przycisk
+    pojawia się tylko po POTWIERDZONYM zniknięciu (hamulec passa potwierdzeń nie liczy, „nic nie
+    znikło" nie ma czego oznaczać). Teraz każda z trzech podpowiedzi w obu językach niesie
+    warunek po nazwie przycisku, a podpowiedź na ekranie mówi go w każdym z trzech stanów.
+
+    Falsyfikator: usuń warunek z którejkolwiek `pipeline.tip.presence*` → pierwsza pętla pada."""
+    warunek = {"pl": "gdy sprawdzenie potwierdzi zniknięcie",
+               "en": "when the check confirms a copy is gone"}
+    klucze = ("pipeline.tip.presence", "pipeline.tip.presence_last", "pipeline.tip.presence_ask")
+    for klucz in klucze:
+        for jezyk in ("pl", "en"):
+            tekst = CATALOG[klucz][jezyk]
+            assert warunek[jezyk] in tekst[tekst.index("{mark}"):], (klucz, jezyk)
+
+    from horreum.gui.pipeline import PipelineView
+    db_path = str(tmp_path / "p.db")
+    db.open_db(db_path).close()
+    view = PipelineView(db_path, now_fn=lambda: NOW)
+    try:
+        assert warunek["pl"] in view.btn_presence.toolTip()               # pytanie o katalog
+        ustawienia.setValue("pipeline/last_source", str(tmp_path))
+        view._sync_source_memo()
+        assert str(tmp_path) in view.btn_presence.toolTip()                # ostatnie źródło
+        assert warunek["pl"] in view.btn_presence.toolTip()
+        view._show_root(str(tmp_path), None)
+        assert warunek["pl"] in view.btn_presence.toolTip()               # wskazany katalog
+    finally:
+        view.close()
+
+
+def test_recepta_recznego_zwolnienia_wskazuje_gest_okna_i_release_isolation():
+    """AR-31 (5): zdanie odmowy „nierozstrzygalne…" (`writeback._RECZNA`) kierowało do
+    `repo.release_inplace_op(N)` - klingi bazy bez blokady pliku, której człowiek nie ma jak wywołać.
+    Drogą usera jest gest „Zwolnij plik do skanu…" w menu prawego kliku w Zbiorach, a w kodzie
+    `writeback.release_isolation` (zwolnienie pod blokadą pliku z CAS fazy). Nazwa gestu musi być
+    tą z katalogu - zmiana etykiety bez zdania rozjechałaby receptę z menu.
+
+    Falsyfikator: przywróć w `_RECZNA` `repo.release_inplace_op` → pierwsza asercja pada."""
+    assert "release_inplace_op" not in writeback._RECZNA
+    assert "writeback.release_isolation" in writeback._RECZNA
+    assert f"„{CATALOG['grid.inplace.release']['pl']}”" in writeback._RECZNA
+    assert "w Zbiorach" in writeback._RECZNA and "prawego kliku" in writeback._RECZNA
 
 
 def test_zapis_naglowkow_mowi_czemu_Dostawa_jest_wygaszona(qapp, tmp_path):

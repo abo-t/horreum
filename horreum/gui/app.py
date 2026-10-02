@@ -3107,7 +3107,8 @@ class MainWindow(QMainWindow):
         OBOWIĄZKOWO — `tasks.py` importuje z `app.py` module-level, F5R2#1: import na górze domknąłby
         cykl). Pod-widoki osi z `TasksView` ALIASOWANE na oknie — kontrakt `axis_view`/
         `observatory_view`/`object_view` przeżywa przemontowanie bez zmian."""
-        from horreum.gui.pipeline import PipelineView          # lazy: Qt-import tylko gdy montujemy
+        from horreum.gui.pipeline import (                     # lazy: Qt-import tylko gdy montujemy
+            REASON_COPY_FACTS, PipelineView)
         from horreum.gui.grid import FramesView
         from horreum.gui.tasks import TasksView
         from horreum.gui.planner import PlannerView
@@ -3158,8 +3159,14 @@ class MainWindow(QMainWindow):
         for v in (tasks.axis_view, tasks.observatory_view, tasks.object_view):
             v.status_message.connect(self._flash)
         tasks.open_collection.connect(self._on_open_collection)
-        # Wiersz „?" Porządków prowadzi tam, gdzie jest jego robota - do Dostawy (AR-28 (b)).
-        tasks.open_intake.connect(lambda: self._show_view(NAV_DOSTAWA))
+        # Wiersz „?" Porządków prowadzi tam, gdzie jest jego robota - do Dostawy (AR-28 (b)) - i
+        # niesie powód: linia nad akcjami mówi, po co człowiek tu jest. Obie drogi do sygnału
+        # (wiersz „?”, pusta perspektywa kopii) czekają na fakty kopii, więc powód jest jeden.
+        tasks.open_intake.connect(lambda: (pipeline.show_reason(REASON_COPY_FACTS),
+                                           self._show_view(NAV_DOSTAWA)))
+        # Pusta perspektywa kopii w Zbiorach mówi zdaniem tego wiersza i prowadzi tą samą drogą -
+        # sygnał na sygnał, więc droga do Dostawy ma jedno podpięcie.
+        grid.open_intake.connect(tasks.open_intake)
         tasks.counts_changed.connect(self._on_tasks_counts)
 
         # Motyw PRZEKAZANY, nie czytany przez widok z rejestru (wiz T5 N4— jeden właściciel faktu).

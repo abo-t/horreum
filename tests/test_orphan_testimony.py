@@ -479,3 +479,33 @@ def test_werdykt_klingi_bez_zapisu_to_wyscig_nie_zmiana_na_dysku(po_skasowaniu, 
     monkeypatch.setattr(repo, "adopt_testimony", lambda *a, **k: werdykt)
     s = scan.adopt_orphan_testimony(con, now=LATER)
     assert (s.adopted, s.stale, s.stale_paths, s.raced) == (0, 0, [], 1)
+
+
+def test_ponowienie_porownuje_odcisk_z_biezacym_wierszem_nie_z_migawka(po_skasowaniu,
+                                                                       monkeypatch):
+    """Pierwszy odczyt ocalałej kopii odrzuca strażnik generacji: w tym czasie pisarz zmienił jej
+    nagłówek, a jego re-sync (`ingest_record`) zapisał w bazie NOWY odcisk. Ponowienie porównywało
+    odcisk przeczytanego pliku z MIGAWKĄ kandydatów (stary odcisk), więc zdrowa kopia, którą baza
+    już opisuje, lądowała w „zmienione na dysku od skanu". Teraz porównanie idzie z bieżącym
+    wierszem lokacji - zero `stale`, kopia rozstrzyga się jak każda inna (przejęcie albo wyścig).
+
+    Falsyfikator: wróć do `kopia["header_hash"]` w `_adopt_one` → `stale == 1`."""
+    from test_copy_facts import _operacja
+    con, _root, _fid, _a, b = po_skasowaniu
+    prawdziwy = scan.scan_file
+    stan = {"raz": True}
+
+    def _przeplot(sciezka, *aa, **kw):
+        if str(sciezka) == str(b) and stan["raz"]:
+            stan["raz"] = False
+            _xisf(b, _MASTER + (("FILTER", "'CLS'"), ("OBJECT", "'NGC 6888'"),
+                                ("EXPTIME", "0.21")), payload=b"\x05" * 32)   # zapis pisarza
+            _operacja(con, _loc(con, b)["id"], "synced")
+            scan.ingest_record(con, prawdziwy(str(b)), volume=_loc(con, b)["volume"], now=NOW,
+                               summary=scan.ScanSummary())
+        return prawdziwy(sciezka, *aa, **kw)
+    monkeypatch.setattr(scan, "scan_file", _przeplot)
+    s = scan.adopt_orphan_testimony(con, now=LATER)
+    monkeypatch.undo()
+    assert (s.read, s.stale, s.stale_paths, s.failed) == (1, 0, [], 0), s
+    assert s.adopted + s.raced == 1, s

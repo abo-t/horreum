@@ -1585,6 +1585,32 @@ def _record_identity(rec):
     return rec.file_sha1, 1
 
 
+def _odczyt_starszy(con, location_id, inplace_gen):
+    """Czy odczyt pliku lokacji jest starszy niż operacja zapisu w miejscu tej lokacji: predykat
+    `repo.newer_inplace_op` wobec generacji sprzed bramki izolacji. `None` = wołający nie jest
+    skanem - bez sprawdzenia (kontrakt `repo._refuse_if_newer_inplace`)."""
+    return inplace_gen is not None and repo.newer_inplace_op(
+        con, location_id=location_id, op_id=inplace_gen)
+
+
+def _odmow_staremu_odczytowi(con, location_id, inplace_gen):
+    """`repo.StaleScanRecord`, gdy `_odczyt_starszy` - ten sam wyjątek, którym odmawia klinga
+    w transakcji zapisu, więc sterowniki obsługują oba jedną drogą (jedno ponowienie, potem kubełek)."""
+    if _odczyt_starszy(con, location_id, inplace_gen):
+        raise repo.StaleScanRecord(f"location:{location_id} ma operację zapisu w miejscu nowszą "
+                                   f"niż odczyt (generacja {inplace_gen})")
+
+
+def _odmow_staremu_odczytowi_sciezki(con, path, volume, inplace_gen):
+    """`_odmow_staremu_odczytowi` dla każdej lokacji pod `path` (na `volume`; `None` = dowolny
+    wolumin, jak bramka `_isolated` przy wyłączonej bramie przyrostowej). Ścieżka bez lokacji nie ma
+    operacji zapisu w miejscu - pisarz pisze wyłącznie znane kopie."""
+    for (location_id,) in con.execute(
+            "SELECT id FROM location WHERE path = ? AND (? IS NULL OR volume = ?)",
+            (path, volume, volume)).fetchall():
+        _odmow_staremu_odczytowi(con, location_id, inplace_gen)
+
+
 def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, summary,
                   actor="scan", inplace_gen=None):
     """Wciągnij JEDEN `ScanRecord` przez jedną klingę (`repo`) — JĄDRO wspólne dla skanu drzewa
@@ -1610,9 +1636,10 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
         no-op idempotentnego re-skanu rozstrzyga repo (zwraca False, gdy powtórna awaria niczego nie
         zmienia); `summary.frame_review` rośnie TYLKO gdy repo zwróciło True;
       - PODMIANA TREŚCI (świeża tożsamość ≠ tożsamość frame'a lokacji — WBPP re-generuje master
-        pod tą samą nazwą): `upsert_frame` (ew. degenerat) + `rebind_location` + świeże fakty
-        kopii; stary frame ZOSTAJE (append-only) — BEZ żadnej lokacji, więc pass zniknięć (oparty
-        na lokacjach) go NIE podchwyci; ślad niesie `location.rebound` (P5, `repo.rebind_location`);
+        pod tą samą nazwą): klatka (ew. degenerat) + przepięcie jedną transakcją
+        (`repo.rebind_location_to_identity`, AR-31) + świeże fakty kopii; stary frame ZOSTAJE
+        (append-only) - BEZ żadnej lokacji, więc pass zniknięć (oparty na lokacjach) go NIE
+        podchwyci; ślad niesie `location.rebound` (P5);
       - ta sama tożsamość → `refresh_location`: fakty kopii + (przy zmianie `header_hash`)
         odświeżenie zeznania i pochodnych frame'a (last-read-wins). Udany odczyt GASI marker
         `unreadable_since` (kopia wyzdrowiała; #13), degeneracja go zakłada/trzyma.
@@ -1631,16 +1658,16 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
     GENERACJA ZAPISU W MIEJSCU (`inplace_gen`, astra 2026-09-27): skan czyta generację dziennika
     (`repo.inplace_generation`) PRZED bramką izolacji, bo bramka i odczyt pliku to osobne chwile -
     zapis w miejscu mógł zacząć się po bramce. Znana lokacja z operacją o większym `id` →
-    `repo.StaleScanRecord` PRZED jakimkolwiek zapisem tej ścieżki (także przed nową klatką gałęzi
-    podmiany), a klinga faktów kopii sprawdza to samo w transakcji zapisu (wąskie okno między tym
-    sprawdzeniem a zapisem). Wołający liczy to jak izolację, bez markera nieczytelności. `None` =
-    wołający nie jest skanem (re-sync pisarza `writeback._resync`, import) - bez sprawdzenia.
+    `repo.StaleScanRecord` PRZED jakimkolwiek zapisem tej ścieżki (także przed kamerą z derywacji
+    osi), a klingi (faktów kopii, przepięcia z nową klatką) sprawdzają to samo w transakcji zapisu
+    (wąskie okno między tym sprawdzeniem a zapisem). Wołający liczy to jak izolację, bez markera
+    nieczytelności. `None` = wołający nie jest skanem (re-sync pisarza `writeback._resync`,
+    import) - bez sprawdzenia.
 
     NIE łapie wyjątków — backstop bez tożsamości (sha1 nieznany → `frame.review`, sha1='?') należy
     do wołającego (`scan_tree` / import), bo to on wie, jak zidentyfikować rekord do review."""
     readable = rec.header is not None
     copy_facts = copy_header_facts(rec.header, rec.header_hash, rec.image_roles)
-    kind, kind_source, ident, camera_id = _derive_axes(con, rec, now=now, actor=actor)
     sha1_data, uncomputable = _record_identity(rec)
 
     loc = con.execute(
@@ -1649,6 +1676,11 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
         "SELECT id, frame_id, mtime, file_sha1, unreadable_since, present "
         "FROM location WHERE volume = ? AND path = ?",
         (volume, rec.path)).fetchone()
+    if loc is not None:
+        # Strażnik generacji PRZED derywacją osi (AR-31): `_derive_axes` pisze kamerę
+        # (`repo.upsert_camera`), a ta - z rozdartego odczytu - zostałaby w bazie po odmowie.
+        _odmow_staremu_odczytowi(con, loc["id"], inplace_gen)
+    kind, kind_source, ident, camera_id = _derive_axes(con, rec, now=now, actor=actor)
 
     if loc is None:                                    # ścieżka NIEZNANA — dotychczasowy tor
         frame_id, created = repo.upsert_frame(
@@ -1674,10 +1706,6 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
         return
 
     # ── ścieżka ZNANA: kontrakt świeżości §2 ──
-    if inplace_gen is not None and repo.newer_inplace_op(con, location_id=loc["id"],
-                                                         op_id=inplace_gen):
-        raise repo.StaleScanRecord(f"location:{loc['id']} ma operację zapisu w miejscu nowszą "
-                                   f"niż odczyt skanu (generacja {inplace_gen})")
     frame_row = con.execute(
         "SELECT sha1_data FROM frame WHERE id = ?", (loc["frame_id"],)).fetchone()
 
@@ -1705,16 +1733,16 @@ def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, su
     kind_after = None if readable else rec.error_kind
     reason_after = None if readable else rec.error
     if sha1_data != frame_row["sha1_data"]:            # PODMIANA TREŚCI pod znaną ścieżką
-        frame_id, created = repo.upsert_frame(
-            con, sha1_data=sha1_data, sha1_data_uncomputable=uncomputable,
+        # Klatka i przepięcie JEDNĄ transakcją ze strażnikiem generacji (AR-31): odmowa cofa także
+        # nową klatkę, więc ponowienie widzi `created=True` i nagrywa zeznanie.
+        frame_id, created = repo.rebind_location_to_identity(
+            con, location_id=loc["id"], sha1_data=sha1_data, sha1_data_uncomputable=uncomputable,
             kind=kind, kind_source=kind_source, filetype=_filetype(rec.path),
-            camera_id=camera_id, now=now, actor=actor)
+            camera_id=camera_id, now=now, actor=actor, inplace_gen=inplace_gen)
         if created:
             summary.frames_new += 1
         else:
             summary.frames_existing += 1
-        repo.rebind_location(con, location_id=loc["id"], frame_after=frame_id, now=now,
-                             actor=actor, inplace_gen=inplace_gen)
         summary.locations_rebound += 1
         if not created and repo.clear_superseded(con, frame_id=frame_id, now=now, actor=actor):
             # POWRÓT TREŚCI (#DR2/R4, D-DR-4): pod tą ścieżką znów leży tożsamość, którą wcześniej
@@ -1928,6 +1956,10 @@ class CopyFactsSummary:
     missing: int = 0          # pliku nie ma, a korzeń przebiegu stoi (skasowany) → ZERO zapisu;
                               # robota passa obecności („Oznacz zniknięte"), nie „nieczytelne"
     failed: int = 0           # odczyt nagłówka padł (albo korzeń nieosiągalny) → ZERO zapisu
+    elsewhere: int = 0        # fakty dociągnął w międzyczasie ktoś inny (re-sync pisarza, skan) →
+                              # ZERO zapisu, nic nie czeka; bez ścieżek - to nie jest fakt o pliku
+    raced: int = 0            # drugi konflikt generacji z rzędu (zapis w miejscu w toku) → ZERO
+                              # zapisu, plik zdrowy, kopia czeka na następną dostawę; bez ścieżek
     remaining: int = 0        # kandydaci PO przebiegu (0 = komplet)
     cancelled: bool = False
     failed_paths: list = field(default_factory=list)
@@ -1935,7 +1967,7 @@ class CopyFactsSummary:
     missing_paths: list = field(default_factory=list)
 
 
-def copy_facts_candidates(con, root=None):
+def copy_facts_candidates(con, root=None, *, porownywalne=False):
     """Kandydaci uzupełnienia faktów kopii (0021): kopie OBECNE, o znanym odcisku nagłówka, bez
     zebranych faktów (`hdr_hash IS NULL`) - XISF wszystkie (liczba i role obrazów żyją tylko tam)
     plus KAŻDA kopia klatki, która ma >1 lokację OGÓŁEM (tylko tam jest z czym porównywać zeznanie).
@@ -1969,7 +2001,12 @@ def copy_facts_candidates(con, root=None):
 
     `root` (opcjonalny) zawęża do kopii pod korzeniem - jak każdy etap Dostawy, który dotyka dysku:
     „Przetwórz wszystko" na wskazanym katalogu nie ma prawa czytać plików spoza niego. Porównanie
-    przez `canonize_root` + `_under`, ta sama forma literowa, którą skan zapisał `location.path`."""
+    przez `canonize_root` + `_under`, ta sama forma literowa, którą skan zapisał `location.path`.
+
+    `porownywalne=True` - wyłącznie kopie klatek o >1 lokacji OGÓŁEM: kandydaci, których fakty mogą
+    zmienić predykaty PORÓWNUJĄCE kopie jednej klatki („Kopie niezgodne", „Zeznanie z nieobecnej
+    kopii"). Pojedynczy XISF czeka na uzupełnienie (liczba i role obrazów), ale żadnej z tych liczb
+    nie ruszy - licznik „nie wiem" przy nich pyta tym trybem, etap Dostawy domyślnym."""
     rows = con.execute(
         "SELECT l.id, l.volume, l.path, l.header_hash FROM location l "
         "JOIN frame f ON f.id = l.frame_id "
@@ -1977,13 +2014,27 @@ def copy_facts_candidates(con, root=None):
         "  AND l.unreadable_since IS NULL "
         "  AND NOT EXISTS (SELECT 1 FROM inplace_op o WHERE o.location_id = l.id "
         "                  AND o.phase IN (SELECT value FROM json_each(?))) "
-        "  AND (f.filetype = 'xisf' OR l.frame_id IN ("
+        "  AND ((f.filetype = 'xisf' AND ? = 0) OR l.frame_id IN ("
         "       SELECT frame_id FROM location GROUP BY frame_id HAVING COUNT(*) > 1)) "
-        "ORDER BY l.id", (json.dumps(list(repo.INPLACE_ISOLATING_PHASES)),)).fetchall()
+        "ORDER BY l.id",
+        (json.dumps(list(repo.INPLACE_ISOLATING_PHASES)), int(porownywalne))).fetchall()
     if root is None:
         return rows
     prefix = canonize_root(root).rstrip("\\/") + os.sep
     return [r for r in rows if _under(r["path"], prefix)]
+
+
+def _odcisk_lokacji(con, location_id):
+    """Odcisk nagłówka lokacji z bazy TERAZ - kotwica porównania sterowników, które czytają plik
+    długo po wyborze kandydatów (migawka mogła się zestarzeć: re-sync pisarza, równoległy skan)."""
+    return con.execute("SELECT header_hash FROM location WHERE id = ?",
+                       (location_id,)).fetchone()[0]
+
+
+def _fakty_kopii_sa(con, location_id):
+    """Czy lokacja ma już fakty kopii (`hdr_hash IS NOT NULL`) - zebrane przez kogokolwiek."""
+    return con.execute("SELECT hdr_hash IS NOT NULL FROM location WHERE id = ?",
+                       (location_id,)).fetchone()[0] == 1
 
 
 def backfill_copy_facts(con, *, now, root=None, progress=None, should_cancel=None,
@@ -2001,6 +2052,12 @@ def backfill_copy_facts(con, *, now, root=None, progress=None, should_cancel=Non
     `location.header_hash` (kotwica w `repo.record_copy_facts`, CAS). Inny odcisk = kopia zmieniła się
     od ostatniego skanu → `stale`, ZERO zapisu: należy do skanu, który odświeży razem z faktami kopii
     także `header` klatki, `cards` i pochodne.
+
+    Odcisk i fakty porównuje z wierszem lokacji czytanym TERAZ, nie z migawką kandydatów: pętla po
+    550 plikach trwa, a w tym czasie re-sync pisarza (zapis nagłówka w miejscu) albo równoległy skan
+    mogą dociągnąć fakty razem z NOWYM odciskiem. Fakty już są → `elsewhere` (nic nie czeka), nie
+    `stale`. Drugi konflikt generacji z rzędu (zapis w miejscu w toku) → `raced`: plik jest zdrowy,
+    a „zmienione na dysku od skanu" wysyłałoby człowieka do skanu, który niczego nie zmieni.
 
     ZEZNANIA KLATKI NIE RUSZA. W odróżnieniu od `backfill_xisf_headers` (które szło przez
     `ingest_record` i przełączało `header` na OSTATNIĄ przeczytaną kopię - świadomie, raz) ten
@@ -2020,9 +2077,10 @@ def backfill_copy_facts(con, *, now, root=None, progress=None, should_cancel=Non
     `FileNotFoundError` co skasowany plik.
       * `root` podany → świadek = `canonize_root(root)` (ta sama forma, którą zawęża kandydatów).
       * `root is None` → świadek = najbliższy ISTNIEJĄCY przodek pliku PONIŻEJ litery dysku albo
-        korzenia udziału (`R:\\`, `\\\\host\\share\\`). Sama litera się nie liczy: istnieje także
-        wtedy, gdy drzewo pod nią zniknęło w całości, więc mówi tylko „coś jest zamontowane", nie
-        „ta gałąź jest żywa". Pomyłka w stronę `missing` niczego
+        korzenia udziału (`R:\\`, `\\\\host\\share\\`), a gdy takiego nie ma - sama kotwica. Bez
+        niej plik leżący wprost w korzeniu udziału albo całe skasowane drzewo nocy szły do
+        `failed` przy udziale, który stoi. Zerwany udział nie przechodzi (kotwica nieosiągalna);
+        istniejąca kotwica mówi „udział stoi, pliku nie ma". Pomyłka w stronę `missing` niczego
         nie zapisuje - kieruje do „Oznacz zniknięte", który sprawdza wolumin i zakres sam.
 
     Hooki `progress(done, total, path, summary)` / `should_cancel()` - kontrakt jak w `scan_tree`
@@ -2035,10 +2093,12 @@ def backfill_copy_facts(con, *, now, root=None, progress=None, should_cancel=Non
 
     def swiadek_zyje(path):
         """Czy świadek skasowania stoi (docstring): korzeń przebiegu albo - bez korzenia -
-        istniejący przodek pliku poniżej litery dysku / korzenia udziału."""
+        istniejący przodek pliku poniżej litery dysku / korzenia udziału, a gdy takiego nie ma,
+        sama kotwica."""
         if korzen is not None:
             return os.path.isdir(korzen)
-        kotwica = os.path.normcase(os.path.splitdrive(path)[0])     # `R:`, `\\host\share`, ``
+        naped = os.path.splitdrive(path)[0]                    # `R:`, `\\host\share`, ``
+        kotwica = os.path.normcase(naped)
         d = os.path.dirname(path)
         while os.path.normcase(d.rstrip("\\/")) != kotwica:
             if os.path.isdir(d):
@@ -2047,17 +2107,20 @@ def backfill_copy_facts(con, *, now, root=None, progress=None, should_cancel=Non
             if rodzic == d:
                 return False
             d = rodzic
-        return False
+        # Plik wprost w kotwicy albo całe drzewo pod nią skasowane: kotwica, która stoi, jest
+        # żywym świadkiem. `R:` + separator - samo `R:` to bieżący katalog napędu, nie jego korzeń.
+        return bool(naped) and os.path.isdir(naped + os.sep)
 
     for i, row in enumerate(rows, 1):
         if should_cancel is not None and should_cancel():
             s.cancelled = True
             break
         path = row["path"]
+        przeczytany = False
         for proba in range(1, _PROBY_GENERACJI + 1):
             # Generacja dziennika zapisu w miejscu PRZED bramką izolacji (kontrakt `scan_tree`):
             # zapis w miejscu po niej odrzuca fakty w transakcji klingi (`repo.StaleScanRecord`) -
-            # jedno ponowienie (`_PROBY_GENERACJI`), drugi konflikt → `stale`.
+            # jedno ponowienie (`_PROBY_GENERACJI`), drugi konflikt → `raced`.
             gen = repo.inplace_generation(con)
             try:
                 # Wolumin wiersza: izolacja kopii o tej samej ścieżce na INNYM woluminie tej nie
@@ -2075,25 +2138,43 @@ def backfill_copy_facts(con, *, now, root=None, progress=None, should_cancel=Non
                     s.failed_paths.append(f"{path}: {type(exc).__name__}: {exc}")
                 break
             except Exception as exc:           # I/O albo parser - raport, nie zapis (docstring)
-                s.failed += 1
-                s.failed_paths.append(f"{path}: {type(exc).__name__}: {exc}")
+                # Parser mógł trafić nagłówek rozdarty zapisem w miejscu z innego procesu (AR-17
+                # (8)): przy operacji nowszej niż generacja to nie jest fakt o pliku - ponowienie,
+                # a drugi konflikt idzie do `raced` jak odmowa klingi.
+                if _odczyt_starszy(con, row["id"], gen):
+                    if proba < _PROBY_GENERACJI:
+                        continue
+                    s.raced += 1
+                else:
+                    s.failed += 1
+                    s.failed_paths.append(f"{path}: {type(exc).__name__}: {exc}")
                 break
-            if proba == 1:                     # plik liczony raz, także gdy ponowienie czyta drugi raz
-                s.read += 1
+            if not przeczytany:                # plik liczony raz, także gdy ponowienie czyta drugi
+                s.read += 1                    # raz, i wtedy, gdy udała się dopiero druga próba
+                przeczytany = True
             facts = copy_header_facts(header, header_hash, image_roles)
+            # Wiersz TERAZ, nie migawka kandydatów (docstring): fakty mógł dociągnąć re-sync pisarza
+            # razem z nowym odciskiem - wtedy robota jest zrobiona, a nie „zmieniona na dysku".
+            if _fakty_kopii_sa(con, row["id"]):
+                s.elsewhere += 1
+                break
             try:
-                zapisane = header_hash == row["header_hash"] and repo.record_copy_facts(
+                znany = _odcisk_lokacji(con, row["id"])
+                zapisane = header_hash == znany and repo.record_copy_facts(
                     con, location_id=row["id"], copy_facts=facts, now=now, actor=actor,
                     inplace_gen=gen)
             except repo.StaleScanRecord:       # zapis w miejscu po generacji - odczyt stęchły
                 if proba < _PROBY_GENERACJI:
                     continue
-                zapisane = False
-            if not zapisane:
+                s.raced += 1                   # drugi konflikt: zapis w toku, plik zdrowy
+                break
+            if zapisane:
+                s.written += 1
+            elif _fakty_kopii_sa(con, row["id"]):  # CAS klingi przegrał z równoległym zapisem faktów
+                s.elsewhere += 1
+            else:
                 s.stale += 1
                 s.stale_paths.append(path)
-            else:
-                s.written += 1
             break
         if progress is not None:
             progress(i, total, path, s)
@@ -2256,22 +2337,26 @@ def _adopt_one(con, frame_id, kopia, rec, *, now, actor, inplace_gen=None):
     klingi `'drift'` / `'unchanged'`). `inplace_gen` = generacja sprzed bramki izolacji: operacja
     zapisu w miejscu tej kopii nowsza niż ona → `repo.StaleScanRecord` przed derywacją osi - ten sam
     wyjątek, którym w wąskim oknie po tym sprawdzeniu odmawia klinga, więc wołający obsługuje oba
-    jedną drogą (jedno ponowienie, drugi konflikt → `raced`)."""
+    jedną drogą (jedno ponowienie, drugi konflikt → `raced`). To samo sprawdzenie stoi też ZARAZ
+    po odczycie, przed klasyfikacją (AR-17 (8)): rozdarty odczyt dawałby fałszywe `failed` /
+    `identity` / `stale`. Drugie sprawdzenie (przed derywacją osi) zostaje, bo pytanie o kandydatów
+    między nimi trwa."""
+    _odmow_staremu_odczytowi(con, kopia["location_id"], inplace_gen)
     if rec.header is None:
         return "failed"
     sha1_data, _ = _record_identity(rec)
     frame_sha1 = con.execute("SELECT sha1_data FROM frame WHERE id = ?", (frame_id,)).fetchone()
     if frame_sha1 is None or frame_sha1[0] != sha1_data:
         return "identity"
-    if rec.header_hash != kopia["header_hash"]:
+    # Odcisk z wiersza TERAZ, nie z migawki kandydatów: ponowienie po konflikcie generacji czyta plik
+    # zapisany przez pisarza, którego re-sync wpisał już nowy odcisk - to nie jest kopia „zmieniona
+    # od skanu". Czy kandydat nadal należy do etapu, rozstrzyga pytanie niżej.
+    if rec.header_hash != _odcisk_lokacji(con, kopia["location_id"]):
         return "stale"
     teraz = dict(adopt_candidates(con)).get(frame_id)    # stan pod nami mógł się zmienić (docstring)
     if teraz is None or teraz["location_id"] != kopia["location_id"]:
         return "raced"
-    if inplace_gen is not None and repo.newer_inplace_op(con, location_id=kopia["location_id"],
-                                                         op_id=inplace_gen):
-        raise repo.StaleScanRecord(f"location:{kopia['location_id']} ma operację zapisu w miejscu "
-                                   f"nowszą niż odczyt (generacja {inplace_gen})")
+    _odmow_staremu_odczytowi(con, kopia["location_id"], inplace_gen)
     kind, _kind_source, _ident, camera_id = _derive_axes(con, rec, now=now, actor=actor)
     return repo.adopt_testimony(
         con, location_id=kopia["location_id"], sha1_data=sha1_data, header_hash=rec.header_hash,
@@ -2380,6 +2465,10 @@ def scan_stacks(con, root, *, volume="?", drive_letter=None, tier=None, now,
                     s.skipped += 1                    # izolowana (0022) albo bez zmian
                 else:
                     rec = scan_file(spath)
+                    # Strażnik generacji ZARAZ po odczycie, PRZED klasyfikacją (AR-17 (8)): odczyt
+                    # w trakcie zapisu w miejscu z innego procesu bywa rozdarty, a odrzucenie
+                    # z niego („nieczytelny", „zeznaje inny rodzaj") byłoby fałszywym raportem.
+                    _odmow_staremu_odczytowi_sciezki(con, spath, volume if gate_on else None, gen)
                     if rec.header is None:                 # W1: nie ma czym potwierdzić tożsamości
                         s.rejected_unreadable += 1
                         s.rejected_paths.append(f"{spath}: nagłówek nieczytelny ({rec.error})")

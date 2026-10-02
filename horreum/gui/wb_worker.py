@@ -243,8 +243,10 @@ def commit_do_cofniecia(res):
     Rdzeń nadaje `commit_id`, gdy choć jeden plik został PODMIENIONY - także przy `failed`
     z `backup_text` (weryfikacja po podmianie padła, plik jest zmieniony, kopia nagłówka leży
     w `header_backups`). Dawny warunek „`applied` niepuste" zostawiał taki plik zmieniony bez
-    przycisku cofnięcia. Rename (`commit_renames`) `commit_id` nie nadaje - jego cofnięcie idzie
-    po `run_id` i ma własną regułę w gridzie."""
+    przycisku cofnięcia. Przebieg, w którym backup powstał, a podmianę odbiła straż (wiersz
+    commitu jest w bazie), `commit_id` NIE dostaje - „Cofnij" commitu, który niczego nie zmienił,
+    byłoby kłamstwem (`writeback.commit`). Rename (`commit_renames`) `commit_id` nie nadaje - jego
+    cofnięcie idzie po `run_id` i ma własną regułę w gridzie."""
     return res.commit_id
 
 

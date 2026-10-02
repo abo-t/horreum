@@ -1634,6 +1634,40 @@ def test_commit_atomowy_przeplatany_z_zapisem_w_miejscu(tmp_path, monkeypatch, f
     assert p.read_bytes() == stan["po_b"] and fits.getheader(str(p))["OBJECT"] == "NGC 6992"
     assert [x.name for x in tmp_path.iterdir() if x.suffix == ".tmp"] == []
     assert _operacje(con)[0]["phase"] == faza_b
+    # Backup A powstał przed podmianą (wiersz commitu w bazie zostaje, append-only), ale żaden plik
+    # nie został podmieniony - wynik nie oddaje `commit_id`, więc żadna powierzchnia nie pokaże
+    # „Cofnij" commitu, który niczego nie zmienił.
+    assert a.commit_id is None, a
+    wb_worker = pytest.importorskip("horreum.gui.wb_worker")
+    assert wb_worker.commit_do_cofniecia(a) is None
+    con.close()
+
+
+@pytest.mark.parametrize("powod, recznie", [
+    ("operacja 1 jest w fazie synced, nie czeka na dokończenie", True),
+    (f"inny plik niż w chwili zapisu (rozmiar/st_ino); {writeback._RECZNA}", False),
+], ids=["faza", "recepta_reczna"])
+def test_dokonczenie_zablokowane_wskazuje_gest_zwolnienia(tmp_path, monkeypatch, powod, recznie):
+    """Dokończenie zapisu w miejscu odmówiło ('blocked') - powód commitu wskazuje drogę zwolnienia,
+    którą człowiek ma: gest „Zwolnij plik do skanu…" (etykieta z katalogu) albo
+    `writeback.release_isolation` (zwolnienie pod blokadą pliku z CAS fazy), nie klingę bazy
+    `repo.release_inplace_op`. Powód, który już niesie receptę ręczną (`_RECZNA`), nie dostaje jej
+    drugi raz.
+
+    Falsyfikator: przywróć w `commit` dopisek `repo.release_inplace_op(N)` → asercje padają."""
+    from horreum.gui.i18n_catalog import CATALOG
+    p = _fits(tmp_path / "z.fits")
+    con, _loc_ = _baza_z_plikiem(tmp_path, p)
+    monkeypatch.setattr(writeback, "_dokoncz",
+                        lambda con_, op_id, *, now: writeback.WriteResult("blocked", powod, None))
+    res = writeback.commit(con, "R", now=NOW, inplace=True)
+    monkeypatch.undo()
+    (f,) = res.failed
+    assert "release_inplace_op" not in f.reason, f.reason
+    gest = f"„{CATALOG['grid.inplace.release']['pl']}”"
+    assert f.reason.count(gest) == 1 and f.reason.count("writeback.release_isolation") == 1, f.reason
+    if recznie:
+        assert f"writeback.release_isolation({_operacje(con)[0]['id']})" in f.reason, f.reason
     con.close()
 
 

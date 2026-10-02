@@ -1122,6 +1122,42 @@ def test_cofniecie_zakonczone_samym_failed_odswieza_plakietke_Porzadkow(wb_view)
     assert emisje == [1], "cofnięcie bez skutku milczy"
 
 
+def test_cofniecie_makra_z_bledem_pokazuje_powod_i_zostawia_Cofnij(wb_view, monkeypatch):
+    """AR-31 (2), lustro `test_cofniecie_renamu_z_bledem_pokazuje_powod_i_zostawia_Cofnij`:
+    cofnięcie makra, którego re-sync bazy pada (czkawka odczytu na udziale), kończy się `failed`
+    z receptą rdzenia „ponowne undo dokończy". Dawniej ogon liczył tylko przywrócone i zablokowane
+    - zdanie „0 przywróconych", „Cofnij" gasło, a z nim jedyny uchwyt ponowienia (`commit_id`).
+    Teraz zdanie ma liczbę błędów i pierwszy powód, „Cofnij" zostaje przy tym samym commicie
+    z receptą, a drugi klik kończy cofnięcie.
+
+    Falsyfikator: przywróć w `_after_undo` bezwarunkowe zgaszenie „Cofnij" → asercja
+    o widoczności pada; zdejmij człon powodu → asercja o „zerwany udział" pada."""
+    from astropy.io import fits
+    from horreum import writeback
+    from horreum.gui import i18n
+    view, con, p = wb_view
+    view.macro_bar.asg_kw.setCurrentText("TELESCOP")
+    view.macro_bar.asg_op.setCurrentIndex(0)
+    view.macro_bar.asg_expr.setText("EQ6")
+    view.macro_bar._emit_stage()
+    view._on_commit()
+    commit_id = view._undo_commit_id
+    assert commit_id is not None and fits.getheader(str(p))["TELESCOP"] == "EQ6"
+    with monkeypatch.context() as m:
+        m.setattr(writeback.scan, "scan_file",
+                  lambda path, **kw: (_ for _ in ()).throw(OSError(64, "zerwany udział")))
+        view._dispatch_undo()
+    tekst = view.drawer.result.text()
+    assert "1 błędów" in tekst and "zerwany udział" in tekst, tekst
+    assert i18n.t("grid.action.undo") in tekst, "recepta ponowienia nazywa przycisk"
+    assert view._undo_btn.isVisibleTo(view) and view._undo_mode == "macro"
+    assert view._undo_commit_id == commit_id
+    view._dispatch_undo()                                # ponowienie kończy cofnięcie
+    assert fits.getheader(str(p))["TELESCOP"] == "RC8"
+    assert "1 przywróconych" in view.drawer.result.text(), view.drawer.result.text()
+    assert not view._undo_btn.isVisibleTo(view) and view._undo_mode is None
+
+
 def test_szuflada_daje_Cofnij_gdy_commit_ma_failed_z_kopia_naglowka(wb_view):
     """Z11/D3: ta sama reguła „Cofnij" co w oknach piszących karty (`wb_worker.commit_do_cofniecia`)
     - rdzeń nadaje `commit_id`, gdy plik został PODMIENIONY, także przy `failed` z kopią nagłówka.
@@ -5508,3 +5544,237 @@ def test_zdanie_pominiec_JEDEN_dom_czlonow_zdania_osi_obiektu():
         g, nothing_key="grid.sel.object_restore_skip_nothing")
     assert "· nie było czego przywrócić: 3" in przywracanie and "cofać" not in przywracanie
     assert grid_mod.zdanie_pominiec(repo.ObjectGesture(assigned=7)) == ""
+
+
+# ---------- kolumna „Obrazy", sort po znaczeniu, ścieżka z treści, pasek kryteriów ----------
+
+def _wiersz_obrazow(fid, tekst, n):
+    """Wiersz bazowy modelu z gotową liczbą obrazów (tekst komórki + klucz sortu)."""
+    return {"frame_id": fid, "path": f"/a/f{fid}.xisf", "kind": "light", "present": 1,
+            "n_present": 1, "n_vanished": 0, "filetype": "xisf", "_images": tekst,
+            "_images_n": n}
+
+
+def test_obrazy_sortuja_sie_liczbowo_a_brak_jest_na_koncu_w_obu_kierunkach():
+    """Kolumna „Obrazy" sortowała się jak tekst („10" przed „2"), a pusta komórka szła na górę.
+    Teraz klucz jest liczbą (przy kilku kopiach - największą), brak stoi na końcu w obu
+    kierunkach (wzór `_dt_delta`), a komórka z liczbą stoi w prawo jak każda kolumna liczb.
+
+    Falsyfikator: wróć do klucza `str(v).lower()` - „10" stanie przed „2" i pusty wiersz na górze."""
+    from horreum.gui.grid import GridTableModel
+    base = [_wiersz_obrazow(1, "10", 10), _wiersz_obrazow(2, "2", 2),
+            _wiersz_obrazow(3, "", None), _wiersz_obrazow(4, "3 | 1", 3)]
+    m = GridTableModel()
+    m.set_data(base, pivot_mod.build_pivot([1, 2, 3, 4], [], []), [])
+    kol = m.base_col("_images")
+
+    def kolejnosc():
+        return [m._rows[i]["frame_id"] for i in range(m.rowCount())]
+
+    m.sort(kol, Qt.AscendingOrder)
+    assert kolejnosc() == [2, 4, 1, 3]
+    m.sort(kol, Qt.DescendingOrder)
+    assert kolejnosc() == [1, 4, 2, 3], "brak zostaje na końcu także malejąco"
+    i10 = kolejnosc().index(1)
+    assert m.data(m.index(i10, kol), Qt.TextAlignmentRole) == int(Qt.AlignRight | Qt.AlignVCenter)
+    # poza perspektywą kopii brak liczby jest pusty, bez „?" i bez podpowiedzi
+    i_brak = kolejnosc().index(3)
+    assert m.data(m.index(i_brak, kol), Qt.DisplayRole) == ""
+    assert m.data(m.index(i_brak, kol), Qt.ToolTipRole) is None
+
+
+def test_sort_pamieta_ZNACZENIE_kolumny_gdy_wchodzi_kolumna_wersji(view):
+    """Model pamiętał sort jako NUMER kolumny, a perspektywa „Wersje stosów" wstawia kolumnę
+    „Wersja" przed keywordami - sort po pierwszym keywordzie stawał się po cichu sortem po „Wersji".
+    Teraz model pamięta znaczenie (`_sort_id`), a widok przestawia wskaźnik nagłówka na nowy numer
+    tej samej kolumny (`_uloz_kolumny`).
+
+    Falsyfikator: zapamiętaj w `sort` sam numer - po wstawieniu kolumny wiersze wracają do kolejności
+    wejścia (sort po „Wersji", której nie mają), a wskaźnik stoi nad „Wersją"."""
+    from horreum.gui.grid import GridTableModel, BASE_COLS
+    wspolne = {"kind": "light", "present": 1, "n_present": 1}
+    base = [{"frame_id": 1, "path": "/a/c.fits", **wspolne},
+            {"frame_id": 2, "path": "/a/a.fits", **wspolne},
+            {"frame_id": 4, "path": "/a/b.fits", **wspolne}]
+    kw = ["OBJECT", "EXPTIME"]
+    pv = pivot_mod.build_pivot([1, 2, 4], kw, [])
+    m = GridTableModel()
+    m.set_data([dict(b) for b in base], pv, kw)
+    kol_exp = len(BASE_COLS) + 1
+    m.sort(kol_exp, Qt.DescendingOrder)
+    assert m._sort_id == ("kw", "EXPTIME")
+    # te same dane, kolumna „Wersja" wchodzi przed keywordy
+    m.set_data([dict(b) for b in base], pv, kw, version_col=True)
+    assert m.sort_column() == kol_exp + 1
+    assert m.headerData(m.sort_column(), Qt.Horizontal) == "EXPTIME"
+    assert m.sort_order() == Qt.DescendingOrder
+    # keyword odznaczony - sortu nie ma w układzie, wskaźnik znika, znaczenie zostaje
+    m.set_data([dict(b) for b in base], pivot_mod.build_pivot([1, 2, 4], ["OBJECT"], []), ["OBJECT"])
+    assert m.sort_column() == -1 and m._sort_id == ("kw", "EXPTIME")
+
+    # widok: wskaźnik nagłówka idzie za znaczeniem po przeładowaniu
+    v = view.model
+    kol = next(c for c in range(v.columnCount()) if v.headerData(c, Qt.Horizontal) == "EXPTIME")
+    view.table.sortByColumn(kol, Qt.DescendingOrder)
+    ids = [r["frame_id"] for r in v._data_rows]
+    v.set_data(list(v._data_rows), pivot_mod.build_pivot(
+        ids, list(v._keywords), queries.cards_pivot(view.con, ids, list(v._keywords))),
+        list(v._keywords), version_col=True)
+    view._uloz_kolumny()
+    naglowek = view.table.horizontalHeader()
+    assert naglowek.sortIndicatorSection() == kol + 1
+    assert v.headerData(naglowek.sortIndicatorSection(), Qt.Horizontal) == "EXPTIME"
+    # nagranie w danych: EXPTIME malejąco - f1 (300) przed f2 (60), f4 zniknięta (120) pomiędzy
+    ids = [r["frame_id"] for r in v._rows if "frame_id" in r]
+    assert ids.index(1) < ids.index(4) < ids.index(2)
+
+
+def test_obrazy_domyslnie_tylko_w_perspektywach_kopii_a_wybor_reki_wygrywa(view):
+    """Kolumna „Obrazy" była pusta w 16 901/16 901 wierszy kopii żywego archiwum: fakty kopii
+    zbiera się dla XISF i klatek wielokopiowych, pojedyncze FITS-y nie dostaną ich nigdy. Stoi więc
+    domyślnie tylko w perspektywach kopii (`_FLAGI_OBRAZOW`), a tam brak liczby u kandydata do
+    zebrania faktów mówi „?" w kolorze braku, z receptą `grid.tip.copy_unread`. Przełącznik
+    w „Polach" wygrywa z domyślną we wszystkich perspektywach.
+
+    Falsyfikator: zostaw kolumnę zawsze widoczną - pierwsza asercja; zdejmij `_obrazy_pytajnik` -
+    komórka duplikatu milczy; zignoruj `_obrazy_reka` - kolumna znika po przejściu na „Przegląd"."""
+    from horreum.gui import i18n
+    kol = view.model.base_col("_images")
+    assert view.table.isColumnHidden(kol), "Przegląd: kolumna bez treści schowana"
+    assert not view.fields.images.isChecked()
+    view.apply_perspective(grid_mod.PRESET_DUPS)
+    kol = view.model.base_col("_images")
+    assert not view.table.isColumnHidden(kol) and view.fields.images.isChecked()
+    m = view.model
+    nr = next(i for i, r in enumerate(m._rows) if r.get("frame_id") == 1)
+    assert m.data(m.index(nr, kol), Qt.DisplayRole) == "?"
+    assert m.data(m.index(nr, kol), Qt.ForegroundRole) == grid_mod._COLORS["missing"]
+    tip = m.data(m.index(nr, kol), Qt.ToolTipRole)
+    assert tip.startswith(i18n.t("grid.tip.images_unknown"))
+    assert i18n.t("nav.dostawa") in tip and i18n.t("pipeline.btn.mark_vanished") in tip
+    # wybór ręki: włączona w „Przeglądzie" i dalej widoczna po zmianie perspektywy
+    view.apply_perspective(grid_mod._PRESET_CZYSTY)
+    assert view.table.isColumnHidden(view.model.base_col("_images"))
+    view.fields.images.click()
+    assert not view.table.isColumnHidden(view.model.base_col("_images"))
+    view.apply_perspective(grid_mod.PRESET_VANISHED)
+    view.apply_perspective(grid_mod._PRESET_CZYSTY)
+    assert not view.table.isColumnHidden(view.model.base_col("_images"))
+    assert view.fields.images.isChecked()
+    # poza perspektywą kopii pojedynczy plik bez faktów milczy - „?" nie jest tam robotą
+    nr3 = next(i for i, r in enumerate(view.model._rows) if r.get("frame_id") == 3)
+    assert view.model.data(view.model.index(nr3, view.model.base_col("_images")), Qt.DisplayRole) == ""
+
+
+def test_obrazy_pytajnik_tylko_przy_kandydacie_do_faktow():
+    """„?" stoi tylko przy kopii, którą uzupełnienie faktów czyta (XISF albo >1 lokacja ogółem -
+    lustro `scan.copy_facts_candidates`). Stos FITS z jedną kopią faktów nie dostanie nigdy, więc
+    „?" z receptą byłby przy nim obietnicą bez pokrycia."""
+    from horreum.gui.grid import GridTableModel
+    fits = {**_wiersz_obrazow(7, "", None), "filetype": "fits"}
+    fits_z_siostra = {**_wiersz_obrazow(8, "", None), "filetype": "fits", "n_vanished": 1}
+    m = GridTableModel()
+    m.set_data([_wiersz_obrazow(6, "", None), fits, fits_z_siostra],
+               pivot_mod.build_pivot([6, 7, 8], [], []), [], images_unknown=True)
+    kol = m.base_col("_images")
+    tekst = {m._rows[i]["frame_id"]: m.data(m.index(i, kol), Qt.DisplayRole)
+             for i in range(m.rowCount())}
+    assert tekst == {6: "?", 7: "", 8: "?"}
+
+
+def test_sciezka_w_duplikatach_szeroka_z_tresci_z_sufitem_i_elizja_w_srodku(view, qapp):
+    """Komórka „×2  nazwa" w Duplikatach traciła nazwę pliku w domyślnych 100 px. W perspektywach
+    `_FLAGI_SCIEZKI_Z_TRESCI` kolumna ścieżki bierze szerokość z treści (nie ponad sufit) i elizję
+    w środku (`kolumna_z_tresci`); poza nimi elizja wraca do domyślnej tabeli.
+
+    Falsyfikator: zdejmij wołanie `kolumna_z_tresci` z `_uloz_kolumny` - delegat nie stoi;
+    zdejmij sufit - długa nazwa rozpycha kolumnę ponad `_SUFIT_KOLUMNY_Z_TRESCI`."""
+    from PySide6.QtGui import QStandardItem, QStandardItemModel
+    from PySide6.QtWidgets import QStyleOptionViewItem, QTableView
+    view.apply_perspective(grid_mod.PRESET_DUPS)
+    kol = view.model.base_col("path")
+    delegat = view.table.itemDelegateForColumn(kol)
+    assert isinstance(delegat, grid_mod._ElizjaWSrodku)
+    assert view.table.columnWidth(kol) <= grid_mod._SUFIT_KOLUMNY_Z_TRESCI
+    opcja = QStyleOptionViewItem()
+    delegat.initStyleOption(opcja, view.model.index(0, kol))
+    assert opcja.textElideMode == Qt.ElideMiddle
+    view.apply_perspective(grid_mod._PRESET_CZYSTY)
+    assert not isinstance(view.table.itemDelegateForColumn(kol), grid_mod._ElizjaWSrodku)
+    # sufit i szerokość z treści na tabeli z jedną długą i jedną krótką komórką
+    tabela, model = QTableView(), QStandardItemModel(1, 2)
+    model.setItem(0, 0, QStandardItem("×2  " + "x" * 300 + ".xisf"))
+    model.setItem(0, 1, QStandardItem("a.fits"))
+    tabela.setModel(model)
+    grid_mod.kolumna_z_tresci(tabela, 0)
+    grid_mod.kolumna_z_tresci(tabela, 1)
+    assert tabela.columnWidth(0) == grid_mod._SUFIT_KOLUMNY_Z_TRESCI
+    assert tabela.columnWidth(1) < grid_mod._SUFIT_KOLUMNY_Z_TRESCI
+    assert len(tabela.findChildren(grid_mod._ElizjaWSrodku)) == 1, "jeden delegat na tabelę"
+
+
+def test_pasek_kryteriow_zaczyna_od_zawezenia_a_wszystkie_klatki_tylko_bez_niego(view):
+    """Pasek elidował „wszystkie klatki · tylko duplikaty" do „wszystkie klatki…" - mówił odwrotność
+    trimu. Człony trimu i facetów idą pierwsze, a „wszystkie klatki" staje tylko bez nich.
+
+    Falsyfikator: przywróć opis drzewa jako pierwszy człon - tekst zacznie się od „wszystkie klatki"."""
+    from horreum.gui import i18n
+    assert view.sel_bar.criteria_label.toolTip() == "wszystkie klatki"
+    view.apply_perspective(grid_mod.PRESET_DUPS)
+    assert view.sel_bar.criteria_label.toolTip() == i18n.t("grid.criteria.only_dups")
+    view.filter_panel.filterApplied.emit({"keyword": "OBJECT", "operator": "eq", "value": "M51"})
+    assert view.sel_bar.criteria_label.toolTip() == (
+        i18n.t("grid.criteria.only_dups") + " · OBJECT = M51")
+
+
+def test_nazwa_wiersza_i_perspektywy_kopii_niezgodnych_mowi_o_klatkach():
+    """Wiersz Porządków, perspektywa i człon paska liczą KLATKI (`queries.copy_conflict_frame_ids`),
+    a nazwa mówiła o kopiach. Jedno brzmienie we wszystkich trzech miejscach, PL i EN."""
+    from horreum.gui.i18n_catalog import CATALOG
+    for klucz in ("tasks.copy_conflict_frames", "perspective.copy_conflict"):
+        assert CATALOG[klucz] == {"pl": "Klatki z niezgodnymi kopiami",
+                                  "en": "Frames with disagreeing copies"}, klucz
+    assert CATALOG["grid.criteria.only_copy_conflict"]["pl"] == "tylko klatki z niezgodnymi kopiami"
+    stare = [k for k, v in CATALOG.items() if "niezgodne ze sobą" in json.dumps(v, ensure_ascii=False)
+             or "copies that disagree" in json.dumps(v)]
+    assert not stare, stare
+
+
+def test_pusta_perspektywa_kopii_przy_czekajacych_faktach_mowi_zdaniem_Porzadkow(view, gcon):
+    """Perspektywa „Kopie niezgodne" otwarta z listy w Zbiorach mówiła „Brak klatek" i prowadziła
+    na „Przegląd", a Porządki w tym samym stanie mówiły „?" - kopie bez zebranych faktów nie biorą
+    udziału w porównaniu. Teraz pusty stan bierze zdanie z podpowiedzi Porządków (jeden właściciel)
+    i przycisk prowadzi do Dostawy (`open_intake`). Bez czekających kopii pustka jest wiedzą
+    i zostaje dawne zdanie z przejściem na „Przegląd".
+
+    Falsyfikator: zdejmij gałąź `czeka` z `_ustaw_pusty_stan` - pusty stan mówi „Brak klatek",
+    a przycisk przełącza perspektywę zamiast emitować `open_intake`."""
+    from horreum import scan
+    from horreum.gui import i18n
+    # dwie obecne kopie klatki 1 z odciskiem nagłówka, bez zebranych faktów - kandydaci porównania
+    gcon.execute("UPDATE location SET header_hash = 'h1' WHERE frame_id = 1")
+    gcon.commit()
+    czeka = len(scan.copy_facts_candidates(gcon, porownywalne=True))
+    assert czeka == 2
+    wezwania = []
+    view.open_intake.connect(lambda: wezwania.append(1))
+    for preset in (grid_mod.PRESET_COPY_CONFLICT, grid_mod.PRESET_ORPHAN_TESTIMONY):
+        view.apply_perspective(preset)
+        assert view._n_total == 0, preset
+        assert view.empty.text() == i18n.t_plural(
+            "tasks.copies_unread_tip", czeka, place=i18n.t("nav.dostawa"),
+            stacks=i18n.t("pipeline.btn.stacks"), check=i18n.t("pipeline.btn.presence"),
+            mark=i18n.t("pipeline.btn.mark_vanished"), dest=i18n.t("nav.dostawa")), preset
+        assert view.empty_btn.text() == i18n.t("grid.empty_go_intake")
+        view.empty_btn.click()
+        assert view.combo_persp.currentData() == ("preset", preset), "perspektywa zostaje"
+    assert wezwania == [1, 1]
+    # pustka bez czekających kopii jest wiedzą - dawne zdanie i przejście na „Przegląd"
+    gcon.execute("UPDATE location SET header_hash = NULL WHERE frame_id = 1")
+    gcon.commit()
+    view.apply_perspective(grid_mod.PRESET_PATH_HEADER_CONFLICT)
+    view.apply_perspective(grid_mod.PRESET_COPY_CONFLICT)
+    assert view.empty.text() == i18n.t("grid.empty_persp")
+    view.empty_btn.click()
+    assert wezwania == [1, 1]
+    assert view.combo_persp.currentData() == ("preset", grid_mod._PRESET_CZYSTY)

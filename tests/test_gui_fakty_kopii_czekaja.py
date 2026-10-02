@@ -207,8 +207,99 @@ def test_czlon_drugi_bez_zeznania_nie_szerszy_niz_dawny(qapp):
         tv.close()
 
 
+def _bez_faktow_kopii(con, pliki):
+    """Kopie wciągnięte klingą bez faktów (jak sprzed 0021): frame per sha1 danych."""
+    for p in pliki:
+        rec = scan.scan_file(str(p))
+        fid, _ = repo.upsert_frame(con, sha1_data=rec.sha1_data, kind="master_flat",
+                                   filetype=scan._filetype(rec.path), camera_id=None, now=NOW)
+        repo.add_location(con, frame_id=fid, volume="V", path=rec.path, mtime=rec.mtime,
+                          header_hash=rec.header_hash, now=NOW)
+
+
+def test_pojedynczy_XISF_bez_faktow_nie_zamienia_zera_w_nie_wiem(qapp, tmp_path):
+    """Kopia XISF o JEDNEJ lokacji jest kandydatem uzupełnienia (liczba obrazów), ale jej fakty nie
+    zmienią żadnej z dwóch liczb, które porównują kopie jednej klatki. Licznik „?" pyta więc
+    predykat porównywalnych kandydatów u jego właściciela (`scan.copy_facts_candidates(...,
+    porownywalne=True)`) - na kopii archiwum 412 z 550 kandydatów to takie XISF.
+
+    Falsyfikator: licz `len(scan.copy_facts_candidates(con))` → wiersze pokazują „?"."""
+    from test_copy_facts import _FLAT, _xisf
+    con = db.open_db(str(tmp_path / "s.db"))
+    _bez_faktow_kopii(con, [_xisf(tmp_path / "S" / "solo.xisf", _FLAT, payload=b"\x09" * 32)])
+    tv = tasks_mod.TasksView(con)
+    try:
+        assert len(scan.copy_facts_candidates(con)) == 1
+        tv.refresh_counts()
+        for klucz in ("copy_conflict_frames", "orphan_testimony_frames"):
+            w = _wiersz(tv, klucz)
+            assert w.data(rows.SECONDARY) == "0  ›", (klucz, w.data(rows.SECONDARY))
+            assert not w.toolTip(), klucz
+    finally:
+        tv.close()
+    con.close()
+
+
+def test_czesciowe_fakty_licza_dolna_granice_N_plus(qapp, tmp_path):
+    """Jedna klatka ma już fakty obu kopii (i niezgodne FILTER - liczba 1), druga czeka z dwiema
+    kopiami bez faktów. „1" udawało liczbę dokładną, a jest dolną granicą: wiersz mówi „1+" i ile
+    kopii jest bez zeznania, z tą samą receptą dróg co „?" - a klik prowadzi do perspektywy, bo
+    tam JEST jedna klatka do obejrzenia. Wiersz, którego liczba to zero, zostaje przy „?".
+
+    Falsyfikator: zawęź człon do `n == 0` → pierwsza asercja widzi „1  ›"."""
+    from test_copy_facts import _FLAT, _xisf
+    root, a, b = _dwie_kopie(tmp_path)
+    con = db.open_db(str(tmp_path / "c.db"))
+    scan.scan_tree(con, root, volume="?", now=NOW)                    # fakty: CLS / L-Pro
+    _bez_faktow_kopii(con, [
+        _xisf(tmp_path / "Q" / "A" / "q.xisf", _FLAT, payload=b"\x0b" * 32),
+        _xisf(tmp_path / "Q" / "B" / "q.xisf", _FLAT, payload=b"\x0b" * 32)])
+    tv = tasks_mod.TasksView(con)
+    try:
+        assert len(scan.copy_facts_candidates(con, porownywalne=True)) == 2
+        tv.refresh_counts()
+        w = _wiersz(tv, "copy_conflict_frames")
+        assert w.data(rows.SECONDARY) == "1+ · 2 kopie bez zeznania  ›", w.data(rows.SECONDARY)
+        assert w.data(rows.STRONG) is True, "jest klatka do obejrzenia - to robota"
+        tip = w.toolTip()
+        assert f"Gdy plik jest na dysku - {i18n.t('nav.dostawa')} → „Przyjmij nowe”" in tip, tip
+        assert f"„{i18n.t('pipeline.btn.stacks')}”" in tip, tip
+        assert tip.splitlines()[-1].endswith(f"{i18n.t('nav.zbiory')}."), tip
+        perspektywy = []
+        tv.open_collection.connect(perspektywy.append)
+        tv._on_task_clicked(w)
+        assert perspektywy == [grid_mod.PRESET_COPY_CONFLICT]
+        sierota = _wiersz(tv, "orphan_testimony_frames")
+        assert sierota.data(rows.SECONDARY).startswith("? · 2 kopie"), sierota.data(rows.SECONDARY)
+        assert sierota.toolTip().splitlines()[-1].endswith(f"{i18n.t('nav.dostawa')}.")
+    finally:
+        tv.close()
+    con.close()
+
+
+def test_recepta_wymienia_droge_Stosy(qapp, sprzed_migracji):
+    """Kopie stosów spod korzenia stosów dostają fakty WYŁĄCZNIE drogą „Stosy" (`_stacks` →
+    `_copy_facts` na korzeniu stosów) - „Przyjmij nowe" chodzi po archiwum. Recepta wymienia obie
+    drogi warunkowo (wiersz nie zna korzenia stosów), nazwę gestu bierze z katalogu w KAŻDEJ formie
+    obu języków."""
+    for jezyk in ("pl", "en"):
+        for forma, tekst in CATALOG["tasks.copies_unread_tip"][jezyk].items():
+            assert "{stacks}" in tekst and "{dest}" in tekst, (jezyk, forma)
+    con, _fid, _a, _b = sprzed_migracji
+    tv = tasks_mod.TasksView(con)
+    try:
+        tv.refresh_counts()
+        tip = _wiersz(tv, "copy_conflict_frames").toolTip()
+        assert (f"Gdy kopia leży pod korzeniem stosów - {i18n.t('nav.dostawa')} → "
+                f"„{i18n.t('pipeline.btn.stacks')}”") in tip, tip
+    finally:
+        tv.close()
+
+
 def test_niewiadome_zero_odmienia_liczbe_kopii():
     """Człon „?" jest frazą odmienianą (PL: one/few/many), bo mówi o liczbie kopii."""
     assert i18n.t_plural("tasks.copies_unread", 1) == "? · 1 kopia bez zeznania"
     assert i18n.t_plural("tasks.copies_unread", 5) == "? · 5 kopii bez zeznania"
     assert i18n.t_plural("tasks.copies_unread", 22) == "? · 22 kopie bez zeznania"
+    assert i18n.t_plural("tasks.copies_partial", 1, m=3) == "3+ · 1 kopia bez zeznania"
+    assert i18n.t_plural("tasks.copies_partial", 5, m=1) == "1+ · 5 kopii bez zeznania"

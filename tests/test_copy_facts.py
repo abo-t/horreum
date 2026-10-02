@@ -6,8 +6,10 @@ Pliki syntetyczne w `tmp_path` (zero archiwum, zero żywej bazy). Pomiar na kopi
 mieszka w teście - bazy prywatnej w repo publicznym nie ma i mieć nie może."""
 import json
 import os
+import shutil
 import sqlite3
 import struct
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -261,6 +263,105 @@ def test_uzupelnienie_czyta_same_naglowki_i_jest_idempotentne(tmp_path):
     s2 = scan.backfill_copy_facts(con, now=NOW)
     assert (s2.rows, s2.read, s2.written) == (0, 0, 0)
     assert con.execute("SELECT count(*) FROM event WHERE id > ?", (ev,)).fetchone()[0] == 0
+    con.close()
+
+
+def test_kandydaci_porownywalni_to_kopie_klatek_z_wiecej_niz_jedna_lokacja(tmp_path):
+    """Pojedynczy XISF jest kandydatem uzupełnienia (liczba i role obrazów żyją tylko tam), ale jego
+    fakty nie zmienią ani „Kopii niezgodnych", ani „Zeznania z nieobecnej kopii" - obie liczby
+    porównują kopie JEDNEJ klatki. `porownywalne=True` zostawia wyłącznie kopie klatek o >1
+    lokacji ogółem: tym pyta licznik „?" Porządków, żeby 412 pojedynczych XISF archiwum nie
+    zamieniało zera w „nie wiem".
+
+    Falsyfikator: zdejmij gałąź `porownywalne` z SELECT-a → pierwsza asercja widzi `solo`."""
+    root, a, b = _dwie_kopie(tmp_path)
+    solo = _xisf(root / "S" / "solo.xisf", _FLAT, payload=b"\x09" * 32)
+    con = _baza_sprzed_0021(tmp_path, [a, b, solo])
+    assert {r["path"] for r in scan.copy_facts_candidates(con, porownywalne=True)} == {
+        str(a), str(b)}
+    assert {r["path"] for r in scan.copy_facts_candidates(con)} == {str(a), str(b), str(solo)}
+    assert [r["path"] for r in scan.copy_facts_candidates(con, root / "S", porownywalne=True)] == []
+    con.close()
+
+
+def test_uzupelnienie_fakty_zebrane_rownolegle_nie_sa_stale(tmp_path, monkeypatch):
+    """Między wyborem kandydatów a zapisem fakty kopii dociągnął ktoś inny (re-sync pisarza po
+    zapisie nagłówka idzie przez `ingest_record`, który zapisuje fakty i NOWY odcisk). Ponowienie
+    po konflikcie generacji porównywało odcisk z MIGAWKI kandydatów, więc kopia z nowym nagłówkiem
+    lądowała w „zmienione na dysku od skanu" - a nic nie czeka. Teraz wiersz jest czytany od nowa:
+    fakty już są → `elsewhere`, zero zapisu, zero ścieżki w `stale`.
+
+    Falsyfikator: wróć do `header_hash == row["header_hash"]` → `stale == 1`."""
+    root, a, b = _dwie_kopie(tmp_path)
+    con = _baza_sprzed_0021(tmp_path, [a, b])
+    prawdziwa = scan._read_meta
+    stan = {"raz": True}
+
+    def _przeplot(sciezka, *aa, **kw):
+        if str(sciezka) == str(a) and stan["raz"]:
+            stan["raz"] = False
+            # pisarz zmienia nagłówek a, operacja w dzienniku (generacja odrzuci ten odczyt),
+            # a jego re-sync zapisuje fakty i nowy odcisk
+            _xisf(a, _FLAT + (("FILTER", "'CLX'"),), images=({"imageType": "MasterFlat"},))
+            _operacja(con, _loc(con, a)["id"], "synced")
+            vol = _loc(con, a)["volume"]
+            scan.ingest_record(con, scan.scan_file(str(a)), volume=vol, now=NOW,
+                               summary=scan.ScanSummary())
+        return prawdziwa(sciezka, *aa, **kw)
+    monkeypatch.setattr(scan, "_read_meta", _przeplot)
+    s = scan.backfill_copy_facts(con, now=NOW)
+    monkeypatch.undo()
+    assert (s.written, s.elsewhere, s.stale, s.stale_paths, s.remaining) == (1, 1, 0, [], 0), s
+    assert _loc(con, a)["hdr_filter"] == "CLX"
+    con.close()
+
+
+def test_uzupelnienie_drugi_konflikt_generacji_to_zapis_w_toku_nie_stale(tmp_path, monkeypatch):
+    """Dwa konflikty generacji z rzędu (zapis nagłówka w miejscu w toku) to nie jest fakt o pliku:
+    plik jest zdrowy, a „zmienione na dysku od skanu" wysyłało człowieka do skanu, który niczego
+    nie zmieni. Osobny licznik `raced` (wzór `AdoptSummary.raced`), bez ścieżek; kopia czeka.
+
+    Falsyfikator: licz drugi `StaleScanRecord` jako `stale` → asercja pada."""
+    root, a, b = _dwie_kopie(tmp_path)
+    con = _baza_sprzed_0021(tmp_path, [a])
+
+    def _odmowa(*_a, **_kw):
+        raise repo.StaleScanRecord("zapis w miejscu w toku")
+    monkeypatch.setattr(repo, "record_copy_facts", _odmowa)
+    s = scan.backfill_copy_facts(con, now=NOW)
+    monkeypatch.undo()
+    assert (s.read, s.written, s.raced, s.stale, s.stale_paths, s.remaining) == (
+        1, 0, 1, 0, [], 1), s
+    con.close()
+
+
+@pytest.mark.parametrize("cale_drzewo", [False, True])
+def test_uzupelnienie_kotwica_jest_swiadkiem_skasowania(tmp_path, monkeypatch, cale_drzewo):
+    """Bez korzenia świadkiem skasowania jest istniejący przodek pliku PONIŻEJ kotwicy (litera dysku
+    / korzeń udziału). Plik leżący BEZPOŚREDNIO w kotwicy (albo całe drzewo pod nią skasowane) nie
+    ma takiego przodka, a sama kotwica, która istnieje, też jest żywym świadkiem: udział stoi,
+    pliku nie ma → `missing`, nie `failed`. Kotwicę udaje katalog `tmp_path` (podmiana
+    `os.path.splitdrive`), bo prawdziwej litery dysku test nie rusza.
+
+    Falsyfikator: zdejmij sprawdzenie kotwicy ze `swiadek_zyje` → `failed == 1`."""
+    kotwica = str(tmp_path / "UDZIAL")
+    os.makedirs(kotwica)
+    plik = (os.path.join(kotwica, "NOC", "m.xisf") if cale_drzewo
+            else os.path.join(kotwica, "m.xisf"))
+    os.makedirs(os.path.dirname(plik), exist_ok=True)
+    _xisf(Path(plik), _FLAT)
+    con = _baza_sprzed_0021(tmp_path, [plik])
+    if cale_drzewo:
+        shutil.rmtree(os.path.dirname(plik))
+    else:
+        os.remove(plik)
+    prawdziwy = os.path.splitdrive
+    monkeypatch.setattr(scan.os.path, "splitdrive",
+                        lambda p: (kotwica, p[len(kotwica):]) if str(p).startswith(kotwica)
+                        else prawdziwy(p))
+    s = scan.backfill_copy_facts(con, now=NOW)
+    monkeypatch.undo()
+    assert (s.missing, s.failed, s.failed_paths) == (1, 0, []), s
     con.close()
 
 

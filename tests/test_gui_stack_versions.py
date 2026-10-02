@@ -121,6 +121,8 @@ def test_pulapka_tekstu_ekspozycji_nie_rozbija_grupy(monkeypatch):
     """`'600.00'` z nagłówka XISF i `600.0` z kolumny muszą dać JEDEN klucz. SQLite maskuje to
     w porównaniu z kolumną REAL, słownik Pythona - nie; koercja stoi przy wejściu."""
     wiersz = {"object_id": 1, "object_canon": "IC1795", "camera_id": 2, "is_mono": 1,
+              "camera_model": "ASI2600MM", "telescope_id": 1, "telescope_label": None,
+              "telescop_canon": "A140R",
               "filter_canon": "Ha", "raw_json": "{}", "window_start": "2025-12-16T17:27:54",
               "window_end": "2026-01-21T20:15:51", "tool": None, "declared_rows": None}
     monkeypatch.setattr(queries, "_stack_version_rows", lambda con: [
@@ -128,7 +130,7 @@ def test_pulapka_tekstu_ekspozycji_nie_rozbija_grupy(monkeypatch):
         {**wiersz, "frame_id": 2, "exptime": 600.0},
         {**wiersz, "frame_id": 3, "exptime": 600, "window_end": "2026-01-21T20:15:51.831"}])
     grupy = queries._grupy_wersji(None)
-    assert len(grupy) == 1 and {c["frame_id"] for c in grupy[0][2]} == {1, 2, 3}, (
+    assert len(grupy) == 1 and {c["frame_id"] for c in grupy[0][3]} == {1, 2, 3}, (
         "napis, liczba i okno z ułamkiem sekundy to ten sam klucz")
 
 
@@ -139,17 +141,24 @@ def test_kazdy_rodzaj_i_swiadek_ma_zdanie_w_katalogu():
         assert f"grid.version.kind.{rodzaj}" in CATALOG
     for swiadek in queries.VERSION_WITNESSES + ("none",):
         assert f"grid.version.why.{swiadek}" in CATALOG
+    for swiadek in queries.VERSION_WITNESSES:
+        assert f"grid.version.short.{swiadek}" in CATALOG, 'skrót świadka do komórki „Wersja"'
 
 
 # ═════════════════════════ read-model na syntetycznej bazie
 
 
+_BEZ_CONFIGU = object()
+
+
 def _stos(con, fid, *, kamera, obiekt, filtr, exp, okno, tool=None, declared=None, pomiary=None,
-          sciezki=None, martwe=(), wycofana=None):
-    """Gotowy obraz z integracją: frame + header + integration + lokacje (obecne i martwe)."""
+          sciezki=None, martwe=(), wycofana=None, config=None):
+    """Gotowy obraz z integracją: frame + header + integration + lokacje (obecne i martwe).
+    Config domyślnie = id kamery (zestaw A140R z tą kamerą, `_seed_wersje`); `_BEZ_CONFIGU` → NULL."""
+    cfg = None if config is _BEZ_CONFIGU else (config if config is not None else kamera)
     con.execute("INSERT INTO frame (id, sha1_data, kind, filetype, first_seen_at, camera_id, "
-                "object_id, filter_canon, retired_at) VALUES (?,?,?,?,?,?,?,?,?)",
-                (fid, f"d{fid}", "master_light", "xisf", NOW, kamera, obiekt, filtr, wycofana))
+                "object_id, filter_canon, retired_at, config_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (fid, f"d{fid}", "master_light", "xisf", NOW, kamera, obiekt, filtr, wycofana, cfg))
     con.execute("INSERT INTO header (frame_id, raw_json, exptime) VALUES (?,?,?)",
                 (fid, json.dumps(pomiary or {}), exp))
     con.execute("INSERT INTO integration (master_frame_id, created_at, tool, window_start, "
@@ -177,6 +186,14 @@ def _seed_wersje(con):
     plus stos samotny (bez bliźniaka)."""
     con.executemany("INSERT INTO camera (id, model_canon, is_mono, created_at) VALUES (?,?,?,?)",
                     [(1, "ASI2600MC", 0, NOW), (2, "ASI2600MM", 1, NOW)])
+    # Zestawy: config 1/2 = A140R z kamerą 1/2; config 3 = drugi teleskop (76EDPH) z kamerą
+    # TEGO SAMEGO MODELU co config 2 - zestaw podwójny tej samej nocy (`_grupy_wersji`).
+    con.executemany("INSERT INTO telescope (id, telescop_canon, status, created_at) VALUES (?,?,?,?)",
+                    [(1, "A140R", "approved", NOW), (2, "76EDPH", "approved", NOW)])
+    con.executemany("INSERT INTO config (id, telescope_id, camera_id, status, created_at) "
+                    "VALUES (?,?,?,?,?)",
+                    [(1, 1, 1, "approved", NOW), (2, 1, 2, "approved", NOW),
+                     (3, 2, 2, "approved", NOW)])
     con.executemany("INSERT INTO object (id, canon) VALUES (?,?)",
                     [(1, "IC1795"), (2, "LMC"), (3, "M31"), (4, "M42"), (5, "Veil"), (6, "M51")])
     a = dict(kamera=2, obiekt=1, filtr="Ha", exp=600.0, okno=W_A)
@@ -306,11 +323,16 @@ def test_perspektywa_ustawia_wersje_obok_siebie_z_faktami(view):
             belki.append(row["_group"])
             continue
         pod_belka.setdefault(belki[-1], []).append(row["frame_id"])
-        assert row["_wersja_grupa"] == belki[-1]
+        assert row["_wersja_etykieta"] == belki[-1]
     assert len(belki) == 2 and sorted(map(sorted, pod_belka.values())) == [[101, 102, 103], [601, 602]]
     assert belki[0].startswith("IC1795 · Ha · 600 s · okno 2025-12-16 17:27:54 - 2026-01-21 20:15:51")
-    assert _komorka_wersji(view, 101, "DisplayRole") == "inna integracja · 2026-02-21 12:43 · 33 wejścia"
-    assert _komorka_wersji(view, 102, "DisplayRole") == "inna integracja · 2026-01-24 06:41 · 31 wejść"
+    assert "zestaw" not in belki[0], "rozróżnik zestawu tylko przy kolizji opisów"
+    assert (_komorka_wersji(view, 101, "DisplayRole")
+            == "inna integracja · historia · 2026-02-21 12:43 · 33 wejścia")
+    assert (_komorka_wersji(view, 102, "DisplayRole")
+            == "inna integracja · historia · 2026-01-24 06:41 · 31 wejść")
+    assert _komorka_wersji(view, 601, "DisplayRole") == "inna integracja · szum i PSF", (
+        "jedyny powód werdyktu - pomiary - stoi w komórce, nie tylko pod kursorem")
     assert _komorka_wersji(view, 103, "DisplayRole") == "nieustalone"
     assert "historia pliku" in _komorka_wersji(view, 101, "ToolTipRole")
     assert "baza nie ma świadka" in _komorka_wersji(view, 103, "ToolTipRole")
@@ -381,8 +403,8 @@ def test_gest_zostaw_te_wersje_kopiuje_sciezki_i_mowi_ile(view):
     assert QApplication.clipboard().text().split("\n") == ["/st/IC1795/Ha/stara.xisf",
                                                             "/kopia/stara.xisf"]
     zdanie = view.komunikaty[-1]
-    assert zdanie.startswith("Skopiowano do schowka 2 ścieżki (pozostałe wersje: 1 stos)")
-    assert "bez dowodu wersji, pominięte: 1" in zdanie and "niczego nie usuwa" in zdanie
+    assert zdanie.startswith("Skopiowano do schowka 2 ścieżki (pozostała wersja: 1 stos)")
+    assert "bez dowodu wersji pominięty 1 stos" in zdanie and "niczego nie usuwa" in zdanie
     # gest NIE pisze do bazy: ani stanu lokacji, ani dziennika
     assert view.con.execute("SELECT COUNT(*), SUM(present) FROM location").fetchone()[:] == stan_przed
     assert view.con.execute("SELECT COUNT(*) FROM event").fetchone()[0] == zdarzen_przed
@@ -476,3 +498,196 @@ def test_zapisana_perspektywa_nie_psuje_sie_od_nowej_flagi(view, wcon, monkeypat
     view.apply_perspective("Przegląd")
     view.apply_perspective("moje wersje")
     assert view._perspektywa_wersji() and sorted(view._frame_ids) == [101, 102, 103, 601, 602]
+
+
+# ═════════════════════════ zestaw podwójny, kopia martwa, sort, odmiana, układ perspektywy
+
+
+def _zestaw_podwojny(con):
+    """NGC3034 B tej samej nocy na dwóch zestawach z kamerą TEGO SAMEGO MODELU (config 2: A140R,
+    config 3: 76EDPH) - po dwie integracje na zestaw - plus stos bez configu na tym samym kluczu."""
+    con.execute("INSERT INTO object (id, canon) VALUES (7, 'NGC3034')")
+    w = dict(kamera=2, obiekt=7, filtr="B", exp=180.0,
+             okno=("2024-04-01T20:00:00", "2024-04-02T01:00:00"))
+    _stos(con, 801, declared=20, config=2, **w)
+    _stos(con, 802, declared=18, config=2, **w)
+    _stos(con, 811, declared=40, config=3, **w)
+    _stos(con, 812, declared=41, config=3, **w)
+    _stos(con, 821, declared=7, config=_BEZ_CONFIGU, **w)
+    con.commit()
+
+
+def test_zestaw_podwojny_z_kamera_tego_samego_modelu_to_dwie_grupy(wcon):
+    """`camera` jest per MODEL, więc kamera nie rozcina zestawu podwójnego - rozcina go teleskop
+    kanoniczny z configu. Stos bez configu nie orzeka wspólnego materiału i nie wchodzi do grupy.
+    Falsyfikator: zdejmij teleskop z klucza `_grupy_wersji` - pięć stosów zleje się w jedną grupę,
+    a „Zostaw tę wersję" podsunie do skasowania stosy z drugiego teleskopu."""
+    _zestaw_podwojny(wcon)
+    grupy = [g for g in queries.stack_version_groups(wcon) if g["object_canon"] == "NGC3034"]
+    assert sorted(sorted(m["frame_id"] for m in g["members"]) for g in grupy) == [[801, 802],
+                                                                                 [811, 812]]
+    assert {g["telescope"] for g in grupy} == {"A140R", "76EDPH"}
+    assert {g["camera"] for g in grupy} == {"ASI2600MM"}
+    assert len({g["group_id"] for g in grupy}) == 2
+    assert ([g["group_id"] for g in queries.stack_version_groups(wcon)]
+            == [g["group_id"] for g in queries.stack_version_groups(wcon)]), (
+        "identyfikator stabilny między przeładowaniami")
+    assert 821 not in queries.stack_version_frame_ids(wcon)
+    assert queries.keep_version_plan(wcon, 801)["paths"] == ["/st/802.xisf"], (
+        "plan nie sięga po stosy z drugiego zestawu")
+    assert queries.keep_version_plan(wcon, 821) is None
+
+
+def test_scalony_teleskop_nie_rozcina_grupy(wcon):
+    """Teleskop przez `telescope_canonical`: scalenie 76EDPH pod A140R zlewa oba zestawy w jeden
+    materiał (ten sam kanon i ta sama kamera)."""
+    _zestaw_podwojny(wcon)
+    wcon.execute("UPDATE telescope SET merged_into = 1 WHERE id = 2")
+    wcon.commit()
+    grupy = [g for g in queries.stack_version_groups(wcon) if g["object_canon"] == "NGC3034"]
+    assert [sorted(m["frame_id"] for m in g["members"]) for g in grupy] == [[801, 802, 811, 812]]
+
+
+def test_belki_dwoch_zestawow_rozne_i_grupowane_po_identyfikatorze(view, wcon):
+    """Ten sam opis (obiekt · filtr · ekspozycja · okno) na dwóch zestawach: dwie belki, każda
+    z rozróżnikiem zestawu, a pod każdą wyłącznie jej stosy. Falsyfikator: grupuj po podpisie
+    bez rozróżnika - cztery stosy wylądują pod jedną belką."""
+    from horreum.gui import grid as grid_mod
+    _zestaw_podwojny(wcon)
+    view.apply_perspective(grid_mod.PRESET_STACK_VERSIONS)
+    pod_belka, belka = {}, None
+    for row in view.model._rows:
+        if "_group" in row:
+            belka = row["_group"]
+            continue
+        pod_belka.setdefault(belka, []).append(row["frame_id"])
+    ngc = {b: sorted(f) for b, f in pod_belka.items() if b.startswith("NGC3034")}
+    assert sorted(ngc.values()) == [[801, 802], [811, 812]]
+    assert {b.split(" · zestaw ")[1] for b in ngc} == {"A140R + ASI2600MM", "76EDPH + ASI2600MM"}
+
+
+def test_wiersz_z_martwej_kopii_nie_zeznaje_liczby_obrazow(wcon):
+    """Klatka bez obecnej kopii pokazuje adres martwej, ale nie jej `image_count` - plik, którego
+    nie ma, nie mówi o stanie dysku. Falsyfikator: wróć do gołego `loc.image_count`."""
+    for fid in (401, 402):
+        wcon.execute("UPDATE location SET header_hash = 'hh', hdr_hash = 'hh', image_count = 1, "
+                     "image_roles = '[\"integration\"]' WHERE frame_id = ?", (fid,))
+    wcon.commit()
+    wiersze = {r["frame_id"]: r for r in queries.base_rows(wcon, [401, 402])}
+    assert wiersze[402]["present"] == 0 and wiersze[402]["path"] == "/st/M42/x.xisf"
+    assert wiersze[402]["image_count"] is None
+    assert wiersze[401]["image_count"] == 1, "obecna kopia zeznaje dalej"
+
+
+def test_sort_wersji_braki_na_koncu_w_obu_kierunkach(view):
+    """Stos bez chwili integracji i stos bez liczby wejść stają ZA znanymi wartościami - rosnąco
+    i malejąco. Falsyfikator: wróć do `timestamp or ""` / `declared_rows or 0`."""
+    from PySide6.QtCore import Qt
+    from horreum.gui import grid as grid_mod
+    view.apply_perspective(grid_mod.PRESET_STACK_VERSIONS)
+    m = view.model
+    fakty = {r["frame_id"]: r["_wersja"] for r in m._data_rows}
+    fakty[103]["declared_rows"] = 5                 # bez chwili, z liczbą wejść
+    fakty[102]["declared_rows"] = None              # z chwilą, bez liczby wejść
+    fakty[601]["timestamp"] = fakty[602]["timestamp"] = fakty[101]["timestamp"]
+    fakty[601]["declared_rows"] = 10                # ta sama chwila: znana liczba przed brakiem
+
+    def _kolejnosc():
+        return [r["frame_id"] for r in m._rows if "_group" not in r]
+
+    m.set_group_by(None)
+    m.sort(m._version_col(), Qt.AscendingOrder)
+    k = _kolejnosc()
+    assert k.index(102) < k.index(101) < k.index(103), "brak chwili na końcu rosnąco"
+    assert k.index(601) < k.index(602), "brak liczby wejść za znaną przy tej samej chwili"
+    m.sort(m._version_col(), Qt.DescendingOrder)
+    k = _kolejnosc()
+    assert k.index(101) < k.index(102) < k.index(103), "brak chwili na końcu także malejąco"
+    assert k.index(601) < k.index(602), "brak liczby wejść na końcu także malejąco"
+
+
+def test_odmiana_zdania_gestu():
+    """„pozostała wersja: 1 stos" / „pozostałe wersje: 2 stosy"; „pominięty 1 stos" /
+    „pominięte 3 stosy" / „pominiętych 12 stosów" - forma idzie za liczbą."""
+    assert i18n.t_plural("grid.version.copied_stacks", 1) == " (pozostała wersja: 1 stos)"
+    assert i18n.t_plural("grid.version.copied_stacks", 2) == " (pozostałe wersje: 2 stosy)"
+    assert i18n.t_plural("grid.version.copied_stacks", 5) == " (pozostałe wersje: 5 stosów)"
+    assert i18n.t_plural("grid.version.skipped_unknown", 1).endswith("pominięty 1 stos")
+    assert i18n.t_plural("grid.version.skipped_unknown", 3).endswith("pominięte 3 stosy")
+    assert i18n.t_plural("grid.version.skipped_unknown", 12).endswith("pominiętych 12 stosów")
+
+
+def test_belka_grupy_na_cala_szerokosc_takze_po_sorcie(view):
+    """Belka grupy obejmuje wszystkie kolumny (span) przy KAŻDYM grupowaniu, wiersze danych nie.
+    Spany są własnością widoku i reset modelu ich nie zdejmuje, więc po sorcie muszą przejść za
+    belkami, a bez grupowania - zniknąć. Falsyfikator: zdejmij `clearSpans` z
+    `_uloz_belki_i_wersje`."""
+    from PySide6.QtCore import Qt
+    from horreum.gui import grid as grid_mod
+    view.apply_perspective(grid_mod.PRESET_STACK_VERSIONS)
+    m, t = view.model, view.table
+
+    def _spany():
+        return [("_group" in r, t.columnSpan(i, 0)) for i, r in enumerate(m._rows)]
+
+    def _sprawdz():
+        assert any(b for b, _s in _spany())
+        for belka, span in _spany():
+            assert span == (m.columnCount() if belka else 1)
+
+    _sprawdz()
+    m.sort(m._version_col(), Qt.DescendingOrder)
+    _sprawdz()
+    m.set_preview({101: {"keyword": "OBJECT", "old": "a", "new": "b", "op": "set"}})
+    try:
+        _sprawdz()                                   # kolumna podglądu też pod belką
+    finally:
+        m.set_preview({})
+    view.apply_perspective("Przegląd")
+    assert all(span == 1 for _b, span in _spany()), "bez grupowania zero spanów"
+    view.combo_group.setCurrentIndex(view.combo_group.findData("_object"))
+    assert m._group_by == "_object"
+    _sprawdz()                                       # grupowanie po Obiekcie też rozpina belki
+    m.sort(0, Qt.DescendingOrder)
+    _sprawdz()
+    view.combo_group.setCurrentIndex(0)              # „bez grupowania" - pierwsza pozycja
+    assert m._group_by is None and all(span == 1 for _b, span in _spany())
+
+
+def test_wersja_stoi_wizualnie_za_sciezka(view):
+    """Kolumna „Wersja" widoczna zaraz za „Ścieżką" (przesunięcie w nagłówku), a jej indeks
+    logiczny - ten, który liczą sort i podgląd - zostaje za bazowymi. Po wyjściu z perspektywy
+    nagłówek wraca do porządku logicznego."""
+    from horreum.gui import grid as grid_mod
+    view.apply_perspective(grid_mod.PRESET_STACK_VERSIONS)
+    m, h = view.model, view.table.horizontalHeader()
+    assert m._version_col() == len(grid_mod.BASE_COLS)
+    assert h.logicalIndex(0) == 0 and h.logicalIndex(1) == m._version_col()
+    m.set_preview({101: {"keyword": "OBJECT", "old": "a", "new": "b", "op": "set"}})
+    try:
+        assert h.logicalIndex(1) == m._version_col(), "zmiana liczby kolumn nie gubi układu"
+    finally:
+        m.set_preview({})
+    view.apply_perspective("Przegląd")
+    assert [h.logicalIndex(i) for i in range(h.count())] == list(range(h.count()))
+
+
+def test_sciezka_w_wersjach_elidowana_w_srodku(view):
+    """Wersje pary różnią się OGONEM nazwy (`…_mono.xisf` wobec `…_mono_OBIEKT-…_WBPP_20260124.xisf`,
+    zmierzone na kopii archiwum), więc ścieżka w tej perspektywie traci środek, nie koniec - wspólny
+    mechanizm kolumn z treści (`kolumna_z_tresci`). Poza perspektywą elizja wraca do domyślnej."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QStyleOptionViewItem
+    from horreum.gui import grid as grid_mod
+    view.apply_perspective(grid_mod.PRESET_STACK_VERSIONS)
+    m = view.model
+    kol = m.base_col("path")
+    delegat = view.table.itemDelegateForColumn(kol)
+    assert delegat is not None
+    wiersz = next(i for i, r in enumerate(m._rows) if "_group" not in r)
+    opcja = QStyleOptionViewItem()
+    delegat.initStyleOption(opcja, m.index(wiersz, kol))
+    assert opcja.textElideMode == Qt.ElideMiddle
+    assert view.table.columnWidth(kol) <= grid_mod._SUFIT_KOLUMNY_Z_TRESCI
+    view.apply_perspective("Przegląd")
+    assert view.table.itemDelegateForColumn(m.base_col("path")) is None

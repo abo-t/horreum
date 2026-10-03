@@ -52,6 +52,7 @@ import json
 import os
 import sqlite3
 import sys
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 # pakiet horreum z korzenia repo (skrypt leży w scripts/)
@@ -65,9 +66,12 @@ from horreum.audit import (config_review_reason_gap, config_source_invariants,  
 from horreum.calibration import KIND_RECIPE, run_calibration      # noqa: E402
 from horreum.lineage import run_lineage                           # noqa: E402
 from horreum.grouper import NO_TELESCOPE_KINDS, run_grouper       # noqa: E402
+from horreum.gui.queries import nameless_frames                   # noqa: E402  (Qt-wolne)
 from horreum.import_fitsmirror import (                                   # noqa: E402
-    ImportAbort, open_donor, read_repaired_registry, run_import,
+    ImportAbort, donor_header, open_donor, read_repaired_registry, run_import,
 )
+from horreum.resolve.headers import extract_header                # noqa: E402
+from horreum.resolve.regions import resolve_region                # noqa: E402
 from horreum.resolver import (                                    # noqa: E402
     NO_OBJECT_CARD_FILETYPES, delta_report, run_resolver)
 from horreum.scan import canonize_root, scan_stacks, scan_tree    # noqa: E402
@@ -179,8 +183,21 @@ EXP_LINEAGE_FLAT = 11938       # lighty z masterflatem (reszta: 1455 brak przepi
 # dawca niesie 108 lightów bez karty, z czego region rozwiązuje 83.
 EXP_NAMELESS_IMPORT = 25       # ZMIERZONE przebiegiem IMPORT 2026-08-01 (`--donor` + `--live-db`),
 # nie policzone z rachunku: dawca niesie 108 lightów bez karty `OBJECT`, region rozwiązuje 83,
-# zostaje 25. Liczba jest STABILNA także po naprawie plików na `R:` — baza importu powstaje
-# z ZAMROŻONEGO dawcy, którego zeznanie naprawa nie dotyka.
+# zostaje 25. Sonda RO dawcy 2026-10-03 potwierdza: te same 25, wszystkie w podgrupie
+# późno-naprawianej (`import_fitsmirror._late_repaired`, 6605 ścieżek).
+#
+# AR-49 (wariant O2, 2026-10-03): KOTWICA LICZY ZEZNANIE DAWCY, NIE STAN BAZY. Baza importu NIE jest
+# w całości zeznaniem dawcy: gdy falsyfikator trafi w późno-naprawiany plik o faktach kopii
+# zmienionych na dysku, CAŁA podgrupa późno-naprawiana wchodzi zeznaniem DYSKU (`Preflight.recompute`).
+# Po wsadzie kart `OBJECT` na `R:` (7412 plików) celowana część próbki (`NGC3034 RC8 Ha`) miała
+# zmienione fakty kopii, podgrupa przeliczyła się z dysku, a 25 klatek dostało nazwę z karty - stan
+# bazy dał 0 IDENTYCZNIE kodem `e45a3c4` i `cf1911d`. Przy częściowo przepisanym `R:` wynik
+# zależałby dodatkowo od ZIARNA: każdy z 5 losowych plików trafia w podgrupę z szansą ~42%
+# (6605 z 15 559). Stąd `nameless_split`: lighty spoza podgrupy liczone ze stanu (ich zeznaniem JEST
+# dawca), lighty podgrupy - z zeznania dawcy (`import_fitsmirror.donor_header`) tym samym kryterium
+# co resolver dla klatki bez `object_raw` (region po współrzędnych). Kotwica łapie zmianę W DAWCY
+# niezależnie od stanu `R:` i od ziarna; podgrupa przeliczona dostaje OSOBNĄ, raportowaną liczbę
+# (bez kotwicy - jej wartość zależy od tego, czy przeliczenie w ogóle zaszło, i od stanu dysku).
 EXP_NAMELESS_FULL = 25         # ZMIERZONE po pilocie P-D na `R:` (2026-08-01), przebieg
 # `--xisf-root R:\ASTRO_ --live-db`. **Przesłanka briefu §6 pkt 9 („po naprawie padnie na 0")
 # OKAZAŁA SIĘ FAŁSZYWA i to jest tu udokumentowane, żeby nikt nie „poprawił" tej liczby z powrotem
@@ -188,9 +205,11 @@ EXP_NAMELESS_FULL = 25         # ZMIERZONE po pilocie P-D na `R:` (2026-08-01), 
 # `header_hash`) z ZAMROŻONEGO dawcy — więc brama przyrostowa doskanu widzi `mtime` równy i pomija
 # plik. Dowód: lokacja 4581 ma w bazie akceptacji `mtime` PO naprawie i `file_sha1` SPRZED niej,
 # a jej dziennik nie zawiera ani jednego `location.refreshed` (same trzy zdarzenia `import:fitsmirror`).
-# FULL nie ma więc jak zobaczyć naprawy na `R:` — jego 25 to ta sama populacja dawcy, co w IMPORT,
-# i z tego samego powodu jest stabilna. Zadaniem obu kotwic jest łapać ZMIANĘ W DAWCY; nawrotu na
-# ŻYWEJ bazie pilnuje `object_nameless` w raporcie dostawy (inna rola — patrz §6 pkt 9 briefu).
+# Doskan nie widzi więc naprawy na `R:`; widzi ją wyłącznie podgrupa przeliczona w imporcie - i tę
+# kotwica od AR-49 liczy zeznaniem dawcy, jak w IMPORT. FULL = te same 25 z dawcy + lighty
+# wciągnięte doskanem bez nazwy (dziś 0; ta część stoi na ŻYWYM drzewie, jak tor RAW). Zadaniem obu
+# kotwic jest łapać ZMIANĘ W DAWCY; nawrotu na ŻYWEJ bazie pilnuje `object_nameless` w raporcie
+# dostawy (inna rola - patrz §6 pkt 9 briefu).
 EXP_NAMELESS_RAW_FULL = 756    # lighty w formacie bez karty `OBJECT` (`resolver.NO_OBJECT_CARD_
 # FILETYPES`). Zmierzone: KAŻDY RAW-light jest bez `object_raw`, ZERO wyjątków — EXIF nie zna tego
 # pola. Osobna kotwica, bo osobna droga naprawy (ręka, nie karta); zlanie z 25 sprawiło, że liczba
@@ -270,7 +289,8 @@ def _ok(cond):
 # ── (I) IMPORT: dawca LIVE → świeża baza przez realny pipeline PF-3 ───────────────────────────────
 def build_import(donor_path, work_path, now, out, live_db=None):
     """Zbuduj świeżą horreum.db z dawcy LIVE przez `run_import` (jedna klinga; §4.6 gate'y w środku).
-    Dawca RO (`open_donor`). Zwraca (con, ImportSummary). Twarde złamanie → ImportAbort propaguje.
+    Dawca RO (`open_donor`). Zwraca (con, ImportSummary, zeznanie dawcy podgrupy przeliczonej -
+    `donor_object_testimony`). Twarde złamanie → ImportAbort propaguje.
 
     `live_db` (opcja `--live-db`) = ŻYWA baza Horreum, z której bierzemy rejestr napraw
     (D-0722-2 wariant A). Bez niego falsyfikator czyta pliki naprawione przez Horreum jako
@@ -287,6 +307,7 @@ def build_import(donor_path, work_path, now, out, live_db=None):
         con = db.open_db(work_path)
         con.execute("PRAGMA synchronous=OFF")          # baza JEDNORAZOWA — wolno przyspieszyć
         summary = run_import(donor, con, now=now, repaired_paths=repaired)
+        testimony = donor_object_testimony(donor, summary.preflight.recompute)
     finally:
         donor.close()
     pf = summary.preflight
@@ -299,7 +320,77 @@ def build_import(donor_path, work_path, now, out, live_db=None):
     out(f"  grouper: {summary.group}")
     out(f"  resolver: {summary.resolve}")
     out(f"  bramki §4.6: {'WSZYSTKIE PASS' if not summary.gate_failures else summary.gate_failures}")
-    return con, summary
+    return con, summary, testimony
+
+
+# ── §5.7b: kotwica nawrotu P-D na ZEZNANIU DAWCY (AR-49, wariant O2) ─────────────────────────────
+def donor_object_testimony(donor, paths):
+    """Zeznanie DAWCY o obiekcie dla ścieżek podgrupy przeliczonej z dysku: `{path: (object_raw,
+    ra_deg, dec_deg)}`, pola gorące tą samą derywacją co `header` w bazie (`extract_header` na
+    syntezie `donor_header`). Czytane, dopóki dawca jest otwarty - po imporcie baza o tych plikach
+    zna już tylko zeznanie dysku. Ścieżka spoza dawcy = złamany kontrakt `preflight` (EXPECT)."""
+    out = {}
+    for path in sorted(paths):
+        header = donor_header(donor, path)
+        if header is None:
+            raise RuntimeError(f"podgrupa przeliczona poza dawca: {path} - kontrakt preflight zlamany")
+        hot = extract_header(header)
+        out[path] = (hot["object_raw"], hot["ra_deg"], hot["dec_deg"])
+    return out
+
+
+@dataclass
+class NamelessSplit:
+    """Lighty bez nazwy rozdzielone wg ŹRÓDŁA zeznania. `anchor` = `outside` + `recomputed_donor`."""
+    anchor: int = 0             # bez nazwy wg zeznania dawcy (FULL: + wciągnięte doskanem)
+    outside: int = 0            # bez nazwy wśród klatek bez kopii przeliczonej (stan bazy)
+    recomputed_lights: int = 0  # lighty (w predykacie formatu) z kopią przeliczoną z dysku
+    recomputed_donor: int = 0   # …z nich bez nazwy wg zeznania DAWCY
+    recomputed_disk: int = 0    # …z nich bez nazwy wg zeznania DYSKU (stan bazy)
+    mismatch: list = field(default_factory=list)   # frame_id: werdykt dawcy != potoku przy tym samym zeznaniu
+
+
+def nameless_split(con, testimony):
+    """Policz kotwicę §5.7b na zeznaniu DAWCY, niezależnie od tego, czy i co przeliczono z dysku.
+
+    Klatka bez kopii przeliczonej ma w bazie zeznanie dawcy (albo doskanu w FULL), więc o niej
+    rozstrzyga stan: `gui.queries.nameless_frames` (oba człony - ten sam predykat co
+    `resolver.nameless_lights`). Klatka z kopią przeliczoną ma w bazie zeznanie DYSKU, więc o niej
+    rozstrzyga zeznanie dawcy: bez `object_raw` i bez regionu po współrzędnych = bez nazwy. To jest
+    całe kryterium resolvera dla takiej klatki - drabina nazw milczy przy braku nazwy, alias też,
+    a na świeżej bazie nie ma źródeł ręki. Zakres formatu/rodzaju/zastąpienia bierzemy ze stanu
+    (te fakty wsad kart nie zmienia), żeby nie budować drugiej derywacji rodzaju klatki.
+
+    `mismatch` pinuje tę derywację do potoku: tam, gdzie zeznanie dysku o obiekcie i współrzędnych
+    jest RÓWNE zeznaniu dawcy, werdykt dawcy musi być werdyktem bazy. Rozjazd = derywacja tu
+    odjechała od resolvera i kotwica przestała mierzyć to, co mierzy stan."""
+    s = NamelessSplit()
+    nameless = {r["frame_id"] for r in nameless_frames(con)}
+    nameless |= {r["frame_id"] for r in nameless_frames(con, cleared=True)}
+    skip = frozenset(NO_OBJECT_CARD_FILETYPES)
+    recomputed = {}                                 # frame_id -> (wiersz, ścieżka przeliczona)
+    for r in con.execute(
+            "SELECT f.id AS fid, f.kind, f.filetype, f.superseded_by, f.retired_at, "
+            "h.frame_id AS hid, h.object_raw, h.ra_deg, h.dec_deg, l.path "
+            "FROM location l JOIN frame f ON f.id = l.frame_id "
+            "LEFT JOIN header h ON h.frame_id = f.id ORDER BY l.path"):
+        if r["path"] in testimony:
+            recomputed.setdefault(r["fid"], r)
+    s.outside = len(nameless - set(recomputed))
+    for fid, r in recomputed.items():
+        if (r["kind"] != "light" or (r["filetype"] or "") in skip or r["hid"] is None
+                or r["superseded_by"] is not None or r["retired_at"] is not None):
+            continue
+        s.recomputed_lights += 1
+        obj, ra, dec = testimony[r["path"]]
+        donor_nameless = obj is None and resolve_region(ra, dec) is None
+        s.recomputed_donor += donor_nameless
+        s.recomputed_disk += fid in nameless
+        if (obj, ra, dec) == (r["object_raw"], r["ra_deg"], r["dec_deg"]) \
+                and donor_nameless != (fid in nameless):
+            s.mismatch.append(fid)
+    s.anchor = s.outside + s.recomputed_donor
+    return s
 
 
 # ── (X) XISF-DOSKAN: realny scan_tree po drzewie z XISF (odtwarza PF-4) ──────────────────────────
@@ -472,7 +563,14 @@ def stack_lineage(con, now, out):
 # ── (C) KRYTERIA §5 na bazie zbudowanej z dawcy (stage-aware: import vs full) ─────────────────────
 def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, lin_idempotent=None,
                    stacks=None, stacks_idempotent=None, slin=None, slin_idempotent=None,
-                   slin_kept=None):
+                   slin_kept=None, donor_testimony=None):
+    """`donor_testimony` = `donor_object_testimony` podgrupy przeliczonej (z `build_import`); musi
+    pokrywać `summary.preflight.recompute` co do ścieżki - inaczej kotwica §5.7b liczyłaby część
+    podgrupy zeznaniem dysku (EXPECT, nie cicha degradacja)."""
+    donor_testimony = donor_testimony or {}
+    if set(donor_testimony) != set(summary.preflight.recompute):
+        raise RuntimeError("check_criteria: zeznanie dawcy nie pokrywa podgrupy przeliczonej "
+                           f"({len(donor_testimony)} != {len(summary.preflight.recompute)})")
     results = []                                    # (etykieta, PASS/FAIL)
 
     def crit(label, cond):
@@ -690,17 +788,26 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
          f"({closure.counted} == {closure.total})", closure.ok)
 
     # §5.7b kotwica nawrotu P-D — lighty bez `object_raw` (poza mianownikiem procentu wyżej).
+    # Od AR-49 kotwica stoi na ZEZNANIU DAWCY (`nameless_split`), nie na stanie bazy: podgrupa
+    # przeliczona z dysku niesie stan `R:` i zależy od próbki falsyfikatora, więc idzie OSOBNĄ
+    # liczbą - raportem, nie kotwicą (jej wartość mówi, ile naprawił dysk, nie co zeznał dawca).
     # Dopóki kotwica nie jest zmierzona (None), pozycja RAPORTUJE liczbę i nie zapala bramki:
     # zaszycie liczby wziętej z rachunku zamiast z przebiegu byłoby dokładnie tym błędem,
     # który ta kotwica ma łapać.
     exp_nameless = EXP_NAMELESS_FULL if full else EXP_NAMELESS_IMPORT
-    out(f"\n§5.7b bez nazwy w nagłówku (light/master_light): {rep.object_nameless}")
+    ns = nameless_split(con, donor_testimony)
+    out(f"\n§5.7b bez nazwy w nagłówku (light): wg zeznania dawcy {ns.anchor}; "
+        f"stan bazy {rep.object_nameless}")
+    out(f"    podgrupa przeliczona z dysku: {len(donor_testimony)} plików, lightów {ns.recomputed_lights}; "
+        f"bez nazwy wg dawcy {ns.recomputed_donor}, wg dysku {ns.recomputed_disk} (raport, bez kotwicy)")
     if exp_nameless is None:
         out(f"    (kotwica NIEZMIERZONA dla trybu {'FULL' if full else 'IMPORT'} — "
             f"zaszyj EXP_NAMELESS_* po tym przebiegu)")
     else:
-        crit(f"§5.7b object_nameless == {exp_nameless} (akt={rep.object_nameless})",
-             rep.object_nameless == exp_nameless)
+        crit(f"§5.7b bez nazwy wg zeznania dawcy == {exp_nameless} (akt={ns.anchor})",
+             ns.anchor == exp_nameless)
+    crit(f"§5.7b derywacja zeznania dawcy zgodna z potokiem przy niezmienionym zeznaniu obiektu "
+         f"(rozjazdy={len(ns.mismatch)})", not ns.mismatch)
     # Bliźniacza populacja po drugiej stronie FORMATU: klatki, które nie mają JAK zeznać o obiekcie.
     # Liczona zawsze, pilnowana tylko w FULL — dawca jest FITS-only, więc w IMPORT jest z definicji 0
     # i osobne kryterium byłoby pustym rytuałem.
@@ -1146,7 +1253,7 @@ def main(argv=None):
         return 2
 
     try:
-        con, summary = build_import(args.donor, work, now, out, live_db=args.live_db)
+        con, summary, testimony = build_import(args.donor, work, now, out, live_db=args.live_db)
     except ImportAbort as exc:
         out(f"\nACCEPTANCE ABORT (import z dawcy nie przeszedł): {exc}")
         return 1
@@ -1168,7 +1275,8 @@ def main(argv=None):
     results = check_criteria(con, summary, out, cal=cal, cal_idempotent=cal_idem,
                              lin=lin, lin_idempotent=lin_idem,
                              stacks=stacks, stacks_idempotent=stacks_idem,
-                             slin=slin, slin_idempotent=slin_idem, slin_kept=slin_kept)
+                             slin=slin, slin_idempotent=slin_idem, slin_kept=slin_kept,
+                             donor_testimony=testimony)
     con.close()
 
     subset_ok = True

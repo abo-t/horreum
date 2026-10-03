@@ -23,7 +23,9 @@ którym rdzeń tnie pulę), a liczbę schowanych podaje nota nagłówka. Bez fil
 PORZĄDEK RDZENIA JEST DOMYŚLNY, SORT SOCZEWKI ŻYJE W WIDOKU (D-T4-c): `targets._sort_key` (człony
 firsthandu T3 + kubełek kadru PL-1 liczony dla `best_rig`) jest JEDYNYM kluczem rady - ekran go nie
 powtarza, tylko oddaje wiersze w kolejności rdzenia, więc GUI i `horreum plan` mówią tym samym
-porządkiem. Soczewka chipa kubełka NIE przelicza. `order=ORDER_LENS` przestawia GOTOWE
+porządkiem. Pod chipem zestawu (PL-3 (1), O1) widok podmienia w porządku rady sam kubełek kadru na
+kubełek SOCZEWKI (`_core_lens_key`) - stabilnie, więc reszta zostaje rdzenia; bez chipa nic się
+nie przestawia. `order=ORDER_LENS` przestawia GOTOWE
 wiersze — to prezentacja, tak jak sam chip; rdzeń nadal oddaje jedną, deterministyczną kolejność,
 a CLI (`horreum plan`) o istnieniu tego porządku nie wie i wiedzieć nie musi.
 """
@@ -127,16 +129,39 @@ def lens_hidden(result, rig_name=None):
 
 
 def view_rows(result, rig_name=None, order=ORDER_CORE):
-    """`PlanResult` → krotka `ViewRow`. `order=ORDER_CORE` (domyślnie) zachowuje porządek rdzenia;
+    """`PlanResult` → krotka `ViewRow`. `order=ORDER_CORE` (domyślnie) zachowuje porządek rdzenia,
+    a pod chipem zestawu przelicza w nim kubełek kadru dla soczewki (patrz `_core_lens_key`);
     `ORDER_LENS` przestawia wiersze WEDŁUG KADROWANIA w soczewce (patrz `_lens_key`). Włączony
     filtr kadru chowa wiersze, których soczewka nie spełnia (`lens_fits`)."""
     rows = tuple(_view_row(r, result, rig_name) for r in result.rows
                  if lens_fits(r, result, rig_name))
     if order != ORDER_LENS:
-        return rows
+        if rig_name is None:
+            return rows
+        return tuple(sorted(rows, key=lambda v: _core_lens_key(v, result, rig_name)))
     # `sorted` jest STABILNY, więc remis (ten sam kadr, to samo wypełnienie) zostaje rozstrzygnięty
     # porządkiem rdzenia — dwa przebiegi dają ten sam plik i nie ma tu drugiego klucza do utrzymania.
     return tuple(sorted(rows, key=lambda v: _lens_key(v, result, rig_name)))
+
+
+# Ile członów `targets._sort_key` stoi PRZED kubełkiem kadru (widoczny, ma-lukę). Widok bierze je
+# z klucza rdzenia, nie przepisuje - zmiana układu klucza wychodzi testem, nie cichym rozjazdem.
+_CORE_PREFIX = 2
+
+
+def _core_lens_key(view_row, result, rig_name):
+    """Porządek rady POD CHIPEM ZESTAWU (PL-3 (1), O1): kubełek kadru liczony dla SOCZEWKI, nie dla
+    `best_rig`. Bez tego cel dobry na RC8 stał w chipie A140R wysoko z „9%" w kolumnie „Wypełn." -
+    klucz i komórka mówiły o dwóch różnych zestawach.
+
+    Sort WTÓRNY po gotowych wierszach (D-T4-c dopuszcza przestawienie w widoku, nie w rdzeniu):
+    człony przed kubełkiem (widoczny, ma-lukę) biorę z `targets._sort_key`, żeby cel pod horyzontem
+    nie wyskoczył nad widoczny tylko dlatego, że pasuje w kadr; kubełek to `targets._fill_bucket`
+    (ta sama funkcja co rdzeń - SIN-DUP), dla celu bez kadrowania w soczewce = 3, czyli koniec.
+    Resztę (koszt, okno, wysokość, kanon) rozstrzyga stabilność `sorted` - remis zostaje w kolejności
+    rdzenia. Bez chipa ta funkcja nie jest wołana: ekran == `horreum plan`."""
+    _rig, fr = lens(view_row.source, result, rig_name)
+    return T._sort_key(view_row.source)[:_CORE_PREFIX] + (T._fill_bucket(fr),)
 
 
 def _lens_key(view_row, result, rig_name):

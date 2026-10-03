@@ -194,8 +194,8 @@ class Framing:
 
     DWIE MIARY WYPEŁNIENIA, KAŻDA Z JEDNYM ZADANIEM:
     - `fill` = rozmiar / KRÓTSZY bok kadru, bez cięcia: klucz wyboru `best_rig` i porządku
-      „po soczewce". Zostaje surowy, bo zmiana tej miary przestawiłaby ranking zestawów, a o członie
-      rankingu decyduje właściciel (PL-1). Przy `panels == 1` potrafi przekroczyć 1 (cel 90' na
+      „po soczewce". Zostaje surowy, bo zmiana tej miary przestawiłaby wybór zestawów - to osobna
+      decyzja (dług PL-3, człon 2), nie skutek uboczny. Przy `panels == 1` potrafi przekroczyć 1 (cel 90' na
       kadrze 103'x69' ma `fill` 1,30 i mieści się w jednym kadrze), dlatego NIE jest miarą dla
       człowieka ani progu.
     - `frame_fill` = WYPEŁNIENIE KADRU (PL-1), 0..1: większy z ilorazów `oś dłuższa / dłuższy bok`

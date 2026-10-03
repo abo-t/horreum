@@ -261,9 +261,9 @@ def main(argv=None):
                           help="spis faktow zapisanych REKA (obiekt/config/rodowod/kalibracja); "
                                "--baseline porownuje i zglasza UBYTKI kodem wyjscia")
     p_hf.add_argument("db", help="ścieżka pliku bazy")
-    # JSON na STDOUT, nie `--save do pliku`: mutacja plików ma w tym pakiecie DWOJE drzwi
-    # (`writeback`, `projection`) i pilnuje ich meta-tripwir AST — wygoda jednej flagi nie jest
-    # warta wyłomu. Odniesienie robi się przekierowaniem: `... --json > przed.json`.
+    # JSON na STDOUT, nie `--save do pliku`: mutacja plików ma w tym pakiecie wąskie drzwi
+    # (`DOORS` w `tests/test_writeback_safety.py`) i pilnuje ich meta-tripwir AST - wygoda jednej
+    # flagi nie jest warta wyłomu. Odniesienie robi się przekierowaniem: `... --json > przed.json`.
     p_hf.add_argument("--json", action="store_true",
                       help="wypisz sam spis jako JSON (do przekierowania: > przed.json)")
     p_hf.add_argument("--baseline", help="plik JSON ze spisem SPRZED etapu; ubytek → kod wyjścia 1")

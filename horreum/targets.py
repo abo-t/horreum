@@ -740,7 +740,9 @@ def _sort_key(row):
     KUBEŁEK KADRU (PL-1, R2, `_fill_bucket`) stoi po luce, przed kosztem: zgłoszenie Zdzinia
     2026-09-27 - `Sh2-85` (ok. 9 % kadru A140R) stał w szóstce, bo wypełnienie nie wchodziło do
     klucza. Liczony dla `best_rig` (jak kolumna „Wypełn."), nie dla soczewki ekranu: jeden klucz
-    rdzenia daje tę samą kolejność w `horreum plan` i w GUI. Kubełki, nie ciągła miara - wewnątrz
+    rdzenia daje tę samą kolejność w `horreum plan` i w GUI bez chipa zestawu. Pod chipem widok
+    podmienia ten człon na kubełek soczewki sortem wtórnym (`planner_model._core_lens_key`, PL-3 (1)),
+    rdzeń zostaje nietknięty. Kubełki, nie ciągła miara - wewnątrz
     kubełka nadal rządzi Księżyc i niebo, wypełnienie nie wypycha tańszej nocy.
 
     Cel domknięty nie ma prawa wygrywać z czekającym - bez rekomendacji bierzemy MAKSIMUM kosztu."""

@@ -553,3 +553,87 @@ def test_run_import_degeneracja_uncomputable(tmp_path):
         "JOIN location l ON l.frame_id = f.id WHERE l.path = ?", (str(p),)).fetchone()
     assert (row["sha1_data"], row["sha1_data_uncomputable"]) == (rec.file_sha1, 1)
     con.close()
+
+
+# ── AR-49 (O2): kotwica §5.7b `acceptance_s5` liczy ZEZNANIE DAWCY, nie stan bazy ────────────────
+# Light bez karty `OBJECT` i bez współrzędnych - region milczy, więc resolver zostawia go bez nazwy.
+L_BEZ_NAZWY = [kv for kv in L_RC8_MM if kv[0] != "OBJECT"]
+
+
+def _acceptance():
+    """Moduł `scripts/acceptance_s5.py` (skrypt, nie pakiet) - ładowany z pliku."""
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "scripts", "acceptance_s5.py")
+    spec = importlib.util.spec_from_file_location("acceptance_s5_ar49", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _kotwica_po_wsadzie(tmp_path, specs, late_rels, karta_na_dysku):
+    """Dawca z podgrupą późno-naprawianą (`late_rels`), a na dysku - jak po wsadzie - karta
+    `OBJECT` dopisana plikom `karta_na_dysku`. Falsyfikator trafia je celowaną próbką, więc cała
+    podgrupa wchodzi zeznaniem DYSKU. Zwraca (summary, NamelessSplit, nameless_lights stanu)."""
+    from horreum.resolver import nameless_lights
+    acc = _acceptance()
+    donor_path, files = _mk_donor(tmp_path, specs)
+    dcon = sqlite3.connect(str(donor_path))
+    dcon.execute("INSERT INTO commits(run_id, applied_at, summary) VALUES ('r1', ?, 's')",
+                 ("2026-07-01T00:00:00+00:00",))            # applied_at > SCANNED_AT
+    for rel in late_rels:
+        dcon.execute("INSERT INTO header_backups(commit_id, file_id, hdu_index, header_text, "
+                     "post_hash) VALUES (1, ?, 0, 'x', 'y')", (files[rel][1],))
+    dcon.commit()
+    dcon.close()
+    for rel in karta_na_dysku:
+        fits.setval(str(files[rel][0]), "OBJECT", value="M31")   # wsad kart PO zeznaniu dawcy
+    donor = open_donor(str(donor_path))
+    con = db.open_db(str(tmp_path / "horreum.db"))
+    try:
+        s = run_import(donor, con, now=NOW, rng_seed=1)
+        testimony = acc.donor_object_testimony(donor, s.preflight.recompute)
+        return s, acc.nameless_split(con, testimony), nameless_lights(con)
+    finally:
+        con.close()
+        donor.close()
+
+
+_NAPRAWIONY = os.path.join("LIGHTS", "bez_nazwy_1.fits")
+_NIETKNIETY = os.path.join("LIGHTS", "bez_nazwy_2.fits")
+SPECS_AR49 = SPECS + [(_NAPRAWIONY, L_BEZ_NAZWY, 21), (_NIETKNIETY, L_BEZ_NAZWY, 22)]
+
+
+def test_kotwica_nameless_liczy_zeznanie_dawcy_mimo_przeliczenia(tmp_path):
+    """Wsad dopisał kartę jednemu z dwóch późno-naprawianych lightów bez nazwy: podgrupa wchodzi
+    zeznaniem dysku i STAN bazy spada do 1, a kotwica (zeznanie dawcy) zostaje przy 2. Podgrupa
+    ma osobną liczbę (dawca 2, dysk 1), a plik nietknięty pinuje derywację do potoku (zero
+    rozjazdów przy tym samym zeznaniu obiektu)."""
+    s, ns, stan = _kotwica_po_wsadzie(tmp_path, SPECS_AR49, [_NAPRAWIONY, _NIETKNIETY],
+                                      [_NAPRAWIONY])
+    assert s.recomputed == 2 and s.gate_failures == []
+    assert stan == 1                                    # stan bazy widzi naprawę z dysku
+    assert ns.anchor == 2                               # kotwica widzi dawcę
+    assert (ns.outside, ns.recomputed_lights, ns.recomputed_donor, ns.recomputed_disk) == (0, 2, 2, 1)
+    assert ns.mismatch == []
+
+
+def test_kotwica_nameless_czerwienieje_na_zmianie_w_dawcy(tmp_path):
+    """FALSYFIKATOR O2: ten sam stan dysku, ale w DAWCY jeszcze jedna klatka traci `OBJECT` -
+    kotwica rośnie o 1 (2 → 3), więc bramka z `EXP == 2` czerwienieje. Zmiana poza podgrupą
+    przeliczoną idzie stanem bazy (`outside`), bo tam zeznaniem JEST dawca."""
+    zmieniony = [(rel, L_BEZ_NAZWY if rel == os.path.join("LIGHTS", "m31_2.fits") else cards, seed)
+                 for rel, cards, seed in SPECS_AR49]
+    s, ns, _stan = _kotwica_po_wsadzie(tmp_path, zmieniony, [_NAPRAWIONY, _NIETKNIETY],
+                                       [_NAPRAWIONY])
+    assert s.recomputed == 2
+    assert ns.anchor == 3 and ns.outside == 1
+    assert ns.mismatch == []
+
+
+def test_kotwica_nameless_bez_przeliczenia_rowna_stanowi(tmp_path):
+    """Bez rozjazdu na dysku nic nie jest przeliczane: kotwica = stan bazy (zeznanie dawcy
+    w całości), czyli O2 nie zmienia liczby tam, gdzie stary rachunek mówił prawdę."""
+    s, ns, stan = _kotwica_po_wsadzie(tmp_path, SPECS_AR49, [_NAPRAWIONY, _NIETKNIETY], [])
+    assert s.recomputed == 0
+    assert ns.anchor == stan == 2 and ns.recomputed_lights == 0

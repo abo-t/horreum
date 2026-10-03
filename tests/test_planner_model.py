@@ -28,28 +28,54 @@ def res(con):
 
 # ─────────────────────────────────────────────────────────── chip = soczewka, nie filtr
 
-def test_chip_niczego_nie_ukrywa_i_nie_przestawia(res):
+def test_chip_niczego_nie_ukrywa(res):
     """D-0731-13: chip zmienia SPOJRZENIE, nie zbiór. Zmierzone na kopii żywej pf4: `framing`
     ma wpis dla KAŻDEGO zestawu w KAŻDYM wierszu, więc „filtr po obecności w framing" nie wyciąłby
-    nic — a ukrywanie wierszy łamałoby regułę „wyceniaj, nie wycinaj"."""
-    base = pm.view_rows(res)
+    nic - a ukrywanie wierszy łamałoby regułę „wyceniaj, nie wycinaj". Porządek pod chipem pilnuje
+    `test_chip_liczy_kubelek_kadru_dla_soczewki` (PL-3 (1))."""
+    base = sorted(v.canon for v in pm.view_rows(res))
     for telescope in pm.rig_choices(res):
-        lensed = pm.view_rows(res, telescope)
-        assert len(lensed) == len(base)
-        assert [v.canon for v in lensed] == [v.canon for v in base]      # porządek = rdzeń
+        assert sorted(v.canon for v in pm.view_rows(res, telescope)) == base
 
 
 def test_porzadek_ekranu_to_klucz_rdzenia_z_kubelkiem_kadru(res):
     """PL-1 R2: ekran (porządek rady) i `horreum plan` mają JEDEN klucz - `targets._sort_key`
-    z kubełkiem kadru `best_rig`. Widok oddaje wiersze rdzenia bez przestawiania, także pod chipem
-    (soczewka kubełka nie przelicza), a w obrębie tej samej widoczności i luki kubełek nie maleje."""
+    z kubełkiem kadru `best_rig`. Bez chipa widok oddaje wiersze rdzenia bez przestawiania, a w obrębie
+    tej samej widoczności i luki kubełek nie maleje."""
     core = [r.target.canon for r in res.rows]
-    for telescope in (None,) + pm.rig_choices(res):
-        assert [v.canon for v in pm.view_rows(res, telescope)] == core
+    assert [v.canon for v in pm.view_rows(res)] == core
     keys = [targets._sort_key(r) for r in res.rows]
     assert keys == sorted(keys)
     buckets = {targets._fill_bucket(r.framing_in(r.best_rig)) for r in res.rows}
     assert len(buckets) > 1, "fixture z jednym kubełkiem - test straciłby sens"
+
+
+def test_chip_liczy_kubelek_kadru_dla_soczewki(res):
+    """PL-3 (1), O1: pod chipem zestawu porządek rady liczy kubełek kadru dla SOCZEWKI (ta sama
+    `targets._fill_bucket`), nie dla `best_rig` - inaczej cel dobry na innym zestawie stał wysoko
+    z małym „Wypełn." w komórce. Widoczność i luka zostają przed kubełkiem (cel pod horyzontem nie
+    przeskakuje widocznego), a remis w kubełku trzyma kolejność rdzenia (sort stabilny)."""
+    core_pos = {r.target.canon: i for i, r in enumerate(res.rows)}
+    moved = 0
+    for telescope in pm.rig_choices(res):
+        rows = pm.view_rows(res, telescope)
+        keys = []
+        for v in rows:
+            _rig, fr = pm.lens(v.source, res, telescope)
+            # Człony przed kubełkiem z JAWNYCH pól, nie z wycinka `_sort_key` - nowy człon wstawiony
+            # do klucza rdzenia przed kubełek przewraca ten test zamiast cicho przesunąć widok.
+            keys.append((not v.source.window.visible, 0 if v.source.coverage.gaps else 1,
+                         targets._fill_bucket(fr), core_pos[v.canon]))
+        assert keys == sorted(keys)
+        moved += [v.canon for v in rows] != [r.target.canon for r in res.rows]
+    assert moved, "fixture bez rozjazdu soczewki i best_rig - test straciłby sens"
+
+
+def test_chip_bez_kadrowania_zostawia_porzadek_rdzenia(res):
+    """Soczewka bez kadrowania dla żadnego celu (zestaw spoza wyniku) daje kubełek 3 wszędzie - remis
+    całej listy, więc sort wtórny oddaje porządek rdzenia bit w bit, nie przypadkową permutację."""
+    assert [v.canon for v in pm.view_rows(res, "brak-takiego")] == \
+        [r.target.canon for r in res.rows]
 
 
 def test_chipy_ida_w_porzadku_zestawow_po_lightach(res):
@@ -190,8 +216,8 @@ def res_fill(con):
 def test_kolumna_wypelnienia_idzie_za_soczewka(res):
     """Kolumna „Wypełnienie" czyta `frame_fill` TEGO zestawu, którym patrzy soczewka."""
     for telescope in (None,) + pm.rig_choices(res):
-        for row, v in zip(res.rows, pm.view_rows(res, telescope)):
-            _rig, fr = pm.lens(row, res, telescope)
+        for v in pm.view_rows(res, telescope):
+            _rig, fr = pm.lens(v.source, res, telescope)
             assert v.fill == pm.fill_text(fr) and v.fill.endswith("%")
     assert pm.fill_text(None) == "-"
 

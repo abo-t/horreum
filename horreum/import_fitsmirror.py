@@ -373,6 +373,20 @@ def _donor_cards(donor, file_id):
                 "FROM cards WHERE file_id = ? ORDER BY keyword, idx", (file_id,))]
 
 
+def donor_header(donor, path):
+    """Nagłówek pliku W ZEZNANIU DAWCY (dict jak `read_fits_header`) - ta sama synteza, którą
+    pętla `run_import` buduje rekord toru głównego. `None`, gdy dawca ścieżki nie zna.
+
+    Po co osobno: podgrupa przeliczana z dysku (`Preflight.recompute`) wchodzi do bazy zeznaniem
+    DYSKU, więc baza po imporcie nie mówi już, co o tych plikach zeznał dawca. Bramka, której
+    zadaniem jest łapać zmianę W DAWCY (`acceptance_s5` §5.7b), czyta to zeznanie stąd - jednym
+    właścicielem syntezy, a nie własną kopią zapytania o karty."""
+    row = donor.execute("SELECT id FROM files WHERE path = ?", (path,)).fetchone()
+    if row is None:
+        return None
+    return header_dict_from_cards(_donor_cards(donor, row["id"]))
+
+
 def _gates(con, summary, axes_seen):
     """Bramki liczbowe §4.6 — versus dawca W CHWILI importu, ze STANU, MINUS skipped.
     `axes_seen` = (telescopes, cameras, configs) zebrane z zeznań w pętli (niezależna derywacja

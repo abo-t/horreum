@@ -11,7 +11,10 @@ trafienia, a `write_text`/aliasy — dziury):
   goły `.replace` (str) / `.remove` (list) NIE jest mutacją pliku;
 - alias importu `from os import replace as ...` / `from io import open as ...` śledzony;
 - nazwy JEDNOZNACZNE łapane po gołym attr: `writeto`, `write_text`, `write_bytes`, `mkstemp`,
-  `NamedTemporaryFile`, `CreateFileW`, `open_osfhandle`, oraz `shutil.*`, `numpy.save`/`np.save`;
+  `NamedTemporaryFile`, `CreateFileW`, `open_osfhandle`, mutatory `pathlib` (`unlink`, `rmdir`,
+  `touch`, `symlink_to`, `hardlink_to`), oraz `shutil.*`, `numpy.save`/`np.save`;
+- `Path.rename`/`Path.replace` po arności (jeden argument pozycyjny, bez nazwanych) - `str.replace`
+  ma dwa, `dataclasses.replace` niesie nazwane;
 - `open(...)`, `Path.open(...)`, `io.open(...)`, `os.fdopen(...)` z trybem piszącym (w/a/x/+)
   ALBO z trybem NIE-literałem (dynamiczny tryb to furtka: `mode = "r+b"; open(p, mode)`);
   `fits.open` - tryby mutujące astropy.
@@ -26,9 +29,10 @@ import pytest
 import horreum
 
 PKG = Path(horreum.__file__).parent
-# Domy mutacji plików: `writeback.py` (druga klinga — nagłówki+rename, KROK 4) oraz `projection.py`
-# (trzecia klinga — link/kopia/katalog, KROK 6). Pętla pomija OBA (brief PLAN_projekcje §0).
-DOORS = {PKG / "writeback.py", PKG / "projection.py"}
+# Domy mutacji plików: `writeback.py` (druga klinga - nagłówki+rename, KROK 4), `projection.py`
+# (trzecia klinga - link/kopia/katalog, KROK 6) oraz `raport.py` (czwarte drzwi - katalog raportu
+# śladów i kopia klatki dla ASTAP, `MT-2`). Pętla pomija wszystkie (brief PLAN_projekcje §0).
+DOORS = {PKG / "writeback.py", PKG / "projection.py", PKG / "raport.py"}
 
 # os.<attr> — mutacje pliku (kwalifikowane przez moduł `os`, nie goły attr). `link`/`symlink`/`mkdir`/
 # `makedirs` doszły z projekcją (KROK 6): tworzenie linków/katalogów to mutacja filesystemu.
@@ -44,7 +48,13 @@ OS_MUTATORS = {"replace", "remove", "rename", "unlink", "rmdir", "removedirs", "
 # ctypes (blokada współdzielenia zapisu w miejscu) omija `open` w całości.
 BARE_MUTATORS = {"writeto", "write_text", "write_bytes", "mkstemp", "mkdtemp",
                  "NamedTemporaryFile", "TemporaryFile", "mkdir", "makedirs",
-                 "CreateFileW", "open_osfhandle"}
+                 "CreateFileW", "open_osfhandle",
+                 "unlink", "rmdir", "touch", "symlink_to", "hardlink_to"}
+# `Path.rename(cel)`/`Path.replace(cel)` - nazwy wspólne z `str.replace` i `dataclasses.replace`,
+# więc rozpoznawane po ARNOŚCI: dokładnie jeden argument pozycyjny i żadnego nazwanego. `str.replace`
+# ma zawsze co najmniej dwa pozycyjne, `dataclasses.replace`/`datetime.replace` niosą zmiany nazwane.
+# Rozpoznanie po typie odbiorcy (`Path(...)`, adnotacja) przepuściłoby `p.rename(q)` na zmiennej.
+PATH_RENAMERS = {"rename", "replace"}
 # moduły, których KAŻDE wywołanie mutujące łapiemy po `<mod>.<attr>`.
 MOD_MUTATORS = {"shutil": {"copy", "copy2", "copyfile", "move", "rmtree", "copytree"},
                 "np": {"save", "savez", "savetxt", "savez_compressed"},
@@ -106,6 +116,8 @@ def _file_mutators(tree, aliases):
                   and attr in MOD_MUTATORS[base.id]):
                 yield f"{base.id}.{attr}(...)"
             elif attr in BARE_MUTATORS:
+                yield f".{attr}(...)"
+            elif attr in PATH_RENAMERS and len(call.args) == 1 and not call.keywords:
                 yield f".{attr}(...)"
             elif attr == "open":
                 # `fits.open(path, mode)` - tryby astropy; `io.open(path, mode)` - jak `open`;
@@ -242,6 +254,73 @@ def test_klinga_projekcji_istnieje():
     assert any("os.link" in d for d in found), "projection.py nie zawiera os.link — klinga martwa"
 
 
+def _mutatory_po_funkcjach(tree):
+    """{nazwa węzła najwyższego poziomu: [opisy mutacji]} - tylko węzły z co najmniej jedną mutacją."""
+    aliases = _aliases(tree)
+    wynik = {}
+    for wezel in tree.body:
+        nazwa = wezel.name if isinstance(wezel, (ast.FunctionDef, ast.ClassDef)) else "<moduł>"
+        found = list(_file_mutators(wezel, aliases))
+        if found:
+            wynik.setdefault(nazwa, []).extend(found)
+    return wynik
+
+
+# Gdzie w czwartych drzwiach WOLNO mutować plik (`MT-2`): zakładanie katalogu, sprzątanie po
+# odmowie i zapis przez plik tymczasowy. Klasa `Raport` nie mutuje sama - każda jej ścieżka idzie
+# przez te funkcje po `Raport._cel`. Nowe miejsce mutacji przewraca test i wymaga dopisania tutaj.
+_RAPORT_MUTACJE = {
+    "_utworz_katalog": {"os.makedirs(...)"},
+    "_usun_pusty": {"os.rmdir(...)"},
+    "_zapisz_plik": {"open(..., <tryb pisania>)", "os.remove(...)", "os.rename(...)"},
+    "_usun_plik": {"os.remove(...)"},
+}
+
+
+def _mapa_mutacji(zrodlo):
+    """{funkcja najwyższego poziomu: zbiór opisów mutacji} - ta sama analiza dla żywego `raport.py`
+    i dla jego zmodyfikowanej kopii w teście negatywnym."""
+    return {k: set(v) for k, v in _mutatory_po_funkcjach(ast.parse(zrodlo)).items()}
+
+
+def test_klinga_raportu_istnieje_i_mutuje_tylko_w_dozwolonych_funkcjach():
+    """Czwarte drzwi (`MT-2`) mają ostrze (publikacja przez `os.rename` - bez nadpisania celu)
+    i W OBIE STRONY mutują wyłącznie w funkcjach z `_RAPORT_MUTACJE`; plik otwierają do zapisu tylko
+    jako NOWY (`xb`) - żadnego `w`/`a`/`+`, czyli żadnego nadpisania ani dopisania do istniejącego
+    pliku."""
+    zrodlo = (PKG / "raport.py").read_text(encoding="utf-8")
+    tree = ast.parse(zrodlo)
+    found = _mapa_mutacji(zrodlo)
+    assert found == _RAPORT_MUTACJE, found
+    tryby = {_tryb(c, 1) for _, c in _wywolania_w_funkcjach(tree)
+             if isinstance(c.func, ast.Name) and c.func.id == "open" and _mode_arg(c, 1) is not None}
+    assert tryby == {"xb", "rb"}, tryby
+
+
+def test_mutatory_po_funkcjach_widzi_metode_klasy():
+    """Negatywny dowód analizy wyżej: mutacja w metodzie klasy przypisana jest klasie, więc
+    `os.remove` dopisany wprost w `Raport` przewraca test drzwi."""
+    tree = ast.parse("class Raport:\n    def f(self, p):\n        os.remove(p)\n")
+    assert _mutatory_po_funkcjach(tree) == {"Raport": ["os.remove(...)"]}
+
+
+@pytest.mark.parametrize("cialo, opis", [
+    ("Path(p).unlink()", ".unlink(...)"),
+    ("Path(p).rename(q)", ".rename(...)"),
+    ("p.replace(q)", ".replace(...)"),
+    ("Path(p).rmdir()", ".rmdir(...)"),
+    ("Path(p).touch()", ".touch(...)"),
+    ("Path(p).write_text('x')", ".write_text(...)"),
+    ("Path(p).open('wb')", ".open(..., <tryb pisania>)"),
+])
+def test_mutacja_pathlib_w_nowej_funkcji_raportu_przewraca_bramke(cialo, opis):
+    """Negatywny dowód bramki drzwi raportu na KOPII żywego źródła w pamięci: mutacja `pathlib`
+    dopisana w osobnej funkcji zmienia mapę, więc `found == _RAPORT_MUTACJE` czerwienieje."""
+    zrodlo = (PKG / "raport.py").read_text(encoding="utf-8")
+    found = _mapa_mutacji(zrodlo + f"\n\ndef _wyciek(p, q):\n    {cialo}\n")
+    assert found != _RAPORT_MUTACJE and found["_wyciek"] == {opis}
+
+
 def test_dopasowanie_nie_lapie_str_list_methods():
     """Regresja fałszywych trafień (R#3): `str.replace`/`list.remove`, odczyt przez `open`/`Path.open`
     i `fits.open(..., mode="readonly")` NIE są mutacją pliku."""
@@ -251,7 +330,9 @@ def test_dopasowanie_nie_lapie_str_list_methods():
         "v = value.replace(\"''\", \"'\")\n"
         "fh = open(p, 'rb'); g = open(p)\n"
         "h = path.open('rb'); k = path.open()\n"
-        "fits.open(p, mode='readonly', memmap=False)\n")
+        "fits.open(p, mode='readonly', memmap=False)\n"
+        "d = dataclasses.replace(ident, alias_norm=None)\n"
+        "t = dt.replace(year=2020)\n")
     assert not list(_file_mutators(sample, _aliases(sample)))
 
 
@@ -277,4 +358,5 @@ def test_furtki_mutacji_sa_lapane(kod, opis):
 def test_wyjatek_po_dokladnej_sciezce_nie_po_nazwie():
     """Z8: zagnieżdżony moduł o nazwie klingi NIE jest klingą."""
     assert PKG / "gui" / "writeback.py" not in DOORS and PKG / "writeback.py" in DOORS
+    assert PKG / "gui" / "raport.py" not in DOORS and PKG / "raport.py" in DOORS
 

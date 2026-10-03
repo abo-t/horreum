@@ -1,8 +1,8 @@
 """ŚLADY NA SUBACH - rdzeń wyszukiwania meteorów, satelitów i samolotów (brief/PLAN_meteory.md §2).
 
 Czysty numpy (+ astropy do odczytu FITS): zero Qt, zero zapisu do bazy i do plików. Funkcje oddają
-struktury w pamięci; zapis (baza albo raport w katalogu) należy do wołającego - drzwi zapisu raportu
-są osobną decyzją (`MT-2`).
+struktury w pamięci; zapis (baza albo raport w katalogu) należy do wołającego - drzwi zapisu raportu:
+`horreum/raport.py` (`MT-2`).
 
 METODA (Gural 2008 przeniesiony z wideo na suby; zmierzona w bramce Q0, `scripts/meteor_q0.py`):
   reszta   = sub - mediana ±2 sąsiadów sekwencji (wyrównanych korelacją fazową, przesunięcie CAŁKOWITE

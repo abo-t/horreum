@@ -19,7 +19,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QSettings, QThread, Qt, Signal, Slot
 from PySide6.QtWidgets import (
-    QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QProgressBar, QPushButton,
+    QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QMessageBox, QProgressBar, QPushButton,
     QVBoxLayout, QWidget,
 )
 
@@ -241,13 +241,22 @@ class PipelineWorker(QObject):
         stoją do timeoutu sieci - w slocie okna zamrażały je. Korzeń, który nie jest osiągalnym
         katalogiem, wraca jako `source_unreachable` (okno pokazuje „źródło niedostępne" i drogę do
         wyboru katalogu) zamiast wyjątku z `canonize_root`, który dawał surowe „FileNotFoundError"
-        na czerwono i żadnej drogi dalej. Zwraca `PresenceSummary` albo `None` (korzeń niedostępny)."""
+        na czerwono i żadnej drogi dalej. Zwraca `PresenceSummary` albo `None` (korzeń niedostępny).
+
+        HAMULEC PROGOWY (AR-31 (6)): gest „Sprawdź obecność” niesie `confirm_under_brake`, więc DRY
+        liczy potwierdzenia mimo przekroczenia progu i okno ma LICZBĘ dla deklaracji `force`; zapis
+        z nią idzie tą samą drogą `presence-apply` (`force` i zbiór `expected_gone_ids` z zamrożonych
+        parametrów - rdzeń aborciuje, gdy dysk potwierdza inny zbiór niż ten z dialogu). Złota akcja
+        flagi nie niesie - jej DRY dalej oszczędza koszt `stat` pod hamulcem."""
         name = "presence"
         self.stage_started.emit(name)
         if not self._zrodlo():
             return None
         s = presence.check(
             con, self._params["root"], volume=self._params["volume"], apply=apply,
+            force=self._params.get("force"),
+            expected_gone_ids=self._params.get("expected_gone_ids"),
+            confirm_under_brake=self._params.get("confirm_under_brake", False),
             now=self._now(), should_cancel=self._cancel.is_set)
         if s.cancelled:
             self.cancelled.emit(name, s)
@@ -1095,7 +1104,7 @@ class PipelineView(QWidget):
         if root is None:
             root = self._settings().value("pipeline/last_source", None)
         self._begin_run()
-        self._start_stage("presence", root=root)
+        self._start_stage("presence", root=root, confirm_under_brake=True)
 
     def _on_presence_pick(self):
         """„Sprawdź obecność w…" (i „Wskaż katalog…" obecności: brak ostatniego źródła albo źródło
@@ -1132,12 +1141,47 @@ class PipelineView(QWidget):
 
     def _on_mark_vanished(self):
         """Jawny gest zapisu na WYNIKU, który user właśnie zobaczył: parametry ZAMROŻONE przy DRY,
-        żeby przycisk nie znaczył czegoś innego niż raport nad nim (wzorzec „Wydaj na stół")."""
-        if self._thread is not None or self._presence_params is None:
+        żeby przycisk nie znaczył czegoś innego niż raport nad nim (wzorzec „Wydaj na stół").
+
+        WYNIK SPOD HAMULCA PROGOWEGO (AR-31 (6)) niesie w parametrach `force` = liczbę
+        potwierdzonych zniknięć z DRY. Wtedy zapis poprzedza dialog z TĄ liczbą, domyślnie
+        „Anuluj” (Enter nie oznacza masy kopii). Rozjazd z dyskiem przy zapisie i tak aborciuje
+        w rdzeniu bez zapisu - także rozjazd ZBIORU przy tej samej liczbie (`expected_gone_ids`).
+        Dialog ma własną pętlę zdarzeń, więc bramki sprawdzamy jeszcze raz po nim: w tym czasie mógł
+        ruszyć zapis nagłówków albo inny etap. Odmowa po zatwierdzeniu mówi powód na pasku statusu -
+        po kliknięciu „Oznacz” cisza wyglądałaby na zjedzony klik."""
+        if self._thread is not None or self._writeback_busy or self._presence_params is None:
             return
         params = self._presence_params            # zdejmij PRZED _begin_run (ono je zapomina)
+        if params.get("force") is not None:
+            if not self._ask_force(params["force"], params["limit"]):
+                return
+            if self._thread is not None or self._presence_params is not params:
+                # Inny etap albo zmiana źródła zapomniały wynik (`_forget_vanished`).
+                self.status_message.emit(i18n.t("pipeline.refuse.mark_stale"))
+                return
+            if self._writeback_busy:              # wynik zostaje, przycisk wróci po zapisie
+                self.status_message.emit(i18n.t("pipeline.refuse.writeback"))
+                return
+        params = {k: v for k, v in params.items() if k != "limit"}
         self._begin_run()
         self._start_stage("presence-apply", **params)
+
+    def _ask_force(self, n, limit):
+        """Dialog przełamania hamulca progowego: liczba POTWIERDZONA (nie kandydatów) i próg.
+        `True` = zatwierdzone. Osobna metoda, bo to jedyny modal Dostawy - testy prowadzą go
+        prawdziwym kliknięciem (`QMessageBox` z `activeModalWidget`)."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle(i18n.t("pipeline.force.title"))
+        box.setText(i18n.t_plural("pipeline.force.text", n, limit=limit))
+        box.setInformativeText(i18n.t("pipeline.force.info"))
+        ok = box.addButton(i18n.t_plural("pipeline.force.ok", n), QMessageBox.AcceptRole)
+        cancel = box.addButton(i18n.t("pipeline.btn.cancel"), QMessageBox.RejectRole)
+        box.setDefaultButton(cancel)
+        box.setEscapeButton(cancel)
+        box.exec()
+        return box.clickedButton() is ok
 
     def _on_cancel(self):
         if self._worker is not None:
@@ -1448,6 +1492,12 @@ class PipelineView(QWidget):
             self.box_vanished.setVisible(bool(s.vanished))
         elif s.confirmed_gone and s.aborted is None and not s.cancelled:
             self._presence_params = dict(root=self._root, volume=s.volume)   # ZAMROŻONE
+            if s.brake_limit is not None:
+                # Ponad progiem hamulca zapis bez deklaracji aborciowałby w rdzeniu: zamrażamy
+                # liczbę POTWIERDZONĄ jako `force`, a `_on_mark_vanished` pyta o nią dialogiem.
+                # Zbiór kopii zamrażamy obok: dialog obiecuje TE kopie, nie dowolne o tej liczbie.
+                self._presence_params.update(force=s.confirmed_gone, limit=s.brake_limit,
+                                             expected_gone_ids=tuple(sorted(s.gone_ids)))
             n = s.confirmed_gone
             self.lbl_vanished.setText(i18n.t_plural("pipeline.vanished_still_present", n))
             self.btn_mark_vanished.setVisible(True)

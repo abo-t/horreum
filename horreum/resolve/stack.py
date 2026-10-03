@@ -44,6 +44,10 @@ DEGENERATE_SPAN_FACTOR = 2
 _HISTORY_PROPERTY = "PixInsight:ProcessingHistory"
 _SIGNATURE_RX = re.compile(
     r'<Property id="PCL:Signature:Integration"[^>]*>([^<]*)</Property>')
+# `XISF:CreationTime` (AR-10): moduł XISF zapisuje go jako `String` w treści elementu (zmierzone
+# na 1.0.13 i 1.1.3); typ `TimePoint` trzymałby wartość w atrybucie `value=` - oba kształty łapiemy.
+_CREATION_RX = re.compile(
+    r'<Property id="XISF:CreationTime"(?:[^>]*?value="([^"]*)"[^>]*/>|[^>]*>([^<]*)</Property>)')
 _IMAGES_TABLE_RX = re.compile(r'<table id="images" rows="(\d+)"')
 _ROW_RX = re.compile(r"<tr>(.*?)</tr>", re.S)
 _PATH_RX = re.compile(r'<td id="path">([^<]*)</td>')
@@ -77,6 +81,7 @@ class StackTestimony:
     rows: object = None            # ile wejść DEKLARUJE historia; None = historii brak
     inputs: tuple = ()
     tool: object = None            # np. „process=ImageIntegration,version=1.7.1,timestamp=…"
+    created: object = None         # `XISF:CreationTime` - chwila zapisu pliku (`creation_time`)
 
     @property
     def window_span_s(self):
@@ -151,6 +156,22 @@ def _signature(xml_text):
     return m.group(1).strip() if m else None
 
 
+def creation_time(xml_text):
+    """`XISF:CreationTime` z nagłówka XML - surowy napis ISO jak w pliku albo `None`.
+
+    Chwila, w której PixInsight ZAPISAŁ plik - dla stosu prosto spod integracji (WBPP zapisuje go
+    zaraz po niej: na lokalnych kopiach `CreationTime` stoi ~2 min po sygnaturze integracji). To
+    jedyna data stosów sprzed modułu XISF 1.1.2, które sygnatury nie mają (AR-10); własność pisze
+    już moduł 1.0.13. Nie jest datą pliku w systemie plików: zapis nagłówka w miejscu przez Horreum
+    podmienia wartości kart, a tej własności nie dotyka. Brak własności, pusta wartość albo brak
+    tekstu (FITS) → `None` - brak faktu nie udaje faktu."""
+    m = _CREATION_RX.search(xml_text or "")
+    if m is None:
+        return None
+    wartosc = html.unescape(m.group(1) if m.group(1) is not None else m.group(2)).strip()
+    return wartosc or None
+
+
 def signature_timestamp(tool):
     """Chwila przebiegu integracji z sygnatury `PCL:Signature:Integration` - albo `None`.
 
@@ -186,7 +207,7 @@ def read_testimony(header, xml_text=None):
         telescop=h.get("TELESCOP"), instrume=h.get("INSTRUME"),
         exptime=h.get("EXPTIME"),
         window_start=header_dt(h.get("DATE-OBS")), window_end=header_dt(h.get("DATE-END")),
-        rows=rows, inputs=inputs, tool=tool,
+        rows=rows, inputs=inputs, tool=tool, created=creation_time(xml_text),
     )
 
 

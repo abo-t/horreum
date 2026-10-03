@@ -525,8 +525,10 @@ def test_commit_awaria_resyncu_nie_zatrzymuje_wsadu(tmp_path, monkeypatch):
 
 def test_spadek_idzie_droga_atomowa_albo_blokuje_w_trybie_pilotazu(tmp_path):
     """Warunek 6: `fallback=False` - plik, który nie mieści się w miejscu, → 'blocked', zero zapisu;
-    domyślnie spadek na drogę atomową z powodem w wyniku."""
-    p = _fits(tmp_path / "e.fits", obj="M31", comment="k" * 47)
+    domyślnie spadek na drogę atomową z powodem w wyniku. Spadek z powodu zastanego komentarza,
+    który nie zmieści się przy nowej wartości, kończy się na drodze atomowej odmową (AR-7) - tam
+    astropy uciąłby komentarz po cichu."""
+    p = _fits(tmp_path / "e.fits", extra=[("OBJECT", "NGC6992")])      # dwie karty → spadek
     przed = p.read_bytes()
     con = db.open_db(str(tmp_path / "h.db"))
     _scan_in(con, p)
@@ -540,7 +542,17 @@ def test_spadek_idzie_droga_atomowa_albo_blokuje_w_trybie_pilotazu(tmp_path):
     res2 = writeback.commit(con, "R2", now=NOW, inplace=True)
     assert len(res2.applied) == 1 and not res2.in_place
     assert res2.applied[0].reason.startswith("droga dotychczasowa: ")
-    assert fits.getheader(str(p))["OBJECT"] == "V" * 20
+    hdr = fits.getheader(str(p))
+    assert hdr["OBJECT"] == "V" * 20 and hdr.comments["OBJECT"] == KOMENTARZ
+
+    q = _fits(tmp_path / "e2.fits", obj="M31", comment="k" * 47, seed=1)
+    przed_q = q.read_bytes()
+    _scan_in(con, q)
+    loc_q = _loc(con, q)
+    _stage(con, "R3", loc_q["id"], "V" * 20, loc_q["header_hash"])
+    res3 = writeback.commit(con, "R3", now=NOW, inplace=True)
+    assert len(res3.blocked) == 1 and "ucięłaby zastany komentarz" in res3.blocked[0].reason
+    assert q.read_bytes() == przed_q
     con.close()
 
 
@@ -1233,7 +1245,7 @@ def _bez_faktow(con, path, *, bez_odcisku=False):
     con.execute("UPDATE location SET hdr_filter = NULL, hdr_imagetyp = NULL, hdr_object = NULL, "
                 "hdr_telescop = NULL, hdr_instrume = NULL, hdr_exptime = NULL, "
                 "hdr_xbinning = NULL, hdr_date_obs = NULL, image_count = NULL, "
-                "image_roles = NULL, hdr_hash = NULL WHERE path = ?", (str(path),))
+                "image_roles = NULL, hdr_hash = NULL, hdr_rule = NULL WHERE path = ?", (str(path),))
     if bez_odcisku:
         con.execute("UPDATE location SET header_hash = NULL WHERE path = ?", (str(path),))
     con.commit()

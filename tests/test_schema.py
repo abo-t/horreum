@@ -95,15 +95,72 @@ def test_szkielet_przyszly_pusty(tmp_path):
     con.close()
 
 
-def test_user_version_v24_po_migracji(tmp_path):
-    """0024 podnosi user_version do 24 (świeża baza leci 0002→…→0024 sekwencyjnie; znacznik
-    backupu bez podmiany `header_backups.unreplaced_at`, AR-37).
+def test_user_version_v26_po_migracji(tmp_path):
+    """0026 podnosi user_version do 26 (świeża baza leci 0002→…→0026 sekwencyjnie; 0025 = wersja
+    reguły koercji faktów kopii `location.hdr_rule`, AR-33; 0026 = werdykt „zostaw wszystkie
+    wersje” `stack_version_kept` + `integration.creation_time`, AR-10).
 
     Pin JEST intencją: każda nowa migracja ma ten test PRZEWRÓCIĆ imiennie, żeby podniesienie
     wersji było gestem, a nie skutkiem ubocznym."""
     con = db.open_db(str(tmp_path / "h.db"))
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 24
-    assert db.SCHEMA_VERSION == 24
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 26
+    assert db.SCHEMA_VERSION == 26
+    con.close()
+
+
+def _baza_v24_z_kopiami(path):
+    """Baza v24 (migracje do 0024 włącznie) z dwiema kopiami: lid 1 z zebranymi faktami (kotwica
+    = odcisk), lid 2 bez faktów - stan żywego archiwum tuż przed 0025."""
+    con = db.connect(path)
+    for version, filename in db.MIGRATIONS:
+        if version <= 24:
+            con.executescript(db._migration_sql(filename))
+            con.execute(f"PRAGMA user_version = {int(version)}")
+    _loc_0021(con, 1)
+    _loc_0021(con, 2)
+    con.execute("UPDATE location SET hdr_hash = 'hh', hdr_filter = 'Ha', hdr_exptime = 1.5 "
+                "WHERE id = 1")
+    con.commit()
+    return con
+
+
+def test_0025_przyrost_na_bazie_v24_stempluje_zebrane_fakty(tmp_path):
+    """Baza v24 przechodzi 0025: kopia z zebranymi faktami dostaje `hdr_rule = 1` (jedyna reguła
+    od 0021 - stempel jest odczytem prawdy, więc migracja NIE wysyła zebranych kopii do ponownego
+    czytania), kopia bez faktów zostaje NULL (dalej kandydat uzupełnienia). Fakty nietknięte,
+    druga migracja to no-op.
+
+    Falsyfikator: zdejmij `UPDATE` z 0025 → lid 1 ma NULL i wraca na listę kandydatów."""
+    con = _baza_v24_z_kopiami(str(tmp_path / "v24.db"))
+    assert db.migrate(con) == db.SCHEMA_VERSION
+    wiersze = [tuple(r) for r in con.execute(
+        "SELECT id, hdr_hash, hdr_filter, hdr_exptime, hdr_rule FROM location ORDER BY id")]
+    assert wiersze == [(1, "hh", "Ha", 1.5, 1), (2, None, None, None, None)]
+    assert db.migrate(con) == db.SCHEMA_VERSION              # idempotencja
+    con.close()
+
+
+def test_0025_CHECK_regula_przy_kotwicy_i_liczbowa(tmp_path):
+    """STRAŻNIK W DDL (0025): reguła bez kotwicy faktów to sprzeczność; reguła jest liczbą całkowitą
+    >= 1. Kotwica BEZ reguły zostaje legalna (stan „reguła nieznana", który dobiera sterownik).
+    Kolumna wchodzi przez `ADD COLUMN`, więc test dowodzi, że SQLite egzekwuje CHECK.
+
+    Falsyfikator: zdejmij `CHECK` z `0025_location_hdr_rule.sql` → pierwszy `raises` czerwienieje."""
+    con = _baza_v24_z_kopiami(str(tmp_path / "v24.db"))
+    db.migrate(con)
+    with pytest.raises(sqlite3.IntegrityError):              # reguła bez kotwicy
+        con.execute("UPDATE location SET hdr_rule = 1 WHERE id = 2")
+    with pytest.raises(sqlite3.IntegrityError):              # tekst zamiast numeru
+        con.execute("UPDATE location SET hdr_rule = 'jeden' WHERE id = 1")
+    with pytest.raises(sqlite3.IntegrityError):              # ułamek zamiast numeru
+        con.execute("UPDATE location SET hdr_rule = 1.5 WHERE id = 1")
+    with pytest.raises(sqlite3.IntegrityError):              # numer spoza łańcucha reguł
+        con.execute("UPDATE location SET hdr_rule = 0 WHERE id = 1")
+    with pytest.raises(sqlite3.IntegrityError):              # zdjęcie kotwicy przy stojącej regule
+        con.execute("UPDATE location SET hdr_hash = NULL, hdr_filter = NULL, hdr_exptime = NULL "
+                    "WHERE id = 1")
+    con.execute("UPDATE location SET hdr_rule = NULL WHERE id = 1")      # reguła nieznana - legalna
+    con.execute("UPDATE location SET hdr_rule = 2 WHERE id = 1")
     con.close()
 
 
@@ -125,7 +182,7 @@ def test_0024_przyrost_na_bazie_v23_z_backupem(tmp_path):
     con.execute("INSERT INTO header_backups(commit_id, location_id, hdu_index, header_text, "
                 "post_hash) VALUES (1, 1, NULL, 'xml', 'ph')")
     con.commit()
-    assert db.migrate(con) == db.SCHEMA_VERSION == 24
+    assert db.migrate(con) == db.SCHEMA_VERSION              # 0024 + każda kolejna
     row = con.execute("SELECT commit_id, location_id, header_text, post_hash, unreplaced_at "
                       "FROM header_backups").fetchone()
     assert tuple(row) == (1, 1, "xml", "ph", None)

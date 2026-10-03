@@ -15,7 +15,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 
-from horreum import db
+from horreum import db, repo
 from horreum.gui import i18n, queries
 from horreum.gui.i18n_catalog import CATALOG
 from horreum.resolve.stack import signature_timestamp
@@ -124,7 +124,9 @@ def test_pulapka_tekstu_ekspozycji_nie_rozbija_grupy(monkeypatch):
               "camera_model": "ASI2600MM", "telescope_id": 1, "telescope_label": None,
               "telescop_canon": "A140R",
               "filter_canon": "Ha", "raw_json": "{}", "window_start": "2025-12-16T17:27:54",
-              "window_end": "2026-01-21T20:15:51", "tool": None, "declared_rows": None}
+              "window_end": "2026-01-21T20:15:51", "tool": None, "declared_rows": None,
+              "creation_time": None, "kept_key": None, "kept_at": None,
+              "ra_deg": None, "dec_deg": None}
     monkeypatch.setattr(queries, "_stack_version_rows", lambda con: [
         {**wiersz, "frame_id": 1, "exptime": "600.00"},
         {**wiersz, "frame_id": 2, "exptime": 600.0},
@@ -263,12 +265,12 @@ def test_plan_zostaw_te_wersje(wcon):
     nic z członka bez dowodu względem zostawianego - ten jest policzony osobno."""
     assert queries.keep_version_plan(wcon, 101) == {
         "paths": ["/st/IC1795/Ha/stara.xisf", "/kopia/stara.xisf"], "stacks": 1,
-        "derived": 0, "unknown": 1}
+        "derived": 0, "unknown": 1, "kept": False}
     assert queries.keep_version_plan(wcon, 102)["paths"] == ["/st/IC1795/Ha/nowa.xisf"]
     assert queries.keep_version_plan(wcon, 103) == {"paths": [], "stacks": 0, "derived": 0,
-                                                    "unknown": 2}
+                                                    "unknown": 2, "kept": False}
     assert queries.keep_version_plan(wcon, 201) == {"paths": [], "stacks": 0, "derived": 1,
-                                                    "unknown": 2}
+                                                    "unknown": 2, "kept": False}
     assert queries.keep_version_plan(wcon, 701) is None, "stos bez bliźniaka nie ma planu"
 
 
@@ -452,9 +454,11 @@ def test_menu_kontekstowe_tylko_w_perspektywie_wersji_i_poza_paskiem_zbioru(view
     assert view.act_keep_version not in view.sel_bar.findChildren(type(view.act_keep_version))
 
 
-def test_wiersz_porzadkow_otwiera_perspektywe_i_nie_swieci_plakietki(view, wcon):
-    """„Zostawiam obie" to prawowita decyzja bez werdyktu w bazie - wiersz liczony do plakietki
-    świeciłby wiecznie. Falsyfikator: wyjmij `stack_versions` z `tasks._BEZ_ROBOTY`."""
+def test_wiersz_porzadkow_liczy_do_plakietki_grupy_bez_werdyktu(view, wcon):
+    """AR-10: „zostawiam wszystkie" ma od 0026 werdykt w bazie, więc wiersz jest robotą dokładnie
+    grupami BEZ werdyktu. Liczba i lista pod klikiem zostają jednym zbiorem (grupy z werdyktem też -
+    tam się go cofa), a przy częściowym werdykcie wiersz mówi „robota z liczby".
+    Falsyfikator: wróć `stack_versions` do `tasks._BEZ_ROBOTY` - plakietka nie drgnie."""
     from PySide6.QtCore import Qt
     from horreum.gui import rows, tasks as tasks_mod
     tv = tasks_mod.TasksView(wcon)
@@ -464,16 +468,21 @@ def test_wiersz_porzadkow_otwiera_perspektywe_i_nie_swieci_plakietki(view, wcon)
         it = next(tv.tasks.item(i) for i in range(tv.tasks.count())
                   if tv.tasks.item(i).data(Qt.UserRole) == "stack_versions")
         assert it.text() == "Wersje stosów" and it.data(rows.SECONDARY) == "5  ›"
-        assert it.data(rows.STRONG) is False
-        wcon.execute("UPDATE location SET present = 0 WHERE frame_id IN (102, 103, 602)")
-        wcon.commit()
-        assert tv.refresh_counts() == przed, "zmiana liczby wersji nie rusza plakietki"
-        assert it.data(rows.SECONDARY) == "0  ›"
-        wcon.execute("UPDATE location SET present = 1")
-        wcon.commit()
-        tv.refresh_counts()
+        assert it.data(rows.STRONG) is True and it.toolTip() == ""
+        # werdykt na IC1795 (3 stosy): robota zostaje w Veil (2) - wiersz dalej żyje
+        repo.keep_stack_versions(wcon, frame_ids=[101, 102, 103], group_key="g-ic", now=NOW)
+        assert tv.refresh_counts() == przed
+        assert it.data(rows.SECONDARY) == "2 z 5  ›" and it.data(rows.STRONG) is True
+        assert it.toolTip().startswith("3 stosy stoją w grupach z werdyktem „Zostaw wszystkie wersje”")
+        # werdykt na Veil: zero roboty - wiersz gaśnie, plakietka o jeden mniej, lista dalej pełna
+        repo.keep_stack_versions(wcon, frame_ids=[601, 602], group_key="g-veil", now=NOW)
+        assert tv.refresh_counts() == przed - 1
+        assert it.data(rows.SECONDARY) == "0 z 5  ›" and it.data(rows.STRONG) is False
         tv._on_task_clicked(it)
-        assert sorted(view._frame_ids) == [101, 102, 103, 601, 602]
+        assert sorted(view._frame_ids) == [101, 102, 103, 601, 602], "werdykt widać i cofa się tam"
+        # droga powrotu: cofnięcie przywraca robotę
+        repo.reopen_stack_versions(wcon, frame_ids=[601, 602], now=NOW)
+        assert tv.refresh_counts() == przed
     finally:
         tv.close()
 
@@ -691,3 +700,292 @@ def test_sciezka_w_wersjach_elidowana_w_srodku(view):
     assert view.table.columnWidth(kol) <= grid_mod._SUFIT_KOLUMNY_Z_TRESCI
     view.apply_perspective("Przegląd")
     assert view.table.itemDelegateForColumn(m.base_col("path")) is None
+
+
+# ═════════════════════════ AR-10: werdykt „zostawiam wszystkie", data z CreationTime, obrazy
+
+
+def _werdykty(con):
+    return {r["frame_id"]: r["group_key"] for r in con.execute(
+        "SELECT frame_id, group_key FROM stack_version_kept")}
+
+
+def _zdarzenia(con, verb):
+    return con.execute("SELECT COUNT(*) FROM event WHERE verb = ?", (verb,)).fetchone()[0]
+
+
+def test_klinga_werdyktu_idempotentna_z_droga_powrotu(wcon):
+    """Zapis werdyktu wyłącznie klingą z eventem; powtórka - zero ruchu i zero eventów;
+    cofnięcie kasuje wiersze z historią w dzienniku; błąd wołającego (pusty klucz, jedna klatka)
+    jest wyjątkiem, nie cichym no-opem (EXPECT)."""
+    assert repo.keep_stack_versions(wcon, frame_ids=[101, 102, 103], group_key="g", now=NOW) == 3
+    assert _werdykty(wcon) == {101: "g", 102: "g", 103: "g"}
+    assert _zdarzenia(wcon, "stack_versions.kept") == 3
+    assert repo.keep_stack_versions(wcon, frame_ids=[103, 102, 101], group_key="g", now=NOW) == 0
+    assert _zdarzenia(wcon, "stack_versions.kept") == 3, "powtórka nie puchnie dziennika"
+    assert repo.reopen_stack_versions(wcon, frame_ids=[101, 102, 103], now=NOW) == 3
+    assert _werdykty(wcon) == {} and _zdarzenia(wcon, "stack_versions.reopened") == 3
+    assert repo.reopen_stack_versions(wcon, frame_ids=[101], now=NOW) == 0
+    for zle in (dict(frame_ids=[101, 102], group_key=""), dict(frame_ids=[101], group_key="g")):
+        with pytest.raises(ValueError):
+            repo.keep_stack_versions(wcon, now=NOW, **zle)
+
+
+def test_werdykt_obejmuje_grupe_tylko_w_calosci_i_jednym_gestem(wcon):
+    """Grupa ma werdykt, gdy KAŻDY członek ma wiersz z jednym kluczem gestu. Nowy stos (bez wiersza)
+    albo dwa klucze (dwie grupy zlane w jedną) cofają grupę do roboty. Perspektywa trzyma grupy
+    z werdyktem; robotę liczy podzbiór."""
+    repo.keep_stack_versions(wcon, frame_ids=[101, 102, 103], group_key="g", now=NOW)
+    grupy = {g["object_canon"]: g for g in queries.stack_version_groups(wcon)}
+    assert grupy["IC1795"]["kept"] is True and grupy["IC1795"]["kept_at"] == NOW
+    assert grupy["Veil"]["kept"] is False and grupy["Veil"]["kept_at"] is None
+    assert queries.stack_version_frame_ids(wcon) == {101, 102, 103, 601, 602}
+    assert queries.stack_version_open_frame_ids(wcon) == {601, 602}
+    st = queries.tasks_state(wcon)
+    assert (st["stack_versions"], st["stack_versions_open"]) == (5, 2)
+    # nowa wersja w grupie: bez wiersza werdyktu - grupa wraca do roboty w całości
+    _stos(wcon, 104, kamera=2, obiekt=1, filtr="Ha", exp=600.0, okno=W_A, declared=40,
+          pomiary=_pomiary(9e-5))
+    wcon.commit()
+    assert queries.stack_version_open_frame_ids(wcon) == {101, 102, 103, 104, 601, 602}
+    # dwa klucze w jednej grupie - też robota
+    repo.keep_stack_versions(wcon, frame_ids=[103, 104], group_key="inna", now=NOW)
+    assert {101, 102, 103, 104} <= queries.stack_version_open_frame_ids(wcon)
+    grupa = queries.stack_version_group_of(wcon, 104)
+    assert grupa["frame_ids"] == [101, 102, 103, 104] and grupa["kept"] is False
+    assert queries.stack_version_group_of(wcon, 701) is None
+
+
+def test_scalenie_teleskopu_nie_gubi_werdyktu(wcon):
+    """Klucz gestu nie jest porównywany z bieżącym identyfikatorem grupy: scalenie teleskopu
+    zmienia identyfikator (kanon w kluczu), a zbiór stosów zostaje ten sam - werdykt ma przeżyć."""
+    przed = queries.stack_version_group_of(wcon, 101)
+    repo.keep_stack_versions(wcon, frame_ids=przed["frame_ids"], group_key=przed["group_id"],
+                             now=NOW)
+    wcon.execute("UPDATE telescope SET merged_into = 2 WHERE id = 1")
+    wcon.commit()
+    po = queries.stack_version_group_of(wcon, 101)
+    assert po["group_id"] != przed["group_id"] and po["kept"] is True
+
+
+def test_gest_zostaw_wszystkie_i_cofnij_w_menu_tabeli(view):
+    """Gest w menu tabeli perspektywy: zapis werdyktu, emisja `stan_porzadkow_changed` (jedyny
+    właściciel plakietki), komórka mówi „zostawione" i jest wyciszona, a menu podaje drogę powrotu."""
+    from horreum.gui import grid as grid_mod
+    view.apply_perspective(grid_mod.PRESET_STACK_VERSIONS)
+    emisje = []
+    view.stan_porzadkow_changed.connect(lambda: emisje.append(1))
+    _zaznacz(view, [102])
+    view._sync_menu_wersji()
+    assert view.act_keep_all_versions.isEnabled() and not view.act_reopen_versions.isVisible()
+    assert view.act_keep_all_versions.toolTip().startswith("Zapisuje werdykt: 3 stosy tej grupy")
+    view._on_keep_all_versions()
+    klucz = queries.stack_version_group_of(view.con, 102)["group_id"]
+    assert _werdykty(view.con) == {101: klucz, 102: klucz, 103: klucz}
+    assert emisje == [1]
+    assert view.komunikaty[-1] == "Zapisano werdykt „zostaw wszystkie” - 3 stosy grupy zostają"
+    assert _komorka_wersji(view, 101, "DisplayRole").startswith("zostawione · inna integracja")
+    assert _komorka_wersji(view, 101, "ForegroundRole") is not None, "po werdykcie wyciszona"
+    assert "Droga powrotu: prawy klik → „Cofnij „zostaw wszystkie””" in _komorka_wersji(
+        view, 101, "ToolTipRole")
+    assert [r["frame_id"] for r in view._selected_data_rows()] == [102], "zaznaczenie zostaje"
+    view._sync_menu_wersji()
+    assert view.act_reopen_versions.isEnabled() and not view.act_keep_all_versions.isVisible()
+    view._on_reopen_versions()
+    assert _werdykty(view.con) == {} and emisje == [1, 1]
+    assert not _komorka_wersji(view, 101, "DisplayRole").startswith("zostawione")
+    # zaznaczenie z dwóch grup - gest odmawia z powodem, bez zapisu
+    _zaznacz(view, [101, 601])
+    view._sync_menu_wersji()
+    assert not view.act_keep_all_versions.isEnabled()
+    assert view.act_keep_all_versions.toolTip() == i18n.t("grid.version.select_group")
+    view._on_keep_all_versions()
+    assert _werdykty(view.con) == {} and emisje == [1, 1]
+    assert view.komunikaty[-1] == i18n.t("grid.version.select_group")
+
+
+def test_gest_werdyktu_bez_ruchu_mowi_prawde_a_nie_zapisano(view):
+    """Wyścig: między menu a kliknięciem werdykt zapisał ktoś inny (albo cofnął) - klinga zwraca 0,
+    a pasek ma tego nie przemilczeć zdaniem „Zapisano"/„Cofnięto". Falsyfikator: wróć do jednego
+    klucza zdania niezależnie od `n` w `_po_werdykcie_wersji`."""
+    from horreum.gui import grid as grid_mod
+    view.apply_perspective(grid_mod.PRESET_STACK_VERSIONS)
+    emisje = []
+    view.stan_porzadkow_changed.connect(lambda: emisje.append(1))
+    _zaznacz(view, [102])
+    view._sync_menu_wersji()
+    grupa = queries.stack_version_group_of(view.con, 102)
+    repo.keep_stack_versions(view.con, frame_ids=grupa["frame_ids"], group_key=grupa["group_id"],
+                             now=NOW)                       # drugi pisarz był szybszy
+    view._on_keep_all_versions()
+    assert view.komunikaty[-1] == i18n.t("grid.version.kept_none")
+    assert not view.komunikaty[-1].startswith("Zapisano") and emisje == []
+    repo.reopen_stack_versions(view.con, frame_ids=grupa["frame_ids"], now=NOW)
+    view._on_reopen_versions()
+    assert view.komunikaty[-1] == i18n.t("grid.version.reopened_none") and emisje == []
+
+
+def test_gesty_werdyktu_milkna_w_biegu_etapu_i_zapisu(view):
+    """Etap Dostawy przelicza grupy w tle (Stosy) i trzyma pisarza bazy, a zapis nagłówków zmienia
+    klucz grupy w połowie zbioru - werdykt liczony wtedy dotyczyłby grupy przejściowej. Pozycje menu
+    gasną z powodem (ten sam predykat zajętości co gesty izolacji), a slot odmawia drugą linią.
+    Falsyfikator: zdejmij `_powod_zajetosci` z `_sync_menu_wersji` albo z `_po_werdykcie_wersji`."""
+    from horreum.gui import grid as grid_mod
+    view.apply_perspective(grid_mod.PRESET_STACK_VERSIONS)
+    _zaznacz(view, [102])
+    view.set_busy(True)
+    try:
+        view._sync_menu_wersji()
+        assert not view.act_keep_all_versions.isEnabled()
+        assert view.act_keep_all_versions.toolTip() == i18n.t("grid.inplace.busy_stage")
+        view._on_keep_all_versions()
+        assert _werdykty(view.con) == {}
+        assert view.komunikaty[-1] == i18n.t("grid.inplace.busy_stage")
+        # Gest schowka („Zostaw tę wersję”) - ścieżki „do usunięcia” z grupy przejściowej też milkną.
+        assert not view.act_keep_version.isEnabled()
+        assert view.act_keep_version.toolTip() == i18n.t("grid.inplace.busy_stage")
+        view.komunikaty.clear()
+        view._on_keep_version()
+        assert view.komunikaty == [i18n.t("grid.inplace.busy_stage")]
+    finally:
+        view.set_busy(False)
+    grupa = queries.stack_version_group_of(view.con, 102)
+    repo.keep_stack_versions(view.con, frame_ids=grupa["frame_ids"], group_key=grupa["group_id"],
+                             now=NOW)
+    view.set_writeback_busy(True)
+    try:
+        view._sync_menu_wersji()
+        assert view.act_reopen_versions.isVisible() and not view.act_reopen_versions.isEnabled()
+        assert view.act_reopen_versions.toolTip() == i18n.t("grid.inplace.busy_write")
+        view._on_reopen_versions()
+        assert len(_werdykty(view.con)) == 3, "werdykt nietknięty w biegu zapisu"
+        assert view.komunikaty[-1] == i18n.t("grid.inplace.busy_write")
+    finally:
+        view.set_writeback_busy(False)
+    view._sync_menu_wersji()
+    assert view.act_reopen_versions.isEnabled(), "po biegu gest wraca"
+
+
+def test_zostaw_te_wersje_wygaszone_przy_werdykcie_zostaw_wszystkie(view):
+    """Grupa z werdyktem „zostaw wszystkie" nie podsuwa ścieżek „do usunięcia" - to dwa sprzeczne
+    zdania o tej samej grupie. Pozycja gaśnie z drogą wyjścia (najpierw cofnij werdykt), slot
+    odmawia, schowek nietknięty. Falsyfikator: zdejmij warunek `kept` z `_sync_menu_wersji`."""
+    from PySide6.QtWidgets import QApplication
+    from horreum.gui import grid as grid_mod
+    view.apply_perspective(grid_mod.PRESET_STACK_VERSIONS)
+    grupa = queries.stack_version_group_of(view.con, 101)
+    repo.keep_stack_versions(view.con, frame_ids=grupa["frame_ids"], group_key=grupa["group_id"],
+                             now=NOW)
+    QApplication.clipboard().setText("nietknięte")
+    _zaznacz(view, [101])
+    view._sync_menu_wersji()
+    blokada = i18n.t("grid.version.keep_blocked_kept", reopen=i18n.t("grid.version.reopen"))
+    assert not view.act_keep_version.isEnabled() and view.act_keep_version.toolTip() == blokada
+    view._on_keep_version()
+    assert view.komunikaty[-1] == blokada
+    assert QApplication.clipboard().text() == "nietknięte"
+    repo.reopen_stack_versions(view.con, frame_ids=grupa["frame_ids"], now=NOW)
+    view._sync_menu_wersji()
+    assert view.act_keep_version.isEnabled(), "po cofnięciu werdyktu gest wraca"
+
+
+def test_liczniki_porzadkow_wersji_z_jednego_przebiegu(wcon, monkeypatch):
+    """Liczba wiersza i jej robota z JEDNEGO przebiegu `_grupy_wersji`: dwa niezależne przebiegi
+    przy etapie piszącym w tle dawały „6 z 5" (podzbiór większy od całości) i ujemną liczbę
+    w podpowiedzi. Falsyfikator: wróć `tasks_state` do dwóch wywołań funkcji zbiorów."""
+    prawdziwe = queries._grupy_wersji
+    przebiegi = []
+
+    def _z_pisarzem_w_tle(con):
+        out = prawdziwe(con)
+        if not przebiegi:                   # po pierwszym przebiegu etap dopisuje nowy stos grupy
+            _stos(con, 104, kamera=2, obiekt=1, filtr="Ha", exp=600.0, okno=W_A, declared=40,
+                  pomiary=_pomiary(9e-5))
+            con.commit()
+        przebiegi.append(1)
+        return out
+
+    monkeypatch.setattr(queries, "_grupy_wersji", _z_pisarzem_w_tle)
+    st = queries.tasks_state(wcon)
+    assert st["stack_versions_open"] <= st["stack_versions"]
+    assert (st["stack_versions"], st["stack_versions_open"]) == (5, 5) and len(przebiegi) == 1
+
+
+def test_data_z_creation_time_gdy_brak_sygnatury_ze_zrodlem(view):
+    """AR-10: stos sprzed sygnatury dostaje datę z `XISF:CreationTime`, a tooltip mówi, skąd;
+    sygnatura bije CreationTime."""
+    from horreum.gui import grid as grid_mod
+    view.con.execute("UPDATE integration SET creation_time = '2023-09-13T18:16:53Z' "
+                     "WHERE master_frame_id IN (601, 101)")
+    view.con.commit()
+    view.apply_perspective(grid_mod.PRESET_STACK_VERSIONS)
+    assert _komorka_wersji(view, 601, "DisplayRole") == (
+        "inna integracja · szum i PSF · 2023-09-13 18:16")
+    assert "XISF:CreationTime" in _komorka_wersji(view, 601, "ToolTipRole")
+    assert "2026-02-21 12:43" in _komorka_wersji(view, 101, "DisplayRole"), "sygnatura bije"
+    assert "(PCL:Signature:Integration)." in _komorka_wersji(view, 101, "ToolTipRole")
+    assert "XISF:CreationTime" not in _komorka_wersji(view, 103, "ToolTipRole")
+
+
+def test_liczba_obrazow_w_kolumnie_wersji_xisf_i_fits(view):
+    """AR-10: `location.image_count` jako fakt w kolumnie „Wersja" - XISF z liczbą i odmianą,
+    FITS „obrazy: -" z powodem (czytnik FITS obrazów nie liczy), XISF bez zebranych faktów milczy
+    (kolumna „Obrazy" mówi tam „?")."""
+    from horreum.gui import grid as grid_mod
+    wcon = view.con
+    wcon.execute("UPDATE location SET header_hash = 'h', hdr_hash = 'h', image_count = 3, "
+                 "image_roles = ? WHERE frame_id = 101",
+                 (json.dumps(["integration", "rejection_low", "rejection_high"]),))
+    wcon.execute("UPDATE frame SET filetype = 'fits' WHERE id = 601")
+    wcon.commit()
+    view.apply_perspective(grid_mod.PRESET_STACK_VERSIONS)
+    assert _komorka_wersji(view, 101, "DisplayRole").endswith(" · 33 wejścia · 3 obrazy")
+    assert _komorka_wersji(view, 601, "DisplayRole") == "inna integracja · szum i PSF · obrazy: -"
+    assert "Horreum czyta pierwszy obraz" in _komorka_wersji(view, 601, "ToolTipRole")
+    assert "obraz" not in _komorka_wersji(view, 102, "DisplayRole")
+
+
+def test_srodek_kadru_etykieta_tylko_przy_nietrywialnym_podziale(wcon):
+    """AR-10 (4): środek kadru z nagłówka rozróżnia kanały dwóch przebiegów kamery kolorowej
+    (NGC3034 RC8 600 s na kopii archiwum). Etykieta tylko, gdy dzieli grupę nietrywialnie:
+    co najmniej dwa środki i jeden wspólny dla dwóch stosów; brak współrzędnych - bez etykiety.
+    Klasyfikacji NIE zmienia (fakt do rozróżnienia, nie świadek)."""
+    przed = {g["object_canon"]: g["kind"] for g in queries.stack_version_groups(wcon)}
+    wcon.executemany("UPDATE header SET ra_deg = ?, dec_deg = ? WHERE frame_id = ?",
+                     [(148.79, 69.64, 201), (148.79, 69.64, 202), (148.96, 69.66, 203)])
+    wcon.commit()
+    lmc = next(g for g in queries.stack_version_groups(wcon) if g["object_canon"] == "LMC")
+    assert {m["frame_id"]: m["center"] for m in lmc["members"]} == {
+        201: "A", 202: "A", 203: "B", 204: None}
+    assert lmc["centers"] == 2
+    wcon.execute("UPDATE header SET ra_deg = 1.0 WHERE frame_id = 202")   # wszystkie różne
+    wcon.commit()
+    lmc = next(g for g in queries.stack_version_groups(wcon) if g["object_canon"] == "LMC")
+    assert all(m["center"] is None for m in lmc["members"])
+    assert {g["object_canon"]: g["kind"] for g in queries.stack_version_groups(wcon)} == przed
+
+
+def test_srodek_kadru_w_komorce_wersji(view):
+    from horreum.gui import grid as grid_mod
+    view.con.executemany("UPDATE header SET ra_deg = ?, dec_deg = ? WHERE frame_id = ?",
+                         [(148.79, 69.64, 101), (148.79, 69.64, 103), (148.96, 69.66, 102)])
+    view.con.commit()
+    view.apply_perspective(grid_mod.PRESET_STACK_VERSIONS)
+    assert _komorka_wersji(view, 101, "DisplayRole") == (
+        "inna integracja · historia · środek A · 2026-02-21 12:43 · 33 wejścia")
+    assert _komorka_wersji(view, 102, "DisplayRole").startswith("inna integracja · historia · środek B")
+    tip = _komorka_wersji(view, 103, "ToolTipRole")
+    assert "Środek A: RA 148.7900°, Dec +69.6400°" in tip and "są 2 różne środki" in tip
+    assert "środek" not in _komorka_wersji(view, 601, "DisplayRole")
+
+
+def test_odmiana_liczby_obrazow_i_zrodla_daty_w_katalogu():
+    """Odmiana sprawdzona formą (1 / 2-4 / 5+ / 12-14 / 22), klucze składane w locie w katalogu."""
+    pl = {n: i18n.t_plural("grid.version.images", n, count=n) for n in (1, 2, 4, 5, 12, 14, 22)}
+    assert pl == {1: "1 obraz", 2: "2 obrazy", 4: "4 obrazy", 5: "5 obrazów", 12: "12 obrazów",
+                  14: "14 obrazów", 22: "22 obrazy"}
+    for zrodlo in ("signature", "created"):
+        assert f"grid.version.when.{zrodlo}" in CATALOG
+    for n, forma in ((1, "1 stos stoi"), (3, "3 stosy stoją"), (5, "5 stosów stoi"),
+                     (12, "12 stosów stoi"), (22, "22 stosy stoją")):
+        assert i18n.t_plural("tasks.stack_versions_kept_tip", n, keep="x").startswith(forma)

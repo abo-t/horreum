@@ -90,7 +90,9 @@ _THRESHOLDS = {"min_size": ("planner.min_size", 6.0, 0.0, 600.0, 1.0),
 _MAX_COST_DEFAULT = 3.0
 # Filtr kadru (dług T5, PL-1, PL-2) - jak próg kosztu: domyślnie WYŁĄCZONY, wartość pamiętana obok
 # przełącznika. Wypełnienie w PROCENTACH na ekranie (kolumna mówi „58%"), w rdzeniu ułamek 0..1.
-_MIN_FILL_DEFAULT = 30.0
+# Domyślna wartość progu = granica kubełka „dobry kadr" w rankingu rdzenia (PL-1); `round`, bo
+# 0,3 × 100 w float to 30,000000000000004.
+_MIN_FILL_DEFAULT = float(round(targets.RANK_MIN_FILL * 100))
 _MAX_PANELS_DEFAULT = 1
 _SETTINGS_PREFIX = "planner/"
 

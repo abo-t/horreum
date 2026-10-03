@@ -21,8 +21,11 @@ from dataclasses import dataclass, replace
 from .resolve._text import norm_alnum          # kierunek repo → resolve (liść; COHESION §2b)
 from .resolve.catalog import catalog_canon      # gramatyka katalogowa — CZYSTA, bez assetu (liść)
 from .resolve.frames import LIGHT_KINDS         # guard RODZAJU w klindze (S2b) — liść, bez cyklu
+from .resolve.headers import (FAKTY_DO_DOCIAGNIECIA, FAKTY_NOWSZE,   # stan faktów kopii (AR-33)
+                              copy_facts_state)
 from .resolve.objects import (CLEARABLE_OBJECT_SOURCES,  # enum źródeł osi OBIEKT —
                               OBJECT_SOURCES,           # jeden właściciel (S1/S2b)
+                              STICKY_OBJECT_SOURCES,    # …ręki, nietykalne dla cofnięcia (AR-38)
                               TRANSFERABLE_OBJECT_SOURCES,   # …i przeżywające podmianę (R4)
                               WEAK_OBJECT_SOURCES)
 from .resolve.observatory import nearest_site   # kierunek repo → resolve (liść math/re; COHESION §2b)
@@ -213,18 +216,27 @@ def _insert_frame(con, *, sha1_data, sha1_data_uncomputable, kind, kind_source, 
 # Słownik `copy_facts` (skład: `scan.copy_header_facts`) niesie DOKŁADNIE te klucze: literał SQL
 # wymienia kolumny po nazwie, więc brak klucza byłby cichym NULL-em, a nadmiar - zgubionym faktem.
 # `hdr_hash` jest KOTWICĄ (CHECK 0021: NULL albo `== header_hash`) - opis w nagłówku migracji.
+# `hdr_rule` (0025, AR-33) - numer reguły koercji, którą zebrano fakty (`COPY_TESTIMONY_RULE`); jedzie
+# w tym samym słowniku, więc każdy z trzech pisarzy stempluje go tym samym zapisem co fakty.
 COPY_FACTS = ("image_count", "image_roles", "hdr_filter", "hdr_imagetyp", "hdr_object",
               "hdr_telescop", "hdr_instrume", "hdr_exptime", "hdr_xbinning", "hdr_date_obs",
-              "hdr_hash")
+              "hdr_hash", "hdr_rule")
 
 
 def _copy_facts_checked(copy_facts):
     """EXPECT na kształcie słownika faktów kopii - jeden strażnik dla trzech pisarzy (dodanie,
-    odświeżenie, uzupełnienie). Zwraca słownik z kompletem kluczy; `None` → same NULL-e."""
+    odświeżenie, uzupełnienie). Zwraca słownik z kompletem kluczy; `None` → same NULL-e.
+
+    Kotwica i reguła występują RAZEM (0025): fakty bez numeru reguły wróciłyby do bazy jako „reguła
+    nieznana" i sterownik czytałby je ponownie przy każdej dostawie; reguła bez faktów to sprzeczność,
+    którą odbija też CHECK 0025."""
     if copy_facts is None:
         return dict.fromkeys(COPY_FACTS)
     if set(copy_facts) != set(COPY_FACTS):
         raise ValueError(f"fakty kopii: klucze {sorted(copy_facts)} != {sorted(COPY_FACTS)}")
+    if (copy_facts["hdr_hash"] is None) != (copy_facts["hdr_rule"] is None):
+        raise ValueError(f"fakty kopii: kotwica {copy_facts['hdr_hash']!r} bez pary z regułą "
+                         f"{copy_facts['hdr_rule']!r}")
     return copy_facts
 
 
@@ -264,8 +276,8 @@ def add_location(con, *, frame_id, volume, path, drive_letter=None, tier=None, m
             "file_sha1, header_hash, hdu_index, compressed, size_bytes, last_verified_at, "
             "unreadable_since, unreadable_kind, unreadable_reason, "
             "image_count, image_roles, hdr_filter, hdr_imagetyp, hdr_object, hdr_telescop, "
-            "hdr_instrume, hdr_exptime, hdr_xbinning, hdr_date_obs, hdr_hash) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "hdr_instrume, hdr_exptime, hdr_xbinning, hdr_date_obs, hdr_hash, hdr_rule) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (frame_id, volume, drive_letter, path, tier, mtime,
              file_sha1, header_hash, hdu_index, compressed, size_bytes, now,
              unreadable_since, unreadable_kind, unreadable_reason,
@@ -841,7 +853,8 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
       - wołający, który przeczytał plik, podaje je zawsze (także same NULL-e przy nagłówku
       nieczytelnym). `None` znaczy „faktów kopii NIE czytałem" i zostawia je, jakie są - to NIE jest
       cichy wektor zwietrzenia, bo kotwica `hdr_hash == header_hash` (CHECK 0021) odbija zmianę
-      odcisku nagłówka bez odświeżenia faktów IntegrityError-em.
+      odcisku nagłówka bez odświeżenia faktów IntegrityError-em. Fakty wiersza reguły NOWSZEJ niż
+      reguła wołającego (AR-33) przy tym samym odcisku zostają - jak w `record_copy_facts`.
     - **`inplace_gen`** (astra, 2026-09-27): generacja dziennika zapisu w miejscu, którą skan
       zapamiętał PRZED bramką izolacji (`inplace_generation`). Operacja tej lokacji o większym `id`
       → `StaleScanRecord` w TEJ SAMEJ transakcji co zapis, zero zapisu: odczyt mógł trafić w zapis
@@ -865,13 +878,21 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
             "SELECT mtime, file_sha1, header_hash, hdu_index, compressed, size_bytes, "
             "unreadable_since, unreadable_kind, unreadable_reason, present, "
             "image_count, image_roles, hdr_filter, hdr_imagetyp, hdr_object, hdr_telescop, "
-            "hdr_instrume, hdr_exptime, hdr_xbinning, hdr_date_obs, hdr_hash "
+            "hdr_instrume, hdr_exptime, hdr_xbinning, hdr_date_obs, hdr_hash, hdr_rule "
             "FROM location WHERE id = ?", (location_id,)).fetchone()
         if row is None:
             raise ValueError(f"location:{location_id} nie istnieje")
         _refuse_if_newer_inplace(con, location_id, inplace_gen)
-        # Faktów kopii nieczytanych (`None`) nie ruszamy: zostają wartościami z wiersza.
-        after.update(cf if cf is not None else {k: row[k] for k in COPY_FACTS})
+        # Faktów kopii nieczytanych (`None`) nie ruszamy: zostają wartościami z wiersza. Tak samo
+        # fakty wiersza zebrane regułą NOWSZĄ niż reguła wołającego (AR-33, kontrakt
+        # `record_copy_facts`: binarka starsza od bazy niczego nie cofa) - o ile opisują ten sam
+        # nagłówek. Po zmianie odcisku fakty wiersza mówią o pliku, którego już nie ma (i CHECK 0021
+        # by je odbił), więc jedyną prawdą są fakty wołającego, nawet starszej reguły.
+        zachowaj = cf is None or (
+            cf["hdr_rule"] is not None and row["hdr_hash"] == header_hash
+            and copy_facts_state(row["hdr_hash"], row["hdr_rule"], rule=cf["hdr_rule"])
+            == FAKTY_NOWSZE)
+        after.update({k: row[k] for k in COPY_FACTS} if zachowaj else cf)
         changed = {k: {"before": row[k], "after": after[k]}
                    for k in _LOCATION_FACTS if row[k] != after[k]}
         if not changed:
@@ -882,7 +903,7 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
             "unreadable_reason = ?, present = ?, last_verified_at = ?, "
             "image_count = ?, image_roles = ?, hdr_filter = ?, hdr_imagetyp = ?, hdr_object = ?, "
             "hdr_telescop = ?, hdr_instrume = ?, hdr_exptime = ?, hdr_xbinning = ?, "
-            "hdr_date_obs = ?, hdr_hash = ? WHERE id = ?",
+            "hdr_date_obs = ?, hdr_hash = ?, hdr_rule = ? WHERE id = ?",
             (mtime, file_sha1, header_hash, hdu_index, compressed, size_bytes, unreadable_since,
              unreadable_kind, unreadable_reason, present, now,
              *(after[k] for k in COPY_FACTS), location_id))
@@ -1031,14 +1052,17 @@ def record_copy_facts(con, *, location_id, copy_facts, now, actor="backfill:copi
         plik niesie DOKŁADNIE ten nagłówek, który baza zna. Inny odcisk znaczy, że kopia zmieniła się
         na dysku od ostatniego skanu; wtedy fakty należą do skanu, który odświeży też `header`
         klatki, `cards` i pochodne - uzupełnienie nie ma prawa go wyprzedzić częściową prawdą;
-      * `hdr_hash IS NULL` - faktów jeszcze nie ma. Uzupełnienie nie nadpisuje tego, co zebrał skan.
+      * faktów jeszcze nie ma (`hdr_hash IS NULL`) ALBO zebrano je regułą koercji starszą niż ta,
+        którą niesie zapis (`hdr_rule` NULL albo mniejszy - 0025, AR-33). Uzupełnienie nie nadpisuje
+        tego, co skan zebrał regułą bieżącą (ani nowszą - binarka starsza od bazy niczego nie cofa).
     Ta sama para chroni przed wyścigiem z równoległym skanem (WAL - GUI i CLI naraz).
 
     Ślad: `location.refreshed` z `{pole: {before, after}}` - ten sam kształt, którym `refresh_location`
-    opisuje każdą inną zmianę faktów kopii, a `actor` odróżnia drogę w dzienniku.
+    opisuje każdą inną zmianę faktów kopii, a `actor` odróżnia drogę w dzienniku. Przy dociągnięciu
+    po zmianie reguły payload niesie przejście `hdr_rule` i dokładnie te pola, które nowy rzut zmienił.
 
-    ZWRACA bool: `True` = zapisano; `False` = odmowa kotwicy (odcisk inny albo fakty już są) - wtedy
-    ZERO UPDATE i ZERO eventu.
+    ZWRACA bool: `True` = zapisano; `False` = odmowa kotwicy (odcisk inny albo fakty bieżącej reguły
+    już są) - wtedy ZERO UPDATE i ZERO eventu.
 
     `inplace_gen` (astra, 2026-09-27) - generacja dziennika zapisu w miejscu zapamiętana przez
     sterownik PRZED bramką izolacji (kontrakt jak w `refresh_location`): operacja tej lokacji o
@@ -1051,23 +1075,45 @@ def record_copy_facts(con, *, location_id, copy_facts, now, actor="backfill:copi
     with _immediate(con):
         row = con.execute(
             "SELECT header_hash, image_count, image_roles, hdr_filter, hdr_imagetyp, hdr_object, "
-            "hdr_telescop, hdr_instrume, hdr_exptime, hdr_xbinning, hdr_date_obs, hdr_hash "
-            "FROM location WHERE id = ?", (location_id,)).fetchone()
+            "hdr_telescop, hdr_instrume, hdr_exptime, hdr_xbinning, hdr_date_obs, hdr_hash, "
+            "hdr_rule FROM location WHERE id = ?", (location_id,)).fetchone()
         if row is None:
             raise ValueError(f"location:{location_id} nie istnieje")
         _refuse_if_newer_inplace(con, location_id, inplace_gen)
-        if row["hdr_hash"] is not None or row["header_hash"] != cf["hdr_hash"]:
+        do_dociagniecia = copy_facts_state(row["hdr_hash"], row["hdr_rule"],
+                                           rule=cf["hdr_rule"]) == FAKTY_DO_DOCIAGNIECIA
+        if not do_dociagniecia or row["header_hash"] != cf["hdr_hash"]:
             return False
         changed = {k: {"before": row[k], "after": cf[k]} for k in COPY_FACTS if row[k] != cf[k]}
         con.execute(
             "UPDATE location SET image_count = ?, image_roles = ?, hdr_filter = ?, "
             "hdr_imagetyp = ?, hdr_object = ?, hdr_telescop = ?, hdr_instrume = ?, "
-            "hdr_exptime = ?, hdr_xbinning = ?, hdr_date_obs = ?, hdr_hash = ? "
-            "WHERE id = ? AND hdr_hash IS NULL AND header_hash = ?",
-            (*(cf[k] for k in COPY_FACTS), location_id, cf["hdr_hash"]))
+            "hdr_exptime = ?, hdr_xbinning = ?, hdr_date_obs = ?, hdr_hash = ?, hdr_rule = ? "
+            "WHERE id = ? AND header_hash = ? "
+            "  AND (hdr_hash IS NULL OR hdr_rule IS NULL OR hdr_rule < ?)",
+            (*(cf[k] for k in COPY_FACTS), location_id, cf["hdr_hash"], cf["hdr_rule"]))
         emit_event(con, actor=actor, verb="location.refreshed",
                    target=f"location:{location_id}", now=now, payload=changed)
     return True
+
+
+def flag_copy_facts_summary(con, summary, now, actor="backfill:copies"):
+    """Przebieg uzupełnienia faktów kopii ZBIORCZO (AR-32) - JEDEN `event(location.copy_facts_summary)`
+    na przebieg `scan.backfill_copy_facts`, obok per-lokacyjnych `location.refreshed` z
+    `record_copy_facts`. Kanon operacji masowej (`backfill_filter_canon`, `flag_*_review_summary`)
+    mówi o jednym zdarzeniu zbiorczym; per-lokacyjne zostają, bo tylko one niosą `{before, after}`
+    pól jednej kopii. Zbiorcze niesie to, czego nie ma żaden ślad per kopia: odmowy (`stale`,
+    `missing`, `failed`, `elsewhere`, `raced`) ze ścieżkami, `remaining` i przerwanie - raport
+    przebiegu ma w dzienniku jedno źródło.
+
+    `summary` = słownik pól `scan.CopyFactsSummary` (wołający podaje `dataclasses.asdict`; repo nie
+    importuje `scan`). Audyt, NIE zapis stanu. Przebieg bez kandydatów (`rows == 0`) → ZERO eventu:
+    powtórne wywołanie jest no-opem także w dzienniku (wzorzec `backfill_filter_canon`)."""
+    if not summary["rows"]:
+        return
+    with _tx(con):
+        emit_event(con, actor=actor, verb="location.copy_facts_summary", target="location:*",
+                   now=now, payload=dict(summary))
 
 
 # Prefiks powodu w dzienniku przy oznaczeniu kopii (#13) - JEDEN właściciel frazy. Od P4-2 żyje
@@ -2172,7 +2218,8 @@ def clear_object_assignment(con, *, frame_ids, now, uid="local"):
                          canons=tuple(kanony))
 
 
-def clear_object_tombstone(con, *, frame_id, now, actor="user:local"):
+def clear_object_tombstone(con, *, frame_id, now, actor="user:local", commit_id=None,
+                           location_id=None):
     """ZGAŚ nagrobek `user_cleared` — jedyna droga wyjścia z werdyktu ręki poza kolejnym gestem.
 
     Woła to `writeback` po wpisaniu karty `OBJECT` do pliku (S2b): człowiek powiedział „to nie ten
@@ -2184,23 +2231,102 @@ def clear_object_tombstone(con, *, frame_id, now, actor="user:local"):
     zakaz — a bramka §5.9 liczy odpięcia i para bez odpowiednika rozjechałaby jej bilans.
 
     PAMIĘĆ GAŚNIE RAZEM Z NAGROBKIEM (0017): znika zakaz, więc znika też wskazanie na to, czego
-    zakaz dotyczył. `CHECK` w DDL i tak nie przepuściłby wiersza bez nagrobka, ale z pamięcią."""
+    zakaz dotyczył. `CHECK` w DDL i tak nie przepuściłby wiersza bez nagrobka, ale z pamięcią.
+
+    ZGASZENIE PAMIĘTA, CZYM BYŁO (AR-38): `commit_id` i `location_id` = commit i plik, którego
+    karta zgasiła nagrobek. Idą do zdarzenia razem z `cleared_id` (pamięć sprzed zgaszenia), żeby
+    cofnięcie TEGO commitu umiało nagrobek odtworzyć (`_restore_object_tombstone_tx`)."""
     with _immediate(con):
-        return _clear_object_tombstone_tx(con, frame_id=frame_id, now=now, actor=actor)
+        return _clear_object_tombstone_tx(con, frame_id=frame_id, now=now, actor=actor,
+                                          commit_id=commit_id, location_id=location_id)
 
 
-def _clear_object_tombstone_tx(con, *, frame_id, now, actor):
+def _clear_object_tombstone_tx(con, *, frame_id, now, actor, commit_id=None, location_id=None):
     """Rdzeń `clear_object_tombstone` BEZ własnej transakcji - wspólny dla gestu commitu drogą
     atomową i dla dokończenia zapisu w miejscu (`finish_inplace_op`), które gasi nagrobek w tej
-    samej transakcji co faza operacji i statusy stagingu. Jedna klinga, dwa zakresy transakcji."""
+    samej transakcji co faza operacji i statusy stagingu. Jedna klinga, dwa zakresy transakcji.
+
+    Payload niesie `cleared_id` (pamięć gaszonego nagrobka, także `None` dla nagrobka bez pamięci)
+    i - gdy gasi commit - `commit_id`/`location_id`. Zdarzenie jest JEDYNYM miejscem, w którym
+    zgaszony stan przeżywa: wiersz klatki po zgaszeniu go już nie ma."""
     row = con.execute(
-        "SELECT object_source FROM frame WHERE id = ?", (frame_id,)).fetchone()
+        "SELECT object_source, object_cleared_id FROM frame WHERE id = ?", (frame_id,)).fetchone()
     if row is None or row["object_source"] != "user_cleared":
         return False
     con.execute("UPDATE frame SET object_source = NULL, object_cleared_id = NULL WHERE id = ?",
                 (frame_id,))
+    payload = {"reason": "object_card_written", "cleared_id": row["object_cleared_id"]}
+    if commit_id is not None:
+        payload.update(commit_id=int(commit_id), location_id=int(location_id))
     emit_event(con, actor=actor, verb="object.tombstone_cleared",
-               target=f"frame:{frame_id}", now=now, payload={"reason": "object_card_written"})
+               target=f"frame:{frame_id}", now=now, payload=payload)
+    return True
+
+
+def restore_object_tombstone(con, *, frame_id, commit_id, location_id, now, actor="user:local"):
+    """Odtworzenie nagrobka przy cofnięciu commitu drogą atomową (`writeback.undo`) - wołane w
+    zakresie `atomic` re-syncu cofnięcia, do którego `_immediate` dołącza. Reguły w rdzeniu."""
+    with _immediate(con):
+        return _restore_object_tombstone_tx(con, frame_id=frame_id, commit_id=commit_id,
+                                            location_id=location_id, now=now, actor=actor)
+
+
+def _restore_object_tombstone_tx(con, *, frame_id, commit_id, location_id, now,
+                                 actor="user:local"):
+    """ODTWÓRZ nagrobek ręki zgaszony przez commit `commit_id` na pliku `location_id` (AR-38,
+    decyzja Zdzinia: „cofnięcie odtwarza wykluczenie"). BEZ własnej transakcji - woła ją cofnięcie
+    w transakcji swojego re-syncu (droga atomowa, `repo.atomic`) albo dokończenia operacji
+    cofnięcia w miejscu (`finish_inplace_op`), więc nagrobek wraca razem z bazą opisującą plik
+    sprzed commitu albo wcale.
+
+    ŹRÓDŁO: zdarzenie `object.tombstone_cleared` tej klatki z `commit_id` i `location_id` w payloadzie
+    (para jest kluczem - jeden commit gasi nagrobek klatki co najwyżej raz, a druga kopia tej samej
+    klatki w tym commicie trafia już na klatkę bez nagrobka). Commit sprzed AR-38 takiego zdarzenia
+    nie ma → `False`, zero zapisu: cofnięcie zachowuje się jak dawniej. Payload bez klucza
+    `cleared_id` to zdarzenie, któremu nie ufamy, więc też `False`.
+
+    BEZ ODTWORZENIA (`False`, zero zapisu):
+      * nagrobek tego commitu i pliku już odtworzony (`object.tombstone_restored` z tą parą) -
+        powtórzone cofnięcie go nie zdubluje;
+      * klatka ma źródło ręki (`STICKY_OBJECT_SOURCES`): ręka przypisała obiekt albo cofnęła go
+        ponownie po commicie - jej nowszy werdykt wygrywa, nic się nie zmienia.
+
+    Gdy automat (resolver z karty) zdążył przypiąć obiekt, odpięcie emituje `object.unassigned`
+    (parytet §5.9), a odtworzenie - `object.tombstone_restored` z pamięcią i parą commitu."""
+    target = f"frame:{frame_id}"
+    zgaszenie = con.execute(
+        "SELECT payload FROM event WHERE target = ? AND verb = 'object.tombstone_cleared' "
+        "AND json_extract(payload, '$.commit_id') = ? "
+        "AND json_extract(payload, '$.location_id') = ? ORDER BY id DESC LIMIT 1",
+        (target, int(commit_id), int(location_id))).fetchone()
+    if zgaszenie is None:
+        return False
+    zgaszone = json.loads(zgaszenie["payload"])
+    if "cleared_id" not in zgaszone:
+        return False
+    odtworzone = con.execute(
+        "SELECT 1 FROM event WHERE target = ? AND verb = 'object.tombstone_restored' "
+        "AND json_extract(payload, '$.commit_id') = ? "
+        "AND json_extract(payload, '$.location_id') = ? LIMIT 1",
+        (target, int(commit_id), int(location_id))).fetchone()
+    if odtworzone is not None:
+        return False
+    fr = con.execute("SELECT object_id, object_source FROM frame WHERE id = ?",
+                     (frame_id,)).fetchone()
+    if fr is None or fr["object_source"] in STICKY_OBJECT_SOURCES:
+        return False
+    if fr["object_id"] is not None:
+        emit_event(con, actor=actor, verb="object.unassigned", target=target, now=now,
+                   payload={"object_id": fr["object_id"], "object_source": fr["object_source"]},
+                   reason="tombstone_restored")
+    con.execute(
+        "UPDATE frame SET object_id = NULL, object_source = 'user_cleared', "
+        "object_cleared_id = ? WHERE id = ?",
+        (zgaszone["cleared_id"], frame_id))
+    emit_event(con, actor=actor, verb="object.tombstone_restored", target=target, now=now,
+               payload={"commit_id": int(commit_id), "location_id": int(location_id),
+                        "cleared_id": zgaszone["cleared_id"], "was_object_id": fr["object_id"],
+                        "was_source": fr["object_source"]})
     return True
 
 
@@ -2787,7 +2913,7 @@ def set_inplace_op_phase(con, *, op_id, phase, now, reason=None, expect_phase=No
 
 def _op_in_phase(con, op_id, phase):
     """Wiersz operacji w fazie `phase` (pod transakcją wołającego) albo `ValueError`."""
-    op = con.execute("SELECT id, kind, location_id, phase FROM inplace_op WHERE id = ?",
+    op = con.execute("SELECT id, kind, location_id, commit_id, phase FROM inplace_op WHERE id = ?",
                      (op_id,)).fetchone()
     if op is None or op["phase"] != phase:
         raise ValueError(f"operacja {op_id} nie jest w fazie {phase!r} "
@@ -2806,6 +2932,8 @@ def finish_inplace_op(con, *, op_id, now, actor="user:local"):
     szukało wierszy po statusie 'failed': crash po `written` zostawiał wiersze 'pending' na zawsze.
     Teraz te trzy fakty albo zachodzą razem, albo wcale - i dotyczą DOKŁADNIE wierszy operacji, nie
     wszystkich wierszy przebiegu. Operacja nie w fazie `written` → `ValueError`, zero zapisu.
+    Operacja `undo` w tej samej transakcji ODTWARZA nagrobek zgaszony przez cofany commit
+    (`_restore_object_tombstone_tx`, AR-38).
     Transient (faza, staging) bez eventu; nagrobek emituje swój. Zwraca liczbę oznaczonych wpisów."""
     with _immediate(con):
         op = _op_in_phase(con, op_id, "written")
@@ -2818,7 +2946,16 @@ def finish_inplace_op(con, *, op_id, now, actor="user:local"):
         if op["kind"] == "commit" and any(r["keyword"] == "OBJECT" for r in rows):
             loc = con.execute("SELECT frame_id FROM location WHERE id = ?",
                               (op["location_id"],)).fetchone()
-            _clear_object_tombstone_tx(con, frame_id=loc["frame_id"], now=now, actor=actor)
+            _clear_object_tombstone_tx(con, frame_id=loc["frame_id"], now=now, actor=actor,
+                                       commit_id=op["commit_id"],
+                                       location_id=op["location_id"])
+        elif op["kind"] == "undo" and op["commit_id"] is not None:
+            # Cofnięcie w miejscu odtwarza nagrobek zgaszony przez cofany commit (AR-38) - w tej
+            # samej transakcji co faza `synced`, więc nie wyprzedzi ani nie zgubi dokończenia.
+            loc = con.execute("SELECT frame_id FROM location WHERE id = ?",
+                              (op["location_id"],)).fetchone()
+            _restore_object_tombstone_tx(con, frame_id=loc["frame_id"], commit_id=op["commit_id"],
+                                         location_id=op["location_id"], now=now, actor=actor)
     return len(rows)
 
 
@@ -3172,13 +3309,17 @@ def flag_calibration_lineage_summary(con, items, now, actor="lineage"):
 def upsert_integration(con, *, master_frame_id, integ_hash, tool, window_start, window_end,
                        declared_rows, drizzle_inputs, disabled_inputs, degenerate, ambiguous,
                        telescope_mismatch, unresolved_reason, now, actor="stacks",
-                       raw_unreferenced=None):
+                       raw_unreferenced=None, creation_time=None):
     """Wiersz `integration` dla klatki mastera — `(integration_id, zmienione)`.
 
     `raw_unreferenced` (G2-1d, migracja 0020) to UWAGA obok werdyktu, nie drugi werdykt: ile
     RAW-ów przebieg widział i nie umiał umieścić w czasie. Jedzie w TEJ liście pól, bo jest
     wyliczana z bazy co przebieg (lustro `telescope_mismatch`), a nie werdyktem ręki (jak offset).
     Domyślne `None` = „brak uwagi"; CHECK 0020 odbija zero i dubel z `offset_unknown`.
+
+    `creation_time` (AR-10, migracja 0026) to fakt zeznania pliku jak `tool`: `XISF:CreationTime`,
+    data stosów sprzed sygnatury integracji. Jedyny wołający (`stacks.run_stack_lineage`) chroni
+    go przy nieczytelnym pliku tak samo jak sygnaturę.
 
     Idempotentny na UNIQUE(master_frame_id) z 0012: identyczny komplet faktów → `False` BEZ eventu
     (drugi przebieg nie ma prawa puchnąć dziennika). Inaczej INSERT `integration.recorded` albo
@@ -3197,20 +3338,21 @@ def upsert_integration(con, *, master_frame_id, integ_hash, tool, window_start, 
               "drizzle_inputs": drizzle_inputs, "disabled_inputs": disabled_inputs,
               "degenerate": degenerate, "ambiguous": ambiguous,
               "telescope_mismatch": telescope_mismatch, "unresolved_reason": unresolved_reason,
-              "raw_unreferenced": raw_unreferenced}
+              "raw_unreferenced": raw_unreferenced, "creation_time": creation_time}
     wartosci = list(fields.values())
     with _immediate(con):
         row = con.execute(
             "SELECT id, integ_hash, tool, window_start, window_end, declared_rows, drizzle_inputs, "
             "disabled_inputs, degenerate, ambiguous, telescope_mismatch, unresolved_reason, "
-            "raw_unreferenced "
+            "raw_unreferenced, creation_time "
             "FROM integration WHERE master_frame_id = ?", (master_frame_id,)).fetchone()
         if row is None:
             cur = con.execute(
                 "INSERT INTO integration(master_frame_id, created_at, integ_hash, tool, "
                 "window_start, window_end, declared_rows, drizzle_inputs, disabled_inputs, "
-                "degenerate, ambiguous, telescope_mismatch, unresolved_reason, raw_unreferenced) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "degenerate, ambiguous, telescope_mismatch, unresolved_reason, raw_unreferenced, "
+                "creation_time) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [master_frame_id, now] + wartosci)
             iid = cur.lastrowid
             emit_event(con, actor=actor, verb="integration.recorded",
@@ -3224,13 +3366,43 @@ def upsert_integration(con, *, master_frame_id, integ_hash, tool, window_start, 
             "UPDATE integration SET updated_at = ?, integ_hash = ?, tool = ?, window_start = ?, "
             "window_end = ?, declared_rows = ?, drizzle_inputs = ?, disabled_inputs = ?, "
             "degenerate = ?, ambiguous = ?, telescope_mismatch = ?, unresolved_reason = ?, "
-            "raw_unreferenced = ? WHERE id = ?", [now] + wartosci + [row["id"]])
+            "raw_unreferenced = ?, creation_time = ? WHERE id = ?", [now] + wartosci + [row["id"]])
         emit_event(con, actor=actor, verb="integration.updated",
                    target=f"frame:{master_frame_id}", now=now,
                    payload={"integration_id": row["id"],
                             "before": {k: v[0] for k, v in zmiany.items()},
                             "after": {k: v[1] for k, v in zmiany.items()}})
         return row["id"], True
+
+
+def record_integration_creation_time(con, *, master_frame_id, creation_time, now, actor="stacks"):
+    """Sam `creation_time` (AR-10, 0026) w ISTNIEJĄCEJ głowie integracji - `True`, gdy drgnął.
+
+    Wąska siostra `upsert_integration` dla jedynej gałęzi przebiegu, która głowy nie przepisuje:
+    stos z rodowodem chronionym i powodem (`stacks.run_stack_lineage`) zostaje w całości, a jego
+    czytelny plik i tak zeznaje datę - bez tej klingi taki stos nigdy by jej nie dostał. Pozostałe
+    pola są tam nietykalne, więc pełny upsert nie wchodzi w grę.
+
+    EXPECT: pusta data i brak głowy to błąd wołającego - klinga uzupełnia fakt, nie kasuje go i nie
+    zakłada rekordu. Ta sama data → `False` bez eventu; inaczej `integration.updated` z `{before,
+    after}` jak w `upsert_integration` (jeden kształt payloadu dla czytelników dziennika)."""
+    if not creation_time:
+        raise ValueError(f"data stosu {master_frame_id}: pusta {creation_time!r}")
+    with _immediate(con):
+        row = con.execute("SELECT id, creation_time FROM integration WHERE master_frame_id = ?",
+                          (master_frame_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"data stosu {master_frame_id}: brak głowy integracji")
+        if row["creation_time"] == creation_time:
+            return False
+        con.execute("UPDATE integration SET updated_at = ?, creation_time = ? WHERE id = ?",
+                    (now, creation_time, row["id"]))
+        emit_event(con, actor=actor, verb="integration.updated",
+                   target=f"frame:{master_frame_id}", now=now,
+                   payload={"integration_id": row["id"],
+                            "before": {"creation_time": row["creation_time"]},
+                            "after": {"creation_time": creation_time}})
+        return True
 
 
 UTC_OFFSET_MAX_MIN = 840
@@ -3442,6 +3614,64 @@ def flag_stack_lineage_summary(con, items, now, actor="stacks", kept_unread=0, k
                             "kept_unread": kept_unread,
                             "kept_proven": kept_proven,
                             "kept_frames": list(kept_frames)})
+
+
+def keep_stack_versions(con, *, frame_ids, group_key, now, uid="local"):
+    """WERDYKT „ZOSTAWIAM WSZYSTKIE" grupy wersji stosów (AR-10, migracja 0026) - ile klatek drgnęło.
+
+    Człowiek ma prawo zostawić kilka integracji tego samego materiału i nigdy do nich nie wracać;
+    bez tego zapisu wiersz Porządków „Wersje stosów" nie miał innej drogi do zera niż skasowanie
+    pliku poza programem. Wiersz na KAŻDEGO członka grupy, wszystkie z jednym `group_key`
+    (identyfikator grupy z chwili gestu, `queries._id_grupy_wersji`) - read-model uznaje grupę za
+    rozstrzygniętą, gdy każdy jej obecny członek ma wiersz z tym samym kluczem (powód w 0026).
+
+    Członek z werdyktem INNEJ grupy dostaje klucz bieżącego gestu: gest opisuje grupę, którą człowiek
+    właśnie widzi. Idempotentny: klatki z tym samym kluczem → pominięte, bez eventu. EXPECT: pusty
+    klucz albo mniej niż dwie klatki to błąd wołającego (grupa ma co najmniej dwa stosy)."""
+    ids = sorted({int(i) for i in frame_ids})
+    if not group_key or len(ids) < 2:
+        raise ValueError(f"werdykt wersji: grupa {group_key!r} z {len(ids)} klatek")
+    zmienione = 0
+    with _immediate(con):
+        przed = {r["frame_id"]: r["group_key"] for r in con.execute(
+            "SELECT frame_id, group_key FROM stack_version_kept "
+            "WHERE frame_id IN (SELECT value FROM json_each(?))", (json.dumps(ids),))}
+        for fid in ids:
+            if przed.get(fid) == group_key:
+                continue
+            con.execute(
+                "INSERT INTO stack_version_kept(frame_id, group_key, decided_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(frame_id) DO UPDATE SET group_key = excluded.group_key, "
+                "decided_at = excluded.decided_at", (fid, group_key, now))
+            emit_event(con, actor=f"user:{uid}", verb="stack_versions.kept",
+                       target=f"frame:{fid}", now=now,
+                       payload={"group_key": group_key, "group_key_before": przed.get(fid),
+                                "members": ids})
+            zmienione += 1
+    return zmienione
+
+
+def reopen_stack_versions(con, *, frame_ids, now, uid="local"):
+    """COFNIĘCIE werdyktu „zostawiam wszystkie" (droga powrotu `keep_stack_versions`) - ile klatek
+    drgnęło. Kasuje wiersze werdyktu tych klatek, więc grupa wraca do roboty i do plakietki.
+
+    Kasacja, nie flaga: werdykt jest jedynym faktem wiersza, a jego historia (kto, kiedy, jaki klucz)
+    zostaje w dzienniku - event niesie stan sprzed cofnięcia. Klatka bez werdyktu → pominięta bez
+    eventu (idempotencja)."""
+    ids = sorted({int(i) for i in frame_ids})
+    zmienione = 0
+    with _immediate(con):
+        for r in con.execute(
+                "SELECT frame_id, group_key, decided_at FROM stack_version_kept "
+                "WHERE frame_id IN (SELECT value FROM json_each(?)) ORDER BY frame_id",
+                (json.dumps(ids),)).fetchall():
+            con.execute("DELETE FROM stack_version_kept WHERE frame_id = ?", (r["frame_id"],))
+            emit_event(con, actor=f"user:{uid}", verb="stack_versions.reopened",
+                       target=f"frame:{r['frame_id']}", now=now,
+                       payload={"group_key_before": r["group_key"],
+                                "decided_at_before": r["decided_at"]})
+            zmienione += 1
+    return zmienione
 
 
 # ═══════════════════════════════════════════════ 1.8 kuratela celów + park (planer T4)

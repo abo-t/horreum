@@ -71,6 +71,8 @@ from collections.abc import Callable
 from astropy.io import fits
 
 from . import exif, repo, scan
+from .card_rules import FITS_RECORD as _FITS_RECORD
+from .card_rules import FITS_STRING_MAX, card_violation  # noqa: F401 - re-eksport („REGUŁY KARTY")
 
 # ============================================================ WRITER (port dawcy fits_io)
 
@@ -107,99 +109,11 @@ class WriteResult:
 
 
 # ============================================================ REGUŁY KARTY (jeden właściciel)
-# Treść, którą ŁATA wnosi do nagłówka, spełnia reguły karty FITS 4.0 (§4.1-4.2) - w OBU formatach:
-# XISF przejmuje je wprost (spec XISF 1.0 Rev. 1 §11.6: dane `<FITSKeyword>` spełniają wymagania
-# FITS 4.0 dla kart). Właściciel jest JEDEN - `card_violation`: woła go pisarz FITS, pisarz XISF
-# i dialog naprawy nagłówka (`gui/app.py`), który pyta go przed stagingiem, żeby odmowa padła
-# wcześniej, a nie inną regułą.
-#
-# Dlaczego tu, a nie w astropy czy w czytniku - zmierzone na astropy 8.0.0: znak sterujący
-# i nie-ASCII odrzuca już przypisanie karty, ale angielskim `ValueError`, czyli dawniej 'failed'
-# („coś się zepsuło") zamiast odmowy; wartość dłuższa niż rekord przechodzi po cichu jako CONTINUE,
-# za długi komentarz jest po cichu UCINANY, a zła nazwa przy `add` zakłada kartę HIERARCH. Przy XISF
-# nie odmawiał nikt: znak sterujący szedł do nagłówka surowo, a nagłówek przestawał być poprawnym
-# XML 1.0 (spec §9.5 - PixInsight takiego pliku nie otworzy). Czytnik Horreum ten znak neutralizuje
-# (`scan.xml_parsable`), więc odczyt po zapisie tego nie widział.
-#
-# Reguły pilnują TREŚCI ŁATY, nie pliku: zastana nielegalna treść (w archiwum jest plik z bajtem
-# 0x07 w historii przetwarzania) nie blokuje łaty legalnej wartości. Nazwę sprawdzamy tylko wtedy,
-# gdy łata ją WNOSI (nowa karta) - `set` na istniejącej karcie jej nazwy nie zmienia.
-
-_FITS_NAME = re.compile(r"[A-Z0-9_-]{1,8}")   # §4.1.2.1: do 8 znaków z tego zbioru
-FITS_STRING_MAX = 68      # tekst w apostrofach w JEDNYM rekordzie: 80 - nazwa 8 - "= " 2 - apostrofy 2
-_FITS_RECORD = 80
-_FITS_VALUE_START = 10    # nazwa (8) + wskaźnik wartości "= " (2)
-_FITS_FIXED_FIELD = 20    # stały format (§4.2): pole wartości zajmuje co najmniej kolumny 11-30
-_FITS_COMMENT_SEP = 3     # " / "
-
-
-@dataclasses.dataclass(frozen=True)
-class CardViolation:
-    """Naruszenie reguł karty wniesione przez łatę. `reason` idzie do raportu pisarza; `kind`
-    ('name' | 'chars' | 'length') oraz `length`/`limit` służą powierzchniom, które mówią własnym
-    językiem (i18n dialogu naprawy nagłówka)."""
-    kind: str
-    reason: str
-    length: int | None = None
-    limit: int | None = None
-
-
-def _first_illegal(text):
-    """Pierwszy znak spoza drukowalnego ASCII (0x20-0x7E) albo `None`. FITS 4.0 dopuszcza w wartości
-    tekstowej (§4.2.1.1) i w komentarzu (§4.1.2.3) wyłącznie ten zbiór; XML 1.0 jest od niego
-    szerszy, więc zbiór FITS domyka też legalność nagłówka XISF."""
-    return next((ch for ch in text if not " " <= ch <= "~"), None)
-
-
-def card_violation(keyword, value, comment=None, *, new_card=False) -> CardViolation | None:
-    """Czy karta `keyword = value / comment` łamie reguły FITS 4.0 → `CardViolation` albo `None`.
-
-    Trzy reguły, w tej kolejności:
-    1. **Nazwa** (tylko `new_card=True`, bo tylko nowa karta wnosi nazwę): po `strip().upper()` -
-       tak ją zapisują oba pisarze - do 8 znaków `A-Z 0-9 _ -`.
-    2. **Znaki** wartości i komentarza: drukowalne ASCII 0x20-0x7E. Znak sterujący w XISF łamie też
-       XML 1.0, i to bez ratunku: nie ma go jak zakodować (`scan._escape_xml`).
-    3. **Długość** - karta mieści się w JEDNYM rekordzie 80 znaków. Wartość liczona jak tekst
-       w apostrofach z podwojonym apostrofem wewnątrz (tak ją zapisuje FITS i `scan.quote_fits`),
-       limit `FITS_STRING_MAX`; dla liczby limit jest o dwa znaki luźniejszy, a liczba tej długości
-       nie istnieje, więc reguła jest jedna. Dłuższa wartość wymagałaby kontynuacji CONTINUE (astropy
-       robi ją po cichu), a XISF-owy `<FITSKeyword>` nie ma rekordów, na które mógłby się rozpaść.
-       Komentarz mieści się w reszcie rekordu po ` / ` przy polu wartości STAŁEGO formatu
-       (co najmniej 20 znaków) - tak kartę układa astropy, więc dla FITS reguła jest dokładna
-       (poza nią astropy ucina komentarz po cichu), a dla XISF ostrożna. Liczymy komentarz
-       WNOSZONY przez łatę; zastany komentarz karty przy `set` bez komentarza zostaje poza regułą
-       (XISF go nie rusza, a FITS przy zmianie wartości układa kartę od nowa i potrafi go uciąć -
-       to osobny dług pisarza FITS, nie reguła treści łaty).
-
-    Wartość sprawdzamy w postaci TEKSTOWEJ (`str(value)`) - dokładnie tej, która stoi w stagingu
-    i którą pisarz XISF wstawia do pliku."""
-    name = str(keyword).strip().upper()
-    comment = None if comment is None else str(comment)
-    if new_card and not _FITS_NAME.fullmatch(name):
-        return CardViolation(
-            "name", f"nazwa karty {name!r} łamie reguły FITS 4.0 - do 8 znaków spośród A-Z, 0-9, "
-                    f"'_' i '-'")
-    text = str(value)
-    for pole, tresc in (("wartość", text), ("komentarz", comment)):
-        znak = _first_illegal(tresc) if tresc is not None else None
-        if znak is not None:
-            return CardViolation(
-                "chars", f"{pole} karty {name} ma znak {znak!r} spoza drukowalnego ASCII - karta "
-                         f"FITS go nie przyjmie, a w nagłówku XISF łamie XML 1.0")
-    pole_wartosci = len(text.replace("'", "''"))
-    if pole_wartosci > FITS_STRING_MAX:
-        return CardViolation(
-            "length", f"wartość karty {name} ma {pole_wartosci} znaków, a jeden rekord FITS mieści "
-                      f"{FITS_STRING_MAX}", length=pole_wartosci, limit=FITS_STRING_MAX)
-    if comment:
-        limit = (_FITS_RECORD - _FITS_VALUE_START - _FITS_COMMENT_SEP
-                 - max(pole_wartosci + 2, _FITS_FIXED_FIELD))
-        if len(comment) > limit:
-            return CardViolation(
-                "length", f"komentarz karty {name} ma {len(comment)} znaków, a przy tej wartości "
-                          f"rekord FITS mieści {max(limit, 0)}", length=len(comment),
-                limit=max(limit, 0))
-    return None
+# Właściciel reguł karty FITS 4.0 to `card_rules` - moduł bez astropy, bo pyta go też czysty silnik
+# makr w podglądzie (AR-9). Tu żyje tylko to, co wie wyłącznie pisarz: która operacja ZAKŁADA kartę
+# (`_ops_violation`) i czy przełożona karta FITS zachowała zastany komentarz (`_fits_comment_loss`).
+# `card_violation` i `FITS_STRING_MAX` zostają nazwami `writeback` (re-eksport) - wołają je
+# `gui/app.py` (dialog naprawy nagłówka) i testy pisarza.
 
 
 def _ops_violation(ops, is_new: Callable[[WriteOp], bool]) -> str | None:
@@ -304,6 +218,59 @@ def _apply_op(hdr, op: WriteOp) -> None:
     raise ValueError(f"nieznana operacja: {op.op!r}")
 
 
+def _nth_card(hdr, keyword: str, n: int):
+    """`n`-te wystąpienie karty `keyword` (nazwa jak u astropy: wielkie litery) albo `None`."""
+    return next((c for i, c in enumerate(c for c in hdr.cards if c.keyword == keyword) if i == n),
+                None)
+
+
+def _fits_comments_before(hdr, ops: list[WriteOp]) -> dict:
+    """Zastane komentarze kart, które `set` BEZ komentarza przełoży:
+    `(keyword, n) → (obraz, komentarz)`. Liczone PRZED `_apply_op` - astropy przy zmianie wartości układa kartę od nowa, a tylko obraz
+    sprzed zmiany mówi, jaki komentarz karta niosła. `set` z komentarzem pomijamy: ten komentarz
+    wnosi łata i jego długość sprawdza `card_violation`."""
+    przed = {}
+    for op in ops:
+        if op.op != "set" or op.comment is not None:
+            continue
+        kw, n = op.keyword.strip().upper(), op.idx or 0
+        card = _nth_card(hdr, kw, n)
+        if card is not None and card.comment:
+            przed[(kw, n)] = (card.image, card.comment)
+    return przed
+
+
+def _fits_comment_loss(hdr, przed: dict) -> str | None:
+    """AR-7: powód odmowy, gdy przełożona karta straciła zastany komentarz, albo `None`.
+
+    astropy układa zmienioną kartę w stałym formacie (pole wartości od kolumny 11 do co najmniej
+    30) i komentarz, który się nie zmieści, UCINA po cichu - dawniej wynik 'applied' z komentarzem
+    62 → 47 znaków. To ta sama kontrola, którą droga w miejscu robi round-tripem obrazu karty
+    (`_fits_card_image`): obraz po zmianie, przeczytany z powrotem, ma nieść ten sam komentarz.
+
+    Zapis TOŻSAMOŚCIOWY (obraz karty bez zmian - astropy nie przekłada karty, której wartość się
+    nie zmieniła) jest poza kontrolą: nie zmienia ani bajtu karty, więc niczego nie ucina, a jego
+    odmowa zablokowałaby przepisanie wartości aktualnej na kartach z zastanym długim komentarzem.
+
+    Odmowa zamiast zachowania komentarza: zachowanie wymagałoby własnego układu karty (wolny format,
+    komentarz bliżej wartości), czyli drugiego właściciela układu obok astropy - a układ astropy
+    przewiduje też podgląd drogi zapisu (`inplace_route`)."""
+    for (kw, n), (obraz, komentarz) in przed.items():
+        card = _nth_card(hdr, kw, n)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            nowy = card.image
+            if nowy == obraz:
+                continue
+            zostal = fits.Card.fromstring(nowy).comment or ""
+        if zostal != komentarz:
+            return (f"zmiana wartości karty {kw} ucięłaby zastany komentarz z {len(komentarz)} do "
+                    f"{len(zostal)} znaków (karta FITS po zmianie ma pole wartości stałego formatu) "
+                    f"- plik nietknięty; zapisz zmianę razem z komentarzem skróconym do "
+                    f"{len(zostal)} znaków albo wybierz krótszą wartość")
+    return None
+
+
 def _is_xisf(path) -> bool:
     """Dyspozycja pisarza po rozszerzeniu — TA SAMA reguła co czytnika (`scan.XISF_SUFFIXES`,
     case-insensitive), żeby zapis i odczyt nigdy nie rozjechały się co do formatu."""
@@ -332,10 +299,11 @@ def write_changes(path, ops: list[WriteOp], expected_hash: str | None, *,
     """Atomowo zapisz zmiany w nagłówku wybranego HDU. Kontrola `header_hash`: nagłówek na dysku ≠
     `expected_hash` → 'blocked', NIE pisze. Treść łamiąca reguły karty FITS 4.0 (`card_violation`)
     → 'blocked' z powodem, NIE pisze - zamiast angielskiego wyjątku astropy albo cichego CONTINUE,
-    ucięcia komentarza czy karty HIERARCH. Plik tymczasowy jest czytany PRZED podmianą (plik
-    nieczytelny nie zastąpi oryginału), a jego hash jest kotwicą weryfikacji po podmianie
-    (`_after_replace`). Zwraca `post_hash` z zapisanego pliku + `backup_text` - także przy 'failed'
-    PO podmianie. Port dawcy `fits_io.write_changes`.
+    ucięcia komentarza czy karty HIERARCH. Zmiana wartości, po której astropy uciąłby ZASTANY
+    komentarz karty, też → 'blocked' (`_fits_comment_loss`, AR-7). Plik tymczasowy jest czytany
+    PRZED podmianą (plik nieczytelny nie zastąpi oryginału), a jego hash jest kotwicą weryfikacji
+    po podmianie (`_after_replace`). Zwraca `post_hash` z zapisanego pliku + `backup_text` - także
+    przy 'failed' PO podmianie. Port dawcy `fits_io.write_changes`.
     `.xisf` → `write_xisf_changes` (inny format, TEN SAM kontrakt `WriteResult`).
     `.dng/.arw/.cr2` → ODMOWA (#2): RAW jest read-only (rename dozwolony osobno).
 
@@ -375,8 +343,12 @@ def write_changes(path, ops: list[WriteOp], expected_hash: str | None, *,
                 return WriteResult("blocked", powod, None)
             info = hdul.fileinfo(index)
             start, data_start = info["hdrLoc"], info["datLoc"]
+            komentarze = _fits_comments_before(hdr, ops)
             for op in ops:
                 _apply_op(hdr, op)
+            powod = _fits_comment_loss(hdr, komentarze)          # AR-7: przed plikiem tymczasowym
+            if powod is not None:
+                return WriteResult("blocked", powod, None)
             fd, tmp = tempfile.mkstemp(suffix=".tmp", dir=os.path.dirname(os.path.abspath(path)))
             os.close(fd)
             hdul.writeto(tmp, overwrite=True)
@@ -760,6 +732,10 @@ def _xisf_verify(meta, ops, patches, new_xml: bytes) -> None:
     3. **Round-trip kart:** karty wyłuskane z nowego XML-a TĄ SAMĄ funkcją co skan
        (`scan.xisf_cards`) == karty oczekiwane po łacie (`_xisf_expected_cards`). Łapie łatę
        w złym miejscu, escape, który zmienia sens, wstrzykniętą albo zgubioną kartę.
+    4. **`FITSKeyword` nie jest dzieckiem `FITSKeyword`** (AR-6). Round-trip kart tego nie widzi:
+       `xisf_cards` chodzi po CAŁYM drzewie, więc karta wstawiona do wnętrza innej daje te same
+       karty w tej samej kolejności. Liczymy zagnieżdżenia WNIESIONE przez łatę (więcej niż
+       w nagłówku sprzed łaty) - z tego samego powodu co w pkt 1.
 
     Każde „nie" to `ValueError` → 'failed', nie 'blocked' - ten sam kontrakt co guard
     `locate_value_span`: pisarz złożył nagłówek, który nie mówi tego, co zamierzał, a to usterka
@@ -779,6 +755,16 @@ def _xisf_verify(meta, ops, patches, new_xml: bytes) -> None:
                        (f"{len(got)} kart", f"{len(want)} kart"))
         raise ValueError(f"XISF: karty odczytane po łacie rozjechały się z oczekiwanymi "
                          f"({rozjazd[0]!r} != {rozjazd[1]!r})")
+    przed = _xisf_nested_keywords(ET.fromstring(scan.xml_parsable(meta.xml_bytes)))
+    if _xisf_nested_keywords(root) > przed:
+        raise ValueError("XISF: łata zagnieżdża <FITSKeyword> w innej karcie (AR-6)")
+
+
+def _xisf_nested_keywords(root) -> int:
+    """Liczba kart `<FITSKeyword>` leżących WEWNĄTRZ innej karty - warunek pkt 4 `_xisf_verify`."""
+    karty = [e for e in root.iter() if scan._local_name(e.tag) == "FITSKeyword"]
+    return sum(1 for k in karty for e in k.iter() if e is not k
+               and scan._local_name(e.tag) == "FITSKeyword")
 
 
 def _xisf_prepare(path: str, ops: list[WriteOp], expected_hash: str | None):
@@ -1244,8 +1230,9 @@ def _fits_inplace_plan(path: str, fh, ops: list[WriteOp], expected_hash: str | N
     """Plan zapisu w miejscu dla FITS (pod blokadą) → `_InplacePlan` | `Fallback` | `WriteResult`.
 
     Kwalifikuje się wyłącznie `set` WARTOŚCI TEKSTOWEJ na karcie tekstowej występującej dokładnie
-    raz, której nowy obraz (z ZASTANYM komentarzem - dług AR-7: tu komentarz nie ginie) mieści
-    się w jednym rekordzie. Karta jest podmieniana w TYM SAMYM 80-bajtowym slocie, więc liczba
+    raz, której nowy obraz (z ZASTANYM komentarzem - tu komentarz nie ginie) mieści się w jednym
+    rekordzie; karta, która się nie mieści, spada na drogę atomową, a tam odmawia
+    `_fits_comment_loss` (AR-7). Karta jest podmieniana w TYM SAMYM 80-bajtowym slocie, więc liczba
     kart, bloków 2880 B i długość nagłówka zostają. Kontrola hasha i reguły karty stoją PRZED
     kwalifikacją, więc odmawiają tak samo jak droga atomowa; `CHECKSUM`/`DATASUM` → odmowa."""
     granice = _fits_hdu_bounds(path, expected_hash)
@@ -1738,7 +1725,8 @@ def _group_by_location(rows) -> list[tuple[int, list]]:
     return [(lid, groups[lid]) for lid in order]
 
 
-def _resync(con, path, volume, *, now, actor="user:local", expect_sha1_data=None, kontrola=None):
+def _resync(con, path, volume, *, now, actor="user:local", expect_sha1_data=None, kontrola=None,
+            w_transakcji=None):
     """RE-SYNC bazy po mutacji pliku - REUŻYWA znanej-ścieżki skanu (SPOT, R#2). `scan_file`
     (read-only, świeże hasze/nagłówek/karty) → `ingest_record`: `refresh_location` odświeża fakty
     kopii + zeznanie + `cards` + `frame.camera_id/kind` z eventami (actor="user:local"). Wymaga
@@ -1758,12 +1746,24 @@ def _resync(con, path, volume, *, now, actor="user:local", expect_sha1_data=None
     re-sync operacji, która sama izoluje lokację, więc nie może odrzucić sam siebie.
 
     Z kontrolą plik jest czytany w całości RAZ (`_skan_kontrolny`): sha1 pliku, danych i pliku
-    z podstawionym starym regionem liczy jeden przebieg (AR-24)."""
+    z podstawionym starym regionem liczy jeden przebieg (AR-24).
+
+    `w_transakcji` (bez argumentów): zapis bazy, który ma wejść RAZEM z wciągnięciem rekordu -
+    jedna transakcja `repo.atomic`, odczyt pliku przed nią (blokada zapisu bazy nie trwa przez
+    pełny odczyt). Cofnięcie odtwarza tak nagrobek ręki (AR-38): baza opisuje plik sprzed commitu
+    z nagrobkiem albo żadne z dwojga."""
     rec = _skan_kontrolny(path, kontrola)
     niezgodne = _kontrola_danych(rec, expect_sha1_data, kontrola)
     if niezgodne is not None:
         return niezgodne
-    scan.ingest_record(con, rec, volume=volume, now=now, summary=scan.ScanSummary(), actor=actor)
+    if w_transakcji is None:
+        scan.ingest_record(con, rec, volume=volume, now=now, summary=scan.ScanSummary(),
+                           actor=actor)
+        return None
+    with repo.atomic(con):
+        scan.ingest_record(con, rec, volume=volume, now=now, summary=scan.ScanSummary(),
+                           actor=actor)
+        w_transakcji()
     return None
 
 
@@ -2199,8 +2199,10 @@ def commit(con, run_id, *, now, clock=None,
         # samo odświeżenie zeznania: każdy skan odświeża zeznanie i gasiłby werdykt, którego nikt
         # nie odwołał. Droga w miejscu gasi go tą samą klingą w transakcji dokończenia
         # (`repo.finish_inplace_op`).
+        # Zgaszenie niesie commit i plik (AR-38) - cofnięcie TEGO commitu odtworzy nagrobek.
         if any(op.keyword == "OBJECT" for op in ops):
-            repo.clear_object_tombstone(con, frame_id=loc["frame_id"], now=now)
+            repo.clear_object_tombstone(con, frame_id=loc["frame_id"], now=now,
+                                        commit_id=commit_id, location_id=location_id)
         _mark(rows, "applied", None)
         applied.append(FileResult(location_id, path, "applied", droga))
         _report(path, "applied")
@@ -2504,7 +2506,13 @@ def undo(con, commit_id, *, now,
     BRAMKA IZOLACJI: operacja izolująca lokację spoza tego commitu (`repo.isolating_inplace_op`) →
     'blocked' z drogą naprawy, zero zapisu - w obu drogach. Droga atomowa powtarza ją pod strażą
     podmiany (`repo.guard_file_replace`, jak w `commit`): zapis w miejscu zaczęty po bramce odbija
-    `os.replace` zamiast zostać przez nie starty."""
+    `os.replace` zamiast zostać przez nie starty.
+
+    COFNIĘCIE ODTWARZA WYKLUCZENIE (AR-38, decyzja Zdzinia): plik 'restored' wraca z nagrobkiem
+    ręki, który commit zgasił kartą `OBJECT` na TYM pliku - w transakcji re-syncu (droga atomowa)
+    albo dokończenia operacji cofnięcia (droga w miejscu, `repo.finish_inplace_op`). Plik
+    'failed'/'blocked' nagrobka nie odtwarza. Commit sprzed AR-38 (zgaszenie bez `commit_id`)
+    i klatka z nowszym werdyktem ręki → bez zmian (`repo._restore_object_tombstone_tx`)."""
     backups = backups_for_commit(con, commit_id)
     total = len(backups)
     restored: list[FileResult] = []
@@ -2520,9 +2528,14 @@ def undo(con, commit_id, *, now,
             progress(done, total, path, status)
 
     def _sync(loc, path, expect, powod):
-        """Re-sync drogi atomowej (bez operacji w dzienniku)."""
+        """Re-sync drogi atomowej (bez operacji w dzienniku) - w jego transakcji odtworzenie
+        nagrobka zgaszonego przez ten commit na tym pliku (AR-38)."""
+        def _nagrobek(_fid=loc["frame_id"], _lid=loc["id"]):
+            repo.restore_object_tombstone(con, frame_id=_fid, commit_id=commit_id,
+                                          location_id=_lid, now=now)
         try:
-            niezgodne = _resync(con, path, loc["volume"], now=now, expect_sha1_data=expect)
+            niezgodne = _resync(con, path, loc["volume"], now=now, expect_sha1_data=expect,
+                                w_transakcji=_nagrobek)
         except Exception as exc:  # noqa: BLE001 - nagłówek przywrócony, pętla idzie dalej
             niezgodne = (f"nagłówek PRZYWRÓCONY, ale re-sync padł - {type(exc).__name__}: {exc}; "
                          f"ponowne undo dokończy samą synchronizację")

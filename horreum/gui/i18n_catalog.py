@@ -2359,8 +2359,9 @@ CATALOG = {
     # Trzy podpowiedzi „Sprawdź obecność" - po jednej na źródło drzewa, w kolejności wyboru
     # (`PipelineView._on_presence`, AR-28 (a)): wskazany katalog, ostatnie źródło, pytanie.
     # Zapis jest WARUNKOWY i podpowiedź to mówi (AR-31 (4), bliźniak recepty `grid.tip.copy_unread`):
-    # „{mark}” pojawia się tylko, gdy sprawdzenie POTWIERDZI zniknięcie - hamulec passa (drzewo
-    # puste, za dużo kandydatów) potwierdzeń nie liczy, a „nic nie znikło” nie ma czego oznaczać.
+    # „{mark}” pojawia się tylko, gdy sprawdzenie POTWIERDZI zniknięcie - hamulec „drzewo puste”
+    # potwierdzeń nie liczy, a „nic nie znikło” nie ma czego oznaczać. Ponad progiem kandydatów
+    # „Sprawdź obecność” liczy potwierdzenia, a zapis pyta dialogiem `pipeline.force.*` (AR-31 (6)).
     "pipeline.tip.presence": {
         "pl": "Porówna z bazą wskazany katalog: {root}. Tylko raport - zapis to „{mark}”, "
               "który pojawi się pod wynikiem, gdy sprawdzenie potwierdzi zniknięcie.",
@@ -2390,6 +2391,39 @@ CATALOG = {
               "“{mark}”, which appears below the result when the check confirms a copy is gone.",
     },
     "pipeline.btn.mark_vanished": {"pl": "Oznacz zniknięte", "en": "Mark vanished"},
+    # Dialog przełamania hamulca progowego przed „Oznacz zniknięte” (AR-31 (6),
+    # `PipelineView._ask_force`). Liczba to POTWIERDZONE zniknięcia z DRY, nie kandydaci; próg
+    # przekroczyli kandydaci, więc zdanie o progu mówi o nich. Domyślny przycisk to „Anuluj”.
+    "pipeline.force.title": {"pl": "Zapis ponad progiem hamulca",
+                             "en": "Write above the brake threshold"},
+    "pipeline.force.text": {
+        "pl": {"one": "Kandydatów było więcej niż próg hamulca ({limit}), więc zapis wymaga "
+                      "potwierdzenia. Sprawdzenie potwierdziło: zniknęła {n} kopia.",
+               "few": "Kandydatów było więcej niż próg hamulca ({limit}), więc zapis wymaga "
+                      "potwierdzenia. Sprawdzenie potwierdziło: zniknęły {n} kopie.",
+               "many": "Kandydatów było więcej niż próg hamulca ({limit}), więc zapis wymaga "
+                       "potwierdzenia. Sprawdzenie potwierdziło: zniknęło {n} kopii."},
+        "en": {"one": "There were more candidates than the brake threshold ({limit}), so writing "
+                      "needs your confirmation. The check confirmed {n} copy is gone.",
+               "other": "There were more candidates than the brake threshold ({limit}), so "
+                        "writing needs your confirmation. The check confirmed {n} copies are gone."},
+    },
+    "pipeline.force.info": {
+        "pl": "Zatwierdzenie oznaczy jako zniknięte wyłącznie kopie, które sprawdzenie właśnie "
+              "potwierdziło; jeśli przy zapisie dysk potwierdzi inne kopie, nic nie zostanie zapisane. "
+              "Kopię przemianowaną w międzyczasie zapis pominie, a raport poda, ile takich było. "
+              "Pliki i wiersze bazy zostają, a kopia, która wróci, odzyska obecność przy skanie. "
+              "Jeśli ta liczba zaskakuje (np. udział zamontowany pusty), wybierz „Anuluj”.",
+        "en": "Confirming marks as vanished only the copies the check has just confirmed; if the "
+              "disk confirms different copies at write time, nothing is written. A copy renamed in "
+              "the meantime is skipped, and the report says how many were. Files and database rows "
+              "stay, and a copy that comes back regains presence on scan. If this number is a "
+              "surprise (e.g. a share mounted empty), choose “Cancel”.",
+    },
+    "pipeline.force.ok": {
+        "pl": {"one": "Oznacz {n} kopię", "few": "Oznacz {n} kopie", "many": "Oznacz {n} kopii"},
+        "en": {"one": "Mark {n} copy", "other": "Mark {n} copies"},
+    },
     "pipeline.btn.show_collections": {"pl": "Pokaż w Zbiorach", "en": "Show in Collections"},
     # Źródło, którego wątek tła nie zobaczył jako katalogu (odłączony udział, katalog skasowany) -
     # wspólne dla „Sprawdź obecność” i sekwencji skanu („Przyjmij nowe”, „Skanuj”, „Przetwórz
@@ -2452,6 +2486,15 @@ CATALOG = {
     "pipeline.refuse.writeback": {
         "pl": "trwa zapis nagłówków do plików - etapy Dostawy ruszą po jego zakończeniu",
         "en": "header write to files in progress - Intake stages start after it finishes",
+    },
+    # Odmowa „Oznacz zniknięte” PO dialogu progu: w trakcie pytania inny etap albo zmiana źródła
+    # zapomniały wynik sprawdzenia (`_forget_vanished`). `refuse.running` nie pasuje - odsyła
+    # do „Rozwiąż”.
+    "pipeline.refuse.mark_stale": {
+        "pl": "wynik sprawdzenia przepadł w trakcie pytania (inny etap albo zmiana źródła) - nic "
+              "nie zapisano; sprawdź obecność ponownie",
+        "en": "the check result was dropped while the question was open (another stage or a "
+              "source change) - nothing was written; check presence again",
     },
     "pipeline.counts": {
         "pl": "Pliki {done}/{total} · nowe {new} · pominięte {skipped} · przegląd {review} · {tail}",
@@ -3080,6 +3123,123 @@ CATALOG = {
         "pl": " · Horreum niczego nie usuwa - pliki usuwasz sam, a skan zdejmie je z tej listy",
         "en": " · Horreum deletes nothing - you delete the files yourself, and a scan takes them "
               "off this list"},
+    # Werdykt „zostawiam wszystkie" grupy wersji (AR-10, 0026) i jego droga powrotu.
+    "grid.version.keep_all": {"pl": "Zostaw wszystkie wersje", "en": "Keep all versions"},
+    "grid.version.reopen": {"pl": "Cofnij „zostaw wszystkie”", "en": "Undo “keep all”"},
+    "grid.version.keep_all_tip": {
+        "pl": {"one": "Zapisuje werdykt: {n} stos tej grupy zostaje. Grupa przestaje być robotą "
+                      "w Porządkach. Horreum niczego nie usuwa.",
+               "few": "Zapisuje werdykt: {n} stosy tej grupy zostają. Grupa przestaje być robotą "
+                      "w Porządkach. Horreum niczego nie usuwa.",
+               "many": "Zapisuje werdykt: {n} stosów tej grupy zostaje. Grupa przestaje być robotą "
+                       "w Porządkach. Horreum niczego nie usuwa."},
+        "en": {"one": "Records the verdict: {n} stack of this group stays. The group stops being "
+                      "work in Housekeeping. Horreum deletes nothing.",
+               "other": "Records the verdict: {n} stacks of this group stay. The group stops being "
+                        "work in Housekeeping. Horreum deletes nothing."},
+    },
+    "grid.version.reopen_tip": {
+        "pl": {"one": "Cofa werdykt: {n} stos tej grupy wraca do roboty w Porządkach.",
+               "few": "Cofa werdykt: {n} stosy tej grupy wracają do roboty w Porządkach.",
+               "many": "Cofa werdykt: {n} stosów tej grupy wraca do roboty w Porządkach."},
+        "en": {"one": "Withdraws the verdict: {n} stack of this group is work in Housekeeping again.",
+               "other": "Withdraws the verdict: {n} stacks of this group are work in Housekeeping "
+                        "again."},
+    },
+    "grid.version.select_group": {
+        "pl": "Zaznacz stos (albo stosy) jednej grupy wersji.",
+        "en": "Select a stack (or stacks) of one version group."},
+    "grid.version.no_group": {
+        "pl": "Ten stos nie należy już do żadnej grupy wersji - widok odświeży się przy następnym "
+              "przeładowaniu.",
+        "en": "This stack no longer belongs to any version group - the view refreshes on the next "
+              "reload."},
+    "grid.version.kept_done": {
+        "pl": {"one": "Zapisano werdykt „zostaw wszystkie” - {n} stos grupy zostaje",
+               "few": "Zapisano werdykt „zostaw wszystkie” - {n} stosy grupy zostają",
+               "many": "Zapisano werdykt „zostaw wszystkie” - {n} stosów grupy zostaje"},
+        "en": {"one": "Verdict “keep all” recorded - {n} stack of the group stays",
+               "other": "Verdict “keep all” recorded - {n} stacks of the group stay"},
+    },
+    "grid.version.reopened_done": {
+        "pl": {"one": "Cofnięto werdykt „zostaw wszystkie” - {n} stos grupy wraca do roboty",
+               "few": "Cofnięto werdykt „zostaw wszystkie” - {n} stosy grupy wracają do roboty",
+               "many": "Cofnięto werdykt „zostaw wszystkie” - {n} stosów grupy wraca do roboty"},
+        "en": {"one": "Verdict “keep all” withdrawn - {n} stack of the group is work again",
+               "other": "Verdict “keep all” withdrawn - {n} stacks of the group are work again"},
+    },
+    # Gest werdyktu, który nie ruszył żadnej klatki - werdykt zmienił w międzyczasie ktoś inny.
+    "grid.version.kept_none": {
+        "pl": "Werdykt „zostaw wszystkie” był już zapisany dla całej grupy - nic nie zmieniono",
+        "en": "The “keep all” verdict was already recorded for the whole group - nothing changed"},
+    "grid.version.reopened_none": {
+        "pl": "Grupa nie ma już werdyktu „zostaw wszystkie” - nie było czego cofać",
+        "en": "The group no longer has a “keep all” verdict - there was nothing to withdraw"},
+    "grid.version.keep_blocked_kept": {
+        "pl": "Grupa ma werdykt „zostaw wszystkie” - najpierw go cofnij („{reopen}”).",
+        "en": "The group has a “keep all” verdict - withdraw it first (“{reopen}”)."},
+    "grid.version.kept": {"pl": "zostawione", "en": "kept"},
+    "grid.version.kept_tip": {
+        "pl": "\nWerdykt: zostawiasz wszystkie wersje tej grupy ({at}). Droga powrotu: prawy klik "
+              "→ „{reopen}”.",
+        "en": "\nVerdict: you keep all versions of this group ({at}). Way back: right click "
+              "→ “{reopen}”."},
+    # Liczba obrazów kopii w kolumnie „Wersja" (AR-10). `count` to tekst komórki „Obrazy" (przy
+    # kopiach różnych „3 | 1"), forma odmiany idzie za największą liczbą.
+    "grid.version.images": {
+        "pl": {"one": "{count} obraz", "few": "{count} obrazy", "many": "{count} obrazów"},
+        "en": {"one": "{count} image", "other": "{count} images"},
+    },
+    "grid.version.images_fits": {"pl": "obrazy: -", "en": "images: -"},
+    "grid.version.images_fits_tip": {
+        "pl": "\nObrazy: plik FITS - Horreum czyta pierwszy obraz i nie liczy pozostałych.",
+        "en": "\nImages: a FITS file - Horreum reads the first image and does not count the rest."},
+    # Źródło daty w komórce „Wersja" - klucz składany z `timestamp_source` read-modelu.
+    "grid.version.when.signature": {
+        "pl": "\nData: chwila integracji z sygnatury (PCL:Signature:Integration).",
+        "en": "\nDate: the integration time from the signature (PCL:Signature:Integration)."},
+    "grid.version.when.created": {
+        "pl": "\nData: XISF:CreationTime - chwila zapisu pliku zaraz po integracji (stos sprzed "
+              "sygnatury integracji).",
+        "en": "\nDate: XISF:CreationTime - when the file was saved right after integration (a stack "
+              "from before the integration signature)."},
+    # Środek kadru w kolumnie „Wersja" (AR-10) - fakt rozróżniający, nie świadek wersji.
+    "grid.version.center": {"pl": "środek {label}", "en": "center {label}"},
+    "grid.version.center_tip": {
+        "pl": {"one": "\nŚrodek {label}: RA {ra}°, Dec {dec}° z nagłówka. W tej grupie jest {n} "
+                      "środek kadru - stosy z tą samą literą mają ten sam. To fakt do rozróżnienia, "
+                      "nie dowód odrębnej integracji: kanały jednej integracji też bywają "
+                      "zapisane z różnymi środkami.",
+               "few": "\nŚrodek {label}: RA {ra}°, Dec {dec}° z nagłówka. W tej grupie są {n} "
+                      "różne środki kadru - stosy z tą samą literą mają ten sam. To fakt do "
+                      "rozróżnienia, nie dowód odrębnej integracji: kanały jednej integracji też "
+                      "bywają zapisane z różnymi środkami.",
+               "many": "\nŚrodek {label}: RA {ra}°, Dec {dec}° z nagłówka. W tej grupie jest {n} "
+                       "różnych środków kadru - stosy z tą samą literą mają ten sam. To fakt do "
+                       "rozróżnienia, nie dowód odrębnej integracji: kanały jednej integracji też "
+                       "bywają zapisane z różnymi środkami."},
+        "en": {"one": "\nCenter {label}: RA {ra}°, Dec {dec}° from the header. This group has {n} "
+                      "frame center - stacks with the same letter share it. A fact to tell them "
+                      "apart, not evidence of a separate integration: channels of one integration "
+                      "are sometimes saved with different centers too.",
+               "other": "\nCenter {label}: RA {ra}°, Dec {dec}° from the header. This group has "
+                        "{n} different frame centers - stacks with the same letter share one. A "
+                        "fact to tell them apart, not evidence of a separate integration: channels "
+                        "of one integration are sometimes saved with different centers too."},
+    },
+    "tasks.of_total": {"pl": "{open} z {total}", "en": "{open} of {total}"},
+    "tasks.stack_versions_kept_tip": {
+        "pl": {"one": "{n} stos stoi w grupie z werdyktem „{keep}” - to nie jest robota. Werdykt "
+                      "cofniesz w tej perspektywie, prawym klikiem na stosie.",
+               "few": "{n} stosy stoją w grupach z werdyktem „{keep}” - to nie jest robota. Werdykt "
+                      "cofniesz w tej perspektywie, prawym klikiem na stosie.",
+               "many": "{n} stosów stoi w grupach z werdyktem „{keep}” - to nie jest robota. "
+                       "Werdykt cofniesz w tej perspektywie, prawym klikiem na stosie."},
+        "en": {"one": "{n} stack is in a group with the verdict “{keep}” - that is not work. You "
+                      "withdraw the verdict in this perspective, with a right click on the stack.",
+               "other": "{n} stacks are in groups with the verdict “{keep}” - that is not work. You "
+                        "withdraw the verdict in this perspective, with a right click on the stack."},
+    },
 
     # --- drogi wyjścia z izolacji zapisu w miejscu (grid.py, menu prawego kliku; AR-17 (2)).
     # Kopia z operacją w fazie izolującej jest pomijana przez skan; gesty wołają rdzeń

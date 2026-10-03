@@ -20,6 +20,10 @@ Krok po kroku dla każdego frame'a z `frame_ids` (już przefiltrowanych przez `f
 Plik bez operandu / z błędem obliczenia / łamiący regułę operacji → POMINIĘTY z jawnym powodem
 (zebrany w `MacroRun.skipped`). Reguły operacji: `set` wymaga istniejącej karty (keyword
 kardynalności >1 wymaga jawnego `idx`); `add` wymaga braku karty. Operand `0` to WARTOSC, nie brak.
+Zmiana łamiąca reguły karty FITS 4.0 (`card_rules.card_violation` - ten sam właściciel, którego
+pyta pisarz) też jest pominięciem z powodem już w PODGLĄDZIE, a nie 'blocked' przy commicie (AR-9).
+Silnik nie importuje astropy: reguły mieszkają w `card_rules`, a `writeback` (przewidywanie drogi
+zapisu dla planu karty OBJECT) jest importowany leniwie w `plan_object_card_form`.
 Makra są JSON-serializowalne (`to_dict`/`from_dict`), ale **NIE SĄ NIGDZIE UTRWALANE** — definicja
 powstaje w pasku (`gui.grid.MacroBar.macro_def`) na czas jednego przebiegu i ginie z zamknięciem okna.
 Tabela `macros` (migracja 0003) stoi PUSTA i taka zostaje: **decyzja Zdzinia 2026-08-01 (D-P-I-4,
@@ -40,7 +44,7 @@ import uuid
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 
-from . import expr, writeback
+from . import card_rules, expr
 
 
 @dataclass(frozen=True)
@@ -283,6 +287,11 @@ def _evaluate_change(
     except (ValueError, TypeError):
         return None, f"wartosc '{md.assign.expr}' nie pasuje do typu '{value_type}'"
 
+    naruszenie = card_rules.card_violation(kw, new_value, md.assign.comment,
+                                           new_card=md.assign.op == "add")
+    if naruszenie is not None:                       # AR-9: powód w podglądzie, nie przy commicie
+        return None, naruszenie.reason
+
     change = {
         "keyword": kw, "idx": idx, "op": md.assign.op, "old_value": old_value,
         "new_value": new_value, "new_type": value_type, "comment": md.assign.comment,
@@ -404,7 +413,11 @@ def plan_object_card_form(rows, *, run_id=None) -> CardFormPlan:
     typ `str`, komentarz BEZ zmian - `None`) na formę nagłówka, z kotwicą `header_hash` kopii.
     Wykonanie to istniejący staging i commit writebacku: `repo.stage_pending_many` +
     `writeback.commit(..., inplace=True)`. Drugi plan po udanym wykonaniu jest pusty z konstrukcji
-    predykatu (karta == forma nie wchodzi)."""
+    predykatu (karta == forma nie wchodzi).
+
+    `writeback` importowany TU, nie na górze modułu: ciągnie astropy, a silnik makr ma się
+    importować bez niego (meta-test w `tests/test_card_rules.py`)."""
+    from . import writeback
     run_id = run_id or uuid.uuid4().hex
     touched: list[PendingPreview] = []
     skipped: list[SkippedFrame] = []
@@ -474,6 +487,9 @@ def evaluate_manual_change(cards, keyword: str, new_text: str) -> ManualResult:
         new_value = _to_text(value, value_type)
     except (ValueError, TypeError):
         return ManualResult(False, f"wartosc '{new_text}' nie pasuje do typu '{value_type}'")
+    naruszenie = card_rules.card_violation(keyword, new_value, new_card=op == "add")
+    if naruszenie is not None:                       # AR-9: te same reguły co pisarz
+        return ManualResult(False, naruszenie.reason)
 
     return ManualResult(
         True, op=op, idx=idx, old_value=old_value, new_value=new_value, new_type=value_type)

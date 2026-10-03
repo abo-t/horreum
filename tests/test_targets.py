@@ -4,6 +4,7 @@ koszt Księżyca i kolejność.
 Meta-testów NIE kopiujemy — `test_repo_safety`/`test_gui_isolation` chodzą po `rglob` i kryją nowy
 moduł same (T1 §7). Tu pinujemy zachowanie, którego one nie widzą.
 """
+import dataclasses
 import json
 import os
 from datetime import date, datetime, timezone
@@ -299,6 +300,61 @@ def test_przy_nowiu_kolejnosc_nie_degeneruje_sie_do_alfabetu():
     nisko = _row("AAA", cost=1.0, hours=5.0, alt=35.0)
     wysoko = _row("ZZZ", cost=1.0, hours=5.0, alt=80.0)
     assert sorted([nisko, wysoko], key=targets._sort_key)[0] is wysoko
+
+
+class _Rig:
+    """Zastępca `RigSet` dla klucza sortowania: `TargetRow.framing_in` czyta wyłącznie `config_id`."""
+    config_id = 1
+
+
+def _framed(canon, *, panels=1, frame_fill=0.5, fill=None, **kw):
+    """Wiersz z kadrowaniem `best_rig` - wejście kubełka kadru (PL-1 R2)."""
+    fr = sky.Framing(fill=frame_fill if fill is None else fill, panels_x=panels, panels_y=1,
+                     panels=panels, overlap=0.1, frame_fill=frame_fill)
+    return dataclasses.replace(_row(canon, **kw), framing={1: fr}, best_rig=_Rig())
+
+
+def test_kubelek_kadru_dobry_kadr_mozaika_za_maly():
+    """PL-1 R2: jeden kadr ≥ 0,3 > mozaika > jeden kadr za mały - nawet gdy kropka ma TAŃSZĄ noc
+    (kubełek stoi przed kosztem). Zgłoszenie: `Sh2-85` (9 % kadru A140R) w szóstce."""
+    kropka = _framed("AAA", frame_fill=0.09, cost=1.0)
+    mozaika = _framed("BBB", panels=4, frame_fill=1.0, cost=2.0)
+    dobry = _framed("CCC", frame_fill=0.36, cost=3.0)
+    assert sorted([kropka, mozaika, dobry], key=targets._sort_key) == [dobry, mozaika, kropka]
+
+
+def test_kubelek_kadru_stoi_po_luce_i_po_widocznosci():
+    """Kubełek NIE przebija członów przed nim: cel z luką i za mały wyprzedza domknięty z dobrym
+    kadrem, a widoczny za mały - dobry kadr pod horyzontem."""
+    domkniety_dobry = _framed("AAA", frame_fill=0.8, gaps=(), recommend=None)
+    z_luka_maly = _framed("ZZZ", frame_fill=0.05)
+    assert sorted([domkniety_dobry, z_luka_maly], key=targets._sort_key)[0] is z_luka_maly
+    pod_dobry = _framed("AAA", frame_fill=0.8, visible=False)
+    widoczny_maly = _framed("ZZZ", frame_fill=0.05)
+    assert sorted([pod_dobry, widoczny_maly], key=targets._sort_key)[0] is widoczny_maly
+
+
+def test_kubelek_kadru_mierzy_frame_fill_nie_surowe_fill():
+    """Pułapka miary z PL-1: surowe `fill` liczy się do krótszego boku i przy jednym kadrze bywa
+    > 1. Kubełek czyta `frame_fill` - tę samą miarę co kolumna „Wypełn." i próg `min_fill`."""
+    assert targets._fill_bucket(sky.Framing(fill=0.35, panels_x=1, panels_y=1, panels=1,
+                                            overlap=0.1, frame_fill=0.25)) == 2
+    assert targets._fill_bucket(sky.Framing(fill=1.3, panels_x=1, panels_y=1, panels=1,
+                                            overlap=0.1, frame_fill=0.87)) == 0
+    # granica włącznie: „co najmniej 30 %" - ta sama nierówność co `rig_fits` przy `min_fill`
+    fr = sky.Framing(fill=0.3, panels_x=1, panels_y=1, panels=1, overlap=0.1,
+                     frame_fill=targets.RANK_MIN_FILL)
+    assert targets._fill_bucket(fr) == 0
+    assert targets.rig_fits(fr, min_fill=targets.RANK_MIN_FILL)
+
+
+def test_kubelek_kadru_brak_kadrowania_na_koniec():
+    """Brak zestawu z FOV = „nie wiem", a nie „mieści się": za celem za małym, jak w sorcie
+    soczewki ekranu. Gdy NIKT nie ma kadrowania, kubełek jest stały i porządek się nie zmienia."""
+    assert targets._fill_bucket(None) == 3
+    bez = _row("AAA")
+    maly = _framed("ZZZ", frame_fill=0.05)
+    assert sorted([bez, maly], key=targets._sort_key)[0] is maly
 
 
 # ─────────────────────────────────────────────────────────────── baza: zestawy, plan (§4, §7)
@@ -711,6 +767,9 @@ def test_plan_z_dwiema_kamerami_na_jednej_optyce(con, tmp_path, capsys, mm, mc):
 # import przypięty `sys.path.insert(0, worktree)` + odpięty finder instalacji edytowalnej, wydruk
 # `horreum.__file__` wskazywał worktree). Test porównuje bieżący kod BEZ progów kadru z tą stałą,
 # nie z samym sobą - dopisane kolumny wypełnienia są jedynym dozwolonym śladem zmiany.
+# PL-1 R2 (kubełek kadru w `_sort_key`) PRZESTAWIA wiersze: mozaika `SYN-SNR-200` wchodzi przed
+# cele za małe dla RC8 (`SYN-HII-8` 24 %, `SYN-PN-7` 15 %). Treść wierszy, liczniki i nagłówek
+# zostają z HEAD `cf1911d` bajt w bajt (dowód: zrzut HEAD z worktree, przestawiony = zrzut po R2).
 
 ZLOTY_KATALOG = (
     _t("SYN-HII-8", "HII", a=8.0, r=300.0, d=40.0),
@@ -745,11 +804,11 @@ ZLOTA_PROJEKCJA = {
         ("SYN-EMN-90", "A140R", (1, 4), "Ha", None, ("RGB", "Ha", "OIII", "SII"), True, 6.92,
          86.7, None),
         ("SYN-HII-25", "RC8", (1, 1), "OIII", None, ("OIII", "SII"), True, 6.92, 81.7, None),
+        ("SYN-SNR-200", "A140R", (9, 25), "SII", None, ("RGB", "SII"), True, 6.92, 66.7, None),
         ("SYN-HII-8", "RC8", (1, 1), "Ha", None, ("RGB", "Ha", "OIII", "SII"), True, 6.92, 76.7,
          None),
         ("SYN-PN-7", "RC8", (1, 1), "Ha", None, ("RGB", "Ha", "OIII", "SII"), True, 5.58, 69.6,
          "planned"),
-        ("SYN-SNR-200", "A140R", (9, 25), "SII", None, ("RGB", "SII"), True, 6.92, 66.7, None),
         ("SYN-G-B", "RC8", (1, 1), "RGB", None, ("RGB",), True, 2.58, 43.0, None),
         ("SYN-G-12", "RC8", (1, 1), None, "no_gap", (), True, 6.92, 77.8, None),
     ),
@@ -775,12 +834,12 @@ ZLOTY_TEKST = (
     "nigdy",
     "  SYN-HII-25    HII      25'  81.7  6.9  RC8 1 kadr       2.4/1.4/1.1   OIII  -         "
     "RGB 2.0h, Ha 2.0h, brak OIII/SII",
+    "  SYN-SNR-200   SNR     200'  66.7  6.9  A140R mozaika 9  2.8/1.5/1.1   SII   -         "
+    "Ha 2.0h, OIII 2.0h, brak RGB/SII",
     "  SYN-HII-8     HII       8'  76.7  6.9  RC8 1 kadr       2.6/1.4/1.1   Ha    -         "
     "nigdy",
     "  SYN-PN-7      PN        7'  69.6  5.6  RC8 1 kadr       2.7/1.4/1.1   Ha    planned 2 "
     "nigdy",
-    "  SYN-SNR-200   SNR     200'  66.7  6.9  A140R mozaika 9  2.8/1.5/1.1   SII   -         "
-    "Ha 2.0h, OIII 2.0h, brak RGB/SII",
     "  SYN-G-B       G         8'  43.0  2.6  RC8 1 kadr       2.9/1.5/1.1   RGB   -         "
     "nigdy",
     "  SYN-G-12      G        12'  77.8  6.9  RC8 1 kadr       1.0/1.0/1.0   -     -         "
@@ -790,7 +849,9 @@ ZLOTY_TEKST = (
 
 # sha256 kanonicznego zrzutu (`sort_keys`, UTF-8) wyjścia `--json` tego samego wołania z HEAD.
 # Pełny JSON ma ~10 kB; strukturę wiersza pinuje projekcja wyżej, tu - każdy bajt poza `fill_pct`.
-ZLOTY_JSON_SHA256 = "cd39af165e7aaa606591da009a783403cce81732c36f8520266e7d470e66a935"
+# PL-1 R2: liczba to zrzut z HEAD `cf1911d` z wierszami PRZESTAWIONYMI w kolejność kubełka kadru
+# (sprzed R2: cd39af16…a935) - słowniki wierszy równe co do bajtu, zmieniła się wyłącznie kolejność.
+ZLOTY_JSON_SHA256 = "d7314a8aad23c21cf1015b3d67380aefecbc659d6f78110b56b756bdd9748cc7"
 
 
 def _zloty_park(con, monkeypatch):
@@ -842,8 +903,9 @@ def _projekcja(res):
 
 
 def test_zloty_plan_bez_progow_kadru_jak_przed_filtrem(con, monkeypatch):
-    """Kryterium nadrzędne paczki filtra kadru: bez `min_fill`/`max_panels` kanony i kolejność,
-    liczniki, `best_rig`, panele w każdym zestawie, rada i luki są te same co w HEAD."""
+    """Kryterium nadrzędne paczki filtra kadru: bez `min_fill`/`max_panels` kanony, liczniki,
+    `best_rig`, panele w każdym zestawie, rada i luki są te same co w HEAD; kolejność - HEAD
+    przestawiony wyłącznie kubełkiem kadru (PL-1 R2)."""
     _zloty_park(con, monkeypatch)
     res = targets.plan(con, night=date(2026, 8, 24), park=["A140R", "RC8"])
     assert res.rig_filter == "off"

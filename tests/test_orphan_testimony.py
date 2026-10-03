@@ -98,10 +98,22 @@ def test_predykat_milczy_przy_zgodzie_braku_faktow_i_braku_obecnych(tmp_path):
     con.execute("UPDATE location SET hdr_filter = NULL, hdr_imagetyp = NULL, hdr_object = NULL, "
                 "hdr_telescop = NULL, hdr_instrume = NULL, hdr_exptime = NULL, "
                 "hdr_xbinning = NULL, hdr_date_obs = NULL, image_count = NULL, "
-                "image_roles = NULL, hdr_hash = NULL WHERE path = ?", (str(b),))
+                "image_roles = NULL, hdr_hash = NULL, hdr_rule = NULL WHERE path = ?", (str(b),))
     con.commit()
     assert queries.orphan_testimony_copies(con) == {}          # ocalała bez faktów - „nie wiem"
     con.close()
+
+
+def test_predykat_milczy_przy_faktach_starej_reguly_koercji(po_skasowaniu, monkeypatch):
+    """AR-33: fakty kopii zebrane STARSZĄ regułą koercji (`hdr_rule` < bieżąca) porównane
+    z `copy_testimony` liczonym regułą bieżącą dałyby fałszywe „zeznanie z nieobecnej kopii",
+    a etap przejęcia przepisałby `header` - kopia starej reguły mówi „nie wiem", jak bez faktów."""
+    from horreum.gui import queries as q
+    con, _root, fid, _a, _b = po_skasowaniu
+    assert list(q.orphan_testimony_copies(con)) == [fid]
+    monkeypatch.setattr(q, "COPY_TESTIMONY_RULE", q.COPY_TESTIMONY_RULE + 1)
+    assert q.orphan_testimony_copies(con) == {}
+    assert [f for f, _k in scan.adopt_candidates(con)] == []
 
 
 def test_wiersz_porzadkow_liczy_klatki_z_dwiema_obecnymi_kopiami(tmp_path):
@@ -139,7 +151,8 @@ def _bez_faktow(con, *paths):
         con.execute("UPDATE location SET hdr_filter = NULL, hdr_imagetyp = NULL, hdr_object = NULL, "
                     "hdr_telescop = NULL, hdr_instrume = NULL, hdr_exptime = NULL, "
                     "hdr_xbinning = NULL, hdr_date_obs = NULL, image_count = NULL, "
-                    "image_roles = NULL, hdr_hash = NULL WHERE path = ?", (str(p),))
+                    "image_roles = NULL, hdr_hash = NULL, hdr_rule = NULL WHERE path = ?",
+                    (str(p),))
     con.commit()
 
 

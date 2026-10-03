@@ -22,7 +22,8 @@ from horreum.repo import (INPLACE_ISOLATING_PHASES,   # fazy izolujące zapisu w
 from horreum.resolve._coerce import _to_float, _to_int, _to_text
 from horreum.resolve._text import norm_alnum
 from horreum.resolve.frames import LIGHT_KINDS
-from horreum.resolve.headers import COPY_TESTIMONY_KEYWORDS, copy_testimony
+from horreum.resolve.headers import (COPY_TESTIMONY_KEYWORDS, COPY_TESTIMONY_RULE, FAKTY_BIEZACE,
+                                     copy_facts_state, copy_testimony)
 from horreum.resolve.objects import CLEARABLE_OBJECT_SOURCES, WEAK_OBJECT_SOURCES
 from horreum.resolve.paths import STACK_KIND, STACKS_DIR, object_from_path
 from horreum.resolve.stack import signature_timestamp
@@ -1557,11 +1558,11 @@ def present_copy_facts(con, frame_ids):
     ORDER BY frame_id, id - kolejność kopii jest kolejnością WJAZDU wpisu, ta sama, którą
     `base_rows` wybiera adres pokazywany w komórce. Zwraca: frame_id, location_id, path,
     image_count, image_roles, hdr_filter, hdr_imagetyp, hdr_object, hdr_telescop, hdr_instrume,
-    hdr_exptime, hdr_xbinning, hdr_date_obs, hdr_hash."""
+    hdr_exptime, hdr_xbinning, hdr_date_obs, hdr_hash, hdr_rule."""
     return con.execute(
         "SELECT l.frame_id, l.id AS location_id, l.path, l.image_count, l.image_roles, "
         "       l.hdr_filter, l.hdr_imagetyp, l.hdr_object, l.hdr_telescop, l.hdr_instrume, "
-        "       l.hdr_exptime, l.hdr_xbinning, l.hdr_date_obs, l.hdr_hash "
+        "       l.hdr_exptime, l.hdr_xbinning, l.hdr_date_obs, l.hdr_hash, l.hdr_rule "
         "FROM location l "
         "WHERE l.present = 1 AND l.frame_id IN (SELECT value FROM json_each(?)) "
         "ORDER BY l.frame_id, l.id",
@@ -1584,6 +1585,16 @@ def copy_divergence(copies):
     mówi „inaczej" - mówi „nie wiem", a lista rozjazdów ma nieść wyłącznie rozjazd DOWIEDZIONY.
     Mniej niż dwie takie kopie = nie ma czego z czym porównać.
 
+    ZEZNANIE INNEJ REGUŁY KOERCJI TO TEŻ „NIE WIEM" (0025, AR-33): kopia, której `hdr_rule` nie jest
+    bieżącym `COPY_TESTIMONY_RULE` (NULL - reguła nieznana, albo inna), wypada z porównania jak kopia
+    bez faktów. Dwie kopie zebrane różnymi rzutami mogą różnić się samym rzutem (`'1.34 '` obok
+    `'1.34'`), czyli rozjazdem, którego w plikach nie ma - a lista ma nieść rozjazd DOWIEDZIONY.
+    Nie porównujemy też kopii starej reguły między sobą: klatka o kopiach mieszanych dostawałaby
+    werdykt cząstkowy, migający w miarę postępu uzupełnienia. Kopię reguły starszej licznik „nie
+    wiem" widzi jako kandydata sterownika (`scan.copy_facts_candidates`), a najbliższa Dostawa
+    dociąga ją regułą bieżącą - wtedy wraca do porównania. Kopię reguły NOWSZEJ niż kod licznik też
+    widzi (tryb `porownywalne`), ale sterownik jej nie nadpisuje - stan rozstrzyga `copy_facts_state`.
+
     Wartość obecna obok brakującej (NULL) JEST rozjazdem: nagłówek, który zeznaje `OBJECT`, i nagłówek,
     który go nie ma, mówią o klatce różne rzeczy. Porównanie idzie po wartościach PO koercji
     (`copy_testimony`), więc XISF-owy tekst i FITS-owa liczba tego samego pomiaru nie rozjeżdżają się.
@@ -1592,7 +1603,8 @@ def copy_divergence(copies):
     nie ma dla tych tokenów parsera (`naming`, `resolve.paths`, `resolve.recipe` ich nie znają),
     a drugi, pisany obok, byłby drugim źródłem prawdy o tej samej nazwie. Luka opisana w raporcie
     toru, nie załatana tutaj."""
-    zeznane = [c for c in copies if c["hdr_hash"] is not None]
+    zeznane = [c for c in copies
+               if copy_facts_state(c["hdr_hash"], c["hdr_rule"]) == FAKTY_BIEZACE]
     if len(zeznane) < 2:
         return {}
     rozne = []
@@ -1645,9 +1657,12 @@ def orphan_testimony_copies(con):
     rozstrzyga `copy_testimony`. Pełna derywacja na 16,9 tys. zeznań kosztowałaby ~0,26 s przy każdym
     odświeżeniu Porządków, a kandydatów po SQL jest tyle, ile realnych rozjazdów.
 
-    KLATKA WCHODZI WYŁĄCZNIE, GDY KAŻDA OBECNA KOPIA MA ZEBRANE ZEZNANIE (`hdr_hash`). Kopia bez
-    faktów mówi „nie wiem", a nie „inaczej" - mogła być źródłem `header`, więc klatka z taką kopią
-    nie należy do predykatu (ta sama zasada co `copy_divergence`). Brak obecnej kopii = inna robota
+    KLATKA WCHODZI WYŁĄCZNIE, GDY KAŻDA OBECNA KOPIA MA ZEBRANE ZEZNANIE (`hdr_hash`) BIEŻĄCEJ
+    REGUŁY KOERCJI (`hdr_rule` == `COPY_TESTIMONY_RULE`, AR-33). Kopia bez faktów mówi „nie wiem",
+    a nie „inaczej" - mogła być źródłem `header`, więc klatka z taką kopią nie należy do predykatu
+    (ta sama zasada co `copy_divergence`). Fakty starej reguły porównane z `copy_testimony` liczonym
+    regułą bieżącą dałyby fałszywe „zeznanie z nieobecnej kopii", a etap przejęcia przepisałby
+    `header` - są więc „nie wiem" do czasu dociągnięcia przez sterownik uzupełnienia. Brak obecnej kopii = inna robota
     („Zniknięte"); brak `header` = frame-szkielet (kubełek `headerless` kolejki przeglądu).
 
     Guardów żywotności (wycofana, zastąpiona) predykat NIE nosi: mówi o prawdzie zeznania, a nie
@@ -1658,15 +1673,15 @@ def orphan_testimony_copies(con):
         "SELECT h.frame_id, h.raw_json FROM header h "
         "WHERE EXISTS (SELECT 1 FROM location l WHERE l.frame_id = h.frame_id AND l.present = 1) "
         "  AND NOT EXISTS (SELECT 1 FROM location l WHERE l.frame_id = h.frame_id "
-        "                   AND l.present = 1 AND l.hdr_hash IS NULL) "
+        "                   AND l.present = 1 AND (l.hdr_hash IS NULL OR l.hdr_rule IS NOT ?)) "
         "  AND NOT EXISTS (SELECT 1 FROM location l WHERE l.frame_id = h.frame_id "
         "                   AND l.present = 1 "
         "                   AND l.hdr_filter IS h.filter_raw AND l.hdr_object IS h.object_raw "
         "                   AND l.hdr_telescop IS h.telescop AND l.hdr_instrume IS h.instrume "
         "                   AND l.hdr_exptime IS h.exptime AND l.hdr_xbinning IS h.xbinning "
         "                   AND l.hdr_date_obs IS h.date_obs "
-        "                   AND l.hdr_imagetyp IS NULLIF(json_extract(h.raw_json, '$.IMAGETYP'), ''))"
-    ).fetchall()}
+        "                   AND l.hdr_imagetyp IS NULLIF(json_extract(h.raw_json, '$.IMAGETYP'), ''))",
+        (COPY_TESTIMONY_RULE,)).fetchall()}
     if not kandydaci:
         return {}
     kopie = {}
@@ -1927,7 +1942,7 @@ def object_card_form_rows(con):
         "       (SELECT count(*) FROM cards c3 WHERE c3.frame_id = f.id "
         "          AND c3.keyword IN ('CHECKSUM', 'DATASUM')) AS n_sum, "
         "       l.id AS lid, l.path, l.header_hash, l.compressed, l.unreadable_since, "
-        "       l.hdr_hash, l.hdr_object "
+        "       l.hdr_hash, l.hdr_rule, l.hdr_object "
         "FROM frame f "
         "JOIN object o ON o.id = f.object_id "
         "JOIN cards c ON c.frame_id = f.id AND c.keyword = 'OBJECT' AND c.idx = 0 "
@@ -1963,6 +1978,8 @@ def object_card_form_rows(con):
         if form is not None and card == form:
             continue
         czlony = [c.strip() for c in card.split("_")] if "_" in card else []
+        # Fakty kopii zebrane starszą regułą koercji (AR-33) to „nie wiem", jak brak faktów.
+        fakty_biezace = copy_facts_state(r["hdr_hash"], r["hdr_rule"]) == FAKTY_BIEZACE
         if r["filetype"] == "raw":
             skip = "plik RAW (DSLR) - Horreum go nie zapisuje"
         elif r["osrc"] == "region":
@@ -1981,9 +1998,9 @@ def object_card_form_rows(con):
             skip = "kopia oznaczona jako nieczytelna"
         elif r["n_cards"] > 1:
             skip = f"wiele kart OBJECT ({r['n_cards']})"
-        elif r["hdr_hash"] is None and r["n_absent"]:
+        elif not fakty_biezace and r["n_absent"]:
             skip = SKIP_COPY_WITHOUT_FACTS
-        elif r["hdr_hash"] is not None and _to_text(r["hdr_object"]) != card:
+        elif fakty_biezace and _to_text(r["hdr_object"]) != card:
             skip = "kopia zeznaje inną kartę OBJECT niż klatka"
         elif form is None:
             skip = "forma karty nie wraca do kanonu (kanon znany tylko z aliasu)"
@@ -2281,16 +2298,19 @@ def _stack_version_rows(con):
 
     Teleskop KANONICZNY przez `config → telescope_canonical` (jak `base_rows`): scalenie teleskopów
     nie rozcina grupy, a `telescope_id` NULL znaczy „config nieznany".
+    Werdykt „zostawiam wszystkie" (0026) przychodzi LEFT JOIN-em: `kept_key`/`kept_at` NULL = brak.
     Zwraca: frame_id, object_id, object_canon, camera_id, camera_model, telescope_id,
     telescope_label, telescop_canon, is_mono, filter_canon, exptime, raw_json, window_start,
-    window_end, tool, declared_rows."""
+    window_end, tool, declared_rows, creation_time, kept_key, kept_at, ra_deg, dec_deg."""
     return con.execute(
         "SELECT f.id AS frame_id, f.object_id, obj.canon AS object_canon, f.camera_id, "
         "       cam.model_canon AS camera_model, tc.canon_id AS telescope_id, "
         "       t.label AS telescope_label, t.telescop_canon, "
-        "       cam.is_mono, f.filter_canon, h.exptime, h.raw_json, "
-        "       i.window_start, i.window_end, i.tool, i.declared_rows "
+        "       cam.is_mono, f.filter_canon, h.exptime, h.raw_json, h.ra_deg, h.dec_deg, "
+        "       i.window_start, i.window_end, i.tool, i.declared_rows, i.creation_time, "
+        "       k.group_key AS kept_key, k.decided_at AS kept_at "
         "FROM frame f JOIN integration i ON i.master_frame_id = f.id "
+        "LEFT JOIN stack_version_kept k ON k.frame_id = f.id "
         "LEFT JOIN header h ON h.frame_id = f.id "
         "LEFT JOIN config c ON c.id = f.config_id "
         "LEFT JOIN telescope_canonical tc ON tc.id = c.telescope_id "
@@ -2345,7 +2365,12 @@ def _grupy_wersji(con):
             pomiary = _pomiary_obrazu(r["raw_json"])
             czlonkowie.append({"frame_id": int(r["frame_id"]), "tool": r["tool"] or None,
                                "declared": _to_int(r["declared_rows"]),
-                               "pomiary": pomiary, "kanaly": _kanaly(pomiary)})
+                               "pomiary": pomiary, "kanaly": _kanaly(pomiary),
+                               "created": r["creation_time"] or None,
+                               "kept_key": r["kept_key"], "kept_at": r["kept_at"],
+                               "srodek": ((r["ra_deg"], r["dec_deg"])
+                                          if r["ra_deg"] is not None and r["dec_deg"] is not None
+                                          else None)})
         out.append((klucz, wiersze, mono, czlonkowie,
                     classify_stack_versions(czlonkowie, mono=mono)))
     return out
@@ -2360,22 +2385,72 @@ def _id_grupy_wersji(klucz):
                                      start.isoformat(), koniec.isoformat()))
 
 
+def _grupa_zostawiona(czlonkowie):
+    """Czy grupa ma werdykt „zostawiam wszystkie" (0026): KAŻDY bieżący członek ma wiersz werdyktu
+    i wszystkie wiersze niosą JEDEN klucz gestu. Nowy stos w grupie (bez wiersza) albo zlanie dwóch
+    grup z osobnymi werdyktami (dwa klucze) cofa grupę do roboty - człowiek nie widział tego zbioru.
+    Klucza nie porównujemy z bieżącym identyfikatorem grupy: scalenie teleskopu zmienia identyfikator,
+    a zbiór stosów zostaje ten sam (powód w 0026)."""
+    klucze = {c["kept_key"] for c in czlonkowie}
+    return None not in klucze and len(klucze) == 1
+
+
+def _srodki_grupy(czlonkowie):
+    """Etykiety ŚRODKA KADRU członków (`header.ra_deg`/`dec_deg`) - `{frame_id: 'A'|'B'|…}` albo `{}`.
+
+    FAKT DO ROZRÓŻNIENIA, NIE ŚWIADEK WERSJI (AR-10). Kanały kamery kolorowej z dwóch przebiegów
+    (NGC3034 RC8 600 s: `_X_WBPP2` wobec `_X`) rozróżniała dotąd tylko nazwa pliku; zmierzone na
+    kopii archiwum 2026-10-03: trzy stosy `_WBPP2` mają jeden środek, cztery pozostałe (z
+    `combined_RGB`) drugi, a każda karta poza pomiarami i środkiem jest wspólna. Świadkiem
+    odrębności środek NIE jest: kanały jednej integracji LMC (5 środków na 6 stosów) i NGC4826
+    (4 na 4) też mają różne - więc „inny środek" nie znaczy „inny przebieg", a tylko „inny kadr
+    w nagłówku". Dlatego etykieta, nie werdykt, i tylko tam, gdzie dzieli grupę NIETRYWIALNIE:
+    co najmniej dwa środki i co najmniej jeden wspólny dla dwóch stosów (wszystkie różne albo
+    wszystkie równe nic człowiekowi nie mówią). Równość dokładna: obie wartości pochodzą z tego
+    samego zapisu nagłówka, a zaokrąglenie skleiłoby kadry różniące się o ułamek sekundy łuku.
+    Litery w porządku `frame_id` pierwszego stosu danego środka - stabilne między przeładowaniami."""
+    srodki = {}
+    for c in sorted(czlonkowie, key=lambda c: c["frame_id"]):
+        if c["srodek"] is not None:
+            srodki.setdefault(c["srodek"], []).append(c["frame_id"])
+    if len(srodki) < 2 or all(len(f) < 2 for f in srodki.values()):
+        return {}
+    return {fid: chr(ord("A") + i) for i, fids in enumerate(srodki.values()) for fid in fids}
+
+
+def _chwila_wersji(c):
+    """Chwila integracji członka i jej źródło - `(napis ISO, 'signature'|'created')` albo
+    `(None, None)`. Sygnatura bije `XISF:CreationTime`: to chwila przebiegu ImageIntegration, a druga
+    to chwila zapisu pliku (zaraz po integracji, ale jednak inny fakt - powierzchnia mówi, który
+    pokazuje). Druga jest jedyną datą stosów sprzed modułu XISF 1.1.2 (AR-10)."""
+    podpis = signature_timestamp(c["tool"])
+    if podpis:
+        return podpis, "signature"
+    if c.get("created"):
+        return c["created"], "created"
+    return None, None
+
+
 def stack_version_groups(con):
     """Grupy bliźniaków (ten sam materiał, co najmniej dwa stosy) z rodzajem grupy i członków.
 
     Zwraca listę dictów, po grupie: `group_id` (stabilny identyfikator z klucza, `_id_grupy_wersji`),
     `object_canon`, `filter_canon`, `exptime` (float), `window_start`, `window_end` (surowe napisy
     z `integration`), `telescope` (nazwa teleskopu kanonicznego, `telescope_label`), `camera` (model
-    kamery), `mono`, `kind` (`WERSJA_*`) oraz `members` - dicty `frame_id`, `kind`, `witness` (token
-    `VERSION_WITNESSES` albo None), `timestamp` (chwila integracji z sygnatury albo None),
-    `declared_rows`. Porządek: obiekt, filtr, ekspozycja, okno, teleskop, kamera - ten sam,
-    w którym powierzchnia ustawia nagłówki grup.
+    kamery), `mono`, `kind` (`WERSJA_*`), `kept` (werdykt „zostawiam wszystkie", `_grupa_zostawiona`),
+    `kept_at` (chwila werdyktu albo None) oraz `members` - dicty `frame_id`, `kind`, `witness` (token
+    `VERSION_WITNESSES` albo None), `timestamp` + `timestamp_source` (`_chwila_wersji`: sygnatura,
+    `XISF:CreationTime` albo None), `center` (etykieta środka kadru, `_srodki_grupy`, albo None),
+    `center_radec` (`(ra, dec)` albo None), `declared_rows`; grupa niesie też `centers` (ile różnych
+    środków). Porządek: obiekt, filtr, ekspozycja, okno,
+    teleskop, kamera - ten sam, w którym powierzchnia ustawia nagłówki grup.
 
     Read-model milczy tekstem UI (zdanie składa widok z katalogu i18n) i nie filtruje po rodzaju:
     perspektywa bierze grupy wersji, raport pomiaru bierze wszystkie."""
     out = []
     for klucz, wiersze, mono, czlonkowie, rodzaje in _grupy_wersji(con):
         r0 = wiersze[0]
+        srodki = _srodki_grupy(czlonkowie)
         out.append({
             "group_id": _id_grupy_wersji(klucz),
             "telescope": telescope_label(r0), "camera": r0["camera_model"],
@@ -2383,9 +2458,15 @@ def stack_version_groups(con):
             "exptime": _to_float(r0["exptime"]),
             "window_start": r0["window_start"], "window_end": r0["window_end"], "mono": mono,
             "kind": _rodzaj_grupy([rodzaje[c["frame_id"]][0] for c in czlonkowie]),
+            "kept": _grupa_zostawiona(czlonkowie),
+            "kept_at": (max(c["kept_at"] for c in czlonkowie)
+                        if _grupa_zostawiona(czlonkowie) else None),
+            "centers": len({c["srodek"] for c in czlonkowie if c["srodek"] is not None}),
             "members": [{"frame_id": c["frame_id"], "kind": rodzaje[c["frame_id"]][0],
                          "witness": rodzaje[c["frame_id"]][1],
-                         "timestamp": signature_timestamp(c["tool"]),
+                         "timestamp": _chwila_wersji(c)[0],
+                         "timestamp_source": _chwila_wersji(c)[1],
+                         "center": srodki.get(c["frame_id"]), "center_radec": c["srodek"],
                          "declared_rows": c["declared"]} for c in czlonkowie],
         })
     out.sort(key=lambda g: (natural_key(g["object_canon"] or ""), g["filter_canon"] or "",
@@ -2402,10 +2483,47 @@ def stack_version_frame_ids(con):
     bez dowodu (pochodna, nieustalony) zostaje w zbiorze, bo NALEŻY do grupy: człowiek decyduje
     o całej grupie i ma widzieć także to, czego maszyna nie umiała rozstrzygnąć. Grupy wyłącznie
     pochodne i nieustalone wypadają - rozbicie jednej integracji na kanały (LMC: `R`/`G`/`B`,
-    `combined_RGB`, `drizzle`) nie jest wersją do sprzątania. Zwraca set[int]."""
-    return {c["frame_id"] for _k, _w, _m, czlonkowie, rodzaje in _grupy_wersji(con)
-            if _rodzaj_grupy([rodzaje[c["frame_id"]][0] for c in czlonkowie]) == WERSJA_INNA
-            for c in czlonkowie}
+    `combined_RGB`, `drizzle`) nie jest wersją do sprzątania. Zwraca set[int].
+
+    Grupy z werdyktem „zostawiam wszystkie" ZOSTAJĄ w zbiorze: perspektywa jest jedynym miejscem,
+    gdzie werdykt widać i skąd się go cofa. Robotę (plakietkę) liczy `stack_version_open_frame_ids`."""
+    return _zbiory_wersji(con)[0]
+
+
+def stack_version_open_frame_ids(con):
+    """Podzbiór `stack_version_frame_ids` w grupach BEZ werdyktu „zostawiam wszystkie" - ROBOTA
+    wiersza Porządków (AR-10). Zwraca set[int]."""
+    return _zbiory_wersji(con)[1]
+
+
+def _zbiory_wersji(con):
+    """Oba zbiory wersji - `(wszystkie, otwarte)` - z JEDNEGO przebiegu `_grupy_wersji`, więc
+    otwarte są podzbiorem z konstrukcji. Dwa niezależne przebiegi rozjeżdżały się przy etapie
+    piszącym w tle (Stosy dopisują integracje między nimi): wiersz Porządków mówił „6 z 5",
+    a podpowiedź liczyła ujemną liczbę stosów z werdyktem. `tasks_state` woła to raz."""
+    wszystkie, otwarte = set(), set()
+    for _k, _w, _m, czlonkowie, rodzaje in _grupy_wersji(con):
+        if _rodzaj_grupy([rodzaje[c["frame_id"]][0] for c in czlonkowie]) != WERSJA_INNA:
+            continue
+        ids = {c["frame_id"] for c in czlonkowie}
+        wszystkie |= ids
+        if not _grupa_zostawiona(czlonkowie):
+            otwarte |= ids
+    return wszystkie, otwarte
+
+
+def stack_version_group_of(con, frame_id):
+    """Grupa wersji stosu `frame_id` pod gest werdyktu - dict `group_id`, `frame_ids` (posortowane),
+    `kind` (`WERSJA_*`), `kept` - albo `None`, gdy stos nie należy do żadnej grupy bliźniaków.
+    Liczona od nowa w chwili gestu, jak `keep_version_plan`: między pokazaniem menu a kliknięciem
+    mógł przejść skan."""
+    for klucz, _w, _m, czlonkowie, rodzaje in _grupy_wersji(con):
+        ids = sorted(c["frame_id"] for c in czlonkowie)
+        if frame_id in ids:
+            return {"group_id": _id_grupy_wersji(klucz), "frame_ids": ids,
+                    "kind": _rodzaj_grupy([rodzaje[i][0] for i in ids]),
+                    "kept": _grupa_zostawiona(czlonkowie)}
+    return None
 
 
 def keep_version_plan(con, frame_id):
@@ -2421,7 +2539,8 @@ def keep_version_plan(con, frame_id):
     Wszystkie obecne kopie, nie jedna: wersja z dwiema kopiami zostaje na dysku, dopóki leży
     którakolwiek z nich. Zwraca dict: `paths` (w porządku frame_id, location.id), `stacks` (ile
     stosów pozostałych wersji), `unknown` (ilu członków bez dowodu względem zostawianego),
-    `derived` (ile pochodnych zostawianej wersji)."""
+    `derived` (ile pochodnych zostawianej wersji), `kept` (grupa ma werdykt „zostawiam wszystkie" -
+    z tego samego przebiegu, bo gest przy werdykcie przeczyłby mu i ma odmówić)."""
     for _klucz, _wiersze, mono, czlonkowie, _rodzaje in _grupy_wersji(con):
         zostaje = next((c for c in czlonkowie if c["frame_id"] == frame_id), None)
         if zostaje is None:
@@ -2434,7 +2553,8 @@ def keep_version_plan(con, frame_id):
             "AND frame_id IN (SELECT value FROM json_each(?)) ORDER BY frame_id, id",
             (json.dumps(wersje),)).fetchall()]
         return {"paths": sciezki, "stacks": len(wersje), "derived": pochodne,
-                "unknown": len(inni) - len(wersje) - pochodne}
+                "unknown": len(inni) - len(wersje) - pochodne,
+                "kept": _grupa_zostawiona(czlonkowie)}
     return None
 
 
@@ -2697,6 +2817,7 @@ def tasks_state(con):
     observatories_unnamed = con.execute(
         "SELECT COUNT(*) FROM observatory WHERE name IS NULL AND merged_into IS NULL"
     ).fetchone()[0]
+    wersje, wersje_otwarte = _zbiory_wersji(con)
     return {
         "unresolved_lights": len(review_frame_ids(con)),
         # Nagłówek mówi co innego niż zatwierdzony folder (E5-2) - robota: plik przeczy gestowi
@@ -2732,9 +2853,13 @@ def tasks_state(con):
         "retired_frames": len(retired_frame_ids(con)),
         "retired_conflict_frames": len(retired_conflict_frame_ids(con)),
         # Wersje stosów - liczba STOSÓW perspektywy (ten sam predykat, co trim), nie liczba grup:
-        # wiersz i lista pod klikiem liczą to samo. Natura wiersza (poza plakietką) mieszka
-        # w `tasks._BEZ_ROBOTY`, nie tutaj - licznik mówi, ile jest, nie czy to robota.
-        "stack_versions": len(stack_version_frame_ids(con)),
+        # wiersz i lista pod klikiem liczą to samo.
+        "stack_versions": len(wersje),
+        # DRUGA LICZBA TEGO SAMEGO WIERSZA (AR-10), nie osobny wiersz: ile z tych stosów stoi
+        # w grupach BEZ werdyktu „zostawiam wszystkie". Ona rozstrzyga, czy wiersz jest robotą
+        # (plakietka, pogrubienie) - lista pod klikiem dalej pokazuje wszystkie, bo tam werdykt
+        # się widzi i cofa. Podzbiór pierwszej z konstrukcji - obie z jednego przebiegu grup.
+        "stack_versions_open": len(wersje_otwarte),
     }
 
 

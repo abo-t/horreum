@@ -333,8 +333,8 @@ def test_skrocony_naglowek_wypelnienia_niesie_pelna_nazwe_w_podpowiedzi(view):
 
 def test_porzadek_po_soczewce_przestawia_liste_bez_re_planu(view):
     """Dług P-A #3: chip zmieniał radę, ale NIE porządek — „patrzę oczami RC8" zostawiało na górze
-    cele wybrane dla A140R. Sort żyje w WIDOKU: `targets._sort_key` (pięć członów, D-T4-c) i CLI
-    zostają nietknięte, a przełącznik nie liczy nocy od nowa."""
+    cele wybrane dla A140R. Sort żyje w WIDOKU: `targets._sort_key` (klucz rady, D-T4-c, z kubełkiem
+    kadru PL-1) i CLI zostają nietknięte, a przełącznik nie liczy nocy od nowa."""
     from horreum.gui import planner_model as pm
     view._on_chip("RC8")
     core = [view.model.row_at(r).canon for r in range(view.model.rowCount())]

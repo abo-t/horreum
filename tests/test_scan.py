@@ -811,7 +811,8 @@ def _do_stanu_sprzed_p6a(con, *paths):
         con.execute("UPDATE location SET header_hash = NULL, hdr_hash = NULL, image_count = NULL, "
                     "image_roles = NULL, hdr_filter = NULL, hdr_imagetyp = NULL, hdr_object = NULL, "
                     "hdr_telescop = NULL, hdr_instrume = NULL, hdr_exptime = NULL, "
-                    "hdr_xbinning = NULL, hdr_date_obs = NULL WHERE path = ?", (str(p),))
+                    "hdr_xbinning = NULL, hdr_date_obs = NULL, hdr_rule = NULL WHERE path = ?",
+                    (str(p),))
     con.commit()
 
 

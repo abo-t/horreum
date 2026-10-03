@@ -65,7 +65,8 @@ from .hashing import sha1_of, sha1_of_span
 from .resolve.cameras import camera_identity
 from .resolve.frames import kind_from_path, normalize_kind
 from .resolve.paths import STACK_KIND, STACKS_DIR
-from .resolve.headers import copy_testimony, extract_header
+from .resolve.headers import (COPY_TESTIMONY_RULE, FAKTY_DO_DOCIAGNIECIA, copy_facts_state,
+                              copy_testimony, extract_header)
 
 # Rozszerzenia nagłówkonośne (PLAN §1.1: jeden mechanizm, format = opakowanie). DSLR/RAW
 # (.dng/.arw/.cr2, czytnik EXIF `exif.py`) DOŁĄCZONY do JEDNEGO passa skanu (#2, D-R-3 —
@@ -645,8 +646,8 @@ def _escape_xml(text, *, attribute):
     `"` tylko w atrybucie (w tekście elementu jest legalny surowy, a escape zmieniłby bajty).
 
     Znaków sterujących tu NIE MA czym zakodować - XML 1.0 zabrania ich nawet jako referencji
-    (`&#7;`), więc escape ich nie legalizuje. Odmawia ich wcześniej pisarz (`writeback.card_violation`,
-    reguły karty FITS 4.0), zanim wartość dojdzie do łaty."""
+    (`&#7;`), więc escape ich nie legalizuje. Odmawia ich wcześniej pisarz (reguły karty FITS 4.0,
+    `card_rules.card_violation`), zanim wartość dojdzie do łaty."""
     out = text.replace("&", "&amp;").replace("<", "&lt;")
     return out.replace('"', "&quot;") if attribute else out
 
@@ -822,6 +823,13 @@ def build_fits_keyword_element(xml_bytes, *, keyword, value, comment=None):
     wzorcem — wzorzec daje styl, nie pozycję. Wcięcie kopiujemy z białych znaków poprzedzających
     ostatnią kartę, więc nowy element siada w tej samej kolumnie.
 
+    Karta ma DWIE legalne postaci elementu: samozamykającą (`<FITSKeyword …/>`) i z zamknięciem
+    (`<FITSKeyword …></FITSKeyword>`). „Za kartą" znaczy za KOŃCEM ELEMENTU - przy drugiej postaci
+    za znacznikiem zamykającym; wstawka za otwierającym zagnieżdżała nową kartę w starej, a parser
+    i round-trip kart tego nie widzą (AR-6). Wzorzec z zamknięciem kopiujemy CAŁY, więc nowa karta
+    ma tę samą postać co sąsiad. Treść elementu karty (tekst, komentarz XML, element) albo karta
+    zagnieżdżona w karcie → odmowa: takiej struktury nie rozumiemy, więc nie kopiujemy jej dalej.
+
     Atrybuty wzorca spoza `name`/`value`/`comment` → odmowa (EXPECT): skopiowalibyśmy do nowej
     karty cudzą wartość, nie wiedząc, co znaczy. `comment` wzorca ZAWSZE nadpisujemy (pustym
     tekstem, gdy wołający nie podał) — przepisany komentarz sąsiada byłby cichym fałszem o nowej
@@ -829,22 +837,44 @@ def build_fits_keyword_element(xml_bytes, *, keyword, value, comment=None):
 
     Zwraca `(offset, blob)` do wycinka ZEROWEJ długości `(offset, offset, blob)`; mieszczenie się
     w rezerwie liczy `build_xisf_header_region`, tak samo jak dla łaty podmieniającej."""
-    ostatnia = None
-    wzorzec = None
+    ostatnia = None      # (początek, koniec ELEMENTU) ostatniej karty
+    wzorzec = None       # (początek, koniec elementu, koniec znacznika otwierającego)
+    otwarta = None       # karta z zamknięciem w toku: (początek, koniec otwierającego, tekstowa)
     for start, end in _iter_xml_tags(xml_bytes):
         tag = xml_bytes[start:end]
         m = _XISF_TAG_NAME.match(tag)
-        if m is None or tag.startswith(b"</"):
+        if m is None or m.group(1).rsplit(b":", 1)[-1] != b"FITSKeyword":
             continue
-        if m.group(1).rsplit(b":", 1)[-1] != b"FITSKeyword":
+        if tag.startswith(b"</"):
+            if otwarta is None:
+                raise ValueError("XISF: </FITSKeyword> bez otwarcia - struktury kart nie rozumiem, "
+                                 "nowej karty nie wstawiam")
+            s, koniec_otw, tekstowa = otwarta
+            if xml_bytes[koniec_otw:start].strip():
+                raise ValueError("XISF: karta ma treść elementu między otwarciem a zamknięciem - "
+                                 "takiej postaci nie rozumiem, nowej karty nie wstawiam")
+            ostatnia = (s, end)
+            if tekstowa:
+                wzorzec = (s, end, koniec_otw)
+            otwarta = None
             continue
-        ostatnia = (start, end)
+        if otwarta is not None:
+            raise ValueError("XISF: <FITSKeyword> zagnieżdżona w innej karcie - struktury kart nie "
+                             "rozumiem, nowej karty nie wstawiam")
         attrs = _tag_attrs(tag)
+        tekstowa = False
         if b"value" in attrs:
             vs, ve = attrs[b"value"]
             surowa = tag[vs:ve]
-            if len(surowa) >= 2 and surowa.startswith(b"'") and surowa.endswith(b"'"):
-                wzorzec = (start, end)
+            tekstowa = len(surowa) >= 2 and surowa.startswith(b"'") and surowa.endswith(b"'")
+        if tag.rstrip().endswith(b"/>"):
+            ostatnia = (start, end)
+            if tekstowa:
+                wzorzec = (start, end, end)
+        else:
+            otwarta = (start, end, tekstowa)
+    if otwarta is not None:
+        raise ValueError("XISF: <FITSKeyword> bez zamknięcia - nowej karty nie wstawiam")
     if ostatnia is None:
         raise XisfTargetMissing(
             "XISF: nagłówek nie ma ani jednej karty <FITSKeyword> — nie ma z czego przejąć "
@@ -854,8 +884,8 @@ def build_fits_keyword_element(xml_bytes, *, keyword, value, comment=None):
             "XISF: żadna karta tego pliku nie trzyma wartości w apostrofach FITS — konwencji "
             "wartości tekstowej NIE ZNAM, więc nowej karty nie składam")
 
-    tmpl = xml_bytes[wzorzec[0]:wzorzec[1]]
-    attrs = _tag_attrs(tmpl)
+    tmpl = xml_bytes[wzorzec[0]:wzorzec[1]]                 # CAŁY element - z zamknięciem, jeśli ma
+    attrs = _tag_attrs(xml_bytes[wzorzec[0]:wzorzec[2]])    # atrybuty tylko ze znacznika otwierającego
     obce = set(attrs) - _KEYWORD_ATTRS_ZNANE
     if obce:
         nazwy = ", ".join(sorted(a.decode("ascii", "replace") for a in obce))
@@ -884,7 +914,7 @@ def build_fits_keyword_element(xml_bytes, *, keyword, value, comment=None):
 
     biale = xml_bytes[:ostatnia[0]]
     sep = biale[len(biale.rstrip()):]          # wcięcie sprzed ostatniej karty — ta sama kolumna
-    return ostatnia[1], sep + element
+    return ostatnia[1], sep + element          # za KOŃCEM elementu ostatniej karty (AR-6)
 
 
 def _assert_span_zgodny_z_parserem(xml_bytes, span, *, keyword, idx, property_id, attr="value"):
@@ -1383,7 +1413,9 @@ def copy_header_facts(header, header_hash, image_roles):
     Kotwica `hdr_hash` = odcisk tego nagłówka. Bez nagłówka (W1) albo bez odcisku (import z dawcy
     bez `header_hash`) faktów nie ma czym zakotwiczyć, więc wszystkie są NULL - CHECK 0021 i tak nie
     przyjąłby faktu bez kotwicy. Role jadą jako lista JSON w kolejności dokumentu (`ensure_ascii`
-    wyłączone, `json.dumps` deterministyczny), więc porównanie dwóch kopii to porównanie tekstu."""
+    wyłączone, `json.dumps` deterministyczny), więc porównanie dwóch kopii to porównanie tekstu.
+    Stempel `hdr_rule` (0025, AR-33) = reguła koercji, którą `copy_testimony` właśnie rzutował -
+    jedno miejsce składu, więc skan, re-sync pisarza i uzupełnienie stemplują tak samo."""
     if header is None or header_hash is None:
         return dict.fromkeys(repo.COPY_FACTS)
     facts = copy_testimony(header)
@@ -1391,6 +1423,7 @@ def copy_header_facts(header, header_hash, image_roles):
     facts["image_roles"] = (None if image_roles is None
                             else json.dumps(list(image_roles), ensure_ascii=False))
     facts["hdr_hash"] = header_hash
+    facts["hdr_rule"] = COPY_TESTIMONY_RULE
     return facts
 
 
@@ -2045,7 +2078,9 @@ class CopyFactsSummary:
 
 def copy_facts_candidates(con, root=None, *, porownywalne=False):
     """Kandydaci uzupełnienia faktów kopii (0021): kopie OBECNE, o znanym odcisku nagłówka, bez
-    zebranych faktów (`hdr_hash IS NULL`), klatek z KLASY kandydata (`queries.copy_facts_class`,
+    zebranych faktów (`hdr_hash IS NULL`) albo z faktami reguły koercji innej niż bieżąca
+    (`hdr_rule` NULL albo mniejszy od `COPY_TESTIMONY_RULE` - 0025, AR-33: zmiana rzutu dociąga stare
+    zeznania tym samym sterownikiem, zamiast zostawić je obok nowych), klatek z KLASY kandydata (`queries.copy_facts_class`,
     właściciel predykatu w read-modelu, import leniwy jak w `_adopt_candidates_under`) - XISF
     wszystkie (liczba i role obrazów żyją tylko tam) plus KAŻDA kopia klatki, która ma >1 lokację
     OGÓŁEM (tylko tam jest z czym porównywać zeznanie).
@@ -2084,17 +2119,24 @@ def copy_facts_candidates(con, root=None, *, porownywalne=False):
     `porownywalne=True` - wyłącznie kopie klatek o >1 lokacji OGÓŁEM: kandydaci, których fakty mogą
     zmienić predykaty PORÓWNUJĄCE kopie jednej klatki („Kopie niezgodne", „Zeznanie z nieobecnej
     kopii"). Pojedynczy XISF czeka na uzupełnienie (liczba i role obrazów), ale żadnej z tych liczb
-    nie ruszy - licznik „nie wiem" przy nich pyta tym trybem, etap Dostawy domyślnym."""
+    nie ruszy - licznik „nie wiem" przy nich pyta tym trybem, etap Dostawy domyślnym.
+
+    TRYB LICZNIKA LICZY TEŻ FAKTY REGUŁY NOWSZEJ NIŻ KOD (`FAKTY_NOWSZE`, AR-33): porównania kopii
+    mówią o nich „nie wiem” (`copy_facts_state`), więc licznik „nie wiem” musi je widzieć - inaczej
+    rozjazd znikałby bez śladu. Kandydatem sterownika NIE są (starsza binarka niczego nie cofa):
+    drugi parametr `>` jest NULL-em w trybie domyślnym, więc fragment staje się „do dociągnięcia”."""
     from .gui import queries
     rows = con.execute(
         "SELECT l.id, l.volume, l.path, l.header_hash FROM location l "
-        "WHERE l.present = 1 AND l.header_hash IS NOT NULL AND l.hdr_hash IS NULL "
+        "WHERE l.present = 1 AND l.header_hash IS NOT NULL "
+        "  AND (l.hdr_hash IS NULL OR l.hdr_rule IS NULL OR l.hdr_rule < ? OR l.hdr_rule > ?) "
         "  AND l.unreadable_since IS NULL "
         "  AND NOT EXISTS (SELECT 1 FROM inplace_op o WHERE o.location_id = l.id "
         "                  AND o.phase IN (SELECT value FROM json_each(?))) "
         "  AND l.frame_id IN (SELECT value FROM json_each(?)) "
         "ORDER BY l.id",
-        (json.dumps(list(repo.INPLACE_ISOLATING_PHASES)),
+        (COPY_TESTIMONY_RULE, COPY_TESTIMONY_RULE if porownywalne else None,
+         json.dumps(list(repo.INPLACE_ISOLATING_PHASES)),
          json.dumps(queries.copy_facts_class(con, porownywalne=porownywalne)))).fetchall()
     if root is None:
         return rows
@@ -2110,9 +2152,12 @@ def _odcisk_lokacji(con, location_id):
 
 
 def _fakty_kopii_sa(con, location_id):
-    """Czy lokacja ma już fakty kopii (`hdr_hash IS NOT NULL`) - zebrane przez kogokolwiek."""
-    return con.execute("SELECT hdr_hash IS NOT NULL FROM location WHERE id = ?",
-                       (location_id,)).fetchone()[0] == 1
+    """Czy sterownik nie ma już przy lokacji roboty: fakty bieżącej reguły albo nowszej (binarka
+    starsza od bazy ich nie cofa) - zebrane przez kogokolwiek. Fakty starszej reguły to robota
+    sterownika, nie „zrobione gdzie indziej" (0025, AR-33). Stan liczy `copy_facts_state`."""
+    row = con.execute("SELECT hdr_hash, hdr_rule FROM location WHERE id = ?",
+                      (location_id,)).fetchone()
+    return copy_facts_state(row["hdr_hash"], row["hdr_rule"]) != FAKTY_DO_DOCIAGNIECIA
 
 
 def backfill_copy_facts(con, *, now, root=None, progress=None, should_cancel=None,
@@ -2133,8 +2178,10 @@ def backfill_copy_facts(con, *, now, root=None, progress=None, should_cancel=Non
 
     Odcisk i fakty porównuje z wierszem lokacji czytanym TERAZ, nie z migawką kandydatów: pętla po
     550 plikach trwa, a w tym czasie re-sync pisarza (zapis nagłówka w miejscu) albo równoległy skan
-    mogą dociągnąć fakty razem z NOWYM odciskiem. Fakty już są → `elsewhere` (nic nie czeka), nie
-    `stale`. Drugi konflikt generacji z rzędu (zapis w miejscu w toku) → `raced`: plik jest zdrowy,
+    mogą dociągnąć fakty razem z NOWYM odciskiem. Fakty już są, a odcisk pliku równa się odciskowi
+    wiersza → `elsewhere` (nic nie czeka), nie `stale`. Fakty są, ale odcisk pliku INNY (także po
+    ponownym odczycie) → `stale`: nagłówek zmienił się na dysku po tym, jak ktoś zebrał fakty, więc
+    robotą jest skan, nie „nic". Drugi konflikt generacji z rzędu (zapis w miejscu w toku) → `raced`: plik jest zdrowy,
     a „zmienione na dysku od skanu" wysyłałoby człowieka do skanu, który niczego nie zmieni.
 
     ZEZNANIA KLATKI NIE RUSZA. W odróżnieniu od `backfill_xisf_headers` (które szło przez
@@ -2163,7 +2210,11 @@ def backfill_copy_facts(con, *, now, root=None, progress=None, should_cancel=Non
 
     Hooki `progress(done, total, path, summary)` / `should_cancel()` - kontrakt jak w `scan_tree`
     (anulowanie na GRANICY PLIKU; przerwany przebieg zostawia bazę spójną, bo każda kopia to osobna
-    transakcja, a następny przebieg dobiera resztę)."""
+    transakcja, a następny przebieg dobiera resztę).
+
+    DZIENNIK (AR-32): każda zapisana kopia - `location.refreshed` z `{before, after}` (klinga), a cały
+    przebieg z kandydatami - JEDEN `location.copy_facts_summary` z polami tego `CopyFactsSummary`
+    (także przerwany: `cancelled`). Przebieg bez kandydatów zdarzenia nie zostawia."""
     rows = copy_facts_candidates(con, root)
     s = CopyFactsSummary(rows=len(rows))
     total = len(rows)
@@ -2233,22 +2284,30 @@ def backfill_copy_facts(con, *, now, root=None, progress=None, should_cancel=Non
             facts = copy_header_facts(header, header_hash, image_roles)
             # Wiersz TERAZ, nie migawka kandydatów (docstring): fakty mógł dociągnąć re-sync pisarza
             # razem z nowym odciskiem - wtedy robota jest zrobiona, a nie „zmieniona na dysku".
-            if _fakty_kopii_sa(con, row["id"]):
-                s.elsewhere += 1
-                break
-            try:
-                znany = _odcisk_lokacji(con, row["id"])
-                zapisane = header_hash == znany and repo.record_copy_facts(
-                    con, location_id=row["id"], copy_facts=facts, now=now, actor=actor,
-                    inplace_gen=gen)
-            except repo.StaleScanRecord:       # zapis w miejscu po generacji - odczyt stęchły
-                if proba < _PROBY_GENERACJI:
-                    continue
-                s.raced += 1                   # drugi konflikt: zapis w toku, plik zdrowy
-                break
+            zapisane = False
+            if header_hash == _odcisk_lokacji(con, row["id"]) and not _fakty_kopii_sa(con, row["id"]):
+                try:
+                    zapisane = repo.record_copy_facts(
+                        con, location_id=row["id"], copy_facts=facts, now=now, actor=actor,
+                        inplace_gen=gen)
+                except repo.StaleScanRecord:   # zapis w miejscu po generacji - odczyt stęchły
+                    if proba < _PROBY_GENERACJI:
+                        continue
+                    s.raced += 1               # drugi konflikt: zapis w toku, plik zdrowy
+                    break
             if zapisane:
                 s.written += 1
-            elif _fakty_kopii_sa(con, row["id"]):  # CAS klingi przegrał z równoległym zapisem faktów
+            elif header_hash != _odcisk_lokacji(con, row["id"]):
+                # Odcisk pliku ≠ odcisk wiersza: kopia zmieniona od skanu - `stale` także wtedy, gdy
+                # fakty już są (zebrał je ktoś dla nagłówka, którego na dysku już nie ma). Przy
+                # faktach jedno ponowienie odczytu odsiewa wyścig, w którym to NASZ odczyt jest
+                # starszy od wiersza (skan wpisał nowszy nagłówek razem z faktami) - wtedy drugi
+                # odczyt zgadza się z wierszem i kopia idzie do `elsewhere`.
+                if _fakty_kopii_sa(con, row["id"]) and proba < _PROBY_GENERACJI:
+                    continue
+                s.stale += 1
+                s.stale_paths.append(path)
+            elif _fakty_kopii_sa(con, row["id"]):  # ten sam nagłówek, fakty zebrane gdzie indziej
                 s.elsewhere += 1
             else:
                 s.stale += 1
@@ -2263,6 +2322,10 @@ def backfill_copy_facts(con, *, now, root=None, progress=None, should_cancel=Non
         prefix = korzen.rstrip("\\/") + os.sep
         reszta = [r for r in reszta if _under(r["path"], prefix)]
     s.remaining = len(reszta)
+    # Ślad przebiegu ZBIORCZO (AR-32) obok per-lokacyjnych `location.refreshed`: te same liczby,
+    # które dostaje raport, w jednym zdarzeniu (`repo.flag_copy_facts_summary`).
+    repo.flag_copy_facts_summary(con, {f.name: getattr(s, f.name) for f in fields(s)},
+                                 now=now, actor=actor)
     return s
 
 

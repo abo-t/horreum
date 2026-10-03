@@ -39,6 +39,19 @@ def test_chip_niczego_nie_ukrywa_i_nie_przestawia(res):
         assert [v.canon for v in lensed] == [v.canon for v in base]      # porządek = rdzeń
 
 
+def test_porzadek_ekranu_to_klucz_rdzenia_z_kubelkiem_kadru(res):
+    """PL-1 R2: ekran (porządek rady) i `horreum plan` mają JEDEN klucz - `targets._sort_key`
+    z kubełkiem kadru `best_rig`. Widok oddaje wiersze rdzenia bez przestawiania, także pod chipem
+    (soczewka kubełka nie przelicza), a w obrębie tej samej widoczności i luki kubełek nie maleje."""
+    core = [r.target.canon for r in res.rows]
+    for telescope in (None,) + pm.rig_choices(res):
+        assert [v.canon for v in pm.view_rows(res, telescope)] == core
+    keys = [targets._sort_key(r) for r in res.rows]
+    assert keys == sorted(keys)
+    buckets = {targets._fill_bucket(r.framing_in(r.best_rig)) for r in res.rows}
+    assert len(buckets) > 1, "fixture z jednym kubełkiem - test straciłby sens"
+
+
 def test_chipy_ida_w_porzadku_zestawow_po_lightach(res):
     """Kontrakt T4 §8a pkt 3: ekran pokazuje park w porządku SPRZĘTU, nie alfabetu."""
     assert pm.rig_choices(res) == tuple(r.telescope for r in res.rigs)

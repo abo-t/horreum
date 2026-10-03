@@ -50,6 +50,51 @@ def _izoluj_qsettings(tmp_path_factory, monkeypatch):
     yield
 
 
+_LIMIT_WATKU_MS = 10_000
+
+
+@pytest.fixture(autouse=True)
+def _skasuj_okna_testu(_izoluj_qsettings):
+    """Okna najwyższego poziomu, które test zostawił, kasujemy po nim (AR-11). `win.close()` tylko
+    chowa okno, a `gc` go nie zbierze: sloty-lambdy trzymają `self` przez połączenia Qt, których
+    cykl jest poza zasięgiem Pythona. Dowód 2026-10-03: przed `test_main_NIE_rusza_rejestru_usera`
+    żyło 24 131 widgetów (950 okien) z samego `test_gui_mainwindow.py`, a `apply_theme`
+    (`setStyleSheet`/`setPalette`/`setStyle` na CAŁĄ aplikację) przepoleruje każdy z nich - koszt
+    liniowy, ~0,3 ms na widget na platformie natywnej. Pełna bateria: 94 s + 51 s na dwóch testach
+    motywu przy 0,24 s dla jednego okna. To koszt baterii, nie produktu (jedno okno, ~750 widgetów).
+
+    Zależność od `_izoluj_qsettings` ustawia kolejność: sprzątanie biegnie PRZED zdjęciem podmiany
+    ustawień, więc kasowane okno nie ma jak sięgnąć rejestru usera. `~QThread` w biegu to `qFatal`
+    (0xC0000409 - zmierzone na planerze, który liczy noc w tle od montażu). Worker kończy rachunek
+    w milisekundach, ale `finished -> QThread.quit` idzie KOLEJKĄ do wątku głównego, a test nie
+    kręci pętli - wątek wisi w `exec()` bez końca. Stąd jawne `quit()` (bezpieczne z innego wątku;
+    przed `exec()` Qt 6 je zapamiętuje) i `wait` z limitem; okno z wątkiem, który nie skończył
+    w limicie, zostaje żywe. Kasujemy wyłącznie okna bez rodzica powstałe w TYM teście;
+    widgety fixture'ów o szerszym zasięgu powstały przed zrzutem i zostają."""
+    try:
+        from PySide6.QtCore import QCoreApplication, QEvent, QThread
+        from PySide6.QtWidgets import QApplication
+    except ImportError:                 # `.venv` bez Qt - nie ma czego sprzątać
+        yield
+        return
+    app = QApplication.instance()
+    przed = set(app.topLevelWidgets()) if app is not None else set()
+    yield
+    app = QApplication.instance()
+    if app is None:
+        return
+    for w in app.topLevelWidgets():
+        if w in przed or w.parentWidget() is not None:
+            continue
+        watki = w.findChildren(QThread)
+        for t in watki:
+            t.quit()
+        if not all(t.wait(_LIMIT_WATKU_MS) for t in watki):
+            continue
+        w.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+
+
 @pytest.fixture
 def ustawienia(_izoluj_qsettings):
     """Ustawienia aplikacji widziane przez test - te same, które czyta i pisze kod produktu

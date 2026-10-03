@@ -20,8 +20,10 @@ wiersze, których TEN zestaw nie spełnia - „patrzę oczami RC8, pokaż, co RC
 Progi czyta z `PlanResult` (jedno źródło z rdzeniem), predykat to `targets.rig_fits` (ten sam,
 którym rdzeń tnie pulę), a liczbę schowanych podaje nota nagłówka. Bez filtra - nic nie znika.
 
-PORZĄDEK RDZENIA JEST DOMYŚLNY, SORT SOCZEWKI ŻYJE W WIDOKU (D-T4-c): `targets._sort_key` ma pięć
-członów wywalczonych firsthandem T3 i pozostaje NIETKNIĘTY. `order=ORDER_LENS` przestawia GOTOWE
+PORZĄDEK RDZENIA JEST DOMYŚLNY, SORT SOCZEWKI ŻYJE W WIDOKU (D-T4-c): `targets._sort_key` (człony
+firsthandu T3 + kubełek kadru PL-1 liczony dla `best_rig`) jest JEDYNYM kluczem rady - ekran go nie
+powtarza, tylko oddaje wiersze w kolejności rdzenia, więc GUI i `horreum plan` mówią tym samym
+porządkiem. Soczewka chipa kubełka NIE przelicza. `order=ORDER_LENS` przestawia GOTOWE
 wiersze — to prezentacja, tak jak sam chip; rdzeń nadal oddaje jedną, deterministyczną kolejność,
 a CLI (`horreum plan`) o istnieniu tego porządku nie wie i wiedzieć nie musi.
 """
@@ -36,7 +38,7 @@ from horreum.gui import i18n, portfolio
 # Kolejność kanałów w opisie pokrycia — RGB pierwszy, potem wąskie (jak w CLI `_coverage_text`).
 _CHANNELS = (T.RGB,) + T.NARROW_CHANNELS
 
-# Porządki listy. `ORDER_CORE` = rada rdzenia (pięcioczłonowy `targets._sort_key`); `ORDER_LENS` =
+# Porządki listy. `ORDER_CORE` = rada rdzenia (`targets._sort_key`); `ORDER_LENS` =
 # dopasowanie do soczewki, liczone TU (widok), nigdy w rdzeniu.
 ORDER_CORE, ORDER_LENS = "core", "lens"
 

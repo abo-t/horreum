@@ -784,7 +784,7 @@ def _dup_tip(row):
             role = json.loads(c["image_roles"]) if c["image_roles"] else []
             if any(r is not None for r in role):
                 tip += f" ({', '.join('?' if r is None else str(r) for r in role)})"
-        if c["hdr_hash"] is None:
+        if queries.copy_facts_state(c["hdr_hash"], c["hdr_rule"]) != queries.FAKTY_BIEZACE:
             tip += i18n.t("grid.tip.copy_unread", place=i18n.t("nav.dostawa"),
                           check=i18n.t("pipeline.btn.presence"),
                           mark=i18n.t("pipeline.btn.mark_vanished"))
@@ -845,6 +845,8 @@ def _adnotuj_wersje(base, grupy):
         for m in g["members"]:
             fakty[m["frame_id"]] = (g["group_id"], etykieta,
                                     {**m, "group_kind": g["kind"],
+                                     "kept": g.get("kept", False), "kept_at": g.get("kept_at"),
+                                     "centers": g.get("centers", 0),
                                      "window_start": g["window_start"],
                                      "window_end": g["window_end"]})
     for row in base:
@@ -1085,29 +1087,58 @@ class GridTableModel(QAbstractTableModel):
         i historii wyglądały na ekranie identycznie („inna integracja"), a jedyny powód werdyktu
         - inne pomiary szumu i PSF - wymagał najechania na każdą komórkę po kolei.
 
-        Brak faktu MILCZY zamiast udawać: stosy sprzed modułu XISF 1.1.2 nie mają sygnatury, więc
-        nie mają daty integracji - człon po prostu nie staje (data pliku nie jest datą integracji:
-        zapis nagłówka przez Horreum ją przestawia). Rodzaj jest zawsze, bo zawsze jest werdyktem
-        read-modelu, także „nieustalone"."""
+        Brak faktu MILCZY zamiast udawać: stos bez sygnatury integracji (sprzed modułu XISF 1.1.2)
+        dostaje datę z `XISF:CreationTime` (AR-10, chwila zapisu pliku zaraz po integracji - źródło
+        mówi tooltip), a bez obu człon po prostu nie staje (data pliku w systemie plików nie jest
+        datą integracji: zapis nagłówka przez Horreum ją przestawia). Rodzaj jest zawsze, bo zawsze
+        jest werdyktem read-modelu, także „nieustalone".
+
+        Werdykt „zostawiam wszystkie" (0026) stoi PIERWSZYM członem - kolumna bywa ucięta przy
+        wąskim oknie, a to on mówi, że w tej grupie nie ma już roboty; komórka jest wtedy wyciszona.
+        Etykieta środka kadru („środek A", `queries._srodki_grupy`) to fakt do rozróżnienia stosów
+        z dwóch przebiegów kamery kolorowej, które poza nią różni tylko nazwa - nie świadek wersji.
+        Liczba obrazów (AR-10) to fakt kopii z kolumny „Obrazy" (`_images`, ta sama wartość): XISF
+        mówi „3 obrazy", FITS „obrazy: -" - czytnik FITS obrazów nie liczy (0021), a pusta komórka
+        wyglądała jak brak danych."""
         f = row.get("_wersja")
         if not f:
             return None
         if role == Qt.DisplayRole:
-            czlony = [i18n.t(f"grid.version.kind.{f['kind']}")]
+            czlony = [i18n.t("grid.version.kept")] if f.get("kept") else []
+            czlony.append(i18n.t(f"grid.version.kind.{f['kind']}"))
             if f.get("witness"):
                 czlony.append(i18n.t(f"grid.version.short.{f['witness']}"))
+            if f.get("center"):
+                czlony.append(i18n.t("grid.version.center", label=f["center"]))
             if f.get("timestamp"):
                 czlony.append(_chwila(f["timestamp"]))
             if f.get("declared_rows") is not None:
                 czlony.append(i18n.t_plural("grid.version.inputs", f["declared_rows"]))
+            if row.get("_images_n") is not None:
+                czlony.append(i18n.t_plural("grid.version.images", row["_images_n"],
+                                            count=row.get("_images") or row["_images_n"]))
+            elif row.get("filetype") == "fits":
+                czlony.append(i18n.t("grid.version.images_fits"))
             return " · ".join(czlony)
         if role == Qt.ToolTipRole:
             swiadek = f.get("witness")
-            return (i18n.t(f"grid.version.why.{swiadek}" if swiadek else "grid.version.why.none")
-                    + i18n.t("grid.version.window", start=_okno(f.get("window_start")),
-                             end=_okno(f.get("window_end"))))
-        if role == Qt.ForegroundRole and f["kind"] != queries.WERSJA_INNA:
-            return _COLORS["missing"]      # bez dowodu wersji - wyciszone, jak brak karty
+            tip = (i18n.t(f"grid.version.why.{swiadek}" if swiadek else "grid.version.why.none")
+                   + i18n.t("grid.version.window", start=_okno(f.get("window_start")),
+                            end=_okno(f.get("window_end"))))
+            if f.get("timestamp_source"):
+                tip += i18n.t(f"grid.version.when.{f['timestamp_source']}")
+            if f.get("center"):
+                ra, dec = f["center_radec"]
+                tip += i18n.t_plural("grid.version.center_tip", f.get("centers") or 0,
+                                     label=f["center"], ra=f"{ra:.4f}", dec=f"{dec:+.4f}")
+            if row.get("_images_n") is None and row.get("filetype") == "fits":
+                tip += i18n.t("grid.version.images_fits_tip")
+            if f.get("kept"):
+                tip += i18n.t("grid.version.kept_tip", at=_chwila(f.get("kept_at")) or "?",
+                              reopen=i18n.t("grid.version.reopen"))
+            return tip
+        if role == Qt.ForegroundRole and (f["kind"] != queries.WERSJA_INNA or f.get("kept")):
+            return _COLORS["missing"]      # bez dowodu wersji albo po werdykcie - wyciszone
         return None
 
     def _preview_cell(self, row, role):
@@ -3394,6 +3425,12 @@ class FramesView(QWidget):
         self._menu_tabeli.setToolTipsVisible(True)   # powód wygaszenia niesie tooltip POZYCJI
         self.act_keep_version = self._menu_tabeli.addAction(i18n.t("grid.version.keep"))
         self.act_keep_version.triggered.connect(self._on_keep_version)
+        # WERDYKT GRUPY (AR-10, 0026) obok gestu wersji: „zostawiam wszystkie" i jego droga powrotu.
+        # Widoczna zawsze jedna z dwóch - ta, która ma sens dla grupy pod kursorem.
+        self.act_keep_all_versions = self._menu_tabeli.addAction(i18n.t("grid.version.keep_all"))
+        self.act_keep_all_versions.triggered.connect(self._on_keep_all_versions)
+        self.act_reopen_versions = self._menu_tabeli.addAction(i18n.t("grid.version.reopen"))
+        self.act_reopen_versions.triggered.connect(self._on_reopen_versions)
         self._sep_zapisu = self._menu_tabeli.addSeparator()
         self.act_finish_write = self._menu_tabeli.addAction(i18n.t("grid.inplace.finish"))
         self.act_finish_write.triggered.connect(self._on_finish_write)
@@ -5082,6 +5119,8 @@ class FramesView(QWidget):
         if poza_zaznaczeniem:
             self.table.selectRow(idx.row())
         self.act_keep_version.setVisible(wersje)
+        self.act_keep_all_versions.setVisible(wersje)    # `_sync_menu_wersji` wybiera jedną z dwóch
+        self.act_reopen_versions.setVisible(False)
         self._sep_zapisu.setVisible(wersje and zapis)
         for act in (self.act_finish_write, self.act_restore_header, self._sep_zwolnienia,
                     self.act_release_file):
@@ -5100,13 +5139,27 @@ class FramesView(QWidget):
         Pozycja żyje wyłącznie wtedy, gdy jest co skopiować: dokładnie jeden zaznaczony stos, który
         ma w grupie co najmniej jedną wersję z dowodem odrębności względem siebie. Tooltip mówi, ile
         ścieżek pójdzie do schowka - tę samą liczbę, którą potwierdzi pasek po geście - albo
-        dlaczego nie ma czego kopiować."""
+        dlaczego nie ma czego kopiować. Grupa z werdyktem „zostawiam wszystkie" gasi ten gest: ścieżki
+        „do usunięcia" przeczyłyby werdyktowi, a drogą jest najpierw go cofnąć.
+
+        Gesty werdyktu pytają o zajętość jak gesty izolacji (`_powod_zajetosci`): etap Dostawy albo
+        zapis nagłówków przestawia klucze grup w połowie zbioru, więc grupa liczona w ich trakcie
+        bywa przejściowa, a werdykt o niej byłby werdyktem o grupie, której człowiek nie widział."""
         wiersze = self._selected_data_rows()
+        zajety = self._powod_zajetosci()
         plan = (queries.keep_version_plan(self.con, wiersze[0]["frame_id"])
-                if len(wiersze) == 1 else None)
+                if len(wiersze) == 1 and zajety is None else None)
         if len(wiersze) != 1:
             self.act_keep_version.setEnabled(False)
             self.act_keep_version.setToolTip(i18n.t("grid.version.select_one"))
+        elif zajety is not None:
+            # Ścieżki „do usunięcia” z grupy przejściowej (etap albo zapis w biegu) byłyby
+            # podpowiedzią skasowania na niepełnym obrazie grupy - ta sama bramka co werdykt.
+            self.act_keep_version.setEnabled(False)
+            self.act_keep_version.setToolTip(i18n.t(zajety))
+        elif plan and plan["kept"]:
+            self.act_keep_version.setEnabled(False)
+            self.act_keep_version.setToolTip(self._zdanie_blokady_werdyktem())
         elif not plan or not plan["paths"]:
             self.act_keep_version.setEnabled(False)
             self.act_keep_version.setToolTip(i18n.t("grid.version.nothing"))
@@ -5114,6 +5167,83 @@ class FramesView(QWidget):
             self.act_keep_version.setEnabled(True)
             self.act_keep_version.setToolTip(
                 i18n.t_plural("grid.version.keep_tip", len(plan["paths"])))
+        # Werdykt grupy: jedna z dwóch pozycji, zależnie od stanu grupy zaznaczenia.
+        grupa, powod = self._grupa_werdyktu()
+        kept = grupa is not None and grupa["kept"]
+        self.act_keep_all_versions.setVisible(not kept)
+        self.act_reopen_versions.setVisible(kept)
+        akcja = self.act_reopen_versions if kept else self.act_keep_all_versions
+        akcja.setEnabled(grupa is not None and zajety is None)
+        if zajety is not None or grupa is None:
+            akcja.setToolTip(i18n.t(zajety or powod))
+        elif kept:
+            akcja.setToolTip(i18n.t_plural("grid.version.reopen_tip", len(grupa["frame_ids"])))
+        else:
+            akcja.setToolTip(i18n.t_plural("grid.version.keep_all_tip", len(grupa["frame_ids"])))
+
+    def _grupa_werdyktu(self):
+        """Grupa wersji, której dotyczy werdykt „zostawiam wszystkie" - z ZAZNACZENIA, liczona od nowa
+        (`queries.stack_version_group_of`): `(grupa, None)` albo `(None, klucz powodu)`. Zaznaczenie
+        może objąć jeden stos albo kilka, ale z jednej grupy - werdykt jest o grupie, a gest na dwóch
+        grupach naraz byłby dwoma werdyktami pod jedną nazwą."""
+        wiersze = self._selected_data_rows()
+        if not wiersze:
+            return None, "grid.version.select_group"
+        grupa = queries.stack_version_group_of(self.con, wiersze[0]["frame_id"])
+        if grupa is None:
+            return None, "grid.version.no_group"
+        if any(r["frame_id"] not in grupa["frame_ids"] for r in wiersze):
+            return None, "grid.version.select_group"
+        return grupa, None
+
+    def _on_keep_all_versions(self):
+        """„Zostaw wszystkie wersje": werdykt człowieka, że grupa zostaje w całości (AR-10, 0026).
+        Grupa znika z roboty Porządków (plakietka), zostaje w perspektywie - wyciszona, z werdyktem
+        w kolumnie „Wersja" i drogą powrotu w tym samym menu. Bez potwierdzenia: gest niczego nie
+        rusza na dysku, a cofnięcie jest jednym kliknięciem."""
+        self._po_werdykcie_wersji(keep=True)
+
+    def _on_reopen_versions(self):
+        """„Cofnij »zostaw wszystkie«" - droga powrotu werdyktu: grupa wraca do roboty."""
+        self._po_werdykcie_wersji(keep=False)
+
+    def _po_werdykcie_wersji(self, *, keep):
+        """Wspólny ogon obu gestów werdyktu: grupa od nowa (między menu a kliknięciem mógł przejść
+        skan), zapis klingą, odświeżenie z zachowaniem zaznaczenia, plakietka Porządków przez
+        `stan_porzadkow_changed` (jedyny właściciel tej emisji) i JEDNO zdanie po odświeżeniu
+        (`refresh()` mówi własnym zdaniem, wcześniejsze by przepadło - lekcja `_po_gescie_klatki`).
+
+        Bramka zajętości to druga linia za wygaszeniem pozycji: etap mógł ruszyć między pokazaniem
+        menu a kliknięciem. Zero
+        ruszonych klatek ma własne zdanie: werdykt zapisał albo cofnął w międzyczasie ktoś inny,
+        więc „Zapisano"/„Cofnięto" byłoby nieprawdą o tym geście."""
+        zajety = self._powod_zajetosci()
+        if zajety is not None:
+            self.status_message.emit(i18n.t(zajety))
+            return
+        grupa, powod = self._grupa_werdyktu()
+        if grupa is None:
+            self.status_message.emit(i18n.t(powod))
+            return
+        if keep:
+            n = repo.keep_stack_versions(self.con, frame_ids=grupa["frame_ids"],
+                                         group_key=grupa["group_id"], now=self._now())
+        else:
+            n = repo.reopen_stack_versions(self.con, frame_ids=grupa["frame_ids"], now=self._now())
+        if not n:
+            self.status_message.emit(i18n.t("grid.version.kept_none" if keep
+                                            else "grid.version.reopened_none"))
+            return
+        zaznaczone = [r["frame_id"] for r in self._selected_data_rows()]
+        self.refresh()
+        self._przywroc_zaznaczenie(zaznaczone)
+        self.stan_porzadkow_changed.emit()
+        klucz = "grid.version.kept_done" if keep else "grid.version.reopened_done"
+        self.status_message.emit(i18n.t_plural(klucz, len(grupa["frame_ids"])))
+
+    def _zdanie_blokady_werdyktem(self):
+        """Powód wygaszenia „Zostaw tę wersję" w grupie z werdyktem - z nazwą drogi wyjścia."""
+        return i18n.t("grid.version.keep_blocked_kept", reopen=i18n.t("grid.version.reopen"))
 
     def _on_keep_version(self):
         """„Zostaw tę wersję": ścieżki obecnych kopii POZOSTAŁYCH wersji grupy idą do schowka,
@@ -5131,7 +5261,14 @@ class FramesView(QWidget):
         if len(wiersze) != 1:
             self.status_message.emit(i18n.t("grid.version.select_one"))
             return
+        zajety = self._powod_zajetosci()
+        if zajety is not None:
+            self.status_message.emit(i18n.t(zajety))
+            return
         plan = queries.keep_version_plan(self.con, wiersze[0]["frame_id"])
+        if plan and plan["kept"]:
+            self.status_message.emit(self._zdanie_blokady_werdyktem())
+            return
         if not plan or not plan["paths"]:
             self.status_message.emit(i18n.t("grid.version.nothing"))
             return

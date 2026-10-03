@@ -17,6 +17,8 @@ from astropy.io import fits
 
 from horreum import db, repo, scan
 from horreum.gui import queries
+from horreum.resolve import headers
+from horreum.resolve.headers import COPY_TESTIMONY_RULE, copy_testimony
 
 NOW = "2026-09-26T12:00:00+00:00"
 PAYLOAD = b"\x05" * 32
@@ -104,8 +106,8 @@ def test_fakty_kopii_z_nagłowka_koercja_i_kotwica(tmp_path):
     assert set(f) == set(repo.COPY_FACTS)
     assert (f["hdr_filter"], f["hdr_imagetyp"], f["hdr_exptime"], f["hdr_xbinning"]) == (
         "CLS", "Master Flat", 1.34, 1)
-    assert (f["image_count"], json.loads(f["image_roles"]), f["hdr_hash"]) == (
-        2, ["integration", None], rec.header_hash)
+    assert (f["image_count"], json.loads(f["image_roles"]), f["hdr_hash"], f["hdr_rule"]) == (
+        2, ["integration", None], rec.header_hash, COPY_TESTIMONY_RULE)
     assert scan.copy_header_facts(None, None, None) == dict.fromkeys(repo.COPY_FACTS)
     assert scan.copy_header_facts(rec.header, None, rec.image_roles) == dict.fromkeys(repo.COPY_FACTS)
 
@@ -191,6 +193,10 @@ def test_klinga_odbija_zly_ksztalt_i_zwietrzale_fakty(tmp_path):
                           copy_facts={"hdr_filter": "Ha"}, now=NOW)
     fakty = dict.fromkeys(repo.COPY_FACTS)
     fakty.update(hdr_filter="Ha", hdr_hash="h1")
+    with pytest.raises(ValueError):                  # kotwica bez reguły koercji (0025)
+        repo.add_location(con, frame_id=fid, volume="V", path="/a.xisf", header_hash="h1",
+                          copy_facts=fakty, now=NOW)
+    fakty["hdr_rule"] = COPY_TESTIMONY_RULE
     lid, _ = repo.add_location(con, frame_id=fid, volume="V", path="/a.xisf", header_hash="h1",
                                copy_facts=fakty, now=NOW)
     with pytest.raises(sqlite3.IntegrityError):
@@ -214,7 +220,7 @@ def test_uzupelnienie_nie_nadpisuje_i_nie_wyprzedza_skanu(tmp_path):
     lid, _ = repo.add_location(con, frame_id=fid, volume="V", path="/a.xisf", header_hash="h1",
                                now=NOW)
     obce = dict.fromkeys(repo.COPY_FACTS)
-    obce.update(hdr_filter="Ha", hdr_hash="INNY")
+    obce.update(hdr_filter="Ha", hdr_hash="INNY", hdr_rule=COPY_TESTIMONY_RULE)
     ev = con.execute("SELECT max(id) FROM event").fetchone()[0]
     assert repo.record_copy_facts(con, location_id=lid, copy_facts=obce, now=NOW) is False
     swoje = dict(obce, hdr_hash="h1")
@@ -619,7 +625,8 @@ def _kopia(lid, **pola):
     row = {"location_id": lid, "frame_id": 1, "path": f"/{lid}", "image_count": 1,
            "image_roles": '["integration"]', "hdr_filter": "Ha", "hdr_imagetyp": "Master Flat",
            "hdr_object": None, "hdr_telescop": "RC8", "hdr_instrume": "ZWO", "hdr_exptime": 1.34,
-           "hdr_xbinning": 1, "hdr_date_obs": "2024-08-25T16:49:18", "hdr_hash": f"h{lid}"}
+           "hdr_xbinning": 1, "hdr_date_obs": "2024-08-25T16:49:18", "hdr_hash": f"h{lid}",
+           "hdr_rule": COPY_TESTIMONY_RULE}
     row.update(pola)
     return row
 
@@ -661,4 +668,291 @@ def test_predykat_porzadkow_podzbior_duplikatow(tmp_path):
     # a do tego stanu prowadzi dopiero powrót plików) - pytamy predykat, nie drogę do stanu.
     con.execute("UPDATE frame SET retired_at = ? WHERE id = ?", (NOW, niezgodna))
     assert queries.copy_conflict_frame_ids(con) == set()
+    con.close()
+
+
+# ═════════════════════════ wersja reguły koercji (0025, AR-33)
+
+
+def test_regula_koercji_przypieta_do_numeru():
+    """TRIPWIRE AR-33: rzut `copy_testimony` na próbkach, które rozróżniają warianty koercji
+    (XISF-owy tekst liczby, `''`, biała spacja, zero i liczba w polu tekstowym, śmieć w polu
+    liczbowym), jest przypięty do `COPY_TESTIMONY_RULE`. Zmiana `_to_text`/`_to_float`/`_to_int` albo
+    doboru pól, która zmienia którąkolwiek wartość lub typ, czerwieni ten test - naprawą jest
+    PODNIESIENIE numeru reguły (sterownik dociągnie stare kopie) razem z nowymi oczekiwaniami, nie
+    samo przepisanie oczekiwań. Typ sprawdzany osobno, bo `300 == 300.0`.
+
+    Falsyfikator: każ `_to_text` zdejmować białe znaki → pierwsza próbka pada."""
+    assert COPY_TESTIMONY_RULE == 1
+    pusto = dict.fromkeys(("hdr_filter", "hdr_imagetyp", "hdr_object", "hdr_telescop",
+                           "hdr_instrume", "hdr_exptime", "hdr_xbinning", "hdr_date_obs"))
+    probki = [
+        ({"FILTER": "CLS ", "IMAGETYP": "Master Flat", "OBJECT": "M 31", "TELESCOP": "RC8",
+          "INSTRUME": "ZWO", "EXPTIME": "1.34", "XBINNING": "1.0",
+          "DATE-OBS": "2024-08-25T16:49:18"},
+         {"hdr_filter": "CLS ", "hdr_imagetyp": "Master Flat", "hdr_object": "M 31",
+          "hdr_telescop": "RC8", "hdr_instrume": "ZWO", "hdr_exptime": 1.34, "hdr_xbinning": 1,
+          "hdr_date_obs": "2024-08-25T16:49:18"}),
+        ({"FILTER": "", "IMAGETYP": 0, "INSTRUME": 100, "EXPTIME": 300, "XBINNING": 2},
+         dict(pusto, hdr_imagetyp="0", hdr_instrume="100", hdr_exptime=300.0, hdr_xbinning=2)),
+        ({"EXPTIME": "abc", "XBINNING": "x", "OBJECT": None}, pusto),
+    ]
+    for naglowek, oczekiwane in probki:
+        wynik = copy_testimony(naglowek)
+        assert wynik == oczekiwane, naglowek
+        assert {k: type(v) for k, v in wynik.items()} == {
+            k: type(v) for k, v in oczekiwane.items()}, naglowek
+
+
+def test_kazdy_zapis_faktow_stempluje_biezaca_regule(tmp_path):
+    """Trzech pisarzy faktów kopii - dodanie (skan nowej kopii), odświeżenie (skan po zmianie
+    nagłówka) i uzupełnienie (sterownik) - stempluje `hdr_rule` bieżącą regułą tym samym zapisem
+    co fakty. Falsyfikator: zdejmij `facts["hdr_rule"]` z `copy_header_facts` → klinga odbija
+    kotwicę bez reguły (ValueError), a bez strażnika - pierwsza asercja widzi NULL."""
+    root, a, b = _dwie_kopie(tmp_path)
+    con = db.open_db(str(tmp_path / "h.db"))
+    scan.scan_tree(con, root, volume="?", now=NOW)
+    assert (_loc(con, a)["hdr_rule"], _loc(con, b)["hdr_rule"]) == (COPY_TESTIMONY_RULE,) * 2
+    _xisf(a, _FLAT + (("FILTER", "'CLX'"),), images=({"imageType": "MasterFlat"},))
+    scan.scan_tree(con, root, volume="?", now="2026-09-26T13:00:00+00:00")
+    assert (_loc(con, a)["hdr_filter"], _loc(con, a)["hdr_rule"]) == ("CLX", COPY_TESTIMONY_RULE)
+    con.close()
+    (tmp_path / "u").mkdir()
+    con = _baza_sprzed_0021(tmp_path / "u", [a, b])
+    assert _loc(con, a)["hdr_rule"] is None
+    assert scan.backfill_copy_facts(con, now=NOW).written == 2
+    assert (_loc(con, a)["hdr_rule"], _loc(con, b)["hdr_rule"]) == (COPY_TESTIMONY_RULE,) * 2
+    con.close()
+
+
+def test_regula_nieznana_jest_kandydatem_i_dociaga_sam_stempel(tmp_path):
+    """Kopia z faktami, ale bez numeru reguły (stan „reguła nieznana") jest kandydatem uzupełnienia
+    i wypada z porównania kopii; dociągnięcie tą samą regułą zmienia WYŁĄCZNIE stempel - payload
+    `location.refreshed` niesie samo przejście `hdr_rule`. Falsyfikator: wróć w kandydatach do
+    `hdr_hash IS NULL` → kopia nie jest kandydatem."""
+    root, a, b = _dwie_kopie(tmp_path)
+    con = db.open_db(str(tmp_path / "h.db"))
+    scan.scan_tree(con, root, volume="?", now=NOW)
+    fid = _loc(con, a)["frame_id"]
+    assert queries.copy_conflict_frame_ids(con) == {fid}         # CLS vs L-Pro, obie reguły 1
+    con.execute("UPDATE location SET hdr_rule = NULL WHERE path = ?", (str(a),))
+    con.commit()
+    assert [r["path"] for r in scan.copy_facts_candidates(con)] == [str(a)]
+    assert queries.copy_conflict_frame_ids(con) == set()         # „nie wiem", nie „inaczej"
+    ev = con.execute("SELECT max(id) FROM event").fetchone()[0]
+    s = scan.backfill_copy_facts(con, now=NOW)
+    assert (s.rows, s.written, s.remaining) == (1, 1, 0)
+    payload = json.loads(con.execute(
+        "SELECT payload FROM event WHERE id > ? AND verb = 'location.refreshed'", (ev,)).fetchone()[0])
+    assert payload == {"hdr_rule": {"before": None, "after": COPY_TESTIMONY_RULE}}
+    assert queries.copy_conflict_frame_ids(con) == {fid}
+    con.close()
+
+
+def test_zmiana_reguly_dociaga_stare_kopie_bez_falszywego_rozjazdu(tmp_path, monkeypatch):
+    """Symulacja zmiany koercji (AR-33): binarka podnosi regułę do 2 i rzuca FILTER inaczej (tu:
+    małymi literami). Dwie ZGODNE kopie zebrane regułą 1 stają się kandydatami; po dociągnięciu
+    jednej z nich (korzeń zawężony) druga zostaje przy starym rzucie - bez stempla porównanie
+    widziałoby FILTER `cls` obok `CLS`, czyli rozjazd, którego w plikach nie ma. Po pełnym
+    przebiegu obie mówią nową regułą i są zgodne. Fakty nowszej reguły nie dają się cofnąć zapisem
+    starszej (binarka starsza od bazy).
+
+    Falsyfikator: zdejmij warunek `hdr_rule` z `copy_divergence` → pierwsze `copy_conflict_frame_ids`
+    po częściowym przebiegu zwraca klatkę."""
+    root = tmp_path / "ARCH"
+    a = _xisf(root / "A" / "z.xisf", _FLAT + (("FILTER", "'CLS'"),))
+    b = _xisf(root / "B" / "z.xisf", _FLAT + (("FILTER", "'CLS'"),))
+    con = db.open_db(str(tmp_path / "h.db"))
+    scan.scan_tree(con, root, volume="?", now=NOW)
+    assert scan.copy_facts_candidates(con) == [] and queries.copy_conflict_frame_ids(con) == set()
+    stary = dict(_loc(con, a))
+
+    stara_koercja = scan.copy_testimony
+    monkeypatch.setattr(scan, "copy_testimony",
+                        lambda h: dict(stara_koercja(h), hdr_filter=stara_koercja(h)["hdr_filter"].lower()))
+    monkeypatch.setattr(scan, "COPY_TESTIMONY_RULE", 2)
+    monkeypatch.setattr(queries, "COPY_TESTIMONY_RULE", 2)
+    monkeypatch.setattr(headers, "COPY_TESTIMONY_RULE", 2)     # `copy_facts_state` (AR-33)
+    assert {r["path"] for r in scan.copy_facts_candidates(con)} == {str(a), str(b)}
+    s = scan.backfill_copy_facts(con, now=NOW, root=root / "A")
+    assert (s.written, s.remaining) == (1, 0)
+    assert (_loc(con, a)["hdr_filter"], _loc(con, a)["hdr_rule"]) == ("cls", 2)
+    assert (_loc(con, b)["hdr_filter"], _loc(con, b)["hdr_rule"]) == ("CLS", 1)
+    assert queries.copy_conflict_frame_ids(con) == set()
+    s = scan.backfill_copy_facts(con, now=NOW)
+    assert (s.rows, s.written, s.remaining) == (1, 1, 0)
+    assert queries.copy_conflict_frame_ids(con) == set()
+    assert scan.backfill_copy_facts(con, now=NOW).rows == 0
+    monkeypatch.undo()
+
+    stare_fakty = {k: stary[k] for k in repo.COPY_FACTS}
+    assert repo.record_copy_facts(con, location_id=stary["id"], copy_facts=stare_fakty,
+                                  now=NOW) is False
+    assert _loc(con, a)["hdr_rule"] == 2
+    con.close()
+
+
+def test_przebieg_uzupelnienia_jedno_zdarzenie_zbiorcze(tmp_path):
+    """AR-32: jeden przebieg `backfill_copy_facts` = JEDEN `location.copy_facts_summary` z polami
+    równymi zwróconemu `CopyFactsSummary` (z odmowami i ich ścieżkami), OBOK per-lokacyjnych
+    `location.refreshed` (te zostają - tylko one niosą `{before, after}` jednej kopii). Przebieg bez
+    kandydatów nie zostawia zdarzenia. Falsyfikator: usuń wołanie `flag_copy_facts_summary` →
+    licznik zdarzeń zbiorczych 0."""
+    from dataclasses import asdict
+    root, a, b = _dwie_kopie(tmp_path)
+    con = _baza_sprzed_0021(tmp_path, [a, b])
+    _xisf(b, _FLAT + (("FILTER", "'CLX'"),), images=({"id": "integration"},))   # b → stale
+    ev = con.execute("SELECT max(id) FROM event").fetchone()[0]
+    s = scan.backfill_copy_facts(con, now=NOW)
+    assert (s.rows, s.written, s.stale, s.stale_paths, s.remaining) == (2, 1, 1, [str(b)], 1)
+    zdarzenia = con.execute("SELECT verb, actor, target, payload FROM event WHERE id > ? "
+                            "ORDER BY id", (ev,)).fetchall()
+    assert [z["verb"] for z in zdarzenia] == ["location.refreshed", "location.copy_facts_summary"]
+    zbiorcze = zdarzenia[-1]
+    assert (zbiorcze["actor"], zbiorcze["target"]) == ("backfill:copies", "location:*")
+    assert json.loads(zbiorcze["payload"]) == asdict(s)
+    scan.scan_tree(con, root, volume="V", now="2026-09-26T13:00:00+00:00")   # skan dogania b
+    ev = con.execute("SELECT max(id) FROM event").fetchone()[0]
+    assert scan.backfill_copy_facts(con, now=NOW).rows == 0
+    assert con.execute("SELECT count(*) FROM event WHERE id > ? "
+                       "AND verb = 'location.copy_facts_summary'", (ev,)).fetchone()[0] == 0
+    con.close()
+
+
+# ═════════════════════════ stan faktów wobec reguły: jedno miejsce prawdy (AR-33)
+
+_R = COPY_TESTIMONY_RULE
+# Fragmenty SQL reguły - ZNAK W ZNAK te z literałów modułów (sprawdza `test_fragmenty_sql_...`):
+# fragment, parametry dla reguły `r`, oczekiwanie wobec stanu z `copy_facts_state`.
+_FRAGMENTY = {
+    "queries.py": ("(l.hdr_hash IS NULL OR l.hdr_rule IS NOT ?)", lambda r: (r,),
+                   lambda st: st != headers.FAKTY_BIEZACE),
+    "scan.py:sterownik": ("(l.hdr_hash IS NULL OR l.hdr_rule IS NULL OR l.hdr_rule < ? "
+                          "OR l.hdr_rule > ?)", lambda r: (r, None),
+                          lambda st: st == headers.FAKTY_DO_DOCIAGNIECIA),
+    "scan.py:licznik": ("(l.hdr_hash IS NULL OR l.hdr_rule IS NULL OR l.hdr_rule < ? "
+                        "OR l.hdr_rule > ?)", lambda r: (r, r),
+                        lambda st: st != headers.FAKTY_BIEZACE),
+    "repo.py": ("(hdr_hash IS NULL OR hdr_rule IS NULL OR hdr_rule < ?)", lambda r: (r,),
+                lambda st: st == headers.FAKTY_DO_DOCIAGNIECIA),
+}
+
+
+def test_fragmenty_sql_zgodne_z_copy_facts_state():
+    """Z10: trzy komparatory jednej reguły (`==`, `<`, `>=`) rozjeżdżały się na regule NOWSZEJ niż
+    kod. Każdy fragment SQL siedzi w swoim module znak w znak i na pełnej tabeli prawdy (brak
+    faktów, reguła nieznana, starsza, bieżąca, nowsza) mówi to samo co `copy_facts_state`.
+    Falsyfikator: zmień w module fragment (np. `>=` w miejsce `IS NOT`) → pierwsza albo druga
+    asercja pada."""
+    import re
+    pkg = Path(headers.__file__).resolve().parents[1]
+    zrodla = {"queries.py": pkg / "gui" / "queries.py", "scan.py": pkg / "scan.py",
+              "repo.py": pkg / "repo.py"}
+    mem = sqlite3.connect(":memory:")
+    regula = 2                                   # reguła > 1, żeby istniała też „starsza”
+    przypadki = [(None, None), ("h", None), ("h", 1), ("h", 2), ("h", 3)]
+    for klucz, (fragment, parametry, oczekiwane) in _FRAGMENTY.items():
+        tekst = re.sub(r'"\s*"', "", zrodla[klucz.split(":")[0]].read_text(encoding="utf-8"))
+        assert re.sub(r"\s+", " ", fragment) in re.sub(r"\s+", " ", tekst), klucz
+        sql = fragment.replace("l.", "")
+        for hh, rr in przypadki:
+            wynik = mem.execute(
+                f"WITH t(hdr_hash, hdr_rule) AS (SELECT ?, ?) SELECT {sql} FROM t",
+                (hh, rr, *parametry(regula))).fetchone()[0]
+            stan = headers.copy_facts_state(hh, rr, rule=regula)
+            assert bool(wynik) == oczekiwane(stan), (klucz, hh, rr, stan)
+    mem.close()
+
+
+def test_regula_nowsza_niz_kod_jest_w_liczniku_nie_wiem_ale_nie_w_sterowniku(tmp_path):
+    """Z10: kopia z faktami reguły nowszej niż kod (baza pisana nowszą binarką) jest w read-modelu
+    „nie wiem” - więc licznik „?” Porządków (`porownywalne=True`) ją widzi; sterownik jej NIE
+    dociąga i nie nadpisuje (starsza binarka niczego nie cofa).
+    Falsyfikator: wróć w kandydatach do samego `hdr_rule < ?` → licznik pusty."""
+    root, a, b = _dwie_kopie(tmp_path)
+    con = db.open_db(str(tmp_path / "h.db"))
+    scan.scan_tree(con, root, volume="?", now=NOW)
+    con.execute("UPDATE location SET hdr_rule = ?, hdr_filter = 'NOWY' WHERE path = ?",
+                (_R + 1, str(a)))
+    con.commit()
+    assert [r["path"] for r in scan.copy_facts_candidates(con, porownywalne=True)] == [str(a)]
+    assert scan.copy_facts_candidates(con) == []
+    assert scan.backfill_copy_facts(con, now=NOW).rows == 0
+    assert (_loc(con, a)["hdr_rule"], _loc(con, a)["hdr_filter"]) == (_R + 1, "NOWY")
+    con.close()
+
+
+def _podmien_wiersz_przy_odczycie(monkeypatch, con, sciezka, *, odcisk_wiersza, odcisk_odczytu=None):
+    """Przy odczycie `sciezka` ktoś inny (skan) wpisuje do wiersza fakty bieżącej reguły
+    z odciskiem `odcisk_wiersza` (None = odcisk pliku); `odcisk_odczytu` podmienia odcisk NASZEGO
+    pierwszego odczytu (odczyt starszy niż wiersz)."""
+    prawdziwa = scan._read_meta
+    stan = {"n": 0}
+
+    def _przeplot(p, *aa, **kw):
+        wynik = list(prawdziwa(p, *aa, **kw))
+        if str(p) == str(sciezka):
+            stan["n"] += 1
+            odcisk = odcisk_wiersza or wynik[2]
+            con.execute("UPDATE location SET header_hash = ?, hdr_hash = ?, hdr_rule = ? "
+                        "WHERE path = ?", (odcisk, odcisk, _R, str(sciezka)))
+            con.commit()
+            if odcisk_odczytu is not None and stan["n"] == 1:
+                wynik[2] = odcisk_odczytu
+        return tuple(wynik)
+    monkeypatch.setattr(scan, "_read_meta", _przeplot)
+    return stan
+
+
+def test_fakty_sa_ale_naglowek_inny_niz_wiersz_to_stale_nie_elsewhere(tmp_path, monkeypatch):
+    """Z11: fakty bieżącej reguły zebrane dla nagłówka, którego na dysku już nie ma (plik zmieniony
+    poza programem) - prawdą jest „zmieniona od skanu”, nie „zebrane gdzie indziej”.
+    Falsyfikator: wróć do `_fakty_kopii_sa` przed porównaniem odcisku → `elsewhere == 1`."""
+    root, a, b = _dwie_kopie(tmp_path)
+    con = _baza_sprzed_0021(tmp_path, [a])
+    stan = _podmien_wiersz_przy_odczycie(monkeypatch, con, a, odcisk_wiersza="INNY")
+    s = scan.backfill_copy_facts(con, now=NOW)
+    monkeypatch.undo()
+    assert (s.read, s.written, s.elsewhere, s.stale, s.stale_paths) == (1, 0, 0, 1, [str(a)]), s
+    assert stan["n"] == 2                                  # jedno ponowienie odczytu, nie więcej
+    con.close()
+
+
+def test_odczyt_starszy_od_wiersza_z_faktami_to_elsewhere(tmp_path, monkeypatch):
+    """Wyścig, który ponowienie odsiewa: NASZ pierwszy odczyt jest starszy od wiersza (skan wpisał
+    nowszy nagłówek razem z faktami). Drugi odczyt zgadza się z wierszem → `elsewhere`, nie `stale`."""
+    root, a, b = _dwie_kopie(tmp_path)
+    con = _baza_sprzed_0021(tmp_path, [a])
+    _podmien_wiersz_przy_odczycie(monkeypatch, con, a, odcisk_wiersza=None, odcisk_odczytu="STARY")
+    s = scan.backfill_copy_facts(con, now=NOW)
+    monkeypatch.undo()
+    assert (s.read, s.written, s.elsewhere, s.stale) == (1, 0, 1, 0), s
+    con.close()
+
+
+def test_odswiezenie_lokacji_nie_cofa_faktow_nowszej_reguly(tmp_path):
+    """Z12: re-odczyt kopii starszą binarką (fakty reguły R) przy wierszu z faktami reguły R+1
+    i TYM SAMYM nagłówku zostawia fakty wiersza - reszta odświeżenia (mtime) idzie normalnie.
+    Po zmianie nagłówka fakty wiersza opisują plik, którego nie ma: wtedy wchodzą fakty
+    wołającego (jedyna prawda o nowym nagłówku).
+    Falsyfikator: zdejmij `zachowaj` w `refresh_location` → `hdr_rule == R` po pierwszym skanie."""
+    root, a, b = _dwie_kopie(tmp_path)
+    con = db.open_db(str(tmp_path / "h.db"))
+    scan.scan_tree(con, root, volume="?", now=NOW)
+    con.execute("UPDATE location SET hdr_rule = ?, hdr_filter = 'NOWY' WHERE path = ?",
+                (_R + 1, str(a)))
+    con.commit()
+    przed = dict(_loc(con, a))
+    t = os.stat(a).st_mtime + 100
+    os.utime(a, (t, t))
+    scan.scan_tree(con, root, volume="?", now="2026-09-26T13:00:00+00:00")
+    po = _loc(con, a)
+    assert po["mtime"] != przed["mtime"]                                  # odświeżenie poszło
+    assert (po["hdr_rule"], po["hdr_filter"], po["hdr_hash"]) == (_R + 1, "NOWY", przed["hdr_hash"])
+
+    _xisf(a, _FLAT + (("FILTER", "'CLX'"),), images=({"imageType": "MasterFlat"},))
+    scan.scan_tree(con, root, volume="?", now="2026-09-26T14:00:00+00:00")
+    po = _loc(con, a)
+    assert po["header_hash"] != przed["header_hash"] and po["hdr_hash"] == po["header_hash"]
+    assert (po["hdr_rule"], po["hdr_filter"]) == (_R, "CLX")
     con.close()

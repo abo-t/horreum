@@ -90,8 +90,9 @@ _TASKS = [
     ("telescopes_unlabeled", "tasks.telescopes_unlabeled", _PAGE_TELESCOPE),
     ("observatories_unnamed", "tasks.observatories_unnamed", _PAGE_OBSERVATORY),
     ("dup_frames", "tasks.dup_frames", PRESET_DUPS),
-    # Wiersz AKCYJNY i ROBOTA (0021) - świadomie POZA `_BEZ_ROBOTY`, inaczej niż sąsiad „Wersje
-    # stosów". Tam dwie wersje to dwa prawowite obrazy i „zostawiam obie" jest odpowiedzią; tu dwie
+    # Wiersz AKCYJNY i ROBOTA (0021) - świadomie POZA `_BEZ_ROBOTY` i bez werdyktu „zostawiam", inaczej
+    # niż sąsiad „Wersje stosów". Tam dwie wersje to dwa prawowite obrazy i „zostawiam obie" jest
+    # odpowiedzią (werdyktem, 0026); tu dwie
     # kopie JEDNEJ klatki mówią sprzeczne rzeczy (inny FILTER, inna liczba obrazów), a oś klatki
     # pokazuje zeznanie tej, która wygrała w `header` - więc jedna z nich wprowadza w błąd i ktoś
     # musi rozstrzygnąć, która. Stoi pod „Duplikatami", bo jest ich podzbiorem. Liczba i lista
@@ -134,14 +135,20 @@ _TASKS = [
     # pali. Stoi na liscie, bo po naprawie D-V-9 ten fakt widac bylo wylacznie pod kursorem,
     # jeden wiersz naraz - a dotyczy 128 gotowych obrazow.
     ("missing_copy_frames", "tasks.missing_copy_frames", PRESET_MISSING_COPY),
-    # Wiersz KLIKALNY, ALE NIE ROBOTA - czwarty w `_BEZ_ROBOTY`. Wersje stosów to decyzja, którą
-    # człowiek ma prawo podjąć „zostawiam obie" i nigdy do niej nie wracać, a Horreum nie ma
-    # werdyktu, który by ten wybór zapisał: jedyną drogą do zera jest skasowanie pliku poza
-    # programem. Wiersz liczony do plakietki świeciłby więc wiecznie - dokładnie ten szum, który
-    # `_BEZ_ROBOTY` zdejmuje z historii. Liczba i lista czytają jeden predykat
-    # (`queries.stack_version_frame_ids`).
+    # Wiersz AKCYJNY, ROBOTA LICZONA PODZBIOREM (AR-10). Wersje stosów to decyzja, którą człowiek
+    # ma prawo podjąć „zostawiam wszystkie" i nigdy do niej nie wracać - od 0026 ten wybór ma werdykt
+    # w bazie (gest w menu tabeli perspektywy, z drogą powrotu). Liczba i lista pod klikiem czytają
+    # jeden predykat (`queries.stack_version_frame_ids`, także grupy z werdyktem - tam się go widzi
+    # i cofa), a robotą jest podzbiór grup BEZ werdyktu (`_ROBOTA_Z_PODZBIORU`). Do 0026 wiersz stał
+    # w `_BEZ_ROBOTY`, bo bez werdyktu świeciłby wiecznie po prawowitej decyzji.
     ("stack_versions", "tasks.stack_versions", PRESET_STACK_VERSIONS),
 ]
+
+# WIERSZE, KTÓRYCH ROBOTA JEST PODZBIOREM LICZBY (AR-10): klucz wiersza → klucz licznika roboty
+# w `queries.tasks_state`. Liczba i lista pod klikiem zostają jednym zbiorem; plakietkę,
+# pogrubienie i kolor rozstrzyga podzbiór. Przy podzbiorze mniejszym od całości wiersz mówi
+# „robota z liczby" (`tasks.of_total`), żeby rozjazd liczby z plakietką nie wyglądał na błąd.
+_ROBOTA_Z_PODZBIORU = {"stack_versions": "stack_versions_open"}
 
 # TRZECI STAN WIERSZA: KLIKALNY, ALE NIE ROBOTA. Do 0809 lista znała dwa — informacyjny (cel `None`,
 # nie prowadzi nigdzie) i akcyjny (cel jest, liczba > 0 znaczy „tu jest robota"). Wiersz „Zastąpione"
@@ -150,8 +157,7 @@ _TASKS = [
 # drzwiami odtwarzał dokładnie ten defekt, który pakiet kolejki wyleczył w kubełkach (bramka 3a
 # 0809, zarzut `kimi` #4). Klucz, nie flaga w krotce: krotka opisuje POZYCJĘ, a to jest fakt o jej
 # NATURZE, i tak samo czyta go badge, jak i pogrubienie.
-_BEZ_ROBOTY = frozenset({"superseded_frames", "retired_frames", "missing_copy_frames",
-                         "stack_versions"})
+_BEZ_ROBOTY = frozenset({"superseded_frames", "retired_frames", "missing_copy_frames"})
 
 # WIERSZE, KTÓRYCH ZERO JEST WIEDZĄ DOPIERO PO ZEBRANIU FAKTÓW KOPII (0021). Oba predykaty porównują
 # zeznania kopii, a kopia bez faktów w porównaniu nie bierze udziału - więc przed pierwszą Dostawą
@@ -300,6 +306,8 @@ class TasksView(QWidget):
         self._niewiadome = set()
         for row, (key, label, action) in enumerate(_TASKS):
             n = state[key]
+            # Robota wiersza: ta sama liczba albo jej podzbiór (`_ROBOTA_Z_PODZBIORU`, AR-10).
+            robota = state[_ROBOTA_Z_PODZBIORU[key]] if key in _ROBOTA_Z_PODZBIORU else n
             it = self.tasks.item(row)
             czesciowe = czeka > 0 and key in _CZEKA_NA_FAKTY_KOPII
             niewiadome = czesciowe and n == 0
@@ -313,6 +321,8 @@ class TasksView(QWidget):
                 liczba = i18n.t_plural("tasks.copies_unread", czeka)
             elif czesciowe:                 # dolna granica: kopie bez faktów nie są w porównaniu
                 liczba = i18n.t_plural("tasks.copies_partial", czeka, m=n)
+            elif robota != n:               # część liczby ma werdykt - robotą jest reszta
+                liczba = i18n.t("tasks.of_total", open=robota, total=n)
             else:
                 liczba = str(n)
             it.setData(rows.SECONDARY, f"{liczba}  ›" if action is not None else liczba)
@@ -330,6 +340,9 @@ class TasksView(QWidget):
                 tip = i18n.t(_PODPOWIEDZI_GESTU[key], finish=i18n.t("grid.inplace.finish"),
                              restore=i18n.t("grid.inplace.restore"),
                              release=i18n.t("grid.inplace.release"))
+            elif robota != n:
+                tip = i18n.t_plural("tasks.stack_versions_kept_tip", n - robota,
+                                    keep=i18n.t("grid.version.keep_all"))
             else:
                 tip = ""
             it.setToolTip(tip)
@@ -338,7 +351,7 @@ class TasksView(QWidget):
             # pogrubione „0" mimo wyszarzenia, czyli krzyczał dokładnie tam, gdzie nie ma nic
             # do zrobienia. Kolor drugiego członu zostaje bez zmian (jawny `ForegroundRole`
             # dalej obejmuje oba człony — `TwoPartDelegate._own_color`).
-            live = action is not None and n > 0 and key not in _BEZ_ROBOTY
+            live = action is not None and robota > 0 and key not in _BEZ_ROBOTY
             it.setData(rows.STRONG, live)
             if action is not None:
                 # n=0 → wyszarzone, wciąż klikalne. TO SAMO dla wierszy HISTORII (`_BEZ_ROBOTY`)
@@ -347,7 +360,7 @@ class TasksView(QWidget):
                 # wzrok czyta większą liczbę jako większy problem, czyli dokładnie odwrotnie do
                 # tego, po co ten stan powstał. Szare = „nie ma tu roboty", nie „nie da się kliknąć".
                 # „?" NIE jest szare: szarość znaczy „nic do zrobienia", a tu jest - Dostawa.
-                it.setForeground(QBrush() if (n > 0 or niewiadome) and key not in _BEZ_ROBOTY
+                it.setForeground(QBrush() if (robota > 0 or niewiadome) and key not in _BEZ_ROBOTY
                                  else _DIM["fg"])
             if live:
                 badge += 1

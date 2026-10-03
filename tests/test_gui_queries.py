@@ -188,6 +188,7 @@ def test_tasks_state_liczniki_na_s8_obj(s8_obj):
         # zero z czwartego powodu (brak populacji, nie dowód poprawności predykatu; ten pinują
         # testy `test_gui_stack_versions.py` na własnych danych).
         "stack_versions": 0,
+        "stack_versions_open": 0,
     }
 
 

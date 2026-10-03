@@ -36,7 +36,8 @@ liczbie ZEBRANEJ — „nie zestackowałem" nie jest brakiem materiału.
 KSIĘŻYC WYCENIA, NIE WYCINA (D-0731-14): koszt jest kolumną i członem klucza sortowania, próg
 domyślnie wyłączony. Sortowanie ma TRZY człony przed kosztem-i-nazwą, bo każdy pojedynczy zawodzi:
 cel pod horyzontem ma uczciwe `cost=1,00`, a przy nowiu KAŻDY cel ma 1,00 i ranking zdegenerowałby
-się do alfabetu.
+się do alfabetu. Tuż przed kosztem stoi KUBEŁEK KADRU (PL-1): dobry jeden kadr, mozaika, cel za
+mały - kropka w kadrze nie wyprzedza celu, który optyka zrobi dobrze.
 
 Qt-wolne, READ-ONLY (zero DML, zero eventów, zero migracji — moduł nie jest klingą), SELECT
 literałem, zero sieci.
@@ -106,6 +107,10 @@ B_TO_V = 0.8
 # Margines przedcięcia deklinacją: asset trzyma J2000, rachunek jedzie na datę, precesja daje do
 # 0,15° na dzisiejszą epokę. Cięcie 3× szersze od błędu.
 _CUT_MARGIN = 0.5
+# Granica „dobrego kadru" w rankingu (PL-1, R2): jeden kadr wypełniony co najmniej w tej części
+# (`sky.Framing.frame_fill`) stoi przed mozaiką i przed celem za małym. Ta sama liczba jest
+# domyślną wartością progu „Min. wypełnienie" w GUI - próg i ranking mówią jednym głosem.
+RANK_MIN_FILL = 0.3
 
 # ─────────────────────────────────────────────────────── palety i kanały (T3 §6)
 # Kanał = to, czego brak użytkownik nazywa luką („Ha bez OIII / HOO bez SII"). Broadband jest
@@ -706,20 +711,45 @@ def recommend_channel(coverage, cost, rig):
     return min(candidates)[2], None
 
 
-def _sort_key(row):
-    """(widoczny, ma-lukę, koszt, dłuższe okno, WYŻEJ NA NIEBIE, kanon) — każdy człon broni się
-    osobno, a dwa ostatnie są odpowiedzią na FIRSTHAND: cel pod horyzontem ma uczciwe `cost=1,00`
-    (pułapka T1), ale przy NOWIU wszystkie koszty są 1,00, luki ma prawie każdy cel nigdy nie
-    fotografowany, a okno bywa równe dla setek celów okołobiegunowych — bez wysokości kulminacji
-    lista degenerowała się do porządku ALFABETYCZNEGO (zmierzone: 1555 wierszy zaczynało się od
-    bezimiennych `G0…` Greena). Kanon zostaje ostatni, żeby dwa przebiegi dały ten sam plik.
+def _fill_bucket(framing):
+    """Kubełek kadru do rankingu (PL-1, wariant R2): 0 = jeden kadr wypełniony co najmniej
+    w `RANK_MIN_FILL`, 1 = mozaika, 2 = jeden kadr za mały, 3 = brak kadrowania.
 
-    Cel domknięty nie ma prawa wygrywać z czekającym — bez rekomendacji bierzemy MAKSIMUM kosztu."""
+    Miara to `sky.Framing.frame_fill` - ta sama, którą pokazuje kolumna „Wypełn." i tnie próg
+    `min_fill` (SIN-DUP: surowe `fill` przy jednym kadrze bywa > 1, bo liczy się do krótszego boku).
+    Mozaika stoi PRZED celem za małym: D-0731-8 trzyma ją w wynikach jako cel wykonalny (kilka
+    nocy, obraz wypełniony), a kropka w kadrze daje obraz, którego optyka nie uniesie żadną liczbą
+    nocy - planer zaczyna od tego, co zestaw zrobi dobrze. Brak kadrowania idzie na koniec, jak
+    w sorcie soczewki: „nie wiem" nie wygrywa z odpowiedzią."""
+    if framing is None:
+        return 3
+    if framing.panels > 1:
+        return 1
+    return 0 if framing.frame_fill >= RANK_MIN_FILL else 2
+
+
+def _sort_key(row):
+    """(widoczny, ma-lukę, KUBEŁEK KADRU, koszt, dłuższe okno, WYŻEJ NA NIEBIE, kanon) - każdy
+    człon broni się osobno. Dwa ostatnie przed kanonem są odpowiedzią na FIRSTHAND: cel pod
+    horyzontem ma uczciwe `cost=1,00` (pułapka T1), ale przy NOWIU wszystkie koszty są 1,00, luki
+    ma prawie każdy cel nigdy nie fotografowany, a okno bywa równe dla setek celów okołobiegunowych
+    - bez wysokości kulminacji lista degenerowała się do porządku ALFABETYCZNEGO (zmierzone: 1555
+    wierszy zaczynało się od bezimiennych `G0…` Greena). Kanon zostaje ostatni, żeby dwa przebiegi
+    dały ten sam plik.
+
+    KUBEŁEK KADRU (PL-1, R2, `_fill_bucket`) stoi po luce, przed kosztem: zgłoszenie Zdzinia
+    2026-09-27 - `Sh2-85` (ok. 9 % kadru A140R) stał w szóstce, bo wypełnienie nie wchodziło do
+    klucza. Liczony dla `best_rig` (jak kolumna „Wypełn."), nie dla soczewki ekranu: jeden klucz
+    rdzenia daje tę samą kolejność w `horreum plan` i w GUI. Kubełki, nie ciągła miara - wewnątrz
+    kubełka nadal rządzi Księżyc i niebo, wypełnienie nie wypycha tańszej nocy.
+
+    Cel domknięty nie ma prawa wygrywać z czekającym - bez rekomendacji bierzemy MAKSIMUM kosztu."""
     if row.recommend is not None:
         cost_key = row.cost[PALETTE_OF_CHANNEL[row.recommend]]
     else:
         cost_key = max(row.cost.values())
-    return (not row.window.visible, 0 if row.coverage.gaps else 1, cost_key,
+    return (not row.window.visible, 0 if row.coverage.gaps else 1,
+            _fill_bucket(row.framing_in(row.best_rig)), cost_key,
             -row.window.hours_above, -row.window.max_alt_deg, row.target.canon)
 
 
@@ -757,7 +787,8 @@ def plan(con, *, night=None, site=None, park=None, layers=DEFAULT_LAYERS,
     „wykonalne twoim sprzętem" (powierzchnie zmieniają napis razem z nim, `rig_filter == 'on'`),
     a `counts['hidden_by_rig']` mówi, ile celów schował - odsiew nie ma prawa wyglądać jak ubogi
     katalog. Klucz istnieje WYŁĄCZNIE przy włączonym filtrze: domyślna odpowiedź zostaje bit
-    w bit ta sama. `_sort_key` NIETKNIĘTY - kurczy się pula, porządek zostaje.
+    w bit ta sama. Filtr kurczy pulę, porządku nie zmienia: kubełek kadru w `_sort_key` (PL-1)
+    działa zawsze, z progami i bez nich, dla `best_rig`.
 
     `find` ma semantykę WYSZUKIWANIA, nie filtra wyniku: pomija progi i przedcięcie (pytasz
     o konkretny obiekt — masz dostać jego okno, nawet gdy nigdy nie wschodzi) i dopasowuje po
@@ -860,7 +891,8 @@ def plan(con, *, night=None, site=None, park=None, layers=DEFAULT_LAYERS,
                               priority=mark["priority"] if mark is not None else None,
                               note=mark["note"] if mark is not None else None))
     # Priorytet użytkownika NIE wchodzi do klucza sortowania (D-T4-c ROZSTRZYGNIĘTE 2026-07-31,
-    # GO Zdzinia — domyślna utrzymana): pięć członów `_sort_key` wywalczył firsthand T3, a priorytet
+    # GO Zdzinia - domyślna utrzymana): człony `_sort_key` wywalczył firsthand T3 (kubełek kadru
+    # dołożyła decyzja PL-1 R2), a priorytet
     # przed „widoczny" postawiłby na czele cel pod horyzontem. Priorytet zostaje kolumną i filtrem;
     # ewentualny przełącznik porządku to sort WTÓRNY w widoku, nie zmiana tego klucza.
     rows.sort(key=_sort_key)

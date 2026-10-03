@@ -682,6 +682,92 @@ def test_nazwanie_LIGHTA_z_cudzego_stosu_nie_kasuje_rodowodu_DOWIEDZIONEGO(con):
     assert _integracja(con, m)["unresolved_reason"] is None
 
 
+def test_creation_time_oba_ksztalty_wlasnosci_i_brak():
+    """AR-10: `XISF:CreationTime` jako `String` (treść elementu - moduły 1.0.13 i 1.1.3) i jako
+    `TimePoint` (atrybut `value=`); brak własności, pusta wartość i brak XML → None."""
+    from horreum.resolve.stack import creation_time
+    assert creation_time('<xisf><Property id="XISF:CreationTime" type="String">'
+                         '2022-04-20T11:53:52Z</Property></xisf>') == "2022-04-20T11:53:52Z"
+    assert creation_time('<Property id="XISF:CreationTime" type="TimePoint" '
+                         'value="2023-09-13T18:16:53Z"/>') == "2023-09-13T18:16:53Z"
+    assert creation_time('<Property id="XISF:CreationTime" type="String"></Property>') is None
+    assert creation_time('<Property id="XISF:CreatorModule" type="String">x</Property>') is None
+    assert creation_time(None) is None
+
+
+def test_przebieg_zapisuje_creation_time_i_chroni_go_przy_nieczytelnym_pliku(con):
+    """AR-10: najbliższy przebieg rodowodu zapisuje `XISF:CreationTime` w `integration` (fakt
+    zeznania pliku jak sygnatura), a przebieg bez dostępu do pliku go nie kasuje. Falsyfikator:
+    zdejmij `creation_time` z ochrony `history_unread` w `run_stack_lineage` - drugi przebieg
+    zapisze NULL."""
+    m = _master(con)
+    _light(con, "l1", date_obs="2025-08-30T20:30:00")
+    z_data = '<xisf><Property id="XISF:CreationTime" type="String">2023-04-22T08:49:00Z</Property></xisf>'
+
+    def _wybuch(_p):
+        raise OSError("dysk odłączony")
+
+    run_stack_lineage(con, now=NOW, xml_reader=lambda _p: z_data)
+    assert _integracja(con, m)["creation_time"] == "2023-04-22T08:49:00Z"
+    run_stack_lineage(con, now=LATER, xml_reader=_wybuch)
+    assert _integracja(con, m)["creation_time"] == "2023-04-22T08:49:00Z"
+    ile = con.execute("SELECT count(*) FROM event WHERE verb = 'integration.updated'").fetchone()[0]
+    run_stack_lineage(con, now=LATER, xml_reader=lambda _p: z_data)
+    assert con.execute("SELECT count(*) FROM event WHERE verb = 'integration.updated'"
+                       ).fetchone()[0] == ile, "idempotencja: ta sama data, zero eventów"
+
+
+def test_creation_time_trafia_takze_do_stosu_chronionego_z_powodem(con):
+    """AR-10, obietnica 0026 („najbliższe Stosy uzupełnią całe archiwum"): stos z rodowodem
+    DOWIEDZIONYM, któremu gest osi dał powód (`kept_proven`), omija `upsert_integration` w całości -
+    a plik leży na miejscu i zeznaje `XISF:CreationTime`. Data ma wejść WĄSKO: wiersze, powód
+    i reszta głowy nietknięte; plik bez daty i plik nieczytelny daty nie kasują.
+    Falsyfikator: zdejmij zapis daty z gałęzi „chroniony + powód" w `run_stack_lineage`."""
+    m, _a, b, _cz = _historia_dwoch(con)
+    assert _integracja(con, m)["creation_time"] is None          # stos sprzed migracji 0026
+    przed = {(r["input_frame_id"], r["asserted_by"]) for r in inputs_of(con, m)}
+    con.execute("UPDATE frame SET object_source = 'user' WHERE id = ?", (b,))
+    con.commit()
+    assert repo.clear_object_assignment(con, frame_ids=[b], now=LATER).assigned == 1
+    glowa_przed = dict(_integracja(con, m))
+    z_data = _xml_historii([-10.0, -9.9]).replace(
+        "</xisf>", '<Property id="XISF:CreationTime" type="String">2023-04-22T08:49:00Z'
+                   '</Property></xisf>')
+
+    s = run_stack_lineage(con, now=LATER, xml_reader=lambda _p: z_data)
+    assert s.kept_proven == 1, "gałąź chroniona z powodem - ten sam stan co bez daty"
+    glowa = dict(_integracja(con, m))
+    assert glowa["creation_time"] == "2023-04-22T08:49:00Z"
+    assert {k: v for k, v in glowa.items() if k not in ("creation_time", "updated_at")} == {
+        k: v for k, v in glowa_przed.items() if k not in ("creation_time", "updated_at")}
+    assert {(r["input_frame_id"], r["asserted_by"]) for r in inputs_of(con, m)} == przed
+    zdarzenie = con.execute("SELECT payload FROM event WHERE verb = 'integration.updated' "
+                            "ORDER BY id DESC LIMIT 1").fetchone()
+    assert json.loads(zdarzenie["payload"])["after"] == {"creation_time": "2023-04-22T08:49:00Z"}
+
+    ile = con.execute("SELECT count(*) FROM event").fetchone()[0]
+    run_stack_lineage(con, now=LATER, xml_reader=lambda _p: z_data)       # idempotencja
+    run_stack_lineage(con, now=LATER, xml_reader=lambda _p: _xml_historii([-10.0, -9.9]))
+
+    def _wybuch(_p):
+        raise OSError("dysk odłączony")
+
+    run_stack_lineage(con, now=LATER, xml_reader=_wybuch)
+    assert _integracja(con, m)["creation_time"] == "2023-04-22T08:49:00Z", "None nie kasuje daty"
+    assert con.execute("SELECT count(*) FROM event WHERE verb = 'integration.updated' "
+                       "AND id > ?", (ile,)).fetchone()[0] == 0
+
+
+def test_klinga_daty_stosu_odmawia_pustej_daty_i_braku_glowy(con):
+    """EXPECT: wąska klinga daty nie jest drogą do skasowania faktu ani do założenia głowy."""
+    m = _master(con)
+    with pytest.raises(ValueError):
+        repo.record_integration_creation_time(con, master_frame_id=m, creation_time=None, now=NOW)
+    with pytest.raises(ValueError):
+        repo.record_integration_creation_time(con, master_frame_id=m, creation_time="2023-04-22T08:49:00Z",
+                                              now=NOW)
+
+
 def test_ochrona_rangi_NIE_zamraza_odtworzenia_tej_samej_sily(con):
     """Człon LUSTRZANY ochrony rangowej — bez niego „chroń zawsze" przeszłoby oba testy wyżej.
 

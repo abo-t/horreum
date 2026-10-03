@@ -86,6 +86,14 @@ from importlib import resources
 # samego `os.replace` mogła podmienić plik na udziale, więc znacznika nie dostaje). Cofnięcie
 # commitu go pomija. Kolumna wchodzi PUSTA (NULL = jak dotąd); backfillu nie ma - SQL nie wie,
 # który backup poprzedził podmianę.
+# 0025 to PRZYROST (ADD COLUMN, AR-33): `location.hdr_rule` - numer reguły koercji, którą zebrano
+# fakty kopii `hdr_*`. Zmiana koercji podnosi stałą `resolve.headers.COPY_TESTIMONY_RULE`, a sterownik
+# uzupełnienia dociąga kopie starszej reguły, zamiast porównywać je z nowymi. Backfill: 1 przy
+# zebranych faktach (jedyna reguła od 0021 - stempel jest odczytem, nie domysłem), NULL przy reszcie.
+# 0026 to PRZYROST (CREATE TABLE + ADD COLUMN, AR-10): `stack_version_kept` - werdykt człowieka
+# „zostawiam wszystkie" grupy wersji stosów (wiersz na członka, wspólny klucz gestu) - oraz
+# `integration.creation_time` (`XISF:CreationTime`, data stosów sprzed sygnatury integracji). Tabela
+# wchodzi pusta, kolumnę wypełnia najbliższy przebieg rodowodu stosów - SQL tego faktu nie zna.
 MIGRATIONS = [
     (2, "0002_initial.sql"),
     (3, "0003_writeback.sql"),
@@ -110,6 +118,8 @@ MIGRATIONS = [
     (22, "0022_inplace_op.sql"),
     (23, "0023_inplace_anchor_link.sql"),
     (24, "0024_backup_unreplaced.sql"),
+    (25, "0025_location_hdr_rule.sql"),
+    (26, "0026_stack_version_kept.sql"),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 _KNOWN_VERSIONS = frozenset({0} | {v for v, _ in MIGRATIONS})

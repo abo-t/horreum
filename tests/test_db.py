@@ -23,7 +23,9 @@ def test_migracja_ustawia_user_version(tmp_path):
     # + 0022 inplace_op (dziennik zapisu w miejscu: faza operacji i izolacja lokacji, O5/Q8)
     # + 0023 inplace_op.anchor_sha1 + pending_changes.inplace_op_id (kotwica operacji, wiązanie)
     # + 0024 header_backups.unreplaced_at (backup bez podmiany - cofnięcie go pomija, AR-37)
-    assert db._user_version(con) == db.SCHEMA_VERSION == 24
+    # + 0025 location.hdr_rule (wersja reguły koercji faktów kopii, AR-33)
+    # + 0026 stack_version_kept + integration.creation_time (werdykt wersji stosów, AR-10)
+    assert db._user_version(con) == db.SCHEMA_VERSION == 26
     con.close()
 
 

@@ -802,6 +802,14 @@ def run_stack_lineage(con, *, now, actor="stacks", xml_reader=None, progress=Non
             _bump(s.by_assert, zrodlo_licznika)
             s.ambiguous += bool(stan["ambiguous"])
             s.telescope_mismatch += bool(stan["telescope_mismatch"])
+            # Wyjątek od „w całości": `XISF:CreationTime` z czytelnego pliku (AR-10). To fakt zeznania
+            # jak sygnatura, którego nic tu nie obala, a ta gałąź jest jedyną drogą stosu chronionego
+            # do daty (obietnica 0026). Wąsko: sama data, i tylko gdy plik ją ma - brak daty
+            # w pliku ani plik nieczytelny zapisanej nie kasują.
+            if not p["history_unread"] and t.created:
+                repo.record_integration_creation_time(
+                    con, master_frame_id=p["frame_id"], creation_time=t.created, now=now,
+                    actor=actor)
             continue
         if p["reason"]:
             _bump(s.reasons, p["reason"])
@@ -828,11 +836,13 @@ def run_stack_lineage(con, *, now, actor="stacks", xml_reader=None, progress=Non
         # DOPASOWANIA AUTOMATU (nie zbioru wierszy niewykluczonych: odrzucenie ręką zostawia wiersz
         # w tabeli, a odcisku nie przelicza), więc zastąpienie go odciskiem świeżo policzonego okna
         # byłoby podmianą faktu o przeszłości na fakt o czymś innym.
+        # `creation_time` (AR-10) jest takim samym faktem zeznania pliku jak sygnatura.
         if p["history_unread"] and stan is not None:
             tool_v, rows_v = stan["tool"], stan["declared_rows"]
             driz_v, dis_v = stan["drizzle_inputs"], stan["disabled_inputs"]
+            created_v = stan["creation_time"]
         else:
-            tool_v, rows_v = t.tool, t.rows
+            tool_v, rows_v, created_v = t.tool, t.rows, t.created
             driz_v = sum(1 for x in t.inputs if x.has_drizzle) if t.rows is not None else None
             dis_v = sum(1 for x in t.inputs if not x.enabled) if t.rows is not None else None
         odcisk = stan["integ_hash"] if chroniony else _fingerprint(con, wejscia)
@@ -844,7 +854,7 @@ def run_stack_lineage(con, *, now, actor="stacks", xml_reader=None, progress=Non
             degenerate=int(t.degenerate), ambiguous=int(p["frame_id"] in ambi),
             telescope_mismatch=int(p["telescope_mismatch"]),
             unresolved_reason=p["reason"], raw_unreferenced=p["raw_unreferenced"],
-            now=now, actor=actor)
+            creation_time=created_v, now=now, actor=actor)
         if chroniony:
             _bump_kept(s, p)            # głowa zaktualizowana, WIERSZE nietknięte
             pominiete.append(p["frame_id"])
@@ -921,7 +931,7 @@ def _zapisany_stan(con, master_frame_id):
     skoro właśnie decyduje, czy w ogóle pisać."""
     glowa = con.execute(
         "SELECT i.id, i.tool, i.declared_rows, i.drizzle_inputs, i.disabled_inputs, i.integ_hash, "
-        "       i.ambiguous, i.telescope_mismatch "
+        "       i.ambiguous, i.telescope_mismatch, i.creation_time "
         "FROM integration i WHERE i.master_frame_id = ?",
         (master_frame_id,)).fetchone()
     if glowa is None:

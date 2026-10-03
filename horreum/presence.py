@@ -79,7 +79,8 @@ class PresenceSummary:
     frames_without_copy: int = 0   # KLATKI bez ani jednej obecnej kopii PO zapisie (≠ liczba kopii!)
     vanished: int = 0              # realnie oznaczone (0 przy DRY)
     gone_paths: list = field(default_factory=list)       # potwierdzone znikłe (raport, także DRY)
-    cancelled: bool = False        # przerwane kooperatywnie na granicy kandydata — ZERO zapisu
+    gone_ids: list = field(default_factory=list)         # ich `location.id` - odcisk zbioru dla deklaracji
+    cancelled: bool = False       # przerwane kooperatywnie na granicy kandydata - ZERO zapisu
     confirmed: bool = False        # czy pętla potwierdzeń w ogóle poszła (pod hamulcem: NIE)
     # DWA RÓŻNE FAKTY, celowo nie jedno pole: `brake` = „hamulec by zadziałał" (baner, przebieg mógł
     # mimo to dokończyć — DRY zawsze, apply za `--force N`); `aborted` = „ZATRZYMANO, nic nie zapisano".
@@ -87,6 +88,10 @@ class PresenceSummary:
     # ABORT, a CLI zwracało kod 1 po udanym zapisie.
     brake: object = None
     aborted: object = None
+    # Próg, który kandydaci przekroczyli - WYŁĄCZNIE dla hamulca progowego (AR-31 (6)). `None` także
+    # przy hamulcu „zakres pusty” / „drzewo puste”: tamte są odmową bez furtki, a GUI rozpoznaje po
+    # tym polu, czy wolno mu zaproponować przełamanie `force` (bez parsowania tekstu `brake`).
+    brake_limit: object = None
 
 
 def _in_scope(path, prefix_cf):
@@ -113,8 +118,9 @@ def _under_any(path, barriers_cf):
 
 
 def _brake_reason(summary):
-    """Powód zatrzymania albo `None`. Liczony PRZED pętlą potwierdzeń — inaczej przy zerwanym SMB
-    płacimy tysiące `stat` tylko po to, żeby powiedzieć „przerwane".
+    """Powód zatrzymania albo `None`; przy hamulcu PROGOWYM ustawia też `summary.brake_limit`.
+    Liczony PRZED pętlą potwierdzeń - inaczej przy zerwanym SMB płacimy tysiące `stat` tylko po
+    to, żeby powiedzieć „przerwane".
 
     `scoped == 0` jest tu tak samo ważne jak próg: literówka w serialu albo zły root dają zakres
     pusty, zero kandydatów i raport „nic nie znikło" NIEODRÓŻNIALNY od przebiegu zdrowego. Pass
@@ -125,13 +131,14 @@ def _brake_reason(summary):
         return f"drzewo puste (0 plików pod {summary.root}) — wolumin zamontowany, ale bez treści?"
     limit = max(_BRAKE_MIN, int(summary.scoped * _BRAKE_FRACTION))
     if summary.candidates > limit:
+        summary.brake_limit = limit
         return (f"kandydatów {summary.candidates} > próg {limit} "
                 f"({_BRAKE_MIN} albo {_BRAKE_FRACTION:.0%} z {summary.scoped})")
     return None
 
 
 def check(con, root, *, volume, apply=False, force=None, run_id=None, now,
-          progress=None, should_cancel=None):
+          progress=None, should_cancel=None, confirm_under_brake=False, expected_gone_ids=None):
     """Jeden przebieg passa obecności. DRY DOMYŚLNIE (`apply=False`): raportuje i NIE dotyka bazy.
 
     DLACZEGO DRY JEST DOMYŚLNE, choć `present=0` cofa zwykły re-skan: `event` jest APPEND-ONLY,
@@ -145,9 +152,25 @@ def check(con, root, *, volume, apply=False, force=None, run_id=None, now,
     zostaje `False`): to jej koszt hamulec ma oszczędzić, a liczba 0 potwierdzonych znaczy wtedy
     „nie liczono", nie „nic nie znikło".
 
+    `confirm_under_brake=True` (AR-31 (6)) = DRY pod hamulcem PROGOWYM mimo to liczy potwierdzenia.
+    Bez tego deklaracja `force` nie ma skąd wziąć liczby: GUI musiałoby pokazać kandydatów (wśród
+    nich `resurfaced` i `undecided`), a apply z taką liczbą aborciuje na rozjeździe. Koszt `stat`
+    płaci wyłącznie ten, kto o niego prosi (gest „Sprawdź obecność”; anulowanie działa jak zwykle).
+    Hamulce „zakres pusty” / „drzewo puste” zostają odmową: tam każdy wiersz jest kandydatem,
+    więc potwierdzona liczba byłaby gotową deklaracją „oznacz cały wolumin”. Przy `apply` flaga
+    nic nie zmienia - furtką apply jest wyłącznie `force`.
+
     `force` = DEKLARACJA INTENCJI, nie przełącznik: liczba potwierdzonych zniknięć, których user
     się spodziewa. Rozjazd (`confirmed_gone != force`) → abort BEZ zapisu, także gdy hamulec milczał.
     Gołe „przełam wszystko" nie istnieje — byłoby przyciskiem „oznacz cały wolumin jako zniknięty".
+
+    `expected_gone_ids` (opcjonalny, AR-31 (6)) = ZBIÓR potwierdzonych zniknięć (`gone_ids` z DRY),
+    który user widział przed decyzją. Sama liczba tego nie pilnuje: kopia, która wróciła, i inna,
+    która w tym czasie zniknęła, dają tę samą liczbę i inny zapis. Rozjazd zbioru przy `apply`
+    → abort BEZ zapisu. Deklaracja zbioru pochodzi z DRY pod hamulcem PROGOWYM, więc przy `apply`
+    pod hamulcem bez progu („drzewo puste” / „zakres pusty”) stan drzewa zmienił się co do natury -
+    abort od razu, bez pętli `stat`. CLI odcisku nie podaje: `--force N` zostaje deklaracją liczby
+    (także przy „drzewo puste” - legalne sprzątanie całej sesji).
 
     ANULOWANIE (`should_cancel`) sprawdzane na granicy KANDYDATA i przerywa CAŁY zapis: lista
     kandydatów jest wtedy niepełna, a apply to jedna decyzja, nie N niezależnych. `progress(done,
@@ -205,10 +228,11 @@ def check(con, root, *, volume, apply=False, force=None, run_id=None, now,
 
     summary.brake = _brake_reason(summary)
     if summary.brake is not None:
-        if apply and force is None:
+        bez_furtki = expected_gone_ids is not None and summary.brake_limit is None
+        if apply and (force is None or bez_furtki):
             summary.aborted = summary.brake    # zatrzymane: zero potwierdzeń, zero zapisu
             return summary
-        if not apply:
+        if not apply and not (confirm_under_brake and summary.brake_limit is not None):
             return summary                     # DRY: baner + pełne liczniki, bez kosztu potwierdzeń
 
     summary.confirmed = True
@@ -221,6 +245,7 @@ def check(con, root, *, volume, apply=False, force=None, run_id=None, now,
         if verdict is True:
             gone.append((loc_id, path))
             summary.gone_paths.append(path)
+            summary.gone_ids.append(loc_id)
         elif verdict is False:
             summary.resurfaced += 1
             summary.resurfaced_paths.append(path)
@@ -235,6 +260,10 @@ def check(con, root, *, volume, apply=False, force=None, run_id=None, now,
     if force is not None and summary.confirmed_gone != force:
         summary.aborted = (f"--force {force} != potwierdzonych zniknięć {summary.confirmed_gone} "
                            f"— deklaracja nie zgadza się z dyskiem, nic nie zapisano")
+        return summary
+    if expected_gone_ids is not None and sorted(summary.gone_ids) != sorted(expected_gone_ids):
+        summary.aborted = ("zbiór potwierdzonych zniknięć inny niż w sprawdzeniu, które zatwierdzono "
+                           "- dysk zmienił się od tamtej chwili, nic nie zapisano")
         return summary
 
     summary.run_id = run_id or uuid.uuid4().hex

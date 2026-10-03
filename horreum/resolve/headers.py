@@ -50,6 +50,41 @@ COPY_TESTIMONY_KEYWORDS = (
     ("hdr_xbinning", "XBINNING"), ("hdr_date_obs", "DATE-OBS"),
 )
 
+# WERSJA REGUŁY ZEZNANIA KOPII (0025, AR-33): numer reguły koercji, którą `copy_testimony` (przez
+# `extract_header` i `_coerce`) rzutuje pola `hdr_*`. Fakty kopii niosą go w `location.hdr_rule`.
+# KAŻDA zmiana rzutu, która może zmienić wartość któregoś pola `hdr_*` (`_to_text`, `_to_float`,
+# `_to_int`, dobór keywordów wyżej) PODNOSI ten numer o 1 - wtedy sterownik uzupełnienia
+# (`scan.backfill_copy_facts`) dociąga kopie starszej reguły, a porównanie kopii do tego czasu mówi
+# o nich „nie wiem" zamiast fałszywego rozjazdu. Reguła 1 = rzut od migracji 0021.
+COPY_TESTIMONY_RULE = 1
+
+# STAN FAKTÓW KOPII WOBEC REGUŁY TEJ BINARKI - trzy stany, jedno miejsce prawdy (AR-33). Wcześniej
+# każdy wołający porównywał `hdr_rule` po swojemu (`==`, `<`, `>=`) i fakty reguły NOWSZEJ niż kod
+# (baza pisana nowszą binarką) wypadały z każdego licznika: porównanie mówiło o nich „nie wiem",
+# sterownik uznawał je za aktualne, a „?” w Porządkach ich nie widział.
+FAKTY_DO_DOCIAGNIECIA = "do_dociagniecia"   # brak faktów albo reguła nieznana/starsza - robota sterownika
+FAKTY_BIEZACE = "biezace"                   # porównywalne z rzutem tej binarki
+FAKTY_NOWSZE = "nowsze"                     # binarka starsza od bazy: nie cofa ich i nie umie porównać
+
+
+def copy_facts_state(hdr_hash, hdr_rule, rule=None):
+    """Stan faktów kopii (`location.hdr_hash`, `location.hdr_rule`) wobec reguły `rule` - domyślnie
+    reguły tej binarki (`COPY_TESTIMONY_RULE` czytane przy wołaniu, nie przy definicji); klinga
+    podaje regułę ZAPISU (`record_copy_facts`, `refresh_location`).
+
+    „Nie wiem” w read-modelu = wszystko poza `FAKTY_BIEZACE`; kandydat sterownika = wyłącznie
+    `FAKTY_DO_DOCIAGNIECIA` (starsza binarka niczego nie cofa). SQL nie woła Pythona, więc literały
+    SQL niosą fragmenty tej reguły, pilnowane tabelą prawdy w testach (AR-33):
+      * „nie bieżące”:     `(l.hdr_hash IS NULL OR l.hdr_rule IS NOT ?)`
+      * „do dociągnięcia”: `(hdr_hash IS NULL OR hdr_rule IS NULL OR hdr_rule < ?)` (klinga)
+      * kandydaci `scan.copy_facts_candidates`: `(... < ? OR l.hdr_rule > ?)` - drugi parametr NULL
+        daje „do dociągnięcia” (sterownik), reguła - „nie bieżące” (licznik „nie wiem”)."""
+    if rule is None:
+        rule = COPY_TESTIMONY_RULE
+    if hdr_hash is None or hdr_rule is None or hdr_rule < rule:
+        return FAKTY_DO_DOCIAGNIECIA
+    return FAKTY_BIEZACE if hdr_rule == rule else FAKTY_NOWSZE
+
 
 def copy_testimony(header):
     """Nagłówek JEDNEJ KOPII (dict ze skanu) → dict pól `hdr_*` na `location` (0021).

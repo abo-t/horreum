@@ -61,7 +61,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from horreum import db                                              # noqa: E402
 from horreum import supersede                                     # noqa: E402
 from horreum.audit import (config_review_reason_gap, config_source_invariants,  # noqa: E402
-                           entity_event_parity, light_population_closure, object_source_audit,
+                           config_unpaired_reassignments, entity_event_parity,
+                           light_population_closure, object_source_audit,
                            retire_invariants, supersede_invariants)
 from horreum.calibration import KIND_RECIPE, run_calibration      # noqa: E402
 from horreum.lineage import run_lineage                           # noqa: E402
@@ -947,8 +948,15 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
     for p in parity:
         all_match &= p.ok
         minus = f" − {p.minus} {p.retracted}" if p.minus else ""
+        if p.legacy:
+            minus += f" − przepięcia bez pary {p.legacy}"
         out(f"    {p.name:28s} {p.entities:6d} == {p.events:6d}{minus}  [{_ok(p.ok)}]")
     crit("§5.9 encje == eventy (co do sztuki, łącznie z przypisaniami)", all_match)
+    # Człon `legacy` osi configu jest HISTORIĄ żywej bazy (przepięcia sprzed pary verbów, R-S1-5).
+    # Ta baza powstała bieżącym kodem, więc każde przepięcie bez pary jest tu regresją klingi -
+    # osobne kryterium, żeby odejmowanie historii nie zazieleniło jej po cichu.
+    n_bez_pary = config_unpaired_reassignments(con)
+    crit(f"§5.9 przepięcia configu bez pary verbów (świeża baza: {n_bez_pary})", n_bez_pary == 0)
 
     # §5.15 ZASTĄPIENIE TOŻSAMOŚCI (R4, #DR2) — bramka GO-1. Pyta o INWARIANTY, nie o liczbę:
     # populacja zastąpionych jest na świeżej bazie dawcy z definicji ZEROWA (podmiana wymaga

@@ -140,6 +140,136 @@ CATALOG = {
     "axis.obs.name_rejected": {"pl": "Nazwa odrzucona: {e}", "en": "Name rejected: {e}"},
     "axis.obs.name_saved": {"pl": "Nazwa zapisana.", "en": "Name saved."},
     "axis.obs.name_unchanged": {"pl": "Nazwa bez zmian.", "en": "Name unchanged."},
+
+    # --- stanowisko Z RĘKI (0027): okno „Wskaż stanowisko…" i przyciski widoku stanowisk ---
+    "obshand.btn_assign": {"pl": "Wskaż stanowisko…", "en": "Assign site…"},
+    "obshand.btn_change": {"pl": "Zmień wskazanie…", "en": "Change assignment…"},
+    "obshand.btn_clear": {"pl": "Cofnij wskazanie…", "en": "Undo assignment…"},
+    "obshand.title": {"pl": "Wskaż stanowisko klatkom bez GPS",
+                      "en": "Assign a site to frames without GPS"},
+    "obshand.title_change": {"pl": "Zmień stanowisko wskazane ręką",
+                             "en": "Change a hand-assigned site"},
+    "obshand.title_clear": {"pl": "Cofnij wskazanie stanowiska", "en": "Undo a site assignment"},
+    # Nagłówki okien niosą GOTOWE frazy liczebne (`dlg.n_*` przez `t_plural`) - dwie liczby w jednym
+    # zdaniu nie dają się odmienić jednym `t_plural`, a „1 folderów” kłamie gramatyką.
+    "obshand.head": {
+        "pl": "{folders} · {frames} bez stanowiska (nagłówek bez GPS). Zaznacz foldery zdjęte "
+              "w jednym miejscu i wskaż stanowisko.",
+        "en": "{folders} · {frames} without a site (no GPS in the header). Check the folders "
+              "shot at one place and pick the site."},
+    "obshand.head_change": {
+        "pl": "{folders} · {frames} ze stanowiskiem wskazanym ręką. Zaznacz te, którym zmieniasz "
+              "stanowisko.",
+        "en": "{folders} · {frames} with a hand-assigned site. Check the ones whose site you "
+              "change."},
+    "obshand.head_clear": {
+        "pl": "{folders} · {frames} ze stanowiskiem wskazanym ręką. Cofnięcie oddaje oś "
+              "automatowi: klatka z GPS wróci do stanowiska z pliku przy najbliższym „Rozwiąż”, "
+              "klatka bez GPS - do „bez stanowiska”.",
+        "en": "{folders} · {frames} with a hand-assigned site. Undo hands the axis back to "
+              "automation: a frame with GPS returns to its file's site on the next “Resolve”, "
+              "a frame without GPS returns to “no site”."},
+    "obshand.check_all": {"pl": "Zaznacz / odznacz wszystkie", "en": "Check / uncheck all"},
+    "obshand.item": {"pl": "{folder}  ·  {frames}  ·  {kinds}",
+                     "en": "{folder}  ·  {frames}  ·  {kinds}"},
+    "dlg.n_folders": {
+        "pl": {"one": "{n} folder", "few": "{n} foldery", "many": "{n} folderów"},
+        "en": {"one": "{n} folder", "other": "{n} folders"}},
+    "dlg.n_groups": {
+        "pl": {"one": "{n} grupa", "few": "{n} grupy", "many": "{n} grup"},
+        "en": {"one": "{n} group", "other": "{n} groups"}},
+    "dlg.n_frames": {
+        "pl": {"one": "{n} klatka", "few": "{n} klatki", "many": "{n} klatek"},
+        "en": {"one": "{n} frame", "other": "{n} frames"}},
+    "obshand.kind_count": {"pl": "{kind} ({n})", "en": "{kind} ({n})"},
+    "obshand.now_set": {"pl": "dziś: {site}", "en": "now: {site}"},
+    "obshand.now_mixed": {"pl": "dziś: różne stanowiska", "en": "now: several sites"},
+    "obshand.no_folder": {"pl": "(bez kopii na dysku)", "en": "(no copy on disk)"},
+    "obshand.pick_existing": {"pl": "Istniejące stanowisko", "en": "Existing site"},
+    "obshand.pick_new": {"pl": "Nowe ze współrzędnych (stopnie dziesiętne)",
+                         "en": "New from coordinates (decimal degrees)"},
+    "obshand.pick_site": {"pl": "- wybierz stanowisko -", "en": "- pick a site -"},
+    "obshand.lat": {"pl": "Szerokość (-90..90, południe ujemna):",
+                    "en": "Latitude (-90..90, south negative):"},
+    "obshand.lon": {"pl": "Długość (-180..180, zachód ujemna):",
+                    "en": "Longitude (-180..180, west negative):"},
+    "obshand.name": {"pl": "Nazwa (opcjonalnie):", "en": "Name (optional):"},
+    "obshand.elev": {"pl": "Wysokość m n.p.m. (opcjonalnie):", "en": "Elevation in m (optional):"},
+    "obshand.near_note": {
+        "pl": "Punkt w promieniu {km} km od istniejącego stanowiska trafi w nie - bez duplikatu.",
+        "en": "A point within {km} km of an existing site joins it - no duplicate."},
+    "obshand.assign_btn": {"pl": "Przypisz zaznaczone ({n})", "en": "Assign selected ({n})"},
+    "obshand.clear_btn": {"pl": "Cofnij zaznaczone ({n})", "en": "Undo selected ({n})"},
+    "obshand.cancel_btn": {"pl": "Anuluj", "en": "Cancel"},
+    "obshand.err_nothing": {"pl": "Nic nie zaznaczono - zero zapisu.",
+                            "en": "Nothing checked - nothing written."},
+    "obshand.err_no_site": {"pl": "Wybierz stanowisko z listy albo podaj współrzędne.",
+                            "en": "Pick a site from the list or enter coordinates."},
+    "obshand.err_coords": {"pl": "Współrzędne odrzucone: {e}", "en": "Coordinates rejected: {e}"},
+    "obshand.nothing": {"pl": "Brak klatek bez stanowiska - każda ma GPS albo wskazanie ręki.",
+                        "en": "No frames without a site - each has GPS or a hand assignment."},
+    "obshand.nothing_hand": {"pl": "Brak klatek ze stanowiskiem wskazanym ręką.",
+                             "en": "No frames with a hand-assigned site."},
+    # Zdania po geście: odmiana przez `t_plural` na liczbie wszystkich klatek gestu („z 1 klatki",
+    # „z 5 klatek"), człony pominięć i skutków WYŁĄCZNIE przy liczbie > 0 (wzorzec
+    # `grid.zdanie_pominiec`); kropkę stawia wołający na końcu całego zdania.
+    "obshand.assigned_report": {
+        "pl": {"one": "Stanowisko {site}: przypisano {assigned} z {n} klatki",
+               "few": "Stanowisko {site}: przypisano {assigned} z {n} klatek",
+               "many": "Stanowisko {site}: przypisano {assigned} z {n} klatek"},
+        "en": {"one": "Site {site}: assigned {assigned} of {n} frame",
+               "other": "Site {site}: assigned {assigned} of {n} frames"}},
+    "obshand.created": {"pl": " · nowe stanowisko", "en": " · new site"},
+    "obshand.skip_occupied": {
+        "pl": {"one": " · {n} klatka miała już stanowisko", "few": " · {n} klatki miały już stanowisko",
+               "many": " · {n} klatek miało już stanowisko"},
+        "en": {"one": " · {n} frame already had a site", "other": " · {n} frames already had a site"}},
+    "obshand.skip_unchanged": {
+        "pl": {"one": " · {n} klatka bez zmiany", "few": " · {n} klatki bez zmiany",
+               "many": " · {n} klatek bez zmiany"},
+        "en": {"one": " · {n} frame unchanged", "other": " · {n} frames unchanged"}},
+    "obshand.name_kept": {"pl": " · stanowisko ma już nazwę „{name}” - zostaje",
+                          "en": " · the site already has the name “{name}” - it stays"},
+    "obshand.elev_set": {"pl": " · wysokość {elev} m dopisana do stanowiska",
+                         "en": " · elevation {elev} m added to the site"},
+    "obshand.elev_kept": {"pl": " · stanowisko ma już wysokość {elev} m - zostaje",
+                          "en": " · the site already has elevation {elev} m - it stays"},
+    "obshand.undo_hint": {"pl": ". Odwrót: ten widok, „Cofnij wskazanie…”",
+                          "en": ". To revert: this view, “Undo assignment…”"},
+    "obshand.cleared_report": {
+        "pl": {"one": "Cofnięto wskazanie stanowiska: {cleared} z {n} klatki",
+               "few": "Cofnięto wskazanie stanowiska: {cleared} z {n} klatek",
+               "many": "Cofnięto wskazanie stanowiska: {cleared} z {n} klatek"},
+        "en": {"one": "Site assignment undone: {cleared} of {n} frame",
+               "other": "Site assignment undone: {cleared} of {n} frames"}},
+    "obshand.clear_not_hand": {
+        "pl": {"one": " · {n} klatka ma stanowisko z GPS, nie z ręki",
+               "few": " · {n} klatki mają stanowisko z GPS, nie z ręki",
+               "many": " · {n} klatek ma stanowisko z GPS, nie z ręki"},
+        "en": {"one": " · {n} frame has its site from GPS, not by hand",
+               "other": " · {n} frames have their site from GPS, not by hand"}},
+    "obshand.clear_nothing": {
+        "pl": {"one": " · {n} klatka bez stanowiska", "few": " · {n} klatki bez stanowiska",
+               "many": " · {n} klatek bez stanowiska"},
+        "en": {"one": " · {n} frame without a site", "other": " · {n} frames without a site"}},
+    "obshand.clear_gps": {
+        "pl": {"one": ". {n} klatka z GPS wróci do stanowiska z pliku po „Rozwiąż”",
+               "few": ". {n} klatki z GPS wrócą do stanowiska z pliku po „Rozwiąż”",
+               "many": ". {n} klatek z GPS wróci do stanowiska z pliku po „Rozwiąż”"},
+        "en": {"one": ". {n} frame with GPS returns to its file's site after “Resolve”",
+               "other": ". {n} frames with GPS return to their file's site after “Resolve”"}},
+    "obshand.clear_no_site": {
+        "pl": {"one": ". {n} klatka wróciła do „bez stanowiska”",
+               "few": ". {n} klatki wróciły do „bez stanowiska”",
+               "many": ". {n} klatek wróciło do „bez stanowiska”"},
+        "en": {"one": ". {n} frame went back to “no site”",
+               "other": ". {n} frames went back to “no site”"}},
+    "obshand.site_empty": {"pl": ". Stanowisko {site} zostaje bez klatek",
+                           "en": ". Site {site} stays without frames"},
+    "obshand.site_label": {"pl": "#{id} {name}", "en": "#{id} {name}"},
+    "pipeline.fmt.resolve_obs_hand": {
+        "pl": "  ⚠ stanowisko z ręki inne niż GPS nagłówka: {n} klatek (ręka zostaje)",
+        "en": "  ⚠ hand-assigned site differs from header GPS: {n} frames (hand stays)"},
     "axis.obs.already_merged": {"pl": "Już scalone.", "en": "Already merged."},
     "axis.obs.already_canonical": {"pl": "Już kanoniczne.", "en": "Already canonical."},
 
@@ -452,10 +582,10 @@ CATALOG = {
     "cfg.title_change": {"pl": "Zmień zestaw (teleskop × kamera)",
                          "en": "Change setup (telescope × camera)"},
     "cfg.head_change": {
-        "pl": "{folders} grup · {frames} klatek — wszystkie mają zestaw wskazany PRZEZ CIEBIE. "
+        "pl": "{folders} · {frames} - wszystkie mają zestaw wskazany PRZEZ CIEBIE. "
               "Zaznacz tylko te, które chcesz zmienić: zapis NADPISZE poprzednie wskazanie. "
               "Wchodzą odznaczone, żeby jedna poprawka nie przestemplowała reszty.",
-        "en": "{folders} groups · {frames} frames — all have a setup indicated BY YOU. Check only "
+        "en": "{folders} · {frames} - all have a setup indicated BY YOU. Check only "
               "the ones you want to change: the write OVERWRITES the previous indication. They "
               "start unchecked so that one fix does not re-stamp the rest."},
     "cfg.now_set": {"pl": "dziś: {telescope}", "en": "now: {telescope}"},
@@ -477,14 +607,14 @@ CATALOG = {
                       "en": "Check / uncheck all"},
     "cfg.title": {"pl": "Przypisz zestaw (teleskop × kamera)", "en": "Assign setup (telescope × camera)"},
     "cfg.head": {
-        "pl": "{folders} grup · {frames} klatek. Kamerę zna plik; wskazać trzeba TELESKOP. "
+        "pl": "{folders} · {frames}. Kamerę zna plik; wskazać trzeba TELESKOP. "
               "Jednostką jest FOLDER × KAMERA, bo jeden zestaw niesie dokładnie jedną kamerę. "
               "Zapis idzie do BAZY, nie do plików — RAW jest read-only.",
-        "en": "{folders} groups · {frames} frames. The file knows the camera; the TELESCOPE is what "
+        "en": "{folders} · {frames}. The file knows the camera; the TELESCOPE is what "
               "you must point out. The unit is FOLDER × CAMERA, because one setup carries exactly "
               "one camera. The write goes to the DATABASE, not the files — RAW is read-only."},
-    "cfg.item": {"pl": "{folder}  ·  {camera}  ·  {n} klatek",
-                 "en": "{folder}  ·  {camera}  ·  {n} frames"},
+    "cfg.item": {"pl": "{folder}  ·  {camera}  ·  {frames}",
+                 "en": "{folder}  ·  {camera}  ·  {frames}"},
     "cfg.no_folder": {"pl": "(bez kopii na dysku)", "en": "(no copy on disk)"},
     "cfg.no_camera": {"pl": "(kamera nieznana)", "en": "(camera unknown)"},
     # RODZAJ ODBIEGAJĄCY OD ŚWIATŁA (R1-3) — człon pokazywany WYŁĄCZNIE przy odchyleniu, więc
@@ -508,30 +638,66 @@ CATALOG = {
     # złożony wyłącznie z klatek bez kamery dawał okno z wiecznie wygaszonym zatwierdzeniem i bez
     # słowa o tym, gdzie tę kamerę załatwić — a to inna oś (skan), nie ten gest.
     "cfg.no_camera_warning": {
-        "pl": "{n} klatek zostanie pominiętych: bez kamery nie ma z czego złożyć zestawu. "
+        "pl": "{skipped}: bez kamery nie ma z czego złożyć zestawu. "
               "Kamera przychodzi z zeznania pliku (INSTRUME/XPIXSZ) — to osobna oś: napraw "
               "nagłówek albo przeskanuj ponownie, potem wróć tutaj.",
-        "en": "{n} frames will be skipped: without a camera there is nothing to build a setup from. "
+        "en": "{skipped}: without a camera there is nothing to build a setup from. "
               "The camera comes from the file's testimony (INSTRUME/XPIXSZ) — a separate axis: "
               "repair the header or re-scan, then come back here."},
+    "cfg.no_camera_skipped": {
+        "pl": {"one": "{n} klatka zostanie pominięta", "few": "{n} klatki zostaną pominięte",
+               "many": "{n} klatek zostanie pominiętych"},
+        "en": {"one": "{n} frame will be skipped", "other": "{n} frames will be skipped"}},
+    # Zdanie gestu zestawu MÓWI GRAMATYKĄ OSI OBIEKTU (R-S2b-15): bez kropki, bo człony pominięć
+    # dokleja `grid.zdanie_pominiec` z prefiksem `grid.sel.config_skip_`; odmienione przez `{n}` =
+    # wszystkie klatki gestu („z 1 klatki", „z 5 klatek").
+    "object.config_assigned_none": {
+        "pl": "Zestaw {telescope}: nic nie przypisano",
+        "en": "Setup {telescope}: nothing assigned"},
     "object.config_assigned_report": {
-        "pl": "Przypisano zestaw {telescope} → {assigned} z {total} klatek.",
-        "en": "Assigned setup {telescope} → {assigned} of {total} frames."},
+        "pl": {"one": "Przypisano zestaw {telescope} → {assigned} z {n} klatki",
+               "few": "Przypisano zestaw {telescope} → {assigned} z {n} klatek",
+               "many": "Przypisano zestaw {telescope} → {assigned} z {n} klatek"},
+        "en": {"one": "Assigned setup {telescope} → {assigned} of {n} frame",
+               "other": "Assigned setup {telescope} → {assigned} of {n} frames"}},
     # NASTĘPNY TAKT NAZWANY, nie domyślony (wzorzec taktu 3 z „Napraw nagłówek…"): oś sprzętu
     # działa natychmiast (facety, filtr), ale dobór rodowodu stosów czyta teleskop kandydata —
     # więc jeśli te klatki są materiałem gotowego obrazu, rodowód trzeba przeliczyć. Zdanie mówi
     # GDZIE; przycisku tu nie ma, bo na dzisiejszym archiwum nie miałby czego zmienić (wszystkie
     # 3367 wejść rodowodu to FITS-y), a obietnica bez skutku jest gorsza od wskazania drogi.
+    # Kropka na CZELE: zamyka zdanie raportu, które kończy się bez niej (człony pominięć).
     "object.config_next_step": {
-        "pl": " Rodowód gotowych obrazów przelicz w Dostawie („Policz rodowód”), gdy te klatki "
+        "pl": ". Rodowód gotowych obrazów przelicz w Dostawie („Policz rodowód”), gdy te klatki "
               "są materiałem stosu.",
-        "en": " Recompute stack lineage in Delivery (“Compute lineage”) if these frames are stack "
+        "en": ". Recompute stack lineage in Delivery (“Compute lineage”) if these frames are stack "
               "material."},
-    "object.config_skipped": {
-        "pl": " (pominięte: {occupied} z zestawem, {no_camera} bez kamery, "
-              "{kind_skip} kalibracja, {unchanged} bez zmiany)",
-        "en": " (skipped: {occupied} already set, {no_camera} without a camera, "
-              "{kind_skip} calibration, {unchanged} unchanged)"},
+    # --- człony pominięć gestu ZESTAWU (`repo.ConfigGesture.skipped_breakdown`, R-S2b-15) ---
+    # Prefiks `grid.sel.config_skip_` + sufiks z rozbicia; frazy odmieniane przez liczbę klatek
+    # (`zdanie_pominiec(odmiana=True)`). Zero nie jest drukowane - człon pojawia się, gdy jest powód.
+    "grid.sel.config_skip_occupied": {
+        "pl": {"one": " · {n} klatka miała już zestaw",
+               "few": " · {n} klatki miały już zestaw",
+               "many": " · {n} klatek miało już zestaw"},
+        "en": {"one": " · {n} frame already had a setup",
+               "other": " · {n} frames already had a setup"}},
+    "grid.sel.config_skip_no_camera": {
+        "pl": {"one": " · {n} klatka bez kamery",
+               "few": " · {n} klatki bez kamery",
+               "many": " · {n} klatek bez kamery"},
+        "en": {"one": " · {n} frame without a camera",
+               "other": " · {n} frames without a camera"}},
+    "grid.sel.config_skip_kind": {
+        "pl": {"one": " · {n} klatka kalibracyjna",
+               "few": " · {n} klatki kalibracyjne",
+               "many": " · {n} klatek kalibracyjnych"},
+        "en": {"one": " · {n} calibration frame",
+               "other": " · {n} calibration frames"}},
+    "grid.sel.config_skip_unchanged": {
+        "pl": {"one": " · {n} klatka bez zmiany",
+               "few": " · {n} klatki bez zmiany",
+               "many": " · {n} klatek bez zmiany"},
+        "en": {"one": " · {n} frame unchanged",
+               "other": " · {n} frames unchanged"}},
     # WYTŁUMACZENIA WIERSZY INFORMACYJNYCH (F-2) — tooltip + odpowiedź na klik. Każde mówi DWIE
     # rzeczy: czego wiersz jest opisem i dlaczego nie prowadzi dalej. Bez nich klik w wiersz nie
     # dawał żadnej reakcji, co dla użytkownika jest nieodróżnialne od zawieszenia aplikacji.
@@ -580,9 +746,11 @@ CATALOG = {
     # R-S2b-13: bez kropki i bez własnego ogona pominięć - człony rozbicia dokleja
     # `grid.zdanie_pominiec`, ten sam dom, co zdań Zbiorów (powód przy `path.done`).
     "object.assigned_report": {
-        "pl": "Przypisano {assigned} z {total} klatek → {canon}",
-        "en": "Assigned {assigned} of {total} frames → {canon}",
-    },
+        "pl": {"one": "Przypisano {assigned} z {n} klatki → {canon}",
+               "few": "Przypisano {assigned} z {n} klatek → {canon}",
+               "many": "Przypisano {assigned} z {n} klatek → {canon}"},
+        "en": {"one": "Assigned {assigned} of {n} frame → {canon}",
+               "other": "Assigned {assigned} of {n} frames → {canon}"}},
     "object.assign_nothing": {
         "pl": "Nic nie zaznaczono w panelu klatek — zero zapisu.",
         "en": "Nothing selected in the frames panel — nothing written.",
@@ -1532,6 +1700,13 @@ CATALOG = {
         "pl": "regex fragmentu starej nazwy", "en": "regex of old-name fragment",
     },
 
+    # --- TokenRow: grupa flatu, końcowy separator, wielkość liter rodzaju ---
+    "grid.token.flatgrp": {"pl": "grupa flatu (FLATGRP)", "en": "flat group (FLATGRP)"},
+    "grid.token.trail": {"pl": "końcowe _ (ostatni)", "en": "trailing _ (last)"},
+    "grid.token.case_keep": {"pl": "jak w bazie", "en": "as stored"},
+    "grid.token.case_upper": {"pl": "WIELKIE", "en": "UPPER"},
+    "grid.token.case_lower": {"pl": "małe", "en": "lower"},
+
     # --- TemplateEditor ---
     "grid.tmpl.title": {"pl": "Wzór nazwy:", "en": "Name pattern:"},
     "grid.tmpl.add_token": {"pl": "+ Token", "en": "+ Token"},
@@ -1571,6 +1746,10 @@ CATALOG = {
     },
     "grid.echo.no_time_batch": {
         "pl": "brak źródła czasu w wsadzie", "en": "no time source in batch",
+    },
+    "grid.echo.no_delta_batch": {
+        "pl": "jedno źródło czasu - Δ niepoliczalna (brak drugiego do porównania)",
+        "en": "one time source - Δ not computable (nothing to compare with)",
     },
 
     # --- SelectionBar (pasek zbioru) ---
@@ -3426,4 +3605,7 @@ CATALOG = {
     "portfolio.frames_no_exptime": {
         "pl": "+{n} klatek bez exptime", "en": "+{n} frames without exptime",
     },
+
+    # --- KANAŁ gotowego obrazu (0028, P4-3): grupa listwy facetów ---
+    "facets.group.channel": {"pl": "Kanał", "en": "Channel"},
 }

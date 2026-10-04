@@ -95,16 +95,43 @@ def test_szkielet_przyszly_pusty(tmp_path):
     con.close()
 
 
-def test_user_version_v26_po_migracji(tmp_path):
-    """0026 podnosi user_version do 26 (świeża baza leci 0002→…→0026 sekwencyjnie; 0025 = wersja
+def test_user_version_v29_po_migracji(tmp_path):
+    """0029 podnosi user_version do 29 (świeża baza leci 0002→…→0029 sekwencyjnie; 0025 = wersja
     reguły koercji faktów kopii `location.hdr_rule`, AR-33; 0026 = werdykt „zostaw wszystkie
-    wersje” `stack_version_kept` + `integration.creation_time`, AR-10).
+    wersje” `stack_version_kept` + `integration.creation_time`, AR-10; 0027 = stanowisko wskazane
+    ręką `frame.observatory_source`; 0028 = kanał `frame.channel`, P4-3; 0029 = zamiar renamu
+    `pending_renames.in_flight`, AR-29).
 
     Pin JEST intencją: każda nowa migracja ma ten test PRZEWRÓCIĆ imiennie, żeby podniesienie
     wersji było gestem, a nie skutkiem ubocznym."""
     con = db.open_db(str(tmp_path / "h.db"))
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 26
-    assert db.SCHEMA_VERSION == 26
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 29
+    assert db.SCHEMA_VERSION == 29
+    con.close()
+
+
+def test_0027_observatory_source_przyrost_na_bazie_v26(tmp_path):
+    """0027 na bazie v26 z danymi: kolumna wchodzi PUSTA (zero ruszonych wierszy), a CHECK odbija
+    literówkę słownika i „rękę bez osi" wstrzyknięte gołym SQL-em (baza = ostatnia bramka)."""
+    path = str(tmp_path / "h.db")
+    con = db.connect(path)
+    for version, filename in db.MIGRATIONS:
+        if version <= 26:
+            db._apply_migration(con, version, db._migration_sql(filename))
+    con.execute("INSERT INTO observatory(name, lat, lon, status, created_at) "
+                "VALUES (NULL, 1.0, 2.0, 'proposed', 't')")
+    con.execute("INSERT INTO frame(sha1_data, kind, filetype, observatory_id, first_seen_at) "
+                "VALUES ('a', 'light', 'raw', 1, 't')")
+    con.commit()
+    assert db.migrate(con) == db.SCHEMA_VERSION
+    assert tuple(con.execute(
+        "SELECT observatory_id, observatory_source FROM frame").fetchone()) == (1, None)
+    with pytest.raises(sqlite3.IntegrityError):
+        con.execute("UPDATE frame SET observatory_source = 'gps'")
+    with pytest.raises(sqlite3.IntegrityError):
+        con.execute("UPDATE frame SET observatory_id = NULL, observatory_source = 'user'")
+    con.execute("UPDATE frame SET observatory_source = 'user'")      # ręka przy osi - legalne
+    assert db.migrate(con) == db.SCHEMA_VERSION              # idempotencja
     con.close()
 
 

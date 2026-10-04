@@ -14,10 +14,10 @@ Drzewo (JSON-serializowalne):
   (F1 redesignu, PLAN_ux_redesign §2). NOT z ≠1 dzieckiem → ValueError (EXPECT). Zagnieżdżenia
   legalne (NOT nad grupą, NOT(NOT(x)) == x). NOT(pusta-grupa) = ∅ — pusta grupa to uniwersum,
   różnica daje zbiór pusty (konsekwencja algebry, nie przypadek do łatania). Zero nowego SQL.
-- facet:   {"facet": "object"|"filter"|"kind"|"telescope"|"night", "value": ..., "label": opc.} —
+- facet:   {"facet": "object"|"filter"|"channel"|"kind"|"telescope"|"night", "value": ..., "label": opc.} -
   liść RELACYJNY (F4, PLAN_ux_redesign §5): mapowany na `rel_*` w dispatchu `leaf_frame_ids`
-  (object→object_id, filter→filter_canon, kind→kind, telescope→canon_id kanonicznego teleskopu,
-  night→zakres na header.date_obs). `label` = CZYSTA prezentacja (describe); `_eval` ignoruje.
+  (object→object_id, filter→filter_canon, channel→channel (0028), kind→kind, telescope→canon_id
+  kanonicznego teleskopu, night→zakres na header.date_obs). `label` = CZYSTA prezentacja (describe); `_eval` ignoruje.
   Rozpoznawany PRZED warunkiem (nie ma `operator`) WŁASNĄ gałęzią — nigdy nie spada do
   `_eval_condition` (`validate_keyword` nie widzi None). Nieznany facet → ValueError (EXPECT).
   Noc: `[<D>T12:00:00, <D+1>T12:00:00)` — górna granica ZAWSZE pełnym datetime, nigdy `<=` z gołą
@@ -54,8 +54,8 @@ _KW_RE = re.compile(r"^[A-Za-z0-9_\-]{1,68}$")
 _NUMERIC_KIND = {"gt": "num_gt", "lt": "num_lt", "ge": "num_ge", "le": "num_le"}
 
 # Facet-liść (F4): facet → kind dispatcha `leaf_frame_ids` (rel_night osobno — dwa parametry-granice).
-_FACET_KIND = {"object": "rel_object", "filter": "rel_filter", "kind": "rel_kind",
-               "telescope": "rel_telescope"}
+_FACET_KIND = {"object": "rel_object", "filter": "rel_filter", "channel": "rel_channel",
+               "kind": "rel_kind", "telescope": "rel_telescope"}
 _NIGHT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 LeafFn = Callable[[str, str, object, object], "set[int]"]
@@ -177,7 +177,7 @@ _OP_WORDS = {"eq": "=", "ne": "≠", "gt": ">", "lt": "<", "ge": "≥", "le": "�
              "contains": "zawiera", "startswith": "zaczyna się od"}
 
 # Mapa facet→nazwa PL dla `describe` (prezentacja facet-liścia: „Obiekt: NGC7000").
-_FACET_WORDS = {"object": "Obiekt", "filter": "Filtr", "kind": "Rodzaj",
+_FACET_WORDS = {"object": "Obiekt", "filter": "Filtr", "channel": "Kanał", "kind": "Rodzaj",
                 "telescope": "Teleskop", "night": "Noc"}
 
 

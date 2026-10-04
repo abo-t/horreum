@@ -27,6 +27,7 @@ czasu, NIGDY cicha północ — R3 #10).
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass, field
@@ -93,6 +94,11 @@ _DISC_LEN = 12                                         # hex prefiksu sha1_data 
 _UNSAFE = re.compile(r"[^0-9A-Za-z+._-]+")             # spacje/separatory/śmieć → '_'
 # Tokeny bez argumentu — WSTECZNIE zgodne z v1 (goły string w liście szablonu).
 BARE_TOKENS = frozenset({"datetime", "object", "kind", "filter", "exp", "disc"})
+# Grupa flatu w nazwie mastera (`MASTERFLAT_FLATGRP_202511010_FILTER_OIII_.xisf` → `202511010`) i znacznik
+# braku podpiętego flatu - ten sam, który archiwum już niesie w nazwach lightów (`FLATGRP_NOFLAT_`).
+_FLATGRP = re.compile(r"FLATGRP_([^_]+)")
+_NOFLAT = "NOFLAT"
+_KIND_CASES = ("upper", "lower")                       # parametr `case` tokenu kind (brak = jak w bazie)
 
 
 def _sanitize(text):
@@ -146,6 +152,30 @@ def _orig_segment(path, pattern):
     return _sanitize(m.group(1) if m.groups() else m.group(0))
 
 
+def _flatgrp_segment(facts):
+    """Segment `FLATGRP_<grupa>` z nazwy OBECNEJ kopii mastera flat podpiętego w `calibration`. Zwraca
+    `(segment, problem)`. Brak podpiętego flatu → `FLATGRP_NOFLAT` (znacznik konwencji archiwum, nie
+    dziura). Flat podpięty, ale grupy nie da się odczytać (brak obecnej kopii, nazwa bez `FLATGRP_`,
+    kopie o różnych grupach) → problem: klatka pominięta z powodem, nigdy nazwa z pustym segmentem."""
+    if facts.get("flat_master_id") is None:
+        return f"FLATGRP_{_NOFLAT}", None
+    paths = facts.get("flat_paths") or []
+    if not paths:
+        return None, "flat podpięty, ale master bez obecnej kopii"
+    groups = set()
+    for p in paths:
+        m = _FLATGRP.search(os.path.splitext(os.path.basename(p))[0])
+        if m is None:
+            return None, f"brak FLATGRP w nazwie mastera flat: {os.path.basename(p)}"
+        grupa = _sanitize(m.group(1))
+        if not grupa:
+            return None, f"pusta grupa FLATGRP w nazwie mastera flat: {os.path.basename(p)}"
+        groups.add(grupa)
+    if len(groups) > 1:
+        return None, f"kopie mastera flat o różnych grupach: {', '.join(sorted(groups))}"
+    return f"FLATGRP_{groups.pop()}", None
+
+
 def compose_name(facts, dt, *, template=DEFAULT_TEMPLATE):
     """Komponuj kanoniczną nazwę z faktów frame'a. Zwraca `(nazwa | None, problem | None)`.
 
@@ -155,15 +185,21 @@ def compose_name(facts, dt, *, template=DEFAULT_TEMPLATE):
     SPECYFIKACJI tokenów (DANE — §0 UNIWERSALNOŚĆ): goły string LUB dict `{"t":token, …args}`.
 
     Tokeny: datetime/object/kind/filter/exp/disc (bez argumentu, v1) + folder(`n`)/orig(`re`) (v2,
-    ze ścieżki). INFORMUJ (§0): brak daty (`dt is None`) → problem (NIGDY nazwa bez czasu). Token
-    obiektu KIND-AWARE: light/master_light nierozwiązany → `_UNSET`; kalibracja → token pominięty.
-    Filtr/exp/folder/orig bez wartości → token pominięty. `disc` (`sha1_data[:12]`) w domyśle gwarantuje
-    unikalność (D-I4 — user może zdjąć go w edytorze na własne ryzyko; kolizja łapana w `run_rename`)."""
+    ze ścieżki) + flatgrp/trail (bez argumentu) + `kind` z opcjonalnym `case` (upper/lower). INFORMUJ
+    (§0): brak daty (`dt is None`) → problem (NIGDY nazwa bez czasu). Token obiektu KIND-AWARE:
+    light/master_light nierozwiązany → `_UNSET`; kalibracja → token pominięty. `flatgrp` (`facts`
+    `flat_master_id` + `flat_paths`) tylko dla `light` (jedyny rodzaj z ogniwem w `calibration`): brak
+    flatu → `FLATGRP_NOFLAT`, grupa nieczytelna → problem; inne rodzaje → pominięty. `trail` = końcowy
+    separator `_` przed rozszerzeniem, wyłącznie OSTATNI w wzorze. Filtr/exp/folder/orig bez wartości →
+    token pominięty. `disc` (`sha1_data[:12]`) w domyśle gwarantuje unikalność (D-I4 - user może zdjąć
+    go w edytorze na własne ryzyko; kolizja łapana w `run_rename`)."""
     tokens: list[str] = []
     ext = facts.get("ext") or ""
     kind = facts.get("kind")
     path = facts.get("path")
-    for spec in template:
+    trail = False
+    specs = list(template)
+    for i, spec in enumerate(specs):
         tok, args = _spec_parts(spec)
         if tok == "datetime":
             if dt is None:
@@ -174,7 +210,21 @@ def compose_name(facts, dt, *, template=DEFAULT_TEMPLATE):
                 obj = _sanitize(facts.get("object_canon")) or _sanitize(facts.get("object_raw"))
                 tokens.append(obj or _UNSET)
         elif tok == "kind":
-            tokens.append(_sanitize(kind) or "unknown")
+            seg = _sanitize(kind) or "unknown"
+            case = args.get("case")
+            if case not in (None, *_KIND_CASES):
+                raise ValueError(f"nieznana wielkość liter tokenu 'kind': {case!r}")
+            tokens.append(seg.upper() if case == "upper" else seg.lower() if case == "lower" else seg)
+        elif tok == "flatgrp":
+            if kind == "light":                        # kalibracja/master_light: brak ogniwa z definicji
+                seg, prob = _flatgrp_segment(facts)
+                if seg is None:
+                    return None, prob
+                tokens.append(seg)
+        elif tok == "trail":
+            if i != len(specs) - 1:
+                raise ValueError("token 'trail' musi być ostatni we wzorze")
+            trail = True
         elif tok == "filter":
             fc = _sanitize(facts.get("filter_canon"))
             if fc:
@@ -197,7 +247,7 @@ def compose_name(facts, dt, *, template=DEFAULT_TEMPLATE):
                 tokens.append(seg)
         else:
             raise ValueError(f"nieznany token szablonu: {tok!r}")
-    return "_".join(t for t in tokens if t) + ext, None
+    return "_".join(t for t in tokens if t) + ("_" if trail else "") + ext, None
 
 
 # ============================================================ szablon per typ pliku (§3)
@@ -219,17 +269,22 @@ def _pick_template(template, kind, filetype):
 def validate_template(template):
     """Skompiluj regexy tokenów `orig` w CAŁYM szablonie (lista albo dict per typ) RAZ przed przebiegiem
     (INFORMUJ, R-v2 #5): zły regex → `ValueError` z czytelnym powodem do wołającego (CLI/GUI pokaże),
-    nie ciche pominięcie na każdej klatce. TANIA (O(tokenów)) — powierzchnia może ją wołać przed mintem
-    run_id, by nie przebiegać dwa razy."""
+    nie ciche pominięcie na każdej klatce. Tak samo `trail` nie na końcu wzoru i nieznany `case` tokenu
+    kind. TANIA (O(tokenów)) - powierzchnia może ją wołać przed mintem run_id, by nie przebiegać dwa razy."""
     lists = template.values() if isinstance(template, dict) else [template]
     for specs in lists:
-        for spec in specs:
+        specs = list(specs)
+        for i, spec in enumerate(specs):
             tok, args = _spec_parts(spec)
             if tok == "orig":
                 try:
                     re.compile(args.get("re", ""))
                 except re.error as e:
                     raise ValueError(f"zły regex w tokenie 'orig': {args.get('re')!r} ({e})")
+            elif tok == "trail" and i != len(specs) - 1:
+                raise ValueError("token 'trail' musi być ostatni we wzorze")
+            elif tok == "kind" and args.get("case") not in (None, *_KIND_CASES):
+                raise ValueError(f"nieznana wielkość liter tokenu 'kind': {args.get('case')!r}")
 
 
 # ============================================================ silnik run_rename (§3)
@@ -276,8 +331,14 @@ def _resolve_target(rows):
 
 def _facts_of(row):
     """Wiersz targetu → dict faktów dla `compose_name` (klucze jak w §1). `path` niesiony WPROST — tokeny
-    folder/orig (v2) go potrzebują; `ext` z niego wyłuskany dla wygody."""
+    folder/orig (v2) go potrzebują; `ext` z niego wyłuskany dla wygody. Ogniwo flatu (`flat_master_id`,
+    `flat_paths` jako tablica JSON ścieżek obecnych kopii mastera) - dla tokenu flatgrp; wiersz bez tych
+    kolumn (inne źródło targetów) = brak flatu."""
+    keys = row.keys()
+    flat_paths = row["flat_paths"] if "flat_paths" in keys else None
     return {
+        "flat_master_id": row["flat_master_id"] if "flat_master_id" in keys else None,
+        "flat_paths": json.loads(flat_paths) if flat_paths else [],
         "kind": row["kind"],
         "object_canon": row["object_canon"],
         "object_raw": row["object_raw"],

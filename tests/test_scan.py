@@ -1798,18 +1798,20 @@ def test_iter_stacks_dwa_sita_nazwa_i_pochodne(tmp_path):
     t = tmp_path / "obrobka"
     t.mkdir()
     for name in ("masterLight_FILTER-H_mono.xisf",              # kandydat
-                 "masterLight_FILTER-H_mono_autocrop.xisf",     # pochodna
+                 "masterLight_FILTER-H_mono_autocrop.xisf",     # wariant obrazu (E3-3 b) - kandydat
+                 "masterLight_FILTER-H_mono_autocrop_ABE.xisf", # autocrop + krok obróbki - pochodna
                  "masterLight_FILTER-O_mono_starless.xisf",     # pochodna
                  "integration_wynik.xisf",                      # inna konwencja — poza prefiksem
                  "MASTERLIGHT_wielkie.xisf"):                   # prefiks NIEWRAŻLIWY na wielkość
         (t / name).write_bytes(b"x")
     derived = []
-    got = [p.name for p in iter_stacks(t, derived_out=derived)]
+    got = sorted(p.name for p in iter_stacks(t, derived_out=derived))
     # Kolejność dziedziczy po `_iter_suffixes` (sort po `Path`, na Windowsie NIEWRAŻLIWY na wielkość
-    # liter) — kontraktem jest DETERMINIZM, nie konkretny porządek bajtowy.
-    assert got == ["masterLight_FILTER-H_mono.xisf", "MASTERLIGHT_wielkie.xisf"]
+    # liter) - kontraktem jest DETERMINIZM, nie konkretny porządek bajtowy, więc porównujemy zbiór.
+    assert got == sorted(["masterLight_FILTER-H_mono.xisf", "masterLight_FILTER-H_mono_autocrop.xisf",
+                          "MASTERLIGHT_wielkie.xisf"])
     assert sorted(Path(p).name for p in derived) == [
-        "masterLight_FILTER-H_mono_autocrop.xisf", "masterLight_FILTER-O_mono_starless.xisf"]
+        "masterLight_FILTER-H_mono_autocrop_ABE.xisf", "masterLight_FILTER-O_mono_starless.xisf"]
 
 
 def test_sito_pochodnych_tnie_po_TOKENIE_nie_po_substringu():
@@ -1822,18 +1824,27 @@ def test_sito_pochodnych_tnie_po_TOKENIE_nie_po_substringu():
     Druga połowa asercji pilnuje ceny tej naprawy: PixInsight skleja kroki bez separatora
     (`SPCCBXTc`, `StarsBack`), więc sama równość tokenu przepuszczałaby realne pochodne. Obie
     listy zmierzone na 11 346 plikach XISF obu drzew (0810), nie wymyślone."""
-    for name in ("masterLight_x_ABE.xisf", "masterLight_x_autocrop.xisf",
+    for name in ("masterLight_x_ABE.xisf", "masterLight_x_autocrop_ABE.xisf",
                  "masterLight_x_SPCC_starless.xisf", "masterLight_x_stars.xisf",
                  "NGC5907_LPRO_OSC_crop_SPCCBXTc.xisf", "Sh2-188_RGB_starsSTR.xisf",
                  "HOO1_MAS_StarsBack.xisf", "starless_HOO_BN_NBN.xisf",
                  # SUFIKS CYFROWY krótkiego znacznika (bramka pakietu 3a, zarzut 7): druga
                  # iteracja tego samego kroku obróbki. `SPCC2` odsiewał próg prefiksu, `ABE2`
                  # nie — sito było niespójne między własnymi znacznikami.
-                 "masterLight_x_ABE2.xisf", "masterLight_x_DBE3.xisf"):
+                 "masterLight_x_ABE2.xisf", "masterLight_x_DBE3.xisf",
+                 # Krok obróbki doklejony do WARIANTU bez separatora - `autocrop` wpuszcza
+                 # wariant, nie to, co PixInsight do niego przykleił.
+                 "masterLight_x_autocropSPCC.xisf", "masterLight_x_autocropStarless.xisf",
+                 "masterLight_x_autocropStars.xisf", "masterLight_x_autocropABE.xisf"):
         assert is_derived_name(name) is True, name
     for name in ("masterLight_Abell 2151_600s.xisf", "masterLight_ABELL1656.xisf",
                  "CTB1_2025-08-30_A140R_2600MM_Ha_600s_mono_ast.xisf",
-                 "masterLight_BIN-1_EXPOSURE-600.00s_FILTER-H_mono.xisf"):
+                 "masterLight_BIN-1_EXPOSURE-600.00s_FILTER-H_mono.xisf",
+                 # WARIANT OBRAZU, nie krok obróbki (E3-3 b) - realne nazwy ze starego drzewa
+                 # obróbki, w tym przycięty drizzle i przycięty kanał kamery kolorowej.
+                 "masterLight_BIN-1_4256x2848_EXPOSURE-90.00s_FILTER-NoFilter_RGB_autocrop.xisf",
+                 "masterLight_BIN-1_8000x5320_EXPOSURE-121.00s_FILTER-NoFilter_RGB_drizzle_1x_autocrop.xisf",
+                 "masterLight_BIN-1_6248x4176_EXPOSURE-120.00s_FILTER-LPRO__B_autocrop.xisf"):
         assert is_derived_name(name) is False, name
 
 
@@ -1908,12 +1919,46 @@ def test_scan_stacks_wciaga_tylko_zeznane_stacki(tmp_path):
     _stack(t / "masterLight_A.xisf", n=1)
     _stack(t / "masterLight_B.xisf", n=2)
     _stack(t / "masterLight_udaje.xisf", imagetyp="Master Flat", n=3)
-    _stack(t / "masterLight_C_autocrop.xisf", n=4)              # pochodna — poza zakresem
+    _stack(t / "masterLight_C_starless.xisf", n=4)              # pochodna - poza zakresem
     s = scan_stacks(con, t, now=NOW)
     assert (s.candidates, s.ingested, s.derived_skipped) == (3, 2, 1)
     assert s.rejected_kind == 1 and s.kinds_rejected == {"master_flat": 1}
     assert con.execute("SELECT count(*) FROM frame").fetchone()[0] == 2
     assert {r[0] for r in con.execute("SELECT kind FROM frame")} == {"master_light"}
+    con.close()
+
+
+def test_autocrop_wjezdza_jako_wariant_obrazu_mimo_bramy_przyrostowej(tmp_path):
+    """E3-3 (b), decyzja Zdzinia: `_autocrop` to WARIANT OBRAZU (jak `_drizzle_1x`), nie krok obróbki.
+
+    Pułapka, której pilnuje drugi przebieg: drzewo przeskanowane PRZED decyzją ma stos główny
+    w bazie, a jego autocrop był odsiany po nazwie - lokacji nie dostał nigdy. Brama przyrostowa
+    (`volume, path, mtime`) pomija wyłącznie ZNANE ścieżki, więc po zmianie sita autocrop ma wjechać
+    zwykłym przebiegiem jako nowa klatka, a stos główny ma zostać pominięty bez odczytu. Ta sama
+    reguła obowiązuje w zwykłym skanie pod `STACKS` (jeden właściciel sita), a pochodna z drugim
+    znacznikiem (`_autocrop_ABE`) dalej odpada."""
+    con = _db(tmp_path)
+    t = tmp_path / "obrobka"
+    t.mkdir()
+    _stack(t / "masterLight_RGB.xisf", n=1)
+    s1 = scan_stacks(con, t, volume="VOL1", now=NOW)
+    assert (s1.ingested, s1.derived_skipped) == (1, 0)
+    _stack(t / "masterLight_RGB_autocrop.xisf", n=2)
+    _stack(t / "masterLight_RGB_autocrop_ABE.xisf", n=3)
+    s2 = scan_stacks(con, t, volume="VOL1", now=NOW)
+    assert (s2.candidates, s2.ingested, s2.skipped, s2.derived_skipped) == (2, 1, 1, 1)
+    nazwy = {Path(r[0]).name for r in con.execute("SELECT path FROM location")}
+    assert nazwy == {"masterLight_RGB.xisf", "masterLight_RGB_autocrop.xisf"}
+
+    root = tmp_path / "ASTRO_"
+    (root / "STACKS" / "IC443").mkdir(parents=True)
+    _stack(root / "STACKS" / "IC443" / "IC443_90s_RGB_autocrop.xisf", n=4)
+    _stack(root / "STACKS" / "IC443" / "IC443_90s_RGB_autocrop_ABE.xisf", n=5)
+    s3 = scan_tree(con, root, now=NOW)
+    assert s3.derived_skipped == 1
+    assert [Path(p).name for p in s3.derived_paths] == ["IC443_90s_RGB_autocrop_ABE.xisf"]
+    assert con.execute("SELECT count(*) FROM location WHERE path LIKE '%IC443_90s_RGB_autocrop.xisf'"
+                       ).fetchone()[0] == 1
     con.close()
 
 
@@ -2014,7 +2059,8 @@ def test_scan_stacks_nie_rusza_bajtow(tmp_path):
     t.mkdir()
     _stack(t / "masterLight_A.xisf", n=1)
     _stack(t / "masterLight_udaje.xisf", imagetyp="Master Flat", n=2)
-    _stack(t / "masterLight_A_autocrop.xisf", n=3)
+    _stack(t / "masterLight_A_starless.xisf", n=3)
+    _stack(t / "masterLight_A_autocrop.xisf", n=4)              # wariant obrazu - wciągany, czytany
     przed = {p.name: (p.read_bytes(), p.stat().st_mtime) for p in t.iterdir()}
     scan_stacks(con, t, now=NOW)
     assert {p.name: (p.read_bytes(), p.stat().st_mtime) for p in t.iterdir()} == przed

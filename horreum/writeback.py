@@ -70,7 +70,7 @@ from collections.abc import Callable
 
 from astropy.io import fits
 
-from . import exif, repo, scan
+from . import exif, hashing, repo, scan
 from .card_rules import FITS_RECORD as _FITS_RECORD
 from .card_rules import FITS_STRING_MAX, card_violation  # noqa: F401 - re-eksport („REGUŁY KARTY")
 
@@ -1683,7 +1683,7 @@ def _location(con, location_id):
 class FileResult:
     location_id: int
     path: str
-    status: str  # 'applied' | 'blocked' | 'failed' | 'skipped' | 'restored' | 'released'
+    status: str  # 'applied' | 'blocked' | 'failed' | 'skipped' | 'restored' | 'released' | 'reconciled'
     reason: str | None = None
 
 
@@ -1701,6 +1701,8 @@ class CommitResult:
     # Podzbiór `applied` zapisany W MIEJSCU (`commit(inplace=True)`); reszta `applied` poszła drogą
     # dotychczasową, a jej `FileResult.reason` mówi, czemu (`Fallback.reason`).
     in_place: list[FileResult] = dataclasses.field(default_factory=list)
+    # Rename: wynik `reconcile_renames` na wejściu (przerwane próby wszystkich przebiegów, AR-29).
+    reconciled: list[FileResult] = dataclasses.field(default_factory=list)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1710,6 +1712,7 @@ class UndoResult:
     blocked: list[FileResult]
     failed: list[FileResult]
     cancelled: bool = False
+    reconciled: list[FileResult] = dataclasses.field(default_factory=list)   # jak w `CommitResult`
 
 
 def _group_by_location(rows) -> list[tuple[int, list]]:
@@ -2219,8 +2222,11 @@ def commit(con, run_id, *, now, clock=None,
 # Anty-clobber DWUWARSTWOWY (R3 #1/#3): (1) `os.path.exists(new)` — brama PRZENOŚNA (na POSIX `os.rename`
 # CICHO nadpisuje, więc rename-fail sam nie wystarcza - R3-P2 #3); (2) straż `repo.guard_file_rename`
 # re-sprawdza `UNIQUE(volume,new_path)` pod blokadą zapisu bazy. Commit i undo idą przez `_rename_pod_straza`:
-# DB/dysk-check → w jednej transakcji straż izolacji i generacji → `os.rename` → UPDATE path + event
-# (T8: plik-first; crash pomiędzy → re-skan naprawia). Wiersz 'applied' sam jest rekordem undo.
+# DB/dysk-check → trwały zamiar (`pending_renames.in_flight`, zatwierdzony PRZED mutacją) → w jednej
+# transakcji straż izolacji i generacji → `os.rename` → UPDATE path + event + status wiersza. Awaria
+# między `os.rename` a COMMIT: kompensacja `new→old`, a gdy ona też nie wyjdzie - zamiar zostaje
+# i `reconcile_renames` przepina TĘ SAMĄ lokację tam, gdzie plik stoi (AR-29). Wiersz 'applied' sam
+# jest rekordem undo.
 # `os.rename` żyje TU (meta-test: `rename` ∈ OS_MUTATORS, DOOR=writeback.py).
 
 
@@ -2228,6 +2234,9 @@ def commit(con, run_id, *, now, clock=None,
 class RenameFileResult:
     status: str            # 'applied' | 'blocked' | 'failed'
     reason: str | None
+    # Rozdarcie plik↔baza bez kompensacji: plik pod nową nazwą, baza pod starą, zamiar renamu otwarty
+    # dla rekoncyliacji (AR-29). Fałsz = plik stoi tam, gdzie baza.
+    torn: bool = False
 
 
 def rename_file(old_path, new_path) -> RenameFileResult:
@@ -2250,16 +2259,24 @@ def rename_file(old_path, new_path) -> RenameFileResult:
 def renames_for_run(con, run_id):
     """Wpisy stagingu renamu przebiegu (commit + szuflada GUI). Kolejność `id` = kolejność stagingu."""
     return con.execute(
-        "SELECT id, location_id, old_path, new_path, expected_mtime, status, reason "
+        "SELECT id, location_id, old_path, new_path, expected_mtime, status, reason, in_flight "
         "FROM pending_renames WHERE run_id = ? ORDER BY id",
         (run_id,),
     ).fetchall()
 
 
+def open_rename_intents(con):
+    """Wiersze stagingu z otwartym zamiarem renamu (AR-29), wszystkich przebiegów. Zbiór mały
+    z definicji (tylko próby przerwane awarią), więc rekoncyliacja nie stat-uje całego archiwum."""
+    return con.execute(
+        "SELECT id, run_id, location_id, old_path, new_path, status, in_flight "
+        "FROM pending_renames WHERE in_flight IS NOT NULL ORDER BY id").fetchall()
+
+
 def _location_rename(con, location_id):
     """Wiersz location do renamu: id, volume, path, mtime, present (kotwica anty-stale)."""
     return con.execute(
-        "SELECT id, volume, path, mtime, present FROM location WHERE id = ?",
+        "SELECT id, volume, path, mtime, present, file_sha1 FROM location WHERE id = ?",
         (location_id,),
     ).fetchone()
 
@@ -2282,38 +2299,208 @@ def _powod_konfliktu_renamu(op) -> str:
             f"zmienić; renamu nie było, plik nietknięty - odśwież podgląd nazw")
 
 
-def _rename_pod_straza(con, *, location_id, old_path, new_path, generation,
-                       now) -> RenameFileResult:
+def _przeszedl(src, dst) -> bool:
+    """Plik stoi pod `dst`, a `src` go nie ma - rename zaszedł. Na udziale SMB `os.rename` potrafi
+    rzucić po stronie klienta, choć serwer przeniósł plik; o tym, gdzie plik jest, mówi dysk."""
+    try:
+        return os.path.exists(dst) and not os.path.exists(src)
+    except OSError:
+        return False
+
+
+def _na_miejscu(src, dst) -> bool:
+    """POZYTYWNY dowód, że rename NIE zaszedł: plik pod `src`, `dst` wolne. Udział, który nie
+    odpowiada, daje `exists() == False` dla obu nazw - to nie jest dowód, tylko brak wiedzy."""
+    try:
+        return os.path.exists(src) and not os.path.exists(dst)
+    except OSError:
+        return False
+
+
+def _sciezka_w_bazie(con, location_id):
+    """`location.path` po awarii transakcji straży (None, gdy baza nie odpowiada)."""
+    try:
+        if con.in_transaction:                    # COMMIT, który rzucił, mógł zostawić transakcję
+            con.rollback()
+        row = con.execute("SELECT path FROM location WHERE id = ?", (location_id,)).fetchone()
+    except Exception:  # noqa: BLE001 - baza nie odpowiada; o kompensacji rozstrzyga brak odpowiedzi
+        return None
+    return None if row is None else row["path"]
+
+
+def _po_awarii_przepiecia(con, *, rename_id, location_id, src, dst, exc) -> RenameFileResult:
+    """`os.rename(src, dst)` zaszedł, transakcja przepięcia bazy padła (UPDATE, status albo COMMIT).
+    KOMPENSACJA `dst→src` wyłącznie, gdy baza POTWIERDZA, że przepięcie nie weszło (`path == src`):
+    gdyby COMMIT zdążył się utrwalić, cofnięcie pliku rozdarłoby to, co jest spójne. Plik wrócił →
+    zamiar gaśnie, wiersz zostaje do ponowienia. Kompensacja niemożliwa albo baza milczy → zamiar
+    ZOSTAJE ('torn'), a `reconcile_renames` przy ponowieniu, cofnięciu albo wejściu do etapu przepina
+    tę samą lokację tam, gdzie plik stoi - skan nie dopisze drugiej lokacji, historia nie pęka."""
+    blad = f"{type(exc).__name__}: {exc}"
+    w_bazie = _sciezka_w_bazie(con, location_id)
+    if w_bazie == dst:                            # COMMIT jednak się utrwalił - stan spójny
+        return RenameFileResult("applied", None)
+    if w_bazie == src and rename_file(dst, src).status == "applied":
+        try:
+            repo.drop_rename_intent(con, rename_id=rename_id)
+        except Exception:  # noqa: BLE001 - zamiar zgasi rekoncyliacja (plik i baza zgodne)
+            pass
+        return RenameFileResult("failed", f"baza nie przyjęła przepięcia ({blad}) - plik wrócił "
+                                          f"pod nazwę {src}; renamu nie ma, można ponowić")
+    return RenameFileResult("failed", f"plik PRZENIESIONY na {dst}, ale baza NIE przepięta "
+                                      f"({blad}) - zamiar renamu zapisany: ponowienie albo "
+                                      f"cofnięcie przebiegu dokończy przepięcie", torn=True)
+
+
+def _rename_pod_straza(con, *, rename_id, kierunek, location_id, old_path, new_path, generation,
+                       now, status, reason=None) -> RenameFileResult:
     """RENAME I RELOKACJA W JEDNEJ TRANSAKCJI (`repo.guard_file_rename`, AR-17 (5)): pod blokadą
     zapisu bazy lokacja bez operacji izolującej i bez operacji nowszej niż `generation` (zapamiętanej
     PRZED bramką izolacji wołającego), cel wolny w bazie, potem `rename_file` (`os.rename`) i dopiero
-    po nim UPDATE `location.path` z eventem. Między bramką izolacji a `os.rename` zapis w miejscu mógł
-    otworzyć operację na tym pliku - wtedy 'blocked', renamu nie było.
+    po nim UPDATE `location.path` z eventem oraz `status`/`reason` wiersza stagingu `rename_id`
+    (AR-29 (2)). Między bramką izolacji a `os.rename` zapis w miejscu mógł otworzyć operację na tym
+    pliku - wtedy 'blocked', renamu nie było. `old_path`/`new_path` = kierunek TEJ próby (undo podaje
+    je odwrotnie), `kierunek` ('commit'|'undo') trafia do zamiaru.
 
-    Wynik prymitywu inny niż 'applied' przerywa transakcję (zero UPDATE) i wraca bez zmian. Wyjątek
-    po udanym renamie (COMMIT bazy padł) → 'failed' z prawdą o rozjeździe: plik stoi pod nową nazwą,
-    baza pod starą - naprawia to skan (stara ścieżka zniknie, nowa wjedzie jako kopia tej klatki)."""
+    TRWAŁY ZAMIAR (AR-29 (1)): `repo.open_rename_intent` zatwierdza próbę PRZED `os.rename`. Plik
+    nie ruszył się (odmowa prymitywu, straż, anty-clobber) → zamiar gaśnie. Sukces → gaśnie w tej
+    samej transakcji co relokacja. Wyjątek po udanym renamie → `_po_awarii_przepiecia` (kompensacja
+    albo zamiar zostaje dla `reconcile_renames`)."""
+    try:
+        repo.open_rename_intent(con, rename_id=rename_id, direction=kierunek)
+    except Exception as exc:  # noqa: BLE001 - bez zamiaru nie ruszamy pliku
+        return RenameFileResult("failed", f"zamiar renamu nie zapisany ({type(exc).__name__}: "
+                                          f"{exc}) - renamu nie było, plik nietknięty")
     przeniesiony = False
     try:
         with repo.guard_file_rename(con, location_id=location_id, new_path=new_path,
-                                    generation=generation, now=now):
+                                    generation=generation, now=now, rename_id=rename_id,
+                                    status=status, reason=reason, kierunek=kierunek):
             wynik = rename_file(old_path, new_path)            # tu następuje os.rename
+            if wynik.status == "failed" and _przeszedl(old_path, new_path):
+                wynik = RenameFileResult("applied", None)      # błąd klienta SMB, plik przeszedł
             if wynik.status != "applied":
                 raise _RenameNieZaszedl(wynik)
             przeniesiony = True
-    except _RenameNieZaszedl as exc:
-        return exc.wynik
-    except repo.InplaceConflict as exc:
-        return RenameFileResult("blocked", _powod_konfliktu_renamu(exc.op))
     except Exception as exc:  # noqa: BLE001 - raport zamiast wyjątku w warstwie zapisu
         if przeniesiony:
-            return RenameFileResult("failed", f"plik PRZENIESIONY na {new_path}, ale baza NIE "
-                                              f"przepięta ({type(exc).__name__}: {exc}) - "
-                                              f"przeskanuj katalog")
+            return _po_awarii_przepiecia(con, rename_id=rename_id, location_id=location_id,
+                                         src=old_path, dst=new_path, exc=exc)
+        # Odmowa straży i prymitywu ('blocked') zapada PRZED `os.rename`; porażka samego renamu albo
+        # wyjątek spoza straży mogły zajść PO nim (serwer SMB przeniósł plik, klient dostał błąd,
+        # udział zamilkł). Zamiar gaśnie wyłącznie przy dowodzie, że plik stoi pod starą nazwą.
+        przed_renamem = isinstance(exc, (repo.InplaceConflict, ValueError)) or (
+            isinstance(exc, _RenameNieZaszedl) and exc.wynik.status != "failed")
+        if not przed_renamem and not _na_miejscu(old_path, new_path):
+            powod = exc.wynik.reason if isinstance(exc, _RenameNieZaszedl) else \
+                f"{type(exc).__name__}: {exc}"
+            return RenameFileResult("failed", f"stan pliku nieznany po błędzie renamu ({powod}) - "
+                                              f"zamiar renamu zostaje: ponowienie albo cofnięcie "
+                                              f"przebiegu rozstrzygnie, gdzie plik stoi", torn=True)
+        try:
+            repo.drop_rename_intent(con, rename_id=rename_id)
+        except Exception:  # noqa: BLE001 - plik nietknięty; zamiar zgasi rekoncyliacja
+            pass
+        if isinstance(exc, _RenameNieZaszedl):
+            return exc.wynik
+        if isinstance(exc, repo.InplaceConflict):
+            return RenameFileResult("blocked", _powod_konfliktu_renamu(exc.op))
         if isinstance(exc, ValueError):                        # anty-clobber w bazie pod blokadą
             return RenameFileResult("blocked", str(exc))
         return RenameFileResult("failed", f"{type(exc).__name__}: {exc}")
     return RenameFileResult("applied", None)
+
+
+_COFNIETO = "cofnięto (undo)"
+_ZAMIAR_OTWARTY = ("przerwany rename tego pliku czeka na rozstrzygnięcie (zamiar otwarty) - "
+                   "powód w wyniku rekoncyliacji")
+
+
+def reconcile_renames(con, *, now, volume=None) -> list[FileResult]:
+    """REKONCYLIACJA ZAMIARÓW RENAMU (AR-29): każdy wiersz z otwartym `in_flight` (próba przerwana
+    awarią albo śmiercią procesu między `os.rename` a COMMIT) dostaje bazę tam, gdzie plik FAKTYCZNIE
+    stoi - przez przepięcie TEJ SAMEJ lokacji (`location.renamed` z powodem), nigdy przez nową
+    lokację. Ruchu pliku tu nie ma: plik jest prawdą, baza go dogania.
+
+    Rozstrzyga dysk: plik pod dokładnie jedną z nazw pary. Tożsamość pliku pod nową dla bazy nazwą
+    = `mtime` równy kopii (rename nie tyka treści ani `mtime`; rozmiar w astro nie rozróżnia klatek),
+    a sama nazwa pochodzi z zamiaru zapisanego przed próbą. Status wiersza wynika z miejsca pliku:
+    pod `new_path` → 'applied' (cofnięcie go obejmie); pod `old_path` → 'skipped' po cofnięciu albo
+    'pending' po commicie (ponowienie go obejmie).
+
+    Zostawia zamiar i melduje 'blocked', gdy: plik pod obiema nazwami albo pod żadną, `mtime` inny
+    niż kopii (to może nie być ten plik), cel zajęty w bazie przez INNĄ lokację (skan zdążył wciągnąć
+    plik jako nową kopię - recepta w powodzie). Zwraca `FileResult` per zamiar ('reconciled' z opisem
+    albo 'blocked' z powodem). Zbiór zamiarów jest mały z definicji, więc wołanie na wejściu etapu
+    kosztuje jedno zapytanie, gdy nic nie przerwano. `volume` zawęża do zamiarów lokacji tego
+    woluminu (skan rozstrzyga tylko to, co sam mógłby wciągnąć); wyjątek jednego zamiaru → 'blocked'."""
+    wyniki = []
+    for r in open_rename_intents(con):
+        if volume is not None:
+            loc = _location_rename(con, r["location_id"])
+            if loc is not None and loc["volume"] != volume:
+                continue                          # cudzy wolumin - litera ścieżki nie dowodzi tożsamości
+        try:
+            wyniki.append(_rozstrzygnij_zamiar(con, r, now=now))
+        except Exception as exc:  # noqa: BLE001 - jeden zamiar nie przerywa etapu, w którym go liczymy
+            wyniki.append(FileResult(r["location_id"], r["old_path"], "blocked",
+                                     f"rekoncyliacja padła ({type(exc).__name__}: {exc}) - "
+                                     f"zamiar zostaje"))
+    return wyniki
+
+
+def _rozstrzygnij_zamiar(con, r, *, now) -> FileResult:
+    rid, lid, stara, nowa = r["id"], r["location_id"], r["old_path"], r["new_path"]
+    loc = _location_rename(con, lid)
+    if loc is None:
+        repo.settle_rename_intent(con, rename_id=rid, location_id=lid, status="failed",
+                                  reason="brak location", now=now)
+        return FileResult(lid, stara, "reconciled", "brak location - zamiar zamknięty")
+    try:
+        pod_stara, pod_nowa = os.path.exists(stara), os.path.exists(nowa)
+    except OSError as exc:
+        return FileResult(lid, stara, "blocked", f"dysk nie odpowiada ({exc}) - zamiar zostaje")
+    if pod_stara == pod_nowa:
+        stan = "pod obiema nazwami" if pod_stara else "pod żadną z nazw"
+        return FileResult(lid, stara, "blocked",
+                          f"plik {stan} ({stara} / {nowa}) - zamiar zostaje, rozstrzyga człowiek")
+    tam = nowa if pod_nowa else stara
+    if tam == nowa:
+        status, powod = "applied", None
+    elif r["in_flight"] == "undo":
+        status, powod = "skipped", _COFNIETO
+    else:
+        status, powod = "pending", None
+    relocate_to = None
+    if loc["path"] != tam:
+        try:
+            mtime = scan._mtime_iso(os.stat(tam))
+        except OSError as exc:
+            return FileResult(lid, tam, "blocked", f"dysk nie odpowiada ({exc}) - zamiar zostaje")
+        if loc["mtime"] is None or mtime != loc["mtime"]:
+            return FileResult(lid, tam, "blocked",
+                              f"plik pod {tam} ma mtime {mtime}, kopia w bazie {loc['mtime']} - "
+                              f"to może nie być ten plik; zamiar zostaje, rozstrzyga człowiek")
+        # `mtime` da się przenieść kopiowaniem, treści nie: zamiarów jest garstka, więc pełny odczyt
+        # pliku jest tani wobec przepięcia lokacji na obcy plik.
+        if loc["file_sha1"] is not None:
+            try:
+                sha = hashing.sha1_of(tam)
+            except OSError as exc:
+                return FileResult(lid, tam, "blocked", f"dysk nie odpowiada ({exc}) - zamiar zostaje")
+            if sha != loc["file_sha1"]:
+                return FileResult(lid, tam, "blocked",
+                                  f"plik pod {tam} ma inną treść niż kopia w bazie (sha1) - to nie "
+                                  f"jest ten plik; zamiar zostaje, rozstrzyga człowiek")
+        relocate_to = tam
+    try:
+        repo.settle_rename_intent(con, rename_id=rid, location_id=lid, status=status, reason=powod,
+                                  now=now, relocate_to=relocate_to)
+    except ValueError as exc:                     # cel zajęty w bazie przez inną lokację
+        return FileResult(lid, tam, "blocked",
+                          f"{exc} - skan wciągnął plik jako nową kopię; zamiar zostaje (lokacja "
+                          f"{lid} pod {loc['path']} niesie historię renamu)")
+    opis = f"baza przepięta na {tam}" if relocate_to else f"baza zgodna z plikiem ({tam})"
+    return FileResult(lid, tam, "reconciled", opis)
 
 
 def commit_renames(con, run_id, *, now,
@@ -2327,7 +2514,12 @@ def commit_renames(con, run_id, *, now,
     renamie (rename nie tyka treści), więc re-commit po udanym renamie widzi już `path==new_path`.
     Utrwalanie per plik (funkcje `repo` commitują), więc anulowanie zostawia zrobione 'applied', resztę
     'pending'. `progress(done, total, path, status)` po KAŻDYM pliku (Qt-wolne). Zwraca `CommitResult`
-    (`commit_id` zawsze None - rename bez tabeli commitów; wiersz 'applied' sam jest undo-rekordem)."""
+    (`commit_id` zawsze None - rename bez tabeli commitów; wiersz 'applied' sam jest undo-rekordem).
+
+    Na wejściu `reconcile_renames` (AR-29): przerwane próby WSZYSTKICH przebiegów dostają bazę tam,
+    gdzie stoi plik, zanim ten przebieg zacznie liczyć kotwice; wynik w `CommitResult.reconciled`.
+    Wiersz, którego zamiaru rekoncyliacja nie rozstrzygnęła, jest 'blocked' bez zmiany statusu."""
+    reconciled = reconcile_renames(con, now=now)
     pending = [r for r in renames_for_run(con, run_id) if r["status"] == "pending"]
     total = len(pending)
     applied: list[FileResult] = []
@@ -2348,6 +2540,10 @@ def commit_renames(con, run_id, *, now,
             cancelled = True
             break
         rid, location_id, old_path, new_path = r["id"], r["location_id"], r["old_path"], r["new_path"]
+        if r["in_flight"] is not None:     # zamiar przerwanej próby nierozstrzygnięty - nie ruszamy
+            blocked.append(FileResult(location_id, old_path, "blocked", _ZAMIAR_OTWARTY))
+            _report(old_path, "blocked")
+            continue
         loc = _location_rename(con, location_id)
         if loc is None:
             repo.set_rename_status(con, rename_id=rid, status="failed", reason="brak location")
@@ -2388,10 +2584,11 @@ def commit_renames(con, run_id, *, now,
             _report(old_path, "blocked")
             continue
 
-        res = _rename_pod_straza(con, location_id=location_id, old_path=old_path,
-                                 new_path=new_path, generation=gen, now=now)
+        # Status 'applied' wchodzi w transakcji relokacji (AR-29 (2)) - osobny zapis nie istnieje.
+        res = _rename_pod_straza(con, rename_id=rid, kierunek="commit", location_id=location_id,
+                                 old_path=old_path, new_path=new_path, generation=gen, now=now,
+                                 status="applied")
         if res.status == "applied":
-            repo.set_rename_status(con, rename_id=rid, status="applied", reason=None)
             applied.append(FileResult(location_id, new_path, "applied"))
             _report(new_path, "applied")
         elif res.status == "blocked":
@@ -2400,10 +2597,12 @@ def commit_renames(con, run_id, *, now,
             _report(old_path, "blocked")
         else:
             repo.set_rename_status(con, rename_id=rid, status="failed", reason=res.reason)
-            failed.append(FileResult(location_id, old_path, "failed", res.reason))
+            failed.append(FileResult(location_id, new_path if res.torn else old_path, "failed",
+                                     res.reason))
             _report(old_path, "failed")
 
-    return CommitResult(run_id, None, applied, blocked, failed, skipped, cancelled)
+    return CommitResult(run_id, None, applied, blocked, failed, skipped, cancelled,
+                        reconciled=reconciled)
 
 
 def undo_renames(con, run_id, *, now,
@@ -2414,7 +2613,12 @@ def undo_renames(con, run_id, *, now,
     relokacja w tej samej transakcji) z powrotem na `old_path`. Kolejność odwrotna (jak stos). Gdy plik
     nie stoi na `new_path` (zmieniony od commitu) → 'blocked'. Udany rewert → status 'skipped' (powód
     „cofnięto") — dwukrotne undo pomija (tylko 'applied' cofane). `commit_id` w wyniku = run przebiegu
-    (rename bez tabeli commitów). Bramka bezpieczna per plik."""
+    (rename bez tabeli commitów). Bramka bezpieczna per plik.
+
+    Na wejściu `reconcile_renames` (AR-29), jak w `commit_renames`: commit przerwany po `os.rename`
+    staje się tu 'applied' (plik pod nową nazwą), więc cofnięcie go obejmuje; wynik w
+    `UndoResult.reconciled`. Status 'skipped' wchodzi w transakcji relokacji."""
+    reconciled = reconcile_renames(con, now=now)
     applied_rows = [r for r in renames_for_run(con, run_id) if r["status"] == "applied"]
     total = len(applied_rows)
     restored: list[FileResult] = []
@@ -2434,6 +2638,10 @@ def undo_renames(con, run_id, *, now,
             cancelled = True
             break
         rid, location_id, old_path, new_path = r["id"], r["location_id"], r["old_path"], r["new_path"]
+        if r["in_flight"] is not None:     # zamiar przerwanej próby nierozstrzygnięty - nie ruszamy
+            blocked.append(FileResult(location_id, new_path, "blocked", _ZAMIAR_OTWARTY))
+            _report(new_path, "blocked")
+            continue
         loc = _location_rename(con, location_id)
         if loc is None or loc["path"] != new_path:
             reason = "plik nie stoi na nazwie z commitu"
@@ -2448,20 +2656,21 @@ def undo_renames(con, run_id, *, now,
             _report(new_path, "blocked")
             continue
         # odwrotny os.rename i relokacja w jednej transakcji pod strażą - to samo okno co przy commicie
-        res = _rename_pod_straza(con, location_id=location_id, old_path=new_path,
-                                 new_path=old_path, generation=gen, now=now)
+        res = _rename_pod_straza(con, rename_id=rid, kierunek="undo", location_id=location_id,
+                                 old_path=new_path, new_path=old_path, generation=gen, now=now,
+                                 status="skipped", reason=_COFNIETO)
         if res.status == "applied":
-            repo.set_rename_status(con, rename_id=rid, status="skipped", reason="cofnięto (undo)")
             restored.append(FileResult(location_id, old_path, "restored"))
             _report(old_path, "restored")
         elif res.status == "blocked":
             blocked.append(FileResult(location_id, new_path, "blocked", res.reason))
             _report(new_path, "blocked")
         else:
-            failed.append(FileResult(location_id, new_path, "failed", res.reason))
+            failed.append(FileResult(location_id, old_path if res.torn else new_path, "failed",
+                                     res.reason))
             _report(new_path, "failed")
 
-    return UndoResult(run_id, restored, blocked, failed, cancelled)
+    return UndoResult(run_id, restored, blocked, failed, cancelled, reconciled=reconciled)
 
 
 def _ostatnia_operacja(con, commit_id, location_id, kind):

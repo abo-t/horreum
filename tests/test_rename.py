@@ -409,3 +409,418 @@ def test_meta_test_klingi_przepuszcza_naming_i_rename():
     meta-testu i uruchomienie — offenders puste."""
     import test_writeback_safety as wbs
     wbs.test_mutacja_plikow_tylko_w_writeback()          # rzuci, gdyby naming.py był offenderem
+
+
+# ============================================================ AR-29: trwały zamiar, kompensacja, rekoncyliacja
+# Awaria wstrzykiwana w każde okno między `os.rename` a utrwaleniem bazy. Niezmiennik po każdym
+# scenariuszu (i po ponowieniu/cofnięciu): plik istnieje dokładnie pod jedną nazwą pary, `location.path`
+# lokacji wskazuje tę nazwę, lokacja ta sama (zero nowych), `location.renamed` liczy realne ruchy.
+
+import os
+import sqlite3
+
+
+def _jeden_plik(tmp_path, nazwa="raw10.fits", obj="NGC7000"):
+    """Baza + jeden przeskanowany FITS + staging przebiegu 'R'. Zwraca (con, lid, stara, nowa)."""
+    con = db.open_db(str(tmp_path / "z.db"))
+    p = tmp_path / nazwa
+    _write_fits(p, IMAGETYP="Light", OBJECT=obj, FILTER="Ha",
+                **{"DATE-OBS": "2024-03-15T21:30:45", "EXPTIME": 300.0})
+    fr = _scan_in(con, p)
+    lid = con.execute("SELECT id FROM location WHERE path=?", (str(p),)).fetchone()["id"]
+    run = _preview_and_stage(con, "R", [fr["id"]])
+    return con, lid, str(p), run.touched[0].new_path
+
+
+def _stan(con, lid):
+    loc = con.execute("SELECT path FROM location WHERE id=?", (lid,)).fetchone()["path"]
+    n_loc = con.execute("SELECT count(*) FROM location").fetchone()[0]
+    n_ev = con.execute("SELECT count(*) FROM event WHERE verb='location.renamed'").fetchone()[0]
+    return loc, n_loc, n_ev
+
+
+def _wiersz(con, run_id="R"):
+    (r,) = writeback.renames_for_run(con, run_id)
+    return r
+
+
+def _pad_raz(monkeypatch, cel, nazwa, wyjatek):
+    """Podmień `cel.nazwa` tak, by PIERWSZE wywołanie rzuciło `wyjatek`, kolejne szły do oryginału."""
+    prawdziwa = getattr(cel, nazwa)
+    stan = {"raz": True}
+
+    def _f(*a, **kw):
+        if stan["raz"]:
+            stan["raz"] = False
+            raise wyjatek
+        return prawdziwa(*a, **kw)
+    monkeypatch.setattr(cel, nazwa, _f)
+
+
+def _bez_kompensacji(monkeypatch):
+    """Kompensacja `new→old` nie wychodzi (udział zajęty) - druga próba prymitywu w tym samym wierszu."""
+    prawdziwy = writeback.rename_file
+    licznik = {"n": 0}
+
+    def _f(src, dst):
+        licznik["n"] += 1
+        if licznik["n"] == 2:
+            return writeback.RenameFileResult("failed", "PermissionError: udział zajęty")
+        return prawdziwy(src, dst)
+    monkeypatch.setattr(writeback, "rename_file", _f)
+
+
+def test_migracja_0029_kolumna_zamiaru(tmp_path):
+    con, lid, stara, nowa = _jeden_plik(tmp_path)
+    assert _wiersz(con)["in_flight"] is None                       # staging nie otwiera zamiaru
+    with pytest.raises(sqlite3.IntegrityError):                    # CHECK słownika kierunków
+        con.execute("UPDATE pending_renames SET in_flight='w-bok'")
+    con.rollback()
+    con.close()
+
+
+def test_zamiar_zatwierdzony_przed_os_rename_i_gasniety_z_relokacja(tmp_path, monkeypatch):
+    """W chwili `os.rename` zamiar 'commit' jest już ZATWIERDZONY (widzi go drugie połączenie),
+    a po sukcesie gaśnie razem ze statusem 'applied' w transakcji relokacji."""
+    con, lid, stara, nowa = _jeden_plik(tmp_path)
+    obserwator = sqlite3.connect(str(tmp_path / "z.db"))
+    widziane = []
+    prawdziwy = writeback.rename_file
+
+    def _podglad(src, dst):
+        widziane.append(obserwator.execute("SELECT in_flight, status FROM pending_renames").fetchone())
+        return prawdziwy(src, dst)
+    monkeypatch.setattr(writeback, "rename_file", _podglad)
+    res = writeback.commit_renames(con, "R", now=NOW)
+    obserwator.close()
+    assert len(res.applied) == 1 and widziane == [("commit", "pending")]
+    r = _wiersz(con)
+    assert (r["status"], r["in_flight"]) == ("applied", None)
+    assert _stan(con, lid) == (nowa, 1, 1)
+    con.close()
+
+
+def test_awaria_miedzy_os_rename_a_update_kompensuje(tmp_path, monkeypatch):
+    """UPDATE `location.path` padł po udanym `os.rename`: kompensacja `new→old` - plik wraca, baza
+    stoi pod starą nazwą, zamiar zgaszony, zero `location.renamed`. Ponowienie (nowy staging) przechodzi."""
+    con, lid, stara, nowa = _jeden_plik(tmp_path)
+    _pad_raz(monkeypatch, repo, "_apply_relocation", sqlite3.OperationalError("disk I/O error"))
+    res = writeback.commit_renames(con, "R", now=NOW)
+    assert len(res.failed) == 1 and "wrócił" in res.failed[0].reason
+    assert os.path.exists(stara) and not os.path.exists(nowa)
+    r = _wiersz(con)
+    assert (r["status"], r["in_flight"]) == ("failed", None)
+    assert _stan(con, lid) == (stara, 1, 0)
+    _preview_and_stage(con, "R2", [con.execute("SELECT frame_id FROM location WHERE id=?",
+                                               (lid,)).fetchone()[0]])
+    assert len(writeback.commit_renames(con, "R2", now=NOW).applied) == 1
+    assert _stan(con, lid) == (nowa, 1, 1) and os.path.exists(nowa)
+    con.close()
+
+
+def test_rozdarcie_bez_kompensacji_ponowienie_przepina_te_sama_lokacje(tmp_path, monkeypatch):
+    """UPDATE padł, a kompensacja też nie wyszła: plik pod nową nazwą, baza pod starą, zamiar
+    'commit' OTWARTY ('torn'). Następne wejście do commitu rekoncyliuje: TA SAMA lokacja przepięta
+    na nową nazwę z `location.renamed` (ciągłość historii), status 'applied' - a cofnięcie obejmuje
+    ją jak każdy rename."""
+    con, lid, stara, nowa = _jeden_plik(tmp_path)
+    _pad_raz(monkeypatch, repo, "_apply_relocation", sqlite3.OperationalError("disk I/O error"))
+    _bez_kompensacji(monkeypatch)
+    res = writeback.commit_renames(con, "R", now=NOW)
+    assert len(res.failed) == 1 and "PRZENIESIONY" in res.failed[0].reason
+    assert res.failed[0].path == nowa                     # wynik wskazuje, gdzie plik STOI
+    assert os.path.exists(nowa) and not os.path.exists(stara)
+    r = _wiersz(con)
+    assert (r["status"], r["in_flight"]) == ("failed", "commit")
+    assert _stan(con, lid) == (stara, 1, 0)
+    monkeypatch.undo()
+
+    ponowienie = writeback.commit_renames(con, "INNY", now=NOW)   # wejście do etapu, inny przebieg
+    assert [f.status for f in ponowienie.reconciled] == ["reconciled"]
+    r = _wiersz(con)
+    assert (r["status"], r["in_flight"]) == ("applied", None)
+    assert _stan(con, lid) == (nowa, 1, 1)
+    ev = con.execute("SELECT payload, reason FROM event WHERE verb='location.renamed'").fetchone()
+    assert '"pending_rename"' in ev["payload"] and "rekoncyliacja" in ev["reason"]
+
+    ur = writeback.undo_renames(con, "R", now=NOW)
+    assert len(ur.restored) == 1 and os.path.exists(stara) and not os.path.exists(nowa)
+    assert _stan(con, lid) == (stara, 1, 2)
+    con.close()
+
+
+def test_rozdarcie_cofniecie_od_razu_obejmuje_przerwany_commit(tmp_path, monkeypatch):
+    """Po rozdarciu commitu człowiek woła od razu „Cofnij": rekoncyliacja na wejściu cofnięcia robi
+    z wiersza 'applied', więc cofnięcie wraca plik pod starą nazwę - zero ręcznego skanu."""
+    con, lid, stara, nowa = _jeden_plik(tmp_path)
+    _pad_raz(monkeypatch, repo, "_apply_relocation", sqlite3.OperationalError("disk I/O error"))
+    _bez_kompensacji(monkeypatch)
+    writeback.commit_renames(con, "R", now=NOW)
+    monkeypatch.undo()
+    ur = writeback.undo_renames(con, "R", now=NOW)
+    assert len(ur.reconciled) == 1 and len(ur.restored) == 1 and not ur.failed
+    assert os.path.exists(stara) and not os.path.exists(nowa)
+    r = _wiersz(con)
+    assert (r["status"], r["in_flight"]) == ("skipped", None)
+    assert _stan(con, lid) == (stara, 1, 2)                   # przepięcie rekoncyliacji + cofnięcie
+    con.close()
+
+
+def test_smierc_procesu_po_os_rename_zamiar_przezywa(tmp_path, monkeypatch):
+    """Proces ginie między `os.rename` a UPDATE (BaseException - kompensacji nie ma komu zrobić):
+    transakcja straży wycofana, zamiar zatwierdzony wcześniej ZOSTAJE. Nowe połączenie (restart)
+    rekoncyliuje: ta sama lokacja pod nową nazwą, status 'applied'."""
+    con, lid, stara, nowa = _jeden_plik(tmp_path)
+    _pad_raz(monkeypatch, repo, "_apply_relocation", KeyboardInterrupt())
+    with pytest.raises(KeyboardInterrupt):
+        writeback.commit_renames(con, "R", now=NOW)
+    con.close()
+    monkeypatch.undo()
+    con = db.open_db(str(tmp_path / "z.db"))
+    assert os.path.exists(nowa) and not os.path.exists(stara)
+    r = _wiersz(con)
+    assert (r["status"], r["in_flight"]) == ("pending", "commit")
+    assert _stan(con, lid) == (stara, 1, 0)
+    wynik = writeback.reconcile_renames(con, now=NOW)
+    assert [f.status for f in wynik] == ["reconciled"]
+    assert _stan(con, lid) == (nowa, 1, 1)
+    assert (_wiersz(con)["status"], _wiersz(con)["in_flight"]) == ("applied", None)
+    con.close()
+
+
+class _ConPadCommit(sqlite3.Connection):
+    """Połączenie, którego N-te `commit()` od uzbrojenia rzuca - przed utrwaleniem albo po nim."""
+    uzbrojony = 0
+    po_utrwaleniu = False
+
+    def commit(self):
+        if self.uzbrojony:
+            self.uzbrojony -= 1
+            if self.uzbrojony == 0:
+                if self.po_utrwaleniu:
+                    super().commit()
+                raise sqlite3.OperationalError("disk I/O error przy COMMIT")
+        super().commit()
+
+
+def _con_pad_commit(tmp_path):
+    con = sqlite3.connect(str(tmp_path / "z.db"), factory=_ConPadCommit)
+    con.row_factory = sqlite3.Row
+    con.execute("PRAGMA foreign_keys = ON")
+    con.execute("PRAGMA busy_timeout = 5000")
+    return con
+
+
+@pytest.mark.parametrize("po_utrwaleniu", [False, True])
+def test_awaria_w_trakcie_commit_bazy(tmp_path, po_utrwaleniu):
+    """COMMIT transakcji straży rzuca. Nieutrwalony → kompensacja (plik wraca, 'failed', zamiar
+    zgaszony). Utrwalony mimo wyjątku → baza ZGODNA z dyskiem, więc kompensacji NIE ma (cofnięcie
+    pliku rozdarłoby stan spójny) - wynik 'applied'."""
+    con0, lid, stara, nowa = _jeden_plik(tmp_path)
+    con0.close()
+    con = _con_pad_commit(tmp_path)
+    con.uzbrojony, con.po_utrwaleniu = 2, po_utrwaleniu   # 1. commit = zamiar, 2. = straż relokacji
+    res = writeback.commit_renames(con, "R", now=NOW)
+    r = _wiersz(con)
+    if po_utrwaleniu:
+        assert len(res.applied) == 1 and not res.failed
+        assert os.path.exists(nowa) and not os.path.exists(stara)
+        assert (r["status"], r["in_flight"]) == ("applied", None)
+        assert _stan(con, lid) == (nowa, 1, 1)
+    else:
+        assert len(res.failed) == 1 and "wrócił" in res.failed[0].reason
+        assert os.path.exists(stara) and not os.path.exists(nowa)
+        assert (r["status"], r["in_flight"]) == ("failed", None)
+        assert _stan(con, lid) == (stara, 1, 0)
+    con.close()
+
+
+def test_awaria_set_rename_status_nie_zostawia_pending(tmp_path, monkeypatch):
+    """AR-29 (2): status 'applied' idzie w transakcji relokacji, nie osobnym zapisem - padający
+    `set_rename_status` nie zostawia wiersza 'pending' przy przeniesionym pliku i bazie."""
+    con, lid, stara, nowa = _jeden_plik(tmp_path)
+
+    def _pad(*a, **kw):
+        raise sqlite3.OperationalError("disk I/O error")
+    monkeypatch.setattr(repo, "set_rename_status", _pad)
+    res = writeback.commit_renames(con, "R", now=NOW)
+    assert len(res.applied) == 1
+    assert _wiersz(con)["status"] == "applied"
+    assert _stan(con, lid) == (nowa, 1, 1)
+    con.close()
+
+
+def test_awaria_zapisu_statusu_w_transakcji_relokacji_kompensuje(tmp_path, monkeypatch):
+    """Zapis statusu wiersza (wewnątrz transakcji straży) padł: rollback obejmuje też przepięcie,
+    więc kompensacja wraca plik - nigdy 'pending' przy przeniesionym pliku. Ponowienie undo/commit
+    widzi stan spójny."""
+    con, lid, stara, nowa = _jeden_plik(tmp_path)
+    _pad_raz(monkeypatch, repo, "_zamknij_wiersz_renamu", sqlite3.OperationalError("disk I/O error"))
+    res = writeback.commit_renames(con, "R", now=NOW)
+    assert len(res.failed) == 1 and os.path.exists(stara) and not os.path.exists(nowa)
+    assert (_wiersz(con)["status"], _wiersz(con)["in_flight"]) == ("failed", None)
+    assert _stan(con, lid) == (stara, 1, 0)
+    con.close()
+
+
+def test_awaria_cofniecia_kompensuje_i_ponowienie_domyka(tmp_path, monkeypatch):
+    """Okno między `os.rename` a UPDATE w cofnięciu: plik wraca pod nazwę z commitu, wiersz zostaje
+    'applied' bez zamiaru; ponowione cofnięcie przywraca starą nazwę."""
+    con, lid, stara, nowa = _jeden_plik(tmp_path)
+    writeback.commit_renames(con, "R", now=NOW)
+    _pad_raz(monkeypatch, repo, "_apply_relocation", sqlite3.OperationalError("disk I/O error"))
+    ur = writeback.undo_renames(con, "R", now=NOW)
+    assert len(ur.failed) == 1 and os.path.exists(nowa) and not os.path.exists(stara)
+    assert (_wiersz(con)["status"], _wiersz(con)["in_flight"]) == ("applied", None)
+    ur2 = writeback.undo_renames(con, "R", now=NOW)
+    assert len(ur2.restored) == 1 and os.path.exists(stara)
+    assert _stan(con, lid) == (stara, 1, 2)
+    con.close()
+
+
+def test_rozdarcie_cofniecia_rekoncyliacja_konczy_jako_cofniete(tmp_path, monkeypatch):
+    """Cofnięcie przeniosło plik pod starą nazwę, UPDATE padł, kompensacja też: zamiar 'undo'.
+    Rekoncyliacja przepina lokację na starą nazwę i kończy wiersz jako 'skipped' (cofnięto)."""
+    con, lid, stara, nowa = _jeden_plik(tmp_path)
+    writeback.commit_renames(con, "R", now=NOW)
+    _pad_raz(monkeypatch, repo, "_apply_relocation", sqlite3.OperationalError("disk I/O error"))
+    _bez_kompensacji(monkeypatch)
+    ur = writeback.undo_renames(con, "R", now=NOW)
+    assert len(ur.failed) == 1 and ur.failed[0].path == stara and os.path.exists(stara)
+    assert _wiersz(con)["in_flight"] == "undo"
+    monkeypatch.undo()
+    wynik = writeback.reconcile_renames(con, now=NOW)
+    assert [f.status for f in wynik] == ["reconciled"]
+    r = _wiersz(con)
+    assert (r["status"], r["reason"], r["in_flight"]) == ("skipped", "cofnięto (undo)", None)
+    assert _stan(con, lid) == (stara, 1, 2)
+    con.close()
+
+
+def _rozdarty(tmp_path, monkeypatch):
+    con, lid, stara, nowa = _jeden_plik(tmp_path)
+    _pad_raz(monkeypatch, repo, "_apply_relocation", sqlite3.OperationalError("disk I/O error"))
+    _bez_kompensacji(monkeypatch)
+    writeback.commit_renames(con, "R", now=NOW)
+    monkeypatch.undo()
+    return con, lid, stara, nowa
+
+
+def test_rekoncyliacja_odmawia_przy_innym_mtime(tmp_path, monkeypatch):
+    """Plik pod nową nazwą ma `mtime` inny niż kopia w bazie - to może nie być ten plik. Zamiar
+    zostaje, baza nietknięta, plik nietknięty (rozmiar NIE jest dowodem tożsamości)."""
+    con, lid, stara, nowa = _rozdarty(tmp_path, monkeypatch)
+    st = os.stat(nowa)
+    os.utime(nowa, (st.st_atime, st.st_mtime + 3600))
+    (w,) = writeback.reconcile_renames(con, now=NOW)
+    assert w.status == "blocked" and "mtime" in w.reason
+    assert _wiersz(con)["in_flight"] == "commit"
+    assert _stan(con, lid) == (stara, 1, 0) and os.path.exists(nowa)
+    con.close()
+
+
+def test_rekoncyliacja_odmawia_gdy_skan_wciagnal_cel(tmp_path, monkeypatch):
+    """Skan zdążył wciągnąć plik spod nowej nazwy jako drugą kopię klatki: przepięcie złamałoby
+    `UNIQUE(volume, path)`. Zamiar zostaje z receptą, oba wiersze lokacji i plik nietknięte."""
+    con, lid, stara, nowa = _rozdarty(tmp_path, monkeypatch)
+    _scan_in(con, nowa)
+    (w,) = writeback.reconcile_renames(con, now=NOW)
+    assert w.status == "blocked" and "skan wciągnął" in w.reason
+    assert _wiersz(con)["in_flight"] == "commit"
+    assert con.execute("SELECT path FROM location WHERE id=?", (lid,)).fetchone()["path"] == stara
+    assert os.path.exists(nowa)
+    rn = writeback.commit_renames(con, "R", now=NOW)        # wiersz z otwartym zamiarem nie ruszany
+    assert not rn.applied and os.path.exists(nowa)
+    con.close()
+
+
+def test_blad_renamu_przy_milczacym_udziale_zostawia_zamiar(tmp_path, monkeypatch):
+    """Serwer przeniósł plik, klient dostał błąd, a udział zamilkł (`_przeszedl` nie widzi pliku
+    pod żadną nazwą). Brak dowodu, że plik stoi pod starą nazwą = zamiar ZOSTAJE ('torn'); gdy dysk
+    wraca, rekoncyliacja przepina tę samą lokację."""
+    con, lid, stara, nowa = _jeden_plik(tmp_path)
+    prawdziwy = writeback.rename_file
+
+    def _przeniosl_i_zglosil_blad(src, dst):
+        prawdziwy(src, dst)
+        return writeback.RenameFileResult("failed", "OSError: sieć zerwana")
+    monkeypatch.setattr(writeback, "rename_file", _przeniosl_i_zglosil_blad)
+    monkeypatch.setattr(writeback, "_przeszedl", lambda src, dst: False)
+    res = writeback.commit_renames(con, "R", now=NOW)
+    assert len(res.failed) == 1 and "zamiar renamu zostaje" in res.failed[0].reason
+    assert _wiersz(con)["in_flight"] == "commit"
+    monkeypatch.undo()
+    (w,) = writeback.reconcile_renames(con, now=NOW)
+    assert w.status == "reconciled" and _stan(con, lid) == (nowa, 1, 1)
+    con.close()
+
+
+def test_zamiar_zgaszony_przez_inny_proces_zatrzymuje_rename(tmp_path, monkeypatch):
+    """Między zatwierdzeniem zamiaru a strażą rekoncyliacja innego procesu gasi zamiar: straż pod
+    blokadą to widzi i rename się nie odbywa - plik nietknięty, baza nietknięta."""
+    con, lid, stara, nowa = _jeden_plik(tmp_path)
+    prawdziwy = repo.open_rename_intent
+
+    def _otworz_i_zgas(con_, *, rename_id, direction):
+        prawdziwy(con_, rename_id=rename_id, direction=direction)
+        repo.drop_rename_intent(con_, rename_id=rename_id)
+    monkeypatch.setattr(repo, "open_rename_intent", _otworz_i_zgas)
+    res = writeback.commit_renames(con, "R", now=NOW)
+    assert not res.applied and len(res.blocked) == 1 and "inny proces" in res.blocked[0].reason
+    assert os.path.exists(stara) and not os.path.exists(nowa)
+    assert _stan(con, lid) == (stara, 1, 0)
+    con.close()
+
+
+def test_rekoncyliacja_odmawia_przy_obcej_tresci_o_tym_samym_mtime(tmp_path, monkeypatch):
+    """`mtime` da się przenieść kopiowaniem: obcy plik pod nową nazwą z tym samym czasem nie jest
+    naszym plikiem - rozstrzyga sha1 treści z `location.file_sha1`."""
+    con, lid, stara, nowa = _rozdarty(tmp_path, monkeypatch)
+    st = os.stat(nowa)
+    with open(nowa, "r+b") as f:
+        f.seek(-1, os.SEEK_END)
+        bajt = f.read(1)
+        f.seek(-1, os.SEEK_END)
+        f.write(bytes([bajt[0] ^ 0xFF]))
+    os.utime(nowa, ns=(st.st_atime_ns, st.st_mtime_ns))
+    (w,) = writeback.reconcile_renames(con, now=NOW)
+    assert w.status == "blocked" and "inną treść" in w.reason
+    assert _wiersz(con)["in_flight"] == "commit" and _stan(con, lid) == (stara, 1, 0)
+    con.close()
+
+
+def test_skan_nie_rusza_zamiarow_cudzego_woluminu_i_przezywa_awarie(tmp_path, monkeypatch):
+    """Skan innego woluminu nie rozstrzyga zamiarów `R:`; wyjątek rekoncyliacji jednego zamiaru
+    jest wynikiem 'blocked', a nie przerwaniem etapu."""
+    con, lid, stara, nowa = _rozdarty(tmp_path, monkeypatch)
+    pusty = tmp_path / "inny"
+    pusty.mkdir()
+    s = scan.scan_tree(con, str(pusty), volume="INNY", now=NOW)
+    assert s.renames_settled == [] and _wiersz(con)["in_flight"] == "commit"
+
+    def _pada(*a, **k):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(writeback, "_rozstrzygnij_zamiar", _pada)
+    (w,) = writeback.reconcile_renames(con, now=NOW)
+    assert w.status == "blocked" and "database is locked" in w.reason
+    con.close()
+
+
+def test_skan_rozstrzyga_zamiar_renamu_zanim_wciagnie_plik(tmp_path, monkeypatch):
+    """Rozdarty rename, a człowiek puszcza zwykły skan katalogu zamiast ponowienia: skan najpierw
+    rekoncyliuje zamiar (TA SAMA lokacja pod nową nazwą, `location.renamed`), więc plik spod nowej
+    nazwy nie wjeżdża jako druga kopia - lokacji dalej jest jedna."""
+    con, lid, stara, nowa = _rozdarty(tmp_path, monkeypatch)
+    s = scan.scan_tree(con, str(tmp_path), volume="V", now=NOW)
+    assert [f.status for f in s.renames_settled] == ["reconciled"]
+    assert _stan(con, lid) == (nowa, 1, 1)
+    assert _wiersz(con)["in_flight"] is None
+    con.close()
+
+
+def test_odrzucenie_stagingu_zostawia_wiersz_z_zamiarem(tmp_path, monkeypatch):
+    """„Odrzuć" (`clear_renames_for_run`) nie kasuje jedynego śladu renamu bez przepięcia bazy."""
+    con, lid, stara, nowa = _rozdarty(tmp_path, monkeypatch)
+    repo.clear_renames_for_run(con, "R")
+    assert _wiersz(con)["in_flight"] == "commit"
+    con.close()

@@ -18,6 +18,13 @@ i nie buduje configu; brak TELESCOP w darku NIE jest deltą do przeglądu. Flat 
 zależy od optyki i filtra realnie (potwierdzone: 73/73 masterflatów i 2256/2256 flatów ma TELESCOP).
 Pliki na dysku pozostają NIETKNIĘTE — to model przestaje czytać pole, które dla darka nic nie znaczy
 (wariant A = kasowanie kart writebackiem — odrzucony).
+
+JEDEN WYJĄTEK OD „tożsamość = TELESCOP.strip()" - RAW (D-OW-3/R1): nazwa z EXIF-u jest nazwą
+OBIEKTYWU, a nazwa zastępcza adaptera obejmuje kilka szkieł. Gdy klatki RAW jednej nazwy zeznają
+co najmniej dwie ogniskowe, oś rozdziela się po `FOCALLEN` (`_soczewki_raw`); teleskop o tej
+nazwie zostaje przy ogniskowej, którą już deklaruje. „8 nazw × 1 ogniskowa" dotyczy lightów
+i flatów FITS - gotowe obrazy niosą ogniskową z rozwiązania astrometrycznego i dlatego FITS/XISF
+rozdziałowi nie podlegają.
 """
 from dataclasses import dataclass
 
@@ -50,8 +57,70 @@ class GroupSummary:
     config_by_hand: int = 0        # zestaw wskazany RĘKĄ — przebieg go mija (R1b, NIE review)
 
 
+# Kanon teleskopu wydzielonego z nazwy RAW po ogniskowej. Nazwa bazowa zostaje na czele, żeby
+# lista osi sortowała soczewki jednego korpusu obok siebie, a ogniskowa stoi w jednostce - to
+# etykieta dla człowieka, póki nie nada własnej (`telescope.label`).
+_SOCZEWKA = "{canon} @ {focal}mm"
+
+
+def _soczewki_raw(con, canon, members):
+    """Grupa jednej nazwy `TELESCOP` → `{kanon osi: członkowie}`; bez rozdziału `{canon: members}`.
+
+    POWÓD (D-OW-3/R1): w RAW-ie `TELESCOP` to nazwa OBIEKTYWU z EXIF-u (E3-3), a obiektyw na
+    adapterze zeznaje nazwę zastępczą (`DT 0mm F0 SAM` = „nieznane szkło przez przejściówkę") dla
+    KAŻDEGO szkła, które się pod nią podepnie. Na żywej `pf4` ta jedna nazwa niosła 50, 70 i 188 mm,
+    a teleskop mówił „50" o wszystkich 22 klatkach - kadr 70 mm był nieodróżnialny od 50 mm, choć
+    to właśnie kadr odróżnia pas od miecza Oriona. Świadkiem jest `FOCALLEN` z EXIF-u: fakt
+    per ujęcie, zapisany przez korpus, nie przez człowieka.
+
+    WĄSKO, trzema warunkami naraz - każdy chroni oś, która dziś jest jednoznaczna:
+      * tylko `filetype='raw'`. W FITS/XISF `FOCALLEN` gotowego obrazu bywa WYNIKIEM rozwiązania
+        astrometrycznego (A140R zeznaje 66 różnych wartości 784-794 mm), więc rozdział po nim
+        rozbiłby jeden tubus na dziesiątki osi. Nazwę FITS nadaje człowiek, a naprawia writeback;
+      * tylko nazwa z CO NAJMNIEJ DWIEMA ogniskowymi RAW (zaokrąglonymi do mm). Nazwa o jednej
+        ogniskowej - także zoom, dziś zawsze na jednej pozycji - zachowuje kanon, id i wszystko,
+        co do niego przypięto. Rozdział zależy od danych, nie od wzorca nazwy: zoom zrobiony na
+        dwóch ogniskowych kłamie o kadrze tak samo jak nazwa zastępcza;
+      * KOTWICA zostaje na miejscu: ogniskowa, którą teleskop o tej nazwie już deklaruje
+        (`focal_nominal`), trzyma gołą nazwę, więc istniejący wiersz zachowuje id, etykietę, park,
+        scalenie i configi swoich klatek - wychodzą wyłącznie klatki, o których kłamał. Dla nazwy
+        jeszcze nieznanej kotwicą jest ogniskowa, którą `propose_telescope` i tak by zapisał.
+
+    Klatka RAW BEZ `FOCALLEN` i każda klatka FITS/XISF zostają przy gołej nazwie - świadka
+    ogniskowej nie ma, a zgadywanie z segmentu folderu (`A7S1_070`) byłoby konwencją jednego
+    archiwum udającą fakt (na `pf4` taka klatka i tak nie istnieje). Ręka: klatki ze zestawem
+    wskazanym ręką liczą się tu jak inne, bo faza 1 opisuje NAGŁÓWKI, ale faza 2 je mija (R1b) -
+    rozdział nie przepina ich nigdy."""
+    def mm(m):
+        return int(round(m["fl"])) if m["ft"] == "raw" and m["fl"] is not None else None
+
+    ogniskowe = {mm(m) for m in members} - {None}
+    if len(ogniskowe) < 2:
+        return {canon: members}
+    row = con.execute(
+        "SELECT t.id, t.focal_nominal, t.merged_into FROM telescope t WHERE t.telescop_canon = ?",
+        (canon,)).fetchone()
+    # SCALENIE TO FAKT RĘKI: człowiek orzekł, że ta nazwa to ten sam sprzęt co inny teleskop (albo
+    # wciągnął pod nią inne nazwy). Automat nie wie, której ogniskowej to orzeczenie dotyczyło, więc
+    # nie wyprowadza klatek spod scalenia - nazwa zostaje w całości, aż ręka ją rozscali.
+    if row is not None and (row["merged_into"] is not None or con.execute(
+            "SELECT 1 FROM telescope WHERE merged_into = ? LIMIT 1", (row["id"],)).fetchone()):
+        return {canon: members}
+    pierwsza = next((m["fl"] for m in members if m["fl"] is not None), None)
+    kandydaci = (row["focal_nominal"] if row is not None else None,
+                 int(round(pierwsza)) if pierwsza is not None else None)
+    kotwica = next((f for f in kandydaci if f in ogniskowe), min(ogniskowe))
+    out = {canon: []}
+    for m in members:
+        f = mm(m)
+        klucz = canon if f is None or f == kotwica else _SOCZEWKA.format(canon=canon, focal=f)
+        out.setdefault(klucz, []).append(m)
+    return out
+
+
 def run_grouper(con, now):
-    """Po skanie: (1) wyłoń teleskopy z DISTINCT `TELESCOP.strip()`; (2) config iloczyn
+    """Po skanie: (1) wyłoń teleskopy z DISTINCT `TELESCOP.strip()` (RAW o kilku ogniskowych -
+    per ogniskowa, `_soczewki_raw`); (2) config iloczyn
     (telescope×camera) + link `frame.config_id`. Brak/pusty TELESCOP lub brak kamery →
     `config.review` (W4, zero cichego NULL; kolejka ze STANU `config_id IS NULL`). Zwraca
     `GroupSummary`. Idempotentny (propose_* i assign_config sprawdzają stan przed zapisem).
@@ -70,7 +139,7 @@ def run_grouper(con, now):
 
     rows = con.execute(
         "SELECT f.id AS fid, f.camera_id AS cam, f.kind AS kind, f.config_id AS cfg, "
-        "       f.config_source AS cfg_src, "
+        "       f.config_source AS cfg_src, f.filetype AS ft, "
         "       h.telescop AS tel, h.focallen AS fl, h.focratio_raw AS fr "
         "FROM frame f JOIN header h ON h.frame_id = f.id").fetchall()
     s.headers = len(rows)
@@ -85,6 +154,17 @@ def run_grouper(con, now):
         canon = (r["tel"] or "").strip()
         if canon:
             groups.setdefault(canon, []).append(r)
+
+    # (1a) ROZDZIAŁ SOCZEWEK RAW - nazwa z EXIF-u, pod którą lustrzanka zeznała kilka ogniskowych,
+    # rozpada się na teleskop per ogniskowa (`_soczewki_raw`). Pozostałe grupy przechodzą 1:1.
+    # Kanon syntetyczny może zderzyć się z dosłownym `TELESCOP` innej grupy (FITS zeznający
+    # `X @ 70mm`) - to ta sama oś, więc listy się ŁĄCZĄ; nadpisanie zgubiłoby klatki grupy.
+    split = {}
+    for canon, members in groups.items():
+        for klucz, czlonkowie in _soczewki_raw(con, canon, members).items():
+            split.setdefault(klucz, []).extend(czlonkowie)
+    groups = split
+    canon_of = {m["fid"]: canon for canon, members in groups.items() for m in members}
 
     tel_ids = {}
     for canon, members in groups.items():
@@ -115,7 +195,7 @@ def run_grouper(con, now):
         if r["cfg_src"] in repo.STICKY_CONFIG_SOURCES:
             s.config_by_hand += 1
             continue
-        canon = (r["tel"] or "").strip()
+        canon = canon_of.get(r["fid"], "")
         if not canon:
             s.telescop_missing += 1
         tel_id = tel_ids.get(canon)

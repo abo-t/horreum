@@ -233,12 +233,16 @@ def pending_transfer(con):
     ostrzega akapit wyżej. Populacja to klatki zastąpione (dziś 2 na 16 797), więc pełne przejście
     po nich nic nie kosztuje, a kryterium ma jedno miejsce.
 
+    CZWARTA OŚ (0027): **stanowisko wskazane ręką** - wchodzi, gdy oś obserwatorium następczyni
+    jest pusta (guard jak przy configu; GPS następczyni wyprowadza parę z kubełka).
+
     Zwraca `[(stara, nowa, co), …]`, gdzie `co` = osie do przeniesienia (`obiekt` / `config` /
-    `rodowod` i ich sumy) — raport ma mówić, CZEGO gest dotyczy, nie tylko że coś czeka."""
+    `stanowisko` / `rodowod` i ich sumy) - raport ma mówić, CZEGO gest dotyczy, nie tylko że coś czeka."""
     rows = con.execute(
         "SELECT f.id, f.superseded_by, f.object_source, f.config_source, f.config_id, "
         "       n.kind AS n_kind, n.object_source AS n_obj_src, n.config_source AS n_cfg_src, "
-        "       n.config_id AS n_cfg, "
+        "       n.config_id AS n_cfg, f.observatory_id AS obs, f.observatory_source AS obs_src, "
+        "       n.observatory_id AS n_obs, n.observatory_source AS n_obs_src, "
         "       (SELECT count(*) FROM integration_input ii "
         "         WHERE ii.input_frame_id = f.id AND ii.asserted_by = 'user' "
         "           AND NOT EXISTS (SELECT 1 FROM integration_input jj "
@@ -249,6 +253,7 @@ def pending_transfer(con):
         "WHERE f.superseded_by IS NOT NULL ORDER BY f.id").fetchall()
     transferowalne = set(TRANSFERABLE_OBJECT_SOURCES)
     lepkie = set(repo.STICKY_CONFIG_SOURCES)
+    lepkie_stanowiska = set(repo.STICKY_OBSERVATORY_SOURCES)
     out = []
     for r in rows:
         osie = []
@@ -258,6 +263,10 @@ def pending_transfer(con):
         if (r["config_source"] in lepkie and r["config_id"] is not None
                 and r["n_cfg_src"] is None and r["n_cfg"] is None):
             osie.append("config")
+        # CZWARTA OŚ (0027): lustro guardu `repo.transfer_human_facts` - oś następczyni pusta.
+        if (r["obs_src"] in lepkie_stanowiska and r["obs"] is not None
+                and r["n_obs_src"] is None and r["n_obs"] is None):
+            osie.append("stanowisko")
         if r["rodowod_n"]:
             osie.append("rodowod")
         if osie:

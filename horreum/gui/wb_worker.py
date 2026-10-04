@@ -221,8 +221,8 @@ def zdanie_wyniku_zapisu(res, noun_key):
     (`grid.wb.applied`/`grid.wb.renamed`/`path.cards_applied`) - DANE, nie string PL.
 
     Powód BŁĘDU ma pierwszeństwo przed powodem blokady: blokada zostawia plik nietknięty, a błąd
-    bywa rozjazdem, który trzeba naprawić („plik PRZENIESIONY…, baza NIE przepięta - przeskanuj
-    katalog"). Przy odwrotnej kolejności jedna blokada w tym samym wsadzie chowała go za sobą."""
+    bywa rozjazdem, który trzeba naprawić („plik PRZENIESIONY…, baza NIE przepięta - zamiar renamu
+    zapisany: ponowienie albo cofnięcie przebiegu dokończy przepięcie"). Przy odwrotnej kolejności jedna blokada w tym samym wsadzie chowała go za sobą."""
     parts = [i18n.t(noun_key, n=len(res.applied))]
     if res.blocked:
         parts.append(i18n.t("grid.wb.blocked", n=len(res.blocked)))

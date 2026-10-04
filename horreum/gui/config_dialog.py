@@ -54,7 +54,8 @@ class AssignConfigDialog(QDialog):
 
         klatek = sum(g["n_frames"] for g in self.groups)
         head = QLabel(i18n.t("cfg.head_change" if change else "cfg.head",
-                             folders=len(self.groups), frames=klatek))
+                             folders=i18n.t_plural("dlg.n_groups", len(self.groups)),
+                             frames=i18n.t_plural("dlg.n_frames", klatek)))
         head.setWordWrap(True)
         lay.addWidget(head)
 
@@ -91,7 +92,8 @@ class AssignConfigDialog(QDialog):
                 rodzaje = i18n.t("cfg.item_kinds", kinds=", ".join(
                     i18n.t("cfg.kind_count", kind=k, n=n) for k, n in g["other_kinds"]))
             it = QListWidgetItem(
-                i18n.t("cfg.item", folder=folder, camera=kamera, n=g["n_frames"])
+                i18n.t("cfg.item", folder=folder, camera=kamera,
+                       frames=i18n.t_plural("dlg.n_frames", g["n_frames"]))
                 + rodzaje + f"   [{swiadek}]")
             it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
             # DWIE GRUPY WCHODZĄ ODZNACZONE, każda z innego powodu:
@@ -118,7 +120,8 @@ class AssignConfigDialog(QDialog):
 
         bez_kamery = sum(g["n_frames"] for g in self.groups if g["camera_id"] is None)
         if bez_kamery:
-            nota = QLabel(i18n.t("cfg.no_camera_warning", n=bez_kamery))
+            nota = QLabel(i18n.t("cfg.no_camera_warning",
+                                 skipped=i18n.t_plural("cfg.no_camera_skipped", bez_kamery)))
             nota.setWordWrap(True)
             lay.addWidget(nota)
 

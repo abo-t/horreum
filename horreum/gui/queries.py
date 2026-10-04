@@ -365,6 +365,106 @@ def observatory_axis_events(con, observatory_id=None, limit=200):
     ).fetchall()
 
 
+# ------------------------------------------------------------ stanowisko Z RĘKI (0027)
+# Wejście gestu „Wskaż stanowisko…": klatki BEZ stanowiska (brak GPS albo GPS nieparsowalny) i ich
+# druga połowa - klatki, którym stanowisko wskazała ręka (tryb ZMIANY i COFNIĘCIA). Lustro pary
+# `config_review_frames`/`config_by_hand_frames`: populacje rozłączne, jedna droga zapisu.
+# Klatka ZASTĄPIONA i WYCOFANA wypadają z obu list z powodu jak tam (robota przeszła na następczynię
+# albo ręka pliku już nie szuka). Rodzaju nie odsiewamy - oś jest KIND-AGNOSTIC.
+
+
+def observatory_review_frames(con):
+    """Klatki bez stanowiska - jeden wiersz na klatkę: frame_id, kind, filetype, path (pierwsza
+    OBECNA kopia albo NULL), observatory_label (zawsze NULL - kolumna dla wspólnego składacza)."""
+    return con.execute(
+        "SELECT f.id AS frame_id, f.kind, f.filetype, l.path, NULL AS observatory_label "
+        "FROM frame f "
+        "LEFT JOIN location l ON l.id = (SELECT MIN(id) FROM location "
+        "                                WHERE frame_id = f.id AND present = 1) "
+        "WHERE f.observatory_id IS NULL "
+        "  AND f.superseded_by IS NULL "
+        "  AND f.retired_at IS NULL "
+        "ORDER BY l.path, f.id").fetchall()
+
+
+def observatory_by_hand_frames(con):
+    """Klatki ze stanowiskiem od RĘKI - kolumny jak `observatory_review_frames`, a `observatory_label`
+    niesie to, CO DZIŚ STOI (nazwa kanonu albo jego współrzędne): user wraca tu po to, żeby zobaczyć
+    własny poprzedni wybór. Etykietę składa SQL, bo kanon rozwiązuje widok `observatory_canonical`."""
+    return con.execute(
+        "SELECT f.id AS frame_id, f.kind, f.filetype, l.path, "
+        "       COALESCE(o.name, printf('%.4f, %.4f', o.lat, o.lon)) AS observatory_label "
+        "FROM frame f "
+        "JOIN observatory_canonical oc ON oc.id = f.observatory_id "
+        "JOIN observatory o ON o.id = oc.canon_id "
+        "LEFT JOIN location l ON l.id = (SELECT MIN(id) FROM location "
+        "                                WHERE frame_id = f.id AND present = 1) "
+        "WHERE f.observatory_source IS NOT NULL "
+        "  AND f.superseded_by IS NULL "
+        "  AND f.retired_at IS NULL "
+        "ORDER BY l.path, f.id").fetchall()
+
+
+def _grupuj_stanowiska_po_folderze(rows):
+    """Grupy **folder** dla gestu stanowiska (SPOT dla obu list). Jednostką jest folder, nie
+    folder × kamera jak przy zestawie: stanowisko nie zależy od korpusu, a sesja zdjęciowa leży
+    w jednym folderze. `kinds` = `[("rodzaj/format", n)]` malejąco - okno pokazuje, że w grupie
+    siedzi np. kalibracja obok RAW-ów; `observatory_label` grupy = wspólna etykieta albo None, gdy
+    folder ma klatki pod różnymi stanowiskami."""
+    grupy = {}
+    for r in rows:
+        folder = os.path.dirname(r["path"]) if r["path"] else None
+        g = grupy.get(folder)
+        if g is None:
+            g = grupy[folder] = {"folder": folder, "observatory_label": r["observatory_label"],
+                                 "n_frames": 0, "frame_ids": [], "_kinds": {}}
+        elif g["observatory_label"] != r["observatory_label"]:
+            g["observatory_label"] = None
+        klucz = f'{r["kind"]}/{r["filetype"] or "?"}'
+        g["_kinds"][klucz] = g["_kinds"].get(klucz, 0) + 1
+        g["n_frames"] += 1
+        g["frame_ids"].append(r["frame_id"])
+    for g in grupy.values():
+        g["kinds"] = sorted(g.pop("_kinds").items(), key=lambda kn: (-kn[1], kn[0]))
+    return list(grupy.values())
+
+
+def observatory_review_groups(con):
+    """Klatki bez stanowiska pogrupowane po folderze - wejście okna w trybie NADANIA."""
+    return _grupuj_stanowiska_po_folderze(observatory_review_frames(con))
+
+
+def observatory_by_hand_groups(con):
+    """Klatki ze stanowiskiem od ręki po folderze - wejście okna w trybie ZMIANY i COFNIĘCIA."""
+    return _grupuj_stanowiska_po_folderze(observatory_by_hand_frames(con))
+
+
+def observatory_site_label(con, observatory_id):
+    """Etykieta stanowiska do zdania gestu: `(canon_id, nazwa kanonu | None)`. Liczona przez
+    kanon, bo user widzi na liście osi kanon - członek scalony nie ma tam własnego wiersza."""
+    r = con.execute(
+        "SELECT o.id, o.name FROM observatory_canonical oc JOIN observatory o ON o.id = oc.canon_id "
+        "WHERE oc.id = ?", (observatory_id,)).fetchone()
+    return (r["id"], r["name"]) if r is not None else (observatory_id, None)
+
+
+def observatory_live_frames(con, observatory_id):
+    """Ile ŻYWYCH klatek (bez `superseded_by`) stoi pod kanonem tego stanowiska - zdanie cofnięcia
+    mówi, że stanowisko zostało puste (stanowisko świadomie zostaje: planer go potrzebuje)."""
+    return con.execute(
+        "SELECT count(*) FROM frame f JOIN observatory_canonical oc ON oc.id = f.observatory_id "
+        "WHERE oc.canon_id = (SELECT canon_id FROM observatory_canonical WHERE id = ?) "
+        "AND f.superseded_by IS NULL", (observatory_id,)).fetchone()[0]
+
+
+def frame_ids_by_path_like(con, pattern):
+    """`frame_id` klatek z OBECNĄ kopią pod ścieżką `LIKE pattern` (selektor CLI `--path-like`).
+    Kopia nieobecna nie wskazuje klatki - gest dotyczy tego, co user widzi na dysku."""
+    return {r[0] for r in con.execute(
+        "SELECT DISTINCT frame_id FROM location WHERE present = 1 AND path LIKE ?",
+        (pattern,)).fetchall()}
+
+
 # ============================================================ oś OBIEKT (PLAN_gui_object §3, read-only)
 # Read-model biblioteki + kolejki przeglądu. KIND-AWARE: obiekt liczony TYLKO na light/master_light
 # (kalibracja nie ma obiektu z definicji — memory horreum-object-resolution-kind-aware). Filtr teleskopu
@@ -891,7 +991,9 @@ def _grupuj_po_folderze_i_kamerze(rows):
         if g is None:
             g = grupy[klucz] = {"folder": folder, "camera_id": r["camera_id"],
                                 "camera_model": r["camera_model"], "telescop": r["telescop"],
-                                "telescope_label": r["telescope_label"],
+                                # właściciel reguły `label → telescop_canon`: oś bez nazwy usera mówi
+                                # kanonem z nagłówka, nie milczy („dziś: —” przy zestawie wskazanym)
+                                "telescope_label": telescope_label(r),
                                 "n_frames": 0, "frame_ids": [], "_kinds": {}}
         elif g["telescop"] != r["telescop"]:
             g["telescop"] = None                 # folder z dwoma zeznaniami nie ma jednego świadka
@@ -1157,6 +1259,8 @@ def leaf_frame_ids(con, kind, keyword, p1=None, p2=None):
         cur = con.execute("SELECT id FROM frame WHERE object_id = ?", (p1,))
     elif kind == "rel_filter":
         cur = con.execute("SELECT id FROM frame WHERE filter_canon = ?", (p1,))
+    elif kind == "rel_channel":
+        cur = con.execute("SELECT id FROM frame WHERE channel = ?", (p1,))
     elif kind == "rel_kind":
         cur = con.execute("SELECT id FROM frame WHERE kind = ?", (p1,))
     elif kind == "rel_telescope":
@@ -1330,6 +1434,21 @@ def facet_filters(con, frame_ids):
         "WHERE filter_canon IS NOT NULL "
         "  AND id IN (SELECT value FROM json_each(?)) "
         "GROUP BY filter_canon ORDER BY n DESC, filter_canon",
+        (json.dumps(list(frame_ids)),),
+    ).fetchall()
+
+
+def facet_channels(con, frame_ids):
+    """Kubełki facetu Kanał: `frame.channel` (0028, kanał kamery kolorowej z nazwy stosu) w zbiorze
+    + liczność; JAWNIE `IS NOT NULL` (F4R#10) - mono, obraz pełnokolorowy i light kanału nie mają
+    i kubełka „(bez kanału)" nie dostają. Porządek STAŁY R, G, B (kolejność kanałów obrazu, nie
+    liczności: trzy kanały jednej sesji mają zwykle tę samą liczbę i sortowanie po `n` tasowałoby
+    je między przeładowaniami). Zwraca: channel, n."""
+    return con.execute(
+        "SELECT channel, COUNT(*) AS n FROM frame "
+        "WHERE channel IS NOT NULL "
+        "  AND id IN (SELECT value FROM json_each(?)) "
+        "GROUP BY channel ORDER BY instr('RGB', channel)",
         (json.dumps(list(frame_ids)),),
     ).fetchall()
 
@@ -2212,8 +2331,16 @@ def _ten_sam_kanal(a, b, mono):
     WBPP integruje każdy kanał osobno. Różne sygnatury znaczą tam „trzy kanały", nie „trzy
     wersje", a nagłówek nie mówi, który kanał jest który. Dla kamery kolorowej wiemy to wyłącznie
     o obrazach PEŁNOKOLOROWYCH: oba zmierzone na tych samych co najmniej dwóch kanałach.
-    Kamera nieznana (`is_mono` NULL) idzie drogą kolorowej - brak faktu nie może poszerzać dowodu."""
+    Kamera nieznana (`is_mono` NULL) idzie drogą kolorowej - brak faktu nie może poszerzać dowodu.
+
+    KANAŁ Z NAZWY (`frame.channel`, 0028) domyka tę lukę dla stosów POJEDYNCZYCH kanałów: dwa stosy
+    `B` jednej grupy to ten sam kanał, więc różne sygnatury czy pomiary znaczą tam dwa przebiegi
+    integracji (NGC3034 RC8 600 s: kanały przebiegu `WBPP2` wobec kanałów `WBPP@@1` - do 0028 grupa
+    „pochodna", odrębność widziała wyłącznie nazwa pliku). Stosy RÓŻNYCH kanałów dalej nie mają
+    wspólnego kanału i dowodu odrębności nie dostaną - kanał przyspiesza dowód, nie poszerza go."""
     if mono:
+        return True
+    if a.get("kanal") is not None and a.get("kanal") == b.get("kanal"):
         return True
     return len(a["kanaly"]) >= 2 and a["kanaly"] == b["kanaly"]
 
@@ -2262,8 +2389,8 @@ def classify_stack_versions(czlonkowie, *, mono):
     """Rodzaj każdego członka jednej grupy bliźniaków - `{frame_id: (rodzaj, świadek|None)}`.
 
     Czysta funkcja, zero SQL. `czlonkowie` = dicty z kluczami `frame_id`, `tool`, `declared`
-    (int albo None - koercja jest sprawą wołającego), `pomiary` (`_pomiary_obrazu`) i `kanaly`
-    (`_kanaly`). Rodzaj jest PARAMI, nie po cesze członka: „inna integracja" znaczy „odrębna od
+    (int albo None - koercja jest sprawą wołającego), `pomiary` (`_pomiary_obrazu`), `kanaly`
+    (`_kanaly`) i opcjonalnie `kanal` (`frame.channel`). Rodzaj jest PARAMI, nie po cesze członka: „inna integracja" znaczy „odrębna od
     co najmniej jednego sąsiada", a relacja odrębności jest symetryczna - dlatego grupa ma albo
     zero, albo co najmniej dwóch członków tego rodzaju. Świadek to najmocniejszy z par
     (`VERSION_WITNESSES` w porządku siły)."""
@@ -2300,12 +2427,12 @@ def _stack_version_rows(con):
     nie rozcina grupy, a `telescope_id` NULL znaczy „config nieznany".
     Werdykt „zostawiam wszystkie" (0026) przychodzi LEFT JOIN-em: `kept_key`/`kept_at` NULL = brak.
     Zwraca: frame_id, object_id, object_canon, camera_id, camera_model, telescope_id,
-    telescope_label, telescop_canon, is_mono, filter_canon, exptime, raw_json, window_start,
+    telescope_label, telescop_canon, is_mono, filter_canon, channel, exptime, raw_json, window_start,
     window_end, tool, declared_rows, creation_time, kept_key, kept_at, ra_deg, dec_deg."""
     return con.execute(
         "SELECT f.id AS frame_id, f.object_id, obj.canon AS object_canon, f.camera_id, "
         "       cam.model_canon AS camera_model, tc.canon_id AS telescope_id, "
-        "       t.label AS telescope_label, t.telescop_canon, "
+        "       t.label AS telescope_label, t.telescop_canon, f.channel, "
         "       cam.is_mono, f.filter_canon, h.exptime, h.raw_json, h.ra_deg, h.dec_deg, "
         "       i.window_start, i.window_end, i.tool, i.declared_rows, i.creation_time, "
         "       k.group_key AS kept_key, k.decided_at AS kept_at "
@@ -2344,7 +2471,15 @@ def _grupy_wersji(con):
     maskuje, słownik Pythona - nie.
 
     Okno idzie przez `naming.header_dt` (SPOT parsera ISO): zapis z ułamkiem sekundy i bez niego
-    ma dać ten sam klucz."""
+    ma dać ten sam klucz.
+
+    KANAŁ (`frame.channel`, 0028) NIE stoi w kluczu - świadomie. Kanały jednej sesji kamery
+    kolorowej to ten sam materiał (te same suby), a grupa niesie też fakty o pochodzeniu MIĘDZY
+    kanałem a obrazem złożonym (`combined_RGB` dziedziczy pomiary kanału `R` znak w znak - świadek
+    `same_measure`). Kanał w kluczu rozcinałby te pary: zmierzone 2026-10-04 na kopii archiwum -
+    31 grup → 28, z czego 8 grup „pochodna" topnieje do 3, a `combined_RGB` LMC traci świadka.
+    Kanał działa PARAMI, w `_ten_sam_kanal`: dwa stosy tego samego kanału mogą mieć dowód odrębnej
+    integracji, stosy różnych kanałów - nigdy."""
     grupy = {}
     for r in _stack_version_rows(con):
         start, koniec = header_dt(r["window_start"]), header_dt(r["window_end"])
@@ -2366,6 +2501,7 @@ def _grupy_wersji(con):
             czlonkowie.append({"frame_id": int(r["frame_id"]), "tool": r["tool"] or None,
                                "declared": _to_int(r["declared_rows"]),
                                "pomiary": pomiary, "kanaly": _kanaly(pomiary),
+                               "kanal": r["channel"],
                                "created": r["creation_time"] or None,
                                "kept_key": r["kept_key"], "kept_at": r["kept_at"],
                                "srodek": ((r["ra_deg"], r["dec_deg"])
@@ -3074,11 +3210,19 @@ def rename_frame_targets(con, frame_ids):
     „brak kopii" od wielu, licząc wiersze per frame). Rename DOZWOLONY dla XISF (nie tyka nagłówka),
     więc BEZ `header_hash`/`compressed` (nieistotne). frame_ids jako TABLICA JSON (`json_each`, jeden
     param — §4). ORDER BY frame_id, location_id. Zwraca: frame_id, filetype, kind, filter_canon,
-    sha1_data, object_canon, object_raw, date_obs, exptime, location_id, path, mtime."""
+    sha1_data, object_canon, object_raw, date_obs, exptime, location_id, path, mtime, flat_master_id,
+    flat_paths. Ogniwo flatu (token flatgrp) idzie PODZAPYTANIAMI skalarnymi, nie JOIN-em: wiele kopii
+    mastera nie mnoży wierszy frame'a (silnik czyta liczbę wierszy jako liczbę kopii LIGHTA).
+    `flat_paths` = tablica JSON ścieżek obecnych kopii mastera flat (`[]` gdy brak)."""
     return con.execute(
         "SELECT f.id AS frame_id, f.filetype, f.kind, f.filter_canon, f.sha1_data, "
         "       obj.canon AS object_canon, h.object_raw, h.date_obs, h.exptime, "
-        "       l.id AS location_id, l.path, l.mtime "
+        "       l.id AS location_id, l.path, l.mtime, "
+        "       (SELECT c.master_frame_id FROM calibration c "
+        "         WHERE c.light_frame_id = f.id AND c.relation = 'flat') AS flat_master_id, "
+        "       (SELECT json_group_array(fl.path) FROM calibration c "
+        "          JOIN location fl ON fl.frame_id = c.master_frame_id AND fl.present = 1 "
+        "         WHERE c.light_frame_id = f.id AND c.relation = 'flat') AS flat_paths "
         "FROM frame f "
         "LEFT JOIN header h ON h.frame_id = f.id "
         "LEFT JOIN object obj ON obj.id = f.object_id "

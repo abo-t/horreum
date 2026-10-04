@@ -394,3 +394,84 @@ def test_lista_od_reki_ODSIEWA_zastapione(view):
     con.execute("UPDATE frame SET superseded_by = ? WHERE id = ?", (klatki[1], klatki[0]))
     con.commit()
     assert queries.config_by_hand_frames(con) == [],         "zastąpiona tożsamość dalej oferuje gest, choć jej robotę przejęła następczyni"
+
+
+# --- R-S2b-15: oś sprzętu mówi gramatyką osi obiektu ---
+
+def test_config_gesture_suma_i_rozbicie_maja_JEDNEGO_wlasciciela():
+    """`skipped` liczy się Z `skipped_breakdown` - człon dołożony do rozbicia wchodzi do „z M"
+    i do zdania naraz. Do R-S2b-15 sumę trzymał wołający w `app.py`."""
+    g = repo.ConfigGesture(assigned=3, kind_skip=1, no_camera=2, occupied=4, unchanged=5)
+    assert g.skipped == 12
+    assert [s for s, _ in g.skipped_breakdown] == ["occupied", "no_camera", "kind", "unchanged"]
+    assert g.skipped == sum(n for _, n in g.skipped_breakdown)
+
+
+@pytest.mark.parametrize("n, pl, en", [
+    (1, " · 1 klatka bez kamery", " · 1 frame without a camera"),
+    (2, " · 2 klatki bez kamery", " · 2 frames without a camera"),
+    (5, " · 5 klatek bez kamery", " · 5 frames without a camera"),
+    (12, " · 12 klatek bez kamery", " · 12 frames without a camera"),
+    (13, " · 13 klatek bez kamery", " · 13 frames without a camera"),
+    (14, " · 14 klatek bez kamery", " · 14 frames without a camera"),
+    (22, " · 22 klatki bez kamery", " · 22 frames without a camera"),
+])
+def test_zdanie_pominiec_osi_sprzetu_odmienia_liczebniki(n, pl, en):
+    """Człony osi sprzętu to FRAZY odmieniane przez liczbę (`t_plural`), nie licznik po
+    dwukropku - 12-14 zawsze „many", 22 znów „few". Zera nie są drukowane."""
+    from horreum.gui import grid
+    g = repo.ConfigGesture(no_camera=n)
+    assert grid.zdanie_pominiec(g, prefix="grid.sel.config_skip_", odmiana=True) == pl
+    i18n.set_lang("en")
+    assert grid.zdanie_pominiec(g, prefix="grid.sel.config_skip_", odmiana=True) == en
+
+
+def test_zdanie_pominiec_osi_sprzetu_bez_zer_i_w_kolejnosci_rozbicia():
+    from horreum.gui import grid
+    kw = dict(prefix="grid.sel.config_skip_", odmiana=True)
+    assert grid.zdanie_pominiec(repo.ConfigGesture(assigned=9), **kw) == ""
+    assert grid.zdanie_pominiec(
+        repo.ConfigGesture(occupied=1, kind_skip=3, unchanged=13), **kw) == (
+        " · 1 klatka miała już zestaw · 3 klatki kalibracyjne · 13 klatek bez zmiany")
+
+
+def test_gest_zestawu_mowi_jednym_zdaniem_bez_zer(view, monkeypatch):
+    """Pełne zdanie po geście: odmienione „z M", człony pominięć z domu `zdanie_pominiec`, BEZ
+    zer i bez kropki w środku (dawniej: „klatek. (pominięte: 0 z zestawem, …)"). Kropkę stawia
+    następny takt. Falsyfikator: wróć do sumy i klucza `object.config_skipped` w `app.py`."""
+    v, con, ids = view
+    tel = con.execute("SELECT id, telescop_canon FROM telescope LIMIT 1").fetchone()
+
+    class _Fake:
+        def __init__(self, *a, **k):
+            self.selected = (tel["id"], "RC8", [1])
+
+        def exec(self):
+            return QDialog.Accepted
+
+    monkeypatch.setattr("horreum.gui.app.AssignConfigDialog", _Fake)
+    monkeypatch.setattr("horreum.gui.app.repo.user_assign_config",
+                        lambda *a, **k: repo.ConfigGesture(assigned=1, no_camera=2))
+    msgs = []
+    v.status_message.connect(msgs.append)
+    v._on_set_config()
+    assert msgs[-1] == ("Przypisano zestaw RC8 → 1 z 3 klatek · 2 klatki bez kamery"
+                        + i18n.t("object.config_next_step")), msgs[-1]
+
+    monkeypatch.setattr("horreum.gui.app.repo.user_assign_config",
+                        lambda *a, **k: repo.ConfigGesture(occupied=1))
+    v._on_set_config()
+    # zero przypisań nie jest „Przypisano … 0 z 1" - zdanie mówi, że nic się nie zmieniło
+    assert msgs[-1] == "Zestaw RC8: nic nie przypisano · 1 klatka miała już zestaw"
+
+
+def test_swiadek_dzis_mowi_kanonem_gdy_teleskop_bez_etykiety():
+    """Okno ZMIANY zestawu pokazuje to, co dziś stoi na osi. Teleskop bez nazwy usera mówi kanonem
+    z nagłówka (właściciel `queries.telescope_label`), a nie „dziś: —"."""
+    from horreum.gui import queries
+    wiersz = {"path": "/a/b/x.arw", "camera_id": 1, "camera_model": "SONYA7S", "telescop": "FE",
+              "telescope_label": None, "telescop_canon": "FE 24-105mm F4 G OSS",
+              "kind": "light", "frame_id": 7}
+    (g,) = queries._grupuj_po_folderze_i_kamerze([wiersz])
+    assert g["telescope_label"] == "FE 24-105mm F4 G OSS"
+

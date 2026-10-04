@@ -35,6 +35,7 @@ from horreum.gui import busy, i18n, mapproj, queries, rows, theme
 from horreum.gui.assign_dialog import AssignObjectDialog
 from horreum.gui.wb_worker import zdanie_commitu_kart, zdanie_undo_kart
 from horreum.gui.config_dialog import AssignConfigDialog
+from horreum.gui.observatory_dialog import AssignObservatoryDialog
 from horreum.gui.map_view import SitesMapView
 from horreum.gui.rows import TwoPartDelegate
 from horreum.resolve._text import norm_alnum
@@ -2302,8 +2303,8 @@ class ObjectAxisView(QWidget):
         # pod ten gest. Człony składa więc ten sam dom, co zdanie Zbiorów.
         from horreum.gui import grid       # lazy - wzorzec `apply_theme`/`_mount_views`
         self.status_message.emit(
-            i18n.t("object.assigned_report", assigned=g.assigned, total=g.assigned + g.skipped,
-                   canon=canon) + grid.zdanie_pominiec(g))
+            i18n.t_plural("object.assigned_report", g.assigned + g.skipped, assigned=g.assigned,
+                          canon=canon) + grid.zdanie_pominiec(g))
         self.refresh(select_canon=canon if g.assigned else None, select_first=bool(g.assigned))
 
     # ------------------------------------------------ akcja potwierdzania propozycji (S2)
@@ -2387,14 +2388,15 @@ class ObjectAxisView(QWidget):
         except ValueError as e:                # dryf do nieistniejącej klatki/teleskopu
             QMessageBox.warning(self, i18n.t("cfg.title"), str(e))
             return
-        pominiete = g.occupied + g.no_camera + g.kind_skip + g.unchanged
-        msg = i18n.t("object.config_assigned_report", telescope=telescope_label,
-                     assigned=g.assigned, total=g.assigned + pominiete)
-        if pominiete:
-            # Rozbicie CO DO POWODU, nie jedna liczba „pominięte": kalibracja, brak kamery i zajęta
-            # klatka to trzy różne stany i trzy różne dalsze kroki (lekcja `ObjectGesture`).
-            msg += i18n.t("object.config_skipped", occupied=g.occupied, no_camera=g.no_camera,
-                          kind_skip=g.kind_skip, unchanged=g.unchanged)
+        from horreum.gui import grid       # lazy - wzorzec `_on_confirm`
+        # Suma i rozbicie pominięć mają JEDNEGO właściciela - `ConfigGesture` (R-S2b-15); zdanie
+        # składa ten sam dom, co na osi obiektu, z prefiksem kluczy osi sprzętu i bez zer.
+        # Zero przypisań nie jest „przypisaniem 0 z N" - zdanie mówi, że nic się nie zmieniło,
+        # a powód niesie rozbicie pominięć zaraz za nim.
+        msg = (i18n.t_plural("object.config_assigned_report", g.assigned + g.skipped,
+                             telescope=telescope_label, assigned=g.assigned) if g.assigned
+               else i18n.t("object.config_assigned_none", telescope=telescope_label))
+        msg += grid.zdanie_pominiec(g, prefix="grid.sel.config_skip_", odmiana=True)
         if g.assigned:
             # Dobór rodowodu stosów czyta teleskop KANDYDATA (`stacks._in_window`), więc zestaw
             # nadany ręką może przesunąć rodowód gotowego obrazu — ale dopiero, gdy te klatki są
@@ -2629,6 +2631,21 @@ class ObservatoryAxisView(QWidget):
         actions.addWidget(self.btn_merge)
         lv.addLayout(actions)
 
+        # STANOWISKO Z RĘKI (0027) - wejście TU, w widoku osi, a nie z Porządków ani z menu klatki:
+        # gest wybiera albo tworzy STANOWISKO, a lista stanowisk i mapa stoją obok, więc user
+        # widzi, w co trafia. Grupy klatek okno liczy samo (folder), bez zaznaczenia w Zbiorach.
+        # Przyciski aktywne zawsze (poza biegiem etapu) - pusty kubełek mówi komunikatem.
+        hand = QHBoxLayout()
+        self.btn_hand_assign = QPushButton(i18n.t("obshand.btn_assign"))
+        self.btn_hand_change = QPushButton(i18n.t("obshand.btn_change"))
+        self.btn_hand_clear = QPushButton(i18n.t("obshand.btn_clear"))
+        for przycisk, tryb in ((self.btn_hand_assign, "assign"), (self.btn_hand_change, "change"),
+                               (self.btn_hand_clear, "clear")):
+            przycisk.clicked.connect(lambda _c=False, t=tryb: self._on_hand_site(t))
+            hand.addWidget(przycisk)
+        hand.addStretch(1)
+        lv.addLayout(hand)
+
         # --- prawa: szczegół zaznaczonego ---
         right = QWidget()
         rv = QVBoxLayout(right)
@@ -2786,6 +2803,8 @@ class ObservatoryAxisView(QWidget):
     def set_busy(self, busy):
         """Podczas etapu pipeline'u wyłącz akcje ZAPISU osi (szczery disabled — worker pisze do bazy).
         Po etapie gospodarz woła `set_busy(False)` → `_on_selection_changed` przywraca szczere stany."""
+        for przycisk in (self.btn_hand_assign, self.btn_hand_change, self.btn_hand_clear):
+            przycisk.setEnabled(not busy)             # gest ręki pisze do bazy - jak scalenie
         if busy:
             self.btn_merge.setEnabled(False)
             self.btn_unmerge.setEnabled(False)
@@ -2856,6 +2875,94 @@ class ObservatoryAxisView(QWidget):
         self._flash(i18n.t("axis.unmerged", mid=mid) if changed
                     else i18n.t("axis.obs.already_canonical"))
         self.refresh()
+
+    def _on_hand_site(self, mode):
+        """„Wskaż / Zmień / Cofnij stanowisko…" → okno grup folderów → jedna klinga (0027).
+
+        Grupy liczymy TU, w chwili otwarcia (lustro `_on_set_config`): między odświeżeniem
+        a kliknięciem mógł przebiec `Rozwiąż`. Klinga i tak liczy odmowy przy zapisie (zajęta,
+        bez zmiany), więc lista nieaktualna kosztuje komunikat, a nie zły zapis.
+
+        RECEPTA ODWROTU W KOMUNIKACIE: po nadaniu zdanie mówi, gdzie leży cofnięcie - ten widok,
+        „Cofnij wskazanie…" - bo klatka po geście wypada z kubełka „bez stanowiska" i bez tej
+        podpowiedzi user nie wie, którędy wrócić."""
+        grupy = (queries.observatory_review_groups(self.con) if mode == "assign"
+                 else queries.observatory_by_hand_groups(self.con))
+        if not grupy:
+            self._flash(i18n.t("obshand.nothing" if mode == "assign" else "obshand.nothing_hand"))
+            return
+        dlg = AssignObservatoryDialog(self.con, groups=grupy, mode=mode, parent=self)
+        if dlg.exec() != QDialog.Accepted or dlg.selected is None:
+            return
+        wybor = dlg.selected
+        try:
+            with busy.busy(self._flash, i18n.t("busy.saving_frames", n=len(wybor["frame_ids"]))):
+                if mode == "clear":
+                    g = repo.clear_observatory_assignment(
+                        self.con, frame_ids=wybor["frame_ids"], now=self._now())
+                else:
+                    g = repo.user_assign_observatory(
+                        self.con, frame_ids=wybor["frame_ids"], now=self._now(),
+                        observatory_id=wybor["observatory_id"], lat=wybor["lat"],
+                        lon=wybor["lon"], name=wybor["name"], elev=wybor["elev"],
+                        overwrite=mode == "change")
+        except ValueError as e:                # dryf do nieistniejącej klatki/stanowiska
+            QMessageBox.warning(self, i18n.t("obshand.title"), str(e))
+            return
+        self.refresh()
+        self._flash(zdanie_stanowiska(self.con, mode, g))
+
+
+def _etykieta_stanowiska(con, observatory_id, *, z_numerem=False):
+    """Stanowisko w zdaniu gestu: nazwa KANONU albo `#id`; `z_numerem` = `#id nazwa` (zdanie o pustym
+    stanowisku musi wskazać wiersz na liście osi, a nazwa bywa pusta)."""
+    cid, nazwa = queries.observatory_site_label(con, observatory_id)
+    if z_numerem:
+        return i18n.t("obshand.site_label", id=cid, name=nazwa or "").strip()
+    return nazwa or f"#{cid}"
+
+
+def zdanie_stanowiska(con, mode, g):
+    """Zdanie po geście stanowiska z ręki - wzorzec `grid.zdanie_pominiec`: odmiana przez liczbę,
+    człony WYŁĄCZNIE przy liczbie > 0, kropka na końcu całego zdania.
+
+    CEL NAZYWA FAKTYCZNE STANOWISKO, nie wpisane współrzędne: punkt w promieniu `THRESH_KM` trafia
+    w istniejące stanowisko, więc „Stanowisko -30.25, 170.70" mówiłoby o miejscu, którego na liście
+    nie ma. Po cofnięciu stanowisko z ręki ZOSTAJE (planer go potrzebuje) - zdanie mówi, że zostało
+    puste, żeby wiersz z zerem klatek nie wyglądał na błąd."""
+    if mode == "clear":
+        msg = i18n.t_plural("obshand.cleared_report", g.cleared + g.not_hand + g.nothing,
+                            cleared=g.cleared)
+        if g.not_hand:
+            msg += i18n.t_plural("obshand.clear_not_hand", g.not_hand)
+        if g.nothing:
+            msg += i18n.t_plural("obshand.clear_nothing", g.nothing)
+        if g.cleared_gps:
+            msg += i18n.t_plural("obshand.clear_gps", g.cleared_gps)
+        if g.cleared - g.cleared_gps:
+            msg += i18n.t_plural("obshand.clear_no_site", g.cleared - g.cleared_gps)
+        for oid in g.cleared_from:
+            if not queries.observatory_live_frames(con, oid):
+                msg += i18n.t("obshand.site_empty",
+                              site=_etykieta_stanowiska(con, oid, z_numerem=True))
+        return msg + "."
+    msg = i18n.t_plural("obshand.assigned_report", g.assigned + g.occupied + g.unchanged,
+                        site=_etykieta_stanowiska(con, g.observatory_id), assigned=g.assigned)
+    if g.created:
+        msg += i18n.t("obshand.created")
+    if g.occupied:
+        msg += i18n.t_plural("obshand.skip_occupied", g.occupied)
+    if g.unchanged:
+        msg += i18n.t_plural("obshand.skip_unchanged", g.unchanged)
+    if g.name_kept:
+        msg += i18n.t("obshand.name_kept", name=g.name_kept)
+    if g.elev_set is not None:
+        msg += i18n.t("obshand.elev_set", elev=f"{g.elev_set:g}")
+    if g.elev_kept is not None:
+        msg += i18n.t("obshand.elev_kept", elev=f"{g.elev_kept:g}")
+    if g.assigned:
+        msg += i18n.t("obshand.undo_hint")
+    return msg + "."
 
 
 class TelescopeAxisWindow(QMainWindow):

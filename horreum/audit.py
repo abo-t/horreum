@@ -18,6 +18,7 @@ import json
 from dataclasses import dataclass, field
 
 from .repo import CONFIG_SOURCES, STICKY_CONFIG_SOURCES   # słowniki osi sprzętu — właściciel (R1)
+from .repo import STICKY_OBSERVATORY_SOURCES   # słownik osi obserwatorium - właściciel (0027)
 from .resolve.objects import (ALIAS_SOURCES, OBJECT_KINDS, OBJECT_SOURCES,
                               TRANSFERABLE_OBJECT_SOURCES, WEAK_OBJECT_SOURCES)
 
@@ -31,13 +32,34 @@ class Parity:
     events: int
     retracted: int
     minus: object
+    # Emisje bez partnera, ODTWORZONE z dziennika (`config_unpaired_reassignments`) - historia
+    # sprzed pary verbów, której append-only nie pozwala poprawić. Zero wszędzie poza osią configu.
+    legacy: int = 0
 
     @property
     def ok(self):
         # `retracted` MUSI mieścić się w emisjach: bez tego brak N emisji i nadmiar N wycofań
         # znosiłyby się do zielonego — bramka przestałaby łapać dokładnie to, po co powstała.
-        return (self.entities == self.events - self.retracted
-                and 0 <= self.retracted <= self.events)
+        return (self.entities == self.events - self.retracted - self.legacy
+                and 0 <= self.retracted <= self.events and 0 <= self.legacy)
+
+
+def config_unpaired_reassignments(con):
+    """Przepięcia configu BEZ PARY verbów w dzienniku: `config.assigned`, którego poprzednikiem na
+    tej samej klatce jest znowu `config.assigned` (nie `config.unassigned`) - klatka miała zestaw,
+    a dziennik nie zapisał jego zdjęcia.
+
+    Liczba jest ODTWORZONA z dziennika, nie pamiętana: tyle razy `repo.assign_config` przepiął
+    klatkę, zanim emitował parę (R-S1-5). Od pary verbów żaden pisarz osi tego stanu nie wytwarza
+    (przebieg, gest ręki i przeniesienie po podmianie pliku domykają się parą albo zaczynają od
+    NULL), więc na bazie zbudowanej bieżącym kodem wynik jest ZEREM - i tak go pilnuje akceptacja
+    (`§5.9`) oraz bateria. Niezerowy na żywej bazie jest historią, nie regresją; niezerowy na
+    świeżej - regresją, której człon `legacy` nie ma prawa ukrywać."""
+    return con.execute(
+        "SELECT count(*) FROM ("
+        "  SELECT verb, LAG(verb) OVER (PARTITION BY target ORDER BY id) AS prev "
+        "  FROM event WHERE verb IN ('config.assigned', 'config.unassigned')) "
+        "WHERE verb = 'config.assigned' AND prev = 'config.assigned'").fetchone()[0]
 
 
 def _events(con, verb):
@@ -54,17 +76,18 @@ def entity_event_parity(con):
     CZŁON ODEJMOWANY MA TA PARA, KTÓRA MA DROGĘ COFNIĘCIA: `object_alias` można wycofać
     (`object.alias_retired`), `frame.object_id` odpiąć (`object.unassigned`), a `frame.config_id`
     zdjąć klatce spoza osi teleskopu (`config.unassigned` — `repo.unassign_config`, kind-scoping
-    darków). Dla obserwatorium i przepisu kalibracji drogi cofnięcia dziś nie ma; gdy powstanie,
-    człon dochodzi TUTAJ — w jednym miejscu, nie w dwóch.
+    darków), a `frame.observatory_id` cofnąć ręką (`observatory.unassigned`, 0027). Dla przepisu
+    kalibracji drogi cofnięcia dziś nie ma; gdy powstanie, człon dochodzi TUTAJ - w jednym miejscu,
+    nie w dwóch.
 
-    UWAGA — RÓWNOŚĆ CONFIGU JEST DOKŁADNA WYŁĄCZNIE NA ŚWIEŻEJ BAZIE, i to nie z winy tej formuły:
-    `repo.assign_config` przy PRZEPIĘCIU emituje samo `config.assigned`, bez partnera
-    `config.unassigned` — czyli dokładnie ten defekt, który S0 naprawił na osi obiektu
-    (`assign_object` emituje parę). Każde przepięcie configu zawyża więc lewą stronę o 1 na zawsze
-    (event jest append-only, historii nie przepisujemy). Zmierzone na żywej `pf4`: 16215 emisji,
-    z tego 7 przepięć, 32 odpięcia ⇒ 16208 − 32 = 16176 klatek z configiem, czyli różnica 7 jest
-    W CAŁOŚCI wyjaśniona brakiem pary. Bramka chodzi na świeżej bazie dawcy, gdzie przepięć nie ma,
-    więc jest tam dokładna. Domknięcie osi configu to osobny ruch — nazwane, nie przemilczane."""
+    OŚ CONFIGU MA TRZECI CZŁON - `legacy` (R-S1-5). `repo.assign_config` przy PRZEPIĘCIU emitował
+    kiedyś samo `config.assigned`, bez partnera `config.unassigned` (defekt, który S0 naprawił na osi
+    obiektu). Event jest append-only, więc każde takie przepięcie zawyża emisje o 1 NA ZAWSZE.
+    Od pary verbów w `assign_config` nowe przepięcia domykają się same; starych nie przepisujemy,
+    tylko je LICZYMY z dziennika (`config_unpaired_reassignments`) i odejmujemy jawnie. Zmierzone
+    na żywej `pf4` (2026-10-04): 16481 emisji − 32 odpięcia − 11 przepięć bez pary = 16438 klatek
+    z configiem, co do sztuki. Człon nie maskuje regresji, bo jest odtworzony, a nie kotwiczony:
+    na bazie zbudowanej bieżącym kodem musi wynosić zero i tego pilnuje osobne kryterium."""
     return (
         Parity("camera",
                con.execute("SELECT count(*) FROM camera").fetchone()[0],
@@ -103,16 +126,20 @@ def entity_event_parity(con):
                con.execute(
                    "SELECT count(*) FROM frame WHERE config_id IS NOT NULL").fetchone()[0],
                _events(con, "config.assigned"), _events(con, "config.unassigned"),
-               "config.unassigned"),
+               "config.unassigned", config_unpaired_reassignments(con)),
         Parity("frame.object_id",
                con.execute(
                    "SELECT count(*) FROM frame WHERE object_id IS NOT NULL").fetchone()[0],
                _events(con, "object.assigned"), _events(con, "object.unassigned"),
                "object.unassigned"),
+        # Droga cofnięcia osi obserwatorium istnieje od 0027 (ręka: `clear_observatory_assignment`,
+        # przepięcie w parze: `user_assign_observatory(overwrite)` i `assign_observatory`) - człon
+        # odejmowany doszedł TU, jak zapowiadał docstring.
         Parity("frame.observatory_id",
                con.execute(
                    "SELECT count(*) FROM frame WHERE observatory_id IS NOT NULL").fetchone()[0],
-               _events(con, "observatory.assigned"), 0, None),
+               _events(con, "observatory.assigned"), _events(con, "observatory.unassigned"),
+               "observatory.unassigned"),
         Parity("frame.calibration_profile_id",
                con.execute("SELECT count(*) FROM frame "
                            "WHERE calibration_profile_id IS NOT NULL").fetchone()[0],
@@ -424,6 +451,12 @@ class HumanFacts:
 
     Wartość domyślna 0 z tego samego powodu i z tym samym kierunkiem błędu, co przy `offset_hand`."""
 
+    observatory_hand: int = 0
+    """STANOWISKO WSKAZANE RĘKĄ (`frame.observatory_source`, 0027) - dziesiąta oś. Bez niej cofnięcie
+    tego faktu przez przebieg (guard lepkości w `repo.assign_observatory` i pominięcie w
+    `resolver.resolve_observatory`) byłoby niewidzialne dla `--baseline`. Wartość domyślna 0 - powód
+    i kierunek błędu jak przy `offset_hand`."""
+
     object_hand_frames: tuple | None = None
     """MIGAWKA TOŻSAMOŚCI osi obiektu (E5-1, bramka `sol` Z1): posortowane `frame_id` klatek
     z faktem ręki (`TRANSFERABLE_OBJECT_SOURCES`) - te same klatki, które liczy `object_hand`.
@@ -459,7 +492,8 @@ class HumanFacts:
                 "calibration_facts": self.calibration_facts,
                 "calibration_links": self.calibration_links,
                 "offset_hand": self.offset_hand,
-                "retired_hand": self.retired_hand}
+                "retired_hand": self.retired_hand,
+                "observatory_hand": self.observatory_hand}
 
     @property
     def snapshot(self):
@@ -564,4 +598,18 @@ def human_facts_census(con):
             "SELECT count(*) FROM integration WHERE utc_offset_min IS NOT NULL").fetchone()[0],
         retired_hand=con.execute(
             "SELECT count(*) FROM frame WHERE retired_at IS NOT NULL").fetchone()[0],
+        observatory_hand=_observatory_hand(con),
     )
+
+
+def _observatory_hand(con):
+    """Licznik osi `observatory_hand` - z bazą SPRZED 0027 włącznie. Spis chodzi przez `db.connect`,
+    nie `open_db` (pomiar nie migruje mierzonej bazy), więc na żywym archiwum w starszej wersji
+    kolumny może nie być. Brak kolumny = fakt nie mógł powstać = 0 (szczera wartość, nie domysł);
+    bez tej gałęzi `human-facts` wywracałby się na każdej bazie sprzed migracji."""
+    if not con.execute("SELECT count(*) FROM pragma_table_info('frame') "
+                       "WHERE name = 'observatory_source'").fetchone()[0]:
+        return 0
+    return con.execute(
+        "SELECT count(*) FROM frame WHERE observatory_source IN (SELECT value FROM json_each(?))",
+        (json.dumps(sorted(STICKY_OBSERVATORY_SOURCES)),)).fetchone()[0]

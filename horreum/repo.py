@@ -15,11 +15,12 @@ Zasady:
 """
 import json
 import zlib
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 
 from .resolve._text import norm_alnum          # kierunek repo → resolve (liść; COHESION §2b)
 from .resolve.catalog import catalog_canon      # gramatyka katalogowa — CZYSTA, bez assetu (liść)
+from .resolve.channel import CHANNELS           # słownik kanału (0028) - liść, bez cyklu
 from .resolve.frames import LIGHT_KINDS         # guard RODZAJU w klindze (S2b) — liść, bez cyklu
 from .resolve.headers import (FAKTY_DO_DOCIAGNIECIA, FAKTY_NOWSZE,   # stan faktów kopii (AR-33)
                               copy_facts_state)
@@ -28,7 +29,9 @@ from .resolve.objects import (CLEARABLE_OBJECT_SOURCES,  # enum źródeł osi OB
                               STICKY_OBJECT_SOURCES,    # …ręki, nietykalne dla cofnięcia (AR-38)
                               TRANSFERABLE_OBJECT_SOURCES,   # …i przeżywające podmianę (R4)
                               WEAK_OBJECT_SOURCES)
-from .resolve.observatory import nearest_site   # kierunek repo → resolve (liść math/re; COHESION §2b)
+from .resolve.observatory import (nearest_site,    # kierunek repo → resolve (liść math/re; COHESION §2b)
+                                  site_coords,       # GPS nagłówka - ta sama reguła co resolver
+                                  user_site_coords)  # walidacja współrzędnych ręki (SPOT z oknem i CLI)
 
 
 @contextmanager
@@ -433,6 +436,9 @@ class FactTransfer:
     `skipped` = powód pominięcia, gdy nic nie przeszło — GUI ma mówić DLACZEGO, nie milczeć."""
     object_moved: bool = False
     config_moved: bool = False
+    observatory_moved: bool = False
+    """Przeniesiono stanowisko wskazane ręką (0027) - czwarta oś, przechodzi na następczynię
+    z osią obserwatorium PUSTĄ (lustro guardu configu: GPS w jej nagłówku to jej własne zeznanie)."""
     lineage_moved: int = 0
     lineage_dropped: int = 0
     """ILE martwych wskaźników rodowodu zdjęto, bo następczyni miała już WŁASNY werdykt (0810).
@@ -520,12 +526,20 @@ def transfer_human_facts(con, *, frame_id, now, actor="user:local"):
     Zdjęcie jest bezpieczne, bo o TEJ SAMEJ treści człowiek wypowiedział się drugi raz, po stronie
     następczyni; historia obu wypowiedzi zostaje w dzienniku.
 
-    Zwraca `FactTransfer`. Idempotentne: powtórzenie po udanym przeniesieniu trafia w guardy trzech
-    osi (następczyni ma już swoje) i zwraca `skipped` bez zapisu."""
+    CZWARTA OŚ: STANOWISKO WSKAZANE RĘKĄ (0027, `STICKY_OBSERVATORY_SOURCES`). Guard brzmi jak przy
+    configu i z tego samego powodu: `observatory_source` pisze wyłącznie ręka, więc pytamy o oś
+    W CAŁOŚCI - przenosimy, gdy następczyni nie ma ani wskazania ręki, ani stanowiska z GPS swojego
+    nagłówka (to drugie jest jej własnym zeznaniem i cudzy werdykt go nie nadpisuje). Oś jest
+    KIND-AGNOSTIC, więc ani rodzaj, ani kamera następczyni nie blokują przeniesienia. Oś następczyni
+    jest pusta, więc emitujemy samo `observatory.assigned` - nie ma czego odpinać, a para
+    rozjechałaby bilans `frame.observatory_id` (wzorzec przeniesienia configu).
+
+    Zwraca `FactTransfer`. Idempotentne: powtórzenie po udanym przeniesieniu trafia w guardy
+    wszystkich osi (następczyni ma już swoje) i zwraca `skipped` bez zapisu."""
     with _immediate(con):
         stara = con.execute(
             "SELECT superseded_by, object_id, object_source, object_cleared_id, "
-            "       config_id, config_source "
+            "       config_id, config_source, observatory_id, observatory_source "
             "FROM frame WHERE id = ?", (frame_id,)).fetchone()
         if stara is None:
             raise ValueError(f"frame:{frame_id} nie istnieje")
@@ -543,11 +557,14 @@ def transfer_human_facts(con, *, frame_id, now, actor="user:local"):
             "SELECT integration_id, excluded FROM integration_input "
             "WHERE input_frame_id = ? AND asserted_by = 'user' ORDER BY integration_id",
             (frame_id,)).fetchall()
-        if not ma_obiekt and not ma_config and not rodowod:
+        ma_stanowisko = (stara["observatory_source"] in STICKY_OBSERVATORY_SOURCES
+                         and stara["observatory_id"] is not None)
+        if not ma_obiekt and not ma_config and not ma_stanowisko and not rodowod:
             return FactTransfer(skipped="brak faktow czlowieka")
         nowa_id = stara["superseded_by"]
         nowa = con.execute(
-            "SELECT kind, camera_id, object_source, config_id, config_source FROM frame "
+            "SELECT kind, camera_id, object_source, config_id, config_source, "
+            "       observatory_id, observatory_source FROM frame "
             "WHERE id = ?", (nowa_id,)).fetchone()
         if nowa is None:
             raise ValueError(f"frame:{nowa_id} (następczyni) nie istnieje")
@@ -572,6 +589,8 @@ def transfer_human_facts(con, *, frame_id, now, actor="user:local"):
             ma_config and nowa["config_source"] is None and nowa["config_id"] is None
             and nowa["kind"] not in NO_TELESCOPE_KINDS
             and kamera_zestawu is not None and nowa["camera_id"] == kamera_zestawu)
+        stanowisko_do_przeniesienia = (ma_stanowisko and nowa["observatory_source"] is None
+                                       and nowa["observatory_id"] is None)
         # Integracje, w których następczyni ma JUŻ własny werdykt ręki — jej zdanie zostaje.
         wlasne = {r["integration_id"] for r in con.execute(
             "SELECT integration_id FROM integration_input "
@@ -588,6 +607,7 @@ def transfer_human_facts(con, *, frame_id, now, actor="user:local"):
         # treści człowiek wypowiedział się drugi raz i to jego zdanie zostaje.
         rodowod_do_zdjecia = [r for r in rodowod if r["integration_id"] in wlasne]
         if (not obiekt_do_przeniesienia and not config_do_przeniesienia
+                and not stanowisko_do_przeniesienia
                 and not rodowod_do_przeniesienia and not rodowod_do_zdjecia):
             # POWÓD MA BYĆ PRAWDZIWY, nie jeden dla wszystkich odmów: „następczyni ma własne
             # źródło" i „zestaw do niej nie pasuje" to dwa różne stany i dwie różne dalsze drogi
@@ -634,6 +654,14 @@ def transfer_human_facts(con, *, frame_id, now, actor="user:local"):
                                          "config_source": stara["config_source"],
                                          "przeniesione_z": frame_id},
                        reason="zestaw wskazany ręką przeniesiony po podmianie pliku")
+        if stanowisko_do_przeniesienia:
+            con.execute("UPDATE frame SET observatory_id = ?, observatory_source = ? WHERE id = ?",
+                        (stara["observatory_id"], stara["observatory_source"], nowa_id))
+            emit_event(con, actor=actor, verb="observatory.assigned", target=f"frame:{nowa_id}",
+                       now=now, payload={"observatory_id": stara["observatory_id"],
+                                         "observatory_source": stara["observatory_source"],
+                                         "przeniesione_z": frame_id},
+                       reason="stanowisko wskazane ręką przeniesione po podmianie pliku")
         for r in rodowod_do_przeniesienia:
             iid = r["integration_id"]
             # Kwalifikator `excluded.` to PSEUDO-TABELA upserta SQLite, nie nasza kolumna o tej
@@ -666,6 +694,7 @@ def transfer_human_facts(con, *, frame_id, now, actor="user:local"):
     return FactTransfer(object_moved=obiekt_do_przeniesienia,
                         object_kept=obiekt_zostaje,
                         config_moved=config_do_przeniesienia,
+                        observatory_moved=stanowisko_do_przeniesienia,
                         lineage_moved=len(rodowod_do_przeniesienia),
                         lineage_dropped=len(rodowod_do_zdjecia))
 
@@ -1402,7 +1431,14 @@ def assign_config(con, *, frame_id, config_id, now, actor="grouper"):
     fakt człowieka configiem z nagłówka — a nagłówek RAW-a przez teleskop niesie nazwę OBIEKTYWU
     (E3-3), więc byłby to zapis WPROST fałszywy, nie tylko niechciany.
 
-    Ręka nadpisuje ręką przez `user_assign_config(overwrite=True)` — świadomym drugim gestem."""
+    Ręka nadpisuje ręką przez `user_assign_config(overwrite=True)` - świadomym drugim gestem.
+
+    PRZEPIĘCIE EMITUJE PARĘ VERBÓW (`config.unassigned` + `config.assigned`, wzorem `assign_object`
+    i ręcznej gałęzi `user_assign_config`), payload odpięcia niesie stan SPRZED. Bez pary parytet
+    `audit.entity_event_parity` zawyżał lewą stronę o każde przepięcie na zawsze (event jest
+    append-only) - tak powstał historyczny dług dziennika liczony tam członem `legacy`. Przepięcia
+    przebiegu są realne: rozdział soczewek RAW (`grouper._soczewki_raw`) przenosi klatki na nowy
+    teleskop właśnie tą drogą."""
     row = con.execute(
         "SELECT config_id, config_source FROM frame WHERE id = ?", (frame_id,)).fetchone()
     if row is not None and row["config_source"] in STICKY_CONFIG_SOURCES:
@@ -1412,6 +1448,11 @@ def assign_config(con, *, frame_id, config_id, now, actor="grouper"):
 
     with con:
         con.execute("UPDATE frame SET config_id = ? WHERE id = ?", (config_id, frame_id))
+        if row is not None and row["config_id"] is not None:   # PRZEPIĘCIE - ślad zostaje
+            emit_event(con, actor=actor, verb="config.unassigned", target=f"frame:{frame_id}",
+                       now=now, payload={"config_id": row["config_id"],
+                                         "config_source": row["config_source"]},
+                       reason="przebieg przepina klatkę na inny zestaw")
         emit_event(con, actor=actor, verb="config.assigned", target=f"frame:{frame_id}", now=now,
                    payload={"config_id": config_id})
     return True
@@ -1469,6 +1510,19 @@ class ConfigGesture:
     no_camera: int = 0         # bez kamery nie ma czego złożyć w config (inwariant DDL §1)
     occupied: int = 0          # klatka ma już config, a gest nie prosił o nadpisanie
     unchanged: int = 0         # ten sam zestaw tą samą ręką — idempotencja, zero zapisu
+
+    @property
+    def skipped(self):
+        """Suma pominięć - do zdania „przypisano N z M"; liczona Z ROZBICIA, więc człon dołożony do
+        `skipped_breakdown` wchodzi do „z M" i do zdania naraz (lekcja `ObjectGesture`)."""
+        return sum(n for _, n in self.skipped_breakdown)
+
+    @property
+    def skipped_breakdown(self):
+        """Rozbicie pominięć jako [(sufiks klucza i18n, n)] - JEDEN właściciel kolejności i składu.
+        Do R-S2b-15 sumę i wyliczankę trzymał wołający w GUI, a zdanie drukowało zera."""
+        return [("occupied", self.occupied), ("no_camera", self.no_camera),
+                ("kind", self.kind_skip), ("unchanged", self.unchanged)]
 
 
 def user_assign_config(con, *, frame_ids, telescope_id, now, uid="local", overwrite=False):
@@ -1839,6 +1893,39 @@ def backfill_filter_canon(con, items, now, actor="resolver"):
             emit_event(con, actor=actor, verb="filter.backfilled", target="frame:*", now=now,
                        payload={"count": changed})
     return changed
+
+
+def backfill_frame_channel(con, items, now, actor="resolver"):
+    """Kolumna POCHODNA `frame.channel` (0028, P4-3) ZBIORCZO: jedna transakcja + JEDEN event
+    `channel.backfilled` na przebieg - kanon `backfill_filter_canon`. `items` = `(frame_id, kanał)`
+    dla KAŻDEJ klatki, której kanał przebieg policzył, także `None`: pochodna ma się dać przeliczyć
+    w obie strony (kopia przemianowana bez kanału w nazwie zdejmuje fakt, który wcześniej niosła).
+
+    IDEMPOTENTNY: `WHERE channel IS NOT ?` odsiewa wiersze bez zmiany, licznik w payloadzie to SKUTEK
+    (`rowcount`), zero zmian → zero eventu. Payload niesie też listę `[frame_id, było, jest]` zmian -
+    pochodna liczona z nazwy pliku jest odwracalna wyłącznie wtedy, gdy dziennik pamięta stan PRZED
+    (rename potrafi zmienić nazwę, a z nią kanał). Wartość spoza słownika → `ValueError` (EXPECT),
+    zanim cokolwiek się zapisze; CHECK 0028 jest drugą linią obrony. Zwraca liczbę zmienionych."""
+    items = list(items)
+    if not items:
+        return 0
+    zle = [k for _f, k in items if k is not None and k not in CHANNELS]
+    if zle:
+        raise ValueError(f"kanał spoza słownika: {zle[0]!r}")
+    with con:
+        zmiany = []
+        for frame_id, kanal in items:
+            stary = con.execute("SELECT channel FROM frame WHERE id = ?", (frame_id,)).fetchone()
+            if stary is None:
+                raise ValueError(f"brak klatki {frame_id}")
+            cur = con.execute("UPDATE frame SET channel = ? WHERE id = ? AND channel IS NOT ?",
+                              (kanal, frame_id, kanal))
+            if cur.rowcount:
+                zmiany.append([frame_id, stary[0], kanal])
+        if zmiany:
+            emit_event(con, actor=actor, verb="channel.backfilled", target="frame:*", now=now,
+                       payload={"count": len(zmiany), "changes": zmiany})
+    return len(zmiany)
 
 
 # ------------------------------------------------ oś OBIEKT — zapis usera (GUI, #8/P4)
@@ -2332,6 +2419,17 @@ def _restore_object_tombstone_tx(con, *, frame_id, commit_id, location_id, now,
 
 # ============================================================ oś OBSERWATORIUM (§PLAN_os_obserwatorium)
 
+OBSERVATORY_SOURCES = frozenset({"user"})
+"""Legalne wartości `frame.observatory_source` - LUSTRO CHECK-a z DDL (`0027_observatory_source.sql`).
+
+Jeden pisarz kolumny: RĘKA. Stanowisko wyliczone z GPS nagłówka zostaje NULL - powód w 0027
+(ten sam, co przy `CONFIG_SOURCES`)."""
+
+STICKY_OBSERVATORY_SOURCES = OBSERVATORY_SOURCES
+"""Źródła osi obserwatorium, których PRZEBIEG nie ma prawa nadpisać. ALIAS, nie druga lista - powód
+jak przy `STICKY_CONFIG_SOURCES` (rozejdą się dopiero przy źródle zapisywanym przez maszynę)."""
+
+
 def propose_observatory(con, *, lat, lon, now, actor="resolver"):
     """Wyłoń stanowisko (oś) z GPS — kotwica idempotencji GEOMETRYCZNA (ANCHOR-PROXIMITY §2b), NIE
     string (GPS nie ma stabilnego klucza-stringa; greedy-od-zera co skan mintowałby duplikaty + churn).
@@ -2363,12 +2461,31 @@ def propose_observatory(con, *, lat, lon, now, actor="resolver"):
 
 def assign_observatory(con, *, frame_id, observatory_id, now, actor="resolver"):
     """Przypisz stanowisko do frame'a (`frame.observatory_id`) — mirror `assign_config`. Idempotentny:
-    już przypisany ten sam → `False` bez eventu; inaczej UPDATE + `event(observatory.assigned)`."""
-    row = con.execute("SELECT observatory_id FROM frame WHERE id = ?", (frame_id,)).fetchone()
-    if row is not None and row[0] == observatory_id:
+    już przypisany ten sam → `False` bez eventu; inaczej UPDATE + `event(observatory.assigned)`.
+
+    GUARD ŹRÓDŁA (0027): klatka ze stanowiskiem wskazanym RĘKĄ (`observatory_source` ∈
+    `STICKY_OBSERVATORY_SOURCES`) jest NIETYKALNA dla automatu - zwrot `False`, zero zapisu, zero
+    eventu. Guard stoi TU, nie tylko w pętli resolvera, z powodu jak przy `assign_config`: to jedyne
+    miejsce, przez które przechodzi każdy pisarz osi z automatu. Ręka zmienia rękę wyłącznie przez
+    `user_assign_observatory(overwrite=True)`.
+
+    PRZEPIĘCIE EMITUJE PARĘ (`observatory.unassigned` + `observatory.assigned`), jak na osiach
+    obiektu i configu - inaczej bilans `frame.observatory_id` (`audit.entity_event_parity`) zawyżałby
+    emisje o każde przepięcie na zawsze. Dziś przepięcie z automatu wymaga zmiany GPS w nagłówku
+    klatki, więc populacja jest znikoma - para kosztuje jeden wiersz dziennika na taki przypadek."""
+    row = con.execute(
+        "SELECT observatory_id, observatory_source FROM frame WHERE id = ?", (frame_id,)).fetchone()
+    if row is not None and row["observatory_source"] in STICKY_OBSERVATORY_SOURCES:
+        return False
+    if row is not None and row["observatory_id"] == observatory_id:
         return False
 
     with con:
+        if row is not None and row["observatory_id"] is not None:
+            emit_event(con, actor=actor, verb="observatory.unassigned", target=f"frame:{frame_id}",
+                       now=now, payload={"observatory_id": row["observatory_id"],
+                                         "observatory_source": None},
+                       reason="GPS nagłówka wskazuje inne stanowisko")
         con.execute("UPDATE frame SET observatory_id = ? WHERE id = ?", (observatory_id, frame_id))
         emit_event(con, actor=actor, verb="observatory.assigned", target=f"frame:{frame_id}", now=now,
                    payload={"observatory_id": observatory_id})
@@ -2604,6 +2721,193 @@ def unmerge_observatory(con, *, observatory_id, now, uid="local"):
                    target=f"observatory:{observatory_id}", now=now,
                    payload={"before": merged_into, "after": None})
     return True
+
+
+@dataclass
+class ObservatoryGesture:
+    """Wynik gestu „Wskaż stanowisko" albo jego cofnięcia - okno i CLI mówią „N z M" I DLACZEGO
+    resztę pominięto. Każdy licznik to inny powód, nie odcienie jednego (lekcja `ConfigGesture`).
+
+    Rodzaju klatki gest NIE odsiewa, i to jest różnica wobec osi sprzętu i obiektu: stanowisko jest
+    KIND-AGNOSTIC (dark i flat też powstały gdzieś na Ziemi - pamięć osi obserwatorium)."""
+    assigned: int = 0           # klatki, które REALNIE dostały stanowisko z ręki
+    occupied: int = 0           # klatka ma już stanowisko, a gest nie prosił o nadpisanie
+    unchanged: int = 0          # to samo stanowisko tą samą ręką - idempotencja, zero zapisu
+    cleared: int = 0            # cofnięcie: klatki, którym zdjęto wskazanie ręki
+    not_hand: int = 0           # cofnięcie: stanowisko z GPS nagłówka - ręka go nie zdejmie
+    nothing: int = 0            # cofnięcie: klatka bez stanowiska - nie ma czego cofać
+    observatory_id: int | None = None   # stanowisko gestu (member-id, jak `propose_observatory`)
+    created: bool = False       # gest powołał NOWE stanowisko (w promieniu `THRESH_KM` nie było)
+    named: bool = False         # nazwa z gestu trafiła na stanowisko dotąd nienazwane
+    name_kept: str | None = None   # stanowisko z promienia miało już INNĄ nazwę - zostaje jego
+    elev_set: float | None = None   # wysokość z gestu dopisana stanowisku dotąd bez wysokości
+    elev_kept: float | None = None  # stanowisko z promienia miało już INNĄ wysokość - zostaje jego
+    frame_ids: tuple = ()       # klatki REALNIE zapisane (nadane albo cofnięte) - recepta odwrotu
+    cleared_from: tuple = ()    # cofnięcie: stanowiska, z których zdjęto wskazania (rosnąco)
+    cleared_gps: int = 0        # cofnięcie: z tego klatki z GPS - wrócą do stanowiska z pliku
+
+
+def user_assign_observatory(con, *, frame_ids, now, observatory_id=None, lat=None, lon=None,
+                            name=None, elev=None, uid="local", overwrite=False, dry=False):
+    """Przypisanie STANOWISKA grupie klatek GESTEM CZŁOWIEKA (`observatory_source='user'`).
+
+    Powstało dla populacji, która nie ma czym zeznać: RAW z lustrzanki bez modułu GPS (LMC, wyjazdy),
+    a DNG jest read-only, więc writeback `SITELAT`/`SITELONG` jest zamknięty NA ZAWSZE (0027).
+
+    CEL GESTU: ALBO `observatory_id` (istniejące stanowisko z listy), ALBO `lat`/`lon` podane ręką
+    (+ opcjonalnie `name`, `elev`). Współrzędne przechodzą przez TĘ SAMĄ kotwicę geometryczną co
+    `propose_observatory` (`nearest_site` ≤ `THRESH_KM`): punkt w promieniu istniejącego stanowiska
+    trafia W NIE (member-id) - druga droga do osi nie ma prawa mnożyć duplikatów, które potem trzeba
+    scalać. Nowe stanowisko POWOŁUJEMY dopiero przy pierwszym realnym zapisie (wzorzec
+    `user_assign_config`, bramka 3a zarzut 5): gest, który nie ruszył żadnej klatki, nie zostawia
+    sieroty w osi. Nazwa idzie na stanowisko nowe albo dotąd NIENAZWANE; stanowisko z inną nazwą
+    jej nie traci (`name_kept`) - zmiana nazwy ma własny gest (`label_observatory`).
+
+    ODMOWY Z LICZNIKAMI (`ObservatoryGesture`): **zajęta** - klatka ma stanowisko (z GPS albo
+    z ręki), a gest nie prosił o nadpisanie; `overwrite=True` to świadomy drugi gest (jak
+    `user_assign_config`); **bez zmiany** - to samo stanowisko tą samą ręką (zero DML, zero eventu).
+
+    PRZEPIĘCIE EMITUJE PARĘ (`observatory.unassigned` + `observatory.assigned`) - bilans
+    `frame.observatory_id` w `audit.entity_event_parity` liczy odpięcia jako człon odejmowany.
+
+    `dry=True` = ten sam rachunek BEZ zapisu i bez transakcji (podgląd CLI) - jedna pętla, nie dwie
+    kopie reguł. Klatka nieistniejąca → `ValueError` i ZERO zapisu (cała grupa wycofana)."""
+    if (observatory_id is None) == (lat is None and lon is None):
+        raise ValueError("podaj ALBO observatory_id, ALBO lat/lon")
+    if observatory_id is not None and (name is not None or elev is not None):
+        raise ValueError("name/elev dotyczą stanowiska z współrzędnych, nie wskazanego po id")
+    nazwa = str(name).strip() if name is not None and str(name).strip() else None
+    actor = f"user:{uid}"
+    g = ObservatoryGesture()
+    zapisane = []
+    with (nullcontext() if dry else _immediate(con)):
+        trafienie = None                         # wiersz stanowiska z promienia (do nazwy)
+        if observatory_id is not None:
+            if con.execute("SELECT 1 FROM observatory WHERE id = ?",
+                           (observatory_id,)).fetchone() is None:
+                raise ValueError(f"observatory:{observatory_id} nie istnieje")
+            cel = observatory_id
+        else:
+            la, lo, el = user_site_coords(lat, lon, elev)
+            rows = con.execute("SELECT id, lat, lon, name, elev FROM observatory").fetchall()
+            cel = nearest_site((la, lo), [(r["id"], r["lat"], r["lon"]) for r in rows])
+            if cel is not None:
+                trafienie = next(r for r in rows if r["id"] == cel)
+        g.observatory_id = cel
+        for frame_id in frame_ids:
+            fr = con.execute("SELECT observatory_id, observatory_source FROM frame WHERE id = ?",
+                             (frame_id,)).fetchone()
+            if fr is None:
+                raise ValueError(f"frame:{frame_id} nie istnieje")
+            if cel is not None and fr["observatory_id"] == cel \
+                    and fr["observatory_source"] in STICKY_OBSERVATORY_SOURCES:
+                g.unchanged += 1
+                continue
+            if fr["observatory_id"] is not None and not overwrite:
+                g.occupied += 1
+                continue
+            if cel is None and not g.created:    # dopiero TERAZ wiadomo, że stanowisko komuś posłuży
+                g.created = True
+                if not dry:
+                    cur = con.execute(
+                        "INSERT INTO observatory(name, lat, lon, elev, status, created_at) "
+                        "VALUES (?, ?, ?, ?, 'proposed', ?)", (nazwa, la, lo, el, now))
+                    cel = g.observatory_id = cur.lastrowid
+                    emit_event(con, actor=actor, verb="observatory.proposed",
+                               target=f"observatory:{cel}", now=now,
+                               payload={"lat": la, "lon": lo, "elev": el, "name": nazwa,
+                                        "observatory_source": "user"})
+            g.assigned += 1
+            zapisane.append(frame_id)
+            if dry:
+                continue
+            if fr["observatory_id"] is not None:  # PRZEPIĘCIE - para verbów, inaczej bilans kłamie
+                emit_event(con, actor=actor, verb="observatory.unassigned",
+                           target=f"frame:{frame_id}", now=now,
+                           payload={"observatory_id": fr["observatory_id"],
+                                    "observatory_source": fr["observatory_source"]},
+                           reason="stanowisko wskazane ręką zastępuje poprzednie")
+            con.execute("UPDATE frame SET observatory_id = ?, observatory_source = 'user' "
+                        "WHERE id = ?", (cel, frame_id))
+            emit_event(con, actor=actor, verb="observatory.assigned", target=f"frame:{frame_id}",
+                       now=now, payload={"observatory_id": cel, "observatory_source": "user"})
+        if trafienie is not None and nazwa is not None and trafienie["name"] != nazwa:
+            if trafienie["name"] is not None:
+                g.name_kept = trafienie["name"]
+            elif g.assigned:                     # „zero zmian, gdy nic nie zapisano" - także nazwy
+                g.named = True
+                if not dry:
+                    con.execute("UPDATE observatory SET name = ? WHERE id = ?", (nazwa, cel))
+                    emit_event(con, actor=actor, verb="observatory.named",
+                               target=f"observatory:{cel}", now=now,
+                               payload={"before": None, "after": nazwa})
+        # WYSOKOŚĆ jak nazwa: trafia wyłącznie na stanowisko bez wysokości, a cudza zostaje i gest
+        # o tym mówi (`elev_kept`) - wcześniej ginęła po cichu. Atrybut, nie tożsamość (0004 D3).
+        if trafienie is not None and el is not None and trafienie["elev"] != el:
+            if trafienie["elev"] is not None:
+                g.elev_kept = trafienie["elev"]
+            elif g.assigned:
+                g.elev_set = el
+                if not dry:
+                    con.execute("UPDATE observatory SET elev = ? WHERE id = ?", (el, cel))
+                    emit_event(con, actor=actor, verb="observatory.elevation_set",
+                               target=f"observatory:{cel}", now=now,
+                               payload={"before": None, "after": el})
+    g.frame_ids = tuple(zapisane)
+    return g
+
+
+def clear_observatory_assignment(con, *, frame_ids, now, uid="local", dry=False):
+    """COFNIĘCIE wskazania stanowiska RĘKĄ - druga strona `user_assign_observatory`.
+
+    ZAKRES = WYŁĄCZNIE źródło ręki. Stanowisko z GPS nagłówka zostaje (`not_hand`): cofnięcie
+    naprawia pomyłkę człowieka, a nie kasuje faktu zapisanego w pliku.
+
+    BEZ NAGROBKA, inaczej niż na osi obiektu - i to jest decyzja, nie przeoczenie. Nagrobek obiektu
+    istnieje, bo szczebel ŚCIEŻKI zgaduje kanon i bez zakazu przypisałby klatkę ponownie. Tutaj
+    automat nie zgaduje: wylicza stanowisko WYŁĄCZNIE z GPS w nagłówku. Po cofnięciu klatka bez GPS
+    wraca do NULL (stan sprzed gestu), a klatka z GPS dostaje przy najbliższym `Rozwiąż` stanowisko
+    ze swojego zeznania - czyli dokładnie to, co miała przed nadpisaniem ręką. Cofnięcie ODDAJE oś
+    automatowi; zakaz zostawiałby klatkę z GPS bez stanowiska, którego plik dowodzi.
+
+    `observatory.unassigned` z poprzednim stanowiskiem i źródłem w payloadzie (append-only: ślad
+    zostaje, ponowne wskazanie odtworzy stan z dziennika). Źródło gaśnie razem z osią - CHECK 0027
+    i tak nie przepuściłby ręki bez osi. `dry=True` jak w `user_assign_observatory`."""
+    actor = f"user:{uid}"
+    g = ObservatoryGesture()
+    zapisane, zrodla = [], set()
+    with (nullcontext() if dry else _immediate(con)):
+        for frame_id in frame_ids:
+            fr = con.execute("SELECT observatory_id, observatory_source FROM frame WHERE id = ?",
+                             (frame_id,)).fetchone()
+            if fr is None:
+                raise ValueError(f"frame:{frame_id} nie istnieje")
+            if fr["observatory_id"] is None:
+                g.nothing += 1
+                continue
+            if fr["observatory_source"] not in STICKY_OBSERVATORY_SOURCES:
+                g.not_hand += 1
+                continue
+            g.cleared += 1
+            zapisane.append(frame_id)
+            zrodla.add(fr["observatory_id"])
+            gps = con.execute(
+                "SELECT (SELECT value_raw FROM cards WHERE frame_id = ? AND keyword = 'SITELAT' "
+                "        ORDER BY idx LIMIT 1), "
+                "       (SELECT value_raw FROM cards WHERE frame_id = ? AND keyword = 'SITELONG' "
+                "        ORDER BY idx LIMIT 1)", (frame_id, frame_id)).fetchone()
+            g.cleared_gps += site_coords(gps[0], gps[1]) is not None
+            if dry:
+                continue
+            con.execute("UPDATE frame SET observatory_id = NULL, observatory_source = NULL "
+                        "WHERE id = ?", (frame_id,))
+            emit_event(con, actor=actor, verb="observatory.unassigned", target=f"frame:{frame_id}",
+                       now=now, payload={"observatory_id": fr["observatory_id"],
+                                         "observatory_source": fr["observatory_source"]},
+                       reason="ręka cofnęła wskazanie stanowiska")
+    g.frame_ids = tuple(zapisane)
+    g.cleared_from = tuple(sorted(zrodla))
+    return g
 
 
 # ============================================================ STAGING WRITEBACKU (krok 4, transient)
@@ -3066,15 +3370,21 @@ def _relocation_target(con, location_id, new_path):
     return row["path"]
 
 
-def _apply_relocation(con, *, location_id, old_path, new_path, now, actor):
-    """UPDATE `location.path` + `location.renamed` pod transakcją wołającego."""
+def _apply_relocation(con, *, location_id, old_path, new_path, now, actor, rename_id=None,
+                      reason=None):
+    """UPDATE `location.path` + `location.renamed` pod transakcją wołającego. Rekoncyliacja zamiaru
+    (`settle_rename_intent`) dokłada wiersz stagingu do ładunku i powód."""
     con.execute("UPDATE location SET path = ? WHERE id = ?", (new_path, location_id))
+    payload = {"before": old_path, "after": new_path}
+    if rename_id is not None:
+        payload["pending_rename"] = rename_id
     emit_event(con, actor=actor, verb="location.renamed", target=f"location:{location_id}",
-               now=now, payload={"before": old_path, "after": new_path})
+               now=now, payload=payload, reason=reason)
 
 
 @contextmanager
-def guard_file_rename(con, *, location_id, new_path, generation, now, actor="user:local"):
+def guard_file_rename(con, *, location_id, new_path, generation, now, actor="user:local",
+                      rename_id=None, status=None, reason=None, kierunek=None):
     """STRAŻ RELOKACJI (AR-17 (5)): rename pliku lokacji i przepięcie `location.path` w JEDNEJ
     transakcji `BEGIN IMMEDIATE` - bliźniak `guard_file_replace` dla `os.rename`:
 
@@ -3082,7 +3392,11 @@ def guard_file_rename(con, *, location_id, new_path, generation, now, actor="use
          (zapamiętanej przez wołającego PRZED jego bramką izolacji, dowolnej fazy) → `InplaceConflict`;
       2. anty-clobber w bazie (`_relocation_target`) → `ValueError`;
       3. ciało `with` - `os.rename` pisarza (`writeback.rename_file`);
-      4. dopiero po ciele BEZ wyjątku: UPDATE `location.path` + `location.renamed`, COMMIT.
+      4. dopiero po ciele BEZ wyjątku: UPDATE `location.path` + `location.renamed`, przy `rename_id`
+         także status wiersza stagingu (`status`, `reason`) i zgaszenie jego zamiaru (`in_flight`),
+         COMMIT. Status idzie w tej samej transakcji co relokacja (AR-29 (2)): osobna transakcja
+         zostawiała przy awarii wiersz 'pending' przy przeniesionym pliku i bazie, a ponowienie
+         widziało nową ścieżkę i mówiło 'blocked'.
     Wyjątek w ciele (rename nie zaszedł) → rollback, zero zapisu w bazie.
 
     DLACZEGO TRANSAKCJA OBEJMUJE RENAME: bramka izolacji w `writeback.commit_renames` i `os.rename`
@@ -3095,10 +3409,60 @@ def guard_file_rename(con, *, location_id, new_path, generation, now, actor="use
     po udanym renamie nie trafi na `UNIQUE(volume, path)`."""
     with _immediate(con):
         _refuse_inplace_conflict(con, location_id, generation)
+        # Zamiar zatwierdzony przez wołającego musi dalej być TEN SAM pod blokadą: między jego
+        # COMMIT-em a tą transakcją rekoncyliacja innego procesu (skan) mogła go zgasić, a rename
+        # bez otwartego zamiaru zostawiłby po śmierci procesu rozjazd bez śladu.
+        if rename_id is not None and kierunek is not None:
+            zamiar = con.execute("SELECT in_flight FROM pending_renames WHERE id = ?",
+                                 (rename_id,)).fetchone()
+            if zamiar is None or zamiar["in_flight"] != kierunek:
+                raise ValueError(f"zamiar renamu {rename_id} zgaszony przez inny proces - renamu "
+                                 f"nie było, plik nietknięty; odśwież przebieg")
         old_path = _relocation_target(con, location_id, new_path)
         yield
         _apply_relocation(con, location_id=location_id, old_path=old_path, new_path=new_path,
                           now=now, actor=actor)
+        if rename_id is not None:
+            _zamknij_wiersz_renamu(con, rename_id, status, reason)
+
+
+def _zamknij_wiersz_renamu(con, rename_id, status, reason):
+    """Status wiersza stagingu + zgaszenie zamiaru pod transakcją wołającego."""
+    con.execute("UPDATE pending_renames SET status = ?, reason = ?, in_flight = NULL WHERE id = ?",
+                (status, reason, rename_id))
+
+
+def open_rename_intent(con, *, rename_id, direction):
+    """TRWAŁY ZAMIAR RENAMU (AR-29): `in_flight` = kierunek ('commit' old→new, 'undo' new→old),
+    zatwierdzony PRZED `os.rename` (`synchronous = FULL` - przeżywa utratę zasilania). Gaśnie razem
+    z relokacją w straży (`guard_file_rename`), gdy plik na pewno nie ruszył się z miejsca
+    (`drop_rename_intent`) albo w rekoncyliacji (`settle_rename_intent`). Zamiar już otwarty → `ValueError` (EXPECT: wołający
+    rekoncyliuje przed próbą, więc drugi zamiar na tym samym wierszu to błąd kolejności).
+    Transient - bez eventu (faktem domenowym jest dopiero `location.renamed`)."""
+    if direction not in ("commit", "undo"):
+        raise ValueError(f"kierunek renamu {direction!r} spoza ('commit', 'undo')")
+    with _immediate(con):
+        cur = con.execute("UPDATE pending_renames SET in_flight = ? "
+                          "WHERE id = ? AND in_flight IS NULL", (direction, rename_id))
+        if cur.rowcount != 1:
+            raise ValueError(f"wiersz renamu {rename_id} nie istnieje albo ma już otwarty zamiar")
+
+
+def settle_rename_intent(con, *, rename_id, location_id, status, reason, now, relocate_to=None,
+                         actor="user:local"):
+    """REKONCYLIACJA ZAMIARU (AR-29): w JEDNEJ transakcji opcjonalne przepięcie TEJ SAMEJ lokacji
+    na ścieżkę, pod którą plik faktycznie stoi (`relocate_to`; `location.renamed` z powodem - ciągłość
+    historii lokacji zostaje), status wiersza stagingu i zgaszenie zamiaru. Cel zajęty w bazie przez
+    INNY wiersz (skan zdążył wciągnąć plik jako nową kopię) → `ValueError`, zero zapisu. Rozstrzygnięcie
+    (gdzie plik stoi, czy to ten plik) należy do wołającego - `writeback.reconcile_renames`."""
+    with _immediate(con):
+        if relocate_to is not None:
+            old_path = _relocation_target(con, location_id, relocate_to)
+            if old_path != relocate_to:
+                _apply_relocation(con, location_id=location_id, old_path=old_path,
+                                  new_path=relocate_to, now=now, actor=actor, rename_id=rename_id,
+                                  reason="dokończenie przerwanego renamu (rekoncyliacja zamiaru)")
+        _zamknij_wiersz_renamu(con, rename_id, status, reason)
 
 
 def stage_rename(con, *, run_id, location_id, old_path, new_path, expected_mtime):
@@ -3113,17 +3477,28 @@ def stage_rename(con, *, run_id, location_id, old_path, new_path, expected_mtime
 
 
 def set_rename_status(con, *, rename_id, status, reason=None):
-    """Ustaw status wpisu stagingu renamu ('applied'|'failed'|'skipped'|'blocked') + powód. Transient."""
+    """Ustaw status wpisu stagingu renamu ('applied'|'failed'|'skipped'|'blocked') + powód. Transient.
+    Zamiaru (`in_flight`) NIE rusza - jego cyklem rządzą `open_rename_intent`/`drop_rename_intent`,
+    straż relokacji i rekoncyliacja (AR-29)."""
     with con:
         con.execute("UPDATE pending_renames SET status = ?, reason = ? WHERE id = ?",
                     (status, reason, rename_id))
 
 
+def drop_rename_intent(con, *, rename_id):
+    """Zgaś zamiar renamu, gdy plik na pewno nie ruszył się z miejsca (prymityw odmówił, straż
+    odbiła, kompensacja wróciła plik na stare miejsce przy bazie po rollbacku). Transient."""
+    with con:
+        con.execute("UPDATE pending_renames SET in_flight = NULL WHERE id = ?", (rename_id,))
+
+
 def clear_renames_for_run(con, run_id):
     """Skasuj staging renamu przebiegu (ponowny podgląd / „Odrzuć"). DELETE sankcjonowany: lustro
-    oczekujących, nie historia (historia = event `location.renamed`). Transient — bez eventu."""
+    oczekujących, nie historia (historia = event `location.renamed`). Transient - bez eventu.
+    Wiersz z otwartym zamiarem (`in_flight`, AR-29) ZOSTAJE: niesie jedyny ślad renamu, który mógł
+    zajść bez przepięcia bazy - zdejmie go dopiero rekoncyliacja."""
     with con:
-        con.execute("DELETE FROM pending_renames WHERE run_id = ?", (run_id,))
+        con.execute("DELETE FROM pending_renames WHERE run_id = ? AND in_flight IS NULL", (run_id,))
 
 
 # ------------------------------------------------ oś KALIBRACJI — przepis + fakty (C2, #6)

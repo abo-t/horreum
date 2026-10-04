@@ -27,7 +27,9 @@ from horreum.resolve._text import norm_alnum
 from horreum.resolve.catalog import catalog_canon, xref
 
 # Stała kolejność facetów: deterministyczne drzewo (testy, describe) i kolejność grup w listwie.
-FACETS = ("object", "filter", "kind", "telescope", "night")
+# Kanał (0028) stoi zaraz po filtrze: to druga połowa odpowiedzi „jakie światło" - filtr optyczny
+# i kanał kamery kolorowej, który z niego wycięto.
+FACETS = ("object", "filter", "channel", "kind", "telescope", "night")
 
 
 def empty_state() -> dict:

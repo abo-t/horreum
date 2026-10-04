@@ -168,7 +168,17 @@ STACK_NAME_PREFIX = "masterlight"       # konwencja WBPP; porównanie na `name.l
 # wystrzeliła — ale sito wchodzi właśnie do drogi, którą jedzie CAŁE archiwum, a tam nazwa obiektu
 # jest normalna. Token = maksymalny ciąg alfanumeryczny nazwy; `_Abell 2151` daje `abell`, `2151`
 # i nie trafia w `abe`.
-DERIVED_NAME_TOKENS = frozenset({"autocrop", "abe", "dbe", "spcc", "starless", "stars"})
+#
+# `_autocrop` NIE JEST znacznikiem pochodnej (decyzja Zdzinia, E3-3 człon b): przycięcie kadru po
+# integracji to WARIANT OBRAZU, jak `_drizzle_1x`, który wchodzi od początku - ten sam stos z tymi
+# samymi subami, nie kolejny krok obróbki tła czy gwiazd. Do tej decyzji sito odsiewało go razem
+# z `_starless`, więc filtr `Teleskop=RC8R` widział jeden master z dwóch leżących na dysku.
+# Zmierzone 2026-10-04: pod `STACKS` autocropów 0 (zwykły skan nie zmienia się o ani jedną klatkę),
+# w starym drzewie obróbki 98 plików, dla których `autocrop` był JEDYNYM znacznikiem -
+# wjeżdżają drogą „Stosy" jako nowe klatki (lokacji nie miały nigdy, więc brama przyrostowa ich
+# nie pomija). Plik z drugim znacznikiem (`_autocrop_ABE`) dalej odpada przez tamten znacznik.
+DERIVED_NAME_TOKENS = frozenset({"abe", "dbe", "spcc", "starless", "stars"})
+_WARIANT_KADRU = "autocrop"
 _NAME_TOKEN_SPLIT = re.compile(r"[^0-9a-z]+")
 
 # Próg, od którego znacznik wolno dopasować jako PRZEDROSTEK tokenu, nie tylko jako cały token.
@@ -189,7 +199,8 @@ _DERIVED_DIGIT_SUFFIX = re.compile(r"\d+\Z")
 
 
 def is_derived_name(name):
-    """Czy nazwa pliku niesie znacznik POCHODNEJ OBRÓBKI (`…_ABE`, `…_autocrop`, `…StarsBack`).
+    """Czy nazwa pliku niesie znacznik POCHODNEJ OBRÓBKI (`…_ABE`, `…_starless`, `…StarsBack`).
+    `…_autocrop` pochodną NIE jest - to wariant obrazu (powód przy `DERIVED_NAME_TOKENS`).
 
     JEDEN WŁAŚCICIEL granicy §5 briefu P-I — woła go droga „Stosy" (`iter_stacks`) i zwykły skan
     w poddrzewie `STACKS` (`scan_tree`). Druga kopia tej reguły znaczyłaby dwie definicje tego,
@@ -203,6 +214,10 @@ def is_derived_name(name):
     Asymetria progu `_DERIVED_PREFIX_MIN` jest ZMIERZONA — powód i liczby przy stałej."""
     stem = name.rsplit(".", 1)[0] if "." in name else name
     for token in _NAME_TOKEN_SPLIT.split(stem.lower()):
+        # `autocrop` jest wariantem, ale PixInsight dokleja do niego kolejny krok bez separatora
+        # (`autocropSPCC`, `autocropStarless`) - reszta tokenu jest badana jak osobny token.
+        if token.startswith(_WARIANT_KADRU) and token != _WARIANT_KADRU:
+            token = token[len(_WARIANT_KADRU):]
         if not token:
             continue
         if token in DERIVED_NAME_TOKENS:
@@ -377,11 +392,12 @@ def iter_stacks(root, derived_out=None, errors_out=None):
       1. `STACK_NAME_PREFIX` — konwencja WBPP dla produktu integracji. Sito TANIE: zawęża
          7383 plików XISF drzewa obróbki do 259 bez otwierania choćby jednego.
       2. `is_derived_name` — granica §5 briefu P-I („nie wciągamy plików pochodnych
-         obróbki"). `masterLight…_autocrop` to ten sam stack po kadrowaniu, `…_ABE`/`…_starless`
-         to kolejne kroki obróbki — obrazy, nie klatki archiwum. Zmierzone na realnym drzewie
-         2026-08-01: 259 nazw pasuje sicie 1, z tego 131 niesie znacznik pochodnej → **128
-         kandydatów** (kotwica D-P-I-6; 85 to liczba INTEGRACJI, nie plików). Od 0810 to sito
-         ma drugiego wołającego (`scan_tree` w poddrzewie `STACKS`) i wspólnego właściciela.
+         obróbki"). `…_ABE`/`…_starless` to kolejne kroki obróbki - obrazy, nie klatki archiwum.
+         Zmierzone na realnym drzewie 2026-08-01: 259 nazw pasuje sicie 1, z tego 131 niesie
+         znacznik pochodnej → **128 kandydatów** (kotwica D-P-I-6; 85 to liczba INTEGRACJI, nie
+         plików). Od 0810 to sito ma drugiego wołającego (`scan_tree` w poddrzewie `STACKS`)
+         i wspólnego właściciela. `masterLight…_autocrop` (ten sam stack po kadrowaniu) od
+         decyzji E3-3 (b) przechodzi - wariant obrazu jak `_drizzle_1x`, nie krok obróbki.
 
     Nazwa NIE jest jednak dowodem, że plik jest stackiem — rozstrzyga ZEZNANIE (`IMAGETYP`),
     które sprawdza dopiero `scan_stacks`. To sito wyznacza ZAKRES (§5), tamta bramka TOŻSAMOŚĆ.
@@ -1431,6 +1447,7 @@ def copy_header_facts(header, header_hash, image_roles):
 class ScanSummary:
     """Zliczenia jednego przebiegu `scan_tree` — do firsthand-weryfikacji integralności."""
     files: int = 0
+    renames_settled: list = field(default_factory=list)  # zamiary renamu rozstrzygnięte PRZED skanem (AR-29)
     derived_skipped: int = 0  # pliki pochodne obróbki odsiane w poddrzewie STACKS (E4-1 wariant A+)
     derived_paths: list = field(default_factory=list)   # ich ścieżki — wykluczenie WIDOCZNE, nie cichy licznik
     frames_new: int = 0
@@ -2669,6 +2686,13 @@ def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now,
         callbacku GUI; rdzeń woła synchronicznie.
     """
     summary = ScanSummary()
+    # Rename przerwany między `os.rename` a COMMIT (AR-29) rozstrzyga się PRZED skanem: skan wciągnąłby
+    # plik spod nowej nazwy jako drugą lokację i rekoncyliacja musiałaby odmówić. Pusty zbiór zamiarów
+    # = jedno zapytanie. Tylko zamiary TEGO woluminu (serial znany); skan bez serialu ich nie rusza.
+    # Import leniwy, bo `writeback` importuje `scan`.
+    if volume != "?":
+        from . import writeback
+        summary.renames_settled = writeback.reconcile_renames(con, now=now, volume=volume)
     excluded = []
     root = canonize_root(root)                             # forma literowa + casing z dysku; UNC → odmowa (§0)
     # `errors_out` (E4-6): katalogi NIEPRZECZYTANE przez `os.walk` (zerwany SMB, odebrane prawa).

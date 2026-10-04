@@ -4,7 +4,9 @@
 Ten sam materiał zintegrowany kilka razy: inne piksele, więc „Duplikaty" go nie widzą. Read-model
 rozstrzyga PARAMI, czy dwa stosy tej samej grupy (obiekt, kamera, filtr, ekspozycja, okno) to
 odrębne integracje, pochodne jednej, czy baza tego nie wie - wyłącznie ze świadków z bazy
-(`declared_rows`, sygnatura `tool`, pomiary szumu i PSF w nagłówku), nigdy z nazwy pliku.
+(`declared_rows`, sygnatura `tool`, pomiary szumu i PSF w nagłówku), nigdy z nazwy pliku wprost.
+Kanał kamery kolorowej (`frame.channel`, 0028) też przychodzi z bazy - nazwę czyta resolver, a jego
+testy (klucz grupy, kanały jednej sesji) mieszkają w `test_channel.py`.
 
 Część czysta (klasyfikacja, koercja, read-model na syntetycznej bazie) biegnie bez Qt; testy widoku
 biorą `qapp`, który pomija się bez PySide6 - pełny pytest bez Qt zostaje prawdziwy."""
@@ -126,7 +128,7 @@ def test_pulapka_tekstu_ekspozycji_nie_rozbija_grupy(monkeypatch):
               "filter_canon": "Ha", "raw_json": "{}", "window_start": "2025-12-16T17:27:54",
               "window_end": "2026-01-21T20:15:51", "tool": None, "declared_rows": None,
               "creation_time": None, "kept_key": None, "kept_at": None,
-              "ra_deg": None, "dec_deg": None}
+              "ra_deg": None, "dec_deg": None, "channel": None}
     monkeypatch.setattr(queries, "_stack_version_rows", lambda con: [
         {**wiersz, "frame_id": 1, "exptime": "600.00"},
         {**wiersz, "frame_id": 2, "exptime": 600.0},

@@ -1,0 +1,20 @@
+-- 0029 - TRWAŁY ZAMIAR RENAMU (AR-29): `pending_renames.in_flight`.
+--
+-- PRZYROST (jedna kolumna `ADD COLUMN`) - zero przebudowy tabeli, zero kasowania wierszy.
+--
+-- Wiersz stagingu niesie już parę ścieżek (`old_path` -> `new_path`) i lokację, ale nie mówi, czy
+-- `os.rename` mógł zajść. `os.rename` i przepięcie `location.path` to dwa media (dysk, baza): gdy
+-- plik przeszedł pod nową nazwę, a COMMIT bazy padł albo proces zginął między nimi, baza stała pod
+-- starą ścieżką bez śladu próby. Skan dopisywał wtedy nową lokację, starą zdejmował dopiero pass
+-- obecności, a ciągłość historii lokacji (`location.renamed`) przepadała.
+--
+-- `in_flight` = kierunek próby zapisany i ZATWIERDZONY PRZED `os.rename`: 'commit' (old -> new) albo
+-- 'undo' (new -> old). Gaśnie w tej samej transakcji, w której baza dogania dysk (straż relokacji
+-- `repo.guard_file_rename` razem ze statusem wiersza), przy statusie odmowy (plik nie ruszył się
+-- z miejsca) albo w rekoncyliacji (`writeback.reconcile_renames`), która przepina TĘ SAMĄ lokację
+-- tam, gdzie plik faktycznie stoi. Pisze ją WYŁĄCZNIE klinga (`repo.open_rename_intent`,
+-- `repo.set_rename_status`, `repo.guard_file_rename`, `repo.settle_rename_intent`).
+-- NULL = brak próby w toku (wiersze sprzed 0029 też - żaden nie był wtedy w locie z tym znacznikiem).
+--
+-- BACKFILLU NIE MA: SQL nie wie, które wiersze sprzed migracji przerwała awaria.
+ALTER TABLE pending_renames ADD COLUMN in_flight TEXT CHECK (in_flight IN ('commit', 'undo'));

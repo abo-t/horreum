@@ -21,10 +21,11 @@ from .grouper import NO_TELESCOPE_KINDS
 from .resolve._coerce import _to_text
 from .resolve._text import norm_alnum
 from .resolve.catalog import catalog_canon, header_form
+from .resolve.channel import frame_channel
 from .resolve.filters import normalize_filter
 from .resolve.objects import (STICKY_OBJECT_SOURCES, WEAK_OBJECT_SOURCES, ObjectIdentity,
                               load_own_objects, resolve_object)
-from .resolve.observatory import site_coords
+from .resolve.observatory import nearest_site, site_coords
 from .resolve.paths import STACK_KIND, object_folder, object_from_path, filename_tokens
 from .resolve.regions import resolve_region
 from .resolve.solar import resolve_solar
@@ -51,6 +52,11 @@ class ResolveSummary:
     observatories_new: int = 0            # nowe stanowiska (seed z propose_observatory, created=True)
     observatories_assigned: int = 0       # klatki z przypisanym observatory_id
     gps_unparseable: int = 0              # klatki z GPS OBECNYM ale nieparsowalnym (→ review_summary)
+    # STANOWISKO Z RĘKI (0027) - przebieg go NIE tyka. Dwie liczby, bo to dwie wiadomości: ile klatek
+    # ręka trzyma w ogóle i ile z nich ma GPS wskazujący INNE stanowisko (ręka wygrała z plikiem -
+    # człowiek ma to widzieć, bo albo poprawił zły zegar/GPS, albo pomylił się przy geście).
+    observatories_hand: int = 0           # klatki ze stanowiskiem wskazanym ręką (pominięte)
+    observatories_hand_vs_gps: int = 0    # …z GPS nagłówka spoza promienia stanowiska z ręki
     own_aliases_seeded: int = 0           # nowe równoważności ze słownika obiektów własnych (S1)
     own_aliases_retired: int = 0          # równoważności zdjęte po edycji słownika (migracja)
     own_frames_unassigned: int = 0        # klatki odpięte razem z wycofaną równoważnością
@@ -66,6 +72,9 @@ class ResolveSummary:
     # zapisuje `repo.assign_object` (`reason` + `next_object_*` w `object.unassigned`).
     objects_path_overridden: int = 0      # klatki ze ścieżki przepięte nagłówkiem na INNY obiekt
     objects_path_to_header: int = 0       # …na TEN SAM obiekt (źródło `path` → nagłówek)
+    # KANAŁ gotowego obrazu (0028, P4-3) - pochodna z nazw kopii, `derive_channels`.
+    channels_known: int = 0               # gotowe obrazy z kanałem R/G/B po przebiegu
+    channels_changed: int = 0             # …z tego zmienione TYM przebiegiem (skutek, nie wejście)
 
 
 def sync_own_aliases(con, now, s=None):
@@ -432,6 +441,34 @@ def path_proposal(con, path, kind="light"):
     return None
 
 
+def derive_channels(con, now):
+    """Oś KANAŁU (0028, P4-3): `frame.channel` gotowych obrazów z NAZW ich kopii - bez odczytu plików.
+
+    JEDEN właściciel derywacji (reguła nazwy w `resolve.channel`, zapis klingą
+    `repo.backfill_frame_channel` z jednym eventem na przebieg). Zakres = `master_light`: konwencja
+    kanału w nazwie należy do produktu integracji WBPP, a light z literą w nazwie (`…_60s_B.fits`)
+    nie niesie kanału kamery kolorowej, tylko numer albo filtr. Kopie wszystkie, także nieobecne -
+    nazwa jest faktem o obrazie, nie o obecności (stary plik WBPP po przenosinach do archiwum stosów
+    zostaje w bazie jako kopia zniknięta i mówi to samo). Przeliczana w obie strony: klatka, której
+    żadna kopia już kanału nie niesie, wraca do NULL. Zwraca `(znane, zmienione)`."""
+    nazwy, mono = {}, set()
+    for r in con.execute(
+            "SELECT f.id AS fid, l.path AS path, c.is_mono AS is_mono FROM frame f "
+            "LEFT JOIN location l ON l.frame_id = f.id "
+            "LEFT JOIN camera c ON c.id = f.camera_id "
+            "WHERE f.kind = ? ORDER BY f.id, l.id", (STACK_KIND,)).fetchall():
+        sciezki = nazwy.setdefault(r["fid"], [])
+        if r["is_mono"] == 1:
+            mono.add(r["fid"])
+        if r["path"] is not None:
+            sciezki.append(r["path"].replace("\\", "/").rsplit("/", 1)[-1])
+    # Kamera MONO nie ma kanałów koloru: litera w nazwie jej stosu to filtr, nie kanał - pozycja
+    # w nazwie tego nie rozstrzyga, kamera tak.
+    items = [(fid, None if fid in mono else frame_channel(n)) for fid, n in nazwy.items()]
+    zmienione = repo.backfill_frame_channel(con, items, now=now)     # no-op gdy pusto
+    return sum(1 for _f, k in items if k is not None), zmienione
+
+
 def run_resolver(con, now):
     """Po skanie: dla każdego frame'a z nagłówkiem rozwiąż OBIEKT (tylko light/master_light) i FILTR
     (wszystkie). Obiekt rozpoznany → `upsert_object`+`assign_object` (+`add_object_alias`, gdy
@@ -442,7 +479,8 @@ def run_resolver(con, now):
     człowieka nie jest re-derywowana ani nadpisywana przez żaden szczebel automatyczny. Light
     nierozpoznany → delta (jeden zbiorczy `object.review_summary`, liczony ze STANU
     `object_id IS NULL` — D5); kalibracja → pomijana (poprawny NULL). Filtr → backfill zbiorczy
-    `filter_canon`. Zwraca `ResolveSummary`. Idempotentny.
+    `filter_canon`; kanał gotowych obrazów z nazw kopii → backfill zbiorczy `channel`
+    (`derive_channels`, 0028). Zwraca `ResolveSummary`. Idempotentny.
 
     SŁOWNIK OBIEKTÓW WŁASNYCH siedzi WEWNĄTRZ `resolve_object` (ostatni jego szczebel), więc stoi
     przed aliasem i regionem — jest jawną wiedzą o NAZWIE, jak `_COMMON`, a nie inferencją. Dzięki
@@ -547,6 +585,7 @@ def run_resolver(con, now):
     s.filters_set = len(filter_items)
     s.objects_unresolved_distinct = len(unresolved)
     repo.backfill_filter_canon(con, filter_items, now=now)        # no-op gdy pusto
+    s.channels_known, s.channels_changed = derive_channels(con, now)
     repo.flag_object_review_summary(
         con, sorted(unresolved.items(), key=lambda kv: (-kv[1], kv[0])), now=now)  # no-op gdy pusto
     # E5-1: powód przejścia `path → nagłówek` zapisuje KLINGA przy każdej klatce, w transakcji
@@ -570,7 +609,8 @@ def run_resolver(con, now):
 
     # oś OBSERWATORIUM foldnięta tu (SPOT — jeden wjazd; callerzy bez zmian). GPS z `cards`, nie z pętli
     # `header` powyżej (osobny SELECT — SITELAT/SITELONG nie są polami gorącymi `header`).
-    s.observatories_new, s.observatories_assigned, s.gps_unparseable = resolve_observatory(con, now)
+    (s.observatories_new, s.observatories_assigned, s.gps_unparseable,
+     s.observatories_hand, s.observatories_hand_vs_gps) = resolve_observatory(con, now)
     return s
 
 
@@ -581,18 +621,39 @@ def resolve_observatory(con, now):
     brak — kalibracja i klatki sprzed montażu GPS; XISF-y już tu NIE należą: od P6a/P6b mają karty,
     więc 202 z nich wchodzą na oś). GPS OBECNY-ale-nieparsowalny → NULL + zliczenie do JEDNEGO `observatory.review_
     summary`. Iteracja `ORDER BY f.id` = pierwszy przebieg powtarzalny (§5 D4). Zwraca (new, assigned,
-    gps_unparseable). Idempotentny: re-run zwraca te same id (anchor stabilny), zero nowych eventów."""
+    gps_unparseable, hand, hand_vs_gps). Idempotentny: re-run zwraca te same id (anchor stabilny),
+    zero nowych eventów.
+
+    RĘKA NIETYKALNA (0027): klatka ze stanowiskiem wskazanym ręką jest pomijana PRZED propozycją -
+    także gdy MA GPS. Nagłówek nie przegłosowuje ręki (guard stoi też w `repo.assign_observatory`;
+    tu pomijamy wcześniej, żeby GPS takiej klatki nie powoływał stanowiska, którego nikt nie użyje).
+    ROZJAZD jest LICZONY, nie naprawiany: GPS poza promieniem `THRESH_KM` od KANONU stanowiska
+    z ręki (i od każdego członka scalonego pod ten kanon) → `hand_vs_gps`. Czytamy ten sam
+    `nearest_site`, więc „rozjazd" znaczy dokładnie „automat przypisałby gdzie indziej"."""
     rows = con.execute(
-        "SELECT f.id AS fid, "
+        "SELECT f.id AS fid, f.observatory_id AS oid, f.observatory_source AS osrc, "
         "  (SELECT value_raw FROM cards WHERE frame_id = f.id AND keyword = 'SITELAT' "
         "   ORDER BY idx LIMIT 1) AS lat_raw, "
         "  (SELECT value_raw FROM cards WHERE frame_id = f.id AND keyword = 'SITELONG' "
         "   ORDER BY idx LIMIT 1) AS lon_raw "
         "FROM frame f ORDER BY f.id").fetchall()
-    new = assigned = 0
+    new = assigned = hand = hand_vs_gps = 0
     unparseable = {}          # (lat_raw, lon_raw) -> liczba (GPS obecny ale nieparsowalny)
+    kanon_reki = None         # {observatory_id: canon_id} - leniwie, tylko gdy ręka ma klatki z GPS
     for r in rows:
         pt = site_coords(r["lat_raw"], r["lon_raw"])
+        if r["osrc"] in repo.STICKY_OBSERVATORY_SOURCES:
+            hand += 1
+            if pt is not None:
+                if kanon_reki is None:
+                    kanon_reki = {c["id"]: c["canon_id"] for c in con.execute(
+                        "SELECT id, canon_id FROM observatory_canonical").fetchall()}
+                    stanowiska = con.execute("SELECT id, lat, lon FROM observatory").fetchall()
+                kanon = kanon_reki.get(r["oid"])
+                czlonkowie = [(o["id"], o["lat"], o["lon"]) for o in stanowiska
+                              if kanon_reki.get(o["id"]) == kanon]
+                hand_vs_gps += nearest_site(pt, czlonkowie) is None
+            continue
         if pt is None:
             if r["lat_raw"] or r["lon_raw"]:            # raw OBECNE ale śmieciowe → delta (review)
                 key = (r["lat_raw"], r["lon_raw"])
@@ -605,7 +666,7 @@ def resolve_observatory(con, now):
     # klucz sortu = str(para) — pary raw mogą zawierać None (nieporównywalne z str inaczej), det.
     repo.flag_observatory_review_summary(
         con, sorted(unparseable.items(), key=lambda kv: (-kv[1], str(kv[0]))), now=now)  # no-op gdy pusto
-    return new, assigned, sum(unparseable.values())
+    return new, assigned, sum(unparseable.values()), hand, hand_vs_gps
 
 
 @dataclass

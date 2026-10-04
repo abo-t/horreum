@@ -567,7 +567,8 @@ def _lista_kanonow(canons, maks=_KANONY_W_ZDANIU):
     return ", ".join(nazwy[:maks]) + i18n.t("grid.sel.object_canons_more", n=len(nazwy) - maks)
 
 
-def zdanie_pominiec(gest, *, nothing_key="grid.sel.object_skip_nothing"):
+def zdanie_pominiec(gest, *, nothing_key="grid.sel.object_skip_nothing",
+                    prefix="grid.sel.object_skip_", odmiana=False):
     """Człony zdania po geście osi obiektu: rozbicie pominięć PER FAKT plus „w tym gotowe obrazy".
     Czysta funkcja; pusty łańcuch, gdy gest nie ma czego dopowiedzieć.
 
@@ -591,10 +592,20 @@ def zdanie_pominiec(gest, *, nothing_key="grid.sel.object_skip_nothing"):
     Gotowe obrazy NIE stoją w pętli pominięć (D-OW-7): od chwili, gdy stos jest w zasięgu gestów,
     ta liczba mówi o tym, co gest ZROBIŁ, a nie czego nie tknął - „nazwano 30 · w tym gotowe
     obrazy: 2" znaczy „dwa z tych trzydziestu to obrazy po integracji". Człon zostaje osobny, bo to
-    jedyny zapis osi, który sięga rodowodu - i należy do tego samego zdania na KAŻDEJ powierzchni."""
-    czlony = [i18n.t(nothing_key if sufiks == "nothing" else f"grid.sel.object_skip_{sufiks}", n=n)
-              for sufiks, n in gest.skipped_breakdown if n]
-    if gest.stacks:
+    jedyny zapis osi, który sięga rodowodu - i należy do tego samego zdania na KAŻDEJ powierzchni.
+
+    OŚ SPRZĘTU MÓWI TĄ SAMĄ GRAMATYKĄ (R-S2b-15): `repo.ConfigGesture` ma własne
+    `skipped_breakdown`, a wołający podaje `prefix` swoich kluczy. Jej człony są FRAZAMI odmienianymi
+    przez liczbę (`odmiana=True` → `t_plural`: „1 klatka bez kamery", „5 klatek bez kamery"), bo
+    to klatki, a nie licznik po dwukropku. Zera nie są drukowane na żadnej osi. Gest bez gotowych
+    obrazów (`stacks`) nie niesie tego pola - gest zestawu ich nie liczy, o rodowodzie mówi
+    osobny człon wołającego."""
+    def czlon(sufiks, n):
+        klucz = nothing_key if sufiks == "nothing" else f"{prefix}{sufiks}"
+        return i18n.t_plural(klucz, n) if odmiana else i18n.t(klucz, n=n)
+
+    czlony = [czlon(sufiks, n) for sufiks, n in gest.skipped_breakdown if n]
+    if getattr(gest, "stacks", 0):
         czlony.append(i18n.t_plural("grid.sel.object_stacks", gest.stacks))
     return "".join(czlony)
 
@@ -1758,7 +1769,7 @@ class MacroBar(QWidget):
 
 
 class _TokenRow(QWidget):
-    """Jeden rząd edytora wzoru: typ tokenu + argument (folder→poziom, orig→regex) + ↑↓⊖. `spec()`
+    """Jeden rząd edytora wzoru: typ tokenu + argument (folder→poziom, orig→regex, kind→wielkość liter) + ↑↓⊖. `spec()`
     zwraca goły string (token bez argumentu) LUB dict `{"t":…}` (parametryczny) — forma DANE `naming`."""
 
     changed = Signal()
@@ -1769,7 +1780,11 @@ class _TokenRow(QWidget):
     _TOKENS = (("grid.token.datetime", "datetime"), ("grid.token.object", "object"),
                ("grid.token.kind", "kind"), ("grid.token.filter", "filter"),
                ("grid.token.exp", "exp"), ("grid.token.disc", "disc"),
-               ("grid.token.folder", "folder"), ("grid.token.orig", "orig"))
+               ("grid.token.folder", "folder"), ("grid.token.orig", "orig"),
+               ("grid.token.flatgrp", "flatgrp"), ("grid.token.trail", "trail"))
+    # Wielkość liter tokenu kind: (klucz-etykiety, wartość `case`; None = jak w bazie, goły "kind").
+    _CASES = (("grid.token.case_keep", None), ("grid.token.case_upper", "upper"),
+              ("grid.token.case_lower", "lower"))
 
     def __init__(self, spec="kind", parent=None):
         super().__init__(parent)
@@ -1783,6 +1798,10 @@ class _TokenRow(QWidget):
         self.regex = QLineEdit(); self.regex.setPlaceholderText(i18n.t("grid.token.regex_ph"))
         self.regex.setMinimumWidth(160)
         lay.addWidget(self.regex)
+        self.case = QComboBox()
+        for lbl, val in self._CASES:
+            self.case.addItem(i18n.t(lbl), val)
+        lay.addWidget(self.case)
         lay.addStretch(1)                                           # wypełniacz → przyciski zawsze przy prawej
         btn_up = QPushButton("↑"); btn_dn = QPushButton("↓"); btn_rm = QPushButton("⊖")
         for b in (btn_up, btn_dn, btn_rm):
@@ -1794,12 +1813,14 @@ class _TokenRow(QWidget):
         self.combo.currentIndexChanged.connect(lambda *_: self.changed.emit())
         self.level.valueChanged.connect(lambda *_: self.changed.emit())
         self.regex.textChanged.connect(lambda *_: self.changed.emit())
+        self.case.currentIndexChanged.connect(lambda *_: self.changed.emit())
         self.set_spec(spec)
 
     def _sync_args(self):
         tok = self.combo.currentData()
         self.level.setVisible(tok == "folder")
         self.regex.setVisible(tok == "orig")
+        self.case.setVisible(tok == "kind")
 
     def set_spec(self, spec):
         tok = spec.get("t") if isinstance(spec, dict) else spec
@@ -1811,6 +1832,9 @@ class _TokenRow(QWidget):
             self.level.setValue(int(args.get("n", 1)))
         elif tok == "orig":
             self.regex.setText(str(args.get("re", "")))
+        elif tok == "kind":
+            j = self.case.findData(args.get("case"))
+            self.case.setCurrentIndex(j if j >= 0 else 0)
         self._sync_args()
 
     def spec(self):
@@ -1819,6 +1843,8 @@ class _TokenRow(QWidget):
             return {"t": "folder", "n": self.level.value()}
         if tok == "orig":
             return {"t": "orig", "re": self.regex.text()}
+        if tok == "kind" and self.case.currentData() is not None:
+            return {"t": "kind", "case": self.case.currentData()}
         return tok
 
 
@@ -4885,6 +4911,9 @@ class FramesView(QWidget):
         if facet == "filter":
             return [(r["filter_canon"], r["filter_canon"], r["n"])
                     for r in queries.facet_filters(self.con, ids)]
+        if facet == "channel":
+            return [(r["channel"], r["channel"], r["n"])
+                    for r in queries.facet_channels(self.con, ids)]
         if facet == "kind":
             return [(r["kind"], r["kind"], r["n"]) for r in queries.facet_kinds(self.con, ids)]
         if facet == "telescope":
@@ -5506,7 +5535,14 @@ class FramesView(QWidget):
                                      i18n.t("grid.echo.batch_stats", med=f"{med:g}", spread=f"{spread:g}"),
                                      "", "", median=med, spread=spread)
         else:
-            self.rename_bar.set_echo(primary, i18n.t("grid.echo.no_time_batch"), "", "")
+            # Brak Δ to brak DRUGIEGO źródła do porównania, nie brak czasu: nazwy składają się
+            # z DATE-OBS bez nazwy-świadka (pliki NINA). „Brak źródła czasu" tylko, gdy żadna
+            # klatka wsadu nie ma czasu ani w nagłówku, ani w nazwie.
+            ma_czas = any(naming.header_dt(r.get("date_obs")) or (
+                r.get("path") and naming.filename_dt(os.path.basename(r["path"]))) for r in scope)
+            self.rename_bar.set_echo(
+                primary, i18n.t("grid.echo.no_delta_batch" if ma_czas else "grid.echo.no_time_batch"),
+                "", "")
 
     def set_busy(self, busy):
         """Podczas etapu pipeline'u wyłącz akcje ZAPISU grida (makro/rename/staging/commit/undo) — worker
@@ -5992,7 +6028,8 @@ class FramesView(QWidget):
 
     def _after_undo_rename(self, op, res):
         """Ogon cofnięcia renamu. BŁĄD JEST WIDOCZNY I DA SIĘ GO PONOWIĆ: `failed` bywa rozdarciem
-        plik↔baza („plik PRZENIESIONY…, baza NIE przepięta - przeskanuj katalog") albo czkawką
+        plik↔baza („plik PRZENIESIONY…, baza NIE przepięta - zamiar renamu zapisany: ponowienie albo
+        cofnięcie przebiegu dokończy przepięcie") albo czkawką
         `os.rename` na udziale, a wiersze nieudanego cofnięcia zostają w przebiegu jako 'applied'.
         Dawniej zdanie mówiło samo „przywrócono: 0", a „Cofnij" gasło - rozjazd znikał z ekranu,
         a jedyna droga ponowienia (run_id) ginęła razem z przyciskiem. Teraz zdanie niesie liczbę

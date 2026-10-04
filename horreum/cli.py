@@ -268,6 +268,31 @@ def main(argv=None):
                       help="wypisz sam spis jako JSON (do przekierowania: > przed.json)")
     p_hf.add_argument("--baseline", help="plik JSON ze spisem SPRZED etapu; ubytek → kod wyjścia 1")
 
+    # STANOWISKO Z RĘKI (0027): klatki bez GPS (RAW z lustrzanki - read-only, writeback odpada).
+    # DRY domyślnie jak każde polecenie mutujące; `clear` jest drogą powrotu tego samego gestu.
+    p_obs = sub.add_parser("observatory",
+                           help="stanowisko wskazane REKA dla klatek bez GPS (DRY domyslnie; --apply)")
+    obs_sub = p_obs.add_subparsers(dest="obs_cmd")
+    p_obs_as = obs_sub.add_parser("assign", help="wskaz stanowisko (istniejace --id albo --lat/--lon)")
+    p_obs_cl = obs_sub.add_parser("clear", help="cofnij wskazanie reki (GPS z naglowka zostaje)")
+    for p in (p_obs_as, p_obs_cl):
+        p.add_argument("db", help="ścieżka pliku bazy")
+        p.add_argument("--frames", default=None, help="frame_id po przecinku (np. 12,13,14)")
+        p.add_argument("--path-like", default=None,
+                       help="wzorzec SQL LIKE na ścieżce OBECNEJ kopii (np. %%\\LMC\\%%)")
+        p.add_argument("--filter-json", default=None,
+                       help="drzewo filtra JSON (jak grid): ścieżka pliku LUB inline")
+        p.add_argument("--apply", action="store_true", help="WYKONAJ zapis (bez tego DRY)")
+    p_obs_as.add_argument("--id", type=int, default=None, dest="observatory_id",
+                          help="istniejące stanowisko (id z widoku stanowisk)")
+    p_obs_as.add_argument("--lat", type=float, default=None, help="szerokość, stopnie dziesiętne")
+    p_obs_as.add_argument("--lon", type=float, default=None,
+                          help="długość, stopnie dziesiętne (-180..180, wschód dodatnia)")
+    p_obs_as.add_argument("--name", default=None, help="nazwa nowego/nienazwanego stanowiska")
+    p_obs_as.add_argument("--elev", type=float, default=None, help="wysokość n.p.m. w metrach")
+    p_obs_as.add_argument("--overwrite", action="store_true",
+                          help="nadpisz stanowisko już przypisane (z GPS albo z ręki)")
+
     args = parser.parse_args(argv)
     if args.cmd == "init":
         con = db.open_db(args.path)
@@ -394,6 +419,8 @@ def main(argv=None):
         return _cmd_park(args)
     if args.cmd == "target":
         return _cmd_target(args)
+    if args.cmd == "observatory":
+        return _cmd_observatory(args, p_obs)
     if args.cmd == "backfill-xisf":
         from .scan import backfill_xisf_headers          # lazy (astropy przez scan)
         now = datetime.now(timezone.utc).isoformat()
@@ -426,20 +453,25 @@ def main(argv=None):
         print(_format_import(args.donor, args.db, summary))
         return 0
     if args.cmd == "rename":
-        # Qt-wolne: naming/filter_engine/queries (astropy-free); writeback/repo lazy tylko przy --apply/--undo.
-        from . import filter_engine, naming
+        # Qt-wolne: naming/filter_engine/queries; writeback także w DRY - liczy przerwane renamy (AR-29).
+        from . import filter_engine, naming, writeback
         from .gui import queries
         now = datetime.now(timezone.utc).isoformat()
         source = "date_obs" if args.source == "date-obs" else "filename"
         con = db.open_db(args.db)
         if args.undo:
-            from . import writeback
             res = writeback.undo_renames(con, args.undo, now=now)
             con.close()
             print(_format_rename_undo(args.db, args.undo, res))
             return 0
         tree = _load_filter_tree(args.filter_json)             # ścieżka pliku LUB inline (SPOT z gridem)
         template = _load_filter_tree(args.template_json) or naming.DEFAULT_TEMPLATE   # file-or-inline; brak→domyślny
+        # Przerwane renamy (AR-29) PRZED podglądem: podgląd liczy nazwy od `location.path`, więc baza
+        # musi już stać tam, gdzie plik. DRY nie mutuje - mówi tylko, ile zamiarów czeka.
+        if args.apply:
+            pre_reconciled = writeback.reconcile_renames(con, now=now)
+        else:
+            otwarte = len(writeback.open_rename_intents(con))
         frame_ids = filter_engine.run(
             tree,
             leaf_fn=lambda k, kw, p1, p2: queries.leaf_frame_ids(con, k, kw, p1, p2),
@@ -456,9 +488,9 @@ def main(argv=None):
             return 2
         if not args.apply:
             con.close()
-            print(_format_rename_dry(args.db, run, limit=args.limit))          # DRY: zero mutacji
+            print(_format_rename_dry(args.db, run, limit=args.limit, open_intents=otwarte))  # DRY: zero mutacji
             return 0
-        from . import repo, writeback
+        from . import repo
         for p in run.touched:
             repo.stage_rename(con, run_id=run_id, location_id=p.location_id, old_path=p.old_path,
                               new_path=p.new_path, expected_mtime=p.mtime)
@@ -468,7 +500,7 @@ def main(argv=None):
                 print(f"  rename: {done}/{total}")
         res = writeback.commit_renames(con, run_id, now=now, progress=heartbeat)
         con.close()
-        print(_format_rename_apply(args.db, run, res, run_id))
+        print(_format_rename_apply(args.db, run, res, run_id, pre_reconciled=pre_reconciled))
         return 0
     if args.cmd == "project":
         # Qt-wolne: filter_engine/queries/projection (projection importuje gui.queries, Qt-free).
@@ -773,11 +805,16 @@ def _presence_tail(con, root, *, now):
     yield f"  lineage: {run_lineage(con, now=now)}"
 
 
-def _format_rename_dry(db_path, run, *, limit):
+def _format_rename_dry(db_path, run, *, limit, open_intents=0):
     """DRY-raport renamu: liczby + zagregowane powody skipów + lista `stary -> nowy` (basename, do limitu).
-    ASCII-safe glify (`->`, bez `→`/`Δ`); polskie znaki w powodach przechodzą przez utf-8 reconfigure."""
+    ASCII-safe glify (`->`, bez `→`/`Δ`); polskie znaki w powodach przechodzą przez utf-8 reconfigure.
+    `open_intents` > 0: przerwane renamy (AR-29) - podgląd mógł liczyć od nazwy, której na dysku już nie
+    ma; --apply albo --undo najpierw dogoni bazę."""
     lines = [f"Horreum rename {db_path} (DRY -- bez zmian na dysku):",
              f"  do zmiany: {len(run.touched)}; pominieto: {len(run.skipped)}"]
+    if open_intents:
+        lines.append(f"  UWAGA: przerwane renamy czekajace na dokonczenie: {open_intents} "
+                     f"(--apply albo --undo przepnie baze tam, gdzie stoja pliki, przed podgladem)")
     reasons = {}
     for s in run.skipped:
         reasons[s.reason] = reasons.get(s.reason, 0) + 1
@@ -790,12 +827,27 @@ def _format_rename_dry(db_path, run, *, limit):
     return "\n".join(lines)
 
 
-def _format_rename_apply(db_path, run, res, run_id):
-    """Raport --apply: wynik commitu + osobno skipy podglądu; run_id i GOTOWA komenda undo (R2 #7)."""
+def _rename_reconciled_lines(results):
+    """Wiersze rekoncyliacji przerwanych renamów (AR-29): dokończone i nierozstrzygnięte z powodem."""
+    if not results:
+        return []
+    done = [fr for fr in results if fr.status == "reconciled"]
+    lines = [f"  dokonczone przerwane renamy: {len(done)}; nierozstrzygniete: "
+             f"{len(results) - len(done)}"]
+    for fr in results:
+        tag = "RECONCILED" if fr.status == "reconciled" else "OPEN"
+        lines.append(f"    {tag} {Path(fr.path).name}: {fr.reason}")
+    return lines
+
+
+def _format_rename_apply(db_path, run, res, run_id, *, pre_reconciled=()):
+    """Raport --apply: wynik commitu + osobno skipy podglądu; run_id i GOTOWA komenda undo (R2 #7).
+    Rekoncyliacja przerwanych renamów (przed podglądem i na wejściu commitu) - osobne wiersze."""
     lines = [f"Horreum rename {db_path} --apply:",
              f"  przemianowano: {len(res.applied)}; zablokowane: {len(res.blocked)}; "
              f"bledy: {len(res.failed)}; pominiete(commit): {len(res.skipped)}; "
              f"pominiete(podglad): {len(run.skipped)}"]
+    lines += _rename_reconciled_lines(list(pre_reconciled) + list(res.reconciled))
     for fr in res.blocked:
         lines.append(f"    BLOCKED {Path(fr.path).name}: {fr.reason}")
     for fr in res.failed:
@@ -807,11 +859,13 @@ def _format_rename_apply(db_path, run, res, run_id):
 
 def _format_rename_undo(db_path, run_id, res):
     """Raport --undo: przywrócone/zablokowane/błędy - każdy błąd z powodem, jak w raporcie --apply.
-    Błąd bywa rozdarciem plik↔baza („plik PRZENIESIONY…, baza NIE przepięta - przeskanuj katalog"),
-    a sam licznik chował go w „bledy: 1". Wiersze nieudane zostają w przebiegu jako 'applied', więc
-    raport podaje też komendę ponowienia."""
+    Błąd bywa przepięciem bazy, które nie weszło („baza nie przyjęła przepięcia… plik wrócił") albo
+    rozdarciem z otwartym zamiarem („plik PRZENIESIONY…, zamiar renamu zapisany" - ponowienie
+    rekoncyliuje, AR-29), a sam licznik chował go w „bledy: 1". Wiersze nieudane zostają
+    w przebiegu jako 'applied', więc raport podaje też komendę ponowienia."""
     lines = [f"Horreum rename {db_path} --undo {run_id}:",
              f"  przywrocono: {len(res.restored)}; zablokowane: {len(res.blocked)}; bledy: {len(res.failed)}"]
+    lines += _rename_reconciled_lines(res.reconciled)
     for fr in res.blocked:
         lines.append(f"    BLOCKED {Path(fr.path).name}: {fr.reason}")
     for fr in res.failed:
@@ -1039,6 +1093,105 @@ def _cmd_target(args):
             orphan = "  [poza katalogiem]"
         prio = "-" if r["priority"] is None else str(r["priority"])
         lines.append(f"  {r['canon']:<16}{r['status']:<9}{prio:>5}  {r['note'] or ''}{orphan}")
+    print("\n".join(lines))
+    return 0
+
+
+def _cmd_observatory(args, parser):
+    """`horreum observatory assign|clear` - stanowisko wskazane RĘKĄ (0027) i droga powrotu.
+
+    WYBÓR KLATEK JEST JAWNY I OBOWIĄZKOWY: `--frames`, `--path-like` i `--filter-json` dają zbiory,
+    a podane razem - ich CZĘŚĆ WSPÓLNĄ (zawężenie, nigdy poszerzenie). Brak selektora = kod 2,
+    a nie „cała baza": jeden gest stemplujący całe archiwum jednym stanowiskiem to dokładnie ta
+    pomyłka, której DRY ma nie dopuścić do `--apply`.
+
+    DRY liczy TĄ SAMĄ klingą (`dry=True`), więc podgląd i zapis nie mają dwóch kopii reguł. Raport
+    kończy się gotową komendą odwrotu (wzorzec `rename --undo`). ASCII - konsola cp1250."""
+    from . import filter_engine, repo
+    from .gui import queries
+    if args.obs_cmd is None:
+        parser.print_help()
+        return 2
+    now = datetime.now(timezone.utc).isoformat()
+    con = db.open_db(args.db)
+    try:
+        zbiory = []
+        if args.frames:
+            try:
+                zbiory.append({int(x) for x in args.frames.split(",") if x.strip()})
+            except ValueError:
+                print(f"Horreum observatory: --frames to liczby po przecinku, nie {args.frames!r}")
+                return 2
+        if args.path_like:
+            zbiory.append(queries.frame_ids_by_path_like(con, args.path_like))
+        if args.filter_json:
+            tree = _load_filter_tree(args.filter_json)
+            zbiory.append(set(filter_engine.run(
+                tree,
+                leaf_fn=lambda k, kw, p1, p2: queries.leaf_frame_ids(con, k, kw, p1, p2),
+                universe_fn=lambda: queries.all_frame_ids(con))))
+        if not zbiory:
+            print("Horreum observatory: wskaz klatki (--frames, --path-like albo --filter-json) - "
+                  "gest bez wyboru nie stempluje calej bazy")
+            return 2
+        ids = sorted(set.intersection(*zbiory))
+        if not ids:
+            print("Horreum observatory: wybor nie wskazal ani jednej klatki")
+            return 2
+        dry = not args.apply
+        tryb = "DRY (bez zapisu)" if dry else "APPLY"
+        try:
+            if args.obs_cmd == "assign":
+                if args.observatory_id is None and (args.lat is None or args.lon is None):
+                    print("Horreum observatory assign: podaj --id ALBO --lat i --lon")
+                    return 2
+                g = repo.user_assign_observatory(
+                    con, frame_ids=ids, now=now, observatory_id=args.observatory_id,
+                    lat=args.lat, lon=args.lon, name=args.name, elev=args.elev,
+                    overwrite=args.overwrite, dry=dry)
+            else:
+                g = repo.clear_observatory_assignment(con, frame_ids=ids, now=now, dry=dry)
+        except ValueError as e:
+            print(f"Horreum observatory {args.obs_cmd}: {e}")
+            return 2
+    finally:
+        con.close()
+    byloby = " (byloby)" if dry else ""
+    lines = [f"Horreum observatory {args.obs_cmd} {args.db} ({tryb}):",
+             f"  wybrane klatki: {len(ids)}"]
+    if args.obs_cmd == "assign":
+        if g.created:
+            stan = (f"NOWE ({args.lat}, {args.lon})" if g.observatory_id is None
+                    else f"#{g.observatory_id} NOWE ({args.lat}, {args.lon})")
+        else:
+            stan = f"#{g.observatory_id} istniejace"
+        lines.append(f"  stanowisko: {stan}"
+                     + (f", nazwa {args.name!r}" if args.name and (g.created or g.named) else ""))
+        if g.name_kept:
+            lines.append(f"  nazwa stanowiska zostaje {g.name_kept!r} (zmiana nazwy: widok stanowisk)")
+        if g.elev_set is not None:
+            lines.append(f"  wysokosc {g.elev_set:g} m{byloby} dopisana do stanowiska")
+        if g.elev_kept is not None:
+            lines.append(f"  stanowisko ma juz wysokosc {g.elev_kept:g} m - zostaje "
+                         f"(podana {args.elev:g} m pominieta)")
+        lines.append(f"  przypisane{byloby}: {g.assigned} | zajete (bez --overwrite): "
+                     f"{g.occupied} | bez zmiany: {g.unchanged}")
+    else:
+        lines.append(f"  cofniete{byloby}: {g.cleared} | stanowisko z GPS (nie reka): "
+                     f"{g.not_hand} | bez stanowiska: {g.nothing}")
+    wybor = " ".join(
+        f'{flaga} "{wartosc}"' if (" " in wartosc or "%" in wartosc) else f"{flaga} {wartosc}"
+        for flaga, wartosc in (("--frames", args.frames), ("--path-like", args.path_like),
+                               ("--filter-json", args.filter_json)) if wartosc)
+    if dry:
+        lines.append("  wykonaj: dopisz --apply")
+    elif args.obs_cmd == "assign" and g.assigned:
+        # Recepta wskazuje DOKŁADNIE zapisane klatki, gdy wybór objął też inne: selektor powtórzony
+        # w `clear` zdjąłby przy okazji wcześniejsze wskazania ręki klatek, których ten gest nie ruszył.
+        # Drzewo filtra inline (cudzysłowy JSON) też idzie listą - powłoka nie przeniesie go bez szwów.
+        if g.occupied or g.unchanged or args.filter_json:
+            wybor = "--frames " + ",".join(str(i) for i in g.frame_ids)
+        lines.append(f"  cofniecie: horreum observatory clear {args.db} {wybor} --apply")
     print("\n".join(lines))
     return 0
 

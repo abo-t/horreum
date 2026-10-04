@@ -4,6 +4,7 @@ Realny R: NIGDY nie dotykany — pliki żyją w `tmp_path`."""
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -70,14 +71,13 @@ def test_cli_rename_apply_undo_roundtrip(tmp_path, capsys):
     assert all(f.exists() for f in files)              # oryginalne nazwy wróciły
 
 
-def test_cli_rename_undo_pokazuje_rozdarcie_i_komende_ponowienia(tmp_path, capsys, monkeypatch):
-    """Cofnięcie przeniosło plik, ale przepięcie bazy padło: rdzeń zwraca `failed` z prawdą
-    „plik PRZENIESIONY…, baza NIE przepięta - przeskanuj katalog". Dawniej raport --undo mówił
-    samo „bledy: 1" - rozdarcie plik↔baza znikało z ekranu. Teraz każdy błąd ma wiersz FAILED
-    z powodem, a raport podaje komendę ponowienia (wiersze nieudane zostają w przebiegu).
+def test_cli_rename_undo_pokazuje_blad_przepiecia_i_komende_ponowienia(tmp_path, capsys, monkeypatch):
+    """Cofnięcie przeniosło plik, ale przepięcie bazy padło: rdzeń kompensuje (plik wraca pod nazwę
+    z commitu, AR-29) i zwraca `failed` z prawdą „baza nie przyjęła przepięcia… plik wrócił". Dawniej
+    raport --undo mówił samo „bledy: 1" - błąd znikał z ekranu. Każdy błąd ma wiersz FAILED z powodem,
+    a raport podaje komendę ponowienia (wiersze nieudane zostają w przebiegu); ponowienie domyka.
 
-    Falsyfikator: zdejmij pętlę `res.failed` z `_format_rename_undo` → asercja o „PRZENIESIONY"
-    pada."""
+    Falsyfikator: zdejmij pętlę `res.failed` z `_format_rename_undo` → asercja o „wrócił" pada."""
     import sqlite3
     from horreum import repo
     dbp, files = _seed(tmp_path)
@@ -96,8 +96,59 @@ def test_cli_rename_undo_pokazuje_rozdarcie_i_komende_ponowienia(tmp_path, capsy
     out = capsys.readouterr().out
     assert "przywrocono: 1" in out and "bledy: 1" in out, out
     (wiersz,) = [w for w in out.splitlines() if "FAILED" in w]
-    assert "PRZENIESIONY" in wiersz and "przeskanuj" in wiersz, out
+    assert "baza nie przyjęła przepięcia" in wiersz and "wrócił" in wiersz, out
     assert f"--undo {run_id}" in out.splitlines()[-1], out
+    assert sum(f.exists() for f in files) == 1          # jeden plik cofnięty, drugi pod nazwą z commitu
+    assert cli.main(["rename", str(dbp), "--undo", run_id]) == 0
+    assert "przywrocono: 1; zablokowane: 0; bledy: 0" in capsys.readouterr().out
+    assert all(f.exists() for f in files)
+
+
+def test_cli_rename_undo_rozdarcie_bez_kompensacji_dokonczy_ponowienie(tmp_path, capsys, monkeypatch):
+    """Przepięcie bazy padło i kompensacja `new→old` też nie wyszła: plik zostaje pod starą nazwą
+    (cel cofnięcia), baza pod nazwą z commitu, zamiar renamu otwarty. Raport mówi „PRZENIESIONY…
+    zamiar renamu zapisany", a ponowienie --undo rekoncyliuje tę samą lokację (wiersz RECONCILED)
+    zamiast odsyłać do skanu."""
+    import sqlite3
+    from horreum import db, repo, writeback
+    dbp, files = _seed(tmp_path)
+    assert cli.main(["rename", str(dbp), "--apply"]) == 0
+    run_id = re.search(r"run_id: (\w+)", capsys.readouterr().out).group(1)
+    prawdziwa_rel, prawdziwy_rename = repo._apply_relocation, writeback.rename_file
+    stan = {"raz": True}
+
+    def _pad_bazy(con, **kw):
+        if stan["raz"]:
+            stan["raz"] = False
+            raise sqlite3.OperationalError("disk I/O error")
+        return prawdziwa_rel(con, **kw)
+
+    def _bez_kompensacji(src, dst):
+        if not stan["raz"] and Path(dst).name.startswith("2024"):   # wsteczny ruch na nazwę z commitu
+            return writeback.RenameFileResult("failed", "PermissionError: udział zajęty")
+        return prawdziwy_rename(src, dst)
+    monkeypatch.setattr(repo, "_apply_relocation", _pad_bazy)
+    monkeypatch.setattr(writeback, "rename_file", _bez_kompensacji)
+    assert cli.main(["rename", str(dbp), "--undo", run_id]) == 0
+    out = capsys.readouterr().out
+    (wiersz,) = [w for w in out.splitlines() if "FAILED" in w]
+    assert "PRZENIESIONY" in wiersz and "zamiar renamu zapisany" in wiersz, out
+    monkeypatch.undo()
+    assert all(f.exists() for f in files)               # oba pliki pod starymi nazwami na dysku
+    con = db.open_db(str(dbp))
+    assert len(writeback.open_rename_intents(con)) == 1
+    con.close()
+    assert cli.main(["rename", str(dbp)]) == 0          # DRY: zero mutacji, ale mówi o zamiarze
+    assert "przerwane renamy czekajace na dokonczenie: 1" in capsys.readouterr().out
+    assert cli.main(["rename", str(dbp), "--undo", run_id]) == 0
+    out2 = capsys.readouterr().out
+    assert "dokonczone przerwane renamy: 1; nierozstrzygniete: 0" in out2, out2
+    assert "RECONCILED" in out2 and "bledy: 0" in out2, out2
+    con = db.open_db(str(dbp))
+    assert sorted(r["path"] for r in con.execute("SELECT path FROM location")) == \
+        sorted(str(f) for f in files)
+    assert not writeback.open_rename_intents(con)
+    con.close()
 
 
 def test_cli_rename_filter_json_zawezenie(tmp_path, capsys):

@@ -92,3 +92,36 @@ def nearest_site(pt, sites, thresh=THRESH_KM):
         if d <= thresh and (best is None or (d, sid) < best):
             best = (d, sid)
     return best[1] if best is not None else None
+
+
+def user_site_coords(lat, lon, elev=None):
+    """Współrzędne stanowiska PODANE RĘKĄ → `(lat, lon, elev)` w stopniach dziesiętnych (i metrach)
+    albo `ValueError` z powodem. Jedna reguła dla klingi, okna i CLI (SPOT) - okno waliduje tym samym
+    przed zapisem, więc komunikat w oknie i odmowa klingi nie mogą się rozjechać.
+
+    INACZEJ NIŻ `site_coords`: nagłówek bywa śmieciem, więc tam „nie da się" znaczy cichy NULL;
+    tu człowiek pisze świadomie, więc „nie da się" jest błędem wołania i ma powód. Długości 0-360°
+    NIE normalizujemy - człowiek pisze w konwencji ±180°, a ciche przeliczenie 190 na -170 byłoby
+    zgadywaniem półkuli. (0, 0) odpada z powodu jak w `site_coords`: to „brak fixa", nie miejsce
+    obserwacji, a wpisane ręką jest niemal na pewno pustym polem formularza."""
+    try:
+        la, lo = float(lat), float(lon)
+    except (TypeError, ValueError):
+        raise ValueError(f"współrzędne nieliczbowe: {lat!r}, {lon!r}") from None
+    if not (math.isfinite(la) and math.isfinite(lo)):
+        raise ValueError("współrzędne muszą być skończone")
+    if not -90 <= la <= 90:
+        raise ValueError(f"szerokość {la} poza zakresem -90..90")
+    if not -180 <= lo <= 180:
+        raise ValueError(f"długość {lo} poza zakresem -180..180")
+    if la == 0 and lo == 0:
+        raise ValueError("(0, 0) to brak fixa GPS, nie stanowisko")
+    el = None
+    if elev is not None:
+        try:
+            el = float(elev)
+        except (TypeError, ValueError):
+            raise ValueError(f"wysokość nieliczbowa: {elev!r}") from None
+        if not math.isfinite(el):
+            raise ValueError("wysokość musi być skończona")
+    return la, lo, el

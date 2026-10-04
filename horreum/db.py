@@ -94,6 +94,15 @@ from importlib import resources
 # „zostawiam wszystkie" grupy wersji stosów (wiersz na członka, wspólny klucz gestu) - oraz
 # `integration.creation_time` (`XISF:CreationTime`, data stosów sprzed sygnatury integracji). Tabela
 # wchodzi pusta, kolumnę wypełnia najbliższy przebieg rodowodu stosów - SQL tego faktu nie zna.
+# 0027 to PRZYROST (ADD COLUMN): `frame.observatory_source` - stanowisko wskazane RĘKĄ (`user`) vs
+# wyliczone z GPS nagłówka (NULL), lustro 0015 na osi obserwatorium. Kolumna wchodzi PUSTA, wypełnia
+# ją gest człowieka (RAW bez GPS jest read-only); CHECK wiąże źródło z niepustą osią.
+# 0028 to PRZYROST (ADD COLUMN, P4-3): `frame.channel` - kanał kamery kolorowej (R/G/B) gotowego
+# obrazu, POCHODNA z nazwy kopii (`resolve.channel`), którą liczy resolver. Kolumna wchodzi PUSTA -
+# SQL nie zna reguły nazwy; najbliższy przebieg resolvera wypełnia archiwum bez odczytu plików.
+# 0029 to PRZYROST (ADD COLUMN, AR-29): `pending_renames.in_flight` - trwały zamiar renamu ('commit'
+# albo 'undo') zatwierdzony PRZED `os.rename`; rekoncyliacja po awarii przepina tę samą lokację tam,
+# gdzie plik stoi. Kolumna wchodzi PUSTA - SQL nie wie, które próby sprzed migracji przerwała awaria.
 MIGRATIONS = [
     (2, "0002_initial.sql"),
     (3, "0003_writeback.sql"),
@@ -120,6 +129,9 @@ MIGRATIONS = [
     (24, "0024_backup_unreplaced.sql"),
     (25, "0025_location_hdr_rule.sql"),
     (26, "0026_stack_version_kept.sql"),
+    (27, "0027_observatory_source.sql"),
+    (28, "0028_frame_channel.sql"),
+    (29, "0029_rename_intent.sql"),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 _KNOWN_VERSIONS = frozenset({0} | {v for v, _ in MIGRATIONS})

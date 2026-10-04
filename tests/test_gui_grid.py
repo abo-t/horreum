@@ -1297,6 +1297,19 @@ def test_renamebar_edytor_folder_orig_serializuja(qapp):
     assert tmpl == ["datetime", {"t": "folder", "n": 2}, {"t": "orig", "re": r"gain\d+"}]
 
 
+def test_renamebar_edytor_flatgrp_trail_kind_case(qapp):
+    """Tokeny flatgrp/trail wybieralne; kind z wielkością liter → dict, bez niej → goły `kind`."""
+    from horreum.gui.grid import RenameBar
+    bar = RenameBar()
+    wzor = ["object", "datetime", {"t": "kind", "case": "upper"}, "filter", "exp", "flatgrp", "trail"]
+    bar.template_editor.set_template(wzor)
+    assert bar.policy()["template"] == wzor
+    kind_row = bar.template_editor._rows()[2]
+    assert not kind_row.case.isHidden() and bar.template_editor._rows()[0].case.isHidden()
+    kind_row.case.setCurrentIndex(kind_row.case.findData(None))
+    assert bar.policy()["template"][2] == "kind"
+
+
 def test_renamebar_edytor_usun_disc_i_przywroc(qapp):
     """User usuwa rząd `disc` (czyste nazwy) → wzór bez disc; „Przywróć domyślny" wraca do DEFAULT."""
     from horreum.gui.grid import RenameBar

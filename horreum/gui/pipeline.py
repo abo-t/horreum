@@ -1568,6 +1568,10 @@ class PipelineView(QWidget):
         if s.objects_path_to_header:
             linia += i18n.t_plural("pipeline.fmt.resolve_path_to_header",
                                    s.objects_path_to_header)
+        # Stanowisko z ręki (0027) przeżywa przebieg także przy GPS w nagłówku - rozjazd jest
+        # jedynym śladem, że plik mówi co innego niż człowiek. Zero = cisza (QUIET).
+        if s.observatories_hand_vs_gps:
+            linia += i18n.t("pipeline.fmt.resolve_obs_hand", n=s.observatories_hand_vs_gps)
         return linia
 
     def _format_calibrate(self, s):

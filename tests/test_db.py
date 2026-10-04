@@ -25,7 +25,10 @@ def test_migracja_ustawia_user_version(tmp_path):
     # + 0024 header_backups.unreplaced_at (backup bez podmiany - cofnięcie go pomija, AR-37)
     # + 0025 location.hdr_rule (wersja reguły koercji faktów kopii, AR-33)
     # + 0026 stack_version_kept + integration.creation_time (werdykt wersji stosów, AR-10)
-    assert db._user_version(con) == db.SCHEMA_VERSION == 26
+    # + 0027 frame.observatory_source (stanowisko wskazane ręką)
+    # + 0028 frame.channel (kanał R/G/B z nazwy stosu, P4-3)
+    # + 0029 pending_renames.in_flight (trwały zamiar renamu przed mutacją, AR-29)
+    assert db._user_version(con) == db.SCHEMA_VERSION == 29
     con.close()
 
 

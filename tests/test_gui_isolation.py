@@ -37,7 +37,12 @@ QT_WIDGET_FILES = {"app.py", "__main__.py", "pipeline.py", "grid.py", "projectio
                    # Wpis PRZESUWA granicę, nie rozluźnia jej: read-model kubełka
                    # (`queries.config_review_frames`/`config_review_groups`) zostaje Qt-wolny
                    # i pilnuje tego asercja pozytywna w `test_readmodel_i_init_gui_qt_free`.
-                   "config_dialog.py"}
+                   "config_dialog.py",
+                   # 0027: okno „Wskaż stanowisko…" (oś OBSERWATORIUM wskazana ręką) - bliźniak
+                   # `config_dialog.py` w konwencji i z tego samego powodu wydzielony. Read-model
+                   # grup (`queries.observatory_review_groups`) i walidator współrzędnych
+                   # (`resolve.observatory.user_site_coords`) zostają Qt-wolne.
+                   "observatory_dialog.py"}
 
 
 def _imports_pyside6(path):

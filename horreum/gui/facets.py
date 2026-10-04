@@ -2,7 +2,7 @@
 `test_gui_isolation`). GŁUPI widżet (NARROW, wzorzec `SelectionBar`): logika cyklu/składania mieszka
 w Qt-wolnym `facet_model`; FramesView karmi `set_data(counts, state)` i słucha `facetsChanged(state)`.
 
-Pięć grup (Obiekt z szukajką, Filtr, Rodzaj, Teleskop, Noc). Interakcja: klik wartości cykluje
+Sześć grup (Obiekt z szukajką, Filtr, Kanał, Rodzaj, Teleskop, Noc). Interakcja: klik wartości cykluje
 none→in→ex→none. Sygnał cyklu = `itemClicked` — WYŁĄCZNIE gest usera (F4R#4: selection-based
 `currentItemChanged` strzelałby przy przeładowaniu list w `set_data` → reentrancja
 `facetsChanged→refresh→set_data→…`); defensywnie guard `_loading` (wzorzec `FieldsPanel`).
@@ -32,6 +32,7 @@ from horreum.gui.rows import TwoPartDelegate
 # (facet, KLUCZ tytułu grupy, czy-długa-lista) — długie (Obiekt/Noc) dostają stretch, krótkie zwarty
 # pas. Tytuł = klucz i18n rozwiązywany w budowie (nie zamrażać PL przy imporcie).
 _GROUPS = [("object", "facets.group.object", True), ("filter", "facets.group.filter", False),
+           ("channel", "facets.group.channel", False),
            ("kind", "facets.group.kind", False), ("telescope", "facets.group.telescope", False),
            ("night", "facets.group.night", True)]
 

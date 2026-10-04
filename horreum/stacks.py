@@ -843,6 +843,11 @@ def run_stack_lineage(con, *, now, actor="stacks", xml_reader=None, progress=Non
             created_v = stan["creation_time"]
         else:
             tool_v, rows_v, created_v = t.tool, t.rows, t.created
+            if created_v is None and stan is not None:
+                # Plik bez daty zapisanej NIE kasuje (AR-50 (4)) - ta sama reguła co w gałęzi
+                # chronionej z powodem wyżej: data powstania to fakt o przeszłości, a milczenie
+                # pliku go nie obala (zeznanie podmienionej treści to inna klatka).
+                created_v = stan["creation_time"]
             driz_v = sum(1 for x in t.inputs if x.has_drizzle) if t.rows is not None else None
             dis_v = sum(1 for x in t.inputs if not x.enabled) if t.rows is not None else None
         odcisk = stan["integ_hash"] if chroniony else _fingerprint(con, wejscia)

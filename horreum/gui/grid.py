@@ -55,7 +55,7 @@ from horreum.gui.projection_dialog import ProjectionDialog
 from horreum.gui.rows import TwoPartDelegate
 from horreum.gui.wb_worker import (WritebackRunner, commit_do_cofniecia, zdanie_undo_kart,
                                    zdanie_wyniku_zapisu)
-from horreum.resolve.headers import COPY_TESTIMONY_KEYWORDS
+from horreum.resolve.headers import COPY_TESTIMONY_KEYWORDS, FAKTY_NOWSZE, copy_facts_state
 
 # Kolumny bazowe: (nagłówek, klucz). Klucze `_telescope`/`_object`/`_dt_delta` = pochodne. `_dt_delta`
 # (Δh nagłówek−nazwa) liczone w `_derive` z `naming.header_dt`/`filename_dt` — `base_rows` zwraca już
@@ -1691,6 +1691,22 @@ class FieldsPanel(QWidget):
             self.columnsChanged.emit(self.checked_keywords())
 
 
+def zdanie_kopii_bez_zeznania(kandydaci, *, dest):
+    """Podpowiedź kopii bez zeznania - Porządki (wiersze „?” i „N+”) i pusty stan perspektywy kopii
+    w Zbiorach mówią TO SAMO zdanie (jeden właściciel). `kandydaci` = wiersze
+    `scan.copy_facts_candidates(..., porownywalne=True)`. Kopie z faktami reguły NOWSZEJ niż ta
+    binarka (AR-33) też są w liczbie, ale Dostawa tej wersji ich nie uzupełni - zdanie mówi to
+    osobno, zamiast obiecywać odpowiedź po Dostawie (AR-50 (3))."""
+    zdanie = i18n.t_plural("tasks.copies_unread_tip", len(kandydaci),
+                           place=i18n.t("nav.dostawa"), stacks=i18n.t("pipeline.btn.stacks"),
+                           check=i18n.t("pipeline.btn.presence"),
+                           mark=i18n.t("pipeline.btn.mark_vanished"), dest=dest)
+    nowsze = sum(copy_facts_state(r["hdr_hash"], r["hdr_rule"]) == FAKTY_NOWSZE for r in kandydaci)
+    if nowsze:
+        zdanie += "\n" + i18n.t_plural("tasks.copies_newer_rule_tip", nowsze)
+    return zdanie
+
+
 class MacroBar(QWidget):
     """Panel makra (F3: strona `_PanelStack`, otwierana z paska zbioru „Popraw nagłówki…") — sekcje
     Oblicz/Przypisz. Emituje `preview(dict)` (policz i pokaż w gridzie, BEZ zapisu), `stage(dict)`
@@ -1721,7 +1737,14 @@ class MacroBar(QWidget):
         self.asg_kw.setFixedWidth(160)
         self.asg_op = QComboBox(); self.asg_op.addItems(["set", "add"])
         self.asg_expr = QLineEdit(); self.asg_expr.setPlaceholderText(i18n.t("grid.macro.assign_ph"))
+        # Komentarz karty (AR-47): pusty = zastany zostaje; wpisany - zapis razem z nim. Jedyna
+        # droga z GUI dla karty FITS, której zastany komentarz nie mieści się przy nowej wartości.
+        self.asg_comment = QLineEdit()
+        self.asg_comment.setPlaceholderText(i18n.t("grid.macro.comment_ph"))
+        self.asg_comment.setToolTip(i18n.t("grid.macro.comment_tip"))
+        self.asg_comment.setFixedWidth(180)
         asg.addWidget(self.asg_kw); asg.addWidget(self.asg_op); asg.addWidget(QLabel("=")); asg.addWidget(self.asg_expr, 1)
+        asg.addWidget(self.asg_comment)
         b.addLayout(asg)
         # akcje
         act = QHBoxLayout()
@@ -1752,6 +1775,9 @@ class MacroBar(QWidget):
         if not kw or not expr:
             return None
         md = {"assign": {"keyword": kw, "op": self.asg_op.currentText(), "expr": expr}}
+        komentarz = self.asg_comment.text().strip()
+        if komentarz:
+            md["assign"]["comment"] = komentarz
         cname, cexpr = self.comp_name.text().strip(), self.comp_expr.text().strip()
         if cname and cexpr:
             md["computes"] = [{"name": cname, "expr": cexpr}]
@@ -4164,17 +4190,12 @@ class FramesView(QWidget):
             zdanie, gest = i18n.t(_EMPTY_DB), ""
         else:
             rodzaj = self._rodzaj_recepty_powrotu(cel=_CEL_WIDOK)
-            czeka = (len(scan.copy_facts_candidates(self.con, porownywalne=True))
+            czeka = (scan.copy_facts_candidates(self.con, porownywalne=True)
                      if rodzaj == _POWROT_PERSPEKTYWA
-                     and any(getattr(self, atrybut) for atrybut in _FLAGI_CZEKAJA_NA_FAKTY) else 0)
+                     and any(getattr(self, atrybut) for atrybut in _FLAGI_CZEKAJA_NA_FAKTY) else [])
             if czeka:
                 self._pusty_do_dostawy = True
-                zdanie = i18n.t_plural("tasks.copies_unread_tip", czeka,
-                                       place=i18n.t("nav.dostawa"),
-                                       stacks=i18n.t("pipeline.btn.stacks"),
-                                       check=i18n.t("pipeline.btn.presence"),
-                                       mark=i18n.t("pipeline.btn.mark_vanished"),
-                                       dest=i18n.t("nav.dostawa"))
+                zdanie = zdanie_kopii_bez_zeznania(czeka, dest=i18n.t("nav.dostawa"))
                 gest = i18n.t("grid.empty_go_intake")
             elif rodzaj == _POWROT_PERSPEKTYWA:
                 zdanie = i18n.t(_EMPTY_PERSP)

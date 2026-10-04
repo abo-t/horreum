@@ -428,6 +428,12 @@ def plan_object_card_form(rows, *, run_id=None) -> CardFormPlan:
         if r["skip"] is not None:
             skipped.append(SkippedFrame(r["frame_id"], r["path"], r["skip"]))
             continue
+        # AR-47: komentarz, który nie przeżyje nowej formy, odmawia w OBU drogach zapisu (AR-7) -
+        # to pominięcie z powodem pisarza, nie „spadek na drogę dotychczasową".
+        odmowa = writeback.comment_loss_route(r["filetype"], "OBJECT", r["form"], r["comment"])
+        if odmowa is not None:
+            skipped.append(SkippedFrame(r["frame_id"], r["path"], odmowa))
+            continue
         touched.append(PendingPreview(
             location_id=int(r["location_id"]), path=r["path"], keyword="OBJECT", idx=0, op="set",
             old_value=r["card"], new_value=r["form"], new_type="str", comment=None,

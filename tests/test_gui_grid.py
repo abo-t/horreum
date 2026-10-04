@@ -1071,6 +1071,35 @@ def test_macro_stage_then_commit_edits_file(wb_view):
     assert fits.getheader(str(p))["TELESCOP"] == "RC8"   # przywrócone
 
 
+def test_makro_z_komentarzem_zapisuje_karte_ktorej_komentarz_sie_nie_miesci(wb_view):
+    """AR-47: zastany komentarz karty nie mieści się przy nowej wartości - bez komentarza zapis
+    odmawia (AR-7), z polem komentarza paska makra zmiana wchodzi razem z krótszym komentarzem.
+
+    Falsyfikator: zdejmij `comment` z `MacroBar.macro_def` → drugi commit też 'blocked'."""
+    from astropy.io import fits
+    from horreum import scan
+    view, con, p = wb_view
+    with fits.open(str(p), mode="update") as hdul:
+        hdul[0].header["TELESCOP"] = ("RC8", "k" * 47)    # karta pełna: 80 znaków
+    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW,
+                       summary=scan.ScanSummary())
+    bar = view.macro_bar
+    bar.asg_kw.setCurrentText("TELESCOP")
+    bar.asg_op.setCurrentIndex(0)
+    bar.asg_expr.setText("SkyWatcher Ritchey-Chretien 8")
+    assert "comment" not in bar.macro_def()["assign"]
+    bar._emit_stage()
+    view._on_commit()
+    assert fits.getheader(str(p))["TELESCOP"] == "RC8"            # odmowa AR-7, plik nietknięty
+
+    bar.asg_comment.setText("  short  ")
+    assert bar.macro_def()["assign"]["comment"] == "short"
+    bar._emit_stage()
+    view._on_commit()
+    hdr = fits.getheader(str(p))
+    assert (hdr["TELESCOP"], hdr.comments["TELESCOP"]) == ("SkyWatcher Ritchey-Chretien 8", "short")
+
+
 def test_commit_i_cofniecie_makra_odswiezaja_plakietke_Porzadkow(wb_view):
     """Lustro `test_gesty_rodowodu_odswiezaja_plakietke_Porzadkow` dla writebacku kart: commit
     makra zmienia zeznanie klatki (`header`, `cards`), z którego liczą się wiersze Porządków

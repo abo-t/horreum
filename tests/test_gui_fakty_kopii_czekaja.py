@@ -303,3 +303,29 @@ def test_niewiadome_zero_odmienia_liczbe_kopii():
     assert i18n.t_plural("tasks.copies_unread", 22) == "? · 22 kopie bez zeznania"
     assert i18n.t_plural("tasks.copies_partial", 1, m=3) == "3+ · 1 kopia bez zeznania"
     assert i18n.t_plural("tasks.copies_partial", 5, m=1) == "1+ · 5 kopii bez zeznania"
+
+
+def test_kopia_nowszej_reguly_nie_obiecuje_odpowiedzi_po_Dostawie(qapp, sprzed_migracji):
+    """AR-50 (3): kopia z faktami reguły NOWSZEJ niż binarka (AR-33) liczy się w „?”, ale Dostawa
+    tej wersji jej nie uzupełni. Podpowiedź mówi to osobnym zdaniem z liczbą takich kopii; bez
+    takich kopii zdania nie ma.
+
+    Falsyfikator: zdejmij dopisek z `grid.zdanie_kopii_bez_zeznania` → pierwsza asercja pada."""
+    from horreum.resolve.headers import COPY_TESTIMONY_RULE
+    con, _fid, _a, _b = sprzed_migracji
+    tv = tasks_mod.TasksView(con)
+    try:
+        tv.refresh_counts()
+        nowsza = i18n.t_plural("tasks.copies_newer_rule_tip", 1)
+        assert nowsza not in _wiersz(tv, "copy_conflict_frames").toolTip()
+        scan.backfill_copy_facts(con, now=NOW)
+        with con:
+            con.execute("UPDATE location SET hdr_rule = ? WHERE id = (SELECT min(id) FROM location)",
+                        (COPY_TESTIMONY_RULE + 1,))
+        tv.refresh_counts()
+        w = _wiersz(tv, "copy_conflict_frames")
+        assert w.data(rows.SECONDARY).startswith("? · 1 "), w.data(rows.SECONDARY)
+        assert w.toolTip().endswith("\n" + nowsza), w.toolTip()
+        assert len(scan.copy_facts_candidates(con)) == 0, "sterownik jej nie nadpisuje"
+    finally:
+        tv.close()

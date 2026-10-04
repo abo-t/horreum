@@ -238,3 +238,33 @@ def test_odmiana_dialogu(n, pl, pl_ok, en, en_ok):
         assert i18n.t_plural("pipeline.force.ok", n) == en_ok
     finally:
         i18n.set_lang("pl")
+
+
+@pytest.mark.parametrize("lang", ["pl", "en"])
+def test_raport_hamulca_w_jezyku_ui_z_recepta_po_zlotej_akcji(lang):
+    """AR-50 (1)+(2): hamulec w linii raportu mówi językiem UI (rdzeń niesie polski tekst CLI),
+    a DRY pod hamulcem PROGOWYM bez potwierdzeń dostaje receptę gestu, który je policzy. Po
+    „Sprawdź obecność” (`confirmed`) recepty nie ma; hamulec bez furtki (`brake_limit is None`)
+    też jej nie dostaje.
+
+    Falsyfikator: wróć do doklejania `s.brake` → w EN linia niesie polskie „kandydatów”."""
+    i18n.set_lang(lang)
+    try:
+        s = presence.PresenceSummary(root="X:\t", scoped=4, walked=2, candidates=2,
+                                     brake="kandydatów 2 > próg 1 (1 albo 2% z 4)", brake_limit=1)
+        linia = PipelineView._format_presence(PipelineView, s)
+        assert i18n.t("pipeline.fmt.presence.brake.limit", candidates=2, limit=1, scoped=4) in linia
+        assert i18n.t("pipeline.fmt.presence.brake_recipe") in linia
+        if lang == "en":
+            assert "kandydatów" not in linia
+        s.confirmed = True
+        assert i18n.t("pipeline.fmt.presence.brake_recipe") not in PipelineView._format_presence(
+            PipelineView, s)
+
+        pusty = presence.PresenceSummary(root="X:\t", scoped=0, brake="zakres pusty (0 lokacji)",
+                                         aborted="zakres pusty (0 lokacji)")
+        assert PipelineView._format_presence(PipelineView, pusty) == i18n.t(
+            "pipeline.fmt.presence.not_done",
+            reason=i18n.t("pipeline.fmt.presence.brake.empty_scope"))
+    finally:
+        i18n.set_lang("pl")

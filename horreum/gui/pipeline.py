@@ -1453,7 +1453,8 @@ class PipelineView(QWidget):
         ciszą: cisza w raporcie dostawy czyta się jak „nie sprawdzono". Kubełki, które NIE są
         zniknięciami, pokazujemy tylko gdy niezerowe."""
         if s.aborted is not None:
-            return i18n.t("pipeline.fmt.presence.not_done", reason=s.aborted)
+            powod = self._brake_text(s) if s.aborted == s.brake else s.aborted
+            return i18n.t("pipeline.fmt.presence.not_done", reason=powod)
         if s.cancelled:
             return i18n.t("pipeline.fmt.presence.cancelled")
         czesci = [i18n.t("pipeline.fmt.presence.scope", scoped=s.scoped, walked=s.walked)]
@@ -1470,8 +1471,27 @@ class PipelineView(QWidget):
             czesci.append(i18n.t("pipeline.fmt.presence.undecided", n=s.undecided))
         if s.drifted:
             czesci.append(i18n.t("pipeline.fmt.presence.drifted", n=s.drifted))
-        line = i18n.t("pipeline.fmt.presence.prefix") + " · ".join(czesci)
-        return line + f" · {s.brake}" if s.brake else line
+        if s.brake:
+            czesci.append(self._brake_text(s))
+            if s.brake_limit is not None and not s.confirmed:
+                # Złota akcja pod hamulcem progowym nie liczy potwierdzeń (bez kosztu `stat`) -
+                # recepta mówi, który gest je policzy i otworzy drogę zapisu (AR-50 (2)).
+                czesci.append(i18n.t("pipeline.fmt.presence.brake_recipe"))
+        return i18n.t("pipeline.fmt.presence.prefix") + " · ".join(czesci)
+
+    @staticmethod
+    def _brake_text(s):
+        """Hamulec obecności w języku interfejsu, złożony z liczb raportu (AR-50 (1)). Rdzeń niesie
+        tekst polski dla CLI; trzy powody rozpoznajemy po polach, nie po tekście. Powód spoza tych
+        trzech idzie tak, jak przyszedł."""
+        if s.brake_limit is not None:
+            return i18n.t("pipeline.fmt.presence.brake.limit", candidates=s.candidates,
+                          limit=s.brake_limit, scoped=s.scoped)
+        if s.scoped == 0:
+            return i18n.t("pipeline.fmt.presence.brake.empty_scope")
+        if s.walked == 0:
+            return i18n.t("pipeline.fmt.presence.brake.empty_tree", root=s.root)
+        return s.brake
 
     def _update_vanished_box(self, s):
         """Sekcja 4b: co user może ZROBIĆ z wynikiem. Rozróżnienie DRY↔zapis po `run_id` (ustawia go

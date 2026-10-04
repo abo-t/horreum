@@ -1666,6 +1666,14 @@ CATALOG = {
         "pl": "wartość lub wyrażenie, np. round(new, 2)",
         "en": "value or expression, e.g. round(new, 2)",
     },
+    "grid.macro.comment_ph": {"pl": "komentarz (opc.)", "en": "comment (opt.)"},
+    "grid.macro.comment_tip": {
+        "pl": "Pusty - karta zachowuje zastany komentarz. Wpisany - zapis razem z nim; użyj, gdy "
+              "zastany komentarz nie mieści się w karcie FITS przy nowej wartości.",
+        "en": "Empty - the card keeps its existing comment. Filled in - written together with "
+              "it; use it when the existing comment no longer fits the FITS card with the new "
+              "value.",
+    },
     "grid.macro.error": {"pl": "Błąd makra: {exc}", "en": "Macro error: {exc}"},
     "grid.macro.no_frames_count": {
         "pl": "Makro: brak widocznych klatek do policzenia",
@@ -2931,6 +2939,25 @@ CATALOG = {
         "pl": "pominięte przez rename {n}", "en": "skipped by rename {n}",
     },
     "pipeline.fmt.presence.prefix": {"pl": "[obecność] ", "en": "[presence] "},
+    # Hamulec obecności w języku UI (AR-50 (1)) - rdzeń `presence._brake_reason` mówi po polsku dla CLI.
+    "pipeline.fmt.presence.brake.limit": {
+        "pl": "HAMULEC: kandydatów {candidates} > próg {limit} (zakres {scoped})",
+        "en": "BRAKE: {candidates} candidates > limit {limit} (scope {scoped})",
+    },
+    "pipeline.fmt.presence.brake.empty_scope": {
+        "pl": "HAMULEC: zakres pusty (0 kopii w bazie pod tym katalogiem) - brak danych to nie brak "
+              "zniknięć",
+        "en": "BRAKE: empty scope (0 copies in the database under this folder) - no data is not "
+              "the same as nothing vanished",
+    },
+    "pipeline.fmt.presence.brake.empty_tree": {
+        "pl": "HAMULEC: drzewo puste (0 plików pod {root}) - dysk podłączony, ale bez treści?",
+        "en": "BRAKE: empty tree (0 files under {root}) - drive connected but empty?",
+    },
+    "pipeline.fmt.presence.brake_recipe": {
+        "pl": "„Sprawdź obecność” policzy potwierdzenia i da drogę zapisu",
+        "en": "“Check presence” will count confirmations and offer a way to save",
+    },
     "pipeline.presence.skipped_no_volume": {
         "pl": "pominięty — wolumin nieustalony, brak kotwicy zakresu",
         "en": "skipped — volume undetermined, no scope anchor",
@@ -3204,6 +3231,22 @@ CATALOG = {
                         "If the file is no longer on disk - {place} → “{check}” → “{mark}” "
                         "(appears below the result when the check confirms the file is gone).\n"
                         "A click takes you to: {dest}."},
+    },
+    # Dopisek tej podpowiedzi, gdy część kopii ma fakty reguły NOWSZEJ niż binarka (AR-33, AR-50 (3)):
+    # Dostawa tej wersji ich nie uzupełni, więc zdanie wyżej nie może za nie obiecywać odpowiedzi.
+    "tasks.copies_newer_rule_tip": {
+        "pl": {"one": "W tym {n} kopia ma zeznanie zebrane nowszą wersją Horreum - ta wersja go nie "
+                      "porówna, a Dostawa go nie uzupełni; odpowiedź da nowsza wersja programu.",
+               "few": "W tym {n} kopie mają zeznanie zebrane nowszą wersją Horreum - ta wersja go "
+                      "nie porówna, a Dostawa go nie uzupełni; odpowiedź da nowsza wersja programu.",
+               "many": "W tym {n} kopii ma zeznanie zebrane nowszą wersją Horreum - ta wersja go "
+                       "nie porówna, a Dostawa go nie uzupełni; odpowiedź da nowsza wersja "
+                       "programu."},
+        "en": {"one": "Of these, {n} copy has testimony collected by a newer Horreum - this version "
+                      "cannot compare it and Intake will not fill it in; a newer version will.",
+               "other": "Of these, {n} copies have testimony collected by a newer Horreum - this "
+                        "version cannot compare it and Intake will not fill it in; a newer version "
+                        "will."},
     },
     "tasks.vanished_frames": {"pl": "Zniknięte z dysku", "en": "Vanished from disk"},
     # NAZWA MÓWI O UBYTKU, NIE O AWARII (D-V-9a). Wiersz stoi obok „Zniknięte z dysku" i musi się

@@ -35,7 +35,7 @@ from horreum.gui.grid import (PRESET_COPY_CONFLICT, PRESET_DUPS, PRESET_LINEAGE,
                               PRESET_MISSING_COPY, PRESET_ORPHAN_TESTIMONY,
                               PRESET_PATH_HEADER_CONFLICT, PRESET_PENDING_FINISH, PRESET_RETIRED,
                               PRESET_TORN_WRITE, PRESET_RETIRED_CONFLICT, PRESET_STACK_VERSIONS,
-                              PRESET_SUPERSEDED, PRESET_VANISHED)
+                              PRESET_SUPERSEDED, PRESET_VANISHED, zdanie_kopii_bez_zeznania)
 from horreum.gui.rows import TwoPartDelegate
 
 # Definicja listy zadań: (klucz stanu z `tasks_state`, etykieta, akcja). Akcja: numer podstrony
@@ -301,7 +301,8 @@ class TasksView(QWidget):
         # Kopie czekające na fakty, które mogą zmienić te wiersze - WOŁANE, nie powielane: predykat
         # ma jednego właściciela (ten sam SELECT steruje etapem Dostawy), tryb `porownywalne`
         # odcina kandydatów, których fakty żadnego porównania kopii nie ruszą.
-        czeka = len(scan.copy_facts_candidates(self.con, porownywalne=True))
+        kandydaci = scan.copy_facts_candidates(self.con, porownywalne=True)
+        czeka = len(kandydaci)
         badge = 0
         self._niewiadome = set()
         for row, (key, label, action) in enumerate(_TASKS):
@@ -330,12 +331,8 @@ class TasksView(QWidget):
             # kopia jest stosem / pliku nie ma), a zdanie z nimi nie mieści się w członie drugim
             # listy 400 px. Ostatnie zdanie mówi, dokąd prowadzi klik: „?" - Dostawa, „N+" - Zbiory.
             if czesciowe:
-                tip = i18n.t_plural("tasks.copies_unread_tip", czeka,
-                                    place=i18n.t("nav.dostawa"),
-                                    stacks=i18n.t("pipeline.btn.stacks"),
-                                    check=i18n.t("pipeline.btn.presence"),
-                                    mark=i18n.t("pipeline.btn.mark_vanished"),
-                                    dest=i18n.t("nav.dostawa" if niewiadome else "nav.zbiory"))
+                tip = zdanie_kopii_bez_zeznania(
+                    kandydaci, dest=i18n.t("nav.dostawa" if niewiadome else "nav.zbiory"))
             elif key in _PODPOWIEDZI_GESTU and n > 0:   # przy zerze zdanie o pliku byłoby fałszem
                 tip = i18n.t(_PODPOWIEDZI_GESTU[key], finish=i18n.t("grid.inplace.finish"),
                              restore=i18n.t("grid.inplace.restore"),

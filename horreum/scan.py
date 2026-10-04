@@ -1869,6 +1869,12 @@ def _ingest_in_tx(con, rec, *, volume, drive_letter, tier, now, summary, actor, 
         camera_id=camera_id, kind=kind, copy_facts=copy_facts, inplace_gen=inplace_gen)
     summary.locations_refreshed += refreshed["facts"]
     summary.headers_refreshed += refreshed["header"]
+    if readable:
+        # Commit drogą atomową, który padł po backupie ('failed' bez re-syncu), dokańcza się tu,
+        # gdy na dysku leży dokładnie zapisany nagłówek (AR-38 (2)). Wejście po indeksie lokacji
+        # w stagingu - zwykły skan płaci jedno zapytanie bez trafień.
+        repo.confirm_failed_commit_by_scan(con, location_id=loc["id"], frame_id=frame_id,
+                                           header_hash=rec.header_hash, now=now, actor=actor)
     if loc["present"] == 0 and repo.clear_superseded(con, frame_id=frame_id, now=now, actor=actor):
         # DRUGA DROGA POWROTU TREŚCI (R4): kopia była nieobecna (`present=0`) i właśnie odżyła —
         # bez przepięcia, bo `sha1_data` się zgadza. Tożsamość oznaczona jako zastąpiona ma znów
@@ -2144,7 +2150,7 @@ def copy_facts_candidates(con, root=None, *, porownywalne=False):
     drugi parametr `>` jest NULL-em w trybie domyślnym, więc fragment staje się „do dociągnięcia”."""
     from .gui import queries
     rows = con.execute(
-        "SELECT l.id, l.volume, l.path, l.header_hash FROM location l "
+        "SELECT l.id, l.volume, l.path, l.header_hash, l.hdr_hash, l.hdr_rule FROM location l "
         "WHERE l.present = 1 AND l.header_hash IS NOT NULL "
         "  AND (l.hdr_hash IS NULL OR l.hdr_rule IS NULL OR l.hdr_rule < ? OR l.hdr_rule > ?) "
         "  AND l.unreadable_since IS NULL "

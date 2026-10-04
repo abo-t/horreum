@@ -264,11 +264,17 @@ def _fits_comment_loss(hdr, przed: dict) -> str | None:
                 continue
             zostal = fits.Card.fromstring(nowy).comment or ""
         if zostal != komentarz:
-            return (f"zmiana wartości karty {kw} ucięłaby zastany komentarz z {len(komentarz)} do "
-                    f"{len(zostal)} znaków (karta FITS po zmianie ma pole wartości stałego formatu) "
-                    f"- plik nietknięty; zapisz zmianę razem z komentarzem skróconym do "
-                    f"{len(zostal)} znaków albo wybierz krótszą wartość")
+            return _powod_ucietego_komentarza(kw, komentarz, zostal)
     return None
+
+
+def _powod_ucietego_komentarza(kw: str, komentarz: str, zostal: str) -> str:
+    """Jedno brzmienie odmowy AR-7 - dla pisarza (`_fits_comment_loss`) i podglądu planu
+    (`comment_loss_route`), żeby plan mówił DOKŁADNIE to, co potem powiedziałby zapis."""
+    return (f"zmiana wartości karty {kw} ucięłaby zastany komentarz z {len(komentarz)} do "
+            f"{len(zostal)} znaków (karta FITS po zmianie ma pole wartości stałego formatu) "
+            f"- plik nietknięty; zapisz zmianę razem z komentarzem skróconym do "
+            f"{len(zostal)} znaków albo wybierz krótszą wartość")
 
 
 def _is_xisf(path) -> bool:
@@ -1496,6 +1502,22 @@ def inplace_route(filetype, keyword: str, value: str, value_type, comment) -> st
     return _fits_card_image(keyword, value, comment or "")[1]
 
 
+def comment_loss_route(filetype, keyword: str, value: str, comment) -> str | None:
+    """PRZEWIDYWANIE odmowy AR-7 dla `set` karty BEZ komentarza z faktów bazy (podgląd planu,
+    AR-47): powód, gdy zastany komentarz nie przeżyje układu astropy przy nowej wartości, inaczej
+    `None`. Odmawiają wtedy OBIE drogi - w miejscu `_fits_card_image` daje spadek, a droga
+    atomowa `_fits_comment_loss` - więc plan ma taką klatkę pominąć, a nie liczyć jako spadek.
+    Ta sama karta astropy co pisarz; XISF i karta bez komentarza → `None`."""
+    if filetype == "xisf" or not comment:
+        return None
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        zostal = fits.Card.fromstring(fits.Card(keyword, value, comment).image).comment or ""
+    if zostal == comment:
+        return None
+    return _powod_ucietego_komentarza(keyword, comment, zostal)
+
+
 def _pod_blokada(path: str, dzialanie) -> WriteResult | Fallback:
     """Wykonaj `dzialanie(fh)` pod `_exclusive` i oddaj jego wynik także wtedy, gdy ZAMKNIĘCIE
     uchwytu rzuci (astra Z15): wynik z backupem i flagą mutacji przeżywa, a błąd zamknięcia
@@ -2182,9 +2204,26 @@ def commit(con, run_id, *, now, clock=None,
             in_place.append(wynik)
             _report(path, "applied")
             continue
+        # NAGROBEK RĘKI GAŚNIE TU, a nie w ścieżce skanu (S2b, §4/14b-c). Klatka cofnięta ma
+        # `object_source='user_cleared'` i drabina ją POMIJA - bez tego gestu zostałaby poza osią na
+        # zawsze, nawet po dopisaniu karty. Wyzwalaczem jest WPISANIE `OBJECT` do TEGO pliku, nie
+        # samo odświeżenie zeznania: każdy skan odświeża zeznanie i gasiłby werdykt, którego nikt
+        # nie odwołał. Droga w miejscu gasi go tą samą klingą w transakcji dokończenia
+        # (`repo.finish_inplace_op`); commit 'failed', którego bajty potwierdzi późniejszy skan,
+        # dokańcza `repo.confirm_failed_commit_by_scan`.
+        # Zgaszenie niesie commit i plik (AR-38) - cofnięcie TEGO commitu odtworzy nagrobek.
+        # Wciągnięcie rekordu, zgaszenie i wpisy 'applied' idą JEDNĄ transakcją (AR-38 (2)):
+        # awaria między nimi zostawiała kartę w bazie przy żywym nagrobku i wpisach 'pending'.
+        def _zamknij(_rows=rows, _lid=location_id, _fid=loc["frame_id"],
+                     _obj=any(op.keyword == "OBJECT" for op in ops)):
+            if _obj:
+                repo.clear_object_tombstone(con, frame_id=_fid, now=now,
+                                            commit_id=commit_id, location_id=_lid)
+            _mark(_rows, "applied", None)
+
         try:                              # droga atomowa: PLIK→DB (T8); pełny odczyt pliku
             niezgodne = _resync(con, path, loc["volume"], now=now,
-                                expect_sha1_data=loc["sha1_data"])
+                                expect_sha1_data=loc["sha1_data"], w_transakcji=_zamknij)
         except Exception as exc:  # noqa: BLE001 - plik zapisany, pętla idzie dalej
             # Wsad to tysiące pełnych odczytów po SMB - jedna czkawka udziału nie może zatrzymać
             # przebiegu z plikiem zapisanym, a bez statusu. Bazę drogi atomowej naprawi ponowny
@@ -2196,17 +2235,6 @@ def commit(con, run_id, *, now, clock=None,
             failed.append(FileResult(location_id, path, "failed", reason))
             _report(path, "failed")
             continue
-        # NAGROBEK RĘKI GAŚNIE TU, a nie w ścieżce skanu (S2b, §4/14b-c). Klatka cofnięta ma
-        # `object_source='user_cleared'` i drabina ją POMIJA - bez tego gestu zostałaby poza osią na
-        # zawsze, nawet po dopisaniu karty. Wyzwalaczem jest WPISANIE `OBJECT` do TEGO pliku, nie
-        # samo odświeżenie zeznania: każdy skan odświeża zeznanie i gasiłby werdykt, którego nikt
-        # nie odwołał. Droga w miejscu gasi go tą samą klingą w transakcji dokończenia
-        # (`repo.finish_inplace_op`).
-        # Zgaszenie niesie commit i plik (AR-38) - cofnięcie TEGO commitu odtworzy nagrobek.
-        if any(op.keyword == "OBJECT" for op in ops):
-            repo.clear_object_tombstone(con, frame_id=loc["frame_id"], now=now,
-                                        commit_id=commit_id, location_id=location_id)
-        _mark(rows, "applied", None)
         applied.append(FileResult(location_id, path, "applied", droga))
         _report(path, "applied")
 

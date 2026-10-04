@@ -1814,6 +1814,29 @@ def test_przewidywanie_drogi_zgodne_z_pisarzem(tmp_path):
     assert writeback.inplace_route("xisf", "OBJECT", "V" * 60, "str", None) is None
 
 
+def test_plan_komentarz_bez_miejsca_pomija_z_powodem_pisarza(tmp_path):
+    """AR-47: karta, której zastany komentarz nie przeżyje nowej formy, odmawia w OBU drogach
+    (w miejscu - spadek, atomowo - AR-7), więc plan ją POMIJA z powodem, który dałby zapis
+    atomowy, zamiast liczyć „spadek na drogę dotychczasową". Ta sama forma z krótkim komentarzem
+    wchodzi w miejscu.
+
+    Falsyfikator: zdejmij `comment_loss_route` z planu → klatka w `touched` i `fallback == 1`,
+    a commit da 'blocked'."""
+    p = _fits(tmp_path / "dlugi.fits", obj="M31", comment="k" * 47)
+    wiersz = {"skip": None, "frame_id": 1, "path": str(p), "location_id": 1, "card": "M31",
+              "form": "V" * 20, "header_hash": _hash(p), "filetype": "fits",
+              "value_type": "str", "comment": "k" * 47}
+    plan = macro.plan_object_card_form([wiersz], run_id="U")
+    assert not plan.run.touched and (plan.in_place, plan.fallback) == (0, 0)
+    (pominiety,) = plan.run.skipped
+    zapis = writeback.write_changes(str(p), _op("V" * 20), _hash(p))
+    assert zapis.status == "blocked" and pominiety.reason == zapis.reason
+
+    krotki = macro.plan_object_card_form([dict(wiersz, comment=KOMENTARZ[:10])], run_id="U")
+    assert len(krotki.run.touched) == 1 and krotki.in_place == 1
+    assert writeback.comment_loss_route("xisf", "OBJECT", "V" * 60, "k" * 70) is None
+
+
 def test_plan_bramki_formy_sklejki_typu_i_sumy(tmp_path):
     """kimi Z1/Z2c/Z5 + astra Z5 w predykacie: kanon znany tylko z aliasu (forma nie wraca), sklejka
     z członem wskazującym co innego, karta nietekstowa, FITS z CHECKSUM - każde pominięte z powodem;

@@ -781,3 +781,21 @@ def test_ochrona_rangi_NIE_zamraza_odtworzenia_tej_samej_sily(con):
     s = run_stack_lineage(con, now=LATER, xml_reader=lambda _p: _xml_historii([-10.0, -9.9, -9.8]))
     assert {r["input_frame_id"] for r in inputs_of(con, m)} == {_a, _b, trzeci}
     assert (s.linked_new, s.kept_proven, s.by_assert) == (1, 0, {"history": 1})
+
+
+def test_czytelny_plik_bez_daty_nie_kasuje_zapisanej(con):
+    """AR-50 (4): plik CZYTELNY, ale bez `XISF:CreationTime` (zwykła gałąź zapisu głowy) daty
+    zapisanej nie kasuje - ta sama reguła co w gałęzi chronionej z powodem i przy pliku
+    nieczytelnym. Zero zdarzeń przy drugim przebiegu.
+
+    Falsyfikator: zdejmij zachowanie `stan["creation_time"]` z gałęzi czytelnej → NULL."""
+    m = _master(con)
+    _light(con, "l1", date_obs="2025-08-30T20:30:00")
+    z_data = ('<xisf><Property id="XISF:CreationTime" type="String">2023-04-22T08:49:00Z'
+              '</Property></xisf>')
+    run_stack_lineage(con, now=NOW, xml_reader=lambda _p: z_data)
+    ile = con.execute("SELECT count(*) FROM event WHERE verb = 'integration.updated'").fetchone()[0]
+    run_stack_lineage(con, now=LATER, xml_reader=lambda _p: "<xisf></xisf>")
+    assert _integracja(con, m)["creation_time"] == "2023-04-22T08:49:00Z"
+    assert con.execute("SELECT count(*) FROM event WHERE verb = 'integration.updated'"
+                       ).fetchone()[0] == ile

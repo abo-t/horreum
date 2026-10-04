@@ -2350,6 +2350,49 @@ def _clear_object_tombstone_tx(con, *, frame_id, now, actor, commit_id=None, loc
     return True
 
 
+def confirm_failed_commit_by_scan(con, *, location_id, frame_id, header_hash, now,
+                                  actor="user:local"):
+    """SKAN POTWIERDZAJĄCY commit drogą atomową, który skończył się 'failed' po backupie (AR-38 (2)):
+    weryfikacja po podmianie albo re-sync padły, więc baza nie przyjęła bajtów, choć mogły trafić
+    na dysk. Gdy skan czyta na tej lokacji nagłówek równy `post_hash` backupu tego commitu, plik
+    niesie DOKŁADNIE zapisany nagłówek - commit się dokonał i dokańczamy go: wpisy stagingu
+    'failed' lokacji w tym przebiegu → 'applied' z powodem potwierdzenia, a gdy któryś wpisał
+    `OBJECT` - zgaszenie nagrobka ręki tą samą klingą i z tą samą parą commit/plik co commit
+    udany, więc cofnięcie commitu go odtworzy.
+
+    Dawniej karta stała w bazie po skanie, a klatka zostawała `user_cleared` - wyjście tylko przez
+    cofnięcie i ponowny commit. Zakres: wyłącznie droga atomowa (`inplace_op_id IS NULL`; zapis
+    w miejscu ma własne dokończenie pod izolacją lokacji) i backup, po którym plik podmieniono
+    (`unreplaced_at IS NULL`). Najnowszy pasujący backup wygrywa. Wołane przez skan w zakresie
+    `atomic` wjazdu rekordu (`_tx` dołącza). Zwraca `commit_id` potwierdzonego commitu albo
+    `None` bez zapisu."""
+    with _tx(con):
+        row = con.execute(
+            "SELECT hb.commit_id, c.run_id FROM pending_changes p "
+            "JOIN commits c ON c.run_id = p.run_id "
+            "JOIN header_backups hb ON hb.commit_id = c.id AND hb.location_id = p.location_id "
+            "WHERE p.location_id = ? AND p.status = 'failed' AND p.inplace_op_id IS NULL "
+            "AND hb.post_hash = ? AND hb.unreplaced_at IS NULL "
+            "ORDER BY hb.id DESC LIMIT 1",
+            (location_id, header_hash)).fetchone()
+        if row is None:
+            return None
+        commit_id = row["commit_id"]
+        wpisy = con.execute(
+            "SELECT keyword FROM pending_changes WHERE run_id = ? AND location_id = ? "
+            "AND status = 'failed' AND inplace_op_id IS NULL",
+            (row["run_id"], location_id)).fetchall()
+        con.execute(
+            "UPDATE pending_changes SET status = 'applied', reason = ? "
+            "WHERE run_id = ? AND location_id = ? AND status = 'failed' AND inplace_op_id IS NULL",
+            (f"potwierdzone skanem: nagłówek na dysku = zapisany w commicie {commit_id}",
+             row["run_id"], location_id))
+        if any(w["keyword"] == "OBJECT" for w in wpisy):
+            _clear_object_tombstone_tx(con, frame_id=frame_id, now=now, actor=actor,
+                                       commit_id=commit_id, location_id=location_id)
+    return commit_id
+
+
 def restore_object_tombstone(con, *, frame_id, commit_id, location_id, now, actor="user:local"):
     """Odtworzenie nagrobka przy cofnięciu commitu drogą atomową (`writeback.undo`) - wołane w
     zakresie `atomic` re-syncu cofnięcia, do którego `_immediate` dołącza. Reguły w rdzeniu."""
@@ -2953,8 +2996,9 @@ def stage_pending_many(con, *, run_id, previews):
 
 
 def set_pending_status(con, *, pending_id, status, reason=None):
-    """Ustaw status wpisu stagingu ('applied'|'failed'|'skipped'|'blocked') + powód. Transient."""
-    with con:
+    """Ustaw status wpisu stagingu ('applied'|'failed'|'skipped'|'blocked') + powód. Transient.
+    W zakresie `atomic` dołącza do niego (commit drogą atomową zamyka plik jedną transakcją)."""
+    with _tx(con):
         con.execute("UPDATE pending_changes SET status = ?, reason = ? WHERE id = ?",
                     (status, reason, pending_id))
 

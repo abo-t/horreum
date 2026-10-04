@@ -245,3 +245,82 @@ def test_commit_innej_karty_nie_odtwarza_niczego(tmp_path):
     assert _stan(con, fid) == (None, "user_cleared", cos)
     assert _ev(con, "object.tombstone_restored") == 0
     con.close()
+
+
+# ───────────────────── AR-38 (2): commit 'failed' z kartą na dysku dokańcza skan potwierdzający
+
+def _commit_failed(con, lid, run, monkeypatch, *, awaria):
+    """Commit karty drogą atomową, którego re-sync pada po zapisie pliku: `awaria='odczyt'` -
+    czkawka odczytu (`scan.scan_file`), `awaria='nagrobek'` - wyjątek przy gaszeniu nagrobka
+    w transakcji re-syncu. Zwraca wynik commitu; plik na dysku niesie już kartę."""
+    hh = con.execute("SELECT header_hash FROM location WHERE id = ?", (lid,)).fetchone()[0]
+    repo.stage_pending(con, run_id=run, location_id=lid, keyword="OBJECT", idx=0, op="set",
+                       old_value=None, new_value="NGC 7000", new_type="str", new_comment=None,
+                       expected_header_hash=hh)
+
+    def _pad(*a, **kw):
+        raise OSError(5, "zerwany udział") if awaria == "odczyt" else RuntimeError("w połowie")
+    cel = (scan, "scan_file") if awaria == "odczyt" else (repo, "clear_object_tombstone")
+    with monkeypatch.context() as m:
+        m.setattr(*cel, _pad)
+        res = writeback.commit(con, run, now=NOW)
+    assert len(res.failed) == 1 and not res.applied and res.commit_id is not None, res
+    return res, hh
+
+
+def _wpisy(con, run):
+    return [tuple(r) for r in con.execute(
+        "SELECT status, reason FROM pending_changes WHERE run_id = ?", (run,))]
+
+
+@pytest.mark.parametrize("awaria", ["odczyt", "nagrobek"])
+def test_failed_z_karta_skan_potwierdzajacy_gasi_nagrobek_odwracalnie(tmp_path, monkeypatch,
+                                                                      awaria):
+    """Commit padł po zapisie pliku: baza dalej opisuje plik sprzed commitu (re-sync, nagrobek
+    i statusy to JEDNA transakcja - wariant `nagrobek` dowodzi, że wyjątek przy gaszeniu wycofał
+    też wciągnięcie rekordu), nagrobek żyje, wpis 'failed'. Skan widzi nagłówek równy `post_hash`
+    backupu i dokańcza commit: wpis 'applied' z powodem potwierdzenia, nagrobek zgaszony z parą
+    commit/plik - więc cofnięcie commitu go odtwarza.
+
+    Falsyfikator: zdejmij wołanie `confirm_failed_commit_by_scan` ze skanu → klatka zostaje
+    `user_cleared` przy karcie w bazie; zdejmij `w_transakcji` z commitu → wariant `nagrobek`
+    zostawia bazę po commicie przy żywym nagrobku."""
+    con, p, lid, fid, cos = _baza_z_nagrobkiem(tmp_path)
+    res, hh_przed = _commit_failed(con, lid, "R", monkeypatch, awaria=awaria)
+    assert fits.getheader(str(p))["OBJECT"] == "NGC 7000"            # bajty na dysku
+    assert con.execute("SELECT header_hash FROM location WHERE id = ?",
+                       (lid,)).fetchone()[0] == hh_przed               # baza sprzed commitu
+    assert _stan(con, fid) == (None, "user_cleared", cos)
+    assert _wpisy(con, "R")[0][0] == "failed"
+
+    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW,
+                       summary=scan.ScanSummary())
+    assert _stan(con, fid) == (None, None, None)
+    (status, reason), = _wpisy(con, "R")
+    assert status == "applied" and f"commicie {res.commit_id}" in reason
+    assert con.execute("SELECT count(*) FROM event WHERE verb = 'object.tombstone_cleared' "
+                       "AND json_extract(payload, '$.commit_id') = ?",
+                       (res.commit_id,)).fetchone()[0] == 1
+
+    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW,
+                       summary=scan.ScanSummary())                     # idempotentne
+    assert _ev(con, "object.tombstone_cleared") == 1
+
+    ures = writeback.undo(con, res.commit_id, now=NOW)
+    assert len(ures.restored) == 1, ures
+    assert _stan(con, fid) == (None, "user_cleared", cos)
+    con.close()
+
+
+def test_failed_skan_innego_naglowka_nie_potwierdza(tmp_path, monkeypatch):
+    """Po commicie 'failed' plik zmienił ktoś inny - nagłówek na dysku nie jest tym, który commit
+    zapisał. Skan nie dokańcza commitu: nagrobek i wpis 'failed' zostają."""
+    con, p, lid, fid, cos = _baza_z_nagrobkiem(tmp_path)
+    _commit_failed(con, lid, "R", monkeypatch, awaria="odczyt")
+    with fits.open(str(p), mode="update") as hdul:
+        hdul[0].header["TELESCOP"] = "RC8"
+    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW,
+                       summary=scan.ScanSummary())
+    assert _stan(con, fid) == (None, "user_cleared", cos)
+    assert _wpisy(con, "R")[0][0] == "failed"
+    con.close()

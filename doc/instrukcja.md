@@ -180,9 +180,11 @@ Na dole ekranu **Dostawa** jest osobna sekcja **Stosy**. Twoje archiwum to pojed
 z teleskopu; gotowe obrazy po złożeniu (integracji) leżą gdzie indziej — w drzewie obróbki.
 Kliknij **Wciągnij stosy…**, wskaż korzeń tego drzewa, a Horreum doda te obrazy do biblioteki.
 
-Co dokładnie bierze: **wyłącznie pliki `masterLight*.xisf`**, czyli wynik integracji. Pomija
-wersje pochodne — skadrowane (`_autocrop`), po usunięciu gradientu (`_ABE`, `_DBE`), bez gwiazd
-(`_starless`) i podobne. To są kolejne kroki obróbki jednego obrazu, a nie osobne zdjęcia.
+Co dokładnie bierze: **wyłącznie pliki `masterLight*.xisf`**, czyli wynik integracji, razem
+z jego wariantami obrazu - skadrowanym (`_autocrop`) i przeskalowanym (`_drizzle_1x`). Pomija
+kolejne kroki obróbki: po usunięciu gradientu (`_ABE`, `_DBE`), po kalibracji koloru (`_SPCC`),
+bez gwiazd (`_starless`) i podobne - także doklejone do wariantu (`_autocropSPCC`). To nie są
+osobne zdjęcia, tylko dalsza obróbka jednego obrazu.
 
 > **To bezpieczne — i osobne.** Ta droga tylko **czyta**: w drzewie obróbki nie zmienia się ani
 > jeden bajt. Nie wchodzi też do **Przyjmij nowe** — codzienna dostawa dotyczy archiwum, a po

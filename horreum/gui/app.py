@@ -3774,6 +3774,3 @@ def main(argv=None):
 #   Odwracalność jest faktem o STANIE (trwa, dopóki jest co przywracać), więc recepta ma się
 #   składać w `refresh()` ze stanu i gasnąć, gdy przestaje być prawdziwa. Świadomy koszt paczki
 #   `A`: nie jest to regresja (przed nią całe zdanie ginęło tak samo), ale nie jest to wzorzec.
-# TODO-DŁUG(P-K/0xC0000409): proces kończy się STATUS_STACK_BUFFER_OVERRUN przy finalizacji
-#   interpretera, gdy MainWindow powstaje nad realną bazą bez app.exec() - zastane, widoczne
-#   wyłącznie w sondach bez pętli zdarzeń. Przy najbliższym dotknięciu closeEvent/teardownu.

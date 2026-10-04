@@ -338,6 +338,7 @@ class PlannerView(QWidget):
         self._shown_gen = 0              # generacja, której wynik (albo błąd) stoi na ekranie
         self._worker = None
         self._thread = None
+        self._zatrzymany = False         # `zatrzymaj_pola` - widok znika, żadnego nowego biegu
         self._result = None
         self._keep_canon = None          # cel, na który zaznaczenie ma wrócić po re-planie
         # PAMIĘĆ ZDJĘTEJ SIEROTY (R-S0-7) — `(kanon, status, priorytet, nota)` albo None. Żyje
@@ -1011,6 +1012,8 @@ class PlannerView(QWidget):
         """Policz plan pod BIEŻĄCE parametry. Nowa generacja unieważnia wynik w locie — jeden
         worker naraz, stary wynik ląduje w koszu (kontrolki zostają aktywne)."""
         self._debounce.stop()
+        if self._zatrzymany:
+            return                       # widok znika (`zatrzymaj_pola`) - nowego wątku nie zakładamy
         # Zaznaczenie przeżywa KAŻDE przeliczenie, nie tylko zapis (wiz T5 #10): zmiana progu
         # gasiła panel, a wpisana notatka przepadała bez śladu.
         if self._keep_canon is None:
@@ -1047,14 +1050,37 @@ class PlannerView(QWidget):
         # PyGILState_Ensure). Bez wait() poniższy thread.deleteLater() mógłby doręczyć się na main
         # ZANIM wątek umrze: ~QThread czekałby na wątek TRZYMAJĄC GIL, a wątek na GIL. wait()
         # zwalnia GIL, więc wątek dokańcza destrukcję workera i umiera.
+        if self._thread is None:
+            return                       # wątek już zebrał `zatrzymaj_pola`; to sygnał z kolejki
         self._worker.deleteLater()
         self._thread.wait()
         self._thread.deleteLater()
         self._worker = None
         self._thread = None
         self.busy.setVisible(False)
-        if self._pending_gen():
+        if self._pending_gen() and not self._zatrzymany:
             self._start(self._gen)       # parametry zmieniły się w biegu → licz jeszcze raz
+
+    def zatrzymaj_pola(self):
+        """Widok znika (zamknięcie okna, przełączenie bazy - `MainWindow._zatrzymaj_watki_widokow`):
+        ZBIERZ wątek rachunku nocy, zanim rodzic go skasuje (P-K). `~QThread` na żywym wątku to
+        `qFatal` = 0xC0000409, a `worker.finished -> thread.quit` idzie kolejką do wątku głównego,
+        więc bez pętli zdarzeń wątek nigdy sam nie wyjdzie z `exec()`. Kolejność jak
+        `_cleanup_thread` (quit z góry → worker.deleteLater → wait → thread.deleteLater). Rachunek
+        nie ma punktu przerwania - `wait` czeka na koniec bieżącego planu; wynik trafia do kosza
+        generacją. Idempotentne; nazwa wspólna z `FramesView.zatrzymaj_pola` (klucz okna)."""
+        self._zatrzymany = True
+        self._debounce.stop()
+        self._gen += 1
+        if self._thread is None:
+            return
+        self._thread.quit()
+        self._worker.deleteLater()
+        self._thread.wait()
+        self._thread.deleteLater()
+        self._worker = None
+        self._thread = None
+        self.busy.setVisible(False)
 
     def _pending_gen(self):
         """Czy na ekranie stoi coś starszego niż bieżące parametry. Liczymy WYŁĄCZNIE generacjami —

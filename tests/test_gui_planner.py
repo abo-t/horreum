@@ -630,6 +630,48 @@ def test_watek_tla_liczy_i_sprzata_bez_zawisu(qapp, tmp_path, ustawienia):
         con.close()
 
 
+def test_zatrzymaj_pola_zbiera_watek_w_trakcie_rachunku_bez_petli_zdarzen(qapp, tmp_path,
+                                                                         ustawienia, monkeypatch):
+    """P-K: okno zamykane w trakcie rachunku nocy woła `zatrzymaj_pola` i po powrocie wątku już
+    nie ma - bez kręcenia pętli zdarzeń (`finished -> quit` idzie kolejką, więc bez jawnego `quit`
+    wątek wisiałby w `exec()`, a `~QThread` na żywym wątku to 0xC0000409). Spóźniony wynik nie
+    trafia na ekran, sygnał `finished` z kolejki nie wywraca `_cleanup_thread`, a zatrzymany widok
+    nie zakłada nowego wątku.
+
+    Falsyfikator: zdejmij `self._thread.quit()` z `zatrzymaj_pola` → `wait()` nie wraca."""
+    import threading
+    import time
+    path = str(tmp_path / "stop.db")
+    con = _seed(path)
+    ruszyl = threading.Event()
+    prawdziwy = targets.plan
+
+    def _wolny(*a, **kw):
+        ruszyl.set()
+        time.sleep(0.5)
+        return prawdziwy(*a, **kw)
+    monkeypatch.setattr(targets, "plan", _wolny)
+    v = PlannerView(con, db_path=path)
+    try:
+        v.replan()
+        assert ruszyl.wait(10), "rachunek ruszył w wątku tła"
+        assert v._thread is not None
+        t0 = time.monotonic()
+        v.zatrzymaj_pola()
+        assert time.monotonic() - t0 < 10
+        assert v._thread is None and v._worker is None
+        assert not v.busy.isVisible()
+        for _ in range(20):                       # doręcz wszystko z kolejki: done, finished
+            qapp.processEvents()
+        assert v.model.rowCount() == 0, "spóźniony wynik nie trafił na ekran"
+        v.replan()
+        assert v._thread is None, "zatrzymany widok nie liczy od nowa"
+        v.zatrzymaj_pola()                        # idempotentne
+    finally:
+        v.close()
+        con.close()
+
+
 # ───────────────────────────────────────── sekcja sierot kurateli (R-S0-7)
 #
 # Populacja tej sekcji jest w żywym archiwum ZEROWA i ma prawo taka zostać — powstaje dopiero przy

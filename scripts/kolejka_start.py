@@ -16,16 +16,28 @@ Podkomendy:
                        to układ strony, nie treść - zdjęte po obu stronach); meldunek = numer
                        pierwszej różnej linii kolejki, nie cały blok.
   start --zapisz       podmienia blok w kolejce atomowo; drugi przebieg zostawia plik bajt w bajt.
+  tory [--fala N] [--pokaz]
+                       szwy torów: zbiór plików toru = backtickowane ścieżki z `siedziba:` jego
+                       otwartych ID (i z `tor-bez-id:`). FAIL, gdy dwa tory JEDNEJ fali dzielą plik
+                       spoza `DOZWOLONE_WSPOLNE`, oraz „szew nieznany”, gdy otwarte ID nie ma
+                       w `siedziba:` żadnej ścieżki pliku. `--pokaz` wypisuje skład torów.
 Wspólne flagi: --rejestr, --kolejka, --kod (domyślnie względem korzenia repo).
 
-Kody wyjścia: 0 OK (cisza) | 1 błąd schematu, rozjazd, budżet STARTU przekroczony - plik
-NIETKNIĘTY | 2 nie da się zmierzyć (brak pliku, brak markera, mieszane końce wiersza, zły UTF-8).
+Kody wyjścia: 0 OK (cisza) | 1 błąd schematu, rozjazd, budżet STARTU przekroczony, kolizja szwów
+w fali, szew nieznany - plik NIETKNIĘTY | 2 nie da się zmierzyć (brak pliku, brak markera,
+mieszane końce wiersza, zły UTF-8, fala spoza STAN).
 
 FORMAT REJESTRU. Blok zaczyna nagłówek `## ` w pierwszej kolumnie (poza płotkiem kodu):
   `## STAN`              pola sesji: sesja, stan, nastepny-krok, model-nastepnej, nie-wracac,
-                         paczki (każde raz) oraz powtarzalne tripwir i paczka-bez-id.
-  `## <ID> · <tytuł>`    dług albo decyzja: pola stan, waga, paczka (wymagane), kiedy, siedziba,
-                         zamkniete (opcjonalne); pola ZARAZ pod nagłówkiem, potem pusta linia i proza.
+                         tory (każde raz) oraz powtarzalne tripwir, tor-bez-id i fala.
+                         `tory:` = dziedzina torów w kolejności indeksu (`decyzja` dopisuje
+                         generator); `tor-bez-id: <tor> <opis> [| <siedziba>]` = pozycje bez
+                         własnego ID (opis idzie do indeksu, siedziba tylko do `tory`);
+                         `fala: <nr> <nazwa> | <tory fali> | <ID decyzji PRZED falą albo ->`.
+  `## <ID> · <tytuł>`    dług albo decyzja: pola stan, waga (wymagane), tor (wymagane w bloku
+                         otwartym i zaparkowanym), paczka (pole HISTORYCZNE - wyłącznie w bloku
+                         zamkniętym), kiedy, siedziba, zamkniete (opcjonalne); pola ZARAZ pod
+                         nagłówkiem, potem pusta linia i proza.
   `## <cokolwiek innego>` sekcja prozy - bez pól.
 Nieznane pole, zła dziedzina, duplikat ID albo niezamknięty płotek = błąd schematu; z rejestru,
 który oblewa schemat, START się nie generuje.
@@ -49,7 +61,8 @@ KOD = KORZEN / "horreum"
 # Limit 45 = najbliższa okrągła wartość z zapasem 6 linii (~40 nowych ID albo trzy tripwiry);
 # skill `kolejka-sesji` celuje w ~30, brief paczki `K` postawił sufit 45. Przekroczenie = FAIL
 # „krok zbyt szeroki", NIGDY ciche obcięcie: obcięcie skasowałoby instrukcję, FAIL każe
-# skrócić pola STAN albo domknąć ID.
+# skrócić pola STAN albo domknąć ID. Pomiar 2026-10-05 po przejściu na indeks wg fal i torów:
+# 45 linii przy 63 otwartych ID (indeks 8 linii) - zapas ZERO, następny przyrost każe ciąć STAN.
 LIMIT_LINII_STARTU = 45
 LIMIT_ZNAKOW = {"nastepny-krok": 900, "model-nastepnej": 250}
 SZEROKOSC = 120
@@ -63,14 +76,29 @@ POLE_RE = re.compile(r"^([a-z][a-z-]*):(.*)$")
 TODO_RE = re.compile(r"TODO-DŁUG\(([^)\s]+)\)")
 KOD_W_BACKTICKU = re.compile(r"`([^`]+)`")
 
-POLA_STANU = ("sesja", "stan", "nastepny-krok", "model-nastepnej", "nie-wracac", "paczki")
-POLA_STANU_WIELE = ("tripwir", "paczka-bez-id")
-POLA_ID_WYMAGANE = ("stan", "waga", "paczka")
-POLA_ID_OPCJONALNE = ("kiedy", "siedziba", "zamkniete")
+POLA_STANU = ("sesja", "stan", "nastepny-krok", "model-nastepnej", "nie-wracac", "tory")
+POLA_STANU_WIELE = ("tripwir", "tor-bez-id", "fala")
+POLA_ID_WYMAGANE = ("stan", "waga")
+POLA_ID_OPCJONALNE = ("tor", "paczka", "kiedy", "siedziba", "zamkniete")
 STANY = ("otwarty", "zaparkowany", "zamkniety")
+STANY_OTWARTE = ("otwarty", "zaparkowany")
 WAGI = {"-": "", "zolta": "🟡", "czerwona": "🔴"}
-PACZKI_STALE = ("poza", "decyzja")
-ETYKIETY = {"poza": "**poza paczkami**", "decyzja": "**decyzje**"}
+TOR_DECYZJA = "decyzja"
+TOR_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_]*")
+# Paczki z planu 2026-08-16 (al) - dziedzina ZAMROŻONA: pole `paczka:` żyje już tylko w blokach
+# zamkniętych jako ślad historyczny (otwarte niosą `tor:`), więc nowa paczka nie powstanie.
+PACZKI_HISTORYCZNE = tuple("ABCDEFGHIJKLMNOPQ") + ("poza", "decyzja")
+
+# Pliki, które dwa tory jednej fali MOGĄ dzielić. Katalog i18n: każdy tor dopisuje własne klucze,
+# konflikt to scalenie sąsiednich linii słownika. `grid.py`: dozwolony, bo tabela fal w kolejce
+# NAZYWA rejon każdego toru (fala 2: `_flash` / kolumny+QSettings / model komórki) - plik bez
+# nazwanego rejonu do tej listy nie wchodzi.
+DOZWOLONE_WSPOLNE = ("horreum/gui/i18n_catalog.py", "horreum/gui/grid.py")
+# Ścieżka pliku na POCZĄTKU backticku; sufiks funkcji/linii w tym samym backticku (`plik.py:45`,
+# `plik.py _f`, `plik.py::f`) odpada. Kropka bez znanego rozszerzenia (`tasks.copies_unread_tip`)
+# to symbol, nie plik.
+PLIK_RE = re.compile(r"[A-Za-z0-9_./\\-]+?\.(?:py|md|json|sql|ps1|toml|txt|nsi|spec|cfg|ini)"
+                     r"(?![A-Za-z0-9_])")
 
 MARKER = "## ⏭ START TUTAJ"
 
@@ -93,16 +121,33 @@ class Blok:
 
 
 @dataclass
+class Fala:
+    nr: int
+    nazwa: str
+    tory: list
+    przed: list                         # ID decyzji, które zapadają PRZED falą
+
+
+@dataclass
+class BezId:
+    tor: str
+    opis: str
+    siedziba: str
+
+
+@dataclass
 class Rejestr:
     stan: dict | None = None            # nazwa -> lista wartości (pola jednokrotne mają jedną)
     bloki: list = field(default_factory=list)
     bledy: list = field(default_factory=list)
+    fale: list = field(default_factory=list)
+    bez_id: list = field(default_factory=list)
 
     def otwarte(self):
-        return [b for b in self.bloki if b.pola.get("stan") in ("otwarty", "zaparkowany")]
+        return [b for b in self.bloki if b.pola.get("stan") in STANY_OTWARTE]
 
-    def paczki(self):
-        return tuple((self.stan or {}).get("paczki", [""])[0].split()) + PACZKI_STALE
+    def tory(self):
+        return tuple((self.stan or {}).get("tory", [""])[0].split()) + (TOR_DECYZJA,)
 
 
 # --- odczyt ----------------------------------------------------------------------------------
@@ -198,20 +243,67 @@ def rozbierz(tekst: str) -> Rejestr:
     if rej.stan is None:
         rej.bledy.append("brak bloku `## STAN` - nie ma z czego złożyć STARTU")
     else:
-        dziedzina = rej.paczki()
-        for b in rej.bloki:
-            p = b.pola.get("paczka")
-            if p is not None and p not in dziedzina:
-                rej.bledy.append(f"linia {b.nr}: {b.ident}: paczka `{p}` spoza dziedziny "
+        dziedzina = rej.tory()
+        for b in rej.otwarte():
+            t = b.pola.get("tor")
+            if t is not None and t not in dziedzina:
+                rej.bledy.append(f"linia {b.nr}: {b.ident}: tor `{t}` spoza dziedziny "
                                  f"{' '.join(dziedzina)}")
-        for wartosc in rej.stan.get("paczka-bez-id", []):
-            litera = wartosc.split(" ")[0]
-            if litera not in dziedzina:
-                rej.bledy.append(f"STAN: paczka-bez-id `{litera}` spoza dziedziny")
-            if any(ID_RE.fullmatch(t) for t in KOD_W_BACKTICKU.findall(wartosc)):
-                rej.bledy.append(f"STAN: paczka-bez-id `{litera}` niesie identyfikator - ID "
+        for wartosc in rej.stan.get("tor-bez-id", []):
+            tor, _, reszta = wartosc.partition(" ")
+            opis, _, siedziba = reszta.partition(" | ")
+            if tor not in dziedzina:
+                rej.bledy.append(f"STAN: tor-bez-id `{tor}` spoza dziedziny")
+            if not opis.strip():
+                rej.bledy.append(f"STAN: tor-bez-id `{tor}` bez opisu")
+            if any(ID_RE.fullmatch(t) for t in KOD_W_BACKTICKU.findall(opis)):
+                rej.bledy.append(f"STAN: tor-bez-id `{tor}` niesie identyfikator - ID "
                                  "dostaje własny blok, inaczej zniknie z kontroli kompletności")
+            rej.bez_id.append(BezId(tor, opis.strip(), siedziba.strip()))
+        rej.fale = _sprawdz_fale(rej)
     return rej
+
+
+def _sprawdz_fale(rej: Rejestr) -> list:
+    """`fala: <nr> <nazwa> | <tory> | <decyzje przed albo ->` -> lista `Fala`. Tor należy do
+    najwyżej jednej fali (inaczej `tory` liczyłby jego szew dwa razy w dwóch składach), a decyzja
+    PRZED falą musi być otwartym ID - zamknięta albo literówka nie wstrzymuje niczego."""
+    fale, numery, tor_w_fali = [], set(), {}
+    dziedzina = set(rej.tory()) - {TOR_DECYZJA}
+    otwarte = {b.ident for b in rej.otwarte()}
+    for wartosc in rej.stan.get("fala", []):
+        czesci = [c.strip() for c in wartosc.split("|")]
+        if len(czesci) != 3:
+            rej.bledy.append(f"STAN: fala `{wartosc[:40]}` - format `<nr> <nazwa> | <tory> | "
+                             "<decyzje przed albo ->`")
+            continue
+        glowa, tory, przed = czesci
+        nr_txt, _, nazwa = glowa.partition(" ")
+        if not nr_txt.isdigit():
+            rej.bledy.append(f"STAN: fala `{glowa[:40]}` - numer fali to liczba")
+            continue
+        nr = int(nr_txt)
+        if nr in numery:
+            rej.bledy.append(f"STAN: fala {nr} powtórzona")
+            continue
+        numery.add(nr)
+        tory = tory.split()
+        if not tory:
+            rej.bledy.append(f"STAN: fala {nr} bez torów")
+        for t in tory:
+            if t not in dziedzina:
+                rej.bledy.append(f"STAN: fala {nr}: tor `{t}` spoza dziedziny "
+                                 f"{' '.join(sorted(dziedzina))}")
+            elif t in tor_w_fali:
+                rej.bledy.append(f"STAN: fala {nr}: tor `{t}` stoi już w fali {tor_w_fali[t]}")
+            else:
+                tor_w_fali[t] = nr
+        przed = [] if przed == "-" else przed.split()
+        for p in przed:
+            if p not in otwarte:
+                rej.bledy.append(f"STAN: fala {nr}: decyzja przed falą `{p}` nie jest otwartym ID")
+        fale.append(Fala(nr, nazwa.strip(), tory, przed))
+    return sorted(fale, key=lambda f: f.nr)
 
 
 def _pola(cialo):
@@ -264,16 +356,16 @@ def _sprawdz_stan(pola, reszta, nr, bledy):
         dl = len(stan.get(nazwa, [""])[0])
         if dl > limit:
             bledy.append(f"STAN: FAIL: krok zbyt szeroki - `{nazwa}:` ma {dl} znaków, limit {limit}")
-    paczki = stan.get("paczki", [""])[0].split()
-    if len(set(paczki)) != len(paczki) or set(paczki) & set(PACZKI_STALE):
-        bledy.append(f"linia {nr}: STAN: `paczki:` z powtórzeniem albo z członem "
-                     f"{'/'.join(PACZKI_STALE)} (te są stałe, dopisuje je generator)")
-    jak_id = [p for p in paczki if ID_RE.fullmatch(p)]
-    if jak_id:
-        # Etykieta paczki stoi w indeksie w backtickach jak ID, więc `K7` wyglądałby tam na
-        # identyfikator i kontrola kompletności generatu pękłaby na zdrowym rejestrze.
-        bledy.append(f"linia {nr}: STAN: nazwa paczki wygląda na ID ({' '.join(jak_id)}) - "
-                     "paczka to litera albo słowo bez cyfry i dywizu")
+    tory = stan.get("tory", [""])[0].split()
+    if len(set(tory)) != len(tory) or TOR_DECYZJA in tory:
+        bledy.append(f"linia {nr}: STAN: `tory:` z powtórzeniem albo z członem `{TOR_DECYZJA}` "
+                     "(ten jest stały, dopisuje go generator)")
+    # Etykieta toru stoi w indeksie GOŁA, nie w backtickach - `T1` wygląda jak ID, a kontrola
+    # kompletności generatu czyta ID wyłącznie z backticków. Znak spoza nazwy (backtick, gwiazdka)
+    # rozbiłby tę granicę.
+    zle = [t for t in tory if not TOR_RE.fullmatch(t)]
+    if zle:
+        bledy.append(f"linia {nr}: STAN: nazwa toru spoza [A-Za-z0-9_] ({' '.join(zle)})")
     if any(l.strip() for _, l, _ in reszta):
         bledy.append(f"linia {nr}: STAN nie niesie prozy - treść idzie w pola")
     return stan
@@ -297,6 +389,17 @@ def _sprawdz_blok(blok, pola, reszta, bledy):
     if (stan == "zamkniety") != ("zamkniete" in blok.pola):
         bledy.append(f"linia {blok.nr}: {blok.ident}: `stan: zamkniety` i pole `zamkniete:` "
                      "chodzą w parze (data i czym zamknięto)")
+    if stan in STANY_OTWARTE:
+        if pola and "tor" not in blok.pola:
+            bledy.append(f"linia {blok.nr}: {blok.ident}: brak pola `tor:` (blok otwarty "
+                         "i zaparkowany należy do toru albo do `decyzja`)")
+        if "paczka" in blok.pola:
+            bledy.append(f"linia {blok.nr}: {blok.ident}: `paczka:` to pole historyczne bloku "
+                         "zamkniętego - otwarty niesie `tor:`")
+    paczka = blok.pola.get("paczka")
+    if paczka is not None and paczka not in PACZKI_HISTORYCZNE:
+        bledy.append(f"linia {blok.nr}: {blok.ident}: paczka `{paczka}` spoza dziedziny "
+                     f"historycznej {' '.join(PACZKI_HISTORYCZNE)}")
     _proza_po_polach(reszta, znane, blok.ident, bledy)
     blok.proza = [l for _, l, _ in reszta]
 
@@ -356,25 +459,40 @@ def _znacznik(b: Blok) -> str:
 
 
 def indeks(rej: Rejestr) -> tuple:
-    """Jednolinijkowy indeks otwartych ID wg paczek. Zwraca (tekst, liczba ID)."""
+    """Jednolinijkowy indeks otwartych ID wg fal i torów: fale w kolejności numerów (tory w kolejności
+    pola `fala:`), potem tory spoza fal (kolejność `tory:`), na końcu decyzje bez toru. Etykiety
+    torów są gołe (pogrubienie 16 etykiet kosztowało linię budżetu), nigdy w backtickach - backtick
+    w indeksie znaczy wyłącznie ID. Zwraca (tekst, liczba ID)."""
     otwarte = rej.otwarte()
     bez_id = {}
-    for wartosc in rej.stan.get("paczka-bez-id", []):
-        litera, _, opis = wartosc.partition(" ")
-        bez_id.setdefault(litera, []).append(opis.strip())
-    czesci = []
-    for p in rej.paczki():
-        ids = [f"`{b.ident}`{_znacznik(b)}" for b in otwarte if b.pola["paczka"] == p]
-        opisy = bez_id.get(p, [])
+    for p in rej.bez_id:
+        bez_id.setdefault(p.tor, []).append(p.opis)
+
+    def czlon(tor):
+        ids = [f"`{b.ident}`{_znacznik(b)}" for b in otwarte if b.pola["tor"] == tor]
+        opisy = bez_id.get(tor, [])
         if not ids and not opisy:
-            continue
-        czlon = [ETYKIETY.get(p, f"`{p}`")] + ids
-        czlon += [("+ " if (ids or i) else "") + o for i, o in enumerate(opisy)]
-        czesci.append(" ".join(czlon))
-    tekst = (f"**Otwarte ID wg paczek ({len(otwarte)}; 🟡 = decyzja nieblokująca, 🔴 = blokująca, "
+            return None
+        c = ["**decyzje**" if tor == TOR_DECYZJA else tor] + ids
+        c += [("+ " if (ids or i) else "") + o for i, o in enumerate(opisy)]
+        return " ".join(c)
+
+    czesci, w_falach = [], set()
+    for f in rej.fale:
+        w_falach.update(f.tory)
+        cz = [c for c in map(czlon, f.tory) if c]
+        if cz:
+            czesci.append(f"**fala {f.nr}:** " + " · ".join(cz))
+    reszta = [c for c in map(czlon, [t for t in rej.tory()[:-1] if t not in w_falach]) if c]
+    if reszta:
+        czesci.append("**poza falami:** " + " · ".join(reszta))
+    decyzje = czlon(TOR_DECYZJA)
+    if decyzje:
+        czesci.append(decyzje)
+    tekst = (f"**Otwarte ID wg fal i torów ({len(otwarte)}; 🟡/🔴 = decyzja nie/blokująca, "
              f"🅿 = zaparkowane):** " + " · ".join(czesci))
     # ⛔ Druga kontrola, niezależna od filtra wyżej: ID odczytane Z WYPISANEGO TEKSTU mają dać
-    # dokładnie zbiór bloków otwartych/zaparkowanych. Filtr, który zgubi paczkę albo stan,
+    # dokładnie zbiór bloków otwartych/zaparkowanych. Filtr, który zgubi tor albo stan,
     # zgodziłby się ze sobą przy równości bajtowej - ta asercja nie (niezmiennik 10 skilla).
     wypisane = [t for t in KOD_W_BACKTICKU.findall(tekst) if ID_RE.fullmatch(t)]
     oczekiwane = sorted(b.ident for b in otwarte)
@@ -415,6 +533,71 @@ def generuj_start(rej: Rejestr) -> list:
         raise BladBudzetu(f"FAIL: krok zbyt szeroki - START ma {len(linie)} linii, limit "
                           f"{LIMIT_LINII_STARTU}; skróć pola STAN albo domknij ID (bez obcinania)")
     return linie
+
+
+# --- szwy torów ------------------------------------------------------------------------------
+
+def pliki_siedziby(tekst: str, korzen: Path, cache: dict | None = None) -> tuple:
+    """Backtickowane ścieżki plików z pola `siedziba:` -> (zbiór ścieżek względem korzenia repo,
+    lista goły-plik-niejednoznaczny). Goła nazwa (`resolver.py`) dostaje ścieżkę, gdy w `horreum/`,
+    `scripts/` i `tests/` jest DOKŁADNIE jeden taki plik - inaczej ta sama jednostka pod dwiema
+    pisowniami minęłaby się w porównaniu szwów. Zero trafień = plik planowany, zostaje jak stoi."""
+    cache = {} if cache is None else cache
+    pliki, niejednoznaczne = set(), []
+    for token in KOD_W_BACKTICKU.findall(tekst):
+        m = PLIK_RE.match(token.strip())
+        if not m:
+            continue
+        sciezka = m.group(0).replace("\\", "/").removeprefix("./")
+        if "/" not in sciezka:
+            if sciezka not in cache:
+                trafienia = sorted({p.relative_to(korzen).as_posix()
+                                    for kat in ("horreum", "scripts", "tests")
+                                    if (korzen / kat).is_dir()
+                                    for p in (korzen / kat).rglob(sciezka)
+                                    if "__pycache__" not in p.parts})
+                cache[sciezka] = trafienia
+            trafienia = cache[sciezka]
+            if len(trafienia) == 1:
+                sciezka = trafienia[0]
+            elif trafienia:
+                niejednoznaczne.append(f"{sciezka} ({len(trafienia)} trafień)")
+        pliki.add(sciezka)
+    return pliki, niejednoznaczne
+
+
+def szwy(rej: Rejestr, korzen: Path, tory_zakres) -> tuple:
+    """Skład szwów torów z zakresu -> ({tor: {plik: [kto]}}, [meldunki szwu nieznanego])."""
+    sklad, nieznane, cache = {t: {} for t in tory_zakres}, [], {}
+
+    def dopisz(tor, kto, siedziba):
+        pliki, niejednoznaczne = pliki_siedziby(siedziba or "", korzen, cache)
+        for n in niejednoznaczne:
+            nieznane.append(f"SZEW NIEZNANY {tor}: {kto} - goła nazwa {n}, podaj ścieżkę")
+        if not pliki:
+            powod = "brak `siedziba:`" if not siedziba else "siedziba bez ścieżki pliku"
+            nieznane.append(f"SZEW NIEZNANY {tor}: {kto} ({powod})")
+        for p in pliki:
+            sklad[tor].setdefault(p, []).append(kto)
+
+    for b in rej.otwarte():
+        if b.pola["tor"] in sklad:
+            dopisz(b.pola["tor"], b.ident, b.pola.get("siedziba"))
+    for p in rej.bez_id:
+        if p.tor in sklad:
+            dopisz(p.tor, p.opis, p.siedziba)
+    return sklad, nieznane
+
+
+def kolizje(fala: Fala, sklad: dict) -> list:
+    """Pary torów jednej fali dzielące plik spoza `DOZWOLONE_WSPOLNE` -> meldunki FAIL."""
+    wynik = []
+    for i, a in enumerate(fala.tory):
+        for b in fala.tory[i + 1:]:
+            for plik in sorted(set(sklad[a]) & set(sklad[b]) - set(DOZWOLONE_WSPOLNE)):
+                wynik.append(f"FAIL fala {fala.nr}: {a} × {b} · {plik} "
+                             f"({a}: {' '.join(sklad[a][plik])}; {b}: {' '.join(sklad[b][plik])})")
+    return wynik
 
 
 # --- kolejka ---------------------------------------------------------------------------------
@@ -541,6 +724,37 @@ def cmd_start(args) -> int:
     return 0
 
 
+def cmd_tory(args) -> int:
+    rej = _wczytaj_rejestr(args)
+    if rej.bledy:
+        return _meldunek_bledow(rej)
+    fale = rej.fale
+    if args.fala is not None:
+        fale = [f for f in fale if f.nr == args.fala]
+        if not fale:
+            raise BladPomiaru(f"nie ma fali {args.fala} w STAN (`fala:`)")
+        zakres = [t for f in fale for t in f.tory]
+    else:
+        zakres = list(rej.tory())
+    sklad, nieznane = szwy(rej, Path(args.kod).resolve().parent, zakres)
+    meldunki = [m for f in fale for m in kolizje(f, sklad)] + nieznane
+    if args.pokaz:
+        w_falach = set()
+        for f in fale:
+            w_falach.update(f.tory)
+            print(f"fala {f.nr} {f.nazwa} (przed: {' '.join(f.przed) or '-'})")
+            for t in f.tory:
+                print(f"  {t}: {' '.join(sorted(sklad[t])) or '-'}")
+        reszta = [t for t in zakres if t not in w_falach]
+        if reszta:
+            print("poza falami")
+            for t in reszta:
+                print(f"  {t}: {' '.join(sorted(sklad[t])) or '-'}")
+    for m in meldunki:
+        print(m)
+    return 1 if meldunki else 0
+
+
 def main(argv=None) -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace", newline="\n")
@@ -556,9 +770,12 @@ def main(argv=None) -> int:
     tryb = s.add_mutually_exclusive_group()
     tryb.add_argument("--sprawdz", action="store_true")
     tryb.add_argument("--zapisz", action="store_true")
+    t = sub.add_parser("tory")
+    t.add_argument("--fala", type=int)
+    t.add_argument("--pokaz", action="store_true")
     args = p.parse_args(argv)
     try:
-        return {"sprawdz": cmd_sprawdz, "start": cmd_start}[args.cmd](args)
+        return {"sprawdz": cmd_sprawdz, "start": cmd_start, "tory": cmd_tory}[args.cmd](args)
     except BladPomiaru as e:
         print(f"BŁĄD (nie da się zmierzyć): {e}")
         return 2

@@ -8,6 +8,7 @@ muszą różnicować dane, nie tylko nagłówki.
 import json
 import os
 import sqlite3
+from datetime import date
 
 import numpy as np
 import pytest
@@ -637,3 +638,35 @@ def test_kotwica_nameless_bez_przeliczenia_rowna_stanowi(tmp_path):
     s, ns, stan = _kotwica_po_wsadzie(tmp_path, SPECS_AR49, [_NAPRAWIONY, _NIETKNIETY], [])
     assert s.recomputed == 0
     assert ns.anchor == stan == 2 and ns.recomputed_lights == 0
+
+
+# ── AR-53: FAIL kryterium z kotwicą drukuje jej pochodzenie i wiek ───────────────────────────────
+def test_fail_kotwicy_drukuje_pochodzenie_i_wiek(tmp_path):
+    """Mała baza importu ma 2 teleskopy, a kotwica IMPORT mówi 8 - kryterium §5.4 MUSI być
+    czerwone, a wiersz FAIL ma nieść obie wartości, datę pomiaru z wiekiem w dniach i ostatnie
+    potwierdzenie. Te same linie wraca `check_criteria` w wyniku (dla podsumowania)."""
+    acc = _acceptance()
+    donor_path, _files = _mk_donor(tmp_path, SPECS)
+    donor = open_donor(str(donor_path))
+    con = db.open_db(str(tmp_path / "horreum.db"))
+    linie = []
+    try:
+        s = run_import(donor, con, now=NOW, rng_seed=1)
+        testimony = acc.donor_object_testimony(donor, s.preflight.recompute)
+        wyniki = acc.check_criteria(con, s, linie.append, donor_testimony=testimony,
+                                    now="2026-10-05T08:00:00+00:00")
+    finally:
+        con.close()
+        donor.close()
+
+    k = acc.EXP_TELESCOPES_IMPORT
+    (etykieta, ok, pochodzenie), = [w for w in wyniki if w[0].startswith("§5.4 liczba teleskopów")]
+    assert not ok and etykieta == f"§5.4 liczba teleskopów == {k.wartosc} (akt=2)"
+    wiek = (date(2026, 10, 5) - date.fromisoformat(k.pomiar.dzien)).days
+    assert pochodzenie[0] == f"oczekiwano == {k.wartosc}, aktualnie 2"
+    assert pochodzenie[1].startswith(f"kotwica zmierzona: {k.pomiar.dzien} ({wiek} dni temu)")
+    assert pochodzenie[2].startswith(f"ostatnio potwierdzona: {k.potwierdzenie.dzien}")
+    i = linie.index(f"  [FAIL] {etykieta}")
+    assert [x.strip() for x in linie[i + 1:i + 4]] == list(pochodzenie)
+    # PASS nie niesie pochodzenia - wydruk nie puchnie na zielonych kotwicach
+    assert all(p == () for _e, ok_, p in wyniki if ok_)

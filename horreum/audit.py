@@ -347,7 +347,12 @@ def config_review_reason_gap(con):
 
     Kalibracja poza osią teleskopu NIE wchodzi (kind-scoping: jej `config_id IS NULL` to stan
     docelowy), klatka bez zeznania też nie (grouper iteruje `frame JOIN header`, więc nigdy jej
-    nie flaguje) — te same dwa wyłączenia, co w `resolver.review_state.no_config`."""
+    nie flaguje) - te same dwa wyłączenia, co w `resolver.review_state.no_config`.
+
+    POWÓD MUSI BYĆ Z BIEŻĄCEGO EPIZODU (R1-4): liczy się `config.review` PÓŹNIEJSZY niż ostatni
+    `config.assigned` tej klatki. Dowolny historyczny przegląd przepuszczałby klatkę, która config
+    MIAŁA, a potem straciła go po cichu - jej stary powód wisi w dzienniku na zawsze. Porządek po
+    `event.id`, nie po `ts`: w obrębie jednego przebiegu znaczniki czasu bywają równe."""
     from .grouper import NO_TELESCOPE_KINDS
 
     return con.execute(
@@ -355,7 +360,10 @@ def config_review_reason_gap(con):
         "AND f.kind NOT IN (SELECT value FROM json_each(?)) "
         "AND EXISTS(SELECT 1 FROM header h WHERE h.frame_id = f.id) "
         "AND NOT EXISTS(SELECT 1 FROM event e WHERE e.verb = 'config.review' "
-        "               AND e.target = 'frame:' || f.id)",
+        "               AND e.target = 'frame:' || f.id "
+        "               AND e.id > COALESCE((SELECT max(a.id) FROM event a "
+        "                                    WHERE a.verb = 'config.assigned' "
+        "                                    AND a.target = 'frame:' || f.id), 0))",
         (json.dumps(sorted(NO_TELESCOPE_KINDS)),)).fetchone()[0]
 
 

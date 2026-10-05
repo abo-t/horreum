@@ -290,6 +290,24 @@ def test_5_6_kierunkowe_przezywa_naprawe():
         "SELECT count(DISTINCT target) FROM event WHERE verb='config.review'").fetchone()[0] == 1
 
 
+def test_5_6_stary_powod_nie_kryje_cichego_wyzerowania():
+    """R1-4: powód liczy się z BIEŻĄCEGO epizodu. Klatka miała przegląd, potem dostała zestaw
+    ręką, a potem straciła go z pominięciem klingi - jej stary `config.review` wisi w dzienniku,
+    ale jest WCZEŚNIEJSZY niż ostatnie `config.assigned`, więc luka = 1. Następny przebieg
+    groupera zapisuje świeży powód i luka wraca do zera."""
+    con = _baza()
+    cam, tel = _kamera(con), _teleskop(con)
+    a = _klatka(con, "aaa", camera_id=cam)
+    grouper.run_grouper(con, now=NOW)                 # powód z epizodu „bez configu"
+    repo.user_assign_config(con, frame_ids=[a], telescope_id=tel, now=NOW)
+    with con:                                         # ciche wyzerowanie gołym SQL-em
+        con.execute("UPDATE frame SET config_id = NULL, config_source = NULL WHERE id = ?", (a,))
+    assert audit.config_review_reason_gap(con) == 1
+
+    grouper.run_grouper(con, now=NOW)                 # świeży powód, PÓŹNIEJSZY niż przypisanie
+    assert audit.config_review_reason_gap(con) == 0
+
+
 def test_5_6_lapie_klatke_bez_powodu():
     """Falsyfikator: klatka bez configu, o której dziennik MILCZY, ma zapalić czerwień — inaczej
     kryterium pinowałoby własną nieobecność (kalibracja i klatka bez zeznania są poza zbiorem)."""

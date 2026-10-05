@@ -15,17 +15,20 @@ Tryb HYBRYDOWY (odpowiednik replay+subset ze skilla `pipeline-replay-validation`
   (X) XISF-DOSKAN (opcja `--xisf-root DIR`) — po imporcie realny `scan_tree` po drzewie z XISF
       (volume z `volume_serial`), potem grouper+resolver. Odtwarza PF-4: FITS gate'owane mtime
       (skip, zero re-odczytu), XISF wciągane → 9. teleskop ED, pełne kotwice §5. Pełne `<xisf-root>`
-      → pełny stan pf4 (czyta tylko ~331 nagłówków XISF, reszta stat-skip).
+      → pełny stan pf4 (czyta tylko ~331 nagłówków XISF, reszta stat-skip). Poddrzewo `STACKS`
+      pod korzeniem jest ODCINANE (AR-53 O1): stosy wchodzą wyłącznie etapem (T), a kotwice
+      FULL znaczą „archiwum" (`korzenie_doskanu`; zwykły skan produktu `STACKS` wciąga dalej).
   (K) KALIBRACJA — `run_calibration` na gotowym stanie (po grouperze i resolverze) + kolejny przebieg
       jako dowód idempotencji. Oś przepisu jest bramkowana tu, bo jej kotwice (38 dark / 37 flat)
       zmierzono na pełnym archiwum, a mastery są XISF — bez doskanu nie ma czego liczyć.
       **Od P-G łańcuch kalibracji+rodowodu robi już `run_import`**, więc w trybie IMPORT ta faza
       jest przebiegiem DRUGIM (zera delt = dowód, nie regresja; pinuje to §4.6), a w FULL wciąż
       pierwszym dla masterów przyniesionych doskanem.
-  (T) STOSY (opcja `--stacks-root DIR`) — po doskanie realny `scan_stacks` po drzewie OBRÓBKI
+  (T) STOSY (opcja `--stacks-root DIR`) - po doskanie realny `scan_stacks` po drzewie STOSÓW
       (I-2b, P-I): gotowe obrazy po integracji wchodzą jako `master_light`. Trzeci etap, bo trzeci
-      ZAKRES — dawca to archiwum FITS, `--xisf-root` to archiwum XISF, a to jest drzewo poza
-      archiwum. Uruchomiony BEZ `--xisf-root` daje bazę, której ta bramka nie zna (kotwice STOSÓW
+      ZAKRES - dawca to archiwum FITS, `--xisf-root` to archiwum XISF bez `STACKS`, a to jest
+      drzewo gotowych obrazów (dziś `<xisf-root>\\STACKS`, do 0810 drzewo obróbki poza archiwum).
+      Uruchomiony BEZ `--xisf-root` daje bazę, której ta bramka nie zna (kotwice STOSÓW
       są liczone na stanie FULL) — skrypt odmawia takiego przebiegu zamiast liczyć nieporównywalne.
   (U) RODOWÓD STOSÓW (razem z `--stacks-root`) — `run_stack_lineage` (I-2c): co weszło w gotowy
       obraz. Osobna faza od (L), bo to inna oś (tam „czym skalibrowano klatkę", tu „z czego zrobiono
@@ -40,7 +43,7 @@ Tryb HYBRYDOWY (odpowiednik replay+subset ze skilla `pipeline-replay-validation`
 
 Użycie:
   python scripts/acceptance_s5.py --donor fitsmirror.db [--xisf-root <xisf-root>]
-                                  [--live-db <zywa horreum.db>]
+                                  [--stacks-root <xisf-root>\\STACKS] [--live-db <zywa horreum.db>]
                                   [--subset PATH\\maly_real_dir] [--work PATH\\horreum_s5.db] [--keep]
 
 `--live-db` podawaj ZAWSZE, gdy Horreum naprawiał nagłówki na tym samym drzewie (D-0722-2
@@ -53,7 +56,8 @@ import os
 import sqlite3
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from pathlib import Path
 
 # pakiet horreum z korzenia repo (skrypt leży w scripts/)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -75,11 +79,114 @@ from horreum.resolve.headers import extract_header                # noqa: E402
 from horreum.resolve.regions import resolve_region                # noqa: E402
 from horreum.resolver import (                                    # noqa: E402
     NO_OBJECT_CARD_FILETYPES, delta_report, run_resolver)
-from horreum.scan import canonize_root, scan_stacks, scan_tree    # noqa: E402
+from horreum.resolve.paths import STACKS_DIR                      # noqa: E402
+from horreum.scan import (                                        # noqa: E402
+    EXCLUDED_DIR_NAMES, HEADER_SUFFIXES, canonize_root, scan_stacks, scan_tree)
 from horreum.stacks import run_stack_lineage                      # noqa: E402
 from horreum.volumes import volume_serial                         # noqa: E402
 
-# ── Kotwice EXP_* PF-3 (dawca) + PF-4 (doskan drzewa `R:`), z horreum_pf4.db 2026-07-02 ──────────
+
+# ── POCHODZENIE KOTWIC (AR-53, decyzja Zdzinia 2026-10-05) ──────────────────────────────────────
+# Kotwica bez daty i stanu archiwum jest liczbą bez nazwy miary: przebieg FULL 2026-10-04 dał
+# 11 czerwieni i każdą trzeba było rozbierać ręcznie, żeby odróżnić regresję od kotwicy po prostu
+# STAREJ (zmierzonej na innym stanie `R:`). Stąd każda `EXP_*` niesie `Pomiar` - kiedy, jakim
+# przebiegiem, na jakim stanie archiwum i jakim kodem - a FAIL drukuje go obok obu wartości
+# razem z wiekiem kotwicy. JEDNO ŹRÓDŁO: data i stan mieszkają WYŁĄCZNIE w `Pomiar`; komentarze
+# przy kotwicach zostają historią DECYZJI (dlaczego ta liczba), nie metryczką pomiaru.
+# Ponowny pomiar = nowy `Pomiar` (jeden na przebieg) i przepięcie na niego wartości, które
+# ten przebieg zmierzył. Pole, którego nie da się ustalić z komentarzy i gita, mówi „nieustalone".
+# Korzenie drzew zapisujemy symbolicznie (`<archiwum>`, `<stosy>`) - repo jest publiczne.
+@dataclass(frozen=True)
+class Pomiar:
+    """Jeden przebieg, który zmierzył (albo potwierdził) kotwice. `dzien=None` = nieustalone."""
+    dzien: str | None    # 'RRRR-MM-DD'
+    przebieg: str        # tryb + argumenty
+    stan_r: str          # zdarzenie na archiwum, po którym mierzono
+    kod: str             # commit kodu przebiegu albo commit, który wpisał wartość
+
+
+@dataclass(frozen=True)
+class Kotwica:
+    """Oczekiwana wartość kryterium z pochodzeniem. `wartosc=None` = NIEZMIERZONA (bramka mówi
+    „nie wiem", patrz `crit_k`). `potwierdzenie` = ostatni udokumentowany przebieg, w którym ta
+    sama wartość dała PASS - odróżnia kotwicę starą od kotwicy starej, ale świeżo sprawdzonej."""
+    wartosc: object
+    pomiar: Pomiar
+    potwierdzenie: Pomiar | None = None
+
+
+def opis_pomiaru(p, dzis):
+    """Jedna linia pochodzenia z wiekiem w dniach liczonym od `dzis` (`datetime.date`)."""
+    if p.dzien is None:
+        kiedy = "data nieustalona"
+    else:
+        kiedy = f"{p.dzien} ({(dzis - date.fromisoformat(p.dzien)).days} dni temu)"
+    return f"{kiedy}; przebieg: {p.przebieg}; stan R: {p.stan_r}; kod: {p.kod}"
+
+
+def opis_niezgodnosci(k, akt, dzis, rel="=="):
+    """Linie wydruku przy FAIL kryterium z kotwicą: oczekiwana i aktualna wartość, pochodzenie
+    kotwicy i jej wiek, a jeśli jest - ostatnie potwierdzenie."""
+    linie = [f"oczekiwano {rel} {k.wartosc!r}, aktualnie {akt!r}",
+             f"kotwica zmierzona: {opis_pomiaru(k.pomiar, dzis)}"]
+    if k.potwierdzenie is not None:
+        linie.append(f"ostatnio potwierdzona: {opis_pomiaru(k.potwierdzenie, dzis)}")
+    return linie
+
+
+# Przebiegi, z których pochodzą dzisiejsze kotwice - odczytane z komentarzy i z gita
+# (`git log -G` na liniach kotwic). „wpisane w <commit>" = wiemy, kiedy liczba weszła do kodu,
+# ale nie, jakim kodem ją zmierzono.
+_POMIAR_PF4 = Pomiar(
+    "2026-07-02", "odczyt bazy PF-4 (nagłówek bloku kotwic: „z horreum_pf4.db”), nie przebieg "
+    "tego skryptu", "przed naprawą `ED` writebackiem P6 (2026-07-22)", "wpisane w 70abc43")
+# Re-baseline PF-5: firsthand IMPORT tym skryptem (15 559 frame == location, 8 teleskopów),
+# WSZYSTKO PASS - komunikat `70abc43`. Dzień = data commitu; argumentów poza `--donor`
+# komunikat nie podaje (`--live-db` powstał dopiero w ff32564).
+_POMIAR_PF5_IMPORT = Pomiar(
+    "2026-07-03", "IMPORT --donor <dawca> (firsthand PF-5, WSZYSTKO PASS)",
+    "nie dotyczy - zeznanie zamrożonego dawcy; archiwum przed naprawą `ED` (P6)", "70abc43")
+_POMIAR_OBS = Pomiar(None, "nieustalone", "nieustalone", "wpisane w d2a58d6 (2026-07-03)")
+# Kind-scoping: przebieg akceptacji na kodzie `1c3d1bf`, WSZYSTKO PASS z `config.review=1`
+# (archiwum kolejki, sesja 2026-07-22 (2)) - PRZED naprawą `ED` na `R:` (sesja (8) tego dnia).
+_POMIAR_KIND_SCOPING = Pomiar("2026-07-22", "FULL (argumenty nieustalone), WSZYSTKO PASS",
+                              "przed naprawą `ED` na archiwum (P6)", "1c3d1bf")
+_POMIAR_P6B = Pomiar("2026-07-22", "nieustalone (re-baseline P6b razem z backfillem)",
+                     "po naprawie `ED` (P6) i backfillu kart XISF (P6b)", "wpisane w 0528263")
+# C2: archiwum kolejki, sesja 2026-07-22 (10) - trzeci przebieg (pierwszy padł transientem SMB).
+_POMIAR_C2 = Pomiar("2026-07-22", "FULL --xisf-root <archiwum> --live-db: WSZYSTKO PASS",
+                    "po naprawie `ED` (P6) i backfillu kart XISF (P6b)", "8bf2d66")
+_POMIAR_C4 = Pomiar("2026-07-23", "FULL --donor --xisf-root <archiwum> --live-db "
+                    "+ niezależnie kopia żywej pf4", "po P6b", "wpisane w 0e56de5")
+_POMIAR_IMPORT_0801 = Pomiar("2026-08-01", "IMPORT --donor --live-db",
+                             "nie dotyczy (od AR-49 kotwica liczy zeznanie dawcy)",
+                             "wpisane w 9e72c91")
+_POMIAR_FULL_0801 = Pomiar("2026-08-01", "FULL --donor --xisf-root <archiwum> --live-db",
+                           "po pilocie P-D (karty `OBJECT`), RAW-y DSLR w archiwum",
+                           "wpisane w 33a2a19")
+_POMIAR_STOSY_0801 = Pomiar("2026-08-01", "sonda drogi „Stosy” na starym drzewie obróbki",
+                            "stare drzewo obróbki, przed przenosinami do `STACKS`",
+                            "wpisane w 7c06e07")
+_POMIAR_STOSY_0802 = Pomiar("2026-08-02", "FULL+STOSY --xisf-root <archiwum> "
+                            "--stacks-root <stare drzewo obróbki>",
+                            "stare drzewo obróbki, przed przenosinami do `STACKS`",
+                            "wpisane w 7c06e07")
+_POMIAR_RODOWOD_STOSOW_0802 = Pomiar("2026-08-02", _POMIAR_STOSY_0802.przebieg,
+                                     _POMIAR_STOSY_0802.stan_r, "wpisane w 68b85fc")
+_POMIAR_RAW_0804 = Pomiar("2026-08-04", "FULL i FULL+STOSY --live-db",
+                          "po kasacji `LIGHTS\\Orion\\A7S1_000\\OSC` (7 `.dng`, 2026-08-03)",
+                          "9ac4c18")
+_PROG = Pomiar(None, "próg z zapasem, nie pomiar", "nie dotyczy", "85.0 od 70abc43")
+# Potwierdzenia: przebiegi, w których kotwica dała PASS bez zmiany wartości.
+_POTW_0804 = Pomiar("2026-08-04", "FULL i FULL+STOSY --live-db: WSZYSTKO PASS",
+                    "po kasacji 7 `.dng` (C3); stosy w starym drzewie obróbki", "9ac4c18")
+_POTW_IMPORT_1004 = Pomiar("2026-10-04", "IMPORT --donor --live-db: WSZYSTKO PASS (56)",
+                           "po wsadzie kart `OBJECT` (7412 plików)", "b718ec4")
+_POTW_FULL_1004 = Pomiar("2026-10-04", "FULL --donor --xisf-root <archiwum> --live-db "
+                         "(11 FAIL, ta kotwica PASS)", "po wsadzie kart `OBJECT` i renamie T-1; "
+                         "`STACKS` jeszcze w doskanie (przed O1)", "5b39f72")
+
+# ── Kotwice EXP_* PF-3 (dawca) + PF-4 (doskan drzewa `R:`) ──────────────────────────────────────
 # UWAGA 2026-08-01: doskan NIE jest już „XISF-owy" — odkąd istnieje moduł DSLR (`e7dcdda`), ciągnie
 # z `R:` także RAW-y (dziś `EXP_NAMELESS_RAW_FULL`), więc baza FULL ma populacje, których żywa
 # `pf4` (0 RAW-ów w chwili tego zapisu) nie zna. Stąd kotwice FULL są STAGE-AWARE i ROZDZIELONE
@@ -87,10 +194,10 @@ from horreum.volumes import volume_serial                         # noqa: E402
 # z lustrzanką. **Tor RAW jedzie z ŻYWEGO drzewa, więc jego kotwice ruszają się od zmian na dysku
 # — pierwszy taki ruch: nota C3 przy `EXP_CONFIG_REVIEW_RAW_FULL`.**
 # 5 kamer w IMPORT: (pixel_um, is_mono). Po naprawie nagłówków INSTRUME 100% — brak review kamer.
-EXP_CAMERAS_IMPORT = {
+EXP_CAMERAS_IMPORT = Kotwica({
     "ASI2600MM": (3.76, 1), "ASI2600MD": (3.76, 1), "ASI2600MC": (3.76, 0),
     "ASI294MC": (4.63, 0), "SONYA7RM3": (4.86, 0),
-}
+}, _POMIAR_PF5_IMPORT, _POTW_IMPORT_1004)
 # RE-BASELINE FULL 2026-08-01 (odnowa bramki): doskan `R:` ciągnie też RAW-y, odkąd istnieje moduł
 # DSLR (`e7dcdda`) — korpusy lustrzanek są na osi kamer TAK SAMO realne jak ASI. `pixel_um=None`
 # NIE jest luką do załatania: EXIF nie podaje rozmiaru piksela, a wpisanie go z deklaracji byłoby
@@ -98,9 +205,15 @@ EXP_CAMERAS_IMPORT = {
 # zapamiętania: dla DSLR nie policzymy FOV, więc planer ich nie kadruje.
 # `SONYA7RM3` NIE jest nowa — ma 4.86 µm z `bayerpat` (FITS) i dodatkowo 301 klatek RAW; to ONA
 # dowodzi, że oba tory schodzą się na jednym wierszu kamery zamiast go rozbijać.
-EXP_CAMERAS_FULL = dict(EXP_CAMERAS_IMPORT,
-                        SONYA7S=(None, 0), SONYA7M3=(None, 0), CANONEOS40D=(None, 0))
-EXP_TELESCOPES_IMPORT = 8      # dawca FITS (§1): A140R/RC8/76EDPH/ED120R/RC6/N800/Sony135/ED120
+# Wartość wypisana WPROST, nie `dict(IMPORT, …)`: ponowny pomiar kotwicy IMPORT nie może po cichu
+# przestawić kotwicy FULL, która przy tym pomiarze nie była mierzona.
+EXP_CAMERAS_FULL = Kotwica({
+    "ASI2600MM": (3.76, 1), "ASI2600MD": (3.76, 1), "ASI2600MC": (3.76, 0),
+    "ASI294MC": (4.63, 0), "SONYA7RM3": (4.86, 0),
+    "SONYA7S": (None, 0), "SONYA7M3": (None, 0), "CANONEOS40D": (None, 0),
+}, _POMIAR_FULL_0801, _POTW_0804)
+# dawca FITS (§1): A140R/RC8/76EDPH/ED120R/RC6/N800/Sony135/ED120
+EXP_TELESCOPES_IMPORT = Kotwica(8, _POMIAR_PF5_IMPORT, _POTW_IMPORT_1004)
 # Po naprawie ED na realnym R: (2026-07-22, brief PLAN_p6_xisf_writeback §8) etykieta `ED` nie ma już
 # nosiciela na osi: 7 masterflatów XISF dostało `ED120R`+789, a masterdarki z `TELESCOP='ED'` są POZA
 # osią (kind-scoping, wariant B). Świeża baza nie powołuje 9. teleskopu — dług PF-4 spłacony.
@@ -108,21 +221,24 @@ EXP_TELESCOPES_IMPORT = 8      # dawca FITS (§1): A140R/RC8/76EDPH/ED120R/RC6/N
 # F4 G OSS` 265 klatek, `105mm F1.4 DG HSM | Art 018` 36, `DT 0mm F0 SAM` 22, `FE 70-300mm` 8 —
 # wszystkie w 100% RAW). Obiektyw JEST optyką, więc własny wiersz osi jest poprawny, nie śmieciem;
 # do PLANERA i tak nie wchodzą, bo park jest jawną własnością usera (D-0731-12), nie derywatem.
-EXP_TELESCOPES_FULL = 12       # 8 astro (jak IMPORT) + 4 obiektywy DSLR
-EXP_TELESCOPES_RAW_ONLY_FULL = 4   # z tych 12 — powołane WYŁĄCZNIE przez klatki RAW
+EXP_TELESCOPES_FULL = Kotwica(12, _POMIAR_FULL_0801, _POTW_0804)   # astro (jak IMPORT) + obiektywy DSLR
+# …z nich powołane WYŁĄCZNIE przez klatki RAW (obiektywy z EXIF)
+EXP_TELESCOPES_RAW_ONLY_FULL = Kotwica(4, _POMIAR_FULL_0801, _POTW_0804)
 # % obiektu na light/master_light. Próg z zapasem; wartość AKTUALNĄ podaje wydruk §5.7 tego skryptu
 # (dawca, `--full`) — nie zamrażamy jej tutaj, bo metryka zmieniła DEFINICJĘ w S0 (licznik zawężony
 # do klatek z nazwą w nagłówku, symetrycznie do mianownika), więc każda liczba sprzed tej zmiany
 # opisuje inny rachunek. Licznik i mianownik kurczą się razem, więc próg powinien się bronić —
 # ale to jest do ZMIERZENIA pierwszym przebiegiem po S0, nie do założenia.
-EXP_OBJECT_PCT_MIN = 85.0
+EXP_OBJECT_PCT_MIN = Kotwica(85.0, _PROG)
 # Stan PF-4 (pełny, po doskanie XISF) — XISF wnoszą dług review i degenerat:
-EXP_UNCOMPUTABLE_FULL = 1      # masterflat OIII: bajt \x07 w XML → sha1_data nieobliczalne (degenerat)
-EXP_FRAME_REVIEW_FULL = 1      # ten sam masterflat (kopia nieczytelna → review)
+# masterflat OIII: bajt \x07 w XML → sha1_data nieobliczalne (degenerat)
+EXP_UNCOMPUTABLE_FULL = Kotwica(1, _POMIAR_PF4, _POTW_0804)
+EXP_FRAME_REVIEW_FULL = Kotwica(1, _POMIAR_PF4, _POTW_0804)   # ten sam masterflat (kopia nieczytelna → review)
 # Po kind-scopingu config (wariant B, 2026-07-22) dark/bias są POZA osią teleskopu: ich `config_id
 # IS NULL` to stan docelowy, nie delta, więc `config.review` ich nie dotyczy. Zostaje 1 realna sprawa
 # — masterflat Sony A7R3 o rodzaju `unknown` (ten sam degenerat, co §5.2). Było 7 (6 masterdarków + on).
-EXP_CONFIG_REVIEW_FULL = 1     # `unknown` masterflat A7R3 — rodzaj wymaga decyzji, nie optyka
+# `unknown` masterflat A7R3 - rodzaj wymaga decyzji, nie optyka
+EXP_CONFIG_REVIEW_FULL = Kotwica(1, _POMIAR_KIND_SCOPING, _POTW_0804)
 # …liczona POZA RAW-ami (2026-08-01). RAW-y bez configu to stan UCZCIWY: zdjęcie z lustrzanki
 # bez teleskopu w EXIF nie ma z czego powołać osi. Gdyby obie populacje wpadły do jednej kotwicy,
 # pojawienie się DRUGIEJ realnej sprawy w torze astro schowałoby się za jednym zdjęciem
@@ -139,8 +255,10 @@ EXP_CONFIG_REVIEW_FULL = 1     # `unknown` masterflat A7R3 — rodzaj wymaga dec
 # NIGDZIE w `R:\ASTRO_` (nie przenosiny — kasacja). Strona BAZY C3 (7 wierszy `frame`/`location`/
 # `header` + 28 `cards` + 28 `event` na żywej `pf4`) jest na 2026-08-04 NIERUSZONA — należy do
 # etapu 3 D-0802-2. Kotwice mówią o świeżej bazie akceptacji, nie o `pf4`, więc są niezależne.
-EXP_CONFIG_REVIEW_RAW_FULL = 425   # było 432 do 2026-08-04 — nota C3 wyżej
-EXP_XISF_KINDS = {"flat": 11, "light": 202, "master_dark": 38, "master_flat": 73, "unknown": 2}
+EXP_CONFIG_REVIEW_RAW_FULL = Kotwica(425, _POMIAR_RAW_0804)   # było 432 - nota C3 wyżej
+EXP_XISF_KINDS = Kotwica(
+    {"flat": 11, "light": 202, "master_dark": 38, "master_flat": 73, "unknown": 2},
+    _POMIAR_PF4, _POTW_0804)
 # Oś OBSERWATORIUM (PLAN_os_obserwatorium §8) — RE-BASELINE P6b (D-X-8a), świadomy i zmierzony:
 # do P6a karty XISF NIE POWSTAWAŁY, więc GPS był de facto FITS-only. Od P6a skan wypełnia karty
 # także dla XISF, a backfill (`horreum backfill-xisf`) dociąga je do lokacji sprzed P6a — 202 klatki
@@ -148,18 +266,22 @@ EXP_XISF_KINDS = {"flat": 11, "light": 202, "master_dark": 38, "master_flat": 73
 # stanowiska „Szczecin, Będargowo" → ZERO nowych stanowisk (EXP_OBSERVATORIES bez ruchu), rusza się
 # wyłącznie populacja. Kotwica jest STAGE-AWARE: etap IMPORT (dawca FITS, zero XISF) zostaje na
 # 15 409 — gdyby liczba tam drgnęła, znaczyłoby to zmianę w torze FITS, nie skutek P6.
-EXP_OBSERVATORIES = 11         # klaster 4 km: 24 distinct pary → 11 stanowisk (dom↔praca 4.385 km OSOBNE)
-EXP_GPS_FRAMES_IMPORT = 15409  # dawca FITS: klatki z SITELAT+SITELONG (97.0%)
-EXP_GPS_FRAMES_FULL = 15611    # + 202 XISF z GPS w kartach (P6b; wszystkie do stanowiska #5)
-EXP_NO_GPS_FULL = 274          # bez GPS w torze ASTRO: 150 fits + 124 xisf (326 − 202 z GPS)
+# klaster 4 km: 24 distinct pary → 11 stanowisk (dom↔praca 4.385 km OSOBNE)
+EXP_OBSERVATORIES = Kotwica(11, _POMIAR_OBS, _POTW_IMPORT_1004)
+# dawca FITS: klatki z SITELAT+SITELONG (97.0%)
+EXP_GPS_FRAMES_IMPORT = Kotwica(15409, _POMIAR_P6B, _POTW_IMPORT_1004)
+# + 202 XISF z GPS w kartach (P6b; wszystkie do stanowiska #5)
+EXP_GPS_FRAMES_FULL = Kotwica(15611, _POMIAR_P6B, _POTW_0804)
+# bez GPS w torze ASTRO: 150 fits + 124 xisf (326 − 202 z GPS)
+EXP_NO_GPS_FULL = Kotwica(274, _POMIAR_FULL_0801, _POTW_0804)
 # RAW osobno (2026-08-01): klatki DSLR, wszystkie bez stanowiska. To NIE brak danych — sentinel
 # GPS (0,0) idzie w `resolve/observatory.py:67` na `None` świadomie („null island" nie jest miejscem),
 # a aparat bez modułu GPS nie zapisuje nic. Rozdzielone od astro z tego samego powodu, co
 # `config.review`: jedna liczba przykryłaby ruch w populacji FITS/XISF.
-EXP_NO_GPS_RAW_FULL = 756      # było 763 do 2026-08-04 — nota C3 przy EXP_CONFIG_REVIEW_RAW_FULL
+EXP_NO_GPS_RAW_FULL = Kotwica(756, _POMIAR_RAW_0804)   # było 763 - nota C3 przy EXP_CONFIG_REVIEW_RAW_FULL
 # Oś KALIBRACJI (C2, brief PLAN_kalibracja_C_brief §3.2) — kotwice ZMIERZONE read-only PRZED kodem.
 # Mastery są XISF, więc obie liczby dotyczą wyłącznie etapu FULL; w imporcie FITS nie ma czego liczyć.
-EXP_RECIPE_DARK = 38           # 38 masterdarków → 38 przepisów (każdy master unikalny)
+EXP_RECIPE_DARK = Kotwica(38, _POMIAR_C2, _POTW_0804)   # masterdarki → przepisy (każdy master unikalny)
 # 38, nie 37 z briefu §3.2: brief mierzył ŻYWĄ pf4, a ta ma o jedną klasę MNIEJ z powodu, który
 # sam brief przewidział (§8). `frame 15645` ma DWIE kopie o sprzecznym zeznaniu — ten sam master
 # leży w `…RC8_2600MC\CLS\` i `…\L-Pro\` (identyczne DANE → jedna klatka, różne nagłówki → jeden
@@ -167,14 +289,20 @@ EXP_RECIPE_DARK = 38           # 38 masterdarków → 38 przepisów (każdy mast
 # klasa → 38); na żywej pf4 backfill P6b przestawił zeznanie na `L-Pro`, gdzie klasa już istniała
 # (→ 37). Sprzeczność siedzi w DANYCH i C2 ma ją POKAZAĆ, nie rozstrzygać — dlatego kotwicą jest
 # liczba świeżej bazy, a osobne kryterium pinuje samą PRZYCZYNĘ (klasa-sierota z pary kopii).
-EXP_RECIPE_FLAT = 38           # 2256 flatów + 73 masterflaty → 38 klas na ŚWIEŻEJ bazie
-EXP_MASTERS_EXCLUDED_FULL = 2  # `frame 15629`/`15636`: kind='unknown' — POZA osią, jawnie wykluczone
+EXP_RECIPE_FLAT = Kotwica(38, _POMIAR_C2, _POTW_0804)   # 2256 flatów + 73 masterflaty na ŚWIEŻEJ bazie
+# Klasa-sierota ze sprzecznej pary kopii (`frame 15645`, CLS↔L-Pro) - PRZYCZYNA 38. klasy wyżej.
+# Do AR-53 literał w kryterium §5.11; wyjęty tu, żeby jego pochodzenie było tak samo widoczne.
+EXP_RECIPE_ORPHAN_FULL = Kotwica(1, _POMIAR_C2, _POTW_0804)
+# `frame 15629`/`15636`: kind='unknown' - POZA osią, jawnie wykluczone
+EXP_MASTERS_EXCLUDED_FULL = Kotwica(2, _POMIAR_C2, _POTW_0804)
 # RODOWÓD (C4) — lighty powiązane z masterem po przepisie, ŚWIEŻA baza. Zmierzone przebiegiem
-# `acceptance_s5 --full --live-db` 2026-07-23 (świeża baza z dawcy) ORAZ niezależnie na kopii żywej
-# pf4 — obie dały te same liczby (profil-sierota CLS↔L-Pro §5.11 nie ruszył sum rodowodu). Domknięcie:
+# FULL (świeża baza z dawcy) ORAZ niezależnie na kopii żywej pf4 - obie dały te same liczby
+# (profil-sierota CLS↔L-Pro §5.11 nie ruszył sum rodowodu). Domknięcie w tamtym pomiarze:
 # dark 7331 + luki 6185 = flat 11938 + luki 1578 = 13 516 lightów.
-EXP_LINEAGE_DARK = 7331        # lighty z masterdarkiem (reszta: 5978 brak przepisu + 207 niekompletny)
-EXP_LINEAGE_FLAT = 11938       # lighty z masterflatem (reszta: 1455 brak przepisu + 123 brak mastera)
+# lighty z masterdarkiem (reszta: 5978 brak przepisu + 207 niekompletny)
+EXP_LINEAGE_DARK = Kotwica(7331, _POMIAR_C4, _POTW_0804)
+# lighty z masterflatem (reszta: 1455 brak przepisu + 123 brak mastera)
+EXP_LINEAGE_FLAT = Kotwica(11938, _POMIAR_C4, _POTW_0804)
 # KOTWICA NAWROTU P-D (D-PD-10): lighty, których nagłówek MILCZY o obiekcie. `delta_report` był na
 # nie ślepy (mianownik wymaga `object_raw NOT NULL`), więc §5.7 świeciło zielono o klatkach, których
 # nie widzi. Kotwica jest STAGE-AWARE i to nie jest ozdoba: w IMPORT baza powstaje z ZAMROŻONEGO
@@ -182,7 +310,7 @@ EXP_LINEAGE_FLAT = 11938       # lighty z masterflatem (reszta: 1455 brak przepi
 # trybów świeciłaby na czerwono przy POPRAWNYM przebiegu. Zadaniem kotwicy jest wykrywać ZMIANĘ
 # (nowa dostawa bez `OBJECT`), a nie być równa 25: liczba porusza się razem z `regions.json` —
 # dawca niesie 108 lightów bez karty, z czego region rozwiązuje 83.
-EXP_NAMELESS_IMPORT = 25       # ZMIERZONE przebiegiem IMPORT 2026-08-01 (`--donor` + `--live-db`),
+EXP_NAMELESS_IMPORT = Kotwica(25, _POMIAR_IMPORT_0801, _POTW_IMPORT_1004)   # ZMIERZONE przebiegiem,
 # nie policzone z rachunku: dawca niesie 108 lightów bez karty `OBJECT`, region rozwiązuje 83,
 # zostaje 25. Sonda RO dawcy 2026-10-03 potwierdza: te same 25, wszystkie w podgrupie
 # późno-naprawianej (`import_fitsmirror._late_repaired`, 6605 ścieżek).
@@ -199,8 +327,8 @@ EXP_NAMELESS_IMPORT = 25       # ZMIERZONE przebiegiem IMPORT 2026-08-01 (`--don
 # co resolver dla klatki bez `object_raw` (region po współrzędnych). Kotwica łapie zmianę W DAWCY
 # niezależnie od stanu `R:` i od ziarna; podgrupa przeliczona dostaje OSOBNĄ, raportowaną liczbę
 # (bez kotwicy - jej wartość zależy od tego, czy przeliczenie w ogóle zaszło, i od stanu dysku).
-EXP_NAMELESS_FULL = 25         # ZMIERZONE po pilocie P-D na `R:` (2026-08-01), przebieg
-# `--xisf-root R:\ASTRO_ --live-db`. **Przesłanka briefu §6 pkt 9 („po naprawie padnie na 0")
+EXP_NAMELESS_FULL = Kotwica(25, _POMIAR_FULL_0801, _POTW_FULL_1004)   # ZMIERZONE po pilocie P-D.
+# **Przesłanka briefu §6 pkt 9 („po naprawie padnie na 0")
 # OKAZAŁA SIĘ FAŁSZYWA i to jest tu udokumentowane, żeby nikt nie „poprawił" tej liczby z powrotem
 # na 0:** baza akceptacji bierze `mtime` ze STANU NA DYSKU, ale zeznanie FITS (nagłówek, `file_sha1`,
 # `header_hash`) z ZAMROŻONEGO dawcy — więc brama przyrostowa doskanu widzi `mtime` równy i pomija
@@ -211,11 +339,22 @@ EXP_NAMELESS_FULL = 25         # ZMIERZONE po pilocie P-D na `R:` (2026-08-01), 
 # wciągnięte doskanem bez nazwy (dziś 0; ta część stoi na ŻYWYM drzewie, jak tor RAW). Zadaniem obu
 # kotwic jest łapać ZMIANĘ W DAWCY; nawrotu na ŻYWEJ bazie pilnuje `object_nameless` w raporcie
 # dostawy (inna rola - patrz §6 pkt 9 briefu).
-EXP_NAMELESS_RAW_FULL = 756    # lighty w formacie bez karty `OBJECT` (`resolver.NO_OBJECT_CARD_
-# FILETYPES`). Zmierzone: KAŻDY RAW-light jest bez `object_raw`, ZERO wyjątków — EXIF nie zna tego
-# pola. Osobna kotwica, bo osobna droga naprawy (ręka, nie karta); zlanie z 25 sprawiło, że liczba
-# nie pilnowała ANI populacji astro, ANI DSLR.
-# Było 763 do 2026-08-04 — nota C3 przy EXP_CONFIG_REVIEW_RAW_FULL (te same 7 klatek).
+EXP_NAMELESS_RAW_FULL = Kotwica(756, _POMIAR_RAW_0804)   # lighty w formacie bez karty `OBJECT`
+# (`resolver.NO_OBJECT_CARD_FILETYPES`). Zmierzone: KAŻDY RAW-light jest bez `object_raw`, ZERO
+# wyjątków - EXIF nie zna tego pola. Osobna kotwica, bo osobna droga naprawy (ręka, nie karta);
+# zlanie z 25 sprawiło, że liczba nie pilnowała ANI populacji astro, ANI DSLR.
+# Było 763 - nota C3 przy EXP_CONFIG_REVIEW_RAW_FULL (te same 7 klatek).
+#
+# TRZECI GENERATOR RUCHU KOTWIC `EXP_NAMELESS_*` (G2-8d) - obok zmiany w dawcy i dostawy na żywym
+# drzewie: WYCOFANIE klatki ręką (`frame.retired_at`, D-OW-3/R2). Predykat bezimiennych
+# (`gui.queries.nameless_frames`, za nim `nameless_split`) odsiewa wycofane, więc każde wycofanie
+# lightu bez nazwy zbija kubełek o 1. Na świeżej bazie z dawcy populacja wycofanych jest ZEROWA
+# (gest robi człowiek w GUI, skrypt nie; `--live-db` przenosi WYŁĄCZNIE rejestr napraw,
+# `read_repaired_registry`), więc w tym skrypcie generator nie działa wprost - rusza liczbę tam,
+# gdzie wycofania żyją: w raporcie dostawy na żywej bazie. Do akceptacji dociera pośrednio, gdy
+# wycofanie idzie w parze z kasacją pliku na dysku (wzór: nota C3, import pomija plik nieobecny).
+# Protokół: kotwica rusza się o N - nowy `Pomiar` z „-N wycofanych/skasowanych" w `stan_r`,
+# nigdy ciche podbicie liczby.
 
 # ── ETAP STOSÓW (I-2b, P-I) — RE-BASELINE JAWNY, nie skutek uboczny ──────────────────────────────
 # Wciągnięcie gotowych obrazów po integracji RUSZA kotwice liczone po CAŁEJ bazie (brief §0 fakt 24)
@@ -224,36 +363,57 @@ EXP_NAMELESS_RAW_FULL = 756    # lighty w formacie bez karty `OBJECT` (`resolver
 # kotwic zamiast podbicia starych: **etap FULL ma dalej pilnować archiwum**, a stosy własnych liczb.
 # Kotwica populacji = **128 PLIKÓW** (D-P-I-6: każdy plik to własna klatka; 85 to liczba INTEGRACJI,
 # czyli relacji, i wejdzie dopiero z segmentem I-2c).
-EXP_STACKS_CANDIDATES = 128    # `masterLight*.xisf` bez znaczników pochodnych, zmierzone na `R:` 0801
-EXP_STACKS_DERIVED = 131       # …i tyle nazw pasujących sicie 1 odpadło na sicie 2 (259 razem)
-EXP_STACKS_INGESTED = 128      # 128/128 zeznało `master_light` — bramka tożsamości nic nie odsiewa
-EXP_STACKS_REJECTED = 0        # …i ma tak zostać: >0 znaczy, że konwencja nazw rozjechała się z treścią
+#
+# AR-53 (O1, decyzja Zdzinia 2026-10-05): stosy wchodzą WYŁĄCZNIE w zakresie `--stacks-root`.
+# Od przenosin gotowych obrazów do `<archiwum>\STACKS` (0810) zwykły skan archiwum je widzi
+# (E4-1 wariant A+), więc przebieg FULL 2026-10-04 wciągnął 193 stosy doskanem i zaczerwienił
+# kotwice archiwum. Doskan tego skryptu odcina dziś `STACKS` (`korzenie_doskanu`), żeby kotwice
+# FULL znaczyły „archiwum"; kotwice tego bloku zmierzono na STARYM drzewie obróbki (128 plików),
+# więc przebieg `--stacks-root <archiwum>\STACKS` wymaga ich ponownego pomiaru.
+# `masterLight*.xisf` bez znaczników pochodnych
+EXP_STACKS_CANDIDATES = Kotwica(128, _POMIAR_STOSY_0801, _POTW_0804)
+# …i tyle nazw pasujących sicie 1 odpadło na sicie 2 (259 razem)
+EXP_STACKS_DERIVED = Kotwica(131, _POMIAR_STOSY_0801, _POTW_0804)
+# 128/128 zeznało `master_light` - bramka tożsamości nic nie odsiewa
+EXP_STACKS_INGESTED = Kotwica(128, _POMIAR_STOSY_0801, _POTW_0804)
+# …i ma tak zostać: >0 znaczy, że konwencja nazw rozjechała się z treścią
+EXP_STACKS_REJECTED = Kotwica(0, _POMIAR_STOSY_0801, _POTW_0804)
 # Kotwice STANU po etapie stosów — te same pytania co w FULL, ale na trzecim zakresie. `None` =
 # NIEZMIERZONA: skrypt wypisze aktualia i poprosi o zaszycie (ten sam protokół, co `EXP_NAMELESS_*`
 # przed pilotem P-D). Nigdy nie wpisuj tu liczby z rachunku „FULL + 128" — kotwica ma być
 # ZMIERZONA, bo stack przechodzi przez grouper i resolver jak każda klatka i jego skutki nie są
-# dodawaniem.
-EXP_XISF_KINDS_STACKS = dict(EXP_XISF_KINDS, master_light=EXP_STACKS_INGESTED)
-# ZMIERZONE przebiegiem `--stacks-root <korzeń drzewa obróbki>` 2026-08-02, nie policzone
-# z rachunku. (Konkretny korzeń trzyma kolejka sesji - poza gitem; tu liczy się TRYB pomiaru.)
-EXP_TELESCOPES_STACKS = 14     # 12 z FULL + DWIE etykiety, które żyją WYŁĄCZNIE w drzewie obróbki:
+# dodawaniem. Słownik kindów wypisany WPROST (do AR-53 `dict(EXP_XISF_KINDS, master_light=…)`):
+# ponowny pomiar kotwicy FULL nie może po cichu przestawić kotwicy, której nikt nie mierzył.
+EXP_XISF_KINDS_STACKS = Kotwica(
+    {"flat": 11, "light": 202, "master_dark": 38, "master_flat": 73, "unknown": 2,
+     "master_light": 128}, _POMIAR_STOSY_0802, _POTW_0804)
+# Zmierzone, nie policzone z rachunku. (Konkretny korzeń starego drzewa obróbki trzyma kolejka
+# sesji - poza gitem; tu liczy się TRYB pomiaru.)
+# 12 z FULL + DWIE etykiety, które żyją WYŁĄCZNIE w drzewie obróbki:
 # `ED` (4 klatki) — etykieta ZDJĘTA z archiwum writebackiem P6 (2026-07-22), ale pliki po integracji
 # noszą ją dalej, bo powstały przed naprawą i nikt ich nie przepisywał; oraz `EQMOD HEQ5/6` (4) —
 # nazwa MONTAŻU wpisana przez program akwizycji w kartę `TELESCOP`. Obie to FAKT archiwum obróbki,
 # nie śmieć do wyczyszczenia — szum modelu naprawia się kind-scopingiem, nigdy kasowaniem pól.
 # `EQMOD HEQ5/6` czeka na decyzję kuratelską (park/merge) — patrz kolejka.
-EXP_NAMELESS_STACKS = 18       # gotowe stosy bez karty `OBJECT` i bez obiektu (własny kubełek,
-# D-P-I-5). Plików bez karty jest 22 — cztery rozwiązał REGION po współrzędnych, więc z kubełka
-# wypadły. KLUCZOWY DOWÓD ROZDZIAŁU: `EXP_NAMELESS_FULL` (25) po dołożeniu 18 stosów NIE DRGNĘŁO.
+EXP_TELESCOPES_STACKS = Kotwica(14, _POMIAR_STOSY_0802, _POTW_0804)
+# gotowe stosy bez karty `OBJECT` i bez obiektu (własny kubełek, D-P-I-5). Plików bez karty było
+# 22 - cztery rozwiązał REGION po współrzędnych, więc z kubełka wypadły. KLUCZOWY DOWÓD
+# ROZDZIAŁU: `EXP_NAMELESS_FULL` (25) po dołożeniu 18 stosów NIE DRGNĘŁO.
+EXP_NAMELESS_STACKS = Kotwica(18, _POMIAR_STOSY_0802, _POTW_0804)
 #
-# ⚠️ KOTWICE STOSÓW SĄ RUCHOME INACZEJ NIŻ RESZTA (D-0802-1 + P6d, 2026-08-02). Kotwice FULL stoją
-# na ZAMROŻONYM dawcy, więc naprawa plików na `R:` ich nie rusza („BAZA AKCEPTACJI NIE WIDZI NAPRAW
-# NA R:" — kolejka). Stosy przychodzą z ŻYWEGO skanu drzewa obróbki, a writeback od D-0802-1 ich
-# SIĘGA — więc pierwsza naprawa kart `OBJECT` w drzewie obróbki ZBIJE tę liczbę i bramka zaświeci
-# czerwono ZGODNIE Z PRAWDĄ. To NIE jest regresja: wtedy podbij kotwicę i dopisz, ile plików
-# dostało kartę. Ta sama uwaga dotyczy `EXP_CONFIG_REVIEW_STACKS` (7 stosów bez `TELESCOP`).
-EXP_NO_GPS_STACKS = 402        # 274 z FULL + 128 stosów. PixInsight NIE przenosi `SITELAT`/`SITELONG`
-# do produktu integracji — zmierzone 0/128, więc CAŁA populacja stosów jest poza osią obserwatorium.
+# ⚠️ KOTWICE STOSÓW SĄ RUCHOME INACZEJ NIŻ RESZTA (D-0802-1 + P6d, 2026-08-02). Stosy przychodzą
+# z ŻYWEGO skanu drzewa obróbki, a writeback od D-0802-1 ich SIĘGA - więc pierwsza naprawa kart
+# `OBJECT` w drzewie stosów ZBIJE tę liczbę i bramka zaświeci czerwono ZGODNIE Z PRAWDĄ. To NIE
+# jest regresja: wtedy nowy `Pomiar` z liczbą plików, które dostały kartę. Ta sama uwaga dotyczy
+# `EXP_CONFIG_REVIEW_STACKS` (stosy bez `TELESCOP`).
+# POPRAWKA AR-53 do dawnego zdania „kotwice FULL stoją na ZAMROŻONYM dawcy, więc naprawa plików
+# na `R:` ich nie rusza": prawdziwe WYŁĄCZNIE dla klatek, które import bierze z zeznania dawcy.
+# Podgrupa przeliczona z dysku (`Preflight.recompute`, patrz AR-49 wyżej) i wszystko, co wnosi
+# doskan (XISF, RAW), stoi na stanie `R:` - te kotwice ruszają się od wsadów, renamów i kasacji
+# na dysku tak samo jak stosy. Dlatego każda kotwica niesie `Pomiar` ze stanem archiwum.
+# 274 z FULL + 128 stosów. PixInsight NIE przenosi `SITELAT`/`SITELONG` do produktu integracji
+# - zmierzone 0/128, więc CAŁA populacja stosów jest poza osią obserwatorium.
+EXP_NO_GPS_STACKS = Kotwica(402, _POMIAR_STOSY_0802, _POTW_0804)
 # ── Kotwice RODOWODU STOSÓW (I-2c, faza (U)) — ZMIERZONE przebiegiem 2026-08-02 ──────────────────
 # Ostrożność, która okazała się niepotrzebna, ale zostaje zapisana: nie wolno było przepisać liczb
 # z sondy na kopii ŻYWEJ pf4, bo baza akceptacji stoi na ZAMROŻONYM dawcy i zna inne nazwy obiektów
@@ -261,18 +421,20 @@ EXP_NO_GPS_STACKS = 402        # 274 z FULL + 128 stosów. PixInsight NIE przeno
 # WARUNKIEM doboru okna. Pomiar dał liczby IDENTYCZNE z sondą (81/3367/6) — bo żaden stos nie celuje
 # w obiekt, którego nazwę naprawiano. To ZBIEG OKOLICZNOŚCI tych danych, nie reguła: pierwszy stos
 # NGC7000 rozjedzie te dwa światy i wtedy ta kotwica ma zaświecić, a nie zostać „poprawiona".
-EXP_SLIN_LINKED = 81           # integracje z co najmniej jednym wejściem (z 128 stosów)
-EXP_SLIN_INPUTS = 3367         # wierszy `integration_input` razem
-EXP_SLIN_HISTORY = 6           # …z tego DOWIEDZIONE zeznaniem pliku; 75 to KANDYDACI z okna.
+# integracje z co najmniej jednym wejściem (z 128 stosów)
+EXP_SLIN_LINKED = Kotwica(81, _POMIAR_RODOWOD_STOSOW_0802, _POTW_0804)
+EXP_SLIN_INPUTS = Kotwica(3367, _POMIAR_RODOWOD_STOSOW_0802, _POTW_0804)   # wierszy `integration_input`
+# …z tego DOWIEDZIONE zeznaniem pliku; 75 to KANDYDACI z okna.
+EXP_SLIN_HISTORY = Kotwica(6, _POMIAR_RODOWOD_STOSOW_0802, _POTW_0804)
 # Reszta populacji to trzy rozłączne kubełki „nie wiem": okno zdegenerowane 24, brak obiektu 18,
 # okno puste 5 (81 + 47 == 128 — partycję pilnuje osobne kryterium, nie te trzy liczby).
 # ⚠️ Te kotwice są RUCHOME tak samo jak `EXP_NAMELESS_STACKS`: stoją na ŻYWYM skanie drzewa obróbki,
 # a nie na zamrożonym dawcy. Naprawa karty `OBJECT` w stosie przesunie 18 → mniej i podniesie
 # `linked`; przeniesienie stosów do `R:\ASTRO_\STACKS` zmieni ścieżki, ale nie liczby (tożsamość
 # integracji to KLATKA, nie ścieżka). Zmiana = zmierz i podbij z notą, nigdy „napraw do zera".
-EXP_CONFIG_REVIEW_STACKS = 8   # 1 z FULL (`unknown` masterflat A7R3) + 7 stosów bez `TELESCOP`.
-# Siedem plików po integracji nie niesie karty teleskopu, więc nie ma z czego powołać osi — stan
-# UCZCIWY, dokładnie jak 432 RAW-y obok.
+# 1 z FULL (`unknown` masterflat A7R3) + 7 stosów bez `TELESCOP`. Siedem plików po integracji nie
+# niesie karty teleskopu, więc nie ma z czego powołać osi - stan UCZCIWY, dokładnie jak RAW-y obok.
+EXP_CONFIG_REVIEW_STACKS = Kotwica(8, _POMIAR_STOSY_0802, _POTW_0804)
 # KAMERY BEZ WŁASNEJ KOTWICY — i to jest wynik DECYZJI, nie przeoczenie. Pierwszy przebieg pokazał
 # 2 kamery z `pixel_conflict` i `SONYA7S`, która dostała piksel od stacku: `_drizzle_2x` zapisuje
 # `XPIXSZ=1.88` przy matrycy 3.76 (siatka wynikowa, nie sprzęt), a korpusy Sony podają w produkcie
@@ -395,19 +557,84 @@ def nameless_split(con, testimony):
 
 
 # ── (X) XISF-DOSKAN: realny scan_tree po drzewie z XISF (odtwarza PF-4) ──────────────────────────
+def korzenie_doskanu(root):
+    """O1 (AR-53): doskan archiwum BEZ poddrzewa `STACKS` - stosy wchodzą wyłącznie w zakresie
+    `--stacks-root`, więc kotwice FULL znaczą „archiwum". Zwraca `(korzenie, odcięte, robocze)`:
+    podkatalogi korzenia do osobnych przebiegów `scan_tree`, odcięte ścieżki `STACKS` i pominięte
+    drzewa robocze górnego poziomu (te skan korzenia liczy w `dirs_excluded`, więc wołający
+    dolicza je do tej samej telemetrii).
+
+    PO STRONIE SKRYPTU, nie parametrem produktu: zwykły skan ma wciągać `STACKS` (E4-1 wariant
+    A+) i to zostaje nietknięte. Skan po podkatalogach jest równoważny skanowi korzenia pod
+    trzema warunkami, a każdy pilnujemy wprost (EXPECT, nie cicha różnica zakresu):
+      * pod samym korzeniem nie leży plik nagłówkonośny - przebieg po podkatalogach by go pominął;
+      * żaden podkatalog nie ma własnego `STACKS` - `scan_tree` z korzeniem w podkatalogu
+        nałożyłby tam sito pochodnych, którego skan korzenia tam nie stosuje;
+      * drzewa robocze (`EXCLUDED_DIR_NAMES`) pomijamy tak, jak odcina je skan korzenia.
+    Kolejność podkatalogów = kolejność `Path` (jak `_iter_suffixes`), więc pierwszy odczyt
+    kopii o sprzecznym zeznaniu wygrywa tak samo jak w skanie korzenia (§5.11, `frame 15645`).
+
+    DOWIĄZANIA jak w `os.walk(followlinks=False)`, którym idzie skan korzenia: do dowiązania
+    symbolicznego katalogu nie schodzi (`os.path.islink`), do JUNCTION schodzi (junction nie jest
+    symlinkiem), a dowiązanie do pliku czyta jak plik. Stąd: symlink katalogu pomijamy, junction
+    jest zwykłym podkatalogiem, `is_dir()` z podążaniem rozstrzyga tylko „katalog czy plik".
+    Nieczytelny podkatalog górnego poziomu przerywa przebieg wyjątkiem z `os.scandir` (EXPECT) -
+    skan korzenia pominąłby go po cichu (`onerror`), a bramka liczyłaby wtedy niepełne archiwum."""
+    root = canonize_root(root)
+    korzenie, odciete, robocze = [], [], []
+    with os.scandir(root) as it:
+        wpisy = sorted(it, key=lambda e: Path(e.path))
+    for e in wpisy:
+        nazwa = e.name.lower()
+        if not e.is_dir():
+            if os.path.splitext(nazwa)[1] in HEADER_SUFFIXES:
+                raise RuntimeError(f"plik nagłówkonośny wprost pod korzeniem doskanu: {e.path} - "
+                                   "doskan po podkatalogach by go pominął")
+            continue
+        if nazwa == STACKS_DIR:
+            odciete.append(e.path)
+            continue
+        if nazwa in EXCLUDED_DIR_NAMES:
+            robocze.append(e.path)
+            continue
+        if e.is_symlink():                          # `os.walk` korzenia tu nie schodzi
+            continue
+        with os.scandir(e.path) as sub:
+            if any(s.is_dir() and not s.is_symlink() and s.name.lower() == STACKS_DIR
+                   for s in sub):
+                raise RuntimeError(f"podkatalog `{STACKS_DIR}` poza korzeniem doskanu: {e.path} - "
+                                   "skan po podkatalogach nałożyłby tam sito pochodnych")
+        korzenie.append(e.path)
+    return korzenie, odciete, robocze
+
+
 def doskan_xisf(con, xisf_root, now, out):
     """Po imporcie dołóż XISF realnym skanem (jak PF-4). FITS gate'owane mtime (skip), XISF wciągane;
-    potem grouper+resolver. Volume z `volume_serial` (brama musi trafiać znane FITS)."""
+    potem grouper+resolver. Volume z `volume_serial` (brama musi trafiać znane FITS).
+    `STACKS` pod korzeniem jest ODCINANY (O1, `korzenie_doskanu`)."""
     out("")
-    out(f"== (X) XISF-DOSKAN: scan_tree {xisf_root} ==")
+    out(f"== (X) XISF-DOSKAN: scan_tree {xisf_root} (bez {STACKS_DIR.upper()}) ==")
     root = canonize_root(xisf_root)
     volume = volume_serial(root)
     if volume is None:
         raise RuntimeError(f"volume_serial({root!r}) nieustalony — zamontuj wolumin XISF-roota")
-    s = scan_tree(con, root, volume=volume, drive_letter=(os.path.splitdrive(root)[0] or None),
-                  tier=None, now=now)
-    out(f"  scan: files={s.files} frames_new={s.frames_new} skipped(mtime)={s.skipped} "
-        f"frame_review={s.frame_review} dirs_excluded={s.dirs_excluded}")
+    korzenie, odciete, robocze = korzenie_doskanu(root)
+    for p in odciete:
+        out(f"  poza doskanem (O1, stosy tylko przez --stacks-root): {p}")
+    for p in robocze:
+        out(f"  poza doskanem (drzewo robocze): {p}")
+    files = frames_new = skipped = frame_review = 0
+    dirs_excluded = len(robocze)                    # górny poziom - skan korzenia też by je liczył
+    for korzen in korzenie:
+        s = scan_tree(con, korzen, volume=volume,
+                      drive_letter=(os.path.splitdrive(root)[0] or None), tier=None, now=now)
+        files += s.files
+        frames_new += s.frames_new
+        skipped += s.skipped
+        frame_review += s.frame_review
+        dirs_excluded += s.dirs_excluded
+    out(f"  scan ({len(korzenie)} poddrzew): files={files} frames_new={frames_new} "
+        f"skipped(mtime)={skipped} frame_review={frame_review} dirs_excluded={dirs_excluded}")
     gs = run_grouper(con, now=now)
     rs = run_resolver(con, now=now)
     out(f"  grouper: {gs}")
@@ -564,19 +791,27 @@ def stack_lineage(con, now, out):
 # ── (C) KRYTERIA §5 na bazie zbudowanej z dawcy (stage-aware: import vs full) ─────────────────────
 def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, lin_idempotent=None,
                    stacks=None, stacks_idempotent=None, slin=None, slin_idempotent=None,
-                   slin_kept=None, donor_testimony=None):
+                   slin_kept=None, donor_testimony=None, now=None):
     """`donor_testimony` = `donor_object_testimony` podgrupy przeliczonej (z `build_import`); musi
     pokrywać `summary.preflight.recompute` co do ścieżki - inaczej kotwica §5.7b liczyłaby część
-    podgrupy zeznaniem dysku (EXPECT, nie cicha degradacja)."""
+    podgrupy zeznaniem dysku (EXPECT, nie cicha degradacja). `now` (ISO-8601) liczy wiek kotwic
+    w wydruku FAIL; domyślnie bieżąca chwila.
+
+    Zwraca listę `(etykieta, ok, pochodzenie)`, gdzie `pochodzenie` to linie `opis_niezgodnosci`
+    przy FAIL kryterium z kotwicą (inaczej pusta krotka) - podsumowanie powtarza je przy FAIL-u."""
     donor_testimony = donor_testimony or {}
     if set(donor_testimony) != set(summary.preflight.recompute):
         raise RuntimeError("check_criteria: zeznanie dawcy nie pokrywa podgrupy przeliczonej "
                            f"({len(donor_testimony)} != {len(summary.preflight.recompute)})")
-    results = []                                    # (etykieta, PASS/FAIL)
+    dzis = (datetime.fromisoformat(now) if now else datetime.now(timezone.utc)).date()
+    results = []                                    # (etykieta, PASS/FAIL, pochodzenie)
 
-    def crit(label, cond):
-        results.append((label, bool(cond)))
+    def crit(label, cond, pochodzenie=()):
+        pochodzenie = tuple(pochodzenie) if not cond else ()
+        results.append((label, bool(cond), pochodzenie))
         out(f"  [{_ok(cond)}] {label}")
+        for linia in pochodzenie:
+            out(f"         {linia}")
 
     n_xisf = con.execute("SELECT count(*) FROM frame WHERE filetype='xisf'").fetchone()[0]
     full = n_xisf > 0
@@ -590,16 +825,19 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
     out("")
     out(f"== (C) KRYTERIA §5 — stan: {stage} ==")
 
-    def crit_anchor(label, exp, akt, nota=""):
-        """Kryterium z kotwicą, która MOŻE być jeszcze niezmierzona (`None`). Wtedy wypisujemy
-        aktualia i NIE stawiamy fałszywie zielonego PASS-a ani fałszywego FAIL-a — bramka ma
-        powiedzieć „nie wiem", a nie zgadywać. Ten sam protokół, którym przed pilotem P-D
-        zaszywano `EXP_NAMELESS_*`."""
-        if exp is None:
+    def crit_k(label, k, akt, nota="", rel="=="):
+        """Kryterium z KOTWICĄ (`Kotwica`): przy FAIL drukuje pochodzenie i wiek kotwicy obok
+        obu wartości (AR-53). `rel` `==` albo `>=` (próg). Kotwica może być jeszcze NIEZMIERZONA
+        (`wartosc=None`) - wtedy wypisujemy aktualia i NIE stawiamy fałszywie zielonego PASS-a
+        ani fałszywego FAIL-a: bramka ma powiedzieć „nie wiem", a nie zgadywać. Ten sam protokół,
+        którym przed pilotem P-D zaszywano `EXP_NAMELESS_*`."""
+        if k.wartosc is None:
             out(f"  [ ?? ] {label} — kotwica NIEZMIERZONA, aktualnie {akt}{nota}; "
                 f"zaszyj po tym przebiegu")
             return
-        crit(f"{label} == {exp} (akt={akt}){nota}", akt == exp)
+        ok = akt >= k.wartosc if rel == ">=" else akt == k.wartosc
+        crit(f"{label} {rel} {k.wartosc} (akt={akt}){nota}", ok,
+             opis_niezgodnosci(k, akt, dzis, rel))
 
 
     # §4.6 IMPORT DOMYKA ŁAŃCUCH (P-G, 2026-08-01): fasada robi group→resolve→calibrate→lineage,
@@ -626,8 +864,7 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
     out(f"\n§5.1 tożsamość: frame={n_frame} z sha1_data={n_sha} (degenerat uncomputable={uncomp})")
     crit("§5.1 sha1_data 100% (każdy frame ma odcisk danych)", n_sha == n_frame and n_frame > 0)
     if full:
-        crit(f"§5.1 degenerat XISF ~{EXP_UNCOMPUTABLE_FULL} (OIII masterflat, bajt \\x07)",
-             uncomp == EXP_UNCOMPUTABLE_FULL)
+        crit_k("§5.1 degenerat XISF (OIII masterflat, bajt \\x07)", EXP_UNCOMPUTABLE_FULL, uncomp)
     else:
         crit("§5.1 zero degeneratów w imporcie FITS (nagłówki naprawione)", uncomp == 0)
 
@@ -649,15 +886,15 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
     for mc in sorted(cams):
         _, px, mono, msrc, pc = cams[mc]
         out(f"    {mc:12s} px={px} is_mono={mono} src={msrc} pixel_conflict={pc}")
-    cams_ok = set(cams) == set(exp_cams)
-    px_mono_ok = all(mc in cams and cams[mc][1] == exp_cams[mc][0]
-                     and cams[mc][2] == exp_cams[mc][1] for mc in exp_cams)
-    crit(f"§5.3 {len(exp_cams)} kamer, piksel+mono zgodne (MM/MD mono, MC/294/Sony/DSLR kolor)",
-         cams_ok and px_mono_ok)
+    # Równość słowników {model: (piksel, mono)} = ten sam zbiór kamer i zgodny piksel+mono każdej.
+    akt_cams = {mc: (cams[mc][1], cams[mc][2]) for mc in cams}
+    crit(f"§5.3 {len(exp_cams.wartosc)} kamer, piksel+mono zgodne "
+         f"(MM/MD mono, MC/294/Sony/DSLR kolor)", akt_cams == exp_cams.wartosc,
+         opis_niezgodnosci(exp_cams, akt_cams, dzis))
     distinct_models = con.execute("SELECT count(DISTINCT model_canon) FROM camera").fetchone()[0]
     n_cam_rows = con.execute("SELECT count(*) FROM camera").fetchone()[0]
     crit("§5.8 zero rozbić modelu (distinct model_canon == wierszy camera)",
-         distinct_models == n_cam_rows == len(exp_cams))
+         distinct_models == n_cam_rows == len(exp_cams.wartosc))
     pconf = con.execute("SELECT count(*) FROM camera WHERE pixel_conflict=1").fetchone()[0]
     # ZERO także w etapie stosów — nie przez podniesienie poprzeczki, tylko dlatego, że produkt
     # integracji przestał wnosić `XPIXSZ` (`cameras.NO_PIXEL_KINDS`, decyzja Zdzinia 2026-08-02).
@@ -678,16 +915,15 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
         # Drzewo obróbki niesie WŁASNE etykiety `TELESCOP` — także takie, których archiwum już nie
         # zna po naprawach na `R:`. Osobna kotwica, bo to inny zakres: gdyby liczyć jedną, powrót
         # martwej etykiety w drzewie obróbki wyglądałby jak regresja naprawy archiwum.
-        crit_anchor("§5.4 liczba teleskopów (z drzewem obróbki)", EXP_TELESCOPES_STACKS, len(tels))
+        crit_k("§5.4 liczba teleskopów (z drzewem stosów)", EXP_TELESCOPES_STACKS, len(tels))
     else:
-        crit(f"§5.4 liczba teleskopów == {exp_tel} (akt={len(tels)})", len(tels) == exp_tel)
+        crit_k("§5.4 liczba teleskopów", exp_tel, len(tels))
     if full and not ze_stosami:
-        # Rozdział, nie sama liczba: kotwica „12" milczałaby o tym, czy przybyło optyki astro,
-        # czy kolejnego obiektywu. Obiektyw = oś powołana WYŁĄCZNIE klatkami RAW.
+        # Rozdział, nie sama liczba: kotwica liczby teleskopów milczałaby o tym, czy przybyło optyki
+        # astro, czy kolejnego obiektywu. Obiektyw = oś powołana WYŁĄCZNIE klatkami RAW.
         raw_only = sum(1 for *_x, nfr, nraw in tels if nfr and nfr == nraw)
         out(f"    z tego powołane wyłącznie przez RAW (obiektywy DSLR): {raw_only}")
-        crit(f"§5.4 osie wyłącznie-RAW == {EXP_TELESCOPES_RAW_ONLY_FULL} (obiektywy z EXIF)",
-             raw_only == EXP_TELESCOPES_RAW_ONLY_FULL)
+        crit_k("§5.4 osie wyłącznie-RAW (obiektywy z EXIF)", EXP_TELESCOPES_RAW_ONLY_FULL, raw_only)
     suspect = con.execute("SELECT count(*) FROM event WHERE verb='telescope.review'").fetchone()[0]
     crit(f"§5.4 telescope.review MARTWY po PF-2 (akt={suspect})", suspect == 0)
 
@@ -748,14 +984,14 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
             (json.dumps(list(NO_OBJECT_CARD_FILETYPES)), off_axis)).fetchone()[0]
         out(f"    z tego RAW (DSLR bez teleskopu w EXIF): {cfg_review_raw}")
         if ze_stosami:
-            crit_anchor("§5.6 config.review poza RAW (z drzewem obróbki)",
-                        EXP_CONFIG_REVIEW_STACKS, cfg_review - cfg_review_raw,
-                        nota=" — stacki bez `TELESCOP` nie powołają osi")
+            crit_k("§5.6 config.review poza RAW (z drzewem stosów)",
+                   EXP_CONFIG_REVIEW_STACKS, cfg_review - cfg_review_raw,
+                   nota=" - stacki bez `TELESCOP` nie powołają osi")
         else:
-            crit(f"§5.6 config.review poza RAW ~{EXP_CONFIG_REVIEW_FULL} (`unknown` masterflat A7R3)",
-                 cfg_review - cfg_review_raw == EXP_CONFIG_REVIEW_FULL)
-        crit(f"§5.6 config.review RAW == {EXP_CONFIG_REVIEW_RAW_FULL} (stan docelowy DSLR)",
-             cfg_review_raw == EXP_CONFIG_REVIEW_RAW_FULL)
+            crit_k("§5.6 config.review poza RAW (`unknown` masterflat A7R3)",
+                   EXP_CONFIG_REVIEW_FULL, cfg_review - cfg_review_raw)
+        crit_k("§5.6 config.review RAW (stan docelowy DSLR)", EXP_CONFIG_REVIEW_RAW_FULL,
+               cfg_review_raw)
     else:
         crit("§5.6 config.review == 0 w imporcie FITS (nagłówki naprawione)", cfg_review == 0)
 
@@ -771,8 +1007,7 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
     out(f"    poza procentem — rozwiazane BEZ nazwy w naglowku: {rep.object_resolved_no_raw}")
     for raw, n in rep.object_delta[:12]:
         out(f"    {n:5d}  {raw}")
-    crit(f"§5.7 object_pct >= {EXP_OBJECT_PCT_MIN}% (akt={rep.object_pct}%)",
-         rep.object_pct >= EXP_OBJECT_PCT_MIN)
+    crit_k("§5.7 object_pct [%]", EXP_OBJECT_PCT_MIN, rep.object_pct, rel=">=")
 
     # §5.7a ROZKŁAD POPULACJI SIĘ DOMYKA (R-S0-6). Sześć predykatów raportu dzieli lighty na kubełki,
     # a dotąd NIC nie sprawdzało, czy pokrywają całość — rozkład, który się nie domyka, jest
@@ -801,12 +1036,7 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
         f"stan bazy {rep.object_nameless}")
     out(f"    podgrupa przeliczona z dysku: {len(donor_testimony)} plików, lightów {ns.recomputed_lights}; "
         f"bez nazwy wg dawcy {ns.recomputed_donor}, wg dysku {ns.recomputed_disk} (raport, bez kotwicy)")
-    if exp_nameless is None:
-        out(f"    (kotwica NIEZMIERZONA dla trybu {'FULL' if full else 'IMPORT'} — "
-            f"zaszyj EXP_NAMELESS_* po tym przebiegu)")
-    else:
-        crit(f"§5.7b bez nazwy wg zeznania dawcy == {exp_nameless} (akt={ns.anchor})",
-             ns.anchor == exp_nameless)
+    crit_k("§5.7b bez nazwy wg zeznania dawcy", exp_nameless, ns.anchor)
     crit(f"§5.7b derywacja zeznania dawcy zgodna z potokiem przy niezmienionym zeznaniu obiektu "
          f"(rozjazdy={len(ns.mismatch)})", not ns.mismatch)
     # Bliźniacza populacja po drugiej stronie FORMATU: klatki, które nie mają JAK zeznać o obiekcie.
@@ -814,8 +1044,8 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
     # i osobne kryterium byłoby pustym rytuałem.
     out(f"    z tego format bez karty `OBJECT` (RAW): {rep.object_nameless_raw}")
     if full:
-        crit(f"§5.7b object_nameless_raw == {EXP_NAMELESS_RAW_FULL} (DSLR — droga naprawy: ręka)",
-             rep.object_nameless_raw == EXP_NAMELESS_RAW_FULL)
+        crit_k("§5.7b object_nameless_raw", EXP_NAMELESS_RAW_FULL, rep.object_nameless_raw,
+               nota=" (DSLR - droga naprawy: ręka)")
     else:
         crit("§5.7b zero RAW w imporcie FITS (dawca jest FITS-only)",
              rep.object_nameless_raw == 0)
@@ -825,8 +1055,8 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
     # i pierwsza dostawa bez `OBJECT` schowałaby się za drzewem obróbki.
     out(f"    z tego gotowe stosy (po integracji): {rep.object_nameless_stacks}")
     if ze_stosami:
-        crit_anchor("§5.7b object_nameless_stacks", EXP_NAMELESS_STACKS,
-                    rep.object_nameless_stacks, nota=" — własny kubełek, naprawa kartą (P6d)")
+        crit_k("§5.7b object_nameless_stacks", EXP_NAMELESS_STACKS,
+               rep.object_nameless_stacks, nota=" - własny kubełek, naprawa kartą (P6d)")
     else:
         crit("§5.7b zero stosów, gdy droga Stosów nie szła (etap ich nie wciągał)",
              rep.object_nameless_stacks == 0)
@@ -840,10 +1070,9 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
         # nowy klucz `master_light` jest tu FAIL-em, i to była przewidziana konsekwencja I-2b,
         # nie niespodzianka (brief §0 fakt 24).
         exp_kinds = EXP_XISF_KINDS_STACKS if ze_stosami else EXP_XISF_KINDS
-        crit(f"§5.8 kinds XISF == {exp_kinds}", xk == exp_kinds)
+        crit_k("§5.8 kinds XISF", exp_kinds, xk)
         frev = con.execute("SELECT count(*) FROM event WHERE verb='frame.review'").fetchone()[0]
-        crit(f"§5.8 frame.review ~{EXP_FRAME_REVIEW_FULL} (OIII masterflat)",
-             frev == EXP_FRAME_REVIEW_FULL)
+        crit_k("§5.8 frame.review (OIII masterflat)", EXP_FRAME_REVIEW_FULL, frev)
 
     # §5.13 DROGA „STOSY" (I-2b, P-I) — dwóch niezależnych świadków tej samej populacji:
     # ZEZNANIE DROGI (ile plików zobaczyła i co z nimi zrobiła) i STAN BAZY (ile klatek jest).
@@ -853,18 +1082,17 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
         out(f"\n§5.13 droga Stosow: kandydaci={stacks.candidates} wciagniete={stacks.ingested} "
             f"pochodne={stacks.derived_skipped} odrzucone={stacks.rejected_kind}/"
             f"{stacks.rejected_unreadable} bledy={stacks.failed}")
-        crit(f"§5.13 kandydaci == {EXP_STACKS_CANDIDATES} (masterLight* bez pochodnych)",
-             stacks.candidates == EXP_STACKS_CANDIDATES)
-        crit(f"§5.13 pochodne obróbki poza zakresem == {EXP_STACKS_DERIVED} (§5 briefu P-I)",
-             stacks.derived_skipped == EXP_STACKS_DERIVED)
-        crit(f"§5.13 wciągnięte == {EXP_STACKS_INGESTED} (zeznanie potwierdziło master_light)",
-             stacks.ingested == EXP_STACKS_INGESTED)
+        crit_k("§5.13 kandydaci (masterLight* bez pochodnych)", EXP_STACKS_CANDIDATES,
+               stacks.candidates)
+        crit_k("§5.13 pochodne obróbki poza zakresem (§5 briefu P-I)", EXP_STACKS_DERIVED,
+               stacks.derived_skipped)
+        crit_k("§5.13 wciągnięte (zeznanie potwierdziło master_light)", EXP_STACKS_INGESTED,
+               stacks.ingested)
         # Zero odmów NIE jest ozdobą: bramka tożsamości dziś nic nie odsiewa i dopóki tak jest,
         # populacja kandydatów == populacja stacków. Pierwsza odmowa znaczy, że konwencja nazw
         # rozjechała się z zawartością — i wtedy to jest sprawa do OBEJRZENIA, nie do podbicia liczby.
-        crit(f"§5.13 zero odmów (kind/nieczytelność/IO) == {EXP_STACKS_REJECTED}",
-             stacks.rejected_kind + stacks.rejected_unreadable + stacks.failed
-             == EXP_STACKS_REJECTED)
+        crit_k("§5.13 odmowy (kind/nieczytelność/IO)", EXP_STACKS_REJECTED,
+               stacks.rejected_kind + stacks.rejected_unreadable + stacks.failed)
         n_ml = con.execute(
             "SELECT count(*) FROM frame WHERE kind='master_light'").fetchone()[0]
         out(f"    stan bazy: frame(kind='master_light') = {n_ml}")
@@ -923,11 +1151,11 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
         # Partycja: każdy stos jest ALBO z rodowodem, ALBO w dokładnie jednym kubełku powodu.
         crit(f"§5.14 partycja domyka populację ({slin.linked} + {sum(slin.reasons.values())} "
              f"== {slin.stacks})", slin.linked + sum(slin.reasons.values()) == slin.stacks)
-        crit_anchor("§5.14 integracje z rodowodem", EXP_SLIN_LINKED, slin.linked)
-        crit_anchor("§5.14 wejść razem", EXP_SLIN_INPUTS, slin.inputs)
-        crit_anchor("§5.14 dowiedzione historią pliku", EXP_SLIN_HISTORY,
-                    slin.by_assert.get("history", 0),
-                    nota=" — reszta to KANDYDACI z okna, nie fakty")
+        crit_k("§5.14 integracje z rodowodem", EXP_SLIN_LINKED, slin.linked)
+        crit_k("§5.14 wejść razem", EXP_SLIN_INPUTS, slin.inputs)
+        crit_k("§5.14 dowiedzione historią pliku", EXP_SLIN_HISTORY,
+               slin.by_assert.get("history", 0),
+               nota=" - reszta to KANDYDACI z okna, nie fakty")
         crit("§5.14 rodowód idempotentny (2. przebieg: zero relacji, zero eventów zapisu)",
              slin_idempotent is True)
         # DWA kryteria, bo „nic nie pominąłem" jest WĘŻSZE niż „przeczytałem wszystko": stos BEZ
@@ -1047,8 +1275,8 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
     for oid, la, lo, n in pops:
         out(f"    #{oid:<3} {la:>10.5f}, {lo:>10.5f}  frames={n}")
     exp_gps = EXP_GPS_FRAMES_FULL if full else EXP_GPS_FRAMES_IMPORT
-    crit(f"§5.10 {EXP_OBSERVATORIES} stanowisk (klaster 4 km, §8)", n_obs == EXP_OBSERVATORIES)
-    crit(f"§5.10 GPS-karty == {exp_gps} (§8; FULL niesie +202 XISF po P6b)", gps_cards == exp_gps)
+    crit_k("§5.10 stanowiska (klaster 4 km, §8)", EXP_OBSERVATORIES, n_obs)
+    crit_k("§5.10 GPS-karty (§8; FULL niesie też XISF po P6b)", exp_gps, gps_cards)
     crit("§5.10 zero nieparsowalnego GPS (sonda: formaty czyste, 0 śmieci)", gps_null == 0)
     # Twarda brama na CZĘŚCIOWY/śmieciowy GPS (rec.#11): `gps_null` widzi tylko klatki z OBIEMA kartami,
     # więc lone-coord (jedna współrzędna → site_coords None → review) by mu umknął. review_summary łapie
@@ -1070,13 +1298,11 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
         if ze_stosami:
             # Stacki nie niosą GPS (zmierzone: 0/128 ma SITELAT+SITELONG — PixInsight nie przenosi
             # tych kart do produktu integracji), więc ta liczba rośnie o CAŁĄ populację stosów.
-            crit_anchor("§5.10 bez GPS w torze astro (z drzewem obróbki)",
-                        EXP_NO_GPS_STACKS, no_obs - no_obs_raw)
+            crit_k("§5.10 bez GPS w torze astro (z drzewem stosów)",
+                   EXP_NO_GPS_STACKS, no_obs - no_obs_raw)
         else:
-            crit(f"§5.10 bez GPS w torze astro == {EXP_NO_GPS_FULL} (150 fits + 124 xisf)",
-                 no_obs - no_obs_raw == EXP_NO_GPS_FULL)
-        crit(f"§5.10 bez GPS w torze RAW == {EXP_NO_GPS_RAW_FULL} (DSLR bez modułu GPS)",
-             no_obs_raw == EXP_NO_GPS_RAW_FULL)
+            crit_k("§5.10 bez GPS w torze astro (fits + xisf)", EXP_NO_GPS_FULL, no_obs - no_obs_raw)
+        crit_k("§5.10 bez GPS w torze RAW (DSLR bez modułu GPS)", EXP_NO_GPS_RAW_FULL, no_obs_raw)
 
     # §5.11 oś KALIBRACJI (C2) — kotwice przepisu + DOMKNIĘCIE POPULACJI. Rozkład, który się nie
     # sumuje, to brama fałszywie zielona: „38 przepisów" nic nie znaczy, dopóki nie wiadomo, że
@@ -1107,10 +1333,10 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
         crit("§5.11 fakt ze ścieżki JEST zapisany (rename mastera nie przepnie klatki po cichu)",
              facts.get("path", 0) > 0 if full else True)
         if full:
-            crit(f"§5.11 przepisy dark == {EXP_RECIPE_DARK} (38 masterdarków, każdy unikalny)",
-                 by_class.get("dark", 0) == EXP_RECIPE_DARK)
-            crit(f"§5.11 przepisy flat == {EXP_RECIPE_FLAT} (2256 flatów + 73 mastery, świeża baza)",
-                 by_class.get("flat", 0) == EXP_RECIPE_FLAT)
+            crit_k("§5.11 przepisy dark (każdy masterdark unikalny)", EXP_RECIPE_DARK,
+                   by_class.get("dark", 0))
+            crit_k("§5.11 przepisy flat (flaty + masterflaty, świeża baza)", EXP_RECIPE_FLAT,
+                   by_class.get("flat", 0))
             # Przyczyna 38. klasy pinowana WPROST: gdyby doszła druga sprzeczna para, sama liczba
             # klas przesunęłaby się „legalnie" i nikt by nie zauważył, że archiwum zeznaje dwoma
             # głosami. Klasa jednoelementowa sama w sobie jest zwyczajna (Sony ma trzy) — dopiero
@@ -1121,12 +1347,12 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
                 "AND EXISTS(SELECT 1 FROM frame f JOIN location l ON l.frame_id=f.id "
                 "           WHERE f.calibration_profile_id=p.id AND l.present=1 "
                 "           GROUP BY f.id HAVING count(l.id) > 1)").fetchone()[0]
-            crit("§5.11 klasa-sierota ze sprzecznej pary kopii: dokładnie 1 (`frame 15645`, "
-                 f"CLS↔L-Pro; akt={sierota})", sierota == 1)
+            crit_k("§5.11 klasa-sierota ze sprzecznej pary kopii (`frame 15645`, CLS↔L-Pro)",
+                   EXP_RECIPE_ORPHAN_FULL, sierota)
             crit("§5.11 każdy master kalibracyjny MA przepis (mastery bez przepisu == 0)",
                  masters_off == 0)
-            crit(f"§5.11 poza osią tylko {EXP_MASTERS_EXCLUDED_FULL} jawnie wykluczone "
-                 f"(kind='unknown', akt={unknown})", unknown == EXP_MASTERS_EXCLUDED_FULL)
+            crit_k("§5.11 poza osią jawnie wykluczone (kind='unknown')", EXP_MASTERS_EXCLUDED_FULL,
+                   unknown)
 
     # §5.12 RODOWÓD (C4) — DOMKNIĘCIE POPULACJI per relacja + szwy pinowane WPROST. Suma kubełków,
     # która nie schodzi do liczby lightów, to brama fałszywie zielona: rozjazd klucza (np. header
@@ -1152,12 +1378,8 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
         czasowa_ok = _check_nearest_in_time(con)
         crit("§5.12 reguła czasowa: każdy link flat = master o min |Δczasu| w profilu", czasowa_ok)
         if full:
-            if EXP_LINEAGE_DARK is not None:
-                crit(f"§5.12 lighty z darkiem == {EXP_LINEAGE_DARK}",
-                     lin.linked.get("dark", 0) == EXP_LINEAGE_DARK)
-            if EXP_LINEAGE_FLAT is not None:
-                crit(f"§5.12 lighty z flatem == {EXP_LINEAGE_FLAT}",
-                     lin.linked.get("flat", 0) == EXP_LINEAGE_FLAT)
+            crit_k("§5.12 lighty z darkiem", EXP_LINEAGE_DARK, lin.linked.get("dark", 0))
+            crit_k("§5.12 lighty z flatem", EXP_LINEAGE_FLAT, lin.linked.get("flat", 0))
 
     return results
 
@@ -1236,10 +1458,13 @@ def main(argv=None):
         description="Kryteria akceptacji PF-5 (read-only): import z dawcy LIVE + kryteria §5")
     ap.add_argument("--donor", required=True, help="ścieżka dawcy fitsmirror.db (LIVE, otwierany read-only)")
     ap.add_argument("--xisf-root", default=None,
-                    help="drzewo z XISF do doskanu (np. <xisf-root>) — odtwarza pełny stan PF-4")
+                    help="drzewo z XISF do doskanu (np. <xisf-root>) - odtwarza pełny stan PF-4. "
+                         "O1: skanowane są PODDRZEWA korzenia bez `STACKS`, więc plik leżący "
+                         "wprost pod korzeniem kończy przebieg odmową")
     ap.add_argument("--stacks-root", default=None,
-                    help="korzeń drzewa OBRÓBKI (I-2b) — gotowe obrazy po integracji wchodzą jako "
-                         "`master_light`. Wymaga `--xisf-root` (kotwice stosów są liczone na FULL)")
+                    help="korzeń drzewa STOSÓW (I-2b; dziś `<xisf-root>\\STACKS`) - gotowe obrazy "
+                         "po integracji wchodzą jako `master_light`. Wymaga `--xisf-root` (kotwice "
+                         "stosów są liczone na FULL, który `STACKS` odcina - O1)")
     ap.add_argument("--live-db", default=None,
                     help="ŻYWA baza Horreum (read-only) — rejestr napraw writebacku; bez niej "
                          "falsyfikator abortuje, gdy próbka trafi w plik naprawiony przez Horreum")
@@ -1284,7 +1509,7 @@ def main(argv=None):
                              lin=lin, lin_idempotent=lin_idem,
                              stacks=stacks, stacks_idempotent=stacks_idem,
                              slin=slin, slin_idempotent=slin_idem, slin_kept=slin_kept,
-                             donor_testimony=testimony)
+                             donor_testimony=testimony, now=now)
     con.close()
 
     subset_ok = True
@@ -1297,9 +1522,11 @@ def main(argv=None):
 
     out("")
     out("== PODSUMOWANIE ==")
-    failed = [lab for lab, ok in results if not ok]
-    for lab in failed:
+    failed = [(lab, poch) for lab, ok, poch in results if not ok]
+    for lab, poch in failed:
         out(f"  FAIL: {lab}")
+        for linia in poch:
+            out(f"        {linia}")
     out("  §8.1 (AST jednej klingi) i bramka clone'a — OSOBNE: pytest + procedura clone.")
     hard_ok = not failed and subset_ok
     out(f"  WYNIK: {'WSZYSTKO PASS' if hard_ok else f'{len(failed)} FAIL' + ('' if subset_ok else ' + subset')}")

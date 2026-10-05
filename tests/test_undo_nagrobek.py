@@ -324,3 +324,29 @@ def test_failed_skan_innego_naglowka_nie_potwierdza(tmp_path, monkeypatch):
     assert _stan(con, fid) == (None, "user_cleared", cos)
     assert _wpisy(con, "R")[0][0] == "failed"
     con.close()
+
+
+def test_failed_dwa_commity_jednego_przebiegu_nie_potwierdza(tmp_path, monkeypatch):
+    """Bramka az, kimi Z1: ten sam `run_id` użyty drugi raz po zewnętrznym przywróceniu pliku -
+    dwa commity 'failed' na jednym pliku. Wpisy nie niosą `commit_id`, więc skan nie wie, które
+    należą do commitu z pasującym `post_hash`; nie potwierdza niczego, nagrobek zostaje.
+
+    Falsyfikator: zdejmij `NOT EXISTS` z `confirm_failed_commit_by_scan` → wpis `OBJECT` commitu A
+    staje się 'applied', a nagrobek gaśnie, choć karty A na dysku nigdy nie było."""
+    con, p, lid, fid, cos = _baza_z_nagrobkiem(tmp_path)
+    oryginal = p.read_bytes()
+    _commit_failed(con, lid, "R", monkeypatch, awaria="odczyt")
+    p.write_bytes(oryginal)                                  # przywrócenie spoza Horreum
+    hh = con.execute("SELECT header_hash FROM location WHERE id = ?", (lid,)).fetchone()[0]
+    repo.stage_pending(con, run_id="R", location_id=lid, keyword="TELESCOP", idx=None, op="add",
+                       old_value=None, new_value="RC8", new_type="str", new_comment=None,
+                       expected_header_hash=hh)
+    with monkeypatch.context() as m:
+        m.setattr(scan, "scan_file", lambda *a, **kw: (_ for _ in ()).throw(OSError(5, "udział")))
+        res = writeback.commit(con, "R", now=NOW)
+    assert len(res.failed) == 1, res
+    scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW,
+                       summary=scan.ScanSummary())
+    assert _stan(con, fid) == (None, "user_cleared", cos)
+    assert [w[0] for w in _wpisy(con, "R")] == ["failed", "failed"]
+    con.close()

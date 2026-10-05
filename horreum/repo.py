@@ -2363,7 +2363,10 @@ def confirm_failed_commit_by_scan(con, *, location_id, frame_id, header_hash, no
     Dawniej karta stała w bazie po skanie, a klatka zostawała `user_cleared` - wyjście tylko przez
     cofnięcie i ponowny commit. Zakres: wyłącznie droga atomowa (`inplace_op_id IS NULL`; zapis
     w miejscu ma własne dokończenie pod izolacją lokacji) i backup, po którym plik podmieniono
-    (`unreplaced_at IS NULL`). Najnowszy pasujący backup wygrywa. Wołane przez skan w zakresie
+    (`unreplaced_at IS NULL`). Przebieg, w którym ten plik ma backupy z WIĘCEJ niż jednego commitu
+    (ponowny staging tego samego `run_id`), nie jest potwierdzany: wpisy 'failed' nie niosą
+    `commit_id`, więc nie da się powiedzieć, które należą do commitu z pasującym `post_hash`
+    (bramka az, kimi Z1) - zostaje droga cofnięcia i ponownego commitu. Wołane przez skan w zakresie
     `atomic` wjazdu rekordu (`_tx` dołącza). Zwraca `commit_id` potwierdzonego commitu albo
     `None` bez zapisu."""
     with _tx(con):
@@ -2373,7 +2376,10 @@ def confirm_failed_commit_by_scan(con, *, location_id, frame_id, header_hash, no
             "JOIN header_backups hb ON hb.commit_id = c.id AND hb.location_id = p.location_id "
             "WHERE p.location_id = ? AND p.status = 'failed' AND p.inplace_op_id IS NULL "
             "AND hb.post_hash = ? AND hb.unreplaced_at IS NULL "
-            "ORDER BY hb.id DESC LIMIT 1",
+            "AND NOT EXISTS (SELECT 1 FROM header_backups hb2 JOIN commits c2 ON c2.id = hb2.commit_id "
+            "                WHERE c2.run_id = c.run_id AND hb2.location_id = p.location_id "
+            "                AND hb2.commit_id <> hb.commit_id AND hb2.unreplaced_at IS NULL) "
+            "LIMIT 1",
             (location_id, header_hash)).fetchone()
         if row is None:
             return None

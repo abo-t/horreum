@@ -2393,6 +2393,10 @@ def confirm_failed_commit_by_scan(con, *, location_id, frame_id, header_hash, no
             "WHERE run_id = ? AND location_id = ? AND status = 'failed' AND inplace_op_id IS NULL",
             (f"potwierdzone skanem: nagłówek na dysku = zapisany w commicie {commit_id}",
              row["run_id"], location_id))
+        # Backupu niepotwierdzonego (0030, AR-40) ta klinga NIE rusza: jego jedynym właścicielem jest
+        # rekoncyliacja pisarza (`settle_pending_backup`), która pyta o niego PRZED wjazdem rekordu
+        # w tej samej transakcji. Dwóch właścicieli zdejmowało stan nawzajem, a CAS rekoncyliacji
+        # cofał wtedy cały re-sync jako „cudzą pracę” (bramka astra, A4).
         if any(w["keyword"] == "OBJECT" for w in wpisy):
             _clear_object_tombstone_tx(con, frame_id=frame_id, now=now, actor=actor,
                                        commit_id=commit_id, location_id=location_id)
@@ -3027,16 +3031,37 @@ def insert_commit(con, *, run_id, now, summary=None):
     return cur.lastrowid
 
 
-def insert_header_backup(con, *, commit_id, location_id, hdu_index, header_text, post_hash):
+def insert_header_backup(con, *, commit_id, location_id, hdu_index, header_text, post_hash,
+                         pending_since=None, pending_rows=None):
     """Zapisz backup pełnego nagłówka SPRZED commitu (undo). `post_hash` = header_hash PO commicie
     (kontrola undo). Append-only: nigdy nie kasowany. Transient - bez eventu. Zwraca id backupu
-    (`mark_backup_unreplaced`, gdy pisarz potem pliku nie podmieni)."""
+    (`mark_backup_unreplaced`, gdy pisarz potem pliku nie podmieni).
+
+    `pending_since` (0030, AR-40) = chwila utrwalenia backupu drogi atomowej PRZED podmianą: backup
+    jest NIEPOTWIERDZONY, dopóki pisarz nie potwierdzi podmiany (`confirm_backup_replaced`, w tej
+    samej transakcji co podmiana), straż jej nie odbije (`mark_backup_unreplaced`) albo rekoncyliacja
+    z dyskiem nie rozstrzygnie (`settle_pending_backup`). `None` = backup bez tego cyklu (droga
+    w miejscu - stan niesie dziennik `inplace_op`).
+
+    `pending_rows` (0030) = wiersze stagingu, które TA próba zapisuje (`pending_changes` z polami
+    `id, keyword, idx, op, new_value, new_type, new_comment`): rekoncyliacja potwierdza wyłącznie
+    wpisy zgodne z nimi co do `id` i treści, nie wpisy dodane później pod tym samym `run_id`
+    (bramka astra, A5)."""
+    proba = None if pending_rows is None else json.dumps([_wpis_proby(r) for r in pending_rows])
     with con:
         cur = con.execute(
-            "INSERT INTO header_backups(commit_id, location_id, hdu_index, header_text, post_hash) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (commit_id, location_id, hdu_index, header_text, post_hash))
+            "INSERT INTO header_backups(commit_id, location_id, hdu_index, header_text, post_hash, "
+            "pending_since, pending_rows) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (commit_id, location_id, hdu_index, header_text, post_hash, pending_since, proba))
     return cur.lastrowid
+
+
+_POLA_PROBY = ("id", "keyword", "idx", "op", "new_value", "new_type", "new_comment")
+
+
+def _wpis_proby(row):
+    """Wpis stagingu jako lista pól `_POLA_PROBY` - tożsamość wpisu próby (A5): `id` i treść."""
+    return [row[k] for k in _POLA_PROBY]
 
 
 def mark_backup_unreplaced(con, *, backup_id, now):
@@ -3044,10 +3069,92 @@ def mark_backup_unreplaced(con, *, backup_id, now):
     wynik bez `backup_text`, bo straż podmiany odbiła `os.replace` - plik nietknięty. Wyjątek przy
     samej podmianie znacznika nie daje (rename mógł zajść mimo błędu). `unreplaced_at` = `now`; cofnięcie commitu taki backup pomija, zamiast meldować
     blokadę o pliku, którego commit nie ruszył. Wiersz już oznaczony zostaje bez zmian (pierwsza
-    chwila). Backup sam zostaje (append-only). Transient - bez eventu."""
+    chwila). Backup sam zostaje (append-only). Transient - bez eventu. Znacznik rozstrzyga też
+    backup niepotwierdzony (`pending_since` → NULL, 0030)."""
     with con:
-        con.execute("UPDATE header_backups SET unreplaced_at = ? "
+        con.execute("UPDATE header_backups SET unreplaced_at = ?, pending_since = NULL "
                     "WHERE id = ? AND unreplaced_at IS NULL", (now, backup_id))
+
+
+def confirm_backup_replaced(con, *, backup_id):
+    """PODMIANA POTWIERDZONA (0030, AR-40): pisarz drogi atomowej woła to w transakcji straży
+    podmiany (`guard_file_replace`), zaraz po udanej podmianie systemowej i kontroli pliku
+    wypartego - backup przestaje być niepotwierdzony. Zdejmuje też `unreplaced_at`: rekoncyliacja
+    innego procesu mogła go postawić w oknie między utrwaleniem backupu a podmianą (widziała na
+    dysku nagłówek sprzed commitu), a pisarz wie lepiej - podmiana zaszła. Transient - bez eventu."""
+    with _immediate(con):
+        con.execute("UPDATE header_backups SET pending_since = NULL, unreplaced_at = NULL "
+                    "WHERE id = ?", (backup_id,))
+
+
+def pending_header_backups(con, location_id):
+    """Backupy drogi atomowej lokacji NIEPOTWIERDZONE (`pending_since`, 0030): proces zginął albo
+    podmiana rzuciła między utrwaleniem backupu a potwierdzeniem. Zbiór pusty w zwykłym biegu, więc
+    bramka commitu i cofnięcia kosztuje jedno zapytanie."""
+    return con.execute(
+        "SELECT hb.id, hb.commit_id, hb.location_id, hb.header_text, hb.post_hash, "
+        "       hb.pending_since, c.run_id "
+        "FROM header_backups hb JOIN commits c ON c.id = hb.commit_id "
+        "WHERE hb.location_id = ? AND hb.pending_since IS NOT NULL ORDER BY hb.id",
+        (location_id,)).fetchall()
+
+
+class BackupAlreadySettled(Exception):
+    """Backup przestał być niepotwierdzony między odczytem a rozstrzygnięciem - inny proces
+    (pisarz albo rekoncyliacja) zdążył go rozstrzygnąć. Zero zapisu."""
+
+
+def settle_pending_backup(con, *, backup_id, replaced, now, actor="user:local"):
+    """REKONCYLIACJA BACKUPU NIEPOTWIERDZONEGO z dyskiem (0030, AR-40) - JEDNA transakcja, CAS na
+    `pending_since IS NOT NULL` (inaczej `BackupAlreadySettled`, zero zapisu). Co jest na dysku,
+    rozstrzyga wołający (`writeback`); tu zapisuje się werdykt:
+
+      * `replaced=True` - na dysku leży nagłówek zapisany przez commit (`post_hash`): podmiana
+        zaszła. Backup potwierdzony, a wpisy stagingu TEJ PRÓBY (`pending_rows`: `id` i treść, A5), które commit
+        zostawił bez rozstrzygnięcia ('pending' po śmierci procesu, 'failed' po błędzie samej
+        podmiany) → 'applied' z powodem; wpis dodany później pod tym samym `run_id` (ponowny
+        staging) zostaje, jaki był - do pliku nie trafił. Gdy któryś z potwierdzonych wpisał
+        `OBJECT` - zgaszenie nagrobka ręki tą klingą i parą commit/plik co commit udany (cofnięcie
+        go odtworzy). Wołane w transakcji re-syncu pliku (`repo.atomic`) PRZED wjazdem rekordu,
+        więc baza opisuje plik po commicie razem z tym werdyktem albo wcale;
+      * `replaced=False` - na dysku nagłówek sprzed commitu: podmiany nie było → `unreplaced_at`
+        (cofnięcie pomija), wpisy stagingu bez zmian (ponowny commit je zapisze);
+      * `replaced=None` - nagłówek ani jeden, ani drugi (plik zmienił się poza programem):
+        NIEROZSTRZYGNIĘTE - backup bez dowodu wykonania nie może cofać (bramka astra, A3: późniejszy
+        commit, który zapisze ten sam nagłówek wynikowy, przepuściłby kontrolę `post_hash`
+        i cofnięcie tego commitu cofnęłoby tamten). Stąd też `unreplaced_at` - backup zostaje
+        w tabeli (append-only), ze zwykłego cofnięcia wypada. Wpisy stagingu bez zmian.
+    Transient (backup, staging) bez eventu; nagrobek emituje swój. Zwraca liczbę oznaczonych wpisów."""
+    with _immediate(con):
+        b = con.execute(
+            "SELECT hb.commit_id, hb.location_id, hb.pending_rows, c.run_id FROM header_backups hb "
+            "JOIN commits c ON c.id = hb.commit_id "
+            "WHERE hb.id = ? AND hb.pending_since IS NOT NULL", (backup_id,)).fetchone()
+        if b is None:
+            raise BackupAlreadySettled(f"backup {backup_id} nie jest już niepotwierdzony")
+        if replaced is not True:
+            con.execute("UPDATE header_backups SET pending_since = NULL, unreplaced_at = ? "
+                        "WHERE id = ?", (now, backup_id))
+            return 0
+        con.execute("UPDATE header_backups SET pending_since = NULL WHERE id = ?", (backup_id,))
+        proba = json.loads(b["pending_rows"] or "[]")
+        kandydaci = con.execute(
+            "SELECT id, keyword, idx, op, new_value, new_type, new_comment FROM pending_changes "
+            "WHERE id IN (SELECT value FROM json_each(?)) AND location_id = ? "
+            "AND status IN ('pending', 'failed') AND inplace_op_id IS NULL",
+            (json.dumps([w[0] for w in proba]), b["location_id"])).fetchall()
+        wpisy = [r for r in kandydaci if _wpis_proby(r) in proba]      # id I treść tej próby
+        con.execute(
+            "UPDATE pending_changes SET status = 'applied', reason = ? "
+            "WHERE id IN (SELECT value FROM json_each(?))",
+            (f"potwierdzone z dysku: nagłówek na dysku = zapisany w commicie {b['commit_id']} "
+             f"(przerwany przed potwierdzeniem podmiany)", json.dumps([r["id"] for r in wpisy])))
+        if any(w["keyword"] == "OBJECT" for w in wpisy):
+            loc = con.execute("SELECT frame_id FROM location WHERE id = ?",
+                              (b["location_id"],)).fetchone()
+            _clear_object_tombstone_tx(con, frame_id=loc["frame_id"], now=now, actor=actor,
+                                       commit_id=b["commit_id"], location_id=b["location_id"])
+    return len(wpisy)
 
 
 # ============================================================ DZIENNIK ZAPISU W MIEJSCU (0022, O5/Q8)
@@ -3146,9 +3253,11 @@ def guard_file_replace(con, *, location_id, generation):
     trzyma blokadę zapisu bazy przez całą podmianę, a `begin_inplace_commit`/`begin_inplace_undo`
     biorą ją też (`BEGIN IMMEDIATE`), więc otwarcie operacji i podmiana są uszeregowane: operacja
     zaczęta przed strażą ma większe `id` niż generacja i odbija podmianę, zaczęta po niej czeka.
-    Straż NIE pisze do bazy: backup drogi atomowej utrwala wołający WCZEŚNIEJ, własną transakcją
-    (kolejność „backup w bazie przed podmianą" zostaje), więc tu nie ma czym się zakleszczyć."""
-    with _immediate(con):
+    Straż sama NIE pisze do bazy: backup drogi atomowej utrwala wołający WCZEŚNIEJ, własną transakcją
+    (kolejność „backup w bazie przed podmianą" zostaje), więc tu nie ma czym się zakleszczyć.
+    Zakres jest `atomic`, więc zapis wołającego w ciele (potwierdzenie podmiany
+    `confirm_backup_replaced`, AR-40) wchodzi w TĘ SAMĄ transakcję co podmiana."""
+    with atomic(con):
         _refuse_inplace_conflict(con, location_id, generation)
         yield
 
@@ -3498,14 +3607,36 @@ def open_rename_intent(con, *, rename_id, direction):
             raise ValueError(f"wiersz renamu {rename_id} nie istnieje albo ma już otwarty zamiar")
 
 
+class RenameIntentChanged(Exception):
+    """Zamiar renamu albo miejsce pliku zmieniły się między obserwacją wołającego a transakcją
+    rozstrzygnięcia - inny proces (kompensacja albo rekoncyliacja) zdążył go rozstrzygnąć. Zero
+    zapisu; wołający melduje i zostawia sprawę następnemu przebiegowi (AR-56)."""
+
+
 def settle_rename_intent(con, *, rename_id, location_id, status, reason, now, relocate_to=None,
-                         actor="user:local"):
+                         actor="user:local", expect_in_flight=None, potwierdz=None):
     """REKONCYLIACJA ZAMIARU (AR-29): w JEDNEJ transakcji opcjonalne przepięcie TEJ SAMEJ lokacji
     na ścieżkę, pod którą plik faktycznie stoi (`relocate_to`; `location.renamed` z powodem - ciągłość
     historii lokacji zostaje), status wiersza stagingu i zgaszenie zamiaru. Cel zajęty w bazie przez
     INNY wiersz (skan zdążył wciągnąć plik jako nową kopię) → `ValueError`, zero zapisu. Rozstrzygnięcie
-    (gdzie plik stoi, czy to ten plik) należy do wołającego - `writeback.reconcile_renames`."""
+    (gdzie plik stoi, czy to ten plik) należy do wołającego - `writeback.reconcile_renames`.
+
+    USZEREGOWANIE Z KOMPENSACJĄ (AR-56): obserwacja dysku wołającego wyprzedza tę transakcję, więc
+    pod blokadą zapisu bazy dwa warunki: zamiar wciąż otwarty w kierunku, który wołający widział
+    (`expect_in_flight`), i `potwierdz()` - ponowne, tanie sprawdzenie dysku (plik wciąż tam, gdzie
+    był). Kompensacja renamu (`guard_rename_compensation`) przenosi plik i gasi zamiar w tej samej
+    blokadzie, więc albo zdążyła przed nami (warunek pada → `RenameIntentChanged`, zero zapisu),
+    albo czeka, aż skończymy."""
     with _immediate(con):
+        if expect_in_flight is not None:
+            row = con.execute("SELECT in_flight FROM pending_renames WHERE id = ?",
+                              (rename_id,)).fetchone()
+            if row is None or row["in_flight"] != expect_in_flight:
+                raise RenameIntentChanged(f"zamiar renamu {rename_id} rozstrzygnięty przez inny "
+                                          f"proces po obserwacji dysku")
+        if potwierdz is not None and not potwierdz():
+            raise RenameIntentChanged(f"plik renamu {rename_id} zmienił miejsce po obserwacji "
+                                      f"dysku")
         if relocate_to is not None:
             old_path = _relocation_target(con, location_id, relocate_to)
             if old_path != relocate_to:
@@ -3540,6 +3671,40 @@ def drop_rename_intent(con, *, rename_id):
     odbiła, kompensacja wróciła plik na stare miejsce przy bazie po rollbacku). Transient."""
     with con:
         con.execute("UPDATE pending_renames SET in_flight = NULL WHERE id = ?", (rename_id,))
+
+
+@dataclass
+class RenameCompensation:
+    """Stan widziany pod blokadą zapisu bazy przez kompensację renamu (`guard_rename_compensation`):
+    `path` lokacji i `in_flight` zamiaru. Wołający ustawia `zgas=True`, gdy plik wrócił - zamiar
+    gaśnie w tej samej transakcji."""
+    path: object
+    in_flight: object
+    zgas: bool = False
+
+
+@contextmanager
+def guard_rename_compensation(con, *, rename_id, location_id):
+    """STRAŻ KOMPENSACJI RENAMU (AR-56): ponowny odczyt bazy, kompensacja pliku i zgaszenie zamiaru
+    pod JEDNYM `BEGIN IMMEDIATE`. Wołane przez `writeback._po_awarii_przepiecia` po padzie
+    transakcji przepięcia: `os.rename` zaszedł, baza mogła przyjąć przepięcie albo nie.
+
+    Ciało `with` dostaje `RenameCompensation` (ścieżka lokacji i zamiar, przeczytane POD blokadą)
+    i samo rozstrzyga: plik wraca (`dst→src`) wyłącznie, gdy baza wciąż wskazuje `src`, a zamiar jest
+    otwarty w kierunku tej próby. Wtedy `zgas=True` gasi zamiar w tej samej transakcji. Dawniej
+    odczyt `path` i powrót pliku to były dwie chwile: rekoncyliacja innego procesu mogła między nimi
+    przepiąć bazę na `dst` i zgasić zamiar, a plik wracał pod `src` - baza i dysk rozjechane bez
+    śladu. Rekoncyliacja (`settle_rename_intent`) bierze tę samą blokadę i sprawdza zamiar oraz
+    miejsce pliku pod nią, więc obie drogi są uszeregowane. Wyjątek w ciele → rollback, zero zapisu."""
+    with _immediate(con):
+        loc = con.execute("SELECT path FROM location WHERE id = ?", (location_id,)).fetchone()
+        zam = con.execute("SELECT in_flight FROM pending_renames WHERE id = ?",
+                          (rename_id,)).fetchone()
+        stan = RenameCompensation(None if loc is None else loc["path"],
+                                  None if zam is None else zam["in_flight"])
+        yield stan
+        if stan.zgas:
+            con.execute("UPDATE pending_renames SET in_flight = NULL WHERE id = ?", (rename_id,))
 
 
 def clear_renames_for_run(con, run_id):

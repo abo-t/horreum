@@ -95,18 +95,19 @@ def test_szkielet_przyszly_pusty(tmp_path):
     con.close()
 
 
-def test_user_version_v29_po_migracji(tmp_path):
-    """0029 podnosi user_version do 29 (świeża baza leci 0002→…→0029 sekwencyjnie; 0025 = wersja
+def test_user_version_v30_po_migracji(tmp_path):
+    """0030 podnosi user_version do 30 (świeża baza leci 0002→…→0030 sekwencyjnie; 0025 = wersja
     reguły koercji faktów kopii `location.hdr_rule`, AR-33; 0026 = werdykt „zostaw wszystkie
     wersje” `stack_version_kept` + `integration.creation_time`, AR-10; 0027 = stanowisko wskazane
     ręką `frame.observatory_source`; 0028 = kanał `frame.channel`, P4-3; 0029 = zamiar renamu
-    `pending_renames.in_flight`, AR-29).
+    `pending_renames.in_flight`, AR-29; 0030 = backup niepotwierdzony
+    `header_backups.pending_since`, AR-40).
 
     Pin JEST intencją: każda nowa migracja ma ten test PRZEWRÓCIĆ imiennie, żeby podniesienie
     wersji było gestem, a nie skutkiem ubocznym."""
     con = db.open_db(str(tmp_path / "h.db"))
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 29
-    assert db.SCHEMA_VERSION == 29
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 30
+    assert db.SCHEMA_VERSION == 30
     con.close()
 
 

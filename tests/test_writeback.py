@@ -868,15 +868,16 @@ def test_wyjatek_samej_podmiany_nie_oznacza_backupu_i_undo_cofa(tmp_path, monkey
         hh = con.execute("SELECT header_hash FROM location WHERE id=?", (lid,)).fetchone()[0]
         _stage(con, "R", lid, "TELESCOP", "set", "EQ6", "str", expected=hh)
         przed[p] = p.read_bytes()
-    prawdziwy = writeback.os.replace
+    # Punkt wstrzyknięcia: prymityw podmiany systemowej (AR-18 - dawniej `os.replace`).
+    prawdziwy = writeback._replace_file_w
 
-    def _replace(src, dst):
-        prawdziwy(src, dst)                            # rename zaszedł, odpowiedź udziału padła
+    def _replace(dst, src, kopia):
+        prawdziwy(dst, src, kopia)                     # podmiana zaszła, odpowiedź udziału padła
         if str(dst) == str(pb):
             raise OSError(64, "nazwa sieciowa jest już niedostępna")
-    monkeypatch.setattr(writeback.os, "replace", _replace)
+    monkeypatch.setattr(writeback, "_replace_file_w", _replace)
     res = writeback.commit(con, "R", now=NOW)
-    monkeypatch.setattr(writeback.os, "replace", prawdziwy)
+    monkeypatch.setattr(writeback, "_replace_file_w", prawdziwy)
     assert len(res.applied) == 1 and len(res.failed) == 1 and res.commit_id is not None, res
     assert f"commicie {res.commit_id}" in res.failed[0].reason
     assert pb.read_bytes() != przed[pb]                               # plik B JEST podmieniony

@@ -45,10 +45,11 @@ OS_MUTATORS = {"replace", "remove", "rename", "unlink", "rmdir", "removedirs", "
 # nazwy jednoznaczne (goły attr wystarcza — nie kolidują z metodami str/list/dict). `flush` CELOWO
 # pominięty: koliduje z lokalnymi funkcjami/Qt. `mkdir`/`makedirs` TAKŻE tu (KROK 6): domyka furtkę
 # `Path(dst).mkdir()`. `CreateFileW`/`open_osfhandle` (O5): uchwyt Windows otwarty do zapisu przez
-# ctypes (blokada współdzielenia zapisu w miejscu) omija `open` w całości.
+# ctypes (blokada współdzielenia zapisu w miejscu) omija `open` w całości. `ReplaceFileW` (AR-18):
+# podmiana pliku drogi atomowej przez ctypes - mutacja bez `os.replace`.
 BARE_MUTATORS = {"writeto", "write_text", "write_bytes", "mkstemp", "mkdtemp",
                  "NamedTemporaryFile", "TemporaryFile", "mkdir", "makedirs",
-                 "CreateFileW", "open_osfhandle",
+                 "CreateFileW", "open_osfhandle", "ReplaceFileW",
                  "unlink", "rmdir", "touch", "symlink_to", "hardlink_to"}
 # `Path.rename(cel)`/`Path.replace(cel)` - nazwy wspólne z `str.replace` i `dataclasses.replace`,
 # więc rozpoznawane po ARNOŚCI: dokładnie jeden argument pozycyjny i żadnego nazwanego. `str.replace`
@@ -153,11 +154,12 @@ def test_mutacja_plikow_tylko_w_writeback():
 
 
 def test_klinga_plikow_istnieje():
-    """Pozytywna asercja zakresu: `writeback.py` REALNIE zawiera `os.replace` (klinga ma ostrze).
+    """Pozytywna asercja zakresu: `writeback.py` REALNIE zawiera podmianę pliku (klinga ma ostrze) -
+    od AR-18 (2026-10-05) jest nią `ReplaceFileW` z kopią pliku wypartego, nie `os.replace`.
     Gdyby ktoś usunął zapis pliku z writeback.py, warstwa byłaby martwa — ten test to złapie."""
     tree = ast.parse((PKG / "writeback.py").read_text(encoding="utf-8"))
     found = list(_file_mutators(tree, _aliases(tree)))
-    assert any("os.replace" in d for d in found), "writeback.py nie zawiera os.replace — klinga martwa"
+    assert any("ReplaceFileW" in d for d in found), "writeback.py nie zawiera ReplaceFileW - klinga martwa"
 
 
 def _funkcja(tree, nazwa):
@@ -208,8 +210,11 @@ def _zapis_w_klindze(tree):
 
 # Gdzie w klindze WOLNO otworzyć plik do zapisu i gdzie wolno pisać bajty (astra Z8). Każde nowe
 # miejsce zapisu w `writeback.py` przewraca test i wymaga świadomego dopisania tutaj.
-_OTWARCIA_DO_ZAPISU = {("_exclusive", "os.fdopen"), ("_write_xisf_file", "open")}
-_ZAPISY_BAJTOW = {"_apply_inplace", "_write_xisf_file"}
+# `_zloz_plik_tymczasowy` (AR-18/AR-19, 2026-10-05) zastąpił `_write_xisf_file`: jedno miejsce, które
+# składa plik tymczasowy drogi atomowej (zapis XISF, cofnięcie bajtowe i semantyczne XISF) z części
+# z uchwytu blokady - nadal wyłącznie plik NOWY z `mkstemp`, nigdy plik usera.
+_OTWARCIA_DO_ZAPISU = {("_exclusive", "os.fdopen"), ("_zloz_plik_tymczasowy", "open")}
+_ZAPISY_BAJTOW = {"_apply_inplace", "_zloz_plik_tymczasowy"}
 
 
 def test_zapis_w_klindze_tylko_w_dozwolonych_funkcjach():

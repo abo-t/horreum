@@ -265,6 +265,8 @@ def zdanie_commitu_kart(res, applied_key):
 def zdanie_undo_kart(res):
     """Zdanie wyniku cofnięcia - wspólne dla okien piszących karty."""
     msg = i18n.t("grid.wb.restored", n=len(res.restored))
+    if res.semantic:
+        msg += " · " + i18n.t("grid.wb.semantic", n=len(res.semantic))
     if res.blocked:
         msg += " · " + i18n.t("grid.wb.blocked", n=len(res.blocked))
     if res.failed:

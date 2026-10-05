@@ -103,6 +103,9 @@ from importlib import resources
 # 0029 to PRZYROST (ADD COLUMN, AR-29): `pending_renames.in_flight` - trwały zamiar renamu ('commit'
 # albo 'undo') zatwierdzony PRZED `os.rename`; rekoncyliacja po awarii przepina tę samą lokację tam,
 # gdzie plik stoi. Kolumna wchodzi PUSTA - SQL nie wie, które próby sprzed migracji przerwała awaria.
+# 0030 to PRZYROST (ADD COLUMN, AR-40): `header_backups.pending_since` - backup drogi atomowej
+# utrwalony przed podmianą, który czeka na jej potwierdzenie; pisarz rekoncyliuje go z dyskiem, zanim
+# tknie lokację. Kolumna wchodzi PUSTA - SQL nie wie, czy podmiany sprzed migracji zaszły.
 MIGRATIONS = [
     (2, "0002_initial.sql"),
     (3, "0003_writeback.sql"),
@@ -132,6 +135,7 @@ MIGRATIONS = [
     (27, "0027_observatory_source.sql"),
     (28, "0028_frame_channel.sql"),
     (29, "0029_rename_intent.sql"),
+    (30, "0030_backup_pending.sql"),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 _KNOWN_VERSIONS = frozenset({0} | {v for v, _ in MIGRATIONS})

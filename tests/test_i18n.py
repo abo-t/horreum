@@ -117,11 +117,27 @@ def test_klucze_call_site_podzbior_katalogu():
     istniał w katalogu. Klucze dynamiczne (`proj.create_copies`/`create_links`) pominięte (zmienna)
     — pokryte testami projekcji wprost."""
     used = set()
-    for p in sorted(GUI.glob("*.py")):
+    for p in sorted(GUI.glob("*.py")) + _RDZEN_Z_I18N:
         used |= _collect_t_keys(p)
     unknown = used - set(CATALOG)
     assert not unknown, f"klucze i18n spoza katalogu: {sorted(unknown)}"
     assert "grid.frames" in used, "kolektor nic nie złapał — bramka byłaby ślepa"
+    for p in _RDZEN_Z_I18N:
+        assert _collect_t_keys(p), f"{p.name}: kolektor nic nie złapał - bramka byłaby ślepa"
+
+
+# Moduły spoza `gui/`, które mówią do UI przez katalog (FH-13: opis drzewa filtra na pasku zbioru).
+_RDZEN_Z_I18N = [PKG / "filter_engine.py"]
+
+
+def test_parytet_nazw_facetow_opisu_filtra_z_katalogiem():
+    """Nazwy facetów w opisie drzewa filtra jadą mapą `filter_engine._FACET_KEYS` - kolektor
+    literałów jej nie widzi. Każdy facet, który silnik umie wykonać, ma nazwę w katalogu (FH-13)."""
+    from horreum import filter_engine
+
+    assert set(filter_engine._FACET_KEYS) == set(filter_engine._FACET_KIND) | {"night"}
+    braki = [k for k in filter_engine._FACET_KEYS.values() if k not in CATALOG]
+    assert not braki, f"facet bez nazwy w katalogu: {braki}"
 
 
 def test_parytet_tokenow_dynamicznych_z_katalogiem():

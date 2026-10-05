@@ -88,6 +88,17 @@ class PresenceSummary:
     # ABORT, a CLI zwracało kod 1 po udanym zapisie.
     brake: object = None
     aborted: object = None
+    # Powód zatrzymania SPOZA hamulca jako KOD (AR-62): `aborted` niesie zdanie polskie dla CLI,
+    # GUI składa zdanie w języku UI z kodu i pól liczbowych niżej, bez parsowania tekstu. Hamulec
+    # ma własne pola (`brake`, `brake_limit`, liczniki), więc przy nim kod zostaje `None`.
+    #   volume_unknown    - `volume == "?"`; `serial` = co jest pod rootem
+    #   serial_unreadable - serialu pod rootem nie da się odczytać
+    #   serial_mismatch   - `serial` pod rootem != `volume`
+    #   force_mismatch    - deklaracja `force` != `confirmed_gone`
+    #   gone_set_changed  - zbiór potwierdzonych zniknięć != zatwierdzony (`expected_gone_ids`)
+    abort_kind: object = None
+    serial: object = None          # serial odczytany pod rootem (przesłanka woluminu)
+    force: object = None           # deklaracja `force` przebiegu (liczba oczekiwanych zniknięć)
     # Próg, który kandydaci przekroczyli - WYŁĄCZNIE dla hamulca progowego (AR-31 (6)). `None` także
     # przy hamulcu „zakres pusty” / „drzewo puste”: tamte są odmową bez furtki, a GUI rozpoznaje po
     # tym polu, czy wolno mu zaproponować przełamanie `force` (bez parsowania tekstu `brake`).
@@ -178,22 +189,27 @@ def check(con, root, *, volume, apply=False, force=None, run_id=None, now,
 
     Zwraca `PresenceSummary`. Rzuca (EXPECT) tylko z `canonize_root`: root UNC albo nieistniejący
     — to błąd wołania, nie stan danych."""
-    summary = PresenceSummary(root=canonize_root(root), volume=volume)
+    summary = PresenceSummary(root=canonize_root(root), volume=volume, force=force)
 
-    serial = volume_serial(summary.root)
+    serial = summary.serial = volume_serial(summary.root)
     if serial != volume:
         # PRZESŁANKA (D-V-2): litera dysku jest efemeryczna. Przemapowane `R:` (inny share, inny NAS)
         # daje przejście po CUDZYM drzewie przy zakresie z naszego woluminu — każdy wiersz stałby się
         # kandydatem, a `stat` uczciwie potwierdziłby „nie ma" (bo tam ich nie ma). Precedens guardu:
         # `import_fitsmirror.py:254-258`.
-        if volume == "?":
-            summary.aborted = (
-                f"wolumin nieustalony ('?') — pass zdejmuje obecność, więc musi wiedzieć, CZYJE "
-                f"drzewo ogląda; pod {summary.root} jest {serial!r}")
-        elif serial is None:
+        # Serial nieczytelny rozstrzyga PIERWSZY: przy `volume == "?"` i braku serialu zdanie
+        # „pod … jest wolumin ?” mówiłoby o woluminie, którego nikt nie odczytał.
+        if serial is None:
+            summary.abort_kind = "serial_unreadable"
             summary.aborted = (f"nie da się odczytać serialu woluminu pod {summary.root} "
-                               f"— zamontuj wolumin i powtórz")
+                               f"- zamontuj wolumin i powtórz")
+        elif volume == "?":
+            summary.abort_kind = "volume_unknown"
+            summary.aborted = (
+                f"wolumin nieustalony ('?') - pass zdejmuje obecność, więc musi wiedzieć, CZYJE "
+                f"drzewo ogląda; pod {summary.root} jest {serial!r}")
         else:
+            summary.abort_kind = "serial_mismatch"
             summary.aborted = (f"serial woluminu {serial!r} pod {summary.root} != podany {volume!r} "
                                f"— zamontowany jest inny wolumin niż zakres w bazie")
         return summary
@@ -258,10 +274,12 @@ def check(con, root, *, volume, apply=False, force=None, run_id=None, now,
     if not apply or summary.cancelled:
         return summary
     if force is not None and summary.confirmed_gone != force:
+        summary.abort_kind = "force_mismatch"
         summary.aborted = (f"--force {force} != potwierdzonych zniknięć {summary.confirmed_gone} "
                            f"— deklaracja nie zgadza się z dyskiem, nic nie zapisano")
         return summary
     if expected_gone_ids is not None and sorted(summary.gone_ids) != sorted(expected_gone_ids):
+        summary.abort_kind = "gone_set_changed"
         summary.aborted = ("zbiór potwierdzonych zniknięć inny niż w sprawdzeniu, które zatwierdzono "
                            "- dysk zmienił się od tamtej chwili, nic nie zapisano")
         return summary

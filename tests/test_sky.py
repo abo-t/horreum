@@ -130,6 +130,66 @@ def test_rigs_scalony_teleskop_nie_dubluje_zestawu(con):
     assert [r.telescope for r in sky.rigs(con)] == ["A140R"]
 
 
+# ─────────────────────────────────────────────────────────────── RAW: piksel z kamery (AR-55)
+
+def _raw_light(con, *, sha1, focal=50.0, naxis=("4240", "2832"), pixel=None):
+    """Klatka RAW jak ze skanu: karty EXIF są STRINGAMI, `xpixsz` brak (EXIF go nie niesie)."""
+    con.execute("INSERT INTO frame(sha1_data, kind, filetype, camera_id, config_id, first_seen_at) "
+                "VALUES (?, 'light', 'raw', 1, 1, ?)", (sha1, NOW))
+    fid = con.execute("SELECT id FROM frame WHERE sha1_data = ?", (sha1,)).fetchone()["id"]
+    raw = "{}" if naxis is None else '{"NAXIS1": "%s", "NAXIS2": "%s"}' % naxis
+    con.execute("INSERT INTO header(frame_id, raw_json, date_obs, focallen, xpixsz) "
+                "VALUES (?, ?, '2018-09-29T22:00:00', ?, ?)", (fid, raw, focal, pixel))
+
+
+def _cfg1(con):
+    return [x for x in sky.rigs(con) if x.config_id == 1][0]
+
+
+def test_raw_bez_xpixsz_bierze_piksel_kamery(con):
+    """A7S + 50 mm: EXIF nie niesie piksela, `camera.pixel_um` (8,4) jest zapasem - kadr powstaje.
+    Liczby: 206,265·8,4/50 = 34,65"/px; 2832 px => 27,26° krótszym bokiem."""
+    con.execute("UPDATE camera SET pixel_um = 8.4 WHERE id = 1")
+    for i in range(3):
+        _raw_light(con, sha1=f"r{i}")
+    r = _cfg1(con)
+    assert r.reason is None and r.pixel_um == 8.4 and r.naxis == (4240, 2832)
+    assert r.fov_arcmin / 60 == pytest.approx(27.26, abs=0.01)
+
+
+def test_xpixsz_klatki_wygrywa_z_kamera(con):
+    """Pierwszeństwo jawne: zeznanie klatki jest silniejsze od właściwości kamery."""
+    con.execute("UPDATE camera SET pixel_um = 9.99 WHERE id = 1")
+    for i in range(3):
+        _light(con, config_id=1, sha1=f"h{i}", pixel=3.76)
+    assert _cfg1(con).pixel_um == 3.76
+
+
+def test_kamera_w_konflikcie_piksela_nie_jest_zapasem(con):
+    """`pixel_conflict = 1`: `pixel_um` to pierwsze z dwóch sprzecznych zeznań, nie fakt."""
+    con.execute("UPDATE camera SET pixel_um = 8.4, pixel_conflict = 1 WHERE id = 1")
+    _raw_light(con, sha1="k1")
+    r = _cfg1(con)
+    assert r.reason == "no_pixel" and r.fov_arcmin is None
+
+
+def test_kamera_bez_piksela_to_dalej_no_pixel(con):
+    con.execute("UPDATE camera SET pixel_um = NULL WHERE id = 1")
+    _raw_light(con, sha1="n1")
+    assert _cfg1(con).reason == "no_pixel"
+
+
+def test_orientacja_zapisu_nie_rozbija_mody(con):
+    """DSLR pionowo (2832×4240) i poziomo (4240×2832) to ta sama matryca - jedna krotka mody,
+    udział 1,0, a nie `mixed_optics` z udziałem 0,5."""
+    con.execute("UPDATE camera SET pixel_um = 8.4 WHERE id = 1")
+    for i in range(3):
+        _raw_light(con, sha1=f"poz{i}")
+        _raw_light(con, sha1=f"pion{i}", naxis=("2832", "4240"))
+    r = _cfg1(con)
+    assert r.reason is None and r.mode_share == 1.0 and r.naxis == (4240, 2832)
+
+
 # ─────────────────────────────────────────────────────────────── kadrowanie (D-0731-8)
 
 def test_cel_rowny_kadrowi_to_jeden_panel():

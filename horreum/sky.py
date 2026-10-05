@@ -13,8 +13,15 @@ z jednej optyki z geometrią z innej sesji. Wyłącznie `kind='light'` — `mast
 jest PRZYCIĘTY i zaniżyłby NAXIS.
 
 BRAK FAKTU NIE JEST ZEREM (lustro D-C-2): config bez ogniskowej, piksela albo geometrii dostaje
-`fov_arcmin=None` i KOD powodu — nigdy „typowej" matrycy. NAXIS niosą wyłącznie FITS (XISF trzyma
-geometrię w atrybucie `<Image>`, którego zeznanie nie przenosi; `exif.py` nie mapuje jej wcale).
+`fov_arcmin=None` i KOD powodu - nigdy „typowej" matrycy. NAXIS niosą FITS i RAW (`exif.py`
+mapuje wymiary pełnego obrazu na `NAXIS1`/`NAXIS2`); XISF trzyma geometrię w atrybucie `<Image>`,
+którego zeznanie nie przenosi.
+
+PIKSEL: KLATKA PRZED KAMERĄ (AR-55). `header.xpixsz` jest zeznaniem tej klatki i wygrywa zawsze;
+`camera.pixel_um` jest ZAPASEM dla klatki bez karty (RAW nie niesie XPIXSZ), bo piksel to
+właściwość matrycy, nie optyki. Kamera z `pixel_conflict = 1` zapasem nie jest - jej wartość to
+pierwsze z dwóch sprzecznych zeznań, nie fakt. Geometria wchodzi do krotki jako (dłuższy, krótszy)
+bok: orientacja zapisu (DSLR bywa pionowo) nie jest inną optyką i nie może rozbić mody.
 
 CZAS MUSI BYĆ AWARE: `header.date_obs` jest w Horreum NAIWNY i bywa czasem lokalnym stanowiska
 (`gui.queries.facet_nights`), więc nie wolno z niego dziedziczyć założenia o strefie. Naiwny
@@ -120,11 +127,13 @@ def rigs(con, only=None):
     przez widok nie odsiewa scalonych, a scalenie wariantu nazwy wyrzuciłoby zestaw z parku."""
     rows = con.execute(
         # Modę liczymy w Pythonie (SQLite nie ma mody) — SQL oddaje surowe krotki geometrii.
-        # `json_extract` na NAXIS daje int (FITS) albo NULL (XISF/RAW); `_to_int` domyka wariant
-        # stringowy. Filtr parku siedzi w TYM SAMYM literale (bramka AST zabrania składania SQL
-        # ze stałych, nie tylko f-stringów): `?1 IS NULL` => brak filtru, inaczej `json_each`.
+        # `json_extract` na NAXIS daje int (FITS), string (RAW, karty EXIF są stringami) albo NULL
+        # (XISF, RAW sprzed mapowania wymiarów); `_to_int` domyka wariant stringowy. Filtr parku
+        # siedzi w TYM SAMYM literale (bramka AST zabrania składania SQL ze stałych, nie tylko
+        # f-stringów): `?1 IS NULL` => brak filtru, inaczej `json_each`.
         "SELECT cf.id AS config_id, t.telescop_canon AS telescope, cam.model_canon AS camera, "
         "       h.focallen AS focal, h.xpixsz AS pixel, "
+        "       cam.pixel_um AS cam_pixel, cam.pixel_conflict AS cam_conflict, "
         "       json_extract(h.raw_json, '$.NAXIS1') AS nx, "
         "       json_extract(h.raw_json, '$.NAXIS2') AS ny, h.date_obs AS d "
         "FROM config cf "
@@ -154,11 +163,19 @@ def _rig_from_rows(config_id, rows):
     Modę liczymy WYŁĄCZNIE po krotkach KOMPLETNYCH, a niekompletne wypadają też z mianownika:
     klatka bez NAXIS (XISF, RAW) nie jest „inną optyką" tylko brakiem zeznania, a wliczona
     rozcieńczyłaby udział i wywołała `mixed_optics` na configu o jednej, spójnej optyce
-    (zmierzone: RC8×ASI2600MC ma 202 XISF na 2733 klatki => udział spadał do 0,93)."""
+    (zmierzone: RC8×ASI2600MC ma 202 XISF na 2733 klatki => udział spadał do 0,93).
+
+    Piksel: karta klatki, a gdy jej brak - `camera.pixel_um` bez konfliktu (nagłówek modułu)."""
     counts, last, complete = {}, None, 0
     missing = {"no_focal": 0, "no_pixel": 0, "no_naxis": 0}
     for r in rows:
-        key = (_to_float(r["focal"]), _to_float(r["pixel"]), _to_int(r["nx"]), _to_int(r["ny"]))
+        pixel = _to_float(r["pixel"])
+        if pixel is None and not r["cam_conflict"]:
+            pixel = _to_float(r["cam_pixel"])
+        nx, ny = _to_int(r["nx"]), _to_int(r["ny"])
+        if nx is not None and ny is not None:
+            nx, ny = max(nx, ny), min(nx, ny)
+        key = (_to_float(r["focal"]), pixel, nx, ny)
         if r["d"] and (last is None or r["d"] > last):
             last = r["d"]
         if key[0] is None:

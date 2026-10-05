@@ -39,6 +39,12 @@ _MAKE, _MODEL, _DATETIME, _EXIF_IFD, _GPS_IFD = 0x010F, 0x0110, 0x0132, 0x8769, 
 _EXPTIME, _ISO, _DTO, _FOCAL, _LENS, _SUBSEC = 0x829A, 0x8827, 0x9003, 0x920A, 0xA434, 0x9291
 # GPSIFD: pozycja (deg/min/sec jako RATIONAL ×3 + półkula).
 _GPS_LATREF, _GPS_LAT, _GPS_LONREF, _GPS_LON = 1, 2, 3, 4
+# Wymiary PEŁNEGO obrazu (AR-55). `ImageWidth`/`ImageLength` z IFD0 to NIE matryca: w DNG IFD0
+# jest miniaturą (256×171), w CR2 podglądem (1936×1288), w ARW tagu brak (sonda 2026-10-05 na
+# R:, po pliku na config). Obraz główny = IFD z `NewSubFileType == 0` (DNG/ARW: w `SubIFDs`).
+_NEWSUBFILE, _IMG_W, _IMG_H, _SUBIFDS, _CROP_SIZE = 0x00FE, 0x0100, 0x0101, 0x014A, 0xC620
+_PIX_X, _PIX_Y = 0xA002, 0xA003               # ExifIFD: PixelXDimension / PixelYDimension
+_INT_TYPES = (3, 4, 13)                        # SHORT, LONG, IFD - tablice czytane `_read_ints`
 
 _TIFF_MAGIC = 42               # klasyczny TIFF; DNG/ARW/CR2 wszystkie niosą 42 (sonda)
 _MAX_IFD_ENTRIES = 4096        # zdrowy sufit (realny IFD <200) — broni przed śmieciem/uszkodzeniem
@@ -86,10 +92,29 @@ def _read_value(fh, endian, typ, cnt, valoff):
     return raw                                    # UNDEFINED/BYTE — surowe bajty
 
 
-def _read_ifd(fh, off, endian, wanted):
+def _read_ints(fh, endian, typ, cnt, valoff):
+    """Tablica SHORT/LONG (`SubIFDs`, `DefaultCropSize` w wariancie całkowitym) → lista int.
+    Osobno od `_read_value`, bo tam SHORT o `cnt>1` (ISO bywa parą) celowo zwraca skalar.
+    Typ 13 (IFD, TIFF-EP) to LONG pod inną nazwą - tak bywa zapisany `SubIFDs`."""
+    if typ not in _INT_TYPES or cnt > _MAX_IFD_ENTRIES:
+        return None
+    size = (2 if typ == 3 else 4) * cnt
+    if size <= 4:
+        raw = valoff[:size]
+    else:
+        (off,) = struct.unpack(endian + "I", valoff)
+        fh.seek(off)
+        raw = fh.read(size)
+    if len(raw) < size:
+        return None
+    return list(struct.unpack(endian + ("H" if typ == 3 else "I") * cnt, raw))
+
+
+def _read_ifd(fh, off, endian, wanted, arrays=frozenset()):
     """Odczytaj wpisy IFD spod `off` dla tagów z `wanted` → {tag: wartość}. Wpisy czytamy w całości
     PRZED rozwiązywaniem wartości (seek w `_read_value` nie psuje pozycji). Podnosi przy podejrzanej
-    liczbie wpisów (uszkodzony/nie-TIFF plik) → W1 w `scan_file`."""
+    liczbie wpisów (uszkodzony/nie-TIFF plik) → W1 w `scan_file`. Tagi z `arrays` o typie
+    SHORT/LONG wracają listą (`_read_ints`), pozostałe jak dotąd."""
     fh.seek(off)
     head = fh.read(2)
     if len(head) < 2:
@@ -105,8 +130,37 @@ def _read_ifd(fh, off, endian, wanted):
             break
         tag, typ, cnt = struct.unpack(endian + "HHI", e[:8])
         if tag in wanted:
-            out[tag] = _read_value(fh, endian, typ, cnt, e[8:12])
+            if tag in arrays and typ in _INT_TYPES:
+                out[tag] = _read_ints(fh, endian, typ, cnt, e[8:12])
+            else:
+                out[tag] = _read_value(fh, endian, typ, cnt, e[8:12])
     return out
+
+
+def _image_dims(fh, endian, ifd0, exif):
+    """Wymiary pełnego obrazu (szer, wys) w orientacji ZAPISU albo None. Pierwszeństwo:
+    1. `DefaultCropSize` obrazu głównego (DNG) - obraz po wywołaniu, bez maskowanego brzegu;
+    2. `PixelXDimension`/`PixelYDimension` z ExifIFD (ARW, CR2 - te same liczby co 1. dla A7S);
+    3. `ImageWidth`/`ImageLength` obrazu głównego (z brzegiem, ~1% więcej).
+    Obraz główny = IFD0 albo IFD z `SubIFDs` z JAWNYM `NewSubFileType == 0` - brak tagu nie jest
+    zeznaniem (IFD0 w CR2 nie ma go wcale i jest podglądem). Orientacji (`Orientation`) nie
+    stosujemy: planer bierze dłuższy i krótszy bok, a obrót to fakt kadru, nie matrycy."""
+    main = None
+    subs = ifd0.get(_SUBIFDS)
+    subs = [subs] if isinstance(subs, int) else (subs or [])
+    for cand in [ifd0] + [_read_ifd(fh, off, endian, {_NEWSUBFILE, _IMG_W, _IMG_H, _CROP_SIZE},
+                                    arrays={_CROP_SIZE}) for off in subs]:
+        if cand.get(_NEWSUBFILE) == 0:
+            main = cand
+            break
+    main = main or {}
+    crop = main.get(_CROP_SIZE)
+    for w, h in ((crop[0], crop[1]) if isinstance(crop, list) and len(crop) == 2 else (None, None),
+                 (exif.get(_PIX_X), exif.get(_PIX_Y)),
+                 (main.get(_IMG_W), main.get(_IMG_H))):
+        if isinstance(w, (int, float)) and isinstance(h, (int, float)) and w > 0 and h > 0:
+            return int(w), int(h)
+    return None
 
 
 def _combine_instrume(make, model):
@@ -166,13 +220,17 @@ def read_exif_meta(path):
             raise ValueError(f"nie klasyczny TIFF (magic {magic})")
         (ifd0_off,) = struct.unpack(endian + "I", head[4:8])
 
-        ifd0 = _read_ifd(fh, ifd0_off, endian, {_MAKE, _MODEL, _DATETIME, _EXIF_IFD, _GPS_IFD})
+        ifd0 = _read_ifd(fh, ifd0_off, endian,
+                         {_MAKE, _MODEL, _DATETIME, _EXIF_IFD, _GPS_IFD,
+                          _NEWSUBFILE, _IMG_W, _IMG_H, _SUBIFDS, _CROP_SIZE},
+                         arrays={_SUBIFDS, _CROP_SIZE})
         exif = (_read_ifd(fh, ifd0[_EXIF_IFD], endian,
-                          {_EXPTIME, _ISO, _DTO, _FOCAL, _LENS, _SUBSEC})
+                          {_EXPTIME, _ISO, _DTO, _FOCAL, _LENS, _SUBSEC, _PIX_X, _PIX_Y})
                 if _EXIF_IFD in ifd0 else {})
         gps = (_read_ifd(fh, ifd0[_GPS_IFD], endian,
                          {_GPS_LATREF, _GPS_LAT, _GPS_LONREF, _GPS_LON})
                if _GPS_IFD in ifd0 else {})
+        dims = _image_dims(fh, endian, ifd0, exif)
 
     # ── Mapa EXIF → klucze FITS-owe (brief §3). JEDNA lista par → dict + karty (lustro 1:1). ──
     pairs = []                                    # (fits_keyword, value_str, value_num|None)
@@ -199,6 +257,9 @@ def read_exif_meta(path):
     if lat is not None and lon is not None:       # (0,0) wchodzi WIERNIE — site_coords je odrzuci (§4)
         put("SITELAT", lat, lat)
         put("SITELONG", lon, lon)
+    if dims is not None:                          # geometria matrycy dla planera (`sky.rigs`, AR-55)
+        put("NAXIS1", dims[0], dims[0])
+        put("NAXIS2", dims[1], dims[1])
 
     header = {}
     card_rows = []

@@ -109,6 +109,7 @@ class FacetRail(QWidget):
         self._loading = False
         self._lists = {}
         self._aliases = {}          # canon → {alias_norm}; dowozi `set_data` (S3)
+        self._alias_forms = {}      # alias_norm → brzmienie do pokazania; dowozi `set_data` (AR-45)
         # (facet, wartość) ostatniego gestu W listwie - JEDNORAZOWY: gasi go najbliższe `set_data`,
         # także gdy niczego nie przewinął (wzorzec `FramesView._reveal_facet`; W-7, `_dopilnuj_kadru`).
         self._klik = None
@@ -164,7 +165,7 @@ class FacetRail(QWidget):
     def state(self):
         return self._state
 
-    def set_data(self, counts, state, extras=None, reveal=None, aliases=None):
+    def set_data(self, counts, state, extras=None, reveal=None, aliases=None, alias_forms=None):
         """Przeładuj listy. `counts`: dict facet → list[(value, label, n)] (sibling-set per facet);
         `state` = aktualny stan (właściciel: FramesView). `extras`: opc. dict facet → {value:
         (suffix, tooltip)} — anotacja godzin portfela (F7 §8), dziś tylko facet „object"; sufiks
@@ -201,7 +202,14 @@ class FacetRail(QWidget):
         widżetem. Mapa TRZYMA SIĘ przez przeładowania: szukajka filtruje przy każdym wpisanym znaku,
         a `set_data` woła się przy każdym `refresh` — gdyby `None` znaczyło „wyczyść", pierwszy
         refresh po wpisaniu litery gasiłby aliasy w środku pisania. `None` znaczy więc „bez zmian",
-        pusty dict — „ta baza nie ma aliasów"."""
+        pusty dict - „ta baza nie ma aliasów".
+
+        `alias_forms` = dict `alias_norm → brzmienie` (AR-45): podpowiedź trafienia aliasem mówi
+        brzmieniem, które user zna („Large Magellanic Cloud”), a nie kluczem (`LARGEMAGELLANICCLOUD`).
+        Wołający podaje TĘ SAMĄ mapę, którą okno „Przypisz obiekt” pokazuje aliasy
+        (`assign_dialog.formy_aliasow` nad `queries.alias_header_forms`); klucz bez brzmienia zostaje
+        kluczem. Dopasowanie dalej idzie po kluczu - mapa służy wyłącznie do pokazania. `None` jak
+        przy `aliases`: „bez zmian"."""
         self._loading = True
         scroll_pos = {facet: lw.verticalScrollBar().value() for facet, lw in self._lists.items()}
         # Co user WIDZIAŁ - liczone PRZED `clear()`, bo po nim wierszy już nie ma (W-7/FH-5).
@@ -263,6 +271,8 @@ class FacetRail(QWidget):
                     self._dopasuj_sufit(lw)        # W-6: z wiersza, który właśnie stanął na liście
             if aliases is not None:
                 self._aliases = aliases
+            if alias_forms is not None:
+                self._alias_forms = alias_forms
             self._filter_objects(self.search.text())
             for facet, lw in self._lists.items():
                 lw.doItemsLayout()                         # przelicz zakres scrolla PRZED restore
@@ -465,7 +475,7 @@ class FacetRail(QWidget):
             # znaczy „dziedzicz tooltip listy", więc `setToolTip("")` jest tu wartością, nie brakiem.
             baza = it.data(_TIP_BASE) or ""
             if hit not in (None, facet_model.HIT_LABEL):
-                zdanie = i18n.t("facets.tip.alias_hit", alias=hit)
+                zdanie = i18n.t("facets.tip.alias_hit", alias=self._alias_forms.get(hit, hit))
                 it.setToolTip(f"{zdanie}\n{baza}" if baza else zdanie)
             else:
                 it.setToolTip(baza)

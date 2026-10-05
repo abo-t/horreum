@@ -2237,6 +2237,17 @@ CATALOG = {
     "grid.proj.no_frames": {
         "pl": "Projekcja: brak widocznych klatek", "en": "Projection: no visible frames",
     },
+    # FH-13: słowa łączące opisu drzewa filtra (`filter_engine.describe`). Glify operatorów
+    # porównania (= ≠ > < ≥ ≤) są wspólne dla obu języków i zostają w silniku; nazwy facetów
+    # bierze z `facets.group.*` (jedno źródło z listwą).
+    "filter.describe.all": {"pl": "wszystkie klatki", "en": "all frames"},
+    "filter.describe.and": {"pl": "i", "en": "and"},
+    "filter.describe.or": {"pl": "lub", "en": "or"},
+    "filter.describe.not": {"pl": "poza ({inner})", "en": "excluding ({inner})"},
+    "filter.describe.has": {"pl": "ma {kw}", "en": "has {kw}"},
+    "filter.describe.lacks": {"pl": "bez {kw}", "en": "without {kw}"},
+    "filter.describe.contains": {"pl": "zawiera", "en": "contains"},
+    "filter.describe.startswith": {"pl": "zaczyna się od", "en": "starts with"},
     "grid.criteria.only_dups": {"pl": "tylko duplikaty", "en": "only duplicates"},
     "grid.criteria.only_review": {"pl": "tylko do przeglądu", "en": "only to review"},
     "grid.criteria.only_vanished": {"pl": "tylko zniknięte", "en": "only vanished"},
@@ -2277,6 +2288,8 @@ CATALOG = {
     "grid.wb.applied": {"pl": "{n} zapisanych", "en": "{n} applied"},
     "grid.wb.renamed": {"pl": "{n} przemianowanych", "en": "{n} renamed"},
     "grid.wb.restored": {"pl": "{n} przywróconych", "en": "{n} restored"},
+    "grid.wb.semantic": {"pl": "{n} cofniętych semantycznie (bajty pliku inne niż przed zapisem)",
+                         "en": "{n} restored semantically (file bytes differ from before the write)"},
     "grid.wb.blocked": {"pl": "{n} zablokowanych", "en": "{n} blocked"},
     "grid.wb.errors": {"pl": "{n} błędów", "en": "{n} errors"},
     "grid.wb.skipped": {"pl": "{n} pominiętych", "en": "{n} skipped"},
@@ -2954,6 +2967,41 @@ CATALOG = {
         "pl": "HAMULEC: drzewo puste (0 plików pod {root}) - dysk podłączony, ale bez treści?",
         "en": "BRAKE: empty tree (0 files under {root}) - drive connected but empty?",
     },
+    # Pozostałe powody zatrzymania w języku UI (AR-62) - z `PresenceSummary.abort_kind` i pól liczbowych.
+    "pipeline.fmt.presence.abort.volume_unknown": {
+        "pl": "wolumin nieustalony - obecność zdejmujemy tylko wtedy, gdy wiadomo, czyje drzewo "
+              "oglądamy; pod {root} jest wolumin {serial}",
+        "en": "volume undetermined - presence is removed only when we know whose tree we are "
+              "looking at; {root} holds volume {serial}",
+    },
+    "pipeline.fmt.presence.abort.serial_unreadable": {
+        "pl": "nie da się odczytać serialu woluminu pod {root} - podłącz dysk i powtórz",
+        "en": "cannot read the volume serial under {root} - connect the drive and try again",
+    },
+    "pipeline.fmt.presence.abort.serial_mismatch": {
+        "pl": "pod {root} jest wolumin {serial}, a zakres w bazie należy do {volume} - podłączony "
+              "jest inny dysk",
+        "en": "{root} holds volume {serial}, but the scope in the database belongs to {volume} - "
+              "a different drive is connected",
+    },
+    "pipeline.fmt.presence.abort.force_mismatch": {
+        "pl": {"one": "zatwierdzono {force} do oznaczenia, a dysk potwierdza teraz {n} zniknięcie "
+                      "- nic nie zapisano",
+               "few": "zatwierdzono {force} do oznaczenia, a dysk potwierdza teraz {n} zniknięcia "
+                      "- nic nie zapisano",
+               "many": "zatwierdzono {force} do oznaczenia, a dysk potwierdza teraz {n} zniknięć "
+                       "- nic nie zapisano"},
+        "en": {"one": "{force} approved for marking, but the disk now confirms {n} vanished copy "
+                      "- nothing was written",
+               "other": "{force} approved for marking, but the disk now confirms {n} vanished "
+                        "copies - nothing was written"},
+    },
+    "pipeline.fmt.presence.abort.gone_set_changed": {
+        "pl": "zbiór potwierdzonych zniknięć inny niż w sprawdzeniu, które zatwierdzono - dysk "
+              "zmienił się od tamtej chwili, nic nie zapisano",
+        "en": "the set of confirmed vanished copies differs from the approved check - the disk "
+              "changed since then, nothing was written",
+    },
     "pipeline.fmt.presence.brake_recipe": {
         "pl": "„Sprawdź obecność” policzy potwierdzenia i da drogę zapisu",
         "en": "“Check presence” will count confirmations and offer a way to save",
@@ -3626,8 +3674,8 @@ CATALOG = {
     },
     "facets.hidden": {"pl": "(+{n} ukryte)", "en": "(+{n} hidden)"},
     # R-S3-9: wiersz trafiony CUDZĄ nazwą mówi którą — bez tego „Large Magellanic Cloud" dawało
-    # `LMC` i nic nie tłumaczyło, dlaczego pasuje. Alias jest w formie znormalizowanej, bo tylko
-    # taka istnieje w bazie (`object_alias.alias_norm`) — user rozpoznaje w niej własną frazę.
+    # `LMC` i nic nie tłumaczyło, dlaczego pasuje. Alias mówi brzmieniem z okna „Przypisz obiekt”
+    # (słownik własny, potem karta `OBJECT`; AR-45), a klucz `alias_norm` tylko tam, gdzie brzmienia brak.
     "facets.tip.alias_hit": {
         "pl": "Pasuje przez inną nazwę tego obiektu: {alias}",
         "en": "Matched by another name of this object: {alias}",

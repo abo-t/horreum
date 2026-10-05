@@ -12,10 +12,12 @@ from horreum.resolve.observatory import site_coords
 
 
 def build_raw(*, make="SONY", model="ILCE-7S", dto="2019:02:25 01:01:09", exptime=(29, 1),
-              iso=3200, focal=None, lens=None, subsec=None, gps=None, magic=42, endian="<"):
-    """Zbuduj minimalny bajtowy TIFF/EXIF. Układ [header][ExifIFD][GPSIFD][pula][IFD0] — IFD0 NA
-    KOŃCU, jak realny DNG (ćwiczy seek po offsecie z końca). `gps` = (latref, [(n,d)×3], lonref,
-    [(n,d)×3]) albo None."""
+              iso=3200, focal=None, lens=None, subsec=None, gps=None, magic=42, endian="<",
+              ifd0_extra=(), exif_extra=(), subifds=()):
+    """Zbuduj minimalny bajtowy TIFF/EXIF. Układ [header][ExifIFD][GPSIFD][SubIFD…][pula][IFD0] -
+    IFD0 NA KOŃCU, jak realny DNG (ćwiczy seek po offsecie z końca). `gps` = (latref, [(n,d)×3],
+    lonref, [(n,d)×3]) albo None. `ifd0_extra`/`exif_extra` = dodatkowe wpisy `(tag, typ, cnt,
+    payload)`; `subifds` = listy takich wpisów - każda staje się SubIFD wskazanym z IFD0."""
     E = endian
 
     def ext(b):
@@ -32,6 +34,7 @@ def build_raw(*, make="SONY", model="ILCE-7S", dto="2019:02:25 01:01:09", exptim
         exif_e.append((exif._LENS, 2, len(lens) + 1, ext(lens.encode() + b"\x00")))
     if subsec is not None:
         exif_e.append((exif._SUBSEC, 2, len(subsec) + 1, ext(subsec.encode() + b"\x00")))
+    exif_e.extend(exif_extra)
 
     gps_e = []
     if gps is not None:
@@ -47,17 +50,26 @@ def build_raw(*, make="SONY", model="ILCE-7S", dto="2019:02:25 01:01:09", exptim
         (exif._MAKE, 2, len(make) + 1, ext(make.encode() + b"\x00")),
         (exif._MODEL, 2, len(model) + 1, ext(model.encode() + b"\x00")),
     ]
+    ifd0_e.extend(ifd0_extra)
 
     def ifdsize(n):
         return 2 + n * 12 + 4
 
     off_exif = 8
     off_gps = off_exif + ifdsize(len(exif_e)) if gps_e else 0
-    pool_base = off_exif + ifdsize(len(exif_e)) + (ifdsize(len(gps_e)) if gps_e else 0)
+    off_sub = off_exif + ifdsize(len(exif_e)) + (ifdsize(len(gps_e)) if gps_e else 0)
+    sub_offs = []
+    for s in subifds:
+        sub_offs.append(off_sub)
+        off_sub += ifdsize(len(s))
+    pool_base = off_sub
 
     ifd0_e.append((exif._EXIF_IFD, 4, 1, struct.pack(E + "I", off_exif)))
     if gps_e:
         ifd0_e.append((exif._GPS_IFD, 4, 1, struct.pack(E + "I", off_gps)))
+    if sub_offs:
+        ifd0_e.append((exif._SUBIFDS, 4, len(sub_offs),
+                       ext(b"".join(struct.pack(E + "I", o) for o in sub_offs))))
 
     pool = bytearray()
 
@@ -78,11 +90,12 @@ def build_raw(*, make="SONY", model="ILCE-7S", dto="2019:02:25 01:01:09", exptim
 
     exif_b = build_ifd(exif_e)
     gps_b = build_ifd(gps_e) if gps_e else b""
+    subs_b = b"".join(build_ifd(s) for s in subifds)
     ifd0_b = build_ifd(ifd0_e)
     off_ifd0 = pool_base + len(pool)
     sig = b"II" if E == "<" else b"MM"
     header = sig + struct.pack(E + "H", magic) + struct.pack(E + "I", off_ifd0)
-    return bytes(header + exif_b + gps_b + bytes(pool) + ifd0_b)
+    return bytes(header + exif_b + gps_b + subs_b + bytes(pool) + ifd0_b)
 
 
 def write_raw(tmp_path, name="x.dng", **kw):
@@ -124,6 +137,80 @@ def test_karty_lustro_1_1(tmp_path):
     m = exif.read_exif_meta(p)
     assert {kw for kw, *_ in m.card_rows} == set(m.header)
     assert all(vt == "str" for _, _, _, _, vt, _ in m.card_rows)   # jak XISF
+
+
+# ── Wymiary pełnego obrazu (AR-55): układy z sondy realnych plików 2026-10-05 ──
+
+def _short(tag, v):
+    return (tag, 3, 1, struct.pack("<H", v))
+
+
+def _long(tag, v):
+    return (tag, 4, 1, struct.pack("<I", v))
+
+
+def _rat2(tag, a, b):
+    return (tag, 5, 2, ("ext", struct.pack("<IIII", a, 1, b, 1)))
+
+
+_MINIATURA = [_long(exif._NEWSUBFILE, 1), _short(exif._IMG_W, 256), _short(exif._IMG_H, 171)]
+
+
+def test_wymiary_dng_z_defaultcropsize_obrazu_glownego(tmp_path):
+    """DNG: IFD0 = miniatura 256×171, obraz główny w SubIFD (`NewSubFileType=0`) 4288×2848
+    z `DefaultCropSize` 4240×2832 (A7S). Wygrywa kadr po wywołaniu, nie miniatura i nie brzeg."""
+    p = write_raw(tmp_path, ifd0_extra=_MINIATURA, subifds=[
+        [_long(exif._NEWSUBFILE, 0), _long(exif._IMG_W, 4288), _long(exif._IMG_H, 2848),
+         _rat2(exif._CROP_SIZE, 4240, 2832)],
+        [_long(exif._NEWSUBFILE, 1), _short(exif._IMG_W, 1024), _short(exif._IMG_H, 684)]])
+    h = exif.read_exif_meta(p).header
+    assert (h["NAXIS1"], h["NAXIS2"]) == ("4240", "2832")
+
+
+def test_wymiary_arw_z_pixeldimension(tmp_path):
+    """ARW: obraz główny bez `DefaultCropSize` - wygrywa `PixelX/YDimension` z ExifIFD (te same
+    4240×2832 co DNG tej matrycy), nie `ImageWidth` z brzegiem."""
+    p = write_raw(tmp_path, name="x.arw", ifd0_extra=[_long(exif._NEWSUBFILE, 1)],
+                  exif_extra=[_short(exif._PIX_X, 4240), _short(exif._PIX_Y, 2832)],
+                  subifds=[[_long(exif._NEWSUBFILE, 0), _short(exif._IMG_W, 4288),
+                            _short(exif._IMG_H, 2848)]])
+    h = exif.read_exif_header(p)
+    assert (h["NAXIS1"], h["NAXIS2"]) == ("4240", "2832")
+
+
+def test_wymiary_cr2_podglad_ifd0_bez_newsubfiletype_ignorowany(tmp_path):
+    """CR2: IFD0 niesie podgląd 1936×1288 BEZ `NewSubFileType` - brak tagu nie jest zeznaniem
+    o obrazie głównym. Wymiary z `PixelXDimension` (3888×2592, EOS 40D)."""
+    p = write_raw(tmp_path, name="x.cr2", make="Canon", model="Canon EOS 40D",
+                  ifd0_extra=[_short(exif._IMG_W, 1936), _short(exif._IMG_H, 1288)],
+                  exif_extra=[_long(exif._PIX_X, 3888), _long(exif._PIX_Y, 2592)])
+    h = exif.read_exif_header(p)
+    assert (h["NAXIS1"], h["NAXIS2"]) == ("3888", "2592")
+
+
+def test_wymiary_obraz_glowny_bez_kadru_i_bez_exif(tmp_path):
+    """Ostatni szczebel: `ImageWidth`/`ImageLength` obrazu głównego. Orientacja zapisu zostaje
+    (pion 2832×4240 nie jest obracany - dłuższy/krótszy bok rozstrzyga planer)."""
+    p = write_raw(tmp_path, ifd0_extra=_MINIATURA, subifds=[
+        [_long(exif._NEWSUBFILE, 0), _long(exif._IMG_W, 2832), _long(exif._IMG_H, 4240)]])
+    h = exif.read_exif_header(p)
+    assert (h["NAXIS1"], h["NAXIS2"]) == ("2832", "4240")
+
+
+def test_wymiary_sama_miniatura_to_brak_faktu(tmp_path):
+    """Plik bez obrazu głównego i bez ExifIFD-owych wymiarów: NAXIS nie powstaje - miniatura
+    dałaby kadr 16× za duży, a brak faktu nie jest zerem."""
+    p = write_raw(tmp_path, ifd0_extra=_MINIATURA)
+    h = exif.read_exif_header(p)
+    assert "NAXIS1" not in h and "NAXIS2" not in h
+
+
+def test_wymiary_w_kartach_lustro_1_1_z_projekcja_liczbowa(tmp_path):
+    p = write_raw(tmp_path, exif_extra=[_short(exif._PIX_X, 4240), _short(exif._PIX_Y, 2832)])
+    m = exif.read_exif_meta(p)
+    assert {kw for kw, *_ in m.card_rows} == set(m.header)
+    num = {kw: n for kw, _, _, n, _, _ in m.card_rows}
+    assert (num["NAXIS1"], num["NAXIS2"]) == (4240, 2832)
 
 
 def test_nie_tiff_rzuca(tmp_path):

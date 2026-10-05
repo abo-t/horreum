@@ -36,8 +36,9 @@ Operatory: eq ne gt lt ge le contains startswith exists not_exists (regex POMINI
 `universe_fn() -> set[int]` — `SELECT id FROM frame` (wszystkie frame).
 
 `describe(tree)` — drzewo → opis SŁOWAMI dla paska zbioru (F3, PLAN_ux_redesign §4). Czysta
-prezentacja: mapa op→słowo mieszka tu (silnik = właściciel gramatyki, SPOT; etykiety combo
-`OPERATORS` w grid.py to INNY fakt — glify UI). Nieznany op renderuje się surowo — fail-fast
+prezentacja: gramatyka opisu mieszka tu (silnik = właściciel gramatyki, SPOT; etykiety combo
+`OPERATORS` w grid.py to INNY fakt - glify UI), SŁOWA - w katalogu i18n (`filter.describe.*`,
+nazwy facetów z `facets.group.*`; FH-13), więc pasek mówi językiem UI. Nieznany op renderuje się surowo - fail-fast
 dotyczy wykonania (`_eval` podnosi ValueError), nie formatera etykiety.
 """
 
@@ -46,6 +47,8 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from datetime import date, timedelta
+
+from .gui import i18n        # Qt-WOLNE (jak `gui.queries` w `presence`/`projection`): opis słowami, FH-13
 
 # Charset/długość keyworda FITS jak w dawcy (query._KW_RE, pivot._KW_RE): do 68 znaków, spacje/kropki
 # odrzucane. Keyword i tak idzie do SELECT jako parametr `?`, ale walidacja defensywna odrzuca śmieci.
@@ -172,13 +175,23 @@ def run(filter_tree: dict | None, *, leaf_fn: LeafFn, universe_fn: UniverseFn) -
     return _eval(filter_tree, leaf_fn, universe_fn)
 
 
-# Mapa op→słowo dla `describe` (exists/not_exists mają własne frazy „ma KW"/„bez KW").
-_OP_WORDS = {"eq": "=", "ne": "≠", "gt": ">", "lt": "<", "ge": "≥", "le": "≤",
-             "contains": "zawiera", "startswith": "zaczyna się od"}
+# Glify op dla `describe` - wspólne dla obu języków. Operatory-słowa (contains/startswith) i frazy
+# exists/not_exists („ma KW"/„bez KW") idą przez katalog i18n w `_op_word`/`describe` (FH-13).
+_OP_GLYPHS = {"eq": "=", "ne": "≠", "gt": ">", "lt": "<", "ge": "≥", "le": "≤"}
 
-# Mapa facet→nazwa PL dla `describe` (prezentacja facet-liścia: „Obiekt: NGC7000").
-_FACET_WORDS = {"object": "Obiekt", "filter": "Filtr", "channel": "Kanał", "kind": "Rodzaj",
-                "telescope": "Teleskop", "night": "Noc"}
+# Facet → klucz nazwy grupy w katalogu: ten sam tytuł, który listwa facetów pokazuje nad grupą
+# (prezentacja facet-liścia: „Obiekt: NGC7000"/„Object: NGC7000"). Parytet z katalogiem trzyma test.
+_FACET_KEYS = {"object": "facets.group.object", "filter": "facets.group.filter",
+               "channel": "facets.group.channel", "kind": "facets.group.kind",
+               "telescope": "facets.group.telescope", "night": "facets.group.night"}
+
+
+def _op_word(op) -> str:
+    if op == "contains":
+        return i18n.t("filter.describe.contains")
+    if op == "startswith":
+        return i18n.t("filter.describe.startswith")
+    return _OP_GLYPHS.get(op, str(op))
 
 
 def _describe_value(value) -> str:
@@ -192,27 +205,29 @@ def describe(tree: dict | None, *, _nested: bool = False) -> str:
     NOT → „poza (…)"; `None`/pusta grupa → „wszystkie klatki". Grupa zagnieżdżona o >1 dzieciach
     dostaje nawiasy; korzeń idzie bez nich."""
     if tree is None:
-        return "wszystkie klatki"
+        return i18n.t("filter.describe.all")
     if _is_facet(tree):
         # PRZED fallbackiem grupy (F4R#7): facet-liść bez `operator`/`conditions` wpadłby w
         # „pusta grupa → wszystkie klatki" = cichy fałsz na pasku zbioru.
-        name = _FACET_WORDS.get(tree["facet"], str(tree["facet"]))
+        key = _FACET_KEYS.get(tree["facet"])
+        name = i18n.t(key) if key else str(tree["facet"])
         return f"{name}: {tree.get('label') or tree.get('value')}"
     if _is_condition(tree):
         kw = tree.get("keyword")
         op = tree.get("operator")
         if op == "exists":
-            return f"ma {kw}"
+            return i18n.t("filter.describe.has", kw=kw)
         if op == "not_exists":
-            return f"bez {kw}"
-        return f"{kw} {_OP_WORDS.get(op, str(op))} {_describe_value(tree.get('value'))}"
+            return i18n.t("filter.describe.lacks", kw=kw)
+        return f"{kw} {_op_word(op)} {_describe_value(tree.get('value'))}"
     op = str(tree.get("op", "AND")).upper()
     children = tree.get("conditions", [])
+    sep_and = f" {i18n.t('filter.describe.and')} "
     if op == "NOT":
         # ≠1 dziecko to drzewo, które `_eval` i tak odrzuci — opis renderuje co jest (prezentacja).
-        inner = " i ".join(describe(c) for c in children)
-        return f"poza ({inner})"
+        return i18n.t("filter.describe.not", inner=sep_and.join(describe(c) for c in children))
     if not children:
-        return "wszystkie klatki"
-    text = (" i " if op == "AND" else " lub ").join(describe(c, _nested=True) for c in children)
+        return i18n.t("filter.describe.all")
+    sep = sep_and if op == "AND" else f" {i18n.t('filter.describe.or')} "
+    text = sep.join(describe(c, _nested=True) for c in children)
     return f"({text})" if _nested and len(children) > 1 else text

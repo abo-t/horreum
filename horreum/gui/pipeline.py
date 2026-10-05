@@ -1453,7 +1453,12 @@ class PipelineView(QWidget):
         ciszą: cisza w raporcie dostawy czyta się jak „nie sprawdzono". Kubełki, które NIE są
         zniknięciami, pokazujemy tylko gdy niezerowe."""
         if s.aborted is not None:
-            powod = self._brake_text(s) if s.aborted == s.brake else s.aborted
+            if s.aborted == s.brake:
+                powod = self._brake_text(s)
+            elif s.abort_kind is not None:
+                powod = self._abort_text(s)
+            else:
+                powod = s.aborted        # zdanie złożone już w GUI z katalogu (pominięty bez woluminu)
             return i18n.t("pipeline.fmt.presence.not_done", reason=powod)
         if s.cancelled:
             return i18n.t("pipeline.fmt.presence.cancelled")
@@ -1492,6 +1497,27 @@ class PipelineView(QWidget):
         if s.walked == 0:
             return i18n.t("pipeline.fmt.presence.brake.empty_tree", root=s.root)
         return s.brake
+
+    @staticmethod
+    def _abort_text(s):
+        """Powód zatrzymania SPOZA hamulca w języku interfejsu (AR-62): zdanie z katalogu złożone
+        z `abort_kind` i pól liczbowych raportu; polski `s.aborted` rdzenia zostaje dla CLI. Kod
+        spoza znanych to rozjazd rdzenia z widokiem - błąd (EXPECT), nie zdanie do pokazania."""
+        kind = s.abort_kind
+        if kind == "volume_unknown":
+            return i18n.t("pipeline.fmt.presence.abort.volume_unknown", root=s.root,
+                          serial=s.serial or "?")
+        if kind == "serial_unreadable":
+            return i18n.t("pipeline.fmt.presence.abort.serial_unreadable", root=s.root)
+        if kind == "serial_mismatch":
+            return i18n.t("pipeline.fmt.presence.abort.serial_mismatch", root=s.root,
+                          serial=s.serial, volume=s.volume)
+        if kind == "force_mismatch":
+            return i18n.t_plural("pipeline.fmt.presence.abort.force_mismatch", s.confirmed_gone,
+                                 force=s.force)
+        if kind == "gone_set_changed":
+            return i18n.t("pipeline.fmt.presence.abort.gone_set_changed")
+        raise ValueError(f"nieznany powód zatrzymania obecności: {kind!r}")
 
     def _update_vanished_box(self, s):
         """Sekcja 4b: co user może ZROBIĆ z wynikiem. Rozróżnienie DRY↔zapis po `run_id` (ustawia go

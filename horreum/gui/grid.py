@@ -4920,8 +4920,10 @@ class FramesView(QWidget):
         # zbioru — szukajka chowa wiersze listy, więc filtrowanie mapy po `ids` nic by nie
         # oszczędziło, a rozjechałoby dwa wejścia tego samego pytania. Bez niej „Large Magellanic
         # Cloud" nie znajduje niczego: kanon `LMC` nie ma z tą frazą wspólnej litery.
+        # Brzmienie aliasu w podpowiedzi trafienia (AR-45) - ta sama mapa co okno „Przypisz obiekt”.
         self.facet_rail.set_data(counts, self._facet_state, extras, reveal=reveal,
-                                 aliases=queries.object_alias_index(self.con))
+                                 aliases=queries.object_alias_index(self.con),
+                                 alias_forms=assign_dialog.formy_aliasow(self.con))
 
     def _facet_counts(self, facet, ids):
         """Kubełki jednego facetu → list[(value, label, n)] (kontrakt `FacetRail.set_data`).

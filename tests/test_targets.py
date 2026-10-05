@@ -120,6 +120,22 @@ def test_dwa_zestawy_jednego_teleskopu_nie_nadpisuja_kadrowania(maly_pierwszy):
     assert targets.feasible(t, rigs, min_fill=0.3, max_panels=1)
 
 
+@pytest.mark.parametrize("kwadrat_pierwszy", [True, False])
+def test_best_rig_po_wypelnieniu_kadru_nie_po_krotszym_boku(kwadrat_pierwszy):
+    """PL-3 (2): matryca 1:1 obok 3:2. Cel wydłużony (17'x2') ma większe surowe `fill` w zestawie
+    3:2 (krótszy bok 40' < 45'), ale kadr wypełnia lepiej kwadrat (17/45 = 0,38 > 17/60 = 0,28).
+    `best_rig` po `fill` wpychał cel do kubełka „za mały”, choć park ma dla niego dobry kadr."""
+    trzy_dwa = _rigset("RC3x2", 60.0, 40.0, 3)
+    kwadrat = _rigset("RC1x1", 45.0, 45.0, 5)
+    rigs = (kwadrat, trzy_dwa) if kwadrat_pierwszy else (trzy_dwa, kwadrat)
+    t = _t("NGC891x", "G", a=17.0, b=2.0)
+    framing, best = targets._framing_for(t, rigs, 0.10)
+    assert framing[3].fill > framing[5].fill
+    assert best is kwadrat
+    assert targets._fill_bucket(framing[best.config_id]) == 0
+    assert targets._fill_bucket(framing[3]) == 2
+
+
 def test_koercja_pola_pisanego_recznie():
     """Plik człowieka pisze CZŁOWIEK: `"a": "15"` musi zachować się jak `15.0` (kanon W3)."""
     t = targets._target({"c": "WR134", "t": "EmN", "r": "302.55", "d": "36.17", "a": "15"},

@@ -545,6 +545,12 @@ def _framing_for(t, rigs, overlap, *, min_fill=None, max_panels=None):
     """Kadrowanie we wszystkich zestawach + rekomendacja: jeden kadr o największym wypełnieniu,
     a gdy cel nie mieści się nigdzie - najmniejsza mozaika (D-0731-8: cel ZOSTAJE).
 
+    WYPEŁNIENIE TO `frame_fill` (PL-3 (2)), nie surowe `fill`: ta sama miara co kubełek kadru
+    (`_fill_bucket`) i kolumna „Wypełn.”, więc `best_rig` ma zawsze najlepszy kubełek w parku.
+    `fill` liczy do KRÓTSZEGO boku i przy matrycach o innych proporcjach (np. 1:1 obok 3:2) wskazuje
+    zestaw, który cel wydłużony kadruje gorzej. Mozaika ma `frame_fill` = 1 z definicji - wśród
+    mozaik o tej samej liczbie paneli rozstrzyga dalej `fill` (mniejsze pole, większa skala).
+
     Włączony filtr kadru zawęża KANDYDATÓW do `best_rig` (nie słownik `framing`: soczewka ekranu
     nadal widzi każdy zestaw). Cel przeszedł pulę, bo spełnia go któryś zestaw, więc rekomendacja
     wskazuje właśnie taki, a nie optykę, której próg nie przepuścił. Bez progów - bez zmian.
@@ -560,7 +566,7 @@ def _framing_for(t, rigs, overlap, *, min_fill=None, max_panels=None):
         if (min_fill is not None or max_panels is not None) and \
                 not rig_fits(f, min_fill=min_fill, max_panels=max_panels):
             continue
-        candidates.append(((f.panels, -f.fill, rig.config_id), rig))
+        candidates.append(((f.panels, -f.frame_fill, -f.fill, rig.config_id), rig))
     if not candidates:
         return framing, None
     return framing, min(candidates, key=lambda p: p[0])[1]

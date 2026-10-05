@@ -274,6 +274,8 @@ _RAPORT_MUTACJE = {
     "_usun_pusty": {"os.rmdir(...)"},
     "_zapisz_plik": {"open(..., <tryb pisania>)", "os.remove(...)", "os.rename(...)"},
     "_usun_plik": {"os.remove(...)"},
+    # AR-51: przypięcie katalogu raportu - uchwyt do LISTOWANIA bez FILE_SHARE_DELETE, nie zapis
+    "_przypnij": {".CreateFileW(...)"},
 }
 
 

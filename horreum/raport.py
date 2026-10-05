@@ -28,11 +28,30 @@ raportem przechodzi, gdy OBIE mówią „pod" (`_wewnatrz`) - stąd ani junction
 ani dowiązanie wyprowadzające z raportu na zewnątrz.
 Granica katalogu przez `os.path.commonpath`, nie `startswith` - `dane_raport` nie leży pod `dane`.
 
+PODMIANA W TRAKCIE (dług `AR-51`, TOCTOU): sprawdzenie ścieżki i zapis to dwie chwile, a między
+nimi drugi proces mógłby podmienić `--out`, jego rodzica albo podkatalog raportu na junction do
+źródła. Drzwi PRZYPINAJĄ każdy katalog, w którym piszą (`_przypnij`, Windows): uchwyt katalogu
+bez `FILE_SHARE_DELETE` blokuje jego usunięcie i zmianę nazwy, a otwarty uchwyt w poddrzewie blokuje
+zmianę nazwy każdego przodka (zmierzone 2026-10-05: zmiana nazwy przodka → `ERROR_ACCESS_DENIED`,
+samego katalogu → `ERROR_SHARING_VIOLATION`). Uchwyt otwiera sam obiekt (bez podążania za reparse
+point); katalog, który jest dowiązaniem albo junction, to odmowa. Ścieżką roboczą raportu jest
+ścieżka KOŃCOWA przypiętego uchwytu - bez junction w żadnym członie, więc przodków nie da się też
+przepiąć. Podkatalogi raportu powstają po jednym członie i każdy jest przypinany przed zejściem
+głębiej. Źródło kopii dla ASTAP otwiera się przed kopiowaniem, a tożsamość pliku `(wolumen,
+file ID)` z uchwytu musi być ta sama, co przy `otworz`; liczba skopiowanych bajtów = rozmiar z tego
+samego uchwytu. Uchwyty zwalnia `Raport.zamknij` (albo wyjście z `with`).
+Poza Windows przypięcia nie ma (brak blokady współdzielenia) - zostają kontrole ścieżek; tożsamość
+źródła kopii obowiązuje wszędzie. Wariant pełny - każda operacja względem uchwytu katalogu
+(`NtCreateFile` z `RootDirectory`) - nie jest potrzebny, póki przypięcie zamyka okno podmiany.
+
 Ścieżek prywatnych w kodzie nie ma (repo publiczne): korzeń archiwum podaje wołający w `chronione`.
 """
 from __future__ import annotations
 
 import os
+import stat
+import sys
+import weakref
 
 ASTAP_DIR = "astap"          # podkatalog raportu z kopiami klatek do rozwiązania przez ASTAP
 _CHUNK = 1 << 20
@@ -127,46 +146,171 @@ def _usun_plik(path):
     os.remove(path)
 
 
-def _czytaj(path):
-    with open(path, "rb") as fh:
-        for kawalek in iter(lambda: fh.read(_CHUNK), b""):
-            yield kawalek
+def _kernel32():
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateFileW.restype = wintypes.HANDLE
+    k32.CreateFileW.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                                wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
+    k32.GetFinalPathNameByHandleW.restype = wintypes.DWORD
+    k32.GetFinalPathNameByHandleW.argtypes = (wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD,
+                                              wintypes.DWORD)
+    k32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    return k32
+
+
+def _dowiazanie(path):
+    """Czy sam obiekt pod `path` (bez podążania) jest dowiązaniem albo junction (reparse point)."""
+    st = os.lstat(path)
+    return bool(getattr(st, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+                if sys.platform == "win32" else stat.S_ISLNK(st.st_mode))
+
+
+def _bez_przedrostka(path):
+    """Ścieżka końcowa uchwytu bez przedrostka `\\\\?\\` (`\\\\?\\UNC\\x` → `\\\\x`)."""
+    if path.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + path[8:]
+    return path[4:] if path.startswith("\\\\?\\") else path
+
+
+def _przypnij(path, powod):
+    """Przypięcie katalogu `path` (AR-51) → `(uchwyt, ścieżka końcowa)`; dowiązanie albo junction =
+    `RaportOdmowa(powod)` bez uchwytu.
+
+    Windows: `CreateFileW` z prawem listowania (uchwyt z samym odczytem atrybutów nie uczestniczy
+    w sprawdzaniu współdzielenia - zmierzone: zmiana nazwy przechodziła), współdzielenie odczytu
+    i zapisu BEZ usuwania, `FILE_FLAG_OPEN_REPARSE_POINT` (otwiera sam obiekt, nie cel junction).
+    Ścieżka końcowa = `GetFinalPathNameByHandleW` przypiętego uchwytu. Poza Windows uchwytu nie ma
+    (None), ścieżka końcowa = `realpath`."""
+    if sys.platform != "win32":
+        if _dowiazanie(path):
+            raise RaportOdmowa(powod)
+        return None, os.path.realpath(path)
+    import ctypes
+    k32 = _kernel32()
+    list_directory, share_read_write, open_existing = 0x1, 0x3, 3
+    backup_semantics, open_reparse_point = 0x02000000, 0x00200000
+    uchwyt = k32.CreateFileW(path, list_directory, share_read_write, None, open_existing,
+                             backup_semantics | open_reparse_point, None)
+    if uchwyt in (None, ctypes.c_void_p(-1).value):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        if _dowiazanie(path):
+            raise RaportOdmowa(powod)
+        buf = ctypes.create_unicode_buffer(32768)
+        if not k32.GetFinalPathNameByHandleW(uchwyt, buf, len(buf), 0):
+            raise ctypes.WinError(ctypes.get_last_error())
+    except BaseException:
+        k32.CloseHandle(uchwyt)
+        raise
+    return uchwyt, _bez_przedrostka(buf.value)
+
+
+def _zwolnij(uchwyty):
+    """Zamknięcie uchwytów przypięcia (wartości słownika albo pojedynczy uchwyt); None pomijane."""
+    for uchwyt in (uchwyty.values() if isinstance(uchwyty, dict) else [uchwyty]):
+        if uchwyt is not None:
+            _kernel32().CloseHandle(uchwyt)
+    if isinstance(uchwyty, dict):
+        uchwyty.clear()
+
+
+def _tozsamosc(st):
+    """Tożsamość pliku z `os.stat`/`os.fstat`: (wolumen, file ID) - nie ścieżka."""
+    return st.st_dev, st.st_ino
+
+
+def _tozsamosc_lub_none(path):
+    """Tożsamość wejścia przy `otworz`; nieczytelne (zniknęło po wylistowaniu, ACL) = None - raport
+    i tak powstaje (klatka dostanie status błędu u wołającego), a kopia dla ASTAP takiego wejścia
+    odmówi, bo nie ma z czym porównać uchwytu."""
+    try:
+        return _tozsamosc(os.stat(path))
+    except OSError:
+        return None
 
 
 def otworz(out, wejscia, *, chronione):
     """Katalog raportu gotowy do zapisu → `Raport`; odmowa → `RaportOdmowa` bez śladu na dysku.
 
-    Położenie sprawdzane jest dwa razy: przed utworzeniem (odmowa nic nie zakłada) i po nim, bo
-    `realpath` nieistniejącej ścieżki rozwiązuje dowiązania tylko w istniejącym przedrostku.
-    Katalog założony przez drzwi i odrzucony w drugim sprawdzeniu jest usuwany (jest pusty)."""
+    Położenie sprawdzane jest dwa razy: przed utworzeniem (odmowa nic nie zakłada) i po
+    przypięciu, na ścieżce końcowej uchwytu - tam, gdzie raport będzie pisany. Katalog założony
+    przez drzwi i odrzucony w drugim sprawdzeniu jest usuwany (jest pusty). Tożsamość każdego
+    wejścia (`_tozsamosc`) zapisywana jest tu - kopia dla ASTAP porównuje z nią otwarty plik."""
     wejscia = [os.path.abspath(f) for f in wejscia]
     powod = odmowa_katalogu(out, wejscia, chronione=chronione)
     if powod:
         raise RaportOdmowa(powod)
+    tozsamosc = {os.path.normcase(f): _tozsamosc_lub_none(f) for f in wejscia}
     nowy = not os.path.lexists(out)
     _utworz_katalog(out)
-    powod = odmowa_katalogu(out, wejscia, chronione=chronione)
-    if powod:
+    uchwyt = None
+    try:
+        uchwyt, katalog = _przypnij(out, f"katalog raportu {out} jest dowiązaniem albo junction")
+        powod = odmowa_katalogu(katalog, wejscia, chronione=chronione)
+        if powod:
+            raise RaportOdmowa(powod)
+    except RaportOdmowa:
+        _zwolnij(uchwyt)
         if nowy:
             _usun_pusty(out)
-        raise RaportOdmowa(powod)
-    return Raport(os.path.abspath(out), wejscia)
+        raise
+    except BaseException:
+        _zwolnij(uchwyt)
+        raise
+    return Raport(katalog, wejscia, tozsamosc, uchwyt)
 
 
 class Raport:
     """Otwarty katalog raportu. Tworzony wyłącznie przez `otworz`; każda ścieżka zapisu przechodzi
-    przez `_cel`."""
+    przez `_cel`. `katalog` = ścieżka końcowa przypiętego katalogu. Uchwyty przypięcia zwalnia
+    `zamknij` (także wyjście z `with` i zbieranie obiektu)."""
 
-    def __init__(self, katalog, wejscia):
+    def __init__(self, katalog, wejscia, tozsamosc, uchwyt):
         self.katalog = katalog
         self._wejscia = {os.path.normcase(f): f for f in wejscia}
+        self._tozsamosc = tozsamosc
+        self._uchwyty = {os.path.normcase(katalog): uchwyt}
+        self._zamknij = weakref.finalize(self, _zwolnij, self._uchwyty)
+
+    def zamknij(self):
+        """Zwolnienie przypięć; dalszy zapis przez ten obiekt nie jest już chroniony przed podmianą."""
+        self._zamknij()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.zamknij()
+
+    def _podkatalog(self, rodzic, czlon, nazwa):
+        """Podkatalog `czlon` przypiętego katalogu `rodzic`: założony (jeden człon), przypięty
+        i sprawdzony - ścieżka końcowa uchwytu musi być dokładnie `rodzic/czlon`, więc ani
+        junction, ani podmiana między założeniem a przypięciem nie wyprowadzają poza raport."""
+        sciezka = os.path.join(rodzic, czlon)
+        klucz = os.path.normcase(sciezka)
+        if klucz not in self._uchwyty:
+            powod = f"{nazwa!r} wychodzi poza katalog raportu {self.katalog}"
+            if os.path.lexists(sciezka) and _dowiazanie(sciezka):
+                raise RaportOdmowa(powod)
+            try:
+                _utworz_katalog(sciezka)
+            except (FileExistsError, NotADirectoryError):     # obcy plik w miejscu podkatalogu
+                raise RaportOdmowa(f"{nazwa!r}: {sciezka} istnieje i nie jest katalogiem") from None
+            uchwyt, koncowa = _przypnij(sciezka, powod)
+            if os.path.normcase(koncowa) != klucz:
+                _zwolnij(uchwyt)
+                raise RaportOdmowa(powod)
+            self._uchwyty[klucz] = uchwyt
+        return sciezka
 
     def _cel(self, nazwa):
-        """Ścieżka bezwzględna pliku `nazwa` pod katalogiem raportu; rodzic tworzony w razie potrzeby.
+        """Ścieżka bezwzględna pliku `nazwa` pod katalogiem raportu; podkatalogi zakładane
+        i przypinane po jednym członie (`_podkatalog`).
 
         Odmowa: nazwa pusta, bezwzględna, z dyskiem (`C:x`), z `:` (strumień NTFS), z członem `..`
-        albo pustym; katalog docelowy, który po rozwiązaniu dowiązań wychodzi poza raport; plik,
-        który już istnieje."""
+        albo pustym; człon katalogu, który jest dowiązaniem albo junction; plik, który już istnieje."""
         if not isinstance(nazwa, str) or not nazwa.strip():
             raise RaportOdmowa(f"nazwa pliku raportu {nazwa!r} jest pusta")
         if os.path.isabs(nazwa) or os.path.splitdrive(nazwa)[0] or ":" in nazwa:
@@ -174,12 +318,11 @@ class Raport:
         czlony = nazwa.replace("\\", "/").split("/")
         if any(c in ("", ".", "..") for c in czlony):
             raise RaportOdmowa(f"nazwa pliku raportu {nazwa!r} ma człon pusty, '.' albo '..'")
-        cel = os.path.join(self.katalog, *czlony)
-        rodzic = os.path.dirname(cel)
-        if not _wewnatrz(rodzic, self.katalog) or not _wewnatrz(cel, self.katalog):
-            raise RaportOdmowa(f"{nazwa!r} wychodzi poza katalog raportu {self.katalog}")
-        _utworz_katalog(rodzic)
-        if not _wewnatrz(rodzic, self.katalog):      # dowiązanie w istniejącym przedrostku
+        rodzic = self.katalog
+        for czlon in czlony[:-1]:
+            rodzic = self._podkatalog(rodzic, czlon, nazwa)
+        cel = os.path.join(rodzic, czlony[-1])
+        if not _wewnatrz(cel, self.katalog):
             raise RaportOdmowa(f"{nazwa!r} wychodzi poza katalog raportu {self.katalog}")
         if os.path.lexists(cel) or os.path.lexists(cel + ".tmp"):
             raise RaportOdmowa(f"plik raportu {cel} już istnieje - drzwi nie nadpisują")
@@ -198,8 +341,12 @@ class Raport:
     def kopia_dla_astap(self, zrodlo):
         """Kopia pliku wejścia do `<raport>/astap/` - ASTAP pisze wyniki obok rozwiązywanego pliku,
         więc dostaje kopię, nigdy oryginał. Źródło musi być zgłoszone w `wejscia` przy `otworz`.
-        Ta sama nazwa z dwóch katalogów dostaje sufiks `_2`, `_3`... Zwraca ścieżkę kopii;
-        rozmiar kopii inny niż źródła = `OSError` (kopia, której nie można ufać, nie zostaje)."""
+        Ta sama nazwa z dwóch katalogów dostaje sufiks `_2`, `_3`... Zwraca ścieżkę kopii.
+
+        Źródło jest otwierane PRZED kopiowaniem, a kopia czyta z tego samego uchwytu: tożsamość
+        `(wolumen, file ID)` uchwytu inna niż przy `otworz` (junction w ścieżce podmieniony
+        w międzyczasie) = `RaportOdmowa`, nic nie zapisane; liczba skopiowanych bajtów inna niż
+        rozmiar z uchwytu = `OSError` (kopia, której nie można ufać, nie zostaje)."""
         klucz = os.path.normcase(os.path.abspath(zrodlo))
         if klucz not in self._wejscia:
             raise RaportOdmowa(f"{zrodlo} nie jest wejściem raportu - drzwi kopiują tylko wejścia")
@@ -209,9 +356,20 @@ class Raport:
         while os.path.lexists(os.path.join(self.katalog, ASTAP_DIR, nazwa)):
             n += 1
             nazwa = f"{stem}_{n}{suffix}"
-        cel = self._cel(f"{ASTAP_DIR}/{nazwa}")
-        _zapisz_plik(cel, _czytaj(zrodlo))
-        if os.path.getsize(cel) != os.path.getsize(zrodlo):
+        with open(zrodlo, "rb") as fh:
+            st = os.fstat(fh.fileno())
+            if self._tozsamosc[klucz] is None or _tozsamosc(st) != self._tozsamosc[klucz]:
+                raise RaportOdmowa(f"{zrodlo} to inny plik niż przy otwarciu raportu - kopia odrzucona")
+            cel = self._cel(f"{ASTAP_DIR}/{nazwa}")
+            skopiowane = []
+
+            def kawalki():
+                for kawalek in iter(lambda: fh.read(_CHUNK), b""):
+                    skopiowane.append(len(kawalek))
+                    yield kawalek
+
+            _zapisz_plik(cel, kawalki())
+        if sum(skopiowane) != st.st_size:
             _usun_plik(cel)
-            raise OSError(f"kopia {cel} ma inny rozmiar niż {zrodlo}")
+            raise OSError(f"kopia {cel} ma {sum(skopiowane)} B, a źródło {zrodlo} {st.st_size} B")
         return cel

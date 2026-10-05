@@ -3,6 +3,7 @@
 `delta` (read-only review) + `import-fitsmirror` (zasilenie świeżej bazy z dawcy — PF-3, brief §4)."""
 import argparse
 import json
+import os
 import sys
 import uuid
 from datetime import date, datetime, timezone
@@ -52,6 +53,17 @@ def _positive_int(text):
     value = int(text)
     if value < 1:
         raise argparse.ArgumentTypeError(f"oczekiwana liczba >= 1, jest {text!r}")
+    return value
+
+
+def _positive_float(text):
+    """Liczba > 0 i skończona (`--k-sigma`, `--min-len`): zero albo NaN wyłączyłyby próg po cichu."""
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"oczekiwana liczba, jest {text!r}") from None
+    if not 0.0 < value < float("inf"):
+        raise argparse.ArgumentTypeError(f"oczekiwana liczba > 0, jest {text!r}")
     return value
 
 
@@ -267,6 +279,27 @@ def main(argv=None):
     p_hf.add_argument("--json", action="store_true",
                       help="wypisz sam spis jako JSON (do przekierowania: > przed.json)")
     p_hf.add_argument("--baseline", help="plik JSON ze spisem SPRZED etapu; ubytek → kod wyjścia 1")
+
+    # ŚLADY (paczka Q, krok Q1): tryb katalogu BEZ bazy - meteory szuka się zaraz po nocy, zanim
+    # sesja trafi do archiwum. Raport pisze wyłącznie przez drzwi `raport.py` (MT-2), a te muszą
+    # znać korzenie chronione: `--folder` i korzeń archiwum. CLI nie ma skąd wziąć korzenia
+    # archiwum (repo publiczne - żadnej ścieżki w kodzie; inne komendy też biorą `--root` jawnie),
+    # więc `--archive-root` jest obowiązkowy.
+    p_stx = sub.add_parser("streaks",
+                           help="slady (meteor/satelita/samolot) w subach katalogu - raport CSV + "
+                                "PNG + manifest w NOWYM katalogu --out, bez bazy")
+    p_stx.add_argument("--folder", required=True, help="katalog subow (czytany, nigdy pisany)")
+    p_stx.add_argument("--out", required=True,
+                       help="NOWY albo pusty katalog raportu - poza --folder i korzeniem archiwum")
+    p_stx.add_argument("--archive-root", action="append", required=True, default=[],
+                       metavar="KATALOG",
+                       help="korzen archiwum chroniony przed raportem (powtarzalne)")
+    p_stx.add_argument("--k-sigma", type=_positive_float, default=None,
+                       help="prog detekcji w sigma reszty (domyslnie 4 - decyzja Q0-a)")
+    p_stx.add_argument("--min-len", type=_positive_float, default=None,
+                       help="najkrotszy slad w pikselach NATYWNYCH (domyslnie 80)")
+    p_stx.add_argument("--workers", type=_positive_int, default=1,
+                       help="watki odczytu i detekcji (domyslnie 1)")
 
     # STANOWISKO Z RĘKI (0027): klatki bez GPS (RAW z lustrzanki - read-only, writeback odpada).
     # DRY domyślnie jak każde polecenie mutujące; `clear` jest drogą powrotu tego samego gestu.
@@ -582,6 +615,8 @@ def main(argv=None):
         # dla skryptu, wiec rozjazd musi wyjsc kodem, inaczej bramka milczy przy zepsutym passie.
         rozliczone = (s.marked + s.already + s.alive + s.cycles + s.conflicts + s.missing)
         return 0 if rozliczone == s.proposed else 1
+    if args.cmd == "streaks":
+        return _cmd_streaks(args)
     if args.cmd == "human-facts":
         from . import audit                                # read-only, bez astropy
         # `connect`, NIE `open_db`: pomiar nie ma prawa zmigrować mierzonej bazy. Spis biegnie
@@ -630,6 +665,64 @@ def main(argv=None):
         return 1 if spadki else 0
     parser.print_help()
     return 0
+
+
+def _cmd_streaks(args):
+    """`horreum streaks --folder --out`: detekcja śladów na subach katalogu, raport w NOWYM katalogu
+    przez drzwi `raport.py`. Katalog raportu jest sprawdzany i przypinany PRZED liczeniem - odmowa
+    nie kosztuje przebiegu. Kod wyjścia: 0 raport zapisany, 2 odmowa albo zły `--folder`."""
+    from . import raport, streaks                         # lazy: numpy/astropy tylko tu
+    folder = os.path.abspath(args.folder)
+    if not os.path.isdir(folder):
+        print(f"Horreum streaks: {args.folder} nie jest katalogiem")
+        return 2
+    paths, unread = streaks.folder_inputs(folder)
+
+    def postep(gotowe, wszystkie):
+        print(f"  klatki {gotowe}/{wszystkie}", file=sys.stderr, flush=True)
+
+    # Nieczytelny sub to status `error:io` w raporcie (`streaks.scan_folder`), nie przerwanie.
+    # Tu zostają błędy RAPORTU: odmowa drzwi i I/O katalogu wyjścia (brak praw, brak miejsca,
+    # uchwyt przypięcia) - krótki komunikat ASCII i kod 2 zamiast tracebacku. Raport bez
+    # `manifest.json` jest niekompletny; uchwyty zamyka `with` także na tej drodze.
+    try:
+        r = raport.otworz(args.out, paths, chronione=[folder, *args.archive_root])
+        with r:
+            started = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            res = streaks.scan_folder(
+                folder, paths, workers=args.workers, unread_dirs=unread, progress=postep,
+                k_sigma=streaks.K_SIGMA if args.k_sigma is None else args.k_sigma,
+                min_len_native=streaks.MIN_LEN_NATIVE if args.min_len is None else args.min_len)
+            finished = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            for nazwa, dane in streaks.report_files(res, started=started, finished=finished):
+                r.zapisz_bajty(nazwa, dane)
+    except raport.RaportOdmowa as exc:
+        print(f"Horreum streaks: ODMOWA -- {exc}")
+        return 2
+    except OSError as exc:
+        print(f"Horreum streaks: BLAD I/O raportu -- {type(exc).__name__} errno={exc.errno} "
+              f"{exc.filename or ''} (raport bez manifest.json jest niekompletny)")
+        return 2
+    print(_format_streaks(folder, r.katalog, streaks.summary(res)))
+    return 0
+
+
+def _format_streaks(folder, out, s):
+    """Podsumowanie `streaks` w ASCII (konsola Windows = cp1250/cp852 - bez strzałek i ptaszków)."""
+    def para(d):
+        return ", ".join(f"{k} {v}" for k, v in d.items()) or "-"
+    lines = [f"Horreum streaks {folder} -> {out}:",
+             f"  pliki: {s['files']}; statusy: {para(s['statuses'])}",
+             f"  sekwencje: {len(s['sequences'])}",
+             f"  hough_segments: {s['hough_segments']}; slady: {s['streaks']}; tory: {s['tracks']}; "
+             f"niejednoznaczne: {s['ambiguous']}",
+             f"  klasy: {para(s['classes'])}",
+             f"  kandydaci meteoru: {s['meteor_candidates']}",
+             "  test radiantu: nie wykonany (brak WCS, Q0-c) - klasa meteor:<roj> nie jest nadawana",
+             "  jasnosc graniczna: nie liczona (Q0-d) - brak kandydatow nie znaczy braku meteorow"]
+    if s["unread_dirs"]:
+        lines.append(f"  katalogi NIEPRZECZYTANE ({len(s['unread_dirs'])}): {s['unread_dirs'][:5]}")
+    return "\n".join(lines)
 
 
 def _format_supersede(db_path, s, sieroty, do_przeniesienia, *, apply, limit):

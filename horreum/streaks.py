@@ -28,13 +28,31 @@ PROGI KLASYFIKACJI (`END_SHARP`, `CV_SATELLITE`) pochodzą z wstrzyknięć Q0 (p
 wstrzyknięć były założeniem o krzywej blasku meteoru, więc to hipoteza do potwierdzenia na prawdziwym
 meteorze, nie pomiar. Próg okresowości samolotu (`BLINK_FAP`) nie był mierzony wcale - Q0 nie miało
 samolotu; kalibruje go falsyfikator z wstrzyknięciem samolotu przerywanego.
+
+PIKSEL NIESKOŃCZONY (NaN, inf - np. brzeg klatki po rejestracji): `np.median` niósł NaN do σ, a σ = NaN
+dawało `skipped:no_noise` klatce i jej czterem sąsiadom, czyli całej sekwencji z NaN w każdej klatce.
+`residual` liczy wtedy medianami `nan*` i dokłada takie piksele do maski (`stars`) - detekcja je
+omija, pomiar profilu pomija. Klatki skończone idą drogą szybką (`np.median`), bez kosztu `nanmedian`.
+
+TRYB KATALOGU (`scan_folder`, `report_files`): fakty sekwencji z nagłówków plików, detekcja w porcjach
+sekwencji na `workers` wątkach, tory i klasy, raport jako bajty w pamięci (CSV, JSON, PNG pisany
+stdlib `zlib` + `struct`). Zapis na dysk robi wołający przez drzwi `horreum/raport.py`. Wynik nie
+zależy od `workers`: porcja czyta sąsiadów ze swojego brzegu, więc zbiór sąsiadów klatki jest ten sam.
 """
 from __future__ import annotations
 
+import contextlib
+import csv
+import hashlib
+import io
 import json
 import math
 import os
+import struct
+import warnings
+import zlib
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from importlib import resources
@@ -43,6 +61,8 @@ import numpy as np
 from astropy.io import fits
 
 from . import exif, scan, sky
+from .resolve._coerce import _to_float, _to_int, _to_text
+from .resolve.frames import normalize_kind
 
 # ---------------------------------------------------------------- parametry (zmierzone w Q0)
 
@@ -83,6 +103,13 @@ SEQ_ROTATION = 1.0           # cięcie sekwencji: zmiana OBJCTROT > 1° (flip, o
 OBLIQUITY_J2000 = 23.4392911                 # nachylenie ekliptyki J2000 [°]
 PRECESSION_LON = 0.013969697                 # precesja ogólna w długości [°/rok] (5029,0966″/stulecie)
 DEG_PER_DAY_SUN = 360.0 / 365.2422           # przyrost długości ekliptycznej Słońca [°/dobę]
+CHUNK_MIN, CHUNK_MAX = 25, 100   # porcja sekwencji na wątek: brzeg porcji czyta 2n klatek drugi raz
+CROP_PAD = 16                    # wycinek: zapas wokół śladu [px binowane]
+CROP_MAX = 512                   # dłuższy bok wycinka [px]; większy jest zmniejszany średnią z bloków
+CROP_LO, CROP_HI = -2.0, 10.0    # rozciągnięcie reszty na wycinku [σ]
+GUIDE_OFFSET = 6                 # linie prowadzące równolegle do śladu, po obu stronach [px binowane]
+TILE = 160                       # kafel mozaiki [px]
+MOSAIC_MAX = 400                 # kafli w mozaice (kolejność: kandydaci meteoru pierwsi)
 
 _XISF_DTYPES = {"UInt8": "u1", "UInt16": "u2", "UInt32": "u4", "UInt64": "u8",
                 "Float32": "f4", "Float64": "f8"}
@@ -285,6 +312,13 @@ def neighbour_indices(i, count, n=N_NEIGHBOURS):
 
 
 def _clip(a):
+    """Obraz do korelacji fazowej: tło zdjęte, przycięty do [0, p99,9]. Piksel nieskończony dostaje
+    medianę klatki (NaN zalałby całą transformatę i przesunięcie wyszłoby z argmax po NaN)."""
+    if not np.isfinite(a).all():
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)      # klatka cała NaN: mediana NaN
+            a = np.where(np.isfinite(a), a, np.nanmedian(a))
+        a = np.nan_to_num(a)
     a = a - np.median(a)
     return np.clip(a, 0, np.percentile(a, 99.9))
 
@@ -316,13 +350,13 @@ def neighbours(i, frames, n=N_NEIGHBOURS):
     return out
 
 
-def _coarse_bg(r, cell=BG_CELL):
+def _coarse_bg(r, cell=BG_CELL, median=np.median):
     """Tło grube: mediana w komórkach `cell`×`cell`, rozlana na piksele; brzeg niepełnej komórki
-    bierze wartość ostatniej pełnej."""
+    bierze wartość ostatniej pełnej. `median` = `np.nanmedian` dla obrazu z pikselami NaN."""
     ny, nx = r.shape
     cell = max(1, min(cell, ny, nx))
     gy, gx = ny // cell, nx // cell
-    g = np.median(r[:gy * cell, :gx * cell].reshape(gy, cell, gx, cell), axis=(1, 3))
+    g = median(r[:gy * cell, :gx * cell].reshape(gy, cell, gx, cell), axis=(1, 3))
     g = np.repeat(np.repeat(g, cell, 0), cell, 1)
     out = np.empty_like(r)
     out[:g.shape[0], :g.shape[1]] = g
@@ -345,19 +379,34 @@ class Residual:
     profilu pomija zamaskowane próbki zamiast liczyć je jako dziurę w śladzie."""
     r: object                    # np.ndarray float32, px binowane
     sigma: float                 # σ reszty z MAD
-    stars: object                # np.ndarray bool
+    stars: object                # np.ndarray bool (gwiazdy i piksele nieskończone)
     margin: int                  # ramka wycięta z detekcji [px binowane]
     bin: int
 
 
 def residual(frame, neigh, bin=BIN):
     """`frame - mediana(sąsiedzi) - tło grube`; `neigh` = wynik `neighbours`. σ z MAD reszty; maska
-    gwiazd z mediany sąsiadów (> 8σ, dylatacja 2 px); margines = max |przesunięcie| + 8."""
-    med = np.median(np.stack([a for _, a, _ in neigh]), axis=0)
-    r = frame - med
-    r -= _coarse_bg(r)
-    sigma = 1.4826 * float(np.median(np.abs(r - np.median(r))))
-    stars = _dilate((med - _coarse_bg(med)) > STAR_SIGMA * sigma, STAR_DILATE)
+    gwiazd z mediany sąsiadów (> 8σ, dylatacja 2 px); margines = max |przesunięcie| + 8.
+
+    Piksel nieskończony w klatce albo u sąsiada: mediany `nan*` (sąsiad z NaN nie głosuje w swoim
+    pikselu), a piksel reszty, który i tak wyszedł nieskończony, ma wartość 0 i trafia do maski."""
+    stack = np.stack([a for _, a, _ in neigh])
+    finite = bool(np.isfinite(frame).all() and np.isfinite(stack).all())
+    median = np.median if finite else np.nanmedian
+    # „All-NaN slice" daje NaN, który i tak idzie do maski. `catch_warnings` nie jest bezpieczne
+    # między wątkami (globalne filtry), więc stoi wyłącznie na rzadkiej drodze nieskończonej.
+    with contextlib.nullcontext() if finite else warnings.catch_warnings():
+        if not finite:
+            warnings.simplefilter("ignore", RuntimeWarning)
+        med = median(stack, axis=0)
+        r = frame - med
+        r -= _coarse_bg(r, median=median)
+        sigma = 1.4826 * float(median(np.abs(r - median(r))))
+        stars = _dilate((med - _coarse_bg(med, median=median)) > STAR_SIGMA * sigma, STAR_DILATE)
+    if not finite:
+        bad = ~np.isfinite(r)
+        r[bad] = 0.0
+        stars |= bad
     margin = max((max(abs(dy), abs(dx)) for _, _, (dy, dx) in neigh), default=0) + ALIGN_MARGIN
     return Residual(r.astype(np.float32), sigma, stars, int(margin), bin)
 
@@ -583,13 +632,43 @@ def measure(seg, res):
                   blink_period=None if period is None else round(period * b, 1))
 
 
+def render_crop(seg, res):
+    """Wycinek reszty wokół odcinka `seg` (wynik `merge_segments`, px binowane) do oceny okiem:
+    reszta rozciągnięta liniowo od -2σ do 10σ na szarość, dwie czerwone linie prowadzące
+    równolegle do śladu `GUIDE_OFFSET` px wycinka po obu stronach - linia NA śladzie zasłoniłaby to,
+    co człowiek ma ocenić (końce, mruganie). Dłuższy bok ponad `CROP_MAX` - zmniejszenie średnią
+    z bloków (odstęp linii rośnie wtedy w pikselach binowanych, żeby po zmniejszeniu nie zlały się
+    ze śladem). Zwraca RGB `uint8` (wys., szer., 3)."""
+    th, rho, ta, tb = seg
+    (x0, y0), (x1, y1) = _seg_points(th, rho, ta, tb)
+    H, W = res.r.shape
+    pad = CROP_PAD + GUIDE_OFFSET
+    xa, xb = max(0, int(min(x0, x1)) - pad), min(W, int(max(x0, x1)) + pad + 1)
+    ya, yb = max(0, int(min(y0, y1)) - pad), min(H, int(max(y0, y1)) + pad + 1)
+    f = max(1, math.ceil(max(xb - xa, yb - ya) / CROP_MAX))
+    crop = res.r[ya:yb, xa:xb] / np.float32(res.sigma)
+    if f > 1:
+        crop = _bin_mean(crop, f)
+    gray = np.clip((crop - CROP_LO) * (255.0 / (CROP_HI - CROP_LO)), 0, 255).astype(np.uint8)
+    img = np.repeat(gray[:, :, None], 3, axis=2)
+    c, s = math.cos(th), math.sin(th)
+    t = np.arange(ta, tb + 0.5, 0.5)
+    for off in (-GUIDE_OFFSET * f, GUIDE_OFFSET * f):     # odstęp stały w pikselach WYCINKA
+        xi = np.floor(((rho + off) * c - t * s - xa) / f).astype(int)
+        yi = np.floor(((rho + off) * s + t * c - ya) / f).astype(int)
+        ok = (xi >= 0) & (xi < img.shape[1]) & (yi >= 0) & (yi < img.shape[0])
+        img[yi[ok], xi[ok]] = (255, 40, 40)
+    return img
+
+
 @dataclass(frozen=True)
 class FrameResult:
     """Wynik jednej klatki sekwencji. `status`: `done` · `no_neighbours` · `skipped:no_noise`
     (reszta zerowa - np. ta sama klatka dwa razy) · `skipped:overflow` (zbyt wiele pikseli nad
     progiem) · `error:shape` (kształt danych obcy w oknie albo klatka pusta po binningu) · statusy
     `read_binned`. `hough_segments` liczy odcinki PRZED scaleniem - raport
-    podaje osobno `hough_segments`, `streaks` i `tracks`."""
+    podaje osobno `hough_segments`, `streaks` i `tracks`. `crops` (na żądanie, `crops=True`) - wycinek
+    reszty RGB `uint8` z liniami prowadzącymi, po jednym na ślad, w kolejności `streaks`."""
     index: int
     status: str
     streaks: tuple = ()
@@ -597,10 +676,14 @@ class FrameResult:
     sigma: float = None
     margin: int = None
     n_neighbours: int = 0
+    crops: tuple = ()
 
 
-def detect_frame(index, frame, neigh, *, k_sigma=K_SIGMA, min_len_native=MIN_LEN_NATIVE, bin=BIN):
-    """Detekcja na klatce `frame` (binowanej) z sąsiadami `neigh` (wynik `neighbours`)."""
+def detect_frame(index, frame, neigh, *, k_sigma=K_SIGMA, min_len_native=MIN_LEN_NATIVE, bin=BIN,
+                 crops=False):
+    """Detekcja na klatce `frame` (binowanej) z sąsiadami `neigh` (wynik `neighbours`). `crops` -
+    dołącz wycinki reszty (`render_crop`); reszta klatki nie przeżywa wywołania, więc wycinek
+    powstaje tu albo wcale."""
     if len(neigh) < MIN_NEIGHBOURS:
         return FrameResult(index, "no_neighbours", n_neighbours=len(neigh))
     res = residual(frame, neigh, bin)
@@ -611,29 +694,33 @@ def detect_frame(index, frame, neigh, *, k_sigma=K_SIGMA, min_len_native=MIN_LEN
         return FrameResult(index, "skipped:overflow", sigma=res.sigma, margin=res.margin,
                            n_neighbours=len(neigh))
     segs = hough_lines(mask, min_len_native, bin)
-    streaks = tuple(measure(s, res) for s in merge_segments(segs))
-    return FrameResult(index, "done", streaks, len(segs), res.sigma, res.margin, len(neigh))
+    merged = merge_segments(segs)
+    streaks = tuple(measure(s, res) for s in merged)
+    images = tuple(render_crop(s, res) for s in merged) if crops else ()
+    return FrameResult(index, "done", streaks, len(segs), res.sigma, res.margin, len(neigh), images)
 
 
-def scan_sequence(count, load, *, n=N_NEIGHBOURS, k_sigma=K_SIGMA, min_len_native=MIN_LEN_NATIVE,
-                  bin=BIN):
-    """Detekcja na całej sekwencji `count` klatek w oknie przesuwnym: `load(j)` → `Binned` klatki j
-    (wołający wie, skąd ją wziąć). W pamięci najwyżej 2n+1 klatek; każda czytana raz, bo okno
-    `neighbour_indices` przesuwa się monotonicznie. Klatka nieczytelna nie jest sąsiadem - bierze
-    się wtedy mniej sąsiadów, a przy mniej niż `MIN_NEIGHBOURS` klatka dostaje `no_neighbours`.
-    Rozjazd kształtu degraduje klatkę, nie sekwencję (`_window_result`). Generator `FrameResult`
-    w kolejności klatek."""
+def scan_sequence(count, load, *, start=0, stop=None, n=N_NEIGHBOURS, k_sigma=K_SIGMA,
+                  min_len_native=MIN_LEN_NATIVE, bin=BIN, crops=False):
+    """Detekcja na klatkach `start..stop-1` sekwencji `count` klatek (domyślnie całej) w oknie
+    przesuwnym: `load(j)` → `Binned` klatki j (wołający wie, skąd ją wziąć). W pamięci najwyżej
+    2n+1 klatek; każda czytana raz, bo okno `neighbour_indices` przesuwa się monotonicznie. Sąsiedzi
+    klatki zależą od `count`, nie od porcji - porcja sekwencji daje te same wyniki co przebieg
+    całości (tryb katalogu dzieli tak sekwencję między wątki). Klatka nieczytelna nie jest
+    sąsiadem - bierze się wtedy mniej sąsiadów, a przy mniej niż `MIN_NEIGHBOURS` klatka dostaje
+    `no_neighbours`. Rozjazd kształtu degraduje klatkę, nie sekwencję (`_window_result`).
+    Generator `FrameResult` w kolejności klatek."""
     window = {}
-    for i in range(count):
+    for i in range(start, count if stop is None else stop):
         need = set(neighbour_indices(i, count, n)) | {i}
         for j in [j for j in window if j not in need]:
             del window[j]
         for j in sorted(need - window.keys()):
             window[j] = load(j)
-        yield _window_result(i, window, n, k_sigma, min_len_native, bin)
+        yield _window_result(i, window, n, k_sigma, min_len_native, bin, crops)
 
 
-def _window_result(i, window, n, k_sigma, min_len_native, bin):
+def _window_result(i, window, n, k_sigma, min_len_native, bin, crops=False):
     """Wynik klatki `i` z okna. Osobna funkcja, bo lokalne referencje do klatek giną przy powrocie -
     w pętli generatora przeżyłyby do następnego odczytu i okno trzymałoby o klatkę więcej.
 
@@ -651,7 +738,7 @@ def _window_result(i, window, n, k_sigma, min_len_native, bin):
         return FrameResult(i, "error:shape")
     readable = {j: w.data for j, w in window.items() if w.status == "ok" and w.data.shape == own.data.shape}
     return detect_frame(i, own.data, neighbours(i, readable, n), k_sigma=k_sigma,
-                        min_len_native=min_len_native, bin=bin)
+                        min_len_native=min_len_native, bin=bin, crops=crops)
 
 
 # ---------------------------------------------------------------- tory
@@ -878,3 +965,394 @@ def classify(streak, *, track_len=1, parallel=False, showers=None):
     if streak.cv >= CV_SATELLITE or any(e < END_SHARP for e in inside):
         return "meteor?"
     return "nieokreslony"
+
+
+# ---------------------------------------------------------------- PNG (stdlib)
+
+def png_bytes(img):
+    """Obraz `uint8` - szarość (wys., szer.) albo RGB (wys., szer., 3) - jako bajty PNG. Stdlib
+    (`zlib` + `struct`), bez Qt i PIL: CLI działa bez extras `gui` (plan §0)."""
+    img = np.ascontiguousarray(img, dtype=np.uint8)
+    if img.ndim == 2:
+        colour = 0
+    elif img.ndim == 3 and img.shape[2] == 3:
+        colour = 2
+    else:
+        raise ValueError(f"PNG: kształt {img.shape} - oczekiwana szarość albo RGB")
+    h, w = img.shape[:2]
+    if not h or not w:
+        raise ValueError("PNG: obraz pusty")
+    rows = np.concatenate([np.zeros((h, 1), np.uint8), img.reshape(h, -1)], axis=1)   # filtr 0
+
+    def chunk(tag, data):
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data))
+
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, colour, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(rows.tobytes(), 6)) + chunk(b"IEND", b""))
+
+
+def _tile(img):
+    """Wycinek wpisany w kafel `TILE`×`TILE` (najbliższy sąsiad, proporcje zachowane, czarne pola)."""
+    h, w = img.shape[:2]
+    k = min(TILE / h, TILE / w)
+    nh, nw = max(1, int(h * k)), max(1, int(w * k))
+    yi = np.minimum((np.arange(nh) / k).astype(int), h - 1)
+    xi = np.minimum((np.arange(nw) / k).astype(int), w - 1)
+    tile = np.zeros((TILE, TILE, 3), np.uint8)
+    oy, ox = (TILE - nh) // 2, (TILE - nw) // 2
+    tile[oy:oy + nh, ox:ox + nw] = img[yi][:, xi]
+    return tile
+
+
+def mosaic(images):
+    """Kafle wycinków w siatce prawie kwadratowej, 2 px szarej przerwy. Pusta lista = None."""
+    if not images:
+        return None
+    cols = math.ceil(math.sqrt(len(images)))
+    rows = math.ceil(len(images) / cols)
+    step = TILE + 2
+    out = np.full((rows * step + 2, cols * step + 2, 3), 64, np.uint8)
+    for n, img in enumerate(images):
+        r, c = divmod(n, cols)
+        out[2 + r * step:2 + r * step + TILE, 2 + c * step:2 + c * step + TILE] = _tile(img)
+    return out
+
+
+# ---------------------------------------------------------------- tryb katalogu
+
+def folder_inputs(folder):
+    """Pliki klatek pod `folder`, posortowane: FITS, XISF i RAW (RAW dostaje `skipped:raw`, ale raport
+    go liczy - „nieliczone" ma być widoczne), drzewa robocze `_WBPP`/`_Review` odcięte jak w skanie
+    (`scan.iter_headers`). Zwraca `(ścieżki, katalogi nieprzeczytane)` - nieprzeczytany katalog
+    jest w raporcie, nie znika po cichu."""
+    errors = []
+    return [str(p) for p in scan.iter_headers(folder, errors_out=errors)], errors
+
+
+def _date_obs(value):
+    """`DATE-OBS` → naiwny `datetime` (strefy nie zgadujemy - sekwencje i tory liczą różnice czasu);
+    ułamek sekundy dowolnej długości obcięty do mikrosekund. Brak albo inny zapis → None."""
+    text = _to_text(value)
+    if text is None or len(text) < 19 or text[10] not in "T ":
+        return None
+    try:
+        t = datetime.strptime(text[:19].replace(" ", "T"), "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        return None
+    frac = text[19:]
+    if frac.startswith("."):
+        digits = frac[1:7]
+        if not digits.isdigit():
+            return None
+        t = t.replace(microsecond=int(digits.ljust(6, "0")))
+    return t
+
+
+def folder_facts(path):
+    """Fakty sekwencji z nagłówka pliku → `(FrameFacts, None)` albo `(None, status)`. Statusy:
+    `skipped:raw` (plan R4) · `skipped:kind_<rodzaj>` (wyłącznie `light`, plan MT-Q3; brak
+    `IMAGETYP` = `kind_unknown`, nie zgadujemy) · `skipped:no_date` (bez `DATE-OBS` nie ma
+    sekwencji ani torów) · `error:parse` · `error:no_image` (XISF bez `<Image>`). Przejściowy błąd
+    I/O (`OSError` z kodem systemu) leci do wołającego jak w `read_binned`."""
+    suffix = os.path.splitext(path)[1].lower()
+    if suffix in exif.RAW_SUFFIXES:
+        return None, "skipped:raw"
+    try:
+        header = scan.read_header(path)
+        if suffix in scan.XISF_SUFFIXES:
+            desc = scan.xisf_image_descriptor(path)
+            if desc is None:
+                return None, "error:no_image"
+            width, height, channels = desc["geometry"][0], desc["geometry"][1], desc["geometry"][-1]
+        else:
+            width, height = _to_int(header.get("NAXIS1")), _to_int(header.get("NAXIS2"))
+            channels = 1
+    except (OSError, ValueError) as exc:
+        if _parse_failure(exc):
+            return None, "error:parse"
+        raise
+    kind = normalize_kind(header.get("IMAGETYP"))
+    if kind != "light":
+        return None, f"skipped:kind_{kind}"
+    time = _date_obs(header.get("DATE-OBS"))
+    if time is None:
+        return None, "skipped:no_date"
+    exptime = _to_float(header.get("EXPTIME"))
+    return FrameFacts(ref=path, time=time,
+                      exptime=_to_float(header.get("EXPOSURE")) if exptime is None else exptime,
+                      camera=_to_text(header.get("INSTRUME")), telescope=_to_text(header.get("TELESCOP")),
+                      filter=_to_text(header.get("FILTER")), width=width, height=height,
+                      binning=_to_int(header.get("XBINNING")) or 1, channels=channels,
+                      rotation=_to_float(header.get("OBJCTROT"))), None
+
+
+@dataclass(frozen=True)
+class FolderFrame:
+    """Klatka trybu katalogu: plik, status i miejsce w sekwencji (`seq`, `index`) - None dla
+    klatki, która do sekwencji nie weszła (status z `folder_facts`)."""
+    path: str
+    status: str
+    facts: FrameFacts = None
+    seq: int = None
+    index: int = None
+    result: FrameResult = None
+
+
+@dataclass(frozen=True)
+class FolderStreak:
+    """Ślad trybu katalogu z torem i propozycją klasy. `k` = numer śladu w klatce; `track` = numer
+    toru w przebiegu albo None; `crop` = wycinek RGB (`render_crop`)."""
+    frame: FolderFrame
+    k: int
+    streak: Streak
+    track: int
+    ambiguous: bool
+    cls: str
+    crop: object
+
+
+@dataclass(frozen=True)
+class FolderScan:
+    """Wynik `scan_folder`. `frames` w kolejności wejść, `streaks` w kolejności (sekwencja, klatka,
+    ślad), `sequences` = krotki `FrameFacts` każdej sekwencji. `inputs_sha1` = sha1 posortowanej
+    listy `ścieżka względna, mtime_ns, rozmiar` (manifest, plan §2 Z2)."""
+    folder: str
+    frames: tuple
+    streaks: tuple
+    sequences: tuple
+    tracks: int
+    unread_dirs: tuple
+    inputs_sha1: str
+    params: dict
+
+
+# PRZEJŚCIOWY BŁĄD I/O W TRYBIE KATALOGU = STATUS `error:io` KLATKI, nie przerwanie przebiegu.
+# Rdzeń (`read_binned`, `folder_facts`) przepuszcza `OSError` z kodem systemu, bo w trybie bazy
+# status byłby TRWAŁĄ etykietą zdrowej klatki, a wołający ponawia. Raport katalogu jest jednorazowy
+# i niczego nie utrwala: nieczytelny sub (ACL, zerwany SMB, plik zniknął po wylistowaniu) dostaje
+# w `frames.csv` status `error:io` jak inne `error:*` z planu, przestaje być sąsiadem, a reszta nocy
+# liczy się dalej - kwadrans przebiegu nie pada przez jeden plik. Zerwany cały udział daje
+# `error:io` na wszystkich dalszych klatkach - widoczne w statusach podsumowania, nie ukryte.
+
+def _stat_or_none(path):
+    try:
+        return os.stat(path)
+    except OSError:
+        return None
+
+
+def _facts_or_io_error(path):
+    try:
+        return folder_facts(path)
+    except OSError:
+        return None, "error:io"
+
+
+def _read_or_io_error(path, bin):
+    try:
+        return read_binned(path, bin)
+    except OSError:
+        return Binned("error:io", bin=bin)
+
+
+def scan_folder(folder, paths, *, k_sigma=K_SIGMA, min_len_native=MIN_LEN_NATIVE, bin=BIN, workers=1,
+                unread_dirs=(), progress=None):
+    """Tryb katalogu bez bazy: fakty z nagłówków `paths` (wynik `folder_inputs`), sekwencje,
+    detekcja z wycinkami, tory i klasy. Odczyt wyłącznie - zapis raportu robi wołający
+    (`report_files` + drzwi `horreum/raport.py`).
+
+    Równoległość: nagłówki i porcje sekwencji (`CHUNK_MIN`-`CHUNK_MAX` klatek) na `workers`
+    wątkach; numpy zwalnia GIL w medianie, FFT i odczycie. Porcja czyta przy brzegu do 2n klatek
+    sąsiedniej porcji drugi raz - zbiór sąsiadów klatki zależy od sekwencji, nie od porcji, więc
+    wynik nie zależy od `workers`. `progress(gotowe, wszystkie)` po każdej porcji (klatki)."""
+    if workers < 1:
+        raise ValueError(f"workers={workers} - musi być >= 1")
+    with ThreadPoolExecutor(workers) as ex:
+        stats = list(ex.map(_stat_or_none, paths))
+        facts = list(ex.map(_facts_or_io_error, paths))
+    stamps = sorted(f"{os.path.relpath(p, folder)}\t{st.st_mtime_ns}\t{st.st_size}"
+                    if st else f"{os.path.relpath(p, folder)}\terror:io"
+                    for p, st in zip(paths, stats))
+    seqs = sequences([f for f, _ in facts if f is not None])
+    jobs = []
+    for si, seq in enumerate(seqs):
+        size = min(CHUNK_MAX, max(CHUNK_MIN, math.ceil(len(seq) / workers)))
+        jobs += [(si, lo, min(len(seq), lo + size)) for lo in range(0, len(seq), size)]
+
+    def run(job):
+        si, lo, hi = job
+        seq = seqs[si]
+        return job, list(scan_sequence(len(seq), lambda j: _read_or_io_error(seq[j].ref, bin), start=lo,
+                                       stop=hi, k_sigma=k_sigma, min_len_native=min_len_native,
+                                       bin=bin, crops=True))
+
+    results, done, total = {}, 0, sum(len(s) for s in seqs)
+    with ThreadPoolExecutor(workers) as ex:
+        for (si, lo, hi), part in ex.map(run, jobs):
+            results.update(((si, fr.index), fr) for fr in part)
+            done += hi - lo
+            if progress:
+                progress(done, total)
+
+    where = {f.ref: (si, i) for si, seq in enumerate(seqs) for i, f in enumerate(seq)}
+    frames, row_of = [], {}
+    for path, (f, status) in zip(paths, facts):
+        if f is None:
+            frames.append(FolderFrame(path, status))
+            continue
+        si, i = where[path]
+        fr = results[(si, i)]
+        row_of[(si, i)] = FolderFrame(path, fr.status, f, si, i, fr)
+        frames.append(row_of[(si, i)])
+
+    out, n_tracks = [], 0
+    for si, seq in enumerate(seqs):
+        items, owners = [], []
+        for i, f in enumerate(seq):
+            for k, s in enumerate(results[(si, i)].streaks):
+                items.append((i, (f.time - seq[0].time).total_seconds(), s))
+                owners.append((i, k))
+        linked = link_tracks(items, cadence([f.time for f in seq]), bin)
+        track_of = {}
+        for chain in linked.tracks:
+            track_of.update((k, (n_tracks, len(chain))) for k in chain)
+            n_tracks += 1
+        parallel = {i: parallel_partners(results[(si, i)].streaks) for i, _ in owners}
+        for idx, (i, k) in enumerate(owners):
+            fr = results[(si, i)]
+            track, track_len = track_of.get(idx, (None, 1))
+            out.append(FolderStreak(row_of[(si, i)], k, fr.streaks[k], track, idx in linked.ambiguous,
+                                    classify(fr.streaks[k], track_len=track_len, parallel=k in parallel[i]),
+                                    fr.crops[k] if fr.crops else None))
+    return FolderScan(folder=folder, frames=tuple(frames), streaks=tuple(out),
+                      sequences=tuple(tuple(s) for s in seqs), tracks=n_tracks,
+                      unread_dirs=tuple(unread_dirs),
+                      inputs_sha1=hashlib.sha1("\n".join(stamps).encode("utf-8")).hexdigest(),
+                      params={"k_sigma": k_sigma, "min_len_native": min_len_native, "bin": bin,
+                              "workers": workers})
+
+
+def _num(value, nd=2):
+    return "" if value is None else (f"{value:.{nd}f}" if isinstance(value, float) else str(value))
+
+
+def _csv(header, rows):
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\n")
+    w.writerow(header)
+    w.writerows(rows)
+    return buf.getvalue().encode("utf-8")
+
+
+def _crop_name(s):
+    return f"crops/s{s.frame.seq:03d}_f{s.frame.index:04d}_{s.k}.png"
+
+
+_CLASS_ORDER = {"meteor?": 0, "nieokreslony": 1, "samolot": 2, "satelita": 3}
+
+
+def summary(res):
+    """Podsumowanie przebiegu (słownik pod `summary.json` i wydruk CLI): statusy klatek, sekwencje,
+    `hough_segments` / `streaks` / `tracks` osobno (plan §2), klasy, kandydaci meteoru. Jasność
+    graniczna (`Q0-d`) wymaga punktu zerowego z ASTAP + Gaia - tryb katalogu jej nie liczy i mówi
+    to wprost, żeby brak śladów nie czytał się jak „nie było meteorów"."""
+    classes = Counter(s.cls for s in res.streaks)
+    return {
+        "folder": res.folder,
+        "files": len(res.frames),
+        "unread_dirs": list(res.unread_dirs),
+        "statuses": dict(sorted(Counter(f.status for f in res.frames).items())),
+        "sequences": [{"seq": si, "frames": len(seq), "first": seq[0].time.isoformat(),
+                       "last": seq[-1].time.isoformat(), "exptime": seq[0].exptime,
+                       "filter": seq[0].filter, "camera": seq[0].camera,
+                       "telescope": seq[0].telescope, "cadence_s": cadence([f.time for f in seq])}
+                      for si, seq in enumerate(res.sequences)],
+        "hough_segments": sum(f.result.hough_segments for f in res.frames if f.result),
+        "streaks": len(res.streaks),
+        "tracks": res.tracks,
+        "ambiguous": sum(s.ambiguous for s in res.streaks),
+        "classes": dict(sorted(classes.items())),
+        "meteor_candidates": sum(n for c, n in classes.items() if c.startswith("meteor")),
+        "radiant_test": None,
+        "radiant_note": "brak WCS - test radiantu nie wykonany (decyzja Q0-c: WCS wyłącznie "
+                        "z rozwiązania zewnętrznego); klasa meteor:<rój> nie jest nadawana",
+        "limiting_mag": None,
+        "limiting_mag_note": "nie liczona w trybie katalogu (wymaga punktu zerowego ASTAP + Gaia, "
+                             "decyzja Q0-d); brak kandydatów nie znaczy braku meteorów",
+        "mosaic_tiles": min(len(res.streaks), MOSAIC_MAX),
+    }
+
+
+def manifest(res, *, started, finished):
+    """Manifest przebiegu (plan §2 Z2): parametry, tożsamość wejść i kodu, wersje bibliotek
+    i assetu rojów. Dwa przebiegi z tym samym manifestem dają ten sam zbiór śladów."""
+    import astropy
+
+    from . import __version__
+    with open(__file__, "rb") as fh:
+        code = hashlib.sha1(fh.read()).hexdigest()
+    showers = resources.files("horreum.data").joinpath("meteor_showers.json").read_bytes()
+    return {
+        "tool": "horreum streaks --folder",
+        "horreum": __version__,
+        "folder": res.folder,
+        "k_sigma": res.params["k_sigma"],
+        "min_len_native": res.params["min_len_native"],
+        "bin": res.params["bin"],
+        "n_neighbours": N_NEIGHBOURS,
+        "align": "integer",
+        "limit": None,
+        "n_files": len(res.frames),
+        "inputs_sha1": res.inputs_sha1,
+        "streaks_sha1": code,
+        "showers_sha1": hashlib.sha1(showers).hexdigest(),
+        "showers_built": json.loads(showers)["_meta"]["built"],
+        "numpy": np.__version__,
+        "astropy": astropy.__version__,
+        "wcs": None,
+        "wcs_parity": None,
+        "workers": res.params["workers"],
+        "started": started,
+        "finished": finished,
+    }
+
+
+def report_files(res, *, started, finished):
+    """Raport jako lista `(nazwa względna, bajty)` w kolejności zapisu: `frames.csv`, `streaks.csv`,
+    `crops/*.png`, `mosaic.png` (gdy są ślady), `summary.json`, `manifest.json` NA KOŃCU - manifest
+    w katalogu znaczy „raport kompletny". Współrzędne w CSV w pikselach NATYWNYCH (plan §0)."""
+    rel = {f.path: os.path.relpath(f.path, res.folder) for f in res.frames}
+    files = [("frames.csv", _csv(
+        ["file", "status", "seq", "frame", "date_obs", "exptime", "filter", "camera", "telescope",
+         "sigma", "margin", "n_neighbours", "hough_segments", "streaks"],
+        [[rel[f.path], f.status, _num(f.seq), _num(f.index),
+          f.facts.time.isoformat() if f.facts else "", _num(f.facts.exptime if f.facts else None),
+          (f.facts.filter or "") if f.facts else "", (f.facts.camera or "") if f.facts else "",
+          (f.facts.telescope or "") if f.facts else "",
+          _num(f.result.sigma if f.result else None, 3), _num(f.result.margin if f.result else None),
+          _num(f.result.n_neighbours if f.result else None),
+          _num(f.result.hough_segments if f.result else None),
+          _num(len(f.result.streaks) if f.result else None)] for f in res.frames]))]
+    files.append(("streaks.csv", _csv(
+        ["seq", "frame", "file", "date_obs", "exptime", "filter", "k", "x0", "y0", "x1", "y1", "theta",
+         "length", "width", "snr", "cv", "end0", "end1", "edge_ends", "masked_frac", "blink_fap",
+         "blink_period", "track", "ambiguous", "class", "crop"],
+        [[s.frame.seq, s.frame.index, rel[s.frame.path], s.frame.facts.time.isoformat(),
+          _num(s.frame.facts.exptime), s.frame.facts.filter or "", s.k,
+          _num(s.streak.x0), _num(s.streak.y0), _num(s.streak.x1), _num(s.streak.y1),
+          _num(s.streak.theta), _num(float(s.streak.length), 1), _num(s.streak.width),
+          _num(s.streak.snr), _num(s.streak.cv, 3), _num(s.streak.end0, 3), _num(s.streak.end1, 3),
+          s.streak.edge_ends, _num(s.streak.masked_frac, 3),
+          "" if s.streak.blink_fap is None else f"{s.streak.blink_fap:.3g}", _num(s.streak.blink_period, 1),
+          _num(s.track), int(s.ambiguous), s.cls, _crop_name(s) if s.crop is not None else ""]
+         for s in res.streaks])))
+    files += [(_crop_name(s), png_bytes(s.crop)) for s in res.streaks if s.crop is not None]
+    shown = sorted((s for s in res.streaks if s.crop is not None),
+                   key=lambda s: (_CLASS_ORDER.get(s.cls, -1), s.frame.seq, s.frame.index, s.k))
+    tiles = mosaic([s.crop for s in shown[:MOSAIC_MAX]])
+    if tiles is not None:
+        files.append(("mosaic.png", png_bytes(tiles)))
+    files.append(("summary.json", json.dumps(summary(res), ensure_ascii=False, indent=1).encode("utf-8")))
+    files.append(("manifest.json", json.dumps(manifest(res, started=started, finished=finished),
+                                              ensure_ascii=False, indent=1).encode("utf-8")))
+    return files

@@ -109,6 +109,18 @@ def emit_event(con, *, actor, verb, target, now, payload=None, reason=None):
     )
 
 
+# Tolerancja WZGLĘDNA zgodności piksela matrycy (decyzja Zdzinia 2026-10-05, AR-55: „wszystkie
+# wartości w zakresie są poprawne”). EXIF podaje piksel z rozdzielczości płaszczyzny ogniskowej, nie
+# z karty katalogowej: SONYA7S 8,469 wobec 8,45 µm (0,2 %) to ta sama matryca; SONYA7RM3 4,62 wobec
+# 4,86 (5 %) to sprzeczność prawdziwa i ma zostać konfliktem.
+PIXEL_REL_TOLERANCE = 0.006
+
+
+def pixel_agrees(a, b):
+    """Czy dwa zeznania piksela [µm] opisują tę samą matrycę (`PIXEL_REL_TOLERANCE` wobec większej)."""
+    return abs(a - b) <= PIXEL_REL_TOLERANCE * max(abs(a), abs(b))
+
+
 def upsert_camera(con, *, model_canon, pixel_um, is_mono, is_mono_source,
                   raw_instrume, now, actor="scan"):
     """Wyłoń kamerę (oś) ze skanu. Tożsamość = `model_canon` (UNIQUE); `pixel_um` to NULLABLE
@@ -117,15 +129,19 @@ def upsert_camera(con, *, model_canon, pixel_um, is_mono, is_mono_source,
 
     Nowa → INSERT + `camera.upserted` w tej samej transakcji; (id, True). Istnieje → (id, False),
     a piksel jest UZUPEŁNIANY/PILNOWANY (R2#4 + R3-c1):
+      - piksel wpisany RĘKĄ (`pixel_source='user'`, 0031) → no-op: człowiek wie lepiej niż karta
+        i EXIF (AR-55 (3)), więc zeznanie skanu ani go nie zmienia, ani nie stawia konfliktu;
+      - zeznanie ZGODNE w tolerancji `PIXEL_REL_TOLERANCE` → no-op (pierwsze zeznanie zostaje);
       - wiersz ma `pixel_um IS NULL`, przyszła wartość → **CAS jednym statementem**
         (`UPDATE ... WHERE id=? AND pixel_um IS NULL`) + `event(camera.pixel_set)`; rowcount=0
         (równoległy writer wygrał — WAL sankcjonuje GUI+CLI naraz) → re-SELECT i gałąź konfliktu;
-      - wiersz ma INNĄ wartość → **STAN `pixel_conflict=1`** (kolejka ze stanu, rama §0) +
-        `event(camera.pixel_conflict)` (osobny verb, target `camera:` — R3-c3); przejście stanu
-        emitowane RAZ (gating na rowcount). Zdjęcie konfliktu = przyszłe `resolve_camera_pixel` (§7).
+      - wiersz ma wartość poza tolerancją → **STAN `pixel_conflict=1`** (kolejka ze stanu, rama
+        §0) + `event(camera.pixel_conflict)` (osobny verb, target `camera:` — R3-c3); przejście
+        stanu emitowane RAZ (gating na rowcount). Zdjęcie konfliktu = `set_camera_pixel` (ręka).
     """
     row = con.execute(
-        "SELECT id, pixel_um FROM camera WHERE model_canon = ?", (model_canon,)).fetchone()
+        "SELECT id, pixel_um, pixel_source FROM camera WHERE model_canon = ?",
+        (model_canon,)).fetchone()
     if row is None:
         with _tx(con):  # atomowo: INSERT camera + INSERT event (albo żadne - rollback)
             cur = con.execute(
@@ -143,8 +159,9 @@ def upsert_camera(con, *, model_canon, pixel_um, is_mono, is_mono_source,
         return camera_id, True
 
     camera_id, existing_px = row["id"], row["pixel_um"]
-    if pixel_um is None or existing_px == pixel_um:
-        return camera_id, False                       # nic do uzupełnienia / zgodne — no-op
+    if (pixel_um is None or row["pixel_source"] == "user"
+            or (existing_px is not None and pixel_agrees(existing_px, pixel_um))):
+        return camera_id, False                       # nic do uzupełnienia / ręka / zgodne — no-op
 
     if existing_px is None:
         with _tx(con):  # CAS: uzupełnij TYLKO gdy wciąż NULL (bez lost-update między writerami)
@@ -159,18 +176,81 @@ def upsert_camera(con, *, model_canon, pixel_um, is_mono, is_mono_source,
             return camera_id, False
         existing_px = con.execute(                    # CAS przegrany — kto był szybszy?
             "SELECT pixel_um FROM camera WHERE id = ?", (camera_id,)).fetchone()[0]
-        if existing_px == pixel_um:
-            return camera_id, False                   # równoległy writer wpisał to samo
+        if existing_px is None or pixel_agrees(existing_px, pixel_um):
+            return camera_id, False                   # równoległy writer: zgodnie albo ręka zdjęła
 
     with _tx(con):  # rozjazd wartości → STAN pixel_conflict (event raz, na przejściu 0→1)
+        # CAS na stanie, który porównaliśmy: ręka wpisana albo cofnięta między odczytem a zapisem
+        # (GUI + CLI naraz) zmienia `pixel_source` albo `pixel_um`, więc konflikt nie wraca od
+        # zeznania skanu i event nie twierdzi o pikselu, którego już nie ma (bramka sol Z2).
         cur = con.execute(
-            "UPDATE camera SET pixel_conflict = 1 WHERE id = ? AND pixel_conflict = 0",
-            (camera_id,))
+            "UPDATE camera SET pixel_conflict = 1 WHERE id = ? AND pixel_conflict = 0 "
+            "AND pixel_source IS NULL AND pixel_um IS ?",
+            (camera_id, existing_px))
         if cur.rowcount:
             emit_event(con, actor=actor, verb="camera.pixel_conflict",
                        target=f"camera:{camera_id}", now=now,
                        payload={"pixel_existing": existing_px, "pixel_new": pixel_um})
     return camera_id, False
+
+
+def set_camera_pixel(con, *, camera_id, pixel_um, now, actor="user"):
+    """Piksel matrycy wpisany RĘKĄ (AR-55 (3), 0031): `pixel_um` + `pixel_source='user'` + zdjęty
+    konflikt, jedną transakcją z `event(camera.pixel_user_set)`. Payload niesie stan SPRZED wpisu
+    (`prev_pixel_um`, `prev_conflict`, `prev_source`) - z niego `clear_camera_pixel` przywraca kamerę.
+
+    Zwraca True przy zmianie, False gdy ręka wpisuje to samo, co już stoi z ręki (QUIET, bez eventu).
+    Wartość niedodatnia albo nieznana kamera = `ValueError` (EXPECT - człowiek się pomylił)."""
+    if not (isinstance(pixel_um, (int, float)) and pixel_um > 0):
+        raise ValueError(f"piksel musi być liczbą dodatnią [µm], jest {pixel_um!r}")
+    with _immediate(con):                             # guard + zapis ręki pod jednym lockiem
+        row = con.execute(
+            "SELECT pixel_um, pixel_conflict, pixel_source FROM camera WHERE id = ?",
+            (camera_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"nie ma kamery camera:{camera_id}")
+        if row["pixel_source"] == "user" and row["pixel_um"] == pixel_um:
+            return False
+        con.execute(
+            "UPDATE camera SET pixel_um = ?, pixel_source = 'user', pixel_conflict = 0 WHERE id = ?",
+            (pixel_um, camera_id))
+        emit_event(con, actor=actor, verb="camera.pixel_user_set", target=f"camera:{camera_id}",
+                   now=now, payload={"pixel_um": pixel_um, "prev_pixel_um": row["pixel_um"],
+                                     "prev_conflict": row["pixel_conflict"],
+                                     "prev_source": row["pixel_source"]})
+    return True
+
+
+def clear_camera_pixel(con, *, camera_id, now, actor="user"):
+    """Cofnięcie wpisu ręki: kamera wraca do stanu zapisanego w payloadzie NAJSTARSZEGO eventu
+    `camera.pixel_user_set` bieżącej serii wpisów (seria = wpisy od ostatniego
+    `camera.pixel_user_cleared`), czyli do stanu sprzed pierwszej ręki - kolejne poprawki ręki nie
+    są stanem skanu. Event `camera.pixel_user_cleared` z wartością zdjętą.
+
+    Zwraca True przy zmianie, False gdy piksel nie pochodzi z ręki (QUIET)."""
+    with _immediate(con):
+        row = con.execute("SELECT pixel_um, pixel_source FROM camera WHERE id = ?",
+                          (camera_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"nie ma kamery camera:{camera_id}")
+        if row["pixel_source"] != "user":
+            return False
+        target = f"camera:{camera_id}"
+        first = con.execute(
+            "SELECT payload FROM event WHERE target = ? AND verb = 'camera.pixel_user_set' "
+            "AND id > COALESCE((SELECT MAX(id) FROM event WHERE target = ? "
+            "                   AND verb = 'camera.pixel_user_cleared'), 0) "
+            "ORDER BY id LIMIT 1", (target, target)).fetchone()
+        if first is None:                             # stan 'user' bez eventu = złamany inwariant
+            raise RuntimeError(f"{target}: pixel_source='user' bez eventu camera.pixel_user_set")
+        prev = json.loads(first["payload"])
+        con.execute(
+            "UPDATE camera SET pixel_um = ?, pixel_conflict = ?, pixel_source = ? WHERE id = ?",
+            (prev["prev_pixel_um"], prev["prev_conflict"], prev["prev_source"], camera_id))
+        emit_event(con, actor=actor, verb="camera.pixel_user_cleared", target=target, now=now,
+                   payload={"pixel_um": row["pixel_um"], "restored_pixel_um": prev["prev_pixel_um"],
+                            "restored_conflict": prev["prev_conflict"]})
+    return True
 
 
 def upsert_frame(con, *, sha1_data, sha1_data_uncomputable=0, kind, filetype, camera_id,

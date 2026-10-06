@@ -614,7 +614,7 @@ def test_migracja_0030_kolumna_backupu_niepotwierdzonego(tmp_path):
     con.execute("INSERT INTO header_backups(commit_id, location_id, hdu_index, header_text, "
                 "post_hash) VALUES (1, 1, 0, 'tekst', 'abc')")
     con.commit()
-    assert db.migrate(con) == 30
+    assert db.migrate(con) == db.SCHEMA_VERSION
     row = con.execute("SELECT header_text, post_hash, pending_since, unreplaced_at "
                       "FROM header_backups").fetchone()
     assert tuple(row) == ("tekst", "abc", None, None)

@@ -199,19 +199,27 @@ EXP_CAMERAS_IMPORT = Kotwica({
     "ASI294MC": (4.63, 0), "SONYA7RM3": (4.86, 0),
 }, _POMIAR_PF5_IMPORT, _POTW_IMPORT_1004)
 # RE-BASELINE FULL 2026-08-01 (odnowa bramki): doskan `R:` ciągnie też RAW-y, odkąd istnieje moduł
-# DSLR (`e7dcdda`) — korpusy lustrzanek są na osi kamer TAK SAMO realne jak ASI. `pixel_um=None`
-# NIE jest luką do załatania: EXIF nie podaje rozmiaru piksela, a wpisanie go z deklaracji byłoby
-# DRUGIM właścicielem faktu (ta sama zasada, co „FOV z zeznania klatek" w planerze). Skutek do
-# zapamiętania: dla DSLR nie policzymy FOV, więc planer ich nie kadruje.
+# DSLR (`e7dcdda`) — korpusy lustrzanek są na osi kamer TAK SAMO realne jak ASI.
 # `SONYA7RM3` NIE jest nowa — ma 4.86 µm z `bayerpat` (FITS) i dodatkowo 301 klatek RAW; to ONA
 # dowodzi, że oba tory schodzą się na jednym wierszu kamery zamiast go rozbijać.
 # Wartość wypisana WPROST, nie `dict(IMPORT, …)`: ponowny pomiar kotwicy IMPORT nie może po cichu
 # przestawić kotwicy FULL, która przy tym pomiarze nie była mierzona.
+# PIKSEL Z EXIF 2026-10-06 (AR-55 (2)): RAW niesie `XPIXSZ` z `FocalPlaneXResolution`, więc
+# lustrzanki dostają piksel z pierwszego zeznania (A7S z DNG 8,469 - ARW tagu nie ma; A7M3 5,962;
+# 40D 5,723). SONYA7RM3 zostaje przy 4,86 z dawcy FITS, a jej EXIF 4,62 to KONFLIKT PRAWDZIWY
+# (5 % poza tolerancją 0,6 %) - świeża baza FULL go stawia (`EXP_PIXEL_CONFLICT_FULL`); w żywej
+# bazie zdejmuje go piksel z ręki (4,52), którego świeża baza nie zna. Wartości z sondy, nie
+# z przebiegu FULL - pierwszy przebieg je potwierdzi albo obali.
+_POMIAR_EXIF_PIKSEL_1006 = Pomiar(
+    "2026-10-06", "sonda read-only EXIF RAW (plik na kamerę i format), nie przebieg tego skryptu",
+    "po renamie T-1; 756 RAW obecnych w pf4", "AR-55 (2), wpisane razem z czytnikiem")
 EXP_CAMERAS_FULL = Kotwica({
     "ASI2600MM": (3.76, 1), "ASI2600MD": (3.76, 1), "ASI2600MC": (3.76, 0),
     "ASI294MC": (4.63, 0), "SONYA7RM3": (4.86, 0),
-    "SONYA7S": (None, 0), "SONYA7M3": (None, 0), "CANONEOS40D": (None, 0),
-}, _POMIAR_FULL_0801, _POTW_0804)
+    "SONYA7S": (8.469, 0), "SONYA7M3": (5.962, 0), "CANONEOS40D": (5.723, 0),
+}, _POMIAR_EXIF_PIKSEL_1006)
+EXP_PIXEL_CONFLICT_IMPORT = Kotwica(0, _POMIAR_PF5_IMPORT, _POTW_IMPORT_1004)
+EXP_PIXEL_CONFLICT_FULL = Kotwica(1, _POMIAR_EXIF_PIKSEL_1006)
 # dawca FITS (§1): A140R/RC8/76EDPH/ED120R/RC6/N800/Sony135/ED120
 EXP_TELESCOPES_IMPORT = Kotwica(8, _POMIAR_PF5_IMPORT, _POTW_IMPORT_1004)
 # Po naprawie ED na realnym R: (2026-07-22, brief PLAN_p6_xisf_writeback §8) etykieta `ED` nie ma już
@@ -896,9 +904,12 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
     crit("§5.8 zero rozbić modelu (distinct model_canon == wierszy camera)",
          distinct_models == n_cam_rows == len(exp_cams.wartosc))
     pconf = con.execute("SELECT count(*) FROM camera WHERE pixel_conflict=1").fetchone()[0]
-    # ZERO także w etapie stosów — nie przez podniesienie poprzeczki, tylko dlatego, że produkt
-    # integracji przestał wnosić `XPIXSZ` (`cameras.NO_PIXEL_KINDS`, decyzja Zdzinia 2026-08-02).
-    crit("§5.3 pixel_conflict == 0 (brak rozjazdu piksela)", pconf == 0)
+    # Etap stosów nie dokłada konfliktu — produkt integracji nie wnosi `XPIXSZ`
+    # (`cameras.NO_PIXEL_KINDS`, decyzja Zdzinia 2026-08-02). FULL niesie jeden prawdziwy: SONYA7RM3,
+    # karta FITS 4,86 wobec EXIF 4,62 (AR-55, nota przy `EXP_CAMERAS_FULL`).
+    exp_pconf = EXP_PIXEL_CONFLICT_FULL if full else EXP_PIXEL_CONFLICT_IMPORT
+    crit(f"§5.3 pixel_conflict == {exp_pconf.wartosc} (rozjazdy piksela poza tolerancją)",
+         pconf == exp_pconf.wartosc, opis_niezgodnosci(exp_pconf, pconf, dzis))
 
     # §5.4 teleskopy: liczność (import 8 / full 12) + suspect=0 (verb telescope.review MARTWY po PF-2)
     out("\n§5.4 teleskopy (canon, f/, focal, #frames, #RAW):")

@@ -2663,7 +2663,7 @@ def scan_stacks(con, root, *, volume="?", drive_letter=None, tier=None, now,
 
 
 def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now,
-              progress=None, should_cancel=None):
+              progress=None, should_cancel=None, reread_raw=False):
     """Pętla PŁASKA: każdy plik nagłówkonośny w `root` oceniany RAZ i wciągany przez jedną klingę
     (`repo`). Jeden plik = jedno dotknięcie (§1.2). Zapis WYŁĄCZNIE przez `repo` (zero DML tutaj).
 
@@ -2682,6 +2682,12 @@ def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now,
     plik o znanym `(volume, path, mtime)` jest POMIJANY bez `sha1_of` (drogi pełny odczyt) i bez DML
     (`summary.skipped += 1`). `volume='?'` (serial nieustalony) → brama OFF → pełny skan (zero
     fałszywych pominięć — `volume` to nie tożsamość frame'a, §7.5).
+
+    PONOWNY ODCZYT RAW (`reread_raw=True`, AR-55): brama nie pomija plików RAW, reszta drzewa idzie
+    jak zwykle. Czytnik EXIF uczy się nowych faktów (wymiary kadru, piksel), których plik nie
+    zmieniony od lat nie dostarczy przez bramę; znana kopia o nowym odcisku nagłówka dostaje
+    świeże zeznanie gałęzią „ta sama tożsamość" (`refresh_location`). Gest świadomy, nie domyślny:
+    przebieg czyta każdy RAW w całości (`file_sha1`). Izolacja (0022) wygrywa i tu.
 
     HOOKI GUI (Qt-WOLNE; rdzeń nic nie wie o Qt):
       - `should_cancel: ()->bool` — sprawdzane na GÓRZE pętli, PRZED plikiem; `True` ⇒ `break` +
@@ -2752,8 +2758,8 @@ def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now,
                     liczniki.isolated_paths.append(spath)
                     skip = True
                 else:
-                    skip = gate_on and _already_scanned(con, volume, spath,
-                                                        _mtime_iso(path.stat()))
+                    skip = (gate_on and not (reread_raw and _filetype(spath) == "raw")
+                            and _already_scanned(con, volume, spath, _mtime_iso(path.stat())))
                     if skip:
                         liczniki.skipped += 1
                 if not skip:

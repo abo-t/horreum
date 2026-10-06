@@ -92,6 +92,19 @@ def main(argv=None):
     p_scan.add_argument("--tier", default=None, help="cold|scratch")
     p_scan.add_argument("--limit", type=int, default=10,
                         help="ile nieprzeczytanych katalogów wypisać (domyślnie 10)")
+    p_scan.add_argument("--reread-raw", action="store_true",
+                        help="przeczytaj ponownie WSZYSTKIE pliki RAW, także niezmienione "
+                             "(nowe fakty EXIF: wymiary kadru, piksel); reszta drzewa jak zwykle")
+
+    # Piksel matrycy z ręki (AR-55 (3)): człowiek wie lepiej niż karta XPIXSZ i EXIF.
+    p_cam = sub.add_parser("camera", help="kamery: lista, piksel matrycy wpisany ręką i jego cofnięcie")
+    p_cam.add_argument("db", help="ścieżka pliku bazy")
+    p_cam.add_argument("model", nargs="?", help="kamera (`model_canon`, np. SONYA7S)")
+    grp_cam = p_cam.add_mutually_exclusive_group()
+    grp_cam.add_argument("--pixel", type=_positive_float, metavar="UM",
+                         help="wpisz piksel matrycy [µm]; silniejszy od karty XPIXSZ i EXIF")
+    grp_cam.add_argument("--clear-pixel", action="store_true",
+                         help="cofnij piksel z ręki - wraca stan sprzed pierwszego wpisu")
 
     # Droga „Stosy" (I-2b, P-I / D-P-I-1 wariant A) — OSOBNA od `scan` z decyzji, nie z wygody:
     # drzewo obróbki nie jest archiwum, więc wskazuje się je świadomym gestem, a standing-op
@@ -338,7 +351,8 @@ def main(argv=None):
         now = datetime.now(timezone.utc).isoformat()
         con = db.open_db(args.db)
         summary = scan_tree(con, args.root, volume=args.volume,
-                            drive_letter=(Path(args.root).drive or None), tier=args.tier, now=now)
+                            drive_letter=(Path(args.root).drive or None), tier=args.tier, now=now,
+                            reread_raw=args.reread_raw)
         con.close()
         print(f"Horreum scan {args.root} -> {args.db}: {summary}")   # ASCII: konsola Windows = cp1250
         if summary.unreadable_dirs:
@@ -357,6 +371,8 @@ def main(argv=None):
         # Kod wyjscia niesie NIEKOMPLETNOSC (jak w `stacks`): skrypt biegu 1 etapu 4 sprawdza
         # „skan widzi 128 nowych lokacji" i nie ma prawa wziac zanizonego przejscia za dowod.
         return 1 if summary.incomplete else 0
+    if args.cmd == "camera":
+        return _cmd_camera(args)
     if args.cmd == "stacks":
         from .scan import scan_stacks                    # lazy: nie ładuj astropy dla init/--version
         now = datetime.now(timezone.utc).isoformat()
@@ -1436,6 +1452,45 @@ def _fill_pct(row):
     """Wypełnienie kadru `best_rig` w procentach (jedna miara: `sky.Framing.frame_fill`)."""
     fr = row.framing_in(row.best_rig)
     return None if fr is None else round(fr.frame_fill * 100, 1)
+
+
+def _cmd_camera(args):
+    """`horreum camera DB [MODEL] [--pixel UM | --clear-pixel]` - bez flag: lista kamer z pikselem
+    i jego źródłem; z flagą: wpis albo cofnięcie ręki przez klingę (`repo`, event). Wyjście ASCII
+    (konsola Windows = cp1250/cp852). Kod 2: brak modelu przy fladze albo nieznana kamera."""
+    from . import repo
+    con = db.open_db(args.db)
+    try:
+        if args.pixel is None and not args.clear_pixel:
+            rows = con.execute(
+                "SELECT model_canon, pixel_um, pixel_source, pixel_conflict FROM camera "
+                "WHERE (?1 IS NULL OR model_canon = ?1) ORDER BY model_canon",
+                (args.model,)).fetchall()
+            for r in rows:
+                px = "-" if r["pixel_um"] is None else f"{r['pixel_um']:g} um"
+                zrodlo = "reka" if r["pixel_source"] == "user" else "skan"
+                konflikt = "  KONFLIKT zeznan" if r["pixel_conflict"] else ""
+                print(f"{r['model_canon']:<16} piksel {px:<10} ({zrodlo}){konflikt}")
+            return 0
+        if not args.model:
+            print("Horreum camera: podaj kamere (np. SONYA7S)", file=sys.stderr)
+            return 2
+        row = con.execute("SELECT id FROM camera WHERE model_canon = ?", (args.model,)).fetchone()
+        if row is None:
+            print(f"Horreum camera: nie ma kamery {args.model}", file=sys.stderr)
+            return 2
+        now = datetime.now(timezone.utc).isoformat()
+        if args.clear_pixel:
+            zmiana = repo.clear_camera_pixel(con, camera_id=row["id"], now=now)
+            print(f"{args.model}: piksel z reki cofniety" if zmiana
+                  else f"{args.model}: piksel nie pochodzi z reki - bez zmian")
+        else:
+            zmiana = repo.set_camera_pixel(con, camera_id=row["id"], pixel_um=args.pixel, now=now)
+            print(f"{args.model}: piksel {args.pixel:g} um wpisany reka" if zmiana
+                  else f"{args.model}: piksel {args.pixel:g} um juz stoi z reki - bez zmian")
+        return 0
+    finally:
+        con.close()
 
 
 def _format_stacks(root, db_path, s, limit=10):

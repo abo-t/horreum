@@ -45,6 +45,12 @@ _GPS_LATREF, _GPS_LAT, _GPS_LONREF, _GPS_LON = 1, 2, 3, 4
 _NEWSUBFILE, _IMG_W, _IMG_H, _SUBIFDS, _CROP_SIZE = 0x00FE, 0x0100, 0x0101, 0x014A, 0xC620
 _PIX_X, _PIX_Y = 0xA002, 0xA003               # ExifIFD: PixelXDimension / PixelYDimension
 _INT_TYPES = (3, 4, 13)                        # SHORT, LONG, IFD - tablice czytane `_read_ints`
+# Piksel matrycy (AR-55): ExifIFD `FocalPlaneXResolution` = pikseli na jednostkę płaszczyzny
+# ogniskowej, `FocalPlaneResolutionUnit` = jednostka (EXIF 2: cal, 3: cm; 4 mm i 5 µm z rozszerzeń).
+# Zmierzone 2026-10-06 (DNG/CR2 z archiwum): A7S 8,469 · A7M3 5,962 · A7RM3 4,620 · 40D 5,723 µm;
+# ARW tych tagów nie niesie. Zgodność z kartą XPIXSZ i z ręką rozstrzyga `repo.pixel_agrees`.
+_FP_XRES, _FP_UNIT = 0xA20E, 0xA210
+_FP_UNIT_UM = {2: 25400.0, 3: 10000.0, 4: 1000.0, 5: 1.0}
 
 _TIFF_MAGIC = 42               # klasyczny TIFF; DNG/ARW/CR2 wszystkie niosą 42 (sonda)
 _MAX_IFD_ENTRIES = 4096        # zdrowy sufit (realny IFD <200) — broni przed śmieciem/uszkodzeniem
@@ -163,6 +169,15 @@ def _image_dims(fh, endian, ifd0, exif):
     return None
 
 
+def _pixel_um(res, unit):
+    """Piksel [µm] z `FocalPlaneXResolution` i jednostki, zaokrąglony do 0,001 µm (szum ułamka
+    RATIONAL nie może rozbić mody krotki w `sky.rigs`). Brak tagu, zero albo nieznana jednostka →
+    None (brak zeznania, nie zgadujemy)."""
+    if not isinstance(res, (int, float)) or res <= 0 or unit not in _FP_UNIT_UM:
+        return None
+    return round(_FP_UNIT_UM[unit] / res, 3)
+
+
 def _combine_instrume(make, model):
     """`Make`+`Model` → INSTRUME bez dublowania marki: Canon Model 'Canon EOS 40D' już niesie
     markę → INSTRUME=Model; Sony Model 'ILCE-7S' + Make 'SONY' → 'SONY ILCE-7S'."""
@@ -225,7 +240,8 @@ def read_exif_meta(path):
                           _NEWSUBFILE, _IMG_W, _IMG_H, _SUBIFDS, _CROP_SIZE},
                          arrays={_SUBIFDS, _CROP_SIZE})
         exif = (_read_ifd(fh, ifd0[_EXIF_IFD], endian,
-                          {_EXPTIME, _ISO, _DTO, _FOCAL, _LENS, _SUBSEC, _PIX_X, _PIX_Y})
+                          {_EXPTIME, _ISO, _DTO, _FOCAL, _LENS, _SUBSEC, _PIX_X, _PIX_Y,
+                           _FP_XRES, _FP_UNIT})
                 if _EXIF_IFD in ifd0 else {})
         gps = (_read_ifd(fh, ifd0[_GPS_IFD], endian,
                          {_GPS_LATREF, _GPS_LAT, _GPS_LONREF, _GPS_LON})
@@ -260,6 +276,9 @@ def read_exif_meta(path):
     if dims is not None:                          # geometria matrycy dla planera (`sky.rigs`, AR-55)
         put("NAXIS1", dims[0], dims[0])
         put("NAXIS2", dims[1], dims[1])
+    pixel = _pixel_um(exif.get(_FP_XRES), exif.get(_FP_UNIT))
+    if pixel is not None:                         # piksel matrycy - ta sama oś co karta FITS
+        put("XPIXSZ", pixel, pixel)
 
     header = {}
     card_rows = []

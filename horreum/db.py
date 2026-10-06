@@ -106,6 +106,8 @@ from importlib import resources
 # 0030 to PRZYROST (ADD COLUMN, AR-40): `header_backups.pending_since` - backup drogi atomowej
 # utrwalony przed podmianą, który czeka na jej potwierdzenie; pisarz rekoncyliuje go z dyskiem, zanim
 # tknie lokację. Kolumna wchodzi PUSTA - SQL nie wie, czy podmiany sprzed migracji zaszły.
+# 0031 to PRZYROST (ADD COLUMN, AR-55 (3)): `camera.pixel_source` - 'user' = piksel matrycy wpisany
+# ręką, silniejszy od karty `XPIXSZ` i EXIF. Kolumna wchodzi PUSTA - wiersze sprzed migracji to skan.
 MIGRATIONS = [
     (2, "0002_initial.sql"),
     (3, "0003_writeback.sql"),
@@ -136,6 +138,7 @@ MIGRATIONS = [
     (28, "0028_frame_channel.sql"),
     (29, "0029_rename_intent.sql"),
     (30, "0030_backup_pending.sql"),
+    (31, "0031_camera_pixel_source.sql"),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 _KNOWN_VERSIONS = frozenset({0} | {v for v, _ in MIGRATIONS})

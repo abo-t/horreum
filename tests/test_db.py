@@ -29,7 +29,8 @@ def test_migracja_ustawia_user_version(tmp_path):
     # + 0028 frame.channel (kanał R/G/B z nazwy stosu, P4-3)
     # + 0029 pending_renames.in_flight (trwały zamiar renamu przed mutacją, AR-29)
     # + 0030 header_backups.pending_since (backup niepotwierdzony, rekoncyliacja z dyskiem, AR-40)
-    assert db._user_version(con) == db.SCHEMA_VERSION == 30
+    # + 0031 camera.pixel_source (piksel matrycy wpisany ręką, AR-55)
+    assert db._user_version(con) == db.SCHEMA_VERSION == 31
     con.close()
 
 

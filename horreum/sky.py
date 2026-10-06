@@ -17,9 +17,12 @@ BRAK FAKTU NIE JEST ZEREM (lustro D-C-2): config bez ogniskowej, piksela albo ge
 mapuje wymiary pełnego obrazu na `NAXIS1`/`NAXIS2`); XISF trzyma geometrię w atrybucie `<Image>`,
 którego zeznanie nie przenosi.
 
-PIKSEL: KLATKA PRZED KAMERĄ (AR-55). `header.xpixsz` jest zeznaniem tej klatki i wygrywa zawsze;
-`camera.pixel_um` jest ZAPASEM dla klatki bez karty (RAW nie niesie XPIXSZ), bo piksel to
-właściwość matrycy, nie optyki. Kamera z `pixel_conflict = 1` zapasem nie jest - jej wartość to
+PIKSEL: RĘKA, POTEM KLATKA, POTEM KAMERA (AR-55). Piksel kamery wpisany ręką
+(`camera.pixel_source = 'user'`) wygrywa ze wszystkim: zeznania plików bywają błędne u źródła
+(karta `XPIXSZ` z profilu programu akwizycji, EXIF z rozdzielczości płaszczyzny ogniskowej).
+Inaczej `header.xpixsz` jest zeznaniem tej klatki (FITS: karta, RAW: EXIF przez `exif.py`), a
+`camera.pixel_um` ZAPASEM dla klatki bez zeznania (ARW nie niesie tagu), bo piksel to właściwość
+matrycy, nie optyki. Kamera z `pixel_conflict = 1` zapasem nie jest - jej wartość to
 pierwsze z dwóch sprzecznych zeznań, nie fakt. Geometria wchodzi do krotki jako (dłuższy, krótszy)
 bok: orientacja zapisu (DSLR bywa pionowo) nie jest inną optyką i nie może rozbić mody.
 
@@ -134,6 +137,7 @@ def rigs(con, only=None):
         "SELECT cf.id AS config_id, t.telescop_canon AS telescope, cam.model_canon AS camera, "
         "       h.focallen AS focal, h.xpixsz AS pixel, "
         "       cam.pixel_um AS cam_pixel, cam.pixel_conflict AS cam_conflict, "
+        "       cam.pixel_source AS cam_source, "
         "       json_extract(h.raw_json, '$.NAXIS1') AS nx, "
         "       json_extract(h.raw_json, '$.NAXIS2') AS ny, h.date_obs AS d "
         "FROM config cf "
@@ -165,11 +169,13 @@ def _rig_from_rows(config_id, rows):
     rozcieńczyłaby udział i wywołała `mixed_optics` na configu o jednej, spójnej optyce
     (zmierzone: RC8×ASI2600MC ma 202 XISF na 2733 klatki => udział spadał do 0,93).
 
-    Piksel: karta klatki, a gdy jej brak - `camera.pixel_um` bez konfliktu (nagłówek modułu)."""
+    Piksel: ręka kamery, potem zeznanie klatki, a gdy go brak - `camera.pixel_um` bez konfliktu
+    (nagłówek modułu)."""
     counts, last, complete = {}, None, 0
     missing = {"no_focal": 0, "no_pixel": 0, "no_naxis": 0}
     for r in rows:
-        pixel = _to_float(r["pixel"])
+        pixel = (_to_float(r["cam_pixel"]) if r["cam_source"] == "user"
+                 else _to_float(r["pixel"]))
         if pixel is None and not r["cam_conflict"]:
             pixel = _to_float(r["cam_pixel"])
         nx, ny = _to_int(r["nx"]), _to_int(r["ny"])

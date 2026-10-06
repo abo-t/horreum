@@ -95,19 +95,42 @@ def test_szkielet_przyszly_pusty(tmp_path):
     con.close()
 
 
-def test_user_version_v30_po_migracji(tmp_path):
-    """0030 podnosi user_version do 30 (świeża baza leci 0002→…→0030 sekwencyjnie; 0025 = wersja
+def test_user_version_v31_po_migracji(tmp_path):
+    """0031 podnosi user_version do 31 (świeża baza leci 0002→…→0031 sekwencyjnie; 0025 = wersja
     reguły koercji faktów kopii `location.hdr_rule`, AR-33; 0026 = werdykt „zostaw wszystkie
     wersje” `stack_version_kept` + `integration.creation_time`, AR-10; 0027 = stanowisko wskazane
     ręką `frame.observatory_source`; 0028 = kanał `frame.channel`, P4-3; 0029 = zamiar renamu
     `pending_renames.in_flight`, AR-29; 0030 = backup niepotwierdzony
-    `header_backups.pending_since`, AR-40).
+    `header_backups.pending_since`, AR-40; 0031 = piksel kamery z ręki `camera.pixel_source`, AR-55).
 
     Pin JEST intencją: każda nowa migracja ma ten test PRZEWRÓCIĆ imiennie, żeby podniesienie
     wersji było gestem, a nie skutkiem ubocznym."""
     con = db.open_db(str(tmp_path / "h.db"))
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 30
-    assert db.SCHEMA_VERSION == 30
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 31
+    assert db.SCHEMA_VERSION == 31
+    con.close()
+
+
+def test_0031_pixel_source_przyrost_na_bazie_v30(tmp_path):
+    """0031 na bazie v30 z kamerą: kolumna wchodzi PUSTA (wiersz sprzed migracji = skan), CHECK
+    przyjmuje wyłącznie NULL albo 'user' - i 'user' tylko z pikselem (bramka sol Z4)."""
+    path = str(tmp_path / "h.db")
+    con = db.connect(path)
+    for version, filename in db.MIGRATIONS:
+        if version <= 30:
+            db._apply_migration(con, version, db._migration_sql(filename))
+    con.execute("INSERT INTO camera(model_canon, pixel_um, created_at) "
+                "VALUES ('SONYA7S', NULL, '2026-10-06T00:00:00')")
+    con.commit()
+    assert db.migrate(con) == db.SCHEMA_VERSION
+    assert con.execute("SELECT pixel_source FROM camera").fetchone()[0] is None
+    with pytest.raises(sqlite3.IntegrityError):
+        con.execute("UPDATE camera SET pixel_source = 'user'")         # ręka bez piksela
+    con.execute("UPDATE camera SET pixel_um = 8.45, pixel_source = 'user'")
+    with pytest.raises(sqlite3.IntegrityError):
+        con.execute("UPDATE camera SET pixel_source = 'scan'")
+    with pytest.raises(sqlite3.IntegrityError):
+        con.execute("UPDATE camera SET pixel_um = NULL")
     con.close()
 
 

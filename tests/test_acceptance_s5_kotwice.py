@@ -47,7 +47,9 @@ def test_kazda_kotwica_niesie_pochodzenie():
             assert p.przebieg and p.stan_r and p.kod, nazwa
             if p.dzien is not None:
                 assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", p.dzien), nazwa
-                assert date.fromisoformat(p.dzien) <= DZIS, nazwa
+                # „nie z przyszłości" wobec dnia URUCHOMIENIA - stały `DZIS` odbijał każdą kotwicę
+                # zmierzoną po dniu, w którym test napisano (pomiar EXIF 2026-10-06).
+                assert date.fromisoformat(p.dzien) <= date.today(), nazwa
         if k.potwierdzenie is not None and k.pomiar.dzien and k.potwierdzenie.dzien:
             assert k.potwierdzenie.dzien >= k.pomiar.dzien, nazwa
 

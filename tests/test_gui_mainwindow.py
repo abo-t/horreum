@@ -20,7 +20,7 @@ from horreum.gui.app import (
     NAV_DOSTAWA, NAV_PORZADKI, NAV_ZBIORY, MainWindow, ObjectAxisView, ObservatoryAxisView,
     TelescopeAxisView,
 )
-from horreum.gui.grid import PRESET_DUPS
+from horreum.gui.grid import PRESET_DUPS, Recepta
 
 from fixture_s8 import NOW, build, seed
 
@@ -258,7 +258,7 @@ def test_badge_zywy_od_montazu(qapp, tmp_path):
     ale była informacyjna, bo nie było przebiegu, który by ją wytwarzał."""
     win = MainWindow(_seeded_db(tmp_path, object_axis=True))
     try:
-        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (4)"
+        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (6)"
         # Wiersz DWUCZŁONOWY (P1, wiz F5 #6): etykieta w `text()`, liczba + chevron „›" w prawej
         # kolumnie (`rows.SECONDARY`) — liczby ustawiają się w kolumnę i dają się skanować.
         assert _task_row(win, "unresolved_lights") == ("Klatki bez obiektu", "3  ›")
@@ -278,7 +278,7 @@ def test_en_render_zadania(qapp, tmp_path):
     try:
         assert _task_row(win, "unresolved_lights") == ("Frames without object", "3  ›")
         assert _task_row(win, "dup_frames") == ("Duplicates (>1 copy)", "1  ›")
-        assert win.nav.item(NAV_PORZADKI).text() == "Housekeeping (4)"    # nav.porzadki_count EN (app)
+        assert win.nav.item(NAV_PORZADKI).text() == "Housekeeping (6)"    # nav.porzadki_count EN (app)
     finally:
         win.close()
 
@@ -386,7 +386,7 @@ def test_podstrona_osi_i_powrot_odswieza_licznik(qapp, tmp_path):
         win.tasks_view._on_back()
         assert win.tasks_view.pages.currentIndex() == 0
         assert _task_row(win, "telescopes_unlabeled") == ("Teleskopy bez etykiety", "3  ›")
-        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (4)"   # wciąż 4 (klatki/tel/dup/zniknięte)
+        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (6)"   # wciąż 6 (klatki/tel/dup/zniknięte + bez zestawu/stanowiska)
     finally:
         win.close()
 
@@ -401,10 +401,10 @@ def test_koniec_przebiegu_odswieza_liczniki_zadan(qapp, tmp_path):
         win._on_pipeline_running(True)
         for row in win.con.execute("SELECT id FROM telescope WHERE merged_into IS NULL").fetchall():
             repo.label_telescope(win.con, telescope_id=row[0], label=f"T{row[0]}", now=NOW)
-        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (4)", "w biegu - jeszcze stary stan"
+        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (6)", "w biegu - jeszcze stary stan"
         win._on_pipeline_running(False)
         assert _task_row(win, "telescopes_unlabeled") == ("Teleskopy bez etykiety", "0  ›")
-        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (3)"   # klatki + duplikaty + zniknięte
+        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (5)"   # klatki + duplikaty + zniknięte + bez zestawu/stanowiska
     finally:
         win.close()
 
@@ -494,7 +494,7 @@ def test_przebieg_zakonczony_bledem_tez_odswieza_widoki(qapp, tmp_path, monkeypa
         assert etapy == [], "etap padł - bez sygnału końca etapu"
         assert "etap padł" in win.pipeline_view.lbl_error.text()
         assert licznik == {"grid": 1, "obiekt": 1}
-        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (3)", "plakietka ze stanu bazy"
+        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (5)", "plakietka ze stanu bazy"
     finally:
         win.close()
 
@@ -570,8 +570,8 @@ def test_gest_osi_zywotnosci_w_Zbiorach_odswieza_plakietke_Porzadkow(qapp, tmp_p
 
     win = MainWindow(path)
     try:
-        # klatki bez obiektu + teleskopy + duplikaty + „a plik wrócił" (zniknięte spadły do 0)
-        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (4)"
+        # klatki bez obiektu + teleskopy + duplikaty + „a plik wrócił" + bez zestawu i bez stanowiska (zniknięte spadły do 0)
+        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (6)"
         win._show_view(NAV_ZBIORY)
         grid = win.grid_view
         grid.apply_perspective(grid_mod.PRESET_RETIRED_CONFLICT)
@@ -582,7 +582,7 @@ def test_gest_osi_zywotnosci_w_Zbiorach_odswieza_plakietke_Porzadkow(qapp, tmp_p
         assert win.con.execute("SELECT retired_at FROM frame WHERE id = ?",
                                (fid,)).fetchone()[0] is None, "gest się odbył"
         assert win.stack.currentIndex() == NAV_ZBIORY, "Porządków nikt nie otworzył"
-        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (3)"
+        assert win.nav.item(NAV_PORZADKI).text() == "Porządki (5)"
     finally:
         win.close()
 
@@ -912,40 +912,55 @@ def test_recepta_ma_WLASNY_nosnik_i_ZABIERA_szerokosc_raportowi(qapp, tmp_path):
         bez_recepty = win.statusBar().currentMessage()
 
         recepta = "potem przywrócisz: Obiekt → Przywróć cofnięte przypisanie"
-        win._pokaz_recepte(recepta)
+        win._pokaz_recepte(Recepta([recepta]))
         assert win.recipe_label.isVisible(), "recepta nie ma nośnika"
         assert "Przywróć cofnięte przypisanie" in win.recipe_label.text()
         assert len(win.statusBar().currentMessage()) < len(bez_recepty), \
             "raport nie oddał miejsca recepcie - przy realnym zdaniu wystawałby pod nią"
-        # PODPOWIEDŹ PASKA NIESIE OBA CZŁONY, a recepta nie ma własnej: jest przezroczysta dla
-        # myszy (uczciwy „nieklikalny"), więc `QEvent::ToolTip` do niej nie dociera i własna
-        # podpowiedź byłaby na niej martwa - bramka pakietu, soczewka repo.
+        # PODPOWIEDŹ PASKA NIESIE OBA CZŁONY. Od FH-2e recepta jest klikalna, więc `QEvent::ToolTip`
+        # do niej dociera - jej własna podpowiedź niesie pełną receptę (przycięty napis jej nie zgubi).
         assert win.statusBar().toolTip() == f"{dlugie} · {recepta}", "pełne zdanie przepadło"
-        assert win.recipe_label.toolTip() == "", "martwa podpowiedź udaje spełnioną obietnicę"
+        assert win.recipe_label.toolTip() == recepta, "przycięta recepta bez pełnej treści"
     finally:
         win.close()
 
 
-def test_recepta_NIE_KLIKA_dopoki_niczego_nie_wykonuje(qapp, tmp_path):
-    """FH-2, granica wariantu „e". Nośnik jest `QToolButton`em, żeby dopięcie akcji było później
-    jedną zmianą - ale DZIŚ nie prowadzi nigdzie, więc nie ma prawa zachowywać się jak przycisk.
-    Kontrolka, która podnosi się pod kursorem i nic nie robi, kłamie bardziej niż etykieta.
+def test_FH2e_recepta_KLIKA_i_wykonuje_czlon_PIERWSZY_a_potem_jest_wygaszona(qapp, tmp_path):
+    """FH-2e. Recepta WYKONUJE powrót, a nie tylko go opisuje: klik robi człon pierwszy (kolejność
+    członów jest kolejnością w czasie). Obie połowy wariantu „e" idą razem - przycisk przyjmuje
+    mysz i wygląda na przycisk (`autoRaise` zdjęte), bo teraz klik naprawdę coś robi.
 
-    Falsyfikator: zdejmij `WA_TransparentForMouseEvents` przed podpięciem akcji → bramka
-    czerwienieje i przypomina, że obie połowy wariantu „e" idą razem."""
+    Wariant „potem" (człon bez wykonawcy) zostawia przycisk WYGASZONY, nie chowa go: zdanie dalej
+    mówi prawdę o drugim kroku, a klikalny napis bez akcji kłamałby afordancją.
+
+    Falsyfikator: zostaw `WA_TransparentForMouseEvents` albo nie podepnij `clicked` → klik nic nie
+    robi; ustaw `setEnabled(True)` bezwarunkowo → człon „potem" udaje wykonalny."""
     from PySide6.QtWidgets import QToolButton
-    win = MainWindow(_seeded_db(tmp_path))
+    from horreum.gui.grid import CzlonRecepty, Recepta
+    win = _pokazane(MainWindow(_seeded_db(tmp_path)))
     try:
-        assert isinstance(win.recipe_label, QToolButton), "nośnik nie jest gotowy pod wariant e"
-        assert win.recipe_label.testAttribute(Qt.WA_TransparentForMouseEvents), \
-            "przycisk bez akcji ma być nieklikalny"
+        assert isinstance(win.recipe_label, QToolButton)
+        assert not win.recipe_label.testAttribute(Qt.WA_TransparentForMouseEvents), \
+            "recepta z wykonawcą nie przyjmuje kliknięcia"
+        assert not win.recipe_label.autoRaise(), "klikalna recepta rysuje się jak tekst"
         assert win.recipe_label.focusPolicy() == Qt.NoFocus, "recepta nie jest przystankiem Taba"
-        # …i ma WYGLĄDAĆ na tekst, nie na przycisk. Firsthand zmierzył ramkę 31,31,31 z gradientem
-        # 79-81 na kontrolce całkowicie bezwładnej: wypukłość obiecywała klik, którego nie ma.
-        assert win.recipe_label.autoRaise(), "recepta rysuje się jako przycisk, którym nie jest"
         # Własność roli byłaby tu MARTWA (selektor motywu to `QLabel[role=…]`), a gdyby ożyła,
         # zeszłaby recepcie do 3,67:1 - poniżej progu 4,5:1. Nie zostawiamy jej naładowanej.
         assert win.recipe_label.property("role") is None, "martwa własność roli czeka na ożywienie"
+
+        wykonane = []
+        win._pokaz_recepte(Recepta([CzlonRecepty("odsłoni je „× Wyczyść zbiór”",
+                                                  lambda: wykonane.append("odslon")),
+                                     CzlonRecepty("potem przywrócisz: Obiekt → Przywróć", None)]))
+        assert win.recipe_label.isVisible() and win.recipe_label.isEnabled()
+        win.recipe_label.click()
+        assert wykonane == ["odslon"], "klik nie wykonał członu pierwszego"
+
+        win._pokaz_recepte(Recepta([CzlonRecepty("potem przywrócisz: Obiekt → Przywróć", None)]))
+        assert win.recipe_label.isVisible(), "recepta „potem” zniknęła zamiast zgasnąć"
+        assert not win.recipe_label.isEnabled(), "człon bez wykonawcy udaje wykonalny"
+        win._wykonaj_recepte()                       # druga linia obrony: sygnał wołany wprost
+        assert wykonane == ["odslon"]
     finally:
         win.close()
 
@@ -959,7 +974,7 @@ def test_recepta_STOI_PRZY_RAPORCIE_a_faza_przy_uchwycie(qapp, tmp_path):
     win = _pokazane(MainWindow(_seeded_db(tmp_path)))
     try:
         win._flash("Cofnięto przypisanie na 2 z 2 klatek")
-        win._pokaz_recepte("przywrócisz: Obiekt → Przywróć cofnięte przypisanie")
+        win._pokaz_recepte(Recepta(["przywrócisz: Obiekt → Przywróć cofnięte przypisanie"]))
         win._say_phase("Odświeżam widoki po etapie…")
         QApplication.processEvents()
 
@@ -969,25 +984,28 @@ def test_recepta_STOI_PRZY_RAPORCIE_a_faza_przy_uchwycie(qapp, tmp_path):
         win.close()
 
 
-def test_recepta_GASNIE_razem_ze_swoim_raportem_I_przy_cudzym(qapp, tmp_path):
-    """FH-2. Recepta należy do JEDNEGO gestu: zdanie po nim znika po 5 s, a instrukcja powrotu
-    wisząca dłużej mówiłaby o czymś, po czym nie ma już śladu na ekranie. Oba wyjścia mają
-    właściciela - wygaśnięcie łapie `messageChanged` z pustym łańcuchem, cudzy raport gasi ją
-    w `_flash`.
+def test_recepta_PRZEZYWA_wygasniecie_raportu_a_GASNIE_przy_cudzym(qapp, tmp_path):
+    """FH-2e. Recepta stoi na STANIE, nie na zegarze raportu: odwracalność trwa, dopóki jest co
+    przywracać, więc timeout zdania po geście jej nie gasi (dawniej przy dwóch członach umierała po
+    wykonaniu pierwszego). Gasi ją cudzy raport (`_flash`) - zdanie o innej sprawie z instrukcją
+    starego gestu obok mówiłoby o czymś, po czym nie ma śladu - a wygaśnięty raport zostawia
+    w podpowiedzi paska samą receptę.
 
-    Falsyfikator: zdejmij `_ustaw_recepte("")` z `_flash` → recepta przeżywa cudzy komunikat."""
+    Falsyfikator: wróć do `_ustaw_recepte("")` w `_on_status_changed` → recepta znika z zegarem;
+    zdejmij `_ustaw_recepte("")` z `_flash` → recepta przeżywa cudzy komunikat."""
     win = _pokazane(MainWindow(_seeded_db(tmp_path)))
     try:
+        recepta = "przywrócisz: Obiekt → Przywróć cofnięte przypisanie"
         win._flash("Cofnięto przypisanie na 2 z 2 klatek")
-        win._pokaz_recepte("przywrócisz: Obiekt → Przywróć cofnięte przypisanie")
+        win._pokaz_recepte(Recepta([recepta]))
         assert win.recipe_label.isVisible()
 
         win.statusBar().clearMessage()                 # …to samo robi timeout 5 s
-        assert not win.recipe_label.isVisible(), "recepta przeżyła swój raport"
-        assert win.statusBar().toolTip() == ""
+        assert win.recipe_label.isVisible(), "recepta umarła z zegarem raportu"
+        assert win.statusBar().toolTip() == recepta, "podpowiedź niesie wygasły raport"
 
         win._flash("Cofnięto przypisanie na 2 z 2 klatek")
-        win._pokaz_recepte("przywrócisz: Obiekt → Przywróć cofnięte przypisanie")
+        win._pokaz_recepte(Recepta([recepta]))
         win._flash("Grid: 16 901 klatek, 0 kolumn-keywordów")
         assert not win.recipe_label.isVisible(), "recepta przeżyła CUDZY raport"
     finally:
@@ -1004,7 +1022,8 @@ def test_gest_osi_dowozi_recepte_NA_PASEK_przez_gospodarza(qapp, tmp_path):
     win = _pokazane(MainWindow(_seeded_db(tmp_path, object_axis=True)))
     try:
         win._show_view(NAV_ZBIORY)
-        win.grid_view.status_recipe.emit("przywrócisz: Obiekt → Przywróć cofnięte przypisanie")
+        win.grid_view.status_recipe.emit(
+            Recepta(["przywrócisz: Obiekt → Przywróć cofnięte przypisanie"]))
         assert win.recipe_label.isVisible()
         assert "Przywróć cofnięte przypisanie" in win.recipe_label.text()
     finally:
@@ -1099,11 +1118,12 @@ def test_recepta_PRZEZYWA_otwarcie_menu_ktore_sama_wskazuje(qapp, tmp_path):
 
     Trafiało to najdotkliwiej w receptę „Obiekt ▾ → Przywróć cofnięte przypisanie", bo jej
     WYKONANIE zaczyna się od otwarcia tego właśnie menu: instrukcja znikała w trakcie celowania
-    w pozycję, którą nazywa. Otwarty popup jest jedynym dostępnym rozróżnieniem - stan paska mają
-    te dwa zdarzenia identyczny.
+    w pozycję, którą nazywa. Do FH-2e otwarty popup był jedynym rozróżnieniem, a ogon klasy
+    (najechanie na menubar bez otwierania) zostawał. Od FH-2e recepta stoi na STANIE, więc pusty
+    `QStatusTipEvent` nie gasi jej ani przy otwartym menu, ani bez niego.
 
-    Falsyfikator: zdejmij warunek `activePopupWidget()` z `_on_status_changed` → recepta gaśnie
-    przy pierwszym dotknięciu menu, choć gest wciąż czeka na dokończenie."""
+    Falsyfikator: wróć do gaszenia recepty w `_on_status_changed` → recepta gaśnie przy pierwszym
+    dotknięciu menu albo menubaru, choć gest wciąż czeka na dokończenie."""
     from PySide6.QtGui import QStatusTipEvent
     from PySide6.QtWidgets import QMenu
 
@@ -1111,7 +1131,7 @@ def test_recepta_PRZEZYWA_otwarcie_menu_ktore_sama_wskazuje(qapp, tmp_path):
     popup = QMenu(win)
     try:
         win._flash("Cofnięto przypisanie na 2 z 2 klatek")
-        win._pokaz_recepte("przywrócisz: Obiekt → Przywróć cofnięte przypisanie")
+        win._pokaz_recepte(Recepta(["przywrócisz: Obiekt → Przywróć cofnięte przypisanie"]))
         assert win.recipe_label.isVisible()
 
         popup.addAction("Przywróć cofnięte przypisanie")
@@ -1123,17 +1143,16 @@ def test_recepta_PRZEZYWA_otwarcie_menu_ktore_sama_wskazuje(qapp, tmp_path):
         QApplication.processEvents()
         assert win.recipe_label.isVisible(), "recepta zgasła w trakcie otwierania własnego menu"
 
-        # …a warunek jest WĄSKI: to samo zdarzenie BEZ otwartego menu gasi receptę jak dawniej.
-        # Bez tej połowy bramka przepuściłaby „wyłączmy gaszenie w ogóle", czyli receptę wiszącą
-        # nad nieistniejącym raportem.
+        # …i OGON KLASY ZAMKNIĘTY: to samo zdarzenie BEZ otwartego menu (najechanie na menubar)
+        # też jej nie gasi - recepta nie wisi już na czasie życia komunikatu.
         popup.close()
         QApplication.processEvents()
         assert QApplication.activePopupWidget() is None, "menu się nie zamknęło - brak układu"
         win._flash("Cofnięto przypisanie na 2 z 2 klatek")
-        win._pokaz_recepte("przywrócisz: Obiekt → Przywróć cofnięte przypisanie")
+        win._pokaz_recepte(Recepta(["przywrócisz: Obiekt → Przywróć cofnięte przypisanie"]))
         QApplication.sendEvent(win, QStatusTipEvent(""))
         QApplication.processEvents()
-        assert not win.recipe_label.isVisible(), "warunek popupu wyłączył gaszenie w ogóle"
+        assert win.recipe_label.isVisible(), "pusty podgląd pozycji menubaru zgasił receptę"
     finally:
         popup.deleteLater()
         win.close()
@@ -1150,7 +1169,7 @@ def test_recepta_MA_SUFIT_szerokosci_i_nie_zjada_pola_raportu(qapp, tmp_path):
     win = _pokazane(MainWindow(_seeded_db(tmp_path)))
     try:
         win._flash("Cofnięto przypisanie na 2 z 2 klatek")
-        win._pokaz_recepte("przywrócisz: " + "bardzo długa etykieta pozycji menu " * 20)
+        win._pokaz_recepte(Recepta(["przywrócisz: " + "bardzo długa etykieta pozycji menu " * 20]))
 
         sufit = int(win.statusBar().width() * _PASEK_UDZIAL_RECEPTY)
         assert win.recipe_label.sizeHint().width() <= sufit + 4, "recepta przebiła swój sufit"

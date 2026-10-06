@@ -345,7 +345,8 @@ def test_perspektywa_ustawia_wersje_obok_siebie_z_faktami(view):
 def test_kolumna_wersji_stoi_przed_keywordami_i_nie_przesuwa_ich_tresci(view):
     """Kolumna „Wersja" stoi zaraz po bazowych - za keywordami lądowała poza krawędzią okna
     (zrzut offscreen na kopii żywej bazy). Keywordy przesuwają się o nią BEZ zmiany treści, sort
-    po niej jest chronologiczny, a podgląd klingi zostaje ostatnią kolumną."""
+    po niej jest chronologiczny, a podgląd klingi zostaje LOGICZNIE ostatnią kolumną - wizualnie
+    stoi zaraz za „Ścieżką", przed „Wersją" (AR-57)."""
     from PySide6.QtCore import Qt
     from horreum.gui import grid as grid_mod
     view.apply_perspective(grid_mod.PRESET_STACK_VERSIONS)
@@ -363,6 +364,8 @@ def test_kolumna_wersji_stoi_przed_keywordami_i_nie_przesuwa_ich_tresci(view):
     m.set_preview({101: {"keyword": "OBJECT", "old": "a", "new": "b", "op": "set"}})
     try:
         assert m._preview_col() == m.columnCount() - 1 == baza + 1 + len(m._keywords)
+        h = view.table.horizontalHeader()
+        assert h.visualIndex(m._preview_col()) == 1 and h.visualIndex(baza) == 2
         assert m.data(m.index(_nr(101), m._preview_col()), Qt.DisplayRole) == "a → b"
         assert m.data(m.index(_nr(101), baza + 1), Qt.DisplayRole) == "IC1795 nowa"
     finally:
@@ -676,7 +679,9 @@ def test_wersja_stoi_wizualnie_za_sciezka(view):
     assert h.logicalIndex(0) == 0 and h.logicalIndex(1) == m._version_col()
     m.set_preview({101: {"keyword": "OBJECT", "old": "a", "new": "b", "op": "set"}})
     try:
-        assert h.logicalIndex(1) == m._version_col(), "zmiana liczby kolumn nie gubi układu"
+        # Podgląd klingi staje bezpośrednio za „Ścieżką" (AR-57), „Wersja" zaraz za nim.
+        assert h.logicalIndex(1) == m._preview_col(), "zmiana liczby kolumn nie gubi układu"
+        assert h.logicalIndex(2) == m._version_col()
     finally:
         m.set_preview({})
     view.apply_perspective("Przegląd")

@@ -780,6 +780,16 @@ def default_night(site, *, now=None, step_min=5):
 
 # ─────────────────────────────────────────────────────── plan
 
+class BrakStanowiska(ValueError):
+    """Baza nie zna stanowiska z pozycją GPS - planer nie ma z czego policzyć nocy.
+
+    Osobna klasa, bo to STAN bazy, a nie awaria rachunku: ekran planera pokazuje wtedy pusty stan
+    z gestem „Ustaw stanowisko…" (AR-48), a każdy inny błąd zostaje surowym komunikatem.
+    Rozpoznanie po TOŻSAMOŚCI, nie po brzmieniu i nie po stanie bazy w chwili doręczenia - inaczej
+    blokada bazy przy bazie bez stanowiska przebierała się za brak stanowiska. Podklasa
+    `ValueError`, więc dotychczasowi wołający łapiący `ValueError` działają bez zmian."""
+
+
 def plan(con, *, night=None, site=None, park=None, layers=DEFAULT_LAYERS,
          min_size=6.0, min_dark=15.0, max_mag=13.0, min_alt=30.0, min_hours=1.0,
          max_cost=None, overlap=0.10, v_zen=sky.V_ZEN_DEFAULT, k_ext=sky.K_EXT_DEFAULT,
@@ -810,7 +820,7 @@ def plan(con, *, night=None, site=None, park=None, layers=DEFAULT_LAYERS,
     cel domknięty w Ha może mieć lukę w SII i planer ma prawo to pokazać."""
     site = site or sky.default_site(con)
     if site is None:
-        raise ValueError("targets: baza nie ma stanowiska z pozycją GPS — planer bez pozycji "
+        raise BrakStanowiska("targets: baza nie ma stanowiska z pozycją GPS - planer bez pozycji "
                          "obserwatora nie ma czego liczyć (podstawienie 'środka Polski' byłoby "
                          "kłamstwem)")
     night_date = night or default_night(site, step_min=step_min)

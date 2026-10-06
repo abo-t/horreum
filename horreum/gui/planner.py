@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QComb
                                QListWidgetItem, QProgressBar, QPushButton, QSpinBox, QTableView,
                                QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget)
 
-from horreum import db, repo, targets
+from horreum import db, repo, sky, targets
 from horreum.gui import i18n, planner_model as pm, queries, theme
 
 # Debounce zmian parametrów: pojedyncze kliknięcie w strzałkę spinboxa nie ma prawa startować
@@ -120,6 +120,7 @@ class PlanWorker(QObject):
 
     done = Signal(int, object)          # (generacja, targets.PlanResult)
     failed = Signal(int, str)           # (generacja, komunikat)
+    no_site = Signal(int, str)          # (generacja, komunikat) - `targets.BrakStanowiska` (AR-48)
     finished = Signal()
 
     def __init__(self, db_path, params, gen, con=None):
@@ -133,10 +134,14 @@ class PlanWorker(QObject):
     def run(self):
         try:
             self.done.emit(self._gen, self._compute())
+        except targets.BrakStanowiska as exc:
+            # STAN bazy, nie awaria - osobny sygnał, żeby ekran rozpoznał go po TOŻSAMOŚCI błędu,
+            # a nie po stanie bazy w chwili doręczenia (Z2: blokada bazy przy bazie bez stanowiska
+            # przebierała się za brak stanowiska i chowała prawdziwy komunikat).
+            self.no_site.emit(self._gen, str(exc))
         except ValueError as exc:
-            # Baza bez stanowiska z GPS (`targets.plan`) — SZCZERY komunikat zamiast crashu:
-            # planer bez pozycji obserwatora nie ma czego liczyć, a podstawienie „środka Polski"
-            # byłoby kłamstwem.
+            # INNY `ValueError` rdzenia (brak stanowiska łapie gałąź wyżej) - zdanie rdzenia jest
+            # samo w sobie opisem, więc idzie na ekran SUROWE, bez nazwy klasy.
             self.failed.emit(self._gen, str(exc))
         except Exception as exc:
             self.failed.emit(self._gen, f"{type(exc).__name__}: {exc}")
@@ -326,6 +331,7 @@ class PlannerView(QWidget):
 
     status_message = Signal(str)
     show_frames_for = Signal(object)     # T5e: kanony archiwum celu → most do gridu
+    open_sites = Signal()                # AR-48: pusty stan „bez stanowiska" → oś obserwatorium
 
     def __init__(self, con, db_path=None, now_fn=_utc_now_iso, parent=None, off_thread=True,
                  theme_name=None):
@@ -341,6 +347,11 @@ class PlannerView(QWidget):
         self._zatrzymany = False         # `zatrzymaj_pola` - widok znika, żadnego nowego biegu
         self._result = None
         self._keep_canon = None          # cel, na który zaznaczenie ma wrócić po re-planie
+        # Ostatni rachunek padł, bo baza nie zna stanowiska z GPS (AR-48). Publiczne, bo gospodarz
+        # przelicza plan przy wejściu na ten ekran, dopóki to prawda - stanowisko wskazuje się
+        # na innym ekranie i ten widok nie ma skąd wiedzieć, że już jest.
+        self.bez_stanowiska = False
+        self._ponowiono_bez_stanowiska = False   # jedno ponowienie `no_site → replan`
         # PAMIĘĆ ZDJĘTEJ SIEROTY (R-S0-7) — `(kanon, status, priorytet, nota)` albo None. Żyje
         # w SESJI, nie w bazie: to droga powrotu z pomyłki sprzed sekundy, a nie druga historia
         # obok dziennika (`event(target_plan.cleared)` niesie cały wiersz sprzed kasacji).
@@ -449,6 +460,13 @@ class PlannerView(QWidget):
         self.empty_note.setWordWrap(True)
         self.empty_note.setVisible(False)
         outer.addWidget(self.empty_note, 1)
+        # GEST PUSTEGO STANU „bez stanowiska" (AR-48): zdanie bez drogi dalej zostawiało człowieka
+        # przed ekranem, który nie ma czego policzyć. Prowadzi tam, gdzie stanowisko się wskazuje -
+        # gospodarz zna oba ekrany, więc to sygnał (NARROW), nie wołanie cudzego widoku.
+        self.empty_btn = QPushButton(i18n.t("planner.no_site_action"))
+        self.empty_btn.clicked.connect(lambda: self.open_sites.emit())
+        self.empty_btn.setVisible(False)
+        outer.addWidget(self.empty_btn, 0, Qt.AlignHCenter)
         outer.addWidget(self._build_orphan_box())
         outer.addWidget(self._build_row_panel())
         self.table.selectionModel().selectionChanged.connect(self._on_row_selected)
@@ -944,8 +962,12 @@ class PlannerView(QWidget):
         # Chip wskazuje NAZWĘ zestawu (`RigSet.name`), nie teleskop: optyka z dwiema kamerami ma
         # dwa chipy z kamerą w etykiecie, a nie dwa „ED120R", z których oba patrzyłyby jednym okiem.
         names = (None,) + pm.rig_choices(result)
-        if self._rig_chip not in names:          # zestaw zniknął (inny park) → wracamy do best-fit
-            self._rig_chip = None
+        # Chip PRZEŻYWA RESTART (AR-36): wybór czytamy z `QSettings` przy każdej przebudowie, więc
+        # zestaw, który zniknął (inny park, inna baza), daje best-fit bez kasowania zapamiętanego -
+        # wróci, gdy zestaw znów będzie na liście. Wpis nieczytelny = best-fit, jak brak wpisu.
+        zapamietany = self._settings.value(_SETTINGS_PREFIX + "rig_chip", "")
+        self._rig_chip = zapamietany if isinstance(zapamietany, str) and zapamietany in names \
+            else None
         for name in names:
             b = QToolButton()
             b.setCheckable(True)
@@ -974,6 +996,8 @@ class PlannerView(QWidget):
 
     def _on_chip(self, name):
         self._rig_chip = name
+        # Zapis od razu (jak progi): pusty napis = best-fit, bo `None` nie przechodzi przez rejestr.
+        self._settings.setValue(_SETTINGS_PREFIX + "rig_chip", name or "")
         self._render_rows()
         # Nota „soczewka schowała N" zależy od chipa, nie od rachunku - nagłówek idzie za chipem.
         if self._result is not None:
@@ -1029,6 +1053,7 @@ class PlannerView(QWidget):
                             con=None if self._db_path else self.con)
         worker.done.connect(self._on_done)
         worker.failed.connect(self._on_failed)
+        worker.no_site.connect(self._on_no_site)
         self._worker = worker
         if self._off_thread and self._db_path:
             self._thread = QThread(self)
@@ -1094,6 +1119,9 @@ class PlannerView(QWidget):
             return                       # stale — świeży bieg wystartuje w cleanupie
         self._result = result
         self._shown_gen = gen
+        self.bez_stanowiska = False          # policzony plan = stanowisko jest (AR-48)
+        self._ponowiono_bez_stanowiska = False   # bezpiecznik `_on_no_site` wraca do gotowości
+        self.empty_btn.setVisible(False)
         self._sync_controls_title()          # dopisek „nieczynny" zależy od policzonego wyniku
         self._rebuild_chips(result)
         self._render_header(result)
@@ -1102,11 +1130,42 @@ class PlannerView(QWidget):
 
     @Slot(int, str)
     def _on_failed(self, gen, message):
+        """Rachunek padł z powodu INNEGO niż brak stanowiska - surowy komunikat zostaje (Z2)."""
         if gen != self._gen:
             return
+        self._pokaz_blad(gen, message, bez_stanowiska=False)
+
+    @Slot(int, str)
+    def _on_no_site(self, gen, message):
+        """Rachunek padł, bo baza nie zna stanowiska z GPS (`targets.BrakStanowiska`, AR-48).
+
+        ODWROTNY WYŚCIG (Z8): bieg ruszył bez stanowiska, ale zanim jego błąd tu dotarł, stanowisko
+        zostało wskazane na osi obserwatorium. Render tego błędu postawiłby pusty stan nad bazą,
+        która stanowisko MA, a `_shown_gen` zablokowałby ponowny rachunek do zmiany parametru -
+        więc liczymy od nowa (w następnym obrocie pętli: przy biegu inline `_worker` jeszcze stoi)."""
+        if gen != self._gen:
+            return
+        if sky.default_site(self.con) is not None:
+            # BEZPIECZNIK PĘTLI: jedno ponowienie, potem błąd na ekran. Gdyby rdzeń dalej
+            # meldował brak stanowiska przy stanowisku obecnym (rozjazd predykatów), `no_site →
+            # replan` kręciłby się bez końca. Flagę zeruje dopiero udany plan (`_on_done`).
+            if not self._ponowiono_bez_stanowiska:
+                self._ponowiono_bez_stanowiska = True
+                QTimer.singleShot(0, self, self.replan)
+                return
+            self._pokaz_blad(gen, message, bez_stanowiska=False)   # stanowisko jest - nie pusty stan
+            return
+        self._pokaz_blad(gen, i18n.t("planner.no_site_title"), bez_stanowiska=True)
+
+    def _pokaz_blad(self, gen, message, *, bez_stanowiska):
+        """Ekran po nieudanym rachunku. BAZA BEZ STANOWISKA TO STAN, NIE AWARIA (AR-48): dostaje
+        pusty stan z gestem i zdanie z katalogu (surowe zdanie rdzenia szło dotąd na nagłówek i na
+        pasek stanu, także nad ekranem Dostawy). Każdy inny błąd - tabela i surowy komunikat. To,
+        czy zdanie w ogóle padnie na pasek, rozstrzyga gospodarz (tylko przy widocznym planerze)."""
         self._result = None
         self._shown_gen = gen
         self.model.set_rows(())
+        self.bez_stanowiska = bez_stanowiska
         self.night_label.setText(message)
         self.counts_label.setText("")
         self.warn_label.setText("")
@@ -1114,8 +1173,10 @@ class PlannerView(QWidget):
         # Sekcja sierot znika razem z wynikiem: przy nieudanym rachunku (baza bez stanowiska GPS)
         # nie wiemy NIC o kurateli, a stara lista udawałaby świeży pomiar.
         self._render_orphans(None)
-        self.empty_note.setVisible(False)
-        self.table.setVisible(True)
+        self.empty_note.setText(i18n.t("planner.no_site"))
+        self.empty_note.setVisible(self.bez_stanowiska)
+        self.empty_btn.setVisible(self.bez_stanowiska)
+        self.table.setVisible(not self.bez_stanowiska)
         self.status_message.emit(message)
 
     # ---------------------------------------------------------------- render

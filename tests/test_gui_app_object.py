@@ -895,7 +895,7 @@ def test_en_render_z_katalogu(qapp, tmp_path):
     v = ObjectAxisView(con)
     try:
         hdrs = [v.objects.horizontalHeaderItem(c).text() for c in range(v.objects.columnCount())]
-        assert hdrs == ["Object", "Catalog", "Frames"]
+        assert hdrs == ["Object", "Catalog", "Frames", "Hours"]
         assert v.assign_btn.text() == "Assign object…"
         assert v.lib_empty.text() == "No objects for this filter — change the filter or resolve."
     finally:

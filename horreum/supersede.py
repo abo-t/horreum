@@ -38,6 +38,7 @@ awarią ŚWIATA ZEWNĘTRZNEGO (share zamontowany pusty ⇒ „wszystko zniknęł
 własny dziennik bazy, którego żadna awaria dysku nie napompuje. Granica nazwana, nie obłożona
 kodem na populację, która nie ma jak powstać.
 """
+import json
 from dataclasses import dataclass, field
 
 from . import repo
@@ -272,6 +273,154 @@ def pending_transfer(con):
         if osie:
             out.append((r["id"], r["superseded_by"], "+".join(osie)))
     return out
+
+
+def kept_object_facts(con):
+    """Klatki zastąpione, na których FAKT RĘKI OBIEKTU ZOSTAŁ, bo następczyni nie jest lightem (AR-41).
+
+    Druga połowa osi obiektu wobec `pending_transfer`: tam para wchodzi, gdy następczyni JEST lightem
+    (gest przeniesie werdykt), tu - gdy nie jest (kalibracja z definicji nie ma obiektu, rodzaj
+    `unknown` jeszcze nie jest lightem). Klinga w tym stanie zostawia werdykt na klatce zastąpionej
+    i mówi o tym `FactTransfer.object_kept`; ta funkcja mówi to samo ZE STANU, bez gestu - po to
+    wiersz Porządków „Fakt ręki zatrzymany na zastąpionej klatce” istnieje, a nie tylko zdanie po
+    geście, którego nikt nie wykonał. Predykat jest LUSTREM `obiekt_zostaje` w
+    `repo.transfer_human_facts` (źródło z `TRANSFERABLE_OBJECT_SOURCES`, rodzaj następczyni poza
+    `LIGHT_KINDS`); rozjazd tych dwóch miejsc pinuje test.
+
+    To NIE jest robota: werdykt nie przepadł (append-only, zostaje na zastąpionej), tylko nie ma
+    dokąd iść. Gdy przebieg ustali następczyni rodzaj light, para przechodzi stąd do
+    `pending_transfer` - oba zbiory liczone ze stanu, rozłączne z konstrukcji.
+
+    Zwraca `[(stara, nowa), …]` po `stara`. Populacja 2026-10-06 na żywej bazie: 0."""
+    rows = con.execute(
+        "SELECT f.id, f.superseded_by, f.object_source, n.kind AS n_kind "
+        "FROM frame f JOIN frame n ON n.id = f.superseded_by "
+        "WHERE f.superseded_by IS NOT NULL ORDER BY f.id").fetchall()
+    transferowalne = set(TRANSFERABLE_OBJECT_SOURCES)
+    return [(r["id"], r["superseded_by"]) for r in rows
+            if r["object_source"] in transferowalne and r["n_kind"] not in LIGHT_KINDS]
+
+
+# Powody `FactTransfer.skipped` → sufiks klucza zdania gestu. Klinga ma cztery powody; nieznany
+# powód to błąd wołającego (EXPECT), nie cichy człon „inne": zdanie ma mówić DLACZEGO, a powód
+# dopisany w klindze bez wpisu tutaj zniknąłby z rozbicia.
+_POWODY_POMINIECIA = {
+    "brak faktow czlowieka": "none",
+    "nastepczyni ma wlasne zrodlo": "own",
+    "zestaw nie pasuje do nastepczyni": "config_mismatch",
+    # Ten powód niesie też `object_kept=True` i liczy się TAM (osobny człon zdania) - w rozbiciu
+    # pominięć powtórzyłby tę samą klatkę drugi raz.
+    "nastepczyni to kalibracja - obiekt zostaje na zrodle": None,
+}
+
+
+@dataclass
+class TransferGesture:
+    """Wynik gestu „Przenieś fakty ręki" na zaznaczeniu (AR-41). Liczby osi liczą KLATKI, na których
+    dana oś przeszła; `lineage_moved`/`lineage_dropped` liczą WIERSZE rodowodu (jedna klatka bywa
+    wejściem wielu obrazów - `FactTransfer`). `done` = klatki, z których cokolwiek przeszło albo
+    zdjęto martwy wskaźnik; `object_kept` = klatki z werdyktem obiektu zatrzymanym na zastąpionej
+    (może współwystąpić z `done`, gdy w tym samym geście przeszła inna oś); `not_superseded` =
+    zaznaczone klatki, które nie są zastąpione (gest ich nie dotyczy); `skipped` = {sufiks powodu:
+    liczba} dla klatek, z których nic nie przeszło; `no_longer_superseded` = klatki zastąpione
+    w chwili odczytu, które przestały nimi być przed klingą (skan zgasił ogniwo, bo treść wróciła -
+    `repo.clear_superseded`): jawny powód, nie wyjątek przerywający gest w połowie."""
+    total: int = 0
+    done: int = 0
+    object_moved: int = 0
+    config_moved: int = 0
+    observatory_moved: int = 0
+    lineage_moved: int = 0
+    lineage_dropped: int = 0
+    object_kept: int = 0
+    not_superseded: int = 0
+    no_longer_superseded: int = 0
+    skipped: dict = field(default_factory=dict)
+    frame_ids: tuple = ()           # klatki zastąpione, z których cokolwiek przeszło
+
+
+def transfer_gesture(con, *, frame_ids, now, actor="user:local"):
+    """Gest „Przenieś fakty ręki na następczynię" na zaznaczeniu perspektywy „Zastąpione" (AR-41).
+
+    Pierwszy wołający produkcyjny klingi `repo.transfer_human_facts`. Klatka po klatce, każda we
+    własnej transakcji klingi (idempotentnej - powtórzenie trafia w guardy osi i nic nie zapisuje),
+    więc gest przerwany w połowie zostawia stan spójny i da się go powtórzyć. Klatki NIEzastąpione
+    odsiewa odczyt PRZED klingą, bo klinga traktuje je jako błąd wołającego (EXPECT) - a zaznaczenie
+    w gridzie bywa szersze niż perspektywa; nie są pominięciem z powodem, tylko spoza zakresu gestu.
+
+    Ręka nietykalna: klinga przenosi wyłącznie fakty ręki na następczynię, która sama nie przemówiła,
+    a klatka zastąpiona zostaje nietknięta. Zwraca `TransferGesture`.
+
+    ODCZYT I KLINGA TO OSOBNE TRANSAKCJE: równoległy skan może między nimi zgasić ogniwo
+    (`repo.clear_superseded`, treść wróciła pod ścieżkę) i klinga odmówi własnym typem
+    `repo.KlatkaNieJestZastapiona`. Tylko ten typ liczy się jako `no_longer_superseded` (bez
+    ponownego odczytu - o przyczynie mówi miejsce rzucenia, nie późniejszy stan); każdy inny wyjątek
+    (także `KeyError` nieznanego powodu - EXPECT) leci dalej, ale niesie RAPORT CZĘŚCIOWY w atrybucie
+    `przeniesienie` - wcześniejsze klatki są już zapisane i wołający ma o nich powiedzieć."""
+    g = TransferGesture(total=len(frame_ids))
+    zastapione = {r["id"] for r in con.execute(
+        "SELECT id FROM frame WHERE superseded_by IS NOT NULL "
+        "AND id IN (SELECT value FROM json_each(?))",
+        (json.dumps([int(i) for i in frame_ids]),))}
+    ruszone = []
+    try:
+        for fid in frame_ids:
+            if fid not in zastapione:
+                g.not_superseded += 1
+                continue
+            try:
+                t = repo.transfer_human_facts(con, frame_id=fid, now=now, actor=actor)
+            except repo.KlatkaNieJestZastapiona:
+                g.no_longer_superseded += 1
+                continue
+            g.object_moved += t.object_moved
+            g.config_moved += t.config_moved
+            g.observatory_moved += t.observatory_moved
+            g.lineage_moved += t.lineage_moved
+            g.lineage_dropped += t.lineage_dropped
+            g.object_kept += t.object_kept
+            if (t.object_moved or t.config_moved or t.observatory_moved or t.lineage_moved
+                    or t.lineage_dropped):
+                g.done += 1
+                ruszone.append(fid)
+            elif t.skipped:
+                sufiks = _POWODY_POMINIECIA[t.skipped]      # KeyError = nowy powód bez wpisu (EXPECT)
+                if sufiks is not None:
+                    g.skipped[sufiks] = g.skipped.get(sufiks, 0) + 1
+    except Exception as exc:
+        g.frame_ids = tuple(ruszone)
+        exc.przeniesienie = g
+        raise
+    g.frame_ids = tuple(ruszone)
+    return g
+
+
+def zdanie_przeniesienia(g):
+    """Jedno zdanie paska statusu po geście przeniesienia - z KAŻDYM członem, który ma liczbę.
+
+    `object_kept` ma WŁASNY człon, nie ginie w „pominięto": werdykt ręki nie przepadł, tylko został
+    na klatce zastąpionej, i to jest jedyne miejsce, gdzie człowiek się o tym dowie w chwili gestu.
+    Katalog i18n importowany leniwie (Qt-wolny, jak w `filter_engine`): rdzeń bez GUI go nie ciągnie."""
+    from .gui import i18n
+    msg = i18n.t_plural("supersede.transfer.done", g.total, done=g.done)
+    osie = [(k, n) for k, n in (("object", g.object_moved), ("config", g.config_moved),
+                                ("site", g.observatory_moved), ("lineage", g.lineage_moved))
+            if n]
+    if osie:
+        msg += i18n.t("supersede.transfer.axes", axes=", ".join(
+            i18n.t(f"supersede.transfer.axis_{k}", n=n) for k, n in osie))
+    if g.object_kept:
+        msg += i18n.t_plural("supersede.transfer.object_kept", g.object_kept)
+    if g.lineage_dropped:
+        msg += i18n.t_plural("supersede.transfer.lineage_dropped", g.lineage_dropped)
+    for sufiks in ("own", "config_mismatch", "none"):
+        if g.skipped.get(sufiks):
+            msg += i18n.t_plural(f"supersede.transfer.skip_{sufiks}", g.skipped[sufiks])
+    if g.no_longer_superseded:
+        msg += i18n.t_plural("supersede.transfer.no_longer_superseded", g.no_longer_superseded)
+    if g.not_superseded:
+        msg += i18n.t_plural("supersede.transfer.not_superseded", g.not_superseded)
+    return msg
 
 
 def orphans(con):

@@ -6,7 +6,7 @@ liczby, nigdy `QPointF` — przechodzi bramkę izolowanego clone'a bez PySide6.
 Rzut = WŁASNA matematyka mapy (equirectangular lokalny), NIE reużywa haversine/THRESH resolvera — mapa
 i `resolve.observatory` mają różne cele (rzut 2D vs dopasowanie punktu do stanowiska). Zakres realny:
 astro deep-sky nie stawia sprzętu na biegunie; antymeridian obsłużony przez modulo-unwrap długości
-(F8 F9), biegun `cos(lat)→0` świadomie poza (SIN-PRECRUFT, forward-guard jak sentinel (0,0) osi)."""
+(F8 F9) i rozcinanie konturów na szwie rzutu (`LocalProjection.project_line`), biegun `cos(lat)→0` świadomie poza (SIN-PRECRUFT, forward-guard jak sentinel (0,0) osi)."""
 import json
 import math
 from importlib import resources
@@ -105,6 +105,41 @@ class LocalProjection:
         dlon = (lon - self.lon0 + 180.0) % 360.0 - 180.0     # [-180,180] — najkrótsza różnica długości
         return (dlon * KM_PER_DEG * self._coslat, (lat - self.lat0) * KM_PER_DEG)
 
+    def project_line(self, line):
+        """Polilinia `[(lon, lat), …]` → lista KAWAŁKÓW `[(x_km, y_km), …]` rozciętych na szwie rzutu.
+
+        Szwem jest antypołudnik ŚRODKA widoku (`lon0 ± 180`), nie geograficzne ±180: rzut bierze
+        różnicę długości modulo 360, więc pierścień lądu, który przecina `lon0 ± 180`, skakałby
+        z jednego brzegu mapy na drugi - jeden odcinek przez całą szerokość widoku. Zmierzone na
+        Polsce + Tekapo (środek ~94° E): szew na ~86° W tnie obie Ameryki i Antarktydę, a każde
+        przecięcie rysowało poziomą kreskę przez cały kadr. Dla widoku wokół 0° szew wypada na ±180,
+        gdzie Natural Earth sam dzieli pierścienie (poza Antarktydą), więc rozcięcie niczego nie zmienia.
+
+        Odcinek przecinający szew kończy kawałek NA KRAWĘDZI (szerokość interpolowana liniowo po
+        krótszej różnicy długości), a następny zaczyna się na krawędzi przeciwnej. Kawałek krótszy
+        niż 2 punkty nie ma czego rysować - odpada."""
+        def x_km(dlon):                               # ta sama arytmetyka co `project` (co do bitu)
+            return dlon * KM_PER_DEG * self._coslat
+
+        pieces, cur = [], []
+        prev = None                                   # (dlon, lat) poprzedniego punktu
+        for lon, lat in line:
+            d = (lon - self.lon0 + 180.0) % 360.0 - 180.0
+            if prev is not None and abs(d - prev[0]) > 180.0:
+                step = (lon - (prev[0] + self.lon0) + 180.0) % 360.0 - 180.0   # krótsza droga
+                edge = 180.0 if prev[0] > 0 else -180.0
+                t = (edge - prev[0]) / step if step else 0.0
+                lat_c = prev[1] + t * (lat - prev[1])
+                cur.append((x_km(edge), (lat_c - self.lat0) * KM_PER_DEG))
+                if len(cur) >= 2:
+                    pieces.append(cur)
+                cur = [(x_km(-edge), (lat_c - self.lat0) * KM_PER_DEG)]
+            cur.append((x_km(d), (lat - self.lat0) * KM_PER_DEG))
+            prev = (d, lat)
+        if len(cur) >= 2:
+            pieces.append(cur)
+        return pieces
+
 
 class ViewTransform:
     """Dopasowanie rzutu do prostokąta widżetu: `to_px(lat,lon)→(px,py)` (y w górę → piksel w dół),
@@ -121,6 +156,11 @@ class ViewTransform:
     def to_px(self, lat, lon):
         x, y = self.proj.project(lat, lon)
         return (self.w / 2 + (x - self.cx) * self.scale, self.h / 2 - (y - self.cy) * self.scale)
+
+    def line_to_px(self, line):
+        """Polilinia `[(lon, lat), …]` → kawałki w px, rozcięte na szwie rzutu (`project_line`)."""
+        return [[(self.w / 2 + (x - self.cx) * self.scale, self.h / 2 - (y - self.cy) * self.scale)
+                 for x, y in piece] for piece in self.proj.project_line(line)]
 
     def km_to_px(self, km):
         return km * self.scale
@@ -140,12 +180,19 @@ def _nice_km(target):
     return p
 
 
-def fit_view(sites, width, height, margin_frac=0.08):
+def fit_view(sites, width, height, margin_frac=0.08, pad_px=0.0):
     """`sites` = [(lat,lon), …] (≥1) → `ViewTransform` dopasowany do prostokąta `width×height` px.
     Środek widoku = środek bbox stanowisk (km); półzakres KAŻDEJ osi klampowany do `MIN_HALF_KM`
     OSOBNO (F7 — stanowiska współliniowe/pojedynczy punkt nie dzielą przez 0). Długości rozwinięte
     względem 1. stanowiska (antymeridian, F9). `width`/`height` ≤ 0 → skala 0 (widżet jeszcze bez
-    rozmiaru — nic nie maluje)."""
+    rozmiaru - nic nie maluje).
+
+    `pad_px` = margines STAŁY w pikselach z każdej strony, ponad ułamkowy `margin_frac`. Sam ułamek
+    nie wystarcza przy zasięgu kontynentalnym: Polska + Tekapo stawiały Tekapo ~14 px od dolnej
+    krawędzi, a dysk zaznaczonego punktu z pierścieniem ma promień ~19 px - punkt leżał NA
+    krawędzi. Wołający podaje margines z geometrii własnego malowania (promień punktu, pierścień).
+    W wymiarze węższym niż 4 × `pad_px` margines maleje płynnie do ćwierci tego wymiaru - nie
+    zjada całego kadru i nie skacze przy progu."""
     lat0, lon0 = sites[0]
     ulons = [lon0 + ((lon - lon0 + 180.0) % 360.0 - 180.0) for _, lon in sites]
     lats = [lat for lat, _ in sites]
@@ -166,7 +213,11 @@ def fit_view(sites, width, height, margin_frac=0.08):
     if width <= 0 or height <= 0:
         scale = 0.0
     else:
-        scale = min(width / (2 * half_x), height / (2 * half_y))
+        # Margines klamrowany PŁYNNIE do ćwierci wymiaru: próg „wszystko albo nic” zrzucał go do
+        # zera przy 4 × `pad_px` (98 px: punkt ~3,6 px od krawędzi, 99 px: nagle ~26 px).
+        aw = width - 2 * min(pad_px, width / 4)
+        ah = height - 2 * min(pad_px, height / 4)
+        scale = min(aw / (2 * half_x), ah / (2 * half_y))
     return ViewTransform(proj, scale, width, height, cx, cy)
 
 

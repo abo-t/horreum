@@ -20,7 +20,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QLocale, QSettings, QUrl, Signal
+from PySide6.QtCore import Qt, QLocale, QSettings, QTimer, QUrl, Signal
 from PySide6.QtGui import QActionGroup, QColor, QDesktopServices, QFontMetrics, QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
 
 from horreum import db, macro as macro_mod, repo, resolver
 from horreum.resolver import forma_karty_object   # SPOT formy karty OBJECT (Qt-wolny)
-from horreum.gui import busy, i18n, mapproj, queries, rows, theme
+from horreum.gui import busy, i18n, mapproj, portfolio, queries, rows, theme
 from horreum.gui.assign_dialog import AssignObjectDialog
 from horreum.gui.wb_worker import zdanie_commitu_kart, zdanie_undo_kart
 from horreum.gui.config_dialog import AssignConfigDialog
@@ -562,8 +562,11 @@ class TelescopeAxisView(QWidget):
 
 # ============================================================ oś OBIEKT (PLAN_gui_object + #8/P4)
 
-OBJ_COL_CANON, OBJ_COL_CATALOG, OBJ_COL_FRAMES = range(3)
-OBJ_HEADERS = ["object.col.name", "object.col.catalog", "col.frames"]
+# „Godziny" (FH-10) - naświetlenie lightów pod filtrami biblioteki (`queries.library_exposure`),
+# rozbicie per filtr w tooltipie. Liczba klatek nie mówi, ile materiału jest: 40 subów po 30 s
+# i 40 po 600 s to ta sama liczba w kolumnie „Klatki".
+OBJ_COL_CANON, OBJ_COL_CATALOG, OBJ_COL_FRAMES, OBJ_COL_HOURS = range(4)
+OBJ_HEADERS = ["object.col.name", "object.col.catalog", "col.frames", "object.col.hours"]
 FRAME_COL_SHA, FRAME_COL_TEL, FRAME_COL_CAM, FRAME_COL_FILTER, FRAME_COL_DATE, FRAME_COL_PRESENT, \
     FRAME_COL_PATH = range(7)
 FRAME_HEADERS = ["frame.col.sha", "frame.col.telescope", "frame.col.camera", "frame.col.filter",
@@ -1621,12 +1624,23 @@ class ObjectAxisView(QWidget):
             # wypychałby ze statusu dokładnie to zdanie, po które user czekał.
             rows = queries.library_objects(
                 self.con, telescope_id=flt["telescope_id"], filter_canon=flt["filter_canon"])
+            godziny = portfolio.summarize(queries.library_exposure(
+                self.con, telescope_id=flt["telescope_id"], filter_canon=flt["filter_canon"]))
             _przeladuj_wiersze(self.objects, len(rows))
             target_row = -1
             for r, row in enumerate(rows):
                 self._set_obj_cell(r, OBJ_COL_CANON, row["canon"], data=row["id"])
                 self._set_obj_cell(r, OBJ_COL_CATALOG, row["catalog"] or "")
                 self._set_obj_cell(r, OBJ_COL_FRAMES, str(row["frame_count"]), align=_NUM_ALIGN)
+                # Obiekt z samymi masterlightami nie ma godzin subów - komórka milczy zamiast
+                # udawać „0.0 h". Lighty bez EXPTIME mówią o sobie W KOMÓRCE tym samym sufiksem co
+                # listwa gridu (`portfolio.object_suffix`, bez separatora listwy): „0.0 h" bez
+                # ogona czytałoby się jak „brak materiału", choć klatki są, tylko bez czasu.
+                wpis = godziny.get(row["id"])
+                self._set_obj_cell(
+                    r, OBJ_COL_HOURS,
+                    portfolio.object_suffix(wpis).removeprefix(" · ") if wpis else "",
+                    align=_NUM_ALIGN, tip=portfolio.object_tooltip(wpis) if wpis else None)
                 if row["canon"] == select_canon \
                         or (select_canon is None and row["id"] == prev):
                     target_row = r
@@ -1968,13 +1982,15 @@ class ObjectAxisView(QWidget):
                 btn.click()
                 return
 
-    def _set_obj_cell(self, r, c, text, *, data=None, align=None):
+    def _set_obj_cell(self, r, c, text, *, data=None, align=None, tip=None):
         item = QTableWidgetItem(text)
         item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
         if align is not None:                 # liczba klatek prawo-wyrównana (skanowalność, wizytator O1)
             item.setTextAlignment(align)
         if data is not None:
             item.setData(Qt.UserRole, data)
+        if tip:
+            item.setToolTip(tip)
         self.objects.setItem(r, c, item)
 
     def _selected_object_id(self):
@@ -2743,6 +2759,11 @@ class ObservatoryAxisView(QWidget):
         Selekcja tabeli kaskaduje przez `itemSelectionChanged` → `_on_selection_changed`
         (wyróżnienie mapy + stan OSM) — mapa NIE orkiestruje, tabela zostaje właścicielem selekcji
         (SPOT). Nieznany oid (wiersz zniknął między refreshami) ignorowany."""
+        self._select_observatory(oid)
+
+    def _select_observatory(self, oid):
+        """Zaznacz wiersz stanowiska `oid` (kanon). Kaskada jak przy kliku w mapę: tabela →
+        `_on_selection_changed` → wyróżnienie mapy i OSM. Nieznany oid - bez skutku."""
         for r in range(self.table.rowCount()):
             item = self.table.item(r, OBS_COL_ID)
             if item and item.data(Qt.UserRole) == oid:
@@ -2910,6 +2931,9 @@ class ObservatoryAxisView(QWidget):
             QMessageBox.warning(self, i18n.t("obshand.title"), str(e))
             return
         self.refresh()
+        if mode != "clear" and g.observatory_id is not None:   # cel gestu zaznaczony: tabela,
+            cid, _ = queries.observatory_site_label(self.con, g.observatory_id)   # szczegół i mapa
+            self._select_observatory(cid)                      # pokazują, gdzie trafiły klatki
         self._flash(zdanie_stanowiska(self.con, mode, g))
 
 
@@ -3157,27 +3181,32 @@ class MainWindow(QMainWindow):
         # wielokropka i w środku słowa. Ucinany był człon OSTATNI, czyli instrukcja powrotu —
         # jedyna część zdania, po którą user faktycznie sięga.
         #
-        # `QToolButton`, nie `QLabel`, choć dziś nic nie robi: docelowo recepta ma powrót WYKONAĆ,
-        # a nie opisać (FH-2 wariant „e"), i wtedy wystarczy zdjąć przezroczystość dla myszy oraz
-        # podpiąć akcję, którą recepta nazywa. Przezroczystość jest tu warunkiem UCZCIWOŚCI:
-        # przycisk, który podnosi się pod kursorem i nic nie robi, kłamie bardziej niż etykieta.
+        # RECEPTA WYKONUJE POWRÓT, NIE TYLKO GO OPISUJE (FH-2e). Klik robi człon PIERWSZY recepty
+        # (kolejność członów jest kolejnością w czasie): odsłonięcie celu albo pozycję menu, którą
+        # zdanie nazywa - ten sam slot, co w menu, bez kopii. Wariant „potem" (gest jeszcze
+        # niewykonalny) zostawia przycisk WYGASZONY, nie znika: zdanie dalej mówi prawdę.
         #
-        # ⚠ `autoRaise` MUSI BYĆ WŁĄCZONE, DOPÓKI RECEPTA NIC NIE ROBI, i to jest pomiar firsthandu,
-        # nie estetyka: bez niego `QToolButton` rysuje się jako przycisk WYPUKŁY (ramka 31,31,31,
-        # gradient 79-81), czyli wygląda na aktywny i kłamie afordancją - a jest całkowicie bezwładny
-        # (`bar.childAt(środek) is None`). Płaski rysunek czyta się jako tekst. Przy dopięciu akcji
-        # wariantu „e" ta linia wraca do `False` RAZEM ze zdjęciem przezroczystości - obie naraz.
+        # `autoRaise` WYŁĄCZONE RAZEM ZE ZDJĘCIEM PRZEZROCZYSTOŚCI DLA MYSZY - obie połowy naraz.
+        # Płaski rysunek był uczciwy, dopóki kontrolka nic nie robiła; teraz klik działa, więc ma
+        # wyglądać na przycisk (firsthand mierzył ramkę 31,31,31 z gradientem 79-81 - właśnie tę
+        # afordancję).
         #
         # BEZ `role=secondary`: selektor motywu to wyłącznie `QLabel[role=…]` (`theme.py`), więc na
         # `QToolButton` własność jest MARTWA - i dobrze, bo gdyby działała, recepta zeszłaby do
-        # 3,67:1, poniżej progu 4,5:1 (zmierzone). Rozróżnienie wizualne niesie płaski rysunek,
-        # nie przygaszony kolor; własność zdjęta, żeby pierwszy „naprawiacz" jej nie ożywił.
+        # 3,67:1, poniżej progu 4,5:1 (zmierzone). Własność zdjęta, żeby pierwszy „naprawiacz" jej
+        # nie ożywił.
         self.recipe_label = QToolButton()
-        self.recipe_label.setAutoRaise(True)
+        # Nazwa obiektu = selektor reguły WYGASZONEJ recepty w `theme.qss` (W4): wygaszona recepta
+        # to zdanie do przeczytania, więc ma tekst `secondary_text` i ramkę przerywaną, a nie
+        # domyślne `disabled_text` (1,63:1 w ciemnym motywie, firsthand na platformie natywnej).
+        self.recipe_label.setObjectName(theme.RECEPTA_OBJECT_NAME)
+        self.recipe_label.setAutoRaise(False)
         self.recipe_label.setFocusPolicy(Qt.NoFocus)
-        self.recipe_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.recipe_label.clicked.connect(self._wykonaj_recepte)
         self.statusBar().addPermanentWidget(self.recipe_label)
         self.recipe_label.setVisible(False)     # po dodaniu — `addPermanentWidget` pokazuje widżet
+        self._czlony_recepty = ()               # człony recepty na przycisku (FH-2e: klik robi pierwszy)
+        self._recepta_wstrzymana = False        # blokada po wykonaniu członu - dwuklik to jeden gest (Z5)
         # FAZA DOPIERO PO RECEPCIE - kolejność dodawania jest kolejnością OD LEWEJ, więc faza dodana
         # pierwsza wchodziła MIĘDZY raport a receptę i rozdzielała dwa człony jednego zdania
         # komunikatem trzeciej sprawy (firsthand, zrzut `K_faza.png`). Recepta przykleja się teraz
@@ -3190,11 +3219,12 @@ class MainWindow(QMainWindow):
         self._ms_komunikatu = 5000              # timeout żywego raportu (0 = bez wygasania)
         self._ostatnio_pokazany = ""            # tekst POSTAWIONY przez nas - strażnik cudzych zdań
         self._miejsce_komunikatu = None         # miejsce nawigacji, do którego raport należy (None = żadne)
-        self._odlozony_raport_gridu = ""        # raport wczytania Zbiorów czekający na wejście w nie
-        # RECEPTA ŻYJE DOKŁADNIE TYLE, CO JEJ RAPORT. `messageChanged` z pustym łańcuchem to jedyny
-        # sygnał wygaśnięcia komunikatu (timeout 5 s albo cudzy `showMessage`), więc drugi timer
-        # byłby drugim właścicielem tego samego zdarzenia — i rozjechałby się z nim przy pierwszej
-        # zmianie czasu. Recepta przy cudzym raporcie mówiłaby o geście, którego już nie widać.
+        # Raporty widoków czekające na wejście w SWOJE miejsce nawigacji (`_raport_miejsca`):
+        # `{miejsce: zdanie}` - wczytanie Zbiorów i oś stanowisk po przebiegu Dostawy (AR-43).
+        self._odlozone_raporty = {}
+        # Wygaśnięcie raportu zeruje jego pełną treść i podpowiedź. RECEPTY NIE GASI (FH-2e):
+        # recepta żyje tyle, co jej prawda - gasi ją cudzy raport (`_flash`), wyjście ze Zbiorów
+        # i sam widok, gdy przestaje być prawdziwa - a nie zegar komunikatu.
         self.statusBar().messageChanged.connect(self._on_status_changed)
 
     def _show_view(self, idx):
@@ -3211,12 +3241,23 @@ class MainWindow(QMainWindow):
             self._miejsce_komunikatu = None
             self._pelny_komunikat = ""
             self.statusBar().clearMessage()
-        if row == NAV_ZBIORY and self._odlozony_raport_gridu:
-            # Raport wczytania z chwili, gdy Zbiorów nie było widać - pada teraz, przy nich.
-            msg, self._odlozony_raport_gridu = self._odlozony_raport_gridu, ""
-            self._flash(msg, miejsce=NAV_ZBIORY)
+        # Recepta mówi o Zbiorach (jedynym nadawcą jest grid), więc poza nimi gaśnie z paska -
+        # a przy powrocie widok podaje ją ze stanu, o ile wciąż jest prawdą (FH-2e).
+        if row != NAV_ZBIORY:
+            self._ustaw_recepte("")
+        msg = self._odlozone_raporty.pop(row, "")
+        if msg:
+            # Raport z chwili, gdy tego miejsca nie było widać - pada teraz, przy nim.
+            self._flash(msg, miejsce=row)
+        if row == NAV_ZBIORY:
+            self.grid_view.ponow_recepte()
         if row == NAV_PORZADKI:        # wejście w Porządki = świeży stan liczników zadań
             self.tasks_view.refresh_counts()
+        if row == NAV_PLANER and self.planner_view.bez_stanowiska:
+            # Stanowisko wskazuje się na innym ekranie (AR-48), więc pusty stan „bez stanowiska"
+            # przelicza się przy każdym wejściu, dopóki jest prawdą - gest z pustego stanu obiecuje,
+            # że plan policzy się po powrocie.
+            self.planner_view.refresh()
 
     def _zatrzymaj_watki_widokow(self):
         """Zbierz wątki tła widoków, ZANIM widoki znikną (przełączenie bazy, zamknięcie okna).
@@ -3230,7 +3271,10 @@ class MainWindow(QMainWindow):
 
     def _clear_views(self):
         self._zatrzymaj_watki_widokow()
-        self._odlozony_raport_gridu = ""     # raport odłożony mówi o widoku, który właśnie znika
+        self._odlozone_raporty.clear()       # raporty odłożone mówią o widokach, które właśnie znikają
+        # Wykonawcy członów recepty wiszą na gridzie, który zaraz pójdzie do `deleteLater` - recepta
+        # schodzi z paska tu, a nie dopiero przy pierwszym raporcie nowej bazy (Z9).
+        self._ustaw_recepte("")
         self.nav.clear()
         self.nav.setVisible(False)
         while self.stack.count():
@@ -3264,7 +3308,7 @@ class MainWindow(QMainWindow):
         grid = FramesView(self.con, now_fn=self._now, pola_poza_watkiem=self._pola_poza_watkiem)
         grid.status_message.connect(self._flash_grid)
         grid.load_report.connect(self._raport_wczytania_gridu)
-        grid.status_recipe.connect(self._pokaz_recepte)   # recepta ma własny nośnik (FH-2)
+        grid.status_recipe.connect(self._recepta_gridu)   # recepta ma własny nośnik (FH-2)
         grid.writeback_busy.connect(self._on_writeback_busy)
         self.grid_view = grid
 
@@ -3287,6 +3331,7 @@ class MainWindow(QMainWindow):
         # kolejkę przeglądu w oknie osi — a tamten widok nie ma skąd o tym wiedzieć. Gospodarz zna
         # obie strony, więc to on je łączy (grid nie importuje osi, oś nie importuje gridu).
         grid.object_axis_changed.connect(tasks.object_view.refresh)
+        grid.observatory_axis_changed.connect(tasks.observatory_view.refresh)   # przeniesione stanowisko
         # …i PIĄTA: badge sidebara, widoczny CAŁY CZAS. Liczy `review_frame_ids`, czyli dokładnie
         # populację, którą oba gesty zmieniają — bez tej linii licznik zadań pokazywał stan sprzed
         # gestu aż do wejścia w Porządki, więc „stan widoczny bez klikania" przestawał być prawdą
@@ -3296,8 +3341,14 @@ class MainWindow(QMainWindow):
         # starej liczbie. Jeden sygnał z ogona każdego gestu gridu, jedno podpięcie tutaj - bez
         # drugiego podpięcia pod `object_axis_changed`, które odświeżałoby plakietkę dwa razy.
         grid.stan_porzadkow_changed.connect(tasks.refresh_counts)
-        for v in (tasks.axis_view, tasks.observatory_view, tasks.object_view):
+        for v in (tasks.axis_view, tasks.object_view):
             v.status_message.connect(self._flash)
+        # OŚ STANOWISK MÓWI PRZY KAŻDYM ODŚWIEŻENIU, gdy jest pusta („Brak stanowisk na osi…"),
+        # a odświeża się też po przebiegu Dostawy - zdanie przykrywało wtedy status etapu, po
+        # który user patrzy (AR-43). Ta sama droga, co raport wczytania Zbiorów: przy widocznych
+        # Porządkach pada od razu, poza nimi czeka na wejście w nie.
+        tasks.observatory_view.status_message.connect(
+            lambda msg: self._raport_miejsca(msg, NAV_PORZADKI, wiaz=False))
         tasks.open_collection.connect(self._on_open_collection)
         # Wiersz „?" Porządków prowadzi tam, gdzie jest jego robota - do Dostawy (AR-28 (b)) - i
         # niesie powód: linia nad akcjami mówi, po co człowiek tu jest. Obie drogi do sygnału
@@ -3313,7 +3364,8 @@ class MainWindow(QMainWindow):
         planner = PlannerView(self.con, db_path=self.db_path, now_fn=self._now,
                               theme_name=theme.normalize(
                                   QSettings("Horreum", "Horreum").value("ui/theme", theme.DEFAULT)))
-        planner.status_message.connect(self._flash)
+        planner.status_message.connect(self._raport_planera)
+        planner.open_sites.connect(self._on_open_sites)                # AR-48: pusty stan → stanowiska
         planner.show_frames_for.connect(self._on_show_target_frames)   # T5e: most planer → grid
         self.planner_view = planner
 
@@ -3392,6 +3444,12 @@ class MainWindow(QMainWindow):
             return
         self._show_view(NAV_ZBIORY)
         self.grid_view.apply_object_facet(pairs)
+
+    def _on_open_sites(self):
+        """Pusty stan planera „bez stanowiska" (AR-48) → oś obserwatorium w Porządkach, gdzie stoi
+        „Wskaż stanowisko…". Gospodarz zna oba ekrany; planer nie importuje Porządków."""
+        self._show_view(NAV_PORZADKI)
+        self.tasks_view.otworz_stanowiska()
 
     def _on_tasks_counts(self, n):
         """Badge sidebara: „Porządki (N)" przy N>0; przy zerze GOŁE „Porządki" — „(0)" to szum (F5R#8)."""
@@ -3551,11 +3609,33 @@ class MainWindow(QMainWindow):
         w Dostawie, mówiąc o ekranie, którego nie widać. Odłożony, a nie zgubiony: przy wejściu
         w Zbiory zdanie „Grid: N klatek…" jest prawdziwe i opisuje to, co właśnie pokazujemy.
         Nowszy raport zastępuje odłożony - liczy się ostatnie wczytanie."""
-        if self.nav.currentRow() == NAV_ZBIORY:
-            self._odlozony_raport_gridu = ""
-            self._flash(msg, miejsce=NAV_ZBIORY)
+        self._raport_miejsca(msg, NAV_ZBIORY)
+
+    def _raport_miejsca(self, msg, miejsce, *, wiaz=True):
+        """Raport widoku, który mówi o JEDNYM miejscu nawigacji - na pasek, gdy to miejsce widać,
+        a inaczej odłożony do wejścia w nie (`_on_nav_changed`). Jedna droga dla raportu wczytania
+        Zbiorów i dla osi stanowisk (AR-43): oba padają też po przebiegu Dostawy i oba przykrywały
+        wtedy status etapu, mówiąc o ekranie, którego nie widać.
+
+        `wiaz` - czy raport pokazany OD RAZU ma gasnąć przy wyjściu z miejsca (AR-34). Oś stanowisk
+        mówi tym samym kanałem także wyniki gestów, a te przeżywały zmianę widoku - zostają przy
+        tym. Odłożony raport pada przy wejściu zawsze związany: mówi już wyłącznie o tym ekranie.
+        Nowszy raport zastępuje odłożony - liczy się ostatnie słowo widoku."""
+        if self.nav.currentRow() == miejsce:
+            self._odlozone_raporty.pop(miejsce, None)
+            self._flash(msg, miejsce=miejsce if wiaz else None)
         else:
-            self._odlozony_raport_gridu = msg
+            self._odlozone_raporty[miejsce] = msg
+
+    def _raport_planera(self, msg):
+        """Komunikat planera - na pasek WYŁĄCZNIE przy widocznym planerze (AR-48).
+
+        Planer liczy noc w wątku tła także wtedy, gdy go nie widać (montaż, przebieg Dostawy),
+        a jego zdanie o braku stanowiska stało nad ekranem Dostawy, którego nie dotyczy. Nie
+        odkładamy go: przy wejściu na planer ten sam stan mówi PUSTY STAN ekranu (zdanie i gest
+        „Ustaw stanowisko…"), więc odłożony raport powtarzałby go drugi raz."""
+        if self.nav.currentRow() == NAV_PLANER:
+            self._flash(msg, miejsce=NAV_PLANER)
 
     def _flash(self, msg, ms=5000, miejsce=None):
         """Raport na pasek — Z ELIZJĄ (FH-2). KAŻDY raport gasi receptę poprzedniego gestu.
@@ -3590,6 +3670,50 @@ class MainWindow(QMainWindow):
         if tekst and self._pelny_komunikat:
             self._przelicz_pasek()
 
+    def _recepta_gridu(self, recepta):
+        """Recepta z gridu - na pasek tylko przy widocznych Zbiorach (FH-2e). Grid składa ją ze
+        stanu przy KAŻDYM przeładowaniu, także po przebiegu Dostawy, a recepta mówi o Zbiorach;
+        przy wejściu w nie widok poda ją ponownie (`FramesView.ponow_recepte`)."""
+        if self.nav.currentRow() == NAV_ZBIORY:
+            self._pokaz_recepte(recepta)
+
+    def _wykonaj_recepte(self):
+        """Klik w receptę = człon PIERWSZY (kolejność członów jest kolejnością w czasie, FH-2e).
+        Człon bez wykonawcy ma przycisk wygaszony, więc tu nie dochodzi - warunek jest drugą linią
+        obrony, bo sygnał bywa wołany wprost (testy, skróty).
+
+        PODWÓJNY KLIK TO JEDEN GEST MOTORYCZNY (Z5). Wykonanie członu składa receptę odwrotną
+        synchronicznie (odświeżenie → `ponow_recepte`), więc drugi klik tego samego ruchu ręki
+        wykonałby odwrót odwrotu - masowo i bez potwierdzenia. Po wykonaniu przycisk stoi więc
+        wygaszony przez systemowy odstęp podwójnego kliku (`doubleClickInterval`), a nie do
+        następnego obrotu pętli: drugi klik dwukliku przychodzi z systemu do ~500 ms później,
+        więc blokada na jeden obrót niczego by nie złapała."""
+        if self._recepta_wstrzymana or not self._czlony_recepty:
+            return
+        wykonaj = self._czlony_recepty[0].wykonaj
+        if wykonaj is None:
+            return
+        self._recepta_wstrzymana = True
+        try:
+            wykonaj()
+        finally:
+            self._wlacz_recepte(False)
+            QTimer.singleShot(QApplication.doubleClickInterval(), self, self._odblokuj_recepte)
+
+    def _wlacz_recepte(self, wlaczona):
+        """Stan przycisku recepty - JEDNO miejsce dla włączenia i kursora (W4). Wygaszenie pokazuje
+        ramka przerywana z `theme.qss` i kursor strzałki; tekst zostaje czytelny (`secondary_text`),
+        bo wariant „potem" jest zdaniem do przeczytania. Włączona recepta ma kursor ręki - klik coś
+        robi."""
+        self.recipe_label.setEnabled(wlaczona)
+        self.recipe_label.setCursor(Qt.PointingHandCursor if wlaczona else Qt.ArrowCursor)
+
+    def _odblokuj_recepte(self):
+        """Koniec blokady po wykonaniu członu (Z5): przycisk wraca do stanu BIEŻĄCEJ recepty."""
+        self._recepta_wstrzymana = False
+        self._wlacz_recepte(bool(self._czlony_recepty)
+                            and self._czlony_recepty[0].wykonaj is not None)
+
     def _wyswietl(self, msg):
         """Wyrenderuj raport na pasek i ZAPAMIĘTAJ, co dokładnie tam postawiliśmy."""
         self._ostatnio_pokazany = self._zwezone(msg)
@@ -3613,51 +3737,64 @@ class MainWindow(QMainWindow):
             return
         self._wyswietl(self._pelny_komunikat)
 
-    def _ustaw_recepte(self, tekst):
-        """Wpisz receptę na jej widżet, PRZYCIĘTĄ do swojego sufitu (pusta = widżet znika).
+    def _ustaw_recepte(self, recepta):
+        """Wpisz receptę na jej przycisk, PRZYCIĘTĄ do swojego sufitu (pusta = przycisk znika).
+
+        `recepta` to `grid.Recepta` (zdanie + człony z wykonawcami) - kontrakt `status_recipe`;
+        pusta (także `""`) zdejmuje przycisk.
 
         SUFIT SZEROKOŚCI JEST STRAŻNIKIEM, NIE OZDOBĄ (bramka pakietu, soczewka architektury):
         bez niego recepta jest bezpieczna wyłącznie przez dzisiejszą zawartość katalogu i18n -
         dłuższa etykieta menu w przyszłym tłumaczeniu zjadłaby pole raportu bez żadnego sygnału.
-        Pełna treść nie ginie: niesie ją podpowiedź PASKA (`_zwezone`), a nie tego widżetu -
-        kontrolka przezroczysta dla myszy nie dostaje `QEvent::ToolTip`, więc własna podpowiedź
-        byłaby na niej martwa."""
+        Pełna treść nie ginie: niesie ją podpowiedź paska (`_zwezone`) i podpowiedź przycisku.
+
+        KONTRAKT: NAPIS NA PRZYCISKU OPISUJE TO, CO ZROBI KLIK (Z6). Klik robi człon pierwszy,
+        bo kolejność członów jest kolejnością w czasie - a w realnych receptach człon drugi nigdy
+        nie jest wykonalny obok pierwszego (wariant „potem" istnieje właśnie dlatego, że cel trzeba
+        najpierw odsłonić). Wersja FH-8, która przy braku miejsca zdejmowała człon PIERWSZY,
+        pokazywała więc instrukcję, której klik nie wykonywał. Teraz przy braku miejsca zostaje
+        człon pierwszy z „ · …" na znak, że jest dalszy ciąg, a dalsze człony idą do podpowiedzi;
+        gdy nie mieści się nawet on, tniemy go od prawej. Nazwa pozycji menu z członu drugiego
+        wraca na przycisk sama, gdy po kliknięciu recepta złoży się ze stanu jako jednoczłonowa."""
         bar, przycisk = self.statusBar(), self.recipe_label
-        self._pelna_recepta = tekst
-        przycisk.setVisible(bool(tekst))
-        if not tekst:
+        if not recepta:
+            self._pelna_recepta, self._czlony_recepty = "", ()
+            przycisk.setVisible(False)
             przycisk.setText("")
+            przycisk.setToolTip("")
             return
+        self._pelna_recepta = str(recepta)
+        self._czlony_recepty = recepta.czlony
+        przycisk.setVisible(True)
+        przycisk.setToolTip(str(recepta))
+        self._wlacz_recepte(recepta.czlony[0].wykonaj is not None and not self._recepta_wstrzymana)
         # NADDATEK WIDŻETU MIERZONY, NIE ZGADYWANY: `QToolButton` dokłada do tekstu własne obramowanie
         # i marginesy, więc elizja liczona wprost do sufitu przebijała go o te kilkadziesiąt pikseli
         # (zmierzone: 944 px przy sufcie 914). Stawiamy pełny tekst, odczytujemy różnicę między
         # podpowiedzią rozmiaru a szerokością samego tekstu i dopiero wtedy tniemy - dzięki temu
         # próg trzyma się także po zmianie motywu, fontu i skalowania DPI.
         fm = QFontMetrics(bar.font())
-        przycisk.setText(tekst)
-        naddatek = przycisk.sizeHint().width() - fm.horizontalAdvance(tekst)
-        sufit = int(bar.width() * _PASEK_UDZIAL_RECEPTY) - naddatek
-        przycisk.setText(fm.elidedText(tekst, Qt.ElideRight, max(sufit, 0)))
+        napis = str(recepta)
+        przycisk.setText(napis)
+        naddatek = przycisk.sizeHint().width() - fm.horizontalAdvance(napis)
+        sufit = max(int(bar.width() * _PASEK_UDZIAL_RECEPTY) - naddatek, 0)
+        if fm.horizontalAdvance(napis) > sufit and len(recepta.czlony) > 1:
+            napis = recepta.czlony[0].tekst + recepta.SEPARATOR + "…"
+        przycisk.setText(fm.elidedText(napis, Qt.ElideRight, sufit))
 
     def _on_status_changed(self, msg):
-        """Wygasł komunikat ⇒ gaśnie jego recepta i podpowiedź z pełną treścią.
+        """Wygasł komunikat ⇒ gaśnie jego pełna treść i podpowiedź; podpowiedź zostaje z samą receptą.
 
-        ⚠ PUSTY KOMUNIKAT Z OTWARTEGO MENU TO NIE WYGAŚNIĘCIE. Każda pozycja menu wysyła przy
-        podświetleniu `QStatusTipEvent`, a pozycja bez własnego opisu wysyła go PUSTEGO - okno
-        przepisuje to na `showMessage("")` i pasek melduje `messageChanged("")`, nie do odróżnienia
-        od timeoutu. Zmierzone: gest → `QStatusTipEvent("")` → recepta gaśnie. Trafiało to
-        dokładnie w receptę „Obiekt ▾ → Przywróć cofnięte przypisanie", bo jej WYKONANIE zaczyna
-        się od otwarcia tego menu: instrukcja znikała w trakcie celowania w pozycję, którą nazywa.
-
-        Otwarty popup jest tu jedynym dostępnym rozróżnieniem - stanu paska te dwa zdarzenia mają
-        identyczny. Ogon klasy zostaje: samo najechanie na MENUBAR (bez otwierania) receptę dalej
-        gasi. Nie leczymy tego szerzej, bo lekarstwem jest oparcie recepty o STAN, nie o czas życia
-        komunikatu - i to jest robota wariantu „e" (→ TODO-DŁUG(FH-2e))."""
-        if msg or QApplication.activePopupWidget() is not None:
+        RECEPTA NIE GAŚNIE TU (FH-2e). Dawniej żyła tyle, co jej raport, i to rodziło dwie klasy
+        błędów naraz: dwuczłonowa recepta umierała po wykonaniu pierwszego członu (odświeżenie
+        emituje własny raport), a pusty `QStatusTipEvent` z podświetlonej pozycji menu - okno
+        przepisuje go na `showMessage("")`, nie do odróżnienia od timeoutu - gasił instrukcję
+        w trakcie celowania w pozycję, którą nazywa. Recepta stoi teraz na STANIE: gasi ją cudzy
+        raport (`_flash`), wyjście ze Zbiorów i sam widok, gdy przestaje być prawdą."""
+        if msg:
             return
-        self._ustaw_recepte("")
         self._pelny_komunikat = ""
-        self.statusBar().setToolTip("")
+        self.statusBar().setToolTip(self._pelna_recepta)
 
     def _zwezone(self, msg):
         """Przytnij raport do REALNEGO zapasu paska, jawnym wielokropkiem, z pełną treścią w podpowiedzi.
@@ -3760,17 +3897,3 @@ def main(argv=None):
         busy.repaint()
         win.open_path(start)
     return app.exec()
-
-# --- TODO-DŁUG (z kolejki sesji, dieta 2026-08-10; pełne brzmienia: archiwum aa) ---
-# TODO-DŁUG(FH-2e): recepta na pasku OPISUJE powrót, zamiast go WYKONAĆ - `recipe_label` jest już
-#   `QToolButton`, więc zostaje zdjęcie `WA_TransparentForMouseEvents` i podpięcie akcji, którą
-#   recepta nazywa. Trzy różne mechanizmy celu (akcja menu „Obiekt", przycisk „× Wyczyść zbiór",
-#   pozycja listy perspektyw), a wariant „potem" celuje w gest jeszcze NIEwykonalny - klikalny
-#   przycisk musi wtedy zostać wygaszony, nie zniknąć.
-#   ⚠ WARIANT „e" MUSI PRZY OKAZJI PRZENIEŚĆ RECEPTĘ Z CZASU NA STAN - i to jest jego właściwy
-#   powód, nazwany przez bramkę pakietu (obie soczewki), nie kosmetyka. Dziś recepta żyje tyle,
-#   co jej raport: 5 s, a przy dwóch członach umiera po wykonaniu PIERWSZEGO, bo `refresh()`
-#   emituje własny status i gasi ją dokładnie wtedy, gdy człon drugi staje się wykonalny.
-#   Odwracalność jest faktem o STANIE (trwa, dopóki jest co przywracać), więc recepta ma się
-#   składać w `refresh()` ze stanu i gasnąć, gdy przestaje być prawdziwa. Świadomy koszt paczki
-#   `A`: nie jest to regresja (przed nią całe zdanie ginęło tak samo), ale nie jest to wzorzec.

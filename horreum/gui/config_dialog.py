@@ -9,13 +9,171 @@ JEDNOSTKĄ JEST FOLDER × KAMERA (D-DR-3), nie klatka i nie folder. Zmierzone na
 w 36 folderach (mediana 5,5 · max 100), z czego **2 foldery mają dwa korpusy** — grupa „folder"
 obiecywałaby jeden gest tam, gdzie muszą powstać dwa zestawy.
 """
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QFontMetrics, QGuiApplication
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QLabel, QListWidget, QListWidgetItem,
-    QVBoxLayout,
+    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QLabel, QLineEdit, QListWidget,
+    QListWidgetItem, QStyle, QStyledItemDelegate, QVBoxLayout,
 )
 
 from horreum.gui import i18n, queries
+
+# ---------------------------------------------------------------------------------------------
+# LISTA FOLDERÓW OKIEN GESTU RĘKI - wspólne dla tego okna i `observatory_dialog` (jedna konwencja
+# okien gestu ręki). Zmierzone na żywej bazie (okno stanowiska): start 333 × 589 px, widać 10 ze
+# 178 folderów, ścieżka ucięta PRZED licznikiem, folder LMC to 50. wiersz - wskazanie jednego
+# folderu kosztowało 9-10 interakcji. Trzy środki, każdy na inną część tego kosztu:
+#  * okno startuje SZERSZE i wyższe (`default_dialog_size`), w jednostkach fontu, nie pikselach;
+#  * pole FILTRA nad listą (`FolderFilter`) - wzorzec szukajki facetu „Obiekt”: chowa wiersze
+#    niepasujące, czyści się natywnym „×”, Enter bierze pierwsze trafienie;
+#  * elizja ŚRODKA ścieżki (`FolderRowDelegate`) - początek i KONIEC ścieżki (nazwa folderu)
+#    zostają, ogon wiersza z licznikiem klatek zostaje cały.
+# ---------------------------------------------------------------------------------------------
+
+# Folder wiersza (człon elidowany środkiem). `UserRole` niesie frame_ids, `+1` - camera_id.
+FOLDER_ROLE = Qt.UserRole + 10
+_SIZE_CHARS = 120          # szerokość domyślna okna w średnich znakach fontu
+_SIZE_LINES = 46           # wysokość domyślna w wierszach fontu
+_SCREEN_FRAC = 0.85        # sufit: część dostępnego ekranu
+
+
+def default_dialog_size(widget):
+    """Rozmiar startowy okna gestu ręki: ~120 znaków × ~46 wierszy fontu okna, nie mniej niż
+    `sizeHint` i nie więcej niż 85 % dostępnego ekranu. Jednostki fontu, bo skalują się z DPI
+    i rozmiarem czcionki - stała w pikselach byłaby za mała na 4K i za duża na laptopie."""
+    fm = widget.fontMetrics()
+    hint = widget.sizeHint()
+    w = max(fm.averageCharWidth() * _SIZE_CHARS, hint.width())
+    h = max(fm.lineSpacing() * _SIZE_LINES, hint.height())
+    screen = widget.screen() or QGuiApplication.primaryScreen()
+    if screen is not None:
+        avail = screen.availableGeometry()
+        w = min(w, int(avail.width() * _SCREEN_FRAC))
+        h = min(h, int(avail.height() * _SCREEN_FRAC))
+    return QSize(w, h)
+
+
+def folder_hit(needle, text):
+    """Czy wiersz `text` pasuje do frazy filtra? KAŻDE słowo frazy musi wystąpić w wierszu,
+    wielkość liter bez znaczenia (`LMC 2024` trafia `R:\\...\\LMC\\2024-01-05`). Pusta fraza
+    pasuje zawsze. Logika bez Qt - testowalna wprost."""
+    hay = text.casefold()
+    return all(word in hay for word in needle.casefold().split())
+
+
+def elide_head_keep_tail(fm, head, tail, width):
+    """`head + tail` zmieszczone w `width` px: `head` (ścieżka) traci ŚRODEK, `tail` (licznik
+    klatek, rodzaje, świadek) zostaje cały. Gdy na `head` nie zostaje miejsca, wraca sam `tail` -
+    dalsze ucięcie od prawej robi już delegat Qt."""
+    if fm.horizontalAdvance(head + tail) <= width:
+        return head + tail
+    room = width - fm.horizontalAdvance(tail)
+    return (fm.elidedText(head, Qt.ElideMiddle, room) if room > 0 else "") + tail
+
+
+class FolderRowDelegate(QStyledItemDelegate):
+    """Wiersz listy folderów z elizją ŚRODKA ścieżki. Tekst wiersza (`DisplayRole`) zostaje pełny -
+    kopiuje się, testuje i trafia w tooltip bez zmian; delegat skraca wyłącznie to, co MALUJE.
+    Ścieżka ucięta od prawej gubiła dokładnie to, co ją wyróżnia (ostatni człon) i licznik za nią;
+    `Qt.ElideMiddle` na całym wierszu ciąłby środek WIERSZA, czyli koniec ścieżki."""
+
+    def initStyleOption(self, opt, index):
+        super().initStyleOption(opt, index)
+        folder = index.data(FOLDER_ROLE)
+        if not folder or not opt.text.startswith(folder) or opt.rect.width() <= 0:
+            return
+        widget = opt.widget
+        style = widget.style() if widget is not None else QApplication.style()
+        rect = style.subElementRect(QStyle.SE_ItemViewItemText, opt, widget)
+        # Qt maluje tekst z marginesem `PM_FocusFrameHMargin + 1` z każdej strony.
+        margin = 2 * (style.pixelMetric(QStyle.PM_FocusFrameHMargin, None, widget) + 1)
+        opt.text = elide_head_keep_tail(QFontMetrics(opt.font), folder, opt.text[len(folder):],
+                                        rect.width() - margin)
+
+
+def folder_list(items):
+    """Ustaw listę folderów okna gestu: delegat elizji środka, bez poziomego paska (inaczej Qt
+    rozciąga wiersz pod pełną ścieżkę i elizja nie dochodzi do głosu)."""
+    items.setItemDelegate(FolderRowDelegate(items))
+    items.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+
+def folder_item(text, folder):
+    """Wiersz listy: pełny tekst, folder w `FOLDER_ROLE` (dla elizji), pełny tekst w tooltipie -
+    elidowana ścieżka ma drogę powrotu."""
+    it = QListWidgetItem(text)
+    it.setData(FOLDER_ROLE, folder)
+    it.setToolTip(text)
+    return it
+
+
+class FolderFilter(QLineEdit):
+    """Pole filtra listy folderów - wzorzec szukajki facetu „Obiekt” (`facets.FacetRail`).
+
+    * KONTRAKT „CO WIDAĆ, TO SIĘ ZAPISZE”: przy niepustej frazie wiersz niepasujący jest UKRYTY
+      bez względu na zaznaczenie, a zapis i licznik na przycisku biorą WYŁĄCZNIE wiersze widoczne
+      i zaznaczone (`visible_rows`). Lista nie chowa więc niczego, co gest zapisze. Zaznaczenie
+      ukrytego wiersza ZOSTAJE (bez cichego odznaczania): wyczyszczenie frazy przywraca pełną
+      listę z zaznaczeniami sprzed filtra. Wcześniejsza reguła „zaznaczony widoczny zawsze”
+      unieważniała filtr w oknie zestawu, gdzie grupy startują zaznaczone - fraza nie chowała nic.
+    * Widoczność zależy WYŁĄCZNIE od frazy, więc zmiana zaznaczenia jej nie rusza i nie wymaga
+      przeliczenia - wystarcza `textChanged`.
+    * Fraza bez trafień ma własne zdanie (`self.empty`), nie pustą listę.
+    * Enter ZAZNACZA kolejne pasujące, jeszcze niezaznaczone wiersze (pierwszy Enter - pierwsze
+      trafienie) i NIE przechodzi do okna: domyślny przycisk zapisałby gest w pół wyboru.
+    `on_change` woła się po każdym przefiltrowaniu - okno synchronizuje przełącznik całości
+    i licznik na przycisku zapisu."""
+
+    def __init__(self, items, on_change, parent=None):
+        super().__init__(parent)
+        self._items = items
+        self._on_change = on_change
+        self.setPlaceholderText(i18n.t("handlist.filter_ph"))
+        self.setToolTip(i18n.t("handlist.filter_tip"))
+        self.setClearButtonEnabled(True)
+        self.empty = QLabel("")
+        self.empty.setWordWrap(True)
+        self.empty.setVisible(False)
+        self.textChanged.connect(self.apply)
+
+    def apply(self, *_):
+        needle = self.text()
+        trafione = 0
+        for i in range(self._items.count()):
+            it = self._items.item(i)
+            hit = folder_hit(needle, it.text())
+            trafione += hit
+            it.setHidden(not hit)
+        pusto = bool(needle.strip()) and trafione == 0
+        self.empty.setText(i18n.t("handlist.filter_empty", q=needle.strip()) if pusto else "")
+        self.empty.setVisible(pusto)
+        self._on_change()
+
+    def check_next_hit(self):
+        """Zaznacz pierwszy pasujący, niezaznaczony wiersz; zwraca jego indeks albo `None`.
+        Pusta fraza nie zaznacza niczego - „nic nie wpisano" nie jest wskazaniem."""
+        needle = self.text()
+        if not needle.strip():
+            return None
+        for i in range(self._items.count()):
+            it = self._items.item(i)
+            if it.checkState() != Qt.Checked and folder_hit(needle, it.text()):
+                it.setCheckState(Qt.Checked)
+                return i
+        return None
+
+    def keyPressEvent(self, ev):
+        if ev.key() in (Qt.Key_Return, Qt.Key_Enter):
+            self.check_next_hit()
+            ev.accept()
+            return
+        super().keyPressEvent(ev)
+
+
+def visible_rows(items):
+    """Wiersze widoczne po filtrze - zakres przełącznika całości ORAZ zapisu (bez frazy:
+    wszystkie). Kontrakt w `FolderFilter`."""
+    return [items.item(i) for i in range(items.count()) if not items.item(i).isHidden()]
 
 
 class AssignConfigDialog(QDialog):
@@ -66,12 +224,19 @@ class AssignConfigDialog(QDialog):
         # gest kosztuje 39 kliknięć), więc domyślny stan ZOSTAJE, a dochodzi droga na skróty
         # w OBIE strony. Stan pośredni (`PartiallyChecked`) jest tylko WYŚWIETLANY — klik zawsze
         # rozstrzyga w jedną stronę, bo „częściowo" nie jest poleceniem, które da się wykonać.
+        self.items = QListWidget()
+        folder_list(self.items)
+        # Filtr NAD przełącznikiem całości: pierwszy w kolejności Tab i z fokusem na starcie -
+        # okno otwiera się gotowe do wpisania fragmentu ścieżki.
+        self.filter = FolderFilter(self.items, self._on_filter)
+        lay.addWidget(self.filter)
+        lay.addWidget(self.filter.empty)
+
         self.check_all = QCheckBox(i18n.t("cfg.check_all"))
         self.check_all.setTristate(True)
         self.check_all.clicked.connect(self._on_check_all)
         lay.addWidget(self.check_all)
 
-        self.items = QListWidget()
         for g in self.groups:
             folder = g["folder"] or i18n.t("cfg.no_folder")
             kamera = g["camera_model"] or i18n.t("cfg.no_camera")
@@ -91,10 +256,10 @@ class AssignConfigDialog(QDialog):
             if g["other_kinds"]:
                 rodzaje = i18n.t("cfg.item_kinds", kinds=", ".join(
                     i18n.t("cfg.kind_count", kind=k, n=n) for k, n in g["other_kinds"]))
-            it = QListWidgetItem(
+            it = folder_item(
                 i18n.t("cfg.item", folder=folder, camera=kamera,
                        frames=i18n.t_plural("dlg.n_frames", g["n_frames"]))
-                + rodzaje + f"   [{swiadek}]")
+                + rodzaje + f"   [{swiadek}]", folder)
             it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
             # DWIE GRUPY WCHODZĄ ODZNACZONE, każda z innego powodu:
             #  * BEZ KAMERY — nie ma z czego złożyć zestawu (inwariant DDL §1); klinga i tak by ją
@@ -116,7 +281,7 @@ class AssignConfigDialog(QDialog):
             self.items.addItem(it)
         self.items.itemChanged.connect(lambda _it: self._sync_check_all())
         self._sync_check_all()
-        lay.addWidget(self.items)
+        lay.addWidget(self.items, 1)                 # przyrost wysokości okna idzie w listę
 
         bez_kamery = sum(g["n_frames"] for g in self.groups if g["camera_id"] is None)
         if bez_kamery:
@@ -151,6 +316,8 @@ class AssignConfigDialog(QDialog):
         self.items.itemChanged.connect(self._sync_accept_enabled)
         self.combo.currentIndexChanged.connect(self._sync_accept_enabled)
         self._sync_accept_enabled()
+        self.resize(default_dialog_size(self))
+        self.filter.setFocus()
 
     def _on_check_all(self):
         """Klik w przełącznik całości — ustaw KAŻDY wiersz na jedno albo drugie.
@@ -171,11 +338,15 @@ class AssignConfigDialog(QDialog):
         odsiewa po `camera_id`, bo bez niej nie ma z czego złożyć configu — inwariant DDL §1);
         **bez kopii na dysku** zapis PRZECHODZI i tak ma być, bo brak pliku nie unieważnia wiedzy
         o sprzęcie. Licznik na przycisku mówi prawdę o obu, bo liczy dokładnie to, co pójdzie
-        do klingi."""
+        do klingi.
+
+        ZAKRES = WIERSZE WIDOCZNE PO FILTRZE (`visible_rows`). Bez frazy to cała lista, czyli
+        zachowanie sprzed filtra; z frazą „zaznacz wszystkie" znaczy „wszystkie, które widzę" -
+        ukryty wiersz zaznaczony w ciemno zapisałby gest, którego user nie oglądał."""
         stan = Qt.Checked if self.check_all.checkState() != Qt.Unchecked else Qt.Unchecked
         self.items.blockSignals(True)                # jeden przebieg synchronizacji, nie N
-        for i in range(self.items.count()):
-            self.items.item(i).setCheckState(stan)
+        for it in visible_rows(self.items):
+            it.setCheckState(stan)
         self.items.blockSignals(False)
         self._sync_check_all()
         self._sync_accept_enabled()
@@ -185,22 +356,29 @@ class AssignConfigDialog(QDialog):
 
         Sygnały blokujemy, bo `setCheckState` nie budzi wprawdzie `clicked` (ten leci wyłącznie
         z interakcji człowieka), ale budzi `stateChanged` — a blokada trzyma tę funkcję
-        jednokierunkową (lista → przełącznik) i zamyka drogę do pętli zwrotnej."""
-        n = self.items.count()
-        zazn = sum(1 for i in range(n) if self.items.item(i).checkState() == Qt.Checked)
+        jednokierunkową (lista → przełącznik) i zamyka drogę do pętli zwrotnej. Liczy wiersze
+        WIDOCZNE po filtrze - ten sam zakres, na którym działa klik (`_on_check_all`)."""
+        widoczne = visible_rows(self.items)
+        n = len(widoczne)
+        zazn = sum(1 for it in widoczne if it.checkState() == Qt.Checked)
         self.check_all.blockSignals(True)
         self.check_all.setCheckState(
             Qt.Checked if zazn == n and n else Qt.Unchecked if zazn == 0 else Qt.PartiallyChecked)
         self.check_all.blockSignals(False)
 
+    def _on_filter(self):
+        """Fraza filtra zmieniła zakres widocznych wierszy - a z nim zakres zapisu i licznik."""
+        self._sync_check_all()
+        self._sync_accept_enabled()
+
     def _zaznaczone(self):
         """Klatki z zaznaczonych grup — POMIJAJĄC grupy bez kamery (klinga i tak je odmówi).
 
         Liczba na przycisku ma mówić, ile klatek gest REALNIE ruszy, a nie ile ich jest w liście
-        (ta sama lekcja, co `frame_count = namable` w oknie przypisania obiektu)."""
+        (ta sama lekcja, co `frame_count = namable` w oknie przypisania obiektu). Liczą się
+        wyłącznie wiersze WIDOCZNE po filtrze - „co widać, to się zapisze” (`FolderFilter`)."""
         out = []
-        for i in range(self.items.count()):
-            it = self.items.item(i)
+        for it in visible_rows(self.items):
             if it.checkState() == Qt.Checked and it.data(Qt.UserRole + 1) is not None:
                 out.extend(it.data(Qt.UserRole))
         return out

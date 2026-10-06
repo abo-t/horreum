@@ -170,6 +170,18 @@ CATALOG = {
               "automation: a frame with GPS returns to its file's site on the next “Resolve”, "
               "a frame without GPS returns to “no site”."},
     "obshand.check_all": {"pl": "Zaznacz / odznacz wszystkie", "en": "Check / uncheck all"},
+    "handlist.filter_ph": {"pl": "Filtruj listę - fragment ścieżki, np. LMC 2024 (Enter zaznacza)",
+                           "en": "Filter the list - part of the path, e.g. LMC 2024 (Enter checks)"},
+    "handlist.filter_tip": {
+        "pl": "Każde słowo musi wystąpić w wierszu, wielkość liter bez znaczenia. Zapis obejmuje "
+              "tylko wiersze widoczne i zaznaczone; ukryte zachowują zaznaczenie i wracają po "
+              "wyczyszczeniu frazy. Enter zaznacza kolejny pasujący wiersz; "
+              "„Zaznacz / odznacz wszystkie” działa na wierszach widocznych.",
+        "en": "Every word must appear in the row, case-insensitive. Saving covers only visible "
+              "checked rows; hidden rows keep their check and return when the filter is cleared. "
+              "Enter checks the next matching row; “Check / uncheck all” acts on visible rows."},
+    "handlist.filter_empty": {"pl": "Żaden wiersz nie pasuje do „{q}”.",
+                              "en": "No row matches “{q}”."},
     "obshand.item": {"pl": "{folder}  ·  {frames}  ·  {kinds}",
                      "en": "{folder}  ·  {frames}  ·  {kinds}"},
     "dlg.n_folders": {
@@ -342,6 +354,7 @@ CATALOG = {
               "→ “…of which from path” → Confirm from path…; if not, assign one "
               "(Object ▾ → “Assign object…”)."},
     "object.col.catalog": {"pl": "Katalog", "en": "Catalog"},
+    "object.col.hours": {"pl": "Godziny", "en": "Hours"},
     "frame.col.sha": {"pl": "sha1 danych", "en": "data sha1"},
     "frame.col.telescope": {"pl": "Teleskop", "en": "Telescope"},
     "frame.col.camera": {"pl": "Kamera", "en": "Camera"},
@@ -1257,6 +1270,21 @@ CATALOG = {
         "pl": "Żaden cel nie przeszedł bieżących progów — poluzuj rozmiar, magnitudo albo wysokość.",
         "en": "No target passed the current thresholds — relax size, magnitude or altitude.",
     },
+    # AR-48: baza bez stanowiska z GPS to STAN ekranu planera (pusty stan z gestem), nie surowe
+    # zdanie rdzenia na pasku nad cudzym ekranem. Tytuł idzie na nagłówek nocy i na pasek (tylko
+    # przy widocznym planerze), zdanie i gest - na środek ekranu.
+    "planner.no_site_title": {
+        "pl": "Brak stanowiska z pozycją GPS - nie ma z czego policzyć nocy",
+        "en": "No site with a GPS position - there is no night to compute",
+    },
+    "planner.no_site": {
+        "pl": "Planer liczy noc z pozycji obserwatora, a baza nie zna jeszcze żadnego stanowiska "
+              "z GPS. Wskaż stanowisko na osi obserwatorium - plan policzy się po powrocie tutaj.",
+        "en": "The planner computes the night from the observer's position, and the database knows "
+              "no site with GPS yet. Set a site on the observatory axis - the plan is computed "
+              "when you come back here.",
+    },
+    "planner.no_site_action": {"pl": "Ustaw stanowisko…", "en": "Set a site…"},
 
     # --- panel celu (T5d, JEDYNE miejsce zapisu ekranu) + park -------------------------------
     "planner.panel": {"pl": "Zaznaczony cel", "en": "Selected target"},
@@ -1692,6 +1720,36 @@ CATALOG = {
         "pl": "Do stagingu: {t} zmian, {s} pominięto",
         "en": "To staging: {t} changes, {s} skipped",
     },
+    # AR-61: edycja JEDNEJ komórki keyworda - ta sama klinga i szuflada co makro. Pole komentarza
+    # edytora bierze brzmienie z `grid.macro.comment_ph`/`comment_tip` (to samo znaczenie).
+    "grid.cell.value_ph": {"pl": "wartość", "en": "value"},
+    # Podgląd stagingu: komentarz karty, który zapis wniesie (samodzielnie albo przy wartości).
+    "grid.preview.comment_only": {"pl": "komentarz → {comment}", "en": "comment → {comment}"},
+    "grid.preview.comment_tip": {"pl": " · komentarz → {comment!r}",
+                                 "en": " · comment → {comment!r}"},
+    "grid.cell.staged": {
+        "pl": "Komórka {kw}: {old} → {new} - w szufladzie, czeka na zatwierdzenie",
+        "en": "Cell {kw}: {old} → {new} - in the drawer, awaiting commit"},
+    "grid.cell.staged_replaced": {
+        "pl": "Komórka {kw}: {old} → {new} - zastąpiła wcześniejszą zmianę tej karty w szufladzie",
+        "en": "Cell {kw}: {old} → {new} - replaced an earlier change of this card in the drawer"},
+    "grid.cell.refused": {
+        "pl": "Komórka {kw} - bez zmiany: {reason}",
+        "en": "Cell {kw} - not staged: {reason}"},
+    "grid.cell.staging_busy": {
+        "pl": "Edycja komórki: najpierw zatwierdź albo odrzuć staging nazw",
+        "en": "Cell edit: first commit or discard the name staging"},
+    "grid.cell.macro_blocked": {
+        "pl": {"one": "Makro: w szufladzie czeka {n} edycja komórki - zatwierdź albo odrzuć ją "
+                      "przed nowym makrem",
+               "few": "Makro: w szufladzie czekają {n} edycje komórek - zatwierdź albo odrzuć je "
+                      "przed nowym makrem",
+               "many": "Makro: w szufladzie czeka {n} edycji komórek - zatwierdź albo odrzuć je "
+                       "przed nowym makrem"},
+        "en": {"one": "Macro: {n} cell edit is waiting in the drawer - commit or discard it "
+                      "before a new macro",
+               "other": "Macro: {n} cell edits are waiting in the drawer - commit or discard them "
+                        "before a new macro"}},
     "grid.macro.preview_cleared": {"pl": "Podgląd makra wyczyszczony", "en": "Macro preview cleared"},
 
     # --- TokenRow (edytor wzoru nazwy): etykieta typu tokenu; klucz-tid to DANE ---
@@ -1832,6 +1890,26 @@ CATALOG = {
     "grid.sel.object_clear_undo_after": {
         "pl": "potem przywrócisz: {menu} → {action}",
         "en": "then undo it: {menu} → {action}"},
+    # FH-9: droga powrotu PRZYWRÓCENIA przypisania - jej odwrotem jest cofnięcie, więc czasownik
+    # jest inny niż wyżej („przywrócisz" mówiłoby o kierunku, którego ten gest nie ma). Para
+    # wariantów z tego samego powodu co wyżej: cel bywa najpierw do odsłonięcia.
+    "grid.sel.object_restore_undo": {
+        "pl": "cofniesz: {menu} → {action}",
+        "en": "to take it back: {menu} → {action}"},
+    # Odmowy wykonania recepty paska (Z4, Z9). Recepta sama nie ruszy po końcu zajętości - inaczej
+    # niż gesty izolacji („ruszy po zakończeniu") - więc zdanie mówi, że trzeba ją kliknąć ponownie.
+    "grid.recipe.busy_stage": {
+        "pl": "Trwa etap Dostawy - kliknij receptę ponownie po jego zakończeniu.",
+        "en": "An Intake stage is running - click the recipe again after it finishes."},
+    "grid.recipe.busy_write": {
+        "pl": "Trwa zapis nagłówków do plików - kliknij receptę ponownie po jego zakończeniu.",
+        "en": "A header write to files is in progress - click the recipe again after it finishes."},
+    "grid.recipe.nothing_to_reveal": {
+        "pl": "Zbiór nie jest już zawężony - nie ma czego odsłaniać.",
+        "en": "The set is no longer narrowed - there is nothing to reveal."},
+    "grid.sel.object_restore_undo_after": {
+        "pl": "potem cofniesz: {menu} → {action}",
+        "en": "then take it back: {menu} → {action}"},
     # FC-2: gest bywa gestem, który WYPYCHA własny cel z widoku - przy facecie „Obiekt" cofnięcie
     # zostawia widok pusty (zmierzone: 43 → 0 klatek), bo facet liczy po `f.object_id`. Klucz jest
     # WSPÓLNY DLA OBU OSI zaznaczenia (obiekt i żywotność klatki): na osi klatki wypchnięcie celu
@@ -3205,6 +3283,110 @@ CATALOG = {
         "pl": "Wycofane, a plik wrócił", "en": "Retired, but the file is back"},
     "tasks.telescopes_unlabeled": {"pl": "Teleskopy bez etykiety", "en": "Telescopes without a label"},
     "tasks.observatories_unnamed": {"pl": "Stanowiska bez nazwy", "en": "Sites without a name"},
+    # AR-59: robota osi stanowiska i osi sprzętu jako wiersze z liczbą klatek. Podpowiedź mówi, gdzie
+    # w podstronie mieszka gest (nazwa z katalogu, `{assign}`).
+    "tasks.observatory_review_frames": {"pl": "Klatki bez stanowiska",
+                                        "en": "Frames without a site"},
+    "tasks.observatory_review_tip": {
+        "pl": "Nagłówek nie niesie GPS, a stanowiska nie wskazała ręka.\n"
+              "W podstronie: „{assign}” - okno grupuje te klatki po folderze.",
+        "en": "The header carries no GPS and no site was assigned by hand.\n"
+              "On the subpage: “{assign}” - the window groups these frames by folder."},
+    "tasks.config_review_frames": {"pl": "Klatki bez zestawu", "en": "Frames without a setup"},
+    "tasks.config_review_tip": {
+        "pl": "Klatki na osi teleskopu, którym automat nie policzył zestawu (teleskop × kamera) - "
+              "dark i bias nie wchodzą, bo zestawu z definicji nie mają.\n"
+              "W podstronie: kubełek bez zestawu jest zaznaczony, gest „{assign}”.",
+        "en": "Frames on the telescope axis with no setup (telescope × camera) worked out by the "
+              "automaton - dark and bias are left out, they have no setup by definition.\n"
+              "On the subpage: the no-setup bucket is selected, gesture “{assign}”."},
+    # AR-41: werdykt obiektu z ręki został na klatce zastąpionej, bo następczyni nie jest lightem.
+    # Wiersz klikalny, ale nie robota (jak „Zastąpione"): prowadzi do perspektywy zastąpionych.
+    "tasks.object_kept_frames": {"pl": "Fakt ręki zatrzymany na zastąpionej klatce",
+                                 "en": "Hand fact kept on a superseded frame"},
+    "tasks.object_kept_tip": {
+        "pl": "Werdykt obiektu wskazany ręką został na klatce zastąpionej: następczyni nie jest "
+              "lightem, więc nie ma dokąd go przenieść. Nic nie przepadło i nie ma tu roboty - "
+              "lista w perspektywie „{persp}”.",
+        "en": "An object verdict given by hand stayed on the superseded frame: the successor is "
+              "not a light, so there is nowhere to transfer it. Nothing was lost and there is no "
+              "work here - the list is in the “{persp}” perspective."},
+    # AR-41: gest przeniesienia faktów ręki w perspektywie „Zastąpione" i jego zdanie
+    # (`supersede.zdanie_przeniesienia`). Człony osi i pominięć doklejane do zdania głównego.
+    "supersede.transfer.action": {"pl": "Przenieś fakty ręki na następczynię",
+                                  "en": "Transfer hand facts to the successor"},
+    "supersede.transfer.action_tip": {
+        "pl": "Werdykty ręki (obiekt, zestaw, stanowisko, rodowód) przechodzą z zaznaczonych klatek "
+              "zastąpionych na klatki, które niosą dziś ich plik - tylko tam, gdzie następczyni "
+              "nie przemówiła sama.",
+        "en": "Hand verdicts (object, setup, site, lineage) move from the selected superseded "
+              "frames to the frames that carry their file today - only where the successor has "
+              "not spoken for itself."},
+    "supersede.transfer.done": {
+        "pl": {"one": "Przeniesienie faktów ręki: {done} z {n} klatki",
+               "few": "Przeniesienie faktów ręki: {done} z {n} klatek",
+               "many": "Przeniesienie faktów ręki: {done} z {n} klatek"},
+        "en": {"one": "Hand facts transferred: {done} of {n} frame",
+               "other": "Hand facts transferred: {done} of {n} frames"}},
+    "supersede.transfer.axes": {"pl": " ({axes})", "en": " ({axes})"},
+    "supersede.transfer.axis_object": {"pl": "obiekt: {n}", "en": "object: {n}"},
+    "supersede.transfer.axis_config": {"pl": "zestaw: {n}", "en": "setup: {n}"},
+    "supersede.transfer.axis_site": {"pl": "stanowisko: {n}", "en": "site: {n}"},
+    "supersede.transfer.axis_lineage": {"pl": "rodowód: {n}", "en": "lineage: {n}"},
+    "supersede.transfer.object_kept": {
+        "pl": {"one": ". {n} werdykt obiektu został na klatce zastąpionej - następczyni nie jest "
+                      "lightem",
+               "few": ". {n} werdykty obiektu zostały na klatkach zastąpionych - następczynie nie "
+                      "są lightami",
+               "many": ". {n} werdyktów obiektu zostało na klatkach zastąpionych - następczynie "
+                       "nie są lightami"},
+        "en": {"one": ". {n} object verdict stayed on the superseded frame - the successor is "
+                      "not a light",
+               "other": ". {n} object verdicts stayed on the superseded frames - the successors "
+                        "are not lights"}},
+    "supersede.transfer.lineage_dropped": {
+        "pl": {"one": ". {n} wskaźnik rodowodu zdjęty - następczyni ma własny werdykt",
+               "few": ". {n} wskaźniki rodowodu zdjęte - następczynie mają własne werdykty",
+               "many": ". {n} wskaźników rodowodu zdjętych - następczynie mają własne werdykty"},
+        "en": {"one": ". {n} lineage pointer removed - the successor has its own verdict",
+               "other": ". {n} lineage pointers removed - the successors have their own verdicts"}},
+    "supersede.transfer.skip_own": {
+        "pl": {"one": ". {n} następczyni ma własne źródło",
+               "few": ". {n} następczynie mają własne źródło",
+               "many": ". {n} następczyń ma własne źródło"},
+        "en": {"one": ". {n} successor has its own source",
+               "other": ". {n} successors have their own source"}},
+    "supersede.transfer.skip_config_mismatch": {
+        "pl": {"one": ". Zestaw nie pasuje do {n} następczyni",
+               "few": ". Zestaw nie pasuje do {n} następczyń",
+               "many": ". Zestaw nie pasuje do {n} następczyń"},
+        "en": {"one": ". The setup does not fit {n} successor",
+               "other": ". The setup does not fit {n} successors"}},
+    "supersede.transfer.skip_none": {
+        "pl": {"one": ". {n} klatka bez faktów ręki",
+               "few": ". {n} klatki bez faktów ręki",
+               "many": ". {n} klatek bez faktów ręki"},
+        "en": {"one": ". {n} frame without hand facts",
+               "other": ". {n} frames without hand facts"}},
+    "supersede.transfer.not_superseded": {
+        "pl": {"one": ". {n} klatka nie jest zastąpiona - gest jej nie dotyczy",
+               "few": ". {n} klatki nie są zastąpione - gest ich nie dotyczy",
+               "many": ". {n} klatek nie jest zastąpionych - gest ich nie dotyczy"},
+        "en": {"one": ". {n} frame is not superseded - the gesture does not apply to it",
+               "other": ". {n} frames are not superseded - the gesture does not apply to them"}},
+    # Ogniwo zgaszone przez skan między odczytem a klingą (treść wróciła pod ścieżkę).
+    "supersede.transfer.no_longer_superseded": {
+        "pl": {"one": ". {n} klatka przestała być zastąpiona w trakcie gestu - jej plik wrócił",
+               "few": ". {n} klatki przestały być zastąpione w trakcie gestu - ich pliki wróciły",
+               "many": ". {n} klatek przestało być zastąpionych w trakcie gestu - ich pliki "
+                       "wróciły"},
+        "en": {"one": ". {n} frame stopped being superseded during the gesture - its file is back",
+               "other": ". {n} frames stopped being superseded during the gesture - their files "
+                        "are back"}},
+    # Gest przerwany błędem klingi na kolejnej klatce: zdanie częściowe + powód (okno ostrzeżenia).
+    "supersede.transfer.interrupted": {
+        "pl": "Gest przerwany na kolejnej klatce: {err}. Wcześniejsze klatki są zapisane.",
+        "en": "The gesture stopped at the next frame: {err}. Earlier frames are saved."},
     "tasks.dup_frames": {"pl": "Duplikaty (>1 kopia)", "en": "Duplicates (>1 copy)"},
     # 0021: podzbiór „Duplikatów", stoi tuż pod nimi. Nazwa mówi o KLATKACH, bo liczba obok liczy
     # klatki (`queries.copy_conflict_frame_ids`) - „Kopie niezgodne ze sobą" obiecywało liczbę kopii.

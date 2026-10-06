@@ -17,6 +17,12 @@ from horreum.gui import mapproj, theme
 _HIT_PX = 14.0             # próg kliku/hover — hojny (punkty małe: r_min=3), nearest wygrywa w klastrze
 _CLUSTER_PX = 16.0         # promień dekolizji etykiet hover — nakładające się stanowiska stackowane
 _LABEL_DX = 8.0            # odsunięcie etykiety w prawo od punktu
+_SEL_GROW = 3.0            # o ile zaznaczony dysk jest większy od zwykłego (paintEvent)
+_RING_GAP = 2.0            # odstęp pierścienia zaznaczenia od dysku
+_RING_W = 2.5              # grubość pierścienia zaznaczenia
+# Margines dopasowania widoku w px: NAJWIĘKSZY możliwy zasięg rysunku punktu (r_max + powiększenie
+# zaznaczenia + pierścień) plus oddech - punkt skrajny nie siada na krawędzi kadru.
+_FIT_PAD_PX = mapproj.point_radius(1, 1) + _SEL_GROW + _RING_GAP + _RING_W + 6.0
 
 # Kolory mapy z motywu (Qt-wolny `theme.map_colors`), wypalone w QColor. Zmiana motywu → `use_theme`
 # (z `apply_theme`) + `refresh_theme()` na widżecie (QPainter nie repaintuje sam — jak grid viewport).
@@ -118,12 +124,14 @@ class SitesMapView(QWidget):
             self._land_px = []
             return
         pts = [(lat, lon) for _, _, lat, lon, _ in self._sites]
-        self._xf = mapproj.fit_view(pts, self.width(), self.height())
+        self._xf = mapproj.fit_view(pts, self.width(), self.height(), pad_px=_FIT_PAD_PX)
         self._land_px = []
         if self._xf.scale > 0:       # pre-rzutuj kontury RAZ per fit (F3 — nie w paintEvent)
+            # Kawałki rozcięte na szwie rzutu: pierścień przecinający antypołudnik środka widoku
+            # nie rysuje już kreski przez całą szerokość mapy (`mapproj.LocalProjection.project_line`).
             for line in mapproj.load_land_polylines():
-                self._land_px.append(
-                    QPolygonF([QPointF(*self._xf.to_px(lat, lon)) for lon, lat in line]))
+                for piece in self._xf.line_to_px(line):
+                    self._land_px.append(QPolygonF([QPointF(x, y) for x, y in piece]))
 
     # -------------------------------------------------------------- malowanie
     def paintEvent(self, ev):
@@ -156,15 +164,15 @@ class SitesMapView(QWidget):
 
         if sel is not None:           # zaznaczony: większy dysk + KONTRASTOWY pierścień (wiz F8 #3 —
             px, py, r, name, lat, lon = sel   # obwódka-tłem była niewidzialna w light; ring z motywu)
-            r += 3                    # wyróżnienie niezależne od rozmiaru punktu (9/11 ma ~minimum)
+            r += _SEL_GROW            # wyróżnienie niezależne od rozmiaru punktu (9/11 ma ~minimum)
             p.setBrush(c["site_selected"])
             p.setPen(QPen(c["bg"], 1.0))
             p.drawEllipse(QPointF(px, py), r, r)
             p.setBrush(Qt.NoBrush)
             ring = QPen(c["sel_ring"])            # widoczny na OBU tłach — nie kolor tła
-            ring.setWidthF(2.5)
+            ring.setWidthF(_RING_W)
             p.setPen(ring)
-            p.drawEllipse(QPointF(px, py), r + 2, r + 2)
+            p.drawEllipse(QPointF(px, py), r + _RING_GAP, r + _RING_GAP)
 
         self._paint_labels(p, c, base_font)
         self._paint_scale_bar(p, c)
@@ -208,7 +216,7 @@ class SitesMapView(QWidget):
         maxw = max(fm.horizontalAdvance(txt) for _, txt in labels)
         r_anchor = mapproj.point_radius(self._sites[indices[0]][4], self._max_count)
         if self._sites[indices[0]][0] == self._selected:
-            r_anchor += 3                     # zaznaczony dysk jest większy (paintEvent: r+3)
+            r_anchor += _SEL_GROW             # zaznaczony dysk jest większy (paintEvent)
         dx = _LABEL_DX + r_anchor             # #4: tło etykiety mija dysk punktu
         x = ax - dx - maxw if ax + dx + maxw + 3 > self.width() else ax + dx   # #3: flip przy prawej krawędzi
         y0 = mapproj.clamp_label_y0(ay, len(indices), fm.ascent(), lh, self.height())   # #1

@@ -29,10 +29,13 @@ import statistics
 import threading
 import uuid
 from datetime import datetime, timezone
+from functools import partial
+from typing import NamedTuple
 
 from PySide6.QtCore import (
     QAbstractTableModel, QEvent, QItemSelection, QItemSelectionModel,
-    QModelIndex, QObject, Qt, QSettings, QSize, QThread, QTimer, Signal, Slot,
+    QModelIndex, QObject, QPersistentModelIndex, Qt, QSettings, QSize, QThread, QTimer, Signal,
+    Slot,
 )
 from PySide6.QtGui import QColor, QFont, QGuiApplication, QKeySequence, QPainter, QShortcut
 from PySide6.QtWidgets import (
@@ -45,7 +48,7 @@ from PySide6.QtWidgets import (
 )
 
 from horreum import (db, filter_engine, lineage, macro as macro_mod, naming, pivot as pivot_mod,
-                     repo, scan, stacks, writeback)
+                     repo, scan, stacks, supersede, writeback)
 from horreum.gui import busy, facet_model, i18n, portfolio, queries, rows, theme
 from horreum.gui import pola as pola_mod   # `pola` bywa w tym pliku zmienną lokalną (pola zeznania)
 from horreum.gui.facets import RAIL_MIN_W as _FIELDS_MIN_W, FacetRail
@@ -451,6 +454,9 @@ _TRIMY = (
 # pilnuje, żeby rodzina nie dostała drugiej, ręcznej enumeracji; to jest JEDNO odwołanie do jednej
 # flagi, a jej obecność w `_TRIMY` pinuje test perspektywy.
 _FLAGA_WERSJI = "_only_stack_versions"
+# Perspektywa „Zastąpione" dokłada do menu tabeli gest przeniesienia faktów ręki (AR-41) - ta sama
+# figura co wyżej: jedno odwołanie do jednej flagi rodziny, pod stałą.
+_FLAGA_ZASTAPIONYCH = "_only_superseded"
 # Te same zasady dla dwóch perspektyw izolacji zapisu w miejscu: w nich menu tabeli pokazuje drogi
 # wyjścia z izolacji także nad pustym zaznaczeniem (wygaszone z powodem), a wejście w perspektywę
 # podaje receptę gestu (`_RECEPTY_ZAPISU`). Klucz = flaga z `_TRIMY`.
@@ -488,9 +494,18 @@ def _klucz_kryterium(atrybut):
     return "grid.criteria." + _klucz_spec(atrybut)
 
 
+# WYGLĄD WIDOKU W SPEC-U PERSPEKTYWY (AR-36) - jeden klucz `view` ze słownikiem, nie klucze obok
+# warunków: wygląd nie zmienia ZBIORU, więc `_nieznane_warunki` pomija go w całości, także pola,
+# których ten build jeszcze nie zna. W środku: widoczność kolumny „Obrazy" (`True`/`False`, brak =
+# za perspektywą) i szerokość kolumny ścieżki w px (brak = liczona przez widok). Starsze wydania
+# czytają spec przez `.get` i pomijają nieznany klucz bez wyjątku (zmierzone na `v0.10.0`:
+# `_on_perspective` czyta wyłącznie swoje klucze, `queries.perspectives` nieznanych nie rusza).
+_SPEC_WIDOK = "view"
+_SPEC_OBRAZY = "images"
+_SPEC_SZEROKOSC_SCIEZKI = "path_width"
 # Klucze spec-a, które TEN build umie zastosować. Flagi `only_*` dochodzą z `_TRIMY`, więc nowa
 # perspektywa nie ma tu drugiego miejsca do dopisania.
-_ZNANE_KLUCZE_SPECU = frozenset({"filter", "columns", "group_by", "facets"}
+_ZNANE_KLUCZE_SPECU = frozenset({"filter", "columns", "group_by", "facets", _SPEC_WIDOK}
                                 | {_klucz_spec(atrybut) for atrybut, _ in _TRIMY})
 
 
@@ -610,17 +625,84 @@ def zdanie_pominiec(gest, *, nothing_key="grid.sel.object_skip_nothing",
     return "".join(czlony)
 
 
-def _zlacz_recepty(czlony):
-    """Człony recepty w jedno zdanie własnego nośnika paska (FH-2). Czysta funkcja.
+class CzlonRecepty(NamedTuple):
+    """Jeden człon recepty paska: TEKST i WYKONAWCA (FH-2e).
+
+    `wykonaj` to wywołanie bez argumentów, które robi DOKŁADNIE to, co tekst nazywa, albo `None`,
+    gdy gest jest jeszcze niewykonalny (wariant „potem" - celuje w klatki, których nie ma na
+    ekranie). `None` nie znaczy „tylko informacja do ukrycia": przycisk recepty ma wtedy zostać
+    WYGASZONY, nie zniknąć, bo zdanie dalej mówi prawdę o drugim kroku."""
+    tekst: str
+    wykonaj: object = None
+
+
+class Recepta(str):
+    """Recepta paska jako ZDANIE i LISTA CZŁONÓW naraz (FH-8, FH-2e). Czysta wartość.
+
+    Zdanie (`str`) jest dla każdego, kto czyta receptę jak tekst - podpowiedź paska, testy, log.
+    Człony są dla nośnika: elizja przy braku miejsca zdejmuje CAŁY człon pierwszy, a nie ogon
+    zdania - cięcie od prawej zjadało nazwę pozycji menu, czyli jedyną część, której user szuka
+    wzrokiem. Wykonawcę bierze nośnik z członu PIERWSZEGO, bo kolejność członów jest kolejnością
+    w czasie.
 
     KOLEJNOŚĆ CZŁONÓW JEST KOLEJNOŚCIĄ W CZASIE, nie ważnością: najpierw „odsłoni je …", potem
     „potem przywrócisz: …" - drugi gest bywa wykonalny dopiero po pierwszym, bo wypchnięcie celu
     z widoku gasi całą kontrolkę „Obiekt" (FC-9). Wołający dokłada człony w tym porządku i to on
-    jest kontraktem; ta funkcja tylko odsiewa milczące i skleja.
+    jest kontraktem; konstruktor tylko odsiewa milczące i skleja.
 
     Separator ten sam, co w raporcie, bo oba zdania czyta się jednym ruchem oka wzdłuż paska -
     dwa różne rozdzielniki na jednej belce wyglądałyby jak dwa różne rejestry."""
-    return " · ".join(x for x in czlony if x)
+    SEPARATOR = " · "
+
+    def __new__(cls, czlony=()):
+        czlony = tuple(c if isinstance(c, CzlonRecepty) else CzlonRecepty(c) for c in czlony)
+        czlony = tuple(c for c in czlony if c.tekst)
+        self = super().__new__(cls, cls.SEPARATOR.join(c.tekst for c in czlony))
+        self.czlony = czlony
+        return self
+
+
+def _zlacz_recepty(czlony):
+    """Człony recepty (`CzlonRecepty` albo goły tekst bez wykonawcy) w `Recepta` (FH-2, FH-8)."""
+    return Recepta(czlony)
+
+
+class _Odwrot(NamedTuple):
+    """Droga powrotu gestu osi zaznaczenia - z czego składa się jej człon recepty (FC-9, FH-2e).
+
+    Dwa klucze, bo człon ma dwa warianty: gest od razu wykonalny i wariant „potem", gdy cel
+    gestu najpierw trzeba odsłonić. `menu`/`akcja` to KLUCZE etykiet kontrolki i pozycji menu,
+    cytowane z katalogu - recepta wskazująca napis, którego na ekranie nie ma, jest gorsza niż jej
+    brak. `slot` to metoda widoku, którą wisi ta pozycja menu: wykonawca recepty woła ją, nie kopię.
+    `zostalo` to metoda widoku, która mówi, ILE klatek celu da się dziś odwrócić - recepta żyje,
+    dopóki to jest prawdą (odwracalność jest faktem o STANIE, nie o czasie komunikatu)."""
+    klucz: str
+    klucz_potem: str
+    menu: str
+    akcja: str
+    slot: str
+    zostalo: str
+
+
+# Trzy drogi powrotu osi zaznaczenia. Cofnięcie przypisania i wycofanie klatki mówią tymi samymi
+# kluczami („przywrócisz: …"), bo para gest↔odwrót różni się tylko etykietami - klucze zdania są
+# wspólne, a etykiety jadą parametrem. Przywrócenie przypisania ma własną parę: jego odwrotem
+# jest COFNIĘCIE („cofniesz: …"), a „przywrócisz" byłoby nieprawdą o kierunku (FH-9).
+_ODWROT_COFNIECIA = _Odwrot("grid.sel.object_clear_undo", "grid.sel.object_clear_undo_after",
+                            "grid.sel.object", "grid.sel.object_restore",
+                            "_on_object_restore", "_ile_do_przywrocenia")
+_ODWROT_PRZYWROCENIA = _Odwrot("grid.sel.object_restore_undo", "grid.sel.object_restore_undo_after",
+                               "grid.sel.object", "grid.sel.object_clear",
+                               "_on_object_clear", "_ile_do_cofniecia")
+# Odmowa wykonania recepty przy zajętości (Z4) - powód z `_powod_zajetosci` (klucze gestów
+# izolacji) na zdanie RECEPTY: tamte obiecują, że gest „ruszy po zakończeniu", a recepta sama
+# nie ruszy - trzeba ją kliknąć jeszcze raz.
+_RECEPTA_ZAJETA = {"grid.inplace.busy_stage": "grid.recipe.busy_stage",
+                   "grid.inplace.busy_write": "grid.recipe.busy_write"}
+
+_ODWROT_WYCOFANIA = _Odwrot("grid.sel.object_clear_undo", "grid.sel.object_clear_undo_after",
+                            "grid.sel.frame", "grid.sel.frame_restore",
+                            "_on_frame_restore", "_ile_wycofanych")
 
 
 def _ogon_sciezki(path):
@@ -876,6 +958,150 @@ class _ElizjaWSrodku(QStyledItemDelegate):
         option.textElideMode = Qt.ElideMiddle
 
 
+class _EdycjaKomorki(QStyledItemDelegate):
+    """Delegat edycji komórki keyworda (AR-61): pole WARTOŚCI i pole KOMENTARZA o znaczeniu pola
+    komentarza w `MacroBar` (pusty - karta zachowuje zastany; wpisany - zapis razem z nim, AR-47).
+
+    Edytor szerszy niż komórka: dwa pola w kolumnie keyworda ~100 px nie dałyby się czytać, a komentarz
+    jest jedyną drogą z GUI dla karty FITS, której zastany komentarz nie mieści się przy nowej wartości.
+    Zamknięcie bez zmiany (fokus poza edytor, ta sama wartość, pusty komentarz) NIE stage'uje nic -
+    inaczej każde przypadkowe otwarcie edytora dokładałoby do szuflady `set` na tę samą wartość.
+
+    EDYTOR JEST KONTENEREM, A FOKUS MAJĄ JEGO POLA - więc filtr zdarzeń bazowego delegata (stawiany
+    przez widok na kontenerze) nie widzi `FocusOut` pól i wyjście z edytora kliknięciem gdzie indziej
+    (np. „Zatwierdź" szuflady) gubiło wpis: commit szedł bez niego, a odświeżenie zabijało edytor.
+    Dlatego delegat filtruje OBA POLA sam (`eventFilter`): opuszczenie CAŁEGO edytora (fokus poza
+    kontener i jego dzieci, bez otwartego popupu) zatwierdza; przejście wartość↔komentarz (Tab)
+    edycji nie kończy; Enter w każdym polu zatwierdza, Esc anuluje. Ta sama reguła co
+    `QAbstractItemDelegate.eventFilter` dla edytora jednopolowego, przeniesiona na pola kontenera.
+
+    CEL EDYCJI JEST STABILNY, NIE INDEKSOWY: `(frame_id, keyword)` ustalone przy otwarciu (`cel`).
+    Reset modelu (odświeżenie po wyniku pól z wątku, sort, podgląd) unieważnia `QModelIndex`, a widok
+    i tak niszczy wtedy edytor - więc widok domyka AKTYWNY edytor (`domknij`) przed każdym resetem
+    i zanim sam zniknie (zamknięcie okna, przełączenie bazy), a zapis idzie po celu. Bez tego wpis
+    ginął po cichu razem z edytorem."""
+
+    _MIN_W = 320
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.aktywny = None          # otwarty edytor (kontener) - jeden naraz, jak w widoku
+
+    def createEditor(self, parent, option, index):
+        ed = QWidget(parent)
+        ed.setAutoFillBackground(True)
+        lay = QHBoxLayout(ed)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(2)
+        ed.wartosc = QLineEdit(ed)
+        ed.wartosc.setPlaceholderText(i18n.t("grid.cell.value_ph"))
+        ed.komentarz = QLineEdit(ed)
+        ed.komentarz.setPlaceholderText(i18n.t("grid.macro.comment_ph"))
+        ed.komentarz.setToolTip(i18n.t("grid.macro.comment_tip"))
+        lay.addWidget(ed.wartosc, 3)
+        lay.addWidget(ed.komentarz, 2)
+        ed.setFocusProxy(ed.wartosc)
+        ed.zamkniety = False
+        ed.zatwierdzony = False
+        ed.model = index.model()
+        ed.cel = ed.model.cel_edycji(index)
+        for pole in (ed.wartosc, ed.komentarz):
+            pole.kontener = ed
+            pole.installEventFilter(self)
+        self.aktywny = ed
+        return ed
+
+    def destroyEditor(self, editor, index):
+        if self.aktywny is editor:
+            self.aktywny = None
+        super().destroyEditor(editor, index)
+
+    def domknij(self):
+        """Zatwierdź AKTYWNY edytor po jego stabilnym celu, bez pytania widoku o indeks - wołane przed
+        resetem modelu i przed zniknięciem widoku. Edytor bez zmiany nie stage'uje nic (ta sama
+        reguła co zamknięcie fokusem). Zwraca True, gdy był otwarty edytor."""
+        ed = self.aktywny
+        if ed is None or ed.zamkniety:
+            return False
+        ed.zamkniety = True
+        self.aktywny = None
+        self._zatwierdz(ed)
+        return True
+
+    def _zatwierdz(self, ed):
+        """Jedno zatwierdzenie wpisu edytora - po celu `(frame_id, keyword)`, raz na edytor."""
+        if ed.zatwierdzony:
+            return
+        wartosc, komentarz = ed.wartosc.text(), ed.komentarz.text().strip()
+        if wartosc == getattr(ed, "pierwotna", None) and not komentarz:
+            return                       # nic nie zmieniono - zamknięcie edytora to nie zmiana
+        ed.zatwierdzony = True
+        ed.model.cell_edit_requested.emit(ed.cel[0], ed.cel[1], wartosc, komentarz)
+
+    def _zakoncz(self, ed, *, zatwierdz):
+        """Jedno zamknięcie edytora: `commitData` (gdy zatwierdzamy) i `closeEditor` dla KONTENERA -
+        widok zna kontener, nie pola. Flaga chroni przed drugim zamknięciem, gdy niszczony edytor
+        oddaje fokus i jego pole dostaje jeszcze `FocusOut`."""
+        from PySide6.QtWidgets import QAbstractItemDelegate
+        if ed.zamkniety:
+            return
+        ed.zamkniety = True
+        if self.aktywny is ed:
+            self.aktywny = None
+        if zatwierdz:
+            self.commitData.emit(ed)
+            self.closeEditor.emit(ed, QAbstractItemDelegate.NoHint)
+        else:
+            self.closeEditor.emit(ed, QAbstractItemDelegate.RevertModelCache)
+
+    def eventFilter(self, obj, ev):
+        ed = getattr(obj, "kontener", None)
+        if ed is None:
+            return super().eventFilter(obj, ev)
+        tab = ev.type() in (QEvent.KeyPress, QEvent.ShortcutOverride) and ev.key() in (
+            Qt.Key_Tab, Qt.Key_Backtab)
+        if tab and ev.type() == QEvent.ShortcutOverride:
+            ev.accept()                      # Tab ma dojść do pola jako KeyPress, nie do skrótu
+            return True
+        if tab:
+            # Tab/Backtab KRĄŻY MIĘDZY POLAMI EDYTORA. Bez tego `QLineEdit` oddaje Tab rodzicom aż do
+            # `QAbstractItemView.focusNextPrevChild`, który zatwierdza komórkę i przechodzi dalej -
+            # komentarz wpisany po Tab przepadał. Zatwierdza wyłącznie Enter albo opuszczenie edytora.
+            (ed.komentarz if obj is ed.wartosc else ed.wartosc).setFocus(Qt.TabFocusReason)
+            return True
+        if ev.type() == QEvent.KeyPress:
+            if ev.key() in (Qt.Key_Return, Qt.Key_Enter):
+                self._zakoncz(ed, zatwierdz=True)
+                return True
+            if ev.key() == Qt.Key_Escape:
+                self._zakoncz(ed, zatwierdz=False)
+                return True
+        elif ev.type() == QEvent.FocusOut:
+            from PySide6.QtWidgets import QApplication
+            if QApplication.activePopupWidget() is not None:
+                return False                 # menu kontekstowe pola - edycja trwa
+            w = QApplication.focusWidget()
+            while w is not None:
+                if w is ed:
+                    return False             # Tab wartość↔komentarz - edycja trwa
+                w = w.parentWidget()
+            self._zakoncz(ed, zatwierdz=True)
+        return False
+
+    def setEditorData(self, editor, index):
+        tekst = index.data(Qt.EditRole) or ""
+        editor.pierwotna = tekst
+        editor.wartosc.setText(tekst)
+        editor.wartosc.selectAll()
+
+    def setModelData(self, editor, model, index):
+        self._zatwierdz(editor)          # po celu z otwarcia, nie po `index` (reset go unieważnia)
+
+    def updateEditorGeometry(self, editor, option, index):
+        r = option.rect
+        editor.setGeometry(r.x(), r.y(), max(r.width(), self._MIN_W), r.height())
+
+
 def elizja_w_srodku(table, col):
     """Kolumna `col` tabeli `table` elidowana W ŚRODKU - bez ruszania jej szerokości. Połowa
     `kolumna_z_tresci` dla kolumn, których szerokość ustala kto inny (sekcja `Stretch` w panelu
@@ -900,18 +1126,36 @@ def kolumna_z_tresci(table, col, *, sufit=_SUFIT_KOLUMNY_Z_TRESCI):
     Idempotentna jak `elizja_w_srodku`. Zdjęcie elizji poza perspektywą robi wołający
     (`setItemDelegateForColumn(col, None)`) - ta funkcja mówi tylko, jak kolumnę ustawić."""
     elizja_w_srodku(table, col)
-    table.resizeColumnToContents(col)
-    if table.columnWidth(col) > sufit:
-        table.setColumnWidth(col, sufit)
+    table.setColumnWidth(col, szerokosc_z_tresci(table, col, sufit=sufit))
+
+
+def szerokosc_z_tresci(table, col, *, sufit=_SUFIT_KOLUMNY_Z_TRESCI):
+    """Szerokość, jaką `kolumna_z_tresci` nadaje kolumnie `col` - bez jej ustawiania. Ta sama
+    reguła co `QTableView.resizeColumnToContents` (większa z podpowiedzi treści i nagłówka),
+    przycięta sufitem. Jedno miejsce, bo pyta o nią też zapis perspektywy: szerokość równa tej
+    nie jest wyborem ręki (AR-36)."""
+    table.executeDelayedItemsLayout()
+    szer = max(table.sizeHintForColumn(col), table.horizontalHeader().sectionSizeHint(col))
+    return min(szer, sufit)
 
 
 class GridTableModel(QAbstractTableModel):
-    """Model read-only: kolumny bazowe + dynamiczne kolumny-keywordy. 3 stany komórki keyworda; sort
-    numeryczny (po `PivotCell.num`) / tekstowy, MISSING na końcu; grupowanie = nagłówki grup w płaskiej
-    liście. Karmiony gotowymi danymi (`set_data`) — zero SQL/plików."""
+    """Model danych read-only: kolumny bazowe + dynamiczne kolumny-keywordy. 3 stany komórki keyworda;
+    sort numeryczny (po `PivotCell.num`) / tekstowy, MISSING na końcu; grupowanie = nagłówki grup
+    w płaskiej liście. Karmiony gotowymi danymi (`set_data`) - zero SQL/plików.
+
+    EDYCJA KOMÓRKI KEYWORDA (AR-61) NIE ZMIENIA MODELU: `setData` zamienia wpis człowieka na sygnał
+    `cell_edit_requested(frame_id, keyword, wartość, komentarz)`, a widok przepuszcza go przez te same
+    bramki co makro i stage'uje do szuflady. Wartość w komórce zmienia dopiero commit i przeładowanie;
+    do tego czasu zmianę pokazuje podgląd klingi (kolumna „makro →"), jak przy makrze."""
+
+    cell_edit_requested = Signal(int, str, str, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        # Edycja komórek włączona poza zajętością (etap Dostawy, zapis plików) - przełącza widok
+        # (`FramesView._sync_edycji`); model sam o zajętości nie wie.
+        self._edytowalne = True
         self._rows = []          # dict-y klatek (z 'cells') PRZEPLATANE markerami grup {'_group':..,'_count':..}
         self._data_rows = []     # same klatki (bez markerów) — źródło do sortu/grupowania
         self._keywords = []
@@ -930,9 +1174,16 @@ class GridTableModel(QAbstractTableModel):
 
     def set_preview(self, preview, *, label=None):
         """Podgląd klingi (doktryna §5: „grid = podgląd"): frame_id → zmiana (stara→nowa) albo
-        pominięcie z powodem. Dokłada EFEMERYCZNĄ kolumnę (`label`, np. „makro →"/„nazwa →") na końcu;
-        `{}`/None ją zdejmuje. `label` rozróżnia klingę (makro vs rename) w tym samym podglądzie (R1 #4);
-        `None` → domyślna „makro →" z katalogu (rozwiązywana w wywołaniu, nie w sygnaturze — D-L1)."""
+        pominięcie z powodem. Dokłada EFEMERYCZNĄ kolumnę (`label`, np. „makro →"/„nazwa →")
+        LOGICZNIE na końcu; `{}`/None ją zdejmuje. `label` rozróżnia klingę (makro vs rename)
+        w tym samym podglądzie (R1 #4); `None` → domyślna „makro →" z katalogu (rozwiązywana
+        w wywołaniu, nie w sygnaturze - D-L1).
+
+        WIZUALNIE kolumna stoi zaraz za „Ścieżką" - przesunięciem nagłówka w widoku
+        (`FramesView._uloz_belki_i_wersje`), nie nowym indeksem, więc numery keywordów, sort
+        i szerokości się nie przesuwają. Podgląd stał ostatni także wizualnie (rename: indeks 14
+        z 15, x=1300 przy viewporcie 1076 px; makro i edycja komórki: ~130 px na końcu), więc
+        tego, co miał pokazać, nie było widać bez przewijania - ani obok starej wartości."""
         self.beginResetModel()
         self._preview = dict(preview or {})
         self._preview_label = label if label is not None else i18n.t("grid.preview.macro")
@@ -994,7 +1245,8 @@ class GridTableModel(QAbstractTableModel):
         return 1 if self._version_col_on else 0
 
     def _preview_col(self):
-        """Indeks efemerycznej kolumny podglądu makra (ostatnia) albo None, gdy podgląd nieaktywny."""
+        """Indeks efemerycznej kolumny podglądu (ostatnia) albo None, gdy podgląd nieaktywny.
+        Indeks LOGICZNY - wizualnie podgląd stoi zaraz za „Ścieżką" (`set_preview`)."""
         if not self._preview_active():
             return None
         return len(BASE_COLS) + self._kw_off() + len(self._keywords)
@@ -1051,7 +1303,53 @@ class GridTableModel(QAbstractTableModel):
         base = super().flags(index)
         if index.isValid() and isinstance(self._rows[index.row()], dict) and "_group" in self._rows[index.row()]:
             return Qt.ItemIsEnabled  # nagłówek grupy: nieselektowalny
+        if index.isValid() and self._komorka_edytowalna(index):
+            return base | Qt.ItemIsEditable
         return base
+
+    def _komorka_edytowalna(self, index):
+        """Czy komórkę wolno otworzyć do edycji (AR-61) - TANIE bramki z faktów wiersza, bo `flags`
+        woła się dla każdej komórki zakresu (R-S2b-7: koszt zaznaczenia mierzony w wywołaniach).
+
+        Tylko kolumna KEYWORDA (te same keywordy, które dostaje pasek makra) i tylko klatka, w którą
+        makro też może pisać, sądząc po tym, co wiersz już niesie: nie RAW (pisarz odmawia) i dokładnie
+        jedna obecna kopia (D-W1). Reszta bramek celu (kompresja, degenerat, brak `header_hash`) i reguły
+        karty idą przy zatwierdzeniu edycji przez `macro.plan_manual_change` - z powodem na pasku."""
+        if not self._edytowalne:
+            return False
+        col = index.column()
+        if (col < len(BASE_COLS) or col == self._preview_col() or col == self._version_col()
+                or col >= self.columnCount()):
+            return False
+        row = self._rows[index.row()]
+        return row.get("filetype") != "raw" and (row.get("n_present") or 0) == 1
+
+    def set_editable(self, on):
+        """Włącz albo wyłącz edycję komórek (zajętość widoku). Bez resetu: `flags` czyta flagę przy
+        następnym zapytaniu widoku, a otwarty edytor i tak odbije bramka zajętości w widoku."""
+        self._edytowalne = bool(on)
+
+    def setData(self, index, value, role=Qt.EditRole):
+        """Wpis człowieka w komórkę keyworda → `cell_edit_requested` (bez komentarza). Model się nie
+        zmienia, więc zwraca False - widok pokaże zmianę podglądem po stage'u."""
+        if role != Qt.EditRole:
+            return False
+        self.request_cell_edit(index, value, "")
+        return False
+
+    def request_cell_edit(self, index, value, comment):
+        """Wyjście gołego `setData` (bez delegata): ten sam warunek edytowalności co `flags` - indeks
+        spoza niego nie emituje nic (EXPECT na wołającym). Delegat nie idzie tędy: zapisuje po celu
+        ustalonym przy otwarciu (`cel_edycji`), bo jego indeks bywa już nieważny po resecie."""
+        if not index.isValid() or not self._komorka_edytowalna(index):
+            return
+        frame_id, keyword = self.cel_edycji(index)
+        self.cell_edit_requested.emit(frame_id, keyword, "" if value is None else str(value),
+                                      comment or "")
+
+    def cel_edycji(self, index):
+        """Stabilny cel edycji komórki: `(frame_id, keyword)` - przeżywa reset modelu."""
+        return int(self._rows[index.row()]["frame_id"]), self._kw_for_col(index.column())
 
     def data(self, index, role=Qt.DisplayRole):
         if not index.isValid():
@@ -1165,6 +1463,33 @@ class GridTableModel(QAbstractTableModel):
                 return _COLORS["missing"]
             if role == Qt.ToolTipRole:
                 return i18n.t("grid.preview.skipped_tip", reason=pv['skipped'])
+            return None
+        if "cards" in pv:
+            # Wpis ze stagingu przebiegu (AR-61): wszystkie karty klatki, które zapisze commit. Jedna
+            # karta wygląda jak podgląd makra; kilka - każda z nazwą keyworda, żeby nie zgadywać.
+            # Komentarz, który zapis wniesie, jest częścią zmiany: przy samej zmianie komentarza
+            # (wartość bez zmian) komórka mówi „komentarz → …" zamiast „RC8 → RC8", a przy zmianie
+            # wartości komentarz stoi w podpowiedzi.
+            karty = pv["cards"]
+
+            def _zmiana(k):
+                if k.get("comment") is not None and k["old"] == k["new"]:
+                    return i18n.t("grid.preview.comment_only", comment=k["comment"])
+                return f"{'∅' if k['old'] is None else k['old']} → {k['new']}"
+
+            def _tip(k):
+                tip = f"{k['keyword']}: {k['old']!r} → {k['new']!r} ({k['op']})"
+                if k.get("comment") is not None:
+                    tip += i18n.t("grid.preview.comment_tip", comment=k["comment"])
+                return tip
+            if role == Qt.DisplayRole:
+                if len(karty) == 1:
+                    return _zmiana(karty[0])
+                return " · ".join(f"{k['keyword']}: {_zmiana(k)}" for k in karty)
+            if role == Qt.ToolTipRole:
+                return "\n".join(_tip(k) for k in karty)
+            if role == Qt.FontRole:
+                f = QFont(); f.setBold(True); return f
             return None
         if role == Qt.DisplayRole:
             if pv.get("op") == "rename":
@@ -1320,6 +1645,10 @@ class GridTableModel(QAbstractTableModel):
 
     def _kw_cell(self, row, kw, role):
         cell = row["cells"].get(kw, pivot_mod.MISSING)
+        if role == Qt.EditRole:
+            # Edytor startuje od wartości karty, a przy braku karty od pustego pola - znak „—"
+            # w polu edycji zostałby zapisany jako wartość nowej karty.
+            return "" if cell is pivot_mod.MISSING or cell.raw is None else str(cell.raw)
         if cell is pivot_mod.MISSING:
             if role == Qt.DisplayRole:
                 return _MISSING_TEXT
@@ -3219,6 +3548,9 @@ class FramesView(QWidget):
     # Gest osi obiektu z paska Zbiorów zmienia stan, który pokazuje INNE okno (kolejka przeglądu
     # osi obiektu). Sygnał, nie wołanie: grid nie zna gospodarza i nie ma go poznawać (NARROW).
     object_axis_changed = Signal()
+    # Gest ruszył oś STANOWISKA (przeniesienie wskazania ręki, AR-41) - gospodarz odświeża oś
+    # obserwatorium; grid jej nie zna, tak samo jak osi obiektu.
+    observatory_axis_changed = Signal()
     # STAN LICZONY PRZEZ PORZĄDKI SIĘ ZMIENIŁ - jeden sygnał z końca drogi KAŻDEGO gestu gridu,
     # który rusza populację `queries.tasks_state`; gospodarz podpina go RAZ pod `refresh_counts`
     # (plakietka nawigacji). Osobno od `object_axis_changed`, bo ten mówi o INNEJ powierzchni
@@ -3248,7 +3580,9 @@ class FramesView(QWidget):
     # przepięłoby kanał, którym mówią wszystkie inne gesty widoku, a raport gestu osi niczym się od
     # nich nie różni. Osobny kanał należy się temu członowi, który ma osobny nośnik - i tylko jemu.
     # Recepta leci ZARAZ PO raporcie (nigdy przed), więc pusta gasi cudzą z poprzedniego gestu.
-    status_recipe = Signal(str)
+    # NIESIE `Recepta` (zdanie + człony z wykonawcami, FH-2e/FH-8), więc typ sygnału to `object`:
+    # `Signal(str)` przepisałby wartość na gołe `str` i nośnik zgubiłby człony po drodze.
+    status_recipe = Signal(object)
     # Pusty stan perspektywy kopii prowadzi do Dostawy (`_ustaw_pusty_stan`) - gospodarz przełącza
     # widok, jak przy `TasksView.open_intake`. Sygnał, nie wołanie: grid nie zna gospodarza (NARROW).
     open_intake = Signal()
@@ -3267,9 +3601,17 @@ class FramesView(QWidget):
         self._zeruj_flagi()         # flagi perspektyw `_only_*` - skład z `_TRIMY`, jedna enumeracja
         self._cel_gestu = []        # klatki wypchnięte z widoku przez ostatni gest - wracają do
                                     # zaznaczenia przy najbliższym przeładowaniu zbioru (FC-2)
+        self._recepta_gestu = None  # `(cel, _Odwrot|None)` ostatniego gestu osi - recepta paska
+                                    # składa się z tego STANU przy każdym odświeżeniu (FH-2e)
         self._reveal_facet = None   # (facet, wartość) do odsłonięcia w listwie — patrz `apply_object_facet`
         self._frame_ids = []      # frame_id widoczne w gridzie (cel makra) — aktualizowane w refresh()
         self._run_id = None       # JEDEN run_id sesji makra (R#5 lifecycle: stage→commit/reject zwalnia)
+        # Edycje komórek (AR-61) jadą TYM SAMYM przebiegiem `_run_id` (jedna klinga, jeden commit,
+        # jeden cel „Cofnij" łapany przy commicie w `_install_undo`) - nie trzecim trybem szuflady.
+        # Pamiętamy, POD KTÓRYM przebiegiem i które karty `(location_id, keyword)` stoją z ręki:
+        # ponowny staging makra czyści cały przebieg, więc bez tej pamięci zjadłby je po cichu.
+        self._komorki_run = None
+        self._komorki = set()
         self._n_total = 0         # liczba widocznych klatek (baza licznika; zaznaczenie dokładane, G2)
         # Stan renamu — CZTERY zmienne (R1 #1 + R2 #1): run aktywnego stagingu, flaga „skommitowany"
         # (re-stage po commicie MINTUJE nowy run, nie kasuje wierszy 'applied'=undo), OSOBNY cel „Cofnij"
@@ -3305,6 +3647,8 @@ class FramesView(QWidget):
         self._pola_async = pola_poza_watkiem
         self._columns = []
         self._obrazy_reka = None    # wybór ręki dla kolumny „Obrazy" (None = za perspektywą)
+        self._obrazy_perspektywy = None  # wybór „Obrazów" z zapisanej perspektywy (None = brak)
+        self._szerokosc_sciezki = None  # szerokość ścieżki z zapisanej perspektywy (None = brak)
         self._pola = None           # ostatnie ZASTOSOWANE pokrycie (lista {"keyword", "n"})
         self._pola_odcisk = None    # odcisk kart, z którego ono pochodzi (`pola.odcisk_kart`)
         self._pola_gen = 0          # generacja prośby - wynik starszej ląduje w koszu
@@ -3437,6 +3781,9 @@ class FramesView(QWidget):
         # Układ belek grup (na całą szerokość) i kolumny „Wersja" (za „Ścieżką") żyje w WIDOKU,
         # więc odnawia się po KAŻDYM resecie modelu - także po sorcie z nagłówka i po podglądzie
         # klingi, które nie przechodzą przez `_refresh` (`_uloz_belki_i_wersje`).
+        self._szerokosci_przed_resetem = {}   # znaczenie kolumny → szerokość (`_zapamietaj_szerokosci`)
+        self._znaczenia_kolumn = []           # znaczenie per numer kolumny w ostatnim układzie
+        self.model.modelAboutToBeReset.connect(self._zapamietaj_szerokosci)
         self.model.modelReset.connect(self._uloz_belki_i_wersje)
         # Debounce panelu daty: `selectionChanged` może sypać setki eventów przy zaznaczeniu wsadu
         # → przelicz echo raz, po 150 ms ciszy (R1 #15).
@@ -3448,7 +3795,17 @@ class FramesView(QWidget):
         self.table.selectionModel().selectionChanged.connect(lambda *_: self._on_selection_changed())
         self.table.setSortingEnabled(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        # EDYCJA KOMÓRKI KEYWORDA (AR-61): dwuklik albo F2 na komórce, którą model uznał za
+        # edytowalną (`GridTableModel._komorka_edytowalna`). Wpis idzie do szuflady tą samą klingą
+        # co makro (`_on_cell_edit`); zajętość zdejmuje wyzwalacze (`_sync_edycji`).
+        self._edit_triggers = QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed
+        self.table.setEditTriggers(self._edit_triggers)
+        self.table.setItemDelegate(_EdycjaKomorki(self.table))
+        self.model.cell_edit_requested.connect(self._on_cell_edit)
+        # Edytor otwarty w chwili resetu modelu (odświeżenie z wątku pól, sort, podgląd) jest
+        # domykany z zapisem PRZED resetem - reset niszczy edytor i unieważnia jego indeks.
+        self._podglad_edycji = "teraz"      # „teraz" / „pozniej" (w resecie) / „bez" (widok znika)
+        self.model.modelAboutToBeReset.connect(lambda: self._domknij_edycje("pozniej"))
         self.table.setAlternatingRowColors(True)   # zebra: skanowalność długich list (P3-5)
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
@@ -3494,6 +3851,11 @@ class FramesView(QWidget):
         self._sep_zwolnienia = self._menu_tabeli.addSeparator()
         self.act_release_file = self._menu_tabeli.addAction(i18n.t("grid.inplace.release"))
         self.act_release_file.triggered.connect(self._on_release_file)
+        # AR-41: przeniesienie faktów ręki - wyłącznie w perspektywie „Zastąpione": klatka
+        # zastąpiona niesie werdykt ręki, a plik niesie dziś następczyni.
+        self._sep_przeniesienia = self._menu_tabeli.addSeparator()
+        self.act_transfer_facts = self._menu_tabeli.addAction(i18n.t("supersede.transfer.action"))
+        self.act_transfer_facts.triggered.connect(self._on_transfer_facts)
         rv.addWidget(self.table, 1)   # stretch: nadmiar pionu należy do TABELI, nie do panelu (N1)
 
         # PUSTY STAN = ZDANIE + GEST (FH-4). `self.empty` zostaje etykietą z tekstem (kontrakt testów
@@ -3596,7 +3958,12 @@ class FramesView(QWidget):
         rodzic go skasuje - `QThread` niszczony w biegu to twardy abort aplikacji. Wynik, który
         zdążył wyjść z wątku, trafia do kosza generacją, więc nie dotknie widoku ani zamkniętego
         połączenia. Przerwanie powtarzamy co 100 ms: `interrupt` trafiony w chwilę między dwoma
-        zapytaniami workera nie działa, a kolejne łapie już zapytanie w locie. Idempotentne."""
+        zapytaniami workera nie działa, a kolejne łapie już zapytanie w locie. Idempotentne.
+
+        To jest też jedyny moment, w którym gospodarz mówi widokowi „znikasz" PRZED zamknięciem
+        połączenia (`MainWindow._zatrzymaj_watki_widokow`) - więc otwarty edytor komórki (AR-61)
+        jest domykany z zapisem do szuflady tutaj, póki połączenie żyje."""
+        self._domknij_edycje("bez")
         self._pola_stop = True
         self._pola_ponow = False
         self._pola_gen += 1
@@ -3748,16 +4115,21 @@ class FramesView(QWidget):
             # zmienia wyłącznie to, które pola są zaznaczone.
             self._columns = list(spec["columns"])
             self._wypelnij_pola()
+        self._wyglad_z_perspektywy(spec)
         self.refresh()
+        if self._szerokosc_sciezki is not None:
+            self.table.setColumnWidth(self.model.base_col("path"), self._szerokosc_sciezki)
         self._zdejmij_wynik_gestu_zapisu()
         # Perspektywa izolacji zapisu podaje gest, który ją opróżnia: gesty mieszkają w menu
         # prawego kliku (nie na pasku zbioru), a menu nie widać, dopóki się go nie otworzy.
         # Recepta PO `refresh()`, bo raport odświeżenia gasi receptę poprzedniego gestu.
         recepta = next((k for a, k in _RECEPTY_ZAPISU.items() if getattr(self, a)), None)
         if recepta is not None and self._frame_ids:
-            self.status_recipe.emit(i18n.t(
+            # `Recepta` z jednym członem BEZ wykonawcy (kontrakt sygnału, Z7): gesty mieszkają
+            # w menu prawego kliku, więc przycisk recepty stoi wygaszony, a zdanie zostaje.
+            self.status_recipe.emit(_zlacz_recepty([i18n.t(
                 recepta, finish=i18n.t("grid.inplace.finish"),
-                restore=i18n.t("grid.inplace.restore"), release=i18n.t("grid.inplace.release")))
+                restore=i18n.t("grid.inplace.restore"), release=i18n.t("grid.inplace.release"))]))
 
     def apply_object_facet(self, pairs):
         """Ustaw zbiór na WSKAZANE obiekty — publiczny seam dla wejść spoza widoku (T5e: „Pokaż
@@ -3869,7 +4241,29 @@ class FramesView(QWidget):
                 self.combo_persp.blockSignals(True)
                 self.combo_persp.setCurrentIndex(i)
                 self.combo_persp.blockSignals(False)
+                # Wygląd zapisanej perspektywy (AR-36) nie jedzie pod etykietę presetu: preset nie
+                # niesie `view`, więc wraca wygląd domyślny i układ kolumn liczy się od nowa.
+                if self._wyglad_z_perspektywy(PRESETS[kandydat[1]]):
+                    self._uloz_kolumny()
                 return
+
+    def _wyglad_z_perspektywy(self, spec):
+        """Wygląd widoku z klucza `view` spec-a (AR-36) - JEDYNE miejsce, które go czyta. Zeruje
+        stan z poprzedniej perspektywy (spec bez `view`, preset) i zwraca, czy coś się zmieniło.
+
+        Wybór „Obrazów" z perspektywy mieszka OSOBNO od wyboru ręki (`_obrazy_reka`): perspektywa
+        nie przepisuje gestu sesji, a po wyjściu z niej jej wybór znika. Pierwszeństwo czyta
+        `_obrazy_widoczne`. Szerokość ścieżki: dodatnia liczba całkowita albo żadna. Wartość spoza
+        kontraktu (ręczna edycja bazy) = brak wartości, bez wyjątku."""
+        widok = spec.get(_SPEC_WIDOK)
+        widok = widok if isinstance(widok, dict) else {}
+        obrazy = widok.get(_SPEC_OBRAZY)
+        obrazy = obrazy if isinstance(obrazy, bool) else None
+        szer = widok.get(_SPEC_SZEROKOSC_SCIEZKI)
+        szer = szer if isinstance(szer, int) and not isinstance(szer, bool) and szer > 0 else None
+        zmiana = (obrazy, szer) != (self._obrazy_perspektywy, self._szerokosc_sciezki)
+        self._obrazy_perspektywy, self._szerokosc_sciezki = obrazy, szer
+        return zmiana
 
     def _warunki_nowszej_wersji_do_przeniesienia(self, name):
         """Klucze spec-a, których ten build nie zna, a które zapis pod nazwą `name` ma PRZENIEŚĆ
@@ -3908,6 +4302,23 @@ class FramesView(QWidget):
         return ({k: v for k, v in spec.items() if k not in _ZNANE_KLUCZE_SPECU},
                 {f: g for f, g in facety.items() if f not in facet_model.FACETS})
 
+    def _wyglad_do_zapisu(self):
+        """Klucz `view` nowego spec-a (AR-36): widoczność „Obrazów", jaką widok POKAZUJE (nie sam
+        gest ręki - perspektywa ma się otworzyć tak, jak ją zapisano), i szerokość ścieżki tylko
+        wtedy, gdy różni się od tej, którą widok ustawiłby sam: z treści w perspektywach
+        `_FLAGI_SCIEZKI_Z_TRESCI`, domyślnej sekcji gdzie indziej. Szerokość „taka jak zwykle"
+        zapisana w spec-u zamroziłaby treść z chwili zapisu."""
+        widok = {_SPEC_OBRAZY: self._obrazy_widoczne()}
+        kol = self.model.base_col("path")
+        biezaca = self.table.columnWidth(kol)
+        if any(getattr(self, atrybut) for atrybut in _FLAGI_SCIEZKI_Z_TRESCI):
+            sama = szerokosc_z_tresci(self.table, kol)
+        else:
+            sama = self.table.horizontalHeader().defaultSectionSize()
+        if biezaca != sama:
+            widok[_SPEC_SZEROKOSC_SCIEZKI] = biezaca
+        return widok
+
     def _save_perspective(self):
         name, ok = QInputDialog.getText(self, i18n.t("grid.persp.save_title"), i18n.t("grid.persp.save_prompt"))
         if not ok or not name.strip():
@@ -3924,12 +4335,23 @@ class FramesView(QWidget):
             # facety, które ten build zna; obce wracają wyłącznie regułą przeniesienia (D-V-9f).
             "facets": {**{f: g for f, g in self._facet_state.items() if f in facet_model.FACETS},
                        **facety_obce},
+            # Wygląd (AR-36): widoczność „Obrazów" EFEKTYWNA w chwili zapisu i szerokość ścieżki -
+            # ta tylko wtedy, gdy ręka ją zmieniła (`_wyglad_do_zapisu`).
+            _SPEC_WIDOK: self._wyglad_do_zapisu(),
             **klucze_obce,
         }
         # Zapis idzie do BAZY (I-1) — perspektywa jedzie z archiwum, nie z tą maszyną. Czasownik
         # z klingi rozstrzyga KOMUNIKAT: nazwa przyjechana z drugiej maszyny z inną treścią zostaje
         # NADPISANA, a „zapisano" bez słowa o tym mówiłoby o czymś, co się nie stało (F9).
         _id, verb = repo.save_perspective(self.con, name=name, spec=spec, now=self._now())
+        # Widok JEST teraz tą perspektywą - jej wygląd obowiązuje od razu, inaczej najbliższe
+        # przeładowanie policzyłoby ścieżkę z treści i zjadło szerokość, którą człowiek zapisał.
+        # Gest ręki na „Obrazach" ZOSTAJE SKONSUMOWANY przez zapis: należy od teraz do tej
+        # perspektywy (wybór efektywny trafił do `view`), a nie do sesji - inaczej przechodził na
+        # preset i chował kolumnę tam, gdzie jej domyślna jest inna (firsthand: zapis z ukrytymi
+        # „Obrazami" w Duplikatach → preset „Duplikaty" dalej bez kolumny).
+        self._wyglad_z_perspektywy(spec)
+        self._obrazy_reka = None
         # Sama lista perspektyw: zapis nie rusza kart, a pełne `_load_facets` liczyło tu dawniej
         # pokrycie całego archiwum i przy okazji zerowało kolumny do domyślnych - zaraz po tym,
         # jak człowiek zapisał je w perspektywie.
@@ -3976,7 +4398,7 @@ class FramesView(QWidget):
             self.status_message.emit(i18n.t("grid.sel.object_empty"))
         return ids
 
-    def _po_gescie_osi(self, klucz, gest, *, odwracalny=False,
+    def _po_gescie_osi(self, klucz, gest, *, odwrot=None,
                        canons_key="grid.sel.object_canons",
                        nothing_key="grid.sel.object_skip_nothing", **kw):
         """Wspólny ogon WSZYSTKICH gestów osi: zdanie z ROZBICIEM per fakt + odświeżenie CZTERECH
@@ -3989,9 +4411,15 @@ class FramesView(QWidget):
         ZAZNACZENIE PRZEŻYWA GEST (R-S2b-3, człon pierwszy). `refresh()` przebudowuje model
         (`beginResetModel`), więc zaznaczenie 120 klatek szło do zera — a razem z nim JEDYNY tani
         cel gestu naprawczego. Zmierzone przez wizytację: odtworzenie stanu sprzed pomyłki
-        kosztowało 6-8 interakcji plus pamięć człowieka o tym, co tam stało."""
+        kosztowało 6-8 interakcji plus pamięć człowieka o tym, co tam stało.
+
+        `odwrot` (`_Odwrot` albo `None`) deklaruje, że gest ma drogę powrotu - recepta paska podaje
+        ją wtedy jako wykonalny człon (FH-2e). Klucze i etykiety niesie deklaracja, a kod składający
+        jest jeden dla wszystkich trzech odwracalnych gestów obu osi zaznaczenia."""
         zaznaczone = [r["frame_id"] for r in self._selected_data_rows()]
-        recepty = []                    # człony „co teraz zrobić" — własny nośnik paska (FH-2)
+        # Recepta poprzedniego gestu przestaje obowiązywać w chwili nowego - `refresh()` niżej
+        # nie ma jej już składać (FH-2e: składa ją ze stanu, którego za moment nie będzie).
+        self._recepta_gestu = None
         msg = i18n.t(klucz, assigned=gest.assigned, total=gest.assigned + gest.skipped, **kw)
         # Rozbicie pominięć i gotowe obrazy składa JEDEN dom (`zdanie_pominiec`), wspólny z dwiema
         # powierzchniami osi w `gui.app` - `nothing_key` idzie za gestem (FC-6), jak `canons_key`.
@@ -4004,7 +4432,6 @@ class FramesView(QWidget):
         # jest w zdaniu bazowym, bo user sam go przed chwilą wybrał.
         if gest.canons and "canon" not in kw:
             msg += i18n.t(canons_key, canons=_lista_kanonow(gest.canons))
-        poza = 0
         if gest.assigned:
             # CZTERY POWIERZCHNIE: wiersze gridu, facety (Obiekt zmienił zawartość), licznik/pasek
             # oraz kolejka przeglądu w oknie osi — ta ostatnia przez sygnał, bo nie jest nasza.
@@ -4020,20 +4447,7 @@ class FramesView(QWidget):
             # Liczba jest POMIAREM (ile z zaznaczonych wróciło na przebudowany model), nie
             # domysłem z liczników klingi - a recepta schodzi od stanu zawężenia, żeby nie
             # obiecywać kliknięcia, które akurat tego zbioru nie odsłoni.
-            poza = len(zaznaczone) - wrocilo
-            fakt, recepta_widoku = self._czlon_poza_widokiem(poza, zaznaczone)
-            msg += fakt
-            recepty.append(recepta_widoku)
-        # RECEPTA ODWRACALNOŚCI SKŁADA SIĘ TUTAJ, NIE U WOŁAJĄCEGO (bramka pakietu, zarzut
-        # blokujący) - bo jej treść zależy od tego, czy cel został na ekranie, a to wie dopiero
-        # ten kod. Gdy klatki wyszły z widoku, zaznaczenie po `refresh()` jest puste, więc
-        # `_sync_object_actions` gasi całą kontrolkę „Obiekt": zdanie „przywrócisz: Obiekt → …"
-        # wskazywałoby wtedy napis wyszarzony w tej samej chwili. Wariant „potem" ustawia oba
-        # gesty w kolejności, w której da się je WYKONAĆ.
-        if odwracalny and gest.assigned:
-            recepty.append(
-                i18n.t("grid.sel.object_clear_undo_after" if poza else "grid.sel.object_clear_undo",
-                       menu=i18n.t("grid.sel.object"), action=i18n.t("grid.sel.object_restore")))
+            msg += self._czlon_poza_widokiem(len(zaznaczone) - wrocilo, zaznaczone)
         # ZDANIE IDZIE PO ODŚWIEŻENIU, nie przed (adjudykacja recenzji S2b). `refresh()` kończy się
         # własnym `status_message` („Grid: N klatek…"), a odbiornikiem jest jeden `showMessage`
         # paska stanu — emisja przed odświeżeniem ginęła w tym samym obrocie pętli. Skutek był
@@ -4044,35 +4458,127 @@ class FramesView(QWidget):
         # więc drugie wymazuje pierwsze (bramka pakietu 0810). Dlatego nagrobek bez pamięci jest
         # członem rozbicia (FC-6), a nie osobnym zdaniem doklejanym przez wołającego.
         self.status_message.emit(msg)
-        self.status_recipe.emit(_zlacz_recepty(recepty))
+        # RECEPTA ODWRACALNOŚCI SKŁADA SIĘ ZE STANU, NIE U WOŁAJĄCEGO (bramka pakietu, zarzut
+        # blokujący) - bo jej treść zależy od tego, czy cel został na ekranie. Gest, który niczego
+        # nie zapisał, recepty nie dostaje: mówiłaby, jak cofnąć coś, co się nie stało - a pusta
+        # gasi receptę poprzedniego gestu.
+        # CEL RECEPTY TO KLATKI REALNIE ZMIENIONE (`gest.frame_ids`), nie całe zaznaczenie: klinga
+        # pomija część celu (nagrobek sprzed tygodnia, źródło z nagłówka), a odwrót na pominiętych
+        # ruszyłby cudzą, starszą decyzję, której ten gest nie podjął (bramka pakietu, Z1).
+        self._ustaw_recepte_gestu(gest.frame_ids, odwrot)
+
+    def _ustaw_recepte_gestu(self, cel, odwrot=None):
+        """Zapamiętaj STAN recepty ostatniego gestu i podaj ją na pasek (FH-2e).
+
+        RECEPTA ŻYJE TYLE, CO JEJ PRAWDA, NIE TYLE, CO KOMUNIKAT. Do FH-2e żyła 5 s razem
+        z raportem, a przy dwóch członach umierała po wykonaniu PIERWSZEGO: `refresh()` emitował
+        własny raport i gasił ją dokładnie wtedy, gdy człon drugi stawał się wykonalny. Teraz
+        widok pamięta CEL i DROGĘ POWROTU, a `refresh()` składa z nich receptę od nowa - człon
+        odsłonięcia znika, gdy cel jest na ekranie, a człon powrotu, gdy nie ma już czego odwracać.
+        `cel=None` zdejmuje receptę (pusta gasi tę z poprzedniego gestu)."""
+        self._recepta_gestu = (tuple(cel), odwrot) if cel else None
+        self._emituj_recepte_gestu()
+
+    def ponow_recepte(self):
+        """Podaj receptę ostatniego gestu jeszcze raz, o ile wciąż jest prawdą - publiczne wejście
+        gospodarza przy powrocie do Zbiorów (FH-2e): poza nimi recepta schodzi z paska, ale stan,
+        z którego się składa, trwa. Milczy, gdy żaden gest recepty nie zostawił."""
+        if self._recepta_gestu is not None:
+            self._emituj_recepte_gestu()
+
+    def _emituj_recepte_gestu(self):
+        """Złóż receptę z bieżącego stanu i wyślij ją na pasek. Pusta - gdy przestała być prawdą."""
+        czlony = self._czlony_recepty_gestu()
+        if not czlony:
+            self._recepta_gestu = None
+        self.status_recipe.emit(_zlacz_recepty(czlony))
+
+    def _czlony_recepty_gestu(self):
+        """Człony recepty ostatniego gestu, w KOLEJNOŚCI W CZASIE, policzone ze stanu w chwili pytania.
+
+        Odsłonięcie, gdy choć jedna klatka celu jest poza widokiem i istnieje gest, który ją
+        odsłoni (`_recepta_powrotu_do_widoku`, cel „gest"); wykonawca pyta o wybór gestu PONOWNIE
+        w chwili kliknięcia. Droga powrotu, dopóki jest co odwracać (`_Odwrot.zostalo`) - wykonalna
+        od razu, gdy cały cel jest na ekranie, a w wariancie „potem" bez wykonawcy (przycisk
+        wygaszony, zdanie zostaje)."""
+        if self._recepta_gestu is None:
+            return []
+        cel, odwrot = self._recepta_gestu
+        widoczne = set(self._frame_ids)
+        poza = any(f not in widoczne for f in cel)
+        czlony = []
+        if poza:
+            recepta = self._recepta_powrotu_do_widoku()
+            if recepta is not None:
+                klucz, kwargi = recepta
+                # Odsłonięcie to sama NAWIGACJA (perspektywa, zbiór) - bez zapisu, więc bez bramki
+                # zajętości: w trakcie etapu ma działać jak każde przełączenie widoku.
+                czlony.append(CzlonRecepty(i18n.t(klucz, **kwargi),
+                                           partial(self.wykonaj_recepte_powrotu, cel=_CEL_GEST)))
+        if odwrot is not None and getattr(self, odwrot.zostalo)(cel):
+            tekst = i18n.t(odwrot.klucz_potem if poza else odwrot.klucz,
+                           menu=i18n.t(odwrot.menu), action=i18n.t(odwrot.akcja))
+            czlony.append(CzlonRecepty(tekst, None if poza else partial(
+                self._wykonaj_czlon, partial(self._wykonaj_odwrot, cel, odwrot))))
+        return czlony
+
+    def _wykonaj_czlon(self, wykonaj):
+        """Bramka ZAJĘTOŚCI przed wykonaniem członu ODWROTU (Z4) - ta sama, co przed gestami
+        izolacji (`_powod_zajetosci`). Członu odsłonięcia nie obejmuje: to sama nawigacja, bez
+        zapisu. Recepta jest nowym klikalnym wejściem do zapisu osi, a etap
+        Dostawy albo zapis nagłówków pisze w tym czasie do tej samej bazy z innego połączenia:
+        klik dostałby blokadę do `busy_timeout` albo `database is locked`. Odmowa mówi na pasku
+        DLACZEGO; recepta zostaje, bo po końcu zajętości jest dalej prawdziwa."""
+        powod = self._powod_zajetosci()
+        if powod is not None:
+            self.status_message.emit(i18n.t(_RECEPTA_ZAJETA[powod]))
+            self.ponow_recepte()            # raport gasi receptę na pasku, a ona dalej obowiązuje
+            return
+        wykonaj()
+
+    def _wykonaj_odwrot(self, cel, odwrot):
+        """Wykonaj drogę powrotu z recepty: zaznacz CEL gestu i wywołaj slot pozycji menu, którą
+        recepta nazywa - ten sam kod, co klik w menu, bez kopii. Zaznaczenie stawiamy od nowa, bo
+        user mógł je zmienić od chwili gestu, a recepta mówi o klatkach GESTU, nie o bieżącym wyborze.
+        Po odwrocie zaznaczenie ZOSTAJE zawężone do klatek realnie zmienionych przez gest (`cel` to
+        `gest.frame_ids`) - zaznaczone jest dokładnie to, co odwrócono."""
+        self._przywroc_zaznaczenie(cel)
+        getattr(self, odwrot.slot)()
+
+    def _ile_do_przywrocenia(self, cel):
+        """Ile klatek celu niesie nagrobek z pamięcią (droga powrotu cofnięcia przypisania)."""
+        return queries.selection_object_state(self.con, list(cel))["restorable"]
+
+    def _ile_do_cofniecia(self, cel):
+        """Ile klatek celu ma przypisanie, które ręka może cofnąć (droga powrotu przywrócenia)."""
+        return queries.selection_object_state(self.con, list(cel))["clearable"]
+
+    def _ile_wycofanych(self, cel):
+        """Ile klatek celu jest dziś wycofanych (droga powrotu wycofania)."""
+        return len(set(cel) & queries.retired_frame_ids(self.con))
 
     def _czlon_poza_widokiem(self, poza, cel=None):
-        """Człon „poza widokiem: N" ORAZ jego recepta - WSPÓLNY DLA OBU OSI zaznaczenia (FC-2).
+        """Człon „poza widokiem: N" - WSPÓLNY DLA OBU OSI zaznaczenia (FC-2).
 
         Obie osie mają ten sam problem i to nie jest analogia: na osi obiektu gest wypycha cel przy
         aktywnym facecie „Obiekt", a na osi żywotności klatki wypchnięcie jest wręcz REGUŁĄ, bo
         wycofanie zdejmuje klatkę z kubełków roboczych. Dwie kopie tej frazy rozjechałyby się przy
         pierwszej poprawce, a trzecia oś dołożyłaby trzecią (bramka pakietu, soczewka repo).
 
-        ZWRACA PARĘ `(fakt, recepta)`, bo te dwa człony jadą na pasek OSOBNYMI kanałami (FH-2):
-        „poza widokiem: N" jest POMIAREM i należy do raportu, a „odsłoni je …" jest INSTRUKCJĄ
-        i dostaje własny widżet, którego długość raportu już nie zdmuchnie.
+        ZWRACA SAM FAKT. „poza widokiem: N" jest POMIAREM i należy do raportu, a „odsłoni je …"
+        jest INSTRUKCJĄ z własnym nośnikiem (FH-2) - i od FH-2e składa się ze STANU gestu
+        (`_czlony_recepty_gestu`), nie z tej chwili, bo ma przeżyć odświeżenie, po którym cel
+        wraca na ekran.
 
-        Para pustych łańcuchów przy zerze, żeby wołający nie musiał pytać - milczenie jest tu
-        poprawną odpowiedzią: zdanie o zerze klatek poza widokiem mówiłoby o czymś, co się nie
-        stało."""
+        Pusty łańcuch przy zerze, żeby wołający nie musiał pytać - milczenie jest tu poprawną
+        odpowiedzią: zdanie o zerze klatek poza widokiem mówiłoby o czymś, co się nie stało."""
         if not poza:
-            return "", ""
+            return ""
         # …i zapamiętaj CEL, żeby recepta odsłaniająca oddała go w zaznaczeniu (`refresh`).
         # Bez tego odsłonięcie jest tylko połową drogi: zbiór wraca, a klatki gestu toną w nim
         # bez śladu - zmierzone firsthandem na 43 klatkach w widoku 16 901 wierszy.
         self._cel_gestu = list(cel or [])
-        fakt = i18n.t("grid.sel.out_of_view", n=poza)
-        recepta = self._recepta_powrotu_do_widoku()
-        if recepta is None:
-            return fakt, ""
-        klucz, kwargi = recepta
-        return fakt, i18n.t(klucz, **kwargi)
+        return i18n.t("grid.sel.out_of_view", n=poza)
 
     def _rodzaj_recepty_powrotu(self, *, cel):
         """Którym JEDNYM gestem odsłonić to, czego nie widać - ze STANU zawężenia, liczone w chwili
@@ -4148,8 +4654,8 @@ class FramesView(QWidget):
         w chwili kliknięcia, nie zapamiętany z chwili podania recepty (stan mógł się zmienić).
 
         JEDEN WYKONAWCA, CEL PODAJE WOŁAJĄCY (FH-4, poprawka po firsthandzie): przycisk pustego
-        stanu pyta o `_CEL_WIDOK`, a przycisk recepty paska stanu zapyta o `_CEL_GEST`
-        (TODO-DŁUG(FH-2e) w `app.py`) - tam zostaje już tylko podpięcie, bez kopii wyboru. `cel`
+        stanu pyta o `_CEL_WIDOK`, a przycisk recepty paska stanu pyta o `_CEL_GEST` (FH-2e: człon
+        odsłonięcia w `_czlony_recepty_gestu` niesie ten wykonawca) - bez kopii wyboru. `cel`
         jest keyword-only, więc `checked: bool` z `clicked` nie wpadnie w jego miejsce. Mechanizmy
         są dwa i różne: lista perspektyw (przez `apply_perspective`, więc pozycja listy idzie za
         stanem) i przycisk zbioru.
@@ -4161,6 +4667,11 @@ class FramesView(QWidget):
             self.apply_perspective(_PRESET_CZYSTY)
         elif rodzaj == _POWROT_ZBIOR:
             self._on_clear_selection()
+        else:
+            # Między podaniem recepty a kliknięciem zniknęło i zawężenie zbioru, i trim - nie ma
+            # czego odsłaniać. Klik bez skutku i bez zdania wyglądałby na zawieszenie (Z9).
+            self.status_message.emit(i18n.t("grid.recipe.nothing_to_reveal"))
+            self.ponow_recepte()
 
     def _ustaw_pusty_stan(self, baza_ma_klatki):
         """Zdanie i gest PUSTEGO GRIDU (FH-4) - wołane z `_refresh`, gdy zbiór jest pusty.
@@ -4258,6 +4769,14 @@ class FramesView(QWidget):
         pierwszy = self.model.index(numery[0], 0)
         sm.setCurrentIndex(pierwszy, QItemSelectionModel.NoUpdate)
         self.table.scrollTo(pierwszy, QAbstractItemView.PositionAtCenter)
+        # …I DRUGI RAZ PO USTALENIU UKŁADU (FH-11). Tabela pokazana w tym samym obrocie pętli
+        # (pusty widok → recepta → zbiór wraca) ma jeszcze geometrię sprzed pokazania, więc
+        # środek liczony teraz jest środkiem cudzego kadru - klatki lądowały na dolnej krawędzi.
+        # Indeks TRWAŁY: kolejne przeładowanie przed obrotem pętli unieważnia go, zamiast wskazać
+        # inną klatkę pod tym samym numerem wiersza.
+        trwaly = QPersistentModelIndex(pierwszy)
+        QTimer.singleShot(0, self, lambda: trwaly.isValid() and self.table.scrollTo(
+            self.model.index(trwaly.row(), 0), QAbstractItemView.PositionAtCenter))
         return len(numery)
 
     def _on_object_name(self, *, preselect_canon=None):
@@ -4370,7 +4889,7 @@ class FramesView(QWidget):
         if not ids:
             return
         gest = repo.clear_object_assignment(self.con, frame_ids=ids, now=self._now())
-        self._po_gescie_osi("grid.sel.object_cleared", gest, odwracalny=True)
+        self._po_gescie_osi("grid.sel.object_cleared", gest, odwrot=_ODWROT_COFNIECIA)
 
     def _on_object_restore(self):
         """„Przywróć cofnięte przypisanie" — DROGA POWROTU z masowego cofnięcia (R-S2b-3).
@@ -4433,8 +4952,11 @@ class FramesView(QWidget):
                             skipped_failed=sum(len(r["frame_ids"]) for r in grupy[i:]))
                         break
                     faza.say(i18n.t("busy.restoring", done=i + 1, total=len(grupy)))
+        # PRZYWRÓCENIE TEŻ JEST ODWRACALNE (FH-9): jego odwrotem jest „Cofnij przypisanie" na tych
+        # samych klatkach. Bez deklaracji widżet recepty zostawał po tym geście pusty, choć para
+        # gest↔odwrót jest symetryczna - a drugą stroną tej pary user właśnie się posłużył.
         self._po_gescie_osi(
-            "grid.sel.object_restored", gest,
+            "grid.sel.object_restored", gest, odwrot=_ODWROT_PRZYWROCENIA,
             canons_key="grid.sel.object_canons_restored",
             nothing_key="grid.sel.object_restore_skip_nothing")
 
@@ -4713,7 +5235,12 @@ class FramesView(QWidget):
         return any(getattr(self, atrybut) for atrybut in _FLAGI_OBRAZOW)
 
     def _obrazy_widoczne(self):
-        """Widoczność kolumny „Obrazy": wybór ręki z „Pól", a bez niego - perspektywa."""
+        """Widoczność kolumny „Obrazy". Pierwszeństwo: gest ręki po wejściu w perspektywę >
+        wybór zapisany w perspektywie (`view`, AR-36) > gest ręki sprzed wejścia > domyślna
+        perspektywy. Gest po wejściu zdejmuje wybór perspektywy (`_on_images_toggled`), więc
+        pierwsze dwa człony rozstrzyga już sam stan."""
+        if self._obrazy_perspektywy is not None:
+            return self._obrazy_perspektywy
         return self._obrazy_reka if self._obrazy_reka is not None else self._perspektywa_obrazow()
 
     def _on_images_toggled(self, on):
@@ -4721,7 +5248,20 @@ class FramesView(QWidget):
         perspektywie do końca sesji widoku (bije domyślną z `_FLAGI_OBRAZOW`). Bez przeładowania
         zbioru: zmienia się tylko widoczność kolumny, nie dane."""
         self._obrazy_reka = bool(on)
+        self._obrazy_perspektywy = None    # gest po wejściu bije wybór zapisany w perspektywie
         self._uloz_kolumny()
+
+    def _ukryj_kolumny(self):
+        """Ukrycie kolumn po ZNACZENIU: schowana bywa wyłącznie „Obrazy" (`_obrazy_widoczne`).
+        Liczone dla CAŁEGO układu, bo nagłówek trzyma stan ukrycia pod numerem, a po zmianie
+        liczby kolumn - pod POZYCJĄ WIZUALNĄ (zmierzone: z podglądem stojącym za „Ścieżką" ukrycie
+        „Obrazów" przechodziło po jego zdjęciu na pierwszy keyword). Zwraca widoczność „Obrazów"."""
+        m = self.model
+        obrazy = m.base_col("_images")
+        widoczne = self._obrazy_widoczne()
+        for c in range(m.columnCount()):
+            self.table.setColumnHidden(c, c == obrazy and not widoczne)
+        return widoczne
 
     def _uloz_kolumny(self):
         """Układ kolumn tabeli po każdym `set_data` - właściciel trzech rzeczy, które Qt pamięta
@@ -4733,12 +5273,11 @@ class FramesView(QWidget):
             po numerze; bez przestawienia strzałka stała nad cudzą kolumną. Bez sygnału, bo model
             już jest posortowany - emisja kazałaby mu przebudować się drugi raz;
           * szerokość i elizja kolumny ścieżki w perspektywach `_FLAGI_SCIEZKI_Z_TRESCI`
-            (`kolumna_z_tresci`); poza nimi elizja wraca do domyślnej, a szerokość zostaje ręki."""
+            (`kolumna_z_tresci`); poza nimi elizja wraca do domyślnej, a szerokość zostaje ręki.
+            Zapisana perspektywa z własną szerokością (AR-36) zostaje przy niej: elizja tak,
+            liczenie z treści nie - inaczej każde przeładowanie zjadałoby zapisany wybór."""
         m = self.model
-        obrazy = m.base_col("_images")
-        widoczne = self._obrazy_widoczne()
-        for c in range(m.columnCount()):
-            self.table.setColumnHidden(c, c == obrazy and not widoczne)
+        widoczne = self._ukryj_kolumny()
         self.fields.set_images_checked(widoczne)
         naglowek = self.table.horizontalHeader()
         naglowek.blockSignals(True)
@@ -4746,7 +5285,10 @@ class FramesView(QWidget):
         naglowek.blockSignals(False)
         sciezka = m.base_col("path")
         if any(getattr(self, atrybut) for atrybut in _FLAGI_SCIEZKI_Z_TRESCI):
-            kolumna_z_tresci(self.table, sciezka)
+            if self._szerokosc_sciezki is None:
+                kolumna_z_tresci(self.table, sciezka)
+            else:
+                elizja_w_srodku(self.table, sciezka)
         else:
             self.table.setItemDelegateForColumn(sciezka, None)
 
@@ -4794,6 +5336,11 @@ class FramesView(QWidget):
         wołane, gdy Zbiorów nie widać, a o tym, czy raport ma paść teraz, wie tylko gospodarz."""
         with busy.busy(self.load_report.emit, i18n.t("busy.read_frames")):
             self._refresh()
+        # RECEPTA GESTU SKŁADA SIĘ ZE STANU PO KAŻDYM PRZEŁADOWANIU (FH-2e). Raport wczytania
+        # gasi na pasku receptę (każdy raport ją gasi), więc bez tej emisji dwuczłonowa recepta
+        # umierała po wykonaniu pierwszego członu - dokładnie wtedy, gdy drugi stawał się
+        # wykonalny. Milczy, gdy żaden gest recepty nie zostawił.
+        self.ponow_recepte()
 
     def _refresh(self):
         """Wykonawcza połowa `refresh` (fazę zakłada wołający — JEDEN jej właściciel)."""
@@ -4846,9 +5393,8 @@ class FramesView(QWidget):
         # gdy niczego nie odłożył. Bez wygaszania zaznaczenie wracałoby przy dowolnym późniejszym
         # odświeżeniu (zmiana kolumn, sortu) - czyli tam, gdzie user o nie nie prosił, a granica
         # „zaznaczenie przeżywa GEST, nie każdy refresh" jest w tym repo pinowana od R-S2b-3.
-        if self._cel_gestu:
-            cel, self._cel_gestu = self._cel_gestu, []
-            self._przywroc_zaznaczenie(cel)
+        # Konsumpcja TU, odłożenie niżej - PO pokazaniu tabeli (FH-11).
+        cel, self._cel_gestu = self._cel_gestu, []
         n = len(base)
         self._n_total = n
         self._update_count()
@@ -4861,6 +5407,11 @@ class FramesView(QWidget):
         self.empty_box.setVisible(n == 0)    # pojemnik i etykieta RAZEM: `empty.isVisible()` zostaje
         self.empty.setVisible(n == 0)        # kontraktem, a etykieta nie wisi widoczna w ukrytym pudle
         self.table.setVisible(n > 0)
+        # CEL GESTU ODKŁADA SIĘ DOPIERO NA POKAZANEJ TABELI (FH-11). Odkładany przed `setVisible`
+        # trafiał po recepcie z pustego widoku w tabelę UKRYTĄ, a `scrollTo` na ukrytym widoku
+        # nic nie robi - zaznaczone klatki stały na dolnej krawędzi kadru albo pod nią.
+        if cel:
+            self._przywroc_zaznaczenie(cel)
         self.macro_bar.set_actions_enabled(bool(base_ids))   # szczery disabled makra na pustym gridzie (#4)
         self.rename_bar.set_actions_enabled(bool(base_ids))  # bliźniaczo dla renamu
         self.sel_bar.set_have_frames(bool(base_ids))         # pusty zbiór gasi „Wydaj na stół…" (F3R#2)
@@ -5047,7 +5598,10 @@ class FramesView(QWidget):
                 i18n.t("grid.sel.frame_retire_ask", n=len(ids))) != QMessageBox.Yes:
             return
         gest = repo.retire_frames(self.con, frame_ids=ids, now=self._now())
-        self._po_gescie_klatki("grid.sel.frame_retired", gest)
+        # ODWRACALNY (FH-6): „Przywróć klatkę" istnieje (`repo.restore_frames`), a klatka po geście
+        # zwykle wypada z widoku - bez recepty jedyną drogą powrotu była pamięć człowieka o tym,
+        # że perspektywa „Wycofane" w ogóle istnieje.
+        self._po_gescie_klatki("grid.sel.frame_retired", gest, odwrot=_ODWROT_WYCOFANIA)
 
     def _on_frame_restore(self):
         """„Przywróć klatkę" — DROGA POWROTU z wycofania. Bez potwierdzenia, bo gest jest
@@ -5059,8 +5613,10 @@ class FramesView(QWidget):
         gest = repo.restore_frames(self.con, frame_ids=ids, now=self._now())
         self._po_gescie_klatki("grid.sel.frame_restored", gest)
 
-    def _po_gescie_klatki(self, klucz, gest):
+    def _po_gescie_klatki(self, klucz, gest, *, odwrot=None):
         """Ogon gestów osi żywotności: zdanie z ROZBICIEM per powód + odświeżenie + zaznaczenie.
+
+        `odwrot` jak w `_po_gescie_osi` - recepta składa się w jednym kodzie dla obu osi (FH-6).
 
         Rozbicie idzie z `RetireGesture.skipped_breakdown` (JEDEN właściciel składu), nie z literału
         tutaj — ta sama lekcja, którą repo dostało już na osi obiektu: człon dołożony później
@@ -5070,16 +5626,15 @@ class FramesView(QWidget):
         wypchnięcie celu jest wręcz REGUŁĄ, bo wycofanie zdejmuje klatkę z kubełków roboczych -
         a zdanie, które „bywa jedynym śladem", milczało o tym, gdzie te klatki się podziały."""
         zaznaczone = [r["frame_id"] for r in self._selected_data_rows()]
+        self._recepta_gestu = None          # recepta poprzedniego gestu przestaje obowiązywać
         msg = i18n.t(klucz, done=gest.done, total=gest.done + gest.skipped)
         for sufiks, n in gest.skipped_breakdown:
             if n:
                 msg += i18n.t(f"grid.sel.frame_skip_{sufiks}", n=n)
-        recepta = ""
         if gest.done:
             self.refresh()
-            fakt, recepta = self._czlon_poza_widokiem(
+            msg += self._czlon_poza_widokiem(
                 len(zaznaczone) - self._przywroc_zaznaczenie(zaznaczone), zaznaczone)
-            msg += fakt
             # Wycofanie i przywrócenie ruszają cztery liczniki Porządków naraz (wycofane,
             # „a plik wrócił", zniknięte, brakujące kopie) - plakietka ma to wiedzieć bez wejścia
             # w Porządki. Przed zdaniem: `refresh_counts` nie mówi na pasek stanu.
@@ -5090,7 +5645,9 @@ class FramesView(QWidget):
         # Waży to tu podwójnie: po udanym wycofaniu klatka ZNIKA z perspektywy, więc to zdanie
         # bywa jedynym śladem, że gest się odbył.
         self.status_message.emit(msg)
-        self.status_recipe.emit(recepta)
+        # Cel recepty = klatki realnie wycofane albo przywrócone (`gest.frame_ids`) - już wycofana
+        # klatka w zaznaczeniu niesie cudzą decyzję i odwrót jej nie tyka (Z1, jak na osi obiektu).
+        self._ustaw_recepte_gestu(gest.frame_ids, odwrot)
 
     # ---- WERSJE STOSÓW (perspektywa „Wersje stosów") ----
 
@@ -5120,23 +5677,78 @@ class FramesView(QWidget):
         i przesunięcie keywordów, a człowiek widzi nazwę pliku i fakty wersji obok siebie. Zmiana
         liczby kolumn kasuje przesunięcia nagłówka, więc ustawiamy je przy każdym resecie; poza
         perspektywą wracają na miejsca logiczne (nagłówek nie ma `setSectionsMovable`, więc innych
-        przesunięć niż to nie ma)."""
+        przesunięć niż nasze nie ma).
+
+        PODGLĄD KLINGI ZARAZ ZA „ŚCIEŻKĄ" tą samą regułą (AR-57; rename, makro, edycja komórki):
+        logicznie ostatni (`_preview_col`), więc numery keywordów, ich szerokości i strzałka sortu
+        nie jadą razem z nim; wizualnie bezpośredni sąsiad „Ścieżki" (przed „Wersją"), bo stara
+        nazwa i nowa mają stać obok siebie. Szerokość z treści i elizja w środku
+        (`kolumna_z_tresci`) - nazwa pliku ma widoczne oba końce, a w nich to, co podgląd ma
+        pokazać (FLATGRP, końcowe `_`). Elizję podglądu zdejmujemy z każdej innej kolumny
+        keywordów: numer podglądu wraca jako keyword, gdy „Wersja" wejdzie w trakcie podglądu
+        albo gdy po jego zdjęciu ręka dołoży keyword w „Polach"."""
         t = self.table
+        m = self.model
         t.clearSpans()
-        if self.model._group_by not in (None, ""):
-            n = self.model.columnCount()
-            for i, row in enumerate(self.model._rows):
+        if m._group_by not in (None, ""):
+            n = m.columnCount()
+            for i, row in enumerate(m._rows):
                 if "_group" in row:
                     t.setSpan(i, 0, 1, n)
         h = t.horizontalHeader()
-        kol = self.model._version_col()
-        if kol is not None:
-            if h.visualIndex(kol) != 1:
-                h.moveSection(h.visualIndex(kol), 1)
-        elif h.sectionsMoved():
+        wersja = m._version_col()
+        podglad = m._preview_col()
+        # (kolumna logiczna, pozycja wizualna) W KOLEJNOŚCI RUCHÓW: podgląd ląduje na 1 jako
+        # drugi, więc „Wersja" zjeżdża na 2 - ścieżka, nowa nazwa, wersja.
+        docelowe = []
+        if wersja is not None:
+            docelowe.append((wersja, 1))
+        if podglad is not None:
+            docelowe.append((podglad, 1))
+        if h.sectionsMoved():
             for i in range(h.count()):
                 if h.visualIndex(i) != i:
                     h.moveSection(h.visualIndex(i), i)
+        for k, p in docelowe:
+            h.moveSection(h.visualIndex(k), p)
+        # SZEROKOŚĆ IDZIE ZA ZNACZENIEM KOLUMNY, NIE ZA NUMEREM. Zmierzone: zmiana liczby kolumn
+        # kasuje przesunięcia nagłówka, ale szerokości zostają na POZYCJACH WIZUALNYCH - po zdjęciu
+        # podglądu stojącego po bazowych jego szerokość lądowała na pierwszym keywordzie. Migawka
+        # sprzed resetu (`_zapamietaj_szerokosci`) oddaje każdej kolumnie bazowej i keywordowi
+        # jej szerokość; keyword świeży dostaje domyślną. „Wersję" i podgląd ustawia treść.
+        # Ukrycie najpierw, tą samą regułą (`_ukryj_kolumny`): stan „ukryta" też zostaje na pozycji
+        # wizualnej, a szerokości sekcji ukrytej nie odtwarzamy (Qt trzyma ją wtedy jako 0).
+        self._ukryj_kolumny()
+        szerokosci, self._szerokosci_przed_resetem = self._szerokosci_przed_resetem, {}
+        self._znaczenia_kolumn = [m._sort_id_for(c) for c in range(m.columnCount())]
+        if szerokosci:
+            for c, znaczenie in enumerate(self._znaczenia_kolumn):
+                if (znaczenie is not None and znaczenie != ("version",)
+                        and not h.isSectionHidden(c)):
+                    t.setColumnWidth(c, szerokosci.get(znaczenie, h.defaultSectionSize()))
+        for c in range(len(BASE_COLS), m.columnCount()):
+            if c != podglad and isinstance(t.itemDelegateForColumn(c), _ElizjaWSrodku):
+                t.setItemDelegateForColumn(c, None)   # numer podglądu niesie teraz keyword
+        if podglad is not None:
+            kolumna_z_tresci(t, podglad)
+
+    def _zapamietaj_szerokosci(self):
+        """Migawka szerokości kolumn po ZNACZENIU tuż przed resetem modelu - druga połowa reguły
+        „szerokość idzie za znaczeniem" w `_uloz_belki_i_wersje`. Znaczenia bierzemy z OSTATNIEGO
+        układu (`_znaczenia_kolumn`), nie z modelu: `set_data` zmienia keywordy i „Wersję" przed
+        `beginResetModel`, więc model w tej chwili opisuje już układ następny.
+
+        OSTATNIA WIDOCZNA SEKCJA POZA MIGAWKĄ: `setStretchLastSection` rozciąga ją do viewportu,
+        więc jej szerokość nie jest wyborem ręki. Utrwalona, jechałaby za keywordem, który przestał
+        być ostatni - seria zmian „Pól" zostawiała kilka kolumn szerokich na pół ekranu."""
+        t = self.table
+        h = t.horizontalHeader()
+        rozciagnieta = next((h.logicalIndex(v) for v in range(h.count() - 1, -1, -1)
+                             if not h.isSectionHidden(h.logicalIndex(v))), None)
+        self._szerokosci_przed_resetem = {
+            znaczenie: t.columnWidth(c) for c, znaczenie in enumerate(self._znaczenia_kolumn)
+            if znaczenie is not None and c < h.count() and c != rozciagnieta
+            and not h.isSectionHidden(c)}             # ukryta ma 0 px - to nie jest wybór ręki
 
     def _on_table_menu(self, pos):
         """Prawy klik na tabeli: menu z sekcją „Zostaw tę wersję" (perspektywa „Wersje stosów")
@@ -5159,7 +5771,8 @@ class FramesView(QWidget):
                              and not sm.isRowSelected(idx.row(), QModelIndex()))
         wersje = self._perspektywa_wersji()
         zapis = self._perspektywa_zapisu()
-        if not wersje and not zapis:
+        zastapione = bool(getattr(self, _FLAGA_ZASTAPIONYCH))
+        if not wersje and not zapis and not zastapione:
             if poza_zaznaczeniem:
                 cel = ([pod_kursorem["frame_id"]] if isinstance(pod_kursorem, dict)
                        and "_group" not in pod_kursorem else [])
@@ -5177,13 +5790,62 @@ class FramesView(QWidget):
         for act in (self.act_finish_write, self.act_restore_header, self._sep_zwolnienia,
                     self.act_release_file):
             act.setVisible(zapis)
+        self._sep_przeniesienia.setVisible(zastapione and (wersje or zapis))
+        self.act_transfer_facts.setVisible(zastapione)
         if wersje:
             self._sync_menu_wersji()
         if zapis:
             self._sync_menu_zapisu()
+        if zastapione:
+            zajety = self._powod_zajetosci()
+            self.act_transfer_facts.setEnabled(zajety is None)
+            self.act_transfer_facts.setToolTip(
+                i18n.t(zajety) if zajety is not None else i18n.t("supersede.transfer.action_tip"))
         # `popup`, nie `exec`: menu nie trzyma własnej pętli zdarzeń, a wybór i tak dochodzi
         # sygnałem `triggered`. Blokujący `exec` zawiesza każdy przebieg bez człowieka przy myszy.
         self._menu_tabeli.popup(self.table.viewport().mapToGlobal(pos))
+
+    def _on_transfer_facts(self):
+        """„Przenieś fakty ręki na następczynię" (AR-41): cel = zaznaczenie perspektywy
+        „Zastąpione". Zapis klingą `repo.transfer_human_facts` przez `supersede.transfer_gesture`;
+        zdanie mówi każdą oś, która przeszła, i werdykt obiektu zatrzymany na zastąpionej
+        (`object_kept`). Bramka zajętości jak przy gestach izolacji - etap mógł ruszyć między
+        menu a kliknięciem."""
+        zajety = self._powod_zajetosci()
+        if zajety is not None:
+            self.status_message.emit(i18n.t(zajety))
+            return
+        ids = [r["frame_id"] for r in self._selected_data_rows()]
+        if not ids:
+            return
+        try:
+            g = supersede.transfer_gesture(self.con, frame_ids=ids, now=self._now())
+        except Exception as e:
+            # Klatki przed błędem SĄ zapisane (klinga per klatka) - widok, osie i plakietka idą
+            # za raportem częściowym, zanim cokolwiek powiemy albo puścimy wyjątek dalej.
+            czesc = getattr(e, "przeniesienie", None)
+            if czesc is not None:
+                self._po_przeniesieniu(czesc, ids)
+            if isinstance(e, ValueError):        # błąd klingi - okno, jak gesty osi obiektu
+                QMessageBox.warning(self, i18n.t("supersede.transfer.action"),
+                                    i18n.t("supersede.transfer.interrupted", err=str(e)))
+                return
+            raise                                # EXPECT (np. nieznany powód klingi)
+        self._po_przeniesieniu(g, ids)
+
+    def _po_przeniesieniu(self, g, ids):
+        """Ogon gestu przeniesienia: odświeżenie ZAWSZE (klatka, której ogniwo zgasł skan,
+        wypada z perspektywy także przy zerze przeniesień), sygnały osi, które gest ruszył
+        (obiekt i zestaw mieszkają w przeglądzie obiektów, stanowisko w osi obserwatorium),
+        plakietka i JEDNO zdanie po odświeżeniu (lekcja `_po_gescie_klatki`)."""
+        self.refresh()
+        self._przywroc_zaznaczenie(ids)
+        if g.object_moved or g.config_moved:
+            self.object_axis_changed.emit()
+        if g.observatory_moved:
+            self.observatory_axis_changed.emit()
+        self.stan_porzadkow_changed.emit()
+        self.status_message.emit(supersede.zdanie_przeniesienia(g))
 
     def _sync_menu_wersji(self):
         """Uczciwy disabled gestu „Zostaw tę wersję" - z planu liczonego w chwili pokazania menu.
@@ -5471,16 +6133,16 @@ class FramesView(QWidget):
         szuflada, plakietka Porządków i JEDNO zdanie po odświeżeniu (`refresh()` kończy własnym
         zdaniem, które zjadłoby wcześniejsze - lekcja `_po_gescie_osi`). Plakietka zawsze: gest
         rozstrzyga rdzeń, a porażka w połowie też mogła zmienić fazę."""
+        self._recepta_gestu = None          # recepta poprzedniego gestu przestaje obowiązywać
         self.refresh()
-        fakt, recepta = self._czlon_poza_widokiem(
-            len(cel) - self._przywroc_zaznaczenie(cel), cel)
+        fakt = self._czlon_poza_widokiem(len(cel) - self._przywroc_zaznaczenie(cel), cel)
         self._refresh_drawer()
         self.drawer.set_result(msg)
         przed = self._wynik_gestu_zapisu[0] if self._wynik_gestu_zapisu is not None else ""
         self._wynik_gestu_zapisu = (przed, msg)
         self.stan_porzadkow_changed.emit()
         self.status_message.emit(msg + fakt)
-        self.status_recipe.emit(recepta)
+        self._ustaw_recepte_gestu(cel)
 
     def _zdejmij_wynik_gestu_zapisu(self):
         """Zmiana perspektywy zdejmuje z szuflady wynik gestu izolacji (AR-30 (5)) i oddaje jej tekst
@@ -5574,6 +6236,7 @@ class FramesView(QWidget):
         Gesty izolacji zapisu w miejscu nie mają stałej kontrolki - stan menu liczy się przy jego
         pokazaniu, więc zapamiętujemy sam fakt biegu (`_powod_zajetosci`)."""
         self._etap_w_biegu = bool(busy)
+        self._sync_edycji()                              # edycja komórek gaśnie razem z akcjami zapisu
         if busy:
             self.macro_bar.set_actions_enabled(False)
             self.rename_bar.set_actions_enabled(False)
@@ -5604,6 +6267,7 @@ class FramesView(QWidget):
         transakcją. Własny bieg gridu tej ścieżki nie używa (jego akcje są wtedy schowane paskiem
         postępu), więc flaga mówi wyłącznie o CUDZEJ operacji."""
         self._foreign_wb = busy
+        self._sync_edycji()                              # cudzy zapis plików - bez edycji komórek
         if busy:
             self.drawer.btn_commit.setEnabled(False)
             self.drawer.btn_reject.setEnabled(False)
@@ -5646,7 +6310,25 @@ class FramesView(QWidget):
         for sk in run.skipped:
             preview[sk.frame_id] = {"skipped": sk.reason}
         self.model.set_preview(preview)
+        self._pokaz_kolumne_podgladu()
         return len(run.touched), len(run.skipped)
+
+    def _pokaz_kolumne_podgladu(self):
+        """Kadr na parę „Ścieżka" + podgląd klingi (stoją obok siebie, `_uloz_belki_i_wersje`).
+        Obie w kadrze - nic nie ruszamy. Inaczej przewijamy w poziomie tak, by „Ścieżka" była lewą
+        krawędzią: przewinięcie do samego podglądu wypychało z kadru starą nazwę, czyli połowę
+        porównania. Wiersz na górze widoku zostaje."""
+        t, m = self.table, self.model
+        podglad = m._preview_col()
+        if podglad is None or not m.rowCount():
+            return
+        sciezka = m.base_col("path")
+        szer = t.viewport().width()
+        if all(0 <= t.columnViewportPosition(c)
+               and t.columnViewportPosition(c) + t.columnWidth(c) <= szer
+               for c in (sciezka, podglad)):
+            return
+        t.scrollTo(m.index(max(t.rowAt(0), 0), sciezka))
 
     def _frame_for_location(self, location_id):
         return queries.frame_for_location(self.con, location_id)
@@ -5668,6 +6350,10 @@ class FramesView(QWidget):
         if self._rename_pending_count() > 0:             # mutex symetryczny: staging renamu w toku
             self.status_message.emit(i18n.t("grid.macro.staging_busy"))
             return
+        czeka = self._komorki_w_szufladzie()
+        if czeka:                                        # re-stage niżej czyści cały przebieg (AR-61)
+            self.status_message.emit(i18n.t_plural("grid.cell.macro_blocked", czeka))
+            return
         self._dismiss_undo()                             # nowy staging unieważnia leftover „Cofnij" (wiz #3)
         if self._run_id is None:
             self._run_id = uuid.uuid4().hex
@@ -5684,6 +6370,101 @@ class FramesView(QWidget):
         self._show_preview(run)
         self._refresh_drawer()
         self.status_message.emit(i18n.t("grid.macro.staged", t=len(run.touched), s=len(run.skipped)))
+
+    def _komorki_w_szufladzie(self):
+        """Ile edycji komórek (AR-61) czeka w szufladzie BIEŻĄCEGO przebiegu makra - ze stanu
+        stagingu, nie z pamięci: commit (także przerwany anulowaniem) i „Odrzuć" zmieniają status albo
+        kasują wiersze, a pamięć `_komorki` zna tylko klucze. Inny przebieg = zero (commit albo
+        odrzucenie zamknęło ten, pod którym edytowano)."""
+        if self._run_id is None or self._komorki_run != self._run_id or not self._komorki:
+            return 0
+        return sum(1 for r in writeback.pending_for_run(self.con, self._run_id)
+                   if r["status"] == "pending" and (r["location_id"], r["keyword"]) in self._komorki)
+
+    def _sync_edycji(self):
+        """Wyzwalacze edycji komórek wg zajętości (etap Dostawy, cudzy zapis plików): zajęty widok nie
+        otwiera edytora, a model nie zgłasza komórek jako edytowalnych (wzorzec `set_busy` osi
+        w `app.py`). Edytor otwarty PRZED zajętością odbije bramka w `_on_cell_edit`."""
+        wolny = not self._etap_w_biegu and not self._foreign_wb
+        self.model.set_editable(wolny)
+        self.table.setEditTriggers(self._edit_triggers if wolny
+                                   else QAbstractItemView.NoEditTriggers)
+
+    def _podglad_ze_stagingu(self):
+        """Podgląd klingi makra liczony z oczekujących wpisów przebiegu `_run_id`: frame_id →
+        `{"cards": [{keyword, old, new, op, comment}, …]}` w kolejności stagingu - wszystkie karty
+        klatki, które commit zapisze, razem z komentarzem, który zapis wniesie (`None` = zastany
+        zostaje). Klatkę pod lokacją daje JEDNO zapytanie (`queries.pending_cards_for_run`)."""
+        podglad = {}
+        if self._run_id is None:
+            return podglad
+        for w in queries.pending_cards_for_run(self.con, self._run_id):
+            podglad.setdefault(w["frame_id"], {"cards": []})["cards"].append(
+                {"keyword": w["keyword"], "old": w["old_value"], "new": w["new_value"],
+                 "op": w["op"], "comment": w["new_comment"]})
+        return podglad
+
+    def _domknij_edycje(self, podglad):
+        """Domknij otwarty edytor komórki z zapisem do szuflady (AR-61) - przed resetem modelu
+        (`podglad="pozniej"`) i zanim widok zniknie (`"bez"`: zamknięcie okna, przełączenie bazy -
+        połączenie jeszcze otwarte, podglądu nie ma już komu pokazać). Odmowę (zajętość, bramka
+        karty) mówi `_on_cell_edit` na pasku - wpis nie ginie po cichu."""
+        delegat = self.table.itemDelegate()
+        if not isinstance(delegat, _EdycjaKomorki) or delegat.aktywny is None:
+            return
+        self._podglad_edycji = podglad
+        try:
+            delegat.domknij()
+        finally:
+            self._podglad_edycji = "teraz"
+
+    def _podglad_po_domknieciu(self):
+        """Podgląd stagingu po edycji domkniętej w resecie - już poza resetem."""
+        if self._preview_owner in (None, "macro") and self._run_id is not None:
+            self._note_preview_takeover("macro")
+            self.model.set_preview(self._podglad_ze_stagingu())
+
+    def _on_cell_edit(self, frame_id, keyword, text, comment):
+        """Edycja JEDNEJ komórki keyworda → szuflada (AR-61). Te same bramki i ta sama klinga co makro:
+        `macro.plan_manual_change` (cel kopii + reguły karty) → `repo.stage_pending_replacing` pod
+        przebiegiem `_run_id`. Commit, „Odrzuć" i „Cofnij" są więc wspólne z makrem, a cel cofnięcia
+        łapie `_install_undo` w chwili commitu (`_undo_commit_id`) - edycja nie zakłada trzeciego trybu.
+
+        Odmowa (zajętość, staging nazw, bramka celu albo karty) mówi powód na pasku i niczego nie
+        zapisuje. Druga edycja tej samej karty ZASTĘPUJE pierwszą (także wpis makra tej karty)."""
+        zajety = self._powod_zajetosci()
+        if zajety is not None:
+            self.status_message.emit(i18n.t(zajety))
+            return
+        if self._rename_pending_count() > 0:             # staging na wyłączność (R2 #8)
+            self.status_message.emit(i18n.t("grid.cell.staging_busy"))
+            return
+        pv, powod = macro_mod.plan_manual_change(
+            queries.writeback_frame_targets(self.con, [frame_id]), keyword, text,
+            cards_fn=lambda lid: queries.location_cards(self.con, lid), comment=comment)
+        if pv is None:
+            self.status_message.emit(i18n.t("grid.cell.refused", kw=keyword, reason=powod))
+            return
+        self._dismiss_undo()                             # nowy staging unieważnia leftover „Cofnij"
+        if self._run_id is None:
+            self._run_id = uuid.uuid4().hex
+        if self._komorki_run != self._run_id:
+            self._komorki_run, self._komorki = self._run_id, set()
+        _id, zastapione = repo.stage_pending_replacing(self.con, run_id=self._run_id, preview=pv)
+        self._komorki.add((pv.location_id, pv.keyword))
+        # Podgląd z BIEŻĄCEGO STAGINGU przebiegu, nie ze sklejanego słownika: klatka bywa celem kilku
+        # kart naraz (dwie edycje różnych keywordów, makro i edycja innej karty), a podgląd ma
+        # pokazać dokładnie to, co zapisze commit. Podgląd innej klingi przejmuje z komunikatem.
+        if self._podglad_edycji == "teraz":
+            self._note_preview_takeover("macro")
+            self.model.set_preview(self._podglad_ze_stagingu())
+        elif self._podglad_edycji == "pozniej":
+            # W środku resetu modelu drugi reset (podgląd) byłby zagnieżdżony - odkładamy go.
+            QTimer.singleShot(0, self._podglad_po_domknieciu)
+        self._refresh_drawer()
+        self.status_message.emit(i18n.t(
+            "grid.cell.staged_replaced" if zastapione else "grid.cell.staged", kw=keyword,
+            old="∅" if pv.old_value is None else pv.old_value, new=pv.new_value))
 
     def _on_macro_clear(self):
         self.model.set_preview({})
@@ -5952,6 +6733,7 @@ class FramesView(QWidget):
         for sk in run.skipped:
             preview[sk.frame_id] = {"skipped": sk.reason}
         self.model.set_preview(preview, label=i18n.t("grid.preview.name"))
+        self._pokaz_kolumne_podgladu()
         return len(run.touched), len(run.skipped)
 
     def _on_rename_preview(self, policy):

@@ -462,14 +462,20 @@ class ManualResult:
     old_value: str | None = None
     new_value: str | None = None
     new_type: str | None = None
+    comment: str | None = None  # None = karta zachowuje zastany komentarz (jak pole `MacroBar`)
 
 
-def evaluate_manual_change(cards, keyword: str, new_text: str) -> ManualResult:
+def evaluate_manual_change(cards, keyword: str, new_text: str,
+                           comment: str | None = None) -> ManualResult:
     """Reczna edycja JEDNEJ komorki (grid) -> opis zmiany (te same reguly co makro). CZYSTA funkcja:
     `cards` = karty frame'a stojacego pod edytowana location (`queries.location_cards`); zapis wpisu
     robi wolajacy przez `repo.stage_pending`. `set` gdy karta istnieje (zachowuje typ+komentarz), `add`
     gdy brak. Keyword z wieloma `idx` (COMMENT/HISTORY/duplikat) -> odrzucony (nie zgadujemy wystapienia).
-    Int + wynik ulamkowy / wartosc niepasujaca do typu -> odrzucone z powodem (bez cichej utraty)."""
+    Int + wynik ulamkowy / wartosc niepasujaca do typu -> odrzucone z powodem (bez cichej utraty).
+
+    `comment` ma znaczenie pola komentarza w `MacroBar` (AR-47): pusty albo None - karta zachowuje
+    zastany komentarz; wpisany - zapis razem z nim i reguly karty licza go tak samo jak w makrze."""
+    comment = (comment or "").strip() or None
     matching = [c for c in cards if c["keyword"] == keyword]
 
     if not matching:
@@ -493,9 +499,39 @@ def evaluate_manual_change(cards, keyword: str, new_text: str) -> ManualResult:
         new_value = _to_text(value, value_type)
     except (ValueError, TypeError):
         return ManualResult(False, f"wartosc '{new_text}' nie pasuje do typu '{value_type}'")
-    naruszenie = card_rules.card_violation(keyword, new_value, new_card=op == "add")
+    naruszenie = card_rules.card_violation(keyword, new_value, comment, new_card=op == "add")
     if naruszenie is not None:                       # AR-9: te same reguły co pisarz
         return ManualResult(False, naruszenie.reason)
 
     return ManualResult(
-        True, op=op, idx=idx, old_value=old_value, new_value=new_value, new_type=value_type)
+        True, op=op, idx=idx, old_value=old_value, new_value=new_value, new_type=value_type,
+        comment=comment)
+
+
+def plan_manual_change(rows, keyword: str, new_text: str, *, cards_fn,
+                       comment: str | None = None) -> tuple[PendingPreview | None, str | None]:
+    """Edycja JEDNEJ komorki gridu -> wpis podgladu w ksztalcie makra albo powod odmowy. CZYSTA
+    funkcja (zero zapisu), wolajacy stage'uje przez `repo.stage_pending_replacing`.
+
+    Te same dwie bramki co makro, w tej samej kolejnosci: najpierw CEL (`resolve_target` na wierszach
+    `queries.writeback_frame_targets` JEDNEJ klatki - RAW, brak/wiele obecnych kopii, kompresja,
+    degenerat tozsamosci, brak `header_hash`), potem ZMIANA (`evaluate_manual_change` na kartach
+    tej kopii, `cards_fn(location_id)` = `queries.location_cards`). Komorka edytowalna w gridzie
+    nie obiecuje wiec niczego, czego makro na tej samej klatce by nie zrobilo.
+
+    Zwraca `(PendingPreview, None)` albo `(None, powod)`; pusta lista wierszy (klatka zniknela
+    z bazy miedzy edycja a zapisem) to powod, nie wyjatek - ten sam, co w `run_macro`."""
+    if not rows:
+        return None, "frame nieobecny w bazie"
+    target, reason = resolve_target(rows)
+    if target is None:
+        return None, reason
+    res = evaluate_manual_change(cards_fn(int(target["location_id"])), keyword, new_text,
+                                 comment=comment)
+    if not res.ok:
+        return None, res.reason
+    return PendingPreview(
+        location_id=int(target["location_id"]), path=target["path"], keyword=keyword,
+        idx=res.idx, op=res.op, old_value=res.old_value, new_value=res.new_value,
+        new_type=res.new_type, comment=res.comment,
+        expected_header_hash=target["header_hash"]), None

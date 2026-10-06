@@ -171,6 +171,26 @@ def test_perspektywa_zapisu_czekajacego_pokazuje_klatke_i_recepte(qapp, tmp_path
     con.close()
 
 
+def test_recepta_perspektywy_zapisu_jest_RECEPTA_z_jednym_czlonem_bez_wykonawcy(qapp, tmp_path,
+                                                                               monkeypatch):
+    """Kontrakt sygnału `status_recipe` (Z7): niesie `Recepta`, nie goły tekst - gospodarz nie ma
+    już gałęzi, która przebierała tekst w receptę. Gest mieszka w menu prawego kliku, więc człon
+    nie ma wykonawcy: przycisk recepty stoi wygaszony, a zdanie zostaje.
+
+    Falsyfikator: emituj `i18n.t(...)` wprost → asercja typu pada (a w oknie `AttributeError`)."""
+    con, [(_p, fid)] = _baza(tmp_path)
+    _commit_written(monkeypatch, con)
+    view = _widok(con)
+    try:
+        view.apply_perspective(grid_mod.PRESET_PENDING_FINISH)
+        r = view.recepty[-1]
+        assert isinstance(r, grid_mod.Recepta), type(r)
+        assert len(r.czlony) == 1 and r.czlony[0].wykonaj is None, r.czlony
+    finally:
+        view.close()
+    con.close()
+
+
 # ═════════════════════════ AR-17 (2): gesty w menu tabeli
 
 

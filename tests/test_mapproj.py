@@ -187,3 +187,86 @@ def test_load_land_polylines_asset():
     lines = mapproj.load_land_polylines()
     assert len(lines) > 100                               # odchudzony NE 110m ≈ 288 polilinii
     assert all(len(p) >= 2 for p in lines)
+
+
+# ----------------------------------------------------------------- szew rzutu (antypołudnik środka)
+
+# Publiczne punkty: obserwatorium Mt John nad jeziorem Tekapo i Warszawa (centrum miasta).
+_TEKAPO = (-43.99, 170.46)
+_WARSZAWA = (52.23, 21.01)
+
+
+def _najdluzszy_odcinek_x(pieces):
+    return max((abs(b[0] - a[0]) for p in pieces for a, b in zip(p, p[1:])), default=0.0)
+
+
+def test_project_line_rozcina_odcinek_przez_szew():
+    # Środek 0° - szew na ±180. Odcinek 179 → -179 (2° na wschód) nie może przejść przez cały świat.
+    proj = mapproj.LocalProjection(0.0, 0.0)
+    pieces = proj.project_line([(170.0, 0.0), (179.0, 10.0), (-179.0, 20.0), (-170.0, 30.0)])
+    assert len(pieces) == 2
+    kraw = 180.0 * KM
+    assert math.isclose(pieces[0][-1][0], kraw) and math.isclose(pieces[1][0][0], -kraw)
+    # szerokość na krawędzi interpolowana w połowie odcinka 10° → 20°
+    assert math.isclose(pieces[0][-1][1], 15.0 * KM) and math.isclose(pieces[1][0][1], 15.0 * KM)
+    assert _najdluzszy_odcinek_x(pieces) < 20 * KM
+
+
+def test_project_line_bez_szwu_jeden_kawalek():
+    proj = mapproj.LocalProjection(50.0, 20.0)
+    linia = [(10.0, 40.0), (20.0, 45.0), (30.0, 50.0)]
+    pieces = proj.project_line(linia)
+    assert pieces == [[proj.project(lat, lon) for lon, lat in linia]]
+
+
+def test_project_line_szew_poza_180_przy_srodku_przesunietym():
+    # Środek widoku ~94° E (Warszawa + Tekapo) - szew na ~86° W, w środku obu Ameryk.
+    proj = mapproj.LocalProjection(0.0, 94.0)
+    pieces = proj.project_line([(-80.0, 0.0), (-90.0, 0.0)])
+    assert len(pieces) == 2
+    assert pieces[0][-1][0] * pieces[1][0][0] < 0          # krawędzie po przeciwnych stronach
+
+
+def test_line_to_px_kontury_bez_kresek_przez_kadr():
+    # Odtworzenie zgłoszenia: Warszawa + Tekapo, kadr 1000 × 400. Rzut punkt po punkcie dawał
+    # odcinki przez cały kadr; kawałki rozcięte na szwie - żadnego dłuższego niż pół szerokości.
+    w, h = 1000, 400
+    xf = mapproj.fit_view([_WARSZAWA, _TEKAPO], w, h)
+    linie = mapproj.load_land_polylines()
+    naiwnie = [[xf.to_px(lat, lon) for lon, lat in l] for l in linie]
+    assert _najdluzszy_odcinek_x(naiwnie) > w / 2           # defekt istniał na tym kadrze
+    po = [p for l in linie for p in xf.line_to_px(l)]
+    assert _najdluzszy_odcinek_x(po) < w / 2
+
+
+def test_fit_view_margines_px_trzyma_punkt_z_dala_od_krawedzi():
+    w, h, pad = 1000, 400, 24.0
+    bez = mapproj.fit_view([_WARSZAWA, _TEKAPO], w, h)
+    z = mapproj.fit_view([_WARSZAWA, _TEKAPO], w, h, pad_px=pad)
+    _, y_bez = bez.to_px(*_TEKAPO)
+    _, y_z = z.to_px(*_TEKAPO)
+    assert h - y_bez < pad                                  # bez marginesu px - przy krawędzi
+    for lat, lon in (_WARSZAWA, _TEKAPO):
+        px, py = z.to_px(lat, lon)
+        assert pad - 1e-6 <= px <= w - pad + 1e-6 and pad - 1e-6 <= py <= h - pad + 1e-6
+    assert z.scale < bez.scale
+
+
+def _odstep_od_krawedzi(xf, sites, w, h):
+    """Najmniejszy odstęp punktów skrajnych od krawędzi kadru (px)."""
+    return min(min(px, w - px, py, h - py) for px, py in (xf.to_px(*s) for s in sites))
+
+
+def test_fit_view_margines_px_plynny_wokol_dawnego_progu():
+    # Dwa punkty skrajne (W-E i N-S naraz). Dawny próg 4 × pad = 98 px zrzucał margines do zera:
+    # 98 px → ~3,6 px od krawędzi, 99 px → ~26 px. Teraz odstęp rośnie z kadrem BEZ skoku.
+    pad = 24.5
+    sites = [(50.0, 20.0), (51.0, 22.0)]
+    odstep = {d: _odstep_od_krawedzi(mapproj.fit_view(sites, d, d, pad_px=pad), sites, d, d)
+              for d in (60, 97, 98, 99, 100, 140)}
+    assert odstep[98] >= 98 / 4 - 1e-6                    # ćwierć wymiaru, nie ~3,6 px
+    assert abs(odstep[99] - odstep[98]) < 1.0             # bez skoku na progu
+    assert odstep[60] < odstep[97] <= odstep[98] <= odstep[99] <= odstep[100] <= odstep[140]
+    assert odstep[140] >= pad - 1e-6                      # powyżej progu - pełny margines
+    for d in (60, 98):
+        assert mapproj.fit_view(sites, d, d, pad_px=pad).scale > 0   # margines nie zjada kadru

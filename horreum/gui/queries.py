@@ -496,6 +496,40 @@ def library_objects(con, *, telescope_id=None, camera_id=None, filter_canon=None
     ).fetchall(), "canon")
 
 
+def library_exposure(con, *, telescope_id=None, camera_id=None, filter_canon=None):
+    """Naświetlenie per (obiekt, filtr) pod TYMI SAMYMI filtrami osi co `library_objects` - godziny
+    materiału w bibliotece obiektów. Kształt wierszy jak `object_exposure` (object_id, filter_canon,
+    secs, n_null), więc sumę, format i rozbicie per filtr robi `portfolio` (SPOT).
+
+    Reguły rachunku jak w `object_exposure`: wyłącznie `kind='light'` (EXPTIME mastera to czas
+    ZINTEGROWANY), klatka zastąpiona nie dolicza sekund, light bez `header` wypada JOIN-em,
+    `exptime IS NULL` liczone jawnie w `n_null`. Filtry osi jak w bibliotece (teleskop przez
+    `telescope_canonical`).
+
+    ⚠ ROZJAZD Z `library_objects` JEST ŚWIADOMY, jak w `object_exposure`: kolumna „Klatki" liczy
+    `light` ORAZ `master_light`, także klatki zastąpione, a godziny - wyłącznie lighty niezastąpione
+    z nagłówkiem. Master doliczony do godzin podwoiłby rachunek (jego EXPTIME to suma subów), a duch
+    zastąpionej klatki doliczałby ekspozycję, którą liczy już jego następczyni. Obiekt z samymi
+    masterlightami ma więc klatki i nie ma wiersza tutaj; light bez nagłówka liczy się w „Klatkach",
+    a tu nie ma go ani w `secs`, ani w `n_null`."""
+    return con.execute(
+        "SELECT f.object_id, f.filter_canon, "
+        "       SUM(h.exptime)         AS secs, "
+        "       SUM(h.exptime IS NULL) AS n_null "
+        "FROM frame f JOIN header h ON h.frame_id = f.id "
+        "LEFT JOIN config c ON c.id = f.config_id "
+        "LEFT JOIN telescope_canonical tc ON tc.id = c.telescope_id "
+        "WHERE f.kind = 'light' AND f.object_id IS NOT NULL "
+        "  AND f.superseded_by IS NULL "
+        "  AND (? IS NULL OR tc.canon_id = ?) "
+        "  AND (? IS NULL OR f.camera_id = ?) "
+        "  AND (? IS NULL OR f.filter_canon = ?) "
+        "GROUP BY f.object_id, f.filter_canon "
+        "ORDER BY f.object_id, secs DESC",
+        (telescope_id, telescope_id, camera_id, camera_id, filter_canon, filter_canon),
+    ).fetchall()
+
+
 def object_frames(con, object_id, *, telescope_id=None, camera_id=None, filter_canon=None):
     """Klatki danego obiektu (light/master_light) z tymi samymi filtrami co biblioteka. Location przez
     `MIN(id)` SPOŚRÓD OBECNYCH, z powrotem do dowolnej (R#3: frame 1:N location - bez tego N lokalizacji
@@ -3238,6 +3272,19 @@ def frame_for_location(con, location_id):
     grid kluczuje frame). Zwraca int albo None."""
     row = con.execute("SELECT frame_id FROM location WHERE id = ?", (location_id,)).fetchone()
     return row["frame_id"] if row else None
+
+
+def pending_cards_for_run(con, run_id):
+    """Oczekujące wpisy stagingu przebiegu z klatką pod ich LOCATION - jednym zapytaniem (podgląd
+    szuflady po edycji komórki, AR-61; dawniej osobny `frame_for_location` na każdy wpis, czyli
+    koszt rosnący kwadratowo z serią edycji). Kopia bez wiersza `location` wypada (INNER JOIN), jak
+    wypadała przy mapowaniu pojedynczym. Kolejność `id` = kolejność stagingu. Zwraca: frame_id,
+    keyword, op, old_value, new_value, new_comment."""
+    return con.execute(
+        "SELECT l.frame_id, p.keyword, p.op, p.old_value, p.new_value, p.new_comment "
+        "FROM pending_changes p JOIN location l ON l.id = p.location_id "
+        "WHERE p.run_id = ? AND p.status = 'pending' ORDER BY p.id",
+        (run_id,)).fetchall()
 
 
 def frame_cards(con, frame_id):

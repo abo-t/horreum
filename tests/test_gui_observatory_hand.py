@@ -138,6 +138,8 @@ def test_gest_z_widoku_zapisuje_i_daje_recepte_odwrotu(scena, monkeypatch):
                                  "WHERE id = ?", (f,)).fetchone()) == (nowe, "user")
                for f in bez[:3])
     assert w.table.rowCount() == 2                        # nowe stanowisko na liście osi
+    assert w._selected_observatory_id() == nowe           # cel gestu zaznaczony w tabeli
+    assert w.map_view._selected == nowe                   # …i wyróżniony na mapie
     assert "Wyjazd" in msgs[-1] and "3" in msgs[-1]
     assert i18n.t("obshand.undo_hint").strip() in msgs[-1]
     assert sorted(f for g in queries.observatory_review_groups(con) for f in g["frame_ids"]) \

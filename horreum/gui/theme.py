@@ -130,6 +130,21 @@ def map_colors(name):
 
 ROLES = {"secondary": "secondary_text", "error": "exclusion_red", "warn": "warn", "ok": "ok_green"}
 
+# Nazwa obiektu przycisku recepty paska stanu - selektor reguły wygaszenia w `qss`.
+RECEPTA_OBJECT_NAME = "recepta"
+
+
+def recepta_wygaszona(name):
+    """(kolor tekstu, tło) WYGASZONEJ recepty paska stanu - jeden właściciel, z którego czyta `qss`
+    i bramka kontrastu.
+
+    Wygaszona recepta (wariant „potem", blokada po kliknięciu) to ZDANIE DO PRZECZYTANIA, nie martwa
+    kontrolka: domyślne `disabled_text` na tle przycisku dawało w ciemnym motywie 1,63:1 (firsthand
+    na platformie natywnej). Tekst bierze więc `secondary_text` (AA 4,5:1 na `window` obu motywów),
+    a tło jest tłem PASKA (`window`), nie przycisku - wygaszenie mówi ramka przerywana i kursor,
+    nie zgaszony kolor liter."""
+    return accents(name)["secondary_text"], palette_spec(name)["window"]
+
 
 def qss(name):
     """Arkusz stylów akcentów dla motywu: własność `role` etykiety → kolor z `ROLES` (widżet pisze
@@ -144,6 +159,9 @@ def qss(name):
     WSZYSTKICH przełączników paska zbioru („Rodowód…", „Popraw nagłówki…", „Uporządkuj nazwy…"),
     bo to jedna klasa kontrolki, nie trzy osobne przypadki."""
     a = accents(name)
+    tekst, tlo = recepta_wygaszona(name)
     return "".join(
         f'QLabel[role="{role}"] {{ color: {a[key]}; }}' for role, key in ROLES.items()
-    ) + (f'QPushButton:checked {{ border: 2px solid {a["gold"]}; font-weight: bold; }}')
+    ) + (f'QPushButton:checked {{ border: 2px solid {a["gold"]}; font-weight: bold; }}') + (
+        f'QToolButton#{RECEPTA_OBJECT_NAME}:disabled {{ color: {tekst}; background: {tlo}; '
+        f'border: 1px dashed {tekst}; padding: 2px 4px; }}')

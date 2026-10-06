@@ -3,7 +3,8 @@ osi (teleskop/obserwatorium/przegląd obiektów) montowane w wewnętrznym stacku
 nawigacji `MainWindow` (Dostawa / Zbiory / Porządki).
 
 Glue Qt↔read-model: liczniki liczy `queries.tasks_state` (bieżący STAN tabel, nigdy `count(event)`
-— memory horreum-review-queue-from-state); ten plik NIE wykonuje żadnego SQL (meta-test AST
+- memory horreum-review-queue-from-state), a wiersze osi sprzętu, stanowiska i faktu zatrzymanego
+dokłada `_liczniki_osi` od właścicieli ich predykatów; ten plik NIE wykonuje żadnego SQL (meta-test AST
 `test_repo_safety.py` skanuje i ten plik). Warstwa widżetów — na whiteliście `test_gui_isolation`.
 
 KIERUNEK IMPORTÓW (F5R2#1): ten moduł importuje widoki osi z `horreum.gui.app` MODULE-LEVEL;
@@ -26,10 +27,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from horreum import scan
+from horreum import resolver, scan, supersede
 from horreum.gui import i18n, queries, rows, theme
 from horreum.gui.app import (
-    ObjectAxisView, ObservatoryAxisView, TelescopeAxisView, _utc_now_iso,
+    _REVIEW_TAG, ObjectAxisView, ObservatoryAxisView, TelescopeAxisView, _utc_now_iso,
 )
 from horreum.gui.grid import (PRESET_COPY_CONFLICT, PRESET_DUPS, PRESET_LINEAGE,
                               PRESET_MISSING_COPY, PRESET_ORPHAN_TESTIMONY,
@@ -87,7 +88,14 @@ _TASKS = [
     ("path_header_conflict_frames", "tasks.path_header_conflict_frames",
      PRESET_PATH_HEADER_CONFLICT),
     ("stacks_lineage_pending", "tasks.stacks_lineage", PRESET_LINEAGE),
+    # Dwa wiersze AKCYJNE i ROBOTA (AR-59) - liczą KLATKI, które czekają na gest ręki na osi
+    # sprzętu i na osi stanowiska. Do tej zmiany gesty istniały, ale prowadziły do nich wiersze
+    # liczące co innego (teleskopy bez etykiety, stanowiska bez nazwy) - szare „0" mówiło „nie ma
+    # roboty" przy 423 klatkach bez zestawu i 1223 bez stanowiska. Liczba czyta predykat jedynego
+    # właściciela (`_liczniki_osi`), a klik prowadzi do podstrony z gestem.
+    ("config_review_frames", "tasks.config_review_frames", _PAGE_OBJECTS),
     ("telescopes_unlabeled", "tasks.telescopes_unlabeled", _PAGE_TELESCOPE),
+    ("observatory_review_frames", "tasks.observatory_review_frames", _PAGE_OBSERVATORY),
     ("observatories_unnamed", "tasks.observatories_unnamed", _PAGE_OBSERVATORY),
     ("dup_frames", "tasks.dup_frames", PRESET_DUPS),
     # Wiersz AKCYJNY i ROBOTA (0021) - świadomie POZA `_BEZ_ROBOTY` i bez werdyktu „zostawiam", inaczej
@@ -117,6 +125,12 @@ _TASKS = [
     # treść przejęła następczyni. Stoi tu, bo od 0809 wypadła z WSZYSTKICH kubełków kolejki
     # (nie jest robotą), a bez tej pozycji jedyną drogą do niej byłby przypadek w gridzie pełnym.
     ("superseded_frames", "tasks.superseded_frames", PRESET_SUPERSEDED),
+    # Wiersz KLIKALNY, ale NIE ROBOTA (AR-41) - podzbiór „Zastąpionych": werdykt obiektu z ręki,
+    # który został na klatce zastąpionej, bo następczyni nie jest lightem. Nic nie przepadło (append-
+    # only) i żaden gest tego nie opróżni, więc wiersz stoi w `_BEZ_ROBOTY`; istnieje po to, żeby ten
+    # stan był widać ZE STANU, a nie tylko ze zdania po geście przeniesienia. Liczba z predykatu
+    # `supersede.kept_object_facts` (lustro klingi); dziś 0 i wtedy wiersz milczy szarym zerem.
+    ("object_kept_frames", "tasks.object_kept_frames", PRESET_SUPERSEDED),
     # Dwa wiersze jednej kolumny (D-OW-3/R2), o RÓŻNEJ naturze — i to rozróżnienie jest tu całą
     # treścią. „Wycofane" to zapis historii jak „Zastąpione": klatka nie wymaga niczego, stoi na
     # liście po to, żeby dało się ją znaleźć i PRZYWRÓCIĆ. „Wycofane, a plik wrócił" jest ROBOTĄ,
@@ -157,7 +171,43 @@ _ROBOTA_Z_PODZBIORU = {"stack_versions": "stack_versions_open"}
 # drzwiami odtwarzał dokładnie ten defekt, który pakiet kolejki wyleczył w kubełkach (bramka 3a
 # 0809, zarzut `kimi` #4). Klucz, nie flaga w krotce: krotka opisuje POZYCJĘ, a to jest fakt o jej
 # NATURZE, i tak samo czyta go badge, jak i pogrubienie.
-_BEZ_ROBOTY = frozenset({"superseded_frames", "retired_frames", "missing_copy_frames"})
+_BEZ_ROBOTY = frozenset({"superseded_frames", "retired_frames", "missing_copy_frames",
+                         "object_kept_frames"})
+
+
+def _liczniki_osi(con):
+    """Liczniki wierszy AR-59/AR-41, których `queries.tasks_state` nie niesie - WOŁANE od jedynych
+    właścicieli predykatów, nie powielane (ten plik nie wykonuje SQL):
+
+      * `config_review_frames` = `resolver.review_state(con).no_config` - właściciel kubełka sprzętu
+        kolejki przeglądu (kind-aware: dark/bias z `grouper.NO_TELESCOPE_KINDS` nie mają zestawu
+        z definicji; klatka bez zeznania i zastąpiona/wycofana poza). Lista pod klikiem
+        (`queries.config_review_frames`) jest jego lustrem pinowanym testem.
+      * `observatory_review_frames` = długość wejścia gestu „Wskaż stanowisko…"
+        (`queries.observatory_review_frames`) - oś stanowiska jest KIND-AGNOSTIC, więc liczba
+        obejmuje każdy rodzaj, dokładnie tyle, ile okno gestu pokaże.
+      * `object_kept_frames` = `supersede.kept_object_facts` (AR-41).
+
+    Pomiar 2026-10-06 na kopii żywej bazy: 423 bez zestawu (422 light RAW bez TELESCOP w EXIF,
+    1 `unknown` XISF), 1223 bez stanowiska, 0 zatrzymanych faktów."""
+    return {
+        "config_review_frames": resolver.review_state(con).no_config,
+        "observatory_review_frames": len(queries.observatory_review_frames(con)),
+        "object_kept_frames": len(supersede.kept_object_facts(con)),
+    }
+
+
+# Wiersz, którego podstrona ma kilka kubełków: klik ZAZNACZA właściwy, żeby lista klatek i gest
+# stały gotowe (klucz wiersza → tag kubełka kolejki przeglądu `ObjectAxisView`).
+_KUBELEK_PODSTRONY = {"config_review_frames": "config_review"}
+
+# Podpowiedzi wierszy AR-59/AR-41 - mówią, gdzie mieszka gest (nazwy z katalogu przy renderze).
+_PODPOWIEDZI_OSI = {
+    "config_review_frames": ("tasks.config_review_tip", {"assign": "object.set_config_btn"}),
+    "observatory_review_frames": ("tasks.observatory_review_tip",
+                                  {"assign": "obshand.btn_assign"}),
+    "object_kept_frames": ("tasks.object_kept_tip", {"persp": "perspective.superseded"}),
+}
 
 # WIERSZE, KTÓRYCH ZERO JEST WIEDZĄ DOPIERO PO ZEBRANIU FAKTÓW KOPII (0021). Oba predykaty porównują
 # zeznania kopii, a kopia bez faktów w porównaniu nie bierze udziału - więc przed pierwszą Dostawą
@@ -298,6 +348,7 @@ class TasksView(QWidget):
         (`counts_changed` = liczba pozycji akcyjnych z n>0). Woła gospodarz (montaż / po przebiegu
         Dostawy / wejście w Porządki / sygnał stanu Porządków z gestu Zbiorów) i powrót z podstrony."""
         state = queries.tasks_state(self.con)
+        state.update(_liczniki_osi(self.con))       # AR-59/AR-41 - od właścicieli predykatów
         # Kopie czekające na fakty, które mogą zmienić te wiersze - WOŁANE, nie powielane: predykat
         # ma jednego właściciela (ten sam SELECT steruje etapem Dostawy), tryb `porownywalne`
         # odcina kandydatów, których fakty żadnego porównania kopii nie ruszą.
@@ -337,6 +388,9 @@ class TasksView(QWidget):
                 tip = i18n.t(_PODPOWIEDZI_GESTU[key], finish=i18n.t("grid.inplace.finish"),
                              restore=i18n.t("grid.inplace.restore"),
                              release=i18n.t("grid.inplace.release"))
+            elif key in _PODPOWIEDZI_OSI and n > 0:     # ta sama reguła zera co wyżej
+                klucz, nazwy = _PODPOWIEDZI_OSI[key]
+                tip = i18n.t(klucz, **{k: i18n.t(v) for k, v in nazwy.items()})
             elif robota != n:
                 tip = i18n.t_plural("tasks.stack_versions_kept_tip", n - robota,
                                     keep=i18n.t("grid.version.keep_all"))
@@ -377,8 +431,31 @@ class TasksView(QWidget):
         action = next(a for k, _, a in _TASKS if k == key)
         if isinstance(action, int):
             self.pages.setCurrentIndex(action)         # podstrona osi
+            if key in _KUBELEK_PODSTRONY:
+                self._zaznacz_kubelek(_KUBELEK_PODSTRONY[key])
         else:
             self.open_collection.emit(action)          # Zbiory z perspektywą (np. Duplikaty)
+
+    def otworz_stanowiska(self):
+        """Podstrona osi obserwatorium - wejście gospodarza (pusty stan planera „bez stanowiska”)."""
+        self.pages.setCurrentIndex(_PAGE_OBSERVATORY)
+
+    def _zaznacz_kubelek(self, tag):
+        """Zaznacz kubełek kolejki przeglądu o tagu `tag` - zaznaczenie drąży jego klatki i zapala
+        gest (`ObjectAxisView._on_review_selected`). Kubełek pusty nie ma tagu (wiersz informacyjny),
+        więc wtedy nic się nie zaznacza: podstrona i jej zdanie „brak klatek" mówią resztę.
+
+        KOLEJKA PRZEŁADOWANA PRZED SZUKANIEM: licznik wiersza jest świeży (`refresh_counts`), a kolejka
+        podstrony pamięta stan z ostatniego odświeżenia osi - bez przeładowania klik w „1" szukał
+        tagu, którego kolejka jeszcze nie miała. Zaznaczenie jest zdejmowane przed ustawieniem, żeby
+        drążenie poszło także wtedy, gdy kubełek był już zaznaczony (lista klatek i gest ze stanu)."""
+        self.object_view.refresh()
+        lista = self.object_view.review
+        for i in range(lista.count()):
+            if lista.item(i).data(_REVIEW_TAG) == tag:
+                lista.clearSelection()
+                lista.setCurrentRow(i)
+                return
 
     def _on_back(self):
         self.pages.setCurrentIndex(_PAGE_LIST)

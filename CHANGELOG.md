@@ -29,7 +29,50 @@ schemat i API mogą się jeszcze zmieniać.
   to wskazanie naprawdę może je wciągnąć. Schemat bazy rośnie do wersji 20; migracja przy pierwszym
   otwarciu, bez ruszania istniejących wierszy.
 
+- **Recepta na pasku stanu da się kliknąć.** Po geście, który da się cofnąć (wycofanie klatki,
+  cofnięcie albo przywrócenie przypisania obiektu), pasek nie tylko podpowiada drogę powrotu, ale
+  ją wykonuje: klik odsłania klatki poza widokiem, a potem cofa gest - dokładnie na tych klatkach,
+  które gest zmienił, nie na całym zaznaczeniu. Recepta żyje tak długo, jak jest prawdą, i nie
+  wykonuje się w trakcie etapu Dostawy ani zapisu do plików.
+
+- **Edycja pojedynczej komórki w Zbiorach.** Komórkę keyworda (dla klatki z jedną obecną kopią,
+  nie RAW-a) edytujesz w miejscu, z polem komentarza jak w makrze. Zmiana trafia do tej samej
+  szuflady co makro: widzisz ją w podglądzie razem z innymi oczekującymi kartami tej klatki,
+  zatwierdzasz albo odrzucasz i cofasz jak każdy zapis.
+
+- **Porządki pokazują klatki bez zestawu i bez stanowiska.** Dwa nowe wiersze z liczbą prowadzą
+  wprost do gestu („Przypisz zestaw…", „Wskaż stanowisko…"). Nowy wiersz „Fakt ręki zatrzymany na
+  zastąpionej klatce" pokazuje, co zostało przy klatce zastąpionej, a w perspektywie „Zastąpione"
+  menu tabeli ma gest „Przenieś fakty ręki".
+
+- **Okna „Wskaż stanowisko" i „Przypisz zestaw" mają filtr listy folderów.** Okno startuje szersze,
+  długa ścieżka skraca się w środku (licznik zostaje widoczny), a zapis bierze dokładnie te
+  zaznaczone foldery, które widać po filtrze.
+
+- **Biblioteka obiektów ma kolumnę „Godziny".** Suma ekspozycji lightów per obiekt pod bieżącym
+  filtrem, z dopiskiem, ile klatek nie ma czasu ekspozycji.
+
+- **Zapisana perspektywa pamięta wygląd.** Wybór kolumny „Obrazy" i szerokość kolumny ścieżki
+  wracają z perspektywą; wybór soczewki w planerze przeżywa restart programu.
+
 ### Naprawione
+
+- **Planer bez stanowiska mówi to u siebie, a nie na cudzym ekranie.** Komunikat o braku
+  stanowiska nie wyskakuje już na pasku Dostawy; planer pokazuje pusty stan z przyciskiem
+  „Ustaw stanowisko…", a po wskazaniu stanowiska plan liczy się sam. Inne błędy planera widać
+  tak jak dotąd.
+
+- **Mapa stanowisk nie rysuje kresek przez cały ekran.** Stanowisko na drugim końcu świata
+  (np. Nowa Zelandia) psuło kontury lądów; punkt na skraju mapy nie leży już na krawędzi,
+  a po wskazaniu stanowiska jest ono zaznaczone na liście i na mapie.
+
+- **Podgląd nowych nazw stoi w kadrze.** Kolumna „nazwa →" stoi zaraz po kolumnach bazowych,
+  zamiast na końcu tabeli poza ekranem.
+
+- **Po wykonaniu recepty zaznaczone klatki są na środku tabeli**, a nie przy dolnej krawędzi.
+
+- **Zdanie osi stanowisk nie przykrywa statusu etapu** po przebiegu Dostawy - czeka na wejście
+  w Porządki.
 
 - **Podpowiedź obiektu gotowego stosu pokazuje obiekt, nie filtr.** Dla stosu bez nazwy kolumna
   „Obiekt" podpowiadała nazwę folderu rodzica, czyli w drzewie `STACKS` nazwę filtra (`⟨Ha⟩`,

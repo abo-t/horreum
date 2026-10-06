@@ -532,6 +532,13 @@ class FactTransfer:
     skipped: str = ""          # "" = nic nie pominięto (konwencja liczników z `ObjectGesture`)
 
 
+class KlatkaNieJestZastapiona(ValueError):
+    """`transfer_human_facts` na klatce, która (już) nie jest zastąpiona - jedyny warunek wejścia
+    klingi, który wołający gestu może spotkać bez własnego błędu: skan gasi ogniwo, gdy treść wraca
+    pod ścieżkę (`clear_superseded`), także między odczytem gestu a klingą. Osobny typ, żeby gest
+    łapał DOKŁADNIE ten przypadek, a każdy inny `ValueError` klingi leciał dalej (AR-41)."""
+
+
 def transfer_human_facts(con, *, frame_id, now, actor="user:local"):
     """PRZENIESIENIE FAKTÓW CZŁOWIEKA z klatki zastąpionej na następczynię (R4, D-DR-4).
 
@@ -624,7 +631,8 @@ def transfer_human_facts(con, *, frame_id, now, actor="user:local"):
         if stara is None:
             raise ValueError(f"frame:{frame_id} nie istnieje")
         if stara["superseded_by"] is None:
-            raise ValueError(f"frame:{frame_id} nie jest zastąpiona — nie ma dokąd przenosić")
+            raise KlatkaNieJestZastapiona(
+                f"frame:{frame_id} nie jest zastąpiona - nie ma dokąd przenosić")
         ma_obiekt = stara["object_source"] in TRANSFERABLE_OBJECT_SOURCES
         # Człon `config_id IS NOT NULL` nie jest nadmiarowy, choć klinga zapisuje oba pola razem:
         # bez niego para (źródło ręki, oś pusta) — gdyby kiedykolwiek powstała — emitowałaby
@@ -815,6 +823,7 @@ class RetireGesture:
     skipped_no_location: int = 0   # bez ŻADNEJ lokacji (sierota po `rebind_location`) — inny stan
     skipped_superseded: int = 0    # zastąpiona: jej sprawę zamknęła NASTĘPCZYNI, nie ta ręka
     skipped_already: int = 0       # już w docelowym stanie (idempotencja)
+    frame_ids: tuple = ()          # klatki REALNIE zapisane - recepta odwrotu rusza tylko je
 
     @property
     def skipped(self):
@@ -882,7 +891,7 @@ def retire_frames(con, *, frame_ids, now, uid="local"):
     Idempotencja jak reszta repo: powtórzenie → wszystkie klatki w `skipped_already`, zero eventów.
     Payload niesie OSTATNIE ZNANE ŚCIEŻKI: po wycofaniu żaden kubełek ich nie pokaże, a „gdzie ten
     plik leżał" jest jedynym pytaniem, które człowiek zada po fakcie."""
-    g = RetireGesture()
+    g, zapisane = RetireGesture(), []
     with _immediate(con):
         for row in _retire_rows(con, frame_ids):
             powod = _retire_verdict(row)
@@ -895,7 +904,9 @@ def retire_frames(con, *, frame_ids, now, uid="local"):
             emit_event(con, actor=f"user:{uid}", verb="frame.retired",
                        target=f"frame:{row['id']}", now=now, payload={"paths": paths})
             g = replace(g, done=g.done + 1)
-    return g
+            zapisane.append(row["id"])
+    # Lista lokalna i jedna krotka po pętli: doklejanie krotki per klatkę to O(n²) pod blokadą zapisu.
+    return replace(g, frame_ids=tuple(zapisane))
 
 
 def restore_frames(con, *, frame_ids, now, uid="local"):
@@ -908,7 +919,7 @@ def restore_frames(con, *, frame_ids, now, uid="local"):
     JEDEN guard, bo jeden warunek ma sens: klatka nie wycofana → `skipped_already`. Obecność kopii
     NIE jest tu powodem pominięcia i to jest sedno — powrót pliku to najczęstszy powód, dla którego
     człowiek sięga po ten gest."""
-    g = RetireGesture()
+    g, zapisane = RetireGesture(), []
     with _immediate(con):
         for row in _retire_rows(con, frame_ids):
             if row["retired_at"] is None:
@@ -919,7 +930,8 @@ def restore_frames(con, *, frame_ids, now, uid="local"):
                        target=f"frame:{row['id']}", now=now,
                        payload={"retired_at_before": row["retired_at"]})
             g = replace(g, done=g.done + 1)
-    return g
+            zapisane.append(row["id"])
+    return replace(g, frame_ids=tuple(zapisane))   # jedna krotka po pętli, jak przy wycofaniu
 
 
 def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_hash,
@@ -2056,6 +2068,9 @@ class ObjectGesture:
                                # wnętrzu niemutowalnego wyniku). Zdanie nadania zna kanon od
                                # wołającego (sam go wybrał); zdanie COFNIĘCIA nie ma go skąd wziąć
                                # inaczej niż od klingi — i przez to milczało o tym, co zdjęło
+    frame_ids: tuple = ()      # klatki REALNIE zapisane (przypisane albo cofnięte) - recepta odwrotu
+                               # rusza wyłącznie je, nie całe zaznaczenie: klatka pominięta przez
+                               # klingę niesie CUDZĄ, starszą decyzję, której ten gest nie podjął
 
     def __add__(self, inny):
         """Suma dwóch gestów — JEDEN właściciel składania, tak jak `skipped_breakdown` jest jedynym
@@ -2088,7 +2103,8 @@ class ObjectGesture:
             skipped_drift=self.skipped_drift + inny.skipped_drift,
             skipped_failed=self.skipped_failed + inny.skipped_failed,
             stacks=self.stacks + inny.stacks,
-            canons=tuple(kanony))
+            canons=tuple(kanony),
+            frame_ids=self.frame_ids + inny.frame_ids)
 
     @property
     def skipped(self):
@@ -2209,6 +2225,7 @@ def user_assign_object(con, *, alias_norm, canon, catalog, kind, frame_ids, now,
                        now=now, payload={"alias_norm": alias_norm, "source": "user"})
 
         assigned = kind_skip = source_skip = drift = stacks = 0
+        zapisane = []
         for frame_id in frame_ids:
             fr = con.execute(
                 "SELECT kind, object_id, object_source, object_cleared_id FROM frame WHERE id = ?",
@@ -2281,6 +2298,7 @@ def user_assign_object(con, *, alias_norm, canon, catalog, kind, frame_ids, now,
             emit_event(con, actor=actor, verb="object.assigned", target=f"frame:{frame_id}",
                        now=now, payload={"object_id": object_id, "object_source": object_source})
             assigned += 1
+            zapisane.append(frame_id)
             # Licznik gotowych obrazów jest LUSTREM licznika z `clear_object_assignment` (D-OW-7):
             # skoro stos jest w zasięgu obu gestów, oba muszą o nim mówić. Nazwanie stosu PRZEPINA
             # dobór okna jego rodowodu — user ma prawo wiedzieć, że tego właśnie dotknął, zanim
@@ -2292,7 +2310,7 @@ def user_assign_object(con, *, alias_norm, canon, catalog, kind, frame_ids, now,
     # dostać STĄD, bo grupy różnią się obiektem.
     return ObjectGesture(assigned=assigned, skipped_kind=kind_skip,
                          skipped_source=source_skip, skipped_drift=drift, stacks=stacks,
-                         canons=(canon,) if assigned else ())
+                         canons=(canon,) if assigned else (), frame_ids=tuple(zapisane))
 
 
 def clear_object_assignment(con, *, frame_ids, now, uid="local"):
@@ -2340,7 +2358,7 @@ def clear_object_assignment(con, *, frame_ids, now, uid="local"):
     klatka: pętla robi już jeden `SELECT` na klatkę, a zaznaczenie bywa liczone w tysiącach."""
     actor = f"user:{uid}"
     cleared = kind_skip = source_skip = nothing_skip = stacks = 0
-    kanony, cache = [], {}
+    kanony, cache, zapisane = [], {}, []
     with _immediate(con):
         for frame_id in frame_ids:
             fr = con.execute(
@@ -2379,10 +2397,11 @@ def clear_object_assignment(con, *, frame_ids, now, uid="local"):
                        now=now, payload={"was_object_id": fr["object_id"],
                                          "was_source": fr["object_source"]})
             cleared += 1
+            zapisane.append(frame_id)
             stacks += fr["kind"] == "master_light"
     return ObjectGesture(assigned=cleared, skipped_kind=kind_skip,
                          skipped_source=source_skip, skipped_nothing=nothing_skip, stacks=stacks,
-                         canons=tuple(kanony))
+                         canons=tuple(kanony), frame_ids=tuple(zapisane))
 
 
 def clear_object_tombstone(con, *, frame_id, now, actor="user:local", commit_id=None,
@@ -3071,6 +3090,28 @@ def stage_pending(con, *, run_id, location_id, keyword, idx, op, old_value, new_
         cur = _insert_pending(con, (run_id, location_id, keyword, idx, op, old_value, new_value,
                                     new_type, new_comment, expected_header_hash))
     return cur.lastrowid
+
+
+def stage_pending_replacing(con, *, run_id, preview):
+    """Dopisz wpis stagingu z EDYCJI KOMÓRKI gridu (AR-61), zastępując oczekujący wpis tej samej karty
+    tej samej kopii w tym samym przebiegu. Jedna transakcja: zdjęcie i wstawienie razem albo wcale.
+
+    Zastąpienie, nie dopisanie, bo druga edycja tej samej komórki jest POPRAWKĄ pierwszej, a dwa
+    wpisy `set` jednej karty w jednym przebiegu zapisałyby oba po kolei - plik dostałby wartość
+    zależną od kolejności, a podgląd pokazywałby tylko ostatnią. Klucz to `(run_id, location_id,
+    keyword)` i status `pending`: wpis makra tej samej karty w tym przebiegu też ustępuje edycji
+    ręcznej (ostatnie słowo człowieka), a wpisy już rozstrzygnięte przez commit zostają nietknięte.
+    `preview` = obiekt z polami `macro.PendingPreview`. Transient - bez eventu, jak `stage_pending`.
+    Zwraca `(id nowego wpisu, liczba zastąpionych)`."""
+    with con:
+        zdjete = con.execute(
+            "DELETE FROM pending_changes WHERE run_id = ? AND location_id = ? AND keyword = ? "
+            "AND status = 'pending'", (run_id, preview.location_id, preview.keyword)).rowcount
+        cur = _insert_pending(con, (run_id, preview.location_id, preview.keyword, preview.idx,
+                                    preview.op, preview.old_value, preview.new_value,
+                                    preview.new_type, preview.comment,
+                                    preview.expected_header_hash))
+    return cur.lastrowid, zdjete
 
 
 def stage_pending_many(con, *, run_id, previews):

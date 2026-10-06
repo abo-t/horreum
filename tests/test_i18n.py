@@ -127,7 +127,7 @@ def test_klucze_call_site_podzbior_katalogu():
 
 
 # Moduły spoza `gui/`, które mówią do UI przez katalog (FH-13: opis drzewa filtra na pasku zbioru).
-_RDZEN_Z_I18N = [PKG / "filter_engine.py"]
+_RDZEN_Z_I18N = [PKG / "filter_engine.py", PKG / "supersede.py"]
 
 
 def test_parytet_nazw_facetow_opisu_filtra_z_katalogiem():

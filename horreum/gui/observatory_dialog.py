@@ -18,10 +18,13 @@ domenowe, nie kosmetyczne:
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit,
-    QListWidget, QListWidgetItem, QRadioButton, QVBoxLayout,
+    QListWidget, QRadioButton, QVBoxLayout,
 )
 
 from horreum.gui import i18n, queries
+from horreum.gui.config_dialog import (
+    FolderFilter, default_dialog_size, folder_item, folder_list, visible_rows,
+)
 from horreum.resolve.observatory import THRESH_KM, user_site_coords
 
 MODES = ("assign", "change", "clear")
@@ -63,12 +66,20 @@ class AssignObservatoryDialog(QDialog):
         head.setWordWrap(True)
         lay.addWidget(head)
 
+        # Lista folderów wspólna z oknem zestawu (`config_dialog`): filtr nad listą z fokusem na
+        # starcie, elizja środka ścieżki, okno szersze. Zmierzone przed: 10 ze 178 folderów
+        # w kadrze, LMC na 50. wierszu, 9-10 interakcji do wskazania folderu.
+        self.items = QListWidget()
+        folder_list(self.items)
+        self.filter = FolderFilter(self.items, self._on_filter)
+        lay.addWidget(self.filter)
+        lay.addWidget(self.filter.empty)
+
         self.check_all = QCheckBox(i18n.t("obshand.check_all"))
         self.check_all.setTristate(True)
         self.check_all.clicked.connect(self._on_check_all)
         lay.addWidget(self.check_all)
 
-        self.items = QListWidget()
         for g in self.groups:
             folder = g["folder"] or i18n.t("obshand.no_folder")
             rodzaje = ", ".join(i18n.t("obshand.kind_count", kind=k, n=n) for k, n in g["kinds"])
@@ -78,14 +89,14 @@ class AssignObservatoryDialog(QDialog):
                 swiadek = (i18n.t("obshand.now_set", site=g["observatory_label"])
                            if g["observatory_label"] else i18n.t("obshand.now_mixed"))
                 tekst += f"   [{swiadek}]"
-            it = QListWidgetItem(tekst)
+            it = folder_item(tekst, folder)
             it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
             it.setCheckState(Qt.Unchecked)
             it.setData(Qt.UserRole, g["frame_ids"])
             self.items.addItem(it)
         self.items.itemChanged.connect(lambda _it: self._sync_check_all())
         self._sync_check_all()
-        lay.addWidget(self.items)
+        lay.addWidget(self.items, 1)                 # przyrost wysokości okna idzie w listę
 
         self.combo = None
         if mode != "clear":
@@ -104,6 +115,8 @@ class AssignObservatoryDialog(QDialog):
         lay.addWidget(buttons)
         self.items.itemChanged.connect(self._sync_accept_enabled)
         self._sync_accept_enabled()
+        self.resize(default_dialog_size(self))
+        self.filter.setFocus()
 
     def _build_target(self, lay):
         """Cel gestu: istniejące stanowisko ALBO nowe ze współrzędnych - przełącznik radiowy, bo to
@@ -148,27 +161,35 @@ class AssignObservatoryDialog(QDialog):
 
     def _on_check_all(self):
         """Klik w przełącznik całości - każdy wiersz na jedno albo drugie (stan pośredni to raport,
-        nie polecenie; ta sama reguła co w `AssignConfigDialog._on_check_all`)."""
+        nie polecenie; ta sama reguła co w `AssignConfigDialog._on_check_all`). Zakres = wiersze
+        widoczne po filtrze, jak tam."""
         stan = Qt.Checked if self.check_all.checkState() != Qt.Unchecked else Qt.Unchecked
         self.items.blockSignals(True)
-        for i in range(self.items.count()):
-            self.items.item(i).setCheckState(stan)
+        for it in visible_rows(self.items):
+            it.setCheckState(stan)
         self.items.blockSignals(False)
         self._sync_check_all()
         self._sync_accept_enabled()
 
     def _sync_check_all(self):
-        n = self.items.count()
-        zazn = sum(1 for i in range(n) if self.items.item(i).checkState() == Qt.Checked)
+        widoczne = visible_rows(self.items)
+        n = len(widoczne)
+        zazn = sum(1 for it in widoczne if it.checkState() == Qt.Checked)
         self.check_all.blockSignals(True)
         self.check_all.setCheckState(
             Qt.Checked if zazn == n and n else Qt.Unchecked if zazn == 0 else Qt.PartiallyChecked)
         self.check_all.blockSignals(False)
 
+    def _on_filter(self):
+        """Fraza filtra zmieniła zakres widocznych wierszy - a z nim zakres zapisu i licznik."""
+        self._sync_check_all()
+        self._sync_accept_enabled()
+
     def _zaznaczone(self):
+        """Klatki z zaznaczonych wierszy WIDOCZNYCH po filtrze - „co widać, to się zapisze”
+        (kontrakt w `config_dialog.FolderFilter`)."""
         out = []
-        for i in range(self.items.count()):
-            it = self.items.item(i)
+        for it in visible_rows(self.items):
             if it.checkState() == Qt.Checked:
                 out.extend(it.data(Qt.UserRole))
         return out

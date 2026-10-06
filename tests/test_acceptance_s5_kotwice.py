@@ -2,7 +2,8 @@
 
 Skrypt `scripts/acceptance_s5.py` chodzi na dawcy i realnym archiwum, więc tu testujemy wyłącznie
 to, co da się sprawdzić bez `R:`: strukturę `Pomiar`/`Kotwica`, wydruk niezgodności (oczekiwana,
-aktualna, pochodzenie, wiek kotwicy) i wybór poddrzew doskanu. Przebieg kryteriów na bazie
+aktualna, pochodzenie, wiek kotwicy), wybór poddrzew doskanu i etap stosów (T) na syntetycznym
+archiwum w `tmp_path`. Przebieg kryteriów na bazie
 z importu pinuje `test_import_fitsmirror.py`.
 """
 import importlib.util
@@ -140,3 +141,87 @@ def test_korzenie_doskanu_odmawia_stacks_w_podkatalogu(tmp_path):
     root = _drzewo(tmp_path, "LIGHTS/STACKS")
     with pytest.raises(RuntimeError, match="poza korzeniem doskanu"):
         acc.korzenie_doskanu(root)
+
+
+# ── (T) etap stosów drogą produktu: zwykły `scan_tree` korzenia archiwum ────────────────────
+def _archiwum_po_doskanie(tmp_path, monkeypatch, *, obcy_rodzaj=False):
+    """Archiwum z jednym plikiem już zeskanowanym doskanem (O1) i `STACKS\\Obj\\Zestaw\\Filtr\\`
+    ze stosem o nazwie kanonicznej i jego pochodną. Wolumin stały, żeby brama `mtime` działała."""
+    from test_scan import NOW, _db, _stack
+    monkeypatch.setattr(acc, "volume_serial", lambda _p: "VOL1")
+    root = tmp_path / "ASTRO_"
+    zestaw = root / "STACKS" / "CTB1" / "A140R_2600MM" / "Ha"
+    zestaw.mkdir(parents=True)
+    (root / "LIGHTS" / "CTB1").mkdir(parents=True)
+    _stack(root / "LIGHTS" / "CTB1" / "CTB1_Ha_600s_0001.xisf", imagetyp="Light Frame", n=1)
+    _stack(zestaw / "CTB1_2025-08-30_A140R_2600MM_Ha_600s_mono_ast.xisf", n=2)
+    _stack(zestaw / "CTB1_2025-08-30_A140R_2600MM_Ha_600s_mono_ast_ABE.xisf", n=3)
+    if obcy_rodzaj:
+        _stack(zestaw / "CTB1_flat_Ha.xisf", imagetyp="Master Flat", n=4)
+    con = _db(tmp_path)
+    acc.doskan_xisf(con, str(root), NOW, lambda *_a: None)
+    assert con.execute("SELECT count(*) FROM location").fetchone()[0] == 1   # STACKS odcięty
+    return con, root, NOW
+
+
+def test_etap_stosow_wciaga_tylko_stos_spod_STACKS(tmp_path, monkeypatch):
+    """Stos o nazwie kanonicznej (nie `masterLight…`) wchodzi, pochodna odpada sitem, plik archiwum
+    przeskakuje brama `mtime`; drugi przebieg nie dodaje klatki ani eventu."""
+    con, root, now = _archiwum_po_doskanie(tmp_path, monkeypatch)
+    e, idem = acc.doskan_stacks(con, str(root), str(root / "STACKS"), now, lambda *_a: None)
+    assert (e.pod_stacks, e.candidates, e.derived_skipped, e.ingested, e.rejected, e.failed) \
+        == (2, 1, 1, 1, 0, 0)
+    assert [os.path.basename(p) for p in e.derived_paths] \
+        == ["CTB1_2025-08-30_A140R_2600MM_Ha_600s_mono_ast_ABE.xisf"]
+    assert idem is True
+    kinds = [r[0] for r in con.execute("SELECT f.kind FROM location l JOIN frame f "
+                                       "ON f.id = l.frame_id WHERE l.path LIKE '%STACKS%'")]
+    assert kinds == ["master_light"]
+    assert con.execute("SELECT count(*) FROM location").fetchone()[0] == 2
+    con.close()
+
+
+def test_etap_stosow_liczy_odrzucone_bez_rodzaju_stosu(tmp_path, monkeypatch):
+    """Plik pod `STACKS`, który zeznaje inny rodzaj, zwykły skan wciąga (to droga produktu) -
+    etap liczy go jako odrzucony z przykładem ścieżki, a nie jako stos."""
+    con, root, now = _archiwum_po_doskanie(tmp_path, monkeypatch, obcy_rodzaj=True)
+    e, idem = acc.doskan_stacks(con, str(root), str(root / "STACKS"), now, lambda *_a: None)
+    assert (e.candidates, e.ingested, e.rejected) == (2, 1, 1)
+    assert "CTB1_flat_Ha.xisf" in e.rejected_paths[0] and idem is True
+    con.close()
+
+
+def test_etap_stosow_odmawia_korzenia_innego_niz_STACKS(tmp_path, monkeypatch):
+    """`--stacks-root` inny niż `<xisf-root>\\STACKS` przesunąłby sito pochodnych - twardy błąd.
+    Wielkość liter nie gra roli (NTFS)."""
+    con, root, now = _archiwum_po_doskanie(tmp_path, monkeypatch)
+    with pytest.raises(RuntimeError, match="to nie <xisf-root>"):
+        acc.doskan_stacks(con, str(root), str(root / "LIGHTS"), now, lambda *_a: None)
+    e, _idem = acc.doskan_stacks(con, str(root), str(root / "stacks"), now, lambda *_a: None)
+    assert e.ingested == 1
+    con.close()
+
+
+def test_etap_stosow_odmawia_nowej_lokacji_spoza_STACKS(tmp_path, monkeypatch):
+    """Plik archiwum, który przybył po doskanie, wszedłby etapem stosów - liczby §5.13 mierzyłyby
+    wtedy coś więcej niż `STACKS`, więc etap przerywa przebieg."""
+    from test_scan import _stack
+    con, root, now = _archiwum_po_doskanie(tmp_path, monkeypatch)
+    _stack(root / "LIGHTS" / "CTB1" / "CTB1_Ha_600s_0002.xisf", imagetyp="Light Frame", n=9)
+    with pytest.raises(RuntimeError, match="spoza"):
+        acc.doskan_stacks(con, str(root), str(root / "STACKS"), now, lambda *_a: None)
+    con.close()
+
+
+def test_etap_stosow_odmawia_podmiany_tresci_pliku_archiwum(tmp_path, monkeypatch):
+    """Plik archiwum przepisany INNYMI danymi pod tą samą ścieżką po doskanie nie daje nowej lokacji -
+    skan przepina starą na nową klatkę. Etap ma to nazwać i wskazać plik, nie `STACKS`."""
+    from test_scan import _stack
+    con, root, now = _archiwum_po_doskanie(tmp_path, monkeypatch)
+    plik = root / "LIGHTS" / "CTB1" / "CTB1_Ha_600s_0001.xisf"
+    _stack(plik, imagetyp="Light Frame", n=9)
+    st = plik.stat()
+    os.utime(plik, (st.st_atime + 100, st.st_mtime + 100))   # brama `mtime` musi przepuścić odczyt
+    with pytest.raises(RuntimeError, match="przepiął 1 znanych lokacji.*CTB1_Ha_600s_0001"):
+        acc.doskan_stacks(con, str(root), str(root / "STACKS"), now, lambda *_a: None)
+    con.close()

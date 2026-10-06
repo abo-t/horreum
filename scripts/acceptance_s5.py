@@ -24,10 +24,12 @@ Tryb HYBRYDOWY (odpowiednik replay+subset ze skilla `pipeline-replay-validation`
       **Od P-G łańcuch kalibracji+rodowodu robi już `run_import`**, więc w trybie IMPORT ta faza
       jest przebiegiem DRUGIM (zera delt = dowód, nie regresja; pinuje to §4.6), a w FULL wciąż
       pierwszym dla masterów przyniesionych doskanem.
-  (T) STOSY (opcja `--stacks-root DIR`) - po doskanie realny `scan_stacks` po drzewie STOSÓW
-      (I-2b, P-I): gotowe obrazy po integracji wchodzą jako `master_light`. Trzeci etap, bo trzeci
-      ZAKRES - dawca to archiwum FITS, `--xisf-root` to archiwum XISF bez `STACKS`, a to jest
-      drzewo gotowych obrazów (dziś `<xisf-root>\\STACKS`, do 0810 drzewo obróbki poza archiwum).
+  (T) STOSY (opcja `--stacks-root <xisf-root>\\STACKS`) - po doskanie zwykły `scan_tree` KORZENIA
+      archiwum, czyli droga produktu (E4-1 wariant A+): archiwum przeskakuje brama `mtime`, wchodzi
+      wyłącznie `STACKS` z sitem pochodnych, gotowe obrazy po integracji jako `master_light`
+      (rodzaj z `IMAGETYP`). Trzeci etap, bo trzeci ZAKRES - dawca to archiwum FITS, `--xisf-root`
+      to archiwum XISF bez `STACKS`, a to jest drzewo gotowych obrazów. Inny `--stacks-root` niż
+      `<xisf-root>\\STACKS` i lokacja dodana spoza `STACKS` przerywają przebieg (EXPECT).
       Uruchomiony BEZ `--xisf-root` daje bazę, której ta bramka nie zna (kotwice STOSÓW
       są liczone na stanie FULL) — skrypt odmawia takiego przebiegu zamiast liczyć nieporównywalne.
   (U) RODOWÓD STOSÓW (razem z `--stacks-root`) — `run_stack_lineage` (I-2c): co weszło w gotowy
@@ -79,9 +81,9 @@ from horreum.resolve.headers import extract_header                # noqa: E402
 from horreum.resolve.regions import resolve_region                # noqa: E402
 from horreum.resolver import (                                    # noqa: E402
     NO_OBJECT_CARD_FILETYPES, delta_report, run_resolver)
-from horreum.resolve.paths import STACKS_DIR                      # noqa: E402
+from horreum.resolve.paths import STACK_KIND, STACKS_DIR          # noqa: E402
 from horreum.scan import (                                        # noqa: E402
-    EXCLUDED_DIR_NAMES, HEADER_SUFFIXES, canonize_root, scan_stacks, scan_tree)
+    EXCLUDED_DIR_NAMES, HEADER_SUFFIXES, canonize_root, scan_tree)
 from horreum.stacks import run_stack_lineage                      # noqa: E402
 from horreum.volumes import volume_serial                         # noqa: E402
 
@@ -137,9 +139,6 @@ def opis_niezgodnosci(k, akt, dzis, rel="=="):
 # Przebiegi, z których pochodzą dzisiejsze kotwice - odczytane z komentarzy i z gita
 # (`git log -G` na liniach kotwic). „wpisane w <commit>" = wiemy, kiedy liczba weszła do kodu,
 # ale nie, jakim kodem ją zmierzono.
-_POMIAR_PF4 = Pomiar(
-    "2026-07-02", "odczyt bazy PF-4 (nagłówek bloku kotwic: „z horreum_pf4.db”), nie przebieg "
-    "tego skryptu", "przed naprawą `ED` writebackiem P6 (2026-07-22)", "wpisane w 70abc43")
 # Re-baseline PF-5: firsthand IMPORT tym skryptem (15 559 frame == location, 8 teleskopów),
 # WSZYSTKO PASS - komunikat `70abc43`. Dzień = data commitu; argumentów poza `--donor`
 # komunikat nie podaje (`--live-db` powstał dopiero w ff32564).
@@ -156,8 +155,6 @@ _POMIAR_P6B = Pomiar("2026-07-22", "nieustalone (re-baseline P6b razem z backfil
 # C2: archiwum kolejki, sesja 2026-07-22 (10) - trzeci przebieg (pierwszy padł transientem SMB).
 _POMIAR_C2 = Pomiar("2026-07-22", "FULL --xisf-root <archiwum> --live-db: WSZYSTKO PASS",
                     "po naprawie `ED` (P6) i backfillu kart XISF (P6b)", "8bf2d66")
-_POMIAR_C4 = Pomiar("2026-07-23", "FULL --donor --xisf-root <archiwum> --live-db "
-                    "+ niezależnie kopia żywej pf4", "po P6b", "wpisane w 0e56de5")
 _POMIAR_IMPORT_0801 = Pomiar("2026-08-01", "IMPORT --donor --live-db",
                              "nie dotyczy (od AR-49 kotwica liczy zeznanie dawcy)",
                              "wpisane w 9e72c91")
@@ -167,12 +164,6 @@ _POMIAR_FULL_0801 = Pomiar("2026-08-01", "FULL --donor --xisf-root <archiwum> --
 _POMIAR_STOSY_0801 = Pomiar("2026-08-01", "sonda drogi „Stosy” na starym drzewie obróbki",
                             "stare drzewo obróbki, przed przenosinami do `STACKS`",
                             "wpisane w 7c06e07")
-_POMIAR_STOSY_0802 = Pomiar("2026-08-02", "FULL+STOSY --xisf-root <archiwum> "
-                            "--stacks-root <stare drzewo obróbki>",
-                            "stare drzewo obróbki, przed przenosinami do `STACKS`",
-                            "wpisane w 7c06e07")
-_POMIAR_RODOWOD_STOSOW_0802 = Pomiar("2026-08-02", _POMIAR_STOSY_0802.przebieg,
-                                     _POMIAR_STOSY_0802.stan_r, "wpisane w 68b85fc")
 _POMIAR_RAW_0804 = Pomiar("2026-08-04", "FULL i FULL+STOSY --live-db",
                           "po kasacji `LIGHTS\\Orion\\A7S1_000\\OSC` (7 `.dng`, 2026-08-03)",
                           "9ac4c18")
@@ -185,6 +176,24 @@ _POTW_IMPORT_1004 = Pomiar("2026-10-04", "IMPORT --donor --live-db: WSZYSTKO PAS
 _POTW_FULL_1004 = Pomiar("2026-10-04", "FULL --donor --xisf-root <archiwum> --live-db "
                          "(11 FAIL, ta kotwica PASS)", "po wsadzie kart `OBJECT` i renamie T-1; "
                          "`STACKS` jeszcze w doskanie (przed O1)", "5b39f72")
+# AR-53 (2026-10-06): kotwice FULL i FULL+STOSY przepięte po zbadaniu KAŻDEJ niezgodności - żadna nie
+# jest regresją. (b) rozdział obiektywów RAW (paczka F); (c) kod `64f8fbc` (2026-08-09) czyta XISF ze
+# znakiem nielegalnym w XML - masterflat OIII przestał być degeneratem (ten sam `file_sha1`, plik
+# nietknięty); (d) nowe dane w archiwum; (e) kasacja błędnych kopii `L-Pro`/`OSC` z `R:` (AR-5,
+# 2026-09-26) - znikła klasa-sierota. Stosy: drzewo `STACKS` (193 pliki w nazwach kanonicznych)
+# zamiast starego drzewa obróbki (128), etap drogą produktu.
+_POMIAR_FULL_1005 = Pomiar("2026-10-05", "FULL --donor --xisf-root <archiwum> --live-db (10 FAIL, "
+                           "przyczyny zbadane 2026-10-06)", "po wsadzie kart `OBJECT`, renamie T-1 "
+                           "i kasacji kopii AR-5; `STACKS` poza doskanem (O1)", "7d8f69e + 778b268")
+_POMIAR_STOSY_1006 = Pomiar("2026-10-06", "FULL+STOSY --donor --xisf-root <archiwum> --stacks-root "
+                            "<archiwum>\\STACKS --live-db (18 FAIL - wyłącznie kotwice sprzed AR-53)",
+                            "jak `_POMIAR_FULL_1005`; 193 stosy pod `STACKS`",
+                            "dd5a31a + etap stosów drogą produktu")
+# Potwierdza WYŁĄCZNIE kotwice, które w tym przebiegu dały PASS (kamery, konflikt piksela).
+# Kotwice przepięte z jego `akt=` mają w polu potwierdzenia nic - ich wartość zmierzono, a nie
+# potwierdzono.
+_POTW_STOSY_1006 = Pomiar(_POMIAR_STOSY_1006.dzien, _POMIAR_STOSY_1006.przebieg + ", ta kotwica PASS",
+                          _POMIAR_STOSY_1006.stan_r, _POMIAR_STOSY_1006.kod)
 
 # ── Kotwice EXP_* PF-3 (dawca) + PF-4 (doskan drzewa `R:`) ──────────────────────────────────────
 # UWAGA 2026-08-01: doskan NIE jest już „XISF-owy" — odkąd istnieje moduł DSLR (`e7dcdda`), ciągnie
@@ -217,9 +226,9 @@ EXP_CAMERAS_FULL = Kotwica({
     "ASI2600MM": (3.76, 1), "ASI2600MD": (3.76, 1), "ASI2600MC": (3.76, 0),
     "ASI294MC": (4.63, 0), "SONYA7RM3": (4.86, 0),
     "SONYA7S": (8.469, 0), "SONYA7M3": (5.962, 0), "CANONEOS40D": (5.723, 0),
-}, _POMIAR_EXIF_PIKSEL_1006)
+}, _POMIAR_EXIF_PIKSEL_1006, _POTW_STOSY_1006)
 EXP_PIXEL_CONFLICT_IMPORT = Kotwica(0, _POMIAR_PF5_IMPORT, _POTW_IMPORT_1004)
-EXP_PIXEL_CONFLICT_FULL = Kotwica(1, _POMIAR_EXIF_PIKSEL_1006)
+EXP_PIXEL_CONFLICT_FULL = Kotwica(1, _POMIAR_EXIF_PIKSEL_1006, _POTW_STOSY_1006)
 # dawca FITS (§1): A140R/RC8/76EDPH/ED120R/RC6/N800/Sony135/ED120
 EXP_TELESCOPES_IMPORT = Kotwica(8, _POMIAR_PF5_IMPORT, _POTW_IMPORT_1004)
 # Po naprawie ED na realnym R: (2026-07-22, brief PLAN_p6_xisf_writeback §8) etykieta `ED` nie ma już
@@ -229,9 +238,10 @@ EXP_TELESCOPES_IMPORT = Kotwica(8, _POMIAR_PF5_IMPORT, _POTW_IMPORT_1004)
 # F4 G OSS` 265 klatek, `105mm F1.4 DG HSM | Art 018` 36, `DT 0mm F0 SAM` 22, `FE 70-300mm` 8 —
 # wszystkie w 100% RAW). Obiektyw JEST optyką, więc własny wiersz osi jest poprawny, nie śmieciem;
 # do PLANERA i tak nie wchodzą, bo park jest jawną własnością usera (D-0731-12), nie derywatem.
-EXP_TELESCOPES_FULL = Kotwica(12, _POMIAR_FULL_0801, _POTW_0804)   # astro (jak IMPORT) + obiektywy DSLR
+# AR-53 (b): rozdział obiektywów RAW (paczka F, `D-OW-3/R1`) - `DT 0mm F0 SAM` na 50/@70/@188 mm.
+EXP_TELESCOPES_FULL = Kotwica(14, _POMIAR_FULL_1005)   # astro (jak IMPORT) + obiektywy DSLR
 # …z nich powołane WYŁĄCZNIE przez klatki RAW (obiektywy z EXIF)
-EXP_TELESCOPES_RAW_ONLY_FULL = Kotwica(4, _POMIAR_FULL_0801, _POTW_0804)
+EXP_TELESCOPES_RAW_ONLY_FULL = Kotwica(6, _POMIAR_FULL_1005)
 # % obiektu na light/master_light. Próg z zapasem; wartość AKTUALNĄ podaje wydruk §5.7 tego skryptu
 # (dawca, `--full`) — nie zamrażamy jej tutaj, bo metryka zmieniła DEFINICJĘ w S0 (licznik zawężony
 # do klatek z nazwą w nagłówku, symetrycznie do mianownika), więc każda liczba sprzed tej zmiany
@@ -239,9 +249,10 @@ EXP_TELESCOPES_RAW_ONLY_FULL = Kotwica(4, _POMIAR_FULL_0801, _POTW_0804)
 # ale to jest do ZMIERZENIA pierwszym przebiegiem po S0, nie do założenia.
 EXP_OBJECT_PCT_MIN = Kotwica(85.0, _PROG)
 # Stan PF-4 (pełny, po doskanie XISF) — XISF wnoszą dług review i degenerat:
-# masterflat OIII: bajt \x07 w XML → sha1_data nieobliczalne (degenerat)
-EXP_UNCOMPUTABLE_FULL = Kotwica(1, _POMIAR_PF4, _POTW_0804)
-EXP_FRAME_REVIEW_FULL = Kotwica(1, _POMIAR_PF4, _POTW_0804)   # ten sam masterflat (kopia nieczytelna → review)
+# masterflat OIII: bajt \x07 w XML → sha1_data nieobliczalne (degenerat). AR-53 (c): od `64f8fbc`
+# skan czyta taki plik - degeneratu nie ma, kotwica 0 pilnuje, żeby nie wrócił.
+EXP_UNCOMPUTABLE_FULL = Kotwica(0, _POMIAR_FULL_1005)
+EXP_FRAME_REVIEW_FULL = Kotwica(0, _POMIAR_FULL_1005)   # ten sam masterflat (kopia nieczytelna → review)
 # Po kind-scopingu config (wariant B, 2026-07-22) dark/bias są POZA osią teleskopu: ich `config_id
 # IS NULL` to stan docelowy, nie delta, więc `config.review` ich nie dotyczy. Zostaje 1 realna sprawa
 # — masterflat Sony A7R3 o rodzaju `unknown` (ten sam degenerat, co §5.2). Było 7 (6 masterdarków + on).
@@ -265,8 +276,8 @@ EXP_CONFIG_REVIEW_FULL = Kotwica(1, _POMIAR_KIND_SCOPING, _POTW_0804)
 # etapu 3 D-0802-2. Kotwice mówią o świeżej bazie akceptacji, nie o `pf4`, więc są niezależne.
 EXP_CONFIG_REVIEW_RAW_FULL = Kotwica(425, _POMIAR_RAW_0804)   # było 432 - nota C3 wyżej
 EXP_XISF_KINDS = Kotwica(
-    {"flat": 11, "light": 202, "master_dark": 38, "master_flat": 73, "unknown": 2},
-    _POMIAR_PF4, _POTW_0804)
+    {"flat": 11, "light": 228, "master_dark": 38, "master_flat": 74, "unknown": 1},
+    _POMIAR_FULL_1005)   # AR-53: (c) OIII 15629 unknown → master_flat, (d) +26 lightów XISF
 # Oś OBSERWATORIUM (PLAN_os_obserwatorium §8) — RE-BASELINE P6b (D-X-8a), świadomy i zmierzony:
 # do P6a karty XISF NIE POWSTAWAŁY, więc GPS był de facto FITS-only. Od P6a skan wypełnia karty
 # także dla XISF, a backfill (`horreum backfill-xisf`) dociąga je do lokacji sprzed P6a — 202 klatki
@@ -278,8 +289,8 @@ EXP_XISF_KINDS = Kotwica(
 EXP_OBSERVATORIES = Kotwica(11, _POMIAR_OBS, _POTW_IMPORT_1004)
 # dawca FITS: klatki z SITELAT+SITELONG (97.0%)
 EXP_GPS_FRAMES_IMPORT = Kotwica(15409, _POMIAR_P6B, _POTW_IMPORT_1004)
-# + 202 XISF z GPS w kartach (P6b; wszystkie do stanowiska #5)
-EXP_GPS_FRAMES_FULL = Kotwica(15611, _POMIAR_P6B, _POTW_0804)
+# + XISF z GPS w kartach (202 w P6b, wszystkie do stanowiska #5; 267 po nowych dostawach, AR-53 (d))
+EXP_GPS_FRAMES_FULL = Kotwica(15676, _POMIAR_FULL_1005)
 # bez GPS w torze ASTRO: 150 fits + 124 xisf (326 − 202 z GPS)
 EXP_NO_GPS_FULL = Kotwica(274, _POMIAR_FULL_0801, _POTW_0804)
 # RAW osobno (2026-08-01): klatki DSLR, wszystkie bez stanowiska. To NIE brak danych — sentinel
@@ -300,17 +311,19 @@ EXP_RECIPE_DARK = Kotwica(38, _POMIAR_C2, _POTW_0804)   # masterdarki → przepi
 EXP_RECIPE_FLAT = Kotwica(38, _POMIAR_C2, _POTW_0804)   # 2256 flatów + 73 masterflaty na ŚWIEŻEJ bazie
 # Klasa-sierota ze sprzecznej pary kopii (`frame 15645`, CLS↔L-Pro) - PRZYCZYNA 38. klasy wyżej.
 # Do AR-53 literał w kryterium §5.11; wyjęty tu, żeby jego pochodzenie było tak samo widoczne.
-EXP_RECIPE_ORPHAN_FULL = Kotwica(1, _POMIAR_C2, _POTW_0804)
-# `frame 15629`/`15636`: kind='unknown' - POZA osią, jawnie wykluczone
-EXP_MASTERS_EXCLUDED_FULL = Kotwica(2, _POMIAR_C2, _POTW_0804)
+# AR-53 (e): kopię `L-Pro` skasowano z `R:` (AR-5, 2026-09-26) - sprzeczności już nie ma; 0 pilnuje,
+# żeby nowa para kopii o sprzecznym zeznaniu nie weszła po cichu.
+EXP_RECIPE_ORPHAN_FULL = Kotwica(0, _POMIAR_FULL_1005)
+# masterflat A7R3 (`unknown`) - POZA osią, jawnie wykluczony; OIII czytelny od `64f8fbc` (AR-53 (c))
+EXP_MASTERS_EXCLUDED_FULL = Kotwica(1, _POMIAR_FULL_1005)
 # RODOWÓD (C4) — lighty powiązane z masterem po przepisie, ŚWIEŻA baza. Zmierzone przebiegiem
 # FULL (świeża baza z dawcy) ORAZ niezależnie na kopii żywej pf4 - obie dały te same liczby
 # (profil-sierota CLS↔L-Pro §5.11 nie ruszył sum rodowodu). Domknięcie w tamtym pomiarze:
 # dark 7331 + luki 6185 = flat 11938 + luki 1578 = 13 516 lightów.
 # lighty z masterdarkiem (reszta: 5978 brak przepisu + 207 niekompletny)
-EXP_LINEAGE_DARK = Kotwica(7331, _POMIAR_C4, _POTW_0804)
+EXP_LINEAGE_DARK = Kotwica(7370, _POMIAR_FULL_1005)   # AR-53 (d)
 # lighty z masterflatem (reszta: 1455 brak przepisu + 123 brak mastera)
-EXP_LINEAGE_FLAT = Kotwica(11938, _POMIAR_C4, _POTW_0804)
+EXP_LINEAGE_FLAT = Kotwica(12003, _POMIAR_FULL_1005)   # AR-53 (d)
 # KOTWICA NAWROTU P-D (D-PD-10): lighty, których nagłówek MILCZY o obiekcie. `delta_report` był na
 # nie ślepy (mianownik wymaga `object_raw NOT NULL`), więc §5.7 świeciło zielono o klatkach, których
 # nie widzi. Kotwica jest STAGE-AWARE i to nie jest ozdoba: w IMPORT baza powstaje z ZAMROŻONEGO
@@ -377,15 +390,24 @@ EXP_NAMELESS_RAW_FULL = Kotwica(756, _POMIAR_RAW_0804)   # lighty w formacie bez
 # (E4-1 wariant A+), więc przebieg FULL 2026-10-04 wciągnął 193 stosy doskanem i zaczerwienił
 # kotwice archiwum. Doskan tego skryptu odcina dziś `STACKS` (`korzenie_doskanu`), żeby kotwice
 # FULL znaczyły „archiwum"; kotwice tego bloku zmierzono na STARYM drzewie obróbki (128 plików),
-# więc przebieg `--stacks-root <archiwum>\STACKS` wymaga ich ponownego pomiaru.
-# `masterLight*.xisf` bez znaczników pochodnych
-EXP_STACKS_CANDIDATES = Kotwica(128, _POMIAR_STOSY_0801, _POTW_0804)
-# …i tyle nazw pasujących sicie 1 odpadło na sicie 2 (259 razem)
-EXP_STACKS_DERIVED = Kotwica(131, _POMIAR_STOSY_0801, _POTW_0804)
-# 128/128 zeznało `master_light` - bramka tożsamości nic nie odsiewa
-EXP_STACKS_INGESTED = Kotwica(128, _POMIAR_STOSY_0801, _POTW_0804)
-# …i ma tak zostać: >0 znaczy, że konwencja nazw rozjechała się z treścią
-EXP_STACKS_REJECTED = Kotwica(0, _POMIAR_STOSY_0801, _POTW_0804)
+# a 2026-10-06 ponownie na `<archiwum>\STACKS` (193 pliki) - komentarze z liczbami 128/18/81
+# niżej opisują tamten, pierwszy pomiar.
+#
+# Zmiana DROGI etapu (2026-10-06): dawna droga „Stosy" (`scan_stacks`) szukała nazw `masterLight…`,
+# a pod `<archiwum>\STACKS` leżą dziś nazwy kanoniczne - przebieg dał 0 kandydatów. Etap idzie
+# drogą produktu: zwykły `scan_tree` korzenia archiwum po doskanie (archiwum przeskakuje brama
+# `mtime`), sito `is_derived_name` pod `STACKS`, rodzaj z `IMAGETYP`. Znaczenia kotwic poniżej:
+# kandydaci = pliki pod `STACKS` po sicie, pochodne = odsiane sitem, wciągnięte = nowe klatki
+# `master_light`, odrzucone = pliki pod `STACKS` bez rodzaju stosu, nieczytelne albo bez lokacji.
+# Zmierzone 2026-10-06: 193 pliki, 0 pochodnych (pochodne obróbki nie leżą już pod `STACKS`),
+# 193 stosy, 0 odrzuconych.
+EXP_STACKS_CANDIDATES = Kotwica(193, _POMIAR_STOSY_1006)
+# …i tyle plików odsiało sito pochodnych (dawna droga: 259 nazw `masterLight…` razem)
+EXP_STACKS_DERIVED = Kotwica(0, _POMIAR_STOSY_1006)
+# 128/128 zeznało `master_light` - nic nie wypada z rodzaju stosu
+EXP_STACKS_INGESTED = Kotwica(193, _POMIAR_STOSY_1006)
+# …i ma tak zostać: >0 znaczy, że pod `STACKS` leży coś, co nie jest stosem
+EXP_STACKS_REJECTED = Kotwica(0, _POMIAR_STOSY_1006)
 # Kotwice STANU po etapie stosów — te same pytania co w FULL, ale na trzecim zakresie. `None` =
 # NIEZMIERZONA: skrypt wypisze aktualia i poprosi o zaszycie (ten sam protokół, co `EXP_NAMELESS_*`
 # przed pilotem P-D). Nigdy nie wpisuj tu liczby z rachunku „FULL + 128" — kotwica ma być
@@ -393,8 +415,8 @@ EXP_STACKS_REJECTED = Kotwica(0, _POMIAR_STOSY_0801, _POTW_0804)
 # dodawaniem. Słownik kindów wypisany WPROST (do AR-53 `dict(EXP_XISF_KINDS, master_light=…)`):
 # ponowny pomiar kotwicy FULL nie może po cichu przestawić kotwicy, której nikt nie mierzył.
 EXP_XISF_KINDS_STACKS = Kotwica(
-    {"flat": 11, "light": 202, "master_dark": 38, "master_flat": 73, "unknown": 2,
-     "master_light": 128}, _POMIAR_STOSY_0802, _POTW_0804)
+    {"flat": 11, "light": 228, "master_dark": 38, "master_flat": 74, "unknown": 1,
+     "master_light": 193}, _POMIAR_STOSY_1006)
 # Zmierzone, nie policzone z rachunku. (Konkretny korzeń starego drzewa obróbki trzyma kolejka
 # sesji - poza gitem; tu liczy się TRYB pomiaru.)
 # 12 z FULL + DWIE etykiety, które żyją WYŁĄCZNIE w drzewie obróbki:
@@ -403,11 +425,12 @@ EXP_XISF_KINDS_STACKS = Kotwica(
 # nazwa MONTAŻU wpisana przez program akwizycji w kartę `TELESCOP`. Obie to FAKT archiwum obróbki,
 # nie śmieć do wyczyszczenia — szum modelu naprawia się kind-scopingiem, nigdy kasowaniem pól.
 # `EQMOD HEQ5/6` czeka na decyzję kuratelską (park/merge) — patrz kolejka.
-EXP_TELESCOPES_STACKS = Kotwica(14, _POMIAR_STOSY_0802, _POTW_0804)
+EXP_TELESCOPES_STACKS = Kotwica(16, _POMIAR_STOSY_1006)   # 14 z FULL + dwie etykiety stosów
 # gotowe stosy bez karty `OBJECT` i bez obiektu (własny kubełek, D-P-I-5). Plików bez karty było
 # 22 - cztery rozwiązał REGION po współrzędnych, więc z kubełka wypadły. KLUCZOWY DOWÓD
 # ROZDZIAŁU: `EXP_NAMELESS_FULL` (25) po dołożeniu 18 stosów NIE DRGNĘŁO.
-EXP_NAMELESS_STACKS = Kotwica(18, _POMIAR_STOSY_0802, _POTW_0804)
+# AR-53: 0 - stosy pod `STACKS` niosą dziś kartę `OBJECT` (wsad kart, ruch zapowiedziany niżej).
+EXP_NAMELESS_STACKS = Kotwica(0, _POMIAR_STOSY_1006)
 #
 # ⚠️ KOTWICE STOSÓW SĄ RUCHOME INACZEJ NIŻ RESZTA (D-0802-1 + P6d, 2026-08-02). Stosy przychodzą
 # z ŻYWEGO skanu drzewa obróbki, a writeback od D-0802-1 ich SIĘGA - więc pierwsza naprawa kart
@@ -421,7 +444,7 @@ EXP_NAMELESS_STACKS = Kotwica(18, _POMIAR_STOSY_0802, _POTW_0804)
 # na dysku tak samo jak stosy. Dlatego każda kotwica niesie `Pomiar` ze stanem archiwum.
 # 274 z FULL + 128 stosów. PixInsight NIE przenosi `SITELAT`/`SITELONG` do produktu integracji
 # - zmierzone 0/128, więc CAŁA populacja stosów jest poza osią obserwatorium.
-EXP_NO_GPS_STACKS = Kotwica(402, _POMIAR_STOSY_0802, _POTW_0804)
+EXP_NO_GPS_STACKS = Kotwica(467, _POMIAR_STOSY_1006)   # AR-53: 274 z FULL + 193 stosy
 # ── Kotwice RODOWODU STOSÓW (I-2c, faza (U)) — ZMIERZONE przebiegiem 2026-08-02 ──────────────────
 # Ostrożność, która okazała się niepotrzebna, ale zostaje zapisana: nie wolno było przepisać liczb
 # z sondy na kopii ŻYWEJ pf4, bo baza akceptacji stoi na ZAMROŻONYM dawcy i zna inne nazwy obiektów
@@ -430,10 +453,10 @@ EXP_NO_GPS_STACKS = Kotwica(402, _POMIAR_STOSY_0802, _POTW_0804)
 # w obiekt, którego nazwę naprawiano. To ZBIEG OKOLICZNOŚCI tych danych, nie reguła: pierwszy stos
 # NGC7000 rozjedzie te dwa światy i wtedy ta kotwica ma zaświecić, a nie zostać „poprawiona".
 # integracje z co najmniej jednym wejściem (z 128 stosów)
-EXP_SLIN_LINKED = Kotwica(81, _POMIAR_RODOWOD_STOSOW_0802, _POTW_0804)
-EXP_SLIN_INPUTS = Kotwica(3367, _POMIAR_RODOWOD_STOSOW_0802, _POTW_0804)   # wierszy `integration_input`
+EXP_SLIN_LINKED = Kotwica(124, _POMIAR_STOSY_1006)   # AR-53: ze 193 stosów
+EXP_SLIN_INPUTS = Kotwica(5742, _POMIAR_STOSY_1006)   # wierszy `integration_input`
 # …z tego DOWIEDZIONE zeznaniem pliku; 75 to KANDYDACI z okna.
-EXP_SLIN_HISTORY = Kotwica(6, _POMIAR_RODOWOD_STOSOW_0802, _POTW_0804)
+EXP_SLIN_HISTORY = Kotwica(27, _POMIAR_STOSY_1006)   # AR-53: reszta (97) to kandydaci z okna
 # Reszta populacji to trzy rozłączne kubełki „nie wiem": okno zdegenerowane 24, brak obiektu 18,
 # okno puste 5 (81 + 47 == 128 — partycję pilnuje osobne kryterium, nie te trzy liczby).
 # ⚠️ Te kotwice są RUCHOME tak samo jak `EXP_NAMELESS_STACKS`: stoją na ŻYWYM skanie drzewa obróbki,
@@ -442,7 +465,7 @@ EXP_SLIN_HISTORY = Kotwica(6, _POMIAR_RODOWOD_STOSOW_0802, _POTW_0804)
 # integracji to KLATKA, nie ścieżka). Zmiana = zmierz i podbij z notą, nigdy „napraw do zera".
 # 1 z FULL (`unknown` masterflat A7R3) + 7 stosów bez `TELESCOP`. Siedem plików po integracji nie
 # niesie karty teleskopu, więc nie ma z czego powołać osi - stan UCZCIWY, dokładnie jak RAW-y obok.
-EXP_CONFIG_REVIEW_STACKS = Kotwica(8, _POMIAR_STOSY_0802, _POTW_0804)
+EXP_CONFIG_REVIEW_STACKS = Kotwica(1, _POMIAR_STOSY_1006)   # AR-53: stosy niosą dziś `TELESCOP`
 # KAMERY BEZ WŁASNEJ KOTWICY — i to jest wynik DECYZJI, nie przeoczenie. Pierwszy przebieg pokazał
 # 2 kamery z `pixel_conflict` i `SONYA7S`, która dostała piksel od stacku: `_drizzle_2x` zapisuje
 # `XPIXSZ=1.88` przy matrycy 3.76 (siatka wynikowa, nie sprzęt), a korpusy Sony podają w produkcie
@@ -649,46 +672,142 @@ def doskan_xisf(con, xisf_root, now, out):
     out(f"  resolver: {rs}")
 
 
-# ── (T) STOSY: realny `scan_stacks` po drzewie OBRÓBKI (I-2b, P-I) ───────────────────────────────
-def doskan_stacks(con, stacks_root, now, out):
-    """Po doskanie archiwum dołóż GOTOWE OBRAZY po integracji realną drogą „Stosy", potem
-    grouper+resolver (stack jest na osi teleskopu i na osi obiektu — `master_light` to kind
-    pełnoprawny, nie wyjątek).
+# ── (T) STOSY: zwykły `scan_tree` korzenia archiwum - droga produktu (E4-1 wariant A+) ──────────
+@dataclass
+class EtapStosow:
+    """Zeznanie etapu (T) dla kryteriów §5.13 - liczby wyłącznie z poddrzewa `STACKS`."""
+    pod_stacks: int = 0        # pliki nagłówkonośne pod `STACKS` widziane przez przejście
+    candidates: int = 0        # pod `STACKS` po sicie pochodnych
+    derived_skipped: int = 0   # odsiane sitem `is_derived_name`
+    derived_paths: list = field(default_factory=list)
+    skipped: int = 0           # pominięte bramą przyrostową (`mtime`)
+    ingested: int = 0          # NOWE klatki rodzaju `STACK_KIND`
+    rejected: int = 0          # lokacje pod `STACKS`, których klatka nie ma rodzaju stosu
+    rejected_paths: list = field(default_factory=list)
+    failed: int = 0            # nieczytelne (marker) + widziane bez lokacji (backstop, izolacja)
+    failed_paths: list = field(default_factory=list)
+    incomplete: bool = False   # przejście nie zobaczyło całego drzewa (`ScanSummary.incomplete`)
 
-    Zwraca `(StackScanSummary, idempotent)`. Kryteria czytają z summary liczby ZEZNANIA drogi (ile
-    kandydatów, ile odmów) niezależnie od liczb STANU bazy — dwaj świadkowie tej samej populacji:
-    gdyby droga wciągnęła 128 plików, a w bazie było ich 127, rozjazd wyszedłby natychmiast.
 
-    DRUGI PRZEBIEG jest BRAMKĄ, nie ozdobą (wzorzec (K)/(L)): brama przyrostowa `(volume, path,
-    mtime)` ma pominąć WSZYSTKO i nie zapisać ANI JEDNEGO eventu. Bez tego dowodu wciąganie stosów
-    przy każdej dostawie mnożyłoby lokacje, a idempotencja byłaby obietnicą z docstringa."""
+def _pod(path, prefix):
+    """`path` pod `prefix` bez wielkości liter (NTFS) - ta sama reguła, co sito w `scan_tree`."""
+    return path.casefold().startswith(prefix.casefold())
+
+
+def doskan_stacks(con, xisf_root, stacks_root, now, out):
+    """Po doskanie archiwum dołóż GOTOWE OBRAZY drogą produktu: zwykły `scan_tree` KORZENIA
+    archiwum, potem grouper+resolver (stack jest na osi teleskopu i na osi obiektu -
+    `master_light` to kind pełnoprawny, nie wyjątek). Pliki archiwum przeskakuje brama przyrostowa
+    (doskan już je zna), więc wchodzi wyłącznie `STACKS` - z sitem pochodnych, które `scan_tree`
+    nakłada tylko na `STACKS` bezpośrednio pod korzeniem skanu (`_stacks_prefix`). Rodzaj klatki
+    daje zeznanie `IMAGETYP`, jak każdej innej; dawna droga „Stosy" (`scan_stacks`) szukała nazw
+    `masterLight…`, a pliki pod `STACKS` noszą dziś nazwy kanoniczne.
+
+    EXPECT, nie cichy rozjazd zakresu: `stacks_root` musi być `<xisf_root>\\STACKS` (inny korzeń
+    przesunąłby sito i kotwice mierzyłyby inną populację), a każda lokacja i klatka dodana w tym
+    etapie musi leżeć pod `STACKS` - coś spoza znaczy, że archiwum zmieniło się po doskanie.
+
+    Zwraca `(EtapStosow, idempotent)`. Kryteria czytają ZEZNANIE etapu niezależnie od liczb STANU
+    bazy - dwaj świadkowie tej samej populacji: gdyby etap wciągnął 128 plików, a w bazie było ich
+    127, rozjazd wyszedłby natychmiast.
+
+    DRUGI PRZEBIEG jest BRAMKĄ, nie ozdobą (wzorzec (K)/(L)): zero nowych klatek i ANI JEDNEGO
+    eventu. Bez tego dowodu wciąganie stosów przy każdej dostawie mnożyłoby lokacje, a idempotencja
+    byłaby obietnicą z docstringa."""
     out("")
-    out(f"== (T) STOSY: scan_stacks {stacks_root} ==")
-    root = canonize_root(stacks_root)
+    root = canonize_root(xisf_root)
+    stacks = canonize_root(stacks_root)
+    if stacks.casefold() != os.path.join(root, STACKS_DIR).casefold():
+        raise RuntimeError(f"--stacks-root {stacks!r} to nie <xisf-root>\\{STACKS_DIR.upper()} "
+                           f"({root!r}) - zwykły skan nakłada sito pochodnych tylko tam")
+    out(f"== (T) STOSY: scan_tree {root} (wchodzi wyłącznie {stacks}) ==")
     volume = volume_serial(root)
     if volume is None:
-        raise RuntimeError(f"volume_serial({root!r}) nieustalony — zamontuj wolumin drzewa obróbki")
-    s = scan_stacks(con, root, volume=volume,
-                    drive_letter=(os.path.splitdrive(root)[0] or None), tier=None, now=now)
-    out(f"  stosy: kandydaci={s.candidates} wciagniete={s.ingested} pochodne={s.derived_skipped} "
-        f"pominiete(mtime)={s.skipped} odrzucone={s.rejected_kind}/{s.rejected_unreadable} "
-        f"bledy={s.failed}")
-    for p in s.rejected_paths[:5]:
+        raise RuntimeError(f"volume_serial({root!r}) nieustalony - zamontuj wolumin archiwum")
+    prefix = stacks + os.sep
+    widziane = []
+    brama = {"przed": 0, "stacks": 0}
+
+    # `progress` woła się po KAŻDYM pliku przejścia z licznikami już doliczonymi, więc przyrost
+    # `skipped` przy ścieżce pod `STACKS` to pominięcie bramą właśnie tego pliku.
+    def _przejscie(_i, _total, spath, summ):
+        if _pod(spath, prefix):
+            widziane.append(spath)
+            brama["stacks"] += summ.skipped - brama["przed"]
+        brama["przed"] = summ.skipped
+
+    def _skan(progress=None):
+        return scan_tree(con, root, volume=volume, drive_letter=(os.path.splitdrive(root)[0] or None),
+                         tier=None, now=now, progress=progress)
+
+    max_frame = con.execute("SELECT coalesce(max(id), 0) FROM frame").fetchone()[0]
+    max_loc = con.execute("SELECT coalesce(max(id), 0) FROM location").fetchone()[0]
+    s = _skan(_przejscie)
+    poza = [r["path"] for r in con.execute("SELECT path FROM location WHERE id > ?", (max_loc,))
+            if not _pod(r["path"], prefix)]
+    if poza:
+        raise RuntimeError(f"etap stosów dodał {len(poza)} lokacji spoza {stacks}, np. {poza[0]} - "
+                           "archiwum zmieniło się po doskanie")
+    # Podmiana treści pliku archiwum pod znaną ścieżką nie daje nowej lokacji: skan przepina starą
+    # na nową klatkę (`location.rebound`). Bez tego guardu złapałby ją dopiero `bez_lokacji` niżej -
+    # z komunikatem, który wskazuje `STACKS` zamiast pliku, który się zmienił.
+    przepiete = [r["path"] for r in con.execute(
+        "SELECT path FROM location WHERE id <= ? AND frame_id > ?", (max_loc, max_frame))]
+    if przepiete:
+        raise RuntimeError(f"etap stosów przepiął {len(przepiete)} znanych lokacji na nowe klatki, "
+                           f"np. {przepiete[0]} - treść archiwum zmieniła się po doskanie")
+    bez_lokacji = con.execute(
+        "SELECT count(*) FROM frame f WHERE f.id > ? AND NOT EXISTS "
+        "(SELECT 1 FROM location l WHERE l.frame_id = f.id AND l.id > ?)",
+        (max_frame, max_loc)).fetchone()[0]
+    if bez_lokacji:
+        raise RuntimeError(f"etap stosów dodał {bez_lokacji} klatek bez nowej lokacji pod {stacks}")
+
+    e = EtapStosow(pod_stacks=len(widziane), derived_skipped=s.derived_skipped,
+                   derived_paths=list(s.derived_paths), incomplete=s.incomplete)
+    e.candidates = e.pod_stacks - e.derived_skipped
+    e.ingested = con.execute("SELECT count(*) FROM frame WHERE id > ? AND kind = ?",
+                             (max_frame, STACK_KIND)).fetchone()[0]
+    lok = [r for r in con.execute(
+        "SELECT l.path, l.unreadable_since, l.unreadable_reason, f.kind FROM location l "
+        "JOIN frame f ON f.id = l.frame_id WHERE l.volume = ? AND l.present = 1 ORDER BY l.path",
+        (volume,)) if _pod(r["path"], prefix)]
+    for r in lok:
+        if r["unreadable_since"] is not None:
+            e.failed_paths.append(f"{r['path']}: {r['unreadable_reason']}")
+        elif r["kind"] != STACK_KIND:
+            e.rejected_paths.append(f"{r['path']}: rodzaj '{r['kind']}', nie {STACK_KIND}")
+    e.rejected = len(e.rejected_paths)
+    znane = {r["path"].casefold() for r in lok} | {p.casefold() for p in e.derived_paths}
+    e.failed_paths += [f"{p}: brak lokacji po przejściu" for p in widziane
+                       if p.casefold() not in znane]
+    e.failed = len(e.failed_paths)
+    e.skipped = brama["stacks"]
+    out(f"  pod STACKS: pliki={e.pod_stacks} kandydaci={e.candidates} wciagniete={e.ingested} "
+        f"odsiane_sitem={e.derived_skipped} pominiete(mtime)={e.skipped} odrzucone={e.rejected} "
+        f"bledy={e.failed}")
+    out(f"  scan_tree calosc: files={s.files} frames_new={s.frames_new} skipped(mtime)={s.skipped} "
+        f"frame_review={s.frame_review} niekompletny={s.incomplete}")
+    for p in e.derived_paths[:5]:
+        out(f"    ODSIANE {p}")
+    for p in e.rejected_paths[:5]:
         out(f"    ODRZUCONE {p}")
-    for p in s.failed_paths[:5]:
+    for p in e.failed_paths[:5]:
         out(f"    BLAD {p}")
-    przed = con.execute("SELECT count(*) FROM event").fetchone()[0]
-    s2 = scan_stacks(con, root, volume=volume,
-                     drive_letter=(os.path.splitdrive(root)[0] or None), tier=None, now=now)
-    po = con.execute("SELECT count(*) FROM event").fetchone()[0]
-    idem = (s2.ingested == 0 and s2.skipped == s2.candidates == s.candidates and po == przed)
-    out(f"  przebieg 2 (idempotencja): wciagniete={s2.ingested} pominiete={s2.skipped}/"
-        f"{s2.candidates}; eventy {przed}=={po}")
+
+    przed_ev = con.execute("SELECT count(*) FROM event").fetchone()[0]
+    przed_fr = con.execute("SELECT count(*) FROM frame").fetchone()[0]
+    s2 = _skan()
+    po_ev = con.execute("SELECT count(*) FROM event").fetchone()[0]
+    po_fr = con.execute("SELECT count(*) FROM frame").fetchone()[0]
+    idem = (s2.frames_new == 0 and s2.locations_new == 0 and po_fr == przed_fr and po_ev == przed_ev)
+    out(f"  przebieg 2 (idempotencja): frames_new={s2.frames_new} locations_new={s2.locations_new} "
+        f"skipped(mtime)={s2.skipped}/{s2.files}; klatki {przed_fr}=={po_fr}; eventy {przed_ev}=={po_ev}")
     gs = run_grouper(con, now=now)
     rs = run_resolver(con, now=now)
     out(f"  grouper: {gs}")
     out(f"  resolver: {rs}")
-    return s, idem
+    return e, idem
 
 
 # ── (K) OŚ KALIBRACJI: przepis + DOWÓD IDEMPOTENCJI (bramka C2) ──────────────────────────────────
@@ -1085,35 +1204,36 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
         frev = con.execute("SELECT count(*) FROM event WHERE verb='frame.review'").fetchone()[0]
         crit_k("§5.8 frame.review (OIII masterflat)", EXP_FRAME_REVIEW_FULL, frev)
 
-    # §5.13 DROGA „STOSY" (I-2b, P-I) — dwóch niezależnych świadków tej samej populacji:
-    # ZEZNANIE DROGI (ile plików zobaczyła i co z nimi zrobiła) i STAN BAZY (ile klatek jest).
-    # Osobno, bo mierzą co innego: droga może wciągnąć 128 plików, a baza mieć 127 klatek, jeśli
-    # dwa pliki mają identyczne DANE (dedup po `sha1_data` — legalny i wtedy widoczny w tej parze).
+    # §5.13 ETAP STOSÓW (I-2b, P-I) - dwóch niezależnych świadków tej samej populacji:
+    # ZEZNANIE ETAPU (ile plików pod `STACKS` przejście zobaczyło i co z nimi zrobiło) i STAN BAZY
+    # (ile klatek jest). Plik o DANYCH identycznych z inną klatką (dedup po `sha1_data`, legalny)
+    # daje lokację, nie klatkę - widać go w parze kandydaci/wciągnięte; `master_light` sprzed
+    # etapu - w parze stan bazy/wciągnięte.
     if ze_stosami:
-        out(f"\n§5.13 droga Stosow: kandydaci={stacks.candidates} wciagniete={stacks.ingested} "
-            f"pochodne={stacks.derived_skipped} odrzucone={stacks.rejected_kind}/"
-            f"{stacks.rejected_unreadable} bledy={stacks.failed}")
-        crit_k("§5.13 kandydaci (masterLight* bez pochodnych)", EXP_STACKS_CANDIDATES,
+        out(f"\n§5.13 STACKS zwyklym skanem: pliki={stacks.pod_stacks} kandydaci={stacks.candidates} "
+            f"wciagniete={stacks.ingested} pochodne={stacks.derived_skipped} "
+            f"odrzucone={stacks.rejected} bledy={stacks.failed}")
+        crit_k("§5.13 kandydaci (pliki pod STACKS po sicie pochodnych)", EXP_STACKS_CANDIDATES,
                stacks.candidates)
-        crit_k("§5.13 pochodne obróbki poza zakresem (§5 briefu P-I)", EXP_STACKS_DERIVED,
+        crit_k("§5.13 pochodne obróbki odsiane sitem (§5 briefu P-I)", EXP_STACKS_DERIVED,
                stacks.derived_skipped)
-        crit_k("§5.13 wciągnięte (zeznanie potwierdziło master_light)", EXP_STACKS_INGESTED,
+        crit_k("§5.13 wciągnięte (nowe klatki master_light)", EXP_STACKS_INGESTED,
                stacks.ingested)
-        # Zero odmów NIE jest ozdobą: bramka tożsamości dziś nic nie odsiewa i dopóki tak jest,
-        # populacja kandydatów == populacja stacków. Pierwsza odmowa znaczy, że konwencja nazw
-        # rozjechała się z zawartością — i wtedy to jest sprawa do OBEJRZENIA, nie do podbicia liczby.
-        crit_k("§5.13 odmowy (kind/nieczytelność/IO)", EXP_STACKS_REJECTED,
-               stacks.rejected_kind + stacks.rejected_unreadable + stacks.failed)
+        # Zero odrzuconych NIE jest ozdobą: dopóki tak jest, populacja kandydatów == populacja
+        # stacków. Plik pod `STACKS`, który zeznaje inny rodzaj albo się nie czyta, to sprawa do
+        # OBEJRZENIA, nie do podbicia liczby.
+        crit_k("§5.13 odrzucone (rodzaj inny niż master_light, nieczytelne, bez lokacji)",
+               EXP_STACKS_REJECTED, stacks.rejected + stacks.failed)
         n_ml = con.execute(
             "SELECT count(*) FROM frame WHERE kind='master_light'").fetchone()[0]
         out(f"    stan bazy: frame(kind='master_light') = {n_ml}")
-        crit("§5.13 stan bazy zgodny z zeznaniem drogi (zero cichego dedupu)",
+        crit("§5.13 stan bazy zgodny z zeznaniem etapu (master_light wyłącznie z etapu)",
              n_ml == stacks.ingested)
-        # Idempotencję drogi na REALNYM drzewie mierzy faza (T) drugim przebiegiem — tak samo, jak
+        # Idempotencję etapu na REALNYM drzewie mierzy faza (T) drugim przebiegiem - tak samo, jak
         # (K)/(L) mierzą swoją. Bramka jest KONIECZNA, nie ozdobna: bez niej wciągnięcie stosów przy
         # każdej dostawie mnożyłoby lokacje, a to dokładnie ten błąd, który przy `volume='?'` już
         # raz groził skanowi (guard serialu w Dostawie).
-        crit("§5.13 droga idempotentna (2. przebieg: wszystko pominięte, zero DML)",
+        crit("§5.13 etap idempotentny (2. przebieg: zero nowych klatek, zero eventów)",
              stacks_idempotent is True)
 
     # §5.14 RODOWÓD STOSÓW (I-2c, P-I) — bramka pyta o INWARIANTY, nie tylko o liczby. Powód:
@@ -1473,9 +1593,9 @@ def main(argv=None):
                          "O1: skanowane są PODDRZEWA korzenia bez `STACKS`, więc plik leżący "
                          "wprost pod korzeniem kończy przebieg odmową")
     ap.add_argument("--stacks-root", default=None,
-                    help="korzeń drzewa STOSÓW (I-2b; dziś `<xisf-root>\\STACKS`) - gotowe obrazy "
-                         "po integracji wchodzą jako `master_light`. Wymaga `--xisf-root` (kotwice "
-                         "stosów są liczone na FULL, który `STACKS` odcina - O1)")
+                    help="drzewo STOSÓW, musi być `<xisf-root>\\STACKS` - etap wciąga je zwykłym "
+                         "skanem korzenia archiwum (gotowe obrazy jako `master_light`). Wymaga "
+                         "`--xisf-root` (kotwice stosów są liczone na FULL, który `STACKS` odcina - O1)")
     ap.add_argument("--live-db", default=None,
                     help="ŻYWA baza Horreum (read-only) — rejestr napraw writebacku; bez niej "
                          "falsyfikator abortuje, gdy próbka trafi w plik naprawiony przez Horreum")
@@ -1507,7 +1627,7 @@ def main(argv=None):
 
     stacks = stacks_idem = None
     if args.stacks_root:
-        stacks, stacks_idem = doskan_stacks(con, args.stacks_root, now, out)
+        stacks, stacks_idem = doskan_stacks(con, args.xisf_root, args.stacks_root, now, out)
 
     cal, cal_idem = calibrate(con, now, out)
     lin, lin_idem = lineage(con, now, out)

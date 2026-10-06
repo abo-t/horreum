@@ -161,9 +161,6 @@ _POMIAR_IMPORT_0801 = Pomiar("2026-08-01", "IMPORT --donor --live-db",
 _POMIAR_FULL_0801 = Pomiar("2026-08-01", "FULL --donor --xisf-root <archiwum> --live-db",
                            "po pilocie P-D (karty `OBJECT`), RAW-y DSLR w archiwum",
                            "wpisane w 33a2a19")
-_POMIAR_STOSY_0801 = Pomiar("2026-08-01", "sonda drogi „Stosy” na starym drzewie obróbki",
-                            "stare drzewo obróbki, przed przenosinami do `STACKS`",
-                            "wpisane w 7c06e07")
 _POMIAR_RAW_0804 = Pomiar("2026-08-04", "FULL i FULL+STOSY --live-db",
                           "po kasacji `LIGHTS\\Orion\\A7S1_000\\OSC` (7 `.dng`, 2026-08-03)",
                           "9ac4c18")
@@ -194,6 +191,9 @@ _POMIAR_STOSY_1006 = Pomiar("2026-10-06", "FULL+STOSY --donor --xisf-root <archi
 # potwierdzono.
 _POTW_STOSY_1006 = Pomiar(_POMIAR_STOSY_1006.dzien, _POMIAR_STOSY_1006.przebieg + ", ta kotwica PASS",
                           _POMIAR_STOSY_1006.stan_r, _POMIAR_STOSY_1006.kod)
+# Oba przebiegi na kodzie `e1dbe60` po przepięciu kotwic AR-53: WSZYSTKO PASS.
+_POTW_E1DBE60 = Pomiar("2026-10-06", "FULL (56 kryteriów) i FULL+STOSY (73) --donor --xisf-root <archiwum> "
+                       "--live-db: WSZYSTKO PASS", _POMIAR_STOSY_1006.stan_r, "e1dbe60")
 
 # ── Kotwice EXP_* PF-3 (dawca) + PF-4 (doskan drzewa `R:`) ──────────────────────────────────────
 # UWAGA 2026-08-01: doskan NIE jest już „XISF-owy" — odkąd istnieje moduł DSLR (`e7dcdda`), ciągnie
@@ -239,9 +239,9 @@ EXP_TELESCOPES_IMPORT = Kotwica(8, _POMIAR_PF5_IMPORT, _POTW_IMPORT_1004)
 # wszystkie w 100% RAW). Obiektyw JEST optyką, więc własny wiersz osi jest poprawny, nie śmieciem;
 # do PLANERA i tak nie wchodzą, bo park jest jawną własnością usera (D-0731-12), nie derywatem.
 # AR-53 (b): rozdział obiektywów RAW (paczka F, `D-OW-3/R1`) - `DT 0mm F0 SAM` na 50/@70/@188 mm.
-EXP_TELESCOPES_FULL = Kotwica(14, _POMIAR_FULL_1005)   # astro (jak IMPORT) + obiektywy DSLR
+EXP_TELESCOPES_FULL = Kotwica(14, _POMIAR_FULL_1005, _POTW_E1DBE60)   # astro (jak IMPORT) + obiektywy DSLR
 # …z nich powołane WYŁĄCZNIE przez klatki RAW (obiektywy z EXIF)
-EXP_TELESCOPES_RAW_ONLY_FULL = Kotwica(6, _POMIAR_FULL_1005)
+EXP_TELESCOPES_RAW_ONLY_FULL = Kotwica(6, _POMIAR_FULL_1005, _POTW_E1DBE60)
 # % obiektu na light/master_light. Próg z zapasem; wartość AKTUALNĄ podaje wydruk §5.7 tego skryptu
 # (dawca, `--full`) — nie zamrażamy jej tutaj, bo metryka zmieniła DEFINICJĘ w S0 (licznik zawężony
 # do klatek z nazwą w nagłówku, symetrycznie do mianownika), więc każda liczba sprzed tej zmiany
@@ -251,8 +251,8 @@ EXP_OBJECT_PCT_MIN = Kotwica(85.0, _PROG)
 # Stan PF-4 (pełny, po doskanie XISF) — XISF wnoszą dług review i degenerat:
 # masterflat OIII: bajt \x07 w XML → sha1_data nieobliczalne (degenerat). AR-53 (c): od `64f8fbc`
 # skan czyta taki plik - degeneratu nie ma, kotwica 0 pilnuje, żeby nie wrócił.
-EXP_UNCOMPUTABLE_FULL = Kotwica(0, _POMIAR_FULL_1005)
-EXP_FRAME_REVIEW_FULL = Kotwica(0, _POMIAR_FULL_1005)   # ten sam masterflat (kopia nieczytelna → review)
+EXP_UNCOMPUTABLE_FULL = Kotwica(0, _POMIAR_FULL_1005, _POTW_E1DBE60)
+EXP_FRAME_REVIEW_FULL = Kotwica(0, _POMIAR_FULL_1005, _POTW_E1DBE60)   # ten sam masterflat, dziś czytelny
 # Po kind-scopingu config (wariant B, 2026-07-22) dark/bias są POZA osią teleskopu: ich `config_id
 # IS NULL` to stan docelowy, nie delta, więc `config.review` ich nie dotyczy. Zostaje 1 realna sprawa
 # — masterflat Sony A7R3 o rodzaju `unknown` (ten sam degenerat, co §5.2). Było 7 (6 masterdarków + on).
@@ -277,7 +277,7 @@ EXP_CONFIG_REVIEW_FULL = Kotwica(1, _POMIAR_KIND_SCOPING, _POTW_0804)
 EXP_CONFIG_REVIEW_RAW_FULL = Kotwica(425, _POMIAR_RAW_0804)   # było 432 - nota C3 wyżej
 EXP_XISF_KINDS = Kotwica(
     {"flat": 11, "light": 228, "master_dark": 38, "master_flat": 74, "unknown": 1},
-    _POMIAR_FULL_1005)   # AR-53: (c) OIII 15629 unknown → master_flat, (d) +26 lightów XISF
+    _POMIAR_FULL_1005, _POTW_E1DBE60)   # AR-53: (c) OIII 15629 unknown → master_flat, (d) +26 lightów XISF
 # Oś OBSERWATORIUM (PLAN_os_obserwatorium §8) — RE-BASELINE P6b (D-X-8a), świadomy i zmierzony:
 # do P6a karty XISF NIE POWSTAWAŁY, więc GPS był de facto FITS-only. Od P6a skan wypełnia karty
 # także dla XISF, a backfill (`horreum backfill-xisf`) dociąga je do lokacji sprzed P6a — 202 klatki
@@ -290,7 +290,7 @@ EXP_OBSERVATORIES = Kotwica(11, _POMIAR_OBS, _POTW_IMPORT_1004)
 # dawca FITS: klatki z SITELAT+SITELONG (97.0%)
 EXP_GPS_FRAMES_IMPORT = Kotwica(15409, _POMIAR_P6B, _POTW_IMPORT_1004)
 # + XISF z GPS w kartach (202 w P6b, wszystkie do stanowiska #5; 267 po nowych dostawach, AR-53 (d))
-EXP_GPS_FRAMES_FULL = Kotwica(15676, _POMIAR_FULL_1005)
+EXP_GPS_FRAMES_FULL = Kotwica(15676, _POMIAR_FULL_1005, _POTW_E1DBE60)
 # bez GPS w torze ASTRO: 150 fits + 124 xisf (326 − 202 z GPS)
 EXP_NO_GPS_FULL = Kotwica(274, _POMIAR_FULL_0801, _POTW_0804)
 # RAW osobno (2026-08-01): klatki DSLR, wszystkie bez stanowiska. To NIE brak danych — sentinel
@@ -313,17 +313,17 @@ EXP_RECIPE_FLAT = Kotwica(38, _POMIAR_C2, _POTW_0804)   # 2256 flatów + 73 mast
 # Do AR-53 literał w kryterium §5.11; wyjęty tu, żeby jego pochodzenie było tak samo widoczne.
 # AR-53 (e): kopię `L-Pro` skasowano z `R:` (AR-5, 2026-09-26) - sprzeczności już nie ma; 0 pilnuje,
 # żeby nowa para kopii o sprzecznym zeznaniu nie weszła po cichu.
-EXP_RECIPE_ORPHAN_FULL = Kotwica(0, _POMIAR_FULL_1005)
+EXP_RECIPE_ORPHAN_FULL = Kotwica(0, _POMIAR_FULL_1005, _POTW_E1DBE60)
 # masterflat A7R3 (`unknown`) - POZA osią, jawnie wykluczony; OIII czytelny od `64f8fbc` (AR-53 (c))
-EXP_MASTERS_EXCLUDED_FULL = Kotwica(1, _POMIAR_FULL_1005)
+EXP_MASTERS_EXCLUDED_FULL = Kotwica(1, _POMIAR_FULL_1005, _POTW_E1DBE60)
 # RODOWÓD (C4) — lighty powiązane z masterem po przepisie, ŚWIEŻA baza. Zmierzone przebiegiem
 # FULL (świeża baza z dawcy) ORAZ niezależnie na kopii żywej pf4 - obie dały te same liczby
 # (profil-sierota CLS↔L-Pro §5.11 nie ruszył sum rodowodu). Domknięcie w tamtym pomiarze:
 # dark 7331 + luki 6185 = flat 11938 + luki 1578 = 13 516 lightów.
 # lighty z masterdarkiem (reszta: 5978 brak przepisu + 207 niekompletny)
-EXP_LINEAGE_DARK = Kotwica(7370, _POMIAR_FULL_1005)   # AR-53 (d)
+EXP_LINEAGE_DARK = Kotwica(7370, _POMIAR_FULL_1005, _POTW_E1DBE60)   # AR-53 (d)
 # lighty z masterflatem (reszta: 1455 brak przepisu + 123 brak mastera)
-EXP_LINEAGE_FLAT = Kotwica(12003, _POMIAR_FULL_1005)   # AR-53 (d)
+EXP_LINEAGE_FLAT = Kotwica(12003, _POMIAR_FULL_1005, _POTW_E1DBE60)   # AR-53 (d)
 # KOTWICA NAWROTU P-D (D-PD-10): lighty, których nagłówek MILCZY o obiekcie. `delta_report` był na
 # nie ślepy (mianownik wymaga `object_raw NOT NULL`), więc §5.7 świeciło zielono o klatkach, których
 # nie widzi. Kotwica jest STAGE-AWARE i to nie jest ozdoba: w IMPORT baza powstaje z ZAMROŻONEGO
@@ -401,13 +401,13 @@ EXP_NAMELESS_RAW_FULL = Kotwica(756, _POMIAR_RAW_0804)   # lighty w formacie bez
 # `master_light`, odrzucone = pliki pod `STACKS` bez rodzaju stosu, nieczytelne albo bez lokacji.
 # Zmierzone 2026-10-06: 193 pliki, 0 pochodnych (pochodne obróbki nie leżą już pod `STACKS`),
 # 193 stosy, 0 odrzuconych.
-EXP_STACKS_CANDIDATES = Kotwica(193, _POMIAR_STOSY_1006)
+EXP_STACKS_CANDIDATES = Kotwica(193, _POMIAR_STOSY_1006, _POTW_E1DBE60)
 # …i tyle plików odsiało sito pochodnych (dawna droga: 259 nazw `masterLight…` razem)
-EXP_STACKS_DERIVED = Kotwica(0, _POMIAR_STOSY_1006)
+EXP_STACKS_DERIVED = Kotwica(0, _POMIAR_STOSY_1006, _POTW_E1DBE60)
 # 128/128 zeznało `master_light` - nic nie wypada z rodzaju stosu
-EXP_STACKS_INGESTED = Kotwica(193, _POMIAR_STOSY_1006)
+EXP_STACKS_INGESTED = Kotwica(193, _POMIAR_STOSY_1006, _POTW_E1DBE60)
 # …i ma tak zostać: >0 znaczy, że pod `STACKS` leży coś, co nie jest stosem
-EXP_STACKS_REJECTED = Kotwica(0, _POMIAR_STOSY_1006)
+EXP_STACKS_REJECTED = Kotwica(0, _POMIAR_STOSY_1006, _POTW_E1DBE60)
 # Kotwice STANU po etapie stosów — te same pytania co w FULL, ale na trzecim zakresie. `None` =
 # NIEZMIERZONA: skrypt wypisze aktualia i poprosi o zaszycie (ten sam protokół, co `EXP_NAMELESS_*`
 # przed pilotem P-D). Nigdy nie wpisuj tu liczby z rachunku „FULL + 128" — kotwica ma być
@@ -416,7 +416,7 @@ EXP_STACKS_REJECTED = Kotwica(0, _POMIAR_STOSY_1006)
 # ponowny pomiar kotwicy FULL nie może po cichu przestawić kotwicy, której nikt nie mierzył.
 EXP_XISF_KINDS_STACKS = Kotwica(
     {"flat": 11, "light": 228, "master_dark": 38, "master_flat": 74, "unknown": 1,
-     "master_light": 193}, _POMIAR_STOSY_1006)
+     "master_light": 193}, _POMIAR_STOSY_1006, _POTW_E1DBE60)
 # Zmierzone, nie policzone z rachunku. (Konkretny korzeń starego drzewa obróbki trzyma kolejka
 # sesji - poza gitem; tu liczy się TRYB pomiaru.)
 # 12 z FULL + DWIE etykiety, które żyją WYŁĄCZNIE w drzewie obróbki:
@@ -425,12 +425,12 @@ EXP_XISF_KINDS_STACKS = Kotwica(
 # nazwa MONTAŻU wpisana przez program akwizycji w kartę `TELESCOP`. Obie to FAKT archiwum obróbki,
 # nie śmieć do wyczyszczenia — szum modelu naprawia się kind-scopingiem, nigdy kasowaniem pól.
 # `EQMOD HEQ5/6` czeka na decyzję kuratelską (park/merge) — patrz kolejka.
-EXP_TELESCOPES_STACKS = Kotwica(16, _POMIAR_STOSY_1006)   # 14 z FULL + dwie etykiety stosów
+EXP_TELESCOPES_STACKS = Kotwica(16, _POMIAR_STOSY_1006, _POTW_E1DBE60)   # 14 z FULL + dwie etykiety stosów
 # gotowe stosy bez karty `OBJECT` i bez obiektu (własny kubełek, D-P-I-5). Plików bez karty było
 # 22 - cztery rozwiązał REGION po współrzędnych, więc z kubełka wypadły. KLUCZOWY DOWÓD
 # ROZDZIAŁU: `EXP_NAMELESS_FULL` (25) po dołożeniu 18 stosów NIE DRGNĘŁO.
 # AR-53: 0 - stosy pod `STACKS` niosą dziś kartę `OBJECT` (wsad kart, ruch zapowiedziany niżej).
-EXP_NAMELESS_STACKS = Kotwica(0, _POMIAR_STOSY_1006)
+EXP_NAMELESS_STACKS = Kotwica(0, _POMIAR_STOSY_1006, _POTW_E1DBE60)
 #
 # ⚠️ KOTWICE STOSÓW SĄ RUCHOME INACZEJ NIŻ RESZTA (D-0802-1 + P6d, 2026-08-02). Stosy przychodzą
 # z ŻYWEGO skanu drzewa obróbki, a writeback od D-0802-1 ich SIĘGA - więc pierwsza naprawa kart
@@ -444,7 +444,7 @@ EXP_NAMELESS_STACKS = Kotwica(0, _POMIAR_STOSY_1006)
 # na dysku tak samo jak stosy. Dlatego każda kotwica niesie `Pomiar` ze stanem archiwum.
 # 274 z FULL + 128 stosów. PixInsight NIE przenosi `SITELAT`/`SITELONG` do produktu integracji
 # - zmierzone 0/128, więc CAŁA populacja stosów jest poza osią obserwatorium.
-EXP_NO_GPS_STACKS = Kotwica(467, _POMIAR_STOSY_1006)   # AR-53: 274 z FULL + 193 stosy
+EXP_NO_GPS_STACKS = Kotwica(467, _POMIAR_STOSY_1006, _POTW_E1DBE60)   # AR-53: 274 z FULL + 193 stosy
 # ── Kotwice RODOWODU STOSÓW (I-2c, faza (U)) — ZMIERZONE przebiegiem 2026-08-02 ──────────────────
 # Ostrożność, która okazała się niepotrzebna, ale zostaje zapisana: nie wolno było przepisać liczb
 # z sondy na kopii ŻYWEJ pf4, bo baza akceptacji stoi na ZAMROŻONYM dawcy i zna inne nazwy obiektów
@@ -453,10 +453,10 @@ EXP_NO_GPS_STACKS = Kotwica(467, _POMIAR_STOSY_1006)   # AR-53: 274 z FULL + 193
 # w obiekt, którego nazwę naprawiano. To ZBIEG OKOLICZNOŚCI tych danych, nie reguła: pierwszy stos
 # NGC7000 rozjedzie te dwa światy i wtedy ta kotwica ma zaświecić, a nie zostać „poprawiona".
 # integracje z co najmniej jednym wejściem (z 128 stosów)
-EXP_SLIN_LINKED = Kotwica(124, _POMIAR_STOSY_1006)   # AR-53: ze 193 stosów
-EXP_SLIN_INPUTS = Kotwica(5742, _POMIAR_STOSY_1006)   # wierszy `integration_input`
+EXP_SLIN_LINKED = Kotwica(124, _POMIAR_STOSY_1006, _POTW_E1DBE60)   # AR-53: ze 193 stosów
+EXP_SLIN_INPUTS = Kotwica(5742, _POMIAR_STOSY_1006, _POTW_E1DBE60)   # wierszy `integration_input`
 # …z tego DOWIEDZIONE zeznaniem pliku; 75 to KANDYDACI z okna.
-EXP_SLIN_HISTORY = Kotwica(27, _POMIAR_STOSY_1006)   # AR-53: reszta (97) to kandydaci z okna
+EXP_SLIN_HISTORY = Kotwica(27, _POMIAR_STOSY_1006, _POTW_E1DBE60)   # AR-53: reszta (97) to kandydaci z okna
 # Reszta populacji to trzy rozłączne kubełki „nie wiem": okno zdegenerowane 24, brak obiektu 18,
 # okno puste 5 (81 + 47 == 128 — partycję pilnuje osobne kryterium, nie te trzy liczby).
 # ⚠️ Te kotwice są RUCHOME tak samo jak `EXP_NAMELESS_STACKS`: stoją na ŻYWYM skanie drzewa obróbki,
@@ -465,7 +465,7 @@ EXP_SLIN_HISTORY = Kotwica(27, _POMIAR_STOSY_1006)   # AR-53: reszta (97) to kan
 # integracji to KLATKA, nie ścieżka). Zmiana = zmierz i podbij z notą, nigdy „napraw do zera".
 # 1 z FULL (`unknown` masterflat A7R3) + 7 stosów bez `TELESCOP`. Siedem plików po integracji nie
 # niesie karty teleskopu, więc nie ma z czego powołać osi - stan UCZCIWY, dokładnie jak RAW-y obok.
-EXP_CONFIG_REVIEW_STACKS = Kotwica(1, _POMIAR_STOSY_1006)   # AR-53: stosy niosą dziś `TELESCOP`
+EXP_CONFIG_REVIEW_STACKS = Kotwica(1, _POMIAR_STOSY_1006, _POTW_E1DBE60)   # AR-53: stosy niosą dziś `TELESCOP`
 # KAMERY BEZ WŁASNEJ KOTWICY — i to jest wynik DECYZJI, nie przeoczenie. Pierwszy przebieg pokazał
 # 2 kamery z `pixel_conflict` i `SONYA7S`, która dostała piksel od stacku: `_drizzle_2x` zapisuje
 # `XPIXSZ=1.88` przy matrycy 3.76 (siatka wynikowa, nie sprzęt), a korpusy Sony podają w produkcie

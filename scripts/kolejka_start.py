@@ -92,8 +92,12 @@ PACZKI_HISTORYCZNE = tuple("ABCDEFGHIJKLMNOPQ") + ("poza", "decyzja")
 # Pliki, które dwa tory jednej fali MOGĄ dzielić. Katalog i18n: każdy tor dopisuje własne klucze,
 # konflikt to scalenie sąsiednich linii słownika. `grid.py`: dozwolony, bo tabela fal w kolejce
 # NAZYWA rejon każdego toru (fala 2: `_flash` / kolumny+QSettings / model komórki) - plik bez
-# nazwanego rejonu do tej listy nie wchodzi.
-DOZWOLONE_WSPOLNE = ("horreum/gui/i18n_catalog.py", "horreum/gui/grid.py")
+# nazwanego rejonu do tej listy nie wchodzi. Rejony z decyzji Zdzinia 2026-10-06 (`Q4`):
+# `app.py` fala 2 - T3 `_flash` i paski recept / T6 `ObjectAxisView`; `planner.py` fala 2 -
+# T3 droga komunikatu i pusty stan / T6 chip; `pipeline.py` fala 3 - T10 `_adopt_and_derive`
+# i `_run_all` / T5 `_on_pick_dir` i `_set_root`.
+DOZWOLONE_WSPOLNE = ("horreum/gui/i18n_catalog.py", "horreum/gui/grid.py", "horreum/gui/app.py",
+                     "horreum/gui/planner.py", "horreum/gui/pipeline.py")
 # Ścieżka pliku na POCZĄTKU backticku; sufiks funkcji/linii w tym samym backticku (`plik.py:45`,
 # `plik.py _f`, `plik.py::f`) odpada. Kropka bez znanego rozszerzenia (`tasks.copies_unread_tip`)
 # to symbol, nie plik.

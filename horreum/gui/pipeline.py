@@ -29,7 +29,6 @@ from horreum.gui.grid import PRESET_VANISHED
 from horreum.gui.progress import counts_snapshot, should_emit
 from horreum.resolver import delta_report
 from horreum.scan import scan_stacks, scan_tree
-from horreum.stacks import run_stack_lineage
 from horreum.volumes import volume_serial
 
 
@@ -232,6 +231,8 @@ class PipelineWorker(QObject):
                 con, self._params.get("root"), self._now, self._cancel.is_set,
                 on_start=self.stage_started.emit, progress=self._on_chain_progress)):
             return False
+        # Rodowód stosów raz na przebieg: ta droga nie wchodzi w łańcuch Dostawy
+        # (`derive.DERIVED_STAGES`), więc nikt nie liczy go tu drugi raz.
         self._bulk(con, "group")
         self._bulk(con, "resolve")
         self._bulk(con, "stack_lineage")
@@ -279,7 +280,7 @@ class PipelineWorker(QObject):
 
     def _adopt_and_derive(self, con, *, derive_always=False):
         """Fakty kopii → przejęcie zeznania → - gdy coś przejęto - pochodne (`group` → `resolve` →
-        `calibrate` → `lineage`), w tej samej kolejności co w Dostawie. Wspólna droga DWÓCH gestów
+        `calibrate` → `lineage` → `stack_lineage`), w tej samej kolejności co w Dostawie. Wspólna droga DWÓCH gestów
         bez skanu: ogona „Oznacz zniknięte" (AR-5) i „Zbierz fakty kopii (N)" - oraz ogon skanu
         Dostawy (`_run_all`, z `derive_always`).
 
@@ -327,19 +328,21 @@ class PipelineWorker(QObject):
     def _bulk(self, con, name):
         """Etap masowy (group/resolve/calibrate/lineage/stack_lineage/delta) - bezobsługowy,
         od sekund do minut, bez progresu per-wiersz; pojedynczy przycisk etapu i droga „Stosy".
-        Funkcje pochodnych bierze z rdzenia (`derive.DERIVED`). delta jest READ-ONLY (zero DML).
-        Emituje stage_started → stage_done."""
+        Funkcje pochodnych (z rodowodem stosów) bierze z rdzenia (`derive.DERIVED`). delta jest
+        READ-ONLY (zero DML). Emituje stage_started → stage_done."""
         self.stage_started.emit(name)
         if name in derive.DERIVED:
-            result = derive.DERIVED[name](con, self._now())
-        elif name == "stack_lineage":
-            result = run_stack_lineage(con, now=self._now())
+            result = derive.DERIVED[name](con, self._now(), self._cancel.is_set)
         else:                                          # delta — read-only
             result = delta_report(con)
+        if getattr(result, "cancelled", False):        # rodowód stosów przerwany w czytaniu plików
+            self.cancelled.emit(name, result)
+            return
         self.stage_done.emit(name, result)
 
     def _run_all(self, con):
-        """„Przetwórz wszystko": scan→group→resolve→calibrate→lineage→delta w jednym wątku. Anulowanie
+        """„Przetwórz wszystko": scan→group→resolve→calibrate→lineage→stack_lineage→delta w jednym
+        wątku. Anulowanie
         skanu PRZERYWA łańcuch (dalsze etapy się nie wykonują — baza spójna, re-skan dokończy).
 
         Kalibracja stoi PO resolverze, bo przepis flata bierze `frame.filter_canon`, a wypełnia go
@@ -350,7 +353,11 @@ class PipelineWorker(QObject):
         Przejęcie zeznania (AR-5) stoi PO faktach kopii i PRZED `group`: predykat porównuje zeznanie
         klatki z faktami kopii, więc bez uzupełnienia nie ma czego porównać, a każdy etap od `group`
         w górę czyta `header` (oś teleskopu, `filter_canon`, przepis flata, rodowód). Przejęcie po nich
-        zostawiłoby pochodne policzone z głosu nieobecnego pliku do NASTĘPNEJ dostawy."""
+        zostawiłoby pochodne policzone z głosu nieobecnego pliku do NASTĘPNEJ dostawy.
+
+        Rodowód stosów zamyka pochodne (`derive.DERIVED_STAGES`, AR-85): dobór okna stoi na osiach
+        obiektu i teleskopu, więc Dostawa, która je zmieni, nie zostawia już werdyktu stosu
+        zamrożonego do ręcznego przeliczenia."""
         if not self._scan(con):
             return
         if not self._adopt_and_derive(con, derive_always=True):

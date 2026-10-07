@@ -131,6 +131,23 @@ def test_historia_potwierdza_zbior_i_podnosi_zrodlo_pewnosci(con):
     assert row["tool"].startswith("process=ImageIntegration")
 
 
+def test_anulowanie_w_czytaniu_naglowkow_nie_zapisuje_nic(con):
+    """Anulowanie sprawdzane przed każdym odczytem nagłówka (zawieszony udział SMB stoi na każdym
+    pliku do timeoutu). Przerwanie w fazie planu = zero odczytów dalej i zero zapisów.
+    Falsyfikator: zdejmij sprawdzenie `should_cancel` z pętli planu → reader wołany, integracja
+    zapisana."""
+    m = _master(con)
+    _light(con, "l1", date_obs="2025-08-30T20:30:00", ccd_temp=-10.0)
+    czytane = []
+    zdarzenia = con.execute("SELECT count(*) FROM event").fetchone()[0]
+    s = run_stack_lineage(con, now=NOW, xml_reader=lambda p: czytane.append(p),
+                          should_cancel=lambda: True)
+
+    assert s.cancelled and czytane == []
+    assert _integracja(con, m) is None and inputs_of(con, m) == []
+    assert con.execute("SELECT count(*) FROM event").fetchone()[0] == zdarzenia
+
+
 def test_rozjazd_z_historia_gasi_relacje_zamiast_zmyslac(con):
     """Historia mówi o klatce -20 °C, której okno nie zna → myli się OKNO. Zero relacji i POWÓD
     w bazie; wariant „zapisz co znalazłeś" byłby cichą nieprawdą o zawartości obrazu."""

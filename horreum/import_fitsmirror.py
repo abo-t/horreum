@@ -27,8 +27,8 @@ Przebieg (`run_import`):
      header+cards+event w jednej transakcji — repo.record_header). Plik nieosiągalny → pomiń +
      `event(frame.review)` target `sha1:<sha1_data>` (W1; kotwica stabilna). Wjazd padł po
      odczycie → szkielet z markerem 'db' jak w `scan_tree` (AR-46), raport liczy takie rekordy.
-  4. Po pętli: pochodne z rdzenia `derive.run_derived` (group → resolve → calibrate → lineage)
-     - ta sama lista co pipeline GUI i CLI.
+  4. Po pętli: pochodne z rdzenia `derive.run_derived` (group → resolve → calibrate → lineage
+     → stack_lineage) - ta sama lista co pipeline GUI i CLI.
   5. BRAMKI LICZBOWE (§4.6 — versus dawca W CHWILI importu, ze STANU, MINUS skipped):
      frame/location == files−skipped; cards == cards dawcy nie-skipped (podgrupa przeliczana
      z dysku wchodzi liczbą realnie odczytanych kart); teleskopy/kamery/configi == niezależna
@@ -110,6 +110,12 @@ class ImportSummary:
     resolve: object = None                     # ResolveSummary
     calibration: object = None                 # CalibrationSummary (oś przepisu, C2)
     lineage: object = None                     # LineageSummary (rodowód light↔master, C4)
+    # StackLineageSummary (AR-85). Import jedzie łańcuchem Dostawy w całości, nie wycinkiem: baza
+    # „po imporcie" ma znaczyć to samo co po Dostawie, a stos z dawcy bez rodowodu czekałby na
+    # ręczne przeliczenie. Etap czyta nagłówki XISF stosów spod ścieżek dawcy - import i tak
+    # czyta pliki (falsyfikator, podgrupa przeliczana z dysku); nieosiągalny plik nie zatrzymuje
+    # importu, tylko liczy się w `history_unread`.
+    stack_lineage: object = None
     files_total: int = 0
     imported: int = 0
     skipped: int = 0

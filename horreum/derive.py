@@ -1,11 +1,17 @@
 """Łańcuch etapów pochodnych - JEDEN właściciel kolejności (AR-39). Rdzeń Qt-wolny: woła go
 wątek tła GUI (`PipelineWorker`), CLI (`presence --apply`) i import z dawcy (`import_fitsmirror`).
 
-KOLEJNOŚĆ NIE JEST GUSTEM: `group` → `resolve` → `calibrate` → `lineage`. Przepis flata bierze
+KOLEJNOŚĆ NIE JEST GUSTEM: `group` → `resolve` → `calibrate` → `lineage` → `stack_lineage`. Przepis flata bierze
 `frame.filter_canon`, który wypełnia dopiero `run_resolver`, więc kalibracja przed resolverem
 wyłoniłaby przepisy z pustym filtrem; rodowód dopasowuje light do profili, które `calibrate`
 dopiero wyłania. Dopóki ta lista żyła w czterech kopiach, GUI, CLI i import dawały tę samą bazę
 po tym samym geście tylko tak długo, jak kopie się nie rozjechały.
+
+RODOWÓD STOSÓW (`stack_lineage`) ZAMYKA ŁAŃCUCH (AR-85): dobór okna stoi na osi obiektu i osi
+teleskopu (`group`, `resolve`), więc Dostawa, która je zmieni, zostawiała rodowód stosów - z jego
+werdyktem `integration.unresolved_reason` - zamrożony do ręcznego przeliczenia. Etap czyta nagłówki
+XISF stosów z dysku (historia PixInsighta nie leży w bazie); zmierzone 2026-10-07 na kopii pf4:
+193 stosy, 86,7 MB nagłówków, 3,6 s przebiegu bez zmian, drugi przebieg zero zdarzeń zapisu.
 
 Przed pochodnymi stoją fakty kopii i przejęcie zeznania ocalałej kopii (`adopt_stages`): każdy
 etap od `group` czyta `header`, a przejęcie zmienia `header`, więc pochodne policzone przed nim
@@ -20,16 +26,20 @@ oddaje swoją parę (wynik z `cancelled=True`) i kończy generator - dalsze etap
 
 `now` to znacznik ISO albo funkcja bez argumentów, która go zwraca: GUI podaje swoją `now_fn`,
 więc każdy etap długiego łańcucha dostaje świeży znacznik (jak wcześniej `_bulk`)."""
-from . import calibration, grouper, lineage, resolver, scan
+from . import calibration, grouper, lineage, resolver, scan, stacks
 
 # Funkcje rdzenia wołane przez moduł (`grouper.run_grouper`), nie przez nazwę zaimportowaną:
 # podmiana etapu w teście trafia wtedy we wszystkie drogi naraz, a sygnatury (`now`
 # pozycyjnie albo nazwane) wyrównuje jedno miejsce.
+# `should_cancel` dostaje tylko etap, który czyta pliki (rodowód stosów) - pozostałe liczą
+# z bazy w sekundach, a anulowanie między etapami trzyma `_emit_chain`.
 DERIVED_STAGES = (
-    ("group", lambda con, now: grouper.run_grouper(con, now)),
-    ("resolve", lambda con, now: resolver.run_resolver(con, now)),
-    ("calibrate", lambda con, now: calibration.run_calibration(con, now=now)),
-    ("lineage", lambda con, now: lineage.run_lineage(con, now=now)),
+    ("group", lambda con, now, should_cancel=None: grouper.run_grouper(con, now)),
+    ("resolve", lambda con, now, should_cancel=None: resolver.run_resolver(con, now)),
+    ("calibrate", lambda con, now, should_cancel=None: calibration.run_calibration(con, now=now)),
+    ("lineage", lambda con, now, should_cancel=None: lineage.run_lineage(con, now=now)),
+    ("stack_lineage", lambda con, now, should_cancel=None: stacks.run_stack_lineage(
+        con, now=now, should_cancel=should_cancel)),
 )
 DERIVED = dict(DERIVED_STAGES)
 
@@ -38,14 +48,18 @@ def _zegar(now):
     return now if callable(now) else (lambda: now)
 
 
-def run_derived(con, now, *, on_start=None):
+def run_derived(con, now, *, on_start=None, should_cancel=None):
     """Same pochodne w kolejności `DERIVED_STAGES` - bez faktów kopii i przejęcia (import ze
-    świeżej bazy nie ma kopii do uzupełnienia). Generator `(etap, wynik)`."""
+    świeżej bazy nie ma kopii do uzupełnienia). Generator `(etap, wynik)`; etap anulowany
+    (`wynik.cancelled`) kończy go."""
     zegar = _zegar(now)
     for name, fn in DERIVED_STAGES:
         if on_start is not None:
             on_start(name)
-        yield name, fn(con, zegar())
+        wynik = fn(con, zegar(), should_cancel)
+        yield name, wynik
+        if getattr(wynik, "cancelled", False):
+            return
 
 
 def adopt_stages(con, root, now, should_cancel=None, *, on_start=None, progress=None):
@@ -99,7 +113,7 @@ def adopt_and_derive(con, root, now, should_cancel=None, *, derive_always=False,
         if name == "adopt_testimony":
             przejete = wynik.adopted
     if derive_always or przejete:
-        yield from run_derived(con, now, on_start=on_start)
+        yield from run_derived(con, now, on_start=on_start, should_cancel=should_cancel)
 
 
 def _etap(progress, name):

@@ -821,6 +821,11 @@ def _format_import(donor_path, db_path, s):
         li = s.lineage
         linked = " ".join(f"{rel}={li.linked.get(rel, 0)}" for rel in sorted(li.linked)) or "-"
         lines.append(f"  rodowod: lighty {li.lights}; z kalibratorem {linked}")
+    if s.stack_lineage is not None:
+        st = s.stack_lineage
+        lines.append(f"  rodowod stosow: stosy {st.stacks}; z rodowodem {st.linked}; "
+                     f"bez rodowodu {sum(st.reasons.values())}; "
+                     f"historia nieodczytana {st.history_unread}")
     status = "OK" if not s.gate_failures else "FAIL"
     gates = " ".join(f"{k}={a}" for k, (_, a) in s.gates.items())
     lines.append(f"  bramki 4.6 {status}: {gates}")
@@ -893,7 +898,8 @@ def _format_presence(db_path, s, *, apply, limit):
 
 def _presence_tail(con, root, *, now):
     """Ogon `presence --apply` (AR-5-CLI): fakty kopii → przejęcie zeznania ocalałej kopii → - gdy
-    coś przejęto - pochodne `group` → `resolve` → `calibrate` → `lineage`. Ta sama semantyka i te
+    coś przejęto - pochodne `group` → `resolve` → `calibrate` → `lineage` → `stack_lineage`. Ta
+    sama semantyka i te
     same funkcje rdzenia co ogon gestu GUI „Oznacz zniknięte" (`PipelineWorker._adopt_and_derive`):
     fakty PRZED przejęciem (bez nich predykat zeznania milczy), pochodne wyłącznie po realnym
     przejęciu, zakres = korzeń przebiegu obecności. Etap bez kandydatów milczy (QUIET).
@@ -910,6 +916,11 @@ def _presence_tail(con, root, *, now):
             yield (f"  przejecie zeznania ocalalej kopii: przejete {w.adopted} z {w.rows} (inna "
                    f"tozsamosc {w.identity}, zmienione na dysku {w.stale}, blad odczytu {w.failed}, "
                    f"wyscig {w.raced}); czeka {w.remaining}")
+        elif etap == "stack_lineage":
+            # Jeden wiersz jak pozostałe etapy; pełny raport z receptami daje `stack-lineage`.
+            yield (f"  stack_lineage: stosy {w.stacks}, z rodowodem {w.linked}, zapisane teraz "
+                   f"{w.linked_new}, zdjete {w.unlinked}, bez rodowodu {sum(w.reasons.values())}, "
+                   f"historia nieodczytana {w.history_unread}")
         else:
             yield f"  {etap}: {w}"
 

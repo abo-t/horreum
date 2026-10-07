@@ -44,7 +44,14 @@ def load_patterns():
 def parse_master_path(path):
     """Ścieżka mastera → dict faktów przepisu; `{}` gdy ŻADEN wzorzec nie pasuje (zero faktów,
     nigdy zgadywanie). Klucze: `recipe_class`, `gain`, `offset_adu`, `set_temp_c`, `exptime_path`,
-    `pattern` (nazwa wzorca — ślad do raportu i do `source='path'`).
+    `pattern` (nazwa wzorca - ślad do raportu i do `source='path'`), a dla masterflatu `flatgrp`
+    i `filter_name` - SUROWE tokeny nazwy (tekst, bez kanonizacji filtra).
+
+    `flatgrp`/`filter_name` NIE są faktami przepisu: przepis flata jest cały w nagłówku (73/73),
+    a `calibration._from_path` bierze ze ścieżki wyłącznie dark/bias i wyłącznie gain/offset/
+    temperaturę. Czyta je porównanie kopii jednej klatki (`gui.queries.copy_divergence`, AR-1):
+    kopie o identycznych nagłówkach różnią się czasem tylko nazwą, a tego rozjazdu nikt inny nie widzi.
+    FLATGRP zostaje tekstem - to identyfikator grupy, nie liczba do rachunku.
 
     `exptime_path` NIE jest faktem do zapisania: czas naświetlania mastera niesie nagłówek (38/38).
     Wracamy z nim po to, by falsyfikator konwencji („czas ze ścieżki == `header.exptime`") był
@@ -68,5 +75,9 @@ def parse_master_path(path):
             facts["set_temp_c"] = None if module is None else sign * module
         if g.get("exptime") is not None:
             facts["exptime_path"] = _to_float(g["exptime"])
+        if g.get("flatgrp") is not None:
+            facts["flatgrp"] = g["flatgrp"]
+        if g.get("filter") is not None:
+            facts["filter_name"] = g["filter"]
         return facts
     return {}

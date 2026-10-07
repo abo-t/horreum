@@ -26,7 +26,9 @@ from horreum.resolve.frames import LIGHT_KINDS
 from horreum.resolve.headers import (COPY_TESTIMONY_KEYWORDS, COPY_TESTIMONY_RULE, FAKTY_BIEZACE,
                                      copy_facts_state, copy_testimony)
 from horreum.resolve.objects import CLEARABLE_OBJECT_SOURCES, WEAK_OBJECT_SOURCES
-from horreum.resolve.paths import STACK_KIND, STACKS_DIR, object_from_path
+from horreum.resolve.paths import (STACK_KIND, STACKS_DIR, filter_folder_from_path,
+                                   object_from_path)
+from horreum.resolve.recipe import parse_master_path
 from horreum.resolve.stack import read_testimony, signature_timestamp
 from horreum.resolver import (NO_OBJECT_CARD_FILETYPES, alias_snapshot, forma_karty_object,
                               path_proposals, resolve_name, review_state)
@@ -1709,6 +1711,24 @@ COPY_IMAGES = "images"
 _COPY_DIVERGENCE_FIELDS = (*COPY_TESTIMONY_KEYWORDS,
                            ("image_count", COPY_IMAGES), ("image_roles", COPY_IMAGES))
 
+# POLA Z NAZWY I ŚCIEŻKI KOPII (AR-1) - klucze sentinelowe jak `COPY_IMAGES`, tłumaczy je
+# powierzchnia. Kolejność = kolejność pokazywania, po polach zeznania i obrazach.
+COPY_FLATGRP = "flatgrp"
+COPY_NAME_FILTER = "name_filter"
+COPY_FILTER_DIR = "filter_dir"
+COPY_NAME_FIELDS = (COPY_FLATGRP, COPY_NAME_FILTER, COPY_FILTER_DIR)
+
+
+def copy_name_facts(path):
+    """Fakty NAZWY i ŚCIEŻKI jednej kopii - `{klucz sentinelowy: surowy tekst albo None}`. Czysta
+    funkcja; jedna derywacja dla porównania (`copy_divergence`) i dla wartości w podpowiedziach.
+    Parserów tu nie ma: tokeny nazwy daje wzorzec assetu (`recipe.parse_master_path`, grupy
+    `flatgrp`/`filter`), folder filtra - reguła pozycyjna (`paths.filter_folder_from_path`)."""
+    nazwa = parse_master_path(path)
+    return {COPY_FLATGRP: nazwa.get("flatgrp"),
+            COPY_NAME_FILTER: nazwa.get("filter_name"),
+            COPY_FILTER_DIR: filter_folder_from_path(path)}
+
 
 def present_copy_facts(con, frame_ids):
     """OBECNE kopie klatek z ich faktami z nagłówka (0021) - jedno wejście dla predykatu Porządków
@@ -1758,26 +1778,36 @@ def copy_divergence(copies):
     który go nie ma, mówią o klatce różne rzeczy. Porównanie idzie po wartościach PO koercji
     (`copy_testimony`), więc XISF-owy tekst i FITS-owa liczba tego samego pomiaru nie rozjeżdżają się.
 
-    FAKTÓW Z NAZWY I ŚCIEŻKI KOPII (token filtra, folder filtra, token FLATGRP) TU NIE MA - Horreum
-    nie ma dla tych tokenów parsera (`naming`, `resolve.paths`, `resolve.recipe` ich nie znają),
-    a drugi, pisany obok, byłby drugim źródłem prawdy o tej samej nazwie. Luka opisana w raporcie
-    toru, nie załatana tutaj."""
+    FAKTY Z NAZWY I ŚCIEŻKI KOPII (AR-1, decyzja Zdzinia 2026-10-07): token FLATGRP, filtr w nazwie
+    i folder filtra (`copy_name_facts`). Kopie o identycznych nagłówkach potrafią różnić się samą
+    nazwą (FLATGRP 202203240 obok 202203250) - to też rozjazd, który rozstrzyga człowiek. Inna
+    reguła udziału niż przy zeznaniu: ścieżkę baza zna zawsze, więc do porównania wchodzi każda
+    obecna kopia, ale wyłącznie z WARTOŚCIĄ - brak tokenu (nazwa spoza wzorca, ścieżka spoza drzewa
+    flatów) mówi „nie wiem", nie „inaczej". Porównanie bez wielkości liter, jak wzorzec assetu
+    i ścieżki Windows. Etykieta trafia do kopii, które w tym polu MAJĄ wartość."""
     zeznane = [c for c in copies
                if copy_facts_state(c["hdr_hash"], c["hdr_rule"]) == FAKTY_BIEZACE]
-    if len(zeznane) < 2:
-        return {}
-    rozne = []
-    for kolumna, etykieta in _COPY_DIVERGENCE_FIELDS:
-        if len({c[kolumna] for c in zeznane}) > 1 and etykieta not in rozne:
-            rozne.append(etykieta)
-    if not rozne:
-        return {}
-    return {c["location_id"]: tuple(rozne) for c in zeznane}
+    out = {}
+    if len(zeznane) >= 2:
+        rozne = []
+        for kolumna, etykieta in _COPY_DIVERGENCE_FIELDS:
+            if len({c[kolumna] for c in zeznane}) > 1 and etykieta not in rozne:
+                rozne.append(etykieta)
+        if rozne:
+            out = {c["location_id"]: list(rozne) for c in zeznane}
+    nazwy = [(c["location_id"], copy_name_facts(c["path"])) for c in copies]
+    for pole in COPY_NAME_FIELDS:
+        z_wartoscia = [(lid, f[pole]) for lid, f in nazwy if f[pole] is not None]
+        if len({v.casefold() for _, v in z_wartoscia}) > 1:
+            for lid, _ in z_wartoscia:
+                out.setdefault(lid, []).append(pole)
+    return {lid: tuple(pola) for lid, pola in out.items()}
 
 
 def copy_conflict_frame_ids(con):
     """Zbiór frame_id perspektywy „Kopie niezgodne ze sobą" (0021): klatki z ≥2 OBECNYMI kopiami,
-    których zeznania nagłówków różnią się w którymkolwiek przechowanym polu (`copy_divergence`).
+    których zeznania nagłówków różnią się w którymkolwiek przechowanym polu albo których nazwy
+    i ścieżki różnią się tokenem FLATGRP, filtrem w nazwie lub folderem filtra (`copy_divergence`).
 
     PODZBIÓR `dup_frame_ids` Z KONSTRUKCJI - kandydaci biorą się z tamtego predykatu, więc guardy
     żywotności (wycofana i zastąpiona wypadają) są te same, a „niezgodne" nigdy nie pokażą klatki,

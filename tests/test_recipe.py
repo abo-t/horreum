@@ -10,9 +10,6 @@ from horreum.resolve.recipe import load_patterns, parse_master_path
 MASTERDARK = os.path.join(
     r"R:\ASTRO_", "CALIBRATION", "masters", "darks", "ASI2600MM_100_21",
     "MASTERDARK_26MM_G100_O21_10_0300.000_EXPOSURE_300s.xisf")
-MASTERFLAT = os.path.join(
-    r"R:\ASTRO_", "CALIBRATION", "masters", "flats", "76EDPH_2600MM", "Ha",
-    "MASTERFLAT_FLATGRP_202304220_FILTER_Ha_.xisf")
 
 
 def test_masterdark_oddaje_komplet_faktow():
@@ -53,11 +50,9 @@ def test_typy_zgodne_z_derywacja_naglowka():
 
 
 def test_sciezka_spoza_wzorca_to_zero_faktow():
-    """Brak dopasowania = PUSTY dict, nigdy wartość domyślna (D-C-2: nastawy się nie wylicza).
-    Masterflat CELOWO nie pasuje — jego przepis jest cały w nagłówku (73/73), więc ścieżka
-    nie ma tam czego dokładać (zmierzone: 0/76 masterflatów łapie ten wzorzec)."""
-    assert parse_master_path(MASTERFLAT) == {}
-    assert parse_master_path(r"R:\ASTRO_\LIGHTS\M31\A140R_2600MM\Ha\light_0001.fits") == {}
+    """Brak dopasowania = PUSTY dict, nigdy wartość domyślna (D-C-2: nastawy się nie wylicza)."""
+    assert parse_master_path(r"X:\ARCHIWUM\LIGHTS\M31\A140R_2600MM\Ha\light_0001.fits") == {}
+    assert parse_master_path(r"X:\ARCHIWUM\flats\RC8_2600MC\OSC\MASTERFLAT_OSC.xisf") == {}
     assert parse_master_path("") == {}
     assert parse_master_path(None) == {}
 
@@ -74,3 +69,49 @@ def test_wzorce_pochodza_z_assetu():
 def test_wielkosc_liter_sciezki_bez_znaczenia():
     """Windows nie rozróżnia wielkości liter w ścieżkach — wzorzec też nie może."""
     assert parse_master_path(MASTERDARK.lower())["gain"] == 100
+
+
+# ─────────────────────────────── masterflat: tokeny NAZWY, nie fakty przepisu (AR-1)
+
+FLAT_A = r"X:\ARCHIWUM\CALIBRATION\masters\flats\RC8_2600MC\OSC\MASTERFLAT_FLATGRP_202203240_FILTER_OSC_.xisf"
+FLAT_B = r"X:\ARCHIWUM\CALIBRATION\masters\flats\RC8_2600MC\L-Pro\MASTERFLAT_FLATGRP_202209010_FILTER_LPRO_.xisf"
+
+
+def test_masterflat_oddaje_grupe_i_filtr_z_nazwy():
+    """Wzorzec `masterflat_flatgrp_filter` - grupa i filtr SUROWO z nazwy (tekst, bez kanonu),
+    zero faktów przepisu: przepis flata jest cały w nagłówku."""
+    facts = parse_master_path(FLAT_A)
+    assert facts == {"recipe_class": "flat", "pattern": "masterflat_flatgrp_filter",
+                     "flatgrp": "202203240", "filter_name": "OSC"}
+    assert parse_master_path(FLAT_B)["filter_name"] == "LPRO"
+    assert parse_master_path(FLAT_B.lower())["flatgrp"] == "202209010"
+    # Filtr kończy się na `_`, kropce albo separatorze - nie wciąga rozszerzenia ani katalogu.
+    assert parse_master_path(r"X:\a\MASTERFLAT_FLATGRP_202408240_FILTER_Ha.xisf")["filter_name"] == "Ha"
+
+
+def test_masterflat_bez_ktoregos_tokenu_nie_pasuje():
+    """Nazwa bez FLATGRP albo bez FILTER nie daje połowy faktów - wzorzec milczy w całości."""
+    assert parse_master_path(r"X:\a\MASTERFLAT_FILTER_Ha_.xisf") == {}
+    assert parse_master_path(r"X:\a\MASTERFLAT_FLATGRP_202408240_.xisf") == {}
+    assert "flatgrp" not in parse_master_path(MASTERDARK)
+
+
+def test_wzorzec_masterflatu_po_wzorcu_darka():
+    """Pierwszy pasujący wygrywa - flat dołożony NA KONIEC listy (kontrakt `parse_master_path`)."""
+    nazwy = [p[0] for p in load_patterns()]
+    assert nazwy == ["masterdark_zwo_gain_offset_temp", "masterflat_flatgrp_filter"]
+    assert load_patterns()[1][1] == "flat"
+
+
+def test_kalibracja_nie_bierze_tokenow_masterflatu():
+    """`calibration._from_path` przepuszcza ze ścieżki wyłącznie dark/bias i wyłącznie gain/offset/
+    temperaturę - tokeny nazwy masterflatu nie wchodzą do przepisu żadnej klasy, a fakty darka
+    zostają takie jak przed wzorcem flata."""
+    from horreum import calibration
+
+    for klasa in ("flat", "dark", "bias"):
+        assert calibration._from_path(FLAT_A, klasa) == {}
+        assert calibration._from_path(FLAT_B, klasa) == {}
+    assert calibration._from_path(MASTERDARK, "dark") == {"gain": 100, "offset_adu": 21,
+                                                          "set_temp_c": -10}
+    assert calibration._from_path(MASTERDARK, "flat") == {}

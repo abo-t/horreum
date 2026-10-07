@@ -1622,6 +1622,11 @@ CATALOG = {
         "pl": "\n    mówi inaczej: {fields}", "en": "\n    says otherwise: {fields}",
     },
     "grid.tip.copy_field_images": {"pl": "obrazy", "en": "images"},
+    # Pola rozjazdu z NAZWY i ŚCIEŻKI kopii (AR-1, `queries.copy_name_facts`) - w zdaniu
+    # „mówi inaczej: grupa flatów=202203240" obok keywordów nagłówka.
+    "grid.tip.copy_field_flatgrp": {"pl": "grupa flatów", "en": "flat group"},
+    "grid.tip.copy_field_name_filter": {"pl": "filtr w nazwie", "en": "filter in name"},
+    "grid.tip.copy_field_filter_dir": {"pl": "folder filtra", "en": "filter folder"},
     # Podpowiedź „?" w kolumnie „Obrazy" (perspektywy kopii): nagłówek zdania, a drogi dokleja
     # `grid.tip.copy_unread` - jeden właściciel recepty dla kopii bez zebranych faktów.
     "grid.tip.images_unknown": {"pl": "Liczba obrazów nieznana:", "en": "Number of images unknown:"},

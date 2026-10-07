@@ -28,7 +28,8 @@ przestemplowanie. Czerwień spoza wypisanych klas znaczy regresję.
 Funkcje ŚCIEŻKI są tu czyste (`resolve.paths` — zero Qt, zero DB), więc ich sekcja nie potrzebuje
 ani PySide6, ani bazy. Reguła DIALOGU pyta drabinę, więc potrzebuje połączenia (nie Qt)."""
 from horreum import db, resolver
-from horreum.resolve.paths import filename_tokens, object_folder, object_from_path
+from horreum.resolve.paths import (filename_tokens, filter_folder_from_path, object_folder,
+                                   object_from_path)
 
 R = "R:\\ASTRO_"
 NOW = "2026-08-03T10:00:00Z"
@@ -217,3 +218,28 @@ def test_PIN_nazwa_spoza_KAZDEGO_szczebla_dalej_milczy():
     con = _con()
     assert resolver.path_proposal(
         con, rf"{R}\LIGHTS\ProbaObiektywu\A7S1_070\OSC\x.ARW") is None
+
+
+# ─────────────────────────────────────── świadek FOLDERU FILTRA (drzewo flatów, AR-1)
+
+_ARCH = r"X:\ARCHIWUM"
+
+
+def test_folder_filtra_drugi_katalog_po_markerze_flatow():
+    """`<marker flat>\\<TELESKOP_KAMERA>\\<FILTR>\\plik` - segment SUROWO, bez względu na wielkość
+    liter markera i jego liczbę (`flat`/`flats`, `kind_dir_segments`)."""
+    assert filter_folder_from_path(
+        rf"{_ARCH}\CALIBRATION\masters\flats\RC8_2600MC\L-Pro\MASTERFLAT_x.xisf") == "L-Pro"
+    assert filter_folder_from_path(rf"{_ARCH}\CALIBRATION\Flat\RC8_2600MM\Ha\f_0001.fit") == "Ha"
+    assert filter_folder_from_path("/mnt/arch/flats/RC8/OSC/f.xisf") == "OSC"
+
+
+def test_folder_filtra_milczy_poza_drzewem_flatow():
+    """Inny rodzaj, płytkie drzewo, brak markera - None. W drzewie lightów głębokość pod obiektem
+    jest mieszana, więc pozycja filtra byłaby zgadywaniem; pierwszy marker od korzenia rozstrzyga."""
+    assert filter_folder_from_path(rf"{_ARCH}\LIGHTS\M31\RC8_2600MM\Ha\x.fit") is None
+    assert filter_folder_from_path(rf"{_ARCH}\CALIBRATION\darks\ASI2600MM_100_21\d.xisf") is None
+    assert filter_folder_from_path(rf"{_ARCH}\CALIBRATION\flats\RC8_2600MC\f.xisf") is None
+    assert filter_folder_from_path(rf"{_ARCH}\STACKS\M31\RC8_2600MM\Ha\s.xisf") is None
+    assert filter_folder_from_path(rf"{_ARCH}\LIGHTS\flats\RC8\Ha\x.fit") is None
+    assert filter_folder_from_path("") is None

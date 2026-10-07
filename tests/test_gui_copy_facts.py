@@ -89,6 +89,26 @@ def test_podpowiedz_xN_wymienia_kopie_obrazy_i_rozbiezne_pola(view, archiwum):
     assert "mówi inaczej" not in solo_tip                    # jedna kopia - nie ma z czym się różnić
 
 
+def test_podpowiedz_nazywa_rozjazd_nazwy_kopii():
+    """AR-1: pola NAZWY i ŚCIEŻKI w zdaniu „mówi inaczej" - etykieta z katalogu i wartość TEJ
+    kopii, także przy kopii bez zebranego zeznania (ścieżkę baza zna zawsze). Ten sam człon
+    (`_pole_rozjazdu`) niesie podmenu „Ta kopia prowadzi"."""
+    from test_copy_facts import _kopia
+
+    flaty = r"X:\ARCHIWUM\CALIBRATION\masters\flats\RC8_2600MC"
+    kopie = [_kopia(1, path=rf"{flaty}\CLS\MASTERFLAT_FLATGRP_202209010_FILTER_CLS_.xisf"),
+             _kopia(2, path=rf"{flaty}\L-Pro\MASTERFLAT_FLATGRP_202209020_FILTER_LPRO_.xisf",
+                    hdr_hash=None)]
+    row = {"frame_id": 1, "n_present": 2}
+    grid_mod._dolacz_kopie([row], kopie)
+    tip = grid_mod._dup_tip(row)
+    assert "grupa flatów=202209010, filtr w nazwie=CLS, folder filtra=CLS" in tip
+    assert "grupa flatów=202209020, filtr w nazwie=LPRO, folder filtra=L-Pro" in tip
+    assert "zeznanie nagłówka jeszcze niezebrane" in tip
+    assert grid_mod._pole_rozjazdu(queries.COPY_FILTER_DIR, kopie[1]) == "folder filtra=L-Pro"
+    assert grid_mod._pole_rozjazdu("FILTER", kopie[0]) == "FILTER=Ha"
+
+
 def test_podpowiedz_mowi_o_kopii_bez_zebranego_zeznania(qapp, tmp_path, monkeypatch):
     """Kopia sprzed 0021 (fakty jeszcze niezebrane) nie milczy jak kopia zgodna - mówi, że zeznania
     nie ma i co je uzupełni. Rozjazdu wtedy nie ogłaszamy: „nie wiem" nie jest „inaczej"."""
@@ -317,7 +337,8 @@ def test_wiersz_porzadkow_zeznanie_z_nieobecnej_kopii(qapp, tmp_path, monkeypatc
 def test_gest_oznacz_znikniete_puszcza_przejecie_i_pochodne(qapp, tmp_path, monkeypatch):
     """„Oznacz zniknięte" (presence-apply) to chwila, w której klatka zaczyna mówić głosem
     nieobecnego pliku - więc w tym samym wątku tła idą przejęcie zeznania i pochodne (group →
-    resolve → calibrate → lineage). Bez tego stan trwał niewidoczny do następnej dostawy."""
+    resolve → calibrate → lineage → stack_lineage). Bez tego stan trwał niewidoczny do następnej
+    dostawy."""
     from horreum import presence
     from horreum.resolve.filters import normalize_filter
     from test_orphan_testimony import _cls, _lpro
@@ -337,7 +358,8 @@ def test_gest_oznacz_znikniete_puszcza_przejecie_i_pochodne(qapp, tmp_path, monk
     w.stage_started.connect(started.append)
     w.stage_done.connect(lambda n, r: done.__setitem__(n, r))
     w.run()
-    assert started == ["presence", "adopt_testimony", "group", "resolve", "calibrate", "lineage"]
+    assert started == ["presence", "adopt_testimony", "group", "resolve", "calibrate", "lineage",
+                       "stack_lineage"]
     assert done["presence"].vanished == 1 and done["adopt_testimony"].adopted == 1
     con = db.open_db(path)
     assert con.execute("SELECT filter_canon FROM frame WHERE id = ?",

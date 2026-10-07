@@ -126,6 +126,32 @@ def object_folder(path, kind="light"):
     return "\\".join(_dirs(path)[:i + 1])
 
 
+def filter_folder_from_path(path):
+    """Segment na pozycji FOLDERU FILTRA w drzewie flatów - SUROWY tekst albo None. Czysta funkcja.
+
+    Układ zmierzony `?mode=ro` 2026-10-07 na 2 336 obecnych lokacjach flatów: zawsze
+    `<marker flat>\\<TELESKOP_KAMERA>\\<FILTR>\\plik` (dwa katalogi po markerze, bez wyjątku);
+    segment na drugiej pozycji zgadza się z `filter_canon` klatki 1 527 razy, a reszta to kamery
+    kolorowe (`OSC`, filtr pusty z definicji) i filtry, których nagłówek nie zna. Kotwicą jest ten
+    sam marker, który nadaje rodzaj (`kind_dir_segments()`), pierwszy od korzenia - jak w
+    `_object_index`. Marker innego rodzaju niż flat milczy: dark ma jeden katalog po markerze,
+    a w drzewie lightów (`LIGHTS\\<OBIEKT>\\…`) głębokość pod obiektem jest mieszana (12 464 × dwa
+    katalogi, 1 873 × jeden), więc pozycja filtra byłaby tam zgadywaniem.
+
+    Czyta go porównanie kopii jednej klatki (`gui.queries.copy_divergence`, AR-1) - świadek NAZWY
+    kopii, nie fakt filtra klatki: oś filtra prowadzi nagłówek."""
+    dirs = _dirs(path)
+    markers = kind_dir_segments()
+    for i, seg in enumerate(dirs):
+        kind = markers.get(seg.strip().lower())
+        if kind is None:
+            continue
+        if kind != "flat" or i + 2 >= len(dirs):
+            return None
+        return dirs[i + 2]
+    return None
+
+
 def filename_tokens(path):
     """Człony STEMU nazwy pliku — jednostka iteracji DRUGIEGO świadka (dialog „Napraw nagłówek…").
 

@@ -139,6 +139,7 @@ class StackLineageSummary:
                                # Osobno od `kept_unread`, bo recepta jest inna: tam „podłącz dysk",
                                # tu „nikt nic nie zgubił — rodowód stoi na dowodzie mocniejszym"
     reasons: dict = field(default_factory=dict)     # powód -> licznik (integracje bez wejść)
+    cancelled: bool = False    # przerwane w fazie planu (czytanie nagłówków) - zero zapisów
 
 
 def _bump_kept(s, p):
@@ -737,7 +738,8 @@ def _plan(con, row, *, xml_reader):
     return plan
 
 
-def run_stack_lineage(con, *, now, actor="stacks", xml_reader=None, progress=None):
+def run_stack_lineage(con, *, now, actor="stacks", xml_reader=None, progress=None,
+                      should_cancel=None):
     """Przebieg rodowodu stosów — idempotentny: drugi przebieg na niezmienionych danych daje ZERO
     nowych wierszy i ZERO eventów ZAPISU (`integration.recorded`/`updated`/`linked`/`unlinked`) -
     UNIQUE z 0012 trzyma idempotencję wierszy, porównanie kompletu faktów w klindze - głowy.
@@ -750,13 +752,20 @@ def run_stack_lineage(con, *, now, actor="stacks", xml_reader=None, progress=Non
 
     Kolejność faz jest istotna: NAJPIERW plan dla wszystkich stosów (bo nierozłączność okien to
     fakt o PARZE integracji, nie o pojedynczej), POTEM zapis. `xml_reader` wstrzykiwalny — testy
-    podają zeznanie wprost, produkcja czyta nagłówek z dysku."""
+    podają zeznanie wprost, produkcja czyta nagłówek z dysku.
+
+    ANULOWANIE (`should_cancel`) sprawdzane przed KAŻDYM odczytem nagłówka: faza planu czyta pliki
+    (zawieszony udział SMB stoi na każdym do timeoutu), a niczego nie zapisuje - przerwanie w niej
+    zostawia bazę nietkniętą. Faza zapisu idzie do końca."""
     s = StackLineageSummary()
     reader = xml_reader if xml_reader is not None else _read_history_xml
     rows = _masters(con)
     s.stacks = len(rows)
     plany = []
     for i, row in enumerate(rows, 1):
+        if should_cancel is not None and should_cancel():
+            s.cancelled = True
+            return s
         plany.append(_plan(con, row, xml_reader=reader))
         if progress is not None:
             progress(i, len(rows), row["frame_id"])

@@ -654,6 +654,61 @@ def test_rozjazd_kopii_z_samego_stanu():
     assert set(queries.copy_divergence(trzy)) == {1, 2, 3}
 
 
+_FLATY = r"X:\ARCHIWUM\CALIBRATION\masters\flats\RC8_2600MC"
+
+
+def test_rozjazd_nazw_kopii_flatgrp_filtr_w_nazwie_folder_filtra():
+    """AR-1: kopie o IDENTYCZNYCH nagłówkach, różne tylko nazwą - grupa flatów, filtr w nazwie,
+    folder filtra (`copy_name_facts`). Kształty z żywej bazy (15660: ten sam folder, inna grupa;
+    15645: inny folder i inny filtr w nazwie). Pola nazwy idą PO polach nagłówka."""
+    r = queries.copy_divergence([
+        _kopia(1, path=rf"{_FLATY}\OSC\MASTERFLAT_FLATGRP_202203240_FILTER_OSC_.xisf"),
+        _kopia(2, path=rf"{_FLATY}\OSC\MASTERFLAT_FLATGRP_202203250_FILTER_OSC_.xisf")])
+    assert r == {1: (queries.COPY_FLATGRP,), 2: (queries.COPY_FLATGRP,)}
+    r = queries.copy_divergence([
+        _kopia(1, path=rf"{_FLATY}\CLS\MASTERFLAT_FLATGRP_202209010_FILTER_CLS_.xisf",
+               hdr_filter="CLS"),
+        _kopia(2, path=rf"{_FLATY}\L-Pro\MASTERFLAT_FLATGRP_202209010_FILTER_LPRO_.xisf")])
+    pola = ("FILTER", queries.COPY_NAME_FILTER, queries.COPY_FILTER_DIR)
+    assert r == {1: pola, 2: pola}
+    # Ta sama nazwa w innej wielkości liter (Windows) - zgoda, nie rozjazd.
+    assert queries.copy_divergence([
+        _kopia(1, path=rf"{_FLATY}\Ha\MASTERFLAT_FLATGRP_202408240_FILTER_Ha_.xisf"),
+        _kopia(2, path=rf"{_FLATY}\HA\masterflat_flatgrp_202408240_filter_ha_.xisf")]) == {}
+
+
+def test_brak_tokenu_nazwy_to_nie_wiem_nie_rozjazd():
+    """Token porównywany WYŁĄCZNIE między kopiami, które go mają: nazwa spoza wzorca i ścieżka
+    spoza drzewa flatów milczą. Trzecia kopia z wartością dołącza do rozjazdu, milcząca - nie."""
+    z_tokenem = rf"{_FLATY}\OSC\MASTERFLAT_FLATGRP_202203240_FILTER_OSC_.xisf"
+    assert queries.copy_divergence([_kopia(1, path=z_tokenem),
+                                    _kopia(2, path=r"X:\ZRZUT\kopia_flata.xisf")]) == {}
+    trzy = [_kopia(1, path=z_tokenem),
+            _kopia(2, path=r"X:\ZRZUT\kopia_flata.xisf"),
+            _kopia(3, path=rf"{_FLATY}\OSC\MASTERFLAT_FLATGRP_202203250_FILTER_OSC_.xisf")]
+    assert queries.copy_divergence(trzy) == {1: (queries.COPY_FLATGRP,),
+                                             3: (queries.COPY_FLATGRP,)}
+
+
+def test_rozjazd_nazw_widac_bez_zebranego_zeznania():
+    """Ścieżkę baza zna zawsze: kopia bez faktów nagłówka (`hdr_hash` NULL) nie wnosi pól
+    zeznania, ale rozjazd NAZWY jest dowiedziony i zostaje."""
+    r = queries.copy_divergence([
+        _kopia(1, path=rf"{_FLATY}\OSC\MASTERFLAT_FLATGRP_202204180_FILTER_OSC_.xisf",
+               hdr_hash=None, hdr_filter=None),
+        _kopia(2, path=rf"{_FLATY}\OSC\MASTERFLAT_FLATGRP_202204190_FILTER_OSC_.xisf")])
+    assert r == {1: (queries.COPY_FLATGRP,), 2: (queries.COPY_FLATGRP,)}
+
+
+def test_fakty_nazwy_kopii_jedna_derywacja():
+    """`copy_name_facts` - surowe tokeny z assetu i folder z reguły pozycyjnej, None gdy milczą."""
+    assert queries.copy_name_facts(
+        rf"{_FLATY}\L-Pro\MASTERFLAT_FLATGRP_202209010_FILTER_LPRO_.xisf") == {
+        queries.COPY_FLATGRP: "202209010", queries.COPY_NAME_FILTER: "LPRO",
+        queries.COPY_FILTER_DIR: "L-Pro"}
+    assert queries.copy_name_facts(r"X:\ZRZUT\x.xisf") == dict.fromkeys(queries.COPY_NAME_FIELDS)
+
+
 def test_predykat_porzadkow_podzbior_duplikatow(tmp_path):
     """`copy_conflict_frame_ids` bierze kandydatów z `dup_frame_ids`, więc guardy żywotności są te
     same: klatka wycofana (plik wrócił, dwie niezgodne kopie) do listy niezgodnych NIE trafia, bo

@@ -7,7 +7,11 @@
     "temp_sign='negative' koduje JAWNIE regułę, że człon temperatury niesie MODUŁ nastawy, a znak",
     "jest stały (chłodzenie): '10' → -10 °C. Potwierdzone dwukrotnie — słowem właściciela archiwum",
     "(2026-07-22) oraz zgodnością z nastawami SET-TEMP lightów (-10,0 ×10237 i -13,0 ×2466).",
-    "To JEDYNE miejsce w Horreum, gdzie ścieżka jest źródłem faktu (brief C0 §5)."
+    "To JEDYNE miejsce w Horreum, gdzie ścieżka jest źródłem faktu (brief C0 §5).",
+    "Wzorzec masterflatu NIE niesie faktów przepisu (przepis flata jest cały w nagłówku): jego grupy",
+    "'flatgrp' i 'filter' to tokeny NAZWY, które czyta wyłącznie porównanie kopii jednej klatki",
+    "(gui.queries.copy_divergence). Kalibracja ich nie bierze - calibration._from_path przepuszcza",
+    "tylko dark/bias i tylko gain/offset/temperaturę."
   ],
   "patterns": [
     {
@@ -16,6 +20,12 @@
       "regex": "_G(?P<gain>\\d+)_O(?P<offset_adu>\\d+)_(?P<temp_module>\\d+)_(?P<exptime>\\d+(?:\\.\\d+)?)_EXPOSURE",
       "temp_sign": "negative",
       "note": "MASTERDARK_26MM_G100_O21_10_0300.000_EXPOSURE_300s.xisf — łapie 38/38 masterdarków archiwum (2026-07-22)"
+    },
+    {
+      "name": "masterflat_flatgrp_filter",
+      "recipe_class": "flat",
+      "regex": "MASTERFLAT_FLATGRP_(?P<flatgrp>\\d+)_FILTER_(?P<filter>[^_\\\\/.]+)",
+      "note": "MASTERFLAT_FLATGRP_202203240_FILTER_OSC_.xisf - łapie 91/91 obecnych masterflatów archiwum (2026-10-07); FLATGRP zawsze 9 cyfr"
     }
   ]
 }

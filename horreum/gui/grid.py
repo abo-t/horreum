@@ -901,6 +901,25 @@ def _wartosc_zeznania(v):
     return str(v)
 
 
+def _pole_rozjazdu(etykieta, kopia):
+    """Jedno pole z `queries.copy_divergence` jako człon zdania „mówi inaczej: …" - wspólne dla
+    podpowiedzi „×N" i podmenu „Ta kopia prowadzi". `kopia` - wiersz `present_copy_facts` (dict).
+    Obrazy - sama nazwa pola; pola NAZWY i ŚCIEŻKI (AR-1) - etykieta z katalogu i wartość tej kopii
+    (`queries.copy_name_facts`); keyword nagłówka - „FILTER=CLS"."""
+    if etykieta == queries.COPY_IMAGES:
+        return i18n.t("grid.tip.copy_field_images")
+    if etykieta in queries.COPY_NAME_FIELDS:
+        wartosc = queries.copy_name_facts(kopia["path"])[etykieta]
+        if etykieta == queries.COPY_FLATGRP:
+            nazwa = i18n.t("grid.tip.copy_field_flatgrp")
+        elif etykieta == queries.COPY_NAME_FILTER:
+            nazwa = i18n.t("grid.tip.copy_field_name_filter")
+        else:
+            nazwa = i18n.t("grid.tip.copy_field_filter_dir")
+        return f"{nazwa}={_wartosc_zeznania(wartosc)}"
+    return f"{etykieta}={_wartosc_zeznania(kopia[_KOPIA_KEYWORD_KOLUMNA[etykieta]])}"
+
+
 def _dup_tip(row):
     """Człon podpowiedzi ścieżki dla klatki z KILKOMA obecnymi kopiami: liczba kopii, a pod nią każda
     kopia - pełna ścieżka, liczba i role obrazów, pola, w których jej zeznanie odbiega od pozostałych
@@ -924,10 +943,10 @@ def _dup_tip(row):
             tip += i18n.t("grid.tip.copy_unread", place=i18n.t("nav.dostawa"),
                           check=i18n.t("pipeline.btn.presence"),
                           mark=i18n.t("pipeline.btn.mark_vanished"))
-        elif c["_rozne"]:
-            pola = [i18n.t("grid.tip.copy_field_images") if e == queries.COPY_IMAGES
-                    else f"{e}={_wartosc_zeznania(c[_KOPIA_KEYWORD_KOLUMNA[e]])}"
-                    for e in c["_rozne"]]
+        # Kopia bez zebranego zeznania nie ma pól nagłówka w `_rozne`, ale pola nazwy i ścieżki
+        # (AR-1) mieć może - baza zna je zawsze.
+        if c["_rozne"]:
+            pola = [_pole_rozjazdu(e, c) for e in c["_rozne"]]
             tip += i18n.t("grid.tip.copy_diff", fields=", ".join(pola))
     return tip
 
@@ -6288,9 +6307,7 @@ class FramesView(QWidget):
             if k.reka:
                 tip = i18n.t("grid.lead.hand_tip", lead=i18n.t("grid.lead.menu")) + "\n" + tip
             if k.rozne:
-                pola = [i18n.t("grid.tip.copy_field_images") if e == queries.COPY_IMAGES
-                        else f"{e}={_wartosc_zeznania(k.fakty_kopii[_KOPIA_KEYWORD_KOLUMNA[e]])}"
-                        for e in k.rozne]
+                pola = [_pole_rozjazdu(e, k.fakty_kopii) for e in k.rozne]
                 tip += i18n.t("grid.tip.copy_diff", fields=", ".join(pola))
             act.setToolTip(tip)
             # Lambda z wartością domyślną: `triggered` niesie `checked: bool`, a pętla wiąże

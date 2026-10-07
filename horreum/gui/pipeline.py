@@ -23,14 +23,11 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from horreum import db, presence, scan
-from horreum.calibration import run_calibration
-from horreum.lineage import run_lineage
+from horreum import db, derive, presence, scan
 from horreum.gui import i18n, queries
 from horreum.gui.grid import PRESET_VANISHED
 from horreum.gui.progress import counts_snapshot, should_emit
-from horreum.grouper import run_grouper
-from horreum.resolver import delta_report, run_resolver
+from horreum.resolver import delta_report
 from horreum.scan import scan_stacks, scan_tree
 from horreum.stacks import run_stack_lineage
 from horreum.volumes import volume_serial
@@ -79,6 +76,9 @@ class PipelineWorker(QObject):
     def run(self):
         con = None
         try:
+            if self._stage == "probe":                 # sama sonda źródła - baza niepotrzebna
+                self._zrodlo()
+                return
             con = db.open_db(self._db_path)
             if self._stage == "scan":
                 self._scan(con)
@@ -133,7 +133,12 @@ class PipelineWorker(QObject):
         po drzewie obróbki). Serial trafia wtedy wyłącznie do parametrów przebiegu."""
         root = self._params["root"]
         if not os.path.isdir(root):
-            self.source_unreachable.emit(self._stage or "?", str(root))
+            if self._stage == "probe":
+                # „Wskaż katalog…" nie jest etapem: katalog z dialogu zostaje wskazany także wtedy,
+                # gdy odpadł po wyborze, z serialem nieustalonym (jak dawny `_set_root`).
+                self.source_ready.emit(str(root), "?")
+            else:
+                self.source_unreachable.emit(self._stage or "?", str(root))
             return False
         if self._params.get("volume") is None:
             serial = volume_serial(root)
@@ -214,10 +219,9 @@ class PipelineWorker(QObject):
             self.cancelled.emit("stacks", s)
             return False
         self.stage_done.emit("stacks", s)
-        if not self._copy_facts(con):
-            return False
-        a = self._adopt_testimony(con)
-        if a is not None and a.cancelled:
+        if not self._emit_chain(derive.adopt_stages(
+                con, self._params.get("root"), self._now, self._cancel.is_set,
+                on_start=self.stage_started.emit, progress=self._on_chain_progress)):
             return False
         self._bulk(con, "group")
         self._bulk(con, "resolve")
@@ -264,10 +268,11 @@ class PipelineWorker(QObject):
             self.stage_done.emit(name, s)
         return s
 
-    def _adopt_and_derive(self, con):
+    def _adopt_and_derive(self, con, *, derive_always=False):
         """Fakty kopii → przejęcie zeznania → - gdy coś przejęto - pochodne (`group` → `resolve` →
         `calibrate` → `lineage`), w tej samej kolejności co w Dostawie. Wspólna droga DWÓCH gestów
-        bez skanu: ogona „Oznacz zniknięte" (AR-5) i „Zbierz fakty kopii (N)".
+        bez skanu: ogona „Oznacz zniknięte" (AR-5) i „Zbierz fakty kopii (N)" - oraz ogon skanu
+        Dostawy (`_run_all`, z `derive_always`).
 
         DLACZEGO TU, a nie dopiero w następnej dostawie: oznaczenie zniknięcia jest dokładnie tą
         chwilą, w której klatka zaczyna mówić głosem nieobecnego pliku. Bez ogona stan trwał do
@@ -289,27 +294,35 @@ class PipelineWorker(QObject):
         sam predykat bez korzenia (`scan.copy_facts_candidates(con)`), więc gest zawężony do
         ostatniego źródła zostawiałby kopie drzewa obróbki i liczba na przycisku nie schodziłaby
         do zera nigdy. Świadek skasowania bez korzenia to najbliższy istniejący przodek pliku
-        (`backfill_copy_facts`)."""
-        if not self._copy_facts(con):
-            return
-        a = self._adopt_testimony(con)
-        if a is None or a.cancelled or not a.adopted:
-            return
-        for name in ("group", "resolve", "calibrate", "lineage"):
-            self._bulk(con, name)
+        (`backfill_copy_facts`).
+
+        KOLEJNOŚĆ I WARUNEK pochodnych trzyma rdzeń (`derive.adopt_and_derive`, AR-39) - ta sama
+        lista co CLI `presence --apply` i import z dawcy. `derive_always=True` - Dostawa po skanie
+        (`_run_all`). Zwraca `False`, gdy któryś etap anulowano."""
+        return self._emit_chain(derive.adopt_and_derive(
+            con, self._params.get("root"), self._now, self._cancel.is_set,
+            derive_always=derive_always, on_start=self.stage_started.emit,
+            progress=self._on_chain_progress))
+
+    def _emit_chain(self, pary):
+        """Sygnał po każdej parze `(etap, wynik)` łańcucha rdzenia: `cancelled` (i `False` -
+        wołający przerywa drogę) albo `stage_done`. `stage_started` emituje sam rdzeń przez
+        `on_start`, przed etapem - okno pokazuje „… w toku" na czas jego trwania."""
+        for name, wynik in pary:
+            if getattr(wynik, "cancelled", False):
+                self.cancelled.emit(name, wynik)
+                return False
+            self.stage_done.emit(name, wynik)
+        return True
 
     def _bulk(self, con, name):
-        """Etap masowy (group/resolve/calibrate/lineage/delta) — bezobsługowy, sekundy–minuty, bez
-        progresu per-wiersz. delta jest READ-ONLY (zero DML). Emituje stage_started → stage_done."""
+        """Etap masowy (group/resolve/calibrate/lineage/stack_lineage/delta) - bezobsługowy,
+        od sekund do minut, bez progresu per-wiersz; pojedynczy przycisk etapu i droga „Stosy".
+        Funkcje pochodnych bierze z rdzenia (`derive.DERIVED`). delta jest READ-ONLY (zero DML).
+        Emituje stage_started → stage_done."""
         self.stage_started.emit(name)
-        if name == "group":
-            result = run_grouper(con, self._now())
-        elif name == "resolve":
-            result = run_resolver(con, self._now())
-        elif name == "calibrate":
-            result = run_calibration(con, now=self._now())
-        elif name == "lineage":
-            result = run_lineage(con, now=self._now())
+        if name in derive.DERIVED:
+            result = derive.DERIVED[name](con, self._now())
         elif name == "stack_lineage":
             result = run_stack_lineage(con, now=self._now())
         else:                                          # delta — read-only
@@ -331,15 +344,8 @@ class PipelineWorker(QObject):
         zostawiłoby pochodne policzone z głosu nieobecnego pliku do NASTĘPNEJ dostawy."""
         if not self._scan(con):
             return
-        if not self._copy_facts(con):
+        if not self._adopt_and_derive(con, derive_always=True):
             return
-        a = self._adopt_testimony(con)
-        if a is not None and a.cancelled:
-            return
-        self._bulk(con, "group")
-        self._bulk(con, "resolve")
-        self._bulk(con, "calibrate")
-        self._bulk(con, "lineage")
         self._bulk(con, "delta")
         # Obecność ZAWSZE w trybie DRY (raport dostawy ma być szczery: „nic nie znikło" to inna
         # wiadomość niż „nie sprawdziłem"). Zapis wymaga jawnego przycisku. Bez realnego serialu
@@ -351,73 +357,12 @@ class PipelineWorker(QObject):
             self.stage_done.emit("presence", presence.PresenceSummary(
                 aborted=i18n.t("pipeline.presence.skipped_no_volume")))
 
-    def _copy_facts(self, con):
-        """Uzupełnienie faktów KOPII z nagłówków (0021) - etap „Przyjmij nowe" zaraz po skanie.
-
-        DLACZEGO TU, a nie osobny przycisk ani CLI: wydanie jedzie jako sam GUI (onefile - CLI
-        nie powstaje), a kopie sprzed migracji skan z bramą przyrostową POMIJA (mtime bez zmian),
-        więc bez tego etapu żywa baza nie dostałaby liczby obrazów ani zeznań kopii nigdy. Koszt
-        jest jednorazowy: sterownik czyta SAME nagłówki (550 plików XISF archiwum ≈ 9 s po SMB
-        zamiast 108,9 GB treści), a po pierwszym przebiegu jego SELECT jest pusty - wtedy etap
-        milczy całkowicie (QUIET): ani „w toku", ani linii raportu, bo nie ma czego ogłaszać.
-
-        ZAKRES = korzeń TEJ dostawy (jak pass obecności): „Przetwórz wszystko" na wskazanym
-        katalogu nie czyta plików spoza niego. Wołają go Dostawa (`_run_all`), droga „Stosy"
-        (`_stacks`, korzeń stosów) oraz ogon „Oznacz zniknięte" i gest „Zbierz fakty kopii" -
-        oba przez `_adopt_and_derive` (gest bez korzenia - całe archiwum). Anulowanie
-        PRZERYWA łańcuch jak przy skanie - każda kopia to osobna transakcja, więc baza zostaje
-        spójna, a następna dostawa dobierze resztę.
-        Zwraca `False`, gdy anulowano."""
-        root = self._params.get("root")
-        if not scan.copy_facts_candidates(con, root):
-            return True
-        self.stage_started.emit("copy_facts")
-        s = scan.backfill_copy_facts(con, now=self._now(), root=root,
-                                     progress=self._on_copy_facts_progress,
-                                     should_cancel=self._cancel.is_set)
-        if s.cancelled:
-            self.cancelled.emit("copy_facts", s)
-            return False
-        self.stage_done.emit("copy_facts", s)
-        return True
-
-    def _adopt_testimony(self, con):
-        """Przejęcie zeznania ocalałej kopii (AR-5) - etap „Przyjmij nowe" zaraz po faktach kopii.
-
-        Sterowany STANEM (`scan.adopt_candidates`): klatki, których `header` pochodzi z kopii już
-        nieobecnej, a jedyna obecna kopia mówi co innego. Bez kandydatów etap milczy całkowicie
-        (QUIET, wzorzec `_copy_facts`) - a milczy prawie zawsze, bo kandydatów jest tyle, ile
-        skasowanych kopii. Klatki o dwóch i więcej obecnych kopiach albo z zeznaniem napisanym ręką
-        etap zostawia człowiekowi (AR-4) - widać je w Porządkach („Zeznanie z nieobecnej kopii").
-
-        ZAKRES = korzeń TEJ dostawy (jak `_copy_facts`). Anulowanie PRZERYWA łańcuch - każda klatka
-        to osobna transakcja, więc baza zostaje spójna. Wołają go Dostawa (`_run_all`), droga
-        „Stosy" (`_stacks`, korzeń stosów) oraz ogon gestu „Oznacz zniknięte" i gest „Zbierz
-        fakty kopii" (oba `_adopt_and_derive`) - każdy zaraz po `_copy_facts`.
-        Zwraca `AdoptSummary` (wołający czyta `cancelled` i `adopted`) albo `None`, gdy kandydatów
-        nie było."""
-        root = self._params.get("root")
-        if not scan.adopt_candidates(con, root):
-            return None
-        self.stage_started.emit("adopt_testimony")
-        s = scan.adopt_orphan_testimony(con, now=self._now(), root=root,
-                                        progress=self._on_adopt_progress,
-                                        should_cancel=self._cancel.is_set)
-        if s.cancelled:
-            self.cancelled.emit("adopt_testimony", s)
-        else:
-            self.stage_done.emit("adopt_testimony", s)
-        return s
-
-    def _on_adopt_progress(self, done, total, path, s):
+    def _on_chain_progress(self, etap, done, total, path, s):
+        # Postęp faktów kopii i przejęcia zeznania (`derive.adopt_stages`). Migawka jak przy skanie
+        # (dict przez granicę wątku, nigdy żywy obiekt); znacznik `etap` mówi slotowi, której
+        # etykiety liczników użyć - liczniki skanu nie mają tu sensu.
         if should_emit(done, total):
-            self.progress.emit(done, total, path, {**counts_snapshot(s), "etap": "adopt_testimony"})
-
-    def _on_copy_facts_progress(self, done, total, path, s):
-        # Migawka jak przy skanie (dict przez granicę wątku, nigdy żywy obiekt); znacznik `etap`
-        # mówi slotowi, której etykiety liczników użyć - liczniki skanu nie mają tu sensu.
-        if should_emit(done, total):
-            self.progress.emit(done, total, path, {**counts_snapshot(s), "etap": "copy_facts"})
+            self.progress.emit(done, total, path, {**counts_snapshot(s), "etap": etap})
 
     def _on_progress(self, done, total, path, summary):
         # wołane SYNCHRONICZNIE w wątku workera przez scan_tree; przerzedź i wyślij MIGAWKĘ (dict),
@@ -809,12 +754,13 @@ class PipelineView(QWidget):
         self._sync_source_memo()
 
     def _set_root(self, path):
-        """Ustaw źródło skanu + etykiety. Serial na etykiecie jest INFORMACYJNY (stan z tej chwili);
-        wartość do bramy `(volume,path,mtime)` liczy ZAWSZE wątek tła na starcie przebiegu
-        (`PipelineWorker._zrodlo`; R#7+R2-3 - serial z pamięci/montażu bywa stale po przepięciu
-        dysku w trakcie sesji). Wołany wyłącznie po dialogu katalogu - katalog wskazany przed
-        chwilą jest pod ręką."""
-        self._show_root(path, volume_serial(path))
+        """Ustaw źródło skanu + etykiety BEZ dotykania dysku (serial nieznany do czasu sondy). Serial
+        na etykiecie jest INFORMACYJNY (stan z tej chwili); wartość do bramy `(volume,path,mtime)`
+        liczy ZAWSZE wątek tła na starcie przebiegu (`PipelineWorker._zrodlo`; R#7+R2-3 - serial
+        z pamięci/montażu bywa stale po przepięciu dysku w trakcie sesji). Serial na etykiecie
+        dociąga sonda wątku tła po dialogu katalogu (`_on_pick_dir` → etap `probe`): dawniej
+        mierzył go tu wątek okna, a na odłączonym udziale SMB okno stało do timeoutu sieci."""
+        self._show_root(path, None)
 
     def _show_root(self, path, serial):
         """`_set_root` z serialem już zmierzonym - bez dotykania dysku. Woła go sonda źródła
@@ -836,8 +782,11 @@ class PipelineView(QWidget):
         path = QFileDialog.getExistingDirectory(self, i18n.t("pipeline.dlg.pick_scan"))
         if not path:
             return
+        if self._thread is not None:    # PRZED pamięcią: inaczej pamięć wskaże B, a korzeń zostanie A
+            return
         self._remember_source(path)     # D-UX-5: jedna pamięć ostatniego katalogu (pick i receive)
         self._set_root(path)
+        self._start_stage("probe", root=path)      # serial na etykietę mierzy wątek tła (`_zrodlo`)
 
     # ---------------------------------------------------------------- korzeń stosów (I-2b)
 

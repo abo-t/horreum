@@ -107,6 +107,43 @@ def test_filter_backfill_nie_mnozy_eventow_przy_powtornym_resolve(tmp_path):
     con.close()
 
 
+def test_naglowek_bez_FILTER_i_OBJECT_zdejmuje_pochodne_kopii_skasowanej(tmp_path):
+    """AR-2 / AR-22 (1): zeznanie przejęte z ocalałej kopii bez kart `FILTER`/`OBJECT` - filtr
+    (pochodna bez ręki) idzie za nagłówkiem do NULL w JEDNYM zdarzeniu zbiorczym z listą `cleared`.
+    Obiekt ZOSTAJE: nagłówek, który zamilkł, nie odpina obiektu (kontrakt
+    `test_path_rung::test_region_NIE_nadpisuje_obiektu_z_naglowka_ktory_zamilkl` - ze stanu nie da
+    się odróżnić przejęcia bez karty od karty cofniętej po potwierdzeniu ze ścieżki).
+    Falsyfikator: przywróć `if fc is not None` w pętli filtra - `filter_canon` zostanie `Ha`."""
+    import json
+    con = _scanned_tree(tmp_path)
+    run_resolver(con, now=NOW)
+    l1, l2 = (con.execute("SELECT f.id FROM frame f JOIN header h ON h.frame_id = f.id "
+                          "WHERE h.object_raw = ?", (raw,)).fetchone()[0]
+              for raw in ("NGC 4258", "M106"))
+    oid = con.execute("SELECT object_id FROM frame WHERE id = ?", (l2,)).fetchone()[0]
+    repo.assign_object(con, frame_id=l2, object_id=oid, object_source="user", now=NOW,
+                       actor="user:local")
+    con.execute("UPDATE header SET filter_raw = NULL, object_raw = NULL "
+                "WHERE frame_id IN (?, ?)", (l1, l2))
+    con.commit()
+
+    run_resolver(con, now=NOW)
+    f1 = con.execute("SELECT filter_canon, object_id, object_source FROM frame WHERE id = ?",
+                     (l1,)).fetchone()
+    assert tuple(f1) == (None, oid, "header"), "filtr schodzi, obiekt z nagłówka zostaje"
+    f2 = con.execute("SELECT filter_canon, object_source FROM frame WHERE id = ?", (l2,)).fetchone()
+    assert tuple(f2) == (None, "user"), "filtr jest pochodną bez ręki; obiekt z ręki zostaje"
+    ev = json.loads(con.execute("SELECT payload FROM event WHERE verb = 'filter.backfilled' "
+                                "ORDER BY id DESC LIMIT 1").fetchone()[0])
+    assert ev == {"count": 2, "cleared": [[l1, "Ha"], [l2, "Ha"]]}
+
+    nasze = "SELECT count(*) FROM event WHERE verb IN ('filter.backfilled', 'object.unassigned')"
+    ile = con.execute(nasze).fetchone()[0]
+    run_resolver(con, now=NOW)
+    assert con.execute(nasze).fetchone()[0] == ile, "powtórka bez dziennika"
+    con.close()
+
+
 def test_delta_report_procent_na_lightach(tmp_path):
     """% obiektu liczone NA light/master_light (kalibracja nie zaniża): 3/4 = 75%, delta=Snapshot."""
     con = _scanned_tree(tmp_path)

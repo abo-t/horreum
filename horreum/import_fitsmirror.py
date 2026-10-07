@@ -25,14 +25,17 @@ Przebieg (`run_import`):
      ŚWIEŻEGO `os.stat` w derywacji `_mtime_iso`; `file_sha1`/`header_hash`/`size_bytes` dawcy —
      ufamy PO falsyfikatorze) → `ingest_record` z `actor='import:fitsmirror'` (jedna klinga;
      header+cards+event w jednej transakcji — repo.record_header). Plik nieosiągalny → pomiń +
-     `event(frame.review)` target `sha1:<sha1_data>` (W1; kotwica stabilna).
-  4. Po pętli: `run_grouper` + `run_resolver` — te same funkcje co pipeline GUI.
+     `event(frame.review)` target `sha1:<sha1_data>` (W1; kotwica stabilna). Wjazd padł po
+     odczycie → szkielet z markerem 'db' jak w `scan_tree` (AR-46), raport liczy takie rekordy.
+  4. Po pętli: pochodne z rdzenia `derive.run_derived` (group → resolve → calibrate → lineage)
+     - ta sama lista co pipeline GUI i CLI.
   5. BRAMKI LICZBOWE (§4.6 — versus dawca W CHWILI importu, ze STANU, MINUS skipped):
      frame/location == files−skipped; cards == cards dawcy nie-skipped (podgrupa przeliczana
      z dysku wchodzi liczbą realnie odczytanych kart); teleskopy/kamery/configi == niezależna
      derywacja z zeznań (strip+fold ASCII jak `COLLATE NOCASE`, `normalize_camera` — TA SAMA
      derywacja co kanon, więc zastrzeżenie R2#11 TRIM≠strip nie powstaje); review sprzętu ze
-     STANU: `camera_id NULL`==0, `config_id NULL`==0, `pixel_conflict`==0. Naruszenie →
+     STANU: `camera_id NULL`==0, `config_id NULL`==0 (plus szkielety po awarii wjazdu),
+     `pixel_conflict`==0. Naruszenie →
      `ImportAbort` z pełną listą (summary w wyjątku — liczby nie giną).
 
 Kotwice dawcy 2026-07-02 (§1 briefu): 15 559 plików, 8 teleskopów, 5 kamer, 9 filtrów — bramki
@@ -51,16 +54,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.request import pathname2url
 
-from . import db, repo
-from .calibration import run_calibration
-from .grouper import NO_TELESCOPE_KINDS, run_grouper
-from .lineage import run_lineage
+from . import db, derive, repo
+from .grouper import NO_TELESCOPE_KINDS
 from .resolve.cameras import normalize_camera
 from .resolve.frames import normalize_kind
-from .resolver import run_resolver
 from .scan import (
     Card, ScanRecord, ScanSummary, canonize_root, header_dict_from_cards, ingest_record,
-    iter_headers, scan_file, _mtime_iso,
+    iter_headers, scan_file, unreadable_reason_of, _dolicz_probe, _mtime_iso,
+    _szkielet_po_awarii_zapisu,
 )
 from .volumes import volume_serial
 
@@ -68,6 +69,8 @@ ACTOR = "import:fitsmirror"
 DONOR_SCHEMA_VERSION = 4          # user_version dawcy, na którym zbudowany jest ten import (§4.1)
 SAMPLE_RANDOM = 5                 # falsyfikator: tylu losowych (R1#6)
 SAMPLE_LATE = 12                  # falsyfikator: tylu późno-naprawianych (jak sonda PF-1)
+# Etap pochodny (`derive.DERIVED_STAGES`) → pole `ImportSummary`; brak wpisu = ta sama nazwa.
+_POLE_ETAPU = {"calibrate": "calibration"}
 
 
 class ImportAbort(RuntimeError):
@@ -111,7 +114,13 @@ class ImportSummary:
     imported: int = 0
     skipped: int = 0
     skipped_paths: list = field(default_factory=list)
-    recomputed: int = 0                        # pliki podgrupy czytane z dysku (nie z dawcy)
+    # Wjazd (`ingest_record`) padł po udanym odczycie: rekord wszedł szkieletem z markerem 'db'
+    # (`scan._szkielet_po_awarii_zapisu`, ta sama droga co `scan_tree`) - najbliższy skan
+    # przeczyta plik ponownie. `ingest_failed_frames` = z tego klatki-szkielety NOWE (osie NULL).
+    ingest_failed: int = 0
+    ingest_failed_paths: list = field(default_factory=list)
+    ingest_failed_frames: int = 0
+    recomputed: int = 0                      # pliki podgrupy czytane z dysku (nie z dawcy)
     expected_cards: int = 0                    # suma kart wciągniętych zeznań (bramka `cards`)
     gates: dict = field(default_factory=dict)
     gate_failures: list = field(default_factory=list)
@@ -400,6 +409,9 @@ def _gates(con, summary, axes_seen):
     JEDEN właściciel w `grouper`, nie kopia w predykacie (spójność z `resolver.review_state`)."""
     tel_seen, cam_seen, cfg_seen = axes_seen
     off_axis = json.dumps(sorted(NO_TELESCOPE_KINDS))
+    # Szkielety po awarii wjazdu (AR-46) to klatki 'unknown' bez osi - stan znany i policzony
+    # w raporcie, więc bramki osi oczekują ich, zamiast udawać, że import ich nie założył.
+    szkielety = summary.ingest_failed_frames
     expected = {
         "frame": summary.imported,
         "location": summary.imported,
@@ -407,8 +419,8 @@ def _gates(con, summary, axes_seen):
         "telescope": len(tel_seen),
         "camera": len(cam_seen),
         "config": len(cfg_seen),
-        "frame.camera_id NULL": 0,             # review sprzętu ze STANU (rama KIND-AWARE/STAN)
-        "frame.config_id NULL": 0,
+        "frame.camera_id NULL": szkielety,     # review sprzętu ze STANU (rama KIND-AWARE/STAN)
+        "frame.config_id NULL": 0 if "unknown" in NO_TELESCOPE_KINDS else szkielety,
         "camera.pixel_conflict": 0,
     }
     actual = {
@@ -486,6 +498,41 @@ def run_import(donor, con, *, now, rng_seed=None, repaired_paths=None, progress=
                 file_sha1=row["sha1_file"], header_hash=row["header_hash"],
                 hdu_index=row["hdu_index"], compressed=row["compressed"], cards=cards)
         summary.scan.files += 1
+        # Liczniki wjazdu na boku (wzorzec `scan_tree`): wyjątek po części zapisu wycofuje zakres
+        # `repo.atomic`, więc jego liczniki nie mogą trafić do raportu przebiegu.
+        liczniki = ScanSummary()
+        try:
+            ingest_record(con, rec, volume=pf.volume, drive_letter=pf.drive_letter, tier=None,
+                          now=now, summary=liczniki, actor=ACTOR, inplace_gen=gen)
+        except repo.StaleScanRecord as exc:
+            raise ImportAbort(
+                f"zapis w miejscu na {path} w trakcie importu ({exc}) - import zasila WYLACZNIE "
+                f"swieza baze bez innych piszacych; powtorz na swiezej bazie") from exc
+        except Exception as exc:  # noqa: BLE001 - backstop wjazdu, jak W1 w `scan_tree`
+            # AR-46: padł ZAPIS po udanym odczycie - fakt o nas, nie o pliku. Ten sam szkielet co
+            # w `scan_tree` (klatka po `sha1_data`, lokacja z markerem 'db', review), więc import
+            # nie przerywa się na jednym rekordzie, a najbliższy skan przeczyta plik ponownie
+            # (marker znosi bramę przyrostową). Szkielet też nie wchodzi = baza nie przyjmuje
+            # zapisu; import zasila świeżą bazę, więc to abort (EXPECT), nie cicha strata.
+            przed = summary.scan.frames_new
+            try:
+                _szkielet_po_awarii_zapisu(
+                    con, rec, volume=pf.volume, drive_letter=pf.drive_letter, tier=None,
+                    reason=unreadable_reason_of(exc), now=now, summary=summary.scan,
+                    actor=ACTOR)
+            except Exception as exc2:
+                raise ImportAbort(
+                    f"wjazd {path} padl ({type(exc).__name__}: {exc}), a szkielet tez nie "
+                    f"wszedl ({type(exc2).__name__}: {exc2})") from exc2
+            summary.ingest_failed += 1
+            summary.ingest_failed_paths.append(path)
+            summary.ingest_failed_frames += summary.scan.frames_new - przed
+            if progress is not None:
+                progress(done, total, path)
+            continue
+        _dolicz_probe(summary.scan, liczniki)
+        # Karty i osie liczone dopiero PO udanym wjeździe: szkielet nie ma kart ani osi, więc
+        # rekord, który wszedł szkieletem, nie może podnosić oczekiwań bramek §4.6.
         summary.expected_cards += len(rec.cards or ())
         if rec.header is not None:             # niezależna derywacja osi do bramek §4.6
             cam = normalize_camera(rec.header.get("INSTRUME"))
@@ -501,26 +548,19 @@ def run_import(donor, con, *, now, rng_seed=None, repaired_paths=None, progress=
                     tel_seen.add(_fold_ascii(tel))
                 if tel and cam:
                     cfg_seen.add((_fold_ascii(tel), cam))
-        try:
-            ingest_record(con, rec, volume=pf.volume, drive_letter=pf.drive_letter, tier=None,
-                          now=now, summary=summary.scan, actor=ACTOR, inplace_gen=gen)
-        except repo.StaleScanRecord as exc:
-            raise ImportAbort(
-                f"zapis w miejscu na {path} w trakcie importu ({exc}) - import zasila WYLACZNIE "
-                f"swieza baze bez innych piszacych; powtorz na swiezej bazie") from exc
         if progress is not None:
             progress(done, total, path)
 
     summary.imported = summary.files_total - summary.skipped
-    # ŁAŃCUCH W TEJ SAMEJ KOLEJNOŚCI CO DOSTAWA W GUI (§4.4, SPOT): group → resolve → calibrate →
-    # lineage. Kolejność nie jest gustem: przepis flata bierze `frame.filter_canon` (powstaje
-    # w resolverze), a rodowód dopasowuje light do już wyłonionych profili. Do 2026-08-01 fasada
-    # kończyła na resolverze, więc po samym imporcie oś przepisu była PUSTA do pierwszego
-    # `calibrate` — baza „po imporcie" nie znaczyła tego samego, co baza po Dostawie.
-    summary.group = run_grouper(con, now=now)          # te same funkcje co pipeline GUI (§4.4)
-    summary.resolve = run_resolver(con, now=now)
-    summary.calibration = run_calibration(con, now=now)
-    summary.lineage = run_lineage(con, now=now)
+    # ŁAŃCUCH Z RDZENIA (`derive.run_derived`, AR-39) - ta sama lista i kolejność co Dostawa w GUI
+    # i ogon CLI `presence --apply`. Do 2026-08-01 fasada kończyła na resolverze, więc po samym
+    # imporcie oś przepisu była PUSTA do pierwszego `calibrate` - baza „po imporcie" nie znaczyła
+    # tego samego, co baza po Dostawie. Faktów kopii i przejęcia zeznania tu nie ma: świeża baza,
+    # każda kopia wchodzi z faktami z wjazdu, a nieobecnych kopii jeszcze nie ma.
+    for etap, wynik in derive.run_derived(con, now):
+        pole = _POLE_ETAPU.get(etap, etap)
+        assert hasattr(summary, pole), f"ImportSummary nie ma pola etapu pochodnego {etap!r}"
+        setattr(summary, pole, wynik)
     _gates(con, summary, (tel_seen, cam_seen, cfg_seen))
     return summary
 

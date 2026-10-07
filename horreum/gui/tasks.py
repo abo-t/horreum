@@ -98,19 +98,22 @@ _TASKS = [
     ("observatory_review_frames", "tasks.observatory_review_frames", _PAGE_OBSERVATORY),
     ("observatories_unnamed", "tasks.observatories_unnamed", _PAGE_OBSERVATORY),
     ("dup_frames", "tasks.dup_frames", PRESET_DUPS),
-    # Wiersz AKCYJNY i ROBOTA (0021) - świadomie POZA `_BEZ_ROBOTY` i bez werdyktu „zostawiam", inaczej
-    # niż sąsiad „Wersje stosów". Tam dwie wersje to dwa prawowite obrazy i „zostawiam obie" jest
-    # odpowiedzią (werdyktem, 0026); tu dwie
-    # kopie JEDNEJ klatki mówią sprzeczne rzeczy (inny FILTER, inna liczba obrazów), a oś klatki
-    # pokazuje zeznanie tej, która wygrała w `header` - więc jedna z nich wprowadza w błąd i ktoś
-    # musi rozstrzygnąć, która. Stoi pod „Duplikatami", bo jest ich podzbiorem. Liczba i lista
-    # czytają jeden predykat (`queries.copy_conflict_frame_ids`).
+    # Wiersz AKCYJNY i ROBOTA (0021) - świadomie POZA `_BEZ_ROBOTY`. Dwie kopie JEDNEJ klatki mówią
+    # sprzeczne rzeczy (inny FILTER, inna liczba obrazów), a oś klatki pokazuje zeznanie tej, która
+    # wygrała w `header` - więc jedna z nich wprowadza w błąd i ktoś musi rozstrzygnąć, która.
+    # Rozstrzyga gest „Ta kopia prowadzi" w menu prawego kliku w Zbiorach (AR-4, AR-23): klatka
+    # przejmuje zeznanie wskazanej kopii, a wybór jest faktem ręki. Kopie dalej się różnią, więc
+    # klatka zostaje na liście (tam się decyzję widzi i zmienia), ale robotą jest wyłącznie podzbiór
+    # BEZ decyzji ręki (`_ROBOTA_Z_PODZBIORU`, wzorzec „Wersji stosów"). Stoi pod „Duplikatami", bo
+    # jest ich podzbiorem. Liczba i lista czytają jeden predykat (`queries.copy_conflict_frame_ids`).
     ("copy_conflict_frames", "tasks.copy_conflict_frames", PRESET_COPY_CONFLICT),
     # Wiersz AKCYJNY i ROBOTA (AR-5) - stoi pod „Kopiami niezgodnymi", bo to ta sama rodzina pytań.
     # Tam kopie kłócą się ze sobą; tu zgadzać się mogą, ale `header` mówi głosem kopii, której już
-    # nie ma. Kopię wiodącą wskazuje człowiek (AR-4) przy ≥2 obecnych kopiach albo zeznaniu z ręki;
-    # klatki o jednej kopii naprawia etap Dostawy, ale tylko pod korzeniem, po którym chodzi - więc
-    # wiersz liczy wszystkie (`queries.orphan_testimony_frame_ids`), żeby żadna nie czekała niewidoczna.
+    # nie ma. Kopię wiodącą wskazuje człowiek (AR-4) gestem „Ta kopia prowadzi" (AR-23) przy ≥2
+    # obecnych kopiach albo zeznaniu z ręki; po geście klatka mówi głosem obecnej kopii i wypada
+    # z predykatu sama. Klatki o jednej kopii naprawia etap Dostawy, ale tylko pod korzeniem, po
+    # którym chodzi - więc wiersz liczy wszystkie (`queries.orphan_testimony_frame_ids`), żeby żadna
+    # nie czekała niewidoczna; gest działa i na nich.
     ("orphan_testimony_frames", "tasks.orphan_testimony_frames", PRESET_ORPHAN_TESTIMONY),
     # Wiersz AKCYJNY (0022, Q8): kopia po przerwanym zapisie nagłówka w miejscu, izolowana od skanu.
     # Robota człowieka: odzysk z dziennika operacji albo zwolnienie po własnym rozstrzygnięciu.
@@ -162,7 +165,20 @@ _TASKS = [
 # w `queries.tasks_state`. Liczba i lista pod klikiem zostają jednym zbiorem; plakietkę,
 # pogrubienie i kolor rozstrzyga podzbiór. Przy podzbiorze mniejszym od całości wiersz mówi
 # „robota z liczby" (`tasks.of_total`), żeby rozjazd liczby z plakietką nie wyglądał na błąd.
-_ROBOTA_Z_PODZBIORU = {"stack_versions": "stack_versions_open"}
+_ROBOTA_Z_PODZBIORU = {"stack_versions": "stack_versions_open",
+                       "copy_conflict_frames": "copy_conflict_open"}
+# Podpowiedź części liczby, która robotą NIE jest - klucz wiersza → (klucz zdania w odmianie,
+# nazwy z katalogu). Liczba tej części = liczba wiersza minus robota.
+_PODPOWIEDZ_PODZBIORU = {
+    "stack_versions": ("tasks.stack_versions_kept_tip", {"keep": "grid.version.keep_all"}),
+    "copy_conflict_frames": ("tasks.copy_conflict_led_tip", {}),
+}
+
+
+def _zdanie_podzbioru(key, n):
+    """Zdanie podpowiedzi o `n` pozycjach liczby wiersza `key`, które robotą nie są."""
+    klucz, nazwy = _PODPOWIEDZ_PODZBIORU[key]
+    return i18n.t_plural(klucz, n, **{k: i18n.t(v) for k, v in nazwy.items()})
 
 # TRZECI STAN WIERSZA: KLIKALNY, ALE NIE ROBOTA. Do 0809 lista znała dwa — informacyjny (cel `None`,
 # nie prowadzi nigdzie) i akcyjny (cel jest, liczba > 0 znaczy „tu jest robota"). Wiersz „Zastąpione"
@@ -187,13 +203,20 @@ def _liczniki_osi(con):
         (`queries.observatory_review_frames`) - oś stanowiska jest KIND-AGNOSTIC, więc liczba
         obejmuje każdy rodzaj, dokładnie tyle, ile okno gestu pokaże.
       * `object_kept_frames` = `supersede.kept_object_facts` (AR-41).
+      * `copy_conflict_open` = klatki „Kopii niezgodnych" BEZ decyzji ręki (AR-23) - robota
+        wiersza (`_ROBOTA_Z_PODZBIORU`). Decyzję czyta `queries.hand_testimony_frame_ids` (jeden
+        właściciel pytania „czyj głos niesie `header`"): gest „Ta kopia prowadzi" zostawia
+        `header.adopted` z aktorem `user:local`. Zapis nagłówka w miejscu odmawia przy kilku
+        obecnych kopiach (`macro`, D-W1), więc ręka na klatce z rozjazdem kopii to ten gest.
 
     Pomiar 2026-10-06 na kopii żywej bazy: 423 bez zestawu (422 light RAW bez TELESCOP w EXIF,
     1 `unknown` XISF), 1223 bez stanowiska, 0 zatrzymanych faktów."""
+    niezgodne = queries.copy_conflict_frame_ids(con)
     return {
         "config_review_frames": resolver.review_state(con).no_config,
         "observatory_review_frames": len(queries.observatory_review_frames(con)),
         "object_kept_frames": len(supersede.kept_object_facts(con)),
+        "copy_conflict_open": len(niezgodne - queries.hand_testimony_frame_ids(con, niezgodne)),
     }
 
 
@@ -207,6 +230,9 @@ _PODPOWIEDZI_OSI = {
     "observatory_review_frames": ("tasks.observatory_review_tip",
                                   {"assign": "obshand.btn_assign"}),
     "object_kept_frames": ("tasks.object_kept_tip", {"persp": "perspective.superseded"}),
+    # AR-23: gest „Ta kopia prowadzi" mieszka w menu prawego kliku w Zbiorach - wiersz mówi, gdzie.
+    "copy_conflict_frames": ("tasks.copy_conflict_tip", {"lead": "grid.lead.menu"}),
+    "orphan_testimony_frames": ("tasks.orphan_testimony_tip", {"lead": "grid.lead.menu"}),
 }
 
 # WIERSZE, KTÓRYCH ZERO JEST WIEDZĄ DOPIERO PO ZEBRANIU FAKTÓW KOPII (0021). Oba predykaty porównują
@@ -219,7 +245,8 @@ _PODPOWIEDZI_OSI = {
 # i mówi „N+" z tą samą receptą - tam robota jest (klatki do obejrzenia), więc wiersz zostaje
 # pogrubiony i klik prowadzi do perspektywy. Kopie bez faktów liczy predykat porównywalnych
 # kandydatów (`scan.copy_facts_candidates(..., porownywalne=True)`): pojedynczy XISF czeka na
-# uzupełnienie, ale żadnej z tych dwóch liczb nie zmieni.
+# uzupełnienie, ale żadnej z tych dwóch liczb nie zmieni. Kopia NIECZYTELNA bez faktów też jest
+# w tej liczbie (AR-26): sterownik jej nie czyta, ale dla porównania kopii to to samo „nie wiem".
 _CZEKA_NA_FAKTY_KOPII = frozenset({"copy_conflict_frames", "orphan_testimony_frames"})
 # KLIK W „?" PROWADZI DO DOSTAWY, nie do perspektywy (AR-28 (b)). Lista pod klikiem czyta ten sam
 # predykat co liczba, a liczba „nie wie" - więc perspektywa była pusta („Brak klatek w tej
@@ -391,9 +418,10 @@ class TasksView(QWidget):
             elif key in _PODPOWIEDZI_OSI and n > 0:     # ta sama reguła zera co wyżej
                 klucz, nazwy = _PODPOWIEDZI_OSI[key]
                 tip = i18n.t(klucz, **{k: i18n.t(v) for k, v in nazwy.items()})
+                if robota != n:                         # gest i część z decyzją - oba zdania
+                    tip += _zdanie_podzbioru(key, n - robota)
             elif robota != n:
-                tip = i18n.t_plural("tasks.stack_versions_kept_tip", n - robota,
-                                    keep=i18n.t("grid.version.keep_all"))
+                tip = _zdanie_podzbioru(key, n - robota)
             else:
                 tip = ""
             it.setToolTip(tip)

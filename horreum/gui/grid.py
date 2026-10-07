@@ -22,6 +22,7 @@ najwyżej JEDEN; przełączenie na cudzy panel czyści podgląd dotychczasowego 
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 import os
@@ -47,8 +48,8 @@ from PySide6.QtWidgets import (
     QTableView, QToolButton, QVBoxLayout, QWidget,
 )
 
-from horreum import (db, filter_engine, lineage, macro as macro_mod, naming, pivot as pivot_mod,
-                     repo, scan, stacks, supersede, writeback)
+from horreum import (db, filter_engine, lead_copy, lineage, macro as macro_mod, naming,
+                     pivot as pivot_mod, repo, scan, stacks, supersede, writeback)
 from horreum.gui import busy, facet_model, i18n, portfolio, queries, rows, theme
 from horreum.gui import pola as pola_mod   # `pola` bywa w tym pliku zmienną lokalną (pola zeznania)
 from horreum.gui.facets import RAIL_MIN_W as _FIELDS_MIN_W, FacetRail
@@ -472,6 +473,10 @@ _RECEPTY_ZAPISU = {
 # to znakiem „?" (`_images_cell`).
 # Wybór ręki w „Polach" bije domyślną (`FramesView._obrazy_reka`). Klucz = flaga z `_TRIMY`.
 _FLAGI_OBRAZOW = ("_only_dups", "_only_copy_conflict", _FLAGA_WERSJI)
+# Dwie perspektywy, w których każda klatka czeka na wskazanie kopii wiodącej (AR-4, AR-23): menu
+# tabeli pokazuje w nich podmenu „Ta kopia prowadzi" zawsze - przy złym zaznaczeniu wygaszone
+# z powodem. Klucz = flaga z `_TRIMY`.
+_FLAGI_KOPII_WIODACEJ = ("_only_copy_conflict", "_only_orphan_testimony")
 # Perspektywy, w których komórka ścieżki niesie prefiks „×N" albo ścieżkę jako przedmiot decyzji
 # (duplikaty, ich podzbiór niezgodnych, wersje stosów, dwie perspektywy izolacji zapisu): tam
 # kolumna bierze szerokość z treści z sufitem i elizją w środku (`kolumna_z_tresci`). Gdzie indziej
@@ -751,6 +756,39 @@ def _zdanie_gestu_zapisu(op, res):
         if powod is not None:
             msg += i18n.t("grid.inplace.detail", file=_ogon_sciezki(powod.path),
                           detail=powod.reason)
+    return msg
+
+
+def _kopia_krotko(path):
+    """Katalog i nazwa pliku kopii (`B_CLS\\m.xisf`) - do zdania na pasku. Sama nazwa nie wystarcza:
+    kopie jednej klatki zwykle mają tę samą nazwę w różnych katalogach, a cała ścieżka zjadłaby
+    pasek, na którym stoi też droga powrotu."""
+    p = str(path or "")
+    i = max(p.rfind("\\"), p.rfind("/"))
+    j = max(p.rfind("\\", 0, i), p.rfind("/", 0, i)) if i > 0 else -1
+    return p[j + 1:]
+
+
+# Werdykt gestu „Ta kopia prowadzi" (`lead_copy.LeadCopyResult.verdict`) → klucz zdania.
+_ZDANIA_KOPII_WIODACEJ = {
+    "adopted": "grid.lead.adopted", "confirmed": "grid.lead.confirmed",
+    "unchanged": "grid.lead.unchanged",
+    "absent": "grid.lead.absent", "isolated": "grid.lead.isolated", "failed": "grid.lead.failed",
+    "identity": "grid.lead.identity", "stale": "grid.lead.stale", "raced": "grid.lead.raced",
+}
+
+
+def _zdanie_kopii_wiodacej(res):
+    """Zdanie po geście „Ta kopia prowadzi" - czysta funkcja. Przejęcie mówi DROGĘ POWROTU: kopię,
+    która mówiła przed gestem, wskazuje się tym samym gestem (`res.back`). Gdy żadna obecna kopia
+    nie mówiła (zeznanie z kopii, której już nie ma), powrotu gestem nie ma i zdanie to mówi -
+    poprzednie zeznanie zostaje wyłącznie w dzienniku. Odmowa mówi, że nic nie zapisano, i czemu."""
+    msg = i18n.t(_ZDANIA_KOPII_WIODACEJ[res.verdict], copy=_kopia_krotko(res.path),
+                 reason=res.reason or "")
+    if res.verdict in ("adopted", "confirmed"):
+        msg += (i18n.t("grid.lead.back", lead=i18n.t("grid.lead.menu"),
+                       copy=_kopia_krotko(res.back[0])) if res.back
+                else i18n.t("grid.lead.no_back"))
     return msg
 
 
@@ -1548,6 +1586,10 @@ class GridTableModel(QAbstractTableModel):
                 # Klatka zastąpiona MÓWI TO WPROST W KOMÓRCE, nie tylko tłem i tooltipem: tło niesie
                 # kolor (a użytkownik bywa daltonistą albo ma inny motyw), tooltip wymaga najechania,
                 # a ten wiersz ma się tłumaczyć sam — inaczej wygląda jak plik, który zginął.
+                # Wchłonięty szkielet (AR-42, flaga `absorbed` z `base_rows`) to nie podmiana treści:
+                # plik wyzdrowiał. Osobne zdanie, to samo ogniwo do następczyni.
+                if superseded and row.get("absorbed"):
+                    return i18n.t("grid.cell.absorbed", id=row.get("superseded_by"))
                 if superseded:
                     return i18n.t("grid.cell.superseded", id=row.get("superseded_by"))
                 # Wycofana MÓWI TO W KOMÓRCE z tego samego powodu, co zastąpiona: tło niesie kolor
@@ -1560,7 +1602,8 @@ class GridTableModel(QAbstractTableModel):
                 # Prefiks „×N" PRZED nazwą (P2-2): sufiks ginął przy elizji długich ścieżek.
                 return f"×{row['n_present']}  {name}" if dup else name
             if role == Qt.ToolTipRole:
-                extra = _superseded_tip(row) if superseded else (
+                extra = i18n.t("grid.tip.absorbed", id=row.get("superseded_by")) if (
+                    superseded and row.get("absorbed")) else _superseded_tip(row) if superseded else (
                     _retired_back_tip(row) if retired_back else
                     _retired_tip(row) if retired else (
                     _vanished_tip(row) if vanished else (
@@ -3530,6 +3573,197 @@ class PolaWorker(QObject):
         return odcisk, pola_mod.pokrycie(con)
 
 
+# ---- skład danych gridu (AR-27): czysty odczyt, bez widżetów - wątek GUI albo `ZbiorWorker` ----
+
+def _memo_leaf_fns(con):
+    """Memoizowane akcesory silnika na czas JEDNEGO składu (F4R2#4): sibling-sety facetów
+    re-używają tych samych liści, więc cache `(kind,kw,p1,p2)→set` zwija 5N wywołań liści do N.
+    Jedna migawka DB per skład - cache umiera razem z nim (źródło prawdy = baza)."""
+    leaf_cache = {}
+    universe_cache = []
+
+    def leaf_fn(k, kw, p1, p2):
+        key = (k, kw, p1, p2)
+        if key not in leaf_cache:
+            leaf_cache[key] = queries.leaf_frame_ids(con, k, kw, p1, p2)
+        return leaf_cache[key]
+
+    def universe_fn():
+        if not universe_cache:
+            universe_cache.append(queries.all_frame_ids(con))
+        return universe_cache[0]
+
+    return leaf_fn, universe_fn
+
+
+def _sklad_zbioru(con, stan, przerwij=lambda: None):
+    """Migawka stanu widoku (`FramesView._migawka_zbioru`) → dane gridu i listwy. ZERO widżetów, więc
+    ten sam kod liczy na wątku GUI (tryb inline, gesty) i w `ZbiorWorker` na jego własnym połączeniu.
+    `przerwij` rzuca, gdy zlecenie straciło sens (nowsze w kolejce, widok znika) - wołane między
+    krokami; zapytanie w locie przerywa `Connection.interrupt` u wołającego.
+
+    Zwraca słownik dla `FramesView._zastosuj_zbior`: wiersze `base`, `pivot`, `keywords`, `base_ids`,
+    liczniki listwy `listwa` i `baza_ma_klatki` (rozróżnienie pustego stanu, wiz F5 #8)."""
+    leaf_fn, universe_fn = _memo_leaf_fns(con)
+    frame_ids = filter_engine.run(stan["drzewo"], leaf_fn=leaf_fn, universe_fn=universe_fn)
+    # JEDNA derywacja trimu dla zbioru głównego I dla sibling-setów listwy (SPOT, F4R2#2) -
+    # lista powstaje RAZ i idzie w obie strony. Dwie kopie tej enumeracji rozjechały się
+    # dokładnie tak, jak zapowiada historia rodziny `only_*`: listwa dostawała `dup_ids`
+    # i `review_ids`, a pięciu młodszych braci nie widziała w ogóle, więc w perspektywie
+    # z trimem liczniki facetów i godziny portfela liczyły się na zbiorze BEZ przycięcia.
+    # Skład rodziny czyta migawka z `_TRIMY` (BP-4), więc dołożenie ósmej flagi jest wpisem
+    # w tabelę, a nie ósmym miejscem do zapamiętania.
+    trims = [getattr(queries, nazwa)(con) for nazwa in stan["trimy"]]
+    # NOWY set, NIGDY `&=`: przy pustym filtrze `filter_engine.run` zwraca uniwersum WPROST
+    # (`filter_engine.py:171`), a to jest ZAPAMIĘTANY obiekt memoizacji (`_memo_leaf_fns`).
+    # `&=` przycinało go W MIEJSCU, więc kolejne `universe_fn()` widziało już przycięty zbiór -
+    # perspektywa z trimem potrafiła pokazać „Baza pusta" na pełnej bazie (wizytator P5 #2).
+    for trim in trims:
+        frame_ids = frame_ids & trim
+    przerwij()
+    base = [_derive(r) for r in queries.base_rows(con, list(frame_ids))]
+    if stan["wersje"]:
+        _adnotuj_wersje(base, queries.stack_version_groups(con))
+    # Fakty KOPII (0021) - pytamy wyłącznie o klatki z kilkoma obecnymi kopiami: kolumna
+    # „Obrazy" i podpowiedź „×N" potrzebują wtedy każdej kopii, a reszta archiwum ma jedną
+    # i jej liczbę niesie już `base_rows`. Wąskie zapytanie zamiast podzapytania na 16 tys. wierszy.
+    _dolacz_kopie(base, queries.present_copy_facts(
+        con, [b["frame_id"] for b in base if (b.get("n_present") or 0) > 1]))
+    base_ids = [b["frame_id"] for b in base]
+    keywords = list(stan["kolumny"])
+    przerwij()
+    karty = queries.cards_pivot(con, base_ids, keywords) if (base_ids and keywords) else []
+    pv = pivot_mod.build_pivot(base_ids, keywords, karty)
+    przerwij()
+    listwa = _liczniki_listwy(con, stan["facety"], stan["filtr"], leaf_fn, universe_fn,
+                              trims, base_ids)
+    # Uniwersum bierzemy z memoizowanego `universe_fn` TEGO składu - na niepustym gridzie
+    # zapytania nie ma w ogóle, a gdy filtr już go dotknął, jest z cache'u.
+    return {"base": base, "pivot": pv, "keywords": keywords, "base_ids": base_ids,
+            "listwa": listwa, "baza_ma_klatki": bool(base) or bool(universe_fn())}
+
+
+def _liczniki_listwy(con, facet_state, filter_tree, leaf_fn, universe_fn, trims, current_ids):
+    """Liczniki listwy facetów per SIBLING-SET (F4R#1): zbiór facetu F = compose bez CAŁEJ własnej
+    grupy F (in+ex) - liczniki na pełnym zbiorze samo-zawężałyby facet i OR-wewnątrz byłby
+    nieosiągalny. Facet BEZ aktywnego wyboru → sibling == zbiór bieżący (już policzony;
+    D-UX-3(a)). Trim perspektywy = przecięcie z gotowymi setami (F4R2#2, bez base_rows).
+
+    `trims` przychodzi ze składu GOTOWĄ LISTĄ, a nie jako dwa nazwane sety: enumeracja
+    rodziny `only_*` ma tu jednego właściciela, więc dołożenie siódmej perspektywy nie może
+    po cichu ominąć liczników listwy (to jest ta sama klasa rozjazdu, którą rodzina
+    przechodziła już dwa razy).
+
+    Zwraca `(counts, extras, aliases, alias_forms)` - komplet argumentów `FacetRail.set_data`
+    poza stanem i odsłonięciem, które należą do widoku (`FramesView._zastosuj_listwe`)."""
+    counts, extras = {}, {}
+    for facet in facet_model.FACETS:
+        if facet not in facet_state:
+            ids = current_ids
+        else:
+            tree = facet_model.compose(facet_model.sibling_state(facet_state, facet), filter_tree)
+            sib = filter_engine.run(tree, leaf_fn=leaf_fn, universe_fn=universe_fn)
+            # NOWY set, NIGDY `&=` - z tego samego powodu, co w składzie zbioru: sibling-set powstaje
+            # z drzewa BEZ własnej grupy facetu, więc przy jednym aktywnym facecie i pustym
+            # filtrze `compose` daje `None`, a `run` oddaje MEMOIZOWANE uniwersum. `&=` przycinało
+            # je w miejscu, czyli kolejny facet tej samej pętli liczył licznik na zbiorze
+            # przyciętym przez poprzednika.
+            for trim in trims:
+                sib = sib & trim
+            ids = list(sib)
+        counts[facet] = _liczniki_facetu(con, facet, ids)
+        if facet == "object":
+            # Portfel (F7 §8): godziny lightów per obiekt na TYM SAMYM `ids` co `facet_objects`
+            # (parytet n↔godziny; inne aktywne facety zawężają godziny). Formatowanie = `portfolio`.
+            summ = portfolio.summarize(queries.object_exposure(con, ids))
+            extras["object"] = {oid: (portfolio.object_suffix(e), portfolio.object_tooltip(e))
+                                for oid, e in summ.items()}
+    # DRUGIE NAZWY do szukajki (S3): mapa `canon → {alias_norm}` z CAŁEJ biblioteki, nie ze
+    # zbioru - szukajka chowa wiersze listy, więc filtrowanie mapy po `ids` nic by nie
+    # oszczędziło, a rozjechałoby dwa wejścia tego samego pytania. Bez niej „Large Magellanic
+    # Cloud" nie znajduje niczego: kanon `LMC` nie ma z tą frazą wspólnej litery.
+    # Brzmienie aliasu w podpowiedzi trafienia (AR-45) - ta sama mapa co okno „Przypisz obiekt”.
+    return (counts, extras, queries.object_alias_index(con), assign_dialog.formy_aliasow(con))
+
+
+def _liczniki_facetu(con, facet, ids):
+    """Kubełki jednego facetu → list[(value, label, n)] (kontrakt `FacetRail.set_data`).
+    Etykieta teleskopu = label→canon fallback z JEDNEGO właściciela (`queries.telescope_label`);
+    filtr/rodzaj/noc są swoją własną etykietą."""
+    if facet == "object":
+        return [(r["id"], r["canon"], r["n"]) for r in queries.facet_objects(con, ids)]
+    if facet == "filter":
+        return [(r["filter_canon"], r["filter_canon"], r["n"])
+                for r in queries.facet_filters(con, ids)]
+    if facet == "channel":
+        return [(r["channel"], r["channel"], r["n"])
+                for r in queries.facet_channels(con, ids)]
+    if facet == "kind":
+        return [(r["kind"], r["kind"], r["n"]) for r in queries.facet_kinds(con, ids)]
+    if facet == "telescope":
+        return [(r["id"], queries.telescope_label(r), r["n"])
+                for r in queries.facet_telescopes(con, ids)]
+    return [(r["night"], r["night"], r["n"]) for r in queries.facet_nights(con, ids)]
+
+
+class ZbiorWorker(QObject):
+    """Skład danych gridu POZA wątkiem GUI (AR-27) - bliźniak `PolaWorker`, ten sam cykl wątku.
+
+    Zmierzone na kopii żywej bazy (16 901 klatek, perspektywa „Przegląd"): okno stało 1,4-1,5 s po
+    każdym przebiegu Dostawy i 1,2-1,5 s po każdym kliku facetu, perspektywy i kolumn, bo cały
+    skład (`base_rows` + `_derive` ×16 901, `cards_pivot`, liczniki listwy) szedł w slocie. Tu
+    liczy go `_sklad_zbioru` na WŁASNYM połączeniu w jednej transakcji czytającej (migawka WAL: zbiór
+    i liczniki listwy opisują ten sam stan bazy); w slocie zostaje samo przyłożenie do widżetów.
+
+    Anulowanie jak w `PolaWorker`: flaga sprawdzana między krokami składu + `Connection.interrupt`
+    z wątku GUI na zapytanie w locie, pod zamkiem, żeby nie trafić w połączenie właśnie zamykane."""
+
+    done = Signal(int, object)     # generacja, wynik `_sklad_zbioru`
+    failed = Signal(int, str)      # generacja, komunikat
+    finished = Signal()            # run() wrócił KAŻDĄ drogą → quit wątku
+
+    def __init__(self, gen, stan, db_path):
+        super().__init__()
+        self._gen = gen
+        self._stan = stan
+        self._db_path = db_path
+        self._con = None
+        self._zamek = threading.Lock()
+        self._cancel = threading.Event()
+
+    def request_cancel(self):
+        """Wołane z wątku GUI: flaga + przerwanie zapytania w locie (patrz docstring klasy)."""
+        self._cancel.set()
+        with self._zamek:
+            if self._con is not None:
+                self._con.interrupt()
+
+    def _przerwij(self):
+        if self._cancel.is_set():
+            raise RuntimeError("przerwano")
+
+    @Slot()
+    def run(self):
+        wynik = error = None
+        try:
+            with self._zamek:
+                self._con = db.connect(self._db_path)
+            try:
+                self._con.execute("BEGIN")
+                wynik = _sklad_zbioru(self._con, self._stan, self._przerwij)
+            finally:
+                with self._zamek:
+                    self._con.close()          # PRZED emisją - główny wątek czyta przez swoje
+                    self._con = None
+        except Exception as exc:                   # błąd (także przerwanie) → sygnał, NIE crash
+            error = f"{type(exc).__name__}: {exc}"
+        if error is not None:
+            self.failed.emit(self._gen, error)
+        else:
+            self.done.emit(self._gen, wynik)
+        self.finished.emit()
+
+
 class FramesView(QWidget):
     """Widok „Klatki": panel Pól | (perspektywa + filtr + PASEK ZBIORU + panele kling + grid)
     + poczekalnia zmian (szuflada stagingu). Kontrakt montażu `MainWindow`: `__init__(con, now_fn,
@@ -3655,14 +3889,28 @@ class FramesView(QWidget):
         self._pola_worker = None
         self._pola_thread = None
         self._pola_ponow = False    # prośba w trakcie biegu → jeszcze jeden bieg po nim
-        self._pola_stop = False     # widok zamykany - żadnego nowego biegu
+        self._pola_stop = False     # widok zamykany - żadnego nowego biegu (pól ani zbioru)
+        # SKŁAD ZBIORU POZA WĄTKIEM GUI (`ZbiorWorker`, AR-27) - ten sam przełącznik co pola: gospodarz
+        # włącza oba wątki tła naraz, widok zbudowany wprost (testy, `:memory:`) liczy inline.
+        # Wątek dostają wyłącznie zlecenia `refresh(w_tle=True)` (nawigacja: facet, filtr, kolumny,
+        # perspektywa, przebieg Dostawy); gesty zapisu czytają model zaraz po `refresh()` i liczą
+        # synchronicznie. Generacja jak przy polach: każde zlecenie (także synchroniczne) ją podbija,
+        # więc wynik starszego, który dotrze po nowszym, ląduje w koszu.
+        self._zbior_async = pola_poza_watkiem
+        self._zbior_gen = 0
+        self._zbior_worker = None
+        self._zbior_thread = None
+        self._zbior_ponow = False   # zlecenie w trakcie biegu → bieg po nim, na stanie z TEJ chwili
+        self._zbior_ogony = []      # ogony zleceń (`refresh(potem=…)`) czekające na przyłożenie zbioru
+        self._zbior_bieg_gen = None  # generacja, którą liczy bieg w wątku (None: wynik już oddany)
+        self._zbior_odlozony = None  # `(gen, wynik)` czekający na zamknięcie edytora komórki
         self._zbudowany = False     # koniec `__init__`: od tej chwili zmiana kolumn przeładowuje zbiór
         self._build_ui()
         # PRZED pierwszym zbudowaniem listy perspektyw: rejestr sprzed I-1 dowozi swoje widoki do
         # bazy, więc combo od razu pokazuje komplet, a nie „gdzie się podziały moje perspektywy".
         self._import_settings_perspectives()
         self._load_facets()
-        self.refresh()
+        self.refresh(w_tle=True)    # otwarcie bazy: okno żyje, zanim zbiór dojedzie (AR-27)
         self._refresh_drawer()
         self._zbudowany = True
 
@@ -3802,6 +4050,10 @@ class FramesView(QWidget):
         self.table.setEditTriggers(self._edit_triggers)
         self.table.setItemDelegate(_EdycjaKomorki(self.table))
         self.model.cell_edit_requested.connect(self._on_cell_edit)
+        # Zamknięty edytor oddaje drogę wynikowi składu odłożonemu na czas pisania (AR-27). Po obrocie
+        # pętli: widok najpierw kończy edycję (zatwierdzenie stage'uje, edytor znika), dopiero potem reset.
+        self.table.itemDelegate().closeEditor.connect(
+            lambda *_: QTimer.singleShot(0, self._przyloz_odlozony))
         # Edytor otwarty w chwili resetu modelu (odświeżenie z wątku pól, sort, podgląd) jest
         # domykany z zapisem PRZED resetem - reset niszczy edytor i unieważnia jego indeks.
         self._podglad_edycji = "teraz"      # „teraz" / „pozniej" (w resecie) / „bez" (widok znika)
@@ -3856,6 +4108,13 @@ class FramesView(QWidget):
         self._sep_przeniesienia = self._menu_tabeli.addSeparator()
         self.act_transfer_facts = self._menu_tabeli.addAction(i18n.t("supersede.transfer.action"))
         self.act_transfer_facts.triggered.connect(self._on_transfer_facts)
+        # AR-4/AR-23: „Ta kopia prowadzi" - podmenu z OBECNYMI kopiami jednej klatki, które czeka na
+        # wskazanie kopii wiodącej (perspektywy „Kopie niezgodne" / „Zeznanie z nieobecnej kopii"
+        # albo taka klatka pod kursorem gdziekolwiek). Pozycje kopii składa `_sync_menu_kopii` przy
+        # każdym pokazaniu: lista kopii jest stanem pliku i bazy z tej chwili, nie z budowy menu.
+        self._sep_kopii = self._menu_tabeli.addSeparator()
+        self._menu_kopii = self._menu_tabeli.addMenu(i18n.t("grid.lead.menu"))
+        self._menu_kopii.setToolTipsVisible(True)
         rv.addWidget(self.table, 1)   # stretch: nadmiar pionu należy do TABELI, nie do panelu (N1)
 
         # PUSTY STAN = ZDANIE + GEST (FH-4). `self.empty` zostaje etykietą z tekstem (kontrakt testów
@@ -3962,9 +4221,13 @@ class FramesView(QWidget):
 
         To jest też jedyny moment, w którym gospodarz mówi widokowi „znikasz" PRZED zamknięciem
         połączenia (`MainWindow._zatrzymaj_watki_widokow`) - więc otwarty edytor komórki (AR-61)
-        jest domykany z zapisem do szuflady tutaj, póki połączenie żyje."""
+        jest domykany z zapisem do szuflady tutaj, póki połączenie żyje.
+
+        Zbiera też wątek składu zbioru (`ZbiorWorker`, AR-27) - gospodarz pyta o tę metodę po nazwie,
+        a „widok znika" dotyczy obu wątków tła naraz."""
         self._domknij_edycje("bez")
         self._pola_stop = True
+        self._zatrzymaj_zbior()
         self._pola_ponow = False
         self._pola_gen += 1
         if self._pola_thread is None:
@@ -4015,7 +4278,7 @@ class FramesView(QWidget):
         self.filter_panel.set_keywords(self._all_keywords)
         self.macro_bar.set_keywords(self._all_keywords)
         if zmiana and self._zbudowany:
-            self.refresh()                 # model tabeli niesie kolumny - bez tego zostałyby stare
+            self.refresh(w_tle=True)       # model tabeli niesie kolumny - bez tego zostałyby stare
 
     def _wypelnij_pola(self):
         """Lista Pól z OSTATNIEGO pokrycia i bieżących kolumn. Szum strukturalny na DÓŁ (stabilnie
@@ -4116,10 +4379,15 @@ class FramesView(QWidget):
             self._columns = list(spec["columns"])
             self._wypelnij_pola()
         self._wyglad_z_perspektywy(spec)
-        self.refresh()
+        self._zdejmij_wynik_gestu_zapisu()
+        # Szerokość ścieżki i recepta czytają NOWY zbiór - ogon zlecenia, nie krok po `refresh()`:
+        # w tle (AR-27) wracałby, zanim zbiór dojedzie.
+        self.refresh(w_tle=True, potem=self._po_perspektywie)
+
+    def _po_perspektywie(self):
+        """Ogon `_on_perspective` po przyłożeniu zbioru perspektywy."""
         if self._szerokosc_sciezki is not None:
             self.table.setColumnWidth(self.model.base_col("path"), self._szerokosc_sciezki)
-        self._zdejmij_wynik_gestu_zapisu()
         # Perspektywa izolacji zapisu podaje gest, który ją opróżnia: gesty mieszkają w menu
         # prawego kliku (nie na pasku zbioru), a menu nie widać, dopóki się go nie otworzy.
         # Recepta PO `refresh()`, bo raport odświeżenia gasi receptę poprzedniego gestu.
@@ -4158,7 +4426,7 @@ class FramesView(QWidget):
         self._facet_state = {"object": {"in": [[oid, canon] for oid, canon in pairs]}} \
             if pairs else facet_model.empty_state()
         self._reveal_facet = ("object", pairs[0][0]) if pairs else None
-        self.refresh()
+        self.refresh(w_tle=True)
 
     def apply_perspective(self, name):
         """Ustaw perspektywę PO NAZWIE — publiczny seam dla wejść spoza widoku (F5: klik w zadanie
@@ -4373,7 +4641,10 @@ class FramesView(QWidget):
     def _open_projection(self):
         """Otwórz dialog projekcji dla WIDOCZNEJ perspektywy (`self._frame_ids` — po filtrach dups/review,
         to co user widzi; doktryna §5). Modal TYLKO na potwierdzenie eksportu; cała mutacja plików w
-        Qt-wolnej klindze `projection` przez dialog. Pusty grid → szczery status, bez pustego dialogu."""
+        Qt-wolnej klindze `projection` przez dialog. Pusty grid → szczery status, bez pustego dialogu.
+        Zbiór w drodze → odmowa: manifest dostałby nazwę NOWEJ perspektywy przy klatkach starej."""
+        if self._odmowa_w_drodze():
+            return
         if not self._frame_ids:
             self.status_message.emit(i18n.t("grid.proj.no_frames"))
             return
@@ -5224,11 +5495,11 @@ class FramesView(QWidget):
         preset go nie definiuje, a właściciel nie zgaduje); przeskok następuje dopiero, gdy stan
         znów jest definicją presetu - w praktyce po zdjęciu filtra."""
         self._filter_tree = tree
-        self.refresh()
+        self.refresh(w_tle=True)
 
     def _on_columns(self, cols):
         self._columns = cols
-        self.refresh()
+        self.refresh(w_tle=True)
 
     def _perspektywa_obrazow(self):
         """Czy perspektywa jest jedną z tych, w których kolumna „Obrazy" ma treść (`_FLAGI_OBRAZOW`)."""
@@ -5297,43 +5568,54 @@ class FramesView(QWidget):
         # (`_potrzebne_wersje`) - wybór tej pozycji musi więc przeładować zbiór, inaczej każdy
         # wiersz wylądowałby w „(brak)". Pozostałe klucze model przegrupowuje sam, bez SQL.
         if self.combo_group.currentData() == _GRUPA_WERSJI:
-            self.refresh()
+            self.refresh(w_tle=True)
             return
         self.model.set_group_by(self.combo_group.currentData())
 
     # ---- odczyt → widok ----
-    def _memo_leaf_fns(self):
-        """Memoizowane akcesory silnika na czas JEDNEGO refreshu (F4R2#4): sibling-sety facetów
-        re-używają tych samych liści, więc cache `(kind,kw,p1,p2)→set` zwija 5N wywołań liści do N.
-        Jedna migawka DB per refresh — cache umiera z wyjściem z refresh() (źródło prawdy = baza)."""
-        leaf_cache = {}
-        universe_cache = []
-
-        def leaf_fn(k, kw, p1, p2):
-            key = (k, kw, p1, p2)
-            if key not in leaf_cache:
-                leaf_cache[key] = queries.leaf_frame_ids(self.con, k, kw, p1, p2)
-            return leaf_cache[key]
-
-        def universe_fn():
-            if not universe_cache:
-                universe_cache.append(queries.all_frame_ids(self.con))
-            return universe_cache[0]
-
-        return leaf_fn, universe_fn
-
-    def refresh(self):
+    def refresh(self, *, w_tle=False, potem=None):
         """Silnik filtra → zbiór frame_id → base_rows + pivot → model. Źródło prawdy = baza (bez
         cache między refreshami). F4: drzewo EFEKTYWNE = compose(stan facetów, drzewo panelu);
-        trimy dups/review SETAMI literałowymi PRZED base_rows — JEDNA derywacja trimu dla zbioru
-        głównego i sibling-setów listwy (SPOT, F4R2#2); liczniki listwy per sibling-set (F4R#1).
+        trimy SETAMI literałowymi PRZED base_rows - JEDNA derywacja trimu dla zbioru głównego
+        i sibling-setów listwy (SPOT, F4R2#2); liczniki listwy per sibling-set (F4R#1). Skład liczy
+        `_sklad_zbioru` (bez widżetów), przykłada `_zastosuj_zbior`.
 
-        POD NAZWANĄ FAZĄ (F-1): zmierzone **1 000 ms** na 16 648 klatkach, a wołane przy KAŻDEJ
-        zmianie facetu, perspektywy i filtra — czyli w reakcji na kliknięcie, po którym user czeka
-        i patrzy w nieruchomy ekran.
+        DWA TRYBY, JEDEN SKŁAD (AR-27). Zmierzone 1,2-1,5 s na kopii żywej bazy (16 901 klatek) -
+        przy KAŻDYM kliku facetu, perspektywy, kolumn i po każdym przebiegu Dostawy okno stało.
+        `w_tle=True` (nawigacja) w widoku gospodarza oddaje skład `ZbiorWorker`-owi i wraca od razu:
+        tabela trzyma zbiór poprzedni, pasek mówi „Wczytuję…", wynik przykłada `_on_zbior_done`.
+        `potem` jest ogonem zlecenia (krok, który musi zobaczyć NOWY zbiór) - leci po przyłożeniu
+        wyniku. Wynik zlecenia wyprzedzonego przez nowsze idzie do kosza, ale jego ogon przechodzi
+        na nowsze: ogony czytają STAN widoku (perspektywa, flagi), a nie wynik, więc po przyłożeniu
+        nowszego zbioru wciąż mówią prawdę - zgubiony zostawiłby perspektywę bez recepty.
+        Bez `w_tle` (gesty zapisu, recepty, testy) i w widoku bez wątku skład idzie synchronicznie
+        pod NAZWANĄ FAZĄ (F-1), jak dotąd: wołający czyta model zaraz po powrocie (zaznaczenie celu
+        gestu, liczba klatek poza widokiem), a wynik zlecenia w tle, które było w drodze, trafia do
+        kosza generacją - synchroniczny skład jest od niego nowszy.
 
         Faza i zdanie końcowe idą kanałem `load_report`, nie `status_message`: odświeżenie bywa
         wołane, gdy Zbiorów nie widać, a o tym, czy raport ma paść teraz, wie tylko gospodarz."""
+        self._zbior_gen += 1                 # PRZED fazą: `busy` doręcza kolejkę, a w niej bywa
+        self._zbior_odlozony = None          # wynik zlecenia w tle - ma trafić do kosza; odłożony też
+        if potem is not None:
+            self._zbior_ogony.append(potem)
+        if w_tle and self._zbior_async and self._db_path and not self._pola_stop:
+            self.load_report.emit(i18n.t("busy.read_frames"))
+            if self._zbior_worker is not None:
+                # Bieg w drodze liczy stan, którego już nie ma: przerwij go, a nowy ruszy po jego
+                # końcu (`_sprzataj_zbior`) na stanie z TAMTEJ chwili - przy szybkim klikaniu
+                # facetów liczy się jeden bieg naraz, zawsze ostatni.
+                self._zbior_ponow = True
+                self._zbior_worker.request_cancel()
+            else:
+                self._start_zbior()
+            # Akcje na CAŁYM widoku gasną do przyłożenia: tabela pokazuje zbiór poprzedni, a cel
+            # (`_frame_ids`) i nazwa perspektywy w combo opisują już różne zbiory.
+            self._sync_zbioru_w_drodze()
+            return
+        self._zbior_ponow = False
+        if self._zbior_worker is not None:
+            self._zbior_worker.request_cancel()   # wynik i tak do kosza - nie liczmy go do końca
         with busy.busy(self.load_report.emit, i18n.t("busy.read_frames")):
             self._refresh()
         # RECEPTA GESTU SKŁADA SIĘ ZE STANU PO KAŻDYM PRZEŁADOWANIU (FH-2e). Raport wczytania
@@ -5341,40 +5623,178 @@ class FramesView(QWidget):
         # umierała po wykonaniu pierwszego członu - dokładnie wtedy, gdy drugi stawał się
         # wykonalny. Milczy, gdy żaden gest recepty nie zostawił.
         self.ponow_recepte()
+        self._wykonaj_ogony()
+
+    def _wykonaj_ogony(self):
+        """Ogony zleceń (`refresh(potem=…)`) po przyłożeniu zbioru - w kolejności zleceń, każdy raz."""
+        ogony, self._zbior_ogony = self._zbior_ogony, []
+        for ogon in ogony:
+            ogon()
 
     def _refresh(self):
-        """Wykonawcza połowa `refresh` (fazę zakłada wołający — JEDEN jej właściciel)."""
-        leaf_fn, universe_fn = self._memo_leaf_fns()
+        """Wykonawcza połowa `refresh` w trybie synchronicznym (fazę zakłada wołający - JEDEN jej
+        właściciel): skład na połączeniu widoku i przyłożenie."""
+        self._zastosuj_zbior(_sklad_zbioru(self.con, self._migawka_zbioru()))
+
+    def _migawka_zbioru(self):
+        """Stan widoku, z którego składa się zbiór - KOPIA, bo `ZbiorWorker` czyta ją w innym wątku,
+        a widok w tym czasie żyje dalej. Ustawia też drzewo EFEKTYWNE (źródło paska kryteriów, F4R#8)."""
         self._effective_tree = facet_model.compose(self._facet_state, self._filter_tree)
-        frame_ids = filter_engine.run(self._effective_tree, leaf_fn=leaf_fn, universe_fn=universe_fn)
-        # JEDNA derywacja trimu dla zbioru głównego I dla sibling-setów listwy (SPOT, F4R2#2) —
-        # lista powstaje RAZ i idzie w obie strony. Dwie kopie tej enumeracji rozjechały się
-        # dokładnie tak, jak zapowiada historia rodziny `only_*`: listwa dostawała `dup_ids`
-        # i `review_ids`, a pięciu młodszych braci nie widziała w ogóle, więc w perspektywie
-        # z trimem liczniki facetów i godziny portfela liczyły się na zbiorze BEZ przycięcia.
-        # Skład rodziny czytamy z `_TRIMY` (BP-4), więc dołożenie ósmej flagi jest wpisem w tabelę,
-        # a nie ósmym miejscem do zapamiętania.
-        trims = [getattr(queries, nazwa)(self.con) for atrybut, nazwa in _TRIMY
-                 if getattr(self, atrybut)]
-        # NOWY set, NIGDY `&=`: przy pustym filtrze `filter_engine.run` zwraca uniwersum WPROST
-        # (`filter_engine.py:171`), a to jest ZAPAMIĘTANY obiekt memoizacji (`_memo_leaf_fns`).
-        # `&=` przycinało go W MIEJSCU, więc kolejne `universe_fn()` widziało już przycięty zbiór —
-        # perspektywa z trimem potrafiła pokazać „Baza pusta" na pełnej bazie (wizytator P5 #2).
-        for trim in trims:
-            frame_ids = frame_ids & trim
-        base = [_derive(r) for r in queries.base_rows(self.con, list(frame_ids))]
-        if self._potrzebne_wersje():
-            _adnotuj_wersje(base, queries.stack_version_groups(self.con))
-        # Fakty KOPII (0021) - pytamy wyłącznie o klatki z kilkoma obecnymi kopiami: kolumna
-        # „Obrazy" i podpowiedź „×N" potrzebują wtedy każdej kopii, a reszta archiwum ma jedną
-        # i jej liczbę niesie już `base_rows`. Wąskie zapytanie zamiast podzapytania na 16 tys. wierszy.
-        _dolacz_kopie(base, queries.present_copy_facts(
-            self.con, [b["frame_id"] for b in base if (b.get("n_present") or 0) > 1]))
-        base_ids = [b["frame_id"] for b in base]
+        return {"drzewo": copy.deepcopy(self._effective_tree),
+                "facety": copy.deepcopy(self._facet_state),
+                "filtr": copy.deepcopy(self._filter_tree),
+                "trimy": [nazwa for atrybut, nazwa in _TRIMY if getattr(self, atrybut)],
+                "kolumny": list(self._columns),
+                "wersje": self._potrzebne_wersje()}
+
+    def _zbior_w_drodze(self):
+        """Czy tabela pokazuje zbiór, który zaraz zostanie zastąpiony - JEDEN predykat dla gaszenia
+        akcji całego widoku, wyzwalaczy edycji i odmowy w slotach. Bieg liczący generację nieaktualną
+        (wyprzedzony synchronicznym przeładowaniem) się nie liczy: jego wynik idzie do kosza."""
+        return (self._zbior_ponow or self._zbior_odlozony is not None
+                or (self._zbior_bieg_gen is not None and self._zbior_bieg_gen == self._zbior_gen))
+
+    def ponow_raport_wczytania(self):
+        """Podaj „Wczytuję…" jeszcze raz, gdy zbiór jest w drodze - wejście gospodarza zaraz po
+        podpięciu `load_report`: pierwsze zlecenie leci z `__init__`, zanim ktokolwiek słucha."""
+        if self._zbior_w_drodze():
+            self.load_report.emit(i18n.t("busy.read_frames"))
+
+    def _odmowa_w_drodze(self):
+        """Druga linia obrony slotów akcji na całym widoku (pierwsza: wygaszone przyciski)."""
+        if not self._zbior_w_drodze():
+            return False
+        self.status_message.emit(i18n.t("grid.sel.loading_refused"))
+        return True
+
+    def _sync_zbioru_w_drodze(self):
+        """Stany zależne od `_zbior_w_drodze` - po każdej jego zmianie."""
+        self._sync_edycji()
+        self._sync_akcji_zbioru()
+
+    def _sync_akcji_zbioru(self):
+        """Akcje na CAŁYM widoku (Podgląd/Do stagingu makra i renamu, „Wydaj na stół…") ze stanu:
+        widoczne klatki, staging drugiej klingi, zbiór w drodze. W biegu etapu Dostawy stanem
+        rządzi `set_busy` - tu nie włączamy niczego, co tamten zgasił."""
+        if self._etap_w_biegu:
+            return
+        ma = bool(self._frame_ids)
+        self.macro_bar.set_actions_enabled(ma)       # szczery disabled makra na pustym gridzie (#4)
+        self.rename_bar.set_actions_enabled(ma)      # bliźniaczo dla renamu
+        self.sel_bar.set_have_frames(ma)             # pusty zbiór gasi „Wydaj na stół…" (F3R#2)
+        self._sync_staging_mutex()                   # staging jednej klingi wyłącza „Do stagingu" drugiej
+        tip = i18n.t("grid.sel.loading_tip") if self._zbior_w_drodze() else ""
+        for btn in (self.macro_bar.btn_prev, self.rename_bar.btn_prev):
+            btn.setToolTip(tip)
+        if tip:
+            for btn in (self.macro_bar.btn_prev, self.rename_bar.btn_prev, self.sel_bar.btn_proj):
+                btn.setEnabled(False)
+            self.sel_bar.btn_proj.setToolTip(tip)
+
+    def _start_zbior(self):
+        self._zbior_bieg_gen = self._zbior_gen
+        worker = ZbiorWorker(self._zbior_gen, self._migawka_zbioru(), self._db_path)
+        worker.done.connect(self._on_zbior_done)
+        worker.failed.connect(self._on_zbior_failed)
+        self._zbior_worker = worker
+        self._zbior_thread = QThread(self)
+        worker.moveToThread(self._zbior_thread)
+        self._zbior_thread.started.connect(worker.run)
+        worker.finished.connect(self._zbior_thread.quit)
+        self._zbior_thread.finished.connect(self._sprzataj_zbior)
+        self._zbior_thread.start()
+
+    def _sprzataj_zbior(self):
+        """Koniec wątku składu. ŚWIĘTA KOLEJNOŚĆ jak w `_sprzataj_pola` (deadlock AB-BA GIL ×
+        ~QThread): worker.deleteLater → wait → thread.deleteLater. Wątek zebrany już przez
+        `_zatrzymaj_zbior` nie ma tu czego sprzątać."""
+        if self._zbior_thread is None:
+            return
+        self._zbior_worker.deleteLater()
+        self._zbior_thread.wait()
+        self._zbior_thread.deleteLater()
+        self._zbior_worker = None
+        self._zbior_thread = None
+        self._zbior_bieg_gen = None
+        if self._zbior_ponow and not self._pola_stop:
+            self._zbior_ponow = False
+            self._start_zbior()              # generacja i ogon - ostatniego zlecenia
+        else:
+            self._sync_zbioru_w_drodze()     # bieg bez przyłożenia (wyprzedzony) - stan bez niego
+
+    def _zatrzymaj_zbior(self):
+        """Widok znika: przerwij skład i ZBIERZ wątek (wzór `zatrzymaj_pola`). Idempotentne."""
+        self._zbior_ponow = False
+        self._zbior_ogony = []
+        self._zbior_odlozony = None
+        self._zbior_bieg_gen = None
+        self._zbior_gen += 1
+        if self._zbior_thread is None:
+            return
+        self._zbior_worker.request_cancel()
+        self._zbior_thread.quit()
+        self._zbior_worker.deleteLater()
+        while not self._zbior_thread.wait(100):
+            self._zbior_worker.request_cancel()
+        self._zbior_thread.deleteLater()
+        self._zbior_worker = None
+        self._zbior_thread = None
+
+    @Slot(int, object)
+    def _on_zbior_done(self, gen, wynik):
+        if gen != self._zbior_gen:
+            return                           # wyprzedzony przez nowsze zlecenie - do kosza
+        self._zbior_bieg_gen = None
+        if self._edytor_otwarty():
+            # EDYTOR KOMÓRKI CZEKA NA CZŁOWIEKA, NIE NA WYNIK. Reset modelu domknąłby go z zapisem
+            # (`_domknij_edycje`), czyli zatwierdził tekst w połowie pisania. Wynik czeka, aż edytor
+            # się zamknie (`_przyloz_odlozony`); nowsze zlecenie w tym czasie wyrzuca go generacją.
+            self._zbior_odlozony = (gen, wynik)
+            return
+        self._przyloz(wynik)
+
+    def _przyloz(self, wynik):
+        self._zastosuj_zbior(wynik)
+        self.ponow_recepte()                 # jak po synchronicznym przeładowaniu (FH-2e)
+        self._wykonaj_ogony()
+
+    def _edytor_otwarty(self):
+        delegat = self.table.itemDelegate()
+        return isinstance(delegat, _EdycjaKomorki) and delegat.aktywny is not None
+
+    def _przyloz_odlozony(self):
+        """Edytor komórki się zamknął (zatwierdzenie, anulowanie, domknięcie przed resetem) - wynik
+        odłożony przez `_on_zbior_done` trafia do widoku, o ile wciąż jest najnowszy."""
+        if self._zbior_odlozony is None or self._edytor_otwarty():
+            return
+        (gen, wynik), self._zbior_odlozony = self._zbior_odlozony, None
+        if gen != self._zbior_gen:
+            self._sync_zbioru_w_drodze()
+            return
+        self._przyloz(wynik)
+
+    @Slot(int, str)
+    def _on_zbior_failed(self, gen, msg):
+        """Skład w tle padł (nie przerwanie - to ma starszą generację). Drugie podejście na wątku
+        GUI tą samą drogą co gesty: dane dojeżdżają, a błąd, który nie jest przypadłością wątku,
+        wychodzi stamtąd tak samo jak przed AR-27 - zamiast zbioru zamrożonego bez słowa. Ogony
+        czekające na ten wynik zabiera synchroniczne przeładowanie."""
+        if gen != self._zbior_gen:
+            return
+        self._zbior_bieg_gen = None
+        self.refresh()
+
+    def _zastosuj_zbior(self, wynik):
+        """Wynik `_sklad_zbioru` → model i każda powierzchnia, która czyta zbiór (wątek GUI)."""
+        # MENU TABELI OTWARTE NAD STARYM ZBIOREM ZAMYKA SIĘ PRZED RESETEM. Jego pozycje liczyły
+        # stan z zaznaczenia w chwili pokazania, a przyłożenie zmienia wiersze i zaznaczenie (cel
+        # gestu niżej) - klik zapisywałby na innych klatkach niż te, dla których menu otwarto.
+        for menu in (*self._menu_tabeli.findChildren(QMenu), self._menu_tabeli):
+            if menu.isVisible():
+                menu.hide()
+        base, pv, keywords = wynik["base"], wynik["pivot"], wynik["keywords"]
+        base_ids = wynik["base_ids"]
         self._frame_ids = base_ids     # cel makra = to, co WIDAĆ (po filtrach dups/review), doktryna §5
-        keywords = list(self._columns)
-        rows = queries.cards_pivot(self.con, base_ids, keywords) if (base_ids and keywords) else []
-        pv = pivot_mod.build_pivot(base_ids, keywords, rows)
         self.model.set_data(base, pv, keywords, group_by=self.combo_group.currentData(),
                             version_col=self._perspektywa_wersji(),
                             images_unknown=self._perspektywa_obrazow())
@@ -5399,11 +5819,10 @@ class FramesView(QWidget):
         self._n_total = n
         self._update_count()
         if n == 0:
-            # Rozróżnienie „filtr nic nie wpuścił" vs „w bazie NIC nie ma" (wiz F5 #8). Uniwersum
-            # bierzemy z memoizowanego `universe_fn` TEGO refreshu — na niepustym gridzie zapytania
-            # nie ma w ogóle, a gdy filtr już go dotknął, jest z cache'u. Wariant niepustej bazy
-            # wybiera decyzja recepty powrotu (FH-4) - patrz `_ustaw_pusty_stan`.
-            self._ustaw_pusty_stan(bool(universe_fn()))
+            # Rozróżnienie „filtr nic nie wpuścił" vs „w bazie NIC nie ma" (wiz F5 #8) - fakt
+            # z tego samego składu (`baza_ma_klatki`). Wariant niepustej bazy wybiera decyzja
+            # recepty powrotu (FH-4) - patrz `_ustaw_pusty_stan`.
+            self._ustaw_pusty_stan(wynik["baza_ma_klatki"])
         self.empty_box.setVisible(n == 0)    # pojemnik i etykieta RAZEM: `empty.isVisible()` zostaje
         self.empty.setVisible(n == 0)        # kontraktem, a etykieta nie wisi widoczna w ukrytym pudle
         self.table.setVisible(n > 0)
@@ -5412,13 +5831,10 @@ class FramesView(QWidget):
         # nic nie robi - zaznaczone klatki stały na dolnej krawędzi kadru albo pod nią.
         if cel:
             self._przywroc_zaznaczenie(cel)
-        self.macro_bar.set_actions_enabled(bool(base_ids))   # szczery disabled makra na pustym gridzie (#4)
-        self.rename_bar.set_actions_enabled(bool(base_ids))  # bliźniaczo dla renamu
-        self.sel_bar.set_have_frames(bool(base_ids))         # pusty zbiór gasi „Wydaj na stół…" (F3R#2)
         self.sel_bar.set_clearable(self._zbior_zawezony())
-        self._reload_facet_rail(leaf_fn, universe_fn, trims, base_ids)   # listwa (F4)
-        self._sync_staging_mutex()                           # staging jednej klingi wyłącza „Do stagingu" drugiej
-        self._refresh_date_echo()                            # panel daty odbija świeże widoczne (echo warunkowe)
+        self._zastosuj_listwe(wynik["listwa"])               # listwa (F4)
+        self._sync_zbioru_w_drodze()                         # akcje całego widoku i edycja - za zbiorem
+        self._refresh_date_echo()                           # panel daty odbija świeże widoczne (echo warunkowe)
         self._refresh_lineage()                              # …i panel rodowodu, tak samo warunkowo
         self.load_report.emit(
             i18n.t("grid.status.loaded", frames=i18n.t_plural('grid.frames', n), cols=len(keywords)))
@@ -5431,75 +5847,21 @@ class FramesView(QWidget):
         # etykiety pytałby pozycję, która za chwilę przestanie być bieżąca.
         self.sel_bar.set_criteria(self._describe_criteria())
 
-    def _reload_facet_rail(self, leaf_fn, universe_fn, trims, current_ids):
-        """Liczniki listwy facetów per SIBLING-SET (F4R#1): zbiór facetu F = compose bez CAŁEJ własnej
-        grupy F (in+ex) — liczniki na pełnym zbiorze samo-zawężałyby facet i OR-wewnątrz byłby
-        nieosiągalny. Facet BEZ aktywnego wyboru → sibling == zbiór bieżący (już policzony;
-        D-UX-3(a)). Trim perspektywy = przecięcie z gotowymi setami (F4R2#2, bez base_rows).
-
-        `trims` przychodzi z `_refresh` GOTOWĄ LISTĄ, a nie jako dwa nazwane sety: enumeracja
-        rodziny `only_*` ma tu jednego właściciela, więc dołożenie siódmej perspektywy nie może
-        po cichu ominąć liczników listwy (to jest ta sama klasa rozjazdu, którą rodzina
-        przechodziła już dwa razy)."""
-        counts, extras = {}, {}
-        for facet in facet_model.FACETS:
-            if facet not in self._facet_state:
-                ids = current_ids
-            else:
-                tree = facet_model.compose(facet_model.sibling_state(self._facet_state, facet),
-                                           self._filter_tree)
-                sib = filter_engine.run(tree, leaf_fn=leaf_fn, universe_fn=universe_fn)
-                # NOWY set, NIGDY `&=` — z tego samego powodu, co w `_refresh`: sibling-set powstaje
-                # z drzewa BEZ własnej grupy facetu, więc przy jednym aktywnym facecie i pustym
-                # filtrze `compose` daje `None`, a `run` oddaje MEMOIZOWANE uniwersum. `&=` przycinało
-                # je w miejscu, czyli kolejny facet tej samej pętli liczył licznik na zbiorze
-                # przyciętym przez poprzednika.
-                for trim in trims:
-                    sib = sib & trim
-                ids = list(sib)
-            counts[facet] = self._facet_counts(facet, ids)
-            if facet == "object":
-                # Portfel (F7 §8): godziny lightów per obiekt na TYM SAMYM `ids` co `facet_objects`
-                # (parytet n↔godziny; inne aktywne facety zawężają godziny). Formatowanie = `portfolio`.
-                summ = portfolio.summarize(queries.object_exposure(self.con, ids))
-                extras["object"] = {oid: (portfolio.object_suffix(e), portfolio.object_tooltip(e))
-                                    for oid, e in summ.items()}
+    def _zastosuj_listwe(self, listwa):
+        """Liczniki z `_liczniki_listwy` → listwa facetów, z bieżącym stanem i odsłonięciem."""
+        counts, extras, aliases, alias_forms = listwa
         # `_reveal_facet` jest JEDNORAZOWY: gasimy go tu, nie u wołającego — inaczej każdy kolejny
         # refresh (klik w listwie, zmiana perspektywy) skakałby do celu sprzed pół godziny.
         reveal, self._reveal_facet = self._reveal_facet, None
-        # DRUGIE NAZWY do szukajki (S3): mapa `canon → {alias_norm}` z CAŁEJ biblioteki, nie ze
-        # zbioru — szukajka chowa wiersze listy, więc filtrowanie mapy po `ids` nic by nie
-        # oszczędziło, a rozjechałoby dwa wejścia tego samego pytania. Bez niej „Large Magellanic
-        # Cloud" nie znajduje niczego: kanon `LMC` nie ma z tą frazą wspólnej litery.
-        # Brzmienie aliasu w podpowiedzi trafienia (AR-45) - ta sama mapa co okno „Przypisz obiekt”.
         self.facet_rail.set_data(counts, self._facet_state, extras, reveal=reveal,
-                                 aliases=queries.object_alias_index(self.con),
-                                 alias_forms=assign_dialog.formy_aliasow(self.con))
-
-    def _facet_counts(self, facet, ids):
-        """Kubełki jednego facetu → list[(value, label, n)] (kontrakt `FacetRail.set_data`).
-        Etykieta teleskopu = label→canon fallback z JEDNEGO właściciela (`queries.telescope_label`);
-        filtr/rodzaj/noc są swoją własną etykietą."""
-        if facet == "object":
-            return [(r["id"], r["canon"], r["n"]) for r in queries.facet_objects(self.con, ids)]
-        if facet == "filter":
-            return [(r["filter_canon"], r["filter_canon"], r["n"])
-                    for r in queries.facet_filters(self.con, ids)]
-        if facet == "channel":
-            return [(r["channel"], r["channel"], r["n"])
-                    for r in queries.facet_channels(self.con, ids)]
-        if facet == "kind":
-            return [(r["kind"], r["kind"], r["n"]) for r in queries.facet_kinds(self.con, ids)]
-        if facet == "telescope":
-            return [(r["id"], queries.telescope_label(r), r["n"])
-                    for r in queries.facet_telescopes(self.con, ids)]
-        return [(r["night"], r["night"], r["n"]) for r in queries.facet_nights(self.con, ids)]
+                                 aliases=aliases, alias_forms=alias_forms)
 
     def _on_facet_change(self, state):
         """Klik w listwie (cykl none→in→ex→none policzony w `facet_model.cycle`) → nowy stan →
-        przeskładanie zbioru. Stan JEST własnością FramesView (widżet emituje wynik)."""
+        przeskładanie zbioru. Stan JEST własnością FramesView (widżet emituje wynik). W tle
+        (AR-27): przy szybkim klikaniu liczy się tylko ostatni stan."""
         self._facet_state = state
-        self.refresh()
+        self.refresh(w_tle=True)
 
     def _on_clear_selection(self):
         """„× Wyczyść zbiór" (wiz F4 #3): zdejmij facety + filtr advanced JEDNYM klikiem. Flagi
@@ -5763,7 +6125,9 @@ class FramesView(QWidget):
 
         Poza perspektywami menu pyta o izolację klatek, na które wskazuje klik (zaznaczenie albo
         wiersz pod kursorem), ZANIM cokolwiek zaznaczy - prawy klik na zwykłej klatce ma zostać
-        niczym, a nie przestawiać zaznaczenia."""
+        niczym, a nie przestawiać zaznaczenia. Tak samo pyta, czy wskazana JEDNA klatka czeka na
+        kopię wiodącą (podmenu „Ta kopia prowadzi", AR-23); w perspektywach kopii podmenu stoi
+        zawsze."""
         idx = self.table.indexAt(pos)
         sm = self.table.selectionModel()
         pod_kursorem = (self.model._rows[idx.row()] if idx.isValid() else None)
@@ -5772,14 +6136,21 @@ class FramesView(QWidget):
         wersje = self._perspektywa_wersji()
         zapis = self._perspektywa_zapisu()
         zastapione = bool(getattr(self, _FLAGA_ZASTAPIONYCH))
+        kopie = any(getattr(self, atrybut) for atrybut in _FLAGI_KOPII_WIODACEJ)
         if not wersje and not zapis and not zastapione:
             if poza_zaznaczeniem:
-                cel = ([pod_kursorem["frame_id"]] if isinstance(pod_kursorem, dict)
-                       and "_group" not in pod_kursorem else [])
+                wiersze = ([pod_kursorem] if isinstance(pod_kursorem, dict)
+                           and "_group" not in pod_kursorem else [])
             else:
-                cel = [r["frame_id"] for r in self._selected_data_rows()]
+                wiersze = self._selected_data_rows()
+            cel = [r["frame_id"] for r in wiersze]
             zapis = bool(queries.isolated_inplace_ops(self.con, cel))
-            if not zapis:
+            # Poza perspektywami kopii gest żyje nad JEDNĄ klatką z kilkoma obecnymi kopiami, która
+            # czeka na decyzję (predykaty wierszy Porządków) - liczba kopii z wiersza odsiewa
+            # archiwum, zanim cokolwiek zapyta bazę.
+            kopie = kopie or (len(wiersze) == 1 and (wiersze[0].get("n_present") or 0) > 1
+                              and lead_copy.awaiting_hand(self.con, cel[0]))
+            if not zapis and not kopie:
                 return
         if poza_zaznaczeniem:
             self.table.selectRow(idx.row())
@@ -5792,6 +6163,10 @@ class FramesView(QWidget):
             act.setVisible(zapis)
         self._sep_przeniesienia.setVisible(zastapione and (wersje or zapis))
         self.act_transfer_facts.setVisible(zastapione)
+        self._sep_kopii.setVisible(kopie and (wersje or zapis or zastapione))
+        self._menu_kopii.menuAction().setVisible(kopie)
+        if kopie:
+            self._sync_menu_kopii()
         if wersje:
             self._sync_menu_wersji()
         if zapis:
@@ -5846,6 +6221,90 @@ class FramesView(QWidget):
             self.observatory_axis_changed.emit()
         self.stan_porzadkow_changed.emit()
         self.status_message.emit(supersede.zdanie_przeniesienia(g))
+
+    # ---- KOPIA WIODĄCA (AR-4, AR-23): „Ta kopia prowadzi" ----
+    # Gdy obecne kopie klatki mówią różnie albo klatka mówi głosem kopii, której już nie ma, kopię
+    # wiodącą wskazuje człowiek. Gest woła rdzeń `lead_copy` (przejęcie zeznania klingą
+    # `repo.adopt_testimony` z aktorem `user:local` + pochodne) wątkiem tła przez uchwyt `self._wb`:
+    # nagłówek kopii bywa na udziale SMB, a uchwyt niesie mutex „zapis → Dostawa".
+
+    def _cel_kopii_wiodacej(self):
+        """Klatka gestu z ZAZNACZENIA, liczona od nowa - `(frame_id, None)` albo `(None, klucz
+        powodu)`. Jedna klatka naraz: kopię wskazuje się dla konkretnej klatki, a gest na kilku
+        byłby kilkoma decyzjami pod jedną pozycją menu. Klatka, która nie czeka na decyzję (stan
+        zmienił się od odświeżenia), gestu nie dostaje - jego robotą są wiersze Porządków."""
+        wiersze = self._selected_data_rows()
+        if len(wiersze) != 1:
+            return None, "grid.lead.select_one"
+        fid = wiersze[0]["frame_id"]
+        if not lead_copy.awaiting_hand(self.con, fid):
+            return None, "grid.lead.not_waiting"
+        return fid, None
+
+    def _sync_menu_kopii(self):
+        """Pozycje podmenu „Ta kopia prowadzi" ze stanu z chwili pokazania: jedna pozycja na OBECNĄ
+        kopię (pełna ścieżka - kopie jednej klatki zwykle mają tę samą nazwę pliku w różnych
+        katalogach), dopisek „mówi teraz" przy kopii, której głosem mówi klatka, i pola rozjazdu
+        w podpowiedzi (`queries.copy_divergence`, ten sam właściciel co podpowiedź „×N").
+        Kopia, która już mówi, zostaje klikalna: kopie zgodne w ośmiu polach zeznania mogą różnić
+        się resztą nagłówka, a wybór jednej z nich jest dalej decyzją człowieka.
+        Zajętość albo złe zaznaczenie gasi całe podmenu z powodem w podpowiedzi."""
+        self._menu_kopii.clear()
+        akcja = self._menu_kopii.menuAction()
+        fid, powod = self._cel_kopii_wiodacej()
+        powod = self._powod_zajetosci() or powod
+        akcja.setEnabled(powod is None)
+        akcja.setToolTip(i18n.t(powod) if powod is not None else i18n.t("grid.lead.menu_tip"))
+        if powod is not None:
+            return
+        for k in lead_copy.lead_copy_choices(self.con, fid):
+            tekst = k.path
+            if k.mowi:
+                tekst += i18n.t("grid.lead.speaks")
+            elif not k.fakty:
+                tekst += i18n.t("grid.lead.unread")
+            act = self._menu_kopii.addAction(tekst)
+            tip = i18n.t("grid.lead.speaks_tip" if k.mowi else "grid.lead.choice_tip")
+            if k.rozne:
+                pola = [i18n.t("grid.tip.copy_field_images") if e == queries.COPY_IMAGES
+                        else f"{e}={_wartosc_zeznania(k.fakty_kopii[_KOPIA_KEYWORD_KOLUMNA[e]])}"
+                        for e in k.rozne]
+                tip += i18n.t("grid.tip.copy_diff", fields=", ".join(pola))
+            act.setToolTip(tip)
+            # Lambda z wartością domyślną: `triggered` niesie `checked: bool`, a pętla wiąże
+            # `location_id` tej pozycji, nie ostatniej.
+            act.triggered.connect(lambda _=False, lid=k.location_id: self._on_lead_copy(lid))
+
+    def _on_lead_copy(self, location_id):
+        """„Ta kopia prowadzi" na kopii `location_id`: bramka zajętości i celu PONOWNIE (druga linia
+        za wygaszeniem - etap mógł ruszyć między menu a kliknięciem), potem wątek tła. Bez
+        potwierdzenia: gest niczego nie rusza na dysku, a przy kopii, która mówiła wcześniej,
+        drogą powrotu jest ten sam gest na niej (zdanie po geście ją nazywa)."""
+        zajety = self._powod_zajetosci()
+        if zajety is not None:
+            self.status_message.emit(i18n.t(zajety))
+            return
+        fid, powod = self._cel_kopii_wiodacej()
+        if powod is not None:
+            self.status_message.emit(i18n.t(powod))
+            return
+        # Para (lokacja, klatka): klinga odmówi (`raced`), gdy skan przepiął lokację na inną klatkę
+        # między menu a zapisem - ręka nie zapisze się na klatce, której człowiek nie wskazał.
+        self._odpal_gest_plikowy("lead_copy", (location_id, fid), [fid], self._after_lead_copy)
+
+    @Slot(str, object)
+    def _after_lead_copy(self, op, res):
+        """Ogon gestu na wątku głównym - wspólny z gestami izolacji (`_po_gescie_zapisu`: odświeżenie
+        z celem w zaznaczeniu, szuflada, plakietka Porządków, JEDNO zdanie po odświeżeniu). Po
+        przejęciu osie obiektu i stanowiska dostają sygnał: pochodne przeliczone z nowego zeznania
+        mogły zmienić obiekt, zestaw i stanowisko klatki."""
+        self.drawer.end_progress()
+        if self._undo_mode is not None:
+            self.drawer.set_commit_actions_visible(False)
+        if res.verdict == "adopted":
+            self.object_axis_changed.emit()
+            self.observatory_axis_changed.emit()
+        self._po_gescie_zapisu(_zdanie_kopii_wiodacej(res), self._cel_gestu_zapisu)
 
     def _sync_menu_wersji(self):
         """Uczciwy disabled gestu „Zostaw tę wersję" - z planu liczonego w chwili pokazania menu.
@@ -6084,16 +6543,23 @@ class FramesView(QWidget):
         if not ops:
             self.status_message.emit(pusty)
             return
-        self._cel_gestu_zapisu = sorted({o["frame_id"] for o in ops})
         cel = [o["op_id"] for o in ops]
         if uzasadnienie is not None:
             cel = {"ops": cel, "reason": uzasadnienie}
+        self._odpal_gest_plikowy(op, cel, sorted({o["frame_id"] for o in ops}),
+                                 self._after_gestu_zapisu)
+
+    def _odpal_gest_plikowy(self, op, cel, frame_ids, after_slot):
+        """Ostatni krok startu gestu plikowego spoza stagingu (gesty izolacji, „Ta kopia prowadzi"):
+        klatki celu i tekst szuflady sprzed gestu zapamiętane dla ogona `_po_gescie_zapisu`, potem
+        wątek tła `self._wb`."""
+        self._cel_gestu_zapisu = frame_ids
         # Tekst sprzed PIERWSZEGO gestu serii: drugi gest z rzędu nie ma wracać do wyniku pierwszego.
         przed = (self._wynik_gestu_zapisu[0] if self._wynik_gestu_zapisu is not None
                  and self.drawer.result.text() == self._wynik_gestu_zapisu[1]
                  else self.drawer.result.text())
         self._wynik_gestu_zapisu = (przed, None)
-        self._start_writeback(op, cel, self._after_gestu_zapisu)
+        self._start_writeback(op, cel, after_slot)
 
     @Slot(str, object)
     def _after_gestu_zapisu(self, op, res):
@@ -6249,16 +6715,13 @@ class FramesView(QWidget):
             if hasattr(self, "_undo_btn"):
                 self._undo_btn.setEnabled(False)
         else:
-            self.macro_bar.set_actions_enabled(bool(self._frame_ids))
-            self.rename_bar.set_actions_enabled(bool(self._frame_ids))
-            self.sel_bar.set_have_frames(bool(self._frame_ids))
             n = self._active_pending_count()             # mode-aware (R1 #2): makro LUB rename
             self.drawer.btn_commit.setEnabled(n > 0)
             self.drawer.btn_reject.setEnabled(n > 0)
             self.lineage_bar.set_busy(False)             # panel wraca do stanu z zaznaczenia
             if hasattr(self, "_undo_btn"):
                 self._undo_btn.setEnabled(True)
-            self._sync_staging_mutex()
+            self._sync_akcji_zbioru()                    # paski i „Wydaj" wg widocznych - i zbioru w drodze
 
     def set_writeback_busy(self, busy):
         """DRUGA powierzchnia writebacku (dialog „Napraw nagłówek…") pisze do plików — wygaś
@@ -6334,6 +6797,8 @@ class FramesView(QWidget):
         return queries.frame_for_location(self.con, location_id)
 
     def _on_macro_preview(self, md):
+        if self._odmowa_w_drodze():                      # cel = widoczne, a widać zbiór poprzedni
+            return
         if not self._frame_ids:
             self.status_message.emit(i18n.t("grid.macro.no_frames_count"))
             return
@@ -6344,6 +6809,8 @@ class FramesView(QWidget):
         self.status_message.emit(i18n.t("grid.macro.preview_result", t=t, s=s))
 
     def _on_macro_stage(self, md):
+        if self._odmowa_w_drodze():
+            return
         if not self._frame_ids:
             self.status_message.emit(i18n.t("grid.macro.no_frames"))
             return
@@ -6384,8 +6851,12 @@ class FramesView(QWidget):
     def _sync_edycji(self):
         """Wyzwalacze edycji komórek wg zajętości (etap Dostawy, cudzy zapis plików): zajęty widok nie
         otwiera edytora, a model nie zgłasza komórek jako edytowalnych (wzorzec `set_busy` osi
-        w `app.py`). Edytor otwarty PRZED zajętością odbije bramka w `_on_cell_edit`."""
-        wolny = not self._etap_w_biegu and not self._foreign_wb
+        w `app.py`). Edytor otwarty PRZED zajętością odbije bramka w `_on_cell_edit`.
+
+        Zbiór w drodze (AR-27) też zamyka NOWE edycje: wiersz pod kursorem za chwilę zniknie albo
+        zmieni miejsce. Edytor otwarty wcześniej pisze dalej - wynik czeka na jego zamknięcie
+        (`_on_zbior_done`), a zatwierdzenie idzie po stabilnym celu delegata, nie przez `flags`."""
+        wolny = not self._etap_w_biegu and not self._foreign_wb and not self._zbior_w_drodze()
         self.model.set_editable(wolny)
         self.table.setEditTriggers(self._edit_triggers if wolny
                                    else QAbstractItemView.NoEditTriggers)
@@ -6417,6 +6888,8 @@ class FramesView(QWidget):
             delegat.domknij()
         finally:
             self._podglad_edycji = "teraz"
+        if podglad != "bez":
+            QTimer.singleShot(0, self._przyloz_odlozony)   # domknięcie nie emituje `closeEditor`
 
     def _podglad_po_domknieciu(self):
         """Podgląd stagingu po edycji domkniętej w resecie - już poza resetem."""
@@ -6493,19 +6966,23 @@ class FramesView(QWidget):
         staging, re-enable wg widocznych klatek (inaczej przycisk zostałby wyszarzony). Wołane po każdej
         zmianie stagingu i w refresh() (po `set_actions_enabled`)."""
         macro_n, rename_n = self._pending_count(), self._rename_pending_count()
-        has_frames = bool(self._frame_ids)
+        # Zbiór w drodze (AR-27) gasi „Do stagingu" także tu: tę metodę woła też szuflada
+        # (`_refresh_drawer`, np. po edycji komórki), więc bez tego włączałaby przycisk w trakcie.
+        w_drodze = self._zbior_w_drodze()
+        has_frames = bool(self._frame_ids) and not w_drodze
+        tip_wolny = i18n.t("grid.sel.loading_tip") if w_drodze else ""
         if macro_n > 0:
             self.rename_bar.btn_stage.setEnabled(False)
             self.rename_bar.btn_stage.setToolTip(f"staging makra w toku ({macro_n} zmian)")
         else:
             self.rename_bar.btn_stage.setEnabled(has_frames)
-            self.rename_bar.btn_stage.setToolTip("")
+            self.rename_bar.btn_stage.setToolTip(tip_wolny)
         if rename_n > 0:
             self.macro_bar.btn_stage.setEnabled(False)
             self.macro_bar.btn_stage.setToolTip(i18n.t("grid.rename.staging_busy_tip", n=rename_n))
         else:
             self.macro_bar.btn_stage.setEnabled(has_frames)
-            self.macro_bar.btn_stage.setToolTip("")
+            self.macro_bar.btn_stage.setToolTip(tip_wolny)
 
     def _refresh_drawer(self):
         """Szuflada MODE-AWARE (R1 #2): pokazuje AKTYWNĄ klingę (staging mutex → najwyżej jedna niepusta).
@@ -6737,6 +7214,8 @@ class FramesView(QWidget):
         return len(run.touched), len(run.skipped)
 
     def _on_rename_preview(self, policy):
+        if self._odmowa_w_drodze():                      # cel bez zaznaczenia = widoczne (zbiór poprzedni)
+            return
         ids, target = self._rename_target_ids()
         if not ids:
             self.status_message.emit(i18n.t("grid.rename.no_count"))
@@ -6750,6 +7229,8 @@ class FramesView(QWidget):
         self.status_message.emit(i18n.t("grid.rename.preview_result", t=t, s=s, target=target))
 
     def _on_rename_stage(self, policy):
+        if self._odmowa_w_drodze():
+            return
         ids, target = self._rename_target_ids()
         if not ids:
             self.status_message.emit(i18n.t("grid.rename.no_frames"))

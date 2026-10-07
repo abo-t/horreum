@@ -16,7 +16,7 @@ from horreum.gui import grid as grid_mod, queries, rows as rows_mod, tasks as ta
 
 _ZRODLO_GRIDU = pathlib.Path(grid_mod.__file__).read_text(encoding='utf-8')
 
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QThread, Qt
 from PySide6.QtWidgets import QApplication
 
 NOW = "2026-07-03T14:00:00"
@@ -68,6 +68,13 @@ def view(qapp, gcon, tmp_path, monkeypatch):
     v = FramesView(gcon, now_fn=None)
     v._writeback_async = False   # test: worker.run() inline (sync-seam), bez QThread
     yield v
+    # Widok kasujemy zaraz po teście (BP-7): żywy `FramesView` z całym drzewem widgetów dostaje
+    # przepolerowanie przy każdej zmianie motywu aplikacji, a `close()` go tylko chowa. Wątek w biegu
+    # zostawiamy autouse-sprzątaczowi z conftestu (`~QThread` w biegu to `qFatal`).
+    if not any(t.isRunning() for t in v.findChildren(QThread)):
+        v.close()
+        v.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 
 
 # ---------- model ----------
@@ -4744,7 +4751,7 @@ def test_KAZDY_preset_ma_etykiete_i_zuzyta_flage():
             assert f"_{klucz}" in atrybuty_trimu, (
                 f"flaga {klucz!r} presetu {nazwa!r} nie ma wiersza w `_TRIMY` - perspektywa "
                 f"pokaże PEŁNY grid zamiast przyciętego, bez żadnego komunikatu")
-    for metoda in (grid_mod.FramesView._refresh, grid_mod.FramesView._trim_aktywny,
+    for metoda in (grid_mod.FramesView._migawka_zbioru, grid_mod.FramesView._trim_aktywny,
                    grid_mod.FramesView._on_perspective, grid_mod.FramesView._save_perspective,
                    grid_mod.FramesView._describe_criteria, grid_mod.FramesView._stan_zgodny_z,
                    grid_mod.FramesView._zeruj_flagi):
@@ -4783,13 +4790,16 @@ def test_listwa_facetow_dostaje_KOMPLET_trimow_perspektywy():
     Bramka jest STRUKTURALNA, bo defekt jest strukturalny: obie strony mają czytać JEDNĄ derywację
     (`trims`), a nie dwie listy nazwanych setów, które trzeba pamiętać, żeby zaktualizować."""
     import inspect
-    zrodlo = inspect.getsource(grid_mod.FramesView._refresh)
-    wywolanie = [w for w in zrodlo.splitlines() if "_reload_facet_rail(" in w]
-    assert wywolanie, "nie znalazłem wywołania listwy w `_refresh`"
-    assert "trims" in wywolanie[0], (
+    # Skład zbioru mieszka w `_sklad_zbioru` (AR-27: ten sam kod na wątku GUI i w `ZbiorWorker`).
+    zrodlo = inspect.getsource(grid_mod._sklad_zbioru)
+    linie = zrodlo.splitlines()
+    i = next((n for n, w in enumerate(linie) if "_liczniki_listwy(" in w), None)
+    assert i is not None, "nie znalazłem wywołania listwy w `_sklad_zbioru`"
+    wywolanie = " ".join(linie[i:i + 2])          # argumenty bywają złamane na dwie linie
+    assert "trims" in wywolanie, (
         "listwa facetów musi dostać KOMPLET trimów jedną derywacją (`trims`), nie wybrane sety - "
-        f"jest: {wywolanie[0].strip()!r}")
-    rail = inspect.getsource(grid_mod.FramesView._reload_facet_rail)
+        f"jest: {wywolanie.strip()!r}")
+    rail = inspect.getsource(grid_mod._liczniki_listwy)
     assert "for trim in trims" in rail, "sibling-set musi przecinać się z KAŻDYM trimem perspektywy"
     # Wzorzec, nie sam operator: `&=` pada też w KOMENTARZU, który ostrzega przed tą pułapką,
     # a bramka łapiąca własną dokumentację nie pilnuje niczego.

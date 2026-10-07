@@ -507,7 +507,7 @@ def run_resolver(con, now):
     lookup = alias_snapshot(con).get
 
     unresolved = {}        # object_raw -> liczba (tylko light/master_light, obecny-nierozpoznany)
-    filter_items = []      # (frame_id, filter_canon) do backfillu zbiorczego
+    filter_items = []      # (frame_id, filter_canon | None) do backfillu zbiorczego
     przeglosowane = []     # [frame_id, było, jest] (object_id) - przepięte ze źródła SŁABEGO (E5-1)
     for r in rows:
         # --- oś OBIEKT: kind-aware (kalibracja nie ma obiektu z definicji) ---
@@ -540,6 +540,13 @@ def run_resolver(con, now):
                 # cofnięciu tej karty nagłówek milczy przy źródle `header` - samo „nie słabe"
                 # oddałoby ją regionowi (recenzja tur D/E, 2026-09-27; na żywej bazie takich klatek
                 # było 0, więc zmiana nie przestawia żadnej istniejącej).
+                #
+                # OBIEKT BEZ ŚWIADKA ZOSTAJE (AR-22 (1), oś obiektu): nagłówek, który zamilkł, nie
+                # odpina obiektu z nazwy. Ze stanu nie da się odróżnić kopii przejętej bez karty
+                # `OBJECT` od karty cofniętej po potwierdzeniu ze ścieżki - a w drugim przypadku
+                # odpięcie albo region skasowałyby werdykt człowieka sprzed przejścia na `header`
+                # (`test_region_NIE_nadpisuje_obiektu_z_naglowka_ktory_zamilkl`). Sonda 2026-10-07
+                # na `pf4`: takich klatek 0. Filtr nie ma ręki, więc on schodzi do NULL (niżej).
                 slabe = r["osrc"] in WEAK_OBJECT_SOURCES
                 if (ident is None and alias_oid is None
                         and (r["oid"] is None or r["osrc"] == "region")):
@@ -578,11 +585,11 @@ def run_resolver(con, now):
             # obj brak (None) na lightcie → object_id NULL bez review (brak zeznania do rozwiązania)
 
         # --- oś FILTR: kind-agnostyczna (flat też ma filtr); brak/pusty → NULL (W2) ---
-        fc = normalize_filter(r["filt"])
-        if fc is not None:
-            filter_items.append((r["fid"], fc))
+        # Brak też idzie do klingi (AR-22 (1)): zeznanie przejęte z kopii bez karty `FILTER` ma
+        # zdjąć kanon kopii, której już nie ma - klinga zeruje wyłącznie wiersze z kanonem.
+        filter_items.append((r["fid"], normalize_filter(r["filt"])))
 
-    s.filters_set = len(filter_items)
+    s.filters_set = sum(1 for _fid, fc in filter_items if fc is not None)
     s.objects_unresolved_distinct = len(unresolved)
     repo.backfill_filter_canon(con, filter_items, now=now)        # no-op gdy pusto
     s.channels_known, s.channels_changed = derive_channels(con, now)

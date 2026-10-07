@@ -60,6 +60,11 @@ class SupersedeSummary:
     cycles: int = 0                  # odrzuconych odmową cyklu
     conflicts: int = 0               # ogniwo już zajęte przez INNĄ następczynię
     missing: int = 0                 # następczyni albo poprzedniczka nie istnieje w `frame`
+    absorbed: int = 0
+    """Z `marked + already`: ogniwa, których klatka jest SZKIELETEM bez śladu (AR-42,
+    `repo.skeleton_frame_ids`) - plik wyzdrowiał, a nie został podmieniony. PODZBIÓR, nie kubełek
+    partycji: ogniwo zapisuje ta sama klinga (czasownikiem `frame.absorbed`), więc suma
+    partycji zostaje ta sama, a raport mówi, ile z oznaczonych to wchłonięcia."""
     pairs: list = field(default_factory=list)        # [(frame_before, frame_after)] — po strażnikach
     refused: list = field(default_factory=list)      # [(frame_before, frame_after, powód)]
     superseded_by_later: list = field(default_factory=list)
@@ -151,6 +156,7 @@ def backfill(con, *, now, apply=False, actor="supersede"):
     zywe = {before for before in ostatnie if _alive(con, before)}
     succ = {b: a for b, a in istniejace.items() if b not in zywe}
     succ.update({b: a for b, a in ostatnie.items() if b not in zywe})
+    szkielety = repo.skeleton_frame_ids(con, ostatnie)       # AR-42: wyzdrowienie, nie podmiana
 
     for before, after in sorted(ostatnie.items()):
         s.proposed += 1
@@ -172,6 +178,7 @@ def backfill(con, *, now, apply=False, actor="supersede"):
             # meldowałby „oznaczyłbym 1" na bazie, w której nie ma czego oznaczać, a raport
             # przed przebiegiem na żywej bazie zawyżałby zakres o wszystko, co już zrobiono.
             s.already += 1
+            s.absorbed += before in szkielety
             continue
         if zapisane is not None and zapisane != after:
             # DWIE ŚCIEŻKI, DWIE NASTĘPCZYNIE: ta sama treść leżała pod dwiema ścieżkami i każda
@@ -185,9 +192,11 @@ def backfill(con, *, now, apply=False, actor="supersede"):
         s.pairs.append((before, after))     # dopiero TU: para, która przeszła wszystkie strażniki
         if not apply:
             s.marked += 1
+            s.absorbed += before in szkielety
             continue
         if repo.mark_superseded(con, frame_id=before, superseded_by=after, now=now, actor=actor):
             s.marked += 1
+            s.absorbed += before in szkielety
         else:
             # Klinga odmówiła po SWOIM odczycie pod lockiem: albo oznaczono już wcześniej
             # (idempotencja), albo kopia wróciła między raportem a zapisem (TOCTOU).
@@ -196,6 +205,7 @@ def backfill(con, *, now, apply=False, actor="supersede"):
                 s.refused.append((before, after, "kopia wróciła w trakcie przebiegu"))
             else:
                 s.already += 1
+                s.absorbed += before in szkielety
     return s
 
 
@@ -215,8 +225,10 @@ def pending_transfer(con):
     stoi w `repo.transfer_human_facts`; rozjazd tych dwóch miejsc znaczy kubełek, którego gest nie
     umie opróżnić — pinuje to test.
 
-    KUBEŁEK JEST DZIŚ PUSTY I TO JEST WYNIK, NIE BRAK: jedyna zastąpiona klatka archiwum (15958)
-    ma `object_source NULL` i `config_source NULL`, więc nie ma czego przenosić. Kolejka mówi „zero
+    KUBEŁEK JEST DZIŚ PUSTY I TO JEST WYNIK, NIE BRAK (pomiar `pf4` 2026-10-07): ogniwo
+    `superseded_by` mają dwie klatki - light 15958 (→ 16777, podmiana treści) i szkielet 15629
+    (→ 16778, wchłonięty, AR-42: `repo.absorbed_frame_ids`). Obie mają `object_source`,
+    `config_source` i `observatory_source` NULL, więc nie ma czego przenosić. Kolejka mówi „zero
     roboty", a nie „nic się nie stało" — te dwie rzeczy odróżnia `orphans` obok.
 
     TRZECIA OŚ (0809): **werdykty rodowodu stosu**, w których zastąpiona klatka jest WEJŚCIEM.
@@ -231,7 +243,7 @@ def pending_transfer(con):
     ODSIEW OSI ROBI SIĘ W PYTHONIE, nie w `WHERE`, i to jest zmiana wobec pierwotnego kształtu:
     trzy warunki w jednym `WHERE` musiałyby powtórzyć te same podzapytania, które pętla i tak liczy
     dla etykiety `co`, a rozjazd DWÓCH kopii tego samego kryterium jest dokładnie tym, przed czym
-    ostrzega akapit wyżej. Populacja to klatki zastąpione (dziś 2 na 16 797), więc pełne przejście
+    ostrzega akapit wyżej. Populacja to klatki zastąpione (2026-10-07: 2 na 16 901), więc pełne przejście
     po nich nic nie kosztuje, a kryterium ma jedno miejsce.
 
     CZWARTA OŚ (0027): **stanowisko wskazane ręką** - wchodzi, gdy oś obserwatorium następczyni

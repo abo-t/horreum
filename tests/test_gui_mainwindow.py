@@ -478,11 +478,11 @@ def test_przebieg_zakonczony_bledem_tez_odswieza_widoki(qapp, tmp_path, monkeypa
     """Błąd etapu nie emituje `stage_finished` - a zapisy sprzed błędu (w łańcuchu: etapy przed
     nim) są w bazie. Koniec przebiegu przychodzi w tej drodze tak samo (`_cleanup_thread`), więc
     widoki i plakietka liczą się ze stanu także tu."""
-    from horreum.gui import pipeline as pipeline_mod
+    from horreum import grouper
 
     def _pada(con, now):
         raise RuntimeError("etap padł")
-    monkeypatch.setattr(pipeline_mod, "run_grouper", _pada)
+    monkeypatch.setattr(grouper, "run_grouper", _pada)   # rdzeń woła przez moduł (`derive`)
     win = MainWindow(_seeded_db(tmp_path, object_axis=True))
     try:
         licznik = _licz_przeladowania(win, monkeypatch)
@@ -507,7 +507,7 @@ def test_wyjatek_w_odswiezeniu_po_przebiegu_gasi_faze(qapp, tmp_path, monkeypatc
     Falsyfikator: wynieś `_end_phase()` z `finally` → asercja o etykiecie fazy pada."""
     win = MainWindow(_seeded_db(tmp_path))
     try:
-        def _pada():
+        def _pada(**_kw):                              # `w_tle` - gospodarz zleca skład w tle (AR-27)
             raise RuntimeError("odświeżenie padło")
         monkeypatch.setattr(win.grid_view, "refresh", _pada)
         with pytest.raises(RuntimeError, match="odświeżenie padło"):
@@ -530,13 +530,13 @@ def test_odswiezenie_po_przebiegu_nie_zagniezdza_sie(qapp, tmp_path, monkeypatch
         oryginal = grid.refresh
         stan = {"glebokosc": 0, "max": 0, "wejscia": 0}
 
-        def _refresh():
+        def _refresh(**kw):
             stan["glebokosc"] += 1
             stan["wejscia"] += 1
             stan["max"] = max(stan["max"], stan["glebokosc"])
             if stan["wejscia"] == 1:
                 win._on_pipeline_running(False)        # prośba doręczona w środku odświeżenia
-            oryginal()
+            oryginal(**kw)
             stan["glebokosc"] -= 1
         monkeypatch.setattr(grid, "refresh", _refresh)
         win._on_pipeline_running(False)

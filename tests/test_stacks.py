@@ -799,3 +799,57 @@ def test_czytelny_plik_bez_daty_nie_kasuje_zapisanej(con):
     assert _integracja(con, m)["creation_time"] == "2023-04-22T08:49:00Z"
     assert con.execute("SELECT count(*) FROM event WHERE verb = 'integration.updated'"
                        ).fetchone()[0] == ile
+
+
+def test_historia_czytana_z_kopii_ktora_dala_naglowek(con):
+    """AR-22 (3): zeznanie stosu to para - karty z `header` i XML historii z pliku. Przy dwóch
+    obecnych kopiach historia ma przyjść z TEJ, której fakty (`hdr_*`) równają się nagłówkowi,
+    a nie z najstarszej. Falsyfikator: przywróć `ORDER BY l.id LIMIT 1` w `_masters` - czytnik
+    dostanie ścieżkę kopii obcej."""
+    from horreum.resolve.headers import copy_testimony
+    m = _master(con, path=r"R:\STARA\inna.xisf")
+    con.execute("INSERT INTO location(frame_id, volume, path, present) VALUES (?, 'V', ?, 1)",
+                (m, STOS))
+    raw = json.loads(con.execute("SELECT raw_json FROM header WHERE frame_id = ?",
+                                 (m,)).fetchone()[0])
+    zgodne = copy_testimony(raw)
+    obce = {**zgodne, "hdr_object": "inny obiekt"}
+    for sciezka, fakty in ((r"R:\STARA\inna.xisf", obce), (STOS, zgodne)):
+        con.execute("UPDATE location SET header_hash = ?, hdr_hash = ?, hdr_rule = 1, "
+                    "hdr_filter = ?, hdr_imagetyp = ?, hdr_object = ?, "
+                    "hdr_telescop = ?, hdr_instrume = ?, hdr_exptime = ?, hdr_xbinning = ?, "
+                    "hdr_date_obs = ? WHERE path = ?",
+                    (f"h{sciezka}", f"h{sciezka}",
+                     fakty["hdr_filter"], fakty["hdr_imagetyp"], fakty["hdr_object"],
+                     fakty["hdr_telescop"], fakty["hdr_instrume"], fakty["hdr_exptime"],
+                     fakty["hdr_xbinning"], fakty["hdr_date_obs"], sciezka))
+    con.commit()
+    czytane = []
+    run_stack_lineage(con, now=NOW, xml_reader=lambda p: czytane.append(p))
+    assert czytane == [STOS]
+
+
+def test_historia_z_kopii_wskazanej_reka_bije_dopasowanie_faktow(con):
+    """Z8: ważna kotwica ręki (`header.adopted` z aktorem `user:*` na obecnej kopii tej klatki)
+    wskazuje kopię wiodącą wprost - historia idzie z niej, choć fakty żadnej kopii nie pasują."""
+    m = _master(con, path=r"R:\STARA\inna.xisf")
+    lid = con.execute("INSERT INTO location(frame_id, volume, path, present) VALUES (?, 'V', ?, 1)",
+                      (m, STOS)).lastrowid
+    con.execute("INSERT INTO event(ts, actor, verb, target, payload) VALUES (?, 'user:local', "
+                "'header.adopted', ?, ?)", (NOW, f"frame:{m}", json.dumps({"location_id": lid})))
+    con.commit()
+    czytane = []
+    run_stack_lineage(con, now=NOW, xml_reader=lambda p: czytane.append(p))
+    assert czytane == [STOS]
+
+
+def test_historia_bez_kopii_zgodnej_z_naglowkiem_z_najstarszej_obecnej(con):
+    """Żadna kopia nie zeznaje tego, co `header` (fakty nie zebrane) - zostaje dotychczasowa
+    reguła: najstarsza obecna. Brak dowodu nie przestawia czytnika na losową kopię."""
+    m = _master(con, path=r"R:\STARA\inna.xisf")
+    con.execute("INSERT INTO location(frame_id, volume, path, present) VALUES (?, 'V', ?, 1)",
+                (m, STOS))
+    con.commit()
+    czytane = []
+    run_stack_lineage(con, now=NOW, xml_reader=lambda p: czytane.append(p))
+    assert czytane == [r"R:\STARA\inna.xisf"]

@@ -888,16 +888,17 @@ def test_gest_fakty_kopii_widoczny_tylko_gdy_jest_co_zbierac(qapp, tmp_path):
 
 
 def test_gest_fakty_kopii_woła_dokladnie_fakty_i_przejecie_bez_skanu(qapp, tmp_path, monkeypatch):
-    """Gest idzie drogą ogona „Oznacz zniknięte" (`_adopt_and_derive`): `_copy_facts` →
-    `_adopt_testimony`, te same funkcje rdzenia, bez zawężenia do korzenia (licznik i wiersz „?"
-    liczą bez korzenia). Ani skanu, ani passa obecności, ani sondy źródła; bez przejęcia
-    zeznania także bez etapów masowych (pochodne tylko po realnym przejęciu - osobny test).
+    """Gest idzie drogą ogona „Oznacz zniknięte" (`_adopt_and_derive`): łańcuch rdzenia
+    `derive.adopt_and_derive` (fakty kopii → przejęcie zeznania), bez zawężenia do korzenia
+    (licznik i wiersz „?" liczą bez korzenia). Ani skanu, ani passa obecności, ani sondy źródła;
+    bez przejęcia zeznania także bez etapów masowych (pochodne tylko po realnym przejęciu -
+    osobny test).
 
     Falsyfikator: dołóż w `_adopt_and_derive` `self._scan(con)` → wołania zawierają skan."""
     from horreum import scan
     db_path, _kat = _kopie_bez_faktow(tmp_path)
     wolane = []
-    for nazwa in ("_adopt_and_derive", "_copy_facts", "_adopt_testimony", "_scan", "_stacks",
+    for nazwa in ("_adopt_and_derive", "_emit_chain", "_scan", "_stacks",
                   "_bulk", "_presence", "_zrodlo"):
         prawdziwa = getattr(PipelineWorker, nazwa)
 
@@ -918,7 +919,7 @@ def test_gest_fakty_kopii_woła_dokladnie_fakty_i_przejecie_bez_skanu(qapp, tmp_
     w.failed.connect(lambda n, m: failed.append((n, m)))
     w.run()
     assert failed == []
-    assert wolane == ["_adopt_and_derive", "_copy_facts", "_adopt_testimony"], wolane
+    assert wolane == ["_adopt_and_derive", "_emit_chain"], wolane
     assert korzenie == [None]
     assert started == ["copy_facts"] and [n for n, _ in done] == ["copy_facts"]
     assert (done[0][1].rows, done[0][1].written) == (2, 2)
@@ -938,42 +939,42 @@ def test_gest_fakty_kopii_pochodne_wylacznie_po_realnym_przejeciu(qapp, tmp_path
     a bez niego (zero przejętych, anulowanie, brak kandydatów) nie rusza żadnego etapu masowego.
     Delty i obecności nie ma w żadnym wariancie - to nie dostawa.
 
-    Falsyfikator: zdejmij `not a.adopted` ze straży `_adopt_and_derive` → wariant zero przejętych
-    liczy całe archiwum."""
-    from horreum import scan
+    Falsyfikator: zdejmij warunek `przejete` ze straży `derive.adopt_and_derive` → wariant zero
+    przejętych liczy całe archiwum."""
+    from horreum import derive, scan
     db_path, _kat = _kopie_bez_faktow(tmp_path)
-    masowe = []
-    monkeypatch.setattr(PipelineWorker, "_bulk", lambda self, con, name: masowe.append(name))
-    monkeypatch.setattr(
-        PipelineWorker, "_adopt_testimony",
-        lambda self, con: None if przejecie is None else scan.AdoptSummary(rows=1, **przejecie))
+    monkeypatch.setattr(scan, "adopt_candidates", lambda con, root=None: przejecie is not None)
+    monkeypatch.setattr(scan, "adopt_orphan_testimony",
+                        lambda con, **kw: scan.AdoptSummary(rows=1, **przejecie))
     w = PipelineWorker(db_path, now_fn=lambda: NOW)
     w.configure("copy_facts")
+    started, failed = [], []
+    w.stage_started.connect(started.append)
+    w.failed.connect(lambda n, m: failed.append((n, m)))
     w.run()
-    assert masowe == pochodne
+    assert failed == []
+    assert [n for n in started if n in derive.DERIVED] == pochodne
 
 
 def test_gest_fakty_kopii_anulowanie_przerywa_przed_przejeciem(qapp, tmp_path, monkeypatch):
     """Anulowanie tak jak w łańcuchu: `cancelled('copy_facts')`, a przejęcie zeznania i pochodne
     nie ruszają. W oknie gest jest przerywalny (przycisk „Anuluj" aktywny w trakcie)."""
+    from horreum import scan
     db_path, _kat = _kopie_bez_faktow(tmp_path)
-    adopt, masowe = [], []
-    prawdziwa = PipelineWorker._adopt_testimony
-    monkeypatch.setattr(PipelineWorker, "_adopt_testimony",
-                        lambda self, con: adopt.append(1) or prawdziwa(self, con))
-    prawdziwy_bulk = PipelineWorker._bulk
-    monkeypatch.setattr(PipelineWorker, "_bulk",
-                        lambda self, con, name: masowe.append(name) or
-                        prawdziwy_bulk(self, con, name))
+    adopt = []
+    prawdziwe_kandydatki = scan.adopt_candidates
+    monkeypatch.setattr(scan, "adopt_candidates",
+                        lambda con, root=None: adopt.append(1) or prawdziwe_kandydatki(con, root))
     w = PipelineWorker(db_path, now_fn=lambda: NOW)
     w.configure("copy_facts")
-    cancelled, done = [], []
+    cancelled, done, started = [], [], []
     w.cancelled.connect(lambda name, s: cancelled.append((name, s)))
     w.stage_done.connect(lambda name, s: done.append(name))
+    w.stage_started.connect(started.append)
     w.request_cancel()
     w.run()
     assert [n for n, _ in cancelled] == ["copy_facts"] and cancelled[0][1].cancelled
-    assert done == [] and adopt == [] and masowe == []
+    assert done == [] and adopt == [] and started == ["copy_facts"]
     assert _bez_faktow(db_path) == 2                     # nic nie zapisane
 
     view = PipelineView(db_path, now_fn=lambda: NOW)

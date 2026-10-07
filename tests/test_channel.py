@@ -223,7 +223,8 @@ def _stos(con, fid, kanal, szum):
                 "object_id, config_id, channel) VALUES (?,?,?,?,?,?,?,?,?)",
                 (fid, f"d{fid}", "master_light", "xisf", NOW, 1, 1, 1, kanal))
     con.execute("INSERT INTO header (frame_id, raw_json, exptime) VALUES (?,?,?)",
-                (fid, json.dumps({"NOISE00": f"{szum:.4e}"}), 600.0))
+                (fid, json.dumps({"NOISE00": f"{szum:.4e}", "DATE-OBS": OKNO[0],
+                                  "DATE-END": OKNO[1]}), 600.0))
     con.execute("INSERT INTO integration (master_frame_id, created_at, tool, window_start, "
                 "window_end) VALUES (?,?,?,?,?)", (fid, NOW, SYG.format(fid), *OKNO))
     con.execute("INSERT INTO location (frame_id, volume, path, present) VALUES (?,?,?,1)",

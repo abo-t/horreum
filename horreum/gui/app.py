@@ -3038,6 +3038,8 @@ class MainWindow(QMainWindow):
 
     # Pokrycie pól Zbiorów liczone w wątku tła (`FramesView(pola_poza_watkiem=…)`). Atrybut KLASY,
     # bo widoki montuje sam `__init__` okna - seam testowy musi stać, zanim okno powstanie.
+    # Ten sam przełącznik oddaje w tło skład zbioru gridu (`ZbiorWorker`, AR-27) - oba wątki tła
+    # Zbiorów chodzą razem, więc test, który chce widoku przewidywalnego, wyłącza oba jednym ruchem.
     _pola_poza_watkiem = True
 
     def __init__(self, db_path=None, now_fn=_utc_now_iso, on_db_changed=None, parent=None):
@@ -3308,6 +3310,7 @@ class MainWindow(QMainWindow):
         grid = FramesView(self.con, now_fn=self._now, pola_poza_watkiem=self._pola_poza_watkiem)
         grid.status_message.connect(self._flash_grid)
         grid.load_report.connect(self._raport_wczytania_gridu)
+        grid.ponow_raport_wczytania()        # zbiór startu jedzie z wątku tła od `__init__` (AR-27)
         grid.status_recipe.connect(self._recepta_gridu)   # recepta ma własny nośnik (FH-2)
         grid.writeback_busy.connect(self._on_writeback_busy)
         self.grid_view = grid
@@ -3414,7 +3417,9 @@ class MainWindow(QMainWindow):
                     self.object_view._load_facets()
                     self.object_view.refresh()
                     self.grid_view._load_facets()
-                    self.grid_view.refresh()
+                    # Skład zbioru w wątku tła (AR-27: 1,4-1,5 s na żywej bazie stało tu w oknie);
+                    # wraca od razu, tabela dostaje zbiór, gdy ten dojedzie.
+                    self.grid_view.refresh(w_tle=True)
                     self.tasks_view.refresh_counts()    # liczniki zadań + badge ze świeżego stanu (F5)
                     # Planer (T5): świeże klatki zmieniają POKRYCIE celów (godziny per kanał), więc
                     # plan nocy policzony przed dostawą pokazywałby stare luki.

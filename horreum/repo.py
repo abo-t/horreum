@@ -22,8 +22,9 @@ from .resolve._text import norm_alnum          # kierunek repo → resolve (liś
 from .resolve.catalog import catalog_canon      # gramatyka katalogowa — CZYSTA, bez assetu (liść)
 from .resolve.channel import CHANNELS           # słownik kanału (0028) - liść, bez cyklu
 from .resolve.frames import LIGHT_KINDS         # guard RODZAJU w klindze (S2b) — liść, bez cyklu
-from .resolve.headers import (FAKTY_DO_DOCIAGNIECIA, FAKTY_NOWSZE,   # stan faktów kopii (AR-33)
-                              copy_facts_state)
+from .resolve.headers import (FAKTY_BIEZACE, FAKTY_DO_DOCIAGNIECIA,   # stan faktów kopii (AR-33)
+                              FAKTY_NOWSZE, copy_facts_state,
+                              copy_testimony)            # źródło `header` (kopia wiodąca, AR-4)
 from .resolve.objects import (CLEARABLE_OBJECT_SOURCES,  # enum źródeł osi OBIEKT —
                               OBJECT_SOURCES,           # jeden właściciel (S1/S2b)
                               STICKY_OBJECT_SOURCES,    # …ręki, nietykalne dla cofnięcia (AR-38)
@@ -479,6 +480,13 @@ def mark_superseded(con, *, frame_id, superseded_by, now, actor="supersede"):
     łańcucha wymaga ZNAJOMOŚCI CAŁEJ mapy, którą ma pass — klinga widzi jedną parę. Podział jak
     przy hamulcu `presence`: klinga broni wiersza, pass broni przebiegu.
 
+    WCHŁONIĘCIE SZKIELETU (AR-42) idzie tą samą kolumną, innym czasownikiem: `frame.absorbed`.
+    Szkielet (`skeleton_frame_ids`: rodzaj `unknown`, bez zeznania, bez lokacji, bez faktów ręki)
+    traci lokację nie przez podmianę treści, tylko dlatego, że plik WYZDROWIAŁ i przeczytany dał
+    prawdziwą tożsamość. Ogniwo jest prawdą („plik spod tej ścieżki niesie dziś klatka N") i trzyma
+    szkielet poza kubełkami roboty (sieroty, `headerless`) bez nowej kolumny; czasownik mówi
+    w dzienniku, że to nie była edycja. Rozstrzyga stan pod lockiem, nie wołający.
+
     ZWRACA bool: `True` = oznaczono; `False` = klatka żywa ALBO już oznaczona tą samą tożsamością
     (idempotencja powtórnego przebiegu — bez UPDATE i bez eventu, QUIET)."""
     if frame_id == superseded_by:
@@ -500,10 +508,46 @@ def mark_superseded(con, *, frame_id, superseded_by, now, actor="supersede"):
                 "SELECT 1 FROM location WHERE frame_id = ? AND present = 1",
                 (frame_id,)).fetchone() is not None:
             return False
+        verb = "frame.absorbed" if skeleton_frame_ids(con, [frame_id]) else "frame.superseded"
         con.execute("UPDATE frame SET superseded_by = ? WHERE id = ?", (superseded_by, frame_id))
-        emit_event(con, actor=actor, verb="frame.superseded", target=f"frame:{frame_id}",
+        emit_event(con, actor=actor, verb=verb, target=f"frame:{frame_id}",
                    now=now, payload={"superseded_by": superseded_by})
     return True
+
+
+def skeleton_frame_ids(con, frame_ids):
+    """Które z `frame_ids` są SZKIELETEM BEZ ŚLADU (AR-42) - set[int]. JEDEN właściciel predykatu
+    dla klingi (`mark_superseded`: czasownik `frame.absorbed`), passu (`supersede.backfill`: licznik
+    `absorbed`) i read-modelu (`absorbed_frame_ids` → perspektywa „Zastąpione").
+
+    Szkielet = klatka z miękkiego lądowania odczytu (W1): rodzaj `unknown`, ustalony bez ręki
+    (`kind_source IS NULL`), BEZ zeznania (`header`) i BEZ żadnej lokacji (także nieobecnej - plik,
+    który zniknął spod innej ścieżki, może wrócić, więc to jeszcze nie wchłonięcie). BEZ FAKTÓW
+    RĘKI: werdykt wycofania, oś obiektu, zestaw i stanowisko wskazane ręką, werdykt rodowodu - każdy
+    z nich czyni klatkę czymś więcej niż pustym miejscem po nieudanym odczycie i zostawia ją przy
+    zwykłym zastąpieniu (kubełek przeniesienia faktów, `supersede.pending_transfer`)."""
+    ids = sorted({int(i) for i in frame_ids})
+    if not ids:
+        return set()
+    return {int(r[0]) for r in con.execute(
+        "SELECT f.id FROM frame f WHERE f.id IN (SELECT value FROM json_each(?)) "
+        "AND f.kind = 'unknown' AND f.kind_source IS NULL AND f.retired_at IS NULL "
+        "AND f.object_id IS NULL AND f.object_source IS NULL "
+        "AND f.config_id IS NULL AND f.config_source IS NULL "
+        "AND f.observatory_id IS NULL AND f.observatory_source IS NULL "
+        "AND NOT EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id) "
+        "AND NOT EXISTS (SELECT 1 FROM location l WHERE l.frame_id = f.id) "
+        "AND NOT EXISTS (SELECT 1 FROM integration_input ii WHERE ii.input_frame_id = f.id "
+        "                AND ii.asserted_by = 'user')",
+        (json.dumps(ids),)).fetchall()}
+
+
+def absorbed_frame_ids(con):
+    """Klatki WCHŁONIĘTE (AR-42): zastąpione (`superseded_by IS NOT NULL`), które są szkieletem bez
+    śladu (`skeleton_frame_ids`). Predykat ze STANU, więc obejmuje też ogniwa zapisane przed AR-42
+    czasownikiem `frame.superseded` (na `pf4` 2026-10-07: 15629 → 16778). Zwraca set[int]."""
+    return skeleton_frame_ids(con, [r[0] for r in con.execute(
+        "SELECT id FROM frame WHERE superseded_by IS NOT NULL")])
 
 
 @dataclass
@@ -949,7 +993,11 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
       `event(header.refreshed)` `{header_hash_before, header_hash_after}`; w TEJ SAMEJ transakcji
       przeliczenie pochodnych frame'a (R3-b2): `frame.camera_id`/`kind` z nowego zeznania →
       UPDATE + `event(frame.rederived)` (inaczej config budowany na stęchłej kamerze).
-      Zeznanie odświeża OSTATNI re-odczyt (last-read-wins).
+      Zeznanie odświeża WYŁĄCZNIE kopia wiodąca (AR-4, `_zeznanie_plynie_z`: kotwica ręki,
+      jedyna obecna kopia albo jednoznaczne źródło bieżącego `header`). Zmiana nagłówka innej
+      kopii zostaje w jej faktach (`location.refreshed`) - rozjazd pokażą „Kopie niezgodne",
+      a kopię wiodącą wskaże człowiek. Dawne „ostatni odczyt wygrywa" było automatyczną regułą
+      wyboru przy ≥2 obecnych kopiach, której decyzja Zdzinia (2026-09-26) zakazuje.
     - **`unreadable_since` (#13)**: marker czytelności kopii — jeden z faktów kopii (`_LOCATION_FACTS`),
       więc jego przejście SAMO jest zmianą. Udany odczyt podaje `None` → marker gaśnie (nawet gdy
       pozostałe fakty identyczne, np. wyzdrowienie transientu przy tym samym mtime); rekord nieczytelny
@@ -1018,6 +1066,11 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
                    for k in _LOCATION_FACTS if row[k] != after[k]}
         if not changed:
             return result
+        # KOPIA WIODĄCA LICZONA PRZED zapisem faktów tej lokacji (AR-4): o tym, czy L była źródłem
+        # zeznania, mówią jej fakty SPRZED zmiany nagłówka. Po UPDATE porównanie z `header`
+        # widziałoby już nowy plik.
+        przepisz = ("header_hash" in changed and raw_json is not None
+                    and _zeznanie_plynie_z(con, frame_id, location_id))
         con.execute(
             "UPDATE location SET mtime = ?, file_sha1 = ?, header_hash = ?, hdu_index = ?, "
             "compressed = ?, size_bytes = ?, unreadable_since = ?, unreadable_kind = ?, "
@@ -1032,7 +1085,7 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
                    target=f"location:{location_id}", now=now, payload=changed)
         result["facts"] = True
 
-        if "header_hash" not in changed or raw_json is None:
+        if not przepisz:
             return result
         result["header"] = True
         result["rederived"] = _rewrite_testimony(
@@ -1040,6 +1093,79 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
             camera_id=camera_id, kind=kind, now=now, actor=actor, verb="header.refreshed",
             payload={"header_hash_before": row["header_hash"], "header_hash_after": header_hash})
     return result
+
+
+def _zeznanie_plynie_z(con, frame_id, location_id):
+    """Czy zmiana nagłówka lokacji `location_id` ma przepisać zeznanie klatki (AR-4, jedna reguła
+    z ręką i bez): klatka bez `header` (nic do ochrony) albo lokacja jest KOPIĄ WIODĄCĄ
+    (`lead_location`: kotwica ręki, jedyna obecna kopia, jednoznaczne źródło `header`).
+    W każdym innym wypadku zmiana zostaje w faktach kopii, a rozjazd pokazują „Kopie niezgodne"."""
+    if con.execute("SELECT 1 FROM header WHERE frame_id = ?", (frame_id,)).fetchone() is None:
+        return True
+    # Jedyna obecna to także kopia, która właśnie ODŻYWA (`present` 0 → 1 w tym zapisie) przy braku
+    # innych obecnych - `lead_location` liczy stan sprzed zapisu, więc tej by nie widział.
+    if con.execute("SELECT 1 FROM location WHERE frame_id = ? AND present = 1 AND id <> ?",
+                   (frame_id, location_id)).fetchone() is None:
+        return True
+    return lead_location(con, frame_id) == location_id
+
+
+def hand_lead_location(con, frame_id):
+    """KOTWICA RĘKI - kopia wiodąca klatki wskazana gestem, `location_id` albo `None` (AR-4).
+    Źródłem jest najnowsze `header.adopted` klatki: aktor `user:*` (gest „Ta kopia prowadzi",
+    `lead_copy`) → jego `location_id`; aktor automatu (etap Dostawy) albo brak przejęcia → `None`.
+    Ta sama przesłanka co druga droga `gui.queries.hand_testimony_frame_ids`.
+
+    KOTWICA WAŻNA WYŁĄCZNIE, gdy wskazana lokacja jest OBECNA i nadal należy do tej klatki: po
+    zniknięciu wybranej kopii (albo przepięciu jej ścieżki na inną klatkę) kotwica nie wskazuje
+    pliku, który mógłby mówić - inaczej zablokowałaby odświeżenie jedynej obecnej kopii (zapis
+    nagłówka ręką raportowałby sukces, a zeznanie zostałoby stare). Fakt ręki zostaje w dzienniku
+    i w osi `testimony_hand`; nieważna kotwica tylko przestaje rozstrzygać o kopii wiodącej."""
+    row = con.execute(
+        "SELECT actor, json_extract(payload, '$.location_id') AS lid FROM event "
+        "WHERE target = ? AND verb = 'header.adopted' ORDER BY id DESC LIMIT 1",
+        (f"frame:{frame_id}",)).fetchone()
+    if row is None or not str(row["actor"]).startswith("user:") or row["lid"] is None:
+        return None
+    wazna = con.execute("SELECT 1 FROM location WHERE id = ? AND frame_id = ? AND present = 1",
+                        (row["lid"], frame_id)).fetchone()
+    return row["lid"] if wazna is not None else None
+
+
+def lead_location(con, frame_id):
+    """KOPIA WIODĄCA klatki - `location_id`, z którego głosu ma płynąć zeznanie, albo `None`
+    („nie wiadomo" - przy ≥2 obecnych kopiach zeznania nie przepisuje nikt poza człowiekiem, AR-4).
+
+    Kolejność, pierwsza odpowiedź wygrywa:
+      1. ważna kotwica ręki (`hand_lead_location`);
+      2. JEDYNA obecna kopia - każda reguła wybrałaby ją, więc to nie jest wybór;
+      3. ŹRÓDŁO bieżącego `header`: dokładnie jedna obecna kopia, której fakty bieżącej reguły
+         (`hdr_hash == header_hash`, `FAKTY_BIEZACE`) równają się `copy_testimony(header)` - ta sama
+         derywacja co predykat „Zeznanie z nieobecnej kopii". Odcisku nagłówka `header` nie niesie,
+         a fakty kopii są jedynym porównaniem po polach, które da się policzyć z obu stron. Dwie
+         pasujące kopie (identyczne zeznania) albo kopia bez faktów = źródła nie da się ustalić
+         jednoznacznie → `None`.
+    Klatka bez obecnej kopii → `None`."""
+    kotwica = hand_lead_location(con, frame_id)
+    if kotwica is not None:
+        return kotwica
+    kopie = con.execute(
+        "SELECT id, header_hash, hdr_hash, hdr_rule, hdr_filter, hdr_imagetyp, hdr_object, "
+        "hdr_telescop, hdr_instrume, hdr_exptime, hdr_xbinning, hdr_date_obs "
+        "FROM location WHERE frame_id = ? AND present = 1 ORDER BY id", (frame_id,)).fetchall()
+    if len(kopie) == 1:
+        return kopie[0]["id"]
+    if not kopie:
+        return None
+    h = con.execute("SELECT raw_json FROM header WHERE frame_id = ?", (frame_id,)).fetchone()
+    if h is None:
+        return None
+    if any(copy_facts_state(k["hdr_hash"], k["hdr_rule"]) != FAKTY_BIEZACE
+           or k["hdr_hash"] != k["header_hash"] for k in kopie):
+        return None
+    zeznanie = copy_testimony(json.loads(h["raw_json"]))
+    zgodne = [k["id"] for k in kopie if all(k[p] == v for p, v in zeznanie.items())]
+    return zgodne[0] if len(zgodne) == 1 else None
 
 
 # Pola gorące `header` w kolejności literału niżej - JEDNA lista dla przepisania zeznania i dla
@@ -1093,7 +1219,7 @@ def _rewrite_testimony(con, *, frame_id, raw_json, cards, hot_fields, camera_id,
 
 
 def adopt_testimony(con, *, location_id, sha1_data, header_hash, raw_json, cards, hot_fields,
-                    camera_id, kind, now, actor, inplace_gen=None):
+                    camera_id, kind, now, actor, inplace_gen=None, expected_frame_id=None):
     """PRZEJĘCIE ZEZNANIA klatki przez WSKAZANĄ kopię: `header` + `cards` + pochodne frame'a
     (`camera_id`/`kind`) z nagłówka pliku tej kopii, przeczytanego przed chwilą przez wołającego.
 
@@ -1104,9 +1230,9 @@ def adopt_testimony(con, *, location_id, sha1_data, header_hash, raw_json, cards
     Rdzeń przepisania jest wspólny (`_rewrite_testimony`), różni się tylko przesłanka i ślad.
 
     KTÓRA KOPIA - ROZSTRZYGA WOŁAJĄCY, NIE KLINGA. Wejście to `location_id` wskazanej kopii i jej
-    odczytany rekord; klinga nie zna reguły wyboru. Dziś woła ją etap Dostawy dla klatek o jednej
-    obecnej kopii (`scan.adopt_orphan_testimony`), jutro gest człowieka „ta kopia prowadzi" (AR-4)
-    przy kopiach, które mówią różnie - bez zmiany tej funkcji.
+    odczytany rekord; klinga nie zna reguły wyboru. Wołają ją etap Dostawy dla klatek o jednej
+    obecnej kopii (`scan.adopt_orphan_testimony`) i gest człowieka „Ta kopia prowadzi" (AR-4,
+    `lead_copy.lead_copy_gesture`, aktor `user:local`) przy kopiach, które mówią różnie.
 
     STRAŻNICY (pod `BEGIN IMMEDIATE`, TOCTOU wobec równoległego skanu):
       * EXPECT: `sha1_data` rekordu (tożsamość liczona regułą skanu, z degeneracją) MUSI równać się
@@ -1115,9 +1241,19 @@ def adopt_testimony(con, *, location_id, sha1_data, header_hash, raw_json, cards
       * kopia OBECNA (`present = 1`) i odcisk nagłówka rekordu == `location.header_hash`: plik niesie
         dokładnie ten nagłówek, który baza zna. Inny odcisk = kopia zmieniła się od skanu i należy
         do skanu (odświeży fakty kopii razem z zeznaniem); nieobecna = nie ma czego przejmować.
-        Oba → `'drift'`, ZERO zapisu.
+        Oba → `'drift'`, ZERO zapisu;
+      * `expected_frame_id` (gest ręki, Z6): klatka, którą człowiek widział w menu. Skan mógł między
+        menu a zapisem przepiąć ścieżkę na inną klatkę - ręka zapisałaby się na klatce, której nikt
+        nie wybierał. Rozjazd → `'raced'`, ZERO zapisu;
+      * aktor AUTOMATU (nie `user:*`): kandydaturę etapu (jedna obecna kopia, brak ręki) sprawdza
+        się tu, pod lockiem, a nie tylko przy wyborze kandydatów - ważna kotwica ręki
+        (`hand_lead_location`) albo liczba obecnych kopii ≠ 1 → `'raced'`, ZERO zapisu (AR-4:
+        automat nie wybiera między kopiami i nie przegłosowuje ręki).
     Zeznanie już identyczne (`raw_json` i pola gorące bez zmian) → `'unchanged'`, ZERO zapisu i ZERO
-    eventu (idempotencja: drugi przebieg nie dopisuje dziennika).
+    eventu (idempotencja: drugi przebieg nie dopisuje dziennika). WYJĄTEK RĘKI (aktor `user:*`):
+    wybór kopii, która już mówi, jest faktem człowieka - `header.adopted` z `changed: {}`
+    i `confirmed: True`, bez przepisania treści, zwrot `'confirmed'`; gdy najnowszy zapis zeznania
+    to już ręka na tej lokacji i tym odcisku → `'unchanged'` bez zdarzenia.
 
     Ślad: `event(header.adopted)` na `frame:` z payloadem „skąd → dokąd": `location_id`, `path`
     i odcisk przejmującej kopii oraz `{pole: {before, after}}` pól gorących, które zmieniły wartość.
@@ -1128,7 +1264,7 @@ def adopt_testimony(con, *, location_id, sha1_data, header_hash, raw_json, cards
     w tej transakcji, zero zapisu. Kotwica odcisku sama tego nie łapie - zapis w miejscu przed
     re-synciem zostawia w bazie stary odcisk, a odczyt sprzed zapisu niesie ten sam.
 
-    ZWRACA `'adopted'` | `'unchanged'` | `'drift'`."""
+    ZWRACA `'adopted'` | `'confirmed'` | `'unchanged'` | `'drift'` | `'raced'`."""
     hot = dict(hot_fields or {})
     with _immediate(con):
         loc = con.execute(
@@ -1144,6 +1280,13 @@ def adopt_testimony(con, *, location_id, sha1_data, header_hash, raw_json, cards
         if not loc["present"] or header_hash is None or loc["header_hash"] != header_hash:
             return "drift"
         frame_id = loc["frame_id"]
+        if expected_frame_id is not None and frame_id != expected_frame_id:
+            return "raced"
+        if not str(actor).startswith("user:"):
+            obecne = con.execute("SELECT count(*) FROM location WHERE frame_id = ? AND present = 1",
+                                 (frame_id,)).fetchone()[0]
+            if obecne != 1 or hand_lead_location(con, frame_id) is not None:
+                return "raced"
         before = con.execute(
             "SELECT raw_json, date_obs, exptime, filter_raw, instrume, telescop, focallen, "
             "focratio_raw, xpixsz, ypixsz, gain, offset_adu, ccd_temp, usblimit, xbinning, "
@@ -1153,7 +1296,28 @@ def adopt_testimony(con, *, location_id, sha1_data, header_hash, raw_json, cards
                    for k in _HEADER_HOT
                    if (None if before is None else before[k]) != hot.get(k)}
         if before is not None and before["raw_json"] == raw_json and not changed:
-            return "unchanged"
+            if not str(actor).startswith("user:"):
+                return "unchanged"
+            # WYBÓR RĘKI KOPII, KTÓRA JUŻ MÓWI: treść bez zmian, ale werdykt człowieka jest faktem
+            # (AR-4) - bez zdarzenia zeznanie zostałoby „z automatu" i pierwszy przebieg etapu albo
+            # odświeżenie innej kopii przestawiłoby je bez pytania. Strażnik idempotencji: najnowszy
+            # zapis zeznania tej klatki to już ręka wskazująca TĘ lokację i TEN odcisk → zero
+            # zdarzenia. Literał czasowników jak w `gui.queries.hand_testimony_frame_ids`.
+            ostatni = con.execute(
+                "SELECT actor, verb, json_extract(payload, '$.location_id') AS lid, "
+                "       json_extract(payload, '$.header_hash') AS hh "
+                "FROM event WHERE target = ? "
+                "  AND verb IN ('header.recorded', 'header.refreshed', 'header.adopted') "
+                "ORDER BY id DESC LIMIT 1", (f"frame:{frame_id}",)).fetchone()
+            if (ostatni is not None and ostatni["verb"] == "header.adopted"
+                    and str(ostatni["actor"]).startswith("user:")
+                    and ostatni["lid"] == location_id and ostatni["hh"] == header_hash):
+                return "unchanged"
+            emit_event(con, actor=actor, verb="header.adopted", target=f"frame:{frame_id}",
+                       now=now, payload={"location_id": location_id, "path": loc["path"],
+                                         "header_hash": header_hash, "changed": {},
+                                         "confirmed": True})
+            return "confirmed"
         _rewrite_testimony(
             con, frame_id=frame_id, raw_json=raw_json, cards=cards, hot_fields=hot,
             camera_id=camera_id, kind=kind, now=now, actor=actor, verb="header.adopted",
@@ -1962,28 +2126,48 @@ def flag_object_review_summary(con, items, now, actor="resolver"):
 
 def backfill_filter_canon(con, items, now, actor="resolver"):
     """Backfill kolumny POCHODNEJ `frame.filter_canon` ZBIORCZO: jedna transakcja + JEDEN event
-    `filter.backfilled`. `items` = lista `(frame_id, filter_canon)` (tylko frame'y z niepustym
-    kanonem; brak filtra zostaje NULL — W2, bez review). Zwraca liczbę REALNIE zmienionych wierszy.
+    `filter.backfilled`. `items` = lista `(frame_id, filter_canon)` - kanon albo `None` (świadomy
+    brak: nagłówek nie zeznaje filtra, W2, bez review). Zwraca liczbę REALNIE zmienionych wierszy.
+
+    `None` ZERUJE (AR-2, AR-22 (1)). Pochodna ma się dać przeliczyć w obie strony, jak
+    `backfill_frame_channel`: zeznanie przejęte z ocalałej kopii bez karty `FILTER` (albo z kartą
+    `NoFilter`) zostawiało kanon kopii skasowanej, bo klinga brała wyłącznie kanon niepusty - oś
+    mówiła co innego niż zapisany nagłówek (15656: `L-Pro` przy `NoFilter`). Ręki ta kolumna nie
+    zna (jedyny pisarz to przebieg), więc zerowanie nie przegłosowuje niczyjego werdyktu.
 
     IDEMPOTENTNY (D-0722-1): `WHERE filter_canon IS NOT ?` odsiewa wiersze, które już mają ten
     kanon (`IS NOT` obsługuje NULL — pierwszy backfill przechodzi), a `count` w payloadzie to suma
     `cur.rowcount`, czyli SKUTEK, nie rozmiar wejścia. Zero zmian → ZERO eventu, jak reszta repo
     (`assign_object`, `flag_object_review_summary`). Wcześniej `UPDATE` leciał bezwarunkowo dla
     każdego itemu, a `count = len(items)` — powtórny resolve dopisywał identyczny event z licznikiem
-    całej populacji (na `horreum_pf4.db` 7× `count: 12582` przy zerze zmian)."""
+    całej populacji (na `horreum_pf4.db` 7× `count: 12582` przy zerze zmian).
+
+    Wyzerowania niosą w payloadzie `cleared` = `[[frame_id, było]]` (klucz tylko, gdy są): kanonu
+    sprzed nie da się odtworzyć z nagłówka, który już go nie zeznaje, więc dziennik jest jedynym
+    miejscem, gdzie przetrwa."""
     items = list(items)
     if not items:
         return 0
     with con:
         changed = 0
+        wyzerowane = []
         for frame_id, filter_canon in items:
+            if filter_canon is None:
+                bylo = con.execute(
+                    "SELECT filter_canon FROM frame WHERE id = ?", (frame_id,)).fetchone()
+                if bylo is None or bylo[0] is None:
+                    continue
+                wyzerowane.append([frame_id, bylo[0]])
             cur = con.execute(
                 "UPDATE frame SET filter_canon = ? WHERE id = ? AND filter_canon IS NOT ?",
                 (filter_canon, frame_id, filter_canon))
             changed += cur.rowcount
         if changed:
+            payload = {"count": changed}
+            if wyzerowane:
+                payload["cleared"] = wyzerowane
             emit_event(con, actor=actor, verb="filter.backfilled", target="frame:*", now=now,
-                       payload={"count": changed})
+                       payload=payload)
     return changed
 
 

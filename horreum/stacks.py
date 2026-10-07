@@ -46,6 +46,7 @@ from .hashing import sha1_of_set
 from .naming import header_dt
 from .resolve import stack as rstack
 from .resolve._coerce import _to_float
+from .resolve.headers import copy_testimony
 
 # Powody, dla których stos NIE dostaje wejść. Wartości = tokeny CHECK-a migracji 0012 (baza jest
 # ostatnią bramką słownika, jak przy `target_plan.status`), proza należy do powierzchni.
@@ -177,17 +178,48 @@ def _masters(con):
     ODNIESIENIE CZASU (R2) PRZYCHODZI Z `integration`, nie z klatki — LEFT JOIN, bo stos widziany
     pierwszy raz wiersza integracji jeszcze nie ma (zakłada go ten sam przebieg, niżej). Brak
     wiersza i wiersz z `utc_offset_min IS NULL` znaczą dla doboru DOKŁADNIE to samo („nie wiem,
-    w jakim zegarze liczy ten master"), więc łączymy je bez rozróżnienia."""
-    return con.execute(
+    w jakim zegarze liczy ten master"), więc łączymy je bez rozróżnienia.
+
+    HISTORIA Z KOPII, KTÓRA DAŁA `header` (AR-22 (3)). Zeznanie stosu to para: karty z `header`
+    i XML historii z pliku spod `path`. Obie połowy mają pochodzić z JEDNEJ kopii - inaczej okno
+    i obiekt mówiłyby o jednym przebiegu integracji, a `declared_rows` i sygnatura o drugim.
+    Gdy kopię wiodącą wskazała ręka (ważna kotwica `repo.hand_lead_location`), historia idzie z NIEJ -
+    to jej głos niesie `header`. Bez kotwicy kopia-źródło to ta obecna, której fakty (`hdr_*`, 0021)
+    równają się `copy_testimony(header)` -
+    ta sama derywacja po obu stronach, co w predykacie „Zeznanie z nieobecnej kopii"
+    (`gui.queries.orphan_testimony_copies`). Żadna nie pasuje (fakty nie zebrane, zeznanie
+    z kopii nieobecnej) → najstarsza obecna, jak dotąd. Sonda 2026-10-07 na `pf4` `?mode=ro`:
+    stosów z dwiema obecnymi kopiami jest 0, więc dziś każdy stos czyta tę samą kopię co przedtem."""
+    rows = con.execute(
         "SELECT f.id AS frame_id, f.object_id AS object_id, f.filter_canon AS filter_canon, "
-        "h.raw_json AS raw_json, tc.canon_id AS telescope_id, i.utc_offset_min AS utc_offset_min, "
-        "(SELECT l.path FROM location l WHERE l.frame_id = f.id AND l.present = 1 "
-        " ORDER BY l.id LIMIT 1) AS path "
+        "h.raw_json AS raw_json, tc.canon_id AS telescope_id, i.utc_offset_min AS utc_offset_min "
         "FROM frame f LEFT JOIN header h ON h.frame_id = f.id "
         "LEFT JOIN config c ON c.id = f.config_id "
         "LEFT JOIN telescope_canonical tc ON tc.id = c.telescope_id "
         "LEFT JOIN integration i ON i.master_frame_id = f.id "
         "WHERE f.kind = 'master_light' AND f.superseded_by IS NULL ORDER BY f.id").fetchall()
+    kopie = {}
+    for k in con.execute(
+            "SELECT l.id, l.frame_id, l.path, l.hdr_filter, l.hdr_imagetyp, l.hdr_object, l.hdr_telescop, "
+            "       l.hdr_instrume, l.hdr_exptime, l.hdr_xbinning, l.hdr_date_obs "
+            "FROM location l JOIN frame f ON f.id = l.frame_id "
+            "WHERE f.kind = 'master_light' AND f.superseded_by IS NULL AND l.present = 1 "
+            "ORDER BY l.frame_id, l.id"):
+        kopie.setdefault(k["frame_id"], []).append(k)
+    out = []
+    for r in rows:
+        obecne = kopie.get(r["frame_id"], [])
+        path = obecne[0]["path"] if obecne else None
+        kotwica = repo.hand_lead_location(con, r["frame_id"]) if len(obecne) > 1 else None
+        if kotwica is not None:
+            path = next(k["path"] for k in obecne if k["id"] == kotwica)
+        elif len(obecne) > 1 and r["raw_json"]:
+            zeznanie = copy_testimony(json.loads(r["raw_json"]))
+            zrodlo = next((k for k in obecne if all(k[p] == v for p, v in zeznanie.items())), None)
+            if zrodlo is not None:
+                path = zrodlo["path"]
+        out.append({**dict(r), "path": path})
+    return out
 
 
 def _window_candidates(con, *, object_id, exptime):

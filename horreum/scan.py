@@ -1885,7 +1885,8 @@ def _ingest_in_tx(con, rec, *, volume, drive_letter, tier, now, summary, actor, 
         summary.supersede_cleared += 1
 
 
-def _szkielet_po_awarii_zapisu(con, rec, *, volume, drive_letter, tier, reason, now, summary):
+def _szkielet_po_awarii_zapisu(con, rec, *, volume, drive_letter, tier, reason, now, summary,
+                               actor="scan"):
     """Miękkie lądowanie NIEZNANEJ ścieżki, której wjazd (`ingest_record`) padł PO udanym odczycie:
     zakres `repo.atomic` wycofał wszystko, więc ścieżka nadal nie ma lokacji, choć tożsamość klatki
     jest znana z rekordu. Szkielet w OSOBNEJ transakcji klingi: klatka po `sha1_data` (rodzaj
@@ -1902,23 +1903,28 @@ def _szkielet_po_awarii_zapisu(con, rec, *, volume, drive_letter, tier, reason, 
 
     Powrót bez wyjątku = lokacja ścieżki stoi (szkielet albo wiersz dopisany w międzyczasie przez
     kogoś innego - wtedy bez eventu). Wyjątek (szkielet też nie wchodzi) idzie do wołającego - ten
-    zostaje przy backstopie bez tożsamości."""
+    zostaje przy backstopie bez tożsamości.
+
+    `actor` idzie do każdej klingi szkieletu - import (`import:fitsmirror`) ma się w dzienniku
+    odróżniać od skanu tak samo jak przy udanym wjeździe."""
     sha1_data, uncomputable = _record_identity(rec)
     rekord = ScanSummary()
     with repo.atomic(con):
         frame_id, created = repo.upsert_frame(
             con, sha1_data=sha1_data, sha1_data_uncomputable=uncomputable, kind="unknown",
-            filetype=_filetype(rec.path), camera_id=None, now=now)
+            filetype=_filetype(rec.path), camera_id=None, now=now, actor=actor)
         _, loc_created = repo.add_location(
             con, frame_id=frame_id, volume=volume, drive_letter=drive_letter, path=rec.path,
             tier=tier, mtime=rec.mtime, file_sha1=rec.file_sha1, size_bytes=rec.size_bytes,
-            unreadable_since=now, unreadable_kind="db", unreadable_reason=reason, now=now)
+            unreadable_since=now, unreadable_kind="db", unreadable_reason=reason, now=now,
+            actor=actor)
         if loc_created:
             rekord.locations_new += 1
             if created:
                 rekord.frames_new += 1
             repo.flag_frame_review(con, sha1=sha1_data, path=rec.path,
-                                   reason=f"{repo.UNREADABLE_REASON_PREFIX}{reason}", now=now)
+                                   reason=f"{repo.UNREADABLE_REASON_PREFIX}{reason}", now=now,
+                                   actor=actor)
             rekord.frame_review += 1
     _dolicz_probe(summary, rekord)
 
@@ -2123,8 +2129,8 @@ def copy_facts_candidates(con, root=None, *, porownywalne=False):
     `unreadable_since IS NULL`: taką kopię czyta ponownie skan, bo brama przyrostowa jej nie pomija
     (`_already_scanned`, guard markera), a udany odczyt idzie przez `ingest_record` do
     `repo.refresh_location` z faktami kopii i gasi marker tym samym UPDATE-em. Sterownik nie ma przy
-    niej nic do dodania poza wiecznym „?" w Porządkach, dopóki plik jest chory - jej robotą jest
-    kubełek kopii nieczytelnych.
+    niej nic do dodania poza wiecznym `failed`, dopóki plik jest chory - jej robotą jest kubełek
+    kopii nieczytelnych. Licznik „nie wiem" ją widzi (tryb `porownywalne`, akapit niżej).
 
     Kopia IZOLOWANA po zapisie w miejscu (operacja w fazie `repo.INPLACE_ISOLATING_PHASES`, ta sama
     reguła co `_isolated`) też wypada: żadna droga czytająca jej nie dotyka, a fakty przynosi re-sync
@@ -2147,18 +2153,25 @@ def copy_facts_candidates(con, root=None, *, porownywalne=False):
     TRYB LICZNIKA LICZY TEŻ FAKTY REGUŁY NOWSZEJ NIŻ KOD (`FAKTY_NOWSZE`, AR-33): porównania kopii
     mówią o nich „nie wiem” (`copy_facts_state`), więc licznik „nie wiem” musi je widzieć - inaczej
     rozjazd znikałby bez śladu. Kandydatem sterownika NIE są (starsza binarka niczego nie cofa):
-    drugi parametr `>` jest NULL-em w trybie domyślnym, więc fragment staje się „do dociągnięcia”."""
+    drugi parametr `>` jest NULL-em w trybie domyślnym, więc fragment staje się „do dociągnięcia”.
+
+    TRYB LICZNIKA LICZY TEŻ KOPIE NIECZYTELNE (AR-26). Warunek `unreadable_since IS NULL` odpowiada
+    na pytanie sterownika („czego nie ma sensu czytać" - inaczej wieczny `failed`), a nie licznika:
+    kopia nieczytelna bez faktów to dla porównań kopii to samo „nie wiem", co kopia nieprzeczytana,
+    i bez niej wiersz Porządków mówił „0" („sprawdzone, czysto") zamiast „?". Ten sam parametr
+    przełącza oba pytania, więc sterownik dostaje dokładnie to, co dotąd. Zmierzona populacja
+    2026-10-07 na `pf4` `?mode=ro`: 0 kopii nieczytelnych - licznik dziś nie drgnie."""
     from .gui import queries
     rows = con.execute(
         "SELECT l.id, l.volume, l.path, l.header_hash, l.hdr_hash, l.hdr_rule FROM location l "
         "WHERE l.present = 1 AND l.header_hash IS NOT NULL "
         "  AND (l.hdr_hash IS NULL OR l.hdr_rule IS NULL OR l.hdr_rule < ? OR l.hdr_rule > ?) "
-        "  AND l.unreadable_since IS NULL "
+        "  AND (l.unreadable_since IS NULL OR ?) "
         "  AND NOT EXISTS (SELECT 1 FROM inplace_op o WHERE o.location_id = l.id "
         "                  AND o.phase IN (SELECT value FROM json_each(?))) "
         "  AND l.frame_id IN (SELECT value FROM json_each(?)) "
         "ORDER BY l.id",
-        (COPY_TESTIMONY_RULE, COPY_TESTIMONY_RULE if porownywalne else None,
+        (COPY_TESTIMONY_RULE, COPY_TESTIMONY_RULE if porownywalne else None, int(porownywalne),
          json.dumps(list(repo.INPLACE_ISOLATING_PHASES)),
          json.dumps(queries.copy_facts_class(con, porownywalne=porownywalne)))).fetchall()
     if root is None:

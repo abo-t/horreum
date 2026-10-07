@@ -90,6 +90,70 @@ def test_ddl_odrzuca_samozastapienie_goly_sqlite():
         con.execute("UPDATE frame SET superseded_by = id WHERE id = ?", (a,))
 
 
+def test_wyzdrowialy_szkielet_jest_wchloniety_a_nie_zastapiony():
+    """AR-42: szkielet W1 (`unknown`, bez zeznania) traci lokację, bo plik WYZDROWIAŁ i przeczytany
+    dał prawdziwą tożsamość - to nie podmiana treści. Ogniwo zostaje (trzyma szkielet poza
+    sierotami), dziennik mówi `frame.absorbed`, raport liczy wchłonięcia, a perspektywa
+    „Zastąpione" pokazuje wyłącznie podmiany. Falsyfikator: zdejmij `skeleton_frame_ids`
+    z `mark_superseded` - czasownik wraca do `frame.superseded`."""
+    con = _baza()
+    szkielet, prawdziwa = _klatka(con, "szk", kind="unknown"), _klatka(con, "ok", kind="flat")
+    a, b = _klatka(con, "aaa"), _klatka(con, "bbb")
+    _podmiana(con, _kopia(con, szkielet, r"R:\X\flat.xisf"), prawdziwa)
+    _podmiana(con, _kopia(con, a, r"R:\X\plik.dng"), b)
+
+    s = supersede.backfill(con, now=NOW, apply=True)
+    assert (s.marked, s.absorbed) == (2, 1)
+    werbs = dict(con.execute("SELECT target, verb FROM event "
+                             "WHERE verb IN ('frame.superseded', 'frame.absorbed')").fetchall())
+    assert werbs == {f"frame:{szkielet}": "frame.absorbed", f"frame:{a}": "frame.superseded"}
+    assert supersede.orphans(con) == [], "ogniwo trzyma szkielet poza sierotami"
+    assert repo.absorbed_frame_ids(con) == {szkielet}
+    assert queries.superseded_frame_ids(con) == {a}
+    assert supersede.backfill(con, now=NOW).absorbed == 1, "już oznaczony liczy się dalej"
+    from horreum import cli
+    raport = cli._format_supersede("h.db", supersede.backfill(con, now=NOW), [], [],
+                                   apply=False, limit=5)
+    assert "wchloniete szkielety  : 1" in raport and "ROZJAZD" not in raport
+
+
+def test_wchloniety_szkielet_mowi_w_gridzie_wlasnym_zdaniem():
+    """Z10: poza perspektywą „Zastąpione" wiersz wchłoniętego szkieletu nie mówi „zastąpiona przez
+    #N" (to była podmiana treści, a tu plik wyzdrowiał). Flaga `absorbed` przychodzi z `base_rows`
+    (ten sam predykat co licznik, `repo.absorbed_frame_ids`), ogniwo do następczyni zostaje.
+    Falsyfikator: zdejmij gałąź `absorbed` w `_base_cell` - komórka wraca do „zastąpiona"."""
+    pytest.importorskip("PySide6")
+    from PySide6.QtCore import Qt
+    from horreum import pivot as pivot_mod
+    from horreum.gui.grid import BASE_COLS, GridTableModel
+    con = _baza()
+    szkielet, prawdziwa = _klatka(con, "szk", kind="unknown"), _klatka(con, "ok", kind="flat")
+    a, b = _klatka(con, "aaa"), _klatka(con, "bbb")
+    _podmiana(con, _kopia(con, szkielet, r"R:\X\flat.xisf"), prawdziwa)
+    _podmiana(con, _kopia(con, a, r"R:\X\plik.dng"), b)
+    supersede.backfill(con, now=NOW, apply=True)
+    wiersze = [dict(r) for r in queries.base_rows(con, [szkielet, a])]
+    assert {r["frame_id"]: r["absorbed"] for r in wiersze} == {szkielet: 1, a: 0}
+    m = GridTableModel()
+    m.set_data(wiersze, pivot_mod.build_pivot([szkielet, a], [], []), [])
+    kol = [k for _, k in BASE_COLS].index("path")
+    teksty = {m.data(m.index(i, kol), Qt.DisplayRole) for i in range(m.rowCount())}
+    assert teksty == {f"wchłonięta przez #{prawdziwa}", f"zastąpiona przez #{b}"}
+
+
+def test_szkielet_z_faktem_reki_to_zwykle_zastapienie():
+    """Werdykt ręki czyni szkielet czymś więcej niż pustym miejscem po odczycie: zostaje przy
+    zwykłym zastąpieniu (kubełek przeniesienia faktów), a nie znika jako wchłonięty."""
+    con = _baza()
+    szkielet, prawdziwa = _klatka(con, "szk", kind="unknown"), _klatka(con, "ok", kind="light")
+    _podmiana(con, _kopia(con, szkielet, r"R:\X\l.xisf"), prawdziwa)
+    con.execute("UPDATE frame SET retired_at = ? WHERE id = ?", (NOW, szkielet))
+    con.commit()
+    s = supersede.backfill(con, now=NOW, apply=True)
+    assert (s.marked, s.absorbed) == (1, 0)
+    assert queries.superseded_frame_ids(con) == {szkielet}
+
+
 # ---------------------------------------------------------------- pass
 
 def test_pass_dry_nie_dotyka_bazy_ale_liczy_zakres():

@@ -18,7 +18,8 @@ import re
 from horreum.grouper import NO_TELESCOPE_KINDS      # jeden właściciel zbioru rodzajów poza osią
 from horreum.naming import header_dt
 from horreum.repo import (INPLACE_ISOLATING_PHASES,   # fazy izolujące zapisu w miejscu (0022)
-                          INPLACE_OPEN_PHASES)        # ...i ich podzbiór otwarty
+                          INPLACE_OPEN_PHASES,        # ...i ich podzbiór otwarty
+                          absorbed_frame_ids)         # wchłonięte szkielety (AR-42)
 from horreum.resolve._coerce import _to_float, _to_int, _to_text
 from horreum.resolve._text import norm_alnum
 from horreum.resolve.frames import LIGHT_KINDS
@@ -26,7 +27,7 @@ from horreum.resolve.headers import (COPY_TESTIMONY_KEYWORDS, COPY_TESTIMONY_RUL
                                      copy_facts_state, copy_testimony)
 from horreum.resolve.objects import CLEARABLE_OBJECT_SOURCES, WEAK_OBJECT_SOURCES
 from horreum.resolve.paths import STACK_KIND, STACKS_DIR, object_from_path
-from horreum.resolve.stack import signature_timestamp
+from horreum.resolve.stack import read_testimony, signature_timestamp
 from horreum.resolver import (NO_OBJECT_CARD_FILETYPES, alias_snapshot, forma_karty_object,
                               path_proposals, resolve_name, review_state)
 from horreum.stacks import REASON_NO_OBJECT, REASON_OFFSET_UNKNOWN
@@ -1622,11 +1623,16 @@ def superseded_frame_ids(con):
     tygodni życia bazy — populacja rośnie wolno i nie magazyn jest jej kosztem, tylko szum
     w kubełkach roboczych.
 
+    WCHŁONIĘTY SZKIELET NIE JEST ZASTĄPIENIEM (AR-42, `repo.absorbed_frame_ids`): plik spod jego
+    ścieżki wyzdrowiał, treść się nie zmieniła, a obejrzeć nie ma czego - klatka bez zeznania nie
+    niesie ani jednej wartości. Ogniwo zostaje (trzyma szkielet poza kubełkami roboty), perspektywa
+    pokazuje wyłącznie podmiany treści.
+
     JEDEN właściciel predykatu dla licznika Porządków i trimu gridu — jak `vanished_frame_ids`
     i `dup_frame_ids`. Zwraca set[int]."""
     return {int(r[0]) for r in con.execute(
         "SELECT f.id FROM frame f WHERE f.superseded_by IS NOT NULL"
-    ).fetchall()}
+    ).fetchall()} - absorbed_frame_ids(con)
 
 
 def retired_frame_ids(con):
@@ -1866,9 +1872,15 @@ def hand_testimony_frame_ids(con, frame_ids):
     (skan `scan`, drogi stosów `stacks`, import `import:fitsmirror`), `header.refreshed` (skan przy
     zmianie odcisku, `backfill:xisf` i RE-SYNC writebacku z aktorem `user:local`: 606 zdarzeń -
     „Napraw nagłówek…", zapis makra i ich cofnięcia, `writeback._resync`) oraz `header.adopted`
-    (etap przejęcia, a jutro gest „ta kopia prowadzi"). Najnowsze po `id` jest więc bieżącym
+    (etap przejęcia i gest „Ta kopia prowadzi", `lead_copy`). Najnowsze po `id` jest więc bieżącym
     zeznaniem, a aktor mówi, czyj to był gest. Cofnięcie zapisu (`writeback.undo`) też liczy się jako
     ręka - to także decyzja człowieka o treści nagłówka, więc etap ma jej nie przestawiać.
+
+    DRUGA DROGA - KOPIA WIODĄCA WSKAZANA RĘKĄ (AR-4): najnowsze `header.adopted` klatki ma aktora
+    `user:*`. Wybór trwa, choć wskazana kopia zmieniła potem nagłówek na dysku (`header.refreshed`
+    skanu): odświeżenie zeznania przepuszcza wtedy WYŁĄCZNIE tę kopię
+    (`repo.hand_lead_location`), więc późniejsze zapisy zeznania niosą dalej głos wybranej kopii.
+    Bez tej drogi zwykła zmiana pliku wiodącego kasowałaby fakt ręki z osi `testimony_hand`.
 
     Zapytanie po indeksie `idx_event_target` (target = `frame:<id>` ze stałego literału `json_each`),
     wołane wyłącznie dla klatek predykatu - czyli dla garstki, nie dla archiwum."""
@@ -1877,8 +1889,13 @@ def hand_testimony_frame_ids(con, frame_ids):
     return {int(r[0]) for r in con.execute(
         "SELECT CAST(substr(e.target, 7) AS INTEGER) FROM event e "
         "WHERE e.id IN (SELECT MAX(id) FROM event "
-        "               WHERE target IN (SELECT 'frame:' || value FROM json_each(?)) "
+        "               WHERE target IN (SELECT 'frame:' || value FROM json_each(?1)) "
         "                 AND verb IN ('header.recorded', 'header.refreshed', 'header.adopted') "
+        "               GROUP BY target "
+        "               UNION "
+        "               SELECT MAX(id) FROM event "
+        "               WHERE target IN (SELECT 'frame:' || value FROM json_each(?1)) "
+        "                 AND verb = 'header.adopted' "
         "               GROUP BY target) "
         "  AND e.actor LIKE 'user:%'",
         (json.dumps(sorted(frame_ids)),)).fetchall()}
@@ -2460,15 +2477,20 @@ def _stack_version_rows(con):
     Teleskop KANONICZNY przez `config → telescope_canonical` (jak `base_rows`): scalenie teleskopów
     nie rozcina grupy, a `telescope_id` NULL znaczy „config nieznany".
     Werdykt „zostawiam wszystkie" (0026) przychodzi LEFT JOIN-em: `kept_key`/`kept_at` NULL = brak.
+
+    OKNA TU NIE MA - liczy je `_grupy_wersji` z ŻYWEGO `header` (AR-22 (2)). Z głowy `integration`
+    idą wyłącznie fakty HISTORII pliku (`tool`, `declared_rows`, `creation_time`), których zapis
+    nagłówka nie zmienia; okno to karty `DATE-OBS`/`DATE-END`, a głowa trzyma je zamrożone do
+    „Policz rodowód stosów".
     Zwraca: frame_id, object_id, object_canon, camera_id, camera_model, telescope_id,
-    telescope_label, telescop_canon, is_mono, filter_canon, channel, exptime, raw_json, window_start,
-    window_end, tool, declared_rows, creation_time, kept_key, kept_at, ra_deg, dec_deg."""
+    telescope_label, telescop_canon, is_mono, filter_canon, channel, exptime, raw_json, tool,
+    declared_rows, creation_time, kept_key, kept_at, ra_deg, dec_deg."""
     return con.execute(
         "SELECT f.id AS frame_id, f.object_id, obj.canon AS object_canon, f.camera_id, "
         "       cam.model_canon AS camera_model, tc.canon_id AS telescope_id, "
         "       t.label AS telescope_label, t.telescop_canon, f.channel, "
         "       cam.is_mono, f.filter_canon, h.exptime, h.raw_json, h.ra_deg, h.dec_deg, "
-        "       i.window_start, i.window_end, i.tool, i.declared_rows, i.creation_time, "
+        "       i.tool, i.declared_rows, i.creation_time, "
         "       k.group_key AS kept_key, k.decided_at AS kept_at "
         "FROM frame f JOIN integration i ON i.master_frame_id = f.id "
         "LEFT JOIN stack_version_kept k ON k.frame_id = f.id "
@@ -2479,7 +2501,6 @@ def _stack_version_rows(con):
         "LEFT JOIN camera cam ON cam.id = f.camera_id "
         "LEFT JOIN object obj ON obj.id = f.object_id "
         "WHERE f.retired_at IS NULL AND f.superseded_by IS NULL "
-        "  AND i.window_start IS NOT NULL AND i.window_end IS NOT NULL "
         "  AND EXISTS (SELECT 1 FROM location l WHERE l.frame_id = f.id AND l.present = 1) "
         "ORDER BY f.id").fetchall()
 
@@ -2504,8 +2525,10 @@ def _grupy_wersji(con):
     bramką na pułapkę formatu: nagłówek XISF niesie `'600.00'`, a porównanie SQLite z kolumną to
     maskuje, słownik Pythona - nie.
 
-    Okno idzie przez `naming.header_dt` (SPOT parsera ISO): zapis z ułamkiem sekundy i bez niego
-    ma dać ten sam klucz.
+    Okno idzie z ŻYWEGO `header` przez `resolve.stack.read_testimony` (karty `DATE-OBS`/`DATE-END`,
+    parser `naming.header_dt` - SPOT): zapis z ułamkiem sekundy i bez niego ma dać ten sam klucz.
+    Głowa `integration` okna NIE daje (AR-22 (2)): zamarza do „Policz rodowód stosów", a reszta
+    klucza jest żywa - przejęcie zeznania albo zapis nagłówka mastera rozjeżdżały te dwie połowy.
 
     KANAŁ (`frame.channel`, 0028) NIE stoi w kluczu - świadomie. Kanały jednej sesji kamery
     kolorowej to ten sam materiał (te same suby), a grupa niesie też fakty o pochodzeniu MIĘDZY
@@ -2516,9 +2539,14 @@ def _grupy_wersji(con):
     integracji, stosy różnych kanałów - nigdy."""
     grupy = {}
     for r in _stack_version_rows(con):
-        start, koniec = header_dt(r["window_start"]), header_dt(r["window_end"])
+        # OKNO Z ŻYWEGO ZEZNANIA (AR-22 (2)), tą samą derywacją co rodowód (`read_testimony`, SPOT):
+        # obiekt, filtr i ekspozycja klucza też są żywe, więc przejęcie zeznania albo zapis
+        # nagłówka mastera nie zostawia już okna ze starego zeznania obok nowego obiektu.
+        t = read_testimony(json.loads(r["raw_json"]) if r["raw_json"] else {})
+        start, koniec = t.window_start, t.window_end
         if start is None or koniec is None:
             continue
+        r = {**dict(r), "window_start": start.isoformat(), "window_end": koniec.isoformat()}
         teleskop = (r["telescope_id"] if r["telescope_id"] is not None
                     else ("bez-configu", r["frame_id"]))
         klucz = (r["object_id"], r["camera_id"], teleskop, r["filter_canon"],
@@ -2605,8 +2633,8 @@ def stack_version_groups(con):
     """Grupy bliźniaków (ten sam materiał, co najmniej dwa stosy) z rodzajem grupy i członków.
 
     Zwraca listę dictów, po grupie: `group_id` (stabilny identyfikator z klucza, `_id_grupy_wersji`),
-    `object_canon`, `filter_canon`, `exptime` (float), `window_start`, `window_end` (surowe napisy
-    z `integration`), `telescope` (nazwa teleskopu kanonicznego, `telescope_label`), `camera` (model
+    `object_canon`, `filter_canon`, `exptime` (float), `window_start`, `window_end` (ISO z żywego
+    `header`, `_grupy_wersji`), `telescope` (nazwa teleskopu kanonicznego, `telescope_label`), `camera` (model
     kamery), `mono`, `kind` (`WERSJA_*`), `kept` (werdykt „zostawiam wszystkie", `_grupa_zostawiona`),
     `kept_at` (chwila werdyktu albo None) oraz `members` - dicty `frame_id`, `kind`, `witness` (token
     `VERSION_WITNESSES` albo None), `timestamp` + `timestamp_source` (`_chwila_wersji`: sygnatura,
@@ -3404,7 +3432,7 @@ def base_rows(con, frame_ids):
     tablica JSON (`json_each`). Zwraca W TEJ KOLEJNOŚCI: frame_id, kind, filetype, filter_canon,
     camera_model, telescope_label, telescop_canon, object_canon, object_raw, object_source,
     object_cleared_canon, date_obs, exptime, path, present, last_verified_at, superseded_by,
-    retired_at, n_present, n_vanished, vanished_path, image_count, copy_facts_class. Wiersze czyta
+    retired_at, n_present, n_vanished, vanished_path, image_count, copy_facts_class, absorbed. Wiersze czyta
     się po NAZWIE (`sqlite3.Row`), ale kolejność w tym zdaniu ma zgadzać się z SELECT-em - rozjazd
     był zarzutem bramki 0809 i jest tańszy do naprawienia niż do wytłumaczenia następnej sesji.
 
@@ -3439,6 +3467,11 @@ def base_rows(con, frame_ids):
     nie tylko we własnej. Bez niej wiersz wyglądał identycznie jak żywa klatka bez kopii, a jedyną
     różnicą było puste pole ścieżki, czyli brak informacji udawał informację.
 
+    `absorbed` (0/1, AR-42) = klatka zastąpiona jest WCHŁONIĘTYM szkieletem (`repo.absorbed_frame_ids`,
+    ten sam predykat, który zdejmuje ją z perspektywy „Zastąpione") - komórka mówi wtedy „wchłonięta
+    przez #N", nie „zastąpiona": plik wyzdrowiał, treść się nie zmieniła. Ogniwo do następczyni
+    zostaje w zdaniu. Koszt jak `copy_facts_class`: jeden SELECT zbioru na wywołanie.
+
     `last_verified_at` NA WIERSZU `present=0` JEST CHWILĄ ZNIKNIĘCIA: jedyną drogą zapisu `present=0`
     jest `repo.mark_location_vanished`, a ona stempluje tę kolumnę tym samym `now`, którym emituje
     `event(location.vanished)` (`repo.py`). Dla kopii OBECNEJ ta sama kolumna znaczy „ostatnio
@@ -3456,7 +3489,8 @@ def base_rows(con, frame_ids):
         "       (SELECT lw.path FROM location lw WHERE lw.frame_id = f.id AND lw.present = 0 "
         "         ORDER BY lw.id LIMIT 1) AS vanished_path, "
         "       CASE WHEN loc.present = 1 THEN loc.image_count END AS image_count, "
-        "       f.id IN (SELECT value FROM json_each(?)) AS copy_facts_class "
+        "       f.id IN (SELECT value FROM json_each(?)) AS copy_facts_class, "
+        "       f.id IN (SELECT value FROM json_each(?)) AS absorbed "
         "FROM frame f "
         "LEFT JOIN header h ON h.frame_id = f.id "
         "LEFT JOIN config c ON c.id = f.config_id "
@@ -3470,7 +3504,8 @@ def base_rows(con, frame_ids):
         "        (SELECT MIN(id) FROM location WHERE frame_id = f.id)) "
         "WHERE f.id IN (SELECT value FROM json_each(?)) "
         "ORDER BY f.id",
-        (json.dumps(copy_facts_class(con)), json.dumps(list(frame_ids))),
+        (json.dumps(copy_facts_class(con)), json.dumps(sorted(absorbed_frame_ids(con))),
+         json.dumps(list(frame_ids))),
     ).fetchall()
 
 # --- TODO-DŁUG (z kolejki sesji, dieta 2026-08-10; pełne brzmienia: archiwum aa) ---

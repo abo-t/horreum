@@ -523,9 +523,12 @@ def _operacja(con, lid, phase):
 
 def test_kopia_nieczytelna_nie_jest_kandydatem_a_fakty_przynosi_jej_skan(tmp_path):
     """Kopia, która była czytelna i przestała, zachowuje `header_hash` z ostatniego udanego odczytu -
-    warunek na odcisk jej NIE odcina. Odcina ją marker `unreadable_since`: uzupełnienie i tak by
-    jej nie przeczytało, a w Porządkach świeciłaby „?" bez końca. Fakty przynosi skan - brama
-    przyrostowa nie pomija kopii z markerem, a udany odczyt zapisuje fakty i gasi marker."""
+    warunek na odcisk jej NIE odcina. Odcina ją marker `unreadable_since` - ale tylko w trybie
+    sterownika: uzupełnienie i tak by jej nie przeczytało (wieczny `failed`). Licznik „nie wiem"
+    (`porownywalne=True`) ją WIDZI (AR-26): bez faktów nie bierze udziału w porównaniu kopii, więc
+    zero wiersza Porządków znaczyłoby „sprawdzone, czysto", a jest „nie wiem". Fakty przynosi skan -
+    brama przyrostowa nie pomija kopii z markerem, a udany odczyt zapisuje fakty i gasi marker.
+    Falsyfikator AR-26: wróć do bezwarunkowego `unreadable_since IS NULL` - licznik widzi samo `a`."""
     root, a, b = _dwie_kopie(tmp_path)
     con = _baza_sprzed_0021(tmp_path, [a, b])
     lb = _loc(con, b)
@@ -535,6 +538,8 @@ def test_kopia_nieczytelna_nie_jest_kandydatem_a_fakty_przynosi_jej_skan(tmp_pat
         reason="OSError: test", kind="io", now=NOW)
     assert _loc(con, b)["header_hash"] is not None
     assert [r["path"] for r in scan.copy_facts_candidates(con)] == [str(a)]
+    assert [r["path"] for r in scan.copy_facts_candidates(con, porownywalne=True)] == [str(a),
+                                                                                       str(b)]
     s = scan.backfill_copy_facts(con, now=NOW)
     assert (s.rows, s.written, s.failed, s.remaining) == (1, 1, 0, 0)
     assert not scan._already_scanned(con, "V", str(b), lb["mtime"])

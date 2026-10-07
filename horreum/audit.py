@@ -465,6 +465,14 @@ class HumanFacts:
     `resolver.resolve_observatory`) byłoby niewidzialne dla `--baseline`. Wartość domyślna 0 - powód
     i kierunek błędu jak przy `offset_hand`."""
 
+    testimony_hand: int = 0
+    """ZEZNANIE KLATKI Z RĘKI - jedenasta oś (AR-4, AR-23): klatki, których bieżący `header` napisał
+    gest człowieka (`queries.hand_testimony_frame_ids`: najnowszy zapis zeznania ma aktora `user:*`)
+    - kopia wiodąca wskazana gestem „Ta kopia prowadzi" oraz zapis nagłówka w miejscu i jego
+    cofnięcie. Wybór kopii wiodącej jest faktem ręki z decyzji Zdzinia (2026-09-26), więc jego
+    cichy ubytek - przebieg, który przepisze zeznanie głosem innej kopii - ma być widać w
+    `--baseline`. Wartość domyślna 0 - powód i kierunek błędu jak przy `offset_hand`."""
+
     object_hand_frames: tuple | None = None
     """MIGAWKA TOŻSAMOŚCI osi obiektu (E5-1, bramka `sol` Z1): posortowane `frame_id` klatek
     z faktem ręki (`TRANSFERABLE_OBJECT_SOURCES`) - te same klatki, które liczy `object_hand`.
@@ -501,7 +509,8 @@ class HumanFacts:
                 "calibration_links": self.calibration_links,
                 "offset_hand": self.offset_hand,
                 "retired_hand": self.retired_hand,
-                "observatory_hand": self.observatory_hand}
+                "observatory_hand": self.observatory_hand,
+                "testimony_hand": self.testimony_hand}
 
     @property
     def snapshot(self):
@@ -607,7 +616,18 @@ def human_facts_census(con):
         retired_hand=con.execute(
             "SELECT count(*) FROM frame WHERE retired_at IS NOT NULL").fetchone()[0],
         observatory_hand=_observatory_hand(con),
+        testimony_hand=_testimony_hand(con),
     )
+
+
+def _testimony_hand(con):
+    """Licznik osi `testimony_hand` - pytanie do JEDYNEGO właściciela reguły „czyj głos niesie
+    `header`" (`queries.hand_testimony_frame_ids`, literał czasowników zapisu zeznania), nie druga
+    kopia tej reguły tutaj. Import leniwy, jak w `scan.adopt_candidates` (moduł Qt-wolny, ale
+    ciągnie resolver/stacks/grouper)."""
+    from .gui import queries
+    ids = [int(r[0]) for r in con.execute("SELECT id FROM frame").fetchall()]
+    return len(queries.hand_testimony_frame_ids(con, ids))
 
 
 def _observatory_hand(con):

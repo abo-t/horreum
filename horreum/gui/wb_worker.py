@@ -23,7 +23,7 @@ import threading
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 
-from horreum import db, writeback
+from horreum import db, lead_copy, writeback
 from horreum.gui import i18n
 
 
@@ -65,8 +65,9 @@ class WritebackWorker(QObject):
     failed = Signal(str, str)               # op, msg — wyjątek → sygnał, NIE crash apki
     finished = Signal()                     # run() wrócił KAŻDĄ drogą → quit wątku
 
-    # Siedem pętli-po-plikach dzieli sygnaturę (con, target_id, now=, progress=, should_cancel=).
-    # Trzy ostatnie to gesty izolacji zapisu w miejscu: cel = LISTA `inplace_op.id`, wynik
+    # Siedem pętli-po-plikach dzieli sygnaturę (con, target_id, now=, progress=, should_cancel=);
+    # ósmy wpis, gest kopii wiodącej, bierze ją bez postępu i bez anulowania (jeden plik).
+    # Trzy pętle za cofnięciem renamu to gesty izolacji zapisu w miejscu: cel = LISTA `inplace_op.id`, wynik
     # `InplaceGestureResult` (AR-17 (2) - ten sam uchwyt, więc ten sam mutex „writeback → Dostawa").
     # Zwolnienie ręką niesie też POWÓD człowieka, więc jego cel to `{"ops": [...], "reason": ...}`;
     # idzie tym uchwytem, bo rdzeń bierze blokadę pliku (`writeback.release_isolation`) i może na
@@ -81,6 +82,16 @@ class WritebackWorker(QObject):
         "release_inplace": lambda con, t, now, pr, sc: po_operacjach(
             con, t["ops"], now, pr, sc,
             lambda c, op_id, *, now: writeback.release_isolation(c, op_id, now=now, reason=t["reason"])),
+        # Gest „Ta kopia prowadzi" (AR-4, AR-23): cel = `location.id` wskazanej kopii, wynik
+        # `lead_copy.LeadCopyResult`. Plik nie jest pisany, ale CZYTANY (bywa na udziale SMB), więc
+        # nie na wątku okna - a tym uchwytem, bo dziedziczy mutex „zapis → Dostawa": przejęcie
+        # i pochodne piszą do wierszy, które etap Dostawy właśnie przelicza.
+        # Cel to `location_id` albo para `(location_id, frame_id)` - klatka z menu gestu (Z6): skan
+        # mógł przepiąć ścieżkę na inną klatkę między menu a zapisem, a ręka nie ma prawa trafić
+        # w klatkę, której człowiek nie wybierał (werdykt `raced`, `lead_copy.adopt_lead_copy`).
+        "lead_copy": lambda con, t, now, pr, sc: (
+            lead_copy.lead_copy_gesture(con, t[0], now, expected_frame_id=t[1])
+            if isinstance(t, tuple) else lead_copy.lead_copy_gesture(con, t, now)),
     }
 
     def __init__(self, db_path, op, target_id, *, now_fn):

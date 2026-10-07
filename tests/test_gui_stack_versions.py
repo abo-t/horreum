@@ -125,14 +125,15 @@ def test_pulapka_tekstu_ekspozycji_nie_rozbija_grupy(monkeypatch):
     wiersz = {"object_id": 1, "object_canon": "IC1795", "camera_id": 2, "is_mono": 1,
               "camera_model": "ASI2600MM", "telescope_id": 1, "telescope_label": None,
               "telescop_canon": "A140R",
-              "filter_canon": "Ha", "raw_json": "{}", "window_start": "2025-12-16T17:27:54",
-              "window_end": "2026-01-21T20:15:51", "tool": None, "declared_rows": None,
+              "filter_canon": "Ha", "tool": None, "declared_rows": None,
               "creation_time": None, "kept_key": None, "kept_at": None,
               "ra_deg": None, "dec_deg": None, "channel": None}
+    okno = {"DATE-OBS": "2025-12-16T17:27:54", "DATE-END": "2026-01-21T20:15:51"}
     monkeypatch.setattr(queries, "_stack_version_rows", lambda con: [
-        {**wiersz, "frame_id": 1, "exptime": "600.00"},
-        {**wiersz, "frame_id": 2, "exptime": 600.0},
-        {**wiersz, "frame_id": 3, "exptime": 600, "window_end": "2026-01-21T20:15:51.831"}])
+        {**wiersz, "frame_id": 1, "exptime": "600.00", "raw_json": json.dumps(okno)},
+        {**wiersz, "frame_id": 2, "exptime": 600.0, "raw_json": json.dumps(okno)},
+        {**wiersz, "frame_id": 3, "exptime": 600, "raw_json": json.dumps(
+            {**okno, "DATE-END": "2026-01-21T20:15:51.831"})}])
     grupy = queries._grupy_wersji(None)
     assert len(grupy) == 1 and {c["frame_id"] for c in grupy[0][3]} == {1, 2, 3}, (
         "napis, liczba i okno z ułamkiem sekundy to ten sam klucz")
@@ -163,8 +164,11 @@ def _stos(con, fid, *, kamera, obiekt, filtr, exp, okno, tool=None, declared=Non
     con.execute("INSERT INTO frame (id, sha1_data, kind, filetype, first_seen_at, camera_id, "
                 "object_id, filter_canon, retired_at, config_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (fid, f"d{fid}", "master_light", "xisf", NOW, kamera, obiekt, filtr, wycofana, cfg))
+    # Okno żyje w NAGŁÓWKU (`DATE-OBS`/`DATE-END`) i stamtąd bierze je read-model (AR-22 (2));
+    # głowa `integration` niesie tę samą parę, jak po „Policz rodowód stosów".
+    naglowek = {**(pomiary or {}), "DATE-OBS": okno[0], "DATE-END": okno[1]}
     con.execute("INSERT INTO header (frame_id, raw_json, exptime) VALUES (?,?,?)",
-                (fid, json.dumps(pomiary or {}), exp))
+                (fid, json.dumps(naglowek), exp))
     con.execute("INSERT INTO integration (master_frame_id, created_at, tool, window_start, "
                 "window_end, declared_rows) VALUES (?,?,?,?,?,?)",
                 (fid, NOW, tool, okno[0], okno[1], declared))
@@ -260,6 +264,30 @@ def test_wersja_usunieta_poza_programem_zdejmuje_grupe_z_listy(wcon):
     wcon.execute("UPDATE location SET present = 0 WHERE frame_id = 103")
     wcon.commit()
     assert queries.stack_version_frame_ids(wcon) == {601, 602}
+
+
+def test_okno_grupy_z_zywego_naglowka_nie_z_zamrozonej_glowy(wcon):
+    """AR-22 (2): zeznanie mastera przejęte z innej kopii (albo zapis nagłówka) zmienia `DATE-OBS`,
+    a głowa `integration` zostaje zamrożona do „Policz rodowód stosów". Klucz grupy bierze obiekt,
+    filtr i ekspozycję z żywego stanu, więc okno też musi - inaczej stos zostaje w grupie, do której
+    jego nagłówek już nie należy. Falsyfikator: przywróć okno z `i.window_start` - 103 zostanie
+    w grupie IC1795."""
+    naglowek = json.loads(wcon.execute(
+        "SELECT raw_json FROM header WHERE frame_id = 103").fetchone()[0])
+    naglowek["DATE-OBS"] = "2025-12-17T17:27:54"
+    wcon.execute("UPDATE header SET raw_json = ? WHERE frame_id = 103", (json.dumps(naglowek),))
+    wcon.commit()
+    assert queries.stack_version_frame_ids(wcon) == {101, 102, 601, 602}
+    ic = next(g for g in queries.stack_version_groups(wcon) if g["object_canon"] == "IC1795")
+    assert ic["window_start"] == "2025-12-16T17:27:54", "okno grupy to ISO z nagłówka"
+
+
+def test_stos_bez_okna_w_naglowku_nie_wchodzi_do_grupy(wcon):
+    """Głowa `integration` z oknem nie ratuje stosu, którego żywy nagłówek okna nie zeznaje -
+    bez `DATE-OBS` nie ma czym przypiąć zbioru subów (ten sam brak, co okno niepełne)."""
+    wcon.execute("UPDATE header SET raw_json = '{}' WHERE frame_id = 103")
+    wcon.commit()
+    assert 103 not in queries.stack_version_frame_ids(wcon)
 
 
 def test_plan_zostaw_te_wersje(wcon):

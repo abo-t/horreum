@@ -1592,6 +1592,18 @@ CATALOG = {
         "pl": "zastąpiona przez #{id}",
         "en": "superseded by #{id}",
     },
+    # WCHŁONIĘTY SZKIELET (AR-42): plik wyzdrowiał i przeczytany dał prawdziwą tożsamość - to nie
+    # podmiana treści, więc nie „zastąpiona". Ogniwo do następczyni zostaje w zdaniu.
+    "grid.cell.absorbed": {
+        "pl": "wchłonięta przez #{id}",
+        "en": "absorbed into #{id}",
+    },
+    "grid.tip.absorbed": {
+        "pl": "\n(wchłonięta - plik wyzdrowiał i przeczytany jest klatką #{id}; ta klatka była "
+              "pustym miejscem po nieudanym odczycie, nic tu nie zginęło)",
+        "en": "\n(absorbed - the file recovered and now reads as frame #{id}; this frame was a "
+              "placeholder after a failed read, nothing was lost)",
+    },
     "grid.tip.vanished_at": {
         "pl": "\n(zniknięta {ts} — wszystkie lokalizacje present=0)",
         "en": "\n(vanished {ts} — all locations present=0)",
@@ -1824,6 +1836,11 @@ CATALOG = {
         "en": "Materialize the current perspective into a tree of links/copies (WBPP feed)",
     },
     "grid.sel.proj_tip_empty": {"pl": "brak klatek w zbiorze", "en": "no frames in the set"},
+    # Skład zbioru w tle (AR-27): akcje na CAŁYM widoku czekają, aż tabela pokaże nowy zbiór.
+    "grid.sel.loading_tip": {"pl": "Wczytuję zbiór… - akcja ruszy na zbiorze, który zaraz pokaże tabela",
+                             "en": "Loading the set… - the action will run on the set the table is about to show"},
+    "grid.sel.loading_refused": {"pl": "Wczytuję zbiór - spróbuj, gdy tabela pokaże nowy zbiór.",
+                                 "en": "Loading the set - try again once the table shows the new set."},
     "grid.sel.project": {"pl": "Wydaj na stół…", "en": "Serve to table…"},
     "grid.sel.clear_set": {"pl": "× Wyczyść zbiór", "en": "× Clear set"},
     "grid.sel.clear_tip": {
@@ -3691,6 +3708,105 @@ CATALOG = {
                       "withdraw the verdict in this perspective, with a right click on the stack.",
                "other": "{n} stacks are in groups with the verdict “{keep}” - that is not work. You "
                         "withdraw the verdict in this perspective, with a right click on the stack."},
+    },
+
+    # --- kopia wiodąca klatki (grid.py, menu prawego kliku; AR-4, AR-23). Gest woła rdzeń
+    # `lead_copy`: klatka przejmuje zeznanie wskazanej kopii, wybór jest faktem ręki.
+    "grid.lead.menu": {"pl": "Ta kopia prowadzi", "en": "This copy leads"},
+    "grid.lead.menu_tip": {
+        "pl": "Wskaż kopię, której nagłówek ma mówić za klatkę. To Twój wybór - Dostawa go nie "
+              "przestawi.",
+        "en": "Pick the copy whose header speaks for the frame. It is your choice - Intake does "
+              "not change it."},
+    # Dopiski pozycji kopii (po ścieżce): kopia, której głosem mówi dziś klatka, i kopia bez
+    # zebranego zeznania w bazie (nie wiadomo, czy mówi).
+    "grid.lead.speaks": {"pl": "  · mówi teraz", "en": "  · speaks now"},
+    "grid.lead.unread": {"pl": "  · bez zeznania w bazie", "en": "  · testimony not read"},
+    "grid.lead.speaks_tip": {
+        "pl": "Klatka mówi dziś głosem tej kopii. Wybór potwierdzi go, o ile nagłówek pliku różni "
+              "się od zapisanego.",
+        "en": "The frame speaks with this copy's voice today. Picking it confirms that only if the "
+              "file header differs from the stored one."},
+    "grid.lead.choice_tip": {
+        "pl": "Klatka przejmie nagłówek tej kopii (obiekt, filtr, ekspozycja, data z pliku).",
+        "en": "The frame takes over this copy's header (object, filter, exposure, date from the "
+              "file)."},
+    "grid.lead.select_one": {
+        "pl": "Zaznacz jedną klatkę - kopię wiodącą wskazuje się dla jednej klatki naraz.",
+        "en": "Select one frame - the leading copy is picked for one frame at a time."},
+    "grid.lead.not_waiting": {
+        "pl": "Ta klatka nie czeka na wskazanie kopii - jej obecne kopie mówią jednym głosem z nią.",
+        "en": "This frame is not waiting for a copy to be picked - its present copies agree with it."},
+    # Zdania po geście: `{copy}` = katalog i nazwa pliku kopii, `{reason}` = diagnoza odczytu.
+    "grid.lead.adopted": {
+        "pl": "Klatka mówi teraz głosem kopii {copy}.",
+        "en": "The frame now speaks with the voice of copy {copy}."},
+    "grid.lead.back": {
+        "pl": " Powrót: „{lead}” na kopii {copy}.",
+        "en": " To go back: “{lead}” on copy {copy}."},
+    "grid.lead.no_back": {
+        "pl": " Poprzednie zeznanie pochodziło z kopii, której już nie ma - zostaje w dzienniku, "
+              "gestem nie wróci.",
+        "en": " The previous testimony came from a copy that is gone - it stays in the log, the "
+              "gesture cannot bring it back."},
+    "grid.lead.confirmed": {
+        "pl": "Kopia {copy} prowadzi - zeznanie klatki bez zmian, wybór zapisany.",
+        "en": "Copy {copy} leads - the frame testimony is unchanged, the choice is saved."},
+    "grid.lead.unchanged": {
+        "pl": "Klatka już mówi głosem kopii {copy} - nic nie zapisano.",
+        "en": "The frame already speaks with the voice of copy {copy} - nothing was saved."},
+    "grid.lead.absent": {
+        "pl": "Kopii {copy} nie ma już na dysku - nic nie zapisano.",
+        "en": "Copy {copy} is no longer on disk - nothing was saved."},
+    "grid.lead.isolated": {
+        "pl": "Kopia {copy} czeka na rozstrzygnięcie zapisu nagłówka (Porządki) - nic nie zapisano.",
+        "en": "Copy {copy} awaits a decision about its header write (Housekeeping) - nothing was "
+              "saved."},
+    "grid.lead.failed": {
+        "pl": "Nie udało się przeczytać kopii {copy}: {reason} - nic nie zapisano.",
+        "en": "Copy {copy} could not be read: {reason} - nothing was saved."},
+    "grid.lead.identity": {
+        "pl": "Pod ścieżką kopii {copy} leży inna treść niż ta klatka - nic nie zapisano. "
+              "Dostawa na jej katalogu przepnie kopię.",
+        "en": "The path of copy {copy} holds content other than this frame - nothing was saved. "
+              "Intake on its folder rebinds the copy."},
+    "grid.lead.stale": {
+        "pl": "Nagłówek kopii {copy} zmienił się od ostatniego skanu - nic nie zapisano. Po Dostawie "
+              "na jej katalogu wskaż kopię jeszcze raz.",
+        "en": "The header of copy {copy} changed since the last scan - nothing was saved. After "
+              "Intake on its folder, pick the copy again."},
+    "grid.lead.raced": {
+        "pl": "Stan kopii {copy} zmienił się w trakcie gestu - nic nie zapisano. Wskaż kopię "
+              "jeszcze raz.",
+        "en": "The state of copy {copy} changed during the gesture - nothing was saved. Pick the "
+              "copy again."},
+    # Podpowiedzi dwóch wierszy Porządków kopii: gest mieszka w menu prawego kliku w Zbiorach.
+    "tasks.copy_conflict_tip": {
+        "pl": "Kopie jednej klatki mówią różnie, a oś klatki pokazuje głos jednej z nich.\n"
+              "W Zbiorach: prawy klik na klatce → „{lead}” i kopia, której nagłówek ma mówić.",
+        "en": "Copies of one frame disagree, and the frame axis shows the voice of one of them.\n"
+              "In Collections: right-click the frame → “{lead}” and the copy whose header should "
+              "speak."},
+    "tasks.orphan_testimony_tip": {
+        "pl": "Klatka mówi głosem pliku, którego już nie ma.\nW Zbiorach: prawy klik na klatce → "
+              "„{lead}” i obecna kopia. Klatkę z jedną kopią naprawia też Dostawa na katalogu tej "
+              "kopii.",
+        "en": "The frame speaks with the voice of a file that is gone.\nIn Collections: "
+              "right-click the frame → “{lead}” and a present copy. A frame with one copy is also "
+              "fixed by Intake on that copy's folder."},
+    # Dopisek podpowiedzi „Kopii niezgodnych", gdy część klatek ma kopię wskazaną ręką: rozjazd
+    # kopii zostaje faktem (lista go pokazuje), ale robotą nie jest.
+    "tasks.copy_conflict_led_tip": {
+        "pl": {"one": "\n{n} klatka ma kopię wiodącą wskazaną ręką - to nie jest robota. Zdanie "
+                      "zmienisz tym samym gestem.",
+               "few": "\n{n} klatki mają kopię wiodącą wskazaną ręką - to nie jest robota. Zdanie "
+                      "zmienisz tym samym gestem.",
+               "many": "\n{n} klatek ma kopię wiodącą wskazaną ręką - to nie jest robota. Zdanie "
+                       "zmienisz tym samym gestem."},
+        "en": {"one": "\n{n} frame has its leading copy picked by hand - that is not work. You "
+                      "change your mind with the same gesture.",
+               "other": "\n{n} frames have their leading copy picked by hand - that is not work. "
+                        "You change your mind with the same gesture."},
     },
 
     # --- drogi wyjścia z izolacji zapisu w miejscu (grid.py, menu prawego kliku; AR-17 (2)).

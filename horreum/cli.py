@@ -283,7 +283,8 @@ def main(argv=None):
                        help="ile par i odmów wypisać w raporcie (domyślnie 20)")
 
     p_hf = sub.add_parser("human-facts",
-                          help="spis faktow zapisanych REKA (obiekt/config/rodowod/kalibracja); "
+                          help="spis faktow zapisanych REKA (obiekt/config/rodowod/kalibracja/"
+                               "stanowisko/zeznanie klatki - testimony_hand); "
                                "--baseline porownuje i zglasza UBYTKI kodem wyjscia")
     p_hf.add_argument("db", help="ścieżka pliku bazy")
     # JSON na STDOUT, nie `--save do pliku`: mutacja plików ma w tym pakiecie wąskie drzwi
@@ -758,7 +759,10 @@ def _format_supersede(db_path, s, sieroty, do_przeniesienia, *, apply, limit):
              f"    odmowa - ogniwo zajete              : {s.conflicts}",
              f"    odmowa - klatka nie istnieje        : {s.missing}",
              f"  partycja: {zsumowane} == {s.proposed}"
-             f"{'' if zsumowane == s.proposed else '  <-- ROZJAZD, kubelek bez powodu'}"]
+             f"{'' if zsumowane == s.proposed else '  <-- ROZJAZD, kubelek bez powodu'}",
+             # Podzbior oznaczonych i juz oznaczonych, NIE kubelek partycji: szkielet, ktorego
+             # plik wyzdrowial, a nie zostal podmieniony (AR-42, `frame.absorbed`).
+             f"  z oznaczonych: wchloniete szkielety  : {s.absorbed}"]
     if s.pairs:
         lines.append(f"  pary (pierwsze {min(limit, len(s.pairs))} z {len(s.pairs)}):")
         lines += [f"    frame {a} -> frame {b}" for a, b in s.pairs[:limit]]
@@ -800,6 +804,11 @@ def _format_import(donor_path, db_path, s):
     if s.skipped_paths:
         lines.append("  skipped (brief 4.3):")
         for p in s.skipped_paths:
+            lines.append(f"    {p}")
+    if s.ingest_failed:
+        lines.append(f"  AWARIA WJAZDU: {s.ingest_failed} (szkielet z markerem 'db' -- najblizszy "
+                     f"skan przeczyta plik ponownie):")
+        for p in s.ingest_failed_paths:
             lines.append(f"    {p}")
     lines.append(f"  grouper: {s.group}")
     lines.append(f"  resolver: {s.resolve}")
@@ -889,29 +898,20 @@ def _presence_tail(con, root, *, now):
     fakty PRZED przejęciem (bez nich predykat zeznania milczy), pochodne wyłącznie po realnym
     przejęciu, zakres = korzeń przebiegu obecności. Etap bez kandydatów milczy (QUIET).
     GENERATOR wierszy raportu (ASCII - konsola Windows = cp1250), wiersz po każdym etapie: wyjątek
-    późniejszego etapu nie połyka raportu etapów już zapisanych."""
-    from . import scan                                # lazy: astropy dopiero tu
-    if scan.copy_facts_candidates(con, root):
-        f = scan.backfill_copy_facts(con, now=now, root=root)
-        yield (f"  fakty kopii: zebrane {f.written} z {f.rows} (zmienione na dysku "
-               f"{f.stale}, brak pliku {f.missing}, blad odczytu {f.failed}, "
-               f"zapis w toku {f.raced}); czeka {f.remaining}")
-    if not scan.adopt_candidates(con, root):
-        return
-    a = scan.adopt_orphan_testimony(con, now=now, root=root)
-    yield (f"  przejecie zeznania ocalalej kopii: przejete {a.adopted} z {a.rows} (inna "
-           f"tozsamosc {a.identity}, zmienione na dysku {a.stale}, blad odczytu {a.failed}, "
-           f"wyscig {a.raced}); czeka {a.remaining}")
-    if not a.adopted:
-        return
-    from .calibration import run_calibration
-    from .grouper import run_grouper
-    from .lineage import run_lineage
-    from .resolver import run_resolver
-    yield f"  group: {run_grouper(con, now)}"
-    yield f"  resolve: {run_resolver(con, now)}"
-    yield f"  calibrate: {run_calibration(con, now=now)}"
-    yield f"  lineage: {run_lineage(con, now=now)}"
+    późniejszego etapu nie połyka raportu etapów już zapisanych. Kolejność i warunek pochodnych
+    trzyma rdzeń (`derive.adopt_and_derive`, AR-39) - tu zostaje samo brzmienie wierszy."""
+    from . import derive                              # lazy: astropy dopiero tu (przez scan)
+    for etap, w in derive.adopt_and_derive(con, root, now):
+        if etap == "copy_facts":
+            yield (f"  fakty kopii: zebrane {w.written} z {w.rows} (zmienione na dysku "
+                   f"{w.stale}, brak pliku {w.missing}, blad odczytu {w.failed}, "
+                   f"zapis w toku {w.raced}); czeka {w.remaining}")
+        elif etap == "adopt_testimony":
+            yield (f"  przejecie zeznania ocalalej kopii: przejete {w.adopted} z {w.rows} (inna "
+                   f"tozsamosc {w.identity}, zmienione na dysku {w.stale}, blad odczytu {w.failed}, "
+                   f"wyscig {w.raced}); czeka {w.remaining}")
+        else:
+            yield f"  {etap}: {w}"
 
 
 def _format_rename_dry(db_path, run, *, limit, open_intents=0):

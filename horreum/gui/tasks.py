@@ -396,34 +396,36 @@ class TasksView(QWidget):
             # Liczba idzie w CZŁON DRUGI (prawa kolumna, `rows.SECONDARY`), nie w tekst etykiety —
             # inaczej liczby nie ustawiają się w kolumnę i nie da się ich skanować (wiz F5 #6).
             it.setText(i18n.t(label))
+            # Człony liczby SKŁADAJĄ SIĘ, nie wykluczają: „robota z liczby" i dolna granica przy
+            # kopiach bez faktów mówią o różnych rzeczach. Gdy gałąź „N+" stała przed „z", wiersz
+            # po decyzji ręki był szary (robota 0), a liczba mówiła „1+", jakby robota czekała.
+            calosc = i18n.t("tasks.of_total", open=robota, total=n) if robota != n else str(n)
             if niewiadome:
                 liczba = i18n.t_plural("tasks.copies_unread", czeka)
             elif czesciowe:                 # dolna granica: kopie bez faktów nie są w porównaniu
-                liczba = i18n.t_plural("tasks.copies_partial", czeka, m=n)
-            elif robota != n:               # część liczby ma werdykt - robotą jest reszta
-                liczba = i18n.t("tasks.of_total", open=robota, total=n)
+                liczba = i18n.t_plural("tasks.copies_partial", czeka, m=calosc)
             else:
-                liczba = str(n)
+                liczba = calosc
             it.setData(rows.SECONDARY, f"{liczba}  ›" if action is not None else liczba)
             # Drogi do liczby niesie PODPOWIEDŹ, nie wiersz: wszystkie są warunkowe (plik jest /
             # kopia jest stosem / pliku nie ma), a zdanie z nimi nie mieści się w członie drugim
-            # listy 400 px. Ostatnie zdanie mówi, dokąd prowadzi klik: „?" - Dostawa, „N+" - Zbiory.
-            if czesciowe:
-                tip = zdanie_kopii_bez_zeznania(
-                    kandydaci, dest=i18n.t("nav.dostawa" if niewiadome else "nav.zbiory"))
-            elif key in _PODPOWIEDZI_GESTU and n > 0:   # przy zerze zdanie o pliku byłoby fałszem
+            # listy 400 px. Zdania składają się w kolejności: gdzie gest, która część liczby ma
+            # decyzję ręki, co z kopiami bez faktów; ostatnie mówi, dokąd prowadzi klik („?" -
+            # Dostawa, „N+" - Zbiory).
+            tip = ""
+            if key in _PODPOWIEDZI_GESTU and n > 0:     # przy zerze zdanie o pliku byłoby fałszem
                 tip = i18n.t(_PODPOWIEDZI_GESTU[key], finish=i18n.t("grid.inplace.finish"),
                              restore=i18n.t("grid.inplace.restore"),
                              release=i18n.t("grid.inplace.release"))
             elif key in _PODPOWIEDZI_OSI and n > 0:     # ta sama reguła zera co wyżej
                 klucz, nazwy = _PODPOWIEDZI_OSI[key]
                 tip = i18n.t(klucz, **{k: i18n.t(v) for k, v in nazwy.items()})
-                if robota != n:                         # gest i część z decyzją - oba zdania
-                    tip += _zdanie_podzbioru(key, n - robota)
-            elif robota != n:
-                tip = _zdanie_podzbioru(key, n - robota)
-            else:
-                tip = ""
+            if robota != n:                             # część liczby z decyzją - nie robota
+                tip += _zdanie_podzbioru(key, n - robota)
+            if czesciowe:
+                kopie = zdanie_kopii_bez_zeznania(
+                    kandydaci, dest=i18n.t("nav.dostawa" if niewiadome else "nav.zbiory"))
+                tip = f"{tip}\n{kopie}" if tip else kopie
             it.setToolTip(tip)
             # Pogrubienie liczby = „TU JEST ROBOTA", więc jest rolą WIERSZA, nie całej listy
             # (wiz P1 #6): wiersz wyszarzony — informacyjny albo akcyjny z n=0 — dostawał

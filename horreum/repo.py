@@ -1121,15 +1121,27 @@ def hand_lead_location(con, frame_id):
     pliku, który mógłby mówić - inaczej zablokowałaby odświeżenie jedynej obecnej kopii (zapis
     nagłówka ręką raportowałby sukces, a zeznanie zostałoby stare). Fakt ręki zostaje w dzienniku
     i w osi `testimony_hand`; nieważna kotwica tylko przestaje rozstrzygać o kopii wiodącej."""
-    row = con.execute(
-        "SELECT actor, json_extract(payload, '$.location_id') AS lid FROM event "
-        "WHERE target = ? AND verb = 'header.adopted' ORDER BY id DESC LIMIT 1",
-        (f"frame:{frame_id}",)).fetchone()
-    if row is None or not str(row["actor"]).startswith("user:") or row["lid"] is None:
-        return None
-    wazna = con.execute("SELECT 1 FROM location WHERE id = ? AND frame_id = ? AND present = 1",
-                        (row["lid"], frame_id)).fetchone()
-    return row["lid"] if wazna is not None else None
+    return hand_lead_locations(con, [frame_id]).get(frame_id)
+
+
+def hand_lead_locations(con, frame_ids):
+    """`hand_lead_location` dla wielu klatek JEDNYM zapytaniem - `{frame_id: location_id}`, wyłącznie
+    klatki z ważną kotwicą ręki. Jedyny właściciel reguły kotwicy (pojedyncza wersja woła tę):
+    podpowiedź ścieżki w Zbiorach pyta o wszystkie klatki z kilkoma kopiami naraz, a zapytanie
+    per klatka byłoby N+1 na składzie gridu. Po indeksie `idx_event_target` (target `frame:<id>`
+    ze stałego literału `json_each`), jak `gui.queries.hand_testimony_frame_ids`."""
+    if not frame_ids:
+        return {}
+    return {int(r[0]): int(r[1]) for r in con.execute(
+        "SELECT CAST(substr(e.target, 7) AS INTEGER), l.id FROM event e "
+        "JOIN location l ON l.id = json_extract(e.payload, '$.location_id') "
+        "  AND l.frame_id = CAST(substr(e.target, 7) AS INTEGER) AND l.present = 1 "
+        "WHERE e.id IN (SELECT MAX(id) FROM event "
+        "               WHERE target IN (SELECT 'frame:' || value FROM json_each(?)) "
+        "                 AND verb = 'header.adopted' "
+        "               GROUP BY target) "
+        "  AND e.actor LIKE 'user:%'",
+        (json.dumps(sorted(set(frame_ids))),)).fetchall()}
 
 
 def lead_location(con, frame_id):

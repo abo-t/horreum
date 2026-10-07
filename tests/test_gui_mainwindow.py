@@ -499,6 +499,50 @@ def test_przebieg_zakonczony_bledem_tez_odswieza_widoki(qapp, tmp_path, monkeypa
         win.close()
 
 
+def test_sonda_katalogu_nie_odswieza_ani_nie_wygasza_widokow(qapp, tmp_path, monkeypatch,
+                                                            ustawienia):
+    """Z13: „Wskaż katalog…" puszcza sondę serialu w wątku tła - etap bez połączenia z bazą. Gospodarz
+    nie wygasza w jej trakcie widoków innych stron i po niej NIE odświeża read-modeli (na kopii
+    żywej bazy okno stało 751-860 ms po każdym wyborze katalogu). Zwykły przebieg w tym samym oknie
+    dalej robi jedno i drugie - prawdziwe wątki, bez wołania slotu wprost.
+
+    Falsyfikator: zdejmij warunek `self._bieg_pisze` z `PipelineView._set_running` → pierwsza
+    połowa widzi odświeżenie i `set_busy(True)` gridu."""
+    import time
+    from PySide6.QtWidgets import QFileDialog
+    kat = tmp_path / "zrodlo"
+    kat.mkdir()
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory",
+                        staticmethod(lambda *a, **k: str(kat)))
+    win = MainWindow(_seeded_db(tmp_path))
+    try:
+        odswiezenia, zajetosc = [], []
+        oryginal = win._odswiez_widoki_po_przebiegu
+        monkeypatch.setattr(win, "_odswiez_widoki_po_przebiegu",
+                            lambda: (odswiezenia.append(1), oryginal()))
+        for nazwa, widok in (("grid", win.grid_view), ("obiekt", win.object_view),
+                             ("planer", win.planner_view)):
+            org = widok.set_busy
+            monkeypatch.setattr(widok, "set_busy",
+                                lambda b, _n=nazwa, _o=org: (zajetosc.append((_n, b)), _o(b)))
+        pv = win.pipeline_view
+        pv._on_pick_dir()
+        assert pv._thread is not None, "sonda ruszyła w wątku tła"
+        for _ in range(2000):                          # koniec sondy: `_cleanup_thread`
+            QApplication.processEvents()
+            if pv._thread is None:
+                break
+            time.sleep(0.01)
+        assert pv._thread is None and pv._root == str(kat)
+        assert odswiezenia == [] and zajetosc == [], (odswiezenia, zajetosc)
+
+        _przebieg_w_watku(win, lambda: pv.run_stage("group"))
+        assert odswiezenia == [1], "zwykły przebieg dalej odświeża widoki raz"
+        assert ("grid", True) in zajetosc and zajetosc[-1] == ("planer", False)
+    finally:
+        win.close()
+
+
 def test_wyjatek_w_odswiezeniu_po_przebiegu_gasi_faze(qapp, tmp_path, monkeypatch):
     """Faza „Odświeżam widoki po etapie…" gaśnie KAŻDĄ drogą: wyjątek w odświeżeniu któregoś
     widoku zostawiał ją na pasku, czyli opis roboty, która już się skończyła - do następnej fazy.

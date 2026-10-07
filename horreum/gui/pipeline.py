@@ -37,6 +37,15 @@ def _utc_now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
+# ETAPY BEZ POŁĄCZENIA Z BAZĄ - jedyny właściciel decyzji „etap pisze do bazy". Wykonawca nie otwiera
+# dla nich połączenia (`PipelineWorker.run`), więc zapisać nie mają czym; widok nie ogłasza ich
+# biegu gospodarzowi (`PipelineView._set_running`), bo `running_changed` znaczy u niego „worker
+# pisze": wygaszenie zapisu w pozostałych widokach i pełne odświeżenie read-modeli po końcu.
+# Sonda „Wskaż katalog…" czyta sam serial woluminu, a ogłoszona stawiała okno na 751-860 ms
+# odświeżenia po każdym wyborze katalogu (wizytacja na kopii żywej bazy).
+ETAPY_BEZ_BAZY = frozenset({"probe"})
+
+
 class PipelineWorker(QObject):
     """Wykonawca etapu pipeline'u w wątku tła. Otwiera WŁASNE połączenie (per-wątek), woła funkcję
     rdzenia, emituje sygnały. NIE dotyka widżetów (slot w głównym wątku rusza UI).
@@ -76,7 +85,7 @@ class PipelineWorker(QObject):
     def run(self):
         con = None
         try:
-            if self._stage == "probe":                 # sama sonda źródła - baza niepotrzebna
+            if self._stage in ETAPY_BEZ_BAZY:          # sama sonda źródła - baza niepotrzebna
                 self._zrodlo()
                 return
             con = db.open_db(self._db_path)
@@ -463,7 +472,9 @@ class PipelineView(QWidget):
     (etap zakończył zapis - znacznik etapu dla testów i słuchaczy; gospodarz NIE odświeża na nim
     widoków, bo pełne przeładowanie po każdym etapie zamrażało okno), `running_changed(bool)` (etap
     w toku - gospodarz wyłącza akcje zapisu osi, szczery disabled, §6; `False` = koniec przebiegu,
-    także przerwanego albo z błędem, i JEDYNY moment odświeżenia read-modelu widoków; WAL → widoczne)."""
+    także przerwanego albo z błędem, i JEDYNY moment odświeżenia read-modelu widoków; WAL → widoczne).
+    Etapy bez połączenia z bazą (`ETAPY_BEZ_BAZY`) `running_changed` nie emitują - gaszą wyłącznie
+    przyciski Dostawy."""
 
     status_message = Signal(str)
     stage_finished = Signal(str)
@@ -478,6 +489,7 @@ class PipelineView(QWidget):
         self._thread = None
         self._worker = None
         self._cancellable = False
+        self._bieg_pisze = False           # bieżący etap ma połączenie z bazą (`ETAPY_BEZ_BAZY`)
         self._writeback_busy = False       # zapis nagłówków do plików w toku (`set_writeback_busy`)
         self._summary_lines = []
         self._presence_params = None       # ZAMROŻONE parametry ostatniego DRY (apply ich nie liczy)
@@ -1155,6 +1167,7 @@ class PipelineView(QWidget):
         # więc NIE wolno kończyć wątku na pierwszym z nich.
         self._worker.finished.connect(self._thread.quit)
         self._thread.finished.connect(self._cleanup_thread)
+        self._bieg_pisze = stage not in ETAPY_BEZ_BAZY
         self._set_running(True, cancellable=stage in ("scan", "stacks", "all", "copy_facts",
                                                       "presence", "presence-apply"))
         self._thread.start()
@@ -1670,10 +1683,14 @@ class PipelineView(QWidget):
         # ekranu i przejmuje uwagę od zdania, które faktycznie coś mówi (wizytator P5 #6).
         if not running:
             self.bar.setVisible(False)
-            self._sync_copy_facts()        # każdy przebieg mógł dodać albo zebrać fakty kopii
+            if self._bieg_pisze:
+                self._sync_copy_facts()    # każdy przebieg piszący mógł dodać albo zebrać fakty kopii
         self._cancellable = cancellable if running else False
         self._refresh_buttons(running, self._cancellable)
-        self.running_changed.emit(running)
+        # Etap bez bazy gasi same przyciski Dostawy: gospodarz czyta `running_changed` jako „worker
+        # pisze" i wygasza zapis w innych widokach, a po końcu przeładowuje wszystkie read-modele.
+        if self._bieg_pisze:
+            self.running_changed.emit(running)
 
     def _can_scan(self):
         return self._db_path is not None and self._root is not None

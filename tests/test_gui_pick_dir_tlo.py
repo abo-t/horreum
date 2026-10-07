@@ -1,6 +1,8 @@
 """„Wskaż katalog…" (tryb zaawansowany) nie dotyka dysku w wątku okna (AR-44) + sprzątanie widgetów
 po testach GUI (BP-7). `importorskip` na poziomie modułu: bez PySide6 plik się POMIJA."""
 import os
+import threading
+import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -8,7 +10,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtCore import QEventLoop, QThread, QTimer
+from PySide6.QtCore import QThread
 from PySide6.QtWidgets import QApplication, QFileDialog, QWidget
 
 from horreum import db
@@ -24,13 +26,14 @@ def qapp():
 
 
 def _czekaj_na_koniec(view, timeout_ms=20000):
-    """Kręci pętlę do końca etapu w tle (`running_changed(False)`); wątek już zakończony → wraca."""
-    if view._thread is None:
-        return
-    loop = QEventLoop()
-    view.running_changed.connect(lambda r: loop.quit() if r is False else None)
-    QTimer.singleShot(timeout_ms, loop.quit)
-    loop.exec()
+    """Kręci pętlę do sprzątnięcia wątku sondy (`_cleanup_thread` zeruje `_thread`). Sonda nie
+    emituje `running_changed` (etap bez bazy, `ETAPY_BEZ_BAZY`), więc koniec czytamy ze stanu
+    widoku. `time.sleep`, nie `QTest.qWait` - `qWait` trzyma GIL i głodzi wątek tła."""
+    for _ in range(timeout_ms // 10):
+        QApplication.processEvents()
+        if view._thread is None:
+            return
+        time.sleep(0.01)
 
 
 def _widok(tmp_path, monkeypatch, katalog):
@@ -89,6 +92,42 @@ def test_wskaz_katalog_nieustalony_serial_i_katalog_ktory_odpadl(qapp, tmp_path,
             assert view._thread is None
         finally:
             view.close()
+
+
+def test_sonda_nie_oglasza_biegu_gospodarzowi(qapp, tmp_path, monkeypatch, ustawienia):
+    """Z13: sonda „Wskaż katalog…" nie ma połączenia z bazą, więc nie emituje `running_changed` -
+    gospodarz czyta ten sygnał jako „worker pisze" (wygaszenie zapisu w innych widokach, pełne
+    odświeżenie po końcu, 751-860 ms okna na kopii żywej bazy). Przyciski Dostawy w trakcie sondy
+    są wygaszone jak przy każdym etapie i wracają po niej.
+
+    Falsyfikator: zdejmij warunek `self._bieg_pisze` z `_set_running` → `bieg == [True, False]`."""
+    import horreum.gui.pipeline as pl
+    kat = tmp_path / "t"
+    kat.mkdir()
+    pusc = threading.Event()
+
+    def _serial(path):
+        pusc.wait(10)                  # sonda stoi, dopóki test nie obejrzy stanu w jej trakcie
+        return "DEADBEEF"
+
+    monkeypatch.setattr(pl, "volume_serial", _serial)
+    view = _widok(tmp_path, monkeypatch, kat)
+    try:
+        bieg = []
+        view.running_changed.connect(bieg.append)
+        view._on_pick_dir()
+        assert view._thread is not None, "sonda biegnie w wątku tła"
+        assert not view.btn_pick.isEnabled() and not view.btn_receive.isEnabled()
+        assert not view.btn_scan.isEnabled()
+        pusc.set()
+        _czekaj_na_koniec(view)
+        assert view._thread is None
+        assert bieg == [], "sonda bez bazy nie ogłasza biegu"
+        assert view.btn_pick.isEnabled() and view.btn_receive.isEnabled() and view.btn_scan.isEnabled()
+        assert view.lbl_volume.text() == i18n.t("pipeline.volume_ok", serial="DEADBEEF")
+    finally:
+        pusc.set()
+        view.close()
 
 
 # ---------- BP-7: nic po teście nie zostaje przy życiu ----------

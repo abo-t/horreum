@@ -1615,6 +1615,8 @@ CATALOG = {
     # (role dokleja kod, bo to wartości z pliku, nie napis UI) i pola, w których jej nagłówek mówi
     # co innego niż pozostałe. Nazwy pól to keywordy z pliku (`FILTER=CLS`) - fakt domenowy, D-L3.
     "grid.tip.copy_path": {"pl": "\n• {path}", "en": "\n• {path}"},
+    # Kopia wskazana gestem „Ta kopia prowadzi" (ważna kotwica ręki) - ten sam znacznik co w menu.
+    "grid.tip.copy_hand": {"pl": " · wskazana ręką", "en": " · picked by hand"},
     "grid.tip.copy_images": {"pl": " · obrazy: {n}", "en": " · images: {n}"},
     "grid.tip.copy_diff": {
         "pl": "\n    mówi inaczej: {fields}", "en": "\n    says otherwise: {fields}",
@@ -3426,7 +3428,8 @@ CATALOG = {
     },
     # Człon drugi tych samych wierszy, gdy liczba NIE jest zerem, a kopie bez zeznania są: liczba
     # jest dolną granicą („{m}+"), bo kopie bez faktów w porównaniu nie biorą udziału. Odmiana po
-    # liczbie kopii (`{n}`), jak w „?".
+    # liczbie kopii (`{n}`), jak w „?". `{m}` to cały człon liczby wiersza - przy robocie mniejszej
+    # od liczby razem z nią („0 z 1+", `tasks.of_total`).
     "tasks.copies_partial": {
         "pl": {"one": "{m}+ · {n} kopia bez zeznania", "few": "{m}+ · {n} kopie bez zeznania",
                "many": "{m}+ · {n} kopii bez zeznania"},
@@ -3722,6 +3725,19 @@ CATALOG = {
     # zebranego zeznania w bazie (nie wiadomo, czy mówi).
     "grid.lead.speaks": {"pl": "  · mówi teraz", "en": "  · speaks now"},
     "grid.lead.unread": {"pl": "  · bez zeznania w bazie", "en": "  · testimony not read"},
+    # Kilka kopii zgodnych z zeznaniem klatki naraz: żadna z nich nie „mówi" sama, więc dopisek
+    # mówi o zgodności, a wybór człowieka niesie osobny znacznik (`grid.lead.hand`, pozycja
+    # zaznaczona) - także w podpowiedzi ścieżki w Zbiorach.
+    "grid.lead.agrees": {"pl": "  · zgodna z zeznaniem", "en": "  · matches the testimony"},
+    "grid.lead.agrees_tip": {
+        "pl": "Nagłówek tej kopii jest zgodny z zeznaniem klatki - tak samo jak innej obecnej kopii. "
+              "Wybór zapisze, że prowadzi ta.",
+        "en": "This copy's header matches the frame testimony - as does another present copy. "
+              "Picking it records that this one leads."},
+    "grid.lead.hand": {"pl": "  · wskazana ręką", "en": "  · picked by hand"},
+    "grid.lead.hand_tip": {
+        "pl": "Tę kopię wskazałeś gestem „{lead}” - Dostawa jej nie przestawi.",
+        "en": "You picked this copy with “{lead}” - Intake does not change it."},
     "grid.lead.speaks_tip": {
         "pl": "Klatka mówi dziś głosem tej kopii. Wybór potwierdzi go, o ile nagłówek pliku różni "
               "się od zapisanego.",

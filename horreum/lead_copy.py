@@ -37,13 +37,16 @@ class LeadChoice:
     """Jedna obecna kopia klatki w menu gestu: `mowi` - jej zeznanie (osiem pól `hdr_*`) jest dziś
     zeznaniem klatki; `fakty` - kopia ma zebrane fakty bieżącej reguły (bez nich nie wiadomo, czy
     mówi); `rozne` - etykiety pól, w których odbiega od pozostałych (`queries.copy_divergence`);
-    `fakty_kopii` - wiersz `queries.present_copy_facts` tej kopii (wartości do zdania o rozjeździe)."""
+    `fakty_kopii` - wiersz `queries.present_copy_facts` tej kopii (wartości do zdania o rozjeździe);
+    `reka` - kopię wskazał człowiek i kotwica jest ważna (`repo.hand_lead_location`). Kilka kopii
+    bywa zgodnych z zeznaniem naraz, a którą wybrała ręka, mówi wyłącznie to pole."""
     location_id: int
     path: str
     mowi: bool
     fakty: bool
     rozne: tuple
     fakty_kopii: dict
+    reka: bool = False
 
 
 @dataclass(frozen=True)
@@ -89,13 +92,15 @@ def lead_copy_choices(con, frame_id):
     kopie = queries.present_copy_facts(con, [frame_id])
     rozne = queries.copy_divergence(kopie)
     zeznanie = _zeznanie_klatki(con, frame_id)
+    kotwica = repo.hand_lead_location(con, frame_id)
     out = []
     for k in kopie:
         fakty = copy_facts_state(k["hdr_hash"], k["hdr_rule"]) == FAKTY_BIEZACE
         mowi = (fakty and zeznanie is not None
                 and all(k[kolumna] == v for kolumna, v in zeznanie.items()))
         out.append(LeadChoice(int(k["location_id"]), k["path"], mowi, fakty,
-                              rozne.get(k["location_id"], ()), dict(k)))
+                              rozne.get(k["location_id"], ()), dict(k),
+                              reka=int(k["location_id"]) == kotwica))
     return out
 
 

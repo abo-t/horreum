@@ -851,15 +851,16 @@ def _derive(row):
     return d
 
 
-def _dolacz_kopie(base, kopie):
+def _dolacz_kopie(base, kopie, reka=None):
     """Dołóż wierszom gridu fakty ICH OBECNYCH KOPII (0021) - czysta funkcja nad gotowymi danymi
     (`queries.present_copy_facts`), zero SQL; mutuje dicty `base` w miejscu, jak `_derive` buduje je
-    dla modelu.
+    dla modelu. `reka` - `{frame_id: location_id}` ważnych kotwic ręki (`repo.hand_lead_locations`).
 
     Dwa klucze, dwóch czytelników:
-      * `_copies` - lista kopii (dict wiersza + `_rozne`, pola rozjazdu z `queries.copy_divergence`)
-        dla podpowiedzi „×N"; JEDEN właściciel reguły rozjazdu z wierszem Porządków, więc opis pod
-        kursorem i liczba na liście mówią o tych samych polach;
+      * `_copies` - lista kopii (dict wiersza + `_rozne`, pola rozjazdu z `queries.copy_divergence`,
+        + `_reka`, kopia wskazana gestem „Ta kopia prowadzi") dla podpowiedzi „×N"; JEDEN właściciel
+        reguły rozjazdu z wierszem Porządków, więc opis pod kursorem i liczba na liście mówią
+        o tych samych polach;
       * `_images` - WSZYSTKIE różne liczby obrazów w kolejności kopii („3 | 1"); kopia bez zebranych
         faktów (NULL) nie wnosi wartości, bo „nie wiem" nie jest liczbą. Jedna wspólna wartość zostaje
         jedną liczbą - rozjazd ma być widoczny, zgodność ma nie hałasować;
@@ -874,7 +875,9 @@ def _dolacz_kopie(base, kopie):
         if not rows:
             continue
         rozne = queries.copy_divergence(rows)
-        row["_copies"] = [{**{k: r[k] for k in r.keys()}, "_rozne": rozne.get(r["location_id"], ())}
+        kotwica = (reka or {}).get(row.get("frame_id"))
+        row["_copies"] = [{**{k: r[k] for k in r.keys()}, "_rozne": rozne.get(r["location_id"], ()),
+                           "_reka": r["location_id"] == kotwica}
                           for r in rows]
         liczby = []
         for r in rows:
@@ -910,6 +913,8 @@ def _dup_tip(row):
     tip = i18n.t("grid.tip.dup_locs", n=row["n_present"])
     for c in row.get("_copies") or ():
         tip += i18n.t("grid.tip.copy_path", path=c["path"])
+        if c.get("_reka"):
+            tip += i18n.t("grid.tip.copy_hand")
         if c["image_count"] is not None:
             tip += i18n.t("grid.tip.copy_images", n=c["image_count"])
             role = json.loads(c["image_roles"]) if c["image_roles"] else []
@@ -3627,8 +3632,10 @@ def _sklad_zbioru(con, stan, przerwij=lambda: None):
     # Fakty KOPII (0021) - pytamy wyłącznie o klatki z kilkoma obecnymi kopiami: kolumna
     # „Obrazy" i podpowiedź „×N" potrzebują wtedy każdej kopii, a reszta archiwum ma jedną
     # i jej liczbę niesie już `base_rows`. Wąskie zapytanie zamiast podzapytania na 16 tys. wierszy.
-    _dolacz_kopie(base, queries.present_copy_facts(
-        con, [b["frame_id"] for b in base if (b.get("n_present") or 0) > 1]))
+    # Kotwice ręki tych samych klatek - jednym zapytaniem, nie per klatka (znacznik „wskazana ręką").
+    wielokopiowe = [b["frame_id"] for b in base if (b.get("n_present") or 0) > 1]
+    _dolacz_kopie(base, queries.present_copy_facts(con, wielokopiowe),
+                  repo.hand_lead_locations(con, wielokopiowe))
     base_ids = [b["frame_id"] for b in base]
     keywords = list(stan["kolumny"])
     przerwij()
@@ -6244,8 +6251,10 @@ class FramesView(QWidget):
     def _sync_menu_kopii(self):
         """Pozycje podmenu „Ta kopia prowadzi" ze stanu z chwili pokazania: jedna pozycja na OBECNĄ
         kopię (pełna ścieżka - kopie jednej klatki zwykle mają tę samą nazwę pliku w różnych
-        katalogach), dopisek „mówi teraz" przy kopii, której głosem mówi klatka, i pola rozjazdu
-        w podpowiedzi (`queries.copy_divergence`, ten sam właściciel co podpowiedź „×N").
+        katalogach), dopisek „mówi teraz" przy kopii, której głosem mówi klatka („zgodna
+        z zeznaniem", gdy takich kopii jest kilka), znacznik i zaznaczenie kopii wskazanej ręką
+        (`LeadChoice.reka`) i pola rozjazdu w podpowiedzi (`queries.copy_divergence`, ten sam
+        właściciel co podpowiedź „×N").
         Kopia, która już mówi, zostaje klikalna: kopie zgodne w ośmiu polach zeznania mogą różnić
         się resztą nagłówka, a wybór jednej z nich jest dalej decyzją człowieka.
         Zajętość albo złe zaznaczenie gasi całe podmenu z powodem w podpowiedzi."""
@@ -6257,14 +6266,27 @@ class FramesView(QWidget):
         akcja.setToolTip(i18n.t(powod) if powod is not None else i18n.t("grid.lead.menu_tip"))
         if powod is not None:
             return
-        for k in lead_copy.lead_copy_choices(self.con, fid):
+        kopie = lead_copy.lead_copy_choices(self.con, fid)
+        # „Mówi teraz" jest prawdą o jednej kopii; gdy zgodnych z zeznaniem jest kilka, głos klatki
+        # nie wskazuje żadnej z nich - dopisek mówi wtedy „zgodna", a wybór ręki niesie znacznik.
+        zgodne = sum(k.mowi for k in kopie)
+        for k in kopie:
             tekst = k.path
+            if k.reka:
+                tekst += i18n.t("grid.lead.hand")
             if k.mowi:
-                tekst += i18n.t("grid.lead.speaks")
+                tekst += i18n.t("grid.lead.speaks" if zgodne == 1 else "grid.lead.agrees")
             elif not k.fakty:
                 tekst += i18n.t("grid.lead.unread")
             act = self._menu_kopii.addAction(tekst)
-            tip = i18n.t("grid.lead.speaks_tip" if k.mowi else "grid.lead.choice_tip")
+            # Pozycje checkable, zaznaczona kopia wskazana ręką - wybór trwa po zamknięciu menu
+            # i widać go przy następnym otwarciu, nie tylko w zdaniu po geście.
+            act.setCheckable(True)
+            act.setChecked(k.reka)
+            tip = i18n.t(("grid.lead.speaks_tip" if zgodne == 1 else "grid.lead.agrees_tip")
+                         if k.mowi else "grid.lead.choice_tip")
+            if k.reka:
+                tip = i18n.t("grid.lead.hand_tip", lead=i18n.t("grid.lead.menu")) + "\n" + tip
             if k.rozne:
                 pola = [i18n.t("grid.tip.copy_field_images") if e == queries.COPY_IMAGES
                         else f"{e}={_wartosc_zeznania(k.fakty_kopii[_KOPIA_KEYWORD_KOLUMNA[e]])}"

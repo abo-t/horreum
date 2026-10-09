@@ -14,6 +14,13 @@ bazy (`con` głównego wątku nie przechodzi - `check_same_thread`); baza bez ś
 i testy liczą inline na żywym `con`. Wynik niesie generację: ten doręczony po zmianie bazy albo po
 nowszym zamówieniu trafia do kosza.
 
+TECZKI NA WYSOKOŚĆ OKNA. Kart jest do osiemnastu (sześć rzędów po trzy), ale rzędów tyle, ile
+mieści pion Domu - niższe okno dostaje mniej rzędów, nie pasek przewijania (2026-10-10: „zamiast
+9 daj 18, chyba że okno się zmniejszy w pionie"). Rachunek idzie z podpowiedzi układu (pion reszty
+ekranu + wysokość każdego rzędu), więc karta z czwartą linią „do przeliczenia" podnosi swój rząd,
+a ukryte rzędy mają miarę bez pokazywania. Karty powstają raz, przy wyniku teczek; zmiana rozmiaru
+tylko je odsłania i chowa.
+
 „Co mam" i zdanie z dziennika liczą się synchronicznie (dwa krótkie SELECT-y, ~0,1 s razem na
 żywej bazie), bo mają mówić prawdę w chwili wejścia na Dom - gest wykonany przed sekundą na innym
 ekranie ma tu już stać.
@@ -39,9 +46,11 @@ from horreum.gui.grid import Recepta
 # Role są nazwami ról QSS (`theme.ROLES`), więc kropka bierze kolor z motywu, nie z literału.
 from horreum.gui.projection_dialog import _STATE_ROLES, _STATE_TIPS
 
-# Ile teczek mieści Dom - reszta jest o jedno zapytanie dalej, w Znajdź (stopka to mówi).
-TECZKI_NA_DOMU = 9
+# Teczki Domu: trzy kolumny, do sześciu rzędów - a rzędów tyle, ile mieści wysokość okna
+# (`_dopasuj_rzedy`). Reszta jest o jedno zapytanie dalej, w Znajdź (stopka to mówi).
 KOLUMNY_TECZEK = 3
+RZEDY_TECZEK = 6
+TECZKI_NA_DOMU = KOLUMNY_TECZEK * RZEDY_TECZEK
 
 # Pozycje menu „Więcej…" - klucze sygnału `wiecej`; trasę każdej z nich zna gospodarz.
 WIECEJ_PLANER = "planer"
@@ -207,7 +216,8 @@ class HomeView(QWidget):
         self._recepta = None             # recepta paska z bieżącej sesji (`grid.Recepta`) albo brak
         self._wstrzymana = False         # blokada po kliknięciu członu - wspólna z paskiem (gospodarz)
         self._gest = None                # ostatni gest ręki z dziennika
-        self.karty = []                  # karty teczek na ekranie (QPushButton z danymi w `teczka_row`)
+        self.karty = []                  # karty teczek (QPushButton z danymi w `teczka_row`), do 18
+        self._teczki = []                # wszystkie wiersze `release_readiness` - stopka liczy resztę
         self._build_ui()
         self.use_theme(theme_name)
         self.odswiez()
@@ -225,6 +235,7 @@ class HomeView(QWidget):
         scroll.setFrameShape(QFrame.NoFrame)
         zewn.addWidget(scroll)
         tresc = QWidget()
+        self._tresc = tresc
         scroll.setWidget(tresc)
         v = QVBoxLayout(tresc)
         v.setContentsMargins(16, 12, 16, 12)
@@ -277,6 +288,7 @@ class HomeView(QWidget):
         self.teczki_status.setWordWrap(True)
         v.addWidget(self.teczki_status)
         siatka = QWidget()
+        self._siatka = siatka
         self.teczki_siatka = QGridLayout(siatka)
         self.teczki_siatka.setContentsMargins(0, 0, 0, 0)
         self.teczki_siatka.setSpacing(8)
@@ -438,16 +450,71 @@ class HomeView(QWidget):
             self.teczki_siatka.removeWidget(karta)
             karta.deleteLater()
         self.karty = []
+        self._teczki = list(rows)
         for i, r in enumerate(rows[:TECZKI_NA_DOMU]):
             karta = self._karta(r)
             self.teczki_siatka.addWidget(karta, i // KOLUMNY_TECZEK, i % KOLUMNY_TECZEK)
             self.karty.append(karta)
         self.teczki_status.setText("" if rows else i18n.t("home.folders.empty"))
         self.teczki_status.setVisible(not rows)
-        reszta = len(rows) - TECZKI_NA_DOMU
+        self._dopasuj_rzedy()
+
+    def _wysokosc_poza_teczkami(self):
+        """Pion Domu zajęty przez wszystko POZA siatką teczek (nagłówek, kafle, „Co mam", tytuł,
+        stopka, „Ostatnio", marginesy i odstępy) - z podpowiedzi układu, nie z geometrii, bo przy
+        pierwszym pokazaniu geometrii jeszcze nie ma. Stopka liczona ZAWSZE jako widoczna: jej
+        obecność jest wynikiem tego rachunku, więc nie może być jego wejściem."""
+        uklad = self._tresc.layout()
+        reszta = uklad.sizeHint().height() - self._siatka.sizeHint().height()
+        if self.btn_teczki_wiecej.isHidden():
+            reszta += self.btn_teczki_wiecej.sizeHint().height() + uklad.spacing()
+        return reszta
+
+    def _wysokosci_rzedow(self):
+        """Wysokość każdego rzędu kart = najwyższa karta w rzędzie (czwarta linia „do przeliczenia"
+        podnosi cały rząd), z podpowiedzi kart - ukryty rząd ma miarę tak samo jak widoczny."""
+        rzedy = []
+        for i, karta in enumerate(self.karty):
+            if i % KOLUMNY_TECZEK == 0:
+                rzedy.append(0)
+            rzedy[-1] = max(rzedy[-1], karta.sizeHint().height())
+        return rzedy
+
+    def _rzedy_mieszczace_sie(self, wysokosc):
+        """Ile rzędów teczek mieści Dom o wysokości `wysokosc`: co najmniej jeden (niższe okno
+        przewija ten jeden), co najwyżej tyle, ile jest rzędów kart."""
+        rzedy = self._wysokosci_rzedow()
+        if not rzedy:
+            return 0
+        dostepne = wysokosc - self._wysokosc_poza_teczkami()
+        odstep = self.teczki_siatka.verticalSpacing()
+        n = zajete = 0
+        for wysokosc_rzedu in rzedy:
+            zajete += wysokosc_rzedu + (odstep if n else 0)
+            if zajete > dostepne:
+                break
+            n += 1
+        return max(1, n)
+
+    def _dopasuj_rzedy(self):
+        """Odsłoń tyle rzędów kart, ile mieści bieżąca wysokość Domu (po zbudowaniu kart, przy każdej
+        zmianie wysokości i gdy wiersz „Ostatnio" pojawia się albo znika); reszta kart jest ukryta
+        i liczy się do stopki „… i N kolejnych" razem z teczkami, dla których kart nie ma."""
+        if not self.karty:
+            self.btn_teczki_wiecej.setVisible(False)
+            return
+        pokazane = min(len(self.karty), self._rzedy_mieszczace_sie(self.height()) * KOLUMNY_TECZEK)
+        for i, karta in enumerate(self.karty):
+            karta.setVisible(i < pokazane)
+        reszta = len(self._teczki) - pokazane
         self.btn_teczki_wiecej.setVisible(reszta > 0)
         if reszta > 0:
             self.btn_teczki_wiecej.setText(i18n.t_plural("home.folders.more", reszta))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if event.size().height() != event.oldSize().height():
+            self._dopasuj_rzedy()
 
     def _karta(self, r):
         """Karta teczki: kropka stanu, obiekt, rozmiar materiału, kalibracja i - osobno - lighty,
@@ -531,6 +598,10 @@ class HomeView(QWidget):
         self._render_ostatnio()
 
     def _render_ostatnio(self):
+        self._render_wiersz_ostatnio()
+        self._dopasuj_rzedy()            # wiersz pojawia się i znika - zmienia pion dla teczek
+
+    def _render_wiersz_ostatnio(self):
         if self._recepta is not None:
             czlony = self._recepta.czlony
             # Najpierw CO się stało (dziennik), potem droga powrotu - sam przycisk mówi, jak

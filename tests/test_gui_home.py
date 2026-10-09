@@ -107,8 +107,24 @@ _TRZY = [("Mniejszy", [("2024-03-05T22:00:00", 600.0)]),
          ("Sredni", [("2024-03-02T02:00:00", 1200.0), ("2024-03-02T03:00:00", 1200.0)])]
 
 
+def _obiekty(n):
+    """`n` obiektów po jednym lighcie, godziny malejące z numerem - kolejność teczek = numeracja."""
+    return [(f"OBJ{i:02d}", [("2024-03-01T23:00:00", 100.0 * (40 - i))]) for i in range(1, n + 1)]
+
+
 def _dwanascie():
-    return [(f"OBJ{i:02d}", [("2024-03-01T23:00:00", 100.0 * (20 - i))]) for i in range(1, 13)]
+    return _obiekty(12)
+
+
+def _widoczne(h):
+    return [k.accessibleName() for k in h.karty if not k.isHidden()]
+
+
+def _wysokosc_na_rzedy(h, n):
+    """Wysokość Domu, w której mieści się DOKŁADNIE `n` rzędów kart (pół rzędu luzu)."""
+    rzedy = h._wysokosci_rzedow()
+    odstep = h.teczki_siatka.verticalSpacing()
+    return h._wysokosc_poza_teczkami() + sum(rzedy[:n]) + odstep * (n - 1) + rzedy[n] // 2
 
 
 def _zdarzenia(path, rows):
@@ -237,16 +253,20 @@ def test_kazdy_czasownik_z_mapy_ma_zdanie_PL_i_EN():
 
 # ---------------------------------------------------------------- HomeView: teczki
 
-def test_teczki_dziewiec_kart_wg_godzin_i_stopka_do_Znajdz(qapp, tmp_path):
-    """Dziewięć teczek o największej liczbie godzin, w kolejności `release_readiness`; reszta to
-    stopka „… i N kolejnych - szukaj w Znajdź", której klik prowadzi do Znajdź. Klik karty niesie
+def test_teczki_do_osiemnastu_kart_wg_godzin_i_stopka_do_Znajdz(qapp, tmp_path):
+    """Do osiemnastu teczek o największej liczbie godzin, w kolejności `release_readiness`; reszta
+    to stopka „… i N kolejnych - szukaj w Znajdź", której klik prowadzi do Znajdź. Klik karty niesie
     obiekt tej karty."""
-    con = _baza_domu(str(tmp_path / "d.db"), _dwanascie(), extra=False)
+    con = _baza_domu(str(tmp_path / "d.db"), _obiekty(20), extra=False)
     h = HomeView(con, now_fn=lambda: DOM_NOW, poza_watkiem=False)
     try:
-        assert [k.accessibleName() for k in h.karty] == [f"OBJ{i:02d}" for i in range(1, 10)]
+        h.resize(1400, 1600)                      # pion na wszystkie sześć rzędów
+        h.show()
+        QApplication.processEvents()
+        assert [k.accessibleName() for k in h.karty] == [f"OBJ{i:02d}" for i in range(1, 19)]
+        assert _widoczne(h) == [f"OBJ{i:02d}" for i in range(1, 19)]
         assert not h.btn_teczki_wiecej.isHidden()
-        assert h.btn_teczki_wiecej.text() == "… i 3 kolejne - szukaj w Znajdź"
+        assert h.btn_teczki_wiecej.text() == "… i 2 kolejne - szukaj w Znajdź"
         assert h.teczki_status.isHidden()
         znajdz, teczki = [], []
         h.znajdz.connect(lambda: znajdz.append(True))
@@ -254,9 +274,39 @@ def test_teczki_dziewiec_kart_wg_godzin_i_stopka_do_Znajdz(qapp, tmp_path):
         h.btn_teczki_wiecej.click()
         h.karty[1].click()
         assert znajdz == [True] and teczki == [(2, "OBJ02")]
-        assert h.co_mam.text() == ("Co mam: 12 obiektów · 12 lightów · "
-                                   f"{sum(100.0 * (20 - i) for i in range(1, 13)) / 3600:.1f} h"
+        assert h.co_mam.text() == ("Co mam: 20 obiektów · 20 lightów · "
+                                   f"{sum(100.0 * (40 - i) for i in range(1, 21)) / 3600:.1f} h"
                                    " · 1 noc · ostatnia noc 2024-03-01")
+    finally:
+        h.close()
+        con.close()
+
+
+def test_teczki_rzedy_schodza_z_wysokoscia_okna_i_wracaja(qapp, tmp_path):
+    """Rzędów teczek tyle, ile mieści pion Domu: niższe okno chowa dolne rzędy (stopka liczy je
+    razem z teczkami bez kart), nie dostaje paska przewijania; najniższe zostawia jeden rząd;
+    powrót do wysokiego okna odsłania wszystko z powrotem - te same karty, bez przebudowy."""
+    con = _baza_domu(str(tmp_path / "d.db"), _obiekty(20), extra=False)
+    h = HomeView(con, now_fn=lambda: DOM_NOW, poza_watkiem=False)
+    try:
+        h.resize(1400, 1600)
+        h.show()
+        QApplication.processEvents()
+        karty = list(h.karty)
+        assert len(_widoczne(h)) == 18
+        h.resize(1400, _wysokosc_na_rzedy(h, 3))
+        QApplication.processEvents()
+        assert _widoczne(h) == [f"OBJ{i:02d}" for i in range(1, 10)]
+        assert h.btn_teczki_wiecej.text() == "… i 11 kolejnych - szukaj w Znajdź"
+        assert h._tresc.layout().sizeHint().height() <= h.height(), "bez paska przewijania"
+        h.resize(1400, 10)                        # niżej niż jeden rząd - jeden rząd zostaje
+        QApplication.processEvents()
+        assert _widoczne(h) == ["OBJ01", "OBJ02", "OBJ03"]
+        assert h.btn_teczki_wiecej.text() == "… i 17 kolejnych - szukaj w Znajdź"
+        h.resize(1400, 1600)
+        QApplication.processEvents()
+        assert len(_widoczne(h)) == 18 and h.karty == karty
+        assert h.btn_teczki_wiecej.text() == "… i 2 kolejne - szukaj w Znajdź"
     finally:
         h.close()
         con.close()

@@ -24,6 +24,14 @@ materializuje — a RAPORT jest przepisany: panel niósł tekst DRY („bez zmia
 bieg kłamałby największą powierzchnią okna. Anulowanie (także zamknięcie okna w biegu) zostawia
 CZĘŚCIOWE drzewo z manifestem (projekcja efemeryczna: undo = skasuj folder w Eksploratorze).
 
+WYDANIE OBIEKTU (`object_id` zamiast `frame_ids`) to drugi tryb TEGO SAMEGO okna, nie drugie okno:
+cele, auto-DRY, generacje, apply w tle i blokada parametrów są wspólne, różni się planista
+(`projection.plan_object`), korzeń (`projection.object_root` - `<karta>/OBJECTS/<obiekt>`, liczony
+raz w workerze DRY i ten sam oddany do `apply`) i manifest (`projection.object_manifest`). Decyzja
+wolumenowa i rozmiar biorą klatki z POZYCJI planu, bo obiekt to lighty + mastery + surowe flaty,
+a nie zbiór gridu. Wejściem jest okno teczek `ObjectPickDialog` (read-model
+`queries.release_readiness`): wiersz na obiekt z kropką stanu, dwuklik prowadzi tutaj.
+
 Cała logika plan/link/sonda/guard w Qt-wolnej klindze `horreum.projection` (NIETKNIĘTA — §0 briefu);
 tu glue widżetów + czyste pomocniki decyzji (Qt-wolne funkcje modułowe, testowane wprost). Walidacja
 segmentu `_WBPP`/`_Review` przy DODAWANIU celu (raz); guard w klindze zostaje drugą linią. Plik na
@@ -36,11 +44,14 @@ import os
 import threading
 import time
 
-from PySide6.QtCore import QObject, QSettings, QThread, Signal, Slot
-from PySide6.QtGui import QColor, QFont, QFontDatabase, QTextCharFormat, QTextCursor
+from PySide6.QtCore import QObject, QSettings, Qt, QThread, QUrl, Signal, Slot
+from PySide6.QtGui import (
+    QColor, QDesktopServices, QFont, QFontDatabase, QTextCharFormat, QTextCursor,
+)
 from PySide6.QtWidgets import (
-    QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog, QHBoxLayout, QInputDialog,
-    QLabel, QPlainTextEdit, QProgressBar, QPushButton, QRadioButton, QVBoxLayout, QWidget,
+    QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog, QHBoxLayout,
+    QHeaderView, QInputDialog, QLabel, QLineEdit, QPlainTextEdit, QProgressBar, QPushButton,
+    QRadioButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from horreum import db, projection
@@ -171,19 +182,96 @@ def _elide_path(path, cap=64):
     return path[:half] + "…" + path[-half:]
 
 
+# Luki flatu z `lineage.raw_flats_for` → zdanie katalogu. Mapa, nie klucz składany w locie: kolektor
+# kluczy (`test_i18n`) widzi tylko literały w `t(...)`, a parytet tokenów z katalogiem pilnuje test
+# tego okna. `pending` ma tu zdanie, choć do `flat_gaps` planu nie trafia (osobna lista) - linia
+# „do przeliczenia w Dostawie" tłumaczy się nim, żeby powód stał przy liczbie.
+_FLAT_GAP_KEYS = {
+    "incomplete_recipe": "proj.obj.gap.incomplete_recipe",
+    "no_profile": "proj.obj.gap.no_profile",
+    "pending": "proj.obj.gap.pending",
+    "no_raw": "proj.obj.gap.no_raw",
+    "out_of_window": "proj.obj.gap.out_of_window",
+    "no_time": "proj.obj.gap.no_time",
+}
+
+
+def flat_gap_text(token, window_days):
+    """Zdanie dla tokenu luki flatu (Qt-wolne). `window_days` wchodzi do zdania `out_of_window` -
+    „poza oknem" bez liczby nie pozwala zdecydować, czy poszerzyć okno, czy dokupić flaty. Token
+    spoza mapy renderuje klucz (fallback katalogu), nie pustkę: nowy token rdzenia ma być widoczny."""
+    return i18n.t(_FLAT_GAP_KEYS.get(token, f"proj.obj.gap.{token}"), days=window_days)
+
+
+def object_totals(info):
+    """Liczby nagłówka wydania obiektu z `Projection.info` (Qt-wolne, testowane wprost). Lighty
+    sumą zestawów (light należy do jednego); mastery i surowe flaty jako DISTINCT klatek - master
+    wspólny dwóch zestawów to dwie pozycje planu, ale JEDEN master, a nagłówek mówi o archiwum,
+    nie o folderach. `pending` osobno: „do przeliczenia w Dostawie" to nie brak flatu."""
+    zestawy = info["zestawy"].values()
+    return {
+        "lights": sum(len(z["lights"]) for z in zestawy),
+        "masters": len({m for z in zestawy for ids in z["masters"].values() for m in ids}),
+        "raw": len({f for z in zestawy for f in z["flat_raw"]}),
+        "bez_flatu": sum(len(z["bez_flatu"]) for z in zestawy),
+        "bez_darka": sum(len(z["bez_darka"]) for z in zestawy),
+        "pending": sum(len(z["pending"]) for z in zestawy),
+    }
+
+
+def object_report_lines(info):
+    """Sekcja raportu wydania obiektu: wiersz na zestaw (lighty, godziny, mastery per relacja,
+    surowe flaty z nocami), pod nim - tylko gdy niezerowe - bez flatu z rozbiciem na powody, bez
+    darka i do przeliczenia w Dostawie (Qt-wolne). Powody stoją przy liczbie, bo „bez flatu: 311"
+    nie mówi, czy trzeba dokupić klatki, poszerzyć okno, czy poprawić nagłówek. Nazwy relacji
+    (`flat`, `dark`) to wartości domenowe - zostają nietłumaczone (D-L3)."""
+    lines = []
+    okno = info["window_days"]
+    for seg, z in info["zestawy"].items():
+        mastery = ", ".join(f"{rel} {len(ids)}" for rel, ids in z["masters"].items()) or "0"
+        surowe = i18n.t_plural("proj.obj.n_raw_flats", len(z["flat_raw"]))
+        if z["flat_raw_nights"]:
+            surowe += i18n.t("proj.obj.nights", nights=", ".join(z["flat_raw_nights"]))
+        lines.append(i18n.t("proj.obj.zestaw_line", seg=seg,
+                            lights=i18n.t_plural("proj.obj.n_lights", len(z["lights"])),
+                            hours=z["hours"], masters=mastery, raw=surowe))
+        if z["bez_flatu"]:
+            powody = "; ".join(f"{flat_gap_text(tok, okno)}: {n}" for tok, n in
+                               sorted(z["flat_gaps"].items(), key=lambda kv: (-kv[1], kv[0])))
+            lines.append(i18n.t("proj.obj.no_flat_line", n=len(z["bez_flatu"]), why=powody))
+        if z["bez_darka"]:
+            lines.append(i18n.t("proj.obj.no_dark_line", n=len(z["bez_darka"])))
+        if z["pending"]:
+            lines.append(i18n.t("proj.obj.pending_line", n=len(z["pending"]),
+                                why=flat_gap_text("pending", okno)))
+    return lines
+
+
+def pick_fold(text):
+    """Klucz pola „Szukaj" okna teczek (Qt-wolne): bez wielkości liter i bez spacji, bo kanon
+    archiwum pisze `NGC6992`, a ręka wpisuje „ngc 6992"."""
+    return "".join((text or "").split()).casefold()
+
+
 # ---------------------------------------------------------------- worker auto-DRY (wątek tła)
 
 class DryWorker(QObject):
     """Auto-DRY poza wątkiem GUI (R#6). Otwiera WŁASNE połączenie po `db_path` (con nie przechodzi
     między wątkami — check_same_thread); tryb inline (testy / `:memory:`) dostaje żywe `con`
     wołającego i działa synchronicznie. Wynik niesie GENERACJĘ startu (R2-2) — handler dialogu
-    odrzuca stale. `request_cancel` łapie na granicy pliku (kontrakt `should_cancel` klingi)."""
+    odrzuca stale. `request_cancel` łapie na granicy pliku (kontrakt `should_cancel` klingi).
 
-    done = Signal(int, object)        # (generacja, payload: plan/res/decyzja/rozmiar)
+    `object_id` przełącza planistę na wydanie obiektu (`plan_object`, opcjonalnie jeden zestaw
+    `config_id`); wtedy `root` to KARTA celu, a sondowany korzeń `<karta>/OBJECTS/<obiekt>` składa
+    `projection.object_root` TUTAJ i oddaje w payloadzie - apply bierze dokładnie ten, który
+    sondował DRY, zamiast składać go drugi raz."""
+
+    done = Signal(int, object)        # (generacja, payload: plan/res/decyzja/rozmiar/korzeń)
     failed = Signal(int, str)         # (generacja, komunikat)
     finished = Signal()
 
-    def __init__(self, db_path, frame_ids, layout, root, force_copy, now, gen, con=None):
+    def __init__(self, db_path, frame_ids, layout, root, force_copy, now, gen, con=None,
+                 object_id=None, config_id=None):
         super().__init__()
         self._db_path = db_path
         self._con = con
@@ -193,6 +281,8 @@ class DryWorker(QObject):
         self._force_copy = force_copy
         self._now = now
         self._gen = gen
+        self._object_id = object_id
+        self._config_id = config_id
         self._cancel = False
 
     def request_cancel(self):
@@ -213,20 +303,33 @@ class DryWorker(QObject):
         own = bool(self._db_path)
         con = db.connect(self._db_path) if own else self._con
         try:
-            plan = projection.plan(con, self._frame_ids, self._layout)
-            rows = queries.present_locations(con, self._frame_ids)
+            if self._object_id is not None:
+                plan = projection.plan_object(con, self._object_id, config_id=self._config_id)
+                rows = queries.present_locations(con, sorted({it.frame_id for it in plan.items}))
+            else:
+                plan = projection.plan(con, self._frame_ids, self._layout)
+                rows = queries.present_locations(con, self._frame_ids)
         finally:
             if own:
                 con.close()
-        chosen = chosen_present(rows)
-        target_serial = volume_serial(self._root)
+        if self._object_id is not None:
+            root = projection.object_root(self._root, plan)
+            # Wybór lokacji PER POZYCJA planu, nie per klatka: master wspólny dwóch zestawów to dwie
+            # kopie na dysku, więc rozmiar kopii liczony po klatkach zaniżałby sumę o każdy taki master.
+            by_frame = {int(r["frame_id"]): r for r in chosen_present(rows)}
+            chosen = [by_frame[it.frame_id] for it in plan.items if it.frame_id in by_frame]
+        else:
+            root = self._root
+            chosen = chosen_present(rows)
+        target_serial = volume_serial(root)
         auto_copy = volume_decision(chosen, target_serial)
         eff_copy = bool(self._force_copy) or auto_copy
-        res = projection.apply(plan, self._root, do_apply=False, copy=eff_copy, now=self._now,
+        res = projection.apply(plan, root, do_apply=False, copy=eff_copy, now=self._now,
                                should_cancel=lambda: self._cancel)
         total, missing = size_summary(chosen)
         return {"plan": plan, "res": res, "auto_copy": auto_copy, "copy": eff_copy,
-                "target_serial": target_serial, "size_total": total, "size_missing": missing}
+                "target_serial": target_serial, "size_total": total, "size_missing": missing,
+                "root": root}
 
 
 # ---------------------------------------------------------------- worker apply (wątek tła)
@@ -285,14 +388,29 @@ class ProjectionDialog(QDialog):
     """Wydanie perspektywy na stół: karty celów z pamięci + auto-DRY + „Utwórz N kopii/linków".
     `frame_ids` = klatki gridu (cel); `now_fn` = zegar (ts manifestu); `perspektywa` = etykieta do
     manifestu `_PROJEKCJA.json`; `off_thread=False` = OBA workery (DRY i apply) inline (seam
-    testowy, wzorzec `_writeback_async` gridu — sygnały direct = synchronicznie)."""
+    testowy, wzorzec `_writeback_async` gridu - sygnały direct = synchronicznie).
 
-    def __init__(self, con, frame_ids, *, now_fn, perspektywa="perspektywa", off_thread=True,
-                 parent=None):
+    `object_id` ZAMIAST `frame_ids` = wydanie obiektu (docstring modułu): układ stały, combo
+    „Zestaw" w miejscu układu, nagłówek z liczbami planu, „Otwórz w Eksploratorze" po wydaniu.
+    Dokładnie jedno z dwojga - oba albo żadne to błąd wołającego (`ValueError`), nie tryb do
+    zgadywania; nieznany obiekt też (nagłówek nie ma czego nazwać)."""
+
+    def __init__(self, con, frame_ids=None, *, object_id=None, now_fn, perspektywa="perspektywa",
+                 off_thread=True, parent=None):
+        if (frame_ids is None) == (object_id is None):
+            raise ValueError("ProjectionDialog: podaj frame_ids ALBO object_id (dokładnie jedno)")
+        canon = None
+        if object_id is not None:
+            canon = queries.object_canon(con, object_id)
+            if canon is None:
+                raise ValueError(f"ProjectionDialog: nieznany obiekt {object_id!r}")
         super().__init__(parent)
         self.con = con
         self._db_path = queries.db_path_of(con)
-        self._frame_ids = list(frame_ids)
+        self._frame_ids = list(frame_ids) if frame_ids is not None else []
+        self._object_id = object_id
+        self._canon = canon
+        self._released_root = None       # korzeń OSTATNIEGO udanego wydania obiektu (Eksplorator)
         self._now = now_fn
         self._perspektywa = perspektywa
         self._off_thread = off_thread
@@ -307,8 +425,9 @@ class ProjectionDialog(QDialog):
         # karty są zamrożone w biegu, więc `_current_root()` pozostaje prawdą do końca wydania.
         self._apply_thread = None
         self._apply_worker = None
+        self._apply_root = None          # korzeń bieżącego/ostatniego apply (obiekt: `object_root`)
         self.summary = None              # zdanie o wydaniu dla statusbara wołającego (wiz P-C #4)
-        self.setWindowTitle(i18n.t("proj.title"))
+        self.setWindowTitle(i18n.t("proj.title" if object_id is None else "proj.obj.title"))
         self.setModal(True)
         self.resize(640, 520)
         self._build_ui()
@@ -317,7 +436,22 @@ class ProjectionDialog(QDialog):
     # ---- budowa ----
     def _build_ui(self):
         v = QVBoxLayout(self)
-        v.addWidget(QLabel(i18n.t("proj.frames_in_perspective", n=len(self._frame_ids))))
+        self.combo_zestaw = None
+        if self._object_id is None:
+            v.addWidget(QLabel(i18n.t("proj.frames_in_perspective", n=len(self._frame_ids))))
+        else:
+            # Nagłówek mówi CO wyjeżdża, zanim user spojrzy w słupek DRY: do pierwszego planu sama
+            # nazwa obiektu (plan czeka na cel), potem liczby planu - `_show_object_head`.
+            self.head_label = QLabel(self._canon)
+            _fh = self.head_label.font(); _fh.setBold(True); self.head_label.setFont(_fh)
+            self.head_label.setWordWrap(True)
+            v.addWidget(self.head_label)
+            # `pending` OSOBNYM zdaniem, nigdy w „bez flatu": master jest, brakuje kliknięcia
+            # w Dostawie - inna robota niż dokupienie klatek, więc inna linia i inny kolor.
+            self.pending_label = QLabel("")
+            self.pending_label.setProperty("role", "warn")
+            self.pending_label.setVisible(False)
+            v.addWidget(self.pending_label)
 
         v.addWidget(QLabel(i18n.t("proj.target_label")))
         self._targets_box = QVBoxLayout()
@@ -337,12 +471,24 @@ class ProjectionDialog(QDialog):
         v.addWidget(hint)
 
         row_l = QHBoxLayout()
-        row_l.addWidget(QLabel(i18n.t("proj.layout_label")))
+        layout_label = QLabel(i18n.t("proj.layout_label"))
+        row_l.addWidget(layout_label)
         self.combo_layout = QComboBox()
         self.combo_layout.addItem(i18n.t("proj.layout_by_object"), "po-obiektach")
         self.combo_layout.addItem(i18n.t("proj.layout_wbpp"), "wbpp-feed")
         self.combo_layout.currentIndexChanged.connect(self._on_param_changed)
         row_l.addWidget(self.combo_layout)
+        if self._object_id is not None:
+            # Układ wydania obiektu jest STAŁY (`wbpp-obiekt`): combo, które niczego nie zmienia,
+            # obiecywałoby wybór. W jego miejscu jedyny realny parametr planu - zestaw. Pozycje
+            # zestawów dochodzą z pierwszego planu (`_fill_zestawy`), bo dopiero on je zna.
+            layout_label.setVisible(False)
+            self.combo_layout.setVisible(False)
+            row_l.addWidget(QLabel(i18n.t("proj.obj.zestaw_label")))
+            self.combo_zestaw = QComboBox()
+            self.combo_zestaw.addItem(i18n.t("proj.obj.zestaw_all"), None)
+            self.combo_zestaw.currentIndexChanged.connect(self._on_param_changed)
+            row_l.addWidget(self.combo_zestaw)
         row_l.addStretch(1)
         v.addLayout(row_l)
 
@@ -389,6 +535,12 @@ class ProjectionDialog(QDialog):
         self.btn_cancel.setAutoDefault(False)
         self.btn_cancel.setVisible(False)
         self.btn_cancel.clicked.connect(self._on_cancel_apply)
+        # Wydanie obiektu kończy się w Eksploratorze (WBPP wskazuje się folderem), więc droga tam
+        # pojawia się po udanym wydaniu, a nie przed nim - wcześniej nie byłoby czego otwierać.
+        self.btn_open = QPushButton(i18n.t("proj.obj.open_explorer"))
+        self.btn_open.setAutoDefault(False)
+        self.btn_open.setVisible(False)
+        self.btn_open.clicked.connect(self._open_in_explorer)
         btn_close = QPushButton(i18n.t("proj.btn_close"))
         btn_close.setAutoDefault(False)
         btn_close.clicked.connect(self.reject)
@@ -396,6 +548,7 @@ class ProjectionDialog(QDialog):
         act.addWidget(self.btn_dry)
         act.addWidget(self.btn_apply)
         act.addWidget(self.btn_cancel)
+        act.addWidget(self.btn_open)
         act.addWidget(btn_close)
         v.addLayout(act)
 
@@ -483,12 +636,18 @@ class ProjectionDialog(QDialog):
     # ---- stan / auto-DRY ----
     def _invalidate(self):
         """Zmiana parametru (cel/układ/kopia) unieważnia DRY: generacja ++ (R2-2), „Utwórz" gaśnie —
-        uzbroi je wyłącznie ZAKOŃCZONY świeży DRY pod dokładnie bieżące parametry."""
+        uzbroi je wyłącznie ZAKOŃCZONY świeży DRY pod dokładnie bieżące parametry.
+
+        Nagłówek trybu obiektu wraca do samej nazwy z tego samego powodu: liczby należą do planu,
+        który właśnie przestał obowiązywać - po zmianie zestawu mówiłyby przez cały bieg sondy
+        o poprzednim zestawie."""
         self._gen += 1
         self._plan = None
         self._dry = None
         self.btn_apply.setEnabled(False)
         self.btn_apply.setText(i18n.t("proj.btn_create"))
+        if self._object_id is not None:
+            self._show_object_head(None)
 
     def _on_target_toggled(self, checked):
         if not checked:
@@ -520,7 +679,9 @@ class ProjectionDialog(QDialog):
         self.btn_dry.setEnabled(False)               # jeden DRY naraz — „Odśwież" gaśnie na czas biegu
         worker = DryWorker(self._db_path, self._frame_ids, self.combo_layout.currentData(),
                            root, self.chk_copy.isChecked(), self._now(), self._gen,
-                           con=None if self._db_path else self.con)
+                           con=None if self._db_path else self.con, object_id=self._object_id,
+                           config_id=(self.combo_zestaw.currentData()
+                                      if self.combo_zestaw is not None else None))
         worker.done.connect(self._on_dry_done)
         worker.failed.connect(self._on_dry_failed)
         self._dry_worker = worker
@@ -568,6 +729,9 @@ class ProjectionDialog(QDialog):
         self.btn_apply.setText(i18n.t_plural(key, n))
         self.btn_apply.setEnabled(n > 0)             # zero do utworzenia → szczery disabled
         self._update_card_note(payload)
+        if self._object_id is not None:
+            self._fill_zestawy(payload["plan"].info)
+            self._show_object_head(payload["plan"].info)
 
     @Slot(int, str)
     def _on_dry_failed(self, gen, msg):
@@ -580,6 +744,61 @@ class ProjectionDialog(QDialog):
         self._dry = None
         self.btn_apply.setEnabled(False)
         self._show_report(i18n.t("proj.dry_failed", msg=msg), "error")
+        if self._object_id is not None:
+            self._show_object_head(None)             # liczby poprzedniego planu kłamałyby o bieżącym
+
+    # ---- tryb obiektu: zestawy, nagłówek, Eksplorator ----
+    def _fill_zestawy(self, info):
+        """Pozycje combo „Zestaw" z PIERWSZEGO planu całego obiektu (raz - później plan bywa
+        zawężony do jednego zestawu i nie zna reszty). Bez emisji: to budowa listy, nie wybór.
+
+        Zestaw bez configu (`_UNSET`) nie dostaje pozycji: `plan_object(config_id=None)` znaczy
+        „wszystkie", więc takiego zestawu nie da się wydać osobno - jego lighty jadą we
+        „Wszystkich", a raport pokazuje je własnym wierszem."""
+        if self.combo_zestaw.count() > 1 or info["config_id"] is not None:
+            return
+        self.combo_zestaw.blockSignals(True)
+        for seg, z in info["zestawy"].items():
+            if z["config_id"] is None:
+                continue
+            self.combo_zestaw.addItem(
+                i18n.t_plural("proj.obj.zestaw_item", len(z["lights"]), seg=seg), z["config_id"])
+        self.combo_zestaw.blockSignals(False)
+
+    def _show_object_head(self, info):
+        """Nagłówek wydania obiektu: liczby BIEŻĄCEGO planu albo sama nazwa (`info=None` - planu
+        nie ma albo właśnie padł). `pending` ma własną linię i znika przy zerze."""
+        if info is None:
+            self.head_label.setText(self._canon)
+            self.pending_label.setVisible(False)
+            return
+        s = object_totals(info)
+        self.head_label.setText(i18n.t(
+            "proj.obj.head", canon=self._canon,
+            lights=i18n.t_plural("proj.obj.n_lights", s["lights"]),
+            masters=i18n.t_plural("proj.obj.n_masters", s["masters"]),
+            raw=i18n.t_plural("proj.obj.n_raw_flats", s["raw"]),
+            no_flat=s["bez_flatu"], no_dark=s["bez_darka"]))
+        self.pending_label.setText(i18n.t("proj.obj.pending_head", n=s["pending"]))
+        self.pending_label.setVisible(s["pending"] > 0)
+
+    def _open_in_explorer(self):
+        """Folder obiektu z OSTATNIEGO udanego wydania - korzeń, który dostał `apply`, a nie
+        przeliczony z bieżących kart: po zmianie karty plan jest unieważniony, a folder stoi."""
+        if self._released_root:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(self._released_root))
+
+    def _object_manifest(self):
+        """Manifest wydania obiektu: treść `projection.object_manifest` (jedno źródło z CLI) plus
+        `etykieta` - nazwa wydania dla człowieka czytającego `_PROJEKCJA.json`: obiekt, a przy
+        jednym zestawie także zestaw. Wartość domenowa, nie tekst UI - bez tłumaczenia."""
+        manifest = projection.object_manifest(self._plan)
+        info = self._plan.info
+        etykieta = self._canon
+        if info["config_id"] is not None and info["zestawy"]:
+            etykieta += " / " + next(iter(info["zestawy"]))
+        manifest["etykieta"] = etykieta
+        return manifest
 
     def _update_card_note(self, payload):
         """Szczera nota trybu na ZAZNACZONEJ karcie celu (brief §3): skąd decyzja hardlink/kopia."""
@@ -601,9 +820,14 @@ class ProjectionDialog(QDialog):
         root = self._current_root()
         if self._plan is None or self._dry is None or not root or self._apply_worker is not None:
             return
+        if self._object_id is not None:
+            root = self._dry["root"]                 # `object_root` karty - ten sam, który sondował DRY
+            manifest = self._object_manifest()
+        else:
+            manifest = {"perspektywa": self._perspektywa, "n_frames": len(self._frame_ids)}
+        self._apply_root = root
         self._apply_begin(len(self._plan.items), root)
-        worker = ApplyWorker(self._plan, root, self._dry["copy"], self._now(),
-                             {"perspektywa": self._perspektywa, "n_frames": len(self._frame_ids)})
+        worker = ApplyWorker(self._plan, root, self._dry["copy"], self._now(), manifest)
         worker.progress.connect(self._on_apply_progress)
         worker.done.connect(self._on_apply_done)
         worker.aborted.connect(self._on_apply_aborted)
@@ -671,6 +895,8 @@ class ProjectionDialog(QDialog):
         WIERSZ karty (`holder`), nie samo radio — inaczej nota trybu („ten sam wolumen → hardlink")
         zostaje w pełnej jasności i zamrożenie czyta się plamiasto (wiz #7)."""
         self.combo_layout.setEnabled(on)
+        if self.combo_zestaw is not None:            # zestaw to parametr planu jak układ (R2-2)
+            self.combo_zestaw.setEnabled(on)
         self.chk_copy.setEnabled(on)
         self.btn_add.setEnabled(on)
         self.btn_dry.setEnabled(on and self._current_root() is not None)
@@ -705,9 +931,21 @@ class ProjectionDialog(QDialog):
         # ŚLAD PO ZAMKNIĘCIU (wizytacja P-C #4): po `exec()` okno główne nie niosło ani słowa
         # o wydaniu — jedynym trwałym zapisem był `_PROJEKCJA.json` w celu, czyli POZA aplikacją.
         # Zdanie składamy TU, gdzie liczby są świeże; `grid` je tylko przekazuje na statusbar.
-        self.summary = i18n.t("proj.status_summary", n=res.counts.get("linked", 0),
-                              word=i18n.t("proj.word_copy_done" if res.copy else "proj.word_link_done"),
-                              root=self._current_root())
+        word = i18n.t("proj.word_copy_done" if res.copy else "proj.word_link_done")
+        if self._object_id is None:
+            self.summary = i18n.t("proj.status_summary", n=res.counts.get("linked", 0),
+                                  word=word, root=self._current_root())
+        elif res.cancelled:
+            # Statusbar zostaje po zamknięciu okna jako JEDYNY ślad - „Wydano" nad połową drzewa
+            # mówiłoby, że folder jest gotowy pod WBPP, a jest w nim tylko część planu.
+            self.summary = i18n.t("proj.obj.status_cancelled", canon=self._canon, word=word,
+                                  n=res.counts.get("linked", 0), total=len(self._plan.items),
+                                  root=self._apply_root)
+        else:
+            self.summary = i18n.t("proj.obj.status_summary", canon=self._canon,
+                                  n=res.counts.get("linked", 0), word=word, root=self._apply_root)
+            self._released_root = self._apply_root
+            self.btn_open.setVisible(True)
         self.btn_apply.setEnabled(False)
         # nie głosi akcji, która zaszła (wiz K2) — także wtedy, gdy nie zaszła ŻADNA (#1)
         self.btn_apply.setText(i18n.t("proj.btn_cancelled") if res.cancelled else (
@@ -786,6 +1024,8 @@ class ProjectionDialog(QDialog):
                 # pierwsza liczba pod nagłówkiem ma mówić o skutku, nie o jego braku (wiz #11).
                 touched = sum(c.get(k, 0) for k in ("linked", "exists", "conflict", "error", "verify_bad"))
                 lines.append(i18n.t("proj.untouched", n=max(len(plan.items) - touched, 0)))
+        if plan.info is not None:
+            lines.extend(object_report_lines(plan.info))   # wydanie obiektu: zestawy i powody luk
         if res.drift:
             # Rozjazd manifestu PRZED drzewem planu: stare drzewo NIE daje `conflict` (leży pod inną
             # ścieżką), więc liczniki wyżej wyglądają czysto — bez tej linii raport milczy o tym,
@@ -828,3 +1068,151 @@ class ProjectionDialog(QDialog):
             self._dry_thread.quit()
             self._dry_thread.wait(10_000)
         super().done(r)
+
+
+# ---------------------------------------------------------------- okno teczek (wybór obiektu)
+
+# Stan teczki → rola koloru z motywu (`_COLORS`, SPOT z nagłówkiem raportu) i zdanie pod kursorem.
+# Kropka sama nie wystarcza: kolor bez słowa nie mówi nic czytelnikowi, który go nie rozróżnia.
+_STATE_ROLES = {"green": "ok", "amber": "warn", "red": "error"}
+_STATE_TIPS = {"green": "proj.pick.state.green", "amber": "proj.pick.state.amber",
+               "red": "proj.pick.state.red"}
+_PICK_HEADERS = ("", "proj.pick.col.object", "proj.pick.col.hours", "proj.pick.col.lights",
+                 "proj.pick.col.nights", "proj.pick.col.sets", "proj.pick.col.flat",
+                 "proj.pick.col.dark", "proj.pick.col.last_night")
+_PICK_COL_OBJECT = 1
+
+
+class ObjectPickDialog(QDialog):
+    """Okno teczek „Wydaj obiekt…": wiersz na obiekt z aktywnymi lightami (`queries.release_readiness`),
+    godzinami malejąco, z kropką stanu i procentami kalibracji. Dwuklik albo „Dalej" (Enter) wybiera
+    obiekt - wołający otwiera z nim `ProjectionDialog` w trybie obiektu. Wynik: `self.object_id`.
+
+    Read-model liczy się INLINE, bez wątku tła: zmierzone na kopii żywej `pf4` (73 obiekty,
+    2026-10-09) ~120 ms z surowymi flatami włącznie - poniżej progu, od którego okno potrzebowałoby
+    stanu „Liczę gotowość…". Gdy archiwum urośnie ponad ~300 ms, wzorzec `DryWorker` czeka obok.
+
+    `preselect` (id obiektu) zaznacza teczkę na starcie - wołający podaje ją, gdy zbiór gridu
+    niesie lighty dokładnie jednego obiektu (`queries.sole_light_object`); bez niego „Dalej" jest
+    szczerze wygaszony, a nie uzbrojony na przypadkowym pierwszym wierszu. Pole „Szukaj" zawęża po
+    nazwie i, gdy zaznaczenie wypadnie z widoku, zaznacza pierwszą pasującą teczkę - wpisanie nazwy
+    i Enter to cała droga dla kogoś, kto wie, czego szuka."""
+
+    def __init__(self, con, *, preselect=None, parent=None):
+        super().__init__(parent)
+        self.object_id = None
+        self._rows = queries.release_readiness(con)
+        self.setWindowTitle(i18n.t("proj.pick.title"))
+        self.setModal(True)
+        self.resize(860, 560)
+        self._build_ui()
+        self._fill()
+        if preselect is not None:
+            for i, r in enumerate(self._rows):
+                if r["object_id"] == preselect:
+                    self.table.selectRow(i)
+                    self.table.scrollToItem(self.table.item(i, _PICK_COL_OBJECT))
+                    break
+        self._sync_next()
+
+    def _build_ui(self):
+        v = QVBoxLayout(self)
+        hint = QLabel(i18n.t("proj.pick.hint"))
+        hint.setProperty("role", "secondary")
+        v.addWidget(hint)
+        row_s = QHBoxLayout()
+        row_s.addWidget(QLabel(i18n.t("proj.pick.search_label")))
+        self.search = QLineEdit()
+        self.search.setPlaceholderText(i18n.t("proj.pick.search_placeholder"))
+        self.search.setClearButtonEnabled(True)
+        self.search.textChanged.connect(self._apply_filter)
+        row_s.addWidget(self.search, 1)
+        v.addLayout(row_s)
+
+        self.table = QTableWidget(0, len(_PICK_HEADERS))
+        self.table.setHorizontalHeaderLabels([i18n.t(k) if k else "" for k in _PICK_HEADERS])
+        self.table.horizontalHeaderItem(0).setToolTip(i18n.t("proj.pick.col.state_tip"))
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        hh = self.table.horizontalHeader()
+        hh.setSectionResizeMode(QHeaderView.ResizeToContents)
+        hh.setSectionResizeMode(_PICK_COL_OBJECT, QHeaderView.Stretch)
+        # Dwuklik, NIE `activated`: Enter na tabeli i tak dochodzi do domyślnego „Dalej" (widok
+        # emituje `activated` i przepuszcza klawisz), więc podpięcie obu wybierałoby dwa razy.
+        self.table.cellDoubleClicked.connect(self._on_double_click)
+        self.table.itemSelectionChanged.connect(self._sync_next)
+        v.addWidget(self.table, 1)
+        self.empty_label = QLabel(i18n.t("proj.pick.empty"))
+        self.empty_label.setProperty("role", "secondary")
+        self.empty_label.setVisible(not self._rows)
+        v.addWidget(self.empty_label)
+
+        act = QHBoxLayout()
+        act.addStretch(1)
+        self.btn_next = QPushButton(i18n.t("proj.pick.next"))
+        self.btn_next.setDefault(True)
+        _fn = self.btn_next.font(); _fn.setBold(True); self.btn_next.setFont(_fn)
+        self.btn_next.clicked.connect(self._on_next)
+        btn_close = QPushButton(i18n.t("proj.btn_close"))
+        btn_close.setAutoDefault(False)
+        btn_close.clicked.connect(self.reject)
+        act.addWidget(self.btn_next)
+        act.addWidget(btn_close)
+        v.addLayout(act)
+        self.search.setFocus()
+
+    def _fill(self):
+        self.table.setRowCount(len(self._rows))
+        right = Qt.AlignRight | Qt.AlignVCenter
+        for i, r in enumerate(self._rows):
+            dot = QTableWidgetItem("●")
+            dot.setForeground(_COLORS[_STATE_ROLES[r["stan"]]])
+            dot.setTextAlignment(Qt.AlignCenter)
+            dot.setToolTip(i18n.t(_STATE_TIPS[r["stan"]]))
+            flat = f"{r['pct_master_flat']} % / {r['pct_raw_flat']} %"
+            if r["n_pending"]:
+                flat += i18n.t("proj.pick.flat_pending", n=r["pct_pending"])
+            cells = [dot, QTableWidgetItem(r["canon"]),
+                     f"{r['hours']:.1f}", str(r["lights"]), str(r["nights"]), str(r["zestawy"]),
+                     flat, f"{r['pct_master_dark']} %", r["last_night"] or ""]
+            for col, cell in enumerate(cells):
+                item = cell if isinstance(cell, QTableWidgetItem) else QTableWidgetItem(cell)
+                if col > _PICK_COL_OBJECT:
+                    item.setTextAlignment(right)
+                self.table.setItem(i, col, item)
+            self.table.item(i, _PICK_COL_OBJECT).setData(Qt.UserRole, r["object_id"])
+
+    def _selected_row(self):
+        """Zaznaczony WIDOCZNY wiersz albo `None` - wiersz ukryty filtrem bywa nadal zaznaczony,
+        a „Dalej" na niewidocznej teczce wydawałby coś, czego user nie widzi."""
+        rows = self.table.selectionModel().selectedRows()
+        if not rows or self.table.isRowHidden(rows[0].row()):
+            return None
+        return rows[0].row()
+
+    def _apply_filter(self, text):
+        needle = pick_fold(text)
+        for i, r in enumerate(self._rows):
+            self.table.setRowHidden(i, needle not in pick_fold(r["canon"]))
+        if self._selected_row() is None:
+            self.table.clearSelection()
+            first = next((i for i in range(len(self._rows)) if not self.table.isRowHidden(i)), None)
+            if first is not None:
+                self.table.selectRow(first)
+        self._sync_next()
+
+    def _sync_next(self):
+        self.btn_next.setEnabled(self._selected_row() is not None)
+
+    def _on_double_click(self, row, _col):
+        self.table.selectRow(row)
+        self._on_next()
+
+    def _on_next(self):
+        row = self._selected_row()
+        if row is None:
+            return
+        self.object_id = self._rows[row]["object_id"]
+        self.accept()

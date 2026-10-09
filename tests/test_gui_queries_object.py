@@ -1080,3 +1080,155 @@ def test_selection_object_state_LICZY_restorable_bez_nowego_zapytania(s8_obj):
     con.execute("UPDATE frame SET object_cleared_id = NULL WHERE id = ?", (fid,))
     con.commit()
     assert queries.selection_object_state(con, [fid])["restorable"] == 0
+
+
+# --- release_readiness: teczki wydania obiektu do WBPP (okno „Wydaj obiekt…") ---
+
+TECZKI_NOW = "2026-10-09T12:00:00"
+
+
+def _teczki(tmp_path):
+    """Baza teczek: jedna nastawa (A140R x ASI2600MM, config 10), master flat Ha, master dark, dwa
+    surowe flaty OIII z nocy 2024-03-01 i pięć obiektów o różnych stanach. Pliki nie powstają -
+    read-model pyta o flagę `present`, nie o dysk. Zwraca (con, ids)."""
+    from horreum import db
+    from horreum.calibration import run_calibration
+
+    con = db.open_db(str(tmp_path / "teczki.db"))
+    con.execute("INSERT INTO camera (id, model_canon, is_mono, created_at) VALUES "
+                "(1, 'ASI2600MM', 1, ?)", (TECZKI_NOW,))
+    con.execute("INSERT INTO telescope (id, telescop_canon, label, status, created_at) VALUES "
+                "(1, 'A140R', NULL, 'proposed', ?)", (TECZKI_NOW,))
+    con.execute("INSERT INTO config (id, telescope_id, camera_id, status, created_at) VALUES "
+                "(10, 1, 1, 'proposed', ?)", (TECZKI_NOW,))
+    con.execute("INSERT INTO object (id, canon) VALUES (1, 'Gotowy'), (2, 'Polowa'), "
+                "(3, 'Pusty'), (4, 'Dostawa'), (5, 'Wycofany')")
+    ids = {}
+
+    def k(name, *, kind, config_id=10, object_id=None, filtr=None,
+          date_obs="2024-03-01T23:00:00", exptime=300.0):
+        cur = con.execute(
+            "INSERT INTO frame (sha1_data, kind, filetype, camera_id, config_id, object_id, "
+            "filter_canon, first_seen_at) VALUES (?, ?, 'fits', 1, ?, ?, ?, ?)",
+            (name, kind, config_id, object_id, filtr, TECZKI_NOW))
+        fid = cur.lastrowid
+        con.execute("INSERT INTO header (frame_id, raw_json, date_obs, exptime, xbinning) "
+                    "VALUES (?, '{}', ?, ?, 1)", (fid, date_obs, exptime))
+        con.execute("INSERT INTO location (frame_id, volume, path, present) VALUES (?, 'V', ?, 1)",
+                    (fid, f"X:\\lib\\{name}.fits"))
+        ids[name] = fid
+
+    k("md", kind="master_dark", config_id=None)
+    k("mf", kind="master_flat", filtr="Ha")
+    k("f1", kind="flat", filtr="OIII", date_obs="2024-03-02T05:30:00")
+    k("f2", kind="flat", filtr="OIII", date_obs="2024-03-02T05:31:00")
+    k("g1", kind="light", object_id=1, filtr="Ha", exptime=600.0)
+    k("g2", kind="light", object_id=1, filtr="Ha", exptime=600.0)
+    k("g_wycofany", kind="light", object_id=1, filtr="Ha", exptime=9000.0)
+    k("g_zastapiony", kind="light", object_id=1, filtr="Ha", exptime=9000.0)
+    k("a_master", kind="light", object_id=2, filtr="Ha")
+    k("a_surowy", kind="light", object_id=2, filtr="OIII")
+    k("a_bez", kind="light", object_id=2, filtr="SII")
+    k("a_pending", kind="light", object_id=2, filtr="Ha")
+    k("a_bez_configu", kind="light", config_id=None, object_id=2, filtr="Ha",
+      date_obs="2024-03-05T22:00:00")
+    k("r1", kind="light", object_id=3, filtr="SII", exptime=7200.0)
+    k("p1", kind="light", object_id=4, filtr="Ha", exptime=60.0)
+    k("x1", kind="light", object_id=5, filtr="Ha")
+    for fid in (ids["g_wycofany"], ids["x1"]):
+        con.execute("UPDATE frame SET retired_at = ? WHERE id = ?", (TECZKI_NOW, fid))
+    con.execute("UPDATE frame SET superseded_by = ? WHERE id = ?", (ids["g1"], ids["g_zastapiony"]))
+    con.commit()
+    run_calibration(con, now=TECZKI_NOW)              # profile: surowe OIII i master Ha
+    for light in ("g1", "g2", "a_master"):
+        for master, rel in (("mf", "flat"), ("md", "dark")):
+            con.execute("INSERT INTO calibration (light_frame_id, master_frame_id, relation, "
+                        "asserted_by, confidence) VALUES (?, ?, ?, 'horreum', 'recipe')",
+                        (ids[light], ids[master], rel))
+    con.commit()
+    return con, ids
+
+
+def test_release_readiness_stany_procenty_i_kolejnosc(tmp_path):
+    """Teczka na obiekt z aktywnymi lightami, godzinami malejąco. `green` = komplet master flat
+    i dark; `red` = ani flatu (mastera, surowych, `pending`), ani darka; reszta `amber`. Wycofane
+    i zastąpione lighty nie liczą się nigdzie (obiekt z samymi wycofanymi nie ma teczki), light
+    bez configu to osobny zestaw jak w planie wydania."""
+    con, _ids = _teczki(tmp_path)
+    rows = queries.release_readiness(con)
+    assert [r["canon"] for r in rows] == ["Pusty", "Polowa", "Gotowy", "Dostawa"]
+    by = {r["canon"]: r for r in rows}
+
+    g = by["Gotowy"]
+    assert (g["stan"], g["lights"], g["pct_master_flat"], g["pct_master_dark"]) == ("green", 2, 100, 100)
+    assert g["hours"] == 1200 / 3600 and g["nights"] == 1 and g["zestawy"] == 1
+
+    a = by["Polowa"]
+    assert a["stan"] == "amber"
+    assert (a["lights"], a["n_master_flat"], a["n_master_dark"], a["n_raw_flat"], a["n_pending"]) \
+        == (5, 1, 1, 1, 1)
+    assert (a["pct_master_flat"], a["pct_master_dark"], a["pct_raw_flat"], a["pct_pending"]) \
+        == (20, 20, 20, 20)
+    assert (a["nights"], a["zestawy"], a["last_night"]) == (2, 2, "2024-03-05")
+
+    r = by["Pusty"]
+    assert (r["stan"], r["pct_master_flat"], r["pct_raw_flat"], r["pct_master_dark"]) == ("red", 0, 0, 0)
+    assert r["hours"] == 2.0
+
+    # `pending` to nie brak flatu: obiekt z samym „do przeliczenia w Dostawie" NIE jest czerwony
+    p = by["Dostawa"]
+    assert (p["stan"], p["n_pending"], p["pct_pending"], p["pct_master_flat"]) == ("amber", 1, 100, 0)
+    assert "Wycofany" not in by
+    con.close()
+
+
+def test_release_readiness_liczy_tych_samych_co_plan_wydania(tmp_path):
+    """SZEW read-model - planista: teczka i podgląd wydania mówią o tych samych lightach. Lighty
+    teczki = suma lightów zestawów `plan_object`, a reszta po masterze, surowych i `pending` =
+    „bez flatu" planu, co do sztuki - inaczej okno wyboru obiecywałoby inne liczby niż wydanie.
+    Zestaw to FOLDER: config teleskopu scalonego z A140R przy tej samej kamerze nie dokłada zestawu.
+    Falsyfikatory: odsiej w read-modelu lighty bez obecnej kopii → pierwsza asercja pęka; licz
+    zestawy jako DISTINCT `config_id` → „Polowa" ma 3 zamiast 2."""
+    from horreum import projection
+
+    con, _ids = _teczki(tmp_path)
+    con.execute("UPDATE location SET present = 0 WHERE frame_id = ?", (_ids["a_master"],))
+    con.execute("INSERT INTO telescope (id, telescop_canon, label, status, merged_into, created_at) "
+                "VALUES (2, 'A140R-bis', NULL, 'proposed', 1, ?)", (TECZKI_NOW,))
+    con.execute("INSERT INTO config (id, telescope_id, camera_id, status, created_at) "
+                "VALUES (11, 2, 1, 'proposed', ?)", (TECZKI_NOW,))
+    con.execute("UPDATE frame SET config_id = 11 WHERE id = ?", (_ids["a_bez"],))
+    con.commit()
+    assert next(r for r in queries.release_readiness(con) if r["canon"] == "Polowa")["zestawy"] == 2
+    for r in queries.release_readiness(con):
+        zestawy = projection.plan_object(con, r["object_id"]).info["zestawy"].values()
+        assert r["lights"] == sum(len(z["lights"]) for z in zestawy), r["canon"]
+        assert r["n_pending"] == sum(len(z["pending"]) for z in zestawy), r["canon"]
+        bez = r["lights"] - r["n_master_flat"] - r["n_raw_flat"] - r["n_pending"]
+        assert bez == sum(len(z["bez_flatu"]) for z in zestawy), r["canon"]
+        assert r["lights"] - r["n_master_dark"] == sum(len(z["bez_darka"]) for z in zestawy)
+        assert r["zestawy"] == len(zestawy), r["canon"]
+    con.close()
+
+
+def test_readiness_pct_zero_i_sto_tylko_gdy_prawda():
+    """0 i 100 wyłącznie przy prawdzie: 344 z 345 to nie „100", 1 z 1000 to nie „0"."""
+    assert queries.readiness_pct(0, 0) == 0
+    assert queries.readiness_pct(0, 5) == 0
+    assert queries.readiness_pct(5, 5) == 100
+    assert queries.readiness_pct(344, 345) == 99
+    assert queries.readiness_pct(1, 1000) == 1
+    assert queries.readiness_pct(1, 3) == 33
+
+
+def test_sole_light_object_i_object_canon(tmp_path):
+    """Preselekcja teczki: dokładnie jeden obiekt wśród LIGHTÓW zbioru (flat i master nie głosują),
+    dwa obiekty albo zero → `None`. `object_canon` - nazwa po id albo `None`."""
+    con, ids = _teczki(tmp_path)
+    assert queries.sole_light_object(con, [ids["g1"], ids["g2"], ids["f1"], ids["md"]]) == 1
+    assert queries.sole_light_object(con, [ids["g1"], ids["a_master"]]) is None
+    assert queries.sole_light_object(con, [ids["f1"], ids["md"]]) is None
+    assert queries.sole_light_object(con, []) is None
+    assert queries.object_canon(con, 2) == "Polowa"
+    assert queries.object_canon(con, 999) is None
+    con.close()

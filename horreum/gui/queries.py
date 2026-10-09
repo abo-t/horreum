@@ -16,6 +16,7 @@ import os
 import re
 
 from horreum.grouper import NO_TELESCOPE_KINDS      # jeden właściciel zbioru rodzajów poza osią
+from horreum.lineage import RAW_FLAT_WINDOW_DAYS, raw_flats_for   # surowe flaty teczek wydania
 from horreum.naming import header_dt
 from horreum.repo import (INPLACE_ISOLATING_PHASES,   # fazy izolujące zapisu w miejscu (0022)
                           INPLACE_OPEN_PHASES,        # ...i ich podzbiór otwarty
@@ -3396,6 +3397,121 @@ def db_path_of(con):
         if name == "main":
             return file
     return None
+
+
+# --- WYDANIE OBIEKTU: teczki gotowości (okno wyboru „Wydaj obiekt…") ---
+
+def readiness_pct(n, total):
+    """Procent na ekran teczek: 0 i 100 WYŁĄCZNIE wtedy, gdy są prawdą, środek ścięty do 1..99.
+    Zwykłe zaokrąglenie dałoby „100" przy 344 z 345 lightów obok bursztynowej kropki (stan liczy się
+    z liczb, nie z procentu) i „0" przy jednym lighcie z tysiąca - a kolumna ma odróżniać „nic" od
+    „prawie nic", bo to dwie różne roboty przed WBPP."""
+    if not total or not n:
+        return 0
+    if n >= total:
+        return 100
+    return min(max(n * 100 // total, 1), 99)
+
+
+def release_readiness(con, *, window_days=RAW_FLAT_WINDOW_DAYS):
+    """Teczki wydania obiektu do WBPP - jeden wiersz na obiekt z AKTYWNYMI lightami, godzinami
+    malejąco (pierwsze na liście to obiekty, na które jest najwięcej materiału).
+
+    Populacja ta sama co `projection.plan_object` (`kind='light'`, obiekt, bez `retired_at`
+    i `superseded_by`; obecność kopii NIE odsiewa - plan kładzie taki light do `skipped`, więc teczka
+    i podgląd wydania liczą tych samych ludzi). Noc z definicji facetu Noc (`date(date_obs,
+    '-12 hours')`, D-UX-1). Zestaw to folder wydania, nie config: tożsamość (teleskop kanoniczny,
+    kamera) bierze się z mapy planisty (`projection.zestawy_configow`), bo configi scalonego teleskopu
+    przy tej samej kamerze lądują w JEDNYM folderze, a goły DISTINCT `config_id` policzyłby je dwa
+    razy; light bez configu to jeden zestaw `_UNSET`, jak w planie. Import leniwy - `projection`
+    importuje ten moduł. Master flat i master dark ze STANU `calibration`; surowe flaty i `pending`
+    z `lineage.raw_flats_for` - tej samej derywacji, którą wydanie potem pakuje, nie z przybliżenia.
+
+    `pending` (master JEST, rodowód go nie przeliczył) ma własne pole i NIGDY nie wlicza się do
+    braku flatu: zakup klatek i jedno kliknięcie w Dostawie to dwie różne wiadomości. Stan: `green`
+    = każdy light ma master flat i master dark; `red` = żaden nie ma flatu (mastera, surowych ani
+    `pending`) i żaden nie ma darka; reszta `amber`. Stan liczy się z LICZB, procenty
+    (`readiness_pct`) są tylko do ekranu.
+
+    Koszt stały w liczbie zapytań: jedno po lighty archiwum, jedno po tabelę `config` (mapa zestawów)
+    i jedno wywołanie `raw_flats_for` na lightach bez master flatu (ono samo ma stałą liczbę zapytań);
+    zmierzone na kopii żywej `pf4` (73 obiekty, 2026-10-09) ~120 ms. Zwraca listę dictów: object_id,
+    canon, lights, hours, nights, zestawy, n_master_flat, n_master_dark, n_raw_flat, n_pending,
+    pct_master_flat, pct_master_dark, pct_raw_flat, pct_pending, last_night, stan."""
+    rows = con.execute(
+        "SELECT f.id AS frame_id, f.object_id, o.canon, f.config_id, h.exptime, "
+        "       date(h.date_obs, '-12 hours') AS night, "
+        "       EXISTS (SELECT 1 FROM calibration c WHERE c.light_frame_id = f.id "
+        "               AND c.relation = 'flat') AS master_flat, "
+        "       EXISTS (SELECT 1 FROM calibration c WHERE c.light_frame_id = f.id "
+        "               AND c.relation = 'dark') AS master_dark "
+        "FROM frame f JOIN object o ON o.id = f.object_id "
+        "LEFT JOIN header h ON h.frame_id = f.id "
+        "WHERE f.kind = 'light' AND f.retired_at IS NULL AND f.superseded_by IS NULL "
+        "ORDER BY f.object_id, f.id").fetchall()
+    picks = raw_flats_for(con, [r["frame_id"] for r in rows if not r["master_flat"]],
+                          window_days=window_days)
+    from horreum import projection                     # leniwie: projection importuje queries
+    zestaw_configu = projection.zestawy_configow(con)
+    teczki = {}
+    for r in rows:
+        t = teczki.setdefault(r["object_id"], {
+            "canon": r["canon"], "lights": 0, "secs": 0.0, "nights": set(), "zestawy": set(),
+            "mf": 0, "md": 0, "raw": 0, "pending": 0})
+        t["lights"] += 1
+        t["secs"] += float(r["exptime"] or 0.0)
+        t["zestawy"].add(zestaw_configu.get(r["config_id"], (None, None))[0])
+        if r["night"] is not None:
+            t["nights"].add(r["night"])
+        t["md"] += bool(r["master_dark"])
+        if r["master_flat"]:
+            t["mf"] += 1
+            continue
+        pick = picks.get(r["frame_id"])
+        if pick is not None and pick.frame_ids:
+            t["raw"] += 1
+        elif pick is not None and pick.gap == "pending":
+            t["pending"] += 1
+    out = []
+    for oid, t in teczki.items():
+        n = t["lights"]
+        if t["mf"] == n and t["md"] == n:
+            stan = "green"
+        elif not (t["mf"] or t["raw"] or t["pending"] or t["md"]):
+            stan = "red"
+        else:
+            stan = "amber"
+        out.append({
+            "object_id": oid, "canon": t["canon"], "lights": n, "hours": t["secs"] / 3600.0,
+            "nights": len(t["nights"]), "zestawy": len(t["zestawy"]),
+            "n_master_flat": t["mf"], "n_master_dark": t["md"], "n_raw_flat": t["raw"],
+            "n_pending": t["pending"],
+            "pct_master_flat": readiness_pct(t["mf"], n), "pct_master_dark": readiness_pct(t["md"], n),
+            "pct_raw_flat": readiness_pct(t["raw"], n), "pct_pending": readiness_pct(t["pending"], n),
+            "last_night": max(t["nights"]) if t["nights"] else None, "stan": stan})
+    out.sort(key=lambda r: (-r["hours"], r["canon"].lower(), r["object_id"]))
+    return out
+
+
+def sole_light_object(con, frame_ids):
+    """Obiekt, którego lighty niesie zbiór gridu, gdy jest DOKŁADNIE jeden - inaczej `None`.
+    Karmi preselekcję okna teczek: user, który właśnie patrzy na NGC6992, nie ma go szukać drugi
+    raz. Lighty bez obiektu nie głosują (nie należą do żadnej teczki); dwa obiekty w zbiorze to
+    wybór, którego okno nie zgaduje."""
+    rows = con.execute(
+        "SELECT DISTINCT f.object_id FROM frame f "
+        "WHERE f.kind = 'light' AND f.object_id IS NOT NULL "
+        "AND f.id IN (SELECT value FROM json_each(?)) LIMIT 2",
+        (json.dumps(list(frame_ids)),)).fetchall()
+    return rows[0]["object_id"] if len(rows) == 1 else None
+
+
+def object_canon(con, object_id):
+    """Kanon obiektu po id albo `None`, gdy takiego obiektu nie ma. Nagłówek okna wydania mówi, CO
+    wydaje, zanim policzy się plan: ten czeka na cel i sondę, a nazwa obiektu ani jednego, ani
+    drugiego nie potrzebuje."""
+    row = con.execute("SELECT canon FROM object WHERE id = ?", (object_id,)).fetchone()
+    return None if row is None else row["canon"]
 
 
 def copy_facts_class(con, *, porownywalne=False) -> list[int]:

@@ -1888,12 +1888,14 @@ def test_panel_pol_pokrycie_w_prawej_kolumnie(view):
 
 
 def test_set_busy_gasi_wydaj(view):
-    """F3R#7: podczas etapu pipeline'u „Wydaj na stół…" gaśnie; po etapie wraca wg widocznych."""
-    assert view.sel_bar.btn_proj.isEnabled()
+    """F3R#7: podczas etapu pipeline'u „Wydaj na stół…" gaśnie; po etapie wraca wg widocznych.
+    „Wydaj obiekt…" gaśnie razem z nim - czyta `calibration`, którą etap przepisuje."""
+    assert view.sel_bar.btn_proj.isEnabled() and view.sel_bar.btn_obj.isEnabled()
     view.set_busy(True)
     assert not view.sel_bar.btn_proj.isEnabled()
+    assert not view.sel_bar.btn_obj.isEnabled()
     view.set_busy(False)
-    assert view.sel_bar.btn_proj.isEnabled()
+    assert view.sel_bar.btn_proj.isEnabled() and view.sel_bar.btn_obj.isEnabled()
 
 
 def test_kryteria_slowami_na_pasku(view):

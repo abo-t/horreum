@@ -56,6 +56,15 @@ def _positive_int(text):
     return value
 
 
+def _non_negative_int(text):
+    """Liczba całkowita ≥ 0 - `--flat-window 0` znaczy „tylko ta sama noc", a ujemne okno nie
+    wybrałoby niczego i wyglądało jak brak surowych flatów. Komunikat ASCII (stderr bywa cp1250)."""
+    value = int(text)
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"oczekiwana liczba >= 0, jest {text!r}")
+    return value
+
+
 def _positive_float(text):
     """Liczba > 0 i skończona (`--k-sigma`, `--min-len`): zero albo NaN wyłączyłyby próg po cichu."""
     try:
@@ -243,10 +252,20 @@ def main(argv=None):
     p_proj.add_argument("--root", required=True,
                         help="korzeń projekcji — MUSI zawierać segment _WBPP/_Review (bez domyślnej "
                              "ścieżki: repo publiczne, prywatny R: poza kodem)")
-    p_proj.add_argument("--layout", type=_layout, default="po-obiektach",
+    # Domyślny układ rozstrzyga dispatcher, nie argparse: `--object` wyklucza JAWNE `--layout`,
+    # a default wpisany tutaj byłby nieodróżnialny od wpisanego ręką.
+    p_proj.add_argument("--layout", type=_layout, default=None,
                         help="układ katalogów (domyślnie po-obiektach; zła nazwa wypisze dostępne)")
     p_proj.add_argument("--filter-json", default=None,
                         help="drzewo filtra JSON (jak grid): ścieżka pliku LUB inline; brak = cała baza")
+    p_proj.add_argument("--object", default=None, metavar="KANON|ID",
+                        help="wydanie OBIEKTU do WBPP: lighty + mastery + surowe flaty, drzewo "
+                             "OBJECTS/<obiekt>/<zestaw>/<rola>/...; kanon (bez wielkości liter) albo id; "
+                             "wyklucza --layout i --filter-json")
+    p_proj.add_argument("--zestaw", type=int, default=None, metavar="CONFIG_ID",
+                        help="tylko z --object: wydaj jeden zestaw (config_id); brak = wszystkie")
+    p_proj.add_argument("--flat-window", type=_non_negative_int, default=None, metavar="DNI",
+                        help="tylko z --object: okno nocy surowych flatów w dniach (domyślnie 30)")
     p_proj.add_argument("--copy", action="store_true",
                         help="kopiuj bajty (shutil.copy2) zamiast hardlinka — cross-wolumen / brak linków")
     p_proj.add_argument("--apply", action="store_true",
@@ -553,36 +572,55 @@ def main(argv=None):
         print(_format_rename_apply(args.db, run, res, run_id, pre_reconciled=pre_reconciled))
         return 0
     if args.cmd == "project":
+        # Tryb obiektu ma STAŁY układ i własną populację - jawny układ albo filtr obok niego to
+        # sprzeczne polecenie, nie preferencja; flagi obiektu bez obiektu nie miałyby czego zmienić.
+        if args.object is not None and (args.layout is not None or args.filter_json is not None):
+            p_proj.error("--object wyklucza sie z --layout i --filter-json (uklad wydania obiektu jest staly)")
+        if args.object is None and (args.zestaw is not None or args.flat_window is not None):
+            p_proj.error("--zestaw i --flat-window dzialaja tylko z --object")
         # Qt-wolne: filter_engine/queries/projection (projection importuje gui.queries, Qt-free).
         from . import filter_engine, projection
         from .gui import queries
         now = datetime.now(timezone.utc).isoformat()
         con = db.open_db(args.db)
-        tree = _load_filter_tree(args.filter_json)             # ścieżka pliku LUB inline JSON (SPOT z gridem)
-        frame_ids = filter_engine.run(
-            tree,
-            leaf_fn=lambda k, kw, p1, p2: queries.leaf_frame_ids(con, k, kw, p1, p2),
-            universe_fn=lambda: queries.all_frame_ids(con))
-        proj = projection.plan(con, sorted(frame_ids), args.layout)
-        manifest = {"perspektywa": args.filter_json or "cala-baza", "filter_tree": tree}
+        if args.object is not None:
+            found = _resolve_object(con, args.object)
+            if isinstance(found, str):
+                con.close()
+                print(f"Horreum project: blad -- {found}")
+                return 1
+            okno = {} if args.flat_window is None else {"window_days": args.flat_window}
+            proj = projection.plan_object(con, found, config_id=args.zestaw, **okno)
+            manifest = projection.object_manifest(proj)
+            root = projection.object_root(args.root, proj)    # <cel>/OBJECTS/<obiekt>: manifest per obiekt
+            print(_format_object(proj.info))                  # liczby wydania PRZED raportem linków
+        else:
+            tree = _load_filter_tree(args.filter_json)         # ścieżka pliku LUB inline JSON (SPOT z gridem)
+            frame_ids = filter_engine.run(
+                tree,
+                leaf_fn=lambda k, kw, p1, p2: queries.leaf_frame_ids(con, k, kw, p1, p2),
+                universe_fn=lambda: queries.all_frame_ids(con))
+            proj = projection.plan(con, sorted(frame_ids), args.layout or "po-obiektach")
+            manifest = {"perspektywa": args.filter_json or "cala-baza", "filter_tree": tree}
+            root = args.root
 
         def heartbeat(done, total, _dst, _status):            # puls co 100 (link na NAS wolniejszy, R1 #10)
             if done % 100 == 0 or done == total:
                 print(f"  projekcja: {done}/{total}")
         try:
-            res = projection.apply(proj, args.root, do_apply=args.apply, copy=args.copy, now=now,
+            res = projection.apply(proj, root, do_apply=args.apply, copy=args.copy, now=now,
                                    manifest=manifest, progress=heartbeat if args.apply else None)
         except projection.ProjectionAbort as exc:
             con.close()
             print(f"Horreum project: ABORT -- {exc}")         # sonda pierwszego linku padla (SMB kopia?)
-            print(_format_project(args.root, exc.result, proj, limit=args.limit))
+            print(_format_project(root, exc.result, proj, limit=args.limit))
             return 1
         except ValueError as exc:                              # korzeń bez segmentu wykluczonego (§0)
             con.close()
             print(f"Horreum project: blad -- {exc}")
             return 1
         con.close()
-        print(_format_project(args.root, res, proj, limit=args.limit))
+        print(_format_project(root, res, proj, limit=args.limit))
         return 0
     if args.cmd == "presence":
         from . import presence                            # lazy: astropy dopiero tu (przez scan)
@@ -1004,6 +1042,53 @@ def _load_filter_tree(arg):
     if p.exists():
         return json.loads(p.read_text(encoding="utf-8"))
     return json.loads(arg)
+
+
+def _resolve_object(con, text):
+    """`--object` → `object.id` albo ZDANIE błędu (str). Kanon najpierw (exact, bez wielkości liter -
+    `COLLATE NOCASE`, ten sam fold co osie), dopiero potem id: kanon złożony z cyfr nie może przegrać
+    z przypadkowym id. `canon` jest UNIQUE z rozróżnieniem wielkości liter, więc fold potrafi trafić
+    dwa obiekty - wtedy pytamy o id zamiast wybierać za usera. Komunikaty ASCII (konsola cp1250)."""
+    text = text.strip()
+    rows = con.execute("SELECT id, canon FROM object WHERE canon = ? COLLATE NOCASE ORDER BY id",
+                       (text,)).fetchall()
+    if len(rows) > 1:
+        ids = ", ".join(f"{r['canon']} (id {r['id']})" for r in rows)
+        return f"obiekt {text!r} niejednoznaczny bez wielkosci liter: {ids} -- podaj id"
+    if rows:
+        return rows[0]["id"]
+    if text.isdigit():
+        row = con.execute("SELECT id FROM object WHERE id = ?", (int(text),)).fetchone()
+        if row is not None:
+            return row["id"]
+    return f"nieznany obiekt {text!r} (ani kanon, ani id)"
+
+
+def _format_object(info):
+    """Raport wydania obiektu per zestaw (ASCII-safe poza nazwą obiektu - ta jest danymi usera, a
+    stdout `main` przełącza na UTF-8): lighty, godziny, mastery per relacja, surowe flaty z nocami,
+    bez flatu, bez darka, tokeny luki flatu i - osobno - lighty do przeliczenia rodowodu (`pending`:
+    master jest, brakuje kliknięcia w Dostawie, a nie klatek). Liczby z `Projection.info` - tej samej
+    treści, którą dostaje manifest (`object_manifest`), więc raport nie liczy niczego po swojemu."""
+    zakres = "wszystkie" if info["config_id"] is None else f"config {info['config_id']}"
+    zestawy = info["zestawy"]
+    lines = [f"Horreum project --object {info['object_canon']} (id {info['object_id']}; "
+             f"zestawy: {zakres}; okno surowych flatow: {info['window_days']} dni):"]
+    if not zestawy:
+        lines.append("  brak aktywnych lightow w wybranym zakresie")
+    for seg, z in zestawy.items():
+        mastery = ", ".join(f"{rel} {len(ids)}" for rel, ids in z["masters"].items()) or "0"
+        noce = f" (noce: {', '.join(z['flat_raw_nights'])})" if z["flat_raw_nights"] else ""
+        lines.append(
+            f"  {seg} (config {z['config_id']}): lighty {len(z['lights'])}; godz {z['hours']:.2f}; "
+            f"mastery {mastery}; surowe flaty {len(z['flat_raw'])}{noce}; "
+            f"bez flatu {len(z['bez_flatu'])}; bez darka {len(z['bez_darka'])}")
+        if z["flat_gaps"]:
+            luki = ", ".join(f"{tok} {n}" for tok, n in z["flat_gaps"].items())
+            lines.append(f"    luki flatu: {luki}")
+        if z["pending"]:
+            lines.append(f"    do przeliczenia rodowodu (horreum lineage / Dostawa): {len(z['pending'])}")
+    return "\n".join(lines)
 
 
 def _format_project(root, res, proj, *, limit):

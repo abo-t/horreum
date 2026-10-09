@@ -55,7 +55,7 @@ from horreum.gui import pola as pola_mod   # `pola` bywa w tym pliku zmienną lo
 from horreum.gui.facets import RAIL_MIN_W as _FIELDS_MIN_W, FacetRail
 from horreum.gui import assign_dialog
 from horreum.gui.assign_dialog import AssignObjectDialog
-from horreum.gui.projection_dialog import ProjectionDialog
+from horreum.gui.projection_dialog import ObjectPickDialog, ProjectionDialog
 from horreum.gui.rows import TwoPartDelegate
 from horreum.gui.wb_worker import (WritebackRunner, commit_do_cofniecia, zdanie_undo_kart,
                                    zdanie_wyniku_zapisu)
@@ -3114,6 +3114,12 @@ class SelectionBar(QFrame):
         # motywu ma w jasnej skórce 2,7:1 i jako tekst nie dochodzi do progu czytelności (wiz T5 N5).
         # Bez podnoszenia wysokości — pasek zbioru trzyma pięć przycisków w jednym rzędzie.
         _f = self.btn_proj.font(); _f.setBold(True); self.btn_proj.setFont(_f)
+        # „Wydaj obiekt…" obok „Wydaj na stół…": ta sama sprawa (wydanie), inne wejście - nie zbiór
+        # gridu, tylko teczka obiektu z okna wyboru. Dlatego ZAWSZE aktywny przy otwartej bazie
+        # i bez `set_have_frames`: pusty zbiór niczego tu nie odbiera. Bez pogrubienia - złota akcja
+        # paska jest jedna.
+        self.btn_obj = QPushButton(i18n.t("grid.sel.release_object"))
+        self.btn_obj.setToolTip(i18n.t("grid.sel.release_object_tip"))
         # „× Wyczyść zbiór" (wiz F4 #3): jednoklikowe zdjęcie facetów + filtra — bez niego jedyną
         # drogą było od-cyklowanie każdej wartości (preset „Przegląd" = no-op, gdy już wybrany).
         self.btn_clear = QPushButton(i18n.t("grid.sel.clear_set"))
@@ -3181,7 +3187,8 @@ class SelectionBar(QFrame):
         # z glifem ★ sąsiada, bo wszystkie pięć stało w jednym ciągu. Odstęp, nie ramka — QSS
         # `border` na QPushButton w Fusion zastępuje CAŁE malowanie ramki i spłaszcza przycisk.
         lay.addWidget(self.btn_clear)
-        lay.addSpacing(12); lay.addWidget(self.btn_proj); lay.addSpacing(12)
+        lay.addSpacing(12); lay.addWidget(self.btn_proj); lay.addWidget(self.btn_obj)
+        lay.addSpacing(12)
         lay.addWidget(self.btn_macro)
         lay.addWidget(self.btn_rename); lay.addWidget(self.btn_lineage)
         lay.addWidget(self.btn_object); lay.addWidget(self.btn_frame)
@@ -4000,6 +4007,7 @@ class FramesView(QWidget):
         self.sel_bar = SelectionBar()
         self.count_label = self.sel_bar.count_label      # TEN SAM QLabel (F3R#5) — `_update_count` bez zmian
         self.sel_bar.btn_proj.clicked.connect(self._open_projection)
+        self.sel_bar.btn_obj.clicked.connect(self._open_object_release)
         self.sel_bar.btn_clear.clicked.connect(self._on_clear_selection)
         self.sel_bar.btn_save.clicked.connect(self._save_perspective)
         self.sel_bar.btn_macro.clicked.connect(lambda: self._toggle_panel("macro"))
@@ -4680,6 +4688,24 @@ class FramesView(QWidget):
         # Wydanie zostawia ślad W APLIKACJI (wiz P-C #4): przed tym jedynym zapisem był
         # `_PROJEKCJA.json` w celu, więc po zamknięciu dialogu okno nie wiedziało nic o tym,
         # co przed chwilą wyjechało na stół. Zdanie składa dialog (tam liczby są świeże).
+        if dlg.summary:
+            self.status_message.emit(dlg.summary)
+
+    def _open_object_release(self):
+        """„Wydaj obiekt…": okno teczek → `ProjectionDialog` w trybie obiektu → zdanie na statusbar.
+        Droga: klik w pasku, dwuklik teczki, „Utwórz N linków" - trzy interakcje przy celu
+        z pamięci. Zbiór gridu nie jest tu celem, tylko PODPOWIEDZIĄ: gdy niesie lighty dokładnie
+        jednego obiektu, jego teczka jest zaznaczona na starcie. Odmowa w drodze jak przy „Wydaj
+        na stół…" - podpowiedź liczona ze zbioru, który zaraz zostanie zastąpiony, wskazałaby
+        teczkę poprzedniego widoku."""
+        if self._odmowa_w_drodze():
+            return
+        jedyny = queries.sole_light_object(self.con, self._frame_ids)
+        pick = ObjectPickDialog(self.con, preselect=jedyny, parent=self)
+        if pick.exec() != QDialog.Accepted or pick.object_id is None:
+            return
+        dlg = ProjectionDialog(self.con, object_id=pick.object_id, now_fn=self._now, parent=self)
+        dlg.exec()
         if dlg.summary:
             self.status_message.emit(dlg.summary)
 
@@ -6746,6 +6772,9 @@ class FramesView(QWidget):
             self.macro_bar.set_actions_enabled(False)
             self.rename_bar.set_actions_enabled(False)
             self.sel_bar.btn_proj.setEnabled(False)      # „Wydaj" gaśnie w biegu etapu (F3R#7)
+            # „Wydaj obiekt…" czyta `calibration` i rodowód, które etap Dostawy właśnie przepisuje -
+            # plan policzony w środku przebiegu wydałby mastery sprzed i po przeliczeniu naraz.
+            self.sel_bar.btn_obj.setEnabled(False)
             self.drawer.btn_commit.setEnabled(False)
             self.drawer.btn_reject.setEnabled(False)
             # Panel „Rodowód" to CZWARTA powierzchnia zapisu (I-2d) i pisze do tego samego stołu,
@@ -6758,6 +6787,7 @@ class FramesView(QWidget):
             self.drawer.btn_commit.setEnabled(n > 0)
             self.drawer.btn_reject.setEnabled(n > 0)
             self.lineage_bar.set_busy(False)             # panel wraca do stanu z zaznaczenia
+            self.sel_bar.btn_obj.setEnabled(True)        # nie zależy od zbioru - wraca od razu
             if hasattr(self, "_undo_btn"):
                 self._undo_btn.setEnabled(True)
             self._sync_akcji_zbioru()                    # paski i „Wydaj" wg widocznych - i zbioru w drodze

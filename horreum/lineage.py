@@ -17,6 +17,13 @@ STRONA ODCZYTU (C4b, Issue #6): `explain_light` odpowiada za JEDNĄ klatkę — 
 STANU (`calibrators_for`), a powód braku z tej samej derywacji, którą liczy przebieg (`_decide`).
 Bez wspólnego predykatu ekran tłumaczyłby brak inaczej, niż przebieg go tworzy.
 
+SUROWE FLATY (`raw_flats_for`) to TRZECIA, osobna droga - tylko do odczytu, pod wydanie obiektu do
+WBPP. `calibration` wiąże lighty wyłącznie z masterami i tak zostaje: wybór surowych niczego nie
+zapisuje, bo WBPP sam złoży z nich master, a stan bazy ma mówić, czym skalibrowano, nie czym dałoby
+się. Profil flatu lighta bierze się z TEJ SAMEJ derywacji co przebieg (`_profile_for`), a noc z tej
+samej definicji co facet Noc (`date(date_obs, '-12 hours')` w SQL), żeby wydanie nie miało własnej
+wersji żadnego z tych faktów.
+
 **To NIE jest C3.** C3 z planu (`brief/PLAN_kalibracja_lineage.md:45`) to RĘCZNE UZUPEŁNIENIE faktu
 przepisu — zapis `source='user'`, `actor=user:local`, przebijający ścieżkę. Tej drogi w repo nie ma
 (jedyny wołający `repo.record_calibration_fact` to `calibration.py` z `source='path'`), a odczyt jej
@@ -26,6 +33,7 @@ Qt-wolne, zapis wyłącznie przez `repo` (DB-KLINGA), SELECT literałem.
 """
 import json
 from dataclasses import dataclass, field
+from datetime import date
 
 from . import repo
 from .calibration import KIND_RECIPE, _collect, missing_facts, profile_key
@@ -101,14 +109,13 @@ def _bump(d, key):
     d[key] = d.get(key, 0) + 1
 
 
-def _decide(row, relation, profiles, masters, light_dt):
-    """JEDNA decyzja „czym skalibrować TĘ klatkę w TEJ relacji" → `(master_frame_id, gap_token)`;
-    dokładnie jedno z dwojga jest `None`.
+def _profile_for(row, relation, profiles):
+    """Przepis lightu w TEJ relacji → `(profile_id, gap_token)`; dokładnie jedno z dwojga jest `None`.
 
-    Właściciel predykatu dla OBU wołających: przebieg (`run_lineage`) i odczyt pojedynczej klatki
-    (`explain_light`). Bez tego panel odpowiadałby na „dlaczego brak" własną derywacją, która
-    rozjeżdża się z przebiegiem po cichu — a rozjazd między tym, co ekran TŁUMACZY, a tym, co
-    przebieg ROBI, jest gorszy niż brak tłumaczenia (SIN-DUP)."""
+    Pierwsza połowa `_decide`, wydzielona, bo surowe flaty (`raw_flats_for`) pytają o ten sam profil,
+    ale kandydatów szukają gdzie indziej. Druga kopia klucza w wydaniu rozjechałaby się z przebiegiem
+    przy pierwszym nowym fakcie przepisu - a wtedy wydanie wiązałoby surowe flaty z INNYM przepisem,
+    niż ten, z którego rodowód szuka mastera."""
     d = dict(row)
     d["recipe_class"] = relation
     facts = _collect(d, {})                            # stored={} — light nie ma faktów path/user
@@ -117,6 +124,20 @@ def _decide(row, relation, profiles, masters, light_dt):
     pid = profiles.get(profile_key(relation, facts))
     if pid is None:
         return None, "no_profile"
+    return pid, None
+
+
+def _decide(row, relation, profiles, masters, light_dt):
+    """JEDNA decyzja „czym skalibrować TĘ klatkę w TEJ relacji" → `(master_frame_id, gap_token)`;
+    dokładnie jedno z dwojga jest `None`.
+
+    Właściciel predykatu dla OBU wołających: przebieg (`run_lineage`) i odczyt pojedynczej klatki
+    (`explain_light`). Bez tego panel odpowiadałby na „dlaczego brak" własną derywacją, która
+    rozjeżdża się z przebiegiem po cichu - a rozjazd między tym, co ekran TŁUMACZY, a tym, co
+    przebieg ROBI, jest gorszy niż brak tłumaczenia (SIN-DUP)."""
+    pid, gap = _profile_for(row, relation, profiles)
+    if gap is not None:
+        return None, gap
     cand = masters.get(pid)
     if not cand:
         return None, "no_master"
@@ -177,6 +198,26 @@ class _LazyMasters:
         return self._cache[pid]
 
 
+def _light_rows(con, light_ids):
+    """Przepis lightów (te same kolumny co przebieg `run_lineage`) dla ZBIORU id - wspólne źródło
+    panelu jednej klatki (`explain_light`) i wyboru surowych flatów (`raw_flats_for`).
+
+    Jeden literał na dwóch wołających, bo bramka `test_obie_drogi_czytaja_TE_SAME_kolumny_przepisu`
+    pilnuje DOKŁADNIE dwóch list kolumn przepisu (przebieg i odczyt) - trzecia, osobna kopia dla
+    wydania przeszłaby obok niej i mogła rozjechać się po cichu. Zbiór id przez `json_each` (idiom
+    `calibration.run_calibration`), więc literał zostaje stały. Klatka, która nie jest lightem,
+    w wyniku się nie pojawia."""
+    return con.execute(
+        "SELECT f.id AS frame_id, f.camera_id AS camera_id, f.filter_canon AS filter_canon, "
+        "c.telescope_id AS telescope_id, h.exptime AS exptime, h.set_temp AS set_temp, "
+        "h.gain AS gain, h.offset_adu AS offset_adu, h.xbinning AS xbinning, "
+        "h.date_obs AS date_obs "
+        "FROM frame f LEFT JOIN header h ON h.frame_id = f.id "
+        "LEFT JOIN config c ON c.id = f.config_id WHERE f.kind = 'light' "
+        "AND f.id IN (SELECT value FROM json_each(?)) ORDER BY f.id",
+        (json.dumps([int(i) for i in light_ids]),)).fetchall()
+
+
 def explain_light(con, light_frame_id):
     """READ-ONLY odpowiedź na pytanie ekranu: „czym skalibrowano tę klatkę — a jeśli niczym, to
     DLACZEGO". Zwraca listę dictów (po jednym na relację `dark`/`flat`) albo `None`, gdy klatka
@@ -194,16 +235,10 @@ def explain_light(con, light_frame_id):
       dwie różne rzeczy, bo jedna wymaga zakupu klatek, a druga jednego kliknięcia w Dostawie.
 
     Zapisu nie ma i mieć nie będzie: panel tłumaczy stan, a zmienia go przebieg (jedna klinga)."""
-    row = con.execute(
-        "SELECT f.id AS frame_id, f.camera_id AS camera_id, f.filter_canon AS filter_canon, "
-        "c.telescope_id AS telescope_id, h.exptime AS exptime, h.set_temp AS set_temp, "
-        "h.gain AS gain, h.offset_adu AS offset_adu, h.xbinning AS xbinning, "
-        "h.date_obs AS date_obs "
-        "FROM frame f LEFT JOIN header h ON h.frame_id = f.id "
-        "LEFT JOIN config c ON c.id = f.config_id WHERE f.kind = 'light' AND f.id = ?",
-        (light_frame_id,)).fetchone()
-    if row is None:
+    rows = _light_rows(con, [light_frame_id])
+    if not rows:
         return None
+    row = rows[0]
     stan = {r["relation"]: r for r in calibrators_for(con, light_frame_id)}
     profiles = {r["profile_key"]: r["id"] for r in con.execute(
         "SELECT id, profile_key FROM calibration_profile")}
@@ -270,3 +305,103 @@ def calibrators_for(con, light_frame_id):
         " ORDER BY l.id LIMIT 1) AS master_path "
         "FROM calibration c WHERE c.light_frame_id = ? ORDER BY c.relation",
         (light_frame_id,)).fetchall()
+
+
+# --- SUROWE FLATY POD WYDANIE (tylko odczyt; `calibration` zostaje przy masterach) ---
+
+# Domyślne okno nocy surowych flatów - jedno źródło dla odczytu, planu wydania i ich wołających.
+RAW_FLAT_WINDOW_DAYS = 30
+
+
+@dataclass(frozen=True)
+class RawFlatPick:
+    """Wybór surowych flatów dla JEDNEGO lightu bez master flatu w stanie - albo powód braku.
+
+    Dokładnie jedno z dwojga jest ustawione: `frame_ids` (niepuste) albo `gap`. `night` i `days_apart`
+    niosą najbliższą noc surowych także przy `out_of_window` - „są, ale 45 dni obok" to inna
+    rozmowa niż „nie ma żadnych", a samo słowo „poza oknem" bez liczby nie pozwala jej podjąć.
+    `profile_id` jest `None` tylko tam, gdzie przepisu nie dało się złożyć albo dopasować."""
+    frame_ids: tuple
+    profile_id: int | None
+    night: str | None
+    days_apart: int | None
+    gap: str | None
+
+
+def raw_flats_for(con, light_ids, *, window_days=RAW_FLAT_WINDOW_DAYS):
+    """READ-ONLY: dla każdego lightu z `light_ids` BEZ wiersza `calibration` relacji `flat` - surowe
+    flaty jego przepisu z najbliższej nocy albo token luki. Lighty z master flatem w stanie (i klatki,
+    które nie są lightem) w wyniku się nie pojawiają: dla nich wołający bierze mastera ze stanu.
+
+    Tokeny luki: `incomplete_recipe` / `no_profile` (przepis lightu, ta sama derywacja co przebieg),
+    `pending` (przepis wskazuje MASTERA, a stanu nie ma - rodowód nie przeliczony; wydanie nie zgaduje
+    za przebieg, tylko odsyła do Dostawy - i dlatego wołający NIE liczy go jako „bez flatu": zakup
+    klatek i jedno kliknięcie w Dostawie to dwie różne wiadomości, jak w `explain_light`), `no_raw`
+    (przepis jest, surowych z obecną kopią nie ma), `out_of_window` (najbliższa noc surowych dalej niż
+    `window_days`), `no_time` (light bez `date_obs` - nie zna nocy; na żywej bazie 0, ale gałąź musi
+    istnieć, inaczej wybór zgadywałby sesję).
+
+    Kandydat = `kind='flat'` tego samego profilu, aktywny (bez `retired_at`/`superseded_by`), z OBECNĄ
+    kopią i z NOCĄ (`date()` nie-NULL: brak `date_obs` i napis, którego SQLite nie rozpozna jako czasu,
+    to ten sam brak nocy - samo `IS NOT NULL` przepuściłoby śmieć do arytmetyki dni). Wybór: noc o najmniejszej odległości w dniach od nocy
+    lightu, remis → wcześniejsza (deterministycznie); w oknie → WSZYSTKIE klatki profilu z tej nocy,
+    bo WBPP składa master z kompletu sesji, a nie z jednej klatki. Noc liczy SQL (`date(date_obs,
+    '-12 hours')`, D-UX-1 facetu Noc) - Python tylko odejmuje gotowe daty.
+
+    Koszt stały w liczbie zapytań (stan lightów, przepis, profile, mastery, kandydaci), nie N:
+    kandydaci przychodzą jednym zapytaniem po zbiorze profili i grupują się w Pythonie."""
+    arg = json.dumps(sorted({int(i) for i in light_ids}))
+    bez_mastera = {}
+    for r in con.execute(
+            "SELECT f.id AS light_id, date(h.date_obs, '-12 hours') AS night "
+            "FROM frame f LEFT JOIN header h ON h.frame_id = f.id "
+            "WHERE f.kind = 'light' AND f.id IN (SELECT value FROM json_each(?)) "
+            "AND NOT EXISTS (SELECT 1 FROM calibration c "
+            "                WHERE c.light_frame_id = f.id AND c.relation = 'flat')", (arg,)):
+        bez_mastera[r["light_id"]] = r["night"]
+    if not bez_mastera:
+        return {}
+
+    profiles = {r["profile_key"]: r["id"] for r in con.execute(
+        "SELECT id, profile_key FROM calibration_profile")}
+    # Mastery tym samym predykatem, z którego przebieg wybiera kalibrator (`_masters_by_profile`) -
+    # „pending" ma znaczyć dokładnie to, co `_decide` nazwałby powiązaniem, nie przybliżenie.
+    masters = _masters_by_profile(con)
+    przepis = {}
+    for row in _light_rows(con, sorted(bez_mastera)):
+        pid, gap = _profile_for({k: row[k] for k in row.keys()}, "flat", profiles)
+        if gap is None and masters.get(pid):
+            gap = "pending"
+        przepis[row["frame_id"]] = (pid, gap)
+
+    noce = {}                                          # profile_id -> {noc: [flat id, ...]}
+    pids = sorted({pid for pid, gap in przepis.values() if gap is None})
+    for r in con.execute(
+            "SELECT f.calibration_profile_id AS profile_id, f.id AS flat_id, "
+            "date(h.date_obs, '-12 hours') AS night "
+            "FROM frame f JOIN header h ON h.frame_id = f.id "
+            "WHERE f.kind = 'flat' AND date(h.date_obs, '-12 hours') IS NOT NULL "
+            "AND f.calibration_profile_id IN (SELECT value FROM json_each(?)) "
+            "AND f.retired_at IS NULL AND f.superseded_by IS NULL "
+            "AND EXISTS (SELECT 1 FROM location l WHERE l.frame_id = f.id AND l.present = 1) "
+            "ORDER BY f.id", (json.dumps(pids),)):
+        noce.setdefault(r["profile_id"], {}).setdefault(r["night"], []).append(r["flat_id"])
+
+    out = {}
+    for lid, (pid, gap) in przepis.items():
+        noc_lightu = bez_mastera[lid]
+        if gap is None and not noce.get(pid):
+            gap = "no_raw"
+        if gap is None and noc_lightu is None:
+            gap = "no_time"
+        if gap is not None:
+            out[lid] = RawFlatPick((), pid, None, None, gap)
+            continue
+        dzien = date.fromisoformat(noc_lightu)
+        odleglosc = {n: abs((date.fromisoformat(n) - dzien).days) for n in noce[pid]}
+        noc = min(odleglosc, key=lambda n: (odleglosc[n], n))       # ISO: leksykalnie = chronologicznie
+        if odleglosc[noc] <= window_days:
+            out[lid] = RawFlatPick(tuple(sorted(noce[pid][noc])), pid, noc, odleglosc[noc], None)
+        else:
+            out[lid] = RawFlatPick((), pid, noc, odleglosc[noc], "out_of_window")
+    return out

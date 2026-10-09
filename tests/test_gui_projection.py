@@ -20,7 +20,8 @@ from horreum import db, projection
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QTextCursor
-from PySide6.QtWidgets import QApplication
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QDialog
 
 from horreum.gui import i18n, theme
 from horreum.gui import projection_dialog as pd_mod
@@ -264,7 +265,7 @@ def test_apply_offthread_postep_i_pasek(qapp, tmp_path, ustawienia, monkeypatch)
     seen = _spy_progress(monkeypatch, hook=lambda n, w: in_run.append(dlg.report.toPlainText()))
     dlg = _dlg(con, ids)
     dlg._on_apply()
-    # P1: przez CAŁY bieg największy panel okna nie może twierdzić „DRY — bez zmian na dysku"
+    # P1: przez CAŁY bieg największy panel okna nie może twierdzić „DRY - bez zmian na dysku"
     assert all("DRY" not in r and "Wydaję na stół" in r and str(root) in r for r in in_run)
     assert [s[0] for s in seen] == [1, 2, 3]               # postęp PER PLIK, nie jeden skok na końcu
     assert all(s[1] == 3 and s[2] == "linked" for s in seen)
@@ -704,4 +705,462 @@ def test_wydanie_zostawia_slad_po_zamknieciu(qapp, tmp_path, ustawienia, monkeyp
     dlg._on_apply()
     assert dlg.summary and "2" in dlg.summary and "zlinkowano" in dlg.summary
     assert str(root) in dlg.summary
+    con.close()
+
+
+# ============================================================ wydanie obiektu (tryb obiektu + teczki)
+
+def _obiekt_wydania(tmp_path):
+    """Baza z PRAWDZIWYMI plikami pod wydanie obiektu. NGC 6992 w dwóch zestawach: A (A140R x mono,
+    config 10) - light z master flatem i darkiem, light OIII z surowymi flatami tej samej nocy,
+    light Ha `pending` (master jest, stanu nie ma), light SII bez profilu flatu, light Ha bez
+    obecnej kopii; B (RC8 x mono, config 20) - light z master flatem B i TYM SAMYM master darkiem
+    (master wspólny dwóch zestawów = dwie pozycje planu). M42: jeden light SII bez niczego (red).
+    IC1795: jeden light z kompletem (green). Zwraca (con, ids)."""
+    from horreum.calibration import run_calibration
+
+    con = db.open_db(str(tmp_path / "obj.db"))
+    con.execute("INSERT INTO camera (id, model_canon, is_mono, created_at) VALUES "
+                "(1, 'ASI2600MM', 1, ?)", (NOW,))
+    con.execute("INSERT INTO telescope (id, telescop_canon, label, status, created_at) VALUES "
+                "(1, 'A140R', NULL, 'proposed', ?), (2, 'RC8', NULL, 'proposed', ?)", (NOW, NOW))
+    con.execute("INSERT INTO config (id, telescope_id, camera_id, status, created_at) VALUES "
+                "(10, 1, 1, 'proposed', ?), (20, 2, 1, 'proposed', ?)", (NOW, NOW))
+    con.execute("INSERT INTO object (id, canon) VALUES (1, 'NGC 6992'), (2, 'M42'), (3, 'IC1795')")
+    ids = {}
+
+    def k(name, *, kind, config_id=10, object_id=None, filtr=None, exptime=300.0, present=True,
+          date_obs="2024-03-01T23:00:00"):
+        src = tmp_path / "lib" / f"{name}.fits"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_bytes(name.encode())
+        cur = con.execute(
+            "INSERT INTO frame (sha1_data, kind, filetype, camera_id, config_id, object_id, "
+            "filter_canon, first_seen_at) VALUES (?, ?, 'fits', 1, ?, ?, ?, ?)",
+            (name, kind, config_id, object_id, filtr, NOW))
+        fid = cur.lastrowid
+        con.execute("INSERT INTO header (frame_id, raw_json, date_obs, exptime, xbinning) "
+                    "VALUES (?, '{}', ?, ?, 1)", (fid, date_obs, exptime))
+        con.execute("INSERT INTO location (frame_id, volume, path, present) VALUES (?, 'V', ?, ?)",
+                    (fid, str(src), int(present)))
+        ids[name] = fid
+
+    k("md", kind="master_dark", config_id=None)
+    k("mf_a", kind="master_flat", filtr="Ha")
+    k("mf_b", kind="master_flat", config_id=20, filtr="Ha")
+    k("f1", kind="flat", filtr="OIII", date_obs="2024-03-02T05:30:00")
+    k("f2", kind="flat", filtr="OIII", date_obs="2024-03-02T05:31:00")
+    k("la1", kind="light", object_id=1, filtr="Ha")
+    k("la2", kind="light", object_id=1, filtr="OIII")
+    k("la3", kind="light", object_id=1, filtr="Ha")
+    k("la4", kind="light", object_id=1, filtr="SII")
+    k("la_gone", kind="light", object_id=1, filtr="Ha", present=False)
+    k("lb1", kind="light", config_id=20, object_id=1, filtr="Ha")
+    k("lm1", kind="light", object_id=2, filtr="SII")
+    k("lg1", kind="light", config_id=20, object_id=3, filtr="Ha", exptime=3600.0)
+    con.commit()
+    run_calibration(con, now=NOW)                         # profile: surowe OIII, mastery Ha
+    for light, master, rel in (("la1", "mf_a", "flat"), ("la1", "md", "dark"),
+                               ("la_gone", "mf_a", "flat"), ("lb1", "mf_b", "flat"),
+                               ("lb1", "md", "dark"), ("lg1", "mf_b", "flat"), ("lg1", "md", "dark")):
+        con.execute("INSERT INTO calibration (light_frame_id, master_frame_id, relation, asserted_by, "
+                    "confidence) VALUES (?, ?, ?, 'horreum', 'recipe')", (ids[light], ids[master], rel))
+    con.commit()
+    return con, ids
+
+
+def _dlg_obj(con, object_id=1):
+    return ProjectionDialog(con, object_id=object_id, now_fn=lambda: NOW, off_thread=False)
+
+
+class _Pulpit:
+    """Podmiana `QDesktopServices` - test nie otwiera Eksploratora na pulpicie, tylko zapisuje URL."""
+
+    def __init__(self):
+        self.urls = []
+
+    def openUrl(self, url):                                # noqa: N802 - nazwa z API Qt
+        self.urls.append(url)
+        return True
+
+
+def test_tryb_obiektu_jedno_z_dwojga_i_nieznany_obiekt(qapp, tmp_path):
+    """Konstruktor przyjmuje `frame_ids` ALBO `object_id` - oba albo żadne to błąd wołającego,
+    nie tryb do zgadywania; nieznany obiekt też (nagłówek nie ma czego nazwać)."""
+    con, ids = _obiekt_wydania(tmp_path)
+    with pytest.raises(ValueError, match="ALBO"):
+        ProjectionDialog(con, [ids["la1"]], object_id=1, now_fn=lambda: NOW, off_thread=False)
+    with pytest.raises(ValueError, match="ALBO"):
+        ProjectionDialog(con, now_fn=lambda: NOW, off_thread=False)
+    with pytest.raises(ValueError, match="nieznany obiekt"):
+        ProjectionDialog(con, object_id=999, now_fn=lambda: NOW, off_thread=False)
+    con.close()
+
+
+def test_tryb_obiektu_dry_naglowek_apply_manifest_eksplorator(qapp, tmp_path, ustawienia, monkeypatch):
+    """Pełna droga trybu obiektu na PRAWDZIWYCH plikach: DRY liczy POZYCJE planu (lighty + mastery
+    + surowe; master dark wspólny dwóch zestawów dwa razy), nagłówek nazywa liczby archiwum
+    (mastery DISTINCT), `pending` stoi osobno, combo układu schowane, combo zestawu ma pozycje
+    z liczbą lightów. Apply idzie do `<karta>/OBJECTS/<obiekt>` (`object_root`), manifest = `info` +
+    etykieta, a „Otwórz w Eksploratorze" otwiera dokładnie ten folder."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    pulpit = _Pulpit()
+    monkeypatch.setattr(pd_mod, "QDesktopServices", pulpit)
+    con, ids = _obiekt_wydania(tmp_path)
+    card = tmp_path / "_WBPP" / "karta"
+    _target(ustawienia, card)
+    dlg = _dlg_obj(con)
+    assert dlg.windowTitle() == "Wydaj obiekt do WBPP"
+    rep = dlg.report.toPlainText()
+    assert "do zlinkowania: 11" in rep and "pominięto: 1" in rep
+    assert dlg.btn_apply.text() == "Utwórz 11 linków"
+    pozycje = [it.frame_id for it in dlg._plan.items]
+    assert pozycje.count(ids["md"]) == 2                   # master wspólny: pozycja w KAŻDYM zestawie
+    assert {ids["mf_a"], ids["mf_b"], ids["f1"], ids["f2"]} <= set(pozycje)
+    assert dlg.head_label.text() == ("NGC 6992: 6 lightów · 3 mastery · 2 surowe flaty · "
+                                     "bez flatu 1 · bez darka 4")
+    assert not dlg.pending_label.isHidden()
+    assert dlg.pending_label.text() == "do przeliczenia w Dostawie: 1"
+    # raport: powód „bez flatu" przy liczbie, `pending` osobną linią ze swoim zdaniem
+    assert "bez flatu: 1 - brak w archiwum flatów tej nastawy: 1" in rep
+    assert "do przeliczenia w Dostawie: 1 - master jest, rodowód go nie przeliczył" in rep
+    assert "A140R_ASI2600MM/FLAT_RAW/OIII: 2" in rep
+    assert dlg.combo_layout.isHidden()
+    assert [dlg.combo_zestaw.itemText(i) for i in range(dlg.combo_zestaw.count())] == [
+        "Wszystkie", "A140R_ASI2600MM (5 lightów)", "RC8_ASI2600MM (1 light)"]
+    assert dlg.btn_open.isHidden()                         # przed wydaniem nie ma czego otwierać
+
+    dlg._on_apply()
+    obj_root = card / "OBJECTS" / "NGC_6992"
+    assert projection.object_root(str(card), dlg._plan) == str(obj_root)
+    assert "zlinkowano: 11" in dlg.report.toPlainText()
+    light = obj_root / "A140R_ASI2600MM" / "LIGHT" / "Ha" / "la1.fits"
+    assert os.stat(str(light)).st_ino == os.stat(str(tmp_path / "lib" / "la1.fits")).st_ino
+    for zestaw in ("A140R_ASI2600MM", "RC8_ASI2600MM"):
+        assert (obj_root / zestaw / "MASTER" / "dark" / "md.fits").exists()
+    assert (obj_root / "A140R_ASI2600MM" / "FLAT_RAW" / "OIII" / "f2.fits").exists()
+    man = json.loads((obj_root / projection.MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert man["layout"] == "wbpp-obiekt" and man["object_id"] == 1
+    assert man["etykieta"] == "NGC 6992"
+    assert set(man["zestawy"]) == {"A140R_ASI2600MM", "RC8_ASI2600MM"}
+    assert man["zestawy"]["A140R_ASI2600MM"]["pending"] == [ids["la3"]]
+    assert dlg.summary == f"Wydano obiekt NGC 6992: 11 zlinkowano → {obj_root}"
+    assert ustawienia.value("projection/last_target") == str(card)   # pamięć = KARTA, nie folder obiektu
+
+    assert not dlg.btn_open.isHidden()
+    QTest.mouseClick(dlg.btn_open, Qt.LeftButton)
+    assert [os.path.normpath(u.toLocalFile()) for u in pulpit.urls] == [str(obj_root)]
+    con.close()
+
+
+def test_tryb_obiektu_combo_zestawu_zaweza_i_blokuje_sie_w_biegu(qapp, tmp_path, ustawienia,
+                                                                   monkeypatch):
+    """Zmiana zestawu = `_invalidate` + auto-DRY pod NOWE parametry (generacja w górę, plan
+    zawężony, nagłówek z liczbami zestawu, lista zestawów NIE kurczy się do jednego). W biegu apply
+    combo zestawu jest zamrożone jak układ - inaczej klik zerowałby materializowany plan."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con, ids = _obiekt_wydania(tmp_path)
+    card = tmp_path / "_WBPP" / "karta"
+    _target(ustawienia, card)
+    dlg = _dlg_obj(con)
+    gen0 = dlg._gen
+    dlg.combo_zestaw.setCurrentIndex(2)                    # RC8_ASI2600MM (config 20)
+    assert dlg._gen > gen0
+    assert dlg._plan.info["config_id"] == 20 and list(dlg._plan.info["zestawy"]) == ["RC8_ASI2600MM"]
+    assert {it.frame_id for it in dlg._plan.items} == {ids["lb1"], ids["md"], ids["mf_b"]}
+    assert dlg.btn_apply.text() == "Utwórz 3 linki"
+    assert dlg.head_label.text() == ("NGC 6992: 1 light · 2 mastery · 0 surowych flatów · "
+                                     "bez flatu 0 · bez darka 0")
+    assert dlg.pending_label.isHidden()                    # zero do przeliczenia → linia znika
+    assert dlg.combo_zestaw.count() == 3
+    frozen = []
+    _spy_progress(monkeypatch, hook=lambda n, w: frozen.append(dlg.combo_zestaw.isEnabled()))
+    dlg._on_apply()
+    assert frozen and not any(frozen)
+    assert dlg.combo_zestaw.isEnabled()
+    man = json.loads((card / "OBJECTS" / "NGC_6992" / projection.MANIFEST_NAME)
+                     .read_text(encoding="utf-8"))
+    assert man["etykieta"] == "NGC 6992 / RC8_ASI2600MM" and man["config_id"] == 20
+    con.close()
+
+
+def test_tryb_obiektu_wolumen_i_rozmiar_z_pozycji_planu(qapp, tmp_path, ustawienia, monkeypatch):
+    """Decyzja hardlink/kopia i rozmiar kopii biorą klatki z POZYCJI planu, nie z perspektywy:
+    master na innym wolumenie przełącza CAŁOŚĆ na kopię, choć żaden light tam nie leży, a master
+    wspólny dwóch zestawów liczy się do rozmiaru dwa razy (dwie kopie na dysku)."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con, ids = _obiekt_wydania(tmp_path)
+    con.execute("UPDATE location SET size_bytes = 100")
+    con.execute("UPDATE location SET volume = 'X' WHERE frame_id = ?", (ids["md"],))
+    con.commit()
+    _target(ustawienia, tmp_path / "_WBPP" / "karta")
+    dlg = _dlg_obj(con)
+    rep = dlg.report.toPlainText()
+    assert "do skopiowania: 11" in rep
+    assert "rozmiar kopii: 1.1 KB" in rep                  # 11 pozycji × 100 B; po klatkach byłoby 1000 B
+    assert dlg.btn_apply.text() == "Utwórz 11 kopii"
+    con.close()
+
+
+def test_tryb_obiektu_anulowane_wydanie_nie_otwiera_eksploratora(qapp, tmp_path, ustawienia,
+                                                                 monkeypatch):
+    """„Otwórz w Eksploratorze" pojawia się po UDANYM wydaniu - przerwane zostawia raport
+    „Przerwano" i liczbę nietkniętych, a nie zaproszenie do folderu z połową drzewa. Zdanie na
+    statusbar (jedyny ślad po zamknięciu okna) też mówi „Przerwano", nie „Wydano"."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con, _ids = _obiekt_wydania(tmp_path)
+    card = tmp_path / "_WBPP" / "karta"
+    _target(ustawienia, card)
+    _spy_progress(monkeypatch, hook=lambda n, w: w.request_cancel() if n == 1 else None)
+    dlg = _dlg_obj(con)
+    dlg._on_apply()
+    assert dlg.report.toPlainText().startswith("Przerwano")
+    assert dlg.btn_open.isHidden()
+    assert dlg.summary == ("Przerwano wydanie obiektu NGC 6992: zlinkowano 1 z 11, reszta nietknięta "
+                           f"→ {card / 'OBJECTS' / 'NGC_6992'}")
+    con.close()
+
+
+def test_tryb_obiektu_naglowek_nie_klamie_w_biegu_nowej_sondy(qapp, tmp_path, ustawienia,
+                                                               monkeypatch):
+    """Zmiana zestawu unieważnia plan, więc nagłówek przez CAŁY bieg nowej sondy pokazuje samą
+    nazwę obiektu - liczby poprzedniego zestawu wracają dopiero z przyjętym DRY, już nowe.
+    Podgląd tekstu w chwili startu workera (podklasa `DryWorker`) - tryb inline kończy sondę
+    synchronicznie, więc stan „w biegu" widać tylko od środka. Falsyfikator: zdejmij
+    `_show_object_head(None)` z `_invalidate` → w biegu widać „6 lightów"."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con, _ids = _obiekt_wydania(tmp_path)
+    _target(ustawienia, tmp_path / "_WBPP" / "karta")
+    dlg = _dlg_obj(con)
+    assert dlg.head_label.text().startswith("NGC 6992: 6 lightów")
+    assert not dlg.pending_label.isHidden()
+    w_biegu = []
+
+    class Szpieg(pd_mod.DryWorker):
+        def run(self):
+            w_biegu.append((dlg.head_label.text(), dlg.pending_label.isHidden()))
+            super().run()
+
+    monkeypatch.setattr(pd_mod, "DryWorker", Szpieg)
+    dlg.combo_zestaw.setCurrentIndex(2)                    # RC8_ASI2600MM
+    assert w_biegu == [("NGC 6992", True)]
+    assert dlg.head_label.text().startswith("NGC 6992: 1 light")   # przyjęty DRY - liczby nowego zestawu
+    con.close()
+
+
+def test_tryb_perspektywy_bez_elementow_obiektu(qapp, tmp_path, ustawienia, monkeypatch):
+    """Tryb perspektywy („Wydaj na stół…") bez zmian: układ widoczny, zestawu nie ma, Eksploratora
+    nie ma także po wydaniu, payload DRY niesie korzeń karty."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con = db.open_db(str(tmp_path / "persp.db"))
+    ids = _seed_files(con, tmp_path, 2)
+    root = tmp_path / "_WBPP" / "feed"
+    _target(ustawienia, root)
+    dlg = _dlg(con, ids)
+    assert dlg.combo_zestaw is None and not dlg.combo_layout.isHidden()
+    assert dlg._dry["root"] == str(root)
+    dlg._on_apply()
+    assert dlg.btn_open.isHidden()
+    con.close()
+
+
+# ---------- okno teczek (`ObjectPickDialog`) ----------
+
+def _wiersz(pick, canon):
+    return next(i for i, r in enumerate(pick._rows) if r["canon"] == canon)
+
+
+def _dwuklik(pick, canon):
+    """Fizyczny dwuklik w komórkę teczki: najpierw klik, potem zdarzenie podwójne - tak dociera on
+    od systemu. Sam `mouseDClick` nie ustawia `pressedIndex` widoku i `QAbstractItemView` traktuje
+    go jak zwykłe wciśnięcie (sygnał `doubleClicked` nie pada)."""
+    rect = pick.table.visualItemRect(pick.table.item(_wiersz(pick, canon), 1))
+    QTest.mouseClick(pick.table.viewport(), Qt.LeftButton, Qt.NoModifier, rect.center())
+    QTest.mouseDClick(pick.table.viewport(), Qt.LeftButton, Qt.NoModifier, rect.center())
+
+
+def test_teczki_kolejnosc_kropka_z_motywu_i_kolumny(qapp, tmp_path):
+    """Teczki godzinami malejąco, kropka stanu w kolorze Z MOTYWU (rola ok/warn/error, nie literał)
+    z powodem pod kursorem, procenty flatu `master / surowy`, `pending` nazwany osobno. Bez
+    preselekcji „Dalej" jest szczerze wygaszony."""
+    con, _ids = _obiekt_wydania(tmp_path)
+    pick = pd_mod.ObjectPickDialog(con)
+    assert [r["canon"] for r in pick._rows] == ["IC1795", "NGC 6992", "M42"]
+    akcent = theme.accents(theme.DEFAULT)
+    for canon, kolor in (("IC1795", "ok_green"), ("NGC 6992", "warn"), ("M42", "exclusion_red")):
+        dot = pick.table.item(_wiersz(pick, canon), 0)
+        assert dot.foreground().color().name().lower() == akcent[kolor].lower(), canon
+    assert pick.table.item(0, 0).toolTip().startswith("komplet")
+    ngc = _wiersz(pick, "NGC 6992")
+    cells = [pick.table.item(ngc, c).text() for c in range(1, pick.table.columnCount())]
+    # flat: la1, la_gone, lb1 z masterem (3/6), la2 z surowymi (1/6 → 16), la3 `pending` (1/6)
+    assert cells == ["NGC 6992", "0.5", "6", "1", "2",
+                     "50 % / 16 % · do przeliczenia w Dostawie: 16 %", "33 %", "2024-03-01"]
+    assert pick.table.selectionModel().selectedRows() == []
+    assert not pick.btn_next.isEnabled()
+    con.close()
+
+
+def test_teczki_szukaj_preselekcja_dwuklik_i_enter(qapp, tmp_path):
+    """Pole „Szukaj" zawęża bez wielkości liter i spacji i zaznacza pierwszą pasującą teczkę;
+    preselekcja zaznacza teczkę obiektu ze zbioru; dwuklik i Enter (prawdziwy klawisz przy tabeli)
+    wybierają obiekt i zamykają okno."""
+    con, _ids = _obiekt_wydania(tmp_path)
+    pick = pd_mod.ObjectPickDialog(con, preselect=2)
+    assert pick._selected_row() == _wiersz(pick, "M42") and pick.btn_next.isEnabled()
+    pick.search.setText("ngc 69")
+    widoczne = [r["canon"] for i, r in enumerate(pick._rows) if not pick.table.isRowHidden(i)]
+    assert widoczne == ["NGC 6992"]
+    assert pick._selected_row() == _wiersz(pick, "NGC 6992")   # M42 wypadł z widoku
+    pick.search.setText("zzz")
+    assert pick._selected_row() is None and not pick.btn_next.isEnabled()
+
+    pick.search.setText("")
+    pick.show()
+    qapp.processEvents()
+    _dwuklik(pick, "IC1795")
+    assert pick.result() == QDialog.Accepted and pick.object_id == 3
+
+    enter = pd_mod.ObjectPickDialog(con, preselect=1)
+    enter.show()
+    qapp.processEvents()
+    QTest.keyClick(enter.table, Qt.Key_Return)
+    assert enter.result() == QDialog.Accepted and enter.object_id == 1
+    con.close()
+
+
+def test_przycisk_paska_droga_trzech_interakcji(qapp, tmp_path, ustawienia, monkeypatch):
+    """Droga z briefu: klik „Wydaj obiekt…" → dwuklik teczki → „Utwórz N linków" = 3 interakcje,
+    na PRAWDZIWYM `QThread` (domyślny tryb FramesView). Teczka obiektu ze zbioru gridu jest
+    zaznaczona na starcie, a wydanie zostawia zdanie na statusbarze. `exec()` podmieniony tak,
+    żeby wykonać REALNE kliknięcia zamiast czekać na rękę."""
+    from horreum.gui.grid import FramesView
+
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con, ids = _obiekt_wydania(tmp_path)
+    card = tmp_path / "_WBPP" / "karta"
+    _target(ustawienia, card)
+    view = FramesView(con, now_fn=lambda: NOW)
+    assert _wait_until(lambda: not view._zbior_w_drodze())
+    view._frame_ids = [ids["la1"], ids["la2"], ids["f1"]]   # zbiór: lighty jednego obiektu
+    msgs, kliki, widziane = [], [], {}
+    view.status_message.connect(msgs.append)
+
+    def pick_exec(self):
+        self.show()
+        qapp.processEvents()
+        widziane["preselekcja"] = self._rows[self._selected_row()]["canon"]
+        _dwuklik(self, "NGC 6992")
+        kliki.append("dwuklik teczki")
+        return self.result()
+
+    def proj_exec(self):
+        self.show()
+        assert _wait_until(lambda: self.btn_apply.isEnabled())
+        widziane["przycisk"] = self.btn_apply.text()
+        QTest.mouseClick(self.btn_apply, Qt.LeftButton)
+        kliki.append("utwórz")
+        assert _wait_until(lambda: self._apply_worker is None and self._apply_thread is None)
+        return 0
+
+    monkeypatch.setattr(pd_mod.ObjectPickDialog, "exec", pick_exec)
+    monkeypatch.setattr(pd_mod.ProjectionDialog, "exec", proj_exec)
+    view.show()
+    qapp.processEvents()
+    assert view.sel_bar.btn_obj.isEnabled() and view.sel_bar.btn_obj.text() == "Wydaj obiekt…"
+    QTest.mouseClick(view.sel_bar.btn_obj, Qt.LeftButton)
+    kliki.insert(0, "Wydaj obiekt…")
+    assert kliki == ["Wydaj obiekt…", "dwuklik teczki", "utwórz"]
+    assert widziane == {"preselekcja": "NGC 6992", "przycisk": "Utwórz 11 linków"}
+    assert (card / "OBJECTS" / "NGC_6992" / "RC8_ASI2600MM" / "LIGHT" / "Ha" / "lb1.fits").exists()
+    assert any(m.startswith("Wydano obiekt NGC 6992: 11") for m in msgs)
+    view.close()
+    con.close()
+
+
+def test_przycisk_paska_odmowa_w_drodze(qapp, tmp_path, monkeypatch):
+    """Zbiór w drodze → odmowa jak przy „Wydaj na stół…" (podpowiedź teczki liczona ze zbioru,
+    który zaraz zniknie); okno teczek się nie otwiera."""
+    from horreum.gui.grid import FramesView
+
+    con, _ids = _obiekt_wydania(tmp_path)
+    view = FramesView(con, now_fn=lambda: NOW)
+    assert _wait_until(lambda: not view._zbior_w_drodze())
+    otwarte = []
+    monkeypatch.setattr(pd_mod.ObjectPickDialog, "exec", lambda self: otwarte.append(1) or 0)
+    monkeypatch.setattr(view, "_zbior_w_drodze", lambda: True)
+    msgs = []
+    view.status_message.connect(msgs.append)
+    view._open_object_release()
+    assert not otwarte and msgs == [i18n.t("grid.sel.loading_refused")]
+    con.close()
+
+
+# ---------- Qt-wolne pomocniki trybu obiektu + i18n ----------
+
+def test_flat_gap_text_szesc_tokenow_ma_zdanie_pl_i_en():
+    """Parytet tokenów luki z katalogiem (mapa `_FLAT_GAP_KEYS` - kolektor literałów jej nie
+    widzi): sześć tokenów `raw_flats_for`, każdy ze zdaniem PL i EN; okno nocy wchodzi do zdania
+    `out_of_window`, a token spoza mapy renderuje klucz, nie pustkę."""
+    from horreum.gui.i18n_catalog import CATALOG
+
+    tokeny = {"incomplete_recipe", "no_profile", "pending", "no_raw", "out_of_window", "no_time"}
+    assert set(pd_mod._FLAT_GAP_KEYS) == tokeny
+    for key in pd_mod._FLAT_GAP_KEYS.values():
+        assert CATALOG[key]["pl"] and CATALOG[key]["en"], key
+    for key in pd_mod._STATE_TIPS.values():
+        assert key in CATALOG, key
+    assert pd_mod.flat_gap_text("out_of_window", 30) == "najbliższe surowe flaty dalej niż 30 dni"
+    assert pd_mod.flat_gap_text("nowy_token", 30) == "proj.obj.gap.nowy_token"
+    i18n.set_lang("en")
+    assert pd_mod.flat_gap_text("out_of_window", 7) == "nearest raw flats more than 7 days away"
+
+
+def test_odmiana_liczebnikow_naglowka_obiektu():
+    """Odmiana przez `t_plural` (1, 2-4, 5+, 12-14, 22) - PL odmienia frazę, EN rzeczownik."""
+    oczek = {
+        "proj.obj.n_lights": ("1 light", "2 lighty", "5 lightów", "12 lightów", "22 lighty"),
+        "proj.obj.n_masters": ("1 master", "2 mastery", "5 masterów", "12 masterów", "22 mastery"),
+        "proj.obj.n_raw_flats": ("1 surowy flat", "2 surowe flaty", "5 surowych flatów",
+                                 "12 surowych flatów", "22 surowe flaty"),
+    }
+    for key, formy in oczek.items():
+        assert tuple(i18n.t_plural(key, n) for n in (1, 2, 5, 12, 22)) == formy, key
+    assert i18n.t_plural("proj.obj.zestaw_item", 3, seg="RC8_X") == "RC8_X (3 lighty)"
+    i18n.set_lang("en")
+    assert i18n.t_plural("proj.obj.n_lights", 1) == "1 light"
+    assert i18n.t_plural("proj.obj.n_raw_flats", 2) == "2 raw flats"
+
+
+def test_object_totals_mastery_distinct_pending_osobno():
+    """Nagłówek mówi o archiwum, nie o folderach: master wspólny dwóch zestawów liczy się raz,
+    surowy flat też; `pending` nie wchodzi do „bez flatu"."""
+    info = {"zestawy": {
+        "A": {"lights": [1, 2, 3], "masters": {"dark": [9], "flat": [8]}, "flat_raw": [7, 6],
+              "bez_flatu": [3], "bez_darka": [2, 3], "pending": [2]},
+        "B": {"lights": [4], "masters": {"dark": [9]}, "flat_raw": [7],
+              "bez_flatu": [], "bez_darka": [], "pending": []},
+    }}
+    assert pd_mod.object_totals(info) == {"lights": 4, "masters": 2, "raw": 2, "bez_flatu": 1,
+                                          "bez_darka": 2, "pending": 1}
+    assert pd_mod.pick_fold(" NGC 6992 ") == pd_mod.pick_fold("ngc6992") == "ngc6992"
+
+
+def test_en_render_trybu_obiektu_i_teczek(qapp, tmp_path, ustawienia, monkeypatch):
+    """EN z katalogu: tytuł, nagłówek z odmianą, combo zestawu, kolumny teczek, przycisk paska."""
+    i18n.set_lang("en")
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con, _ids = _obiekt_wydania(tmp_path)
+    _target(ustawienia, tmp_path / "_WBPP" / "karta")
+    dlg = _dlg_obj(con)
+    assert dlg.windowTitle() == "Release object to WBPP"
+    assert dlg.head_label.text() == ("NGC 6992: 6 lights · 3 masters · 2 raw flats · "
+                                     "without flat 1 · without dark 4")
+    assert dlg.pending_label.text() == "to recompute in Delivery: 1"
+    assert dlg.combo_zestaw.itemText(0) == "All" and dlg.btn_open.text() == "Open in Explorer"
+    assert dlg.btn_apply.text() == "Create 11 links"
+    pick = pd_mod.ObjectPickDialog(con)
+    assert pick.windowTitle() == "Pick an object to release" and pick.btn_next.text() == "Next"
+    assert pick.table.horizontalHeaderItem(1).text() == "Object"
+    assert i18n.t("grid.sel.release_object") == "Release object…"
     con.close()

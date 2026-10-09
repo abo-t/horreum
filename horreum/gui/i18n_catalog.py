@@ -1849,6 +1849,11 @@ CATALOG = {
     "grid.sel.loading_refused": {"pl": "Wczytuję zbiór - spróbuj, gdy tabela pokaże nowy zbiór.",
                                  "en": "Loading the set - try again once the table shows the new set."},
     "grid.sel.project": {"pl": "Wydaj na stół…", "en": "Serve to table…"},
+    "grid.sel.release_object": {"pl": "Wydaj obiekt…", "en": "Release object…"},
+    "grid.sel.release_object_tip": {
+        "pl": "Wydaj komplet obiektu do WBPP: lighty, mastery i surowe flaty, rozdzielone zestawem",
+        "en": "Release an object's full set to WBPP: lights, masters and raw flats, split by rig",
+    },
     "grid.sel.clear_set": {"pl": "× Wyczyść zbiór", "en": "× Clear set"},
     "grid.sel.clear_tip": {
         "pl": "Zdejmij facety i filtr zaawansowany (perspektywa zostaje)",
@@ -3212,8 +3217,8 @@ CATALOG = {
     "proj.mode_copies": {"pl": "kopie", "en": "copies"},
     "proj.mode_links": {"pl": "hardlinki", "en": "hardlinks"},
     "proj.dry_head": {
-        "pl": "DRY — bez zmian na dysku (układ {layout}, {mode}):",
-        "en": "DRY — no disk changes (layout {layout}, {mode}):",
+        "pl": "DRY - bez zmian na dysku (układ {layout}, {mode}):",
+        "en": "DRY - no disk changes (layout {layout}, {mode}):",
     },
     "proj.dry_counts": {
         "pl": "  {todo}: {would}   istnieje: {exists}   konflikty: {conflict}   pominięto: {skipped}",
@@ -3251,6 +3256,123 @@ CATALOG = {
     "proj.plan_tree": {"pl": "  drzewo planu: {tree}", "en": "  plan tree: {tree}"},
     "proj.more_folders": {
         "pl": "    … (+{n} folderów)", "en": "    … (+{n} more folders)",
+    },
+
+    # --- wydanie obiektu (tryb obiektu `ProjectionDialog`) ---
+    "proj.obj.title": {"pl": "Wydaj obiekt do WBPP", "en": "Release object to WBPP"},
+    "proj.obj.head": {
+        "pl": "{canon}: {lights} · {masters} · {raw} · bez flatu {no_flat} · bez darka {no_dark}",
+        "en": "{canon}: {lights} · {masters} · {raw} · without flat {no_flat} · without dark {no_dark}",
+    },
+    "proj.obj.pending_head": {
+        "pl": "do przeliczenia w Dostawie: {n}", "en": "to recompute in Delivery: {n}",
+    },
+    "proj.obj.n_lights": {
+        "pl": {"one": "{n} light", "few": "{n} lighty", "many": "{n} lightów"},
+        "en": {"one": "{n} light", "other": "{n} lights"},
+    },
+    "proj.obj.n_masters": {
+        "pl": {"one": "{n} master", "few": "{n} mastery", "many": "{n} masterów"},
+        "en": {"one": "{n} master", "other": "{n} masters"},
+    },
+    "proj.obj.n_raw_flats": {
+        "pl": {"one": "{n} surowy flat", "few": "{n} surowe flaty", "many": "{n} surowych flatów"},
+        "en": {"one": "{n} raw flat", "other": "{n} raw flats"},
+    },
+    "proj.obj.zestaw_label": {"pl": "Zestaw:", "en": "Rig:"},
+    "proj.obj.zestaw_all": {"pl": "Wszystkie", "en": "All"},
+    "proj.obj.zestaw_item": {
+        "pl": {"one": "{seg} ({n} light)", "few": "{seg} ({n} lighty)", "many": "{seg} ({n} lightów)"},
+        "en": {"one": "{seg} ({n} light)", "other": "{seg} ({n} lights)"},
+    },
+    "proj.obj.zestaw_line": {
+        "pl": "  zestaw {seg}: {lights} · {hours:.2f} h · mastery: {masters} · {raw}",
+        "en": "  rig {seg}: {lights} · {hours:.2f} h · masters: {masters} · {raw}",
+    },
+    "proj.obj.nights": {"pl": " (noce: {nights})", "en": " (nights: {nights})"},
+    "proj.obj.no_flat_line": {
+        "pl": "    bez flatu: {n} - {why}", "en": "    without flat: {n} - {why}",
+    },
+    "proj.obj.no_dark_line": {"pl": "    bez darka: {n}", "en": "    without dark: {n}"},
+    "proj.obj.pending_line": {
+        "pl": "    do przeliczenia w Dostawie: {n} - {why}",
+        "en": "    to recompute in Delivery: {n} - {why}",
+    },
+    "proj.obj.open_explorer": {"pl": "Otwórz w Eksploratorze", "en": "Open in Explorer"},
+    "proj.obj.status_summary": {
+        "pl": "Wydano obiekt {canon}: {n} {word} → {root}",
+        "en": "Released object {canon}: {n} {word} → {root}",
+    },
+    "proj.obj.status_cancelled": {
+        "pl": "Przerwano wydanie obiektu {canon}: {word} {n} z {total}, reszta nietknięta → {root}",
+        "en": "Release of object {canon} stopped: {word} {n} of {total}, the rest untouched → {root}",
+    },
+    # Powody luki flatu (`lineage.raw_flats_for`) - mapa `projection_dialog._FLAT_GAP_KEYS`.
+    "proj.obj.gap.incomplete_recipe": {
+        "pl": "niepełna nastawa w nagłówku lightu",
+        "en": "incomplete settings in the light header",
+    },
+    "proj.obj.gap.no_profile": {
+        "pl": "brak w archiwum flatów tej nastawy",
+        "en": "no flats with these settings in the archive",
+    },
+    "proj.obj.gap.pending": {
+        "pl": "master jest, rodowód go nie przeliczył",
+        "en": "a master exists, lineage has not linked it",
+    },
+    "proj.obj.gap.no_raw": {
+        "pl": "nastawa znana, brak surowych flatów z obecną kopią",
+        "en": "settings known, no raw flats with a present copy",
+    },
+    "proj.obj.gap.out_of_window": {
+        "pl": "najbliższe surowe flaty dalej niż {days} dni",
+        "en": "nearest raw flats more than {days} days away",
+    },
+    "proj.obj.gap.no_time": {
+        "pl": "light bez daty obserwacji - nie zna swojej nocy",
+        "en": "light without an observation date - its night is unknown",
+    },
+
+    # --- okno teczek „Wydaj obiekt…" (`ObjectPickDialog`) ---
+    "proj.pick.title": {"pl": "Wybierz obiekt do wydania", "en": "Pick an object to release"},
+    "proj.pick.hint": {
+        "pl": "Dwuklik albo „Dalej” otwiera podgląd wydania (nic nie powstaje na dysku).",
+        "en": "Double-click or „Next” opens the release preview (nothing is written to disk).",
+    },
+    "proj.pick.search_label": {"pl": "Szukaj:", "en": "Search:"},
+    "proj.pick.search_placeholder": {"pl": "nazwa obiektu", "en": "object name"},
+    "proj.pick.col.object": {"pl": "Obiekt", "en": "Object"},
+    "proj.pick.col.hours": {"pl": "Godz.", "en": "Hours"},
+    "proj.pick.col.lights": {"pl": "Lightów", "en": "Lights"},
+    "proj.pick.col.nights": {"pl": "Nocy", "en": "Nights"},
+    "proj.pick.col.sets": {"pl": "Zestawów", "en": "Rigs"},
+    "proj.pick.col.flat": {"pl": "Flat (master / surowy)", "en": "Flat (master / raw)"},
+    "proj.pick.col.dark": {"pl": "Dark", "en": "Dark"},
+    "proj.pick.col.last_night": {"pl": "Ostatnia noc", "en": "Last night"},
+    "proj.pick.col.state_tip": {
+        "pl": "Stan kalibracji: zielony = komplet master flat i dark, bursztynowy = częściowo, "
+              "czerwony = żaden light nie ma flatu ani darka",
+        "en": "Calibration state: green = master flat and dark complete, amber = partial, "
+              "red = no light has a flat or a dark",
+    },
+    "proj.pick.state.green": {
+        "pl": "komplet: master flat i master dark dla każdego lightu",
+        "en": "complete: master flat and master dark for every light",
+    },
+    "proj.pick.state.amber": {
+        "pl": "częściowo: części lightów brakuje flatu albo darka",
+        "en": "partial: some lights lack a flat or a dark",
+    },
+    "proj.pick.state.red": {
+        "pl": "brak kalibracji: żaden light nie ma flatu ani darka",
+        "en": "no calibration: no light has a flat or a dark",
+    },
+    "proj.pick.flat_pending": {
+        "pl": " · do przeliczenia w Dostawie: {n} %", "en": " · to recompute in Delivery: {n} %",
+    },
+    "proj.pick.next": {"pl": "Dalej", "en": "Next"},
+    "proj.pick.empty": {
+        "pl": "Brak obiektów z lightami w bazie.", "en": "No objects with lights in the database.",
     },
 
     # ============================================================ drobne (rollout §4: tasks/facets/portfolio)

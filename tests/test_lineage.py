@@ -336,3 +336,182 @@ def test_gotowy_obraz_NIE_udaje_nieposzytej_osi_przepisu(con):
     _frame(con, kind="master_dark", sha1="d_bez", exptime=300.0)   # bez ścieżki i faktów → bez profilu
     stan2 = {r["relation"]: r for r in explain_light(con, lid)}
     assert stan2["dark"]["gap"] == "not_calibrated"
+
+
+# --- SUROWE FLATY POD WYDANIE (`raw_flats_for`) - odczyt, który niczego nie zapisuje do `calibration` ---
+
+def _surowy(con, sha1, date_obs, *, filter_canon="Ha", present=True):
+    """Surowy flat profilu (config 1 = A140R x ASI2600MM) z kopią na dysku; `present=False` = kopia
+    zniknęła (pass obecności), czyli kandydat, którego WBPP nie dostanie."""
+    fid = _frame(con, kind="flat", sha1=sha1, path=rf"R:\FLATS\{sha1}.fits", config_id=1,
+                 filter_canon=filter_canon, date_obs=date_obs)
+    if not present:
+        con.execute("UPDATE location SET present = 0 WHERE frame_id = ?", (fid,))
+        con.commit()
+    return fid
+
+
+def _light_ha(con, sha1, date_obs):
+    return _frame(con, kind="light", sha1=sha1, config_id=1, filter_canon="Ha", date_obs=date_obs)
+
+
+def test_surowe_ta_sama_noc_wszystkie_klatki_nocy(con):
+    """Noc to `date(date_obs, '-12 hours')` (D-UX-1): flat o świcie (05:30) należy do nocy lightu
+    z 23:00 dnia poprzedniego - inaczej poranne flaty sesji wyglądałyby na „dzień później". Wybór
+    to WSZYSTKIE klatki profilu z tej nocy (WBPP składa master z kompletu sesji)."""
+    from horreum.lineage import raw_flats_for
+    f1 = _surowy(con, "f1", "2024-03-02T05:30:00")
+    f2 = _surowy(con, "f2", "2024-03-02T05:31:00")
+    lid = _light_ha(con, "l1", "2024-03-01T23:00:00")
+    run_calibration(con, now=NOW)
+
+    pick = raw_flats_for(con, [lid])[lid]
+    assert pick.frame_ids == (f1, f2) and pick.gap is None
+    assert (pick.night, pick.days_apart) == ("2024-03-01", 0)
+    assert pick.profile_id is not None
+    assert con.execute("SELECT count(*) FROM calibration").fetchone()[0] == 0   # odczyt, zero zapisu
+
+
+def test_surowe_najblizsza_noc_w_oknie(con):
+    """Bliższa noc wygrywa, a z dalszej nie bierze się ani jednej klatki (to inna sesja)."""
+    from horreum.lineage import raw_flats_for
+    _surowy(con, "daleko", "2024-03-01T22:00:00")
+    blisko = _surowy(con, "blisko", "2024-03-20T22:00:00")
+    lid = _light_ha(con, "l1", "2024-03-15T22:00:00")
+    run_calibration(con, now=NOW)
+
+    pick = raw_flats_for(con, [lid])[lid]
+    assert pick.frame_ids == (blisko,) and (pick.night, pick.days_apart) == ("2024-03-20", 5)
+
+
+def test_surowe_remis_wczesniejsza_noc(con):
+    """Remis odległości → WCZEŚNIEJSZA noc, deterministycznie (nie kolejność wierszy w bazie)."""
+    from horreum.lineage import raw_flats_for
+    _surowy(con, "pozniej", "2024-03-20T22:00:00")                # wjeżdża PIERWSZY (niższe id)
+    wczesniej = _surowy(con, "wczesniej", "2024-03-10T22:00:00")
+    lid = _light_ha(con, "l1", "2024-03-15T22:00:00")
+    run_calibration(con, now=NOW)
+
+    pick = raw_flats_for(con, [lid])[lid]
+    assert pick.frame_ids == (wczesniej,) and (pick.night, pick.days_apart) == ("2024-03-10", 5)
+
+
+def test_surowe_poza_oknem_niesie_odleglosc(con):
+    """Najbliższa noc dalej niż okno → `out_of_window` z liczbą dni i nocą (rozmowa „są, ale daleko"),
+    bez klatek. Szersze okno tę samą noc przyjmuje - granica jest włączna."""
+    from horreum.lineage import raw_flats_for
+    f = _surowy(con, "stary", "2024-01-01T22:00:00")
+    lid = _light_ha(con, "l1", "2024-03-15T22:00:00")
+    run_calibration(con, now=NOW)
+
+    pick = raw_flats_for(con, [lid])[lid]
+    assert (pick.gap, pick.frame_ids) == ("out_of_window", ())
+    assert (pick.night, pick.days_apart) == ("2024-01-01", 74)
+    assert raw_flats_for(con, [lid], window_days=74)[lid].frame_ids == (f,)
+
+
+def test_surowe_luki_przepisu_ta_sama_derywacja_co_przebieg(con):
+    """`no_profile` (przepis, którego archiwum nie zna) i `incomplete_recipe` (light bez configu -
+    flat nie złoży klucza bez teleskopu) - te same tokeny, które dałby `_decide` przebiegu."""
+    from horreum.lineage import raw_flats_for
+    _surowy(con, "f_ha", "2024-03-01T22:00:00")
+    oiii = _frame(con, kind="light", sha1="l_oiii", config_id=1, filter_canon="OIII",
+                  date_obs="2024-03-01T23:00:00")
+    bez_configu = _frame(con, kind="light", sha1="l_bez", filter_canon="Ha", date_obs="2024-03-01T23:00:00")
+    run_calibration(con, now=NOW)
+
+    out = raw_flats_for(con, [oiii, bez_configu])
+    assert (out[oiii].gap, out[oiii].profile_id) == ("no_profile", None)
+    assert (out[bez_configu].gap, out[bez_configu].profile_id) == ("incomplete_recipe", None)
+    assert out[oiii].frame_ids == () and out[oiii].days_apart is None
+
+
+def test_surowe_pending_gdy_przepis_wskazuje_mastera(con):
+    """Master flat w profilu jest, a wiersza `calibration` nie ma → `pending` (przelicz rodowód),
+    a nie surowe flaty obok mastera. Po przebiegu light ma flat w stanie i z wyniku WYPADA."""
+    from horreum.lineage import raw_flats_for
+    _surowy(con, "f_ha", "2024-03-01T22:00:00")
+    _frame(con, kind="master_flat", sha1="mf", config_id=1, filter_canon="Ha", date_obs="2023-01-01T00:00:00")
+    lid = _light_ha(con, "l1", "2024-03-01T23:00:00")
+    run_calibration(con, now=NOW)
+
+    pick = raw_flats_for(con, [lid])[lid]
+    assert pick.gap == "pending" and pick.frame_ids == () and pick.profile_id is not None
+    run_lineage(con, now=NOW)
+    assert raw_flats_for(con, [lid]) == {}                     # light z master flatem poza wynikiem
+
+
+def test_surowe_wykluczone_wycofany_zastapiony_bez_kopii(con):
+    """Kandydat musi być aktywny i mieć OBECNĄ kopię - inaczej wydanie zlinkowałoby plik, którego
+    nie ma, albo klatkę, którą ręka wycofała. Sam taki profil daje `no_raw` (przepis jest, surowych
+    nie ma); dopiero żywy flat zostaje wybrany - sam, bez wykluczonych z tej samej nocy."""
+    from horreum.lineage import raw_flats_for
+    wycofany = _surowy(con, "wycofany", "2024-03-01T22:00:00")
+    zastapiony = _surowy(con, "zastapiony", "2024-03-01T22:01:00")
+    _surowy(con, "zniknal", "2024-03-01T22:02:00", present=False)
+    lid = _light_ha(con, "l1", "2024-03-01T23:00:00")
+    con.execute("UPDATE frame SET retired_at = ? WHERE id = ?", (NOW, wycofany))
+    con.execute("UPDATE frame SET superseded_by = ? WHERE id = ?", (wycofany, zastapiony))
+    con.commit()
+    run_calibration(con, now=NOW)
+
+    pick = raw_flats_for(con, [lid])[lid]
+    assert (pick.gap, pick.frame_ids) == ("no_raw", ()) and pick.profile_id is not None
+    zywy = _surowy(con, "zywy", "2024-03-01T22:03:00")
+    run_calibration(con, now=NOW)
+    assert raw_flats_for(con, [lid])[lid].frame_ids == (zywy,)
+
+
+def test_surowe_light_bez_czasu_i_klatka_nie_light(con):
+    """Light bez `date_obs` nie zna nocy - `no_time`, nie zgadywana sesja. Klatka, która nie jest
+    lightem, w wyniku się nie pojawia (pytanie „czym skalibrować" ma treść tylko dla nieba)."""
+    from horreum.lineage import raw_flats_for
+    f = _surowy(con, "f_ha", "2024-03-01T22:00:00")
+    lid = _light_ha(con, "l1", None)
+    run_calibration(con, now=NOW)
+
+    out = raw_flats_for(con, [lid, f])
+    assert set(out) == {lid} and out[lid].gap == "no_time" and out[lid].frame_ids == ()
+    assert (out[lid].night, out[lid].days_apart) == (None, None) and out[lid].profile_id is not None
+
+
+def test_surowy_flat_bez_czasu_nie_kandyduje(con):
+    """Flat bez nocy nie wchodzi do wyboru - ani jako „ta sama noc", ani jako jedyny kandydat profilu
+    (wtedy `no_raw`, nie wybór bez sesji). Brak nocy to brak `date_obs` ORAZ napis, którego SQLite nie
+    rozpozna jako czasu (`date()` → NULL): samo `IS NOT NULL` przepuściłoby taki flat do arytmetyki
+    dni i jeden śmieć w archiwum wywracałby gotowość wszystkich teczek. Flat z czasem obok - wybrany sam."""
+    from horreum.lineage import raw_flats_for
+    bez_czasu = _surowy(con, "f_bez", None)
+    smiec = _surowy(con, "f_smiec", "nieznany")
+    lid = _light_ha(con, "l1", "2024-03-01T23:00:00")
+    run_calibration(con, now=NOW)
+    assert raw_flats_for(con, [lid])[lid].gap == "no_raw"
+
+    z_czasem = _surowy(con, "f_z", "2024-03-02T05:30:00")
+    run_calibration(con, now=NOW)
+    pick = raw_flats_for(con, [lid])[lid]
+    assert pick.frame_ids == (z_czasem,) and not {bez_czasu, smiec} & set(pick.frame_ids)
+
+
+def test_surowe_koszt_staly_w_liczbie_zapytan(con):
+    """Koszt nie rośnie z liczbą lightów: tyle samo zapytań dla jednego lightu co dla pięciu
+    (kandydaci jednym zapytaniem po zbiorze profili, nie zapytanie na light)."""
+    from horreum.lineage import raw_flats_for
+    _surowy(con, "f_ha", "2024-03-01T22:00:00")
+    _surowy(con, "f_oiii", "2024-03-01T22:00:00", filter_canon="OIII")
+    lights = [_light_ha(con, f"l{i}", "2024-03-01T23:00:00") for i in range(4)]
+    lights.append(_frame(con, kind="light", sha1="l_oiii", config_id=1, filter_canon="OIII",
+                         date_obs="2024-03-01T23:00:00"))
+    run_calibration(con, now=NOW)
+
+    def _ile(ids):
+        n = []
+        con.set_trace_callback(lambda s: n.append(s) if s.lstrip().upper().startswith("SELECT") else None)
+        try:
+            out = raw_flats_for(con, ids)
+        finally:
+            con.set_trace_callback(None)
+        assert all(p.frame_ids for p in out.values())
+        return len(n)
+
+    assert _ile(lights[:1]) == _ile(lights)

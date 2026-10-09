@@ -754,7 +754,9 @@ def test_szukajka_MOWI_CZYM_trafila():
     ("M 106", "NGC4258", None, "M106"),
     ("NGC 4258", "NGC4258", None, "__label__"),            # własną nazwą
     ("M 42", "M42", None, "__label__"),                    # kanon PRZED xref też jest własną nazwą
-    ("NGC 42", "NGC4258", None, None),                     # oznaczenie innego obiektu - nie podciąg
+    # Zmienione z `None`: `NGC 42` to też NGC4258 w połowie wpisywania - szukajka filtruje po
+    # każdej literze, więc niedokończone oznaczenie trafia PREFIKSEM (test niżej); podciąg dalej nie.
+    ("NGC 42", "NGC4258", None, "__label__"),
     ("Collinder 464", "Cr464", None, "__label__"),
     ("Sh2 184", "NGC281", None, "SH2184"),
     ("CTB 1", "X", {"X": {"CTB1"}}, "CTB1"),               # oznaczenie wśród aliasów bazy
@@ -765,5 +767,29 @@ def test_szukajka_OZNACZENIE_trafia_DOKLADNIE_reszta_podciagiem(igla, label, ali
     """C6 (bramka 0926): fraza rozpoznana przez `catalog_canon` trafia WYŁĄCZNIE wiersz tego kanonu
     (przed albo po `xref`) albo wiersz z tym oznaczeniem wśród aliasów; `C4` przestało trafiać
     `NGC4258`. Ten sam predykat służy oknu „Przypisz obiekt" - jeden właściciel reguły."""
+    wynik = facet_model.HIT_LABEL if wynik == "__label__" else wynik
+    assert facet_model.search_hit(igla, label, aliasy) == wynik
+
+
+@pytest.mark.parametrize("igla, label, aliasy, wynik", [
+    ("sh2", "Sh2-131", None, "__label__"),                 # `catalog_canon` czyta to jako Sh2-2
+    ("sh2 1", "Sh2-131", None, "__label__"),
+    ("sh2 13", "Sh2-131", None, "__label__"),              # pełne Sh2-13 innego obiektu - prefiks
+    ("ngc70", "NGC7000", None, "__label__"),
+    ("ngc 69", "NGC6992", None, "__label__"),
+    ("collinder 46", "Cr464", None, "__label__"),           # prefiks kanonicznej postaci (`Cr46`)
+    ("m10", "NGC4258", {"NGC4258": {"M106"}}, "M106"),     # prefiks aliasu mówi, którym trafił
+    ("C4", "NGC4258", None, None),                         # prefiks, nie podciąg
+    ("C 42", "NGC4258", None, None),                       # „C42" siedzi w środku - podciąg by trafił
+    ("NGC7000", "NGC7000", None, "__label__"),             # pełne oznaczenie - dokładnie
+    ("NGC7000", "NGC700", None, None),                     # krótszy kanon to inny obiekt
+    ("C4", "NGC7023", None, "C4"),                         # dokładna równoważność przed prefiksem
+])
+def test_szukajka_OZNACZENIE_w_trakcie_pisania_trafia_PREFIKSEM(igla, label, aliasy, wynik):
+    """Szukajka filtruje po każdej literze, a `catalog_canon` czyta niedokończone oznaczenie jako
+    pełne innego obiektu (`sh2 13` → `Sh2-13`, `ngc70` → `NGC70`, `sh2` → `Sh2-2`). Sama
+    dokładność dawała w połowie nazwy pusty wynik nad obiektem, który istnieje. Gdy dokładnie nic
+    nie trafia, wiersz trafia, jeśli jego kanon albo alias ZACZYNA SIĘ od igły - prefiks, nie
+    podciąg, więc `C4` dalej nie trafia `NGC4258`, a pełne `NGC7000` nie trafia `NGC700`."""
     wynik = facet_model.HIT_LABEL if wynik == "__label__" else wynik
     assert facet_model.search_hit(igla, label, aliasy) == wynik

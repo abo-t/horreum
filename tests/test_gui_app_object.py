@@ -2603,7 +2603,8 @@ def test_lista_obiektow_ma_sufit_wysokosci(aliasy, qapp):
     ("M 106", ["NGC4258"]),
     ("Messier 106", ["NGC4258"]),
     ("NGC 4258", ["NGC4258"]),
-    ("NGC 42", []),                        # oznaczenie bez obiektu - nie podciąg `NGC4258`
+    ("NGC 42", ["NGC4258"]),               # oznaczenie w trakcie pisania - PREFIKS kanonu, jak w listwie
+    ("C 42", []),                          # prefiks, nie podciąg: `NGC4258` nie zaczyna się od `C42`
     ("Sh2 131", ["Sh2-131"]),
     ("NGC", ["NGC4258", "NGC7000", "NGC7023"]),   # sam skrót nie jest oznaczeniem - podciąg
     ("elephant", ["Sh2-131"]),             # nazwa potoczna - podciąg
@@ -2611,7 +2612,9 @@ def test_lista_obiektow_ma_sufit_wysokosci(aliasy, qapp):
 ])
 def test_szukajka_oznaczenie_katalogowe_DOKLADNIE_reszta_podciagiem(aliasy, fraza, trafione):
     """B1: fraza rozpoznana przez `catalog_canon` przechodzi przez kanon i `xref` i trafia obiekt
-    TEGO kanonu; nazwy nie-katalogowe dalej trafiają podciągiem."""
+    TEGO kanonu - a w trakcie pisania także obiekt, którego kanon ZACZYNA SIĘ od oznaczenia (ta sama
+    reguła co listwa facetów i okno teczek, `facet_model.search_hit`); nazwy nie-katalogowe dalej
+    trafiają podciągiem."""
     v, con, ids = aliasy
     dlg = AssignObjectDialog(con, object_raw="FlatWizard", frame_count=2, parent=v)
     dlg.search.setText(fraza)

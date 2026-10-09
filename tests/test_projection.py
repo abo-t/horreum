@@ -2,7 +2,8 @@
 
 Pokrycie: `plan` (źródło linku `present_locations` R#1 / multi-present D-P5 / skipped-kwarantanna /
 segmenty layoutu + `_UNSET` + sanityzacja + anty-traversal), guard `_assert_excluded_segment` (§0),
-prymitywy `_link_to`/`_verify_content` na PRAWDZIWYCH plikach (`os.link` na `tmp_path`), pełny `apply`
+prymitywy `_link_to`/`_verify_content`/`_same_content` na PRAWDZIWYCH plikach (`os.link` na
+`tmp_path`; w trybie kopii kopia z wydania = `exists`: rozmiar + czas + prefiks), pełny `apply`
 DRY vs realny (hardlink + manifest + copy-mode + conflict-bez-nadpisania + idempotencja + skipped),
 TWARDY ABORT sondy pierwszego linku (`ProjectionAbort`), oraz zielony meta-test bramki (projekcja jako
 DOOR pominięta, `os.link` obecny). Rdzeń Qt-wolny — bez PySide6."""
@@ -214,6 +215,75 @@ def test_verify_content_dobry_zly(tmp_path):
     assert projection._verify_content(str(src), str(bad)) is False
 
 
+def _kopia(tmp_path, nazwa, dane):
+    """Źródło + jego kopia `shutil.copy2` (bajty i czas modyfikacji) - stan celu po wydaniu kopią."""
+    import shutil
+
+    src = tmp_path / "lib" / nazwa
+    src.parent.mkdir(parents=True, exist_ok=True)
+    src.write_bytes(dane)
+    dst = tmp_path / "_WBPP" / nazwa
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(str(src), str(dst))
+    return src, dst
+
+
+def _przesun_mtime(path, o_sekund):
+    st = os.stat(str(path))
+    os.utime(str(path), ns=(st.st_atime_ns, st.st_mtime_ns + int(o_sekund * 1_000_000_000)))
+
+
+def test_link_to_kopia_z_wydania_to_exists_w_trybie_kopii(tmp_path):
+    """Kopia `copy2` (inny i-węzeł, ten sam rozmiar, czas i treść) w trybie kopii = `exists`, w DRY
+    i przy wydaniu, i NIC nie jest nadpisane. Tryb hardlinków bez zmian: ta sama kopia to obcy plik
+    (`conflict`). Czas różny o mniej niż ziarno FAT/exFAT (2 s) dalej jest tą samą kopią."""
+    src, dst = _kopia(tmp_path, "k.fits", b"NAGLOWEK" + b"X" * 100_000)
+    assert os.stat(str(src)).st_ino != os.stat(str(dst)).st_ino
+    assert projection._link_to(str(src), str(dst), do_apply=False, copy=True) == ("exists", None)
+    assert projection._link_to(str(src), str(dst), do_apply=True, copy=True) == ("exists", None)
+    st, reason = projection._link_to(str(src), str(dst), do_apply=False, copy=False)
+    assert st == "conflict" and "i-węzłem" in reason             # hardlinki: bez zmian
+    _przesun_mtime(dst, 1.5)                                       # ziarno FAT: zaokrąglony czas
+    assert projection._link_to(str(src), str(dst), do_apply=False, copy=True) == ("exists", None)
+
+
+def test_link_to_kopia_rowny_rozmiar_inny_prefiks_to_conflict(tmp_path):
+    """Równy rozmiar i czas, ale inny nagłówek (np. kopia sprzed writebacku nagłówka) = `conflict`:
+    nieaktualna kopia nazwana, nie nadpisana i nie udająca kompletu."""
+    src, dst = _kopia(tmp_path, "p.fits", b"NAGLOWEK-NOWY" + b"X" * 1000)
+    st = os.stat(str(dst))
+    dst.write_bytes(b"NAGLOWEK-STAR" + b"X" * 1000)               # ten sam rozmiar, inny prefiks
+    os.utime(str(dst), ns=(st.st_atime_ns, st.st_mtime_ns))      # czas jak u kopii
+    status, reason = projection._link_to(str(src), str(dst), do_apply=True, copy=True)
+    assert status == "conflict" and "nie jest kopią" in reason
+    assert dst.read_bytes().startswith(b"NAGLOWEK-STAR")          # nietknięty
+
+
+def test_link_to_kopia_rowny_rozmiar_i_prefiks_czas_poza_granica_to_conflict(tmp_path):
+    """Rozmiar i prefiks zgodne, ale czas modyfikacji dalej niż 2 s od źródła = `conflict`: to nie
+    jest kopia, którą zrobiło wydanie (`copy2` przenosi czas), tylko plik o zbieżnym początku."""
+    src, dst = _kopia(tmp_path, "t.fits", b"TRESC" * 200)
+    _przesun_mtime(dst, 3)
+    assert projection._link_to(str(src), str(dst), do_apply=False, copy=True)[0] == "conflict"
+    _przesun_mtime(dst, -6)                                        # w drugą stronę też
+    assert projection._link_to(str(src), str(dst), do_apply=False, copy=True)[0] == "conflict"
+
+
+def test_same_content_wspolna_sonda_rozmiar_i_prefiks(tmp_path):
+    """Jedna sonda treści dla obu pytań klingi: różny rozmiar rozstrzyga bez odczytu, zgodny prefiks
+    przy równym rozmiarze to `True` niezależnie od i-węzła (warunek i-węzła dokłada `_verify_content`)."""
+    a = tmp_path / "a.fits"
+    a.write_bytes(b"A" * 70_000)
+    b = tmp_path / "b.fits"
+    b.write_bytes(b"A" * 70_000)
+    c = tmp_path / "c.fits"
+    c.write_bytes(b"A" * 69_999)
+    sa, sb, sc = (os.stat(str(p)) for p in (a, b, c))
+    assert projection._same_content(str(a), str(b), sa, sb) is True
+    assert projection._same_content(str(a), str(c), sa, sc) is False
+    assert projection._verify_content(str(a), str(b)) is False    # treść ta sama, i-węzeł nie
+
+
 # ============================================================ apply (DRY / realny / manifest)
 
 
@@ -257,6 +327,34 @@ def test_apply_copy_mode(tmp_path):
     dst = os.path.join(root, "_UNSET", "_UNSET", "c.fits")
     assert os.path.exists(dst) and open(dst, "rb").read() == b"COPYME"
     assert os.stat(src).st_ino != os.stat(dst).st_ino          # kopia, nie hardlink
+    con.close()
+
+
+def test_ponowne_dry_w_trybie_kopii_zero_do_skopiowania(tmp_path):
+    """Powtórne wydanie kopią: DRY po wydaniu = 0 do skopiowania, wszystko `exists`, zero konfliktów;
+    nowa klatka w planie = DOKŁADNIE jedna do skopiowania, a ponowne wydanie kopiuje tylko ją
+    (stare kopie nietknięte - ten sam i-węzeł i czas)."""
+    con = db.open_db(str(tmp_path / "kp.db"))
+    f1, _ = _seed_file(con, tmp_path, "n1.fits", filter_canon="Ha", data=b"N1" * 50)
+    f2, _ = _seed_file(con, tmp_path, "n2.fits", filter_canon="Ha", data=b"N2" * 50)
+    root = str(tmp_path / "_WBPP" / "kopie")
+    first = projection.apply(projection.plan(con, [f1, f2], "po-obiektach"), root, do_apply=True,
+                             copy=True, now=NOW)
+    assert first.counts == {"linked": 2}
+    dry = projection.apply(projection.plan(con, [f1, f2], "po-obiektach"), root, do_apply=False,
+                           copy=True)
+    assert dry.counts == {"exists": 2}
+
+    f3, _ = _seed_file(con, tmp_path, "n3.fits", filter_canon="Ha", data=b"N3" * 50)
+    stara = os.path.join(root, "_UNSET", "Ha", "n1.fits")
+    przed = os.stat(stara)
+    plan = projection.plan(con, [f1, f2, f3], "po-obiektach")
+    assert projection.apply(plan, root, do_apply=False, copy=True).counts == {"exists": 2,
+                                                                               "would-link": 1}
+    again = projection.apply(plan, root, do_apply=True, copy=True, now=NOW)
+    assert again.counts == {"exists": 2, "linked": 1}
+    po = os.stat(stara)
+    assert (po.st_ino, po.st_mtime_ns) == (przed.st_ino, przed.st_mtime_ns)
     con.close()
 
 

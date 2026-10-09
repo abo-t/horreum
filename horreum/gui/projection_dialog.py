@@ -8,8 +8,9 @@ seriale lokacji, które plan FAKTYCZNIE wybierze — pierwsza obecna per frame, 
 frame'ów bez obecnej kopii; JAKIKOLWIEK inny wolumen / `'?'` → kopia CAŁOŚCI, bo `apply` ma jedną
 globalną flagę `copy`). Słownictwo per tryb (wchłania wiz #5): „skopiowano/do skopiowania" vs
 „zlinkowano/do zlinkowania"; przycisk nazywa skutek i liczbę („Utwórz 131 kopii"). Rozmiar przy
-kopii (R#5): suma po TEJ SAMEJ lokacji, którą wybiera plan; `size_bytes IS NULL` → „(+n plików bez
-rozmiaru)" zamiast kłamliwej sumy.
+kopii (R#5): suma po TEJ SAMEJ lokacji, którą wybiera plan, wyłącznie dla pozycji, które sonda
+zostawiła do skopiowania (`would-link`); `size_bytes IS NULL` → „(+n plików bez rozmiaru)" zamiast
+kłamliwej sumy. Sonda bez nic do zrobienia (komplet w celu) mówi to nagłówkiem raportu.
 
 Ochrona przed stale-DRY (R2-2): licznik generacji — każde `_invalidate` inkrementuje; wynik DRY
 niesie generację startu; handler przyjmuje WYŁĄCZNIE generację równą bieżącej (stale = odrzuć +
@@ -30,7 +31,9 @@ cele, auto-DRY, generacje, apply w tle i blokada parametrów są wspólne, róż
 raz w workerze DRY i ten sam oddany do `apply`) i manifest (`projection.object_manifest`). Decyzja
 wolumenowa i rozmiar biorą klatki z POZYCJI planu, bo obiekt to lighty + mastery + surowe flaty,
 a nie zbiór gridu. Wejściem jest okno teczek `ObjectPickDialog` (read-model
-`queries.release_readiness`): wiersz na obiekt z kropką stanu, dwuklik prowadzi tutaj.
+`queries.release_readiness`): wiersz na obiekt z kropką stanu, dwuklik prowadzi tutaj. Powrót do
+obiektu, który już w całości leży w celu, kończy się od razu „Otwórz w Eksploratorze" - WBPP
+wskazuje się folderem, a nie ma czego wydawać drugi raz.
 
 Cała logika plan/link/sonda/guard w Qt-wolnej klindze `horreum.projection` (NIETKNIĘTA — §0 briefu);
 tu glue widżetów + czyste pomocniki decyzji (Qt-wolne funkcje modułowe, testowane wprost). Walidacja
@@ -44,7 +47,7 @@ import os
 import threading
 import time
 
-from PySide6.QtCore import QObject, QSettings, Qt, QThread, QUrl, Signal, Slot
+from PySide6.QtCore import QEvent, QObject, QSettings, Qt, QThread, QUrl, Signal, Slot
 from PySide6.QtGui import (
     QColor, QDesktopServices, QFont, QFontDatabase, QTextCharFormat, QTextCursor,
 )
@@ -55,7 +58,7 @@ from PySide6.QtWidgets import (
 )
 
 from horreum import db, projection
-from horreum.gui import i18n, queries, theme
+from horreum.gui import facet_model, i18n, queries, theme
 from horreum.volumes import volume_serial
 
 _TREE_CAP = 30                        # ile folderów kategorii pokazać w raporcie dialogu
@@ -159,6 +162,18 @@ def report_head_key(res, *, partial):
     return "proj.head_created" if res.counts.get("linked", 0) else "proj.head_nothing_new"
 
 
+def dry_complete(res):
+    """Sonda zastała KOMPLET w celu (Qt-WOLNE, testowane wprost): nic do utworzenia, coś już leży,
+    żadnego konfliktu ani błędu. Bez tego stanu powrót do wydanego obiektu kończył się nagłówkiem
+    „DRY" nad zerem do zrobienia i wygaszonym „Utwórz 0 kopii" - prawdziwym, ale bez odpowiedzi na
+    jedyne pytanie, z którym user wraca: czy folder jest gotowy pod WBPP. Błąd sondy wyklucza
+    komplet, bo pozycja, której nie dało się odczytać, nie jest „już w celu"; `skipped` nie
+    wyklucza - tych klatek żadne wydanie nie położy, a liczba stoi w słupku pod nagłówkiem."""
+    c = res.counts
+    return (not res.cancelled and not c.get("would-link", 0) and c.get("exists", 0) > 0
+            and not c.get("conflict", 0) and not c.get("error", 0))
+
+
 def report_outcome(res, *, partial):
     """Wynik wydania → rola koloru nagłówka raportu: `ok` | `warn` (Qt-WOLNE, testowane wprost).
 
@@ -247,12 +262,6 @@ def object_report_lines(info):
     return lines
 
 
-def pick_fold(text):
-    """Klucz pola „Szukaj" okna teczek (Qt-wolne): bez wielkości liter i bez spacji, bo kanon
-    archiwum pisze `NGC6992`, a ręka wpisuje „ngc 6992"."""
-    return "".join((text or "").split()).casefold()
-
-
 # ---------------------------------------------------------------- worker auto-DRY (wątek tła)
 
 class DryWorker(QObject):
@@ -312,21 +321,20 @@ class DryWorker(QObject):
         finally:
             if own:
                 con.close()
-        if self._object_id is not None:
-            root = projection.object_root(self._root, plan)
-            # Wybór lokacji PER POZYCJA planu, nie per klatka: master wspólny dwóch zestawów to dwie
-            # kopie na dysku, więc rozmiar kopii liczony po klatkach zaniżałby sumę o każdy taki master.
-            by_frame = {int(r["frame_id"]): r for r in chosen_present(rows)}
-            chosen = [by_frame[it.frame_id] for it in plan.items if it.frame_id in by_frame]
-        else:
-            root = self._root
-            chosen = chosen_present(rows)
+        root = projection.object_root(self._root, plan) if self._object_id is not None else self._root
+        chosen = chosen_present(rows)
         target_serial = volume_serial(root)
         auto_copy = volume_decision(chosen, target_serial)
         eff_copy = bool(self._force_copy) or auto_copy
         res = projection.apply(plan, root, do_apply=False, copy=eff_copy, now=self._now,
                                should_cancel=lambda: self._cancel)
-        total, missing = size_summary(chosen)
+        # Rozmiar kopii to bajty, które wydanie NAPRAWDĘ skopiuje: wyłącznie pozycje `would-link`
+        # sondy. Liczony po całym planie obiecywał przy ponownym wydaniu gigabajty plików, które już
+        # leżą w celu (`exists`). Pozycja, nie klatka: master wspólny dwóch zestawów to dwie kopie
+        # na dysku, a lokacja każdej to ta sama pierwsza obecna, którą wybiera plan (`chosen_present`).
+        by_frame = {int(r["frame_id"]): r for r in chosen}
+        total, missing = size_summary(
+            [by_frame[r.frame_id] for r in res.results if r.status == "would-link"])
         return {"plan": plan, "res": res, "auto_copy": auto_copy, "copy": eff_copy,
                 "target_serial": target_serial, "size_total": total, "size_missing": missing,
                 "root": root}
@@ -410,7 +418,7 @@ class ProjectionDialog(QDialog):
         self._frame_ids = list(frame_ids) if frame_ids is not None else []
         self._object_id = object_id
         self._canon = canon
-        self._released_root = None       # korzeń OSTATNIEGO udanego wydania obiektu (Eksplorator)
+        self._released_root = None       # folder „Otwórz w Eksploratorze" - zmienia go wyłącznie `_arm_open`
         self._now = now_fn
         self._perspektywa = perspektywa
         self._off_thread = off_thread
@@ -486,6 +494,11 @@ class ProjectionDialog(QDialog):
             self.combo_layout.setVisible(False)
             row_l.addWidget(QLabel(i18n.t("proj.obj.zestaw_label")))
             self.combo_zestaw = QComboBox()
+            # Szerokość za treścią przy KAŻDEJ zmianie listy, nie raz przy pierwszym pokazaniu
+            # (domyślna polityka): pozycje dochodzą z pierwszego planu, często już po pokazaniu
+            # okna, a szerokość „Wszystkie" ucinała „A140R_ASI2600MC/MD/MM" do „A140R_AS" - trzy
+            # zestawy jednego obiektu nie do odróżnienia.
+            self.combo_zestaw.setSizeAdjustPolicy(QComboBox.AdjustToContents)
             self.combo_zestaw.addItem(i18n.t("proj.obj.zestaw_all"), None)
             self.combo_zestaw.currentIndexChanged.connect(self._on_param_changed)
             row_l.addWidget(self.combo_zestaw)
@@ -640,12 +653,13 @@ class ProjectionDialog(QDialog):
 
         Nagłówek trybu obiektu wraca do samej nazwy z tego samego powodu: liczby należą do planu,
         który właśnie przestał obowiązywać - po zmianie zestawu mówiłyby przez cały bieg sondy
-        o poprzednim zestawie."""
+        o poprzednim zestawie. „Otwórz w Eksploratorze" gaśnie razem z nimi (`_arm_open`)."""
         self._gen += 1
         self._plan = None
         self._dry = None
         self.btn_apply.setEnabled(False)
         self.btn_apply.setText(i18n.t("proj.btn_create"))
+        self._arm_open(None)
         if self._object_id is not None:
             self._show_object_head(None)
 
@@ -732,6 +746,9 @@ class ProjectionDialog(QDialog):
         if self._object_id is not None:
             self._fill_zestawy(payload["plan"].info)
             self._show_object_head(payload["plan"].info)
+            # Komplet zastany w celu to ten sam stan folderu co po udanym wydaniu - droga do
+            # niego od razu, bez „wydania" zera pozycji tylko po to, żeby przycisk się pojawił.
+            self._arm_open(payload["root"] if dry_complete(payload["res"]) else None)
 
     @Slot(int, str)
     def _on_dry_failed(self, gen, msg):
@@ -743,6 +760,7 @@ class ProjectionDialog(QDialog):
         self._plan = None
         self._dry = None
         self.btn_apply.setEnabled(False)
+        self._arm_open(None)                         # sonda bieżących parametrów padła - folderu nie znamy
         self._show_report(i18n.t("proj.dry_failed", msg=msg), "error")
         if self._object_id is not None:
             self._show_object_head(None)             # liczby poprzedniego planu kłamałyby o bieżącym
@@ -767,14 +785,16 @@ class ProjectionDialog(QDialog):
 
     def _show_object_head(self, info):
         """Nagłówek wydania obiektu: liczby BIEŻĄCEGO planu albo sama nazwa (`info=None` - planu
-        nie ma albo właśnie padł). `pending` ma własną linię i znika przy zerze."""
+        nie ma albo właśnie padł). `pending` ma własną linię i znika przy zerze. Przy wydaniu
+        jednego zestawu nagłówek nazywa go (`_release_label`) - liczby bez nazwy nie mówią,
+        o którym z kilku zestawów obiektu jest mowa, a combo bywa zwinięte."""
         if info is None:
             self.head_label.setText(self._canon)
             self.pending_label.setVisible(False)
             return
         s = object_totals(info)
         self.head_label.setText(i18n.t(
-            "proj.obj.head", canon=self._canon,
+            "proj.obj.head", canon=self._release_label(info),
             lights=i18n.t_plural("proj.obj.n_lights", s["lights"]),
             masters=i18n.t_plural("proj.obj.n_masters", s["masters"]),
             raw=i18n.t_plural("proj.obj.n_raw_flats", s["raw"]),
@@ -782,22 +802,38 @@ class ProjectionDialog(QDialog):
         self.pending_label.setText(i18n.t("proj.obj.pending_head", n=s["pending"]))
         self.pending_label.setVisible(s["pending"] > 0)
 
+    def _arm_open(self, root):
+        """Uzbrój „Otwórz w Eksploratorze" na folderze `root` albo zgaś go (`None`) - JEDYNE miejsce,
+        gdzie przycisk i jego folder zmieniają się razem.
+
+        Przycisk żyje wyłącznie przy parametrach, dla których go uzbrojono: udane wydanie
+        (`_on_apply_done`) albo sonda, która zastała komplet (`_on_dry_done`). Każda zmiana
+        parametru (`_invalidate`) i padnięta sonda go gaszą. Folder sprzed zmiany karty, zestawu
+        czy trybu kopii to odpowiedź na pytanie, którego user już nie zadaje: po przejściu na kartę
+        B z „do skopiowania: N" przycisk otwierałby folder z karty A. Samo wydanie niczego nie
+        unieważnia, więc zaraz po nim przycisk stoi na właśnie wydanym folderze."""
+        self._released_root = root
+        self.btn_open.setVisible(root is not None)
+
     def _open_in_explorer(self):
-        """Folder obiektu z OSTATNIEGO udanego wydania - korzeń, który dostał `apply`, a nie
-        przeliczony z bieżących kart: po zmianie karty plan jest unieważniony, a folder stoi."""
+        """Folder uzbrojony przez `_arm_open` - korzeń, który dostał `apply` albo sondował DRY,
+        a nie przeliczony z bieżących kart."""
         if self._released_root:
             QDesktopServices.openUrl(QUrl.fromLocalFile(self._released_root))
 
+    def _release_label(self, info):
+        """Nazwa wydania: obiekt, a przy jednym zestawie także zestaw (`NGC6992 / RC8_ASI2600MM`).
+        JEDNO źródło dla nagłówka okna i etykiety manifestu - człowiek czytający `_PROJEKCJA.json`
+        i człowiek patrzący na okno mają zobaczyć to samo imię. Wartość domenowa - bez tłumaczenia."""
+        if info["config_id"] is not None and info["zestawy"]:
+            return f"{self._canon} / {next(iter(info['zestawy']))}"
+        return self._canon
+
     def _object_manifest(self):
         """Manifest wydania obiektu: treść `projection.object_manifest` (jedno źródło z CLI) plus
-        `etykieta` - nazwa wydania dla człowieka czytającego `_PROJEKCJA.json`: obiekt, a przy
-        jednym zestawie także zestaw. Wartość domenowa, nie tekst UI - bez tłumaczenia."""
+        `etykieta` - nazwa wydania dla człowieka czytającego `_PROJEKCJA.json` (`_release_label`)."""
         manifest = projection.object_manifest(self._plan)
-        info = self._plan.info
-        etykieta = self._canon
-        if info["config_id"] is not None and info["zestawy"]:
-            etykieta += " / " + next(iter(info["zestawy"]))
-        manifest["etykieta"] = etykieta
+        manifest["etykieta"] = self._release_label(self._plan.info)
         return manifest
 
     def _update_card_note(self, payload):
@@ -944,8 +980,7 @@ class ProjectionDialog(QDialog):
         else:
             self.summary = i18n.t("proj.obj.status_summary", canon=self._canon,
                                   n=res.counts.get("linked", 0), word=word, root=self._apply_root)
-            self._released_root = self._apply_root
-            self.btn_open.setVisible(True)
+            self._arm_open(self._apply_root)
         self.btn_apply.setEnabled(False)
         # nie głosi akcji, która zaszła (wiz K2) — także wtedy, gdy nie zaszła ŻADNA (#1)
         self.btn_apply.setText(i18n.t("proj.btn_cancelled") if res.cancelled else (
@@ -998,7 +1033,10 @@ class ProjectionDialog(QDialog):
         mode = i18n.t("proj.mode_copies" if res.copy else "proj.mode_links")
         lines = []
         if dry:
-            lines.append(i18n.t("proj.dry_head", layout=res.layout, mode=mode))
+            if dry_complete(res):
+                lines.append(i18n.t("proj.dry_head_complete", layout=res.layout, mode=mode))
+            else:
+                lines.append(i18n.t("proj.dry_head", layout=res.layout, mode=mode))
             lines.append(i18n.t("proj.dry_counts", todo=word_todo, would=c.get("would-link", 0),
                                 exists=c.get("exists", 0), conflict=c.get("conflict", 0),
                                 skipped=c.get("skipped", 0)))
@@ -1094,14 +1132,22 @@ class ObjectPickDialog(QDialog):
 
     `preselect` (id obiektu) zaznacza teczkę na starcie - wołający podaje ją, gdy zbiór gridu
     niesie lighty dokładnie jednego obiektu (`queries.sole_light_object`); bez niego „Dalej" jest
-    szczerze wygaszony, a nie uzbrojony na przypadkowym pierwszym wierszu. Pole „Szukaj" zawęża po
-    nazwie i, gdy zaznaczenie wypadnie z widoku, zaznacza pierwszą pasującą teczkę - wpisanie nazwy
-    i Enter to cała droga dla kogoś, kto wie, czego szuka."""
+    szczerze wygaszony, a nie uzbrojony na przypadkowym pierwszym wierszu. Pole „Szukaj" zawęża
+    i, gdy zaznaczenie wypadnie z widoku, zaznacza pierwszą pasującą teczkę - wpisanie nazwy
+    i Enter to cała droga dla kogoś, kto wie, czego szuka.
+
+    Szukanie to ta sama reguła co szukajka facetu Obiekt (`facet_model.search_hit` z aliasami
+    `queries.object_alias_index`), nie własny klucz okna: „sh2 131" trafia `Sh2-131`, „m106"
+    `NGC4258`, a nazwa potoczna z aliasu ręki - swój obiekt. Dwie reguły szukania tego samego
+    archiwum dawały w dwóch oknach dwie różne odpowiedzi na tę samą frazę. Strzałki w polu
+    przesuwają zaznaczenie po widocznych teczkach, więc teczka poza kadrem nie kosztuje
+    przeniesienia ręki na mysz; fraza bez trafień ma zdanie, nie gołą tabelę."""
 
     def __init__(self, con, *, preselect=None, parent=None):
         super().__init__(parent)
         self.object_id = None
         self._rows = queries.release_readiness(con)
+        self._aliases = queries.object_alias_index(con)
         self.setWindowTitle(i18n.t("proj.pick.title"))
         self.setModal(True)
         self.resize(860, 560)
@@ -1126,6 +1172,7 @@ class ObjectPickDialog(QDialog):
         self.search.setPlaceholderText(i18n.t("proj.pick.search_placeholder"))
         self.search.setClearButtonEnabled(True)
         self.search.textChanged.connect(self._apply_filter)
+        self.search.installEventFilter(self)          # Up/Down → zaznaczenie tabeli (`eventFilter`)
         row_s.addWidget(self.search, 1)
         v.addLayout(row_s)
 
@@ -1192,16 +1239,52 @@ class ObjectPickDialog(QDialog):
             return None
         return rows[0].row()
 
+    def _visible_rows(self):
+        return [i for i in range(len(self._rows)) if not self.table.isRowHidden(i)]
+
     def _apply_filter(self, text):
-        needle = pick_fold(text)
         for i, r in enumerate(self._rows):
-            self.table.setRowHidden(i, needle not in pick_fold(r["canon"]))
+            self.table.setRowHidden(i, facet_model.search_hit(text, r["canon"], self._aliases) is None)
+        widoczne = self._visible_rows()
         if self._selected_row() is None:
             self.table.clearSelection()
-            first = next((i for i in range(len(self._rows)) if not self.table.isRowHidden(i)), None)
-            if first is not None:
-                self.table.selectRow(first)
+            if widoczne:
+                self.table.selectRow(widoczne[0])
+        # Stan pusty dwoma zdaniami jak listwa facetów (R-S3-5): „fraza nic nie trafiła" to inna
+        # prawda niż „w bazie nie ma teczek" - pierwsza każe zmienić frazę, druga przyjąć lighty.
+        fraza = (text or "").strip()
+        if self._rows and not widoczne:
+            self.empty_label.setText(i18n.t("proj.pick.empty_search", fraza=fraza))
+        else:
+            self.empty_label.setText(i18n.t("proj.pick.empty"))
+        self.empty_label.setVisible(not widoczne)
         self._sync_next()
+
+    def eventFilter(self, obj, event):
+        """Up/Down w polu „Szukaj" przesuwa zaznaczenie tabeli. Fokus zostaje w polu: kolejna
+        litera dalej zawęża, a Enter trafia w domyślne „Dalej" na przesuniętej teczce. Reszta
+        klawiszy należy do pola (Home/End to kursor w tekście, nie skok po tabeli)."""
+        if (obj is self.search and event.type() == QEvent.KeyPress
+                and event.key() in (Qt.Key_Up, Qt.Key_Down)):
+            self._move_selection(-1 if event.key() == Qt.Key_Up else 1)
+            return True
+        return super().eventFilter(obj, event)
+
+    def _move_selection(self, step):
+        """Zaznacz sąsiednią WIDOCZNĄ teczkę (`step` = -1/+1), zatrzymując się na krańcach listy.
+        Wiersze ukryte frazą się pomija - zaznaczenie niewidocznej teczki wydałoby coś, czego user
+        nie widzi. Bez zaznaczenia pierwszy krok idzie na kraniec, z którego strzałka wchodzi."""
+        widoczne = self._visible_rows()
+        if not widoczne:
+            return
+        biezacy = self._selected_row()
+        if biezacy is None:
+            cel = widoczne[0] if step > 0 else widoczne[-1]
+        else:
+            k = widoczne.index(biezacy) + step
+            cel = widoczne[min(max(k, 0), len(widoczne) - 1)]
+        self.table.selectRow(cel)
+        self.table.scrollToItem(self.table.item(cel, _PICK_COL_OBJECT))
 
     def _sync_next(self):
         self.btn_next.setEnabled(self._selected_row() is not None)

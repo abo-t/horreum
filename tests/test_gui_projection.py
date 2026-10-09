@@ -673,6 +673,17 @@ def test_report_head_key_powtorka_nie_glosi_utworzenia():
     assert pd_mod.report_outcome(_Res({"linked": 0, "exists": 4}), partial=False) == "ok"
 
 
+def test_dry_complete_nic_do_zrobienia_i_nic_zlego():
+    """Komplet = zero do utworzenia, coś leży, zero konfliktów i błędów sondy. `skipped` kompletu
+    nie psuje (tych klatek żadne wydanie nie położy), anulowana sonda nie jest werdyktem."""
+    assert pd_mod.dry_complete(_Res({"exists": 3})) is True
+    assert pd_mod.dry_complete(_Res({"exists": 3, "skipped": 1})) is True
+    for zle in ({"exists": 3, "would-link": 1}, {"exists": 3, "conflict": 1},
+                {"exists": 3, "error": 1}, {}, {"skipped": 2}):
+        assert pd_mod.dry_complete(_Res(zle)) is False, zle
+    assert pd_mod.dry_complete(_Res({"exists": 3}, cancelled=True)) is False
+
+
 def test_powtorne_wydanie_mowi_nic_nowego(qapp, tmp_path, ustawienia, monkeypatch):
     """Pełna droga na PRAWDZIWYCH plikach: wydanie → świeży DRY → wydanie na ten sam cel."""
     monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
@@ -688,6 +699,46 @@ def test_powtorne_wydanie_mowi_nic_nowego(qapp, tmp_path, ustawienia, monkeypatc
     rep = dlg.report.toPlainText()
     assert rep.startswith("Nic nowego") and "zlinkowano: 0" in rep and "istniało: 2" in rep
     assert dlg.btn_apply.text() == "Bez zmian ✓"
+    con.close()
+
+
+def test_dry_komplet_w_celu_mowi_naglowkiem(qapp, tmp_path, ustawienia, monkeypatch):
+    """Sonda po wydaniu, która nie ma nic do zrobienia, mówi „Komplet już w celu" zamiast nagłówka
+    „DRY" nad samymi zerami. Perspektywa gridu nie dostaje Eksploratora - to droga wydania obiektu."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con = db.open_db(str(tmp_path / "komplet.db"))
+    ids = _seed_files(con, tmp_path, 2)
+    _target(ustawienia, tmp_path / "_WBPP" / "feed")
+    dlg = _dlg(con, ids)
+    assert dlg.report.toPlainText().startswith("DRY - bez zmian na dysku")
+    dlg._on_apply()
+    dlg._on_manual_dry()
+    rep = dlg.report.toPlainText()
+    assert rep.startswith("Komplet już w celu (układ po-obiektach, hardlinki):")
+    assert "do zlinkowania: 0   istnieje: 2   konflikty: 0" in rep
+    assert not dlg.btn_apply.isEnabled() and dlg.btn_open.isHidden()
+    con.close()
+
+
+def test_rozmiar_kopii_tylko_po_pozycjach_do_skopiowania(qapp, tmp_path, ustawienia, monkeypatch):
+    """Rozmiar kopii to bajty, które wydanie naprawdę skopiuje: pozycja, której kopia z wydania już
+    leży w celu (`copy2` - ten sam rozmiar, czas i treść), jest `exists` i do sumy nie wchodzi.
+    Po całym planie suma obiecywała przy ponownym wydaniu gigabajty plików, które już są."""
+    import shutil
+
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "INNY")
+    con = db.open_db(str(tmp_path / "rozmiar.db"))
+    ids = _seed_files(con, tmp_path, 2, sizes=[100, 50])
+    root = tmp_path / "_WBPP" / "kopie"
+    juz = root / "_UNSET" / "_UNSET" / "raw0.fits"
+    juz.parent.mkdir(parents=True)
+    shutil.copy2(str(tmp_path / "lib" / "raw0.fits"), str(juz))   # kopia z poprzedniego wydania
+    _target(ustawienia, root)
+    dlg = _dlg(con, ids)
+    rep = dlg.report.toPlainText()
+    assert "do skopiowania: 1   istnieje: 1   konflikty: 0" in rep
+    assert "rozmiar kopii: 50 B" in rep                    # po całym planie byłoby 150 B
+    assert dlg.btn_apply.text() == "Utwórz 1 kopię"
     con.close()
 
 
@@ -856,8 +907,8 @@ def test_tryb_obiektu_dry_naglowek_apply_manifest_eksplorator(qapp, tmp_path, us
 def test_tryb_obiektu_combo_zestawu_zaweza_i_blokuje_sie_w_biegu(qapp, tmp_path, ustawienia,
                                                                    monkeypatch):
     """Zmiana zestawu = `_invalidate` + auto-DRY pod NOWE parametry (generacja w górę, plan
-    zawężony, nagłówek z liczbami zestawu, lista zestawów NIE kurczy się do jednego). W biegu apply
-    combo zestawu jest zamrożone jak układ - inaczej klik zerowałby materializowany plan."""
+    zawężony, nagłówek z NAZWĄ i liczbami zestawu, lista zestawów NIE kurczy się do jednego). W biegu
+    apply combo zestawu jest zamrożone jak układ - inaczej klik zerowałby materializowany plan."""
     monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
     con, ids = _obiekt_wydania(tmp_path)
     card = tmp_path / "_WBPP" / "karta"
@@ -869,8 +920,8 @@ def test_tryb_obiektu_combo_zestawu_zaweza_i_blokuje_sie_w_biegu(qapp, tmp_path,
     assert dlg._plan.info["config_id"] == 20 and list(dlg._plan.info["zestawy"]) == ["RC8_ASI2600MM"]
     assert {it.frame_id for it in dlg._plan.items} == {ids["lb1"], ids["md"], ids["mf_b"]}
     assert dlg.btn_apply.text() == "Utwórz 3 linki"
-    assert dlg.head_label.text() == ("NGC 6992: 1 light · 2 mastery · 0 surowych flatów · "
-                                     "bez flatu 0 · bez darka 0")
+    assert dlg.head_label.text() == ("NGC 6992 / RC8_ASI2600MM: 1 light · 2 mastery · "
+                                     "0 surowych flatów · bez flatu 0 · bez darka 0")
     assert dlg.pending_label.isHidden()                    # zero do przeliczenia → linia znika
     assert dlg.combo_zestaw.count() == 3
     frozen = []
@@ -921,6 +972,134 @@ def test_tryb_obiektu_anulowane_wydanie_nie_otwiera_eksploratora(qapp, tmp_path,
     con.close()
 
 
+@pytest.mark.parametrize("serial, tryb", [("INNY", "kopie"), ("V", "hardlinki")])
+def test_tryb_obiektu_powrot_do_kompletu_od_razu_eksplorator(qapp, tmp_path, ustawienia, monkeypatch,
+                                                             serial, tryb):
+    """Powrót do wydanego obiektu (nowe okno, ta sama karta): sonda zastaje komplet - kopie z wydania
+    są `exists`, nie konfliktami - więc nagłówek mówi „Komplet już w celu", rozmiar kopii nie liczy
+    plików, które leżą, a „Otwórz w Eksploratorze" jest od razu i otwiera folder obiektu."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: serial)
+    pulpit = _Pulpit()
+    monkeypatch.setattr(pd_mod, "QDesktopServices", pulpit)
+    con, _ids = _obiekt_wydania(tmp_path)
+    card = tmp_path / "_WBPP" / "karta"
+    _target(ustawienia, card)
+    pierwsze = _dlg_obj(con)
+    pierwsze._on_apply()
+    assert pierwsze.report.toPlainText().startswith("Utworzono")
+
+    powrot = _dlg_obj(con)
+    rep = powrot.report.toPlainText()
+    assert rep.startswith(f"Komplet już w celu (układ wbpp-obiekt, {tryb}):")
+    assert "0   istnieje: 11   konflikty: 0   pominięto: 1" in rep
+    assert "bez rozmiaru" not in rep                       # zero pozycji do skopiowania - zero niewiadomych
+    assert not powrot.btn_apply.isEnabled()
+    assert not powrot.btn_open.isHidden()
+    QTest.mouseClick(powrot.btn_open, Qt.LeftButton)
+    assert [os.path.normpath(u.toLocalFile()) for u in pulpit.urls] == [
+        str(card / "OBJECTS" / "NGC_6992")]
+    con.close()
+
+
+def test_tryb_obiektu_eksplorator_zyje_tylko_przy_swoich_parametrach(qapp, tmp_path, ustawienia,
+                                                                     monkeypatch):
+    """„Otwórz w Eksploratorze" należy do parametrów, przy których go uzbrojono. Wydanie niczego nie
+    unieważnia, więc zaraz po nim przycisk stoi i otwiera właśnie wydany folder. Przejście na kartę
+    B („do zlinkowania: 11") gasi go - inaczej otwierałby folder z karty A; powrót na A zastaje
+    komplet i uzbraja go znowu; padnięta sonda (karta bez segmentu wykluczonego) gasi go także
+    sama, bez pomocy zmiany parametru."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    pulpit = _Pulpit()
+    monkeypatch.setattr(pd_mod, "QDesktopServices", pulpit)
+    con, _ids = _obiekt_wydania(tmp_path)
+    karta_a, karta_b = tmp_path / "_WBPP" / "a", tmp_path / "_WBPP" / "b"
+    zla = tmp_path / "poza_wykluczeniem"
+    ustawienia.setValue("projection/targets", json.dumps(
+        [{"name": n, "path": str(p)} for n, p in (("a", karta_a), ("b", karta_b), ("zla", zla))]))
+    ustawienia.setValue("projection/last_target", str(karta_a))
+    dlg = _dlg_obj(con)
+    radio = {c["path"]: c["radio"] for c in dlg._cards}
+    assert dlg.btn_open.isHidden()
+
+    dlg._on_apply()
+    assert not dlg.btn_open.isHidden()                     # zaraz po wydaniu - bez regresji
+    QTest.mouseClick(dlg.btn_open, Qt.LeftButton)
+    assert [os.path.normpath(u.toLocalFile()) for u in pulpit.urls] == [
+        str(karta_a / "OBJECTS" / "NGC_6992")]
+
+    radio[str(karta_b)].setChecked(True)
+    assert "do zlinkowania: 11" in dlg.report.toPlainText()
+    assert dlg.btn_open.isHidden() and dlg._released_root is None
+
+    radio[str(karta_a)].setChecked(True)
+    assert dlg.report.toPlainText().startswith("Komplet już w celu")
+    assert not dlg.btn_open.isHidden()
+
+    radio[str(zla)].setChecked(True)
+    assert dlg.report.toPlainText().startswith("Nie można")
+    assert dlg.btn_open.isHidden()
+
+    radio[str(karta_a)].setChecked(True)
+    assert not dlg.btn_open.isHidden()
+    dlg._on_dry_failed(dlg._gen, "OSError: cel odpięty")   # sonda bieżących parametrów padła
+    assert dlg.btn_open.isHidden() and dlg._released_root is None
+    con.close()
+
+
+def test_tryb_obiektu_zmiana_zestawu_po_wydaniu_gasi_eksplorator(qapp, tmp_path, ustawienia,
+                                                                 monkeypatch):
+    """Po wydaniu jednego zestawu zmiana zestawu gasi „Otwórz w Eksploratorze" już na czas nowej
+    sondy (podgląd z wnętrza workera). Wraca wyłącznie wtedy, gdy nowa sonda sama zastanie
+    komplet: „Wszystkie" mają w celu tylko wydany zestaw, więc przycisk zostaje zgaszony; powrót
+    na wydany zestaw zastaje komplet i uzbraja go znowu."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con, _ids = _obiekt_wydania(tmp_path)
+    _target(ustawienia, tmp_path / "_WBPP" / "karta")
+    dlg = _dlg_obj(con)
+    dlg.combo_zestaw.setCurrentIndex(2)                    # RC8_ASI2600MM
+    dlg._on_apply()
+    assert not dlg.btn_open.isHidden()
+    w_biegu = []
+
+    class Szpieg(pd_mod.DryWorker):
+        def run(self):
+            w_biegu.append(dlg.btn_open.isHidden())
+            super().run()
+
+    monkeypatch.setattr(pd_mod, "DryWorker", Szpieg)
+    dlg.combo_zestaw.setCurrentIndex(0)                    # Wszystkie: A140R nie leży w celu
+    assert "do zlinkowania: 8   istnieje: 3" in dlg.report.toPlainText()
+    assert dlg.btn_open.isHidden()
+    dlg.combo_zestaw.setCurrentIndex(2)                    # z powrotem wydany zestaw
+    assert dlg.report.toPlainText().startswith("Komplet już w celu")
+    assert not dlg.btn_open.isHidden()
+    assert w_biegu == [True, True]                         # w biegu każdej sondy - zgaszony
+    con.close()
+
+
+def test_tryb_obiektu_combo_zestawu_szerokosc_za_trescia(qapp, tmp_path, ustawienia, monkeypatch):
+    """Pozycje zestawów dochodzą z pierwszego planu - w biegu na żywo już PO pokazaniu okna (sonda
+    w wątku tła). Szerokość ustalona przy pierwszym pokazaniu na „Wszystkie" ucinała nazwy zestawów;
+    combo ma rosnąć za treścią. Okno pokazane bez celu, cel dodany potem = ta sama kolejność."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con, _ids = _obiekt_wydania(tmp_path)
+    dlg = _dlg_obj(con)                                    # bez celu: tylko „Wszystkie"
+    combo = dlg.combo_zestaw
+    assert combo.count() == 1
+    dlg.show()
+    qapp.processEvents()
+    przed = combo.width()
+    assert dlg._add_target_path(str(tmp_path / "_WBPP" / "karta"), "karta")   # → auto-DRY → zestawy
+    qapp.processEvents()
+    fm = combo.fontMetrics()
+    najdluzsza = max((combo.itemText(i) for i in range(combo.count())), key=fm.horizontalAdvance)
+    assert najdluzsza == "A140R_ASI2600MM (5 lightów)"
+    assert combo.width() > przed
+    assert combo.width() >= fm.horizontalAdvance(najdluzsza)
+    dlg.close()
+    con.close()
+
+
 def test_tryb_obiektu_naglowek_nie_klamie_w_biegu_nowej_sondy(qapp, tmp_path, ustawienia,
                                                                monkeypatch):
     """Zmiana zestawu unieważnia plan, więc nagłówek przez CAŁY bieg nowej sondy pokazuje samą
@@ -944,7 +1123,7 @@ def test_tryb_obiektu_naglowek_nie_klamie_w_biegu_nowej_sondy(qapp, tmp_path, us
     monkeypatch.setattr(pd_mod, "DryWorker", Szpieg)
     dlg.combo_zestaw.setCurrentIndex(2)                    # RC8_ASI2600MM
     assert w_biegu == [("NGC 6992", True)]
-    assert dlg.head_label.text().startswith("NGC 6992: 1 light")   # przyjęty DRY - liczby nowego zestawu
+    assert dlg.head_label.text().startswith("NGC 6992 / RC8_ASI2600MM: 1 light")   # przyjęty DRY
     con.close()
 
 
@@ -1002,13 +1181,13 @@ def test_teczki_kolejnosc_kropka_z_motywu_i_kolumny(qapp, tmp_path):
 
 
 def test_teczki_szukaj_preselekcja_dwuklik_i_enter(qapp, tmp_path):
-    """Pole „Szukaj" zawęża bez wielkości liter i spacji i zaznacza pierwszą pasującą teczkę;
-    preselekcja zaznacza teczkę obiektu ze zbioru; dwuklik i Enter (prawdziwy klawisz przy tabeli)
-    wybierają obiekt i zamykają okno."""
+    """Pole „Szukaj" zawęża i zaznacza pierwszą pasującą teczkę; preselekcja zaznacza teczkę
+    obiektu ze zbioru; dwuklik i Enter (prawdziwy klawisz przy tabeli) wybierają obiekt i zamykają
+    okno. Reguła szukania (aliasy, separatory, oznaczenie katalogowe) - test niżej."""
     con, _ids = _obiekt_wydania(tmp_path)
     pick = pd_mod.ObjectPickDialog(con, preselect=2)
     assert pick._selected_row() == _wiersz(pick, "M42") and pick.btn_next.isEnabled()
-    pick.search.setText("ngc 69")
+    pick.search.setText("6992")
     widoczne = [r["canon"] for i, r in enumerate(pick._rows) if not pick.table.isRowHidden(i)]
     assert widoczne == ["NGC 6992"]
     assert pick._selected_row() == _wiersz(pick, "NGC 6992")   # M42 wypadł z widoku
@@ -1027,6 +1206,124 @@ def test_teczki_szukaj_preselekcja_dwuklik_i_enter(qapp, tmp_path):
     QTest.keyClick(enter.table, Qt.Key_Return)
     assert enter.result() == QDialog.Accepted and enter.object_id == 1
     con.close()
+
+
+def _teczki_do_szukania(tmp_path):
+    """Teczki pod regułę szukania: kanony zapisane jak w archiwum (`Sh2-131`, `NGC4258`, `NGC6992`)
+    i `IC1795` z aliasem ręki „Heart of the Soul" (`object_alias.alias_norm`). Po jednym lighcie,
+    godziny malejąco w kolejności wstawiania - kolejność teczek jest stała."""
+    con = db.open_db(str(tmp_path / "szukaj.db"))
+    con.execute("INSERT INTO object (id, canon) VALUES "
+                "(1, 'Sh2-131'), (2, 'NGC4258'), (3, 'IC1795'), (4, 'NGC6992')")
+    con.execute("INSERT INTO object_alias (alias_norm, object_id, source) "
+                "VALUES ('HEARTOFTHESOUL', 3, 'user')")
+    for oid in (1, 2, 3, 4):
+        cur = con.execute("INSERT INTO frame (sha1_data, kind, filetype, object_id, first_seen_at) "
+                          "VALUES (?, 'light', 'fits', ?, ?)", (f"s{oid}", oid, NOW))
+        con.execute("INSERT INTO header (frame_id, raw_json, date_obs, exptime) "
+                    "VALUES (?, '{}', '2024-03-01T23:00:00', ?)", (cur.lastrowid, 3600.0 * (5 - oid)))
+    con.commit()
+    return con
+
+
+def _widoczne(pick):
+    return [r["canon"] for i, r in enumerate(pick._rows) if not pick.table.isRowHidden(i)]
+
+
+def test_teczki_szukaj_regula_facetu_aliasy_separatory(qapp, tmp_path):
+    """Pole „Szukaj" to reguła szukajki facetu Obiekt (`facet_model.search_hit` z aliasami), nie
+    własny klucz okna: separatory nie przeszkadzają, oznaczenie katalogowe trafia swój obiekt także
+    przez drugą nazwę (`m106` → `NGC4258`), nazwa potoczna - przez alias ręki. Fraza niekatalogowa
+    zawęża podciągiem, pusta pokazuje wszystko; zaznaczenie idzie za pierwszą trafioną teczką."""
+    con = _teczki_do_szukania(tmp_path)
+    pick = pd_mod.ObjectPickDialog(con)
+    assert _widoczne(pick) == ["Sh2-131", "NGC4258", "IC1795", "NGC6992"]
+    for fraza, oczek in (("sh2 131", ["Sh2-131"]), ("sh2131", ["Sh2-131"]), ("SH2-131", ["Sh2-131"]),
+                         ("m106", ["NGC4258"]), ("m 106", ["NGC4258"]),
+                         ("heart of the soul", ["IC1795"]), ("Heart-of-the-Soul", ["IC1795"]),
+                         ("ngc", ["NGC4258", "NGC6992"]), ("", ["Sh2-131", "NGC4258", "IC1795",
+                                                                "NGC6992"])):
+        pick.search.setText(fraza)
+        assert _widoczne(pick) == oczek, fraza
+    pick.search.setText("heart of the soul")
+    assert pick._selected_row() == _wiersz(pick, "IC1795") and pick.btn_next.isEnabled()
+    con.close()
+
+
+def test_teczki_wpisywanie_po_literze_nie_gubi_teczki(qapp, tmp_path):
+    """Pole filtruje po każdej literze, a niedokończone oznaczenie (`sh2`, `sh2 13`, `ngc69`)
+    `catalog_canon` czyta jako pełne innego obiektu. Na żadnym etapie wpisywania prawdziwymi
+    klawiszami teczka, do której nazwa zmierza, nie znika, a zdanie „Brak teczek…" się nie
+    pojawia - pusty wynik w połowie nazwy kazałby userowi szukać inaczej czegoś, co istnieje."""
+    con = _teczki_do_szukania(tmp_path)
+    pick = pd_mod.ObjectPickDialog(con)
+    pick.show()
+    pick.activateWindow()
+    qapp.processEvents()
+    assert pick.search.hasFocus()
+    for fraza, cel in (("sh2 131", "Sh2-131"), ("ngc6992", "NGC6992"), ("ngc 4258", "NGC4258")):
+        pick.search.clear()
+        for litera in fraza:
+            QTest.keyClicks(pick.focusWidget(), litera)
+            napisane = pick.search.text()
+            if not napisane.strip():
+                continue
+            assert cel in _widoczne(pick), napisane
+            assert pick.empty_label.isHidden(), napisane
+        assert _widoczne(pick) == [cel] and pick._selected_row() == _wiersz(pick, cel)
+    con.close()
+
+
+def test_teczki_strzalki_w_polu_przesuwaja_zaznaczenie(qapp, tmp_path):
+    """Up/Down w polu z fokusem (prawdziwe klawisze) przesuwają zaznaczenie po WIDOCZNYCH teczkach
+    i stają na krańcach; fokus i fraza zostają w polu, a Enter wybiera przesuniętą teczkę. Droga:
+    pisz → strzałka → Enter, bez sięgania po mysz, gdy trafień jest więcej niż jedno."""
+    con = _teczki_do_szukania(tmp_path)
+    pick = pd_mod.ObjectPickDialog(con)
+    pick.show()
+    pick.activateWindow()
+    qapp.processEvents()
+    assert pick.focusWidget() is pick.search and pick.search.hasFocus()
+    pole = pick.focusWidget()
+    QTest.keyClicks(pole, "ngc")
+    assert _widoczne(pick) == ["NGC4258", "NGC6992"]
+    assert pick._selected_row() == _wiersz(pick, "NGC4258")
+    QTest.keyClick(pole, Qt.Key_Down)
+    assert pick._selected_row() == _wiersz(pick, "NGC6992")   # ukryte IC1795 pominięte
+    QTest.keyClick(pole, Qt.Key_Down)
+    assert pick._selected_row() == _wiersz(pick, "NGC6992")   # kraniec - zostaje
+    QTest.keyClick(pole, Qt.Key_Up)
+    assert pick._selected_row() == _wiersz(pick, "NGC4258")
+    QTest.keyClick(pole, Qt.Key_Up)
+    assert pick._selected_row() == _wiersz(pick, "NGC4258")
+    assert pick.search.hasFocus() and pick.search.text() == "ngc"
+    QTest.keyClick(pole, Qt.Key_Down)
+    QTest.keyClick(pole, Qt.Key_Return)
+    assert pick.result() == QDialog.Accepted and pick.object_id == 4
+    con.close()
+
+
+def test_teczki_stan_pusty_dwa_zdania(qapp, tmp_path):
+    """Fraza bez trafień ma zdanie z frazą zamiast gołej tabeli, a „Dalej" gaśnie; pusta baza ma
+    INNE zdanie - także gdy ktoś coś wpisał, bo prawdą jest brak teczek, nie za wąska fraza."""
+    con = _teczki_do_szukania(tmp_path)
+    pick = pd_mod.ObjectPickDialog(con)
+    assert pick.empty_label.isHidden()
+    pick.search.setText("zzz")
+    assert not pick.empty_label.isHidden()
+    assert pick.empty_label.text() == "Brak teczek dla „zzz”"
+    assert pick._selected_row() is None and not pick.btn_next.isEnabled()
+    pick.search.setText("")
+    assert pick.empty_label.isHidden() and pick.btn_next.isEnabled()
+    con.close()
+
+    pusta = db.open_db(str(tmp_path / "pusta.db"))
+    nic = pd_mod.ObjectPickDialog(pusta)
+    assert not nic.empty_label.isHidden()
+    assert nic.empty_label.text() == "Brak obiektów z lightami w bazie."
+    nic.search.setText("m42")
+    assert nic.empty_label.text() == "Brak obiektów z lightami w bazie."
+    pusta.close()
 
 
 def test_przycisk_paska_droga_trzech_interakcji(qapp, tmp_path, ustawienia, monkeypatch):
@@ -1143,7 +1440,6 @@ def test_object_totals_mastery_distinct_pending_osobno():
     }}
     assert pd_mod.object_totals(info) == {"lights": 4, "masters": 2, "raw": 2, "bez_flatu": 1,
                                           "bez_darka": 2, "pending": 1}
-    assert pd_mod.pick_fold(" NGC 6992 ") == pd_mod.pick_fold("ngc6992") == "ngc6992"
 
 
 def test_en_render_trybu_obiektu_i_teczek(qapp, tmp_path, ustawienia, monkeypatch):
@@ -1164,3 +1460,23 @@ def test_en_render_trybu_obiektu_i_teczek(qapp, tmp_path, ustawienia, monkeypatc
     assert pick.table.horizontalHeaderItem(1).text() == "Object"
     assert i18n.t("grid.sel.release_object") == "Release object…"
     con.close()
+
+
+def test_en_komplet_w_celu_i_stan_pusty_teczek(qapp, tmp_path, ustawienia, monkeypatch):
+    """EN z katalogu: nagłówek sondy przy komplecie i zdanie frazy bez trafień w oknie teczek."""
+    i18n.set_lang("en")
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con = db.open_db(str(tmp_path / "en_komplet.db"))
+    ids = _seed_files(con, tmp_path, 1)
+    _target(ustawienia, tmp_path / "_WBPP" / "feed")
+    dlg = _dlg(con, ids)
+    dlg._on_apply()
+    dlg._on_manual_dry()
+    assert dlg.report.toPlainText().startswith(
+        "Already complete in the target (layout po-obiektach, hardlinks):")
+    con.close()
+    teczki = _teczki_do_szukania(tmp_path)
+    pick = pd_mod.ObjectPickDialog(teczki)
+    pick.search.setText("zzz")
+    assert pick.empty_label.text() == "No objects to release for “zzz”"
+    teczki.close()

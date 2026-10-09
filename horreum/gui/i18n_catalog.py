@@ -3225,6 +3225,12 @@ CATALOG = {
         "en": "  {todo}: {would}   exists: {exists}   conflicts: {conflict}   skipped: {skipped}",
     },
     "proj.dry_size": {"pl": "  rozmiar kopii: {size}", "en": "  copy size: {size}"},
+    # Sonda bez nic do zrobienia (`projection_dialog.dry_complete`): odpowiedź na pytanie, z którym
+    # user wraca do wydanego obiektu, zamiast nagłówka „DRY" nad samymi zerami.
+    "proj.dry_head_complete": {
+        "pl": "Komplet już w celu (układ {layout}, {mode}):",
+        "en": "Already complete in the target (layout {layout}, {mode}):",
+    },
     "proj.head_cancelled": {"pl": "Przerwano", "en": "Cancelled"},
     "proj.head_partial": {"pl": "Wynik częściowy", "en": "Partial result"},
     "proj.head_created": {"pl": "Utworzono", "en": "Created"},
@@ -3373,6 +3379,10 @@ CATALOG = {
     "proj.pick.next": {"pl": "Dalej", "en": "Next"},
     "proj.pick.empty": {
         "pl": "Brak obiektów z lightami w bazie.", "en": "No objects with lights in the database.",
+    },
+    # Drugie zdanie stanu pustego (wzorzec R-S3-5): fraza bez trafień to nie pusta baza.
+    "proj.pick.empty_search": {
+        "pl": "Brak teczek dla „{fraza}”", "en": "No objects to release for “{fraza}”",
     },
 
     # ============================================================ drobne (rollout §4: tasks/facets/portfolio)

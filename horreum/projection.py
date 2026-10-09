@@ -13,8 +13,9 @@ Twarde ramy (brief §0):
 - **ZERO zapisu domenowego** — projekcja EFEMERYCZNA (kasowalna w Eksploratorze, poza skanem): NIE
   emituje eventu ani nie pisze do bazy (JEDNA-KLINGA nietknięta — brak `repo`). Obok korzenia zostaje
   manifest `_PROJEKCJA.json` (PLIK, nie DB).
-- **ZERO nadpisania** — cel istnieje z INNYM i-węzłem → `conflict` (NIE clobber); ten sam i-węzeł →
-  `exists` (idempotentnie pomiń). Read-only wobec drzewa źródłowego.
+- **ZERO nadpisania** - cel istnieje z INNYM i-węzłem → `conflict` (NIE clobber); ten sam i-węzeł →
+  `exists` (idempotentnie pomiń). W trybie kopii `exists` to także kopia, którą zrobiło wydanie
+  (rozmiar + czas + nagłówek, `_link_to`). Read-only wobec drzewa źródłowego.
 - **CEL-POD-WYKLUCZENIEM** — `root` MUSI zawierać segment z `EXCLUDED_DIR_NAMES`. Hardlink = duplikat
   i-węzła; `os.walk followlinks=False` NIE odróżni go od oryginału → dla hardlinków chroni WYŁĄCZNIE
   prune `dirnames` po nazwie (`_assert_excluded_segment` PRZED masą).
@@ -392,6 +393,13 @@ def object_manifest(projection):
 
 # ============================================================ prymitywy filesystemu (KLINGA)
 
+# Prefiks treści czytany przez obie sondy (`_same_content`): obejmuje nagłówek FITS/XISF, więc
+# zmiana nagłówka po writebacku go rusza, a odczyt zostaje mały nawet po SMB.
+_PROBE_BYTES = 65536
+# Granica zgodności czasu modyfikacji kopii ze źródłem: `shutil.copy2` przenosi czas, ale FAT/exFAT
+# zapisują go z ziarnem 2 s, więc kopia na takim nośniku różni się od źródła o ułamek tego ziarna.
+_MTIME_TOLERANCE_NS = 2_000_000_000
+
 
 class ProjectionAbort(Exception):
     """Sonda pierwszego linku wykazała rozjazd (wolumen nie daje hardlinków — SMB dał kopię) → abort
@@ -423,14 +431,36 @@ def _assert_excluded_segment(root):
 def _link_to(src, dst, *, do_apply, copy):
     """Status src→KONKRETNY dst, ZERO nadpisania (§0). Zwraca `(status, reason|None)`:
     `would-link` (DRY, cel wolny) · `linked` (utworzony) · `exists` (ten sam i-węzeł, idempotentnie
-    pomiń) · `conflict` (cel z INNYM i-węzłem — NIE clobber) · `verify_bad` (po `os.link` inny i-węzeł
+    pomiń) · `conflict` (cel z INNYM i-węzłem - NIE clobber) · `verify_bad` (po `os.link` inny i-węzeł
     = SMB kopia) · `error` (I/O, np. EXDEV cross-wolumen → rada `--copy`). Odczyty stanu celu
-    (`exists`/`stat`) działają też w DRY (raport nad istniejącym drzewem)."""
+    (`exists`/`stat`, w trybie kopii także prefiks treści) działają też w DRY (raport nad
+    istniejącym drzewem).
+
+    KOPIA Z WYDANIA TO `exists`, NIE `conflict`. Kopia ma z definicji inny i-węzeł, więc samo
+    kryterium i-węzła nazywało konfliktem każdą kopię zrobioną przez poprzednie wydanie: ponowne
+    wydanie obiektu po nowej nocy pokazywało setki konfliktów i stan „komplet" był w trybie kopii
+    nieosiągalny. W trybie kopii cel z innym i-węzłem jest `exists` wtedy i tylko wtedy, gdy ma
+    równy rozmiar, czas modyfikacji w granicy `_MTIME_TOLERANCE_NS` od źródła (`shutil.copy2`
+    przenosi czas; tolerancja na ziarno 2 s FAT/exFAT) i zgodny prefiks treści (`_same_content`).
+    To znaczy „to jest kopia, którą zrobiło wydanie", nie audyt integralności bajtów: pełne
+    porównanie albo hash każdej pozycji biegłby przy każdym auto-DRY (sonda startuje na każdą zmianę
+    parametru okna), a samo IC1795 w trybie kopii to ~17 GB odczytu po SMB.
+    Prefiks obejmuje nagłówek FITS/XISF, więc kopia sprzed writebacku nagłówka zostaje
+    `conflict` - nieaktualna kopia nazwana, nie nadpisana. Tryb hardlinków bez zmian: tam inny
+    i-węzeł zawsze znaczy obcy plik."""
     try:
         if os.path.exists(dst):
-            if os.stat(dst).st_ino == os.stat(src).st_ino:
+            ss, ds = os.stat(src), os.stat(dst)
+            if ds.st_ino == ss.st_ino:
                 return "exists", None
-            return "conflict", "cel istnieje z innym i-węzłem (nie nadpisuję)"
+            if not copy:
+                return "conflict", "cel istnieje z innym i-węzłem (nie nadpisuję)"
+            # Tanie warunki przed odczytem: czas porównuje się bez otwierania plików, a rozmiar
+            # sprawdza `_same_content`, zanim przeczyta prefiks.
+            if (abs(ss.st_mtime_ns - ds.st_mtime_ns) <= _MTIME_TOLERANCE_NS
+                    and _same_content(src, dst, ss, ds)):
+                return "exists", None
+            return "conflict", "cel istnieje i nie jest kopią źródła (rozmiar/czas/treść; nie nadpisuję)"
         if not do_apply:
             return "would-link", None
         os.makedirs(os.path.dirname(dst), exist_ok=True)
@@ -445,12 +475,20 @@ def _link_to(src, dst, *, do_apply, copy):
         return "error", f"{type(exc).__name__}: {exc}"
 
 
-def _verify_content(src, dst, nbytes=65536):
+def _verify_content(src, dst, nbytes=_PROBE_BYTES):
     """PEŁNA sonda tożsamości linku (port `wbpp_feed.py:268`): i-węzeł + rozmiar + prefiks treści.
-    Sam `st_ino` za słaby — SMB potrafi zwrócić kopię o tym samym/zerowym ino; odczyt `nbytes` bajtów
+    Sam `st_ino` za słaby - SMB potrafi zwrócić kopię o tym samym/zerowym ino; odczyt `nbytes` bajtów
     rozstrzyga. `True` = prawdziwy hardlink (ta sama treść pod tym samym i-węzłem)."""
     ss, ds = os.stat(src), os.stat(dst)
-    if ss.st_ino != ds.st_ino or ss.st_size != ds.st_size:
+    return ss.st_ino == ds.st_ino and _same_content(src, dst, ss, ds, nbytes)
+
+
+def _same_content(src, dst, ss, ds, nbytes=_PROBE_BYTES):
+    """Rozmiar + prefiks treści - JEDNA sonda porównania treści dla obu pytań klingi: „czy ten
+    hardlink jest prawdziwy" (`_verify_content`, z warunkiem i-węzła) i „czy ten cel jest kopią
+    z wydania" (`_link_to` w trybie kopii, bez niego). `ss`/`ds` to `os.stat` wołającego - drugi
+    `stat` po SMB nic by nie dodał. Rozmiar przed odczytem: różny rozmiar rozstrzyga bez otwierania."""
+    if ss.st_size != ds.st_size:
         return False
     with open(src, "rb") as a, open(dst, "rb") as b:
         return a.read(nbytes) == b.read(nbytes)

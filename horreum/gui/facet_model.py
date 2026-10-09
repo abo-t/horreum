@@ -154,7 +154,16 @@ def search_hit(needle: str, label, aliases=None):
       albo po `xref`) albo wiersz, który ma to oznaczenie wśród aliasów. Podciąg był tu fałszywym
       tropem: `C4` zawiera się w `NGC4258`. Fraza nie-katalogowa (nazwa potoczna, obiekt własny,
       sam skrót `NGC`) dalej trafia podciągiem. Ta sama reguła służy szukajce okna „Przypisz
-      obiekt" (`assign_dialog`) - jeden predykat, dwaj wołający.
+      obiekt" (`assign_dialog`) i okna teczek wydania - jeden predykat, kilku wołających.
+    * **OZNACZENIE W TRAKCIE PISANIA TRAFIA PREFIKSEM** - szukajka filtruje po każdej literze,
+      a `catalog_canon` czyta niedokończone oznaczenie jako pełne innego obiektu: `sh2 13` to
+      `Sh2-13`, `ngc70` to `NGC70`, a samo `sh2` to `Sh2-2`. Sama dokładność gubiła więc teczkę
+      w połowie wpisywanej nazwy (pusty wynik nad `Sh2-131`, które istnieje). Gdy dokładnie nic
+      nie trafia, wiersz trafia, jeśli znormalizowany kanon albo alias ZACZYNA SIĘ od igły (w
+      obu postaciach: wpisanej i kanonicznej, bo `sh2` kanonicznie to `SH22`). Prefiks, nie
+      podciąg: `C4` dalej nie trafia `NGC4258`, a pełne `NGC7000` trafia tylko to, co się od
+      niego zaczyna. Ceną jest szerszy wynik przy krótkim numerze (`NGC 42` pokazuje też
+      `NGC4258`) - zawęża go następna cyfra, a pusty wynik w połowie nazwy niczego nie zawęża.
 
     Predykat mieszka TU, nie w listwie: `FacetRail` jest głupim widżetem (NARROW), a to jest logika
     — z normalizacją rdzenia i regułą, którą trzeba móc przetestować bez Qt.
@@ -177,7 +186,13 @@ def search_hit(needle: str, label, aliases=None):
         # Trafienie przez równoważność mówi, KTÓRĄ nazwą trafiło (`C4` przy `NGC7023`) - tą samą
         # drogą co alias, bo dla usera to jest druga nazwa wiersza, nie jego etykieta.
         klucz = norm_alnum(cc)
-        return klucz if str(label) == xref(cc) or klucz in wlasne else None
+        if str(label) == xref(cc) or klucz in wlasne:
+            return klucz
+        # Dokładnie nic - oznaczenie bywa niedokończone: prefiks własnej nazwy, potem aliasu.
+        prefiksy = (igla, klucz)
+        if norm_alnum(str(label)).startswith(prefiksy):
+            return HIT_LABEL
+        return next((a for a in sorted(wlasne) if a.startswith(prefiksy)), None)
     if igla in norm_alnum(str(label)):
         return HIT_LABEL
     return next((a for a in sorted(wlasne) if igla in a), None)

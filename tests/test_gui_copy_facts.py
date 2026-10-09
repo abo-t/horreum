@@ -85,6 +85,9 @@ def test_podpowiedz_xN_wymienia_kopie_obrazy_i_rozbiezne_pola(view, archiwum):
     assert "obrazy: 1 (integration)" in tip
     assert "FILTER=CLS" in tip and "FILTER=L-Pro" in tip
     assert tip.count("mówi inaczej:") == 2
+    # Rozjazd obrazów niesie WARTOŚĆ tej kopii, nie samą nazwę pola (odbiór 2026-10-10).
+    assert "obrazy=3 (MasterFlat, RejectionMapLow, RejectionMapHigh)" in tip
+    assert "obrazy=1 (integration)" in tip
     solo_tip = _komorka(view, fid["solo"], "path", Qt.ToolTipRole)
     assert "mówi inaczej" not in solo_tip                    # jedna kopia - nie ma z czym się różnić
 
@@ -107,6 +110,11 @@ def test_podpowiedz_nazywa_rozjazd_nazwy_kopii():
     assert "zeznanie nagłówka jeszcze niezebrane" in tip
     assert grid_mod._pole_rozjazdu(queries.COPY_FILTER_DIR, kopie[1]) == "folder filtra=L-Pro"
     assert grid_mod._pole_rozjazdu("FILTER", kopie[0]) == "FILTER=Ha"
+    # Obrazy: liczba i role tej kopii; sama liczba bez znanej roli; „∅" bez zebranej liczby.
+    assert grid_mod._pole_rozjazdu(queries.COPY_IMAGES, kopie[0]) == "obrazy=1 (integration)"
+    assert grid_mod._pole_rozjazdu(queries.COPY_IMAGES, _kopia(3, image_roles="[null]")) == "obrazy=1"
+    assert grid_mod._pole_rozjazdu(
+        queries.COPY_IMAGES, _kopia(4, image_count=None, image_roles=None)) == "obrazy=∅"
 
 
 def test_podpowiedz_mowi_o_kopii_bez_zebranego_zeznania(qapp, tmp_path, monkeypatch):

@@ -945,13 +945,28 @@ def _wartosc_zeznania(v):
     return str(v)
 
 
+def _obrazy_kopii(kopia):
+    """Liczba i role obrazów kopii do podpowiedzi: „3 (MasterFlat, RejectionMapLow, …)"; sama liczba,
+    gdy żadna rola nie jest znana (pojedynczy obraz bez `imageType` i bez `id` - 248 plików
+    archiwum - lista „(?)" nie niesie informacji); „∅" bez zebranej liczby. Jeden format dla
+    „×N" i dla członu „mówi inaczej"."""
+    if kopia["image_count"] is None:
+        return _wartosc_zeznania(None)
+    tekst = str(kopia["image_count"])
+    role = json.loads(kopia["image_roles"]) if kopia["image_roles"] else []
+    if any(r is not None for r in role):
+        tekst += f" ({', '.join('?' if r is None else str(r) for r in role)})"
+    return tekst
+
+
 def _pole_rozjazdu(etykieta, kopia):
     """Jedno pole z `queries.copy_divergence` jako człon zdania „mówi inaczej: …" - wspólne dla
     podpowiedzi „×N" i podmenu „Ta kopia prowadzi". `kopia` - wiersz `present_copy_facts` (dict).
-    Obrazy - sama nazwa pola; pola NAZWY i ŚCIEŻKI (AR-1) - etykieta z katalogu i wartość tej kopii
-    (`queries.copy_name_facts`); keyword nagłówka - „FILTER=CLS"."""
+    Obrazy - liczba i role TEJ kopii (`_obrazy_kopii`), nie sama nazwa pola: „obrazy" bez wartości
+    nie mówiło, czym kopie się różnią (odbiór 2026-10-10); pola NAZWY i ŚCIEŻKI (AR-1) - etykieta
+    z katalogu i wartość tej kopii (`queries.copy_name_facts`); keyword nagłówka - „FILTER=CLS"."""
     if etykieta == queries.COPY_IMAGES:
-        return i18n.t("grid.tip.copy_field_images")
+        return f"{i18n.t('grid.tip.copy_field_images')}={_obrazy_kopii(kopia)}"
     if etykieta in queries.COPY_NAME_FIELDS:
         wartosc = queries.copy_name_facts(kopia["path"])[etykieta]
         if etykieta == queries.COPY_FLATGRP:
@@ -970,19 +985,15 @@ def _dup_tip(row):
     (z jej własną wartością). Do 0021 podpowiedź mówiła samo „N obecnych lokalizacji", a baza nie
     wiedziała, czym kopie się różnią - teraz wie, więc mówi.
 
-    Role pokazujemy, gdy którakolwiek jest znana; pojedynczy obraz bez `imageType` i bez `id` (248
-    plików archiwum) dostaje samą liczbę - lista „(?)" nie niesie informacji. Kopia bez zebranego
-    zeznania mówi to wprost, zamiast milczeć jak kopia zgodna."""
+    Liczba i role obrazów w jednym formacie z członem „mówi inaczej" (`_obrazy_kopii`). Kopia bez
+    zebranego zeznania mówi to wprost, zamiast milczeć jak kopia zgodna."""
     tip = i18n.t("grid.tip.dup_locs", n=row["n_present"])
     for c in row.get("_copies") or ():
         tip += i18n.t("grid.tip.copy_path", path=c["path"])
         if c.get("_reka"):
             tip += i18n.t("grid.tip.copy_hand")
         if c["image_count"] is not None:
-            tip += i18n.t("grid.tip.copy_images", n=c["image_count"])
-            role = json.loads(c["image_roles"]) if c["image_roles"] else []
-            if any(r is not None for r in role):
-                tip += f" ({', '.join('?' if r is None else str(r) for r in role)})"
+            tip += i18n.t("grid.tip.copy_images", n=_obrazy_kopii(c))
         if queries.copy_facts_state(c["hdr_hash"], c["hdr_rule"]) != queries.FAKTY_BIEZACE:
             tip += i18n.t("grid.tip.copy_unread", place=i18n.t("nav.dostawa"),
                           check=i18n.t("pipeline.btn.presence"),

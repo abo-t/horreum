@@ -120,11 +120,30 @@ def _widoczne(h):
     return [k.accessibleName() for k in h.karty if not k.isHidden()]
 
 
-def _wysokosc_na_rzedy(h, n):
-    """Wysokość Domu, w której mieści się DOKŁADNIE `n` rzędów kart (pół rzędu luzu)."""
+def _wysokosc_na_rzedy(h, n, *, ze_stopka=True, luz=None):
+    """Wysokość Domu, w której mieści się DOKŁADNIE `n` rzędów kart (domyślnie pół rzędu luzu,
+    gdy jest rząd następny) - z tą samą miarą reszty ekranu, której używa kod (zawinięty tekst
+    liczony dla bieżącej szerokości)."""
     rzedy = h._wysokosci_rzedow()
     odstep = h.teczki_siatka.verticalSpacing()
-    return h._wysokosc_poza_teczkami() + sum(rzedy[:n]) + odstep * (n - 1) + rzedy[n] // 2
+    if luz is None:
+        luz = rzedy[n] // 2 if n < len(rzedy) else 2
+    return h._wysokosc_poza_teczkami(ze_stopka=ze_stopka) + sum(rzedy[:n]) + odstep * (n - 1) + luz
+
+
+def _reszta_przy_szerokosci(h, w):
+    h.resize(w, h.height())
+    QApplication.processEvents()
+    return h._wysokosc_poza_teczkami()
+
+
+def _bez_przewijania(h):
+    """Dom nie przewija w pionie: prawdziwy pasek QScrollArea ukryty, a pion treści dla bieżącej
+    szerokości mieści się w viewporcie (po zdarzeniach, więc z paskiem poziomym, gdy ten stoi)."""
+    QApplication.processEvents()
+    uklad = h._tresc.layout()
+    pion = uklad.heightForWidth(h.width()) if uklad.hasHeightForWidth() else uklad.sizeHint().height()
+    return not h._scroll.verticalScrollBar().isVisible() and pion <= h._scroll.viewport().height()
 
 
 def _zdarzenia(path, rows):
@@ -298,7 +317,7 @@ def test_teczki_rzedy_schodza_z_wysokoscia_okna_i_wracaja(qapp, tmp_path):
         QApplication.processEvents()
         assert _widoczne(h) == [f"OBJ{i:02d}" for i in range(1, 10)]
         assert h.btn_teczki_wiecej.text() == "… i 11 kolejnych - szukaj w Znajdź"
-        assert h._tresc.layout().sizeHint().height() <= h.height(), "bez paska przewijania"
+        assert _bez_przewijania(h)
         h.resize(1400, 10)                        # niżej niż jeden rząd - jeden rząd zostaje
         QApplication.processEvents()
         assert _widoczne(h) == ["OBJ01", "OBJ02", "OBJ03"]
@@ -307,6 +326,79 @@ def test_teczki_rzedy_schodza_z_wysokoscia_okna_i_wracaja(qapp, tmp_path):
         QApplication.processEvents()
         assert len(_widoczne(h)) == 18 and h.karty == karty
         assert h.btn_teczki_wiecej.text() == "… i 2 kolejne - szukaj w Znajdź"
+        assert _bez_przewijania(h)
+    finally:
+        h.close()
+        con.close()
+
+
+def test_teczki_waskie_okno_liczy_zawiniety_tekst(qapp, tmp_path):
+    """Reszta ekranu liczona dla BIEŻĄCEJ szerokości: w wąskim oknie „Co mam" zawija się na kilka
+    linii i zabiera pion kartom - rzędów ma być tyle, żeby Dom dalej nie przewijał, także gdy
+    zmieniła się sama szerokość (recenzja Z1)."""
+    con = _baza_domu(str(tmp_path / "d.db"), _obiekty(20), extra=False)
+    h = HomeView(con, now_fn=lambda: DOM_NOW, poza_watkiem=False)
+    try:
+        h.resize(1400, 1600)
+        h.show()
+        QApplication.processEvents()
+        h.resize(1400, _wysokosc_na_rzedy(h, 4, luz=2))   # cztery rzędy na styk
+        QApplication.processEvents()
+        assert len(_widoczne(h)) == 12 and _bez_przewijania(h)
+        szeroko = h._wysokosc_poza_teczkami()
+        # Pierwsza szerokość, przy której „Co mam" się zawija (metryki czcionki offscreen nie są
+        # stałą). Poniżej podłogi okna kafle i karty nie zwężają się dalej, więc dochodzi pasek
+        # poziomy - rachunek ma go odjąć od pionu, a pionowego paska dalej nie ma.
+        next(w for w in (1000, 860, 760, 680, 600, 540) if _reszta_przy_szerokosci(h, w) > szeroko)
+        assert len(_widoczne(h)) < 12 and _bez_przewijania(h)
+        h.resize(1400, h.height())
+        QApplication.processEvents()
+        assert len(_widoczne(h)) == 12 and _bez_przewijania(h)
+    finally:
+        h.close()
+        con.close()
+
+
+def test_teczki_komplet_bez_stopki_ma_pierwszenstwo(qapp, tmp_path):
+    """Gdy każda teczka ma kartę (≤ 18), a komplet mieści się bez stopki, Dom pokazuje komplet:
+    stopka doliczona z góry chowałaby ostatni rząd i mówiła „… i 3 kolejne" o kartach, które ukryła
+    sama (recenzja Z2). O jeden rząd niżej stopka wraca z prawdziwą liczbą."""
+    con = _baza_domu(str(tmp_path / "d.db"), _obiekty(18), extra=False)
+    h = HomeView(con, now_fn=lambda: DOM_NOW, poza_watkiem=False)
+    try:
+        h.resize(1400, 1600)
+        h.show()
+        QApplication.processEvents()
+        assert len(_widoczne(h)) == 18 and h.btn_teczki_wiecej.isHidden()
+        h.resize(1400, _wysokosc_na_rzedy(h, 6, ze_stopka=False))
+        QApplication.processEvents()
+        assert len(_widoczne(h)) == 18 and h.btn_teczki_wiecej.isHidden() and _bez_przewijania(h)
+        h.resize(1400, _wysokosc_na_rzedy(h, 5))
+        QApplication.processEvents()
+        assert len(_widoczne(h)) == 15 and _bez_przewijania(h)
+        assert h.btn_teczki_wiecej.text() == "… i 3 kolejne - szukaj w Znajdź"
+    finally:
+        h.close()
+        con.close()
+
+
+def test_teczki_status_i_blad_biegu_zabieraja_pion_starym_kartom(qapp, tmp_path):
+    """Komunikat błędu biegu (i „Liczę gotowość…" w `_start`) stoi obok starych kart - rzędy liczą
+    się od nowa, żeby Dom nie przewijał do następnego biegu (recenzja Z3)."""
+    con = _baza_domu(str(tmp_path / "d.db"), _obiekty(20), extra=False)
+    h = HomeView(con, now_fn=lambda: DOM_NOW, poza_watkiem=False)
+    try:
+        h.resize(1400, 1600)
+        h.show()
+        QApplication.processEvents()
+        h.resize(1400, _wysokosc_na_rzedy(h, 3, luz=2))   # trzy rzędy na styk
+        QApplication.processEvents()
+        assert len(_widoczne(h)) == 9 and h.teczki_status.isHidden()
+        h._on_teczki_failed(h._gen, "boom")
+        QApplication.processEvents()
+        assert not h.teczki_status.isHidden() and "boom" in h.teczki_status.text()
+        assert len(_widoczne(h)) == 6 and _bez_przewijania(h)
+        assert h.btn_teczki_wiecej.text() == "… i 14 kolejnych - szukaj w Znajdź"
     finally:
         h.close()
         con.close()

@@ -17,9 +17,11 @@ nowszym zamówieniu trafia do kosza.
 TECZKI NA WYSOKOŚĆ OKNA. Kart jest do osiemnastu (sześć rzędów po trzy), ale rzędów tyle, ile
 mieści pion Domu - niższe okno dostaje mniej rzędów, nie pasek przewijania (2026-10-10: „zamiast
 9 daj 18, chyba że okno się zmniejszy w pionie"). Rachunek idzie z podpowiedzi układu (pion reszty
-ekranu + wysokość każdego rzędu), więc karta z czwartą linią „do przeliczenia" podnosi swój rząd,
-a ukryte rzędy mają miarę bez pokazywania. Karty powstają raz, przy wyniku teczek; zmiana rozmiaru
-tylko je odsłania i chowa.
+ekranu dla BIEŻĄCEJ szerokości, bo „Co mam", status i ogon „Ostatnio" zawijają tekst, plus wysokość
+każdego rzędu), więc karta z czwartą linią „do przeliczenia" podnosi swój rząd, a ukryte rzędy mają
+miarę bez pokazywania. Gdy każda teczka ma kartę, komplet bez stopki ma pierwszeństwo - stopka nie
+może sama wymuszać schowania rzędu, którego potrzebuje tylko ona. Karty powstają raz, przy wyniku
+teczek; zmiana rozmiaru, status i wiersz „Ostatnio" tylko je odsłaniają i chowają.
 
 „Co mam" i zdanie z dziennika liczą się synchronicznie (dwa krótkie SELECT-y, ~0,1 s razem na
 żywej bazie), bo mają mówić prawdę w chwili wejścia na Dom - gest wykonany przed sekundą na innym
@@ -231,6 +233,7 @@ class HomeView(QWidget):
         # Przewijanie, bo kanon minimalnego ekranu jest niski, a dziewięć kart teczek z ogonem
         # „do przeliczenia" potrafi go przerosnąć - bez tego dolny wiersz ucinałby się bez śladu.
         scroll = QScrollArea()
+        self._scroll = scroll
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
         zewn.addWidget(scroll)
@@ -379,6 +382,7 @@ class HomeView(QWidget):
     def _start(self, gen):
         self.teczki_status.setText(i18n.t("home.folders.computing"))
         self.teczki_status.setVisible(True)
+        self._dopasuj_rzedy()            # status zabiera pion starym kartom, które zostają w biegu
         inline = not (self._poza_watkiem and self._db_path)
         worker = TeczkiWorker(None if inline else self._db_path, gen,
                               con=self.con if inline else None)
@@ -442,6 +446,7 @@ class HomeView(QWidget):
         self._pokazana_gen = gen
         self.teczki_status.setText(i18n.t("home.folders.failed", msg=msg))
         self.teczki_status.setVisible(True)
+        self._dopasuj_rzedy()            # komunikat zostaje obok starych kart do następnego biegu
 
     # ---------------------------------------------------------------- teczki
 
@@ -459,15 +464,22 @@ class HomeView(QWidget):
         self.teczki_status.setVisible(not rows)
         self._dopasuj_rzedy()
 
-    def _wysokosc_poza_teczkami(self):
+    def _wysokosc_poza_teczkami(self, *, ze_stopka=True):
         """Pion Domu zajęty przez wszystko POZA siatką teczek (nagłówek, kafle, „Co mam", tytuł,
-        stopka, „Ostatnio", marginesy i odstępy) - z podpowiedzi układu, nie z geometrii, bo przy
-        pierwszym pokazaniu geometrii jeszcze nie ma. Stopka liczona ZAWSZE jako widoczna: jej
-        obecność jest wynikiem tego rachunku, więc nie może być jego wejściem."""
+        status, stopka, „Ostatnio", marginesy i odstępy) - z podpowiedzi układu dla BIEŻĄCEJ
+        szerokości (`heightForWidth`: etykiety zawijają tekst, więc węższe okno ma wyższą resztę),
+        nie z geometrii, bo przy pierwszym pokazaniu geometrii jeszcze nie ma. Stopkę liczy wg
+        `ze_stopka`, nie wg tego, czy akurat stoi: jej obecność jest wynikiem tego rachunku, więc
+        nie może być jego wejściem."""
         uklad = self._tresc.layout()
-        reszta = uklad.sizeHint().height() - self._siatka.sizeHint().height()
-        if self.btn_teczki_wiecej.isHidden():
-            reszta += self.btn_teczki_wiecej.sizeHint().height() + uklad.spacing()
+        calosc = (uklad.heightForWidth(self.width()) if uklad.hasHeightForWidth()
+                  else uklad.sizeHint().height())
+        reszta = calosc - self._siatka.sizeHint().height()
+        stopka = self.btn_teczki_wiecej.sizeHint().height() + uklad.spacing()
+        if ze_stopka and self.btn_teczki_wiecej.isHidden():
+            reszta += stopka
+        elif not ze_stopka and not self.btn_teczki_wiecej.isHidden():
+            reszta -= stopka
         return reszta
 
     def _wysokosci_rzedow(self):
@@ -486,8 +498,14 @@ class HomeView(QWidget):
         rzedy = self._wysokosci_rzedow()
         if not rzedy:
             return 0
-        dostepne = wysokosc - self._wysokosc_poza_teczkami()
         odstep = self.teczki_siatka.verticalSpacing()
+        # Każda teczka ma kartę i komplet mieści się BEZ stopki - pokaż komplet: stopka, która
+        # sama wymusiłaby schowanie ostatniego rzędu, mówiłaby o kartach ukrytych tylko przez nią.
+        if len(self._teczki) <= len(self.karty):
+            komplet = sum(rzedy) + odstep * (len(rzedy) - 1)
+            if komplet <= wysokosc - self._wysokosc_poza_teczkami(ze_stopka=False):
+                return len(rzedy)
+        dostepne = wysokosc - self._wysokosc_poza_teczkami()
         n = zajete = 0
         for wysokosc_rzedu in rzedy:
             zajete += wysokosc_rzedu + (odstep if n else 0)
@@ -503,7 +521,8 @@ class HomeView(QWidget):
         if not self.karty:
             self.btn_teczki_wiecej.setVisible(False)
             return
-        pokazane = min(len(self.karty), self._rzedy_mieszczace_sie(self.height()) * KOLUMNY_TECZEK)
+        pokazane = min(len(self.karty),
+                       self._rzedy_mieszczace_sie(self._pion_widoku()) * KOLUMNY_TECZEK)
         for i, karta in enumerate(self.karty):
             karta.setVisible(i < pokazane)
         reszta = len(self._teczki) - pokazane
@@ -511,10 +530,18 @@ class HomeView(QWidget):
         if reszta > 0:
             self.btn_teczki_wiecej.setText(i18n.t_plural("home.folders.more", reszta))
 
+    def _pion_widoku(self):
+        """Pion, jaki widok oddaje treści: wysokość Domu, pomniejszona o pasek poziomy, gdy treść
+        jest szersza od okna (poniżej podłogi okna karty i kafle nie zwężają się dalej). Viewport
+        w `resizeEvent` jeszcze tego nie wie, więc liczymy z minimum treści, nie z jego geometrii."""
+        pion = self.height()
+        if self._tresc.minimumSizeHint().width() > self.width():
+            pion -= self._scroll.horizontalScrollBar().sizeHint().height()
+        return pion
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if event.size().height() != event.oldSize().height():
-            self._dopasuj_rzedy()
+        self._dopasuj_rzedy()            # także po samej szerokości: zawinięty tekst rośnie w pion
 
     def _karta(self, r):
         """Karta teczki: kropka stanu, obiekt, rozmiar materiału, kalibracja i - osobno - lighty,

@@ -30,7 +30,8 @@ def test_migracja_ustawia_user_version(tmp_path):
     # + 0029 pending_renames.in_flight (trwały zamiar renamu przed mutacją, AR-29)
     # + 0030 header_backups.pending_since (backup niepotwierdzony, rekoncyliacja z dyskiem, AR-40)
     # + 0031 camera.pixel_source (piksel matrycy wpisany ręką, AR-55)
-    assert db._user_version(con) == db.SCHEMA_VERSION == 31
+    # + 0032 frame_note (uwagi klatki, tylko w bazie, WO-2)
+    assert db._user_version(con) == db.SCHEMA_VERSION == 32
     con.close()
 
 

@@ -19,6 +19,8 @@ EXPECTED_TABLES = {
     "target_plan",
     # 0022 - dziennik zapisu w miejscu (O5/Q8)
     "inplace_op",
+    # 0032 - uwagi klatki (WO-2)
+    "frame_note",
 }
 
 
@@ -95,19 +97,48 @@ def test_szkielet_przyszly_pusty(tmp_path):
     con.close()
 
 
-def test_user_version_v31_po_migracji(tmp_path):
-    """0031 podnosi user_version do 31 (świeża baza leci 0002→…→0031 sekwencyjnie; 0025 = wersja
+def test_user_version_v32_po_migracji(tmp_path):
+    """0032 podnosi user_version do 32 (świeża baza leci 0002→…→0032 sekwencyjnie; 0025 = wersja
     reguły koercji faktów kopii `location.hdr_rule`, AR-33; 0026 = werdykt „zostaw wszystkie
     wersje” `stack_version_kept` + `integration.creation_time`, AR-10; 0027 = stanowisko wskazane
     ręką `frame.observatory_source`; 0028 = kanał `frame.channel`, P4-3; 0029 = zamiar renamu
     `pending_renames.in_flight`, AR-29; 0030 = backup niepotwierdzony
-    `header_backups.pending_since`, AR-40; 0031 = piksel kamery z ręki `camera.pixel_source`, AR-55).
+    `header_backups.pending_since`, AR-40; 0031 = piksel kamery z ręki `camera.pixel_source`, AR-55;
+    0032 = uwagi klatki `frame_note`, WO-2).
 
     Pin JEST intencją: każda nowa migracja ma ten test PRZEWRÓCIĆ imiennie, żeby podniesienie
     wersji było gestem, a nie skutkiem ubocznym."""
     con = db.open_db(str(tmp_path / "h.db"))
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 31
-    assert db.SCHEMA_VERSION == 31
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 32
+    assert db.SCHEMA_VERSION == 32
+    con.close()
+
+
+def test_0032_frame_note_przyrost_na_bazie_v31(tmp_path):
+    """0032 na bazie v31 z klatką: tabela wchodzi PUSTA, jeden wiersz na klatkę (PK), CHECK odrzuca
+    treść pustą i z samych białych znaków, FK wiąże uwagę z istniejącą klatką."""
+    path = str(tmp_path / "h.db")
+    con = db.connect(path)
+    for version, filename in db.MIGRATIONS:
+        if version <= 31:
+            db._apply_migration(con, version, db._migration_sql(filename))
+    con.execute("INSERT INTO frame(sha1_data, kind, first_seen_at) VALUES ('a' || hex(randomblob(19)), "
+                "'light', '2026-10-09T00:00:00')")
+    con.commit()
+    assert db.migrate(con) == db.SCHEMA_VERSION
+    assert con.execute("SELECT count(*) FROM frame_note").fetchone()[0] == 0
+    fid = con.execute("SELECT id FROM frame").fetchone()[0]
+    con.execute("INSERT INTO frame_note(frame_id, body, updated_at) VALUES (?, 'chmury po 2:00', "
+                "'2026-10-09T00:00:00')", (fid,))
+    with pytest.raises(sqlite3.IntegrityError):
+        con.execute("INSERT INTO frame_note(frame_id, body, updated_at) VALUES (?, 'druga', "
+                    "'2026-10-09T00:00:00')", (fid,))                          # jedna uwaga na klatkę
+    for pusta in ("", "   "):
+        with pytest.raises(sqlite3.IntegrityError):
+            con.execute("UPDATE frame_note SET body = ? WHERE frame_id = ?", (pusta, fid))
+    with pytest.raises(sqlite3.IntegrityError):
+        con.execute("INSERT INTO frame_note(frame_id, body, updated_at) VALUES (999999, 'x', "
+                    "'2026-10-09T00:00:00')")                                  # FK: klatka musi istnieć
     con.close()
 
 

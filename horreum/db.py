@@ -108,6 +108,8 @@ from importlib import resources
 # tknie lokację. Kolumna wchodzi PUSTA - SQL nie wie, czy podmiany sprzed migracji zaszły.
 # 0031 to PRZYROST (ADD COLUMN, AR-55 (3)): `camera.pixel_source` - 'user' = piksel matrycy wpisany
 # ręką, silniejszy od karty `XPIXSZ` i EXIF. Kolumna wchodzi PUSTA - wiersze sprzed migracji to skan.
+# 0032 to PRZYROST (nowa tabela, WO-2): `frame_note` - jedna krótka uwaga człowieka na klatkę, tylko
+# w bazie, nigdy w nagłówku pliku. Tabela wchodzi PUSTA - uwag sprzed migracji nie było.
 MIGRATIONS = [
     (2, "0002_initial.sql"),
     (3, "0003_writeback.sql"),
@@ -139,6 +141,7 @@ MIGRATIONS = [
     (29, "0029_rename_intent.sql"),
     (30, "0030_backup_pending.sql"),
     (31, "0031_camera_pixel_source.sql"),
+    (32, "0032_frame_note.sql"),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 _KNOWN_VERSIONS = frozenset({0} | {v for v, _ in MIGRATIONS})

@@ -20,6 +20,10 @@ Drzewo (JSON-serializowalne):
   kanonicznego teleskopu, night→zakres na header.date_obs). `label` = CZYSTA prezentacja (describe); `_eval` ignoruje.
   Rozpoznawany PRZED warunkiem (nie ma `operator`) WŁASNĄ gałęzią — nigdy nie spada do
   `_eval_condition` (`validate_keyword` nie widzi None). Nieznany facet → ValueError (EXPECT).
+  Liść `camera` (→ `rel_camera`, `frame.camera_id`) nie ma grupy w listwie facetów: stawia go
+  zapytanie Znajdź `zestaw:` w drzewie zaawansowanym (zestaw = teleskop + kamera, a teleskop
+  bez kamery wskazywałby oba zestawy tej samej optyki). Gramatyka liścia jest wspólna, więc
+  wykonanie i opis słowami idą tą samą drogą co sześć facetów listwy.
   Noc: `[<D>T12:00:00, <D+1>T12:00:00)` — górna granica ZAWSZE pełnym datetime, nigdy `<=` z gołą
   datą [skill: sqlite-bare-date-upper-bound-trap]; NOT(noc) ZOSTAWIA klatki bez date_obs
   („nieznana data ≠ ta noc" — konsekwencja algebry, jak NOT(pusta-grupa)=∅).
@@ -58,7 +62,7 @@ _NUMERIC_KIND = {"gt": "num_gt", "lt": "num_lt", "ge": "num_ge", "le": "num_le"}
 
 # Facet-liść (F4): facet → kind dispatcha `leaf_frame_ids` (rel_night osobno — dwa parametry-granice).
 _FACET_KIND = {"object": "rel_object", "filter": "rel_filter", "channel": "rel_channel",
-               "kind": "rel_kind", "telescope": "rel_telescope"}
+               "kind": "rel_kind", "telescope": "rel_telescope", "camera": "rel_camera"}
 _NIGHT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 LeafFn = Callable[[str, str, object, object], "set[int]"]
@@ -183,7 +187,9 @@ _OP_GLYPHS = {"eq": "=", "ne": "≠", "gt": ">", "lt": "<", "ge": "≥", "le": "
 # (prezentacja facet-liścia: „Obiekt: NGC7000"/„Object: NGC7000"). Parytet z katalogiem trzyma test.
 _FACET_KEYS = {"object": "facets.group.object", "filter": "facets.group.filter",
                "channel": "facets.group.channel", "kind": "facets.group.kind",
-               "telescope": "facets.group.telescope", "night": "facets.group.night"}
+               "telescope": "facets.group.telescope", "night": "facets.group.night",
+               # Kamera nie ma grupy w listwie - nazwa ta sama, którą niesie nagłówek kolumny gridu.
+               "camera": "frame.col.camera"}
 
 
 def _op_word(op) -> str:

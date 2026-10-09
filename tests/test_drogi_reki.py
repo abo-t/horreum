@@ -101,6 +101,35 @@ def test_gest_przeniesienia_liczy_osie_zatrzymane_i_pominiecia():
     assert (g2.done, g2.skipped) == (0, {"own": 1})
 
 
+def test_gest_przeniesienia_liczy_klatke_z_ktorej_przeszla_tylko_uwaga():
+    """Równanie księgowe gestu z piątą osią (0032): klatka, z której przeszła WYŁĄCZNIE uwaga, jest
+    w `done` i w `frame_ids` - inaczej nie trafiłaby do żadnego członu
+    `done + skipped + zatrzymane + not_superseded == total`. Zdanie paska nazywa uwagi.
+    Falsyfikator: zdejmij `t.note_moved` z warunku `done` w `transfer_gesture`."""
+    con = _baza()
+    oid = _obiekt(con)
+    a, b = _klatka(con, "a"), _klatka(con, "b")                     # tylko uwaga
+    c, d = _klatka(con, "c"), _klatka(con, "d")                     # obiekt + uwaga
+    e, f = _klatka(con, "e"), _klatka(con, "f")                     # uwaga, następczyni ma własną
+    zywa = _klatka(con, "z")
+    repo.assign_object(con, frame_id=c, object_id=oid, object_source="user", now=NOW)
+    repo.set_frame_note(con, frame_ids=[a, c, e], body="chmury po 2:00", now=NOW)
+    repo.set_frame_note(con, frame_ids=[f], body="własna", now=NOW)
+    _zastap(con, a, b, r"R:\X\a.dng")
+    _zastap(con, c, d, r"R:\X\c.dng")
+    _zastap(con, e, f, r"R:\X\e.dng")
+
+    g = supersede.transfer_gesture(con, frame_ids=[a, c, e, zywa], now=NOW)
+    assert (g.total, g.done, g.note_moved, g.object_moved, g.not_superseded) == (4, 2, 2, 1, 1)
+    assert g.skipped == {"own": 1} and g.frame_ids == (a, c)
+    assert g.done + sum(g.skipped.values()) + g.not_superseded == g.total
+    i18n.set_lang("pl")
+    msg = supersede.zdanie_przeniesienia(g)
+    assert msg.startswith("Przeniesienie faktów ręki: 2 z 4 klatek (obiekt: 1, uwagi: 2)")
+    i18n.set_lang("en")
+    assert "(object: 1, notes: 2)" in supersede.zdanie_przeniesienia(g)
+
+
 def test_zdanie_przeniesienia_renderuje_object_kept(monkeypatch):
     """Zdanie paska mówi o werdykcie zatrzymanym osobnym członem - nie chowa go w „pominięto".
     Falsyfikator: usuń człon `object_kept` z `zdanie_przeniesienia` - asercja o „został" pada."""
@@ -204,7 +233,8 @@ def test_klucze_zdania_przeniesienia_sa_w_katalogu():
                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
                  and n.func.attr in ("t", "t_plural") and n.args
                  and isinstance(n.args[0], ast.Constant)}
-    dynamiczne = ({f"supersede.transfer.axis_{k}" for k in ("object", "config", "site", "lineage")}
+    dynamiczne = ({f"supersede.transfer.axis_{k}"
+                   for k in ("object", "config", "site", "note", "lineage")}
                   | {f"supersede.transfer.skip_{s}" for s in supersede._POWODY_POMINIECIA.values()
                      if s is not None})
     assert literalne and literalne <= set(CATALOG)

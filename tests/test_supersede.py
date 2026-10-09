@@ -4,6 +4,8 @@ Cztery strażniki passu (replay chronologiczny · ostatni event per klatka · ż
 cyklu), klinga i jej idempotencja, gaszenie ogniwa przy powrocie treści oraz trzej konsumenci
 kolumny. Bez plików na dysku — wejściem passu jest DZIENNIK bazy, nie drzewo.
 """
+import json
+
 import pytest
 
 from horreum import audit, db, repo, resolver, supersede
@@ -152,6 +154,22 @@ def test_szkielet_z_faktem_reki_to_zwykle_zastapienie():
     s = supersede.backfill(con, now=NOW, apply=True)
     assert (s.marked, s.absorbed) == (1, 0)
     assert queries.superseded_frame_ids(con) == {szkielet}
+
+
+def test_szkielet_z_uwaga_to_zwykle_zastapienie():
+    """Uwaga klatki (0032) jest faktem ręki jak werdykt wycofania: szkielet z uwagą nie jest
+    „pustym miejscem po odczycie”, więc zostaje przy zwykłym zastąpieniu i w kubełku przeniesienia.
+    Falsyfikator: zdejmij człon `frame_note` z `repo.skeleton_frame_ids` - wraca czasownik
+    `frame.absorbed`."""
+    con = _baza()
+    szkielet, prawdziwa = _klatka(con, "szk", kind="unknown"), _klatka(con, "ok", kind="light")
+    _podmiana(con, _kopia(con, szkielet, r"R:\X\l.xisf"), prawdziwa)
+    repo.set_frame_note(con, frame_ids=[szkielet], body="plik z uszkodzonej karty", now=NOW)
+    assert repo.skeleton_frame_ids(con, [szkielet]) == set()
+    s = supersede.backfill(con, now=NOW, apply=True)
+    assert (s.marked, s.absorbed) == (1, 0)
+    assert queries.superseded_frame_ids(con) == {szkielet}
+    assert supersede.pending_transfer(con) == [(szkielet, prawdziwa, "uwaga")]
 
 
 # ---------------------------------------------------------------- pass
@@ -587,6 +605,72 @@ def test_przeniesienie_jest_idempotentne_i_wymaga_ogniwa():
     assert powtorka.object_moved is False and powtorka.skipped == "nastepczyni ma wlasne zrodlo"
     assert con.execute(
         "SELECT count(*) FROM event WHERE verb='object.assigned'").fetchone()[0] == 2  # gest + przeniesienie
+
+
+def _zastapiona(con, *, kind_nastepczyni="light"):
+    a, b = _klatka(con, "aaa"), _klatka(con, "bbb", kind=kind_nastepczyni)
+    lid = _kopia(con, a, r"R:\X\plik.fits")
+    _podmiana(con, lid, b)
+    assert repo.mark_superseded(con, frame_id=a, superseded_by=b, now=NOW)
+    return a, b
+
+
+def _uwaga(con, fid):
+    r = con.execute("SELECT body FROM frame_note WHERE frame_id = ?", (fid,)).fetchone()
+    return None if r is None else r[0]
+
+
+@pytest.mark.parametrize("kind_nastepczyni", ["light", "flat"])
+def test_przenosi_uwage_na_nastepczynie_bez_wlasnej(kind_nastepczyni):
+    """Piąta oś (0032): uwaga przechodzi na następczynię bez własnej uwagi, BEZ WZGLĘDU na rodzaj
+    („zmieniony flat” mówi o flacie). Stara klatka zostaje ze swoją uwagą (append-only), spis
+    `notes_hand` rośnie, parytet `frame_note` zostaje zielony, payload niesie `przeniesione_z`."""
+    con = _baza()
+    a, b = _zastapiona(con, kind_nastepczyni=kind_nastepczyni)
+    repo.set_frame_note(con, frame_ids=[a], body="zmieniony flat", now=NOW)
+    assert supersede.pending_transfer(con) == [(a, b, "uwaga")]
+    przed = audit.human_facts_census(con)
+
+    t = repo.transfer_human_facts(con, frame_id=a, now=NOW)
+    assert (t.note_moved, t.object_moved, t.skipped) == (True, False, "")
+    assert (_uwaga(con, a), _uwaga(con, b)) == ("zmieniony flat", "zmieniony flat")
+    payload = con.execute("SELECT payload FROM event WHERE verb = 'note.set' AND target = ?",
+                          (f"frame:{b}",)).fetchone()[0]
+    assert json.loads(payload) == {"before": None, "after": "zmieniony flat", "przeniesione_z": a}
+    assert supersede.pending_transfer(con) == []
+    po = audit.human_facts_census(con)
+    assert (przed.notes_hand, po.notes_hand) == (1, 2) and po.spadki(przed) == {}
+    assert all(p.ok for p in audit.entity_event_parity(con) if p.name.startswith("frame_note"))
+    powtorka = repo.transfer_human_facts(con, frame_id=a, now=NOW)
+    assert (powtorka.note_moved, powtorka.skipped) == (False, "nastepczyni ma wlasne zrodlo")
+
+
+def test_uwaga_nie_nadpisuje_wlasnej_uwagi_nastepczyni():
+    """Guard lustrzany do pozostałych osi: następczyni z własną uwagą przemówiła sama - nie ma
+    jej w kubełku, a klinga zostawia jej tekst."""
+    con = _baza()
+    a, b = _zastapiona(con)
+    repo.set_frame_note(con, frame_ids=[a], body="stara", now=NOW)
+    repo.set_frame_note(con, frame_ids=[b], body="własna", now=NOW)
+    assert supersede.pending_transfer(con) == []
+    t = repo.transfer_human_facts(con, frame_id=a, now=NOW)
+    assert (t.note_moved, t.skipped) == (False, "nastepczyni ma wlasne zrodlo")
+    assert _uwaga(con, b) == "własna"
+
+
+def test_uwaga_przechodzi_razem_z_obiektem_w_jednym_gescie():
+    con = _baza()
+    oid = repo.upsert_object(con, canon="IC443", catalog="IC", kind=None, now=NOW)[0]
+    a, b = _zastapiona(con)
+    _z_obiektem(con, a, oid, "user")
+    repo.set_frame_note(con, frame_ids=[a], body="chmury", now=NOW)
+    assert supersede.pending_transfer(con) == [(a, b, "obiekt+uwaga")]
+    t = repo.transfer_human_facts(con, frame_id=a, now=NOW)
+    assert (t.object_moved, t.note_moved) == (True, True)
+    ts = {r[0] for r in con.execute("SELECT ts FROM event WHERE target = ? "
+                                    "AND verb IN ('object.assigned', 'note.set')",
+                                    (f"frame:{b}",))}
+    assert ts == {NOW}
 
 
 def _integracja(con, master_frame_id, *, now=NOW):

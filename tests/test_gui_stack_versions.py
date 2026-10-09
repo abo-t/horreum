@@ -1024,3 +1024,27 @@ def test_odmiana_liczby_obrazow_i_zrodla_daty_w_katalogu():
     for n, forma in ((1, "1 stos stoi"), (3, "3 stosy stoją"), (5, "5 stosów stoi"),
                      (12, "12 stosów stoi"), (22, "22 stosy stoją")):
         assert i18n.t_plural("tasks.stack_versions_kept_tip", n, keep="x").startswith(forma)
+
+
+def test_AR50_kolumna_Wersja_do_wlaczenia_w_Znajdz_poza_perspektywa(view):
+    """AR-50 (5), decyzja „q11 tak": w prezentacji Znajdź kolumna „Wersja" jest do włączenia
+    („Kolumny ▾"), domyślnie wyłączona - i działa w KAŻDEJ perspektywie, nie tylko w „Wersjach
+    stosów": fakty grupy (tu etykieta środka kadru i świadek) widać przy stosie w „Przeglądzie".
+    Stoi za „Plikiem", ostatnim z prostego zestawu kolumn. W klasycznej zostaje własnością
+    perspektywy - przypięte zachowanie tamtej prezentacji się nie zmienia."""
+    from horreum.gui import grid as grid_mod
+    view.apply_perspective("Przegląd")
+    view.set_presentation(grid_mod.PREZENTACJA_ZNAJDZ)
+    assert view.model._version_col() is None
+    view.sel_bar.act_version_col.setChecked(True)
+    m, h = view.model, view.table.horizontalHeader()
+    assert m._version_col() == len(grid_mod.FIND_COLS)
+    assert h.visualIndex(m._version_col()) == h.visualIndex(m.base_col("path")) + 1
+    assert (_komorka_wersji(view, 101, "DisplayRole")
+            == "inna integracja · historia · 2026-02-21 12:43 · 33 wejścia")
+    view.set_presentation(grid_mod.PREZENTACJA_KLASYCZNA)
+    assert view.model._version_col() is None
+    view.set_presentation(grid_mod.PREZENTACJA_ZNAJDZ)
+    assert view.model._version_col() is not None, "wybór przeżywa przełączenie prezentacji"
+    view.sel_bar.act_version_col.setChecked(False)
+    assert view.model._version_col() is None and not view._potrzebne_wersje()

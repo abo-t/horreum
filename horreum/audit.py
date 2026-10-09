@@ -87,7 +87,19 @@ def entity_event_parity(con):
     tylko je LICZYMY z dziennika (`config_unpaired_reassignments`) i odejmujemy jawnie. Zmierzone
     na żywej `pf4` (2026-10-04): 16481 emisji − 32 odpięcia − 11 przepięć bez pary = 16438 klatek
     z configiem, co do sztuki. Człon nie maskuje regresji, bo jest odtworzony, a nie kotwiczony:
-    na bazie zbudowanej bieżącym kodem musi wynosić zero i tego pilnuje osobne kryterium."""
+    na bazie zbudowanej bieżącym kodem musi wynosić zero i tego pilnuje osobne kryterium.
+
+    UWAGI KLATKI (0032) MAJĄ PO STRONIE DZIENNIKA KLATKI, NIE EMISJE. Zmiana treści uwagi to UPSERT
+    tego samego wiersza z kolejnym `note.set`, więc „emisje - zdjęcia” rozjeżdżałyby się o każdą
+    edycję. Licznikiem dziennika jest liczba klatek, których OSTATNI event uwag to `note.set`
+    (gest, cofnięcie i przeniesienie po podmianie pliku piszą te same czasowniki). Drugi wiersz,
+    `frame_note.body`, pyta o TREŚĆ: ile wierszy niesie dokładnie `after` tego eventu. Sam licznik
+    nie widzi podmiany tekstu gołym SQL-em (wiersz zostaje, liczba się zgadza) - strażnikiem treści
+    jest ta para, nie spis `human_facts_census`, który liczy wiersze."""
+    uwagi_w_dzienniku = con.execute(
+        "SELECT count(*) FROM event e WHERE e.verb = 'note.set' "
+        "AND e.id = (SELECT max(o.id) FROM event o WHERE o.target = e.target "
+        "            AND o.verb IN ('note.set', 'note.cleared'))").fetchone()[0]
     return (
         Parity("camera",
                con.execute("SELECT count(*) FROM camera").fetchone()[0],
@@ -144,6 +156,17 @@ def entity_event_parity(con):
                con.execute("SELECT count(*) FROM frame "
                            "WHERE calibration_profile_id IS NOT NULL").fetchone()[0],
                _events(con, "calibration_profile.assigned"), 0, None),
+        Parity("frame_note",
+               con.execute("SELECT count(*) FROM frame_note").fetchone()[0],
+               uwagi_w_dzienniku, 0, None),
+        Parity("frame_note.body",
+               con.execute(
+                   "SELECT count(*) FROM frame_note n JOIN event e ON e.id = "
+                   "  (SELECT max(o.id) FROM event o WHERE o.target = 'frame:' || n.frame_id "
+                   "   AND o.verb IN ('note.set', 'note.cleared')) "
+                   "WHERE e.verb = 'note.set' "
+                   "AND json_extract(e.payload, '$.after') IS n.body").fetchone()[0],
+               uwagi_w_dzienniku, 0, None),
     )
 
 
@@ -473,6 +496,13 @@ class HumanFacts:
     cichy ubytek - przebieg, który przepisze zeznanie głosem innej kopii - ma być widać w
     `--baseline`. Wartość domyślna 0 - powód i kierunek błędu jak przy `offset_hand`."""
 
+    notes_hand: int = 0
+    """UWAGA KLATKI (`frame_note`, 0032) - dwunasta oś: wiersze tabeli uwag. Uwag nie pisze żaden
+    automat, więc każdy ich ubytek po etapie jest wycofaniem ręki i ma dać kod 1, jak na każdej
+    osi. Oś liczy WIERSZE, nie treść: podmianę tekstu bez zmiany liczby łapie parytet `frame_note`
+    w `entity_event_parity` (treść wiersza == `after` ostatniego `note.set`), nie ten spis.
+    Wartość domyślna 0 - powód i kierunek błędu jak przy `offset_hand`."""
+
     object_hand_frames: tuple | None = None
     """MIGAWKA TOŻSAMOŚCI osi obiektu (E5-1, bramka `sol` Z1): posortowane `frame_id` klatek
     z faktem ręki (`TRANSFERABLE_OBJECT_SOURCES`) - te same klatki, które liczy `object_hand`.
@@ -510,7 +540,8 @@ class HumanFacts:
                 "offset_hand": self.offset_hand,
                 "retired_hand": self.retired_hand,
                 "observatory_hand": self.observatory_hand,
-                "testimony_hand": self.testimony_hand}
+                "testimony_hand": self.testimony_hand,
+                "notes_hand": self.notes_hand}
 
     @property
     def snapshot(self):
@@ -617,6 +648,7 @@ def human_facts_census(con):
             "SELECT count(*) FROM frame WHERE retired_at IS NOT NULL").fetchone()[0],
         observatory_hand=_observatory_hand(con),
         testimony_hand=_testimony_hand(con),
+        notes_hand=_notes_hand(con),
     )
 
 
@@ -641,3 +673,13 @@ def _observatory_hand(con):
     return con.execute(
         "SELECT count(*) FROM frame WHERE observatory_source IN (SELECT value FROM json_each(?))",
         (json.dumps(sorted(STICKY_OBSERVATORY_SOURCES)),)).fetchone()[0]
+
+
+def _notes_hand(con):
+    """Licznik osi `notes_hand` - z bazą SPRZED 0032 włącznie, z tego samego powodu co
+    `_observatory_hand`: spis nie migruje mierzonej bazy, a tabeli uwag może w niej nie być.
+    Brak tabeli = uwaga nie mogła powstać = 0."""
+    if not con.execute("SELECT count(*) FROM sqlite_master "
+                       "WHERE type = 'table' AND name = 'frame_note'").fetchone()[0]:
+        return 0
+    return con.execute("SELECT count(*) FROM frame_note").fetchone()[0]

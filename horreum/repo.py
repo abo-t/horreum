@@ -523,9 +523,10 @@ def skeleton_frame_ids(con, frame_ids):
     Szkielet = klatka z miękkiego lądowania odczytu (W1): rodzaj `unknown`, ustalony bez ręki
     (`kind_source IS NULL`), BEZ zeznania (`header`) i BEZ żadnej lokacji (także nieobecnej - plik,
     który zniknął spod innej ścieżki, może wrócić, więc to jeszcze nie wchłonięcie). BEZ FAKTÓW
-    RĘKI: werdykt wycofania, oś obiektu, zestaw i stanowisko wskazane ręką, werdykt rodowodu - każdy
-    z nich czyni klatkę czymś więcej niż pustym miejscem po nieudanym odczycie i zostawia ją przy
-    zwykłym zastąpieniu (kubełek przeniesienia faktów, `supersede.pending_transfer`)."""
+    RĘKI: werdykt wycofania, oś obiektu, zestaw i stanowisko wskazane ręką, werdykt rodowodu, uwaga
+    klatki (0032) - każdy z nich czyni klatkę czymś więcej niż pustym miejscem po nieudanym odczycie
+    i zostawia ją przy zwykłym zastąpieniu (kubełek przeniesienia faktów,
+    `supersede.pending_transfer`)."""
     ids = sorted({int(i) for i in frame_ids})
     if not ids:
         return set()
@@ -538,7 +539,8 @@ def skeleton_frame_ids(con, frame_ids):
         "AND NOT EXISTS (SELECT 1 FROM header h WHERE h.frame_id = f.id) "
         "AND NOT EXISTS (SELECT 1 FROM location l WHERE l.frame_id = f.id) "
         "AND NOT EXISTS (SELECT 1 FROM integration_input ii WHERE ii.input_frame_id = f.id "
-        "                AND ii.asserted_by = 'user')",
+        "                AND ii.asserted_by = 'user') "
+        "AND NOT EXISTS (SELECT 1 FROM frame_note n WHERE n.frame_id = f.id)",
         (json.dumps(ids),)).fetchall()}
 
 
@@ -573,6 +575,9 @@ class FactTransfer:
     """Fakt ręki obiektu ZOSTAŁ na klatce zastąpionej, bo następczyni nie jest lightem (AR-16):
     kalibracja z definicji nie ma obiektu. Osobno od `skipped`, bo inne osie mogły przejść w tym
     samym geście, a raport ma powiedzieć, że werdykt ręki nie przepadł, tylko nie miał dokąd iść."""
+    note_moved: bool = False
+    """Przeniesiono uwagę klatki (0032) - piąta oś, przechodzi na następczynię BEZ własnej uwagi.
+    Klatka, z której przeszła wyłącznie uwaga, też jest przeniesieniem (gest liczy ją w `done`)."""
     skipped: str = ""          # "" = nic nie pominięto (konwencja liczników z `ObjectGesture`)
 
 
@@ -665,6 +670,14 @@ def transfer_human_facts(con, *, frame_id, now, actor="user:local"):
     jest pusta, więc emitujemy samo `observatory.assigned` - nie ma czego odpinać, a para
     rozjechałaby bilans `frame.observatory_id` (wzorzec przeniesienia configu).
 
+    PIĄTA OŚ: UWAGA KLATKI (0032). Guard pyta o oś w całości, jak przy stanowisku: przenosimy, gdy
+    następczyni nie ma WŁASNEJ uwagi - jej uwaga jest zdaniem człowieka o tej treści i cudza jej
+    nie nadpisuje. Oś jest KIND-AGNOSTIC (uwaga mówi o nocy i o obrazie, także flata: „zmieniony
+    flat”). Stara klatka zostaje ze swoją uwagą (append-only), więc spis `notes_hand` rośnie o jeden
+    zamiast stać w miejscu. Zapis to `note.set` z `before=None` i `przeniesione_z` - parytet
+    `frame_note` czyta ostatni event uwag klatki, więc przeniesiona uwaga bilansuje się jak napisana
+    ręką.
+
     Zwraca `FactTransfer`. Idempotentne: powtórzenie po udanym przeniesieniu trafia w guardy
     wszystkich osi (następczyni ma już swoje) i zwraca `skipped` bez zapisu."""
     with _immediate(con):
@@ -691,7 +704,10 @@ def transfer_human_facts(con, *, frame_id, now, actor="user:local"):
             (frame_id,)).fetchall()
         ma_stanowisko = (stara["observatory_source"] in STICKY_OBSERVATORY_SOURCES
                          and stara["observatory_id"] is not None)
-        if not ma_obiekt and not ma_config and not ma_stanowisko and not rodowod:
+        uwaga = con.execute(
+            "SELECT body FROM frame_note WHERE frame_id = ?", (frame_id,)).fetchone()
+        if (not ma_obiekt and not ma_config and not ma_stanowisko and not rodowod
+                and uwaga is None):
             return FactTransfer(skipped="brak faktow czlowieka")
         nowa_id = stara["superseded_by"]
         nowa = con.execute(
@@ -723,6 +739,8 @@ def transfer_human_facts(con, *, frame_id, now, actor="user:local"):
             and kamera_zestawu is not None and nowa["camera_id"] == kamera_zestawu)
         stanowisko_do_przeniesienia = (ma_stanowisko and nowa["observatory_source"] is None
                                        and nowa["observatory_id"] is None)
+        uwaga_do_przeniesienia = uwaga is not None and con.execute(
+            "SELECT 1 FROM frame_note WHERE frame_id = ?", (nowa_id,)).fetchone() is None
         # Integracje, w których następczyni ma JUŻ własny werdykt ręki — jej zdanie zostaje.
         wlasne = {r["integration_id"] for r in con.execute(
             "SELECT integration_id FROM integration_input "
@@ -739,7 +757,7 @@ def transfer_human_facts(con, *, frame_id, now, actor="user:local"):
         # treści człowiek wypowiedział się drugi raz i to jego zdanie zostaje.
         rodowod_do_zdjecia = [r for r in rodowod if r["integration_id"] in wlasne]
         if (not obiekt_do_przeniesienia and not config_do_przeniesienia
-                and not stanowisko_do_przeniesienia
+                and not stanowisko_do_przeniesienia and not uwaga_do_przeniesienia
                 and not rodowod_do_przeniesienia and not rodowod_do_zdjecia):
             # POWÓD MA BYĆ PRAWDZIWY, nie jeden dla wszystkich odmów: „następczyni ma własne
             # źródło" i „zestaw do niej nie pasuje" to dwa różne stany i dwie różne dalsze drogi
@@ -794,6 +812,13 @@ def transfer_human_facts(con, *, frame_id, now, actor="user:local"):
                                          "observatory_source": stara["observatory_source"],
                                          "przeniesione_z": frame_id},
                        reason="stanowisko wskazane ręką przeniesione po podmianie pliku")
+        if uwaga_do_przeniesienia:
+            con.execute("INSERT INTO frame_note(frame_id, body, updated_at) VALUES (?, ?, ?)",
+                        (nowa_id, uwaga["body"], now))
+            emit_event(con, actor=actor, verb="note.set", target=f"frame:{nowa_id}",
+                       now=now, payload={"before": None, "after": uwaga["body"],
+                                         "przeniesione_z": frame_id},
+                       reason="uwaga przeniesiona po podmianie pliku")
         for r in rodowod_do_przeniesienia:
             iid = r["integration_id"]
             # Kwalifikator `excluded.` to PSEUDO-TABELA upserta SQLite, nie nasza kolumna o tej
@@ -827,6 +852,7 @@ def transfer_human_facts(con, *, frame_id, now, actor="user:local"):
                         object_kept=obiekt_zostaje,
                         config_moved=config_do_przeniesienia,
                         observatory_moved=stanowisko_do_przeniesienia,
+                        note_moved=uwaga_do_przeniesienia,
                         lineage_moved=len(rodowod_do_przeniesienia),
                         lineage_dropped=len(rodowod_do_zdjecia))
 
@@ -4724,3 +4750,141 @@ def save_perspective(con, *, name, spec, now, uid="local"):
 # miała (rejestr też nie dawał drogi z okna), a pisarz bez ekranu byłby kodem dla nikogo. Dług
 # nazwany w kolejce: kasowanie ma sens dopiero razem z listą perspektyw do zarządzania, a to jest
 # ekran, nie funkcja.
+
+
+# ═══════════════════════════════════════════════ 1.10 uwagi klatki (0032, WO-2)
+# Jedna krótka notatka człowieka na klatkę („chmury po drugiej”, „zmieniony flat”). Żyje wyłącznie
+# w bazie (powód w 0032) i pisze ją wyłącznie ręka - automatu uwag nie ma, więc zdjęcie uwagi
+# kasuje wiersz bez nagrobka (precedens `clear_target_plan`), a historię niesie dziennik:
+# `note.set` z `{before, after}` i `note.cleared` z `{before}`.
+
+# Najdłuższa uwaga w znakach PO normalizacji. Limit jest decyzją, nie pomiarem (przed 0032 uwag nie
+# było czym zmierzyć): uwaga ma się zmieścić w komórce gridu z podpowiedzią i w jednym zdaniu
+# o nocy - dłuższy opis należy do dziennika obserwacji, nie do klatki.
+NOTE_MAX = 300
+
+
+def normalize_note(body):
+    """Treść uwagi w postaci, którą zapisuje klinga: białe znaki (także nowe linie) zwinięte do
+    jednej spacji, bez spacji na brzegach; `None` → pusty napis. JEDNO źródło tej reguły - okno
+    uwag liczy nią pustość pola i zgodność z bieżącą uwagą, więc wygaszone „Zapisz” i odmowa
+    klingi nie mogą się rozjechać."""
+    return " ".join((body or "").split())
+
+
+@dataclass(frozen=True)
+class NoteGesture:
+    """Wynik gestu uwag. `changed` = klatki, których uwaga realnie drgnęła (każda ma swój event),
+    `unchanged` = klatki zastane w stanie docelowym (idempotencja, bez eventu).
+
+    `before` = uwaga SPRZED gestu dla KAŻDEJ zmienionej klatki (`None` = klatka uwagi nie miała).
+    To jest droga powrotu, nie raport: podane do `restore_frame_notes` oddaje stan bajt w bajt,
+    także zaznaczeniu mieszanemu (część klatek z uwagą, część bez). Klatek niezmienionych tu nie
+    ma - cofnięcie nie ma im czego oddawać."""
+    changed: tuple[int, ...]
+    unchanged: tuple[int, ...]
+    before: dict[int, str | None]
+
+
+def _note_gesture(con, cel, *, now, actor, reason=None, expected=None):
+    """Doprowadź uwagi klatek do stanu `cel` (`{frame_id: treść | None}`) - wspólne ostrze trzech
+    gestów. Wołane WEWNĄTRZ transakcji wołającego: stan czytany pod tym samym lockiem, pod którym
+    pada zapis (TOCTOU), i jeden `now` na cały gest - wspólny `ts` eventów JEST tożsamością gestu
+    w dzienniku (ostatni gest ręki czyta się po `ts`).
+
+    Klatka spoza bazy to błąd wołającego (EXPECT) i pada PRZED pierwszym zapisem: cel gestu to
+    zaznaczenie z widoku, więc brak klatki znaczy rozjazd widoku z bazą, a nie stan, o którym gest
+    miałby cicho zameldować pominięciem.
+
+    `expected` (`{frame_id: treść | None}`) = GUARD DRYFU pod tym samym lockiem: klatka, której
+    bieżąca uwaga nie jest tą oczekiwaną, zostaje `unchanged` bez eventu - zapis z drugiego
+    połączenia między odczytem wołającego a tą transakcją jest cudzą, nowszą decyzją."""
+    ids = sorted(cel)
+    stan = {int(r[0]): r[1] for r in con.execute(
+        "SELECT f.id, n.body FROM frame f LEFT JOIN frame_note n ON n.frame_id = f.id "
+        "WHERE f.id IN (SELECT value FROM json_each(?))", (json.dumps(ids),))}
+    brak = [fid for fid in ids if fid not in stan]
+    if brak:
+        raise ValueError(f"uwagi: klatek nie ma w bazie: {brak[:10]}")
+    zmienione, bez_zmian, przed = [], [], {}
+    for fid in ids:
+        byla, ma_byc = stan[fid], cel[fid]
+        if byla == ma_byc or (expected is not None and byla != expected[fid]):
+            bez_zmian.append(fid)
+            continue
+        if ma_byc is None:
+            con.execute("DELETE FROM frame_note WHERE frame_id = ?", (fid,))
+            emit_event(con, actor=actor, verb="note.cleared", target=f"frame:{fid}", now=now,
+                       payload={"before": byla}, reason=reason)
+        else:
+            con.execute(
+                "INSERT INTO frame_note(frame_id, body, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(frame_id) DO UPDATE SET body = excluded.body, "
+                "updated_at = excluded.updated_at", (fid, ma_byc, now))
+            emit_event(con, actor=actor, verb="note.set", target=f"frame:{fid}", now=now,
+                       payload={"before": byla, "after": ma_byc}, reason=reason)
+        zmienione.append(fid)
+        przed[fid] = byla
+    return NoteGesture(changed=tuple(zmienione), unchanged=tuple(bez_zmian), before=przed)
+
+
+def set_frame_note(con, *, frame_ids, body, now, uid="local"):
+    """USTAW UWAGĘ - ta sama treść na każdej z `frame_ids` (gest na zaznaczeniu). `NoteGesture`.
+
+    Treść przechodzi przez `normalize_note`. Pusta po normalizacji → `ValueError`: zdjęcie uwagi
+    jest osobnym gestem (`clear_frame_note`), a pusty zapis udający kasację rozmyłby w dzienniku
+    dwa różne zdania człowieka. Dłuższa niż `NOTE_MAX` → `ValueError`. Klatka z identyczną treścią
+    → `unchanged` bez eventu (przeklikanie okna nie ma prawa puchnąć dziennika). Zapis to UPSERT,
+    a `note.set` niesie `before` także przy nadpisaniu, bo po nim tekstu nie ma skąd wziąć."""
+    tekst = normalize_note(body)
+    if not tekst:
+        raise ValueError("uwaga pusta po normalizacji - do zdjęcia uwagi służy clear_frame_note")
+    if len(tekst) > NOTE_MAX:
+        raise ValueError(f"uwaga ma {len(tekst)} znaków, limit to {NOTE_MAX}")
+    with _immediate(con):
+        g = _note_gesture(con, {int(i): tekst for i in frame_ids}, now=now, actor=f"user:{uid}")
+    return g
+
+
+def clear_frame_note(con, *, frame_ids, now, uid="local"):
+    """ZDEJMIJ UWAGĘ z każdej z `frame_ids` - kasuje wiersz, `note.cleared` niesie CAŁĄ treść sprzed
+    kasacji (odtworzenie jest odczytem dziennika, nie archeologią). Klatka bez uwagi → `unchanged`
+    bez eventu. `NoteGesture`."""
+    with _immediate(con):
+        g = _note_gesture(con, {int(i): None for i in frame_ids}, now=now, actor=f"user:{uid}")
+    return g
+
+
+def restore_frame_notes(con, *, before, expected=None, now, uid="local"):
+    """COFNIJ GEST UWAG: doprowadź każdą klatkę z `before` (`NoteGesture.before`) DOKŁADNIE do
+    zapisanego tam stanu - `None` zdejmuje uwagę, tekst ją ustawia. Te same czasowniki co gest
+    w przód, z `reason="cofnięcie"`: parytet `frame_note` czyta ostatni event uwag klatki, więc
+    cofnięcie bilansuje się jak każdy inny zapis, a dziennik mówi, że to nie była nowa decyzja.
+
+    TEKST WRACA BEZ PONOWNEJ NORMALIZACJI i bez limitu: pochodzi z bazy (klinga znormalizowała go
+    przy zapisie), a cofnięcie ma oddać bajty, nie ich poprawioną wersję. Pusty albo nie-tekst to
+    błąd wołającego (EXPECT) - `ValueError` przed zapisem, zamiast wywrotki na `CHECK` w połowie
+    gestu. Klatka już w stanie z `before` → `unchanged` bez eventu, więc drugi klik nic nie pisze.
+    Wynik niesie własne `before`, czyli drogę z powrotem do stanu sprzed cofnięcia.
+
+    `expected` (`{frame_id: treść | None}` - stan, który zostawił cofany gest) zamyka okno między
+    odczytem wołającego a zapisem: klatka, której uwagę pod `BEGIN IMMEDIATE` zastajemy INNĄ niż
+    oczekiwana, zostaje `unchanged` bez eventu (wzór `expected_*` w `user_assign_object`) - inaczej
+    cofnięcie nadpisałoby stanem sprzed gestu zapis z drugiego połączenia, którego cofany gest nie
+    zrobił. Podane `expected` musi pokrywać każdą klatkę z `before` (EXPECT): klatka bez warunku
+    w gescie z warunkami to luka w guardzie, nie świadomy wybór."""
+    cel = {}
+    for fid, tekst in before.items():
+        if tekst is not None and (not isinstance(tekst, str) or not tekst.strip()):
+            raise ValueError(f"uwagi: frame:{fid} - stan do przywrócenia {tekst!r} nie jest uwagą")
+        cel[int(fid)] = tekst
+    oczekiwane = None
+    if expected is not None:
+        oczekiwane = {int(fid): tekst for fid, tekst in expected.items()}
+        brak = sorted(set(cel) - set(oczekiwane))
+        if brak:
+            raise ValueError(f"uwagi: cofnięcie bez stanu oczekiwanego dla klatek {brak[:10]}")
+    with _immediate(con):
+        g = _note_gesture(con, cel, now=now, actor=f"user:{uid}", reason="cofnięcie",
+                          expected=oczekiwane)
+    return g

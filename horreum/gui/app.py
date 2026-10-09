@@ -35,6 +35,9 @@ from horreum.gui import busy, i18n, mapproj, portfolio, queries, rows, theme
 from horreum.gui.assign_dialog import AssignObjectDialog
 from horreum.gui.wb_worker import zdanie_commitu_kart, zdanie_undo_kart
 from horreum.gui.config_dialog import AssignConfigDialog
+# Kontener strony zbiorów: stałe prezentacji są wartościami jego sygnału, a `_TRASY` (poziom modułu)
+# ich potrzebuje; import ciągnie grid (~30 ms przy imporcie okna, zmierzone 2026-10-09).
+from horreum.gui.flows.znajdz_view import PREZENTACJA_KLASYCZNA, PREZENTACJA_ZNAJDZ, ZnajdzView
 from horreum.gui.observatory_dialog import AssignObservatoryDialog
 from horreum.gui.map_view import SitesMapView
 from horreum.gui.rows import TwoPartDelegate
@@ -3017,17 +3020,40 @@ class TelescopeAxisWindow(QMainWindow):
         raise AttributeError(name)
 
 
-# Miejsca nawigacji (F5, PLAN_ux_redesign §6): indeksy pozycji sidebara == indeksy stron stacku.
-# NAV_PLANER dołożony w T5 jako CZWARTE miejsce (D-0731-6) — świadomie BEZ badge'a: „ile do
-# zrobienia" zależy u planera od suwaka `min_hours`, więc liczba w nawiasie kłamałaby przy każdej
-# zmianie progu (badge Porządków liczy roboty, które są faktem bazy, nie funkcją parametru).
-NAV_DOSTAWA, NAV_ZBIORY, NAV_PORZADKI, NAV_PLANER = range(4)
+# Wiersze sidebara: Dom i Znajdź na górze, pod nieklikalnym nagłówkiem „Więcej" dawne cztery
+# miejsca (F5, PLAN_ux_redesign §6). NAV_PLANER świadomie BEZ badge'a (D-0731-6): „ile do zrobienia"
+# zależy u planera od suwaka `min_hours`, więc liczba w nawiasie kłamałaby przy każdej zmianie progu
+# (badge Porządków liczy roboty, które są faktem bazy, nie funkcją parametru).
+NAV_DOM, NAV_ZNAJDZ, NAV_WIECEJ, NAV_DOSTAWA, NAV_ZBIORY, NAV_PORZADKI, NAV_PLANER = range(7)
+# Strony stosu. WIERSZ NIE JEST JUŻ STRONĄ 1:1: Znajdź i Zbiory klasyczne to JEDNA strona (ten sam
+# `FramesView` w kontenerze `ZnajdzView`) w dwóch prezentacjach - drugi grid rozjechałby stan zbioru,
+# staging i mutex (JEDEN-STAN-EKRANU). Raporty widoków wiążą się ze STRONĄ, nie z wierszem: przejście
+# Znajdź → Zbiory klasyczne nie zmienia tego, co widać pod paskiem.
+STRONA_DOM, STRONA_ZBIORY, STRONA_DOSTAWA, STRONA_PORZADKI, STRONA_PLANER = range(5)
+# JEDYNE miejsce mapowania wiersz → (strona, prezentacja strony zbiorów). Nagłówka „Więcej" tu nie
+# ma: nie jest celem, a `_on_nav_changed` ignoruje wiersz bez trasy. Prezentacje to wartości
+# sygnału `ZnajdzView.prezentacja_zmieniona` (stałe z kontenera strony), więc odwrotna mapa
+# (przełączenie z wnętrza strony przesuwa wiersz) bierze się z tej samej tabeli.
+_TRASY = {
+    NAV_DOM: (STRONA_DOM, None),
+    NAV_ZNAJDZ: (STRONA_ZBIORY, PREZENTACJA_ZNAJDZ),
+    NAV_DOSTAWA: (STRONA_DOSTAWA, None),
+    NAV_ZBIORY: (STRONA_ZBIORY, PREZENTACJA_KLASYCZNA),
+    NAV_PORZADKI: (STRONA_PORZADKI, None),
+    NAV_PLANER: (STRONA_PLANER, None),
+}
+_WIERSZ_PREZENTACJI = {prez: row for row, (_strona, prez) in _TRASY.items() if prez is not None}
+# Postój na wierszu Dom przed jego odczytem przy przeglądaniu sidebara strzałkami - dłuższy niż
+# odstęp autopowtórzenia klawisza, krótszy niż chwila, po której człowiek czyta ekran.
+_DOM_POSTOJ_MS = 150
 
 
 class MainWindow(QMainWindow):
     """Okno aplikacji (PLAN_gui_pipeline §2 + UX-redesign F5): menu Plik (Otwórz/Nowa baza) +
-    nawigacja 3 MIEJSC w sidebarze (Dostawa / Zbiory / Porządki — `QListWidget` prowadzi
-    `QStackedWidget`; osie teleskop/obserwatorium/obiekt to PODSTRONY Porządków w `TasksView`).
+    sidebar (Dom · Znajdź · „Więcej": Dostawa / Zbiory klasyczne / Porządki / Planer - `QListWidget`
+    prowadzi `QStackedWidget` przez `_TRASY`; osie teleskop/obserwatorium/obiekt to PODSTRONY
+    Porządków w `TasksView`). Start z otwartą bazą = Dom; wejścia do strony zbiorów z Domu i z menu
+    to wyłącznie `show_find`/`show_classic`.
     WŁAŚCICIEL połączenia `con` — otwiera je z `db_path`, zamyka poprzednie przy przełączeniu bazy
     i bieżące przy zamknięciu okna (top-level apki, w odróżnieniu od osadzonych widoków).
 
@@ -3055,6 +3081,12 @@ class MainWindow(QMainWindow):
         # jeden obrót więcej po skończeniu bieżącego.
         self._odswiezam_widoki = False
         self._odswiez_jeszcze_raz = False
+        # Dom istnieje tylko przy zamontowanej bazie; `None` po demontażu, bo blokada recepty
+        # (`_odblokuj_recepte`, zegar) może przyjść już po nim.
+        self.home_view = None
+        # Ostatnia recepta ze strumienia Zbiorów - Dom pokazuje ją i wykonuje niezależnie od paska,
+        # z którego gasi ją każdy cudzy raport (FH-2e); życie wyznacza wyłącznie strumień.
+        self._recepta_strumienia = None
         # Numer wersji W TYTULE, bo wydanie jedzie do użytkownika jako JEDEN plik `horreum-gui.exe`
         # (onefile — CLI `horreum --version` nie powstaje) i okno jest wtedy jedyną powierzchnią,
         # na której da się sprawdzić, co się ma. Numer czytany, nie pisany (`horreum/__init__.py`).
@@ -3135,6 +3167,8 @@ class MainWindow(QMainWindow):
         if grid_view is not None:
             grid_view.table.viewport().update()
             grid_view.facet_rail.refresh_theme()
+        if self.home_view is not None:                 # złota ramka kafla to arkusz widżetu
+            self.home_view.use_theme(name)
         obs = getattr(self, "observatory_view", None)   # mapa maluje QPainterem — paleta jej nie odświeży (F8)
         if obs is not None:
             obs.map_view.refresh_theme()
@@ -3155,11 +3189,22 @@ class MainWindow(QMainWindow):
     def _build_central(self):
         central = QWidget()
         outer = QHBoxLayout(central)
-        # Sidebar nawigacji (F5): lista pionowa 3 miejsc zamiast paska przycisków-zakładek.
+        # Sidebar nawigacji (F5): lista pionowa miejsc zamiast paska przycisków-zakładek.
         # Ukryty do montażu widoków (dom widoczności JAWNY: _clear_views chowa, _mount_views odsłania).
         self.nav = QListWidget()
         self.nav.setFixedWidth(160)
         self.nav.currentRowChanged.connect(self._on_nav_changed)
+        # Klik albo Enter na wierszu = „idę tam pracować" (fokus wchodzi na stronę), same strzałki
+        # = przeglądanie sidebara (fokus zostaje w liście) - patrz `_on_nav_changed`.
+        self.nav.itemClicked.connect(self._on_nav_wejscie)
+        self.nav.itemActivated.connect(self._on_nav_wejscie)
+        # Odczyt Domu (~0,1 s na żywej bazie, teczki osobno w tle) dopiero po POSTOJU na wierszu:
+        # strzałki w sidebarze mijają Dom w drodze do Znajdź i nie mają za każdym razem czekać.
+        # Kolejny ruch restartuje zegar, a po nim odczyt idzie tylko, gdy Dom wciąż jest na ekranie.
+        self._dom_po_postoju = QTimer(self)
+        self._dom_po_postoju.setSingleShot(True)
+        self._dom_po_postoju.setInterval(_DOM_POSTOJ_MS)
+        self._dom_po_postoju.timeout.connect(self._odswiez_dom_po_postoju)
         self.nav.setVisible(False)
         outer.addWidget(self.nav)
         self.stack = QStackedWidget()
@@ -3230,44 +3275,130 @@ class MainWindow(QMainWindow):
         self.statusBar().messageChanged.connect(self._on_status_changed)
 
     def _show_view(self, idx):
-        """Przełącz miejsce nawigacji (seam dla kodu i testów) — sidebar prowadzi stack."""
+        """Przełącz WIERSZ sidebara (seam dla kodu i testów) - trasę do strony i prezentacji
+        rozstrzyga `_on_nav_changed` z `_TRASY`."""
         self.nav.setCurrentRow(idx)
+
+    def show_find(self, query=None):
+        """Wejście do strony zbiorów w prezentacji Znajdź - jedyna droga z Domu i z menu. `query`
+        (gdy podane) zastępuje bieżący zbiór wynikiem zapytania; bez niego zbiór zostaje, jaki był.
+        Wiersz sidebara przełącza stronę i prezentację (`_on_nav_changed`), a kontener dostaje
+        wywołanie jeszcze raz WPROST: wejście z Domu i z menu to zamiar szukania, więc fokus ma
+        trafić w pole także wtedy, gdy przełączenie oddało go liście, która go trzymała."""
+        self._show_view(NAV_ZNAJDZ)
+        self.znajdz_view.show_find(query)
+
+    def show_classic(self):
+        """Wejście do strony zbiorów w prezentacji klasycznej (dzisiejszy ekran Zbiorów)."""
+        self._show_view(NAV_ZBIORY)
+
+    def _strona(self):
+        """Bieżąca strona stosu (`STRONA_*`) - miejsce, z którym wiążą się raporty i recepta."""
+        return self.stack.currentIndex()
 
     def _on_nav_changed(self, row):
         if row < 0:                     # nav.clear() przy przemontowaniu emituje -1 (F5R#6)
             return
-        self.stack.setCurrentIndex(row)
-        if self._miejsce_komunikatu is not None and self._miejsce_komunikatu != row:
+        trasa = _TRASY.get(row)
+        if trasa is None:               # nagłówek „Więcej" - ręka go nie wybierze, kod nie powinien
+            return
+        strona, prezentacja = trasa
+        self.stack.setCurrentIndex(strona)
+        if prezentacja == PREZENTACJA_ZNAJDZ:
+            # `show_find` kładzie fokus w polu zapytania - dobrze, gdy człowiek przyszedł szukać, ale
+            # strzałki w sidebarze zatrzymywałyby się na Znajdź na zawsze (następna strzałka trafia
+            # w pole). Fokus wraca więc do listy, jeśli tam był; wejście „na serio" (klik, Enter)
+            # oddaje go polu w `_on_nav_wejscie`, a Dom i menu wchodzą przez `show_find`.
+            z_listy = self.nav.hasFocus()
+            self.znajdz_view.show_find()
+            if z_listy:
+                self.nav.setFocus(Qt.OtherFocusReason)
+        elif prezentacja == PREZENTACJA_KLASYCZNA:
+            self.znajdz_view.show_classic()
+        if self._miejsce_komunikatu is not None and self._miejsce_komunikatu != strona:
             # Raport widoku nie przechodzi do cudzego miejsca; `clearMessage` gasi też receptę
             # (`_on_status_changed`), a tu zerujemy to, co tamta droga zostawia przy cichym pasku.
             self._miejsce_komunikatu = None
             self._pelny_komunikat = ""
             self.statusBar().clearMessage()
         # Recepta mówi o Zbiorach (jedynym nadawcą jest grid), więc poza nimi gaśnie z paska -
-        # a przy powrocie widok podaje ją ze stanu, o ile wciąż jest prawdą (FH-2e).
-        if row != NAV_ZBIORY:
+        # a przy powrocie widok podaje ją ze stanu, o ile wciąż jest prawdą (FH-2e). Dom niesie
+        # ją osobno, ze strumienia (`_recepta_gridu`).
+        if strona != STRONA_ZBIORY:
             self._ustaw_recepte("")
-        msg = self._odlozone_raporty.pop(row, "")
+        msg = self._odlozone_raporty.pop(strona, "")
         if msg:
             # Raport z chwili, gdy tego miejsca nie było widać - pada teraz, przy nim.
-            self._flash(msg, miejsce=row)
-        if row == NAV_ZBIORY:
+            self._flash(msg, miejsce=strona)
+        if strona == STRONA_ZBIORY:
             self.grid_view.ponow_recepte()
-        if row == NAV_PORZADKI:        # wejście w Porządki = świeży stan liczników zadań
+        if strona == STRONA_DOM:
+            # Dom mówi o bazie w chwili wejścia. Przełączenie z listy (strzałki, klik) czeka na
+            # postój - klik i Enter odczytują od razu w `_on_nav_wejscie`; z kodu (Dom, menu) od razu.
+            if self.nav.hasFocus():
+                self._dom_po_postoju.start()
+            else:
+                self._odswiez_dom()
+        if strona == STRONA_PORZADKI:   # wejście w Porządki = świeży stan liczników zadań
             self.tasks_view.refresh_counts()
-        if row == NAV_PLANER and self.planner_view.bez_stanowiska:
+        if strona == STRONA_PLANER and self.planner_view.bez_stanowiska:
             # Stanowisko wskazuje się na innym ekranie (AR-48), więc pusty stan „bez stanowiska"
             # przelicza się przy każdym wejściu, dopóki jest prawdą - gest z pustego stanu obiecuje,
             # że plan policzy się po powrocie.
             self.planner_view.refresh()
 
+    def _on_nav_wejscie(self, item):
+        """Klik albo Enter na wierszu: Znajdź oddaje fokus polu zapytania (`show_find` bez zapytania
+        nie zmienia zbioru), Dom odczytuje się od razu, bez czekania na postój."""
+        row = self.nav.row(item)
+        if row == NAV_ZNAJDZ:
+            self.znajdz_view.show_find()
+        elif row == NAV_DOM:
+            self._dom_po_postoju.stop()
+            self._odswiez_dom()
+
+    def _odswiez_dom(self):
+        """Wejście na Dom: „Co mam" i dziennik od razu, teczki zamówione w tle. Teczki przy KAŻDYM
+        wejściu, bo nadanie obiektu w Porządkach przenosi klatki między teczkami, a oś obiektu
+        Porządków nie ma sygnału zmiany - wejście jest jedyną chwilą, w której wiadomo, że Dom
+        trzeba pokazać prawdziwy. Stare karty stoją do wyniku (zdanie „Liczę gotowość…" nad nimi)."""
+        self.home_view.odswiez()
+        self.home_view.odswiez_teczki()
+
+    def _odswiez_dom_po_postoju(self):
+        """Koniec postoju na wierszu Dom - odczyt tylko, gdy Dom wciąż jest na ekranie (strzałki mogły
+        go minąć) i wciąż istnieje (zmiana bazy w trakcie postoju)."""
+        if self.home_view is not None and self._strona() == STRONA_DOM:
+            self._odswiez_dom()
+
+    def _on_prezentacja_zmieniona(self, prezentacja):
+        """Prezentację przełączono Z WNĘTRZA strony zbiorów (przycisk „Zbiory klasyczne" paska
+        Znajdź) albo z `show_*` - sidebar ma pokazać właściwy wiersz. Sygnały listy zablokowane:
+        strona się nie zmienia, a `_on_nav_changed` zawołałby `show_*` drugi raz (pętla).
+        Idempotentne - wiersz już właściwy zostaje."""
+        row = _WIERSZ_PREZENTACJI.get(prezentacja)
+        if row is None or self.nav.currentRow() == row:
+            return
+        self.nav.blockSignals(True)
+        try:
+            self.nav.setCurrentRow(row)
+        finally:
+            self.nav.blockSignals(False)
+
     def _zatrzymaj_watki_widokow(self):
         """Zbierz wątki tła widoków, ZANIM widoki znikną (przełączenie bazy, zamknięcie okna).
         `QThread` jest dzieckiem widoku, więc kasowany razem z nim w biegu zabiłby aplikację,
         a wynik doręczony później trafiłby w zamknięte połączenie. Po kluczu metody, nie po
-        typie: widok bez wątku tła po prostu jej nie ma."""
-        for i in range(self.stack.count()):
-            zatrzymaj = getattr(self.stack.widget(i), "zatrzymaj_pola", None)
+        typie: widok bez wątku tła po prostu jej nie ma.
+
+        Grid nie stoi wprost na stosie (siedzi w kontenerze strony zbiorów), więc jego wątki
+        zbieramy jawnie - pytanie samych stron stosu zgubiłoby skład zbioru i pokrycie pól.
+        Metody są idempotentne, więc kontener, który kiedyś zacznie delegować, nie szkodzi."""
+        widoki = [self.stack.widget(i) for i in range(self.stack.count())]
+        if self.stack.count():
+            widoki.append(self.grid_view)
+        for w in widoki:
+            zatrzymaj = getattr(w, "zatrzymaj_pola", None)
             if zatrzymaj is not None:
                 zatrzymaj()
 
@@ -3277,6 +3408,8 @@ class MainWindow(QMainWindow):
         # Wykonawcy członów recepty wiszą na gridzie, który zaraz pójdzie do `deleteLater` - recepta
         # schodzi z paska tu, a nie dopiero przy pierwszym raporcie nowej bazy (Z9).
         self._ustaw_recepte("")
+        self._recepta_strumienia = None
+        self.home_view = None
         self.nav.clear()
         self.nav.setVisible(False)
         while self.stack.count():
@@ -3287,18 +3420,21 @@ class MainWindow(QMainWindow):
     # ---------------------------------------------------------------- montaż widoków na bazie
 
     def _mount_views(self):
-        """(Prze)montuj widoki na bieżącej bazie — 3 MIEJSCA (F5): Dostawa (pipeline), Zbiory (grid),
-        Porządki (zadania + podstrony osi). Importy widżetów lazy (wzorzec etapów; dla `TasksView`
-        OBOWIĄZKOWO — `tasks.py` importuje z `app.py` module-level, F5R2#1: import na górze domknąłby
-        cykl). Pod-widoki osi z `TasksView` ALIASOWANE na oknie — kontrakt `axis_view`/
+        """(Prze)montuj widoki na bieżącej bazie - strony `STRONA_*`: Dom, zbiory (grid w kontenerze
+        Znajdź), Dostawa (pipeline), Porządki (zadania + podstrony osi), Planer; wiersze sidebara wg
+        `_TRASY`. Importy widżetów lazy (wzorzec etapów; dla `TasksView`
+        OBOWIĄZKOWO - `tasks.py` importuje z `app.py` module-level, F5R2#1: import na górze domknąłby
+        cykl). Pod-widoki osi z `TasksView` ALIASOWANE na oknie - kontrakt `axis_view`/
         `observatory_view`/`object_view` przeżywa przemontowanie bez zmian."""
         from horreum.gui.pipeline import (                     # lazy: Qt-import tylko gdy montujemy
             REASON_COPY_FACTS, PipelineView)
         from horreum.gui.grid import FramesView
         from horreum.gui.tasks import TasksView
         from horreum.gui.planner import PlannerView
+        from horreum.gui.home import HomeView
 
         self._clear_views()
+        motyw = theme.normalize(QSettings("Horreum", "Horreum").value("ui/theme", theme.DEFAULT))
         pipeline = PipelineView(self.db_path, now_fn=self._now)
         pipeline.status_message.connect(self._flash)
         # `stage_finished` ŚWIADOMIE NIEPODPIĘTE: widoki odświeża koniec PRZEBIEGU
@@ -3351,7 +3487,7 @@ class MainWindow(QMainWindow):
         # który user patrzy (AR-43). Ta sama droga, co raport wczytania Zbiorów: przy widocznych
         # Porządkach pada od razu, poza nimi czeka na wejście w nie.
         tasks.observatory_view.status_message.connect(
-            lambda msg: self._raport_miejsca(msg, NAV_PORZADKI, wiaz=False))
+            lambda msg: self._raport_miejsca(msg, STRONA_PORZADKI, wiaz=False))
         tasks.open_collection.connect(self._on_open_collection)
         # Wiersz „?" Porządków prowadzi tam, gdzie jest jego robota - do Dostawy (AR-28 (b)) - i
         # niesie powód: linia nad akcjami mówi, po co człowiek tu jest. Obie drogi do sygnału
@@ -3364,21 +3500,63 @@ class MainWindow(QMainWindow):
         tasks.counts_changed.connect(self._on_tasks_counts)
 
         # Motyw PRZEKAZANY, nie czytany przez widok z rejestru (wiz T5 N4— jeden właściciel faktu).
-        planner = PlannerView(self.con, db_path=self.db_path, now_fn=self._now,
-                              theme_name=theme.normalize(
-                                  QSettings("Horreum", "Horreum").value("ui/theme", theme.DEFAULT)))
+        planner = PlannerView(self.con, db_path=self.db_path, now_fn=self._now, theme_name=motyw)
         planner.status_message.connect(self._raport_planera)
         planner.open_sites.connect(self._on_open_sites)                # AR-48: pusty stan → stanowiska
         planner.show_frames_for.connect(self._on_show_target_frames)   # T5e: most planer → grid
         self.planner_view = planner
 
-        for label, widget in ((i18n.t("nav.dostawa"), pipeline), (i18n.t("nav.zbiory"), grid),
-                              (i18n.t("nav.porzadki"), tasks), (i18n.t("nav.planer"), planner)):
+        # Strona zbiorów: TEN SAM grid w kontenerze z paskiem Znajdź - dwie prezentacje jednego
+        # stanu zbioru, nie dwa gridy (JEDEN-STAN-EKRANU).
+        znajdz = ZnajdzView(grid)
+        # Przełączenie prezentacji z wnętrza strony („Zbiory klasyczne" na pasku czasowników
+        # Znajdź) przesuwa wiersz sidebara - inaczej sidebar mówiłby „Znajdź" nad ekranem klasycznym.
+        znajdz.prezentacja_zmieniona.connect(self._on_prezentacja_zmieniona)
+        self.znajdz_view = znajdz
+
+        # Dom: zamiary człowieka → istniejące drogi. Teczki w tle chodzą razem z wątkami tła
+        # Zbiorów - test, który wyłącza tamte, dostaje też przewidywalny Dom.
+        home = HomeView(self.con, now_fn=self._now, theme_name=motyw,
+                        poza_watkiem=self._pola_poza_watkiem)
+        home.przyjmij.connect(lambda: self._show_view(NAV_DOSTAWA))
+        home.znajdz.connect(lambda: self.show_find())
+        home.wydaj.connect(grid._open_object_release)
+        home.popraw.connect(lambda: self._show_view(NAV_PORZADKI))
+        home.teczka.connect(self._on_teczka_domu)
+        home.wiecej.connect(self._on_wiecej_domu)
+        home.recepta_klik.connect(
+            lambda: self._wykonaj_recepte(czlony=self._recepta_strumienia.czlony
+                                          if self._recepta_strumienia else ()))
+        # Teczki liczą godziny per obiekt - gest osi obiektu przenosi klatki między teczkami.
+        grid.object_axis_changed.connect(home.odswiez_teczki)
+        self.home_view = home
+
+        for widget in (home, znajdz, pipeline, tasks, planner):      # kolejność = `STRONA_*`
             self.stack.addWidget(widget)
-            self.nav.addItem(label)
+        # Wiersze i wiersz startu przy ZABLOKOWANYCH sygnałach listy: Dom właśnie policzył się
+        # w konstruktorze, a `_on_nav_changed` zamówiłby drugi odczyt i drugi rachunek teczek
+        # (~0,5 s w tle na żywej bazie) przy każdym starcie i zmianie bazy.
+        self.nav.blockSignals(True)
+        try:
+            for row, label in ((NAV_DOM, i18n.t("nav.dom")), (NAV_ZNAJDZ, i18n.t("nav.znajdz")),
+                               (NAV_WIECEJ, i18n.t("nav.wiecej")),
+                               (NAV_DOSTAWA, i18n.t("nav.dostawa")),
+                               (NAV_ZBIORY, i18n.t("nav.zbiory")),
+                               (NAV_PORZADKI, i18n.t("nav.porzadki")),
+                               (NAV_PLANER, i18n.t("nav.planer"))):
+                assert self.nav.count() == row, "wiersze sidebara muszą stać w kolejności NAV_*"
+                item = QListWidgetItem(label)
+                if row == NAV_WIECEJ:
+                    # Nagłówek sekcji: bez flag nie da się go wybrać ani myszą, ani strzałkami
+                    # (klawiatura go przeskakuje), a wyszarzenie mówi, że to podpis, nie miejsce.
+                    item.setFlags(Qt.NoItemFlags)
+                self.nav.addItem(item)
+            self.nav.setCurrentRow(NAV_DOM)
+        finally:
+            self.nav.blockSignals(False)
+        self.stack.setCurrentIndex(STRONA_DOM)
         self.nav.setVisible(True)
-        self._show_view(NAV_DOSTAWA)
-        tasks.refresh_counts()    # badge żywy od MONTAŻU (F5R#1) — connect i pozycje nav już stoją
+        tasks.refresh_counts()    # badge żywy od MONTAŻU (F5R#1) - connect i pozycje nav już stoją
 
     def _odswiez_widoki_po_przebiegu(self):
         """Przebieg Dostawy się skończył (worker, własne połączenie) - read-modele w głównym wątku
@@ -3424,6 +3602,8 @@ class MainWindow(QMainWindow):
                     # Planer (T5): świeże klatki zmieniają POKRYCIE celów (godziny per kanał), więc
                     # plan nocy policzony przed dostawą pokazywałby stare luki.
                     self.planner_view.refresh()
+                    # Dom: sumy i dziennik od razu, teczki tylko zamawiamy (wątek tła).
+                    self._odswiez_dom()
                 if not self._odswiez_jeszcze_raz:
                     break
         finally:
@@ -3434,8 +3614,9 @@ class MainWindow(QMainWindow):
 
     def _on_open_collection(self, name):
         """Zadanie z Porządków prowadzi do Zbiorów z ustawioną perspektywą (Duplikaty = flaga
-        `only_dups` presetu, NIE drzewo filtra — R#14)."""
-        self._show_view(NAV_ZBIORY)
+        `only_dups` presetu, NIE drzewo filtra - R#14). Prezentacja klasyczna: perspektywa jest
+        kontrolką tamtej prezentacji."""
+        self.show_classic()
         self.grid_view.apply_perspective(name)
 
     def _on_show_target_frames(self, canons):
@@ -3447,7 +3628,7 @@ class MainWindow(QMainWindow):
         if not pairs:
             self._flash(i18n.t("planner.no_object_for_target"))
             return
-        self._show_view(NAV_ZBIORY)
+        self.show_classic()
         self.grid_view.apply_object_facet(pairs)
 
     def _on_open_sites(self):
@@ -3456,11 +3637,45 @@ class MainWindow(QMainWindow):
         self._show_view(NAV_PORZADKI)
         self.tasks_view.otworz_stanowiska()
 
+    def _on_teczka_domu(self, object_id, canon):
+        """Karta teczki na Domu → Znajdź z facetem tego obiektu. Ten sam publiczny seam gridu, co
+        most planera (`apply_object_facet`): zbiór definiuje wejście, nie poprzedni widok."""
+        self.show_find()
+        self.grid_view.apply_object_facet([(object_id, canon)])
+
+    def _on_wiecej_domu(self, klucz):
+        """Pozycja menu „Więcej…" Domu → istniejąca droga. Narzędzia paska zbioru (nazwy plików,
+        makra) otwieramy KLIKIEM ich przycisku, tylko gdy panel jest zamknięty: przycisk jest
+        przełącznikiem, więc drugi klik schowałby to, po co człowiek przyszedł."""
+        from horreum.gui import home as home_mod     # lazy jak `HomeView` w `_mount_views`
+        if klucz == home_mod.WIECEJ_PLANER:
+            self._show_view(NAV_PLANER)
+        elif klucz == home_mod.WIECEJ_STANOWISKA:
+            self._on_open_sites()
+        elif klucz in (home_mod.WIECEJ_NAZWY, home_mod.WIECEJ_MAKRA):
+            self.show_classic()
+            bar = self.grid_view.sel_bar
+            btn = bar.btn_rename if klucz == home_mod.WIECEJ_NAZWY else bar.btn_macro
+            if not btn.isChecked():
+                btn.click()
+        elif klucz == home_mod.WIECEJ_PERSPEKTYWY:
+            self.show_classic()
+            self.grid_view.combo_persp.setFocus(Qt.OtherFocusReason)
+        elif klucz == home_mod.WIECEJ_DOSTAWA:
+            self._show_view(NAV_DOSTAWA)
+        elif klucz == home_mod.WIECEJ_KLASYCZNE:
+            self.show_classic()
+        else:
+            raise ValueError(f"nieznana pozycja menu Więcej: {klucz!r}")
+
     def _on_tasks_counts(self, n):
-        """Badge sidebara: „Porządki (N)" przy N>0; przy zerze GOŁE „Porządki" — „(0)" to szum (F5R#8)."""
+        """Badge sidebara: „Porządki (N)" przy N>0; przy zerze GOŁE „Porządki" - „(0)" to szum (F5R#8).
+        Ta sama liczba idzie na kafel „Popraw" Domu - jeden sygnał, dwa nośniki (SPOT)."""
         item = self.nav.item(NAV_PORZADKI)
         if item is not None:
             item.setText(i18n.t("nav.porzadki") if n == 0 else i18n.t("nav.porzadki_count", n=n))
+        if self.home_view is not None:
+            self.home_view.ustaw_popraw(n)
 
     def _resolve_after_repair(self):
         """Takt 3 P-D wołany z okna „Napraw nagłówek…": ISTNIEJĄCY etap Dostawy. Zwraca POWÓD
@@ -3505,6 +3720,7 @@ class MainWindow(QMainWindow):
         self.object_view.set_busy(running)     # „Przypisz obiekt…" (#8/P4) — zapis, gatowany jak inne
         self.grid_view.set_busy(running)     # grid ma akcje ZAPISU (staging/commit/undo) — gatuj (wizytator C1)
         self.planner_view.set_busy(running)  # planer czyta CAŁE archiwum — nie liczmy nocy na wpół zapisanej bazie
+        self.home_view.set_busy(running)     # „Wydaj do WBPP" Domu gaśnie jak „Wydaj obiekt…" gridu
         if not running:
             # KONIEC PRZEBIEGU = JEDNO odświeżenie wszystkich widoków i plakietki. Bez warunku
             # „czy etap coś zapisał": przebieg przerwany albo zakończony błędem też mógł zapisać
@@ -3603,7 +3819,7 @@ class MainWindow(QMainWindow):
         """Wynik gestu gridu: związany ze Zbiorami, więc gaśnie przy zmianie miejsca nawigacji
         (AR-34). Wynik wyemitowany, gdy user jest gdzie indziej (gest panelu rodowodu przełącza
         widok na Dostawę), nie dostaje powiązania - nie ma z czym gasnąć, a zdanie ma paść."""
-        self._flash(msg, miejsce=NAV_ZBIORY if self.nav.currentRow() == NAV_ZBIORY else None)
+        self._flash(msg, miejsce=STRONA_ZBIORY if self._strona() == STRONA_ZBIORY else None)
 
     def _raport_wczytania_gridu(self, msg):
         """Raport WCZYTANIA zbioru („Wczytuję klatki…", „Grid: N klatek…") - na pasek tylko wtedy,
@@ -3614,7 +3830,7 @@ class MainWindow(QMainWindow):
         w Dostawie, mówiąc o ekranie, którego nie widać. Odłożony, a nie zgubiony: przy wejściu
         w Zbiory zdanie „Grid: N klatek…" jest prawdziwe i opisuje to, co właśnie pokazujemy.
         Nowszy raport zastępuje odłożony - liczy się ostatnie wczytanie."""
-        self._raport_miejsca(msg, NAV_ZBIORY)
+        self._raport_miejsca(msg, STRONA_ZBIORY)
 
     def _raport_miejsca(self, msg, miejsce, *, wiaz=True):
         """Raport widoku, który mówi o JEDNYM miejscu nawigacji - na pasek, gdy to miejsce widać,
@@ -3626,7 +3842,7 @@ class MainWindow(QMainWindow):
         mówi tym samym kanałem także wyniki gestów, a te przeżywały zmianę widoku - zostają przy
         tym. Odłożony raport pada przy wejściu zawsze związany: mówi już wyłącznie o tym ekranie.
         Nowszy raport zastępuje odłożony - liczy się ostatnie słowo widoku."""
-        if self.nav.currentRow() == miejsce:
+        if self._strona() == miejsce:
             self._odlozone_raporty.pop(miejsce, None)
             self._flash(msg, miejsce=miejsce if wiaz else None)
         else:
@@ -3639,8 +3855,8 @@ class MainWindow(QMainWindow):
         a jego zdanie o braku stanowiska stało nad ekranem Dostawy, którego nie dotyczy. Nie
         odkładamy go: przy wejściu na planer ten sam stan mówi PUSTY STAN ekranu (zdanie i gest
         „Ustaw stanowisko…"), więc odłożony raport powtarzałby go drugi raz."""
-        if self.nav.currentRow() == NAV_PLANER:
-            self._flash(msg, miejsce=NAV_PLANER)
+        if self._strona() == STRONA_PLANER:
+            self._flash(msg, miejsce=STRONA_PLANER)
 
     def _flash(self, msg, ms=5000, miejsce=None):
         """Raport na pasek — Z ELIZJĄ (FH-2). KAŻDY raport gasi receptę poprzedniego gestu.
@@ -3678,24 +3894,36 @@ class MainWindow(QMainWindow):
     def _recepta_gridu(self, recepta):
         """Recepta z gridu - na pasek tylko przy widocznych Zbiorach (FH-2e). Grid składa ją ze
         stanu przy KAŻDYM przeładowaniu, także po przebiegu Dostawy, a recepta mówi o Zbiorach;
-        przy wejściu w nie widok poda ją ponownie (`FramesView.ponow_recepte`)."""
-        if self.nav.currentRow() == NAV_ZBIORY:
+        przy wejściu w nie widok poda ją ponownie (`FramesView.ponow_recepte`).
+
+        Dom dostaje KAŻDĄ receptę strumienia, niezależnie od widocznej strony: jego „Ostatnio" żyje
+        wyłącznie tym strumieniem (pusta recepta zdejmuje ją z Domu), a nie raportami paska."""
+        self._recepta_strumienia = recepta if recepta else None
+        if self.home_view is not None:
+            self.home_view.pokaz_recepte(recepta)
+        if self._strona() == STRONA_ZBIORY:
             self._pokaz_recepte(recepta)
 
-    def _wykonaj_recepte(self):
+    def _wykonaj_recepte(self, *, czlony=None):
         """Klik w receptę = człon PIERWSZY (kolejność członów jest kolejnością w czasie, FH-2e).
         Człon bez wykonawcy ma przycisk wygaszony, więc tu nie dochodzi - warunek jest drugą linią
         obrony, bo sygnał bywa wołany wprost (testy, skróty).
+
+        `czlony` podaje Dom: jego recepta przychodzi ze strumienia i żyje dłużej niż ta na pasku,
+        którą gasi każdy cudzy raport. Bez argumentu - człony z paska. Keyword-only, bo `clicked`
+        przycisku paska podałby tu `checked: bool`.
 
         PODWÓJNY KLIK TO JEDEN GEST MOTORYCZNY (Z5). Wykonanie członu składa receptę odwrotną
         synchronicznie (odświeżenie → `ponow_recepte`), więc drugi klik tego samego ruchu ręki
         wykonałby odwrót odwrotu - masowo i bez potwierdzenia. Po wykonaniu przycisk stoi więc
         wygaszony przez systemowy odstęp podwójnego kliku (`doubleClickInterval`), a nie do
         następnego obrotu pętli: drugi klik dwukliku przychodzi z systemu do ~500 ms później,
-        więc blokada na jeden obrót niczego by nie złapała."""
-        if self._recepta_wstrzymana or not self._czlony_recepty:
+        więc blokada na jeden obrót niczego by nie złapała. Blokada jest JEDNA dla paska i Domu -
+        to ta sama recepta, a dwuklik na którymkolwiek nośniku to wciąż jeden gest."""
+        czlony = self._czlony_recepty if czlony is None else czlony
+        if self._recepta_wstrzymana or not czlony:
             return
-        wykonaj = self._czlony_recepty[0].wykonaj
+        wykonaj = czlony[0].wykonaj
         if wykonaj is None:
             return
         self._recepta_wstrzymana = True
@@ -3703,6 +3931,8 @@ class MainWindow(QMainWindow):
             wykonaj()
         finally:
             self._wlacz_recepte(False)
+            if self.home_view is not None:
+                self.home_view.wstrzymaj_recepte(True)
             QTimer.singleShot(QApplication.doubleClickInterval(), self, self._odblokuj_recepte)
 
     def _wlacz_recepte(self, wlaczona):
@@ -3718,6 +3948,8 @@ class MainWindow(QMainWindow):
         self._recepta_wstrzymana = False
         self._wlacz_recepte(bool(self._czlony_recepty)
                             and self._czlony_recepty[0].wykonaj is not None)
+        if self.home_view is not None:             # `None` po demontażu w trakcie blokady
+            self.home_view.wstrzymaj_recepte(False)
 
     def _wyswietl(self, msg):
         """Wyrenderuj raport na pasek i ZAPAMIĘTAJ, co dokładnie tam postawiliśmy."""

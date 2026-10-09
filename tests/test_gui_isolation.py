@@ -42,7 +42,14 @@ QT_WIDGET_FILES = {"app.py", "__main__.py", "pipeline.py", "grid.py", "projectio
                    # `config_dialog.py` w konwencji i z tego samego powodu wydzielony. Read-model
                    # grup (`queries.observatory_review_groups`) i walidator współrzędnych
                    # (`resolve.observatory.user_site_coords`) zostają Qt-wolne.
-                   "observatory_dialog.py"}
+                   "observatory_dialog.py",
+                   # Znajdź: kontener strony zbiorów (pasek zapytania nad tym samym `FramesView`).
+                   # Parser zapytania (`gui/flows/znajdz.py`) zostaje Qt-wolny.
+                   "znajdz_view.py",
+                   # 0032: okno „Uwagi…” - nie dotyka bazy; klinga uwag zostaje w Qt-wolnym `repo`.
+                   "note_dialog.py",
+                   "home.py",     # Dom: ekran startu (kafle, teczki w wątku tła); sumy w Qt-wolnym `queries`
+                   }
 
 
 def _imports_pyside6(path):

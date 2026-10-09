@@ -17,8 +17,8 @@ pytest.importorskip("PySide6")
 from horreum import db, repo
 from horreum.gui import queries
 from horreum.gui.app import (
-    NAV_DOSTAWA, NAV_PORZADKI, NAV_ZBIORY, MainWindow, ObjectAxisView, ObservatoryAxisView,
-    TelescopeAxisView,
+    NAV_DOM, NAV_DOSTAWA, NAV_PORZADKI, NAV_ZBIORY, STRONA_DOM, STRONA_PORZADKI, STRONA_ZBIORY,
+    MainWindow, ObjectAxisView, ObservatoryAxisView, TelescopeAxisView,
 )
 from horreum.gui.grid import PRESET_DUPS, Recepta
 
@@ -104,8 +104,10 @@ def test_zapis_naglowkow_do_plikow_gasi_etapy_Dostawy(qapp, tmp_path):
 def test_otwarte_na_bazie_montuje_widoki(qapp, tmp_path):
     win = MainWindow(_seeded_db(tmp_path))
     try:
-        assert win.stack.count() == 4                  # Dostawa + Zbiory + Porządki (F5) + Planer (T5)
-        assert win.nav.count() == 4 and not win.nav.isHidden()
+        # strony: Dom + zbiory (Znajdź/klasyczne) + Dostawa + Porządki (F5) + Planer (T5);
+        # wiersze: te same miejsca + drugi wiersz zbiorów + nagłówek „Więcej"
+        assert win.stack.count() == 5
+        assert win.nav.count() == 7 and not win.nav.isHidden()
         # kontrakt aliasów (R#10): osie żyją jako podstrony Porządków, atrybuty zostają
         assert isinstance(win.axis_view, TelescopeAxisView)
         assert isinstance(win.observatory_view, ObservatoryAxisView)
@@ -114,7 +116,8 @@ def test_otwarte_na_bazie_montuje_widoki(qapp, tmp_path):
         assert win.axis_view is win.tasks_view.axis_view
         assert win.axis_view.table.rowCount() == 4     # read-model odbity w osadzonym widoku
         assert win.tasks_view.axis_view._now is win._now   # forward now_fn (F5R#2)
-        assert win.nav.currentRow() == NAV_DOSTAWA     # start w Dostawie
+        assert win.nav.currentRow() == NAV_DOM         # start na Domu
+        assert win.stack.currentIndex() == STRONA_DOM
     finally:
         win.close()                                    # closeEvent zamyka con (własność okna)
 
@@ -134,9 +137,9 @@ def test_sidebar_przelacza_stack(qapp, tmp_path):
     win = MainWindow(_seeded_db(tmp_path))
     try:
         win._show_view(NAV_ZBIORY)
-        assert win.stack.currentIndex() == NAV_ZBIORY and win.nav.currentRow() == NAV_ZBIORY
+        assert win.stack.currentIndex() == STRONA_ZBIORY and win.nav.currentRow() == NAV_ZBIORY
         win._show_view(NAV_PORZADKI)                   # wejście w Porządki nie wybucha (refresh)
-        assert win.stack.currentIndex() == NAV_PORZADKI
+        assert win.stack.currentIndex() == STRONA_PORZADKI
     finally:
         win.close()
 
@@ -150,7 +153,7 @@ def test_zmiana_bazy_przemontowuje_i_zamyka_stara(qapp, tmp_path):
         assert win.con is not con_a                    # przejęta nowa baza
         assert win.db_path.endswith("b.db")            # ścieżka aktualna (worker jej potrzebuje)
         assert win.axis_view.table.rowCount() == 0     # pusta → 0 teleskopów
-        assert win.stack.count() == 4                  # przemontowane 4 miejsca, nie nadmontowane
+        assert win.stack.count() == 5                  # przemontowane 5 stron, nie nadmontowane
         with pytest.raises(Exception):                 # stare połączenie zamknięte
             con_a.execute("SELECT 1")
     finally:
@@ -367,7 +370,7 @@ def test_klik_duplikaty_otwiera_zbiory_z_perspektywa(qapp, tmp_path):
     win = MainWindow(_seeded_db(tmp_path, object_axis=True))
     try:
         win.tasks_view.tasks.itemClicked.emit(_task_item(win, "dup_frames"))
-        assert win.stack.currentIndex() == NAV_ZBIORY
+        assert win.stack.currentIndex() == STRONA_ZBIORY
         assert win.grid_view._only_dups is True
         assert win.grid_view.combo_persp.currentText() == PRESET_DUPS
     finally:
@@ -625,7 +628,7 @@ def test_gest_osi_zywotnosci_w_Zbiorach_odswieza_plakietke_Porzadkow(qapp, tmp_p
 
         assert win.con.execute("SELECT retired_at FROM frame WHERE id = ?",
                                (fid,)).fetchone()[0] is None, "gest się odbył"
-        assert win.stack.currentIndex() == NAV_ZBIORY, "Porządków nikt nie otworzył"
+        assert win.stack.currentIndex() == STRONA_ZBIORY, "Porządków nikt nie otworzył"
         assert win.nav.item(NAV_PORZADKI).text() == "Porządki (5)"
     finally:
         win.close()
@@ -672,7 +675,7 @@ def test_zadanie_zniknietych_otwiera_perspektywe(qapp, tmp_path):
     win = MainWindow(_seeded_db(tmp_path, object_axis=True))
     try:
         win.tasks_view.tasks.itemClicked.emit(_task_item(win, "vanished_frames"))
-        assert win.stack.currentIndex() == NAV_ZBIORY
+        assert win.stack.currentIndex() == STRONA_ZBIORY
         assert win.grid_view._only_vanished is True
         assert win.grid_view.combo_persp.currentText() == PRESET_VANISHED
         widoczne = set(win.grid_view._frame_ids)               # to, co WIDAĆ po trimie perspektywy
@@ -700,7 +703,7 @@ def test_zadanie_rodowodu_otwiera_perspektywe(qapp, tmp_path):
     try:
         assert _task_row(win, "stacks_lineage_pending")[0] == "Obrazy bez rodowodu"
         win.tasks_view.tasks.itemClicked.emit(_task_item(win, "stacks_lineage_pending"))
-        assert win.stack.currentIndex() == NAV_ZBIORY
+        assert win.stack.currentIndex() == STRONA_ZBIORY
         assert win.grid_view._only_lineage is True
         assert win.grid_view.combo_persp.currentData() == ("preset", PRESET_LINEAGE)
         widoczne = set(win.grid_view._frame_ids)          # to, co WIDAĆ po trimie perspektywy
@@ -724,7 +727,7 @@ def test_kazdy_wiersz_porzadkow_prowadzi_do_powierzchni(qapp, tmp_path):
                                      for i in range(tasks.count()))
         win.tasks_view._on_task_clicked(QListWidgetItem("bez akcji"))   # UserRole = None
         assert win.tasks_view.pages.currentIndex() == 0
-        assert win.stack.currentIndex() == NAV_DOSTAWA
+        assert win.stack.currentIndex() == STRONA_DOM      # okno zostało na stronie startu
     finally:
         win.close()
 

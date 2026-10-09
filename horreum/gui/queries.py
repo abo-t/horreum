@@ -20,7 +20,8 @@ from horreum.lineage import RAW_FLAT_WINDOW_DAYS, raw_flats_for   # surowe flaty
 from horreum.naming import header_dt
 from horreum.repo import (INPLACE_ISOLATING_PHASES,   # fazy izolujące zapisu w miejscu (0022)
                           INPLACE_OPEN_PHASES,        # ...i ich podzbiór otwarty
-                          absorbed_frame_ids)         # wchłonięte szkielety (AR-42)
+                          absorbed_frame_ids,         # wchłonięte szkielety (AR-42)
+                          normalize_note)             # postać treści uwagi z klingi (0032)
 from horreum.resolve._coerce import _to_float, _to_int, _to_text
 from horreum.resolve._text import norm_alnum
 from horreum.resolve.frames import LIGHT_KINDS
@@ -1292,7 +1293,8 @@ def leaf_frame_ids(con, kind, keyword, p1=None, p2=None):
     cards; `keyword` dla nich nieużywany (silnik podaje None). `rel_telescope` = canon_id kanonicznego
     teleskopu (scaleni członkowie rolują się pod kanon przez `telescope_canonical`, jak
     `active_telescopes`). `rel_night` = zakres `[p1, p2)` na `header.date_obs` — OBA parametry pełne
-    datetime (granice liczy `filter_engine.night_bounds`); klatka bez header/date_obs nie wpada."""
+    datetime (granice liczy `filter_engine.night_bounds`); klatka bez header/date_obs nie wpada.
+    `rel_camera` = `frame.camera_id` (liść zestawu w Znajdź, bez grupy w listwie)."""
     if kind == "rel_object":
         cur = con.execute("SELECT id FROM frame WHERE object_id = ?", (p1,))
     elif kind == "rel_filter":
@@ -1301,6 +1303,10 @@ def leaf_frame_ids(con, kind, keyword, p1=None, p2=None):
         cur = con.execute("SELECT id FROM frame WHERE channel = ?", (p1,))
     elif kind == "rel_kind":
         cur = con.execute("SELECT id FROM frame WHERE kind = ?", (p1,))
+    elif kind == "rel_camera":
+        # Kamera klatki, nie configu: `zestaw:` Znajdź składa teleskop (facet) z tym liściem,
+        # a klatka bez configu (review) też niesie swoją kamerę.
+        cur = con.execute("SELECT id FROM frame WHERE camera_id = ?", (p1,))
     elif kind == "rel_telescope":
         cur = con.execute(
             "SELECT f.id FROM frame f "
@@ -3578,9 +3584,16 @@ def base_rows(con, frame_ids):
     tablica JSON (`json_each`). Zwraca W TEJ KOLEJNOŚCI: frame_id, kind, filetype, filter_canon,
     camera_model, telescope_label, telescop_canon, object_canon, object_raw, object_source,
     object_cleared_canon, date_obs, exptime, path, present, last_verified_at, superseded_by,
-    retired_at, n_present, n_vanished, vanished_path, image_count, copy_facts_class, absorbed. Wiersze czyta
+    retired_at, n_present, n_vanished, vanished_path, image_count, copy_facts_class, absorbed, night,
+    note. Wiersze czyta
     się po NAZWIE (`sqlite3.Row`), ale kolejność w tym zdaniu ma zgadzać się z SELECT-em - rozjazd
     był zarzutem bramki 0809 i jest tańszy do naprawienia niż do wytłumaczenia następnej sesji.
+
+    `night` i `note` karmią prosty zestaw kolumn prezentacji Znajdź (Noc, Uwagi) i stoją NA KOŃCU
+    SELECT-u: konsumenci spoza gridu (`app`, `projection`) czytają po nazwie, więc dopisane kolumny
+    nie zmieniają ich zachowania. Noc tą samą derywacją co facet Noc (`facet_nights`) - kolumna
+    i kubełek listwy nie mogą nazwać tej samej klatki dwiema różnymi nocami. Uwaga to wiersz
+    `frame_note` (0032, PK = klatka), więc LEFT JOIN nie mnoży wierszy.
 
     `copy_facts_class` (0/1, AR-35) = klatka należy do KLASY kandydata uzupełnienia faktów kopii
     (`copy_facts_class`: XISF albo >1 lokacja ogółem) - komórka „Obrazy" mówi przy niej „?"
@@ -3636,7 +3649,8 @@ def base_rows(con, frame_ids):
         "         ORDER BY lw.id LIMIT 1) AS vanished_path, "
         "       CASE WHEN loc.present = 1 THEN loc.image_count END AS image_count, "
         "       f.id IN (SELECT value FROM json_each(?)) AS copy_facts_class, "
-        "       f.id IN (SELECT value FROM json_each(?)) AS absorbed "
+        "       f.id IN (SELECT value FROM json_each(?)) AS absorbed, "
+        "       date(h.date_obs, '-12 hours') AS night, fn.body AS note "
         "FROM frame f "
         "LEFT JOIN header h ON h.frame_id = f.id "
         "LEFT JOIN config c ON c.id = f.config_id "
@@ -3645,6 +3659,7 @@ def base_rows(con, frame_ids):
         "LEFT JOIN camera cam ON cam.id = f.camera_id "
         "LEFT JOIN object obj ON obj.id = f.object_id "
         "LEFT JOIN object ocl ON ocl.id = f.object_cleared_id "
+        "LEFT JOIN frame_note fn ON fn.frame_id = f.id "
         "LEFT JOIN location loc ON loc.id = COALESCE("
         "        (SELECT MIN(id) FROM location WHERE frame_id = f.id AND present = 1), "
         "        (SELECT MIN(id) FROM location WHERE frame_id = f.id)) "
@@ -3653,6 +3668,107 @@ def base_rows(con, frame_ids):
         (json.dumps(copy_facts_class(con)), json.dumps(sorted(absorbed_frame_ids(con))),
          json.dumps(list(frame_ids))),
     ).fetchall()
+
+
+# ---- Znajdź i Uwagi: read-model (zapis uwag wyłącznie klingą `repo`) ----
+
+def notes_for(con, frame_ids):
+    """Bieżące uwagi zaznaczenia - `{frame_id: treść}`, klatka bez uwagi nie ma wpisu. Czyta je gest
+    „Uwagi…" przed oknem (okno bazy nie dotyka) i recepta cofnięcia, która żyje, dopóki uwagi celu
+    są wciąż tymi, które gest zostawił."""
+    return {int(r[0]): r[1] for r in con.execute(
+        "SELECT frame_id, body FROM frame_note WHERE frame_id IN (SELECT value FROM json_each(?))",
+        (json.dumps(list(frame_ids)),)).fetchall()}
+
+
+def note_hits(con, text):
+    """Klatki, których uwaga ZAWIERA `text` - bez wielkości liter, posortowane po `frame_id`.
+
+    Porównanie w Pythonie (`casefold`) po CAŁEJ tabeli, nie `LIKE`/`lower()`: SQLite składa wielkość
+    liter wyłącznie w ASCII, więc „Łuna" nie trafiałoby „łuna" - a uwagi pisze się po polsku. Tabela
+    jest mała (jedna krótka uwaga na klatkę z ręki). Igła przechodzi TĘ SAMĄ normalizację co treść
+    w klindze zapisu (`repo.normalize_note`), więc podwójna spacja w polu Znajdź nie gubi trafienia."""
+    igla = normalize_note(text).casefold()
+    return sorted(int(fid) for fid, body in con.execute(
+        "SELECT frame_id, body FROM frame_note").fetchall() if igla in str(body).casefold())
+
+
+def find_rigs(con):
+    """Zestawy (teleskop kanoniczny + kamera) z etykietą `<teleskop>_<kamera>` - słownik tokenu
+    `zestaw:` w Znajdź. Lista dictów `label, telescope_id, telescope_label, camera_id, camera`,
+    jeden wpis na tożsamość zestawu.
+
+    ETYKIETA TA SAMA, CO NAZWA FOLDERU ZESTAWU W WYDANIU (`projection.zestawy_configow`, SPOT):
+    user wpisuje to, co widzi w celu wydania, a druga reguła etykiety rozjechałaby się z nią przy
+    pierwszej kolizji nazw (`_cfgN`). Config bez teleskopu albo bez kamery nie jest zestawem, który
+    da się wskazać - wypada (JOIN)."""
+    from horreum import projection                     # leniwie: projection importuje queries
+    foldery = projection.zestawy_configow(con)
+    out, widziane = [], set()
+    for r in con.execute(
+            "SELECT c.id AS config_id, tc.canon_id AS telescope_id, c.camera_id AS camera_id, "
+            "       t.label AS telescope_label, t.telescop_canon, cam.model_canon AS camera_model "
+            "FROM config c "
+            "JOIN telescope_canonical tc ON tc.id = c.telescope_id "
+            "JOIN telescope t ON t.id = tc.canon_id "
+            "JOIN camera cam ON cam.id = c.camera_id "
+            "ORDER BY c.id").fetchall():
+        klucz = (r["telescope_id"], r["camera_id"])
+        if klucz in widziane or r["config_id"] not in foldery:
+            continue
+        widziane.add(klucz)
+        out.append({"label": foldery[r["config_id"]][0], "telescope_id": r["telescope_id"],
+                    "telescope_label": telescope_label(r), "camera_id": r["camera_id"],
+                    "camera": r["camera_model"] or ""})
+    return out
+
+# --- DOM: „Co mam" i ostatni gest ręki (ekran `gui/home.py`) ---
+
+def home_summary(con):
+    """„Co mam" na Domu - jedna linia sum archiwum: obiekty, lighty, godziny, noce, ostatnia noc.
+
+    POPULACJA TA SAMA, CO TECZKI WYDANIA (`release_readiness`): aktywny light (`kind='light'`, bez
+    `retired_at` i `superseded_by`) Z OBIEKTEM. Obie liczby stoją na jednym ekranie, więc liczone
+    po różnych zbiorach przeczyłyby sobie nawzajem; light bez obiektu nie ma teczki i czeka
+    w Porządkach. Noc z definicji facetu Noc (`date(date_obs, '-12 hours')`, D-UX-1), DISTINCT
+    po całym archiwum - nie suma nocy teczek, bo noc przy dwóch obiektach to jedna noc przy
+    teleskopie.
+
+    Jeden SELECT na wątku GUI: zmierzone na żywej `pf4` (`?mode=ro`, 2026-10-09) ~50 ms przy
+    14 337 lightach. Zwraca dict: objects, lights, hours, nights, last_night (`None` bez lightów)."""
+    r = con.execute(
+        "SELECT COUNT(DISTINCT f.object_id) AS objects, COUNT(*) AS lights, "
+        "       COALESCE(SUM(h.exptime), 0) AS secs, "
+        "       COUNT(DISTINCT date(h.date_obs, '-12 hours')) AS nights, "
+        "       MAX(date(h.date_obs, '-12 hours')) AS last_night "
+        "FROM frame f JOIN object o ON o.id = f.object_id "
+        "LEFT JOIN header h ON h.frame_id = f.id "
+        "WHERE f.kind = 'light' AND f.retired_at IS NULL AND f.superseded_by IS NULL").fetchone()
+    return {"objects": r["objects"], "lights": r["lights"], "hours": float(r["secs"]) / 3600.0,
+            "nights": r["nights"], "last_night": r["last_night"]}
+
+
+def last_hand_gesture(con):
+    """Ostatni gest RĘKI z dziennika - zdanie Domu „Ostatnio (…): …", gdy w sesji nie ma recepty.
+
+    GEST TO NIE JEDEN EVENT. Klinga zapisuje gest jednym `now`, więc wszystkie jego eventy mają
+    wspólny `ts`; gest na wielu klatkach albo cofnięcie uwag mieszanego zaznaczenia emituje ich
+    naraz kilka, czasem różnych czasowników. Gest = wszystkie eventy z tym samym `ts` i `actor`, co
+    ostatni event ręki (`actor LIKE 'user%'` - klingi piszą `user:<uid>`, oś piksela kamery goły
+    `user`). Ostatni po `id DESC`, nie po `ts`: `id` rośnie z zapisem, a tabela ma indeks wyłącznie
+    na `target`, więc drugi SELECT przechodzi dziennik w całości (~60 ms na 164 tys. eventów żywej
+    `pf4`, 2026-10-09).
+
+    Zwraca `None` (dziennik bez gestów ręki) albo dict: ts, actor, verbs (`{verb: liczba}`,
+    alfabetycznie), n (wszystkie eventy gestu)."""
+    last = con.execute(
+        "SELECT ts, actor FROM event WHERE actor LIKE 'user%' ORDER BY id DESC LIMIT 1").fetchone()
+    if last is None:
+        return None
+    verbs = {r["verb"]: r["n"] for r in con.execute(
+        "SELECT verb, COUNT(*) AS n FROM event WHERE ts = ? AND actor = ? "
+        "GROUP BY verb ORDER BY verb", (last["ts"], last["actor"]))}
+    return {"ts": last["ts"], "actor": last["actor"], "verbs": verbs, "n": sum(verbs.values())}
 
 # --- TODO-DŁUG (z kolejki sesji, dieta 2026-08-10; pełne brzmienia: archiwum aa) ---
 # TODO-DŁUG(P4-1): unresolved_reason to werdykt ZAMROŻONY - 11 stosów niosło no_object dobę po

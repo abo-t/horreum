@@ -309,6 +309,40 @@ def test_base_rows_xisf_kolumny(grid_db):
     assert rows[3]["filetype"] == "xisf"
 
 
+def test_base_rows_noc_i_uwaga_DOPISANE_NA_KONCU(grid_db):
+    """Prezentacja Znajdź czyta noc i uwagę z `base_rows`; kolumny stoją na KOŃCU SELECT-u, więc
+    konsumenci czytający po nazwie (`app`, `projection`) i stara kolejność kolumn są nietknięci.
+    Noc tą samą derywacją co facet Noc - kolumna i kubełek nie nazwą jednej klatki dwiema nocami."""
+    grid_db.execute("UPDATE header SET date_obs = '2025-08-15T11:59:59' WHERE frame_id = 1")
+    grid_db.execute("UPDATE header SET date_obs = '2025-08-15T12:00:00' WHERE frame_id = 2")
+    grid_db.execute("INSERT INTO frame_note (frame_id, body, updated_at) VALUES (1, 'chmury', ?)",
+                    (NOW,))
+    grid_db.commit()
+    rows = queries.base_rows(grid_db, [1, 2, 3])
+    klucze = rows[0].keys()
+    assert klucze[-2:] == ["night", "note"]
+    assert klucze[:-2][-1] == "absorbed", "dotychczasowe kolumny przesunięte"
+    po_id = {r["frame_id"]: r for r in rows}
+    assert (po_id[1]["night"], po_id[1]["note"]) == ("2025-08-14", "chmury")
+    assert (po_id[2]["night"], po_id[2]["note"]) == ("2025-08-15", None)
+    assert po_id[3]["night"] is None                      # XISF bez nagłówka - bez nocy
+    kubelki = {r["night"] for r in queries.facet_nights(grid_db, [1, 2])}
+    assert kubelki == {po_id[1]["night"], po_id[2]["night"]}
+
+
+def test_notes_for_i_note_hits_bez_wielkosci_liter_takze_polskich(grid_db):
+    """`note_hits` porównuje `casefold` w Pythonie - SQLite `lower()` nie zna „Ł"; igła przechodzi
+    normalizację klingi (podwójna spacja w polu nie gubi trafienia)."""
+    grid_db.executemany("INSERT INTO frame_note (frame_id, body, updated_at) VALUES (?,?,?)",
+                        [(1, "Łuna nad horyzontem", NOW), (2, "rosa na lustrze", NOW)])
+    grid_db.commit()
+    assert queries.notes_for(grid_db, [1, 3]) == {1: "Łuna nad horyzontem"}
+    assert queries.note_hits(grid_db, "łuna") == [1]
+    assert queries.note_hits(grid_db, "NA  LUSTRZE") == [2]
+    assert queries.note_hits(grid_db, "na") == [1, 2]
+    assert queries.note_hits(grid_db, "mgła") == []
+
+
 # ---------- describe — kryteria zbioru SŁOWAMI (F3, PLAN_ux_redesign §4) ----------
 
 def test_describe_none_i_pusta_grupa():
@@ -443,6 +477,50 @@ def test_rel_telescope_roluje_scalonego_pod_kanon(facet_db):
     """f2 stoi na configu SCALONEGO rc8bis → roluje się pod kanon RC8 (telescope_canonical)."""
     assert _run(facet_db, {"facet": "telescope", "value": 1}) == {1, 2, 5, 6}
     assert _run(facet_db, {"facet": "telescope", "value": 3}) == {3}
+
+
+def test_rel_camera_po_kamerze_KLATKI_takze_bez_configu(facet_db):
+    """Liść kamery (zestaw w Znajdź) czyta `frame.camera_id`, nie kamerę configu: f7 BEZ configu
+    (`config_id IS NULL`) też niesie swoją kamerę i liść ją widzi."""
+    facet_db.execute("INSERT INTO camera (id, model_canon, created_at) VALUES (2, 'ASI294MC', ?)",
+                     (NOW,))
+    # Kamera klatek zgodna z configami fikstury (configi 1-3 stoją na kamerze 1).
+    facet_db.execute("UPDATE frame SET camera_id = 1 WHERE config_id IN (1, 2, 3)")
+    facet_db.execute("INSERT INTO frame (id, sha1_data, kind, filetype, config_id, camera_id, "
+                     "first_seen_at) VALUES (7, 'f7', 'light', 'fits', NULL, 2, ?)", (NOW,))
+    facet_db.commit()
+    assert _run(facet_db, {"facet": "camera", "value": 1}) == {1, 2, 3, 5, 6}
+    assert _run(facet_db, {"facet": "camera", "value": 2}) == {7}
+    assert queries.leaf_frame_ids(facet_db, "rel_camera", None, 2) == {7}
+
+
+def test_rel_camera_w_parze_z_teleskopem_to_dokladnie_zestaw(facet_db):
+    """Para AND(teleskop, kamera) = zestaw: klatka configu `RC8 + ASI294MC` wpada, klatka tej samej
+    kamery bez configu (bez teleskopu) i klatki RC8 z drugą kamerą - nie."""
+    facet_db.execute("INSERT INTO camera (id, model_canon, created_at) VALUES (2, 'ASI294MC', ?)",
+                     (NOW,))
+    facet_db.execute("INSERT INTO config (id, telescope_id, camera_id, status, created_at) "
+                     "VALUES (4, 1, 2, 'proposed', ?)", (NOW,))
+    facet_db.execute("UPDATE frame SET camera_id = 1 WHERE config_id IN (1, 2, 3)")
+    facet_db.executemany(
+        "INSERT INTO frame (id, sha1_data, kind, filetype, config_id, camera_id, first_seen_at) "
+        "VALUES (?, ?, 'light', 'fits', ?, 2, ?)", [(7, "f7", None, NOW), (8, "f8", 4, NOW)])
+    facet_db.commit()
+    para = {"op": "AND", "conditions": [{"facet": "telescope", "value": 1},
+                                        {"facet": "camera", "value": 2}]}
+    assert _run(facet_db, para) == {8}
+    assert _run(facet_db, {"op": "AND", "conditions": [{"facet": "telescope", "value": 1},
+                                                       {"facet": "camera", "value": 1}]}) == {1, 2, 5, 6}
+
+
+def test_describe_liscia_kamery_slowami_w_obu_jezykach():
+    """Warunek kamery stoi w drzewie zaawansowanym - pasek kryteriów i chip mówią go słowami,
+    nazwą kolumny „Kamera" (liść nie ma grupy w listwie)."""
+    from horreum.gui import i18n
+    lisc = {"facet": "camera", "value": 7, "label": "ASI2600MM"}
+    assert filter_engine.describe(lisc) == "Kamera: ASI2600MM"
+    i18n.set_lang("en")
+    assert filter_engine.describe(lisc) == "Camera: ASI2600MM"
 
 
 def test_rel_night_granice_poludnia(facet_db):

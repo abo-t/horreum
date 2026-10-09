@@ -249,8 +249,13 @@ def pending_transfer(con):
     CZWARTA OŚ (0027): **stanowisko wskazane ręką** - wchodzi, gdy oś obserwatorium następczyni
     jest pusta (guard jak przy configu; GPS następczyni wyprowadza parę z kubełka).
 
+    PIĄTA OŚ (0032): **uwaga klatki** - wchodzi, gdy następczyni nie ma własnej uwagi; bez względu
+    na rodzaj obu klatek (lustro guardu `repo.transfer_human_facts`). Własna uwaga następczyni
+    wyprowadza parę z kubełka tak samo, jak jej własne źródło na pozostałych osiach.
+
     Zwraca `[(stara, nowa, co), …]`, gdzie `co` = osie do przeniesienia (`obiekt` / `config` /
-    `stanowisko` / `rodowod` i ich sumy) - raport ma mówić, CZEGO gest dotyczy, nie tylko że coś czeka."""
+    `stanowisko` / `rodowod` / `uwaga` i ich sumy) - raport ma mówić, CZEGO gest dotyczy, nie tylko
+    że coś czeka."""
     rows = con.execute(
         "SELECT f.id, f.superseded_by, f.object_source, f.config_source, f.config_id, "
         "       n.kind AS n_kind, n.object_source AS n_obj_src, n.config_source AS n_cfg_src, "
@@ -261,7 +266,9 @@ def pending_transfer(con):
         "           AND NOT EXISTS (SELECT 1 FROM integration_input jj "
         "                            WHERE jj.integration_id = ii.integration_id "
         "                              AND jj.input_frame_id = n.id "
-        "                              AND jj.asserted_by = 'user')) AS rodowod_n "
+        "                              AND jj.asserted_by = 'user')) AS rodowod_n, "
+        "       EXISTS (SELECT 1 FROM frame_note fn WHERE fn.frame_id = f.id) AS uwaga, "
+        "       EXISTS (SELECT 1 FROM frame_note nn WHERE nn.frame_id = n.id) AS n_uwaga "
         "FROM frame f JOIN frame n ON n.id = f.superseded_by "
         "WHERE f.superseded_by IS NOT NULL ORDER BY f.id").fetchall()
     transferowalne = set(TRANSFERABLE_OBJECT_SOURCES)
@@ -282,6 +289,8 @@ def pending_transfer(con):
             osie.append("stanowisko")
         if r["rodowod_n"]:
             osie.append("rodowod")
+        if r["uwaga"] and not r["n_uwaga"]:          # PIĄTA OŚ (0032): lustro guardu klingi
+            osie.append("uwaga")
         if osie:
             out.append((r["id"], r["superseded_by"], "+".join(osie)))
     return out
@@ -330,8 +339,12 @@ _POWODY_POMINIECIA = {
 class TransferGesture:
     """Wynik gestu „Przenieś fakty ręki" na zaznaczeniu (AR-41). Liczby osi liczą KLATKI, na których
     dana oś przeszła; `lineage_moved`/`lineage_dropped` liczą WIERSZE rodowodu (jedna klatka bywa
-    wejściem wielu obrazów - `FactTransfer`). `done` = klatki, z których cokolwiek przeszło albo
-    zdjęto martwy wskaźnik; `object_kept` = klatki z werdyktem obiektu zatrzymanym na zastąpionej
+    wejściem wielu obrazów - `FactTransfer`). `note_moved` = klatki, z których przeszła uwaga
+    (0032). `done` = klatki, z których cokolwiek przeszło albo zdjęto martwy wskaźnik - także
+    klatka, z której przeszła WYŁĄCZNIE uwaga: bez niej w `done` nie trafiłaby do żadnego członu
+    równania `done + skipped + zatrzymane bez innej osi + not_superseded + no_longer_superseded
+    == total`, a `frame_ids` by jej nie znały;
+    `object_kept` = klatki z werdyktem obiektu zatrzymanym na zastąpionej
     (może współwystąpić z `done`, gdy w tym samym geście przeszła inna oś); `not_superseded` =
     zaznaczone klatki, które nie są zastąpione (gest ich nie dotyczy); `skipped` = {sufiks powodu:
     liczba} dla klatek, z których nic nie przeszło; `no_longer_superseded` = klatki zastąpione
@@ -342,6 +355,7 @@ class TransferGesture:
     object_moved: int = 0
     config_moved: int = 0
     observatory_moved: int = 0
+    note_moved: int = 0
     lineage_moved: int = 0
     lineage_dropped: int = 0
     object_kept: int = 0
@@ -388,11 +402,12 @@ def transfer_gesture(con, *, frame_ids, now, actor="user:local"):
             g.object_moved += t.object_moved
             g.config_moved += t.config_moved
             g.observatory_moved += t.observatory_moved
+            g.note_moved += t.note_moved
             g.lineage_moved += t.lineage_moved
             g.lineage_dropped += t.lineage_dropped
             g.object_kept += t.object_kept
-            if (t.object_moved or t.config_moved or t.observatory_moved or t.lineage_moved
-                    or t.lineage_dropped):
+            if (t.object_moved or t.config_moved or t.observatory_moved or t.note_moved
+                    or t.lineage_moved or t.lineage_dropped):
                 g.done += 1
                 ruszone.append(fid)
             elif t.skipped:
@@ -416,7 +431,8 @@ def zdanie_przeniesienia(g):
     from .gui import i18n
     msg = i18n.t_plural("supersede.transfer.done", g.total, done=g.done)
     osie = [(k, n) for k, n in (("object", g.object_moved), ("config", g.config_moved),
-                                ("site", g.observatory_moved), ("lineage", g.lineage_moved))
+                                ("site", g.observatory_moved), ("note", g.note_moved),
+                                ("lineage", g.lineage_moved))
             if n]
     if osie:
         msg += i18n.t("supersede.transfer.axes", axes=", ".join(

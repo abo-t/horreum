@@ -55,6 +55,7 @@ from horreum.gui import pola as pola_mod   # `pola` bywa w tym pliku zmienną lo
 from horreum.gui.facets import RAIL_MIN_W as _FIELDS_MIN_W, FacetRail
 from horreum.gui import assign_dialog
 from horreum.gui.assign_dialog import AssignObjectDialog
+from horreum.gui.note_dialog import NoteDialog
 from horreum.gui.projection_dialog import ObjectPickDialog, ProjectionDialog
 from horreum.gui.rows import TwoPartDelegate
 from horreum.gui.wb_worker import (WritebackRunner, commit_do_cofniecia, zdanie_undo_kart,
@@ -75,6 +76,22 @@ BASE_COLS = [
     # przewija się w poziomie, więc podłoga okna (D-0801-1) zostaje, gdzie była.
     ("grid.col.images", "_images"),
 ]
+# PREZENTACJA ZNAJDŹ - ten sam model i ten sam zbiór, inny zestaw kolumn bazowych: to, po co człowiek
+# przychodzi z pytaniem („co mam z tej nocy, w tym filtrze"), bez kolumn warsztatu (Δh, Obrazy,
+# keywordy). Plik stoi OSTATNI, bo w tej prezentacji jest adresem, a nie przedmiotem pracy. Klucze
+# `night`/`note` niesie `queries.base_rows` (kolumny dopisane na końcu SELECT-u), `_zestaw` liczy
+# `_derive`. Kolumny keywordów zostają w modelu i chowa je widok - przełączenie prezentacji nie
+# przeładowuje zbioru (`FramesView.set_presentation`).
+FIND_COLS = [
+    ("object.col.name", "_object"), ("find.col.night", "night"), ("frame.col.filter", "filter_canon"),
+    ("find.col.exposure", "exptime"), ("find.col.rig", "_zestaw"), ("find.col.notes", "note"),
+    ("find.col.file", "path"),
+]
+PREZENTACJA_ZNAJDZ = "znajdz"
+PREZENTACJA_KLASYCZNA = "klasyczna"
+# Szerokość kolumny „Uwagi" w px: uwaga ma do 300 znaków, a kolumna ma ją zapowiadać, nie zjadać
+# okna - pełna treść idzie tooltipem komórki.
+_SZEROKOSC_UWAG = 220
 _MISSING_TEXT = "—"
 
 # TOOLTIP KOLUMNY „Obiekt" PER STAN (R-S3-4) — mapa, bo powodów jest cztery i każdy niesie inną
@@ -414,6 +431,8 @@ _PRESET_LABELS = {
 # nazwa nie może być literałem w dwóch miejscach - a bramka pilnuje, że ten preset naprawdę
 # jest czysty (`test_gui_grid`, `_PRESET_CZYSTY`).
 _PRESET_CZYSTY = "Przegląd"
+# Rola pozycji listy perspektyw z etykietą BAZOWĄ (bez sufiksu „(zmieniona)", FH-12).
+_ROLA_ETYKIETY = Qt.UserRole + 1
 # PARA FLAGA → ZAPYTANIE MA JEDNO MIEJSCE (BP-4): `refresh()` buduje z tej tabeli listę trimów,
 # a `_trim_aktywny()` odpowiada z niej recepcie powrotu. Wcześniej recepcie odpowiadał atrybut
 # instancji stawiany RAZ w `refresh()`: poprawny wyłącznie przez kolejność wywołań, bez strażnika.
@@ -512,6 +531,18 @@ _SPEC_SZEROKOSC_SCIEZKI = "path_width"
 # perspektywa nie ma tu drugiego miejsca do dopisania.
 _ZNANE_KLUCZE_SPECU = frozenset({"filter", "columns", "group_by", "facets", _SPEC_WIDOK}
                                 | {_klucz_spec(atrybut) for atrybut, _ in _TRIMY})
+
+
+def _zawezenie_facetowe(drzewo):
+    """Czy drzewo filtra to SAMO zawężenie facetowe - liść facetu albo grupa AND/OR takich liści
+    (warunek zestawu z Znajdź). Warunek keyworda, negacja albo pusta grupa - nie. Czysta funkcja."""
+    if not isinstance(drzewo, dict):
+        return False
+    if "facet" in drzewo:
+        return True
+    dzieci = drzewo.get("conditions") or []
+    return (str(drzewo.get("op", "")).upper() in ("AND", "OR") and bool(dzieci)
+            and all(_zawezenie_facetowe(d) for d in dzieci))
 
 
 def _nieznane_warunki(spec):
@@ -708,6 +739,16 @@ _RECEPTA_ZAJETA = {"grid.inplace.busy_stage": "grid.recipe.busy_stage",
 _ODWROT_WYCOFANIA = _Odwrot("grid.sel.object_clear_undo", "grid.sel.object_clear_undo_after",
                             "grid.sel.frame", "grid.sel.frame_restore",
                             "_on_frame_restore", "_ile_wycofanych")
+# Droga powrotu gestu UWAG nie jest pozycją menu: odwrotem jest przywrócenie stanu sprzed gestu,
+# a ten zna wyłącznie migawka widoku (`FramesView._migawka_uwag`) - recepta jest jedynym wejściem.
+# Zdanie członu mówi więc samą czynność; `menu`/`akcja` wskazują nazwę gestu, nie napis menu.
+_ODWROT_UWAG = _Odwrot("grid.notes.undo", "grid.notes.undo_after",
+                       "grid.notes.action", "grid.notes.action",
+                       "_cofnij_uwagi", "_ile_uwag_do_cofniecia")
+# Odmowa gestu uwag przy zajętości - zdania gestów izolacji obiecują, że gest „ruszy po
+# zakończeniu", a okno uwag samo nie ruszy.
+_UWAGI_ZAJETE = {"grid.inplace.busy_stage": "grid.notes.busy_stage",
+                 "grid.inplace.busy_write": "grid.notes.busy_write"}
 
 
 def _ogon_sciezki(path):
@@ -848,6 +889,9 @@ def _derive(row):
     n = d.get("image_count")
     d["_images"] = "" if n is None else str(n)
     d["_images_n"] = n          # klucz SORTU kolumny „Obrazy" - liczba, nie tekst („10" < „2")
+    # Zestaw „teleskop · kamera" dla prezentacji Znajdź - z pól, które wiersz i tak niesie; brak
+    # jednej połowy nie kasuje drugiej (klatka bez configu ma kamerę, a nie ma teleskopu).
+    d["_zestaw"] = " · ".join(p for p in (d["_telescope"], d.get("camera_model")) if p)
     return d
 
 
@@ -1232,7 +1276,22 @@ class GridTableModel(QAbstractTableModel):
         self._numeric_kw = set() # keywordy z choć jedną komórką liczbową → MISSING „—" też prawo (P3-7)
         self._preview = {}       # frame_id → {'keyword','old','new'} | {'skipped': reason} (podgląd makra/renamu)
         self._preview_label = i18n.t("grid.preview.macro")   # etykieta efemerycznej kolumny (klinga-zależna, R1 #4)
-        self._version_col_on = False   # kolumna „Wersja" - wyłącznie w perspektywie „Wersje stosów"
+        self._version_col_on = False   # kolumna „Wersja" - perspektywa „Wersje stosów" albo wybór w Znajdź
+        # Kolumny bazowe BIEŻĄCEJ prezentacji: `BASE_COLS` (klasyczna) albo `FIND_COLS` (Znajdź).
+        # Numery liczone od nich - keywordy, „Wersja" i podgląd idą za nimi w obu prezentacjach.
+        self._base = BASE_COLS
+
+    def set_base_columns(self, cols, *, version_col):
+        """Przełącz zestaw kolumn bazowych (prezentacja) na TYCH SAMYCH wierszach - bez nowych
+        danych: przebudowa układu, jak przy sorcie. `version_col` jak w `set_data`, bo o kolumnie
+        „Wersja" w Znajdź decyduje wybór w „Kolumny ▾", a w klasycznej perspektywa."""
+        self._base = cols
+        self._version_col_on = bool(version_col)
+        self._rebuild()
+
+    def n_bazowych(self):
+        """Liczba kolumn bazowych bieżącej prezentacji - pierwszy numer kolumny za nimi."""
+        return len(self._base)
 
     def set_preview(self, preview, *, label=None):
         """Podgląd klingi (doktryna §5: „grid = podgląd"): frame_id → zmiana (stara→nowa) albo
@@ -1291,7 +1350,7 @@ class GridTableModel(QAbstractTableModel):
     def columnCount(self, parent=QModelIndex()):
         if parent.isValid():
             return 0
-        return (len(BASE_COLS) + len(self._keywords) + (1 if self._version_col_on else 0)
+        return (len(self._base) + len(self._keywords) + (1 if self._version_col_on else 0)
                 + (1 if self._preview_active() else 0))
 
     def _version_col(self):
@@ -1300,7 +1359,7 @@ class GridTableModel(QAbstractTableModel):
         ZARAZ PO KOLUMNACH BAZOWYCH, PRZED KEYWORDAMI - zmierzone zrzutem offscreen na kopii żywej
         bazy: postawiona za sześcioma domyślnymi keywordami lądowała poza prawą krawędzią okna
         1400 px, czyli fakty, po które ta perspektywa istnieje, wymagały przewijania w bok."""
-        return len(BASE_COLS) if self._version_col_on else None
+        return len(self._base) if self._version_col_on else None
 
     def _kw_off(self):
         """Przesunięcie kolumn-keywordów o kolumnę „Wersja" (0 poza jej perspektywą)."""
@@ -1311,7 +1370,7 @@ class GridTableModel(QAbstractTableModel):
         Indeks LOGICZNY - wizualnie podgląd stoi zaraz za „Ścieżką" (`set_preview`)."""
         if not self._preview_active():
             return None
-        return len(BASE_COLS) + self._kw_off() + len(self._keywords)
+        return len(self._base) + self._kw_off() + len(self._keywords)
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
         if role != Qt.DisplayRole:
@@ -1321,16 +1380,16 @@ class GridTableModel(QAbstractTableModel):
                 return self._preview_label
             if section == self._version_col():
                 return i18n.t("grid.col.version")
-            if section < len(BASE_COLS):
-                return i18n.t(BASE_COLS[section][0])
-            return self._keywords[section - len(BASE_COLS) - self._kw_off()]
+            if section < len(self._base):
+                return i18n.t(self._base[section][0])
+            return self._keywords[section - len(self._base) - self._kw_off()]
         return section + 1
 
     def _col_key(self, col):
-        return BASE_COLS[col][1] if col < len(BASE_COLS) else None
+        return self._base[col][1] if col < len(self._base) else None
 
     def _kw_for_col(self, col):
-        return None if col < len(BASE_COLS) else self._keywords[col - len(BASE_COLS) - self._kw_off()]
+        return None if col < len(self._base) else self._keywords[col - len(self._base) - self._kw_off()]
 
     def _sort_id_for(self, col):
         """Znaczenie kolumny `col` BIEŻĄCEGO układu jako identyfikator sortu (`_sort_id`) albo None
@@ -1352,13 +1411,17 @@ class GridTableModel(QAbstractTableModel):
         return Qt.DescendingOrder if self._sort_desc else Qt.AscendingOrder
 
     def base_col(self, key):
-        """Numer kolumny bazowej o kluczu danych `key` (`BASE_COLS`) w bieżącym układzie. Klucz
-        spoza `BASE_COLS` to błąd wołającego (EXPECT)."""
+        """Numer kolumny bazowej o kluczu danych `key` w bieżącym układzie. Klucz spoza kolumn
+        bazowych bieżącej prezentacji to błąd wołającego (EXPECT) - pyta o niego `has_base_col`."""
         col = next((c for c in range(self.columnCount())
                     if self._sort_id_for(c) == ("base", key)), None)
         if col is None:
             raise ValueError(f"nieznana kolumna bazowa: {key!r}")
         return col
+
+    def has_base_col(self, key):
+        """Czy bieżąca prezentacja ma kolumnę bazową `key` („Obrazy" ma tylko klasyczna)."""
+        return any(k == key for _, k in self._base)
 
     # ---- komórki ----
     def flags(self, index):
@@ -1380,7 +1443,7 @@ class GridTableModel(QAbstractTableModel):
         if not self._edytowalne:
             return False
         col = index.column()
-        if (col < len(BASE_COLS) or col == self._preview_col() or col == self._version_col()
+        if (col < len(self._base) or col == self._preview_col() or col == self._version_col()
                 or col >= self.columnCount()):
             return False
         row = self._rows[index.row()]
@@ -1445,7 +1508,7 @@ class GridTableModel(QAbstractTableModel):
             return self._preview_cell(row, role)
         if col == self._version_col():
             return self._version_cell(row, role)
-        if col < len(BASE_COLS):
+        if col < len(self._base):
             return self._base_cell(row, self._col_key(col), role)
         return self._kw_cell(row, self._kw_for_col(col), role)
 
@@ -1673,6 +1736,23 @@ class GridTableModel(QAbstractTableModel):
             return None
         if key == "_images":
             return self._images_cell(row, role)
+        if key == "exptime":
+            # Czas ekspozycji Znajdź: liczba bez ogona zer („300 s", nie „300.0"), do prawej jak
+            # każda kolumna liczb; sort liczbowy w `_sort_key`.
+            v = row.get("exptime")
+            if role == Qt.DisplayRole:
+                return "" if v is None else i18n.t("find.cell.exposure", s=f"{v:g}")
+            if role == Qt.TextAlignmentRole and v is not None:
+                return int(Qt.AlignRight | Qt.AlignVCenter)
+            return None
+        if key == "note":
+            # Uwaga ścięta szerokością kolumny, pełna w tooltipie - kolumna zapowiada, nie czyta.
+            v = row.get("note")
+            if role == Qt.DisplayRole:
+                return v or ""
+            if role == Qt.ToolTipRole and v:
+                return v
+            return None
         if role == Qt.DisplayRole:
             v = row.get(key)
             return "" if v is None else str(v)
@@ -1749,7 +1829,8 @@ class GridTableModel(QAbstractTableModel):
         # Kolumny sortu nie ma w bieżącym układzie (keyword odznaczony, „Wersja" poza swoją
         # perspektywą) → sort neutralny; wróci sam, gdy kolumna wróci (`_sort_id` pamięta znaczenie).
         if (sid is None or (sid[0] == "kw" and sid[1] not in self._keywords)
-                or (sid[0] == "version" and self._version_col() is None)):
+                or (sid[0] == "version" and self._version_col() is None)
+                or (sid[0] == "base" and not self.has_base_col(sid[1]))):   # np. Δh w Znajdź
             return (0, "")
         if sid[0] == "version":
             # Po CHWILI INTEGRACJI (ISO sortuje się chronologicznie), potem po liczbie wejść;
@@ -1774,6 +1855,9 @@ class GridTableModel(QAbstractTableModel):
                 # kierunkach, jak MISSING (wzór `_dt_delta`).
                 v = row.get("_images_n")
                 return (2, 0) if v is None else (0, v)
+            if key == "exptime":                             # liczba, brak na koniec (wzór `_images`)
+                v = row.get("exptime")
+                return (2, 0.0) if v is None else (0, float(v))
             v = row.get(key)
             return (0, "" if v is None else str(v).lower())
         cell = row["cells"].get(sid[1], pivot_mod.MISSING)
@@ -3173,7 +3257,27 @@ class SelectionBar(QFrame):
         # PRZED pomyłką. Tu waży to podwójnie: wycofanie zdejmuje klatkę z oczu, więc bez tej
         # pozycji user nie miałby skąd wiedzieć, że gest w ogóle się cofa.
         self.act_frame_restore = fmenu.addAction(i18n.t("grid.sel.frame_restore"))
+        # UWAGI (0032) w klasycznej mieszkają w menu klatki - to fakt ręki o KLATCE, a dziewiąty
+        # przycisk paska poszerzałby podłogę okna. W Znajdź ten sam gest ma własny czasownik
+        # (`btn_notes`); obie drogi wołają jeden slot.
+        fmenu.addSeparator()
+        self.act_notes = fmenu.addAction(i18n.t("grid.notes.action"))
         self.btn_frame.setMenu(fmenu)
+        # CZASOWNIKI ZNAJDŹ, których klasyczna nie ma - tworzone raz, widoczne tylko w tamtej
+        # prezentacji (`set_presentation`). „Kolumny ▾" niesie wyłącznie kolumnę „Wersja" (AR-50):
+        # prosty zestaw kolumn Znajdź jest stały, a wybór keywordów zostaje w „Polach" klasycznej.
+        # Z RODZICEM od urodzenia: w klasycznej te przyciski nie trafiają do układu, więc nikt ich
+        # nie przepina - widżet bez rodzica pokazany przy wejściu w Znajdź byłby oknem najwyższego
+        # poziomu i zabierał aktywację oknu głównemu (fokus pola zapytania ginął po obrocie pętli).
+        self.btn_notes = QPushButton(i18n.t("grid.notes.action"), self)
+        self.btn_columns = QToolButton(self)
+        self.btn_columns.setText(i18n.t("find.verb.columns"))
+        self.btn_columns.setPopupMode(QToolButton.InstantPopup)
+        cmenu = QMenu(self.btn_columns)
+        self.act_version_col = cmenu.addAction(i18n.t("grid.col.version"))
+        self.act_version_col.setCheckable(True)
+        self.btn_columns.setMenu(cmenu)
+        self.btn_classic = QPushButton(i18n.t("nav.zbiory"), self)   # nazwa wiersza nawigacji
         self.btn_save = QPushButton(i18n.t("grid.sel.save_view"))
         # RÓWNA WYSOKOŚĆ W RZĘDZIE (R-S2b-11): `QToolButton` liczy `sizeHint` inaczej niż
         # `QPushButton` i wychodził o 1 px niższy od sześciu sąsiadów — jedyny widżet innej klasy
@@ -3181,18 +3285,52 @@ class SelectionBar(QFrame):
         # rozjechałaby się przy pierwszej zmianie motywu albo skali DPI.
         self.btn_object.setFixedHeight(self.btn_save.sizeHint().height())
         self.btn_frame.setFixedHeight(self.btn_save.sizeHint().height())
-        lay.addWidget(self.count_label); lay.addSpacing(8)
-        lay.addWidget(self.criteria_label, 1)
+        self.btn_columns.setFixedHeight(self.btn_save.sizeHint().height())
+        self._lay = lay
+        self.prezentacja = PREZENTACJA_KLASYCZNA
+        self._uloz()
+
+    # Kolejność i skład rzędu per prezentacja. Klasyczna = dzisiejszy pasek co do widżetu i odstępu
+    # (testy go pinują); Znajdź = pasek czasowników w ustalonej kolejności (Wydaj do WBPP ·
+    # Popraw nagłówki… · Obiekt ▾ · Rodowód… · Uwagi… · Kolumny ▾ · Zbiory klasyczne). `None` =
+    # odstęp 12 px. Widżety spoza listy prezentacji są schowane, nie usunięte - to te same
+    # przyciski z tym samym stanem (zaznaczenie paneli, wygaszenie przy zajętości).
+    def _rzad(self):
+        if self.prezentacja == PREZENTACJA_ZNAJDZ:
+            return [self.btn_clear, None, self.btn_obj, self.btn_macro, self.btn_object,
+                    self.btn_lineage, self.btn_notes, self.btn_columns, None, self.btn_classic]
         # Złota akcja WYJĘTA z klastra pomocniczych (wizytacja P-C #6): sam bold przegrywał wzrokowo
         # z glifem ★ sąsiada, bo wszystkie pięć stało w jednym ciągu. Odstęp, nie ramka — QSS
         # `border` na QPushButton w Fusion zastępuje CAŁE malowanie ramki i spłaszcza przycisk.
-        lay.addWidget(self.btn_clear)
-        lay.addSpacing(12); lay.addWidget(self.btn_proj); lay.addWidget(self.btn_obj)
-        lay.addSpacing(12)
-        lay.addWidget(self.btn_macro)
-        lay.addWidget(self.btn_rename); lay.addWidget(self.btn_lineage)
-        lay.addWidget(self.btn_object); lay.addWidget(self.btn_frame)
-        lay.addWidget(self.btn_save)
+        return [self.btn_clear, None, self.btn_proj, self.btn_obj, None, self.btn_macro,
+                self.btn_rename, self.btn_lineage, self.btn_object, self.btn_frame, self.btn_save]
+
+    def _uloz(self):
+        lay = self._lay
+        while lay.count():
+            lay.takeAt(0)            # widżety zostają dziećmi paska; odstępy znikają z elementem
+        lay.addWidget(self.count_label); lay.addSpacing(8)
+        lay.addWidget(self.criteria_label, 1)
+        rzad = self._rzad()
+        # NAJPIERW UKŁAD, POTEM WIDOCZNOŚĆ: widżet pokazywany jest już na swoim miejscu w pasku.
+        for w in rzad:
+            if w is None:
+                lay.addSpacing(12)
+            else:
+                lay.addWidget(w)
+        for w in (self.btn_clear, self.btn_proj, self.btn_obj, self.btn_macro, self.btn_rename,
+                  self.btn_lineage, self.btn_object, self.btn_frame, self.btn_save,
+                  self.btn_notes, self.btn_columns, self.btn_classic):
+            w.setVisible(w in rzad)
+
+    def set_presentation(self, prezentacja):
+        """Pasek w prezentacji `prezentacja`: skład, kolejność i nazwa wydania obiektu. „Wydaj
+        obiekt…" i „Wydaj do WBPP" to JEDEN przycisk (`_open_object_release`) - w Znajdź nosi nazwę
+        czasownika z Domu, bo tam człowiek mówi, CO chce zrobić, a nie którym oknem."""
+        self.prezentacja = prezentacja
+        znajdz = prezentacja == PREZENTACJA_ZNAJDZ
+        self.btn_obj.setText(i18n.t("find.verb.release" if znajdz else "grid.sel.release_object"))
+        self._uloz()
 
     def set_criteria(self, text):
         self.criteria_label.set_full_text(text)
@@ -3241,7 +3379,7 @@ class SelectionBar(QFrame):
             tip += i18n.t_plural("grid.sel.object_stacks", stacks)
         self.btn_object.setToolTip(tip)
 
-    def set_frame_actions(self, *, retirable, restorable, reason=None):
+    def set_frame_actions(self, *, retirable, restorable, reason=None, notes=0):
         """Uczciwy disabled osi żywotności klatki (D-OW-3/R2) — wzorzec `set_object_actions`.
 
         Powód wygaszenia liczy `_frame_gate_reason` i niesie go tooltip KONTROLKI: menu w tym repo
@@ -3251,14 +3389,27 @@ class SelectionBar(QFrame):
         Liczby biorą się z WIERSZY, które i tak są na ekranie (`base_rows` niesie `retired_at`,
         `present`, `n_present`, `superseded_by`) — bez nowego zapytania w gorącej pętli zaznaczenia.
         To jest PREZENTACJA, nie prawda: prawdę rozstrzyga klinga wewnątrz transakcji, bo między
-        zaznaczeniem a zapisem plik może wrócić na dysk."""
+        zaznaczeniem a zapisem plik może wrócić na dysk.
+
+        `notes` = ile klatek dostanie uwagę (całe zaznaczenie - uwagę może mieć każda klatka).
+        Uwaga trzyma kontrolkę przy życiu także wtedy, gdy oś żywotności nie ma nic do zrobienia;
+        powód wygaszenia tamtej osi zostaje wtedy w tooltipie obok liczby, bo pozycja „Wycofaj…"
+        dalej jest szara i ktoś zapyta dlaczego."""
         self.act_retire.setEnabled(bool(retirable))
         self.act_frame_restore.setEnabled(bool(restorable))
-        aktywna = bool(retirable or restorable)
-        self.btn_frame.setEnabled(aktywna)
-        self.btn_frame.setToolTip(
-            i18n.t("grid.sel.frame_tip_ready", retirable=retirable, restorable=restorable)
-            if aktywna else i18n.t(reason or "grid.sel.frame_tip_empty"))
+        self.act_notes.setEnabled(bool(notes))
+        self.btn_notes.setEnabled(bool(notes))
+        self.btn_notes.setToolTip(i18n.t_plural("grid.notes.tip_ready", notes) if notes
+                                  else i18n.t("grid.notes.tip_empty"))
+        zywotnosc = bool(retirable or restorable)
+        self.btn_frame.setEnabled(zywotnosc or bool(notes))
+        if zywotnosc:
+            tip = i18n.t("grid.sel.frame_tip_ready", retirable=retirable, restorable=restorable)
+        else:
+            tip = i18n.t(reason or "grid.sel.frame_tip_empty")
+        if notes:
+            tip += "\n" + i18n.t_plural("grid.notes.tip_ready", notes)
+        self.btn_frame.setToolTip(tip)
 
     def set_recent_objects(self, obiekty):
         """Skrót „ostatnio użyte" na dole menu obiektu (R-S2b-12) — 5 interakcji spada do 2.
@@ -3645,6 +3796,11 @@ def _sklad_zbioru(con, stan, przerwij=lambda: None):
     # Skład rodziny czyta migawka z `_TRIMY` (BP-4), więc dołożenie ósmej flagi jest wpisem
     # w tabelę, a nie ósmym miejscem do zapamiętania.
     trims = [getattr(queries, nazwa)(con) for nazwa in stan["trimy"]]
+    # TEKST UWAG TNIE JAK TRIM - w tę samą listę, więc ten sam zbiór dostają i grid, i sibling-sety
+    # listwy (liczniki facetów przy `uwagi:chmury` liczą klatki z tą uwagą, nie całe archiwum).
+    # `.get`: migawka sprzed tego składnika (test, który ją składa ręcznie) znaczy „bez uwag".
+    if stan.get("uwagi") is not None:
+        trims.append(set(queries.note_hits(con, stan["uwagi"])))
     # NOWY set, NIGDY `&=`: przy pustym filtrze `filter_engine.run` zwraca uniwersum WPROST
     # (`filter_engine.py:171`), a to jest ZAPAMIĘTANY obiekt memoizacji (`_memo_leaf_fns`).
     # `&=` przycinało go W MIEJSCU, więc kolejne `universe_fn()` widziało już przycięty zbiór -
@@ -3672,8 +3828,11 @@ def _sklad_zbioru(con, stan, przerwij=lambda: None):
                               trims, base_ids)
     # Uniwersum bierzemy z memoizowanego `universe_fn` TEGO składu - na niepustym gridzie
     # zapytania nie ma w ogóle, a gdy filtr już go dotknął, jest z cache'u.
+    # Migawka wraca razem z wynikiem: przyłożenie mówi o składnikach TEGO zbioru (chipy Znajdź),
+    # a nie o stanie widoku z chwili, w której wynik dojechał.
     return {"base": base, "pivot": pv, "keywords": keywords, "base_ids": base_ids,
-            "listwa": listwa, "baza_ma_klatki": bool(base) or bool(universe_fn())}
+            "listwa": listwa, "baza_ma_klatki": bool(base) or bool(universe_fn()),
+            "migawka": stan}
 
 
 def _liczniki_listwy(con, facet_state, filter_tree, leaf_fn, universe_fn, trims, current_ids):
@@ -3853,6 +4012,13 @@ class FramesView(QWidget):
     # Pusty stan perspektywy kopii prowadzi do Dostawy (`_ustaw_pusty_stan`) - gospodarz przełącza
     # widok, jak przy `TasksView.open_intake`. Sygnał, nie wołanie: grid nie zna gospodarza (NARROW).
     open_intake = Signal()
+    # Czasownik „Zbiory klasyczne" z paska Znajdź - przełączenie prezentacji należy do kontenera
+    # strony (`ZnajdzView`), który zna też nawigację; widok o nim nie wie (NARROW).
+    classic_requested = Signal()
+    # Stan zbioru przyłożony (koniec `_zastosuj_zbior`) albo zmieniona prezentacja - kontener odbudowuje
+    # chipy aktywnego stanu. Jeden sygnał po przyłożeniu, nie po każdym geście: chip ma mówić o zbiorze,
+    # który WIDAĆ, a nie o tym, który dopiero się liczy.
+    stan_zbioru_zmieniony = Signal()
 
     def __init__(self, con, now_fn=None, parent=None, *, pola_poza_watkiem=False):
         super().__init__(parent)
@@ -3865,6 +4031,23 @@ class FramesView(QWidget):
         # F4R#8). Oba PRZED pierwszym refresh() (F4R2#7).
         self._facet_state = facet_model.empty_state()
         self._effective_tree = None
+        # TEKST UWAG - składnik stanu zbioru obok facetów i filtra (Znajdź: `uwagi:` albo fraza bez
+        # obiektu). Przecięcie z `queries.note_hits` w `_sklad_zbioru`. Zdejmuje go każde wejście,
+        # które ZASTĘPUJE zbiór (perspektywa, „× Wyczyść zbiór", most obiektu, nowe zapytanie);
+        # klik facetu go zostawia, bo tylko zawęża.
+        self.note_query = None
+        self.prezentacja = PREZENTACJA_KLASYCZNA
+        self._wersja_w_znajdz = False   # „Kolumny ▾ → Wersja" w Znajdź (AR-50 (5)), domyślnie wyłączona
+        # Droga powrotu gestu uwag: `(before, after)` ostatniego gestu - `before` z klingi (stan sprzed
+        # gestu per zmieniona klatka), `after` = treść, którą gest zostawił (`None` = zdjęcie).
+        self._migawka_uwag = None
+        self._skladniki_przylozone = []   # składniki zawężenia OSTATNIO PRZYŁOŻONEGO zbioru (chipy)
+        # Terminy ostatniego zapytania Znajdź - `(etykieta, klucze składników)`, jeden chip na termin;
+        # schodzą z każdym wejściem, które zastępuje zbiór. Stan, który zapytanie postawiło, i to,
+        # czy przyłożony zbiór wciąż nim jest (`zapytanie_aktualne`).
+        self._terminy = []
+        self._stan_zapytania = None
+        self._zapytanie_aktualne = False
         self._zeruj_flagi()         # flagi perspektyw `_only_*` - skład z `_TRIMY`, jedna enumeracja
         self._cel_gestu = []        # klatki wypchnięte z widoku przez ostatni gest - wracają do
                                     # zaznaczenia przy najbliższym przeładowaniu zbioru (FC-2)
@@ -4018,6 +4201,10 @@ class FramesView(QWidget):
         self.sel_bar.act_restore.triggered.connect(self._on_object_restore)
         self.sel_bar.act_retire.triggered.connect(self._on_frame_retire)
         self.sel_bar.act_frame_restore.triggered.connect(self._on_frame_restore)
+        self.sel_bar.act_notes.triggered.connect(self._on_notes)
+        self.sel_bar.btn_notes.clicked.connect(self._on_notes)
+        self.sel_bar.act_version_col.toggled.connect(self._on_version_col)
+        self.sel_bar.btn_classic.clicked.connect(lambda: self.classic_requested.emit())
         # Skrót „ostatnio użyte" (R-S2b-12): lista jest pochodną dziennika, więc odświeża się
         # PRZY OTWARCIU menu, nie raz na budowie widoku — inaczej pokazywałaby stan sprzed gestów.
         self.sel_bar.btn_object.menu().aboutToShow.connect(self._sync_recent_objects)
@@ -4334,18 +4521,25 @@ class FramesView(QWidget):
         self.combo_persp.blockSignals(True)
         self.combo_persp.clear()
         for name in PRESETS:
-            self.combo_persp.addItem(i18n.t(_PRESET_LABELS[name]), ("preset", name))
+            self._dodaj_perspektywe(i18n.t(_PRESET_LABELS[name]), ("preset", name))
         for name, spec in self._saved_perspectives():
             # Wiersz, którego nie umiemy zastosować (`spec is None` — stary `sql_text` z 0013),
             # ZOSTAJE NA LIŚCIE i mówi to wprost. Ukrycie go byłoby zniknięciem cudzej pracy bez
             # słowa; wybór kończy się statusem, nie pustym filtrem.
             label = f"★ {name}" if spec is not None else f"★ {name} ⚠"
-            self.combo_persp.addItem(label, ("saved", name))
+            self._dodaj_perspektywe(label, ("saved", name))
         for i in range(self.combo_persp.count()):
             if self.combo_persp.itemData(i) == biezaca:
                 self.combo_persp.setCurrentIndex(i)
                 break
         self.combo_persp.blockSignals(False)
+        self._oznacz_zmiane_perspektywy()   # sufiks „(zmieniona)" przeżywa odbudowę listy (FH-12)
+
+    def _dodaj_perspektywe(self, etykieta, data):
+        """Pozycja listy perspektyw z etykietą BAZOWĄ w osobnej roli - tekst pozycji bywa etykietą
+        z sufiksem „(zmieniona)" (FH-12), a sufiks liczy się zawsze od nazwy, nie od tekstu."""
+        self.combo_persp.addItem(etykieta, data)
+        self.combo_persp.setItemData(self.combo_persp.count() - 1, etykieta, _ROLA_ETYKIETY)
 
     def _settings(self):
         return QSettings("Horreum", "Horreum")
@@ -4395,6 +4589,8 @@ class FramesView(QWidget):
         for atrybut, _ in _TRIMY:
             setattr(self, atrybut, bool(spec.get(_klucz_spec(atrybut))))
         self._filter_tree = spec.get("filter")
+        self.note_query = None      # perspektywa definiuje CAŁY zbiór - tekst uwag nie jest jej częścią
+        self._terminy = []
         # F4R#2: stan facetów resetowany dla KAŻDEJ perspektywy (preset ORAZ zapisana) — perspektywa
         # definiuje CAŁY zbiór; stara zapisana bez klucza "facets" MUSI zerować stan, inaczej facety
         # poprzedniego wyboru wyciekają w nowy zbiór. Rail przeładuje refresh() (set_data).
@@ -4414,6 +4610,9 @@ class FramesView(QWidget):
             self._wypelnij_pola()
         self._wyglad_z_perspektywy(spec)
         self._zdejmij_wynik_gestu_zapisu()
+        # Stan JEST teraz definicją pozycji - sufiks „(zmieniona)" schodzi od razu, także z pozycji,
+        # z której widok właśnie zszedł (w tle zbiór dojedzie później, a lista mówi już dziś).
+        self._oznacz_zmiane_perspektywy()
         # Szerokość ścieżki i recepta czytają NOWY zbiór - ogon zlecenia, nie krok po `refresh()`:
         # w tle (AR-27) wracałby, zanim zbiór dojedzie.
         self.refresh(w_tle=True, potem=self._po_perspektywie)
@@ -4457,10 +4656,207 @@ class FramesView(QWidget):
         self._zeruj_flagi()
         self._filter_tree = None
         self.filter_panel.set_tree(None)
+        self.note_query = None      # wejście ZASTĘPUJE zbiór, więc tekst uwag też schodzi
+        self._terminy = []
         self._facet_state = {"object": {"in": [[oid, canon] for oid, canon in pairs]}} \
             if pairs else facet_model.empty_state()
         self._reveal_facet = ("object", pairs[0][0]) if pairs else None
         self.refresh(w_tle=True)
+
+    def apply_find(self, *, facets, filter_tree, note_query, terms=()):
+        """Zbiór z zapytania Znajdź - publiczny seam kontenera strony (`ZnajdzView`). Zapytanie
+        ZASTĘPUJE cały zbiór: flagi perspektywy zerowane, facety, filtr zaawansowany i tekst uwag
+        dokładnie z wyniku (`flows.znajdz.resolve`). Widok nie zna parsera ani jego typów - dostaje
+        składniki własnego stanu, więc Znajdź nie ma drugiego silnika zbioru (JEDEN-STAN-EKRANU).
+        `terms` = `(etykieta, klucze składników)` wpisanych terminów - jeden chip na termin.
+
+        ZAPYTANIE STARTUJE OD „PRZEGLĄDU", nie od bieżącej perspektywy: pozycja listy, grupowanie
+        i wygląd presetu bez zawężenia. Inaczej zapytanie po „Kalibracji" dziedziczyło jej
+        grupowanie po rodzaju i nazwę - lighty zestawu szły pod „Kalibracja (zmieniona)" także do
+        manifestu wydania. Etykietę rozstrzyga potem właściciel na końcu `_refresh` (FH-12): facety
+        i zestaw są zawężeniem W RAMACH „Przeglądu", tekst uwag - zmianą.
+        Pierwszy obiekt zapytania jest odsłaniany w listwie jak przy moście teczki."""
+        nieznane = [f for f in facets if f not in facet_model.FACETS]
+        if nieznane:
+            raise ValueError(f"nieznane facety zapytania: {nieznane!r}")
+        self._zeruj_flagi()
+        self._filter_tree = copy.deepcopy(filter_tree)
+        self.filter_panel.set_tree(self._filter_tree)
+        self._facet_state = copy.deepcopy(facets) or facet_model.empty_state()
+        self.note_query = note_query or None
+        self._terminy = [(etykieta, tuple(klucze)) for etykieta, klucze in terms]
+        self._stan_zapytania = (copy.deepcopy(self._facet_state), copy.deepcopy(self._filter_tree),
+                                self.note_query)
+        czysty = PRESETS[_PRESET_CZYSTY]
+        self.combo_persp.blockSignals(True)
+        self.combo_persp.setCurrentIndex(next(
+            i for i in range(self.combo_persp.count())
+            if self.combo_persp.itemData(i) == ("preset", _PRESET_CZYSTY)))
+        self.combo_persp.blockSignals(False)
+        grupa = self.combo_group.findData(czysty.get("group_by"))
+        self.combo_group.blockSignals(True)
+        self.combo_group.setCurrentIndex(grupa if grupa >= 0 else 0)
+        self.combo_group.blockSignals(False)
+        self._wyglad_z_perspektywy(czysty)
+        self._zdejmij_wynik_gestu_zapisu()
+        self._oznacz_zmiane_perspektywy()
+        obiekty = (facets.get("object") or {}).get("in")
+        self._reveal_facet = ("object", obiekty[0][0]) if obiekty else None
+        self.refresh(w_tle=True)
+
+    def zapytanie_aktualne(self):
+        """Czy PRZYŁOŻONY zbiór jest wciąż dokładnie tym, który postawiło ostatnie zapytanie Znajdź.
+        Fałsz po każdej zmianie spoza pola (chip, facet, perspektywa, „× Wyczyść zbiór") - pole
+        zapytania przestaje wtedy opisywać stan i kontener je czyści."""
+        return self._zapytanie_aktualne
+
+    def set_presentation(self, prezentacja):
+        """Prezentacja widoku: `PREZENTACJA_KLASYCZNA` (dzisiejszy ekran Zbiorów) albo
+        `PREZENTACJA_ZNAJDZ` (prosty zestaw kolumn, pasek czasowników, bez paneli warsztatu).
+
+        PRZEŁĄCZENIE NIE PRZEŁADOWUJE ZBIORU: zmienia się układ kolumn na tych samych wierszach
+        (`GridTableModel.set_base_columns`) i widoczność kontrolek, a stan zbioru, staging, zajętość
+        i mutex zostają, gdzie są (JEDEN-STAN-EKRANU). Zaznaczenie wraca po `frame_id`, bo przebudowa
+        modelu je zeruje, a to ono jest celem czasowników.
+
+        Znajdź chowa filtr drzewiasty i „Pola" (ich składniki widać w chipach i na pasku kryteriów)
+        oraz panel nazw plików - ten nie ma tu czasownika, więc otwarty zostałby bez kontrolki,
+        która go zamyka. Makro i rodowód zostają, jak były: ich czasowniki są na pasku."""
+        if prezentacja not in (PREZENTACJA_ZNAJDZ, PREZENTACJA_KLASYCZNA):
+            raise ValueError(f"nieznana prezentacja: {prezentacja!r}")
+        if prezentacja == self.prezentacja:
+            return
+        zaznaczone = [r["frame_id"] for r in self._selected_data_rows()]
+        # OTWARTY EDYTOR KOMÓRKI DOMYKA SIĘ JAWNIE, ZANIM ruszy układ - z zapisem do szuflady, jak
+        # klik poza komórkę. Domknięty dopiero w resecie `set_base_columns` odkładał podgląd
+        # stagingu do następnego obrotu pętli, a ten drugi reset zerował zaznaczenie odtworzone
+        # niżej (zmierzone testem: wpis w szufladzie, zaznaczenie puste). Tu podgląd pada od razu,
+        # więc odtworzenie zaznaczenia przychodzi po OSTATNIEJ przebudowie modelu.
+        self._domknij_edycje("teraz")
+        self.prezentacja = prezentacja
+        znajdz = prezentacja == PREZENTACJA_ZNAJDZ
+        self.filter_panel.setVisible(not znajdz)
+        self.fields.setVisible(not znajdz)
+        if znajdz and self._rename_panel_open():
+            self.panel_stack.setVisible(False)
+            self.sel_bar.set_active_panel(None)
+        self.sel_bar.set_presentation(prezentacja)
+        self.model.set_base_columns(FIND_COLS if znajdz else BASE_COLS,
+                                    version_col=self._kolumna_wersji())
+        self._uloz_kolumny()
+        if znajdz:
+            self._szerokosci_znajdz()
+        if self.model._version_col() is not None:
+            self.table.resizeColumnToContents(self.model._version_col())
+        self._przywroc_zaznaczenie(zaznaczone)
+        self.stan_zbioru_zmieniony.emit()
+
+    def _szerokosci_znajdz(self):
+        """Szerokości prostego zestawu kolumn przy wejściu w Znajdź: krótkie fakty (obiekt, noc,
+        filtr, czas, zestaw) z treści, uwaga stałą szerokością (tooltip niesie pełną). Liczone przy
+        wejściu, nie przy każdym przeładowaniu - potem szerokość ręki idzie za znaczeniem kolumny
+        (`_zapamietaj_szerokosci`)."""
+        for klucz in ("_object", "night", "filter_canon", "exptime", "_zestaw"):
+            self.table.resizeColumnToContents(self.model.base_col(klucz))
+        self.table.setColumnWidth(self.model.base_col("note"), _SZEROKOSC_UWAG)
+
+    def skladniki_stanu(self, *, tylko_bez_kontrolki=False):
+        """Składniki zawężenia zbioru jako `(klucz, etykieta)` - rząd chipów Znajdź. Każdy składnik,
+        który zawęża wynik, ma tu wpis (ekran nie kłamie): flagi perspektywy, wartości facetów
+        (włączone i wykluczone), filtr zaawansowany i tekst uwag. Etykiety facetów i filtra mówi
+        `filter_engine.describe` - ta sama gramatyka co pasek kryteriów, więc chip i pasek nie
+        nazwą jednego warunku dwoma zdaniami.
+
+        `tylko_bez_kontrolki` - składniki, których prezentacja klasyczna nie pokazuje żadną własną
+        kontrolką (dziś: tekst uwag); tam chipy stoją wyłącznie po to, żeby zbiór nie był zawężony
+        niewidocznie. Klucz to krotka do `zdejmij_skladnik`.
+
+        CHIPY MÓWIĄ O ZBIORZE, KTÓRY WIDAĆ: lista pochodzi z migawki OSTATNIO PRZYŁOŻONEGO zbioru
+        (`_zastosuj_zbior`), nie ze stanu intencji. W trakcie składu w tle stan widoku jest już nowym
+        zapytaniem, a tabela pokazuje jeszcze klatki poprzedniego - chip czytany ze stanu nazywałby
+        kryteria wyników, których na ekranie nie ma."""
+        if tylko_bez_kontrolki:
+            return [s for s in self._skladniki_przylozone
+                    if all(k == ("uwagi",) for k in self._klucze_chipu(s[0]))]
+        return list(self._skladniki_przylozone)
+
+    @staticmethod
+    def _klucze_chipu(klucz):
+        """Składniki stanu za kluczem chipu: chip terminu niesie ich kilka, chip pojedynczy - jeden."""
+        return list(klucz[1]) if klucz[0] == "termin" else [klucz]
+
+    def _skladniki_z_migawki(self, migawka):
+        """Chipy z migawki składu (`_migawka_zbioru`): najpierw JEDEN chip na wpisany termin
+        zapytania (`("termin", klucze)` - z tych jego składników, które w stanie wciąż stoją), potem
+        każdy składnik spoza terminów osobno. Bez tego „noc:2025" dawało chip na każdą noc - rząd
+        szerszy niż ekran i zdjęcie miesiąca w kilkunastu kliknięciach."""
+        pojedyncze = self._pojedyncze_z_migawki(migawka)
+        klucze = {k for k, _ in pojedyncze}
+        out, zuzyte = [], set()
+        for etykieta, klucze_terminu in migawka.get("terminy") or ():
+            stoja = tuple(k for k in klucze_terminu if k in klucze and k not in zuzyte)
+            if stoja:
+                out.append((("termin", stoja), etykieta))
+                zuzyte.update(stoja)
+        return out + [(k, e) for k, e in pojedyncze if k not in zuzyte]
+
+    def _pojedyncze_z_migawki(self, migawka):
+        """`(klucz, etykieta)` każdego składnika zawężenia z migawki - kolejność: tekst uwag, flagi
+        perspektywy, facety, filtr zaawansowany."""
+        out = []
+        if migawka.get("uwagi") is not None:
+            out.append((("uwagi",), i18n.t("find.chip.notes", text=migawka["uwagi"])))
+        trimy = set(migawka.get("trimy") or ())
+        for atrybut, nazwa in _TRIMY:
+            if nazwa in trimy:
+                out.append((("trim", atrybut), i18n.t(_klucz_kryterium(atrybut))))
+        facety = migawka.get("facety") or {}
+        for facet in facet_model.FACETS:
+            grupa = facety.get(facet) or {}
+            for v, label in grupa.get("in") or []:
+                out.append((("facet", facet, "in", v), filter_engine.describe(
+                    {"facet": facet, "value": v, "label": label})))
+            for v, label in grupa.get("ex") or []:
+                out.append((("facet", facet, "ex", v), filter_engine.describe(
+                    {"op": "NOT", "conditions": [{"facet": facet, "value": v, "label": label}]})))
+        if migawka.get("filtr") is not None:
+            out.append((("filtr",), filter_engine.describe(migawka["filtr"])))
+        return out
+
+    def zdejmij_skladnik(self, klucz):
+        """„×" chipu: zdejmij JEDEN składnik zawężenia i przeładuj zbiór. Facet traci jedną wartość
+        (reszta wyboru zostaje), flaga perspektywy znika sama - etykietę listy rozstrzyga potem
+        właściciel na końcu `_refresh`, jak po każdym przeładowaniu. Klucz spoza
+        `skladniki_stanu` to błąd wołającego (EXPECT). Chip terminu zdejmuje wszystkie swoje
+        składniki jednym przeładowaniem."""
+        for skladnik in self._klucze_chipu(klucz):
+            self._zdejmij_jeden(skladnik)
+        self.refresh(w_tle=True)
+
+    def _zdejmij_jeden(self, klucz):
+        rodzaj = klucz[0]
+        if rodzaj == "uwagi":
+            self.note_query = None
+        elif rodzaj == "filtr":
+            self._filter_tree = None
+            self.filter_panel.set_tree(None)
+        elif rodzaj == "trim" and klucz[1] in {a for a, _ in _TRIMY}:
+            setattr(self, klucz[1], False)
+        elif rodzaj == "facet":
+            _, facet, strona, wartosc = klucz
+            stan = copy.deepcopy(self._facet_state)
+            grupa = stan.get(facet) or {}
+            grupa[strona] = [e for e in grupa.get(strona) or [] if e[0] != wartosc]
+            for k in ("in", "ex"):
+                if not grupa.get(k):
+                    grupa.pop(k, None)
+            if grupa:
+                stan[facet] = grupa
+            else:
+                stan.pop(facet, None)
+            self._facet_state = stan
+        else:
+            raise ValueError(f"nieznany składnik stanu: {klucz!r}")
 
     def apply_perspective(self, name):
         """Ustaw perspektywę PO NAZWIE — publiczny seam dla wejść spoza widoku (F5: klik w zadanie
@@ -4494,17 +4890,26 @@ class FramesView(QWidget):
         Definicję zbioru niosą trzy rzeczy: flagi `only_*`, filtr zaawansowany i facety. Grupowanie
         i kolumny zmieniają WYGLĄD zbioru, nie jego skład, więc nie są porównywane.
 
-        Flagi i filtr zgadzają się DOKŁADNIE. Facety perspektywy muszą w stanie STAĆ, ale stan może
-        mieć ich więcej: facet dołożony ponad definicję (klik w listwie, most planera) jest zawężeniem
+        Flagi i filtr zgadzają się DOKŁADNIE (wyjątek: filtr z samych liści facetowych nad definicją
+        bez filtra - warunek zestawu Znajdź, `_zawezenie_facetowe`). Facety perspektywy muszą
+        w stanie STAĆ, ale stan może mieć ich więcej: facet dołożony ponad definicję (klik w listwie, most planera) jest zawężeniem
         W RAMACH perspektywy, nie jej zmianą. Ta jedna reguła rozstrzyga obu wołających bez rozróżniania
         ich: preset (bez facetów) pasuje do stanu z facetem mostu, a zapisana perspektywa z facetem
         przestaje pasować, gdy „× Wyczyść zbiór" ten facet zdjął.
 
         Flagi biorą skład z `_TRIMY` (BP-4), a spec niesie je bez podkreślnika (`only_dups` ↔
-        `_only_dups`) - konwencja pinowana bramką `test_KAZDY_preset_ma_etykiete_i_zuzyta_flage`."""
+        `_only_dups`) - konwencja pinowana bramką `test_KAZDY_preset_ma_etykiete_i_zuzyta_flage`.
+
+        TEKST UWAG ZAWSZE ROZJEŻDŻA STAN Z DEFINICJĄ (FH-12): żadna perspektywa go nie niesie, a zbiór
+        zawężony do klatek z uwagą „chmury" nie jest „Przeglądem" - w odróżnieniu od facetu, którego
+        wybór widać w listwie, uwagi nie mają kontrolki w klasycznej prezentacji."""
         flagi_spec = {atrybut for atrybut, _ in _TRIMY if spec.get(_klucz_spec(atrybut))}
         flagi_stanu = {atrybut for atrybut, _ in _TRIMY if getattr(self, atrybut)}
-        if flagi_spec != flagi_stanu or spec.get("filter") != self._filter_tree:
+        # Filtr złożony WYŁĄCZNIE z liści facetowych (warunek zestawu z Znajdź: teleskop + kamera)
+        # jest zawężeniem jak klik w listwie - nad definicją bez filtra nie zmienia perspektywy.
+        filtr_zgodny = (spec.get("filter") == self._filter_tree
+                        or (spec.get("filter") is None and _zawezenie_facetowe(self._filter_tree)))
+        if flagi_spec != flagi_stanu or not filtr_zgodny or self.note_query is not None:
             return False
         return all(self._facet_state.get(facet) == wybor
                    for facet, wybor in (spec.get("facets") or {}).items())
@@ -4530,12 +4935,15 @@ class FramesView(QWidget):
         (i kolumny, gdy spec je niesie) i przeładował zbiór drugi raz. Kandydatami są wyłącznie
         presety - nazwa zapisana przez człowieka nie jest nasza do zgadywania. Brak dopasowania
         (dwie flagi naraz, możliwe tylko w specyfikacji spoza GUI - `_save_perspective` bierze flagi
-        ze stanu, a preset niesie najwyżej jedną) zostawia etykietę: lepiej nieprecyzyjna nazwa niż
-        wymyślona."""
+        ze stanu, a preset niesie najwyżej jedną) zostawia nazwę pozycji, ale nie jako twierdzenie:
+        dostaje sufiks „(zmieniona)" (FH-12, decyzja „q9.o1") - „Kalibracja" z filtrem zmienionym
+        na `OBJECT = NGC7000` przestaje udawać kalibrację, a nazwa zostaje, bo mówi, OD CZEGO
+        zbiór się zaczął. Ta sama etykieta idzie do manifestu wydania (`_open_projection`)."""
         data = self.combo_persp.currentData()
         if data:
             spec = self._spec_pozycji(data)
             if spec is not None and self._stan_zgodny_z(spec):
+                self._oznacz_zmiane_perspektywy()
                 return
         for i in range(self.combo_persp.count()):
             kandydat = self.combo_persp.itemData(i)
@@ -4543,11 +4951,37 @@ class FramesView(QWidget):
                 self.combo_persp.blockSignals(True)
                 self.combo_persp.setCurrentIndex(i)
                 self.combo_persp.blockSignals(False)
+                self._oznacz_zmiane_perspektywy()
                 # Wygląd zapisanej perspektywy (AR-36) nie jedzie pod etykietę presetu: preset nie
                 # niesie `view`, więc wraca wygląd domyślny i układ kolumn liczy się od nowa.
                 if self._wyglad_z_perspektywy(PRESETS[kandydat[1]]):
                     self._uloz_kolumny()
                 return
+        self._oznacz_zmiane_perspektywy()
+
+    def _oznacz_zmiane_perspektywy(self):
+        """Tekst pozycji listy perspektyw ze STANU (FH-12): bieżąca pozycja, której definicja nie
+        zgadza się ze zbiorem, mówi „<Nazwa> (zmieniona)"; każda inna wraca do etykiety bazowej
+        (`_ROLA_ETYKIETY`), więc sufiks nie zostaje na pozycji, z której widok już zszedł. Pozycja
+        „★ X ⚠" (spec `None`) nie ma definicji, więc po przeładowaniu, które nie trafiło w preset,
+        też dostaje sufiks - do najbliższego przeładowania mówi tylko swoją nazwę.
+
+        Sam tekst, bez sygnału i bez zmiany pozycji: wybór pozycji rozstrzyga
+        `_etykieta_perspektywy_za_stanem`, a `setItemText` nie emituje `currentIndexChanged`."""
+        biezaca = self.combo_persp.currentIndex()
+        data = self.combo_persp.currentData()
+        zmieniona = False
+        if data:
+            spec = self._spec_pozycji(data)
+            zmieniona = spec is None or not self._stan_zgodny_z(spec)
+        for i in range(self.combo_persp.count()):
+            tekst = self.combo_persp.itemData(i, _ROLA_ETYKIETY)
+            if tekst is None:
+                continue
+            if i == biezaca and zmieniona:
+                tekst = i18n.t("grid.persp.changed", name=tekst)
+            if self.combo_persp.itemText(i) != tekst:
+                self.combo_persp.setItemText(i, tekst)
 
     def _wyglad_z_perspektywy(self, spec):
         """Wygląd widoku z klucza `view` spec-a (AR-36) - JEDYNE miejsce, które go czyta. Zeruje
@@ -4668,6 +5102,9 @@ class FramesView(QWidget):
                 self.combo_persp.setCurrentIndex(i)
                 break
         self.combo_persp.blockSignals(False)
+        # Sufiks idzie za pozycją: poprzednia traci „(zmieniona)", a zapisana dostaje go wyłącznie
+        # wtedy, gdy stan ma składnik, którego perspektywa nie niesie (tekst uwag, FH-12).
+        self._oznacz_zmiane_perspektywy()
         self.status_message.emit(i18n.t(
             "grid.persp.overwritten" if verb == "perspective.overwritten" else "grid.persp.saved",
             name=name))
@@ -4695,12 +5132,14 @@ class FramesView(QWidget):
         """„Wydaj obiekt…": okno teczek → `ProjectionDialog` w trybie obiektu → zdanie na statusbar.
         Droga: klik w pasku, dwuklik teczki, „Utwórz N linków" - trzy interakcje przy celu
         z pamięci. Zbiór gridu nie jest tu celem, tylko PODPOWIEDZIĄ: gdy niesie lighty dokładnie
-        jednego obiektu, jego teczka jest zaznaczona na starcie. Odmowa w drodze jak przy „Wydaj
-        na stół…" - podpowiedź liczona ze zbioru, który zaraz zostanie zastąpiony, wskazałaby
-        teczkę poprzedniego widoku."""
-        if self._odmowa_w_drodze():
-            return
-        jedyny = queries.sole_light_object(self.con, self._frame_ids)
+        jednego obiektu, jego teczka jest zaznaczona na starcie.
+
+        ZBIÓR W DRODZE NIE ODMAWIA, TYLKO GASI PODPOWIEDŹ: podpowiedź liczona ze zbioru, który zaraz
+        zostanie zastąpiony, wskazałaby teczkę poprzedniego widoku, więc okno otwiera się bez
+        preselekcji. Odmowa (jak przy „Wydaj na stół…", gdzie zbiór JEST celem) blokowała kafel
+        Domu przez ~1 s po każdym przeładowaniu zdaniem o tabeli, której na Domu nie widać."""
+        jedyny = (None if self._zbior_w_drodze()
+                  else queries.sole_light_object(self.con, self._frame_ids))
         pick = ObjectPickDialog(self.con, preselect=jedyny, parent=self)
         if pick.exec() != QDialog.Accepted or pick.object_id is None:
             return
@@ -5493,9 +5932,13 @@ class FramesView(QWidget):
 
         CZŁONY ZAWĘŻENIA IDĄ PIERWSZE, „wszystkie klatki" TYLKO BEZ NICH: pasek elidował
         „wszystkie klatki · tylko duplikaty" do „wszystkie klatki…", czyli mówił odwrotność trimu.
-        Kolejność: trim perspektywy, potem facety i filtr (drzewo efektywne), na końcu ostrzeżenie."""
+        Kolejność: trim perspektywy, tekst uwag, potem facety i filtr (drzewo efektywne), na końcu
+        ostrzeżenie. Tekst uwag stoi przed drzewem z tego samego powodu co trim: jest zawężeniem,
+        więc „wszystkie klatki" przy nim byłoby nieprawdą."""
         parts = [i18n.t(_klucz_kryterium(atrybut)) for atrybut, _ in _TRIMY
                  if getattr(self, atrybut)]
+        if self.note_query is not None:
+            parts.append(i18n.t("grid.criteria.notes", text=self.note_query))
         drzewo = filter_engine.describe(self._effective_tree)
         if not parts or drzewo != filter_engine.describe(None):
             parts.append(drzewo)
@@ -5519,8 +5962,10 @@ class FramesView(QWidget):
         geście osi (FC-2). Dwie kopie rozjechałyby się dokładnie tak, jak rozjechała się rodzina
         `only_*` - a tu cena rozjazdu jest wyższa niż wygaszony przycisk: zdanie po geście
         wskazywałoby gest, który zawężenia nie zdejmuje. Flagi perspektywy są POZA tym predykatem
-        świadomie, bo ten przycisk ich nie tyka (`_on_clear_selection`)."""
-        return bool(self._facet_state) or self._filter_tree is not None
+        świadomie, bo ten przycisk ich nie tyka (`_on_clear_selection`). Tekst uwag jest W NIM, bo
+        przycisk go zdejmuje - inaczej zbiór zawężony samymi uwagami miałby szary przycisk."""
+        return (bool(self._facet_state) or self._filter_tree is not None
+                or self.note_query is not None)
 
     def _trim_aktywny(self):
         """Czy trim perspektywy przycina zbiór - LICZONE W MIEJSCU UŻYCIA, nie zapamiętane (BP-4).
@@ -5578,12 +6023,19 @@ class FramesView(QWidget):
         """Ukrycie kolumn po ZNACZENIU: schowana bywa wyłącznie „Obrazy" (`_obrazy_widoczne`).
         Liczone dla CAŁEGO układu, bo nagłówek trzyma stan ukrycia pod numerem, a po zmianie
         liczby kolumn - pod POZYCJĄ WIZUALNĄ (zmierzone: z podglądem stojącym za „Ścieżką" ukrycie
-        „Obrazów" przechodziło po jego zdjęciu na pierwszy keyword). Zwraca widoczność „Obrazów"."""
+        „Obrazów" przechodziło po jego zdjęciu na pierwszy keyword). Zwraca widoczność „Obrazów".
+
+        W prezentacji Znajdź chowane są też kolumny keywordów: model je trzyma (przełączenie
+        prezentacji nie przeładowuje zbioru), a prosty zestaw kolumn ich nie pokazuje. „Obrazów"
+        Znajdź w ogóle nie ma."""
         m = self.model
-        obrazy = m.base_col("_images")
+        obrazy = m.base_col("_images") if m.has_base_col("_images") else None
         widoczne = self._obrazy_widoczne()
+        keywordy = (set(range(m.n_bazowych() + m._kw_off(), m.n_bazowych() + m._kw_off()
+                              + len(m._keywords)))
+                    if self.prezentacja == PREZENTACJA_ZNAJDZ else set())
         for c in range(m.columnCount()):
-            self.table.setColumnHidden(c, c == obrazy and not widoczne)
+            self.table.setColumnHidden(c, (c == obrazy and not widoczne) or c in keywordy)
         return widoczne
 
     def _uloz_kolumny(self):
@@ -5696,6 +6148,8 @@ class FramesView(QWidget):
                 "facety": copy.deepcopy(self._facet_state),
                 "filtr": copy.deepcopy(self._filter_tree),
                 "trimy": [nazwa for atrybut, nazwa in _TRIMY if getattr(self, atrybut)],
+                "uwagi": self.note_query,
+                "terminy": list(self._terminy),
                 "kolumny": list(self._columns),
                 "wersje": self._potrzebne_wersje()}
 
@@ -5705,6 +6159,11 @@ class FramesView(QWidget):
         (wyprzedzony synchronicznym przeładowaniem) się nie liczy: jego wynik idzie do kosza."""
         return (self._zbior_ponow or self._zbior_odlozony is not None
                 or (self._zbior_bieg_gen is not None and self._zbior_bieg_gen == self._zbior_gen))
+
+    def zbior_w_drodze(self):
+        """Publiczne pytanie kontenera strony (Znajdź): czy tabela pokazuje zbiór, który zaraz
+        zostanie zastąpiony - zdanie o zapytaniu w toku czeka wtedy na jego przyłożenie."""
+        return self._zbior_w_drodze()
 
     def ponow_raport_wczytania(self):
         """Podaj „Wczytuję…" jeszcze raz, gdy zbiór jest w drodze - wejście gospodarza zaraz po
@@ -5848,7 +6307,7 @@ class FramesView(QWidget):
         base_ids = wynik["base_ids"]
         self._frame_ids = base_ids     # cel makra = to, co WIDAĆ (po filtrach dups/review), doktryna §5
         self.model.set_data(base, pv, keywords, group_by=self.combo_group.currentData(),
-                            version_col=self._perspektywa_wersji(),
+                            version_col=self._kolumna_wersji(),
                             images_unknown=self._perspektywa_obrazow())
         self._uloz_kolumny()
         if self.model._version_col() is not None:
@@ -5898,6 +6357,18 @@ class FramesView(QWidget):
         # perspektyw o warunki, których ten build nie zna (D-V-9f); przed rozstrzygnięciem
         # etykiety pytałby pozycję, która za chwilę przestanie być bieżąca.
         self.sel_bar.set_criteria(self._describe_criteria())
+        # Chipy aktywnego stanu (Znajdź) z migawki TEGO zbioru - razem z modelem, nie ze stanu intencji.
+        migawka = wynik.get("migawka") or {}
+        self._skladniki_przylozone = self._skladniki_z_migawki(migawka)
+        # Czy to wciąż zbiór ostatniego zapytania: stan, który ono postawiło, bez flag perspektywy.
+        # Raz rozjechany zostaje rozjechany - pole zapytania zostało już wyczyszczone.
+        if self._stan_zapytania is not None and (
+                migawka.get("trimy") or (migawka.get("facety") or {}) != self._stan_zapytania[0]
+                or migawka.get("filtr") != self._stan_zapytania[1]
+                or migawka.get("uwagi") != self._stan_zapytania[2]):
+            self._stan_zapytania = None
+        self._zapytanie_aktualne = self._stan_zapytania is not None
+        self.stan_zbioru_zmieniony.emit()
 
     def _zastosuj_listwe(self, listwa):
         """Liczniki z `_liczniki_listwy` → listwa facetów, z bieżącym stanem i odsłonięciem."""
@@ -5924,8 +6395,12 @@ class FramesView(QWidget):
         gest zdejmuje całą jego definicję, a zapisana perspektywa traci swoje facety. Rozstrzyga
         właściciel etykiety na końcu `_refresh`, do którego ten gest dochodzi przez `_on_filter`;
         kontrakt wobec flag zostaje bez zmian, bo od niego zależy wykonalność recepty powrotu
-        (`_rodzaj_recepty_powrotu`)."""
+        (`_rodzaj_recepty_powrotu`).
+
+        Tekst uwag schodzi razem z facetami: gest zastępuje zbiór, a uwagi są jego składnikiem."""
         self._facet_state = facet_model.empty_state()
+        self.note_query = None
+        self._terminy = []
         self.filter_panel._clear()
 
     def _on_selection_changed(self):
@@ -5989,7 +6464,7 @@ class FramesView(QWidget):
         restorable = sum(1 for r in rows if r.get("retired_at") is not None)
         alive = sum(1 for r in rows if (r.get("n_present") or 0) > 0)
         self.sel_bar.set_frame_actions(retirable=retirable, restorable=restorable,
-                                       reason=_frame_gate_reason(len(rows), alive))
+                                       reason=_frame_gate_reason(len(rows), alive), notes=len(rows))
 
     # ---- oś ŻYWOTNOŚCI klatki (D-OW-3/R2) ----
 
@@ -6063,6 +6538,112 @@ class FramesView(QWidget):
         # klatka w zaznaczeniu niesie cudzą decyzję i odwrót jej nie tyka (Z1, jak na osi obiektu).
         self._ustaw_recepte_gestu(gest.frame_ids, odwrot)
 
+    # ---- UWAGI klatki (0032) - fakt ręki, zapis wyłącznie klingą `repo` ----
+
+    def _on_notes(self):
+        """„Uwagi…" (czasownik Znajdź i pozycja menu „Klatka ▾"): cel = WYŁĄCZNIE zaznaczenie, jak
+        na osiach zaznaczenia - przy setkach widocznych klatek chybione kliknięcie i zamierzony
+        gest wyglądają tak samo.
+
+        ODMOWA PRZED OKNEM, nie po nim: etap Dostawy albo zapis nagłówków pisze do tej samej bazy
+        z innego połączenia (zapis uwagi czekałby na `busy_timeout`), a zbiór w drodze znaczy, że
+        zaznaczenie wskazuje wiersze zbioru, który za chwilę zniknie. Okno bazy nie dotyka -
+        bieżące uwagi czyta tu `queries.notes_for`, a klinga dostaje intencję. Odmowa klingi
+        (`ValueError` przed zapisem: klatka zniknęła, treść za długa) wraca oknem z jej zdaniem."""
+        powod = self._powod_zajetosci()
+        if powod is not None:
+            self.status_message.emit(i18n.t(_UWAGI_ZAJETE[powod]))
+            return
+        if self._odmowa_w_drodze():
+            return
+        ids = self._object_gesture_ids()
+        if not ids:
+            return
+        dlg = NoteDialog(current=queries.notes_for(self.con, ids), frame_count=len(ids), parent=self)
+        dlg.exec()
+        if dlg.intent is None:
+            return
+        akcja, tresc = dlg.intent
+        try:
+            if akcja == "set":
+                gest = repo.set_frame_note(self.con, frame_ids=ids, body=tresc, now=self._now())
+            else:
+                gest = repo.clear_frame_note(self.con, frame_ids=ids, now=self._now())
+        except ValueError as e:
+            QMessageBox.warning(self, i18n.t("grid.notes.action"), str(e))
+            return
+        self._po_gescie_uwag(gest, after=tresc if akcja == "set" else None)
+
+    def _po_gescie_uwag(self, gest, *, after):
+        """Ogon gestu uwag: zdanie, odświeżenie z zachowaniem zaznaczenia (wzór `_po_gescie_osi`)
+        i recepta „Cofnij uwagi".
+
+        NOŚNIK COFNIĘCIA TO MIGAWKA, NIE NAZWA METODY: recepta osi pamięta `(cel, _Odwrot)`,
+        bo jej odwrót to inna pozycja menu na tych samych klatkach. Odwrotem uwag jest stan SPRZED
+        gestu - inny dla każdej klatki (jedna miała „chmury", druga nic) - więc widok trzyma
+        `(before, after)` z klingi obok recepty, a `_Odwrot` uwag wskazuje metody, które z niej
+        czytają. Gest, który niczego nie zmienił (treść już była), recepty nie dostaje."""
+        zaznaczone = [r["frame_id"] for r in self._selected_data_rows()]
+        self._recepta_gestu = None
+        klucz = "grid.notes.set_done" if after is not None else "grid.notes.cleared_done"
+        msg = i18n.t(klucz, changed=len(gest.changed),
+                     total=len(gest.changed) + len(gest.unchanged))
+        if gest.changed:
+            self._migawka_uwag = (dict(gest.before), after)
+            # Uwaga bywa składnikiem zbioru (`note_query`), więc gest potrafi wypchnąć cel z widoku
+            # - ten sam pomiar i człon, co na osiach zaznaczenia.
+            self.refresh()
+            wrocilo = self._przywroc_zaznaczenie(zaznaczone)
+            msg += self._czlon_poza_widokiem(len(zaznaczone) - wrocilo, zaznaczone)
+        self.status_message.emit(msg)
+        self._ustaw_recepte_gestu(gest.changed, _ODWROT_UWAG if gest.changed else None)
+
+    def _ile_uwag_do_cofniecia(self, cel):
+        """Ile klatek celu niesie WCIĄŻ uwagę, którą zostawił gest - recepta żyje, dopóki to prawda.
+        Późniejsza edycja tych klatek (inny tekst, zdjęcie) gasi ją: cofnięcie nadpisałoby
+        decyzję, której gest nie podjął."""
+        if self._migawka_uwag is None:
+            return 0
+        before, after = self._migawka_uwag
+        biezace = queries.notes_for(self.con, list(cel))
+        return sum(1 for fid in cel if fid in before and biezace.get(fid) == after)
+
+    def _cofnij_uwagi(self):
+        """Wykonawca recepty „Cofnij uwagi" - przywraca stan sprzed gestu (`repo.restore_frame_notes`)
+        na klatkach, które wciąż niosą uwagę gestu; klatek zmienionych później nie tyka (ta sama
+        reguła, co `_ile_uwag_do_cofniecia`). Migawka znika PRZED zapisem: drugi klik nie ma czego
+        cofać, a recepta schodzi z paska po tym geście."""
+        migawka, self._migawka_uwag = self._migawka_uwag, None
+        if migawka is None:
+            self.status_message.emit(i18n.t("grid.notes.undo_nothing"))
+            return
+        before, after = migawka
+        biezace = queries.notes_for(self.con, list(before))
+        zywe = {fid: b for fid, b in before.items() if biezace.get(fid) == after}
+        if not zywe:
+            self.status_message.emit(i18n.t("grid.notes.undo_nothing"))
+            self._ustaw_recepte_gestu(())
+            return
+        zaznaczone = [r["frame_id"] for r in self._selected_data_rows()]
+        self._recepta_gestu = None
+        try:
+            # Odczyt wyżej jest PREZENTACJĄ (zdanie „nie ma czego cofać"); prawdę rozstrzyga klinga
+            # pod blokadą - `expected` zatrzymuje cofnięcie na klatce, którą w międzyczasie zmieniło
+            # drugie połączenie (etap Dostawy nie pisze uwag, ale druga instancja aplikacji może).
+            gest = repo.restore_frame_notes(self.con, before=zywe,
+                                            expected={fid: after for fid in zywe}, now=self._now())
+        except ValueError as e:
+            QMessageBox.warning(self, i18n.t("grid.notes.action"), str(e))
+            self._ustaw_recepte_gestu(())
+            return
+        msg = i18n.t("grid.notes.restored", changed=len(gest.changed))
+        if gest.changed:
+            self.refresh()
+            wrocilo = self._przywroc_zaznaczenie(zaznaczone)
+            msg += self._czlon_poza_widokiem(len(zaznaczone) - wrocilo, zaznaczone)
+        self.status_message.emit(msg)
+        self._ustaw_recepte_gestu(())
+
     # ---- WERSJE STOSÓW (perspektywa „Wersje stosów") ----
 
     def _perspektywa_wersji(self):
@@ -6072,8 +6653,23 @@ class FramesView(QWidget):
     def _potrzebne_wersje(self):
         """Czy przeładowanie ma policzyć grupy wersji - tylko gdy ktoś o nie pyta: perspektywa
         (kolumna „Wersja") albo grupowanie „Wersja stosu". Poza tym `_refresh` nie płaci za read-model
-        (zmierzone 17 ms na 193 stosach żywego archiwum, przy każdym kliknięciu w listwie)."""
-        return self._perspektywa_wersji() or self.combo_group.currentData() == _GRUPA_WERSJI
+        (zmierzone 17 ms na 193 stosach żywego archiwum, przy każdym kliknięciu w listwie).
+        Kolumna „Wersja" włączona w Znajdź liczy się w OBU prezentacjach: fakty muszą już być
+        w wierszach, gdy człowiek wróci do Znajdź - przełączenie prezentacji nie przeładowuje zbioru."""
+        return (self._perspektywa_wersji() or self.combo_group.currentData() == _GRUPA_WERSJI
+                or self._wersja_w_znajdz)
+
+    def _kolumna_wersji(self):
+        """Czy model ma pokazać kolumnę „Wersja": perspektywa „Wersje stosów" albo wybór w „Kolumny ▾"
+        Znajdź (AR-50 (5)) - ten drugi tylko w prezentacji, która go oferuje."""
+        return self._perspektywa_wersji() or (
+            self.prezentacja == PREZENTACJA_ZNAJDZ and self._wersja_w_znajdz)
+
+    def _on_version_col(self, on):
+        """„Kolumny ▾ → Wersja" w Znajdź. Przeładowanie, bo fakty grup wersji liczą się w składzie
+        tylko wtedy, gdy ktoś o nie pyta (`_potrzebne_wersje`)."""
+        self._wersja_w_znajdz = bool(on)
+        self.refresh(w_tle=True)
 
     def _uloz_belki_i_wersje(self):
         """Układ widoku po każdym resecie modelu (sygnał `modelReset`): belki grup i kolumna „Wersja".
@@ -6112,13 +6708,16 @@ class FramesView(QWidget):
         h = t.horizontalHeader()
         wersja = m._version_col()
         podglad = m._preview_col()
-        # (kolumna logiczna, pozycja wizualna) W KOLEJNOŚCI RUCHÓW: podgląd ląduje na 1 jako
-        # drugi, więc „Wersja" zjeżdża na 2 - ścieżka, nowa nazwa, wersja.
+        # (kolumna logiczna, pozycja wizualna) W KOLEJNOŚCI RUCHÓW: podgląd ląduje za ścieżką jako
+        # drugi, więc „Wersja" zjeżdża o jeden dalej - ścieżka, nowa nazwa, wersja. „Za ścieżką"
+        # liczone od JEJ numeru: w klasycznej to pozycja 1, w Znajdź ścieżka („Plik") stoi ostatnia
+        # wśród bazowych, więc oba przesunięcia lądują na końcu prostego zestawu kolumn.
+        za_sciezka = m.base_col("path") + 1
         docelowe = []
         if wersja is not None:
-            docelowe.append((wersja, 1))
+            docelowe.append((wersja, za_sciezka))
         if podglad is not None:
-            docelowe.append((podglad, 1))
+            docelowe.append((podglad, za_sciezka))
         if h.sectionsMoved():
             for i in range(h.count()):
                 if h.visualIndex(i) != i:
@@ -6140,9 +6739,14 @@ class FramesView(QWidget):
                 if (znaczenie is not None and znaczenie != ("version",)
                         and not h.isSectionHidden(c)):
                     t.setColumnWidth(c, szerokosci.get(znaczenie, h.defaultSectionSize()))
-        for c in range(len(BASE_COLS), m.columnCount()):
-            if c != podglad and isinstance(t.itemDelegateForColumn(c), _ElizjaWSrodku):
-                t.setItemDelegateForColumn(c, None)   # numer podglądu niesie teraz keyword
+        # Elizja w środku należy do ścieżki (ustawia ją `_uloz_kolumny`) i do podglądu; każdy inny
+        # numer, który ją niesie, dostał ją pod innym znaczeniem - numer podglądu niesie teraz
+        # keyword, a po zmianie prezentacji numer ścieżki niesie „Obiekt".
+        sciezka = m.base_col("path")
+        for c in range(m.columnCount()):
+            if (c not in (podglad, sciezka)
+                    and isinstance(t.itemDelegateForColumn(c), _ElizjaWSrodku)):
+                t.setItemDelegateForColumn(c, None)
         if podglad is not None:
             kolumna_z_tresci(t, podglad)
 
@@ -6946,8 +7550,10 @@ class FramesView(QWidget):
 
     def _domknij_edycje(self, podglad):
         """Domknij otwarty edytor komórki z zapisem do szuflady (AR-61) - przed resetem modelu
-        (`podglad="pozniej"`) i zanim widok zniknie (`"bez"`: zamknięcie okna, przełączenie bazy -
-        połączenie jeszcze otwarte, podglądu nie ma już komu pokazać). Odmowę (zajętość, bramka
+        (`podglad="pozniej"`), przed przełączeniem prezentacji (`"teraz"`: podgląd pada od razu, żeby
+        żaden reset nie przyszedł po odtworzeniu zaznaczenia) i zanim widok zniknie (`"bez"`:
+        zamknięcie okna, przełączenie bazy - połączenie jeszcze otwarte, podglądu nie ma już komu
+        pokazać). Odmowę (zajętość, bramka
         karty) mówi `_on_cell_edit` na pasku - wpis nie ginie po cichu."""
         delegat = self.table.itemDelegate()
         if not isinstance(delegat, _EdycjaKomorki) or delegat.aktywny is None:

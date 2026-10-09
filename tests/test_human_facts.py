@@ -37,7 +37,7 @@ def test_spis_zna_KAZDA_os_gestu_ktora_repo_ma():
     assert set(_spis().counts) == {
         "object_hand", "object_cleared", "config_hand", "lineage_inputs", "lineage_excluded",
         "calibration_facts", "calibration_links", "offset_hand", "retired_hand",
-        "observatory_hand", "testimony_hand"}
+        "observatory_hand", "testimony_hand", "notes_hand"}
     # E5-1: odniesienie niesie też migawkę TOŻSAMOŚCI osi obiektu i znak wodny dziennika - to nie
     # są osie (nie ma ich w `counts`), tylko materiał rozstrzygnięcia po klatkach.
     assert set(_spis().snapshot) == set(_spis().counts) | {"object_hand_frames",
@@ -52,6 +52,10 @@ def test_odniesienie_bez_nowej_osi_wczytuje_sie_jako_zero():
     assert stare.offset_hand == 0
     assert _spis(object_hand=1, offset_hand=7).spadki(stare) == {}      # wzrost to nie ubytek
     assert _spis(offset_hand=0).spadki(_spis(offset_hand=3)) == {"offset_hand": (3, 0)}
+    # Dwunasta oś (uwagi, 0032) - ta sama figura: odniesienie bez klucza wczytuje się zerem.
+    assert stare.notes_hand == 0 and "notes_hand" in stare.counts
+    assert _spis(object_hand=1, notes_hand=4).spadki(stare) == {}
+    assert _spis(notes_hand=1).spadki(_spis(notes_hand=2)) == {"notes_hand": (2, 1)}
 
 
 # ---------------------------------------------------------------- sam spis
@@ -160,3 +164,58 @@ def test_nowy_sub_nie_uszczupla_spisu_faktow_reki():
     po = audit.human_facts_census(con)
     assert po.spadki(przed) == {}
     assert po.lineage_inputs == przed.lineage_inputs
+
+
+# ---------------------------------------------------------------- oś uwag klatki (0032)
+
+def test_spis_liczy_uwagi_klatek():
+    con = _baza()
+    a, _ = repo.upsert_frame(con, sha1_data="aaa", kind="light", filetype="raw",
+                             camera_id=None, now=NOW)
+    b, _ = repo.upsert_frame(con, sha1_data="bbb", kind="flat", filetype="fits",
+                             camera_id=None, now=NOW)
+    assert audit.human_facts_census(con).notes_hand == 0
+    repo.set_frame_note(con, frame_ids=[a, b], body="zmieniony flat", now=NOW)
+    przed = audit.human_facts_census(con)
+    assert przed.notes_hand == 2
+    repo.clear_frame_note(con, frame_ids=[b], now=LATER)
+    assert audit.human_facts_census(con).spadki(przed) == {"notes_hand": (2, 1)}
+
+
+def test_spis_na_bazie_sprzed_0032(tmp_path):
+    """Spis nie migruje mierzonej bazy - na bazie v31 (bez tabeli uwag) oś liczy się jako 0,
+    zamiast wywracać `human-facts`."""
+    path = str(tmp_path / "v31.db")
+    con = db.connect(path)
+    for version, filename in db.MIGRATIONS:
+        if version <= 31:
+            db._apply_migration(con, version, db._migration_sql(filename))
+    assert not con.execute(
+        "SELECT count(*) FROM sqlite_master WHERE name = 'frame_note'").fetchone()[0]
+    assert audit.human_facts_census(con).notes_hand == 0
+    con.close()
+
+
+def test_cli_ubytek_uwagi_to_kod_1(tmp_path, capsys):
+    """Bramka etapu: odniesienie z `--json`, uwaga zdjęta poza odniesieniem - `--baseline` drukuje
+    oś i ubytek, kod wyjścia 1. Uwag nie pisze żaden automat, więc każdy ubytek jest wycofaniem."""
+    from horreum import cli
+    path = str(tmp_path / "h.db")
+    con = db.open_db(path)
+    a, _ = repo.upsert_frame(con, sha1_data="aaa", kind="light", filetype="raw",
+                             camera_id=None, now=NOW)
+    repo.set_frame_note(con, frame_ids=[a], body="chmury po 2:00", now=NOW)
+    con.close()
+    assert cli.main(["human-facts", path]) == 0
+    assert "  notes_hand         1" in capsys.readouterr().out.splitlines()
+    assert cli.main(["human-facts", path, "--json"]) == 0
+    odniesienie = tmp_path / "przed.json"
+    odniesienie.write_text(capsys.readouterr().out, encoding="utf-8")
+    assert cli.main(["human-facts", path, "--baseline", str(odniesienie)]) == 0
+    capsys.readouterr()
+
+    con = db.open_db(path)
+    repo.clear_frame_note(con, frame_ids=[a], now=LATER)
+    con.close()
+    assert cli.main(["human-facts", path, "--baseline", str(odniesienie)]) == 1
+    assert "  UBYTEK notes_hand: 1 -> 0" in capsys.readouterr().out.splitlines()

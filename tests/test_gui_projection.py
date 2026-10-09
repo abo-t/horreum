@@ -1375,21 +1375,37 @@ def test_przycisk_paska_droga_trzech_interakcji(qapp, tmp_path, ustawienia, monk
     con.close()
 
 
-def test_przycisk_paska_odmowa_w_drodze(qapp, tmp_path, monkeypatch):
-    """Zbiór w drodze → odmowa jak przy „Wydaj na stół…" (podpowiedź teczki liczona ze zbioru,
-    który zaraz zniknie); okno teczek się nie otwiera."""
+def test_przycisk_paska_w_drodze_otwiera_teczki_BEZ_podpowiedzi(qapp, tmp_path, monkeypatch):
+    """Zbiór w drodze → okno teczek otwiera się bez preselekcji i bez odmowy: zbiór jest tu tylko
+    podpowiedzią, a podpowiedź ze zbioru, który zaraz zniknie, wskazałaby cudzą teczkę. Odmowa
+    blokowała kafel Domu przez ~1 s po każdym przeładowaniu zdaniem o tabeli, której na Domu
+    nie widać (wizytacja natywna). Poza drogą podpowiedź wraca."""
+    from horreum.gui import grid as grid_mod
     from horreum.gui.grid import FramesView
 
     con, _ids = _obiekt_wydania(tmp_path)
     view = FramesView(con, now_fn=lambda: NOW)
     assert _wait_until(lambda: not view._zbior_w_drodze())
     otwarte = []
-    monkeypatch.setattr(pd_mod.ObjectPickDialog, "exec", lambda self: otwarte.append(1) or 0)
-    monkeypatch.setattr(view, "_zbior_w_drodze", lambda: True)
+
+    class _Teczki:
+        def __init__(self, con_, *, preselect=None, parent=None):
+            otwarte.append(preselect)
+
+        def exec(self):
+            return 0
+
+    monkeypatch.setattr(grid_mod, "ObjectPickDialog", _Teczki)
     msgs = []
     view.status_message.connect(msgs.append)
+    view.apply_object_facet([(r[0], r[1]) for r in con.execute(
+        "SELECT id, canon FROM object WHERE canon = 'NGC 6992'")])
+    assert _wait_until(lambda: not view._zbior_w_drodze())
     view._open_object_release()
-    assert not otwarte and msgs == [i18n.t("grid.sel.loading_refused")]
+    assert otwarte[-1] is not None, "poza drogą podpowiedź teczki stoi"
+    monkeypatch.setattr(view, "_zbior_w_drodze", lambda: True)
+    view._open_object_release()
+    assert otwarte[-1] is None and i18n.t("grid.sel.loading_refused") not in msgs
     con.close()
 
 

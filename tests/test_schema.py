@@ -116,7 +116,8 @@ def test_user_version_v32_po_migracji(tmp_path):
 
 def test_0032_frame_note_przyrost_na_bazie_v31(tmp_path):
     """0032 na bazie v31 z klatką: tabela wchodzi PUSTA, jeden wiersz na klatkę (PK), CHECK odrzuca
-    treść pustą i z samych białych znaków, FK wiąże uwagę z istniejącą klatką."""
+    treść pustą i z samych białych znaków - także tabulatorów i końców linii, których goły `trim`
+    SQLite nie zdejmuje - a FK wiąże uwagę z istniejącą klatką."""
     path = str(tmp_path / "h.db")
     con = db.connect(path)
     for version, filename in db.MIGRATIONS:
@@ -133,7 +134,7 @@ def test_0032_frame_note_przyrost_na_bazie_v31(tmp_path):
     with pytest.raises(sqlite3.IntegrityError):
         con.execute("INSERT INTO frame_note(frame_id, body, updated_at) VALUES (?, 'druga', "
                     "'2026-10-09T00:00:00')", (fid,))                          # jedna uwaga na klatkę
-    for pusta in ("", "   "):
+    for pusta in ("", "   ", "\t", "\n", "\r\n", " \t\n\x0b\x0c\r "):
         with pytest.raises(sqlite3.IntegrityError):
             con.execute("UPDATE frame_note SET body = ? WHERE frame_id = ?", (pusta, fid))
     with pytest.raises(sqlite3.IntegrityError):

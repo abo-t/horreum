@@ -1048,10 +1048,192 @@ CATALOG = {
     "menu.theme.dark": {"pl": "Ciemny", "en": "Dark"},
     "menu.theme.light": {"pl": "Jasny", "en": "Light"},
     "nav.dostawa": {"pl": "Dostawa", "en": "Intake"},
-    "nav.zbiory": {"pl": "Zbiory", "en": "Collections"},
+    # Wiersz klasycznej prezentacji strony zbiorów; ta sama nazwa pada w podpowiedziach zadań
+    # Porządków („Klik prowadzi do: …"), więc mówi dokładnie to, co stoi w sidebarze.
+    "nav.zbiory": {"pl": "Zbiory klasyczne", "en": "Classic collections"},
     "nav.porzadki": {"pl": "Porządki", "en": "Housekeeping"},
     "nav.porzadki_count": {"pl": "Porządki ({n})", "en": "Housekeeping ({n})"},
     "nav.planer": {"pl": "Planer", "en": "Planner"},
+    "nav.dom": {"pl": "Dom", "en": "Home"},
+    "nav.znajdz": {"pl": "Znajdź", "en": "Find"},
+    # Nagłówek sekcji - wiersz nieklikalny nad miejscami, które Dom zbiera pod „Więcej…".
+    "nav.wiecej": {"pl": "Więcej", "en": "More"},
+
+    # --- DOM (`home.py`): czasowniki, „Co mam", teczki, ostatni gest ---------------------------
+    "home.title": {"pl": "Co chcesz zrobić?", "en": "What do you want to do?"},
+    "home.tile.receive": {"pl": "Przyjmij", "en": "Receive"},
+    "home.tile.receive_tip": {
+        "pl": "Nowe klatki z dysku do archiwum - strona Dostawy ze złotą akcją „Przyjmij nowe”",
+        "en": "New frames from disk into the archive - the Intake page with “Receive new”"},
+    "home.tile.find": {"pl": "Znajdź", "en": "Find"},
+    "home.tile.find_tip": {
+        "pl": "Obiekt, noc, filtr, teleskop, zestaw albo tekst uwag - jedno pole i Enter",
+        "en": "Object, night, filter, telescope, set or note text - one field and Enter"},
+    "home.tile.release": {"pl": "Wydaj do WBPP", "en": "Release to WBPP"},
+    "home.tile.release_tip": {
+        "pl": "Teczka obiektu: lighty, mastery i surowe flaty jako linki dla WBPP",
+        "en": "Object folder: lights, masters and raw flats as links for WBPP"},
+    "home.tile.release_busy": {
+        "pl": "Wydanie czeka na koniec przebiegu Dostawy - etap przelicza kalibrację i rodowód",
+        "en": "Release waits for the intake run to finish - it recomputes calibration and lineage"},
+    "home.tile.fix": {"pl": "Popraw", "en": "Fix"},
+    "home.tile.fix_count": {"pl": "Popraw · {n}", "en": "Fix · {n}"},
+    "home.tile.fix_tip": {
+        "pl": "Zadania w Porządkach - ta sama liczba, co przy Porządkach w sidebarze",
+        "en": "Tasks in Housekeeping - the same count as next to Housekeeping in the sidebar"},
+    "home.more": {"pl": "Więcej…", "en": "More…"},
+    "home.more.planner": {"pl": "Planer", "en": "Planner"},
+    "home.more.sites": {"pl": "Mapa stanowisk", "en": "Site map"},
+    "home.more.rename": {"pl": "Nazwy plików…", "en": "File names…"},
+    "home.more.macro": {"pl": "Makra nagłówków…", "en": "Header macros…"},
+    "home.more.perspectives": {"pl": "Perspektywy", "en": "Perspectives"},
+    "home.more.advanced_intake": {"pl": "Tryb zaawansowany dostawy", "en": "Advanced intake"},
+    "home.more.classic": {"pl": "Zbiory klasyczne", "en": "Classic collections"},
+    "home.have.line": {"pl": "Co mam: {what}", "en": "What I have: {what}"},
+    "home.have.empty": {
+        "pl": "Co mam: jeszcze żadnego lightu z obiektem - zacznij od „Przyjmij”.",
+        "en": "What I have: no lights with an object yet - start with “Receive”."},
+    "home.have.objects": {
+        "pl": {"one": "{n} obiekt", "few": "{n} obiekty", "many": "{n} obiektów"},
+        "en": {"one": "{n} object", "other": "{n} objects"}},
+    "home.have.lights": {
+        "pl": {"one": "{n} light", "few": "{n} lighty", "many": "{n} lightów"},
+        "en": {"one": "{n} light", "other": "{n} lights"}},
+    "home.have.nights": {
+        "pl": {"one": "{n} noc", "few": "{n} noce", "many": "{n} nocy"},
+        "en": {"one": "{n} night", "other": "{n} nights"}},
+    "home.have.last_night": {"pl": "ostatnia noc {night}", "en": "last night {night}"},
+    "home.folders.title": {"pl": "Teczki - najwięcej godzin", "en": "Objects - most hours"},
+    "home.folders.computing": {"pl": "Liczę gotowość…", "en": "Computing readiness…"},
+    "home.folders.empty": {
+        "pl": "Brak teczek - żaden obiekt nie ma jeszcze aktywnych lightów.",
+        "en": "No objects yet - none has active lights."},
+    "home.folders.failed": {
+        "pl": "Gotowość się nie policzyła: {msg}", "en": "Readiness could not be computed: {msg}"},
+    "home.folders.more": {
+        "pl": {"one": "… i {n} kolejna - szukaj w Znajdź",
+               "few": "… i {n} kolejne - szukaj w Znajdź",
+               "many": "… i {n} kolejnych - szukaj w Znajdź"},
+        "en": {"one": "… and {n} more - search in Find", "other": "… and {n} more - search in Find"}},
+    "home.card.sets": {
+        "pl": {"one": "{n} zestaw", "few": "{n} zestawy", "many": "{n} zestawów"},
+        "en": {"one": "{n} set", "other": "{n} sets"}},
+    "home.card.flat": {"pl": "flat {n} %", "en": "flat {n} %"},
+    "home.card.raw": {"pl": " (+ surowe {n} %)", "en": " (+ raw {n} %)"},
+    "home.card.dark": {"pl": "dark {n} %", "en": "dark {n} %"},
+    "home.card.pending": {
+        "pl": {"one": "{n} light do przeliczenia w Dostawie",
+               "few": "{n} lighty do przeliczenia w Dostawie",
+               "many": "{n} lightów do przeliczenia w Dostawie"},
+        "en": {"one": "{n} light to recompute in Intake",
+               "other": "{n} lights to recompute in Intake"}},
+    "home.card.tip": {"pl": "Klik: klatki {canon} w Znajdź", "en": "Click: {canon} frames in Find"},
+    "home.last.label": {"pl": "Ostatnio:", "en": "Last:"},
+    "home.last.journal": {"pl": "Ostatnio ({day}): {what}", "en": "Last ({day}): {what}"},
+    "home.last.day": {"pl": "{dd}.{mm}", "en": "{mm}/{dd}"},
+    "home.last.day_year": {"pl": "{dd}.{mm}.{yyyy}", "en": "{yyyy}-{mm}-{dd}"},
+    # Zdanie gestu ogólne: kilka czasowników naraz albo czasownik bez własnego zdania - liczba
+    # mówi o WSZYSTKICH zmianach gestu.
+    "home.gest.many": {
+        "pl": {"one": "{n} zmiana", "few": "{n} zmiany", "many": "{n} zmian"},
+        "en": {"one": "{n} change", "other": "{n} changes"}},
+    "home.gest.object_assigned": {
+        "pl": {"one": "{n} klatce nadano obiekt", "few": "{n} klatkom nadano obiekt",
+               "many": "{n} klatkom nadano obiekt"},
+        "en": {"one": "object assigned to {n} frame", "other": "object assigned to {n} frames"}},
+    "home.gest.object_cleared": {
+        "pl": {"one": "{n} klatce cofnięto obiekt", "few": "{n} klatkom cofnięto obiekt",
+               "many": "{n} klatkom cofnięto obiekt"},
+        "en": {"one": "object cleared on {n} frame", "other": "object cleared on {n} frames"}},
+    "home.gest.object_aliased": {
+        "pl": {"one": "{n} alias zapamiętano", "few": "{n} aliasy zapamiętano",
+               "many": "{n} aliasów zapamiętano"},
+        "en": {"one": "{n} alias remembered", "other": "{n} aliases remembered"}},
+    "home.gest.object_upserted": {
+        "pl": {"one": "{n} obiekt dodano", "few": "{n} obiekty dodano", "many": "{n} obiektów dodano"},
+        "en": {"one": "{n} object added", "other": "{n} objects added"}},
+    "home.gest.location_renamed": {
+        "pl": {"one": "{n} plik przemianowano", "few": "{n} pliki przemianowano",
+               "many": "{n} plików przemianowano"},
+        "en": {"one": "{n} file renamed", "other": "{n} files renamed"}},
+    "home.gest.note_set": {
+        "pl": {"one": "{n} klatce zapisano uwagę", "few": "{n} klatkom zapisano uwagę",
+               "many": "{n} klatkom zapisano uwagę"},
+        "en": {"one": "note saved on {n} frame", "other": "note saved on {n} frames"}},
+    "home.gest.note_cleared": {
+        "pl": {"one": "{n} klatce usunięto uwagę", "few": "{n} klatkom usunięto uwagę",
+               "many": "{n} klatkom usunięto uwagę"},
+        "en": {"one": "note removed from {n} frame", "other": "note removed from {n} frames"}},
+    "home.gest.camera_pixel_user_set": {
+        "pl": {"one": "{n} kamerze wpisano piksel", "few": "{n} kamerom wpisano piksel",
+               "many": "{n} kamerom wpisano piksel"},
+        "en": {"one": "pixel size set on {n} camera", "other": "pixel size set on {n} cameras"}},
+    "home.gest.camera_pixel_user_cleared": {
+        "pl": {"one": "{n} kamerze zdjęto wpisany piksel", "few": "{n} kamerom zdjęto wpisany piksel",
+               "many": "{n} kamerom zdjęto wpisany piksel"},
+        "en": {"one": "pixel size cleared on {n} camera",
+               "other": "pixel size cleared on {n} cameras"}},
+    "home.gest.frame_retired": {
+        "pl": {"one": "{n} klatkę wycofano", "few": "{n} klatki wycofano", "many": "{n} klatek wycofano"},
+        "en": {"one": "{n} frame retired", "other": "{n} frames retired"}},
+    "home.gest.frame_unretired": {
+        "pl": {"one": "{n} klatkę przywrócono", "few": "{n} klatki przywrócono",
+               "many": "{n} klatek przywrócono"},
+        "en": {"one": "{n} frame restored", "other": "{n} frames restored"}},
+    "home.gest.config_assigned": {
+        "pl": {"one": "{n} klatce przypisano zestaw", "few": "{n} klatkom przypisano zestaw",
+               "many": "{n} klatkom przypisano zestaw"},
+        "en": {"one": "set assigned to {n} frame", "other": "set assigned to {n} frames"}},
+    "home.gest.observatory_assigned": {
+        "pl": {"one": "{n} klatce wskazano stanowisko", "few": "{n} klatkom wskazano stanowisko",
+               "many": "{n} klatkom wskazano stanowisko"},
+        "en": {"one": "site assigned to {n} frame", "other": "site assigned to {n} frames"}},
+    "home.gest.observatory_named": {
+        "pl": {"one": "{n} stanowisku nadano nazwę", "few": "{n} stanowiskom nadano nazwę",
+               "many": "{n} stanowiskom nadano nazwę"},
+        "en": {"one": "{n} site named", "other": "{n} sites named"}},
+    "home.gest.observatory_merged": {
+        "pl": {"one": "{n} stanowisko scalono", "few": "{n} stanowiska scalono",
+               "many": "{n} stanowisk scalono"},
+        "en": {"one": "{n} site merged", "other": "{n} sites merged"}},
+    "home.gest.telescope_merged": {
+        "pl": {"one": "{n} teleskop scalono", "few": "{n} teleskopy scalono",
+               "many": "{n} teleskopów scalono"},
+        "en": {"one": "{n} telescope merged", "other": "{n} telescopes merged"}},
+    "home.gest.telescope_approved": {
+        "pl": {"one": "{n} teleskop zatwierdzono", "few": "{n} teleskopy zatwierdzono",
+               "many": "{n} teleskopów zatwierdzono"},
+        "en": {"one": "{n} telescope approved", "other": "{n} telescopes approved"}},
+    "home.gest.telescope_labeled": {
+        "pl": {"one": "{n} teleskopowi nadano nazwę", "few": "{n} teleskopom nadano nazwę",
+               "many": "{n} teleskopom nadano nazwę"},
+        "en": {"one": "{n} telescope named", "other": "{n} telescopes named"}},
+    "home.gest.telescope_parked": {
+        "pl": {"one": "{n} teleskop odłożono", "few": "{n} teleskopy odłożono",
+               "many": "{n} teleskopów odłożono"},
+        "en": {"one": "{n} telescope parked", "other": "{n} telescopes parked"}},
+    "home.gest.integration_judged": {
+        "pl": {"one": "{n} werdykt rodowodu zapisano", "few": "{n} werdykty rodowodu zapisano",
+               "many": "{n} werdyktów rodowodu zapisano"},
+        "en": {"one": "{n} lineage verdict saved", "other": "{n} lineage verdicts saved"}},
+    "home.gest.integration_offset_set": {
+        "pl": {"one": "{n} stosowi ustawiono odniesienie czasu",
+               "few": "{n} stosom ustawiono odniesienie czasu",
+               "many": "{n} stosom ustawiono odniesienie czasu"},
+        "en": {"one": "time reference set on {n} stack",
+               "other": "time reference set on {n} stacks"}},
+    "home.gest.target_plan_set": {
+        "pl": {"one": "{n} cel planu zapisano", "few": "{n} cele planu zapisano",
+               "many": "{n} celów planu zapisano"},
+        "en": {"one": "{n} plan target saved", "other": "{n} plan targets saved"}},
+    "home.gest.target_plan_cleared": {
+        "pl": {"one": "{n} cel planu zdjęto", "few": "{n} cele planu zdjęto",
+               "many": "{n} celów planu zdjęto"},
+        "en": {"one": "{n} plan target removed", "other": "{n} plan targets removed"}},
+    "home.gest.perspective_saved": {
+        "pl": {"one": "{n} perspektywę zapisano", "few": "{n} perspektywy zapisano",
+               "many": "{n} perspektyw zapisano"},
+        "en": {"one": "{n} perspective saved", "other": "{n} perspectives saved"}},
 
     # --- PLANER CELÓW (T5): nagłówek nocy, komórki listy, noty ---------------------------------
     # Świadomie BEZ badge'a przy pozycji nav (D-0731-6): „ile do zrobienia" zależy od suwaka
@@ -2453,6 +2635,60 @@ CATALOG = {
         "pl": "Odrzucono {n} zmian nazw", "en": "Discarded {n} name changes",
     },
 
+    # --- Znajdź (flows/znajdz_view.py + prezentacja „znajdz" w grid.py) i Uwagi w gridzie ---
+    "find.placeholder": {
+        "pl": "Znajdź: obiekt albo nazwa potoczna · noc:2026-08 · filtr:Ha,OIII · teleskop: · "
+              "zestaw: · uwagi:",
+        "en": "Find: object or common name · night:2026-08 · filter:Ha,OIII · telescope: · "
+              "setup: · notes:"},
+    # Rozpoznane części zapytania działają - zdanie mówi tylko o tym, czego archiwum nie zna.
+    "find.unmatched": {"pl": "Nie znam: {items} - reszta zapytania działa.",
+                       "en": "Not recognised: {items} - the rest of the query applies."},
+    # Zapytanie bez ani jednej rozpoznanej części NIE zastępuje zbioru - zdanie mówi to wprost.
+    "find.nothing_matched": {"pl": "Nie znam: {items} - zbiór bez zmian.",
+                             "en": "Not recognised: {items} - the set is unchanged."},
+    "find.chip.notes": {"pl": "Uwagi: „{text}”", "en": "Notes: “{text}”"},
+    # Chip WPISANEGO terminu: nazwa osi i to, co user wpisał („Noc: 2025-11").
+    "find.chip.term": {"pl": "{name}: {value}", "en": "{name}: {value}"},
+    "find.chip.remove_tip": {"pl": "Zdejmij ten warunek ze zbioru",
+                             "en": "Remove this condition from the set"},
+    "find.col.night": {"pl": "Noc", "en": "Night"},
+    "find.col.exposure": {"pl": "Czas", "en": "Exposure"},
+    "find.col.rig": {"pl": "Zestaw", "en": "Setup"},
+    "find.col.notes": {"pl": "Uwagi", "en": "Notes"},
+    "find.col.file": {"pl": "Plik", "en": "File"},
+    "find.cell.exposure": {"pl": "{s} s", "en": "{s} s"},
+    "find.verb.release": {"pl": "Wydaj do WBPP", "en": "Release to WBPP"},
+    "find.verb.columns": {"pl": "Kolumny", "en": "Columns"},
+    # FH-12: pozycja listy perspektyw, której definicja nie zgadza się już ze zbiorem.
+    "grid.persp.changed": {"pl": "{name} (zmieniona)", "en": "{name} (modified)"},
+    "grid.criteria.notes": {"pl": "uwagi zawierają „{text}”", "en": "notes contain “{text}”"},
+    "grid.notes.action": {"pl": "Uwagi…", "en": "Notes…"},
+    "grid.notes.tip_ready": {
+        "pl": {"one": "Uwaga dla {n} zaznaczonej klatki",
+               "few": "Uwaga dla {n} zaznaczonych klatek",
+               "many": "Uwaga dla {n} zaznaczonych klatek"},
+        "en": {"one": "Note for {n} selected frame", "other": "Note for {n} selected frames"}},
+    "grid.notes.tip_empty": {"pl": "Zaznacz klatki, żeby dopisać albo usunąć uwagę.",
+                             "en": "Select frames to add or remove a note."},
+    # Okno uwag samo nie ruszy po zajętości - zdanie nie obiecuje, że gest „ruszy po zakończeniu".
+    "grid.notes.busy_stage": {
+        "pl": "Trwa etap Dostawy - uwagę zapiszesz po jego zakończeniu.",
+        "en": "An Intake stage is running - you can save the note after it finishes."},
+    "grid.notes.busy_write": {
+        "pl": "Trwa zapis nagłówków do plików - uwagę zapiszesz po jego zakończeniu.",
+        "en": "A header write to files is in progress - you can save the note after it finishes."},
+    "grid.notes.set_done": {"pl": "Zapisano uwagę · zmienione klatki: {changed} z {total}",
+                            "en": "Note saved · frames changed: {changed} of {total}"},
+    "grid.notes.cleared_done": {"pl": "Usunięto uwagi · zmienione klatki: {changed} z {total}",
+                                "en": "Notes removed · frames changed: {changed} of {total}"},
+    "grid.notes.restored": {"pl": "Cofnięto uwagi · przywrócone klatki: {changed}",
+                            "en": "Notes undone · frames restored: {changed}"},
+    "grid.notes.undo": {"pl": "Cofnij uwagi", "en": "Undo notes"},
+    "grid.notes.undo_after": {"pl": "potem cofniesz uwagi", "en": "then undo the notes"},
+    "grid.notes.undo_nothing": {"pl": "Nie ma już czego cofać - uwagi tych klatek zmieniono później.",
+                                "en": "Nothing left to undo - these frames' notes changed since."},
+
     # ============================================================ pipeline.py (rollout §4: pipeline)
 
     # --- poziomy zapisu (combo; wartość "cold"/"scratch" = identyfikator do bazy, ZOSTAJE) ---
@@ -3472,12 +3708,12 @@ CATALOG = {
     "supersede.transfer.action": {"pl": "Przenieś fakty ręki na następczynię",
                                   "en": "Transfer hand facts to the successor"},
     "supersede.transfer.action_tip": {
-        "pl": "Werdykty ręki (obiekt, zestaw, stanowisko, rodowód) przechodzą z zaznaczonych klatek "
-              "zastąpionych na klatki, które niosą dziś ich plik - tylko tam, gdzie następczyni "
-              "nie przemówiła sama.",
-        "en": "Hand verdicts (object, setup, site, lineage) move from the selected superseded "
-              "frames to the frames that carry their file today - only where the successor has "
-              "not spoken for itself."},
+        "pl": "Werdykty ręki (obiekt, zestaw, stanowisko, uwaga, rodowód) przechodzą "
+              "z zaznaczonych klatek zastąpionych na klatki, które niosą dziś ich plik - tylko "
+              "tam, gdzie następczyni nie przemówiła sama.",
+        "en": "Hand verdicts (object, setup, site, note, lineage) move from the selected "
+              "superseded frames to the frames that carry their file today - only where the "
+              "successor has not spoken for itself."},
     "supersede.transfer.done": {
         "pl": {"one": "Przeniesienie faktów ręki: {done} z {n} klatki",
                "few": "Przeniesienie faktów ręki: {done} z {n} klatek",
@@ -3488,6 +3724,7 @@ CATALOG = {
     "supersede.transfer.axis_object": {"pl": "obiekt: {n}", "en": "object: {n}"},
     "supersede.transfer.axis_config": {"pl": "zestaw: {n}", "en": "setup: {n}"},
     "supersede.transfer.axis_site": {"pl": "stanowisko: {n}", "en": "site: {n}"},
+    "supersede.transfer.axis_note": {"pl": "uwagi: {n}", "en": "notes: {n}"},
     "supersede.transfer.axis_lineage": {"pl": "rodowód: {n}", "en": "lineage: {n}"},
     "supersede.transfer.object_kept": {
         "pl": {"one": ". {n} werdykt obiektu został na klatce zastąpionej - następczyni nie jest "
@@ -3543,6 +3780,41 @@ CATALOG = {
     "supersede.transfer.interrupted": {
         "pl": "Gest przerwany na kolejnej klatce: {err}. Wcześniejsze klatki są zapisane.",
         "en": "The gesture stopped at the next frame: {err}. Earlier frames are saved."},
+    # 0032: okno „Uwagi…” (`gui/note_dialog.py`). Zdanie stanu składa dwie liczby: `state_some`
+    # odmienia się przez liczbę klatek Z UWAGĄ (orzeczenie: „ma” / „mają”), a wstawiony człon
+    # `of_frames` przez liczbę zaznaczonych („z 1 klatki” / „z 5 klatek”).
+    "note.title": {"pl": "Uwagi klatek", "en": "Frame notes"},
+    "note.placeholder": {"pl": "np. chmury po 2:00, zmieniony flat",
+                         "en": "e.g. clouds after 2 am, flat replaced"},
+    "note.counter": {"pl": "{n} / {max} znaków", "en": "{n} / {max} characters"},
+    # Nadmiar liczony PO zwinięciu białych znaków - tą samą miarą, którą sprawdza klinga.
+    "note.too_long": {
+        "pl": {"one": "Uwaga jest za długa o {n} znak - skróć ją, żeby zapisać",
+               "few": "Uwaga jest za długa o {n} znaki - skróć ją, żeby zapisać",
+               "many": "Uwaga jest za długa o {n} znaków - skróć ją, żeby zapisać"},
+        "en": {"one": "The note is {n} character too long - shorten it to save",
+               "other": "The note is {n} characters too long - shorten it to save"}},
+    "note.of_frames": {
+        "pl": {"one": "z {n} klatki", "few": "z {n} klatek", "many": "z {n} klatek"},
+        "en": {"one": "of {n} frame", "other": "of {n} frames"}},
+    "note.state_some": {
+        "pl": {"one": "Uwagę ma {n} {of}", "few": "Uwagę mają {n} {of}",
+               "many": "Uwagę ma {n} {of}"},
+        "en": {"one": "{n} {of} has a note", "other": "{n} {of} have a note"}},
+    "note.state_single": {"pl": "Klatka ma uwagę", "en": "The frame has a note"},
+    "note.state_none": {
+        "pl": {"one": "Klatka nie ma uwagi", "few": "Żadna z {n} klatek nie ma uwagi",
+               "many": "Żadna z {n} klatek nie ma uwagi"},
+        "en": {"one": "The frame has no note", "other": "None of the {n} frames has a note"}},
+    "note.state_mixed": {
+        "pl": {"one": "Różne uwagi na {k} z {n} klatki - zapis zastąpi je jedną",
+               "few": "Różne uwagi na {k} z {n} klatkach - zapis zastąpi je jedną",
+               "many": "Różne uwagi na {k} z {n} klatkach - zapis zastąpi je jedną"},
+        "en": {"one": "Different notes on {k} of {n} frame - saving replaces them with one",
+               "other": "Different notes on {k} of {n} frames - saving replaces them with one"}},
+    "note.save": {"pl": "Zapisz", "en": "Save"},
+    "note.clear": {"pl": "Usuń uwagi", "en": "Remove notes"},
+    "note.cancel": {"pl": "Anuluj", "en": "Cancel"},
     "tasks.dup_frames": {"pl": "Duplikaty (>1 kopia)", "en": "Duplicates (>1 copy)"},
     # 0021: podzbiór „Duplikatów", stoi tuż pod nimi. Nazwa mówi o KLATKACH, bo liczba obok liczy
     # klatki (`queries.copy_conflict_frame_ids`) - „Kopie niezgodne ze sobą" obiecywało liczbę kopii.

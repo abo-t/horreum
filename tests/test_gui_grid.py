@@ -5135,6 +5135,63 @@ def test_BP5_BLIZNIAK_most_planera_nie_zostawia_etykiety_poprzedniej_perspektywy
         f"most pokazuje klatki celu pod cudzą etykietą: {view.combo_persp.currentText()!r}"
 
 
+def test_FH12_zmieniona_perspektywa_mowi_to_sufiksem_i_idzie_nim_do_manifestu(view, monkeypatch):
+    """FH-12 (decyzja „q9.o1"): „Kalibracja" z filtrem zmienionym na `OBJECT = M51` nie pasuje ani
+    do swojej definicji, ani do żadnego presetu - właściciel etykiety nie zgaduje innej nazwy, ale
+    przestaje twierdzić, że to kalibracja: „Kalibracja (zmieniona)". Ta sama etykieta idzie do
+    manifestu „Wydaj na stół…". Powrót stanu do definicji zdejmuje sufiks.
+
+    Falsyfikator: zdejmij `_oznacz_zmiane_perspektywy` z właściciela etykiety → lista mówi
+    „Kalibracja" nad M51, a manifest dostaje tę samą nieprawdę."""
+    view.apply_perspective("Kalibracja")
+    assert view.combo_persp.currentText() == "Kalibracja"
+    view._on_filter({"keyword": "OBJECT", "operator": "eq", "value": "M51"})
+    assert view.combo_persp.currentData() == ("preset", "Kalibracja")
+    assert view.combo_persp.currentText() == "Kalibracja (zmieniona)"
+    widziane = {}
+
+    class _Dialog:
+        summary = None
+
+        def __init__(self, *a, perspektywa=None, **k):
+            widziane["perspektywa"] = perspektywa
+
+        def exec(self):
+            return 0
+
+    monkeypatch.setattr(grid_mod, "ProjectionDialog", _Dialog)
+    view._open_projection()
+    assert widziane["perspektywa"] == "Kalibracja (zmieniona)"
+    view._on_filter(grid_mod.PRESETS["Kalibracja"]["filter"])
+    assert view.combo_persp.currentText() == "Kalibracja", "stan wrócił do definicji"
+
+
+def test_FH12_sufiks_nie_zostaje_na_pozycji_z_ktorej_widok_zszedl(view):
+    view.apply_perspective("Kalibracja")
+    view._on_filter({"keyword": "OBJECT", "operator": "eq", "value": "M51"})
+    view.apply_perspective(grid_mod.PRESET_DUPS)
+    teksty = [view.combo_persp.itemText(i) for i in range(view.combo_persp.count())]
+    assert not [t for t in teksty if "(zmieniona)" in t], teksty
+    view._on_filter({"keyword": "OBJECT", "operator": "eq", "value": "M51"})
+    view._load_facets()                                   # odbudowa listy (po przebiegu Dostawy)
+    assert view.combo_persp.currentText() == "Duplikaty (zmieniona)", "sufiks przeżywa odbudowę"
+
+
+def test_FH12_pozycja_bez_definicji_dostaje_sufiks_przy_najblizszym_przeladowaniu(view):
+    """Pozycja „★ X ⚠" (spec `None`) nie ma definicji: do najbliższego przeładowania mówi samą
+    nazwę, a przeładowanie, które nie trafiło w żaden preset, dokłada sufiks."""
+    view.con.execute("INSERT INTO saved_query(name, spec_json, created_at) VALUES ('Stary', ?, 't')",
+                     (json.dumps({"legacy_sql": "SELECT 1"}),))
+    view.con.commit()
+    view._load_facets()
+    view._filter_tree = {"keyword": "OBJECT", "operator": "eq", "value": "M51"}
+    view.combo_persp.setCurrentIndex(next(i for i in range(view.combo_persp.count())
+                                          if view.combo_persp.itemData(i) == ("saved", "Stary")))
+    assert view.combo_persp.currentText() == "★ Stary ⚠"
+    view.refresh()
+    assert view.combo_persp.currentText() == "★ Stary ⚠ (zmieniona)"
+
+
 def test_FH4_pusty_stan_ma_warianty_a_przycisk_TYLKO_przy_recepcie(obj_view, tmp_path):
     """FH-4 (firsthand 0816, P2): pusty stan podawał receptę SPRZECZNĄ z tą, którą zdanie po geście
     podało pięć sekund wcześniej - pasek mówił „odsłoni je „× Wyczyść zbiór”", a centrum ekranu

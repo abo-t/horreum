@@ -17,9 +17,12 @@
 -- Precedens: `target_plan` (`repo.clear_target_plan`). Historię niesie dziennik zdarzeń.
 --
 -- Pisze WYŁĄCZNIE klinga `repo` (z eventem); `updated_at` = chwila ostatniego gestu. CHECK broni
--- pustej treści na poziomie bazy - pusta uwaga to brak uwagi, nie wiersz.
+-- pustej treści na poziomie bazy - pusta uwaga to brak uwagi, nie wiersz. `trim` dostaje JAWNY zbiór
+-- znaków, bo bez drugiego argumentu SQLite zdejmuje wyłącznie spację, a treść z samych tabulatorów
+-- albo końców linii przeszłaby jako uwaga; klinga zwija białe znaki wcześniej, CHECK jest drugą linią.
 CREATE TABLE frame_note (
     frame_id   INTEGER PRIMARY KEY REFERENCES frame (id),
-    body       TEXT NOT NULL CHECK (length(trim(body)) > 0),
+    body       TEXT NOT NULL CHECK (length(trim(body, ' ' || char(9) || char(10) || char(11)
+                                                     || char(12) || char(13))) > 0),
     updated_at TEXT NOT NULL
 );

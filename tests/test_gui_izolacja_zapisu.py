@@ -575,7 +575,7 @@ def test_klik_w_wiersz_niewiadomy_prowadzi_do_Dostawy(qapp, tmp_path):
 def test_klik_w_wiersz_niewiadomy_przelacza_okno_na_Dostawe(qapp, tmp_path, monkeypatch):
     """Gospodarz podpina `open_intake` pod przełączenie widoku - droga człowieka od wiersza do ekranu -
     i podaje Dostawie powód wejścia: linia nad akcjami mówi, po co człowiek tu jest."""
-    from horreum.gui.app import NAV_DOSTAWA, NAV_PORZADKI, MainWindow
+    from horreum.gui.app import NAV_PORZADKI, STRONA_DOSTAWA, MainWindow
     from horreum.gui.pipeline import REASON_COPY_FACTS
     monkeypatch.setattr(MainWindow, "_pola_poza_watkiem", False)
     _kopie_bez_faktow(tmp_path).close()
@@ -583,7 +583,7 @@ def test_klik_w_wiersz_niewiadomy_przelacza_okno_na_Dostawe(qapp, tmp_path, monk
     try:
         win._show_view(NAV_PORZADKI)
         win.tasks_view._on_task_clicked(_wiersz(win.tasks_view, "orphan_testimony_frames"))
-        assert win.stack.currentIndex() == NAV_DOSTAWA
+        assert win.stack.currentIndex() == STRONA_DOSTAWA
         assert win.pipeline_view._reason == REASON_COPY_FACTS
         assert win.pipeline_view.lbl_reason.text()
     finally:

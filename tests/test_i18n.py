@@ -117,7 +117,9 @@ def test_klucze_call_site_podzbior_katalogu():
     istniał w katalogu. Klucze dynamiczne (`proj.create_copies`/`create_links`) pominięte (zmienna)
     — pokryte testami projekcji wprost."""
     used = set()
-    for p in sorted(GUI.glob("*.py")) + _RDZEN_Z_I18N:
+    # `gui/flows/` (drogi: Znajdź) mówi do UI tym samym katalogiem - bez niej bramka byłaby ślepa
+    # na każdy klucz strony Znajdź.
+    for p in sorted(GUI.glob("*.py")) + sorted(GUI.glob("flows/*.py")) + _RDZEN_Z_I18N:
         used |= _collect_t_keys(p)
     unknown = used - set(CATALOG)
     assert not unknown, f"klucze i18n spoza katalogu: {sorted(unknown)}"

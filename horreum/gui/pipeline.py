@@ -1201,7 +1201,8 @@ class PipelineView(QWidget):
 
     @staticmethod
     def _pusty_zapis_przebiegu():
-        return {"stage": None, "since": None, "results": {}, "cancelled": None, "failed": None}
+        return {"stage": None, "since": None, "results": {}, "cancelled": None, "failed": None,
+                "refused": None}
 
     def _start_stage(self, stage, **params):
         # Znacznik startu z TEGO SAMEGO zegara, którym worker pisze `first_seen_at` - raport
@@ -1319,6 +1320,8 @@ class PipelineView(QWidget):
         self.lbl_counts.setText("")
         self._etap_bez_zrodla = stage
         powod = i18n.t("pipeline.source.unreachable", root=root)
+        # Przebieg, który nie ruszył, nie może wyglądać w zapisie jak pusty sukces (zero klatek).
+        self.last_run["refused"] = powod
         klucz = {"scan": "pipeline.fmt.scan_not_done", "all": "pipeline.fmt.scan_not_done",
                  "stacks": "pipeline.fmt.stacks_not_done"}.get(
                      stage, "pipeline.fmt.presence.not_done")
@@ -1340,6 +1343,7 @@ class PipelineView(QWidget):
         self.bar.setRange(0, 1)
         self.bar.setValue(0)
         self.lbl_counts.setText("")
+        self.last_run["refused"] = msg          # jak przy źródle nieosiągalnym: nie ruszył, nie „pusty”
         self._pokaz_odmowe(msg)
 
     @Slot(str, str)

@@ -1124,7 +1124,22 @@ def test_run_all_on_skanuje_podany_korzen_bez_zapisu_zrodla(qapp, tmp_path, usta
     # Nowy przebieg zaczyna zapis od zera - stary wynik skanu nie przeżywa do raportu innego etapu.
     view._begin_run()
     assert view.last_run == {"stage": None, "since": None, "results": {}, "cancelled": None,
-                             "failed": None}
+                             "failed": None, "refused": None}
+
+
+def test_zapis_przebiegu_niesie_odmowe_startu(qapp, tmp_path):
+    """Źródło nieosiągalne i guard serialu nie zapisują żadnego etapu, więc bez własnego pola zapis
+    przebiegu wyglądałby jak pusty sukces (zero nowych klatek) - raport Przyjmij musi móc powiedzieć
+    „dostawa nie ruszyła” i dlaczego."""
+    i18n.set_lang("pl")
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    view._begin_run()
+    view._on_source_unreachable("all", "X:/nie-ma")
+    assert "X:/nie-ma" in view.last_run["refused"] and view.last_run["results"] == {}
+    view._begin_run()
+    assert view.last_run["refused"] is None
+    view._on_start_refused("powód guardu")
+    assert view.last_run["refused"] == "powód guardu"
 
 
 def test_run_all_on_odmawia_bez_bazy_i_w_biegu(qapp, tmp_path, ustawienia):

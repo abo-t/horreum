@@ -3770,6 +3770,85 @@ def last_hand_gesture(con):
         "GROUP BY verb ORDER BY verb", (last["ts"], last["actor"]))}
     return {"ts": last["ts"], "actor": last["actor"], "verbs": verbs, "n": sum(verbs.values())}
 
+# --- ŻNIWA: proweniencja i siedziba masterów z wyjścia WBPP (rdzeń `horreum/harvest.py`) ---
+
+def flat_locations(con):
+    """WSZYSTKIE kopie (obecne i nie) aktywnych surowych flatów (`kind='flat'`, bez `retired_at`
+    i `superseded_by`) - materiał świadka proweniencji żniw. Historia mastera z WBPP niesie NAZWY
+    wejść, a nazwa surowego flatu jest w archiwum unikalna (zmierzone na żywej `pf4` 2026-10-10:
+    2 257 nazw na 2 257 kopii); rdzeń nazwy liczy `harvest.raw_stem` - jeden właściciel reguły,
+    nie SQL. Kopia nieobecna też świadczy: surowy flat skasowany po wydaniu dalej jest rodzicem
+    mastera. Noc z definicji facetu Noc (`date(date_obs, '-12 hours')`, D-UX-1) - NULL bez
+    DATE-OBS; `xbinning` z nagłówka. Zwraca: frame_id, path, present, calibration_profile_id,
+    night, xbinning (ORDER BY frame_id, location_id)."""
+    return con.execute(
+        "SELECT f.id AS frame_id, l.path, l.present, f.calibration_profile_id, "
+        "       date(h.date_obs, '-12 hours') AS night, h.xbinning "
+        "FROM frame f JOIN location l ON l.frame_id = f.id "
+        "LEFT JOIN header h ON h.frame_id = f.id "
+        "WHERE f.kind = 'flat' AND f.retired_at IS NULL AND f.superseded_by IS NULL "
+        "ORDER BY f.id, l.id").fetchall()
+
+
+def master_flat_dirs_by_profile(con):
+    """Katalogi OBECNYCH kopii aktywnych masterflatów per `calibration_profile_id` - gdzie archiwum
+    już trzyma mastery danego profilu. `{profil: [(katalog, liczba kopii), ...]}` malejąco po
+    liczbie, potem alfabetycznie. Liczba jedzie razem z katalogiem, bo żniwa wybierają siedzibę
+    po OGONIE ścieżki od segmentu `CALIBRATION` (archiwum wskazane ręką może mieć inny korzeń niż
+    baza), a ten sam ogon pod dwoma korzeniami sumuje kopie obu. Klatka bez profilu nie świadczy
+    o siedzibie żadnego profilu."""
+    licznik = {}
+    for r in con.execute(
+            "SELECT f.calibration_profile_id AS profile_id, l.path "
+            "FROM frame f JOIN location l ON l.frame_id = f.id AND l.present = 1 "
+            "WHERE f.kind = 'master_flat' AND f.calibration_profile_id IS NOT NULL "
+            "AND f.retired_at IS NULL AND f.superseded_by IS NULL"):
+        katalogi = licznik.setdefault(r["profile_id"], {})
+        katalog = os.path.dirname(r["path"])
+        katalogi[katalog] = katalogi.get(katalog, 0) + 1
+    return {pid: sorted(k.items(), key=lambda kv: (-kv[1], kv[0])) for pid, k in licznik.items()}
+
+
+def flat_profile_facts(con, profile_ids):
+    """Fakty profili flatu, z których żniwa sprawdzają nagłówek mastera i składają siedzibę oraz
+    nazwę: `{profil: {camera_id, xbinning, telescope_id, filter_canon, is_mono, config_id}}`.
+
+    `config_id` = najmniejszy config pary (teleskop KANONICZNY, kamera) przez `telescope_canonical`,
+    jak `stacks._masters`: profil trzyma teleskop configu klatki, a po scaleniu teleskopów ta sama
+    optyka ma kilka configów - każdy daje ten sam folder zestawu (`projection.zestawy_configow`),
+    więc reprezentant wystarcza. Brak configu tej pary → `None` (siedziby nie ma z czego złożyć).
+    Profil spoza klasy `flat` albo nieznany id nie wraca."""
+    out = {}
+    for r in con.execute(
+            "SELECT p.id AS profile_id, p.camera_id, p.xbinning, p.telescope_id, p.filter_canon, "
+            "       cam.is_mono, "
+            "       (SELECT MIN(c.id) FROM config c "
+            "        JOIN telescope_canonical tc ON tc.id = c.telescope_id "
+            "        WHERE c.camera_id = p.camera_id AND tc.canon_id = ptc.canon_id) AS config_id "
+            "FROM calibration_profile p "
+            "LEFT JOIN camera cam ON cam.id = p.camera_id "
+            "LEFT JOIN telescope_canonical ptc ON ptc.id = p.telescope_id "
+            "WHERE p.recipe_class = 'flat' AND p.id IN (SELECT value FROM json_each(?)) "
+            "ORDER BY p.id",
+            (json.dumps(sorted(int(i) for i in profile_ids)),)):
+        out[r["profile_id"]] = {k: r[k] for k in ("camera_id", "xbinning", "telescope_id",
+                                                  "filter_canon", "is_mono", "config_id")}
+    return out
+
+
+def frame_by_sha1_data(con, sha1):
+    """Klatka o tej tożsamości danych: `(frame_id, ścieżka pierwszej OBECNEJ kopii | None,
+    retired_at | None)` albo `None`. Tożsamość `sha1_data` przeżywa rename i przeprowadzkę, więc łapie
+    też master położony w archiwum ręką i master zeskanowany po poprzednich żniwach. Klatka wycofana
+    też wraca (`repo.upsert_frame` po tym samym `sha1_data` oddałby właśnie ją, nie nową) - z datą
+    wycofania, bo dla żniw to inna odpowiedź niż klatka aktywna bez obecnej kopii."""
+    r = con.execute(
+        "SELECT f.id AS frame_id, f.retired_at, "
+        "       (SELECT l.path FROM location l WHERE l.frame_id = f.id AND l.present = 1 "
+        "        ORDER BY l.id LIMIT 1) AS path "
+        "FROM frame f WHERE f.sha1_data = ?", (sha1,)).fetchone()
+    return None if r is None else (r["frame_id"], r["path"], r["retired_at"])
+
 # --- TODO-DŁUG (z kolejki sesji, dieta 2026-08-10; pełne brzmienia: archiwum aa) ---
 # TODO-DŁUG(P4-1): unresolved_reason to werdykt ZAMROŻONY - 11 stosów niosło no_object dobę po
 #   nadaniu obiektów ręką. Kubełek liczyć ze STANU (obiekt jest => no_object nie ma prawa się

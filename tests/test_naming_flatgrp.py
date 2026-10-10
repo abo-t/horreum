@@ -1,5 +1,6 @@
 """Testy tokenów wzoru nazwy: `flatgrp` (grupa flatu z nazwy mastera podpiętego w `calibration`),
-`trail` (końcowy separator `_` przed rozszerzeniem) i parametr `case` tokenu `kind`.
+`trail` (końcowy separator `_` przed rozszerzeniem) i parametr `case` tokenu `kind`; nazwa nowego
+mastera flat (`master_flat_name`) z round-tripem przez wzorzec `master_paths.json`.
 
 Pokrycie: rdzeń `compose_name` (wartość, brak flatu → znacznik NOFLAT, grupa nieczytelna → problem,
 kind-aware), walidacja wzoru (trail nie na końcu, nieznany case), wsteczna zgodność gołego `kind`,
@@ -15,6 +16,7 @@ import pytest
 
 from horreum import db, naming, repo
 from horreum.gui import queries
+from horreum.resolve import recipe
 
 NOW = "2026-10-04T00:00:00+00:00"
 DT = datetime(2026, 8, 8, 21, 58, 45)
@@ -112,6 +114,44 @@ def test_validate_template_case():
     naming.validate_template(WZOR_SIOSTR)                            # poprawny wzór nie rzuca
     with pytest.raises(ValueError, match="case|wielkość"):
         naming.validate_template([{"t": "kind", "case": "title"}])
+
+
+@pytest.mark.parametrize("night8, segment, seq", [("20230507", "CLS", 0), ("20251101", "L-Pro", 9),
+                                                  ("20220324", "OSC", 3)])
+def test_master_flat_name_round_trip_z_wzorcem_archiwum(night8, segment, seq):
+    """Nazwa nowego mastera czyta się z powrotem obiema regułami archiwum: wzorcem
+    `masterflat_flatgrp_filter` z `master_paths.json` (grupa = noc + cyfra, filtr = segment) i grupą
+    `FLATGRP_` w nazwie lighta. Zmiana konwencji w JSON zaczerwieni ten test."""
+    name = naming.master_flat_name(night8, segment, seq)
+    assert name == f"MASTERFLAT_FLATGRP_{night8}{seq}_FILTER_{segment}_.xisf"
+    rx = next(r for n, _cls, r, _sign in recipe.load_patterns() if n == "masterflat_flatgrp_filter")
+    m = rx.search(name)
+    assert m is not None and m.group("flatgrp") == f"{night8}{seq}" and m.group("filter") == segment
+    seg, prob = naming._flatgrp_segment({"flat_master_id": 1, "flat_paths": [rf"R:\M\{name}"]})
+    assert prob is None and seg == f"FLATGRP_{night8}{seq}"
+
+
+def test_master_flat_name_konwencja_archiwum_dokladnie():
+    """Rozszerzenie stałe `.xisf` - parametru nie ma, więc XISF nie dostanie nazwy `.fits`."""
+    assert naming.master_flat_name("20230507", "CLS", 0) == "MASTERFLAT_FLATGRP_202305070_FILTER_CLS_.xisf"
+    with pytest.raises(TypeError):
+        naming.master_flat_name("20230507", "CLS", 0, ext=".fits")
+
+
+@pytest.mark.parametrize("night8, segment, seq", [("2023057", "CLS", 0), ("2023-05-07", "CLS", 0),
+                                                  ("20230231", "CLS", 0), ("20231301", "CLS", 0),
+                                                  ("20230507", "CLS", 10), ("20230507", "CLS", -1),
+                                                  ("20230507", "CLS", "1"), ("20230507", "CLS", True),
+                                                  ("20230507", "", 0), ("20230507", None, 0),
+                                                  ("20230507", "L_Pro", 0), ("20230507", "H.a", 0),
+                                                  ("20230507", "CLS_", 0), ("20230507", " CLS", 0),
+                                                  ("20230507", "CLS!", 0)])
+def test_master_flat_name_expect(night8, segment, seq):
+    """Noc nie z 8 cyfr albo nie data kalendarza, cyfra spoza 0..9, segment filtru pusty, z `_`/`.`
+    (wzorzec uciąłby filtr przy odczycie) albo różny od siebie po `_sanitize` (żadnej cichej poprawki
+    `CLS_` → `CLS`) → `ValueError`, nigdy nazwa, której archiwum nie przeczyta z powrotem."""
+    with pytest.raises(ValueError):
+        naming.master_flat_name(night8, segment, seq)
 
 
 def test_domyslny_wzor_bez_nowych_tokenow():

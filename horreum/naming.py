@@ -176,6 +176,37 @@ def _flatgrp_segment(facts):
     return f"FLATGRP_{groups.pop()}", None
 
 
+_NIGHT8 = re.compile(r"[0-9]{8}")
+
+
+def master_flat_name(night8, filter_segment, seq):
+    """Nazwa NOWEGO mastera flat w konwencji archiwum: `MASTERFLAT_FLATGRP_<noc><cyfra>_FILTER_<filtr>_.xisf`
+    (`MASTERFLAT_FLATGRP_202305070_FILTER_CLS_.xisf`). Nie `compose_name`: jej wzór to konwencja
+    LIGHTÓW (data i godzina na początku), a nazwę mastera czytają dwie inne reguły - wzorzec
+    `masterflat_flatgrp_filter` z `resolve/data/master_paths.json` i `_flatgrp_segment` (grupa flatu
+    w nazwie lighta). Grupa = noc `YYYYMMDD` + cyfra kolejności grupy tej nocy (zmierzone w archiwum:
+    `202308230` i `202308231` w jednym folderze `76EDPH_2600MC\\OSC`). Rozszerzenie STAŁE `.xisf`:
+    żniwa wciągają wyłącznie XISF, a nazwa `.fits` na pliku XISF kłamałaby skanowi o formacie.
+
+    EXPECT: `night8` to dokładnie 8 cyfr i prawdziwa data kalendarza, `seq` jedna cyfra `0..9`,
+    segment filtru niepusty, równy sobie po `_sanitize` (żadnej cichej poprawki: `CLS_` nie staje się
+    `CLS`) i bez `_` oraz `.` - wzorzec czyta filtr jako `[^_\\\\/.]+`, więc taki znak uciąłby filtr
+    przy odczycie. Inaczej `ValueError`: nazwa, której archiwum nie przeczyta z powrotem, nie powstaje."""
+    night8 = str(night8)
+    try:
+        if not _NIGHT8.fullmatch(night8):
+            raise ValueError
+        datetime.strptime(night8, "%Y%m%d")
+    except ValueError:
+        raise ValueError(f"noc mastera flat musi być datą YYYYMMDD (8 cyfr): {night8!r}") from None
+    if isinstance(seq, bool) or not isinstance(seq, int) or not 0 <= seq <= 9:
+        raise ValueError(f"cyfra kolejności grupy flatu musi być 0..9: {seq!r}")
+    if (not isinstance(filter_segment, str) or not filter_segment
+            or _sanitize(filter_segment) != filter_segment or "_" in filter_segment or "." in filter_segment):
+        raise ValueError(f"segment filtru nieczytelny dla wzorca nazwy mastera: {filter_segment!r}")
+    return f"MASTERFLAT_FLATGRP_{night8}{seq}_FILTER_{filter_segment}_.xisf"
+
+
 def compose_name(facts, dt, *, template=DEFAULT_TEMPLATE):
     """Komponuj kanoniczną nazwę z faktów frame'a. Zwraca `(nazwa | None, problem | None)`.
 

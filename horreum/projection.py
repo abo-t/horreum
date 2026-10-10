@@ -46,13 +46,17 @@ import re
 import shutil
 from collections import Counter
 from collections.abc import Callable
+from datetime import datetime
 
-from . import lineage, naming
+from . import hashing, lineage, naming
 from .gui import queries
 from .scan import EXCLUDED_DIR_NAMES
 
 _UNSET = "_UNSET"                      # segment layoutu pusty/None — nie gubimy klatki po cichu (§1)
 MANIFEST_NAME = "_PROJEKCJA.json"
+HARVEST_MANIFEST_PREFIX = "_ZNIWA"     # zeznanie biegu żniw obok wyjścia WBPP (`write_harvest_manifest`)
+CALIBRATION_SEGMENT = "CALIBRATION"    # biblioteka kalibracji archiwum - jedyny cel kopii mastera
+PART_SUFFIX = ".part"                  # plik w drodze; nie nagłówkonośny, więc skan go nie weźmie
 
 # Presety layoutu = KOD (uniwersalia, jak słowniki solar 5a; D-P1 rekomendacja (a)). Kolumny bazowe
 # z `base_rows`. JSON dojdzie, gdy user zażąda własnych layoutów (MINIMAL). Spec segmentu = nazwa
@@ -680,3 +684,120 @@ def _merge_object_manifest(old, manifest, *, now, root, cancelled):
             if seg not in zestawy and isinstance(z, dict) and os.path.isdir(os.path.join(root, seg)):
                 zestawy[seg] = {**z, "ts": z.get("ts", old.get("ts"))}
     return {**manifest, "zestawy": dict(sorted(zestawy.items()))}
+
+
+# ============================================================ KOPIA MASTERA (żniwa, `horreum/harvest.py`)
+
+_COPY_BUF = 1 << 20
+
+
+def _assert_calibration_segment(dst):
+    """Guard żniw: katalog celu MUSI mieć segment `CALIBRATION` - żniwa piszą wyłącznie do biblioteki
+    kalibracji, nigdy do drzewa lightów ani do warsztatu. Ścieżka ZNORMALIZOWANA (`abspath` +
+    `normpath`), jak w `_assert_excluded_segment`: `…\\CALIBRATION\\..\\LIGHTS` ma segment w napisie,
+    a system plików pisze do `LIGHTS`. Brak segmentu → `ValueError` (EXPECT) przed czymkolwiek."""
+    katalog = os.path.dirname(os.path.normpath(os.path.abspath(str(dst))))
+    parts = [p for p in re.split(r"[\\/]+", katalog) if p]
+    if not any(p.lower() == CALIBRATION_SEGMENT.lower() for p in parts):
+        raise ValueError(f"cel kopii mastera {dst} leży poza biblioteką kalibracji "
+                         f"(brak segmentu {CALIBRATION_SEGMENT})")
+
+
+def _drop_part(part):
+    """Zdejmij `.part`, który ta klinga sama przed chwilą utworzyła. Błąd zdjęcia nie przykrywa
+    błędu, który do sprzątania doprowadził - wołający raportuje tamten."""
+    try:
+        os.remove(part)
+    except OSError:
+        pass
+
+
+def copy_master(src, dst, *, expected_sha1, sha1_fn=hashing.sha1_of):
+    """Skopiuj master z wyjścia WBPP pod `dst` w bibliotece kalibracji, BEZ nadpisania. Zwraca
+    `(status, reason | None)`: `placed` · `conflict` (cel albo `.part` już leży - plan nadał nazwę
+    wolną, więc to wyścig z ręką) · `verify_bad` (bajty kopii ≠ `expected_sha1`) · `error` (I/O).
+
+    Droga: guard segmentu → cel istnieje? → katalog celu (błąd, także rodzic będący plikiem → `error`)
+    → kopia do `dst + ".part"` (otwarte `xb`: istniejący `.part` to `conflict`, cudzego pliku nie
+    nadpisujemy ani nie usuwamy - wzorzec `raport._zapisz_plik`) → `flush` + `os.fsync` (jak bliźnie
+    klingi `raport.py` i `writeback.py`: wyjście WBPP bywa jedyną kopią, a audyt czytający bufor
+    systemu nie dowodzi bajtów na dysku) → sha1 CAŁEGO `.part` == `expected_sha1` → czasy źródła
+    (wyłącznie czasy, `os.utime`: atrybut tylko-do-odczytu przeniesiony `copystat` blokowałby zdjęcie
+    `.part` po przegranym wyścigu) → publikacja.
+
+    `expected_sha1` to bajty, które zaakceptował plan (DRY), nie „bieżące źródło": plik w warsztacie
+    mógł się zmienić między sondą a kopią, a scratch WBPP bywa jedyną kopią mastera. Master to
+    pojedynczy plik ~100 MB, więc pełny audyt bajtów jest tani. Rozjazd → `.part` zdjęty, `dst`
+    nietknięty.
+
+    Publikacja przez `os.rename`, NIGDY `os.replace`: `replace` kasuje plik stojący pod celem
+    (`writeback.py` dokumentuje to samo), a `os.rename` na Windows rzuca `FileExistsError`, gdy cel
+    powstał między sprawdzeniem a publikacją - to drugi `conflict`, `.part` zdjęty. Poza Windows
+    `rename` zastępuje cel; Horreum chodzi na Windows i tę semantykę zakłada. `.part` nie jest
+    sufiksem nagłówkonośnym (`scan.HEADER_SUFFIXES`), więc przerwanie w połowie nie zostawia
+    półproduktu, który skan wziąłby za mastera. `sha1_fn` to szew testu wyścigu.
+
+    Powód to DANE, nie zdanie (ekran EN pokazuje go dosłownie, a co się stało, mówi status): ścieżka
+    celu albo `.part`, `sha1 <kopia> != <plan>`, treść wyjątku."""
+    _assert_calibration_segment(dst)
+    if os.path.lexists(dst):
+        return "conflict", str(dst)
+    part = dst + PART_SUFFIX
+    try:
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+    except OSError as exc:                     # także `FileExistsError`: rodzic celu jest plikiem
+        return "error", f"{type(exc).__name__}: {exc}"
+    try:
+        fh = open(part, "xb")
+    except FileExistsError:
+        return "conflict", str(part)
+    except OSError as exc:
+        return "error", f"{type(exc).__name__}: {exc}"
+    try:
+        with fh, open(src, "rb") as zrodlo:
+            shutil.copyfileobj(zrodlo, fh, _COPY_BUF)
+            fh.flush()
+            os.fsync(fh.fileno())
+        got = sha1_fn(part)
+        if got != expected_sha1:
+            _drop_part(part)
+            return "verify_bad", f"sha1 {got} != {expected_sha1}"
+        st = os.stat(src)
+        os.utime(part, ns=(st.st_atime_ns, st.st_mtime_ns))
+        try:
+            os.rename(part, dst)
+        except FileExistsError:
+            _drop_part(part)
+            return "conflict", f"{dst} (rename: FileExistsError)"
+    except OSError as exc:
+        _drop_part(part)
+        return "error", f"{type(exc).__name__}: {exc}"
+    except BaseException:
+        _drop_part(part)
+        raise
+    return "placed", None
+
+
+def write_harvest_manifest(wbpp_dir, payload, *, now):
+    """Zapisz zeznanie biegu żniw w katalogu wyjścia WBPP (PLIK, nie DB - jak `_PROJEKCJA.json` przy
+    wydaniu): co wciągnięto, dokąd, z jakich wejść i dlaczego reszta została. Baza dowie się
+    o masterze zwykłym skanem, a jego historia jedzie w jego nagłówku; proweniencja decyzji żniw
+    zostaje przy wyjściu. Zwraca ścieżkę zapisanego pliku.
+
+    KAŻDY BIEG WŁASNYM PLIKIEM `_ZNIWA_<YYYYMMDD-HHMMSS>.json` (znacznik z `now` wołającego), otwieranym
+    `x`: drugi bieg nad tym samym wyjściem nie nadpisuje zeznania pierwszego, więc proweniencja
+    masterów wciągniętych wcześniej zostaje. Dwa biegi w tej samej sekundzie → `_2`, `_3`… Zapis
+    `open(..., 'x')` żyje w tej klindze (DOOR meta-testu)."""
+    chwila = now if isinstance(now, datetime) else datetime.fromisoformat(str(now))
+    stem = f"{HARVEST_MANIFEST_PREFIX}_{chwila.strftime('%Y%m%d-%H%M%S')}"
+    n = 1
+    while True:
+        path = os.path.join(wbpp_dir, f"{stem}.json" if n == 1 else f"{stem}_{n}.json")
+        try:
+            fh = open(path, "x", encoding="utf-8")
+        except FileExistsError:
+            n += 1
+            continue
+        with fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2)
+        return path

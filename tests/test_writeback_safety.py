@@ -259,6 +259,34 @@ def test_klinga_projekcji_istnieje():
     assert any("os.link" in d for d in found), "projection.py nie zawiera os.link — klinga martwa"
 
 
+def test_rdzen_zniw_nie_mutuje_plikow():
+    """Asercja negatywna po NAZWIE (nie tylko pętla wyżej): `harvest.py` nie jest drzwiami i nie ma
+    ani jednej mutacji - `os.*` mutujących, `shutil.*`, `open` w trybie piszącym. Plik pisze wyłącznie
+    klinga `projection.copy_master`/`write_harvest_manifest`. `shutil` nie wolno nawet importować:
+    `copyfileobj`/`copystat` nie stoją na liście mutatorów, a w rdzeniu żniw nie mają po co być."""
+    src = PKG / "harvest.py"
+    assert src.exists() and src not in DOORS
+    tree = ast.parse(src.read_text(encoding="utf-8"))
+    assert not list(_file_mutators(tree, _aliases(tree)))
+    importy = {a.name.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
+    importy |= {(n.module or "").split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
+    assert "shutil" not in importy
+    assert not any(isinstance(n, ast.Name) and n.id == "shutil" for n in ast.walk(tree))
+
+
+def test_klinga_kopii_mastera_publikuje_rename_nigdy_replace():
+    """Ostrze klingi żniw: `projection.copy_master` publikuje przez `os.rename` (na Windows nie
+    nadpisuje celu), otwiera `.part` WYŁĄCZNIE jako nowy (`xb`), a `os.replace` (kasuje plik stojący
+    pod celem) nie występuje w niej wcale."""
+    tree = ast.parse((PKG / "projection.py").read_text(encoding="utf-8"))
+    found = set(_file_mutators(_funkcja(tree, "copy_master"), _aliases(tree)))
+    assert {"os.rename(...)", "open(..., <tryb pisania>)", "os.makedirs(...)"} <= found
+    assert "os.replace(...)" not in found
+    tryby = {_tryb(c, 1) for c in ast.walk(_funkcja(tree, "copy_master"))
+             if isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id == "open"}
+    assert tryby == {"xb", "rb"}, tryby
+
+
 def _mutatory_po_funkcjach(tree):
     """{nazwa węzła najwyższego poziomu: [opisy mutacji]} - tylko węzły z co najmniej jedną mutacją."""
     aliases = _aliases(tree)

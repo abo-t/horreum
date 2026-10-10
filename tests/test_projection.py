@@ -5,7 +5,10 @@ segmenty layoutu + `_UNSET` + sanityzacja + anty-traversal), guard `_assert_excl
 prymitywy `_link_to`/`_verify_content`/`_same_content` na PRAWDZIWYCH plikach (`os.link` na
 `tmp_path`; w trybie kopii kopia z wydania = `exists`: rozmiar + czas + prefiks), pełny `apply`
 DRY vs realny (hardlink + manifest + copy-mode + conflict-bez-nadpisania + idempotencja + skipped),
-TWARDY ABORT sondy pierwszego linku (`ProjectionAbort`), oraz zielony meta-test bramki (projekcja jako
+TWARDY ABORT sondy pierwszego linku (`ProjectionAbort`), klinga kopii mastera żniw (`copy_master`:
+publikacja bez `.part`, `verify_bad`, `conflict` bez nadpisania, wyścig przed publikacją, leżący `.part`,
+`fsync` przed audytem, rodzic celu będący plikiem, źródło tylko-do-odczytu, guard segmentu `CALIBRATION`)
+i `write_harvest_manifest` (plik na bieg, bez nadpisania), oraz zielony meta-test bramki (projekcja jako
 DOOR pominięta, `os.link` obecny). Rdzeń Qt-wolny — bez PySide6."""
 
 from __future__ import annotations
@@ -15,7 +18,7 @@ import os
 
 import pytest
 
-from horreum import db, projection, repo
+from horreum import db, hashing, projection, repo
 
 NOW = "2026-07-04T00:00:00+00:00"
 
@@ -891,6 +894,155 @@ def test_manifest_starych_ukladow_bajt_w_bajt(tmp_path):
     with pytest.raises(ValueError, match="nieznany layout"):
         projection.layout_segments("wymyslony")
     con.close()
+
+
+# ============================================================ kopia mastera (żniwa)
+
+
+def _master_src(tmp_path, data=b"MASTER-BAJTY" * 100):
+    src = tmp_path / "wbpp" / "master" / "masterFlat_X.xisf"
+    src.parent.mkdir(parents=True, exist_ok=True)
+    src.write_bytes(data)
+    return str(src)
+
+
+def _master_dst(tmp_path, name="MASTERFLAT_FLATGRP_202305070_FILTER_CLS_.xisf"):
+    return str(tmp_path / "arch" / "CALIBRATION" / "masters" / "flats" / "Z" / "CLS" / name)
+
+
+def test_copy_master_publikuje_bez_part_i_z_czasem_zrodla(tmp_path):
+    src, dst = _master_src(tmp_path), _master_dst(tmp_path)
+    assert projection.copy_master(src, dst, expected_sha1=hashing.sha1_of(src)) == ("placed", None)
+    assert open(dst, "rb").read() == open(src, "rb").read()
+    assert not os.path.exists(dst + ".part")
+    assert abs(os.stat(dst).st_mtime_ns - os.stat(src).st_mtime_ns) < 1_000_000
+
+
+def test_copy_master_verify_bad_zdejmuje_part_i_nie_tyka_celu(tmp_path):
+    """Oczekiwany sha1 to bajty zaakceptowane w planie, nie bieżące źródło: źródło zmienione po
+    sondzie daje `verify_bad`, a w bibliotece nie zostaje ani cel, ani `.part`."""
+    src, dst = _master_src(tmp_path), _master_dst(tmp_path)
+    plan_sha = hashing.sha1_of(src)
+    open(src, "ab").write(b"zmiana-po-sondzie")
+    status, why = projection.copy_master(src, dst, expected_sha1=plan_sha)
+    assert status == "verify_bad" and plan_sha in why
+    assert not os.path.exists(dst) and not os.path.exists(dst + ".part")
+
+
+def test_copy_master_cel_istnieje_conflict_bez_nadpisania(tmp_path):
+    src, dst = _master_src(tmp_path), _master_dst(tmp_path)
+    os.makedirs(os.path.dirname(dst))
+    open(dst, "wb").write(b"CUDZY")
+    assert projection.copy_master(src, dst, expected_sha1=hashing.sha1_of(src))[0] == "conflict"
+    assert open(dst, "rb").read() == b"CUDZY" and not os.path.exists(dst + ".part")
+
+
+def test_copy_master_wyscig_cel_powstal_przed_publikacja(tmp_path):
+    """Cel powstaje między kopią a publikacją (wstrzyknięty `sha1_fn`): `os.rename` na Windows nie
+    nadpisuje → `conflict`, `.part` zdjęty, plik ręki nietknięty."""
+    src, dst = _master_src(tmp_path), _master_dst(tmp_path)
+
+    def sha1_z_wyscigiem(part):
+        open(dst, "wb").write(b"RECZNY")
+        return hashing.sha1_of(part)
+    status, why = projection.copy_master(src, dst, expected_sha1=hashing.sha1_of(src),
+                                         sha1_fn=sha1_z_wyscigiem)
+    assert (status, why) == ("conflict", f"{dst} (rename: FileExistsError)")
+    assert open(dst, "rb").read() == b"RECZNY" and not os.path.exists(dst + ".part")
+
+
+def test_copy_master_lezacy_part_to_conflict_nie_nadpisanie(tmp_path):
+    src, dst = _master_src(tmp_path), _master_dst(tmp_path)
+    os.makedirs(os.path.dirname(dst))
+    open(dst + ".part", "wb").write(b"PRZERWANA")
+    status, why = projection.copy_master(src, dst, expected_sha1=hashing.sha1_of(src))
+    assert (status, why) == ("conflict", dst + projection.PART_SUFFIX)
+    assert open(dst + ".part", "rb").read() == b"PRZERWANA" and not os.path.exists(dst)
+
+
+def test_copy_master_brak_zrodla_error_bez_part(tmp_path):
+    dst = _master_dst(tmp_path)
+    status, why = projection.copy_master(str(tmp_path / "brak.xisf"), dst, expected_sha1="x")
+    assert status == "error" and "FileNotFoundError" in why
+    assert not os.path.exists(dst) and not os.path.exists(dst + ".part")
+
+
+@pytest.mark.parametrize("cel", [os.path.join("arch", "LIGHTS", "M.xisf"),
+                                 os.path.join("arch", "CALIBRATION", "..", "LIGHTS", "M.xisf"),
+                                 os.path.join("arch", "LIGHTS", "CALIBRATION")])
+def test_copy_master_guard_segmentu_calibration(tmp_path, cel):
+    src = _master_src(tmp_path)
+    with pytest.raises(ValueError, match="CALIBRATION"):
+        projection.copy_master(src, str(tmp_path / cel), expected_sha1=hashing.sha1_of(src))
+    assert not os.path.exists(tmp_path / "arch")
+
+
+def test_copy_master_fsync_part_przed_audytem_i_publikacja(tmp_path, monkeypatch):
+    """`.part` utrwalony (`flush` + `os.fsync`) ZANIM audyt go przeczyta i zanim pójdzie publikacja -
+    jak bliźnie klingi `raport.py` i `writeback.py`; wyjście WBPP bywa jedyną kopią."""
+    src, dst = _master_src(tmp_path), _master_dst(tmp_path)
+    zdarzenia, prawdziwy_fsync, prawdziwy_rename = [], os.fsync, os.rename
+
+    def fsync(fd):
+        zdarzenia.append(("fsync", os.fstat(fd).st_size))
+        prawdziwy_fsync(fd)
+
+    def rename(a, b):
+        zdarzenia.append(("rename", a))
+        prawdziwy_rename(a, b)
+
+    def sha1(part):
+        zdarzenia.append(("sha1", part))
+        return hashing.sha1_of(part)
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "rename", rename)
+    assert projection.copy_master(src, dst, expected_sha1=hashing.sha1_of(src), sha1_fn=sha1)[0] == "placed"
+    part = dst + projection.PART_SUFFIX
+    assert zdarzenia == [("fsync", os.path.getsize(src)), ("sha1", part), ("rename", part)]
+
+
+def test_copy_master_rodzic_celu_jest_plikiem_to_error_nie_conflict_part(tmp_path):
+    src, dst = _master_src(tmp_path), _master_dst(tmp_path)
+    os.makedirs(os.path.dirname(os.path.dirname(dst)))
+    open(os.path.dirname(dst), "wb").write(b"PLIK-ZAMIAST-KATALOGU")
+    status, why = projection.copy_master(src, dst, expected_sha1=hashing.sha1_of(src))
+    assert status == "error" and why.startswith("FileExistsError")
+
+
+def test_copy_master_zrodlo_tylko_do_odczytu_i_wyscig_nie_zostawia_part(tmp_path):
+    """Źródło tylko-do-odczytu: na `.part` idą wyłącznie czasy (`os.utime`), nie atrybuty, więc po
+    przegranym wyścigu `.part` daje się zdjąć; po sukcesie cel jest zapisywalny, a czas jak źródło."""
+    import stat
+    src, dst = _master_src(tmp_path), _master_dst(tmp_path)
+    os.chmod(src, stat.S_IREAD)
+    try:
+        def sha1_z_wyscigiem(part):
+            open(dst, "wb").write(b"RECZNY")
+            return hashing.sha1_of(part)
+        status, _ = projection.copy_master(src, dst, expected_sha1=hashing.sha1_of(src),
+                                           sha1_fn=sha1_z_wyscigiem)
+        assert status == "conflict" and not os.path.exists(dst + projection.PART_SUFFIX)
+        drugi = _master_dst(tmp_path, "MASTERFLAT_FLATGRP_202305071_FILTER_CLS_.xisf")
+        assert projection.copy_master(src, drugi, expected_sha1=hashing.sha1_of(src))[0] == "placed"
+        assert os.access(drugi, os.W_OK)
+        assert abs(os.stat(drugi).st_mtime_ns - os.stat(src).st_mtime_ns) < 1_000_000
+    finally:
+        os.chmod(src, stat.S_IREAD | stat.S_IWRITE)
+
+
+def test_write_harvest_manifest_plik_na_bieg_bez_nadpisania(tmp_path):
+    """Każdy bieg własnym plikiem `_ZNIWA_<YYYYMMDD-HHMMSS>.json` (znacznik z `now`), otwartym `x`:
+    poprzednie zeznanie nietknięte, kolizja w tej samej sekundzie → `_2`, `_3`."""
+    p1 = {"ts": NOW, "items": [{"src": "masterFlat_Ł.xisf", "status": "placed"}]}
+    p2 = {"ts": NOW, "items": []}
+    a = projection.write_harvest_manifest(str(tmp_path), p1, now=NOW)
+    b = projection.write_harvest_manifest(str(tmp_path), p2, now=NOW)
+    c = projection.write_harvest_manifest(str(tmp_path), p2, now="2026-07-04T00:00:01.5+00:00")
+    assert [os.path.basename(x) for x in (a, b, c)] == [
+        f"{projection.HARVEST_MANIFEST_PREFIX}_20260704-000000.json", "_ZNIWA_20260704-000000_2.json",
+        "_ZNIWA_20260704-000001.json"]
+    tekst = open(a, encoding="utf-8").read()
+    assert tekst == json.dumps(p1, ensure_ascii=False, indent=2) and "Ł" in tekst
 
 
 # ============================================================ meta-test bramki zielony

@@ -11,7 +11,8 @@ import pytest
 
 from horreum import db, repo
 from horreum.stacks import REASON_DEGENERATE, REASON_MISMATCH, REASON_NO_OBJECT, \
-    REASON_NO_CANDIDATES, REASON_TELESCOPE, inputs_of, record_harvest_inputs, run_stack_lineage
+    REASON_NO_CANDIDATES, REASON_TELESCOPE, harvest_lineage_pending, inputs_of, record_harvest_inputs, \
+    run_stack_lineage
 
 NOW = "2026-08-02T12:00:00+00:00"
 LATER = "2026-08-02T13:00:00+00:00"
@@ -1013,3 +1014,83 @@ def test_rodowod_z_zniw_odmawia_wejsc_spoza_lightow_i_pustego_zbioru(con):
     with pytest.raises(ValueError, match="bez wejść"):
         record_harvest_inputs(con, master_sha1_data="m1", input_frame_ids=[], now=LATER)
     assert {r["asserted_by"] for r in inputs_of(con, m)} == {"window"}
+
+
+# ============================================================ czy rodowód z żniw czeka (`harvest_lineage_pending`)
+
+def _czeka(con, ids, sha="m1"):
+    return harvest_lineage_pending(con, master_sha1_data=sha, input_frame_ids=ids)
+
+
+def test_rodowod_czeka_lustro_zapisu_okno_powod_i_brak_integracji(con):
+    """AR-104: predykat odpowiada TAK, dopóki `record_harvest_inputs` ma tu coś do zrobienia - stos
+    nieznany bazie, stos bez integracji, wiersze `window`, głowa z powodem - a po zapisie NIE; drugi
+    przebieg łańcucha (rodowód `history` zostaje, `kept_proven`) zdania nie zmienia. Predykat nie pisze."""
+    lighty = _okno_dziesieciu(con)
+    assert _czeka(con, lighty[:8]) is True                                # kopia jeszcze nieprzyjęta
+    assert _czeka(con, []) is False                                       # bez zbioru nie ma czego czekać
+    m = _master(con)
+    assert _czeka(con, lighty[:8]) is True                                # integrację postawi łańcuch
+    run_stack_lineage(con, now=NOW, xml_reader=_brak_xml)
+    assert {r["asserted_by"] for r in inputs_of(con, m)} == {"window"}
+    assert _czeka(con, lighty[:8]) is True                                # okno czasu, nie zbiór dokładny
+    zdarzenia = con.execute("SELECT count(*) FROM event").fetchone()[0]
+    record_harvest_inputs(con, master_sha1_data="m1", input_frame_ids=lighty[:8], now=LATER)
+    assert con.execute("SELECT count(*) FROM event").fetchone()[0] > zdarzenia
+    assert _czeka(con, lighty[:8]) is False
+    run_stack_lineage(con, now=LATER, xml_reader=_brak_xml)
+    assert _czeka(con, lighty[:8]) is False
+    zdarzenia = con.execute("SELECT count(*) FROM event").fetchone()[0]
+    _czeka(con, lighty[:8])
+    assert con.execute("SELECT count(*) FROM event").fetchone()[0] == zdarzenia
+
+
+def test_rodowod_czeka_po_rozjezdzie_z_historia_reka_liczy_sie_jako_zapisana(con):
+    """`history_mismatch` (zero wierszy, powód na głowie) czeka; wejście, które ręka już ma (`user`),
+    zapis by zostawił - nie czeka przez nie."""
+    m = _master(con)
+    lighty = _okno_dziesieciu(con)
+    xml = _xml_historii([-10.0] * 8)
+    run_stack_lineage(con, now=NOW, xml_reader=lambda _p: xml)
+    assert inputs_of(con, m) == [] and _czeka(con, lighty[:8]) is True
+    record_harvest_inputs(con, master_sha1_data="m1", input_frame_ids=lighty[:7], now=LATER)
+    assert _czeka(con, lighty[:7]) is False and _czeka(con, lighty[:8]) is True
+    iid = _integracja(con, m)["id"]
+    repo.link_integration(con, integration_id=iid, input_frame_id=lighty[7], asserted_by="user", now=LATER)
+    assert _czeka(con, lighty[:8]) is True                                # odcisk głowy = siedem, zbiór = osiem
+    record_harvest_inputs(con, master_sha1_data="m1", input_frame_ids=lighty[:8], now=LATER)
+    assert _czeka(con, lighty[:8]) is False
+
+
+def test_rodowod_czeka_przy_odcisku_glowy_innym_niz_zbior_lancuch_go_nie_przywraca(con):
+    """Bramka `sol` Z4: lustro zapisu obejmuje głowę - wiersze zgodne, a odcisk (`integ_hash`) innego
+    zbioru = zapis by go przepisał, więc czeka. Łańcuch stosu chronionego odcisku nie rusza, więc po
+    zapisie predykat nie wraca do „czeka” (bez pętli przyjęć)."""
+    m = _master(con)
+    lighty = _okno_dziesieciu(con)
+    xml = _xml_historii([-10.0] * 8)
+    run_stack_lineage(con, now=NOW, xml_reader=lambda _p: xml)
+    record_harvest_inputs(con, master_sha1_data="m1", input_frame_ids=lighty[:8], now=LATER)
+    assert _czeka(con, lighty[:8]) is False
+    con.execute("UPDATE integration SET integ_hash = 'obcy' WHERE master_frame_id = ?", (m,))
+    con.commit()
+    assert _czeka(con, lighty[:8]) is True
+    record_harvest_inputs(con, master_sha1_data="m1", input_frame_ids=lighty[:8], now=LATER)
+    assert _czeka(con, lighty[:8]) is False
+    run_stack_lineage(con, now=LATER, xml_reader=lambda _p: xml)
+    assert _czeka(con, lighty[:8]) is False
+
+
+def test_rodowod_nie_czeka_gdy_zapis_odmowilby_albo_stos_wycofany(con):
+    """Tam, gdzie `record_harvest_inputs` odmawia (wejście spoza lightów) albo nie ma czego zapisywać
+    (klatka nie jest stosem, stos wycofany), predykat mówi NIE - „czeka” znaczyłoby „na zawsze”."""
+    m = _master(con)
+    lid = _light(con, "l1", date_obs="2025-08-30T20:30:00")
+    assert _czeka(con, [lid, m]) is False
+    assert _czeka(con, [lid], sha="l1") is False
+    wycofany = _master(con, "m2", path=r"R:\ARCHIWUM\zniknal.xisf")
+    con.execute("UPDATE location SET present = 0 WHERE frame_id = ?", (wycofany,))   # guard repo: plik zniknął
+    con.commit()
+    assert _czeka(con, [lid], sha="m2") is True
+    repo.retire_frames(con, frame_ids=[wycofany], now=LATER)
+    assert _czeka(con, [lid], sha="m2") is False

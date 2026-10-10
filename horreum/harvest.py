@@ -1078,7 +1078,12 @@ class ReleaseRow:
     `awaiting_wbpp` = w `out_dir` SĄ kandydaci, ale ostatnie wydanie (`ts` manifestu) jest nowsze niż
     najnowszy z nich: obiekt wydano ponownie (nowe lighty), a WBPP po tym wydaniu jeszcze nie liczył.
     Liczniki dalej opisują wyniki leżące w `out_dir`; to pole mówi, że nie są wynikami OSTATNIEGO
-    wydania. Brak kandydatów albo nieczytelny `ts` → `False` (stan „czeka na WBPP” niosą wtedy zera)."""
+    wydania. Brak kandydatów albo nieczytelny `ts` → `False` (stan „czeka na WBPP” niosą wtedy zera).
+
+    `lineage` = stosy wciągnięte z tego wyjścia, których rodowodu DOKŁADNEGO baza jeszcze nie ma
+    (`stacks.harvest_lineage_pending`): `(sha1_data, frame_ids, ścieżka kopii pod STACKS)` - zbiór wejść
+    leży wtedy tylko w zeznaniu żniw w tym folderze (AR-104). Liczone wyłącznie z bazą i archiwum
+    (`releases(..., archive_root=, con=)`); bez nich puste."""
     root: str
     object_root: str
     object_canon: str | None
@@ -1088,6 +1093,7 @@ class ReleaseRow:
     done: int
     review: int
     awaiting_wbpp: bool = False
+    lineage: tuple = ()
 
 
 def _iso_timestamp(value):
@@ -1103,9 +1109,10 @@ def _iso_timestamp(value):
 def _harvest_testimonies(out_dir):
     """Zeznania żniw (`_ZNIWA_*.json`) w `out_dir` i do `_TESTIMONY_DEPTH` poziomów pod nim (okno żniw
     zapisuje zeznanie tam, gdzie człowiek wskazał wyjście: `out` albo `out\\master`), PARSOWANE:
-    `[(ts, {klucz ścieżki src: (status, src_mtime_ns | None)})]` od najnowszego. Plik nieczytelny, bez
-    `ts` albo bez listy pozycji nie świadczy; pozycja bez `src_mtime_ns` (zeznanie sprzed tego pola)
-    niesie `None`."""
+    `[(ts, archiwum, {klucz ścieżki src: pozycja})]` od najnowszego. `archiwum` = klucz ścieżki
+    (`_path_key`) korzenia archiwum biegu albo `None` (zeznanie bez tego pola); `pozycja` = dict pozycji
+    zeznania (`status`, `src_mtime_ns`, `kind`, `sha1_data`, `frame_ids`, `dst`, `exists_path`…). Plik
+    nieczytelny, bez `ts` albo bez listy pozycji nie świadczy."""
     pliki, poziom = [], [str(out_dir)]
     for _ in range(_TESTIMONY_DEPTH + 1):
         nastepny = []
@@ -1131,16 +1138,51 @@ def _harvest_testimonies(out_dir):
         ts = _iso_timestamp(payload.get("ts")) if isinstance(payload, dict) else None
         if ts is None or not isinstance(payload.get("items"), list):
             continue
-        statusy = {_path_key(i["src"]): (i.get("status"),
-                                         i["src_mtime_ns"] if isinstance(i.get("src_mtime_ns"), int) else None)
-                   for i in payload["items"] if isinstance(i, dict) and i.get("src")}
-        zeznania.append((ts, p, statusy))
+        archiwum = payload.get("archive_root")
+        pozycje = {_path_key(i["src"]): i for i in payload["items"] if isinstance(i, dict) and i.get("src")}
+        zeznania.append((ts, p, _path_key(archiwum) if archiwum else None, pozycje))
     zeznania.sort(key=lambda z: (z[0], z[1]), reverse=True)
-    return [(ts, statusy) for ts, _p, statusy in zeznania]
+    return [(ts, archiwum, pozycje) for ts, _p, archiwum, pozycje in zeznania]
 
 
-def _release_state(out_dir, release_ts):
-    """`(pending, done, review, awaiting_wbpp)` kandydatów żniw w `out_dir`. Stan kandydata mówi
+def _src_mtime_ns(pozycja):
+    """`src_mtime_ns` pozycji zeznania albo `None` (zeznanie sprzed tego pola, śmieć)."""
+    v = pozycja.get("src_mtime_ns")
+    return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+
+def _pending_stack(con, klucz, mtime_ns, zeznania, stacks_root):
+    """Stos pliku `klucz`, którego rodowodu DOKŁADNEGO baza jeszcze nie ma → `(sha1_data, frame_ids,
+    kopia)` albo `None` (AR-104). Zbiór wejść bierze NAJNOWSZE zeznanie, które go niesie dla pliku
+    niezmienionego od SWOJEGO planu, przy pozycji `placed`/`exists`: bieg nad stosem, który baza już
+    zna, zeznaje `exists` bez zbioru - zbiór zna starsze zeznanie wciągnięcia. Pozycja `review` też
+    bywa ze zbiorem (`_plan_stack` ustawia `frame_ids` przed odmową nagłówka i kalibracji), ale to
+    zbiór stosu, którego żniwa NIE przyjęły - nie świadczy. Kopia = obecna kopia znana bazie pod
+    `STACKS` archiwum, bez niej - plik z zeznania, który dalej leży pod `STACKS`; bez żadnej nie ma
+    czego przyjmować."""
+    for _ts, _a, pozycje in zeznania:
+        p = pozycje.get(klucz)
+        ids = p.get("frame_ids") if p is not None else None
+        if (p is not None and p.get("status") in ("placed", "exists") and p.get("kind") == "master_light"
+                and p.get("sha1_data") and ids and isinstance(ids, list)
+                and all(isinstance(i, int) for i in ids) and _src_mtime_ns(p) == mtime_ns):
+            break
+    else:
+        return None
+    sha1, ids = p["sha1_data"], tuple(sorted(set(ids)))
+    if not stacks.harvest_lineage_pending(con, master_sha1_data=sha1, input_frame_ids=ids):
+        return None
+    znane = [x for x in queries.present_paths_by_sha1_data(con, sha1) if _under(x, stacks_root)]
+    zeznana = p.get("dst") or p.get("exists_path")
+    if znane:
+        return sha1, ids, znane[0]
+    if zeznana and _under(zeznana, stacks_root) and os.path.isfile(zeznana):
+        return sha1, ids, zeznana
+    return None
+
+
+def _release_state(out_dir, release_ts, *, archive_root=None, con=None):
+    """`(pending, done, review, awaiting_wbpp, lineage)` kandydatów żniw w `out_dir`. Stan kandydata mówi
     NAJNOWSZE zeznanie, które go wymienia (bieg nad `out\\master` nie zna plików spoza tego katalogu):
     `placed`/`exists` przy pliku niezmienionym od planu tego biegu = wciągnięty, `review` tak samo = do
     przeglądu, cała reszta - bieg przerwany (`would-place`, `cancelled`), konflikt, błąd, plik bez
@@ -1151,11 +1193,22 @@ def _release_state(out_dir, release_ts):
     planu, nie porównanie z chwilą biegu: `apply` przenosi `exists` z planu bez audytu, więc plik
     nadpisany przez WBPP między planem a `apply` ma czas starszy od zeznania, a bajty inne niż archiwum.
 
+    ARCHIWUM (AR-105): z `archive_root` świadczą WYŁĄCZNIE zeznania biegów do tego archiwum (`archive_root`
+    zeznania = korzeń przed `CALIBRATION`/`STACKS`, porównanie `_path_key`; zeznanie bez tego pola nie
+    świadczy) - plik wciągnięty do innego archiwum w tym archiwum nie leży. Bez `archive_root` świadczą
+    wszystkie. `lineage` (`_pending_stack`) liczy się tylko z bazą (`con`) i archiwum.
+
     `awaiting_wbpp` = są kandydaci, a `release_ts` (sekundy, ostatnie wydanie) jest nowszy od najnowszego
     z nich. Ekran liczy to z dysku i z treści zeznań, nie z pamięci okna ani z samego zegara."""
     zeznania = _harvest_testimonies(out_dir)
+    stacks_root = None
+    if archive_root:
+        lib = library_root(archive_root)
+        zeznania = [z for z in zeznania if z[1] == _path_key(lib)]
+        stacks_root = os.path.join(lib, STACKS_SEGMENT)
     pending = done = review = 0
     najnowszy = None
+    lineage = {}
     for src in discover(out_dir):
         try:
             st = os.stat(src)
@@ -1163,30 +1216,36 @@ def _release_state(out_dir, release_ts):
             continue
         najnowszy = st.st_mtime if najnowszy is None else max(najnowszy, st.st_mtime)
         klucz = _path_key(src)
-        werdykt = next(((ts, s[klucz]) for ts, s in zeznania if klucz in s), None)
+        werdykt = next(((ts, z[klucz]) for ts, _a, z in zeznania if klucz in z), None)
         if werdykt is None:
             pending += 1
             continue
-        ts, (status, zapisany_ns) = werdykt
+        ts, pozycja = werdykt
+        status, zapisany_ns = pozycja.get("status"), _src_mtime_ns(pozycja)
         niezmieniony = st.st_mtime_ns == zapisany_ns if zapisany_ns is not None else st.st_mtime <= ts
         if niezmieniony and status in ("placed", "exists"):
             done += 1
+            stos = (_pending_stack(con, klucz, st.st_mtime_ns, zeznania, stacks_root)
+                    if con is not None and stacks_root is not None else None)
+            if stos is not None:
+                lineage.setdefault(stos[0], stos)
         elif niezmieniony and status == "review":
             review += 1
         else:
             pending += 1
     awaiting = najnowszy is not None and release_ts is not None and release_ts > najnowszy
-    return pending, done, review, awaiting
+    return pending, done, review, awaiting, tuple(lineage.values())
 
 
-def releases(roots):
-    """Lista wydań obiektu z kart celu (CZYSTY ODCZYT dysku) → `[ReleaseRow]` od najnowszego wydania
-    (`ts` manifestu malejąco; nieczytelny `ts` na końcu). `roots` = korzenie kart (folder roboczy
-    WBPP i karty celu wydania); pod każdym podkatalogi `<root>\\OBJECTS\\*` z manifestem układu
-    `wbpp-obiekt`. Karta bez `OBJECTS` nie daje nic; ten sam folder obiektu pod dwiema pisowniami
-    karty liczy się raz. Stan wyjścia - `_release_state`. Czas zeznań i wydań: ISO ze strefą (UTC
-    od okna), naiwny znacznik liczony lokalnie (`_iso_timestamp`) - porównanie z `mtime` pliku jest
-    wtedy poprawne tylko w strefie czasu, w której go zapisano."""
+def releases(roots, *, archive_root=None, con=None):
+    """Lista wydań obiektu z kart celu (odczyt dysku; z `con` - też bazy) → `[ReleaseRow]` od
+    najnowszego wydania (`ts` manifestu malejąco; nieczytelny `ts` na końcu). `roots` = korzenie kart
+    (folder roboczy WBPP i karty celu wydania); pod każdym podkatalogi `<root>\\OBJECTS\\*` z manifestem
+    układu `wbpp-obiekt`. Karta bez `OBJECTS` nie daje nic; ten sam folder obiektu pod dwiema pisowniami
+    karty liczy się raz. Stan wyjścia - `_release_state` (`archive_root` = archiwum okna żniw, `con` =
+    baza do rodowodu stosów). Czas zeznań i wydań: ISO ze strefą (UTC od okna), naiwny znacznik liczony
+    lokalnie (`_iso_timestamp`) - porównanie z `mtime` pliku jest wtedy poprawne tylko w strefie czasu,
+    w której go zapisano."""
     rows, widziane = [], set()
     for root in roots:
         przestrzen = os.path.join(str(root), projection.OBJECT_NAMESPACE)
@@ -1204,11 +1263,12 @@ def releases(roots):
                 continue
             widziane.add(klucz)
             out_dir = os.path.join(object_root, projection.OUTPUT_DIR)
-            pending, done, review, awaiting = _release_state(out_dir, _iso_timestamp(manifest.get("ts")))
+            pending, done, review, awaiting, lineage = _release_state(
+                out_dir, _iso_timestamp(manifest.get("ts")), archive_root=archive_root, con=con)
             rows.append(ReleaseRow(root=str(root), object_root=object_root,
                                    object_canon=manifest.get("object_canon"), ts=manifest.get("ts"),
                                    out_dir=out_dir, pending=pending, done=done, review=review,
-                                   awaiting_wbpp=awaiting))
+                                   awaiting_wbpp=awaiting, lineage=lineage))
     rows.sort(key=lambda r: (_iso_timestamp(r.ts) is not None, _iso_timestamp(r.ts) or 0.0,
                              str(r.ts), r.object_root), reverse=True)
     return rows

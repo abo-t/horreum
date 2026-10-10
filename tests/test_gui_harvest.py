@@ -25,13 +25,13 @@ from PySide6.QtCore import QDeadlineTimer, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog
 
-from horreum import db, harvest, hashing, projection, repo
+from horreum import db, harvest, hashing, projection, repo, stacks
 from horreum.gui import i18n
 from horreum.gui import harvest_dialog as hd_mod
 from horreum.gui.harvest_dialog import (
     _HARVEST_KINDS, _HARVEST_REASONS, _HARVEST_STATUS, _STACK_REASONS, COL_DIR, COL_FILE, COL_KIND,
     COL_NAME, COL_REASON, COL_RELEASE, COL_STATUS, REL_STATE, HarvestDialog, clean_path, common_root,
-    find_manifest, is_harvested, is_under, needs_review, preselect_index, reason_text, rel_text,
+    find_manifest, is_harvested, is_under, needs_lineage, needs_review, preselect_index, reason_text, rel_text,
     release_date_text, release_roots_of, release_state_text, release_text,
 )
 from horreum.gui.i18n_catalog import CATALOG
@@ -1290,6 +1290,15 @@ def test_stan_wiersza_data_i_korzenie_kart():
     assert not is_harvested(row(1, 3, 0)) and not needs_review(row(1, 0, 1))
     assert not is_harvested(row(5, 0, 0), fresh=(0, 0, 2)) and needs_review(row(5, 0, 0), fresh=(0, 0, 2))
     assert is_harvested(row(0, 3, 0), fresh=(0, 3, 0)) and not is_harvested(row(0, 3, 0), fresh=(1, 3, 0))
+    # AR-104: stos bez rodowodu dokładnego trzyma folder - własny stan i własne zdanie, nie „skasuj”.
+    z_rodowodem = harvest.ReleaseRow("K", "K/OBJECTS/X", "X", None, "K/OBJECTS/X/out", 0, 3, 0,
+                                     lineage=(("s", (1, 2), "K/STACKS/s.xisf"),))
+    assert release_state_text(z_rodowodem) == "wciągnięte 3 · rodowód do zapisania 1"
+    assert not is_harvested(z_rodowodem) and needs_lineage(z_rodowodem) and not needs_review(z_rodowodem)
+    assert not is_harvested(z_rodowodem, fresh=(0, 3, 0)) and not needs_lineage(z_rodowodem, fresh=(1, 3, 0))
+    assert not needs_lineage(row(0, 3, 0))
+    assert preselect_index([row(0, 3, 0), z_rodowodem, row(1, 0, 0)]) == 2       # robota do wciągnięcia pierwsza
+    assert preselect_index([row(0, 3, 0), z_rodowodem]) == 1                      # potem rodowód (wizytator Z13)
     assert preselect_index([row(0, 3, 0, czeka=True), row(2, 0, 0), row(4, 0, 0)]) == 1
     assert preselect_index([row(0, 3, 0, czeka=True), row(0, 0, 0)]) is None
     lokalnie = time.strftime("%Y-%m-%d %H:%M", time.localtime(1760097600))     # 2025-10-10T12:00:00Z
@@ -1429,8 +1438,9 @@ def test_stos_z_wydania_do_stacks_korzen_archiwum_i_rodowod_po_przyjeciu(qapp, t
                                                                           monkeypatch):
     """Scenariusz wizytatora na oknie: wiersz „do wciągnięcia 3” zaznaczony sam (stos, wariant, master
     flat; produkty obróbki poza listą) → stosy do `<archiwum>\\STACKS\\<ogon lightów>` pod nazwą
-    archiwum, master flat pod `CALIBRATION` → po „Wciągnij” lista mówi „wciągnięte 3”, zdanie
-    „folder wydania możesz skasować” i „Otwórz” (bez kasowania) → „Zamknij i przyjmij” oddaje KORZEŃ
+    archiwum, master flat pod `CALIBRATION` → po „Wciągnij” lista mówi „wciągnięte 3 · rodowód do
+    zapisania 2” i zdanie o „Zamknij i przyjmij” zamiast „folder możesz skasować” (AR-104: zbiór wejść
+    stosów leży tylko w zeznaniu w folderze wydania), bez „Otwórz” → „Zamknij i przyjmij” oddaje KORZEŃ
     ARCHIWUM (sito `STACKS`) i dokładny zbiór wejść stosów; przed przyjęciem `harvested_stacks` puste.
     Ponowny podgląd po biegu (stosy leżą, baza ich nie zna) nie dubluje stosów - jeden wpis na
     `sha1_data`."""
@@ -1453,18 +1463,18 @@ def test_stos_z_wydania_do_stacks_korzen_archiwum_i_rodowod_po_przyjeciu(qapp, t
         "IC1795_2025-12-16_76EDPH_2600MM_Ha_600s_mono_autocrop.xisf"
     dlg.btn_apply.click()
     assert (seat / NAZWA_STOSU).read_bytes() == b"STOS-HA" and _cel(archive).read_bytes() == b"MF-CLS"
-    assert _stan(dlg, 0) == "wciągnięte 3"                              # lista przeliczona po biegu
+    assert _stan(dlg, 0) == "wciągnięte 3 · rodowód do zapisania 2"     # lista przeliczona po biegu
     assert [i.row() for i in dlg.rel_table.selectionModel().selectedRows()] == [0]
-    assert not dlg.rel_done_note.isHidden() and not dlg.btn_open_release.isHidden()
-    assert dlg.rel_done_note.text() == ("Folder wydania możesz skasować - Horreum go już nie potrzebuje; "
-                                        "własne pliki obróbki przenieś przed skasowaniem.")
-    dlg.btn_open_release.click()
-    assert [os.path.normpath(p) for p in otwarte] == [str(root)] and root.is_dir()   # otwiera, nie kasuje
+    assert not dlg.rel_done_note.isHidden() and dlg.btn_open_release.isHidden()
+    assert dlg.rel_done_note.text() == (
+        "Stosy z tego wydania czekają na rodowód dokładny - zapisze go „Zamknij i przyjmij do archiwum”. "
+        "Zbiór ich wejść leży tylko w tym folderze, więc nie kasuj go do tego czasu.")
+    assert otwarte == [] and root.is_dir()
     assert dlg.harvested_stacks == [] and dlg.harvested_root is None
     assert dlg.summary == f"Wciągnięto 3 pliki do archiwum → {archive}"
     dlg._set_output(str(out))                                            # „Wskaż…” tego samego wyjścia po biegu
     assert dlg.head_label.text() == "Do wciągnięcia 0 · już w archiwum 3 · do przeglądu 0"
-    assert _stan(dlg, 0) == "wciągnięte 3" and not dlg.rel_done_note.isHidden()
+    assert _stan(dlg, 0) == "wciągnięte 3 · rodowód do zapisania 2" and not dlg.rel_done_note.isHidden()
     dlg.btn_accept.click()
     assert dlg.result() == QDialog.Accepted and dlg.harvested_root == str(archive)
     assert sorted(dlg.harvested_stacks) == [("stos-crop", tuple(ids[:2])), ("stos-ha", tuple(ids[:2]))]
@@ -1474,7 +1484,8 @@ def test_stos_z_wydania_do_stacks_korzen_archiwum_i_rodowod_po_przyjeciu(qapp, t
 def test_przyjecie_samego_stosu_korzen_archiwum_zwykle_zamknij_bez_stosow(qapp, tmp_path, ustawienia,
                                                                           monkeypatch):
     """Sam stos (bez mastera) też daje korzeń archiwum, nie wspólny rodzic kopii; zwykłe „Zamknij”
-    nie oddaje ani korzenia, ani stosów, a zdanie paska kończy się ścieżką za instrukcją."""
+    nie oddaje ani korzenia, ani stosów, a zdanie paska mówi, że rodowód dokładny zapisze tylko
+    „Zamknij i przyjmij” (AR-104), i kończy się ścieżką za instrukcją."""
     con, _profile, _flats = _baza(tmp_path)
     archive = tmp_path / "ARCH"
     work, _root, _out, _ids, zeznania = _wydanie_ic1795(tmp_path, con, archive, z_flatem=False)
@@ -1485,8 +1496,10 @@ def test_przyjecie_samego_stosu_korzen_archiwum_zwykle_zamknij_bez_stosow(qapp, 
     assert dlg._receivable_root() == (str(archive), None)
     dlg.reject()
     assert dlg.harvested_root is None and dlg.harvested_stacks == []
-    assert dlg.summary == ("Wciągnięto 2 pliki do archiwum - baza pozna je przy następnej dostawie "
-                           f"(„Przyjmij”) → {archive.joinpath('STACKS', *LIGHT_SEAT)}")
+    assert dlg.summary == ("Wciągnięto 2 pliki do archiwum (stosy bez rodowodu dokładnego: 2 - zapisze go tylko "
+                           "„Zamknij i przyjmij do archiwum”, także po ponownym otwarciu tego okna; folderu wydania "
+                           "nie kasuj) - baza pozna je przy następnej dostawie („Przyjmij”) → "
+                           f"{archive.joinpath('STACKS', *LIGHT_SEAT)}")
     con.close()
 
 
@@ -1513,14 +1526,178 @@ def test_ar100_kopie_nieznane_bazie_bez_placed_daja_przyjecie(qapp, tmp_path, us
     assert dlg.summary == f"W archiwum leżą 2 kopie nieznane bazie → {archive}"
     dlg2 = _dlg(con, archive, work_root=str(work))
     dlg2.reject()
-    assert dlg2.summary == ("W archiwum leżą 2 kopie nieznane bazie - kopie leżą poza źródłem Dostawy; baza "
-                            "pozna je przez „Zamknij i przyjmij do archiwum” albo Dostawę wskazaną na archiwum "
-                            f"→ {archive}")
+    assert dlg2.summary == ("W archiwum leżą 2 kopie nieznane bazie (stosy bez rodowodu dokładnego: 1 - zapisze "
+                            "go tylko „Zamknij i przyjmij do archiwum”, także po ponownym otwarciu tego okna; "
+                            "folderu wydania nie kasuj) - kopie leżą poza źródłem Dostawy; baza pozna je przez "
+                            f"„Zamknij i przyjmij do archiwum” albo Dostawę wskazaną na archiwum → {archive}")
     assert dlg2.harvested_stacks == []
     dlg.btn_accept.click()
     assert dlg.result() == QDialog.Accepted and dlg.harvested_root == str(archive)
     assert dlg.harvested_stacks == [("stos-ha", tuple(ids[:2]))]
     assert out.exists()
+    con.close()
+
+
+NAZWA_STOSU_CROP = "IC1795_2025-12-16_76EDPH_2600MM_Ha_600s_mono_autocrop.xisf"
+
+
+def _dostawa_po_zwyklym_zamknij(con, archive):
+    """Osobna Dostawa po zwykłym „Zamknij”: master flat i oba stosy znane bazie (obecne kopie tam, gdzie
+    je położyły żniwa), a łańcuch dał stosom rodowód okna rozjechany z historią pliku - głowa
+    `history_mismatch`, zero wierszy (stan z wizytacji W1 fali 9)."""
+    seat = archive.joinpath("STACKS", *LIGHT_SEAT)
+    for sha, kind, filt, path in (("sd-masterFlat_BIN-1_FILTER-CLS_mono.xisf", "master_flat", "CLS", _cel(archive)),
+                                  ("stos-ha", "master_light", "Ha", seat / NAZWA_STOSU),
+                                  ("stos-crop", "master_light", "Ha", seat / NAZWA_STOSU_CROP)):
+        cur = con.execute("INSERT INTO frame (sha1_data, kind, filetype, camera_id, config_id, filter_canon, "
+                          "first_seen_at) VALUES (?, ?, 'xisf', 1, 10, ?, ?)", (sha, kind, filt, NOW))
+        con.execute("INSERT INTO location (frame_id, volume, path, present) VALUES (?, 'V', ?, 1)",
+                    (cur.lastrowid, str(path)))
+        con.commit()
+        if kind == "master_light":
+            repo.upsert_integration(
+                con, master_frame_id=cur.lastrowid, integ_hash=None, tool=None,
+                window_start="2025-12-16T17:00:00", window_end="2025-12-16T19:00:00", declared_rows=2,
+                drizzle_inputs=None, disabled_inputs=None, degenerate=0, ambiguous=0, telescope_mismatch=0,
+                unresolved_reason="history_mismatch", now=NOW)
+    return seat
+
+
+def test_ar104_zwykle_zamknij_dostawa_ponowne_okno_oddaje_zbior_dokladny(qapp, tmp_path, ustawienia,
+                                                                          monkeypatch):
+    """AR-104 (wizytacja W1 fali 9): stosy wciągnięte, zwykłe „Zamknij” - pasek mówi, że rodowód
+    dokładny zapisze tylko „Zamknij i przyjmij”; potem osobna Dostawa (stosy znane bazie, rodowód okna
+    rozjechany z historią). Ponowne okno OD OTWARCIA: wiersz „wciągnięte 3 · rodowód do zapisania 2”,
+    zdanie o „Zamknij i przyjmij” zamiast „folder możesz skasować”, bez „Otwórz”, przycisk przyjęcia
+    widoczny, archiwum zablokowane, a przyjęcie oddaje korzeń archiwum (łańcuch) i zbiór dokładny obu
+    stosów. Po zapisie rodowodu trzecie okno: „wciągnięte 3”, zdanie o kasowaniu i „Otwórz” (otwiera,
+    nie kasuje), bez przyjęcia i bez zdania na pasku."""
+    con, _profile, _flats = _baza(tmp_path)
+    archive = tmp_path / "ARCH"
+    work, root, _out, ids, zeznania = _wydanie_ic1795(tmp_path, con, archive)
+    _czytnik(monkeypatch, zeznania)
+    otwarte = _pulpit(monkeypatch)
+    ustawienia.setValue("pipeline/last_source", str(archive))
+    dlg = _dlg(con, archive, work_root=str(work))
+    dlg._on_apply()
+    dlg.reject()
+    assert dlg.harvested_root is None and dlg.harvested_stacks == []
+    assert dlg.summary == ("Wciągnięto 3 pliki do archiwum (stosy bez rodowodu dokładnego: 2 - zapisze go tylko "
+                           "„Zamknij i przyjmij do archiwum”, także po ponownym otwarciu tego okna; folderu wydania "
+                           f"nie kasuj) - baza pozna je przy następnej dostawie („Przyjmij”) → {archive}")
+    seat = _dostawa_po_zwyklym_zamknij(con, archive)
+
+    dlg2 = _dlg(con, archive, work_root=str(work))
+    assert _stan(dlg2, 0) == "wciągnięte 3 · rodowód do zapisania 2"
+    assert dlg2.head_label.text() == "Do wciągnięcia 0 · już w archiwum 3 · do przeglądu 0"
+    assert not dlg2.rel_done_note.isHidden() and dlg2.btn_open_release.isHidden()
+    assert dlg2.rel_done_note.text().startswith("Stosy z tego wydania czekają na rodowód dokładny")
+    assert dlg2.rel_done_note.property("role") == "warn"                 # wstrzymuje kasowanie (wizytator Z12)
+    assert not dlg2.btn_accept.isHidden() and dlg2.btn_accept.isEnabled() and not dlg2.btn_archive.isEnabled()
+    # waga za jedyną robotą (wizytator Z11): przyjęcie grube, „Wciągnij 0” bez wagi; Enter nie przyjmuje
+    assert dlg2.btn_accept.font().bold() and not dlg2.btn_accept.isDefault() and not dlg2.btn_accept.autoDefault()
+    assert not dlg2.btn_apply.font().bold() and not dlg2.btn_apply.isDefault()
+    assert dlg2.summary == f"Stosy do rodowodu dokładnego po Dostawie: 2 → {seat}"
+    dlg2.btn_accept.click()
+    assert dlg2.result() == QDialog.Accepted and dlg2.harvested_root == str(archive)
+    assert sorted(dlg2.harvested_stacks) == [("stos-crop", tuple(ids[:2])), ("stos-ha", tuple(ids[:2]))]
+
+    for sha, wejscia in dlg2.harvested_stacks:                         # gospodarz po łańcuchu (`app._zdanie_rodowodu`)
+        assert stacks.record_harvest_inputs(con, master_sha1_data=sha, input_frame_ids=wejscia,
+                                            now=NOW)["reason"] is None
+    dlg3 = _dlg(con, archive, work_root=str(work))
+    assert _stan(dlg3, 0) == "wciągnięte 3"
+    assert dlg3.btn_accept.isHidden() and dlg3.btn_archive.isEnabled()
+    assert dlg3.rel_done_note.text() == ("Folder wydania możesz skasować - Horreum go już nie potrzebuje; "
+                                         "własne pliki obróbki przenieś przed skasowaniem.")
+    assert dlg3.rel_done_note.property("role") == "secondary" and dlg3.btn_apply.isDefault()
+    dlg3.btn_open_release.click()
+    assert [os.path.normpath(p) for p in otwarte] == [str(root)] and root.is_dir()   # otwiera, nie kasuje
+    dlg3.reject()
+    assert dlg3.summary is None and dlg3.harvested_stacks == []
+    con.close()
+
+
+def test_ar104_zwykle_zamknij_samych_stosow_bez_kopii_do_przyjecia(qapp, tmp_path, ustawienia, monkeypatch):
+    """Zwykłe „Zamknij” okna, w którym jedyną robotą są stosy bez rodowodu dokładnego (kopie baza zna):
+    zdanie paska niesie instrukcję samo i nie mówi o następnej dostawie - Dostawa rodowodu dokładnego
+    nie zapisze. EN tak samo."""
+    con, _profile, _flats = _baza(tmp_path)
+    archive = tmp_path / "ARCH"
+    work, _root, _out, _ids, zeznania = _wydanie_ic1795(tmp_path, con, archive)
+    _czytnik(monkeypatch, zeznania)
+    _dlg(con, archive, work_root=str(work))._on_apply()
+    _dostawa_po_zwyklym_zamknij(con, archive)
+    dlg = _dlg(con, archive, work_root=str(work))
+    dlg.reject()
+    assert dlg.summary == ("Stosy w archiwum bez rodowodu dokładnego: 2 - zapisze go tylko „Zamknij i przyjmij "
+                           "do archiwum” w oknie żniw; folderu wydania nie kasuj do tego czasu")
+    i18n.set_lang("en")
+    dlg = _dlg(con, archive, work_root=str(work))
+    assert _stan(dlg, 0) == "harvested 3 · lineage to record 2"
+    dlg.reject()
+    assert dlg.summary == ("Stacks in the archive without their exact lineage: 2 - only \"Close and receive into "
+                           "the archive\" in the harvest window records it; keep the release folder until then")
+    con.close()
+
+
+def test_okno_bez_archiwum_nie_radzi_kasowac_folderu(qapp, tmp_path, ustawienia, monkeypatch):
+    """Bramka `kimi` Z6: okno bez archiwum (baza bez archiwum, puste źródło Dostawy) nie policzy
+    rodowodu stosów - puste `lineage` znaczy „nie wiem”, więc wiersz „wciągnięte 3” NIE dostaje zdania
+    o kasowaniu ani „Otwórz”, choć zbiór dokładny leży tylko w zeznaniu w folderze wydania."""
+    con, _profile, _flats = _baza(tmp_path)
+    archive = tmp_path / "ARCH"
+    work, _root, out, _ids, zeznania = _wydanie_ic1795(tmp_path, con, archive)
+    _czytnik(monkeypatch, zeznania)
+    _dlg(con, archive, work_root=str(work))._on_apply()
+    dlg = _dlg(con, "", work_root=str(work))
+    assert _stan(dlg, 0) == "wciągnięte 3" and dlg.edit_output.text() == str(out)
+    assert [i.row() for i in dlg.rel_table.selectionModel().selectedRows()] == [0]
+    assert dlg.rel_done_note.isHidden() and dlg.btn_open_release.isHidden()
+    con.close()
+
+
+def test_okno_na_archiwum_innym_niz_baza_nie_radzi_kasowac_folderu(qapp, tmp_path, ustawienia, monkeypatch):
+    """Wizytator Z9 (bliźniak AR-105): okno, które samo wciąga do archiwum innego niż archiwum bazy,
+    liczy wiersz „wciągnięte 1” wobec swojego archiwum, ale o kasowaniu milczy - Dostawa bazy tych
+    kopii nie zobaczy, a jedynym źródłem do archiwum bazy jest dalej folder wydania. Ostrzeżenie
+    o archiwum stoi nad listą."""
+    archive, scratch = tmp_path / "ARCH", tmp_path / "SCRATCH"
+    con, _profile, _flats = _baza(tmp_path, db_archive=archive)
+    work = tmp_path / "_WBPP"
+    _wyniki(_wydanie_obiektu(work, "A", ts="2026-10-09T10:00:00+00:00", con=con), {"masterFlat_A.xisf": b"A"})
+    _czytnik(monkeypatch, {"masterFlat_A.xisf": _flat_cls()})
+    dlg = _dlg(con, scratch, work_root=str(work))
+    dlg._on_apply()
+    assert _stan(dlg, 0) == "wciągnięte 1" and not dlg.archive_warn.isHidden()
+    assert dlg.rel_done_note.isHidden() and dlg.btn_open_release.isHidden()
+    con.close()
+
+
+def test_ar105_wciagniete_do_innego_archiwum_nie_sa_wciagniete_w_archiwum_okna(qapp, tmp_path, ustawienia,
+                                                                              monkeypatch):
+    """AR-105 (wizytacja W2 fali 9): wyjście wciągnięte do archiwum w scratchu. Okno z innym archiwum
+    widzi wiersz bez „wciągnięte” (zeznanie scratchu o tym archiwum nie świadczy), zaznacza go sam,
+    podgląd mówi „do wciągnięcia 1”, „Wciągnij” aktywny, a zdanie o kasowaniu nie pada. Zmiana
+    archiwum w oknie liczy listę od nowa - wobec scratchu wiersz znów jest wciągnięty."""
+    con, _profile, _flats = _baza(tmp_path)
+    work = tmp_path / "_WBPP"
+    out = _wyniki(_wydanie_obiektu(work, "A", ts="2026-10-09T10:00:00+00:00", con=con), {"masterFlat_A.xisf": b"A"})
+    _czytnik(monkeypatch, {"masterFlat_A.xisf": _flat_cls()})
+    scratch, archive = tmp_path / "SCRATCH", tmp_path / "ARCH"
+    dlg = _dlg(con, scratch, work_root=str(work))
+    dlg._on_apply()
+    assert _stan(dlg, 0) == "wciągnięte 1" and not dlg.rel_done_note.isHidden()
+    dlg.reject()
+    dlg2 = _dlg(con, archive, work_root=str(work))
+    assert _stan(dlg2, 0) == "do wciągnięcia 1" and dlg2.edit_output.text() == str(out)
+    assert dlg2.rel_done_note.isHidden() and dlg2.btn_apply.text() == "Wciągnij 1 plik"
+    assert dlg2.btn_apply.isEnabled()
+    dlg2._fresh.clear()                                                 # sam stan listy, bez podglądu
+    dlg2._render_release_states()
+    assert _stan(dlg2, 0) == "do sprawdzenia 1"
+    dlg2._set_archive(str(scratch))
+    assert _stan(dlg2, 0) == "wciągnięte 1" and not dlg2.rel_done_note.isHidden()
     con.close()
 
 
@@ -1595,10 +1772,10 @@ def test_realny_qthread_lista_wydan_po_wyborze_czlowieka_nie_wybiera(qapp, tmp_p
     gate, entered = threading.Event(), threading.Event()
     prawdziwe = harvest.releases
 
-    def wolne(roots):
+    def wolne(roots, **kw):
         entered.set()
         gate.wait(10)
-        return prawdziwe(roots)
+        return prawdziwe(roots, **kw)
 
     monkeypatch.setattr(harvest, "releases", wolne)
     dlg = _dlg(con, tmp_path / "ARCH", work_root=str(work), off_thread=True)
@@ -1640,10 +1817,10 @@ def test_realny_qthread_zamkniecie_w_trakcie_listy_nie_czeka(qapp, tmp_path, ust
     gate, entered = threading.Event(), threading.Event()
     prawdziwe = harvest.releases
 
-    def wolne(roots):
+    def wolne(roots, **kw):
         entered.set()
         gate.wait(10)
-        return prawdziwe(roots)
+        return prawdziwe(roots, **kw)
 
     monkeypatch.setattr(harvest, "releases", wolne)
     dlg = _dlg(con, tmp_path / "ARCH", work_root=str(work), off_thread=True)
@@ -1659,7 +1836,8 @@ def test_realny_qthread_zamkniecie_w_trakcie_listy_nie_czeka(qapp, tmp_path, ust
 
 
 def test_en_lista_wydan_i_rodzaj(qapp, tmp_path, ustawienia, monkeypatch):
-    """EN: nagłówki listy, stany wiersza, zdanie „wciągnięte” i słowo rodzaju stosu z katalogu."""
+    """EN: nagłówki listy, stany wiersza, zdanie o rodowodzie stosów (AR-104) i słowo rodzaju stosu
+    z katalogu."""
     i18n.set_lang("en")
     con, _profile, _flats = _baza(tmp_path)
     archive = tmp_path / "ARCH"
@@ -1672,10 +1850,15 @@ def test_en_lista_wydan_i_rodzaj(qapp, tmp_path, ustawienia, monkeypatch):
     assert [_stan(dlg, r) for r in range(2)] == ["waiting for WBPP", "to harvest 3"]
     assert _kol(dlg, _wiersze(dlg)[os.path.join("master", STOS)], COL_KIND) == "stack"
     dlg._on_apply()
-    assert _stan(dlg, 1) == "harvested 3"
-    assert dlg.rel_done_note.text() == ("You can delete the release folder - Horreum no longer needs it; "
-                                        "move your own processing files out before deleting it.")
+    assert _stan(dlg, 1) == "harvested 3 · lineage to record 2"
+    assert dlg.rel_done_note.text() == (
+        "Stacks from this release await their exact lineage - \"Close and receive into the archive\" "
+        "records it. The set of their inputs exists only in this folder, so keep it until then.")
     assert dlg.btn_open_release.text() == "Open"
+    dlg.reject()
+    assert dlg.summary.startswith("Harvested 3 files into the archive (stacks without exact lineage: 2 - only "
+                                  "\"Close and receive into the archive\" records it, also after reopening this "
+                                  "window; keep the release folder)")
     con.close()
 
 
@@ -1731,7 +1914,7 @@ def test_wydanie_nowsze_od_wynikow_czeka_na_wbpp_bez_wyboru_i_zdania(qapp, tmp_p
     a = _wydanie_obiektu(work, "A", ts="2026-10-10T11:30:00+00:00", con=con)   # po `_PO_WYDANIU`
     out = _wyniki(a, {"masterFlat_A.xisf": b"A"})
     src = out / "master" / "masterFlat_A.xisf"
-    projection.write_harvest_manifest(str(out), {"ts": NOW, "items": [
+    projection.write_harvest_manifest(str(out), {"ts": NOW, "archive_root": str(archive), "items": [
         {"src": str(src), "status": "placed", "src_mtime_ns": os.stat(src).st_mtime_ns}]}, now=NOW)
     _cel(archive).parent.mkdir(parents=True)
     _cel(archive).write_bytes(b"A")                                      # wciągnięty wcześniej, leży w archiwum
@@ -1754,10 +1937,10 @@ def _wolna_lista(monkeypatch):
     gate, entered = threading.Event(), threading.Event()
     prawdziwe = harvest.releases
 
-    def wolne(roots):
+    def wolne(roots, **kw):
         entered.set()
         gate.wait(10)
-        return prawdziwe(roots)
+        return prawdziwe(roots, **kw)
 
     monkeypatch.setattr(harvest, "releases", wolne)
     return gate, entered

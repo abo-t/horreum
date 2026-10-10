@@ -3750,6 +3750,8 @@ class MainWindow(QMainWindow):
             reason = self.pipeline_view.run_all_on(dlg.harvested_root)
             if reason is not None:
                 zdania.append(reason)
+                if dlg.harvested_stacks:                 # zbiór dokładny leży dalej tylko w folderze wydania
+                    zdania.append(i18n.t("status.harvest_lineage_lost", n=len(dlg.harvested_stacks)))
             elif dlg.harvested_stacks:
                 self._zapisz_rodowod_po_przebiegu(list(dlg.harvested_stacks), dlg.summary)
         if zdania:
@@ -3768,8 +3770,10 @@ class MainWindow(QMainWindow):
 
         Nasłuch rozłącza się przy pierwszym WŁAŚCIWYM wywołaniu, niezależnie od wyniku: następne
         przebiegi Dostawy nie mają wpływać na rodowód, a przebieg przerwany, odmówiony albo
-        z błędem nie zapisuje niczego (stos zostaje z rodowodem okna, jak bez żniw). Zmiana bazy
-        w trakcie biegu też kasuje zapis - `con` jest już inne niż to, na którym żniwa się odbyły.
+        z błędem nie zapisuje niczego (stos zostaje z rodowodem okna, jak bez żniw) - i mówi to na
+        pasku: zbiór dokładny leży wtedy tylko w zeznaniu w folderze wydania, a ponowne okno żniw
+        odsłoni przyjęcie jeszcze raz (AR-104). Zmiana bazy w trakcie biegu też kasuje zapis - `con`
+        jest już inne niż to, na którym żniwa się odbyły; tamto zdanie nie dotyczy bazy na ekranie.
 
         Po zapisie widoki odświeżają się TĄ SAMĄ drogą co po każdym przebiegu: zapis idzie PO
         odświeżeniu gospodarza, więc bez tego panel rodowodu pokazywałby rodowód okna jako
@@ -3783,7 +3787,10 @@ class MainWindow(QMainWindow):
             if zapis["since"] != start:
                 return
             widok.run_finished.disconnect(po_przebiegu)
-            if zapis["cancelled"] or zapis["refused"] or zapis["failed"] or con is not self.con:
+            if con is not self.con:
+                return
+            if zapis["cancelled"] or zapis["refused"] or zapis["failed"]:
+                self._flash(i18n.t("status.harvest_lineage_lost", n=len(stosy)))
                 return
             try:
                 zdanie = self._zdanie_rodowodu(con, stosy)

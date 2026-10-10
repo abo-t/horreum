@@ -23,7 +23,7 @@ from datetime import datetime
 
 import pytest
 
-from horreum import db, harvest, hashing, projection, repo, scan
+from horreum import db, harvest, hashing, projection, repo, scan, stacks
 
 NOW = "2026-10-10T12:00:00+00:00"
 RAW_DIR = r"R:\ASTRO_\CALIBRATION\raw\76EDPH_2600MM\CLS"
@@ -1530,3 +1530,103 @@ def test_releases_ponowne_wydanie_przed_nowym_wbpp_czeka_na_wbpp(tmp_path):
     _wynik_wbpp(root, "masterLight_B_mono.xisf", mtime=PO)
     [row] = harvest.releases([str(tmp_path / "_WBPP")])
     assert (row.pending, row.done, row.awaiting_wbpp) == (1, 1, False)
+
+
+def test_releases_swiadcza_tylko_zeznania_biegow_do_archiwum_okna(tmp_path):
+    """AR-105: zeznanie biegu do INNEGO archiwum nie świadczy o archiwum okna - plik wciągnięty do kopii
+    archiwum w scratchu jest w archiwum okna „do sprawdzenia”, nie „wciągnięty”; zeznanie bez pola
+    `archive_root` też nie świadczy, gdy archiwum podano. Wskazanie biblioteki (`…\\CALIBRATION`) i inna
+    pisownia porównują się korzeniem; bez `archive_root` świadczą wszystkie zeznania."""
+    root = _wydanie_na_dysku(tmp_path)
+    arch, scratch = tmp_path / "ARCH", tmp_path / "SCRATCH"
+    a = _wynik_wbpp(root, "masterFlat_A.xisf")
+    b = _wynik_wbpp(root, "masterFlat_B.xisf", sub="inne")
+    c = _wynik_wbpp(root, "masterFlat_C.xisf", sub="stare")
+    for katalog, src, archiwum in ((root / "out" / "master", a, arch), (root / "out" / "inne", b, scratch)):
+        projection.write_harvest_manifest(str(katalog), {"ts": TS, "archive_root": str(archiwum), "items": [
+            {"src": src, "status": "placed"}]}, now=TS)
+    _zeznanie_zniw(root / "out" / "stare", {c: "placed"})                 # zeznanie sprzed pola `archive_root`
+    karta = [str(tmp_path / "_WBPP")]
+    stan = lambda **kw: [(r.pending, r.done) for r in harvest.releases(karta, **kw)]   # noqa: E731
+    assert stan() == [(0, 3)]
+    assert stan(archive_root=str(arch)) == [(2, 1)]
+    assert stan(archive_root=str(arch / "CALIBRATION")) == [(2, 1)]
+    assert stan(archive_root=str(arch).upper() + os.sep) == [(2, 1)]
+    assert stan(archive_root=str(scratch)) == [(2, 1)]
+
+
+def _stos_po_dostawie(con, sha1, path):
+    """Dostawa po zwykłym „Zamknij”: klatka stosu z obecną kopią pod `STACKS` i integracja z okna czasu,
+    które rozjechało się z historią pliku (`history_mismatch`, zero wierszy)."""
+    cur = con.execute("INSERT INTO frame(sha1_data, kind, filetype, camera_id, config_id, filter_canon, "
+                      "first_seen_at) VALUES (?, 'master_light', 'xisf', 1, 1, 'Ha', ?)", (sha1, NOW))
+    _kopia(con, cur.lastrowid, path)
+    repo.upsert_integration(
+        con, master_frame_id=cur.lastrowid, integ_hash=None, tool=None, window_start="2025-12-16T17:00:00",
+        window_end="2025-12-16T19:00:00", declared_rows=2, drizzle_inputs=None, disabled_inputs=None,
+        degenerate=0, ambiguous=0, telescope_mismatch=0, unresolved_reason="history_mismatch", now=NOW)
+    return cur.lastrowid
+
+
+def test_releases_stos_bez_rodowodu_dokladnego_czeka_az_do_zapisu(con, tmp_path):
+    """AR-104 w rdzeniu listy: stos wciągnięty (zeznanie `placed` ze zbiorem wejść), którego baza nie
+    zna - `lineage` z kopią z zeznania; po Dostawie (klatka znana, rodowód okna rozjechany z historią) -
+    dalej `lineage`, z kopią znaną bazie; bieg nad stosem już w archiwum zeznaje `exists` BEZ zbioru,
+    a zbiór bierze się ze starszego zeznania; po `record_harvest_inputs` - pusto, a wiersz dalej
+    „wciągnięty”. Bez bazy albo bez archiwum `lineage` nie liczy się wcale; kopia z zeznania, której już
+    nie ma, a której baza nie zna, nie czeka (nie ma czego przyjmować)."""
+    root = _wydanie_na_dysku(tmp_path)
+    names, ids = _lighty(con, 3)
+    a = _wynik_wbpp(root, STOS_WBPP)
+    czytnik = _reader({a: _stos(a, [_wejscie(nm) for nm in names[:2]], sha="stos-a")})
+    manifest = _wydanie(tmp_path, {ZESTAW: (names, ids)})
+    arch = str(tmp_path / "arch")
+    plan = lambda: harvest.plan(con, str(root / "out"), archive_root=arch,    # noqa: E731
+                                manifest=manifest, read=czytnik)
+    [placed] = harvest.apply(plan(), now=TS).items
+    assert placed.status == "placed" and placed.frame_ids == tuple(ids[:2])
+    karta = [str(tmp_path / "_WBPP")]
+    assert harvest.releases(karta, archive_root=arch)[0].lineage == ()
+    assert harvest.releases(karta, con=con)[0].lineage == ()
+    [row] = harvest.releases(karta, archive_root=arch, con=con)
+    assert (row.done, row.lineage) == (1, (("stos-a", tuple(ids[:2]), placed.dst),))
+
+    _stos_po_dostawie(con, "stos-a", placed.dst)
+    [drugi] = harvest.apply(plan(), now="2026-10-10T13:00:00+00:00").items
+    assert (drugi.status, drugi.frame_ids) == ("exists", ())
+    [row] = harvest.releases(karta, archive_root=arch, con=con)
+    assert (row.done, row.lineage) == (1, (("stos-a", tuple(ids[:2]), placed.dst),))
+
+    stacks.record_harvest_inputs(con, master_sha1_data="stos-a", input_frame_ids=ids[:2], now=TS)
+    [row] = harvest.releases(karta, archive_root=arch, con=con)
+    assert (row.pending, row.done, row.lineage) == (0, 1, ())
+
+    con.execute("DELETE FROM integration_input")
+    con.execute("DELETE FROM location WHERE path = ?", (placed.dst,))
+    con.commit()
+    os.remove(placed.dst)                                                # kopii nie ma ani w bazie, ani na dysku
+    assert harvest.releases(karta, archive_root=arch, con=con)[0].lineage == ()
+
+
+@pytest.mark.parametrize("status, czeka", [("placed", True), ("exists", True), ("review", False)])
+def test_releases_zbior_z_pozycji_review_nie_swiadczy(con, tmp_path, status, czeka):
+    """Bramka `sol` Z1: `_plan_stack` ustawia `frame_ids` PRZED odmową nagłówka i kalibracji, więc
+    zeznanie niesie zbiór także przy pozycji `review` - to zbiór stosu, którego żniwa nie przyjęły.
+    Gdy ten sam stos trafi do `STACKS` inną drogą, a nowszy bieg zeznaje go `exists` bez zbioru, lista
+    NIE bierze zbioru z `review`; ze starszego `placed`/`exists` - bierze."""
+    root = _wydanie_na_dysku(tmp_path)
+    _names, ids = _lighty(con, 2)
+    a = _wynik_wbpp(root, STOS_WBPP)
+    arch = tmp_path / "arch"
+    kopia = arch / "STACKS" / "IC1795" / "76EDPH_2600MM" / "Ha" / NAZWA_STOSU
+    kopia.parent.mkdir(parents=True)
+    kopia.write_bytes(b"STOS")
+    _stos_po_dostawie(con, "stos-a", str(kopia))
+    pozycja = {"src": a, "kind": "master_light", "sha1_data": "stos-a", "src_mtime_ns": os.stat(a).st_mtime_ns}
+    for ts, poz in (("2026-10-10T11:00:00+00:00", {**pozycja, "status": status, "frame_ids": ids}),
+                    ("2026-10-10T12:00:00+00:00", {**pozycja, "status": "exists", "frame_ids": []})):
+        projection.write_harvest_manifest(str(root / "out"), {"ts": ts, "archive_root": str(arch),
+                                                               "items": [poz]}, now=ts)
+    [row] = harvest.releases([str(tmp_path / "_WBPP")], archive_root=str(arch), con=con)
+    assert row.done == 1
+    assert row.lineage == ((("stos-a", tuple(ids), str(kopia)),) if czeka else ())

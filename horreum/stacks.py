@@ -1103,6 +1103,41 @@ def record_harvest_inputs(con, *, master_sha1_data, input_frame_ids, now, actor=
     return wynik
 
 
+def harvest_lineage_pending(con, *, master_sha1_data, input_frame_ids):
+    """READ-ONLY lustro `record_harvest_inputs`: czy baza NIE MA jeszcze rodowodu dokładnego tego
+    stosu z żniw - True, gdy łańcuch Dostawy + zapis po nim mają tu coś do zrobienia (AR-104: zbiór
+    leży tylko w zeznaniu żniw w folderze wydania, więc folderu nie wolno jeszcze skasować).
+
+    True: klatki stosu baza nie zna (kopia nieprzyjęta), stos bez wiersza integracji (postawi go
+    łańcuch), wejście zbioru bez wiersza `history`/`user`, jakikolwiek wiersz `window` (zapis go zdejmie),
+    głowa z powodem odmowy albo z odciskiem innym niż odcisk zbioru (`_fingerprint` - zapis go
+    przepisze; łańcuch odcisku stosu chronionego nie rusza, więc po zapisie nie wraca). False: zapis
+    byłby bez mutacji - albo nie ma czego zapisać (klatka wycofana, klatka nie jest stosem, zbiór pusty
+    albo z wejściem spoza lightów: tam `record_harvest_inputs` odmawia, więc „czeka” znaczyłoby „czeka
+    na zawsze”)."""
+    zbior = sorted({int(i) for i in input_frame_ids})
+    klatka = con.execute("SELECT id, kind, retired_at FROM frame WHERE sha1_data = ?",
+                         (master_sha1_data,)).fetchone()
+    if klatka is None:
+        return bool(zbior)
+    if klatka["retired_at"] is not None or klatka["kind"] != "master_light" or not zbior:
+        return False
+    lighty = {r[0] for r in con.execute(
+        "SELECT id FROM frame WHERE kind = 'light' AND id IN (SELECT value FROM json_each(?))",
+        (json.dumps(zbior),))}
+    if set(zbior) - lighty:
+        return False
+    glowa = con.execute("SELECT id, unresolved_reason, integ_hash FROM integration WHERE master_frame_id = ?",
+                        (klatka["id"],)).fetchone()
+    if (glowa is None or glowa["unresolved_reason"] is not None
+            or glowa["integ_hash"] != _fingerprint(con, zbior)):
+        return True
+    stan = {r["input_frame_id"]: r["asserted_by"] for r in con.execute(
+        "SELECT input_frame_id, asserted_by FROM integration_input WHERE integration_id = ?", (glowa["id"],))}
+    return ("window" in stan.values()
+            or any(stan.get(fid) not in ("history", "user") for fid in zbior))
+
+
 def inputs_of(con, master_frame_id):
     """READ-ONLY „co weszło w ten obraz": wiersze rodowodu stosu ze ścieżką klatki wejściowej
     i źródłem pewności. Materiał pod powierzchnię I-2d i raport CLI — bez zapisu."""

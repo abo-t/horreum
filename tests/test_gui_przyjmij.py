@@ -671,12 +671,17 @@ def test_rodowod_ze_zniw_nie_zapisuje_po_przebiegu_przerwanym_odmowionym_ani_z_b
         qapp, tmp_path, ustawienia, monkeypatch, pola):
     """Przebieg przerwany, odmówiony albo zakończony błędem nie zapisuje niczego (stos zostaje
     z rodowodem okna, jak bez żniw) - a nasłuch i tak znika po pierwszym wywołaniu, więc
-    późniejszy, udany przebieg Dostawy też niczego nie dopisuje."""
+    późniejszy, udany przebieg Dostawy też niczego nie dopisuje. Pasek mówi, że rodowód dokładny
+    NIE został zapisany i folderu wydania nie wolno kasować (bramka `kimi` Z7, AR-104)."""
+    i18n.set_lang("pl")
     wolane = _zniwa_ze_stosami(monkeypatch, [("a", [1])])
     win = MainWindow(_baza(tmp_path), now_fn=_Zegar())
     try:
         win.pipeline_view.btn_harvest.click()
         win.pipeline_view.run_finished.emit(_zapis_przebiegu(**pola))
+        assert win._pelny_komunikat == (
+            "rodowód dokładny stosów (1) NIE zapisany - Dostawa nie doszła do końca; folderu wydania nie "
+            "kasuj, otwórz ponownie „Wciągnij z WBPP…” i „Zamknij i przyjmij do archiwum”")
         win.pipeline_view.run_finished.emit(_zapis_przebiegu())
         assert wolane == []
     finally:
@@ -685,12 +690,18 @@ def test_rodowod_ze_zniw_nie_zapisuje_po_przebiegu_przerwanym_odmowionym_ani_z_b
 
 def test_rodowod_ze_zniw_bez_nasluchu_gdy_lancuch_odmowil_albo_nie_ma_stosow(
         qapp, tmp_path, ustawienia, monkeypatch):
-    """Odmowa łańcucha (`run_all_on` oddaje powód) = brak przebiegu, na który można czekać; okno,
+    """Odmowa łańcucha (`run_all_on` oddaje powód) = brak przebiegu, na który można czekać - pasek
+    po powodzie mówi, że rodowód dokładny stosów nie został zapisany (bramka `kimi` Z7); okno,
     które wciągnęło same mastery (pusta lista stosów), też nie podpina nasłuchu."""
-    wolane = _zniwa_ze_stosami(monkeypatch, [("a", [1])], odmowa="dostawa w biegu")
+    i18n.set_lang("pl")
+    wolane = _zniwa_ze_stosami(monkeypatch, [("a", [1]), ("b", [2])], odmowa="dostawa w biegu")
     win = MainWindow(_baza(tmp_path), now_fn=_Zegar())
     try:
         win.pipeline_view.btn_harvest.click()
+        assert win._pelny_komunikat == (
+            "Wciągnięto stosy - dostawa w biegu - rodowód dokładny stosów (2) NIE zapisany - Dostawa nie "
+            "doszła do końca; folderu wydania nie kasuj, otwórz ponownie „Wciągnij z WBPP…” i „Zamknij "
+            "i przyjmij do archiwum”")
         win.pipeline_view.run_finished.emit(_zapis_przebiegu())
         assert wolane == []
     finally:
@@ -715,8 +726,9 @@ def test_rodowod_ze_zniw_nie_zapisuje_na_innej_bazie(qapp, tmp_path, ustawienia,
         widok, prawdziwe = win.pipeline_view, win.con
         widok.btn_harvest.click()
         win.con = object()                                    # inna baza otwarta w trakcie biegu
-        widok.run_finished.emit(_zapis_przebiegu())
-        assert wolane == []
+        przed = win._pelny_komunikat
+        widok.run_finished.emit(_zapis_przebiegu(failed="[scan] błąd"))
+        assert wolane == [] and win._pelny_komunikat == przed  # zdanie o stosach nie dotyczy bazy na ekranie
     finally:
         win.con = prawdziwe
         win.close()

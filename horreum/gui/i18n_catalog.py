@@ -1060,6 +1060,12 @@ CATALOG = {
         "en": {"one": "lineage: {n} stack from harvest history",
                "other": "lineage: {n} stacks from harvest history"},
     },
+    "status.harvest_lineage_lost": {
+        "pl": "rodowód dokładny stosów ({n}) NIE zapisany - Dostawa nie doszła do końca; folderu wydania nie "
+              "kasuj, otwórz ponownie „Wciągnij z WBPP…” i „Zamknij i przyjmij do archiwum”",
+        "en": "exact lineage of the stacks ({n}) NOT recorded - Intake did not finish; keep the release folder, "
+              "reopen \"Take in from WBPP…\" and \"Close and receive into the archive\"",
+    },
     "status.harvest_lineage_window": {
         "pl": {"one": "{n} stos zostaje z rodowodem okna czasu",
                "few": "{n} stosy zostają z rodowodem okna czasu",
@@ -3992,6 +3998,23 @@ CATALOG = {
         "en": {"one": "{n} copy in the archive unknown to the database",
                "other": "{n} copies in the archive unknown to the database"},
     },
+    # Stosy znane bazie bez rodowodu dokładnego (AR-104): zbiór wejść leży tylko w zeznaniu żniw.
+    "harvest.status_lineage": {
+        "pl": "Stosy do rodowodu dokładnego po Dostawie: {n} → {root}",
+        "en": "Stacks for exact lineage after Intake: {n} → {root}",
+    },
+    "harvest.close_lineage": {
+        "pl": "Stosy w archiwum bez rodowodu dokładnego: {n} - zapisze go tylko „Zamknij i przyjmij do "
+              "archiwum” w oknie żniw; folderu wydania nie kasuj do tego czasu",
+        "en": "Stacks in the archive without their exact lineage: {n} - only \"Close and receive into the "
+              "archive\" in the harvest window records it; keep the release folder until then",
+    },
+    "harvest.close_lineage_tail": {
+        "pl": " (stosy bez rodowodu dokładnego: {n} - zapisze go tylko „Zamknij i przyjmij do archiwum”, także "
+              "po ponownym otwarciu tego okna; folderu wydania nie kasuj)",
+        "en": " (stacks without exact lineage: {n} - only \"Close and receive into the archive\" records it, "
+              "also after reopening this window; keep the release folder)",
+    },
     "harvest.sum_unknown": {"pl": " · kopie nieznane bazie: {n}", "en": " · copies unknown to the database: {n}"},
     "harvest.status_nothing": {
         "pl": "Żniwa: nic nie wciągnięto (już w archiwum {exists} · do przeglądu {review})",
@@ -4045,6 +4068,7 @@ CATALOG = {
     "harvest.rel.done": {"pl": "wciągnięte {n}", "en": "harvested {n}"},
     "harvest.rel.done_before": {"pl": "poprzednio wciągnięte {n}", "en": "previously harvested {n}"},
     "harvest.rel.review": {"pl": "do przeglądu {n}", "en": "to review {n}"},
+    "harvest.rel.lineage": {"pl": "rodowód do zapisania {n}", "en": "lineage to record {n}"},
     "harvest.rel.no_sources": {
         "pl": "Ustaw folder roboczy: Plik → Folder roboczy WBPP…",
         "en": "Set the working folder: File → WBPP working folder…",
@@ -4063,6 +4087,12 @@ CATALOG = {
     "harvest.rel.review_note": {
         "pl": "Najpierw rozstrzygnij pozycje do przeglądu - ich pliki leżą tylko w tym folderze.",
         "en": "Resolve the items to review first - their files exist only in this folder.",
+    },
+    "harvest.rel.lineage_note": {
+        "pl": "Stosy z tego wydania czekają na rodowód dokładny - zapisze go „Zamknij i przyjmij do archiwum”. "
+              "Zbiór ich wejść leży tylko w tym folderze, więc nie kasuj go do tego czasu.",
+        "en": "Stacks from this release await their exact lineage - \"Close and receive into the archive\" "
+              "records it. The set of their inputs exists only in this folder, so keep it until then.",
     },
     "harvest.rel.btn_open": {"pl": "Otwórz", "en": "Open"},
     "harvest.closing": {"pl": "Zamykam po bieżącym pliku…", "en": "Closing after the current file…"},

@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QToolButton, QVBoxLayout, QWidget,
 )
 
-from horreum import db, macro as macro_mod, repo, resolver
+from horreum import db, macro as macro_mod, projection, repo, resolver, stacks
 from horreum.resolver import forma_karty_object   # SPOT formy karty OBJECT (Qt-wolny)
 from horreum.gui import busy, i18n, mapproj, portfolio, queries, rows, theme
 from horreum.gui.assign_dialog import AssignObjectDialog
@@ -3072,6 +3072,7 @@ class MainWindow(QMainWindow):
         super().__init__(parent)
         self.con = None
         self.db_path = None
+        self.pipeline_view = None       # montuje go `_mount_views`; menu Plik bywa wołane przed bazą
         self._now = now_fn
         # Wstrzykiwane wywołanie zwrotne „zmieniono bazę" (wzór jak `now_fn`): `main` podpina tu zapis
         # ostatniej ścieżki do trwałych ustawień; testy go nie podają → brak skutków ubocznych.
@@ -3106,6 +3107,7 @@ class MainWindow(QMainWindow):
         m = self.menuBar().addMenu(i18n.t("menu.file"))
         m.addAction(i18n.t("menu.open_db"), self._on_open_db)
         m.addAction(i18n.t("menu.new_db"), self._on_new_db)
+        m.addAction(i18n.t("menu.work_root"), self._on_work_root)
         self._build_view_menu()
 
     def _build_view_menu(self):
@@ -3398,10 +3400,15 @@ class MainWindow(QMainWindow):
 
         Grid nie stoi wprost na stosie (siedzi w kontenerze strony zbiorów), więc jego wątki
         zbieramy jawnie - pytanie samych stron stosu zgubiłoby skład zbioru i pokrycie pól.
-        Metody są idempotentne, więc kontener, który kiedyś zacznie delegować, nie szkodzi."""
+        Metody są idempotentne, więc kontener, który kiedyś zacznie delegować, nie szkodzi.
+
+        Okna dialogowe też: zamknięte okno zostaje ukrytym dzieckiem okna głównego razem ze swoim
+        `QThread` (lista wydań w oknie żniw chodzi po kartach SMB i nie ma punktu przerwania), więc
+        wątek w biegu przy wyjściu z aplikacji zabiłby ją tak samo jak wątek widoku."""
         widoki = [self.stack.widget(i) for i in range(self.stack.count())]
         if self.stack.count():
             widoki.append(self.grid_view)
+        widoki.extend(self.findChildren(QDialog))
         for w in widoki:
             zatrzymaj = getattr(w, "zatrzymaj_pola", None)
             if zatrzymaj is not None:
@@ -3449,6 +3456,7 @@ class MainWindow(QMainWindow):
         pipeline.open_collection.connect(self._on_open_collection)   # P5b: raport → perspektywa (3→1)
         # „Wciągnij mastery…”: okno żniw potrzebuje połączenia z bazą, którego Dostawa nie trzyma.
         pipeline.open_harvest.connect(self._on_open_harvest)
+        pipeline.set_work_root(self._work_wbpp())   # widok powstaje z każdą bazą, folder roboczy jest jeden
         self.pipeline_view = pipeline
         # Strona Dostawy: TEN SAM `PipelineView` w kontenerze z raportem „Co przyszło” (jak Znajdź
         # nad gridem) - drugi widok Dostawy rozjechałby wątek etapów, mutex i przyciski.
@@ -3723,20 +3731,97 @@ class MainWindow(QMainWindow):
         kopii (`run_all_on`, bez zapisu źródła); bieg etapów ma jednego właściciela, więc okno go
         nie uruchamia samo. Zdanie wyniku i ewentualna odmowa łańcucha idą JEDNYM komunikatem -
         odmowa na osobnym raporcie zastąpiłaby na pasku wiadomość o położonych masterach. Importy
-        leniwe (wzorzec `_mount_views`): okno ładuje się dopiero, gdy ktoś po nie sięgnie."""
+        leniwe (wzorzec `_mount_views`): okno ładuje się dopiero, gdy ktoś po nie sięgnie.
+
+        Okno dostaje folder roboczy WBPP (stąd bierze wyniki wydań) i korzenie wszystkich kart
+        wydań. Gdy wciągnęło stosy, a łańcuch ruszył, rodowód zapisujemy dopiero PO nim
+        (`_zapisz_rodowod_po_przebiegu`): wiersz integracji stawia sam łańcuch."""
         from horreum import harvest
+        from horreum.gui import projection_dialog
         from horreum.gui.harvest_dialog import HarvestDialog
         archiwum = (harvest.archive_root_from_db(self.con)
                     or QSettings("Horreum", "Horreum").value("pipeline/last_source", "") or "")
-        dlg = HarvestDialog(self.con, now_fn=self._now, archive_root=archiwum, parent=self)
+        dlg = HarvestDialog(self.con, now_fn=self._now, archive_root=archiwum,
+                            work_root=self._work_wbpp(),
+                            release_roots=projection_dialog.target_roots(), parent=self)
         dlg.exec()
         zdania = [dlg.summary] if dlg.summary else []
         if dlg.harvested_root:
             reason = self.pipeline_view.run_all_on(dlg.harvested_root)
             if reason is not None:
                 zdania.append(reason)
+            elif dlg.harvested_stacks:
+                self._zapisz_rodowod_po_przebiegu(list(dlg.harvested_stacks), dlg.summary)
         if zdania:
             self._flash(" - ".join(zdania))
+
+    def _zapisz_rodowod_po_przebiegu(self, stosy, podsumowanie=""):
+        """Rodowód stosów wciągniętych w oknie żniw: JEDNORAZOWY nasłuch końca przebiegu, który
+        właśnie ruszył. Łańcuch Dostawy daje stosowi wejścia z okna czasu (z klatkami odrzuconymi
+        przez WBPP); żniwa znają zbiór dokładny, więc zapisują go po łańcuchu (`stacks.
+        record_harvest_inputs`). Przed nim wiersza integracji jeszcze nie ma.
+
+        PRZEBIEG ROZPOZNAJEMY PO ZNACZNIKU STARTU (`last_run["since"]`, ustawiany synchronicznie
+        w `run_all_on`, więc jest znany w chwili powrotu): okno żniw mogło się otworzyć w fazie
+        odświeżania po POPRZEDNIM biegu, zanim ten wyemitował `run_finished` - taki sygnał niesie
+        cudzy znacznik i jest ignorowany bez rozłączania, nasłuch czeka na właściwy.
+
+        Nasłuch rozłącza się przy pierwszym WŁAŚCIWYM wywołaniu, niezależnie od wyniku: następne
+        przebiegi Dostawy nie mają wpływać na rodowód, a przebieg przerwany, odmówiony albo
+        z błędem nie zapisuje niczego (stos zostaje z rodowodem okna, jak bez żniw). Zmiana bazy
+        w trakcie biegu też kasuje zapis - `con` jest już inne niż to, na którym żniwa się odbyły.
+
+        Po zapisie widoki odświeżają się TĄ SAMĄ drogą co po każdym przebiegu: zapis idzie PO
+        odświeżeniu gospodarza, więc bez tego panel rodowodu pokazywałby rodowód okna jako
+        aktualny. Odświeżenie jest w `finally` - wyjątek zapisu (inny niż `ValueError` per stos)
+        leci dalej, ale nie zostawia widoków ze stanem sprzed zapisu. Zdanie rodowodu DOKLEJA się
+        do podsumowania okna żniw, nie zastępuje go."""
+        widok, con = self.pipeline_view, self.con
+        start = widok.last_run["since"]
+
+        def po_przebiegu(zapis):
+            if zapis["since"] != start:
+                return
+            widok.run_finished.disconnect(po_przebiegu)
+            if zapis["cancelled"] or zapis["refused"] or zapis["failed"] or con is not self.con:
+                return
+            try:
+                zdanie = self._zdanie_rodowodu(con, stosy)
+            finally:
+                self._odswiez_widoki_po_przebiegu()
+                self.grid_view.refresh_lineage_panel()
+            if zdanie:
+                self._flash(" - ".join(c for c in (podsumowanie, zdanie) if c))
+
+        widok.run_finished.connect(po_przebiegu)
+
+    def _zdanie_rodowodu(self, con, stosy):
+        """Zapisuje rodowód stosów (`stacks.record_harvest_inputs`, per stos) i zwraca zdanie dla
+        paska. Stos, któremu zapis odmówił (`ValueError`: wejście spoza lightów albo pusty zbiór;
+        `no_integration`: łańcuch nie postawił mu integracji), liczony jest OSOBNYM członem -
+        zdanie, które mówi tylko o udanych, ukryłoby stratę. Trzy człony, bo trzy różne stany:
+        rodowód z historii; stos z rodowodem okna czasu (zapis odmówił, rodowód z łańcucha
+        zostaje); stos BEZ rodowodu (łańcuch nie ujął go jako stosu, nie ma czego zapisać)."""
+        z_historii = z_okna = bez_rodowodu = 0
+        for sha1_data, wejscia in stosy:
+            try:
+                wynik = stacks.record_harvest_inputs(
+                    con, master_sha1_data=sha1_data, input_frame_ids=wejscia, now=self._now())
+            except ValueError:
+                z_okna += 1
+                continue
+            if wynik["reason"] is None:
+                z_historii += 1
+            else:
+                bez_rodowodu += 1
+        czlony = []
+        if z_historii:
+            czlony.append(i18n.t_plural("status.harvest_lineage", z_historii))
+        if z_okna:
+            czlony.append(i18n.t_plural("status.harvest_lineage_window", z_okna))
+        if bez_rodowodu:
+            czlony.append(i18n.t_plural("status.harvest_lineage_none", bez_rodowodu))
+        return "; ".join(czlony)
 
     def _on_tasks_counts(self, n):
         """Badge sidebara: „Porządki (N)" przy N>0; przy zerze GOŁE „Porządki" - „(0)" to szum (F5R#8).
@@ -3820,6 +3905,36 @@ class MainWindow(QMainWindow):
             self, i18n.t("dialog.new_db_title"), "", i18n.t("dialog.new_db_filter"))
         if path:
             self._open_path(path)
+
+    def _work_wbpp(self):
+        """Korzeń `_WBPP` folderu roboczego z ustawienia `work/root` albo `None`, gdy nikt go nie
+        wskazał. Ustawienie trzyma katalog wybrany przez człowieka (`_on_work_root`); `_WBPP` składa
+        z niego czysta `projection.work_wbpp_root` za każdym razem, więc jest jedno źródło tej
+        ścieżki. Zero dysku."""
+        root = QSettings("Horreum", "Horreum").value("work/root", "")
+        return projection.work_wbpp_root(root) if root else None
+
+    def _on_work_root(self):
+        """Plik → „Folder roboczy WBPP…": wskazanie katalogu, z którego okno żniw bierze wyniki
+        wydań. Zapisuje wybór (`work/root` - ten slot jest jedynym właścicielem ustawienia),
+        dopisuje kartę celu wydania i podaje folder widokowi Dostawy.
+
+        ZERO DYSKU W SLOCIE (jak „Przyjmij nowe" i „Wciągnij stosy…"): nic nie zakłada ani nie
+        sprawdza. `_WBPP`,
+        `OBJECTS\\<obiekt>` i `out` powstają przy pierwszym wydaniu obiektu, w klindze `apply`
+        na wątku tła - katalog wskazany na odłączonym udziale nie zawiesi okna."""
+        from horreum.gui import projection_dialog
+        ustawienia = QSettings("Horreum", "Horreum")
+        start = str(ustawienia.value("work/root", "") or "")
+        root = QFileDialog.getExistingDirectory(self, i18n.t("proj.work_card"), start)
+        if not root:
+            return
+        ustawienia.setValue("work/root", root)
+        wbpp = projection.work_wbpp_root(root)
+        projection_dialog.remember_target(i18n.t("proj.work_card"), wbpp)
+        if self.pipeline_view is not None:
+            self.pipeline_view.set_work_root(wbpp)
+        self._flash(i18n.t("status.work_root_set", path=wbpp))
 
     def open_path(self, path):
         """PUBLICZNE wejście w bazę — jedyna droga dla `main`, które otwiera bazę PO pokazaniu okna

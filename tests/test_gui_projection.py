@@ -21,7 +21,7 @@ from horreum import db, projection
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QTextCursor
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtWidgets import QApplication, QDialog, QLabel
 
 from horreum.gui import i18n, theme
 from horreum.gui import projection_dialog as pd_mod
@@ -499,7 +499,7 @@ def test_dialog_walidacja_celu_przy_dodawaniu(qapp, tmp_path, ustawienia, monkey
     dlg = _dlg(con, ids)
     assert dlg._add_target_path(str(tmp_path / "LIGHTS"), "zly") is False
     assert "Nie można dodać celu" in dlg.report.toPlainText()
-    assert dlg._load_target_list() == []
+    assert pd_mod.target_roots() == []
     good = str(tmp_path / "_Review" / "stol")
     assert dlg._add_target_path(good, "stol") is True
     assert dlg._current_root() == good
@@ -1496,3 +1496,168 @@ def test_en_komplet_w_celu_i_stan_pusty_teczek(qapp, tmp_path, ustawienia, monke
     pick.search.setText("zzz")
     assert pick.empty_label.text() == "No objects to release for “zzz”"
     teczki.close()
+
+
+# ---------- cele wydania: jedna postać zapisu (`remember_target`, `target_roots`) ----------
+
+def test_remember_target_dedup_po_kluczu_a_zapis_zachowuje_wielkosc_liter(qapp, tmp_path, ustawienia):
+    """Ta sama karta zapisana z `/`, z `\\`, inną wielkością liter albo końcowym separatorem to JEDEN
+    cel: nowa nazwa, karta na końcu, jedna kanoniczna postać także w `projection/last_target`.
+    Zapis zachowuje wielkość liter wejścia (karta trafia do nazw katalogów zakładanych przy
+    wydaniu) - wielkości nie rozróżnia wyłącznie klucz porównania."""
+    karta = tmp_path / "_WBPP" / "Karta"
+    ustawienia.setValue("projection/targets", json.dumps(
+        [{"name": "stara", "path": str(karta).replace("\\", "/")}]))        # zapis sprzed kanonizacji
+    inna = tmp_path / "_Review" / "stol"
+
+    zapisana = pd_mod.remember_target("nowa", str(karta).upper() + "\\")
+    assert zapisana == os.path.normpath(str(karta).upper())
+    cele = json.loads(ustawienia.value("projection/targets"))
+    assert cele == [{"name": "nowa", "path": zapisana}]                    # stara karta zastąpiona, nie obok
+    assert ustawienia.value("projection/last_target") == zapisana
+
+    pd_mod.remember_target("stol", str(inna).replace("\\", "/"), select=False)
+    assert ustawienia.value("projection/last_target") == zapisana          # select=False nie rusza pamięci
+    assert [c["name"] for c in json.loads(ustawienia.value("projection/targets"))] == ["nowa", "stol"]
+
+    pd_mod.remember_target("karta", str(karta))                            # powrót do pierwszej: karta na końcu
+    assert [c["name"] for c in json.loads(ustawienia.value("projection/targets"))] == ["stol", "karta"]
+    assert ustawienia.value("projection/last_target") == str(karta)
+
+
+def test_target_roots_kanoniczne_bez_powtorzen(qapp, tmp_path, ustawienia):
+    """Korzenie kart dla listy wydań: postać kanoniczna, bez powtórzeń nawet wtedy, gdy zapis sprzed
+    kanonizacji niesie ten sam cel dwa razy (`/` i `\\`, inna wielkość liter)."""
+    assert pd_mod.target_roots() == []
+    a, b = tmp_path / "_WBPP" / "A", tmp_path / "_Review" / "B"
+    ustawienia.setValue("projection/targets", json.dumps([
+        {"name": "a", "path": str(a).replace("\\", "/")},
+        {"name": "a2", "path": str(a).upper()},
+        {"name": "b", "path": str(b)},
+    ]))
+    assert pd_mod.target_roots() == [str(a), str(b)]
+
+
+def test_dialog_dwa_zapisy_tego_samego_celu_to_jedna_karta(qapp, tmp_path, ustawienia, monkeypatch):
+    """Dodanie celu przez dialog idzie tą samą drogą co menu (`remember_target`): ta sama karta
+    z `/` i potem z `\\` nie rośnie w drugą - jedna karta, zaznaczona, pamięć w postaci kanonicznej."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con = db.open_db(str(tmp_path / "g_dedup.db"))
+    ids = _seed_files(con, tmp_path, 1)
+    dlg = _dlg(con, ids)
+    karta = tmp_path / "_WBPP" / "feed"
+    assert dlg._add_target_path(str(karta).replace("\\", "/"), "feed")
+    assert dlg._add_target_path(str(karta), "feed2")
+    assert [c["path"] for c in dlg._cards] == [str(karta)]
+    assert dlg._current_root() == str(karta)
+    assert ustawienia.value("projection/last_target") == str(karta)
+    con.close()
+
+
+def test_dialog_pamiec_celu_zapisana_inaczej_niz_karta_nadal_zaznacza_karte(
+        qapp, tmp_path, ustawienia, monkeypatch):
+    """`last_target` z `/` przy karcie z `\\` (albo odwrotnie) wskazuje ten sam cel: otwarcie okna
+    zaznacza właśnie tę kartę, a nie ostatnio dodaną."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con = db.open_db(str(tmp_path / "g_pamiec.db"))
+    ids = _seed_files(con, tmp_path, 1)
+    a, b = tmp_path / "_WBPP" / "a", tmp_path / "_WBPP" / "b"
+    ustawienia.setValue("projection/targets", json.dumps(
+        [{"name": "a", "path": str(a)}, {"name": "b", "path": str(b)}]))
+    ustawienia.setValue("projection/last_target", str(a).replace("\\", "/"))
+    assert _dlg(con, ids)._current_root() == str(a)
+    con.close()
+
+
+# ---------- wydanie obiektu: wiersz „Wyjście WBPP" ----------
+
+def _etykiety(widget):
+    return [lab.text() for lab in widget.findChildren(QLabel)]
+
+
+def test_tryb_obiektu_wiersz_wyjscia_wbpp_po_wydaniu_schowek_i_invalidate(
+        qapp, tmp_path, ustawienia, monkeypatch):
+    """Po udanym wydaniu obiektu okno mówi, gdzie w WBPP ustawić Output Directory: wiersz
+    „Wyjście WBPP: <folder obiektu>\\out", przycisk do schowka i podpowiedź (jedna sesja na wydanie,
+    keyword TELESCOP przy mieszaniu). Wiersz żyje i gaśnie z `_arm_open`: przed wydaniem go nie ma,
+    `_invalidate` go zdejmuje, powrót do kompletu (nowe okno, DRY zastaje komplet) uzbraja go znowu.
+
+    Falsyfikator: `out_label.setText` poza `_arm_open` → wiersz zostaje po zmianie karty."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con, _ids = _obiekt_wydania(tmp_path)
+    karta = tmp_path / "_WBPP" / "karta"
+    _target(ustawienia, karta)
+    dlg = _dlg_obj(con)
+    assert dlg.out_box.isHidden() and dlg._out_dir is None               # przed wydaniem nie ma czego kopiować
+
+    dlg._on_apply()
+    wyjscie = karta / "OBJECTS" / "NGC_6992" / projection.OUTPUT_DIR
+    assert not dlg.out_box.isHidden()
+    assert dlg.out_label.text() == f"Wyjście WBPP: {wyjscie}"
+    assert wyjscie.is_dir()                                              # zakłada go klinga apply, nie okno
+    napisy = " ".join(_etykiety(dlg.out_box))
+    assert "Output Directory" in napisy and "TELESCOP" in napisy and "jedna sesja" in napisy.lower()
+
+    QTest.mouseClick(dlg.btn_out_copy, Qt.LeftButton)
+    assert QApplication.clipboard().text() == str(wyjscie)
+
+    QApplication.clipboard().setText("sprzed")
+    dlg._invalidate()
+    assert dlg.out_box.isHidden() and dlg._out_dir is None and dlg.out_label.text() == ""
+    dlg.btn_out_copy.click()                                             # zgaszony wiersz nie kopiuje starej ścieżki
+    assert QApplication.clipboard().text() == "sprzed"
+
+    powrot = _dlg_obj(con)                                               # DRY zastaje komplet
+    assert not powrot.out_box.isHidden()
+    assert powrot.out_label.text() == f"Wyjście WBPP: {wyjscie}"
+    con.close()
+
+
+def test_tryb_obiektu_wiersz_wyjscia_gasnie_przy_zmianie_karty(qapp, tmp_path, ustawienia, monkeypatch):
+    """Wyjście jest własnością folderu wydanego na DANEJ karcie: przejście na kartę, na której
+    obiektu jeszcze nie ma, zdejmuje wiersz (inaczej wskazywałby folder cudzej karty), a padnięta
+    sonda też go gasi."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con, _ids = _obiekt_wydania(tmp_path)
+    a, b = tmp_path / "_WBPP" / "a", tmp_path / "_WBPP" / "b"
+    ustawienia.setValue("projection/targets", json.dumps(
+        [{"name": "a", "path": str(a)}, {"name": "b", "path": str(b)}]))
+    ustawienia.setValue("projection/last_target", str(a))
+    dlg = _dlg_obj(con)
+    radio = {c["path"]: c["radio"] for c in dlg._cards}
+    dlg._on_apply()
+    assert not dlg.out_box.isHidden()
+    radio[str(b)].setChecked(True)
+    assert dlg.out_box.isHidden()
+    radio[str(a)].setChecked(True)
+    assert not dlg.out_box.isHidden()
+    dlg._on_dry_failed(dlg._gen, "OSError: cel odpięty")
+    assert dlg.out_box.isHidden()
+    con.close()
+
+
+def test_wydanie_perspektywy_nie_ma_wiersza_wyjscia(qapp, tmp_path, ustawienia, monkeypatch):
+    """Wiersz „Wyjście WBPP" należy do wydania OBIEKTU (WBPP wskazuje się folderem obiektu);
+    wydanie klatek gridu go nie tworzy, a `_arm_open` nie sięga po nieistniejący widżet."""
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con = db.open_db(str(tmp_path / "g_persp.db"))
+    ids = _seed_files(con, tmp_path, 1)
+    _target(ustawienia, tmp_path / "_WBPP" / "feed")
+    dlg = _dlg(con, ids)
+    dlg._on_apply()
+    assert dlg.out_box is None
+    con.close()
+
+
+def test_en_wiersz_wyjscia_wbpp(qapp, tmp_path, ustawienia, monkeypatch):
+    i18n.set_lang("en")
+    monkeypatch.setattr(pd_mod, "volume_serial", lambda p: "V")
+    con, _ids = _obiekt_wydania(tmp_path)
+    karta = tmp_path / "_WBPP" / "karta"
+    _target(ustawienia, karta)
+    dlg = _dlg_obj(con)
+    dlg._on_apply()
+    assert dlg.out_label.text() == f"WBPP output: {karta / 'OBJECTS' / 'NGC_6992' / 'out'}"
+    assert dlg.btn_out_copy.text() == "Copy path"
+    assert any("Output Directory" in t and "TELESCOP" in t for t in _etykiety(dlg.out_box))
+    con.close()

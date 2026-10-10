@@ -1044,6 +1044,37 @@ CATALOG = {
     "menu.file": {"pl": "&Plik", "en": "&File"},
     "menu.open_db": {"pl": "Otwórz bazę…", "en": "Open database…"},
     "menu.new_db": {"pl": "Nowa baza…", "en": "New database…"},
+    "menu.work_root": {"pl": "Folder roboczy WBPP…", "en": "WBPP working folder…"},
+    "status.work_root_set": {
+        "pl": "Folder roboczy: {path} - powstanie przy pierwszym wydaniu; stąd okno żniw "
+              "bierze wyniki WBPP",
+        "en": "Working folder: {path} - created at the first release; the harvest window "
+              "takes WBPP results from here",
+    },
+    # Zdanie po żniwach ze stosami: rodowód z historii pliku, liczony per stos. Stos, któremu zapis
+    # się nie udał, zostaje z rodowodem okna czasu - paskowi wolno to powiedzieć tylko wprost.
+    "status.harvest_lineage": {
+        "pl": {"one": "rodowód: {n} stos z historii żniw",
+               "few": "rodowód: {n} stosy z historii żniw",
+               "many": "rodowód: {n} stosów z historii żniw"},
+        "en": {"one": "lineage: {n} stack from harvest history",
+               "other": "lineage: {n} stacks from harvest history"},
+    },
+    "status.harvest_lineage_window": {
+        "pl": {"one": "{n} stos zostaje z rodowodem okna czasu",
+               "few": "{n} stosy zostają z rodowodem okna czasu",
+               "many": "{n} stosów zostaje z rodowodem okna czasu"},
+        "en": {"one": "{n} stack keeps its time-window lineage",
+               "other": "{n} stacks keep their time-window lineage"},
+    },
+    # Łańcuch nie postawił stosowi integracji, więc rodowodu nie ma wcale (to nie jest rodowód okna).
+    "status.harvest_lineage_none": {
+        "pl": {"one": "{n} stos bez rodowodu - Dostawa nie ujęła go jako stosu; uruchom „Przyjmij nowe” na archiwum",
+               "few": "{n} stosy bez rodowodu - Dostawa nie ujęła ich jako stosów; uruchom „Przyjmij nowe” na archiwum",
+               "many": "{n} stosów bez rodowodu - Dostawa nie ujęła ich jako stosów; uruchom „Przyjmij nowe” na archiwum"},
+        "en": {"one": "{n} stack without lineage - Intake did not take it in as a stack; run Take new on the archive",
+               "other": "{n} stacks without lineage - Intake did not take them in as stacks; run Take new on the archive"},
+    },
     "menu.view": {"pl": "&Widok", "en": "&View"},
     "menu.theme.dark": {"pl": "Ciemny", "en": "Dark"},
     "menu.theme.light": {"pl": "Jasny", "en": "Light"},
@@ -2990,15 +3021,20 @@ CATALOG = {
         "pl": "Stosy — gotowe obrazy po integracji (drzewo obróbki, osobno od archiwum):",
         "en": "Stacks — finished images after integration (processing tree, separate from the archive):",
     },
-    "pipeline.btn.harvest": {"pl": "Wciągnij mastery…", "en": "Harvest masters…"},
+    "pipeline.btn.harvest": {"pl": "Wciągnij z WBPP…", "en": "Take in from WBPP…"},
     "pipeline.tip.harvest": {
-        "pl": "Mastery kalibracyjne z wyjścia WBPP do biblioteki kalibracji archiwum: historia "
-              "integracji w pliku mówi, z których surowych flatów powstał master, a baza zna te "
-              "flaty z nazwy. Nazwa i katalog z faktów, kopia bez nadpisywania, potem zwykła dostawa.",
-        "en": "Calibration masters from the WBPP output into the archive calibration library: the "
-              "integration history in the file says which raw flats made the master, and the "
-              "database knows those flats by name. Name and folder from facts, copy without "
-              "overwriting, then a regular intake.",
+        "pl": "Wyniki WBPP z wydania do archiwum: historia integracji w pliku mówi, z których "
+              "klatek powstał wynik, a baza zna te klatki z nazwy. Nazwa i katalog z faktów, "
+              "kopia bez nadpisywania, potem zwykła dostawa.",
+        "en": "WBPP results from a release into the archive: the integration history in the "
+              "file says which frames made the result, and the database knows those frames by "
+              "name. Name and folder from facts, copy without overwriting, then a regular intake.",
+    },
+    "pipeline.stacks_in_work_root": {
+        "pl": "To folder roboczy WBPP - stosy z wydań wciąga okno żniw (Wciągnij z WBPP…); "
+              "pliki w folderze roboczym są tymczasowe",
+        "en": "This is the WBPP working folder - stacks from releases are taken in by the "
+              "harvest window (Take in from WBPP…); files in the working folder are temporary",
     },
     "pipeline.btn.stacks": {"pl": "Wciągnij stosy…", "en": "Take in stacks…"},
     "pipeline.tip.stacks": {
@@ -3666,6 +3702,16 @@ CATALOG = {
         "en": "    to recompute in Delivery: {n} - {why}",
     },
     "proj.obj.open_explorer": {"pl": "Otwórz w Eksploratorze", "en": "Open in Explorer"},
+    # Wyjście WBPP wydania: gdzie człowiek ustawia Output Directory i jak miesza wydania bezpiecznie.
+    "proj.work_card": {"pl": "Folder roboczy", "en": "Working folder"},
+    "proj.obj.out_line": {"pl": "Wyjście WBPP: {path}", "en": "WBPP output: {path}"},
+    "proj.obj.out_copy": {"pl": "Kopiuj ścieżkę", "en": "Copy path"},
+    "proj.obj.out_hint": {
+        "pl": "W WBPP ustaw Output Directory na tę ścieżkę. Jedna sesja WBPP na jedno wydanie; "
+              "gdy mieszasz wydania, dodaj keyword TELESCOP jako Pre i Post.",
+        "en": "In WBPP set Output Directory to this path. One WBPP session per release; when "
+              "you mix releases, add the TELESCOP keyword as Pre and Post.",
+    },
     "proj.obj.status_summary": {
         "pl": "Wydano obiekt {canon}: {n} {word} → {root}",
         "en": "Released object {canon}: {n} {word} → {root}",

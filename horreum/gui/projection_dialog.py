@@ -52,8 +52,8 @@ from PySide6.QtGui import (
     QColor, QDesktopServices, QFont, QFontDatabase, QTextCharFormat, QTextCursor,
 )
 from PySide6.QtWidgets import (
-    QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog, QHBoxLayout,
-    QHeaderView, QInputDialog, QLabel, QLineEdit, QPlainTextEdit, QProgressBar, QPushButton,
+    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog,
+    QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QPlainTextEdit, QProgressBar, QPushButton,
     QRadioButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -78,6 +78,68 @@ def use_theme(name):
 
 
 use_theme(theme.DEFAULT)
+
+
+# ---------------------------------------------------------------- cele wydania (QSettings)
+
+def _settings():
+    return QSettings("Horreum", "Horreum")
+
+
+def _canon_path(path):
+    """Jedna postać zapisu celu: ścieżka bezwzględna, `normpath` (separatory systemowe, bez `..`
+    i podwójnych separatorów). Wielkość liter ZOSTAJE - karta trafia do manifestów i do nazw
+    katalogów zakładanych przy wydaniu, więc zapis małymi literami przemianowałby `X:\\Praca_WBPP`
+    na dysku; wielkość liter nie rozróżnia wyłącznie klucz porównania (`_target_key`)."""
+    return os.path.normpath(os.path.abspath(str(path)))
+
+
+def _target_key(path):
+    """Klucz porównania celów: ta sama karta zapisana z `/` albo `\\`, z inną wielkością liter
+    albo z końcowym separatorem to jeden cel."""
+    return os.path.normcase(_canon_path(path))
+
+
+def _load_targets():
+    raw = _settings().value("projection/targets", "[]")
+    try:
+        targets = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(targets, list):
+        return []
+    return [t for t in targets if isinstance(t, dict) and t.get("path")]
+
+
+def remember_target(name, path, *, select=True):
+    """Zapamiętaj kartę celu wydania (`projection/targets`) - JEDYNA droga zapisu: dialog wydania
+    i menu „Folder roboczy WBPP…” składają kartę tą samą funkcją, więc nie rozjadą się w postaci
+    ścieżki. Dedup po `_target_key` (ten sam cel → nowa nazwa, karta na końcu listy); zapisana
+    jest postać kanoniczna. `select=True` ustawia ją też jako ostatnio użytą
+    (`projection/last_target`), czyli domyślnie zaznaczoną przy następnym otwarciu okna wydania.
+    Zero dysku. Zwraca zapisaną ścieżkę."""
+    canon = _canon_path(path)
+    klucz = os.path.normcase(canon)
+    cele = [t for t in _load_targets() if _target_key(t["path"]) != klucz]
+    cele.append({"name": name, "path": canon})
+    ustawienia = _settings()
+    ustawienia.setValue("projection/targets", json.dumps(cele, ensure_ascii=False))
+    if select:
+        ustawienia.setValue("projection/last_target", canon)
+    return canon
+
+
+def target_roots():
+    """Korzenie zapamiętanych kart w postaci kanonicznej, bez powtórzeń (kolejność zapisu) - lista
+    wydań okna żniw szuka wyników WBPP pod każdą z nich."""
+    widziane, korzenie = set(), []
+    for t in _load_targets():
+        canon = _canon_path(t["path"])
+        klucz = os.path.normcase(canon)
+        if klucz not in widziane:
+            widziane.add(klucz)
+            korzenie.append(canon)
+    return korzenie
 
 
 # ---------------------------------------------------------------- pomocniki Qt-WOLNE (testowane wprost)
@@ -419,6 +481,7 @@ class ProjectionDialog(QDialog):
         self._object_id = object_id
         self._canon = canon
         self._released_root = None       # folder „Otwórz w Eksploratorze" - zmienia go wyłącznie `_arm_open`
+        self._out_dir = None             # wyjście WBPP tego folderu (`_arm_open`), źródło schowka
         self._now = now_fn
         self._perspektywa = perspektywa
         self._off_thread = off_thread
@@ -515,6 +578,31 @@ class ProjectionDialog(QDialog):
         self.report.setPlaceholderText(i18n.t("proj.placeholder"))
         v.addWidget(self.report, 1)
 
+        # Wyjście WBPP wydania obiektu: pokazane razem z „Otwórz w Eksploratorze" (`_arm_open`),
+        # bo dotyczy tego samego folderu i tych samych parametrów. Wydanie perspektywy go nie ma -
+        # WBPP wskazuje się tylko folderem obiektu.
+        self.out_box = None
+        if self._object_id is not None:
+            self.out_box = QWidget()
+            ob = QVBoxLayout(self.out_box)
+            ob.setContentsMargins(0, 0, 0, 0)
+            row_out = QHBoxLayout()
+            self.out_label = QLabel("")
+            self.out_label.setWordWrap(True)
+            self.out_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            self.btn_out_copy = QPushButton(i18n.t("proj.obj.out_copy"))
+            self.btn_out_copy.setAutoDefault(False)
+            self.btn_out_copy.clicked.connect(self._copy_out_dir)
+            row_out.addWidget(self.out_label, 1)
+            row_out.addWidget(self.btn_out_copy)
+            ob.addLayout(row_out)
+            out_hint = QLabel(i18n.t("proj.obj.out_hint"))
+            out_hint.setWordWrap(True)
+            out_hint.setProperty("role", "secondary")
+            ob.addWidget(out_hint)
+            self.out_box.setVisible(False)
+            v.addWidget(self.out_box)
+
         act = QHBoxLayout()
         # JEDEN pasek dwóch biegów (SPOT): DRY = nieokreślony (sonda nie zna liczby z góry, wiz W2),
         # apply = determinowany `done/total` z planu. Przełącza `_apply_begin`/`_apply_end`.
@@ -566,32 +654,19 @@ class ProjectionDialog(QDialog):
         v.addLayout(act)
 
     # ---- cele (QSettings) ----
-    def _settings(self):
-        return QSettings("Horreum", "Horreum")
-
-    def _load_target_list(self):
-        raw = self._settings().value("projection/targets", "[]")
-        try:
-            targets = json.loads(raw)
-        except (ValueError, TypeError):
-            targets = []
-        return [t for t in targets if isinstance(t, dict) and t.get("path")]
-
-    def _save_target(self, name, path):
-        targets = [t for t in self._load_target_list() if t["path"] != path]   # ten sam cel → nadpisz nazwę
-        targets.append({"name": name, "path": path})
-        self._settings().setValue("projection/targets", json.dumps(targets, ensure_ascii=False))
-
     def _reload_targets(self, select_path=None):
         """Przebuduj karty-radio z QSettings; zaznacz `select_path` albo ostatnio użyty cel. Zaznaczenie
-        (o ile jest) ODPALA auto-DRY — to zdarzenie dyskretne „otwarcie dialogu / nowy cel"."""
+        (o ile jest) ODPALA auto-DRY - to zdarzenie dyskretne „otwarcie dialogu / nowy cel".
+        Cel wskazuje się kluczem porównania, nie napisem: karta zapisana dawniej z `/` jest tym samym
+        celem co `last_target` zapisany z `\\`."""
         for c in self._cards:
             self._btn_group.removeButton(c["radio"])
             c["holder"].setParent(None)
         self._cards = []
-        targets = self._load_target_list()
-        last = self._settings().value("projection/last_target", "")
-        pick = select_path if select_path else (last if any(t["path"] == last for t in targets) else None)
+        targets = _load_targets()
+        chciany = select_path or _settings().value("projection/last_target", "")
+        klucz = _target_key(chciany) if chciany else None
+        pick = next((t["path"] for t in targets if _target_key(t["path"]) == klucz), None)
         if pick is None and targets:
             pick = targets[-1]["path"]               # brak pamięci → ostatnio dodany
         for t in targets:
@@ -642,8 +717,8 @@ class ProjectionDialog(QDialog):
         except ValueError as exc:
             self._show_report(i18n.t("proj.add_failed", e=exc), "error")
             return False
-        self._save_target(name, path)
-        self._reload_targets(select_path=path)       # nowa karta zaznaczona → auto-DRY
+        canon = remember_target(name, path)
+        self._reload_targets(select_path=canon)      # nowa karta zaznaczona → auto-DRY
         return True
 
     # ---- stan / auto-DRY ----
@@ -666,7 +741,8 @@ class ProjectionDialog(QDialog):
     def _on_target_toggled(self, checked):
         if not checked:
             return                                   # reaguj raz, na kartę ZAZNACZANĄ
-        self._settings().setValue("projection/last_target", self._current_root() or "")
+        root = self._current_root()
+        _settings().setValue("projection/last_target", _canon_path(root) if root else "")
         self._invalidate()
         self._trigger_dry()
 
@@ -803,8 +879,8 @@ class ProjectionDialog(QDialog):
         self.pending_label.setVisible(s["pending"] > 0)
 
     def _arm_open(self, root):
-        """Uzbrój „Otwórz w Eksploratorze" na folderze `root` albo zgaś go (`None`) - JEDYNE miejsce,
-        gdzie przycisk i jego folder zmieniają się razem.
+        """Uzbrój „Otwórz w Eksploratorze" (i wiersz „Wyjście WBPP" wydania obiektu) na folderze
+        `root` albo zgaś je (`None`) - JEDYNE miejsce, gdzie przycisk i jego folder zmieniają się razem.
 
         Przycisk żyje wyłącznie przy parametrach, dla których go uzbrojono: udane wydanie
         (`_on_apply_done`) albo sonda, która zastała komplet (`_on_dry_done`). Każda zmiana
@@ -814,6 +890,17 @@ class ProjectionDialog(QDialog):
         unieważnia, więc zaraz po nim przycisk stoi na właśnie wydanym folderze."""
         self._released_root = root
         self.btn_open.setVisible(root is not None)
+        # Wiersz „Wyjście WBPP" żyje i gaśnie razem z przyciskiem: ten sam folder, te same parametry.
+        if self.out_box is not None:
+            self._out_dir = os.path.join(root, projection.OUTPUT_DIR) if root else None
+            self.out_label.setText(
+                i18n.t("proj.obj.out_line", path=self._out_dir) if root else "")
+            self.out_box.setVisible(root is not None)
+
+    def _copy_out_dir(self):
+        """Ścieżka wyjścia WBPP do schowka - człowiek wkleja ją w Output Directory programu."""
+        if self._out_dir:
+            QApplication.clipboard().setText(self._out_dir)
 
     def _open_in_explorer(self):
         """Folder uzbrojony przez `_arm_open` - korzeń, który dostał `apply` albo sondował DRY,
@@ -961,7 +1048,7 @@ class ProjectionDialog(QDialog):
         zmienił, więc kolejne wydanie wymaga ŚWIEŻEGO DRY („Odśwież podgląd")."""
         self._apply_end()
         # Cel był ZAMROŻONY na czas biegu, więc `_current_root()` to dokładnie ten, na który wydano.
-        self._settings().setValue("projection/last_target", self._current_root())   # ostatnio UŻYTY = domyślny
+        _settings().setValue("projection/last_target", _canon_path(self._current_root()))   # ostatnio UŻYTY = domyślny
         self._show_report(self._format(res, self._plan, dry=False, partial=res.cancelled),
                           report_outcome(res, partial=res.cancelled))
         # ŚLAD PO ZAMKNIĘCIU (wizytacja P-C #4): po `exec()` okno główne nie niosło ani słowa

@@ -1215,3 +1215,102 @@ def test_przycisk_zniw_emituje_sygnal_i_gasnie_jak_stosy(qapp, tmp_path):
     view._set_running(False)
     assert view.btn_harvest.isEnabled()
     assert not PipelineView(None, now_fn=lambda: NOW).btn_harvest.isEnabled()
+
+
+# --- „Wciągnij stosy…" pod folderem roboczym WBPP: odmowa leksykalna (okno żniw wciąga stosy z wydań) ---
+
+def _stosy_z_dialogu(monkeypatch, view, odpowiedz):
+    """„Wciągnij stosy…" z dialogiem podstawionym na `odpowiedz`; start etapu podmieniony na
+    rejestr, żeby test nie uruchamiał wątku - pytanie brzmi tylko: odmowa czy start."""
+    from PySide6.QtWidgets import QFileDialog
+    starty, komunikaty = [], []
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: odpowiedz))
+    monkeypatch.setattr(view, "_start_stage", lambda stage, **p: starty.append((stage, p)))
+    view.status_message.connect(komunikaty.append)
+    view._on_stacks()
+    return starty, komunikaty
+
+
+@pytest.mark.parametrize("wariant, odmowa", [
+    ("{wbpp}", True),                                    # sam folder roboczy
+    ("{wbpp}/OBJECTS/NGC_6992/out", True),               # potomek
+    ("{wbpp}/OBJECTS/../OBJECTS/NGC_6992", True),        # potomek z `..` w środku
+    ("{wbpp}_II", False),                                # rodzeństwo o wspólnym przedrostku nazwy
+    ("{wbpp}/../inny", False),                           # `..` wychodzi z folderu roboczego
+    ("{praca}", False),                                  # rodzic folderu roboczego
+    ("{tmp}/obok/_WBPP", False),                         # zwykły `_WBPP` gdzie indziej
+    ("{wbpp_wielkie}", True),                            # wielkość liter nie rozróżnia ścieżek Windows
+    ("{wbpp_ukosniki}/OBJECTS", True),                   # `/` zamiast `\` to ta sama ścieżka
+])
+def test_stosy_pod_folderem_roboczym_odmowa_leksykalna_bez_dysku(
+        qapp, tmp_path, monkeypatch, ustawienia, wariant, odmowa):
+    """Stosy z wydań wciąga okno żniw, a folder roboczy jest lokacją efemeryczną (jego pliki
+    znikną, wpisy w bazie zostałyby z fałszywym `exists`). Odmowa dotyczy TYLKO folderu roboczego
+    i jego potomków - nie rodzeństwa, nie rodzica i nie zwykłego `_WBPP`. Test jest leksykalny:
+    folderu roboczego na dysku nie ma, a szpieg nie łapie żadnego dotknięcia dysku w oknie.
+    Odmowa dzieje się PRZED zapisem `stacks/last_root` i przed startem etapu - po niej dialog nie
+    podpowiada folderu, do którego ta droga nie ma wstępu.
+
+    Falsyfikator: test dysku (`os.path.isdir`) zamiast leksykalnego → szpieg łapie dotknięcie
+    i folder roboczy bez katalogu na dysku przepuszcza stosy."""
+    i18n.set_lang("pl")
+    praca = tmp_path / "praca_wbpp"
+    wbpp = praca / "_WBPP"
+    odpowiedz = wariant.format(wbpp=str(wbpp), praca=str(praca), tmp=str(tmp_path),
+                               wbpp_wielkie=str(wbpp).upper(),
+                               wbpp_ukosniki=str(wbpp).replace("\\", "/"))
+    ustawienia.setValue("stacks/last_root", "stare")
+    w_oknie = _szpieg_dysku(monkeypatch, "praca_wbpp")
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    try:
+        view.set_work_root(str(wbpp))
+        starty, komunikaty = _stosy_z_dialogu(monkeypatch, view, odpowiedz)
+        assert w_oknie == [], w_oknie
+        assert not wbpp.exists()                       # nic nie założone
+        if odmowa:
+            assert starty == []
+            assert komunikaty == [i18n.t("pipeline.stacks_in_work_root")]
+            assert not view.lbl_error.isHidden()
+            assert i18n.t("pipeline.stacks_in_work_root") in view.lbl_error.text()
+            assert ustawienia.value("stacks/last_root") == "stare"      # pamięć korzenia nietknięta
+            assert view.lbl_summary.text() == ""                        # przebieg się nie zaczął
+        else:
+            assert [s for s, _p in starty] == ["stacks"]
+            assert ustawienia.value("stacks/last_root") == odpowiedz
+            assert komunikaty == []
+    finally:
+        view.close()
+
+
+def test_stosy_bez_folderu_roboczego_nie_odmawiaja_a_none_go_zdejmuje(qapp, tmp_path, monkeypatch,
+                                                                     ustawienia):
+    """Bez ustawionego folderu roboczego odmowy nie ma (to nie jest ustawienie obowiązkowe), a
+    `set_work_root(None)` zdejmuje poprzednio podany folder - widok nie trzyma cudzego stanu."""
+    wbpp = tmp_path / "_WBPP"
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    try:
+        starty, _k = _stosy_z_dialogu(monkeypatch, view, str(wbpp / "OBJECTS"))
+        assert [s for s, _p in starty] == ["stacks"]
+        view.set_work_root(str(wbpp))
+        starty.clear()
+        view._on_stacks()
+        assert starty == []                            # teraz ten sam korzeń jest pod folderem roboczym
+        view.set_work_root(None)
+        view._on_stacks()
+        assert [s for s, _p in starty] == ["stacks"]
+    finally:
+        view.close()
+
+
+def test_przycisk_zniw_neutralny_wobec_masterow_i_stosow(qapp, tmp_path):
+    """Okno żniw wciąga wszystko, co WBPP zwraca (mastery kalibracyjne i stosy), więc przycisk i
+    jego podpowiedź nie obiecują samych masterów."""
+    for jezyk, przycisk in (("pl", "Wciągnij z WBPP…"), ("en", "Take in from WBPP…")):
+        i18n.set_lang(jezyk)
+        view = PipelineView(_fresh_db(tmp_path, f"neutralny_{jezyk}.db"), now_fn=lambda: NOW)
+        try:
+            assert view.btn_harvest.text() == przycisk
+            tip = view.btn_harvest.toolTip().lower()
+            assert "master" not in tip and "stos" not in tip and "stack" not in tip
+        finally:
+            view.close()

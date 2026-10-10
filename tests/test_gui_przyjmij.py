@@ -452,23 +452,35 @@ def test_wciagnij_mastery_otwiera_okno_zniw_i_przyjmuje_korzen(qapp, tmp_path, u
     wiadomości o położonych masterach. Okno, które nic nie wciągnęło, łańcucha nie uruchamia.
     Moduł okna podstawiony w `sys.modules` - gospodarz importuje go leniwie.
 
+    Okno dostaje też folder roboczy WBPP (`_WBPP` złożony z `work/root`) i korzenie wszystkich
+    zapamiętanych kart wydań.
+
     Falsyfikatory: archiwum wprost z ustawień → pierwsze okno dostaje „X:/archiwum/2024-03-01”;
-    odmowa osobnym `_flash` → na pasku samo zdanie odmowy."""
+    odmowa osobnym `_flash` → na pasku samo zdanie odmowy; folder roboczy bez `_WBPP` → okno
+    szukałoby wydań w katalogu, który wskazał człowiek, a nie w tym, który zakłada wydanie."""
     import sys
     import types
     from horreum import harvest
+    from horreum.gui import projection_dialog
     i18n.set_lang("pl")
     ustawienia.setValue("pipeline/last_source", "X:/archiwum/2024-03-01")
-    okna, biegi = [], []
+    ustawienia.setValue("work/root", "X:/praca")
+    praca = os.path.normpath("X:/praca/_WBPP")
+    projection_dialog.remember_target("Folder roboczy", praca)
+    projection_dialog.remember_target("Stół", "X:/inna/_Review", select=False)
+    okna, biegi, parametry = [], [], []
     z_bazy = ["X:/archiwum", None, None]
     wyniki = [("Wciągnięto 1", "X:/archiwum/CALIBRATION/masters/flats"), ("", None),
               ("Wciągnięto 2", "X:/archiwum/CALIBRATION/masters/flats")]
     odmowy = [None, "dostawa w biegu"]
 
     class _OknoZniw:
-        def __init__(self, con, *, now_fn, archive_root, parent=None):
+        def __init__(self, con, *, now_fn, archive_root, work_root=None, release_roots=(),
+                     parent=None):
             okna.append((con, archive_root, parent))
+            parametry.append((work_root, list(release_roots)))
             self.summary, self.harvested_root = wyniki.pop(0)
+            self.harvested_stacks = []
 
         def exec(self):
             return QDialog.Accepted
@@ -484,6 +496,7 @@ def test_wciagnij_mastery_otwiera_okno_zniw_i_przyjmuje_korzen(qapp, tmp_path, u
     try:
         win.pipeline_view.btn_harvest.click()
         assert okna == [(win.con, "X:/archiwum", win)]                # archiwum z bazy
+        assert parametry[0] == (praca, [praca, os.path.normpath("X:/inna/_Review")])
         assert biegi == ["X:/archiwum/CALIBRATION/masters/flats"]
         assert win.statusBar().currentMessage() == "Wciągnięto 1"
         win.pipeline_view.btn_harvest.click()                          # nic nie wciągnięto
@@ -492,6 +505,7 @@ def test_wciagnij_mastery_otwiera_okno_zniw_i_przyjmuje_korzen(qapp, tmp_path, u
         win.pipeline_view.btn_harvest.click()                          # łańcuch odmówił
         assert len(biegi) == 2
         assert win.statusBar().currentMessage() == "Wciągnięto 2 - dostawa w biegu"
+        assert parametry == [parametry[0]] * 3                         # każde otwarcie: te same wejścia
     finally:
         win.close()
 
@@ -560,3 +574,282 @@ def test_okno_bieg_mutex_porzadki_i_powrot(qapp, tmp_path, ustawienia, monkeypat
         assert przyjmij.lbl_unresolved.text() == "Nie rozpoznałem: 1 klatka"   # bez nazwy zostaje
     finally:
         win.close()
+
+
+# --- rodowód stosów z żniw: zapis PO przebiegu Dostawy, jednorazowy nasłuch ---
+
+ZNACZNIK_BIEGU = "2026-10-10T12:00:00+00:00"      # `last_run["since"]` przebiegu uruchomionego po żniwach
+
+
+def _zniwa_ze_stosami(monkeypatch, stosy, odmowa=None):
+    """Okno żniw podstawione w `sys.modules`: oddaje `stosy` jako wciągnięte w oknie i korzeń do
+    przyjęcia; `run_all_on` bez wątku (zwraca `odmowa`, `None` = łańcuch ruszył). Zwraca rejestr
+    wywołań `stacks.record_harvest_inputs` (podmienionego na atrapę: stos o sha1 `zly` rzuca
+    `ValueError`, `brak` oddaje `no_integration`, reszta przechodzi)."""
+    import sys
+    import types
+    from horreum import stacks
+    wolane = []
+
+    class _OknoZniw:
+        def __init__(self, con, *, now_fn, archive_root, work_root=None, release_roots=(),
+                     parent=None):
+            self.summary = "Wciągnięto stosy"
+            self.harvested_root = "X:/archiwum"
+            self.harvested_stacks = list(stosy)
+
+        def exec(self):
+            return QDialog.Accepted
+
+    def _zapis(con, *, master_sha1_data, input_frame_ids, now, actor="harvest"):
+        wolane.append((con, master_sha1_data, list(input_frame_ids), now))
+        if master_sha1_data == "zly":
+            raise ValueError("wejście spoza lightów")
+        reason = "no_integration" if master_sha1_data == "brak" else None
+        return {"reason": reason, "linked": 2, "upgraded": 0, "dropped": 0, "kept_user": 0}
+
+    modul = types.ModuleType("horreum.gui.harvest_dialog")
+    modul.HarvestDialog = _OknoZniw
+    monkeypatch.setitem(sys.modules, "horreum.gui.harvest_dialog", modul)
+
+    def _run_all_on(self, root):
+        if odmowa is None:
+            self.last_run["since"] = ZNACZNIK_BIEGU       # `_start_stage` robi to synchronicznie
+        return odmowa
+
+    monkeypatch.setattr(PipelineView, "run_all_on", _run_all_on)
+    monkeypatch.setattr(stacks, "record_harvest_inputs", _zapis)
+    return wolane
+
+
+def _zapis_przebiegu(**pola):
+    """Zapis końca przebiegu w kształcie `PipelineView.last_run` (kopia emitowana przez
+    `run_finished`)."""
+    return {**PipelineView._pusty_zapis_przebiegu(), "stage": "all", "since": ZNACZNIK_BIEGU, **pola}
+
+
+def test_rodowod_ze_zniw_zapisuje_sie_po_przebiegu_bez_przerwania_i_tylko_raz(
+        qapp, tmp_path, ustawienia, monkeypatch):
+    """Stos wciągnięty w oknie żniw dostaje rodowód z HISTORII pliku dopiero po łańcuchu Dostawy
+    (wiersz integracji stawia łańcuch): do końca przebiegu `record_harvest_inputs` nie jest wołane,
+    po przebiegu bez przerwania leci per stos na połączeniu okna, a zdanie na pasku liczy osobno
+    stosy z historii i te, które zostają z rodowodem okna czasu (odmowa zapisu: `ValueError`,
+    `no_integration`) - strata nazwana, nie ukryta. Nasłuch jest JEDNORAZOWY: kolejny przebieg
+    Dostawy niczego nie zapisuje.
+
+    Falsyfikatory: zapis w slocie `_on_open_harvest` → rejestr niepusty przed `run_finished`;
+    nasłuch bez rozłączenia → drugi `run_finished` powiela zapis."""
+    i18n.set_lang("pl")
+    wolane = _zniwa_ze_stosami(
+        monkeypatch, [("a", [1, 2]), ("zly", [3]), ("brak", [4]), ("b", [5, 6, 7])])
+    win = MainWindow(_baza(tmp_path), now_fn=_Zegar())
+    try:
+        odswiezenia = _szpieg_odswiezen(win)
+        win.pipeline_view.btn_harvest.click()
+        assert wolane == [] and odswiezenia == []             # przed końcem przebiegu nic nie jedzie
+        win.pipeline_view.run_finished.emit(_zapis_przebiegu())
+        assert [(s, w) for _c, s, w, _n in wolane] == [
+            ("a", [1, 2]), ("zly", [3]), ("brak", [4]), ("b", [5, 6, 7])]
+        assert all(c is win.con and n for c, _s, _w, n in wolane)       # połączenie okna, zegar okna
+        # trzy człony naraz: z historii · okno czasu (ValueError) · bez rodowodu (no_integration);
+        # zdanie DOKLEJA się do podsumowania okna żniw, nie zastępuje go
+        assert win._pelny_komunikat == (
+            "Wciągnięto stosy - rodowód: 2 stosy z historii żniw; "
+            "1 stos zostaje z rodowodem okna czasu; "
+            "1 stos bez rodowodu - Dostawa nie ujęła go jako stosu; "
+            "uruchom „Przyjmij nowe” na archiwum")
+        assert odswiezenia == ["widoki", "panel"]             # po zapisie, tą drogą co po przebiegu
+        win.pipeline_view.run_finished.emit(_zapis_przebiegu())         # następny przebieg Dostawy
+        assert len(wolane) == 4 and len(odswiezenia) == 2
+    finally:
+        win.close()
+
+
+@pytest.mark.parametrize("pola", [
+    {"cancelled": "scan"}, {"refused": "źródło niedostępne"}, {"failed": "[group] błąd"}])
+def test_rodowod_ze_zniw_nie_zapisuje_po_przebiegu_przerwanym_odmowionym_ani_z_bledem(
+        qapp, tmp_path, ustawienia, monkeypatch, pola):
+    """Przebieg przerwany, odmówiony albo zakończony błędem nie zapisuje niczego (stos zostaje
+    z rodowodem okna, jak bez żniw) - a nasłuch i tak znika po pierwszym wywołaniu, więc
+    późniejszy, udany przebieg Dostawy też niczego nie dopisuje."""
+    wolane = _zniwa_ze_stosami(monkeypatch, [("a", [1])])
+    win = MainWindow(_baza(tmp_path), now_fn=_Zegar())
+    try:
+        win.pipeline_view.btn_harvest.click()
+        win.pipeline_view.run_finished.emit(_zapis_przebiegu(**pola))
+        win.pipeline_view.run_finished.emit(_zapis_przebiegu())
+        assert wolane == []
+    finally:
+        win.close()
+
+
+def test_rodowod_ze_zniw_bez_nasluchu_gdy_lancuch_odmowil_albo_nie_ma_stosow(
+        qapp, tmp_path, ustawienia, monkeypatch):
+    """Odmowa łańcucha (`run_all_on` oddaje powód) = brak przebiegu, na który można czekać; okno,
+    które wciągnęło same mastery (pusta lista stosów), też nie podpina nasłuchu."""
+    wolane = _zniwa_ze_stosami(monkeypatch, [("a", [1])], odmowa="dostawa w biegu")
+    win = MainWindow(_baza(tmp_path), now_fn=_Zegar())
+    try:
+        win.pipeline_view.btn_harvest.click()
+        win.pipeline_view.run_finished.emit(_zapis_przebiegu())
+        assert wolane == []
+    finally:
+        win.close()
+    wolane = _zniwa_ze_stosami(monkeypatch, [])
+    (tmp_path / "bez_stosow").mkdir()
+    win = MainWindow(_baza(tmp_path / "bez_stosow"), now_fn=_Zegar())
+    try:
+        win.pipeline_view.btn_harvest.click()
+        win.pipeline_view.run_finished.emit(_zapis_przebiegu())
+        assert wolane == []
+    finally:
+        win.close()
+
+
+def test_rodowod_ze_zniw_nie_zapisuje_na_innej_bazie(qapp, tmp_path, ustawienia, monkeypatch):
+    """Zmiana bazy w trakcie przebiegu: okno ma już inne połączenie, więc rodowód stosów z poprzedniej
+    bazy nie jedzie na nową (stosy tam nie istnieją)."""
+    wolane = _zniwa_ze_stosami(monkeypatch, [("a", [1])])
+    win = MainWindow(_baza(tmp_path), now_fn=_Zegar())
+    try:
+        widok, prawdziwe = win.pipeline_view, win.con
+        widok.btn_harvest.click()
+        win.con = object()                                    # inna baza otwarta w trakcie biegu
+        widok.run_finished.emit(_zapis_przebiegu())
+        assert wolane == []
+    finally:
+        win.con = prawdziwe
+        win.close()
+
+
+@pytest.mark.parametrize("n, pl, en", [
+    (1, "rodowód: 1 stos z historii żniw", "lineage: 1 stack from harvest history"),
+    (2, "rodowód: 2 stosy z historii żniw", "lineage: 2 stacks from harvest history"),
+    (4, "rodowód: 4 stosy z historii żniw", "lineage: 4 stacks from harvest history"),
+    (5, "rodowód: 5 stosów z historii żniw", "lineage: 5 stacks from harvest history"),
+    (12, "rodowód: 12 stosów z historii żniw", "lineage: 12 stacks from harvest history"),
+    (14, "rodowód: 14 stosów z historii żniw", "lineage: 14 stacks from harvest history"),
+    (22, "rodowód: 22 stosy z historii żniw", "lineage: 22 stacks from harvest history"),
+])
+def test_zdanie_rodowodu_odmiana_liczebnika(qapp, n, pl, en):
+    """Odmiana przez mechanizm katalogu (`t_plural`): 1 · 2-4 · 5 · 12-14 · 22."""
+    for jezyk, oczekiwane in (("pl", pl), ("en", en)):
+        i18n.set_lang(jezyk)
+        assert i18n.t_plural("status.harvest_lineage", n) == oczekiwane
+
+
+@pytest.mark.parametrize("n, pl", [
+    (1, "1 stos zostaje z rodowodem okna czasu"),
+    (3, "3 stosy zostają z rodowodem okna czasu"),
+    (5, "5 stosów zostaje z rodowodem okna czasu"),
+    (13, "13 stosów zostaje z rodowodem okna czasu"),
+    (22, "22 stosy zostają z rodowodem okna czasu"),
+])
+def test_zdanie_stosow_bez_rodowodu_z_historii_odmiana_liczebnika(qapp, n, pl):
+    i18n.set_lang("pl")
+    assert i18n.t_plural("status.harvest_lineage_window", n) == pl
+
+
+def _szpieg_odswiezen(win):
+    """Rejestr odświeżeń widoków wołanych przez gospodarza po przebiegu: pełne odświeżenie
+    (`_odswiez_widoki_po_przebiegu`) i panel rodowodu gridu. Podmiana na instancji okna."""
+    wolane = []
+    win._odswiez_widoki_po_przebiegu = lambda: wolane.append("widoki")
+    win.grid_view.refresh_lineage_panel = lambda: wolane.append("panel")
+    return wolane
+
+
+def test_rodowod_ze_zniw_ignoruje_cudzy_run_finished_i_czeka_na_wlasciwy(
+        qapp, tmp_path, ustawienia, monkeypatch):
+    """Okno żniw mogło się otworzyć w fazie odświeżania po POPRZEDNIM biegu, zanim ten wyemitował
+    `run_finished`: sygnał z cudzym znacznikiem startu nie zapisuje niczego i NIE rozłącza nasłuchu
+    (zapis z nim wyczerpałby jednorazowość i rodowód przepadłby). Właściwy przebieg zapisuje raz.
+
+    Falsyfikator: brak porównania znaczników → pierwszy (cudzy) sygnał zapisuje rodowód przed
+    łańcuchem żniw, gdy wiersza integracji jeszcze nie ma."""
+    wolane = _zniwa_ze_stosami(monkeypatch, [("a", [1])])
+    win = MainWindow(_baza(tmp_path), now_fn=_Zegar())
+    try:
+        odswiezenia = _szpieg_odswiezen(win)
+        win.pipeline_view.btn_harvest.click()
+        win.pipeline_view.run_finished.emit(
+            _zapis_przebiegu(since="2026-10-10T11:00:00+00:00"))        # poprzedni bieg
+        assert wolane == [] and odswiezenia == []
+        win.pipeline_view.run_finished.emit(_zapis_przebiegu())          # właściwy
+        assert [s for _c, s, _w, _n in wolane] == ["a"]
+        win.pipeline_view.run_finished.emit(
+            _zapis_przebiegu(since="2026-10-10T13:00:00+00:00"))        # nasłuch już zdjęty
+        win.pipeline_view.run_finished.emit(_zapis_przebiegu())
+        assert len(wolane) == 1
+    finally:
+        win.close()
+
+
+def test_rodowod_ze_zniw_odswieza_widoki_takze_gdy_zapis_rzuci(qapp, tmp_path, ustawienia,
+                                                                monkeypatch):
+    """Zapis idzie PO odświeżeniu widoków przez gospodarza, więc widoki muszą dostać drugie, także
+    gdy zapis rzuci wyjątek inny niż `ValueError` (ten leci dalej - slot Qt wypisuje go do
+    `sys.excepthook` - a pasek nie dostaje zdania z połowy pracy)."""
+    import sys
+    wolane = _zniwa_ze_stosami(monkeypatch, [("a", [1]), ("boom", [2])])
+    from horreum import stacks
+    atrapa = stacks.record_harvest_inputs
+
+    def _rzuca(con, **kw):
+        if kw["master_sha1_data"] == "boom":
+            raise RuntimeError("baza zablokowana")
+        return atrapa(con, **kw)
+
+    monkeypatch.setattr(stacks, "record_harvest_inputs", _rzuca)
+    zlapane = []
+    monkeypatch.setattr(sys, "excepthook", lambda typ, w, tb: zlapane.append(typ))
+    win = MainWindow(_baza(tmp_path), now_fn=_Zegar())
+    try:
+        odswiezenia = _szpieg_odswiezen(win)
+        win.pipeline_view.btn_harvest.click()
+        win.pipeline_view.run_finished.emit(_zapis_przebiegu())
+        assert [s for _c, s, _w, _n in wolane] == ["a"]       # drugi stos nie doszedł do atrapy
+        assert odswiezenia == ["widoki", "panel"]
+        assert zlapane == [RuntimeError]
+        assert win._pelny_komunikat == "Wciągnięto stosy"     # zdanie z połowy pracy nie wychodzi na pasek
+    finally:
+        win.close()
+
+
+def test_rodowod_ze_zniw_pusty_rodowod_nie_flashuje_drugi_raz(qapp, tmp_path, ustawienia,
+                                                               monkeypatch):
+    """Zdanie rodowodu dokleja się do podsumowania okna; gdy rodowód nie ma żadnego członu, pasek
+    zostaje przy samym podsumowaniu (nic nie jest flashowane ponownie)."""
+    _zniwa_ze_stosami(monkeypatch, [("a", [1])])
+    win = MainWindow(_baza(tmp_path), now_fn=_Zegar())
+    try:
+        _szpieg_odswiezen(win)
+        assert win._zdanie_rodowodu(win.con, []) == ""
+        monkeypatch.setattr(win, "_zdanie_rodowodu", lambda con, stosy: "")
+        win.pipeline_view.btn_harvest.click()
+        flash = []
+        prawdziwy_flash = win._flash
+        win._flash = lambda msg, *a, **k: (flash.append(msg), prawdziwy_flash(msg, *a, **k))
+        win.pipeline_view.run_finished.emit(_zapis_przebiegu())
+        assert flash == []
+        assert win._pelny_komunikat == "Wciągnięto stosy"
+    finally:
+        win.close()
+
+
+@pytest.mark.parametrize("n, pl, en", [
+    (1, "1 stos bez rodowodu - Dostawa nie ujęła go jako stosu; uruchom „Przyjmij nowe” na archiwum",
+     "1 stack without lineage - Intake did not take it in as a stack; run Take new on the archive"),
+    (2, "2 stosy bez rodowodu - Dostawa nie ujęła ich jako stosów; uruchom „Przyjmij nowe” na archiwum",
+     "2 stacks without lineage - Intake did not take them in as stacks; run Take new on the archive"),
+    (5, "5 stosów bez rodowodu - Dostawa nie ujęła ich jako stosów; uruchom „Przyjmij nowe” na archiwum",
+     "5 stacks without lineage - Intake did not take them in as stacks; run Take new on the archive"),
+    (12, "12 stosów bez rodowodu - Dostawa nie ujęła ich jako stosów; uruchom „Przyjmij nowe” na archiwum",
+     "12 stacks without lineage - Intake did not take them in as stacks; run Take new on the archive"),
+    (22, "22 stosy bez rodowodu - Dostawa nie ujęła ich jako stosów; uruchom „Przyjmij nowe” na archiwum",
+     "22 stacks without lineage - Intake did not take them in as stacks; run Take new on the archive"),
+])
+def test_zdanie_stosow_bez_rodowodu_odmiana_liczebnika(qapp, n, pl, en):
+    for jezyk, oczekiwane in (("pl", pl), ("en", en)):
+        i18n.set_lang(jezyk)
+        assert i18n.t_plural("status.harvest_lineage_none", n) == oczekiwane

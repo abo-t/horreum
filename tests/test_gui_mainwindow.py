@@ -101,6 +101,31 @@ def test_zapis_naglowkow_do_plikow_gasi_etapy_Dostawy(qapp, tmp_path):
         win.close()
 
 
+def test_zamkniecie_okna_zbiera_watki_okien_dialogowych(qapp, tmp_path):
+    """Zamknięte okno dialogowe zostaje ukrytym dzieckiem okna głównego razem ze swoim wątkiem tła
+    (lista wydań w oknie żniw nie ma punktu przerwania), więc zamknięcie aplikacji zbiera i jego
+    wątki - `QThread` niszczony w biegu to twardy abort. Okno bez `zatrzymaj_pola` jest pomijane."""
+    from PySide6.QtWidgets import QDialog
+
+    class _OknoZWatkiem(QDialog):
+        def __init__(self, parent):
+            super().__init__(parent)
+            self.zatrzymania = 0
+
+        def zatrzymaj_pola(self):
+            self.zatrzymania += 1
+
+    win = MainWindow(_seeded_db(tmp_path))
+    okno = _OknoZWatkiem(win)
+    zwykle = QDialog(win)                              # bez metody: nic do zebrania
+    try:
+        win._zatrzymaj_watki_widokow()
+        assert okno.zatrzymania == 1
+    finally:
+        win.close()
+    assert okno.zatrzymania == 2 and zwykle.parent() is win
+
+
 def test_otwarte_na_bazie_montuje_widoki(qapp, tmp_path):
     win = MainWindow(_seeded_db(tmp_path))
     try:
@@ -1329,3 +1354,111 @@ def test_ZADNE_okno_nie_pokazuje_surowego_klucza_i18n(qapp, tmp_path):
         assert any("Horreum" in n for n in napisy), "kolektor nie widzi tytułu okna"
     finally:
         win.close()
+
+
+# --- Plik → „Folder roboczy WBPP…" ---
+
+def _akcja_menu_plik(win, klucz):
+    """Akcja menu Plik po etykiecie z katalogu (bez sprzęgania testu z kolejnością wierszy)."""
+    from horreum.gui import i18n
+    from PySide6.QtWidgets import QMenu
+    # `QAction.menu()` oddaje wrapper już skasowany po stronie C++ (menu należy do paska, nie do
+    # Pythona) - dzieci paska są pewną drogą.
+    menu = next(m for m in win.menuBar().findChildren(QMenu) if m.title() == i18n.t("menu.file"))
+    for akcja in menu.actions():
+        if akcja.text() == i18n.t(klucz):
+            return akcja
+    raise AssertionError(f"brak akcji {klucz!r} w menu Plik")
+
+
+def test_menu_plik_folder_roboczy_stoi_za_nowa_baza(qapp):
+    from horreum.gui import i18n
+    win = MainWindow()
+    try:
+        akcje = [_akcja_menu_plik(win, k) for k in ("menu.open_db", "menu.new_db", "menu.work_root")]
+        menu = akcje[0].parent()
+        assert menu.actions()[:3] == akcje                # „Folder roboczy WBPP…" tuż za „Nowa baza…"
+    finally:
+        win.close()
+
+
+def test_menu_folder_roboczy_karta_pipeline_i_zero_dysku(qapp, tmp_path, ustawienia, monkeypatch):
+    """Wybór folderu roboczego: zapis `work/root` (jedyny właściciel: gospodarz), karta celu wydania
+    `_WBPP` pod wskazanym katalogiem (zaznaczona jako ostatnio użyta), folder podany widokowi
+    Dostawy i zdanie na pasku. ZERO DYSKU w slocie: wskazany katalog nie istnieje, a szpieg nie
+    łapie `makedirs`/`mkdir`/`exists`/`isdir` na nim - `_WBPP`, `OBJECTS\\<obiekt>` i `out` zakłada
+    dopiero wydanie obiektu. Ponowny wybór tego samego katalogu inaczej zapisanego (`/`, wielkość
+    liter) nie dokłada drugiej karty. Anulowanie dialogu nie zmienia niczego."""
+    import json
+    import threading
+    from pathlib import Path
+    from horreum.gui import i18n, projection_dialog
+    from PySide6.QtWidgets import QFileDialog
+
+    i18n.set_lang("pl")
+    wybrany = tmp_path / "ASTRO_PRACA"
+    wbpp = str(wybrany / "_WBPP")
+    dotkniecia = []
+
+    def szpieg(nazwa, prawdziwa):
+        def _f(sciezka=None, *a, **kw):
+            if threading.current_thread() is threading.main_thread() and "ASTRO_PRACA" in str(sciezka):
+                dotkniecia.append((nazwa, str(sciezka)))
+            return prawdziwa(sciezka, *a, **kw)
+        return _f
+
+    for modul, atrybut in ((os, "makedirs"), (os, "mkdir"), (os, "stat"),
+                           (os.path, "exists"), (os.path, "isdir"), (Path, "mkdir"),
+                           (Path, "exists"), (Path, "is_dir")):
+        monkeypatch.setattr(modul, atrybut, szpieg(atrybut, getattr(modul, atrybut)))
+
+    odpowiedzi = [str(wybrany), "", str(wybrany).replace("\\", "/").upper()]
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory",
+                        staticmethod(lambda *a, **k: odpowiedzi.pop(0)))
+
+    win = MainWindow()                                    # bez bazy: menu działa przed otwarciem bazy
+    try:
+        assert win.pipeline_view is None
+        _akcja_menu_plik(win, "menu.work_root").trigger()
+        assert ustawienia.value("work/root") == str(wybrany)
+        cele = json.loads(ustawienia.value("projection/targets"))
+        assert cele == [{"name": "Folder roboczy", "path": wbpp}]
+        assert ustawienia.value("projection/last_target") == wbpp
+        assert win._pelny_komunikat == (
+            f"Folder roboczy: {wbpp} - powstanie przy pierwszym wydaniu; "
+            "stąd okno żniw bierze wyniki WBPP")
+
+        _akcja_menu_plik(win, "menu.work_root").trigger()  # anulowanie dialogu
+        assert ustawienia.value("work/root") == str(wybrany)
+
+        _akcja_menu_plik(win, "menu.work_root").trigger()  # ten sam katalog, inny zapis
+        assert len(json.loads(ustawienia.value("projection/targets"))) == 1
+        assert projection_dialog.target_roots() == [wbpp.upper()]
+    finally:
+        win.close()
+    assert dotkniecia == [], dotkniecia
+    assert not wybrany.exists()                           # nic nie założone
+
+
+def test_folder_roboczy_trafia_do_pipeline_przy_starcie_i_po_wyborze(qapp, tmp_path, ustawienia,
+                                                                    monkeypatch):
+    """Start okna z zapamiętanym `work/root` podaje `_WBPP` widokowi Dostawy (każda baza montuje nowy
+    widok, folder roboczy jest jeden); wybór z menu przy otwartej bazie podaje go od ręki, bez
+    przemontowania."""
+    from PySide6.QtWidgets import QFileDialog
+    ustawienia.setValue("work/root", str(tmp_path / "praca"))
+    win = MainWindow(_seeded_db(tmp_path))
+    try:
+        assert win.pipeline_view._work_root == str(tmp_path / "praca" / "_WBPP")
+        inny = tmp_path / "inna_praca" / "_WBPP"          # wskazanie samego `_WBPP`: bez drugiego w środku
+        monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: str(inny)))
+        _akcja_menu_plik(win, "menu.work_root").trigger()
+        assert win.pipeline_view._work_root == str(inny)
+        assert ustawienia.value("work/root") == str(inny)
+    finally:
+        win.close()
+    win2 = MainWindow(_seeded_db(tmp_path, "druga.db"))
+    try:
+        assert win2.pipeline_view._work_root == str(inny)  # pamięć przeżywa okno
+    finally:
+        win2.close()

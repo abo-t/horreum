@@ -498,6 +498,9 @@ class PipelineView(QWidget):
         self._db_path = db_path
         self._now = now_fn
         self._root = None
+        # Folder roboczy WBPP (`set_work_root`): pusty, dopóki gospodarz go nie poda. Widok trzyma go
+        # wyłącznie do odmowy w `_on_stacks`, nigdy do zapisu ani do dotykania dysku.
+        self._work_root = None
         self._thread = None
         self._worker = None
         self._cancellable = False
@@ -869,10 +872,39 @@ class PipelineView(QWidget):
         root = QFileDialog.getExistingDirectory(self, i18n.t("pipeline.dlg.pick_stacks"), last)
         if not root:
             return
+        # PRZED zapamiętaniem korzenia i przed startem: odmowa nie może zostawić śladu (ani
+        # `stacks/last_root`, ani przebiegu), bo następne otwarcie dialogu podpowiadałoby folder,
+        # do którego ta droga nie ma wstępu.
+        if self._under_work_root(root):
+            self._pokaz_odmowe(i18n.t("pipeline.stacks_in_work_root"))
+            return
         self._settings().setValue("stacks/last_root", root)
         self._sync_stacks_memo()
         self._begin_run()
         self._start_stage("stacks", **self._scan_params(root))
+
+    def set_work_root(self, path):
+        """Folder roboczy WBPP (korzeń `_WBPP`) albo `None`. Podaje go gospodarz, który jest
+        właścicielem ustawienia; widok tylko pamięta napis i nie dotyka dysku."""
+        self._work_root = str(path) if path else None
+
+    def _under_work_root(self, path):
+        """Czy `path` leży w folderze roboczym lub jest nim - test WYŁĄCZNIE leksykalny
+        (`abspath`/`normpath`/`normcase`/`commonpath`), bez dotykania dysku: folder roboczy bywa
+        jeszcze nieutworzony (powstaje przy pierwszym wydaniu), a slot okna nie sięga dysku
+        (reguła „zero dysku w slocie" tej drogi). `commonpath` porównuje CAŁE segmenty, więc
+        rodzeństwo `_WBPP2` obok `_WBPP` nie jest potomkiem; inny dysk to `ValueError` z `commonpath` = nie."""
+        if not self._work_root:
+            return False
+
+        def klucz(p):
+            return os.path.normcase(os.path.normpath(os.path.abspath(p)))
+
+        korzen = klucz(self._work_root)
+        try:
+            return os.path.commonpath([korzen, klucz(path)]) == korzen
+        except ValueError:
+            return False
 
     # ---------------------------------------------------------------- fakty kopii (0021)
 

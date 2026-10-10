@@ -1020,6 +1020,89 @@ def _reconcile(con, integration_id, frame_ids, *, now, actor):
                for fid in sorted(zbedne))
 
 
+def record_harvest_inputs(con, *, master_sha1_data, input_frame_ids, now, actor="harvest"):
+    """RODOWÓD Z ŻNIW - zbiór DOKŁADNY wejść stosu wciągniętego z wydania Horreum (Qt-wolna, zapis
+    wyłącznie przez `repo`) → `{reason, linked, upgraded, dropped, kept_user}`.
+
+    PO CO: łańcuch Dostawy daje stosowi wejścia z OKNA CZASU (wszystkie lighty obiektu, filtru,
+    teleskopu i ekspozycji między `DATE-OBS` a `DATE-END`), więc klatki odrzucone przez WBPP zostają
+    w rodowodzie jako kandydaci - albo, gdy plik zeznaje mniej wejść, niż okno ma klatek, strażnik 2
+    gasi rodowód w całości (`history_mismatch`). Żniwa znają zbiór DOKŁADNY (nazwy wejść historii ↔
+    nazwy lightów wydania), więc wołający podaje go tu PO łańcuchu: każde wejście → ranga `history`
+    (`repo.link_integration` podnosi `window`, nie rusza `user`), wejścia rangi `window` spoza zbioru
+    schodzą (`repo.unlink_integration_input`), `user` zostaje zawsze, `history` spoza zbioru też
+    (dowód innego zeznania nie jest nasz do obalenia).
+
+    GŁOWA INTEGRACJI IDZIE ZA WIERSZAMI: powód odmowy z łańcucha (`history_mismatch`, `no_object`…)
+    obok wierszy automatu łamałby inwariant bramki akceptacji „powód wyklucza wejścia automatu”
+    (`scripts/acceptance_s5.py`), więc głowa
+    dostaje `unresolved_reason=None` i odcisk tego zbioru (`_fingerprint`), resztę faktów bez zmian
+    (`repo.upsert_integration` - idempotentny, ta sama głowa bez eventu). Następny `run_stack_lineage`
+    widzi rodowód `history` mocniejszy od okna (`RANGA_ASSERT`): przy powodzie zostawia stos w całości
+    (`kept_proven`), przy oknie bez historii pliku chroni wiersze - okna z powrotem nie dokłada.
+
+    Klatka stosu po `sha1_data`; wiersz `integration` MUSI już istnieć (stawia go `run_stack_lineage`
+    w łańcuchu) - brak klatki albo wiersza → `reason='no_integration'`, zero zapisu. Wejście, które nie
+    jest lightem bazy, albo pusty zbiór → `ValueError` (EXPECT: stos nie wchodzi w stos, a integracja
+    bez wejść zawsze niesie powód - ta sama bramka akceptacji). Liczniki: `linked`
+    = nowe wiersze, `upgraded` = `window` → `history`, `dropped` = zdjęte `window`, `kept_user` = wiersze
+    ręki nietknięte (w zbiorze i poza nim - to stan, nie delta: przy każdym wołaniu liczy je od nowa).
+    Drugie wołanie z tym samym zbiorem: liczniki mutacji (`linked`, `upgraded`, `dropped`) zerowe
+    i zero eventów.
+
+    JEDNA TRANSAKCJA (`repo.atomic`) na całe wołanie, z odczytami głowy, lightów i wierszy w środku:
+    awaria w połowie zostawiłaby wiersze `history` obok niezdjętego powodu, a odczyt sprzed transakcji
+    mógłby opisywać stan, który inny pisarz zdążył zmienić. Kolejność zapisów i tak trzyma inwariant na
+    każdym kroku: wiersze `history`, potem głowa bez powodu, na końcu zdjęcia `window`."""
+    wynik = {"reason": None, "linked": 0, "upgraded": 0, "dropped": 0, "kept_user": 0}
+    zbior = sorted({int(i) for i in input_frame_ids})
+    with repo.atomic(con):
+        glowa = con.execute(
+            "SELECT i.id, i.master_frame_id, i.tool, i.window_start, i.window_end, i.declared_rows, "
+            "       i.drizzle_inputs, i.disabled_inputs, i.degenerate, i.ambiguous, i.telescope_mismatch, "
+            "       i.raw_unreferenced, i.creation_time "
+            "FROM frame f JOIN integration i ON i.master_frame_id = f.id WHERE f.sha1_data = ?",
+            (master_sha1_data,)).fetchone()
+        if glowa is None:
+            return {**wynik, "reason": "no_integration"}
+        if not zbior:
+            raise ValueError(f"rodowód z żniw bez wejść (stos {master_sha1_data}) - głowa bez powodu "
+                             "i bez wierszy byłaby cichą pustką")
+        lighty = {r[0] for r in con.execute(
+            "SELECT id FROM frame WHERE kind = 'light' AND id IN (SELECT value FROM json_each(?))",
+            (json.dumps(zbior),))}
+        if set(zbior) - lighty:
+            raise ValueError(f"wejścia stosu spoza lightów bazy: {sorted(set(zbior) - lighty)}")
+        iid = glowa["id"]
+        stan = {r["input_frame_id"]: r["asserted_by"] for r in con.execute(
+            "SELECT input_frame_id, asserted_by FROM integration_input WHERE integration_id = ?", (iid,))}
+        for fid in zbior:
+            przed = stan.get(fid)
+            if przed == "user":
+                wynik["kept_user"] += 1
+                continue
+            if repo.link_integration(con, integration_id=iid, input_frame_id=fid, asserted_by="history",
+                                     now=now, actor=actor):
+                wynik["linked" if przed is None else "upgraded"] += 1
+        repo.upsert_integration(
+            con, master_frame_id=glowa["master_frame_id"], integ_hash=_fingerprint(con, zbior),
+            tool=glowa["tool"], window_start=glowa["window_start"], window_end=glowa["window_end"],
+            declared_rows=glowa["declared_rows"], drizzle_inputs=glowa["drizzle_inputs"],
+            disabled_inputs=glowa["disabled_inputs"], degenerate=glowa["degenerate"],
+            ambiguous=glowa["ambiguous"], telescope_mismatch=glowa["telescope_mismatch"],
+            unresolved_reason=None, raw_unreferenced=glowa["raw_unreferenced"],
+            creation_time=glowa["creation_time"], now=now, actor=actor)
+        for fid, zrodlo in sorted(stan.items()):
+            if fid in zbior:
+                continue
+            if zrodlo == "user":
+                wynik["kept_user"] += 1
+            elif zrodlo == "window" and repo.unlink_integration_input(
+                    con, integration_id=iid, input_frame_id=fid, now=now, actor=actor):
+                wynik["dropped"] += 1
+    return wynik
+
+
 def inputs_of(con, master_frame_id):
     """READ-ONLY „co weszło w ten obraz": wiersze rodowodu stosu ze ścieżką klatki wejściowej
     i źródłem pewności. Materiał pod powierzchnię I-2d i raport CLI — bez zapisu."""

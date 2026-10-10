@@ -4472,8 +4472,10 @@ def unlink_integration_input(con, *, integration_id, input_frame_id, now, actor=
     `calibration.unlinked`, gdzie doskan podstawia bliższego mastera.
 
     Wołający MUSI pominąć relacje `asserted_by='user'` — automat nie ma prawa cofać rozstrzygnięcia
-    ręki. Guard stoi TU (`AND asserted_by <> 'user'`), bo ostatnią bramką jest klinga, nie pętla."""
-    with con:
+    ręki. Guard stoi TU (`AND asserted_by <> 'user'`), bo ostatnią bramką jest klinga, nie pętla.
+    Transakcja przez `_tx`: rodowód z żniw zdejmuje wejścia okna w zakresie `atomic` razem z resztą
+    zapisu stosu, a goły `with con:` zatwierdziłby ten zakres w połowie."""
+    with _tx(con):
         cur = con.execute(
             "DELETE FROM integration_input WHERE integration_id = ? AND input_frame_id = ? "
             "AND asserted_by <> 'user'", (integration_id, input_frame_id))

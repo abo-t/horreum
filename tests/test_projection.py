@@ -19,6 +19,7 @@ import os
 import pytest
 
 from horreum import db, hashing, projection, repo
+from horreum.scan import EXCLUDED_DIR_NAMES
 
 NOW = "2026-07-04T00:00:00+00:00"
 
@@ -732,13 +733,18 @@ def test_plan_object_nieznany_obiekt_i_plan_nie_zna_ukladu_obiektu(obiekt):
     assert "wbpp-obiekt" not in projection.LAYOUTS
 
 
+def _bez_names(zestawy):
+    return {seg: {k: v for k, v in z.items() if k != "names"} for seg, z in zestawy.items()}
+
+
 def test_object_manifest_kopia_info_i_odmowa_dla_perspektywy(obiekt):
-    """Manifest obiektu = treść `info` (listy id), jako KOPIA - wołający dokłada etykietę bez ruszania
-    planu. Plan perspektywy nie ma `info` → odmowa, nie pusty manifest."""
+    """Manifest obiektu = treść `info` (listy id) + `names` lightów per zestaw, jako KOPIA - wołający
+    dokłada etykietę bez ruszania planu. Plan perspektywy nie ma `info` → odmowa, nie pusty manifest."""
     con, i = obiekt
     p = projection.plan_object(con, 1)
     man = projection.object_manifest(p)
-    assert man == p.info and man is not p.info
+    assert {**man, "zestawy": _bez_names(man["zestawy"])} == p.info and man is not p.info
+    assert all("names" not in z for z in p.info["zestawy"].values())
     man["zestawy"]["_UNSET"]["lights"].append(-1)
     man["etykieta"] = "test"
     assert -1 not in p.info["zestawy"]["_UNSET"]["lights"] and "etykieta" not in p.info
@@ -771,7 +777,9 @@ def test_apply_obiektu_drzewo_manifest_i_drift(obiekt, tmp_path):
     payload = _manifest(root)
     assert payload["layout"] == "wbpp-obiekt"
     assert payload["segments"] == [["zestaw"], ["rola"], ["filtr", "relacja"]]
-    assert _bez_ts(payload["zestawy"]) == p.info["zestawy"] and payload["object_canon"] == "NGC 6992"
+    assert _bez_names(_bez_ts(payload["zestawy"])) == p.info["zestawy"]
+    assert payload["object_canon"] == "NGC 6992"
+    assert os.path.isdir(os.path.join(root, projection.OUTPUT_DIR))     # wyjście WBPP wydania
     assert {z["ts"] for z in payload["zestawy"].values()} == {NOW}
 
     assert projection.apply(p, root, do_apply=False).drift is None
@@ -815,7 +823,12 @@ def test_manifest_obiektu_scala_zestawy_kolejnych_wydan(obiekt, tmp_path):
     assert payload["zestawy"]["A140R_ASI2600MM"]["ts"] == "T1"
     assert payload["zestawy"]["RC8_ASI2600MM"]["ts"] == "T2"
     assert (payload["ts"], payload["config_id"]) == ("T2", 20)       # nagłówek = bieżące wydanie
-    assert _bez_ts(payload["zestawy"])["A140R_ASI2600MM"] == pierwszy.info["zestawy"]["A140R_ASI2600MM"]
+    assert _bez_names(_bez_ts(payload["zestawy"]))["A140R_ASI2600MM"] == \
+        pierwszy.info["zestawy"]["A140R_ASI2600MM"]
+    # Nazwy lightów starego zestawu przeżywają scalenie razem z jego wpisem.
+    assert payload["zestawy"]["A140R_ASI2600MM"]["names"] == {
+        "la1.fits": i["la1"], "la2.fits": i["la2"], "la3.fits": i["la3"], "la4.fits": i["la4"]}
+    assert payload["zestawy"]["RC8_ASI2600MM"]["names"] == {"lb1.fits": i["lb1"]}
 
     # Obce zeznanie w tym korzeniu (inny obiekt) nie jest scalane - nadpisanie jak dla każdego układu.
     obcy = dict(payload, object_id=999, zestawy={"OBCY": {"lights": [1], "ts": "T0"}})
@@ -823,6 +836,62 @@ def test_manifest_obiektu_scala_zestawy_kolejnych_wydan(obiekt, tmp_path):
         json.dump(obcy, fh)
     projection.apply(drugi, root, do_apply=True, now="T3", manifest=projection.object_manifest(drugi))
     assert list(_manifest(root)["zestawy"]) == ["RC8_ASI2600MM"]
+
+
+def _drugie_wydanie_zestawu(con, tmp_path, i):
+    """Między wydaniami zestawu A: `la1` wycofany (jego plik zostaje w folderze wydania), `la6` nowy,
+    `la2` wycofany, a NOWA klatka nosi nazwę `la2.fits` (inny folder filtru) - dwie klatki pod jedną
+    nazwą. Zwraca id `la6`."""
+    con.execute("UPDATE frame SET retired_at = ? WHERE id IN (?, ?)", (NOW, i["la1"], i["la2"]))
+    con.commit()
+    la6 = _klatka(con, tmp_path, "la6.fits", kind="light", config_id=10, object_id=1, filter_canon="Ha")
+    _klatka(con, tmp_path, "la2.fits", kind="light", config_id=10, object_id=1, filter_canon="OIII", sub="inny")
+    return la6
+
+
+def test_manifest_obiektu_sumuje_nazwy_zestawu_wydanego_ponownie(obiekt, tmp_path):
+    """Ponowne wydanie TEGO SAMEGO zestawu: pliki poprzedniego zostają w folderze, więc ich nazwy
+    zostają w `names` (suma map); ta sama nazwa dwóch różnych klatek → `None`. Reszta wpisu - z wydania
+    bieżącego."""
+    con, i = obiekt
+    cel = str(tmp_path / "_WBPP" / "karta")
+    pierwszy = projection.plan_object(con, 1, config_id=10)
+    root = projection.object_root(cel, pierwszy)
+    projection.apply(pierwszy, root, do_apply=True, now="T1", manifest=projection.object_manifest(pierwszy))
+    la6 = _drugie_wydanie_zestawu(con, tmp_path, i)
+    drugi = projection.plan_object(con, 1, config_id=10)
+    projection.apply(drugi, root, do_apply=True, now="T2", manifest=projection.object_manifest(drugi))
+    zestaw = _manifest(root)["zestawy"]["A140R_ASI2600MM"]
+    assert zestaw["names"] == {"la1.fits": i["la1"], "la2.fits": None, "la3.fits": i["la3"],
+                               "la4.fits": i["la4"], "la6.fits": la6}
+    assert zestaw["ts"] == "T2" and zestaw["lights"] == drugi.info["zestawy"]["A140R_ASI2600MM"]["lights"]
+    assert "la1.fits" not in projection.object_manifest(drugi)["zestawy"]["A140R_ASI2600MM"]["names"]
+
+
+def test_manifest_obiektu_anulowane_wydanie_tez_wnosi_nazwy(obiekt, tmp_path):
+    """Wydanie anulowane po którejkolwiek stronie wnosi swoje nazwy do sumy: zostawia na dysku część
+    plików, a nazwa pliku, którego nie ma, niczego w historii WBPP nie dopasuje."""
+    con, i = obiekt
+    cel = str(tmp_path / "_WBPP" / "karta")
+    pierwszy = projection.plan_object(con, 1, config_id=10)
+    root = projection.object_root(cel, pierwszy)
+    done = []
+    projection.apply(pierwszy, root, do_apply=True, now="T1", manifest=projection.object_manifest(pierwszy),
+                     progress=lambda *a: done.append(a), should_cancel=lambda: len(done) >= 1)
+    la6 = _drugie_wydanie_zestawu(con, tmp_path, i)
+    drugi = projection.plan_object(con, 1, config_id=10)
+    projection.apply(drugi, root, do_apply=True, now="T2", manifest=projection.object_manifest(drugi),
+                     should_cancel=lambda: True)
+    zestaw = _manifest(root)["zestawy"]["A140R_ASI2600MM"]
+    assert zestaw["cancelled"] is True and zestaw["names"] == {
+        "la1.fits": i["la1"], "la2.fits": None, "la3.fits": i["la3"], "la4.fits": i["la4"], "la6.fits": la6}
+
+
+def test_merge_names_suma_i_kolizje():
+    stare = {"a": 1, "b": 2, "c": None, "d": 4}
+    nowe = {"b": 2, "c": 3, "d": 5, "e": None, "f": 6}
+    assert projection._merge_names(stare, nowe) == {"a": 1, "b": 2, "c": None, "d": None, "e": None, "f": 6}
+    assert stare == {"a": 1, "b": 2, "c": None, "d": 4}                  # nowa mapa, wejście nietknięte
 
 
 def test_manifest_obiektu_zapomina_zestaw_skasowany_z_dysku(obiekt, tmp_path):
@@ -876,6 +945,53 @@ def test_apply_obiektu_kolizja_nazwy_pliku_daje_conflict(obiekt, tmp_path):
     assert (statusy[i["la1"]], statusy[drugi]) == ("linked", "conflict")
 
 
+def test_apply_obiektu_zaklada_wyjscie_wbpp_tylko_przy_apply(obiekt, tmp_path):
+    """`<korzeń wydania>\\out` powstaje razem z wydaniem (`apply`), nie w DRY i nie dla układów
+    kolumnowych - okno żniw szuka tam wyników WBPP tego wydania."""
+    con, i = obiekt
+    p = projection.plan_object(con, 1)
+    root = projection.object_root(str(tmp_path / "_WBPP" / "karta"), p)
+    projection.apply(p, root, do_apply=False)
+    assert not os.path.exists(root)
+    projection.apply(p, root, do_apply=True, now=NOW, manifest=projection.object_manifest(p))
+    assert os.path.isdir(os.path.join(root, projection.OUTPUT_DIR)) and projection.OUTPUT_DIR == "out"
+    kolumnowy = str(tmp_path / "_WBPP" / "kolumny")
+    projection.apply(projection.plan(con, [i["la1"]], "po-obiektach"), kolumnowy, do_apply=True, now=NOW)
+    assert not os.path.exists(os.path.join(kolumnowy, projection.OUTPUT_DIR))
+
+
+def test_object_manifest_nazwy_lightow_wydania_i_kolizja_nazwy(obiekt, tmp_path):
+    """`names` = nazwy plików, pod którymi WBPP dostał lighty TEGO wydania (bez pominiętych bez kopii
+    i bez masterów/surowych flatów); ta sama nazwa dwóch klatek w zestawie to `None`, nie wybór."""
+    con, i = obiekt
+    drugi = _klatka(con, tmp_path, "la1.fits", kind="light", config_id=10, object_id=1,
+                    filter_canon="OIII", sub="inny")
+    man = projection.object_manifest(projection.plan_object(con, 1))
+    assert man["zestawy"]["A140R_ASI2600MM"]["names"] == {
+        "la1.fits": None, "la2.fits": i["la2"], "la3.fits": i["la3"], "la4.fits": i["la4"]}
+    assert man["zestawy"]["A140R_ASI2600MC"]["names"] == {"lc1.fits": i["lc1"]}
+    assert drugi not in man["zestawy"]["A140R_ASI2600MM"]["names"].values()
+
+
+@pytest.mark.parametrize("wskazany, korzen", [
+    (r"R:\ASTRO_\_WBPP\OBJECTS", r"R:\ASTRO_\_WBPP"),
+    (r"R:\ASTRO_", r"R:\ASTRO_\_WBPP"),
+    (r"R:\ASTRO_\_Review", r"R:\ASTRO_\_Review\_WBPP"),
+    ("R:/ASTRO_/_wbpp/OBJECTS/IC1795/", r"R:\ASTRO_\_wbpp"),
+])
+def test_work_wbpp_root_pierwszy_segment_wbpp_albo_dopisany(wskazany, korzen):
+    """Folder roboczy WBPP: pierwszy segment `_WBPP` (bez wielkości liter) wskazanej ścieżki włącznie,
+    inaczej `<wskazany>\\_WBPP` - także pod innym segmentem wykluczonym (`_Review`)."""
+    assert projection.work_wbpp_root(wskazany) == korzen
+    assert projection.WBPP_DIR.lower() in EXCLUDED_DIR_NAMES
+
+
+def test_work_wbpp_root_nie_dotyka_dysku(tmp_path):
+    wskazany = tmp_path / "ASTRO_"
+    assert projection.work_wbpp_root(str(wskazany)) == str(wskazany / "_WBPP")
+    assert not wskazany.exists()
+
+
 def test_manifest_starych_ukladow_bajt_w_bajt(tmp_path):
     """Kształt manifestu układów kolumnowych bez zmian po wejściu `layout_segments`: ten sam zestaw
     kluczy w tej samej kolejności i ten sam tekst JSON co przed wydaniem obiektu."""
@@ -910,9 +1026,15 @@ def _master_dst(tmp_path, name="MASTERFLAT_FLATGRP_202305070_FILTER_CLS_.xisf"):
     return str(tmp_path / "arch" / "CALIBRATION" / "masters" / "flats" / "Z" / "CLS" / name)
 
 
+def _lib(tmp_path):
+    """Korzeń archiwum klingi (`library_root`): biblioteki `CALIBRATION` i `STACKS` leżą pod nim."""
+    return str(tmp_path / "arch")
+
+
 def test_copy_master_publikuje_bez_part_i_z_czasem_zrodla(tmp_path):
     src, dst = _master_src(tmp_path), _master_dst(tmp_path)
-    assert projection.copy_master(src, dst, expected_sha1=hashing.sha1_of(src)) == ("placed", None)
+    assert projection.copy_master(src, dst, expected_sha1=hashing.sha1_of(src),
+                                  library_root=_lib(tmp_path)) == ("placed", None)
     assert open(dst, "rb").read() == open(src, "rb").read()
     assert not os.path.exists(dst + ".part")
     assert abs(os.stat(dst).st_mtime_ns - os.stat(src).st_mtime_ns) < 1_000_000
@@ -924,7 +1046,7 @@ def test_copy_master_verify_bad_zdejmuje_part_i_nie_tyka_celu(tmp_path):
     src, dst = _master_src(tmp_path), _master_dst(tmp_path)
     plan_sha = hashing.sha1_of(src)
     open(src, "ab").write(b"zmiana-po-sondzie")
-    status, why = projection.copy_master(src, dst, expected_sha1=plan_sha)
+    status, why = projection.copy_master(src, dst, expected_sha1=plan_sha, library_root=_lib(tmp_path))
     assert status == "verify_bad" and plan_sha in why
     assert not os.path.exists(dst) and not os.path.exists(dst + ".part")
 
@@ -933,7 +1055,8 @@ def test_copy_master_cel_istnieje_conflict_bez_nadpisania(tmp_path):
     src, dst = _master_src(tmp_path), _master_dst(tmp_path)
     os.makedirs(os.path.dirname(dst))
     open(dst, "wb").write(b"CUDZY")
-    assert projection.copy_master(src, dst, expected_sha1=hashing.sha1_of(src))[0] == "conflict"
+    assert projection.copy_master(src, dst, expected_sha1=hashing.sha1_of(src),
+                                  library_root=_lib(tmp_path))[0] == "conflict"
     assert open(dst, "rb").read() == b"CUDZY" and not os.path.exists(dst + ".part")
 
 
@@ -946,7 +1069,7 @@ def test_copy_master_wyscig_cel_powstal_przed_publikacja(tmp_path):
         open(dst, "wb").write(b"RECZNY")
         return hashing.sha1_of(part)
     status, why = projection.copy_master(src, dst, expected_sha1=hashing.sha1_of(src),
-                                         sha1_fn=sha1_z_wyscigiem)
+                                         library_root=_lib(tmp_path), sha1_fn=sha1_z_wyscigiem)
     assert (status, why) == ("conflict", f"{dst} (rename: FileExistsError)")
     assert open(dst, "rb").read() == b"RECZNY" and not os.path.exists(dst + ".part")
 
@@ -955,25 +1078,53 @@ def test_copy_master_lezacy_part_to_conflict_nie_nadpisanie(tmp_path):
     src, dst = _master_src(tmp_path), _master_dst(tmp_path)
     os.makedirs(os.path.dirname(dst))
     open(dst + ".part", "wb").write(b"PRZERWANA")
-    status, why = projection.copy_master(src, dst, expected_sha1=hashing.sha1_of(src))
+    status, why = projection.copy_master(src, dst, expected_sha1=hashing.sha1_of(src),
+                                         library_root=_lib(tmp_path))
     assert (status, why) == ("conflict", dst + projection.PART_SUFFIX)
     assert open(dst + ".part", "rb").read() == b"PRZERWANA" and not os.path.exists(dst)
 
 
 def test_copy_master_brak_zrodla_error_bez_part(tmp_path):
     dst = _master_dst(tmp_path)
-    status, why = projection.copy_master(str(tmp_path / "brak.xisf"), dst, expected_sha1="x")
+    status, why = projection.copy_master(str(tmp_path / "brak.xisf"), dst, expected_sha1="x",
+                                         library_root=_lib(tmp_path))
     assert status == "error" and "FileNotFoundError" in why
     assert not os.path.exists(dst) and not os.path.exists(dst + ".part")
 
 
 @pytest.mark.parametrize("cel", [os.path.join("arch", "LIGHTS", "M.xisf"),
                                  os.path.join("arch", "CALIBRATION", "..", "LIGHTS", "M.xisf"),
-                                 os.path.join("arch", "LIGHTS", "CALIBRATION")])
-def test_copy_master_guard_segmentu_calibration(tmp_path, cel):
+                                 os.path.join("arch", "LIGHTS", "CALIBRATION"),
+                                 os.path.join("arch", "LIGHTS", "X", "stacks", "M.xisf"),
+                                 os.path.join("arch", "STACKS", "..", "LIGHTS", "M.xisf"),
+                                 os.path.join("arch", "STACKS.xisf"),
+                                 os.path.join("inne", "STACKS", "X", "M.xisf"),
+                                 os.path.join("arch", "inne", "CALIBRATION", "M.xisf")])
+def test_copy_master_guard_biblioteki_pod_korzeniem_archiwum(tmp_path, cel):
+    """Cel MUSI leżeć pod `<library_root>\\CALIBRATION` albo `<library_root>\\STACKS` - segment
+    BEZPOŚREDNIO pod korzeniem, po normalizacji: `…\\LIGHTS\\X\\stacks\\` to folder roboczy przy
+    obiekcie, `STACKS\\..\\LIGHTS` pisze do lightów, a `STACKS` pod innym korzeniem to nie archiwum."""
     src = _master_src(tmp_path)
-    with pytest.raises(ValueError, match="CALIBRATION"):
-        projection.copy_master(src, str(tmp_path / cel), expected_sha1=hashing.sha1_of(src))
+    with pytest.raises(ValueError, match="CALIBRATION albo STACKS"):
+        projection.copy_master(src, str(tmp_path / cel), expected_sha1=hashing.sha1_of(src),
+                               library_root=_lib(tmp_path))
+    assert not os.path.exists(tmp_path / "arch") and not os.path.exists(tmp_path / "inne")
+
+
+@pytest.mark.parametrize("pod", [("STACKS", "IC1795", "A140R_2600MM", "Ha"), ("stacks", "X"),
+                                 ("calibration", "masters", "flats", "Z", "CLS")])
+def test_copy_master_do_bibliotek_archiwum_bez_wielkosci_liter(tmp_path, pod):
+    src = _master_src(tmp_path)
+    dst = str(tmp_path.joinpath("arch", *pod, "M.xisf"))
+    assert projection.copy_master(src, dst, expected_sha1=hashing.sha1_of(src),
+                                  library_root=str(tmp_path / "ARCH" / ".")) == ("placed", None)
+
+
+def test_copy_master_bez_korzenia_archiwum_odmawia(tmp_path):
+    src = _master_src(tmp_path)
+    with pytest.raises(ValueError, match="library_root"):
+        projection.copy_master(src, _master_dst(tmp_path), expected_sha1=hashing.sha1_of(src),
+                               library_root=None)
     assert not os.path.exists(tmp_path / "arch")
 
 
@@ -996,7 +1147,8 @@ def test_copy_master_fsync_part_przed_audytem_i_publikacja(tmp_path, monkeypatch
         return hashing.sha1_of(part)
     monkeypatch.setattr(os, "fsync", fsync)
     monkeypatch.setattr(os, "rename", rename)
-    assert projection.copy_master(src, dst, expected_sha1=hashing.sha1_of(src), sha1_fn=sha1)[0] == "placed"
+    assert projection.copy_master(src, dst, expected_sha1=hashing.sha1_of(src), library_root=_lib(tmp_path),
+                                  sha1_fn=sha1)[0] == "placed"
     part = dst + projection.PART_SUFFIX
     assert zdarzenia == [("fsync", os.path.getsize(src)), ("sha1", part), ("rename", part)]
 
@@ -1005,7 +1157,8 @@ def test_copy_master_rodzic_celu_jest_plikiem_to_error_nie_conflict_part(tmp_pat
     src, dst = _master_src(tmp_path), _master_dst(tmp_path)
     os.makedirs(os.path.dirname(os.path.dirname(dst)))
     open(os.path.dirname(dst), "wb").write(b"PLIK-ZAMIAST-KATALOGU")
-    status, why = projection.copy_master(src, dst, expected_sha1=hashing.sha1_of(src))
+    status, why = projection.copy_master(src, dst, expected_sha1=hashing.sha1_of(src),
+                                         library_root=_lib(tmp_path))
     assert status == "error" and why.startswith("FileExistsError")
 
 
@@ -1020,10 +1173,11 @@ def test_copy_master_zrodlo_tylko_do_odczytu_i_wyscig_nie_zostawia_part(tmp_path
             open(dst, "wb").write(b"RECZNY")
             return hashing.sha1_of(part)
         status, _ = projection.copy_master(src, dst, expected_sha1=hashing.sha1_of(src),
-                                           sha1_fn=sha1_z_wyscigiem)
+                                           library_root=_lib(tmp_path), sha1_fn=sha1_z_wyscigiem)
         assert status == "conflict" and not os.path.exists(dst + projection.PART_SUFFIX)
         drugi = _master_dst(tmp_path, "MASTERFLAT_FLATGRP_202305071_FILTER_CLS_.xisf")
-        assert projection.copy_master(src, drugi, expected_sha1=hashing.sha1_of(src))[0] == "placed"
+        assert projection.copy_master(src, drugi, expected_sha1=hashing.sha1_of(src),
+                                      library_root=_lib(tmp_path))[0] == "placed"
         assert os.access(drugi, os.W_OK)
         assert abs(os.stat(drugi).st_mtime_ns - os.stat(src).st_mtime_ns) < 1_000_000
     finally:

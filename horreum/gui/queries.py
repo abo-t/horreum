@@ -3984,6 +3984,65 @@ def frame_by_sha1_data(con, sha1):
         "FROM frame f WHERE f.sha1_data = ?", (sha1,)).fetchone()
     return None if r is None else (r["frame_id"], r["path"], r["retired_at"])
 
+# --- ŻNIWA STOSÓW: kopie, tożsamość i fakty lightów wejściowych (rdzeń `horreum/harvest.py`) ---
+
+def present_paths_by_sha1_data(con, sha1):
+    """Ścieżki WSZYSTKICH obecnych kopii klatki o tej tożsamości danych (ORDER BY location_id); brak
+    klatki albo brak obecnej kopii → `[]`. Żniwa stosu pytają, czy któraś leży w bibliotece `STACKS`
+    archiwum - stos wciągnięty drogą „Stosy” z drzewa obróbki jest znany bazie, a w archiwum go nie ma -
+    i czy plik siedziby jest już kopią znaną bazie (`frame_by_sha1_data` oddaje tylko pierwszą)."""
+    return [r["path"] for r in con.execute(
+        "SELECT l.path FROM frame f JOIN location l ON l.frame_id = f.id AND l.present = 1 "
+        "WHERE f.sha1_data = ? ORDER BY l.id", (sha1,))]
+
+
+def light_copies(con, frame_ids):
+    """`{frame_id: [ścieżki WSZYSTKICH obecnych kopii]}` (ORDER BY location_id) dla każdej podanej
+    klatki - także `[]`, gdy obecnej kopii nie ma. Siedziba stosu to ogon katalogu lightów pod `LIGHTS`
+    (każda kopia głosuje, pierwsza obecna bywa poza archiwum), a stare manifesty wydania bez nazw
+    plików biorą nazwy wejść stąd. frame_ids jako tablica JSON (`json_each`)."""
+    out = {int(f): [] for f in frame_ids}
+    for r in con.execute(
+            "SELECT l.frame_id, l.path FROM location l "
+            "WHERE l.present = 1 AND l.frame_id IN (SELECT value FROM json_each(?)) "
+            "ORDER BY l.frame_id, l.id", (json.dumps(sorted(out)),)):
+        out[r["frame_id"]].append(r["path"])
+    return out
+
+
+def light_facts(con, frame_ids):
+    """Fakty lightów, z którymi żniwa porównują nagłówek stosu: `{frame_id: {kind, filter_canon,
+    exptime, config_id, telescope_canon, camera_canon}}`. `telescope_canon` = `telescop_canon`
+    teleskopu configu klatki (ten, który nadał grouper z `TELESCOP.strip()`, przed scaleniem osi -
+    WBPP przepisuje do stosu kartę pierwszej klatki, nie kanon po scaleniu), `camera_canon` = model
+    kamery klatki (`normalize_camera` z `INSTRUME`). Nieznany id nie wraca - wołający widzi brak."""
+    out = {}
+    for r in con.execute(
+            "SELECT f.id AS frame_id, f.kind, f.filter_canon, h.exptime, f.config_id, "
+            "       t.telescop_canon AS telescope_canon, cam.model_canon AS camera_canon "
+            "FROM frame f "
+            "LEFT JOIN header h ON h.frame_id = f.id "
+            "LEFT JOIN config c ON c.id = f.config_id "
+            "LEFT JOIN telescope t ON t.id = c.telescope_id "
+            "LEFT JOIN camera cam ON cam.id = f.camera_id "
+            "WHERE f.id IN (SELECT value FROM json_each(?)) ORDER BY f.id",
+            (json.dumps(sorted(int(i) for i in frame_ids)),)):
+        out[r["frame_id"]] = {k: r[k] for k in ("kind", "filter_canon", "exptime", "config_id",
+                                                "telescope_canon", "camera_canon")}
+    return out
+
+
+def location_paths_in_dir(con, directory):
+    """Ścieżki lokacji (obecnych i nie) leżących BEZPOŚREDNIO w `directory` - nazwy zajęte w bazie,
+    zanim nowy plik dostanie tę samą ścieżkę (kopia skasowana z dysku dalej trzyma nazwę: plik pod
+    nią byłby dla skanu podmianą znanej lokacji). Porównanie bez wielkości liter, jak NTFS: `LIKE`
+    zawęża po prefiksie (`!` ucieka `%`, `_` i sam siebie), katalog rozstrzyga Python."""
+    katalog = os.path.normcase(os.path.normpath(str(directory)))
+    wzor = re.sub(r"([!%_])", r"!\1", os.path.normpath(str(directory)) + os.sep) + "%"
+    return [r["path"] for r in con.execute(
+        "SELECT path FROM location WHERE path LIKE ? ESCAPE '!' ORDER BY id", (wzor,))
+        if os.path.normcase(os.path.dirname(os.path.normpath(r["path"]))) == katalog]
+
 # --- TODO-DŁUG (z kolejki sesji, dieta 2026-08-10; pełne brzmienia: archiwum aa) ---
 # TODO-DŁUG(P4-1): unresolved_reason to werdykt ZAMROŻONY - 11 stosów niosło no_object dobę po
 #   nadaniu obiektów ręką. Kubełek liczyć ze STANU (obiekt jest => no_object nie ma prawa się

@@ -1,10 +1,28 @@
-"""Okno „Wciągnij mastery…” - żniwa masterów z wyjścia WBPP do biblioteki kalibracji archiwum.
+"""Okno „Wciągnij wyniki WBPP” - żniwa masterów flat i stosów z wyjścia WBPP do bibliotek archiwum.
 
-Okno odpowiada na jedno pytanie: które pliki z katalogu wyjścia WBPP są masterami, które Horreum
-umie przypiąć do swoich surowych flatów, dokąd pójdą i pod jaką nazwą. Odpowiedź liczy Qt-wolny
-rdzeń `horreum.harvest` (plan bez mutacji, kopia przez klingę `projection.copy_master`); tu jest
-glue widżetów wzorem okna wydania (`projection_dialog`): auto-DRY w wątku tła z licznikiem
-generacji, apply w wątku tła z anulowaniem na granicy pliku, `off_thread=False` jako seam testowy.
+Okno odpowiada na jedno pytanie: które pliki z katalogu wyjścia WBPP Horreum umie przypiąć do
+swoich klatek (master flat do surowych flatów, stos do lightów wydania), dokąd pójdą i pod jaką
+nazwą. Odpowiedź liczy Qt-wolny rdzeń `horreum.harvest` (plan bez mutacji, kopia przez klingę
+`projection.copy_master`); tu jest glue widżetów wzorem okna wydania (`projection_dialog`): auto-DRY
+w wątku tła z licznikiem generacji, apply w wątku tła z anulowaniem na granicy pliku,
+`off_thread=False` jako seam testowy.
+
+LISTA WYDAŃ nad polem wyjścia, bo człowiek nie pamięta, gdzie WBPP oddał wyniki: wydanie obiektu
+kładzie wyjście w `<karta>\\OBJECTS\\<obiekt>\\out`, a karty zna gospodarz (folder roboczy WBPP
+i karty celu wydania). Stan wiersza (`harvest.releases`) liczy się z dysku i z TREŚCI zeznań żniw,
+nie z pamięci okna - w wątku tła z własnym licznikiem generacji, bo to spacer po drzewach kart,
+także po SMB. Na starcie zaznacza się najnowsze wydanie z czymś do wciągnięcia, a wybór wiersza
+to pole wyjścia i auto-DRY - do kopii zostaje jeden klik. Po każdym biegu lista liczy się
+ponownie; wiersz bez niczego do wciągnięcia mówi, że folder wydania można skasować, i otwiera go -
+okno niczego nie kasuje. Wybór wiersza ani wynik listy nie przestawiają pola, które człowiek już
+wskazał sam: pole jest prawdą, zaznaczenie listy idzie za nim.
+
+STOSY idą do `<archiwum>\\STACKS`, nie pod `CALIBRATION`, więc korzeń przyjęcia przy stosie to korzeń
+archiwum (sito `STACKS` łańcucha Dostawy), a nie wspólny rodzic kopii. Dokładny zbiór wejść stosu
+(`frame_ids` planu) wraca do gospodarza w `harvested_stacks` - rodowód zapisuje on po łańcuchu,
+okno bazy nie tyka. Przyjąć można też kopie, które leżą w archiwum, a których baza nie zna (`exists`
+z `known_to_db=False`: wciągnięte w innym oknie bez przyjęcia) - bieg bez nowej kopii też ma wtedy
+co oddać Dostawie.
 
 DRY idzie w tle, bo plan czyta pliki: master to ~100 MB, a jego tożsamość (`sha1_data`,
 `file_sha1`) liczy się z całych bajtów - kilka masterów na SMB to sekundy, w których okno nie
@@ -16,27 +34,29 @@ najwyżej na jeden plik. Tekst pola różny od sondowanego wyszarza tabelę: pod
 o katalogu, którego w polu już nie ma.
 
 Dwa przyciski, każdy z jedną rolą: „Wciągnij N” (domyślny, kopie) i „Zamknij i przyjmij do
-archiwum” (widoczny od pierwszego wciągniętego mastera). Żaden nie zmienia znaczenia na
+archiwum” (widoczny od pierwszej kopii do przyjęcia). Żaden nie zmienia znaczenia na
 zdarzeniu z tła - przycisk, który pod kursorem zamienia się z kopii w zamknięcie okna, łapie
 klik przeznaczony dla poprzedniej roli. Enter nigdy nie przyjmuje: w polu potwierdza ścieżkę,
 w reszcie okna trafia w „Wciągnij”, który bez świeżego planu jest wygaszony.
 
 Okno NIE uruchamia łańcucha Dostawy: bieg etapów ma jednego właściciela (`PipelineView`).
-Wynik dla gospodarza to dwa atrybuty: `summary` (zdanie na pasek stanu) i `harvested_root`
-(korzeń do przyjęcia). Ten drugi ustawia WYŁĄCZNIE gest „Zamknij i przyjmij do archiwum” i tylko
-wtedy, gdy korzeń leży pod `<archiwum>\\CALIBRATION` - stąd archiwum zamrożone od pierwszej kopii:
-dwa archiwa w jednym oknie dałyby korzeń, którego Dostawa nie powinna skanować. Zwykłe
-„Zamknij” zostawia mastery na dysku i mówi w `summary`, kiedy baza je pozna.
+Wynik dla gospodarza to trzy atrybuty: `summary` (zdanie na pasek stanu), `harvested_root`
+(korzeń do przyjęcia) i `harvested_stacks` (stosy wciągnięte w tym oknie ze zbiorem wejść). Dwa
+ostatnie ustawia WYŁĄCZNIE gest „Zamknij i przyjmij do archiwum” i tylko wtedy, gdy kopie leżą
+w bibliotekach archiwum okna (`CALIBRATION`, `STACKS`) - stąd archiwum zamrożone od pierwszej kopii
+do przyjęcia: dwa archiwa w jednym oknie dałyby korzeń, którego Dostawa nie powinna skanować.
+Zwykłe „Zamknij” zostawia kopie na dysku i mówi w `summary`, kiedy baza je pozna - instrukcja
+przed ścieżką, bo pasek stanu ucina koniec zdania.
 
 Prawda o biegu przychodzi z POSTĘPU, nie z wyniku: katalogi wciągniętych kopii i liczniki
 kłopotów zbiera `_on_apply_progress`, więc wyjątek rdzenia po kopiach (gałąź `failed`, bez
 wyniku) dalej pokazuje, co leży w archiwum, i pozwala to przyjąć. Zeznanie `_ZNIWA_<ts>.json`,
 którego nie udało się zapisać, to ostrzeżenie przy kopiach, które leżą - nie błąd kopii.
 
-Powody przeglądu i statusy jadą LITERALNYMI mapami `_HARVEST_REASONS` / `_HARVEST_STATUS` (wzór
-`pipeline._REVIEW_REASONS`): kolektor kluczy i18n widzi tylko literały, a parytet map z rdzeniem
-(`harvest.REASONS`, `harvest.STATUSES`) i z katalogiem pilnuje test tego okna. Plik na whiteliście
-`test_gui_isolation` (warstwa widżetów)."""
+Powody przeglądu, statusy i rodzaje jadą LITERALNYMI mapami `_HARVEST_REASONS` / `_STACK_REASONS` /
+`_HARVEST_STATUS` / `_HARVEST_KINDS` (wzór `pipeline._REVIEW_REASONS`): kolektor kluczy i18n widzi
+tylko literały, a parytet map z rdzeniem (`harvest.REASONS`, `harvest.STATUSES`) i z katalogiem
+pilnuje test tego okna. Plik na whiteliście `test_gui_isolation` (warstwa widżetów)."""
 
 from __future__ import annotations
 
@@ -44,8 +64,10 @@ import dataclasses
 import os
 import threading
 from collections import Counter
+from datetime import datetime
 
-from PySide6.QtCore import QEvent, QObject, QSettings, Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QEvent, QObject, QSettings, Qt, QThread, QTimer, QUrl, Signal, Slot
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView, QDialog, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QProgressBar, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
@@ -77,6 +99,26 @@ _HARVEST_REASONS = {
     "outside_release": "harvest.reason.outside_release",
     "no_config": "harvest.reason.no_config",
     "name_taken": "harvest.reason.name_taken",
+    "no_release": "harvest.reason.no_release",
+    "no_light_seat": "harvest.reason.no_light_seat",
+    "color_unknown": "harvest.reason.color_unknown",
+    "foreign_calibration": "harvest.reason.foreign_calibration",
+}
+
+# Powód STOSU, którego zdanie różni się od zdania tego samego tokenu przy master flacie. Stos
+# z wejściami spoza wydania ma receptę (skopiować ręką do `STACKS`, Dostawa go weźmie) i liczbę
+# wejść; master flat spoza wydania nie ma ani jednego, ani drugiego. Klucze ⊆ `harvest.REASONS`.
+_STACK_REASONS = {
+    "outside_release": "harvest.reason.outside_release_stack",
+}
+
+# Rodzaj pozycji (`HarvestItem.kind`, ten sam, który nada skan kopii) → słowo kolumny „Rodzaj”.
+# Rodzaj spoza mapy (master z nagłówkiem surowej klatki) renderuje się tokenem, jak status.
+_HARVEST_KINDS = {
+    "master_flat": "harvest.kind.master_flat",
+    "master_light": "harvest.kind.master_light",
+    "master_dark": "harvest.kind.master_dark",
+    "unknown": "harvest.kind.unknown",
 }
 
 # Status pozycji (plan i apply) → słowo w tabeli. Ta sama zasada literalności; parytet
@@ -96,13 +138,21 @@ _HARVEST_STATUS = {
 _TROUBLE_KEYS = (("conflict", "harvest.sum_conflict"), ("error", "harvest.sum_error"),
                  ("verify_bad", "harvest.verify_bad_tail"))
 
-# Kolumny tabeli. Powód TRZECI: to jedyna kolumna, która mówi, CO się nie zgadza, więc stoi przy
-# pliku i stanie, a nie za dwiema ścieżkami - przy oknie węższym niż treść ścieżki przewijają się
-# w bok, powód zostaje w kadrze (`_fit_columns`).
-COL_FILE, COL_STATUS, COL_REASON, COL_NAME, COL_DIR, COL_RELEASE = range(6)
-_HEADERS = ("harvest.col.file", "harvest.col.status", "harvest.col.reason", "harvest.col.name",
-            "harvest.col.dir", "harvest.col.release")
+# Kolumny tabeli. Powód przed ścieżkami: to jedyna kolumna, która mówi, CO się nie zgadza, więc
+# stoi przy pliku i stanie, a nie za dwiema ścieżkami - przy oknie węższym niż treść ścieżki
+# przewijają się w bok, powód zostaje w kadrze (`_fit_columns`). Rodzaj (krótkie słowo) stoi przy
+# pliku z tego samego powodu: za ścieżkami wypadałby z kadru.
+COL_FILE, COL_KIND, COL_STATUS, COL_REASON, COL_NAME, COL_DIR, COL_RELEASE = range(7)
+_HEADERS = ("harvest.col.file", "harvest.col.kind", "harvest.col.status", "harvest.col.reason",
+            "harvest.col.name", "harvest.col.dir", "harvest.col.release")
 _SCREEN_SHARE = 0.9                      # okno rośnie pod treść tabeli najwyżej do tej części ekranu
+
+# Lista wydań: kolumny i wysokość. Lista stoi NAD polem i nie może zjeść tabeli pozycji - widać
+# najwyżej tyle wierszy, dalej przewija się sama.
+REL_OBJECT, REL_CARD, REL_DATE, REL_STATE = range(4)
+_REL_HEADERS = ("harvest.rel.col.object", "harvest.rel.col.card", "harvest.rel.col.date",
+                "harvest.rel.col.state")
+_REL_VISIBLE_ROWS = 4
 
 
 # ---------------------------------------------------------------- pomocniki Qt-WOLNE (testowane wprost)
@@ -160,16 +210,26 @@ def status_text(status):
     return i18n.t(key) if key else status
 
 
+def kind_text(kind):
+    """Słowo kolumny „Rodzaj” (master flat, stos). Rodzaj spoza mapy renderuje się tokenem."""
+    key = _HARVEST_KINDS.get(kind)
+    return i18n.t(key) if key else (kind or "")
+
+
 def reason_text(item):
     """Kolumna „Powód” (Qt-wolne). `reason` to TOKEN rdzenia (`harvest.REASONS`) - zdanie z mapy
     z `reason_n` (ile wejść, profili, nazw); `detail` to dane od rdzenia: CO się nie zgadza
-    (nagłówek kontra profil), pierwsze nazwy nietrafionych wejść, wyjątek czytnika. Ekran pokazuje
-    oba, bo sama kategoria nie mówi, co poprawić. Po apply token jest pusty, a `detail` niesie
-    tekst klingi kopii (konflikt, błąd I/O). Pozycja `exists` bez obecnej kopii mówi to wprost -
-    pusta kolumna katalogu wyglądałaby jak błąd. Token spoza mapy renderuje się sam, nie pustką."""
+    (nagłówek kontra profil), pierwsze nazwy nietrafionych wejść, wyjątek czytnika, ścieżka
+    biblioteki `STACKS` albo cudzego mastera. Ekran pokazuje oba, bo sama kategoria nie mówi, co
+    poprawić - receptę niesie zdanie z katalogu, nie `detail` (dane rdzenia nie znają języka ekranu).
+    Stos bierze zdanie z `_STACK_REASONS`, gdy jego token ma tam własne. Po apply token jest pusty,
+    a `detail` niesie tekst klingi kopii (konflikt, błąd I/O). Pozycja `exists` bez obecnej kopii
+    mówi to wprost - pusta kolumna katalogu wyglądałaby jak błąd. Token spoza mapy renderuje się
+    sam, nie pustką."""
     detail = (item.detail or "").strip()
     if item.reason:
-        key = _HARVEST_REASONS.get(item.reason)
+        key = ((_STACK_REASONS.get(item.reason) if item.kind == "master_light" else None)
+               or _HARVEST_REASONS.get(item.reason))
         text = i18n.t(key, n=item.reason_n or 0) if key else item.reason
         return f"{text}: {detail}" if detail else text
     if detail:
@@ -233,6 +293,86 @@ def common_root(dirs):
         return os.path.commonpath(dirs)
     except ValueError:
         return None
+
+
+def plan_counts(items):
+    """`(do wciągnięcia, już w archiwum, do przeglądu)` świeżego planu - liczby wiersza listy, którego
+    `out` właśnie przeliczył podgląd."""
+    c = status_counts(items)
+    return c.get("would-place", 0), c.get("exists", 0), c.get("review", 0)
+
+
+def release_counts(row, fresh=None):
+    """`(niewciągnięte, wciągnięte, do przeglądu)` wiersza listy: ze świeżego planu (`plan_counts`),
+    gdy podgląd przeliczył `out` tego wiersza, inaczej z listy (`harvest.ReleaseRow`)."""
+    return fresh if fresh is not None else (row.pending, row.done, row.review)
+
+
+def release_state_text(row, fresh=None):
+    """Stan wiersza listy wydań: liczby (zera milczą), a bez żadnej - „czeka na WBPP”. Niewciągnięte
+    z listy to „do sprawdzenia”: lista zna zeznania żniw, nie plan - kandydat bez rozstrzygającego
+    zeznania może być równie dobrze przeglądem; „do wciągnięcia” mówi dopiero świeży plan (`fresh`).
+    Wydanie nowsze od wyników (`awaiting_wbpp`) zaczyna od „czeka na WBPP”, a wciągnięte z poprzednich
+    wyników są „poprzednio wciągnięte” - nie są wynikami OSTATNIEGO wydania."""
+    pending, done, review = release_counts(row, fresh)
+    parts = [i18n.t("harvest.rel.waiting")] if row.awaiting_wbpp else []
+    if pending:
+        parts.append(i18n.t("harvest.rel.pending", n=pending) if fresh is not None
+                     else i18n.t("harvest.rel.unchecked", n=pending))
+    if done:
+        parts.append(i18n.t("harvest.rel.done_before", n=done) if row.awaiting_wbpp
+                     else i18n.t("harvest.rel.done", n=done))
+    if review:
+        parts.append(i18n.t("harvest.rel.review", n=review))
+    return " · ".join(parts) if parts else i18n.t("harvest.rel.waiting")
+
+
+def is_harvested(row, fresh=None):
+    """Folder wydania przestał być Horreum potrzebny: nic do wciągnięcia ani do przeglądu (pliki
+    przeglądu leżą tylko tam), coś wciągnięto, a wyniki są wynikami OSTATNIEGO wydania."""
+    pending, done, review = release_counts(row, fresh)
+    return pending == 0 and review == 0 and done > 0 and not row.awaiting_wbpp
+
+
+def needs_review(row, fresh=None):
+    """Nic do wciągnięcia, ale są pozycje do przeglądu - folderu nie wolno jeszcze kasować."""
+    pending, _done, review = release_counts(row, fresh)
+    return pending == 0 and review > 0
+
+
+def preselect_index(rows):
+    """Wiersz zaznaczany na starcie: najnowsze wydanie z kandydatami bez rozstrzygnięcia (rdzeń oddaje
+    listę od najnowszego) albo None. Wydanie czekające na WBPP bez takich kandydatów nie jest robotą."""
+    return next((i for i, r in enumerate(rows) if r.pending > 0), None)
+
+
+def release_date_text(ts):
+    """Data wydania z `ts` manifestu: czas LOKALNY `YYYY-MM-DD HH:MM` (manifest pisze UTC, człowiek
+    pamięta swój wieczór); nieczytelny znacznik pokazuje się surowy, brak - pusto."""
+    if not ts:
+        return ""
+    try:
+        dt = datetime.fromisoformat(str(ts))
+    except ValueError:
+        return str(ts)
+    if dt.tzinfo is not None:
+        dt = dt.astimezone()
+    return dt.strftime("%Y-%m-%d %H:%M")
+
+
+def release_roots_of(work_root, release_roots):
+    """Korzenie kart do listy wydań: folder roboczy pierwszy, potem karty celu; ta sama karta pod
+    dwiema pisowniami (`/` i `\\`, wielkość liter) liczy się raz - pierwsza pisownia zostaje."""
+    out, seen = [], set()
+    for root in ([work_root] if work_root else []) + list(release_roots or ()):
+        root = str(root or "").strip()
+        if not root:
+            continue
+        key = norm_path(os.path.abspath(root))
+        if key not in seen:
+            seen.add(key)
+            out.append(os.path.normpath(root))
+    return tuple(out)
 
 
 # ---------------------------------------------------------------- worker DRY (wątek tła)
@@ -334,22 +474,57 @@ class HarvestApplyWorker(QObject):
         self.progress.emit(done, total, dst, status)
 
 
+# ---------------------------------------------------------------- worker listy wydań (wątek tła)
+
+class HarvestReleasesWorker(QObject):
+    """Lista wydań z kart poza wątkiem GUI (`harvest.releases`: spacer po `OBJECTS` każdej karty,
+    `discover` w każdym `out` i odczyt zeznań żniw - bez bazy, więc bez własnego połączenia). Wynik
+    niesie GENERACJĘ startu - dialog odrzuca listę policzoną przed nowszym zamówieniem. Rdzeń nie
+    ma punktu przerwania, więc worker nie ma `request_cancel`: porzucona lista po prostu dobiega
+    końca i nikt jej nie odbiera. Funkcję bierze z modułu rdzenia W CHWILI biegu (seam testowy)."""
+
+    done = Signal(int, object)        # (generacja, [ReleaseRow])
+    failed = Signal(int, str)         # (generacja, komunikat)
+    finished = Signal()
+
+    def __init__(self, roots, gen):
+        super().__init__()
+        self._roots = tuple(roots)
+        self._gen = gen
+
+    @Slot()
+    def run(self):
+        try:
+            rows = harvest.releases(self._roots)
+        except Exception as exc:                     # lista pada szczerze, nie cichą śmiercią wątku
+            self.failed.emit(self._gen, f"{type(exc).__name__}: {exc}")
+        else:
+            self.done.emit(self._gen, rows)
+        finally:
+            self.finished.emit()
+
+
 # ---------------------------------------------------------------- dialog
 
 class HarvestDialog(QDialog):
-    """Żniwa masterów: pole wyjścia WBPP z pamięci (`harvest/last_output`), wiersz archiwum
-    (`archive_root` od wołającego - domyślne archiwum podaje gospodarz), auto-DRY, tabela pozycji
-    planu, „Wciągnij N” i „Zamknij i przyjmij do archiwum”. `now_fn` = zegar (znacznik zeznania
-    `_ZNIWA_<ts>.json`); `off_thread=False` = oba workery inline (seam testowy, sygnały direct =
-    synchronicznie)."""
+    """Żniwa wyników WBPP: lista wydań z kart (`work_root` = folder roboczy WBPP, `release_roots` =
+    karty celu wydania; obie od gospodarza), pole wyjścia WBPP z pamięci (`harvest/last_output`),
+    wiersz archiwum (`archive_root` od wołającego - domyślne archiwum podaje gospodarz), auto-DRY,
+    tabela pozycji planu, „Wciągnij N” i „Zamknij i przyjmij do archiwum”. `now_fn` = zegar
+    (znacznik zeznania `_ZNIWA_<ts>.json`); `off_thread=False` = wszystkie workery inline (seam
+    testowy, sygnały direct = synchronicznie)."""
 
-    def __init__(self, con, *, now_fn, archive_root, off_thread=True, parent=None):
+    def __init__(self, con, *, now_fn, archive_root, work_root=None, release_roots=(),
+                 off_thread=True, parent=None):
         super().__init__(parent)
         self.con = con
         self._db_path = queries.db_path_of(con)
         self._now = now_fn
         root = str(archive_root or "").strip()
         self._archive_root = os.path.normpath(root) if root else ""
+        work = str(work_root or "").strip()
+        self._work_root = os.path.normpath(work) if work else ""
+        self._rel_roots = release_roots_of(self._work_root, release_roots)
         # Archiwum, które zna baza - JEDNO zapytanie przy otwarciu (tanie SQL, inline). Inne
         # archiwum w oknie to częsty błąd ręki (kopia archiwum w scratchu, stara karta): okno mówi
         # to przy wierszu „Archiwum”, zanim cokolwiek zostanie skopiowane.
@@ -367,25 +542,48 @@ class HarvestDialog(QDialog):
         self._apply_worker = None
         self._apply_seen = (0, 0)        # ostatni postęp - zdanie błędu mówi, ile przetworzono
         self._run_status = {}            # dst → status z postępu BIEŻĄCEGO biegu
-        self._placed_dirs = set()        # katalogi z ≥1 wciągniętym masterem, ze wszystkich biegów okna
-        self._placed_n = 0               # ile masterów wciągnęły wszystkie biegi okna (z postępu)
+        self._run_items = {}             # dst → pozycja planu BIEŻĄCEGO biegu (stos niesie wejścia)
+        self._placed_dirs = set()        # katalogi z ≥1 wciągniętą kopią, ze wszystkich biegów okna
+        self._placed_keys = set()        # `norm_path` celów wciągniętych kopii - wszystkie biegi okna
+        self._placed_n = 0               # ile plików wciągnęły wszystkie biegi okna (z postępu)
+        self._placed_stacks = {}         # sha1_data → frame_ids stosów wciągniętych w tym oknie
+        self._unknown = {}               # `norm_path` → ścieżka kopii w archiwum, której baza nie zna
+        self._unknown_stacks = {}        # sha1_data → frame_ids stosów leżących w archiwum bez wiedzy bazy
+        self._fresh = {}                 # `norm_path(out)` → `plan_counts` ostatniego podglądu tego wyjścia
         self._trouble = Counter()        # konflikty, błędy, niezgodne bajty - wszystkie biegi okna
-        self._summary_fact = None        # zdanie o biegach; `done` dokłada do niego los przyjęcia
+        self._ran = False                # okno puściło choć jeden bieg apply
+        self._last_counts = Counter()    # statusy ostatniego biegu (zdanie „nic nie wciągnięto”)
+        self._last_cancelled = 0         # nietknięte w ostatnim, przerwanym biegu
+        self._last_error = None          # wyjątek rdzenia ostatniego biegu
         self._close_after_apply = None   # kod zamknięcia zgłoszonego w biegu apply
         self._closing = False
         self._notice_state = ("", None)  # ostatni komunikat stanu - wraca, gdy pole przestaje odbiegać
         self.summary = None              # zdanie na pasek stanu gospodarza (None = nic się nie stało)
         self.harvested_root = None       # korzeń do przyjęcia - ustawia go WYŁĄCZNIE „Zamknij i przyjmij”
+        self.harvested_stacks = []       # [(sha1_data, frame_ids)] - razem z `harvested_root`, tym samym gestem
         self._shown_out = None           # wyjście WBPP pozycji w tabeli - kolumna pliku liczy się względem niego
         self._table_viewport = None      # viewport tabeli po budowie (filtr zdarzeń zmiany rozmiaru)
         self._first_pick_checked = False  # pierwsze użycie: wybór katalogu raz po pokazaniu (`showEvent`)
+        self._rel_gen = 0                # licznik generacji listy wydań - lista starszego zamówienia odpada
+        self._rel_thread = None
+        self._rel_worker = None
+        self._rel_pending = False        # zamówienie przyszło w biegu listy → świeża lista po sprzątnięciu
+        self._rel_started = False        # pierwsza lista przyszła (wybór startowy zrobiony albo oddany polu)
+        self._releases = []              # wiersze listy wydań w kolejności tabeli
         self.setWindowTitle(i18n.t("harvest.title"))
         self.setModal(True)
-        self.resize(980, 540)
+        self.resize(980, 600)
         self._build_ui()
         self._show_archive()
         self.edit_output.setText(str(self._settings().value("harvest/last_output", "") or ""))
-        self._on_output_edited()         # otwarcie z pamięci = zdarzenie dyskretne → auto-DRY
+        if self._rel_roots:
+            # Karty są: auto-DRY rusza dopiero z pierwszą listą (najnowsze wydanie z robotą albo
+            # pamięć pola) - inaczej sonda pamięci czytałaby mastery, które lista zaraz unieważni.
+            self._show_rel_notice(i18n.t("harvest.rel.probing"))
+            self._trigger_releases()
+        else:
+            self._show_rel_notice(i18n.t("harvest.rel.no_sources"))
+            self._on_output_edited()     # otwarcie z pamięci = zdarzenie dyskretne → auto-DRY
 
     # ---- budowa ----
     def _build_ui(self):
@@ -394,6 +592,52 @@ class HarvestDialog(QDialog):
         hint.setProperty("role", "secondary")
         hint.setWordWrap(True)
         v.addWidget(hint)
+
+        # Lista wydań z kart. Zdanie nad nią: brak kart, liczenie, pusta lista, błąd listy. Z kartami
+        # miejsce listy stoi od startu (zdanie o wysokości wiersza, pusta tabela, zarezerwowany wiersz
+        # „wciągnięte”): lista, która dochodzi z tła, nie spycha pola i przycisków pod kursorem - klik
+        # w „Wskaż…” trafiałby w wiersz listy.
+        reserve = bool(self._rel_roots)
+        self.rel_notice = QLabel("")
+        self.rel_notice.setWordWrap(True)
+        self.rel_notice.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.rel_notice.setMinimumHeight(self.rel_notice.fontMetrics().lineSpacing())
+        self.rel_notice.setVisible(False)
+        v.addWidget(self.rel_notice)
+        self.rel_table = QTableWidget(0, len(_REL_HEADERS))
+        self.rel_table.setHorizontalHeaderLabels([i18n.t(k) for k in _REL_HEADERS])
+        self.rel_table.verticalHeader().setVisible(False)
+        self.rel_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.rel_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.rel_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.rel_table.setWordWrap(False)
+        rh = self.rel_table.horizontalHeader()
+        rh.setSectionResizeMode(QHeaderView.ResizeToContents)
+        rh.setStretchLastSection(True)
+        self.rel_table.setMaximumHeight(
+            rh.sizeHint().height() + _REL_VISIBLE_ROWS * self.rel_table.verticalHeader().defaultSectionSize()
+            + 2 * self.rel_table.frameWidth())
+        self.rel_table.itemSelectionChanged.connect(self._on_release_selected)
+        self.rel_table.setVisible(reserve)
+        v.addWidget(self.rel_table)
+        # Wiersz zaznaczonego wydania bez niczego do wciągnięcia: zdanie (folder można skasować albo
+        # najpierw przegląd) i „Otwórz” - bez kasowania.
+        row_d = QHBoxLayout()
+        self.rel_done_note = QLabel(i18n.t("harvest.rel.done_note"))
+        self.rel_done_note.setProperty("role", "secondary")
+        self.rel_done_note.setWordWrap(True)
+        row_d.addWidget(self.rel_done_note, 1)
+        self.btn_open_release = QPushButton(i18n.t("harvest.rel.btn_open"))
+        self.btn_open_release.setAutoDefault(False)
+        self.btn_open_release.clicked.connect(self._on_open_release)
+        row_d.addWidget(self.btn_open_release)
+        v.addLayout(row_d)
+        for w in (self.rel_done_note, self.btn_open_release):
+            if reserve:
+                sp = w.sizePolicy()
+                sp.setRetainSizeWhenHidden(True)
+                w.setSizePolicy(sp)
+            w.setVisible(False)
 
         row_o = QHBoxLayout()
         row_o.addWidget(QLabel(i18n.t("harvest.output_label")))
@@ -520,21 +764,22 @@ class HarvestDialog(QDialog):
         return super().eventFilter(obj, event)
 
     def showEvent(self, event):
-        """Pierwsze użycie (brak `harvest/last_output`): od razu okno wyboru katalogu wyjścia, jak
-        kafel Przyjmij przy pierwszej dostawie - puste pole i zdanie „Wskaż…” to jedna interakcja
-        więcej do tego samego miejsca. Raz na okno, po pokazaniu (kolejka zdarzeń), żeby wybór
+        """Pierwsze użycie (brak `harvest/last_output`) BEZ kart: od razu okno wyboru katalogu
+        wyjścia, jak kafel Przyjmij przy pierwszej dostawie - puste pole i zdanie „Wskaż…” to jedna
+        interakcja więcej do tego samego miejsca. Z kartami wyborem jest lista wydań, więc okno
+        wyboru nie wyskakuje nad nią. Raz na okno, po pokazaniu (kolejka zdarzeń), żeby wybór
         stał nad oknem żniw, a nie przed nim; anulowanie zostawia okno z pustym polem."""
         super().showEvent(event)
         if not self._first_pick_checked:
             self._first_pick_checked = True
-            if not str(self._settings().value("harvest/last_output", "") or ""):
+            if not self._rel_roots and not str(self._settings().value("harvest/last_output", "") or ""):
                 QTimer.singleShot(0, self._on_pick_output)
 
     # ---- szerokości (powód w kadrze, ścieżki odróżnialne) ----
     def _fit_columns(self):
         """Szerokości kolumn: wszystkie poza powodem za treścią; powód dostaje resztę viewportu
         (rozciąga się, gdy jest miejsce), a gdy reszty brakuje - swoją treść, przycięte tak, by
-        razem z plikiem i stanem mieścił się w kadrze. Kolumny ścieżek na prawo wtedy przewijają
+        razem z kolumnami przed nim mieścił się w kadrze. Kolumny ścieżek na prawo wtedy przewijają
         się w bok, powód nie (zrzut wizytatora: suma 1827 px przy viewporcie 956 px chowała go za
         krawędzią)."""
         if self._table_viewport is None:
@@ -545,7 +790,7 @@ class HarvestDialog(QDialog):
                 self.table.resizeColumnToContents(c)
         vw = self.table.viewport().width()
         others = sum(self.table.columnWidth(c) for c in range(len(_HEADERS)) if c != COL_REASON)
-        left = self.table.columnWidth(COL_FILE) + self.table.columnWidth(COL_STATUS)
+        left = sum(self.table.columnWidth(c) for c in range(COL_REASON))
         want = max(self.table.sizeHintForColumn(COL_REASON), hh.sectionSizeHint(COL_REASON))
         width = max(vw - others, min(want, vw - left), hh.minimumSectionSize())
         if self.table.columnWidth(COL_REASON) != width:
@@ -571,9 +816,18 @@ class HarvestDialog(QDialog):
         self._fit_columns()
 
     # ---- parametry ----
+    def _pick_start(self):
+        """Katalog startowy „Wskaż…”: `<folder roboczy>\\OBJECTS`, gdy istnieje - tam leżą wyjścia
+        wszystkich wydań; inaczej ostatnie wyjście z pola, a bez niego archiwum. Jedno `isdir` tuż
+        przed oknem wyboru, które i tak czyta ten katalog w wątku GUI - nic nie zakłada."""
+        if self._work_root:
+            objects = os.path.join(self._work_root, projection.OBJECT_NAMESPACE)
+            if os.path.isdir(objects):
+                return objects
+        return clean_path(self.edit_output.text()) or self._archive_root
+
     def _on_pick_output(self):
-        start = clean_path(self.edit_output.text()) or self._archive_root
-        path = QFileDialog.getExistingDirectory(self, i18n.t("harvest.dlg.pick_output"), start)
+        path = QFileDialog.getExistingDirectory(self, i18n.t("harvest.dlg.pick_output"), self._pick_start())
         if path:
             self._set_output(path)
 
@@ -584,17 +838,26 @@ class HarvestDialog(QDialog):
         self._on_output_edited(force=True)
 
     def _on_pick_archive(self):
+        """„Zmień…” archiwum. Okno wyboru kręci WŁASNĄ pętlę zdarzeń, a w niej może dobiec podgląd
+        z kopiami do przyjęcia (AR-100) - przycisk był aktywny przy kliku, a po powrocie archiwum
+        jest już zamrożone. Ponowne sprawdzenie po powrocie: zdanie o blokadzie, archiwum bez zmian
+        (asercja `_set_archive` zostaje strażnikiem obejścia, nie odpowiedzią na wyścig)."""
         path = QFileDialog.getExistingDirectory(self, i18n.t("harvest.dlg.pick_archive"),
                                                 self._archive_root)
-        if path:
-            self._set_archive(path)
+        if not path:
+            return
+        if self._receivable_dirs():
+            self._show_notice(i18n.t("harvest.archive_locked"), "warn")
+            self._sync_buttons()
+            return
+        self._set_archive(path)
 
     def _set_archive(self, path):
         """Zmiana archiwum TYLKO dla tego okna: źródło Dostawy (`pipeline/last_source`) należy do
         strony Dostawy, a okno żniw nie przestawia jej po cichu następnej dostawy. Po pierwszej
         kopii archiwum jest zamrożone (`_sync_buttons`) - EXPECT, gdy ktoś obejdzie wygaszony
         przycisk. Seam testowy."""
-        assert not self._placed_dirs, "archiwum zamrożone od pierwszego wciągniętego mastera"
+        assert not self._receivable_dirs(), "archiwum zamrożone od pierwszej kopii do przyjęcia"
         self._archive_root = os.path.normpath(path)
         self._show_archive()
         self._on_output_edited()
@@ -615,6 +878,7 @@ class HarvestDialog(QDialog):
         if key == self._requested and not force:
             return
         self._requested = key
+        self._select_release_for(path)               # zaznaczenie listy idzie za polem, nie odwrotnie
         self._invalidate()
         self._trigger_dry()
 
@@ -648,7 +912,8 @@ class HarvestDialog(QDialog):
         """Stan obu przycisków z faktów okna - jedyne miejsce, które je ustawia (poza wejściem
         i wyjściem z biegu). „Wciągnij N”: świeży plan bieżących parametrów z czymś do wciągnięcia,
         pole zgodne z podglądem, nic w biegu; po biegu nazywa jego skutek. „Zamknij i przyjmij”:
-        od pierwszego wciągniętego mastera. Archiwum zamrożone od tej samej chwili."""
+        od pierwszej kopii do przyjęcia (`_receivable_dirs` - wciągnięta albo zastana w archiwum bez
+        wiedzy bazy). Archiwum zamrożone od tej samej chwili."""
         running = self._apply_worker is not None
         n = status_counts(self._plan.items).get("would-place", 0) if self._plan is not None else 0
         if self._plan is None and self._outcome is not None:
@@ -657,11 +922,11 @@ class HarvestDialog(QDialog):
             self.btn_apply.setText(i18n.t_plural("harvest.btn_apply", n))
         self.btn_apply.setEnabled(n > 0 and not running and not self._is_stale()
                                   and self._close_after_apply is None)
-        placed = bool(self._placed_dirs)
-        self.btn_accept.setVisible(placed)
-        self.btn_accept.setEnabled(placed and self._close_after_apply is None)
-        self.btn_archive.setEnabled(not placed and not running)
-        self.btn_archive.setToolTip(i18n.t("harvest.archive_locked") if placed else "")
+        receivable = bool(self._receivable_dirs())
+        self.btn_accept.setVisible(receivable)
+        self.btn_accept.setEnabled(receivable and self._close_after_apply is None)
+        self.btn_archive.setEnabled(not receivable and not running)
+        self.btn_archive.setToolTip(i18n.t("harvest.archive_locked") if receivable else "")
 
     # ---- sonda (auto-DRY) ----
     def _set_probing(self, on):
@@ -727,6 +992,8 @@ class HarvestDialog(QDialog):
         # KOLEJNOŚĆ jak w `projection_dialog._cleanup_dry_thread`: wait() przed thread.deleteLater(),
         # bo ~QThread doręczony na main przed śmiercią wątku czekałby na niego TRZYMAJĄC GIL, a wątek
         # (destrukcja wrappera workera) czekałby na GIL - AB-BA na stałe; wait() GIL zwalnia.
+        if self._dry_thread is None:
+            return                                   # wątek zebrał już `zatrzymaj_pola`; sygnał z kolejki
         self._dry_worker.deleteLater()
         self._dry_thread.wait()
         self._dry_thread.deleteLater()
@@ -753,6 +1020,22 @@ class HarvestDialog(QDialog):
         self._plan = plan
         self._probed = wbpp_dir
         self._shown_out = wbpp_dir                   # wynik biegu z tego planu liczy pliki względem tego samego wyjścia
+        # Kopie, które leżą w archiwum, a baza ich nie zna (wciągnięte w innym oknie bez przyjęcia):
+        # fakt o archiwum, nie o tym wyjściu - zostaje do końca okna, jak katalogi wciągniętych kopii.
+        unknown = {norm_path(it.exists_path): it.exists_path for it in plan.items
+                   if it.status == "exists" and not it.known_to_db and it.exists_path}
+        if unknown.keys() - self._unknown.keys():
+            self._unknown.update(unknown)
+            self._refresh_summary()
+        # Stos z tej grupy niesie zbiór wejść z planu - przyjęty teraz dostaje rodowód dokładny,
+        # choć położyło go inne okno.
+        self._unknown_stacks.update((it.sha1_data, tuple(it.frame_ids)) for it in plan.items
+                                    if it.status == "exists" and not it.known_to_db
+                                    and it.kind == "master_light" and it.sha1_data and it.frame_ids)
+        # Wiersz listy z tym `out` liczy się teraz ze świeżego planu, nie z zeznań (wynik bez
+        # zeznania wisiałby inaczej jako „do sprawdzenia” na zawsze); inne wiersze stoją.
+        self._fresh[norm_path(wbpp_dir)] = plan_counts(plan.items)
+        self._render_release_states()
         self._fill(plan.items)
         if not plan.items:
             self.head_label.setText("")
@@ -800,6 +1083,7 @@ class HarvestDialog(QDialog):
             folder = dir_of(it)
             reason = reason_text(it)
             cells = {COL_FILE: (rel_text(it.src, self._shown_out), it.src),
+                     COL_KIND: (kind_text(it.kind), None),
                      COL_STATUS: (status_text(it.status), None),
                      COL_REASON: (reason, reason),
                      COL_NAME: (name_text(it), None),
@@ -812,6 +1096,197 @@ class HarvestDialog(QDialog):
                 self.table.setItem(i, col, cell)
         self._grow_to_table()
 
+    # ---- lista wydań ----
+    def _show_rel_notice(self, text, role=None):
+        """Zdanie nad listą wydań (brak kart, liczenie, pusta lista, błąd). Z kartami wiersz zdania
+        zostaje także pusty - miejsce listy jest zarezerwowane; bez kart pusty tekst go chowa."""
+        self.rel_notice.setText(text)
+        self.rel_notice.setProperty("role", role or "")
+        self.rel_notice.style().unpolish(self.rel_notice)
+        self.rel_notice.style().polish(self.rel_notice)
+        self.rel_notice.setVisible(bool(text) or bool(self._rel_roots))
+
+    def _trigger_releases(self):
+        """Lista wydań z kart pod BIEŻĄCE zamówienie (start okna, koniec biegu apply). Jeden worker
+        naraz: zamówienie w trakcie listy podnosi generację - wynik w biegu odpadnie - a świeża
+        lista rusza po sprzątnięciu (`_rel_pending`). Bez kart nie ma czego liczyć, a po zamknięciu
+        zgłoszonym w biegu apply - nie ma komu jej pokazać."""
+        if self._closing or self._close_after_apply is not None or not self._rel_roots:
+            return
+        self._rel_gen += 1
+        if self._rel_worker is not None:
+            self._rel_pending = True
+            return
+        self._rel_pending = False
+        if not self._releases:
+            self._show_rel_notice(i18n.t("harvest.rel.probing"))
+        worker = HarvestReleasesWorker(self._rel_roots, self._rel_gen)
+        worker.done.connect(self._on_releases_done)
+        worker.failed.connect(self._on_releases_failed)
+        self._rel_worker = worker
+        if self._off_thread:
+            self._rel_thread = QThread(self)
+            worker.moveToThread(self._rel_thread)
+            self._rel_thread.started.connect(worker.run)
+            worker.finished.connect(self._rel_thread.quit)
+            self._rel_thread.finished.connect(self._cleanup_rel_thread)
+            self._rel_thread.start()
+        else:
+            try:
+                worker.run()                         # inline: done/failed lecą direct = synchronicznie
+            finally:
+                self._rel_worker = None
+            if self._rel_pending:
+                self._trigger_releases()
+
+    @Slot()
+    def _cleanup_rel_thread(self):
+        # wait() przed thread.deleteLater() - ten sam deadlock GIL × ~QThread co w `_cleanup_dry_thread`;
+        # wątek już skończył (`finished`), więc wait() wraca od razu.
+        if self._rel_thread is None:
+            return                                   # wątek zebrał już `zatrzymaj_pola`; sygnał z kolejki
+        self._rel_worker.deleteLater()
+        self._rel_thread.wait()
+        self._rel_thread.deleteLater()
+        self._rel_worker = None
+        self._rel_thread = None
+        if self._rel_pending and not self._closing:
+            self._trigger_releases()
+
+    @Slot(int, object)
+    def _on_releases_done(self, gen, rows):
+        """Lista bieżącej generacji: tabela, zaznaczenie za polem, a przy PIERWSZEJ liście - wybór
+        startowy. Wybór startowy zaznacza najnowsze wydanie z kandydatami i sonduje jego `out`, ale
+        tylko wtedy, gdy człowiek niczego jeszcze nie wskazał (`_requested`), nie pisze właśnie w polu
+        (`isModified`) i nic nie biegnie - lista, która przyszła później, nie przestawia pola, które
+        ktoś już wybrał albo w które pisze."""
+        if self._closing:
+            return
+        if gen != self._rel_gen:
+            self._rel_pending = True                 # stale: odrzuć, świeża lista po sprzątnięciu
+            return
+        self._fill_releases(rows)
+        if self._rel_started:
+            return
+        self._rel_started = True
+        if self._field_taken():
+            return
+        i = preselect_index(rows)
+        if i is not None:
+            self._set_output(rows[i].out_dir)        # zaznaczenie idzie za polem (`_on_output_edited`)
+        else:
+            self._on_output_edited()                 # nic do wciągnięcia - podgląd pamięci pola
+
+    @Slot(int, str)
+    def _on_releases_failed(self, gen, msg):
+        if self._closing:
+            return
+        if gen != self._rel_gen:
+            self._rel_pending = True
+            return
+        self._show_rel_notice(i18n.t("harvest.rel.failed", msg=msg), "error")
+        if not self._rel_started:
+            self._rel_started = True
+            if not self._field_taken():
+                self._on_output_edited()             # bez listy okno dalej działa na polu
+
+    def _field_taken(self):
+        """Pole należy do człowieka: wskazał wyjście (`_requested`), pisze w polu (`isModified` -
+        `setText` z kodu flagę zdejmuje) albo biegnie apply. Wtedy pierwsza lista nie robi wyboru."""
+        return (self._requested is not None or self.edit_output.isModified()
+                or self._apply_worker is not None)
+
+    def _fill_releases(self, rows):
+        """Tabela listy wydań: obiekt · karta · data · stan; pełne ścieżki pod kursorem. Wypełnienie
+        bez sygnału wyboru - przebudowa tabeli nie jest wyborem człowieka."""
+        self._releases = list(rows)
+        blocked = self.rel_table.blockSignals(True)
+        try:
+            self.rel_table.setRowCount(len(rows))
+            for i, row in enumerate(rows):
+                cells = {REL_OBJECT: (row.object_canon or os.path.basename(row.object_root), row.object_root),
+                         REL_CARD: (row.root, row.root),
+                         REL_DATE: (release_date_text(row.ts), row.ts),
+                         REL_STATE: ("", row.out_dir)}
+                for col, (text, tip) in cells.items():
+                    cell = QTableWidgetItem(str(text))
+                    if tip:
+                        cell.setToolTip(str(tip))
+                    self.rel_table.setItem(i, col, cell)
+        finally:
+            self.rel_table.blockSignals(blocked)
+        self._render_release_states()
+        self._show_rel_notice("" if rows else i18n.t("harvest.rel.none"))
+        path = self._requested[0] if self._requested is not None else clean_path(self.edit_output.text())
+        self._select_release_for(path)
+
+    def _fresh_of(self, row):
+        """`plan_counts` ostatniego podglądu `out` tego wiersza albo None (wiersz mówi listą)."""
+        return self._fresh.get(norm_path(row.out_dir))
+
+    def _render_release_states(self):
+        """Komórka stanu każdego wiersza - z listy albo ze świeżego planu jego `out` (`_fresh`) -
+        i zdanie pod listą dla zaznaczonego wiersza."""
+        for i, row in enumerate(self._releases):
+            item = self.rel_table.item(i, REL_STATE)
+            if item is not None:
+                item.setText(release_state_text(row, self._fresh_of(row)))
+        self._sync_release_note()
+
+    def _select_release_for(self, path):
+        """Zaznacz wiersz, którego `out` to `path` (bez wielkości liter, po normalizacji), albo żaden -
+        bez sygnału wyboru: zaznaczenie idzie za polem i nie sonduje drugi raz."""
+        key = norm_path(path) if path else None
+        idx = next((i for i, r in enumerate(self._releases) if key and norm_path(r.out_dir) == key), None)
+        blocked = self.rel_table.blockSignals(True)
+        try:
+            if idx is None:
+                self.rel_table.clearSelection()
+            else:
+                self.rel_table.selectRow(idx)
+        finally:
+            self.rel_table.blockSignals(blocked)
+        self._sync_release_note()
+
+    def _selected_release(self):
+        rows = self.rel_table.selectionModel().selectedRows()
+        if not rows:
+            return None
+        i = rows[0].row()
+        return self._releases[i] if 0 <= i < len(self._releases) else None
+
+    def _on_release_selected(self):
+        """Wybór wiersza przez człowieka = pole `<wydanie>\\out` i auto-DRY. W biegu apply lista jest
+        wygaszona; gdyby sygnał i tak przyszedł, pole jest zamrożone (`_on_output_edited`)."""
+        self._sync_release_note()
+        row = self._selected_release()
+        if row is None or self._apply_worker is not None:
+            return
+        self._set_output(row.out_dir)
+
+    def _sync_release_note(self):
+        """Zdanie pod listą i „Otwórz” przy zaznaczonym wierszu bez niczego do wciągnięcia (liczby
+        ze świeżego planu, gdy jest): „folder możesz skasować” wyłącznie przy `is_harvested`, przy
+        pozycjach do przeglądu - „najpierw rozstrzygnij” (ich pliki leżą tylko tam); inaczej nic."""
+        row = self._selected_release()
+        fresh = self._fresh_of(row) if row is not None else None
+        if row is not None and is_harvested(row, fresh):
+            self.rel_done_note.setText(i18n.t("harvest.rel.done_note"))
+        elif row is not None and needs_review(row, fresh):
+            self.rel_done_note.setText(i18n.t("harvest.rel.review_note"))
+        else:
+            row = None
+        on = row is not None
+        self.rel_done_note.setVisible(on)
+        self.btn_open_release.setVisible(on)
+        self.btn_open_release.setToolTip(row.object_root if on else "")
+
+    def _on_open_release(self):
+        """Folder zaznaczonego wydania w Eksploratorze - człowiek kasuje go sam, okno nie kasuje."""
+        row = self._selected_release()
+        if row is not None:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(row.object_root))
+
     # ---- apply ----
     def _on_apply(self):
         """„Wciągnij N” - kopie w wątku tła według planu, który stoi w tabeli."""
@@ -822,6 +1297,9 @@ class HarvestDialog(QDialog):
         if total == 0:
             return
         self._run_status = {}
+        self._run_items = {it.dst: it for it in self._plan.items if it.status == "would-place"}
+        # Bieg zmienia dysk i zostawia zeznanie: wiersz tego wyjścia mówi odtąd lista, nie plan sprzed biegu.
+        self._fresh.pop(norm_path(self._plan.wbpp_dir or ""), None)
         self._apply_begin(total)
         worker = HarvestApplyWorker(self._plan, self._now())
         worker.progress.connect(self._on_apply_progress)
@@ -846,6 +1324,8 @@ class HarvestDialog(QDialog):
     @Slot()
     def _cleanup_apply_thread(self):
         # wait() przed thread.deleteLater() - ten sam deadlock GIL × ~QThread co w `_cleanup_dry_thread`.
+        if self._apply_thread is None:
+            return                                   # wątek zebrał już `zatrzymaj_pola`; sygnał z kolejki
         self._apply_worker.deleteLater()
         self._apply_thread.wait()
         self._apply_thread.deleteLater()
@@ -883,9 +1363,12 @@ class HarvestDialog(QDialog):
         self._set_params_enabled(True)
 
     def _set_params_enabled(self, on):
+        """Parametry sondy w biegu apply: pole, „Wskaż…”, „Zmień…” i lista wydań (wybór wiersza
+        przestawia pole). „Otwórz” zostaje - otwiera folder i niczego nie zmienia."""
         self.edit_output.setEnabled(on)
         self.btn_pick.setEnabled(on)
-        self.btn_archive.setEnabled(on and not self._placed_dirs)
+        self.rel_table.setEnabled(on)
+        self.btn_archive.setEnabled(on and not self._receivable_dirs())
 
     def _on_cancel_apply(self):
         if self._apply_worker is not None:
@@ -897,7 +1380,8 @@ class HarvestDialog(QDialog):
     def _on_apply_progress(self, done_n, total, dst, status):
         """Postęp per plik - i JEDYNE źródło faktów biegu: katalog każdej opublikowanej kopii
         i licznik kłopotów wpadają tu, zanim rdzeń odda wynik, więc wyjątek po kopiach nie gubi
-        tego, co już leży w archiwum. Przyjęcie dostępne od pierwszej kopii."""
+        tego, co już leży w archiwum. Przyjęcie dostępne od pierwszej kopii. Wciągnięty stos zapisuje
+        tu swój zbiór wejść (pozycja planu biegu) - rodowód dostanie go po przyjęciu."""
         if self.busy.maximum() != total:
             self.busy.setRange(0, total)
         self.busy.setValue(done_n)
@@ -905,7 +1389,11 @@ class HarvestDialog(QDialog):
         self._run_status[dst] = status
         if status == "placed":
             self._placed_dirs.add(os.path.dirname(dst))
+            self._placed_keys.add(norm_path(dst))
             self._placed_n += 1
+            it = self._run_items.get(dst)
+            if it is not None and it.kind == "master_light" and it.sha1_data:
+                self._placed_stacks[it.sha1_data] = tuple(it.frame_ids)
         elif status in ("conflict", "error", "verify_bad"):
             self._trouble[status] += 1
         if self._close_after_apply is None:
@@ -931,6 +1419,7 @@ class HarvestDialog(QDialog):
         self._outcome = i18n.t("harvest.btn_cancelled" if res.cancelled else
                                "harvest.btn_done" if c.get("placed") else "harvest.btn_nothing")
         self._sync_buttons()
+        self._trigger_releases()                     # zeznanie biegu zmieniło stan wydania na liście
 
     @Slot(str)
     def _on_apply_failed(self, msg):
@@ -950,6 +1439,7 @@ class HarvestDialog(QDialog):
         self._set_summary(c, cancelled_n=0, error=msg)
         self._outcome = i18n.t("harvest.btn_error")
         self._sync_buttons()
+        self._trigger_releases()                     # kopie sprzed błędu też zmieniają stan wydania
 
     def _show_head_done(self, c, *, cancelled):
         head = i18n.t("harvest.head_done", placed=c.get("placed", 0), exists=c.get("exists", 0),
@@ -962,49 +1452,105 @@ class HarvestDialog(QDialog):
         self.head_label.setText(head)
 
     def _set_summary(self, c, *, cancelled_n, error=None):
-        """Zdanie paska stanu ze WSZYSTKICH biegów okna: drugi bieg z zerem po pierwszym
-        z wciągnięciem mówiłby „nic nie wciągnięto” nad korzeniem, który gospodarz przyjmuje.
-        Niezerowe konflikty, błędy i niezgodne bajty dochodzą do zdania (zera milczą) - pasek
-        stanu to jedyny ślad po zamknięciu okna, a „wciągnięto 3” bez „konflikty: 1” kłamie
-        o komplecie."""
-        root = common_root(self._placed_dirs)
-        if self._placed_n and root:
-            fact = i18n.t_plural("harvest.status_placed", self._placed_n, root=root)
-            if error:
-                fact += " · " + i18n.t("harvest.status_error", msg=error)
-        elif error:                                  # nic nie leży - błąd jest całą wiadomością
-            fact = i18n.t("harvest.status_error", msg=error)
-        else:
-            fact = i18n.t("harvest.status_nothing", exists=c.get("exists", 0),
-                          review=c.get("review", 0))
+        """Fakty ostatniego biegu do zdania paska (statusy, nietknięte przy przerwaniu, wyjątek
+        rdzenia); samo zdanie składa `_refresh_summary` ze wszystkich faktów okna."""
+        self._ran = True
+        self._last_counts = Counter(c)
+        self._last_cancelled = cancelled_n
+        self._last_error = error
+        self._refresh_summary()
+
+    def _summary_fact(self, *, with_root):
+        """Zdanie główne paska: ile wciągnięto, a bez kopii - ile kopii w archiwum nie zna baza,
+        a bez obu - błąd albo „nic nie wciągnięto”; None = w oknie nic się nie stało. `with_root`
+        - ścieżka w zdaniu (wynik okna, przyjęcie); bez niej - zdanie zwykłego „Zamknij”, w którym
+        ścieżka stoi za instrukcją (`_close_summary`)."""
+        dirs = self._receivable_dirs()
+        root = common_root(dirs) or ", ".join(sorted(dirs))
+        if self._placed_n:
+            if with_root:
+                return i18n.t_plural("harvest.status_placed", self._placed_n, root=root)
+            return i18n.t_plural("harvest.close_placed", self._placed_n)
+        if self._unknown:
+            if with_root:
+                return i18n.t_plural("harvest.status_unknown", len(self._unknown), root=root)
+            return i18n.t_plural("harvest.close_unknown", len(self._unknown))
+        if self._last_error:                         # nic nie leży - błąd jest całą wiadomością
+            return i18n.t("harvest.status_error", msg=self._last_error)
+        if self._ran:
+            return i18n.t("harvest.status_nothing", exists=self._last_counts.get("exists", 0),
+                          review=self._last_counts.get("review", 0))
+        return None
+
+    def _summary_tail(self):
+        """Dopiski zdania paska ze WSZYSTKICH biegów okna: błąd przy kopiach, które leżą, niezerowe
+        konflikty, błędy i niezgodne bajty (zera milczą), kopie nieznane bazie obok wciągniętych,
+        nietknięte przy przerwaniu. Pasek stanu to jedyny ślad po zamknięciu okna, a „wciągnięto 3”
+        bez „konflikty: 1” kłamie o komplecie."""
+        tail = ""
+        if self._last_error and (self._placed_n or self._unknown):
+            tail += " · " + i18n.t("harvest.status_error", msg=self._last_error)
         for status, key in _TROUBLE_KEYS:
             if self._trouble[status]:
-                fact += i18n.t(key, n=self._trouble[status])
-        if cancelled_n:
-            fact += i18n.t("harvest.cancelled_tail", n=cancelled_n)
-        self._summary_fact = fact
-        self.summary = fact
+                tail += i18n.t(key, n=self._trouble[status])
+        extra = len(self._unknown.keys() - self._placed_keys) if self._placed_n else 0
+        if extra:
+            tail += i18n.t("harvest.sum_unknown", n=extra)
+        if self._last_cancelled:
+            tail += i18n.t("harvest.cancelled_tail", n=self._last_cancelled)
+        return tail
+
+    def _refresh_summary(self):
+        """`summary` = zdanie główne ze ścieżką + dopiski. Drugi bieg z zerem po pierwszym
+        z wciągnięciem mówiłby inaczej „nic nie wciągnięto” nad korzeniem, który gospodarz przyjmuje."""
+        fact = self._summary_fact(with_root=True)
+        self.summary = None if fact is None else fact + self._summary_tail()
+
+    def _close_summary(self):
+        """Zdanie zwykłego „Zamknij” przy kopiach do przyjęcia: fakt, dopiski, INSTRUKCJA, a ścieżka
+        na końcu - pasek stanu ucina koniec zdania, a instrukcja bez ścieżki dalej mówi, co zrobić."""
+        dirs = self._receivable_dirs()
+        root = common_root(dirs) or ", ".join(sorted(dirs))
+        return self._summary_fact(with_root=False) + self._summary_tail() + self._later_tail(dirs, root)
 
     # ---- przyjęcie i zamknięcie ----
+    def _receivable_dirs(self):
+        """Katalogi kopii do przyjęcia: wciągnięte w tym oknie ∪ katalogi kopii zastanych w archiwum,
+        których baza nie zna (`exists` z `known_to_db=False`). Ten zbiór niesie widoczność
+        „Zamknij i przyjmij”, blokadę archiwum, korzeń, `done()` i zdanie paska."""
+        return self._placed_dirs | {os.path.dirname(p) for p in self._unknown.values()}
+
     def _receivable_root(self):
         """Korzeń do przyjęcia albo zdanie odmowy. EXPECT na korzeniu, który pójdzie do skanu
-        Dostawy: wspólny rodzic kopii MUSI leżeć pod `<archiwum>\\CALIBRATION` - inny korzeń
-        (dwa wolumeny, archiwum zmienione obejściem blokady) kazałby Dostawie skanować coś, czego
-        żniwa nie pisały."""
-        root = common_root(self._placed_dirs)
-        cal = os.path.join(self._archive_root, projection.CALIBRATION_SEGMENT) if self._archive_root else ""
-        if root is None or not cal or not is_under(root, cal):
-            return None, i18n.t("harvest.accept_refused", root=root or ", ".join(sorted(self._placed_dirs)),
-                                cal=cal or "?")
-        return root, None
+        Dostawy, wobec bibliotek archiwum OKNA (korzeń przed segmentem `CALIBRATION`, jak w planie):
+        wszystkie katalogi pod `<archiwum>\\CALIBRATION` → ich wspólny rodzic (skan tylko tego, co
+        wciągnięto); choć jeden pod `<archiwum>\\STACKS`, reszta w bibliotekach → korzeń archiwum (sito
+        `STACKS` łańcucha bierze stos dopiero ze skanu korzenia); katalog poza obiema bibliotekami
+        (dwa wolumeny, archiwum zmienione obejściem blokady) → odmowa: Dostawa skanowałaby coś,
+        czego żniwa nie pisały."""
+        dirs = self._receivable_dirs()
+        try:
+            lib = harvest.library_root(self._archive_root) if self._archive_root else ""
+        except ValueError:
+            lib = ""
+        cal = os.path.join(lib, projection.CALIBRATION_SEGMENT) if lib else ""
+        stk = os.path.join(lib, harvest.STACKS_SEGMENT) if lib else ""
+        outside = sorted(d for d in dirs if not (cal and (is_under(d, cal) or is_under(d, stk))))
+        if not dirs or outside:
+            return None, i18n.t("harvest.accept_refused", root=", ".join(outside or sorted(dirs)) or "?",
+                                cal=cal or "?", stacks=stk or "?")
+        if all(is_under(d, cal) for d in dirs):
+            return common_root(dirs), None
+        return lib, None
 
     def _on_accept(self):
         """„Zamknij i przyjmij do archiwum”: korzeń dla gospodarza (strażnik `_receivable_root`)
-        i zamknięcie. W biegu - zamknięcie po bieżącym pliku (`done`), a korzeń liczy się
-        jeszcze raz przy zamknięciu, bo bieżący plik mógł dołożyć katalog."""
+        i zamknięcie. W biegu - zamknięcie po bieżącym pliku (`done`), a korzeń i stosy liczą się
+        jeszcze raz przy zamknięciu, bo bieżący plik mógł dołożyć katalog albo stos."""
         root, why = self._receivable_root()
         if why is not None:
             self.harvested_root = None
+            self.harvested_stacks = []
             self._show_notice(why, "error")
             return
         self.harvested_root = root
@@ -1028,7 +1574,12 @@ class HarvestDialog(QDialog):
 
         SONDA: anulowanie na granicy pliku (`should_cancel` rdzenia) + `wait` - czeka najwyżej na
         odczyt jednego mastera; limit 10 s jak w oknie wydania chroni przed zawieszonym SMB.
-        Świeża sonda po zamknięciu już nie startuje (`_closing`)."""
+        Świeża sonda po zamknięciu już nie startuje (`_closing`).
+
+        LISTA WYDAŃ: rdzeń nie ma punktu przerwania, więc czekanie byłoby zakładem o czas spaceru
+        po kartach (SMB) w wątku głównym. Generacja w górę (wynik nie dotknie zamkniętego okna),
+        `quit()` kończy wątek zaraz po liście, a zbiera go `_cleanup_rel_thread`. Okno żyje dalej pod
+        rodzicem gospodarza; zanim gospodarz zniknie, czeka na wątek `zatrzymaj_pola`."""
         if self._apply_worker is not None:
             self._close_after_apply = r
             self._apply_worker.request_cancel()
@@ -1043,17 +1594,60 @@ class HarvestDialog(QDialog):
         if self._dry_thread is not None:
             self._dry_thread.quit()
             self._dry_thread.wait(10_000)
+        self._rel_gen += 1
+        if self._rel_thread is not None:
+            self._rel_thread.quit()
         if r == QDialog.Accepted and self.harvested_root is not None:
             self.harvested_root, _why = self._receivable_root()
-        if self._summary_fact and self.harvested_root is None and self._placed_dirs:
-            self.summary = self._summary_fact + self._later_tail()
+        accepted = r == QDialog.Accepted and self.harvested_root is not None
+        # Stosy do rodowodu: wciągnięte w tym oknie i zastane w archiwum bez wiedzy bazy (przyjmowane
+        # teraz, położone wcześniej) - jeden wpis na `sha1_data`.
+        self.harvested_stacks = (list({**self._unknown_stacks, **self._placed_stacks}.items())
+                                 if accepted else [])
+        if not accepted and self._receivable_dirs():
+            self.summary = self._close_summary()
         super().done(r)
 
-    def _later_tail(self):
-        """Kiedy baza pozna mastery, których nikt nie przyjął: przy następnej dostawie TYLKO wtedy,
-        gdy wszystkie kopie leżą pod źródłem Dostawy (`pipeline/last_source`); inaczej Dostawa ich
-        nie zobaczy i zdanie mówi, którędy do nich dojść."""
+    def zatrzymaj_pola(self):
+        """Okno znika razem z gospodarzem (zamknięcie aplikacji, przełączenie bazy -
+        `MainWindow._zatrzymaj_watki_widokow` woła tę metodę po nazwie): ZBIERZ każdy wątek tła okna,
+        zanim rodzic go skasuje - `QThread` niszczony w biegu to twardy abort. Zamknięte okno zostaje
+        ukrytym dzieckiem okna głównego, a `done` na listę wydań nie czeka (rdzeń bez punktu
+        przerwania, karta bywa uśpionym SMB) - więc czekanie żyje tu, poza gestem człowieka.
+        Kolejność jak w `_cleanup_*` (quit z góry → worker.deleteLater → wait → thread.deleteLater);
+        anulowanie powtarzane co 100 ms tam, gdzie worker je ma. Generacje w górę: wynik, który
+        zdążył wyjść z wątku, nie dotknie okna. Idempotentne."""
+        self._closing = True
+        self._gen += 1
+        self._rel_gen += 1
+        self._zbierz(self._rel_thread, self._rel_worker)
+        self._rel_thread = self._rel_worker = None
+        self._zbierz(self._dry_thread, self._dry_worker)
+        self._dry_thread = self._dry_worker = None
+        self._zbierz(self._apply_thread, self._apply_worker)
+        self._apply_thread = self._apply_worker = None
+
+    @staticmethod
+    def _zbierz(thread, worker):
+        """Zakończ i zbierz jeden wątek tła (bez limitu czasu - to jest właśnie chwila, w której okno
+        musi go przeżyć); brak wątku - nic."""
+        if thread is None:
+            return
+        cancel = getattr(worker, "request_cancel", None)
+        if cancel is not None:
+            cancel()
+        thread.quit()
+        worker.deleteLater()
+        while not thread.wait(100):
+            if cancel is not None:
+                cancel()
+        thread.deleteLater()
+
+    def _later_tail(self, dirs, root):
+        """Kiedy baza pozna kopie, których nikt nie przyjął: przy następnej dostawie TYLKO wtedy,
+        gdy wszystkie leżą pod źródłem Dostawy (`pipeline/last_source`); inaczej Dostawa ich nie
+        zobaczy i zdanie mówi, którędy do nich dojść. Ścieżka za instrukcją."""
         source = str(self._settings().value("pipeline/last_source", "") or "").strip()
-        if source and all(is_under(d, source) for d in self._placed_dirs):
-            return i18n.t("harvest.status_later")
-        return i18n.t("harvest.status_outside")
+        if source and all(is_under(d, source) for d in dirs):
+            return i18n.t("harvest.status_later", root=root)
+        return i18n.t("harvest.status_outside", root=root)

@@ -33,6 +33,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
+from .resolve.channel import channel_from_name
 from .resolve.frames import LIGHT_KINDS   # jedyne z obiektem (kind-aware) — właściciel w liściu
 
 # ============================================================ ekstraktory daty-godziny (§2)
@@ -205,6 +206,99 @@ def master_flat_name(night8, filter_segment, seq):
             or _sanitize(filter_segment) != filter_segment or "_" in filter_segment or "." in filter_segment):
         raise ValueError(f"segment filtru nieczytelny dla wzorca nazwy mastera: {filter_segment!r}")
     return f"MASTERFLAT_FLATGRP_{night8}{seq}_FILTER_{filter_segment}_.xisf"
+
+
+# ============================================================ nazwa STOSU w archiwum (żniwa)
+
+# Kolor stosu w nazwie archiwum: `mono` (kamera mono), `RGB` (stos WBPP kamery kolorowej), `R`/`G`/`B`
+# (kanał - właściciel reguły odczytu `resolve.channel`). `combined_RGB` (składanka ręki) z wyjścia WBPP
+# nie przychodzi i stosem WBPP nie jest, więc nazwa jej nie składa.
+STACK_COLORS = ("mono", "RGB", "R", "G", "B")
+_DRIZZLE_VARIANT = re.compile(r"drizzle_([1-9][0-9]*)x")
+_AUTOCROP = "autocrop"
+
+
+def _stem_tokens(name):
+    """Człony stemu nazwy pliku (bez katalogu i rozszerzenia) po `_`, małymi literami."""
+    stem = re.split(r"[\\/]", str(name))[-1]
+    stem = stem.rsplit(".", 1)[0] if "." in stem else stem
+    return [t.lower() for t in stem.split("_")]
+
+
+def wbpp_stack_color(name):
+    """Kolor stosu z NAZWY pliku WBPP - jedna z `STACK_COLORS` albo `None`.
+
+    Kanał (`…_FILTER-NoFilter__B.xisf`) rozstrzyga `resolve.channel.channel_from_name` - jeden właściciel
+    reguły pozycyjnej, bo goły token `B` jest też filtrem mono. Bez kanału kolor niesie token `mono`
+    (`…_FILTER-H_mono.xisf`) albo `RGB` (`…_FILTER-NoFilter_RGB.xisf`). Oba naraz, żaden, albo
+    `combined_RGB` (składanka ręki, nie stos WBPP) → `None`: kolor zgadnięty byłby nazwą, która kłamie."""
+    kanal = channel_from_name(re.split(r"[\\/]", str(name))[-1])
+    if kanal is not None:
+        return kanal
+    tokeny = _stem_tokens(name)
+    mono, rgb = "mono" in tokeny, "rgb" in tokeny
+    if mono == rgb or (rgb and "combined" in tokeny):
+        return None
+    return "mono" if mono else "RGB"
+
+
+def wbpp_stack_variants(name):
+    """Warianty obrazu z NAZWY pliku WBPP w stałej kolejności: `autocrop`, potem `drizzle_<n>x`.
+    Oba to ten sam stos z tymi samymi subami (`scan.is_derived_name` nie odsiewa ich jako pochodnych),
+    więc nazwa archiwum musi je nieść - inaczej `…_autocrop.xisf` i plik bez przycięcia dostałyby jedną
+    nazwę. Inne tokeny WBPP (`OBIEKT-<x>`, `fastIntegration`) do nazwy nie przechodzą."""
+    tokeny = _stem_tokens(name)
+    out = [_AUTOCROP] if _AUTOCROP in tokeny else []
+    for i, t in enumerate(tokeny[:-1]):
+        if t == "drizzle" and _DRIZZLE_VARIANT.fullmatch(f"drizzle_{tokeny[i + 1]}"):
+            out.append(f"drizzle_{tokeny[i + 1]}")
+            break
+    return tuple(out)
+
+
+def _variant_order(variant):
+    if variant == _AUTOCROP:
+        return 0
+    if _DRIZZLE_VARIANT.fullmatch(str(variant)):
+        return 1
+    raise ValueError(f"nieznany wariant stosu: {variant!r} (znane: {_AUTOCROP}, drizzle_<n>x)")
+
+
+def stack_name(obj_seg, date_obs, rig_seg, filter_seg, exptime, color, *, variants=(), suffix=None):
+    """Nazwa STOSU w archiwum `STACKS`: `<obj>_<YYYY-MM-DD>_<rig>_<filtr>_<exp>s_<kolor>[_<wariant>…]
+    [_<sufiks>].xisf` - konwencja planu przenosin 0802 (193 nazwy), np.
+    `IC1795_2025-12-16_A140R_2600MM_Ha_600s_mono.xisf`. Nie `compose_name`: tamta to konwencja LIGHTÓW
+    (data i godzina na początku), a archiwum stosów sortuje się po obiekcie.
+
+    Segmenty przez `_sanitize` (jak nazwy plików). Data = `DATE-OBS` stosu walidowane `header_dt` (FITS
+    pisze UTC, więc bez przeliczania strefy), potem sama data. `exp` = `format(float, "g")` (`600.000`
+    → `600`). Warianty w stałej kolejności `autocrop`, `drizzle_<n>x`; sufiks (rozróżnienie kolizji,
+    `WBPP_<YYYYMMDD>`) na końcu. Token `OBIEKT-<x>` z nazwy WBPP tu nie wchodzi - obiekt stoi już na
+    początku nazwy. Rozszerzenie STAŁE `.xisf` (żniwa wciągają wyłącznie XISF).
+
+    EXPECT: brak albo śmieć w `DATE-OBS` → `ValueError` (plan: `header_mismatch`), kolor spoza
+    `STACK_COLORS` → `ValueError` (plan: `color_unknown`), brak ekspozycji, segment pusty po
+    `_sanitize`, nieznany wariant, pusty sufiks → `ValueError`. Nazwa, której archiwum nie przeczyta
+    z powrotem, nie powstaje."""
+    dt = header_dt(date_obs)
+    if dt is None:
+        raise ValueError(f"DATE-OBS stosu nieczytelne: {date_obs!r}")
+    if color not in STACK_COLORS:
+        raise ValueError(f"kolor stosu spoza {STACK_COLORS}: {color!r}")
+    try:
+        exp = float(exptime)
+    except (TypeError, ValueError):
+        raise ValueError(f"ekspozycja stosu nieczytelna: {exptime!r}") from None
+    segs = [_sanitize(obj_seg), dt.strftime("%Y-%m-%d"), _sanitize(rig_seg), _sanitize(filter_seg),
+            f"{format(exp, 'g')}s", color]
+    if not all(segs):
+        raise ValueError(f"pusty segment nazwy stosu: {segs!r}")
+    segs += sorted(variants, key=_variant_order)
+    if suffix is not None:
+        if not _sanitize(suffix):
+            raise ValueError(f"pusty sufiks nazwy stosu: {suffix!r}")
+        segs.append(_sanitize(suffix))
+    return "_".join(segs) + ".xisf"
 
 
 def compose_name(facts, dt, *, template=DEFAULT_TEMPLATE):

@@ -50,13 +50,20 @@ from datetime import datetime
 
 from . import hashing, lineage, naming
 from .gui import queries
+from .resolve.paths import STACKS_DIR
 from .scan import EXCLUDED_DIR_NAMES
 
 _UNSET = "_UNSET"                      # segment layoutu pusty/None — nie gubimy klatki po cichu (§1)
 MANIFEST_NAME = "_PROJEKCJA.json"
 HARVEST_MANIFEST_PREFIX = "_ZNIWA"     # zeznanie biegu żniw obok wyjścia WBPP (`write_harvest_manifest`)
-CALIBRATION_SEGMENT = "CALIBRATION"    # biblioteka kalibracji archiwum - jedyny cel kopii mastera
+CALIBRATION_SEGMENT = "CALIBRATION"    # biblioteka kalibracji archiwum - cel kopii mastera
 PART_SUFFIX = ".part"                  # plik w drodze; nie nagłówkonośny, więc skan go nie weźmie
+# Folder roboczy WBPP: segment wykluczony ze skanu (`scan.EXCLUDED_DIR_NAMES`), więc wydania pod nim
+# nie wracają jako wejście skanu. `work_wbpp_root` składa go z katalogu, który wskazał człowiek.
+WBPP_DIR = "_WBPP"
+# Wyjście WBPP w korzeniu wydania obiektu (`<cel>/OBJECTS/<obiekt>/out`): zakłada je `apply` wydania,
+# żeby okno żniw miało jedno miejsce, w którym szuka wyników tego wydania.
+OUTPUT_DIR = "out"
 
 # Presety layoutu = KOD (uniwersalia, jak słowniki solar 5a; D-P1 rekomendacja (a)). Kolumny bazowe
 # z `base_rows`. JSON dojdzie, gdy user zażąda własnych layoutów (MINIMAL). Spec segmentu = nazwa
@@ -87,6 +94,31 @@ OBJECT_SEGMENTS = ("zestaw", "rola", ("filtr", "relacja"))
 OBJECT_NAMESPACE = "OBJECTS"           # token dysku jak LIGHT/MASTER/FLAT_RAW - neutralny językowo
 _OSC = "OSC"                           # konwencja archiwum: `CALIBRATION\masters\flats\<zestaw>\OSC`
 _SKIP_NO_COPY = "brak obecnej kopii (wszystkie present=0)"
+
+
+def _segments_from_root(path):
+    """`[(rodzic, segment)]` ścieżki znormalizowanej (`normpath`), od korzenia - jedno cięcie dla pytań
+    „gdzie stoi pierwszy segment o tej nazwie” (oba separatory, bez dotykania dysku)."""
+    cur, wstecz = os.path.normpath(str(path)), []
+    while True:
+        head, tail = os.path.split(cur)
+        if not tail:
+            break
+        wstecz.append((head, tail))
+        cur = head
+    return list(reversed(wstecz))
+
+
+def work_wbpp_root(root):
+    """Korzeń folderu roboczego WBPP dla katalogu wskazanego przez człowieka (czysta funkcja, zero
+    dysku). Ścieżka znormalizowana; gdy któryś jej segment to `_WBPP` (bez wielkości liter) - ścieżka
+    do PIERWSZEGO takiego segmentu włącznie (wskazanie `…\\_WBPP\\OBJECTS` nie zakłada drugiego
+    `_WBPP` w środku); inaczej `<root>\\_WBPP`, także pod `…\\_Review` (inny segment wykluczony to
+    inne drzewo robocze, nie folder WBPP)."""
+    for head, tail in _segments_from_root(root):
+        if tail.lower() == WBPP_DIR.lower():
+            return os.path.join(head, tail)
+    return os.path.join(os.path.normpath(str(root)), WBPP_DIR)
 
 
 def layout_segments(layout):
@@ -388,11 +420,26 @@ def object_manifest(projection):
     `apply`, więc dwie powierzchnie nie składają dwóch wersji tego samego zeznania. Listy id, nie
     ścieżki: ścieżki zna drzewo obok, a id przeżywają przeprowadzkę plików (żniwa czytają rodowód
     po id). Kopia głęboka - wołający dokłada swoje klucze (etykieta) bez ruszania `info` planu.
-    Plan bez `info` (perspektywa gridu) → `ValueError`: manifest obiektu z niczego byłby kłamstwem."""
+    Plan bez `info` (perspektywa gridu) → `ValueError`: manifest obiektu z niczego byłby kłamstwem.
+
+    Do `info` dochodzi per zestaw `names: {nazwa pliku: frame_id}` lightów TEGO wydania
+    (`PlanItem.basename` - nazwa, pod którą WBPP dostał klatkę). Historia stosu WBPP niesie nazwy wejść,
+    a nazwa w bazie może się zmienić między wydaniem a żniwami (rename); żniwa dopasowują wejścia do
+    nazw z wydania, nie do bieżących. Ta sama nazwa dwóch RÓŻNYCH klatek w jednym zestawie to `None` -
+    nazwa, która nie wskazuje jednej klatki, nie jest świadkiem."""
     if projection.layout != OBJECT_LAYOUT or projection.info is None:
         raise ValueError(f"manifest obiektu wymaga planu {OBJECT_LAYOUT!r} z info "
                          f"(jest {projection.layout!r})")
-    return _copy.deepcopy(projection.info)
+    manifest = _copy.deepcopy(projection.info)
+    for z in manifest["zestawy"].values():
+        z["names"] = {}
+    for item in projection.items:
+        seg, rola = item.segments[0], item.segments[1]
+        if rola != "LIGHT":
+            continue
+        names = manifest["zestawy"][seg]["names"]
+        names[item.basename] = item.frame_id if names.get(item.basename, item.frame_id) == item.frame_id else None
+    return manifest
 
 
 # ============================================================ prymitywy filesystemu (KLINGA)
@@ -580,13 +627,18 @@ def apply(projection, root, *, do_apply, copy=False, now=None, manifest=None,
     PRZED czymkolwiek. Pierwszy realny hardlink (nie `copy`) sondowany PEŁNYM `_verify_content` → rozjazd
     = `ProjectionAbort` (częściowy wynik: 1 link). `progress(done,total,dst,status)` po KAŻDYM frame'ie
     (Qt-wolne). `should_cancel` PRZED frame'em (anulowanie na granicy pliku). Przy `do_apply` pisze
-    `_PROJEKCJA.json` obok korzenia (PLIK, nie DB). Pominięte z planu dochodzą jako `skipped`."""
+    `_PROJEKCJA.json` obok korzenia (PLIK, nie DB), a wydanie obiektu zakłada też `<root>/out`
+    (`OUTPUT_DIR`, wyjście WBPP). Pominięte z planu dochodzą jako `skipped`."""
     _assert_excluded_segment(root)
     # PRZED czymkolwiek: `_write_manifest` nadpisze zeznanie starego drzewa, więc po masie nie byłoby
     # już czego czytać. DRY sonduje ten sam fakt, bo to właśnie DRY ma ostrzec PRZED wydaniem.
     drift = manifest_drift(root, projection.layout)
     if do_apply:
         os.makedirs(root, exist_ok=True)           # korzeń istnieje dla linków I manifestu (KLINGA)
+        if projection.layout == OBJECT_LAYOUT:
+            # Wyjście WBPP wydania obiektu powstaje razem z wydaniem, nie przy wyborze folderu
+            # roboczego: slot GUI nie dotyka dysku, a DRY niczego nie zakłada.
+            os.makedirs(os.path.join(root, OUTPUT_DIR), exist_ok=True)
 
     results: list[LinkResult] = []
     cancelled = False
@@ -675,15 +727,39 @@ def _merge_object_manifest(old, manifest, *, now, root, cancelled):
     odczyt): user kasuje wydanie w Eksploratorze, a manifest, który pamiętałby skasowane drzewo,
     zeznawałby o linkach, których nie ma. Wydanie ANULOWANE (`cancelled`) zostawia w drzewie tylko
     część pozycji, więc jego wpisy dostają `"cancelled": true` - listy id mówią wtedy, co wydanie
-    zamierzało, nie co leży na dysku. Wpis bez tego klucza to wydanie domknięte."""
+    zamierzało, nie co leży na dysku. Wpis bez tego klucza to wydanie domknięte.
+
+    NAZWY ZESTAWU WYDANEGO PONOWNIE SIĘ SUMUJĄ (`_merge_names`), reszta jego wpisu idzie z bieżącego
+    wydania: pliki poprzedniego wydania zostają w folderze zestawu (klinga nie kasuje), więc WBPP je
+    dostanie, a żniwa muszą je dalej rozpoznać po nazwie. Wpis anulowany po którejkolwiek stronie też
+    wnosi swoje nazwy - część jego plików leży na dysku, a nazwa pliku, którego nie ma, niczego
+    w historii WBPP nie dopasuje."""
     stempel = {"ts": now, "cancelled": True} if cancelled else {"ts": now}
     zestawy = {seg: {**z, **stempel} for seg, z in manifest["zestawy"].items()}
     if (old and old.get("layout") == OBJECT_LAYOUT and old.get("object_id") == manifest.get("object_id")
             and isinstance(old.get("zestawy"), dict)):
         for seg, z in old["zestawy"].items():
-            if seg not in zestawy and isinstance(z, dict) and os.path.isdir(os.path.join(root, seg)):
-                zestawy[seg] = {**z, "ts": z.get("ts", old.get("ts"))}
+            if not isinstance(z, dict):
+                continue
+            if seg not in zestawy:
+                if os.path.isdir(os.path.join(root, seg)):
+                    zestawy[seg] = {**z, "ts": z.get("ts", old.get("ts"))}
+            elif isinstance(z.get("names"), dict) and isinstance(zestawy[seg].get("names"), dict):
+                zestawy[seg]["names"] = _merge_names(z["names"], zestawy[seg]["names"])
     return {**manifest, "zestawy": dict(sorted(zestawy.items()))}
+
+
+def _merge_names(stare, nowe):
+    """Suma map `{nazwa pliku: frame_id}` dwóch wydań jednego zestawu - nowa mapa. Ta sama nazwa
+    z innym `frame_id` albo z `None` po którejkolwiek stronie to `None`: nazwa, która nie wskazuje
+    jednej klatki, nie jest świadkiem (ta sama reguła co kolizja w `object_manifest`)."""
+    out = dict(stare)
+    for name, fid in nowe.items():
+        if name in out and (out[name] is None or fid is None or out[name] != fid):
+            out[name] = None
+        else:
+            out[name] = fid
+    return out
 
 
 # ============================================================ KOPIA MASTERA (żniwa, `horreum/harvest.py`)
@@ -691,16 +767,27 @@ def _merge_object_manifest(old, manifest, *, now, root, cancelled):
 _COPY_BUF = 1 << 20
 
 
-def _assert_calibration_segment(dst):
-    """Guard żniw: katalog celu MUSI mieć segment `CALIBRATION` - żniwa piszą wyłącznie do biblioteki
-    kalibracji, nigdy do drzewa lightów ani do warsztatu. Ścieżka ZNORMALIZOWANA (`abspath` +
-    `normpath`), jak w `_assert_excluded_segment`: `…\\CALIBRATION\\..\\LIGHTS` ma segment w napisie,
-    a system plików pisze do `LIGHTS`. Brak segmentu → `ValueError` (EXPECT) przed czymkolwiek."""
-    katalog = os.path.dirname(os.path.normpath(os.path.abspath(str(dst))))
-    parts = [p for p in re.split(r"[\\/]+", katalog) if p]
-    if not any(p.lower() == CALIBRATION_SEGMENT.lower() for p in parts):
-        raise ValueError(f"cel kopii mastera {dst} leży poza biblioteką kalibracji "
-                         f"(brak segmentu {CALIBRATION_SEGMENT})")
+def _assert_archive_library(dst, library_root):
+    """Guard żniw: katalog celu MUSI leżeć pod `<library_root>\\CALIBRATION` albo
+    `<library_root>\\STACKS` - segment BEZPOŚREDNIO pod korzeniem archiwum, bez wielkości liter. Żniwa
+    piszą wyłącznie do bibliotek archiwum (mastery kalibracji, gotowe stosy), nigdy do drzewa lightów
+    ani do warsztatu. Sam segment `CALIBRATION`/`STACKS` gdziekolwiek nie wystarcza:
+    `…\\LIGHTS\\NGC7000\\stacks\\` to czyjś folder roboczy przy obiekcie (`scan._stacks_prefix` - to
+    samo rozstrzygnięcie dla sita skanu). Obie ścieżki ZNORMALIZOWANE (`abspath` + `normpath`), jak
+    w `_assert_excluded_segment`: `…\\STACKS\\..\\LIGHTS` ma segment w napisie, a system plików pisze do
+    `LIGHTS`. Pusty `library_root` albo cel poza biblioteką → `ValueError` (EXPECT) przed czymkolwiek."""
+    if not library_root:
+        raise ValueError(f"kopia do archiwum bez korzenia archiwum (library_root={library_root!r})")
+
+    def _segmenty(sciezka):
+        return [p for p in re.split(r"[\\/]+", os.path.normpath(os.path.abspath(str(sciezka)))) if p]
+    katalog = [p.lower() for p in _segmenty(dst)[:-1]]
+    korzen = [p.lower() for p in _segmenty(library_root)]
+    biblioteki = {CALIBRATION_SEGMENT.lower(), STACKS_DIR.lower()}
+    if not (len(katalog) > len(korzen) and katalog[:len(korzen)] == korzen
+            and katalog[len(korzen)] in biblioteki):
+        raise ValueError(f"cel kopii {dst} leży poza biblioteką archiwum {library_root} "
+                         f"({CALIBRATION_SEGMENT} albo {STACKS_DIR.upper()} bezpośrednio pod korzeniem)")
 
 
 def _drop_part(part):
@@ -712,12 +799,14 @@ def _drop_part(part):
         pass
 
 
-def copy_master(src, dst, *, expected_sha1, sha1_fn=hashing.sha1_of):
-    """Skopiuj master z wyjścia WBPP pod `dst` w bibliotece kalibracji, BEZ nadpisania. Zwraca
-    `(status, reason | None)`: `placed` · `conflict` (cel albo `.part` już leży - plan nadał nazwę
-    wolną, więc to wyścig z ręką) · `verify_bad` (bajty kopii ≠ `expected_sha1`) · `error` (I/O).
+def copy_master(src, dst, *, expected_sha1, library_root, sha1_fn=hashing.sha1_of):
+    """Skopiuj master albo stos z wyjścia WBPP pod `dst` w bibliotece archiwum (`<library_root>\\
+    CALIBRATION` albo `<library_root>\\STACKS`), BEZ nadpisania. Zwraca `(status, reason | None)`:
+    `placed` · `conflict` (cel albo `.part` już leży - plan nadał nazwę wolną, więc to wyścig z ręką)
+    · `verify_bad` (bajty kopii ≠ `expected_sha1`) · `error` (I/O). `library_root` = korzeń archiwum
+    planu żniw (`HarvestPlan.archive_root`), jedyna podstawa guardu `_assert_archive_library`.
 
-    Droga: guard segmentu → cel istnieje? → katalog celu (błąd, także rodzic będący plikiem → `error`)
+    Droga: guard biblioteki → cel istnieje? → katalog celu (błąd, także rodzic będący plikiem → `error`)
     → kopia do `dst + ".part"` (otwarte `xb`: istniejący `.part` to `conflict`, cudzego pliku nie
     nadpisujemy ani nie usuwamy - wzorzec `raport._zapisz_plik`) → `flush` + `os.fsync` (jak bliźnie
     klingi `raport.py` i `writeback.py`: wyjście WBPP bywa jedyną kopią, a audyt czytający bufor
@@ -739,7 +828,7 @@ def copy_master(src, dst, *, expected_sha1, sha1_fn=hashing.sha1_of):
 
     Powód to DANE, nie zdanie (ekran EN pokazuje go dosłownie, a co się stało, mówi status): ścieżka
     celu albo `.part`, `sha1 <kopia> != <plan>`, treść wyjątku."""
-    _assert_calibration_segment(dst)
+    _assert_archive_library(dst, library_root)
     if os.path.lexists(dst):
         return "conflict", str(dst)
     part = dst + PART_SUFFIX

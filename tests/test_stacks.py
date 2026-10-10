@@ -11,7 +11,7 @@ import pytest
 
 from horreum import db, repo
 from horreum.stacks import REASON_DEGENERATE, REASON_MISMATCH, REASON_NO_OBJECT, \
-    REASON_NO_CANDIDATES, REASON_TELESCOPE, inputs_of, run_stack_lineage
+    REASON_NO_CANDIDATES, REASON_TELESCOPE, inputs_of, record_harvest_inputs, run_stack_lineage
 
 NOW = "2026-08-02T12:00:00+00:00"
 LATER = "2026-08-02T13:00:00+00:00"
@@ -870,3 +870,146 @@ def test_historia_bez_kopii_zgodnej_z_naglowkiem_z_najstarszej_obecnej(con):
     czytane = []
     run_stack_lineage(con, now=NOW, xml_reader=lambda p: czytane.append(p))
     assert czytane == [r"R:\STARA\inna.xisf"]
+
+
+# ============================================================ rodowód z żniw (`record_harvest_inputs`)
+
+_ZAPIS = ("integration.recorded", "integration.updated", "integration.linked", "integration.unlinked")
+
+
+def _zdarzenia_zapisu(con):
+    return con.execute("SELECT count(*) FROM event WHERE verb IN (?, ?, ?, ?)", _ZAPIS).fetchone()[0]
+
+
+def _okno_dziesieciu(con):
+    """Dziesięć lightów w oknie mastera (20:00-23:00), każdy z tą samą temperaturą."""
+    return [_light(con, f"l{i}", date_obs=f"2025-08-30T{20 + i // 6}:{(i % 6) * 10:02d}:00") for i in range(10)]
+
+
+def _automat_z_powodem(con):
+    """Inwariant bramki akceptacji: głowa z powodem nie ma wierszy automatu (ręka się nie liczy)."""
+    return con.execute(
+        "SELECT count(*) FROM integration i WHERE i.unresolved_reason IS NOT NULL AND EXISTS ("
+        "SELECT 1 FROM integration_input ii WHERE ii.integration_id = i.id AND ii.asserted_by <> 'user')"
+    ).fetchone()[0]
+
+
+def test_rodowod_z_zniw_okno_10_historia_8_drugi_lancuch_bez_zmian_reka_nietknieta(con):
+    """Okno dało 10 kandydatów (`window`), WBPP zintegrował 8: zbiór DOKŁADNY z żniw podnosi 8 do
+    `history`, zdejmuje jedyne `window` spoza zbioru, a odrzucenia ręką nie rusza. Następny przebieg
+    łańcucha widzi rodowód mocniejszy od okna i niczego nie dokłada; drugie wołanie = same zera."""
+    m = _master(con)
+    lighty = _okno_dziesieciu(con)
+    run_stack_lineage(con, now=NOW, xml_reader=_brak_xml)
+    assert {r["asserted_by"] for r in inputs_of(con, m)} == {"window"} and len(inputs_of(con, m)) == 10
+    iid = _integracja(con, m)["id"]
+    repo.judge_integration_input(con, integration_id=iid, input_frame_id=lighty[9], excluded=1, now=NOW)
+
+    wynik = record_harvest_inputs(con, master_sha1_data="m1", input_frame_ids=lighty[:8], now=LATER)
+    assert wynik == {"reason": None, "linked": 0, "upgraded": 8, "dropped": 1, "kept_user": 1}
+    stan = {r["input_frame_id"]: (r["asserted_by"], r["excluded"]) for r in inputs_of(con, m)}
+    assert stan == {**{f: ("history", 0) for f in lighty[:8]}, lighty[9]: ("user", 1)}
+    glowa = _integracja(con, m)
+    assert glowa["unresolved_reason"] is None and glowa["integ_hash"] is not None
+
+    zapis, wiersze = _zdarzenia_zapisu(con), dict(stan)
+    s = run_stack_lineage(con, now=LATER, xml_reader=_brak_xml)
+    assert (s.linked_new, s.unlinked, s.kept_proven) == (0, 0, 1)
+    assert {r["input_frame_id"]: (r["asserted_by"], r["excluded"]) for r in inputs_of(con, m)} == wiersze
+    assert _zdarzenia_zapisu(con) == zapis and dict(_integracja(con, m)) == dict(glowa)
+
+    assert record_harvest_inputs(con, master_sha1_data="m1", input_frame_ids=lighty[:8], now=LATER) == \
+        {"reason": None, "linked": 0, "upgraded": 0, "dropped": 0, "kept_user": 1}
+    assert _zdarzenia_zapisu(con) == zapis
+
+
+def _migawka(con, m):
+    """Stan, którego awaria w połowie zapisu nie ma prawa ruszyć: wiersze, głowa, dziennik."""
+    return ([tuple(r) for r in inputs_of(con, m)], dict(_integracja(con, m)),
+            con.execute("SELECT count(*) FROM event").fetchone()[0])
+
+
+def _awaria_przy(monkeypatch, nazwa, ktory):
+    """Funkcja `repo.<nazwa>` rzuca przy `ktory`-m wołaniu (wcześniejsze idą normalnie)."""
+    prawdziwa, wolania = getattr(repo, nazwa), []
+
+    def z_awaria(*a, **k):
+        wolania.append(1)
+        if len(wolania) == ktory:
+            raise RuntimeError(f"awaria {nazwa} #{ktory}")
+        return prawdziwa(*a, **k)
+    monkeypatch.setattr(repo, nazwa, z_awaria)
+
+
+@pytest.mark.parametrize("nazwa, ktory", [("link_integration", 2), ("upsert_integration", 1)])
+def test_rodowod_z_zniw_awaria_w_polowie_nie_zostawia_nic(con, monkeypatch, nazwa, ktory):
+    """Jedna transakcja na wołanie: awaria drugiego zapisu wierszy albo zapisu głowy cofa wszystko -
+    wiersze `history` nie zostają obok niezdjętego powodu, a wyjątek leci do wołającego."""
+    m = _master(con)
+    lighty = _okno_dziesieciu(con)
+    xml = _xml_historii([-10.0] * 8)
+    run_stack_lineage(con, now=NOW, xml_reader=lambda _p: xml)
+    przed = _migawka(con, m)
+    _awaria_przy(monkeypatch, nazwa, ktory)
+    with pytest.raises(RuntimeError, match="awaria"):
+        record_harvest_inputs(con, master_sha1_data="m1", input_frame_ids=lighty[:8], now=LATER)
+    assert _migawka(con, m) == przed and _automat_z_powodem(con) == 0
+    assert _integracja(con, m)["unresolved_reason"] == REASON_MISMATCH
+
+
+def test_rodowod_z_zniw_awaria_przy_zdejmowaniu_okna_cofa_wszystko(con, monkeypatch):
+    m = _master(con)
+    lighty = _okno_dziesieciu(con)
+    run_stack_lineage(con, now=NOW, xml_reader=_brak_xml)
+    przed = _migawka(con, m)
+    _awaria_przy(monkeypatch, "unlink_integration_input", 2)
+    with pytest.raises(RuntimeError, match="awaria"):
+        record_harvest_inputs(con, master_sha1_data="m1", input_frame_ids=lighty[:8], now=LATER)
+    assert _migawka(con, m) == przed
+
+
+def test_rodowod_z_zniw_przy_rozjezdzie_z_historia_zdejmuje_powod_a_lancuch_go_zostawia(con):
+    """Plik zeznaje 8 wejść, okno ma 10 klatek → strażnik 2 gasi rodowód (`history_mismatch`, zero
+    wierszy). Żniwa zapisują 8 `history` i zdejmują powód z głowy (powód obok wierszy automatu łamałby
+    inwariant bramki akceptacji); następny przebieg z tym samym zeznaniem zostawia stos w całości."""
+    m = _master(con)
+    lighty = _okno_dziesieciu(con)
+    xml = _xml_historii([-10.0] * 8)
+    s = run_stack_lineage(con, now=NOW, xml_reader=lambda _p: xml)
+    assert s.reasons == {REASON_MISMATCH: 1} and inputs_of(con, m) == []
+
+    wynik = record_harvest_inputs(con, master_sha1_data="m1", input_frame_ids=lighty[:8], now=LATER)
+    assert wynik == {"reason": None, "linked": 8, "upgraded": 0, "dropped": 0, "kept_user": 0}
+    glowa = _integracja(con, m)
+    assert glowa["unresolved_reason"] is None and glowa["declared_rows"] == 8 and _automat_z_powodem(con) == 0
+
+    zapis = _zdarzenia_zapisu(con)
+    s = run_stack_lineage(con, now=LATER, xml_reader=lambda _p: xml)
+    assert (s.reasons, s.linked, s.by_assert, s.kept_proven) == ({}, 1, {"history": 1}, 1)
+    assert sorted(r["input_frame_id"] for r in inputs_of(con, m)) == sorted(lighty[:8])
+    assert _zdarzenia_zapisu(con) == zapis and _automat_z_powodem(con) == 0
+    assert _integracja(con, m)["unresolved_reason"] is None
+
+
+def test_rodowod_z_zniw_bez_integracji_no_integration_zero_zapisu(con):
+    """Wiersz `integration` stawia łańcuch; bez niego (albo bez klatki stosu) - wynik `no_integration`,
+    zero zapisu i zero zdarzeń."""
+    _master(con)
+    lid = _light(con, "l1", date_obs="2025-08-30T20:30:00")
+    zdarzenia = con.execute("SELECT count(*) FROM event").fetchone()[0]
+    for sha in ("m1", "nieznany"):
+        assert record_harvest_inputs(con, master_sha1_data=sha, input_frame_ids=[lid], now=NOW) == \
+            {"reason": "no_integration", "linked": 0, "upgraded": 0, "dropped": 0, "kept_user": 0}
+    assert con.execute("SELECT count(*) FROM event").fetchone()[0] == zdarzenia
+    assert con.execute("SELECT count(*) FROM integration_input").fetchone()[0] == 0
+
+
+def test_rodowod_z_zniw_odmawia_wejsc_spoza_lightow_i_pustego_zbioru(con):
+    m = _master(con)
+    lid = _light(con, "l1", date_obs="2025-08-30T20:30:00")
+    run_stack_lineage(con, now=NOW, xml_reader=_brak_xml)
+    with pytest.raises(ValueError, match="spoza lightów"):
+        record_harvest_inputs(con, master_sha1_data="m1", input_frame_ids=[lid, m], now=LATER)
+    with pytest.raises(ValueError, match="bez wejść"):
+        record_harvest_inputs(con, master_sha1_data="m1", input_frame_ids=[], now=LATER)
+    assert {r["asserted_by"] for r in inputs_of(con, m)} == {"window"}

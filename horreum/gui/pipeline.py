@@ -981,7 +981,7 @@ class PipelineView(QWidget):
         if self._db_path is None:
             return i18n.t("pipeline.refuse.no_db")
         if self._thread is not None:
-            return i18n.t("pipeline.refuse.running")
+            return i18n.t("pipeline.refuse.delivery_running")
         if self._writeback_busy:
             return i18n.t("pipeline.refuse.writeback")
         source = self._settings().value("pipeline/last_source", None)
@@ -999,7 +999,7 @@ class PipelineView(QWidget):
         if self._db_path is None:
             return i18n.t("pipeline.refuse.no_db")
         if self._thread is not None:
-            return i18n.t("pipeline.refuse.running")
+            return i18n.t("pipeline.refuse.delivery_running")
         if self._writeback_busy:
             return i18n.t("pipeline.refuse.writeback")
         self._start_scan_sequence("all", root)

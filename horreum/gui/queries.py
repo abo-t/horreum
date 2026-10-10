@@ -3419,6 +3419,37 @@ def readiness_pct(n, total):
     return min(max(n * 100 // total, 1), 99)
 
 
+# Stan flatu lightu - wartości `flat_states`. `pending` (master JEST, rodowód go nie przeliczył) nie
+# jest brakiem flatu: zakup klatek i jedno kliknięcie w Dostawie to dwie różne wiadomości.
+FLAT_MASTER, FLAT_RAW, FLAT_PENDING, FLAT_NONE = "master", "raw", "pending", "none"
+
+
+def flat_states(con, rows, *, window_days=RAW_FLAT_WINDOW_DAYS):
+    """`{frame_id: FLAT_*}` dla wierszy lightów niosących `frame_id` i `master_flat` (EXISTS
+    relacji `flat` w `calibration`). JEDNA derywacja dla dwóch powierzchni: teczek wydania
+    (`release_readiness`) i raportu dostawy (`delivery_report`) - dwie kopie pętli rozjechałyby się
+    przy pierwszym nowym tokenie luki, a obie liczby stoją przed człowiekiem tego samego dnia.
+
+    Master ze STANU `calibration`; dla lightów bez niego surowe flaty i `pending` z
+    `lineage.raw_flats_for` - tej samej derywacji, którą wydanie potem pakuje. Jedno wywołanie
+    `raw_flats_for` na wszystkie lighty bez mastera (ono samo ma stałą liczbę zapytań)."""
+    picks = raw_flats_for(con, [r["frame_id"] for r in rows if not r["master_flat"]],
+                          window_days=window_days)
+    stany = {}
+    for r in rows:
+        if r["master_flat"]:
+            stany[r["frame_id"]] = FLAT_MASTER
+            continue
+        pick = picks.get(r["frame_id"])
+        if pick is not None and pick.frame_ids:
+            stany[r["frame_id"]] = FLAT_RAW
+        elif pick is not None and pick.gap == "pending":
+            stany[r["frame_id"]] = FLAT_PENDING
+        else:
+            stany[r["frame_id"]] = FLAT_NONE
+    return stany
+
+
 def release_readiness(con, *, window_days=RAW_FLAT_WINDOW_DAYS):
     """Teczki wydania obiektu do WBPP - jeden wiersz na obiekt z AKTYWNYMI lightami, godzinami
     malejąco (pierwsze na liście to obiekty, na które jest najwięcej materiału).
@@ -3430,8 +3461,9 @@ def release_readiness(con, *, window_days=RAW_FLAT_WINDOW_DAYS):
     kamera) bierze się z mapy planisty (`projection.zestawy_configow`), bo configi scalonego teleskopu
     przy tej samej kamerze lądują w JEDNYM folderze, a goły DISTINCT `config_id` policzyłby je dwa
     razy; light bez configu to jeden zestaw `_UNSET`, jak w planie. Import leniwy - `projection`
-    importuje ten moduł. Master flat i master dark ze STANU `calibration`; surowe flaty i `pending`
-    z `lineage.raw_flats_for` - tej samej derywacji, którą wydanie potem pakuje, nie z przybliżenia.
+    importuje ten moduł. Master dark ze STANU `calibration`; stan flatu z `flat_states` (master ze
+    stanu, surowe flaty i `pending` z `lineage.raw_flats_for` - tej samej derywacji, którą wydanie
+    potem pakuje, nie z przybliżenia).
 
     `pending` (master JEST, rodowód go nie przeliczył) ma własne pole i NIGDY nie wlicza się do
     braku flatu: zakup klatek i jedno kliknięcie w Dostawie to dwie różne wiadomości. Stan: `green`
@@ -3455,8 +3487,7 @@ def release_readiness(con, *, window_days=RAW_FLAT_WINDOW_DAYS):
         "LEFT JOIN header h ON h.frame_id = f.id "
         "WHERE f.kind = 'light' AND f.retired_at IS NULL AND f.superseded_by IS NULL "
         "ORDER BY f.object_id, f.id").fetchall()
-    picks = raw_flats_for(con, [r["frame_id"] for r in rows if not r["master_flat"]],
-                          window_days=window_days)
+    flat = flat_states(con, rows, window_days=window_days)
     from horreum import projection                     # leniwie: projection importuje queries
     zestaw_configu = projection.zestawy_configow(con)
     teczki = {}
@@ -3469,15 +3500,11 @@ def release_readiness(con, *, window_days=RAW_FLAT_WINDOW_DAYS):
         t["zestawy"].add(zestaw_configu.get(r["config_id"], (None, None))[0])
         if r["night"] is not None:
             t["nights"].add(r["night"])
-        t["md"] += bool(r["master_dark"])
-        if r["master_flat"]:
-            t["mf"] += 1
-            continue
-        pick = picks.get(r["frame_id"])
-        if pick is not None and pick.frame_ids:
-            t["raw"] += 1
-        elif pick is not None and pick.gap == "pending":
-            t["pending"] += 1
+        t["md"] += int(bool(r["master_dark"]))
+        stan = flat[r["frame_id"]]
+        t["mf"] += int(stan == FLAT_MASTER)
+        t["raw"] += int(stan == FLAT_RAW)
+        t["pending"] += int(stan == FLAT_PENDING)
     out = []
     for oid, t in teczki.items():
         n = t["lights"]
@@ -3769,6 +3796,114 @@ def last_hand_gesture(con):
         "SELECT verb, COUNT(*) AS n FROM event WHERE ts = ? AND actor = ? "
         "GROUP BY verb ORDER BY verb", (last["ts"], last["actor"]))}
     return {"ts": last["ts"], "actor": last["actor"], "verbs": verbs, "n": sum(verbs.values())}
+
+# --- PRZYJMIJ: raport „co przyszło” po dostawie (`gui/flows/przyjmij.py`) ---
+
+def delivery_report(con, since, *, until=None, window_days=RAW_FLAT_WINDOW_DAYS):
+    """Raport „co przyszło” - klatki TEJ dostawy policzone ze STANU bazy, nie z liczników eventów.
+
+    Klatka dostawy = aktywna (bez `retired_at` i `superseded_by`) z `first_seen_at` w oknie
+    `[since, until]`. Oba końce i `first_seen_at` pisze TEN SAM zegar (`now_fn` okna: `since` bierze
+    `PipelineView` przy starcie przebiegu, `first_seen_at` worker przy skanie, `until` raport po jego
+    końcu), więc porównanie tekstowe PEŁNYCH znaczników ISO jest porównaniem czasu - goła data
+    w granicy zgubiłaby wszystko po północy. `until=None` = okno otwarte z góry; raport przeliczany
+    później (po geście, przy wejściu na stronę) podaje je, żeby klatki NASTĘPNEGO przebiegu (droga
+    „Stosy”, skan trybu zaawansowanego) nie weszły pod nagłówek tej dostawy.
+
+    Populacje „nie rozpoznałem” ZNAK W ZNAK jak kubełki Porządków, zawężone do dostawy i bez
+    nagrobka: `unresolved` - predykat `object_review_frames`, `nameless`/`nameless_raw`/
+    `nameless_stacks` - drążenia `nameless_frames`/`nameless_raw_frames`/`nameless_stack_frames`.
+    Predykaty powtórzone w Pythonie na wierszach dostawy zamiast trzech SELECT-ów po całym
+    archiwum przy każdym przeliczeniu raportu; równość z drążeniami pinuje test. `total` przy nazwie
+    = liczność TEJ SAMEJ nazwy w całym archiwum wg predykatu gestu (populacja, którą zapisze
+    „Przypisz obiekt…”), więc wiersz nazywa obie liczby, zanim dialog powie swoją. `cleared` =
+    lighty i stosy dostawy bez obiektu Z DECYZJI RĘKI (nagrobek - suma połówek „cofnięte” tych
+    samych kubełków): nie trafiają do kolejki napraw, ale raport nie może nad nimi ogłosić pełnego
+    rozpoznania.
+
+    Kalibracja nowych lightów: stan flatu z `flat_states` (ta sama derywacja co teczki wydania),
+    dark ze stanu relacji `dark`. Koszt: jedno zapytanie po klatkach dostawy, `raw_flats_for` dla
+    lightów bez mastera i - gdy są nierozpoznane nazwy - jedno zliczenie ich w archiwum.
+
+    Zwraca dict: frames, by_kind `{kind: n}`, lights, hours, objects `[(canon, n, hours)]` (godziny
+    malejąco), unresolved `[(object_raw, n, total)]` (n malejąco), nameless, nameless_raw,
+    nameless_stacks, cleared, cal `{master_flat, raw_flat, pending, no_flat, master_dark, no_dark}`,
+    masters `{flat, dark}`, stacks."""
+    rows = con.execute(
+        "SELECT f.id AS frame_id, f.kind, f.filetype, f.object_id, f.object_source, o.canon, "
+        "       h.frame_id IS NOT NULL AS has_header, h.object_raw, h.exptime, "
+        "       EXISTS (SELECT 1 FROM calibration c WHERE c.light_frame_id = f.id "
+        "               AND c.relation = 'flat') AS master_flat, "
+        "       EXISTS (SELECT 1 FROM calibration c WHERE c.light_frame_id = f.id "
+        "               AND c.relation = 'dark') AS master_dark "
+        "FROM frame f "
+        "LEFT JOIN object o ON o.id = f.object_id "
+        "LEFT JOIN header h ON h.frame_id = f.id "
+        "WHERE f.first_seen_at >= ? AND (? IS NULL OR f.first_seen_at <= ?) "
+        "  AND f.retired_at IS NULL AND f.superseded_by IS NULL "
+        "ORDER BY f.id",
+        (since, until, until)).fetchall()
+    by_kind = {}
+    for r in rows:
+        by_kind[r["kind"]] = by_kind.get(r["kind"], 0) + 1
+    lights = [r for r in rows if r["kind"] == "light"]
+    obiekty = {}
+    for r in lights:
+        if r["object_id"] is not None:
+            o = obiekty.setdefault(r["canon"], [0, 0.0])
+            o[0] += 1
+            o[1] += float(r["exptime"] or 0.0)
+    bez_karty = set(NO_OBJECT_CARD_FILETYPES)
+    nazwy, nameless, nameless_raw, nameless_stacks, cleared = {}, 0, 0, 0, 0
+    for r in rows:
+        # Wspólny rdzeń kubełków: bez obiektu, z zeznaniem (drążenia idą `JOIN header`, więc klatka
+        # bez wiersza `header` nie należy do żadnego z nich). Nagrobek ręki to połówka „cofnięte”
+        # każdego kubełka - nie robota do naprawy, ale też nie rozpoznanie, więc liczy się osobno.
+        if r["object_id"] is not None or not r["has_header"]:
+            continue
+        if r["object_source"] == "user_cleared":
+            cleared += int(r["kind"] in LIGHT_KINDS)
+            continue
+        if r["object_raw"] is not None:
+            if r["kind"] in LIGHT_KINDS:
+                nazwy[r["object_raw"]] = nazwy.get(r["object_raw"], 0) + 1
+        elif r["kind"] == "master_light":
+            nameless_stacks += 1
+        elif r["kind"] == "light":
+            if (r["filetype"] or "") in bez_karty:
+                nameless_raw += 1
+            else:
+                nameless += 1
+    total = {}
+    if nazwy:
+        total = {r["object_raw"]: r["n"] for r in con.execute(
+            "SELECT h.object_raw, COUNT(*) AS n "
+            "FROM frame f JOIN header h ON h.frame_id = f.id "
+            "WHERE f.kind IN ('light','master_light') AND f.object_id IS NULL "
+            "  AND (f.object_source IS 'user_cleared') = 0 "
+            "  AND h.object_raw IN (SELECT value FROM json_each(?)) "
+            "GROUP BY h.object_raw",
+            (json.dumps(sorted(nazwy)),)).fetchall()}
+    stan_flatu = flat_states(con, lights, window_days=window_days)
+    flaty = {stan: 0 for stan in (FLAT_MASTER, FLAT_RAW, FLAT_PENDING, FLAT_NONE)}
+    for stan in stan_flatu.values():
+        flaty[stan] += 1
+    dark = sum(1 for r in lights if r["master_dark"])
+    secs = sum(float(r["exptime"] or 0.0) for r in lights)
+    return {
+        "frames": len(rows), "by_kind": by_kind, "lights": len(lights), "hours": secs / 3600.0,
+        "objects": sorted(((canon, n, s / 3600.0) for canon, (n, s) in obiekty.items()),
+                          key=lambda o: (-o[2], -o[1], str(o[0]).lower())),
+        "unresolved": sorted(((raw, n, total.get(raw, n)) for raw, n in nazwy.items()),
+                             key=lambda u: (-u[1], natural_key(u[0]), u[0])),
+        "nameless": nameless, "nameless_raw": nameless_raw, "nameless_stacks": nameless_stacks,
+        "cleared": cleared,
+        "cal": {"master_flat": flaty[FLAT_MASTER], "raw_flat": flaty[FLAT_RAW],
+                "pending": flaty[FLAT_PENDING], "no_flat": flaty[FLAT_NONE],
+                "master_dark": dark, "no_dark": len(lights) - dark},
+        "masters": {"flat": by_kind.get("master_flat", 0), "dark": by_kind.get("master_dark", 0)},
+        "stacks": by_kind.get("master_light", 0),
+    }
 
 # --- ŻNIWA: proweniencja i siedziba masterów z wyjścia WBPP (rdzeń `horreum/harvest.py`) ---
 

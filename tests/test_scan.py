@@ -1362,6 +1362,49 @@ def test_scan_tree_podmiana_tresci_rebound(tmp_path):
     con.close()
 
 
+def test_scan_tree_nowe_kopie_znanych_klatek_liczone_wprost(tmp_path):
+    """`locations_new_known` = nowa ścieżka ISTNIEJĄCEJ tożsamości: kopia znanej klatki +1, nowa
+    tożsamość pod nową ścieżką 0, podmiana treści pod znaną ścieżką 0. Raport dostawy mówi z tego
+    pola „kopie znanych klatek”; różnica `locations_new - frames_new` dawała tu 1 zamiast 2, bo
+    podmiana podbija `frames_new` bez nowej lokacji."""
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    a, b = _light(tree / "a.fits", 1), _light(tree / "b.fits", 2)
+    m = _light(tree / "master.fits", 3)
+    s1 = scan_tree(con, tree, volume="VOL1", now=NOW)
+    assert (s1.frames_new, s1.locations_new, s1.locations_new_known) == (3, 3, 0)
+    (tree / "kopie").mkdir()
+    shutil.copy(str(a), str(tree / "kopie" / "a.fits"))       # dwie kopie znanych klatek
+    shutil.copy(str(b), str(tree / "kopie" / "b.fits"))
+    _light(tree / "nowa.fits", 4)                              # nowa tożsamość pod nową ścieżką
+    m.unlink()
+    _light(tree / "master.fits", 5)                            # podmiana treści pod znaną ścieżką
+    st = m.stat()
+    os.utime(m, (st.st_atime, st.st_mtime + 100))
+    s2 = scan_tree(con, tree, volume="VOL1", now=NOW)
+    assert (s2.frames_new, s2.locations_new, s2.locations_rebound) == (2, 3, 1)
+    assert s2.locations_new_known == 2
+    con.close()
+
+
+def test_szkielet_po_awarii_wjazdu_liczy_kopie_znanej_klatki(tmp_path, monkeypatch):
+    """Ta sama reguła w drodze szkieletu (wjazd padł po udanym odczycie): szkielet pod nową ścieżką
+    ZNANEJ tożsamości to nowa kopia znanej klatki (+1), szkielet nowej tożsamości - nie (0)."""
+    con = _db(tmp_path)
+    tree = tmp_path / "t"; tree.mkdir()
+    a = _light(tree / "a.fits", 1)
+    scan_tree(con, tree, volume="VOL1", now=NOW)
+    shutil.copy(str(a), str(tree / "kopia.fits"))
+    _light(tree / "nowa.fits", 2)
+
+    def _bug(*a, **k):
+        raise RuntimeError("bug w derywacji osi")
+    monkeypatch.setattr("horreum.scan._derive_axes", _bug)
+    s = scan_tree(con, tree, volume="VOL1", now=LATER)
+    assert (s.frames_new, s.locations_new, s.locations_new_known) == (1, 2, 1)
+    con.close()
+
+
 def test_ingest_znana_sciezka_nieczytelna_bajty_bez_zmian(tmp_path):
     """R3-b1 (#13): kopia, która BYŁA czytelna, teraz nieczytelna (transient NAS) przy NIEZMIENIONYCH
     bajtach → refresh mtime + MARKER `unreadable_since` + frame.review „kopia nieczytelna"; ZERO

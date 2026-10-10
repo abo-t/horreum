@@ -2308,7 +2308,7 @@ class ObjectAxisView(QWidget):
         canon, catalog, kind, alias_norm = dlg.selected
         try:
             with busy.busy(self.status_message.emit,
-                           i18n.t("busy.saving_frames", n=len(frame_ids))):
+                           i18n.t_plural("busy.saving_frames", len(frame_ids))):
                 g = repo.user_assign_object(
                     self.con, alias_norm=alias_norm, canon=canon, catalog=catalog, kind=kind,
                     frame_ids=frame_ids, now=self._now(), overwrite_weak=cofniete)
@@ -2400,7 +2400,7 @@ class ObjectAxisView(QWidget):
         telescope_id, telescope_label, frame_ids = dlg.selected
         try:
             with busy.busy(self.status_message.emit,
-                           i18n.t("busy.saving_frames", n=len(frame_ids))):
+                           i18n.t_plural("busy.saving_frames", len(frame_ids))):
                 g = repo.user_assign_config(self.con, frame_ids=frame_ids,
                                             telescope_id=telescope_id, now=self._now(),
                                             overwrite=zmiana)
@@ -2920,7 +2920,7 @@ class ObservatoryAxisView(QWidget):
             return
         wybor = dlg.selected
         try:
-            with busy.busy(self._flash, i18n.t("busy.saving_frames", n=len(wybor["frame_ids"]))):
+            with busy.busy(self._flash, i18n.t_plural("busy.saving_frames", len(wybor["frame_ids"]))):
                 if mode == "clear":
                     g = repo.clear_observatory_assignment(
                         self.con, frame_ids=wybor["frame_ids"], now=self._now())
@@ -3341,6 +3341,11 @@ class MainWindow(QMainWindow):
                 self._odswiez_dom()
         if strona == STRONA_PORZADKI:   # wejście w Porządki = świeży stan liczników zadań
             self.tasks_view.refresh_counts()
+        if strona == STRONA_DOSTAWA:
+            # Raport „co przyszło” liczy się ze stanu, a nazwę mogła nadać ręka w Porządkach albo
+            # w Zbiorach - wiersz „nie rozpoznałem” po powrocie kłamałby o niej (jedno zapytanie
+            # zawężone do dostawy; bez raportu w tej sesji nic się nie liczy).
+            self.przyjmij_view.odswiez_raport()
         if strona == STRONA_PLANER and self.planner_view.bez_stanowiska:
             # Stanowisko wskazuje się na innym ekranie (AR-48), więc pusty stan „bez stanowiska"
             # przelicza się przy każdym wejściu, dopóki jest prawdą - gest z pustego stanu obiecuje,
@@ -3428,6 +3433,7 @@ class MainWindow(QMainWindow):
         `observatory_view`/`object_view` przeżywa przemontowanie bez zmian."""
         from horreum.gui.pipeline import (                     # lazy: Qt-import tylko gdy montujemy
             REASON_COPY_FACTS, PipelineView)
+        from horreum.gui.flows.przyjmij import PrzyjmijView
         from horreum.gui.grid import FramesView
         from horreum.gui.tasks import TasksView
         from horreum.gui.planner import PlannerView
@@ -3441,7 +3447,15 @@ class MainWindow(QMainWindow):
         # (`running_changed(False)`), nie koniec etapu - patrz `_odswiez_widoki_po_przebiegu`.
         pipeline.running_changed.connect(self._on_pipeline_running)
         pipeline.open_collection.connect(self._on_open_collection)   # P5b: raport → perspektywa (3→1)
+        # „Wciągnij mastery…”: okno żniw potrzebuje połączenia z bazą, którego Dostawa nie trzyma.
+        pipeline.open_harvest.connect(self._on_open_harvest)
         self.pipeline_view = pipeline
+        # Strona Dostawy: TEN SAM `PipelineView` w kontenerze z raportem „Co przyszło” (jak Znajdź
+        # nad gridem) - drugi widok Dostawy rozjechałby wątek etapów, mutex i przyciski.
+        przyjmij = PrzyjmijView(self.con, pipeline, now_fn=self._now)
+        przyjmij.status_message.connect(self._flash)
+        przyjmij.open_tasks.connect(self._on_kubelek_porzadkow)
+        self.przyjmij_view = przyjmij
 
         grid = FramesView(self.con, now_fn=self._now, pola_poza_watkiem=self._pola_poza_watkiem)
         grid.status_message.connect(self._flash_grid)
@@ -3466,6 +3480,7 @@ class MainWindow(QMainWindow):
         grid.run_stage_fn = self._stack_lineage_after_gesture
         tasks.object_view.writeback_busy.connect(grid.set_writeback_busy)   # mutex w drugą stronę
         tasks.object_view.writeback_busy.connect(pipeline.set_writeback_busy)   # i Dostawa gaśnie
+        tasks.object_view.writeback_busy.connect(przyjmij.set_writeback_busy)   # …z gestem raportu
         # CZWARTA POWIERZCHNIA gestu osi obiektu (S2b, §4/14c-f): gest z paska Zbiorów zmienia
         # kolejkę przeglądu w oknie osi — a tamten widok nie ma skąd o tym wiedzieć. Gospodarz zna
         # obie strony, więc to on je łączy (grid nie importuje osi, oś nie importuje gridu).
@@ -3518,7 +3533,7 @@ class MainWindow(QMainWindow):
         # Zbiorów - test, który wyłącza tamte, dostaje też przewidywalny Dom.
         home = HomeView(self.con, now_fn=self._now, theme_name=motyw,
                         poza_watkiem=self._pola_poza_watkiem)
-        home.przyjmij.connect(lambda: self._show_view(NAV_DOSTAWA))
+        home.przyjmij.connect(self._on_przyjmij)
         home.znajdz.connect(lambda: self.show_find())
         home.wydaj.connect(grid._open_object_release)
         home.popraw.connect(lambda: self._show_view(NAV_PORZADKI))
@@ -3530,8 +3545,15 @@ class MainWindow(QMainWindow):
         # Teczki liczą godziny per obiekt - gest osi obiektu przenosi klatki między teczkami.
         grid.object_axis_changed.connect(home.odswiez_teczki)
         self.home_view = home
+        # Gest „Przypisz obiekt…” z raportu dostawy zmienia tę samą oś, co gest Zbiorów - te same
+        # powierzchnie liczą się od nowa: kolejka osi, plakietka Porządków, teczki Domu i grid
+        # (facet Obiekt liczy się w `_refresh`, więc przeładowanie facetów niepotrzebne).
+        przyjmij.object_axis_changed.connect(tasks.object_view.refresh)
+        przyjmij.object_axis_changed.connect(tasks.refresh_counts)
+        przyjmij.object_axis_changed.connect(home.odswiez_teczki)
+        przyjmij.object_axis_changed.connect(lambda: grid.refresh(w_tle=True))
 
-        for widget in (home, znajdz, pipeline, tasks, planner):      # kolejność = `STRONA_*`
+        for widget in (home, znajdz, przyjmij, tasks, planner):      # kolejność = `STRONA_*`
             self.stack.addWidget(widget)
         # Wiersze i wiersz startu przy ZABLOKOWANYCH sygnałach listy: Dom właśnie policzył się
         # w konstruktorze, a `_on_nav_changed` zamówiłby drugi odczyt i drugi rachunek teczek
@@ -3668,6 +3690,54 @@ class MainWindow(QMainWindow):
         else:
             raise ValueError(f"nieznana pozycja menu Więcej: {klucz!r}")
 
+    def _on_przyjmij(self):
+        """Kafel Przyjmij na Domu = JEDNA interakcja do raportu: strona Dostawy i złota akcja na
+        zapamiętanym źródle (pierwsza dostawa pyta o katalog - decyzja należy do człowieka).
+        Odmowa (bieg w toku, zapis nagłówków, brak bazy) idzie na pasek, a strona z postępem biegu
+        stoi wtedy przed oczami - drugi bieg nie rusza (`PipelineView.receive`). Menu „Więcej…”
+        i wiersz „?" Porządków prowadzą na tę stronę dalej BEZ startu: to wejście po robotę
+        trybu zaawansowanego, nie zamiar dostawy."""
+        self._show_view(NAV_DOSTAWA)
+        reason = self.pipeline_view.receive()
+        if reason is not None:
+            self._flash(reason)
+
+    def _on_kubelek_porzadkow(self, tag):
+        """Wiersz „bez nazwy” raportu dostawy → Porządki z TYM kubełkiem zaznaczonym na podstronie
+        obiektów (drążenie pokazuje klatki, gest naprawy się zapala). Sama lista zadań kazałaby
+        szukać kubełka drugi raz - przycisk raportu ma kończyć się na celu, nie przed nim. Pusty
+        tag = podstrona bez wskazania (nazwy ponad sufit raportu: kolejka stoi przed oczami)."""
+        from horreum.gui import tasks as tasks_mod      # lazy jak `TasksView` w `_mount_views`
+        self._show_view(NAV_PORZADKI)
+        self.tasks_view.pages.setCurrentIndex(tasks_mod._PAGE_OBJECTS)
+        if tag:
+            self.tasks_view._zaznacz_kubelek(tag)
+        else:
+            self.object_view.refresh()
+
+    def _on_open_harvest(self):
+        """„Wciągnij mastery…” → okno żniw nad połączeniem okna. Korzeń archiwum najpierw z bazy
+        (`harvest.archive_root_from_db` - tam, gdzie leży biblioteka kalibracji), dopiero bez niego
+        ostatnie źródło Dostawy: ono bywa podkatalogiem nocy, a wtedy mastery lądowałyby w drugiej,
+        równoległej bibliotece. Po oknie: gdy coś wciągnięto - łańcuch Dostawy na wspólnym rodzicu
+        kopii (`run_all_on`, bez zapisu źródła); bieg etapów ma jednego właściciela, więc okno go
+        nie uruchamia samo. Zdanie wyniku i ewentualna odmowa łańcucha idą JEDNYM komunikatem -
+        odmowa na osobnym raporcie zastąpiłaby na pasku wiadomość o położonych masterach. Importy
+        leniwe (wzorzec `_mount_views`): okno ładuje się dopiero, gdy ktoś po nie sięgnie."""
+        from horreum import harvest
+        from horreum.gui.harvest_dialog import HarvestDialog
+        archiwum = (harvest.archive_root_from_db(self.con)
+                    or QSettings("Horreum", "Horreum").value("pipeline/last_source", "") or "")
+        dlg = HarvestDialog(self.con, now_fn=self._now, archive_root=archiwum, parent=self)
+        dlg.exec()
+        zdania = [dlg.summary] if dlg.summary else []
+        if dlg.harvested_root:
+            reason = self.pipeline_view.run_all_on(dlg.harvested_root)
+            if reason is not None:
+                zdania.append(reason)
+        if zdania:
+            self._flash(" - ".join(zdania))
+
     def _on_tasks_counts(self, n):
         """Badge sidebara: „Porządki (N)" przy N>0; przy zerze GOŁE „Porządki" - „(0)" to szum (F5R#8).
         Ta sama liczba idzie na kafel „Popraw" Domu - jeden sygnał, dwa nośniki (SPOT)."""
@@ -3708,9 +3778,11 @@ class MainWindow(QMainWindow):
         """Mutex DWÓCH powierzchni writebacku (D-PD-3). Grid pisze do plików → „Napraw nagłówek…"
         gaśnie; okno naprawy pisze → gaśnie Zatwierdź/Odrzuć/Cofnij gridu. Bez tego oba commity
         spotkałyby się na `BEGIN IMMEDIATE` (`busy_timeout` 5 s) i jeden wróciłby jako 'failed'.
-        Trzecia strona mutexu: Dostawa gaśnie przy zapisie Z KAŻDEJ z dwóch powierzchni."""
+        Trzecia strona mutexu: Dostawa gaśnie przy zapisie Z KAŻDEJ z dwóch powierzchni - razem
+        z gestem raportu „co przyszło” (zapis osi obiektu w trakcie zapisu kart do plików)."""
         self.object_view.set_writeback_busy(busy)
         self.pipeline_view.set_writeback_busy(busy)
+        self.przyjmij_view.set_writeback_busy(busy)
 
     def _on_pipeline_running(self, running):
         """W trakcie etapu wyłącz akcje zapisu osi (szczery disabled). Nawigacja zostaje aktywna —
@@ -3721,6 +3793,7 @@ class MainWindow(QMainWindow):
         self.grid_view.set_busy(running)     # grid ma akcje ZAPISU (staging/commit/undo) — gatuj (wizytator C1)
         self.planner_view.set_busy(running)  # planer czyta CAŁE archiwum — nie liczmy nocy na wpół zapisanej bazie
         self.home_view.set_busy(running)     # „Wydaj do WBPP" Domu gaśnie jak „Wydaj obiekt…" gridu
+        self.przyjmij_view.set_busy(running)  # „Przypisz obiekt…” raportu dostawy - zapis osi
         if not running:
             # KONIEC PRZEBIEGU = JEDNO odświeżenie wszystkich widoków i plakietki. Bez warunku
             # „czy etap coś zapisał": przebieg przerwany albo zakończony błędem też mógł zapisać

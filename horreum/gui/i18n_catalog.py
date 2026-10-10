@@ -1063,8 +1063,8 @@ CATALOG = {
     "home.title": {"pl": "Co chcesz zrobić?", "en": "What do you want to do?"},
     "home.tile.receive": {"pl": "Przyjmij", "en": "Receive"},
     "home.tile.receive_tip": {
-        "pl": "Nowe klatki z dysku do archiwum - strona Dostawy ze złotą akcją „Przyjmij nowe”",
-        "en": "New frames from disk into the archive - the Intake page with “Receive new”"},
+        "pl": "Uruchamia dostawę i pokazuje raport: co przyszło i czego nie rozpoznałem",
+        "en": "Starts the intake and shows the report: what came in and what was not recognized"},
     "home.tile.find": {"pl": "Znajdź", "en": "Find"},
     "home.tile.find_tip": {
         "pl": "Obiekt, noc, filtr, teleskop, zestaw albo tekst uwag - jedno pole i Enter",
@@ -1632,7 +1632,11 @@ CATALOG = {
     "busy.count_proposals": {"pl": "Liczę propozycje ze ścieżki…", "en": "Counting path proposals…"},
     "busy.saving_names": {"pl": "Zapisuję nazwy: {done} z {total}…",
                           "en": "Saving names: {done} of {total}…"},
-    "busy.saving_frames": {"pl": "Zapisuję {n} klatek…", "en": "Saving {n} frames…"},
+    "busy.saving_frames": {
+        "pl": {"one": "Zapisuję {n} klatkę…", "few": "Zapisuję {n} klatki…",
+               "many": "Zapisuję {n} klatek…"},
+        "en": {"one": "Saving {n} frame…", "other": "Saving {n} frames…"},
+    },
     # Przywracanie idzie transakcja per OBIEKT, nie per klatka — licznik mówi więc o grupach,
     # tak jak `saving_names` mówi o nazwach: „zapisuję" bez liczby nie odróżniałoby przebiegu
     # przez pięć obiektów od zawieszenia się na pierwszym.
@@ -3036,6 +3040,12 @@ CATALOG = {
         "pl": "etap w biegu — uruchom „Rozwiąż” po jego zakończeniu",
         "en": "a stage is running — start „Resolve” after it finishes",
     },
+    # Odmowa wejść SPOZA strony (kafel Przyjmij, żniwa): wołający nie prosił o „Rozwiąż”, więc
+    # zdanie mówi, gdzie widać bieżący etap i co zrobić po nim.
+    "pipeline.refuse.delivery_running": {
+        "pl": "etap Dostawy w biegu - postęp na stronie Dostawy; przyjmij po jego zakończeniu",
+        "en": "an Intake stage is running - progress is on the Intake page; receive after it finishes",
+    },
     "pipeline.refuse.writeback": {
         "pl": "trwa zapis nagłówków do plików - etapy Dostawy ruszą po jego zakończeniu",
         "en": "header write to files in progress - Intake stages start after it finishes",
@@ -3362,6 +3372,111 @@ CATALOG = {
     "pipeline.presence.skipped_no_volume": {
         "pl": "pominięty — wolumin nieustalony, brak kotwicy zakresu",
         "en": "skipped — volume undetermined, no scope anchor",
+    },
+
+    # ============================================================ flows/przyjmij.py („co przyszło”)
+    # Panel nad stroną Dostawy: liczby ze STANU bazy (`queries.delivery_report`) i ze skanu, wiersze
+    # „nie rozpoznałem” z gestem na miejscu. Człony „etykieta liczba” jak w raporcie etapów; zera
+    # milczą. Przycisk przypisania i link do Porządków biorą etykiety z istniejących kluczy
+    # (`object.assign_btn`, `nav.porzadki`) - ta sama akcja i to samo miejsce, jedna nazwa.
+    "intake.title": {"pl": "Co przyszło", "en": "What came in"},
+    "intake.head": {"pl": "Dostawa z {time}: {what}", "en": "Intake at {time}: {what}"},
+    "intake.new": {
+        "pl": {"one": "{n} nowa klatka", "few": "{n} nowe klatki", "many": "{n} nowych klatek"},
+        "en": {"one": "{n} new frame", "other": "{n} new frames"},
+    },
+    "intake.nothing_new": {"pl": "nic nowego", "en": "nothing new"},
+    "intake.kinds": {"pl": "({parts})", "en": "({parts})"},
+    "intake.kind.light": {"pl": "lighty {n}", "en": "lights {n}"},
+    "intake.kind.flat": {"pl": "flaty {n}", "en": "flats {n}"},
+    "intake.kind.masters": {"pl": "mastery {n}", "en": "masters {n}"},
+    "intake.kind.stacks": {"pl": "stosy {n}", "en": "stacks {n}"},
+    "intake.kind.other": {"pl": "inne {n}", "en": "other {n}"},
+    "intake.copies_known": {"pl": "kopie znanych klatek {n}", "en": "copies of known frames {n}"},
+    "intake.unchanged": {"pl": "bez zmian {n}", "en": "unchanged {n}"},
+    "intake.refused": {"pl": "Dostawa nie ruszyła: {reason}", "en": "Intake did not start: {reason}"},
+    "intake.cancelled": {
+        "pl": "Dostawa przerwana w etapie „{stage}” - niżej to, co zdążyło wejść",
+        "en": "Intake interrupted at stage “{stage}” - below is what made it in",
+    },
+    "intake.failed": {
+        "pl": "{line} - niżej to, co zdążyło wejść",
+        "en": "{line} - below is what made it in",
+    },
+    "intake.objects": {"pl": "Obiekty: {items}", "en": "Objects: {items}"},
+    "intake.object_item": {"pl": "{canon} ×{n} ({hours})", "en": "{canon} ×{n} ({hours})"},
+    "intake.objects_more": {
+        "pl": {"one": "i {n} inny", "few": "i {n} inne", "many": "i {n} innych"},
+        "en": {"one": "and {n} more", "other": "and {n} more"},
+    },
+    "intake.cal": {"pl": "Kalibracja nowych lightów: {parts}",
+                   "en": "Calibration of new lights: {parts}"},
+    "intake.cal.master_flat": {"pl": "flat master {n}", "en": "master flat {n}"},
+    "intake.cal.raw_flat": {"pl": "surowy flat {n}", "en": "raw flat {n}"},
+    "intake.cal.no_flat": {"pl": "bez flatu {n}", "en": "no flat {n}"},
+    "intake.cal.pending": {"pl": "do przeliczenia {n}", "en": "to recompute {n}"},
+    "intake.cal.master_dark": {"pl": "dark master {n}", "en": "master dark {n}"},
+    "intake.cal.no_dark": {"pl": "bez darka {n}", "en": "no dark {n}"},
+    "intake.unresolved_head": {
+        "pl": {"one": "Nie rozpoznałem: {n} klatka", "few": "Nie rozpoznałem: {n} klatki",
+               "many": "Nie rozpoznałem: {n} klatek"},
+        "en": {"one": "Not recognized: {n} frame", "other": "Not recognized: {n} frames"},
+    },
+    "intake.all_recognized": {"pl": "Wszystko rozpoznane", "en": "Everything recognized"},
+    "intake.unresolved_row": {"pl": "„{name}” ×{n} w tej dostawie",
+                              "en": "“{name}” ×{n} in this intake"},
+    "intake.unresolved_total": {"pl": " · łącznie {total} w archiwum",
+                                "en": " · {total} in the archive in total"},
+    "intake.unresolved_more": {
+        "pl": {"one": "i {n} inna nazwa", "few": "i {n} inne nazwy", "many": "i {n} innych nazw"},
+        "en": {"one": "and {n} more name", "other": "and {n} more names"},
+    },
+    "intake.nameless": {"pl": "bez nazwy w nagłówku {n}", "en": "no name in the header {n}"},
+    "intake.nameless_raw": {"pl": "RAW bez nazwy {n}", "en": "RAW without a name {n}"},
+    "intake.nameless_stacks": {"pl": "stosy bez nazwy {n}", "en": "stacks without a name {n}"},
+    "intake.cleared": {
+        "pl": {"one": "Bez obiektu z decyzji ręki: {n} klatka",
+               "few": "Bez obiektu z decyzji ręki: {n} klatki",
+               "many": "Bez obiektu z decyzji ręki: {n} klatek"},
+        "en": {"one": "Without an object by hand decision: {n} frame",
+               "other": "Without an object by hand decision: {n} frames"},
+    },
+    "intake.tip.tasks": {
+        "pl": "Pokazuje ten kubełek w Porządkach - tam jest jego naprawa",
+        "en": "Shows this bucket in Housekeeping - its fix lives there",
+    },
+    "intake.assign_tip": {
+        "pl": {"one": "Wskaż obiekt dla {n} klatki o tej nazwie - nazwę zapamiętam "
+                      "na następne dostawy",
+               "few": "Wskaż obiekt dla {n} klatek o tej nazwie - nazwę zapamiętam "
+                      "na następne dostawy",
+               "many": "Wskaż obiekt dla {n} klatek o tej nazwie - nazwę zapamiętam "
+                       "na następne dostawy"},
+        "en": {"one": "Pick the object for {n} frame with this name - the name is remembered for "
+                      "next deliveries",
+               "other": "Pick the object for {n} frames with this name - the name is remembered "
+                        "for next deliveries"},
+    },
+    "intake.assign_busy_tip": {
+        "pl": "Dostawa w biegu - przypisanie po jej zakończeniu",
+        "en": "Intake is running - assign after it finishes",
+    },
+    "intake.assign_writeback_tip": {
+        "pl": "Trwa zapis nagłówków do plików - przypisanie po jego zakończeniu",
+        "en": "Header write to files in progress - assign after it finishes",
+    },
+    "intake.assign.remembered": {
+        "pl": "Zapamiętałem: „{raw}” = {canon} - następne dostawy rozpoznają same",
+        "en": "Remembered: “{raw}” = {canon} - next deliveries will recognize it on their own",
+    },
+    "intake.assign.assigned": {
+        "pl": {"one": "Przypisałem {canon} ({n} klatka)", "few": "Przypisałem {canon} ({n} klatki)",
+               "many": "Przypisałem {canon} ({n} klatek)"},
+        "en": {"one": "Assigned {canon} ({n} frame)", "other": "Assigned {canon} ({n} frames)"},
+    },
+    "intake.assign.gone": {
+        "pl": "„{raw}” nie czeka już na obiekt - raport przeliczony",
+        "en": "“{raw}” no longer waits for an object - report recomputed",
     },
 
     # ============================================================ projection_dialog.py (rollout §4)

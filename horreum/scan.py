@@ -1453,6 +1453,9 @@ class ScanSummary:
     frames_new: int = 0
     frames_existing: int = 0
     locations_new: int = 0
+    locations_new_known: int = 0   # z tego: nowa ścieżka ISTNIEJĄCEJ tożsamości (kopia znanej klatki) -
+                                   # nie `locations_new - frames_new`: podmiana treści pod znaną ścieżką
+                                   # podbija `frames_new` bez nowej lokacji, więc różnica zaniżała kopie
     locations_refreshed: int = 0   # znana ścieżka, fakty kopii odświeżone (mtime/hash/rozmiar — §2)
     headers_refreshed: int = 0     # zeznanie odświeżone po zmianie header_hash (writeback — §2)
     locations_rebound: int = 0     # podmiana treści pod znaną ścieżką → location przepięta (§2)
@@ -1787,6 +1790,8 @@ def _ingest_in_tx(con, rec, *, volume, drive_letter, tier, now, summary, actor, 
             now=now, actor=actor)
         if loc_created:
             summary.locations_new += 1
+            if not created:
+                summary.locations_new_known += 1
         if created:                                    # header 1:1 z frame → tylko dla nowego
             _record_testimony_and_flags(
                 con, rec, frame_id=frame_id, sha1_data=sha1_data, readable=readable,
@@ -1922,6 +1927,8 @@ def _szkielet_po_awarii_zapisu(con, rec, *, volume, drive_letter, tier, reason, 
             rekord.locations_new += 1
             if created:
                 rekord.frames_new += 1
+            else:
+                rekord.locations_new_known += 1
             repo.flag_frame_review(con, sha1=sha1_data, path=rec.path,
                                    reason=f"{repo.UNREADABLE_REASON_PREFIX}{reason}", now=now,
                                    actor=actor)

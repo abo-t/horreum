@@ -1093,7 +1093,7 @@ def test_receive_publiczne_zwraca_powod_albo_startuje(qapp, tmp_path, ustawienia
     view.running_changed.connect(lambda r: loop.quit() if r is False else None)
     QTimer.singleShot(20000, loop.quit)
     assert view.receive() is None and view._thread is not None      # ruszyło bez pytania
-    assert view.receive() == i18n.t("pipeline.refuse.running")      # drugi klik w biegu
+    assert view.receive() == i18n.t("pipeline.refuse.delivery_running")      # drugi klik w biegu
     loop.exec()
     assert "[skan]" in view.lbl_summary.text()
 
@@ -1155,7 +1155,7 @@ def test_run_all_on_odmawia_bez_bazy_w_biegu_i_przy_zapisie_naglowkow(qapp, tmp_
     view.run_finished.connect(lambda _lr: loop.quit())
     QTimer.singleShot(20000, loop.quit)
     assert view.run_all_on(tree) is None
-    assert view.run_all_on(tree) == i18n.t("pipeline.refuse.running")   # drugi bieg w trakcie
+    assert view.run_all_on(tree) == i18n.t("pipeline.refuse.delivery_running")   # drugi bieg w trakcie
     loop.exec()
 
 

@@ -607,12 +607,18 @@ def test_kafle_prowadza_istniejacymi_drogami(qapp, tmp_path, monkeypatch):
             return 0                                     # Anuluj
 
     monkeypatch.setattr(grid_mod, "ObjectPickDialog", _OknoTeczek)
+    # Kafel Przyjmij URUCHAMIA dostawę (`PipelineView.receive`): bez zapamiętanego źródła złota
+    # akcja pyta o katalog modalnym oknem, więc tu stoi szpieg zamiast prawdziwego startu.
+    from horreum.gui.pipeline import PipelineView
+    dostawy = []
+    monkeypatch.setattr(PipelineView, "receive", lambda self: dostawy.append(self))
     win = _pokazane(MainWindow(_s8(tmp_path)))
     try:
         win.activateWindow()
         h = win.home_view
         h.tile_przyjmij.click()
         assert win.stack.currentIndex() == STRONA_DOSTAWA and win.nav.currentRow() == NAV_DOSTAWA
+        assert dostawy == [win.pipeline_view], "kafel uruchamia złotą akcję Dostawy"
         win._show_view(NAV_DOM)
         h.tile_znajdz.click()
         assert win.stack.currentIndex() == STRONA_ZBIORY and win.nav.currentRow() == NAV_ZNAJDZ
@@ -971,7 +977,7 @@ def _stan_zbioru(g):
             g._run_id, g._pending_count(), g.drawer._n)
 
 
-def test_przejscia_przy_biegu_Dostawy_i_otwartym_stagingu(okno_ze_stagingiem):
+def test_przejscia_przy_biegu_Dostawy_i_otwartym_stagingu(okno_ze_stagingiem, monkeypatch):
     """Dom ↔ Znajdź ↔ Zbiory klasyczne ↔ Dostawa w trakcie biegu Dostawy (`set_busy`) i przy
     otwartym stagingu: staging i stan zbioru przeżywają każde przejście (ten sam grid), akcje zapisu
     zostają wygaszone, nawigacja aktywna. Kafel Przyjmij w biegu prowadzi na Dostawę, nie do
@@ -980,6 +986,10 @@ def test_przejscia_przy_biegu_Dostawy_i_otwartym_stagingu(okno_ze_stagingiem):
     win = okno_ze_stagingiem
     g, h = win.grid_view, win.home_view
     przed = _stan_zbioru(g)
+    # Bieg udawany po stronie gospodarza (`_on_pipeline_running`) nie stawia wątku Dostawy, więc
+    # jej własną bramkę biegu w `receive` (kafel ją woła) udaje odmowa - tak odpowiada w biegu.
+    from horreum.gui.pipeline import PipelineView
+    monkeypatch.setattr(PipelineView, "receive", lambda self: i18n.t("pipeline.refuse.delivery_running"))
     win._on_pipeline_running(True)
     try:
         assert not h.tile_wydaj.isEnabled() and not g.sel_bar.btn_obj.isEnabled()
@@ -997,6 +1007,7 @@ def test_przejscia_przy_biegu_Dostawy_i_otwartym_stagingu(okno_ze_stagingiem):
         h.tile_przyjmij.click()
         assert win.stack.currentIndex() == STRONA_DOSTAWA
         assert win.pipeline_view._thread is None, "kafel nie startuje biegu"
+        assert win.statusBar().currentMessage() == i18n.t("pipeline.refuse.delivery_running")
     finally:
         win._on_pipeline_running(False)
     assert h.tile_wydaj.isEnabled()

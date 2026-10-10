@@ -45,7 +45,7 @@ import os
 import threading
 from collections import Counter
 
-from PySide6.QtCore import QEvent, QObject, QSettings, Qt, QThread, Signal, Slot
+from PySide6.QtCore import QEvent, QObject, QSettings, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
     QAbstractItemView, QDialog, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
     QProgressBar, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
@@ -96,8 +96,13 @@ _HARVEST_STATUS = {
 _TROUBLE_KEYS = (("conflict", "harvest.sum_conflict"), ("error", "harvest.sum_error"),
                  ("verify_bad", "harvest.verify_bad_tail"))
 
-_HEADERS = ("harvest.col.file", "harvest.col.status", "harvest.col.name", "harvest.col.dir",
-            "harvest.col.release", "harvest.col.reason")
+# Kolumny tabeli. Powód TRZECI: to jedyna kolumna, która mówi, CO się nie zgadza, więc stoi przy
+# pliku i stanie, a nie za dwiema ścieżkami - przy oknie węższym niż treść ścieżki przewijają się
+# w bok, powód zostaje w kadrze (`_fit_columns`).
+COL_FILE, COL_STATUS, COL_REASON, COL_NAME, COL_DIR, COL_RELEASE = range(6)
+_HEADERS = ("harvest.col.file", "harvest.col.status", "harvest.col.reason", "harvest.col.name",
+            "harvest.col.dir", "harvest.col.release")
+_SCREEN_SHARE = 0.9                      # okno rośnie pod treść tabeli najwyżej do tej części ekranu
 
 
 # ---------------------------------------------------------------- pomocniki Qt-WOLNE (testowane wprost)
@@ -202,6 +207,20 @@ def release_text(item):
     if item.status in ("would-place", "placed"):
         return i18n.t("harvest.outside_release")
     return ""
+
+
+def rel_text(path, root):
+    """Ścieżka do tabeli: WZGLĘDEM `root`, gdy w nim leży, inaczej pełna. Archiwum i wyjście WBPP
+    stoją w wierszach nad tabelą, więc w komórce zostaje to, co odróżnia wiersze - podkatalog
+    wyjścia przy czterech plikach o tej samej nazwie, ogon `CALIBRATION\\…` przy celu. Ścieżka
+    ucięta środkiem gubiła właśnie tę część. Cel spoza `root` (kopia w archiwum, które pamięta
+    baza) pokazuje się cały - skrót udawałby, że leży w archiwum okna."""
+    if not path:
+        return ""
+    if root and is_under(path, root):
+        rel = os.path.relpath(path, root)
+        return path if rel == os.curdir else rel
+    return path
 
 
 def common_root(dirs):
@@ -357,6 +376,9 @@ class HarvestDialog(QDialog):
         self._notice_state = ("", None)  # ostatni komunikat stanu - wraca, gdy pole przestaje odbiegać
         self.summary = None              # zdanie na pasek stanu gospodarza (None = nic się nie stało)
         self.harvested_root = None       # korzeń do przyjęcia - ustawia go WYŁĄCZNIE „Zamknij i przyjmij”
+        self._shown_out = None           # wyjście WBPP pozycji w tabeli - kolumna pliku liczy się względem niego
+        self._table_viewport = None      # viewport tabeli po budowie (filtr zdarzeń zmiany rozmiaru)
+        self._first_pick_checked = False  # pierwsze użycie: wybór katalogu raz po pokazaniu (`showEvent`)
         self.setWindowTitle(i18n.t("harvest.title"))
         self.setModal(True)
         self.resize(980, 540)
@@ -416,9 +438,17 @@ class HarvestDialog(QDialog):
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        # Szerokości liczy `_fit_columns` (przy każdym wypełnieniu i zmianie rozmiaru), nie tryb
+        # nagłówka: `Stretch` daje powodowi wyłącznie resztkę po pozostałych kolumnach, a przy
+        # dwóch długich ścieżkach resztką jest minimum sekcji - powód znikał za prawą krawędzią.
+        # Bez zawijania: długi powód elidowany na końcu, pełna treść pod kursorem.
+        self.table.setWordWrap(False)
+        self.table.setTextElideMode(Qt.ElideRight)
         hh = self.table.horizontalHeader()
-        hh.setSectionResizeMode(QHeaderView.ResizeToContents)
-        hh.setSectionResizeMode(len(_HEADERS) - 1, QHeaderView.Stretch)
+        hh.setSectionResizeMode(QHeaderView.Interactive)
+        hh.setStretchLastSection(False)
+        self._table_viewport = self.table.viewport()
+        self._table_viewport.installEventFilter(self)    # zmiana szerokości okna → `_fit_columns`
         v.addWidget(self.table, 1)
 
         act = QHBoxLayout()
@@ -485,7 +515,60 @@ class HarvestDialog(QDialog):
                 and event.key() in (Qt.Key_Return, Qt.Key_Enter)):
             self._on_output_edited(force=True)
             return True
+        if obj is self._table_viewport and event.type() == QEvent.Resize:
+            self._fit_columns()
         return super().eventFilter(obj, event)
+
+    def showEvent(self, event):
+        """Pierwsze użycie (brak `harvest/last_output`): od razu okno wyboru katalogu wyjścia, jak
+        kafel Przyjmij przy pierwszej dostawie - puste pole i zdanie „Wskaż…” to jedna interakcja
+        więcej do tego samego miejsca. Raz na okno, po pokazaniu (kolejka zdarzeń), żeby wybór
+        stał nad oknem żniw, a nie przed nim; anulowanie zostawia okno z pustym polem."""
+        super().showEvent(event)
+        if not self._first_pick_checked:
+            self._first_pick_checked = True
+            if not str(self._settings().value("harvest/last_output", "") or ""):
+                QTimer.singleShot(0, self._on_pick_output)
+
+    # ---- szerokości (powód w kadrze, ścieżki odróżnialne) ----
+    def _fit_columns(self):
+        """Szerokości kolumn: wszystkie poza powodem za treścią; powód dostaje resztę viewportu
+        (rozciąga się, gdy jest miejsce), a gdy reszty brakuje - swoją treść, przycięte tak, by
+        razem z plikiem i stanem mieścił się w kadrze. Kolumny ścieżek na prawo wtedy przewijają
+        się w bok, powód nie (zrzut wizytatora: suma 1827 px przy viewporcie 956 px chowała go za
+        krawędzią)."""
+        if self._table_viewport is None:
+            return
+        hh = self.table.horizontalHeader()
+        for c in range(len(_HEADERS)):
+            if c != COL_REASON:
+                self.table.resizeColumnToContents(c)
+        vw = self.table.viewport().width()
+        others = sum(self.table.columnWidth(c) for c in range(len(_HEADERS)) if c != COL_REASON)
+        left = self.table.columnWidth(COL_FILE) + self.table.columnWidth(COL_STATUS)
+        want = max(self.table.sizeHintForColumn(COL_REASON), hh.sectionSizeHint(COL_REASON))
+        width = max(vw - others, min(want, vw - left), hh.minimumSectionSize())
+        if self.table.columnWidth(COL_REASON) != width:
+            hh.resizeSection(COL_REASON, width)
+
+    def _grow_to_table(self):
+        """Szerokość okna pod treść tabeli: suma kolumn (powód w pełnej treści) + ramy, najwyżej
+        90% dostępnej szerokości ekranu. Okno tylko ROŚNIE - nie zabiera szerokości, którą user mu
+        dał - i nie schodzi poniżej szerokości startowej."""
+        if self.table.rowCount() == 0:
+            return
+        hh = self.table.horizontalHeader()
+        total = sum(max(self.table.sizeHintForColumn(c), hh.sectionSizeHint(c))
+                    for c in range(len(_HEADERS)))
+        m = self.layout().contentsMargins()
+        overhead = (m.left() + m.right() + 2 * self.table.frameWidth()
+                    + self.table.verticalScrollBar().sizeHint().width())
+        screen = self.screen()
+        cap = int(screen.availableGeometry().width() * _SCREEN_SHARE) if screen is not None else total + overhead
+        target = min(total + overhead, cap)
+        if target > self.width():
+            self.resize(target, self.height())
+        self._fit_columns()
 
     # ---- parametry ----
     def _on_pick_output(self):
@@ -669,6 +752,7 @@ class HarvestDialog(QDialog):
         plan = payload["plan"]
         self._plan = plan
         self._probed = wbpp_dir
+        self._shown_out = wbpp_dir                   # wynik biegu z tego planu liczy pliki względem tego samego wyjścia
         self._fill(plan.items)
         if not plan.items:
             self.head_label.setText("")
@@ -708,19 +792,25 @@ class HarvestDialog(QDialog):
         self.notice.style().polish(self.notice)
 
     def _fill(self, items):
-        """Tabela pozycji (plan albo wynik apply - te same pola, inne statusy). Pełne ścieżki pod
-        kursorem: kolumny niosą nazwę pliku i katalog skrócony środkiem."""
+        """Tabela pozycji (plan albo wynik apply - te same pola, inne statusy). Plik WZGLĘDEM
+        wyjścia WBPP, katalog WZGLĘDEM archiwum (`rel_text`); pełne ścieżki i pełny powód pod
+        kursorem. Po wypełnieniu okno rośnie pod treść, a powód wraca w kadr (`_grow_to_table`)."""
         self.table.setRowCount(len(items))
         for i, it in enumerate(items):
             folder = dir_of(it)
-            cells = [(os.path.basename(it.src), it.src), (status_text(it.status), None),
-                     (name_text(it), None), (_elide_path(folder), folder),
-                     (release_text(it), None), (reason_text(it), None)]
-            for col, (text, tip) in enumerate(cells):
+            reason = reason_text(it)
+            cells = {COL_FILE: (rel_text(it.src, self._shown_out), it.src),
+                     COL_STATUS: (status_text(it.status), None),
+                     COL_REASON: (reason, reason),
+                     COL_NAME: (name_text(it), None),
+                     COL_DIR: (rel_text(folder, self._archive_root), folder),
+                     COL_RELEASE: (release_text(it), None)}
+            for col, (text, tip) in cells.items():
                 cell = QTableWidgetItem(text)
                 if tip:
                     cell.setToolTip(tip)
                 self.table.setItem(i, col, cell)
+        self._grow_to_table()
 
     # ---- apply ----
     def _on_apply(self):

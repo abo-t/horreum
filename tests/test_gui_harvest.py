@@ -27,8 +27,9 @@ from horreum import db, harvest, hashing, projection, repo
 from horreum.gui import i18n
 from horreum.gui import harvest_dialog as hd_mod
 from horreum.gui.harvest_dialog import (
-    _HARVEST_REASONS, _HARVEST_STATUS, HarvestDialog, clean_path, common_root, find_manifest,
-    is_under, reason_text, release_text,
+    _HARVEST_REASONS, _HARVEST_STATUS, COL_DIR, COL_FILE, COL_NAME, COL_REASON, COL_RELEASE,
+    COL_STATUS, HarvestDialog, clean_path, common_root, find_manifest, is_under, reason_text,
+    rel_text, release_text,
 )
 from horreum.gui.i18n_catalog import CATALOG
 
@@ -40,6 +41,21 @@ _PL_LITERY = re.compile(r"[ąćęłńóśźżĄĆĘŁŃÓŚŹŻ]")
 @pytest.fixture(scope="session")
 def qapp():
     yield QApplication.instance() or QApplication([])
+
+
+@pytest.fixture(autouse=True)
+def wybor_katalogu(monkeypatch):
+    """Okno wyboru katalogu podmienione w KAŻDYM teście: pierwsze użycie (brak pamięci wyjścia)
+    otwiera je samo po pokazaniu okna, a prawdziwy `QFileDialog` w offscreen wisiałby bez końca.
+    Domyślnie „Anuluj” (pusty wynik); test ustawia `odpowiedz` i czyta `wywolania`."""
+    stan = SimpleNamespace(odpowiedz="", wywolania=[])
+
+    def wybierz(parent, title, start=""):
+        stan.wywolania.append((title, start))
+        return stan.odpowiedz
+
+    monkeypatch.setattr(hd_mod.QFileDialog, "getExistingDirectory", staticmethod(wybierz))
+    return stan
 
 
 # ---------------------------------------------------------------- baza i wyjście WBPP
@@ -126,7 +142,7 @@ def _czytnik(monkeypatch, zeznania, gate=None, entered=None):
         if isinstance(z, Exception):
             raise z
         return harvest.MasterTestimony(
-            path=path, kind=z.get("kind", "master_flat"), header={},
+            path=path, kind=z.get("kind", "master_flat"), header=z.get("header", {}),
             inputs_enabled=tuple(z.get("inputs", ())), rows=len(z.get("inputs", ())) or None,
             sha1_data=z.get("sha1_data", f"sd-{os.path.basename(path)}"),
             file_sha1=hashing.sha1_of(path), filter_raw=z.get("filter_raw", "CLS"),
@@ -152,7 +168,7 @@ def _kol(dlg, row, col):
 
 
 def _wiersze(dlg):
-    return {_kol(dlg, r, 0): r for r in range(dlg.table.rowCount())}
+    return {_kol(dlg, r, COL_FILE): r for r in range(dlg.table.rowCount())}
 
 
 def _cel(archive, filt="CLS", seq=0):
@@ -240,6 +256,16 @@ def test_common_root_is_under_i_clean_path(tmp_path):
     assert clean_path('"') == '"' and clean_path("") == ""
 
 
+def test_rel_text_wzgledem_korzenia_albo_pelna():
+    """Komórka ścieżki: względem korzenia (bez wielkości liter), poza nim - pełna; sam korzeń
+    i brak korzenia - pełna."""
+    assert rel_text(r"E:\Arch\CALIBRATION\masters", r"e:\arch") == r"CALIBRATION\masters"
+    assert rel_text(r"R:\ASTRO_\CALIBRATION\x", r"E:\Arch") == r"R:\ASTRO_\CALIBRATION\x"
+    assert rel_text(r"E:\Arch", r"E:\Arch") == r"E:\Arch"
+    assert rel_text(r"E:\Arch\x", None) == r"E:\Arch\x"
+    assert rel_text("", r"E:\Arch") == ""
+
+
 def test_reason_text_token_detail_i_tekst_klingi():
     """Powód = zdanie tokenu z `reason_n` + `detail` (CO się nie zgadza); po apply token pusty,
     a tekst klingi jedzie wprost; `exists` bez obecnej kopii mówi to zdaniem; liczba nazw zajętych
@@ -320,16 +346,16 @@ def test_dry_po_wskazaniu_katalogu_liczby_naglowka_i_tabela(qapp, tmp_path, usta
     rows = _wiersze(dlg)
     assert len(rows) == 3
     r = rows["masterFlat_BIN-1_FILTER-CLS_mono.xisf"]
-    assert _kol(dlg, r, 1) == "do wciągnięcia"
-    assert _kol(dlg, r, 2) == "MASTERFLAT_FLATGRP_202305070_FILTER_CLS_.xisf"
-    assert dlg.table.item(r, 3).toolTip() == str(_cel(archive).parent)   # realny `dst`, pełny pod kursorem
-    assert _kol(dlg, r, 4) == "poza wydaniem Horreum"
+    assert _kol(dlg, r, COL_STATUS) == "do wciągnięcia"
+    assert _kol(dlg, r, COL_NAME) == "MASTERFLAT_FLATGRP_202305070_FILTER_CLS_.xisf"
+    assert dlg.table.item(r, COL_DIR).toolTip() == str(_cel(archive).parent)   # realny `dst`, pełny pod kursorem
+    assert _kol(dlg, r, COL_RELEASE) == "poza wydaniem Horreum"
     r = rows["masterDark_BIN-1_EXP-300s.xisf"]
-    assert _kol(dlg, r, 1) == "do przeglądu"
-    assert _kol(dlg, r, 4) == ""                                         # nieoceniona - o wydaniu milczy
-    assert _kol(dlg, r, 5).startswith("master dark/bias - archiwum nie ma surowych darków")
+    assert _kol(dlg, r, COL_STATUS) == "do przeglądu"
+    assert _kol(dlg, r, COL_RELEASE) == ""                                         # nieoceniona - o wydaniu milczy
+    assert _kol(dlg, r, COL_REASON).startswith("master dark/bias - archiwum nie ma surowych darków")
     r = rows["masterFlat_BIN-1_FILTER-OIII_mono.xisf"]
-    assert _kol(dlg, r, 5) == "wejść nieznanych bazie: 2: obca_1_c.xisf, obca_2_c.xisf"
+    assert _kol(dlg, r, COL_REASON) == "wejść nieznanych bazie: 2: obca_1_c.xisf, obca_2_c.xisf"
     assert not archive.exists()                                          # podgląd: zero zapisu
     con.close()
 
@@ -381,8 +407,8 @@ def test_blad_czytnika_pozycja_unreadable_reszta_planu_zyje(qapp, tmp_path, usta
     dlg = _dlg(con, tmp_path / "ARCH")
     dlg._set_output(str(out))
     r = _wiersze(dlg)["masterFlat_A.xisf"]
-    assert _kol(dlg, r, 1) == "do przeglądu"
-    assert _kol(dlg, r, 5) == "pliku nie da się odczytać: OSError: uszkodzony nagłówek XISF"
+    assert _kol(dlg, r, COL_STATUS) == "do przeglądu"
+    assert _kol(dlg, r, COL_REASON) == "pliku nie da się odczytać: OSError: uszkodzony nagłówek XISF"
     assert dlg.head_label.text() == "Do wciągnięcia 1 · już w archiwum 0 · do przeglądu 1"
     assert dlg.btn_apply.isEnabled()
     con.close()
@@ -404,7 +430,7 @@ def test_brak_archiwum_prosi_o_nie_i_nie_sonduje(qapp, tmp_path, ustawienia, mon
     assert dlg.archive_label.text() == f"Archiwum: {hd_mod._elide_path(str(archive))}"
     assert dlg.archive_label.toolTip() == str(archive)                   # pełna ścieżka pod kursorem
     assert dlg.btn_apply.text() == "Wciągnij 1 master"
-    assert dlg.table.item(0, 3).toolTip() == str(_cel(archive).parent)
+    assert dlg.table.item(0, COL_DIR).toolTip() == str(_cel(archive).parent)
     assert ustawienia.value("pipeline/last_source") is None              # Dostawa nieprzestawiona
     con.close()
 
@@ -475,8 +501,8 @@ def test_manifest_wydania_swiadkiem_w_kolumnie_wydanie(qapp, tmp_path, ustawieni
     dlg = _dlg(con, tmp_path / "ARCH")
     dlg._set_output(str(out))
     assert dlg.notice.text() == f"Wydanie Horreum (manifest _PROJEKCJA.json): {out.parent}"
-    assert _kol(dlg, 0, 4) == f"Cr464 / {SEG}"
-    assert _kol(dlg, 0, 1) == "do wciągnięcia"
+    assert _kol(dlg, 0, COL_RELEASE) == f"Cr464 / {SEG}"
+    assert _kol(dlg, 0, COL_STATUS) == "do wciągnięcia"
     con.close()
 
 
@@ -525,6 +551,123 @@ def test_wyczyszczone_pole_prosi_o_katalog(qapp, tmp_path, ustawienia, monkeypat
     con.close()
 
 
+def _powod_w_kadrze(dlg):
+    """(x, szerokość, viewport) kolumny powodu - kadr bez przewijania w bok."""
+    t = dlg.table
+    return t.columnViewportPosition(COL_REASON), t.columnWidth(COL_REASON), t.viewport().width()
+
+
+def test_powod_w_kadrze_przy_domyslnej_szerokosci(qapp, tmp_path, ustawienia, monkeypatch):
+    """Powód (jedyna kolumna, która mówi, CO się nie zgadza) stoi trzeci i przy domyślnej
+    szerokości okna mieści się w kadrze bez przewijania w bok - gdy treści jest więcej niż kadru,
+    w bok przewijają się ścieżki, nie powód; okno rośnie pod treść najwyżej do 90% ekranu, a przy
+    miejscu powód pokazuje pełną treść."""
+    con, _profile, _flats = _baza(tmp_path)
+    archive = tmp_path / "ARCH"
+    stary = "masterFlat_BIN-1_6248x4176_FILTER-Ha_stary.xisf"
+    out = _wyjscie(tmp_path, {"masterFlat_BIN-1_6248x4176_FILTER-CLS_mono.xisf": b"A", stary: b"S"})
+    _czytnik(monkeypatch, {"masterFlat_BIN-1_6248x4176_FILTER-CLS_mono.xisf": _flat_cls(),
+                           stary: {"kind": "flat", "header": {"IMAGETYP": "FLAT"}}})
+    dlg = _dlg(con, archive)
+    dlg.show()
+    dlg._set_output(str(out))
+    qapp.processEvents()
+    r = _wiersze(dlg)[stary]
+    tekst = _kol(dlg, r, COL_REASON)
+    assert tekst == "nagłówek mastera nie zgadza się z wejściami: IMAGETYP='FLAT' -> flat"
+    assert dlg.table.item(r, COL_REASON).toolTip() == tekst
+    assert dlg.table.horizontalScrollBar().value() == 0
+    pelny = dlg.table.sizeHintForColumn(COL_REASON)
+    x, w, vw = _powod_w_kadrze(dlg)
+    # Offscreen mierzy czcionkę zastępczą (~12 px na znak), więc przy 980 px powód nie mieści się
+    # cały: dostaje CAŁE miejsce między stanem a krawędzią kadru, nie resztkę po ścieżkach.
+    assert 0 <= x and x + w <= vw
+    assert w >= min(pelny, vw - x)
+    cap = int(dlg.screen().availableGeometry().width() * 0.9)
+    assert dlg.width() <= max(980, cap, dlg.minimumSizeHint().width())  # rośnie najwyżej do 90% ekranu
+    dlg.resize(x + pelny + 200, dlg.height())                            # miejsce jest - pełna treść
+    assert _wait_until(lambda: dlg.table.viewport().width() >= x + pelny)
+    qapp.processEvents()
+    x, w, vw = _powod_w_kadrze(dlg)
+    assert w >= pelny and x + w <= vw
+    con.close()
+
+
+def test_sciezki_wzgledem_wyjscia_i_archiwum(qapp, tmp_path, ustawienia, monkeypatch):
+    """Cztery pliki o tej samej nazwie w różnych podkatalogach wyjścia są odróżnialne: kolumna pliku
+    pokazuje ścieżkę WZGLĘDEM wyjścia WBPP, katalogu - WZGLĘDEM archiwum (`CALIBRATION\\…`); kopia,
+    która leży w archiwum bazy (poza archiwum okna), pokazuje pełną ścieżkę. Pełne ścieżki pod
+    kursorem."""
+    db_arch = tmp_path / "ARCH_DB"
+    con, _profile, _flats = _baza(tmp_path, db_archive=db_arch)
+    archive = tmp_path / "ARCH"
+    nazwa = "masterFlat_BIN-1_6248x4176_FILTER-CLS_mono.xisf"
+    out = tmp_path / "WBPP"
+    for sub, data in (("mf_nowy", b"N"), ("mf_stary", b"S"), ("mf_archiwum", b"Z")):
+        _wyjscie(tmp_path, {nazwa: data}, sub=("WBPP", sub))
+    zeznania = {}
+
+    def czytaj(path, **_kw):
+        sub = os.path.basename(os.path.dirname(path))
+        z = {"mf_archiwum": {**_flat_cls(), "sha1_data": "mf-archiwum"}}.get(sub, _flat_cls())
+        zeznania[sub] = path
+        return harvest.MasterTestimony(
+            path=path, kind="master_flat", header={}, inputs_enabled=tuple(z["inputs"]), rows=3,
+            sha1_data=z.get("sha1_data", f"sd-{sub}"), file_sha1=hashing.sha1_of(path),
+            filter_raw="CLS", xbinning=1, date_obs="2023-05-07T21:00:00")
+
+    monkeypatch.setattr(harvest, "read_master", czytaj)
+    dlg = _dlg(con, archive)
+    dlg._set_output(str(out))
+    rows = _wiersze(dlg)
+    assert set(rows) == {os.path.join(sub, nazwa) for sub in ("mf_archiwum", "mf_nowy", "mf_stary")}
+    for sub in ("mf_nowy", "mf_stary"):
+        r = rows[os.path.join(sub, nazwa)]
+        assert dlg.table.item(r, COL_FILE).toolTip() == str(out / sub / nazwa)
+        assert _kol(dlg, r, COL_DIR) == os.path.join("CALIBRATION", "masters", "flats", SEG, "CLS")
+        assert dlg.table.item(r, COL_DIR).toolTip() == str(_cel(archive).parent)
+    r = rows[os.path.join("mf_archiwum", nazwa)]
+    assert _kol(dlg, r, COL_STATUS) == "już w archiwum"
+    assert _kol(dlg, r, COL_DIR) == str(db_arch / "CALIBRATION" / "masters" / "flats" / SEG / "CLS")
+    con.close()
+
+
+def test_pierwsze_uzycie_od_razu_wybor_katalogu(qapp, tmp_path, ustawienia, monkeypatch, wybor_katalogu):
+    """Brak pamięci wyjścia: po pokazaniu okna od razu wybór katalogu (start w archiwum), wybrany
+    katalog ma podgląd - do mastera w archiwum zostają „Wciągnij” i „Zamknij i przyjmij”.
+    Anulowanie wyboru zostawia okno z pustym polem; z pamięcią wyboru nie ma."""
+    con, _profile, _flats = _baza(tmp_path)
+    archive = tmp_path / "ARCH"
+    out = _wyjscie(tmp_path, {"masterFlat_A.xisf": b"A"})
+    _czytnik(monkeypatch, {"masterFlat_A.xisf": _flat_cls()})
+    wybor_katalogu.odpowiedz = str(out)
+    dlg = _dlg(con, archive)
+    qapp.processEvents()
+    assert wybor_katalogu.wywolania == []                                # nie przed pokazaniem okna
+    dlg.show()
+    assert _wait_until(lambda: wybor_katalogu.wywolania)
+    assert wybor_katalogu.wywolania == [("Wskaż katalog wyjścia WBPP", str(archive))]
+    assert dlg.edit_output.text() == str(out) and dlg.btn_apply.text() == "Wciągnij 1 master"
+    dlg.btn_apply.click()
+    dlg.btn_accept.click()
+    assert dlg.result() == QDialog.Accepted and dlg.harvested_root == str(_cel(archive).parent)
+
+    ustawienia.remove("harvest/last_output")
+    wybor_katalogu.odpowiedz = ""                                        # „Anuluj” w oknie wyboru
+    dlg2 = _dlg(con, archive)
+    dlg2.show()
+    assert _wait_until(lambda: len(wybor_katalogu.wywolania) == 2)
+    assert dlg2.isVisible() and dlg2.edit_output.text() == ""
+    assert dlg2.notice.text() == "Wskaż katalog wyjścia WBPP - podgląd policzy się sam."
+
+    ustawienia.setValue("harvest/last_output", str(out))
+    dlg3 = _dlg(con, archive)
+    dlg3.show()
+    QTest.qWait(30)
+    assert len(wybor_katalogu.wywolania) == 2                            # pamięć jest - okno wyboru nie wraca
+    con.close()
+
+
 # ---------------------------------------------------------------- apply
 
 def test_apply_kopiuje_prawdziwy_plik_i_oddaje_korzen(qapp, tmp_path, ustawienia, monkeypatch):
@@ -548,7 +691,7 @@ def test_apply_kopiuje_prawdziwy_plik_i_oddaje_korzen(qapp, tmp_path, ustawienia
     assert seen == [(1, 1, "placed")]
     assert dlg.head_label.text() == ("Wciągnięto 1 · pominięto 0 (już w archiwum) · do przeglądu 1 · "
                                      "konflikty 0 · błędy 0")
-    assert sorted(_kol(dlg, r, 1) for r in range(2)) == ["do przeglądu", "wciągnięty"]
+    assert sorted(_kol(dlg, r, COL_STATUS) for r in range(2)) == ["do przeglądu", "wciągnięty"]
     assert dlg.summary == f"Wciągnięto 1 master do archiwum → {cel.parent}"
     assert dlg.harvested_root is None                                    # jeszcze nikt nie przyjął
     assert dlg.btn_apply.text() == "Wciągnięto" and not dlg.btn_apply.isEnabled()
@@ -636,11 +779,11 @@ def test_drugi_bieg_juz_w_archiwum(qapp, tmp_path, ustawienia, monkeypatch):
     dlg._set_output(str(out))
     dlg._on_apply()
     dlg._on_output_edited()                                              # `editingFinished` bez zmiany pola
-    assert _kol(dlg, 0, 1) == "wciągnięty"
+    assert _kol(dlg, 0, COL_STATUS) == "wciągnięty"
     dlg._set_output(str(out))                                            # „Wskaż…” tej samej ścieżki = świeża sonda
     assert dlg.head_label.text() == "Do wciągnięcia 0 · już w archiwum 1 · do przeglądu 0"
-    assert _kol(dlg, 0, 1) == "już w archiwum" and _kol(dlg, 0, 4) == ""
-    assert _kol(dlg, 0, 2) == "MASTERFLAT_FLATGRP_202305070_FILTER_CLS_.xisf"
+    assert _kol(dlg, 0, COL_STATUS) == "już w archiwum" and _kol(dlg, 0, COL_RELEASE) == ""
+    assert _kol(dlg, 0, COL_NAME) == "MASTERFLAT_FLATGRP_202305070_FILTER_CLS_.xisf"
     assert dlg.btn_apply.text() == "Wciągnij 0 masterów" and not dlg.btn_apply.isEnabled()
     assert not dlg.btn_accept.isHidden() and dlg.btn_accept.isEnabled()
     con.close()
@@ -681,7 +824,7 @@ def test_apply_anulowanie_na_granicy_pliku(qapp, tmp_path, ustawienia, monkeypat
     dlg._on_apply()
     assert _cel(archive, "CLS").exists() and not _cel(archive, "Ha").exists()
     assert not _parts(archive)
-    assert sorted(_kol(dlg, r, 1) for r in range(2)) == ["przerwano", "wciągnięty"]
+    assert sorted(_kol(dlg, r, COL_STATUS) for r in range(2)) == ["przerwano", "wciągnięty"]
     assert dlg.head_label.text().endswith(" · przerwano, nietknięte: 1")
     assert dlg.summary.endswith(" · przerwano, nietknięte: 1")
     assert dlg.btn_apply.text() == "Przerwano" and not dlg.btn_accept.isHidden()
@@ -750,7 +893,7 @@ def test_apply_blad_przed_kopia_nie_zabija_okna(qapp, tmp_path, ustawienia, monk
     dlg._on_apply()
     assert dlg.notice.text() == "Błąd wciągania: OSError: archiwum odpięte"
     assert dlg.summary == "Żniwa przerwane błędem: OSError: archiwum odpięte"
-    assert _kol(dlg, 0, 1) == "przerwano"
+    assert _kol(dlg, 0, COL_STATUS) == "przerwano"
     assert dlg.btn_apply.text() == "Przerwane błędem" and not dlg.btn_apply.isEnabled()
     assert dlg.btn_accept.isHidden()
     assert dlg.edit_output.isEnabled() and dlg.btn_cancel.isHidden()
@@ -775,7 +918,7 @@ def test_wyjatek_po_kopiach_prawda_z_postepu(qapp, tmp_path, ustawienia, monkeyp
     monkeypatch.setattr(harvest, "apply", po_kopiach)
     dlg._on_apply()
     assert _cel(archive, "CLS").exists() and _cel(archive, "Ha").exists()
-    assert [_kol(dlg, r, 1) for r in range(2)] == ["wciągnięty", "wciągnięty"]
+    assert [_kol(dlg, r, COL_STATUS) for r in range(2)] == ["wciągnięty", "wciągnięty"]
     zestaw = _cel(archive).parent.parent
     assert dlg.summary == (f"Wciągnięto 2 mastery do archiwum → {zestaw} · "
                            f"Żniwa przerwane błędem: RuntimeError: po kopiach")
@@ -997,14 +1140,14 @@ def test_en_render_z_katalogu(qapp, tmp_path, ustawienia, monkeypatch):
     assert dlg.head_label.text() == "To harvest 2 · already in the archive 0 · to review 2"
     assert dlg.btn_apply.text() == "Harvest 2 masters"
     rows = _wiersze(dlg)
-    assert {_kol(dlg, r, 1) for r in rows.values()} == {"to harvest", "to review"}
-    assert _kol(dlg, rows["masterDark_D.xisf"], 5).startswith("dark/bias master")
-    powod = _kol(dlg, rows["masterFlat_X.xisf"], 5)
+    assert {_kol(dlg, r, COL_STATUS) for r in rows.values()} == {"to harvest", "to review"}
+    assert _kol(dlg, rows["masterDark_D.xisf"], COL_REASON).startswith("dark/bias master")
+    powod = _kol(dlg, rows["masterFlat_X.xisf"], COL_REASON)
     assert powod.startswith("the master header disagrees with its inputs: ")
     assert "OIII" in powod and "Ha" in powod and not _PL_LITERY.search(powod)
     assert [dlg.table.horizontalHeaderItem(c).text() for c in range(6)] == \
-        ["File", "Status", "Target name", "Target folder", "Release", "Reason"]
-    assert _kol(dlg, rows["masterFlat_A.xisf"], 4) == "outside a Horreum release"
+        ["File", "Status", "Reason", "Target name", "Target folder", "Release"]
+    assert _kol(dlg, rows["masterFlat_A.xisf"], COL_RELEASE) == "outside a Horreum release"
     dlg._on_apply()
     assert dlg.head_label.text().startswith("Harvested 2 · skipped 0 (already in the archive)")
     assert dlg.btn_apply.text() == "Harvested"

@@ -3631,6 +3631,196 @@ CATALOG = {
         "pl": "Brak teczek dla „{fraza}”", "en": "No objects to release for “{fraza}”",
     },
 
+    # --- okno żniw „Wciągnij mastery…” (`harvest_dialog.py`) ---------------------------------
+    "harvest.title": {"pl": "Wciągnij mastery z wyjścia WBPP", "en": "Harvest masters from WBPP output"},
+    "harvest.hint": {
+        "pl": "Master trafia do biblioteki kalibracji, gdy historia integracji w pliku wymienia surowe "
+              "flaty znane bazie. Plik w wyjściu WBPP zostaje nietknięty, kopia niczego nie nadpisuje.",
+        "en": "A master goes into the calibration library when the integration history in the file "
+              "names raw flats the database knows. The file in the WBPP output stays untouched, the "
+              "copy overwrites nothing.",
+    },
+    "harvest.output_label": {"pl": "Wyjście WBPP:", "en": "WBPP output:"},
+    "harvest.output_placeholder": {
+        "pl": "katalog z masterami WBPP (np. …\\master)", "en": "folder with WBPP masters (e.g. …\\master)",
+    },
+    "harvest.btn_pick": {"pl": "Wskaż…", "en": "Browse…"},
+    "harvest.dlg.pick_output": {"pl": "Wskaż katalog wyjścia WBPP", "en": "Choose the WBPP output folder"},
+    "harvest.btn_archive": {"pl": "Zmień…", "en": "Change…"},
+    "harvest.dlg.pick_archive": {
+        "pl": "Wskaż archiwum (źródło Dostawy)", "en": "Choose the archive (Intake source)",
+    },
+    "harvest.archive_label": {"pl": "Archiwum: {root}", "en": "Archive: {root}"},
+    "harvest.archive_unset": {"pl": "Archiwum: nie wskazane", "en": "Archive: not set"},
+    "harvest.no_output": {
+        "pl": "Wskaż katalog wyjścia WBPP - podgląd policzy się sam.",
+        "en": "Choose the WBPP output folder - the preview computes itself.",
+    },
+    "harvest.no_archive": {
+        "pl": "Wskaż archiwum (źródło Dostawy) - tam trafią mastery.",
+        "en": "Choose the archive (Intake source) - the masters go there.",
+    },
+    "harvest.missing_dir": {"pl": "Katalog nie istnieje: {path}", "en": "Folder does not exist: {path}"},
+    "harvest.empty": {"pl": "Brak masterów w {path}", "en": "No masters in {path}"},
+    "harvest.probing": {
+        "pl": "Czytam mastery i ich historię (podgląd, bez zmian na dysku)…",
+        "en": "Reading masters and their history (preview, no disk changes)…",
+    },
+    "harvest.dry_failed": {"pl": "Nie można: {msg}", "en": "Cannot: {msg}"},
+    "harvest.head_dry": {
+        "pl": "Do wciągnięcia {place} · już w archiwum {exists} · do przeglądu {review}",
+        "en": "To harvest {place} · already in the archive {exists} · to review {review}",
+    },
+    "harvest.manifest_note": {
+        "pl": "Wydanie Horreum (manifest _PROJEKCJA.json): {path}",
+        "en": "Horreum release (manifest _PROJEKCJA.json): {path}",
+    },
+    "harvest.col.file": {"pl": "Plik", "en": "File"},
+    "harvest.col.status": {"pl": "Stan", "en": "Status"},
+    "harvest.col.name": {"pl": "Nazwa docelowa", "en": "Target name"},
+    "harvest.col.dir": {"pl": "Katalog docelowy", "en": "Target folder"},
+    "harvest.col.release": {"pl": "Wydanie", "en": "Release"},
+    "harvest.col.reason": {"pl": "Powód", "en": "Reason"},
+    "harvest.status.would_place": {"pl": "do wciągnięcia", "en": "to harvest"},
+    "harvest.status.exists": {"pl": "już w archiwum", "en": "already in the archive"},
+    "harvest.status.review": {"pl": "do przeglądu", "en": "to review"},
+    "harvest.status.placed": {"pl": "wciągnięty", "en": "harvested"},
+    "harvest.status.verify_bad": {"pl": "bajty inne niż w podglądzie", "en": "bytes differ from preview"},
+    "harvest.status.conflict": {"pl": "konflikt nazwy", "en": "name conflict"},
+    "harvest.status.error": {"pl": "błąd", "en": "error"},
+    "harvest.status.cancelled": {"pl": "przerwano", "en": "cancelled"},
+    "harvest.outside_release": {"pl": "poza wydaniem Horreum", "en": "outside a Horreum release"},
+    "harvest.nights": {"pl": "  (noce wejść: {nights})", "en": "  (input nights: {nights})"},
+    "harvest.exists_no_copy": {
+        "pl": "znany bazie, bez obecnej kopii", "en": "known to the database, no present copy",
+    },
+    # Powody przeglądu - tokeny `harvest.REASONS` przez literalną mapę `_HARVEST_REASONS`.
+    "harvest.reason.no_raw_darks": {
+        "pl": "master dark/bias - archiwum nie ma surowych darków, z których mógłby powstać",
+        "en": "dark/bias master - the archive holds no raw darks it could come from",
+    },
+    "harvest.reason.unreadable": {"pl": "pliku nie da się odczytać", "en": "the file cannot be read"},
+    "harvest.reason.no_history": {
+        "pl": "brak historii integracji w pliku", "en": "no integration history in the file",
+    },
+    "harvest.reason.no_inputs": {
+        "pl": "historia bez włączonych wejść", "en": "history with no enabled inputs",
+    },
+    "harvest.reason.inputs_unknown": {
+        "pl": "wejść nieznanych bazie: {n}", "en": "inputs unknown to the database: {n}",
+    },
+    "harvest.reason.inputs_ambiguous": {
+        "pl": "nazw wejść pasujących do kilku klatek: {n}",
+        "en": "input names matching several frames: {n}",
+    },
+    "harvest.reason.mixed_profile": {
+        "pl": "profili flatu wśród wejść: {n}", "en": "flat profiles among the inputs: {n}",
+    },
+    "harvest.reason.no_profile": {
+        "pl": "wejść bez profilu flatu: {n}", "en": "inputs without a flat profile: {n}",
+    },
+    "harvest.reason.no_night": {
+        "pl": "wejść bez daty nocy (nazwa mastera jej wymaga): {n}",
+        "en": "inputs without a night date (the master name needs one): {n}",
+    },
+    "harvest.reason.header_mismatch": {
+        "pl": "nagłówek mastera nie zgadza się z wejściami", "en": "the master header disagrees with its inputs",
+    },
+    "harvest.reason.outside_release": {
+        "pl": "wejścia spoza wydania, w którego drzewie leży wyjście",
+        "en": "inputs outside the release whose tree holds the output",
+    },
+    "harvest.reason.no_config": {
+        "pl": "profil bez zestawu (teleskop × kamera) - nie wiem, do którego katalogu",
+        "en": "profile without a rig (telescope × camera) - target folder unknown",
+    },
+    "harvest.reason.name_taken": {
+        "pl": "zajęte wszystkie nazwy tej nocy i filtru: {n}", "en": "all names for this night and filter taken: {n}",
+    },
+    "harvest.btn_apply": {
+        "pl": {"one": "Wciągnij {n} master", "few": "Wciągnij {n} mastery", "many": "Wciągnij {n} masterów"},
+        "en": {"one": "Harvest {n} master", "other": "Harvest {n} masters"},
+    },
+    "harvest.btn_accept": {"pl": "Zamknij i przyjmij do archiwum", "en": "Close and receive into the archive"},
+    "harvest.btn_cancel_apply": {"pl": "Przerwij wciąganie", "en": "Stop harvesting"},
+    "harvest.btn_close": {"pl": "Zamknij", "en": "Close"},
+    "harvest.applying": {
+        "pl": "Kopiuję mastery do archiwum - dysk się ZMIENIA. „Przerwij wciąganie” zatrzyma po "
+              "bieżącym pliku; to, co wciągnięte, zostaje w archiwum.",
+        "en": "Copying masters into the archive - the disk is CHANGING. \"Stop harvesting\" halts "
+              "after the current file; whatever was harvested stays in the archive.",
+    },
+    "harvest.cancelling": {"pl": "Przerywam… (po bieżącym pliku)", "en": "Stopping… (after the current file)"},
+    "harvest.head_done": {
+        "pl": "Wciągnięto {placed} · pominięto {exists} (już w archiwum) · do przeglądu {review} · "
+              "konflikty {conflict} · błędy {errors}",
+        "en": "Harvested {placed} · skipped {exists} (already in the archive) · to review {review} · "
+              "conflicts {conflict} · errors {errors}",
+    },
+    "harvest.verify_bad_tail": {
+        "pl": " · bajty inne niż w podglądzie {n}", "en": " · bytes differ from preview {n}",
+    },
+    "harvest.cancelled_tail": {"pl": " · przerwano, nietknięte: {n}", "en": " · stopped, untouched: {n}"},
+    "harvest.made_before_error": {
+        "pl": " (przetworzono {done} z {total} przed błędem)",
+        "en": " (processed {done} of {total} before the error)",
+    },
+    "harvest.apply_error": {"pl": "Błąd wciągania: {msg}{made}", "en": "Harvest error: {msg}{made}"},
+    "harvest.btn_nothing": {"pl": "Nic nie wciągnięto", "en": "Nothing harvested"},
+    "harvest.btn_cancelled": {"pl": "Przerwano", "en": "Stopped"},
+    "harvest.btn_error": {"pl": "Przerwane błędem", "en": "Stopped by an error"},
+    "harvest.status_placed": {
+        "pl": {"one": "Wciągnięto {n} master do archiwum → {root}",
+               "few": "Wciągnięto {n} mastery do archiwum → {root}",
+               "many": "Wciągnięto {n} masterów do archiwum → {root}"},
+        "en": {"one": "Harvested {n} master into the archive → {root}",
+               "other": "Harvested {n} masters into the archive → {root}"},
+    },
+    "harvest.status_nothing": {
+        "pl": "Żniwa: nic nie wciągnięto (już w archiwum {exists} · do przeglądu {review})",
+        "en": "Harvest: nothing harvested (already in the archive {exists} · to review {review})",
+    },
+    "harvest.status_error": {"pl": "Żniwa przerwane błędem: {msg}", "en": "Harvest stopped by an error: {msg}"},
+    "harvest.status_later": {
+        "pl": " - baza pozna je przy następnej dostawie („Przyjmij”).",
+        "en": " - the database learns them at the next delivery (\"Receive\").",
+    },
+    "harvest.status_outside": {
+        "pl": " - kopie leżą poza źródłem Dostawy; baza pozna je przez „Zamknij i przyjmij do archiwum” "
+              "albo Dostawę wskazaną na archiwum.",
+        "en": " - the copies lie outside the Intake source; the database learns them through \"Close and "
+              "receive into the archive\" or an Intake pointed at the archive.",
+    },
+    "harvest.sum_conflict": {"pl": " · konflikty: {n}", "en": " · conflicts: {n}"},
+    "harvest.sum_error": {"pl": " · błędy: {n}", "en": " · errors: {n}"},
+    "harvest.btn_done": {"pl": "Wciągnięto", "en": "Harvested"},
+    "harvest.not_absolute": {
+        "pl": "Ścieżka wyjścia musi być pełna (z dyskiem albo \\\\serwer): {path}",
+        "en": "The output path must be absolute (with a drive or \\\\server): {path}",
+    },
+    "harvest.stale": {
+        "pl": "Podgląd dla: {path} - Enter liczy nowy", "en": "Preview for: {path} - Enter computes a new one",
+    },
+    "harvest.archive_differs": {
+        "pl": "Baza zna archiwum w {db} - mastery trafią gdzie indziej, a Dostawa na tamtym archiwum ich nie zobaczy.",
+        "en": "The database knows the archive at {db} - the masters go elsewhere, and an Intake on that "
+              "archive will not see them.",
+    },
+    "harvest.archive_locked": {
+        "pl": "Archiwum zablokowane: w tym oknie wciągnięto już mastery - drugie archiwum dałoby korzeń, "
+              "którego Dostawa nie powinna skanować.",
+        "en": "Archive locked: this window already harvested masters - a second archive would give a root "
+              "Intake should not scan.",
+    },
+    "harvest.accept_refused": {
+        "pl": "Nie przyjmę: {root} nie leży pod {cal}", "en": "Will not receive: {root} is not under {cal}",
+    },
+    "harvest.closing": {"pl": "Zamykam po bieżącym pliku…", "en": "Closing after the current file…"},
+    "harvest.manifest_error": {
+        "pl": "Kopie leżą w archiwum, ale zeznania żniw nie zapisano: {err}",
+        "en": "The copies are in the archive, but the harvest record was not written: {err}",
+    },
+
     # ============================================================ drobne (rollout §4: tasks/facets/portfolio)
     # (mapproj/map_view: 0 UI-stringów — „km" jednostka neutralna; NIE dokładamy i18n, R-i18n #7)
 

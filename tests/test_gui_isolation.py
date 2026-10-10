@@ -49,6 +49,7 @@ QT_WIDGET_FILES = {"app.py", "__main__.py", "pipeline.py", "grid.py", "projectio
                    # 0032: okno „Uwagi…” - nie dotyka bazy; klinga uwag zostaje w Qt-wolnym `repo`.
                    "note_dialog.py",
                    "home.py",     # Dom: ekran startu (kafle, teczki w wątku tła); sumy w Qt-wolnym `queries`
+                   "harvest_dialog.py",  # okno żniw masterów (plan i kopie w wątku tła); rdzeń `harvest` Qt-wolny
                    }
 
 

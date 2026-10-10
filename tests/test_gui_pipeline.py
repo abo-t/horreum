@@ -1142,13 +1142,62 @@ def test_zapis_przebiegu_niesie_odmowe_startu(qapp, tmp_path):
     assert view.last_run["refused"] == "powód guardu"
 
 
-def test_run_all_on_odmawia_bez_bazy_i_w_biegu(qapp, tmp_path, ustawienia):
+def test_run_all_on_odmawia_bez_bazy_w_biegu_i_przy_zapisie_naglowkow(qapp, tmp_path, ustawienia):
     i18n.set_lang("pl")
     assert PipelineView(None, now_fn=lambda: NOW).run_all_on(str(tmp_path)) == i18n.t(
         "pipeline.refuse.no_db")
     view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
     view.set_writeback_busy(True)
     assert view.run_all_on(str(tmp_path)) == i18n.t("pipeline.refuse.writeback")
+    view.set_writeback_busy(False)
+    tree = _tree(tmp_path, 1)
+    loop = QEventLoop()
+    view.run_finished.connect(lambda _lr: loop.quit())
+    QTimer.singleShot(20000, loop.quit)
+    assert view.run_all_on(tree) is None
+    assert view.run_all_on(tree) == i18n.t("pipeline.refuse.running")   # drugi bieg w trakcie
+    loop.exec()
+
+
+def test_sonda_katalogu_nie_jest_przebiegiem_i_nie_rusza_zapisu(qapp, tmp_path, monkeypatch, ustawienia):
+    """„Wskaż katalog…" uruchamia samą sondę źródła (`probe`, bez bazy): nie emituje
+    `running_changed` ani `run_finished` i nie dotyka zapisu ostatniego przebiegu - inaczej po
+    dostawie sam wybór katalogu podmieniałby zapis na „probe" bez wyników i raport Przyjmij
+    zostawałby bez źródła."""
+    tree = _tree(tmp_path, 1)
+    from PySide6.QtWidgets import QFileDialog
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: tree))
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    view.last_run = {**view.last_run, "stage": "all", "since": "T0"}
+    odebrane = []
+    view.run_finished.connect(odebrane.append)
+    view.running_changed.connect(lambda r: odebrane.append(("running", r)))
+    loop = QEventLoop()
+    QTimer.singleShot(3000, loop.quit)
+    view._on_pick_dir()
+    assert view._thread is not None
+    view._thread.finished.connect(loop.quit)
+    loop.exec()
+    assert view._thread is None and odebrane == []
+    assert view.last_run["stage"] == "all" and view.last_run["since"] == "T0"
+
+
+def test_run_finished_niesie_migawke_zakonczonego_przebiegu(qapp, tmp_path, ustawienia):
+    """Nowy przebieg uruchomiony w słuchaczu `running_changed(False)` (gospodarz odświeża widoki
+    pod fazą doręczającą zdarzenia) zeruje `last_run`; `run_finished` ma nieść zapis przebiegu,
+    który się właśnie skończył, nie pusty zapis następnego."""
+    tree = _tree(tmp_path, 1)
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    zapisy = []
+    view.running_changed.connect(lambda r: r is False and view._begin_run())
+    view.run_finished.connect(zapisy.append)
+    loop = QEventLoop()
+    view.run_finished.connect(lambda _lr: loop.quit())
+    QTimer.singleShot(20000, loop.quit)
+    assert view.run_all_on(tree) is None
+    loop.exec()
+    assert zapisy and zapisy[0]["stage"] == "all" and "scan" in zapisy[0]["results"]
+    assert view.last_run["stage"] is None                     # zapis widoku jest już wyzerowany
 
 
 def test_przycisk_zniw_emituje_sygnal_i_gasnie_jak_stosy(qapp, tmp_path):

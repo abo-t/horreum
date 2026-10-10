@@ -1207,8 +1207,12 @@ class PipelineView(QWidget):
     def _start_stage(self, stage, **params):
         # Znacznik startu z TEGO SAMEGO zegara, którym worker pisze `first_seen_at` - raport
         # „co przyszło” porównuje oba jako tekst ISO, więc muszą pochodzić z jednej funkcji.
-        self.last_run["stage"] = stage
-        self.last_run["since"] = self._now()
+        # Sonda źródła bez bazy (`ETAPY_BEZ_BAZY`) nie jest przebiegiem: nie rusza zapisu, nie
+        # emituje `running_changed` ani `run_finished` - inaczej zapis ostatniej dostawy ginąłby
+        # pod etykietą „probe” po samym „Wskaż katalog…”.
+        if stage not in ETAPY_BEZ_BAZY:
+            self.last_run["stage"] = stage
+            self.last_run["since"] = self._now()
         self._worker = PipelineWorker(self._db_path, now_fn=self._now)
         self._worker.configure(stage, **params)
         self._thread = QThread(self)
@@ -1240,10 +1244,16 @@ class PipelineView(QWidget):
         self._thread.deleteLater()
         self._worker = None
         self._thread = None
+        # MIGAWKA PRZED `running_changed(False)`: gospodarz odświeża pod nią widoki fazą, która
+        # doręcza zdarzenia (`processEvents`), więc do chwili emisji mógł już ruszyć NOWY przebieg
+        # i wyzerować `last_run` - słuchacz dostałby pusty zapis cudzego biegu zamiast swojego.
+        # Kopia niesie własny słownik wyników; słuchacz nie mutuje zapisu.
+        zapis = {**self.last_run, "results": dict(self.last_run["results"])}
+        bieg_pisal = self._bieg_pisze
         self._set_running(False)
-        # Po `running_changed(False)`: gospodarz zdążył odświeżyć widoki, a słuchacz raportu
-        # czyta bazę po zamknięciu połączenia workera. Kopia płytka - słuchacz nie mutuje zapisu.
-        self.run_finished.emit(dict(self.last_run))
+        # Po `running_changed(False)`: słuchacz raportu czyta bazę po zamknięciu połączenia workera.
+        if bieg_pisal:
+            self.run_finished.emit(zapis)
 
     # ---------------------------------------------------------------- sloty (główny wątek)
 

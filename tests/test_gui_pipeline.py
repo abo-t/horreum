@@ -1072,3 +1072,82 @@ def test_etykieta_zlotej_akcji_wymienia_fakty_kopii(qapp):
                     in i18n.t("pipeline.receive").lower()), jezyk
         finally:
             i18n.set_lang("pl")
+
+
+# --- szwy drogi Przyjmij i żniw: `receive`, `run_all_on`, `last_run`/`run_finished`, „Wciągnij mastery…" ---
+
+def test_receive_publiczne_zwraca_powod_albo_startuje(qapp, tmp_path, ustawienia):
+    """`receive()` = ta sama złota akcja co `_on_receive`, ale z POWODEM odmowy dla wołającego spoza
+    widoku (kafel Przyjmij na Domu): bez bazy, przy zapisie nagłówków, w trakcie biegu - zdanie
+    z katalogu, to samo, którym odmawia `run_stage`; start sekwencji = `None`."""
+    i18n.set_lang("pl")
+    bez_bazy = PipelineView(None, now_fn=lambda: NOW)
+    assert bez_bazy.receive() == i18n.t("pipeline.refuse.no_db")
+    tree = _tree(tmp_path, 1)
+    ustawienia.setValue("pipeline/last_source", tree)
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    view.set_writeback_busy(True)
+    assert view.receive() == i18n.t("pipeline.refuse.writeback") and view._thread is None
+    view.set_writeback_busy(False)
+    loop = QEventLoop()
+    view.running_changed.connect(lambda r: loop.quit() if r is False else None)
+    QTimer.singleShot(20000, loop.quit)
+    assert view.receive() is None and view._thread is not None      # ruszyło bez pytania
+    assert view.receive() == i18n.t("pipeline.refuse.running")      # drugi klik w biegu
+    loop.exec()
+    assert "[skan]" in view.lbl_summary.text()
+
+
+def test_run_all_on_skanuje_podany_korzen_bez_zapisu_zrodla(qapp, tmp_path, ustawienia):
+    """Żniwa skanują PODDRZEWO archiwum: sekwencja „all" na podanym korzeniu nie zapisuje go jako
+    źródła „Przyjmij nowe" (źródłem zostaje archiwum). `run_finished` niesie zapis przebiegu
+    (etap startu, znacznik `since` z zegara widoku, wyniki etapów, brak anulowania i błędu)
+    i pada PO `running_changed(False)` - słuchacz raportu czyta bazę po zapisie workera."""
+    tree = _tree(tmp_path, 2)
+    ustawienia.setValue("pipeline/last_source", "X:/archiwum")
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    kolejnosc, zapisy = [], []
+    view.running_changed.connect(lambda r: kolejnosc.append(("running", r)))
+    view.run_finished.connect(lambda lr: (kolejnosc.append(("finished", None)), zapisy.append(lr)))
+    loop = QEventLoop()
+    view.run_finished.connect(lambda _lr: loop.quit())
+    QTimer.singleShot(20000, loop.quit)
+    assert view.run_all_on(tree) is None
+    loop.exec()
+    assert ustawienia.value("pipeline/last_source") == "X:/archiwum"
+    assert kolejnosc[-2:] == [("running", False), ("finished", None)]
+    lr = zapisy[0]
+    assert lr["stage"] == "all" and lr["since"] == NOW
+    assert lr["cancelled"] is None and lr["failed"] is None
+    assert {"scan", "group", "delta"} <= set(lr["results"])
+    assert lr["results"]["scan"].frames_new == 2
+    # Nowy przebieg zaczyna zapis od zera - stary wynik skanu nie przeżywa do raportu innego etapu.
+    view._begin_run()
+    assert view.last_run == {"stage": None, "since": None, "results": {}, "cancelled": None,
+                             "failed": None}
+
+
+def test_run_all_on_odmawia_bez_bazy_i_w_biegu(qapp, tmp_path, ustawienia):
+    i18n.set_lang("pl")
+    assert PipelineView(None, now_fn=lambda: NOW).run_all_on(str(tmp_path)) == i18n.t(
+        "pipeline.refuse.no_db")
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    view.set_writeback_busy(True)
+    assert view.run_all_on(str(tmp_path)) == i18n.t("pipeline.refuse.writeback")
+
+
+def test_przycisk_zniw_emituje_sygnal_i_gasnie_jak_stosy(qapp, tmp_path):
+    """„Wciągnij mastery…" stoi w sekcji „Stosy" (ta sama granica: drzewo obróbki) i tylko
+    SYGNALIZUJE - okno żniw otwiera gospodarz, bo widok Dostawy nie trzyma połączenia z bazą.
+    Wygaszany jak „Wciągnij stosy…": w biegu i bez bazy."""
+    view = PipelineView(_fresh_db(tmp_path), now_fn=lambda: NOW)
+    odebrane = []
+    view.open_harvest.connect(lambda: odebrane.append(1))
+    assert view.btn_harvest.isEnabled() and view.btn_stacks.isEnabled()
+    view.btn_harvest.click()
+    assert odebrane == [1]
+    view._set_running(True)
+    assert not view.btn_harvest.isEnabled()
+    view._set_running(False)
+    assert view.btn_harvest.isEnabled()
+    assert not PipelineView(None, now_fn=lambda: NOW).btn_harvest.isEnabled()

@@ -487,6 +487,11 @@ class PipelineView(QWidget):
     stage_finished = Signal(str)
     running_changed = Signal(bool)
     open_collection = Signal(str)          # nazwa perspektywy Zbiorów (ścieżka 3→1 po oznaczeniu)
+    # Koniec przebiegu z jego zapisem (`last_run`): etap startu, znacznik `since`, wyniki etapów,
+    # etap anulowany, błąd. Emitowany PO `running_changed(False)`, więc słuchacz (raport „co
+    # przyszło” drogi Przyjmij) czyta bazę już po zapisie workera i po odświeżeniu widoków gospodarza.
+    run_finished = Signal(object)
+    open_harvest = Signal()                # „Wciągnij mastery…” - okno żniw otwiera gospodarz
 
     def __init__(self, db_path, *, now_fn=_utc_now_iso, parent=None):
         super().__init__(parent)
@@ -503,6 +508,9 @@ class PipelineView(QWidget):
         self._etap_bez_zrodla = None       # etap, którego źródła wątek tła nie zobaczył („Wskaż katalog…")
         self._copy_facts_waiting = 0       # kopie czekające na fakty (`_sync_copy_facts`)
         self._reason = None                # powód wejścia z innej powierzchni (`show_reason`)
+        # Zapis OSTATNIEGO przebiegu dla powierzchni spoza widoku (`run_finished`): raport Przyjmij
+        # liczy „co przyszło” od `since`, a liczby skanu bierze z `results["scan"]`.
+        self.last_run = self._pusty_zapis_przebiegu()
         self._build_ui()
         self._sync_source_memo()
         self._sync_stacks_memo()
@@ -647,6 +655,13 @@ class PipelineView(QWidget):
         self.btn_stack_lineage.setToolTip(i18n.t("pipeline.tip.stack_lineage"))
         self.btn_stack_lineage.clicked.connect(self._on_stack_lineage)
         stk.addWidget(self.btn_stack_lineage)
+        # ŻNIWA MASTERÓW - trzecia akcja tej sekcji, bo też sięga do drzewa OBRÓBKI (wyjście WBPP),
+        # tyle że w drugą stronę: z warsztatu do biblioteki kalibracji. Okno żniw otwiera gospodarz
+        # (`open_harvest`), bo ono potrzebuje połączenia z bazą, którego ten widok nie trzyma.
+        self.btn_harvest = QPushButton(i18n.t("pipeline.btn.harvest"))
+        self.btn_harvest.setToolTip(i18n.t("pipeline.tip.harvest"))
+        self.btn_harvest.clicked.connect(self.open_harvest)
+        stk.addWidget(self.btn_harvest)
         self.lbl_stacks_memo = QLabel("")      # treść = WYŁĄCZNIE _sync_stacks_memo
         stk.addWidget(self.lbl_stacks_memo, 1)
         v.addLayout(stk)
@@ -955,13 +970,40 @@ class PipelineView(QWidget):
         sprawdza wątek tła; niedostępne wraca jako jawny stan „Źródło niedostępne - wskaż katalog"
         z przyciskiem (`_on_source_unreachable`), a osiągalne zostaje wskazanym katalogiem
         z serialem z wątku tła (`_on_source_ready`)."""
-        if self._db_path is None or self._thread is not None:
-            return
+        self.receive()
+
+    def receive(self):
+        """PUBLICZNE wejście złotej akcji dla powierzchni SPOZA widoku (kafel Przyjmij na Domu):
+        ta sama sekwencja co `_on_receive`, ale z POWODEM ODMOWY (string z katalogu) zamiast
+        ciszy - kafel, który nic nie zrobił, musi powiedzieć dlaczego. `None` = sekwencja ruszyła
+        albo okno zapytało o katalog (pierwsza dostawa; decyzja należy do człowieka). Bramki
+        te same, co w `run_stage`, w tej samej kolejności."""
+        if self._db_path is None:
+            return i18n.t("pipeline.refuse.no_db")
+        if self._thread is not None:
+            return i18n.t("pipeline.refuse.running")
+        if self._writeback_busy:
+            return i18n.t("pipeline.refuse.writeback")
         source = self._settings().value("pipeline/last_source", None)
         if not source:
             self._pick_and_scan("all")
-            return
+            return None
         self._start_scan_sequence("all", source)
+        return None
+
+    def run_all_on(self, root):
+        """Sekwencja „all” na PODANYM korzeniu BEZ zapamiętania go jako źródła „Przyjmij nowe”:
+        żniwa masterów skanują poddrzewo biblioteki kalibracji, a źródłem Dostawy ma zostać
+        archiwum. Powód odmowy (jak `run_stage`) albo `None`, gdy ruszyło; sonda źródła i serial
+        jak zawsze w wątku tła."""
+        if self._db_path is None:
+            return i18n.t("pipeline.refuse.no_db")
+        if self._thread is not None:
+            return i18n.t("pipeline.refuse.running")
+        if self._writeback_busy:
+            return i18n.t("pipeline.refuse.writeback")
+        self._start_scan_sequence("all", root)
+        return None
 
     def _pick_and_scan(self, stage):
         """Pytanie o katalog (pierwsza dostawa albo źródło niedostępne), zapamiętanie go jak
@@ -982,6 +1024,7 @@ class PipelineView(QWidget):
         self._summary_lines = []
         self._forget_vanished()
         self._etap_bez_zrodla = None
+        self.last_run = self._pusty_zapis_przebiegu()
         self.lbl_summary.setText("")
         self.lbl_error.setVisible(False)
         self.lbl_error.setText("")
@@ -1156,7 +1199,15 @@ class PipelineView(QWidget):
             self._worker.request_cancel()
             self.status_message.emit(i18n.t("pipeline.cancelling"))
 
+    @staticmethod
+    def _pusty_zapis_przebiegu():
+        return {"stage": None, "since": None, "results": {}, "cancelled": None, "failed": None}
+
     def _start_stage(self, stage, **params):
+        # Znacznik startu z TEGO SAMEGO zegara, którym worker pisze `first_seen_at` - raport
+        # „co przyszło” porównuje oba jako tekst ISO, więc muszą pochodzić z jednej funkcji.
+        self.last_run["stage"] = stage
+        self.last_run["since"] = self._now()
         self._worker = PipelineWorker(self._db_path, now_fn=self._now)
         self._worker.configure(stage, **params)
         self._thread = QThread(self)
@@ -1189,6 +1240,9 @@ class PipelineView(QWidget):
         self._worker = None
         self._thread = None
         self._set_running(False)
+        # Po `running_changed(False)`: gospodarz zdążył odświeżyć widoki, a słuchacz raportu
+        # czyta bazę po zamknięciu połączenia workera. Kopia płytka - słuchacz nie mutuje zapisu.
+        self.run_finished.emit(dict(self.last_run))
 
     # ---------------------------------------------------------------- sloty (główny wątek)
 
@@ -1222,6 +1276,7 @@ class PipelineView(QWidget):
         self.bar.setRange(0, 1)
         self.bar.setValue(1)
         self.lbl_counts.setText("")
+        self.last_run["results"][name] = result
         self._append_summary(self._format_result(name, result))
         if name == "presence":
             self._update_vanished_box(result)
@@ -1237,6 +1292,8 @@ class PipelineView(QWidget):
         # `[skan]` + `summary.files` wywalało slot AttributeError na `PresenceSummary`, a wtedy panel
         # zostawał pusty, pasek na 0% i status „Anulowanie…" na wieki (wizytator P5 #1).
         etykieta = _stage_label(name)
+        self.last_run["results"][name] = summary
+        self.last_run["cancelled"] = name
         if name == "scan":
             self._append_summary(i18n.t("pipeline.scan_cancelled", n=summary.files))
         self._append_summary(self._format_result(name, summary))
@@ -1290,6 +1347,7 @@ class PipelineView(QWidget):
         self.bar.setRange(0, 1)
         self.bar.setValue(0)
         self.lbl_counts.setText("")
+        self.last_run["failed"] = i18n.t("pipeline.stage_failed_line", stage=_stage_label(name), msg=msg)
         self.lbl_error.setText(i18n.t("pipeline.stage_failed_line", stage=_stage_label(name), msg=msg))
         self.lbl_error.setVisible(True)                 # czerwony, osobny wiersz — nie ginie w panelu
         self.status_message.emit(i18n.t("pipeline.stage_failed_status", stage=name))
@@ -1677,6 +1735,7 @@ class PipelineView(QWidget):
         # trybu zaawansowanego — wymagają samej bazy.
         self.btn_stacks.setEnabled(idle and has_db)
         self.btn_stack_lineage.setEnabled(idle and has_db)
+        self.btn_harvest.setEnabled(idle and has_db)        # wyjście WBPP wskazuje okno żniw
         # Fakty kopii nie potrzebują katalogu (kandydaci z bazy, bez korzenia); wygasza je ten sam
         # mutex zapisu nagłówków co resztę Dostawy - zbieranie czyta nagłówki kopii, które pisarz
         # właśnie przepisuje.

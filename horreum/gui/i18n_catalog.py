@@ -2986,6 +2986,16 @@ CATALOG = {
         "pl": "Stosy — gotowe obrazy po integracji (drzewo obróbki, osobno od archiwum):",
         "en": "Stacks — finished images after integration (processing tree, separate from the archive):",
     },
+    "pipeline.btn.harvest": {"pl": "Wciągnij mastery…", "en": "Harvest masters…"},
+    "pipeline.tip.harvest": {
+        "pl": "Mastery kalibracyjne z wyjścia WBPP do biblioteki kalibracji archiwum: historia "
+              "integracji w pliku mówi, z których surowych flatów powstał master, a baza zna te "
+              "flaty z nazwy. Nazwa i katalog z faktów, kopia bez nadpisywania, potem zwykła dostawa.",
+        "en": "Calibration masters from the WBPP output into the archive calibration library: the "
+              "integration history in the file says which raw flats made the master, and the "
+              "database knows those flats by name. Name and folder from facts, copy without "
+              "overwriting, then a regular intake.",
+    },
     "pipeline.btn.stacks": {"pl": "Wciągnij stosy…", "en": "Take in stacks…"},
     "pipeline.tip.stacks": {
         "pl": "Wskaż korzeń drzewa obróbki — Horreum wciągnie same pliki `masterLight*.xisf` "

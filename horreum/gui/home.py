@@ -116,8 +116,9 @@ def zdanie_gestu(gest):
     LICZBA NETTO: w jednym geście zapisu plik, którego kartę odbił rdzeń, wraca tym samym
     czasownikiem z powodem cofnięcia - liczy się różnica „gest - powrót”, nie suma. „Przeniesiono do
     folderu obiektu” mówi się WYŁĄCZNIE o relokacjach ze zmianą katalogu (`relocated_dirs`
-    read-modelu: powód → liczba); wzór „Nazw” zmienia też nazwy w tym samym folderze, więc bez tego
-    rozróżnienia zdanie jest ogólne (nowe miejsce albo nowa nazwa). Netto ujemne = cofnięcie gestu."""
+    read-modelu: powód → liczba); gest zmienia też samą nazwę w tym samym folderze (człon obiektu
+    na początku nazwy, D-1011-6 `O2`), więc bez tego rozróżnienia zdanie jest ogólne (nowe miejsce
+    albo nowa nazwa). Netto ujemne = cofnięcie gestu."""
     relokacje = (gest.get("reasons") or {}).get("location.renamed", {})
     netto = relokacje.get(POWOD_ZMIANY_OBIEKTU, 0) - relokacje.get(POWOD_COFNIECIA_ZMIANY, 0)
     katalogi = gest.get("relocated_dirs") or {}

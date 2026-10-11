@@ -34,10 +34,12 @@ FORMAT REJESTRU. Blok zaczyna nagłówek `## ` w pierwszej kolumnie (poza płotk
                          generator); `tor-bez-id: <tor> <opis> [| <siedziba>]` = pozycje bez
                          własnego ID (opis idzie do indeksu, siedziba tylko do `tory`);
                          `fala: <nr> <nazwa> | <tory fali> | <ID decyzji PRZED falą albo ->`.
-  `## <ID> · <tytuł>`    dług albo decyzja: pola stan, waga (wymagane), tor (wymagane w bloku
-                         otwartym i zaparkowanym), paczka (pole HISTORYCZNE - wyłącznie w bloku
-                         zamkniętym), kiedy, siedziba, zamkniete (opcjonalne); pola ZARAZ pod
-                         nagłówkiem, potem pusta linia i proza.
+  `## <ID> · <tytuł>`    dług albo decyzja: pola stan, waga (wymagane), tor i czasownik (wymagane
+                         w bloku otwartym i zaparkowanym; czasownik = droga ekranu Dom, której
+                         ID służy: Przyjmij/Znajdź/Wydaj/Popraw/Więcej, albo `-` = żadna),
+                         paczka (pole HISTORYCZNE - wyłącznie w bloku zamkniętym), kiedy,
+                         siedziba, zamkniete (opcjonalne); pola ZARAZ pod nagłówkiem, potem
+                         pusta linia i proza.
   `## <cokolwiek innego>` sekcja prozy - bez pól.
 Nieznane pole, zła dziedzina, duplikat ID albo niezamknięty płotek = błąd schematu; z rejestru,
 który oblewa schemat, START się nie generuje.
@@ -79,9 +81,12 @@ KOD_W_BACKTICKU = re.compile(r"`([^`]+)`")
 POLA_STANU = ("sesja", "stan", "nastepny-krok", "model-nastepnej", "nie-wracac", "tory")
 POLA_STANU_WIELE = ("tripwir", "tor-bez-id", "fala")
 POLA_ID_WYMAGANE = ("stan", "waga")
-POLA_ID_OPCJONALNE = ("tor", "paczka", "kiedy", "siedziba", "zamkniete")
+POLA_ID_OPCJONALNE = ("tor", "czasownik", "paczka", "kiedy", "siedziba", "zamkniete")
 STANY = ("otwarty", "zaparkowany", "zamkniety")
 STANY_OTWARTE = ("otwarty", "zaparkowany")
+# Drogi ekranu Dom (`horreum/gui/home.py`: cztery kafle i menu „Więcej…") plus `-` = żadna.
+# Rozwój produktu z `-` parkuje (rama PARKOWANIE-ROZWOJU planu ostatecznego).
+CZASOWNIKI = ("Przyjmij", "Znajdź", "Wydaj", "Popraw", "Więcej", "-")
 WAGI = {"-": "", "zolta": "🟡", "czerwona": "🔴"}
 TOR_DECYZJA = "decyzja"
 TOR_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_]*")
@@ -390,6 +395,10 @@ def _sprawdz_blok(blok, pola, reszta, bledy):
         bledy.append(f"linia {blok.nr}: {blok.ident}: stan `{stan}` spoza {'/'.join(STANY)}")
     if waga is not None and waga not in WAGI:
         bledy.append(f"linia {blok.nr}: {blok.ident}: waga `{waga}` spoza {'/'.join(WAGI)}")
+    czasownik = blok.pola.get("czasownik")
+    if czasownik is not None and czasownik not in CZASOWNIKI:
+        bledy.append(f"linia {blok.nr}: {blok.ident}: czasownik `{czasownik}` spoza "
+                     f"{'/'.join(CZASOWNIKI)}")
     if (stan == "zamkniety") != ("zamkniete" in blok.pola):
         bledy.append(f"linia {blok.nr}: {blok.ident}: `stan: zamkniety` i pole `zamkniete:` "
                      "chodzą w parze (data i czym zamknięto)")
@@ -397,6 +406,9 @@ def _sprawdz_blok(blok, pola, reszta, bledy):
         if pola and "tor" not in blok.pola:
             bledy.append(f"linia {blok.nr}: {blok.ident}: brak pola `tor:` (blok otwarty "
                          "i zaparkowany należy do toru albo do `decyzja`)")
+        if pola and "czasownik" not in blok.pola:
+            bledy.append(f"linia {blok.nr}: {blok.ident}: brak pola `czasownik:` (blok otwarty "
+                         "i zaparkowany należy do drogi ekranu Dom albo do `-`)")
         if "paczka" in blok.pola:
             bledy.append(f"linia {blok.nr}: {blok.ident}: `paczka:` to pole historyczne bloku "
                          "zamkniętego - otwarty niesie `tor:`")

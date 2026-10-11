@@ -36,10 +36,14 @@ STAN = (
 )
 
 
-def blok(ident, stan="otwarty", waga="-", tor="T1", extra="", proza="Proza długu.", paczka=None):
+def blok(ident, stan="otwarty", waga="-", tor="T1", extra="", proza="Proza długu.", paczka=None,
+         czasownik="Znajdź"):
+    """Blok ID; `czasownik:` stoi wyłącznie w bloku otwartym i zaparkowanym (zamknięty go nie
+    potrzebuje), `czasownik=None` go zdejmuje."""
     zam = "zamkniete: 2026-01-01 test\n" if stan == "zamkniety" else ""
+    czas = f"czasownik: {czasownik}\n" if czasownik and stan in ("otwarty", "zaparkowany") else ""
     pola = (f"tor: {tor}\n" if tor else "") + (f"paczka: {paczka}\n" if paczka else "")
-    return (f"## {ident} · tytuł {ident}\nstan: {stan}\nwaga: {waga}\n{pola}{zam}{extra}"
+    return (f"## {ident} · tytuł {ident}\nstan: {stan}\nwaga: {waga}\n{czas}{pola}{zam}{extra}"
             f"\n{proza}\n")
 
 
@@ -109,6 +113,34 @@ def test_zla_dziedzina_to_blad(pole, zla):
 def test_otwarty_blok_bez_toru_to_blad():
     rej = rozbior(rejestr(blok("A-1", tor=None)))
     assert any("brak pola `tor:`" in b for b in rej.bledy), rej.bledy
+
+
+@pytest.mark.parametrize("stan", ["otwarty", "zaparkowany"])
+def test_otwarty_i_zaparkowany_bez_czasownika_to_blad(stan):
+    rej = rozbior(rejestr(blok("A-1", stan=stan, czasownik=None)))
+    assert any("brak pola `czasownik:`" in b for b in rej.bledy), rej.bledy
+
+
+@pytest.mark.parametrize("zly", ["Usuń", "znajdź", "Wydaj do WBPP", "\u2014"])
+def test_czasownik_spoza_dziedziny_to_blad(zly):
+    rej = rozbior(rejestr(blok("A-1", czasownik=zly)))
+    assert any(f"czasownik `{zly}` spoza" in b for b in rej.bledy), rej.bledy
+
+
+def test_zamkniety_bez_czasownika_przechodzi():
+    assert rozbior(rejestr(blok("A-1"), blok("C-3", stan="zamkniety"))).bledy == []
+
+
+@pytest.mark.parametrize("czasownik", ks.CZASOWNIKI)
+@pytest.mark.parametrize("stan", ["otwarty", "zaparkowany"])
+def test_kazdy_czasownik_z_dziedziny_przechodzi(stan, czasownik):
+    assert rozbior(rejestr(blok("A-1", stan=stan, czasownik=czasownik))).bledy == []
+
+
+def test_czasownik_nie_zmienia_bloku_start():
+    """Pole jest dla schematu i parkowania, nie dla generatu - START go nie pokazuje."""
+    rej = rozbior(rejestr(blok("A-1", czasownik="Wydaj")))
+    assert "Wydaj" not in "\n".join(ks.generuj_start(rej))
 
 
 @pytest.mark.parametrize("stan", ["otwarty", "zaparkowany"])

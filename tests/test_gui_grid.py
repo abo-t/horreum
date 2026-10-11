@@ -14,7 +14,10 @@ pytest.importorskip("PySide6")
 from horreum import db, naming, pivot as pivot_mod, writeback
 from horreum.gui import grid as grid_mod, queries, rows as rows_mod, tasks as tasks_mod
 
-_ZRODLO_GRIDU = pathlib.Path(grid_mod.__file__).read_text(encoding='utf-8')
+# Źródło CAŁEGO widoku: fasada `grid.py` + moduły `grid_*.py` (WO-6) - bramki tekstowe nie mogą
+# przegapić literału tylko dlatego, że mieszka w module obok fasady.
+_ZRODLO_GRIDU = "\n".join(p.read_text(encoding='utf-8') for p in
+                            sorted(pathlib.Path(grid_mod.__file__).parent.glob("grid*.py")))
 
 from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QThread, Qt
 from PySide6.QtWidgets import QApplication
@@ -1713,10 +1716,11 @@ def test_kropka_poczekalni_przelacza_role_i_przepolerowuje(view, monkeypatch):
     """Wizytacja P-C #9: mechanika `_set_role` była bez bramki, a bez `unpolish`/`polish` sam
     `setProperty` NIE przemalowuje żywego widżetu — usunięcie tych dwóch linii przeszłoby całą
     baterię, a kropka poczekalni zamarłaby na kolorze z chwili budowy."""
-    from horreum.gui import grid as grid_mod
+    from horreum.gui import grid_selection
     polished = []
-    real = grid_mod._set_role
-    monkeypatch.setattr(grid_mod, "_set_role",
+    real = grid_selection._set_role
+    # Podmiana tam, gdzie nazwę CZYTA szuflada (`grid_selection`), nie w fasadzie `grid`.
+    monkeypatch.setattr(grid_selection, "_set_role",
                         lambda w, role: (polished.append(role), real(w, role))[1])
     view.drawer.set_count(7)
     assert view.drawer.dot.property("role") == "warn" and view.drawer.dot.text() == "●"

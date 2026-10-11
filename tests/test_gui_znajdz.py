@@ -18,7 +18,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from horreum import db, repo
-from horreum.gui import grid as grid_mod, i18n, queries
+from horreum.gui import grid as grid_mod, grid_workers, i18n, queries
 from horreum.gui.note_dialog import NoteIntent
 
 NOW = "2026-10-09T12:00:00"
@@ -129,7 +129,9 @@ def test_przelaczenie_prezentacji_NIE_przeladowuje_zbioru_i_zachowuje_zaznaczeni
     _zaznacz(v, [2, 3])
     wolania = []
     prawdziwy = grid_mod._sklad_zbioru
-    monkeypatch.setattr(grid_mod, "_sklad_zbioru", lambda *a, **k: wolania.append(1) or prawdziwy(*a, **k))
+    # Skład zbioru woła i wątek GUI (fasada `grid`), i robotnik tła (`grid_workers`) - liczymy obie drogi.
+    for modul in (grid_mod, grid_workers):
+        monkeypatch.setattr(modul, "_sklad_zbioru", lambda *a, **k: wolania.append(1) or prawdziwy(*a, **k))
     gen = v._zbior_gen
     strona.show_find()
     strona.show_classic()
@@ -755,7 +757,8 @@ def test_chipy_i_zdanie_mowia_o_PRZYLOZONYM_zbiorze_gdy_sklad_w_tle_trwa(qapp, c
         wstrzymaj.wait(10)
         return prawdziwy(con_, stan, przerwij)
 
-    monkeypatch.setattr(grid_mod, "_sklad_zbioru", _sklad)
+    for modul in (grid_mod, grid_workers):   # wątek GUI (fasada) i robotnik tła - jak przed podziałem
+        monkeypatch.setattr(modul, "_sklad_zbioru", _sklad)
     v = grid_mod.FramesView(con, now_fn=lambda: NOW, pola_poza_watkiem=True)
     s = ZnajdzView(v)
     try:
@@ -903,7 +906,8 @@ def test_wydaj_do_WBPP_przy_skladzie_w_tle_otwiera_teczki_bez_podpowiedzi(qapp, 
         def exec(self):
             return 0
 
-    monkeypatch.setattr(grid_mod, "_sklad_zbioru", _sklad)
+    for modul in (grid_mod, grid_workers):   # wątek GUI (fasada) i robotnik tła - jak przed podziałem
+        monkeypatch.setattr(modul, "_sklad_zbioru", _sklad)
     monkeypatch.setattr(grid_mod, "ObjectPickDialog", _Teczki)
     v = grid_mod.FramesView(con, now_fn=lambda: NOW, pola_poza_watkiem=True)
     s = ZnajdzView(v)

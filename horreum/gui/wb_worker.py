@@ -61,19 +61,31 @@ class WritebackWorker(QObject):
     slot głównego wątku czytał tylko przez `self.con` (bez nakładania połączeń na tym samym pliku)."""
 
     progress = Signal(int, int, str, str)   # done, total, path, status — MID-commit (Qt-wolny callback rdzenia)
-    done = Signal(str, object)              # op, result (CommitResult|UndoResult|InplaceGestureResult) - niemutowany po zwrocie rdzenia
+    done = Signal(str, object)              # op, result (CommitResult|UndoResult|InplaceGestureResult|ObjectChangeResult) - niemutowany po zwrocie rdzenia
     failed = Signal(str, str)               # op, msg — wyjątek → sygnał, NIE crash apki
     finished = Signal()                     # run() wrócił KAŻDĄ drogą → quit wątku
 
-    # Siedem pętli-po-plikach dzieli sygnaturę (con, target_id, now=, progress=, should_cancel=);
-    # ósmy wpis, gest kopii wiodącej, bierze ją bez postępu i bez anulowania (jeden plik).
+    # Pętle po plikach dzielą sygnaturę (con, target_id, now=, progress=, should_cancel=); gest
+    # kopii wiodącej bierze ją bez postępu i bez anulowania (jeden plik).
     # Trzy pętle za cofnięciem renamu to gesty izolacji zapisu w miejscu: cel = LISTA `inplace_op.id`, wynik
     # `InplaceGestureResult` (AR-17 (2) - ten sam uchwyt, więc ten sam mutex „writeback → Dostawa").
     # Zwolnienie ręką niesie też POWÓD człowieka, więc jego cel to `{"ops": [...], "reason": ...}`;
     # idzie tym uchwytem, bo rdzeń bierze blokadę pliku (`writeback.release_isolation`) i może na
     # nią czekać - w wątku okna byłoby to zamrożenie, a poza uchwytem - drugi pisarz obok zapisu.
+    # Trzy wpisy fali zmiany obiektu (AR-17 krok 3, AR-117) - ta sama sygnatura pętli po plikach:
+    # `commit_inplace` to karta zapisana W MIEJSCU (spadek na drogę atomową z powodem w
+    # `FileResult.reason`), bo pełne przepisanie pliku po SMB zrywa dowiązania `_WBPP`; `object_change`
+    # i `undo_object_change` to JEDNA operacja gestu (przeniesienie + karta + baza per pozycja), bo
+    # dwa starty uchwytu zwalniałyby między sobą mutex „zapis → Dostawa". Cel wszystkich trzech:
+    # `run_id` przebiegu ze stagingu.
     _OPS = {
         "commit":        lambda con, t, now, pr, sc: writeback.commit(con, t, now=now, progress=pr, should_cancel=sc),
+        "commit_inplace": lambda con, t, now, pr, sc: writeback.commit(
+            con, t, now=now, progress=pr, should_cancel=sc, inplace=True),
+        "object_change": lambda con, t, now, pr, sc: writeback.commit_object_change(
+            con, t, now=now, progress=pr, should_cancel=sc),
+        "undo_object_change": lambda con, t, now, pr, sc: writeback.undo_object_change(
+            con, t, now=now, progress=pr, should_cancel=sc),
         "commit_rename": lambda con, t, now, pr, sc: writeback.commit_renames(con, t, now=now, progress=pr, should_cancel=sc),
         "undo":          lambda con, t, now, pr, sc: writeback.undo(con, t, now=now, progress=pr, should_cancel=sc),
         "undo_rename":   lambda con, t, now, pr, sc: writeback.undo_renames(con, t, now=now, progress=pr, should_cancel=sc),
@@ -261,10 +273,47 @@ def commit_do_cofniecia(res):
     return res.commit_id
 
 
-def zdanie_commitu_kart(res, applied_key):
+# Początek powodu, którym rdzeń znaczy plik zapisany drogą atomową po odmowie zapisu w miejscu
+# (`writeback._zapisz_lokacje`: „droga dotychczasowa: <powód Fallback>”). Rdzeń nie niesie flagi,
+# więc rozpoznajemy po zdaniu - pinuje je test na prawdziwym pisarzu (FITS z dopisaniem karty).
+PREFIKS_SPADKU = "droga dotychczasowa"
+
+
+def bez_prefiksu_spadku(reason):
+    """Powód spadku bez prefiksu rdzenia - zdanie mówi już „drogą atomową”, drugi raz nie."""
+    if reason.startswith(PREFIKS_SPADKU):
+        return reason[len(PREFIKS_SPADKU):].lstrip(": ") or reason
+    return reason
+
+
+def zdanie_drogi_zapisu(res):
+    """Człon o SPADKU na drogę atomową przy zapisie w miejscu (AR-117) albo `""`.
+
+    Okna kart piszą w miejscu (`commit_inplace`), bo pełne przepisanie pliku po SMB zrywa
+    dowiązania `_WBPP`. Plik, w którym zapis w miejscu się nie kwalifikuje (FITS umie w miejscu
+    wyłącznie podmienić istniejącą kartę), rdzeń zapisuje drogą atomową i mówi dlaczego - powodem
+    z prefiksem `PREFIKS_SPADKU`. Spadkiem jest WYŁĄCZNIE taki plik: `applied` poza `in_place` bez
+    tego prefiksu to co innego (np. zapis potwierdzony z dysku po przerwanym commicie - nic nie
+    przepisano). Droga zapisu jest szczegółem, dopóki wszystko poszło w miejscu, więc człon mówi
+    wyłącznie o spadku: ile plików przepisano w całości i pierwszy powód."""
+    w_miejscu = {fr.location_id for fr in res.in_place}
+    spadek = [fr for fr in res.applied if fr.location_id not in w_miejscu
+              and (fr.reason or "").startswith(PREFIKS_SPADKU)]
+    if not spadek:
+        return ""
+    return i18n.t("wb.inplace_fallback", n=len(spadek),
+                  reason=bez_prefiksu_spadku(spadek[0].reason))
+
+
+def zdanie_commitu_kart(res, applied_key, *, w_miejscu=False):
     """Zdanie commitu okna piszącego karty → `(tekst, commit_id do cofnięcia | None)`: zdanie
-    wyniku + nota przerwania + `commit_id` (po zamknięciu okna to jedyny uchwyt do cofnięcia)."""
+    wyniku + nota przerwania + `commit_id` (po zamknięciu okna to jedyny uchwyt do cofnięcia).
+    `w_miejscu` = commit szedł zapisem w miejscu (`commit_inplace`) - zdanie dokłada wtedy człon
+    o spadku na drogę atomową (`zdanie_drogi_zapisu`); przy zwykłym commicie drogą atomową jest
+    każdy plik i taki człon byłby fałszem."""
     summary = zdanie_wyniku_zapisu(res, applied_key)
+    if w_miejscu:
+        summary += zdanie_drogi_zapisu(res)
     if res.cancelled:
         summary += i18n.t("wb.cancelled_note")
     cofnij = commit_do_cofniecia(res)

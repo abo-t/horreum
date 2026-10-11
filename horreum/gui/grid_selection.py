@@ -84,6 +84,12 @@ class SelectionBar(QFrame):
         # Populacja nagrobków jest z natury rzadka, więc ta pozycja bywa wygaszona przez większość
         # czasu; powód niesie tooltip KONTROLKI (menu w tym repo nie pokazuje tooltipów pozycji).
         self.act_restore = menu.addAction(i18n.t("grid.sel.object_restore"))
+        # ZMIANA OBIEKTU RAZEM Z PLIKIEM (AR-17 krok 3) za własną kreską: trzy pozycje wyżej piszą
+        # wyłącznie bazę, ta przenosi plik do folderu obiektu i pisze kartę `OBJECT` - inna waga
+        # gestu, więc nie stoi z nimi w jednym ciągu. Rusza KAŻDE źródło nazwy (także nagłówek),
+        # bo to jest jawne przepięcie ręką z podglądem i drogą powrotu, nie nadpisanie słabego.
+        menu.addSeparator()
+        self.act_change = menu.addAction(i18n.t("grid.sel.object_change"))
         # Pula skrótu „ostatnio użyte" (R-S2b-12) — tworzona RAZ; treść i widoczność ustawia
         # `set_recent_objects`. Powód takiego kształtu, a nie dokładania akcji: patrz jej docstring.
         self._recent_sep = menu.addSeparator()
@@ -186,9 +192,13 @@ class SelectionBar(QFrame):
     def set_criteria(self, text):
         self.criteria_label.set_full_text(text)
 
-    def set_object_actions(self, *, namable, clearable, stacks=0, restorable=0, reason=None):
+    def set_object_actions(self, *, namable, clearable, changeable, stacks=0, restorable=0,
+                           reason=None):
         # `stacks` = ILE GEST RUSZY, nie ile ich jest w zaznaczeniu — parametr karmi wyłącznie
         # zdanie o skutku, więc wołający podaje `stacks_touchable` (bramka pakietu 0810, zarzut 1).
+        # `changeable` = klatki nieba (light, master_light) z jedną obecną kopią, z obiektem albo bez -
+        # „Zmień obiekt…" rusza każde źródło nazwy, więc ta liczba nie wynika z `namable`. Parametr
+        # BEZ domyślnej: wołający, który o nim zapomni, ma paść wywołaniem, a nie gasić pozycję.
         """Uczciwy disabled obu pozycji osi obiektu (S2b, §4/14c-a). Cel gestu to WYŁĄCZNIE
         zaznaczenie, więc przy pustym gaśnie wszystko — fallback „to, co widoczne" jest dla ZAPISU
         osi ZAKAZANY (800 widocznych klatek i jedno chybione kliknięcie to ta sama sekunda).
@@ -202,14 +212,28 @@ class SelectionBar(QFrame):
         self.act_name.setEnabled(bool(namable))
         self.act_clear.setEnabled(bool(clearable))
         self.act_restore.setEnabled(bool(restorable))
+        self.act_change.setEnabled(bool(changeable))
         # `restorable` W WARUNKU JAWNIE, choć dziś jest nadmiarowy: każdy nagrobek jest też
         # `namable` (`object_id IS NULL` ⇒ do nazwania), więc kontrolka i tak by żyła. Zależność
         # jest jednak NIEJAWNA i pęknie przy pierwszej zmianie `WEAK_OBJECT_SOURCES` — wtedy
         # kontrolka gasłaby nad żywą pozycją menu, czyli odbierała jedyną drogę do gestu.
-        aktywna = bool(namable or clearable or restorable)
+        # `changeable` z tego samego powodu: zaznaczenie samych klatek z nagłówka (~95% lightów
+        # archiwum) nie ma czego nazwać ani cofnąć, a obiekt da się mu zmienić - kontrolka gasnąca
+        # nad żywą „Zmień obiekt…" odbierałaby jedyną drogę do tego gestu.
+        baza = bool(namable or clearable or restorable)
+        aktywna = baza or bool(changeable)
         self.btn_object.setEnabled(aktywna)
         if not aktywna:
             self.btn_object.setToolTip(i18n.t(reason or "grid.sel.object_tip_empty"))
+            return
+        if not baza:
+            # ŻYWA TYLKO DLA „Zmień obiekt…": powód, dla którego trzy gesty bazy milczą, nie traci
+            # się razem z wygaszeniem (R-S2b-8) - stoi pierwszy, a za nim to, co gest z plikiem
+            # ruszy. Zdanie „nazwa z nagłówka - poprawia się w pliku" i pozycja, która poprawia ją
+            # w pliku, mówią wtedy jedno.
+            self.btn_object.setToolTip(
+                i18n.t(reason or "grid.sel.object_tip_empty") + "\n"
+                + i18n.t_plural("grid.sel.object_change_tip_only", changeable))
             return
         # CZŁON O GOTOWYCH OBRAZACH PRZED GESTEM, nie po nim (R-S3-8). Powód `object_tip_stacks`
         # broni wyłącznie zaznaczenia z SAMYCH stosów — tam gasi kontrolkę. Przy zaznaczeniu
@@ -226,6 +250,8 @@ class SelectionBar(QFrame):
         # bo „do przywrócenia: 0" mówiłoby o czymś, czego w zaznaczeniu nie ma.
         if restorable:
             tip += i18n.t("grid.sel.object_tip_restorable", n=restorable)
+        if changeable:
+            tip += i18n.t("grid.sel.object_change_tip", n=changeable)
         if stacks:
             tip += i18n.t_plural("grid.sel.object_stacks", stacks)
         self.btn_object.setToolTip(tip)

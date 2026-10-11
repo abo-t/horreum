@@ -864,7 +864,9 @@ class ConfirmPathObjectsDialog(QDialog):
         self._run_id = run_id
         self._domkniety = True
         self._begin_progress(staged)
-        self._runner.start("commit", run_id, on_progress=self._on_progress,
+        # Karta W MIEJSCU (AR-117): droga atomowa przepisuje cały plik po SMB i zrywa dowiązania
+        # `_WBPP`; plik, w którym karta się nie mieści, rdzeń zapisuje atomowo i mówi dlaczego.
+        self._runner.start("commit_inplace", run_id, on_progress=self._on_progress,
                            on_done=self._after_commit, on_failed=self._on_failed)
 
     def _stage_karty(self, wybrane):
@@ -915,8 +917,10 @@ class ConfirmPathObjectsDialog(QDialog):
         """Po commicie kart (wątek główny): zdanie bazy + zdanie plików, „Cofnij karty" i „Rozwiąż
         teraz". `commit_id` widoczny - po zamknięciu okna to jedyny uchwyt do cofnięcia z ręki
         (ta sama umowa co w „Napraw nagłówek…"). Commit, który NIE podmienił żadnego pliku (same
-        `blocked`/`failed` bez kopii), oddaje „Zatwierdź" - powtórka ma czym dopisać karty."""
-        summary, cofnij = zdanie_commitu_kart(res, "path.cards_applied")
+        `blocked`/`failed` bez kopii), oddaje „Zatwierdź" - powtórka ma czym dopisać karty.
+        Zapis w miejscu (`commit_inplace`) mówi o drodze zapisu tylko przy spadku na atomową."""
+        summary, cofnij = zdanie_commitu_kart(res, "path.cards_applied",
+                                              w_miejscu=op == "commit_inplace")
         if cofnij is not None:
             self._commit_id = cofnij
             self.undo_btn.setVisible(True)
@@ -1300,7 +1304,8 @@ class RepairHeaderDialog(QDialog):
 
         self._run_id = run_id
         self._begin_progress(staged)
-        self._runner.start("commit", run_id, on_progress=self._on_progress,
+        # Karta W MIEJSCU (AR-117) - ten sam powód co w „Zatwierdź ze ścieżki…".
+        self._runner.start("commit_inplace", run_id, on_progress=self._on_progress,
                            on_done=self._after_commit, on_failed=self._on_failed)
 
     def _begin_progress(self, total):
@@ -1323,7 +1328,8 @@ class RepairHeaderDialog(QDialog):
         Zdanie i regułę „kiedy wolno cofnąć" daje `zdanie_commitu_kart` - wspólne z oknem
         „Zatwierdź ze ścieżki…" (C4: także `failed` z kopią nagłówka ma „Cofnij")."""
         self.bar.setVisible(False)
-        summary, cofnij = zdanie_commitu_kart(res, "grid.wb.applied")
+        summary, cofnij = zdanie_commitu_kart(res, "grid.wb.applied",
+                                              w_miejscu=op == "commit_inplace")
         if cofnij is not None:
             self._commit_id = cofnij
             self._committed = True
@@ -3258,7 +3264,7 @@ class MainWindow(QMainWindow):
         self.recipe_label.setVisible(False)     # po dodaniu — `addPermanentWidget` pokazuje widżet
         self._czlony_recepty = ()               # człony recepty na przycisku (FH-2e: klik robi pierwszy)
         self._obiekty_wydania = None            # (con, rozjazdy) - cel gestu „Przypisz obiekt wydania”
-        self._zmiany_obiektu_wydania = None     # (con, [repo.StackObjectChange]) - materiał „Cofnij”
+        self._zmiany_obiektu_wydania = None     # (con, [repo.ObjectOverride]) - materiał „Cofnij”
         self._recepta_wstrzymana = False        # blokada po wykonaniu członu - dwuklik to jeden gest (Z5)
         # FAZA DOPIERO PO RECEPCIE - kolejność dodawania jest kolejnością OD LEWEJ, więc faza dodana
         # pierwsza wchodziła MIĘDZY raport a receptę i rozdzielała dwa człony jednego zdania
@@ -3918,7 +3924,7 @@ class MainWindow(QMainWindow):
 
     def _on_przypisz_obiekt_wydania(self):
         """Klik „Przypisz obiekt wydania”: per stos klinga jawnego nadpisania ręką
-        (`repo.user_override_stack_object`) ze stanem, który zdanie pokazało, jako oczekiwanym -
+        (`repo.user_override_object`) ze stanem, który zdanie pokazało, jako oczekiwanym -
         stos zmieniony od żniw jest pomijany i nazwany (dryf), drugi klik niczego nie dopisuje.
         Po zapisie zdanie wyniku i recepta „Cofnij” (stan sprzed z klingi, nie z ekranu). Inna
         baza niż ta, na której żniwa się odbyły - gest milczy (stosy jej nie dotyczą)."""
@@ -3929,10 +3935,10 @@ class MainWindow(QMainWindow):
             return
         zmiany, kanony, juz, dryf = [], [], 0, 0
         for r in rozjazdy:
-            wynik = repo.user_override_stack_object(
-                con, frame_id=r["frame_id"], object_id=r["release_object_id"],
-                expected_object_id=r["stack_object_id"], expected_source=r["stack_source"],
-                expected_cleared_id=r["stack_cleared_id"], now=self._now(), changes_out=zmiany)
+            wynik = repo.user_override_object(
+                con, frame_id=r["frame_id"], canon=r["release_canon"],
+                expected=(r["stack_object_id"], r["stack_source"], r["stack_cleared_id"]),
+                reason="release_object", now=self._now(), changes_out=zmiany)
             if wynik == "assigned":
                 kanony.append(r["release_canon"])
             elif wynik == "unchanged":
@@ -3955,7 +3961,7 @@ class MainWindow(QMainWindow):
                                                       self._on_cofnij_obiekt_wydania)]))
 
     def _on_cofnij_obiekt_wydania(self):
-        """Klik „Cofnij” po geście: każdy stos wraca do stanu sprzed (`repo.restore_stack_object`,
+        """Klik „Cofnij” po geście: każdy stos wraca do stanu sprzed (`repo.restore_object_override`,
         CAS - stos zmieniony po geście zostaje i jest nazwany). Zdanie mówi, DO CZEGO stos wrócił
         (`change.before`): do poprzedniego obiektu, do braku obiektu albo do nagrobka ręki - „wrócił
         do poprzedniego obiektu” przy stosie, który obiektu nie miał, byłoby nieprawdą. Recepta
@@ -3966,7 +3972,7 @@ class MainWindow(QMainWindow):
             return
         obiekt = pustka = nagrobek = dryf = 0
         for z in zmiany:
-            if not repo.restore_stack_object(con, change=z, now=self._now()):
+            if not repo.restore_object_override(con, change=z, now=self._now()):
                 dryf += 1
             elif z.before[0] is not None:
                 obiekt += 1

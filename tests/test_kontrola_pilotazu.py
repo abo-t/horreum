@@ -337,3 +337,77 @@ def test_po_undo_wymaga_bajtow_sprzed(tmp_path):
     with open(p, "ab") as fh:
         fh.write(b"\x00")
     assert K.po_undo(str(kopie)) == 1
+
+
+# ============================================================ para ścieżek (zmiana obiektu, AR-17 krok 3)
+
+
+def _przed_para(tmp_path, plik, po, forma):
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps([{"plik": str(plik), "po": str(po), "object": forma}]),
+                    encoding="utf-8")
+    kopie = tmp_path / "kopie"
+    K.przed(str(kopie), str(plan))
+    return kopie
+
+
+def test_para_przeniesienie_i_karta_przechodzi_a_cofniecie_wraca_bajt_w_bajt(tmp_path):
+    """Gest: jeden `os.rename` do folderu nowego obiektu + karta w miejscu pod nową ścieżką →
+    `po` OK (ten sam `st_ino`, bajty poza kartą jak kopia); cofnięcie (karta w miejscu, plik wraca)
+    → `po-undo` OK, a plik zostawiony pod nową ścieżką to NIE."""
+    (tmp_path / "Sh2-229").mkdir()
+    p = _fits(tmp_path / "Sh2-229" / "a.fits")
+    po = tmp_path / "IC405" / "IC405_a.fits"
+    kopie = _przed_para(tmp_path, p, po, "NGC 6992")
+    przed = p.read_bytes()
+    po.parent.mkdir()
+    os.rename(p, po)
+    _zapisz(po, "NGC 6992")
+    assert K.po(str(kopie)) == 0, _raport(kopie)
+    assert _raport(kopie)["plik"] == str(po)
+    assert K.po_undo(str(kopie)) == 1                        # plik nadal pod nową ścieżką
+    _w_miejscu(po, 0, przed)
+    os.rename(po, p)
+    assert K.po_undo(str(kopie)) == 0
+    po.write_bytes(p.read_bytes())                            # kopia pod nową ścieżką została
+    assert K.po_undo(str(kopie)) == 1
+
+
+def test_para_bez_karty_raw_caly_plik_jak_kopia(tmp_path):
+    """`"object": null` (RAW - format bez karty): po przeniesieniu CAŁY plik bajt w bajt jak kopia,
+    jeden zmieniony bajt to NIE; RAW nie otwiera się czytnikiem FITS i nie musi."""
+    from test_exif import build_raw
+    p = tmp_path / "c.dng"
+    p.write_bytes(build_raw())
+    po = tmp_path / "IC405_c.dng"
+    kopie = _przed_para(tmp_path, p, po, None)
+    os.rename(p, po)
+    assert K.po(str(kopie)) == 0, _raport(kopie)
+    _w_miejscu(po, len(po.read_bytes()) - 1, b"\x7f")
+    assert K.po(str(kopie)) == 1
+    assert any("bajty pliku rozne od kopii" in x for x in _raport(kopie)["problemy"])
+
+
+def test_para_kopia_zamiast_przeniesienia_to_NIE(tmp_path):
+    """Plik SKOPIOWANY pod nową ścieżkę (inny `st_ino`) i zostawiony pod starą - dwa „NIE”."""
+    p = _fits(tmp_path / "a.fits")
+    po = tmp_path / "b.fits"
+    kopie = _przed_para(tmp_path, p, po, "NGC 6992")
+    po.write_bytes(p.read_bytes())
+    _zapisz(po, "NGC 6992")
+    assert K.po(str(kopie)) == 1
+    problemy = _raport(kopie)["problemy"]
+    assert any("st_ino" in x for x in problemy)
+    assert any("sprzed przeniesienia nadal lezy" in x for x in problemy)
+
+
+def test_para_przed_odmawia_bez_klucza_object_i_przy_zajetym_celu(tmp_path):
+    p = _fits(tmp_path / "a.fits")
+    zajety = _fits(tmp_path / "b.fits")
+    plan = tmp_path / "plan.json"
+    for wpis in ({"plik": str(p), "po": str(tmp_path / "c.fits")},
+                 {"plik": str(p), "po": str(zajety), "object": "NGC 6992"}):
+        plan.write_text(json.dumps([wpis]), encoding="utf-8")
+        with pytest.raises(SystemExit):
+            K.przed(str(tmp_path / "kopie"), str(plan))
+        assert not (tmp_path / "kopie").exists()

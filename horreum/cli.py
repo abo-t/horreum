@@ -355,6 +355,21 @@ def main(argv=None):
     p_hfx.add_argument("--limit", type=int, default=20,
                        help="ile pozycji każdej listy wypisać (domyślnie 20)")
 
+    # PRZEBIEG GESTU „Zmień obiekt…”/„Uzgodnij pliki…” POZA OKNEM (AR-17 krok 3): okno oferuje
+    # „Dokończ” i „Cofnij” do zamknięcia, a przebieg leży w bazie - zdanie wyniku okna podaje jego
+    # numer, a te dwie podkomendy są drogą po zamknięciu okna albo po awarii procesu.
+    p_oc = sub.add_parser("object-change",
+                          help="przebieg gestu zmiany obiektu z okna: finish (dokoncz) / undo "
+                               "(cofnij) po numerze przebiegu ze zdania wyniku")
+    oc_sub = p_oc.add_subparsers(dest="oc_cmd")
+    for nazwa, pomoc in (("finish", "dokoncz przebieg: pozycje oczekujace (np. po przerwaniu)"),
+                         ("undo", "cofnij przebieg: karty, pliki, katalogi i obiekt w bazie")):
+        p = oc_sub.add_parser(nazwa, help=pomoc)
+        p.add_argument("db", help="ścieżka pliku bazy")
+        p.add_argument("run_id", help="numer przebiegu ze zdania wyniku okna („przebieg …”)")
+        p.add_argument("--limit", type=int, default=20,
+                       help="ile pozycji z powodem wypisać (domyślnie 20)")
+
     p_hf = sub.add_parser("human-facts",
                           help="spis faktow zapisanych REKA (obiekt/config/rodowod/kalibracja/"
                                "stanowisko/zeznanie klatki - testimony_hand); "
@@ -730,6 +745,8 @@ def main(argv=None):
         return _cmd_rederive_kind(args)
     if args.cmd == "header-fix":
         return _cmd_header_fix(args)
+    if args.cmd == "object-change":
+        return _cmd_object_change(args, p_oc)
     if args.cmd == "streaks":
         return _cmd_streaks(args)
     if args.cmd == "human-facts":
@@ -2022,6 +2039,50 @@ def _header_fix_rows(con, frame_ids=None):
             "hdr_imagetyp": r["hdr_imagetyp"], "hdr_filter": r["hdr_filter"],
             "cards": karty.get(r["fid"], {})})
     return wynik
+
+
+def _cmd_object_change(args, parser):
+    """`horreum object-change finish DB RUN_ID` | `horreum object-change undo DB RUN_ID` - dokończenie
+    albo cofnięcie ISTNIEJĄCEGO przebiegu gestu „Zmień obiekt…”/„Uzgodnij pliki…” (AR-17 krok 3).
+
+    Bez DRY: przebieg został już podejrzany i zatwierdzony w oknie, a obie drogi idą tym samym
+    sterownikiem co okno (`writeback.commit_object_change` / `undo_object_change`) - przebieg
+    odtwarzany z bazy, ponowienie wznawia pierwszą niedomkniętą fazę, drugie cofnięcie to „nic do
+    zrobienia”. Przebieg nieznany albo cofnięty (zapis cofniętego nie wznawia) → kod 2 z powodem.
+    Kod wyjścia 1, gdy którakolwiek pozycja zablokowana albo nieudana. ASCII - konsola cp1250."""
+    if args.oc_cmd is None:
+        parser.print_help()
+        return 2
+    from . import writeback                              # lazy (astropy przez pisarza)
+    now = datetime.now(timezone.utc).isoformat()
+    con = db.open_db(args.db)
+    try:
+        krok = (writeback.commit_object_change if args.oc_cmd == "finish"
+                else writeback.undo_object_change)
+        try:
+            res = krok(con, args.run_id, now=now)
+        except ValueError as exc:
+            print(f"Horreum object-change {args.oc_cmd} {args.db} (przebieg {args.run_id}): "
+                  f"odmowa - {exc}")
+            return 2
+    finally:
+        con.close()
+    zrobione = "zmienione" if args.oc_cmd == "finish" else "cofniete"
+    lines = [f"Horreum object-change {args.oc_cmd} {args.db} (przebieg {args.run_id}): "
+             f"{zrobione} {len(res.applied)}, zablokowane {len(res.blocked)}, nieudane "
+             f"{len(res.failed)}, pominiete {len(res.skipped)}; katalogi zalozone "
+             f"{res.dirs_created}, usuniete {res.dirs_removed}"]
+    if res.dirs_uncertain:
+        lines.append(f"  katalogi o niepewnej wlasnosci (zostaja do oka): {res.dirs_uncertain}")
+    if res.cancelled:
+        lines.append("  przerwano - pozycje oczekujace dokonczy ponowne `finish`")
+    z_powodem = res.blocked + res.failed + [fr for fr in res.applied if fr.reason]
+    lines += [f"    {fr.status}: {fr.path} - {fr.reason}" for fr in z_powodem[:args.limit]]
+    if len(z_powodem) > args.limit:
+        lines.append(f"    ... i {len(z_powodem) - args.limit} wiecej")
+    lines += [f"  uwaga: {w}" for w in res.warnings]
+    print("\n".join(lines))
+    return 1 if (res.blocked or res.failed) else 0
 
 
 def _cmd_header_fix(args):

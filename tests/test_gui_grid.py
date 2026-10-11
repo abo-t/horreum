@@ -2930,14 +2930,17 @@ def _zaznacz(view, frame_ids):
                       QItemSelectionModel.Select | QItemSelectionModel.Rows)
 
 
-def test_pasek_ma_JEDNA_kontrolke_osi_z_trzema_pozycjami(obj_view):
+def test_pasek_ma_JEDNA_kontrolke_osi_z_czterema_pozycjami(obj_view):
     """§4/14c-j: pasek zyskuje JEDNĄ kontrolkę, nie osobne przyciski — siódmy i ósmy przewróciłyby
     go do drugiego rzędu. Etykiety z KLUCZA i18n, nie literałem.
 
     TRZECIA POZYCJA (R-S2b-3) jest WIDOCZNA ZAWSZE, także gdy nie ma czego przywracać — i to jest
     pin na tę decyzję, nie skutek uboczny. Ukrycie jej do czasu, aż pojawi się nagrobek, znaczyłoby,
     że o odwracalności gestu user dowiaduje się dopiero PO pomyłce, czyli w jedynym momencie,
-    w którym ta wiedza jest już spóźniona."""
+    w którym ta wiedza jest już spóźniona.
+
+    CZWARTA (AR-17 krok 3) stoi za kreską: „Zmień obiekt…" przenosi plik i pisze kartę, trzy
+    wyżej piszą wyłącznie bazę."""
     v, _ = obj_view
     assert v.sel_bar.btn_object.menu() is not None
     from horreum.gui import i18n
@@ -2946,7 +2949,7 @@ def test_pasek_ma_JEDNA_kontrolke_osi_z_trzema_pozycjami(obj_view):
     # `deleteLater` na QAction wywalał Qt (bramka pakietu, zarzut 8).
     assert [a.text() for a in v.sel_bar.btn_object.menu().actions() if a.isVisible()] == [
         i18n.t("grid.sel.object_name"), i18n.t("grid.sel.object_clear"),
-        i18n.t("grid.sel.object_restore")]
+        i18n.t("grid.sel.object_restore"), "", i18n.t("grid.sel.object_change")]
 
 
 def test_puste_zaznaczenie_GASI_obie_pozycje(obj_view):
@@ -4028,21 +4031,28 @@ def test_wygaszona_kontrolka_osi_TLUMACZY_SIE_powodem(obj_view):
     v._update_count()
     assert v.sel_bar.btn_object.toolTip() == i18n.t("grid.sel.object_tip_no_lights")
 
-    _zaznacz(v, [3])                                    # light z NAGŁÓWKA — poprawia się w pliku
+    # Light z NAGŁÓWKA z obecną kopią: od AR-17 krok 3 kontrolka ŻYJE dla „Zmień obiekt…" (gest
+    # poprawia nazwę w pliku), a powód milczenia trzech gestów bazy zostaje pierwszym zdaniem.
+    _zaznacz(v, [3])
     v._update_count()
-    assert v.sel_bar.btn_object.toolTip() == i18n.t("grid.sel.object_tip_header")
+    assert v.sel_bar.btn_object.isEnabled()
+    assert v.sel_bar.btn_object.toolTip() == (
+        i18n.t("grid.sel.object_tip_header") + "\n"
+        + i18n.t_plural("grid.sel.object_change_tip_only", 1))
 
-    _dodaj_stos(con, 12, src="header")                  # sam gotowy obraz z nazwą z pliku
+    _dodaj_stos(con, 12, src="header")                  # sam gotowy obraz z nazwą z pliku, bez kopii
     v.refresh()
     _zaznacz(v, [12])
     v._update_count()
+    assert not v.sel_bar.btn_object.isEnabled()
     assert v.sel_bar.btn_object.toolTip() == i18n.t("grid.sel.object_tip_stacks")
 
     _zaznacz(v, [1, 2])                                 # …a przy AKTYWNEJ mówi, ile gest ruszy
     v._update_count()
     assert v.sel_bar.btn_object.isEnabled()
-    assert v.sel_bar.btn_object.toolTip() == i18n.t("grid.sel.object_tip_ready",
-                                                    namable=2, clearable=2)
+    assert v.sel_bar.btn_object.toolTip() == (
+        i18n.t("grid.sel.object_tip_ready", namable=2, clearable=2)
+        + i18n.t("grid.sel.object_change_tip", n=2))
 
 
 def test_tooltip_AKTYWNEJ_kontrolki_liczy_gotowe_obrazy(obj_view):
@@ -4058,10 +4068,13 @@ def test_tooltip_AKTYWNEJ_kontrolki_liczy_gotowe_obrazy(obj_view):
     _dodaj_stos(con, 13, src="user")
     v.refresh()
 
+    # Człon „do zmiany obiektu z plikiem" (AR-17 krok 3) liczy klatki z obecną kopią - stos
+    # fikstury kopii nie ma, więc w obu zaznaczeniach jest ich 2.
     _zaznacz(v, [1, 2])                                 # same klatki nieba — człon MILCZY
     v._update_count()
-    assert v.sel_bar.btn_object.toolTip() == i18n.t("grid.sel.object_tip_ready",
-                                                    namable=2, clearable=2)
+    assert v.sel_bar.btn_object.toolTip() == (
+        i18n.t("grid.sel.object_tip_ready", namable=2, clearable=2)
+        + i18n.t("grid.sel.object_change_tip", n=2))
 
     _zaznacz(v, [1, 2, 13])                             # …a przy stosie w zaznaczeniu MÓWI
     v._update_count()
@@ -4069,6 +4082,7 @@ def test_tooltip_AKTYWNEJ_kontrolki_liczy_gotowe_obrazy(obj_view):
     assert stan["stacks"] == 1
     assert v.sel_bar.btn_object.toolTip() == (
         i18n.t("grid.sel.object_tip_ready", namable=stan["namable"], clearable=stan["clearable"])
+        + i18n.t("grid.sel.object_change_tip", n=2)
         + i18n.t_plural("grid.sel.object_stacks", 1))
 
 
@@ -4094,8 +4108,9 @@ def test_tooltip_liczy_stosy_TYKALNE_a_nie_wszystkie(obj_view):
     v._update_count()
     stan = queries.selection_object_state(con, [1, 2, 14])
     assert (stan["stacks"], stan["stacks_touchable"]) == (1, 0),         "read-model musi rozróżniać, ile stosów JEST, od tego, ile gest RUSZY"
-    assert v.sel_bar.btn_object.toolTip() == i18n.t(
-        "grid.sel.object_tip_ready", namable=stan["namable"], clearable=stan["clearable"]),         "tooltip policzył stos, którego gest nie tknie"
+    assert v.sel_bar.btn_object.toolTip() == (
+        i18n.t("grid.sel.object_tip_ready", namable=stan["namable"], clearable=stan["clearable"])
+        + i18n.t("grid.sel.object_change_tip", n=2)),         "tooltip policzył stos, którego gest nie tknie"
 
 
 def test_faza_zajetosci_gridu_NIE_zjada_zdania_koncowego(obj_view):
@@ -4343,7 +4358,7 @@ def test_skrot_ostatnio_uzytych_niesie_KOMPLET_pol(qapp):
     Falsyfikator: zawęź sygnał do samego kanonu → asercja o krotce czerwienieje."""
     from horreum.gui.grid import SelectionBar
     bar = SelectionBar()
-    bar.set_object_actions(namable=3, clearable=0)
+    bar.set_object_actions(namable=3, clearable=0, changeable=0)
     bar.set_recent_objects([{"canon": "NGC6960", "catalog": "NGC", "kind": "deep_sky"},
                             {"canon": "LMC", "catalog": None, "kind": "own"}])
     zlapane = []
@@ -4359,7 +4374,7 @@ def test_skrot_gasnie_razem_z_akcja_ktora_skraca(qapp):
     """Skrót nie może omijać bramki, którą stoi „Przypisz obiekt…" — puste zaznaczenie gasi oba."""
     from horreum.gui.grid import SelectionBar
     bar = SelectionBar()
-    bar.set_object_actions(namable=0, clearable=0)          # nie ma czego nazwać
+    bar.set_object_actions(namable=0, clearable=0, changeable=0)   # nie ma czego nazwać
     bar.set_recent_objects([{"canon": "NGC6960", "catalog": "NGC", "kind": "deep_sky"}])
     pozycje = _pozycje_skrotu(bar)
     assert pozycje and not any(a.isEnabled() for a in pozycje)
@@ -4370,7 +4385,7 @@ def test_lista_skrotu_przebudowuje_sie_a_nie_ROSNIE(qapp):
     """Pozycje powstają na nowo przy każdym pokazaniu menu — inaczej doklejałyby się w nieskończoność."""
     from horreum.gui.grid import SelectionBar
     bar = SelectionBar()
-    bar.set_object_actions(namable=3, clearable=0)
+    bar.set_object_actions(namable=3, clearable=0, changeable=0)
     for _ in range(3):
         bar.set_recent_objects([{"canon": "NGC6960", "catalog": "NGC", "kind": "deep_sky"}])
     assert len(_pozycje_skrotu(bar)) == 1
@@ -4378,7 +4393,8 @@ def test_lista_skrotu_przebudowuje_sie_a_nie_ROSNIE(qapp):
     assert not _pozycje_skrotu(bar)
     # …i ŻADNA akcja nie przybyła: pula jest stała, bo `deleteLater` na QAction wywalał Qt
     # (bramka pakietu, zarzut 8 - lekarstwo gorsze od choroby, zmierzone na pełnej baterii).
-    assert len(bar.btn_object.menu().actions()) == 3 + 1 + bar._RECENT_MAX
+    # 3 gesty bazy + kreska i „Zmień obiekt…" (AR-17 krok 3) + kreska skrótu + pula skrótu
+    assert len(bar.btn_object.menu().actions()) == 3 + 2 + 1 + bar._RECENT_MAX
     bar.close()
 
 

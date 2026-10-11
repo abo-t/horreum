@@ -343,6 +343,12 @@ PRESET_TORN_WRITE = "Plik po przerwanym zapisie"
 # osobna perspektywa obok przerwanego zapisu. Predykat `queries.pending_finish_frame_ids`. Stała
 # współdzielona z TasksView po nazwie.
 PRESET_PENDING_FINISH = "Zapis czeka na dokończenie"
+# PRESET_FILE_OBJECT_MISMATCH - czternasty bliźniak (AR-17 krok 3). Klatka ma obiekt, a jej plik
+# leży w folderze innego obiektu albo karta `OBJECT` mówi inną formą (E5-1: folderami zarządza
+# Horreum). Robotą jest gest „Uzgodnij pliki…" (menu prawego kliku w tej perspektywie) - plik
+# dogania obiekt, który klatka już ma. Predykat `queries.file_object_mismatch_frame_ids`, ten sam
+# co liczba wiersza Porządków. Stała współdzielona z TasksView po nazwie.
+PRESET_FILE_OBJECT_MISMATCH = "Plik nie zgadza się z obiektem"
 # PRESET_READY_IMAGES - gotowe obrazy pogrupowane po stanie rodowodu. Bez flagi `only_*`: zbiór
 # niesie ISTNIEJĄCY facet Rodzaj (`master_light`), więc listwa pokazuje go jako wybór, a facet
 # „Rodowód" obok zawęża dalej jednym klikiem. Grupowanie po kolumnie „Rodowód" stawia stosy bez
@@ -375,6 +381,8 @@ PRESETS = {
                                   "only_path_header_conflict": True},
     PRESET_TORN_WRITE: {"filter": None, "group_by": None, "only_torn_write": True},
     PRESET_PENDING_FINISH: {"filter": None, "group_by": None, "only_pending_finish": True},
+    PRESET_FILE_OBJECT_MISMATCH: {"filter": None, "group_by": None,
+                                  "only_file_object_mismatch": True},
     "Do przeglądu": {"filter": None, "group_by": None, "only_review": True},
 }
 # Etykieta WYŚWIETLANIA presetu (tekst) osobno od TOŻSAMOŚCI (klucz PRESETS w `itemData` — używany przez
@@ -396,6 +404,7 @@ _PRESET_LABELS = {
     PRESET_PATH_HEADER_CONFLICT: "perspective.path_header_conflict",
     PRESET_TORN_WRITE: "perspective.torn_write",
     PRESET_PENDING_FINISH: "perspective.pending_finish",
+    PRESET_FILE_OBJECT_MISMATCH: "perspective.file_object_mismatch",
     "Do przeglądu": "perspective.to_review",
 }
 # PERSPEKTYWA BEZ ZAWĘŻENIA - jedyny preset, który nie niesie ani filtra, ani flagi `only_*`
@@ -439,6 +448,7 @@ _TRIMY = (
     ("_only_path_header_conflict", "path_header_conflict_frame_ids"),
     ("_only_torn_write", "torn_write_frame_ids"),
     ("_only_pending_finish", "pending_finish_frame_ids"),
+    ("_only_file_object_mismatch", "file_object_mismatch_frame_ids"),
 )
 
 # FLAGA, OD KTÓREJ ZALEŻY ZACHOWANIE WIDOKU, NIE TYLKO ZBIÓR: w perspektywie „Wersje stosów" model
@@ -450,6 +460,9 @@ _FLAGA_WERSJI = "_only_stack_versions"
 # Perspektywa „Zastąpione" dokłada do menu tabeli gest przeniesienia faktów ręki (AR-41) - ta sama
 # figura co wyżej: jedno odwołanie do jednej flagi rodziny, pod stałą.
 _FLAGA_ZASTAPIONYCH = "_only_superseded"
+# Perspektywa „Plik nie zgadza się z obiektem" dokłada do menu tabeli gest „Uzgodnij pliki…"
+# (AR-17 krok 3) i przy wejściu podaje jego receptę - ta sama figura: jedna flaga, pod stałą.
+_FLAGA_ZGODNOSCI_PLIKU = "_only_file_object_mismatch"
 # Te same zasady dla dwóch perspektyw izolacji zapisu w miejscu: w nich menu tabeli pokazuje drogi
 # wyjścia z izolacji także nad pustym zaznaczeniem (wygaszone z powodem), a wejście w perspektywę
 # podaje receptę gestu (`_RECEPTY_ZAPISU`). Klucz = flaga z `_TRIMY`.

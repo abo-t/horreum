@@ -72,6 +72,7 @@ from astropy.io import fits
 
 from . import exif, hashing, repo, scan
 from .card_rules import FITS_RECORD as _FITS_RECORD
+from .resolve.paths import path_key   # ścieżka FIZYCZNA (bez wielkości liter) - jak planer i straż
 from .card_rules import FITS_STRING_MAX, card_violation  # noqa: F401 - re-eksport („REGUŁY KARTY")
 
 # ============================================================ WRITER (port dawcy fits_io)
@@ -2524,7 +2525,6 @@ def commit(con, run_id, *, now, clock=None,
     `unreplaced_at`; inny → nierozstrzygnięte, też `unreplaced_at` (backup bez dowodu wykonania nie
     cofa). Potwierdzone z dysku zostają wyłącznie wpisy stagingu tej próby (`pending_rows`). Dopiero
     wtedy zapis."""
-    clock = clock or (lambda: now)
     pending = [r for r in pending_for_run(con, run_id) if r["status"] == "pending"]
     groups = _group_by_location(pending)
     total = len(groups)
@@ -2534,11 +2534,8 @@ def commit(con, run_id, *, now, clock=None,
     failed: list[FileResult] = []
     skipped: list[FileResult] = []
     in_place: list[FileResult] = []
-    commit_id: int | None = None
-    # Czy choć jeden plik został naprawdę ruszony (`backup_text` w wyniku pisarza). Wiersz commitu
-    # powstaje z backupem PRZED podmianą, więc sam `commit_id` tego nie mówi: podmiana odbita
-    # strażą albo awaria po backupie zostawiają commit z backupem, który niczego nie zmienił.
-    podmieniono = False
+    kubly = {"applied": applied, "blocked": blocked, "failed": failed, "skipped": skipped}
+    stan = _StanCommitu(run_id, clock or (lambda: now))
     cancelled = False
     done = 0
 
@@ -2548,223 +2545,235 @@ def commit(con, run_id, *, now, clock=None,
         if progress is not None:
             progress(done, total, path, status)
 
-    def _mark(rows, status, reason):
-        for r in rows:
-            repo.set_pending_status(con, pending_id=r["id"], status=status, reason=reason)
-
     for location_id, rows in groups:
         if should_cancel is not None and should_cancel():
             cancelled = True
             break
-        loc = _location(con, location_id)
-        if loc is None:
-            _mark(rows, "failed", "brak location w bazie")
-            failed.append(FileResult(location_id, "", "failed", "brak location w bazie"))
-            _report("", "failed")
-            continue
-        path = loc["path"]
-        if not loc["present"]:
-            reason = "kopia zniknęła (present=0)"
-            _mark(rows, "skipped", reason)
-            skipped.append(FileResult(location_id, path, "skipped", reason))
-            _report(path, "skipped")
-            continue
-        if loc["compressed"]:
-            reason = "skompresowany master — edycja poza krokiem 4"
-            _mark(rows, "skipped", reason)
-            skipped.append(FileResult(location_id, path, "skipped", reason))
-            _report(path, "skipped")
-            continue
-        # BRAMKA BACKUPU NIEPOTWIERDZONEGO (AR-40): przerwany commit drogi atomowej tej lokacji
-        # (dowolnego przebiegu) najpierw rozstrzyga dysk - inaczej ponowiony zapis tej samej zmiany
-        # dałby backup nierozróżnialny od tamtego, a cofnięcie starego commitu cofnęłoby nowy.
-        zalegle = repo.pending_header_backups(con, location_id)
-        if zalegle:
-            reason = _rekoncyliuj_backupy(con, zalegle, loc, now=now)
-            if reason is not None:
-                _mark(rows, "blocked", reason)
-                blocked.append(FileResult(location_id, path, "blocked", reason))
-                _report(path, "blocked")
-                continue
-            loc = _location(con, location_id)
-            stan = {r["id"]: r["status"] for r in pending_for_run(con, run_id)}
-            rows = [r for r in rows if stan.get(r["id"]) == "pending"]
-            if not rows:                    # przerwany commit TEGO przebiegu potwierdził dysk
-                reason = ("zapis potwierdzony z dysku po przerwanym commicie "
-                          f"{', '.join(str(z['commit_id']) for z in zalegle)} - nic do zapisania")
-                applied.append(FileResult(location_id, path, "applied", reason))
-                _report(path, "applied")
-                continue
-        # Generacja dziennika PRZED bramką: straż podmiany drogi atomowej odbije operację zaczętą
-        # po tej chwili (plik tymczasowy powstanie ze stanu sprzed niej).
-        gen = repo.inplace_generation(con)
-        izolujaca = repo.isolating_inplace_op(con, location_id)
-        if izolujaca is not None:           # obie drogi: plik po nieukończonym zapisie w miejscu
-            reason = _powod_izolacji(izolujaca)
-            _mark(rows, "blocked", reason)
-            blocked.append(FileResult(location_id, path, "blocked", reason))
-            _report(path, "blocked")
-            continue
-
-        ops = [WriteOp(keyword=r["keyword"], op=r["op"], value=r["new_value"],
-                       value_type=r["new_type"], idx=r["idx"], comment=r["new_comment"])
-               for r in rows]
-        expected = rows[0]["expected_header_hash"]  # kotwica stagingu (R#7)
-
-        backup_pliku: list[int] = []      # id backupu drogi atomowej utrwalonego dla TEGO pliku
-
-        def _persist(backup_text, post_hash, _lid=location_id, _hdu=loc["hdu_index"],
-                     _ids=backup_pliku, _proba=tuple(rows)):
-            # Backup PRZED podmianą (droga atomowa): commit powstaje przy pierwszym pliku, który
-            # naprawdę ma być ruszony.
-            nonlocal commit_id
-            if commit_id is None:
-                commit_id = repo.insert_commit(con, run_id=run_id, now=clock(),
-                                               summary=f"run {run_id}")
-            # NIEPOTWIERDZONY do podmiany (AR-40): potwierdza go `_potwierdz` w transakcji straży;
-            # niesie wpisy stagingu tej próby - rekoncyliacja potwierdzi wyłącznie je (A5).
-            _ids.append(repo.insert_header_backup(con, commit_id=commit_id, location_id=_lid,
-                                                  hdu_index=_hdu, header_text=backup_text,
-                                                  post_hash=post_hash, pending_since=now,
-                                                  pending_rows=_proba))
-
-        def _potwierdz(_ids=backup_pliku):
-            repo.confirm_backup_replaced(con, backup_id=_ids[0])
-
-        class _Dziennik:
-            """Dziennik commitu w miejscu: backup + commit + operacja + wiązanie wpisów stagingu
-            jedną transakcją."""
-            op_id = None
-
-            def begin(self, spec, backup_text, _lid=location_id, _hdu=loc["hdu_index"],
-                      _ids=tuple(r["id"] for r in rows)):
-                nonlocal commit_id
-                commit_id, self.op_id = repo.begin_inplace_commit(
-                    con, run_id=run_id, commit_id=commit_id, location_id=_lid, hdu_index=_hdu,
-                    header_text=backup_text, spec=spec, now=clock(), pending_ids=_ids)
-
-            def phase(self, faza, reason=None):
-                repo.set_inplace_op_phase(con, op_id=self.op_id, phase=faza, now=now,
-                                          reason=reason, expect_phase="writing")
-
-        def _straz(_lid=location_id, _gen=gen):
-            return repo.guard_file_replace(con, location_id=_lid, generation=_gen)
-
-        droga = None                                 # powód drogi atomowej w trybie `inplace`
-        res = None
-        dziennik = _Dziennik()
-        if inplace:
-            res = write_changes_inplace(
-                path, ops, expected, journal=dziennik,
-                anchor=FileAnchor(loc["file_sha1"], loc["mtime"], strict=not fallback))
-            if isinstance(res, Fallback):
-                if not fallback:
-                    res = WriteResult("blocked", f"nie mieści się w miejscu (tryb bez spadku): "
-                                                 f"{res.reason}", None)
-                else:
-                    droga = f"droga dotychczasowa: {res.reason}"
-                    res = None
-        if res is None:
-            res = write_changes(path, ops, expected, persist_backup=_persist,
-                                replace_guard=_straz, confirm_backup=_potwierdz)  # podmiana pod strażą
-
-        if res.backup_text is None:       # zapisu nie było: odmowa albo awaria przed plikiem
-            status = "blocked" if res.status == "blocked" else "failed"
-            reason = res.reason
-            if backup_pliku and status == "blocked":
-                # Backup leży, a 'blocked' po nim daje WYŁĄCZNIE odmowa straży podmiany albo
-                # rewalidacja po wyparciu, która oddała plik innemu pisarzowi (bramki pisarza stoją
-                # przed backupem): pod ścieżką nie ma naszej wersji - cofnięcie go pominie.
-                repo.mark_backup_unreplaced(con, backup_id=backup_pliku[0], now=now)
-            elif backup_pliku:
-                # 'failed' po backupie = wyjątek przy samej podmianie: na zerwanym udziale podmiana
-                # mogła zajść mimo błędu. Backup zostaje NIEPOTWIERDZONY (AR-40) - następny commit
-                # albo cofnięcie tej lokacji najpierw rozstrzyga go z dyskiem.
-                reason = (f"{res.reason}; podmiana niepotwierdzona, backup do cofnięcia zapisany "
-                          f"w commicie {commit_id}")
-            _mark(rows, status, reason)
-            (blocked if status == "blocked" else failed).append(
-                FileResult(location_id, path, status, reason))
-            _report(path, status)
-            continue
-        podmieniono = True
-        if res.status != "applied":
-            # Backup JEST (powstał przed zapisem), więc undo cofnie plik, o ile leży na nim to, co
-            # zapisaliśmy (`post_hash`); plik rozdarty w miejscu naprawia `recover_torn`. Re-syncu
-            # NIE robimy - baza opisuje bajty POTWIERDZONE. Nagrobek ręki też zostaje.
-            naprawa = (f"; lokacja IZOLOWANA od skanu, odzysk: "
-                       f"{_droga(_GEST_PRZYWROC, f'recover_torn({dziennik.op_id})')}"
-                       if res.in_place else "")
-            reason = (f"{res.reason}; backup do cofnięcia zapisany w commicie {commit_id}"
-                      f"{naprawa}")
-            _mark(rows, "failed", reason)
-            failed.append(FileResult(location_id, path, "failed", reason))
-            _report(path, "failed")
-            continue
-        if res.in_place:
-            # PLIK→DB pod blokadą: region == wynik, kontrola danych (bajty poza nagłówkiem), re-sync
-            # i JEDNA transakcja zamknięcia (`synced` + wpisy 'applied' + nagrobek). Porażka zostawia
-            # lokację IZOLOWANĄ w fazie `written` (skan jej nie ruszy, a nie „naprawi ponownym
-            # re-skanem") - drogę dalej (`finish_inplace` / `recover_torn`) niesie powód.
-            koniec = _dokoncz(con, dziennik.op_id, now=now)
-            if koniec.status != "applied":
-                # Zwolnienie ręką = gest okna albo rdzeń pod blokadą pliku (`release_isolation`),
-                # nie klinga bazy. Powód z receptą `_RECZNA` już ją niesie - drugi raz nie.
-                droga_dalej = ("" if koniec.status == "failed" or "recover_torn" in koniec.reason
-                               or _RECZNA in koniec.reason
-                               else ", zwolnienie ręką: w Zbiorach z menu prawego kliku "
-                                    "„Zwolnij plik do skanu…” albo "
-                                    f"writeback.release_isolation({dziennik.op_id})")
-                reason = (f"{koniec.reason}; backup do cofnięcia zapisany w commicie {commit_id}; "
-                          f"lokacja IZOLOWANA od skanu{droga_dalej}")
-                _mark(rows, "failed", reason)
-                failed.append(FileResult(location_id, path, "failed", reason))
-                _report(path, "failed")
-                continue
-            # Wpisy stagingu i nagrobek zamknęło dokończenie, atomowo z fazą.
-            wynik = FileResult(location_id, path, "applied", droga)
-            applied.append(wynik)
-            in_place.append(wynik)
-            _report(path, "applied")
-            continue
-        # NAGROBEK RĘKI GAŚNIE TU, a nie w ścieżce skanu (S2b, §4/14b-c). Klatka cofnięta ma
-        # `object_source='user_cleared'` i drabina ją POMIJA - bez tego gestu zostałaby poza osią na
-        # zawsze, nawet po dopisaniu karty. Wyzwalaczem jest WPISANIE `OBJECT` do TEGO pliku, nie
-        # samo odświeżenie zeznania: każdy skan odświeża zeznanie i gasiłby werdykt, którego nikt
-        # nie odwołał. Droga w miejscu gasi go tą samą klingą w transakcji dokończenia
-        # (`repo.finish_inplace_op`); commit 'failed', którego bajty potwierdzi późniejszy skan,
-        # dokańcza `repo.confirm_failed_commit_by_scan`.
-        # Zgaszenie niesie commit i plik (AR-38) - cofnięcie TEGO commitu odtworzy nagrobek.
-        # Wciągnięcie rekordu, zgaszenie i wpisy 'applied' idą JEDNĄ transakcją (AR-38 (2)):
-        # awaria między nimi zostawiała kartę w bazie przy żywym nagrobku i wpisach 'pending'.
-        def _zamknij(_rows=rows, _lid=location_id, _fid=loc["frame_id"],
-                     _obj=any(op.keyword == "OBJECT" for op in ops)):
-            if _obj:
-                repo.clear_object_tombstone(con, frame_id=_fid, now=now,
-                                            commit_id=commit_id, location_id=_lid)
-            _mark(_rows, "applied", None)
-
-        try:                              # droga atomowa: PLIK→DB (T8); pełny odczyt pliku
-            niezgodne = _resync(con, path, loc["volume"], now=now,
-                                expect_sha1_data=loc["sha1_data"], w_transakcji=_zamknij)
-        except Exception as exc:  # noqa: BLE001 - plik zapisany, pętla idzie dalej
-            # Wsad to tysiące pełnych odczytów po SMB - jedna czkawka udziału nie może zatrzymać
-            # przebiegu z plikiem zapisanym, a bez statusu. Bazę drogi atomowej naprawi ponowny
-            # re-skan (T8) - ta droga lokacji nie izoluje.
-            niezgodne = f"plik ZMIENIONY, ale re-sync padł - {type(exc).__name__}: {exc}"
-        if niezgodne is not None:
-            reason = f"{niezgodne}; backup do cofnięcia zapisany w commicie {commit_id}"
-            _mark(rows, "failed", reason)
-            failed.append(FileResult(location_id, path, "failed", reason))
-            _report(path, "failed")
-            continue
-        applied.append(FileResult(location_id, path, "applied", _dopisz(droga, res.reason)))
-        _report(path, "applied")
+        zapis = _zapisz_lokacje(con, stan, location_id, rows, now=now, inplace=inplace,
+                                fallback=fallback)
+        kubly[zapis.wynik.status].append(zapis.wynik)
+        if zapis.w_miejscu:
+            in_place.append(zapis.wynik)
+        _report(zapis.wynik.path, zapis.wynik.status)
 
     # `commit_id` wyłącznie przy pliku podmienionym (kontrakt `CommitResult.commit_id`): commit bez
     # podmiany nie ma czego cofać, a jego wiersz z backupem zostaje w bazie (append-only).
-    return CommitResult(run_id, commit_id if podmieniono else None, applied, blocked, failed,
-                        skipped, cancelled, in_place)
+    return CommitResult(run_id, stan.commit_id if stan.podmieniono else None, applied, blocked,
+                        failed, skipped, cancelled, in_place)
+
+
+@dataclasses.dataclass
+class _StanCommitu:
+    """Stan przebiegu zapisu kart dzielony przez jego pliki (`commit`, sterownik zmiany obiektu):
+    wiersz `commits` powstaje przy PIERWSZYM pliku, który naprawdę ma być ruszony, i obejmuje
+    kolejne. `podmieniono` - czy choć jeden plik został naprawdę ruszony (`backup_text` w wyniku
+    pisarza): wiersz commitu powstaje z backupem PRZED podmianą, więc sam `commit_id` tego nie mówi -
+    podmiana odbita strażą albo awaria po backupie zostawiają commit z backupem, który niczego nie
+    zmienił. `clock` = źródło `applied_at` commitu."""
+    run_id: str
+    clock: Callable[[], str]
+    commit_id: int | None = None
+    podmieniono: bool = False
+
+
+@dataclasses.dataclass(frozen=True)
+class _ZapisLokacji:
+    """Wynik zapisu kart JEDNEJ lokacji. `w_miejscu` - 'applied' zapisany w miejscu
+    (`CommitResult.in_place`). `dotknieto` - bajty pliku MOGŁY się zmienić: zapis zaszedł (także
+    częściowo albo bez re-syncu) albo podmiana rzuciła po backupie i jest niepotwierdzona. Fałsz =
+    plik na pewno nietknięty (odmowa bramki albo pisarza przed pierwszym bajtem) - sterownik zmiany
+    obiektu wolno wtedy cofnąć przeniesienie tej pary („razem albo wcale”)."""
+    wynik: FileResult
+    w_miejscu: bool = False
+    dotknieto: bool = False
+
+
+def _zapisz_lokacje(con, stan, location_id, rows, *, now, inplace, fallback) -> _ZapisLokacji:
+    """CIAŁO `commit` DLA JEDNEJ LOKACJI - JEDEN pisarz karty dla `commit` i sterownika zmiany
+    obiektu (`commit_object_change`, para przeniesienie → karta). `rows` = oczekujące wpisy stagingu
+    tej lokacji, `stan` = stan przebiegu (`_StanCommitu`: commit i podmiana). Zachowanie, bramki
+    i statusy wpisów - opis `commit`; wynik niesie dodatkowo, czy plik mógł zostać ruszony."""
+    def _mark(rows, status, reason):
+        for r in rows:
+            repo.set_pending_status(con, pending_id=r["id"], status=status, reason=reason)
+
+    loc = _location(con, location_id)
+    if loc is None:
+        _mark(rows, "failed", "brak location w bazie")
+        return _ZapisLokacji(FileResult(location_id, "", "failed", "brak location w bazie"))
+    path = loc["path"]
+    if not loc["present"]:
+        reason = "kopia zniknęła (present=0)"
+        _mark(rows, "skipped", reason)
+        return _ZapisLokacji(FileResult(location_id, path, "skipped", reason))
+    if loc["compressed"]:
+        reason = "skompresowany master - edycja poza krokiem 4"
+        _mark(rows, "skipped", reason)
+        return _ZapisLokacji(FileResult(location_id, path, "skipped", reason))
+    # BRAMKA BACKUPU NIEPOTWIERDZONEGO (AR-40): przerwany commit drogi atomowej tej lokacji
+    # (dowolnego przebiegu) najpierw rozstrzyga dysk - inaczej ponowiony zapis tej samej zmiany
+    # dałby backup nierozróżnialny od tamtego, a cofnięcie starego commitu cofnęłoby nowy.
+    zalegle = repo.pending_header_backups(con, location_id)
+    if zalegle:
+        reason = _rekoncyliuj_backupy(con, zalegle, loc, now=now)
+        if reason is not None:
+            _mark(rows, "blocked", reason)
+            return _ZapisLokacji(FileResult(location_id, path, "blocked", reason))
+        loc = _location(con, location_id)
+        statusy = {r["id"]: r["status"] for r in pending_for_run(con, stan.run_id)}
+        rows = [r for r in rows if statusy.get(r["id"]) == "pending"]
+        if not rows:                    # przerwany commit TEGO przebiegu potwierdził dysk
+            reason = ("zapis potwierdzony z dysku po przerwanym commicie "
+                      f"{', '.join(str(z['commit_id']) for z in zalegle)} - nic do zapisania")
+            return _ZapisLokacji(FileResult(location_id, path, "applied", reason), dotknieto=True)
+    # Generacja dziennika PRZED bramką: straż podmiany drogi atomowej odbije operację zaczętą
+    # po tej chwili (plik tymczasowy powstanie ze stanu sprzed niej).
+    gen = repo.inplace_generation(con)
+    izolujaca = repo.isolating_inplace_op(con, location_id)
+    if izolujaca is not None:           # obie drogi: plik po nieukończonym zapisie w miejscu
+        reason = _powod_izolacji(izolujaca)
+        _mark(rows, "blocked", reason)
+        return _ZapisLokacji(FileResult(location_id, path, "blocked", reason))
+
+    ops = [WriteOp(keyword=r["keyword"], op=r["op"], value=r["new_value"],
+                   value_type=r["new_type"], idx=r["idx"], comment=r["new_comment"])
+           for r in rows]
+    expected = rows[0]["expected_header_hash"]  # kotwica stagingu (R#7)
+
+    backup_pliku: list[int] = []      # id backupu drogi atomowej utrwalonego dla TEGO pliku
+
+    def _persist(backup_text, post_hash):
+        # Backup PRZED podmianą (droga atomowa): commit powstaje przy pierwszym pliku, który
+        # naprawdę ma być ruszony.
+        if stan.commit_id is None:
+            stan.commit_id = repo.insert_commit(con, run_id=stan.run_id, now=stan.clock(),
+                                                summary=f"run {stan.run_id}")
+        # NIEPOTWIERDZONY do podmiany (AR-40): potwierdza go `_potwierdz` w transakcji straży;
+        # niesie wpisy stagingu tej próby - rekoncyliacja potwierdzi wyłącznie je (A5).
+        backup_pliku.append(repo.insert_header_backup(
+            con, commit_id=stan.commit_id, location_id=location_id, hdu_index=loc["hdu_index"],
+            header_text=backup_text, post_hash=post_hash, pending_since=now,
+            pending_rows=tuple(rows)))
+
+    def _potwierdz():
+        repo.confirm_backup_replaced(con, backup_id=backup_pliku[0])
+
+    class _Dziennik:
+        """Dziennik commitu w miejscu: backup + commit + operacja + wiązanie wpisów stagingu
+        jedną transakcją."""
+        op_id = None
+
+        def begin(self, spec, backup_text):
+            stan.commit_id, self.op_id = repo.begin_inplace_commit(
+                con, run_id=stan.run_id, commit_id=stan.commit_id, location_id=location_id,
+                hdu_index=loc["hdu_index"], header_text=backup_text, spec=spec, now=stan.clock(),
+                pending_ids=tuple(r["id"] for r in rows))
+
+        def phase(self, faza, reason=None):
+            repo.set_inplace_op_phase(con, op_id=self.op_id, phase=faza, now=now,
+                                      reason=reason, expect_phase="writing")
+
+    def _straz():
+        return repo.guard_file_replace(con, location_id=location_id, generation=gen)
+
+    droga = None                                 # powód drogi atomowej w trybie `inplace`
+    res = None
+    dziennik = _Dziennik()
+    if inplace:
+        res = write_changes_inplace(
+            path, ops, expected, journal=dziennik,
+            anchor=FileAnchor(loc["file_sha1"], loc["mtime"], strict=not fallback))
+        if isinstance(res, Fallback):
+            if not fallback:
+                res = WriteResult("blocked", f"nie mieści się w miejscu (tryb bez spadku): "
+                                             f"{res.reason}", None)
+            else:
+                droga = f"droga dotychczasowa: {res.reason}"
+                res = None
+    if res is None:
+        res = write_changes(path, ops, expected, persist_backup=_persist,
+                            replace_guard=_straz, confirm_backup=_potwierdz)  # podmiana pod strażą
+
+    if res.backup_text is None:       # zapisu nie było: odmowa albo awaria przed plikiem
+        status = "blocked" if res.status == "blocked" else "failed"
+        reason = res.reason
+        if backup_pliku and status == "blocked":
+            # Backup leży, a 'blocked' po nim daje WYŁĄCZNIE odmowa straży podmiany albo
+            # rewalidacja po wyparciu, która oddała plik innemu pisarzowi (bramki pisarza stoją
+            # przed backupem): pod ścieżką nie ma naszej wersji - cofnięcie go pominie.
+            repo.mark_backup_unreplaced(con, backup_id=backup_pliku[0], now=now)
+        elif backup_pliku:
+            # 'failed' po backupie = wyjątek przy samej podmianie: na zerwanym udziale podmiana
+            # mogła zajść mimo błędu. Backup zostaje NIEPOTWIERDZONY (AR-40) - następny commit
+            # albo cofnięcie tej lokacji najpierw rozstrzyga go z dyskiem.
+            reason = (f"{res.reason}; podmiana niepotwierdzona, backup do cofnięcia zapisany "
+                      f"w commicie {stan.commit_id}")
+        _mark(rows, status, reason)
+        return _ZapisLokacji(FileResult(location_id, path, status, reason),
+                             dotknieto=bool(backup_pliku) and status == "failed")
+    stan.podmieniono = True
+    if res.status != "applied":
+        # Backup JEST (powstał przed zapisem), więc undo cofnie plik, o ile leży na nim to, co
+        # zapisaliśmy (`post_hash`); plik rozdarty w miejscu naprawia `recover_torn`. Re-syncu
+        # NIE robimy - baza opisuje bajty POTWIERDZONE. Nagrobek ręki też zostaje.
+        naprawa = (f"; lokacja IZOLOWANA od skanu, odzysk: "
+                   f"{_droga(_GEST_PRZYWROC, f'recover_torn({dziennik.op_id})')}"
+                   if res.in_place else "")
+        reason = (f"{res.reason}; backup do cofnięcia zapisany w commicie {stan.commit_id}"
+                  f"{naprawa}")
+        _mark(rows, "failed", reason)
+        return _ZapisLokacji(FileResult(location_id, path, "failed", reason), dotknieto=True)
+    if res.in_place:
+        # PLIK→DB pod blokadą: region == wynik, kontrola danych (bajty poza nagłówkiem), re-sync
+        # i JEDNA transakcja zamknięcia (`synced` + wpisy 'applied' + nagrobek). Porażka zostawia
+        # lokację IZOLOWANĄ w fazie `written` (skan jej nie ruszy, a nie „naprawi ponownym
+        # re-skanem") - drogę dalej (`finish_inplace` / `recover_torn`) niesie powód.
+        koniec = _dokoncz(con, dziennik.op_id, now=now)
+        if koniec.status != "applied":
+            # Zwolnienie ręką = gest okna albo rdzeń pod blokadą pliku (`release_isolation`),
+            # nie klinga bazy. Powód z receptą `_RECZNA` już ją niesie - drugi raz nie.
+            droga_dalej = ("" if koniec.status == "failed" or "recover_torn" in koniec.reason
+                           or _RECZNA in koniec.reason
+                           else ", zwolnienie ręką: w Zbiorach z menu prawego kliku "
+                                "„Zwolnij plik do skanu…” albo "
+                                f"writeback.release_isolation({dziennik.op_id})")
+            reason = (f"{koniec.reason}; backup do cofnięcia zapisany w commicie "
+                      f"{stan.commit_id}; lokacja IZOLOWANA od skanu{droga_dalej}")
+            _mark(rows, "failed", reason)
+            return _ZapisLokacji(FileResult(location_id, path, "failed", reason), dotknieto=True)
+        # Wpisy stagingu i nagrobek zamknęło dokończenie, atomowo z fazą.
+        return _ZapisLokacji(FileResult(location_id, path, "applied", droga), w_miejscu=True,
+                             dotknieto=True)
+    # NAGROBEK RĘKI GAŚNIE TU, a nie w ścieżce skanu (S2b, §4/14b-c). Klatka cofnięta ma
+    # `object_source='user_cleared'` i drabina ją POMIJA - bez tego gestu zostałaby poza osią na
+    # zawsze, nawet po dopisaniu karty. Wyzwalaczem jest WPISANIE `OBJECT` do TEGO pliku, nie
+    # samo odświeżenie zeznania: każdy skan odświeża zeznanie i gasiłby werdykt, którego nikt
+    # nie odwołał. Droga w miejscu gasi go tą samą klingą w transakcji dokończenia
+    # (`repo.finish_inplace_op`); commit 'failed', którego bajty potwierdzi późniejszy skan,
+    # dokańcza `repo.confirm_failed_commit_by_scan`.
+    # Zgaszenie niesie commit i plik (AR-38) - cofnięcie TEGO commitu odtworzy nagrobek.
+    # Wciągnięcie rekordu, zgaszenie i wpisy 'applied' idą JEDNĄ transakcją (AR-38 (2)):
+    # awaria między nimi zostawiała kartę w bazie przy żywym nagrobku i wpisach 'pending'.
+    def _zamknij():
+        if any(op.keyword == "OBJECT" for op in ops):
+            repo.clear_object_tombstone(con, frame_id=loc["frame_id"], now=now,
+                                        commit_id=stan.commit_id, location_id=location_id)
+        _mark(rows, "applied", None)
+
+    try:                              # droga atomowa: PLIK→DB (T8); pełny odczyt pliku
+        niezgodne = _resync(con, path, loc["volume"], now=now,
+                            expect_sha1_data=loc["sha1_data"], w_transakcji=_zamknij)
+    except Exception as exc:  # noqa: BLE001 - plik zapisany, pętla idzie dalej
+        # Wsad to tysiące pełnych odczytów po SMB - jedna czkawka udziału nie może zatrzymać
+        # przebiegu z plikiem zapisanym, a bez statusu. Bazę drogi atomowej naprawi ponowny
+        # re-skan (T8) - ta droga lokacji nie izoluje.
+        niezgodne = f"plik ZMIENIONY, ale re-sync padł - {type(exc).__name__}: {exc}"
+    if niezgodne is not None:
+        reason = f"{niezgodne}; backup do cofnięcia zapisany w commicie {stan.commit_id}"
+        _mark(rows, "failed", reason)
+        return _ZapisLokacji(FileResult(location_id, path, "failed", reason), dotknieto=True)
+    return _ZapisLokacji(FileResult(location_id, path, "applied", _dopisz(droga, res.reason)),
+                         dotknieto=True)
 
 
 # ============================================================ RENAME "Nazwy z faktów" (trzecia operacja)
@@ -2916,7 +2925,7 @@ def _po_awarii_przepiecia(con, *, rename_id, location_id, src, dst, kierunek,
 
 
 def _rename_pod_straza(con, *, rename_id, kierunek, location_id, old_path, new_path, generation,
-                       now, status, reason=None) -> RenameFileResult:
+                       now, status, reason=None, gest=None) -> RenameFileResult:
     """RENAME I RELOKACJA W JEDNEJ TRANSAKCJI (`repo.guard_file_rename`, AR-17 (5)): pod blokadą
     zapisu bazy lokacja bez operacji izolującej i bez operacji nowszej niż `generation` (zapamiętanej
     PRZED bramką izolacji wołającego), cel wolny w bazie, potem `rename_file` (`os.rename`) i dopiero
@@ -2928,7 +2937,8 @@ def _rename_pod_straza(con, *, rename_id, kierunek, location_id, old_path, new_p
     TRWAŁY ZAMIAR (AR-29 (1)): `repo.open_rename_intent` zatwierdza próbę PRZED `os.rename`. Plik
     nie ruszył się (odmowa prymitywu, straż, anty-clobber) → zamiar gaśnie. Sukces → gaśnie w tej
     samej transakcji co relokacja. Wyjątek po udanym renamie → `_po_awarii_przepiecia` (kompensacja
-    albo zamiar zostaje dla `reconcile_renames`)."""
+    albo zamiar zostaje dla `reconcile_renames`). `gest` trafia do ładunku `location.renamed`
+    (`repo._apply_relocation`) - przeniesienie zmiany obiektu, nie zmiana nazwy."""
     try:
         repo.open_rename_intent(con, rename_id=rename_id, direction=kierunek)
     except Exception as exc:  # noqa: BLE001 - bez zamiaru nie ruszamy pliku
@@ -2938,7 +2948,7 @@ def _rename_pod_straza(con, *, rename_id, kierunek, location_id, old_path, new_p
     try:
         with repo.guard_file_rename(con, location_id=location_id, new_path=new_path,
                                     generation=generation, now=now, rename_id=rename_id,
-                                    status=status, reason=reason, kierunek=kierunek):
+                                    status=status, reason=reason, kierunek=kierunek, gest=gest):
             wynik = rename_file(old_path, new_path)            # tu następuje os.rename
             if wynik.status == "failed" and _przeszedl(old_path, new_path):
                 wynik = RenameFileResult("applied", None)      # błąd klienta SMB, plik przeszedł
@@ -3304,6 +3314,7 @@ def undo(con, commit_id, *, now,
     blocked: list[FileResult] = []
     failed: list[FileResult] = []
     semantic: list[FileResult] = []
+    kubly = {"restored": restored, "blocked": blocked, "failed": failed}
     cancelled = False
     done = 0
 
@@ -3313,13 +3324,41 @@ def undo(con, commit_id, *, now,
         if progress is not None:
             progress(done, total, path, status)
 
+    for b in backups:
+        if should_cancel is not None and should_cancel():
+            cancelled = True
+            break
+        cofniecie = _cofnij_lokacje(con, commit_id, b, now=now)
+        kubly[cofniecie.wynik.status].append(cofniecie.wynik)
+        if cofniecie.semantycznie:
+            semantic.append(cofniecie.wynik)
+        _report(cofniecie.wynik.path, cofniecie.wynik.status)
+
+    return UndoResult(commit_id, restored, blocked, failed, cancelled, semantic=semantic)
+
+
+@dataclasses.dataclass(frozen=True)
+class _CofniecieLokacji:
+    """Wynik cofnięcia JEDNEGO backupu commitu. `semantycznie` - plik wrócił cofnięciem semantycznym
+    (`UndoResult.semantic`). `juz` - stan sprzed commitu już leży na dysku i w bazie ('blocked' „już
+    cofnięte” albo commit, który tego pliku nie podmienił): nie ma czego cofać, a ponowienie
+    cofnięcia zmiany obiektu wolno uznać za domknięte."""
+    wynik: FileResult
+    semantycznie: bool = False
+    juz: bool = False
+
+
+def _cofnij_lokacje(con, commit_id, b, *, now) -> _CofniecieLokacji:
+    """CIAŁO `undo` DLA JEDNEGO BACKUPU commitu - wspólne dla `undo` i cofnięcia zmiany obiektu
+    (`undo_object_change`: karta per pozycja, przed powrotem pliku). Drogi, bramki i statusy - opis
+    `undo`."""
     def _sync(loc, path, expect, powod, semantycznie=False):
         """Re-sync drogi atomowej (bez operacji w dzienniku) - w jego transakcji odtworzenie
         nagrobka zgaszonego przez ten commit na tym pliku (AR-38). `semantycznie` - plik wrócił
         cofnięciem semantycznym (AR-19), wynik trafia też do `semantic`."""
-        def _nagrobek(_fid=loc["frame_id"], _lid=loc["id"]):
-            repo.restore_object_tombstone(con, frame_id=_fid, commit_id=commit_id,
-                                          location_id=_lid, now=now)
+        def _nagrobek():
+            repo.restore_object_tombstone(con, frame_id=loc["frame_id"], commit_id=commit_id,
+                                          location_id=loc["id"], now=now)
         try:
             niezgodne = _resync(con, path, loc["volume"], now=now, expect_sha1_data=expect,
                                 w_transakcji=_nagrobek)
@@ -3327,170 +3366,142 @@ def undo(con, commit_id, *, now,
             niezgodne = (f"nagłówek PRZYWRÓCONY, ale re-sync padł - {type(exc).__name__}: {exc}; "
                          f"ponowne undo dokończy samą synchronizację")
         if niezgodne is not None:
-            failed.append(FileResult(loc["id"], path, "failed", niezgodne))
-            _report(path, "failed")
-            return
-        wynik = FileResult(loc["id"], path, "restored", powod)
-        restored.append(wynik)
-        if semantycznie:
-            semantic.append(wynik)
-        _report(path, "restored")
+            return _pad(loc, path, niezgodne)
+        return _CofniecieLokacji(FileResult(loc["id"], path, "restored", powod),
+                                 semantycznie=semantycznie)
 
     def _dokoncz_undo(loc, path, op_id, powod):
         """Dokończenie operacji cofnięcia w miejscu (`_dokoncz`) z wynikiem undo."""
         wynik = _dokoncz(con, op_id, now=now)
         if wynik.status == "applied":
-            restored.append(FileResult(loc["id"], path, "restored", powod))
-            _report(path, "restored")
-        elif wynik.status == "blocked":
-            _blok(loc, path, f"{wynik.reason}; lokacja IZOLOWANA od skanu")
-        else:
-            _pad(loc, path, f"nagłówek PRZYWRÓCONY, ale {wynik.reason}; lokacja IZOLOWANA od "
-                            f"skanu - ponowne undo dokończy samą synchronizację")
+            return _CofniecieLokacji(FileResult(loc["id"], path, "restored", powod))
+        if wynik.status == "blocked":
+            return _blok(loc, path, f"{wynik.reason}; lokacja IZOLOWANA od skanu")
+        return _pad(loc, path, f"nagłówek PRZYWRÓCONY, ale {wynik.reason}; lokacja IZOLOWANA od "
+                               f"skanu - ponowne undo dokończy samą synchronizację")
 
-    def _blok(loc, path, powod):
-        blocked.append(FileResult(loc["id"], path, "blocked", powod))
-        _report(path, "blocked")
+    def _blok(loc, path, powod, juz=False):
+        return _CofniecieLokacji(FileResult(loc["id"], path, "blocked", powod), juz=juz)
 
     def _pad(loc, path, powod):
-        failed.append(FileResult(loc["id"], path, "failed", powod))
-        _report(path, "failed")
+        return _CofniecieLokacji(FileResult(loc["id"], path, "failed", powod))
 
-    for b in backups:
-        if should_cancel is not None and should_cancel():
-            cancelled = True
-            break
-        loc = _location(con, int(b["location_id"]))
-        if loc is None:
-            failed.append(FileResult(int(b["location_id"]), "", "failed", "brak location w bazie"))
-            _report("", "failed")
-            continue
-        path = loc["path"]
-        # Zwykłe cofnięcie tylko dla podmian potwierdzonych (AR-40): backup niepotwierdzony tej
-        # lokacji (dowolnego commitu) rozstrzyga najpierw dysk.
-        zalegle = repo.pending_header_backups(con, loc["id"])
-        if zalegle:
-            powod = _rekoncyliuj_backupy(con, zalegle, loc, now=now)
-            if powod is not None:
-                _blok(loc, path, powod)
-                continue
-            loc = _location(con, loc["id"])
-            if con.execute("SELECT unreplaced_at FROM header_backups WHERE id = ?",
-                           (b["id"],)).fetchone()[0] is not None:
-                _blok(loc, path, "rekoncyliacja z dyskiem: commit nie podmienił tego pliku (na "
-                                 "dysku nagłówek sprzed commitu) - nie ma czego cofać")
-                continue
+    loc = _location(con, int(b["location_id"]))
+    if loc is None:
+        return _CofniecieLokacji(FileResult(int(b["location_id"]), "", "failed",
+                                            "brak location w bazie"))
+    path = loc["path"]
+    # Zwykłe cofnięcie tylko dla podmian potwierdzonych (AR-40): backup niepotwierdzony tej
+    # lokacji (dowolnego commitu) rozstrzyga najpierw dysk.
+    zalegle = repo.pending_header_backups(con, loc["id"])
+    if zalegle:
+        powod = _rekoncyliuj_backupy(con, zalegle, loc, now=now)
+        if powod is not None:
+            return _blok(loc, path, powod)
+        loc = _location(con, loc["id"])
+        if con.execute("SELECT unreplaced_at FROM header_backups WHERE id = ?",
+                       (b["id"],)).fetchone()[0] is not None:
+            return _blok(loc, path, "rekoncyliacja z dyskiem: commit nie podmienił tego pliku (na "
+                                    "dysku nagłówek sprzed commitu) - nie ma czego cofać", juz=True)
+    op_c = _ostatnia_operacja(con, commit_id, loc["id"], "commit")
+    op_u = _ostatnia_operacja(con, commit_id, loc["id"], "undo")
+    otwarta = next((o for o in (op_u, op_c)
+                    if o is not None and o["phase"] in repo.INPLACE_OPEN_PHASES), None)
+    if otwarta is not None:
+        odzysk = _droga(_GEST_PRZYWROC, f"recover_torn({otwarta['id']})")
+        return _pad(loc, path, f"przerwany zapis w miejscu (operacja {otwarta['id']}, "
+                               f"{otwarta['kind']}) - lokacja izolowana; najpierw {odzysk}")
+    if op_u is not None and op_u["phase"] == "written":
+        return _dokoncz_undo(loc, path, op_u["id"], "nagłówek był już przywrócony - dokończono "
+                                                    "synchronizację bazy")
+    if op_u is not None and op_u["phase"] == "synced":
+        return _blok(loc, path, "już cofnięte (operacja cofnięcia zamknięta)", juz=True)
+    if op_c is not None and op_c["phase"] == "written":
+        # Commit zapisał i zweryfikował plik, ale jego re-sync padł (lokacja izolowana). Cofamy
+        # dopiero stan, który baza zna: najpierw dokończenie commitu, potem zwykłe cofnięcie.
+        koniec = _dokoncz(con, op_c["id"], now=now)
+        if koniec.status != "applied":
+            return (_pad if koniec.status == "failed" else _blok)(
+                loc, path, f"commit nie jest dokończony (operacja {op_c['id']}): "
+                           f"{koniec.reason}; lokacja IZOLOWANA od skanu")
         op_c = _ostatnia_operacja(con, commit_id, loc["id"], "commit")
-        op_u = _ostatnia_operacja(con, commit_id, loc["id"], "undo")
-        otwarta = next((o for o in (op_u, op_c)
-                        if o is not None and o["phase"] in repo.INPLACE_OPEN_PHASES), None)
-        if otwarta is not None:
-            odzysk = _droga(_GEST_PRZYWROC, f"recover_torn({otwarta['id']})")
-            _pad(loc, path, f"przerwany zapis w miejscu (operacja {otwarta['id']}, "
-                            f"{otwarta['kind']}) - lokacja izolowana; najpierw {odzysk}")
-            continue
-        if op_u is not None and op_u["phase"] == "written":
-            _dokoncz_undo(loc, path, op_u["id"], "nagłówek był już przywrócony - dokończono "
-                                                 "synchronizację bazy")
-            continue
-        if op_u is not None and op_u["phase"] == "synced":
-            _blok(loc, path, "już cofnięte (operacja cofnięcia zamknięta)")
-            continue
-        if op_c is not None and op_c["phase"] == "written":
-            # Commit zapisał i zweryfikował plik, ale jego re-sync padł (lokacja izolowana). Cofamy
-            # dopiero stan, który baza zna: najpierw dokończenie commitu, potem zwykłe cofnięcie.
-            koniec = _dokoncz(con, op_c["id"], now=now)
-            if koniec.status != "applied":
-                (_pad if koniec.status == "failed" else _blok)(
-                    loc, path, f"commit nie jest dokończony (operacja {op_c['id']}): "
-                               f"{koniec.reason}; lokacja IZOLOWANA od skanu")
-                continue
-            op_c = _ostatnia_operacja(con, commit_id, loc["id"], "commit")
-            loc = _location(con, loc["id"])         # kotwica i mtime po dokończeniu commitu
-        gen = repo.inplace_generation(con)          # przed bramką - dla straży podmiany atomowej
-        izolujaca = repo.isolating_inplace_op(con, loc["id"])
-        if izolujaca is not None:                   # nieukończony zapis spoza tego commitu
-            _blok(loc, path, _powod_izolacji(izolujaca))
-            continue
-        try:
-            env = RegionBackup.decode(b["header_text"])
-        except ValueError as exc:
-            _pad(loc, path, f"uszkodzona koperta backupu: {exc}")
-            continue
+        loc = _location(con, loc["id"])         # kotwica i mtime po dokończeniu commitu
+    gen = repo.inplace_generation(con)          # przed bramką - dla straży podmiany atomowej
+    izolujaca = repo.isolating_inplace_op(con, loc["id"])
+    if izolujaca is not None:                   # nieukończony zapis spoza tego commitu
+        return _blok(loc, path, _powod_izolacji(izolujaca))
+    try:
+        env = RegionBackup.decode(b["header_text"])
+    except ValueError as exc:
+        return _pad(loc, path, f"uszkodzona koperta backupu: {exc}")
 
-        if env is not None and op_c is not None and op_c["phase"] == "synced":
-            class _Dziennik:
-                op_id = None
+    if env is not None and op_c is not None and op_c["phase"] == "synced":
+        class _Dziennik:
+            op_id = None
 
-                def begin(self, spec, backup_text, _lid=loc["id"]):
-                    self.op_id = repo.begin_inplace_undo(con, commit_id=commit_id,
-                                                         location_id=_lid, spec=spec, now=now)
+            def begin(self, spec, backup_text):
+                self.op_id = repo.begin_inplace_undo(con, commit_id=commit_id,
+                                                     location_id=loc["id"], spec=spec, now=now)
 
-                def phase(self, faza, reason=None):
-                    repo.set_inplace_op_phase(con, op_id=self.op_id, phase=faza, now=now,
-                                              reason=reason, expect_phase="writing")
-            dziennik = _Dziennik()
-            spec_c = _spec_z_operacji(op_c)
-            res = restore_inplace(path, env, op_new_region=spec_c.new_region,
-                                  op_file_size=spec_c.file_size, op_file_ino=spec_c.file_ino,
-                                  op_post_hash=spec_c.post_hash, journal=dziennik,
-                                  anchor=FileAnchor(loc["file_sha1"], loc["mtime"]))
-            if not isinstance(res, Fallback):
-                if res.status == "applied":
-                    _dokoncz_undo(loc, path, dziennik.op_id, None)
-                elif res.status == "blocked":
-                    _blok(loc, path, res.reason)
-                else:
-                    odzysk = _droga(_GEST_PRZYWROC, f"recover_torn({dziennik.op_id})")
-                    dopisek = (f"; lokacja IZOLOWANA od skanu, odzysk: {odzysk}"
-                               if res.in_place else "")
-                    _pad(loc, path, f"{res.reason}{dopisek}")
-                continue
+            def phase(self, faza, reason=None):
+                repo.set_inplace_op_phase(con, op_id=self.op_id, phase=faza, now=now,
+                                          reason=reason, expect_phase="writing")
+        dziennik = _Dziennik()
+        spec_c = _spec_z_operacji(op_c)
+        res = restore_inplace(path, env, op_new_region=spec_c.new_region,
+                              op_file_size=spec_c.file_size, op_file_ino=spec_c.file_ino,
+                              op_post_hash=spec_c.post_hash, journal=dziennik,
+                              anchor=FileAnchor(loc["file_sha1"], loc["mtime"]))
+        if not isinstance(res, Fallback):
+            if res.status == "applied":
+                return _dokoncz_undo(loc, path, dziennik.op_id, None)
+            if res.status == "blocked":
+                return _blok(loc, path, res.reason)
+            odzysk = _droga(_GEST_PRZYWROC, f"recover_torn({dziennik.op_id})")
+            dopisek = (f"; lokacja IZOLOWANA od skanu, odzysk: {odzysk}"
+                       if res.in_place else "")
+            return _pad(loc, path, f"{res.reason}{dopisek}")
 
-        # Droga atomowa: najpierw rozpoznanie „już przywrócone" z pliku i kompletu faktów bazy.
-        try:
-            if env is not None:
-                with open(path, "rb") as fh:
-                    fh.seek(env.offset)
-                    na_miejscu = fh.read(len(env.region)) == env.region
-            else:
-                na_miejscu = _post_hash(path) == _backup_pre_hash(path, b["header_text"])
-        except Exception:  # noqa: BLE001 - rozpoznanie tylko pomaga; decyduje pisarz niżej
-            na_miejscu = False
-        if na_miejscu:
-            przywrocony = env.pre_hash if env is not None else _post_hash(path)
-            try:
-                mtime = scan._mtime_iso(os.stat(path))
-            except OSError:
-                mtime = None
-            if loc["header_hash"] == przywrocony and loc["mtime"] == mtime:
-                _blok(loc, path, "już cofnięte - nagłówek i baza opisują stan sprzed commitu")
-            else:
-                _sync(loc, path, loc["sha1_data"],
-                      "nagłówek był już przywrócony - dokończono synchronizację bazy")
-            continue
-        res = write_full_header(
-            path, b["header_text"], b["post_hash"],
-            replace_guard=lambda _lid=loc["id"], _gen=gen: repo.guard_file_replace(
-                con, location_id=_lid, generation=_gen))
-        if res.status == "applied":
-            # Kontrola tożsamości jak w commicie i w gałęzi „już przywrócone": astropy zapisuje cały
-            # `HDUList`, więc inna serializacja sekcji danych dałaby nowe `sha1_data`, a re-sync bez
-            # kotwicy przepiąłby lokację na nową klatkę, zostawiając fakty ręki na starej. Powód
-            # niesie prawdę o bajtach (AR-19): `None` = cały plik jak przed commitem.
-            _sync(loc, path, loc["sha1_data"], res.reason, semantycznie=res.byte_exact is False)
-        elif res.status == "blocked":
-            _blok(loc, path, res.reason)
-        elif res.backup_text is not None:
-            # Podmiana zaszła, weryfikacja po niej nie (AR-8): re-syncu NIE ma - baza opisuje bajty
-            # potwierdzone, jak po 'failed' commitu. Drogą naprawy jest skan albo ponowne undo,
-            # które rozpozna przywrócony nagłówek po bajtach regionu.
-            _pad(loc, path, f"{res.reason}; baza NIE zsynchronizowana - przeskanuj plik albo "
-                            f"ponów cofnięcie")
+    # Droga atomowa: najpierw rozpoznanie „już przywrócone" z pliku i kompletu faktów bazy.
+    try:
+        if env is not None:
+            with open(path, "rb") as fh:
+                fh.seek(env.offset)
+                na_miejscu = fh.read(len(env.region)) == env.region
         else:
-            _pad(loc, path, res.reason)
-
-    return UndoResult(commit_id, restored, blocked, failed, cancelled, semantic=semantic)
+            na_miejscu = _post_hash(path) == _backup_pre_hash(path, b["header_text"])
+    except Exception:  # noqa: BLE001 - rozpoznanie tylko pomaga; decyduje pisarz niżej
+        na_miejscu = False
+    if na_miejscu:
+        przywrocony = env.pre_hash if env is not None else _post_hash(path)
+        try:
+            mtime = scan._mtime_iso(os.stat(path))
+        except OSError:
+            mtime = None
+        if loc["header_hash"] == przywrocony and loc["mtime"] == mtime:
+            return _blok(loc, path, "już cofnięte - nagłówek i baza opisują stan sprzed commitu",
+                         juz=True)
+        return _sync(loc, path, loc["sha1_data"],
+                     "nagłówek był już przywrócony - dokończono synchronizację bazy")
+    res = write_full_header(
+        path, b["header_text"], b["post_hash"],
+        replace_guard=lambda: repo.guard_file_replace(con, location_id=loc["id"], generation=gen))
+    if res.status == "applied":
+        # Kontrola tożsamości jak w commicie i w gałęzi „już przywrócone": astropy zapisuje cały
+        # `HDUList`, więc inna serializacja sekcji danych dałaby nowe `sha1_data`, a re-sync bez
+        # kotwicy przepiąłby lokację na nową klatkę, zostawiając fakty ręki na starej. Powód
+        # niesie prawdę o bajtach (AR-19): `None` = cały plik jak przed commitem.
+        return _sync(loc, path, loc["sha1_data"], res.reason,
+                     semantycznie=res.byte_exact is False)
+    if res.status == "blocked":
+        return _blok(loc, path, res.reason)
+    if res.backup_text is not None:
+        # Podmiana zaszła, weryfikacja po niej nie (AR-8): re-syncu NIE ma - baza opisuje bajty
+        # potwierdzone, jak po 'failed' commitu. Drogą naprawy jest skan albo ponowne undo,
+        # które rozpozna przywrócony nagłówek po bajtach regionu.
+        return _pad(loc, path, f"{res.reason}; baza NIE zsynchronizowana - przeskanuj plik albo "
+                               f"ponów cofnięcie")
+    return _pad(loc, path, res.reason)
 
 
 def recover_torn(con, op_id, *, now) -> FileResult:
@@ -3726,4 +3737,627 @@ def _zwolnij_reka(con, op_id, *, now, reason, bez_blokady=None) -> tuple[str, st
         return "released", (f"pliku nie da się otworzyć ({bez_blokady}) - zwolniono bez blokady "
                             f"pliku")
     return "released", None
+
+
+# ============================================================ ZMIANA OBIEKTU RAZEM Z PLIKIEM (AR-17 krok 3)
+# Gest „Zmień obiekt…” i „Uzgodnij” (D-1011-5): per POZYCJA (klatka z jedną obecną kopią) baza →
+# przeniesienie → karta, razem albo wcale; cofnięcie per pozycja karta → plik → baza, z fazą w bazie;
+# katalogi na końcu przebiegu. Plan: `object_change.plan_object_change`, staging:
+# `repo.stage_object_change`. Sterownik i cofnięcie odtwarzają przebieg WYŁĄCZNIE z bazy (`run_id`),
+# więc przeżywają awarię procesu. W GUI to JEDNA operacja pisarza - dwa starty `WritebackRunner`
+# zwalniają między sobą mutex Dostawy (`gui/wb_worker.py`).
+
+_GEST = "object_change"                  # ładunek `location.renamed` przeniesienia gestu
+_GEST_POWROTU = "object_change_undo"     # ... i powrotu pliku (cofnięcie, odmowa karty w biegu)
+
+
+@dataclasses.dataclass(frozen=True)
+class ObjectChangeResult:
+    """Wynik przebiegu gestu zmiany obiektu (`commit_object_change`) albo jego cofnięcia
+    (`undo_object_change`) - per POZYCJA (plik pary), nie per wpis stagingu.
+
+    Zapis: `applied` (baza, plik i karta pozycji zgodne z celem), `blocked` (odmowa - kroki pozycji
+    wróciły, plik i baza jak przed gestem), `failed` (stan częściowy - powód niesie drogę dalej:
+    cofnięcie przebiegu albo odzysk karty), `skipped` (dryf, kopia zniknęła - nic nie zrobiono).
+    Cofnięcie: `applied` = pozycje cofnięte (status 'restored', powód = uwaga, np. nowsza decyzja
+    ręki w bazie), `blocked`/`failed` = zatrzymane z powodem (ponowienie wznawia fazę), `skipped` =
+    pozycje, do których zapis nie doszedł (nie było czego cofać).
+
+    `commit_ids` = WSZYSTKIE commity kart przebiegu (ponowienie po awarii dokłada nowy). Katalogi:
+    `dirs_created` (zapis: założone katalogi celu, cofnięcie: odtworzone stare), `dirs_removed`
+    (zapis: źródłowe opróżnione przez gest i własne puste po odmowie, cofnięcie: założone przez
+    gest), `dirs_uncertain` (zamiar założenia bez potwierdzenia przy istniejącym katalogu - nigdy nie
+    usuwany automatycznie, ścieżki w `warnings`). `warnings` - zdania dla człowieka bez blokady."""
+    run_id: str
+    applied: list[FileResult]
+    blocked: list[FileResult]
+    failed: list[FileResult]
+    skipped: list[FileResult]
+    commit_ids: tuple[int, ...] = ()
+    dirs_created: int = 0
+    dirs_removed: int = 0
+    dirs_uncertain: int = 0
+    cancelled: bool = False
+    warnings: tuple[str, ...] = ()
+
+
+def _przebieg_zmiany(con, run_id):
+    return con.execute("SELECT run_id, mode, status FROM object_change_run WHERE run_id = ?",
+                       (run_id,)).fetchone()
+
+
+def _pozycje_przebiegu(con, run_id):
+    """Pozycje przebiegu z wierszem przeniesienia, w kolejności stagingu. Ścieżka i `mtime` podglądu
+    z wiersza POZYCJI (każda je ma), nowa ścieżka i stan ruchu z wiersza przeniesienia."""
+    return con.execute(
+        "SELECT p.id, p.run_id, p.frame_id, p.location_id, p.object_change, p.object_id, p.status, "
+        "       p.undo_phase, p.rename_id, p.mkdirs, p.old_path, p.expected_mtime, r.new_path, "
+        "       r.status AS rename_status, r.in_flight "
+        "FROM pending_object_change p LEFT JOIN pending_renames r ON r.id = p.rename_id "
+        "WHERE p.run_id = ? ORDER BY p.id", (run_id,)).fetchall()
+
+
+def _karty_lokacji(con, run_id, location_id):
+    """Wpisy stagingu karty pozycji (przebieg + lokacja), w kolejności stagingu."""
+    return con.execute(
+        "SELECT id, location_id, keyword, idx, op, old_value, new_value, new_type, new_comment, "
+        "       expected_header_hash, status, reason "
+        "FROM pending_changes WHERE run_id = ? AND location_id = ? ORDER BY id",
+        (run_id, location_id)).fetchall()
+
+
+def _status_renamu(con, rename_id):
+    row = con.execute("SELECT status FROM pending_renames WHERE id = ?", (rename_id,)).fetchone()
+    return None if row is None else row["status"]
+
+
+def _katalogi_przebiegu(con, run_id):
+    return con.execute("SELECT id, path, action, done_at, undone_at FROM run_dir "
+                       "WHERE run_id = ? ORDER BY id", (run_id,)).fetchall()
+
+
+def _commity_przebiegu(con, run_id) -> tuple[int, ...]:
+    """Commity kart przebiegu z backupem do cofnięcia - WSZYSTKIE (ponowienie dokłada nowy)."""
+    return tuple(r[0] for r in con.execute(
+        "SELECT DISTINCT c.id FROM commits c JOIN header_backups b ON b.commit_id = c.id "
+        "WHERE c.run_id = ? AND b.unreplaced_at IS NULL ORDER BY c.id", (run_id,)))
+
+
+def _backupy_lokacji(con, run_id, location_id):
+    """Backupy kart pozycji ze WSZYSTKICH commitów przebiegu, od najnowszego (cofnięcie jak stos)."""
+    return con.execute(
+        "SELECT b.id, b.commit_id, b.location_id, b.hdu_index, b.header_text, b.post_hash "
+        "FROM header_backups b JOIN commits c ON c.id = b.commit_id "
+        "WHERE c.run_id = ? AND b.location_id = ? AND b.unreplaced_at IS NULL ORDER BY b.id DESC",
+        (run_id, location_id)).fetchall()
+
+
+def _glebokosc(sciezka) -> int:
+    return len(os.path.normpath(sciezka).split(os.sep))
+
+
+def _poziomy_pod(wspolny, katalog) -> list[str]:
+    """Katalogi od `wspolny` (bez niego) w dół do `katalog` włącznie, od najpłytszego - jedyny
+    zakres, w którym gest zakłada i usuwa katalogi źródła: wspólny przodek starej i nowej ścieżki
+    niesie też cel, więc nie jest nigdy kandydatem. EXPECT: `katalog` leży pod `wspolny`."""
+    rel = os.path.relpath(katalog, wspolny)
+    if rel == os.curdir:
+        return []
+    if rel == os.pardir or rel.startswith(os.pardir + os.sep) or os.path.isabs(rel):
+        raise ValueError(f"{katalog} nie leży pod {wspolny}")
+    poziomy, biezacy = [], wspolny
+    for czesc in rel.split(os.sep):
+        biezacy = os.path.join(biezacy, czesc)
+        poziomy.append(biezacy)
+    return poziomy
+
+
+def _wspolny_przodek(p) -> str:
+    return os.path.commonpath([os.path.dirname(p["old_path"]), os.path.dirname(p["new_path"])])
+
+
+def _pusty_katalog(sciezka) -> bool:
+    try:
+        return os.path.isdir(sciezka) and not os.listdir(sciezka)
+    except OSError:
+        return False
+
+
+def _zaloz_katalogi(con, run_id, katalogi, *, now, akcja) -> tuple[str | None, int]:
+    """Załóż brakujące katalogi z listy (od najpłytszego) - KAŻDY z zamiarem w `run_dir`
+    zatwierdzonym WŁASNĄ transakcją PRZED `os.mkdir` i `done_at` po nim (D-1011-5 Q3). Dzieje się
+    PRZED strażą renamu, nigdy w niej: zapis katalogu w transakcji relokacji wiązałby jej rollback
+    z mutacją, której rollback nie cofnie. Katalog, który już istnieje, nie jest nasz - bez wiersza.
+    `os.mkdir`, nie `os.makedirs` ani `os.renames`: rodzic każdego poziomu istnieje z konstrukcji
+    listy, a poziom spoza listy nie powstanie bez zapisu (brak rodzica = odmowa); `os.renames`
+    kasowałby przy okazji puste katalogi źródła. Katalog założony przez kogoś między sprawdzeniem
+    a `mkdir` zostawia zamiar bez `done_at` = własność niepewna (nigdy nie usuwany automatycznie).
+    → `(powód odmowy | None, ile założono)`; po odmowie plik nie jest ruszany."""
+    zalozone = 0
+    for katalog in katalogi:
+        if os.path.isdir(katalog):
+            continue
+        try:
+            dir_id = repo.open_run_dir(con, run_id=run_id, path=katalog, action=akcja, now=now)
+        except Exception as exc:  # noqa: BLE001 - bez zamiaru katalogu nie zakładamy
+            return (f"zamiar katalogu {katalog} nie zapisany ({type(exc).__name__}: {exc}) - "
+                    f"katalogu nie założono, pliku nie ruszono"), zalozone
+        try:
+            os.mkdir(katalog)
+        except FileExistsError:
+            continue                     # ktoś zdążył przed nami - zamiar zostaje bez `done_at`
+        except OSError as exc:
+            return (f"katalogu {katalog} nie da się założyć ({type(exc).__name__}: {exc}) - "
+                    f"pliku nie ruszono"), zalozone
+        zalozone += 1
+        try:
+            repo.finish_run_dir(con, dir_id=dir_id, now=now)
+        except Exception as exc:  # noqa: BLE001 - katalog jest, potwierdzenia nie ma
+            return (f"katalog {katalog} założony, ale jego potwierdzenie w bazie padło "
+                    f"({type(exc).__name__}: {exc}) - zostaje do oka, pliku nie ruszono"), zalozone
+    return None, zalozone
+
+
+def _usun_katalog(con, run_id, katalog, *, now) -> str | None:
+    """Usuń PUSTY katalog źródłowy, który gest opróżnił: zamiar `removed` własną transakcją PRZED
+    `os.rmdir` (tylko pusty - na niepustym rzuca), `done_at` po nim. → powód porażki albo None."""
+    try:
+        dir_id = repo.open_run_dir(con, run_id=run_id, path=katalog, action="removed", now=now)
+        os.rmdir(katalog)
+    except Exception as exc:  # noqa: BLE001 - katalog zostaje; to nie blokuje przebiegu
+        return f"katalog {katalog} nie usunięty ({type(exc).__name__}: {exc})"
+    repo.finish_run_dir(con, dir_id=dir_id, now=now)
+    return None
+
+
+def _usun_wlasne_puste(con, run_id, *, now) -> tuple[int, list[str]]:
+    """Katalogi założone przez gest (`created` z `done_at`, bez `undone_at`) - od najgłębszego:
+    pusty → `os.rmdir` + `undone_at`, już nieistniejący → `undone_at`, niepusty → zostaje (lista).
+    Wyłącznie własność pewna: zamiar bez `done_at` nigdy tu nie wchodzi. → (ile usunięto, niepuste)."""
+    usuniete, niepuste = 0, []
+    wlasne = [d for d in _katalogi_przebiegu(con, run_id) if d["action"] == "created"
+              and d["done_at"] is not None and d["undone_at"] is None]
+    for d in sorted(wlasne, key=lambda d: _glebokosc(d["path"]), reverse=True):
+        if not os.path.isdir(d["path"]):
+            repo.undo_run_dir(con, dir_id=d["id"], now=now)
+            continue
+        if not _pusty_katalog(d["path"]):
+            niepuste.append(d["path"])
+            continue
+        try:
+            os.rmdir(d["path"])
+        except OSError:
+            niepuste.append(d["path"])
+            continue
+        repo.undo_run_dir(con, dir_id=d["id"], now=now)
+        usuniete += 1
+    return usuniete, niepuste
+
+
+def _rekoncyliuj_katalogi(con, run_id, *, now) -> None:
+    """Zamiary katalogów bez `done_at` (awaria między zamiarem a potwierdzeniem) - rozstrzyga dysk:
+    `removed`, którego katalogu nie ma → zaszło; `restored`, którego katalog jest → zaszło. `created`
+    bez `done_at` zostaje, jak jest: katalogu nie ma = mutacji nie było (następne założenie otworzy
+    zamiar od nowa), katalog jest = własność niepewna (`_niepewne_katalogi`)."""
+    for d in _katalogi_przebiegu(con, run_id):
+        if d["done_at"] is not None:
+            continue
+        jest = os.path.isdir(d["path"])
+        if (d["action"] == "removed" and not jest) or (d["action"] == "restored" and jest):
+            repo.finish_run_dir(con, dir_id=d["id"], now=now)
+
+
+def _niepewne_katalogi(con, run_id) -> list[str]:
+    return [d["path"] for d in _katalogi_przebiegu(con, run_id)
+            if d["action"] == "created" and d["done_at"] is None and os.path.isdir(d["path"])]
+
+
+def _przenies_wstecz(con, p, *, now, reason) -> RenameFileResult:
+    """Powrót pliku pozycji pod starą ścieżkę - ta sama straż co przeniesienie (izolacja, generacja,
+    cel wolny w bazie, relokacja w transakcji renamu), wiersz przeniesienia → 'skipped' z powodem."""
+    gen = repo.inplace_generation(con)
+    izolujaca = repo.isolating_inplace_op(con, p["location_id"])
+    if izolujaca is not None:
+        return RenameFileResult("blocked", _powod_izolacji(izolujaca))
+    loc = _location_rename(con, p["location_id"])
+    if loc is None or path_key(loc["path"]) != path_key(p["new_path"]):
+        return RenameFileResult("blocked", "plik nie stoi na ścieżce z przebiegu")
+    return _rename_pod_straza(con, rename_id=p["rename_id"], kierunek="undo",
+                              location_id=p["location_id"], old_path=p["new_path"],
+                              new_path=p["old_path"], generation=gen, now=now, status="skipped",
+                              reason=reason, gest=_GEST_POWROTU)
+
+
+def _wycofaj_pozycje(con, p, status, powod, *, now, przeniesiony) -> FileResult:
+    """ODMOWA POZYCJI („razem albo wcale”, D-1011-5 Q2): kroki zrobione dla niej wracają - plik pod
+    starą ścieżkę, baza przez CAS klingi - a pozycja dostaje `status` z powodem. Wpisy stagingu, do
+    których nie doszło, dostają ten sam status (szuflada nie pokaże ich jako oczekujących). Plik,
+    który nie wrócił, to stan częściowy: 'failed' z drogą dalej (cofnięcie przebiegu), a baza zostaje
+    przy nowym obiekcie - zgodna z miejscem pliku."""
+    lid = p["location_id"]
+    if przeniesiony:
+        wynik = _przenies_wstecz(con, p, now=now, reason=f"{_COFNIETO} - {powod}")
+        if wynik.status != "applied":
+            powod = (f"{powod}; plik NIE wrócił pod {p['old_path']} ({wynik.reason}) - zostaje pod "
+                     f"nową ścieżką, baza pozycji jak po zapisie; drogą dalej jest cofnięcie "
+                     f"przebiegu")
+            repo.settle_object_change_item(con, item_id=p["id"], status="failed", reason=powod,
+                                           now=now)
+            return FileResult(lid, p["new_path"], "failed", powod)
+    _rozlicz_wpisy(con, p, status, powod)
+    repo.settle_object_change_item(con, item_id=p["id"], status=status, reason=powod, now=now,
+                                   restore=True)
+    loc = _location_rename(con, lid)
+    return FileResult(lid, "" if loc is None else loc["path"], status, powod)
+
+
+def _dryf_po_wznowieniu(con, p, *, now, przeniesiony) -> FileResult:
+    """WZNOWIENIE pozycji, której klatka nie niesie już wyniku kroku bazy sprzed awarii (nowsza
+    decyzja ręki albo martwa tożsamość): ani baza, ani plik nie są dalej ruszane - starsza decyzja
+    nie wraca, a plik nie idzie za obiektem, którego klatka już nie ma. Nic z gestu nie zostało
+    (wynik w bazie zapomniany przez klingę, plik nieprzeniesiony) → 'skipped'; inaczej 'failed' -
+    resztę gestu zdejmuje cofnięcie przebiegu."""
+    zostalo = przeniesiony or con.execute(
+        "SELECT object_id FROM pending_object_change WHERE id = ?", (p["id"],)).fetchone()[0] \
+        is not None
+    powod = ("obiekt klatki zmienił się po kroku bazy tej pozycji (przed awarią) - plik nie jest "
+             "dalej ruszany" + ("; resztę gestu zdejmuje cofnięcie przebiegu" if zostalo else ""))
+    status = "failed" if zostalo else "skipped"
+    _rozlicz_wpisy(con, p, "skipped", powod)
+    repo.settle_object_change_item(con, item_id=p["id"], status=status, reason=powod, now=now)
+    loc = _location_rename(con, p["location_id"])
+    return FileResult(p["location_id"], "" if loc is None else loc["path"], status, powod)
+
+
+def _rozlicz_wpisy(con, p, status, powod) -> None:
+    """Wpisy stagingu pozycji, do których zapis nie doszedł (przeniesienie i karta wciąż 'pending'),
+    dostają status pozycji z powodem - szuflada nie pokaże ich jako oczekujących."""
+    if p["rename_id"] is not None and _status_renamu(con, p["rename_id"]) == "pending":
+        repo.set_rename_status(con, rename_id=p["rename_id"], status=status, reason=powod)
+    for r in _karty_lokacji(con, p["run_id"], p["location_id"]):
+        if r["status"] == "pending":
+            repo.set_pending_status(con, pending_id=r["id"], status=status, reason=powod)
+
+
+def _zmien_pozycje(con, stan, p, *, now, liczniki) -> FileResult:
+    """JEDNA POZYCJA gestu (D-1011-5 Q1/Q2, baza per pozycja): bramki bez zapisu → (1) baza (CAS ręki
+    i stan sprzed jedną transakcją) → (2) przeniesienie (katalogi celu z zamiarem przed `mkdir`,
+    rename pod strażą) → (3) karta (ciało `commit` per lokacja, w miejscu ze spadkiem na drogę
+    atomową). Odmowa (2) albo (3) BEZ zapisu = zrobione kroki pozycji wracają, status 'blocked'.
+    Karta po zapisie częściowym (rozdarta, bez re-syncu) = plik zostaje, lokacja izolowana, 'failed'
+    z drogą naprawy. Krok zrobiony przed awarią (`object_id` w wierszu, przeniesienie 'applied',
+    karta 'applied') nie powtarza się - ponowienie idzie od pierwszego niezrobionego."""
+    lid = p["location_id"]
+    gen = repo.inplace_generation(con)      # PRZED bramką izolacji - dla straży renamu
+    loc = _location(con, lid)
+    karty = _karty_lokacji(con, stan.run_id, lid)
+    oczekujace = [r for r in karty if r["status"] == "pending"]
+    przeniesiony = p["rename_id"] is not None and p["rename_status"] == "applied"
+
+    def _odmowa(status, powod):
+        return _wycofaj_pozycje(con, p, status, powod, now=now, przeniesiony=przeniesiony)
+
+    if p["rename_id"] is not None and p["in_flight"] is not None:
+        # Przerwana próba, której rekoncyliacja nie rozstrzygnęła: plik może stać pod którąkolwiek
+        # nazwą - to nie jest odmowa „bez zapisu”, tylko stan do rozstrzygnięcia.
+        repo.settle_object_change_item(con, item_id=p["id"], status="failed",
+                                       reason=_ZAMIAR_OTWARTY, now=now)
+        return FileResult(lid, p["old_path"], "failed", _ZAMIAR_OTWARTY)
+    if loc is None:
+        return _odmowa("skipped", "brak location w bazie")
+    if not loc["present"]:
+        return _odmowa("skipped", "kopia zniknęła (present=0)")
+    izolujaca = repo.isolating_inplace_op(con, lid)
+    if izolujaca is not None:
+        return _odmowa("blocked", _powod_izolacji(izolujaca))
+    # KOTWICE PODGLĄDU, KAŻDA POZYCJA: kopia stoi tam, gdzie pokazał ją podgląd (po przeniesieniu
+    # zrobionym przed awarią - pod nową ścieżką), porównanie fizyczne jak przy kolizji (`R:` nie
+    # rozróżnia wielkości liter). Przed mutacją pliku także `mtime` z podglądu w bazie I NA DYSKU:
+    # zmiana pliku, której skan jeszcze nie wciągnął (karta przepisana innym programem), ma inny
+    # `mtime` na dysku - gest nie zawiezie do folderu obiektu pliku, którego podgląd nie widział.
+    tutaj = p["new_path"] if przeniesiony else p["old_path"]
+    if path_key(loc["path"]) != path_key(tutaj):
+        return _odmowa("blocked", "kopia stoi pod inną ścieżką niż w podglądzie - odśwież podgląd")
+    if oczekujace or (p["rename_id"] is not None and not przeniesiony):
+        if p["expected_mtime"] is None:
+            return _odmowa("blocked", "kopia bez kotwicy mtime z podglądu - gest nie wie, czy to "
+                                      "ten sam plik")
+        if loc["mtime"] != p["expected_mtime"]:
+            return _odmowa("blocked", "plik zmieniony od podglądu (mtime w bazie) - odśwież "
+                                      "podgląd")
+        try:
+            na_dysku = scan._mtime_iso(os.stat(loc["path"]))
+        except OSError as exc:
+            return _odmowa("blocked", f"plik nieosiągalny przed zapisem ({type(exc).__name__}: "
+                                      f"{exc})")
+        if na_dysku != p["expected_mtime"]:
+            return _odmowa("blocked", "plik zmieniony od ostatniego skanu - Dostawa, potem gest "
+                                      "ponownie")
+    if p["rename_id"] is not None and not przeniesiony:
+        if p["rename_status"] != "pending":
+            return _odmowa("blocked", f"przeniesienie odbite w poprzedniej próbie (status "
+                                      f"{p['rename_status']}) - odśwież podgląd")
+        kolizja = repo.path_owner(con, volume=loc["volume"], path=p["new_path"], location_id=lid)
+        if kolizja is not None:
+            return _odmowa("blocked", f"cel zajęty w bazie (location:{kolizja})")
+    if oczekujace and (oczekujace[0]["expected_header_hash"] is None
+                       or loc["header_hash"] != oczekujace[0]["expected_header_hash"]):
+        return _odmowa("blocked", "nagłówek zmieniony od podglądu albo bez kotwicy (header_hash) - "
+                                  "karta nie wejdzie; odśwież podgląd")
+
+    # (1) BAZA
+    try:
+        werdykt = repo.apply_object_change_item(con, item_id=p["id"], now=now)
+    except ValueError as exc:
+        return _odmowa("blocked", f"zmiana obiektu odmówiona: {exc}")
+    if werdykt == "copies":
+        return _odmowa("blocked", "klatka nie ma dokładnie jednej obecnej kopii, tej z podglądu - "
+                                  "kopia wjechała albo zniknęła po podglądzie; odśwież podgląd")
+    if werdykt == "drift" and p["object_id"] is not None:
+        return _dryf_po_wznowieniu(con, p, now=now, przeniesiony=przeniesiony)
+    if werdykt == "drift":
+        return _odmowa("skipped", "obiekt klatki zmienił się od podglądu (dryf) - pozycja "
+                                  "nietknięta; odśwież podgląd")
+
+    # (2) PRZENIESIENIE
+    if p["rename_id"] is not None and not przeniesiony:
+        powod, zalozone = _zaloz_katalogi(con, stan.run_id, json.loads(p["mkdirs"]), now=now,
+                                          akcja="created")
+        liczniki["created"] += zalozone
+        if powod is not None:
+            return _odmowa("blocked", powod)
+        katalog_celu = os.path.dirname(p["new_path"])
+        if not os.path.isdir(katalog_celu):
+            return _odmowa("blocked", f"katalog celu {katalog_celu} nie istnieje, a podgląd go nie "
+                                      f"zakładał - odśwież podgląd")
+        ruch = _rename_pod_straza(con, rename_id=p["rename_id"], kierunek="commit", location_id=lid,
+                                  old_path=p["old_path"], new_path=p["new_path"], generation=gen,
+                                  now=now, status="applied", gest=_GEST)
+        if ruch.status != "applied":
+            repo.set_rename_status(con, rename_id=p["rename_id"],
+                                   status="failed" if ruch.status == "failed" else "blocked",
+                                   reason=ruch.reason)
+            if ruch.torn:
+                powod = (f"{ruch.reason}; baza pozycji jak po kroku bazy - miejsce pliku "
+                         f"rozstrzyga rekoncyliacja renamu, drogą dalej jest cofnięcie przebiegu")
+                repo.settle_object_change_item(con, item_id=p["id"], status="failed", reason=powod,
+                                               now=now)
+                return FileResult(lid, p["old_path"], "failed", powod)
+            return _odmowa("blocked", ruch.reason)
+        przeniesiony = True
+
+    # (3) KARTA
+    uwaga = None
+    if oczekujace:
+        zapis = _zapisz_lokacje(con, stan, lid, oczekujace, now=now, inplace=True, fallback=True)
+        if zapis.wynik.status != "applied":
+            if not zapis.dotknieto:
+                return _odmowa("blocked", f"karta odbita bez zapisu: {zapis.wynik.reason}")
+            powod = (f"karta zapisana częściowo: {zapis.wynik.reason}; plik zostaje pod "
+                     f"{zapis.wynik.path}, baza pozycji jak po zapisie - najpierw naprawa karty "
+                     f"wg powodu, potem ewentualnie cofnięcie przebiegu")
+            repo.settle_object_change_item(con, item_id=p["id"], status="failed", reason=powod,
+                                           now=now)
+            return FileResult(lid, zapis.wynik.path, "failed", powod)
+        uwaga = zapis.wynik.reason
+    elif karty and any(r["status"] != "applied" for r in karty):
+        # Wpisy karty rozliczone przed awarią bez zapisu pozycji: 'failed' mógł ruszyć bajty.
+        zly = next(r for r in karty if r["status"] != "applied")
+        if zly["status"] == "failed":
+            powod = f"karta z poprzedniej próby: {zly['reason']}"
+            repo.settle_object_change_item(con, item_id=p["id"], status="failed", reason=powod,
+                                           now=now)
+            return FileResult(lid, loc["path"], "failed", powod)
+        return _odmowa("blocked", f"karta odbita w poprzedniej próbie: {zly['reason']}")
+    repo.settle_object_change_item(con, item_id=p["id"], status="applied", reason=uwaga, now=now)
+    teraz = _location_rename(con, lid)
+    return FileResult(lid, teraz["path"], "applied", uwaga)
+
+
+def _sprzatnij_po_zapisie(con, run_id, rozliczone, *, now) -> tuple[int, list[str]]:
+    """KONIEC PRZEBIEGU ZAPISU (D-1011-5 Q3): (1) katalogi źródłowe, które gest opróżnił W TYM
+    PRZEBIEGU (`rozliczone` = id pozycji zapisanych teraz) - od katalogu starej ścieżki w górę do
+    wspólnego przodka starej i nowej (bez niego) - usuwane, gdy puste, od najgłębszego, z zamiarem
+    `removed` przed `os.rmdir`; (2) katalogi założone przez gest, które zostały puste (przeniesienie
+    odbite po założeniu katalogu), usuwane - wyłącznie własność pewna. Katalogu z ZAKOŃCZONYM wpisem
+    `removed` (opróżniony i usunięty wcześniej, pod tą ścieżką stoi już cudzy) nie usunie
+    `_usun_katalog`: `repo.open_run_dir` nie otwiera takiego wpisu ponownie. → (ile usunięto,
+    ostrzeżenia)."""
+    kandydaci = {}
+    for p in _pozycje_przebiegu(con, run_id):
+        if (p["id"] not in rozliczone or p["status"] != "applied" or p["rename_id"] is None
+                or p["rename_status"] != "applied"):
+            continue
+        for katalog in _poziomy_pod(_wspolny_przodek(p), os.path.dirname(p["old_path"])):
+            kandydaci.setdefault(os.path.normcase(katalog), katalog)
+    usuniete, ostrzezenia = 0, []
+    for katalog in sorted(kandydaci.values(), key=_glebokosc, reverse=True):
+        if not _pusty_katalog(katalog):
+            continue
+        powod = _usun_katalog(con, run_id, katalog, now=now)
+        if powod is None:
+            usuniete += 1
+        else:
+            ostrzezenia.append(powod)
+    wlasne, _ = _usun_wlasne_puste(con, run_id, now=now)
+    return usuniete + wlasne, ostrzezenia
+
+
+def commit_object_change(con, run_id, *, now,
+                         progress: Callable[[int, int, str, str], None] | None = None,
+                         should_cancel: Callable[[], bool] | None = None) -> ObjectChangeResult:
+    """ZAPIS GESTU „Zmień obiekt…”/„Uzgodnij” (D-1011-5, AR-17 krok 3) - przebieg odtworzony z bazy
+    (`run_id`): per POZYCJA oczekująca `_zmien_pozycje` (baza → przeniesienie → karta, razem albo
+    wcale), na końcu katalogi (źródłowe opróżnione przez gest i własne puste). Pozycja rozliczona
+    utrwala się od razu, więc anulowanie (`should_cancel` PRZED pozycją) zostawia resztę 'pending' -
+    ponowne wywołanie ją dokończy. `progress(done, total, path, status)` po KAŻDEJ pozycji.
+
+    Na wejściu: rekoncyliacja przerwanych renamów WSZYSTKICH przebiegów (`reconcile_renames`, jak
+    `commit_renames`) i zamiarów katalogów tego przebiegu. Przebieg bez pozycji oczekujących (np.
+    zapisany wcześniej) = nic poza tą rekoncyliacją - sprzątanie katalogów dotyczy wyłącznie pozycji
+    rozliczonych w tym wywołaniu. Przebieg nieznany albo cofany/cofnięty → `ValueError` (EXPECT:
+    cofniętego gestu zapis nie wznawia - nowy gest to nowy podgląd)."""
+    przebieg = _przebieg_zmiany(con, run_id)
+    if przebieg is None:
+        raise ValueError(f"przebieg zmiany obiektu {run_id} nie istnieje")
+    if przebieg["status"] in ("undoing", "undone"):
+        raise ValueError(f"przebieg zmiany obiektu {run_id} jest cofany albo cofnięty - zapis go "
+                         f"nie wznowi; nowy gest to nowy podgląd")
+    ostrzezenia = [f"{r.path}: {r.reason}" for r in reconcile_renames(con, now=now)
+                   if r.status == "blocked"]
+    _rekoncyliuj_katalogi(con, run_id, now=now)
+    pozycje = [p for p in _pozycje_przebiegu(con, run_id) if p["status"] == "pending"]
+    total = len(pozycje)
+    applied: list[FileResult] = []
+    blocked: list[FileResult] = []
+    failed: list[FileResult] = []
+    skipped: list[FileResult] = []
+    kubly = {"applied": applied, "blocked": blocked, "failed": failed, "skipped": skipped}
+    stan = _StanCommitu(run_id, lambda: now)
+    liczniki = {"created": 0}
+    cancelled = False
+    done = 0
+    rozliczone = set()
+    for p in pozycje:
+        if should_cancel is not None and should_cancel():
+            cancelled = True
+            break
+        wynik = _zmien_pozycje(con, stan, p, now=now, liczniki=liczniki)
+        rozliczone.add(p["id"])
+        kubly[wynik.status].append(wynik)
+        done += 1
+        if progress is not None:
+            progress(done, total, wynik.path, wynik.status)
+    usuniete = 0
+    if rozliczone:
+        usuniete, uwagi = _sprzatnij_po_zapisie(con, run_id, rozliczone, now=now)
+        ostrzezenia.extend(uwagi)
+    if not cancelled:
+        repo.set_object_change_run_status(con, run_id=run_id, status="applied")
+    niepewne = _niepewne_katalogi(con, run_id)
+    ostrzezenia.extend(f"katalog {k}: zamiar założenia bez potwierdzenia, a katalog istnieje - "
+                       f"własność niepewna, zostaje do oka" for k in niepewne)
+    return ObjectChangeResult(run_id, applied, blocked, failed, skipped,
+                              _commity_przebiegu(con, run_id), liczniki["created"], usuniete,
+                              len(niepewne), cancelled, tuple(ostrzezenia))
+
+
+def _bez_sladu(con, p) -> bool:
+    """Pozycja oczekująca, do której zapis nie doszedł: baza nietknięta, plik nie przeniesiony (bez
+    zamiaru w locie), karta bez backupu w przebiegu - cofnięcie nie ma tu czego cofać."""
+    return (p["object_id"] is None and p["in_flight"] is None
+            and p["rename_status"] in (None, "pending", "blocked", "failed", "skipped")
+            and not _backupy_lokacji(con, p["run_id"], p["location_id"]))
+
+
+def _cofnij_pozycje(con, p, *, now, liczniki) -> FileResult:
+    """COFNIĘCIE JEDNEJ POZYCJI (D-1011-5 Q2, fazy w bazie): karta (wszystkie backupy pozycji ze
+    wszystkich commitów przebiegu, od najnowszego - ciało `undo` per lokacja) → plik (odwrotne
+    przeniesienie pod strażą; stary katalog, którego nie ma, zakładany i zapisany jako `restored`)
+    → baza (CAS klingi, status `undone`). Każda faza utrwala się po sukcesie; porażka zatrzymuje TĘ
+    pozycję z powodem, a ponowienie wznawia pierwszą niedomkniętą fazę."""
+    lid = p["location_id"]
+    faza = p["undo_phase"]
+
+    def _stop(status, sciezka, powod):
+        repo.set_object_change_undo_phase(con, item_id=p["id"], phase=None, reason=powod)
+        return FileResult(lid, sciezka, status, powod)
+
+    if p["rename_id"] is not None and p["in_flight"] is not None:
+        # Zamiar renamu, którego rekoncyliacja na wejściu nie rozstrzygnęła: nie wiadomo, pod którą
+        # nazwą stoi plik - ani karta, ani plik, ani baza nie ruszają się na ślepo.
+        return _stop("blocked", p["old_path"], _ZAMIAR_OTWARTY)
+    if faza is None:
+        for b in _backupy_lokacji(con, p["run_id"], lid):
+            cofniecie = _cofnij_lokacje(con, b["commit_id"], b, now=now)
+            if cofniecie.wynik.status != "restored" and not cofniecie.juz:
+                return _stop(cofniecie.wynik.status, cofniecie.wynik.path,
+                             f"karta nie wróciła: {cofniecie.wynik.reason}")
+        repo.set_object_change_undo_phase(con, item_id=p["id"], phase="card")
+        faza = "card"
+    if faza == "card":
+        if p["rename_id"] is not None and p["rename_status"] == "applied":
+            stary = os.path.dirname(p["old_path"])
+            brak = [k for k in _poziomy_pod(_wspolny_przodek(p), stary) if not os.path.isdir(k)]
+            powod, zalozone = _zaloz_katalogi(con, p["run_id"], brak, now=now, akcja="restored")
+            liczniki["created"] += zalozone
+            if powod is not None:
+                return _stop("blocked", p["new_path"], f"plik nie wrócił: {powod}")
+            ruch = _przenies_wstecz(con, p, now=now, reason=_COFNIETO)
+            if ruch.status != "applied":
+                return _stop("blocked" if ruch.status == "blocked" else "failed",
+                             p["old_path"] if ruch.torn else p["new_path"],
+                             f"plik nie wrócił: {ruch.reason}")
+        repo.set_object_change_undo_phase(con, item_id=p["id"], phase="file")
+    uwaga = repo.undo_object_change_db(con, item_id=p["id"], now=now)
+    teraz = _location_rename(con, lid)
+    return FileResult(lid, "" if teraz is None else teraz["path"], "restored", uwaga)
+
+
+def undo_object_change(con, run_id, *, now,
+                       progress: Callable[[int, int, str, str], None] | None = None,
+                       should_cancel: Callable[[], bool] | None = None) -> ObjectChangeResult:
+    """COFNIĘCIE GESTU (D-1011-5 Q2/Q3) - przebieg odtworzony z bazy, pozycje od ostatniej (jak stos):
+    każda pozycja ze śladem zapisu (zapisana, częściowa, przerwana w biegu) idzie fazami karta → plik
+    → baza (`_cofnij_pozycje`); pozycja, do której zapis nie doszedł, dostaje 'skipped' bez mutacji,
+    a pozycja odmówiona przy zapisie (już czysta) trafia do `skipped` z powodem, bez mutacji - wynik
+    cofnięcia mówi o każdej pozycji przebiegu, którą mówił zapis. Na końcu (bez anulowania) katalogi
+    założone przez gest - wyłącznie z potwierdzeniem i puste.
+
+    STATUS PRZEBIEGU: `undoing` NA WEJŚCIU (od tej chwili sterownik zapisu go nie wznowi), `undone`
+    dopiero, gdy żadna pozycja nie czeka na cofnięcie, a katalogi przeszły - awaria albo pozycja
+    zatrzymana z powodem zostawiają `undoing`, a ponowienie wznawia pierwszą niedomkniętą fazę każdej
+    pozycji. Drugie cofnięcie domkniętego przebiegu = nic do zrobienia (pozycje `undone`, katalogi
+    z `undone_at`). Na wejściu rekoncyliacja przerwanych renamów i zamiarów katalogów - jak w zapisie."""
+    przebieg = _przebieg_zmiany(con, run_id)
+    if przebieg is None:
+        raise ValueError(f"przebieg zmiany obiektu {run_id} nie istnieje")
+    if przebieg["status"] != "undone":
+        repo.set_object_change_run_status(con, run_id=run_id, status="undoing")
+    ostrzezenia = [f"{r.path}: {r.reason}" for r in reconcile_renames(con, now=now)
+                   if r.status == "blocked"]
+    _rekoncyliuj_katalogi(con, run_id, now=now)
+    pozycje = [p for p in _pozycje_przebiegu(con, run_id)
+               if p["status"] in ("applied", "failed", "pending", "blocked")]
+    total = len(pozycje)
+    applied: list[FileResult] = []
+    blocked: list[FileResult] = []
+    failed: list[FileResult] = []
+    skipped: list[FileResult] = []
+    kubly = {"restored": applied, "blocked": blocked, "failed": failed, "skipped": skipped}
+    liczniki = {"created": 0}
+    cancelled = False
+    done = 0
+    for p in reversed(pozycje):
+        if should_cancel is not None and should_cancel():
+            cancelled = True
+            break
+        if p["status"] == "blocked":
+            loc = _location_rename(con, p["location_id"])
+            wynik = FileResult(p["location_id"], "" if loc is None else loc["path"], "skipped",
+                               "odmówione przy zapisie - nic do cofnięcia")
+        elif p["status"] == "pending" and _bez_sladu(con, p):
+            wynik = _wycofaj_pozycje(con, p, "skipped", "przebieg cofnięty, zanim zapis doszedł "
+                                                        "do tej pozycji", now=now,
+                                     przeniesiony=False)
+        else:
+            wynik = _cofnij_pozycje(con, p, now=now, liczniki=liczniki)
+        kubly[wynik.status].append(wynik)
+        done += 1
+        if progress is not None:
+            progress(done, total, wynik.path, wynik.status)
+    usuniete = 0
+    if not cancelled:
+        usuniete, niepuste = _usun_wlasne_puste(con, run_id, now=now)
+        ostrzezenia.extend(f"katalog {k}: założony przez gest, ale nie jest pusty - zostaje"
+                           for k in niepuste)
+        if not any(p["status"] in ("applied", "failed", "pending")
+                   for p in _pozycje_przebiegu(con, run_id)):
+            repo.set_object_change_run_status(con, run_id=run_id, status="undone")
+    niepewne = _niepewne_katalogi(con, run_id)
+    ostrzezenia.extend(f"katalog {k}: zamiar założenia bez potwierdzenia, a katalog istnieje - "
+                       f"własność niepewna, zostaje do oka" for k in niepewne)
+    return ObjectChangeResult(run_id, applied, blocked, failed, skipped,
+                              _commity_przebiegu(con, run_id), liczniki["created"], usuniete,
+                              len(niepewne), cancelled, tuple(ostrzezenia))
 

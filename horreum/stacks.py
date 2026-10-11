@@ -1378,7 +1378,7 @@ def release_object_check(con, *, master_sha1_data, object_canon):
     karta wydania z innej bazy; porównania nie ma, gestu też nie: `release_object_id` = `None`).
     Porównanie po `object.id` kanonu wydania. `stack_object_id`, `stack_source` i `stack_cleared_id`
     (pamięć nagrobka) to PEŁNY stan, który gest ręki dostaje jako oczekiwany
-    (`repo.user_override_stack_object`) - sama para obiekt+źródło przeżywa sekwencję „nagrobek X →
+    (`repo.user_override_object`) - sama para obiekt+źródło przeżywa sekwencję „nagrobek X →
     przypisz Y → zdejmij Y”. `None`: wydanie bez kanonu, klatka stosu nieznana bazie, niebędąca
     stosem, wycofana albo zastąpiona (`retired_at`/`superseded_by` - martwa tożsamość) - gest nie
     miałby celu."""

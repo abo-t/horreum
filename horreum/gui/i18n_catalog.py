@@ -5282,4 +5282,236 @@ CATALOG = {
     "facets.group.channel": {"pl": "Kanał", "en": "Channel"},
     # --- RODOWÓD gotowego obrazu: grupa listwy facetów (stany `grid.lineage.state.*`) ---
     "facets.group.lineage": {"pl": "Rodowód", "en": "Lineage"},
+
+    # --- ZMIANA OBIEKTU RAZEM Z PLIKIEM (AR-17 krok 3, D-1011-5) i karta w miejscu (AR-117) ---
+    # Okno podglądu i wykonania (`gui/object_change_dialog.py`).
+    "objchg.title_change": {"pl": "Zmień obiekt", "en": "Change object"},
+    "objchg.title_align": {"pl": "Uzgodnij pliki z obiektem", "en": "Align files with their object"},
+    "objchg.head_change": {
+        "pl": {"one": "Zmiana obiektu {n} zaznaczonej klatki na {canon} - karta OBJECT: „{card}”.",
+               "few": "Zmiana obiektu {n} zaznaczonych klatek na {canon} - karta OBJECT: „{card}”.",
+               "many": "Zmiana obiektu {n} zaznaczonych klatek na {canon} - karta OBJECT: „{card}”."},
+        "en": {"one": "Changing the object of {n} selected frame to {canon} - OBJECT card: “{card}”.",
+               "other": "Changing the object of {n} selected frames to {canon} - OBJECT card: "
+                        "“{card}”."}},
+    "objchg.head_align": {
+        "pl": {"one": "Uzgodnienie pliku {n} zaznaczonej klatki z obiektem, który już ma.",
+               "few": "Uzgodnienie plików {n} zaznaczonych klatek z obiektem, który już mają.",
+               "many": "Uzgodnienie plików {n} zaznaczonych klatek z obiektem, który już mają."},
+        "en": {"one": "Aligning the file of {n} selected frame with the object it already has.",
+               "other": "Aligning the files of {n} selected frames with the object they already "
+                        "have."}},
+    "objchg.explain_change": {
+        "pl": "Najpierw baza (obiekt z ręki), potem plik: przeniesienie do folderu obiektu z nazwą "
+              "ze wzoru „Nazw” i karta OBJECT w pliku - per plik razem albo wcale. „Cofnij” "
+              "przywraca karty, pliki, katalogi i obiekt, dopóki okno jest otwarte.",
+        "en": "Database first (object set by hand), then the file: a move into the object folder "
+              "with the name from the “Names” pattern and the OBJECT card in the file - per file "
+              "together or not at all. “Undo” restores cards, files, folders and the object while "
+              "the window is open."},
+    "objchg.explain_align": {
+        "pl": "Obiekt w bazie zostaje. Plik jedzie do folderu swojego obiektu z nazwą ze wzoru "
+              "„Nazw”, a karta OBJECT dostaje jego formę - per plik razem albo wcale. „Cofnij” "
+              "działa, dopóki okno jest otwarte.",
+        "en": "The object in the database stays. The file moves into its object folder with the "
+              "name from the “Names” pattern and the OBJECT card gets the object form - per file "
+              "together or not at all. “Undo” works while the window is open."},
+    # Linijka wzoru nazwy - ta sama reguła co pasek „Nazwy” (D-1011-5 Q8), widoczna przed kliknięciem.
+    "objchg.template_line": {
+        "pl": "Nowe nazwy plików liczy wzór z paska „Nazwy”: {wzor} · data: {data}.",
+        "en": "New file names come from the “Names” bar pattern: {wzor} · date: {data}."},
+    "objchg.template_empty_bar": {
+        "pl": "Pasek „Nazwy” ma pusty wzór - nowe nazwy liczy wzór domyślny: {wzor} · data: {data}.",
+        "en": "The “Names” bar pattern is empty - new names come from the default pattern: {wzor}"
+              " · date: {data}."},
+    "objchg.template_default_note": {
+        "pl": " To wzór domyślny: KAŻDY plik z listy dostanie zupełnie nową nazwę (data na "
+              "początku, skrót danych na końcu) - inny wzór ustawisz w pasku „Nazwy”.",
+        "en": " This is the default pattern: EVERY file on the list gets a completely new name (date"
+              " first, data hash last) - set another pattern in the “Names” bar."},
+    "objchg.template_offset": {"pl": " ({offset:+d} h)", "en": " ({offset:+d} h)"},
+    "objchg.template_fallback": {"pl": ", druga data w zapasie",
+                                 "en": ", second date as a fallback"},
+    "objchg.template_fallback_forced": {
+        "pl": ", druga data w zapasie (pasek „Nazwy” ma go wyłączonego - zmiana obiektu bierze go "
+              "zawsze)",
+        "en": ", second date as a fallback (the “Names” bar has it off - the object change always "
+              "uses it)"},
+    "objchg.col.old": {"pl": "Plik dziś", "en": "File now"},
+    "objchg.col.new": {"pl": "Po zmianie", "en": "After the change"},
+    "objchg.col.card": {"pl": "Karta OBJECT", "en": "OBJECT card"},
+    "objchg.col.reason": {"pl": "Powód / plik", "en": "Reason / file"},
+    "objchg.col.n": {"pl": "Klatek", "en": "Frames"},
+    "objchg.undo_btn": {"pl": "Cofnij", "en": "Undo"},
+    "objchg.close_btn": {"pl": "Zamknij", "en": "Close"},
+    "objchg.planning": {"pl": "Liczę plan - sprawdzam foldery celu na dysku…",
+                        "en": "Computing the plan - checking target folders on disk…"},
+    "objchg.err.plan": {"pl": "Plan się nie policzył: {msg}", "en": "The plan failed: {msg}"},
+    "objchg.no_move": {"pl": "bez przeniesienia", "en": "no move"},
+    "objchg.mkdirs_tip": {"pl": "Nowe katalogi:\n{dirs}", "en": "New folders:\n{dirs}"},
+    "objchg.skipped_head": {
+        "pl": {"one": "Pominie {n} klatkę - powód i plik:",
+               "few": "Pominie {n} klatki - powody i pliki:",
+               "many": "Pominie {n} klatek - powody i pliki:"},
+        "en": {"one": "Skips {n} frame - reason and file:",
+               "other": "Skips {n} frames - reasons and files:"}},
+    "objchg.counts": {
+        "pl": "Do innego folderu: {folder} · nowa nazwa w tym samym folderze: {nazwa} · karty "
+              "OBJECT: {karty} · nowe katalogi: {katalogi} · usunie pustych katalogów: {usunie} · "
+              "obiekt w bazie: {obiekt} · bez zmian: {bez_zmian} · pominie: {pominie}",
+        "en": "To another folder: {folder} · new name in the same folder: {nazwa} · OBJECT cards: "
+              "{karty} · new folders: {katalogi} · empty folders to remove: {usunie} · object in "
+              "the database: {obiekt} · unchanged: {bez_zmian} · skipped: {pominie}"},
+    "objchg.rmdirs_tip": {"pl": "Puste po zmianie - zostaną usunięte:\n{dirs}",
+                          "en": "Empty after the change - will be removed:\n{dirs}"},
+    # Lista po biegu (zapis albo cofnięcie): co się stało z pozycją.
+    "objchg.col.was": {"pl": "Było", "en": "Was"},
+    "objchg.col.is": {"pl": "Jest", "en": "Is now"},
+    "objchg.col.status": {"pl": "Status", "en": "Status"},
+    "objchg.st.done": {"pl": "zrobione", "en": "done"},
+    "objchg.st.undone": {"pl": "cofnięte", "en": "undone"},
+    "objchg.st.blocked": {"pl": "zablokowane", "en": "blocked"},
+    "objchg.st.failed": {"pl": "błąd", "en": "error"},
+    "objchg.st.skipped": {"pl": "pominięte", "en": "skipped"},
+    "objchg.st.untouched": {"pl": "nie ruszone (bieg przerwany przed tą pozycją)",
+                            "en": "untouched (the run stopped before this item)"},
+    "objchg.st.reason": {"pl": " - {reason}", "en": " - {reason}"},
+    "objchg.replan_btn": {"pl": "Policz plan ponownie", "en": "Compute the plan again"},
+    "objchg.skipped_head_done": {
+        "pl": {"one": "Pominięto {n} klatkę - powód i plik:",
+               "few": "Pominięto {n} klatki - powody i pliki:",
+               "many": "Pominięto {n} klatek - powody i pliki:"},
+        "en": {"one": "Skipped {n} frame - reason and file:",
+               "other": "Skipped {n} frames - reasons and files:"}},
+    "objchg.card_rewrite": {"pl": " · cały plik przepisany (FITS: dopisanie karty)",
+                            "en": " · whole file rewritten (FITS: card added)"},
+    "objchg.err.stage": {"pl": "Zapis planu do bazy odmówiony: {msg}",
+                         "en": "Saving the plan to the database was refused: {msg}"},
+    "objchg.res.notes": {"pl": " · z uwagą: {n} - {note}", "en": " · with a note: {n} - {note}"},
+    "objchg.res.rescan": {
+        "pl": {"one": " · {n} plik zmienił się od ostatniego skanu - najpierw przebieg Dostawy "
+                      "(skan), potem gest ponownie",
+               "few": " · {n} pliki zmieniły się od ostatniego skanu - najpierw przebieg Dostawy "
+                      "(skan), potem gest ponownie",
+               "many": " · {n} plików zmieniło się od ostatniego skanu - najpierw przebieg Dostawy "
+                       "(skan), potem gest ponownie"},
+        "en": {"one": " · {n} file changed since the last scan - run Intake (scan) first, then "
+                      "the gesture again",
+               "other": " · {n} files changed since the last scan - run Intake (scan) first, then "
+                        "the gesture again"}},
+    "objchg.res.run": {"pl": " · przebieg {run_id}", "en": " · run {run_id}"},
+    "objchg.card_kept": {"pl": "{value} (bez zmiany)", "en": "{value} (unchanged)"},
+    "objchg.card_none": {"pl": "- (bez karty)", "en": "- (no card)"},
+    "objchg.card_absent": {"pl": "(brak)", "en": "(none)"},
+    "objchg.card_change": {"pl": "{old} → {new}", "en": "{old} → {new}"},
+    "objchg.finish_btn": {"pl": "Dokończ ({n})", "en": "Finish ({n})"},
+    "objchg.action_change": {"pl": "Zmień obiekt ({n})", "en": "Change object ({n})"},
+    "objchg.action_change_bare": {"pl": "Zmień obiekt", "en": "Change object"},
+    "objchg.action_align": {"pl": "Uzgodnij ({n})", "en": "Align ({n})"},
+    "objchg.action_align_bare": {"pl": "Uzgodnij", "en": "Align"},
+    "objchg.nothing_tip": {
+        "pl": "Plan nie ma nic do zrobienia - pliki stoją już w folderze obiektu z właściwą kartą "
+              "albo są pominięte z powodem.",
+        "en": "The plan has nothing to do - the files already sit in the object folder with the "
+              "right card, or they are skipped with a reason."},
+    "objchg.res.applied": {"pl": "{n} zmienionych", "en": "{n} changed"},
+    "objchg.res.undone": {"pl": "{n} cofniętych", "en": "{n} undone"},
+    "objchg.res.dirs": {"pl": " · katalogi założone: {created}, usunięte: {removed}",
+                        "en": " · folders created: {created}, removed: {removed}"},
+    "objchg.res.dirs_uncertain": {
+        "pl": {"one": " · {n} katalog o niepewnej własności zostaje do oka (nie usuwam)",
+               "few": " · {n} katalogi o niepewnej własności zostają do oka (nie usuwam)",
+               "many": " · {n} katalogów o niepewnej własności zostaje do oka (nie usuwam)"},
+        "en": {"one": " · {n} folder of uncertain ownership is left for review (not removed)",
+               "other": " · {n} folders of uncertain ownership are left for review (not removed)"}},
+    # Wejścia gestu w Zbiorach: pozycja menu „Obiekt", wybór celu, „Uzgodnij pliki…" perspektywy.
+    "grid.sel.object_change": {"pl": "Zmień obiekt…", "en": "Change object…"},
+    "grid.sel.object_change_tip": {"pl": " · „Zmień obiekt…” - do sprawdzenia w podglądzie: {n}",
+                                   "en": " · “Change object…” - to check in the preview: {n}"},
+    "grid.sel.object_change_tip_only": {
+        "pl": {"one": "„Zmień obiekt…” - do sprawdzenia w podglądzie: {n} klatka (plik, karta "
+                      "i baza razem).",
+               "few": "„Zmień obiekt…” - do sprawdzenia w podglądzie: {n} klatki (plik, karta "
+                      "i baza razem).",
+               "many": "„Zmień obiekt…” - do sprawdzenia w podglądzie: {n} klatek (plik, karta "
+                       "i baza razem)."},
+        "en": {"one": "“Change object…” - to check in the preview: {n} frame (file, card and "
+                      "database together).",
+               "other": "“Change object…” - to check in the preview: {n} frames (file, card and "
+                        "database together)."}},
+    "grid.sel.object_change_align": {"pl": "Uzgodnij pliki…", "en": "Align files…"},
+    "grid.sel.object_change_align_tip": {
+        "pl": {"one": "Plik {n} zaznaczonej klatki pojedzie do folderu jej obiektu - podgląd "
+                      "przed zapisem.",
+               "few": "Pliki {n} zaznaczonych klatek pojadą do folderu ich obiektu - podgląd "
+                      "przed zapisem.",
+               "many": "Pliki {n} zaznaczonych klatek pojadą do folderu ich obiektu - podgląd "
+                       "przed zapisem."},
+        "en": {"one": "The file of {n} selected frame moves into its object folder - preview "
+                      "before writing.",
+               "other": "The files of {n} selected frames move into their object folder - "
+                        "preview before writing."}},
+    "grid.sel.object_change_recipe": {"pl": "zaznacz klatki, prawy klik → „{align}”",
+                                      "en": "select the frames, right-click → “{align}”"},
+    "grid.sel.object_change_pick_title": {"pl": "Zmień obiekt - wybierz cel",
+                                          "en": "Change object - pick the target"},
+    "grid.sel.object_change_pick_head": {
+        "pl": {"one": "Nowy obiekt dla {n} zaznaczonej klatki. Wybór niczego nie zapisuje - plan "
+                      "z plikami pokaże następne okno.",
+               "few": "Nowy obiekt dla {n} zaznaczonych klatek. Wybór niczego nie zapisuje - plan "
+                      "z plikami pokaże następne okno.",
+               "many": "Nowy obiekt dla {n} zaznaczonych klatek. Wybór niczego nie zapisuje - "
+                       "plan z plikami pokaże następne okno."},
+        "en": {"one": "New object for {n} selected frame. Picking writes nothing - the next "
+                      "window shows the plan with the files.",
+               "other": "New object for {n} selected frames. Picking writes nothing - the next "
+                        "window shows the plan with the files."}},
+    "grid.sel.object_change_pick_ok": {"pl": "Dalej - podgląd…", "en": "Next - preview…"},
+    "grid.sel.object_change_unknown": {
+        "pl": "Drabina nazw nie rozpoznaje „{canon}” - gest nie ruszy.",
+        "en": "The name ladder does not recognise “{canon}” - the gesture will not start."},
+    "grid.sel.object_change_no_card": {
+        "pl": "Obiekt {canon} nie ma formy karty OBJECT, która wróciłaby do niego przy odczycie "
+              "(kanon znany tylko z aliasu). Gest obiecuje kartę i folder razem, więc odmawia - "
+              "obiekt w samej bazie nada „Przypisz obiekt…”.",
+        "en": "Object {canon} has no OBJECT card form that would resolve back to it on reading "
+              "(canon known only from an alias). The gesture promises the card and the folder "
+              "together, so it refuses - “Assign object…” sets the object in the database only."},
+    # Wiersz Porządków i jego perspektywa (nazwy rodziny presetów: `perspective.*`,
+    # `grid.criteria.only_*` - konwencja bramki `test_KAZDY_preset_ma_etykiete_i_zuzyta_flage`).
+    "tasks.file_object_mismatch_frames": {"pl": "Plik nie zgadza się z obiektem",
+                                          "en": "File disagrees with its object"},
+    "tasks.file_object_mismatch_tip": {
+        "pl": "Gest: zaznacz klatki w perspektywie, prawy klik → „{align}”. Plik pojedzie do "
+              "folderu obiektu, karta OBJECT dostanie jego formę - podgląd przed zapisem.",
+        "en": "Gesture: select the frames in the view, right-click → “{align}”. The file moves "
+              "into the object folder and the OBJECT card gets its form - preview before writing."},
+    "perspective.file_object_mismatch": {"pl": "Plik nie zgadza się z obiektem",
+                                         "en": "File disagrees with its object"},
+    "grid.criteria.only_file_object_mismatch": {
+        "pl": "tylko plik niezgodny z obiektem (folder albo karta)",
+        "en": "only files disagreeing with their object (folder or card)"},
+    # Okna kart piszą w miejscu (AR-117) - zdanie mówi o drodze zapisu tylko przy spadku.
+    "wb.inplace_fallback": {"pl": " · drogą atomową (cały plik przepisany): {n} - {reason}",
+                            "en": " · atomic path (whole file rewritten): {n} - {reason}"},
+    # Dom: gest zmiany obiektu przenosi pliki, a nie przemianowuje (relokacja z powodem gestu).
+    "home.gest.object_relocated": {
+        "pl": {"one": "przeniesiono {n} plik do folderu obiektu",
+               "few": "przeniesiono {n} pliki do folderu obiektu",
+               "many": "przeniesiono {n} plików do folderu obiektu"},
+        "en": {"one": "{n} file moved to the object folder",
+               "other": "{n} files moved to the object folder"}},
+    "home.gest.object_relocated_back": {
+        "pl": {"one": "cofnięto zmianę obiektu - {n} plik wrócił na dawne miejsce",
+               "few": "cofnięto zmianę obiektu - {n} pliki wróciły na dawne miejsce",
+               "many": "cofnięto zmianę obiektu - {n} plików wróciło na dawne miejsce"},
+        "en": {"one": "object change undone - {n} file returned to its former place",
+               "other": "object change undone - {n} files returned to their former place"}},
+    # Relokacje gestu bez rozróżnienia katalogu (read-model nie mówi, czy folder się zmienił).
+    "home.gest.object_files": {
+        "pl": {"one": "zmiana obiektu - {n} plik w nowym miejscu albo pod nową nazwą",
+               "few": "zmiana obiektu - {n} pliki w nowym miejscu albo pod nową nazwą",
+               "many": "zmiana obiektu - {n} plików w nowym miejscu albo pod nową nazwą"},
+        "en": {"one": "object change - {n} file in a new place or under a new name",
+               "other": "object change - {n} files in a new place or under a new name"}},
 }

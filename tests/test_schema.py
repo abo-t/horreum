@@ -21,6 +21,8 @@ EXPECTED_TABLES = {
     "inplace_op",
     # 0032 - uwagi klatki (WO-2)
     "frame_note",
+    # 0036 - zmiana obiektu razem z plikiem (AR-17 krok 3)
+    "object_change_run", "pending_object_change", "run_dir",
 }
 
 
@@ -97,8 +99,8 @@ def test_szkielet_przyszly_pusty(tmp_path):
     con.close()
 
 
-def test_user_version_v35_po_migracji(tmp_path):
-    """0035 podnosi user_version do 35 (świeża baza leci 0002→…→0035 sekwencyjnie; 0025 = wersja
+def test_user_version_v36_po_migracji(tmp_path):
+    """0036 podnosi user_version do 36 (świeża baza leci 0002→…→0036 sekwencyjnie; 0025 = wersja
     reguły koercji faktów kopii `location.hdr_rule`, AR-33; 0026 = werdykt „zostaw wszystkie
     wersje” `stack_version_kept` + `integration.creation_time`, AR-10; 0027 = stanowisko wskazane
     ręką `frame.observatory_source`; 0028 = kanał `frame.channel`, P4-3; 0029 = zamiar renamu
@@ -106,13 +108,109 @@ def test_user_version_v35_po_migracji(tmp_path):
     `header_backups.pending_since`, AR-40; 0031 = piksel kamery z ręki `camera.pixel_source`, AR-55;
     0032 = uwagi klatki `frame_note`, WO-2; 0033 = ranga `harvest` rodowodu stosów, AR-102;
     0034 = historia stosu `stack_history`, aliasy `light_name_alias` i podstawa rodowodu;
-    0035 = wariant kadru stosu `stack_variant`, AR-54).
+    0035 = wariant kadru stosu `stack_variant`, AR-54; 0036 = przebieg gestu zmiany obiektu
+    `object_change_run`, pozycje ze stanem sprzed `pending_object_change` i katalogi gestu `run_dir`,
+    AR-17 krok 3).
 
     Pin JEST intencją: każda nowa migracja ma ten test PRZEWRÓCIĆ imiennie, żeby podniesienie
     wersji było gestem, a nie skutkiem ubocznym."""
     con = db.open_db(str(tmp_path / "h.db"))
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 35
-    assert db.SCHEMA_VERSION == 35
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 36
+    assert db.SCHEMA_VERSION == 36
+    con.close()
+
+
+def _baza_v35_z_kopia(path):
+    """Baza v35 (migracje do 0035 włącznie) z klatką, kopią, obiektem i wierszem renamu - stan
+    żywego archiwum tuż przed 0036."""
+    con = db.connect(path)
+    for version, filename in db.MIGRATIONS:
+        if version <= 35:
+            db._apply_migration(con, version, db._migration_sql(filename))
+    con.execute("INSERT INTO frame(id, sha1_data, kind, first_seen_at) VALUES (1, 'a', 'light', 't')")
+    con.execute("INSERT INTO location(id, frame_id, volume, path) VALUES (1, 1, 'V', 'R:\\L\\a.fits')")
+    con.execute("INSERT INTO object(id, canon, catalog, kind) VALUES (1, 'IC405', 'IC', 'deep_sky')")
+    con.execute("INSERT INTO pending_renames(id, run_id, location_id, old_path, new_path, status) "
+                "VALUES (1, 'R', 1, 'R:\\L\\a.fits', 'R:\\L\\b.fits', 'pending')")
+    con.commit()
+    return con
+
+
+def test_0036_zmiana_obiektu_przyrost_na_bazie_v35(tmp_path):
+    """0036 na bazie v35 z danymi: trzy tabele wchodzą PUSTE, istniejące wiersze nietknięte,
+    druga migracja = no-op; FK pozycji wiąże przebieg, klatkę, kopię i wiersz renamu."""
+    con = _baza_v35_z_kopia(str(tmp_path / "h.db"))
+    przed = {t: con.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
+             for t in ("frame", "location", "object", "pending_renames", "event")}
+    assert db.migrate(con) == db.SCHEMA_VERSION == 36
+    for t in ("object_change_run", "pending_object_change", "run_dir"):
+        assert con.execute(f"SELECT count(*) FROM {t}").fetchone()[0] == 0
+    assert {t: con.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in przed} == przed
+    assert db.migrate(con) == db.SCHEMA_VERSION                      # idempotencja
+    con.execute("INSERT INTO object_change_run(run_id, mode, created_at) VALUES ('R', 'align', 't')")
+    con.execute("INSERT INTO pending_object_change(run_id, frame_id, location_id, old_path, "
+                "object_change, rename_id) VALUES ('R', 1, 1, 'R:\\L\\a.fits', 0, 1)")
+    for zly in ("INSERT INTO pending_object_change(run_id, frame_id, location_id, old_path, "
+                "object_change) VALUES ('X', 1, 1, 'R:\\L\\a.fits', 0)",   # przebieg nieznany
+                "INSERT INTO pending_object_change(run_id, frame_id, location_id, old_path, "
+                "object_change, rename_id) VALUES ('R', 1, 1, 'R:\\L\\a.fits', 0, 99)",  # rename
+                "INSERT INTO run_dir(run_id, path, action, opened_at) VALUES ('X', 'R:\\L', "
+                "'created', 't')"):
+        with pytest.raises(sqlite3.IntegrityError):
+            con.execute(zly)
+    assert con.execute("PRAGMA foreign_key_check").fetchall() == []
+    con.close()
+
+
+def test_0036_CHECK_przebiegu_pozycji_i_katalogow(tmp_path):
+    """CHECK-i 0036 odbijają stan sprzeczny wstrzyknięty gołym SQL-em (baza = ostatnia bramka):
+    tryb i cel przebiegu, obiekt zapisany bez zmiany obiektu, stan sprzed bez obiektu, `undone` bez
+    fazy bazy (i odwrotnie), katalogi bez przeniesienia i nie-tablica JSON, akcja katalogu, cofnięcie
+    katalogu bez potwierdzenia albo nie-założonego; ścieżka katalogu bez wielkości liter."""
+    con = _baza_v35_z_kopia(str(tmp_path / "h.db"))
+    db.migrate(con)
+    for zly in ("INSERT INTO object_change_run(run_id, mode, created_at) VALUES ('Z', 'change', 't')",
+                "INSERT INTO object_change_run(run_id, mode, canon, created_at) "
+                "VALUES ('Z', 'align', 'IC405', 't')",
+                "INSERT INTO object_change_run(run_id, mode, created_at) VALUES ('Z', 'swap', 't')",
+                "INSERT INTO object_change_run(run_id, mode, created_at, status) "
+                "VALUES ('Z', 'align', 't', 'done')"):
+        with pytest.raises(sqlite3.IntegrityError):
+            con.execute(zly)
+    con.execute("INSERT INTO object_change_run(run_id, mode, created_at, status) "
+                "VALUES ('U', 'align', 't', 'undoing')")                # cofany - status przejściowy
+    con.execute("INSERT INTO object_change_run(run_id, mode, canon, catalog, kind, card_form, "
+                "created_at) VALUES ('R', 'change', 'IC405', 'IC', 'deep_sky', 'IC 405', 't')")
+    with pytest.raises(sqlite3.IntegrityError):                          # ścieżka podglądu pusta
+        con.execute("INSERT INTO pending_object_change(run_id, frame_id, location_id, old_path, "
+                    "object_change) VALUES ('R', 1, 1, '', 0)")
+    wstaw = ("INSERT INTO pending_object_change(id, run_id, frame_id, location_id, old_path, "
+             "object_change, object_id, before_source, rename_id, mkdirs, status, undo_phase) "
+             "VALUES (?, 'R', 1, 1, 'R:\\L\\a.fits', ?, ?, ?, ?, ?, ?, ?)")
+    for zle in ((1, 0, 1, None, None, "[]", "pending", None),             # obiekt bez zmiany
+                (1, 1, None, "header", None, "[]", "pending", None),      # stan sprzed bez obiektu
+                (1, 1, None, None, None, "[]", "undone", None),           # undone bez fazy bazy
+                (1, 1, None, None, None, "[]", "applied", "db"),          # faza bazy bez undone
+                (1, 1, None, None, None, '["R:\\\\L"]', "pending", None), # katalogi bez renamu
+                (1, 1, None, None, 1, '{"a": 1}', "pending", None),       # nie-tablica
+                (1, 1, None, None, None, "[]", "done", None),
+                (1, 1, None, None, None, "[]", "pending", "dirs")):
+        with pytest.raises(sqlite3.IntegrityError):
+            con.execute(wstaw, zle)
+    con.execute(wstaw, (1, 1, 1, "header", 1, '["R:\\\\L\\\\IC405"]', "undone", "db"))
+    with pytest.raises(sqlite3.IntegrityError):
+        con.execute(wstaw, (2, 1, None, None, None, "[]", "pending", None))   # klatka raz w przebiegu
+    con.execute("INSERT INTO run_dir(id, run_id, path, action, opened_at) "
+                "VALUES (1, 'R', 'R:\\L\\IC405', 'created', 't')")
+    for zly in ("INSERT INTO run_dir(run_id, path, action, opened_at) "
+                "VALUES ('R', 'r:\\l\\ic405', 'created', 't')",       # ten sam katalog bez liter
+                "INSERT INTO run_dir(run_id, path, action, opened_at) VALUES ('R', 'R:\\L', 'moved', 't')",
+                "UPDATE run_dir SET undone_at = 't' WHERE id = 1",    # cofnięcie bez potwierdzenia
+                "INSERT INTO run_dir(run_id, path, action, opened_at, done_at, undone_at) "
+                "VALUES ('R', 'R:\\S', 'removed', 't', 't', 't')"):   # cofamy tylko założone
+        with pytest.raises(sqlite3.IntegrityError):
+            con.execute(zly)
+    con.execute("UPDATE run_dir SET done_at = 't', undone_at = 't' WHERE id = 1")
     con.close()
 
 

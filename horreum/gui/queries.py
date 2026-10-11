@@ -12,28 +12,33 @@ NIGDY składanie stringa SQL. Listy zmiennej długości (id/keywordy) idą jako 
 """
 
 import json
+import ntpath
 import os
 import re
 
 from horreum.grouper import NO_TELESCOPE_KINDS      # jeden właściciel zbioru rodzajów poza osią
 from horreum.lineage import RAW_FLAT_WINDOW_DAYS, raw_flats_for   # surowe flaty teczek wydania
 from horreum.naming import header_dt
+from horreum.object_change import ObjectTarget             # cel gestu zmiany obiektu (AR-17)
+from horreum.resolve.paths import path_key                 # klucz ścieżki fizycznej (bez wielkości liter)
 from horreum.repo import (INPLACE_ISOLATING_PHASES,   # fazy izolujące zapisu w miejscu (0022)
                           INPLACE_OPEN_PHASES,        # ...i ich podzbiór otwarty
                           absorbed_frame_ids,         # wchłonięte szkielety (AR-42)
                           normalize_note)             # postać treści uwagi z klingi (0032)
 from horreum.resolve._coerce import _to_float, _to_int, _to_text
 from horreum.resolve._text import norm_alnum
+from horreum.resolve.catalog import folder_form      # forma folderu obiektu (D-1011-5 Q5)
 from horreum.resolve.frames import LIGHT_KINDS
 from horreum.resolve.headers import (COPY_TESTIMONY_KEYWORDS, COPY_TESTIMONY_RULE, FAKTY_BIEZACE,
                                      copy_facts_state, copy_testimony)
 from horreum.resolve.objects import CLEARABLE_OBJECT_SOURCES, WEAK_OBJECT_SOURCES
 from horreum.resolve.paths import (STACK_KIND, STACKS_DIR, filter_folder_from_path,
-                                   object_from_path)
+                                   object_from_path, path_after_object_change)
 from horreum.resolve.recipe import parse_master_path
 from horreum.resolve.stack import read_testimony, signature_timestamp
-from horreum.resolver import (NO_OBJECT_CARD_FILETYPES, alias_snapshot, forma_karty_object,
-                              library_root_from_db, path_proposals, resolve_name, review_state)
+from horreum.resolver import (NO_OBJECT_CARD_FILETYPES, alias_lookup, alias_snapshot,
+                              forma_karty_object, library_root_from_db, path_proposals,
+                              resolve_name, review_state)
 from horreum.stacks import REASON_NO_OBJECT, REASON_OFFSET_UNKNOWN, propose_lineage_candidates
 
 
@@ -2107,6 +2112,63 @@ def isolated_inplace_ops(con, frame_ids):
 SKIP_COPY_WITHOUT_FACTS = ("kopia bez zebranych faktów przy klatce z nieobecną kopią - zbierze je "
                            "„Przyjmij nowe”, gdy plik jest na dysku i nie czeka na dokończenie "
                            "przerwanego zapisu")
+# Forma karty nie wraca do kanonu (`forma_karty_object` → None, kanon znany tylko z aliasu): karta
+# z nią wypchnęłaby klatkę do nierozpoznanych. Stała, bo to samo zdanie mówi bramka karty
+# i okno zmiany obiektu, które odmawia takiego celu, zanim powstanie plan.
+SKIP_FORM_NOT_CANON = "forma karty nie wraca do kanonu (kanon znany tylko z aliasu)"
+
+
+def object_card_gate(r, *, card, form, canon, lookup):
+    """BRAMKA ZAPISU KARTY `OBJECT` jednej klatki - pierwszy powód, dla którego kartę nie da się
+    postawić w formie `form` (`set` na karcie `card` albo `add`, gdy `card` is None), albo None.
+    JEDEN właściciel dla obu read-modeli piszących kartę: ujednolicenia (`object_card_form_rows`)
+    i zmiany obiektu (`object_change_rows`) - dwie kopie listy rozjechałyby podgląd jednego gestu
+    z drugim przy pierwszej nowej bramce.
+
+    `r` = fakty klatki i jej obecnej kopii pod nazwami kolumn obu read-modeli: `n_present`,
+    `n_absent`, `compressed`, `degen` (`sha1_data_uncomputable`), `header_hash`, `unreadable_since`,
+    `n_cards` (liczba kart `OBJECT`), `hdr_hash`/`hdr_rule`/`hdr_object` (fakty kopii), `vtype`
+    (typ karty idx 0), `filetype`, `n_sum` (karty `CHECKSUM`/`DATASUM`). `canon` = obiekt, który
+    karta ma nazwać (sklejka musi go wskazywać KAŻDYM członem), `lookup` = migawka aliasów drabiny.
+
+    Kolejność bramek = kolejność z `object_card_form_rows` (powód ujednolicenia zostaje bajt
+    w bajt); RAW i region rozstrzyga WOŁAJĄCY przed tą funkcją, bo dla zmiany obiektu nie są
+    pominięciem, tylko brakiem karty (RAW przenosi się bez karty, region karty nie ma)."""
+    czlony = [c.strip() for c in card.split("_")] if card is not None and "_" in card else []
+    # Fakty kopii zebrane starszą regułą koercji (AR-33) to „nie wiem", jak brak faktów.
+    fakty_biezace = copy_facts_state(r["hdr_hash"], r["hdr_rule"]) == FAKTY_BIEZACE
+
+    def _kanon(tekst):
+        trafienie = resolve_name(lookup, tekst)[0] if tekst else None
+        return trafienie.canon if trafienie is not None else None
+
+    if r["n_present"] == 0:
+        return "brak obecnej kopii"
+    if r["n_present"] > 1:
+        return f"wiele obecnych kopii ({r['n_present']})"
+    if r["compressed"]:
+        return "skompresowany master"
+    if r["degen"]:
+        return "tożsamość nieobliczalna (degenerat) - zapis rozdwoiłby klatkę"
+    if r["header_hash"] is None:
+        return "brak header_hash - brak kontroli zapisu"
+    if r["unreadable_since"] is not None:
+        return "kopia oznaczona jako nieczytelna"
+    if r["n_cards"] > 1:
+        return f"wiele kart OBJECT ({r['n_cards']})"
+    if not fakty_biezace and r["n_absent"]:
+        return SKIP_COPY_WITHOUT_FACTS
+    if fakty_biezace and _to_text(r["hdr_object"]) != card:
+        return "kopia zeznaje inną kartę OBJECT niż klatka"
+    if form is None:
+        return SKIP_FORM_NOT_CANON
+    if czlony and not all(_kanon(c) == canon for c in czlony):
+        return "sklejka oznaczeń - nie każdy człon wskazuje ten obiekt"
+    if card is not None and r["vtype"] != "str":
+        return f"karta OBJECT nietekstowa ({r['vtype']})"
+    if r["filetype"] == "fits" and r["n_sum"]:
+        return "FITS z sumą kontrolną (CHECKSUM/DATASUM)"
+    return None
 
 
 def object_card_form_rows(con):
@@ -2176,10 +2238,6 @@ def object_card_form_rows(con):
     lookup = alias_snapshot(con).get
     formy: dict[str, str | None] = {}
 
-    def _kanon(tekst):
-        trafienie = resolve_name(lookup, tekst)[0] if tekst else None
-        return trafienie.canon if trafienie is not None else None
-
     wynik, widziane = [], set()
     for r in rows:
         fid = int(r["fid"])
@@ -2197,41 +2255,12 @@ def object_card_form_rows(con):
         form = formy[r["canon"]]
         if form is not None and card == form:
             continue
-        czlony = [c.strip() for c in card.split("_")] if "_" in card else []
-        # Fakty kopii zebrane starszą regułą koercji (AR-33) to „nie wiem", jak brak faktów.
-        fakty_biezace = copy_facts_state(r["hdr_hash"], r["hdr_rule"]) == FAKTY_BIEZACE
         if r["filetype"] == "raw":
             skip = "plik RAW (DSLR) - Horreum go nie zapisuje"
         elif r["osrc"] == "region":
             skip = "obiekt z regionu (współrzędne), nie z karty"
-        elif r["n_present"] == 0:
-            skip = "brak obecnej kopii"
-        elif r["n_present"] > 1:
-            skip = f"wiele obecnych kopii ({r['n_present']})"
-        elif r["compressed"]:
-            skip = "skompresowany master"
-        elif r["degen"]:
-            skip = "tożsamość nieobliczalna (degenerat) - zapis rozdwoiłby klatkę"
-        elif r["header_hash"] is None:
-            skip = "brak header_hash - brak kontroli zapisu"
-        elif r["unreadable_since"] is not None:
-            skip = "kopia oznaczona jako nieczytelna"
-        elif r["n_cards"] > 1:
-            skip = f"wiele kart OBJECT ({r['n_cards']})"
-        elif not fakty_biezace and r["n_absent"]:
-            skip = SKIP_COPY_WITHOUT_FACTS
-        elif fakty_biezace and _to_text(r["hdr_object"]) != card:
-            skip = "kopia zeznaje inną kartę OBJECT niż klatka"
-        elif form is None:
-            skip = "forma karty nie wraca do kanonu (kanon znany tylko z aliasu)"
-        elif czlony and not all(_kanon(c) == r["canon"] for c in czlony):
-            skip = "sklejka oznaczeń - nie każdy człon wskazuje ten obiekt"
-        elif r["vtype"] != "str":
-            skip = f"karta OBJECT nietekstowa ({r['vtype']})"
-        elif r["filetype"] == "fits" and r["n_sum"]:
-            skip = "FITS z sumą kontrolną (CHECKSUM/DATASUM)"
         else:
-            skip = None
+            skip = object_card_gate(r, card=card, form=form, canon=r["canon"], lookup=lookup)
         wynik.append({
             "frame_id": fid, "location_id": r["lid"], "path": r["path"] or "",
             "filetype": r["filetype"], "header_hash": r["header_hash"], "canon": r["canon"],
@@ -2244,6 +2273,289 @@ def object_card_form_frame_ids(con):
     """Klatki do ujednolicenia karty `OBJECT` - wiersze `object_card_form_rows` BEZ powodu
     pominięcia (licznik i trim wiersza Porządków „Karta OBJECT w innej formie"). Zwraca set[int]."""
     return {r["frame_id"] for r in object_card_form_rows(con) if r["skip"] is None}
+
+
+# ============================================================ ZMIANA OBIEKTU (AR-17 krok 3, D-1011-5)
+# Read-model gestu „Zmień obiekt…” i „Uzgodnij pliki…”: wiersze dla czystego planera
+# (`horreum.object_change.plan_object_change`), cel z nazwy okna i predykat wiersza Porządków.
+
+
+def object_target(con, text, *, alias_norm=None):
+    """Cel gestu „Zmień obiekt…” z kanonu albo nazwy wpisanej w oknie → `ObjectTarget` albo None
+    (nazwa nierozpoznana). Kanon istniejącego obiektu wygrywa wprost (jego `catalog`/`kind`
+    z bazy); każda inna nazwa idzie TĄ SAMĄ drabiną, co okno przypisania (`resolver.resolve_name`
+    z aliasami bazy) - obiekt, którego jeszcze nie ma, bierze `catalog`/`kind` z tożsamości drabiny,
+    a zakłada go dopiero sterownik przy pierwszej pozycji.
+
+    `alias_norm` przychodzi z okna wyboru (`assign_dialog.alias_key` - reguła trzech przypadków
+    mieszka tam) i jedzie w celu bez zmian. `card_form` = `resolver.forma_karty_object`; None
+    znaczy, że karta z tą formą nie wróci do kanonu - okno odmawia takiego celu, zanim powstanie
+    plan (`SKIP_FORM_NOT_CANON`, obietnica „karta i folder razem”).
+
+    Uszkodzony słownik obiektów własnych (`ValueError` drabiny) przechodzi do wołającego - okno
+    przypisania melduje go własnym zdaniem, a „nierozpoznana” byłoby nieprawdą o przyczynie."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    row = con.execute("SELECT canon, catalog, kind FROM object WHERE canon = ?", (text,)).fetchone()
+    if row is not None:
+        canon, catalog, kind = row["canon"], row["catalog"], row["kind"]
+    else:
+        ident, _ = resolve_name(alias_lookup(con), text)
+        if ident is None:
+            return None
+        row = con.execute("SELECT canon, catalog, kind FROM object WHERE canon = ?",
+                          (ident.canon,)).fetchone()
+        canon, catalog, kind = ((row["canon"], row["catalog"], row["kind"]) if row is not None
+                                else (ident.canon, ident.catalog, ident.kind))
+    return ObjectTarget(canon=canon, catalog=catalog, kind=kind, alias_norm=alias_norm,
+                        card_form=forma_karty_object(con, canon))
+
+
+def location_lookup(con):
+    """`(volume, path) → frozenset[location_id]` - lokacje bazy (KAŻDY `present`) pod tą samą
+    ścieżką FIZYCZNĄ (`object_change.path_key`: bez wielkości liter, jak `R:`). Kolizja celu
+    w bazie dla planera zmiany obiektu: wiersz `present=0` też się liczy, bo `UNIQUE(volume, path)`
+    odbiłby relokację, a cel różniący się wielkością liter to ten sam plik na udziale. Indeks
+    budowany RAZ (jeden SELECT, ~17 tys. wierszy), planer pyta go w pętli bez zapytań."""
+    indeks = {}
+    for r in con.execute("SELECT id, volume, path FROM location").fetchall():
+        indeks.setdefault((r["volume"], path_key(r["path"])), set()).add(int(r["id"]))
+    return lambda volume, path: frozenset(indeks.get((volume, path_key(path)), ()))
+
+
+def object_change_rows(con, frame_ids, *, target=None):
+    """Wiersze klatek dla planera zmiany obiektu (`object_change.plan_object_change`) - jeden dict
+    na klatkę, ze ŚWIADOMIE pełnym opisem, bo planer jest czysty (zero bazy):
+
+      * fakty do nazwy pliku z `rename_frame_targets` (SPOT nazw: `kind`, `filetype`,
+        `filter_canon`, `sha1_data`, `object_canon`, `object_raw`, `date_obs`, `exptime`,
+        `location_id`, `path`, `mtime`, ogniwo flatu) - pierwsza obecna kopia;
+      * stan klatki: `retired_at`, `superseded_by`, `n_present`, `isolated` (kopia izolowana
+        otwartym albo niedokończonym zapisem w miejscu - straż renamu by ją odbiła), `volume`;
+      * oś obiektu: `object_id`, `object_source`, `object_cleared_id` (trójca CAS ręki), `canon`,
+        `object_kind` (bieżące);
+      * karta: `card` (idx 0, pusta = None), `card_present` (karta `OBJECT` stoi w nagłówku,
+        także pusta - wtedy zapis to `set`, nie `add`), `card_comment`, `card_vtype`,
+        `header_hash`, `card_applicable` (format z kartą i - przy „Uzgodnij” - obiekt nie
+        z regionu: karta regionu nie istnieje),
+        `card_form` (forma, którą karta ma mieć: celu albo bieżącego kanonu), `card_skip` (powód
+        `object_card_gate` - liczony, gdy karta ma się zmienić; bramka ta sama co w ujednoliceniu);
+      * stosy: `variant_of` (`(oryginał, wariant)` dla wersji stosu, `stack_variant`) i `stacks`
+        (dla lighta: krotki `(id stosu, nazwa pliku stosu, ((frame_id, ścieżka), …) wszystkich
+        wejść)` - planer ostrzega, gdy gest rozdzieli wejścia stosu między foldery);
+      * `target_canon` - kanon celu, dla którego liczono bramkę (planer sprawdza zgodność);
+      * `folder_twins` - INNE kanony bazy o tej samej formie folderu co kanon celu (bez wielkości
+        liter): forma komety nie jest różnowartościowa (`catalog.folder_form`), a dwa obiekty
+        w jednym folderze to pliki pomieszane bez śladu - planer odmawia takiego celu.
+
+    ZAZNACZENIE ROŚNIE O PARĘ STOSU: wersja stosu i jej oryginał jadą razem (D-1011-5 - wersja
+    siedzi obok oryginału), więc wybranie jednej połowy wciąga drugą; podgląd pokazuje obie.
+
+    `target` = `ObjectTarget` (gest „Zmień obiekt…”) albo None („Uzgodnij” - plik dogania obiekt,
+    który klatka ma). Kolejność wierszy po `frame_id`."""
+    ids = sorted({int(f) for f in frame_ids})
+    pary = con.execute(
+        "SELECT variant_frame_id AS v, original_frame_id AS o, variant FROM stack_variant "
+        "WHERE variant_frame_id IN (SELECT value FROM json_each(?)) "
+        "   OR original_frame_id IN (SELECT value FROM json_each(?))",
+        (json.dumps(ids), json.dumps(ids))).fetchall()
+    wariant_z = {int(p["v"]): (int(p["o"]), p["variant"]) for p in pary}
+    ids = sorted(set(ids) | set(wariant_z) | {o for o, _ in wariant_z.values()})
+    if not ids:
+        return []
+    nazwy = {}
+    for r in rename_frame_targets(con, ids):
+        nazwy.setdefault(int(r["frame_id"]), dict(r))     # pierwsza obecna kopia (ORDER BY l.id)
+    if len(nazwy) < len(ids):                             # EXPECT - jak `restore_targets`
+        brak = sorted(set(ids) - set(nazwy))
+        raise ValueError(f"frame nie istnieje - id: {', '.join(str(i) for i in brak)}")
+    rows = con.execute(
+        "SELECT f.id AS fid, f.filetype, f.retired_at, f.superseded_by, "
+        "       f.sha1_data_uncomputable AS degen, "
+        "       f.object_id, f.object_source, f.object_cleared_id, "
+        "       o.canon AS canon, o.kind AS object_kind, "
+        "       c.value_raw AS card, c.value_type AS vtype, c.comment AS card_comment, "
+        "       (SELECT count(*) FROM cards c2 WHERE c2.frame_id = f.id "
+        "          AND c2.keyword = 'OBJECT') AS n_cards, "
+        "       (SELECT count(*) FROM location l2 WHERE l2.frame_id = f.id "
+        "          AND l2.present = 1) AS n_present, "
+        "       (SELECT count(*) FROM location l4 WHERE l4.frame_id = f.id "
+        "          AND l4.present = 0) AS n_absent, "
+        "       (SELECT count(*) FROM cards c3 WHERE c3.frame_id = f.id "
+        "          AND c3.keyword IN ('CHECKSUM', 'DATASUM')) AS n_sum, "
+        "       (SELECT count(*) FROM inplace_op io WHERE io.location_id = l.id "
+        "          AND io.phase IN (SELECT value FROM json_each(?))) AS isolated, "
+        "       l.id AS lid, l.volume, l.header_hash, l.compressed, l.unreadable_since, "
+        "       l.hdr_hash, l.hdr_rule, l.hdr_object "
+        "FROM frame f "
+        "LEFT JOIN object o ON o.id = f.object_id "
+        "LEFT JOIN cards c ON c.frame_id = f.id AND c.keyword = 'OBJECT' AND c.idx = 0 "
+        "LEFT JOIN location l ON l.frame_id = f.id AND l.present = 1 "
+        "WHERE f.id IN (SELECT value FROM json_each(?)) "
+        "ORDER BY f.id, l.id",
+        (json.dumps(list(INPLACE_ISOLATING_PHASES)), json.dumps(ids))).fetchall()
+    stosy = _object_change_stacks(con, [i for i in ids if (nazwy.get(i) or {}).get("kind") == "light"])
+    lookup = alias_snapshot(con).get
+    formy: dict[str, str | None] = {}
+
+    def _forma(canon):
+        if canon not in formy:
+            formy[canon] = forma_karty_object(con, canon, lookup=lookup)
+        return formy[canon]
+
+    def _klucz_folderu(canon):
+        try:
+            return folder_form(canon).casefold()
+        except ValueError:                      # kanon nie do postawienia - planer poda powód
+            return None
+
+    foldery: dict[str, set] = {}
+    for (c,) in con.execute("SELECT canon FROM object").fetchall():
+        foldery.setdefault(_klucz_folderu(c), set()).add(c)
+
+    def _blizniaki(canon):
+        if canon is None or _klucz_folderu(canon) is None:
+            return ()
+        return tuple(sorted(foldery.get(_klucz_folderu(canon), set()) - {canon}))
+
+    wynik, widziane = [], set()
+    for r in rows:
+        fid = int(r["fid"])
+        if fid in widziane:                     # druga obecna kopia - klatka już opisana
+            continue
+        widziane.add(fid)
+        n = nazwy[fid]
+        card = _to_text(r["card"])
+        canon_celu = target.canon if target is not None else r["canon"]
+        form = target.card_form if target is not None else (
+            _forma(r["canon"]) if r["canon"] is not None else None)
+        applicable = (n["filetype"] not in NO_OBJECT_CARD_FILETYPES
+                      and (target is not None or r["object_source"] != "region"))
+        skip = None
+        if applicable and canon_celu is not None and (form is None or card != form):
+            skip = object_card_gate(r, card=card, form=form, canon=canon_celu, lookup=lookup)
+        n.update({
+            "retired_at": r["retired_at"], "superseded_by": r["superseded_by"],
+            "n_present": r["n_present"], "isolated": bool(r["isolated"]), "volume": r["volume"],
+            "object_id": r["object_id"], "object_source": r["object_source"],
+            "object_cleared_id": r["object_cleared_id"], "canon": r["canon"],
+            "object_kind": r["object_kind"], "card": card, "card_present": r["n_cards"] > 0,
+            "card_comment": r["card_comment"],
+            "card_vtype": r["vtype"], "header_hash": r["header_hash"],
+            "card_applicable": applicable, "card_form": form if applicable else None,
+            "card_skip": skip, "variant_of": wariant_z.get(fid),
+            "stacks": stosy.get(fid, ()), "target_canon": target.canon if target else None,
+            "folder_twins": _blizniaki(canon_celu)})
+        wynik.append(n)
+    return wynik
+
+
+def _object_change_stacks(con, light_ids):
+    """`{light frame_id: ((id stosu, nazwa stosu, ((frame_id, ścieżka), …)), …)}` - stosy, których
+    wejściem (`integration_input`, nieodrzucone ręką) jest light, z WSZYSTKIMI wejściami tych stosów
+    i ich obecnymi kopiami. Żniwa liczą siedzibę stosu z folderu lightów (`harvest._light_tail`),
+    więc planer musi widzieć także wejścia spoza zaznaczenia. Nazwa = plik obecnej kopii stosu."""
+    if not light_ids:
+        return {}
+    karmi = con.execute(
+        "SELECT ii.input_frame_id AS fid, i.master_frame_id AS sid "
+        "FROM integration_input ii JOIN integration i ON i.id = ii.integration_id "
+        "WHERE ii.excluded = 0 AND i.master_frame_id IS NOT NULL "
+        "AND ii.input_frame_id IN (SELECT value FROM json_each(?))",
+        (json.dumps(sorted(light_ids)),)).fetchall()
+    if not karmi:
+        return {}
+    wejscia, nazwy = {}, {}
+    for r in con.execute(
+            "SELECT i.master_frame_id AS sid, ii.input_frame_id AS fid, l.path, "
+            "       (SELECT s.path FROM location s WHERE s.frame_id = i.master_frame_id "
+            "          AND s.present = 1 ORDER BY s.id LIMIT 1) AS stack_path "
+            "FROM integration i JOIN integration_input ii ON ii.integration_id = i.id "
+            "LEFT JOIN location l ON l.frame_id = ii.input_frame_id AND l.present = 1 "
+            "WHERE ii.excluded = 0 "
+            "AND i.master_frame_id IN (SELECT value FROM json_each(?)) "
+            "ORDER BY i.master_frame_id, ii.input_frame_id, l.id",
+            (json.dumps(sorted({int(r["sid"]) for r in karmi})),)).fetchall():
+        sid = int(r["sid"])
+        nazwy[sid] = os.path.basename(r["stack_path"]) if r["stack_path"] else f"#{sid}"
+        if r["path"] is not None:
+            wejscia.setdefault(sid, []).append((int(r["fid"]), r["path"]))
+    stos = {sid: (sid, nazwy[sid], tuple(wejscia.get(sid, ()))) for sid in nazwy}
+    wynik = {}
+    for r in karmi:
+        wynik.setdefault(int(r["fid"]), []).append(stos[int(r["sid"])])
+    return {fid: tuple(sorted(set(s), key=lambda x: x[0])) for fid, s in wynik.items()}
+
+
+def file_object_mismatch_frame_ids(con):
+    """PLIK NIE ZGADZA SIĘ Z OBIEKTEM (D-1011-5 Q4) - predykat wiersza Porządków, z którego
+    „Uzgodnij pliki…” prowadzi do planu zmiany obiektu bez zmiany obiektu. JEDEN właściciel
+    licznika i trimu gridu. Zwraca set[int] jak sąsiedzi z rodziny trimów (`grid._populacja_trimu`
+    przecina je `set.intersection`).
+
+    KLATKA WCHODZI: light albo stos z obiektem, żywa (nie wycofana, nie zastąpiona), z DOKŁADNIE
+    jedną obecną kopią z `mtime` (tylko taką planer przeniesie), i spełnia co najmniej jedno:
+      * FOLDER: katalog, do którego planer przeniósłby plik (`paths.path_after_object_change` -
+        `folder_form(kanon)` pod kategorią z rodzaju obiektu), różni się od bieżącego BEZ wielkości
+        liter (`R:` jej nie rozróżnia - sama pisownia nie jest rozjazdem). Ta sama funkcja co
+        planer, więc wiersz i „Uzgodnij” nie mogą się rozjechać co do folderu; kategoria wchodzi
+        razem z folderem (deep sky pod `_SOLAR` to też plik w nie swoim miejscu). Plik spoza
+        pozycji obiektu i kanon, którego `folder_form` nie przyjmie, nie wchodzą - gest nie ma
+        dokąd ich przenieść;
+      * KARTA: format z kartą, obiekt nie z regionu (karta regionu nie istnieje), karta `OBJECT`
+        różna od formy karty kanonu (także jej brak) - i tylko gdy bramka karty przepuszcza
+        (`object_card_gate`, ta sama co w planie): karty, której gest nie zapisze, wiersz nie
+        obiecuje.
+
+    KOSZT (licznik Porządków liczy się na wątku okna): jeden SELECT po obecnych kopiach lightów
+    i stosów, który sam odsiewa klatki z więcej niż jedną obecną kopią (`GROUP BY` + `HAVING`)
+    i oddaje KROTKI zamiast `sqlite3.Row` (kursor z `row_factory = None`: przy ~14,5 tys. wierszy
+    `Row` to ~40 ms); cel folderu liczony RAZ na (katalog, kanon, rodzaje) - ~570 katalogów zamiast
+    ~14,5 tys. plików, bo nazwa pliku w nim nie gra; forma karty raz na kanon; bramka karty
+    wyłącznie dla kandydatów z rozjazdem karty (`object_change_rows`)."""
+    kursor = con.cursor()
+    kursor.row_factory = None
+    rows = kursor.execute(
+        "SELECT f.id, f.kind, f.filetype, f.object_source, o.canon, o.kind, c.value_raw, "
+        "       l.path, l.mtime "
+        "FROM frame f JOIN object o ON o.id = f.object_id "
+        "JOIN location l ON l.frame_id = f.id AND l.present = 1 "
+        "LEFT JOIN cards c ON c.frame_id = f.id AND c.keyword = 'OBJECT' AND c.idx = 0 "
+        "WHERE f.kind IN (SELECT value FROM json_each(?)) "
+        "AND f.retired_at IS NULL AND f.superseded_by IS NULL "
+        "GROUP BY f.id HAVING count(*) = 1",
+        (json.dumps(sorted(LIGHT_KINDS)),)).fetchall()
+    root = library_root_from_db(con)
+    lookup = alias_snapshot(con).get
+    formy: dict[str, str | None] = {}
+    rozjazd_folderu: dict[tuple, bool] = {}
+    wynik, kandydaci_karty = set(), []
+    for fid, kind, filetype, osrc, canon, object_kind, card, path, mtime in rows:
+        if mtime is None:
+            continue
+        klucz = (path[:max(path.rfind("\\"), path.rfind("/"))], canon, kind, object_kind)
+        if klucz not in rozjazd_folderu:
+            try:
+                cel = path_after_object_change(path, canon, kind, root, object_kind=object_kind)
+            except ValueError:
+                cel = None
+            rozjazd_folderu[klucz] = cel is not None and path_key(cel) != path_key(path)
+        if rozjazd_folderu[klucz]:
+            wynik.add(fid)
+            continue
+        if filetype in NO_OBJECT_CARD_FILETYPES or osrc == "region":
+            continue
+        if canon not in formy:
+            formy[canon] = forma_karty_object(con, canon, lookup=lookup)
+        form = formy[canon]
+        if form is not None and _to_text(card) != form:
+            kandydaci_karty.append(fid)
+    if kandydaci_karty:
+        kandydaci = set(kandydaci_karty)                # wiersze rosną o parę stosu - ta nie wchodzi
+        wynik |= {r["frame_id"] for r in object_change_rows(con, kandydaci_karty)
+                  if r["frame_id"] in kandydaci and r["card_skip"] is None}
+    return wynik
 
 
 def review_frame_ids(con):
@@ -3977,16 +4289,58 @@ def last_hand_gesture(con):
     na `target`, więc drugi SELECT przechodzi dziennik w całości (~60 ms na 164 tys. eventów żywej
     `pf4`, 2026-10-09).
 
+    POWÓD ZDARZENIA (`reasons`, AR-17 krok 3): gest zmiany obiektu i jego cofnięcie przenoszą pliki
+    tym samym czasownikiem co rename (`location.renamed`), a sterownik zapisu odróżnia je powodem
+    w ładunku (`payload.reason` = `object_change` / `object_change_undo`). Bez powodu Dom
+    powiedziałby „przemianowano” o plikach, które pojechały do folderu innego obiektu. Liczone tym
+    samym przejściem po gestach co czasowniki (jedno zapytanie, grupowanie po czasowniku i powodzie).
+    Event BEZ `reason` w ładunku do `reasons` nie wchodzi (liczy się wyłącznie w `verbs`); klucz
+    `reasons` stoi w wyniku tylko wtedy, gdy któryś event gestu powód niesie - gest bez powodów ma
+    słownik dokładnie taki jak przed tym polem.
+
+    PRZENIESIENIE TO NIE KAŻDA RELOKACJA GESTU (`relocated_dirs`): gest zmiany obiektu przemianowuje
+    też plik w TYM SAMYM folderze (nazwa ze wzoru), a Dom mówi „przeniesiono do folderu obiektu”
+    wyłącznie o plikach, którym zmienił się katalog. Liczone z ładunku `before`/`after` zdarzeń
+    `location.renamed` z powodem, kluczem ścieżki fizycznej (`path_key` - bez wielkości liter jak
+    `R:`), per powód; klucz stoi w wyniku tylko wtedy, gdy któraś relokacja zmieniła katalog.
+
     Zwraca `None` (dziennik bez gestów ręki) albo dict: ts, actor, verbs (`{verb: liczba}`,
-    alfabetycznie), n (wszystkie eventy gestu)."""
+    alfabetycznie), n (wszystkie eventy gestu) i - gdy są - reasons (`{verb: {reason: liczba}}`)
+    oraz relocated_dirs (`{reason: liczba}`)."""
     last = con.execute(
         "SELECT ts, actor FROM event WHERE actor LIKE 'user%' ORDER BY id DESC LIMIT 1").fetchone()
     if last is None:
         return None
-    verbs = {r["verb"]: r["n"] for r in con.execute(
-        "SELECT verb, COUNT(*) AS n FROM event WHERE ts = ? AND actor = ? "
-        "GROUP BY verb ORDER BY verb", (last["ts"], last["actor"]))}
-    return {"ts": last["ts"], "actor": last["actor"], "verbs": verbs, "n": sum(verbs.values())}
+    # Grupowanie JAWNYM wyrażeniem, nie aliasem: `event` ma własną kolumnę `reason`, a nazwa
+    # w `GROUP BY` trafiłaby w nią zamiast w powód z ładunku.
+    verbs, reasons = {}, {}
+    for r in con.execute(
+            "SELECT verb, json_extract(payload, '$.reason') AS powod, COUNT(*) AS n FROM event "
+            "WHERE ts = ? AND actor = ? "
+            "GROUP BY verb, json_extract(payload, '$.reason') "
+            "ORDER BY verb, json_extract(payload, '$.reason')",
+            (last["ts"], last["actor"])):
+        verbs[r["verb"]] = verbs.get(r["verb"], 0) + r["n"]
+        if r["powod"] is not None:
+            reasons.setdefault(r["verb"], {})[r["powod"]] = r["n"]
+    gest = {"ts": last["ts"], "actor": last["actor"], "verbs": verbs, "n": sum(verbs.values())}
+    if reasons:
+        gest["reasons"] = reasons
+    katalogi = {}
+    if "location.renamed" in reasons:
+        for r in con.execute(
+                "SELECT json_extract(payload, '$.reason') AS powod, "
+                "       json_extract(payload, '$.before') AS przed, "
+                "       json_extract(payload, '$.after') AS po FROM event "
+                "WHERE ts = ? AND actor = ? AND verb = 'location.renamed' "
+                "  AND json_extract(payload, '$.reason') IS NOT NULL",
+                (last["ts"], last["actor"])):
+            if (path_key(ntpath.dirname(r["przed"] or ""))
+                    != path_key(ntpath.dirname(r["po"] or ""))):
+                katalogi[r["powod"]] = katalogi.get(r["powod"], 0) + 1
+    if katalogi:
+        gest["relocated_dirs"] = katalogi
+    return gest
 
 # --- PRZYJMIJ: raport „co przyszło” po dostawie (`gui/flows/przyjmij.py`) ---
 

@@ -33,6 +33,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
+from .resolve.catalog import folder_form   # forma systemu plików kanonu (token obiektu, D-1011-5)
 from .resolve.channel import channel_from_name
 from .resolve.frames import LIGHT_KINDS   # jedyne z obiektem (kind-aware) — właściciel w liściu
 
@@ -366,7 +367,14 @@ def compose_name(facts, dt, *, template=DEFAULT_TEMPLATE):
             tokens.append(dt.strftime("%Y%m%d_%H%M%S"))
         elif tok == "object":
             if kind in LIGHT_KINDS:                    # kalibracja: token pominięty (bez _UNSET)
-                obj = _sanitize(facts.get("object_canon")) or _sanitize(facts.get("object_raw"))
+                # Token = forma systemu plików kanonu (`folder_form`, D-1011-5 Q5) - ta sama, którą
+                # niesie folder obiektu, inaczej nazwa komety przeczyłaby folderowi. Różni się od
+                # `_sanitize(kanon)` WYŁĄCZNIE dla kanonu z `/` (kometa); każdy inny kanon idzie
+                # bajt w bajt jak dotąd i nie przechodzi przez EXPECT formy katalogu.
+                canon = facts.get("object_canon")
+                if canon is not None and "/" in str(canon):
+                    canon = folder_form(canon)
+                obj = _sanitize(canon) or _sanitize(facts.get("object_raw"))
                 tokens.append(obj or _UNSET)
         elif tok == "kind":
             seg = _sanitize(kind) or "unknown"

@@ -34,7 +34,8 @@ def test_migracja_ustawia_user_version(tmp_path):
     # + 0033 integration_input.asserted_by z rangą `harvest` (zbiór dokładny z żniw, AR-102)
     # + 0034 stack_history + light_name_alias + podstawa rodowodu na integration
     # + 0035 stack_variant (wariant kadru stosu powiązany z oryginałem, AR-54)
-    assert db._user_version(con) == db.SCHEMA_VERSION == 35
+    # + 0036 object_change_run + pending_object_change + run_dir (zmiana obiektu z plikiem, AR-17)
+    assert db._user_version(con) == db.SCHEMA_VERSION == 36
     con.close()
 
 

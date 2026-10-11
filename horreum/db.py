@@ -121,6 +121,10 @@ from importlib import resources
 # 0035 to PRZYROST (nowa tabela, AR-54): `stack_variant` - wariant kadru stosu (autocrop) powiązany
 # z oryginałem, ze świadkiem pary (`window` < `location` < `user`). Wchodzi PUSTA - wypełnia konsument
 # zeznania wariantu po skanie.
+# 0036 to PRZYROST (trzy nowe tabele, AR-17 krok 3): `object_change_run` (cel gestu „Zmień obiekt…”),
+# `pending_object_change` (pozycja: CAS ręki, stan sprzed zmiany obiektu, faza cofnięcia) i `run_dir`
+# (katalogi założone i usunięte przez gest, zamiar przed mutacją). Wchodzą PUSTE - wypełnia staging
+# i sterownik gestu.
 MIGRATIONS = [
     (2, "0002_initial.sql"),
     (3, "0003_writeback.sql"),
@@ -156,6 +160,7 @@ MIGRATIONS = [
     (33, "0033_lineage_harvest_rank.sql"),
     (34, "0034_stack_history.sql"),
     (35, "0035_stack_variant.sql"),
+    (36, "0036_object_change.sql"),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 _KNOWN_VERSIONS = frozenset({0} | {v for v, _ in MIGRATIONS})

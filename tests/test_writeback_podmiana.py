@@ -707,3 +707,22 @@ def test_rekoncyliacja_nie_przepina_po_kompensacji_innego_procesu(tmp_path, monk
     assert loc == stara and os.path.exists(stara) and not os.path.exists(nowa)
     con2.close()
     con.close()
+
+
+def test_porzucenie_stagingu_zostawia_wpisy_operacji_w_miejscu(tmp_path):
+    """Okno karty porzucające staging po przerwaniu (`repo.clear_pending_for_run`) nie kasuje wpisów
+    związanych z operacją zapisu w miejscu: dokończenie (`finish_inplace`) szuka ich po operacji
+    i dopiero wtedy oznacza je 'applied' i gasi nagrobek. Wpis bez operacji znika jak dotąd."""
+    con, _p, lid = _baza(tmp_path, "fits")
+    _stage(con, "R", lid, "OBSERVER", "add", "Zdzin", "str",
+           expected=con.execute("SELECT header_hash FROM location WHERE id=?", (lid,)).fetchone()[0])
+    zwiazany, wolny = [r[0] for r in con.execute(
+        "SELECT id FROM pending_changes WHERE run_id='R' ORDER BY id")]
+    con.execute("PRAGMA foreign_keys = OFF")     # atrapa operacji: liczy się tylko wiązanie wpisu
+    with con:
+        con.execute("UPDATE pending_changes SET inplace_op_id = 999 WHERE id = ?", (zwiazany,))
+    con.execute("PRAGMA foreign_keys = ON")
+    repo.clear_pending_for_run(con, "R")
+    zostaly = [r[0] for r in con.execute("SELECT id FROM pending_changes WHERE run_id='R'")]
+    assert zostaly == [zwiazany] and wolny not in zostaly
+    con.close()

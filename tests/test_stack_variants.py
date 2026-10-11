@@ -678,23 +678,27 @@ def test_pamiec_korzenia_drugi_base_rows_nie_liczy_a_zmiana_lokacji_uniewaznia(t
 
 
 def test_planer_celu_zmienia_wylacznie_segment_obiektu():
-    assert path_after_object_change(rf"{R}\LIGHTS\NGC 7635\RC8\Ha\x.fit", "NGC7635") == \
+    ds = {"object_kind": "deep_sky"}
+    assert path_after_object_change(rf"{R}\LIGHTS\NGC 7635\RC8\Ha\x.fit", "NGC7635", **ds) == \
         rf"{R}\LIGHTS\NGC7635\RC8\Ha\x.fit"
-    assert path_after_object_change(rf"{R}\LIGHTS\_COMETS\12P\cam\x.fit", "C2023A3") == \
-        rf"{R}\LIGHTS\_COMETS\C2023A3\cam\x.fit"
-    assert path_after_object_change(rf"{R}\LIGHTS\LMC\A7R3_105\OSC\_7R38821.ARW", "NGC2070") == \
-        rf"{R}\LIGHTS\NGC2070\A7R3_105\OSC\_7R38821.ARW"
+    assert path_after_object_change(rf"{R}\LIGHTS\_COMETS\12P\cam\x.fit", "C2023A3",
+                                    object_kind="comet") == rf"{R}\LIGHTS\_COMETS\C2023A3\cam\x.fit"
+    assert path_after_object_change(rf"{R}\LIGHTS\LMC\A7R3_105\OSC\_7R38821.ARW", "NGC2070",
+                                    **ds) == rf"{R}\LIGHTS\NGC2070\A7R3_105\OSC\_7R38821.ARW"
     assert path_after_object_change(rf"{R}\STACKS\Veil\cfg\Ha\v.xisf", "NGC6992", kind=STACK_KIND,
-                                    library_root=R) == rf"{R}\STACKS\NGC6992\cfg\Ha\v.xisf"
-    assert path_after_object_change("/mnt/a/LIGHTS/M31//cfg/x.fit", "NGC224") == \
+                                    library_root=R, **ds) == rf"{R}\STACKS\NGC6992\cfg\Ha\v.xisf"
+    assert path_after_object_change("/mnt/a/LIGHTS/M31//cfg/x.fit", "NGC224", **ds) == \
         "/mnt/a/LIGHTS/NGC224//cfg/x.fit", "separatory zostają"
 
 
 def test_planer_celu_milczy_poza_pozycja_obiektu_i_odmawia_zlego_kanonu():
-    assert path_after_object_change(rf"{R}\CALIBRATION\darks\d.fit", "M31") is None
-    assert path_after_object_change(r"R:\A\LMC\master\m.xisf", "LMC", kind=STACK_KIND) is None
+    ds = {"object_kind": "deep_sky"}
+    assert path_after_object_change(rf"{R}\CALIBRATION\darks\d.fit", "M31", **ds) is None
+    assert path_after_object_change(r"R:\A\LMC\master\m.xisf", "LMC", kind=STACK_KIND, **ds) is None
     assert path_after_object_change(rf"{R}\work\STACKS\M31\c\f\y.xisf", "M33", kind=STACK_KIND,
-                                    library_root=R) is None
+                                    library_root=R, **ds) is None
     for zly in ("", " M31", "M31 ", "a/b", "a:b", "..", None):
         with pytest.raises(ValueError):
-            path_after_object_change(rf"{R}\LIGHTS\M31\c\x.fit", zly)
+            path_after_object_change(rf"{R}\LIGHTS\M31\c\x.fit", zly, **ds)
+    with pytest.raises(ValueError):
+        path_after_object_change(rf"{R}\LIGHTS\M31\c\x.fit", "M33", object_kind="galaxy")

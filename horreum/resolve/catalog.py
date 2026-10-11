@@ -9,6 +9,8 @@ Czyste funkcje (zero zapisu):
   - `catalog_label(canon)` — etykieta katalogu z formy kanonicznej (NGC|IC|Sh2|Messier|…).
   - `header_form(canon)` - forma do karty `OBJECT` nagłówka (`NGC7000` → `NGC 7000`), odwracalna
     przez `catalog_canon`; `xref_aliases(canon)` - równoważność czytana wstecz (`NGC4258` → `M106`).
+  - `folder_form(canon)` - forma SYSTEMU PLIKÓW kanonu: folder obiektu i token obiektu w nazwie
+    pliku (`C/2025 A6 (Lemmon)` → `C2025A6_Lemmon`; kanon bez `/` - bez zmian).
 
 Reguły rozpoznania przeniesione z `custos/resolve/catalog.py` (zamrożony Custos) — formy gramatyk
 katalogowych to UNIWERSALIA nieba, nie dane per-archiwum. `catalog_xref.json` = jedyny ASSET danych
@@ -213,3 +215,67 @@ def header_form(canon):
         return canon
     m = _HEADER_SPACED.match(canon)
     return f"{m.group(1)} {m.group(2)}" if m else canon
+
+
+# FORMA SYSTEMU PLIKÓW (D-1011-5 Q5, E5-1): JEDNA forma kanonu na dysku - folder obiektu w drzewie
+# archiwum ORAZ token obiektu w nazwie pliku (`naming.compose_name`), żeby nazwa nie przeczyła
+# folderowi. Kanon głębokiego nieba, Układu Słonecznego, regionu i obiektu własnego JEST tą formą
+# (folder `NGC7000`, `Moon`, `Veil`). Kometa ma w kanonie `/` (oznaczenie IAU, `resolve.solar`), więc
+# folderem być nie może: forma = oznaczenie bez `/` i spacji + `_` + nazwa z nawiasu - konwencja,
+# którą archiwum już niesie (`C2025A6_Lemmon`, `21P_Giacobini-Zinner`). Spacje WEWNĄTRZ nazwy komety
+# (`Shoemaker-Levy 9`) → `_`, jak w każdym segmencie nazwy pliku.
+#
+# Segment, którego system plików Windows nie przyjmie jako nazwy katalogu (albo przyjmie inaczej, niż
+# pokazał podgląd): znak zakazany lub sterujący, nazwa urządzenia (`CON`, `NUL`, `COM1`… - także
+# z rozszerzeniem po kropce, `nul.txt`), kropka albo spacja na końcu (Windows ją zdejmuje), segment
+# dłuższy niż 255 znaków. Wynik z takim segmentem nie powstaje (EXPECT), zamiast ciąć po cichu.
+_ZAKAZANE_W_SEGMENCIE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_NAZWA_URZADZENIA = re.compile(r"(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\..*)?", re.IGNORECASE)
+_SEGMENT_MAX = 255
+
+
+def _zly_segment(forma):
+    """Czy `forma` NIE może być nazwą katalogu na Windows (powody wyżej)."""
+    return (forma in ("", ".", "..") or bool(_ZAKAZANE_W_SEGMENCIE.search(forma))
+            or bool(_NAZWA_URZADZENIA.fullmatch(forma)) or forma[-1] in ". "
+            or len(forma) > _SEGMENT_MAX)
+# Kanony komet w postaci, którą składa `resolve.solar`: oznaczenie IAU (`C/2023 A3`, opcjonalnie
+# z nazwą w nawiasie) albo kometa okresowa z numerem (`21P/Giacobini-Zinner`).
+_KOMETA_IAU = re.compile(r"^([CPDX])/(\d{4}) ([A-Z]\d{1,3})(?: \(([^()]+)\))?$")
+_KOMETA_NUMEROWANA = re.compile(r"^(\d+[PD])/(.+)$")
+
+
+def folder_form(canon):
+    """Kanon Horreum → nazwa folderu obiektu (i token obiektu w nazwie pliku). SPOT formy systemu
+    plików dla planera zmiany obiektu (`resolve.paths.path_after_object_change`), predykatu
+    Porządków i nazw plików.
+
+    `NGC7000` → `NGC7000`; `C/2025 A6 (Lemmon)` → `C2025A6_Lemmon`; `C/2023 A3 (Tsuchinshan-ATLAS)`
+    → `C2023A3_Tsuchinshan-ATLAS`; `21P/Giacobini-Zinner` → `21P_Giacobini-Zinner`; oznaczenie IAU
+    bez nazwy (`C/2019 Y4`, kanon nieznanej komety) → `C2019Y4`.
+
+    EXPECT → `ValueError`: kanon pusty albo nietekstowy, z białym znakiem na brzegu, `/` poza
+    gramatyką komety, wynik, którego Windows nie przyjmie jako katalogu (`_zly_segment`: znak
+    zakazany, nazwa urządzenia, kropka lub spacja na końcu, ponad 255 znaków, `.`/`..`). Walidowany
+    jest WYNIK, już po przekształceniu komety. Folder, którego system plików nie przyjmie, nie
+    powstaje.
+
+    Forma komety NIE jest różnowartościowa (`(Foo Bar)` i `(Foo_Bar)` dają ten sam folder) - dwa
+    kanony o jednej formie wykrywa read-model zmiany obiektu (`gui.queries.object_change_rows`,
+    pole `folder_twins`), a planer odmawia takiego celu."""
+    if not isinstance(canon, str) or not canon or canon != canon.strip():
+        raise ValueError(f"kanon obiektu nie może być nazwą katalogu: {canon!r}")
+    forma = canon
+    if "/" in canon:
+        m = _KOMETA_IAU.match(canon)
+        if m is not None:
+            forma = "".join(m.group(1, 2, 3)) + (f"_{m.group(4)}" if m.group(4) else "")
+        else:
+            m = _KOMETA_NUMEROWANA.match(canon)
+            if m is None:
+                raise ValueError(f"kanon z '/' spoza gramatyki komety: {canon!r}")
+            forma = f"{m.group(1)}_{m.group(2)}"
+        forma = re.sub(r"\s+", "_", forma.strip())
+    if _zly_segment(forma):
+        raise ValueError(f"kanon obiektu nie może być nazwą katalogu: {canon!r}")
+    return forma

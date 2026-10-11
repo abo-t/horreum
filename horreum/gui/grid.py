@@ -55,7 +55,9 @@ from horreum.gui.facets import FacetRail
 from horreum.gui import assign_dialog
 from horreum.gui.assign_dialog import AssignObjectDialog
 from horreum.gui.note_dialog import NoteDialog
+from horreum.gui.object_change_dialog import ObjectChangeDialog
 from horreum.gui.projection_dialog import ObjectPickDialog, ProjectionDialog
+from horreum.resolve.frames import LIGHT_KINDS
 from horreum.gui.wb_worker import WritebackRunner, commit_do_cofniecia, zdanie_undo_kart, zdanie_wyniku_zapisu
 
 # FASADA: `grid` re-eksportuje nazwy modułów `grid_*`, po które sięga reszta pakietu i testy
@@ -63,12 +65,14 @@ from horreum.gui.wb_worker import WritebackRunner, commit_do_cofniecia, zdanie_u
 from horreum.gui.grid_model import (
     BASE_COLS, _CEL_GEST, _CEL_WIDOK, _COLORS, CzlonRecepty, _dolacz_kopie, _dup_tip, _EdycjaKomorki,
     elizja_w_srodku, _ElizjaWSrodku, _EMPTY_DB, _EMPTY_FILTER, _EMPTY_PERSP, _EMPTY_VIEW, FIND_COLS,
-    _FLAGA_WERSJI, _FLAGA_ZASTAPIONYCH, _FLAGI_CZEKAJA_NA_FAKTY, _FLAGI_KOPII_WIODACEJ, _FLAGI_OBRAZOW,
+    _FLAGA_WERSJI, _FLAGA_ZASTAPIONYCH, _FLAGA_ZGODNOSCI_PLIKU, _FLAGI_CZEKAJA_NA_FAKTY,
+    _FLAGI_KOPII_WIODACEJ, _FLAGI_OBRAZOW,
     _FLAGI_SCIEZKI_Z_TRESCI, GridTableModel, _GRUPA_WERSJI, _half_away, _klucz_kryterium, _klucz_spec,
     kolumna_z_tresci, _kopie_wielokrotne, _lista_kanonow, _nieznane_warunki, _OBJECT_STATE_TIPS, _object_tip,
     _ODWROT_COFNIECIA, _ODWROT_PRZYWROCENIA, _ODWROT_UWAG, _ODWROT_WERDYKTU, _ODWROT_WYCOFANIA,
     _ogon_sciezki, OPERATORS,
     _pole_rozjazdu, _POWROT_PERSPEKTYWA, _POWROT_ZBIOR, PRESET_COPY_CONFLICT, _PRESET_CZYSTY, PRESET_DUPS,
+    PRESET_FILE_OBJECT_MISMATCH,
     _PRESET_LABELS, PRESET_LINEAGE, PRESET_MISSING_COPY, PRESET_ORPHAN_TESTIMONY, PRESET_PATH_HEADER_CONFLICT,
     PRESET_PENDING_FINISH, PRESET_READY_IMAGES, PRESET_RETIRED, PRESET_RETIRED_CONFLICT,
     PRESET_STACK_VERSIONS, PRESET_SUPERSEDED,
@@ -226,6 +230,9 @@ class FramesView(QWidget):
         self._foreign_wb = False   # DRUGA powierzchnia pisze (mutex; ustawia gospodarz)
         self._etap_w_biegu = False  # etap Dostawy pisze do bazy (`set_busy`) - gesty izolacji czekają
         self._cel_gestu_zapisu = []  # klatki ostatniego gestu izolacji - zaznaczenie po jego końcu
+        # Otwarte okno „Zmień obiekt…"/„Uzgodnij pliki…" (modalne, poza `set_busy` widoku) - etap
+        # Dostawy w biegu gasi jego akcje zapisu przez to odwołanie (wzorzec `_repair_dlg` osi).
+        self._okno_zmiany_obiektu = None
         # Wynik gestu izolacji w szufladzie należy do perspektywy, w której padł (AR-30 (5)):
         # `(tekst sprzed gestu, tekst wyniku)`; zmiana perspektywy przywraca pierwszy, o ile szuflada
         # wciąż pokazuje drugi (inny zapis mógł ją już przejąć).
@@ -356,6 +363,7 @@ class FramesView(QWidget):
         self.sel_bar.act_name.triggered.connect(self._on_object_name)
         self.sel_bar.act_clear.triggered.connect(self._on_object_clear)
         self.sel_bar.act_restore.triggered.connect(self._on_object_restore)
+        self.sel_bar.act_change.triggered.connect(self._on_object_change)
         self.sel_bar.act_retire.triggered.connect(self._on_frame_retire)
         self.sel_bar.act_frame_restore.triggered.connect(self._on_frame_restore)
         self.sel_bar.act_notes.triggered.connect(self._on_notes)
@@ -509,6 +517,12 @@ class FramesView(QWidget):
         self._sep_kopii = self._menu_tabeli.addSeparator()
         self._menu_kopii = self._menu_tabeli.addMenu(i18n.t("grid.lead.menu"))
         self._menu_kopii.setToolTipsVisible(True)
+        # AR-17 krok 3: „Uzgodnij pliki…" - wyłącznie w perspektywie „Plik nie zgadza się
+        # z obiektem". Gest tej jednej perspektywy, więc menu prawego kliku (ten sam argument co
+        # przy izolacji zapisu: kontrolka paska poszerzałaby podłogę okna w każdej perspektywie).
+        self._sep_zgodnosci = self._menu_tabeli.addSeparator()
+        self.act_align_files = self._menu_tabeli.addAction(i18n.t("grid.sel.object_change_align"))
+        self.act_align_files.triggered.connect(self._on_align_files)
         rv.addWidget(self.table, 1)   # stretch: nadmiar pionu należy do TABELI, nie do panelu (N1)
 
         # PUSTY STAN = ZDANIE + GEST (FH-4). `self.empty` zostaje etykietą z tekstem (kontrakt testów
@@ -807,6 +821,11 @@ class FramesView(QWidget):
             self.status_recipe.emit(_zlacz_recepty([i18n.t(
                 recepta, finish=i18n.t("grid.inplace.finish"),
                 restore=i18n.t("grid.inplace.restore"), release=i18n.t("grid.inplace.release"))]))
+        # Ta sama figura dla „Plik nie zgadza się z obiektem" (AR-17 krok 3): gest mieszka w menu
+        # prawego kliku, więc wejście w perspektywę mówi, gdzie go szukać.
+        if getattr(self, _FLAGA_ZGODNOSCI_PLIKU) and self._frame_ids:
+            self.status_recipe.emit(_zlacz_recepty([i18n.t(
+                "grid.sel.object_change_recipe", align=i18n.t("grid.sel.object_change_align"))]))
 
     def apply_object_facet(self, pairs):
         """Ustaw zbiór na WSKAZANE obiekty — publiczny seam dla wejść spoza widoku (T5e: „Pokaż
@@ -1909,6 +1928,105 @@ class FramesView(QWidget):
             canons_key="grid.sel.object_canons_restored",
             nothing_key="grid.sel.object_restore_skip_nothing")
 
+    # ---- zmiana obiektu RAZEM z plikiem (AR-17 krok 3, D-1011-5) ----
+
+    def _on_object_change(self):
+        """„Zmień obiekt…": wybór celu oknem przypisania (BEZ zapisu - okno zwraca wybór) → okno
+        podglądu i wykonania (`ObjectChangeDialog`). Cel = zaznaczenie, jak każdy gest tej osi.
+
+        Okno przypisania jest tu wyłącznie WYBIERAKIEM: ta sama lista, szukajka i drabina nazwy, ta
+        sama walidacja i klucz aliasu (`assign_dialog.alias_key`) - druga lista obiektów rozjechałaby
+        się z pierwszą przy pierwszej zmianie. Nagłówek, tytuł i przycisk mówią o tym geście, bo zdanie
+        okna („N klatek bez nazwy…") opisuje inny przypadek.
+
+        CEL BEZ FORMY KARTY TO ODMOWA PRZED PLANEM (D-1011-5): kanon znany tylko z aliasu nie wraca
+        z karty do siebie, więc obietnica „karta i folder razem" nie ma czym się spełnić - lepiej
+        powiedzieć to teraz niż po przeniesieniu plików."""
+        ids = self._object_gesture_ids()
+        if not ids:
+            return
+        zajety = self._powod_zajetosci()
+        if zajety is not None:
+            self.status_message.emit(i18n.t(zajety))
+            return
+        wybor = AssignObjectDialog(self.con, object_raw=None, frame_count=len(ids), parent=self)
+        wybor.setWindowTitle(i18n.t("grid.sel.object_change_pick_title"))
+        wybor.head.setText(i18n.t_plural("grid.sel.object_change_pick_head", len(ids)))
+        wybor.accept_btn.setText(i18n.t("grid.sel.object_change_pick_ok"))
+        if wybor.exec() != QDialog.Accepted or wybor.selected is None:
+            return
+        canon, _catalog, _kind, alias_norm = wybor.selected
+        target = queries.object_target(self.con, canon, alias_norm=alias_norm)
+        if target is None:
+            # Okno przypisania przepuściło nazwę tą samą drabiną, więc `None` znaczy, że dwa
+            # wołania odpowiadają różnie na jedno pytanie - odmowa z nazwą, zero zapisu.
+            QMessageBox.warning(self, i18n.t("grid.sel.object_change"),
+                                i18n.t("grid.sel.object_change_unknown", canon=canon))
+            return
+        if target.card_form is None:
+            QMessageBox.warning(self, i18n.t("grid.sel.object_change"),
+                                i18n.t("grid.sel.object_change_no_card", canon=target.canon))
+            return
+        self._otworz_zmiane_obiektu(ids, target)
+
+    def _on_align_files(self):
+        """„Uzgodnij pliki…" (perspektywa „Plik nie zgadza się z obiektem", menu prawego kliku): to
+        samo okno z `target=None` - obiekt w bazie zostaje, plik dogania ten, który klatka ma."""
+        zajety = self._powod_zajetosci()
+        if zajety is not None:
+            self.status_message.emit(i18n.t(zajety))
+            return
+        ids = self._object_gesture_ids()
+        if ids:
+            self._otworz_zmiane_obiektu(ids, None)
+
+    def _sync_menu_zgodnosci(self):
+        """Uczciwy disabled „Uzgodnij pliki…" w chwili pokazania menu: zajętość (etap, inny zapis)
+        albo puste zaznaczenie - powód w tooltipie pozycji; inaczej liczba klatek celu."""
+        n = len(self._selected_data_rows())
+        powod = self._powod_zajetosci() or (None if n else "grid.sel.object_empty")
+        self.act_align_files.setEnabled(powod is None)
+        self.act_align_files.setToolTip(
+            i18n.t(powod) if powod is not None
+            else i18n.t_plural("grid.sel.object_change_align_tip", n))
+
+    def _otworz_zmiane_obiektu(self, ids, target):
+        """Wspólny ogon obu wejść: okno podglądu i wykonania. Wzór nazwy bierze się z „Nazw"
+        (panel renamu) - ta sama polityka, którą człowiek widzi i ustawia przy porządkowaniu nazw.
+
+        Okno pisze do plików, więc jego zajętość idzie do mutexu gospodarza (`writeback_busy`),
+        a każdy zapis i cofnięcie odświeża zbiór z zachowaniem zaznaczenia (`changed`) - okno jest
+        modalne, ale lista pod nim ma mówić prawdę, gdy człowiek je zamknie albo cofnie gest."""
+        zaznaczone = list(ids)
+        # TA SAMA REGUŁA CO „NAZWY" (D-1011-5 Q8): wzór, źródło daty i przesunięcie z polityki
+        # paska - jak przy renamie (`_run_rename`). Pusty wzór paska → domyślny `naming`, a okno
+        # mówi to wprost (przy nim każdy przenoszony plik dostaje nową nazwę).
+        polityka = self.rename_bar.policy()
+        dlg = ObjectChangeDialog(
+            self.con, frame_ids=ids, target=target,
+            template=polityka["template"] or naming.DEFAULT_TEMPLATE,
+            date_source=polityka["source"], offset_hours=polityka["offset_hours"],
+            fallback=polityka["fallback"], wzor_z_paska=bool(polityka["template"]),
+            now_fn=self._now, db_path=self._db_path, off_thread=self._wb.async_ok, parent=self)
+        dlg.changed.connect(lambda: self._po_zmianie_obiektu(zaznaczone))
+        dlg.busy_changed.connect(self.writeback_busy)
+        self._okno_zmiany_obiektu = dlg
+        try:
+            dlg.exec()
+        finally:
+            self._okno_zmiany_obiektu = None
+        if dlg.summary:
+            self.status_message.emit(dlg.summary)
+
+    def _po_zmianie_obiektu(self, zaznaczone):
+        """Ogon zapisu i cofnięcia w oknie zmiany obiektu: ścieżki, obiekt i karta klatek się
+        zmieniły - zbiór od nowa, zaznaczenie zostaje (cel „Cofnij" i kolejnego gestu), a dwie
+        cudze powierzchnie dostają sygnał (kolejka osi obiektu, plakietka Porządków)."""
+        self.refresh()
+        self._przywroc_zaznaczenie(zaznaczone)
+        self.object_axis_changed.emit()
+        self.stan_porzadkow_changed.emit()
+
     # ---- panele kling (F3, PLAN_ux_redesign §4) ----
     def _toggle_panel(self, which):
         """Panel klingi z paska zbioru: najwyżej JEDEN widoczny. Zamknięcie zostawia podgląd
@@ -2956,9 +3074,17 @@ class FramesView(QWidget):
             rows = self._selected_data_rows()
         ids = [r["frame_id"] for r in rows]
         stan = queries.selection_object_state(self.con, ids) if ids else None
+        # „Zmień obiekt…" (AR-17 krok 3) z TYCH SAMYCH wierszy, bez drugiego zapytania: klatka
+        # nieba, żywa (niewycofana, niezastąpiona) i z DOKŁADNIE jedną obecną kopią (tylko taką
+        # planer przeniesie) - z obiektem albo bez, bo gest przepina każde źródło. Prezentacja, nie
+        # prawda: resztę odsiewa planer z powodem, dlatego tooltip mówi „do sprawdzenia w podglądzie”.
+        changeable = sum(1 for r in rows
+                         if r.get("kind") in LIGHT_KINDS and r.get("n_present") == 1
+                         and r.get("retired_at") is None and r.get("superseded_by") is None)
         self.sel_bar.set_object_actions(
             namable=stan["namable"] if stan else 0,
             clearable=stan["clearable"] if stan else 0,
+            changeable=changeable,
             stacks=stan["stacks_touchable"] if stan else 0,
             restorable=stan["restorable"] if stan else 0,
             reason=_object_gate_reason(stan))
@@ -3276,9 +3402,10 @@ class FramesView(QWidget):
             and not h.isSectionHidden(c)}             # ukryta ma 0 px - to nie jest wybór ręki
 
     def _on_table_menu(self, pos):
-        """Prawy klik na tabeli: menu z sekcją „Zostaw tę wersję" (perspektywa „Wersje stosów")
-        i sekcją dróg wyjścia z izolacji zapisu w miejscu (perspektywy zapisu albo klatka z kopią
-        izolowaną). Żadna sekcja nie pasuje → menu się nie pokazuje i zaznaczenie zostaje.
+        """Prawy klik na tabeli: menu z sekcją „Zostaw tę wersję" (perspektywa „Wersje stosów"),
+        sekcją dróg wyjścia z izolacji zapisu w miejscu (perspektywy zapisu albo klatka z kopią
+        izolowaną) i gestem „Uzgodnij pliki…" (perspektywa „Plik nie zgadza się z obiektem").
+        Żadna sekcja nie pasuje → menu się nie pokazuje i zaznaczenie zostaje.
 
         Wiersz pod kursorem, którego nie ma w zaznaczeniu, staje się zaznaczeniem - konwencja
         platformy, a zarazem jedyny sposób, żeby „tę" wskazywało to, na co człowiek kliknął.
@@ -3300,7 +3427,8 @@ class FramesView(QWidget):
         zapis = self._perspektywa_zapisu()
         zastapione = bool(getattr(self, _FLAGA_ZASTAPIONYCH))
         kopie = any(getattr(self, atrybut) for atrybut in _FLAGI_KOPII_WIODACEJ)
-        if not wersje and not zapis and not zastapione:
+        zgodnosc = bool(getattr(self, _FLAGA_ZGODNOSCI_PLIKU))
+        if not wersje and not zapis and not zastapione and not zgodnosc:
             if poza_zaznaczeniem:
                 wiersze = ([pod_kursorem] if isinstance(pod_kursorem, dict)
                            and "_group" not in pod_kursorem else [])
@@ -3328,6 +3456,10 @@ class FramesView(QWidget):
         self.act_transfer_facts.setVisible(zastapione)
         self._sep_kopii.setVisible(kopie and (wersje or zapis or zastapione))
         self._menu_kopii.menuAction().setVisible(kopie)
+        self._sep_zgodnosci.setVisible(zgodnosc and (wersje or zapis or zastapione or kopie))
+        self.act_align_files.setVisible(zgodnosc)
+        if zgodnosc:
+            self._sync_menu_zgodnosci()
         if kopie:
             self._sync_menu_kopii()
         if wersje:
@@ -3879,6 +4011,8 @@ class FramesView(QWidget):
         pokazaniu, więc zapamiętujemy sam fakt biegu (`_powod_zajetosci`)."""
         self._etap_w_biegu = bool(busy)
         self._sync_edycji()                              # edycja komórek gaśnie razem z akcjami zapisu
+        if self._okno_zmiany_obiektu is not None:        # okno modalne - poza akcjami widoku
+            self._okno_zmiany_obiektu.set_pipeline_busy(busy)
         if busy:
             self.macro_bar.set_actions_enabled(False)
             self.rename_bar.set_actions_enabled(False)

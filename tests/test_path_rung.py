@@ -125,15 +125,15 @@ def test_normalizacja_ta_sama_co_dla_naglowka():
     """`Sh2-229`/`IC 405` przechodzą TĘ SAMĄ normalizację co zeznanie nagłówka — szczebel nie ma
     własnej gramatyki (`IC 405` ze spacją daje `IC405`).
 
-    ROZJAZD `Sh2-229` vs `IC405` ZOSTAJE — i to jest pin na DŁUG NAZWANY, nie na poprawność:
-    `xref` tych dwóch oznaczeń nie skleja, więc ten sam obiekt nieba ma w bazie dwa kanony i dwie
-    pozycje w facecie. Brief mówi wprost, że tego NIE naprawia (to pytanie o `xref`, 308 klatek
-    FITS), a bramka rozszczepienia (§4/3) ma go POKAZAĆ, nie ukryć. Zzielenienie tego pinu na
-    jeden kanon znaczy, że ktoś ruszył `catalog_xref.json` — wtedy trzeba policzyć skutek na
-    tamtych 308 klatkach, a nie tylko tutaj."""
+    DŁUG ZAMKNIĘTY decyzją D-1011-5 Q9: `catalog_xref.json` skleja `Sh2-229` z `IC405`
+    (`sh2_to_ic`), więc folder Sharplessa i oznaczenie IC to JEDEN kanon i jedna pozycja w facecie.
+    Skutek policzony na kopii archiwum przed zmianą (2026-10-11): obiektu `Sh2-229` w bazie nie ma,
+    żaden nagłówek ani alias tej nazwy nie niesie - 308 klatek z folderu `Sh2-229` ma już kanon
+    `IC405` z karty, więc xref nie przemalowuje żadnej klatki; rozjazd folderu zamyka gest
+    „Uzgodnij pliki…”."""
     con = _baza([(rf"{R}\LIGHTS\Sh2-229\RC8\Ha\x.ARW", None, "raw"),
                  (rf"{R}\LIGHTS\IC 405\RC8\Ha\y.ARW", None, "raw")])
-    assert {p.canon for p in resolver.path_proposals(con)} == {"IC405", "Sh2-229"}
+    assert {p.canon for p in resolver.path_proposals(con)} == {"IC405"}
 
 
 def test_kanon_NOWY_jest_oznaczony():

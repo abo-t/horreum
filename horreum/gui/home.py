@@ -96,9 +96,39 @@ _ZDANIA_GESTU = {
 }
 
 
+# Powód relokacji pliku z gestu „Zmień obiekt…"/„Uzgodnij pliki…" (AR-17 krok 3) i z jego
+# cofnięcia - ten, który klinga zapisu dokłada do ładunku `location.renamed` (`reason`). Takie
+# przeniesienie to nie „przemianowanie": plik zmienił folder razem z obiektem, a zdanie Domu ma to
+# powiedzieć.
+POWOD_ZMIANY_OBIEKTU = "object_change"
+POWOD_COFNIECIA_ZMIANY = "object_change_undo"
+
+
 def zdanie_gestu(gest):
     """Co zrobił gest z dziennika (`queries.last_hand_gesture`) - bez daty. Jeden znany czasownik
-    = jego zdanie; inaczej zdanie ogólne z liczbą WSZYSTKICH eventów gestu."""
+    = jego zdanie; inaczej zdanie ogólne z liczbą WSZYSTKICH eventów gestu.
+
+    GEST ZMIANY OBIEKTU MA PIERWSZEŃSTWO: zapisuje kilka czasowników naraz (obiekt w bazie,
+    przeniesienie pliku, karta), więc zdanie ogólne „N zmian" ukrywałoby jedyną rzecz, której
+    człowiek szuka w pamięci - że pliki pojechały do innego folderu. Rozpoznanie po powodzie
+    relokacji (`reasons` read-modelu: czasownik → powód → liczba), nie po zestawie czasowników.
+
+    LICZBA NETTO: w jednym geście zapisu plik, którego kartę odbił rdzeń, wraca tym samym
+    czasownikiem z powodem cofnięcia - liczy się różnica „gest - powrót”, nie suma. „Przeniesiono do
+    folderu obiektu” mówi się WYŁĄCZNIE o relokacjach ze zmianą katalogu (`relocated_dirs`
+    read-modelu: powód → liczba); wzór „Nazw” zmienia też nazwy w tym samym folderze, więc bez tego
+    rozróżnienia zdanie jest ogólne (nowe miejsce albo nowa nazwa). Netto ujemne = cofnięcie gestu."""
+    relokacje = (gest.get("reasons") or {}).get("location.renamed", {})
+    netto = relokacje.get(POWOD_ZMIANY_OBIEKTU, 0) - relokacje.get(POWOD_COFNIECIA_ZMIANY, 0)
+    katalogi = gest.get("relocated_dirs") or {}
+    netto_katalogow = (katalogi.get(POWOD_ZMIANY_OBIEKTU, 0)
+                       - katalogi.get(POWOD_COFNIECIA_ZMIANY, 0))
+    if netto_katalogow > 0:
+        return i18n.t_plural("home.gest.object_relocated", netto_katalogow)
+    if netto > 0:
+        return i18n.t_plural("home.gest.object_files", netto)
+    if netto < 0:
+        return i18n.t_plural("home.gest.object_relocated_back", -netto)
     if len(gest["verbs"]) == 1:
         (verb, n), = gest["verbs"].items()
         klucz = _ZDANIA_GESTU.get(verb)

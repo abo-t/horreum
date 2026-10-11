@@ -54,6 +54,9 @@ QT_WIDGET_FILES = {"app.py", "__main__.py", "pipeline.py", "grid.py", "projectio
                    "home.py",     # Dom: ekran startu (kafle, teczki w wątku tła); sumy w Qt-wolnym `queries`
                    "harvest_dialog.py",  # okno żniw masterów (plan i kopie w wątku tła); rdzeń `harvest` Qt-wolny
                    "przyjmij.py",  # raport „co przyszło” nad Dostawą; liczby w Qt-wolnym `queries`
+                   # AR-17 krok 3: okno „Zmień obiekt…”/„Uzgodnij pliki…” (plan w wątku tła); planer
+                   # `object_change.py` i read-model zostają Qt-wolne
+                   "object_change_dialog.py",
                    }
 
 

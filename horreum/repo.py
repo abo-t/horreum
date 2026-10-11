@@ -14,10 +14,14 @@ Zasady:
 - `now` podawany jawnie (ISO-8601) — deterministyczne testy, jak `now_fn` w Custosie.
 """
 import json
+import ntpath
+import os
 import zlib
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 
+from .resolve.paths import path_key            # klucz ścieżki fizycznej - jeden dla podglądu planera
+                                                # i straży relokacji (liść `resolve`, bez cyklu)
 from .resolve._text import norm_alnum          # kierunek repo → resolve (liść; COHESION §2b)
 from .resolve.catalog import catalog_canon      # gramatyka katalogowa — CZYSTA, bez assetu (liść)
 from .resolve.channel import CHANNELS           # słownik kanału (0028) - liść, bez cyklu
@@ -2462,6 +2466,45 @@ class ObjectGesture:
                 ("drift", self.skipped_drift), ("failed", self.skipped_failed)]
 
 
+def _object_target(con, canon, alias_norm):
+    """Pod transakcją wołającego: `(object_id | None, alias_znany)` celu gestu ręki - obiekt po
+    kanonie (None = jeszcze go nie ma) i czy `alias_norm` już jest w słowniku. Alias wskazujący INNY
+    obiekt → `ValueError` (domyka pułapkę z `resolve/regions.py:18-22`), zero zapisu."""
+    row = con.execute("SELECT id FROM object WHERE canon = ?", (canon,)).fetchone()
+    object_id = row[0] if row is not None else None
+    # Bez klucza nie ma czego sprawdzać ani zapisywać - gałąź aliasu milczy w CAŁOŚCI (nie
+    # `SELECT … = NULL`, który po cichu zawsze zwraca pustkę i udawałby „alias wolny").
+    existing = None if alias_norm is None else con.execute(
+        "SELECT object_id FROM object_alias WHERE alias_norm = ?", (alias_norm,)).fetchone()
+    if existing is not None and existing[0] != object_id:
+        raise ValueError(
+            f"alias '{alias_norm}' wskazuje już object:{existing[0]} - konflikt, zero zapisu")
+    return object_id, existing is not None
+
+
+def _upsert_object_tx(con, *, canon, catalog, kind, alias_norm, actor, now):
+    """Pod transakcją wołającego: obiekt celu gestu ręki (`INSERT object` + `object.upserted`, gdy
+    kanonu nie ma) i alias wpisanej nazwy (`source='user'` + `object.aliased`, gdy nowy) → id obiektu.
+    JEDNO miejsce dla obu klingi ręki (`user_assign_object`, `user_override_object`) - druga kopia
+    tej drabiny rozjechałaby się o pierwszy dopisany guard. Konflikt aliasu → `ValueError` PRZED
+    pierwszym zapisem (`_object_target`)."""
+    object_id, alias_znany = _object_target(con, canon, alias_norm)
+    if object_id is None:
+        cur = con.execute(
+            "INSERT INTO object(canon, catalog, kind) VALUES (?, ?, ?)",
+            (canon, catalog, kind))
+        object_id = cur.lastrowid
+        emit_event(con, actor=actor, verb="object.upserted", target=f"object:{object_id}",
+                   now=now, payload={"canon": canon, "catalog": catalog, "kind": kind})
+    if alias_norm is not None and not alias_znany:
+        con.execute(
+            "INSERT INTO object_alias(alias_norm, object_id, source) VALUES (?, ?, 'user')",
+            (alias_norm, object_id))
+        emit_event(con, actor=actor, verb="object.aliased", target=f"object:{object_id}",
+                   now=now, payload={"alias_norm": alias_norm, "source": "user"})
+    return object_id
+
+
 def user_assign_object(con, *, alias_norm, canon, catalog, kind, frame_ids, now, uid="local",
                        object_source="user", expected_object_id=None, overwrite_weak=False,
                        expected_source=None, expected_cleared_id=None):
@@ -2535,30 +2578,9 @@ def user_assign_object(con, *, alias_norm, canon, catalog, kind, frame_ids, now,
     if object_source not in OBJECT_SOURCES:
         raise ValueError(f"object_source '{object_source}' spoza OBJECT_SOURCES")
     with _immediate(con):
-        row = con.execute("SELECT id FROM object WHERE canon = ?", (canon,)).fetchone()
-        object_id = row[0] if row is not None else None
-        # Bez klucza nie ma czego sprawdzać ani zapisywać — gałąź aliasu milczy w CAŁOŚCI (nie
-        # `SELECT … = NULL`, który po cichu zawsze zwraca pustkę i udawałby „alias wolny").
-        existing = None if alias_norm is None else con.execute(
-            "SELECT object_id FROM object_alias WHERE alias_norm = ?", (alias_norm,)).fetchone()
-        if existing is not None and existing[0] != object_id:
-            raise ValueError(
-                f"alias '{alias_norm}' wskazuje już object:{existing[0]} — konflikt, zero zapisu")
-
         actor = f"user:{uid}"
-        if object_id is None:
-            cur = con.execute(
-                "INSERT INTO object(canon, catalog, kind) VALUES (?, ?, ?)",
-                (canon, catalog, kind))
-            object_id = cur.lastrowid
-            emit_event(con, actor=actor, verb="object.upserted", target=f"object:{object_id}",
-                       now=now, payload={"canon": canon, "catalog": catalog, "kind": kind})
-        if alias_norm is not None and existing is None:
-            con.execute(
-                "INSERT INTO object_alias(alias_norm, object_id, source) VALUES (?, ?, 'user')",
-                (alias_norm, object_id))
-            emit_event(con, actor=actor, verb="object.aliased", target=f"object:{object_id}",
-                       now=now, payload={"alias_norm": alias_norm, "source": "user"})
+        object_id = _upsert_object_tx(con, canon=canon, catalog=catalog, kind=kind,
+                                      alias_norm=alias_norm, actor=actor, now=now)
 
         assigned = kind_skip = source_skip = drift = stacks = 0
         zapisane = []
@@ -2741,112 +2763,144 @@ def clear_object_assignment(con, *, frame_ids, now, uid="local"):
 
 
 @dataclass(frozen=True)
-class StackObjectChange:
-    """Jedno nadpisanie obiektu stosu ręką - materiał cofnięcia. `before` = `(object_id,
+class ObjectOverride:
+    """Jedno nadpisanie obiektu klatki ręką - materiał cofnięcia. `before` = `(object_id,
     object_source, object_cleared_id)` klatki sprzed gestu, odczytane pod blokadą zapisu;
-    `object_id` = obiekt, który gest zapisał (źródło `user`)."""
+    `object_id` = obiekt, który gest zapisał (źródło `user`); `reason` = gest (`release_object`,
+    `object_change`) - trafia do pary verbów gestu i, z dopiskiem `_undo`, do pary jego cofnięcia."""
     frame_id: int
     before: tuple
     object_id: int
+    reason: str
 
 
-def user_override_stack_object(con, *, frame_id, object_id, expected_object_id, expected_source,
-                               expected_cleared_id, now, uid="local", changes_out=None):
-    """JAWNE NADPISANIE OBIEKTU STOSU RĘKĄ (AR-103: „Przypisz obiekt wydania” po żniwach) - jedna
-    transakcja `_immediate` → `'assigned'` · `'unchanged'` · `'drift'`.
+def user_override_object(con, *, frame_id, canon, expected, now, reason, catalog=None, kind=None,
+                         alias_norm=None, uid="local", changes_out=None):
+    """JAWNE NADPISANIE OBIEKTU KLATKI RĘKĄ - jedna klinga dla `LIGHT_KINDS` (light i stos), jedna
+    transakcja `_immediate` → `'assigned'` · `'unchanged'` · `'drift'`. Gesty: „Przypisz obiekt
+    wydania” po żniwach (AR-103, `reason='release_object'`) i „Zmień obiekt…” (AR-17 krok 3,
+    `reason='object_change'` - przez `apply_object_change_item`, które w tej samej transakcji
+    utrwala stan sprzed).
 
     DLACZEGO OSOBNA KLINGA: `user_assign_object` nie nadpisuje źródeł z pliku i geometrii
-    (`header`/`alias`/`xref`/`region` - poza `WEAK_OBJECT_SOURCES`), a stos z obiektem innym niż
-    obiekt wydania ma go właśnie z nagłówka (`OBJECT` przepisany przez WBPP). Tamtej ochrony nie
+    (`header`/`alias`/`xref`/`region` - poza `WEAK_OBJECT_SOURCES`) ani ręki. Tamtej ochrony nie
     luzujemy: gest kubełka i paska Zbiorów dalej nie zamaluje faktu z pliku. Ta klinga robi to
-    WYŁĄCZNIE na jednej klatce stosu i wyłącznie przy stanie, który człowiek widział.
+    pojedynczo na klatce i wyłącznie przy stanie, który człowiek widział - a gest, który ją woła,
+    zgadza z nią plik (karta i folder przy zmianie obiektu) albo stos z jego wydaniem.
 
-    CAS NA PEŁNEJ TRÓJCE: `expected_object_id`, `expected_source` i `expected_cleared_id` (pamięć
-    nagrobka) = stan klatki z chwili porównania (`stacks.release_object_check`), porównane dosłownie
-    (także `None`). Sama para obiekt+źródło przeżywa sekwencję „nagrobek X → przypisz Y → zdejmij Y”
-    (znów `NULL`/`user_cleared`, ale o INNYM przedmiocie) - bez trzeciego członu stary gest
-    zamalowałby nowszą decyzję ręki (ta sama figura, co `expected_cleared_id` w `user_assign_object`).
-    Stos wycofany albo zastąpiony (`retired_at`/`superseded_by`) między zdaniem a klikiem to też
-    `'drift'` - martwej tożsamości gest nie pisze. Inny stan = zero zapisu i zero eventów. Klatka
-    już z obiektem `object_id` (drugi gest, inna droga) = `'unchanged'` bez eventu - ten test idzie
-    PRZED CAS, więc powtórzony klik nie mówi „zmieniło się”.
+    CAS NA PEŁNEJ TRÓJCE: `expected` = `(object_id, object_source, object_cleared_id)` z chwili
+    podglądu (`stacks.release_object_check`, plan zmiany obiektu), porównane dosłownie (także
+    `None`). Sama para obiekt+źródło przeżywa sekwencję „nagrobek X → przypisz Y → zdejmij Y” (znów
+    `NULL`/`user_cleared`, ale o INNYM przedmiocie) - bez trzeciego członu stary gest zamalowałby
+    nowszą decyzję ręki (ta sama figura, co `expected_cleared_id` w `user_assign_object`). Klatka
+    wycofana albo zastąpiona (`retired_at`/`superseded_by`) między podglądem a klikiem to też
+    `'drift'` - martwej tożsamości gest nie pisze. Inny stan = zero zapisu i zero eventów. Klatka już
+    z obiektem celu (drugi gest, inna droga) = `'unchanged'` bez eventu - ten test idzie PRZED CAS,
+    więc powtórzony klik nie mówi „zmieniło się”.
+
+    CEL PO KANONIE (jak `user_assign_object`): obiekt (`catalog`, `kind`) i alias wpisanej nazwy
+    (`alias_norm`) powstają W TEJ transakcji i wyłącznie wtedy, gdy klatka naprawdę dostaje obiekt -
+    porzucony podgląd i dryf nie zostawiają pustego obiektu. Konflikt aliasu → `ValueError` przed
+    oceną klatki (cel jest zły niezależnie od niej), zero zapisu.
 
     ZAPIS: `UPDATE frame` na `object_source='user'` (pomija drabinę resolvera: przebieg nie cofnie
     ręki) z wyczyszczeniem pamięci nagrobka. Para verbów jak każde przepięcie osi (§5.9):
-    `object.unassigned` stanu sprzed (gdy obiekt był) + `object.assigned` z `before` w payloadzie.
-    `changes_out` (lista) dostaje `StackObjectChange` - stan sprzed z tej samej blokady, nie
-    z pamięci ekranu (`restore_stack_object`).
+    `object.unassigned` stanu sprzed (gdy obiekt był) + `object.assigned` z `before` w payloadzie,
+    oba z `reason`. `changes_out` (lista) dostaje `ObjectOverride` - stan sprzed z tej samej
+    blokady, nie z pamięci ekranu (`restore_object_override`).
 
-    `ValueError` (EXPECT): klatki nie ma, klatka nie jest stosem (`master_light`), obiektu
-    `object_id` nie ma."""
-    actor = f"user:{uid}"
+    `ValueError` (EXPECT): klatki nie ma, rodzaj spoza `LIGHT_KINDS` (kalibracja obiektu nie ma
+    z definicji), pusty `alias_norm`, kanonu nie ma, a cel nie niesie rodzaju, z którego dałoby się
+    go założyć."""
     with _immediate(con):
-        fr = con.execute(
-            "SELECT kind, object_id, object_source, object_cleared_id, retired_at, superseded_by "
-            "FROM frame WHERE id = ?", (frame_id,)).fetchone()
-        if fr is None:
-            raise ValueError(f"frame:{frame_id} nie istnieje")
-        if fr["kind"] != "master_light":
-            raise ValueError(f"frame:{frame_id} to '{fr['kind']}', nie stos - nadpisanie obiektu "
-                             "wydania dotyczy wyłącznie stosów")
-        if con.execute("SELECT 1 FROM object WHERE id = ?", (object_id,)).fetchone() is None:
-            raise ValueError(f"object:{object_id} nie istnieje")
-        if fr["retired_at"] is not None or fr["superseded_by"] is not None:
-            return "drift"
-        if fr["object_id"] == object_id:
-            return "unchanged"
-        if ((fr["object_id"], fr["object_source"], fr["object_cleared_id"])
-                != (expected_object_id, expected_source, expected_cleared_id)):
-            return "drift"
-        before = (fr["object_id"], fr["object_source"], fr["object_cleared_id"])
-        if fr["object_id"] is not None:
-            emit_event(con, actor=actor, verb="object.unassigned", target=f"frame:{frame_id}",
-                       now=now, payload={"object_id": fr["object_id"],
-                                         "object_source": fr["object_source"],
-                                         "reason": "release_object"})
-        con.execute(
-            "UPDATE frame SET object_id = ?, object_source = 'user', object_cleared_id = NULL "
-            "WHERE id = ?", (object_id, frame_id))
-        emit_event(con, actor=actor, verb="object.assigned", target=f"frame:{frame_id}", now=now,
-                   payload={"object_id": object_id, "object_source": "user",
-                            "reason": "release_object",
-                            "before": {"object_id": before[0], "object_source": before[1],
-                                       "object_cleared_id": before[2]}})
-    if changes_out is not None:
-        changes_out.append(StackObjectChange(frame_id, before, object_id))
-    return "assigned"
+        werdykt, zmiana = _override_object_tx(
+            con, frame_id=frame_id, canon=canon, catalog=catalog, kind=kind, alias_norm=alias_norm,
+            expected=expected, now=now, actor=f"user:{uid}", reason=reason)
+    if zmiana is not None and changes_out is not None:
+        changes_out.append(zmiana)
+    return werdykt
 
 
-def restore_stack_object(con, *, change, now, uid="local"):
-    """COFNIĘCIE `user_override_stack_object`: klatka wraca do stanu `change.before` (obiekt i źródło
+def _override_object_tx(con, *, frame_id, canon, catalog, kind, alias_norm, expected, now, actor,
+                        reason):
+    """Rdzeń `user_override_object` BEZ własnej transakcji → `(werdykt, ObjectOverride | None)`.
+    Wspólny dla gestu wydania i dla kroku bazy pozycji zmiany obiektu, który w tej samej transakcji
+    zapisuje stan sprzed w `pending_object_change` (D-1011-5). Jedna klinga, dwa zakresy."""
+    fr = con.execute(
+        "SELECT kind, object_id, object_source, object_cleared_id, retired_at, superseded_by "
+        "FROM frame WHERE id = ?", (frame_id,)).fetchone()
+    if fr is None:
+        raise ValueError(f"frame:{frame_id} nie istnieje")
+    if fr["kind"] not in LIGHT_KINDS:
+        raise ValueError(f"frame:{frame_id} to '{fr['kind']}' - kalibracja obiektu nie ma "
+                         "z definicji, nadpisanie dotyczy lightów i stosów")
+    if alias_norm is not None and not alias_norm:
+        raise ValueError("alias_norm pusty - nazwa bez znaków alfanumerycznych nie może być kluczem")
+    znany, _ = _object_target(con, canon, alias_norm)
+    if znany is None and kind is None:
+        raise ValueError(f"obiekt '{canon}' nie istnieje, a cel nie niesie rodzaju - nie ma z czego "
+                         "go założyć")
+    if fr["retired_at"] is not None or fr["superseded_by"] is not None:
+        return "drift", None
+    if znany is not None and fr["object_id"] == znany:
+        return "unchanged", None
+    before = (fr["object_id"], fr["object_source"], fr["object_cleared_id"])
+    if before != tuple(expected):
+        return "drift", None
+    object_id = _upsert_object_tx(con, canon=canon, catalog=catalog, kind=kind,
+                                  alias_norm=alias_norm, actor=actor, now=now)
+    if fr["object_id"] is not None:
+        emit_event(con, actor=actor, verb="object.unassigned", target=f"frame:{frame_id}",
+                   now=now, payload={"object_id": fr["object_id"],
+                                     "object_source": fr["object_source"], "reason": reason})
+    con.execute(
+        "UPDATE frame SET object_id = ?, object_source = 'user', object_cleared_id = NULL "
+        "WHERE id = ?", (object_id, frame_id))
+    emit_event(con, actor=actor, verb="object.assigned", target=f"frame:{frame_id}", now=now,
+               payload={"object_id": object_id, "object_source": "user", "reason": reason,
+                        "before": {"object_id": before[0], "object_source": before[1],
+                                   "object_cleared_id": before[2]}})
+    return "assigned", ObjectOverride(frame_id, before, object_id, reason)
+
+
+def restore_object_override(con, *, change, now, uid="local"):
+    """COFNIĘCIE `user_override_object`: klatka wraca do stanu `change.before` (obiekt i źródło
     z nagłówka, pustka albo nagrobek z pamięcią) → `True`; inaczej `False`.
 
     CAS pod blokadą na pełnej trójce: przywracamy WYŁĄCZNIE klatkę, która dalej niesie wynik TEGO
-    gestu (`change.object_id`, źródło `user`, bez pamięci nagrobka - gest ją wyczyścił). Inny stan (nowszy gest, drugie cofnięcie) = `False` bez
-    zapisu i bez eventu - cofnięcie nie nadpisuje decyzji, której nie widziało.
+    gestu (`change.object_id`, źródło `user`, bez pamięci nagrobka - gest ją wyczyścił). Inny stan
+    (nowszy gest, drugie cofnięcie) = `False` bez zapisu i bez eventu - cofnięcie nie nadpisuje
+    decyzji, której nie widziało.
 
     Para verbów lustrem gestu: `object.unassigned` obiektu ręki + `object.assigned` obiektu sprzed
-    (gdy był) - bilans osi (§5.9) domyka się tak samo jak przy geście. Źródło sprzed wraca
-    dosłownie: przebieg resolvera i tak przeliczy `header`, a nagrobek odzyska pamięć."""
-    actor = f"user:{uid}"
-    stary_obiekt, stare_zrodlo, stara_pamiec = change.before
+    (gdy był), oba z `reason` gestu i dopiskiem `_undo` - bilans osi (§5.9) domyka się tak samo jak
+    przy geście. Źródło sprzed wraca dosłownie: przebieg resolvera i tak przeliczy `header`,
+    a nagrobek odzyska pamięć."""
     with _immediate(con):
-        fr = con.execute(
-            "SELECT object_id, object_source, object_cleared_id FROM frame WHERE id = ?",
-            (change.frame_id,)).fetchone()
-        if fr is None or ((fr["object_id"], fr["object_source"], fr["object_cleared_id"])
-                          != (change.object_id, "user", None)):
-            return False
-        emit_event(con, actor=actor, verb="object.unassigned", target=f"frame:{change.frame_id}",
-                   now=now, payload={"object_id": change.object_id, "object_source": "user",
-                                     "reason": "release_object_undo"})
-        con.execute(
-            "UPDATE frame SET object_id = ?, object_source = ?, object_cleared_id = ? WHERE id = ?",
-            (stary_obiekt, stare_zrodlo, stara_pamiec, change.frame_id))
-        if stary_obiekt is not None:
-            emit_event(con, actor=actor, verb="object.assigned", target=f"frame:{change.frame_id}",
-                       now=now, payload={"object_id": stary_obiekt, "object_source": stare_zrodlo,
-                                         "reason": "release_object_undo"})
+        return _restore_override_tx(con, change=change, now=now, actor=f"user:{uid}")
+
+
+def _restore_override_tx(con, *, change, now, actor):
+    """Rdzeń `restore_object_override` BEZ własnej transakcji - wspólny dla cofnięcia gestu wydania
+    i dla cofnięcia (albo wycofania w biegu) kroku bazy pozycji zmiany obiektu."""
+    stary_obiekt, stare_zrodlo, stara_pamiec = change.before
+    powod = f"{change.reason}_undo"
+    fr = con.execute(
+        "SELECT object_id, object_source, object_cleared_id FROM frame WHERE id = ?",
+        (change.frame_id,)).fetchone()
+    if fr is None or ((fr["object_id"], fr["object_source"], fr["object_cleared_id"])
+                      != (change.object_id, "user", None)):
+        return False
+    emit_event(con, actor=actor, verb="object.unassigned", target=f"frame:{change.frame_id}",
+               now=now, payload={"object_id": change.object_id, "object_source": "user",
+                                 "reason": powod})
+    con.execute(
+        "UPDATE frame SET object_id = ?, object_source = ?, object_cleared_id = ? WHERE id = ?",
+        (stary_obiekt, stare_zrodlo, stara_pamiec, change.frame_id))
+    if stary_obiekt is not None:
+        emit_event(con, actor=actor, verb="object.assigned", target=f"frame:{change.frame_id}",
+                   now=now, payload={"object_id": stary_obiekt, "object_source": stare_zrodlo,
+                                     "reason": powod})
     return True
 
 
@@ -3583,9 +3637,15 @@ def set_pending_status(con, *, pending_id, status, reason=None):
 def clear_pending_for_run(con, run_id):
     """Skasuj staging przebiegu (idempotentne ponowne uruchomienie makra / „Odrzuć" w szufladzie).
     DELETE sankcjonowany: pending_changes to LUSTRO oczekujących zmian, nie historia (historia =
-    event). Transient — bez eventu."""
+    event). Transient - bez eventu.
+
+    WPISY ZWIĄZANE Z OPERACJĄ ZAPISU W MIEJSCU ZOSTAJĄ (`inplace_op_id` NOT NULL): po zapisie, którego
+    dokończenie padło (lokacja w fazie `written`), `finish_inplace` szuka ich po operacji i dopiero
+    wtedy oznacza je 'applied' i gasi nagrobek ręki - okno karty porzucające staging po przerwaniu
+    zostawiłoby dokończenie bez wpisów (AR-117: oba okna kart piszą dziś w miejscu)."""
     with con:
-        con.execute("DELETE FROM pending_changes WHERE run_id = ?", (run_id,))
+        con.execute("DELETE FROM pending_changes WHERE run_id = ? AND inplace_op_id IS NULL",
+                    (run_id,))
 
 
 def insert_commit(con, *, run_id, now, summary=None):
@@ -4081,25 +4141,46 @@ def relocate_location(con, *, location_id, new_path, now, actor="user:local"):
 
 def _relocation_target(con, location_id, new_path):
     """Pod transakcją wołającego: bieżąca `path` lokacji. Brak lokacji albo cel zajęty w bazie przez
-    INNY wiersz `(volume, new_path)` (anty-clobber w bazie, R3 #3) → `ValueError`."""
+    INNY wiersz pod tą samą ścieżką FIZYCZNĄ (`path_owner`; anty-clobber w bazie, R3 #3) →
+    `ValueError`. Zmiana samej wielkości liter własnej lokacji kolizją nie jest - to ten sam wiersz."""
     row = con.execute(
         "SELECT volume, path FROM location WHERE id = ?", (location_id,)).fetchone()
     if row is None:
         raise ValueError(f"location:{location_id} nie istnieje")
-    clash = con.execute(
-        "SELECT id FROM location WHERE volume = ? AND path = ? AND id <> ?",
-        (row["volume"], new_path, location_id)).fetchone()
+    clash = path_owner(con, volume=row["volume"], path=new_path, location_id=location_id)
     if clash is not None:
         raise ValueError(
-            f"cel zajęty w bazie: location:{clash['id']} ma już (volume={row['volume']}, "
-            f"{new_path})")
+            f"cel zajęty w bazie: location:{clash} ma już (volume={row['volume']}, {new_path})")
     return row["path"]
 
 
+def path_owner(con, *, volume, path, location_id):
+    """Id INNEJ lokacji woluminu (obecnej albo nie) pod tą samą ścieżką FIZYCZNĄ co `path` → int
+    albo None. Ścieżka fizyczna = klucz planera (`object_change.path_key`: separatory jak w systemie,
+    bez wielkości liter) - udział `R:` nie rozróżnia `IC405` i `ic405`, a `UNIQUE(volume, path)`
+    porównuje binarnie, więc samo `path = ?` przepuszczało drugą lokację tego samego pliku. Lokacja
+    nieobecna też się liczy: jej wiersz wróci przy skanie pod tą samą ścieżką.
+
+    Najpierw tani filtr w SQL (koniec ścieżki = nazwa pliku; `LIKE` składa wielkość liter ASCII,
+    znak spoza ASCII zastępuje dowolny jeden znak), potem dokładny klucz w Pythonie - filtr jest
+    nadzbiorem, decyduje klucz."""
+    klucz = path_key(path)
+    nazwa = ntpath.basename(ntpath.normpath(str(path)))
+    wzor = "%" + "".join("!" + z if z in "!%_" else (z if z.isascii() else "_") for z in nazwa)
+    for r in con.execute(
+            "SELECT id, path FROM location WHERE volume = ? AND id <> ? AND path LIKE ? ESCAPE '!'",
+            (volume, location_id, wzor)):
+        if path_key(r["path"]) == klucz:
+            return r["id"]
+    return None
+
+
 def _apply_relocation(con, *, location_id, old_path, new_path, now, actor, rename_id=None,
-                      reason=None, alias=True):
+                      reason=None, alias=True, gest=None):
     """UPDATE `location.path` + `location.renamed` pod transakcją wołającego. Rekoncyliacja zamiaru
-    (`settle_rename_intent`) dokłada wiersz stagingu do ładunku i powód.
+    (`settle_rename_intent`) dokłada wiersz stagingu do ładunku i powód. `gest` (zmiana obiektu:
+    `object_change`, jej cofnięcie: `object_change_undo`) trafia do ładunku jako `reason` - Dom
+    opisuje takie zdarzenie jako przeniesienie do folderu obiektu, nie jako zmianę nazwy.
 
     DAWNA NAZWA LIGHTU ZOSTAJE ALIASEM (`light_name_alias`, źródło `horreum`, AR-108): historia stosu
     zapisuje nazwy lightów z chwili obróbki, więc zmiana nazwy po obróbce odcina rodowód po nazwie -
@@ -4116,6 +4197,8 @@ def _apply_relocation(con, *, location_id, old_path, new_path, now, actor, renam
     payload = {"before": old_path, "after": new_path}
     if rename_id is not None:
         payload["pending_rename"] = rename_id
+    if gest is not None:
+        payload["reason"] = gest
     emit_event(con, actor=actor, verb="location.renamed", target=f"location:{location_id}",
                now=now, payload=payload, reason=reason)
 
@@ -4141,7 +4224,7 @@ def _dopisz_alias_nazwy(con, *, location_id, old_path, new_path, now, actor):
 
 @contextmanager
 def guard_file_rename(con, *, location_id, new_path, generation, now, actor="user:local",
-                      rename_id=None, status=None, reason=None, kierunek=None):
+                      rename_id=None, status=None, reason=None, kierunek=None, gest=None):
     """STRAŻ RELOKACJI (AR-17 (5)): rename pliku lokacji i przepięcie `location.path` w JEDNEJ
     transakcji `BEGIN IMMEDIATE` - bliźniak `guard_file_replace` dla `os.rename`:
 
@@ -4178,7 +4261,7 @@ def guard_file_rename(con, *, location_id, new_path, generation, now, actor="use
         old_path = _relocation_target(con, location_id, new_path)
         yield
         _apply_relocation(con, location_id=location_id, old_path=old_path, new_path=new_path,
-                          now=now, actor=actor, alias=kierunek != "undo")
+                          now=now, actor=actor, alias=kierunek != "undo", gest=gest)
         if rename_id is not None:
             _zamknij_wiersz_renamu(con, rename_id, status, reason)
 
@@ -4245,15 +4328,20 @@ def settle_rename_intent(con, *, rename_id, location_id, status, reason, now, re
         _zamknij_wiersz_renamu(con, rename_id, status, reason)
 
 
+def _insert_rename(con, row):
+    """JEDEN literał INSERT stagingu renamu dla obu wołających (`stage_rename`, staging zmiany
+    obiektu) - jak `_insert_pending`. Bez własnej transakcji: obejmuje ją wołający. Zwraca id."""
+    return con.execute(
+        "INSERT INTO pending_renames(run_id, location_id, old_path, new_path, expected_mtime, "
+        "status) VALUES (?, ?, ?, ?, ?, 'pending')", row).lastrowid
+
+
 def stage_rename(con, *, run_id, location_id, old_path, new_path, expected_mtime):
     """Dopisz JEDEN wpis stagingu renamu (status 'pending'). Kluczowany LOCATION. Zwraca id wiersza.
     Transient — bez eventu. `expected_mtime` = kotwica anty-stale (mtime pliku przy podglądzie)."""
     with con:
-        cur = con.execute(
-            "INSERT INTO pending_renames(run_id, location_id, old_path, new_path, expected_mtime, "
-            "status) VALUES (?, ?, ?, ?, ?, 'pending')",
-            (run_id, location_id, old_path, new_path, expected_mtime))
-    return cur.lastrowid
+        rename_id = _insert_rename(con, (run_id, location_id, old_path, new_path, expected_mtime))
+    return rename_id
 
 
 def set_rename_status(con, *, rename_id, status, reason=None):
@@ -4313,6 +4401,290 @@ def clear_renames_for_run(con, run_id):
     zajść bez przepięcia bazy - zdejmie go dopiero rekoncyliacja."""
     with con:
         con.execute("DELETE FROM pending_renames WHERE run_id = ? AND in_flight IS NULL", (run_id,))
+
+
+# ------------------------------------------------ ZMIANA OBIEKTU RAZEM Z PLIKIEM (AR-17 krok 3, 0036)
+# Księgowość gestu „Zmień obiekt…”/„Uzgodnij” (`object_change_run`, `pending_object_change`, `run_dir`)
+# - transient jak staging karty i renamu, BEZ eventów: faktami domenowymi są zmiana obiektu klatki
+# (para verbów klingi ręki) i relokacja (`location.renamed`). Sterownik i cofnięcie żyją w `writeback`
+# (mutacja plików); tu każdy ich zapis bazy, każdy w swojej transakcji.
+
+_ETAPY_COFNIECIA = (None, "card", "file")     # fazy cofnięcia pozycji przed fazą bazy (0036)
+
+
+def _katalogi_celu(katalogi, new_path):
+    """Czy `katalogi` to kolejne poziomy drogi do katalogu `new_path`, od najpłytszego, z katalogiem
+    pliku na końcu: sterownik zakłada wyłącznie je, więc katalog spoza tej drogi (błąd planu) nie
+    może przejść stagingu - powstałby na udziale bez żadnego pliku w środku."""
+    cel = os.path.normcase(os.path.normpath(os.path.dirname(new_path)))
+    poziomy = [os.path.normcase(os.path.normpath(k)) for k in katalogi]
+    return (poziomy[-1] == cel
+            and all(os.path.dirname(dziecko) == rodzic
+                    for rodzic, dziecko in zip(poziomy, poziomy[1:])))
+
+
+def stage_object_change(con, *, plan, now):
+    """STAGING GESTU (D-1011-5) - JEDNA transakcja: przebieg (`object_change_run`: tryb i cel),
+    a per pozycja przeniesienie (`pending_renames`, gdy `new_path`), karta `OBJECT`
+    (`pending_changes`, gdy `card_op`; kotwica `expected_header_hash`) i sama pozycja
+    (`pending_object_change`: CAS ręki, katalogi celu z podglądu). Wiersze `run_dir` NIE - powstają
+    w sterowniku, bo zależą od stanu dysku w chwili ruchu. Obiektu i aliasu staging nie zakłada
+    (porzucony podgląd nie zostawia pustego obiektu) - robi to klinga ręki przy pierwszej pozycji,
+    która obiekt naprawdę dostaje.
+
+    `plan` = `object_change.ObjectChangePlan` (pola czytane po nazwie - repo nie importuje planera).
+    EXPECT (`ValueError`, zero zapisu): cel bez formy karty (gest odmawia takiego celu przed planem),
+    pozycja zmieniająca obiekt w trybie „Uzgodnij”, operacja karty spoza `set`/`add` albo bez
+    wartości, katalogi do założenia bez przeniesienia, CAS ręki nie-trójką. Drugi staging tego samego
+    `run_id` → `sqlite3.IntegrityError` (przebieg ma jeden staging)."""
+    cel = plan.target
+    if cel is not None and not cel.card_form:
+        raise ValueError(f"cel '{cel.canon}' bez formy karty OBJECT - gest „karta i folder razem” "
+                         "odmawia celu przed planem")
+    for it in plan.items:
+        if cel is None and it.object_change:
+            raise ValueError(f"frame:{it.frame_id} zmienia obiekt w trybie „Uzgodnij” (cel None)")
+        if it.card_op not in (None, "set", "add") or (it.card_op is not None and it.card_new is None):
+            raise ValueError(f"frame:{it.frame_id}: karta {it.card_op!r} bez wartości albo spoza "
+                             "('set', 'add')")
+        if it.mkdirs and it.new_path is None:
+            raise ValueError(f"frame:{it.frame_id}: katalogi do założenia bez przeniesienia pliku")
+        if it.mkdirs and not _katalogi_celu(it.mkdirs, it.new_path):
+            raise ValueError(f"frame:{it.frame_id}: katalogi do założenia nie są kolejnymi przodkami "
+                             f"katalogu celu {it.new_path} od najpłytszego")
+        if len(tuple(it.expected_object)) != 3:
+            raise ValueError(f"frame:{it.frame_id}: CAS ręki to trójca (object_id, object_source, "
+                             "object_cleared_id)")
+    with _immediate(con):
+        con.execute(
+            "INSERT INTO object_change_run(run_id, mode, canon, catalog, kind, alias_norm, card_form, "
+            "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (plan.run_id, "align" if cel is None else "change",
+             None if cel is None else cel.canon, None if cel is None else cel.catalog,
+             None if cel is None else cel.kind, None if cel is None else cel.alias_norm,
+             None if cel is None else cel.card_form, now))
+        for it in plan.items:
+            rename_id = None
+            if it.new_path is not None:
+                rename_id = _insert_rename(con, (plan.run_id, it.location_id, it.old_path,
+                                                 it.new_path, it.expected_mtime))
+            if it.card_op is not None:
+                _insert_pending(con, (plan.run_id, it.location_id, "OBJECT",
+                                      0 if it.card_op == "set" else None, it.card_op, it.card_old,
+                                      it.card_new, "str", None, it.expected_header_hash))
+            oczekiwany = tuple(it.expected_object)
+            con.execute(
+                "INSERT INTO pending_object_change(run_id, frame_id, location_id, old_path, "
+                "expected_mtime, object_change, expected_object_id, expected_source, "
+                "expected_cleared_id, rename_id, mkdirs) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (plan.run_id, it.frame_id, it.location_id, it.old_path, it.expected_mtime,
+                 int(bool(it.object_change)), oczekiwany[0], oczekiwany[1], oczekiwany[2],
+                 rename_id, json.dumps(list(it.mkdirs), ensure_ascii=False)))
+
+
+def apply_object_change_item(con, *, item_id, now, uid="local"):
+    """KROK BAZY POZYCJI gestu (D-1011-5 Q1: baza najpierw, per pozycja) - JEDNA transakcja: CAS ręki
+    i zmiana obiektu klatki (`_override_object_tx`, `reason='object_change'`) RAZEM z utrwaleniem
+    zapisanego obiektu i stanu sprzed w wierszu pozycji (cofnięcie przeżywa awarię procesu, bo stan
+    sprzed nie żyje w pamięci okna). Cel (kanon, katalog, rodzaj, alias) z `object_change_run`.
+
+    → `'assigned'` · `'unchanged'` (klatka już ma obiekt celu - baza nietknięta) · `'drift'` (stan
+    inny niż w podglądzie albo martwa tożsamość - zero zapisu) · `'none'` (pozycja bez zmiany obiektu:
+    „Uzgodnij” albo cel = obiekt bieżący) · `'copies'` (klatka nie ma dokładnie jednej obecnej kopii
+    albo nie jest nią kopia pozycji - zero zapisu). Krok zrobiony przed awarią (wiersz niesie
+    `object_id`) → `'assigned'` bez zapisu, o ile klatka dalej niesie jego wynik `(object_id, 'user',
+    NULL)` i żyje - wtedy ponowienie idzie dalej od pliku; inaczej `'drift'`. `ValueError` klingi
+    (konflikt aliasu, klatka spoza `LIGHT_KINDS`) i pozycja nie-oczekująca (EXPECT) - zero zapisu.
+
+    POZYCJA BEZ ZMIANY OBIEKTU TEŻ PYTA O STAN Z PODGLĄDU (sam odczyt, ta sama trójca i ta sama
+    martwa tożsamość): plik dogania obiekt, który klatka miała w podglądzie - gdy w międzyczasie
+    dostała inny, przeniesienie zawiozłoby go do folderu obiektu, którego klatka już nie ma."""
+    with _immediate(con):
+        p = con.execute(
+            "SELECT p.frame_id, p.location_id, p.object_change, p.object_id, p.expected_object_id, "
+            "       p.expected_source, p.expected_cleared_id, p.status, r.canon, r.catalog, r.kind, "
+            "       r.alias_norm "
+            "FROM pending_object_change p JOIN object_change_run r ON r.run_id = p.run_id "
+            "WHERE p.id = ?", (item_id,)).fetchone()
+        if p is None:
+            raise ValueError(f"pozycja zmiany obiektu {item_id} nie istnieje")
+        if p["status"] != "pending":
+            raise ValueError(f"pozycja zmiany obiektu {item_id} ma status '{p['status']}' - krok "
+                             "bazy dotyczy wyłącznie pozycji oczekującej")
+        # JEDNA OBECNA KOPIA, I TO TA Z PODGLĄDU - pod tą samą blokadą co zapis klatki. Ręka zmienia
+        # obiekt CAŁEJ klatki, a plik i kartę dostaje tylko kopia pozycji: druga obecna kopia, którą
+        # skan dopisał po podglądzie, zostałaby ze starym folderem i kartą przy nowym obiekcie.
+        kopie = [r[0] for r in con.execute(
+            "SELECT id FROM location WHERE frame_id = ? AND present = 1", (p["frame_id"],))]
+        if kopie != [p["location_id"]]:
+            return "copies"
+        fr = con.execute(
+            "SELECT object_id, object_source, object_cleared_id, retired_at, superseded_by "
+            "FROM frame WHERE id = ?", (p["frame_id"],)).fetchone()
+        martwa = fr is None or fr["retired_at"] is not None or fr["superseded_by"] is not None
+        trojca = None if fr is None else (fr["object_id"], fr["object_source"],
+                                          fr["object_cleared_id"])
+        if not p["object_change"]:
+            if martwa or trojca != (p["expected_object_id"], p["expected_source"],
+                                    p["expected_cleared_id"]):
+                return "drift"
+            return "none"
+        if p["object_id"] is not None:
+            # WZNOWIENIE po awarii: krok bazy zrobiono wcześniej, więc klatka ma dalej nieść JEGO
+            # wynik - inaczej plik i karta poszłyby za obiektem, który ręka już zmieniła. Wyniku
+            # gestu w bazie nie ma (nowsza decyzja) → pozycja go zapomina, bez przywracania stanu
+            # sprzed; martwa tożsamość z wynikiem gestu → dryf, a wynik zostaje dla cofnięcia.
+            if trojca != (p["object_id"], "user", None):
+                con.execute(
+                    "UPDATE pending_object_change SET object_id = NULL, before_object_id = NULL, "
+                    "before_source = NULL, before_cleared_id = NULL WHERE id = ?", (item_id,))
+                return "drift"
+            return "drift" if martwa else "assigned"
+        werdykt, zmiana = _override_object_tx(
+            con, frame_id=p["frame_id"], canon=p["canon"], catalog=p["catalog"], kind=p["kind"],
+            alias_norm=p["alias_norm"],
+            expected=(p["expected_object_id"], p["expected_source"], p["expected_cleared_id"]),
+            now=now, actor=f"user:{uid}", reason="object_change")
+        if zmiana is not None:
+            con.execute(
+                "UPDATE pending_object_change SET object_id = ?, before_object_id = ?, "
+                "before_source = ?, before_cleared_id = ? WHERE id = ?",
+                (zmiana.object_id, *zmiana.before, item_id))
+    return werdykt
+
+
+def _krok_bazy_pozycji(con, item_id):
+    """Pod transakcją wołającego: `(wiersz pozycji, ObjectOverride | None)` - materiał cofnięcia kroku
+    bazy pozycji (None = baza tej pozycji nietknięta przez gest)."""
+    p = con.execute(
+        "SELECT frame_id, object_id, before_object_id, before_source, before_cleared_id, status, "
+        "       undo_phase FROM pending_object_change WHERE id = ?", (item_id,)).fetchone()
+    if p is None:
+        raise ValueError(f"pozycja zmiany obiektu {item_id} nie istnieje")
+    if p["object_id"] is None:
+        return p, None
+    return p, ObjectOverride(p["frame_id"], (p["before_object_id"], p["before_source"],
+                                             p["before_cleared_id"]), p["object_id"],
+                             "object_change")
+
+
+def settle_object_change_item(con, *, item_id, status, reason, now, restore=False, uid="local"):
+    """ROZLICZENIE POZYCJI w biegu gestu - JEDNA transakcja: status z powodem, a przy `restore=True`
+    także wycofanie jej kroku bazy (odmowa przeniesienia albo karty BEZ zapisu = zrobione kroki
+    pozycji wracają; plik wraca wcześniej, w `writeback`). Wycofanie idzie CAS-em klingi
+    (`_restore_override_tx`): klatka, która nie niesie już wyniku gestu (inny gest zdążył ją
+    zmienić), zostaje nietknięta, a powód to mówi. Po wycofaniu - udanym albo odbitym - wiersz nie
+    niesie obiektu ani stanu sprzed: w bazie nie ma już wyniku TEGO gestu, więc cofnięcie przebiegu
+    nie ma tu czego cofać.
+
+    → `True` (baza wycofana), `False` (CAS odmówił), `None` (nie było czego wycofywać)."""
+    if status not in ("applied", "skipped", "blocked", "failed"):
+        raise ValueError(f"status pozycji {status!r} spoza ('applied', 'skipped', 'blocked', 'failed')")
+    with _immediate(con):
+        _, zmiana = _krok_bazy_pozycji(con, item_id)
+        wycofano = None
+        if restore and zmiana is not None:
+            wycofano = _restore_override_tx(con, change=zmiana, now=now, actor=f"user:{uid}")
+            if not wycofano:
+                reason = (f"{reason}; " if reason else "") + ("baza: klatka niesie już nowszą "
+                                                               "decyzję niż gest - zostaje")
+            con.execute(
+                "UPDATE pending_object_change SET object_id = NULL, before_object_id = NULL, "
+                "before_source = NULL, before_cleared_id = NULL WHERE id = ?", (item_id,))
+        con.execute("UPDATE pending_object_change SET status = ?, reason = ? WHERE id = ?",
+                    (status, reason, item_id))
+    return wycofano
+
+
+def set_object_change_undo_phase(con, *, item_id, phase, reason=None):
+    """Faza cofnięcia pozycji (`card` → `file`, 0036) z powodem albo - `phase=None` - sam powód
+    zatrzymania przy fazie bieżącej. Faza idzie WYŁĄCZNIE o jeden krok naprzód (EXPECT: cofnięcie
+    domyka fazy po kolei, przeskok znaczy błąd wołającego); fazę `db` stawia
+    `undo_object_change_db` razem ze statusem `undone`."""
+    with _immediate(con):
+        row = con.execute("SELECT undo_phase FROM pending_object_change WHERE id = ?",
+                          (item_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"pozycja zmiany obiektu {item_id} nie istnieje")
+        if phase is None:
+            con.execute("UPDATE pending_object_change SET reason = ? WHERE id = ?", (reason, item_id))
+            return
+        if (phase not in _ETAPY_COFNIECIA[1:] or row["undo_phase"] not in _ETAPY_COFNIECIA
+                or _ETAPY_COFNIECIA.index(phase) != _ETAPY_COFNIECIA.index(row["undo_phase"]) + 1):
+            raise ValueError(f"faza cofnięcia {row['undo_phase']!r} → {phase!r} - poza kolejnością "
+                             f"{_ETAPY_COFNIECIA}")
+        con.execute("UPDATE pending_object_change SET undo_phase = ?, reason = ? WHERE id = ?",
+                    (phase, reason, item_id))
+
+
+def undo_object_change_db(con, *, item_id, now, uid="local"):
+    """OSTATNIA FAZA COFNIĘCIA POZYCJI (karta → plik → baza) - JEDNA transakcja: baza wraca do stanu
+    sprzed (CAS klingi: wyłącznie klatka, która dalej niesie wynik gestu), wiersz dostaje fazę `db`
+    i status `undone`. Klatka z nowszą decyzją ręki zostaje, a powód to mówi; pozycja bez kroku bazy
+    („Uzgodnij”, `unchanged`) domyka się bez zapisu klatki. EXPECT: plik pozycji już wrócił (faza
+    `file`). → powód dla człowieka albo None."""
+    with _immediate(con):
+        p, zmiana = _krok_bazy_pozycji(con, item_id)
+        if p["undo_phase"] != "file":
+            raise ValueError(f"pozycja zmiany obiektu {item_id} w fazie cofnięcia "
+                             f"{p['undo_phase']!r} - baza wraca dopiero po pliku")
+        uwaga = None
+        if zmiana is not None and not _restore_override_tx(con, change=zmiana, now=now,
+                                                          actor=f"user:{uid}"):
+            uwaga = "baza: klatka niesie nowszą decyzję niż gest - obiekt zostaje"
+        con.execute("UPDATE pending_object_change SET status = 'undone', undo_phase = 'db', "
+                    "reason = ? WHERE id = ?", (uwaga, item_id))
+    return uwaga
+
+
+def set_object_change_run_status(con, *, run_id, status):
+    """Status przebiegu gestu: `applied` (sterownik doszedł do końca listy pozycji), `undoing`
+    (cofnięcie zlecone - sterownik zapisu przebiegu już nie wznowi, ponowienie cofnięcia wznawia
+    pozycje), `undone` (cofnięcie domknęło wszystkie pozycje i katalogi). Przebieg nieznany →
+    `ValueError` (EXPECT)."""
+    with _immediate(con):
+        cur = con.execute("UPDATE object_change_run SET status = ? WHERE run_id = ?",
+                          (status, run_id))
+        if cur.rowcount != 1:
+            raise ValueError(f"przebieg zmiany obiektu {run_id} nie istnieje")
+
+
+def open_run_dir(con, *, run_id, path, action, now):
+    """ZAMIAR mutacji katalogu gestu (0036, D-1011-5 Q3) - zatwierdzony WŁASNĄ transakcją PRZED
+    `os.mkdir`/`os.rmdir`, nigdy w straży renamu. Zamiar sprzed awarii, którego mutacja nie zaszła
+    (bez `done_at`), wraca jako TEN SAM wiersz - `UNIQUE(run_id, path, action)`, ścieżka bez wielkości
+    liter. Wiersza ZAKOŃCZONEGO (`done_at`) nie otwieramy ponownie → `ValueError`, zero zapisu:
+    katalog pod tą ścieżką po zakończonej mutacji założył albo opróżnił już ktoś inny, a ponowne
+    otwarcie wymazałoby ślad gestu i oddało cudzy katalog do usunięcia. → id wiersza."""
+    if action not in ("created", "removed", "restored"):
+        raise ValueError(f"akcja katalogu {action!r} spoza ('created', 'removed', 'restored')")
+    with _immediate(con):
+        row = con.execute("SELECT id, done_at FROM run_dir WHERE run_id = ? AND path = ? "
+                          "AND action = ?", (run_id, path, action)).fetchone()
+        if row is not None and row["done_at"] is not None:
+            raise ValueError(f"katalog {path} ({action}) już zamknięty w tym przebiegu - zamiaru "
+                             f"nie otwieramy ponownie")
+        if row is not None:
+            con.execute("UPDATE run_dir SET opened_at = ? WHERE id = ?", (now, row["id"]))
+            return row["id"]
+        return con.execute("INSERT INTO run_dir(run_id, path, action, opened_at) "
+                           "VALUES (?, ?, ?, ?)", (run_id, path, action, now)).lastrowid
+
+
+def finish_run_dir(con, *, dir_id, now):
+    """Mutacja katalogu zaszła (`done_at`) - po `os.mkdir`/`os.rmdir` albo w rekoncyliacji, gdy dysk
+    pokazuje jej skutek. Wiersz już domknięty zostaje bez zmian (pierwsza chwila)."""
+    with _immediate(con):
+        con.execute("UPDATE run_dir SET done_at = ? WHERE id = ? AND done_at IS NULL",
+                    (now, dir_id))
+
+
+def undo_run_dir(con, *, dir_id, now):
+    """Katalog założony przez gest usunięty (`undone_at`) - WYŁĄCZNIE wiersz `created` z `done_at`
+    (własność pewna; CHECK 0036 odbija resztę). Wiersz już oznaczony zostaje bez zmian."""
+    with _immediate(con):
+        con.execute("UPDATE run_dir SET undone_at = ? WHERE id = ? AND action = 'created' "
+                    "AND done_at IS NOT NULL AND undone_at IS NULL", (now, dir_id))
 
 
 # ------------------------------------------------ oś KALIBRACJI — przepis + fakty (C2, #6)

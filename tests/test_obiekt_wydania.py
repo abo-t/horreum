@@ -2,13 +2,16 @@ r"""OBIEKT STOSU WOBEC OBIEKTU WYDANIA (AR-103) - rdzeń: porównanie i klinga j
 
 Stos dostaje obiekt po Dostawie z nagłówka (`OBJECT` przepisany przez WBPP z lightów), a żniwa wiedzą,
 dla jakiego obiektu Horreum wydało lighty. Porównanie (`stacks.release_object_check`) niczego nie
-zapisuje; zapis robi wyłącznie gest ręki (`repo.user_override_stack_object`) - z CAS na stanie, który
-człowiek widział, idempotentny i odwracalny (`repo.restore_stack_object`). Ochrona `user_assign_object`
-(nie zamaluje faktu z nagłówka) zostaje nietknięta - ta klinga jest osobna i działa tylko na stosie.
+zapisuje; zapis robi wyłącznie gest ręki (`repo.user_override_object`, `reason='release_object'`) - z CAS
+na stanie, który człowiek widział, idempotentny i odwracalny (`repo.restore_object_override`). Ochrona
+`user_assign_object` (nie zamaluje faktu z nagłówka) zostaje nietknięta - klinga nadpisania jest osobna
+i działa pojedynczo na klatce (stos, light; kalibracja nigdy).
 
 Testy pytają o stan ORAZ o dziennik: drugi gest i dryf to ZERO eventów, a bilans osi `§5.9`
 (`audit.entity_event_parity`) domyka się po geście i po cofnięciu.
 """
+import json
+
 import pytest
 
 from horreum import audit, db, repo, resolver, stacks
@@ -51,10 +54,11 @@ def _bilans_osi(con):
 
 
 def _nadpisz(con, check, **kw):
-    return repo.user_override_stack_object(
-        con, frame_id=check["frame_id"], object_id=check["release_object_id"],
-        expected_object_id=check["stack_object_id"], expected_source=check["stack_source"],
-        expected_cleared_id=check["stack_cleared_id"], now=NOW, **kw)
+    """Wywołanie gestu dokładnie jak `MainWindow._on_przypisz_obiekt_wydania`."""
+    return repo.user_override_object(
+        con, frame_id=check["frame_id"], canon=check["release_canon"],
+        expected=(check["stack_object_id"], check["stack_source"], check["stack_cleared_id"]),
+        reason="release_object", now=NOW, **kw)
 
 
 # ═══════════════════════════════════════════ porównanie (read-only)
@@ -109,10 +113,11 @@ def test_gest_nadpisuje_obiekt_z_naglowka_para_eventow_a_drugi_gest_zero_eventow
     przed, zmiany = _ev(con), []
     assert _nadpisz(con, check, changes_out=zmiany) == "assigned"
     assert _stan(con) == (ngc, "user", None)
-    assert zmiany == [repo.StackObjectChange(1, (ic, "header", None), ngc)]
-    verby = [r[0] for r in con.execute("SELECT verb FROM event WHERE id > (SELECT max(id) - 2 FROM event) "
-                                       "ORDER BY id")]
-    assert _ev(con) - przed == 2 and verby == ["object.unassigned", "object.assigned"]
+    assert zmiany == [repo.ObjectOverride(1, (ic, "header", None), ngc, "release_object")]
+    ostatnie = con.execute("SELECT verb, payload FROM event WHERE id > (SELECT max(id) - 2 FROM event) "
+                           "ORDER BY id").fetchall()
+    assert _ev(con) - przed == 2 and [r[0] for r in ostatnie] == ["object.unassigned", "object.assigned"]
+    assert all(json.loads(r[1])["reason"] == "release_object" for r in ostatnie)
     assert _bilans_osi(con)
 
     po = _ev(con)
@@ -174,10 +179,13 @@ def test_cofniecie_przywraca_stan_sprzed_i_tylko_raz():
     zmiany = []
     _nadpisz(con, check, changes_out=zmiany)
     przed = _ev(con)
-    assert repo.restore_stack_object(con, change=zmiany[0], now=NOW) is True
+    assert repo.restore_object_override(con, change=zmiany[0], now=NOW) is True
     assert _stan(con) == (ic, "header", None) and _ev(con) - przed == 2 and _bilans_osi(con)
+    powody = {json.loads(r[0])["reason"] for r in con.execute(
+        "SELECT payload FROM event WHERE id > ?", (przed,))}
+    assert powody == {"release_object_undo"}
     po = _ev(con)
-    assert repo.restore_stack_object(con, change=zmiany[0], now=NOW) is False
+    assert repo.restore_object_override(con, change=zmiany[0], now=NOW) is False
     assert _ev(con) == po
 
     # nowsza decyzja ręki po geście: cofnięcie jej nie nadpisuje
@@ -186,7 +194,7 @@ def test_cofniecie_przywraca_stan_sprzed_i_tylko_raz():
     repo.clear_object_assignment(con, frame_ids=[1], now=NOW)             # „Cofnij przypisanie” w Zbiorach
     stan, po = _stan(con), _ev(con)
     assert stan == (None, "user_cleared", ngc)
-    assert repo.restore_stack_object(con, change=zmiany[0], now=NOW) is False
+    assert repo.restore_object_override(con, change=zmiany[0], now=NOW) is False
     assert (_stan(con), _ev(con)) == (stan, po)
 
 
@@ -205,17 +213,22 @@ def test_stos_bez_obiektu_i_nagrobek_wracaja_po_cofnieciu_z_pamiecia():
     przed, zmiany = _ev(con), []
     assert _nadpisz(con, check, changes_out=zmiany) == "assigned"
     assert _stan(con) == (ngc, "user", None) and _ev(con) - przed == 1 and _bilans_osi(con)
-    assert repo.restore_stack_object(con, change=zmiany[0], now=NOW) is True
+    assert repo.restore_object_override(con, change=zmiany[0], now=NOW) is True
     assert _stan(con) == (None, "user_cleared", m31) and _bilans_osi(con)
 
 
-def test_klinga_odmawia_spoza_stosu_i_obiektowi_spoza_bazy():
+def test_klinga_odmawia_kalibracji_klatce_spoza_bazy_i_obiektowi_spoza_bazy():
+    """EXPECT, zero zapisu: kalibracja (obiektu nie ma z definicji), klatka spoza bazy i kanon wydania,
+    którego baza nie zna, przy celu bez rodzaju (gest wydania nie zakłada obiektu - nie ma z czego)."""
     con = _baza()
-    ngc = _oid(con, "NGC7000")
-    for kw in ({"frame_id": 2, "object_id": ngc}, {"frame_id": 1, "object_id": 9999},
-               {"frame_id": 77, "object_id": ngc}):
-        przed = _ev(con)
+    con.execute("INSERT INTO frame(id, kind, filetype, sha1_data, first_seen_at) "
+                "VALUES (3, 'dark', 'xisf', 'sha3', ?)", (NOW,))
+    con.commit()
+    for kw in ({"frame_id": 3, "canon": "NGC7000"}, {"frame_id": 1, "canon": "NGC9999"},
+               {"frame_id": 77, "canon": "NGC7000"}):
+        przed, obiekty = _ev(con), con.execute("SELECT count(*) FROM object").fetchone()[0]
         with pytest.raises(ValueError):
-            repo.user_override_stack_object(con, expected_object_id=None, expected_source=None,
-                                            expected_cleared_id=None, now=NOW, **kw)
+            repo.user_override_object(con, expected=(None, None, None), reason="release_object",
+                                      now=NOW, **kw)
         assert _ev(con) == przed
+        assert con.execute("SELECT count(*) FROM object").fetchone()[0] == obiekty

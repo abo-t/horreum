@@ -12,15 +12,20 @@ sama z kopii i planu. Z `writeback` bierze wyłącznie blokadę (`_exclusive`) d
 Tryby (pliki pilotażu czytane WYŁĄCZNIE do odczytu):
 
   przed KATALOG_KOPII PLAN.json
-      PLAN.json = lista `{"plik": ścieżka, "object": oczekiwana forma karty OBJECT}`. Pełna kopia
+      PLAN.json = lista `{"plik": ścieżka, "object": oczekiwana forma karty OBJECT}`, opcjonalnie
+      z `"po": ścieżka` - PARA ŚCIEŻEK gestu „Zmień obiekt…” (AR-17 krok 3): `plik` = ścieżka przed
+      przeniesieniem, `po` = ścieżka po nim (jeden `os.rename` zmienia folder i nazwę). `"object":
+      null` = karta bez zmiany (RAW albo karta już w formie): po zapisie CAŁY plik bajt w bajt jak
+      kopia. Klucz `object` jest obowiązkowy - jego brak to literówka planu, nie „bez karty”. Pełna kopia
       każdego pliku do KATALOG_KOPII (lokalny dysk, NIE udział z oryginałami), tworzona wyłącznie
       jako NOWY plik; sha1 oryginału i kopii (muszą być równe), rozmiar, `st_ino`, granice
       nagłówka, karty → manifest.json, zapisany atomowo dopiero po skopiowaniu i sprawdzeniu
       wszystkich plików. Katalog z manifestem albo z plikiem kopii (`NNNN.*`) → odmowa: kopie
       sprzed zapisu są jedynym materiałem porównania i nie wolno ich nadpisać.
   po KATALOG_KOPII
-      dla każdego pliku: kopia nietknięta (sha1), rozmiar i `st_ino` bez zmian, a CAŁY plik równy
-      plikowi oczekiwanemu, wyznaczonemu z kopii i planu:
+      dla każdego pliku (przy parze: pod ścieżką `po`, a pod starą nie ma już nic - rename zachowuje
+      `st_ino`, zmierzone na `R:`): kopia nietknięta (sha1), rozmiar i `st_ino` bez zmian, a CAŁY plik
+      równy plikowi oczekiwanemu, wyznaczonemu z kopii i planu:
         FITS - wszystkie bajty identyczne z kopią poza jednym 80-bajtowym rekordem karty
           `OBJECT[0]` w jej położeniu z kopii (pierwszy rekord `OBJECT` w regionie
           `[hdrLoc, datLoc)` wybranego HDU); ten rekord to karta `OBJECT` o wartości = forma
@@ -44,7 +49,7 @@ Tryby (pliki pilotażu czytane WYŁĄCZNIE do odczytu):
       Kod wyjścia 1 przy którymkolwiek NIE.
   po-undo KATALOG_KOPII
       po cofnięciu pilotażu: sha1 CAŁEGO pliku == sha1 sprzed pilotażu, ten sam rozmiar i ten sam
-      `st_ino`.
+      `st_ino` - pod ścieżką `plik` (przed); przy parze pod ścieżką `po` nie ma już nic.
   blokada KATALOG_TESTOWY
       pomiar blokady `writeback._exclusive` na udziale: tworzy WŁASNE pliki testowe (unikalna nazwa,
       tworzenie wyłączne `xb`), trzyma blokadę i sprawdza, że zapis z INNEGO procesu, drugie
@@ -154,19 +159,30 @@ def przed(katalog, plan_json):
                          f"nie moga byc nadpisane; podaj nowy katalog")
     plan = json.loads(Path(plan_json).read_text(encoding="utf-8"))
     sciezki = [os.path.abspath(p["plik"]) for p in plan]
+    pary = [os.path.abspath(p["po"]) if p.get("po") else None for p in plan]
     if not plan or len(set(sciezki)) != len(sciezki) or any(
-            not isinstance(p.get("object"), str) for p in plan):
+            "object" not in p or not (p["object"] is None or isinstance(p["object"], str))
+            for p in plan):
         raise SystemExit("odmowa: plan pusty, z powtorzonym plikiem albo bez formy 'object'")
+    cele = [po for po in pary if po is not None]
+    if len(set(map(os.path.normcase, cele))) != len(cele):
+        raise SystemExit("odmowa: dwa pliki planu z ta sama sciezka 'po'")
+    for p, po in zip(sciezki, pary):
+        if po is not None and os.path.normcase(po) != os.path.normcase(p) and os.path.exists(po):
+            raise SystemExit(f"odmowa: sciezka 'po' juz istnieje przed zapisem: {_a(po)}")
     katalog.mkdir(parents=True, exist_ok=True)
     manifest = []
-    for i, (p, pozycja) in enumerate(zip(sciezki, plan)):
+    for i, (p, pozycja, po) in enumerate(zip(sciezki, plan, pary)):
         kopia = katalog / f"{i:04d}{os.path.splitext(p)[1]}"
         st = os.stat(p)
         _kopiuj(p, kopia)
         karty, _ = _karty(p)
-        wpis = {"plik": p, "kopia": str(kopia), "sha1": _sha1(p), "sha1_kopii": _sha1(kopia), "rozmiar": st.st_size,
-                "ino": st.st_ino, "granice": list(_granice(p)), "object": pozycja["object"],
-                "karty": karty}
+        # Karta bez zmiany (RAW, karta już w formie) nie potrzebuje granic nagłówka - porównanie
+        # obejmuje cały plik, a RAW nie otworzy się czytnikiem FITS.
+        granice = [0, 0] if pozycja["object"] is None else list(_granice(p))
+        wpis = {"plik": p, "po": po, "kopia": str(kopia), "sha1": _sha1(p),
+                "sha1_kopii": _sha1(kopia), "rozmiar": st.st_size, "ino": st.st_ino,
+                "granice": granice, "object": pozycja["object"], "karty": karty}
         st_po = os.stat(p)
         if wpis["sha1"] != wpis["sha1_kopii"] or os.path.getsize(kopia) != st.st_size:
             raise SystemExit(f"KOPIA NIEZGODNA: {_a(p)}")
@@ -397,23 +413,38 @@ def _xisf_problemy(plik, kopia, fa, forma):
 # ============================================================ po
 
 
+def _przeniesiony(w):
+    """Ścieżka `po` pary, gdy różni się od `plik` (manifest sprzed trybu pary jej nie ma) albo None."""
+    po = w.get("po")
+    return po if po is not None and os.path.normcase(po) != os.path.normcase(w["plik"]) else None
+
+
 def _problemy_pliku(w):
-    """Lista problemów jednego pliku pilotażu (pusta = OK)."""
+    """Lista problemów jednego pliku pilotażu (pusta = OK). Przy parze ścieżek plik po zapisie
+    czytany pod ścieżką `po`, a pod starą nie ma już nic."""
     problemy = []
     if _sha1(w["kopia"]) != w["sha1"]:
         return ["kopia sprzed zapisu zmieniona - brak materialu porownania"]
-    st = os.stat(w["plik"])
+    po = _przeniesiony(w)
+    plik = po or w["plik"]
+    if po is not None and os.path.exists(w["plik"]):
+        problemy.append("pod sciezka sprzed przeniesienia nadal lezy plik")
+    st = os.stat(plik)
     if st.st_size != w["rozmiar"]:
         problemy.append("rozmiar pliku zmieniony")
     if st.st_ino != w["ino"]:
-        problemy.append("st_ino zmieniony - plik podmieniony, nie zapisany w miejscu")
+        problemy.append("st_ino zmieniony - plik podmieniony, nie zapisany w miejscu ani przeniesiony")
+    if w["object"] is None:
+        if not _porownaj_poza(plik, w["kopia"], 0, 0):
+            problemy.append("karta bez zmiany w planie, a bajty pliku rozne od kopii")
+        return problemy
     a, b = w["granice"]
-    if _jest_xisf(w["plik"]):
-        problemy += _xisf_problemy(w["plik"], w["kopia"], b, w["object"])
+    if _jest_xisf(plik):
+        problemy += _xisf_problemy(plik, w["kopia"], b, w["object"])
     else:
-        problemy += _fits_problemy(w["plik"], w["kopia"], a, b, w["object"])
+        problemy += _fits_problemy(plik, w["kopia"], a, b, w["object"])
     # Czytnik skanu - druga derywacja: OBJECT[0] = forma z planu, komentarz sprzed.
-    karty_po, blad = _karty(w["plik"])
+    karty_po, blad = _karty(plik)
     if blad is not None:
         problemy.append(f"naglowek nieczytelny dla skanu: {_a(blad)}")
     przed_obj, po_obj = w["karty"].get("OBJECT[0]"), karty_po.get("OBJECT[0]")
@@ -438,8 +469,9 @@ def po(katalog):
         except (OSError, ValueError) as exc:
             problemy = [f"kontrola padla: {type(exc).__name__}: {_a(exc)}"]
         zle += bool(problemy)
-        raport.append({"plik": w["plik"], "ok": not problemy, "problemy": problemy})
-        print(f"po {'OK ' if not problemy else 'NIE'} {_a(w['plik'])}"
+        plik = _przeniesiony(w) or w["plik"]
+        raport.append({"plik": plik, "ok": not problemy, "problemy": problemy})
+        print(f"po {'OK ' if not problemy else 'NIE'} {_a(plik)}"
               + (f" | {'; '.join(problemy)}" if problemy else ""))
     (katalog / "raport_po.json").write_text(json.dumps(raport, indent=1, ensure_ascii=False),
                                             encoding="utf-8")
@@ -450,9 +482,13 @@ def po_undo(katalog):
     manifest = json.loads((Path(katalog) / MANIFEST).read_text(encoding="utf-8"))
     zle = 0
     for w in manifest:
-        st = os.stat(w["plik"])
-        ok = (_sha1(w["plik"]) == w["sha1"] and st.st_ino == w["ino"]
-              and st.st_size == w["rozmiar"])
+        po = _przeniesiony(w)
+        try:
+            st = os.stat(w["plik"])
+            ok = (_sha1(w["plik"]) == w["sha1"] and st.st_ino == w["ino"]
+                  and st.st_size == w["rozmiar"] and (po is None or not os.path.exists(po)))
+        except OSError:                                    # pod ścieżką sprzed nie ma pliku
+            ok = False
         zle += not ok
         print(f"po-undo {'OK ' if ok else 'NIE'} {_a(w['plik'])}")
     return 1 if zle else 0

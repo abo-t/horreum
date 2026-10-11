@@ -32,8 +32,8 @@ from horreum.gui import i18n, queries, rows, theme
 from horreum.gui.app import (
     _REVIEW_TAG, ObjectAxisView, ObservatoryAxisView, TelescopeAxisView, _utc_now_iso,
 )
-from horreum.gui.grid import (PRESET_COPY_CONFLICT, PRESET_DUPS, PRESET_LINEAGE,
-                              PRESET_MISSING_COPY, PRESET_ORPHAN_TESTIMONY,
+from horreum.gui.grid import (PRESET_COPY_CONFLICT, PRESET_DUPS, PRESET_FILE_OBJECT_MISMATCH,
+                              PRESET_LINEAGE, PRESET_MISSING_COPY, PRESET_ORPHAN_TESTIMONY,
                               PRESET_PATH_HEADER_CONFLICT, PRESET_PENDING_FINISH, PRESET_RETIRED,
                               PRESET_TORN_WRITE, PRESET_RETIRED_CONFLICT, PRESET_STACK_VERSIONS,
                               PRESET_SUPERSEDED, PRESET_VANISHED, zdanie_kopii_bez_zeznania)
@@ -87,6 +87,13 @@ _TASKS = [
     # czytają jeden predykat (`queries.path_header_conflict_frame_ids`).
     ("path_header_conflict_frames", "tasks.path_header_conflict_frames",
      PRESET_PATH_HEADER_CONFLICT),
+    # Wiersz AKCYJNY i ROBOTA (AR-17 krok 3) - ta sama oś, trzeci stan: klatka MA obiekt, a jej
+    # plik leży w folderze innego obiektu albo karta `OBJECT` mówi inną formą (E5-1: folderami
+    # zarządza Horreum). Gest „Uzgodnij pliki…" mieszka w menu prawego kliku perspektywy, więc
+    # wiersz prowadzi do niej, a podpowiedź mówi, gdzie gest. Liczba i lista czytają jeden predykat
+    # (`queries.file_object_mismatch_frame_ids`, licznik w `_liczniki_osi`).
+    ("file_object_mismatch_frames", "tasks.file_object_mismatch_frames",
+     PRESET_FILE_OBJECT_MISMATCH),
     ("stacks_lineage_pending", "tasks.stacks_lineage", PRESET_LINEAGE),
     # Dwa wiersze AKCYJNE i ROBOTA (AR-59) - liczą KLATKI, które czekają na gest ręki na osi
     # sprzętu i na osi stanowiska. Do tej zmiany gesty istniały, ale prowadziły do nich wiersze
@@ -208,6 +215,8 @@ def _liczniki_osi(con):
         właściciel pytania „czyj głos niesie `header`"): gest „Ta kopia prowadzi" zostawia
         `header.adopted` z aktorem `user:local`. Zapis nagłówka w miejscu odmawia przy kilku
         obecnych kopiach (`macro`, D-W1), więc ręka na klatce z rozjazdem kopii to ten gest.
+      * `file_object_mismatch_frames` = `queries.file_object_mismatch_frame_ids` (AR-17 krok 3) -
+        ten sam predykat, który przycina perspektywę pod klikiem (lista = liczba).
 
     Pomiar 2026-10-06 na kopii żywej bazy: 423 bez zestawu (422 light RAW bez TELESCOP w EXIF,
     1 `unknown` XISF), 1223 bez stanowiska, 0 zatrzymanych faktów."""
@@ -217,6 +226,7 @@ def _liczniki_osi(con):
         "observatory_review_frames": len(queries.observatory_review_frames(con)),
         "object_kept_frames": len(supersede.kept_object_facts(con)),
         "copy_conflict_open": len(niezgodne - queries.hand_testimony_frame_ids(con, niezgodne)),
+        "file_object_mismatch_frames": len(queries.file_object_mismatch_frame_ids(con)),
     }
 
 
@@ -233,6 +243,9 @@ _PODPOWIEDZI_OSI = {
     # AR-23: gest „Ta kopia prowadzi" mieszka w menu prawego kliku w Zbiorach - wiersz mówi, gdzie.
     "copy_conflict_frames": ("tasks.copy_conflict_tip", {"lead": "grid.lead.menu"}),
     "orphan_testimony_frames": ("tasks.orphan_testimony_tip", {"lead": "grid.lead.menu"}),
+    # AR-17 krok 3: „Uzgodnij pliki…" mieszka w menu prawego kliku perspektywy.
+    "file_object_mismatch_frames": ("tasks.file_object_mismatch_tip",
+                                    {"align": "grid.sel.object_change_align"}),
 }
 
 # WIERSZE, KTÓRYCH ZERO JEST WIEDZĄ DOPIERO PO ZEBRANIU FAKTÓW KOPII (0021). Oba predykaty porównują

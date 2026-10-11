@@ -36,16 +36,36 @@ Kotwicą jest biblioteka stosów ARCHIWUM, nie dowolny folder `STACKS` (E5-3): w
 korzeń archiwum (`library_root`, ustalony z obecnych kopii - `library_root_candidates`), a bez
 korzenia świadek drzewa stosów milczy.
 """
+import ntpath
 import re
 
 from ._text import path_segments
+from .catalog import folder_form
 from .frames import kind_dir_segments
+from .objects import OBJECT_KINDS
+
+
+def path_key(path):
+    """Klucz tożsamości FIZYCZNEJ ścieżki na udziale Windows: separatory i `.`/`..` jak w systemie
+    (`normpath`), bez wielkości liter (`normcase` + `casefold` - `R:` nie rozróżnia `ic405`
+    i `IC405`, a baza porównuje binarnie). Jeden klucz dla planera zmiany obiektu
+    (`object_change`), kolizji w bazie (`gui.queries.location_lookup`, `repo.path_owner`),
+    predykatu Porządków i sterownika zapisu - mieszka w liściu, bo importują go i `repo`,
+    i `writeback`, a planer siedzi nad nimi."""
+    return ntpath.normcase(ntpath.normpath(str(path))).casefold()
+
+#: Kategoria drzewa lightów wynikająca z RODZAJU obiektu (`object.kind`, D-1011-5 Q6): kometa pod
+#: `_COMETS`, ciało Układu Słonecznego pod `_SOLAR`, reszta (`deep_sky`, `region`, `own`) bez
+#: kategorii - wprost pod markerem lightów. Zmierzone na kopii archiwum 2026-10-11: rodzaj i
+#: kategoria zgodne w 100 % (kometa → `_COMETS` 419, solar → `_SOLAR` 811).
+KIND_CATEGORY = {"comet": "_COMETS", "solar_system": "_SOLAR"}
 
 #: Segmenty-KATEGORIE: stoją na pozycji obiektu, ale obiektem nie są — uprawniają zejście o JEDEN
 #: poziom niżej. Lista JAWNA, nie limit głębokości ani konwencja `_*`: `_WBPP`/`_Review` to drzewa
 #: robocze (skan ich nie widzi), a `_COMETS`/`_SOLAR` to realne lighty. Odtwarza dokładnie
 #: 674 (segment po markerze) + 33 (27 Moon + 2 Jupiter + 4 21P) = 707 klatek żywego archiwum.
-CATEGORY_DIRS = frozenset({"_SOLAR", "_COMETS"})
+#: Wyprowadzona z `KIND_CATEGORY`: kategoria, której żaden rodzaj nie wskazuje, nie istnieje.
+CATEGORY_DIRS = frozenset(KIND_CATEGORY.values())
 
 #: Kotwica drzewa GOTOWYCH OBRAZÓW (porównanie bez wielkości liter, jak marker rodzaju). Kategorie
 #: `CATEGORY_DIRS` pod nią NIE działają: w zmierzonym drzewie stosów ich nie ma, a zejście o poziom
@@ -121,7 +141,16 @@ def library_root_candidates(paths):
 
 
 def _object_index(path, kind="light", library_root=None):
-    """Indeks segmentu na pozycji obiektu w `_dirs(path)` albo None (helper obu funkcji niżej).
+    """Indeks segmentu na pozycji obiektu w `_dirs(path)` albo None (helper funkcji niżej) - drugi
+    człon `_object_slot`."""
+    slot = _object_slot(path, kind, library_root)
+    return None if slot is None else slot[1]
+
+
+def _object_slot(path, kind="light", library_root=None):
+    """`(pierwszy, obiekt)` - indeksy w `_dirs(path)` segmentu tuż za kotwicą i segmentu na pozycji
+    obiektu - albo None. Różne wyłącznie pod kategorią (`LIGHTS\\_COMETS\\12P\\…` → kategoria,
+    obiekt); planer zmiany obiektu wymienia CAŁY ten odcinek, bo kategoria wynika z rodzaju obiektu.
 
     Kotwicą jest segment, który nadaje klatce RODZAJ (`kind_dir_segments()` zna `light` ORAZ
     `lights`) — nie własny literał `LIGHTS`. Dziś koszt tego rozróżnienia to 0 (763/763 ścieżek
@@ -142,7 +171,7 @@ def _object_index(path, kind="light", library_root=None):
     dirs = _dirs(path)
     if kind == STACK_KIND:
         i = _stacks_anchor(dirs, library_root)
-        return i + 1 if i is not None and i + 1 < len(dirs) else None
+        return (i + 1, i + 1) if i is not None and i + 1 < len(dirs) else None
     if kind != "light":
         return None
     markers = kind_dir_segments()
@@ -150,8 +179,8 @@ def _object_index(path, kind="light", library_root=None):
         if markers.get(seg.strip().lower()) != "light" or i + 1 >= len(dirs):
             continue
         if dirs[i + 1].strip().upper() in CATEGORY_DIRS:
-            return i + 2 if i + 2 < len(dirs) else None
-        return i + 1
+            return (i + 1, i + 2) if i + 2 < len(dirs) else None
+        return (i + 1, i + 1)
     return None
 
 
@@ -187,46 +216,50 @@ def object_folder(path, kind="light", library_root=None):
     return "\\".join(_dirs(path)[:i + 1])
 
 
-# Znaki, których system plików Windows nie przyjmie w nazwie katalogu (plus znaki sterujące) -
-# kanon obiektu z takim znakiem nie da się postawić jako folder, więc planer odmawia zamiast ciąć.
-_ZAKAZANE_W_SEGMENCIE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
-
-
-def path_after_object_change(path, canon, kind="light", library_root=None):
-    """Ścieżka pliku PO zmianie obiektu - segment na pozycji obiektu (`_object_index`) zastąpiony
-    kanonem `canon` (`object.canon`), reszta ścieżki znak w znak. Czysta funkcja, zero dysku: planer
-    celu gestu „zmień obiekt” (karta `OBJECT` + przeniesienie pliku do folderu obiektu, AR-17
-    krok 3); sam gest i mutacja to osobna robota, tu jest tylko odpowiedź „dokąd”.
+def path_after_object_change(path, canon, kind="light", library_root=None, *, object_kind):
+    """Ścieżka pliku PO zmianie obiektu - odcinek „kategoria + folder obiektu” (`_object_slot`)
+    zastąpiony formą systemu plików kanonu (`catalog.folder_form`, D-1011-5 Q5) pod kategorią
+    wynikającą z rodzaju obiektu (`KIND_CATEGORY`, D-1011-5 Q6), reszta ścieżki znak w znak.
+    Czysta funkcja, zero dysku: planer celu gestu „Zmień obiekt…” i „Uzgodnij”
+    (`object_change.plan_object_change`) oraz predykat Porządków „Plik nie zgadza się
+    z obiektem”; tu jest tylko odpowiedź „dokąd”.
 
     TA SAMA REGUŁA POZYCJI co świadek ścieżki (SPOT): drzewo lightów (marker rodzaju, także RAW
-    z lustrzanki), zejście o poziom pod kategorią (`CATEGORY_DIRS`: `LIGHTS\\_COMETS\\12P\\…` zmienia
-    `12P`, nie `_COMETS`), drzewo stosów (`kind=STACK_KIND`, segment po kotwicy `STACKS` - z
-    `library_root` wyłącznie pod korzeniem archiwum). Nazwa pliku zostaje: składa ją `naming`
-    (rename), a mieszanie dwóch reguł w jednej funkcji dałoby planer, który zmienia nazwę bez podglądu
-    renamu.
+    z lustrzanki), zejście o poziom pod kategorią (`CATEGORY_DIRS`), drzewo stosów
+    (`kind=STACK_KIND`, segment po kotwicy `STACKS` - z `library_root` wyłącznie pod korzeniem
+    archiwum). KATEGORIA (`object_kind` = `object.kind` celu): kometa ląduje pod `_COMETS`, ciało
+    Układu Słonecznego pod `_SOLAR`, reszta wprost pod markerem - także gdy plik leżał dotąd pod
+    kategorią (`LIGHTS\\_SOLAR\\Saturn\\…` → `NGC7000` daje `LIGHTS\\NGC7000\\…`). Kategoria zastana
+    tego samego rodzaju zostaje w swojej pisowni. Drzewo stosów kategorii NIE MA (zmierzone: 25
+    folderów `STACKS` = 25 kanonów), więc tam rodzaj niczego nie dokłada. Nazwa pliku zostaje:
+    składa ją `naming` (rename), planer wkłada ją w ten sam ruch.
 
     Separatory i forma reszty ścieżki zostają takie, jak przyszły (`R:\\…`, `/mnt/…`, UNC) - cięcie
-    tym samym rozdzielnikiem co `path_segments` (R-S0-12), sklejenie z zachowaniem separatorów.
+    tym samym rozdzielnikiem co `path_segments` (R-S0-12), sklejenie z zachowaniem separatorów
+    (wstawiona kategoria dostaje separator stojący przed wymienianym odcinkiem).
 
     None = ścieżka nie stoi na pozycji obiektu (kalibracja, układ WBPP, plik wprost pod kotwicą) -
     pliku nie da się przenieść „do folderu obiektu”, bo takiego folderu w jego drzewie nie ma.
-    EXPECT: kanon pusty, z białym znakiem na brzegu, `.`/`..` albo ze znakiem zakazanym w nazwie
-    katalogu → `ValueError` (cel, którego system plików nie przyjmie, nie powstaje)."""
-    i = _object_index(path, kind, library_root)
-    if i is None:
+    EXPECT → `ValueError`: kanon, którego `folder_form` nie przyjmie (cel, którego system plików nie
+    przyjmie, nie powstaje), albo `object_kind` spoza `OBJECT_KINDS`."""
+    slot = _object_slot(path, kind, library_root)
+    if slot is None:
         return None
-    if (not isinstance(canon, str) or not canon or canon != canon.strip() or canon in (".", "..")
-            or _ZAKAZANE_W_SEGMENCIE.search(canon)):
-        raise ValueError(f"kanon obiektu nie może być nazwą katalogu: {canon!r}")
+    folder = folder_form(canon)
+    if object_kind not in OBJECT_KINDS:
+        raise ValueError(f"rodzaj obiektu spoza OBJECT_KINDS: {object_kind!r}")
+    pierwszy, obiekt = slot
+    odcinek = [folder]
+    kategoria = KIND_CATEGORY.get(object_kind) if kind != STACK_KIND else None
+    if kategoria is not None:
+        zastana = _dirs(path)[pierwszy] if pierwszy != obiekt else None
+        odcinek.insert(0, zastana if zastana is not None and zastana.strip().upper() == kategoria
+                       else kategoria)
     czesci = re.split(r"([\\/]+)", str(path))           # segmenty na pozycjach parzystych
-    k = -1
-    for j in range(0, len(czesci), 2):
-        if czesci[j]:
-            k += 1
-            if k == i:
-                czesci[j] = canon
-                break
-    return "".join(czesci)
+    pozycje = [j for j in range(0, len(czesci), 2) if czesci[j]]
+    od, do = pozycje[pierwszy], pozycje[obiekt]
+    sep = czesci[od + 1] if pierwszy != obiekt else czesci[od - 1]
+    return "".join(czesci[:od]) + sep.join(odcinek) + "".join(czesci[do + 1:])
 
 
 def filter_folder_from_path(path):

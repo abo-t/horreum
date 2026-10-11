@@ -3031,3 +3031,105 @@ def test_oba_gesty_licza_forme_TA_SAMA_funkcja(sciezka_karty, monkeypatch):
     value, _touched, _skipped = app_mod.plan_kart_sciezki(con, "NGC7635", [fid["zapis"]])
     assert value == "NGC 7000"
     assert app_mod._validate_object_value(con, "NGC 7635")[0] == "NGC 7000"
+
+
+@pytest.mark.parametrize("ktore", ["sciezka", "naprawa"])
+def test_okna_kart_startuja_zapis_w_miejscu_a_FITS_bez_karty_SPADA_i_MOWI_to(
+        ktore, request, monkeypatch):
+    """AR-117: „Zatwierdź ze ścieżki…" i „Napraw nagłówek…" startują `commit_inplace` - droga
+    atomowa przepisywała cały plik po SMB i zrywała dowiązania `_WBPP`.
+
+    Oba okna DOPISUJĄ kartę (`add`), a zapis w miejscu FITS umie dziś wyłącznie `set` istniejącej
+    karty (`writeback.write_changes_inplace` → `Fallback`; dopisanie w miejscu to AR-118), więc plik
+    FITS spada na drogę atomową z powodem rdzenia - i okno MÓWI to zdaniem wyniku (ekran nie kłamie
+    o drodze zapisu). Powód spadku niesie prefiks, po którym okno go rozpoznaje
+    (`wb_worker.PREFIKS_SPADKU`) - test pinuje go na PRAWDZIWYM pisarzu.
+
+    Falsyfikator: wróć do `start("commit", …)` w którymkolwiek oknie → pierwsza asercja."""
+    from horreum.gui.wb_worker import PREFIKS_SPADKU, bez_prefiksu_spadku
+    from astropy.io import fits
+    if ktore == "sciezka":
+        v, con, pliki, fid = request.getfixturevalue("sciezka_karty")
+        dlg = _okno_sciezki(v, con)
+        klik, plik = dlg._on_confirm, pliki["zapis"]
+    else:
+        v, con, files, _open = request.getfixturevalue("repair")
+        dlg = _open()
+        klik, plik = dlg._on_save, files[0]
+    ops, wyniki = [], []
+    prawdziwy_start, prawdziwy_koniec = dlg._runner.start, dlg._after_commit
+    monkeypatch.setattr(dlg._runner, "start", lambda op, *a, **k: ops.append(op)
+                        or prawdziwy_start(op, *a, **k))
+    monkeypatch.setattr(dlg, "_after_commit", lambda op, res: wyniki.append(res)
+                        or prawdziwy_koniec(op, res))
+    klik()
+    assert ops == ["commit_inplace"]
+    assert fits.getheader(str(plik))["OBJECT"] == "NGC 7635"
+    w_miejscu = {fr.location_id for fr in wyniki[0].in_place}
+    spadek = [fr for fr in wyniki[0].applied if fr.location_id not in w_miejscu]
+    assert spadek and all(fr.reason.startswith(PREFIKS_SPADKU) for fr in spadek)
+    assert i18n.t("wb.inplace_fallback", n=len(spadek),
+                  reason=bez_prefiksu_spadku(spadek[0].reason)) in dlg.status.text()
+    dlg.reject()
+
+
+def _xisf_bez_object(path, *, pad=512, payload=b"\x07" * 32):
+    """Monolityczny XISF lightu BEZ karty `OBJECT` (XML + rezerwa `pad` na dopisanie + dane)."""
+    import struct
+    from horreum import scan
+    def body(start):
+        kw = '<FITSKeyword name="IMAGETYP" value="\'Light\'" comment=""/>'
+        return ('<?xml version="1.0" encoding="UTF-8"?>'
+                '<xisf version="1.0" xmlns="http://www.pixinsight.com/xisf">'
+                f'<Image geometry="4:4:1" sampleFormat="UInt16" '
+                f'location="attachment:{start:08d}:{len(payload)}">{kw}</Image></xisf>'
+                ).encode("utf-8")
+    xml = body(scan.XISF_XML_OFFSET + len(body(0)) + pad)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "wb") as fh:
+        fh.write(b"XISF0100" + struct.pack("<I", len(xml)) + b"\x00" * 4 + xml
+                 + b"\x00" * pad + payload)
+    return path
+
+
+def test_XISF_dopisuje_karte_W_MIEJSCU_i_Cofnij_wraca_bajt_w_bajt(qapp, tmp_path):
+    """AR-117 tam, gdzie rdzeń to umie: XISF dopisuje kartę w miejscu (`in_place` niepuste), więc
+    zdanie wyniku milczy o drodze zapisu, a „Cofnij” przywraca plik co do bajtu."""
+    import hashlib
+    from horreum import scan
+    from horreum.gui.app import RepairHeaderDialog
+    plik = _xisf_bez_object(tmp_path / "LIGHTS" / "NGC7635" / "RC8" / "L" / "NGC7635_a.xisf")
+    con = db.open_db(str(tmp_path / "x.db"))
+    scan.ingest_record(con, scan.scan_file(str(plik)), volume="V", now=NOW_PD,
+                       summary=scan.ScanSummary())
+    przed = hashlib.sha1(plik.read_bytes()).hexdigest()
+    dlg = RepairHeaderDialog(con, rows=queries.nameless_frames(con),
+                             db_path=queries.db_path_of(con), now_fn=lambda: NOW_PD)
+    dlg._runner.async_ok = False
+    wyniki = []
+    prawdziwy_koniec = dlg._after_commit
+    dlg._after_commit = lambda op, res: wyniki.append(res) or prawdziwy_koniec(op, res)
+    dlg._on_save()
+    assert wyniki and len(wyniki[0].in_place) == len(wyniki[0].applied) == 1
+    assert b'name="OBJECT"' in plik.read_bytes() and b"NGC 7635" in plik.read_bytes()
+    assert "drogą atomową" not in dlg.status.text()
+    dlg._on_undo()
+    assert hashlib.sha1(plik.read_bytes()).hexdigest() == przed
+    dlg.reject()
+    con.close()
+
+
+def test_spadek_na_droge_atomowa_MOWI_powod_w_oknie_kart(sciezka_karty):
+    """AR-117: plik, w którym karta się nie mieści, rdzeń zapisuje atomowo z powodem
+    (`FileResult.reason`) - okno mówi to zdaniem, inaczej pełne przepisanie po SMB byłoby ciche."""
+    from horreum import writeback
+    from horreum.gui.wb_worker import PREFIKS_SPADKU
+    v, con, pliki, fid = sciezka_karty
+    dlg = _okno_sciezki(v, con)
+    a = writeback.FileResult(1, "a.fits", "applied")
+    b = writeback.FileResult(2, "b.fits", "applied", f"{PREFIKS_SPADKU}: brak miejsca w nagłówku")
+    dlg._after_commit("commit_inplace", writeback.CommitResult(
+        run_id="r", commit_id=7, applied=[a, b], blocked=[], failed=[], skipped=[], in_place=[a]))
+    assert i18n.t("wb.inplace_fallback", n=1, reason="brak miejsca w nagłówku") in dlg.status.text()
+    dlg._commit_id = None                                  # nie cofamy atrapy przy zamknięciu
+    dlg.reject()

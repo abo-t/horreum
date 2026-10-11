@@ -2558,6 +2558,58 @@ def file_object_mismatch_frame_ids(con):
     return wynik
 
 
+def interrupted_object_change_runs(con):
+    """PRZERWANE PRZEBIEGI gestu „Zmień obiekt…”/„Uzgodnij” (AR-121) - `run_id` od najstarszego.
+    Jeden właściciel licznika wiersza Porządków i wejścia okna na przebiegu.
+
+    Przerwany = zapis nie doszedł do końca listy (`staged`: przerwanie, awaria procesu), cofnięcie
+    się nie domknęło (`undoing`) albo przebieg zapisany ma pozycję `failed` (stan częściowy z drogą
+    dalej w powodzie). `applied` bez `failed` jest skończony (pozycje odbite wróciły w całości),
+    `undone` - zużyty. Do tej listy jedyną drogą powrotu po zamknięciu okna było CLI
+    (`horreum object-change finish|undo DB RUN_ID`) z numerem przebiegu ze zdania wyniku."""
+    return [r[0] for r in con.execute(
+        "SELECT r.run_id FROM object_change_run r "
+        "WHERE r.status IN ('staged', 'undoing') "
+        "   OR (r.status = 'applied' AND EXISTS (SELECT 1 FROM pending_object_change p "
+        "                                         WHERE p.run_id = r.run_id "
+        "                                         AND p.status = 'failed')) "
+        "ORDER BY r.created_at, r.run_id").fetchall()]
+
+
+def object_change_run_view(con, run_id):
+    """Przebieg gestu zmiany obiektu do wznowienia (okno z Porządków, a po wyjątku workera także
+    okno, w którym bieg ruszył) → dict albo None (brak przebiegu). Klucze: `run_id`, `status`
+    przebiegu, `target` (`ObjectTarget` z celu zapisanego przy stagingu; None przy „Uzgodnij”),
+    `frame_ids` (kolejność stagingu - na nich okno liczy świeży plan po pełnym cofnięciu),
+    `pending` (pozycje czekające na zapis; przy `undoing` i `applied` zapis się nie wznawia - 0),
+    `can_finish` (przebieg `staged` - sterownik zapisu go domknie, TAKŻE przy zerze czekających:
+    awaria po ostatniej pozycji, przed domknięciem przebiegu, zostawia `staged` bez `pending`)
+    i `items` - per pozycja: `frame_id`, `location_id`, `old_path` (ścieżka z podglądu), `path`
+    (gdzie lokacja stoi w bazie TERAZ), `new_path` (cel przeniesienia albo None), `status`
+    i `reason` pozycji, `card_op`/`card_old`/`card_new` (wpis stagingu karty `OBJECT` tego
+    przebiegu albo None - pozycja bez zmiany karty)."""
+    run = con.execute("SELECT run_id, mode, canon, catalog, kind, alias_norm, card_form, status "
+                      "FROM object_change_run WHERE run_id = ?", (run_id,)).fetchone()
+    if run is None:
+        return None
+    target = (ObjectTarget(canon=run["canon"], catalog=run["catalog"], kind=run["kind"],
+                           alias_norm=run["alias_norm"], card_form=run["card_form"])
+              if run["mode"] == "change" else None)
+    items = [dict(r) for r in con.execute(
+        "SELECT p.frame_id, p.location_id, p.old_path, l.path, r.new_path, p.status, p.reason, "
+        "       c.op AS card_op, c.old_value AS card_old, c.new_value AS card_new "
+        "FROM pending_object_change p JOIN location l ON l.id = p.location_id "
+        "LEFT JOIN pending_renames r ON r.id = p.rename_id "
+        "LEFT JOIN pending_changes c ON c.run_id = p.run_id AND c.location_id = p.location_id "
+        "     AND c.keyword = 'OBJECT' "
+        "WHERE p.run_id = ? ORDER BY p.id", (run_id,)).fetchall()]
+    staged = run["status"] == "staged"
+    pending = sum(1 for it in items if it["status"] == "pending") if staged else 0
+    return {"run_id": run["run_id"], "status": run["status"], "target": target,
+            "frame_ids": [it["frame_id"] for it in items], "pending": pending,
+            "can_finish": staged, "items": items}
+
+
 def review_frame_ids(con):
     """Zbiór frame_id perspektywy „Do przeglądu": light/master_light z `object_id IS NULL`
     (równoważne trimowi `object_canon is None` — `object.canon` NOT NULL, LEFT JOIN daje NULL

@@ -1,10 +1,11 @@
 r"""Zmiana obiektu klatki RAZEM z plikiem (AR-17 krok 3) - plan gestu „Zmień obiekt…” i „Uzgodnij”.
 
 Decyzje Zdzinia: `E5-1` (2026-09-26 - folderami zarządza Horreum, folder bez spacji = forma
-systemu plików kanonu, nagłówek ze spacją, jedna wersja na obiekt) i `D-1011-5` (2026-10-11 -
+systemu plików kanonu, nagłówek ze spacją, jedna wersja na obiekt), `D-1011-5` (2026-10-11 -
 baza najpierw ręką, potem plik; per plik przeniesienie i karta razem albo wcale; jedno cofnięcie;
-katalogi zakładane i usuwane przez gest zapisane w bazie; nazwa pliku ze wzoru „Nazw” z nowym
-obiektem w tym samym ruchu).
+katalogi zakładane i usuwane przez gest zapisane w bazie; nazwa pliku w tym samym ruchu)
+i `D-1011-6` `O2` (2026-10-11 - w nazwie pliku zmienia się WYŁĄCZNIE człon obiektu na początku,
+reszta zostaje; pełne przemianowanie jest gestem „Nazw”).
 
 TEN MODUŁ JEST CZYSTY: zero zapisu do bazy i do plików, zero Qt. Wejściem są wiersze read-modelu
 (`gui.queries.object_change_rows`), wyjściem `ObjectChangePlan` - dokładnie to, co pokaże podgląd
@@ -18,12 +19,12 @@ obiekt ręką) albo `None` („Uzgodnij” z Porządków - obiekt zostaje, plik 
 klatka już ma).
 
 CEL PLIKU = folder z `resolve.paths.path_after_object_change` (forma systemu plików kanonu pod
-kategorią z rodzaju obiektu) + nazwa z silnika „Nazw” (`naming.run_rename`: ten sam wzór, ta sama
-polityka daty, kanon celu w tokenie obiektu) - jeden `os.rename` zmienia folder i nazwę
-(D-1011-5 Q8).
-Stos (`master_light`) nazwy ze wzoru lightów nie dostaje: archiwum stosów ma własny układ
-(`naming.stack_name`, `<obiekt>_<YYYY-MM-DD>_…`), więc wymieniany jest wyłącznie człon obiektu,
-a wersja stosu (`stack_variant`) bierze nazwę z nowej nazwy oryginału (`naming.variant_stack_name`).
+kategorią z rodzaju obiektu) + nazwa z wymienionym członem obiektu - jeden `os.rename` zmienia
+folder i nazwę (D-1011-5 Q8). Człon obiektu (D-1011-6 `O2`): light - stary token obiektu na
+początku nazwy (`_nazwa_lightu`: folder obiektu albo obiekt klatki w bazie), stos - wszystko przed
+datą układu `naming.stack_name` (`_nazwa_stosu`); nowy człon = token obiektu kanonu celu
+(`_token_obiektu`, ten sam, który składa „Nazwy”). Wersja stosu (`stack_variant`) bierze nazwę
+z nowej nazwy oryginału (`naming.variant_stack_name`).
 """
 import dataclasses
 import ntpath
@@ -33,7 +34,7 @@ import uuid
 
 from . import card_rules, naming
 from .resolve.frames import LIGHT_KINDS
-from .resolve.paths import STACK_KIND, path_after_object_change, path_key
+from .resolve.paths import STACK_KIND, object_from_path, path_after_object_change, path_key
 
 
 @dataclasses.dataclass(frozen=True)
@@ -70,10 +71,17 @@ class ObjectChangeItem:
 
 @dataclasses.dataclass(frozen=True)
 class ObjectChangeSkip:
-    """Klatka, której gest nie ruszy - z powodem dla człowieka."""
+    """Klatka, której gest nie ruszy - z powodem dla człowieka. `code` = stan, który okno
+    rozpoznaje (`SKIP_UNCHANGED`); zdanie `reason` jest dla człowieka i może się zmienić."""
     frame_id: int
     path: str
     reason: str
+    code: str | None = None
+
+
+# Kod pominięcia, które NIE jest odmową: plik w folderze obiektu, nazwa i karta zgodne - pozycja
+# bez zmian (okno liczy ją w „bez zmian”, nie w „pominie”).
+SKIP_UNCHANGED = "unchanged"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -96,9 +104,10 @@ class ObjectChangePlan:
     rmdirs: tuple[str, ...] = ()
 
 
-# Powód, którym `naming.run_rename` oddaje klatkę, gdy wzór zostawia nazwę bez zmian - dla planu to
-# nie pominięcie, tylko brak zmiany nazwy (test pinuje zgodność z silnikiem nazw).
-_NAZWA_BEZ_ZMIAN = "nazwa bez zmian"
+# Separatory członu obiektu w nazwie lightu: `_` (archiwum, `naming`) i spacja (nazwy z lustrzanki:
+# `IC342 20181011_dsc3351.dng`). Zmierzone 2026-10-11 na `pf4`: 13 635 z 14 337 obecnych lightów
+# na pozycji obiektu zaczyna nazwę `<folder obiektu>_`, reszta to nazwy aparatu bez obiektu.
+_SEPARATORY_CZLONU = ("_", " ")
 
 # Układ nazwy stosu w archiwum (`naming.stack_name`): człon obiektu, potem data `DATE-OBS` stosu.
 # Człon obiektu bywa wieloczłonowy (`C2025A6_Lemmon_2025-10-19_…`), więc dopasowanie leniwe do
@@ -265,42 +274,83 @@ def _puste_po_planie(cele, wiersz, dysk, writeback):
     return tuple(wynik)
 
 
+def _token_obiektu(canon):
+    """Token obiektu kanonu w nazwie pliku - ten sam, który składa `naming.compose_name` (forma
+    systemu plików kanonu, `folder_form`, D-1011-5 Q5). Jeden właściciel dla lightów i stosów."""
+    token, _ = naming.compose_name({"kind": STACK_KIND, "object_canon": canon}, None,
+                                   template=("object",))
+    return token
+
+
 def _nazwa_stosu(nazwa, canon):
     """Nazwa stosu po zmianie obiektu: człon obiektu układu `naming.stack_name` wymieniony na token
-    obiektu kanonu celu (ten sam, który składa `naming.compose_name`), reszta bez zmian. Nazwa spoza
-    układu zostaje - nie niesie obiektu, więc nie ma w niej czego poprawiać."""
+    obiektu kanonu celu, reszta bez zmian. Nazwa spoza układu zostaje - nie niesie obiektu, więc nie
+    ma w niej czego poprawiać."""
     m = _UKLAD_STOSU.match(nazwa)
     if m is None:
         return nazwa
-    token, _ = naming.compose_name({"kind": STACK_KIND, "object_canon": canon}, None,
-                                   template=("object",))
-    return f"{token}_{m.group('reszta')}"
+    return f"{_token_obiektu(canon)}_{m.group('reszta')}"
 
 
-def plan_object_change(rows, *, target, template, library_root, location_at, run_id=None,
-                       isdir=os.path.isdir, listdir=os.listdir, date_source="date_obs",
-                       offset_hours=0) -> ObjectChangePlan:
+def _stare_tokeny(r):
+    """Tokeny, którymi nazwa lightu może dziś nieść obiekt: folder na pozycji obiektu, w którym plik
+    stoi (przy „Uzgodnij” jedyny świadek starego obiektu - baza ma już nowy), i token obiektu klatki
+    w bazie (przy „Zmień obiekt…” plik bywa w folderze innego obiektu). Kanon, którego forma folderu
+    nie powstaje (`ValueError`), tokenu nie daje - jest tylko kandydatem, nie celem."""
+    tokeny = [object_from_path(r["path"], r["kind"])]
+    if r["canon"] is not None:
+        try:
+            tokeny.append(_token_obiektu(r["canon"]))
+        except ValueError:
+            pass
+    return tuple(t for t in tokeny if t)
+
+
+def _nazwa_lightu(nazwa, stare, canon):
+    """Nazwa lightu po zmianie obiektu (D-1011-6 `O2`): wymieniony WYŁĄCZNIE człon obiektu na
+    początku nazwy, reszta znak w znak (data, filtr, `FLATGRP_…`, `OSC`, rozszerzenie).
+
+    Członem obiektu jest NAJDŁUŻSZY z tokenów - starych (`stare`, `_stare_tokeny`) i nowego (token
+    kanonu celu) - którym nazwa się zaczyna przed separatorem (`_SEPARATORY_CZLONU`), bez wielkości
+    liter (`R:` jej nie rozróżnia). Stary człon → nowy token, separator zostaje. Nowy człon albo brak
+    członu → nazwa bez zmian: nazwa aparatu (`20181011_dsc3322.dng`) obiektu nie niesie, a pełne
+    przemianowanie robi pasek „Nazwy”. Najdłuższe dopasowanie trzyma idempotencję, gdy forma komety
+    jest dłuższa od folderu (`C2023A3` → `C2023A3_Tsuchinshan-ATLAS`): po zmianie nazwa zaczyna się
+    nowym tokenem i drugi gest jej nie rusza."""
+    nowy = _token_obiektu(canon)
+    trafienia = [t for t in {*stare, nowy}
+                 if nazwa[:len(t)].casefold() == t.casefold()
+                 and nazwa[len(t):len(t) + 1] in _SEPARATORY_CZLONU]
+    if not trafienia:
+        return nazwa
+    czlon = max(trafienia, key=len)
+    if czlon.casefold() == nowy.casefold():
+        return nazwa
+    return nowy + nazwa[len(czlon):]
+
+
+def plan_object_change(rows, *, target, library_root, location_at, run_id=None,
+                       isdir=os.path.isdir, listdir=os.listdir) -> ObjectChangePlan:
     """Wiersze read-modelu (`gui.queries.object_change_rows`, policzone dla TEGO `target`) →
     `ObjectChangePlan`. Kontrakt: `brief/FALA10_zmien_obiekt.md` §4.1 i §8 (§8 wygrywa).
 
-    PARAMETRY: `target` - `ObjectTarget` albo None („Uzgodnij”); `template` - wzór „Nazw” (lista
-    albo dict per typ, `naming._pick_template`); `date_source`/`offset_hours` - polityka daty jak
-    w pasku „Nazw” (`naming.run_rename`, zawsze z drugim źródłem w zapasie); `library_root` -
-    korzeń archiwum (`resolver.library_root_from_db`, kotwica drzewa stosów); `location_at` -
+    PARAMETRY: `target` - `ObjectTarget` albo None („Uzgodnij”); `library_root` - korzeń
+    archiwum (`resolver.library_root_from_db`, kotwica drzewa stosów); `location_at` -
     `(volume, path) → frozenset[location_id]` (`gui.queries.location_lookup`), kolizja w bazie;
-    `isdir`/`listdir` - jedyny dostęp do dysku.
+    `isdir`/`listdir` - jedyny dostęp do dysku. Nazwa nie zależy od wzoru „Nazw” ani od daty
+    (D-1011-6 `O2`), więc planer ich nie bierze.
 
     POZYCJA (`ObjectChangeItem`): katalog z `path_after_object_change` w pisowni z dysku + nazwa
-    (lighty: `naming.run_rename` z kanonem celu w tokenie obiektu; stos: `_nazwa_stosu`; wersja
-    stosu: `naming.variant_stack_name` z nowej nazwy oryginału, w katalogu oryginału). Cel równy
-    źródłu po normalizacji Windows i `casefold` → `new_path` None (sama zmiana pisowni nie jest
-    robotą tego gestu). Karta: `set`/`add` na formę celu albo None.
+    z wymienionym członem obiektu (lighty: `_nazwa_lightu`; stos: `_nazwa_stosu`; wersja stosu:
+    `naming.variant_stack_name` z nowej nazwy oryginału, w katalogu oryginału). Cel równy źródłu po
+    normalizacji Windows i `casefold` → `new_path` None (sama zmiana pisowni nie jest robotą tego
+    gestu). Karta: `set`/`add` na formę celu albo None.
 
     POMINIĘCIA (`ObjectChangeSkip`, zdanie PL dla człowieka): stan klatki (`_powod_klatki`), plik
     spoza pozycji obiektu, kanon nie do postawienia jako folder, karta potrzebna a nie do zapisania
-    (cały plik zostaje), nazwa nie do złożenia, kolizja celu we wsadzie, na dysku (`listdir`
-    katalogu celu) albo w bazie (inna lokacja), wersja stosu w innym katalogu niż oryginał (oba),
-    połowa pary stosu pominięta (druga też), pozycja bez żadnej zmiany.
+    (cały plik zostaje), kolizja celu we wsadzie, na dysku (`listdir` katalogu celu) albo w bazie
+    (inna lokacja), wersja stosu w innym katalogu niż oryginał (oba), połowa pary stosu pominięta
+    (druga też), pozycja bez żadnej zmiany (kod `SKIP_UNCHANGED` - nie odmowa).
 
     OSTRZEŻENIA (`ObjectChangeWarning`): przeniesienie rozdziela wejścia stosu między foldery
     (żniwa liczą siedzibę stosu z jednego folderu lightów, `harvest._light_tail`) - nie blokada,
@@ -320,7 +370,6 @@ def plan_object_change(rows, *, target, template, library_root, location_at, run
     if target is not None and target.card_form is None:
         raise ValueError(f"cel {target.canon!r} bez formy karty OBJECT - gest odmawia go przed "
                          f"planem (karta i folder razem)")
-    naming.validate_template(template)
     rows = list(rows)
     canon_celu = target.canon if target is not None else None
     for r in rows:
@@ -366,26 +415,13 @@ def plan_object_change(rows, *, target, template, library_root, location_at, run
                         "card_op": card_op, "card_new": card_new,
                         "object_change": target is not None and r["canon"] != target.canon}
 
-    # 2. Nazwy: lighty silnikiem „Nazw” (ścieżka już w katalogu celu - token `folder` widzi nowy
-    #    folder), stosy wymianą członu obiektu.
-    swiatla = {fid: dict(wiersz[fid], object_canon=p["canon"],
-                         path=p["katalog"] + p["sep"] + ntpath.basename(wiersz[fid]["path"]))
-               for fid, p in robocze.items() if wiersz[fid]["kind"] != STACK_KIND}
-    if swiatla:
-        run = naming.run_rename(swiatla, targets_fn=lambda ids: [swiatla[i] for i in ids],
-                                source=date_source, offset_hours=offset_hours, template=template,
-                                fallback=True, run_id=run_id)
-        for pv in run.touched:
-            robocze[pv.frame_id]["nazwa"] = ntpath.basename(pv.new_path)
-        for sk in run.skipped:
-            if sk.reason == _NAZWA_BEZ_ZMIAN:
-                robocze[sk.frame_id]["nazwa"] = ntpath.basename(wiersz[sk.frame_id]["path"])
-            else:
-                pominiete[sk.frame_id] = f"nazwa pliku: {sk.reason}"
-                del robocze[sk.frame_id]
+    # 2. Nazwy (D-1011-6 `O2`): wymiana członu obiektu - stos po układzie archiwum stosów, light po
+    #    starym tokenie obiektu; reszta nazwy znak w znak.
     for fid, p in robocze.items():
-        if wiersz[fid]["kind"] == STACK_KIND:
-            p["nazwa"] = _nazwa_stosu(ntpath.basename(wiersz[fid]["path"]), p["canon"])
+        r = wiersz[fid]
+        nazwa = ntpath.basename(r["path"])
+        p["nazwa"] = (_nazwa_stosu(nazwa, p["canon"]) if r["kind"] == STACK_KIND
+                      else _nazwa_lightu(nazwa, _stare_tokeny(r), p["canon"]))
 
     # 3. Wersja stosu jedzie z oryginałem: ten sam katalog celu, nazwa z nowej nazwy oryginału.
     for fid in sorted(robocze):
@@ -413,6 +449,7 @@ def plan_object_change(rows, *, target, template, library_root, location_at, run
 
     # 4. Cel pliku, brak zmian, kolizja na dysku.
     cele: dict[int, tuple] = {}
+    bez_zmian: set[int] = set()
     for fid in sorted(robocze):
         p, r = robocze[fid], wiersz[fid]
         nowa, mkdirs = p["katalog"] + p["sep"] + p["nazwa"], p["mkdirs"]
@@ -420,6 +457,7 @@ def plan_object_change(rows, *, target, template, library_root, location_at, run
             nowa, mkdirs = None, ()
         if nowa is None and p["card_op"] is None and not p["object_change"]:
             pominiete[fid] = "bez zmian - plik w folderze obiektu, nazwa i karta zgodne"
+            bez_zmian.add(fid)
             continue
         if nowa is not None and not mkdirs:
             try:
@@ -487,7 +525,8 @@ def plan_object_change(rows, *, target, template, library_root, location_at, run
         expected_object=(wiersz[fid]["object_id"], wiersz[fid]["object_source"],
                          wiersz[fid]["object_cleared_id"]),
         object_change=robocze[fid]["object_change"]) for fid in sorted(cele))
-    skipped = tuple(ObjectChangeSkip(fid, wiersz[fid]["path"] or "", pominiete[fid])
+    skipped = tuple(ObjectChangeSkip(fid, wiersz[fid]["path"] or "", pominiete[fid],
+                                     SKIP_UNCHANGED if fid in bez_zmian else None)
                     for fid in sorted(pominiete))
     return ObjectChangePlan(run_id=run_id, target=target, items=items, skipped=skipped,
                             warnings=tuple(warnings),

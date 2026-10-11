@@ -1991,23 +1991,32 @@ class FramesView(QWidget):
             else i18n.t_plural("grid.sel.object_change_align_tip", n))
 
     def _otworz_zmiane_obiektu(self, ids, target):
-        """Wspólny ogon obu wejść: okno podglądu i wykonania. Wzór nazwy bierze się z „Nazw"
-        (panel renamu) - ta sama polityka, którą człowiek widzi i ustawia przy porządkowaniu nazw.
+        """Wspólny ogon obu wejść z zaznaczenia („Zmień obiekt…”, „Uzgodnij pliki…”): okno
+        podglądu i wykonania. Nazwa pliku nie zależy od paska „Nazwy” - gest wymienia wyłącznie
+        człon obiektu (D-1011-6 `O2`)."""
+        self._pokaz_okno_zmiany_obiektu(ObjectChangeDialog(
+            self.con, frame_ids=ids, target=target, now_fn=self._now, db_path=self._db_path,
+            off_thread=self._wb.async_ok, parent=self), list(ids))
 
-        Okno pisze do plików, więc jego zajętość idzie do mutexu gospodarza (`writeback_busy`),
+    def otworz_przebieg_zmiany_obiektu(self, run_id):
+        """Wejście z Porządków (AR-121): okno na przerwanym przebiegu `run_id` - „Dokończ (N)”
+        albo „Cofnij” bez CLI. Zaznaczenie po zmianie = klatki przebiegu.
+
+        Ta sama straż zajętości co wejścia z zaznaczenia (bramka, kimi): okno otwarte w biegu
+        etapu Dostawy albo innego zapisu miałoby czynne „Dokończ”/„Cofnij” - zajętość dochodzi do
+        okna dopiero ze zbocza (`set_busy`), a nie przy jego otwarciu."""
+        zajety = self._powod_zajetosci()
+        if zajety is not None:
+            self.status_message.emit(i18n.t(zajety))
+            return
+        dlg = ObjectChangeDialog(self.con, run_id=run_id, now_fn=self._now, db_path=self._db_path,
+                                 off_thread=self._wb.async_ok, parent=self)
+        self._pokaz_okno_zmiany_obiektu(dlg, list(dlg.frame_ids))
+
+    def _pokaz_okno_zmiany_obiektu(self, dlg, zaznaczone):
+        """Okno pisze do plików, więc jego zajętość idzie do mutexu gospodarza (`writeback_busy`),
         a każdy zapis i cofnięcie odświeża zbiór z zachowaniem zaznaczenia (`changed`) - okno jest
         modalne, ale lista pod nim ma mówić prawdę, gdy człowiek je zamknie albo cofnie gest."""
-        zaznaczone = list(ids)
-        # TA SAMA REGUŁA CO „NAZWY" (D-1011-5 Q8): wzór, źródło daty i przesunięcie z polityki
-        # paska - jak przy renamie (`_run_rename`). Pusty wzór paska → domyślny `naming`, a okno
-        # mówi to wprost (przy nim każdy przenoszony plik dostaje nową nazwę).
-        polityka = self.rename_bar.policy()
-        dlg = ObjectChangeDialog(
-            self.con, frame_ids=ids, target=target,
-            template=polityka["template"] or naming.DEFAULT_TEMPLATE,
-            date_source=polityka["source"], offset_hours=polityka["offset_hours"],
-            fallback=polityka["fallback"], wzor_z_paska=bool(polityka["template"]),
-            now_fn=self._now, db_path=self._db_path, off_thread=self._wb.async_ok, parent=self)
         dlg.changed.connect(lambda: self._po_zmianie_obiektu(zaznaczone))
         dlg.busy_changed.connect(self.writeback_busy)
         self._okno_zmiany_obiektu = dlg

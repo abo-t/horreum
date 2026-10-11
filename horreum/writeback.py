@@ -106,13 +106,27 @@ class WriteResult:
     `byte_exact` (przywrócenie z backupu, AR-19): `True` = cały plik ma sha1 sprzed commitu, `None` =
     region nagłówka przywrócony bajt w bajt, a całego pliku nie było z czym porównać (backup bez
     sha1 pliku), `False` = cofnięcie SEMANTYCZNE (nagłówek odtworzony z treści, bajty pliku inne niż
-    przed commitem). Przy zapisie zmian zawsze `None`."""
+    przed commitem). Przy zapisie zmian zawsze `None`.
+
+    `code` = stan, który powierzchnia ROZPOZNAJE (`CODE_*`), obok zdania dla człowieka w `reason`;
+    przechodzi do `FileResult.code`. `None` = powód bez kodu."""
     status: str            # 'applied' | 'blocked' | 'failed'
     reason: str | None
     post_hash: str | None  # header_hash PO zapisie (z ZAPISANEGO pliku) — kontrola undo + kolejny zapis
     backup_text: str | None = None  # pełny nagłówek SPRZED zapisu (undo)
     in_place: bool = False
     byte_exact: bool | None = None
+    code: str | None = None
+
+
+# KODY POWODÓW, które powierzchnie rozpoznają (AR-121 (4)) - zdanie w `reason` jest dla człowieka
+# i może się zmienić, kod nie. `CODE_CHANGED_SINCE_SCAN`: odmowa zapisu karty, bo sha1 całego pliku
+# różni się od bazy (drogą wyjścia jest skan w Dostawie). `CODE_INPLACE_FALLBACK`: plik zapisany
+# drogą atomową po odmowie zapisu w miejscu (`commit(inplace=True, fallback=True)`) - cały plik
+# przepisany; `reason` zaczyna się wtedy od `PREFIKS_DROGI_ATOMOWEJ`.
+CODE_CHANGED_SINCE_SCAN = "changed_since_scan"
+CODE_INPLACE_FALLBACK = "inplace_fallback"
+PREFIKS_DROGI_ATOMOWEJ = "droga dotychczasowa"
 
 
 # ============================================================ REGUŁY KARTY (jeden właściciel)
@@ -1843,7 +1857,8 @@ def _apply_inplace(plan: _InplacePlan, fh, journal,
                     return WriteResult("blocked", "plik zmienił się od ostatniego skanu (sha1 "
                                                   "całego pliku inny niż w bazie) - kontrola danych "
                                                   "po zapisie nie miałaby kotwicy; najpierw skan, "
-                                                  "plik nietknięty", None)
+                                                  "plik nietknięty", None,
+                                       code=CODE_CHANGED_SINCE_SCAN)
                 if anchor.file_sha1 is None:
                     koperta_sha1 = kotwica      # baza kotwicy nie miała - koperta ją niesie
             else:
@@ -2130,6 +2145,7 @@ class FileResult:
     path: str
     status: str  # 'applied' | 'blocked' | 'failed' | 'skipped' | 'restored' | 'released' | 'reconciled'
     reason: str | None = None
+    code: str | None = None      # `CODE_*` powodu (patrz `WriteResult.code`)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -2688,7 +2704,7 @@ def _zapisz_lokacje(con, stan, location_id, rows, *, now, inplace, fallback) -> 
                 res = WriteResult("blocked", f"nie mieści się w miejscu (tryb bez spadku): "
                                              f"{res.reason}", None)
             else:
-                droga = f"droga dotychczasowa: {res.reason}"
+                droga = f"{PREFIKS_DROGI_ATOMOWEJ}: {res.reason}"
                 res = None
     if res is None:
         res = write_changes(path, ops, expected, persist_backup=_persist,
@@ -2709,7 +2725,7 @@ def _zapisz_lokacje(con, stan, location_id, rows, *, now, inplace, fallback) -> 
             reason = (f"{res.reason}; podmiana niepotwierdzona, backup do cofnięcia zapisany "
                       f"w commicie {stan.commit_id}")
         _mark(rows, status, reason)
-        return _ZapisLokacji(FileResult(location_id, path, status, reason),
+        return _ZapisLokacji(FileResult(location_id, path, status, reason, code=res.code),
                              dotknieto=bool(backup_pliku) and status == "failed")
     stan.podmieniono = True
     if res.status != "applied":
@@ -2772,7 +2788,8 @@ def _zapisz_lokacje(con, stan, location_id, rows, *, now, inplace, fallback) -> 
         reason = f"{niezgodne}; backup do cofnięcia zapisany w commicie {stan.commit_id}"
         _mark(rows, "failed", reason)
         return _ZapisLokacji(FileResult(location_id, path, "failed", reason), dotknieto=True)
-    return _ZapisLokacji(FileResult(location_id, path, "applied", _dopisz(droga, res.reason)),
+    return _ZapisLokacji(FileResult(location_id, path, "applied", _dopisz(droga, res.reason),
+                                    code=CODE_INPLACE_FALLBACK if droga is not None else None),
                          dotknieto=True)
 
 
@@ -3968,12 +3985,12 @@ def _przenies_wstecz(con, p, *, now, reason) -> RenameFileResult:
                               reason=reason, gest=_GEST_POWROTU)
 
 
-def _wycofaj_pozycje(con, p, status, powod, *, now, przeniesiony) -> FileResult:
+def _wycofaj_pozycje(con, p, status, powod, *, now, przeniesiony, code=None) -> FileResult:
     """ODMOWA POZYCJI („razem albo wcale”, D-1011-5 Q2): kroki zrobione dla niej wracają - plik pod
-    starą ścieżkę, baza przez CAS klingi - a pozycja dostaje `status` z powodem. Wpisy stagingu, do
-    których nie doszło, dostają ten sam status (szuflada nie pokaże ich jako oczekujących). Plik,
-    który nie wrócił, to stan częściowy: 'failed' z drogą dalej (cofnięcie przebiegu), a baza zostaje
-    przy nowym obiekcie - zgodna z miejscem pliku."""
+    starą ścieżkę, baza przez CAS klingi - a pozycja dostaje `status` z powodem (i `code` odmowy
+    pisarza, gdy ją niesie). Wpisy stagingu, do których nie doszło, dostają ten sam status (szuflada
+    nie pokaże ich jako oczekujących). Plik, który nie wrócił, to stan częściowy: 'failed' z drogą
+    dalej (cofnięcie przebiegu), a baza zostaje przy nowym obiekcie - zgodna z miejscem pliku."""
     lid = p["location_id"]
     if przeniesiony:
         wynik = _przenies_wstecz(con, p, now=now, reason=f"{_COFNIETO} - {powod}")
@@ -3988,7 +4005,7 @@ def _wycofaj_pozycje(con, p, status, powod, *, now, przeniesiony) -> FileResult:
     repo.settle_object_change_item(con, item_id=p["id"], status=status, reason=powod, now=now,
                                    restore=True)
     loc = _location_rename(con, lid)
-    return FileResult(lid, "" if loc is None else loc["path"], status, powod)
+    return FileResult(lid, "" if loc is None else loc["path"], status, powod, code=code)
 
 
 def _dryf_po_wznowieniu(con, p, *, now, przeniesiony) -> FileResult:
@@ -4034,8 +4051,9 @@ def _zmien_pozycje(con, stan, p, *, now, liczniki) -> FileResult:
     oczekujace = [r for r in karty if r["status"] == "pending"]
     przeniesiony = p["rename_id"] is not None and p["rename_status"] == "applied"
 
-    def _odmowa(status, powod):
-        return _wycofaj_pozycje(con, p, status, powod, now=now, przeniesiony=przeniesiony)
+    def _odmowa(status, powod, code=None):
+        return _wycofaj_pozycje(con, p, status, powod, now=now, przeniesiony=przeniesiony,
+                                code=code)
 
     if p["rename_id"] is not None and p["in_flight"] is not None:
         # Przerwana próba, której rekoncyliacja nie rozstrzygnęła: plik może stać pod którąkolwiek
@@ -4127,19 +4145,20 @@ def _zmien_pozycje(con, stan, p, *, now, liczniki) -> FileResult:
         przeniesiony = True
 
     # (3) KARTA
-    uwaga = None
+    uwaga = kod = None
     if oczekujace:
         zapis = _zapisz_lokacje(con, stan, lid, oczekujace, now=now, inplace=True, fallback=True)
         if zapis.wynik.status != "applied":
             if not zapis.dotknieto:
-                return _odmowa("blocked", f"karta odbita bez zapisu: {zapis.wynik.reason}")
+                return _odmowa("blocked", f"karta odbita bez zapisu: {zapis.wynik.reason}",
+                               code=zapis.wynik.code)
             powod = (f"karta zapisana częściowo: {zapis.wynik.reason}; plik zostaje pod "
                      f"{zapis.wynik.path}, baza pozycji jak po zapisie - najpierw naprawa karty "
                      f"wg powodu, potem ewentualnie cofnięcie przebiegu")
             repo.settle_object_change_item(con, item_id=p["id"], status="failed", reason=powod,
                                            now=now)
             return FileResult(lid, zapis.wynik.path, "failed", powod)
-        uwaga = zapis.wynik.reason
+        uwaga, kod = zapis.wynik.reason, zapis.wynik.code
     elif karty and any(r["status"] != "applied" for r in karty):
         # Wpisy karty rozliczone przed awarią bez zapisu pozycji: 'failed' mógł ruszyć bajty.
         zly = next(r for r in karty if r["status"] != "applied")
@@ -4151,7 +4170,7 @@ def _zmien_pozycje(con, stan, p, *, now, liczniki) -> FileResult:
         return _odmowa("blocked", f"karta odbita w poprzedniej próbie: {zly['reason']}")
     repo.settle_object_change_item(con, item_id=p["id"], status="applied", reason=uwaga, now=now)
     teraz = _location_rename(con, lid)
-    return FileResult(lid, teraz["path"], "applied", uwaga)
+    return FileResult(lid, teraz["path"], "applied", uwaga, code=kod)
 
 
 def _sprzatnij_po_zapisie(con, run_id, rozliczone, *, now) -> tuple[int, list[str]]:

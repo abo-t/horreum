@@ -542,6 +542,7 @@ def test_spadek_idzie_droga_atomowa_albo_blokuje_w_trybie_pilotazu(tmp_path):
     res2 = writeback.commit(con, "R2", now=NOW, inplace=True)
     assert len(res2.applied) == 1 and not res2.in_place
     assert res2.applied[0].reason.startswith("droga dotychczasowa: ")
+    assert res2.applied[0].code == writeback.CODE_INPLACE_FALLBACK
     hdr = fits.getheader(str(p))
     assert hdr["OBJECT"] == "V" * 20 and hdr.comments["OBJECT"] == KOMENTARZ
 

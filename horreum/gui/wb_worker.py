@@ -273,16 +273,17 @@ def commit_do_cofniecia(res):
     return res.commit_id
 
 
-# Początek powodu, którym rdzeń znaczy plik zapisany drogą atomową po odmowie zapisu w miejscu
-# (`writeback._zapisz_lokacje`: „droga dotychczasowa: <powód Fallback>”). Rdzeń nie niesie flagi,
-# więc rozpoznajemy po zdaniu - pinuje je test na prawdziwym pisarzu (FITS z dopisaniem karty).
-PREFIKS_SPADKU = "droga dotychczasowa"
+def spadek_na_droge_atomowa(fr):
+    """Czy plik zapisano drogą atomową po odmowie zapisu w miejscu - po KODZIE rdzenia
+    (`writeback.CODE_INPLACE_FALLBACK`), nie po zdaniu powodu."""
+    return fr.code == writeback.CODE_INPLACE_FALLBACK
 
 
 def bez_prefiksu_spadku(reason):
-    """Powód spadku bez prefiksu rdzenia - zdanie mówi już „drogą atomową”, drugi raz nie."""
-    if reason.startswith(PREFIKS_SPADKU):
-        return reason[len(PREFIKS_SPADKU):].lstrip(": ") or reason
+    """Powód spadku bez prefiksu rdzenia (`writeback.PREFIKS_DROGI_ATOMOWEJ`) - zdanie mówi już
+    „drogą atomową”, drugi raz nie."""
+    if reason.startswith(writeback.PREFIKS_DROGI_ATOMOWEJ):
+        return reason[len(writeback.PREFIKS_DROGI_ATOMOWEJ):].lstrip(": ") or reason
     return reason
 
 
@@ -291,14 +292,12 @@ def zdanie_drogi_zapisu(res):
 
     Okna kart piszą w miejscu (`commit_inplace`), bo pełne przepisanie pliku po SMB zrywa
     dowiązania `_WBPP`. Plik, w którym zapis w miejscu się nie kwalifikuje (FITS umie w miejscu
-    wyłącznie podmienić istniejącą kartę), rdzeń zapisuje drogą atomową i mówi dlaczego - powodem
-    z prefiksem `PREFIKS_SPADKU`. Spadkiem jest WYŁĄCZNIE taki plik: `applied` poza `in_place` bez
-    tego prefiksu to co innego (np. zapis potwierdzony z dysku po przerwanym commicie - nic nie
-    przepisano). Droga zapisu jest szczegółem, dopóki wszystko poszło w miejscu, więc człon mówi
-    wyłącznie o spadku: ile plików przepisano w całości i pierwszy powód."""
-    w_miejscu = {fr.location_id for fr in res.in_place}
-    spadek = [fr for fr in res.applied if fr.location_id not in w_miejscu
-              and (fr.reason or "").startswith(PREFIKS_SPADKU)]
+    wyłącznie podmienić istniejącą kartę), rdzeń zapisuje drogą atomową, znaczy kodem
+    (`spadek_na_droge_atomowa`) i mówi dlaczego. `applied` bez tego kodu to co innego (np. zapis
+    potwierdzony z dysku po przerwanym commicie - nic nie przepisano). Droga zapisu jest szczegółem,
+    dopóki wszystko poszło w miejscu, więc człon mówi wyłącznie o spadku: ile plików przepisano
+    w całości i pierwszy powód."""
+    spadek = [fr for fr in res.applied if spadek_na_droge_atomowa(fr)]
     if not spadek:
         return ""
     return i18n.t("wb.inplace_fallback", n=len(spadek),

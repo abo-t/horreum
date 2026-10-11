@@ -9,14 +9,13 @@ import os
 
 import pytest
 
-from horreum import db, naming, object_change, repo
+from horreum import db, object_change, repo
 from horreum.gui import queries
-from horreum.object_change import _nazwa_stosu, path_key, plan_object_change
+from horreum.object_change import _nazwa_lightu, _nazwa_stosu, path_key, plan_object_change
 from horreum.resolve.catalog import catalog_label
 from horreum.scan import Card
 
 NOW = "2026-10-11T12:00:00+00:00"
-WZOR = ["object", "datetime"]
 
 
 class _Archiwum:
@@ -66,10 +65,9 @@ class _Archiwum:
         from horreum.resolver import forma_karty_object
         return forma_karty_object(self.con, canon) or canon
 
-    def plan(self, ids, target=None, template=WZOR, **kw):
+    def plan(self, ids, target=None, **kw):
         rows = queries.object_change_rows(self.con, ids, target=target)
-        return plan_object_change(rows, target=target, template=template,
-                                  library_root=str(self.root),
+        return plan_object_change(rows, target=target, library_root=str(self.root),
                                   location_at=queries.location_lookup(self.con), **kw)
 
     def drzewo(self):
@@ -106,7 +104,7 @@ def test_zmiana_obiektu_nowy_folder_nazwa_karta_i_kotwice(arch):
     plan = arch.plan([fid], target=cel, run_id="R1")
     it = _jedna(plan)
     assert plan.run_id == "R1" and plan.target == cel and not plan.skipped and not plan.warnings
-    assert it.new_path == arch.sciezka(r"LIGHTS\NGC2632\RC6_2600MC\OSC\NGC2632_20220321_202901.fits")
+    assert it.new_path == arch.sciezka(r"LIGHTS\NGC2632\RC6_2600MC\OSC\NGC2632_x.fits")
     assert it.mkdirs == (arch.sciezka(r"LIGHTS\NGC2632"), arch.sciezka(r"LIGHTS\NGC2632\RC6_2600MC"),
                          arch.sciezka(r"LIGHTS\NGC2632\RC6_2600MC\OSC"))
     assert (it.card_op, it.card_old, it.card_new) == ("set", "NGC 3034", "NGC 2632")
@@ -119,7 +117,7 @@ def test_cel_rowny_biezacemu_obiektowi_nie_zmienia_bazy(arch):
     fid = arch.klatka(r"LIGHTS\NGC3034\cam\CLS\a.fits", canon="NGC3031", card="NGC 3031")
     it = _jedna(arch.plan([fid], target=queries.object_target(arch.con, "NGC3031")))
     assert it.object_change is False and it.card_op is None
-    assert it.new_path == arch.sciezka(r"LIGHTS\NGC3031\cam\CLS\NGC3031_20220321_202901.fits")
+    assert it.new_path == arch.sciezka(r"LIGHTS\NGC3031\cam\CLS\a.fits")      # nazwa bez obiektu
 
 
 def test_cel_bez_formy_karty_odmawia_przed_planem(arch):
@@ -131,7 +129,7 @@ def test_cel_bez_formy_karty_odmawia_przed_planem(arch):
     fid = arch.klatka(r"LIGHTS\M31\cam\a.fits", canon="NGC224")
     with pytest.raises(ValueError, match="bez formy karty"):
         plan_object_change(queries.object_change_rows(arch.con, [fid], target=cel), target=cel,
-                           template=WZOR, library_root=None, location_at=lambda v, p: frozenset())
+                           library_root=None, location_at=lambda v, p: frozenset())
 
 
 def test_object_target_drabina_jak_okno_przypisania(arch):
@@ -149,7 +147,7 @@ def test_wiersze_policzone_dla_innego_celu_to_EXPECT(arch):
     fid = arch.klatka(r"LIGHTS\M31\cam\a.fits", canon="NGC224")
     rows = queries.object_change_rows(arch.con, [fid])
     with pytest.raises(ValueError, match="policzony dla celu"):
-        plan_object_change(rows, target=queries.object_target(arch.con, "M33"), template=WZOR,
+        plan_object_change(rows, target=queries.object_target(arch.con, "M33"),
                            library_root=None, location_at=lambda v, p: frozenset())
 
 
@@ -159,25 +157,26 @@ def test_wiersze_policzone_dla_innego_celu_to_EXPECT(arch):
 def test_uzgodnij_przenosi_plik_do_folderu_obiektu_bez_zmiany_bazy(arch):
     fid = arch.klatka(r"LIGHTS\Sh2-229\A140R\B\Sh2-229_x.fits", canon="IC405")
     it = _jedna(arch.plan([fid]))
-    assert it.new_path == arch.sciezka(r"LIGHTS\IC405\A140R\B\IC405_20220321_202901.fits")
+    assert it.new_path == arch.sciezka(r"LIGHTS\IC405\A140R\B\IC405_x.fits")
     assert it.card_op is None and it.card_new == "IC 405" and it.object_change is False
 
 
 def test_kategoria_celu_z_rodzaju_obiektu(arch):
-    deep = arch.klatka(r"LIGHTS\_SOLAR\Saturn\cam\a.fits", canon="Saturn", okind="solar_system")
-    kom = arch.klatka(r"LIGHTS\NGC3034\cam\b.fits", canon="NGC3034", date_obs="2022-03-22T20:00:00")
+    deep = arch.klatka(r"LIGHTS\_SOLAR\Saturn\cam\Saturn_a.fits", canon="Saturn",
+                       okind="solar_system")
+    kom = arch.klatka(r"LIGHTS\NGC3034\cam\NGC3034_b.fits", canon="NGC3034")
     p1 = arch.plan([deep], target=queries.object_target(arch.con, "NGC7000"))
-    assert _jedna(p1).new_path == arch.sciezka(r"LIGHTS\NGC7000\cam\NGC7000_20220321_202901.fits")
+    assert _jedna(p1).new_path == arch.sciezka(r"LIGHTS\NGC7000\cam\NGC7000_a.fits")
     p2 = arch.plan([kom], target=queries.object_target(arch.con, "C/2023 A3"))
     assert _jedna(p2).new_path == arch.sciezka(
-        r"LIGHTS\_COMETS\C2023A3_Tsuchinshan-ATLAS\cam\C2023A3_Tsuchinshan-ATLAS_20220322_200000.fits")
+        r"LIGHTS\_COMETS\C2023A3_Tsuchinshan-ATLAS\cam\C2023A3_Tsuchinshan-ATLAS_b.fits")
 
 
 def test_istniejacy_katalog_w_innej_pisowni_bierze_forme_z_dysku(arch):
     os.makedirs(arch.sciezka(r"LIGHTS\ic405\A140R"))
     fid = arch.klatka(r"LIGHTS\Sh2-229\A140R\B\a.fits", canon="IC405")
     it = _jedna(arch.plan([fid]))
-    assert it.new_path == arch.sciezka(r"LIGHTS\ic405\A140R\B\IC405_20220321_202901.fits")
+    assert it.new_path == arch.sciezka(r"LIGHTS\ic405\A140R\B\a.fits")
     assert it.mkdirs == (arch.sciezka(r"LIGHTS\ic405\A140R\B"),)
 
 
@@ -190,8 +189,8 @@ def test_katalog_zaplanowany_przez_pierwsza_pozycje_ma_jedna_pisownie(arch):
     plan = arch.plan([a, b], target=queries.object_target(arch.con, "NGC5"))
     nowe = {i.frame_id: i for i in plan.items}
     katalog = arch.sciezka(r"LIGHTS\NGC5\Rig\Ha")
-    assert nowe[a].new_path == katalog + r"\NGC5_20220321_202901.fits"
-    assert nowe[b].new_path == katalog + r"\NGC5_20220322_202901.fits"
+    assert nowe[a].new_path == katalog + r"\1.fits"
+    assert nowe[b].new_path == katalog + r"\2.fits"
     lancuch = (arch.sciezka(r"LIGHTS\NGC5"), arch.sciezka(r"LIGHTS\NGC5\Rig"), katalog)
     assert nowe[a].mkdirs == nowe[b].mkdirs == lancuch
 
@@ -283,21 +282,21 @@ def test_kolizje_we_wsadzie_na_dysku_i_w_bazie(arch):
     a = arch.klatka(r"LIGHTS\A\cam\1.fits", canon="NGC224")
     b = arch.klatka(r"LIGHTS\B\cam\1.fits", canon="NGC224")
     plan = arch.plan([a, b], target=queries.object_target(arch.con, "NGC1"))
-    assert not plan.items                                  # silnik nazw widzi ten sam katalog celu
-    assert all(r.startswith("nazwa pliku: kolizja nazwy w wsadzie") for r in _powody(plan).values())
+    assert not plan.items                                  # ta sama nazwa w jednym katalogu celu
+    assert all(r.startswith("kolizja we wsadzie") for r in _powody(plan).values())
     sa = _stos(arch, r"STACKS\A\c\Ha\A_2025-08-23_c_Ha_60s_mono.xisf", canon="NGC253")
     sb = _stos(arch, r"STACKS\B\c\Ha\B_2025-08-23_c_Ha_60s_mono.xisf", canon="NGC254")
     plan = arch.plan([sa, sb], target=queries.object_target(arch.con, "NGC1"))
     assert not plan.items and all(r.startswith("kolizja we wsadzie") for r in _powody(plan).values())
 
     os.makedirs(arch.sciezka(r"LIGHTS\NGC2\cam"))
-    open(arch.sciezka(r"LIGHTS\NGC2\cam\ngc2_20220323_202901.fits"), "wb").close()
-    c = arch.klatka(r"LIGHTS\C\cam\1.fits", canon="NGC224", date_obs="2022-03-23T20:29:01")
+    open(arch.sciezka(r"LIGHTS\NGC2\cam\ngc2_x.FITS"), "wb").close()     # bez wielkości liter
+    c = arch.klatka(r"LIGHTS\C\cam\NGC224_x.fits", canon="NGC224")
     assert _powody(arch.plan([c], target=queries.object_target(arch.con, "NGC2")))[c].startswith(
         "na dysku stoi już plik")
 
-    d = arch.klatka(r"LIGHTS\D\cam\1.fits", canon="NGC224", date_obs="2022-03-24T20:29:01")
-    duch = arch.klatka(r"LIGHTS\NGC3\cam\NGC3_20220324_202901.fits", canon="NGC3", plik=False)
+    d = arch.klatka(r"LIGHTS\D\cam\NGC224_y.fits", canon="NGC224")
+    duch = arch.klatka(r"LIGHTS\NGC3\cam\NGC3_y.fits", canon="NGC3", plik=False)
     arch.con.execute("UPDATE location SET present = 0 WHERE frame_id = ?", (duch,))
     assert _powody(arch.plan([d], target=queries.object_target(arch.con, "NGC3")))[d].startswith(
         "w bazie jest inna kopia")
@@ -313,7 +312,7 @@ def test_karta_odbita_bramka_zostawia_caly_plik_a_RAW_i_region_jada_bez_karty(ar
     assert "karta i folder idą razem" in _powody(plan)[suma]
     it = _jedna(plan)
     assert it.frame_id == raw and it.card_op is None and it.card_new is None
-    assert it.new_path == arch.sciezka(r"LIGHTS\M33\cam\M33_20220325_000000.ARW")
+    assert it.new_path == arch.sciezka(r"LIGHTS\M33\cam\2.ARW")
 
     region = arch.klatka(r"LIGHTS\Petla\cam\3.fits", canon="Veil", okind="region", source="region",
                          card=None, date_obs="2022-03-26T00:00:00")
@@ -559,9 +558,58 @@ def test_ostatni_gest_reki_niesie_powody_relokacji(arch):
     assert "reasons" not in queries.last_hand_gesture(arch.con)
 
 
-def test_powod_nazwy_bez_zmian_zgodny_z_silnikiem_nazw(arch):
-    """Planer czyta jeden powód `naming.run_rename` jako „nazwa zostaje” - pin na tekst silnika."""
-    fid = arch.klatka(r"LIGHTS\NGC224\cam\NGC224_20220321_202901.fits", canon="NGC224")
-    run = naming.run_rename([fid], targets_fn=lambda ids: queries.rename_frame_targets(arch.con, ids),
-                            source="date_obs", offset_hours=0, template=WZOR)
-    assert [s.reason for s in run.skipped] == [object_change._NAZWA_BEZ_ZMIAN]
+# ═══════════════════════════════════════════════════════════════════ nazwa pliku (D-1011-6 `O2`)
+
+
+def test_nazwa_lightu_wymienia_wylacznie_czlon_obiektu():
+    """Człon obiektu na początku nazwy → token kanonu celu, reszta znak w znak - także `FLATGRP_…`
+    i `OSC`, które wzór „Nazw” zmieniał albo gubił (wizytacja bs W1 W2)."""
+    archiwum = "NGC3034_20220326_201500_LIGHT_FLATGRP_NOFLAT_OSC_30s_.fits"
+    assert _nazwa_lightu(archiwum, ("NGC3034",), "NGC2632") == \
+        "NGC2632_20220326_201500_LIGHT_FLATGRP_NOFLAT_OSC_30s_.fits"
+    assert _nazwa_lightu("Sh2-229_x.fits", ("Sh2-229", "IC405"), "IC405") == "IC405_x.fits"
+    assert _nazwa_lightu("ngc3034_x.fits", ("NGC3034",), "NGC2632") == "NGC2632_x.fits"
+    assert _nazwa_lightu("IC342 20181011_dsc3351.dng", ("IC342",), "NGC1") == \
+        "NGC1 20181011_dsc3351.dng"                          # nazwa z lustrzanki: spacja
+
+
+def test_nazwa_lightu_bez_czlonu_obiektu_zostaje():
+    for nazwa in ("20181011_dsc3322.dng", "_DSC6180.ARW", "NGC30345_x.fits", "NGC3034.fits",
+                  "M63 20181003_dsc3087.dng"):
+        assert _nazwa_lightu(nazwa, ("NGC3034", "NGC5055"), "NGC2632") == nazwa
+
+
+def test_nazwa_lightu_kometa_najdluzszy_czlon_i_idempotencja():
+    """Forma komety dłuższa od folderu: pierwszy gest dokłada nazwę, drugi już nie dubluje."""
+    kometa = "C/2023 A3 (Tsuchinshan-ATLAS)"
+    raz = _nazwa_lightu("C2023A3_20240101.fits", ("C2023A3", "C2023A3_Tsuchinshan-ATLAS"), kometa)
+    assert raz == "C2023A3_Tsuchinshan-ATLAS_20240101.fits"
+    assert _nazwa_lightu(raz, ("C2023A3_Tsuchinshan-ATLAS",), kometa) == raz
+    assert _nazwa_lightu(raz, ("C2023A3",), kometa) == raz          # folder krótszy niż nazwa
+    assert _nazwa_lightu(raz, ("C2023A3_Tsuchinshan-ATLAS",), "NGC1") == "NGC1_20240101.fits"
+
+
+def test_stary_czlon_z_obiektu_w_bazie_gdy_folder_inny(arch):
+    """Plik w folderze innego obiektu niosący w nazwie obiekt z bazy: człon z bazy też jest stary."""
+    fid = arch.klatka(r"LIGHTS\Q\cam\NGC224_x.fits", canon="NGC224")
+    it = _jedna(arch.plan([fid], target=queries.object_target(arch.con, "M33")))
+    assert it.new_path == arch.sciezka(r"LIGHTS\M33\cam\M33_x.fits")
+
+
+def test_proba_fali_10_b_i_c_bez_ruchu_pliku(arch):
+    """(b) karta `NGC 3031` w folderze `NGC3034` → `NGC 3034`: plik stoi, nazwa ta sama, karta
+    i baza się zmieniają; (c) Saturn → Saturn bez zmian (kod `SKIP_UNCHANGED`, nie odmowa)."""
+    b = arch.klatka(r"LIGHTS\NGC3034\ED120R_2600MM\L\NGC3034_20220321_202901_L.fits",
+                    canon="NGC3031", card="NGC 3031")
+    it = _jedna(arch.plan([b], target=queries.object_target(arch.con, "NGC 3034")))
+    assert it.new_path is None and it.card_op == "set" and it.object_change is True
+    c = arch.klatka(r"LIGHTS\_SOLAR\Saturn\A140R_2600MC\Saturn_20250907_193535.fits",
+                    canon="Saturn", okind="solar_system")
+    plan = arch.plan([c], target=queries.object_target(arch.con, "Saturn"))
+    assert not plan.items
+    assert [(s.frame_id, s.code) for s in plan.skipped] == [(c, object_change.SKIP_UNCHANGED)]
+
+
+def test_odmowa_nie_niesie_kodu_bez_zmian(arch):
+    fid = arch.klatka(r"LIGHTS\X\cam\1.fits", canon="NGC224", mtime=None)
+    assert [s.code for s in arch.plan([fid]).skipped] == [None]

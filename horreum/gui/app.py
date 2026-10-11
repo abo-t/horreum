@@ -3525,6 +3525,9 @@ class MainWindow(QMainWindow):
         tasks.observatory_view.status_message.connect(
             lambda msg: self._raport_miejsca(msg, STRONA_PORZADKI, wiaz=False))
         tasks.open_collection.connect(self._on_open_collection)
+        # Wiersz „Przerwane zmiany obiektu” (AR-121) otwiera okno przebiegu przez Zbiory - tam
+        # mieszka mutex zapisu i odświeżenie zbioru oraz plakietki po zapisie albo cofnięciu.
+        tasks.open_object_change_run.connect(grid.otworz_przebieg_zmiany_obiektu)
         # Wiersz „?" Porządków prowadzi tam, gdzie jest jego robota - do Dostawy (AR-28 (b)) - i
         # niesie powód: linia nad akcjami mówi, po co człowiek tu jest. Obie drogi do sygnału
         # (wiersz „?”, pusta perspektywa kopii) czekają na fakty kopii, więc powód jest jeden.

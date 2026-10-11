@@ -19,7 +19,7 @@ pytest.importorskip("PySide6")
 from PySide6.QtCore import QCoreApplication, QEvent, QThread
 from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
-from horreum import db, naming, object_change as oc, repo, resolver, writeback
+from horreum import db, object_change as oc, repo, resolver, writeback
 from horreum.gui import i18n, queries
 from horreum.gui import grid as grid_mod
 from horreum.gui.i18n_catalog import CATALOG
@@ -42,8 +42,8 @@ def qapp():
 _Wynik = writeback.ObjectChangeResult
 
 
-def _fr(lid, status, reason=None):
-    return writeback.FileResult(lid, rf"{NOWY}\f{lid}.fits", status, reason)
+def _fr(lid, status, reason=None, code=None):
+    return writeback.FileResult(lid, rf"{NOWY}\f{lid}.fits", status, reason, code=code)
 
 
 def _pozycja(fid, *, nowa=True, karta=True, katalogi=True, stara_karta="NGC 3034"):
@@ -75,7 +75,6 @@ class _Rdzen:
         self.plany = []          # kolejne plany; pusta lista = `_plan(run-N)`
         self.n_planow = 0
         self.wiersze = []        # (frame_ids, target) każdego czytania read-modelu
-        self.polityka = []       # (wzór, źródło daty, przesunięcie) każdego planu
         self.staging = []        # plany oddane do `repo.stage_object_change`
         self.commity = []        # run_id każdego startu sterownika
         self.cofniecia = []      # run_id każdego cofnięcia
@@ -92,9 +91,8 @@ def rdzen(monkeypatch):
         r.wiersze.append((list(frame_ids), target))
         return []
 
-    def planuj(rows, *, target, template, library_root, location_at, run_id=None, **kw):
+    def planuj(rows, *, target, library_root, location_at, run_id=None):
         assert library_root == KORZEN and callable(location_at)
-        r.polityka.append((list(template), kw.get("date_source"), kw.get("offset_hours")))
         time.sleep(r.opoznienie)
         r.n_planow += 1
         if r.plany:
@@ -118,6 +116,10 @@ def rdzen(monkeypatch):
                                            blocked=[], failed=[], skipped=[], dirs_removed=3)
 
     monkeypatch.setattr(queries, "object_change_rows", wiersze)
+    # Staging atrapy nie pisze do bazy, więc stan przebiegu po wyjątku workera też jest atrapą:
+    # przebieg `staged` (sterownik domyka go wyłącznie na końcu listy), nic nie czeka.
+    monkeypatch.setattr(queries, "object_change_run_view",
+                        lambda con, run_id: {"pending": 0, "can_finish": True})
     monkeypatch.setattr(resolver, "library_root_from_db", lambda con: KORZEN)
     monkeypatch.setattr(oc, "plan_object_change", planuj)
     monkeypatch.setattr(repo, "stage_object_change", stage)
@@ -134,12 +136,9 @@ def con(tmp_path):
 
 
 def _okno(qapp, con, target=CEL, *, off_thread=False, frame_ids=(1, 2, 3, 4, 5, 6),
-          template=naming.DEFAULT_TEMPLATE, date_source="date_obs", offset_hours=0,
-          fallback=True, wzor_z_paska=True, now_fn=lambda: NOW):
+          now_fn=lambda: NOW):
     from horreum.gui.object_change_dialog import ObjectChangeDialog
-    return ObjectChangeDialog(con, frame_ids=list(frame_ids), target=target, template=template,
-                              date_source=date_source, offset_hours=offset_hours,
-                              fallback=fallback, wzor_z_paska=wzor_z_paska, now_fn=now_fn,
+    return ObjectChangeDialog(con, frame_ids=list(frame_ids), target=target, now_fn=now_fn,
                               off_thread=off_thread)
 
 
@@ -236,17 +235,23 @@ def test_liczby_ROZDZIELAJA_folder_od_nowej_nazwy_a_dopisanie_karty_FITS_jest_oz
 
 
 def test_zdanie_wyniku_liczy_spadek_UWAGI_i_numer_przebiegu():
-    """Pozycje `applied` z powodem: przy zapisie spadek karty na drogę atomową (prefiks rdzenia)
-    i uwagi osobno; przy cofnięciu każdy powód to uwaga. Numer przebiegu zawsze - po zamknięciu
-    okna to jedyny uchwyt (`horreum object-change finish|undo`)."""
+    """Pozycje `applied` z powodem: przy zapisie spadek karty na drogę atomową (KOD rdzenia
+    `CODE_INPLACE_FALLBACK`) i uwagi osobno - powód o tym samym brzmieniu bez kodu jest uwagą; przy
+    cofnięciu każdy powód to uwaga. Numer przebiegu zawsze - po zamknięciu okna uchwyt CLI
+    (`horreum object-change finish|undo`) i wiersz Porządków."""
     from horreum.gui.object_change_dialog import zdanie_wyniku_zmiany
-    from horreum.gui.wb_worker import PREFIKS_SPADKU
+    prefiks = writeback.PREFIKS_DROGI_ATOMOWEJ
     res = _Wynik("przebieg-7", applied=[
-        _fr(1, "applied"), _fr(2, "applied", f"{PREFIKS_SPADKU}: operacja add/str na OBJECT"),
+        _fr(1, "applied"), _fr(2, "applied", f"{prefiks}: operacja add/str na OBJECT",
+                               code=writeback.CODE_INPLACE_FALLBACK),
         _fr(3, "applied", "zapis potwierdzony z dysku")], blocked=[], failed=[], skipped=[])
     z = zdanie_wyniku_zmiany(res)
     assert i18n.t("wb.inplace_fallback", n=1, reason="operacja add/str na OBJECT") in z
     assert i18n.t("objchg.res.notes", n=1, note="zapis potwierdzony z dysku") in z
+    bez_kodu = zdanie_wyniku_zmiany(_Wynik("p", applied=[_fr(2, "applied", f"{prefiks}: x")],
+                                           blocked=[], failed=[], skipped=[]))
+    assert "drogą atomową" not in bez_kodu and i18n.t("objchg.res.notes", n=1,
+                                                      note=f"{prefiks}: x") in bez_kodu
     assert i18n.t("objchg.res.run", run_id="przebieg-7") in z
     cof = zdanie_wyniku_zmiany(_Wynik("przebieg-7", applied=[
         _fr(1, "restored", "baza: nowsza decyzja")], blocked=[], failed=[], skipped=[]),
@@ -256,8 +261,9 @@ def test_zdanie_wyniku_liczy_spadek_UWAGI_i_numer_przebiegu():
 
 
 def test_blokada_pliku_zmienionego_od_skanu_MA_recepte(tmp_path):
-    """Zdanie rdzenia o pliku zmienionym od skanu bierzemy od PRAWDZIWEGO pisarza w miejscu
-    (kotwica sha1 niezgodna) - okno rozpoznaje je i podaje drogę: skan w Dostawie, potem gest."""
+    """Odmowę pliku zmienionego od skanu bierzemy od PRAWDZIWEGO pisarza w miejscu (kotwica sha1
+    niezgodna) - okno rozpoznaje ją po KODZIE (`CODE_CHANGED_SINCE_SCAN`) i podaje drogę: skan
+    w Dostawie, potem gest. Samo zdanie bez kodu recepty nie dostaje."""
     import numpy as np
     from astropy.io import fits
     from horreum import scan
@@ -269,10 +275,14 @@ def test_blokada_pliku_zmienionego_od_skanu_MA_recepte(tmp_path):
     wynik = writeback.write_changes_inplace(
         str(p), [writeback.WriteOp("OBJECT", "set", "NGC 2632", "str", idx=0)],
         scan.scan_file(str(p)).header_hash, anchor=writeback.FileAnchor("0" * 40, "2000-01-01"))
-    assert wynik.status == "blocked"
+    assert (wynik.status, wynik.code) == ("blocked", writeback.CODE_CHANGED_SINCE_SCAN)
     res = _Wynik("R", applied=[], failed=[], skipped=[],
-                 blocked=[_fr(1, "blocked", f"karta odbita bez zapisu: {wynik.reason}")])
+                 blocked=[_fr(1, "blocked", f"karta odbita bez zapisu: {wynik.reason}",
+                              code=wynik.code)])
     assert i18n.t_plural("objchg.res.rescan", 1) in zdanie_wyniku_zmiany(res)
+    bez_kodu = _Wynik("R", applied=[], failed=[], skipped=[],
+                      blocked=[_fr(1, "blocked", f"karta odbita bez zapisu: {wynik.reason}")])
+    assert i18n.t_plural("objchg.res.rescan", 1) not in zdanie_wyniku_zmiany(bez_kodu)
 
 
 def test_Cofnij_tylko_gdy_cos_ruszono_katalogi_netto():
@@ -340,50 +350,21 @@ def test_etap_Dostawy_gasi_akcje_okna(qapp, con, rdzen):
     dlg.reject()
 
 
-def test_linijka_wzoru_mowi_wzor_zrodlo_daty_i_skad_wzor(qapp, con, rdzen):
-    """Ta sama reguła co „Nazwy” (D-1011-5 Q8): okno pokazuje jedną linijką wzór i datę, którymi
-    liczy nowe nazwy, a planer dostaje dokładnie tę politykę. Wzór domyślny (podstawiony za pusty
-    pasek albo taki sam) dokłada zdanie o skutku: każdy plik z listy dostaje nową nazwę. Zapas
-    drugiej daty: planer bierze go dziś zawsze - linijka mówi to, co planer zrobi."""
-    from horreum.gui.object_change_dialog import opis_wzoru
-    zapas = i18n.t("objchg.template_fallback")
-    dlg = _okno(qapp, con, template=["object", "datetime"], date_source="filename", offset_hours=2)
-    assert rdzen.polityka == [(["object", "datetime"], "filename", 2)]
-    assert dlg.template_line.text() == i18n.t(
-        "objchg.template_line", wzor="object · datetime",
-        data=i18n.t("grid.rename.src_filename") + i18n.t("objchg.template_offset", offset=2)
-        + zapas)
-    assert dlg.template_line.property("role") is None
+def test_linijka_reguly_nazwy_zamiast_wzoru_paska(qapp, con, rdzen):
+    """D-1011-6 `O2`: okno mówi jedną linijką, że w nazwie zmienia się wyłącznie człon obiektu -
+    bez wzoru i daty paska „Nazwy” (planer ich nie dostaje: atrapa ma sygnaturę bez nich), bez
+    ostrzeżenia, bo reguła żadnej nazwy nie wymienia w całości."""
+    dlg = _okno(qapp, con)
+    assert dlg.name_rule.text() == i18n.t("objchg.name_rule")
+    assert dlg.name_rule.property("role") == "secondary"
+    assert not hasattr(dlg, "template_line")
     dlg.reject()
-
-    dlg = _okno(qapp, con)                                # pasek z wzorem domyślnym
-    assert dlg.template_line.text() == (
-        i18n.t("objchg.template_line", wzor=opis_wzoru(naming.DEFAULT_TEMPLATE),
-               data="DATE-OBS" + zapas)
-        + i18n.t("objchg.template_default_note"))
-    assert dlg.template_line.property("role") == "warn"
-    dlg.reject()
-
-    dlg = _okno(qapp, con, wzor_z_paska=False, fallback=False)   # pusty pasek, zapas wyłączony
-    assert dlg.template_line.text().startswith(i18n.t(
-        "objchg.template_empty_bar", wzor=opis_wzoru(naming.DEFAULT_TEMPLATE),
-        data="DATE-OBS" + i18n.t("objchg.template_fallback_forced")))
-    assert dlg.template_line.text().endswith(i18n.t("objchg.template_default_note"))
-    dlg.reject()
-
-
-def test_opis_wzoru_tokeny_z_argumentami_i_wzor_per_typ():
-    from horreum.gui.object_change_dialog import opis_wzoru
-    assert opis_wzoru(["object", {"t": "folder", "n": 2}, {"t": "kind", "case": "upper"}]) == \
-        "object · folder(n=2) · kind(case=upper)"
-    assert opis_wzoru({"default": ["object"], "fits": ["datetime"]}) == \
-        "default: object | fits: datetime"
 
 
 def test_okno_na_PRAWDZIWYM_planerze_i_read_modelu_staguje_plan(qapp, tmp_path, monkeypatch):
     """Bez atrapy planu i read-modelu (atrapa wyłącznie dla sterownika zapisu): okno woła planer
-    z KOMPLETEM argumentów (`location_at`, polityka daty paska), pokazuje nazwę złożoną wzorem
-    z przesunięciem godzin, a „Zmień obiekt” staguje ten plan prawdziwą klingą repo."""
+    z KOMPLETEM argumentów (`location_at`), pokazuje nazwę z wymienionym członem obiektu
+    (D-1011-6 `O2`), a „Zmień obiekt” staguje ten plan prawdziwą klingą repo."""
     from horreum.resolve.catalog import catalog_label
     from horreum.scan import Card
     korzen = tmp_path / "ASTRO_"
@@ -414,12 +395,11 @@ def test_okno_na_PRAWDZIWYM_planerze_i_read_modelu_staguje_plan(qapp, tmp_path, 
                         lambda con_, run_id, **k: starty.append(run_id) or _Wynik(
                             run_id, applied=[_fr(1, "applied")], blocked=[], failed=[],
                             skipped=[]))
-    dlg = _okno(qapp, c, target=cel, frame_ids=[fid], template=["object", "datetime"],
-                offset_hours=1)
+    dlg = _okno(qapp, c, target=cel, frame_ids=[fid])
     assert dlg.error.text() == "", dlg.error.text()
     assert _teksty(dlg.items_tree) == [[
         r"LIGHTS\NGC3034\RC6_2600MC\OSC\NGC3034_a.fits",
-        r"LIGHTS\NGC2632\RC6_2600MC\OSC\NGC2632_20220326_223012.fits",
+        r"LIGHTS\NGC2632\RC6_2600MC\OSC\NGC2632_a.fits",
         "'NGC 3034' → 'NGC 2632'"]]
     run_id = dlg._plan.run_id
     dlg.action_btn.click()
@@ -480,17 +460,18 @@ def test_CYKL_na_PRAWDZIWYM_sterowniku_lista_wynik_Cofnij_bajty_jak_przed(qapp, 
     kliknięciem, wynik liczy spadek, „Cofnij” przywraca pliki pod stare ścieżki co do bajtu."""
     from astropy.io import fits
     a = archiwum
-    fa, pa = a.fits(r"LIGHTS\NGC3034\RC6\OSC\a.fits", obj="NGC 3034", seed=1)
+    fa, pa = a.fits(r"LIGHTS\NGC3034\RC6\OSC\NGC3034_a_FLATGRP_NOFLAT_OSC.fits", obj="NGC 3034",
+                    seed=1)
     fb, pb = a.fits(r"LIGHTS\NGC3034\RC6\OSC\b.fits", date="2022-03-26T21:31:00", seed=2)
     przed = {pa: _sha1(pa), pb: _sha1(pb)}
     cel = queries.object_target(a.con, "M 44")
-    dlg = _okno(qapp, a.con, target=cel, frame_ids=[fa, fb], template=["object", "datetime"])
+    dlg = _okno(qapp, a.con, target=cel, frame_ids=[fa, fb])
     karty = [dlg.items_tree.topLevelItem(i).text(2) for i in range(2)]
     assert karty[0] == "'NGC 3034' → 'NGC 2632'"
     assert karty[1].endswith(i18n.t("objchg.card_rewrite"))
     dlg.action_btn.click()
-    nowe = [a.root / r"LIGHTS\NGC2632\RC6\OSC\NGC2632_20220326_213012.fits",
-            a.root / r"LIGHTS\NGC2632\RC6\OSC\NGC2632_20220326_213100.fits"]
+    nowe = [a.root / r"LIGHTS\NGC2632\RC6\OSC\NGC2632_a_FLATGRP_NOFLAT_OSC.fits",   # człon obiektu
+            a.root / r"LIGHTS\NGC2632\RC6\OSC\b.fits"]                       # nazwa bez obiektu
     assert all(p.exists() for p in nowe) and not pa.exists() and not pb.exists()
     assert [fits.getheader(str(p))["OBJECT"] for p in nowe] == ["NGC 2632", "NGC 2632"]
     assert dlg.status.text().startswith(i18n.t("objchg.res.applied", n=2))
@@ -518,7 +499,7 @@ def test_Dom_na_PRAWDZIWYCH_zdarzeniach_gestu_mowi_przeniesiono_do_folderu_obiek
                    date="2022-03-26T21:31:00")
     zegar = iter(f"2026-10-11T12:{m:02d}:00+00:00" for m in range(1, 60))
     dlg = _okno(qapp, a.con, target=queries.object_target(a.con, "M 44"), frame_ids=[fa, fb],
-                template=["object", "datetime"], now_fn=lambda: next(zegar))
+                now_fn=lambda: next(zegar))
     dlg.action_btn.click()
     assert zdanie_gestu(queries.last_hand_gesture(a.con)) == i18n.t_plural(
         "home.gest.object_relocated", 2)
@@ -529,17 +510,16 @@ def test_Dom_na_PRAWDZIWYCH_zdarzeniach_gestu_mowi_przeniesiono_do_folderu_obiek
 
 
 def test_pominiecie_BEZ_ZMIAN_planera_liczy_sie_w_bez_zmian_nie_w_pominie(qapp, archiwum):
-    """Planer oddaje pozycję, która nic nie zmienia, jako pominięcie z powodem „bez zmian…” - okno
-    liczy ją w „bez zmian”, a lista pominięć niesie wyłącznie odmowy. Prawdziwy planer: zmiana
-    jego zdania przewróci ten test (dyskryminator jest tekstem)."""
+    """Planer oddaje pozycję, która nic nie zmienia, jako pominięcie z kodem `SKIP_UNCHANGED` -
+    okno liczy ją w „bez zmian”, a lista pominięć niesie wyłącznie odmowy. Prawdziwy planer:
+    dyskryminatorem jest kod, nie zdanie (AR-121 (4))."""
     a = archiwum
     zgodny, _ = a.fits(r"LIGHTS\NGC3034\RC6\OSC\NGC3034_20220326_213012.fits", obj="NGC 3034")
     obcy, _ = a.fits(r"LIGHTS\NGC3031\RC6\OSC\x.fits", obj="NGC 3034", seed=3,
                      date="2022-03-26T22:00:00")
-    dlg = _okno(qapp, a.con, target=None, frame_ids=[zgodny, obcy],
-                template=["object", "datetime"])
+    dlg = _okno(qapp, a.con, target=None, frame_ids=[zgodny, obcy])
     assert dlg.error.text() == "", dlg.error.text()
-    assert any(s.reason.startswith("bez zmian") for s in dlg._plan.skipped)
+    assert [s.code for s in dlg._plan.skipped] == [oc.SKIP_UNCHANGED]
     from horreum.gui.object_change_dialog import liczby_planu
     liczby = liczby_planu(dlg._plan)
     assert (liczby["bez_zmian"], liczby["pominie"], liczby["folder"]) == (1, 0, 1)
@@ -557,8 +537,7 @@ def test_wyjatek_zapisu_Dokoncz_liczy_oczekujace_Z_BAZY_a_wyjatek_cofniecia_zeru
     def padnij(*a_, **k):
         raise OSError("udział zniknął")
     monkeypatch.setattr(writeback, "commit_object_change", padnij)
-    dlg = _okno(qapp, a.con, target=queries.object_target(a.con, "M 44"), frame_ids=[fa, fb],
-                template=["object", "datetime"])
+    dlg = _okno(qapp, a.con, target=queries.object_target(a.con, "M 44"), frame_ids=[fa, fb])
     dlg.action_btn.click()                                # staging prawdziwy, sterownik pada
     assert dlg.action_btn.text() == i18n.t("objchg.finish_btn", n=2) and dlg.action_btn.isEnabled()
     monkeypatch.setattr(writeback, "undo_object_change", padnij)
@@ -576,8 +555,7 @@ def test_CLI_finish_i_undo_przebiegu_po_numerze(archiwum, capsys):
     a = archiwum
     fa, pa = a.fits(r"LIGHTS\NGC3034\RC6\OSC\a.fits", obj="NGC 3034", seed=1)
     przed = _sha1(pa)
-    plan, _ = policz_plan(a.con, [fa], target=queries.object_target(a.con, "M 44"),
-                          template=["object", "datetime"], date_source="date_obs", offset_hours=0)
+    plan, _ = policz_plan(a.con, [fa], target=queries.object_target(a.con, "M 44"))
     repo.stage_object_change(a.con, plan=plan, now=NOW)
     assert cli.main(["object-change", "finish", a.db_path, plan.run_id]) == 0
     assert not pa.exists() and "zmienione 1" in capsys.readouterr().out
@@ -843,9 +821,10 @@ def test_OPS_prowadza_gest_i_karte_w_miejscu_do_rdzenia(monkeypatch):
 
 
 def test_zdanie_drogi_zapisu_mowi_TYLKO_o_spadku_na_atomowa():
-    from horreum.gui.wb_worker import PREFIKS_SPADKU, zdanie_commitu_kart, zdanie_drogi_zapisu
+    from horreum.gui.wb_worker import zdanie_commitu_kart, zdanie_drogi_zapisu
     a = _fr(1, "applied")
-    b = _fr(2, "applied", f"{PREFIKS_SPADKU}: karta się nie mieści w nagłówku")
+    b = _fr(2, "applied", f"{writeback.PREFIKS_DROGI_ATOMOWEJ}: karta się nie mieści w nagłówku",
+            code=writeback.CODE_INPLACE_FALLBACK)
     wszystko_w_miejscu = writeback.CommitResult("r", 3, [a], [], [], [], in_place=[a])
     assert zdanie_drogi_zapisu(wszystko_w_miejscu) == ""
     spadek = writeback.CommitResult("r", 3, [a, b], [], [], [], in_place=[a])
@@ -963,6 +942,8 @@ class _OknoAtrapa:
         self.kw = kw
         self.summary = "zdanie wyniku"
         self.zajetosc = []
+        # Klatki okna: z zaznaczenia albo - przy wejściu na przebieg - z bazy (tu: stałe).
+        self.frame_ids = tuple(kw.get("frame_ids") or (1, 2))
         _OknoAtrapa.ostatnie = self
 
     def set_pipeline_busy(self, busy):
@@ -1015,9 +996,6 @@ def gest(monkeypatch):
 def test_Zmien_obiekt_wybor_BEZ_zapisu_potem_okno_z_celem_i_zaznaczeniem(widok, gest):
     v, c = widok
     _zaznacz(v, [1, 3])
-    v.rename_bar.src.setCurrentIndex(v.rename_bar.src.findData("filename"))   # polityka paska
-    v.rename_bar.offset.setValue(3)
-    v.rename_bar.fallback.setChecked(False)
     przed = c.execute("SELECT count(*) FROM event").fetchone()[0]
     statusy = []
     v.status_message.connect(statusy.append)
@@ -1030,10 +1008,8 @@ def test_Zmien_obiekt_wybor_BEZ_zapisu_potem_okno_z_celem_i_zaznaczeniem(widok, 
     okno = _OknoAtrapa.ostatnie
     assert sorted(okno.kw["frame_ids"]) == [1, 3] and okno.kw["target"].canon == "NGC2632"
     assert okno.kw["target"].alias_norm is None
-    assert list(okno.kw["template"]) == list(naming.DEFAULT_TEMPLATE)   # wzór z panelu „Nazwy”
-    # …razem z polityką daty paska (ta sama reguła co „Nazwy”, D-1011-5 Q8)
-    assert (okno.kw["date_source"], okno.kw["offset_hours"], okno.kw["fallback"],
-            okno.kw["wzor_z_paska"]) == ("filename", 3, False, True)
+    # Nazwa nie zależy od paska „Nazwy” (D-1011-6 `O2`) - okno nie dostaje jego polityki.
+    assert set(okno.kw) == {"frame_ids", "target", "now_fn", "db_path", "off_thread", "parent"}
     assert okno.kw["off_thread"] is False                 # seam testowy widoku idzie do okna
     assert c.execute("SELECT count(*) FROM event").fetchone()[0] == przed   # wybór nic nie pisze
     assert statusy[-1] == "zdanie wyniku"                 # zdanie okna trafia na pasek
@@ -1075,6 +1051,40 @@ def test_zmiana_w_oknie_odswieza_zbior_ZACHOWUJE_zaznaczenie_i_mutex(widok, gest
     sciezki = {r["frame_id"]: r["path"] for r in v.model._rows if isinstance(r, dict) and "path" in r}
     assert sciezki[1] == rf"{NOWY}\f1.fits"
     assert v._okno_zmiany_obiektu is None
+
+
+def test_przebieg_z_Porzadkow_otwiera_okno_na_run_id_z_mutexem_i_odswiezeniem(widok, gest):
+    """Wejście z Porządków (AR-121): okno dostaje WYŁĄCZNIE `run_id` (klatki i cel bierze z bazy),
+    zapis w nim idzie przez mutex gospodarza, a po zmianie zbiór zaznacza klatki przebiegu."""
+    v, _ = widok
+    sygnaly = {"porzadki": 0, "mutex": []}
+    v.stan_porzadkow_changed.connect(lambda: sygnaly.__setitem__("porzadki", sygnaly["porzadki"] + 1))
+    v.writeback_busy.connect(sygnaly["mutex"].append)
+
+    def scenariusz(okno):
+        okno.busy_changed.emit(True)
+        okno.busy_changed.emit(False)
+        okno.changed.emit()
+    _OknoAtrapa.scenariusz = scenariusz
+    v.otworz_przebieg_zmiany_obiektu("przebieg-9")
+    okno = _OknoAtrapa.ostatnie
+    assert okno.kw["run_id"] == "przebieg-9" and "frame_ids" not in okno.kw
+    assert "target" not in okno.kw
+    assert sygnaly == {"porzadki": 1, "mutex": [True, False]}
+    assert {r["frame_id"] for r in v._selected_data_rows()} == {1, 2}
+    assert v._okno_zmiany_obiektu is None
+
+
+def test_przebieg_z_Porzadkow_przy_zajetym_widoku_ODMAWIA_przed_oknem(widok, gest):
+    """Bramka Z3 (kimi): ta sama straż zajętości co wejścia z zaznaczenia - w biegu etapu
+    Dostawy okno przebiegu z czynnym „Dokończ” byłoby drugim pisarzem obok etapu."""
+    v, _ = widok
+    statusy = []
+    v.status_message.connect(statusy.append)
+    v.set_busy(True)
+    v.otworz_przebieg_zmiany_obiektu("przebieg-9")
+    v.set_busy(False)
+    assert statusy == [i18n.t("grid.inplace.busy_stage")] and _OknoAtrapa.ostatnie is None
 
 
 def test_zajety_widok_ODMAWIA_gestu_przed_wyborem(widok, gest):
@@ -1152,6 +1162,179 @@ def test_wiersz_Porzadkow_liczy_predykat_i_prowadzi_do_perspektywy(qapp, con, mo
     t._on_task_clicked(it)
     assert cele == [grid_mod.PRESET_FILE_OBJECT_MISMATCH]
     t.close()
+
+
+def test_wiersz_przerwanych_zmian_liczy_przebiegi_i_otwiera_NAJSTARSZY(qapp, con, monkeypatch):
+    """AR-121: wiersz liczy przebiegi z `queries.interrupted_object_change_runs` (robota - pogrubiony,
+    w plakietce), klik emituje `run_id` najstarszego; przy zerze szary i klik niczego nie otwiera."""
+    from PySide6.QtCore import Qt
+    from horreum.gui import rows as rows_mod
+    from horreum.gui.tasks import TasksView
+    przebiegi = ["stary", "nowy"]
+    monkeypatch.setattr(queries, "interrupted_object_change_runs", lambda c: list(przebiegi))
+    t = TasksView(con, now_fn=lambda: NOW)
+    plakietki = []
+    t.counts_changed.connect(plakietki.append)
+    t.refresh_counts()
+    it = next(t.tasks.item(i) for i in range(t.tasks.count())
+              if t.tasks.item(i).data(Qt.UserRole) == "object_change_interrupted")
+    assert it.text() == i18n.t("tasks.object_change_interrupted")
+    assert it.data(rows_mod.SECONDARY) == "2  ›" and it.data(rows_mod.STRONG)
+    assert it.toolTip() == i18n.t("tasks.object_change_interrupted_tip")
+    otwarte = []
+    t.open_object_change_run.connect(otwarte.append)
+    t._on_task_clicked(it)
+    assert otwarte == ["stary"]
+    przebiegi.clear()
+    t.refresh_counts()
+    assert it.data(rows_mod.SECONDARY) == "0  ›" and not it.data(rows_mod.STRONG)
+    assert it.toolTip() == ""
+    t._on_task_clicked(it)
+    assert otwarte == ["stary"]
+    assert plakietki[0] == plakietki[1] + 1
+    t.close()
+
+
+def test_przerwany_przebieg_z_bazy_lista_Dokoncz_potem_Cofnij_bajty_jak_przed(qapp, archiwum):
+    """AR-121 na PRAWDZIWYM rdzeniu: staging bez sterownika (awaria procesu po stagingu) - przebieg
+    jest na liście przerwanych; okno z `run_id` bierze klatki i cel z bazy, pokazuje pozycje
+    „czeka na zapis → <cel>” z kartą ze stagingu i „Dokończ (2)”; klik dokańcza tym samym
+    sterownikiem (przebieg schodzi z listy, nagłówek przestaje mówić „Przerwany”, martwego
+    przycisku nie ma), „Cofnij” wraca do bajtów sprzed gestu, a okno proponuje świeży plan
+    zwykłym nagłówkiem gestu (wizytacja W1)."""
+    from horreum.gui.object_change_dialog import ObjectChangeDialog, policz_plan
+    a = archiwum
+    fa, pa = a.fits(r"LIGHTS\NGC3034\RC6\OSC\NGC3034_a.fits", obj="NGC 3034", seed=1)
+    fb, pb = a.fits(r"LIGHTS\NGC3034\RC6\OSC\NGC3034_b.fits", obj="NGC 3034", seed=2,
+                    date="2022-03-26T21:31:00")
+    przed = {pa: _sha1(pa), pb: _sha1(pb)}
+    plan, _ = policz_plan(a.con, [fa, fb], target=queries.object_target(a.con, "M 44"))
+    repo.stage_object_change(a.con, plan=plan, now=NOW)
+    assert queries.interrupted_object_change_runs(a.con) == [plan.run_id]
+    widok = queries.object_change_run_view(a.con, plan.run_id)
+    assert (widok["pending"], widok["can_finish"]) == (2, True)
+
+    dlg = ObjectChangeDialog(a.con, run_id=plan.run_id, now_fn=lambda: NOW, off_thread=False)
+    assert dlg.frame_ids == (fa, fb)
+    assert dlg.head.text() == i18n.t_plural("objchg.head_resume_change", 2, run_id=plan.run_id,
+                                            canon="NGC2632", card="NGC 2632")
+    assert dlg.opis.text() == i18n.t("objchg.explain_resume")
+    nowe = a.root / r"LIGHTS\NGC2632\RC6\OSC"            # baza bez korzenia: pełne ścieżki
+
+    def czeka(p):
+        return i18n.t("objchg.st.pending_to", path=str(p))
+    assert _teksty(dlg.items_tree) == [
+        [str(pa), str(pa), "'NGC 3034' → 'NGC 2632'", czeka(nowe / "NGC2632_a.fits")],
+        [str(pb), str(pb), "'NGC 3034' → 'NGC 2632'", czeka(nowe / "NGC2632_b.fits")]]
+    assert dlg.action_btn.text() == i18n.t("objchg.finish_btn", n=2) and dlg.action_btn.isEnabled()
+    assert not dlg.undo_btn.isHidden()
+    dlg.action_btn.click()
+    assert (nowe / "NGC2632_a.fits").exists() and (nowe / "NGC2632_b.fits").exists()
+    assert queries.interrupted_object_change_runs(a.con) == []
+    assert dlg.status.text().startswith(i18n.t("objchg.res.applied", n=2))
+    assert dlg.head.text() == i18n.t_plural("objchg.head_change", 2, canon="NGC2632",
+                                            card="NGC 2632")
+    assert dlg.action_btn.isHidden() and not dlg.undo_btn.isHidden()
+    dlg.undo_btn.click()
+    assert {p: _sha1(p) for p in (pa, pb)} == przed
+    assert a.con.execute("SELECT status FROM object_change_run WHERE run_id = ?",
+                         (plan.run_id,)).fetchone()[0] == "undone"
+    assert dlg.action_btn.text() == i18n.t("objchg.replan_btn")   # świeży plan na klatkach przebiegu
+    assert not dlg.action_btn.isHidden() and dlg.opis.text() == i18n.t("objchg.explain_change")
+    dlg.reject()
+
+
+def test_przebieg_staged_BEZ_czekajacych_Dokoncz_domyka_zamiast_samego_Cofnij(qapp, archiwum):
+    """Bramka Z1 (sol, kimi): awaria po ostatniej pozycji, przed domknięciem przebiegu, zostawia
+    `staged` bez pozycji `pending`. Okno z Porządków daje „Dokończ” (bez liczby) - sterownik
+    domyka przebieg i schodzi on z listy przerwanych; poprawnie zapisane pliki zostają."""
+    from horreum.gui.object_change_dialog import ObjectChangeDialog, policz_plan
+    a = archiwum
+    fa, _ = a.fits(r"LIGHTS\NGC3034\RC6\OSC\NGC3034_a.fits", obj="NGC 3034", seed=1)
+    plan, _ = policz_plan(a.con, [fa], target=queries.object_target(a.con, "M 44"))
+    repo.stage_object_change(a.con, plan=plan, now=NOW)
+    writeback.commit_object_change(a.con, plan.run_id, now=NOW)
+    a.con.execute("UPDATE object_change_run SET status = 'staged' WHERE run_id = ?", (plan.run_id,))
+    a.con.commit()
+    widok = queries.object_change_run_view(a.con, plan.run_id)
+    assert (widok["pending"], widok["can_finish"]) == (0, True)
+    nowy = a.root / r"LIGHTS\NGC2632\RC6\OSC\NGC2632_a.fits"
+    dlg = ObjectChangeDialog(a.con, run_id=plan.run_id, now_fn=lambda: NOW, off_thread=False)
+    assert dlg.action_btn.text() == i18n.t("objchg.finish_btn_bare") and dlg.action_btn.isEnabled()
+    dlg.action_btn.click()
+    assert queries.interrupted_object_change_runs(a.con) == [] and nowy.exists()
+    assert _teksty(dlg.items_tree)[0][3] == i18n.t("objchg.st.done")   # nie „nie ruszone”
+    dlg.reject()
+
+
+def test_Dokoncz_zostawia_status_pozycji_zapisanych_PRZED_przerwaniem(qapp, archiwum):
+    """Bramka Z4 (kimi): wynik „Dokończ” niesie wyłącznie pozycje, które czekały - pozycja zapisana
+    przed przerwaniem zachowuje status z bazy („zrobione”), zamiast „nie ruszone”."""
+    from horreum.gui.object_change_dialog import ObjectChangeDialog, policz_plan
+    a = archiwum
+    fa, _ = a.fits(r"LIGHTS\NGC3034\RC6\OSC\NGC3034_a.fits", obj="NGC 3034", seed=1)
+    fb, _ = a.fits(r"LIGHTS\NGC3034\RC6\OSC\NGC3034_b.fits", obj="NGC 3034", seed=2,
+                   date="2022-03-26T21:31:00")
+    plan, _ = policz_plan(a.con, [fa, fb], target=queries.object_target(a.con, "M 44"))
+    repo.stage_object_change(a.con, plan=plan, now=NOW)
+    licznik = iter([False, True])                         # przerwanie przed drugą pozycją
+    wynik = writeback.commit_object_change(a.con, plan.run_id, now=NOW,
+                                           should_cancel=lambda: next(licznik))
+    assert wynik.cancelled and len(wynik.applied) == 1
+    dlg = ObjectChangeDialog(a.con, run_id=plan.run_id, now_fn=lambda: NOW, off_thread=False)
+    assert dlg.action_btn.text() == i18n.t("objchg.finish_btn", n=1)
+    dlg.action_btn.click()
+    assert [w[3] for w in _teksty(dlg.items_tree)] == [i18n.t("objchg.st.done")] * 2
+    dlg.reject()
+
+
+def test_cofanie_przerwane_i_pozycja_z_bledem_opis_mowi_droge_bez_martwego_przycisku(
+        qapp, archiwum):
+    """Bramka Z8 (wizytacja W2): `undoing` - opis mówi, że „Cofnij” dokończy cofanie; `applied`
+    z pozycją `failed` - że „Cofnij” cofa cały przebieg. W obu przycisku akcji nie ma (nie ma
+    czego dokańczać), „Cofnij” jest."""
+    from horreum.gui.object_change_dialog import ObjectChangeDialog, policz_plan
+    a = archiwum
+    fa, _ = a.fits(r"LIGHTS\NGC3034\RC6\OSC\NGC3034_a.fits", obj="NGC 3034", seed=1)
+    plan, _ = policz_plan(a.con, [fa], target=queries.object_target(a.con, "M 44"))
+    repo.stage_object_change(a.con, plan=plan, now=NOW)
+    for status, pozycja, opis in (("undoing", "applied", "objchg.explain_resume_undoing"),
+                                  ("applied", "failed", "objchg.explain_resume_failed")):
+        a.con.execute("UPDATE object_change_run SET status = ? WHERE run_id = ?",
+                      (status, plan.run_id))
+        a.con.execute("UPDATE pending_object_change SET status = ? WHERE run_id = ?",
+                      (pozycja, plan.run_id))
+        a.con.commit()
+        dlg = ObjectChangeDialog(a.con, run_id=plan.run_id, now_fn=lambda: NOW, off_thread=False)
+        assert dlg.opis.text() == i18n.t(opis)
+        assert dlg.head.text() == i18n.t_plural("objchg.head_resume_change", 1,
+                                                run_id=plan.run_id, canon="NGC2632",
+                                                card="NGC 2632")
+        assert dlg.action_btn.isHidden() and not dlg.undo_btn.isHidden()
+        dlg.reject()
+
+
+def test_lista_przerwanych_cofanie_w_toku_i_zapisany_z_bledem_pozycji(archiwum):
+    """Przerwane = `staged`, `undoing` albo `applied` z pozycją `failed`; `applied` bez `failed`
+    i `undone` - nie. „Dokończ” liczy pozycje wyłącznie przy `staged` (cofanie zapisu nie wznawia)."""
+    from horreum.gui.object_change_dialog import policz_plan
+    a = archiwum
+    fa, _ = a.fits(r"LIGHTS\NGC3034\RC6\OSC\NGC3034_a.fits", obj="NGC 3034", seed=1)
+    plan, _ = policz_plan(a.con, [fa], target=queries.object_target(a.con, "M 44"))
+    repo.stage_object_change(a.con, plan=plan, now=NOW)
+    run = plan.run_id
+
+    def stan(status, pozycja="pending"):
+        a.con.execute("UPDATE object_change_run SET status = ? WHERE run_id = ?", (status, run))
+        a.con.execute("UPDATE pending_object_change SET status = ? WHERE run_id = ?",
+                      (pozycja, run))
+        a.con.commit()
+        widok = queries.object_change_run_view(a.con, run)
+        return queries.interrupted_object_change_runs(a.con), widok["pending"], widok["can_finish"]
+    assert stan("undoing", "applied") == ([run], 0, False)
+    assert stan("applied", "failed") == ([run], 0, False)
+    assert stan("applied", "blocked") == ([], 0, False)
+    assert queries.object_change_run_view(a.con, "nie-ma") is None
 
 
 # ═══════════════════════════════════════════════ Dom: przeniesienie, nie przemianowanie

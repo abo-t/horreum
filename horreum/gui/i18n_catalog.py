@@ -5302,41 +5302,65 @@ CATALOG = {
                "other": "Aligning the files of {n} selected frames with the object they already "
                         "have."}},
     "objchg.explain_change": {
-        "pl": "Najpierw baza (obiekt z ręki), potem plik: przeniesienie do folderu obiektu z nazwą "
-              "ze wzoru „Nazw” i karta OBJECT w pliku - per plik razem albo wcale. „Cofnij” "
-              "przywraca karty, pliki, katalogi i obiekt, dopóki okno jest otwarte.",
+        "pl": "Najpierw baza (obiekt z ręki), potem plik: przeniesienie do folderu obiektu "
+              "i karta OBJECT w pliku - per plik razem albo wcale. „Cofnij” przywraca karty, "
+              "pliki, katalogi i obiekt, dopóki okno jest otwarte.",
         "en": "Database first (object set by hand), then the file: a move into the object folder "
-              "with the name from the “Names” pattern and the OBJECT card in the file - per file "
-              "together or not at all. “Undo” restores cards, files, folders and the object while "
-              "the window is open."},
+              "and the OBJECT card in the file - per file together or not at all. “Undo” "
+              "restores cards, files, folders and the object while the window is open."},
     "objchg.explain_align": {
-        "pl": "Obiekt w bazie zostaje. Plik jedzie do folderu swojego obiektu z nazwą ze wzoru "
-              "„Nazw”, a karta OBJECT dostaje jego formę - per plik razem albo wcale. „Cofnij” "
-              "działa, dopóki okno jest otwarte.",
-        "en": "The object in the database stays. The file moves into its object folder with the "
-              "name from the “Names” pattern and the OBJECT card gets the object form - per file "
-              "together or not at all. “Undo” works while the window is open."},
-    # Linijka wzoru nazwy - ta sama reguła co pasek „Nazwy” (D-1011-5 Q8), widoczna przed kliknięciem.
-    "objchg.template_line": {
-        "pl": "Nowe nazwy plików liczy wzór z paska „Nazwy”: {wzor} · data: {data}.",
-        "en": "New file names come from the “Names” bar pattern: {wzor} · date: {data}."},
-    "objchg.template_empty_bar": {
-        "pl": "Pasek „Nazwy” ma pusty wzór - nowe nazwy liczy wzór domyślny: {wzor} · data: {data}.",
-        "en": "The “Names” bar pattern is empty - new names come from the default pattern: {wzor}"
-              " · date: {data}."},
-    "objchg.template_default_note": {
-        "pl": " To wzór domyślny: KAŻDY plik z listy dostanie zupełnie nową nazwę (data na "
-              "początku, skrót danych na końcu) - inny wzór ustawisz w pasku „Nazwy”.",
-        "en": " This is the default pattern: EVERY file on the list gets a completely new name (date"
-              " first, data hash last) - set another pattern in the “Names” bar."},
-    "objchg.template_offset": {"pl": " ({offset:+d} h)", "en": " ({offset:+d} h)"},
-    "objchg.template_fallback": {"pl": ", druga data w zapasie",
-                                 "en": ", second date as a fallback"},
-    "objchg.template_fallback_forced": {
-        "pl": ", druga data w zapasie (pasek „Nazwy” ma go wyłączonego - zmiana obiektu bierze go "
-              "zawsze)",
-        "en": ", second date as a fallback (the “Names” bar has it off - the object change always "
-              "uses it)"},
+        "pl": "Obiekt w bazie zostaje. Plik jedzie do folderu swojego obiektu, a karta OBJECT "
+              "dostaje jego formę - per plik razem albo wcale. „Cofnij” działa, dopóki okno jest "
+              "otwarte.",
+        "en": "The object in the database stays. The file moves into its object folder and the "
+              "OBJECT card gets the object form - per file together or not at all. “Undo” works "
+              "while the window is open."},
+    # Reguła nazwy pliku (D-1011-6 `O2`) - widoczna przed kliknięciem, bo z listy folderów jej
+    # nie widać.
+    "objchg.name_rule": {
+        "pl": "Nazwa pliku: zmienia się wyłącznie człon obiektu na początku nazwy, reszta zostaje "
+              "znak w znak; nazwa, która obiektem się nie zaczyna (np. nazwa z aparatu), zostaje "
+              "cała. Pełne przemianowanie robi pasek „Nazwy”.",
+        "en": "File name: only the object part at the start of the name changes, the rest stays "
+              "exactly as it is; a name that does not start with the object (e.g. a camera name) "
+              "stays whole. A full rename is done by the “Names” bar."},
+    # Wejście z Porządków na przerwany przebieg (AR-121): okno bez planu, stan z bazy.
+    "objchg.head_resume_change": {
+        "pl": {"one": "Przerwany przebieg {run_id}: zmiana obiektu {n} klatki na {canon} - karta "
+                      "OBJECT: „{card}”.",
+               "few": "Przerwany przebieg {run_id}: zmiana obiektu {n} klatek na {canon} - karta "
+                      "OBJECT: „{card}”.",
+               "many": "Przerwany przebieg {run_id}: zmiana obiektu {n} klatek na {canon} - karta "
+                       "OBJECT: „{card}”."},
+        "en": {"one": "Interrupted run {run_id}: changing the object of {n} frame to {canon} - "
+                      "OBJECT card: “{card}”.",
+               "other": "Interrupted run {run_id}: changing the object of {n} frames to {canon} - "
+                        "OBJECT card: “{card}”."}},
+    "objchg.head_resume_align": {
+        "pl": {"one": "Przerwany przebieg {run_id}: uzgodnienie pliku {n} klatki z obiektem.",
+               "few": "Przerwany przebieg {run_id}: uzgodnienie plików {n} klatek z obiektem.",
+               "many": "Przerwany przebieg {run_id}: uzgodnienie plików {n} klatek z obiektem."},
+        "en": {"one": "Interrupted run {run_id}: aligning the file of {n} frame with its object.",
+               "other": "Interrupted run {run_id}: aligning the files of {n} frames with their "
+                        "object."}},
+    "objchg.explain_resume": {
+        "pl": "Stan pozycji z bazy. „Dokończ” zapisuje pozycje, które czekają; „Cofnij” przywraca "
+              "karty, pliki, katalogi i obiekt sprzed gestu.",
+        "en": "Item state from the database. “Finish” writes the items that are waiting; “Undo” "
+              "restores cards, files, folders and the object from before the gesture."},
+    "objchg.st.pending": {"pl": "czeka na zapis", "en": "waiting to be written"},
+    "objchg.st.pending_to": {"pl": "czeka na zapis → {path}", "en": "waiting to be written → {path}"},
+    "objchg.explain_resume_undoing": {
+        "pl": "Cofanie tego przebiegu zostało przerwane. „Cofnij” dokończy je od pierwszej "
+              "niedomkniętej pozycji - do stanu sprzed gestu.",
+        "en": "Undoing this run was interrupted. “Undo” finishes it from the first unfinished "
+              "item - back to the state before the gesture."},
+    "objchg.explain_resume_failed": {
+        "pl": "Przebieg ma pozycję w stanie częściowym - powód i drogę dalej mówi kolumna Status. "
+              "„Cofnij” cofa cały przebieg.",
+        "en": "The run has an item in a partial state - the Status column gives the reason and the "
+              "way forward. “Undo” reverts the whole run."},
+    "objchg.finish_btn_bare": {"pl": "Dokończ", "en": "Finish"},
     "objchg.col.old": {"pl": "Plik dziś", "en": "File now"},
     "objchg.col.new": {"pl": "Po zmianie", "en": "After the change"},
     "objchg.col.card": {"pl": "Karta OBJECT", "en": "OBJECT card"},
@@ -5486,6 +5510,16 @@ CATALOG = {
               "folderu obiektu, karta OBJECT dostanie jego formę - podgląd przed zapisem.",
         "en": "Gesture: select the frames in the view, right-click → “{align}”. The file moves "
               "into the object folder and the OBJECT card gets its form - preview before writing."},
+    # Wiersz przerwanych przebiegów gestu zmiany obiektu (AR-121) - otwiera okno na przebiegu.
+    "tasks.object_change_interrupted": {"pl": "Przerwane zmiany obiektu",
+                                        "en": "Interrupted object changes"},
+    "tasks.object_change_interrupted_tip": {
+        "pl": "„Zmień obiekt…” albo „Uzgodnij pliki…” nie doszło do końca (przerwanie, awaria "
+              "albo błąd pozycji). Klik otwiera najstarszy przebieg: „Dokończ” zapisze pozycje, "
+              "które czekają, „Cofnij” wróci do stanu sprzed gestu.",
+        "en": "“Change object…” or “Align files…” did not finish (interrupted, crashed or an item "
+              "failed). A click opens the oldest run: “Finish” writes the items that are waiting, "
+              "“Undo” returns to the state before the gesture."},
     "perspective.file_object_mismatch": {"pl": "Plik nie zgadza się z obiektem",
                                          "en": "File disagrees with its object"},
     "grid.criteria.only_file_object_mismatch": {

@@ -53,6 +53,9 @@ from horreum.gui.rows import TwoPartDelegate
 # i działa z zaznaczenia jednej klatki. Do tej zmiany liczba istniała wyłącznie w raporcie etapu
 # Dostawy, a droga od niej do konkretnego obrazu wiodła przez przeklikanie całego archiwum stosów.
 _PAGE_LIST, _PAGE_TELESCOPE, _PAGE_OBSERVATORY, _PAGE_OBJECTS = range(4)
+# Cel wiersza, który nie jest ani podstroną (int), ani perspektywą (nazwa presetu): okno na
+# przebiegu gestu zmiany obiektu - sygnał `open_object_change_run` z `run_id` (AR-121).
+_OKNO_PRZEBIEGU = ("okno", "object_change_run")
 # Szarość wierszy BEZ roboty: pozycje informacyjne (zawsze) i akcyjne z n=0 (wiz F5 #6 — „nic do
 # zrobienia" ma być widać bez czytania liczby). Akcyjne z n=0 zostają KLIKALNE: podstrona osi to
 # jedyna droga do niej po przemontowaniu nawigacji.
@@ -94,6 +97,13 @@ _TASKS = [
     # (`queries.file_object_mismatch_frame_ids`, licznik w `_liczniki_osi`).
     ("file_object_mismatch_frames", "tasks.file_object_mismatch_frames",
      PRESET_FILE_OBJECT_MISMATCH),
+    # Wiersz AKCYJNY i ROBOTA (AR-121) - liczy PRZEBIEGI, nie klatki: gest „Zmień obiekt…” albo
+    # „Uzgodnij pliki…”, który nie doszedł do końca (przerwanie, awaria procesu, pozycja w stanie
+    # częściowym). Do tego wiersza drogą powrotu po zamknięciu okna było wyłącznie CLI z numerem
+    # przebiegu ze zdania wyniku. Klik otwiera okno na najstarszym przebiegu (`_OKNO_PRZEBIEGU`
+    # - gospodarz woła Zbiory, które trzymają mutex zapisu); liczba i wejście czytają jeden
+    # predykat (`queries.interrupted_object_change_runs`, licznik w `_liczniki_osi`).
+    ("object_change_interrupted", "tasks.object_change_interrupted", _OKNO_PRZEBIEGU),
     ("stacks_lineage_pending", "tasks.stacks_lineage", PRESET_LINEAGE),
     # Dwa wiersze AKCYJNE i ROBOTA (AR-59) - liczą KLATKI, które czekają na gest ręki na osi
     # sprzętu i na osi stanowiska. Do tej zmiany gesty istniały, ale prowadziły do nich wiersze
@@ -217,6 +227,8 @@ def _liczniki_osi(con):
         obecnych kopiach (`macro`, D-W1), więc ręka na klatce z rozjazdem kopii to ten gest.
       * `file_object_mismatch_frames` = `queries.file_object_mismatch_frame_ids` (AR-17 krok 3) -
         ten sam predykat, który przycina perspektywę pod klikiem (lista = liczba).
+      * `object_change_interrupted` = przebiegi z `queries.interrupted_object_change_runs`
+        (AR-121) - ta sama lista, z której klik bierze przebieg do okna.
 
     Pomiar 2026-10-06 na kopii żywej bazy: 423 bez zestawu (422 light RAW bez TELESCOP w EXIF,
     1 `unknown` XISF), 1223 bez stanowiska, 0 zatrzymanych faktów."""
@@ -227,6 +239,7 @@ def _liczniki_osi(con):
         "object_kept_frames": len(supersede.kept_object_facts(con)),
         "copy_conflict_open": len(niezgodne - queries.hand_testimony_frame_ids(con, niezgodne)),
         "file_object_mismatch_frames": len(queries.file_object_mismatch_frame_ids(con)),
+        "object_change_interrupted": len(queries.interrupted_object_change_runs(con)),
     }
 
 
@@ -246,6 +259,8 @@ _PODPOWIEDZI_OSI = {
     # AR-17 krok 3: „Uzgodnij pliki…" mieszka w menu prawego kliku perspektywy.
     "file_object_mismatch_frames": ("tasks.file_object_mismatch_tip",
                                     {"align": "grid.sel.object_change_align"}),
+    # AR-121: klik otwiera okno przebiegu - podpowiedź mówi, co tam czeka.
+    "object_change_interrupted": ("tasks.object_change_interrupted_tip", {}),
 }
 
 # WIERSZE, KTÓRYCH ZERO JEST WIEDZĄ DOPIERO PO ZEBRANIU FAKTÓW KOPII (0021). Oba predykaty porównują
@@ -282,6 +297,7 @@ class TasksView(QWidget):
 
     open_collection = Signal(str)   # nazwa perspektywy Zbiorów (gospodarz przełącza widok)
     open_intake = Signal()          # klik w wiersz „?" - robota czeka w Dostawie (AR-28 (b))
+    open_object_change_run = Signal(str)   # `run_id` przerwanego przebiegu (AR-121) - okno w Zbiorach
     counts_changed = Signal(int)    # badge sidebara: liczba pozycji AKCYJNYCH z n>0
 
     def __init__(self, con, now_fn=_utc_now_iso, parent=None):
@@ -472,6 +488,13 @@ class TasksView(QWidget):
             self.open_intake.emit()
             return
         action = next(a for k, _, a in _TASKS if k == key)
+        if action == _OKNO_PRZEBIEGU:
+            # Najstarszy przerwany przebieg; przy zerze klik niczego nie otwiera (okno bez
+            # przebiegu nie ma czego pokazać), a wiersz jest szary.
+            przebiegi = queries.interrupted_object_change_runs(self.con)
+            if przebiegi:
+                self.open_object_change_run.emit(przebiegi[0])
+            return
         if isinstance(action, int):
             self.pages.setCurrentIndex(action)         # podstrona osi
             if key in _KUBELEK_PODSTRONY:

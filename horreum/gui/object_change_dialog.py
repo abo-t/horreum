@@ -1,14 +1,19 @@
 r"""Okno „Zmień obiekt…” i „Uzgodnij pliki…” - podgląd i wykonanie gestu zmiany obiektu RAZEM
 z plikiem (AR-17 krok 3, decyzja `D-1011-5`).
 
-JEDNO OKNO, DWA WEJŚCIA, JEDEN SILNIK. „Zmień obiekt…” (Zbiory → Obiekt ▾) niesie cel
+JEDNO OKNO, TRZY WEJŚCIA, JEDEN SILNIK. „Zmień obiekt…” (Zbiory → Obiekt ▾) niesie cel
 (`object_change.ObjectTarget`): baza dostaje nowy obiekt ręką, plik jedzie do folderu nowego
 obiektu, a karta `OBJECT` dostaje jego formę. „Uzgodnij pliki…” (Porządki → perspektywa „Plik nie
 zgadza się z obiektem”) idzie z `target=None`: obiekt w bazie zostaje, plik dogania ten, który
 klatka już ma. Plan liczy Qt-wolny `object_change.plan_object_change` nad read-modelem
 `queries.object_change_rows`; okno pokazuje DOKŁADNIE ten plan i ten sam obiekt idzie do stagingu
 (`repo.stage_object_change`) - podgląd nie jest drugą regułą, tylko tym samym zdaniem
-powiedzianym przed kliknięciem.
+powiedzianym przed kliknięciem. Trzecie wejście (`run_id`, Porządki → „Przerwane zmiany obiektu”,
+AR-121) otwiera okno na przebiegu z bazy (`queries.object_change_run_view`) bez planu: lista ze
+stanem pozycji, „Dokończ (N)” i „Cofnij” - te same operacje uchwytu co po przerwaniu w oknie.
+
+NAZWA PLIKU (D-1011-6 `O2`): zmienia się wyłącznie człon obiektu na początku nazwy, reszta zostaje
+znak w znak - okno mówi tę regułę jedną linijką, bo z listy folderów jej nie widać.
 
 PLAN POZA WĄTKIEM OKNA. Planer czyta dysk (czy cel istnieje, jaką pisownię ma istniejący katalog -
 `R:` nie rozróżnia wielkości liter, baza tak), a dysk bywa udziałem SMB: kilkaset pytań o katalogi
@@ -37,7 +42,7 @@ from PySide6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QVBoxLayout,
 )
 
-from horreum import db, naming, object_change, repo, resolver
+from horreum import db, object_change, repo, resolver
 from horreum.gui import i18n, queries
 
 # Kolumny listy pozycji: plik dziś, plik po zmianie, karta `OBJECT` stara → nowa i - po biegu
@@ -51,50 +56,28 @@ _POMINIECIA_MAX_PX = 150
 # Rozmiar startowy okna. Szerokość z zapasem pod kanon 1920 logicznych; resztę dają suwaki
 # i elizja, nie rozpychanie.
 _START_W, _START_H = 1100, 640
-# ZDANIA RDZENIA, PO KTÓRYCH OKNO ROZPOZNAJE STAN - rdzeń nie niesie kodu, tylko zdanie dla
-# człowieka, więc dyskryminatorem jest jego stały początek albo fragment; każdy pinuje test na
-# PRAWDZIWYM rdzeniu (planer, pisarz w miejscu), żeby zmiana zdania po tamtej stronie nie przeszła
-# cicho. Pominięcie planu „bez zmian” nie jest odmową, tylko pozycją, która nic nie zmienia; blokada
-# „zmienił się od ostatniego skanu” ma drogę wyjścia (skan w Dostawie, potem ponowny gest).
-_POMINIECIE_BEZ_ZMIAN = "bez zmian"
-_ZMIENIONY_OD_SKANU = "zmienił się od ostatniego skanu"
+# Status pozycji przebiegu z bazy (wejście z Porządków) → klucz katalogu: ta sama mowa co po biegu.
+_STATUS_POZYCJI = {"pending": "objchg.st.pending", "applied": "objchg.st.done",
+                   "blocked": "objchg.st.blocked", "failed": "objchg.st.failed",
+                   "skipped": "objchg.st.skipped", "undone": "objchg.st.undone"}
 # Rozszerzenie XISF: zapis karty w miejscu umie tam także DOPISAĆ kartę; FITS w miejscu wyłącznie
 # podmienia istniejącą (`writeback._fits_inplace_plan`), więc dopisanie przepisuje cały plik.
 _XISF = ".xisf"
 
 
-def policz_plan(con, frame_ids, *, target, template, date_source, offset_hours):
+def policz_plan(con, frame_ids, *, target):
     """Plan gestu dla `frame_ids` → `(ObjectChangePlan, korzeń archiwum | None)`. ZERO ZAPISU.
 
     Jeden rachunek dla wątku tła i trybu inline: read-model (`queries.object_change_rows`), korzeń
     archiwum (`resolver.library_root_from_db` - kotwica pozycji obiektu w ścieżce), indeks lokacji
     bazy (`queries.location_lookup` - kolizja celu z inną lokacją) i Qt-wolny planer. Read-model
     dostaje cel, bo forma karty i bramka karty zależą od kanonu celu (przy „Uzgodnij" - od
-    bieżącego). Nazwa idzie TĄ SAMĄ regułą co pasek „Nazwy" (D-1011-5 Q8): wzór, źródło daty
-    i przesunięcie godzin z jego polityki. Korzeń wraca razem z planem, bo okno skraca nim ścieżki."""
+    bieżącego). Korzeń wraca razem z planem, bo okno skraca nim ścieżki."""
     korzen = resolver.library_root_from_db(con)
     rows = queries.object_change_rows(con, list(frame_ids), target=target)
     plan = object_change.plan_object_change(
-        rows, target=target, template=template, library_root=korzen,
-        location_at=queries.location_lookup(con), date_source=date_source,
-        offset_hours=offset_hours)
+        rows, target=target, library_root=korzen, location_at=queries.location_lookup(con))
     return plan, korzen
-
-
-def opis_wzoru(template):
-    """Wzór nazwy jedną linijką: `object · datetime · folder(n=2)` - tokeny w kolejności, argumenty
-    w nawiasie; wzór per typ pliku (dict) - każdy typ osobno. Okno pokazuje go PRZED kliknięciem,
-    bo to on decyduje, czy przenoszony plik zachowa nazwę, czy dostanie zupełnie nową."""
-    if isinstance(template, dict):
-        return " | ".join(f"{typ}: {opis_wzoru(specs)}" for typ, specs in template.items())
-    czlony = []
-    for spec in template:
-        if isinstance(spec, str):
-            czlony.append(spec)
-            continue
-        args = ", ".join(f"{k}={v}" for k, v in spec.items() if k != "t")
-        czlony.append(f"{spec.get('t')}({args})" if args else str(spec.get("t")))
-    return " · ".join(czlony)
 
 
 class PlanWorker(QObject):
@@ -106,14 +89,13 @@ class PlanWorker(QObject):
     failed = Signal(int, str)           # (generacja, komunikat)
     finished = Signal()
 
-    def __init__(self, db_path, gen, *, frame_ids, target, nazwy, con=None):
+    def __init__(self, db_path, gen, *, frame_ids, target, con=None):
         super().__init__()
         self._db_path = db_path
         self._con = con
         self._gen = gen
         self._frame_ids = list(frame_ids)
         self._target = target
-        self._nazwy = dict(nazwy)       # template, date_source, offset_hours - polityka „Nazw”
 
     @Slot()
     def run(self):
@@ -128,7 +110,7 @@ class PlanWorker(QObject):
         own = bool(self._db_path)
         con = db.connect(self._db_path) if own else self._con
         try:
-            return policz_plan(con, self._frame_ids, target=self._target, **self._nazwy)
+            return policz_plan(con, self._frame_ids, target=self._target)
         finally:
             if own:
                 con.close()
@@ -161,15 +143,16 @@ def inny_katalog(item):
 
 def bez_zmian(skip):
     """Pominięcie planu, które jest pozycją BEZ ZMIAN (plik w folderze obiektu, nazwa i karta zgodne),
-    a nie odmową - liczy się w „bez zmian”, nie w „pominie”."""
-    return skip.reason.startswith(_POMINIECIE_BEZ_ZMIAN)
+    a nie odmową - liczy się w „bez zmian”, nie w „pominie”. Rozpoznane po kodzie planera."""
+    return skip.code == object_change.SKIP_UNCHANGED
 
 
 def liczby_planu(plan):
     """Liczby podglądu z planu - te same, które padną na przycisku i w zdaniu przed zapisem.
-    Przeniesienie liczy się osobno do innego folderu i jako nowa nazwa w tym samym folderze (wzór
-    „Nazw” zmienia nazwę także plikom, które folderu nie zmieniają). Katalogi liczone RAZ na ścieżkę
-    (kilka plików jedzie do jednego nowego folderu), bez wielkości liter, bo `R:` jej nie rozróżnia."""
+    Przeniesienie liczy się osobno do innego folderu i jako nowa nazwa w tym samym folderze (człon
+    obiektu w nazwie zmienia się także plikowi, który folderu nie zmienia - stos stoi w folderze
+    obiektu pod starą nazwą). Katalogi liczone RAZ na ścieżkę (kilka plików jedzie do jednego
+    nowego folderu), bez wielkości liter, bo `R:` jej nie rozróżnia."""
     items = plan.items
     bez = sum(1 for s in plan.skipped if bez_zmian(s))
     return {
@@ -200,13 +183,14 @@ def zdanie_wyniku_zmiany(res, *, cofniecie=False):
       * numer przebiegu - po zamknięciu okna jedyny uchwyt do dokończenia albo cofnięcia
         (`horreum object-change finish|undo DB RUN_ID`), jak `commit_id` w oknach kart;
       * ostrzeżenia rdzenia."""
-    from horreum.gui.wb_worker import (    # lazy: `wb_worker` ciągnie astropy
-        bez_prefiksu_spadku, PREFIKS_SPADKU, zdanie_wyniku_zapisu)
+    from horreum import writeback          # lazy: `writeback` i `wb_worker` ciągną astropy
+    from horreum.gui.wb_worker import (
+        bez_prefiksu_spadku, spadek_na_droge_atomowa, zdanie_wyniku_zapisu)
     msg = (zdanie_wyniku_zapisu(res, "objchg.res.undone") if cofniecie
            else zdanie_wyniku_zapisu(res, "objchg.res.applied"))
     z_powodem = [fr for fr in res.applied if fr.reason]
     atomowe = ([] if cofniecie
-               else [fr for fr in z_powodem if fr.reason.startswith(PREFIKS_SPADKU)])
+               else [fr for fr in z_powodem if spadek_na_droge_atomowa(fr)])
     uwagi = [fr for fr in z_powodem if fr not in atomowe]
     if atomowe:
         msg += i18n.t("wb.inplace_fallback", n=len(atomowe),
@@ -217,7 +201,7 @@ def zdanie_wyniku_zmiany(res, *, cofniecie=False):
         msg += i18n.t("objchg.res.dirs", created=res.dirs_created, removed=res.dirs_removed)
     if res.dirs_uncertain:
         msg += i18n.t_plural("objchg.res.dirs_uncertain", res.dirs_uncertain)
-    od_skanu = sum(1 for fr in res.blocked if _ZMIENIONY_OD_SKANU in (fr.reason or ""))
+    od_skanu = sum(1 for fr in res.blocked if fr.code == writeback.CODE_CHANGED_SINCE_SCAN)
     if od_skanu:
         msg += i18n.t_plural("objchg.res.rescan", od_skanu)
     if res.cancelled:
@@ -237,23 +221,12 @@ def ruszyl_cokolwiek(res):
                 or res.dirs_created > res.dirs_removed)
 
 
-def oczekujace_pozycje(con, run_id):
-    """Ile pozycji przebiegu wciąż czeka na zapis (`pending_object_change.status = 'pending'`) -
-    po wyjątku workera okno nie wie, dokąd sterownik doszedł, a „Dokończ (N)” ma liczyć prawdę."""
-    return con.execute("SELECT COUNT(*) FROM pending_object_change "
-                       "WHERE run_id = ? AND status = 'pending'", (run_id,)).fetchone()[0]
-
-
 class ObjectChangeDialog(QDialog):
     """Podgląd i wykonanie gestu zmiany obiektu (`target`) albo uzgodnienia plików (`target=None`)
-    na klatkach `frame_ids`.
-
-    NAZWA TĄ SAMĄ REGUŁĄ CO „NAZWY” (D-1011-5 Q8): `template` (wzór, lista specyfikacji `naming`),
-    `date_source`, `offset_hours` i `fallback` (drugie źródło daty w zapasie) - polityka paska
-    „Nazwy”. `wzor_z_paska` = wzór przyszedł z paska (False: pasek miał pusty wzór i wołający
-    podstawił `naming.DEFAULT_TEMPLATE`). Okno pokazuje wzór jedną linijką przed kliknięciem, a przy
-    wzorze domyślnym mówi wprost, że KAŻDY plik z listy dostanie zupełnie nową nazwę - to skutek,
-    którego nie widać z samej listy folderów.
+    na klatkach `frame_ids` - albo (`run_id`) wznowienie przerwanego przebiegu z bazy: wtedy cel
+    i klatki bierze z przebiegu (`queries.object_change_run_view`), a `frame_ids`/`target` nie
+    przychodzą. Przebieg, którego nie ma, to błąd wołającego (EXPECT) - wiersz Porządków liczy
+    z tej samej bazy.
 
     Enter NIE uruchamia gestu: przyciskiem domyślnym jest „Zamknij” (zapis do plików idzie wyłącznie
     świadomym kliknięciem).
@@ -269,21 +242,25 @@ class ObjectChangeDialog(QDialog):
     changed = Signal()
     busy_changed = Signal(bool)
 
-    def __init__(self, con, *, frame_ids, target, template, date_source, offset_hours, fallback,
-                 wzor_z_paska, now_fn, db_path=None, off_thread=True, parent=None):
+    def __init__(self, con, *, frame_ids=None, target=None, run_id=None, now_fn, db_path=None,
+                 off_thread=True, parent=None):
         super().__init__(parent)
         # Lazy jak w oknach kart: `wb_worker` ciągnie `writeback` → astropy.
         from horreum.gui.wb_worker import WritebackRunner
 
+        przebieg = None
+        if run_id is not None:
+            assert frame_ids is None and target is None, (
+                "wznowienie przebiegu bierze klatki i cel z bazy, nie od wołającego")
+            przebieg = queries.object_change_run_view(con, run_id)
+            assert przebieg is not None, f"brak przebiegu zmiany obiektu {run_id!r}"
+            frame_ids, target = przebieg["frame_ids"], przebieg["target"]
         assert target is None or target.card_form is not None, (
             "cel bez formy karty OBJECT - gest odmawia go przed planem (wołający)")
         self.con = con
         self._frame_ids = list(frame_ids)
         self._target = target
-        self._nazwy = {"template": template, "date_source": date_source,
-                       "offset_hours": offset_hours}
-        self._fallback = bool(fallback)
-        self._wzor_z_paska = wzor_z_paska
+        self._przebieg = przebieg        # wejście z Porządków: przebieg z bazy, bez planu
         self._zamknij_po_planie = None   # wynik zamknięcia odłożony do końca planu w biegu
         self._now = now_fn
         self._db_path = db_path if db_path is not None else queries.db_path_of(con)
@@ -297,6 +274,14 @@ class ObjectChangeDialog(QDialog):
         self._do_cofniecia = False   # przebieg coś zmienił, a cofnięcie jeszcze nie przeszło
         self._domkniety = False      # plan wykonany - drugi zapis nie ma czego robić do „Cofnij”
         self._pozostalo = 0          # pozycje nieprzetworzone po przerwaniu (droga „Dokończ”)
+        # Przebieg `staged` do domknięcia - „Dokończ” także przy zerze czekających (awaria po
+        # ostatniej pozycji, przed domknięciem przebiegu: `can_finish` read-modelu).
+        self._dokonczenie = False
+        # Stan przerwanego przebiegu, o którym mówi nagłówek i opis okna z Porządków: `staged`
+        # (zapis do dokończenia), `undoing` (cofanie przerwane), `failed` (pozycja z błędem) albo
+        # None (przebieg domknięty albo okno liczy nowy plan) - `_opisz_stan`.
+        self._stan_przebiegu = None
+        self._status_wiersza = {}    # location_id → ostatni status wiersza (z bazy albo z biegu)
         self._w_biegu = 0            # z iloma pozycjami ruszył ostatni bieg zapisu
         # LISTA PO BIEGU MÓWI O WYNIKU, NIE O PLANIE: `_wynik_na_liscie` = lista pokazuje wynik
         # zapisu albo cofnięcia (status per wiersz), a nowy plan liczy się dopiero na prośbę
@@ -317,30 +302,33 @@ class ObjectChangeDialog(QDialog):
                             else i18n.t("objchg.title_align"))
         self._build_ui()
         self.resize(_START_W, _START_H)
-        self._licz_plan()
+        if przebieg is not None:
+            self._wczytaj_przebieg(przebieg)
+        else:
+            self._licz_plan()
+
+    @property
+    def frame_ids(self):
+        """Klatki okna - z zaznaczenia albo (wejście z Porządków) z przebiegu w bazie."""
+        return tuple(self._frame_ids)
 
     # ---------------------------------------------------------------- budowa UI
     def _build_ui(self):
         lay = QVBoxLayout(self)
-        n = len(self._frame_ids)
-        if self._target is not None:
-            head = i18n.t_plural("objchg.head_change", n, canon=self._target.canon,
-                                 card=self._target.card_form)
-        else:
-            head = i18n.t_plural("objchg.head_align", n)
-        self.head = QLabel(head)
+        self.head = QLabel("")
         self.head.setWordWrap(True)
         lay.addWidget(self.head)
-        opis = QLabel(i18n.t("objchg.explain_change") if self._target is not None
-                      else i18n.t("objchg.explain_align"))
-        opis.setWordWrap(True)
-        opis.setProperty("role", "secondary")
-        lay.addWidget(opis)
-        self.template_line = QLabel(self._zdanie_wzoru())
-        self.template_line.setWordWrap(True)
-        if self._wzor_domyslny():
-            self.template_line.setProperty("role", "warn")
-        lay.addWidget(self.template_line)
+        self.opis = QLabel("")
+        self.opis.setWordWrap(True)
+        self.opis.setProperty("role", "secondary")
+        lay.addWidget(self.opis)
+        self._opisz_stan()
+        # Reguła nazwy (D-1011-6 `O2`) - z listy folderów jej nie widać, a decyduje, czy nazwa
+        # pliku się zmieni.
+        self.name_rule = QLabel(i18n.t("objchg.name_rule"))
+        self.name_rule.setWordWrap(True)
+        self.name_rule.setProperty("role", "secondary")
+        lay.addWidget(self.name_rule)
 
         self.items_tree = QTreeWidget()
         self.items_tree.setColumnCount(4)
@@ -433,33 +421,31 @@ class ObjectChangeDialog(QDialog):
                         i18n.t("objchg.col.card"), i18n.t("objchg.col.status")]
         self.items_tree.setHeaderLabels(etykiety)
 
-    def _wzor_domyslny(self):
-        """Czy nazwy liczy wzór domyślny `naming` - podstawiony za pusty pasek albo taki sam."""
-        return (not self._wzor_z_paska
-                or list(self._nazwy["template"]) == list(naming.DEFAULT_TEMPLATE))
-
-    def _zdanie_wzoru(self):
-        """Jedna linijka: którym wzorem i jaką datą powstaną nowe nazwy i skąd ten wzór jest; przy
-        wzorze domyślnym - skutek wprost (każdy plik z listy dostaje nową nazwę).
-
-        Drugie źródło daty w zapasie: planer bierze je dziś ZAWSZE (`plan_object_change` woła silnik
-        „Nazw” z zapasem na sztywno), więc linijka mówi to, co planer zrobi - także wtedy, gdy pasek
-        ma zapas wyłączony (wtedy wprost, że gest go i tak bierze)."""
-        n = self._nazwy
-        data = ("DATE-OBS" if n["date_source"] == "date_obs"
-                else i18n.t("grid.rename.src_filename"))
-        if n["offset_hours"]:
-            data += i18n.t("objchg.template_offset", offset=int(n["offset_hours"]))
-        data += (i18n.t("objchg.template_fallback") if self._fallback
-                 else i18n.t("objchg.template_fallback_forced"))
-        wzor = opis_wzoru(n["template"])
-        if self._wzor_z_paska:
-            zdanie = i18n.t("objchg.template_line", wzor=wzor, data=data)
+    def _opisz_stan(self):
+        """Nagłówek i opis okna mówią o tym, co zrobią przyciski TERAZ (wizytacja W1/W2): przerwany
+        przebieg z Porządków ma nagłówek „Przerwany przebieg…” i opis drogi wyjścia ze swojego
+        stanu (`staged` - „Dokończ” albo „Cofnij”, `undoing` - „Cofnij” dokończy cofanie, `failed` -
+        „Cofnij” cofa cały przebieg); przebieg domknięty albo nowy plan na tych klatkach - zwykły
+        nagłówek gestu. Wołane z `_sync_akcji`, więc nadąża za każdym biegiem i planem."""
+        n = len(self._frame_ids)
+        if self._stan_przebiegu is not None:
+            run_id = self._przebieg["run_id"]
+            head = (i18n.t_plural("objchg.head_resume_change", n, run_id=run_id,
+                                  canon=self._target.canon, card=self._target.card_form)
+                    if self._target is not None
+                    else i18n.t_plural("objchg.head_resume_align", n, run_id=run_id))
+            opis = i18n.t({"staged": "objchg.explain_resume",
+                           "undoing": "objchg.explain_resume_undoing",
+                           "failed": "objchg.explain_resume_failed"}[self._stan_przebiegu])
+        elif self._target is not None:
+            head = i18n.t_plural("objchg.head_change", n, canon=self._target.canon,
+                                 card=self._target.card_form)
+            opis = i18n.t("objchg.explain_change")
         else:
-            zdanie = i18n.t("objchg.template_empty_bar", wzor=wzor, data=data)
-        if self._wzor_domyslny():
-            zdanie += i18n.t("objchg.template_default_note")
-        return zdanie
+            head = i18n.t_plural("objchg.head_align", n)
+            opis = i18n.t("objchg.explain_align")
+        self.head.setText(head)
+        self.opis.setText(opis)
 
     # ---------------------------------------------------------------- plan (wątek tła albo inline)
     def _licz_plan(self):
@@ -468,12 +454,13 @@ class ObjectChangeDialog(QDialog):
         self._gen += 1
         self._plan = None
         self._wynik_na_liscie = False
+        self._stan_przebiegu = None        # nowy plan na tych klatkach - nie przebieg z Porządków
         self.error.clear()
         # Faza planu w wierszu LICZB, nie w zdaniu wyniku: plan po cofnięciu liczy się, gdy zdanie
         # cofnięcia ma jeszcze stać - liczby i tak zastąpi wynik planu.
         self.counts.setText(i18n.t("objchg.planning"))
         worker = PlanWorker(self._db_path, self._gen, frame_ids=self._frame_ids,
-                            target=self._target, nazwy=self._nazwy,
+                            target=self._target,
                             con=None if (self._off_thread and self._db_path) else self.con)
         worker.done.connect(self._on_plan_done)
         worker.failed.connect(self._on_plan_failed)
@@ -530,12 +517,14 @@ class ObjectChangeDialog(QDialog):
         self._naglowki(po_biegu=False)
         self.items_tree.setColumnHidden(_COL_STATUS, True)
         self._wiersze = {}
+        self._status_wiersza = {}       # nowy plan: wiersze bez historii biegu
         self._jest = {it.location_id: it.old_path for it in plan.items}
         for it in plan.items:
             stara = sciezka_pod_korzeniem(it.old_path, self._korzen)
             nowa = (sciezka_pod_korzeniem(it.new_path, self._korzen) if it.new_path
                     else i18n.t("objchg.no_move"))
-            w = QTreeWidgetItem([stara, nowa, self._tekst_karty(it)])
+            w = QTreeWidgetItem([stara, nowa, self._tekst_karty(it.card_op, it.card_old,
+                                                                it.card_new, it.old_path)])
             w.setToolTip(_COL_STARA, it.old_path)
             w.setToolTip(_COL_NOWA, it.new_path or i18n.t("objchg.no_move"))
             if it.mkdirs:
@@ -574,13 +563,59 @@ class ObjectChangeDialog(QDialog):
                                if plan.rmdirs else "")
         self.counts.setVisible(True)
 
+    def _wczytaj_przebieg(self, przebieg):
+        """Wejście z Porządków (AR-121): lista z bazy w mowie listy po biegu - „Było” = ścieżka
+        z podglądu, „Jest” = gdzie lokacja stoi teraz, status pozycji z powodem; karta = wpis
+        stagingu tego przebiegu (pozycja bez wpisu kartą nie płaciła - kolumna milczy); pozycja
+        czekająca mówi, DOKĄD pojedzie plik - na tym człowiek decyduje o zapisie. Stan akcji jak po
+        przerwanym biegu w oknie: „Dokończ” przy przebiegu `staged` (z liczbą czekających, także
+        przy zerze), „Cofnij” cofa cały przebieg. Planu nie ma - świeży liczy się dopiero po
+        pełnym cofnięciu („Policz plan ponownie”, na klatkach przebiegu)."""
+        self._run_id = przebieg["run_id"]
+        self._pozostalo = przebieg["pending"]
+        self._dokonczenie = przebieg["can_finish"]
+        self._stan_przebiegu = {"staged": "staged", "undoing": "undoing"}.get(przebieg["status"],
+                                                                              "failed")
+        self._do_cofniecia = True
+        self._domkniety = True
+        self._wynik_na_liscie = True
+        self._korzen = resolver.library_root_from_db(self.con)
+        self._naglowki(po_biegu=True)
+        self.items_tree.setColumnHidden(_COL_STATUS, False)
+        for it in przebieg["items"]:
+            if it["status"] == "pending" and it["new_path"]:
+                status = i18n.t("objchg.st.pending_to",
+                                path=sciezka_pod_korzeniem(it["new_path"], self._korzen))
+            else:
+                status = i18n.t(_STATUS_POZYCJI[it["status"]])
+            if it["reason"]:
+                status += i18n.t("objchg.st.reason", reason=it["reason"])
+            self._status_wiersza[it["location_id"]] = status
+            karta = (self._tekst_karty(it["card_op"], it["card_old"], it["card_new"],
+                                       it["old_path"]) if it["card_op"] else "")
+            w = QTreeWidgetItem([sciezka_pod_korzeniem(it["old_path"], self._korzen),
+                                 sciezka_pod_korzeniem(it["path"], self._korzen), karta, status])
+            w.setToolTip(_COL_STARA, it["old_path"])
+            w.setToolTip(_COL_NOWA, it["path"])
+            w.setToolTip(_COL_STATUS, status)
+            w.setData(_COL_STARA, Qt.UserRole, it["frame_id"])
+            self.items_tree.addTopLevelItem(w)
+            self._wiersze[it["location_id"]] = w
+            self._jest[it["location_id"]] = it["path"]
+        self.counts.setVisible(False)
+        self.status.setText(i18n.t("objchg.res.run", run_id=self._run_id).lstrip(" ·"))
+        self._sync_akcji()
+
     def _pokaz_wynik(self, res, *, cofniecie):
         """Wynik biegu (`ObjectChangeResult`) na liście: „Było” = gdzie plik stał przed biegiem,
         „Jest” = gdzie stoi po nim (ścieżka z wyniku rdzenia), „Status” = co się stało z pozycją
         i dlaczego. Dopasowanie po `location_id` - jedyna tożsamość pozycji wspólna dla planu
-        i wyniku. Pozycja, której wynik nie zna (bieg przerwany przed nią), jest „nie ruszona”.
-        Liczby podglądu mówiły w czasie przyszłym, więc po biegu chowają się (czas przeszły niesie
-        zdanie wyniku), a nagłówek pominięć przechodzi w czas przeszły."""
+        i wyniku. Pozycja, której wynik nie zna, zachowuje swój ostatni status: „Dokończ” niesie
+        w wyniku wyłącznie pozycje, które czekały, a te zapisane przed przerwaniem (poprzedni bieg
+        albo przebieg z Porządków) „nie ruszonymi” nie są (bramka, kimi). „Nie ruszona” zostaje
+        dla pozycji bez historii - bieg przerwany przed nią. Liczby podglądu mówiły w czasie
+        przyszłym, więc po biegu chowają się (czas przeszły niesie zdanie wyniku), a nagłówek
+        pominięć przechodzi w czas przeszły."""
         if cofniecie:
             statusy = {"applied": "objchg.st.undone", "blocked": "objchg.st.blocked",
                        "failed": "objchg.st.failed", "skipped": "objchg.st.skipped"}
@@ -597,9 +632,13 @@ class ObjectChangeDialog(QDialog):
             klucz, fr = wyniki.get(lid, (None, None))
             jest = (fr.path or bylo) if fr is not None else bylo
             self._jest[lid] = jest
-            status = i18n.t(statusy[klucz]) if klucz else i18n.t("objchg.st.untouched")
-            if fr is not None and fr.reason:
-                status += i18n.t("objchg.st.reason", reason=fr.reason)
+            if klucz:
+                status = i18n.t(statusy[klucz])
+                if fr.reason:
+                    status += i18n.t("objchg.st.reason", reason=fr.reason)
+            else:
+                status = self._status_wiersza.get(lid) or i18n.t("objchg.st.untouched")
+            self._status_wiersza[lid] = status
             w.setText(_COL_STARA, sciezka_pod_korzeniem(bylo, self._korzen))
             w.setToolTip(_COL_STARA, bylo)
             w.setText(_COL_NOWA, sciezka_pod_korzeniem(jest, self._korzen))
@@ -625,17 +664,17 @@ class ObjectChangeDialog(QDialog):
         t.setFixedHeight(min(_POMINIECIA_MAX_PX, h))
 
     @staticmethod
-    def _tekst_karty(it):
+    def _tekst_karty(card_op, card_old, card_new, path):
         """Karta `OBJECT` pozycji: stara → nowa, albo stan bez zmiany (karta już w formie albo
         format bez karty - RAW). DOPISANIE karty do FITS jest oznaczone: zapis w miejscu umie
         w FITS wyłącznie podmienić istniejącą kartę, więc ten plik rdzeń przepisze w całości (droga
         atomowa) - człowiek ma to wiedzieć przed kliknięciem, nie dopiero ze zdania wyniku."""
-        if it.card_op is None:
-            return (i18n.t("objchg.card_kept", value=repr(it.card_old)) if it.card_old
+        if card_op is None:
+            return (i18n.t("objchg.card_kept", value=repr(card_old)) if card_old
                     else i18n.t("objchg.card_none"))
-        stara = repr(it.card_old) if it.card_old is not None else i18n.t("objchg.card_absent")
-        tekst = i18n.t("objchg.card_change", old=stara, new=repr(it.card_new))
-        if it.card_op == "add" and not it.old_path.lower().endswith(_XISF):
+        stara = repr(card_old) if card_old is not None else i18n.t("objchg.card_absent")
+        tekst = i18n.t("objchg.card_change", old=stara, new=repr(card_new))
+        if card_op == "add" and not path.lower().endswith(_XISF):
             tekst += i18n.t("objchg.card_rewrite")
         return tekst
 
@@ -647,10 +686,17 @@ class ObjectChangeDialog(QDialog):
     def _sync_akcji(self):
         """Przycisk akcji mówi, ILE pozycji pójdzie do zapisu - szczery disabled przy zerze, w biegu
         planu, zapisu i etapu Dostawy. Po przerwaniu przebiegu ta sama akcja DOKAŃCZA go (pozycje
-        nieprzetworzone czekają w bazie jako oczekujące), a po udanym zapisie milczy do „Cofnij”."""
+        nieprzetworzone czekają w bazie jako oczekujące; przebieg `staged` bez czekających też -
+        sterownik go domknie), a po udanym zapisie milczy do „Cofnij”. Okno przebiegu z Porządków,
+        w którym nie ma czego dokańczać (cofanie przerwane, pozycja z błędem, przebieg domknięty),
+        chowa przycisk akcji: zostaje „Cofnij” i „Zamknij”, a martwy „Zmień obiekt” nie udaje drogi
+        (wizytacja W2). Nagłówek i opis nadążają za stanem (`_opisz_stan`)."""
         wolny = self._wolny()
-        if self._pozostalo:
-            self.action_btn.setText(i18n.t("objchg.finish_btn", n=self._pozostalo))
+        self.action_btn.setVisible(not (self._przebieg is not None and self._run_id is not None
+                                        and not (self._pozostalo or self._dokonczenie)))
+        if self._pozostalo or self._dokonczenie:
+            self.action_btn.setText(i18n.t("objchg.finish_btn", n=self._pozostalo)
+                                    if self._pozostalo else i18n.t("objchg.finish_btn_bare"))
             self.action_btn.setEnabled(wolny)
             self.action_btn.setToolTip("")
         elif self._wynik_na_liscie and self._run_id is None:
@@ -676,6 +722,8 @@ class ObjectChangeDialog(QDialog):
                 "" if n or self._plan is None or self._domkniety else i18n.t("objchg.nothing_tip"))
         self.undo_btn.setVisible(self._do_cofniecia)
         self.undo_btn.setEnabled(wolny)
+        if self._przebieg is not None:
+            self._opisz_stan()
 
     def set_pipeline_busy(self, busy):
         """Etap Dostawy w biegu → akcje zapisu gasną (okno modalne, poza `set_busy` widoku).
@@ -701,8 +749,8 @@ class ObjectChangeDialog(QDialog):
         if self._wynik_na_liscie and self._run_id is None and not self._pozostalo:
             self._licz_plan()                   # „Policz plan ponownie” - zapis dopiero z planu
             return
-        if self._pozostalo:
-            total = self._pozostalo
+        if self._pozostalo or self._dokonczenie:
+            total = self._pozostalo             # 0: sterownik tylko domknie przebieg `staged`
         else:
             if self._plan is None or self._domkniety or not liczby_planu(self._plan)["robota"]:
                 return
@@ -753,6 +801,10 @@ class ObjectChangeDialog(QDialog):
             self._pozostalo = max(self._w_biegu - przetworzone, 0)
         else:
             self._pozostalo = 0
+        # Przerwany bieg zostawia przebieg `staged` (sterownik domyka go wyłącznie na końcu listy);
+        # bieg do końca - domknięty, a pozycja z błędem zostawia stan częściowy do cofnięcia.
+        self._dokonczenie = res.cancelled
+        self._stan_przebiegu = ("staged" if res.cancelled else "failed" if res.failed else None)
         if not self._do_cofniecia and not self._pozostalo:
             # Przebieg niczego nie zmienił (same blokady i pominięcia): nie ma czego cofać ani
             # dokańczać. Lista zostaje z powodami blokad, a akcja proponuje świeży plan na
@@ -764,14 +816,20 @@ class ObjectChangeDialog(QDialog):
 
     def _on_failed(self, op, msg):
         """Wyjątek workera. Przebieg jest w bazie, więc okno bierze stan stamtąd, nie z pamięci:
-        po wyjątku ZAPISU „Cofnij” zostaje (cofnięcie przy niczym do zrobienia mówi „0”), a „Dokończ
-        (N)” liczy pozycje, które w bazie wciąż czekają; po wyjątku COFNIĘCIA dokańczać nie ma czego
+        po wyjątku ZAPISU „Cofnij” zostaje (cofnięcie przy niczym do zrobienia mówi „0”), a „Dokończ”
+        stoi, dopóki przebieg jest `staged` (liczy pozycje, które w bazie wciąż czekają - także
+        zero, gdy wyjątek padł po ostatniej pozycji); po wyjątku COFNIĘCIA dokańczać nie ma czego
         (cofnięty przebieg zapisu nie wznawia), zostaje ponowienie „Cofnij”."""
         self.bar.setVisible(False)
         if self._run_id is not None:
             self._do_cofniecia = True
-            self._pozostalo = (oczekujace_pozycje(self.con, self._run_id)
-                               if op == "object_change" else 0)
+            if op == "object_change":
+                widok = queries.object_change_run_view(self.con, self._run_id)
+                self._pozostalo, self._dokonczenie = widok["pending"], widok["can_finish"]
+                self._stan_przebiegu = "staged" if widok["can_finish"] else "failed"
+            else:
+                self._pozostalo, self._dokonczenie = 0, False
+                self._stan_przebiegu = "undoing"
         self.error.setText(i18n.t("grid.wb.error", msg=msg)
                            + (i18n.t("objchg.res.run", run_id=self._run_id) if self._run_id else ""))
         self._sync_akcji()
@@ -799,6 +857,8 @@ class ObjectChangeDialog(QDialog):
         niedomkniete = bool(res.blocked or res.failed or res.cancelled)
         self._do_cofniecia = niedomkniete
         self._pozostalo = 0          # po cofnięciu „Dokończ” przebiegu nie ma już czego dokańczać
+        self._dokonczenie = False
+        self._stan_przebiegu = "undoing" if niedomkniete else None
         if not niedomkniete:
             self._run_id = None
             self._domkniety = False
@@ -822,9 +882,3 @@ class ObjectChangeDialog(QDialog):
             self.hide()
             return
         super().done(r)
-
-
-# TODO: `oczekujace_pozycje` (SELECT w warstwie widżetów) przenieść do read-modelu `gui/queries.py`;
-# dyskryminatory zdań rdzenia (`_POMINIECIE_BEZ_ZMIAN`, `_ZMIENIONY_OD_SKANU`,
-# `wb_worker.PREFIKS_SPADKU`) zastąpić kodem w wyniku rdzenia; zapas drugiej daty przekazać do
-# planera, gdy `plan_object_change` dostanie kwarg `fallback`.

@@ -3042,11 +3042,12 @@ def test_okna_kart_startuja_zapis_w_miejscu_a_FITS_bez_karty_SPADA_i_MOWI_to(
     Oba okna DOPISUJĄ kartę (`add`), a zapis w miejscu FITS umie dziś wyłącznie `set` istniejącej
     karty (`writeback.write_changes_inplace` → `Fallback`; dopisanie w miejscu to AR-118), więc plik
     FITS spada na drogę atomową z powodem rdzenia - i okno MÓWI to zdaniem wyniku (ekran nie kłamie
-    o drodze zapisu). Powód spadku niesie prefiks, po którym okno go rozpoznaje
-    (`wb_worker.PREFIKS_SPADKU`) - test pinuje go na PRAWDZIWYM pisarzu.
+    o drodze zapisu). Spadek niesie KOD (`writeback.CODE_INPLACE_FALLBACK`), po którym okno go
+    rozpoznaje - test pinuje go na PRAWDZIWYM pisarzu.
 
     Falsyfikator: wróć do `start("commit", …)` w którymkolwiek oknie → pierwsza asercja."""
-    from horreum.gui.wb_worker import PREFIKS_SPADKU, bez_prefiksu_spadku
+    from horreum import writeback
+    from horreum.gui.wb_worker import bez_prefiksu_spadku
     from astropy.io import fits
     if ktore == "sciezka":
         v, con, pliki, fid = request.getfixturevalue("sciezka_karty")
@@ -3067,7 +3068,9 @@ def test_okna_kart_startuja_zapis_w_miejscu_a_FITS_bez_karty_SPADA_i_MOWI_to(
     assert fits.getheader(str(plik))["OBJECT"] == "NGC 7635"
     w_miejscu = {fr.location_id for fr in wyniki[0].in_place}
     spadek = [fr for fr in wyniki[0].applied if fr.location_id not in w_miejscu]
-    assert spadek and all(fr.reason.startswith(PREFIKS_SPADKU) for fr in spadek)
+    assert spadek and all(fr.code == writeback.CODE_INPLACE_FALLBACK
+                          and fr.reason.startswith(writeback.PREFIKS_DROGI_ATOMOWEJ)
+                          for fr in spadek)
     assert i18n.t("wb.inplace_fallback", n=len(spadek),
                   reason=bez_prefiksu_spadku(spadek[0].reason)) in dlg.status.text()
     dlg.reject()
@@ -3123,11 +3126,12 @@ def test_spadek_na_droge_atomowa_MOWI_powod_w_oknie_kart(sciezka_karty):
     """AR-117: plik, w którym karta się nie mieści, rdzeń zapisuje atomowo z powodem
     (`FileResult.reason`) - okno mówi to zdaniem, inaczej pełne przepisanie po SMB byłoby ciche."""
     from horreum import writeback
-    from horreum.gui.wb_worker import PREFIKS_SPADKU
     v, con, pliki, fid = sciezka_karty
     dlg = _okno_sciezki(v, con)
     a = writeback.FileResult(1, "a.fits", "applied")
-    b = writeback.FileResult(2, "b.fits", "applied", f"{PREFIKS_SPADKU}: brak miejsca w nagłówku")
+    b = writeback.FileResult(2, "b.fits", "applied",
+                             f"{writeback.PREFIKS_DROGI_ATOMOWEJ}: brak miejsca w nagłówku",
+                             code=writeback.CODE_INPLACE_FALLBACK)
     dlg._after_commit("commit_inplace", writeback.CommitResult(
         run_id="r", commit_id=7, applied=[a, b], blocked=[], failed=[], skipped=[], in_place=[a]))
     assert i18n.t("wb.inplace_fallback", n=1, reason="brak miejsca w nagłówku") in dlg.status.text()

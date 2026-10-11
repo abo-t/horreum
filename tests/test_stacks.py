@@ -460,6 +460,57 @@ def test_potwierdzenie_reka_chroni_rodowod_tak_jak_zeznanie_pliku(con):
     assert s.kept_unread == 1 and s.by_assert == {"user": 1}
 
 
+def _wiersz(con, iid, fid):
+    r = con.execute("SELECT asserted_by, excluded FROM integration_input "
+                    "WHERE integration_id = ? AND input_frame_id = ?", (iid, fid)).fetchone()
+    return None if r is None else (r["asserted_by"], r["excluded"])
+
+
+def test_cofniecie_werdyktu_przywraca_stan_sprzed_gestu_a_nie_werdykt_przeciwny(con):
+    """„Cofnij” po werdykcie ręki: wiersz automatu wraca do swojego źródła (`window`), wiersz,
+    którego przed gestem nie było, znika. Drugie cofnięcie i cofnięcie po nowszym werdykcie nie
+    zapisują nic (CAS) - cofnięcie nie nadpisuje decyzji, której nie widziało."""
+    m = _master(con)
+    fid = _light(con, "l1", date_obs="2025-08-30T20:30:00")
+    run_stack_lineage(con, now=NOW, xml_reader=_brak_xml)
+    iid = _integracja(con, m)["id"]
+    obcy = _light(con, "l2", date_obs="2025-08-30T20:31:00")
+    przed_okno = _wiersz(con, iid, fid)
+    assert przed_okno is not None and przed_okno[0] != "user"
+    assert _wiersz(con, iid, obcy) is None or _wiersz(con, iid, obcy)[0] != "user"
+    bez_wiersza = obcy if _wiersz(con, iid, obcy) is None else None
+
+    zmiany = []
+    for f in (fid, obcy):
+        repo.judge_integration_input(con, integration_id=iid, input_frame_id=f, excluded=True,
+                                     now=NOW, changes_out=zmiany)
+    assert [z.input_frame_id for z in zmiany] == [fid, obcy]
+    assert repo.judge_integration_input(con, integration_id=iid, input_frame_id=fid, excluded=True,
+                                        now=NOW, changes_out=zmiany) is False
+    assert len(zmiany) == 2                                       # idempotentny gest nie dopisuje
+
+    for z in zmiany:
+        assert repo.restore_integration_judgment(con, integration_id=iid, change=z, now=NOW)
+    assert _wiersz(con, iid, fid) == przed_okno
+    if bez_wiersza is not None:
+        assert _wiersz(con, iid, bez_wiersza) is None
+    zdarzenia = con.execute("SELECT count(*) FROM event WHERE verb = 'integration.judgment_restored'"
+                            ).fetchone()[0]
+    assert zdarzenia == 2
+    assert not any(repo.restore_integration_judgment(con, integration_id=iid, change=z, now=NOW)
+                   for z in zmiany)                              # drugie cofnięcie: zero zapisu
+
+    nowy = []
+    repo.judge_integration_input(con, integration_id=iid, input_frame_id=fid, excluded=True,
+                                 now=NOW, changes_out=nowy)
+    repo.judge_integration_input(con, integration_id=iid, input_frame_id=fid, excluded=False,
+                                 now=NOW)                         # nowszy werdykt po geście
+    assert repo.restore_integration_judgment(con, integration_id=iid, change=nowy[0], now=NOW) is False
+    assert _wiersz(con, iid, fid) == ("user", 0)
+    assert con.execute("SELECT count(*) FROM event WHERE verb = 'integration.judgment_restored'"
+                       ).fetchone()[0] == 2
+
+
 def test_nowy_sub_nie_rusza_werdyktu_reki_a_licznik_go_WIDZI(con):
     """P4-4 + warunek Zdzinia 0809 („wprowadzanie nowych subów nie może wpłynąć na wycofanie
     czegokolwiek ustawionego ręcznie") — na stosie MIESZANYM, czyli tam, gdzie wjazd materiału

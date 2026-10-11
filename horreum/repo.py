@@ -4493,7 +4493,17 @@ def unlink_integration_input(con, *, integration_id, input_frame_id, now, actor=
     return True
 
 
-def judge_integration_input(con, *, integration_id, input_frame_id, excluded, now, uid="local"):
+@dataclass(frozen=True)
+class JudgedInput:
+    """Jedna zmiana werdyktu ręki - materiał cofnięcia. `before` = `(asserted_by, excluded)` wiersza
+    sprzed gestu albo `None`, gdy wiersza nie było; `excluded` = werdykt, który gest zapisał."""
+    input_frame_id: int
+    before: object
+    excluded: int
+
+
+def judge_integration_input(con, *, integration_id, input_frame_id, excluded, now, uid="local",
+                            changes_out=None):
     """ROZSTRZYGNIĘCIE RĘKĄ (I-2d): człowiek potwierdza kandydata albo go odrzuca —
     `asserted_by='user'` + `excluded` 0/1, `event(integration.judged)`.
 
@@ -4503,15 +4513,19 @@ def judge_integration_input(con, *, integration_id, input_frame_id, excluded, no
     werdykt przeżywa kolejne przebiegi rodowodu.
 
     Idempotentny: ten sam werdykt na tym samym wierszu → `False` bez eventu (przeklikanie w oknie
-    nie ma prawa puchnąć dziennika)."""
-    row = con.execute(
-        "SELECT rowid AS rid, asserted_by, excluded FROM integration_input "
-        "WHERE integration_id = ? AND input_frame_id = ?",
-        (integration_id, input_frame_id)).fetchone()
+    nie ma prawa puchnąć dziennika).
+
+    `changes_out` (lista) dostaje `JudgedInput` każdej REALNEJ zmiany - stan sprzed gestu odczytany
+    pod tą samą blokadą co zapis, więc „Cofnij” przywraca to, co klinga nadpisała, a nie to, co
+    ekran pamiętał (`restore_integration_judgment`). Odczyt z dziennika zdarzeń byłby wyścigiem."""
     excluded = 1 if excluded else 0
-    if row is not None and (row["asserted_by"], row["excluded"]) == ("user", excluded):
-        return False
     with _immediate(con):
+        row = con.execute(
+            "SELECT rowid AS rid, asserted_by, excluded FROM integration_input "
+            "WHERE integration_id = ? AND input_frame_id = ?",
+            (integration_id, input_frame_id)).fetchone()
+        if row is not None and (row["asserted_by"], row["excluded"]) == ("user", excluded):
+            return False
         if row is None:
             con.execute(
                 "INSERT INTO integration_input(integration_id, input_frame_id, asserted_by, "
@@ -4525,6 +4539,40 @@ def judge_integration_input(con, *, integration_id, input_frame_id, excluded, no
                    payload={"input_frame_id": input_frame_id, "excluded": excluded,
                             "before": None if row is None else
                             {"asserted_by": row["asserted_by"], "excluded": row["excluded"]}})
+    if changes_out is not None:
+        changes_out.append(JudgedInput(
+            input_frame_id, None if row is None else (row["asserted_by"], row["excluded"]), excluded))
+    return True
+
+
+def restore_integration_judgment(con, *, integration_id, change, now, uid="local"):
+    """COFNIĘCIE werdyktu ręki: wiersz wraca do stanu sprzed gestu (`change.before`), a gdy wiersza
+    przed gestem nie było - znika. Bez tej klingi „Cofnij” mogło tylko zapisać werdykt przeciwny,
+    czyli zostawić `user` tam, gdzie przed gestem decydował automat (`window`/`history`).
+
+    CAS pod blokadą: przywracamy WYŁĄCZNIE wiersz, który dalej niesie werdykt tego gestu
+    (`user` + `change.excluded`). Inny stan (nowszy werdykt, przebieg rodowodu, drugie cofnięcie)
+    = `False` bez zapisu i bez eventu - cofnięcie nie ma prawa nadpisać decyzji, której nie widziało.
+    `event(integration.judgment_restored)` niesie oba stany."""
+    with _immediate(con):
+        row = con.execute(
+            "SELECT rowid AS rid, asserted_by, excluded FROM integration_input "
+            "WHERE integration_id = ? AND input_frame_id = ?",
+            (integration_id, change.input_frame_id)).fetchone()
+        if row is None or (row["asserted_by"], row["excluded"]) != ("user", change.excluded):
+            return False
+        if change.before is None:
+            con.execute("DELETE FROM integration_input WHERE rowid = ?", (row["rid"],))
+        else:
+            con.execute(
+                "UPDATE integration_input SET asserted_by = ?, excluded = ? WHERE rowid = ?",
+                (change.before[0], change.before[1], row["rid"]))
+        emit_event(con, actor=f"user:{uid}", verb="integration.judgment_restored",
+                   target=f"integration:{integration_id}", now=now,
+                   payload={"input_frame_id": change.input_frame_id,
+                            "undone": {"asserted_by": "user", "excluded": change.excluded},
+                            "restored": None if change.before is None else
+                            {"asserted_by": change.before[0], "excluded": change.before[1]}})
     return True
 
 

@@ -1602,13 +1602,16 @@ def test_releases_stos_bez_rodowodu_dokladnego_czeka_az_do_zapisu(con, tmp_path)
     assert harvest.releases(karta, archive_root=arch)[0].lineage == ()
     assert harvest.releases(karta, con=con)[0].lineage == ()
     [row] = harvest.releases(karta, archive_root=arch, con=con)
-    assert (row.done, row.lineage) == (1, (("stos-a", tuple(ids[:2]), placed.dst),))
+    # czwarty człon = kanon obiektu wydania z pozycji zeznania (AR-103: gospodarz porówna go z obiektem stosu)
+    assert placed.release_canon == "IC1795"
+    assert (row.done, row.lineage) == (1, (("stos-a", tuple(ids[:2]), placed.dst, "IC1795"),))
 
     _stos_po_dostawie(con, "stos-a", placed.dst)
     [drugi] = harvest.apply(plan(), now="2026-10-10T13:00:00+00:00").items
-    assert (drugi.status, drugi.frame_ids) == ("exists", ())
+    assert (drugi.status, drugi.frame_ids, drugi.release_canon) == ("exists", (), None)
     [row] = harvest.releases(karta, archive_root=arch, con=con)
-    assert (row.done, row.lineage) == (1, (("stos-a", tuple(ids[:2]), placed.dst),))
+    # kanon ze starszego zeznania - tego, które niesie zbiór, nie z biegu `exists` bez wydania
+    assert (row.done, row.lineage) == (1, (("stos-a", tuple(ids[:2]), placed.dst, "IC1795"),))
 
     stacks.record_harvest_inputs(con, master_sha1_data="stos-a", input_frame_ids=ids[:2], now=TS)
     [row] = harvest.releases(karta, archive_root=arch, con=con)
@@ -1642,4 +1645,4 @@ def test_releases_zbior_z_pozycji_review_nie_swiadczy(con, tmp_path, status, cze
                                                                "items": [poz]}, now=ts)
     [row] = harvest.releases([str(tmp_path / "_WBPP")], archive_root=str(arch), con=con)
     assert row.done == 1
-    assert row.lineage == ((("stos-a", tuple(ids), str(kopia)),) if czeka else ())
+    assert row.lineage == ((("stos-a", tuple(ids), str(kopia), None),) if czeka else ())   # pozycja bez `release`

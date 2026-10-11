@@ -281,6 +281,11 @@ def test_hint_obiektu_idzie_za_zywym_adresem(grid_db):
     podpowiedź czyta segment po `STACKS` (`resolve.paths`), więc żywy adres daje OBIEKT."""
     _dwa_adresy(grid_db, stary="/arch/test 2023-05-07/master/masterLight_BIN-1.xisf",
                 nowy="/arch/STACKS/Cr464/76EDPH_2600MM/CLS/Cr464_2023-05-07.xisf")
+    # Korzeń archiwum `/arch` jest wiarygodny przy rodzeństwie bibliotek (E5-3): kalibracja obok
+    # `STACKS`; bez korzenia podpowiedź z drzewa stosów milczy.
+    grid_db.execute("INSERT INTO location (frame_id, volume, path, present) "
+                    "VALUES (3, 'V', '/arch/CALIBRATION/flats/f3.xisf', 1)")
+    grid_db.commit()
     r = {x["frame_id"]: x for x in queries.base_rows(grid_db, [5])}[5]
     assert queries.object_cell({k: r[k] for k in r.keys()}) == ("⟨Cr464⟩", "hint")
     # Martwy adres (układ WBPP) dałby nazwę SESJI z dziadka - komórka idzie za żywym, nie za nim.
@@ -320,8 +325,8 @@ def test_base_rows_noc_i_uwaga_DOPISANE_NA_KONCU(grid_db):
     grid_db.commit()
     rows = queries.base_rows(grid_db, [1, 2, 3])
     klucze = rows[0].keys()
-    assert klucze[-2:] == ["night", "note"]
-    assert klucze[:-2][-1] == "absorbed", "dotychczasowe kolumny przesunięte"
+    assert klucze[-3:] == ["night", "note", "library_root"]
+    assert klucze[:-3][-1] == "absorbed", "dotychczasowe kolumny przesunięte"
     po_id = {r["frame_id"]: r for r in rows}
     assert (po_id[1]["night"], po_id[1]["note"]) == ("2025-08-14", "chmury")
     assert (po_id[2]["night"], po_id[2]["note"]) == ("2025-08-15", None)

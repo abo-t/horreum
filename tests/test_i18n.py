@@ -165,6 +165,15 @@ def test_parytet_tokenow_dynamicznych_z_katalogiem():
     # Źródło wejścia stosu (`grid._lineage_item_text`): każda ranga kanonu, także `harvest` (AR-102).
     from horreum import repo
     braki += [f"grid.lin.src.{z}" for z in repo.RANGA_ASSERT if f"grid.lin.src.{z}" not in CATALOG]
+    # Odmowa gestu ręki osi kalibracji (`repo.KalibratorOdrzucony.token`) i stan klasy w nagłówku
+    # panelu (`grid_lineage._calibration_head_text`) - oba składane w locie.
+    braki += [f"grid.lin.cal.refused.{t}" for t in repo.CALIBRATION_REFUSALS
+              if f"grid.lin.cal.refused.{t}" not in CATALOG]
+    braki += [f"grid.lin.cal.mis.{p}" for pola in lineage._POLA_PRZEPISU.values() for p in pola
+              if f"grid.lin.cal.mis.{p}" not in CATALOG]
+    braki += [f"grid.lin.cal.head.{s}" for s in ("linked", "linked_inactive", "linked_mismatch",
+                                                 "pending", "gap")
+              if f"grid.lin.cal.head.{s}" not in CATALOG]
     assert not braki, f"rdzeń produkuje tokeny bez zdania w katalogu: {braki}"
 
 
@@ -198,3 +207,19 @@ def test_parytet_zrodel_pewnosci_obu_osi_panelu():
                                        ("cal.src", ("horreum", "user", "wbpp")))
              for w in wartosci if f"grid.lin.{rodzina}.{w}" not in CATALOG]
     assert not braki, f"źródło pewności bez zdania: {braki}"
+
+
+def test_parytet_podstawy_rodowodu_stosu_w_obie_strony():
+    """Podstawa rodowodu stosu (`integration.lineage_basis`, 0034) - klucz składany w locie
+    (`grid_lineage._lineage_basis_text`: `grid.lin.basis.{token}`), więc kolektor literałów go nie
+    widzi. Parytet w OBIE strony z jedynym zbiorem tokenów rdzenia (`stacks.LINEAGE_BASES`): token
+    bez zdania to surowy klucz na ekranie, zdanie bez tokenu - martwy wpis, który udaje podstawę,
+    której rdzeń nie umie wyprodukować.
+
+    Falsyfikator: dopisz token do `LINEAGE_BASES` bez wpisu w katalogu (albo wpis bez tokenu) - test
+    czerwienieje."""
+    from horreum import stacks
+
+    tokeny = {f"grid.lin.basis.{t}" for t in stacks.LINEAGE_BASES}
+    katalog = {k for k in CATALOG if k.startswith("grid.lin.basis.")}
+    assert katalog == tokeny, f"rozjazd podstaw: bez zdania {tokeny - katalog}, bez tokenu {katalog - tokeny}"

@@ -564,7 +564,7 @@ class HumanFacts:
         zniknely = set(wczesniej.object_hand_frames) - set(self.object_hand_frames)
         return tuple(sorted(zniknely - przejete)), tuple(sorted(zniknely & przejete))
 
-    def spadki(self, wczesniej, przejete=frozenset()):
+    def spadki(self, wczesniej, przejete=frozenset(), zdjete_reka=0):
         """Osie, na których fakt ręki UBYŁ wobec wcześniejszego spisu — `{oś: (było, jest)}`.
 
         Pusty słownik == warunek dotrzymany. WZROST NIE JEST NARUSZENIEM: nowy materiał wolno
@@ -575,8 +575,16 @@ class HumanFacts:
         która fakt ręki straciła, poza wyjaśnionymi śladem przejścia (`reka_obiektu`) - także gdy
         suma nie spadła, bo nowa ręka gdzie indziej nie oddaje utraconej. Bez migawki (stare
         odniesienie) - sumy, jak przed E5-1, bez żadnego tłumienia. Para `(było, jest)` to liczby
-        osi; listę klatek podaje `reka_obiektu`."""
+        osi; listę klatek podaje `reka_obiektu`.
+
+        OŚ KALIBRATORA RĘKI (`calibration_links`, E4-5): gest „Przywróć automat” celowo zdejmuje
+        wskazanie ręki - to decyzja człowieka, nie wycofanie przez przebieg. `zdjete_reka` = ile
+        takich zdjęć niesie dziennik PO znaku wodnym (`calibration_hand_restored_since`); spadek
+        nie większy od niej jest wyjaśniony, większy zostaje ubytkiem w całości."""
         ubytki = {k: (v, self.counts[k]) for k, v in wczesniej.counts.items() if self.counts[k] < v}
+        kal = ubytki.get("calibration_links")
+        if kal is not None and kal[0] - kal[1] <= zdjete_reka:
+            ubytki.pop("calibration_links")
         rozbior = self.reka_obiektu(wczesniej, przejete)
         if rozbior is not None:
             ubytki.pop("object_hand", None)
@@ -603,6 +611,20 @@ def path_to_header_since(con, watermark):
         "AND json_extract(payload, '$.object_source') IN (SELECT value FROM json_each(?)) "
         "AND json_extract(payload, '$.next_object_id') = json_extract(payload, '$.object_id')",
         (watermark, json.dumps(sorted(WEAK_OBJECT_SOURCES)))).fetchall())
+
+
+def calibration_hand_restored_since(con, watermark):
+    """Ile wskazań kalibratora RĘKĄ zdjął gest „Przywróć automat” PO znaku wodnym `watermark` -
+    `int`. READ-ONLY. Dowodem jest wyłącznie ślad klingi (`repo.unlink_calibration`):
+    `calibration.unlinked` ze źródłem `user`, powodem `user_restore` i aktorem `user:*`. Zdjęcie
+    automatu (AR-81, `not_light`) i przeniesienie na następczynię (`transferred`, z parą
+    `.linked`) tu nie wchodzą - pierwsze nie dotyka ręki, drugie nie zmienia sumy. `None` → 0."""
+    if watermark is None:
+        return 0
+    return con.execute(
+        "SELECT count(*) FROM event WHERE id > ? AND verb = 'calibration.unlinked' "
+        "AND actor LIKE 'user:%' AND json_extract(payload, '$.asserted_by') = 'user' "
+        "AND json_extract(payload, '$.reason') = 'user_restore'", (watermark,)).fetchone()[0]
 
 
 def human_facts_census(con):

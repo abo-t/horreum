@@ -33,8 +33,8 @@ from horreum.resolve.paths import (STACK_KIND, STACKS_DIR, filter_folder_from_pa
 from horreum.resolve.recipe import parse_master_path
 from horreum.resolve.stack import read_testimony, signature_timestamp
 from horreum.resolver import (NO_OBJECT_CARD_FILETYPES, alias_snapshot, forma_karty_object,
-                              path_proposals, resolve_name, review_state)
-from horreum.stacks import REASON_NO_OBJECT, REASON_OFFSET_UNKNOWN
+                              library_root_from_db, path_proposals, resolve_name, review_state)
+from horreum.stacks import REASON_NO_OBJECT, REASON_OFFSET_UNKNOWN, propose_lineage_candidates
 
 
 PATH_TAIL_DIRS = 2
@@ -70,7 +70,7 @@ def path_tail(path, dirs=PATH_TAIL_DIRS):
     return "\\".join(czesci[-(dirs + 1):])
 
 
-def stack_folder(path):
+def stack_folder(path, library_root=None):
     """Folder OBRAZU ze ścieżki gotowego stosu — albo `None`. Czysta funkcja, zero SQL.
 
     DRZEWO STOSÓW NAJPIERW (FC-4/D-V-9b): w układzie `STACKS\\<OBIEKT>\\<KONFIG>\\<FILTR>\\plik`
@@ -92,18 +92,23 @@ def stack_folder(path):
     dwie kopie rozjechałyby się przy pierwszej zmianie układu drzewa.
 
     KOTWICA NIE JEST FOLDEREM OBIEKTU: `STACKS\\plik.xisf` (plik wprost pod kotwicą) milczy tak
-    samo jak litera dysku niżej - rodzic `STACKS` byłby podpowiedzią bez treści, udającą nazwę."""
+    samo jak litera dysku niżej - rodzic `STACKS` byłby podpowiedzią bez treści, udającą nazwę.
+
+    KORZEŃ ARCHIWUM (`library_root`, E5-3) przychodzi od wołającego - wiersz gridu niesie go
+    z `base_rows` (`resolver.library_root_from_db`, ten sam, którym szczebel resolvera kotwiczy
+    propozycję). Ścieżka z segmentem `STACKS` poza biblioteką archiwum (albo przy nieznanym korzeniu)
+    MILCZY: rodzic/dziadek takiej ścieżki to filtr albo folder roboczy, a nie nazwa obrazu."""
     if not path:
         return None
-    obiekt = object_from_path(str(path), kind=STACK_KIND)
+    obiekt = object_from_path(str(path), kind=STACK_KIND, library_root=library_root)
     if obiekt:
         return obiekt
     czesci = [c for c in re.split(r"[\\/]", str(path)) if c]
     if len(czesci) < 2:
         return None
-    rodzic = czesci[-2]
-    if rodzic.strip().lower() == STACKS_DIR:
+    if any(c.strip().lower() == STACKS_DIR for c in czesci[:-1]):
         return None
+    rodzic = czesci[-2]
     if rodzic.lower() == "master" and len(czesci) >= 3:
         dziadek = czesci[-3]
         # KORZEŃ NIE JEST FOLDEREM OBIEKTU (bramka pakietu, zarzut 9): przy układzie
@@ -113,11 +118,13 @@ def stack_folder(path):
     return rodzic
 
 
-def hint_from_stacks_tree(path):
+def hint_from_stacks_tree(path, library_root=None):
     """Czy podpowiedź `stack_folder` dla tej ścieżki pochodzi z drzewa `STACKS` - pytanie zdania
     podpowiedzi w gridzie. Ta sama reguła, którą `stack_folder` wybiera gałąź (SPOT): w drzewie
-    stosów folder NIESIE nazwę i szczebel ścieżki ma propozycję; w układzie WBPP nie niesie."""
-    return bool(path) and object_from_path(str(path), kind=STACK_KIND) is not None
+    stosów folder NIESIE nazwę i szczebel ścieżki ma propozycję; w układzie WBPP nie niesie.
+    `library_root` jak w `stack_folder` (z wiersza `base_rows`)."""
+    return bool(path) and object_from_path(str(path), kind=STACK_KIND,
+                                           library_root=library_root) is not None
 
 
 OBJECT_CELL_STATES = ("canon", "cleared", "kind", "raw", "hint")
@@ -229,7 +236,7 @@ def object_cell(row):
             return raw, "kind"                     # kalibracja: bez znacznika, bo nie ma tu roboty
         return f"{RAW_MARK} {raw}", "raw"          # FC-8: jedyny stan, który JEST robotą, ma znacznik
     if row.get("kind") == "master_light":
-        folder = stack_folder(row.get("path"))
+        folder = stack_folder(row.get("path"), row.get("library_root"))
         if folder:
             return f"{HINT_MARK[0]}{folder}{HINT_MARK[1]}", "hint"
     return "", "canon"          # nic do powiedzenia — pusta komórka bez stanu do wytłumaczenia
@@ -1294,7 +1301,13 @@ def leaf_frame_ids(con, kind, keyword, p1=None, p2=None):
     teleskopu (scaleni członkowie rolują się pod kanon przez `telescope_canonical`, jak
     `active_telescopes`). `rel_night` = zakres `[p1, p2)` na `header.date_obs` — OBA parametry pełne
     datetime (granice liczy `filter_engine.night_bounds`); klatka bez header/date_obs nie wpada.
-    `rel_camera` = `frame.camera_id` (liść zestawu w Znajdź, bez grupy w listwie)."""
+    `rel_camera` = `frame.camera_id` (liść zestawu w Znajdź, bez grupy w listwie).
+    `rel_lineage` = stan rodowodu gotowego obrazu (`p1` = token `LINEAGE_STATES`) - stan liczy
+    `stack_lineage_states` (agregacja w Pythonie, bo człon „do potwierdzenia" stoi na predykacie
+    `lineage_reason_stale`), więc liść nie ma własnego literału i nie może się z kolumną
+    rozjechać."""
+    if kind == "rel_lineage":
+        return lineage_state_frame_ids(stack_lineage_states(con), p1)
     if kind == "rel_object":
         cur = con.execute("SELECT id FROM frame WHERE object_id = ?", (p1,))
     elif kind == "rel_filter":
@@ -2312,18 +2325,50 @@ def lineage_reason_stale(row):
 def _lineage_reason_rows(con):
     """Integracje z ZAPISANYM powodem braku rodowodu + fakty, po których poznać zwietrzenie.
     Wąski literał pod `lineage_pending_frame_ids` — pełny opis obrazu daje `stack_lineage_head`.
-    `inputs` liczy WYŁĄCZNIE wejścia niewykluczone, jak w głowie panelu: stos, z którego człowiek
-    odrzucił wszystkich kandydatów, wciąż nie ma rodowodu i do kubełka NALEŻY.
-    Zwraca: master_frame_id, unresolved_reason, object_now, utc_offset_min, inputs."""
+    `inputs` liczy WYŁĄCZNIE wejścia niewykluczone, jak w głowie panelu; `excluded` - werdykty
+    „to nie weszło", z których `_czeka_na_reke` rozpoznaje stos, którego kandydatury człowiek już
+    osądził. Populacja akcyjna: bez wycofanych i bez ZASTĄPIONYCH - zastąpiony stos jest zapisem
+    historii (wiersz Porządków „Zastąpione"), nie robotą.
+    Zwraca: master_frame_id, unresolved_reason, object_now, utc_offset_min, inputs, excluded."""
     return con.execute(
         "SELECT i.master_frame_id, i.unresolved_reason, i.utc_offset_min, "
         "       (SELECT f.object_id FROM frame f WHERE f.id = i.master_frame_id) AS object_now, "
         "       (SELECT COUNT(*) FROM integration_input ii "
-        "         WHERE ii.integration_id = i.id AND ii.excluded = 0) AS inputs "
+        "         WHERE ii.integration_id = i.id AND ii.excluded = 0) AS inputs, "
+        "       (SELECT COUNT(*) FROM integration_input ii "
+        "         WHERE ii.integration_id = i.id AND ii.excluded = 1) AS excluded "
         "FROM integration i WHERE i.unresolved_reason IS NOT NULL "
         "  AND EXISTS (SELECT 1 FROM frame f WHERE f.id = i.master_frame_id "
-        "                AND f.retired_at IS NULL)"
+        "                AND f.retired_at IS NULL AND f.superseded_by IS NULL)"
     ).fetchall()
+
+
+def _czeka_na_reke(con, r):
+    """JEDEN FAKT „gest w panelu ma tu jeszcze co zrobić" dla wiersza `_lineage_reason_rows` -
+    zasila perspektywę „Rodowód do potwierdzenia", stan kolumny („do potwierdzenia" vs „wszystkie
+    odrzucone") i tryb propozycji panelu (`lineage_awaits_hand`).
+
+    Powód zwietrzały - nie (czeka na przeliczenie, nie na rękę). Bez żadnego werdyktu - tak: powód
+    sam jest receptą (propozycje, odniesienie czasu, nazwa obiektu). Po werdyktach - tylko wtedy,
+    gdy zostało coś NIEOSĄDZONEGO: kandydat w propozycji (osądzonych propozycja nie zwraca),
+    klatki czekające na zegar albo brak obiektu (receptą jest nadanie nazwy, nie lista). Bez tego
+    stos, z którego człowiek odrzucił ostatniego kandydata, zostawał w kolejce z zadaniem, którego
+    nie da się wykonać. Propozycję liczymy WYŁĄCZNIE dla stosów z werdyktem bez wejść - garstka."""
+    if lineage_reason_stale(r):
+        return False
+    if not r["excluded"]:
+        return True
+    if r["unresolved_reason"] == REASON_NO_OBJECT:
+        return True
+    noce, raw_bez_zegara = propose_lineage_candidates(con, r["master_frame_id"])
+    return raw_bez_zegara > 0 or any(n.frames for n in noce)
+
+
+def lineage_awaits_hand(con, frame_id):
+    """`_czeka_na_reke` dla JEDNEGO stosu (panel przy zaznaczeniu) - ten sam fakt, co perspektywa.
+    Stos bez zapisanego powodu albo spoza populacji akcyjnej - nie."""
+    r = next((r for r in _lineage_reason_rows(con) if r["master_frame_id"] == frame_id), None)
+    return r is not None and _czeka_na_reke(con, r)
 
 
 def lineage_pending_frame_ids(con):
@@ -2344,9 +2389,11 @@ def lineage_pending_frame_ids(con):
     drogi „Stosy", więc `kind = 'master_light'` byłby martwą literą udającą bramkę (ta sama figura,
     co `NO_OBJECT_CARD_FILETYPES` poza `nameless_stack_frames`).
 
+    Zbiór = stosy, nad którymi gest w panelu ma jeszcze co zrobić (`_czeka_na_reke`): stos
+    z odrzuconym ostatnim kandydatem do kubełka już nie należy.
+
     Zwraca set[int]."""
-    return {int(r["master_frame_id"]) for r in _lineage_reason_rows(con)
-            if not lineage_reason_stale(r)}
+    return {int(r["master_frame_id"]) for r in _lineage_reason_rows(con) if _czeka_na_reke(con, r)}
 
 
 # ============================================================ WERSJE STOSÓW (perspektywa „Wersje stosów")
@@ -2515,6 +2562,12 @@ def _stack_version_rows(con):
     nie rozcina grupy, a `telescope_id` NULL znaczy „config nieznany".
     Werdykt „zostawiam wszystkie" (0026) przychodzi LEFT JOIN-em: `kept_key`/`kept_at` NULL = brak.
 
+    WARIANT KADRU Z JAWNĄ RELACJĄ (`stack_variant`, 0035, AR-54) NIE JEST KANDYDATEM: autocrop ma te
+    same suby i to samo okno co oryginał, więc bez tego członu para wpadałaby do jednej grupy, a różne
+    pomiary przyciętego kadru robiłyby z niej „inną integrację" - wiersz Porządków podsuwałby do
+    skasowania plik, który człowiek świadomie trzyma jako wersję mastera. Oryginał zostaje
+    kandydatem: jego prawdziwe bliźniaki (druga integracja tego materiału) dalej mają tworzyć grupę.
+
     OKNA TU NIE MA - liczy je `_grupy_wersji` z ŻYWEGO `header` (AR-22 (2)). Z głowy `integration`
     idą wyłącznie fakty HISTORII pliku (`tool`, `declared_rows`, `creation_time`), których zapis
     nagłówka nie zmienia; okno to karty `DATE-OBS`/`DATE-END`, a głowa trzyma je zamrożone do
@@ -2539,6 +2592,7 @@ def _stack_version_rows(con):
         "LEFT JOIN object obj ON obj.id = f.object_id "
         "WHERE f.retired_at IS NULL AND f.superseded_by IS NULL "
         "  AND EXISTS (SELECT 1 FROM location l WHERE l.frame_id = f.id AND l.present = 1) "
+        "  AND NOT EXISTS (SELECT 1 FROM stack_variant sv WHERE sv.variant_frame_id = f.id) "
         "ORDER BY f.id").fetchall()
 
 
@@ -2965,12 +3019,16 @@ def stack_lineage_head(con, frame_id):
 
     Zwraca: integration_id, unresolved_reason, degenerate, ambiguous, telescope_mismatch,
     declared_rows, drizzle_inputs, disabled_inputs, tool, window_start, window_end,
-    utc_offset_min, raw_unreferenced, inputs, excluded, secs, sources (rozdzielone przecinkiem
+    utc_offset_min, raw_unreferenced, lineage_basis, outside_window, used_rows (podstawa rodowodu,
+    0034), window_rows (M werdyktu „N z M”: wiersze okna + odrzucone werdyktem), inputs, excluded, secs, sources (rozdzielone przecinkiem
     źródła pewności wejść), twins, shared."""
     return con.execute(
         "SELECT i.id AS integration_id, i.unresolved_reason, i.degenerate, i.ambiguous, "
         "       i.telescope_mismatch, i.declared_rows, i.drizzle_inputs, i.disabled_inputs, "
         "       i.tool, i.window_start, i.window_end, i.utc_offset_min, i.raw_unreferenced, "
+        "       i.lineage_basis, i.outside_window, i.used_rows, "
+        "       (SELECT COUNT(*) FROM integration_input ii WHERE ii.integration_id = i.id "
+        "         AND (ii.asserted_by = 'window' OR ii.excluded = 1)) AS window_rows, "
         "       (SELECT f.object_id FROM frame f WHERE f.id = i.master_frame_id) AS object_now, "
         "       (SELECT COUNT(*) FROM integration b WHERE b.integ_hash IS NOT NULL "
         "         AND b.integ_hash = i.integ_hash AND b.id <> i.id) AS twins, "
@@ -3011,6 +3069,135 @@ def stack_lineage_inputs(con, frame_id):
         "LEFT JOIN header h ON h.frame_id = ii.input_frame_id "
         "WHERE i.master_frame_id = ? ORDER BY h.date_obs, ii.input_frame_id",
         (frame_id,)).fetchall()
+
+
+# ============================================================ STAN RODOWODU W TABELI (kolumna, facet, memo)
+# Jeden read-model dla trzech powierzchni: kolumny „Rodowód" w gridzie, facetu „Rodowód" w listwie
+# i memo stosów w Dostawie. Kolumna i facet czytają `stack_lineage_states` (stan per gotowy obraz),
+# memo - `stack_lineage_counts` (cztery rozłączne liczniki) z TEGO SAMEGO zapytania.
+
+LINEAGE_STATES = ("pending", "exact", "history", "mixed", "window", "rejected", "none", "uncounted")
+"""Stany rodowodu gotowego obrazu, w kolejności listwy i belek: NAJPIERW robota („do potwierdzenia"
+- jedyny stan, który czeka na gest), potem od najpewniejszego do braku.
+
+* `exact` - każde niewykluczone wejście ze zbioru dokładnego (`harvest`) albo z ręki (`user`);
+* `history` - najsłabsze wejście zeznał plik (`history`), żadne nie jest z samego okna czasu;
+* `mixed` - CZĘŚCIOWO POTWIERDZONY: obok wejść z okna stoją wejścia mocniejsze (ręka, plik, żniwa);
+* `window` - wszystkie wejścia wyliczone z okna czasu, nikt ich nie potwierdził;
+* `pending` - bez wejść, z aktualnym powodem: czeka na gest w panelu (ten sam zbiór, co perspektywa
+  „Rodowód do potwierdzenia" - `lineage_pending_frame_ids`);
+* `rejected` - człowiek odrzucił wszystkie kandydatury i powodu do gestu nie ma;
+* `none` - policzony, bez wejść i bez sprawy do gestu (powód zwietrzały - czeka na przeliczenie -
+  albo przebieg nie zostawił powodu);
+* `uncounted` - rodowodu tego obrazu nigdy nie liczono (brak wiersza `integration`).
+
+Klatka, która nie jest gotowym obrazem, stanu nie ma (n.d.) - kolumna jest pusta, facet jej nie liczy.
+Kolejność rang źródeł (`repo.RANGA_ASSERT`: window < history < harvest < user) jest tu tylko
+odczytana, nie powtórzona: domena `asserted_by` jest zamknięta CHECK-iem (0033), więc cztery
+liczniki z SQL-a pokrywają każde wejście."""
+
+
+def _stany_rodowodu_wiersze(con):
+    """Gotowe obrazy + liczniki ich wejść per źródło - wspólny materiał stanu i memo."""
+    return con.execute(
+        "SELECT f.id AS frame_id, i.id AS integration_id, "
+        "       (f.retired_at IS NULL AND f.superseded_by IS NULL) AS alive, "
+        "       EXISTS (SELECT 1 FROM location l WHERE l.frame_id = f.id AND l.present = 1) "
+        "         AS present, "
+        "       COALESCE(SUM(ii.excluded = 0), 0) AS n_inputs, "
+        "       COALESCE(SUM(ii.excluded = 0 AND ii.asserted_by = 'window'), 0) AS n_window, "
+        "       COALESCE(SUM(ii.excluded = 0 AND ii.asserted_by = 'history'), 0) AS n_history, "
+        "       COALESCE(SUM(ii.excluded = 1), 0) AS n_excluded "
+        "FROM frame f LEFT JOIN integration i ON i.master_frame_id = f.id "
+        "LEFT JOIN integration_input ii ON ii.integration_id = i.id "
+        "WHERE f.kind = 'master_light' GROUP BY f.id").fetchall()
+
+
+def _stan_rodowodu(r, oczekuje):
+    """Token `LINEAGE_STATES` z wiersza `_stany_rodowodu_wiersze` - agregacja jawna, nie min/max rangi:
+    stos mieszany, wszystkie odrzucone i czekający na gest to trzy różne zdania, a skrajna ranga
+    zlewała je z sąsiadami („okno" przy częściowo potwierdzonym, „brak" przy odrzuconych)."""
+    if r["integration_id"] is None:
+        return "uncounted"
+    n = r["n_inputs"]
+    if not n:
+        if oczekuje:
+            return "pending"
+        return "rejected" if r["n_excluded"] else "none"
+    if r["n_window"] == n:
+        return "window"
+    if r["n_window"]:
+        return "mixed"
+    return "history" if r["n_history"] else "exact"
+
+
+def stack_lineage_states(con):
+    """Stan rodowodu KAŻDEGO gotowego obrazu (`kind = 'master_light'`) → dict `frame_id → token`
+    z `LINEAGE_STATES`. Klatki innych rodzajów w słowniku nie ma (n.d.).
+
+    Koszt: jedno zapytanie po stosach archiwum (193 wiersze na kopii `pf4`) + zbiór perspektywy
+    „Rodowód do potwierdzenia" - liczone przy składzie zbioru, nie per wiersz."""
+    oczekujace = lineage_pending_frame_ids(con)
+    return {int(r["frame_id"]): _stan_rodowodu(r, int(r["frame_id"]) in oczekujace)
+            for r in _stany_rodowodu_wiersze(con)}
+
+
+def frame_present_paths(con, frame_ids):
+    """Ścieżka OBECNEJ kopii (`MIN(id)` spośród `present = 1`, jak `stack_lineage_inputs`) dla
+    zbioru klatek → dict `frame_id → path`; klatka bez obecnej kopii w słowniku nie stoi. Karmi
+    nazwę pliku w wierszu kandydata panelu rodowodu (propozycja rdzenia ścieżek nie niesie)."""
+    return {int(r["frame_id"]): r["path"] for r in con.execute(
+        "SELECT l.frame_id, l.path FROM location l "
+        "WHERE l.present = 1 AND l.frame_id IN (SELECT value FROM json_each(?)) "
+        "  AND l.id = (SELECT MIN(l2.id) FROM location l2 "
+        "              WHERE l2.frame_id = l.frame_id AND l2.present = 1)",
+        (json.dumps([int(f) for f in frame_ids]),))}
+
+
+def lineage_state_frame_ids(stany, stan):
+    """Liść facetu „Rodowód": klatki ze stanem `stan` w gotowym słowniku `stack_lineage_states`.
+    Token spoza `LINEAGE_STATES` to błąd wołającego (EXPECT)."""
+    if stan not in LINEAGE_STATES:
+        raise ValueError(f"nieznany stan rodowodu: {stan!r}")
+    return {fid for fid, s in stany.items() if s == stan}
+
+
+def facet_lineage(con, frame_ids, stany=None):
+    """Kubełki facetu „Rodowód" w zbiorze `frame_ids` (sibling-set listwy) → list[(token, n)]
+    w kolejności `LINEAGE_STATES`, bez zer. Klatki spoza gotowych obrazów nie wpadają do żadnego.
+    `stany` = gotowy wynik `stack_lineage_states` tego samego składu (liczony raz na migawkę)."""
+    if stany is None:
+        stany = stack_lineage_states(con)
+    licznik = {}
+    for fid in frame_ids:
+        stan = stany.get(fid)
+        if stan is not None:
+            licznik[stan] = licznik.get(stan, 0) + 1
+    return [(s, licznik[s]) for s in LINEAGE_STATES if s in licznik]
+
+
+def stack_lineage_counts(con):
+    """Cztery ROZŁĄCZNE liczniki gotowych obrazów do memo Dostawy (ze STANU, nie z ostatniego
+    przebiegu): `all` = `uncounted` + `with_inputs` + `without_inputs`, plus `no_copy` - ile z nich
+    nie ma dziś obecnej kopii na dysku (osobno, bo to inna oś: rodowód jest faktem bazy, kopia -
+    stanem dysku). Liczy obrazy ŻYWE (bez wycofanych i zastąpionych) - te, o które człowiek pyta.
+
+    `with_inputs` liczy obrazy z choć jednym NIEWYKLUCZONYM wejściem - stos, z którego człowiek
+    odrzucił wszystko, jest „policzony bez wejść", tak jak w nagłówku panelu."""
+    out = {"all": 0, "uncounted": 0, "with_inputs": 0, "without_inputs": 0, "no_copy": 0}
+    for r in _stany_rodowodu_wiersze(con):
+        if not r["alive"]:
+            continue
+        out["all"] += 1
+        if r["integration_id"] is None:
+            out["uncounted"] += 1
+        elif r["n_inputs"]:
+            out["with_inputs"] += 1
+        else:
+            out["without_inputs"] += 1
+        if not r["present"]:
+            out["no_copy"] += 1
+    return out
 
 
 # DŁUG ZAPŁACONY 0808: „gotowe obrazy czekające na Twoje słowo" ma odtąd wiersz Porządków i własną
@@ -3616,6 +3803,10 @@ def base_rows(con, frame_ids):
     się po NAZWIE (`sqlite3.Row`), ale kolejność w tym zdaniu ma zgadzać się z SELECT-em - rozjazd
     był zarzutem bramki 0809 i jest tańszy do naprawienia niż do wytłumaczenia następnej sesji.
 
+    `library_root` (E5-3) = korzeń archiwum (`resolver.library_root_from_db`, jeden na wywołanie,
+    ten sam w każdym wierszu) - kotwica podpowiedzi kolumny „Obiekt" dla stosów (`stack_folder`),
+    żeby komórka mówiła to samo, co propozycja szczebla ścieżki.
+
     `night` i `note` karmią prosty zestaw kolumn prezentacji Znajdź (Noc, Uwagi) i stoją NA KOŃCU
     SELECT-u: konsumenci spoza gridu (`app`, `projection`) czytają po nazwie, więc dopisane kolumny
     nie zmieniają ich zachowania. Noc tą samą derywacją co facet Noc (`facet_nights`) - kolumna
@@ -3677,7 +3868,7 @@ def base_rows(con, frame_ids):
         "       CASE WHEN loc.present = 1 THEN loc.image_count END AS image_count, "
         "       f.id IN (SELECT value FROM json_each(?)) AS copy_facts_class, "
         "       f.id IN (SELECT value FROM json_each(?)) AS absorbed, "
-        "       date(h.date_obs, '-12 hours') AS night, fn.body AS note "
+        "       date(h.date_obs, '-12 hours') AS night, fn.body AS note, ? AS library_root "
         "FROM frame f "
         "LEFT JOIN header h ON h.frame_id = f.id "
         "LEFT JOIN config c ON c.id = f.config_id "
@@ -3693,7 +3884,7 @@ def base_rows(con, frame_ids):
         "WHERE f.id IN (SELECT value FROM json_each(?)) "
         "ORDER BY f.id",
         (json.dumps(copy_facts_class(con)), json.dumps(sorted(absorbed_frame_ids(con))),
-         json.dumps(list(frame_ids))),
+         library_root_from_db(con), json.dumps(list(frame_ids))),
     ).fetchall()
 
 

@@ -8,6 +8,9 @@
 horreum*.db
 custos*.db
 manifest*.sqlite
+# plany DRY `rederive-kind` / `header-fix` lądują domyślnie obok bazy (stan, nie kod)
+plan_rederive-kind_*/
+plan_header-fix_*/
 
 # === Scratch / materializacja na NVMe (jednorazowe projekcje WBPP) ===
 scratch/

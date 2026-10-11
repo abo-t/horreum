@@ -1292,7 +1292,7 @@ def test_stan_wiersza_data_i_korzenie_kart():
     assert is_harvested(row(0, 3, 0), fresh=(0, 3, 0)) and not is_harvested(row(0, 3, 0), fresh=(1, 3, 0))
     # AR-104: stos bez rodowodu dokładnego trzyma folder - własny stan i własne zdanie, nie „skasuj”.
     z_rodowodem = harvest.ReleaseRow("K", "K/OBJECTS/X", "X", None, "K/OBJECTS/X/out", 0, 3, 0,
-                                     lineage=(("s", (1, 2), "K/STACKS/s.xisf"),))
+                                     lineage=(("s", (1, 2), "K/STACKS/s.xisf", "X"),))
     assert release_state_text(z_rodowodem) == "wciągnięte 3 · rodowód do zapisania 1"
     assert not is_harvested(z_rodowodem) and needs_lineage(z_rodowodem) and not needs_review(z_rodowodem)
     assert not is_harvested(z_rodowodem, fresh=(0, 3, 0)) and not needs_lineage(z_rodowodem, fresh=(1, 3, 0))
@@ -1477,7 +1477,9 @@ def test_stos_z_wydania_do_stacks_korzen_archiwum_i_rodowod_po_przyjeciu(qapp, t
     assert _stan(dlg, 0) == "wciągnięte 3 · rodowód do zapisania 2" and not dlg.rel_done_note.isHidden()
     dlg.btn_accept.click()
     assert dlg.result() == QDialog.Accepted and dlg.harvested_root == str(archive)
-    assert sorted(dlg.harvested_stacks) == [("stos-crop", tuple(ids[:2])), ("stos-ha", tuple(ids[:2]))]
+    # kanon obiektu wydania jedzie ze zbiorem (AR-103: gospodarz porówna go z obiektem stosu)
+    assert sorted(dlg.harvested_stacks) == [("stos-crop", tuple(ids[:2]), "IC1795"),
+                                            ("stos-ha", tuple(ids[:2]), "IC1795")]
     con.close()
 
 
@@ -1533,7 +1535,7 @@ def test_ar100_kopie_nieznane_bazie_bez_placed_daja_przyjecie(qapp, tmp_path, us
     assert dlg2.harvested_stacks == []
     dlg.btn_accept.click()
     assert dlg.result() == QDialog.Accepted and dlg.harvested_root == str(archive)
-    assert dlg.harvested_stacks == [("stos-ha", tuple(ids[:2]))]
+    assert dlg.harvested_stacks == [("stos-ha", tuple(ids[:2]), "IC1795")]
     assert out.exists()
     con.close()
 
@@ -1600,9 +1602,11 @@ def test_ar104_zwykle_zamknij_dostawa_ponowne_okno_oddaje_zbior_dokladny(qapp, t
     assert dlg2.summary == f"Stosy do rodowodu dokładnego po Dostawie: 2 → {seat}"
     dlg2.btn_accept.click()
     assert dlg2.result() == QDialog.Accepted and dlg2.harvested_root == str(archive)
-    assert sorted(dlg2.harvested_stacks) == [("stos-crop", tuple(ids[:2])), ("stos-ha", tuple(ids[:2]))]
+    # kanon wydania ze zbiorem także dla stosów z zeznania (`_pending_stack`)
+    assert sorted(dlg2.harvested_stacks) == [("stos-crop", tuple(ids[:2]), "IC1795"),
+                                             ("stos-ha", tuple(ids[:2]), "IC1795")]
 
-    for sha, wejscia in dlg2.harvested_stacks:                         # gospodarz po łańcuchu (`app._zdanie_rodowodu`)
+    for sha, wejscia, _kanon in dlg2.harvested_stacks:                       # gospodarz po łańcuchu (`app._zdanie_rodowodu`)
         assert stacks.record_harvest_inputs(con, master_sha1_data=sha, input_frame_ids=wejscia,
                                             now=NOW)["reason"] is None
     dlg3 = _dlg(con, archive, work_root=str(work))

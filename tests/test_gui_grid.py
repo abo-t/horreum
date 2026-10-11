@@ -2523,7 +2523,8 @@ def test_flaga_deklarowanych_klatek_sie_odmienia(n, fraza):
 
     Falsyfikator: wróć `i18n.t("grid.lin.flag.declared", …)` → forma jedna i parametryzacja czerwienieje."""
     head = {"inputs": [], "shared": 0, "telescope_mismatch": 0, "twins": 0, "excluded": 0,
-            "declared_rows": n, "utc_offset_min": None, "raw_unreferenced": 0}
+            "declared_rows": n, "utc_offset_min": None, "raw_unreferenced": 0,
+            "lineage_basis": None, "outside_window": 0, "used_rows": None, "window_rows": 0}
     _ostrz, info = grid_mod._lineage_flags(head)
     assert info == fraza
 
@@ -2581,7 +2582,7 @@ def test_gest_odniesienia_DOMYKA_SIE_sam(view, gcon):
     view._toggle_panel("lineage")
 
     wolane = []
-    view.run_stage_fn = lambda: wolane.append("stack_lineage") or None
+    view.run_stage_fn = lambda etap: wolane.append(etap) or None
     komunikaty = []
     view.status_message.connect(komunikaty.append)
     view.lineage_bar.offset_asked.emit(60)
@@ -2590,7 +2591,7 @@ def test_gest_odniesienia_DOMYKA_SIE_sam(view, gcon):
     assert gcon.execute("SELECT utc_offset_min FROM integration WHERE id = 5").fetchone()[0] == 60
     assert "liczę" in komunikaty[-1]
 
-    view.run_stage_fn = lambda: "etap już biegnie"
+    view.run_stage_fn = lambda _etap: "etap już biegnie"
     view.lineage_bar.offset_asked.emit(120)
     assert "NIE policzony" in komunikaty[-1] and "biegnie" in komunikaty[-1]
     assert gcon.execute("SELECT utc_offset_min FROM integration WHERE id = 5").fetchone()[0] == 120, \
@@ -2740,7 +2741,9 @@ def test_panel_pokazuje_os_kalibracji_dla_klatki_nieba(view, gcon):
     assert bar.items.count() == 2                       # dark + flat, zawsze obie klasy
     teksty = [bar.items.item(i).text() for i in range(2)]
     assert any("/a/f3.xisf" in t for t in teksty)       # powiązany master pokazuje SWOJĄ ścieżkę
-    assert "1 z 2" in bar.head.text()
+    # Nagłówek per klasa z nazwą klatki: „f1.fits - ciemność (dark): brak · pole (flat): jest".
+    assert "f1" in bar.head.text() and "pole (flat): jest" in bar.head.text()
+    assert "ciemność (dark): brak" in bar.head.text()
     # Werdykt ręki NIE ISTNIEJE w tej osi — `calibration` nie zna kolumny `excluded`, więc przyciski
     # nie mają w co trafić. Widoczne, ale bezczynne byłyby obietnicą bez pokrycia.
     assert bar.action_row.isHidden()
@@ -2753,7 +2756,7 @@ def test_panel_kalibracji_odroznia_nieliczone_od_braku(view, gcon):
     assert _zaznacz_frame(view, 1)
     view._toggle_panel("lineage")
     bar = view.lineage_bar
-    assert "Skalibrowana: 0 z 2" in bar.head.text()
+    assert "ciemność (dark): brak · pole (flat): brak" in bar.head.text()
     assert bar.warn.full_text() == ""                   # nic nie czeka na przeliczenie — brak ⚠
     # POWÓD LUKI MUSI BYĆ NA EKRANIE, nie tylko w modelu — i ma być POWODEM TEJ klatki: light
     # fixture'u nie niesie nastawy, więc uczciwe jest „nie wiadomo, czego szukać", a nie zdanie
@@ -2795,9 +2798,10 @@ def test_panel_kalibracji_przyznaje_sie_do_znikniętego_mastera(view, gcon):
     assert "plik zniknął z dysku" in teksty and "#3" in teksty
 
 
-def test_panel_kalibracji_nie_zgaduje_ktora_klatke_opisuje(view, gcon):
-    """Zaznaczenie light + klatka kalibracyjna: panel NIE odpowiada o lighcie po cichu — nagłówek
-    nie nazywa klatki, więc użytkownik nie miałby jak sprawdzić, o której z nich mowa (CAPTAIN)."""
+def test_panel_kalibracji_przy_lighcie_z_klatka_kalibracyjna_mowi_o_lighcie_po_imieniu(view, gcon):
+    """Zaznaczenie light + klatka kalibracyjna: w zaznaczeniu jest JEDNA klatka nieba, a nagłówek
+    panelu ją NAZYWA, więc odpowiedź o niej nie jest zgadywaniem. Dawne „zostaw jedną” było
+    ceremonią z czasów nagłówka bez nazwy (jedna interakcja mniej)."""
     view.refresh()
     idx = {}
     for i, r in enumerate(view.model._rows):
@@ -2809,7 +2813,8 @@ def test_panel_kalibracji_nie_zgaduje_ktora_klatke_opisuje(view, gcon):
         view.table.model().index(idx[3], 0),
         QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows)
     view._toggle_panel("lineage")
-    assert "Zostaw jedną" in view.lineage_bar.head.text()
+    assert view.lineage_bar.head.text().startswith("f1"), view.lineage_bar.head.text()
+    assert view.lineage_bar._light_id == 1
 
 
 def test_przelaczenie_osi_wraca_z_zanizonym_sufitem_listy(view, gcon):

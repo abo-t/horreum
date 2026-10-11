@@ -68,6 +68,8 @@ from .resolve.filters import normalize_filter
 from .resolve.frames import kind_dir_segments
 from .resolve.paths import CATEGORY_DIRS, STACKS_DIR
 from .resolve.stack import read_testimony
+# Rdzeń nazwy wejścia ↔ nazwy lightu: jeden właściciel reguły dla żniw i rodowodu stosów (AR-108).
+from .resolve.stack import NameIndex, raw_stem  # noqa: F401 (API `harvest.raw_stem`)
 
 # Konwencja archiwum (Custos): `CALIBRATION\masters\flats\<zestaw>\<filtr>`. Folder, a nie tabela,
 # bo silnik go nie potrzebuje - skan klasyfikuje po `IMAGETYP`, kalibracja czyta nagłówek, a `FLATGRP`
@@ -128,14 +130,6 @@ def discover(wbpp_dir, *, should_cancel=None):
                 continue
             out.append(os.path.join(dirpath, name))
     return sorted(out)
-
-
-def raw_stem(path):
-    """Rdzeń nazwy surowego flatu z BAZY: basename bez rozszerzenia, małymi literami, nic więcej.
-    Separatory `/` i `\\` oba. Strona bazy NIE zdejmuje `_c`: nazwa surowego flatu nigdy nie niesie
-    dopisku WBPP, więc surowy `…_c.fits` jest własną nazwą klatki, a jego wejście w historii to
-    `…_c_c.xisf` (`input_stem` zdejmie jedno `_c` i trafi)."""
-    return os.path.splitext(re.split(r"[\\/]", str(path))[-1])[0].lower()
 
 
 def input_stem(path):
@@ -242,6 +236,13 @@ class HarvestItem:
     detail: str | None = None
     known_to_db: bool = True
     src_mtime_ns: int | None = None
+
+    @property
+    def release_canon(self):
+        """Kanon obiektu wydania (`release[0]`) albo `None` - stos niesie go do gospodarza okna
+        żniw, który po łańcuchu Dostawy porównuje go z obiektem stosu z nagłówka
+        (`stacks.release_object_check`, AR-103)."""
+        return self.release[0] if self.release else None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -443,11 +444,16 @@ def _names_index(witness, copies=None):
     """Rdzeń nazwy lightu (`raw_stem`) → `{(zestaw, frame_id)}` ze zbioru wydania. Nazwy z manifestu
     (`names` - pod tymi nazwami WBPP dostał lighty); zestaw zapisany przed tym polem bierze nazwy
     obecnych kopii swoich lightów z bazy (`copies`, `queries.light_copies`), a bez bazy (`copies=None`,
-    audyt kalibracji) nie świadczy. `frame_id` `None` = nazwa dwóch klatek w zestawie (manifest)."""
-    index = {}
+    audyt kalibracji) nie świadczy. `frame_id` `None` = nazwa dwóch klatek w zestawie (manifest).
+
+    Indeks to `resolve.stack.NameIndex` - TA SAMA reguła tożsamości wejścia co w rodowodzie stosów
+    (`match_stem` ∪ rdzeń bez końcowych dopisków WBPP): wejście bez `_c` (`x_r`, lighty
+    nieskalibrowane) daje w obu drogach ten sam werdykt. Nazwy wydania to nazwy, pod którymi WBPP
+    dostał lighty, więc idą jako `dawne` (z luźnym rdzeniem)."""
+    dawne = []
     zestawy = witness.get("zestawy") if witness is not None else None
     if not isinstance(zestawy, dict):
-        return index
+        return NameIndex.build()
     for seg in sorted(zestawy):
         z = zestawy[seg]
         if not isinstance(z, dict):
@@ -459,22 +465,8 @@ def _names_index(witness, copies=None):
             pary = [(p, fid) for fid, paths in copies(ids).items() for p in paths]
         else:
             continue
-        for name, fid in pary:
-            index.setdefault(raw_stem(name), set()).add((seg, fid))
-    return index
-
-
-def _match_stem(stem, index):
-    """Trafienia rdzenia wejścia w nazwy wydania: lighty `L`, dla których
-    `re.fullmatch(re.escape(L) + r"_c(?:_.*)?", stem)` - wejście to nazwa lightu + `_c` (kalibracja WBPP)
-    i dalsze kroki po `_` (`_c_r`, `_c_d_r`). Liczone po pozycjach `_c` w rdzeniu wejścia, nie po
-    wszystkich nazwach wydania: `L` jest prefiksem rdzenia ucięciem tuż przed takim `_c`. Wejście
-    `a_crop_c_r` NIE trafia w light `a` (po `_c` stoi `r`, nie `_`)."""
-    hits = set()
-    for i in range(len(stem) - 1):
-        if stem[i:i + 2] == "_c" and (i + 2 == len(stem) or stem[i + 2] == "_"):
-            hits |= index.get(stem[:i], set())
-    return hits
+        dawne.extend(((seg, fid), raw_stem(name)) for name, fid in pary)
+    return NameIndex.build(dawne=dawne)
 
 
 def _light_tail(path):
@@ -515,8 +507,9 @@ def _stack_header_mismatch(t, fakty):
     `None`. Filtr kanonem (`normalize_filter`), ekspozycja progiem (`stacks.exposure_matches` - jedyny
     właściciel), `TELESCOP` jak w grupowaniu (`strip`, wobec `telescop_canon` configu lightów),
     `INSTRUME` przez `normalize_camera` (wobec modelu kamery lightów). `OBJECT` nie jest porównywany:
-    WBPP przepisuje kartę lightu, a ta bywa potoczna (`Heart of the Soul Nebula`) - obiekt sprawdza
-    oś obiektu po Dostawie. `DATE-OBS` waliduje nazwa (`naming.stack_name`)."""
+    WBPP przepisuje kartę lightu, a ta bywa potoczna (`Heart of the Soul Nebula`) - obiekt stosu
+    porównuje z obiektem wydania gospodarz okna po łańcuchu Dostawy (`stacks.release_object_check`,
+    gest „Przypisz obiekt wydania”). `DATE-OBS` waliduje nazwa (`naming.stack_name`)."""
     h = {str(k).upper(): v for k, v in t.header.items()}
     fakty = list(fakty)
     filtr = normalize_filter(t.filter_raw)
@@ -553,7 +546,7 @@ def _plan_stack(con, item, t, ctx, reserved):
     2. manifest wydania obiektu wymagany → inaczej `no_release` (`detail` = biblioteka `STACKS`, do
        której człowiek kopiuje taki stos ręką);
     3. historia: brak → `no_history`, zero włączonych wejść → `no_inputs`;
-    4. wejścia ↔ nazwy wydania (`_match_stem`): wejście trafiające w dwie klatki → `inputs_ambiguous`,
+    4. wejścia ↔ nazwy wydania (`NameIndex.hits`): wejście trafiające w dwie klatki → `inputs_ambiguous`,
        bez trafienia → `outside_release`, wejścia z kilku zestawów → `outside_release` (wejścia spoza
        zestawu większości); jeden zestaw → `release`, `frame_ids`;
     5. lighty z manifestu, których baza nie zna jako lightów → `inputs_unknown`; nagłówek wobec lightów
@@ -591,7 +584,7 @@ def _plan_stack(con, item, t, ctx, reserved):
 
     wiele, poza, pary = [], [], []
     for p in t.inputs_enabled:
-        hits = _match_stem(raw_stem(p), ctx.names)
+        hits = ctx.names.hits(p)
         if len(hits) > 1 or any(fid is None for _seg, fid in hits):
             wiele.append(p)
         elif not hits:
@@ -1016,7 +1009,7 @@ def audit_calibration(out_dir, manifest):
 
     Dla każdego katalogu pod `<out_dir>\\calibrated` czyta nagłówek PIERWSZEGO `*_c.xisf` (WBPP kalibruje
     grupę jednym kompletem masterów), przypisuje go do zestawu manifestu po nazwie lightu (ta sama
-    reguła co wejścia stosu, `_match_stem`; nazwy wyłącznie z manifestu - bez bazy zestaw zapisany przed
+    reguła co wejścia stosu, `NameIndex.hits`; nazwy wyłącznie z manifestu - bez bazy zestaw zapisany przed
     polem `names` nie świadczy) i sprawdza LEKSYKALNIE: master flat ma leżeć pod `<wydanie>\\<zestaw>\\
     MASTER\\` (master z wydania) albo `<out_dir>\\master\\` (zbudowany w tej sesji z surowych flatów
     wydania), master dark pod `<wydanie>\\<zestaw>\\MASTER\\` (darki wydanie daje wyłącznie jako
@@ -1038,7 +1031,7 @@ def audit_calibration(out_dir, manifest):
         kalibrowane = sorted(n for n in filenames if n.lower().endswith(_CALIBRATED_SUFFIXES))
         if not kalibrowane:
             continue
-        hits = _match_stem(raw_stem(kalibrowane[0]), index)
+        hits = index.hits(kalibrowane[0])
         if len(hits) != 1:
             continue
         ((seg, fid),) = hits
@@ -1081,7 +1074,8 @@ class ReleaseRow:
     wydania. Brak kandydatów albo nieczytelny `ts` → `False` (stan „czeka na WBPP” niosą wtedy zera).
 
     `lineage` = stosy wciągnięte z tego wyjścia, których rodowodu DOKŁADNEGO baza jeszcze nie ma
-    (`stacks.harvest_lineage_pending`): `(sha1_data, frame_ids, ścieżka kopii pod STACKS)` - zbiór wejść
+    (`stacks.harvest_lineage_pending`): `(sha1_data, frame_ids, ścieżka kopii pod STACKS, kanon obiektu
+    wydania albo None)` - zbiór wejść
     leży wtedy tylko w zeznaniu żniw w tym folderze (AR-104). Liczone wyłącznie z bazą i archiwum
     (`releases(..., archive_root=, con=)`); bez nich puste."""
     root: str
@@ -1153,10 +1147,12 @@ def _src_mtime_ns(pozycja):
 
 def _pending_stack(con, klucz, mtime_ns, zeznania, stacks_root):
     """Stos pliku `klucz`, którego rodowodu DOKŁADNEGO baza jeszcze nie ma → `(sha1_data, frame_ids,
-    kopia)` albo `None` (AR-104). Zbiór wejść bierze NAJNOWSZE zeznanie, które go niesie dla pliku
-    niezmienionego od SWOJEGO planu, przy pozycji `placed`/`exists`: bieg nad stosem, który baza już
-    zna, zeznaje `exists` bez zbioru - zbiór zna starsze zeznanie wciągnięcia. Pozycja `review` też
-    bywa ze zbiorem (`_plan_stack` ustawia `frame_ids` przed odmową nagłówka i kalibracji), ale to
+    kopia, kanon obiektu wydania)` albo `None` (AR-104). Kanon (`release[0]` tej samej pozycji
+    zeznania - plan stawia go razem ze zbiorem; `None`, gdy pozycja go nie niesie) jedzie z AR-103:
+    gospodarz porównuje go po łańcuchu z obiektem stosu. Zbiór wejść bierze NAJNOWSZE zeznanie,
+    które go niesie dla pliku niezmienionego od SWOJEGO planu, przy pozycji `placed`/`exists`: bieg
+    nad stosem, który baza już zna, zeznaje `exists` bez zbioru - zbiór zna starsze zeznanie
+    wciągnięcia. Pozycja `review` też bywa ze zbiorem (`_plan_stack` ustawia `frame_ids` przed odmową nagłówka i kalibracji), ale to
     zbiór stosu, którego żniwa NIE przyjęły - nie świadczy. Kopia = obecna kopia znana bazie pod
     `STACKS` archiwum, bez niej - plik z zeznania, który dalej leży pod `STACKS`; bez żadnej nie ma
     czego przyjmować."""
@@ -1172,12 +1168,15 @@ def _pending_stack(con, klucz, mtime_ns, zeznania, stacks_root):
     sha1, ids = p["sha1_data"], tuple(sorted(set(ids)))
     if not stacks.harvest_lineage_pending(con, master_sha1_data=sha1, input_frame_ids=ids):
         return None
+    wydanie = p.get("release")
+    kanon = (wydanie[0] if isinstance(wydanie, list) and wydanie and isinstance(wydanie[0], str)
+             else None)
     znane = [x for x in queries.present_paths_by_sha1_data(con, sha1) if _under(x, stacks_root)]
     zeznana = p.get("dst") or p.get("exists_path")
     if znane:
-        return sha1, ids, znane[0]
+        return sha1, ids, znane[0], kanon
     if zeznana and _under(zeznana, stacks_root) and os.path.isfile(zeznana):
-        return sha1, ids, zeznana
+        return sha1, ids, zeznana, kanon
     return None
 
 

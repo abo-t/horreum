@@ -10,8 +10,9 @@ po tym samym geście tylko tak długo, jak kopie się nie rozjechały.
 RODOWÓD STOSÓW (`stack_lineage`) ZAMYKA ŁAŃCUCH (AR-85): dobór okna stoi na osi obiektu i osi
 teleskopu (`group`, `resolve`), więc Dostawa, która je zmieni, zostawiała rodowód stosów - z jego
 werdyktem `integration.unresolved_reason` - zamrożony do ręcznego przeliczenia. Etap czyta nagłówki
-XISF stosów z dysku (historia PixInsighta nie leży w bazie); zmierzone 2026-10-07 na kopii pf4:
-193 stosy, 86,7 MB nagłówków, 3,6 s przebiegu bez zmian, drugi przebieg zero zdarzeń zapisu.
+XISF stosów z bazy (`stack_history`, 0034 - pisze ją skan i etap `stack_history` niżej), a z dysku
+tylko tam, gdzie wiersza brak albo jego kotwica rozjechała się z nagłówkiem kopii; zmierzone
+2026-10-07 przed 0034: 193 stosy, 86,7 MB nagłówków z udziału przy każdym przebiegu.
 
 Przed pochodnymi stoją fakty kopii i przejęcie zeznania ocalałej kopii (`adopt_stages`): każdy
 etap od `group` czyta `header`, a przejęcie zmienia `header`, więc pochodne policzone przed nim
@@ -91,9 +92,24 @@ def adopt_stages(con, root, now, should_cancel=None, *, on_start=None, progress=
     if scan.adopt_candidates(con, root):
         if on_start is not None:
             on_start("adopt_testimony")
-        yield "adopt_testimony", scan.adopt_orphan_testimony(
+        a = scan.adopt_orphan_testimony(
             con, now=zegar(), root=root, progress=_etap(progress, "adopt_testimony"),
             should_cancel=should_cancel)
+        yield "adopt_testimony", a
+        if a.cancelled:
+            return
+    if scan.stack_history_candidates(con, root):
+        # HISTORIA STOSÓW (0034, AR-87): jeden odczyt nagłówka stosu bez wiersza `stack_history` -
+        # stosy sprzed migracji i z importu dawcy. Po pierwszym przebiegu SELECT pusty, etap milczy,
+        # a rodowód stosów czyta historię z bazy. PO przejęciu zeznania: przejęcie przepisuje
+        # `header_hash` kopii, więc wiersz zapisany wcześniej od razu byłby kandydatem (jeden
+        # nadprogramowy odczyt i przepis na następnej Dostawie). Postęp jak przy faktach kopii.
+        if on_start is not None:
+            on_start("stack_history")
+        h = scan.backfill_stack_history(con, now=zegar(), root=root,
+                                        progress=_etap(progress, "stack_history"),
+                                        should_cancel=should_cancel)
+        yield "stack_history", h
 
 
 def adopt_and_derive(con, root, now, should_cancel=None, *, derive_always=False, on_start=None,

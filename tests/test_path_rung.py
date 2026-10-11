@@ -467,8 +467,14 @@ def _stos(con, sha, path, object_raw=None):
 
 
 def _pusta():
+    """Baza z biblioteką KALIBRACJI obok `STACKS` (jeden dark pod `CALIBRATION`): korzeń archiwum
+    jest wiarygodny dopiero przy rodzeństwie bibliotek (`resolver.library_root_from_db`, E5-3), a bez
+    korzenia świadek drzewa stosów milczy. Dark nie ma obiektu, więc nie wchodzi do żadnej propozycji."""
     con = db.connect(":memory:")
     db.migrate(con)
+    fid, _ = repo.upsert_frame(con, sha1_data="biblioteka", kind="dark", filetype="fits",
+                               camera_id=None, now=NOW)
+    repo.add_location(con, frame_id=fid, volume="VOL", path=rf"{R}\CALIBRATION\darks\d.fit", now=NOW)
     return con
 
 

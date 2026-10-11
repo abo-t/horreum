@@ -212,7 +212,8 @@ def test_nowy_master_NIE_przepina_ogniwa_wskazanego_reka(con):
     run_lineage(con, now=NOW)
     # Ręka rozstrzyga: TEN flat, choćby jutro doszedł bliższy czasowo.
     assert repo.link_calibration(con, light_frame_id=lid, master_frame_id=stary, relation="flat",
-                                 now=NOW, asserted_by="user") is True
+                                 now=NOW, asserted_by="user", confidence="user",
+                                 expected=(stary, "horreum")) is True
 
     nowy = _frame(con, kind="master_flat", sha1="f_new", config_id=1, filter_canon="Ha",
                   date_obs="2024-05-01T00:00:00")               # bliżej lightu niż wskazany ręką
@@ -225,9 +226,518 @@ def test_nowy_master_NIE_przepina_ogniwa_wskazanego_reka(con):
     assert s.linked_new.get("flat") is None                     # przebieg NIE zapisał zmiany
     # FALSYFIKATOR: bramka broni przed AUTOMATEM, nie przed człowiekiem — ręka zmienia zdanie.
     assert repo.link_calibration(con, light_frame_id=lid, master_frame_id=nowy, relation="flat",
-                                 now=NOW, asserted_by="user") is True
+                                 now=NOW, asserted_by="user", confidence="user",
+                                 expected=(stary, "user")) is True
     assert con.execute("SELECT master_frame_id FROM calibration WHERE light_frame_id=? "
                        "AND relation='flat'", (lid,)).fetchone()[0] == nowy
+
+
+# --- GEST RĘKI NA OSI KALIBRACJI (E4-5) i rekoncyliacja luki (AR-81) ---
+
+def _ogniwo(con, lid, relation="flat"):
+    r = con.execute("SELECT master_frame_id, asserted_by, confidence FROM calibration "
+                    "WHERE light_frame_id=? AND relation=?", (lid, relation)).fetchone()
+    return None if r is None else tuple(r)
+
+
+def _ile(con, verb):
+    return con.execute("SELECT count(*) FROM event WHERE verb=?", (verb,)).fetchone()[0]
+
+
+def _druga_kamera(con):
+    con.execute("INSERT INTO camera(model_canon, pixel_um, is_mono, created_at) "
+                "VALUES ('ASI2600MC', 3.76, 0, ?)", (NOW,))
+    con.commit()
+    return con.execute("SELECT id FROM camera WHERE model_canon='ASI2600MC'").fetchone()[0]
+
+
+def test_gest_reki_wskazuje_master_SPOZA_przepisu_i_przebieg_go_nie_rusza(con):
+    """Decyzja: ręka wskazuje dowolny master, także spoza przepisu, z `confidence='user'`.
+    Light Ha dostaje masterflat OIII tej samej kamery - przepis by go nie wybrał. Przebieg potem
+    liczy light jako skalibrowany i niczego nie zapisuje (ani nie przepina, ani nie zdejmuje)."""
+    ha = _frame(con, kind="master_flat", sha1="f_ha", config_id=1, filter_canon="Ha",
+                date_obs="2024-05-01T00:00:00")
+    oiii = _frame(con, kind="master_flat", sha1="f_oiii", config_id=1, filter_canon="OIII",
+                  date_obs="2023-01-01T00:00:00")
+    lid = _frame(con, kind="light", sha1="l1", config_id=1, filter_canon="Ha",
+                 date_obs="2024-06-01T00:00:00")
+    run_calibration(con, now=NOW)
+    run_lineage(con, now=NOW)
+    assert _ogniwo(con, lid) == (ha, "horreum", "recipe")
+
+    assert repo.link_calibration(con, light_frame_id=lid, master_frame_id=oiii, relation="flat",
+                                 now=NOW, actor="user:local", asserted_by="user",
+                                 confidence="user", expected=(ha, "horreum")) is True
+    assert _ogniwo(con, lid) == (oiii, "user", "user")
+    ev = json.loads(con.execute("SELECT payload FROM event WHERE verb='calibration.linked' "
+                                "ORDER BY id DESC LIMIT 1").fetchone()[0])
+    assert ev["before"] == [ha, "horreum"] and ev["asserted_by"] == "user"
+
+    ev_przed = con.execute("SELECT count(*) FROM event").fetchone()[0]
+    s = run_lineage(con, now=NOW)
+    assert _ogniwo(con, lid) == (oiii, "user", "user")
+    assert s.linked.get("flat") == 1 and not s.linked_new and not s.unlinked
+    nowe = con.execute("SELECT verb FROM event WHERE id > ? AND verb IN "
+                       "('calibration.linked', 'calibration.unlinked')", (ev_przed,)).fetchall()
+    assert nowe == []                                     # zero eventów zapisu
+
+
+@pytest.mark.parametrize("przypadek, token", [
+    ("light_nie_light", "not_light"), ("zla_klasa", "not_master"), ("surowy", "not_master"),
+    ("wycofany", "inactive"), ("zastapiony", "inactive"), ("kamera", "camera"), ("dryf", "drift"),
+])
+def test_gest_reki_odmawia_z_tokenem_bez_zapisu(con, przypadek, token):
+    """Walidacja gałęzi ręki POD blokadą klingi: light musi być lightem, kalibrator aktywnym
+    masterem tej klasy i kamery, ogniwo w stanie, który człowiek widział. Każda odmowa niesie token
+    (zdanie składa ekran) i nie zostawia ani zapisu, ani eventu."""
+    ha = _frame(con, kind="master_flat", sha1="f_ha", config_id=1, filter_canon="Ha",
+                date_obs="2024-05-01T00:00:00")
+    lid = _frame(con, kind="light", sha1="l1", config_id=1, filter_canon="Ha",
+                 date_obs="2024-06-01T00:00:00")
+    run_calibration(con, now=NOW)
+    run_lineage(con, now=NOW)
+    cel, light, expected = ha, lid, (ha, "horreum")
+    if przypadek == "light_nie_light":
+        light = ha
+        expected = None
+    elif przypadek == "zla_klasa":
+        cel = _frame(con, kind="master_dark", sha1="d", path=MASTERDARK, exptime=300.0)
+    elif przypadek == "surowy":
+        cel = _frame(con, kind="flat", sha1="raw", config_id=1, filter_canon="Ha")
+    elif przypadek == "wycofany":
+        cel = _frame(con, kind="master_flat", sha1="f2", config_id=1, filter_canon="Ha")
+        con.execute("UPDATE frame SET retired_at=? WHERE id=?", (NOW, cel))
+    elif przypadek == "zastapiony":
+        cel = _frame(con, kind="master_flat", sha1="f2", config_id=1, filter_canon="Ha")
+        con.execute("UPDATE frame SET superseded_by=? WHERE id=?", (ha, cel))
+    elif przypadek == "kamera":
+        cel = _frame(con, kind="master_flat", sha1="f2", config_id=1, filter_canon="Ha")
+        con.execute("UPDATE frame SET camera_id=? WHERE id=?", (_druga_kamera(con), cel))
+    elif przypadek == "dryf":
+        cel = _frame(con, kind="master_flat", sha1="f2", config_id=1, filter_canon="Ha")
+        expected = None                                   # ekran widział „brak ogniwa”
+    con.commit()
+    ev_przed = con.execute("SELECT count(*) FROM event").fetchone()[0]
+
+    with pytest.raises(repo.KalibratorOdrzucony) as exc:
+        repo.link_calibration(con, light_frame_id=light, master_frame_id=cel, relation="flat",
+                              now=NOW, actor="user:local", asserted_by="user", confidence="user",
+                              expected=expected)
+    assert exc.value.token == token and token in repo.CALIBRATION_REFUSALS
+    assert _ogniwo(con, lid) == (ha, "horreum", "recipe")
+    assert con.execute("SELECT count(*) FROM event").fetchone()[0] == ev_przed
+    assert not con.in_transaction                         # odmowa zwolniła blokadę zapisu
+
+
+def test_gest_reki_bez_oczekiwanego_stanu_to_blad_wolajacego(con):
+    """`expected` jest wymagane w gałęzi ręki - brak to błąd programu (EXPECT), nie odmowa
+    z tokenem: ekran, który nie podaje, co widział, nie ma prawa pisać."""
+    ha = _frame(con, kind="master_flat", sha1="f_ha", config_id=1, filter_canon="Ha")
+    lid = _frame(con, kind="light", sha1="l1", config_id=1, filter_canon="Ha")
+    with pytest.raises(ValueError) as exc:
+        repo.link_calibration(con, light_frame_id=lid, master_frame_id=ha, relation="flat",
+                              now=NOW, asserted_by="user", confidence="user")
+    assert not isinstance(exc.value, repo.KalibratorOdrzucony)
+    assert _ogniwo(con, lid) is None
+
+
+def test_przywroc_automat_zdejmuje_reke_a_przebieg_odtwarza_dobor(con):
+    """„Przywróć automat” = `unlink_calibration` wiersza ręki (CAS na masterze, który człowiek
+    widział) + przebieg, który odtwarza ogniwo z przepisu. Lista dozwolonych źródeł należy do
+    wołającego: automatem ręki zdjąć się nie da."""
+    ha = _frame(con, kind="master_flat", sha1="f_ha", config_id=1, filter_canon="Ha",
+                date_obs="2024-05-01T00:00:00")
+    stary = _frame(con, kind="master_flat", sha1="f_old", config_id=1, filter_canon="Ha",
+                   date_obs="2020-01-01T00:00:00")
+    lid = _frame(con, kind="light", sha1="l1", config_id=1, filter_canon="Ha",
+                 date_obs="2024-06-01T00:00:00")
+    run_calibration(con, now=NOW)
+    run_lineage(con, now=NOW)
+    repo.link_calibration(con, light_frame_id=lid, master_frame_id=stary, relation="flat", now=NOW,
+                          actor="user:local", asserted_by="user", confidence="user",
+                          expected=(ha, "horreum"))
+
+    assert repo.unlink_calibration(con, light_frame_id=lid, relation="flat",
+                                   allowed=repo.CALIBRATION_AUTO_SOURCES, reason="no_profile",
+                                   now=NOW) is False      # automat ręki nie zdejmie
+    assert repo.unlink_calibration(con, light_frame_id=lid, relation="flat", allowed=("user",),
+                                   reason="user_restore", now=NOW, actor="user:local",
+                                   expected_master_frame_id=ha) is False   # nie to widział
+    assert _ogniwo(con, lid) == (stary, "user", "user")
+
+    assert repo.unlink_calibration(con, light_frame_id=lid, relation="flat", allowed=("user",),
+                                   reason="user_restore", now=NOW, actor="user:local",
+                                   expected_master_frame_id=stary) is True
+    assert _ogniwo(con, lid) is None
+    ev = json.loads(con.execute("SELECT payload FROM event WHERE verb='calibration.unlinked' "
+                                "ORDER BY id DESC LIMIT 1").fetchone()[0])
+    assert ev == {"relation": "flat", "master_frame_id": stary, "asserted_by": "user",
+                  "reason": "user_restore"}
+    ev_po = _ile(con, "calibration.unlinked")
+    assert repo.unlink_calibration(con, light_frame_id=lid, relation="flat", allowed=("user",),
+                                   reason="user_restore", now=NOW) is False   # idempotencja
+    assert _ile(con, "calibration.unlinked") == ev_po
+
+    s = run_lineage(con, now=NOW)
+    assert _ogniwo(con, lid) == (ha, "horreum", "recipe") and s.linked_new == {"flat": 1}
+
+
+def test_unlink_calibration_odmawia_liscie_spoza_0009_i_pustemu_powodowi(con):
+    lid = _frame(con, kind="light", sha1="l1", config_id=1, filter_canon="Ha")
+    for allowed, reason in (((), "x"), (("window",), "x"), (("user",), "")):
+        with pytest.raises(ValueError):
+            repo.unlink_calibration(con, light_frame_id=lid, relation="flat", allowed=allowed,
+                                    reason=reason, now=NOW)
+
+
+def test_AR81_luka_zdejmuje_ogniwo_automatu_a_reka_zostaje(con):
+    """AR-81: przejęcie zeznania zeruje filtr lighta, profilu bez filtra nie ma - `_decide` daje
+    lukę. Do tej zmiany przebieg robił `continue` i zostawiał ogniwo do flatu dawnego filtra.
+    Teraz zdejmuje ogniwo AUTOMATU (event z tokenem luki, licznik `unlinked`), a wskazanie ręki
+    stoi i liczy się jako kalibrator, nie jako luka. Drugi przebieg: zero zmian, zero eventów
+    zapisu."""
+    ha = _frame(con, kind="master_flat", sha1="f_ha", config_id=1, filter_canon="Ha",
+                date_obs="2024-05-01T00:00:00")
+    auto = _frame(con, kind="light", sha1="l_auto", config_id=1, filter_canon="Ha",
+                  date_obs="2024-06-01T00:00:00")
+    reka = _frame(con, kind="light", sha1="l_reka", config_id=1, filter_canon="Ha",
+                  date_obs="2024-06-01T00:00:00")
+    run_calibration(con, now=NOW)
+    run_lineage(con, now=NOW)
+    repo.link_calibration(con, light_frame_id=reka, master_frame_id=ha, relation="flat", now=NOW,
+                          actor="user:local", asserted_by="user", confidence="user",
+                          expected=(ha, "horreum"))
+    con.execute("UPDATE frame SET filter_canon = NULL WHERE id IN (?, ?)", (auto, reka))
+    con.commit()
+
+    s = run_lineage(con, now=NOW)
+    assert _ogniwo(con, auto) is None
+    assert _ogniwo(con, reka) == (ha, "user", "user")
+    assert s.unlinked == {"flat": 1}
+    assert s.linked.get("flat") == 1                       # ręka = kalibrator, nie luka
+    assert {k: n for k, n in s.reasons.items() if k.startswith("flat")} == {
+        "flat: brak przepisu w archiwum": 1}
+    ev = json.loads(con.execute("SELECT payload FROM event WHERE verb='calibration.unlinked' "
+                                "ORDER BY id DESC LIMIT 1").fetchone()[0])
+    assert ev == {"relation": "flat", "master_frame_id": ha, "asserted_by": "horreum",
+                  "reason": "no_profile"}
+    podsumowanie = json.loads(con.execute(
+        "SELECT payload FROM event WHERE verb='calibration.lineage_summary' "
+        "ORDER BY id DESC LIMIT 1").fetchone()[0])
+    assert podsumowanie["unlinked"] == {"flat": 1}
+
+    zapisy = (_ile(con, "calibration.unlinked"), _ile(con, "calibration.linked"))
+    s2 = run_lineage(con, now=NOW)
+    assert not s2.unlinked and not s2.linked_new
+    assert (_ile(con, "calibration.unlinked"), _ile(con, "calibration.linked")) == zapisy
+
+
+def test_wycofany_master_wypada_z_doboru_przepisu(con):
+    """Kandydat przepisu jest AKTYWNY: master wycofany ręką przestaje być wybierany - light
+    przechodzi na następny w czasie, a gdy innego nie ma, ogniwo automatu znika (luka „brak
+    mastera”), zamiast wisieć na nagrobku."""
+    blisko = _frame(con, kind="master_flat", sha1="f_b", config_id=1, filter_canon="Ha",
+                    date_obs="2024-05-01T00:00:00")
+    daleko = _frame(con, kind="master_flat", sha1="f_d", config_id=1, filter_canon="Ha",
+                    date_obs="2020-01-01T00:00:00")
+    _frame(con, kind="flat", sha1="raw", config_id=1, filter_canon="Ha",
+           date_obs="2024-05-01T00:00:00")                  # surowy trzyma profil przy życiu
+    lid = _frame(con, kind="light", sha1="l1", config_id=1, filter_canon="Ha",
+                 date_obs="2024-06-01T00:00:00")
+    run_calibration(con, now=NOW)
+    run_lineage(con, now=NOW)
+    assert _ogniwo(con, lid)[0] == blisko
+
+    con.execute("UPDATE frame SET retired_at = ? WHERE id = ?", (NOW, blisko))
+    con.commit()
+    s = run_lineage(con, now=NOW)
+    assert _ogniwo(con, lid)[0] == daleko and s.linked_new == {"flat": 1}
+
+    con.execute("UPDATE frame SET superseded_by = ? WHERE id = ?", (blisko, daleko))
+    con.commit()
+    s = run_lineage(con, now=NOW)
+    assert _ogniwo(con, lid) is None and s.unlinked == {"flat": 1}
+    assert s.reasons.get("flat: brak mastera (są tylko surowe)") == 1
+
+
+def test_explain_light_kandydaci_przepis_najpierw_potem_spoza(con):
+    """Materiał gestu: aktywne mastery klasy i kamery lightu, najpierw z przepisu (rosnąco
+    odległością - pierwszy to wybór automatu), potem spoza przepisu. Bez nagrobków i bez cudzej
+    kamery - klinga i tak by ich odmówiła."""
+    from horreum.lineage import explain_light
+    ha_blisko = _frame(con, kind="master_flat", sha1="ha_b", config_id=1, filter_canon="Ha",
+                       date_obs="2024-05-31T00:00:00")
+    ha_daleko = _frame(con, kind="master_flat", sha1="ha_d", config_id=1, filter_canon="Ha",
+                       date_obs="2022-01-01T00:00:00")
+    oiii = _frame(con, kind="master_flat", sha1="oiii", config_id=1, filter_canon="OIII",
+                  date_obs="2024-06-02T00:00:00")
+    wycofany = _frame(con, kind="master_flat", sha1="ret", config_id=1, filter_canon="Ha",
+                      date_obs="2024-06-01T00:00:00")
+    obcy = _frame(con, kind="master_flat", sha1="obcy", config_id=1, filter_canon="Ha",
+                  date_obs="2024-06-01T00:00:00")
+    md = _frame(con, kind="master_dark", sha1="d1", path=MASTERDARK, exptime=300.0,
+                date_obs="2023-01-01T00:00:00")
+    con.execute("UPDATE frame SET retired_at = ? WHERE id = ?", (NOW, wycofany))
+    con.execute("UPDATE frame SET camera_id = ? WHERE id = ?", (_druga_kamera(con), obcy))
+    con.commit()
+    lid = _frame(con, kind="light", sha1="l1", config_id=1, filter_canon="Ha",
+                 date_obs="2024-06-01T00:00:00")
+    run_calibration(con, now=NOW)
+
+    stan = {r["relation"]: r for r in explain_light(con, lid)}
+    flat = [(c["master_frame_id"], c["in_recipe"], c["days_apart"]) for c in stan["flat"]["candidates"]]
+    assert flat == [(ha_blisko, True, 1), (ha_daleko, True, 882), (oiii, False, 1)]
+    assert stan["flat"]["pending"]                         # pierwszy z przepisu = wybór automatu
+    # Dark lightu bez nastawy: przepisu nie ma, kandydat jest - spoza przepisu.
+    assert [(c["master_frame_id"], c["in_recipe"]) for c in stan["dark"]["candidates"]] == [(md, False)]
+    assert stan["dark"]["candidates"][0]["master_path"] == MASTERDARK
+
+
+def test_odleglosc_w_dobach_ta_sama_dla_ogniwa_i_kandydata(con):
+    """Jeden master, jedna odległość: wiersz ogniwa i lista kandydatów liczą PEŁNE doby z wartości
+    bezwzględnej. `abs(timedelta.days)` zaokrąglało ujemną różnicę w dół - master 2 doby i 2 h
+    przed lightem miał w tym samym panelu „Δ 3” w wierszu i „Δ 2” w liście wyboru."""
+    from horreum.lineage import explain_light
+    mf = _frame(con, kind="master_flat", sha1="mf", config_id=1, filter_canon="Ha",
+                date_obs="2024-05-30T20:00:00")
+    lid = _frame(con, kind="light", sha1="l1", config_id=1, filter_canon="Ha",
+                 date_obs="2024-06-01T22:00:00")
+    run_calibration(con, now=NOW)
+    run_lineage(con, now=NOW)
+    flat = {r["relation"]: r for r in explain_light(con, lid)}["flat"]
+    assert flat["master_frame_id"] == mf
+    assert flat["days_apart"] == flat["candidates"][0]["days_apart"] == 2
+
+
+def _reka(con, lid, master, expected, relation="flat"):
+    return repo.link_calibration(con, light_frame_id=lid, master_frame_id=master, relation=relation,
+                                 now=NOW, actor="user:local", asserted_by="user",
+                                 confidence="user", expected=expected)
+
+
+def test_klinga_odmawia_zrodla_spoza_slownika_i_reki_bez_pewnosci_user(con):
+    """Słownik źródeł ma jedno miejsce (`CALIBRATION_SOURCES`), a wskazanie ręki niesie
+    `confidence='user'` - inna pewność przy źródle `user` kłamałaby o tym, skąd wiersz jest."""
+    ha = _frame(con, kind="master_flat", sha1="f_ha", config_id=1, filter_canon="Ha")
+    lid = _frame(con, kind="light", sha1="l1", config_id=1, filter_canon="Ha")
+    with pytest.raises(ValueError):
+        repo.link_calibration(con, light_frame_id=lid, master_frame_id=ha, relation="flat",
+                              now=NOW, asserted_by="window")
+    with pytest.raises(ValueError):
+        repo.link_calibration(con, light_frame_id=lid, master_frame_id=ha, relation="flat",
+                              now=NOW, asserted_by="user", confidence="recipe", expected=None)
+    assert _ogniwo(con, lid) is None
+    assert set(repo.CALIBRATION_AUTO_SOURCES) < set(repo.CALIBRATION_SOURCES)
+
+
+def test_druga_petla_zdejmuje_automat_klatki_ktora_przestala_byc_lightem(con):
+    """Ogniwo automatu klatki, która przestała być lightem (przeliczony rodzaj), znika z tokenem
+    `not_light` - pętla po lightach nigdy by go nie zobaczyła. Ręka zostaje; drugi przebieg 0."""
+    ha = _frame(con, kind="master_flat", sha1="f_ha", config_id=1, filter_canon="Ha",
+                date_obs="2024-05-01T00:00:00")
+    auto = _frame(con, kind="light", sha1="l_a", config_id=1, filter_canon="Ha",
+                  date_obs="2024-06-01T00:00:00")
+    reka = _frame(con, kind="light", sha1="l_r", config_id=1, filter_canon="Ha",
+                  date_obs="2024-06-01T00:00:00")
+    run_calibration(con, now=NOW)
+    run_lineage(con, now=NOW)
+    _reka(con, reka, ha, (ha, "horreum"))
+    con.execute("UPDATE frame SET kind = 'flat' WHERE id IN (?, ?)", (auto, reka))
+    con.commit()
+
+    s = run_lineage(con, now=NOW)
+    assert _ogniwo(con, auto) is None and _ogniwo(con, reka) == (ha, "user", "user")
+    assert s.unlinked == {"flat": 1}
+    ev = json.loads(con.execute("SELECT payload FROM event WHERE verb='calibration.unlinked' "
+                                "ORDER BY id DESC LIMIT 1").fetchone()[0])
+    assert (ev["reason"], ev["asserted_by"]) == ("not_light", "horreum")
+    assert not run_lineage(con, now=NOW).unlinked
+
+
+def test_reka_na_masterze_nieaktywnym_zostaje_i_mowi_o_tym(con):
+    """Wskazanie ręki na masterze wycofanym albo bez obecnej kopii przeżywa przebieg (ręka
+    nietykalna), ale `explain_light` mówi `master_active=False`, a przebieg liczy `hand_inactive`
+    i niesie go w zdarzeniu zbiorczym - stan „wskaż inny” nie jest cichy."""
+    from horreum.lineage import explain_light
+    ha = _frame(con, kind="master_flat", sha1="f_ha", path=r"R:\M\f_ha.xisf", config_id=1,
+                filter_canon="Ha", date_obs="2024-05-01T00:00:00")
+    oiii = _frame(con, kind="master_flat", sha1="f_o", path=r"R:\M\f_o.xisf", config_id=1,
+                  filter_canon="OIII", date_obs="2024-05-01T00:00:00")
+    lid = _frame(con, kind="light", sha1="l1", config_id=1, filter_canon="Ha",
+                 date_obs="2024-06-01T00:00:00")
+    run_calibration(con, now=NOW)
+    run_lineage(con, now=NOW)
+    _reka(con, lid, oiii, (ha, "horreum"))
+    assert {r["relation"]: r for r in explain_light(con, lid)}["flat"]["master_active"] is True
+    assert not run_lineage(con, now=NOW).hand_inactive
+
+    con.execute("UPDATE frame SET retired_at = ? WHERE id = ?", (NOW, oiii))
+    con.commit()
+    flat = {r["relation"]: r for r in explain_light(con, lid)}["flat"]
+    assert flat["master_active"] is False and flat["master_frame_id"] == oiii
+    s = run_lineage(con, now=NOW)
+    assert s.hand_inactive == {"flat": 1} and _ogniwo(con, lid) == (oiii, "user", "user")
+    ev = json.loads(con.execute("SELECT payload FROM event WHERE verb='calibration.lineage_summary' "
+                                "ORDER BY id DESC LIMIT 1").fetchone()[0])
+    assert ev["hand_inactive"] == {"flat": 1}
+
+    con.execute("UPDATE frame SET retired_at = NULL WHERE id = ?", (oiii,))
+    con.execute("UPDATE location SET present = 0 WHERE frame_id = ?", (oiii,))   # plik zniknął
+    con.commit()
+    assert {r["relation"]: r for r in explain_light(con, lid)}["flat"]["master_active"] is False
+    assert run_lineage(con, now=NOW).hand_inactive == {"flat": 1}
+
+
+def test_wskazanie_reki_przechodzi_na_nastepczynie_szosta_os(con):
+    """Szósta oś `transfer_human_facts`: wskazanie kalibratora ręką przechodzi z lightu
+    zastąpionego na następczynię (para eventów, licznik), nadpisując jej ogniwo AUTOMATU.
+    Kubełek `pending_transfer` je widzi i domyka się po geście; drugi gest niczego nie pisze."""
+    from horreum import supersede
+    ha = _frame(con, kind="master_flat", sha1="f_ha", config_id=1, filter_canon="Ha",
+                date_obs="2024-05-01T00:00:00")
+    oiii = _frame(con, kind="master_flat", sha1="f_o", config_id=1, filter_canon="OIII",
+                  date_obs="2024-05-01T00:00:00")
+    stara = _frame(con, kind="light", sha1="l_old", config_id=1, filter_canon="Ha",
+                   date_obs="2024-06-01T00:00:00")
+    nowa = _frame(con, kind="light", sha1="l_new", config_id=1, filter_canon="Ha",
+                  date_obs="2024-06-01T00:00:00")
+    run_calibration(con, now=NOW)
+    run_lineage(con, now=NOW)
+    _reka(con, stara, oiii, (ha, "horreum"))
+    assert repo.mark_superseded(con, frame_id=stara, superseded_by=nowa, now=NOW)
+    assert supersede.pending_transfer(con) == [(stara, nowa, "kalibracja")]
+
+    t = repo.transfer_human_facts(con, frame_id=stara, now=NOW)
+    assert t.calibration_moved == 1 and not t.skipped
+    assert _ogniwo(con, nowa) == (oiii, "user", "user") and _ogniwo(con, stara) is None
+    linked = json.loads(con.execute("SELECT payload FROM event WHERE verb='calibration.linked' "
+                                    "ORDER BY id DESC LIMIT 1").fetchone()[0])
+    assert (linked["przeniesione_z"], linked["before"]) == (stara, [ha, "horreum"])
+    unl = json.loads(con.execute("SELECT payload FROM event WHERE verb='calibration.unlinked' "
+                                 "ORDER BY id DESC LIMIT 1").fetchone()[0])
+    assert (unl["reason"], unl["przeniesione_na"]) == ("transferred", nowa)
+    assert supersede.pending_transfer(con) == []
+    assert repo.transfer_human_facts(con, frame_id=stara, now=NOW).skipped == "brak faktow czlowieka"
+    g = supersede.transfer_gesture(con, frame_ids=[stara], now=NOW)
+    assert g.done == 0 and g.calibration_moved == 0
+
+
+def test_wskazanie_reki_nie_przechodzi_na_nastepczynie_z_inna_kamera(con):
+    """Następczyni z inną kamerą niż master - wskazanie zostaje na klatce zastąpionej, gest mówi
+    „kalibrator nie pasuje”, a kubełek pary nie pokazuje (gest nie umiałby go opróżnić)."""
+    from horreum import supersede
+    ha = _frame(con, kind="master_flat", sha1="f_ha", config_id=1, filter_canon="Ha")
+    stara = _frame(con, kind="light", sha1="l_old", config_id=1, filter_canon="Ha")
+    nowa = _frame(con, kind="light", sha1="l_new", config_id=1, filter_canon="Ha")
+    _reka(con, stara, ha, None)
+    con.execute("UPDATE frame SET camera_id = ? WHERE id = ?", (_druga_kamera(con), nowa))
+    con.commit()
+    assert repo.mark_superseded(con, frame_id=stara, superseded_by=nowa, now=NOW)
+    assert supersede.pending_transfer(con) == []
+    t = repo.transfer_human_facts(con, frame_id=stara, now=NOW)
+    assert (t.calibration_moved, t.skipped) == (0, "kalibrator nie pasuje do nastepczyni")
+    assert _ogniwo(con, stara) == (ha, "user", "user") and _ogniwo(con, nowa) is None
+    g = supersede.transfer_gesture(con, frame_ids=[stara], now=NOW)
+    assert g.skipped == {"calibration_mismatch": 1}
+
+
+def test_wyrocznia_akceptacji_pomija_reke_i_nagrobki(con):
+    """Wyrocznia bramki (`scripts/acceptance_s5.py`) liczy regułę czasu wyłącznie dla ogniw
+    AUTOMATU i wyłącznie wśród aktywnych masterów; wskazanie ręki ma osobne kryterium
+    „ręka ⊆ aktywne mastery klasy i kamery lightu”."""
+    import importlib.util
+    import pathlib
+    sciezka = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "acceptance_s5.py"
+    spec = importlib.util.spec_from_file_location("acceptance_s5_t13", sciezka)
+    acc = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(acc)
+
+    blisko = _frame(con, kind="master_flat", sha1="f_b", config_id=1, filter_canon="Ha",
+                    date_obs="2024-05-30T00:00:00")
+    daleko = _frame(con, kind="master_flat", sha1="f_d", config_id=1, filter_canon="Ha",
+                    date_obs="2022-01-01T00:00:00")
+    oiii = _frame(con, kind="master_flat", sha1="f_o", config_id=1, filter_canon="OIII",
+                  date_obs="2020-01-01T00:00:00")
+    auto = _frame(con, kind="light", sha1="l_a", config_id=1, filter_canon="Ha",
+                  date_obs="2024-06-01T00:00:00")
+    reka = _frame(con, kind="light", sha1="l_r", config_id=1, filter_canon="Ha",
+                  date_obs="2024-06-01T00:00:00")
+    run_calibration(con, now=NOW)
+    con.execute("UPDATE frame SET retired_at = ? WHERE id = ?", (NOW, blisko))
+    con.commit()
+    run_lineage(con, now=NOW)
+    assert _ogniwo(con, auto)[0] == daleko                 # nagrobek wypadł z doboru
+    _reka(con, reka, daleko, (daleko, "horreum"))
+    _reka(con, reka, daleko, (daleko, "user"))             # idempotentnie - bez zmian
+    repo.link_calibration(con, light_frame_id=reka, master_frame_id=oiii, relation="flat",
+                          now=NOW, actor="user:local", asserted_by="user", confidence="user",
+                          expected=(daleko, "user"))
+    assert acc._check_nearest_in_time(con) is True
+    assert acc._check_hand_links_active(con) == 0
+    con.execute("UPDATE frame SET retired_at = ? WHERE id = ?", (NOW, oiii))
+    con.commit()
+    assert acc._check_hand_links_active(con) == 1
+
+
+def test_spis_reki_wyjasnia_zdjecie_gestem_przywroc_automat(con):
+    """`human-facts --baseline`: „Przywróć automat” zdejmuje wskazanie ręki z wyboru człowieka -
+    ślad w dzienniku po znaku wodnym wyjaśnia spadek `calibration_links`. Zdjęcie bez tego śladu
+    (aktor spoza ręki) zostaje ubytkiem."""
+    from horreum import audit
+    ha = _frame(con, kind="master_flat", sha1="f_ha", config_id=1, filter_canon="Ha")
+    l1 = _frame(con, kind="light", sha1="l1", config_id=1, filter_canon="Ha")
+    l2 = _frame(con, kind="light", sha1="l2", config_id=1, filter_canon="Ha")
+    _reka(con, l1, ha, None)
+    _reka(con, l2, ha, None)
+    przed = audit.human_facts_census(con)
+    assert przed.calibration_links == 2
+    repo.unlink_calibration(con, light_frame_id=l1, relation="flat", allowed=("user",),
+                            reason="user_restore", now=NOW, actor="user:local")
+    po = audit.human_facts_census(con)
+    zdjete = audit.calibration_hand_restored_since(con, przed.event_watermark)
+    assert zdjete == 1 and po.spadki(przed, zdjete_reka=zdjete) == {}
+    assert po.spadki(przed) == {"calibration_links": (2, 1)}       # bez dowodu - ubytek
+    repo.unlink_calibration(con, light_frame_id=l2, relation="flat", allowed=("user",),
+                            reason="user_restore", now=NOW, actor="skrypt")
+    po2 = audit.human_facts_census(con)
+    zdjete2 = audit.calibration_hand_restored_since(con, przed.event_watermark)
+    assert po2.spadki(przed, zdjete_reka=zdjete2) == {"calibration_links": (2, 0)}
+    assert audit.calibration_hand_restored_since(con, None) == 0
+
+
+def test_kandydaci_spoza_przepisu_nazywaja_niezgodnosc_zgodni_co_do_filtra_pierwsi(con):
+    """Wizytacja fali 4: dla lightu Ha lista spoza przepisu zaczynała się od flatów OIII. Kandydat
+    niesie `mismatch` (fakty przepisu różne od lightu); spoza przepisu najpierw zgodni co do filtra,
+    master bez profilu (nastawa nieznana, `None`) na końcu. Dark - ekspozycja tak samo."""
+    from horreum.lineage import explain_light
+    con.execute("INSERT INTO telescope(telescop_canon, status, created_at) "
+                "VALUES ('RC8', 'proposed', ?)", (NOW,))
+    con.execute("INSERT INTO config(telescope_id, camera_id, label, status, created_at) "
+                "VALUES (2, 1, 'RC8 x ASI2600MM', 'proposed', ?)", (NOW,))
+    con.commit()
+    ha = _frame(con, kind="master_flat", sha1="ha", config_id=1, filter_canon="Ha",
+                date_obs="2024-05-31T00:00:00")
+    oiii = _frame(con, kind="master_flat", sha1="oiii", config_id=1, filter_canon="OIII",
+                  date_obs="2024-05-31T00:00:00")                 # bliżej niż tel2
+    tel2 = _frame(con, kind="master_flat", sha1="tel2", config_id=2, filter_canon="Ha",
+                  date_obs="2023-01-01T00:00:00")
+    bez = _frame(con, kind="master_flat", sha1="bez", filter_canon="Ha",
+                 date_obs="2024-05-31T00:00:00")                  # bez teleskopu = bez profilu
+    md = _frame(con, kind="master_dark", sha1="d1", path=MASTERDARK, exptime=300.0,
+                date_obs="2023-01-01T00:00:00")
+    lid = _frame(con, kind="light", sha1="l1", config_id=1, filter_canon="Ha", exptime=120.0,
+                 set_temp=-10, gain=100, offset_adu=21, date_obs="2024-06-01T00:00:00")
+    run_calibration(con, now=NOW)
+
+    stan = {r["relation"]: r for r in explain_light(con, lid)}
+    flat = stan["flat"]["candidates"]
+    assert [c["master_frame_id"] for c in flat] == [ha, tel2, oiii, bez]
+    assert [c["mismatch"] for c in flat] == [
+        [], [{"fact": "tel", "master": "2", "light": "1"}],
+        [{"fact": "filt", "master": "OIII", "light": "Ha"}], None]
+    dark = stan["dark"]["candidates"]
+    assert [(c["master_frame_id"], c["mismatch"]) for c in dark] == [
+        (md, [{"fact": "exp", "master": "300.000", "light": "120.000"}])]
 
 
 def test_light_bez_date_obs_degeneruje_do_min_id_bez_crash(con):

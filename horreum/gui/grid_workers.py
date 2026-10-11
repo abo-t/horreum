@@ -12,10 +12,11 @@ import threading
 from PySide6.QtCore import QObject, Signal, Slot
 
 from horreum import db, filter_engine, pivot as pivot_mod, repo
-from horreum.gui import facet_model, portfolio, queries
+from horreum.gui import facet_model, i18n, portfolio, queries
 from horreum.gui import pola as pola_mod
 from horreum.gui import assign_dialog
-from horreum.gui.grid_model import _adnotuj_wersje, _derive, _dolacz_kopie
+from horreum.gui.grid_model import (_adnotuj_rodowod, _adnotuj_wersje, _derive, _dolacz_kopie,
+                                    _STANY_RODOWODU)
 
 
 class PolaWorker(QObject):
@@ -89,17 +90,22 @@ class PolaWorker(QObject):
 
 # ---- skład danych gridu (AR-27): czysty odczyt, bez widżetów - wątek GUI albo `ZbiorWorker` ----
 
-def _memo_leaf_fns(con):
+def _memo_leaf_fns(con, stany=None):
     """Memoizowane akcesory silnika na czas JEDNEGO składu (F4R2#4): sibling-sety facetów
     re-używają tych samych liści, więc cache `(kind,kw,p1,p2)→set` zwija 5N wywołań liści do N.
-    Jedna migawka DB per skład - cache umiera razem z nim (źródło prawdy = baza)."""
+    Jedna migawka DB per skład - cache umiera razem z nim (źródło prawdy = baza).
+
+    `stany` = stan rodowodu gotowych obrazów policzony RAZ na skład (`queries.stack_lineage_states`):
+    liść facetu „Rodowód" filtruje ten słownik zamiast liczyć read-model od nowa per wartość."""
     leaf_cache = {}
     universe_cache = []
 
     def leaf_fn(k, kw, p1, p2):
         key = (k, kw, p1, p2)
         if key not in leaf_cache:
-            leaf_cache[key] = queries.leaf_frame_ids(con, k, kw, p1, p2)
+            leaf_cache[key] = (queries.lineage_state_frame_ids(stany, p1)
+                               if k == "rel_lineage" and stany is not None
+                               else queries.leaf_frame_ids(con, k, kw, p1, p2))
         return leaf_cache[key]
 
     def universe_fn():
@@ -118,7 +124,10 @@ def _sklad_zbioru(con, stan, przerwij=lambda: None):
 
     Zwraca słownik dla `FramesView._zastosuj_zbior`: wiersze `base`, `pivot`, `keywords`, `base_ids`,
     liczniki listwy `listwa` i `baza_ma_klatki` (rozróżnienie pustego stanu, wiz F5 #8)."""
-    leaf_fn, universe_fn = _memo_leaf_fns(con)
+    # Stan rodowodu gotowych obrazów RAZ na skład: kolumna, liść facetu, widoczność grupy i liczniki
+    # listwy czytają ten sam słownik (jedna migawka, zero powtórzeń read-modelu).
+    stany = queries.stack_lineage_states(con)
+    leaf_fn, universe_fn = _memo_leaf_fns(con, stany)
     frame_ids = filter_engine.run(stan["drzewo"], leaf_fn=leaf_fn, universe_fn=universe_fn)
     # JEDNA derywacja trimu dla zbioru głównego I dla sibling-setów listwy (SPOT, F4R2#2) -
     # lista powstaje RAZ i idzie w obie strony. Dwie kopie tej enumeracji rozjechały się
@@ -133,6 +142,10 @@ def _sklad_zbioru(con, stan, przerwij=lambda: None):
     # `.get`: migawka sprzed tego składnika (test, który ją składa ręcznie) znaczy „bez uwag".
     if stan.get("uwagi") is not None:
         trims.append(set(queries.note_hits(con, stan["uwagi"])))
+    # KLATKI WSKAZANE WPROST (dwuklik w panelu rodowodu, `FramesView.show_frames`) - ta sama lista,
+    # więc i listwa liczy na nich, a nie na całym archiwum.
+    if stan.get("wskazane") is not None:
+        trims.append(set(stan["wskazane"]))
     # NOWY set, NIGDY `&=`: przy pustym filtrze `filter_engine.run` zwraca uniwersum WPROST
     # (`filter_engine.py:171`), a to jest ZAPAMIĘTANY obiekt memoizacji (`_memo_leaf_fns`).
     # `&=` przycinało go W MIEJSCU, więc kolejne `universe_fn()` widziało już przycięty zbiór -
@@ -141,6 +154,7 @@ def _sklad_zbioru(con, stan, przerwij=lambda: None):
         frame_ids = frame_ids & trim
     przerwij()
     base = [_derive(r) for r in queries.base_rows(con, list(frame_ids))]
+    _adnotuj_rodowod(base, stany)                 # kolumna „Rodowód" - ten sam słownik co facet
     if stan["wersje"]:
         _adnotuj_wersje(base, queries.stack_version_groups(con))
     # Fakty KOPII (0021) - pytamy wyłącznie o klatki z kilkoma obecnymi kopiami: kolumna
@@ -157,7 +171,7 @@ def _sklad_zbioru(con, stan, przerwij=lambda: None):
     pv = pivot_mod.build_pivot(base_ids, keywords, karty)
     przerwij()
     listwa = _liczniki_listwy(con, stan["facety"], stan["filtr"], leaf_fn, universe_fn,
-                              trims, base_ids)
+                              trims, base_ids, stany)
     # Uniwersum bierzemy z memoizowanego `universe_fn` TEGO składu - na niepustym gridzie
     # zapytania nie ma w ogóle, a gdy filtr już go dotknął, jest z cache'u.
     # Migawka wraca razem z wynikiem: przyłożenie mówi o składnikach TEGO zbioru (chipy Znajdź),
@@ -167,7 +181,8 @@ def _sklad_zbioru(con, stan, przerwij=lambda: None):
             "migawka": stan}
 
 
-def _liczniki_listwy(con, facet_state, filter_tree, leaf_fn, universe_fn, trims, current_ids):
+def _liczniki_listwy(con, facet_state, filter_tree, leaf_fn, universe_fn, trims, current_ids,
+                     stany=None):
     """Liczniki listwy facetów per SIBLING-SET (F4R#1): zbiór facetu F = compose bez CAŁEJ własnej
     grupy F (in+ex) - liczniki na pełnym zbiorze samo-zawężałyby facet i OR-wewnątrz byłby
     nieosiągalny. Facet BEZ aktywnego wyboru → sibling == zbiór bieżący (już policzony;
@@ -178,10 +193,23 @@ def _liczniki_listwy(con, facet_state, filter_tree, leaf_fn, universe_fn, trims,
     po cichu ominąć liczników listwy (to jest ta sama klasa rozjazdu, którą rodzina
     przechodziła już dwa razy).
 
+    `stany` = stan rodowodu z tego samego składu (`_sklad_zbioru`); `None` = policz tu, raz.
+
     Zwraca `(counts, extras, aliases, alias_forms)` - komplet argumentów `FacetRail.set_data`
     poza stanem i odsłonięciem, które należą do widoku (`FramesView._zastosuj_listwe`)."""
+    if stany is None:
+        stany = queries.stack_lineage_states(con)
     counts, extras = {}, {}
     for facet in facet_model.FACETS:
+        if facet == "lineage" and facet not in facet_state and not _same_gotowe_obrazy(
+                stany, current_ids):
+            # RODOWÓD WCHODZI DO LISTWY, GDY ZBIÓR TO GOTOWE OBRAZY (preset „Gotowe obrazy",
+            # Rodzaj = master_light, perspektywa rodowodu) albo gdy facet ma już wybór. Nad
+            # zbiorem mieszanym grupa stałaby zawsze (stosy są w każdym archiwum) i podnosiła
+            # podłogę okna o 74 px (zmierzone na kopii `pf4`: 825 → 899) dla pytania, które
+            # dotyczy jednego rodzaju. Pusta lista = grupa gaśnie (`FacetRail`, `_ZNIKAJACE`).
+            counts[facet] = []
+            continue
         if facet not in facet_state:
             ids = current_ids
         else:
@@ -195,7 +223,7 @@ def _liczniki_listwy(con, facet_state, filter_tree, leaf_fn, universe_fn, trims,
             for trim in trims:
                 sib = sib & trim
             ids = list(sib)
-        counts[facet] = _liczniki_facetu(con, facet, ids)
+        counts[facet] = _liczniki_facetu(con, facet, ids, stany)
         if facet == "object":
             # Portfel (F7 §8): godziny lightów per obiekt na TYM SAMYM `ids` co `facet_objects`
             # (parytet n↔godziny; inne aktywne facety zawężają godziny). Formatowanie = `portfolio`.
@@ -210,7 +238,12 @@ def _liczniki_listwy(con, facet_state, filter_tree, leaf_fn, universe_fn, trims,
     return (counts, extras, queries.object_alias_index(con), assign_dialog.formy_aliasow(con))
 
 
-def _liczniki_facetu(con, facet, ids):
+def _same_gotowe_obrazy(stany, ids):
+    """Czy niepusty zbiór `ids` składa się WYŁĄCZNIE z gotowych obrazów (klucze stanu rodowodu)."""
+    return bool(ids) and all(fid in stany for fid in ids)
+
+
+def _liczniki_facetu(con, facet, ids, stany=None):
     """Kubełki jednego facetu → list[(value, label, n)] (kontrakt `FacetRail.set_data`).
     Etykieta teleskopu = label→canon fallback z JEDNEGO właściciela (`queries.telescope_label`);
     filtr/rodzaj/noc są swoją własną etykietą."""
@@ -224,6 +257,10 @@ def _liczniki_facetu(con, facet, ids):
                 for r in queries.facet_channels(con, ids)]
     if facet == "kind":
         return [(r["kind"], r["kind"], r["n"]) for r in queries.facet_kinds(con, ids)]
+    if facet == "lineage":
+        # Etykieta z katalogu, nie token: wartość (token) niesie tożsamość, etykieta tylko mówi.
+        return [(stan, i18n.t(_STANY_RODOWODU[stan]), n)
+                for stan, n in queries.facet_lineage(con, ids, stany)]
     if facet == "telescope":
         return [(r["id"], queries.telescope_label(r), r["n"])
                 for r in queries.facet_telescopes(con, ids)]

@@ -890,3 +890,109 @@ def write_harvest_manifest(wbpp_dir, payload, *, now):
         with fh:
             json.dump(payload, fh, ensure_ascii=False, indent=2)
         return path
+
+
+# ============================================================ WARIANT KADRU STOSU (`horreum/stack_variants.py`)
+
+# Zeznanie pary wariant-oryginał leży OBOK kopii wariantu w `STACKS`: `_WARIANT_<nazwa kopii bez
+# rozszerzenia>.json`. Plik, nie wiersz bazy: kopię robi ręka Zdzinia (`stack-versions --apply`),
+# a bazę o niej informuje dopiero skan - konsument (`stack_variants.link_from_testimonies`) czyta
+# zeznanie po wjeździe obu klatek, także po restarcie programu między kopią a Dostawą. JSON nie jest
+# sufiksem nagłówkonośnym, więc skan go nie bierze.
+VARIANT_TESTIMONY_PREFIX = "_WARIANT"
+VARIANT_TESTIMONY_KIND = "horreum.stack_variant"
+
+
+def variant_testimony_path(copy_path):
+    """Ścieżka zeznania wariantu dla kopii `copy_path` (konwencja przy `VARIANT_TESTIMONY_PREFIX`)."""
+    katalog, nazwa = os.path.split(str(copy_path))
+    return os.path.join(katalog, f"{VARIANT_TESTIMONY_PREFIX}_{os.path.splitext(nazwa)[0]}.json")
+
+
+def read_variant_testimony(path):
+    """Zeznanie wariantu jako dict albo None (brak pliku, JSON nieczytelny, inny `kind`). Odczyt -
+    pisze wyłącznie `write_variant_testimony`, czyta konsument relacji i ponowienie zapisu."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            dane = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return dane if isinstance(dane, dict) and dane.get("kind") == VARIANT_TESTIMONY_KIND else None
+
+
+def _assert_stacks_library(dst, library_root):
+    """Strażnik wariantu: cel MUSI leżeć pod `<library_root>\\STACKS` (`_assert_archive_library`
+    dopuszcza też `CALIBRATION`, a wariant kadru jest gotowym obrazem, nie masterem kalibracji)."""
+    _assert_archive_library(dst, library_root)
+    korzen = os.path.normpath(os.path.abspath(str(library_root)))
+    cel = os.path.normpath(os.path.abspath(str(dst)))
+    if not cel.lower().startswith(os.path.join(korzen, STACKS_DIR).lower() + os.sep):
+        raise ValueError(f"cel wariantu {dst} leży poza biblioteką stosów {korzen}")
+
+
+def copy_stack_variant(src, dst, *, expected_sha1, library_root, sha1_fn=hashing.sha1_of):
+    """Kopia wariantu kadru (autocrop) do biblioteki `STACKS` obok kopii oryginału - `(status, reason)`.
+
+    Ta sama klinga no-clobber z audytem bajtów co kopia stosu żniw (`copy_master`: `.part`, `fsync`,
+    sha1 całego pliku == `expected_sha1`, publikacja `os.rename`), ten sam strażnik segmentu
+    biblioteki, zawężony do `STACKS`. Jedna różnica i to jest PONOWIENIE: cel, pod którym leżą już
+    TE SAME bajty (sha1 całego pliku), to `exists` - przerwany bieg (kopia zrobiona, zeznanie nie)
+    dokańcza się drugim `--apply`. Inne bajty pod celem → `conflict`, nic nie nadpisujemy.
+
+    Statusy: `placed` · `exists` · `conflict` · `verify_bad` · `error` (`copy_master`). Źródło
+    w starym drzewie zostaje nietknięte - kasacja starego drzewa to osobna decyzja (Custos/ręka)."""
+    _assert_stacks_library(dst, library_root)
+    if os.path.lexists(dst):
+        if os.path.isfile(dst) and sha1_fn(dst) == expected_sha1:
+            return "exists", None
+        return "conflict", str(dst)
+    return copy_master(src, dst, expected_sha1=expected_sha1, library_root=library_root,
+                       sha1_fn=sha1_fn)
+
+
+def write_variant_testimony(copy_path, payload, *, replace=None):
+    """Zapisz zeznanie wariantu obok kopii `copy_path` - `(status, ścieżka)`:
+    `written` (nowe zeznanie) · `replaced` (podmienione zeznanie `replace`) · `exists` (leży zeznanie
+    tej samej pary z tym samym świadkiem - `pair_id`, `source`; ponowienie) · `conflict` (leży inne
+    zeznanie, którego wołający nie kazał podmienić, albo
+    zmieniło się od chwili, gdy je przeczytał) · `part_exists` (pod `.part` leży cudzy plik roboczy).
+
+    `replace` = treść zeznania, które wołający przeczytał i POSTANOWIŁ podmienić (ten sam autocrop,
+    mocniejszy świadek oryginału - polityka mieszka u wołającego, `stack_variants.apply`). Podmiana
+    jest CAS-em: tuż przed publikacją plik jest czytany ponownie i musi równać się `replace`.
+
+    Atomowo i bez nadpisywania cudzego: `.part` otwierany `x` (istniejący `.part` = czyjś bieg w toku
+    albo jego resztka - `part_exists`, nic nie ruszamy), `fsync`, publikacja `os.rename` dla nowego
+    zeznania (cel, który powstał w międzyczasie, to `conflict`) i `os.replace` WYŁĄCZNIE dla podmiany
+    po CAS-ie. Przerwanie w połowie nie zostawia uciętego JSON-u pod nazwą zeznania."""
+    path = variant_testimony_path(copy_path)
+    if os.path.lexists(path):
+        stare = read_variant_testimony(path)
+        if stare is not None and all(stare.get(k) == payload.get(k) for k in ("pair_id", "source")):
+            return "exists", path
+        if replace is None or stare != replace:
+            return "conflict", path
+    part = path + PART_SUFFIX
+    try:
+        fh = open(part, "x", encoding="utf-8")
+    except FileExistsError:
+        return "part_exists", path
+    try:
+        with fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
+        if replace is not None and os.path.lexists(path):
+            if read_variant_testimony(path) != replace:
+                _drop_part(part)
+                return "conflict", path
+            os.replace(part, path)
+            return "replaced", path
+        os.rename(part, path)
+    except FileExistsError:
+        _drop_part(part)
+        return "conflict", path
+    except BaseException:
+        _drop_part(part)
+        raise
+    return "written", path

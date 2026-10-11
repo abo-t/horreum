@@ -21,7 +21,9 @@ from dataclasses import dataclass, replace
 from .resolve._text import norm_alnum          # kierunek repo → resolve (liść; COHESION §2b)
 from .resolve.catalog import catalog_canon      # gramatyka katalogowa — CZYSTA, bez assetu (liść)
 from .resolve.channel import CHANNELS           # słownik kanału (0028) - liść, bez cyklu
-from .resolve.frames import LIGHT_KINDS         # guard RODZAJU w klindze (S2b) — liść, bez cyklu
+from .resolve.stack import raw_stem             # rdzeń nazwy pliku - alias dawnej nazwy (0034)
+from .resolve.frames import (HISTORY_MASTER_KINDS,   # pary przeliczenia rodzaju (AR-96)
+                             LIGHT_KINDS)            # guard RODZAJU w klindze (S2b) - liść, bez cyklu
 from .resolve.headers import (FAKTY_BIEZACE, FAKTY_DO_DOCIAGNIECIA,   # stan faktów kopii (AR-33)
                               FAKTY_NOWSZE, copy_facts_state,
                               copy_testimony)            # źródło `header` (kopia wiodąca, AR-4)
@@ -578,6 +580,9 @@ class FactTransfer:
     note_moved: bool = False
     """Przeniesiono uwagę klatki (0032) - piąta oś, przechodzi na następczynię BEZ własnej uwagi.
     Klatka, z której przeszła wyłącznie uwaga, też jest przeniesieniem (gest liczy ją w `done`)."""
+    calibration_moved: int = 0
+    """ILE wskazań kalibratora ręką (`calibration.asserted_by='user'`, E4-5) przeszło na następczynię -
+    szósta oś, liczba relacji (dark/flat), nie bit."""
     skipped: str = ""          # "" = nic nie pominięto (konwencja liczników z `ObjectGesture`)
 
 
@@ -678,6 +683,14 @@ def transfer_human_facts(con, *, frame_id, now, actor="user:local"):
     `frame_note` czyta ostatni event uwag klatki, więc przeniesiona uwaga bilansuje się jak napisana
     ręką.
 
+    SZÓSTA OŚ: KALIBRATOR WSKAZANY RĘKĄ (E4-5, `calibration.asserted_by='user'`). To RELACJA, nie
+    kolumna klatki - więc jak rodowód stosu: wiersz PRZECHODZI (para `calibration.unlinked` na
+    starej + `calibration.linked` na następczyni), a nie dubluje się. Guard: następczyni jest lightem,
+    ma kamerę mastera (wskazanie ręki z cudzej matrycy byłoby kłamstwem - klinga gestu by go nie
+    przyjęła) i nie ma WŁASNEGO wskazania ręki tej relacji; ogniwo automatu następczyni jest
+    nadpisywane, bo to dobór, nie werdykt. Wskazanie, które nie pasuje, ZOSTAJE na klatce zastąpionej
+    (`skipped='kalibrator nie pasuje do nastepczyni'`, gdy nic innego nie przeszło).
+
     Zwraca `FactTransfer`. Idempotentne: powtórzenie po udanym przeniesieniu trafia w guardy
     wszystkich osi (następczyni ma już swoje) i zwraca `skipped` bez zapisu."""
     with _immediate(con):
@@ -706,8 +719,14 @@ def transfer_human_facts(con, *, frame_id, now, actor="user:local"):
                          and stara["observatory_id"] is not None)
         uwaga = con.execute(
             "SELECT body FROM frame_note WHERE frame_id = ?", (frame_id,)).fetchone()
+        kalibratory = con.execute(
+            "SELECT c.relation AS relation, c.master_frame_id AS master_frame_id, "
+            "c.confidence AS confidence, m.camera_id AS m_cam FROM calibration c "
+            "JOIN frame m ON m.id = c.master_frame_id "
+            "WHERE c.light_frame_id = ? AND c.asserted_by = 'user' ORDER BY c.relation",
+            (frame_id,)).fetchall()
         if (not ma_obiekt and not ma_config and not ma_stanowisko and not rodowod
-                and uwaga is None):
+                and uwaga is None and not kalibratory):
             return FactTransfer(skipped="brak faktow czlowieka")
         nowa_id = stara["superseded_by"]
         nowa = con.execute(
@@ -756,9 +775,19 @@ def transfer_human_facts(con, *, frame_id, now, actor="user:local"):
         # bieżącego dopasowania (§4.2), a bieżącym dopasowaniem jest następczyni — o tej samej
         # treści człowiek wypowiedział się drugi raz i to jego zdanie zostaje.
         rodowod_do_zdjecia = [r for r in rodowod if r["integration_id"] in wlasne]
+        # SZÓSTA OŚ - lustro predykatu `supersede.pending_transfer` (kolumna `kalibracja`).
+        kal_nowej = {r["relation"]: r for r in con.execute(
+            "SELECT relation, master_frame_id, asserted_by FROM calibration "
+            "WHERE light_frame_id = ?", (nowa_id,))}
+        kal_reki_nowej = {rel for rel, r in kal_nowej.items() if r["asserted_by"] == "user"}
+        kalibracja_do_przeniesienia = [
+            r for r in kalibratory
+            if nowa["kind"] == "light" and r["m_cam"] is not None
+            and r["m_cam"] == nowa["camera_id"] and r["relation"] not in kal_reki_nowej]
         if (not obiekt_do_przeniesienia and not config_do_przeniesienia
                 and not stanowisko_do_przeniesienia and not uwaga_do_przeniesienia
-                and not rodowod_do_przeniesienia and not rodowod_do_zdjecia):
+                and not rodowod_do_przeniesienia and not rodowod_do_zdjecia
+                and not kalibracja_do_przeniesienia):
             # POWÓD MA BYĆ PRAWDZIWY, nie jeden dla wszystkich odmów: „następczyni ma własne
             # źródło" i „zestaw do niej nie pasuje" to dwa różne stany i dwie różne dalsze drogi
             # (w pierwszym nie ma nic do roboty, w drugim ręka musi wskazać zestaw od nowa).
@@ -768,6 +797,8 @@ def transfer_human_facts(con, *, frame_id, now, actor="user:local"):
                 powod = "nastepczyni to kalibracja - obiekt zostaje na zrodle"
             elif nie_pasuje:
                 powod = "zestaw nie pasuje do nastepczyni"
+            elif any(r["relation"] not in kal_reki_nowej for r in kalibratory):
+                powod = "kalibrator nie pasuje do nastepczyni"
             else:
                 powod = "nastepczyni ma wlasne zrodlo"
             return FactTransfer(object_kept=obiekt_zostaje, skipped=powod)
@@ -848,13 +879,41 @@ def transfer_human_facts(con, *, frame_id, now, actor="user:local"):
             emit_event(con, actor=actor, verb="integration.unlinked", target=f"integration:{iid}",
                        now=now, payload={"input_frame_id": frame_id, "nastepczyni": nowa_id},
                        reason="następczyni ma własny werdykt — stary wskaźnik nic nie wskazuje")
+        for r in kalibracja_do_przeniesienia:
+            przed = kal_nowej.get(r["relation"])
+            if przed is None:
+                con.execute(
+                    "INSERT INTO calibration(light_frame_id, master_frame_id, relation, "
+                    "asserted_by, confidence) VALUES (?, ?, ?, 'user', ?)",
+                    (nowa_id, r["master_frame_id"], r["relation"], r["confidence"]))
+            else:
+                con.execute(
+                    "UPDATE calibration SET master_frame_id = ?, asserted_by = 'user', "
+                    "confidence = ? WHERE light_frame_id = ? AND relation = ?",
+                    (r["master_frame_id"], r["confidence"], nowa_id, r["relation"]))
+            con.execute("DELETE FROM calibration WHERE light_frame_id = ? AND relation = ? "
+                        "AND asserted_by = 'user'", (frame_id, r["relation"]))
+            emit_event(con, actor=actor, verb="calibration.linked", target=f"frame:{nowa_id}",
+                       now=now, payload={"relation": r["relation"],
+                                         "master_frame_id": r["master_frame_id"],
+                                         "asserted_by": "user", "przeniesione_z": frame_id,
+                                         **({"before": [przed["master_frame_id"],
+                                                        przed["asserted_by"]]}
+                                            if przed is not None else {})},
+                       reason="kalibrator wskazany ręką przeniesiony po podmianie pliku")
+            emit_event(con, actor=actor, verb="calibration.unlinked", target=f"frame:{frame_id}",
+                       now=now, payload={"relation": r["relation"],
+                                         "master_frame_id": r["master_frame_id"],
+                                         "asserted_by": "user", "reason": "transferred",
+                                         "przeniesione_na": nowa_id})
     return FactTransfer(object_moved=obiekt_do_przeniesienia,
                         object_kept=obiekt_zostaje,
                         config_moved=config_do_przeniesienia,
                         observatory_moved=stanowisko_do_przeniesienia,
                         note_moved=uwaga_do_przeniesienia,
                         lineage_moved=len(rodowod_do_przeniesienia),
-                        lineage_dropped=len(rodowod_do_zdjecia))
+                        lineage_dropped=len(rodowod_do_zdjecia),
+                        calibration_moved=len(kalibracja_do_przeniesienia))
 
 
 def clear_superseded(con, *, frame_id, now, actor="scan"):
@@ -1119,6 +1178,61 @@ def refresh_location(con, *, location_id, frame_id, mtime, file_sha1, header_has
             camera_id=camera_id, kind=kind, now=now, actor=actor, verb="header.refreshed",
             payload={"header_hash_before": row["header_hash"], "header_hash_after": header_hash})
     return result
+
+
+class KindWitnessStale(Exception):
+    """Przeliczenie rodzaju odmówione: stan klatki albo kopii, z której wołający policzył rodzaj,
+    zmienił się po odczycie (`rederive_frame_kind`). Nic nie zapisano; ponowny odczyt rozstrzyga."""
+
+
+def rederive_frame_kind(con, *, frame_id, expected_kind, kind, witnesses, now,
+                        actor="rederive-kind"):
+    """PRZELICZENIE RODZAJU klatki już w bazie BEZ ZMIANY ODCISKU nagłówka (AR-96). Zwykły przebieg
+    rodzaju nie ruszy: brama przyrostowa pomija niezmieniony plik, a `refresh_location` przelicza
+    pochodne wyłącznie przy zmianie `header_hash`. Reguła rodzaju urosła (historia integracji,
+    `resolve.frames.kind_from_testimony`), plik nie - więc przeliczenie jest osobnym krokiem.
+
+    `witnesses` = `[(location_id, header_hash)]` kopii, z których zeznania wołający policzył `kind`.
+    W TEJ SAMEJ transakcji (`_immediate`) zbiór OBECNYCH kopii klatki z ich odciskami nagłówka musi
+    być DOKŁADNIE zbiorem świadków (nowa kopia po odczycie mogłaby zeznawać inny rodzaj), a klatka -
+    mieć rodzaj `expected_kind`; inaczej `KindWitnessStale` i zero zapisu (skan albo zapis nagłówka
+    wyprzedził odczyt). Klatka już z rodzajem `kind` → False, zero
+    eventów (idempotencja). Zmiana → UPDATE `frame.kind` + `event(frame.rederived)` z `before/after`
+    w kształcie odświeżenia zeznania (`camera_id` bez zmian, obok rodzaju) i listą kopii-świadków.
+
+    Dozwolone są WYŁĄCZNIE pary `HISTORY_MASTER_KINDS` (sub → master tej samej klasy przepisu); inna
+    para to błąd wołającego (EXPECT, `ValueError`). Para nie przesuwa żadnej pochodnej zależnej od
+    rodzaju (przepis, oś teleskopu, bramka kamery, oś obiektu - docstring mapy), więc klinga pisze
+    sam rodzaj; rodowód (`calibrate` + `lineage`) przelicza zwykła droga po przeliczeniu.
+
+    Ręki na osi rodzaju NIE MA: `kind_source` zna wyłącznie `header`/`path`/NULL (0010), więc nie ma
+    tu ochrony wiersza `user` - byłaby pozorna. Gdy ręka powstanie, lista DOZWOLONYCH źródeł wchodzi
+    do tej klingi razem z nią."""
+    if HISTORY_MASTER_KINDS.get(expected_kind) != kind:
+        raise ValueError(f"przeliczenie rodzaju {expected_kind!r} -> {kind!r} poza regułą historii")
+    if not witnesses:
+        raise ValueError("przeliczenie rodzaju bez kopii-świadka")
+    with _immediate(con):
+        fr = con.execute("SELECT kind, camera_id FROM frame WHERE id = ?", (frame_id,)).fetchone()
+        if fr is None:
+            raise KindWitnessStale(f"frame:{frame_id} nie istnieje")
+        if fr["kind"] == kind:
+            return False
+        if fr["kind"] != expected_kind:
+            raise KindWitnessStale(
+                f"frame:{frame_id} ma rodzaj {fr['kind']!r}, odczyt zakładał {expected_kind!r}")
+        obecne = {(r["id"], r["header_hash"]) for r in con.execute(
+            "SELECT id, header_hash FROM location WHERE frame_id = ? AND present = 1", (frame_id,))}
+        if obecne != {(lid, h) for lid, h in witnesses}:
+            raise KindWitnessStale(
+                f"obecne kopie frame:{frame_id} to nie dokładnie kopie odczytane "
+                f"(nowa, zniknięta albo zmieniona po odczycie)")
+        con.execute("UPDATE frame SET kind = ? WHERE id = ?", (kind, frame_id))
+        emit_event(con, actor=actor, verb="frame.rederived", target=f"frame:{frame_id}", now=now,
+                   payload={"before": {"camera_id": fr["camera_id"], "kind": fr["kind"]},
+                            "after": {"camera_id": fr["camera_id"], "kind": kind},
+                            "locations": sorted(lid for lid, _h in witnesses)})
+    return True
 
 
 def _zeznanie_plynie_z(con, frame_id, location_id):
@@ -2626,6 +2740,116 @@ def clear_object_assignment(con, *, frame_ids, now, uid="local"):
                          canons=tuple(kanony), frame_ids=tuple(zapisane))
 
 
+@dataclass(frozen=True)
+class StackObjectChange:
+    """Jedno nadpisanie obiektu stosu ręką - materiał cofnięcia. `before` = `(object_id,
+    object_source, object_cleared_id)` klatki sprzed gestu, odczytane pod blokadą zapisu;
+    `object_id` = obiekt, który gest zapisał (źródło `user`)."""
+    frame_id: int
+    before: tuple
+    object_id: int
+
+
+def user_override_stack_object(con, *, frame_id, object_id, expected_object_id, expected_source,
+                               expected_cleared_id, now, uid="local", changes_out=None):
+    """JAWNE NADPISANIE OBIEKTU STOSU RĘKĄ (AR-103: „Przypisz obiekt wydania” po żniwach) - jedna
+    transakcja `_immediate` → `'assigned'` · `'unchanged'` · `'drift'`.
+
+    DLACZEGO OSOBNA KLINGA: `user_assign_object` nie nadpisuje źródeł z pliku i geometrii
+    (`header`/`alias`/`xref`/`region` - poza `WEAK_OBJECT_SOURCES`), a stos z obiektem innym niż
+    obiekt wydania ma go właśnie z nagłówka (`OBJECT` przepisany przez WBPP). Tamtej ochrony nie
+    luzujemy: gest kubełka i paska Zbiorów dalej nie zamaluje faktu z pliku. Ta klinga robi to
+    WYŁĄCZNIE na jednej klatce stosu i wyłącznie przy stanie, który człowiek widział.
+
+    CAS NA PEŁNEJ TRÓJCE: `expected_object_id`, `expected_source` i `expected_cleared_id` (pamięć
+    nagrobka) = stan klatki z chwili porównania (`stacks.release_object_check`), porównane dosłownie
+    (także `None`). Sama para obiekt+źródło przeżywa sekwencję „nagrobek X → przypisz Y → zdejmij Y”
+    (znów `NULL`/`user_cleared`, ale o INNYM przedmiocie) - bez trzeciego członu stary gest
+    zamalowałby nowszą decyzję ręki (ta sama figura, co `expected_cleared_id` w `user_assign_object`).
+    Stos wycofany albo zastąpiony (`retired_at`/`superseded_by`) między zdaniem a klikiem to też
+    `'drift'` - martwej tożsamości gest nie pisze. Inny stan = zero zapisu i zero eventów. Klatka
+    już z obiektem `object_id` (drugi gest, inna droga) = `'unchanged'` bez eventu - ten test idzie
+    PRZED CAS, więc powtórzony klik nie mówi „zmieniło się”.
+
+    ZAPIS: `UPDATE frame` na `object_source='user'` (pomija drabinę resolvera: przebieg nie cofnie
+    ręki) z wyczyszczeniem pamięci nagrobka. Para verbów jak każde przepięcie osi (§5.9):
+    `object.unassigned` stanu sprzed (gdy obiekt był) + `object.assigned` z `before` w payloadzie.
+    `changes_out` (lista) dostaje `StackObjectChange` - stan sprzed z tej samej blokady, nie
+    z pamięci ekranu (`restore_stack_object`).
+
+    `ValueError` (EXPECT): klatki nie ma, klatka nie jest stosem (`master_light`), obiektu
+    `object_id` nie ma."""
+    actor = f"user:{uid}"
+    with _immediate(con):
+        fr = con.execute(
+            "SELECT kind, object_id, object_source, object_cleared_id, retired_at, superseded_by "
+            "FROM frame WHERE id = ?", (frame_id,)).fetchone()
+        if fr is None:
+            raise ValueError(f"frame:{frame_id} nie istnieje")
+        if fr["kind"] != "master_light":
+            raise ValueError(f"frame:{frame_id} to '{fr['kind']}', nie stos - nadpisanie obiektu "
+                             "wydania dotyczy wyłącznie stosów")
+        if con.execute("SELECT 1 FROM object WHERE id = ?", (object_id,)).fetchone() is None:
+            raise ValueError(f"object:{object_id} nie istnieje")
+        if fr["retired_at"] is not None or fr["superseded_by"] is not None:
+            return "drift"
+        if fr["object_id"] == object_id:
+            return "unchanged"
+        if ((fr["object_id"], fr["object_source"], fr["object_cleared_id"])
+                != (expected_object_id, expected_source, expected_cleared_id)):
+            return "drift"
+        before = (fr["object_id"], fr["object_source"], fr["object_cleared_id"])
+        if fr["object_id"] is not None:
+            emit_event(con, actor=actor, verb="object.unassigned", target=f"frame:{frame_id}",
+                       now=now, payload={"object_id": fr["object_id"],
+                                         "object_source": fr["object_source"],
+                                         "reason": "release_object"})
+        con.execute(
+            "UPDATE frame SET object_id = ?, object_source = 'user', object_cleared_id = NULL "
+            "WHERE id = ?", (object_id, frame_id))
+        emit_event(con, actor=actor, verb="object.assigned", target=f"frame:{frame_id}", now=now,
+                   payload={"object_id": object_id, "object_source": "user",
+                            "reason": "release_object",
+                            "before": {"object_id": before[0], "object_source": before[1],
+                                       "object_cleared_id": before[2]}})
+    if changes_out is not None:
+        changes_out.append(StackObjectChange(frame_id, before, object_id))
+    return "assigned"
+
+
+def restore_stack_object(con, *, change, now, uid="local"):
+    """COFNIĘCIE `user_override_stack_object`: klatka wraca do stanu `change.before` (obiekt i źródło
+    z nagłówka, pustka albo nagrobek z pamięcią) → `True`; inaczej `False`.
+
+    CAS pod blokadą na pełnej trójce: przywracamy WYŁĄCZNIE klatkę, która dalej niesie wynik TEGO
+    gestu (`change.object_id`, źródło `user`, bez pamięci nagrobka - gest ją wyczyścił). Inny stan (nowszy gest, drugie cofnięcie) = `False` bez
+    zapisu i bez eventu - cofnięcie nie nadpisuje decyzji, której nie widziało.
+
+    Para verbów lustrem gestu: `object.unassigned` obiektu ręki + `object.assigned` obiektu sprzed
+    (gdy był) - bilans osi (§5.9) domyka się tak samo jak przy geście. Źródło sprzed wraca
+    dosłownie: przebieg resolvera i tak przeliczy `header`, a nagrobek odzyska pamięć."""
+    actor = f"user:{uid}"
+    stary_obiekt, stare_zrodlo, stara_pamiec = change.before
+    with _immediate(con):
+        fr = con.execute(
+            "SELECT object_id, object_source, object_cleared_id FROM frame WHERE id = ?",
+            (change.frame_id,)).fetchone()
+        if fr is None or ((fr["object_id"], fr["object_source"], fr["object_cleared_id"])
+                          != (change.object_id, "user", None)):
+            return False
+        emit_event(con, actor=actor, verb="object.unassigned", target=f"frame:{change.frame_id}",
+                   now=now, payload={"object_id": change.object_id, "object_source": "user",
+                                     "reason": "release_object_undo"})
+        con.execute(
+            "UPDATE frame SET object_id = ?, object_source = ?, object_cleared_id = ? WHERE id = ?",
+            (stary_obiekt, stare_zrodlo, stara_pamiec, change.frame_id))
+        if stary_obiekt is not None:
+            emit_event(con, actor=actor, verb="object.assigned", target=f"frame:{change.frame_id}",
+                       now=now, payload={"object_id": stary_obiekt, "object_source": stare_zrodlo,
+                                         "reason": "release_object_undo"})
+    return True
+
+
 def clear_object_tombstone(con, *, frame_id, now, actor="user:local", commit_id=None,
                            location_id=None):
     """ZGAŚ nagrobek `user_cleared` — jedyna droga wyjścia z werdyktu ręki poza kolejnym gestem.
@@ -3873,15 +4097,46 @@ def _relocation_target(con, location_id, new_path):
 
 
 def _apply_relocation(con, *, location_id, old_path, new_path, now, actor, rename_id=None,
-                      reason=None):
+                      reason=None, alias=True):
     """UPDATE `location.path` + `location.renamed` pod transakcją wołającego. Rekoncyliacja zamiaru
-    (`settle_rename_intent`) dokłada wiersz stagingu do ładunku i powód."""
+    (`settle_rename_intent`) dokłada wiersz stagingu do ładunku i powód.
+
+    DAWNA NAZWA LIGHTU ZOSTAJE ALIASEM (`light_name_alias`, źródło `horreum`, AR-108): historia stosu
+    zapisuje nazwy lightów z chwili obróbki, więc zmiana nazwy po obróbce odcina rodowód po nazwie -
+    tak zgubił się cały zapis przenosin Custos (0/1762 trafień nazwami bieżącymi). Alias powstaje
+    PRZED `UPDATE`, z tej samej transakcji co relokacja (`_dopisz_alias_nazwy`: idempotentny, event
+    tylko przy nowym wierszu); inne rodzaje klatek i zmiana samego katalogu (rdzeń bez zmian) -
+    bez aliasu. `alias=False` - kierunek `undo`: cofnięcie wraca do nazwy, która już jest aliasem
+    albo nazwą bieżącą, a nazwa cofana była tranzytowa (żaden program obróbki jej nie widział) -
+    jej rdzeń w tabeli tylko zderzałby się z rdzeniami innych klatek."""
+    if alias:
+        _dopisz_alias_nazwy(con, location_id=location_id, old_path=old_path, new_path=new_path,
+                            now=now, actor=actor)
     con.execute("UPDATE location SET path = ? WHERE id = ?", (new_path, location_id))
     payload = {"before": old_path, "after": new_path}
     if rename_id is not None:
         payload["pending_rename"] = rename_id
     emit_event(con, actor=actor, verb="location.renamed", target=f"location:{location_id}",
                now=now, payload=payload, reason=reason)
+
+
+def _dopisz_alias_nazwy(con, *, location_id, old_path, new_path, now, actor):
+    """Pod transakcją wołającego: rdzeń dawnej nazwy lightu → `light_name_alias` (`source='horreum'`)
+    → `True`, gdy wiersz powstał. Rdzeń bez zmian albo klatka nie-light → `False` bez zapisu."""
+    stary = raw_stem(old_path)
+    if not stary or stary == raw_stem(new_path):
+        return False
+    row = con.execute("SELECT f.id, f.kind FROM location l JOIN frame f ON f.id = l.frame_id "
+                      "WHERE l.id = ?", (location_id,)).fetchone()
+    if row is None or row["kind"] != "light":
+        return False
+    cur = con.execute("INSERT OR IGNORE INTO light_name_alias(frame_id, stem, source) "
+                      "VALUES (?, ?, 'horreum')", (row["id"], stary))
+    if not cur.rowcount:
+        return False
+    emit_event(con, actor=actor, verb="light_name_alias.added", target=f"frame:{row['id']}",
+               now=now, payload={"stem": stary, "source": "horreum", "location_id": location_id})
+    return True
 
 
 @contextmanager
@@ -3923,7 +4178,7 @@ def guard_file_rename(con, *, location_id, new_path, generation, now, actor="use
         old_path = _relocation_target(con, location_id, new_path)
         yield
         _apply_relocation(con, location_id=location_id, old_path=old_path, new_path=new_path,
-                          now=now, actor=actor)
+                          now=now, actor=actor, alias=kierunek != "undo")
         if rename_id is not None:
             _zamknij_wiersz_renamu(con, rename_id, status, reason)
 
@@ -3985,7 +4240,8 @@ def settle_rename_intent(con, *, rename_id, location_id, status, reason, now, re
             if old_path != relocate_to:
                 _apply_relocation(con, location_id=location_id, old_path=old_path,
                                   new_path=relocate_to, now=now, actor=actor, rename_id=rename_id,
-                                  reason="dokończenie przerwanego renamu (rekoncyliacja zamiaru)")
+                                  reason="dokończenie przerwanego renamu (rekoncyliacja zamiaru)",
+                                  alias=expect_in_flight != "undo")
         _zamknij_wiersz_renamu(con, rename_id, status, reason)
 
 
@@ -4154,11 +4410,76 @@ def flag_calibration_review_summary(con, items, now, actor="calibration"):
                             "items": [[reason, n] for reason, n in items]})
 
 
+CALIBRATION_SOURCES = ("horreum", "user", "wbpp")
+"""Słownik źródeł ogniwa kalibracji (`calibration.asserted_by`, komentarz DDL `0009`) - jedno źródło
+dla obu klingi osi (`link_calibration`, `unlink_calibration`); `0009` nie ma na tej kolumnie CHECK,
+więc pilnuje go kod (EXPECT)."""
+
+CALIBRATION_REFUSALS = ("not_light", "not_master", "inactive", "camera", "drift")
+"""Tokeny odmowy gestu ręki na osi kalibracji (`KalibratorOdrzucony.token`) - zdanie składa
+powierzchnia z katalogu (`grid.lin.cal.refused.<token>`), parytet pilnuje `tests/test_i18n.py`."""
+
+# Źródła ogniwa kalibracji, które przebieg rodowodu wylicza SAM i wolno mu je zdjąć (AR-81). Lista
+# DOZWOLONYCH, nie zakazanych: źródło dopisane kiedyś do `0009` (`wbpp` - zeznanie pliku) jest
+# chronione, dopóki ktoś świadomie go tu nie wpisze.
+CALIBRATION_AUTO_SOURCES = ("horreum",)
+
+_BEZ_OCZEKIWANIA = object()     # `link_calibration(expected=...)` niepodane - automat stanu nie zna
+
+
+class KalibratorOdrzucony(ValueError):
+    """Odmowa gestu ręki na osi kalibracji - stan bazy nie pozwala zapisać wskazania. Osobny typ
+    (wzorzec `KlatkaNieJestZastapiona`), żeby powierzchnia łapała DOKŁADNIE odmowę z powodem
+    (`token` z `CALIBRATION_REFUSALS`), a każdy inny błąd klingi leciał dalej."""
+
+    def __init__(self, token, message):
+        super().__init__(message)
+        self.token = token
+
+
+def _waliduj_wskazanie_kalibratora(con, *, light_frame_id, master_frame_id, relation, row,
+                                   expected):
+    """Bramka gałęzi `asserted_by='user'` - wołana POD blokadą `link_calibration`, więc to, co
+    sprawdza, jest stanem, na który pada zapis. Ręka wskazuje DOWOLNY master (także spoza przepisu),
+    ale nie dowolną klatkę: light musi być lightem, kalibrator aktywnym masterem tej klasy (bez
+    nagrobka `retired_at`/`superseded_by`), oba z tej samej kamery, a ogniwo w stanie, który
+    człowiek widział na ekranie (`expected`: `None` = brak ogniwa, albo `(master, asserted_by)`).
+    Dryf między ekranem a bazą to odmowa, nie nadpisanie decyzji, której gest nie widział."""
+    if expected is _BEZ_OCZEKIWANIA:
+        raise ValueError("gest ręki bez oczekiwanego stanu ogniwa - nie ma czego porównać")
+    light = con.execute("SELECT kind, camera_id FROM frame WHERE id = ?",
+                        (light_frame_id,)).fetchone()
+    if light is None or light["kind"] != "light":
+        raise KalibratorOdrzucony("not_light", f"frame:{light_frame_id} nie jest lightem")
+    master = con.execute(
+        "SELECT kind, camera_id, retired_at, superseded_by FROM frame WHERE id = ?",
+        (master_frame_id,)).fetchone()
+    if master is None or master["kind"] != f"master_{relation}":
+        raise KalibratorOdrzucony("not_master",
+                                  f"frame:{master_frame_id} nie jest masterem klasy {relation}")
+    if master["retired_at"] is not None or master["superseded_by"] is not None:
+        raise KalibratorOdrzucony("inactive", f"frame:{master_frame_id} jest wycofany albo zastąpiony")
+    if light["camera_id"] is None or light["camera_id"] != master["camera_id"]:
+        raise KalibratorOdrzucony("camera", f"frame:{master_frame_id} z innej kamery niż light")
+    stan = None if row is None else (row["master_frame_id"], row["asserted_by"])
+    if stan != (None if expected is None else tuple(expected)):
+        raise KalibratorOdrzucony("drift", f"ogniwo {relation} lighta {light_frame_id} zmieniło się: "
+                                           f"{stan!r} zamiast {expected!r}")
+
+
 def link_calibration(con, *, light_frame_id, master_frame_id, relation, now,
-                     actor="lineage", asserted_by="horreum", confidence="recipe"):
+                     actor="lineage", asserted_by="horreum", confidence="recipe",
+                     expected=_BEZ_OCZEKIWANIA):
     """RODOWÓD (C4): powiąż light z egzemplarzem mastera danej klasy — wiersz `calibration`
     + `event(calibration.linked)`. Idempotentny na kluczu UNIQUE(light_frame_id, relation) (0009):
     ten sam kalibrator → False BEZ eventu.
+
+    GEST RĘKI (`asserted_by='user'`, E4-5): człowiek wskazuje dowolny aktywny master tej klasy
+    i kamery, także spoza przepisu (`confidence='user'`). Ta gałąź WYMAGA `expected` - stanu ogniwa,
+    który człowiek widział - i waliduje go pod blokadą (`_waliduj_wskazanie_kalibratora`); odmowa
+    to `KalibratorOdrzucony` z tokenem. `_immediate`, bo guard (SELECT stanu) musi trzymać do
+    zapisu: gest pisze z wątku GUI, gdy etap „Rodowód” liczy w tle na własnym połączeniu - lustro
+    `link_integration`.
 
     Gdy dla tej klasy stał JUŻ inny master (doszedł bliższy czasowo w nowym wsadzie) → UPDATE
     + `event(calibration.unlinked)` na starym (ślad append-only) + `.linked` na nowym. To POŻĄDANE
@@ -4171,29 +4492,37 @@ def link_calibration(con, *, light_frame_id, master_frame_id, relation, now,
     subów albo masterów nie może wpłynąć na wycofanie czegokolwiek już ustawionego ręcznie"). Do
     0809 była to JEDYNA oś rodowodu bez takiej bramki: siostrzana `link_integration` ma
     `RANGA_ASSERT`, `calibration_fact` ma człon `source == 'user'`, a tutaj nowy dark po prostu
-    przepinał ogniwo — bezwarunkowym UPDATE-em. Trzymało to wyłącznie na ZERZE populacji (dziś
-    `calibration` z `asserted_by='user'`: 0, bo gestu ręki na tej osi jeszcze nie ma), więc
-    pierwszy taki gest łamałby warunek po cichu. Teraz warunek trzyma MECHANIZM.
+    przepinał ogniwo - bezwarunkowym UPDATE-em. Trzymało to wyłącznie na ZERZE populacji (gestu
+    ręki na tej osi wtedy nie było), więc pierwszy taki gest łamałby warunek po cichu. Teraz
+    warunek trzyma MECHANIZM, a gest jest w panelu „Rodowód” („Wskaż kalibrator…”).
 
     Pełnej drabiny rang tu NIE MA i to jest świadome: `RANGA_ASSERT` opisuje słownik osi stosów
     (`history`/`window`/`user`), a ta oś ma własny (`horreum`, docelowo `wbpp` — DDL 0009). Dwa
     słowniki w jednym dicie zrobiłyby z kanonu wspólny worek. Pytanie, na które ta bramka odpowiada,
     jest jedno i binarne — „czy ręka już to rozstrzygnęła" — więc kształt jest taki sam, jak
     w `calibration_fact`, i urośnie dopiero razem z drugim nie-ludzkim źródłem."""
-    row = con.execute(
-        "SELECT id, master_frame_id, asserted_by FROM calibration "
-        "WHERE light_frame_id = ? AND relation = ?",
-        (light_frame_id, relation)).fetchone()
-    # IDEMPOTENCJA PYTA O PARĘ (kalibrator, źródło), nie o sam kalibrator — inaczej bramka niżej
-    # byłaby NIEOSIĄGALNA: ręka potwierdzająca ten sam master, który wybrał automat, odbijała się
-    # od tego `return` i źródło zostawało `horreum`, więc werdykt nie miał jak powstać. Lustro
-    # `link_integration`: „podniesienie pewności zostawia ślad".
-    if row is not None and (row["master_frame_id"], row["asserted_by"]) == (master_frame_id,
-                                                                            asserted_by):
-        return False
-    if row is not None and row["asserted_by"] == "user" and asserted_by != "user":
-        return False
-    with con:
+    if asserted_by not in CALIBRATION_SOURCES:
+        raise ValueError(f"źródło ogniwa kalibracji spoza słownika: {asserted_by!r}")
+    if asserted_by == "user" and confidence != "user":
+        raise ValueError("wskazanie ręki niesie confidence='user' - inna pewność kłamałaby o źródle")
+    with _immediate(con):
+        row = con.execute(
+            "SELECT id, master_frame_id, asserted_by FROM calibration "
+            "WHERE light_frame_id = ? AND relation = ?",
+            (light_frame_id, relation)).fetchone()
+        if asserted_by == "user":
+            _waliduj_wskazanie_kalibratora(con, light_frame_id=light_frame_id,
+                                           master_frame_id=master_frame_id, relation=relation,
+                                           row=row, expected=expected)
+        # IDEMPOTENCJA PYTA O PARĘ (kalibrator, źródło), nie o sam kalibrator - inaczej bramka niżej
+        # byłaby NIEOSIĄGALNA: ręka potwierdzająca ten sam master, który wybrał automat, odbijała się
+        # od tego `return` i źródło zostawało `horreum`, więc werdykt nie miał jak powstać. Lustro
+        # `link_integration`: „podniesienie pewności zostawia ślad".
+        if row is not None and (row["master_frame_id"], row["asserted_by"]) == (master_frame_id,
+                                                                                asserted_by):
+            return False
+        if row is not None and row["asserted_by"] == "user" and asserted_by != "user":
+            return False
         if row is None:
             con.execute(
                 "INSERT INTO calibration(light_frame_id, master_frame_id, relation, asserted_by, "
@@ -4212,26 +4541,73 @@ def link_calibration(con, *, light_frame_id, master_frame_id, relation, now,
                 emit_event(con, actor=actor, verb="calibration.unlinked",
                            target=f"frame:{light_frame_id}", now=now,
                            payload={"relation": relation,
-                                    "master_frame_id": row["master_frame_id"]})
+                                    "master_frame_id": row["master_frame_id"],
+                                    "asserted_by": row["asserted_by"], "reason": "relinked"})
         emit_event(con, actor=actor, verb="calibration.linked",
                    target=f"frame:{light_frame_id}", now=now,
                    payload={"relation": relation, "master_frame_id": master_frame_id,
-                            "asserted_by": asserted_by})
+                            "asserted_by": asserted_by,
+                            **({"before": [row["master_frame_id"], row["asserted_by"]]}
+                               if row is not None else {})})
     return True
 
 
-def flag_calibration_lineage_summary(con, items, now, actor="lineage"):
+def unlink_calibration(con, *, light_frame_id, relation, allowed, reason, now, actor="lineage",
+                       expected_master_frame_id=None):
+    """Zdejmij ogniwo kalibracji - `DELETE` wiersza `calibration` + `event(calibration.unlinked)`
+    z `asserted_by` zdjętego wiersza i tokenem `reason` w payloadzie. `True` = wiersz zniknął.
+
+    Dwóch wołających, dwie listy DOZWOLONYCH źródeł - i to wołający je podaje, bo pytanie jest
+    różne: przebieg rodowodu zdejmuje ogniwo AUTOMATU, dla którego derywacja nie ma już kandydata
+    (AR-81, `allowed=CALIBRATION_AUTO_SOURCES`, `reason` = token luki), a gest „Przywróć automat”
+    zdejmuje wskazanie RĘKI (`allowed=('user',)`), żeby przebieg odtworzył dobór z przepisu. Lista
+    pusta albo źródło spoza `0009` to błąd wołającego (EXPECT), nie cichy brak zapisu.
+
+    `expected_master_frame_id` (gest) - CAS: zdejmujemy wyłącznie ogniwo, które człowiek widział;
+    inne = `False` bez zapisu. Brak wiersza albo źródło spoza listy - `False` bez eventu
+    (idempotencja: drugi przebieg niczego nie zdejmuje). `_immediate`, bo guard i `DELETE` muszą
+    widzieć ten sam stan - lustro `link_calibration`."""
+    allowed = tuple(allowed)
+    if not allowed or not set(allowed) <= set(CALIBRATION_SOURCES):
+        raise ValueError(f"lista źródeł do zdjęcia spoza 0009: {allowed!r}")
+    if not reason:
+        raise ValueError("zdjęcie ogniwa bez powodu - token jest treścią eventu")
+    with _immediate(con):
+        row = con.execute(
+            "SELECT id, master_frame_id, asserted_by FROM calibration "
+            "WHERE light_frame_id = ? AND relation = ?", (light_frame_id, relation)).fetchone()
+        if row is None or row["asserted_by"] not in allowed:
+            return False
+        if expected_master_frame_id is not None and row["master_frame_id"] != expected_master_frame_id:
+            return False
+        con.execute("DELETE FROM calibration WHERE id = ?", (row["id"],))
+        emit_event(con, actor=actor, verb="calibration.unlinked",
+                   target=f"frame:{light_frame_id}", now=now,
+                   payload={"relation": relation, "master_frame_id": row["master_frame_id"],
+                            "asserted_by": row["asserted_by"], "reason": reason})
+    return True
+
+
+def flag_calibration_lineage_summary(con, items, now, actor="lineage", unlinked=None,
+                                     hand_inactive=None):
     """Lighty BEZ pokrycia kalibratorem — JEDEN `event(calibration.lineage_summary)` z licznością
     per powód (wzorzec `flag_calibration_review_summary`). Stan (brak wiersza `calibration` dla
-    `(light, relation)`) SAM jest deltą; to event audytowy, nie zapis na frame. Pusta lista → bez
-    eventu, więc idempotentny przebieg bez luk nie emituje (jak review_summary)."""
+    `(light, relation)`) SAM jest deltą; to event audytowy, nie zapis na frame. Wszystko puste →
+    bez eventu, więc idempotentny przebieg bez luk nie emituje (jak review_summary).
+
+    `unlinked` (relacja → licznik) to ogniwa automatu zdjęte w TYM przebiegu: bez kandydata (AR-81)
+    albo na klatce, która przestała być lightem. `hand_inactive` (relacja → licznik) to STAN:
+    wskazania ręki na masterze wycofanym, zastąpionym albo bez obecnej kopii. Każde z nich samo
+    wystarcza, żeby event powstał - bez śladu w dzienniku wyglądałyby jak brak roboty."""
     items = list(items)
-    if not items:
+    if not items and not unlinked and not hand_inactive:
         return
     with con:
         emit_event(con, actor=actor, verb="calibration.lineage_summary", target="frame:*", now=now,
                    payload={"distinct": len(items), "frames": sum(n for _, n in items),
-                            "items": [[reason, n] for reason, n in items]})
+                            "items": [[reason, n] for reason, n in items],
+                            "unlinked": dict(unlinked or {}),
+                            "hand_inactive": dict(hand_inactive or {})})
 
 
 # ═══════════════════════════════════════════════ 1.7b RODOWÓD STOSÓW (I-2c, P-I)
@@ -4239,11 +4615,23 @@ def flag_calibration_lineage_summary(con, items, now, actor="lineage"):
 # KLATKA MASTERA (migracja 0012, §4.1 briefu). Wejścia są zbiorem osobno, bo zbiór bywa
 # WYLICZONY (okno czasu), a wyliczenie nie ma prawa być kluczem rekordu.
 
+BEZ_ZMIAN = object()
+"""Wartość wstrzymująca klingi: „tej kolumny nie ruszaj” - inna niż `None`, które jest faktem (brak)."""
+
+
 def upsert_integration(con, *, master_frame_id, integ_hash, tool, window_start, window_end,
                        declared_rows, drizzle_inputs, disabled_inputs, degenerate, ambiguous,
                        telescope_mismatch, unresolved_reason, now, actor="stacks",
-                       raw_unreferenced=None, creation_time=None):
+                       raw_unreferenced=None, creation_time=None, lineage_basis=BEZ_ZMIAN,
+                       outside_window=BEZ_ZMIAN, used_rows=BEZ_ZMIAN):
     """Wiersz `integration` dla klatki mastera — `(integration_id, zmienione)`.
+
+    PODSTAWA RODOWODU (migracja 0034, AR-108): `lineage_basis` - na czym stoi ranga `history`
+    (`name` / `temp` / `count`, słownik `stacks.LINEAGE_BASES`), `outside_window` - zbiór z nazw
+    sięga klatek spoza okna nagłówka, `used_rows` - N werdyktu „plik użył N z M klatek okna”.
+    Liczy je WYŁĄCZNIE przebieg rodowodu (`stacks.run_stack_lineage`, podaje wszystkie trzy).
+    Domyślne `BEZ_ZMIAN` = „nie ruszaj zapisanej kolumny” (nowy wiersz: NULL / 0 / NULL): wołający,
+    który podstawy nie liczy - rodowód z żniw - nie ma prawa jej skasować.
 
     `raw_unreferenced` (G2-1d, migracja 0020) to UWAGA obok werdyktu, nie drugi werdykt: ile
     RAW-ów przebieg widział i nie umiał umieścić w czasie. Jedzie w TEJ liście pól, bo jest
@@ -4271,21 +4659,26 @@ def upsert_integration(con, *, master_frame_id, integ_hash, tool, window_start, 
               "drizzle_inputs": drizzle_inputs, "disabled_inputs": disabled_inputs,
               "degenerate": degenerate, "ambiguous": ambiguous,
               "telescope_mismatch": telescope_mismatch, "unresolved_reason": unresolved_reason,
-              "raw_unreferenced": raw_unreferenced, "creation_time": creation_time}
-    wartosci = list(fields.values())
+              "raw_unreferenced": raw_unreferenced, "creation_time": creation_time,
+              "lineage_basis": lineage_basis, "outside_window": outside_window,
+              "used_rows": used_rows}
     with _immediate(con):
         row = con.execute(
             "SELECT id, integ_hash, tool, window_start, window_end, declared_rows, drizzle_inputs, "
             "disabled_inputs, degenerate, ambiguous, telescope_mismatch, unresolved_reason, "
-            "raw_unreferenced, creation_time "
+            "raw_unreferenced, creation_time, lineage_basis, outside_window, used_rows "
             "FROM integration WHERE master_frame_id = ?", (master_frame_id,)).fetchone()
+        for k, pusto in (("lineage_basis", None), ("outside_window", 0), ("used_rows", None)):
+            if fields[k] is BEZ_ZMIAN:
+                fields[k] = pusto if row is None else row[k]
+        wartosci = list(fields.values())
         if row is None:
             cur = con.execute(
                 "INSERT INTO integration(master_frame_id, created_at, integ_hash, tool, "
                 "window_start, window_end, declared_rows, drizzle_inputs, disabled_inputs, "
                 "degenerate, ambiguous, telescope_mismatch, unresolved_reason, raw_unreferenced, "
-                "creation_time) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "creation_time, lineage_basis, outside_window, used_rows) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [master_frame_id, now] + wartosci)
             iid = cur.lastrowid
             emit_event(con, actor=actor, verb="integration.recorded",
@@ -4299,7 +4692,8 @@ def upsert_integration(con, *, master_frame_id, integ_hash, tool, window_start, 
             "UPDATE integration SET updated_at = ?, integ_hash = ?, tool = ?, window_start = ?, "
             "window_end = ?, declared_rows = ?, drizzle_inputs = ?, disabled_inputs = ?, "
             "degenerate = ?, ambiguous = ?, telescope_mismatch = ?, unresolved_reason = ?, "
-            "raw_unreferenced = ?, creation_time = ? WHERE id = ?", [now] + wartosci + [row["id"]])
+            "raw_unreferenced = ?, creation_time = ?, lineage_basis = ?, outside_window = ?, "
+            "used_rows = ? WHERE id = ?", [now] + wartosci + [row["id"]])
         emit_event(con, actor=actor, verb="integration.updated",
                    target=f"frame:{master_frame_id}", now=now,
                    payload={"integration_id": row["id"],
@@ -4545,6 +4939,19 @@ def judge_integration_input(con, *, integration_id, input_frame_id, excluded, no
     return True
 
 
+def judge_integration_inputs(con, *, integration_id, input_frame_ids, excluded, now, uid="local"):
+    """Werdykt ręki na KILKU wejściach jednego stosu - jeden gest = jedna transakcja (`atomic`):
+    wszystkie wiersze zapisują się razem albo żaden. Osobne transakcje per wiersz zostawiały po
+    awarii w połowie gest częściowo zapisany i bez materiału „Cofnij”. Zwraca listę `JudgedInput`
+    realnych zmian (idempotentne powtórzenia nie wchodzą)."""
+    zmiany = []
+    with atomic(con):
+        for fid in input_frame_ids:
+            judge_integration_input(con, integration_id=integration_id, input_frame_id=fid,
+                                    excluded=excluded, now=now, uid=uid, changes_out=zmiany)
+    return zmiany
+
+
 def restore_integration_judgment(con, *, integration_id, change, now, uid="local"):
     """COFNIĘCIE werdyktu ręki: wiersz wraca do stanu sprzed gestu (`change.before`), a gdy wiersza
     przed gestem nie było - znika. Bez tej klingi „Cofnij” mogło tylko zapisać werdykt przeciwny,
@@ -4605,6 +5012,130 @@ def flag_stack_lineage_summary(con, items, now, actor="stacks", kept_unread=0, k
                             "kept_frames": list(kept_frames)})
 
 
+def record_stack_history(con, *, location_id, hdr_hash, history, now, actor="scan"):
+    """HISTORIA STOSU KOPII w bazie (migracja 0034, AR-87) - `True`, gdy wiersz drgnął.
+
+    `history` = `resolve.stack.History` (krotka `(rows, inputs, tool)` + `.created`) z odczytu
+    nagłówka, którego odcisk to `hdr_hash`. KOTWICA (CAS): zapis wyłącznie przy
+    `location.header_hash == hdr_hash` W TEJ transakcji - odczyt starszy od bieżącego nagłówka
+    kopii (zapis w miejscu, skan w międzyczasie) zwraca `False` bez zapisu, bo historia opisywałaby
+    nagłówek, którego na kopii już nie ma. Czytelnik (`stacks._plan`) porównuje tę samą kotwicę.
+
+    Idempotentny: ten sam odcisk i ta sama treść → `False` bez eventu (drugi przebieg skanu czy
+    uzupełnienia nie puchnie dziennika). Inna treść albo inny odcisk → wiersz i wejścia przepisane
+    w całości (wejścia to lustro pliku, nie fakt z własną historią - jak karty `cards`) i JEDEN
+    `stack_history.recorded` z odciskami przed/po i liczbami, bez listy wejść (ta leży w tabeli,
+    a 3348 ścieżek w dzienniku byłoby balastem).
+
+    Wywoływana wewnątrz `atomic` skanu (`scan._ingest_in_tx`) albo samodzielnie (uzupełnienie,
+    odświeżenie w rodowodzie) - `_immediate` dołącza do zakresu zewnętrznego."""
+    if not hdr_hash:
+        raise ValueError(f"historia stosu location:{location_id} bez odcisku nagłówka")
+    rows, inputs, tool = history
+    tool = tool or None                      # pusta sygnatura to brak faktu (CHECK 0034)
+    created = getattr(history, "created", None) or None
+    wejscia = [(location_id, seq, i.path, int(bool(i.enabled)), int(bool(i.has_drizzle)),
+                None if i.set_temp_c is None else float(i.set_temp_c))
+               for seq, i in enumerate(inputs)]
+    with _immediate(con):
+        kopia = con.execute("SELECT header_hash FROM location WHERE id = ?",
+                            (location_id,)).fetchone()
+        if kopia is None:
+            raise ValueError(f"historia stosu: location:{location_id} nie istnieje")
+        if kopia["header_hash"] != hdr_hash:
+            return False
+        byl = con.execute("SELECT hdr_hash, declared_rows, tool, creation_time FROM stack_history "
+                          "WHERE location_id = ?", (location_id,)).fetchone()
+        if byl is not None and (byl["hdr_hash"], byl["declared_rows"], byl["tool"],
+                                byl["creation_time"]) == (hdr_hash, rows, tool, created):
+            stare = [tuple(r) for r in con.execute(
+                "SELECT location_id, seq, path, enabled, has_drizzle, temp_c FROM stack_history_input "
+                "WHERE location_id = ? ORDER BY seq", (location_id,))]
+            if stare == wejscia:
+                return False
+        con.execute("DELETE FROM stack_history_input WHERE location_id = ?", (location_id,))
+        con.execute(
+            "INSERT INTO stack_history(location_id, hdr_hash, declared_rows, tool, creation_time) "
+            "VALUES (?, ?, ?, ?, ?) ON CONFLICT(location_id) DO UPDATE SET "
+            "hdr_hash = excluded.hdr_hash, declared_rows = excluded.declared_rows, "
+            "tool = excluded.tool, creation_time = excluded.creation_time",
+            (location_id, hdr_hash, rows, tool, created))
+        con.executemany(
+            "INSERT INTO stack_history_input(location_id, seq, path, enabled, has_drizzle, temp_c) "
+            "VALUES (?, ?, ?, ?, ?, ?)", wejscia)
+        emit_event(con, actor=actor, verb="stack_history.recorded", target=f"location:{location_id}",
+                   now=now, payload={"before_hdr_hash": byl["hdr_hash"] if byl is not None else None,
+                                     "hdr_hash": hdr_hash, "declared_rows": rows,
+                                     "inputs": len(wejscia),
+                                     "enabled": sum(w[3] for w in wejscia)})
+    return True
+
+
+def clear_stack_history(con, *, location_id, now, actor="scan"):
+    """Zdejmij historię stosu z kopii, która przestała nieść stos (0034) - `True`, gdy wiersz był.
+
+    Przepięcie lokacji na treść innego rodzaju (pod ścieżką stosu leży dziś np. light) zostawiało
+    wiersz `stack_history` przy `location_id`, który dalej istnieje: czytelnicy go nie widzą (łączą
+    przez `kind='master_light'`), ale tabela niosłaby zeznanie o pliku, którego nie ma. Wiersz jest
+    lustrem nagłówka, nie faktem z własną historią - DELETE wejść i głowy + `stack_history.cleared`
+    z odciskiem, który opisywał. Brak wiersza → `False` bez eventu (skan woła to przy każdym rekordzie
+    nie-stosu, więc cisza jest regułą)."""
+    with _immediate(con):
+        byl = con.execute("SELECT hdr_hash FROM stack_history WHERE location_id = ?",
+                          (location_id,)).fetchone()
+        if byl is None:
+            return False
+        con.execute("DELETE FROM stack_history_input WHERE location_id = ?", (location_id,))
+        con.execute("DELETE FROM stack_history WHERE location_id = ?", (location_id,))
+        emit_event(con, actor=actor, verb="stack_history.cleared", target=f"location:{location_id}",
+                   now=now, payload={"hdr_hash": byl["hdr_hash"]})
+    return True
+
+
+LIGHT_ALIAS_SOURCES = ("custos", "horreum")
+"""Źródła aliasu nazwy lightu - lustro CHECK-a 0034: `custos` = zapis przenosin dawcy (import
+jednorazowy), `horreum` = dawna nazwa przy zmianie nazwy przez Horreum (`_apply_relocation`)."""
+
+
+def record_light_name_aliases(con, *, aliases, source, now, actor):
+    """Wsad aliasów nazw lightów (`light_name_alias`, AR-108) → ile wierszy PRZYBYŁO.
+
+    `aliases` = pary `(frame_id, stem)`; `stem` to rdzeń `resolve.stack.raw_stem` dawnej nazwy.
+    EXPECT przed zapisem: źródło ze słownika, rdzeń niepusty i w postaci `raw_stem` (małe litery, bez
+    separatora ścieżki - `raw_stem(stem)` NIE jest testem, bo nazwy WBPP niosą kropki, które `splitext`
+    uciąłby jak rozszerzenie), klatka istnieje i jest lightem - alias wskazuje wejście stosu, a stos
+    nie wchodzi w stos.
+    Naruszenie → `ValueError` i zero zapisu (cały wsad w jednej transakcji).
+
+    Idempotentny na `UNIQUE(stem, frame_id)`: powtórka tego samego wsadu → 0 i bez eventu. Wsad
+    z przyrostem → JEDEN `light_name_alias.imported` z liczbami (import Custos to dziesiątki tysięcy
+    par - event per alias byłby dziennikiem wielkości tabeli; pojedynczy alias z relokacji ma własny
+    event w `_dopisz_alias_nazwy`). Ten sam rdzeń przy dwóch klatkach tabela przyjmuje świadomie:
+    czytelnik traktuje go jako nazwę niejednoznaczną i odmawia."""
+    if source not in LIGHT_ALIAS_SOURCES:
+        raise ValueError(f"źródło aliasu {source!r} spoza {LIGHT_ALIAS_SOURCES}")
+    pary = sorted({(int(f), s) for f, s in aliases})
+    zle = [s for _f, s in pary if not s or s != s.lower() or "/" in s or "\\" in s]
+    if zle:
+        raise ValueError(f"rdzeń aliasu pusty albo nieznormalizowany: {zle[:5]}")
+    with _immediate(con):
+        ids = sorted({f for f, _s in pary})
+        lighty = {r[0] for r in con.execute(
+            "SELECT id FROM frame WHERE kind = 'light' AND id IN (SELECT value FROM json_each(?))",
+            (json.dumps(ids),))}
+        if set(ids) - lighty:
+            raise ValueError(f"alias nazwy przy klatce spoza lightów: {sorted(set(ids) - lighty)[:5]}")
+        przed = con.execute("SELECT count(*) FROM light_name_alias").fetchone()[0]
+        con.executemany("INSERT OR IGNORE INTO light_name_alias(frame_id, stem, source) "
+                        "VALUES (?, ?, ?)", [(f, s, source) for f, s in pary])
+        nowe = con.execute("SELECT count(*) FROM light_name_alias").fetchone()[0] - przed
+        if nowe:
+            emit_event(con, actor=actor, verb="light_name_alias.imported", target="frame:*",
+                       now=now, payload={"source": source, "added": nowe, "pairs": len(pary),
+                                         "frames": len(ids)})
+    return nowe
+
+
 def keep_stack_versions(con, *, frame_ids, group_key, now, uid="local"):
     """WERDYKT „ZOSTAWIAM WSZYSTKIE" grupy wersji stosów (AR-10, migracja 0026) - ile klatek drgnęło.
 
@@ -4661,6 +5192,162 @@ def reopen_stack_versions(con, *, frame_ids, now, uid="local"):
                                 "decided_at_before": r["decided_at"]})
             zmienione += 1
     return zmienione
+
+
+STACK_VARIANTS = frozenset({"autocrop"})
+"""Słownik rodzajów wariantu kadru stosu - LUSTRO CHECK-a `stack_variant.variant` (0035)."""
+
+RANGA_WARIANTU = {"window": 0, "location": 1, "user": 2}
+"""Precedencja świadka pary wariant-oryginał - LUSTRO CHECK-a `stack_variant.source` (0035), jeden
+właściciel dla klingi i testów. Rosnąco: `window` (jednoznaczne okno `DATE-OBS`/`DATE-END`/`FILTER`
+wśród stosów - zbieżność czasu, nie ślad pochodzenia) < `location` (dawna lokacja oryginału w tym
+samym katalogu co autocrop: PixInsight zapisuje przycięcie obok pliku, który przycina) < `user`
+(wskazanie ręką)."""
+
+
+def link_stack_variant(con, *, variant_frame_id, original_frame_id, variant, source, now,
+                       original_path=None, actor="stack_variants"):
+    """Zapisz relację wariantu kadru (`stack_variant`, 0035) + `event(stack_variant.linked)`. Zwraca
+    True, gdy wiersz drgnął.
+
+    STAN OBU KLATEK SPRAWDZANY POD BLOKADĄ: obie aktywne (`retired_at`/`superseded_by` NULL),
+    oryginał z OBECNĄ kopią - a gdy wołający zna kopię, przy której zeznanie postawiło parę
+    (`original_path`, kopia w `STACKS` z zeznania), to właśnie ta kopia musi być obecna. Oryginał
+    skasowany, podmieniony albo wycofany między planem a Dostawą daje odmowę, nie relację do klatki,
+    której już nie ma. UNIQUE(oryginał, wariant): drugi autocrop tego samego oryginału to odmowa.
+
+    PRECEDENCJA W KLINDZE, jak `link_integration`: świadka wolno PODNIEŚĆ, nigdy obniżyć - wiersz
+    o randze wyższej niż `source` zostaje nietknięty (`False`, bez eventu), więc automat nie
+    przepisze ręki ani pary z dawnej lokacji parą z samego okna. Ta sama ranga z inną parą to
+    przeliczenie automatu i przechodzi. Pełna ta sama wartość (oryginał, wariant, źródło) → `False`
+    bez eventu - drugi przebieg konsumenta zeznań jest ciszą. Event niesie stan PRZED (`before`)
+    i PO, więc droga powrotu jest w dzienniku.
+
+    GUARDY (`ValueError`, zero zapisu), wszystkie WEWNĄTRZ `_immediate` (TOCTOU): źródło spoza
+    `RANGA_WARIANTU`, wariant spoza `STACK_VARIANTS`, klatka jako wariant samej siebie, któraś
+    klatka nie istnieje albo nie jest gotowym obrazem (`master_light`), GŁĘBOKOŚĆ > 1 - oryginał
+    jest już czyimś wariantem albo wariant jest już czyimś oryginałem. Łańcuch wariant wariantu
+    zrobiłby z dziedziczenia obiektu rekurencję, której resolver nie liczy (bierze obiekt oryginału
+    jednym krokiem); pętla przez dwa wiersze byłaby tym samym błędem w krótszej formie."""
+    if source not in RANGA_WARIANTU:
+        raise ValueError(f"źródło wariantu {source!r} spoza {sorted(RANGA_WARIANTU)}")
+    if variant not in STACK_VARIANTS:
+        raise ValueError(f"wariant {variant!r} spoza {sorted(STACK_VARIANTS)}")
+    if variant_frame_id == original_frame_id:
+        raise ValueError(f"klatka {variant_frame_id} nie może być wariantem samej siebie")
+    with _immediate(con):
+        klatki = {r["id"]: r for r in con.execute(
+            "SELECT id, kind, retired_at, superseded_by FROM frame WHERE id IN (?, ?)",
+            (variant_frame_id, original_frame_id))}
+        for fid in (variant_frame_id, original_frame_id):
+            k = klatki.get(fid)
+            if k is None or k["kind"] != "master_light":
+                raise ValueError(f"klatka {fid} nie jest gotowym obrazem "
+                                 f"(kind={k['kind'] if k is not None else None!r})")
+            if k["retired_at"] is not None or k["superseded_by"] is not None:
+                raise ValueError(f"klatka {fid} wycofana albo zastąpiona")
+        if original_path is None:
+            kopia = con.execute("SELECT 1 FROM location WHERE frame_id = ? AND present = 1",
+                                (original_frame_id,)).fetchone()
+        else:
+            kopia = con.execute("SELECT 1 FROM location WHERE frame_id = ? AND present = 1 "
+                                "AND path = ? COLLATE NOCASE",
+                                (original_frame_id, original_path)).fetchone()
+        if kopia is None:
+            raise ValueError(f"oryginał {original_frame_id} bez obecnej kopii "
+                             f"{original_path or ''}".rstrip())
+        inny = con.execute("SELECT variant_frame_id FROM stack_variant WHERE original_frame_id = ? "
+                           "AND variant = ? AND variant_frame_id <> ?",
+                           (original_frame_id, variant, variant_frame_id)).fetchone()
+        if inny is not None:
+            raise ValueError(f"oryginał {original_frame_id} ma już wariant {variant} "
+                             f"(klatka {inny['variant_frame_id']})")
+        if con.execute("SELECT 1 FROM stack_variant WHERE variant_frame_id = ?",
+                       (original_frame_id,)).fetchone() is not None:
+            raise ValueError(f"oryginał {original_frame_id} jest już wariantem innego stosu")
+        if con.execute("SELECT 1 FROM stack_variant WHERE original_frame_id = ?",
+                       (variant_frame_id,)).fetchone() is not None:
+            raise ValueError(f"wariant {variant_frame_id} jest już oryginałem innego wariantu")
+        row = con.execute(
+            "SELECT original_frame_id, variant, source FROM stack_variant WHERE variant_frame_id = ?",
+            (variant_frame_id,)).fetchone()
+        przed = dict(row) if row is not None else None
+        po = {"original_frame_id": original_frame_id, "variant": variant, "source": source}
+        if przed == po:
+            return False
+        if przed is not None and RANGA_WARIANTU[przed["source"]] > RANGA_WARIANTU[source]:
+            return False
+        con.execute(
+            "INSERT INTO stack_variant(variant_frame_id, original_frame_id, variant, source, "
+            "linked_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(variant_frame_id) DO UPDATE SET "
+            "original_frame_id = excluded.original_frame_id, variant = excluded.variant, "
+            "source = excluded.source, linked_at = excluded.linked_at",
+            (variant_frame_id, original_frame_id, variant, source, now))
+        emit_event(con, actor=actor, verb="stack_variant.linked",
+                   target=f"frame:{variant_frame_id}", now=now,
+                   payload={**po, "before": przed})
+    return True
+
+
+def record_variant_testimony(con, *, path, fingerprint, payload, now, actor="stack_variants"):
+    """Wpisz zeznanie pary do kolejki konsumenta (`stack_variant_testimony`, 0035) - True, gdy wiersz
+    drgnął. Ten sam odcisk → `False` bez eventu (powtórny skan, powtórne `apply`). Nowy odcisk pod tą
+    samą ścieżką (zeznanie przepisane mocniejszym świadkiem) zastępuje treść i ZERUJE rozstrzygnięcie,
+    więc konsument przeczyta je jeszcze raz. Event `stack_variant.testimony` niesie odcisk przed i po.
+    `payload` to tekst JSON zeznania (konsument nie wraca do pliku na udziale)."""
+    if not path or not fingerprint:
+        raise ValueError("zeznanie wariantu bez ścieżki albo odcisku")
+    with _immediate(con):
+        row = con.execute("SELECT fingerprint FROM stack_variant_testimony WHERE path = ?",
+                          (path,)).fetchone()
+        if row is not None and row["fingerprint"] == fingerprint:
+            return False
+        con.execute(
+            "INSERT INTO stack_variant_testimony(path, fingerprint, payload, recorded_at) "
+            "VALUES (?, ?, ?, ?) ON CONFLICT(path) DO UPDATE SET fingerprint = excluded.fingerprint, "
+            "payload = excluded.payload, recorded_at = excluded.recorded_at, "
+            "consumed_fingerprint = NULL, consumed_at = NULL, outcome = NULL",
+            (path, fingerprint, payload, now))
+        emit_event(con, actor=actor, verb="stack_variant.testimony", target=f"path:{path}", now=now,
+                   payload={"fingerprint": fingerprint,
+                            "before": row["fingerprint"] if row is not None else None})
+    return True
+
+
+def settle_variant_testimony(con, *, path, fingerprint, outcome, now, actor="stack_variants"):
+    """Zapisz rozstrzygnięcie konsumenta dla zeznania o odcisku `fingerprint` - CAS: zeznanie
+    przepisane w międzyczasie (inny odcisk) zostaje nierozstrzygnięte i wróci w następnym przebiegu.
+    Zwraca True, gdy wiersz drgnął; event `stack_variant.testimony_settled` z wynikiem."""
+    with _immediate(con):
+        row = con.execute("SELECT fingerprint, consumed_fingerprint, outcome "
+                          "FROM stack_variant_testimony WHERE path = ?", (path,)).fetchone()
+        if row is None or row["fingerprint"] != fingerprint:
+            return False
+        if row["consumed_fingerprint"] == fingerprint and row["outcome"] == outcome:
+            return False
+        con.execute("UPDATE stack_variant_testimony SET consumed_fingerprint = ?, consumed_at = ?, "
+                    "outcome = ? WHERE path = ?", (fingerprint, now, outcome, path))
+        emit_event(con, actor=actor, verb="stack_variant.testimony_settled", target=f"path:{path}",
+                   now=now, payload={"fingerprint": fingerprint, "outcome": outcome})
+    return True
+
+
+def clear_twin_object(con, *, frame_id, now, actor="resolver"):
+    """Odepnij obiekt przejęty od oryginału (`object_source='twin'`), gdy oryginał obiektu już nie ma
+    - True, gdy wiersz drgnął. Klinga zdejmuje WYŁĄCZNIE fakt automatu: klatka z innym źródłem
+    (ręka, nagrobek, nagłówek, region) zostaje nietknięta (`False`). Event `object.unassigned` ze
+    stanem sprzed (parytet `assigned − unassigned` jak w `assign_object`)."""
+    with _immediate(con):
+        row = con.execute("SELECT object_id, object_source FROM frame WHERE id = ?",
+                          (frame_id,)).fetchone()
+        if row is None or row["object_source"] != "twin" or row["object_id"] is None:
+            return False
+        con.execute("UPDATE frame SET object_id = NULL, object_source = NULL WHERE id = ?",
+                    (frame_id,))
+        emit_event(con, actor=actor, verb="object.unassigned", target=f"frame:{frame_id}", now=now,
+                   payload={"object_id": row["object_id"], "object_source": "twin"},
+                   reason="oryginał wariantu nie ma już obiektu")
+    return True
 
 
 # ═══════════════════════════════════════════════ 1.8 kuratela celów + park (planer T4)

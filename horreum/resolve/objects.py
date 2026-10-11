@@ -64,7 +64,12 @@ ALIAS_SOURCES = frozenset({"header", "catalog_xref", "common_name", "curated", "
 # pole niesie jedyny ślad, że pustka jest WERDYKTEM ręki, nie brakiem zeznania. Bez niego kolejny
 # `Rozwiąż` przypisywałby ją z powrotem tym samym szczeblem, który człowiek właśnie odrzucił —
 # a cofnięcie, które cofa się samo przy najbliższym przebiegu, nie jest cofnięciem.
-OBJECT_SOURCES = ALIAS_SOURCES | {"alias", "region", "path", "user_cleared"}
+#
+# `twin` (AR-54) to obiekt ORYGINAŁU przejęty przez wariant kadru (`stack_variant`, 0035): autocrop
+# nie niesie `OBJECT`, a jego suby są subami oryginału. Szczebel automatu (po aliasie, przed
+# regionem), re-derywowany przy każdym przebiegu - słabszy od nagłówka i ręki, więc poza aliasem
+# (nazwy do zapamiętania nie ma) i poza `WEAK_OBJECT_SOURCES` (powód przy tamtej stałej).
+OBJECT_SOURCES = ALIAS_SOURCES | {"alias", "region", "path", "user_cleared", "twin"}
 
 # Źródła, które POMIJAJĄ CAŁĄ drabinę — jeden właściciel dla przebiegu, klingi i read-modelu.
 # Wspólny mianownik: oba są ZEZNANIEM CZŁOWIEKA o tej konkretnej klatce, a przebieg nie ma prawa
@@ -75,6 +80,12 @@ STICKY_OBJECT_SOURCES = frozenset({"user", "user_cleared"})
 # ścieżka, czyli zeznanie o pliku, a nie o niebie: folder mógł zostać nazwany byle jak i to jest
 # dokładnie ta klasa pomyłki, którą gest ręki ma naprawiać. Nagłówek, xref i region ZOSTAJĄ poza —
 # ich nadpisanie byłoby cichym zamalowaniem faktu z pliku albo z geometrii.
+#
+# `twin` też ZOSTAJE poza, choć jest automatem: ta stała ma trzech konsumentów, którzy pytają
+# o POTWIERDZENIE CZŁOWIEKA, nie o słabość - przeżycie podmiany pliku (`TRANSFERABLE_OBJECT_SOURCES`),
+# spis faktów ręki (`audit`, `human-facts --baseline`) i powód „nagłówek przegłosował potwierdzenie”
+# w `repo.assign_object`. Obiekt bliźniaka poprawia się tam, skąd płynie: ręka nazywa ORYGINAŁ,
+# a następny przebieg niesie nazwę do wariantu.
 WEAK_OBJECT_SOURCES = frozenset({"path"})
 
 # Źródła, które „Cofnij przypisanie" wolno ZDJĄĆ (S2b) — postawiła je ręka albo ścieżka, więc

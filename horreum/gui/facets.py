@@ -33,7 +33,8 @@ from horreum.gui.rows import TwoPartDelegate
 # pas. Tytuł = klucz i18n rozwiązywany w budowie (nie zamrażać PL przy imporcie).
 _GROUPS = [("object", "facets.group.object", True), ("filter", "facets.group.filter", False),
            ("channel", "facets.group.channel", False),
-           ("kind", "facets.group.kind", False), ("telescope", "facets.group.telescope", False),
+           ("kind", "facets.group.kind", False), ("lineage", "facets.group.lineage", False),
+           ("telescope", "facets.group.telescope", False),
            ("night", "facets.group.night", True)]
 
 # Czerwień wykluczeń ⊖ — z motywu (F6 §7, SPOT). WYPALANA w item przy `set_data`, więc zmiana
@@ -64,6 +65,12 @@ use_theme(theme.DEFAULT)
 # wszystkich trzech.
 _SHORT_ROWS = 4                            # krótka grupa nie zjada pionu długim (wiz F4 #1)
 _KROTKIE = frozenset(facet for facet, _tytul, dluga in _GROUPS if not dluga)   # z `_GROUPS` (SPOT)
+# Grupy, które GASNĄ w całości (tytuł + lista), gdy w zbiorze nie ma czego liczyć. Rodowód dotyczy
+# wyłącznie gotowych obrazów: nad zbiorem samych lightów pusta grupa nic nie mówi, a zabiera pion
+# listwie, której krótkie grupy mają stać na suficie (W-6) - zmierzone bramką W-6: dołożona
+# grupa zawsze widoczna ściskała Filtr do 75 px przy suficie 78 px w listwie 900 px.
+_ZNIKAJACE = frozenset({"lineage"})
+_ROWS_ZNIKAJACE = 6                        # do tylu wartości grupa stanów stoi bez suwaka
 _LONG_MIN_H = 140                          # ~6 wierszy; Obiekt/Noc (47/173 wartości) wygrywają pion (wiz F4 #1)
 # Próg czytelności LEWEJ KOLUMNY okna (wiz F4 #2) — publiczny, bo panel „Pola" w `grid.py` dzieli
 # to samo minimum (wiz F3 #4); dwie liczby rozjechałyby się przy pierwszej korekcie (SPOT).
@@ -116,10 +123,12 @@ class FacetRail(QWidget):
         self.setMinimumWidth(RAIL_MIN_W)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
+        self._tytuly = {}
         for facet, title, long_list in _GROUPS:
             lbl = QLabel(i18n.t(title))
             f = QFont(); f.setBold(True); lbl.setFont(f)
             outer.addWidget(lbl)
+            self._tytuly[facet] = lbl
             if facet == "object":
                 self.search = QLineEdit()
                 self.search.setPlaceholderText(i18n.t("facets.search_object"))
@@ -156,6 +165,9 @@ class FacetRail(QWidget):
                 lw.setMinimumHeight(_LONG_MIN_H)
             self._lists[facet] = lw
             outer.addWidget(lw, 1 if long_list else 0)
+            if facet in _ZNIKAJACE:              # do pierwszego `set_data` nie ma czego liczyć
+                lbl.setVisible(False)
+                lw.setVisible(False)
             if not long_list:
                 # Sufit PO wpięciu w listwę: wiersz ma się zmierzyć fontem, który lista dziedziczy
                 # od rodzica, a nie tym, który miała jako sierota.
@@ -266,9 +278,20 @@ class FacetRail(QWidget):
                 # jednego obiektu potrafi opróżnić Filtr, Teleskop i Noc naraz — zmierzone cztery
                 # nieme prostokąty w jednym widoku. Grupa „object" dostanie zaraz potem własny
                 # przebieg z frazą (`_filter_objects`), który tę decyzję nadpisze.
+                widac = lw.count() > 0
+                if facet in _ZNIKAJACE:
+                    lw.setVisible(widac)
+                    self._tytuly[facet].setVisible(widac)
                 self._set_empty_row(lw, pusto=lw.count() == 0, fraza="")
                 if facet in _KROTKIE:
                     self._dopasuj_sufit(lw)        # W-6: z wiersza, który właśnie stanął na liście
+                if facet in _ZNIKAJACE and widac:
+                    # Grupa stanów: wysokość DOPASOWANA DO LICZBY WARTOŚCI (stanów jest najwyżej osiem,
+                    # zwykle cztery) - przy podłodze jednego wiersza layout ściskał grupę do jednej
+                    # wartości z suwakiem (zmierzone natywnie). Stała wysokość nie podnosi podłogi
+                    # okna: pion listwy bierze przewijany kontener (`FramesView.rail_box`).
+                    wiersz = lw.sizeHintForRow(0)
+                    lw.setFixedHeight(min(lw.count(), _ROWS_ZNIKAJACE) * wiersz + 2 * lw.frameWidth())
             if aliases is not None:
                 self._aliases = aliases
             if alias_forms is not None:

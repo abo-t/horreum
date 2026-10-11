@@ -31,6 +31,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import sqlite3
 import statistics
 import uuid
 from datetime import datetime, timezone
@@ -43,7 +44,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QPushButton, QDialog, QMenu,
-    QMessageBox, QSizePolicy, QSplitter, QTableView, QVBoxLayout, QWidget,
+    QFrame, QMessageBox, QScrollArea, QSizePolicy, QSplitter, QTableView, QVBoxLayout, QWidget,
 )
 
 from horreum import (
@@ -65,10 +66,12 @@ from horreum.gui.grid_model import (
     _FLAGA_WERSJI, _FLAGA_ZASTAPIONYCH, _FLAGI_CZEKAJA_NA_FAKTY, _FLAGI_KOPII_WIODACEJ, _FLAGI_OBRAZOW,
     _FLAGI_SCIEZKI_Z_TRESCI, GridTableModel, _GRUPA_WERSJI, _half_away, _klucz_kryterium, _klucz_spec,
     kolumna_z_tresci, _kopie_wielokrotne, _lista_kanonow, _nieznane_warunki, _OBJECT_STATE_TIPS, _object_tip,
-    _ODWROT_COFNIECIA, _ODWROT_PRZYWROCENIA, _ODWROT_UWAG, _ODWROT_WYCOFANIA, _ogon_sciezki, OPERATORS,
+    _ODWROT_COFNIECIA, _ODWROT_PRZYWROCENIA, _ODWROT_UWAG, _ODWROT_WERDYKTU, _ODWROT_WYCOFANIA,
+    _ogon_sciezki, OPERATORS,
     _pole_rozjazdu, _POWROT_PERSPEKTYWA, _POWROT_ZBIOR, PRESET_COPY_CONFLICT, _PRESET_CZYSTY, PRESET_DUPS,
     _PRESET_LABELS, PRESET_LINEAGE, PRESET_MISSING_COPY, PRESET_ORPHAN_TESTIMONY, PRESET_PATH_HEADER_CONFLICT,
-    PRESET_PENDING_FINISH, PRESET_RETIRED, PRESET_RETIRED_CONFLICT, PRESET_STACK_VERSIONS, PRESET_SUPERSEDED,
+    PRESET_PENDING_FINISH, PRESET_READY_IMAGES, PRESET_RETIRED, PRESET_RETIRED_CONFLICT,
+    PRESET_STACK_VERSIONS, PRESET_SUPERSEDED,
     PRESET_TORN_WRITE, PRESET_VANISHED, PRESETS, PREZENTACJA_KLASYCZNA, PREZENTACJA_ZNAJDZ, Recepta,
     _RECEPTA_ZAJETA, _RECEPTY_ZAPISU, _ROLA_ETYKIETY, _set_role, _SPEC_OBRAZY, _SPEC_SZEROKOSC_SCIEZKI,
     _SPEC_WIDOK, STRUCT_NOISE, _SUFIT_KOLUMNY_Z_TRESCI, _SZEROKOSC_UWAG, szerokosc_z_tresci, _TRIMY,
@@ -77,9 +80,10 @@ from horreum.gui.grid_model import (
 )
 from horreum.gui.grid_panels import FieldsPanel, FilterPanel, MacroBar, RenameBar, zdanie_kopii_bez_zeznania
 from horreum.gui.grid_lineage import (
-    _frame_gate_reason, _lineage_flags, _lineage_item_text, _lineage_raw_note, LineageBar,
-    _object_gate_reason, REASON_NO_OBJECT_TOKEN, REASON_OFFSET_TOKEN,
+    _frame_gate_reason, _KLUCZE_POKAZ, _lineage_flags, _lineage_item_text, _lineage_raw_note,
+    LineageBar, _object_gate_reason, REASON_NO_OBJECT_TOKEN, REASON_OFFSET_TOKEN,
 )
+from horreum.gui.grid_lineage import calibration_class_name, _nazwa_pliku   # oś kalibracji (E4-5)
 from horreum.gui.grid_selection import _PanelStack, ReleaseDialog, SelectionBar, StagingDrawer
 from horreum.gui.grid_workers import _liczniki_listwy, PolaWorker, _sklad_zbioru, ZbiorWorker
 
@@ -164,11 +168,21 @@ class FramesView(QWidget):
         # które ZASTĘPUJE zbiór (perspektywa, „× Wyczyść zbiór", most obiektu, nowe zapytanie);
         # klik facetu go zostawia, bo tylko zawęża.
         self.note_query = None
+        # KLATKI WSKAZANE WPROST - składnik stanu zbioru obok trimów (`show_frames`, dwuklik w panelu
+        # rodowodu): `(frame_ids, etykieta chipu)` albo `None`. Tnie jak trim, ale zbiór niesie wejście,
+        # nie zapytanie, więc nie ma go w żadnej perspektywie. `_powrot_wskazanych` = stan sprzed
+        # wejścia - „×" chipu WRACA do niego (droga wyjścia), zamiast zostawiać całe archiwum.
+        self._wskazane = None
+        self._powrot_wskazanych = None
         self.prezentacja = PREZENTACJA_KLASYCZNA
         self._wersja_w_znajdz = False   # „Kolumny ▾ → Wersja" w Znajdź (AR-50 (5)), domyślnie wyłączona
         # Droga powrotu gestu uwag: `(before, after)` ostatniego gestu - `before` z klingi (stan sprzed
         # gestu per zmieniona klatka), `after` = treść, którą gest zostawił (`None` = zdjęcie).
         self._migawka_uwag = None
+        # Droga powrotu werdyktu ręki w panelu rodowodu: `(integration_id, zmiany)` ostatniego gestu,
+        # `zmiany` = `repo.JudgedInput` z klingi (stan sprzed gestu odczytany pod jej blokadą).
+        self._migawka_werdyktu = None
+        self._cichy_raport_gen = None   # generacja przeładowania po geście panelu - bez raportu wczytania
         self._skladniki_przylozone = []   # składniki zawężenia OSTATNIO PRZYŁOŻONEGO zbioru (chipy)
         # Terminy ostatniego zapytania Znajdź - `(etykieta, klucze składników)`, jeden chip na termin;
         # schodzą z każdym wejściem, które zastępuje zbiór. Stan, który zapytanie postawiło, i to,
@@ -256,6 +270,7 @@ class FramesView(QWidget):
         self._load_facets()
         self.refresh(w_tle=True)    # otwarcie bazy: okno żyje, zanim zbiór dojedzie (AR-27)
         self._refresh_drawer()
+        self._przywroc_panel_rodowodu()   # panel rodowodu otwarty przy zamknięciu wraca otwarty
         self._zbudowany = True
 
     # ---- budowa ----
@@ -302,7 +317,21 @@ class FramesView(QWidget):
         self.fields.columnsChanged.connect(self._on_columns)
         self.fields.imagesToggled.connect(self._on_images_toggled)
         left = QSplitter(Qt.Vertical)
-        left.addWidget(self.facet_rail)
+        # LISTWA W PRZEWIJANYM KONTENERZE: jej minimum (grupy długie, krótkie na suficie W-6, grupa
+        # „Rodowód" nad gotowymi obrazami) nie podnosi podłogi OKNA - przy niskim oknie listwa
+        # dostaje suwak, a nie wypycha okno poza ekran (kanon: okno mieści się na 1920x1080 przy
+        # 100 %; zmierzone natywnie: grupa „Rodowód" podnosiła podłogę 996 → 1058 px).
+        self.rail_box = QScrollArea()
+        self.rail_box.setWidget(self.facet_rail)
+        self.rail_box.setWidgetResizable(True)
+        self.rail_box.setFrameShape(QFrame.NoFrame)
+        self.rail_box.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # Szerokość: próg czytelności lewej kolumny (`RAIL_MIN_W`) ma KONTENER, a listwa oddaje suwakowi
+        # jego szerokość - dołożony do progu poszerzałby podłogę okna (zmierzone natywnie +30 px).
+        prog = self.facet_rail.minimumWidth()
+        self.rail_box.setMinimumWidth(prog)
+        self.facet_rail.setMinimumWidth(max(0, prog - self.rail_box.verticalScrollBar().sizeHint().width()))
+        left.addWidget(self.rail_box)
         left.addWidget(self.fields)
         left.setStretchFactor(0, 3)
         left.setStretchFactor(1, 1)
@@ -353,11 +382,27 @@ class FramesView(QWidget):
         self.lineage_bar = LineageBar()                   # trzeci panel stacku (I-2d)
         self.lineage_bar.judged.connect(self._on_lineage_judged)
         self.lineage_bar.offset_asked.connect(self._on_lineage_offset)
+        self.lineage_bar.frames_requested.connect(self._on_lineage_frames)
+        # MOST „pokaż te klatki w Zbiorach" - wstrzykuje gospodarz
+        # (`MainWindow.show_frames_in_collections`), bo tylko on zna nawigację. None = widok bez
+        # gospodarza (testy samego gridu): wejście idzie wprost do `show_frames`, więc brak
+        # wstrzyknięcia niczego nie psuje (wzór `run_stage_fn`).
+        self.show_frames_fn = None
         self._lineage_frame_id = None       # cel gestu odniesienia (klatka stosu w panelu)
         # TAKT 3 gestu osi stosu — wstrzykuje gospodarz (`MainWindow`), bo tylko on zna Dostawę.
         # None = widok bez gospodarza (testy samego gridu): gest zapisuje, a zdanie mówi, gdzie
         # przeliczyć — dokładnie jak przed tą zmianą, więc brak wstrzyknięcia niczego nie psuje.
+        # Wołane z NAZWĄ etapu Dostawy (`stack_lineage` po odniesieniu czasu, `lineage` po gestach
+        # osi kalibracji) - zwraca powód odmowy albo `None`.
         self.run_stage_fn = None
+        # Gesty ręki osi KALIBRACJI (E4-5) - zapis jedną klingą tutaj, panel tylko pyta.
+        self.lineage_bar.calibrator_picked.connect(self._on_calibrator_picked)
+        self.lineage_bar.calibrator_restored.connect(self._on_calibrator_restored)
+        self.lineage_bar.calibration_count_asked.connect(self._on_calibration_count)
+        # Zapis do plików TEJ powierzchni trzyma blokadę bazy jak etap w tle - panel gaśnie i wtedy.
+        # Flaga z sygnału, nie `self._wb.is_busy`: uchwyt ogłasza start, ZANIM ustawi swój wątek.
+        self._zapis_wlasny = False
+        self._wb.busy_changed.connect(self._on_wlasny_zapis_plikow)
 
         self.panel_stack = _PanelStack()                 # najwyżej JEDEN panel widoczny (F3)
         self.panel_stack.addWidget(self.macro_bar)
@@ -718,11 +763,14 @@ class FramesView(QWidget):
             setattr(self, atrybut, bool(spec.get(_klucz_spec(atrybut))))
         self._filter_tree = spec.get("filter")
         self.note_query = None      # perspektywa definiuje CAŁY zbiór - tekst uwag nie jest jej częścią
+        self._zdejmij_wskazane()    # …klatki wskazane z panelu też nie
         self._terminy = []
         # F4R#2: stan facetów resetowany dla KAŻDEJ perspektywy (preset ORAZ zapisana) — perspektywa
         # definiuje CAŁY zbiór; stara zapisana bez klucza "facets" MUSI zerować stan, inaczej facety
         # poprzedniego wyboru wyciekają w nowy zbiór. Rail przeładuje refresh() (set_data).
-        self._facet_state = spec.get("facets") or facet_model.empty_state()
+        # Kopia, nie referencja: preset z facetami („Gotowe obrazy”) dzieliłby obiekt z `PRESETS`,
+        # a pierwsza mutacja stanu w miejscu zepsułaby preset na całą sesję.
+        self._facet_state = copy.deepcopy(spec.get("facets")) or facet_model.empty_state()
         self.filter_panel.set_tree(self._filter_tree)   # panel odbija filtr perspektywy (P3-3);
         # set_tree dostaje TYLKO advanced — facety NIGDY nie idą w płaski panel (nota R2, P3-3 wyżej)
         gb = spec.get("group_by")
@@ -785,6 +833,7 @@ class FramesView(QWidget):
         self._filter_tree = None
         self.filter_panel.set_tree(None)
         self.note_query = None      # wejście ZASTĘPUJE zbiór, więc tekst uwag też schodzi
+        self._zdejmij_wskazane()
         self._terminy = []
         self._facet_state = {"object": {"in": [[oid, canon] for oid, canon in pairs]}} \
             if pairs else facet_model.empty_state()
@@ -812,6 +861,7 @@ class FramesView(QWidget):
         self.filter_panel.set_tree(self._filter_tree)
         self._facet_state = copy.deepcopy(facets) or facet_model.empty_state()
         self.note_query = note_query or None
+        self._zdejmij_wskazane()
         self._terminy = [(etykieta, tuple(klucze)) for etykieta, klucze in terms]
         self._stan_zapytania = (copy.deepcopy(self._facet_state), copy.deepcopy(self._filter_tree),
                                 self.note_query)
@@ -904,8 +954,10 @@ class FramesView(QWidget):
         zapytaniem, a tabela pokazuje jeszcze klatki poprzedniego - chip czytany ze stanu nazywałby
         kryteria wyników, których na ekranie nie ma."""
         if tylko_bez_kontrolki:
+            # Klatki wskazane z panelu też nie mają kontrolki w klasycznej prezentacji - chip jest
+            # ich JEDYNYM śladem na ekranie i jedyną drogą wyjścia.
             return [s for s in self._skladniki_przylozone
-                    if all(k == ("uwagi",) for k in self._klucze_chipu(s[0]))]
+                    if all(k[0] in ("uwagi", "wskazane") for k in self._klucze_chipu(s[0]))]
         return list(self._skladniki_przylozone)
 
     @staticmethod
@@ -932,6 +984,8 @@ class FramesView(QWidget):
         """`(klucz, etykieta)` każdego składnika zawężenia z migawki - kolejność: tekst uwag, flagi
         perspektywy, facety, filtr zaawansowany."""
         out = []
+        if migawka.get("wskazane") is not None:
+            out.append((("wskazane",), migawka["wskazane_etykieta"]))
         if migawka.get("uwagi") is not None:
             out.append((("uwagi",), i18n.t("find.chip.notes", text=migawka["uwagi"])))
         trimy = set(migawka.get("trimy") or ())
@@ -965,6 +1019,8 @@ class FramesView(QWidget):
         rodzaj = klucz[0]
         if rodzaj == "uwagi":
             self.note_query = None
+        elif rodzaj == "wskazane":
+            self._wroc_ze_wskazanych()
         elif rodzaj == "filtr":
             self._filter_tree = None
             self.filter_panel.set_tree(None)
@@ -1037,7 +1093,10 @@ class FramesView(QWidget):
         # jest zawężeniem jak klik w listwie - nad definicją bez filtra nie zmienia perspektywy.
         filtr_zgodny = (spec.get("filter") == self._filter_tree
                         or (spec.get("filter") is None and _zawezenie_facetowe(self._filter_tree)))
-        if flagi_spec != flagi_stanu or not filtr_zgodny or self.note_query is not None:
+        # KLATKI WSKAZANE Z PANELU - jak tekst uwag: żadna perspektywa ich nie niesie, a 190 wejść
+        # jednego stosu nie jest „Przeglądem".
+        if (flagi_spec != flagi_stanu or not filtr_zgodny or self.note_query is not None
+                or self._wskazane is not None):
             return False
         return all(self._facet_state.get(facet) == wybor
                    for facet, wybor in (spec.get("facets") or {}).items())
@@ -1864,6 +1923,7 @@ class FramesView(QWidget):
         if not self.panel_stack.isHidden() and self.panel_stack.currentWidget() is target:
             self.panel_stack.setVisible(False)           # zamknięcie: podgląd ZOSTAJE
             self.sel_bar.set_active_panel(None)
+            self._zapamietaj_panel_rodowodu()
             return
         if (self._preview_owner and self._preview_owner != which
                 and self.model._preview_active()):
@@ -1874,10 +1934,25 @@ class FramesView(QWidget):
         self.panel_stack.setCurrentWidget(target)
         self.panel_stack.setVisible(True)
         self.sel_bar.set_active_panel(which)
+        self._zapamietaj_panel_rodowodu()
         if which == "rename":
             self._refresh_date_echo()                    # PO pokazaniu strony (F3R#4)
         elif which == "lineage":
             self._refresh_lineage()                      # jw. — panel czyta zaznaczenie po pokazaniu
+
+    # OTWARTY PANEL RODOWODU PRZEŻYWA ZAMKNIĘCIE PROGRAMU (wizytacja 0802). Pytanie „czym skalibrowano / z czego
+    # powstał” zadaje się seriami, a każda seria zaczynała od kliknięcia „Rodowód…” (pierwsza
+    # odpowiedź 3 → 2 interakcje, precedens: perspektywy). Pamiętamy WYŁĄCZNIE ten panel - makro
+    # i rename niosą staging, a otwarcie ich samo z siebie po starcie byłoby niespodzianką.
+    _KLUCZ_PANELU_RODOWODU = "grid/lineage_panel_open"
+
+    def _zapamietaj_panel_rodowodu(self):
+        self._settings().setValue(self._KLUCZ_PANELU_RODOWODU, self._lineage_panel_open())
+
+    def _przywroc_panel_rodowodu(self):
+        if (self._settings().value(self._KLUCZ_PANELU_RODOWODU, False, type=bool)
+                and not self._lineage_panel_open()):
+            self._toggle_panel("lineage")
 
     def _rename_panel_open(self):
         return (not self.panel_stack.isHidden()
@@ -1898,7 +1973,7 @@ class FramesView(QWidget):
         return (not self.panel_stack.isHidden()
                 and self.panel_stack.currentWidget() is self.lineage_bar)
 
-    def _refresh_lineage(self, *, select_frame_ids=None):
+    def _refresh_lineage(self, *, select_frame_ids=None, select_relation=None):
         """Wypełnij panel rodowodu z zaznaczenia. Warunek: DOKŁADNIE JEDNA zaznaczona klatka
         `master_light` — rodowód jest faktem o JEDNYM obrazie, a „rodowód zbioru" nie znaczy nic.
         Każdy inny stan dostaje ZDANIE, nie pustkę: user ma wiedzieć, czego brakuje do odpowiedzi
@@ -1906,6 +1981,7 @@ class FramesView(QWidget):
 
         `select_frame_ids` przywraca zaznaczenie PO odświeżeniu (werdykt ręki) — po klatkach,
         nie po indeksach, bo kolejność wierszy należy do zapytania, a nie do panelu.
+        `select_relation` robi to samo na osi kalibracji (po geście ręki - relacja, nie indeks).
 
         Świadomie WARUNKOWE (jak `_refresh_date_echo`): przy zamkniętym panelu nie czytamy bazy."""
         if not self._lineage_panel_open():
@@ -1917,20 +1993,22 @@ class FramesView(QWidget):
             # DOPEŁNIENIEM osi stosów, nie jej konkurentem: pytamy dopiero, gdy w zaznaczeniu nie
             # ma gotowego obrazu, więc droga stosu zachowuje się dokładnie jak przedtem.
             lighty = [r for r in wiersze if r.get("kind") == "light"]
-            # DOKŁADNIE JEDEN ZAZNACZONY WIERSZ, nie „jeden light wśród kilku klatek" (CAPTAIN):
-            # nagłówek panelu nie nazywa klatki, więc przy zaznaczeniu light+dark+bias użytkownik
-            # nie miałby jak sprawdzić, o której z nich mówi ekran.
-            if len(wiersze) == 1 and lighty:
+            # DOKŁADNIE JEDEN LIGHT W ZAZNACZENIU (klatki kalibracyjne obok nie przeszkadzają):
+            # nagłówek panelu NAZYWA klatkę, o której mówi, więc cel gestu ręki jest jawny także
+            # przy zaznaczeniu light + jego flat - dawne „dokładnie jeden wiersz” było ceremonią
+            # z czasów, gdy nagłówek nazwy nie miał. Dwa wiersze tej samej klatki (dwie kopie) to
+            # nadal jeden light.
+            if len({r["frame_id"] for r in lighty}) == 1:
                 relacje = lineage.explain_light(self.con, lighty[0]["frame_id"])
                 if relacje:
-                    self.lineage_bar.set_calibration(relacje)
+                    self.lineage_bar.set_calibration(
+                        relacje, frame_name=_nazwa_pliku(lighty[0].get("path")),
+                        light_frame_id=lighty[0]["frame_id"], select_relation=select_relation)
                     return
-            # TRZY RÓŻNE POMYŁKI, TRZY ZDANIA. Jeden komunikat na wszystkie mówił o klatce
-            # KALIBRACYJNEJ także wtedy, gdy zaznaczono dwie klatki nieba — czyli zdanie fałszywe
-            # o tym, co użytkownik ma przed oczami (ta sama klasa co „kryterium sklejające fakty").
+            # DWIE POMYŁKI, DWA ZDANIA (plus pustka). Kilka klatek nieba albo kilka obrazów - panel
+            # nie wie, o którym mówić; same klatki kalibracyjne - narzędzie nie ma rodowodu.
             klucz = ("grid.lin.hint.none" if not wiersze else
                      "grid.lin.hint.many" if len(stosy) > 1 or len(lighty) > 1 else
-                     "grid.lin.hint.one_only" if len(wiersze) > 1 else
                      "grid.lin.hint.not_stack")
             self.lineage_bar.set_lineage(None, [], hint=i18n.t(klucz))
             return
@@ -1943,9 +2021,11 @@ class FramesView(QWidget):
         # a obraz z powodem ZWIETRZAŁYM czeka na przeliczenie etapem, nie na rękę. Poza tymi dwoma
         # stanami zapytanie chodziłoby po całym materiale obiektu przy każdym zaznaczeniu, nie
         # mając komu oddać wyniku.
+        # Fakt „gest ma tu jeszcze co zrobić" jest JEDEN dla panelu, kolumny i perspektywy
+        # (`queries.lineage_awaits_hand`): stos z odrzuconym ostatnim kandydatem nie wraca do trybu
+        # propozycji z pustymi nocami, tylko pokazuje własne werdykty do ewentualnego cofnięcia.
         kandydaci, raw_bez_zegara = (), 0
-        if head["unresolved_reason"] and not head["inputs"] \
-                and not queries.lineage_reason_stale(head):
+        if queries.lineage_awaits_hand(self.con, fid):
             kandydaci, raw_bez_zegara = stacks.propose_lineage_candidates(self.con, fid)
         # TRZECI ŚWIADEK ZEGARA (G2-1d): uwaga przebiegu o RAW-ach bez zegara przy obrazie, którego
         # werdykt mówi co innego - także przy GOTOWYM rodowodzie z puli mieszanej, gdzie propozycji
@@ -1963,8 +2043,13 @@ class FramesView(QWidget):
         self.lineage_bar.set_offset_hint(
             stacks.propose_offset_minutes(self.con, fid)
             if head["unresolved_reason"] == REASON_OFFSET_TOKEN or raw_bez_zegara else None)
+        # Nazwy plików kandydatów - jednym zapytaniem dla wszystkich nocy (combo przerysowuje z pamięci).
+        sciezki = (queries.frame_present_paths(self.con, [f["frame_id"] for n in kandydaci
+                                                          for f in n.frames])
+                   if kandydaci else {})
         self.lineage_bar.set_lineage(head, queries.stack_lineage_inputs(self.con, fid),
-                                     candidates=kandydaci, raw_unreferenced=raw_bez_zegara)
+                                     candidates=kandydaci, raw_unreferenced=raw_bez_zegara,
+                                     candidate_paths=sciezki)
         self._lineage_frame_id = fid
         if select_frame_ids:
             self.lineage_bar.select_frame_ids(select_frame_ids)
@@ -2017,28 +2102,121 @@ class FramesView(QWidget):
         if self.run_stage_fn is None:
             self.status_message.emit(i18n.t("grid.lin.offset_saved", hours=godziny) + czekalo)
             return
-        powod = self.run_stage_fn()
+        powod = self.run_stage_fn("stack_lineage")
         self.status_message.emit(
             (i18n.t("grid.lin.offset_saved_counting", hours=godziny) if powod is None
              else i18n.t("grid.lin.offset_saved_busy", hours=godziny, reason=powod)) + czekalo)
 
+    # ---- gesty ręki osi KALIBRACJI (E4-5) i „Policz teraz” ----
+    def _on_calibrator_picked(self, light_frame_id, relation, master_frame_id, widziany):
+        """„Wskaż kalibrator…” → jedna klinga (`repo.link_calibration`, gałąź ręki z `confidence=
+        'user'`), potem odświeżenie panelu ze STANU. Klinga waliduje pod blokadą to, co panel
+        pokazał (`widziany`): dryf albo kandydat, który przestał się nadawać, to ODMOWA z tokenem,
+        a panel po niej pokazuje stan bieżący - człowiek wybiera jeszcze raz na prawdzie, nie na
+        zdjęciu sprzed chwili.
+
+        PRZELICZENIA TU NIE MA i nie jest potrzebne: wskazanie ręki jest stanem samo w sobie,
+        a przebieg rodowodu go omija (`run_lineage`)."""
+        klasa = calibration_class_name(relation)
+        try:
+            zmiana = repo.link_calibration(
+                self.con, light_frame_id=light_frame_id, master_frame_id=master_frame_id,
+                relation=relation, now=self._now(), actor="user:local", asserted_by="user",
+                confidence="user", expected=widziany)
+        except repo.KalibratorOdrzucony as odmowa:
+            self._refresh_lineage(select_relation=relation)
+            self.status_message.emit(i18n.t(f"grid.lin.cal.refused.{odmowa.token}"))
+            return
+        except sqlite3.OperationalError:
+            # Blokada zapisu trzymana dłużej niż `busy_timeout` (etap w tle na własnym połączeniu,
+            # zapis do plików): zapis się nie odbył, a gest ma to powiedzieć zdaniem, nie traceback.
+            self.status_message.emit(i18n.t("grid.lin.cal.db_busy"))
+            return
+        # Zaznaczenie wraca na relację gestu - następny krok (np. „Przywróć automat”) jest o klik bliżej.
+        self._refresh_lineage(select_relation=relation)
+        self.status_message.emit(i18n.t("grid.lin.cal.picked", rel=klasa) if zmiana
+                                 else i18n.t("grid.lin.cal.picked_none", rel=klasa))
+
+    def _on_calibrator_restored(self, light_frame_id, relation, master_frame_id):
+        """„Przywróć automat” → `repo.unlink_calibration` wiersza RĘKI (CAS na masterze, który panel
+        pokazał), potem takt 3: etap „Rodowód” odtwarza ogniwo z przepisu. Bez przeliczenia panel
+        pokazałby „nie policzono” w miejscu, z którego człowiek właśnie zdjął swoją decyzję.
+
+        PRZEPIS BEZ KANDYDATA: odpowiedź bierzemy ze STANU po zdjęciu (`explain_light`) - relacja
+        nieliczona (`pending`) dostaje przeliczenie, luka zdanie „klatka została bez kalibratora”;
+        uruchamianie etapu, który niczego nie odtworzy, obiecywałoby powrót, którego nie będzie."""
+        klasa = calibration_class_name(relation)
+        try:
+            zdjete = repo.unlink_calibration(
+                self.con, light_frame_id=light_frame_id, relation=relation, allowed=("user",),
+                reason="user_restore", now=self._now(), actor="user:local",
+                expected_master_frame_id=master_frame_id)
+        except sqlite3.OperationalError:
+            self.status_message.emit(i18n.t("grid.lin.cal.db_busy"))
+            return
+        self._refresh_lineage(select_relation=relation)
+        if not zdjete:
+            self.status_message.emit(i18n.t("grid.lin.cal.restored_none"))
+            return
+        stan = {r["relation"]: r for r in lineage.explain_light(self.con, light_frame_id) or ()}
+        if not (stan.get(relation) or {}).get("pending"):
+            self.status_message.emit(i18n.t("grid.lin.cal.restored_no_auto", rel=klasa))
+            return
+        self._policz_rodowod_kalibracji(light_frame_id, i18n.t("grid.lin.cal.restored", rel=klasa))
+
+    def _sync_lineage_busy(self):
+        """Bramka gestów panelu Rodowód (werdykt stosu, odniesienie, gesty osi kalibracji): etap
+        Dostawy w tle ALBO zapis do plików z tej lub drugiej powierzchni (`_powod_zajetosci`) -
+        każdy z nich trzyma blokadę zapisu bazy, a gest w tym czasie czekałby `busy_timeout`
+        i wracał błędem zamiast zdaniem."""
+        self.lineage_bar.set_busy(bool(self._etap_w_biegu or self._foreign_wb
+                                       or getattr(self, "_zapis_wlasny", False)))
+
+    def _on_wlasny_zapis_plikow(self, busy):
+        self._zapis_wlasny = bool(busy)
+        self._sync_lineage_busy()
+
+    def _on_calibration_count(self, light_frame_id):
+        """„Policz teraz” przy ⚠: etap „Rodowód” jednym kliknięciem, bez wycieczki do Dostawy."""
+        self._policz_rodowod_kalibracji(light_frame_id)
+
+    def _policz_rodowod_kalibracji(self, light_frame_id, zdanie=""):
+        """Takt 3 osi kalibracji: istniejący etap Dostawy `lineage` przez wstrzykniętą drogę
+        gospodarza (`run_stage_fn`). Klatka panelu wraca do zaznaczenia przy przeładowaniu zbioru po
+        przebiegu (`_cel_gestu`) - dawny koszt tej drogi to właśnie powrót, który czyścił zaznaczenie.
+        Odmowa (etap biegnie, brak bazy) mówi prawdę o obu połówkach; bez gospodarza zdanie
+        odsyła do Dostawy."""
+        if self.run_stage_fn is None:
+            reszta = i18n.t("grid.lin.cal.count_no_host")
+        else:
+            powod = self.run_stage_fn("lineage")
+            if powod is None:
+                self._cel_gestu = [light_frame_id]
+                reszta = i18n.t("grid.lin.cal.counting")
+            else:
+                reszta = i18n.t("grid.lin.cal.count_busy", reason=powod)
+        self.status_message.emit(" - ".join(x for x in (zdanie, reszta) if x))
+
     def _on_lineage_judged(self, frame_ids, excluded):
         """Werdykt ręki → jedna klinga (`repo.judge_integration_input`), potem odświeżenie panelu
         ze STANU. Zapis jest natychmiastowy i BEZ poczekalni: to decyzja o RELACJI w bazie, nie
-        mutacja pliku — staging chroni bajty na dysku, a tu żaden bajt nie jest ruszany."""
+        mutacja pliku - staging chroni bajty na dysku, a tu żaden bajt nie jest ruszany.
+
+        „COFNIJ" W KOMUNIKACIE (D-1011-4): recepta paska niesie drogę powrotu do stanu SPRZED
+        gestu - nie werdykt przeciwny, który zostawiłby `user` tam, gdzie decydował automat.
+        Materiałem jest lista zmian z klingi zbiorczej (`judge_integration_inputs`): cały gest to
+        JEDNA transakcja, więc nie ma gestu zapisanego w połowie i bez „Cofnij"."""
         iid = self.lineage_bar.integration_id()
         if iid is None:
             return
-        n = 0
-        for fid in frame_ids:
-            n += repo.judge_integration_input(
-                self.con, integration_id=iid, input_frame_id=fid,
-                excluded=excluded, now=self._now())
-        # ZAZNACZENIE PRZEŻYWA WERDYKT: lista jest przebudowywana ze stanu, więc bez tego człowiek
-        # tracił wiersze zaraz po decyzji i cofnięcie własnego „odrzuć" kosztowało odszukanie ich
-        # od nowa (wiz #8). Zwracamy te same klatki, nie te same indeksy — kolejność wierszy
-        # należy do zapytania.
-        self._refresh_lineage(select_frame_ids=frame_ids)
+        stos = self._lineage_frame_id
+        zmiany = repo.judge_integration_inputs(
+            self.con, integration_id=iid, input_frame_ids=list(frame_ids), excluded=excluded,
+            now=self._now())
+        n = len(zmiany)
+        self._recepta_gestu = None          # recepta poprzedniego gestu przestaje obowiązywać
+        self._migawka_werdyktu = (iid, stos, tuple(zmiany)) if zmiany else None
+        self._po_werdykcie(stos, list(frame_ids), zmienione=bool(n))
         if n:
             # Potwierdzone wejście czyni powód stosu zwietrzałym, a ten liczy się do plakietki.
             self.stan_porzadkow_changed.emit()
@@ -2047,6 +2225,185 @@ class FramesView(QWidget):
         klucz = ("grid.lin.judged_none" if not n else
                  "grid.lin.judged_excluded" if excluded else "grid.lin.judged_confirmed")
         self.status_message.emit(i18n.t(klucz, n=n))
+        # Recepta PO zdaniu (kontrakt `status_recipe`); gest bez zmian recepty nie dostaje.
+        self._ustaw_recepte_gestu((stos,) if zmiany else (), _ODWROT_WERDYKTU if zmiany else None)
+
+    def _ile_werdyktow_do_cofniecia(self, cel):
+        """Ile zmian ostatniego werdyktu WCIĄŻ stoi w bazie (wiersz `user` z tym samym werdyktem) -
+        recepta żyje, dopóki to prawda. Nowszy werdykt albo przebieg rodowodu na tych wierszach ją
+        gasi: cofnięcie nadpisałoby decyzję, której ten gest nie podjął (ta sama reguła, co CAS
+        klingi `restore_integration_judgment`). `cel` = klatka stosu (kontrakt `_Odwrot.zostalo`)."""
+        if self._migawka_werdyktu is None:
+            return 0
+        _iid, stos, zmiany = self._migawka_werdyktu
+        if tuple(cel) != (stos,):
+            return 0
+        teraz = {r["input_frame_id"]: (r["asserted_by"], r["excluded"])
+                 for r in queries.stack_lineage_inputs(self.con, stos)}
+        return sum(1 for z in zmiany if teraz.get(z.input_frame_id) == ("user", z.excluded))
+
+    def _cofnij_werdykt(self):
+        """Wykonawca recepty „Cofnij" po werdykcie - wiersze wracają do stanu sprzed gestu
+        (`repo.restore_integration_judgment`; wiersz, którego przed gestem nie było, znika i odtworzy
+        go automat). Migawka schodzi PRZED zapisem: drugi klik nie ma czego cofać. Zaznaczenie stosu
+        postawił już `_wykonaj_odwrot`; panel wraca z zaznaczonymi wierszami cofniętego gestu."""
+        migawka, self._migawka_werdyktu = self._migawka_werdyktu, None
+        self._recepta_gestu = None
+        if migawka is None:
+            self.status_message.emit(i18n.t("grid.lin.undo_nothing"))
+            return
+        iid, stos, zmiany = migawka
+        n = sum(repo.restore_integration_judgment(self.con, integration_id=iid, change=z,
+                                                  now=self._now()) for z in zmiany)
+        if n:
+            self.stan_porzadkow_changed.emit()
+        self._po_werdykcie(stos, [z.input_frame_id for z in zmiany], zmienione=bool(n))
+        self.status_message.emit(i18n.t("grid.lin.undone", n=n) if n
+                                 else i18n.t("grid.lin.undo_nothing"))
+        self._ustaw_recepte_gestu(())
+
+    def _po_werdykcie(self, stos, wiersze_listy, *, zmienione):
+        """Ogon werdyktu i jego cofnięcia: zbiór i liczniki listwy liczone OD NOWA, bo gest zmienia
+        stan rodowodu stosu - kolumnę, facet „Rodowód" i perspektywę „Rodowód do potwierdzenia".
+        Przy aktywnym facecie „do potwierdzenia" stos, któremu właśnie dano rodowód, ma zniknąć ze
+        zbioru, a nie stać pod filtrem, któremu przeczy (ekran nie kłamie).
+
+        CEL WRACA, JEŚLI DALEJ NALEŻY DO ZBIORU: stos idzie celem gestu (`_cel_gestu`, FC-2), a panel
+        po przyłożeniu odtwarza zaznaczenie wierszy listy (wiz #8). Stos wypchnięty ze zbioru nie
+        wraca - recepta mówi wtedy najpierw, jak go odsłonić. Gest bez zmiany przeładowania nie
+        potrzebuje: panel odświeża się wprost."""
+        if not zmienione:
+            self._refresh_lineage(select_frame_ids=wiersze_listy)
+            return
+        self._cel_gestu = [stos]
+        self._cichy_raport_gen = self._zbior_gen + 1     # generacja TEGO przeładowania
+        self.refresh(w_tle=True, potem=partial(self._panel_po_werdykcie, wiersze_listy))
+
+    def _panel_po_werdykcie(self, wiersze_listy):
+        """Ogon przeładowania po werdykcie: zaznaczenie stosu wystartowało debounce panelu, który
+        odbudowałby listę BEZ zaznaczenia wierszy - zatrzymujemy go i odświeżamy panel od razu."""
+        self._date_timer.stop()
+        self._refresh_lineage(select_frame_ids=wiersze_listy)
+
+    # ---- „pokaż te klatki w Zbiorach" (dwuklik w panelu rodowodu, obie osie) ----
+    def _on_lineage_frames(self, frame_ids, cel, tryb):
+        """Dwuklik wiersza panelu → zbiór klatek tej listy, z dwukliknięta zaznaczoną.
+
+        ZDANIE CHIPU NAZYWA ŹRÓDŁO, nie liczbę: „Wejścia obrazu X (190)" mówi, skąd ten zbiór się
+        wziął i do czego „×" wraca. Nazwę bierzemy z zaznaczonego wiersza gridu - panel pokazuje
+        materiał DOKŁADNIE JEDNEGO zaznaczonego wiersza (`_refresh_lineage`), więc to on jest
+        źródłem listy. Droga idzie przez gospodarza, gdy jest (`show_frames_fn`): on zna nawigację."""
+        wiersze = self._selected_data_rows()
+        nazwa = _ogon_sciezki(wiersze[0].get("path")) if len(wiersze) == 1 else ""
+        etykieta = i18n.t(_KLUCZE_POKAZ[tryb], name=nazwa, n=len(frame_ids))
+        (self.show_frames_fn or self.show_frames)(frame_ids, label=etykieta, focus=cel)
+
+    def show_frames(self, frame_ids, *, label, focus=None):
+        """Ustaw zbiór na WSKAZANE klatki - publiczny seam dla wejść spoza listwy i perspektyw
+        (dwuklik w panelu rodowodu przez most gospodarza, `MainWindow.show_frames_in_collections`).
+        `frame_ids` = klatki do pokazania, `label` = zdanie chipu i paska kryteriów, `focus` =
+        klatka do zaznaczenia (i przewinięcia kadru) po przyłożeniu zbioru.
+
+        WZÓR TRIMU, NIE FILTRA: zbiór to gotowa lista `frame_id` przecinana w `_sklad_zbioru`
+        (jak `_TRIMY` i tekst uwag), więc listwa liczy na tych samych klatkach co grid. Drzewo
+        filtra nie umie wyrazić „te 190 klatek" bez 190 liści.
+
+        WEJŚCIE ZASTĘPUJE ZBIÓR (jak most obiektu i Znajdź): flagi, facety, filtr i uwagi schodzą,
+        a pozycja listy wraca do „Przeglądu" - przecięcie z poprzednim zbiorem dawałoby zwykle
+        pustkę (perspektywa stosów nie zawiera lightów, które w nie weszły). Poprzedni stan NIE
+        GINIE: „×" chipu do niego wraca (`_wroc_ze_wskazanych`), razem z zaznaczeniem - człowiek
+        wraca do stosu, z którego przyszedł, jednym kliknięciem. Wejście z wejścia (dwuklik
+        w panelu nad już wskazanym zbiorem) odkłada stan na stos, więc „×" cofa o jeden krok.
+
+        Pusta lista to błąd wołającego (EXPECT): pusty trim pokazałby „nic", a pusty zbiór bez
+        trimu - całe archiwum; żadne z nich nie jest tym, o co proszono."""
+        ids = list(dict.fromkeys(frame_ids))
+        if not ids:
+            raise ValueError("show_frames: pusta lista klatek")
+        self._powrot_wskazanych = self._stan_do_powrotu()
+        self._zeruj_flagi()
+        self._filter_tree = None
+        self.filter_panel.set_tree(None)
+        self.note_query = None
+        self._terminy = []
+        self._stan_zapytania = None
+        self._facet_state = facet_model.empty_state()
+        self._wskazane = (tuple(ids), label)
+        self._ustaw_pozycje_listy(("preset", _PRESET_CZYSTY), PRESETS[_PRESET_CZYSTY].get("group_by"))
+        self._zdejmij_wynik_gestu_zapisu()
+        # Cel zaznaczenia jedzie mechanizmem celu gestu (FC-2): odkłada się na POKAZANEJ tabeli
+        # z przewinięciem kadru, przy pierwszym przyłożeniu zbioru - także składanego w tle.
+        self._cel_gestu = [focus] if focus in ids else []
+        self.refresh(w_tle=True)
+
+    def _stan_do_powrotu(self):
+        """Stan zbioru, do którego wraca „×" chipu klatek wskazanych - KOPIA, bo stan żyje dalej."""
+        return {"flagi": {atrybut: getattr(self, atrybut) for atrybut, _ in _TRIMY},
+                "filtr": copy.deepcopy(self._filter_tree),
+                "facety": copy.deepcopy(self._facet_state),
+                "uwagi": self.note_query,
+                "terminy": list(self._terminy),
+                # Tożsamość zapytania Znajdź: bez niej „×" przywracał zbiór, ale już nie pytanie.
+                "zapytanie": copy.deepcopy(self._stan_zapytania),
+                "pozycja": self.combo_persp.currentData(),
+                "grupa": self.combo_group.currentData(),
+                "wskazane": self._wskazane,
+                "powrot": self._powrot_wskazanych,
+                "zaznaczone": [r["frame_id"] for r in self._selected_data_rows()]}
+
+    def _wroc_ze_wskazanych(self):
+        """„×" chipu klatek wskazanych: zbiór wraca do stanu sprzed wejścia, z zaznaczeniem.
+        Bez zapamiętanego stanu (nie powinno się zdarzyć, ale stan bywa składany w testach ręką)
+        schodzi sam składnik. Przeładowanie robi wołający (`zdejmij_skladnik`)."""
+        powrot, self._powrot_wskazanych = self._powrot_wskazanych, None
+        self._wskazane = None
+        if powrot is None:
+            return
+        for atrybut, wartosc in powrot["flagi"].items():
+            setattr(self, atrybut, wartosc)
+        self._filter_tree = powrot["filtr"]
+        self.filter_panel.set_tree(self._filter_tree)
+        self._facet_state = powrot["facety"]
+        self.note_query = powrot["uwagi"]
+        self._terminy = powrot["terminy"]
+        self._stan_zapytania = powrot["zapytanie"]
+        self._wskazane = powrot["wskazane"]
+        self._powrot_wskazanych = powrot["powrot"]
+        self._ustaw_pozycje_listy(powrot["pozycja"], powrot["grupa"])
+        self._cel_gestu = list(powrot["zaznaczone"])
+
+    def _ustaw_pozycje_listy(self, dane, grupa):
+        """Pozycja listy perspektyw i grupowanie BEZ sygnału (stan zbioru ustawia wołający). Pozycja,
+        której już nie ma (perspektywę skasowano w międzyczasie), oddaje miejsce „Przeglądowi"."""
+        idx = next((i for i in range(self.combo_persp.count())
+                    if self.combo_persp.itemData(i) == dane), None)
+        if idx is None:
+            dane = ("preset", _PRESET_CZYSTY)
+            idx = next(i for i in range(self.combo_persp.count())
+                       if self.combo_persp.itemData(i) == dane)
+        self.combo_persp.blockSignals(True)
+        self.combo_persp.setCurrentIndex(idx)
+        self.combo_persp.blockSignals(False)
+        g = self.combo_group.findData(grupa)
+        self.combo_group.blockSignals(True)
+        self.combo_group.setCurrentIndex(g if g >= 0 else 0)
+        self.combo_group.blockSignals(False)
+        spec = self._spec_pozycji(dane)
+        self._wyglad_z_perspektywy(spec if spec is not None else PRESETS[_PRESET_CZYSTY])
+        self._oznacz_zmiane_perspektywy()
+
+    def nakladka_wskazanych(self):
+        """Czy zbiór to dziś klatki wskazane z panelu (`show_frames`) - nakładka nad zbiorem, do
+        którego „×" wraca. Kontener Znajdź nie czyści wtedy pola zapytania: po powrocie zapytanie
+        znów opisuje zbiór (`_wroc_ze_wskazanych` przywraca `_stan_zapytania`)."""
+        return self._wskazane is not None
+
+    def _zdejmij_wskazane(self):
+        """Wejście, które ZASTĘPUJE zbiór (perspektywa, most, Znajdź, „× Wyczyść zbiór"), zdejmuje
+        klatki wskazane razem z drogą powrotu - powrót do stanu sprzed nowego wejścia byłby
+        powrotem do czegoś, czego człowiek już nie ogląda."""
+        self._wskazane = None
+        self._powrot_wskazanych = None
 
     def _describe_criteria(self):
         """Opis zbioru słowami do paska: drzewo EFEKTYWNE (facety + advanced — F4R#8, samo
@@ -2065,6 +2422,8 @@ class FramesView(QWidget):
         więc „wszystkie klatki" przy nim byłoby nieprawdą."""
         parts = [i18n.t(_klucz_kryterium(atrybut)) for atrybut, _ in _TRIMY
                  if getattr(self, atrybut)]
+        if self._wskazane is not None:
+            parts.append(self._wskazane[1])
         if self.note_query is not None:
             parts.append(i18n.t("grid.criteria.notes", text=self.note_query))
         drzewo = filter_engine.describe(self._effective_tree)
@@ -2093,7 +2452,7 @@ class FramesView(QWidget):
         świadomie, bo ten przycisk ich nie tyka (`_on_clear_selection`). Tekst uwag jest W NIM, bo
         przycisk go zdejmuje - inaczej zbiór zawężony samymi uwagami miałby szary przycisk."""
         return (bool(self._facet_state) or self._filter_tree is not None
-                or self.note_query is not None)
+                or self.note_query is not None or self._wskazane is not None)
 
     def _trim_aktywny(self):
         """Czy trim perspektywy przycina zbiór - LICZONE W MIEJSCU UŻYCIA, nie zapamiętane (BP-4).
@@ -2162,9 +2521,18 @@ class FramesView(QWidget):
         keywordy = (set(range(m.n_bazowych() + m._kw_off(), m.n_bazowych() + m._kw_off()
                               + len(m._keywords)))
                     if self.prezentacja == PREZENTACJA_ZNAJDZ else set())
+        # „Gotowe obrazy": Δh (nagłówek - nazwa) jest kolumną warsztatu nazw lightów, a gotowy obraz
+        # czasu w nazwie nie niesie - pusta kolumna zabierała miejsce ścieżce (wizytacja natywna).
+        delta = (m.base_col("_dt_delta") if m.has_base_col("_dt_delta")
+                 and self._widok_gotowych_obrazow() else None)
         for c in range(m.columnCount()):
-            self.table.setColumnHidden(c, (c == obrazy and not widoczne) or c in keywordy)
+            self.table.setColumnHidden(c, (c == obrazy and not widoczne) or c in keywordy
+                                       or c == delta)
         return widoczne
+
+    def _widok_gotowych_obrazow(self):
+        """Czy lista perspektyw stoi na presecie „Gotowe obrazy" (wygląd kolumn tego presetu)."""
+        return self.combo_persp.currentData() == ("preset", PRESET_READY_IMAGES)
 
     def _uloz_kolumny(self):
         """Układ kolumn tabeli po każdym `set_data` - właściciel trzech rzeczy, które Qt pamięta
@@ -2192,6 +2560,10 @@ class FramesView(QWidget):
                 kolumna_z_tresci(self.table, sciezka)
             else:
                 elizja_w_srodku(self.table, sciezka)
+        elif self._widok_gotowych_obrazow():
+            # Nazwy stosów różnią się KOŃCEM (filtr, wariant `_drizzle`, `_autocrop`), a elizja
+            # z prawej zjadała właśnie koniec - dziesięć wierszy „NGC3034_2022…" nie do odróżnienia.
+            elizja_w_srodku(self.table, sciezka)
         else:
             self.table.setItemDelegateForColumn(sciezka, None)
 
@@ -2277,6 +2649,8 @@ class FramesView(QWidget):
                 "filtr": copy.deepcopy(self._filter_tree),
                 "trimy": [nazwa for atrybut, nazwa in _TRIMY if getattr(self, atrybut)],
                 "uwagi": self.note_query,
+                "wskazane": None if self._wskazane is None else list(self._wskazane[0]),
+                "wskazane_etykieta": None if self._wskazane is None else self._wskazane[1],
                 "terminy": list(self._terminy),
                 "kolumny": list(self._columns),
                 "wersje": self._potrzebne_wersje()}
@@ -2475,8 +2849,11 @@ class FramesView(QWidget):
         self._sync_zbioru_w_drodze()                         # akcje całego widoku i edycja - za zbiorem
         self._refresh_date_echo()                           # panel daty odbija świeże widoczne (echo warunkowe)
         self._refresh_lineage()                              # …i panel rodowodu, tak samo warunkowo
-        self.load_report.emit(
-            i18n.t("grid.status.loaded", frames=i18n.t_plural('grid.frames', n), cols=len(keywords)))
+        # Przeładowanie WYWOŁANE GESTEM w panelu rodowodu milczy (`_po_werdykcie`): raport „Grid: N
+        # klatek" przykrywał zdanie gestu („Odrzucono 2") razem z sensem recepty „Cofnij werdykt".
+        if self._cichy_raport_gen != self._zbior_gen:
+            self.load_report.emit(
+                i18n.t("grid.status.loaded", frames=i18n.t_plural('grid.frames', n), cols=len(keywords)))
         # ETYKIETA PERSPEKTYWY JEST POCHODNĄ STANU (BP-5 domknięty tutaj): każda droga, która zmienia
         # zbiór, kończy się tym przeładowaniem, więc właściciel etykiety ma JEDNO miejsce wołania,
         # a nie po jednym przy każdym geście - tamte trzy przegapiły klik w listwie facetów.
@@ -2491,7 +2868,8 @@ class FramesView(QWidget):
         # Czy to wciąż zbiór ostatniego zapytania: stan, który ono postawiło, bez flag perspektywy.
         # Raz rozjechany zostaje rozjechany - pole zapytania zostało już wyczyszczone.
         if self._stan_zapytania is not None and (
-                migawka.get("trimy") or (migawka.get("facety") or {}) != self._stan_zapytania[0]
+                migawka.get("trimy") or migawka.get("wskazane") is not None
+                or (migawka.get("facety") or {}) != self._stan_zapytania[0]
                 or migawka.get("filtr") != self._stan_zapytania[1]
                 or migawka.get("uwagi") != self._stan_zapytania[2]):
             self._stan_zapytania = None
@@ -2528,6 +2906,7 @@ class FramesView(QWidget):
         Tekst uwag schodzi razem z facetami: gest zastępuje zbiór, a uwagi są jego składnikiem."""
         self._facet_state = facet_model.empty_state()
         self.note_query = None
+        self._zdejmij_wskazane()    # „Wyczyść" czyści, nie wraca: powrót niesie „×" chipu
         self._terminy = []
         self.filter_panel._clear()
 
@@ -3511,14 +3890,14 @@ class FramesView(QWidget):
             self.drawer.btn_reject.setEnabled(False)
             # Panel „Rodowód" to CZWARTA powierzchnia zapisu (I-2d) i pisze do tego samego stołu,
             # który worker właśnie przelicza — bez tej linii werdykt ręki wchodził w środek etapu.
-            self.lineage_bar.set_busy(True)
+            self._sync_lineage_busy()
             if hasattr(self, "_undo_btn"):
                 self._undo_btn.setEnabled(False)
         else:
             n = self._active_pending_count()             # mode-aware (R1 #2): makro LUB rename
             self.drawer.btn_commit.setEnabled(n > 0)
             self.drawer.btn_reject.setEnabled(n > 0)
-            self.lineage_bar.set_busy(False)             # panel wraca do stanu z zaznaczenia
+            self._sync_lineage_busy()                    # panel wraca, o ile nie trwa zapis plików
             self.sel_bar.btn_obj.setEnabled(True)        # nie zależy od zbioru - wraca od razu
             if hasattr(self, "_undo_btn"):
                 self._undo_btn.setEnabled(True)
@@ -3532,6 +3911,7 @@ class FramesView(QWidget):
         postępu), więc flaga mówi wyłącznie o CUDZEJ operacji."""
         self._foreign_wb = busy
         self._sync_edycji()                              # cudzy zapis plików - bez edycji komórek
+        self._sync_lineage_busy()                        # …i bez gestów panelu Rodowód
         if busy:
             self.drawer.btn_commit.setEnabled(False)
             self.drawer.btn_reject.setEnabled(False)

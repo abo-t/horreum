@@ -581,7 +581,7 @@ def test_okno_bieg_mutex_porzadki_i_powrot(qapp, tmp_path, ustawienia, monkeypat
 ZNACZNIK_BIEGU = "2026-10-10T12:00:00+00:00"      # `last_run["since"]` przebiegu uruchomionego po żniwach
 
 
-def _zniwa_ze_stosami(monkeypatch, stosy, odmowa=None):
+def _zniwa_ze_stosami(monkeypatch, stosy, odmowa=None, podsumowanie=None):
     """Okno żniw podstawione w `sys.modules`: oddaje `stosy` jako wciągnięte w oknie i korzeń do
     przyjęcia; `run_all_on` bez wątku (zwraca `odmowa`, `None` = łańcuch ruszył). Zwraca rejestr
     wywołań `stacks.record_harvest_inputs` (podmienionego na atrapę: stos o sha1 `zly` rzuca
@@ -594,9 +594,13 @@ def _zniwa_ze_stosami(monkeypatch, stosy, odmowa=None):
     class _OknoZniw:
         def __init__(self, con, *, now_fn, archive_root, work_root=None, release_roots=(),
                      parent=None):
-            self.summary = "Wciągnięto stosy"
+            # `podsumowanie` (wołane przy otwarciu okna, w bieżącym języku) - zdanie okna z katalogu;
+            # bez niego stały znacznik testów rodowodu
+            self.summary = podsumowanie() if podsumowanie is not None else "Wciągnięto stosy"
             self.harvested_root = "X:/archiwum"
-            self.harvested_stacks = list(stosy)
+            # `(sha1_data, wejścia, kanon wydania)`; para bez kanonu = stos bez wydania (porównanie
+            # obiektu z wydaniem milczy - te testy mówią o rodowodzie)
+            self.harvested_stacks = [s if len(s) == 3 else (*s, None) for s in stosy]
 
         def exec(self):
             return QDialog.Accepted
@@ -865,3 +869,215 @@ def test_zdanie_stosow_bez_rodowodu_odmiana_liczebnika(qapp, n, pl, en):
     for jezyk, oczekiwane in (("pl", pl), ("en", en)):
         i18n.set_lang(jezyk)
         assert i18n.t_plural("status.harvest_lineage_none", n) == oczekiwane
+
+
+# --- obiekt stosu wobec obiektu wydania (AR-103): zdanie + gest „Przypisz obiekt wydania” na pasku ---
+
+
+def _baza_ze_stosem(tmp_path, raw_stosu="IC 1795", dalsze=()):
+    """Baza okna ze stosem `stos-ic` (id 1; obiekt z nagłówka stawia resolver - zwykła droga Dostawy)
+    i obiektem wydania NGC7000; `dalsze` = kolejne stosy `[(id, sha1_data, OBJECT)]`. Przygotowana
+    PRZED oknem: okno otwiera własne połączenie."""
+    from horreum import resolver
+    path = _baza(tmp_path)
+    con = db.open_db(path)
+    for fid, sha, raw in ((1, "stos-ic", raw_stosu), *dalsze):
+        con.execute("INSERT INTO frame(id, kind, filetype, sha1_data, first_seen_at) "
+                    "VALUES (?, 'master_light', 'xisf', ?, ?)", (fid, sha, ZNACZNIK_BIEGU))
+        con.execute("INSERT INTO header(frame_id, object_raw, raw_json) VALUES (?, ?, '{}')", (fid, raw))
+    con.commit()
+    resolver.run_resolver(con, now=ZNACZNIK_BIEGU)
+    repo.upsert_object(con, canon="NGC7000", catalog="NGC", kind="deep_sky", now=ZNACZNIK_BIEGU)
+    con.close()
+    return path
+
+
+def _obiekt_stosu(win):
+    r = win.con.execute("SELECT o.canon, f.object_source FROM frame f LEFT JOIN object o ON o.id = f.object_id "
+                        "WHERE f.id = 1").fetchone()
+    return r[0], r[1]
+
+
+def _zdarzenia(win):
+    return win.con.execute("SELECT count(*) FROM event").fetchone()[0]
+
+
+def _zniwa_i_przebieg(win):
+    """„Wciągnij mastery…” (okno żniw podstawione) i koniec przebiegu Dostawy, który ono uruchomiło."""
+    win.pipeline_view.btn_harvest.click()
+    win.pipeline_view.run_finished.emit(_zapis_przebiegu())
+
+
+def _klik_recepty(win):
+    """Prawdziwy klik myszą w przycisk recepty na pasku - po odstępie dwukliku poprzedniego gestu
+    (blokada Z5 trzyma przycisk wygaszony; pętla zdarzeń bez `qWait`)."""
+    import time
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    koniec = time.monotonic() + QApplication.doubleClickInterval() / 1000 + 2
+    while not win.recipe_label.isEnabled():
+        assert time.monotonic() < koniec, "recepta nie wróciła po odstępie dwukliku"
+        QApplication.processEvents()
+        time.sleep(0.02)
+    QTest.mouseClick(win.recipe_label, Qt.LeftButton)
+
+
+def test_obiekt_stosu_inny_niz_wydanie_zdanie_gest_cofniecie_i_drugi_bieg(qapp, tmp_path, ustawienia,
+                                                                         monkeypatch):
+    """Po łańcuchu żniw stos z obiektem z nagłówka innym niż obiekt wydania: zdanie NA POCZĄTKU raportu
+    mówi, co się nie zgadza, przycisk na pasku - co zrobi gest; do kliku baza stoi (nigdy cicha
+    podmiana). Klik zapisuje obiekt wydania ręką, recepta zmienia się w „Cofnij” (wygaszone przez odstęp
+    dwukliku - drugi klik tego samego ruchu nie cofa), klik „Cofnij” przywraca obiekt z nagłówka.
+    Ponowne żniwa: rozjazd wraca, gest drugi raz; trzecie żniwa - stos zgodny, zdanie i przycisk milczą,
+    dziennik stoi. Bilans osi §5.9 zielony.
+
+    Falsyfikatory: `_rozjazdy_obiektu_wydania` zwraca `[]` → brak zdania i przycisku; klinga bez
+    zapisu → stos dalej IC1795 po kliku; cofnięcie bez `before` → stos zostaje NGC7000."""
+    i18n.set_lang("pl")
+    _zniwa_ze_stosami(monkeypatch, [("stos-ic", [7], "NGC7000")])
+    win = MainWindow(_baza_ze_stosem(tmp_path), now_fn=_Zegar())
+    try:
+        win.show()
+        _zniwa_i_przebieg(win)
+        assert win._pelny_komunikat == ("1 stos ma inny obiekt niż wydanie (stos: IC1795, wydanie: NGC7000) - "
+                                        "Wciągnięto stosy - rodowód: 1 stos z historii żniw")
+        assert _obiekt_stosu(win) == ("IC1795", "header")
+        assert win.recipe_label.isVisible() and win.recipe_label.text() == "Przypisz obiekt wydania"
+
+        _klik_recepty(win)
+        assert _obiekt_stosu(win) == ("NGC7000", "user")
+        assert win._pelny_komunikat == "Obiekt wydania przypisany ręką: 1 stos (NGC7000)"
+        assert win.recipe_label.text() == "Cofnij" and not win.recipe_label.isEnabled()
+
+        _klik_recepty(win)
+        assert _obiekt_stosu(win) == ("IC1795", "header")
+        assert win._pelny_komunikat == "Cofnięto: 1 stos wrócił do poprzedniego obiektu"
+        assert not win.recipe_label.isVisible()
+
+        _zniwa_i_przebieg(win)
+        assert win.recipe_label.text() == "Przypisz obiekt wydania"
+        _klik_recepty(win)
+        assert _obiekt_stosu(win) == ("NGC7000", "user")
+        przed = _zdarzenia(win)
+        _zniwa_i_przebieg(win)
+        assert win._pelny_komunikat == "Wciągnięto stosy - rodowód: 1 stos z historii żniw"
+        assert not win.recipe_label.isVisible() and _zdarzenia(win) == przed
+        [osi] = [p for p in audit.entity_event_parity(win.con) if p.name == "frame.object_id"]
+        assert osi.ok
+    finally:
+        win.close()
+
+
+def test_stos_bez_obiektu_zdanie_po_angielsku_a_dryf_przed_klikiem_nic_nie_zapisuje(
+        qapp, tmp_path, ustawienia, monkeypatch):
+    """Stos BEZ obiektu (nazwa potoczna bez aliasu) - zdanie „brak” (tu po angielsku). Między zdaniem
+    a klikiem stos dostał obiekt inną drogą: gest pomija go i to mówi, bez zapisu i bez „Cofnij”.
+    Podsumowanie okna żniw z katalogu w bieżącym języku - cały raport EN, bez polskiego członu."""
+    import re
+    _zniwa_ze_stosami(monkeypatch, [("stos-ic", [7], "NGC7000")],
+                      podsumowanie=lambda: i18n.t_plural("harvest.close_placed", 1))
+    win = MainWindow(_baza_ze_stosem(tmp_path, raw_stosu="Mglawica Zdzicha"), now_fn=_Zegar())
+    try:
+        i18n.set_lang("en")
+        win.show()
+        assert _obiekt_stosu(win) == (None, None)
+        _zniwa_i_przebieg(win)
+        assert win._pelny_komunikat == ("1 stack has no object, the release says NGC7000 - Harvested 1 file "
+                                        "into the archive - lineage: 1 stack from harvest history")
+        assert not re.search(r"[ąćęłńóśźżĄĆĘŁŃÓŚŹŻ]|Wciągnięto|stos\b|wydanie", win._pelny_komunikat)
+        assert win.recipe_label.text() == "Assign release object"
+        repo.user_assign_object(win.con, alias_norm=None, canon="IC1795", catalog="IC", kind="deep_sky",
+                                frame_ids=[1], now=ZNACZNIK_BIEGU)
+        przed = _zdarzenia(win)
+        _klik_recepty(win)
+        assert _obiekt_stosu(win) == ("IC1795", "user") and _zdarzenia(win) == przed
+        assert win._pelny_komunikat == "1 stack skipped - its object changed since the harvest, nothing saved"
+        assert not win.recipe_label.isVisible()
+    finally:
+        i18n.set_lang("pl")
+        win.close()
+
+
+def test_gest_wydania_przezywa_wczytanie_i_recepte_gridu_w_Zbiorach(qapp, tmp_path, ustawienia, monkeypatch):
+    """User przeszedł do Zbiorów, zanim przebieg Dostawy się skończył: gest pada w Zbiorach, a spóźnione
+    przeładowanie gridu (raport wczytania + recepta gridu, w produkcji z wątku tła) NIE zdejmuje ani
+    „Przypisz obiekt wydania”, ani zdania; po kliku to samo dla „Cofnij” - i „Cofnij” dalej działa.
+
+    Falsyfikator: zdejmij `_gest_wydania_aktywny` z `_raport_wczytania_gridu`/`_recepta_gridu` → po
+    `grid.refresh()` przycisk recepty niesie receptę gridu albo znika."""
+    from horreum.gui.app import NAV_ZBIORY
+    i18n.set_lang("pl")
+    _zniwa_ze_stosami(monkeypatch, [("stos-ic", [7], "NGC7000")])
+    win = MainWindow(_baza_ze_stosem(tmp_path), now_fn=_Zegar())
+    try:
+        win.show()
+        win.pipeline_view.btn_harvest.click()
+        win._show_view(NAV_ZBIORY)
+        win.pipeline_view.run_finished.emit(_zapis_przebiegu())
+        zdanie = win._pelny_komunikat
+        assert zdanie.startswith("1 stos ma inny obiekt niż wydanie")
+        win.grid_view.refresh()
+        assert win.recipe_label.isVisible() and win.recipe_label.text() == "Przypisz obiekt wydania"
+        assert win._pelny_komunikat == zdanie
+
+        _klik_recepty(win)
+        assert _obiekt_stosu(win) == ("NGC7000", "user")
+        win.grid_view.refresh()
+        assert win.recipe_label.isVisible() and win.recipe_label.text() == "Cofnij"
+        assert win._pelny_komunikat == "Obiekt wydania przypisany ręką: 1 stos (NGC7000)"
+        _klik_recepty(win)
+        assert _obiekt_stosu(win) == ("IC1795", "header")
+    finally:
+        win.close()
+
+
+def test_kanon_wydania_spoza_bazy_mowi_zdaniem_bez_gestu(qapp, tmp_path, ustawienia, monkeypatch):
+    """Wydanie, którego obiektu ta baza nie zna (karta wydania z innej bazy): porównania nie ma i ekran
+    to MÓWI - zdanie bez przycisku gestu, baza nietknięta (wcześniej: cisza, jakby było zgodnie)."""
+    i18n.set_lang("pl")
+    _zniwa_ze_stosami(monkeypatch, [("stos-ic", [7], "NGC9999")])
+    win = MainWindow(_baza_ze_stosem(tmp_path), now_fn=_Zegar())
+    try:
+        win.show()
+        przed = _zdarzenia(win)
+        _zniwa_i_przebieg(win)
+        assert win._pelny_komunikat == ("1 stos bez porównania - obiektu wydania NGC9999 nie ma w tej bazie - "
+                                        "Wciągnięto stosy - rodowód: 1 stos z historii żniw")
+        assert not win.recipe_label.isVisible()
+        assert _obiekt_stosu(win) == ("IC1795", "header") and _zdarzenia(win) == przed
+    finally:
+        win.close()
+
+
+def test_cofniecie_mowi_do_czego_wrocil_kazdy_stos(qapp, tmp_path, ustawienia, monkeypatch):
+    """Zestaw mieszany: stos z obiektem z nagłówka, stos bez obiektu i stos z nagrobkiem ręki. Gest
+    przypisuje wszystkim trzem; „Cofnij” mówi osobno: poprzedni obiekt / znów bez obiektu / znów bez
+    obiektu z decyzji ręki - a stan każdego wraca dokładnie do `before`."""
+    i18n.set_lang("pl")
+    _zniwa_ze_stosami(monkeypatch, [("stos-ic", [7], "NGC7000"), ("stos-pusty", [8], "NGC7000"),
+                                    ("stos-nagrobek", [9], "NGC7000")])
+    win = MainWindow(_baza_ze_stosem(tmp_path, dalsze=[(2, "stos-pusty", None), (3, "stos-nagrobek", None)]),
+                     now_fn=_Zegar())
+    try:
+        win.show()
+        repo.user_assign_object(win.con, alias_norm=None, canon="M31", catalog="M", kind="deep_sky",
+                                frame_ids=[3], now=ZNACZNIK_BIEGU)
+        repo.clear_object_assignment(win.con, frame_ids=[3], now=ZNACZNIK_BIEGU)
+        stan = lambda: [tuple(r) for r in win.con.execute(                          # noqa: E731
+            "SELECT o.canon, f.object_source, c.canon FROM frame f LEFT JOIN object o ON o.id = f.object_id "
+            "LEFT JOIN object c ON c.id = f.object_cleared_id ORDER BY f.id")]
+        przed = stan()
+        assert przed == [("IC1795", "header", None), (None, None, None), (None, "user_cleared", "M31")]
+        _zniwa_i_przebieg(win)
+        assert win._pelny_komunikat.startswith(
+            "1 stos ma inny obiekt niż wydanie (stos: IC1795, wydanie: NGC7000); "
+            "2 stosy bez obiektu, a wydanie mówi NGC7000 - ")
+        _klik_recepty(win)
+        assert win._pelny_komunikat == "Obiekt wydania przypisany ręką: 3 stosy (NGC7000)"
+        assert {s[:2] for s in stan()} == {("NGC7000", "user")}
+        _klik_recepty(win)
+        assert win._pelny_komunikat == ("Cofnięto: 1 stos wrócił do poprzedniego obiektu, 1 stos znów bez "
+                                        "obiektu, 1 stos znów bez obiektu z decyzji ręki")
+        assert stan() == przed
+    finally:
+        win.close()

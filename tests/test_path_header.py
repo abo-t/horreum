@@ -28,13 +28,26 @@ R = "R:\\ASTRO_"
 
 
 def _pusta():
+    """Baza z biblioteką KALIBRACJI obok `STACKS` (jeden dark pod `CALIBRATION`) - korzeń archiwum
+    wiarygodny (`resolver.library_root_from_db`, E5-3); bez niego świadek drzewa stosów milczy."""
     con = db.connect(":memory:")
     db.migrate(con)
+    _biblioteka(con)
     return con
+
+
+def _biblioteka(con):
+    """Jeden dark pod `CALIBRATION` obok `STACKS` - idempotentnie (stos i pusta baza wołają oba)."""
+    sciezka = rf"{R}\CALIBRATION\darks\d.fit"
+    if con.execute("SELECT 1 FROM location WHERE path = ?", (sciezka,)).fetchone() is None:
+        fid, _ = repo.upsert_frame(con, sha1_data="biblioteka", kind="dark", filetype="fits",
+                                   camera_id=None, now=NOW)
+        repo.add_location(con, frame_id=fid, volume="VOL", path=sciezka, now=NOW)
 
 
 def _stos_potwierdzony(con, folder, sha="st1"):
     """Stos pod `STACKS\\<folder>` bez `OBJECT`, zatwierdzony z propozycji ścieżki klingą gestu."""
+    _biblioteka(con)
     fid, _ = repo.upsert_frame(con, sha1_data=sha, kind="master_light", filetype="xisf",
                                camera_id=None, now=NOW)
     repo.record_header(con, frame_id=fid, raw_json="{}", object_raw=None, now=NOW)
@@ -411,7 +424,7 @@ def test_wiersz_Porzadkow_prowadzi_do_perspektywy_z_tymi_klatkami(tmp_path, monk
     from PySide6.QtWidgets import QApplication
     from horreum.gui import grid as grid_mod, i18n, rows, tasks as tasks_mod
     QApplication.instance() or QApplication([])
-    monkeypatch.setattr(QSettings, "value", lambda self, k, d=None: d)
+    monkeypatch.setattr(QSettings, "value", lambda self, k, d=None, **kw: d)
     monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: None)
     con = db.open_db(str(tmp_path / "h.db"))
     fid = _stos_potwierdzony(con, "vdB30")

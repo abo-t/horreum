@@ -398,6 +398,7 @@ _STAGE_LABEL = {"scan": "pipeline.stage.scan", "stacks": "pipeline.stage.stacks"
                 "presence": "pipeline.stage.presence",
                 "stack_lineage": "pipeline.stage.stack_lineage",
                 "copy_facts": "pipeline.stage.copy_facts",
+                "stack_history": "pipeline.stage.stack_history",
                 "adopt_testimony": "pipeline.stage.adopt_testimony"}
 
 # Kolejność i klucze powodów przeglądu w raporcie dostawy (rdzeń niesie same liczby — wording należy
@@ -828,11 +829,29 @@ class PipelineView(QWidget):
     # ---------------------------------------------------------------- korzeń stosów (I-2b)
 
     def _sync_stacks_memo(self):
-        """JEDYNY właściciel treści memo korzenia stosów (wzorzec `_sync_source_memo`) — wołane
-        z `__init__` i po KAŻDYM zapisie `stacks/last_root`."""
+        """JEDYNY właściciel treści memo stosów (wzorzec `_sync_source_memo`): korzeń i liczniki
+        rodowodu - wołane z `__init__`, po KAŻDYM zapisie `stacks/last_root`, po przebiegu piszącym
+        i przy wejściu w widok."""
         root = self._settings().value("stacks/last_root", None)
-        self.lbl_stacks_memo.setText(i18n.t("pipeline.stacks_last", root=root) if root
-                                     else i18n.t("pipeline.stacks_first"))
+        memo = (i18n.t("pipeline.stacks_last", root=root) if root
+                else i18n.t("pipeline.stacks_first"))
+        # DRUGA LINIA: co baza WIE o rodowodzie stosów - cztery rozłączne liczniki ze STANU
+        # (`queries.stack_lineage_counts`), nie z ostatniego przebiegu. Ekran milczał o tym, ile
+        # obrazów czeka na rodowód, choć baza to wiedziała. Krótkie WŁASNE połączenie, jak
+        # `_sync_copy_facts`; wołane też po każdym przebiegu piszącym i przy wejściu w widok.
+        tip = ""
+        if self._db_path is not None:
+            con = db.connect(self._db_path)
+            try:
+                n = queries.stack_lineage_counts(con)
+            finally:
+                con.close()
+            memo += "\n" + i18n.t("pipeline.stacks_counts", all=n["all"],
+                                  with_inputs=n["with_inputs"], without=n["without_inputs"],
+                                  uncounted=n["uncounted"])
+            tip = i18n.t("pipeline.stacks_counts_tip", no_copy=n["no_copy"])
+        self.lbl_stacks_memo.setText(memo)
+        self.lbl_stacks_memo.setToolTip(tip)
 
     def _on_stack_lineage(self):
         """Przelicz rodowód gotowych stosów — BEZ skanu i BEZ pytania o korzeń.
@@ -954,6 +973,7 @@ class PipelineView(QWidget):
         super().showEvent(event)
         if self._thread is None:
             self._sync_copy_facts()
+            self._sync_stacks_memo()       # gest w panelu rodowodu zmienia liczniki stosów
 
     def _on_copy_facts(self):
         """„Zbierz fakty kopii (N)": fakty kopii, przejęcie zeznania i - wyłącznie po realnym
@@ -1299,6 +1319,10 @@ class PipelineView(QWidget):
             self.lbl_counts.setText(i18n.t("pipeline.counts_copy_facts", done=done, total=total,
                                            written=counts["written"], tail=tail))
             return
+        if counts.get("etap") == "stack_history":     # uzupełnienie historii stosów (0034)
+            self.lbl_counts.setText(i18n.t("pipeline.counts_stack_history", done=done, total=total,
+                                           written=counts["written"], tail=tail))
+            return
         if counts.get("etap") == "adopt_testimony":   # przejęcie zeznania (AR-5)
             self.lbl_counts.setText(i18n.t("pipeline.counts_adopt", done=done, total=total,
                                            adopted=counts["adopted"], tail=tail))
@@ -1425,6 +1449,8 @@ class PipelineView(QWidget):
             return self._format_stack_lineage(r)
         if name == "copy_facts":
             return self._format_copy_facts(r)
+        if name == "stack_history":
+            return self._format_stack_history(r)
         if name == "adopt_testimony":
             return self._format_adopt(r)
         return str(r)
@@ -1444,6 +1470,19 @@ class PipelineView(QWidget):
         if s.remaining:
             czesci.append(i18n.t("pipeline.fmt.adopt.remaining", n=s.remaining))
         return i18n.t("pipeline.fmt.adopt.prefix") + " · ".join(czesci)
+
+    def _format_stack_history(self, s):
+        """Linia uzupełnienia historii stosów (0034): ile nagłówków stosów przeczytano i zapisano do
+        bazy; odmowy (plik zmieniony od skanu, błąd odczytu) tylko, gdy są (QUIET), z liczbą, która
+        czeka na następną Dostawę."""
+        czesci = [i18n.t("pipeline.fmt.stack_history.written", n=s.written, rows=s.rows)]
+        if s.stale:
+            czesci.append(i18n.t("pipeline.fmt.stack_history.stale", n=s.stale))
+        if s.failed:
+            czesci.append(i18n.t("pipeline.fmt.stack_history.failed", n=s.failed))
+        if s.remaining:
+            czesci.append(i18n.t("pipeline.fmt.stack_history.remaining", n=s.remaining))
+        return " · ".join(czesci)
 
     def _format_copy_facts(self, s):
         """Linia raportu uzupełnienia faktów kopii (0021). Odmowy tylko, gdy są (QUIET), ale gdy są,
@@ -1474,6 +1513,11 @@ class PipelineView(QWidget):
         czesci = [i18n.t("pipeline.fmt.slin.linked", n=s.linked, total=s.stacks, inputs=s.inputs)]
         if s.by_assert.get("history"):
             czesci.append(i18n.t("pipeline.fmt.slin.history", n=s.by_assert["history"]))
+        by_basis = getattr(s, "by_basis", None) or {}
+        if by_basis.get("subset"):
+            czesci.append(i18n.t("pipeline.fmt.slin.subset", n=by_basis["subset"]))
+        if getattr(s, "outside_window", 0):
+            czesci.append(i18n.t("pipeline.fmt.slin.outside_window", n=s.outside_window))
         if s.by_assert.get("harvest"):
             czesci.append(i18n.t("pipeline.fmt.slin.harvest", n=s.by_assert["harvest"]))
         czekaja = sum(s.reasons.values())
@@ -1655,6 +1699,12 @@ class PipelineView(QWidget):
         # geście widać sam SPADEK dwóch liczników bez przyczyny („przebieg naprawił coś sam").
         by_hand = (i18n.t("pipeline.fmt.group_by_hand", n=s.config_by_hand)
                    if s.config_by_hand else "")
+        # Pary wariantu kadru z zeznań kopii (faza 0 przebiegu) - czekające i odrzucone muszą być
+        # widoczne, bo inaczej autocrop bez relacji wygląda jak zwykły drugi stos (QUIET przy zerze).
+        v = getattr(s, "variants", None)
+        if v is not None and (v.linked or v.waiting or v.mismatch or v.refused):
+            by_hand += i18n.t("pipeline.fmt.group_variants", linked=v.linked, waiting=v.waiting,
+                              bad=v.mismatch + v.refused)
         return i18n.t(
             "pipeline.fmt.group", headers=s.headers, telescopes=s.telescopes_proposed,
             no_tel=s.telescop_missing, off_axis=s.calibration_off_axis, unassigned=unassigned,
@@ -1716,6 +1766,11 @@ class PipelineView(QWidget):
         if s.reasons:
             gaps = ", ".join(f"{powod} ×{n}" for powod, n in s.reasons.items())
             linia += i18n.t("pipeline.fmt.lineage_gaps", gaps=gaps)
+        # Zdjęte ogniwa automatu (luka po wyzerowanym filtrze albo wycofanym masterze) - bez tej
+        # linii panel pokazałby lukę, a raport milczałby, że przebieg właśnie zdjął kalibrator.
+        if getattr(s, "unlinked", None):
+            zdjete = " · ".join(f"{rel} {n}" for rel, n in sorted(s.unlinked.items()))
+            linia += i18n.t("pipeline.fmt.lineage_unlinked", unlinked=zdjete)
         return linia
 
     def _format_delta(self, r):
@@ -1799,6 +1854,7 @@ class PipelineView(QWidget):
             self.bar.setVisible(False)
             if self._bieg_pisze:
                 self._sync_copy_facts()    # każdy przebieg piszący mógł dodać albo zebrać fakty kopii
+                self._sync_stacks_memo()   # …i policzyć rodowód stosów (liczniki memo)
         self._cancellable = cancellable if running else False
         self._refresh_buttons(running, self._cancellable)
         # Etap bez bazy gasi same przyciski Dostawy: gospodarz czyta `running_changed` jako „worker

@@ -28,8 +28,9 @@ from horreum.resolve.catalog import catalog_canon, xref
 
 # Stała kolejność facetów: deterministyczne drzewo (testy, describe) i kolejność grup w listwie.
 # Kanał (0028) stoi zaraz po filtrze: to druga połowa odpowiedzi „jakie światło" - filtr optyczny
-# i kanał kamery kolorowej, który z niego wycięto.
-FACETS = ("object", "filter", "channel", "kind", "telescope", "night")
+# i kanał kamery kolorowej, który z niego wycięto. Rodowód stoi zaraz po rodzaju, bo dotyczy
+# jednego rodzaju (gotowy obraz) - tak się go czyta: „gotowe obrazy · bez rodowodu".
+FACETS = ("object", "filter", "channel", "kind", "lineage", "telescope", "night")
 
 
 def empty_state() -> dict:

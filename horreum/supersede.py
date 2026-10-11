@@ -253,8 +253,11 @@ def pending_transfer(con):
     na rodzaj obu klatek (lustro guardu `repo.transfer_human_facts`). Własna uwaga następczyni
     wyprowadza parę z kubełka tak samo, jak jej własne źródło na pozostałych osiach.
 
+    SZÓSTA OŚ (E4-5): **kalibrator wskazany ręką** - wchodzi, gdy następczyni jest lightem z kamerą
+    mastera i nie ma własnego wskazania ręki tej relacji (lustro guardu klingi).
+
     Zwraca `[(stara, nowa, co), …]`, gdzie `co` = osie do przeniesienia (`obiekt` / `config` /
-    `stanowisko` / `rodowod` / `uwaga` i ich sumy) - raport ma mówić, CZEGO gest dotyczy, nie tylko
+    `stanowisko` / `rodowod` / `uwaga` / `kalibracja` i ich sumy) - raport ma mówić, CZEGO gest dotyczy, nie tylko
     że coś czeka."""
     rows = con.execute(
         "SELECT f.id, f.superseded_by, f.object_source, f.config_source, f.config_id, "
@@ -268,7 +271,13 @@ def pending_transfer(con):
         "                              AND jj.input_frame_id = n.id "
         "                              AND jj.asserted_by = 'user')) AS rodowod_n, "
         "       EXISTS (SELECT 1 FROM frame_note fn WHERE fn.frame_id = f.id) AS uwaga, "
-        "       EXISTS (SELECT 1 FROM frame_note nn WHERE nn.frame_id = n.id) AS n_uwaga "
+        "       EXISTS (SELECT 1 FROM frame_note nn WHERE nn.frame_id = n.id) AS n_uwaga, "
+        "       (SELECT count(*) FROM calibration c JOIN frame m ON m.id = c.master_frame_id "
+        "         WHERE c.light_frame_id = f.id AND c.asserted_by = 'user' AND n.kind = 'light' "
+        "           AND m.camera_id IS NOT NULL AND m.camera_id = n.camera_id "
+        "           AND NOT EXISTS (SELECT 1 FROM calibration d WHERE d.light_frame_id = n.id "
+        "                            AND d.relation = c.relation "
+        "                            AND d.asserted_by = 'user')) AS kalibracja_n "
         "FROM frame f JOIN frame n ON n.id = f.superseded_by "
         "WHERE f.superseded_by IS NOT NULL ORDER BY f.id").fetchall()
     transferowalne = set(TRANSFERABLE_OBJECT_SOURCES)
@@ -291,6 +300,8 @@ def pending_transfer(con):
             osie.append("rodowod")
         if r["uwaga"] and not r["n_uwaga"]:          # PIĄTA OŚ (0032): lustro guardu klingi
             osie.append("uwaga")
+        if r["kalibracja_n"]:                        # SZÓSTA OŚ (E4-5): lustro guardu klingi
+            osie.append("kalibracja")
         if osie:
             out.append((r["id"], r["superseded_by"], "+".join(osie)))
     return out
@@ -329,6 +340,7 @@ _POWODY_POMINIECIA = {
     "brak faktow czlowieka": "none",
     "nastepczyni ma wlasne zrodlo": "own",
     "zestaw nie pasuje do nastepczyni": "config_mismatch",
+    "kalibrator nie pasuje do nastepczyni": "calibration_mismatch",
     # Ten powód niesie też `object_kept=True` i liczy się TAM (osobny człon zdania) - w rozbiciu
     # pominięć powtórzyłby tę samą klatkę drugi raz.
     "nastepczyni to kalibracja - obiekt zostaje na zrodle": None,
@@ -358,6 +370,7 @@ class TransferGesture:
     note_moved: int = 0
     lineage_moved: int = 0
     lineage_dropped: int = 0
+    calibration_moved: int = 0      # WIERSZE wskazań kalibratora ręką (relacje), jak `lineage_moved`
     object_kept: int = 0
     not_superseded: int = 0
     no_longer_superseded: int = 0
@@ -405,9 +418,10 @@ def transfer_gesture(con, *, frame_ids, now, actor="user:local"):
             g.note_moved += t.note_moved
             g.lineage_moved += t.lineage_moved
             g.lineage_dropped += t.lineage_dropped
+            g.calibration_moved += t.calibration_moved
             g.object_kept += t.object_kept
             if (t.object_moved or t.config_moved or t.observatory_moved or t.note_moved
-                    or t.lineage_moved or t.lineage_dropped):
+                    or t.lineage_moved or t.lineage_dropped or t.calibration_moved):
                 g.done += 1
                 ruszone.append(fid)
             elif t.skipped:
@@ -432,7 +446,8 @@ def zdanie_przeniesienia(g):
     msg = i18n.t_plural("supersede.transfer.done", g.total, done=g.done)
     osie = [(k, n) for k, n in (("object", g.object_moved), ("config", g.config_moved),
                                 ("site", g.observatory_moved), ("note", g.note_moved),
-                                ("lineage", g.lineage_moved))
+                                ("lineage", g.lineage_moved),
+                                ("calibration", g.calibration_moved))
             if n]
     if osie:
         msg += i18n.t("supersede.transfer.axes", axes=", ".join(
@@ -441,7 +456,7 @@ def zdanie_przeniesienia(g):
         msg += i18n.t_plural("supersede.transfer.object_kept", g.object_kept)
     if g.lineage_dropped:
         msg += i18n.t_plural("supersede.transfer.lineage_dropped", g.lineage_dropped)
-    for sufiks in ("own", "config_mismatch", "none"):
+    for sufiks in ("own", "config_mismatch", "calibration_mismatch", "none"):
         if g.skipped.get(sufiks):
             msg += i18n.t_plural(f"supersede.transfer.skip_{sufiks}", g.skipped[sufiks])
     if g.no_longer_superseded:

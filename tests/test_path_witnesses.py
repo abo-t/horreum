@@ -103,14 +103,19 @@ _STOS = rf"{R}\STACKS\vdB30\A140R_2600MM\G\vdB30_2026-03-06_A140R_2600MM_G_5s_mo
 
 
 def test_drzewo_stosow_obiekt_to_segment_PO_kotwicy():
-    assert object_from_path(_STOS, kind="master_light") == "vdB30"
-    assert object_folder(_STOS, kind="master_light") == rf"{R}\STACKS\vdB30"
+    """Kotwicą jest `STACKS` bezpośrednio pod korzeniem archiwum (`library_root`, E5-3); bez korzenia
+    świadek drzewa stosów milczy."""
+    assert object_from_path(_STOS, kind="master_light", library_root=R) == "vdB30"
+    assert object_folder(_STOS, kind="master_light", library_root=R) == rf"{R}\STACKS\vdB30"
+    assert object_from_path(_STOS, kind="master_light") is None
     for filtr in ("NoFilter", "Ha", "OIII", "SII", "R"):
         assert object_from_path(rf"{R}\STACKS\Veil\76EDPH_2600MC\{filtr}\x.xisf",
-                                kind="master_light") == "Veil", "filtr nie udaje obiektu"
+                                kind="master_light", library_root=R) == "Veil", "filtr nie udaje obiektu"
     # kotwica bez względu na wielkość liter i separator (R-S0-12)
-    assert object_from_path(r"R:\astro_\Stacks\M31\x\y\z.xisf", kind="master_light") == "M31"
-    assert object_from_path("/mnt/astro/STACKS/M31/cfg/L/z.xisf", kind="master_light") == "M31"
+    assert object_from_path(r"R:\astro_\Stacks\M31\x\y\z.xisf", kind="master_light",
+                            library_root=R) == "M31"
+    assert object_from_path("/mnt/astro/STACKS/M31/cfg/L/z.xisf", kind="master_light",
+                            library_root="/mnt/astro") == "M31"
 
 
 def test_drzewo_stosow_galezie_milczenia():
@@ -159,6 +164,14 @@ def test_propozycja_dialogu_dla_STOSU_ta_sama_regula_dwoch_swiadkow():
     przedtem (domyślny kontrakt nietknięty)."""
     con = _con()
     stos = rf"{R}\STACKS\vdB30\A140R_2600MM\G\vdB30_2026-03-06_A140R_2600MM_G_5s_mono.xisf"
+    assert resolver.path_proposal(con, stos, kind="master_light") is None, "baza bez korzenia archiwum"
+    # Korzeń archiwum z obecnych kopii (E5-3): `STACKS` i `CALIBRATION` pod jednym rodzicem.
+    for i, (rodzaj, sciezka) in enumerate((("master_light", stos),
+                                           ("dark", rf"{R}\CALIBRATION\darks\d.fit")), start=1):
+        con.execute("INSERT INTO frame(id, kind, filetype, sha1_data, first_seen_at) "
+                    "VALUES (?, ?, 'xisf', ?, ?)", (i, rodzaj, f"k{i}", NOW))
+        con.execute("INSERT INTO location(frame_id, volume, path, present) VALUES (?, 'VOL', ?, 1)",
+                    (i, sciezka))
     assert resolver.path_proposal(con, stos, kind="master_light") == "vdB30"
     assert resolver.path_proposal(con, stos) is None
     # rozjazd świadków i milczący drugi świadek - pole puste, jak u lightów

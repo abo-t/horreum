@@ -58,10 +58,16 @@ _GAP_PROSE = {
 @dataclass
 class LineageSummary:
     """Zliczenia przebiegu (QUIET). `linked` = STAN (lighty z kalibratorem, do domknięcia populacji);
-    `linked_new` = delta zapisu (idempotentny re-run daje 0); `reasons` = kubełki luki (per relacja)."""
+    `linked_new` = delta zapisu (idempotentny re-run daje 0); `unlinked` = ogniwa automatu zdjęte,
+    bo derywacja nie ma już dla nich kandydata (AR-81; drugi przebieg daje 0); `reasons` = kubełki
+    luki (per relacja)."""
     lights: int = 0
     linked: dict = field(default_factory=dict)         # relation -> stan (light ma kalibrator)
     linked_new: dict = field(default_factory=dict)     # relation -> realne zapisy tego przebiegu
+    unlinked: dict = field(default_factory=dict)       # relation -> zdjęte ogniwa automatu (AR-81)
+    # relation -> wskazania RĘKI na masterze nieaktywnym (wycofany, zastąpiony, bez obecnej kopii).
+    # Przebieg ich NIE rusza (ręka nietykalna) - liczy, żeby stan „wskaż inny” miał głos w raporcie.
+    hand_inactive: dict = field(default_factory=dict)
     reasons: dict = field(default_factory=dict)        # "relation: powód" -> licznik (luki)
 
 
@@ -69,6 +75,10 @@ def _masters_by_profile(con, profile_id=None):
     """`profile_id -> [(frame_id, datetime|None)]` dla kandydatów `kind LIKE 'master_%'`.
     Master i klatka surowa dzielą profil (C2), więc filtr `master_%` jest KONIECZNY — inaczej
     „czym skalibrować" oddałoby surowego darka jako kalibrator (brief C2 §5).
+
+    Kandydat jest AKTYWNY (bez `retired_at`/`superseded_by`) - ta sama granica co surowe flaty
+    (`raw_flats_for`): master wycofany ręką albo zastąpiony nową treścią pod ścieżką nie ma prawa
+    wrócić do doboru z przepisu, a bez filtra przebieg przepinał na niego lighty po cichu.
 
     `profile_id` ZAWĘŻA do jednego przepisu — odczyt pojedynczej klatki (panel) nie ma powodu
     czytać wszystkich masterów archiwum. Dwa PEŁNE literały zamiast sklejania: bramka
@@ -80,12 +90,14 @@ def _masters_by_profile(con, profile_id=None):
         cur = con.execute(
             "SELECT f.calibration_profile_id AS pid, f.id AS fid, h.date_obs AS d "
             "FROM frame f LEFT JOIN header h ON h.frame_id = f.id "
-            "WHERE f.calibration_profile_id IS NOT NULL AND f.kind LIKE 'master_%'")
+            "WHERE f.calibration_profile_id IS NOT NULL AND f.kind LIKE 'master_%' "
+            "AND f.retired_at IS NULL AND f.superseded_by IS NULL")
     else:
         cur = con.execute(
             "SELECT f.calibration_profile_id AS pid, f.id AS fid, h.date_obs AS d "
             "FROM frame f LEFT JOIN header h ON h.frame_id = f.id "
-            "WHERE f.calibration_profile_id = ? AND f.kind LIKE 'master_%'", (profile_id,))
+            "WHERE f.calibration_profile_id = ? AND f.kind LIKE 'master_%' "
+            "AND f.retired_at IS NULL AND f.superseded_by IS NULL", (profile_id,))
     for r in cur:
         out.setdefault(r["pid"], []).append((r["fid"], header_dt(r["d"])))
     return out
@@ -147,11 +159,35 @@ def _decide(row, relation, profiles, masters, light_dt):
 def run_lineage(con, *, now, actor="lineage"):
     """Przebieg rodowodu — idempotentny jak `calibration`/`grouper`: drugi przebieg na niezmienionych
     danych daje ZERO nowych wierszy `calibration` i ZERO eventów (UNIQUE(light,relation) z 0009 trzyma
-    idempotencję, nie kod). Wymaga zapełnionej osi przepisu (po `calibrate`)."""
+    idempotencję, nie kod). Wymaga zapełnionej osi przepisu (po `calibrate`).
+
+    REKONCYLIACJA LUKI (AR-81): ogniwo AUTOMATU, dla którego derywacja daje dziś lukę (filtr lighta
+    wyzerowany, master wycofany, przepis zniknął), znika przez `repo.unlink_calibration` z tokenem
+    luki - inaczej panel i rename pokazywały kalibrator, którego przepis już nie wskazuje. Ogniwo
+    ręki zostaje: lista dozwolonych źródeł to `repo.CALIBRATION_AUTO_SOURCES`.
+
+    Stan ogniw czytamy RAZ na początku i klingę wołamy tylko tam, gdzie zapis może coś zmienić -
+    klinga bierze blokadę zapisu na każde wywołanie, a niezmienione ogniwo to tysiące pustych
+    transakcji na przebieg. Decyzję i tak podejmuje klinga pod blokadą: odczyt jest filtrem kosztu,
+    nie guardem.
+
+    DRUGA PĘTLA REKONCYLIACJI: ogniwo automatu klatki, która PRZESTAŁA być lightem (przeliczony
+    rodzaj, zeznanie `IMAGETYP`), znika z tokenem `not_light` - pętla po lightach nigdy by go nie
+    zobaczyła, a kalibrator flata albo darka to zdanie bez treści. Ogniwo ręki zostaje.
+
+    Wskazanie ręki na masterze NIEAKTYWNYM (wycofany, zastąpiony, bez obecnej kopii) zostaje
+    nietknięte i liczy się do `hand_inactive` - panel prosi wtedy o wskazanie innego."""
     s = LineageSummary()
     profiles = {r["profile_key"]: r["id"] for r in con.execute(
         "SELECT id, profile_key FROM calibration_profile")}
     masters = _masters_by_profile(con)
+    stan = {(r["light_frame_id"], r["relation"]): (r["master_frame_id"], r["asserted_by"])
+            for r in con.execute(
+                "SELECT light_frame_id, relation, master_frame_id, asserted_by FROM calibration")}
+    nieaktywne = {r[0] for r in con.execute(
+        "SELECT f.id FROM frame f WHERE f.id IN (SELECT master_frame_id FROM calibration "
+        "WHERE asserted_by = 'user') AND (f.retired_at IS NOT NULL OR f.superseded_by IS NOT NULL "
+        "OR NOT EXISTS (SELECT 1 FROM location l WHERE l.frame_id = f.id AND l.present = 1))")}
 
     # Populacja pinowana WPROST do `kind='light'` — `master_light` to inny DAG (integration), a
     # wciągnięty do rachunku rozsypałby domknięcie i wyglądał jak bug rozkładu.
@@ -168,17 +204,43 @@ def run_lineage(con, *, now, actor="lineage"):
         light_dt = header_dt(row["date_obs"])
         d = {k: row[k] for k in row.keys()}
         for relation in _RELATIONS:
+            zapisane = stan.get((row["frame_id"], relation))
+            if zapisane is not None and zapisane[1] == "user":
+                # RĘKA ROZSTRZYGNĘŁA (E4-5): light MA kalibrator, także gdy przepis dziś milczy -
+                # wskazanie spoza przepisu jest dozwolone właśnie dla lightów bez profilu. Liczony
+                # do stanu, nie do luki: kubełek „brak przepisu” o skalibrowanej klatce kłamałby.
+                _bump(s.linked, relation)
+                if zapisane[0] in nieaktywne:
+                    _bump(s.hand_inactive, relation)
+                continue
             master_id, gap = _decide(d, relation, profiles, masters, light_dt)
             if gap:
                 _bump(s.reasons, f"{relation}: {_GAP_PROSE[gap]}")
+                if (zapisane is not None and zapisane[1] in repo.CALIBRATION_AUTO_SOURCES
+                        and repo.unlink_calibration(
+                            con, light_frame_id=row["frame_id"], relation=relation,
+                            allowed=repo.CALIBRATION_AUTO_SOURCES, reason=gap, now=now,
+                            actor=actor)):
+                    _bump(s.unlinked, relation)                      # AR-81: luka zdjęła automat
                 continue
             _bump(s.linked, relation)                                # STAN (do domknięcia populacji)
+            if zapisane == (master_id, "horreum"):
+                continue                                             # klinga i tak by odmówiła
             if repo.link_calibration(con, light_frame_id=row["frame_id"], master_frame_id=master_id,
                                      relation=relation, now=now, actor=actor):
                 _bump(s.linked_new, relation)                        # delta realnych zapisów
 
+    lighty = {row["frame_id"] for row in rows}
+    for (light_id, relation), (_master, zrodlo) in sorted(stan.items()):
+        if (light_id not in lighty and zrodlo in repo.CALIBRATION_AUTO_SOURCES
+                and repo.unlink_calibration(con, light_frame_id=light_id, relation=relation,
+                                            allowed=repo.CALIBRATION_AUTO_SOURCES,
+                                            reason="not_light", now=now, actor=actor)):
+            _bump(s.unlinked, relation)                              # klatka przestała być lightem
+
     s.reasons = dict(sorted(s.reasons.items()))
-    repo.flag_calibration_lineage_summary(con, sorted(s.reasons.items()), now, actor=actor)
+    repo.flag_calibration_lineage_summary(con, sorted(s.reasons.items()), now, actor=actor,
+                                          unlinked=s.unlinked, hand_inactive=s.hand_inactive)
     return s
 
 
@@ -234,7 +296,11 @@ def explain_light(con, light_frame_id):
       archiwum, tylko nieprzebiegnięty (albo stęchły) etap „Rodowód" — i użytkownik ma usłyszeć
       dwie różne rzeczy, bo jedna wymaga zakupu klatek, a druga jednego kliknięcia w Dostawie.
 
-    Zapisu nie ma i mieć nie będzie: panel tłumaczy stan, a zmienia go przebieg (jedna klinga)."""
+    Zapisu tu nie ma: panel tłumaczy stan, a zmienia go przebieg albo gest ręki (jedna klinga).
+
+    `candidates` każdej relacji to materiał gestu „Wskaż kalibrator…” (E4-5): aktywne mastery tej
+    klasy i TEJ SAMEJ kamery, najpierw z przepisu lightu (`in_recipe`), potem spoza niego - ręka
+    może wskazać każdy z nich (`_candidates`)."""
     rows = _light_rows(con, [light_frame_id])
     if not rows:
         return None
@@ -251,8 +317,8 @@ def explain_light(con, light_frame_id):
     # master". `master_light` to gotowy obraz po integracji: profilu nie ma i mieć nie będzie, bo
     # `KIND_RECIPE` go nie zna. Wzorzec `LIKE 'master_%'` łapał go razem z kalibracyjnymi, więc
     # JEDEN wciągnięty stos wystarczał, żeby to zdanie zapaliło się na stałe — a droga „Stosy"
-    # wciąga ich 128. Panel mówiłby wtedy „przepisy nie są policzone" o bazie z 19 268 powiązaniami
-    # i odsyłał do etapu, który niczego nie zmieni.
+    # wciąga ich setki. Panel mówiłby wtedy „przepisy nie są policzone" o bazie z dziesiątkami
+    # tysięcy powiązań i odsyłał do etapu, który niczego nie zmieni.
     # Wiązanie listy klas przez `json_each` — idiom `calibration.run_calibration`: literał SQL
     # zostaje STAŁY (bramka `test_repo_safety`), a lista klas ma jedno źródło.
     bez_przepisu = con.execute(
@@ -266,6 +332,7 @@ def explain_light(con, light_frame_id):
     # Relacje ze STANU obok stałej: `0009` dopuszcza `bias` i wpisy ręki/WBPP, a panel iterujący
     # samą stałą byłby ślepy na wiersz, który w bazie JEST (kłamałby o stanie, którego nie zna).
     relacje = list(_RELATIONS) + [r for r in stan if r not in _RELATIONS]
+    kandydaci = _candidates(con, d, relacje, profiles, light_dt)
     for relation in relacje:
         s = stan.get(relation)
         if s is not None:
@@ -274,19 +341,121 @@ def explain_light(con, light_frame_id):
             # żywym archiwum mediany to 139 dni (dark) i 43 dni (flat), z ogonem powyżej trzech lat.
             # Oś stosów w tym samym panelu odróżnia fakt od domysłu; ta ma na to własną miarę.
             mdt = header_dt(s["master_date"])
-            dni = None if (mdt is None or light_dt is None) else abs((mdt - light_dt).days)
+            # PEŁNE DOBY z wartości bezwzględnej, nie `abs(timedelta.days)`: `days` ujemnej różnicy
+            # zaokrągla w dół (master 2 doby i 2 h PRZED lightem dawał „Δ 3”), a lista kandydatów
+            # gestu liczy pełne doby - ten sam master miał w jednym panelu dwie różne odległości.
+            dni = (None if (mdt is None or light_dt is None)
+                   else int(abs((mdt - light_dt).total_seconds()) // 86400))
             out.append({"relation": relation, "master_frame_id": s["master_frame_id"],
                         "master_path": s["master_path"], "confidence": s["confidence"],
                         "asserted_by": s["asserted_by"], "days_apart": dni,
-                        "gap": None, "pending": False})
+                        # AKTYWNY = bez nagrobka I z obecną kopią. Ogniwo automatu do nieaktywnego
+                        # mastera przeliczy przebieg; wskazanie ręki zostaje i to panel ma poprosić
+                        # o inne - inaczej „jest” mówiłoby o kalibratorze, którym nie da się kalibrować.
+                        "master_active": bool(s["master_alive"]) and s["master_path"] is not None,
+                        "gap": None, "pending": False, "candidates": kandydaci[relation]})
             continue
         master_id, gap = _decide(d, relation, profiles, masters, light_dt)
         if gap == "no_profile" and bez_przepisu:
             gap = "not_calibrated"
         out.append({"relation": relation, "master_frame_id": None, "master_path": None,
-                    "confidence": None, "asserted_by": None, "days_apart": None, "gap": gap,
-                    "pending": master_id is not None})
+                    "confidence": None, "asserted_by": None, "days_apart": None,
+                    "master_active": None, "gap": gap,
+                    "pending": master_id is not None, "candidates": kandydaci[relation]})
     return out
+
+
+def _candidates(con, light, relations, profiles, light_dt):
+    """Kandydaci gestu ręki per relacja → `{relation: [dict, ...]}` (materiał `explain_light`).
+
+    Kandydat = master klasy relacji (`master_<relation>`), AKTYWNY (bez nagrobka - ta sama granica
+    co `_masters_by_profile` i walidacja klingi) i z TEJ SAMEJ kamery co light: dark z innej matrycy
+    nie ma czego odjąć, więc lista nie podsuwa wyboru, którego klinga i tak odmówi
+    (`repo.link_calibration`, token `camera`). Light bez kamery nie ma kandydatów.
+
+    NIEZGODNOŚĆ NASTAWY (`mismatch`): kandydat spoza przepisu niesie listę faktów przepisu, którymi
+    różni się od lightu (`_niezgodnosc`: filtr / teleskop / binning flatu, ekspozycja / temperatura
+    / gain / offset darka) - `[]` dla kandydata z przepisu, `None`, gdy master nie ma profilu (nastawa
+    nieznana). Ręka ma prawo wybrać flat OIII dla lightu Ha, ale lista ma to NAZWAĆ, zanim wybierze.
+
+    Kolejność: najpierw z przepisu lightu (`in_recipe` - ten sam profil, z którego przebieg wybiera
+    master), potem spoza przepisu od NAJMNIEJ niezgodnych (nastawa nieznana na końcu); w każdej
+    grupie rosnąco odległością w czasie, remis → niższe id. Pierwszy kandydat z przepisu jest więc
+    tym, którego wybrałby automat, a zaraz za przepisem stoją mastery zgodne co do filtra."""
+    out = {r: [] for r in relations}
+    if light["camera_id"] is None:
+        return out
+    pids = {r: _profile_for(light, r, profiles)[0] for r in relations}
+    pola_lightu = {r: _pola_lightu(light, r) for r in relations}
+    rodzaje = {f"master_{r}": r for r in relations}
+    for m in con.execute(
+            "SELECT f.id AS fid, f.kind AS kind, f.calibration_profile_id AS profile_id, "
+            "h.date_obs AS d, cp.profile_key AS profile_key, "
+            "(SELECT l.path FROM location l WHERE l.frame_id = f.id AND l.present = 1 "
+            " ORDER BY l.id LIMIT 1) AS path "
+            "FROM frame f LEFT JOIN header h ON h.frame_id = f.id "
+            "LEFT JOIN calibration_profile cp ON cp.id = f.calibration_profile_id "
+            "WHERE f.camera_id = ? AND f.kind IN (SELECT value FROM json_each(?)) "
+            "AND f.retired_at IS NULL AND f.superseded_by IS NULL ORDER BY f.id",
+            (light["camera_id"], json.dumps(sorted(rodzaje)))):
+        relation = rodzaje[m["kind"]]
+        mdt = header_dt(m["d"])
+        sekundy = (abs((mdt - light_dt).total_seconds())
+                   if mdt is not None and light_dt is not None else None)
+        w_przepisie = pids[relation] is not None and m["profile_id"] == pids[relation]
+        out[relation].append({
+            "master_frame_id": m["fid"], "master_path": m["path"],
+            "in_recipe": w_przepisie,
+            "mismatch": ([] if w_przepisie
+                         else _niezgodnosc(relation, pola_lightu[relation], m["profile_key"])),
+            "days_apart": None if sekundy is None else int(sekundy // 86400),
+            "_s": float("inf") if sekundy is None else sekundy})
+    for relation, lista in out.items():
+        # Filtr pierwszy wśród różnic: flat innego filtra jest dla lightu najgorszym wyborem, więc
+        # zgodni co do filtra stoją przed resztą, potem mniej różnic przed więcej, nieznana nastawa
+        # na końcu.
+        lista.sort(key=lambda c: (not c["in_recipe"], c["mismatch"] is None,
+                                  any(m["fact"] == "filt" for m in c["mismatch"] or ()),
+                                  len(c["mismatch"] or ()), c["_s"], c["master_frame_id"]))
+        for c in lista:
+            del c["_s"]
+    return out
+
+
+# Fakty przepisu, które lista kandydatów porównuje - w kolejności ważności dla człowieka. Nazwy
+# pól to człony `calibration.profile_key` (jedno źródło formatu: klucz przepisu, nie druga kopia).
+_POLA_PRZEPISU = {"dark": ("exp", "t", "g", "o", "bin"), "bias": ("t", "g", "o", "bin"),
+                  "flat": ("filt", "tel", "bin")}
+
+
+def _pola_lightu(light, relation):
+    """Fakty przepisu LIGHTU w formacie członów `profile_key` - ta sama derywacja (`_collect`) i ten
+    sam zapis liczb, więc porównanie z kluczem mastera jest porównaniem napisów. Brak faktu = `None`
+    (nie wiadomo - nie zgłaszamy niezgodności, której nie umiemy stwierdzić)."""
+    if relation not in _POLA_PRZEPISU:
+        return {}
+    d = dict(light)
+    d["recipe_class"] = relation
+    f = _collect(d, {})
+    pola = {"bin": f.get("xbinning")}
+    if relation == "dark":
+        pola["exp"] = None if f.get("exptime") is None else f"{f['exptime']:.3f}"
+    if relation in ("dark", "bias"):
+        pola.update(t=f.get("set_temp_c"), g=f.get("gain"), o=f.get("offset_adu"))
+    if relation == "flat":
+        pola.update(tel=f.get("telescope_id"), filt=f.get("filter_canon") or "~")
+    return {k: None if v is None else str(v) for k, v in pola.items()}
+
+
+def _niezgodnosc(relation, pola_lightu, profile_key_mastera):
+    """Fakty przepisu, którymi master różni się od lightu → `[{"fact", "master", "light"}]`;
+    `None`, gdy master nie ma profilu (nastawy nie znamy) albo klasa nie ma przepisu."""
+    if profile_key_mastera is None or relation not in _POLA_PRZEPISU:
+        return None
+    mastera = dict(p.split("=", 1) for p in profile_key_mastera.split("|")[1:] if "=" in p)
+    return [{"fact": k, "master": mastera[k], "light": pola_lightu[k]}
+            for k in _POLA_PRZEPISU[relation]
+            if pola_lightu.get(k) is not None and k in mastera and mastera[k] != pola_lightu[k]]
 
 
 def calibrators_for(con, light_frame_id):
@@ -301,6 +470,8 @@ def calibrators_for(con, light_frame_id):
         "SELECT c.relation AS relation, c.master_frame_id AS master_frame_id, "
         "c.confidence AS confidence, c.asserted_by AS asserted_by, "
         "(SELECT h.date_obs FROM header h WHERE h.frame_id = c.master_frame_id) AS master_date, "
+        "(SELECT m.retired_at IS NULL AND m.superseded_by IS NULL FROM frame m "
+        " WHERE m.id = c.master_frame_id) AS master_alive, "
         "(SELECT l.path FROM location l WHERE l.frame_id = c.master_frame_id AND l.present = 1 "
         " ORDER BY l.id LIMIT 1) AS master_path "
         "FROM calibration c WHERE c.light_frame_id = ? ORDER BY c.relation",

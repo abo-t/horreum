@@ -301,6 +301,40 @@ def stack_name(obj_seg, date_obs, rig_seg, filter_seg, exptime, color, *, varian
     return "_".join(segs) + ".xisf"
 
 
+_EXPOSURE_TOKEN = re.compile(r"\d+(?:\.\d+)?s", re.IGNORECASE)
+
+
+def variant_stack_name(original_name, variant=_AUTOCROP):
+    """Nazwa WARIANTU stosu w archiwum z nazwy archiwalnej ORYGINAŁU (`stack_name`) - człon wariantu
+    wstawiony zaraz po kolorze, przed drizzle i sufiksem rozróżnienia: ta sama kolejność członów, którą
+    składa `stack_name`. Czysta funkcja; None, gdy nazwa nie ma układu `…_<exp>s_<kolor>[…]` albo JUŻ
+    niesie ten wariant.
+
+    ROZBIÓR OD KOŃCA: segmenty zestawu i filtra przechodzą przez `_sanitize`, więc mogą nieść `_`
+    i token wyglądający jak ekspozycja (zestaw `X_300s`). Kolor to OSTATNI token ze `STACK_COLORS`
+    (albo para `combined_RGB`), przed którym stoi token ekspozycji `<n>s` - za nim mogą stać już
+    tylko warianty i sufiks, a te koloru ani ekspozycji nie udają.
+
+    DLACZEGO Z NAZWY ORYGINAŁU (pomiar na kopii archiwum 2026-10-11): oryginały w `STACKS` niosą
+    sufiksy przebiegu (`_WBPP`, `_WBPP_nowy`, `_WBPP2`), wariant drizzle i `combined_RGB`; nazwa
+    złożona z nagłówka autocropu dawała 27 kolizji w obrębie planu i 5 odmów koloru. Nazwa oryginału
+    jest w swoim katalogu unikalna, więc wariant dziedziczy tę unikalność."""
+    _variant_order(variant)                            # EXPECT: wariant spoza słownika → ValueError
+    stem, ext = os.path.splitext(str(original_name))
+    tokens = stem.split("_")
+    if any(t.lower() == variant for t in tokens):
+        return None
+    kolory = {c.lower() for c in STACK_COLORS}
+    for i in range(len(tokens) - 1, 0, -1):
+        t = tokens[i].lower()
+        if t not in kolory:
+            continue
+        exp = i - 2 if (t == "rgb" and tokens[i - 1].lower() == "combined") else i - 1
+        if exp >= 0 and _EXPOSURE_TOKEN.fullmatch(tokens[exp]):
+            return "_".join(tokens[:i + 1] + [variant] + tokens[i + 1:]) + ext
+    return None
+
+
 def compose_name(facts, dt, *, template=DEFAULT_TEMPLATE):
     """Komponuj kanoniczną nazwę z faktów frame'a. Zwraca `(nazwa | None, problem | None)`.
 

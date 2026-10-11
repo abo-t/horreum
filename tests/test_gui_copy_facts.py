@@ -42,7 +42,7 @@ def archiwum(tmp_path):
 
 @pytest.fixture
 def view(qapp, archiwum, monkeypatch):
-    monkeypatch.setattr(QSettings, "value", lambda self, k, d=None: d)
+    monkeypatch.setattr(QSettings, "value", lambda self, k, d=None, **kw: d)
     monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: None)
     con = archiwum[0]
     v = grid_mod.FramesView(con, now_fn=None)
@@ -120,7 +120,7 @@ def test_podpowiedz_nazywa_rozjazd_nazwy_kopii():
 def test_podpowiedz_mowi_o_kopii_bez_zebranego_zeznania(qapp, tmp_path, monkeypatch):
     """Kopia sprzed 0021 (fakty jeszcze niezebrane) nie milczy jak kopia zgodna - mówi, że zeznania
     nie ma i co je uzupełni. Rozjazdu wtedy nie ogłaszamy: „nie wiem" nie jest „inaczej"."""
-    monkeypatch.setattr(QSettings, "value", lambda self, k, d=None: d)
+    monkeypatch.setattr(QSettings, "value", lambda self, k, d=None, **kw: d)
     monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: None)
     root, a, b = _dwie_kopie(tmp_path)
     con = db.open_db(str(tmp_path / "h.db"))
@@ -318,7 +318,7 @@ def test_wiersz_porzadkow_zeznanie_z_nieobecnej_kopii(qapp, tmp_path, monkeypatc
     """Wiersz AKCYJNY i ROBOTA (poza `_BEZ_ROBOTY`): liczy klatki o ≥2 obecnych kopiach, których
     `header` mówi głosem nieobecnej - tu kopię wiodącą wskazuje człowiek. Klik prowadzi do Zbiorów
     z perspektywą pokazującą dokładnie te klatki; pasek kryteriów nazywa zawężenie."""
-    monkeypatch.setattr(QSettings, "value", lambda self, k, d=None: d)
+    monkeypatch.setattr(QSettings, "value", lambda self, k, d=None, **kw: d)
     monkeypatch.setattr(QSettings, "setValue", lambda self, k, v: None)
     path, _root, fid = _po_skasowaniu_zrodla(tmp_path, trzecia=True)
     con = db.open_db(path)

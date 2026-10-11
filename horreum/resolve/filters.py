@@ -49,3 +49,15 @@ def normalize_filter(filter_raw):
     if key.isdigit():            # slot koła (1..7) bez mapy per-rig → nienormalizowalny
         return None
     return raw.strip()           # nieznany niepusty → zeznanie verbatim
+
+
+def classify_filter_token(text):
+    """Token spoza nagłówka (segment folderu, człon nazwy pliku) → `(stan, kanon)`: `("filtr", kanon)`,
+    gdy token jest nazwą ze słownika osi; `("bez_filtra", None)` dla żetonu braku; `(None, None)`
+    dla tekstu spoza słownika. Dopasowanie DOKŁADNE - bez wariantu verbatim `normalize_filter`:
+    świadek ścieżki nie zakłada filtra z dowolnej nazwy katalogu (`A140R_2600MC` filtrem nie jest)."""
+    key = norm(text)
+    if key in _NONE:
+        return "bez_filtra", None
+    canon = _CANON.get(key)
+    return ("filtr", canon) if canon is not None else (None, None)

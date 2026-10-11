@@ -35,6 +35,9 @@ BASE_COLS = [
     # `_dolacz_kopie`). Na końcu listy: kolumny szukane po kluczu nie przesuwają się, a tabela
     # przewija się w poziomie, więc podłoga okna (D-0801-1) zostaje, gdzie była.
     ("grid.col.images", "_images"),
+    # „Rodowód" - stan rodowodu GOTOWEGO OBRAZU (`queries.LINEAGE_STATES`, `_adnotuj_rodowod`);
+    # klatka innego rodzaju ma komórkę pustą (n.d.). Na końcu z tego samego powodu co „Obrazy".
+    ("grid.col.lineage", "_rodowod"),
 ]
 # PREZENTACJA ZNAJDŹ - ten sam model i ten sam zbiór, inny zestaw kolumn bazowych: to, po co człowiek
 # przychodzi z pytaniem („co mam z tej nocy, w tym filtrze"), bez kolumn warsztatu (Δh, Obrazy,
@@ -95,7 +98,7 @@ def _object_tip(row, stan):
     Podpowiedź `hint` ma DWA zdania: w drzewie `STACKS` folder niesie nazwę i istnieje droga
     potwierdzenia ze ścieżki, w układzie WBPP nie - jedno wspólne zdanie byłoby o stosach
     z drzewa nieprawdą („nazwy nie niosą tożsamości")."""
-    if stan == "hint" and queries.hint_from_stacks_tree(row.get("path")):
+    if stan == "hint" and queries.hint_from_stacks_tree(row.get("path"), row.get("library_root")):
         return i18n.t("grid.cell.object_hint_stacks_tip")
     return _cleared_tip(row) if stan == "cleared" else i18n.t(_OBJECT_STATE_TIPS[stan])
 
@@ -160,6 +163,8 @@ def use_theme(name):
     `tasks.use_theme` gasi wiersze bez roboty."""
     _COLORS.update({k: QColor(v) for k, v in theme.grid_colors(name).items()})
     _COLORS["secondary_text"] = QColor(theme.accents(name)["secondary_text"])
+    # Rola `warn` z akcentów (bez nowego koloru): stan rodowodu „do potwierdzenia" w komórce gridu.
+    _COLORS["warn"] = QColor(theme.accents(name)["warn"])
 
 
 use_theme(theme.DEFAULT)     # init przy imporcie (QColor bez QApplication — jak dawne stałe modułu)
@@ -338,6 +343,11 @@ PRESET_TORN_WRITE = "Plik po przerwanym zapisie"
 # osobna perspektywa obok przerwanego zapisu. Predykat `queries.pending_finish_frame_ids`. Stała
 # współdzielona z TasksView po nazwie.
 PRESET_PENDING_FINISH = "Zapis czeka na dokończenie"
+# PRESET_READY_IMAGES - gotowe obrazy pogrupowane po stanie rodowodu. Bez flagi `only_*`: zbiór
+# niesie ISTNIEJĄCY facet Rodzaj (`master_light`), więc listwa pokazuje go jako wybór, a facet
+# „Rodowód" obok zawęża dalej jednym klikiem. Grupowanie po kolumnie „Rodowód" stawia stosy bez
+# rodowodu pod własną belką - wcześniej nic ich w tabeli nie odróżniało.
+PRESET_READY_IMAGES = "Gotowe obrazy"
 # Klucz grupowania po GRUPIE WERSJI - pochodna wiersza (`_adnotuj_wersje`), nie kolumna bazowa:
 # `BASE_COLS` zostaje bez zmian, więc podłoga okna się nie rusza. Pozycja listy „Grupuj wg" działa
 # w każdej perspektywie (stosy spoza grup bliźniaków lądują w „(brak)"), a preset ją ustawia.
@@ -349,6 +359,8 @@ PRESETS = {
         {"keyword": "IMAGETYP", "operator": "contains", "value": "flat"},
         {"keyword": "IMAGETYP", "operator": "contains", "value": "bias"},
     ]}, "group_by": "kind"},
+    PRESET_READY_IMAGES: {"filter": None, "group_by": "_rodowod",
+                          "facets": {"kind": {"in": [["master_light", "master_light"]]}}},
     PRESET_DUPS: {"filter": None, "group_by": None, "only_dups": True},
     PRESET_VANISHED: {"filter": None, "group_by": None, "only_vanished": True},
     PRESET_LINEAGE: {"filter": None, "group_by": None, "only_lineage": True},
@@ -370,6 +382,7 @@ PRESETS = {
 _PRESET_LABELS = {
     "Przegląd": "perspective.review",
     "Kalibracja": "perspective.calibration",
+    PRESET_READY_IMAGES: "perspective.ready_images",
     PRESET_DUPS: "perspective.dups",
     PRESET_VANISHED: "perspective.vanished",
     PRESET_LINEAGE: "perspective.lineage",
@@ -705,6 +718,13 @@ _ODWROT_WYCOFANIA = _Odwrot("grid.sel.object_clear_undo", "grid.sel.object_clear
 _ODWROT_UWAG = _Odwrot("grid.notes.undo", "grid.notes.undo_after",
                        "grid.notes.action", "grid.notes.action",
                        "_cofnij_uwagi", "_ile_uwag_do_cofniecia")
+# Droga powrotu WERDYKTU RĘKI w panelu rodowodu (D-1011-4): odwrotem nie jest werdykt przeciwny,
+# tylko stan SPRZED gestu (`repo.restore_integration_judgment`), znany wyłącznie migawce widoku
+# (`FramesView._migawka_werdyktu`) - recepta jest jedynym wejściem, jak przy uwagach. Cel recepty
+# to klatka STOSU (wiersz gridu), bo wejścia stosu w gridzie zwykle nie stoją.
+_ODWROT_WERDYKTU = _Odwrot("grid.lin.undo", "grid.lin.undo_after",
+                           "grid.sel.lineage", "grid.sel.lineage",
+                           "_cofnij_werdykt", "_ile_werdyktow_do_cofniecia")
 # Odmowa gestu uwag przy zajętości - zdania gestów izolacji obiecują, że gest „ruszy po
 # zakończeniu", a okno uwag samo nie ruszy.
 _UWAGI_ZAJETE = {"grid.inplace.busy_stage": "grid.notes.busy_stage",
@@ -1023,6 +1043,41 @@ def _adnotuj_wersje(base, grupy):
         f = fakty.get(row.get("frame_id"))
         if f is not None:
             row["_wersja_grupa"], row["_wersja_etykieta"], row["_wersja"] = f
+
+
+# Stan rodowodu gotowego obrazu → (etykieta, podpowiedź). Klucze JAWNE per token (kolektor literałów
+# bramki i18n widzi wyłącznie literały) - komplet z `queries.LINEAGE_STATES` pinuje test.
+_STANY_RODOWODU = {
+    "pending": "grid.lineage.state.pending",
+    "exact": "grid.lineage.state.exact",
+    "history": "grid.lineage.state.history",
+    "mixed": "grid.lineage.state.mixed",
+    "window": "grid.lineage.state.window",
+    "rejected": "grid.lineage.state.rejected",
+    "none": "grid.lineage.state.none",
+    "uncounted": "grid.lineage.state.uncounted",
+}
+_TIPY_RODOWODU = {
+    "exact": "grid.lineage.tip.exact",
+    "history": "grid.lineage.tip.history",
+    "mixed": "grid.lineage.tip.mixed",
+    "window": "grid.lineage.tip.window",
+    "pending": "grid.lineage.tip.pending",
+    "rejected": "grid.lineage.tip.rejected",
+    "none": "grid.lineage.tip.none",
+    "uncounted": "grid.lineage.tip.uncounted",
+}
+# Stany, które są BRAKIEM rodowodu - komórka maluje je rolą braku (szarość + kursywa), jak brak
+# karty keyworda: „nie wiadomo, z czego powstał" nie jest ostrzeżeniem, tylko pustym miejscem.
+_RODOWOD_BRAK = frozenset({"rejected", "none", "uncounted"})
+
+
+def _adnotuj_rodowod(base, stany):
+    """Dołóż wierszom gridu `_rodowod` = token stanu (`queries.stack_lineage_states`) albo `None`
+    dla klatki, która nie jest gotowym obrazem. Czysta funkcja nad gotowym słownikiem, zero SQL;
+    mutuje dicty `base` w miejscu, jak `_adnotuj_wersje`."""
+    for row in base:
+        row["_rodowod"] = stany.get(row.get("frame_id"))
 
 
 class _ElizjaWSrodku(QStyledItemDelegate):
@@ -1707,6 +1762,27 @@ class GridTableModel(QAbstractTableModel):
             return None
         if key == "_images":
             return self._images_cell(row, role)
+        if key == "_rodowod":
+            # Stan rodowodu gotowego obrazu; n.d. (inny rodzaj) = pusta komórka bez podpowiedzi.
+            stan = row.get("_rodowod")
+            if stan is None:
+                return "" if role == Qt.DisplayRole else None
+            if role == Qt.DisplayRole:
+                return i18n.t(_STANY_RODOWODU[stan])
+            if role == Qt.ToolTipRole:
+                return i18n.t(_TIPY_RODOWODU[stan])
+            # Role z motywu: „do potwierdzenia" to robota (warn), „z okna czasu" - kandydat, którego
+            # nikt nie potwierdził (secondary); brak rodowodu - rola braku, jak brak karty.
+            if stan == "pending" and role == Qt.ForegroundRole:
+                return _COLORS["warn"]
+            if stan == "window" and role == Qt.ForegroundRole:
+                return _COLORS["secondary_text"]
+            if stan in _RODOWOD_BRAK:
+                if role == Qt.ForegroundRole:
+                    return _COLORS["missing"]
+                if role == Qt.FontRole:
+                    f = QFont(); f.setItalic(True); return f
+            return None
         if key == "exptime":
             # Czas ekspozycji Znajdź: liczba bez ogona zer („300 s", nie „300.0"), do prawej jak
             # każda kolumna liczb; sort liczbowy w `_sort_key`.
@@ -1826,6 +1902,11 @@ class GridTableModel(QAbstractTableModel):
                 # kierunkach, jak MISSING (wzór `_dt_delta`).
                 v = row.get("_images_n")
                 return (2, 0) if v is None else (0, v)
+            if key == "_rodowod":
+                # Po PEWNOŚCI (kolejność `_STANY_RODOWODU` = `queries.LINEAGE_STATES`), nie po
+                # alfabecie etykiety; n.d. na koniec w obu kierunkach, jak MISSING.
+                v = row.get("_rodowod")
+                return (2, 0) if v is None else (0, list(_STANY_RODOWODU).index(v))
             if key == "exptime":                             # liczba, brak na koniec (wzór `_images`)
                 v = row.get("exptime")
                 return (2, 0.0) if v is None else (0, float(v))
@@ -1868,7 +1949,8 @@ class GridTableModel(QAbstractTableModel):
         if stan == "hint":
             # Zdanie podpowiedzi zależy od UKŁADU ścieżki (`_object_tip`): kubełek mieszający drzewo
             # `STACKS` z układem WBPP pod jednym tekstem komórki nie ma jednego zdania - belka milczy.
-            drzewa = {queries.hint_from_stacks_tree(r.get("path")) for r in bucket}
+            drzewa = {queries.hint_from_stacks_tree(r.get("path"), r.get("library_root"))
+                      for r in bucket}
             return "exact" if len(drzewa) == 1 else None
         if stan != "cleared":
             return "exact"
@@ -1881,10 +1963,16 @@ class GridTableModel(QAbstractTableModel):
         if self._group_by in (None, ""):
             return None
         v = row.get(self._group_by)
+        if self._group_by == "_rodowod" and v is None:
+            # Klatka, która nie jest gotowym obrazem: „nie dotyczy", NIE „(brak)" - obok stoi stan
+            # „brak" rodowodu i dwa kubełki o jednym słowie znaczyłyby dwie różne rzeczy.
+            return i18n.t("grid.lineage.state.nd")
         if v in (None, ""):
             return "(brak)"
         if self._group_by == "_dt_delta":
             return f"{v:g}"                                    # etykieta grupy spójna z komórką („-2")
+        if self._group_by == "_rodowod":
+            return i18n.t(_STANY_RODOWODU[v])                  # belka mówi słowem komórki, nie tokenem
         return str(v)
 
     def _group_label(self, row):
@@ -1912,6 +2000,10 @@ class GridTableModel(QAbstractTableModel):
             if self._group_by == "_dt_delta":                 # porządek nagłówków grup NUMERYCZNY (R2 #4):
                 rows = sorted(rows, key=lambda r: (           # inaczej „-1", „-12", „-2"; None-grupa na koniec
                     r.get("_dt_delta") is None, r.get("_dt_delta") or 0.0))
+            elif self._group_by == "_rodowod":               # belki po PEWNOŚCI, n.d. na końcu
+                kolejnosc = list(_STANY_RODOWODU)
+                rows = sorted(rows, key=lambda r: (
+                    kolejnosc.index(r["_rodowod"]) if r.get("_rodowod") else len(kolejnosc)))
             elif self._group_by == _GRUPA_WERSJI:            # porządek belek po PODPISIE, kubełek
                 rows = sorted(rows, key=lambda r: (           # po IDENTYFIKATORZE grupy
                     self._group_label(r).lower(), self._group_value(r)))

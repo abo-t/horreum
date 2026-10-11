@@ -23,7 +23,8 @@ wskazał sam: pole jest prawdą, zaznaczenie listy idzie za nim.
 
 STOSY idą do `<archiwum>\\STACKS`, nie pod `CALIBRATION`, więc korzeń przyjęcia przy stosie to korzeń
 archiwum (sito `STACKS` łańcucha Dostawy), a nie wspólny rodzic kopii. Dokładny zbiór wejść stosu
-(`frame_ids` planu) wraca do gospodarza w `harvested_stacks` - rodowód zapisuje on po łańcuchu,
+(`frame_ids` planu) wraca do gospodarza w `harvested_stacks` razem z kanonem obiektu wydania
+(AR-103: gospodarz porównuje go po łańcuchu z obiektem stosu) - rodowód zapisuje on po łańcuchu,
 okno bazy nie tyka. Przyjąć można też kopie, które leżą w archiwum, a których baza nie zna (`exists`
 z `known_to_db=False`: wciągnięte w innym oknie bez przyjęcia) - bieg bez nowej kopii też ma wtedy
 co oddać Dostawie.
@@ -578,11 +579,11 @@ class HarvestDialog(QDialog):
         self._placed_dirs = set()        # katalogi z ≥1 wciągniętą kopią, ze wszystkich biegów okna
         self._placed_keys = set()        # `norm_path` celów wciągniętych kopii - wszystkie biegi okna
         self._placed_n = 0               # ile plików wciągnęły wszystkie biegi okna (z postępu)
-        self._placed_stacks = {}         # sha1_data → frame_ids stosów wciągniętych w tym oknie
+        self._placed_stacks = {}         # sha1_data → (frame_ids, kanon wydania) stosów wciągniętych w tym oknie
         self._unknown = {}               # `norm_path` → ścieżka kopii w archiwum, której baza nie zna
-        self._unknown_stacks = {}        # sha1_data → frame_ids stosów leżących w archiwum bez wiedzy bazy
+        self._unknown_stacks = {}        # sha1_data → (frame_ids, kanon) stosów w archiwum bez wiedzy bazy
         self._lineage = {}               # `norm_path` → kopia stosu pod STACKS bez rodowodu dokładnego (lista)
-        self._lineage_stacks = {}        # sha1_data → frame_ids tych stosów (zbiór z zeznania żniw, AR-104)
+        self._lineage_stacks = {}        # sha1_data → (frame_ids, kanon) tych stosów (z zeznania żniw, AR-104)
         self._fresh = {}                 # `norm_path(out)` → `plan_counts` ostatniego podglądu tego wyjścia
         self._trouble = Counter()        # konflikty, błędy, niezgodne bajty - wszystkie biegi okna
         self._ran = False                # okno puściło choć jeden bieg apply
@@ -594,7 +595,7 @@ class HarvestDialog(QDialog):
         self._notice_state = ("", None)  # ostatni komunikat stanu - wraca, gdy pole przestaje odbiegać
         self.summary = None              # zdanie na pasek stanu gospodarza (None = nic się nie stało)
         self.harvested_root = None       # korzeń do przyjęcia - ustawia go WYŁĄCZNIE „Zamknij i przyjmij”
-        self.harvested_stacks = []       # [(sha1_data, frame_ids)] - razem z `harvested_root`, tym samym gestem
+        self.harvested_stacks = []       # [(sha1_data, frame_ids, kanon wydania)] - razem z `harvested_root`
         self._shown_out = None           # wyjście WBPP pozycji w tabeli - kolumna pliku liczy się względem niego
         self._table_viewport = None      # viewport tabeli po budowie (filtr zdarzeń zmiany rozmiaru)
         self._first_pick_checked = False  # pierwsze użycie: wybór katalogu raz po pokazaniu (`showEvent`)
@@ -1079,7 +1080,8 @@ class HarvestDialog(QDialog):
             self._refresh_summary()
         # Stos z tej grupy niesie zbiór wejść z planu - przyjęty teraz dostaje rodowód dokładny,
         # choć położyło go inne okno.
-        self._unknown_stacks.update((it.sha1_data, tuple(it.frame_ids)) for it in plan.items
+        self._unknown_stacks.update((it.sha1_data, (tuple(it.frame_ids), it.release_canon))
+                                    for it in plan.items
                                     if it.status == "exists" and not it.known_to_db
                                     and it.kind == "master_light" and it.sha1_data and it.frame_ids)
         # Wiersz listy z tym `out` liczy się teraz ze świeżego planu, nie z zeznań (wynik bez
@@ -1277,8 +1279,9 @@ class HarvestDialog(QDialog):
         osobna Dostawa - zbiór wejść leży tylko w zeznaniu żniw w folderze wydania). Fakt o archiwum
         okna, nie o wybranym wierszu - zostaje do końca okna jak kopie nieznane bazie: odsłania
         „Zamknij i przyjmij”, blokuje archiwum, a przyjęcie oddaje te stosy gospodarzowi."""
-        nowe = {norm_path(path): path for row in rows for _sha1, _ids, path in row.lineage}
-        self._lineage_stacks.update((sha1, tuple(ids)) for row in rows for sha1, ids, _path in row.lineage)
+        nowe = {norm_path(path): path for row in rows for _sha1, _ids, path, _kanon in row.lineage}
+        self._lineage_stacks.update((sha1, (tuple(ids), kanon))
+                                    for row in rows for sha1, ids, _path, kanon in row.lineage)
         if nowe.keys() - self._lineage.keys():
             self._lineage.update(nowe)
             self._refresh_summary()
@@ -1473,7 +1476,7 @@ class HarvestDialog(QDialog):
             self._placed_n += 1
             it = self._run_items.get(dst)
             if it is not None and it.kind == "master_light" and it.sha1_data:
-                self._placed_stacks[it.sha1_data] = tuple(it.frame_ids)
+                self._placed_stacks[it.sha1_data] = (tuple(it.frame_ids), it.release_canon)
         elif status in ("conflict", "error", "verify_bad"):
             self._trouble[status] += 1
         if self._close_after_apply is None:
@@ -1700,9 +1703,10 @@ class HarvestDialog(QDialog):
         accepted = r == QDialog.Accepted and self.harvested_root is not None
         # Stosy do rodowodu: wciągnięte w tym oknie, zastane w archiwum bez wiedzy bazy (przyjmowane
         # teraz, położone wcześniej) i znane bazie bez rodowodu dokładnego (lista, AR-104) - jeden
-        # wpis na `sha1_data`.
-        self.harvested_stacks = (list({**self._lineage_stacks, **self._unknown_stacks,
-                                       **self._placed_stacks}.items()) if accepted else [])
+        # wpis na `sha1_data`, z kanonem obiektu wydania (porównanie obiektu stosu po łańcuchu, AR-103).
+        stosy = {**self._lineage_stacks, **self._unknown_stacks, **self._placed_stacks}
+        self.harvested_stacks = ([(sha1, ids, kanon) for sha1, (ids, kanon) in stosy.items()]
+                                 if accepted else [])
         if not accepted and self._receivable_dirs():
             self.summary = self._close_summary()
         super().done(r)

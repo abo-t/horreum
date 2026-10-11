@@ -149,6 +149,10 @@ class ZnajdzView(QWidget):
         Pole, które człowiek właśnie edytuje (tekst inny niż przyłożone zapytanie), zostaje."""
         if self._nic or self.frames_view.zbior_w_drodze():
             return                       # zapytanie w toku - zdanie przyjdzie z jego zbiorem
+        if self.frames_view.nakladka_wskazanych():
+            # Klatki wskazane z panelu rodowodu to NAKŁADKA: „×" chipu wraca do zbioru zapytania
+            # razem z jego tożsamością, więc pole i zdanie zostają do tej chwili nietknięte.
+            return
         if self._tekst_zapytania is not None and not self.frames_view.zapytanie_aktualne():
             if self.pole.text() == self._tekst_zapytania:
                 self.pole.clear()

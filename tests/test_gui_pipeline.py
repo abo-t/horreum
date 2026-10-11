@@ -1314,3 +1314,23 @@ def test_przycisk_zniw_neutralny_wobec_masterow_i_stosow(qapp, tmp_path):
             assert "master" not in tip and "stos" not in tip and "stack" not in tip
         finally:
             view.close()
+
+
+def test_raport_rodowodu_i_sprzetu_mowi_o_zdjetych_ogniwach_i_wariantach_kadru():
+    """Linia „Rodowód” nazywa ogniwa automatu zdjęte przez przebieg, linia „grupuj” - pary wariantu
+    kadru z zeznań kopii; obie milczą przy zerze (QUIET)."""
+    from horreum.grouper import GroupSummary
+    from horreum.lineage import LineageSummary
+    from horreum.stack_variants import LinkSummary
+
+    zdjete = PipelineView._format_lineage(PipelineView, LineageSummary(lights=1, unlinked={"flat": 1}))
+    assert i18n.t("pipeline.fmt.lineage_unlinked", unlinked="flat 1") in zdjete
+    cisza = PipelineView._format_lineage(PipelineView, LineageSummary(lights=1))
+    assert i18n.t("pipeline.fmt.lineage_unlinked", unlinked="").strip() not in cisza
+
+    s = GroupSummary()
+    s.variants = LinkSummary(linked=2, waiting=1, mismatch=1)
+    assert i18n.t("pipeline.fmt.group_variants", linked=2, waiting=1, bad=1) in \
+        PipelineView._format_group(PipelineView, s)
+    s.variants = LinkSummary()
+    assert "warianty" not in PipelineView._format_group(PipelineView, s)

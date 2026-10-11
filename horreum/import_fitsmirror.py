@@ -59,8 +59,9 @@ from .grouper import NO_TELESCOPE_KINDS
 from .resolve.cameras import normalize_camera
 from .resolve.frames import normalize_kind
 from .scan import (
-    Card, ScanRecord, ScanSummary, canonize_root, header_dict_from_cards, ingest_record,
-    iter_headers, scan_file, unreadable_reason_of, _dolicz_probe, _mtime_iso,
+    Card, ScanRecord, ScanSummary, backfill_stack_history, canonize_root, header_dict_from_cards,
+    ingest_record,
+    iter_headers, rederive_kinds, scan_file, unreadable_reason_of, _dolicz_probe, _mtime_iso,
     _szkielet_po_awarii_zapisu,
 )
 from .volumes import volume_serial
@@ -116,6 +117,13 @@ class ImportSummary:
     # czyta pliki (falsyfikator, podgrupa przeliczana z dysku); nieosiągalny plik nie zatrzymuje
     # importu, tylko liczy się w `history_unread`.
     stack_lineage: object = None
+    # StackHistorySummary (0034, AR-87): rekord z cache dawcy nie niesie historii stosu, więc import
+    # dociąga ją jednym odczytem nagłówka każdego stosu PRZED pochodnymi - rodowód stosów czyta ją
+    # potem z bazy, a następna Dostawa nie czyta stosów z udziału wcale.
+    stack_history: object = None
+    # KindRederiveSummary (AR-96): rodzaj klatek XISF przeliczony regułą historii po wjeździe - rekord
+    # z cache dawcy historii nie niesie, więc master flat zapisany jako `FLAT` wjechałby jako surowy.
+    kind_rederive: object = None
     files_total: int = 0
     imported: int = 0
     skipped: int = 0
@@ -562,7 +570,13 @@ def run_import(donor, con, *, now, rng_seed=None, repaired_paths=None, progress=
     # i ogon CLI `presence --apply`. Do 2026-08-01 fasada kończyła na resolverze, więc po samym
     # imporcie oś przepisu była PUSTA do pierwszego `calibrate` - baza „po imporcie" nie znaczyła
     # tego samego, co baza po Dostawie. Faktów kopii i przejęcia zeznania tu nie ma: świeża baza,
-    # każda kopia wchodzi z faktami z wjazdu, a nieobecnych kopii jeszcze nie ma.
+    # każda kopia wchodzi z faktami z wjazdu, a nieobecnych kopii jeszcze nie ma. Historia stosów -
+    # tak (celowane uzupełnienie, `stack_history`): synteza z dawcy jej nie niesie.
+    summary.stack_history = backfill_stack_history(con, now=now, actor=ACTOR)
+    # Rodzaj z historii (AR-96): synteza z dawcy nie niesie historii XISF, więc master flat zapisany
+    # jako `FLAT` wjechał jako surowy flat. Jeden odczyt nagłówka kandydatów PRZED pochodnymi -
+    # przepis i rodowód liczą się już z właściwym rodzajem.
+    summary.kind_rederive = rederive_kinds(con, now=now, actor=ACTOR)
     for etap, wynik in derive.run_derived(con, now):
         pole = _POLE_ETAPU.get(etap, etap)
         assert hasattr(summary, pole), f"ImportSummary nie ma pola etapu pochodnego {etap!r}"

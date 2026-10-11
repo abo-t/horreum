@@ -26,7 +26,8 @@ from .resolve.filters import normalize_filter
 from .resolve.objects import (STICKY_OBJECT_SOURCES, WEAK_OBJECT_SOURCES, ObjectIdentity,
                               load_own_objects, resolve_object)
 from .resolve.observatory import nearest_site, site_coords
-from .resolve.paths import STACK_KIND, object_folder, object_from_path, filename_tokens
+from .resolve.paths import (STACK_KIND, object_folder, object_from_path, filename_tokens,
+                            library_root_candidates)
 from .resolve.regions import resolve_region
 from .resolve.solar import resolve_solar
 
@@ -45,6 +46,7 @@ class ResolveSummary:
     objects_assigned: int = 0             # light'y z przypisanym object_id
     objects_by_alias: int = 0             # z tego: przypisane przez ZAPISANY ALIAS (#8, P4)
     objects_by_region: int = 0            # z tego: przypisane ze WSPÓŁRZĘDNYCH (kompleks, #5)
+    objects_by_twin: int = 0              # z tego: wariant kadru po oryginale (`twin`, AR-54)
     objects_review: int = 0               # light'y obecne-ale-nierozpoznane (delta, per-frame)
     objects_user_cleared: int = 0         # klatki z NAGROBKIEM ręki (S2b) — przebieg ich NIE tyka
     objects_unresolved_distinct: int = 0  # distinct object_raw w delcie
@@ -286,6 +288,47 @@ class PathProposal:
         return len(self.frame_ids)
 
 
+def library_root_from_db(con):
+    """Korzeń archiwum, pod którym leży biblioteka `STACKS` - albo None, gdy baza go nie zna.
+
+    Kotwica drzewa stosów dla świadka ścieżki (E5-3): `paths.object_from_path(…, library_root=…)`
+    bierze wtedy WYŁĄCZNIE `STACKS` bezpośrednio pod tym korzeniem, więc folder roboczy
+    `…\\work\\STACKS\\M31` nie podsuwa obiektu. Korzeń skanu nie jest zapisany przy lokacji, więc
+    źródłem są OBECNE kopie (`paths.library_root_candidates`): wiarygodny jest prefiks, pod którym
+    stoi `STACKS` RAZEM z inną biblioteką archiwum (`LIGHTS` albo `CALIBRATION`), a wygrywa
+    najliczniejszy w kopiach pod `STACKS` (remis alfabetycznie). Nie zależy od masterflatów
+    (dawne źródło - `harvest.archive_root_from_db` - milkło w archiwum bez biblioteki kalibracji).
+    Brak wiarygodnego korzenia → None → świadek drzewa stosów milczy (`paths._stacks_anchor`).
+    Zmierzone na kopii archiwum 2026-10-11: jeden kandydat, `R:\\ASTRO_`.
+
+    PAMIĘĆ (`_PAMIEC_KORZENIA`): przeliczenie kosztuje ~70-80 ms (16 901 klatek, kopia wizytacji),
+    a woła je każde przeładowanie gridu (`gui.queries.base_rows`). Klucz unieważnienia to PARA
+    liczników SQLite dla tego połączenia: `total_changes` (każdy wiersz zmieniony TYM połączeniem,
+    także niezatwierdzony) i `PRAGMA data_version` (zmienia się po zatwierdzeniu zmian przez KAŻDE
+    INNE połączenie, także w tym samym procesie - wątek Dostawy). Korzeń zależy wyłącznie od
+    `location.path`/`present`, a każda zmiana tych kolumn jest zmianą wiersza, którą jedna z dwóch
+    liczb widzi - klucz jest pewny bez zaufania do eventów (fikstury i migracje piszą bez nich).
+    Unieważnia też przy zmianach innych tabel: to koszt jednego przeliczenia po zapisie, nie błąd.
+    Jedno miejsce, trzymające SAMO połączenie (sprawdzane tożsamością `is`): `sqlite3.Connection`
+    nie przyjmuje słabej referencji ani atrybutów, a klucz po `id()` mógłby trafić w nowe
+    połączenie pod adresem starego, z tymi samymi licznikami startowymi. Odczyt klucza: <0,1 ms."""
+    klucz = (con.total_changes, con.execute("PRAGMA data_version").fetchone()[0])
+    pamiec = _PAMIEC_KORZENIA[0]
+    if pamiec is not None and pamiec[0] is con and pamiec[1] == klucz:
+        return pamiec[2]
+    kandydaci = library_root_candidates(
+        r["path"] for r in con.execute("SELECT path FROM location WHERE present = 1").fetchall())
+    pewne = [(-n, klucz_k, forma) for klucz_k, (forma, n, rodzenstwo) in kandydaci.items()
+             if n and rodzenstwo]
+    korzen = min(pewne)[2] if pewne else None
+    _PAMIEC_KORZENIA[0] = (con, klucz, korzen)
+    return korzen
+
+
+#: Jedno miejsce pamięci `library_root_from_db`: `(połączenie, (total_changes, data_version), korzeń)`.
+_PAMIEC_KORZENIA = [None]
+
+
 def path_proposals(con):
     """Kandydaci szczebla ŚCIEŻKI, POGRUPOWANI PO KANONIE — read-only, ZERO zapisu (D-OW-2/B).
 
@@ -323,7 +366,8 @@ def path_proposals(con):
     (STICKY jak wyżej, także obiekt z REGIONU, który stoi w drabinie przed ścieżką),
     `object_source IS NULL` (nagrobek ręki wyklucza propozycję, jak wyżej) oraz kotwica `STACKS`
     w ścieżce OBECNEJ kopii (`paths.object_from_path(…, kind=STACK_KIND)` milczy poza tym drzewem:
-    układ WBPP `…\\master\\…` nazwy obiektu nie niesie w żadnym stałym segmencie). Zmierzone na 193
+    układ WBPP `…\\master\\…` nazwy obiektu nie niesie w żadnym stałym segmencie; kotwicą jest
+    `STACKS` pod korzeniem archiwum, `library_root_from_db`, E5-3). Zmierzone na 193
     stosach: segment po `STACKS` zgadza się z kanonem osi 187 razy, rozjeżdża 0 razy.
     RÓŻNICA WOBEC LIGHTÓW FITS JEST ŚWIADOMA: tam szczebel milczy, żeby kotwica `nameless_lights`
     pilnowała naprawy PLIKU. Stos dostaje propozycję, bo drzewo `STACKS` jest jedną regułą
@@ -387,8 +431,9 @@ def path_proposals(con):
             _dopisz(False, r["fid"], ident, lambda p=r["path"]: object_folder(p))
 
     glosy = {}                       # frame_id -> {kanon: (ident, ścieżka pierwszej kopii)}
+    korzen = library_root_from_db(con) if kopie_stosow else None
     for r in kopie_stosow:
-        seg = object_from_path(r["path"], kind=STACK_KIND)
+        seg = object_from_path(r["path"], kind=STACK_KIND, library_root=korzen)
         ident = resolve_name(lookup, seg, from_path=True)[0] if seg else None
         glos = glosy.setdefault(r["fid"], {})
         if ident is not None and ident.canon not in glos:
@@ -397,7 +442,8 @@ def path_proposals(con):
         if len(glos) != 1:          # zero głosów = milczenie; dwa kanony = sprzeczność = milczenie
             continue
         ident, sciezka = next(iter(glos.values()))
-        _dopisz(True, fid, ident, lambda p=sciezka: object_folder(p, kind=STACK_KIND))
+        _dopisz(True, fid, ident,
+                lambda p=sciezka: object_folder(p, kind=STACK_KIND, library_root=korzen))
     # Porządek po NAZWIE, populacja drugim kluczem: ta sama nazwa z obu drzew stoi obok siebie.
     return tuple(
         PathProposal(canon=canon, catalog=ident.catalog, kind=ident.kind, folder=folder,
@@ -427,7 +473,8 @@ def path_proposal(con, path, kind="light"):
     odwrócone) forma nagłówka kanonu - `header_form` po drabinie nazwy (`M82` → `NGC 3034`); liczy
     ją walidacja dialogu (`gui.app._validate_object_value` → `forma_karty_object`), nie ta funkcja.
     Drabina odpowiada tu na pytanie „czy ta nazwa się rozwiąże", a nie „jak ją zapisać"."""
-    seg = object_from_path(path, kind=kind)
+    seg = object_from_path(path, kind=kind,
+                           library_root=library_root_from_db(con) if kind == STACK_KIND else None)
     if not seg:
         return None
     lookup = alias_lookup(con)
@@ -474,8 +521,9 @@ def run_resolver(con, now):
     (wszystkie). Obiekt rozpoznany → `upsert_object`+`assign_object` (+`add_object_alias`, gdy
     rozpoznanie pochodzi z NAZWY — region rozpoznaje ze współrzędnych i aliasu nie ma). Drabina
     szczebli: `resolve_solar`/`resolve_object` (header-primary ŚWIĘTE) → **ALIAS** (`object_alias`
-    zapisany wcześniej — #8, P4; jawna wiedza o nazwie, `object_source='alias'`) → `resolve_region`
-    (inferencja z geometrii, ostatni). **`object_source='user'` pomija CAŁĄ drabinę** (P4): decyzja
+    zapisany wcześniej - #8, P4; jawna wiedza o nazwie, `object_source='alias'`) → **BLIŹNIAK**
+    (wariant kadru bierze obiekt oryginału z relacji `stack_variant`, `object_source='twin'`,
+    AR-54) → `resolve_region` (inferencja z geometrii, ostatni). **`object_source='user'` pomija CAŁĄ drabinę** (P4): decyzja
     człowieka nie jest re-derywowana ani nadpisywana przez żaden szczebel automatyczny. Light
     nierozpoznany → delta (jeden zbiorczy `object.review_summary`, liczony ze STANU
     `object_id IS NULL` — D5); kalibracja → pomijana (poprawny NULL). Filtr → backfill zbiorczy
@@ -505,6 +553,15 @@ def run_resolver(con, now):
     # Szczebel ALIASU (P4, D-P4-1): preload WSZYSTKICH aliasów raz na przebieg — drabina dostaje go
     # jako `lookup`, więc w pętli nie ma ANI JEDNEGO SELECT-a.
     lookup = alias_snapshot(con).get
+
+    # Szczebel BLIŹNIAKA (AR-54): wariant kadru (`stack_variant`, 0035) bierze obiekt ORYGINAŁU.
+    # Warianty idą na KONIEC pętli (sortowanie stabilne - reszta w dawnej kolejności), więc oryginał
+    # rozstrzyga się w tym samym przebiegu przed swoim wariantem, a stan oryginału czytamy w chwili
+    # wariantu: druga Dostawa nie jest potrzebna, żeby wariant dogonił świeżo nazwany oryginał.
+    warianty = {r["variant_frame_id"]: r["original_frame_id"] for r in con.execute(
+        "SELECT variant_frame_id, original_frame_id FROM stack_variant").fetchall()}
+    if warianty:
+        rows = sorted(rows, key=lambda r: r["fid"] in warianty)
 
     unresolved = {}        # object_raw -> liczba (tylko light/master_light, obecny-nierozpoznany)
     filter_items = []      # (frame_id, filter_canon | None) do backfillu zbiorczego
@@ -548,10 +605,32 @@ def run_resolver(con, now):
                 # (`test_region_NIE_nadpisuje_obiektu_z_naglowka_ktory_zamilkl`). Sonda 2026-10-07
                 # na `pf4`: takich klatek 0. Filtr nie ma ręki, więc on schodzi do NULL (niżej).
                 slabe = r["osrc"] in WEAK_OBJECT_SOURCES
-                if (ident is None and alias_oid is None
-                        and (r["oid"] is None or r["osrc"] == "region")):
+                # BLIŹNIAK (AR-54) PO aliasie, PRZED regionem: nazwa milczy, a klatka jest
+                # wariantem kadru z jawną relacją - obiekt oryginału jest zeznaniem o TYM SAMYM
+                # niebie (te same suby), mocniejszym od geometrii. Wypełnia pustkę, region i siebie
+                # (oryginał zmienił obiekt → wariant idzie za nim); potwierdzenia ze ścieżki ani
+                # nagłówka, który zamilkł, nie rusza (te same powody co przy regionie niżej).
+                # Oryginał BEZ obiektu (stracił go, ręka go zdjęła) zabiera wariantowi obiekt
+                # przejęty od niego: `twin` schodzi szczebel niżej - do regionu, a bez regionu do
+                # pustki (`repo.clear_twin_object`). Nigdy nie rusza ręki ani nagrobka (gałąź
+                # `STICKY_OBJECT_SOURCES` wyżej kończy przebieg klatki przed tym miejscem).
+                blizniak_oid = None
+                if (ident is None and alias_oid is None and r["fid"] in warianty
+                        and (r["oid"] is None or r["osrc"] in ("region", "twin"))):
+                    blizniak_oid = con.execute(
+                        "SELECT object_id FROM frame WHERE id = ?",
+                        (warianty[r["fid"]],)).fetchone()["object_id"]
+                bez_blizniaka = (r["osrc"] == "twin" and blizniak_oid is None
+                                 and ident is None and alias_oid is None)
+                if (ident is None and alias_oid is None and blizniak_oid is None
+                        and (r["oid"] is None or r["osrc"] == "region" or bez_blizniaka)):
                     ident = resolve_region(r["ra"], r["dec"])
-                if alias_oid is not None:
+                if blizniak_oid is not None:
+                    if repo.assign_object(con, frame_id=r["fid"], object_id=blizniak_oid,
+                                          object_source="twin", now=now):
+                        s.objects_assigned += 1
+                        s.objects_by_twin += 1
+                elif alias_oid is not None:
                     # Trafienie aliasu: obiekt i alias ISTNIEJĄ z definicji — BEZ upsert_object i
                     # BEZ zapisu aliasu; `object_source='alias'` (D-P4-6: klatka z aliasu zostaje
                     # re-derywowalna, 'user' rezerwuje się dla jawnego przypisania).
@@ -574,6 +653,8 @@ def run_resolver(con, now):
                         s.objects_by_region += ident.source == "region"
                         if slabe:                   # E5-1: potwierdzenie ręki przegłosowane
                             przeglosowane.append([r["fid"], r["oid"], oid])
+                elif bez_blizniaka:
+                    repo.clear_twin_object(con, frame_id=r["fid"], now=now)
                 elif r["oid"] is None:
                     # D5: delta ze STANU (`object_id IS NULL`), nie z rederywacji — frame przypisany
                     # (ręcznie lub wcześniej), którego nagłówek dziś się nie rozwiązuje, NIE wraca

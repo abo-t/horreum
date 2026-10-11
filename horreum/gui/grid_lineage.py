@@ -9,16 +9,19 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QHBoxLayout, QInputDialog, QLabel, QListWidget, QListWidgetItem,
+    QAbstractItemView, QComboBox, QDialog, QHBoxLayout, QInputDialog, QLabel, QListWidget,
+    QListWidgetItem,
     QPushButton, QVBoxLayout, QWidget,
 )
+
+from PySide6.QtWidgets import QDialogButtonBox      # okno wyboru kalibratora (`_WyborKalibratora`)
 
 from horreum.gui import busy, i18n, queries
 from horreum.gui.grid_model import _COLORS
 from horreum.gui.grid_panels import ElidedLabel
 
 
-# Sufit listy panelu rodowodu: wejść stosu bywa 190, więc lista MUSI mieć próg, za którym oddaje
+# Sufit listy panelu rodowodu: wejść stosu bywa kilkaset, więc lista MUSI mieć próg, za którym oddaje
 # pion gridowi. Oś kalibracji ma zawsze dwa wiersze i sufit sobie zaniża do treści (`set_calibration`),
 # dlatego droga stosu przywraca tę wartość WPROST — panel przełącza się w obie strony.
 _LINEAGE_LIST_MAX_H = 160
@@ -32,19 +35,41 @@ class LineageBar(QWidget):
     z `history` plik zeznał o sobie sam, wejście z `harvest` przyszło ze zbioru dokładnego żniw (nazwy
     w historii pliku ↔ lighty wydania); wejście z `window` zostało WYLICZONE z okna czasu i czeka
     na potwierdzenie. Bez tej różnicy w oczach użytkownika rodowód wyglądałby jak wiedza pewna,
-    a w 75 na 81 przypadków nią nie jest.
+    a w większości stosów archiwum (najwyższa ranga wejść = okno czasu) nią nie jest.
 
     Głupi widżet (NARROW, wzorzec `MacroBar`/`SelectionBar`): sam nie czyta i nie pisze do bazy —
     dostaje gotowy materiał przez `set_lineage` i emituje `judged(frame_ids, excluded)`; zapis
     (jedna klinga) robi `FramesView`.
 
-    STOS BEZ WEJŚĆ TEŻ MA CO POKAZAĆ — i to jest sedno, nie przypadek brzegowy: 47 ze 128 stosów
-    archiwum nie dostało rodowodu, a powód („okno opisuje jedną klatkę", „klatki są z innego
-    teleskopu") mówi użytkownikowi, KTÓRĄ naprawę wykonać. Puste okno bez zdania byłoby gorsze
-    niż brak panelu."""
+    STOS BEZ WEJŚĆ TEŻ MA CO POKAZAĆ - i to jest sedno, nie przypadek brzegowy: spora część
+    stosów archiwum nie ma rodowodu (liczniki ze stanu: memo stosów w Dostawie), a powód („okno
+    opisuje jedną klatkę", „klatki są z innego teleskopu") mówi użytkownikowi, KTÓRĄ naprawę
+    wykonać. Puste okno bez zdania byłoby gorsze niż brak panelu."""
 
     judged = Signal(list, bool)        # (frame_ids, excluded) — werdykt ręki, zapis u gospodarza
     offset_asked = Signal(int)         # (minuty) — wskazane odniesienie czasu, zapis u gospodarza
+    # (frame_ids listy, frame_id dwukliku, tryb listy) - „pokaż te klatki w Zbiorach". Panel nie zna
+    # gridu (NARROW): oddaje klatki, które pokazuje, a zbiór zawęża gospodarz. Tryb (`TRYB_*`) mówi,
+    # CZYM są te klatki, bo od tego zależy zdanie na chipie zbioru (wejścia / propozycje / kalibratory).
+    frames_requested = Signal(list, int, str)
+    # Tryb propozycji: odrzucone wejścia stosu (wygaszone pod propozycjami) i ścieżki kandydatów
+    # (nazwa pliku w wierszu) - podaje je `set_lineage` razem z nocami.
+    _odrzucone = ()
+    _sciezki_kandydatow = {}
+    # OŚ KALIBRACJI - gesty ręki (E4-5), zapis u gospodarza. Każdy sygnał niesie klatkę nieba, o którą
+    # pyta panel: para (panel, cel zapisu) powstaje razem w `set_calibration`, więc zmiana zaznaczenia
+    # gridu w trakcie gestu nie przekieruje zapisu na inną klatkę.
+    # (light, relacja, master, stan widziany: None = brak ogniwa | [master, asserted_by])
+    calibrator_picked = Signal(int, str, int, object)
+    calibrator_restored = Signal(int, str, int)      # (light, relacja, master wskazania ręki)
+    calibration_count_asked = Signal(int)            # (light) - „Policz teraz”: etap Rodowód
+
+    # Wiersz gestów osi kalibracji powstaje przy PIERWSZYM pokazaniu tej osi (`_wiersz_kalibracji`) -
+    # panel stosu go nie potrzebuje. `_relacje` = materiał `explain_light` pokazywany na liście,
+    # `_light_id` = klatka, o którą panel pyta; oba gasną przy wyjściu z osi (`_zgas_os_kalibracji`).
+    _cal_row = None
+    _relacje = ()
+    _light_id = None
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -75,12 +100,35 @@ class LineageBar(QWidget):
         self.combo_night.currentIndexChanged.connect(self._on_night)
         nr.addWidget(self.combo_night, 1)
         lay.addWidget(self.night_row)
+        # WSPÓLNY KATALOG WEJŚĆ RAZ, NAD LISTĄ - w wierszu zostaje sama nazwa pliku. Zmierzone na
+        # kopii `pf4`: 161 ze 162 stosów z wejściami ma WSZYSTKIE wejścia w jednym katalogu, więc
+        # `…\NGC4826\RC8_2600MC\L-Pro\` powtarzał się w każdym wierszu i zjadał miejsce nazwie.
+        # Katalog opisuje TĘ listę, więc gaśnie przy każdym jej czyszczeniu (`modelReset`) - także
+        # w osi kalibracji i w trybie propozycji, bez pamiętania o tym w każdej gałęzi z osobna.
+        self.dir_row = QWidget()
+        dr = QHBoxLayout(self.dir_row)
+        dr.setContentsMargins(0, 0, 0, 0)
+        _dir_lbl = QLabel(i18n.t("grid.lin.common_dir"))
+        _dir_lbl.setProperty("role", "secondary")
+        dr.addWidget(_dir_lbl)
+        self.dir_path = _SciezkaLabel()
+        self.dir_path.setProperty("role", "secondary")
+        dr.addWidget(self.dir_path, 1)
+        self.dir_row.setVisible(False)
+        lay.addWidget(self.dir_row)
         self.items = QListWidget()
+        self.items.model().modelReset.connect(self._zgas_katalog)
         self.items.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.items.setTextElideMode(Qt.ElideLeft)       # ścieżka: koniec (nazwa pliku) niesie sens
         self.items.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.items.setMaximumHeight(_LINEAGE_LIST_MAX_H)   # panel nie zjada gridu (wiz F3 #1)
         self.items.itemSelectionChanged.connect(self._sync_buttons)
+        # DWUKLIK WIERSZA = TA KLATKA W ZBIORACH, w obu osiach jednym handlerem. Bez niego panel był
+        # ślepym zaułkiem: pokazywał setki ścieżek wejść albo ścieżkę mastera, a żadna nie wiodła
+        # do klatki, której dotyczyła. Tooltip listy nazywa gest - lista nie ma paska narzędzi,
+        # a gest bez afordancji istnieje tylko dla tego, kto czytał kod (wzór listwy facetów).
+        self.items.itemDoubleClicked.connect(self._on_double_click)
+        self.items.setToolTip(i18n.t("grid.lin.show_tip"))
         lay.addWidget(self.items)
         # Wiersz akcji w WIDŻECIE, nie w gołym layoucie — pusta lista chowa go w całości (wiz #6),
         # a layoutu nie da się ukryć jednym wywołaniem.
@@ -113,7 +161,8 @@ class LineageBar(QWidget):
         self._warn_base = ""            # ostrzeżenie sprzed trybu propozycji (noc dokłada swoje)
         self.set_lineage(None, [])
 
-    def set_lineage(self, head, inputs, *, hint=None, candidates=(), raw_unreferenced=0):
+    def set_lineage(self, head, inputs, *, hint=None, candidates=(), raw_unreferenced=0,
+                    candidate_paths=None):
         """Wypełnij panel. `head` = wiersz `queries.stack_lineage_head` (albo `None`), `inputs` =
         wiersze `queries.stack_lineage_inputs`, `hint` = gotowe zdanie, gdy nie ma czego pokazać
         (złe zaznaczenie / rodowód nieliczony), `candidates` + `raw_unreferenced` = obie wartości
@@ -154,34 +203,61 @@ class LineageBar(QWidget):
         # wiersze — `_reconcile` omija werdykty ręki, więc odrzucone kandydatury zostają, mając
         # `head["inputs"] == 0`. Gałąź powodu, która listy nie wypełniała, zabierała wtedy JEDYNĄ
         # drogę cofnięcia własnej decyzji (`stack_lineage_inputs` oddaje je właśnie po to).
+        katalog = _wspolny_katalog([r["path"] for r in inputs])
         for r in inputs:
-            it = QListWidgetItem(_lineage_item_text(r))
+            it = QListWidgetItem(_lineage_item_text(r, katalog))
             it.setData(Qt.UserRole, r["input_frame_id"])
+            if katalog is not None:
+                it.setToolTip(r["path"] or "")      # pełna ścieżka pod kursorem, gdy wiersz ją skraca
             if r["excluded"]:
                 it.setForeground(_COLORS["secondary_text"])
             self.items.addItem(it)
         if not head["inputs"] and powod:
             # NIE MA CZEGO POLICZYĆ ⇒ NIE LICZYMY. „Weszło 0 klatek · 0.0 h" o obrazie, który
             # przecież Z CZEGOŚ powstał, jest twierdzeniem, którego model nie ma — a to stan
-            # NAJCZĘSTSZY, nie brzegowy: 47 ze 128 stosów archiwum. Głos oddaje powód, bo to on
+            # CZĘSTY, nie brzegowy (memo stosów w Dostawie liczy go ze stanu). Głos oddaje powód, bo to on
             # mówi, KTÓRĄ naprawę wykonać; zero i „0.0 h" znikają.
             #
             # Warunek stoi na POWODZIE, nie na samym zerze: gdy człowiek odrzuci wszystkie
             # kandydatury, `inputs` też jest zerem — ale wtedy „weszło 0 klatek" jest PRAWDĄ
             # i jego własną decyzją, więc nagłówek ma ją pokazać.
+            # ZDANIE POWODU MÓWI TYLKO TO, CO SPRAWDZONO (wizytacja natywna): `no_candidates` znaczy
+            # „okno NAGŁÓWKA nic nie wybrało", a nie „archiwum nic nie ma" - pod spodem stoi noc
+            # obrazu z dziesiątkami kandydatów. Przy materiale w propozycji powód mówi węziej.
+            if (head["unresolved_reason"] == REASON_NO_CANDIDATES_TOKEN and not _lineage_stale(head)
+                    and any(n.frames for n in candidates)):
+                powod = i18n.t("grid.lin.reason.no_candidates_window")
             self.head.setText(powod)
             self.note.set_full_text(info)
             if candidates:
+                self._odrzucone = [r for r in inputs if r["excluded"]]
+                self._sciezki_kandydatow = dict(candidate_paths or {})
                 self._set_candidates(candidates)
                 return
+        elif head["used_rows"] is not None:
+            # WERDYKT „N Z M" (podzbiór okna): nagłówek nie ma prawa mówić „weszły M" - weszło N,
+            # tylko nie wiadomo które. Godziny skalowane do N (≈), bo wiersze listy to kandydaci okna.
+            # Zdanie o podzbiorze idzie do OSTRZEŻENIA: to sprawa do decyzji, nie objaśnienie.
+            m, n = head["window_rows"] or head["inputs"], head["used_rows"]
+            godziny = (head["secs"] or 0) / 3600.0 * (n / head["inputs"] if head["inputs"] else 0)
+            self.head.setText(i18n.t_plural("grid.lin.head_subset", m, used=n,
+                                            hours=f"{godziny:.1f}"))
+            self.warn.set_full_text(" · ".join(x for x in (
+                ostrz, i18n.t_plural("grid.lin.flag.used_rows_warn", m, used=n)) if x))
+            self.note.set_full_text(" · ".join(
+                x for x in (powod, _lineage_basis_text(head, z_uzyciem=False), info) if x))
         else:
             godziny = (head["secs"] or 0) / 3600.0
             self.head.setText(i18n.t_plural("grid.lin.head", head["inputs"],
                                             hours=f"{godziny:.1f}"))
-            self.note.set_full_text(" · ".join(x for x in (powod, info) if x))
+            self.note.set_full_text(" · ".join(x for x in (powod, _lineage_basis_text(head), info)
+                                               if x))
         # Widoczność z LISTY, nie z licznika: stos z powodem, ale z odrzuconymi wierszami, ma je
         # pokazać (i dać się cofnąć), a stos bez ani jednego wiersza nie ma zajmować pionu na listę.
         self._sync_visible(bool(inputs))
+        if katalog is not None:
+            self.dir_path.set_full_text(katalog)
+            self.dir_row.setVisible(True)
 
     def _set_candidates(self, nights):
         """Tryb PROPOZYCJI: noce z materiałem w combo, klatki wybranej nocy na liście.
@@ -190,6 +266,7 @@ class LineageBar(QWidget):
         pytanie człowieka brzmi „czy program dobrze zrozumiał, o który wieczór pytam", a nie „daj mi
         cokolwiek". Przełączenie nocy NIE PYTA BAZY: rdzeń oddał wszystkie noce naraz, więc combo
         przerysowuje listę z pamięci."""
+        self._zgas_os_kalibracji()            # propozycje to oś stosów - gesty kalibracji gasną
         self._nights = tuple(nights)
         self._note_base = self.note.full_text()
         self._warn_base = self.warn.full_text()
@@ -229,9 +306,18 @@ class LineageBar(QWidget):
         self.items.clear()
         klatki = self._nights[idx].frames if 0 <= idx < len(self._nights) else ()
         for r in klatki:
-            it = QListWidgetItem(_candidate_item_text(r))
+            it = QListWidgetItem(_candidate_item_text(r, self._sciezki_kandydatow.get(r["frame_id"])))
             it.setData(Qt.UserRole, r["frame_id"])
             self.items.addItem(it)
+        # ODRZUCONE ZOSTAJĄ NA LIŚCIE, WYGASZONE (wizytacja natywna): propozycja osądzonych klatek nie
+        # zwraca, więc odrzucony kandydat znikał z ekranu i jedyną drogą cofnięcia było „Cofnij"
+        # na pasku. Pod propozycjami stoją własne werdykty - zaznaczenie i „Potwierdź" je odwraca.
+        for r in self._odrzucone:
+            it = QListWidgetItem(_lineage_item_text(r))
+            it.setData(Qt.UserRole, r["input_frame_id"])
+            it.setForeground(_COLORS["secondary_text"])
+            self.items.addItem(it)
+        widac_liste = self.items.count() > 0
         gdzie_indziej = sum(len(n.frames) for n in self._nights) - len(klatki)
         # TRZY RÓŻNE PUSTKI, TRZY RECEPTY — i to jest sedno naprawy z bramki 3a. „Nie ma nic"
         # i „są klatki, których nie umiem umieścić w czasie" prowadzą w zupełnie inne miejsca:
@@ -256,61 +342,184 @@ class LineageBar(QWidget):
             teleskop = ""
         self.warn.set_full_text(" · ".join(x for x in (self._warn_base, teleskop) if x))
         self.night_row.setVisible(True)
-        self.items.setVisible(bool(klatki))
-        self.action_row.setVisible(bool(klatki))
+        self.items.setVisible(widac_liste)
+        self.action_row.setVisible(widac_liste)
         self.warn.setVisible(bool(self.warn.full_text()))
         self.note.setVisible(bool(self.note.full_text()))
         self._sync_buttons()
         self._sync_offset_visible()
 
-    def set_calibration(self, relations):
+    def set_calibration(self, relations, *, frame_name=None, light_frame_id=None,
+                        select_relation=None):
         """DRUGA ODPOWIEDŹ TEGO SAMEGO PANELU (C3, Issue #6): czym skalibrowano zaznaczoną klatkę
-        nieba. `relations` = wynik `lineage.explain_light` (po jednym wierszu na `dark`/`flat`).
+        nieba. `relations` = wynik `lineage.explain_light` (po jednym wierszu na `dark`/`flat`),
+        `frame_name` = nazwa pliku tej klatki (nagłówek), `light_frame_id` = cel gestów ręki,
+        `select_relation` = relacja do zaznaczenia (po geście; bez niej - wiersz wymagający ręki).
 
-        Panel jest kind-aware, a nie zdublowany, bo pytanie użytkownika jest JEDNO — „skąd ta
-        klatka ma swój kształt" — i tylko odpowiedź zależy od rodzaju: gotowy obraz mówi, co
+        Panel jest kind-aware, a nie zdublowany, bo pytanie użytkownika jest JEDNO - „skąd ta
+        klatka ma swój kształt" - i tylko odpowiedź zależy od rodzaju: gotowy obraz mówi, co
         w niego weszło, klatka nieba mówi, czym ją skalibrowano. Dwa osobne panele kazałyby
         zgadywać, który otworzyć, zanim wiadomo, co się zaznaczyło.
 
-        WERDYKTU RĘKI TU NIE MA i to nie jest przeoczenie: `calibration` nie zna kolumny
-        `excluded` — dobór mastera jest funkcją przepisu i czasu, więc ręka zmienia go naprawiając
-        FAKT (nastawę, kartę), nie przegłosowując wynik. Wiersz akcji chowa się w całości."""
+        RĘKA WSKAZUJE KALIBRATOR (decyzja Zdzinia, E4-5): dowolny master tej klasy i kamery, także
+        spoza przepisu - bo przepis bywa ślepy (6004 lighty bez profilu darka) albo dobiera master
+        sprzed trzech lat, a człowiek wie, którym naprawdę kalibrował. To NIE jest werdykt
+        „potwierdź/odrzuć” osi stosów (`calibration` nie zna `excluded`), tylko wybór z listy,
+        więc wiersz akcji stosu chowa się w całości, a gesty tej osi stoją we własnym wierszu
+        (`_wiersz_kalibracji`): „Wskaż kalibrator…”, „Przywróć automat”, „Policz teraz”.
+
+        TRZY STANY, TRZY POZIOMY (wizytacja 0802): powiązany - zwykły tekst; nieliczony - ⚠ i zwykły tekst, bo
+        to robota na jedno kliknięcie, nie brak; luka - wygaszona, bo archiwum nie ma czego dać."""
         self.items.clear()
         self._head = None
         # OŚ KALIBRACJI TO WYJŚCIE Z TRYBU PROPOZYCJI (G2-3d) - obie wartości gasną, bo obie opisują
         # materiał POPRZEDNIEGO obrazu. `set_lineage` zeruje je swoją drogą; ta metoda go nie woła.
         self._nights = ()
         self._raw_bez_odniesienia = 0
-        powiazane = [r for r in relations if r["master_frame_id"] is not None]
+        self._relacje = list(relations)
+        self._light_id = light_frame_id
         for r in relations:
             it = QListWidgetItem(_calibration_item_text(r))
             it.setData(Qt.UserRole, r["master_frame_id"])
-            if r["master_frame_id"] is None:
+            if r["master_frame_id"] is None and not r["pending"]:
                 it.setForeground(_COLORS["secondary_text"])
             self.items.addItem(it)
-        self.head.setText(i18n.t("grid.lin.cal.head", n=len(powiazane), total=len(relations)))
+        self.head.setText(_calibration_head_text(relations, frame_name))
         # LISTA DO TREŚCI, nie do sufitu. Wejść stosu bywa 190, więc tam sufit 160 px chroni grid;
-        # tutaj wierszy jest kilka (klasy przepisu), a ten sam sufit zostawiał ~100 px pustki —
+        # tutaj wierszy jest kilka (klasy przepisu), a ten sam sufit zostawiał ~100 px pustki -
         # dokładnie ten zarzut, który zdjął pustkę z panelu stosu (wiz #6), tylko z drugiej strony.
         # Pusta lista NIE zaniża sufitu do paska kilku pikseli: zero relacji jest dziś niemożliwe
         # (stała `_RELATIONS`), ale sufit liczony z nieistniejącego wiersza byłby pułapką czekającą.
         if self.items.count():
             wiersz = self.items.sizeHintForRow(0)
             self.items.setMaximumHeight(wiersz * self.items.count() + 2 * self.items.frameWidth())
-        # NIELICZONE ≠ LUKA — pierwsze naprawia jedno kliknięcie w Dostawie, drugie wymaga klatek,
-        # których w archiwum nie ma. Wspólne „brak" kazałoby szukać winy tam, gdzie jej nie ma.
-        czeka = [r for r in relations if r["pending"]]
+        # NIELICZONE ≠ LUKA - pierwsze naprawia jedno kliknięcie („Policz teraz” obok), drugie
+        # wymaga klatek, których w archiwum nie ma. Wspólne „brak” kazałoby szukać winy nie tam.
+        czeka = any(r["pending"] for r in relations)
         self.warn.set_full_text(i18n.t("grid.lin.cal.pending") if czeka else "")
         self.note.set_full_text("")
         self.items.setVisible(True)
-        self.action_row.setVisible(False)          # w tej osi nie ma czego potwierdzać ani odrzucać
+        self.action_row.setVisible(False)          # werdykt stosu nie ma tu celu zapisu
         self.warn.setVisible(bool(self.warn.full_text()))
         self.note.setVisible(False)
+        self._wiersz_kalibracji().setVisible(bool(relations))
+        self.btn_cal_count.setVisible(czeka)
+        self.btn_cal_restore.setVisible(any(r["asserted_by"] == "user" for r in relations))
+        # ZAZNACZENIE: relacja, której dotyczył gest (gospodarz po zapisie), a bez niej - jedyny
+        # wiersz, który WYMAGA ręki (`_wymaga_reki`). Lista jest przebudowywana ze stanu, więc bez
+        # tego każdy gest kończył się pustym zaznaczeniem, a następny zaczynał od kliknięcia w wiersz.
+        relacje = [r["relation"] for r in relations]
+        do_reki = [r["relation"] for r in relations if _wymaga_reki(r)]
+        cel = (select_relation if select_relation in relacje
+               else do_reki[0] if len(do_reki) == 1 else None)
+        if cel is not None:
+            self.items.item(relacje.index(cel)).setSelected(True)
         self._sync_buttons()
-        # Odniesienie czasu jest faktem O OBRAZIE, a ta gałąź opisuje KLATKĘ NIEBA — przycisk
+        # Odniesienie czasu jest faktem O OBRAZIE, a ta gałąź opisuje KLATKĘ NIEBA - przycisk
         # gaśnie razem z całym trybem stosu. `_head` jest tu `None`, więc gest i tak nie miałby
         # celu zapisu; jawne wołanie trzyma to w JEDNYM miejscu zamiast liczyć na kolejność pól.
         self._sync_offset_visible()
+
+    def _wiersz_kalibracji(self):
+        """Wiersz gestów osi kalibracji - budowany RAZ, przy pierwszym pokazaniu tej osi, i wstawiany
+        pod wiersz akcji stosu. Osobny widżet, bo chowa się w całości razem z osią
+        (`_zgas_os_kalibracji`), a osi stosów nie dotyczy żaden z jego przycisków."""
+        if self._cal_row is not None:
+            return self._cal_row
+        w = QWidget()
+        row = QHBoxLayout(w)
+        row.setContentsMargins(0, 0, 0, 0)
+        self.btn_cal_pick = QPushButton(i18n.t("grid.lin.cal.pick"))
+        self.btn_cal_pick.clicked.connect(self._ask_calibrator)
+        self.btn_cal_restore = QPushButton(i18n.t("grid.lin.cal.restore"))
+        self.btn_cal_restore.clicked.connect(self._emit_restore)
+        # „Policz teraz” STOI PRZY ⚠: stan nieliczony naprawia jedno kliknięcie, a do tej pory
+        # kosztował cztery (Dostawa → Rodowód → Zbiory → ponowne zaznaczenie).
+        self.btn_cal_count = QPushButton(i18n.t("grid.lin.cal.count"))
+        self.btn_cal_count.setToolTip(i18n.t("grid.lin.cal.count_tip"))
+        self.btn_cal_count.clicked.connect(self._emit_count)
+        for b in (self.btn_cal_pick, self.btn_cal_restore, self.btn_cal_count):
+            row.addWidget(b)
+        row.addStretch(1)
+        lay = self.layout()
+        lay.insertWidget(lay.indexOf(self.action_row) + 1, w)
+        self._cal_row = w
+        return w
+
+    def _zgas_os_kalibracji(self):
+        """Wyjście z osi kalibracji (oś stosów, propozycje, podpowiedź): gesty tej osi znikają
+        razem z materiałem, który opisywały - inaczej „Wskaż kalibrator…” wisiałby nad stosem."""
+        self._relacje = ()
+        self._light_id = None
+        if self._cal_row is not None:
+            self._cal_row.setVisible(False)
+
+    def _wybrana_relacja(self):
+        """Wiersz osi kalibracji, którego dotyczy gest - DOKŁADNIE jeden zaznaczony, inaczej `None`
+        (dwa wiersze to dwie klasy, a gest wskazuje kalibrator jednej)."""
+        zaznaczone = self.items.selectedItems()
+        if len(zaznaczone) != 1 or not self._relacje:
+            return None
+        i = self.items.row(zaznaczone[0])
+        return self._relacje[i] if 0 <= i < len(self._relacje) else None
+
+    def _ask_calibrator(self):
+        """„Wskaż kalibrator…”: lista kandydatów z rdzenia (`explain_light`, najpierw z przepisu,
+        potem SPOZA PRZEPISU - oznaczone w każdym wierszu) i `calibrator_picked` ze stanem ogniwa,
+        który człowiek widział (klinga odmówi, gdy baza zmieniła się w międzyczasie). Okno listy, nie
+        rozwijane menu: kandydatów jednej kamery bywa 50 (zmierzone na kopii archiwum)."""
+        r = self._wybrana_relacja()
+        if r is None or not r.get("candidates") or self._light_id is None:
+            return
+        kandydaci = r["candidates"]
+        dlg = _WyborKalibratora(
+            self, [_calibrator_candidate_text(c, r["master_frame_id"]) for c in kandydaci],
+            i18n.t("grid.lin.cal.pick_prompt", rel=calibration_class_name(r["relation"])),
+            next((i for i, c in enumerate(kandydaci)
+                  if c["master_frame_id"] == r["master_frame_id"]), 0))
+        if dlg.exec() != QDialog.Accepted or dlg.wybrany() is None:
+            return
+        wybor = kandydaci[dlg.wybrany()]
+        widziany = (None if r["master_frame_id"] is None
+                    else [r["master_frame_id"], r["asserted_by"]])
+        self.calibrator_picked.emit(self._light_id, r["relation"], wybor["master_frame_id"], widziany)
+
+    def _emit_restore(self):
+        r = self._wybrana_relacja()
+        if r is not None and r["asserted_by"] == "user" and self._light_id is not None:
+            self.calibrator_restored.emit(self._light_id, r["relation"], r["master_frame_id"])
+
+    def _emit_count(self):
+        if self._light_id is not None:
+            self.calibration_count_asked.emit(self._light_id)
+
+    def _sync_calibration_buttons(self):
+        """Uczciwy disabled gestów osi kalibracji - każdy wygaszony przycisk mówi, czego brakuje
+        (zaznaczenia wiersza, kandydatów, Twojej decyzji); etap w tle gasi wszystkie (`set_busy`)."""
+        if self._cal_row is None:
+            return
+        r = self._wybrana_relacja()
+        if r is None:
+            pick_tip = restore_tip = "grid.lin.cal.tip_select"
+        else:
+            pick_tip = "grid.lin.cal.pick_tip" if r.get("candidates") else "grid.lin.cal.pick_tip_none"
+            # „Przywróć automat” mówi, CO zostanie po zdjęciu: dobór z przepisu albo nic.
+            restore_tip = ("grid.lin.cal.restore_tip_auto" if r["asserted_by"] != "user" else
+                           "grid.lin.cal.restore_tip" if _ma_kandydata_z_przepisu(r) else
+                           "grid.lin.cal.restore_tip_none")
+        mozna_wskazac = pick_tip == "grid.lin.cal.pick_tip"
+        mozna_zdjac = restore_tip in ("grid.lin.cal.restore_tip", "grid.lin.cal.restore_tip_none")
+        self.btn_cal_pick.setEnabled(mozna_wskazac and not self._busy)
+        self.btn_cal_restore.setEnabled(mozna_zdjac and not self._busy)
+        self.btn_cal_count.setEnabled(not self._busy)
+        # ETAP W TLE MÓWI SAM ZA SIEBIE: wygaszony przycisk z podpowiedzią „zaznacz wiersz” przy
+        # zaznaczonym wierszu kłamałby o przyczynie.
+        if self._busy:
+            pick_tip = restore_tip = "grid.lin.cal.tip_busy"
+        self.btn_cal_pick.setToolTip(i18n.t(pick_tip))
+        self.btn_cal_restore.setToolTip(i18n.t(restore_tip))
+        self.btn_cal_count.setToolTip(i18n.t("grid.lin.cal.tip_busy" if self._busy
+                                             else "grid.lin.cal.count_tip"))
 
     def integration_id(self):
         """Integracja, której dotyczy panel (albo `None`) — gospodarz pyta o cel zapisu TU, zamiast
@@ -336,8 +545,10 @@ class LineageBar(QWidget):
 
         WYBÓR NOCY GAŚNIE TU, A ZAPALA SIĘ WYŁĄCZNIE W `_fill_night` — jedna droga w każdą stronę:
         combo należy do trybu propozycji, więc każde wyjście z niego (rodowód gotowy, inne
-        zaznaczenie, oś kalibracji) ma je zdjąć bez pamiętania o tym z osobna."""
+        zaznaczenie, oś kalibracji) ma je zdjąć bez pamiętania o tym z osobna. Tą samą drogą gasną
+        gesty osi kalibracji - `_sync_visible` woła wyłącznie oś stosów."""
         self.night_row.setVisible(False)
+        self._zgas_os_kalibracji()
         self.items.setVisible(ma_liste)
         self.action_row.setVisible(ma_liste)
         self.warn.setVisible(bool(self.warn.full_text()))
@@ -351,6 +562,7 @@ class LineageBar(QWidget):
         ile = len(self.items.selectedItems())
         for b in (self.btn_confirm, self.btn_reject):
             b.setEnabled(ile > 0 and not self._busy)
+        self._sync_calibration_buttons()      # ta sama bramka (zaznaczenie + etap w tle) dla osi kalibracji
 
     def selected_frame_ids(self):
         return [it.data(Qt.UserRole) for it in self.items.selectedItems()]
@@ -367,6 +579,35 @@ class LineageBar(QWidget):
         ids = self.selected_frame_ids()
         if ids:
             self.judged.emit(ids, excluded)
+
+    def _zgas_katalog(self):
+        """Lista wyczyszczona → wspólny katalog poprzedniej listy schodzi z ekranu."""
+        self.dir_path.set_full_text("")
+        self.dir_row.setVisible(False)
+
+    def _tryb_listy(self):
+        """Czym są klatki na liście: kalibratory (oś kalibracji zeruje `_head`), propozycje (tryb
+        nocy) albo wejścia stosu. Fakt panelu, nie domysł gospodarza z zaznaczenia gridu."""
+        if self._head is None:
+            return TRYB_KALIBRATORY
+        return TRYB_PROPOZYCJE if self._nights else TRYB_WEJSCIA
+
+    def _on_double_click(self, item):
+        """Dwuklik wiersza → `frames_requested(klatki listy, klatka wiersza, tryb)`.
+
+        ZBIÓREM JEST CAŁA LISTA, celem zaznaczenia - dwukliknięty wiersz. Pytanie brzmi „co weszło
+        w ten obraz", więc w Zbiorach ma stanąć komplet (sort, kolumny, nagłówki), a nie samotna
+        klatka; wiersz, w który człowiek kliknął, wraca zaznaczony. Wiersz bez klatki (luka osi
+        kalibracji: `master_frame_id` NULL) nie ma dokąd prowadzić - gest milczy."""
+        cel = item.data(Qt.UserRole)
+        if cel is None:
+            return
+        ids = []
+        for i in range(self.items.count()):
+            fid = self.items.item(i).data(Qt.UserRole)
+            if fid is not None and fid not in ids:
+                ids.append(fid)
+        self.frames_requested.emit(ids, cel, self._tryb_listy())
 
     def set_offset_hint(self, minutes):
         """Propozycja odniesienia z rdzenia (`stacks.propose_offset_minutes`) — `None` = brak.
@@ -423,26 +664,61 @@ class LineageBar(QWidget):
                 else i18n.t("grid.lin.offset_set", hours=f"{biezacy / 60.0:+.1f}"))
 
 
-def _lineage_item_text(r):
+def _lineage_item_text(r, katalog=None):
     """Jeden wiersz listy wejść: czas · ekspozycja · ŹRÓDŁO PEWNOŚCI · ścieżka. Źródło stoi PRZED
-    ścieżką, bo ścieżka jest elidowana od lewej i to ona ustępuje miejsca, nigdy werdykt."""
+    ścieżką, bo ścieżka jest elidowana od lewej i to ona ustępuje miejsca, nigdy werdykt.
+
+    `katalog` = wspólny katalog całej listy (`_wspolny_katalog`), pokazany raz nad listą - wiersz
+    niesie wtedy samą nazwę pliku."""
     czas = (r["date_obs"] or "")[:19].replace("T", " ")
-    exp = f"{r['exptime']:.0f}s" if r["exptime"] is not None else "—"
+    exp = f"{r['exptime']:.0f}s" if r["exptime"] is not None else "-"   # DASH, ORDERs §5.2
     zrodlo = i18n.t(f"grid.lin.src.{r['asserted_by']}")
     if r["excluded"]:
         zrodlo = i18n.t("grid.lin.src.excluded")
-    return f"{czas} · {exp} · [{zrodlo}] · {r['path'] or ''}"
+    sciezka = r["path"] or ""
+    if katalog is not None and sciezka.startswith(katalog):
+        sciezka = sciezka[len(katalog):]
+    return f"{czas} · {exp} · [{zrodlo}] · {sciezka}"
 
 
-def _candidate_item_text(r):
-    """Jeden wiersz PROPOZYCJI: czas · ekspozycja · filtr. Bez ścieżki i bez źródła pewności — obu
-    tu nie ma z definicji: kandydat nie jest jeszcze wejściem, więc źródła nie ma czym wypełnić,
-    a wiersz różnicuje CZAS (klatki jednej nocy leżą w jednym folderze i mają nazwy z akwizycji).
-    Filtr zostaje, bo master bez własnego `FILTER` nie zawęża tej osi — wtedy jest jedyną
-    informacją, która odróżnia kanały tej samej sesji."""
+def _wspolny_katalog(sciezki):
+    """Katalog (z końcowym separatorem), w którym leżą WSZYSTKIE pokazane ścieżki, albo `None`.
+
+    Tylko jeden katalog, nie najdłuższy wspólny przedrostek: stos z wejściami z dwóch nocy
+    (1 ze 162 na kopii `pf4`) ma dwa katalogi i każdy wiersz musi powiedzieć, z którego jest -
+    przedrostek wspólny ukryłby właśnie tę różnicę. Wiersz bez ścieżki (klatka bez obecnej kopii)
+    nie rozstrzyga - nie ma czego skracać. Separator `\\` albo `/`, jak w ścieżkach archiwum."""
+    katalogi = set()
+    for p in sciezki:
+        if p:
+            i = max(p.rfind("\\"), p.rfind("/"))
+            katalogi.add(p[:i + 1])
+    if len(katalogi) != 1:
+        return None
+    (katalog,) = katalogi
+    return katalog or None
+
+
+class _SciezkaLabel(ElidedLabel):
+    """Etykieta ścieżki elidowana OD LEWEJ - koniec katalogu (obiekt, zestaw, filtr) niesie sens,
+    a początek (`R:\\ASTRO_\\LIGHTS\\`) jest wspólny dla całego archiwum. Pełna ścieżka w tooltipie."""
+
+    def _update_elide(self):
+        fm = self.fontMetrics()
+        self.setText(fm.elidedText(self._full, Qt.ElideLeft, max(0, self.width() - 4)))
+
+
+def _candidate_item_text(r, sciezka=None):
+    """Jeden wiersz PROPOZYCJI: czas · ekspozycja · filtr · nazwa pliku. Bez źródła pewności -
+    kandydat nie jest jeszcze wejściem, więc źródła nie ma czym wypełnić. Filtr zostaje, bo master
+    bez własnego `FILTER` nie zawęża tej osi - wtedy jest jedyną informacją, która odróżnia kanały
+    tej samej sesji. Nazwa pliku (bez katalogu: klatki jednej nocy leżą w jednym folderze) daje
+    człowiekowi to, po czym zna swoje klatki - sam czas tego nie dawał (wizytacja natywna)."""
     czas = (r["date_obs"] or "")[:19].replace("T", " ")
     exp = f"{r['exptime']:.0f}s" if r["exptime"] is not None else "-"   # DASH, ORDERs §5.2
-    return f"{czas} · {exp}" + (f" · {r['filter_canon']}" if r["filter_canon"] else "")
+    nazwa = str(sciezka or "").rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
+    return (f"{czas} · {exp}" + (f" · {r['filter_canon']}" if r["filter_canon"] else "")
+            + (f" · {nazwa}" if nazwa else ""))
 
 
 def _znany(klucz, zapasowo):
@@ -452,28 +728,186 @@ def _znany(klucz, zapasowo):
     return i18n.t(klucz) if klucz in i18n.CATALOG else zapasowo
 
 
+class _WyborKalibratora(QDialog):
+    """Okno „Wskaż kalibrator”: lista kandydatów (wiersze z `_calibrator_candidate_text`), DWUKLIK
+    zatwierdza wybór, przyciski mówią językiem programu (i18n, nie „Cancel” w polskim oknie),
+    a wysokość mieści kilkanaście wierszy z ~50 - `QInputDialog` nie dawał żadnej z tych trzech
+    rzeczy (wizytacja fali 4). Wynik: indeks wybranego wiersza (`wybrany`)."""
+
+    def __init__(self, parent, etykiety, prompt, start):
+        super().__init__(parent)
+        self.setObjectName("calibrator_picker")
+        self.setWindowTitle(i18n.t("grid.lin.cal.pick_title"))
+        lay = QVBoxLayout(self)
+        opis = QLabel(prompt)
+        opis.setWordWrap(True)
+        lay.addWidget(opis)
+        self.lista = QListWidget()
+        self.lista.addItems(etykiety)
+        self.lista.setCurrentRow(start)
+        self.lista.itemDoubleClicked.connect(lambda _it: self.accept())
+        lay.addWidget(self.lista, 1)
+        przyciski = QDialogButtonBox()
+        ok = przyciski.addButton(i18n.t("grid.lin.cal.pick_ok"), QDialogButtonBox.AcceptRole)
+        przyciski.addButton(i18n.t("grid.lin.cal.pick_cancel"), QDialogButtonBox.RejectRole)
+        ok.setDefault(True)
+        przyciski.accepted.connect(self.accept)
+        przyciski.rejected.connect(self.reject)
+        lay.addWidget(przyciski)
+        self.resize(760, 560)
+        self.setMinimumSize(560, 420)
+
+    def wybrany(self):
+        i = self.lista.currentRow()
+        return i if i >= 0 else None
+
+
+def calibration_class_name(relation):
+    """Nazwa klasy kalibratora dla człowieka („ciemność (dark)”) - jedno źródło dla wiersza listy,
+    nagłówka panelu i komunikatów gestu u gospodarza."""
+    return _znany(f"grid.lin.cal.rel.{relation}", relation)
+
+
+def _nazwa_pliku(sciezka):
+    """Ostatni człon ścieżki, oba separatory - archiwum to `R:\\...`, testy i kopie bywają `/...`."""
+    return (sciezka or "").replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def _calibration_head_text(relations, frame_name):
+    """Nagłówek osi kalibracji: NAZWA KLATKI i stan KAŻDEJ klasy osobno - „ciemność: jest
+    · pole: nie policzono”. Dawne „Skalibrowana: N z 2 klas” zrównywało „nie ma” z „nie policzono”,
+    a „klas” było żargonem; bez nazwy klatki ekran nie mówił, o której klatce odpowiada."""
+    stany = []
+    for r in relations:
+        stan = ("linked_inactive" if r["master_frame_id"] is not None
+                and r.get("master_active") is False else
+                "linked_mismatch" if r["master_frame_id"] is not None
+                and _niezgodnosc_biezacego(r) else
+                "linked" if r["master_frame_id"] is not None else
+                "pending" if r["pending"] else "gap")
+        stany.append(i18n.t("grid.lin.cal.head.class", rel=calibration_class_name(r["relation"]),
+                            state=i18n.t(f"grid.lin.cal.head.{stan}")))
+    klasy = " · ".join(stany)
+    return i18n.t("grid.lin.cal.head", name=frame_name, classes=klasy) if frame_name else klasy
+
+
+def _wymaga_reki(r):
+    """Czy wiersz osi kalibracji CZEKA NA GEST: kalibrator jest, ale nieaktywny (wycofany, zastąpiony,
+    bez pliku) albo kalibratora nie ma, a są kandydaci do wskazania. Nieliczony nie czeka na rękę,
+    tylko na „Policz teraz”. Właściciel predykatu domyślnego zaznaczenia (`set_calibration`)."""
+    if r["master_frame_id"] is not None:
+        return r.get("master_active") is False
+    return not r["pending"] and bool(r.get("candidates"))
+
+
+def _ma_kandydata_z_przepisu(r):
+    """Czy po zdjęciu wskazania ręki przebieg ma z czego odtworzyć automat - jest kandydat
+    z przepisu lightu. Bez niego „Przywróć automat” zostawia klatkę bez kalibratora i ma to
+    powiedzieć, zanim człowiek kliknie."""
+    return any(c["in_recipe"] for c in r.get("candidates") or ())
+
+
+def _poza_przepisem(r):
+    """Czy POWIĄZANY master leży poza przepisem lightu - tylko ręka może go tam postawić (E4-5).
+    Świadkiem jest lista kandydatów z rdzenia: master z przepisu stoi na niej z `in_recipe`."""
+    return r["master_frame_id"] is not None and not any(
+        c["master_frame_id"] == r["master_frame_id"] and c["in_recipe"]
+        for c in r.get("candidates") or ())
+
+
+def _calibrator_candidate_text(c, biezacy_id):
+    """Wiersz listy wyboru kalibratora: [z przepisu | SPOZA PRZEPISU] · Δ dni · plik (#id).
+    Oznaczenie stoi PIERWSZE w każdym wierszu - lista jest długa, a granica przepisu ma być widoczna
+    w każdym jej miejscu, nie tylko na początku grupy. Numer klatki czyni wiersze rozróżnialnymi,
+    gdy dwa mastery noszą tę samą nazwę pliku w różnych katalogach."""
+    znak = i18n.t("grid.lin.cal.cand.recipe" if c["in_recipe"] else "grid.lin.cal.cand.off")
+    # SPOZA PRZEPISU NAZYWA NIEZGODNOŚĆ w samym znaczniku („· filtr OIII ≠ Ha”): flat innego filtra
+    # stał na liście bez wyróżnienia obok zgodnych (wizytacja fali 4), a wybór bez tej wiedzy jest
+    # zgadywaniem. Zgodny spoza przepisu (inna noc profilu? inny teleskop?) mówi samą różnicą.
+    if not c["in_recipe"]:
+        roznica = _niezgodnosc_text(c.get("mismatch", []))
+        if roznica:
+            znak = f"{znak} · {roznica}"
+    dni = (i18n.t("grid.lin.cal.delta", n=c["days_apart"]) if c["days_apart"] is not None
+           else i18n.t("grid.lin.cal.cand.no_time"))
+    plik = (_nazwa_pliku(c["master_path"]) if c["master_path"]
+            else i18n.t("grid.lin.cal.vanished", id=c["master_frame_id"]))
+    tekst = f"[{znak}] · {dni} · {plik} (#{c['master_frame_id']})"
+    if c["master_frame_id"] == biezacy_id:
+        tekst += f" · {i18n.t('grid.lin.cal.cand.current')}"
+    return tekst
+
+
+def _wartosc_faktu(fakt, wartosc):
+    """Wartość członu `profile_key` po ludzku: ekspozycja bez zer po przecinku, brak filtra słowem."""
+    if fakt == "filt" and wartosc == "~":
+        return i18n.t("grid.lin.cal.mis.no_filter")
+    if fakt == "exp":
+        try:
+            return f"{float(wartosc):g}"
+        except ValueError:
+            return wartosc
+    return wartosc
+
+
+def _niezgodnosc_text(mismatch):
+    """Niezgodność nastawy kandydata wobec lightu (`lineage._niezgodnosc`) → zdanie dla człowieka,
+    „filtr OIII ≠ Ha, binning 2 ≠ 1”; `None` (master bez profilu) → „nastawa nieznana”; `[]` → ""."""
+    if mismatch is None:
+        return i18n.t("grid.lin.cal.mis.unknown")
+    return ", ".join(
+        i18n.t(f"grid.lin.cal.mis.{m['fact']}", master=_wartosc_faktu(m["fact"], m["master"]),
+               light=_wartosc_faktu(m["fact"], m["light"]))
+        for m in mismatch)
+
+
+def _niezgodnosc_biezacego(r):
+    """Niezgodność nastawy POWIĄZANEGO mastera wobec lightu - z listy kandydatów (rdzeń liczy ją
+    raz, dla każdego aktywnego mastera kamery). Master spoza listy (nieaktywny) - `[]`: o nim
+    mówi już ostrzeżenie nieaktywności."""
+    for c in r.get("candidates") or ():
+        if c["master_frame_id"] == r["master_frame_id"]:
+            return c.get("mismatch") or []
+    return []
+
+
 def _calibration_item_text(r):
     """Jeden wiersz osi kalibracji: KLASA · [źródło pewności] · ścieżka mastera. Klasa stoi pierwsza,
     bo to ona jest pytaniem („czym odjęto ciemność, czym wyrównano pole"); ścieżka jest elidowana
-    od lewej, więc ustępuje ona, nigdy werdykt — dokładnie jak w wierszu wejść stosu.
+    od lewej, więc ustępuje ona, nigdy werdykt - dokładnie jak w wierszu wejść stosu.
 
-    Klasa spoza stałej (`bias`, wpis ręki) dostaje SWOJĄ nazwę zamiast surowego klucza — katalog
-    zna dwie, a baza dopuszcza więcej (`0009`)."""
-    klasa = _znany(f"grid.lin.cal.rel.{r['relation']}", r["relation"])
+    Klasa spoza stałej (`bias`, wpis ręki) dostaje SWOJĄ nazwę zamiast surowego klucza - katalog
+    zna dwie, a baza dopuszcza więcej (`0009`). Wskazanie ręki spoza przepisu mówi to w źródle
+    pewności („Twoja decyzja · spoza przepisu”) - to jedyne miejsce, gdzie widać, że automat by
+    tego mastera nie wybrał."""
+    klasa = calibration_class_name(r["relation"])
     if r["master_frame_id"] is not None:
         zrodlo = _znany(f"grid.lin.cal.src.{r['asserted_by']}", r["asserted_by"] or "")
+        if r["asserted_by"] == "user" and _poza_przepisem(r):
+            zrodlo = f"{zrodlo} · {i18n.t('grid.lin.cal.off_recipe')}"
         # ZNIKNIĘTY MASTER MUSI SIĘ PRZYZNAĆ. `calibrators_for` bierze ścieżkę tylko z kopii
-        # OBECNEJ, więc po zniknięciu pliku wiersz kończył się kropką i pustką — a nagłówek dalej
+        # OBECNEJ, więc po zniknięciu pliku wiersz kończył się kropką i pustką - a nagłówek dalej
         # liczył go do „skalibrowana". Powiązanie jest prawdziwe (tożsamość to `sha1_data`),
-        # nieprawdziwa jest dostępność — i to ona ma być na ekranie.
+        # nieprawdziwa jest dostępność - i to ona ma być na ekranie.
         gdzie = r["master_path"] or i18n.t("grid.lin.cal.vanished", id=r["master_frame_id"])
-        # DYSTANS OBOK ŹRÓDŁA — liczba, nie werdykt. Progu „za daleko" świadomie nie stawiamy:
+        # DYSTANS OBOK ŹRÓDŁA - liczba, nie werdykt. Progu „za daleko" świadomie nie stawiamy:
         # ile dni to za dużo, zależy od klasy i od sprzętu, a zgadnięty próg malowałby na czerwono
         # dobór, który bywa jedynym możliwym. Użytkownik dostaje miarę i ocenia sam.
         if r.get("days_apart") is not None:
             zrodlo = f"{zrodlo} · {i18n.t('grid.lin.cal.delta', n=r['days_apart'])}"
+        # NIEAKTYWNY KALIBRATOR (wycofany, zastąpiony, bez pliku) stoi PRZED źródłem: wskazanie ręki
+        # przeżywa przebieg, więc bez tego ostrzeżenia „Twoja decyzja” wisiałaby na masterze,
+        # którego nie da się już użyć, a jedyną drogą jest wskazać inny.
+        if r.get("master_active") is False:
+            return f"{klasa} · {i18n.t('grid.lin.cal.inactive')} · [{zrodlo}] · {gdzie}"
+        # INNA NASTAWA (wizytacja fali 4): ręka wolno wskazała flat OIII dla lightu Ha, ale panel
+        # nie ma prawa mówić o nim zwykłym „jest” - ostrzeżenie nazywa różnicę przed źródłem.
+        roznica = _niezgodnosc_biezacego(r)
+        if roznica:
+            ostrz = i18n.t("grid.lin.cal.mismatch", what=_niezgodnosc_text(roznica))
+            return f"{klasa} · {ostrz} · [{zrodlo}] · {gdzie}"
         return f"{klasa} · [{zrodlo}] · {gdzie}"
-    # BRAK MA POWÓD ALBO GO NIE MA — i to są dwa różne zdania. Token `gap` niesie powód archiwum;
+    # BRAK MA POWÓD ALBO GO NIE MA - i to są dwa różne zdania. Token `gap` niesie powód archiwum;
     # `pending` znaczy, że master JEST, tylko nikt jeszcze nie policzył powiązania.
     if r["pending"]:
         return f"{klasa} · {i18n.t('grid.lin.cal.state.pending')}"
@@ -487,6 +921,41 @@ def _calibration_item_text(r):
 # pinuje bramka w `tests/test_gui_grid.py`, żeby rozjazd nie przeszedł cicho.
 REASON_NO_OBJECT_TOKEN = "no_object"
 REASON_OFFSET_TOKEN = "offset_unknown"
+REASON_NO_CANDIDATES_TOKEN = "no_candidates"   # lustro `stacks.REASON_NO_CANDIDATES`
+
+# Tryby listy panelu w sygnale `frames_requested` - gospodarz składa z nich zdanie chipu zbioru.
+TRYB_WEJSCIA = "inputs"
+TRYB_PROPOZYCJE = "candidates"
+TRYB_KALIBRATORY = "calibration"
+# Zdanie chipu zbioru per tryb listy. Klucze jawne, nie składane w locie - kolektor literałów
+# bramki i18n widzi wyłącznie literały (wzorzec `_OBJECT_STATE_TIPS`).
+_KLUCZE_POKAZ = {
+    TRYB_WEJSCIA: "grid.lin.show.inputs",
+    TRYB_PROPOZYCJE: "grid.lin.show.candidates",
+    TRYB_KALIBRATORY: "grid.lin.show.calibration",
+}
+
+
+def _lineage_basis_text(head, *, z_uzyciem=True):
+    """NA CZYM stoi rodowód stosu (0034, AR-108) - zdanie obok liczby wejść: podstawa rangi
+    `history` (`grid.lin.basis.{token}`, tokeny `stacks.LINEAGE_BASES`), „część klatek poza oknem
+    nagłówka” (zbiór z nazw szerszy od okna) i werdykt „plik użył N z M klatek okna” (wiersze okna
+    są kandydatami - ile z nich weszło, plik mówi, których - nie). M = `window_rows` z read-modelu:
+    wiersze okna plus odrzucone werdyktem, czyli kandydaci okna, które przebieg zapisał - wejście
+    dopięte ręką (`user`) M nie zawyża. Token bierze rdzeń, prozę powierzchnia - ta sama granica co
+    `_lineage_reason_text`.
+
+    `z_uzyciem=False` - bez członu „plik użył N z M": przy werdykcie podzbioru mówi go nagłówek
+    i ostrzeżenie panelu (`set_lineage`), a trzecie powtórzenie w nocie byłoby szumem."""
+    czesci = []
+    if head["lineage_basis"]:
+        czesci.append(i18n.t(f"grid.lin.basis.{head['lineage_basis']}"))
+    if head["outside_window"]:
+        czesci.append(i18n.t("grid.lin.flag.outside_window"))
+    if z_uzyciem and head["used_rows"] is not None:
+        czesci.append(i18n.t_plural("grid.lin.flag.used_rows", head["window_rows"],
+                                    used=head["used_rows"]))
+    return " · ".join(czesci)
 
 
 def _lineage_reason_text(head):

@@ -1081,6 +1081,84 @@ CATALOG = {
         "en": {"one": "{n} stack without lineage - Intake did not take it in as a stack; run Take new on the archive",
                "other": "{n} stacks without lineage - Intake did not take them in as stacks; run Take new on the archive"},
     },
+    # Obiekt stosu wobec obiektu wydania po żniwach (AR-103): zdanie mówi, CO się nie zgadza, a przycisk
+    # recepty na pasku - co zrobi gest. `pair` i `none` niosą kanony z bazy, nie z nagłówka.
+    "app.release_object.other": {
+        "pl": {"one": "{n} stos ma inny obiekt niż wydanie ({pary})",
+               "few": "{n} stosy mają inny obiekt niż wydanie ({pary})",
+               "many": "{n} stosów ma inny obiekt niż wydanie ({pary})"},
+        "en": {"one": "{n} stack has a different object than the release ({pary})",
+               "other": "{n} stacks have a different object than the release ({pary})"},
+    },
+    "app.release_object.pair": {"pl": "stos: {stack}, wydanie: {release}",
+                                "en": "stack: {stack}, release: {release}"},
+    "app.release_object.none": {
+        "pl": {"one": "{n} stos bez obiektu, a wydanie mówi {release}",
+               "few": "{n} stosy bez obiektu, a wydanie mówi {release}",
+               "many": "{n} stosów bez obiektu, a wydanie mówi {release}"},
+        "en": {"one": "{n} stack has no object, the release says {release}",
+               "other": "{n} stacks have no object, the release says {release}"},
+    },
+    "app.release_object.assign": {"pl": "Przypisz obiekt wydania", "en": "Assign release object"},
+    "app.release_object.assigned": {
+        "pl": {"one": "Obiekt wydania przypisany ręką: {n} stos ({canons})",
+               "few": "Obiekt wydania przypisany ręką: {n} stosy ({canons})",
+               "many": "Obiekt wydania przypisany ręką: {n} stosów ({canons})"},
+        "en": {"one": "Release object assigned by hand: {n} stack ({canons})",
+               "other": "Release object assigned by hand: {n} stacks ({canons})"},
+    },
+    "app.release_object.already": {
+        "pl": {"one": "{n} stos ma już obiekt wydania",
+               "few": "{n} stosy mają już obiekt wydania",
+               "many": "{n} stosów ma już obiekt wydania"},
+        "en": {"one": "{n} stack already has the release object",
+               "other": "{n} stacks already have the release object"},
+    },
+    "app.release_object.drift": {
+        "pl": {"one": "{n} stos pominięty - jego obiekt zmienił się od żniw, nic nie zapisano",
+               "few": "{n} stosy pominięte - ich obiekt zmienił się od żniw, nic nie zapisano",
+               "many": "{n} stosów pominiętych - ich obiekt zmienił się od żniw, nic nie zapisano"},
+        "en": {"one": "{n} stack skipped - its object changed since the harvest, nothing saved",
+               "other": "{n} stacks skipped - their object changed since the harvest, nothing saved"},
+    },
+    "app.release_object.undo": {"pl": "Cofnij", "en": "Undo"},
+    "app.release_object.unknown": {
+        "pl": {"one": "{n} stos bez porównania - obiektu wydania {release} nie ma w tej bazie",
+               "few": "{n} stosy bez porównania - obiektu wydania {release} nie ma w tej bazie",
+               "many": "{n} stosów bez porównania - obiektu wydania {release} nie ma w tej bazie"},
+        "en": {"one": "{n} stack not compared - the release object {release} is not in this database",
+               "other": "{n} stacks not compared - the release object {release} is not in this database"},
+    },
+    # Cofnięcie mówi, DO CZEGO stos wrócił (`StackObjectChange.before`) - człony sklejane w `undone`.
+    "app.release_object.undone": {"pl": "Cofnięto: {czlony}", "en": "Undone: {czlony}"},
+    "app.release_object.restored": {
+        "pl": {"one": "{n} stos wrócił do poprzedniego obiektu",
+               "few": "{n} stosy wróciły do poprzedniego obiektu",
+               "many": "{n} stosów wróciło do poprzedniego obiektu"},
+        "en": {"one": "{n} stack is back to its previous object",
+               "other": "{n} stacks are back to their previous object"},
+    },
+    "app.release_object.restored_none": {
+        "pl": {"one": "{n} stos znów bez obiektu",
+               "few": "{n} stosy znów bez obiektu",
+               "many": "{n} stosów znów bez obiektu"},
+        "en": {"one": "{n} stack has no object again",
+               "other": "{n} stacks have no object again"},
+    },
+    "app.release_object.restored_cleared": {
+        "pl": {"one": "{n} stos znów bez obiektu z decyzji ręki",
+               "few": "{n} stosy znów bez obiektu z decyzji ręki",
+               "many": "{n} stosów znów bez obiektu z decyzji ręki"},
+        "en": {"one": "{n} stack is again without an object by hand decision",
+               "other": "{n} stacks are again without an object by hand decision"},
+    },
+    "app.release_object.undo_drift": {
+        "pl": {"one": "{n} stos bez cofnięcia - jego obiekt zmienił się po geście",
+               "few": "{n} stosy bez cofnięcia - ich obiekt zmienił się po geście",
+               "many": "{n} stosów bez cofnięcia - ich obiekt zmienił się po geście"},
+        "en": {"one": "{n} stack not undone - its object changed after the gesture",
+               "other": "{n} stacks not undone - their object changed after the gesture"},
+    },
     "menu.view": {"pl": "&Widok", "en": "&View"},
     "menu.theme.dark": {"pl": "Ciemny", "en": "Dark"},
     "menu.theme.light": {"pl": "Jasny", "en": "Light"},
@@ -1693,6 +1771,60 @@ CATALOG = {
     "grid.col.kind": {"pl": "Rodzaj", "en": "Kind"},
     "grid.col.dt_delta": {"pl": "Δh (hdr−nazwa)", "en": "Δh (hdr−name)"},
     "grid.col.images": {"pl": "Obrazy", "en": "Images"},
+    "grid.col.lineage": {"pl": "Rodowód", "en": "Lineage"},
+    # Stan rodowodu gotowego obrazu (`queries.LINEAGE_STATES`) - komórka, belka grupy, facet listwy.
+    "grid.lineage.state.exact": {"pl": "dokładny", "en": "exact"},
+    "grid.lineage.state.history": {"pl": "z historii pliku", "en": "from file history"},
+    "grid.lineage.state.mixed": {"pl": "częściowo potwierdzony", "en": "partly confirmed"},
+    "grid.lineage.state.window": {"pl": "z okna czasu", "en": "from time window"},
+    "grid.lineage.state.pending": {"pl": "do potwierdzenia", "en": "to confirm"},
+    "grid.lineage.state.rejected": {"pl": "wszystkie odrzucone", "en": "all rejected"},
+    "grid.lineage.state.none": {"pl": "brak", "en": "none"},
+    "grid.lineage.state.uncounted": {"pl": "nie liczono", "en": "not computed"},
+    "grid.lineage.state.nd": {"pl": "nie dotyczy (to nie gotowy obraz)",
+                              "en": "not applicable (not a finished image)"},
+    "grid.lineage.tip.exact": {
+        "pl": "Każda klatka tego obrazu jest pewna: wskazana ręką albo dopasowana po nazwach "
+              "przy wydaniu.",
+        "en": "Every frame of this image is certain: pointed out by hand or matched by name "
+              "at release.",
+    },
+    "grid.lineage.tip.history": {
+        "pl": "Plik sam zapisał, z czego powstał (historia obróbki). Panel „Rodowód” pokazuje listę.",
+        "en": "The file recorded what it was made from (processing history). "
+              "The “Lineage” panel lists it.",
+    },
+    "grid.lineage.tip.mixed": {
+        "pl": "Część klatek potwierdzona, część wynika tylko z czasu - resztę potwierdzisz "
+              "w panelu „Rodowód”.",
+        "en": "Some frames confirmed, some only inferred from time - confirm the rest "
+              "in the “Lineage” panel.",
+    },
+    "grid.lineage.tip.window": {
+        "pl": "Klatki dobrane z okna czasu, nikt ich nie potwierdził - sprawdź w panelu „Rodowód”.",
+        "en": "Frames picked from the time window, nobody confirmed them - "
+              "check in the “Lineage” panel.",
+    },
+    "grid.lineage.tip.pending": {
+        "pl": "Program nie ustalił, z czego powstał ten obraz - panel „Rodowód” mówi dlaczego "
+              "i co zrobić.",
+        "en": "The program could not tell what this image was made from - "
+              "the “Lineage” panel says why and what to do.",
+    },
+    "grid.lineage.tip.rejected": {
+        "pl": "Odrzuciłeś wszystkie proponowane klatki - obraz nie ma rodowodu z Twojej decyzji.",
+        "en": "You rejected every proposed frame - the image has no lineage by your decision.",
+    },
+    "grid.lineage.tip.none": {
+        "pl": "Obraz nie ma rodowodu i nie czeka na Twój gest - policz rodowód w Dostawie, "
+              "żeby sprawdzić go od nowa.",
+        "en": "The image has no lineage and awaits no gesture of yours - recompute lineage "
+              "in Intake to check it again.",
+    },
+    "grid.lineage.tip.uncounted": {
+        "pl": "Rodowodu tego obrazu jeszcze nie liczono - policz go w Dostawie.",
+        "en": "This image's lineage has not been computed yet - compute it in Intake.",
+    },
 
     # --- operatory filtra (etykieta; klucz-op to DANE) ---
     "grid.op.eq": {"pl": "= równe", "en": "= equal"},
@@ -1709,6 +1841,7 @@ CATALOG = {
     # --- nazwy perspektyw (WYŚWIETLANIE; tożsamość zostaje w itemData = klucz PRESETS) ---
     "perspective.review": {"pl": "Przegląd", "en": "Review"},
     "perspective.calibration": {"pl": "Kalibracja", "en": "Calibration"},
+    "perspective.ready_images": {"pl": "Gotowe obrazy", "en": "Finished images"},
     "perspective.dups": {"pl": "Duplikaty", "en": "Duplicates"},
     "perspective.vanished": {"pl": "Zniknięte", "en": "Vanished"},
     "perspective.lineage": {"pl": "Rodowód do potwierdzenia", "en": "Lineage to confirm"},
@@ -2321,33 +2454,166 @@ CATALOG = {
               "itself, so nothing calibrates it.",
     },
     # --- oś KALIBRACJI w panelu (C3, Issue #6) ---
-    # Zwykłe `t`, nie `t_plural`: trzy identyczne formy PL to sam koszt i ryzyko rozjazdu przy
-    # edycji jednej z nich — odmiany tu nie ma, bo liczba stoi przy „z {total}".
-    "grid.lin.cal.head": {
-        "pl": "Skalibrowana: {n} z {total} klas",
-        "en": "Calibrated: {n} of {total} classes",
+    # Nagłówek: nazwa klatki i stan KAŻDEJ klasy osobno (wizytacja 0802) - dawne „N z 2 klas” zrównywało
+    # „nie ma” z „nie policzono”, a „klas” było żargonem.
+    "grid.lin.cal.head": {"pl": "{name} - {classes}", "en": "{name} - {classes}"},
+    "grid.lin.cal.head.class": {"pl": "{rel}: {state}", "en": "{rel}: {state}"},
+    "grid.lin.cal.head.linked": {"pl": "jest", "en": "linked"},
+    "grid.lin.cal.head.pending": {"pl": "nie policzono", "en": "not computed"},
+    "grid.lin.cal.head.gap": {"pl": "brak", "en": "missing"},
+    "grid.lin.cal.head.linked_inactive": {"pl": "jest (nieaktywny)", "en": "linked (inactive)"},
+    "grid.lin.cal.head.linked_mismatch": {"pl": "jest (inna nastawa)", "en": "linked (other settings)"},
+    # Niezgodność nastawy kandydata albo powiązanego mastera wobec lightu - człony `profile_key`
+    # (`lineage._POLA_PRZEPISU`): najpierw wartość mastera, potem lightu.
+    "grid.lin.cal.mismatch": {"pl": "⚠ inna nastawa: {what}", "en": "⚠ other settings: {what}"},
+    "grid.lin.cal.mis.filt": {"pl": "filtr {master} ≠ {light}", "en": "filter {master} ≠ {light}"},
+    "grid.lin.cal.mis.tel": {"pl": "inny teleskop", "en": "other telescope"},
+    "grid.lin.cal.mis.bin": {"pl": "binning {master} ≠ {light}", "en": "binning {master} ≠ {light}"},
+    "grid.lin.cal.mis.exp": {"pl": "ekspozycja {master} s ≠ {light} s",
+                             "en": "exposure {master} s ≠ {light} s"},
+    "grid.lin.cal.mis.t": {"pl": "temperatura {master} °C ≠ {light} °C",
+                           "en": "temperature {master} °C ≠ {light} °C"},
+    "grid.lin.cal.mis.g": {"pl": "gain {master} ≠ {light}", "en": "gain {master} ≠ {light}"},
+    "grid.lin.cal.mis.o": {"pl": "offset {master} ≠ {light}", "en": "offset {master} ≠ {light}"},
+    "grid.lin.cal.mis.no_filter": {"pl": "bez filtra", "en": "no filter"},
+    "grid.lin.cal.mis.unknown": {"pl": "nastawa nieznana", "en": "settings unknown"},
+    "grid.lin.cal.pick_ok": {"pl": "Wskaż", "en": "Choose"},
+    "grid.lin.cal.pick_cancel": {"pl": "Anuluj", "en": "Cancel"},
+    # Kalibrator nieaktywny (wycofany, zastąpiony, bez pliku) - wskazanie ręki go nie opuszcza samo.
+    "grid.lin.cal.inactive": {
+        "pl": "⚠ master wycofany, zastąpiony albo bez pliku - wskaż inny",
+        "en": "⚠ master retired, replaced or without a file - choose another",
+    },
+    "grid.lin.cal.tip_busy": {
+        "pl": "Trwa etap w Dostawie albo zapis do plików - gesty wrócą, gdy się skończy.",
+        "en": "A Delivery step or a write to files is running - the gestures return when it ends.",
+    },
+    "grid.lin.cal.restore_tip_none": {
+        "pl": "Zdejmij Twój wybór - przepis nie ma kandydata, więc klatka zostanie bez kalibratora.",
+        "en": "Remove your choice - the recipe has no candidate, so the frame stays without a "
+              "calibrator.",
+    },
+    "grid.lin.cal.restored_no_auto": {
+        "pl": "Zdjęto Twój wybór: {rel} - przepis nie ma kandydata, klatka została bez kalibratora",
+        "en": "Your choice removed: {rel} - the recipe has no candidate, the frame has no "
+              "calibrator now",
+    },
+    "grid.lin.cal.db_busy": {
+        "pl": "Nie zapisano: baza jest zajęta innym zapisem - spróbuj za chwilę.",
+        "en": "Not saved: the database is busy with another write - try again in a moment.",
     },
     "grid.lin.cal.vanished": {
-        "pl": "master #{id} — plik zniknął z dysku",
-        "en": "master #{id} — the file has vanished from disk",
+        "pl": "master #{id} - plik zniknął z dysku",
+        "en": "master #{id} - the file has vanished from disk",
     },
     "grid.lin.cal.delta": {"pl": "Δ {n} dni", "en": "Δ {n} days"},
     "grid.lin.cal.src.horreum": {"pl": "dobrane z przepisu", "en": "matched by recipe"},
     "grid.lin.cal.src.user": {"pl": "Twoja decyzja", "en": "your decision"},
     "grid.lin.cal.src.wbpp": {"pl": "z historii obróbki", "en": "from processing history"},
+    "grid.lin.cal.off_recipe": {"pl": "spoza przepisu", "en": "outside the recipe"},
     "grid.lin.cal.gap.not_calibrated": {
-        "pl": "przepisy nie są jeszcze policzone — uruchom etap Kalibracja w Dostawie",
-        "en": "recipes have not been computed yet — run the Calibration step in Delivery",
+        "pl": "przepisy nie są jeszcze policzone - uruchom etap Kalibracja w Dostawie",
+        "en": "recipes have not been computed yet - run the Calibration step in Delivery",
     },
     "grid.lin.cal.rel.dark": {"pl": "ciemność (dark)", "en": "dark"},
     "grid.lin.cal.rel.flat": {"pl": "pole (flat)", "en": "flat"},
+    # Nieliczone to OSTRZEŻENIE, nie wygaszenie: robota na jedno kliknięcie, nie brak.
     "grid.lin.cal.state.pending": {
-        "pl": "master jest — powiązania jeszcze nie policzono",
-        "en": "master exists — the link has not been computed yet",
+        "pl": "⚠ master jest - powiązania jeszcze nie policzono",
+        "en": "⚠ master exists - the link has not been computed yet",
     },
     "grid.lin.cal.pending": {
-        "pl": "⚠ uruchom etap Rodowód w Dostawie, żeby powiązać to, co już jest w archiwum",
-        "en": "⚠ run the Lineage step in Delivery to link what the archive already holds",
+        "pl": "⚠ uruchom etap Rodowód („Policz teraz”), żeby powiązać to, co już jest w archiwum",
+        "en": "⚠ run the Lineage step (\"Count now\") to link what the archive already holds",
+    },
+    # --- gesty ręki na osi kalibracji (E4-5) ---
+    "grid.lin.cal.pick": {"pl": "Wskaż kalibrator…", "en": "Choose calibrator…"},
+    "grid.lin.cal.pick_tip": {
+        "pl": "Wybierz master dla zaznaczonego wiersza - także spoza przepisu. Twój wybór "
+              "przetrwa kolejne przeliczenia.",
+        "en": "Choose the master for the selected row - also outside the recipe. Your choice "
+              "survives later recomputations.",
+    },
+    "grid.lin.cal.pick_tip_none": {
+        "pl": "Brak masterów tej klasy z tej samej kamery - nie ma czego wskazać.",
+        "en": "No masters of this kind from the same camera - nothing to choose.",
+    },
+    "grid.lin.cal.tip_select": {
+        "pl": "Zaznacz na liście wiersz ciemności albo pola.",
+        "en": "Select the dark or the flat row in the list.",
+    },
+    "grid.lin.cal.pick_title": {"pl": "Wskaż kalibrator", "en": "Choose calibrator"},
+    "grid.lin.cal.pick_prompt": {
+        "pl": "Master dla: {rel}. Najpierw z przepisu (najbliższy w czasie u góry), "
+              "potem SPOZA PRZEPISU.",
+        "en": "Master for: {rel}. Recipe matches first (closest in time on top), "
+              "then OUTSIDE THE RECIPE.",
+    },
+    "grid.lin.cal.cand.recipe": {"pl": "z przepisu", "en": "recipe"},
+    "grid.lin.cal.cand.off": {"pl": "SPOZA PRZEPISU", "en": "OUTSIDE THE RECIPE"},
+    "grid.lin.cal.cand.current": {"pl": "obecny", "en": "current"},
+    "grid.lin.cal.cand.no_time": {"pl": "bez daty", "en": "no date"},
+    "grid.lin.cal.restore": {"pl": "Przywróć automat", "en": "Restore automatic"},
+    "grid.lin.cal.restore_tip": {
+        "pl": "Zdejmij Twój wybór - program dobierze kalibrator z przepisu i od razu przeliczy.",
+        "en": "Remove your choice - the program picks the calibrator by recipe and recomputes now.",
+    },
+    "grid.lin.cal.restore_tip_auto": {
+        "pl": "Ten kalibrator dobrał program - nie ma czego przywracać.",
+        "en": "The program chose this calibrator - nothing to restore.",
+    },
+    "grid.lin.cal.count": {"pl": "Policz teraz", "en": "Count now"},
+    "grid.lin.cal.count_tip": {
+        "pl": "Uruchom etap Rodowód (trwa chwilę) - panel odświeży się sam.",
+        "en": "Run the Lineage step (takes a moment) - the panel refreshes by itself.",
+    },
+    "grid.lin.cal.picked": {
+        "pl": "Zapisano Twój kalibrator: {rel} - przeliczenia go nie zmienią",
+        "en": "Your calibrator is saved: {rel} - recomputations will not change it",
+    },
+    "grid.lin.cal.picked_none": {
+        "pl": "Bez zmian - ten kalibrator ({rel}) już jest Twoim wyborem",
+        "en": "No change - this calibrator ({rel}) is already your choice",
+    },
+    "grid.lin.cal.restored": {"pl": "Zdjęto Twój wybór: {rel}", "en": "Your choice removed: {rel}"},
+    "grid.lin.cal.restored_none": {
+        "pl": "Nic do przywrócenia - wybór zmienił się w międzyczasie",
+        "en": "Nothing to restore - the choice changed in the meantime",
+    },
+    "grid.lin.cal.counting": {
+        "pl": "liczę rodowód kalibracji - panel odświeży się sam",
+        "en": "computing calibration lineage - the panel refreshes by itself",
+    },
+    "grid.lin.cal.count_busy": {
+        "pl": "rodowodu NIE policzono: {reason}",
+        "en": "lineage NOT computed: {reason}",
+    },
+    "grid.lin.cal.count_no_host": {
+        "pl": "uruchom etap Rodowód w Dostawie",
+        "en": "run the Lineage step in Delivery",
+    },
+    # Odmowy klingi (`repo.CALIBRATION_REFUSALS`) - zapis się nie odbył, panel pokazuje stan z bazy.
+    "grid.lin.cal.refused.not_light": {
+        "pl": "Nie zapisano: ta klatka nie jest już klatką nieba.",
+        "en": "Not saved: this frame is no longer a sky frame.",
+    },
+    "grid.lin.cal.refused.not_master": {
+        "pl": "Nie zapisano: wybrana klatka nie jest masterem tej klasy.",
+        "en": "Not saved: the chosen frame is not a master of this kind.",
+    },
+    "grid.lin.cal.refused.inactive": {
+        "pl": "Nie zapisano: wybrany master jest wycofany albo zastąpiony.",
+        "en": "Not saved: the chosen master is retired or replaced.",
+    },
+    "grid.lin.cal.refused.camera": {
+        "pl": "Nie zapisano: wybrany master pochodzi z innej kamery.",
+        "en": "Not saved: the chosen master comes from another camera.",
+    },
+    "grid.lin.cal.refused.drift": {
+        "pl": "Nie zapisano: kalibrator zmienił się w międzyczasie - panel pokazuje stan bieżący, "
+              "wybierz jeszcze raz.",
+        "en": "Not saved: the calibrator changed in the meantime - the panel shows the current "
+              "state, choose again.",
     },
     "grid.lin.cal.gap.incomplete_recipe": {
         "pl": "nie wiadomo, czego szukać: klatka nie podaje pełnej nastawy",
@@ -2364,12 +2630,6 @@ CATALOG = {
     "grid.lin.hint.many": {
         "pl": "Zaznacz DOKŁADNIE jedną klatkę — rodowód opisuje pojedynczą klatkę.",
         "en": "Select EXACTLY one frame — lineage describes a single frame.",
-    },
-    "grid.lin.hint.one_only": {
-        "pl": "Zaznaczono kilka różnych klatek. Zostaw jedną — panel nie ma jak powiedzieć, "
-              "o której z nich mówi.",
-        "en": "Several different frames are selected. Leave one — the panel has no way to say "
-              "which of them it is describing.",
     },
     "grid.lin.hint.not_computed": {
         "pl": "Rodowodu jeszcze nie liczono. Wciągnij stosy w Dostawie — policzy się przy okazji.",
@@ -2534,6 +2794,71 @@ CATALOG = {
         "en": {"one": "the file declares {n} frame", "other": "the file declares {n} frames"},
     },
     "grid.lin.flag.excluded": {"pl": "odrzuconych: {n}", "en": "rejected: {n}"},
+    # PODSTAWA rodowodu stosu (0034, `integration.lineage_basis`): tokeny = `stacks.LINEAGE_BASES`,
+    # parytet w obie strony pilnuje `tests/test_i18n.py`. Zdanie mówi, NA CZYM stoi „plik zeznał”.
+    "grid.lin.basis.name": {"pl": "wejścia z nazw plików", "en": "inputs from file names"},
+    "grid.lin.basis.temp": {"pl": "wejścia potwierdzone temperaturami z nazw",
+                            "en": "inputs confirmed by temperatures in names"},
+    "grid.lin.basis.count": {"pl": "wejścia z liczby klatek", "en": "inputs from the frame count"},
+    "grid.lin.flag.outside_window": {
+        "pl": "część klatek leży poza oknem nagłówka",
+        "en": "some frames lie outside the header window",
+    },
+    # „N z M” (E4-9): plik zeznał N wejść, okno ma M klatek - wiersze są kandydatami okna. Odmiana
+    # po M (dopełniacz po „z”: „z 1 klatki”, „z 34 klatek”).
+    "grid.lin.flag.used_rows": {
+        "pl": {"one": "plik użył {used} z {n} klatki okna",
+               "few": "plik użył {used} z {n} klatek okna",
+               "many": "plik użył {used} z {n} klatek okna"},
+        "en": {"one": "the file used {used} of {n} window frame",
+               "other": "the file used {used} of {n} window frames"},
+    },
+    # Dwuklik wiersza panelu → te klatki w Zbiorach (chip zbioru z drogą powrotu).
+    "grid.lin.common_dir": {"pl": "Wszystkie z katalogu:", "en": "All from folder:"},
+    # Werdykt podzbioru okna („plik użył N z M"): nagłówek mówi prawdę o N, ostrzeżenie - o sprawie.
+    "grid.lin.head_subset": {
+        "pl": {"one": "Okno: {n} klatka, plik użył {used} (≈{hours} h)",
+               "few": "Okno: {n} klatki, plik użył {used} (≈{hours} h)",
+               "many": "Okno: {n} klatek, plik użył {used} (≈{hours} h)"},
+        "en": {"one": "Window: {n} frame, the file used {used} (≈{hours} h)",
+               "other": "Window: {n} frames, the file used {used} (≈{hours} h)"},
+    },
+    "grid.lin.flag.used_rows_warn": {
+        "pl": {"one": "⚠ plik użył {used} z {n} klatki okna i nie zapisał, których - "
+                      "potwierdź je na liście",
+               "few": "⚠ plik użył {used} z {n} klatek okna i nie zapisał, których - "
+                      "potwierdź je na liście",
+               "many": "⚠ plik użył {used} z {n} klatek okna i nie zapisał, których - "
+                       "potwierdź je na liście"},
+        "en": {"one": "⚠ the file used {used} of {n} window frame and did not record which - "
+                      "confirm them in the list",
+               "other": "⚠ the file used {used} of {n} window frames and did not record which - "
+                        "confirm them in the list"},
+    },
+    "grid.lin.reason.no_candidates_window": {
+        "pl": "Nie wiem, z czego powstał: okno nagłówka nie wybrało żadnej klatki - poniżej materiał "
+              "do potwierdzenia.",
+        "en": "Unknown source: the header window picked no frame - material to confirm below.",
+    },
+    # Recepta „Cofnij" po werdykcie ręki - powrót do stanu sprzed gestu (D-1011-4).
+    "grid.lin.undo": {"pl": "Cofnij werdykt", "en": "Undo the verdict"},
+    "grid.lin.undo_after": {"pl": "potem cofniesz werdykt", "en": "then undo the verdict"},
+    "grid.lin.undone": {"pl": "Przywrócono stan sprzed werdyktu: {n}",
+                        "en": "Restored the state before the verdict: {n}"},
+    "grid.lin.undo_nothing": {
+        "pl": "Nie ma już czego cofać - te wiersze rodowodu zmieniono później.",
+        "en": "Nothing left to undo - these lineage rows were changed later.",
+    },
+    "grid.lin.show_tip": {
+        "pl": "Dwuklik wiersza: pokaż te klatki w Zbiorach (× na chipie wraca tutaj)",
+        "en": "Double-click a row: show these frames in Collections (× on the chip comes back here)",
+    },
+    "grid.lin.show.inputs": {"pl": "Wejścia obrazu {name} ({n})",
+                             "en": "Inputs of image {name} ({n})"},
+    "grid.lin.show.candidates": {"pl": "Propozycje dla obrazu {name} ({n})",
+                                 "en": "Candidates for image {name} ({n})"},
+    "grid.lin.show.calibration": {"pl": "Kalibratory klatki {name} ({n})",
+                                  "en": "Calibrators of frame {name} ({n})"},
 
     # --- StagingDrawer (poczekalnia zmian) ---
     "grid.drawer.empty": {"pl": "Poczekalnia zmian — pusta", "en": "Changes waiting room — empty"},
@@ -2749,6 +3074,17 @@ CATALOG = {
     "pipeline.stage.stacks": {"pl": "Stosy", "en": "Stacks"},
     "pipeline.stage.stack_lineage": {"pl": "Rodowód stosów", "en": "Stack lineage"},
     "pipeline.stage.copy_facts": {"pl": "Fakty kopii", "en": "Copy facts"},
+    "pipeline.stage.stack_history": {"pl": "Historia stosów", "en": "Stack history"},
+    "pipeline.fmt.stack_history.written": {
+        "pl": "[historia stosów] zapisana {n} z {rows}", "en": "[stack history] stored {n} of {rows}"},
+    "pipeline.fmt.stack_history.stale": {
+        "pl": "zmienione na dysku od skanu: {n}", "en": "changed on disk since the scan: {n}"},
+    "pipeline.fmt.stack_history.failed": {"pl": "błąd odczytu: {n}", "en": "read error: {n}"},
+    "pipeline.fmt.stack_history.remaining": {"pl": "czeka: {n}", "en": "waiting: {n}"},
+    "pipeline.counts_stack_history": {
+        "pl": "Historia stosów {done}/{total} · zapisane {written} · {tail}",
+        "en": "Stack history {done}/{total} · stored {written} · {tail}",
+    },
     "pipeline.stage.adopt_testimony": {"pl": "Przejęcie zeznania", "en": "Testimony adoption"},
     # Linia raportu przejęcia zeznania (AR-5). Odmowy tylko, gdy są (QUIET); każda nazywa przyczynę,
     # bo „przejęto 1 z 3" bez niej zatajałoby, dlaczego dwie klatki dalej mówią głosem nieobecnej kopii.
@@ -3055,6 +3391,18 @@ CATALOG = {
     "pipeline.stacks_first": {
         "pl": "(jeszcze nie wskazano korzenia)", "en": "(no root chosen yet)",
     },
+    # Druga linia memo stosów - cztery rozłączne liczniki ze stanu (`queries.stack_lineage_counts`).
+    "pipeline.stacks_counts": {
+        "pl": "gotowe obrazy: {all} · z rodowodem: {with_inputs} · bez wejść: {without} · "
+              "nieliczone: {uncounted}",
+        "en": "finished images: {all} · with lineage: {with_inputs} · without inputs: {without} · "
+              "not computed: {uncounted}",
+    },
+    "pipeline.stacks_counts_tip": {
+        "pl": "Liczone ze stanu bazy (bez wycofanych i zastąpionych). Bez kopii na dysku: {no_copy}.",
+        "en": "Counted from the database state (without retired and superseded). "
+              "Without a copy on disk: {no_copy}.",
+    },
 
     # --- dialogi wyboru katalogu ---
     "pipeline.dlg.pick_scan": {"pl": "Wskaż katalog do skanu", "en": "Choose a folder to scan"},
@@ -3162,6 +3510,12 @@ CATALOG = {
     },
     "pipeline.fmt.slin.history": {
         "pl": "z tego {n} potwierdza sam plik", "en": "of those {n} confirmed by the file itself",
+    },
+    "pipeline.fmt.slin.subset": {
+        "pl": "{n} z nich: plik użył części klatek okna", "en": "{n} of those: the file used part of the window frames",
+    },
+    "pipeline.fmt.slin.outside_window": {
+        "pl": "{n} z nazw spoza okna nagłówka", "en": "{n} from names outside the header window",
     },
     # AR-102: stosy, których rodowód przyszedł z żniw (zbiór dokładny wydania) - dowód mocniejszy niż
     # plik dopasowany do okna, więc osobny człon, nie doliczenie do „potwierdza sam plik”.
@@ -3305,6 +3659,14 @@ CATALOG = {
         "en": "[lineage] lights {lights} · linked: {linked}",
     },
     "pipeline.fmt.lineage_gaps": {"pl": "\n   luki: {gaps}", "en": "\n   gaps: {gaps}"},
+    "pipeline.fmt.lineage_unlinked": {
+        "pl": "\n   zdjęte ogniwa bez kandydata: {unlinked}",
+        "en": "\n   links removed (no candidate left): {unlinked}",
+    },
+    "pipeline.fmt.group_variants": {
+        "pl": " · warianty kadru: powiązane {linked}, czekają {waiting}, odrzucone {bad}",
+        "en": " · crop variants: linked {linked}, waiting {waiting}, rejected {bad}",
+    },
     # `nameless` STOI OSOBNO od procentu (P-D): klatka bez `object_raw` nie wchodzi do mianownika
     # delty (nie ma nazwy, pod którą byłaby „nierozpoznana"), a bez tej pozycji raport dostawy jest
     # na całą klasę ślepy — i pierwsza nowa dostawa bez `OBJECT` przeszłaby bez śladu.
@@ -4242,6 +4604,15 @@ CATALOG = {
                "many": ". Zestaw nie pasuje do {n} następczyń"},
         "en": {"one": ". The setup does not fit {n} successor",
                "other": ". The setup does not fit {n} successors"}},
+    # Szósta oś (E4-5): wskazanie kalibratora ręką nie przechodzi na następczynię, która nie jest
+    # lightem albo ma inną kamerę niż master - zostaje na klatce zastąpionej.
+    "supersede.transfer.skip_calibration_mismatch": {
+        "pl": {"one": ". Kalibrator nie pasuje do {n} następczyni",
+               "few": ". Kalibrator nie pasuje do {n} następczyń",
+               "many": ". Kalibrator nie pasuje do {n} następczyń"},
+        "en": {"one": ". The calibrator does not fit {n} successor",
+               "other": ". The calibrator does not fit {n} successors"}},
+    "supersede.transfer.axis_calibration": {"pl": "kalibrator: {n}", "en": "calibrator: {n}"},
     "supersede.transfer.skip_none": {
         "pl": {"one": ". {n} klatka bez faktów ręki",
                "few": ". {n} klatki bez faktów ręki",
@@ -4909,4 +5280,6 @@ CATALOG = {
 
     # --- KANAŁ gotowego obrazu (0028, P4-3): grupa listwy facetów ---
     "facets.group.channel": {"pl": "Kanał", "en": "Channel"},
+    # --- RODOWÓD gotowego obrazu: grupa listwy facetów (stany `grid.lineage.state.*`) ---
+    "facets.group.lineage": {"pl": "Rodowód", "en": "Lineage"},
 }

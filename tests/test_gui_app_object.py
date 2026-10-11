@@ -998,7 +998,8 @@ def test_zdanie_podpowiedzi_ROZNE_dla_drzewa_STACKS_i_ukladu_WBPP():
     Scenariusz jedzie przez politykę komórki (`queries.object_cell`) i wybór zdania gridu."""
     from horreum.gui import grid
     stos = {"kind": "master_light", "object_canon": None, "object_raw": None,
-            "path": r"R:\ASTRO_\STACKS\vdB30\A140R_2600MM\G\vdB30_G.xisf"}
+            "path": r"R:\ASTRO_\STACKS\vdB30\A140R_2600MM\G\vdB30_G.xisf",
+            "library_root": r"R:\ASTRO_"}                   # korzeń archiwum z `base_rows` (E5-3)
     wbpp = {"kind": "master_light", "object_canon": None, "object_raw": None,
             "path": r"R:\ARCHIWUM\vdB30\master\masterLight_BIN-1.xisf"}
     assert queries.object_cell(stos) == queries.object_cell(wbpp) == ("⟨vdB30⟩", "hint")
@@ -1061,6 +1062,15 @@ def test_naprawa_LIGHTOW_bez_zmian_co_do_bajtu(repair):
         dlg.reject()
 
 
+def _biblioteka_kalibracji(con, korzen, now):
+    """Dark pod `<korzeń>\\CALIBRATION` - rodzeństwo `STACKS`, bez którego korzeń archiwum nie jest
+    wiarygodny (`resolver.library_root_from_db`, E5-3) i świadek drzewa stosów milczy."""
+    fid, _ = repo.upsert_frame(con, sha1_data="biblioteka", kind="dark", filetype="fits",
+                               camera_id=None, now=now)
+    repo.add_location(con, frame_id=fid, volume="V", now=now,
+                      path=os.path.join(str(korzen), "CALIBRATION", "darks", "d.fit"))
+
+
 def _stos_pd(con, sha, path):
     fid, _ = repo.upsert_frame(con, sha1_data=sha, kind="master_light", filetype="xisf",
                                camera_id=None, now=NOW_PD)
@@ -1078,6 +1088,7 @@ def test_naprawa_STOSU_grupuje_po_folderze_OBIEKTU_z_propozycja(qapp, tmp_path):
     from horreum.gui.app import RepairHeaderDialog
     con = db.open_db(str(tmp_path / "st.db"))
     R = r"R:\ASTRO_\STACKS\vdB30\A140R_2600MM"
+    _biblioteka_kalibracji(con, r"R:\ASTRO_", NOW_PD)
     for filtr in ("Ha", "OIII", "SII"):
         _stos_pd(con, f"st-{filtr}", rf"{R}\{filtr}\vdB30_2026-03-06_A140R_2600MM_{filtr}_5s_mono.xisf")
     wbpp = r"R:\ARCHIWUM\A7R3_105_LMC\master"
@@ -2955,6 +2966,7 @@ def test_karty_dla_pozycji_nazwanej_mimo_bledu_INNEJ_pozycji(qapp, tmp_path, mon
     a = _stos_fits(tmp_path, "NGC7635", "NGC7635_Ha.fits", seed=11)
     b = _stos_fits(tmp_path, "Sh2-131", "Sh2-131_Ha.fits", seed=12)
     con = db.open_db(str(tmp_path / "c2.db"))
+    _biblioteka_kalibracji(con, tmp_path, NOW_O3)
     for p in (a, b):
         scan.ingest_record(con, scan.scan_file(str(p)), volume="V", now=NOW_O3,
                            summary=scan.ScanSummary())

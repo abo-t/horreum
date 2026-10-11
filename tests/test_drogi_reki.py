@@ -234,7 +234,7 @@ def test_klucze_zdania_przeniesienia_sa_w_katalogu():
                  and n.func.attr in ("t", "t_plural") and n.args
                  and isinstance(n.args[0], ast.Constant)}
     dynamiczne = ({f"supersede.transfer.axis_{k}"
-                   for k in ("object", "config", "site", "note", "lineage")}
+                   for k in ("object", "config", "site", "note", "lineage", "calibration")}
                   | {f"supersede.transfer.skip_{s}" for s in supersede._POWODY_POMINIECIA.values()
                      if s is not None})
     assert literalne and literalne <= set(CATALOG)

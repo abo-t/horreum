@@ -55,6 +55,8 @@ class GroupSummary:
     calibration_off_axis: int = 0  # dark/bias pominięte na osi teleskopu (kind-scoping, NIE review)
     configs_unassigned: int = 0    # stęchłe przypisania kalibracji zdjęte (dane sprzed kind-scopingu)
     config_by_hand: int = 0        # zestaw wskazany RĘKĄ — przebieg go mija (R1b, NIE review)
+    configs_by_twin: int = 0       # wariant kadru bez TELESCOP z zestawem ORYGINAŁU (AR-54)
+    variants: object = None        # relacje wariantu z zeznań (`stack_variants.LinkSummary`)
 
 
 # Kanon teleskopu wydzielonego z nazwy RAW po ogniskowej. Nazwa bazowa zostaje na czele, żeby
@@ -134,8 +136,23 @@ def run_grouper(con, now):
     `STICKY_CONFIG_SOURCES` (R1b) omija FAZĘ 2: zestaw wskazany ręką jest faktem, którego przebieg
     nie ma prawa ani nadpisać, ani zgłosić do przeglądu. Faza 1 zostaje nietknięta — teleskopy
     wyłaniają się z NAGŁÓWKÓW niezależnie od tego, komu ręka co przypisała, i cofnięcie tego
-    byłoby zmianą osi teleskopu przy okazji zmiany osi sprzętu."""
+    byłoby zmianą osi teleskopu przy okazji zmiany osi sprzętu.
+
+    FAZA 0 - RELACJE WARIANTU KADRU (AR-54) z zeznań leżących obok kopii w `STACKS`
+    (`stack_variants.link_from_testimonies`). Stoi TUTAJ, bo grouper jest pierwszym etapem pochodnych
+    po skanie: relacja ma istnieć, zanim przebieg sprzętu i resolver zapytają o oryginał wariantu.
+    Czyta wyłącznie kolejkę zeznań w bazie (`stack_variant_testimony`) - udziału nie dotyka.
+
+    ZESTAW BLIŹNIAKA (AR-54): wariant bez `TELESCOP` z relacją `stack_variant` bierze config
+    ORYGINAŁU - automat (`config_source` NULL), więc ręka i nagłówek dalej wygrywają (wariant
+    z własnym `TELESCOP` idzie zwykłą drogą). Warunek inwariantu: ta sama kamera co config oryginału
+    (`config.camera_id == frame.camera_id`), inaczej przegląd jak dotąd, a zestaw przejęty wcześniej
+    od oryginału schodzi (`repo.unassign_config`, wyłącznie automat). Warianty idą na KONIEC
+    fazy 2, a config oryginału czytamy w chwili wariantu - oryginał przypisany w tym samym przebiegu
+    jest już widoczny."""
+    from . import stack_variants              # leniwie: plan wersji ciągnie projekcję i skan
     s = GroupSummary()
+    s.variants = stack_variants.link_from_testimonies(con, now)
 
     rows = con.execute(
         "SELECT f.id AS fid, f.camera_id AS cam, f.kind AS kind, f.config_id AS cfg, "
@@ -143,6 +160,8 @@ def run_grouper(con, now):
         "       h.telescop AS tel, h.focallen AS fl, h.focratio_raw AS fr "
         "FROM frame f JOIN header h ON h.frame_id = f.id").fetchall()
     s.headers = len(rows)
+    oryginaly = {r["variant_frame_id"]: r["original_frame_id"] for r in con.execute(
+        "SELECT variant_frame_id, original_frame_id FROM stack_variant").fetchall()}
 
     # (1) grupy po strip() — reprezentatywne właściwości (f/, ogniskowa) z pierwszego
     # niepustego zeznania grupy (nullable właściwości audytowe, nie klucz — brief §3).
@@ -178,7 +197,7 @@ def run_grouper(con, now):
         tel_ids[canon] = tel_id
 
     # (2) config iloczyn + link frame.config_id (inwariant: config.camera_id == frame.camera_id)
-    for r in rows:
+    for r in sorted(rows, key=lambda r: r["fid"] in oryginaly):     # warianty na koniec (faza 0)
         if r["kind"] in NO_TELESCOPE_KINDS:
             s.calibration_off_axis += 1
             if r["cfg"] is not None and repo.unassign_config(con, frame_id=r["fid"], now=now):
@@ -199,6 +218,20 @@ def run_grouper(con, now):
         if not canon:
             s.telescop_missing += 1
         tel_id = tel_ids.get(canon)
+        if not canon and r["cam"] is not None and r["fid"] in oryginaly:
+            zestaw = con.execute(
+                "SELECT c.id, c.camera_id FROM frame f JOIN config c ON c.id = f.config_id "
+                "WHERE f.id = ?", (oryginaly[r["fid"]],)).fetchone()
+            if zestaw is not None and zestaw["camera_id"] == r["cam"]:
+                s.configs_by_twin += 1
+                if repo.assign_config(con, frame_id=r["fid"], config_id=zestaw["id"], now=now):
+                    s.configs_assigned += 1
+                continue
+            # Oryginał bez zestawu (albo z inną kamerą): zestaw przejęty od niego schodzi razem
+            # z nim - wariant bez `TELESCOP` nie ma innego świadka, a ręczny zestaw przebieg minął
+            # już wyżej (`STICKY_CONFIG_SOURCES`). Dalej zwykła droga: przegląd.
+            if r["cfg"] is not None and repo.unassign_config(con, frame_id=r["fid"], now=now):
+                s.configs_unassigned += 1
         if tel_id is None or r["cam"] is None:
             repo.flag_config_review(
                 con, frame_id=r["fid"],

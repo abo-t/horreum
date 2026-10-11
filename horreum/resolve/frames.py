@@ -66,6 +66,40 @@ def normalize_kind(imagetyp):
     return _KIND_MAP.get(key, "unknown")
 
 
+# Master zapisany STARSZYM zapisem PixInsighta: karta mówi `FLAT`, a plik niesie historię integracji
+# (tabela `images` z wejściami) - surowy flat takiej historii mieć nie może, więc historia jest
+# zeznaniem pliku o sobie samym, mocniejszym od karty. Zmierzone 2026-10-11 (kopia `pf4`, nagłówki
+# z `R:`): 352 klatki XISF poza stosami, `IMAGETYP='FLAT'` + historia = 11 klatek, wszystkie pod
+# `CALIBRATION\masters\flats`, 0 fałszywych. Mapa zna WYŁĄCZNIE flat: darków i biasów XISF bez
+# słowa „Master" w archiwum nie ma (każdy masterdark mówi `Master Dark`), więc reguła dla nich
+# byłaby zgadywaniem bez populacji - dopisz parę dopiero po pomiarze, który ją pokaże.
+# Para łączy klasy przepisu tej samej rodziny (sub i master dzielą przepis, oś teleskopu i bramkę
+# kamery), więc przeliczenie rodzaju po tej mapie nie przesuwa żadnej innej pochodnej klatki.
+HISTORY_MASTER_KINDS = {"flat": "master_flat"}
+
+# Karta `IMAGETYP`, którą skan czyta jako dany rodzaj mastera - forma pod naprawę nagłówka masterów
+# z `HISTORY_MASTER_KINDS` (po zapisie karta sama mówi to, co dziś mówi historia).
+MASTER_IMAGETYP = {"master_flat": "Master Flat"}
+
+
+def kind_from_testimony(imagetyp, history):
+    """Rodzaj z zeznania pliku: `normalize_kind(IMAGETYP)`, a sub z `HISTORY_MASTER_KINDS`, którego
+    historia (`(rows, inputs, tool)` z `resolve.stack.parse_history`) ma tabelę wejść z ≥1 wejściem
+    włączonym → jego master. `history=None` (FITS, RAW, nieczytelny XML) i `rows=None` (plik bez
+    historii integracji) zostawiają rodzaj karty.
+
+    JEDNO miejsce reguły: woła ją `scan._derive_kind` (wjazd, odświeżenie zeznania, przejęcie kopii),
+    przez nią żniwa (`harvest.read_master`) i przeliczenie rodzaju klatek już w bazie."""
+    kind = normalize_kind(imagetyp)
+    master = HISTORY_MASTER_KINDS.get(kind)
+    if master is None or history is None:
+        return kind
+    rows, inputs, _tool = history
+    if rows is None or not any(i.enabled for i in inputs):
+        return kind
+    return master
+
+
 def kind_from_path(path):
     """Rodzaj klatki z FOLDERU — RAW nie niesie IMAGETYP w EXIF (#2, D-R-4; `kind_source='path'`).
     Precedens C1: ścieżka jako źródło faktu (wąski, jawny, dowodowy). Dopasowanie po SEGMENCIE

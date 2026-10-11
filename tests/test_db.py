@@ -32,7 +32,9 @@ def test_migracja_ustawia_user_version(tmp_path):
     # + 0031 camera.pixel_source (piksel matrycy wpisany ręką, AR-55)
     # + 0032 frame_note (uwagi klatki, tylko w bazie, WO-2)
     # + 0033 integration_input.asserted_by z rangą `harvest` (zbiór dokładny z żniw, AR-102)
-    assert db._user_version(con) == db.SCHEMA_VERSION == 33
+    # + 0034 stack_history + light_name_alias + podstawa rodowodu na integration
+    # + 0035 stack_variant (wariant kadru stosu powiązany z oryginałem, AR-54)
+    assert db._user_version(con) == db.SCHEMA_VERSION == 35
     con.close()
 
 

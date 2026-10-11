@@ -900,12 +900,16 @@ def test_object_cell_PODPOWIEDZ_z_folderu_dla_bezimiennego_stosu():
 def test_podpowiedz_stosu_w_drzewie_STACKS_czyta_OBIEKT_nie_filtr():
     """FC-4/D-V-9b: w układzie `STACKS\\<OBIEKT>\\<KONFIG>\\<FILTR>\\plik` rodzic pliku to FILTR -
     dawna reguła dawała `⟨NoFilter⟩`/`⟨Ha⟩` dla 182 ze 193 stosów archiwum. Reguła WBPP (dziadek
-    przy `master`) i reguła rodzica zostają dla układów spoza drzewa stosów."""
+    przy `master`) i reguła rodzica zostają dla układów spoza drzewa stosów. Kotwicą drzewa jest
+    `STACKS` pod korzeniem archiwum, który wiersz gridu niesie z `base_rows` (E5-3); bez korzenia
+    ścieżka z `STACKS` milczy, zamiast podpowiadać filtr."""
     for filtr in ("NoFilter", "Ha", "OIII", "SII", "G"):
-        assert queries.stack_folder(
-            rf"R:\ASTRO_\STACKS\vdB30\A140R_2600MM\{filtr}\vdB30_{filtr}.xisf") == "vdB30"
+        sciezka = rf"R:\ASTRO_\STACKS\vdB30\A140R_2600MM\{filtr}\vdB30_{filtr}.xisf"
+        assert queries.stack_folder(sciezka, r"R:\ASTRO_") == "vdB30"
+        assert queries.stack_folder(sciezka) is None
     stos = {"kind": "master_light", "object_canon": None, "object_raw": None,
-            "path": r"R:\ASTRO_\STACKS\Veil\76EDPH_2600MC\NoFilter\Veil_x.xisf"}
+            "path": r"R:\ASTRO_\STACKS\Veil\76EDPH_2600MC\NoFilter\Veil_x.xisf",
+            "library_root": r"R:\ASTRO_"}
     assert queries.object_cell(stos) == ("⟨Veil⟩", "hint")
     assert queries.stack_folder(r"R:\A\A7R3_105_LMC\master\masterLight.xisf") == "A7R3_105_LMC"
     assert queries.stack_folder(r"R:\A\IC443\masterLight.xisf") == "IC443"

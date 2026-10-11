@@ -9,17 +9,22 @@ UNIQUE, kubełki „czego nie wiemy"), ale różni je ŹRÓDŁO PEWNOŚCI i to j
     tylko `PixInsight:ProcessingHistory` (zeznanie pliku o samym sobie), i to na mniejszości
     plików. Stąd trójstan `asserted_by` (`history` / `window` / `user`) i strażniki niżej.
 
-DLACZEGO NIE DOPASOWUJEMY PO NAZWACH, skoro historia niesie ścieżki wejść: zmierzone 0/36 —
-historia wskazuje dysk roboczy i nazwy WBPP, archiwum trzyma nazwy z akwizycji. Historia służy
-więc do WERYFIKACJI zbioru wybranego oknem (`resolve.stack.inputs_contained` porównuje wielozbiór
-temperatur z nazw WBPP z temperaturami klatek okna), nie do wskazania klatek.
+NAZWY NAJPIERW, OKNO POTEM (AR-108, E4-9, D-1011-4). Historia niesie nazwy wejść z CHWILI OBRÓBKI;
+wobec nazw bieżących archiwum milczy (0/36 - Custos przemianował pliki po obróbce), ale z dawnymi
+nazwami lightów (`light_name_alias`: zapis przenosin Custos i zmiany nazw Horreum) daje pełny zbiór
+dla 28 z 33 stosów rangi `history` i 20 z 26 dawnych `history_mismatch` (sonda 2026-10-11, kopia
+pf4). Pełny, unikalny zbiór z nazw wskazuje klatki wprost (`lineage_basis='name'`), także poza
+oknem nagłówka. Gdzie nazwy milczą, historia WERYFIKUJE zbiór wybrany oknem
+(`resolve.stack.inputs_contained`: wielozbiór temperatur z nazw WBPP wobec temperatur klatek okna -
+`temp`, albo sam licznik - `count`), a okno szersze od zeznania dostaje werdykt „plik użył N z M
+klatek okna” (`used_rows`) zamiast odmowy.
 
 TRZY STRAŻNIKI — każdy gasi konkretną, ZMIERZONĄ nieprawdę (brief P-I §4.2):
   1. **okno zdegenerowane** (`DATE-END ≈ DATE-OBS + EXPTIME`) → ZERO relacji. 23 z 84 masterów
      starszego rocznika opisuje nagłówkiem JEDNĄ klatkę; bez tego strażnika stos dostałby jeden
      sub i wyglądałby wiarygodnie. Cicha nieprawda jest gorsza niż brak odpowiedzi.
   2. **rozjazd z historią** → ZERO relacji. Gdy plik zeznał, z czego powstał, a okno wybrało inny
-     zbiór, to okno się MYLI — a nie historia.
+     zbiór (nie nadzbiór - ten dostaje „N z M”), to okno się MYLI - a nie historia.
   3. **okna nierozłączne** (43 pary tej samej półki, reprocessingi tej samej nocy) → `ambiguous=1`.
      Relacje zostają, ale most do planera (I-2e) MUSI liczyć taki sub raz.
 
@@ -32,11 +37,14 @@ scaleniach). Inaczej naprawa `ED`→`ED120R` rozspójniłaby rodowód ze wszystk
 KROK ZBIORCZY PO `group` I `resolve` — tak jak `lineage` idzie po `calibrate`: dobór stoi na osi
 obiektu i osi teleskopu, więc puszczony przed nimi widziałby same `no_object`.
 
-ODCZYT PLIKU: historia mieszka w XML-u nagłówka XISF, którego baza nie lustruje (`cards` niosą
-karty FITS, nie własności PixInsighta). Ten moduł czyta ją więc z dysku — READ-ONLY, sam nagłówek
-(`scan.read_xisf_meta_full`), bez sekcji danych. Plik nieosiągalny nie jest błędem przebiegu:
-stos schodzi wtedy na ścieżkę okna i jest to POLICZONE (`history_unread`), nie przemilczane.
+HISTORIA Z BAZY (AR-87, 0034): historia mieszka w XML-u nagłówka XISF; skan zapisuje ją przy kopii
+(`stack_history`, kotwica = odcisk nagłówka), a uzupełnienie dociąga stosy sprzed migracji. Ten
+moduł czyta plik z dysku - READ-ONLY, sam nagłówek (`scan.read_xisf_meta_full`) - wyłącznie, gdy
+wiersza brak albo kotwica rozjechała się z nagłówkiem kopii, i wtedy odświeża wiersz
+(`history_reads`/`history_refreshed`). Plik nieosiągalny nie jest błędem przebiegu: stos schodzi
+na ścieżkę okna i jest to POLICZONE (`history_unread`), nie przemilczane.
 """
+import hashlib
 import json
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -57,6 +65,18 @@ REASON_NO_WINDOW = "no_window"
 REASON_NO_CANDIDATES = "no_candidates"
 REASON_TELESCOPE = "telescope_mismatch"
 REASON_OFFSET_UNKNOWN = "offset_unknown"
+
+# PODSTAWA rangi `history` (AR-108, D-1011-4) - tokeny CHECK-a 0034 (`integration.lineage_basis`)
+# i JEDYNY zbiór, z którego powierzchnia składa zdanie (`grid.lin.basis.{token}`, parytet w testach
+# i18n): `name` - pełny, unikalny zbiór po nazwach wejść historii; `temp` - podzbiór okna potwierdzony
+# temperaturami z nazw WBPP; `count` - nazwy bez temperatury, okno równe liczbie wejść.
+BASIS_NAME = "name"
+BASIS_TEMP = "temp"
+BASIS_COUNT = "count"
+LINEAGE_BASES = (BASIS_NAME, BASIS_TEMP, BASIS_COUNT)
+# Klucz licznika `by_basis` dla werdyktu „plik użył N z M klatek okna” - nie jest podstawą rangi
+# `history` (wiersze zostają `window`), więc nie wchodzi do `LINEAGE_BASES` ani do bazy.
+BASIS_SUBSET = "subset"
 
 EXP_TOL_FLOOR_S = 0.5
 """Podłoga tolerancji ekspozycji — poniżej niej próg nie schodzi nawet dla krótkich klatek."""
@@ -140,6 +160,23 @@ class StackLineageSummary:
                                # tu „nikt nic nie zgubił — rodowód stoi na dowodzie mocniejszym"
     reasons: dict = field(default_factory=dict)     # powód -> licznik (integracje bez wejść)
     cancelled: bool = False    # przerwane w fazie planu (czytanie nagłówków) - zero zapisów
+    # HISTORIA Z BAZY (AR-87): falsyfikatorem jest `history_reads` - druga Dostawa ma czytać ZERO
+    # nagłówków stosów z udziału. Odczyt pliku zostaje drogą zapasową (brak wiersza `stack_history`
+    # albo rozjazd jego kotwicy z odciskiem kopii); `history_refreshed` = ile wierszy taki odczyt
+    # przepisał w bazie (następny przebieg wraca do bazy).
+    history_reads: int = 0     # nagłówki stosów przeczytane z dysku w tym przebiegu. GRANICA: kopia
+                               # bez odcisku nagłówka (`header_hash` NULL - W1) nie dostaje wiersza
+                               # historii, więc jej odczyt zostaje przy KAŻDYM przebiegu; to stan,
+                               # nie nieszczelność (pf4 2026-10-11: 0 takich stosów)
+    history_refreshed: int = 0
+    # PODSTAWA RODOWODU (AR-108, E4-9): na czym stoi plan każdego stosu z wejściami - token
+    # `LINEAGE_BASES` dla rangi `history`, `BASIS_SUBSET` dla werdyktu „plik użył N z M klatek okna”
+    # (wiersze `window`), `"window"` dla stosu bez historii integracji (wiersze okna bez zeznania
+    # pliku); `outside_window` - ile zbiorów z nazw sięga poza okno nagłówka;
+    # `names_ambiguous` - ile stosów odmówiło zbioru z nazw, bo nazwa trafia dwie klatki.
+    by_basis: dict = field(default_factory=dict)
+    outside_window: int = 0
+    names_ambiguous: int = 0
 
 
 def _bump_kept(s, p):
@@ -201,7 +238,8 @@ def _masters(con):
         "WHERE f.kind = 'master_light' AND f.superseded_by IS NULL ORDER BY f.id").fetchall()
     kopie = {}
     for k in con.execute(
-            "SELECT l.id, l.frame_id, l.path, l.hdr_filter, l.hdr_imagetyp, l.hdr_object, l.hdr_telescop, "
+            "SELECT l.id, l.frame_id, l.path, l.header_hash, l.hdr_filter, l.hdr_imagetyp, "
+            "       l.hdr_object, l.hdr_telescop, "
             "       l.hdr_instrume, l.hdr_exptime, l.hdr_xbinning, l.hdr_date_obs "
             "FROM location l JOIN frame f ON f.id = l.frame_id "
             "WHERE f.kind = 'master_light' AND f.superseded_by IS NULL AND l.present = 1 "
@@ -209,17 +247,23 @@ def _masters(con):
         kopie.setdefault(k["frame_id"], []).append(k)
     out = []
     for r in rows:
+        # KOPIA WYBRANA niesie też `location_id` i `header_hash` (AR-87): historia z bazy
+        # (`stack_history`) należy do KOPII i wolno jej użyć tylko przy równości kotwicy z odciskiem
+        # nagłówka TEJ kopii, którą wybrała reguła niżej - nie dowolnej kopii klatki.
         obecne = kopie.get(r["frame_id"], [])
-        path = obecne[0]["path"] if obecne else None
+        wybrana = obecne[0] if obecne else None
         kotwica = repo.hand_lead_location(con, r["frame_id"]) if len(obecne) > 1 else None
         if kotwica is not None:
-            path = next(k["path"] for k in obecne if k["id"] == kotwica)
+            wybrana = next(k for k in obecne if k["id"] == kotwica)
         elif len(obecne) > 1 and r["raw_json"]:
             zeznanie = copy_testimony(json.loads(r["raw_json"]))
             zrodlo = next((k for k in obecne if all(k[p] == v for p, v in zeznanie.items())), None)
             if zrodlo is not None:
-                path = zrodlo["path"]
-        out.append({**dict(r), "path": path})
+                wybrana = zrodlo
+        out.append({**dict(r),
+                    "path": wybrana["path"] if wybrana is not None else None,
+                    "location_id": wybrana["id"] if wybrana is not None else None,
+                    "header_hash": wybrana["header_hash"] if wybrana is not None else None})
     return out
 
 
@@ -644,8 +688,11 @@ def _shelf_ambiguous(plany):
 
 
 def _read_history_xml(path):
-    """Tekst XML nagłówka XISF spod ścieżki — READ-ONLY, sam nagłówek. Import lokalny, bo `scan`
-    ciągnie astropy, a ten moduł bywa wołany tam, gdzie ładowanie astropy jest zbędne.
+    """SUROWE bajty XML nagłówka XISF spod ścieżki - READ-ONLY, sam nagłówek. Import lokalny, bo `scan`
+    ciągnie astropy, a ten moduł bywa wołany tam, gdzie ładowanie astropy jest zbędne. Bajty, nie
+    tekst: odcisk odświeżenia historii (`_plan`) liczy się z nich tak samo jak `header_hash` kopii
+    (sha1 bajtów XML) - tekst po `decode(..., "replace")` nie wraca do tych samych bajtów, gdy nagłówek
+    niesie bajt spoza UTF-8. Czytnik wstrzykiwany (testy) może oddać tekst.
 
     Format INNY niż XISF oddaje `None`, a nie wyjątek: historia PixInsighta jest własnością XISF-a
     i jej brak w FITS-ie nie jest awarią odczytu. Bez tego rozdziału stos zapisany jako FITS
@@ -654,18 +701,111 @@ def _read_history_xml(path):
     from .scan import XISF_SUFFIXES, read_xisf_meta_full
     if not str(path).lower().endswith(XISF_SUFFIXES):
         return None
-    return read_xisf_meta_full(path).xml_bytes.decode("utf-8", "replace")
+    return read_xisf_meta_full(path).xml_bytes
 
 
-def _plan(con, row, *, xml_reader):
-    """Materiał decyzji dla JEDNEJ klatki stosu — bez zapisu (czysta faza, testowalna osobno)."""
+def _stored_histories(con):
+    """Historia stosów zapisana w bazie (0034) → `{location_id: (hdr_hash, History)}` - DWA
+    zapytania na przebieg (wejścia i głowy; wejścia 193 stosów to kilka tysięcy wierszy), nie
+    zapytanie per stos."""
+    wejscia = {}
+    for r in con.execute(
+            "SELECT location_id, path, enabled, has_drizzle, temp_c FROM stack_history_input "
+            "ORDER BY location_id, seq"):
+        wejscia.setdefault(r["location_id"], []).append(rstack.StackInput(
+            path=r["path"], enabled=bool(r["enabled"]), has_drizzle=bool(r["has_drizzle"]),
+            set_temp_c=r["temp_c"]))
+    return {r["location_id"]: (r["hdr_hash"], rstack.History(
+                r["declared_rows"], wejscia.get(r["location_id"], ()), r["tool"],
+                created=r["creation_time"]))
+            for r in con.execute(
+                "SELECT location_id, hdr_hash, declared_rows, tool, creation_time FROM stack_history")}
+
+
+def names_index_pairs(con):
+    """Świadectwa NAZW lightów archiwum (AR-108, D-1011-4) → `(biezace, dawne)`, pary `(frame_id,
+    rdzeń)`: `biezace` - ścieżki lokacji (obecnych i nieobecnych), `dawne` - dawne ścieżki z dziennika
+    zmian nazw Horreum (`location.renamed`, sprzed aliasów) i aliasy `light_name_alias` (zapis
+    przenosin Custos, zmiany nazw od 0034). Jeden `raw_stem` po stronie ścieżek; alias jest już
+    rdzeniem. Podział idzie do `resolve.stack.NameIndex.build` (luźny rdzeń tylko z dawnych nazw).
+    Klatki zastąpione poza indeksem - sierota i następczyni dzielą ścieżkę, więc każda ich nazwa
+    byłaby niejednoznaczna (lustro warunku okna w `_window_candidates`). Ten sam materiał liczy
+    niejednoznaczność w skrypcie importu aliasów - jedna definicja indeksu dla obu."""
+    biezace = [(r[0], rstack.raw_stem(r[1])) for r in con.execute(
+        "SELECT l.frame_id, l.path FROM location l JOIN frame f ON f.id = l.frame_id "
+        "WHERE f.kind = 'light' AND f.superseded_by IS NULL")]
+    dawne = [(r[0], rstack.raw_stem(r[1])) for r in con.execute(
+        "SELECT l.frame_id, json_extract(e.payload, '$.before') FROM event e "
+        "JOIN location l ON e.target = 'location:' || l.id JOIN frame f ON f.id = l.frame_id "
+        "WHERE e.verb = 'location.renamed' AND f.kind = 'light' AND f.superseded_by IS NULL "
+        "AND json_extract(e.payload, '$.before') IS NOT NULL")]
+    dawne += [(r[0], r[1]) for r in con.execute(
+        "SELECT a.frame_id, a.stem FROM light_name_alias a JOIN frame f ON f.id = a.frame_id "
+        "WHERE f.kind = 'light' AND f.superseded_by IS NULL")]
+    return biezace, dawne
+
+
+def _names_index(con):
+    """Indeks nazw lightów archiwum dla `_plan` (`names_index_pairs` → `NameIndex`)."""
+    biezace, dawne = names_index_pairs(con)
+    return rstack.NameIndex.build(biezace, dawne)
+
+
+def _poza_przedzialem(con, frame_ids, start, end):
+    """Czy któraś klatka zbioru z nazw leży POZA SUROWYM przedziałem czasu nagłówka stosu
+    (`DATE-OBS`…`DATE-END`) - flaga „poza oknem nagłówka” mówi o CZASIE, nie o doborze okna: klatka
+    w czasie okna, którą `_in_window` odsiał innym filtrem albo teleskopem na karcie, w oknie leży.
+    Bez przedziału (brak któregoś końca) albo bez `DATE-OBS` klatki - poza. Czas przez
+    `naming.header_dt` (SPOT parser ISO), jak w doborze okna."""
+    if start is None or end is None:
+        return True
+    for (date_obs,) in con.execute(
+            "SELECT h.date_obs FROM frame f LEFT JOIN header h ON h.frame_id = f.id "
+            "WHERE f.id IN (SELECT value FROM json_each(?))", (json.dumps(list(frame_ids)),)):
+        t = header_dt(date_obs)
+        if t is None or not (start <= t <= end):
+            return True
+    return False
+
+
+def _plan(con, row, *, xml_reader, stored=None, names=None):
+    """Materiał decyzji dla JEDNEJ klatki stosu - bez zapisu (czysta faza, testowalna osobno).
+
+    HISTORIA Z BAZY, PLIK ZAPASOWO (AR-87): `stored` (`_stored_histories`) daje historię kopii
+    wybranej w `_masters`, gdy kotwica wiersza równa się odciskowi nagłówka tej kopii - wtedy
+    pliku nie czytamy. Brak wiersza albo rozjazd kotwicy → odczyt pliku jak dotąd, a gdy odcisk
+    PRZECZYTANEGO tekstu (sha1 bajtów XML, ta sama definicja co `header_hash` kopii XISF) równa się
+    odciskowi kopii, plan niesie `history_refresh` - przebieg zapisze go w fazie zapisu (atomowo,
+    z CAS w klindze). Czytnik wstrzyknięty w testach oddaje tekst, którego odcisk z kopią się nie
+    zgadza - wtedy plan nie odświeża niczego.
+
+    KOLEJNOŚĆ ŹRÓDEŁ WEJŚĆ (D-1011-4, E4-9): (a) NAZWY wejść historii w indeksie `names`
+    - pełny, unikalny zbiór wygrywa z oknem, także poza nim i przy oknie pustym albo
+    zdegenerowanym (`outside_window`); (b) temperatury z nazw WBPP wobec okna (`temp`/`count`);
+    (c) podzbiór temperatur okna → wiersze okna z werdyktem „plik użył N z M” (`used_rows`), bez
+    powodu; (d) reszta → `history_mismatch`. Ranga `history` dla (a) i (b), `window` dla (c)."""
     header = json.loads(row["raw_json"]) if row["raw_json"] else {}
-    xml, unread, brak_lokacji = None, False, False
-    if row["path"]:
+    xml, unread, brak_lokacji, przeczytany, odswiez = None, False, False, False, None
+    zapis = (stored or {}).get(row.get("location_id"))
+    historia = None
+    if zapis is not None and row.get("header_hash") and zapis[0] == row["header_hash"]:
+        historia = zapis[1]
+    elif row["path"]:
+        surowe = None
         try:
-            xml = xml_reader(row["path"])
+            surowe = xml_reader(row["path"])
+            przeczytany = surowe is not None   # FITS: czytnik oddaje None bez I/O - to nie odczyt
         except Exception:              # plik zniknął/leży na odłączonym dysku — patrz docstring
             unread = True
+        if surowe is not None:
+            # Odcisk z SUROWYCH bajtów (`_read_history_xml`); czytnik tekstowy (testy) - z UTF-8.
+            if isinstance(surowe, (bytes, bytearray)):
+                xml = bytes(surowe).decode("utf-8", "replace")
+            else:
+                xml, surowe = surowe, surowe.encode("utf-8")
+            if (row.get("location_id") is not None and row.get("header_hash")
+                    and hashlib.sha1(surowe).hexdigest() == row["header_hash"]):
+                odswiez = (row["location_id"], row["header_hash"], rstack.read_history(xml))
     else:
         # BRAK OBECNEJ LOKACJI TO TEN SAM STAN dla strażnika, co błąd odczytu: pliku nie ma pod
         # ręką, więc jego zeznania NIE ZNAMY. Dla POWIERZCHNI to jednak dwie różne rzeczy i dwie
@@ -673,7 +813,7 @@ def _plan(con, row, *, xml_reader):
         # (skasowany plik roboczy WBPP, stos przeniesiony). Stąd drugi licznik: jeden fakt
         # dla decyzji, dwa dla człowieka.
         unread = brak_lokacji = True
-    t = rstack.read_testimony(header, xml)
+    t = rstack.read_testimony(header, xml, history=historia)
     start, end = t.window_start, t.window_end
     # KOERCJA PRZY WEJŚCIU, nie w SQL-u: XISF oddaje KAŻDĄ kartę jako tekst (`_put(header,
     # keyword, value_raw)`), więc `EXPTIME` stosu to `'600.00'`, a `header.exptime` klatki to REAL.
@@ -689,31 +829,52 @@ def _plan(con, row, *, xml_reader):
         # PÓŁKA BEZ EKSPOZYCJI (R3) — zgodność ekspozycji rozstrzyga test PARY w `_shelf_ambiguous`,
         # bo próg D-DR-2 nie jest przechodni, a klucz słownika zakłada równoważność (powód tam).
         "shelf": (row["object_id"], row["filter_canon"], row["telescope_id"]),
+        # Podstawa (0034): `basis` - token `LINEAGE_BASES` przy randze `history`, `used_rows` - N
+        # werdyktu „N z M”, `outside_window` - zbiór z nazw sięga poza okno; `names_ambiguous` -
+        # zbioru z nazw odmówiono, bo nazwa trafia dwie klatki (licznik przebiegu).
+        "basis": None, "used_rows": None, "outside_window": False, "names_ambiguous": False,
+        "history_read": przeczytany, "history_refresh": odswiez,
     }
     if row["object_id"] is None:
         plan["reason"] = REASON_NO_OBJECT
         return plan
-    if start is None or end is None or t.degenerate:
+    okno_jest = not (start is None or end is None or t.degenerate)
+    kand, rozjazd, raw_bez_odniesienia = [], False, 0
+    if okno_jest:
+        # GUARD ZEZNANIA (R3) STOI W `okno_jest` I TO JEST SPRAWDZONE, NIE ZAŁOŻONE: master bez
+        # `EXPTIME` tu nie wchodzi, bo `testimony.degenerate` jest wtedy `True` z definicji („brak
+        # czasu ekspozycji też jest True — nie mamy wtedy czym ograniczyć doboru", `resolve/stack.py`).
+        # Własny guard na `exptime is None` był tu przez chwilę i został ZDJĘTY jako martwy - pas
+        # nadzbioru wokół `None` nigdy nie powstaje. Pinuje to test imienny
+        # `test_master_bez_ekspozycji_konczy_na_oknie_zdegenerowanym`.
+        kand, rozjazd, raw_bez_odniesienia = _in_window(
+            _window_candidates(con, object_id=row["object_id"], exptime=exptime),
+            start=start, end=end, filter_canon=row["filter_canon"],
+            telescope_id=row["telescope_id"], exptime=exptime, utc_offset_min=row["utc_offset_min"])
+        plan["telescope_mismatch"] = rozjazd
+        # UWAGA OBOK WERDYKTU (G2-1d): RAW-y, których nie da się umieścić w czasie, mówią ZAWSZE -
+        # także gdy rodowód domknął się z innego materiału albo werdykt brzmi inaczej. Jedyny wyjątek
+        # to werdykt `offset_unknown`, który mówi dokładnie to samo (niżej; CHECK 0020 pilnuje).
+        # Zero znaczy „brak uwagi", więc idzie jako NULL - stan bez uwagi ma jedną postać.
+        plan["raw_unreferenced"] = raw_bez_odniesienia or None
+    if t.rows is not None and names is not None:
+        # (a) NAZWY PRZED OKNEM (AR-108, E4-9): plik zeznaje, z czego powstał, a nazwy jego wejść
+        # trafiają klatki archiwum jedna w jedną - to jest zbiór, nie kandydat. Wygrywa z oknem
+        # także wtedy, gdy wychodzi poza nie (4 stosy E4-9 z oknem za wąskim) albo okna nie ma
+        # (`no_candidates`, okno zdegenerowane); flaga mówi to człowiekowi. Odmowa (wejście bez
+        # trafienia albo nazwa dwóch klatek) schodzi do testu temperatur - nie do wyboru.
+        werdykt, po_nazwie = rstack.inputs_by_name(t.inputs, names)
+        plan["names_ambiguous"] = werdykt == rstack.NAMES_AMBIGUOUS
+        if werdykt == rstack.NAMES_FULL:
+            # `telescope_mismatch` i uwaga RAW zostały ustawione wyżej z okna - zostają przy planie.
+            plan["inputs"] = [{"frame_id": fid} for fid in po_nazwie]
+            plan["asserted_by"], plan["basis"] = "history", BASIS_NAME
+            plan["outside_window"] = _poza_przedzialem(con, po_nazwie, start, end)
+            return plan
+    if not okno_jest:
         # Okno bez końca i okno o długości jednej klatki to ten sam brak: nie ma czym wybierać.
         plan["reason"] = REASON_NO_WINDOW if start is None or end is None else REASON_DEGENERATE
         return plan
-    # GUARD ZEZNANIA (R3) STOI WYŻEJ I TO JEST SPRAWDZONE, NIE ZAŁOŻONE: master bez `EXPTIME` nie
-    # dochodzi tu wcale, bo `testimony.degenerate` jest wtedy `True` z definicji („brak czasu
-    # ekspozycji też jest True — nie mamy wtedy czym ograniczyć doboru", `resolve/stack.py`), więc
-    # plan kończy się na `degenerate_window` linijkę wyżej. Własny guard na `exptime is None` był
-    # tu przez chwilę i został ZDJĘTY jako martwy — pas nadzbioru wokół `None` nigdy nie powstaje,
-    # a kod na nieosiągalny stan udaje ochronę, której nikt nie testuje. Pinuje to test imienny
-    # `test_master_bez_ekspozycji_konczy_na_oknie_zdegenerowanym`.
-    kand, rozjazd, raw_bez_odniesienia = _in_window(
-        _window_candidates(con, object_id=row["object_id"], exptime=exptime),
-        start=start, end=end, filter_canon=row["filter_canon"], telescope_id=row["telescope_id"],
-        exptime=exptime, utc_offset_min=row["utc_offset_min"])
-    plan["telescope_mismatch"] = rozjazd
-    # UWAGA OBOK WERDYKTU (G2-1d): RAW-y, których nie da się umieścić w czasie, mówią ZAWSZE -
-    # także gdy rodowód domknął się z innego materiału albo werdykt brzmi inaczej. Jedyny wyjątek
-    # to werdykt `offset_unknown`, który mówi dokładnie to samo (niżej; CHECK 0020 pilnuje).
-    # Zero znaczy „brak uwagi", więc idzie jako NULL - stan bez uwagi ma jedną postać.
-    plan["raw_unreferenced"] = raw_bez_odniesienia or None
     if not kand:
         # KOLEJNOŚĆ POWODÓW = KOLEJNOŚĆ RECEPT, nie hierarchia ważności. Rozjazd teleskopu idzie
         # pierwszy, bo kandydaci BYLI i odrzuciła ich oś — recepta („napraw kartę") jest wtedy
@@ -730,11 +891,22 @@ def _plan(con, row, *, xml_reader):
     if t.rows is None:
         plan["inputs"], plan["asserted_by"] = kand, "window"
         return plan
-    ok, _poza, _nadwyzka = rstack.inputs_contained(t, [r["ccd_temp"] for r in kand])
-    if not ok:
-        plan["reason"] = REASON_MISMATCH        # strażnik 2: myli się OKNO, nie zeznanie pliku
+    ok, poza, nadwyzka = rstack.inputs_contained(t, [r["ccd_temp"] for r in kand])
+    if ok:
+        # (b) Temperatury z nazw WBPP potwierdzają zbiór okna; bez ani jednej czytelnej temperatury
+        # test sprowadza się do licznika (`count`) - podstawa mówi to wprost (D-1011-3).
+        plan["inputs"], plan["asserted_by"] = kand, "history"
+        plan["basis"] = BASIS_TEMP if t.declared_temps else BASIS_COUNT
         return plan
-    plan["inputs"], plan["asserted_by"] = kand, "history"
+    if not poza and nadwyzka > t.unreadable_inputs:
+        # (c) WBPP użył PODZBIORU okna (21 z 26 stosów E4-9: okno za szerokie o 1..34 klatek).
+        # Których klatek - plik bez nazw archiwum nie mówi, więc wiersze zostają kandydatami okna
+        # (`window`), a werdykt mówi ile: N z historii, M = wiersze okna. Nie jest to powód odmowy -
+        # okno nie myli się co do materiału, tylko jest go więcej, niż weszło.
+        plan["inputs"], plan["asserted_by"] = kand, "window"
+        plan["used_rows"] = sum(1 for i in t.inputs if i.enabled)
+        return plan
+    plan["reason"] = REASON_MISMATCH            # (d) strażnik 2: myli się OKNO, nie zeznanie pliku
     return plan
 
 
@@ -761,12 +933,17 @@ def run_stack_lineage(con, *, now, actor="stacks", xml_reader=None, progress=Non
     reader = xml_reader if xml_reader is not None else _read_history_xml
     rows = _masters(con)
     s.stacks = len(rows)
+    # Historia i nazwy RAZ na przebieg (AR-87, AR-108): dwa zapytania zamiast zapytania per stos.
+    zapisane = _stored_histories(con)
+    nazwy = _names_index(con)
     plany = []
     for i, row in enumerate(rows, 1):
         if should_cancel is not None and should_cancel():
             s.cancelled = True
             return s
-        plany.append(_plan(con, row, xml_reader=reader))
+        plan = _plan(con, row, xml_reader=reader, stored=zapisane, names=nazwy)
+        s.history_reads += plan["history_read"]
+        plany.append(plan)
         if progress is not None:
             progress(i, len(rows), row["frame_id"])
     ambi = _shelf_ambiguous(plany)
@@ -779,6 +956,14 @@ def run_stack_lineage(con, *, now, actor="stacks", xml_reader=None, progress=Non
         t = p["testimony"]
         s.history_unread += p["history_unread"]
         s.no_location += p["no_location"]
+        s.names_ambiguous += p["names_ambiguous"]
+        if p["history_refresh"] is not None:
+            # Odczyt pliku w planie (brak wiersza historii albo rozjazd kotwicy) zostawia historię
+            # w bazie - następny przebieg tego stosu nie czyta udziału. CAS w klindze: nagłówek
+            # kopii zmieniony od planu odmawia zapisu i zostaje drogą zapasową.
+            loc_id, hdr, historia = p["history_refresh"]
+            s.history_refreshed += repo.record_stack_history(
+                con, location_id=loc_id, hdr_hash=hdr, history=historia, now=now, actor=actor)
         # STRAŻNIK 4 — decyzja PRZED policzeniem i PRZED zapisem CZEGOKOLWIEK. Reguła brzmi „bez
         # zeznania nie dotykamy tego stosu", więc obejmuje GŁOWĘ integracji tak samo jak wiersze.
         # Guard postawiony za `upsert_integration` chronił tylko wiersze i przez to sam produkował
@@ -892,6 +1077,17 @@ def run_stack_lineage(con, *, now, actor="stacks", xml_reader=None, progress=Non
             driz_v = sum(1 for x in t.inputs if x.has_drizzle) if t.rows is not None else None
             dis_v = sum(1 for x in t.inputs if not x.enabled) if t.rows is not None else None
         odcisk = stan["integ_hash"] if chroniony else _fingerprint(con, wejscia)
+        # PODSTAWA idzie za WIERSZAMI, jak odcisk: chroniony rodowód (wiersze nietknięte) zachowuje
+        # podstawę, na której te wiersze stanęły; plan, który właśnie pisze wiersze, daje swoją.
+        if chroniony:
+            basis_v, poza_v, uzyte_v = (stan["lineage_basis"], stan["outside_window"],
+                                        stan["used_rows"])
+        else:
+            basis_v, poza_v, uzyte_v = p["basis"], int(p["outside_window"]), p["used_rows"]
+            if not p["reason"]:
+                _bump(s.by_basis, p["basis"] or (BASIS_SUBSET if p["used_rows"] is not None
+                                                 else p["asserted_by"]))
+                s.outside_window += bool(p["outside_window"])
         iid, _ = repo.upsert_integration(
             con, master_frame_id=p["frame_id"], integ_hash=odcisk, tool=tool_v,
             window_start=p["start"].isoformat() if p["start"] else None,
@@ -900,7 +1096,8 @@ def run_stack_lineage(con, *, now, actor="stacks", xml_reader=None, progress=Non
             degenerate=int(t.degenerate), ambiguous=int(p["frame_id"] in ambi),
             telescope_mismatch=int(p["telescope_mismatch"]),
             unresolved_reason=p["reason"], raw_unreferenced=p["raw_unreferenced"],
-            creation_time=created_v, now=now, actor=actor)
+            creation_time=created_v, lineage_basis=basis_v, outside_window=poza_v,
+            used_rows=uzyte_v, now=now, actor=actor)
         if chroniony:
             _bump_kept(s, p)            # głowa zaktualizowana, WIERSZE nietknięte
             pominiete.append(p["frame_id"])
@@ -977,7 +1174,8 @@ def _zapisany_stan(con, master_frame_id):
     skoro właśnie decyduje, czy w ogóle pisać."""
     glowa = con.execute(
         "SELECT i.id, i.tool, i.declared_rows, i.drizzle_inputs, i.disabled_inputs, i.integ_hash, "
-        "       i.ambiguous, i.telescope_mismatch, i.creation_time "
+        "       i.ambiguous, i.telescope_mismatch, i.creation_time, i.lineage_basis, "
+        "       i.outside_window, i.used_rows "
         "FROM integration i WHERE i.master_frame_id = ?",
         (master_frame_id,)).fetchone()
     if glowa is None:
@@ -1162,20 +1360,63 @@ def inputs_of(con, master_frame_id):
         "WHERE i.master_frame_id = ? ORDER BY ii.input_frame_id",
         (master_frame_id,)).fetchall()
 
+
+def release_object_check(con, *, master_sha1_data, object_canon):
+    """READ-ONLY: obiekt stosu wobec obiektu WYDANIA, z którego żniwa go wciągnęły (AR-103) → `None`
+    (nie ma czego porównać) albo `{verdict, frame_id, stack_object_id, stack_source, stack_cleared_id,
+    stack_canon, release_object_id, release_canon}`.
+
+    PO CO: obiekt stosu daje mu po Dostawie nagłówek (`OBJECT` przepisany przez WBPP z lightów)
+    - a żniwa wiedzą, dla jakiego obiektu Horreum wydało lighty (manifest wydania). Lighty
+    przypisane ręką wbrew nagłówkowi albo nazwa potoczna bez aliasu dają stos z INNYM obiektem
+    albo BEZ obiektu, choć rodowód wskazuje lighty wydania. Gospodarz mówi o tym zdaniem
+    z gestem; ta funkcja niczego nie zapisuje - cicha podmiana obiektu z nagłówka byłaby
+    zamalowaniem faktu z pliku.
+
+    `verdict`: `zgodny` (ten sam obiekt), `inny` (stos ma inny obiekt), `brak` (stos bez obiektu -
+    także nagrobek ręki `user_cleared`), `wydanie_poza_baza` (kanonu wydania ta baza nie zna - np.
+    karta wydania z innej bazy; porównania nie ma, gestu też nie: `release_object_id` = `None`).
+    Porównanie po `object.id` kanonu wydania. `stack_object_id`, `stack_source` i `stack_cleared_id`
+    (pamięć nagrobka) to PEŁNY stan, który gest ręki dostaje jako oczekiwany
+    (`repo.user_override_stack_object`) - sama para obiekt+źródło przeżywa sekwencję „nagrobek X →
+    przypisz Y → zdejmij Y”. `None`: wydanie bez kanonu, klatka stosu nieznana bazie, niebędąca
+    stosem, wycofana albo zastąpiona (`retired_at`/`superseded_by` - martwa tożsamość) - gest nie
+    miałby celu."""
+    if not object_canon:
+        return None
+    stos = con.execute(
+        "SELECT f.id, f.kind, f.retired_at, f.superseded_by, f.object_id, f.object_source, "
+        "       f.object_cleared_id, o.canon "
+        "FROM frame f LEFT JOIN object o ON o.id = f.object_id WHERE f.sha1_data = ?",
+        (master_sha1_data,)).fetchone()
+    if (stos is None or stos["kind"] != "master_light" or stos["retired_at"] is not None
+            or stos["superseded_by"] is not None):
+        return None
+    wydanie = con.execute("SELECT id FROM object WHERE canon = ?", (object_canon,)).fetchone()
+    if wydanie is None:
+        verdict = "wydanie_poza_baza"
+    elif stos["object_id"] is None:
+        verdict = "brak"
+    else:
+        verdict = "zgodny" if stos["object_id"] == wydanie["id"] else "inny"
+    return {"verdict": verdict, "frame_id": stos["id"], "stack_object_id": stos["object_id"],
+            "stack_source": stos["object_source"], "stack_cleared_id": stos["object_cleared_id"],
+            "stack_canon": stos["canon"], "release_object_id": None if wydanie is None else wydanie["id"],
+            "release_canon": object_canon}
+
 # --- TODO-DŁUG (z kolejki sesji, dieta 2026-08-10; pełne brzmienia: archiwum aa) ---
-# TODO-DŁUG(E4-9): 26 stosów history_mismatch (0810). Dawna teza „wejść nie ma w archiwum" jest
-#   OBALONA pomiarem niżej - rozjazd bierze się z okna doboru (przeważnie ZA SZEROKIEGO), nie
-#   z braku materiału. NIE gasić rozluźnieniem okna; kierunek naprawy czeka na decyzję Zdzinia.
-#   POMIAR 2026-09-26 (pf4 read-only, historia 26 plików z R:, 1559 nazw wejść): wynik >0, a TEZA
-#   UPADA W OBU CZŁONACH. (a) Nazwa: 12/1559 ma odpowiednik w `location` co do rdzenia nazwy -
-#   wszystkie z JEDNEGO stosu (NGC5907 Ha 300s, 12/12; historia niesie tam nazwy archiwum).
-#   (b) Pokrycie: 1402/1402 nazw z temperaturą ma odpowiednik w puli obiektu (obiekt+filtr+
-#   ekspozycja+teleskop, każda noc) - wejścia LEŻĄ w archiwum; licznością pula pokrywa 1558/1559.
-#   (c) Kierunek rozjazdu: 21/26 okno za SZEROKIE (deklarowany zbiór mieści się w oknie, nadwyżka
-#   1..34 klatek - WBPP użył podzbioru; okno 1670 wobec 1559 deklarowanych), 4/26 za wąskie
-#   (IC405 SII, IC5070 OIII, NGC2237 OIII/SII: 4/5/6/6 wejść poza oknem, obecne w puli), 1/26
-#   zgodne z tezą (IC405 Ha 600s: 3 deklarowane, w puli archiwum 2). Rozluźnienie okna dalej NIE
-#   jest naprawą - psułoby 21 stosów, żeby łatać 4. Temperatura to słaby świadek (635/1559 nazw
-#   ma -10,00), więc (b) to zgodność wielozbioru, nie tożsamość klatki. Wariant rozwojowy do
-#   rozstrzygnięcia: dopasowanie PO NAZWIE tam, gdzie historia niesie nazwy archiwum (NGC5907:
-#   12 wejść `history` z dowodem), i test PODZBIORU dla okna szerszego od zeznania.
+# TODO-DŁUG(E4-9): reszta po dopasowaniu PO NAZWIE i werdykcie „N z M” (D-1011-4).
+#   Stan na kopii pf4 po imporcie aliasów Custos (2026-10-11): `history_mismatch` 26 → 1 - 20 stosów
+#   dostaje pełny zbiór z nazw (16 podzbiór okna, 4 poza oknem: 16870 16875 16882 16883 z flagą
+#   `outside_window`), 5 bez nazw (16847 16849 16852 16901 16903) dostaje werdykt „plik użył N z M
+#   klatek okna” na wierszach `window`; `no_candidates` 16865 i 16895 mają zbiór z nazw poza oknem.
+#   OTWARTE: (a) tych 5 stoi na kandydatach okna - KTÓRYCH klatek WBPP nie użył, wie tylko człowiek
+#   (werdykt ręki w panelu) albo nazwa z czasu obróbki, której zapis przenosin nie niesie; (b) 5
+#   stosów rangi `history` bez nazw (16727-16729, 16878 - podstawa `temp`; 16871 - `count`) dalej
+#   stoi na temperaturze z nazwy suba albo na liczniku - przypadku konwencji WBPP (D-1011-3),
+#   z podstawą widoczną w panelu; (c) 16860 (`history_mismatch`) i 16862 (`no_candidates`) - wejście
+#   `…_0000_…` to bliźniak `…_0000a_…` z kolizji Custos bez drugiego świadka (odcisku, lokacji), więc
+#   aliasu nie ma; decyzja ręki w panelu albo świadek spoza zapisu przenosin. Rozluźnienie okna dalej
+#   NIE jest naprawą (psułoby 21, żeby łatać 4). Wariant rozwojowy: nazwy z czasu obróbki dla tych
+#   12 stosów z innego świadka (kopie robocze WBPP, `.xdrz`/`.xnml` obok stosu) - do sondy, nie do
+#   zgadywania.

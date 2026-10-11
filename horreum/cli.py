@@ -153,6 +153,20 @@ def main(argv=None):
                                  "PO `group` i `resolve`)")
     p_slin.add_argument("db", help="ścieżka pliku bazy")
 
+    # WARIANT KADRU (AR-54): autocropy ze starego drzewa obróbki jako wersje mastera w `STACKS`, obok
+    # kopii oryginału. DRY domyślnie (plan z bazy i nagłówków); `--apply` kopiuje i zostawia zeznanie
+    # pary - bazy nie rusza, relację zapisze najbliższa Dostawa po skanie `STACKS`.
+    p_sv = sub.add_parser("stack-versions",
+                          help="autocropy starego drzewa jako wersje mastera w STACKS "
+                               "(DRY domyslnie; --apply kopiuje)")
+    p_sv.add_argument("root", help="korzeń starego drzewa obróbki (tylko odczyt)")
+    p_sv.add_argument("db", help="ścieżka pliku bazy")
+    p_sv.add_argument("--archive", default=None,
+                      help="korzeń archiwum (biblioteka STACKS pod nim); domyślnie z bazy")
+    p_sv.add_argument("--apply", action="store_true", help="WYKONAJ kopie (bez tego DRY)")
+    p_sv.add_argument("--limit", type=int, default=0,
+                      help="ile pozycji wypisać na status (0 = wszystkie)")
+
     p_delta = sub.add_parser("delta", help="delta do review (read-only): %% obiektu + nierozstrzygnięte")
     p_delta.add_argument("db", help="ścieżka pliku bazy")
 
@@ -301,6 +315,46 @@ def main(argv=None):
     p_sup.add_argument("--limit", type=int, default=20,
                        help="ile par i odmów wypisać w raporcie (domyślnie 20)")
 
+    # RODZAJ Z HISTORII (AR-96): reguła rodzaju urosła, pliki nie - zwykły skan ich nie przeliczy
+    # (brama mtime, rodzaj przepisywany tylko przy zmianie odcisku nagłówka). Udział tylko czytany.
+    p_rk = sub.add_parser("rederive-kind",
+                          help="przelicz rodzaj klatek XISF wg reguly z historii integracji "
+                               "(master zapisany jako FLAT); czyta naglowki obecnych kopii, "
+                               "pisze tylko baze (DRY domyslnie; --apply)")
+    p_rk.add_argument("db", help="ścieżka pliku bazy")
+    p_rk.add_argument("--apply", action="store_true",
+                      help="WYKONAJ plan z DRY (wymaga --plan): zapisz nowy rodzaj w bazie, "
+                           "potem pochodne")
+    p_rk.add_argument("--plan", default=None, help="plan.json z wydruku DRY (dla --apply)")
+    p_rk.add_argument("--plan-dir", default=None,
+                      help="gdzie DRY zapisuje katalog planu (domyślnie katalog bazy)")
+    p_rk.add_argument("--limit", type=int, default=50,
+                      help="ile klatek i odmów wypisać w raporcie (domyślnie 50)")
+
+    # NAPRAWA NAGŁÓWKÓW W MIEJSCU (AR-96 + AR-111): plan kart z bazy, zapis tą samą drogą co
+    # ujednolicenie karty OBJECT (staging + `writeback.commit(inplace=True)`), cofnięcie po commicie.
+    p_hfx = sub.add_parser("header-fix",
+                           help="naprawa naglowkow w miejscu: IMAGETYP mastera z historii i FILTER "
+                                "z folderu filtra (DRY domyslnie; --apply; --undo COMMIT)")
+    p_hfx.add_argument("db", help="ścieżka pliku bazy")
+    p_hfx.add_argument("--keyword", action="append", choices=("IMAGETYP", "FILTER"), default=None,
+                       help="tylko ta karta (powtarzalne; domyślnie obie)")
+    p_hfx.add_argument("--frames", default=None,
+                       help="tylko te frame_id po przecinku (pilotaż na kilku klatkach)")
+    p_hfx.add_argument("--filter-form", action="append", default=None, metavar="KANON=FORMA",
+                       help="forma zapisu karty FILTER dla kanonu (np. L-Pro=LPRO); domyślnie "
+                            "forma folderu")
+    p_hfx.add_argument("--apply", action="store_true",
+                       help="WYKONAJ plan z DRY (wymaga --plan): zapisz karty w plikach, potem "
+                            "pochodne")
+    p_hfx.add_argument("--plan", default=None, help="plan.json z wydruku DRY (dla --apply)")
+    p_hfx.add_argument("--plan-dir", default=None,
+                       help="gdzie DRY zapisuje katalog planu (domyślnie katalog bazy)")
+    p_hfx.add_argument("--undo", type=int, default=None, metavar="COMMIT",
+                       help="cofnij zapis o numerze commitu z raportu --apply")
+    p_hfx.add_argument("--limit", type=int, default=20,
+                       help="ile pozycji każdej listy wypisać (domyślnie 20)")
+
     p_hf = sub.add_parser("human-facts",
                           help="spis faktow zapisanych REKA (obiekt/config/rodowod/kalibracja/"
                                "stanowisko/zeznanie klatki - testimony_hand); "
@@ -438,6 +492,8 @@ def main(argv=None):
         con.close()
         print(f"Horreum lineage {args.db}: {summary}")    # ASCII (cp1250)
         return 0
+    if args.cmd == "stack-versions":
+        return _cmd_stack_versions(args)
     if args.cmd == "stack-lineage":
         from .stacks import run_stack_lineage             # lazy: ciągnie `scan` dopiero przy odczycie
         now = datetime.now(timezone.utc).isoformat()
@@ -670,6 +726,10 @@ def main(argv=None):
         # dla skryptu, wiec rozjazd musi wyjsc kodem, inaczej bramka milczy przy zepsutym passie.
         rozliczone = (s.marked + s.already + s.alive + s.cycles + s.conflicts + s.missing)
         return 0 if rozliczone == s.proposed else 1
+    if args.cmd == "rederive-kind":
+        return _cmd_rederive_kind(args)
+    if args.cmd == "header-fix":
+        return _cmd_header_fix(args)
     if args.cmd == "streaks":
         return _cmd_streaks(args)
     if args.cmd == "human-facts":
@@ -686,7 +746,9 @@ def main(argv=None):
             # E5-1: dowod przejscia `path -> naglowek` czytany z dziennika PO znaku wodnym
             # odniesienia; stare odniesienie bez znaku = pusty zbior (nic nie wyjasniamy).
             przejete = audit.path_to_header_since(con, odniesienie.event_watermark)
-            spadki = spis.spadki(odniesienie, przejete)
+            # Gest „Przywroc automat” zdejmuje wskazanie kalibratora reka - decyzja, nie ubytek.
+            zdjete_reka = audit.calibration_hand_restored_since(con, odniesienie.event_watermark)
+            spadki = spis.spadki(odniesienie, przejete, zdjete_reka)
             rozbior = spis.reka_obiektu(odniesienie, przejete)
         con.close()
         if args.json:
@@ -954,6 +1016,9 @@ def _presence_tail(con, root, *, now):
             yield (f"  przejecie zeznania ocalalej kopii: przejete {w.adopted} z {w.rows} (inna "
                    f"tozsamosc {w.identity}, zmienione na dysku {w.stale}, blad odczytu {w.failed}, "
                    f"wyscig {w.raced}); czeka {w.remaining}")
+        elif etap == "stack_history":
+            yield (f"  historia stosow: zapisana {w.written} z {w.rows} (zmienione na dysku "
+                   f"{w.stale}, blad odczytu {w.failed}); czeka {w.remaining}")
         elif etap == "stack_lineage":
             # Jeden wiersz jak pozostałe etapy; pełny raport z receptami daje `stack-lineage`.
             yield (f"  stack_lineage: stosy {w.stacks}, z rodowodem {w.linked}, zapisane teraz "
@@ -1638,6 +1703,66 @@ _STACK_REASON_PROZA = {
 }
 
 
+def _cmd_stack_versions(args):
+    """`stack-versions` (AR-54): plan wariantów kadru i - z `--apply` - kopie do `STACKS` z zeznaniem
+    pary. Korzeń archiwum z `--archive` albo z bazy (`resolver.library_root_from_db` - ta sama
+    kotwica, którą świadek ścieżki stosu rozpoznaje bibliotekę `STACKS`); bez niego odmowa (kod 2),
+    bo cel kopii bez biblioteki to zgadywanie. Kod wyjścia 1, gdy coś zostało: pozycje zablokowane
+    do ręki albo kopie nieudane - skrypt nie czyta prozy, żeby to wiedzieć. `--apply` zapisuje też
+    odcisk zeznania do kolejki bazy (relację zapisze Dostawa). Wyjście ASCII poza ścieżkami."""
+    from . import harvest, resolver, stack_variants   # lazy: skan i projekcja dopiero tu
+    con = db.open_db(args.db)
+    try:
+        return _stack_versions(con, args, harvest, resolver, stack_variants)
+    finally:
+        con.close()
+
+
+def _stack_versions(con, args, harvest, resolver, stack_variants):
+    archiwum = args.archive or resolver.library_root_from_db(con)
+    if not archiwum:
+        print("stack-versions: baza nie zna korzenia archiwum - podaj --archive")
+        return 2
+    archiwum = harvest.library_root(archiwum)
+    plan = stack_variants.plan(con, args.root, library_root=archiwum)
+    c = stack_variants.plan_counts(plan)
+    tryb = "APPLY" if args.apply else "DRY -- bez zmian na dysku"
+    print(f"Horreum stack-versions {args.root} -> {archiwum} ({tryb}):")
+    print(f"  autocropy: {c['all']}; oryginal z dawnej lokacji: {c['location']} (okno zgodne "
+          f"{c['location_window_agrees']}, okno zawiodlo {c['location_window_fails']}); z okna: "
+          f"{c['window']}; do wykonania: {c['applicable']}; zablokowane: "
+          f"{sum(c['blocked'].values())} {dict(sorted(c['blocked'].items()))}")
+    wiersze = {}
+    for it in plan.items:
+        o = it.original
+        opis = (f"oryginal frame_id={o.frame_id} swiadek={o.source} {o.status}: {o.src} -> {o.dst}"
+                if o is not None else "oryginal: brak")
+        if o is not None and o.other_paths:
+            opis += f" poza STACKS={list(o.other_paths)}"
+        cel = it.autocrop.dst or "-"
+        wiersze.setdefault(it.status, []).append(
+            f"    {it.autocrop.src} -> {cel} | {opis}" + (f" | {it.detail}" if it.detail else ""))
+    for status in sorted(wiersze):
+        print(f"  [{status}] {len(wiersze[status])}")
+        for w in wiersze[status][:args.limit or None]:
+            print(w)
+    if not args.apply:
+        return 1 if c["blocked"] else 0
+    now = datetime.now(timezone.utc).isoformat()
+    wyniki = stack_variants.apply(plan, con=con, now=now)
+    licz = {}
+    zle_zeznanie = ("conflict", "part_exists")
+    for w in wyniki:
+        licz[w.status] = licz.get(w.status, 0) + 1
+        if w.status not in ("placed", "exists", "skipped") or w.testimony in zle_zeznanie:
+            print(f"  {w.status}: {w.item.autocrop.src} -> {w.item.autocrop.dst} | {w.reason} "
+                  f"| zeznanie={w.testimony}")
+    print(f"  wynik: {dict(sorted(licz.items()))}; relacje zapisze Dostawa po skanie STACKS")
+    zle = any(w.status not in ("placed", "exists", "skipped") or w.testimony in zle_zeznanie
+              for w in wyniki)
+    return 1 if (zle or c["blocked"]) else 0
+
+
 def _format_stack_lineage(db_path, s):
     """Sformatuj `StackLineageSummary` do ASCII (konsola Windows = cp1250).
 
@@ -1737,6 +1862,269 @@ def _format_delta(db_path, rep):
         czesci = [f"{etykiety[k]} {n}" for k, n in unreadable_kinds_shown(rv.unreadable_kinds)]
         lines.append(f"      kopie: {', '.join(czesci)}")
     return "\n".join(lines)
+
+
+def _zapisz_plan(polecenie, db_path, plan_dir, payload, wejscia, now):
+    """Trwały plan DRY (`plan.json`) w NOWYM katalogu `plan_<polecenie>_<czas>` pod `plan_dir`
+    (domyślnie katalog bazy) - zapis wyłącznie drzwiami raportu (`raport.otworz`, DOORS): katalog
+    nowy albo pusty, nigdy w katalogu żadnego z planowanych plików (`wejscia`), plik bez nadpisania.
+    `--apply` wykonuje WYŁĄCZNIE ten plan (`_wczytaj_plan`). Zwraca ścieżkę pliku."""
+    from . import raport
+    baza = plan_dir or os.path.dirname(os.path.abspath(db_path))
+    znacznik = now.replace(":", "").replace("-", "").replace("+", "_").replace(".", "_")
+    tresc = {"polecenie": polecenie, "db": os.path.normcase(os.path.abspath(db_path)),
+             "utworzony": now, **payload}
+    with raport.otworz(os.path.join(baza, f"plan_{polecenie}_{znacznik}"), sorted(set(wejscia)),
+                       chronione=()) as r:
+        return r.zapisz_tekst("plan.json", json.dumps(tresc, ensure_ascii=False, indent=1))
+
+
+def _wczytaj_plan(path, polecenie, db_path):
+    """Plan z `_zapisz_plan` → dict albo `ValueError` (brak pliku, inne polecenie, inna baza):
+    plan jest zgodą człowieka na KONKRETNE zmiany konkretnej bazy, nie na „to, co dziś wyjdzie"."""
+    if not path:
+        raise ValueError("--apply wymaga --plan PLIK (plan.json z wydruku DRY)")
+    with open(path, encoding="utf-8") as fh:
+        plan = json.load(fh)
+    if plan.get("polecenie") != polecenie:
+        raise ValueError(f"plan {path} jest planem {plan.get('polecenie')!r}, nie {polecenie!r}")
+    if plan.get("db") != os.path.normcase(os.path.abspath(db_path)):
+        raise ValueError(f"plan {path} dotyczy bazy {plan.get('db')}, nie {db_path}")
+    return plan
+
+
+def _pochodne(con, now, lines):
+    """Łańcuch pochodnych Dostawy (`derive.run_derived`: group → resolve → calibrate → lineage →
+    stack_lineage) po zapisie i po cofnięciu - baza po geście mówi o plikach to samo, co po Dostawie
+    (filtr, przepis, rodowód), bez osobnej pamięci człowieka o kolejności poleceń."""
+    from . import derive
+    etapy = []
+    for etap, wynik in derive.run_derived(con, now):
+        etapy.append(etap)
+        if etap == "lineage":
+            lines.append(f"  rodowod: nowe/zmienione ogniwa {wynik.linked_new}")
+    lines.append(f"  pochodne przeliczone: {', '.join(etapy)}")
+
+
+def _cmd_rederive_kind(args):
+    """`horreum rederive-kind DB [--plan-dir K] | --apply --plan PLIK` - przeliczenie rodzaju (AR-96).
+    DRY (`scan.kind_rederive_plan`) wypisuje klatki, którym reguła daje inny rodzaj, i zapisuje
+    trwały plan z dokładnym `frame_id`, rodzajem przed/po i kompletem kopii-świadków (`location_id`,
+    `header_hash`). `--apply` wykonuje WYŁĄCZNIE ten plan: liczy plan od nowa dla klatek z pliku
+    i przy jakimkolwiek rozjeździe (inny rodzaj, inny zbiór kopii, inny nagłówek, klatka spoza
+    kandydatów) odmawia w całości, zero zapisu. Zapis klingą `repo.rederive_frame_kind` (CAS
+    kompletu kopii), po nim łańcuch pochodnych. Kod wyjścia 1 przy jakiejkolwiek odmowie."""
+    from . import repo, scan
+    now = datetime.now(timezone.utc).isoformat()
+    con = db.open_db(args.db)
+    try:
+        if not args.apply:
+            zmiany, bez_zmian, odmowy = scan.kind_rederive_plan(con)
+            lines = [f"Horreum rederive-kind {args.db} (DRY): kandydaci "
+                     f"{len(zmiany) + bez_zmian + len(odmowy)} klatek XISF; zmiana rodzaju "
+                     f"{len(zmiany)}, bez zmiany {bez_zmian}, odmowy {len(odmowy)}"]
+            for z in zmiany[:args.limit]:
+                reszta = f" (+{len(z['paths']) - 1} kop.)" if len(z["paths"]) > 1 else ""
+                lines.append(f"  frame {z['frame_id']}: {z['before']} -> {z['after']}  "
+                             f"{z['paths'][0]}{reszta}")
+            if len(zmiany) > args.limit:
+                lines.append(f"  ... i {len(zmiany) - args.limit} wiecej")
+            if odmowy:
+                lines.append("  odmowy:")
+                lines += [f"    frame {fid}: {powod}" for fid, powod in odmowy[:args.limit]]
+            if zmiany:
+                plik = _zapisz_plan(
+                    "rederive-kind", args.db, args.plan_dir,
+                    {"items": [{k: z[k] for k in ("frame_id", "before", "after", "witnesses")}
+                               for z in zmiany]},
+                    [p for z in zmiany for p in z["paths"]], now)
+                lines.append(f"  plan: {plik}")
+                lines.append(f'  wykonanie: horreum rederive-kind "{args.db}" --apply --plan "{plik}"')
+            print("\n".join(lines))
+            return 1 if odmowy else 0
+        try:
+            plan = _wczytaj_plan(args.plan, "rederive-kind", args.db)
+        except (OSError, ValueError) as exc:
+            print(f"Horreum rederive-kind {args.db} (APPLY): odmowa - {exc}")
+            return 2
+        chciane = {it["frame_id"]: (it["before"], it["after"], sorted(map(tuple, it["witnesses"])))
+                   for it in plan["items"]}
+        zmiany, _bez, odmowy = scan.kind_rederive_plan(con, frame_ids=set(chciane))
+        teraz = {z["frame_id"]: (z["before"], z["after"], sorted(map(tuple, z["witnesses"])))
+                 for z in zmiany}
+        rozjazd = sorted(f for f in chciane if teraz.get(f) != chciane[f])
+        lines = [f"Horreum rederive-kind {args.db} (APPLY, plan {args.plan}): klatek w planie "
+                 f"{len(chciane)}"]
+        if rozjazd:
+            powody = dict(odmowy)
+            lines.append(f"  ODMOWA w calosci, zero zapisu: stan {len(rozjazd)} klatek rozjechal sie "
+                         f"z planem - powtorz DRY")
+            lines += [f"    frame {f}: {powody.get(f, 'inny rodzaj albo zbior kopii niz w planie')}"
+                      for f in rozjazd[:args.limit]]
+            print("\n".join(lines))
+            return 1
+        zapisane, odmowy_klingi = 0, []
+        for z in zmiany:
+            try:
+                zapisane += repo.rederive_frame_kind(
+                    con, frame_id=z["frame_id"], expected_kind=z["before"], kind=z["after"],
+                    witnesses=z["witnesses"], now=now)
+            except repo.KindWitnessStale as exc:
+                odmowy_klingi.append((z["frame_id"], str(exc)))
+        lines.append(f"  zapisane: {zapisane}")
+        lines += [f"    odmowa klingi frame {f}: {p}" for f, p in odmowy_klingi[:args.limit]]
+        if zapisane:
+            _pochodne(con, now, lines)
+        print("\n".join(lines))
+        return 1 if odmowy_klingi else 0
+    finally:
+        con.close()
+
+
+def _header_fix_rows(con, frame_ids=None):
+    """Wiersze kopii pod `macro.plan_header_fix`: jeden na OBECNĄ lokację aktywnej klatki (bez
+    wycofanych i zastąpionych) rodzaju z planu (`FILTER_FIX_KINDS` ∪ `MASTER_IMAGETYP`). Karty
+    `IMAGETYP`/`FILTER` klatki jednym zapytaniem; fakty kopii (`hdr_*`) liczą się wyłącznie wtedy,
+    gdy są zebrane bieżącą regułą dla bieżącego nagłówka (`FAKTY_BIEZACE`, `hdr_hash ==
+    header_hash`) - inaczej mówią o pliku, którego już nie ma. `frame_ids` zawęża (pilotaż)."""
+    from collections import defaultdict
+    from .macro import FILTER_FIX_KINDS
+    from .resolve.frames import MASTER_IMAGETYP
+    from .resolve.headers import FAKTY_BIEZACE, copy_facts_state
+    kinds = sorted(FILTER_FIX_KINDS | set(MASTER_IMAGETYP))
+    karty = defaultdict(lambda: defaultdict(list))
+    for c in con.execute(
+            "SELECT frame_id, keyword, value_raw, value_type, comment FROM cards "
+            "WHERE keyword IN ('IMAGETYP', 'FILTER') ORDER BY frame_id, keyword, idx"):
+        karty[c["frame_id"]][c["keyword"]].append(
+            {"value_raw": c["value_raw"], "value_type": c["value_type"], "comment": c["comment"]})
+    wynik = []
+    for r in con.execute(
+            "SELECT f.id AS fid, f.kind, f.filetype, f.sha1_data_uncomputable AS degen, "
+            "l.id AS lid, l.path, l.header_hash, l.compressed, l.unreadable_since, "
+            "l.hdr_hash, l.hdr_rule, l.hdr_imagetyp, l.hdr_filter, "
+            "(SELECT count(*) FROM location l2 WHERE l2.frame_id = f.id) AS n_loc, "
+            "(SELECT count(*) FROM cards c WHERE c.frame_id = f.id "
+            "   AND c.keyword IN ('CHECKSUM', 'DATASUM')) AS n_sum "
+            "FROM frame f JOIN location l ON l.frame_id = f.id AND l.present = 1 "
+            "WHERE f.kind IN (SELECT value FROM json_each(?)) "
+            "  AND f.retired_at IS NULL AND f.superseded_by IS NULL ORDER BY f.id, l.id",
+            (json.dumps(kinds),)):
+        if frame_ids is not None and r["fid"] not in frame_ids:
+            continue
+        wynik.append({
+            "frame_id": r["fid"], "location_id": r["lid"], "path": r["path"],
+            "filetype": r["filetype"], "kind": r["kind"], "header_hash": r["header_hash"],
+            "compressed": r["compressed"], "degen": r["degen"],
+            "unreadable_since": r["unreadable_since"], "n_sum": r["n_sum"], "n_loc": r["n_loc"],
+            "facts_current": (r["hdr_hash"] is not None and r["hdr_hash"] == r["header_hash"]
+                              and copy_facts_state(r["hdr_hash"], r["hdr_rule"]) == FAKTY_BIEZACE),
+            "hdr_imagetyp": r["hdr_imagetyp"], "hdr_filter": r["hdr_filter"],
+            "cards": karty.get(r["fid"], {})})
+    return wynik
+
+
+def _cmd_header_fix(args):
+    """`horreum header-fix DB [--keyword K] [--frames ...] [--filter-form KANON=FORMA] [--plan-dir K]`
+    (DRY) | `--apply --plan PLIK` | `--undo COMMIT` - plan kart `IMAGETYP` (master z historii)
+    i `FILTER` (filtr z folderu) per kopia (`macro.plan_header_fix`).
+
+    DRY wypisuje zmiany (karty i RÓŻNE kopie osobno), pominięcia i sprzeczności do ręki oraz zapisuje
+    trwały plan: dokładne `location_id`, karta, operacja, wartość i `expected_header_hash` każdej
+    zmiany, zakres (`frame_id`), karty i formy filtra. `--apply` wykonuje WYŁĄCZNIE ten plan: plan
+    liczony od nowa dla klatek z pliku musi być identyczny (nowa kopia, zmieniony nagłówek, nowa
+    sprzeczność = odmowa w całości, zero zapisu). Zapis: staging (`repo.stage_pending_many`) +
+    `writeback.commit(..., inplace=True)` (droga ujednolicenia karty `OBJECT`, kotwica nagłówka każdej
+    kopii, backup pod `--undo`). Po zapisie i po cofnięciu - łańcuch pochodnych (filtr, przepis,
+    rodowód). Kod wyjścia APPLY/UNDO: 1, gdy którykolwiek plik zablokowany albo nieudany."""
+    from . import macro, repo, writeback
+    now = datetime.now(timezone.utc).isoformat()
+    con = db.open_db(args.db)
+    try:
+        if args.undo is not None:
+            res = writeback.undo(con, args.undo, now=now)
+            lines = [f"Horreum header-fix {args.db} (UNDO commit {args.undo}): przywrocone "
+                     f"{len(res.restored)}, zablokowane {len(res.blocked)}, nieudane {len(res.failed)}"]
+            lines += [f"    {fr.status}: {fr.path} - {fr.reason}"
+                      for fr in (res.blocked + res.failed)[:args.limit]]
+            if res.restored:
+                _pochodne(con, now, lines)
+            print("\n".join(lines))
+            return 1 if (res.blocked or res.failed) else 0
+        if args.apply:
+            try:
+                zapisany = _wczytaj_plan(args.plan, "header-fix", args.db)
+            except (OSError, ValueError) as exc:
+                print(f"Horreum header-fix {args.db} (APPLY): odmowa - {exc}")
+                return 2
+            ids, keywords = set(zapisany["frames"]), tuple(zapisany["keywords"])
+            forms = zapisany["filter_forms"]
+        else:
+            ids = {int(x) for x in args.frames.split(",") if x.strip()} if args.frames else None
+            keywords = tuple(args.keyword) if args.keyword else ("IMAGETYP", "FILTER")
+            try:
+                forms = dict(f.split("=", 1) for f in (args.filter_form or ()))
+            except ValueError:
+                print(f"Horreum header-fix: --filter-form oczekuje KANON=FORMA, jest {args.filter_form}")
+                return 2
+        wiersze = _header_fix_rows(con, ids)
+        try:
+            plan = macro.plan_header_fix(wiersze, keywords=keywords, filter_forms=forms)
+        except ValueError as exc:
+            print(f"Horreum header-fix {args.db}: odmowa - {exc}")
+            return 2
+        tryb = f"APPLY, plan {args.plan}" if args.apply else "DRY"
+        lines = [f"Horreum header-fix {args.db} ({tryb}, karty: {', '.join(keywords)}): "
+                 f"zmiany {len(plan.run.touched)} kart w {plan.copies} kopiach (plikach), "
+                 f"pominiete {len(plan.run.skipped)}, sprzecznosci do reki {len(plan.conflicts)}"]
+        for keyword, stara, nowa, n in plan.changes:
+            lines.append(f"  {keyword}: {stara if stara is not None else '(brak karty)'} -> {nowa}: {n}")
+        for p in plan.run.touched[:args.limit]:
+            lines.append(f"    location {p.location_id} {p.keyword} {p.op} {p.new_value!r}  {p.path}")
+        if len(plan.run.touched) > args.limit:
+            lines.append(f"    ... i {len(plan.run.touched) - args.limit} wiecej")
+        for tytul, lista in (("pominiete", plan.run.skipped), ("sprzecznosci do reki", plan.conflicts)):
+            if lista:
+                lines.append(f"  {tytul}:")
+                lines += [f"    frame {s.frame_id}: {s.reason}  {s.path}" for s in lista[:args.limit]]
+                if len(lista) > args.limit:
+                    lines.append(f"    ... i {len(lista) - args.limit} wiecej")
+        klucz = lambda p: [p.location_id, p.keyword, p.op, p.idx, p.old_value, p.new_value,
+                           p.new_type, p.expected_header_hash]
+        if not args.apply:
+            if plan.run.touched:
+                loc2fid = {r["location_id"]: r["frame_id"] for r in wiersze}
+                plik = _zapisz_plan(
+                    "header-fix", args.db, args.plan_dir,
+                    {"keywords": list(keywords), "filter_forms": forms,
+                     "frames": sorted({loc2fid[p.location_id] for p in plan.run.touched}),
+                     "items": [klucz(p) for p in plan.run.touched]},
+                    [p.path for p in plan.run.touched], now)
+                lines.append(f"  plan: {plik}")
+                lines.append(f'  wykonanie: horreum header-fix "{args.db}" --apply --plan "{plik}"')
+            print("\n".join(lines))
+            return 0
+        teraz = sorted(json.dumps(klucz(p)) for p in plan.run.touched)
+        if teraz != sorted(json.dumps(i) for i in zapisany["items"]):
+            lines.append(f"  ODMOWA w calosci, zero zapisu: plan liczony teraz ({len(teraz)} kart) "
+                         f"nie jest planem z DRY ({len(zapisany['items'])} kart) - powtorz DRY")
+            print("\n".join(lines))
+            return 1
+        repo.stage_pending_many(con, run_id=plan.run.run_id, previews=plan.run.touched)
+        res = writeback.commit(con, plan.run.run_id, now=now, inplace=True)
+        lines.append(f"  zapisane {len(res.applied)} (w miejscu {len(res.in_place)}), zablokowane "
+                     f"{len(res.blocked)}, nieudane {len(res.failed)}, pominiete {len(res.skipped)}"
+                     f"; commit {res.commit_id}")
+        for fr in (res.blocked + res.failed + res.skipped)[:args.limit]:
+            lines.append(f"    {fr.status}: {fr.path} - {fr.reason}")
+        if res.applied:
+            _pochodne(con, now, lines)
+        if res.commit_id is not None:
+            lines.append(f'  cofniecie: horreum header-fix "{args.db}" --undo {res.commit_id}')
+        print("\n".join(lines))
+        return 1 if (res.blocked or res.failed) else 0
+    finally:
+        con.close()
 
 
 if __name__ == "__main__":

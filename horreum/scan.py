@@ -63,9 +63,10 @@ from astropy.io import fits
 from . import exif, repo
 from .hashing import sha1_of, sha1_of_span
 from .resolve.cameras import camera_identity
-from .resolve.frames import kind_from_path, normalize_kind
+from .resolve.frames import (HISTORY_MASTER_KINDS, kind_from_path, kind_from_testimony,
+                             normalize_kind)
 from .resolve.paths import STACK_KIND, STACKS_DIR
-from .resolve.stack import parse_history
+from .resolve.stack import read_history
 from .resolve.headers import (COPY_TESTIMONY_RULE, FAKTY_DO_DOCIAGNIECIA, copy_facts_state,
                               copy_testimony, extract_header)
 
@@ -306,7 +307,8 @@ class ScanRecord:
         (P6a/D-X-4); None przy W1;
       - `image_roles`: role wszystkich obrazów kopii (0021, `XisfMeta.image_roles`) - tylko XISF;
         None dla FITS/RAW (liczba HDU wymagałaby dodatkowego I/O) i przy W1;
-      - `history`: `(rows, inputs, tool)` z historii PixInsighta (`resolve.stack.parse_history`) -
+      - `history`: `(rows, inputs, tool)` z historii PixInsighta (`resolve.stack.read_history`;
+        krotka niesie też `.created` = `XISF:CreationTime` dla pisarza `stack_history`) -
         tylko XISF, z TEGO SAMEGO odczytu XML co karty; `rows is None` = pliku bez historii
         integracji. Jeden odczyt dla dwóch konsumentów: rodzaju (master zapisany jako `FLAT`
         zdradza historia wejść) i rodowodu stosów (wejścia bez ponownego czytania udziału).
@@ -1424,7 +1426,7 @@ def _read_meta(spath, size):
         # `hdu_index`/`compressed` zostają None (D-X-7: pojęcia obce formatowi)
         xmeta = read_xisf_meta_full(spath)
         return (xmeta.header, xmeta.cards, xmeta.header_hash, None, None, xmeta.image_span,
-                xmeta.image_roles, parse_history(xmeta.xml_bytes.decode("utf-8", "replace")))
+                xmeta.image_roles, read_history(xmeta.xml_bytes.decode("utf-8", "replace")))
     meta = read_fits_meta(spath)
     return (meta.header, meta.cards, meta.header_hash, meta.hdu_index, meta.compressed,
             (meta.datloc, meta.datspan), None, None)
@@ -1616,13 +1618,106 @@ def _record_testimony_and_flags(con, rec, *, frame_id, sha1_data, readable, iden
 
 def _derive_kind(rec, *, readable, is_raw):
     """Rodzaj klatki + PROWIENIENCJA (#2, D-R-4). RAW nie ma IMAGETYP w EXIF → rodzaj z FOLDERU
-    (`kind_source='path'`, precedens C1: ścieżka jako źródło faktu — wąski, jawny); FITS/XISF z
-    IMAGETYP zeznania (`source='header'`); nieczytelny (W1) → `unknown`/None (brak zeznania)."""
+    (`kind_source='path'`, precedens C1: ścieżka jako źródło faktu - wąski, jawny); FITS/XISF z
+    IMAGETYP zeznania (`source='header'`); nieczytelny (W1) → `unknown`/None (brak zeznania).
+
+    XISF dokłada historię integracji z tego samego odczytu (`rec.history`): master zapisany jako
+    `FLAT` jest masterem (`resolve.frames.kind_from_testimony` - jedyny właściciel reguły). FITS
+    historii nie niesie, więc dostaje samą kartę - także wtedy, gdy wołający poda rekord z polem."""
     if not readable:
         return "unknown", None
     if is_raw:
         return kind_from_path(rec.path), "path"
-    return normalize_kind(rec.header.get("IMAGETYP")), "header"
+    history = rec.history if _filetype(rec.path) == "xisf" else None
+    return kind_from_testimony(rec.header.get("IMAGETYP"), history), "header"
+
+
+@dataclass
+class KindRederiveSummary:
+    """Zliczenia przeliczenia rodzaju (`rederive_kinds`): kandydaci, zapisane zmiany, bez zmiany,
+    odmowy `[(frame_id, powód)]`."""
+    candidates: int = 0
+    changed: int = 0
+    unchanged: int = 0
+    refused: list = field(default_factory=list)
+
+
+def kind_rederive_plan(con, frame_ids=None):
+    """Plan przeliczenia rodzaju klatek JUŻ W BAZIE regułą `_derive_kind` (AR-96) → `(zmiany,
+    bez_zmian, odmowy)`. Kandydaci = klatki XISF z rodzajem, który reguła historii umie podnieść
+    (`HISTORY_MASTER_KINDS`); `frame_ids` zawęża. Każda OBECNA kopia czytana sama (nagłówek
+    + historia, bez haszowania danych - `_read_meta`), rodzaj z TEJ SAMEJ derywacji co wjazd.
+    Kopia zmieniona od ostatniego skanu (`mtime` - sygnał bramy przyrostowej - albo odcisk nagłówka)
+    to odmowa: zeznanie znane bazie nie jest już zeznaniem pliku, a pierwszeństwo ma zwykły skan.
+    Kopie jednej klatki zeznające różne rodzaje - odmowa (do ręki). `zmiany` = dict: `frame_id`,
+    `before`, `after`, `witnesses` (`[(location_id, header_hash)]` - KOMPLET obecnych kopii, pod CAS
+    klingi `repo.rederive_frame_kind`), `paths`; `odmowy` = `[(frame_id, powód)]`."""
+    kopie = {}
+    for r in con.execute(
+            "SELECT f.id AS fid, f.kind, l.id AS lid, l.path, l.mtime, l.header_hash "
+            "FROM frame f LEFT JOIN location l ON l.frame_id = f.id AND l.present = 1 "
+            "WHERE f.filetype = 'xisf' AND f.kind IN (SELECT value FROM json_each(?)) "
+            "ORDER BY f.id, l.id", (json.dumps(sorted(HISTORY_MASTER_KINDS)),)):
+        if frame_ids is None or r["fid"] in frame_ids:
+            kopie.setdefault(r["fid"], []).append(r)
+    zmiany, bez_zmian, odmowy = [], 0, []
+    for fid, wiersze in kopie.items():
+        kind = wiersze[0]["kind"]
+        if wiersze[0]["lid"] is None:
+            odmowy.append((fid, "brak obecnej kopii - nie ma czego przeczytac"))
+            continue
+        rodzaje, swiadkowie, powod = set(), [], None
+        for k in wiersze:
+            try:
+                st = os.stat(k["path"])
+                if _mtime_iso(st) != k["mtime"]:
+                    powod = f"kopia zmieniona od ostatniego skanu (najpierw Dostawa): {k['path']}"
+                    break
+                header, _cards, header_hash, *_reszta, history = _read_meta(k["path"], st.st_size)
+            except Exception as exc:                   # czkawka udziału: odmowa tej klatki, nie przebiegu
+                powod = f"odczyt {type(exc).__name__}: {exc}"
+                break
+            if header_hash != k["header_hash"]:
+                powod = f"naglowek zmieniony od ostatniego skanu (najpierw Dostawa): {k['path']}"
+                break
+            rec = ScanRecord(path=k["path"], size_bytes=st.st_size, mtime=k["mtime"],
+                             header=header, header_hash=header_hash, history=history)
+            rodzaje.add(_derive_kind(rec, readable=True, is_raw=False)[0])
+            swiadkowie.append((k["lid"], header_hash))
+        if powod is None and len(rodzaje) > 1:
+            powod = f"kopie zeznaja rozne rodzaje: {', '.join(sorted(rodzaje))}"
+        if powod is not None:
+            odmowy.append((fid, powod))
+            continue
+        nowy = rodzaje.pop()
+        if nowy == kind:
+            bez_zmian += 1
+        elif nowy != HISTORY_MASTER_KINDS[kind]:
+            odmowy.append((fid, f"regula daje {nowy}, przeliczenie zna tylko {kind} -> "
+                                f"{HISTORY_MASTER_KINDS[kind]}"))
+        else:
+            zmiany.append({"frame_id": fid, "before": kind, "after": nowy, "witnesses": swiadkowie,
+                           "paths": [k["path"] for k in wiersze]})
+    return zmiany, bez_zmian, odmowy
+
+
+def rederive_kinds(con, *, now, actor="rederive-kind"):
+    """Plan + zapis przeliczenia rodzaju BEZ bramki człowieka - dla drogi, która i tak nadaje rodzaj
+    automatem: import dawcy (`import_fitsmirror`) syntetyzuje `ScanRecord` z cache dawcy bez historii,
+    więc reguła z historii nie widzi tam master flatów zapisanych jako `FLAT` - ten krok czyta ich
+    nagłówki raz, po wjeździe, przed pochodnymi. Na bazie z ludzką bramką (żywa archiwum) idzie
+    `horreum rederive-kind` z planem DRY. Odmowa klingi (wyścig) ląduje w `refused`."""
+    zmiany, bez_zmian, odmowy = kind_rederive_plan(con)
+    s = KindRederiveSummary(candidates=len(zmiany) + bez_zmian + len(odmowy), unchanged=bez_zmian,
+                            refused=list(odmowy))
+    for z in zmiany:
+        try:
+            s.changed += repo.rederive_frame_kind(
+                con, frame_id=z["frame_id"], expected_kind=z["before"], kind=z["after"],
+                witnesses=z["witnesses"], now=now, actor=actor)
+        except repo.KindWitnessStale as exc:
+            s.refused.append((z["frame_id"], f"odmowa klingi: {exc}"))
+    return s
 
 
 def _derive_axes(con, rec, *, now, actor):
@@ -1682,6 +1777,28 @@ def _odmow_staremu_odczytowi_sciezki(con, path, volume, inplace_gen):
             "SELECT id FROM location WHERE path = ? AND (? IS NULL OR volume = ?)",
             (path, volume, volume)).fetchall():
         _odmow_staremu_odczytowi(con, location_id, inplace_gen)
+
+
+def _record_stack_history(con, rec, *, location_id, kind, now, actor):
+    """PISARZ HISTORII STOSU przy skanie (0034, AR-87): `rec.history` z TEGO SAMEGO odczytu XML co
+    karty, więc rodowód stosów nie czyta już nagłówka z udziału drugi raz. Wyłącznie stos
+    (`master_light` z derywacji tego rekordu) z czytelnym nagłówkiem i odciskiem - wiersz stoi także
+    dla stosu BEZ historii integracji (`rows` NULL): „przeczytano i nie ma” zamyka uzupełnienie, które
+    inaczej czytałoby ten plik przy każdej Dostawie. Kotwicą jest odcisk nagłówka tej kopii; każda
+    gałąź wjazdu (nowa lokacja, przepięcie po podmianie treści, odświeżenie - także re-sync pisarza
+    po zapisie w miejscu) woła tę funkcję po klindze kopii, więc wiersz idzie za nagłówkiem. Rekord
+    bez historii (FITS, import dawcy - `ScanRecord` syntetyzowany z cache) - bez zapisu; stosy z
+    importu dociąga `backfill_stack_history`. Kopia, której treść przestała być stosem (przepięcie
+    na inny rodzaj), traci wiersz (`repo.clear_stack_history`) - wiersz idzie za rodzajem tak samo
+    jak za odciskiem. Rekord nieczytelny rodzaju nie zna i niczego nie zdejmuje."""
+    if kind != "master_light":
+        if rec.header is not None:
+            repo.clear_stack_history(con, location_id=location_id, now=now, actor=actor)
+        return
+    if rec.header is None or rec.history is None or not rec.header_hash:
+        return
+    repo.record_stack_history(con, location_id=location_id, hdr_hash=rec.header_hash,
+                              history=rec.history, now=now, actor=actor)
 
 
 def ingest_record(con, rec, *, volume="?", drive_letter=None, tier=None, now, summary,
@@ -1786,7 +1903,7 @@ def _ingest_in_tx(con, rec, *, volume, drive_letter, tier, now, summary, actor, 
             summary.frames_new += 1
         else:
             summary.frames_existing += 1
-        _, loc_created = repo.add_location(
+        location_id, loc_created = repo.add_location(
             con, frame_id=frame_id, volume=volume, drive_letter=drive_letter,
             path=rec.path, tier=tier, mtime=rec.mtime,
             file_sha1=rec.file_sha1, header_hash=rec.header_hash, hdu_index=rec.hdu_index,
@@ -1803,6 +1920,7 @@ def _ingest_in_tx(con, rec, *, volume, drive_letter, tier, now, summary, actor, 
             _record_testimony_and_flags(
                 con, rec, frame_id=frame_id, sha1_data=sha1_data, readable=readable,
                 ident=ident, kind=kind, now=now, summary=summary, actor=actor)
+        _record_stack_history(con, rec, location_id=location_id, kind=kind, now=now, actor=actor)
         return
 
     # ── ścieżka ZNANA: kontrakt świeżości §2 ──
@@ -1866,6 +1984,7 @@ def _ingest_in_tx(con, rec, *, volume, drive_letter, tier, now, summary, actor, 
             unreadable_kind=kind_after, unreadable_reason=reason_after,
             present=1, now=now, actor=actor, copy_facts=copy_facts, inplace_gen=inplace_gen)
         summary.locations_refreshed += refreshed["facts"]
+        _record_stack_history(con, rec, location_id=loc["id"], kind=kind, now=now, actor=actor)
         return
 
     # ta sama tożsamość pod znaną ścieżką → refresh faktów (+ zeznania przy zmianie header_hash)
@@ -1881,6 +2000,7 @@ def _ingest_in_tx(con, rec, *, volume, drive_letter, tier, now, summary, actor, 
         camera_id=camera_id, kind=kind, copy_facts=copy_facts, inplace_gen=inplace_gen)
     summary.locations_refreshed += refreshed["facts"]
     summary.headers_refreshed += refreshed["header"]
+    _record_stack_history(con, rec, location_id=loc["id"], kind=kind, now=now, actor=actor)
     if readable:
         # Commit drogą atomową, który padł po backupie ('failed' bez re-syncu), dokańcza się tu,
         # gdy na dysku leży dokładnie zapisany nagłówek (AR-38 (2)). Wejście po indeksie lokacji
@@ -2380,6 +2500,87 @@ def backfill_copy_facts(con, *, now, root=None, progress=None, should_cancel=Non
 
 
 @dataclass
+class StackHistorySummary:
+    """Zliczenia `backfill_stack_history`; `remaining` = kandydaci PO przebiegu (0 = komplet)."""
+    rows: int = 0             # kopie stosów bez aktualnego wiersza historii (pod korzeniem)
+    headers_read: int = 0     # KOSZT I/O: nagłówki przeczytane z dysku - także te, które okazały się
+                              # `stale`; wynik przebiegu to `written`, nie ten licznik
+    written: int = 0          # wiersz historii zapisany (`repo.record_stack_history` → True)
+    stale: int = 0            # odcisk nagłówka na dysku ≠ odcisk kopii w bazie → ZERO zapisu (skan)
+    failed: int = 0           # odczyt padł / kopia izolowana → ZERO zapisu
+    remaining: int = 0
+    cancelled: bool = False
+    failed_paths: list = field(default_factory=list)
+    stale_paths: list = field(default_factory=list)
+
+
+def stack_history_candidates(con, root=None):
+    """Kopie stosów, którym brakuje AKTUALNEJ historii w bazie (0034): obecne kopie `master_light`
+    XISF (historia PixInsighta jest własnością XISF - stos FITS jej nie ma i nie czeka; bez zastąpionych)
+    o znanym odcisku nagłówka, bez wiersza `stack_history` albo z wierszem
+    o innym odcisku (zapis w miejscu poza skanem). `root` zawęża po prefiksie ścieżki jak przy
+    faktach kopii. Ten sam SELECT po udanym przebiegu jest pusty - etap Dostawy milknie."""
+    rows = con.execute(
+        "SELECT l.id, l.path, l.volume, l.header_hash FROM location l "
+        "JOIN frame f ON f.id = l.frame_id "
+        "LEFT JOIN stack_history sh ON sh.location_id = l.id "
+        "WHERE f.kind = 'master_light' AND f.filetype = 'xisf' AND f.superseded_by IS NULL "
+        "AND l.present = 1 AND l.header_hash IS NOT NULL "
+        "AND (sh.location_id IS NULL OR sh.hdr_hash <> l.header_hash) "
+        "ORDER BY l.id").fetchall()
+    if root is None:
+        return rows
+    prefix = canonize_root(root).rstrip("\\/") + os.sep
+    return [r for r in rows if _under(r["path"], prefix)]
+
+
+def backfill_stack_history(con, *, now, root=None, progress=None, should_cancel=None,
+                           actor="backfill:stack_history"):
+    """STEROWNIK CELOWANY historii stosów (0034, AR-87): jeden odczyt SAMEGO nagłówka XISF dla kopii
+    stosu bez aktualnego wiersza `stack_history` - stosy sprzed migracji (brama przyrostowa skanu
+    ich nie przeczyta, mtime bez zmian) i stosy z importu dawcy (`ScanRecord` z cache nie niesie
+    historii). Wzorzec `backfill_copy_facts`: kandydaci z bazy, po przebiegu ten sam SELECT pusty,
+    więc druga Dostawa nie czyta z udziału ani jednego nagłówka stosu.
+
+    Zapis wyłącznie przy równości odcisku przeczytanego nagłówka z `location.header_hash` (CAS
+    w `repo.record_stack_history`): inny odcisk = kopia zmieniła się od skanu → `stale`, robota
+    skanu, który odświeży razem z historią także zeznanie i pochodne. Kopia izolowana po
+    przerwanym zapisie w miejscu i błąd odczytu → `failed` + ścieżka, bez zapisu. Każda kopia to
+    osobna transakcja; anulowanie na granicy pliku zostawia bazę spójną."""
+    rows = stack_history_candidates(con, root)
+    s = StackHistorySummary(rows=len(rows))
+    for i, row in enumerate(rows, 1):
+        if should_cancel is not None and should_cancel():
+            s.cancelled = True
+            break
+        path = row["path"]
+        try:
+            if _isolated(con, path, row["volume"]):
+                raise OSError("kopia izolowana po przerwanym zapisie w miejscu (0022)")
+            xmeta = read_xisf_meta_full(path)
+        except Exception as exc:               # I/O albo parser - raport, nie zapis
+            s.failed += 1
+            s.failed_paths.append(f"{path}: {unreadable_reason_of(exc)}")
+        else:
+            s.headers_read += 1
+            historia = read_history(xmeta.xml_bytes.decode("utf-8", "replace"))
+            # Kotwica w klindze porównuje odcisk z wierszem lokacji TERAZ (migawka kandydatów mogła
+            # się zestarzeć); `False` = nagłówek kopii zmienił się w międzyczasie albo ten sam wiersz
+            # dociągnął równoległy skan - w obu razach ten przebieg nie ma czego zapisać.
+            if xmeta.header_hash == row["header_hash"] and repo.record_stack_history(
+                    con, location_id=row["id"], hdr_hash=xmeta.header_hash, history=historia,
+                    now=now, actor=actor):
+                s.written += 1
+            else:
+                s.stale += 1
+                s.stale_paths.append(path)
+        if progress is not None:
+            progress(i, len(rows), path, s)
+    s.remaining = len(stack_history_candidates(con, root))
+    return s
+
+
+@dataclass
 class AdoptSummary:
     """Zliczenia jednego przebiegu `adopt_orphan_testimony` - kotwica idempotencji w `remaining`.
     Każdy licznik ODMOWY niesie ścieżki (wzorzec `CopyFactsSummary`): „przejęto 1 z 3" bez
@@ -2797,6 +2998,9 @@ def scan_tree(con, root, *, volume="?", drive_letter=None, tier=None, now,
                 try:
                     ingest_record(con, rec, volume=volume, drive_letter=drive_letter, tier=tier,
                                   now=now, summary=liczniki, inplace_gen=gen)
+                    if _under(spath, stacks_prefix):       # wariant kadru z zeznaniem obok (AR-54)
+                        from . import stack_variants       # leniwie: plan wersji importuje skan
+                        stack_variants.note_testimony(con, spath, now=now)
                 except repo.StaleScanRecord:               # zapis w miejscu po generacji
                     stary = True
                 except Exception as exc:                   # backstop W1, strona ZAPISU - fakt o nas

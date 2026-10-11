@@ -114,6 +114,13 @@ from importlib import resources
 # dokładny wejść stosu z żniw (dowód manifestu wydania) między `history` a `user`. Wiersze `history`
 # zapisane przez żniwa przed v33 przechodzą na `harvest` po dzienniku (`integration.linked` aktora
 # `harvest`); reszta tabeli bez zmian, co do wiersza.
+# 0034 to PRZYROST (nowe tabele + ADD COLUMN, AR-87/AR-108): `stack_history`(+`_input`) - historia
+# integracji stosu z nagłówka kopii, kotwiczona `hdr_hash`; `light_name_alias` - dawne nazwy lightów
+# (Custos, zmiany nazw Horreum); `integration.lineage_basis/outside_window/used_rows` - podstawa
+# rangi `history`. Wszystko wchodzi PUSTE - wypełnia skan, uzupełnienie, import aliasów i rodowód.
+# 0035 to PRZYROST (nowa tabela, AR-54): `stack_variant` - wariant kadru stosu (autocrop) powiązany
+# z oryginałem, ze świadkiem pary (`window` < `location` < `user`). Wchodzi PUSTA - wypełnia konsument
+# zeznania wariantu po skanie.
 MIGRATIONS = [
     (2, "0002_initial.sql"),
     (3, "0003_writeback.sql"),
@@ -147,6 +154,8 @@ MIGRATIONS = [
     (31, "0031_camera_pixel_source.sql"),
     (32, "0032_frame_note.sql"),
     (33, "0033_lineage_harvest_rank.sql"),
+    (34, "0034_stack_history.sql"),
+    (35, "0035_stack_variant.sql"),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 _KNOWN_VERSIONS = frozenset({0} | {v for v, _ in MIGRATIONS})

@@ -997,13 +997,19 @@ def _awaria_przy(monkeypatch, nazwa, ktory):
     monkeypatch.setattr(repo, nazwa, z_awaria)
 
 
+# ROZJAZD Z HISTORIĄ wobec `_okno_dziesieciu` (wszystkie lighty -10,0): osiem wejść, z których jedno
+# zeznaje temperaturę spoza okna - strażnik 2 gasi rodowód (`history_mismatch`). Osiem wejść o tej
+# samej temperaturze co okno to dziś PODZBIÓR okna i werdykt „plik użył 8 z 10”, nie powód.
+_TEMP_ROZJAZD = [-10.0] * 7 + [-25.0]
+
+
 @pytest.mark.parametrize("nazwa, ktory", [("link_integration", 2), ("upsert_integration", 1)])
 def test_rodowod_z_zniw_awaria_w_polowie_nie_zostawia_nic(con, monkeypatch, nazwa, ktory):
     """Jedna transakcja na wołanie: awaria drugiego zapisu wierszy albo zapisu głowy cofa wszystko -
     wiersze `history` nie zostają obok niezdjętego powodu, a wyjątek leci do wołającego."""
     m = _master(con)
     lighty = _okno_dziesieciu(con)
-    xml = _xml_historii([-10.0] * 8)
+    xml = _xml_historii(_TEMP_ROZJAZD)
     run_stack_lineage(con, now=NOW, xml_reader=lambda _p: xml)
     przed = _migawka(con, m)
     _awaria_przy(monkeypatch, nazwa, ktory)
@@ -1025,12 +1031,13 @@ def test_rodowod_z_zniw_awaria_przy_zdejmowaniu_okna_cofa_wszystko(con, monkeypa
 
 
 def test_rodowod_z_zniw_przy_rozjezdzie_z_historia_zdejmuje_powod_a_lancuch_go_zostawia(con):
-    """Plik zeznaje 8 wejść, okno ma 10 klatek → strażnik 2 gasi rodowód (`history_mismatch`, zero
-    wierszy). Żniwa zapisują 8 `harvest` i zdejmują powód z głowy (powód obok wierszy automatu łamałby
-    inwariant bramki akceptacji); następny przebieg z tym samym zeznaniem zostawia stos w całości."""
+    """Plik zeznaje 8 wejść, jedno z temperaturą spoza okna 10 klatek → strażnik 2 gasi rodowód
+    (`history_mismatch`, zero wierszy). Żniwa zapisują 8 `harvest` i zdejmują powód z głowy (powód
+    obok wierszy automatu łamałby inwariant bramki akceptacji); następny przebieg z tym samym
+    zeznaniem zostawia stos w całości."""
     m = _master(con)
     lighty = _okno_dziesieciu(con)
-    xml = _xml_historii([-10.0] * 8)
+    xml = _xml_historii(_TEMP_ROZJAZD)
     s = run_stack_lineage(con, now=NOW, xml_reader=lambda _p: xml)
     assert s.reasons == {REASON_MISMATCH: 1} and inputs_of(con, m) == []
 
@@ -1202,7 +1209,7 @@ def test_rodowod_czeka_po_rozjezdzie_z_historia_reka_liczy_sie_jako_zapisana(con
     zapis by zostawił - nie czeka przez nie."""
     m = _master(con)
     lighty = _okno_dziesieciu(con)
-    xml = _xml_historii([-10.0] * 8)
+    xml = _xml_historii(_TEMP_ROZJAZD)
     run_stack_lineage(con, now=NOW, xml_reader=lambda _p: xml)
     assert inputs_of(con, m) == [] and _czeka(con, lighty[:8]) is True
     record_harvest_inputs(con, master_sha1_data="m1", input_frame_ids=lighty[:7], now=LATER)
@@ -1246,3 +1253,37 @@ def test_rodowod_nie_czeka_gdy_zapis_odmowilby_albo_stos_wycofany(con):
     assert _czeka(con, [lid], sha="m2") is True
     repo.retire_frames(con, frame_ids=[wycofany], now=LATER)
     assert _czeka(con, [lid], sha="m2") is False
+
+
+def test_werdykt_na_kilku_wejsciach_to_jedna_transakcja(con, monkeypatch):
+    """Gest na kilku zaznaczonych wejściach zapisuje się razem albo wcale: awaria drugiego zapisu
+    nie zostawia pierwszego (inaczej część gestu zostaje w bazie bez materiału „Cofnij”)."""
+    m = _master(con)
+    f1 = _light(con, "l1", date_obs="2025-08-30T20:30:00")
+    f2 = _light(con, "l2", date_obs="2025-08-30T20:31:00")
+    run_stack_lineage(con, now=NOW, xml_reader=_brak_xml)
+    iid = _integracja(con, m)["id"]
+    przed = (_wiersz(con, iid, f1), _wiersz(con, iid, f2))
+
+    prawdziwa = repo.emit_event
+    licznik = {"n": 0}
+
+    def _pada_za_drugim(con_, **kw):
+        if kw.get("verb") == "integration.judged":
+            licznik["n"] += 1
+            if licznik["n"] == 2:
+                raise RuntimeError("awaria drugiego zapisu")
+        return prawdziwa(con_, **kw)
+
+    monkeypatch.setattr(repo, "emit_event", _pada_za_drugim)
+    with pytest.raises(RuntimeError):
+        repo.judge_integration_inputs(con, integration_id=iid, input_frame_ids=[f1, f2],
+                                      excluded=True, now=NOW)
+    assert (_wiersz(con, iid, f1), _wiersz(con, iid, f2)) == przed
+
+    monkeypatch.setattr(repo, "emit_event", prawdziwa)
+    zmiany = repo.judge_integration_inputs(con, integration_id=iid, input_frame_ids=[f1, f2],
+                                           excluded=True, now=NOW)
+    assert [z.input_frame_id for z in zmiany] == [f1, f2]
+    assert repo.judge_integration_inputs(con, integration_id=iid, input_frame_ids=[f1, f2],
+                                         excluded=True, now=NOW) == []

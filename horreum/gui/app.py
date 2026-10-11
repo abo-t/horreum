@@ -1124,6 +1124,7 @@ class RepairHeaderDialog(QDialog):
             targets.setdefault(int(t["frame_id"]), []).append(t)
         groups = {}
         rodzaj = {}             # frame_id -> kind (drzewo świadka), poza słownikiem wiersza grupy
+        korzen = resolver.library_root_from_db(self.con)   # kotwica drzewa stosów (E5-3)
         for r in rows:
             trows = targets.get(int(r["frame_id"]))
             if not trows:                       # klatka zniknęła z bazy między odczytem a otwarciem
@@ -1136,7 +1137,8 @@ class RepairHeaderDialog(QDialog):
             rodzaj[r["frame_id"]] = r["kind"]
             folder = os.path.dirname(target["path"])
             if r["kind"] == STACK_KIND:
-                folder = object_folder(target["path"], kind=STACK_KIND) or folder
+                folder = object_folder(target["path"], kind=STACK_KIND,
+                                       library_root=korzen) or folder
             groups.setdefault(folder, []).append(
                 dict(frame_id=r["frame_id"], path=target["path"]))
         for folder, items in groups.items():
@@ -3255,6 +3257,8 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self.recipe_label)
         self.recipe_label.setVisible(False)     # po dodaniu — `addPermanentWidget` pokazuje widżet
         self._czlony_recepty = ()               # człony recepty na przycisku (FH-2e: klik robi pierwszy)
+        self._obiekty_wydania = None            # (con, rozjazdy) - cel gestu „Przypisz obiekt wydania”
+        self._zmiany_obiektu_wydania = None     # (con, [repo.StackObjectChange]) - materiał „Cofnij”
         self._recepta_wstrzymana = False        # blokada po wykonaniu członu - dwuklik to jeden gest (Z5)
         # FAZA DOPIERO PO RECEPCIE - kolejność dodawania jest kolejnością OD LEWEJ, więc faza dodana
         # pierwsza wchodziła MIĘDZY raport a receptę i rozdzielała dwa człony jednego zdania
@@ -3323,9 +3327,10 @@ class MainWindow(QMainWindow):
             self._miejsce_komunikatu = None
             self._pelny_komunikat = ""
             self.statusBar().clearMessage()
-        # Recepta mówi o Zbiorach (jedynym nadawcą jest grid), więc poza nimi gaśnie z paska -
-        # a przy powrocie widok podaje ją ze stanu, o ile wciąż jest prawdą (FH-2e). Dom niesie
-        # ją osobno, ze strumienia (`_recepta_gridu`).
+        # Recepta gridu mówi o Zbiorach, więc poza nimi gaśnie z paska - a przy powrocie widok podaje
+        # ją ze stanu, o ile wciąż jest prawdą (FH-2e). Drugi nadawca - gest obiektu wydania po żniwach
+        # (`_pokaz_gest_obiektu_wydania`) - żyje w miejscu, w którym padł jego raport, i gaśnie z nim.
+        # Dom dostaje ją osobno, ze strumienia (`_recepta_gridu`).
         if strona != STRONA_ZBIORY:
             self._ustaw_recepte("")
         msg = self._odlozone_raporty.pop(strona, "")
@@ -3482,10 +3487,12 @@ class MainWindow(QMainWindow):
         # etapu wraz z przełączeniem widoku na Dostawę (precedens „3→1"). Wstrzykiwane TU, bo tylko
         # gospodarz zna obie powierzchnie.
         tasks.object_view.run_stage_fn = self._resolve_after_repair
-        # …i to samo dla gestu osi STOSU (R2): panel Rodowód zmienia fakt, na którym stoi dobór
-        # wejść, więc musi umieć domknąć własny gest. Bez tej linii user wędrował na inny ekran po
-        # przycisk stojący obok wyboru katalogu (firsthand 0808).
-        grid.run_stage_fn = self._stack_lineage_after_gesture
+        # …i to samo dla gestów panelu Rodowód (R2 oś stosu, E4-5 oś kalibracji): panel zmienia
+        # fakt, na którym stoi dobór, więc musi umieć domknąć własny gest - z NAZWĄ etapu. Bez tej
+        # linii user wędrował na inny ekran po przycisk stojący obok wyboru katalogu (firsthand 0808).
+        grid.run_stage_fn = self._etap_po_gescie_rodowodu
+        # Dwuklik w panelu rodowodu prowadzi do klatek w Zbiorach - nawigację zna gospodarz.
+        grid.show_frames_fn = self.show_frames_in_collections
         tasks.object_view.writeback_busy.connect(grid.set_writeback_busy)   # mutex w drugą stronę
         tasks.object_view.writeback_busy.connect(pipeline.set_writeback_busy)   # i Dostawa gaśnie
         tasks.object_view.writeback_busy.connect(przyjmij.set_writeback_busy)   # …z gestem raportu
@@ -3661,6 +3668,15 @@ class MainWindow(QMainWindow):
         self.show_classic()
         self.grid_view.apply_object_facet(pairs)
 
+    def show_frames_in_collections(self, frame_ids, *, label, focus=None):
+        """Most „pokaż te klatki w Zbiorach" - publiczne wejście dla każdej powierzchni, która zna
+        `frame_id` (dziś: dwuklik w panelu rodowodu, obie osie). Strona zbiorów w BIEŻĄCEJ
+        prezentacji, gdy już na niej stoimy (Znajdź zostaje Znajdź), inaczej klasyczna; zbiór
+        ustawia publiczny seam gridu (`FramesView.show_frames`), z chipem i drogą powrotu."""
+        if self._strona() != STRONA_ZBIORY:
+            self.show_classic()
+        self.grid_view.show_frames(frame_ids, label=label, focus=focus)
+
     def _on_open_sites(self):
         """Pusty stan planera „bez stanowiska" (AR-48) → oś obserwatorium w Porządkach, gdzie stoi
         „Wskaż stanowisko…". Gospodarz zna oba ekrany; planer nie importuje Porządków."""
@@ -3779,7 +3795,11 @@ class MainWindow(QMainWindow):
         odświeżeniu gospodarza, więc bez tego panel rodowodu pokazywałby rodowód okna jako
         aktualny. Odświeżenie jest w `finally` - wyjątek zapisu (inny niż `ValueError` per stos)
         leci dalej, ale nie zostawia widoków ze stanem sprzed zapisu. Zdanie rodowodu DOKLEJA się
-        do podsumowania okna żniw, nie zastępuje go."""
+        do podsumowania okna żniw, nie zastępuje go.
+
+        Po zapisie - obiekt stosu wobec obiektu wydania (AR-103, `_rozjazdy_obiektu_wydania`):
+        rozjazd albo brak obiektu staje NA POCZĄTKU raportu z gestem „Przypisz obiekt wydania”
+        na pasku; zgodność milczy."""
         widok, con = self.pipeline_view, self.con
         start = widok.last_run["since"]
 
@@ -3794,10 +3814,13 @@ class MainWindow(QMainWindow):
                 return
             try:
                 zdanie = self._zdanie_rodowodu(con, stosy)
+                rozjazdy = self._rozjazdy_obiektu_wydania(con, stosy)
             finally:
                 self._odswiez_widoki_po_przebiegu()
                 self.grid_view.refresh_lineage_panel()
-            if zdanie:
+            if rozjazdy:
+                self._pokaz_gest_obiektu_wydania(con, rozjazdy, podsumowanie, zdanie)
+            elif zdanie:
                 self._flash(" - ".join(c for c in (podsumowanie, zdanie) if c))
 
         widok.run_finished.connect(po_przebiegu)
@@ -3810,7 +3833,7 @@ class MainWindow(QMainWindow):
         rodowód z historii; stos z rodowodem okna czasu (zapis odmówił, rodowód z łańcucha
         zostaje); stos BEZ rodowodu (łańcuch nie ujął go jako stosu, nie ma czego zapisać)."""
         z_historii = z_okna = bez_rodowodu = 0
-        for sha1_data, wejscia in stosy:
+        for sha1_data, wejscia, _kanon in stosy:
             try:
                 wynik = stacks.record_harvest_inputs(
                     con, master_sha1_data=sha1_data, input_frame_ids=wejscia, now=self._now())
@@ -3829,6 +3852,150 @@ class MainWindow(QMainWindow):
         if bez_rodowodu:
             czlony.append(i18n.t_plural("status.harvest_lineage_none", bez_rodowodu))
         return "; ".join(czlony)
+
+    # ---- obiekt stosu wobec obiektu wydania (AR-103): zdanie + gest na pasku, cofnięcie ----
+
+    def _rozjazdy_obiektu_wydania(self, con, stosy):
+        """Stosy z żniw, których obiekt NIE zgadza się z obiektem wydania (`stacks.release_object_check`:
+        `inny` albo `brak`) albo NIE DAJE SIĘ porównać, bo kanonu wydania ta baza nie zna
+        (`wydanie_poza_baza` - zdanie bez gestu), w kolejności okna. Stos zgodny, bez kanonu wydania
+        albo nieznany bazie nie daje zdania. Odczyt po łańcuchu: obiekt stosu daje mu dopiero
+        Dostawa (nagłówek → resolver)."""
+        rozjazdy = []
+        for sha1_data, _wejscia, kanon in stosy:
+            r = stacks.release_object_check(con, master_sha1_data=sha1_data, object_canon=kanon)
+            if r is not None and r["verdict"] in ("inny", "brak", "wydanie_poza_baza"):
+                rozjazdy.append(r)
+        return rozjazdy
+
+    @staticmethod
+    def _zdanie_obiektu_wydania(rozjazdy):
+        """Co się nie zgadza, po ludzku: osobny człon dla stosów z innym obiektem (para „stos: X,
+        wydanie: Y” na każdą parę, bez powtórzeń) i dla stosów bez obiektu (kanony wydania). Kanony
+        z bazy, nie z nagłówka - te same nazwy, które pokazują Zbiory."""
+        inne = [r for r in rozjazdy if r["verdict"] == "inny"]
+        puste = [r for r in rozjazdy if r["verdict"] == "brak"]
+        czlony = []
+        if inne:
+            pary = list(dict.fromkeys(
+                i18n.t("app.release_object.pair", stack=r["stack_canon"], release=r["release_canon"])
+                for r in inne))
+            czlony.append(i18n.t_plural("app.release_object.other", len(inne), pary="; ".join(pary)))
+        if puste:
+            kanony = ", ".join(dict.fromkeys(r["release_canon"] for r in puste))
+            czlony.append(i18n.t_plural("app.release_object.none", len(puste), release=kanony))
+        obce = [r for r in rozjazdy if r["verdict"] == "wydanie_poza_baza"]
+        if obce:
+            kanony = ", ".join(dict.fromkeys(r["release_canon"] for r in obce))
+            czlony.append(i18n.t_plural("app.release_object.unknown", len(obce), release=kanony))
+        return "; ".join(czlony)
+
+    def _gest_wydania_aktywny(self):
+        """Czy przycisk recepty niesie TERAZ gest obiektu wydania („Przypisz obiekt wydania” albo
+        „Cofnij”) - właściciela recepty rozpoznajemy po wykonawcy jej pierwszego członu, bez
+        osobnego stanu, który mógłby rozjechać się z paskiem."""
+        czlony = self._czlony_recepty
+        return bool(czlony) and czlony[0].wykonaj in (self._on_przypisz_obiekt_wydania,
+                                                       self._on_cofnij_obiekt_wydania)
+
+    def _pokaz_gest_obiektu_wydania(self, con, rozjazdy, podsumowanie="", zdanie_rodowodu=""):
+        """Zdanie rozjazdu NA POCZĄTKU raportu (pasek ucina koniec, a to jest jedyny człon, który
+        prosi o decyzję) i gest „Przypisz obiekt wydania” na przycisku recepty, przyklejonym do
+        raportu. Raport bez wygasania i związany z bieżącym miejscem nawigacji: zdanie i gest żyją
+        razem - gasi je cudzy raport gestu (`_flash` zdejmuje receptę) albo wyjście z tego miejsca;
+        raport wczytania i recepta gridu go nie zdejmują (`_gest_wydania_aktywny`). Stosy, których
+        nie da się porównać (`wydanie_poza_baza`), dostają samo zdanie - gest bez celu nie staje.
+        Nigdy cicha podmiana: zapis robi wyłącznie klik."""
+        from horreum.gui.grid_model import CzlonRecepty, Recepta
+        tekst = " - ".join(c for c in (self._zdanie_obiektu_wydania(rozjazdy), podsumowanie,
+                                       zdanie_rodowodu) if c)
+        cele = [r for r in rozjazdy if r["verdict"] in ("inny", "brak")]
+        self._obiekty_wydania = (con, cele) if cele else None
+        self._flash(tekst, ms=0 if cele else 5000, miejsce=self._strona())
+        if cele:
+            self._pokaz_recepte(Recepta([CzlonRecepty(i18n.t("app.release_object.assign"),
+                                                      self._on_przypisz_obiekt_wydania)]))
+
+    def _on_przypisz_obiekt_wydania(self):
+        """Klik „Przypisz obiekt wydania”: per stos klinga jawnego nadpisania ręką
+        (`repo.user_override_stack_object`) ze stanem, który zdanie pokazało, jako oczekiwanym -
+        stos zmieniony od żniw jest pomijany i nazwany (dryf), drugi klik niczego nie dopisuje.
+        Po zapisie zdanie wyniku i recepta „Cofnij” (stan sprzed z klingi, nie z ekranu). Inna
+        baza niż ta, na której żniwa się odbyły - gest milczy (stosy jej nie dotyczą)."""
+        from horreum.gui.grid_model import CzlonRecepty, Recepta
+        con, rozjazdy = self._obiekty_wydania or (None, [])
+        self._obiekty_wydania = None
+        if con is None or con is not self.con or not rozjazdy:
+            return
+        zmiany, kanony, juz, dryf = [], [], 0, 0
+        for r in rozjazdy:
+            wynik = repo.user_override_stack_object(
+                con, frame_id=r["frame_id"], object_id=r["release_object_id"],
+                expected_object_id=r["stack_object_id"], expected_source=r["stack_source"],
+                expected_cleared_id=r["stack_cleared_id"], now=self._now(), changes_out=zmiany)
+            if wynik == "assigned":
+                kanony.append(r["release_canon"])
+            elif wynik == "unchanged":
+                juz += 1
+            else:
+                dryf += 1
+        self._odswiez_po_obiekcie_wydania()
+        czlony = []
+        if zmiany:
+            czlony.append(i18n.t_plural("app.release_object.assigned", len(zmiany),
+                                        canons=", ".join(dict.fromkeys(kanony))))
+        if juz:
+            czlony.append(i18n.t_plural("app.release_object.already", juz))
+        if dryf:
+            czlony.append(i18n.t_plural("app.release_object.drift", dryf))
+        self._zmiany_obiektu_wydania = (con, zmiany) if zmiany else None
+        self._flash("; ".join(czlony), ms=0, miejsce=self._strona())
+        if zmiany:
+            self._pokaz_recepte(Recepta([CzlonRecepty(i18n.t("app.release_object.undo"),
+                                                      self._on_cofnij_obiekt_wydania)]))
+
+    def _on_cofnij_obiekt_wydania(self):
+        """Klik „Cofnij” po geście: każdy stos wraca do stanu sprzed (`repo.restore_stack_object`,
+        CAS - stos zmieniony po geście zostaje i jest nazwany). Zdanie mówi, DO CZEGO stos wrócił
+        (`change.before`): do poprzedniego obiektu, do braku obiektu albo do nagrobka ręki - „wrócił
+        do poprzedniego obiektu” przy stosie, który obiektu nie miał, byłoby nieprawdą. Recepta
+        gaśnie razem ze zdaniem wyniku: cofnięcia nie cofamy."""
+        con, zmiany = self._zmiany_obiektu_wydania or (None, [])
+        self._zmiany_obiektu_wydania = None
+        if con is None or con is not self.con or not zmiany:
+            return
+        obiekt = pustka = nagrobek = dryf = 0
+        for z in zmiany:
+            if not repo.restore_stack_object(con, change=z, now=self._now()):
+                dryf += 1
+            elif z.before[0] is not None:
+                obiekt += 1
+            elif z.before[1] == "user_cleared":
+                nagrobek += 1
+            else:
+                pustka += 1
+        self._odswiez_po_obiekcie_wydania()
+        cofniete = []
+        if obiekt:
+            cofniete.append(i18n.t_plural("app.release_object.restored", obiekt))
+        if pustka:
+            cofniete.append(i18n.t_plural("app.release_object.restored_none", pustka))
+        if nagrobek:
+            cofniete.append(i18n.t_plural("app.release_object.restored_cleared", nagrobek))
+        czlony = [i18n.t("app.release_object.undone", czlony=", ".join(cofniete))] if cofniete else []
+        if dryf:
+            czlony.append(i18n.t_plural("app.release_object.undo_drift", dryf))
+        self._flash("; ".join(czlony), miejsce=self._strona())
+
+    def _odswiez_po_obiekcie_wydania(self):
+        """Gest zmienił oś obiektu stosów - te same powierzchnie, co po geście „Przypisz obiekt…”
+        z raportu Dostawy (kolejka osi, plakietka Porządków, teczki Domu, grid) i panel rodowodu."""
+        self.object_view.refresh()
+        self.tasks_view.refresh_counts()
+        if self.home_view is not None:
+            self.home_view.odswiez_teczki()
+        self.grid_view.refresh(w_tle=True)
+        self.grid_view.refresh_lineage_panel()
 
     def _on_tasks_counts(self, n):
         """Badge sidebara: „Porządki (N)" przy N>0; przy zerze GOŁE „Porządki" - „(0)" to szum (F5R#8).
@@ -3849,20 +4016,25 @@ class MainWindow(QMainWindow):
             self._show_view(NAV_DOSTAWA)
         return reason
 
-    def _stack_lineage_after_gesture(self):
-        """Takt 3 dla gestów osi STOSU (odniesienie czasu R2) — lustro `_resolve_after_repair`.
+    def _etap_po_gescie_rodowodu(self, stage):
+        """Takt 3 dla gestów panelu Rodowód - lustro `_resolve_after_repair`, z etapem jako
+        parametrem: `stack_lineage` po odniesieniu czasu stosu (R2), `lineage` po gestach osi
+        kalibracji („Policz teraz”, „Przywróć automat”).
 
-        Gest zmienia fakt, na którym stoi dobór wejść, więc dopóki rodowód się nie przeliczy, ekran
+        Gest zmienia fakt, na którym stoi dobór, więc dopóki rodowód się nie przeliczy, ekran
         pokazuje stan sprzed gestu. Zdzin nazwał koszt wprost: „muszę teraz zmienić zakładkę na
         Dostawę i klikać button, który jest przy buttonie wyboru folderu — UX-owo to jest
         niezrozumiałe". I jest: akcja domykająca gest mieszkała na innym ekranie, w sekcji
         o wciąganiu plików z dysku.
 
-        Przełączenie widoku ZOSTAJE (jak przy naprawie nagłówka): etap jest długi i jego postęp ma
-        być widoczny tam, gdzie zawsze. Różnica wobec stanu sprzed tej zmiany jest w tym, że
-        przełącza PROGRAM po jednym kliknięciu, a nie człowiek po trzech."""
-        reason = self.pipeline_view.run_stage("stack_lineage")
-        if reason is None:
+        PRZEŁĄCZENIE WIDOKU ZALEŻY OD ETAPU. Rodowód stosów jest długi (czyta historię plików
+        z archiwum), więc jego postęp ma być widoczny tam, gdzie zawsze - przełącza PROGRAM po
+        jednym kliknięciu, a nie człowiek po trzech. Rodowód kalibracji trwa ułamek sekundy (0,38 s
+        na kopii żywego archiwum, 14 338 lightów), a powrót z Dostawy czyścił zaznaczenie - to był
+        cały koszt „Policz teraz” (4 interakcje zamiast 1, wizytacja 0802), więc ten etap biegnie
+        bez zmiany ekranu, a panel odświeża się sam po końcu przebiegu."""
+        reason = self.pipeline_view.run_stage(stage)
+        if reason is None and stage == "stack_lineage":
             self._show_view(NAV_DOSTAWA)
         return reason
 
@@ -4024,7 +4196,15 @@ class MainWindow(QMainWindow):
         Na pasku bez powiązania z miejscem przykrywał wtedy status etapu, po który user patrzy
         w Dostawie, mówiąc o ekranie, którego nie widać. Odłożony, a nie zgubiony: przy wejściu
         w Zbiory zdanie „Grid: N klatek…" jest prawdziwe i opisuje to, co właśnie pokazujemy.
-        Nowszy raport zastępuje odłożony - liczy się ostatnie wczytanie."""
+        Nowszy raport zastępuje odłożony - liczy się ostatnie wczytanie.
+
+        Aktywny gest obiektu wydania (AR-103, `_gest_wydania_aktywny`) też odkłada ten raport:
+        wczytanie po przebiegu Dostawy przychodzi z wątku tła PO zdaniu rozjazdu, a `_flash`
+        zdjąłby jego przycisk („Przypisz obiekt wydania” / „Cofnij”) - raport wczytania to nie gest
+        człowieka, który ma prawo go zastąpić."""
+        if self._gest_wydania_aktywny():
+            self._odlozone_raporty[STRONA_ZBIORY] = msg
+            return
         self._raport_miejsca(msg, STRONA_ZBIORY)
 
     def _raport_miejsca(self, msg, miejsce, *, wiaz=True):
@@ -4092,11 +4272,15 @@ class MainWindow(QMainWindow):
         przy wejściu w nie widok poda ją ponownie (`FramesView.ponow_recepte`).
 
         Dom dostaje KAŻDĄ receptę strumienia, niezależnie od widocznej strony: jego „Ostatnio" żyje
-        wyłącznie tym strumieniem (pusta recepta zdejmuje ją z Domu), a nie raportami paska."""
+        wyłącznie tym strumieniem (pusta recepta zdejmuje ją z Domu), a nie raportami paska.
+
+        Pasek NIE dostaje recepty gridu, gdy niesie gest obiektu wydania (`_gest_wydania_aktywny`):
+        grid składa receptę przy każdym przeładowaniu (także po przebiegu Dostawy, w tle), a to nie
+        gest człowieka - podmiana zabrałaby „Przypisz obiekt wydania” / „Cofnij” spod kursora."""
         self._recepta_strumienia = recepta if recepta else None
         if self.home_view is not None:
             self.home_view.pokaz_recepte(recepta)
-        if self._strona() == STRONA_ZBIORY:
+        if self._strona() == STRONA_ZBIORY and not self._gest_wydania_aktywny():
             self._pokaz_recepte(recepta)
 
     def _wykonaj_recepte(self, *, czlony=None):

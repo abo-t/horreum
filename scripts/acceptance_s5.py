@@ -1267,6 +1267,13 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
         ).fetchone()[0]
         crit("§5.14 powód wyklucza wejścia automatu (odmowa == ZERO relacji)",
              z_wejsciami_i_powodem == 0)
+        # WERDYKT „N z M” (0034, E4-9) ZASTĄPIŁ część `history_mismatch` - i nie jest powodem: wiersze
+        # okna stoją, a głowa mówi, ile z nich plik użył. Z powodem obok byłby dwoma werdyktami naraz
+        # (CHECK 0034 wiąże tylko flagę „poza oknem” z podstawą `name`; ta para żyje tu).
+        n_z_m_z_powodem = con.execute(
+            "SELECT count(*) FROM integration WHERE used_rows IS NOT NULL "
+            "AND unresolved_reason IS NOT NULL").fetchone()[0]
+        crit("§5.14 werdykt „plik użył N z M” nie stoi obok powodu odmowy", n_z_m_z_powodem == 0)
         # Strażnik okna zdegenerowanego — sedno D-P-I-2: taki stos ma NIE dostać ani jednej relacji.
         # Z OKNA - stąd wyłączony także `harvest` (AR-102): zbiór dokładny z żniw nie pochodzi z okna
         # czasu, więc stos o zdegenerowanym oknie, który WBPP zintegrował z wydania, ma go słusznie.
@@ -1511,7 +1518,10 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
         # Reguła czasowa pinowana WPROST: light w profilu FLAT wielo-masterowym linkuje master
         # o min |Δ date_obs| (nie MIN id, nie pierwszy). Sprawdzamy na KAŻDYM takim wierszu.
         czasowa_ok = _check_nearest_in_time(con)
-        crit("§5.12 reguła czasowa: każdy link flat = master o min |Δczasu| w profilu", czasowa_ok)
+        crit("§5.12 reguła czasowa: każdy link flat automatu = aktywny master o min |Δczasu| "
+             "w profilu", czasowa_ok)
+        crit("§5.12 ręka ⊆ aktywne mastery klasy i kamery lightu",
+             _check_hand_links_active(con) == 0)
         if full:
             crit_k("§5.12 lighty z darkiem", EXP_LINEAGE_DARK, lin.linked.get("dark", 0))
             crit_k("§5.12 lighty z flatem", EXP_LINEAGE_FLAT, lin.linked.get("flat", 0))
@@ -1520,20 +1530,28 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
 
 
 def _check_nearest_in_time(con):
-    """Dla KAŻDEGO wiersza `calibration` relacji flat: czy podpięty master ma min |Δ date_obs|
-    wśród masterów swojego profilu? Liczone na `naming.header_dt` (jak produkcja), NIE `julianday`."""
+    """Dla KAŻDEGO wiersza AUTOMATU `calibration` relacji flat: czy podpięty master ma min |Δ date_obs|
+    wśród AKTYWNYCH masterów swojego profilu? Liczone na `naming.header_dt` (jak produkcja), NIE
+    `julianday`. Wyrocznia niezależna od `lineage`, ale z tymi samymi granicami: kandydat bez
+    nagrobka (`retired_at`/`superseded_by`), a wskazanie ręki (`asserted_by='user'`, także spoza
+    przepisu) nie jest pytaniem o regułę czasu - pilnuje go `_check_hand_links_active`."""
+    from horreum import repo
     from horreum.naming import header_dt
     masters = {}
     for r in con.execute(
             "SELECT f.calibration_profile_id AS pid, f.id AS fid, h.date_obs AS d "
             "FROM frame f LEFT JOIN header h ON h.frame_id=f.id "
-            "WHERE f.calibration_profile_id IS NOT NULL AND f.kind LIKE 'master_%'"):
+            "WHERE f.calibration_profile_id IS NOT NULL AND f.kind LIKE 'master_%' "
+            "AND f.retired_at IS NULL AND f.superseded_by IS NULL"):
         masters.setdefault(r["pid"], []).append((r["fid"], header_dt(r["d"])))
     for r in con.execute(
-            "SELECT c.master_frame_id AS mid, hl.date_obs AS ld, mf.calibration_profile_id AS pid "
+            "SELECT c.master_frame_id AS mid, hl.date_obs AS ld, mf.calibration_profile_id AS pid, "
+            "c.asserted_by AS src "
             "FROM calibration c JOIN frame mf ON mf.id=c.master_frame_id "
             "LEFT JOIN header hl ON hl.frame_id=c.light_frame_id "
             "WHERE c.relation='flat'"):
+        if r["src"] not in repo.CALIBRATION_AUTO_SOURCES:
+            continue
         cand = masters.get(r["pid"], [])
         if len(cand) <= 1:
             continue
@@ -1545,6 +1563,19 @@ def _check_nearest_in_time(con):
         if best[0] != r["mid"]:
             return False
     return True
+
+
+def _check_hand_links_active(con):
+    """Wskazania RĘKI osi kalibracji (`asserted_by='user'`) - osobne kryterium, bo reguła czasu ich
+    nie obejmuje: ręka ⊆ aktywne mastery klasy relacji i kamery lightu. Zwraca liczbę wierszy, które
+    tę granicę łamią (0 = zielono); wycofanie mastera PO geście to stan do pokazania, nie błąd
+    klingi, ale bramka ma go nazwać."""
+    return con.execute(
+        "SELECT count(*) FROM calibration c JOIN frame m ON m.id = c.master_frame_id "
+        "JOIN frame l ON l.id = c.light_frame_id WHERE c.asserted_by = 'user' "
+        "AND (m.kind <> 'master_' || c.relation OR m.retired_at IS NOT NULL "
+        "     OR m.superseded_by IS NOT NULL OR l.camera_id IS NULL "
+        "     OR l.camera_id IS NOT m.camera_id)").fetchone()[0]
 
 
 # ── (S) SUBSET: realny skan małego katalogu (czytniki + sha1 na realnych bajtach) ────────────────

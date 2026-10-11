@@ -1474,6 +1474,8 @@ class PipelineView(QWidget):
         czesci = [i18n.t("pipeline.fmt.slin.linked", n=s.linked, total=s.stacks, inputs=s.inputs)]
         if s.by_assert.get("history"):
             czesci.append(i18n.t("pipeline.fmt.slin.history", n=s.by_assert["history"]))
+        if s.by_assert.get("harvest"):
+            czesci.append(i18n.t("pipeline.fmt.slin.harvest", n=s.by_assert["harvest"]))
         czekaja = sum(s.reasons.values())
         if czekaja:
             czesci.append(i18n.t("pipeline.fmt.slin.waiting", n=czekaja))

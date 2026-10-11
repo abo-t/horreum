@@ -162,6 +162,9 @@ def test_parytet_tokenow_dynamicznych_z_katalogiem():
     for relation in lineage._RELATIONS:
         if f"grid.lin.cal.rel.{relation}" not in CATALOG:
             braki.append(f"grid.lin.cal.rel.{relation}")
+    # Źródło wejścia stosu (`grid._lineage_item_text`): każda ranga kanonu, także `harvest` (AR-102).
+    from horreum import repo
+    braki += [f"grid.lin.src.{z}" for z in repo.RANGA_ASSERT if f"grid.lin.src.{z}" not in CATALOG]
     assert not braki, f"rdzeń produkuje tokeny bez zdania w katalogu: {braki}"
 
 

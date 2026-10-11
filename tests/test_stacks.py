@@ -22,15 +22,19 @@ STOS = r"R:\ARCHIWUM\A140R\CTB1\WBPP\master\masterLight_EXPOSURE-600.00s_FILTER-
 # zbioru, nie sam licznik (`resolve.stack.inputs_contained`).
 _WBPP = ("D:/robocze/CTB1/wbpp/registered/"
          "CTB 1_LIGHT_GRP-MM_FILTER-H_600.00s_{idx}_2.98_0.56_{temp}C_c_r.xisf")
+# Nazwa lightu WYDANEGO przez Horreum (nazwa archiwum, `naming`) - BEZ tokenu temperatury, więc test
+# okna widzi sam licznik (D-1011-3, test bo: `LBN807_20250103_195625_LIGHT_Ha_600s_FLATGRP_NOFLAT_`).
+_WYDANIE = ("D:/robocze/OBJECTS/CTB1/out/registered/"
+            "CTB1_20250830_20{idx}_LIGHT_Ha_600s_FLATGRP_NOFLAT__c_r.xisf")
 
 
-def _xml_historii(temperatury, *, drizzle=True, enabled=True):
+def _xml_historii(temperatury, *, drizzle=True, enabled=True, wzor=_WBPP):
     """Nagłówek XISF z własnością `PixInsight:ProcessingHistory` (treść zaescape'owana, jak
     w realnym pliku) — tabela `images` z wejściami plus `imageData` z własnymi wierszami."""
     wiersze = []
     for i, t in enumerate(temperatury):
         td = f'&lt;td id="enabled" value="{"true" if enabled else "false"}"/&gt;'
-        td += f'&lt;td id="path"&gt;{_WBPP.format(idx=f"{i:04d}", temp=f"{t:.2f}")}&lt;/td&gt;'
+        td += f'&lt;td id="path"&gt;{wzor.format(idx=f"{i:04d}", temp=f"{t:.2f}")}&lt;/td&gt;'
         if drizzle:
             td += '&lt;td id="drizzlePath"&gt;x.xdrz&lt;/td&gt;'
         wiersze.append(f"&lt;tr&gt;{td}&lt;/tr&gt;")
@@ -897,7 +901,7 @@ def _automat_z_powodem(con):
 
 def test_rodowod_z_zniw_okno_10_historia_8_drugi_lancuch_bez_zmian_reka_nietknieta(con):
     """Okno dało 10 kandydatów (`window`), WBPP zintegrował 8: zbiór DOKŁADNY z żniw podnosi 8 do
-    `history`, zdejmuje jedyne `window` spoza zbioru, a odrzucenia ręką nie rusza. Następny przebieg
+    `harvest`, zdejmuje jedyne `window` spoza zbioru, a odrzucenia ręką nie rusza. Następny przebieg
     łańcucha widzi rodowód mocniejszy od okna i niczego nie dokłada; drugie wołanie = same zera."""
     m = _master(con)
     lighty = _okno_dziesieciu(con)
@@ -909,7 +913,7 @@ def test_rodowod_z_zniw_okno_10_historia_8_drugi_lancuch_bez_zmian_reka_nietknie
     wynik = record_harvest_inputs(con, master_sha1_data="m1", input_frame_ids=lighty[:8], now=LATER)
     assert wynik == {"reason": None, "linked": 0, "upgraded": 8, "dropped": 1, "kept_user": 1}
     stan = {r["input_frame_id"]: (r["asserted_by"], r["excluded"]) for r in inputs_of(con, m)}
-    assert stan == {**{f: ("history", 0) for f in lighty[:8]}, lighty[9]: ("user", 1)}
+    assert stan == {**{f: ("harvest", 0) for f in lighty[:8]}, lighty[9]: ("user", 1)}
     glowa = _integracja(con, m)
     assert glowa["unresolved_reason"] is None and glowa["integ_hash"] is not None
 
@@ -971,7 +975,7 @@ def test_rodowod_z_zniw_awaria_przy_zdejmowaniu_okna_cofa_wszystko(con, monkeypa
 
 def test_rodowod_z_zniw_przy_rozjezdzie_z_historia_zdejmuje_powod_a_lancuch_go_zostawia(con):
     """Plik zeznaje 8 wejść, okno ma 10 klatek → strażnik 2 gasi rodowód (`history_mismatch`, zero
-    wierszy). Żniwa zapisują 8 `history` i zdejmują powód z głowy (powód obok wierszy automatu łamałby
+    wierszy). Żniwa zapisują 8 `harvest` i zdejmują powód z głowy (powód obok wierszy automatu łamałby
     inwariant bramki akceptacji); następny przebieg z tym samym zeznaniem zostawia stos w całości."""
     m = _master(con)
     lighty = _okno_dziesieciu(con)
@@ -986,10 +990,107 @@ def test_rodowod_z_zniw_przy_rozjezdzie_z_historia_zdejmuje_powod_a_lancuch_go_z
 
     zapis = _zdarzenia_zapisu(con)
     s = run_stack_lineage(con, now=LATER, xml_reader=lambda _p: xml)
-    assert (s.reasons, s.linked, s.by_assert, s.kept_proven) == ({}, 1, {"history": 1}, 1)
+    assert (s.reasons, s.linked, s.by_assert, s.kept_proven) == ({}, 1, {"harvest": 1}, 1)
     assert sorted(r["input_frame_id"] for r in inputs_of(con, m)) == sorted(lighty[:8])
     assert _zdarzenia_zapisu(con) == zapis and _automat_z_powodem(con) == 0
     assert _integracja(con, m)["unresolved_reason"] is None
+
+
+def test_rodowod_z_zniw_okno_rownej_licznosci_nie_przepisuje_zbioru_dokladnego(con):
+    """AR-102, test regresji D-1011-2 (wariant B testu bo na scratchu fali 9): plik zeznaje 8 wejść,
+    okno ma 10 → żniwa zapisują zbiór dokładny (lighty 0-7). Korekta `DATE-OBS` dwóch lightów ZE
+    zbioru wyrzuca je z okna, które ma teraz 8 klatek - tyle, ile zeznaje plik, w tym dwie odrzucone
+    przez WBPP (8, 9) - więc plan przechodzi test okna jako `history` bez powodu. Do v33 przebieg
+    wstawiał wtedy odrzucone i zdejmował użyte; ranga `harvest` stoi nad planem, więc wiersze
+    zostają co do sztuki, a predykat „czeka” mówi NIE (bez pętli przyjęć). Nazwy wejść jak z wydania
+    Horreum - BEZ temperatury (D-1011-3): ochrona nie może stać na zeznaniu temperatur."""
+    m = _master(con)
+    lighty = _okno_dziesieciu(con)
+    xml = _xml_historii([-10.0] * 8, wzor=_WYDANIE)
+    assert "C_c_r" not in xml
+    run_stack_lineage(con, now=NOW, xml_reader=lambda _p: xml)
+    record_harvest_inputs(con, master_sha1_data="m1", input_frame_ids=lighty[:8], now=LATER)
+    zbior = {r["input_frame_id"]: (r["asserted_by"], r["excluded"]) for r in inputs_of(con, m)}
+    assert zbior == {f: ("harvest", 0) for f in lighty[:8]}
+    con.executemany("UPDATE header SET date_obs = '2025-08-31T03:00:00' WHERE frame_id = ?",
+                    [(lighty[6],), (lighty[7],)])
+    con.commit()
+
+    zapis = _zdarzenia_zapisu(con)
+    s = run_stack_lineage(con, now=LATER, xml_reader=lambda _p: xml)
+    assert (s.reasons, s.linked_new, s.unlinked, s.kept_proven, s.by_assert) == ({}, 0, 0, 1, {"harvest": 1})
+    assert {r["input_frame_id"]: (r["asserted_by"], r["excluded"]) for r in inputs_of(con, m)} == zbior
+    assert _zdarzenia_zapisu(con) == zapis
+    assert _czeka(con, lighty[:8]) is False
+
+
+def test_rodowod_z_zniw_zdejmuje_nadmiar_history_a_predykat_go_widzi(con):
+    """Z1 (D-1011-2): wiersz `history` spoza zbioru dokładnego (nadmiar z przebiegu łańcucha sprzed
+    v33) - predykat „czeka” mówi TAK, zapis go zdejmuje (`dropped`), potem NIE. `harvest` spoza
+    późniejszego, węższego zbioru zostaje: klinga zdejmuje tylko zeznania automatu, a dowód manifestu
+    obala wyłącznie ręka - i predykat, lustro zapisu, przez niego nie czeka."""
+    m = _master(con)
+    lighty = _okno_dziesieciu(con)
+    xml = _xml_historii([-10.0] * 8)
+    run_stack_lineage(con, now=NOW, xml_reader=lambda _p: xml)
+    record_harvest_inputs(con, master_sha1_data="m1", input_frame_ids=lighty[:8], now=LATER)
+    iid = _integracja(con, m)["id"]
+    assert repo.link_integration(con, integration_id=iid, input_frame_id=lighty[8], asserted_by="history",
+                                 now=LATER) is True
+    assert _czeka(con, lighty[:8]) is True
+
+    wynik = record_harvest_inputs(con, master_sha1_data="m1", input_frame_ids=lighty[:8], now=LATER)
+    assert wynik == {"reason": None, "linked": 0, "upgraded": 0, "dropped": 1, "kept_user": 0}
+    assert {r["input_frame_id"]: r["asserted_by"] for r in inputs_of(con, m)} == {f: "harvest" for f in lighty[:8]}
+    assert _czeka(con, lighty[:8]) is False
+
+    assert record_harvest_inputs(con, master_sha1_data="m1", input_frame_ids=lighty[:7], now=LATER)["dropped"] == 0
+    assert {r["input_frame_id"]: r["asserted_by"] for r in inputs_of(con, m)} == {f: "harvest" for f in lighty[:8]}
+    assert _czeka(con, lighty[:7]) is False
+
+
+def test_stos_mieszany_harvest_i_history_reconcile_zdejmuje_tylko_history(con):
+    """Bramka `sol` (AR-102): stos z nadmiarem `history` obok zbioru `harvest` ma minimum rangi równe
+    planowi okna, więc przebieg łańcucha NIE jest chroniony i `_reconcile` naprawdę biegnie. Okno
+    równej liczności po korekcie `DATE-OBS` dwóch lightów zbioru wskazuje 0-5, 8, 9: łańcuch dopisuje
+    `history` 9, a zdjąć próbuje 6 i 7 (`harvest`) - klinga odmawia, więc zbiór dokładny zostaje cały;
+    nadmiar `history` zdejmie dopiero przyjęcie (predykat „czeka” go widzi)."""
+    m = _master(con)
+    lighty = _okno_dziesieciu(con)
+    xml = _xml_historii([-10.0] * 8, wzor=_WYDANIE)
+    run_stack_lineage(con, now=NOW, xml_reader=lambda _p: xml)
+    record_harvest_inputs(con, master_sha1_data="m1", input_frame_ids=lighty[:8], now=LATER)
+    iid = _integracja(con, m)["id"]
+    repo.link_integration(con, integration_id=iid, input_frame_id=lighty[8], asserted_by="history", now=LATER)
+    con.executemany("UPDATE header SET date_obs = '2025-08-31T03:00:00' WHERE frame_id = ?",
+                    [(lighty[6],), (lighty[7],)])
+    con.commit()
+
+    s = run_stack_lineage(con, now=LATER, xml_reader=lambda _p: xml)
+    assert (s.reasons, s.kept_proven, s.linked_new, s.unlinked) == ({}, 0, 1, 0)
+    stan = {r["input_frame_id"]: r["asserted_by"] for r in inputs_of(con, m)}
+    assert stan == {**{f: "harvest" for f in lighty[:8]}, lighty[8]: "history", lighty[9]: "history"}
+    assert _czeka(con, lighty[:8]) is True
+    assert record_harvest_inputs(con, master_sha1_data="m1", input_frame_ids=lighty[:8], now=LATER)["dropped"] == 2
+    assert {r["input_frame_id"]: r["asserted_by"] for r in inputs_of(con, m)} == {f: "harvest" for f in lighty[:8]}
+
+
+def test_klinga_zdejmowania_nie_rusza_harvest_ani_reki_a_link_nie_obniza_harvest(con):
+    """`unlink_integration_input` zdejmuje wyłącznie `window`/`history`; `harvest` i `user` zostają.
+    `link_integration` nie obniża `harvest` planem okna ani zeznaniem pliku, a werdykt ręki go przebija."""
+    m = _master(con)
+    lighty = _okno_dziesieciu(con)
+    run_stack_lineage(con, now=NOW, xml_reader=_brak_xml)
+    record_harvest_inputs(con, master_sha1_data="m1", input_frame_ids=lighty[:8], now=LATER)
+    iid = _integracja(con, m)["id"]
+    assert repo.unlink_integration_input(con, integration_id=iid, input_frame_id=lighty[0], now=LATER) is False
+    for slabsze in ("window", "history"):
+        assert repo.link_integration(con, integration_id=iid, input_frame_id=lighty[1], asserted_by=slabsze,
+                                     now=LATER) is False
+    assert repo.link_integration(con, integration_id=iid, input_frame_id=lighty[1], asserted_by="user",
+                                 now=LATER) is True
+    stan = {r["input_frame_id"]: r["asserted_by"] for r in inputs_of(con, m)}
+    assert (stan[lighty[0]], stan[lighty[1]]) == ("harvest", "user")
 
 
 def test_rodowod_z_zniw_bez_integracji_no_integration_zero_zapisu(con):

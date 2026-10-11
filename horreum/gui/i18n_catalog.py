@@ -2301,6 +2301,8 @@ CATALOG = {
         "en": "No change — those frames already carried this verdict",
     },
     "grid.lin.src.history": {"pl": "plik zeznał", "en": "file testified"},
+    # AR-102: zbiór dokładny z żniw - WBPP zintegrował dokładnie te lighty, które Horreum wydał.
+    "grid.lin.src.harvest": {"pl": "z wydania", "en": "from the release"},
     "grid.lin.src.window": {"pl": "wynika z czasu", "en": "inferred from time"},
     "grid.lin.src.user": {"pl": "Twoja decyzja", "en": "your decision"},
     "grid.lin.src.excluded": {"pl": "odrzucone", "en": "rejected"},
@@ -3160,6 +3162,11 @@ CATALOG = {
     },
     "pipeline.fmt.slin.history": {
         "pl": "z tego {n} potwierdza sam plik", "en": "of those {n} confirmed by the file itself",
+    },
+    # AR-102: stosy, których rodowód przyszedł z żniw (zbiór dokładny wydania) - dowód mocniejszy niż
+    # plik dopasowany do okna, więc osobny człon, nie doliczenie do „potwierdza sam plik”.
+    "pipeline.fmt.slin.harvest": {
+        "pl": "z wydania {n}", "en": "from a release {n}",
     },
     "pipeline.fmt.slin.waiting": {
         "pl": "czeka na Ciebie {n}", "en": "waiting for you {n}",

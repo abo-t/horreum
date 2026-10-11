@@ -4416,13 +4416,16 @@ def set_integration_offset(con, *, master_frame_id, utc_offset_min, now, uid="lo
     return True
 
 
-RANGA_ASSERT = {"window": 0, "history": 1, "user": 2}
+RANGA_ASSERT = {"window": 0, "history": 1, "harvest": 2, "user": 3}
 """Precedencja zeznania o wejściu stosu — JEDEN właściciel kanonu (`link_integration` ORAZ strażnik
 przebiegu w `stacks`). Do S2b liczba żyła jako zmienna lokalna klingi, więc przebieg, który musi
 zapytać „czy ZAPISANY rodowód jest mocniejszy od tego, co umiem policzyć TERAZ", nie miał jej skąd
 wziąć i odpowiadał wyliczanką wartości — a wyliczanka gubi sąsiednie zeznanie przy każdym nowym
-źródle. Rosnąco: `window` (dobór z bieżącego stanu bazy) < `history` (zeznanie pliku) < `user`
-(werdykt ręki)."""
+źródle. Rosnąco: `window` (dobór z bieżącego stanu bazy) < `history` (zeznanie pliku potwierdzone
+oknem czasu) < `harvest` (zbiór dokładny z żniw - nazwy w historii pliku ↔ lighty, które Horreum sam
+wydał; migracja 0033, AR-102) < `user` (werdykt ręki). `harvest` stoi NAD `history`, bo test okna
+przy nazwach bez temperatury jest samym licznikiem: okno równej liczności z inną klatką przechodzi go
+i bez tej rangi przepisywało zbiór dokładny (D-1011-2)."""
 
 
 def link_integration(con, *, integration_id, input_frame_id, asserted_by, now, actor="stacks"):
@@ -4432,7 +4435,7 @@ def link_integration(con, *, integration_id, input_frame_id, asserted_by, now, a
     → `False` bez eventu. Zmiana źródła (np. kandydat z okna DOWIEDZIONY historią) to UPDATE
     z eventem — podniesienie pewności zostawia ślad.
 
-    PRECEDENCJA `user` > `history` > `window` STOI TU, w klindze, nie w pętli wołającego: pewność
+    PRECEDENCJA `user` > `harvest` > `history` > `window` STOI TU, w klindze, nie w pętli wołającego: pewność
     wolno PODNIEŚĆ, nigdy obniżyć. Dotyczy to obu szczebli i z tego samego powodu — relacji
     rozstrzygniętej ręką automat nie ma prawa zdegradować do kandydata, a relacji DOWIEDZIONEJ
     zeznaniem pliku nie ma prawa zdegradować przebieg, który tego zeznania akurat nie przeczytał
@@ -4471,14 +4474,17 @@ def unlink_integration_input(con, *, integration_id, input_frame_id, now, actor=
     dopasowania, więc znika z tabeli, a jego historia zostaje w dzienniku — dokładnie jak przy
     `calibration.unlinked`, gdzie doskan podstawia bliższego mastera.
 
-    Wołający MUSI pominąć relacje `asserted_by='user'` — automat nie ma prawa cofać rozstrzygnięcia
-    ręki. Guard stoi TU (`AND asserted_by <> 'user'`), bo ostatnią bramką jest klinga, nie pętla.
-    Transakcja przez `_tx`: rodowód z żniw zdejmuje wejścia okna w zakresie `atomic` razem z resztą
+    Zdejmuje WYŁĄCZNIE zeznania automatu, które da się przeliczyć (`window`, `history`) - rozstrzygnięcia
+    ręki (`user`) i zbioru dokładnego z żniw (`harvest`) automat nie ma prawa cofać. Guard stoi TU,
+    bo ostatnią bramką jest klinga, nie pętla, i jest LISTĄ DOZWOLONYCH, nie zakazanych: ranga
+    dopisana kiedyś do `RANGA_ASSERT` jest chroniona, dopóki ktoś świadomie jej tu nie wpisze (stos
+    mieszany `harvest` + `history` ma minimum równe planowi okna i przechodzi przez `_reconcile`).
+    Transakcja przez `_tx`: rodowód z żniw zdejmuje wejścia automatu w zakresie `atomic` razem z resztą
     zapisu stosu, a goły `with con:` zatwierdziłby ten zakres w połowie."""
     with _tx(con):
         cur = con.execute(
             "DELETE FROM integration_input WHERE integration_id = ? AND input_frame_id = ? "
-            "AND asserted_by <> 'user'", (integration_id, input_frame_id))
+            "AND asserted_by IN ('window', 'history')", (integration_id, input_frame_id))
         if not cur.rowcount:
             return False
         emit_event(con, actor=actor, verb="integration.unlinked",

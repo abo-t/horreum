@@ -122,7 +122,7 @@ class StackLineageSummary:
     inputs: int = 0            # STAN: wierszy `integration_input`
     linked_new: int = 0        # delta: realnie zapisane relacje tego przebiegu
     unlinked: int = 0          # delta: relacje zdjęte przez reconcile
-    by_assert: dict = field(default_factory=dict)   # 'history'/'window' -> ile integracji
+    by_assert: dict = field(default_factory=dict)   # źródło (`repo.RANGA_ASSERT`) -> ile integracji
     ambiguous: int = 0         # integracje z oknem nierozłącznym (patrz strażnik 3)
     telescope_mismatch: int = 0    # master zeznaje inny teleskop niż klatki jego okna
     history_unread: int = 0    # plik nieosiągalny/nieczytelny (błąd odczytu ALBO brak lokacji)
@@ -1020,6 +1020,12 @@ def _reconcile(con, integration_id, frame_ids, *, now, actor):
                for fid in sorted(zbedne))
 
 
+_ZRODLA_AUTOMATU = ("window", "history")
+"""Wiersze, które zbiór dokładny z żniw ZASTĘPUJE: wynik łańcucha (okno, zeznanie pliku dopasowane do
+okna). Lustro listy dozwolonych w `repo.unlink_integration_input` - zapis i predykat „czeka” pytają
+o ten sam zbiór, inaczej predykat obiecywałby zdjęcie, którego zapis nie wykona (pętla przyjęć)."""
+
+
 def record_harvest_inputs(con, *, master_sha1_data, input_frame_ids, now, actor="harvest"):
     """RODOWÓD Z ŻNIW - zbiór DOKŁADNY wejść stosu wciągniętego z wydania Horreum (Qt-wolna, zapis
     wyłącznie przez `repo`) → `{reason, linked, upgraded, dropped, kept_user}`.
@@ -1028,24 +1034,29 @@ def record_harvest_inputs(con, *, master_sha1_data, input_frame_ids, now, actor=
     teleskopu i ekspozycji między `DATE-OBS` a `DATE-END`), więc klatki odrzucone przez WBPP zostają
     w rodowodzie jako kandydaci - albo, gdy plik zeznaje mniej wejść, niż okno ma klatek, strażnik 2
     gasi rodowód w całości (`history_mismatch`). Żniwa znają zbiór DOKŁADNY (nazwy wejść historii ↔
-    nazwy lightów wydania), więc wołający podaje go tu PO łańcuchu: każde wejście → ranga `history`
-    (`repo.link_integration` podnosi `window`, nie rusza `user`), wejścia rangi `window` spoza zbioru
-    schodzą (`repo.unlink_integration_input`), `user` zostaje zawsze, `history` spoza zbioru też
-    (dowód innego zeznania nie jest nasz do obalenia).
+    nazwy lightów wydania), więc wołający podaje go tu PO łańcuchu: każde wejście → ranga `harvest`
+    (`repo.link_integration` podnosi `window` i `history`, nie rusza `user`), wejścia automatu
+    (`window`, `history`) spoza zbioru schodzą (`repo.unlink_integration_input`), `user` zostaje
+    zawsze, `harvest` spoza zbioru też (klinga go nie zdejmuje - dowód manifestu obala tylko ręka).
+    `history` spoza zbioru SCHODZI (Z1, D-1011-2): to wynik łańcucha z oknem równej liczności, a nie
+    drugi dowód - przebieg po korekcie `DATE-OBS` lightu ze zbioru dopisywał tak klatkę odrzuconą
+    przez WBPP, a ponowne przyjęcie zostawiało ją obok zbioru dokładnego (test bo na scratchu fali 9).
 
     GŁOWA INTEGRACJI IDZIE ZA WIERSZAMI: powód odmowy z łańcucha (`history_mismatch`, `no_object`…)
     obok wierszy automatu łamałby inwariant bramki akceptacji „powód wyklucza wejścia automatu”
     (`scripts/acceptance_s5.py`), więc głowa
     dostaje `unresolved_reason=None` i odcisk tego zbioru (`_fingerprint`), resztę faktów bez zmian
     (`repo.upsert_integration` - idempotentny, ta sama głowa bez eventu). Następny `run_stack_lineage`
-    widzi rodowód `history` mocniejszy od okna (`RANGA_ASSERT`): przy powodzie zostawia stos w całości
-    (`kept_proven`), przy oknie bez historii pliku chroni wiersze - okna z powrotem nie dokłada.
+    widzi rodowód `harvest` mocniejszy od każdego planu (`RANGA_ASSERT`; plan umie najwyżej `history`):
+    przy powodzie zostawia stos w całości, bez powodu chroni wiersze (`kept_proven` w obu) - ani okna,
+    ani zeznania pliku dopasowanego do okna z powrotem nie dokłada.
 
     Klatka stosu po `sha1_data`; wiersz `integration` MUSI już istnieć (stawia go `run_stack_lineage`
     w łańcuchu) - brak klatki albo wiersza → `reason='no_integration'`, zero zapisu. Wejście, które nie
     jest lightem bazy, albo pusty zbiór → `ValueError` (EXPECT: stos nie wchodzi w stos, a integracja
     bez wejść zawsze niesie powód - ta sama bramka akceptacji). Liczniki: `linked`
-    = nowe wiersze, `upgraded` = `window` → `history`, `dropped` = zdjęte `window`, `kept_user` = wiersze
+    = nowe wiersze, `upgraded` = `window`/`history` → `harvest`, `dropped` = zdjęte `window`/`history`
+    spoza zbioru, `kept_user` = wiersze
     ręki nietknięte (w zbiorze i poza nim - to stan, nie delta: przy każdym wołaniu liczy je od nowa).
     Drugie wołanie z tym samym zbiorem: liczniki mutacji (`linked`, `upgraded`, `dropped`) zerowe
     i zero eventów.
@@ -1053,7 +1064,7 @@ def record_harvest_inputs(con, *, master_sha1_data, input_frame_ids, now, actor=
     JEDNA TRANSAKCJA (`repo.atomic`) na całe wołanie, z odczytami głowy, lightów i wierszy w środku:
     awaria w połowie zostawiłaby wiersze `history` obok niezdjętego powodu, a odczyt sprzed transakcji
     mógłby opisywać stan, który inny pisarz zdążył zmienić. Kolejność zapisów i tak trzyma inwariant na
-    każdym kroku: wiersze `history`, potem głowa bez powodu, na końcu zdjęcia `window`."""
+    każdym kroku: wiersze `harvest`, potem głowa bez powodu, na końcu zdjęcia automatu."""
     wynik = {"reason": None, "linked": 0, "upgraded": 0, "dropped": 0, "kept_user": 0}
     zbior = sorted({int(i) for i in input_frame_ids})
     with repo.atomic(con):
@@ -1081,7 +1092,7 @@ def record_harvest_inputs(con, *, master_sha1_data, input_frame_ids, now, actor=
             if przed == "user":
                 wynik["kept_user"] += 1
                 continue
-            if repo.link_integration(con, integration_id=iid, input_frame_id=fid, asserted_by="history",
+            if repo.link_integration(con, integration_id=iid, input_frame_id=fid, asserted_by="harvest",
                                      now=now, actor=actor):
                 wynik["linked" if przed is None else "upgraded"] += 1
         repo.upsert_integration(
@@ -1097,7 +1108,7 @@ def record_harvest_inputs(con, *, master_sha1_data, input_frame_ids, now, actor=
                 continue
             if zrodlo == "user":
                 wynik["kept_user"] += 1
-            elif zrodlo == "window" and repo.unlink_integration_input(
+            elif zrodlo in _ZRODLA_AUTOMATU and repo.unlink_integration_input(
                     con, integration_id=iid, input_frame_id=fid, now=now, actor=actor):
                 wynik["dropped"] += 1
     return wynik
@@ -1109,7 +1120,8 @@ def harvest_lineage_pending(con, *, master_sha1_data, input_frame_ids):
     leży tylko w zeznaniu żniw w folderze wydania, więc folderu nie wolno jeszcze skasować).
 
     True: klatki stosu baza nie zna (kopia nieprzyjęta), stos bez wiersza integracji (postawi go
-    łańcuch), wejście zbioru bez wiersza `history`/`user`, jakikolwiek wiersz `window` (zapis go zdejmie),
+    łańcuch), wejście zbioru bez wiersza `harvest`/`user`, jakikolwiek wiersz automatu `window`/`history`
+    - w zbiorze zapis go podniesie, poza nim zdejmie (Z1: nadmiar, którego do v33 predykat nie widział),
     głowa z powodem odmowy albo z odciskiem innym niż odcisk zbioru (`_fingerprint` - zapis go
     przepisze; łańcuch odcisku stosu chronionego nie rusza, więc po zapisie nie wraca). False: zapis
     byłby bez mutacji - albo nie ma czego zapisać (klatka wycofana, klatka nie jest stosem, zbiór pusty
@@ -1134,8 +1146,8 @@ def harvest_lineage_pending(con, *, master_sha1_data, input_frame_ids):
         return True
     stan = {r["input_frame_id"]: r["asserted_by"] for r in con.execute(
         "SELECT input_frame_id, asserted_by FROM integration_input WHERE integration_id = ?", (glowa["id"],))}
-    return ("window" in stan.values()
-            or any(stan.get(fid) not in ("history", "user") for fid in zbior))
+    return (any(z in _ZRODLA_AUTOMATU for z in stan.values())
+            or any(stan.get(fid) not in ("harvest", "user") for fid in zbior))
 
 
 def inputs_of(con, master_frame_id):

@@ -1268,10 +1268,14 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
         crit("§5.14 powód wyklucza wejścia automatu (odmowa == ZERO relacji)",
              z_wejsciami_i_powodem == 0)
         # Strażnik okna zdegenerowanego — sedno D-P-I-2: taki stos ma NIE dostać ani jednej relacji.
+        # Z OKNA - stąd wyłączony także `harvest` (AR-102): zbiór dokładny z żniw nie pochodzi z okna
+        # czasu, więc stos o zdegenerowanym oknie, który WBPP zintegrował z wydania, ma go słusznie.
+        # Strażnik wyżej („powód wyklucza wejścia automatu") `harvest` ŁAPIE: zapis żniw zdejmuje
+        # powód z głowy, a przebieg zostawia taki stos w całości, więc ta para byłaby regresją.
         deg_z_wejsciami = con.execute(
             "SELECT count(*) FROM integration i WHERE i.degenerate = 1 "
             "AND EXISTS (SELECT 1 FROM integration_input ii WHERE ii.integration_id = i.id "
-            "            AND ii.asserted_by <> 'user')"
+            "            AND ii.asserted_by NOT IN ('user', 'harvest'))"
         ).fetchone()[0]
         crit("§5.14 okno zdegenerowane nie dostaje relacji automatu (strażnik D-P-I-2)",
              deg_z_wejsciami == 0)

@@ -2603,7 +2603,8 @@ class LineageBar(QWidget):
     zbioru, gdy zaznaczono DOKŁADNIE JEDEN gotowy stos (`kind='master_light'`).
 
     Panel jest jedynym miejscem, w którym widać RÓŻNICĘ MIĘDZY FAKTEM A KANDYDATEM. Wejście
-    z `history` plik zeznał o sobie sam; wejście z `window` zostało WYLICZONE z okna czasu i czeka
+    z `history` plik zeznał o sobie sam, wejście z `harvest` przyszło ze zbioru dokładnego żniw (nazwy
+    w historii pliku ↔ lighty wydania); wejście z `window` zostało WYLICZONE z okna czasu i czeka
     na potwierdzenie. Bez tej różnicy w oczach użytkownika rodowód wyglądałby jak wiedza pewna,
     a w 75 na 81 przypadków nią nie jest.
 

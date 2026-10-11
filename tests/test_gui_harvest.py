@@ -2046,3 +2046,25 @@ def test_miejsce_listy_zarezerwowane_pole_i_przyciski_nie_zjezdzaja(qapp, tmp_pa
     assert dlg.rel_table.rowCount() == 1 and dlg.rel_notice.text() == ""
     assert (dlg.btn_pick.y(), dlg.btn_archive.y(), dlg.edit_output.y()) == przed
     con.close()
+
+
+def test_rodowod_z_wydania_etykieta_w_panelu_i_czlon_raportu(qapp, tmp_path):
+    """AR-102: wejście rangi `harvest` mówi w panelu rodowodu „z wydania” (nie surowy klucz, nie „plik
+    zeznał”), a raport przebiegu liczy stosy z wydania osobnym członem obok „potwierdza sam plik”."""
+    from horreum.gui.grid import _lineage_item_text
+    from horreum.gui.pipeline import PipelineView
+    wiersz = {"date_obs": "2025-01-03T20:00:00", "exptime": 600.0, "asserted_by": "harvest", "excluded": 0,
+              "path": "R:/x.fits"}
+    assert "[z wydania]" in _lineage_item_text(wiersz)
+    path = str(tmp_path / "p.db")
+    db.open_db(path).close()
+    v = PipelineView(path, now_fn=lambda: NOW)
+    try:
+        linia = v._format_result("stack_lineage", stacks.StackLineageSummary(
+            stacks=3, linked=3, inputs=12, by_assert={"history": 1, "harvest": 2}))
+        assert "z tego 1 potwierdza sam plik" in linia and "z wydania 2" in linia
+        bez = v._format_result("stack_lineage", stacks.StackLineageSummary(
+            stacks=1, linked=1, inputs=4, by_assert={"window": 1}))
+        assert "z wydania" not in bez
+    finally:
+        v.close()

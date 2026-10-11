@@ -97,20 +97,58 @@ def test_szkielet_przyszly_pusty(tmp_path):
     con.close()
 
 
-def test_user_version_v32_po_migracji(tmp_path):
-    """0032 podnosi user_version do 32 (świeża baza leci 0002→…→0032 sekwencyjnie; 0025 = wersja
+def test_user_version_v33_po_migracji(tmp_path):
+    """0033 podnosi user_version do 33 (świeża baza leci 0002→…→0033 sekwencyjnie; 0025 = wersja
     reguły koercji faktów kopii `location.hdr_rule`, AR-33; 0026 = werdykt „zostaw wszystkie
     wersje” `stack_version_kept` + `integration.creation_time`, AR-10; 0027 = stanowisko wskazane
     ręką `frame.observatory_source`; 0028 = kanał `frame.channel`, P4-3; 0029 = zamiar renamu
     `pending_renames.in_flight`, AR-29; 0030 = backup niepotwierdzony
     `header_backups.pending_since`, AR-40; 0031 = piksel kamery z ręki `camera.pixel_source`, AR-55;
-    0032 = uwagi klatki `frame_note`, WO-2).
+    0032 = uwagi klatki `frame_note`, WO-2; 0033 = ranga `harvest` rodowodu stosów, AR-102).
 
     Pin JEST intencją: każda nowa migracja ma ten test PRZEWRÓCIĆ imiennie, żeby podniesienie
     wersji było gestem, a nie skutkiem ubocznym."""
     con = db.open_db(str(tmp_path / "h.db"))
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 32
-    assert db.SCHEMA_VERSION == 32
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 33
+    assert db.SCHEMA_VERSION == 33
+    con.close()
+
+
+def test_0033_ranga_harvest_przerangowanie_po_dzienniku_na_bazie_v32(tmp_path):
+    """0033 na bazie v32 z rodowodem: komplet wierszy i kolumn wraca co do wiersza; na `harvest`
+    przechodzi WYŁĄCZNIE `history` z dziennikiem żniw dla tej samej pary (integracja, klatka) -
+    `history` z przebiegu łańcucha, zdarzenie żniw innej integracji, `window` i werdykt ręki
+    (z `excluded`) zostają; CHECK przyjmuje `harvest` i dalej odrzuca token spoza słownika; indeks
+    po klatce wejściowej odtworzony."""
+    path = str(tmp_path / "h.db")
+    con = db.connect(path)
+    for version, filename in db.MIGRATIONS:
+        if version <= 32:
+            db._apply_migration(con, version, db._migration_sql(filename))
+    ts = "2026-10-11T00:00:00"
+    ids = [con.execute("INSERT INTO frame(sha1_data, kind, first_seen_at) VALUES (?, ?, ?)",
+                       (f"s{i}", "master_light" if i == 0 else "light", ts)).lastrowid for i in range(6)]
+    m, l1, l2, l3, l4, l5 = ids
+    iid = con.execute("INSERT INTO integration(master_frame_id, created_at) VALUES (?, ?)", (m, ts)).lastrowid
+    con.executemany("INSERT INTO integration_input(integration_id, input_frame_id, asserted_by, excluded) "
+                    "VALUES (?, ?, ?, ?)",
+                    [(iid, l1, "history", 0), (iid, l2, "history", 0), (iid, l3, "window", 0),
+                     (iid, l4, "user", 1), (iid, l5, "history", 0)])
+    zdarzenia = [("harvest", iid, l1), ("stacks", iid, l2), ("harvest", iid, l3), ("harvest", iid + 1, l5)]
+    con.executemany("INSERT INTO event(ts, actor, verb, target, payload) VALUES (?, ?, 'integration.linked', ?, ?)",
+                    [(ts, a, f"integration:{i}", json.dumps({"input_frame_id": f, "asserted_by": "history"}))
+                     for a, i, f in zdarzenia])
+    con.commit()
+    assert db.migrate(con) == db.SCHEMA_VERSION
+    assert [c[1] for c in con.execute("PRAGMA table_info(integration_input)")] == \
+        ["integration_id", "input_frame_id", "asserted_by", "excluded"]
+    stan = {r[0]: (r[1], r[2]) for r in con.execute(
+        "SELECT input_frame_id, asserted_by, excluded FROM integration_input")}
+    assert stan == {l1: ("harvest", 0), l2: ("history", 0), l3: ("window", 0), l4: ("user", 1),
+                    l5: ("history", 0)}
+    assert "idx_integration_input_frame" in _names(con, "index")
+    with pytest.raises(sqlite3.IntegrityError):
+        con.execute("UPDATE integration_input SET asserted_by = 'manifest' WHERE input_frame_id = ?", (l2,))
     con.close()
 
 

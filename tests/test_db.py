@@ -31,7 +31,8 @@ def test_migracja_ustawia_user_version(tmp_path):
     # + 0030 header_backups.pending_since (backup niepotwierdzony, rekoncyliacja z dyskiem, AR-40)
     # + 0031 camera.pixel_source (piksel matrycy wpisany ręką, AR-55)
     # + 0032 frame_note (uwagi klatki, tylko w bazie, WO-2)
-    assert db._user_version(con) == db.SCHEMA_VERSION == 32
+    # + 0033 integration_input.asserted_by z rangą `harvest` (zbiór dokładny z żniw, AR-102)
+    assert db._user_version(con) == db.SCHEMA_VERSION == 33
     con.close()
 
 

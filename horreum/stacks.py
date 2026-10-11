@@ -1405,7 +1405,7 @@ def release_object_check(con, *, master_sha1_data, object_canon):
             "release_canon": object_canon}
 
 # --- TODO-DŁUG (z kolejki sesji, dieta 2026-08-10; pełne brzmienia: archiwum aa) ---
-# TODO-DŁUG(E4-9): reszta po dopasowaniu PO NAZWIE i werdykcie „N z M” (D-1011-4).
+# TODO-DŁUG(AR-112): reszta E4-9 po dopasowaniu PO NAZWIE i werdykcie „N z M” (D-1011-4).
 #   Stan na kopii pf4 po imporcie aliasów Custos (2026-10-11): `history_mismatch` 26 → 1 - 20 stosów
 #   dostaje pełny zbiór z nazw (16 podzbiór okna, 4 poza oknem: 16870 16875 16882 16883 z flagą
 #   `outside_window`), 5 bez nazw (16847 16849 16852 16901 16903) dostaje werdykt „plik użył N z M

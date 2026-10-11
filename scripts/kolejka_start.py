@@ -100,9 +100,11 @@ PACZKI_HISTORYCZNE = tuple("ABCDEFGHIJKLMNOPQ") + ("poza", "decyzja")
 # nazwanego rejonu do tej listy nie wchodzi. Rejony z decyzji Zdzinia 2026-10-06 (`Q4`):
 # `app.py` fala 2 - T3 `_flash` i paski recept / T6 `ObjectAxisView`; `planner.py` fala 2 -
 # T3 droga komunikatu i pusty stan / T6 chip; `pipeline.py` fala 3 - T10 `_adopt_and_derive`
-# i `_run_all` / T5 `_on_pick_dir` i `_set_root`.
+# i `_run_all` / T5 `_on_pick_dir` i `_set_root`. `repo.py` (jedyna klinga zapisu do bazy) z decyzji
+# Zdzinia 2026-10-11 (`D-1011-4` `Q9`): fala 4 - T8 przeliczenie rodzaju bez zmiany odcisku, pisarz
+# historii stosów i aliasów nazw / T13 `link_calibration` i `unlink_calibration`.
 DOZWOLONE_WSPOLNE = ("horreum/gui/i18n_catalog.py", "horreum/gui/grid.py", "horreum/gui/app.py",
-                     "horreum/gui/planner.py", "horreum/gui/pipeline.py")
+                     "horreum/gui/planner.py", "horreum/gui/pipeline.py", "horreum/repo.py")
 # Ścieżka pliku na POCZĄTKU backticku; sufiks funkcji/linii w tym samym backticku (`plik.py:45`,
 # `plik.py _f`, `plik.py::f`) odpada. Kropka bez znanego rozszerzenia (`tasks.copies_unread_tip`)
 # to symbol, nie plik.

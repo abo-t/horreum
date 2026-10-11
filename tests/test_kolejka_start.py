@@ -390,11 +390,11 @@ def tory(repo, capsys, *bloki, stan=STAN_FAL, argv=()):
 
 
 def test_tory_kolizja_dwoch_torow_jednej_fali_to_fail_z_fala_para_i_plikiem(repo, capsys):
-    kod, out = tory(repo, capsys, blok("A-1", extra=siedziba("horreum/repo.py")),
-                    blok("B-2", tor="T2", extra=siedziba("horreum/repo.py")),
+    kod, out = tory(repo, capsys, blok("A-1", extra=siedziba("horreum/scan.py")),
+                    blok("B-2", tor="T2", extra=siedziba("horreum/scan.py")),
                     blok("C-3", tor="T3", extra=siedziba("horreum/c.py")))
     assert kod == 1
-    assert "FAIL fala 1: T1 × T2 · horreum/repo.py (T1: A-1; T2: B-2)" in out
+    assert "FAIL fala 1: T1 × T2 · horreum/scan.py (T1: A-1; T2: B-2)" in out
 
 
 def test_tory_plik_z_listy_dozwolonych_przechodzi(repo, capsys):
@@ -407,9 +407,9 @@ def test_tory_plik_z_listy_dozwolonych_przechodzi(repo, capsys):
 
 
 def test_tory_wspolny_plik_torow_z_roznych_fal_przechodzi(repo, capsys):
-    kod, out = tory(repo, capsys, blok("A-1", extra=siedziba("horreum/repo.py")),
+    kod, out = tory(repo, capsys, blok("A-1", extra=siedziba("horreum/scan.py")),
                     blok("B-2", tor="T2", extra=siedziba("horreum/b.py")),
-                    blok("C-3", tor="T3", extra=siedziba("horreum/repo.py")))
+                    blok("C-3", tor="T3", extra=siedziba("horreum/scan.py")))
     assert (kod, out) == (0, "")
 
 
@@ -461,8 +461,8 @@ def test_tory_gola_nazwa_niejednoznaczna_to_szew_nieznany(repo, capsys):
 
 
 def test_tory_fala_ogranicza_zakres_a_fala_spoza_stanu_to_kod_2(repo, capsys):
-    bloki = (blok("A-1", extra=siedziba("horreum/repo.py")),
-             blok("B-2", tor="T2", extra=siedziba("horreum/repo.py")),
+    bloki = (blok("A-1", extra=siedziba("horreum/scan.py")),
+             blok("B-2", tor="T2", extra=siedziba("horreum/scan.py")),
              blok("C-3", tor="T3"))                               # szew nieznany w fali 2
     assert tory(repo, capsys, *bloki, argv=("--fala", "2"))[0] == 1
     kod, out = tory(repo, capsys, *bloki, argv=("--fala", "2"))

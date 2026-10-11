@@ -65,6 +65,7 @@ from .hashing import sha1_of, sha1_of_span
 from .resolve.cameras import camera_identity
 from .resolve.frames import kind_from_path, normalize_kind
 from .resolve.paths import STACK_KIND, STACKS_DIR
+from .resolve.stack import parse_history
 from .resolve.headers import (COPY_TESTIMONY_RULE, FAKTY_DO_DOCIAGNIECIA, copy_facts_state,
                               copy_testimony, extract_header)
 
@@ -305,6 +306,11 @@ class ScanRecord:
         (P6a/D-X-4); None przy W1;
       - `image_roles`: role wszystkich obrazów kopii (0021, `XisfMeta.image_roles`) - tylko XISF;
         None dla FITS/RAW (liczba HDU wymagałaby dodatkowego I/O) i przy W1;
+      - `history`: `(rows, inputs, tool)` z historii PixInsighta (`resolve.stack.parse_history`) -
+        tylko XISF, z TEGO SAMEGO odczytu XML co karty; `rows is None` = pliku bez historii
+        integracji. Jeden odczyt dla dwóch konsumentów: rodzaju (master zapisany jako `FLAT`
+        zdradza historia wejść) i rodowodu stosów (wejścia bez ponownego czytania udziału).
+        None dla FITS/RAW i przy W1;
       - `file_sha1_substituted`: sha1 pliku z podstawionym regionem `(offset, bajty)` - liczony
         WYŁĄCZNIE, gdy wołający poda `scan_file(substitute=)` (re-sync po zapisie w miejscu:
         podstawiony stary region == kotwica sprzed zapisu dowodzi, że poza nagłówkiem nic się nie
@@ -323,6 +329,7 @@ class ScanRecord:
     compressed: object = None         # 0/1 (CompImageHDU); None dla XISF/W1
     cards: object = None              # list[Card] - lustro nagłówka (FITS i XISF); None przy W1
     image_roles: object = None        # tuple ról obrazów (XISF, 0021); None dla FITS/RAW i przy W1
+    history: object = None            # (rows, inputs, tool) z historii XISF; None dla FITS/RAW i przy W1
     file_sha1_substituted: object = None   # sha1 pliku z podstawionym regionem - wyłącznie na żądanie
                                            # (`scan_file(substitute=)`, kontrola danych zapisu w miejscu)
 
@@ -1359,9 +1366,9 @@ def scan_file(path, *, substitute=None):
     mtime = _mtime_iso(st)
     spath = str(p)
     header = None
-    cards = header_hash = hdu_index = compressed = span = image_roles = None
+    cards = header_hash = hdu_index = compressed = span = image_roles = history = None
     try:
-        header, cards, header_hash, hdu_index, compressed, span, image_roles = _read_meta(
+        header, cards, header_hash, hdu_index, compressed, span, image_roles, history = _read_meta(
             spath, st.st_size)
         error = error_kind = None
     except Exception as exc:              # W1: dowolny błąd czytnika → review, nie crash pętli
@@ -1396,7 +1403,7 @@ def scan_file(path, *, substitute=None):
         header=header, error=error, error_kind=error_kind,
         sha1_data=sha1_data, file_sha1=file_sha1,
         header_hash=header_hash, hdu_index=hdu_index, compressed=compressed, cards=cards,
-        image_roles=image_roles, file_sha1_substituted=podstawiony,
+        image_roles=image_roles, history=history, file_sha1_substituted=podstawiony,
     )
 
 
@@ -1405,22 +1412,22 @@ def _read_meta(spath, size):
     kopii (`backfill_copy_facts`), które czyta SAM nagłówek, bez haszowania pliku. Dwie kopie tej
     dyspozycji rozjechałyby się przy pierwszym nowym formacie: skan widziałby go, a uzupełnienie nie.
 
-    Zwraca krotkę `(header, cards, header_hash, hdu_index, compressed, span, image_roles)`;
+    Zwraca krotkę `(header, cards, header_hash, hdu_index, compressed, span, image_roles, history)`;
     wyjątek czytnika propaguje (miękkie lądowanie robi wołający). `size` = rozmiar pliku ze `stat`
     (span RAW-a: D-R-1, tożsamość RAW = sha1 CAŁEGO pliku → `sha1_data == file_sha1`)."""
     suffix = Path(spath).suffix.lower()
     if suffix in exif.RAW_SUFFIXES:
         emeta = exif.read_exif_meta(spath)
         cards = [Card(*row) for row in emeta.card_rows]   # opakuj krotki (unikamy cyklu importu)
-        return emeta.header, cards, emeta.header_hash, None, None, (0, size), None
+        return emeta.header, cards, emeta.header_hash, None, None, (0, size), None, None
     if suffix in XISF_SUFFIXES:
         # `hdu_index`/`compressed` zostają None (D-X-7: pojęcia obce formatowi)
         xmeta = read_xisf_meta_full(spath)
         return (xmeta.header, xmeta.cards, xmeta.header_hash, None, None, xmeta.image_span,
-                xmeta.image_roles)
+                xmeta.image_roles, parse_history(xmeta.xml_bytes.decode("utf-8", "replace")))
     meta = read_fits_meta(spath)
     return (meta.header, meta.cards, meta.header_hash, meta.hdu_index, meta.compressed,
-            (meta.datloc, meta.datspan), None)
+            (meta.datloc, meta.datspan), None, None)
 
 
 def copy_header_facts(header, header_hash, image_roles):
@@ -2299,7 +2306,7 @@ def backfill_copy_facts(con, *, now, root=None, progress=None, should_cancel=Non
                 # dotyczy. Kandydaci izolowanych nie niosą - bramka łapie zapis otwarty w trakcie.
                 if _isolated(con, path, row["volume"]):
                     raise OSError("kopia izolowana po przerwanym zapisie w miejscu (0022)")
-                header, _cards, header_hash, _hdu, _comp, _span, image_roles = _read_meta(
+                header, _cards, header_hash, _hdu, _comp, _span, image_roles, _hist = _read_meta(
                     path, os.stat(path).st_size)
             except FileNotFoundError as exc:   # skasowany albo zerwany udział - rozstrzyga świadek
                 if swiadek_zyje(path):

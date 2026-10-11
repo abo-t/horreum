@@ -264,6 +264,19 @@ def test_read_master_na_prawdziwym_xisf(tmp_path):
     assert t.filter_raw == "CLS" and t.xbinning == 1
 
 
+def test_scan_file_niesie_historie_z_tego_samego_odczytu(tmp_path):
+    """`ScanRecord.history` = historia PixInsighta z XML-a, który skan i tak czyta (fala 4: rodzaj
+    `AR-96` i rodowód stosów `AR-87` biorą ją stąd, bez drugiego odczytu udziału). Plik bez historii
+    daje `rows is None`, a nie brak pola - „brak historii” to fakt, nie niewiedza."""
+    wejscia = [_wbpp_input(n) for n in _names(2)]
+    p = _write_xisf_master(tmp_path / "masterFlat_CLS.xisf", [("IMAGETYP", "'FLAT'")],
+                           _xml_historii_flat(wejscia))
+    rows, inputs, _tool = scan.scan_file(p).history
+    assert rows == 2 and tuple(i.path for i in inputs if i.enabled) == tuple(wejscia)
+    goly = _write_xisf_master(tmp_path / "flat.xisf", [("IMAGETYP", "'FLAT'")], "")
+    assert scan.scan_file(goly).history[0] is None
+
+
 # ============================================================ plan - ścieżka szczęśliwa i siedziba
 
 

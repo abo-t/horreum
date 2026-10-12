@@ -120,3 +120,21 @@ def test_build_zewnetrzny_ma_bramke_tagu():
     assert "--untracked-files=no" in text, (
         "build.ps1 nie sprawdza już czystości drzewa — PyInstaller zamraża drzewo robocze, "
         "nie tag, więc brudny plik śledzony trafiłby do wydania")
+
+
+def test_sonda_tytulu_nie_otwiera_zapamietanej_bazy():
+    """Sonda tytułu `-Onefile` uruchamia exe BEZ argumentów, więc program otwiera bazę zapamiętaną
+    w ustawieniach (`ostatnia_baza`) - na maszynie właściciela żywe archiwum. Nowszy exe migruje
+    ją przy otwarciu, a sonda zabija proces chwilę później, w środku migracji (zmierzone
+    2026-10-12, sesja bu: żywa baza v32, kod v36). Skrypt na czas sondy kieruje ustawienie na
+    nieistniejący plik i przywraca je w `finally`.
+
+    Jak bramka tagu wyżej: test pilnuje OBECNOŚCI mechanizmu, zachowanie dowodzi przebieg buildu
+    (rejestr i żywa baza bez zmian po sondzie)."""
+    text = (ROOT / "packaging/build.ps1").read_text(encoding="ascii")
+    sonda = text[text.index("5F-0."):text.index("if ($title -ne $expected)")]
+    assert '"ostatnia_baza" -Value $probeDb' in sonda, (
+        "sonda tytułu nie przekierowuje już zapamiętanej bazy - exe otworzy (i zmigruje) żywe archiwum")
+    po_finally = sonda[sonda.index("finally {"):]
+    assert '"ostatnia_baza" -Value $savedDb' in po_finally, (
+        "zapamiętana baza nie wraca w `finally` - przerwana sonda zostawi ustawienie na pliku sondy")

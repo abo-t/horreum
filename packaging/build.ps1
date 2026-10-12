@@ -187,25 +187,52 @@ if ($Onefile) {
     $ver = (& $py -c "from importlib.metadata import version; print(version('horreum'))")
     if (-not $? -or -not $ver) { throw "cannot read horreum version from build venv metadata" }
     $expected = "Horreum $($ver.Trim())"
+
+    # 5F-0. The probe starts the exe WITHOUT arguments, so the app opens the database REMEMBERED
+    #       in the user's settings (HKCU\Software\Horreum\Horreum, value ostatnia_baza) -- on the
+    #       owner's machine that is the LIVE archive. A newer exe MIGRATES it on open, and the probe
+    #       kills the process a moment later, mid-migration (measured 2026-10-12: live db v32,
+    #       code v36). The probe needs a window title, not a database: point the setting at a path
+    #       that does not exist (the app then starts without a database and writes nothing) and
+    #       restore the setting in `finally`, also when the probe throws.
+    $settingsKey = "HKCU:\Software\Horreum\Horreum"
+    $savedDb = $null
+    if (Test-Path $settingsKey) {
+        $savedDb = (Get-ItemProperty -Path $settingsKey -Name "ostatnia_baza" -ErrorAction SilentlyContinue).ostatnia_baza
+    } else {
+        New-Item -Path $settingsKey -Force | Out-Null
+    }
+    $probeDb = Join-Path $env:TEMP ("horreum-title-probe-{0}.db" -f [guid]::NewGuid())
     Write-Host ("Probing window title (expect '{0}'; a window will flash)..." -f $expected) -ForegroundColor Cyan
-    $gui = Start-Process -FilePath $exePath -PassThru
     $title = $null
     $child = $null
-    for ($i = 0; $i -lt 60; $i++) {
-        Start-Sleep -Milliseconds 500
-        if ($gui.HasExited) {
-            throw ("Frozen GUI exited immediately (code {0}) -- onefile smoke FAILED" -f $gui.ExitCode)
-        }
-        $child = Get-CimInstance Win32_Process -Filter "Name='horreum-gui.exe'" |
-                 Where-Object { $_.ParentProcessId -eq $gui.Id }
-        if ($child) {
-            $cp = Get-Process -Id $child.ProcessId -ErrorAction SilentlyContinue
-            if ($cp -and $cp.MainWindowTitle) { $title = $cp.MainWindowTitle; break }
+    $gui = $null
+    try {
+        Set-ItemProperty -Path $settingsKey -Name "ostatnia_baza" -Value $probeDb
+        $gui = Start-Process -FilePath $exePath -PassThru
+        for ($i = 0; $i -lt 60; $i++) {
+            Start-Sleep -Milliseconds 500
+            if ($gui.HasExited) {
+                throw ("Frozen GUI exited immediately (code {0}) -- onefile smoke FAILED" -f $gui.ExitCode)
+            }
+            $child = Get-CimInstance Win32_Process -Filter "Name='horreum-gui.exe'" |
+                     Where-Object { $_.ParentProcessId -eq $gui.Id }
+            if ($child) {
+                $cp = Get-Process -Id $child.ProcessId -ErrorAction SilentlyContinue
+                if ($cp -and $cp.MainWindowTitle) { $title = $cp.MainWindowTitle; break }
+            }
         }
     }
-    # Kill the CHILD first: stopping only the parent orphans the child (measured 2026-08-01).
-    if ($child) { try { Stop-Process -Id $child.ProcessId -Force -ErrorAction Stop } catch {} }
-    if (-not $gui.HasExited) { try { Stop-Process -Id $gui.Id -Force -ErrorAction Stop } catch {} }
+    finally {
+        # Kill the CHILD first: stopping only the parent orphans the child (measured 2026-08-01).
+        if ($child) { try { Stop-Process -Id $child.ProcessId -Force -ErrorAction Stop } catch {} }
+        if ($gui -and -not $gui.HasExited) { try { Stop-Process -Id $gui.Id -Force -ErrorAction Stop } catch {} }
+        if ($null -ne $savedDb) {
+            Set-ItemProperty -Path $settingsKey -Name "ostatnia_baza" -Value $savedDb
+        } else {
+            Remove-ItemProperty -Path $settingsKey -Name "ostatnia_baza" -ErrorAction SilentlyContinue
+        }
+    }
     if ($title -ne $expected) {
         throw ("Window title probe FAILED: expected '{0}', got '{1}'" -f $expected, $title)
     }

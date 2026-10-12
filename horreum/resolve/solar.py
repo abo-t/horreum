@@ -46,6 +46,10 @@ _COMET_CANON = {
 # Token potoczny komety → desig (spina token z oznaczeniem: JEDEN canon na kometę).
 _COMET_TOKEN = {"LEMMON": "C/2025 A6", "TSUCHINSHAN": "C/2023 A3", "GIACOBINI": "21P"}
 
+# Brzmienie tokenu ciała, którego nie odtworzy `capitalize()` (litery z ogonkami) - wyłącznie do
+# pokazania aliasu (`solar_form`, AR-63); dopasowanie dalej idzie po kluczach `_BODIES`.
+_BODY_OGONKI = {"KSIEZYC": "Księżyc", "SLONCE": "Słońce"}
+
 # Oznaczenie IAU: litera typu + rok + kod połowy miesiąca (C/2025 A6, P/2019 Y4). Na UPPER.
 _COMET_IAU = re.compile(r"(?<![A-Z0-9])([CPDX])[ /_-]?(\d{4})[ _-]?([A-Z]\d{1,3})\b")
 
@@ -53,6 +57,22 @@ _COMET_IAU = re.compile(r"(?<![A-Z0-9])([CPDX])[ /_-]?(\d{4})[ _-]?([A-Z]\d{1,3}
 def _comet_identity(canon, raw):
     return ObjectIdentity(canon=canon, catalog="comet", kind="comet",
                           source="comet", alias_norm=norm_alnum(raw))
+
+
+def solar_form(alias_norm):
+    """Klucz aliasu z drogi solar/komety → brzmienie do pokazania albo None (AR-63).
+
+    Ciało: token `_BODIES` (`KSIEZYC` → „Księżyc”, `JOWISZ` → „Jowisz”). Token komety: słowo
+    z kanonu tej komety, które ten token nazywa (`LEMMON` → „Lemmon” z „C/2025 A6 (Lemmon)”) -
+    brzmienie bierzemy z kanonu, nie wypisujemy drugi raz."""
+    if alias_norm in _BODIES:
+        return _BODY_OGONKI.get(alias_norm, alias_norm.capitalize())
+    desig = _COMET_TOKEN.get(alias_norm)
+    if desig is not None:
+        for slowo in re.split(r"[^0-9A-Za-z]+", _COMET_CANON.get(desig, desig)):
+            if slowo.upper() == alias_norm:
+                return slowo
+    return None
 
 
 def resolve_solar(object_raw):

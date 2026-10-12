@@ -15,7 +15,8 @@ from horreum import resolver
 from horreum.gui import facet_model, i18n, queries
 from horreum.resolve._text import norm_alnum
 from horreum.resolve.catalog import catalog_canon, header_form, xref_aliases
-from horreum.resolve.objects import load_own_objects
+from horreum.resolve.objects import common_name_form, load_own_objects
+from horreum.resolve.solar import solar_form
 
 # Litery bez rozkładu NFKD: dla Unicode „ł" nie jest „l z kreską", tylko osobną literą, więc
 # `unicodedata.normalize` jej nie rusza i bez tej tablicy „Obłok" zostałby przy „Obok".
@@ -67,12 +68,27 @@ def nazwy_slownika():
     return out
 
 
+def forma_aliasu(alias_norm, pretty=None):
+    """JEDYNY właściciel formy aliasu na ekranie (AR-63) - okno „Przypisz obiekt” i podpowiedź
+    listwy facetów mówią jednym zdaniem. Najczytelniejsza forma, jaką znamy, bez zmyślania:
+      * oznaczenie katalogowe → forma kanoniczna gramatyki (`CALDWELL3` → `C3`, `SH2184` → `Sh2-184`);
+      * brzmienie z `pretty` (`formy_aliasow`: słownik obiektów własnych, a za nim karta `OBJECT`);
+      * brzmienie z wiedzy o niebie w kodzie: nazwa potoczna (`BODESGALAXY` → „Bode's Galaxy”),
+        ciało i token komety (`KSIEZYC` → „Księżyc”, `LEMMON` → „Lemmon”);
+      * reszta → sam klucz (alias ręki bez zeznania, np. `MUR`) - żadnego brzmienia nie znamy."""
+    return (catalog_canon(alias_norm, split=False) or (pretty or {}).get(alias_norm)
+            or common_name_form(alias_norm) or solar_form(alias_norm) or alias_norm)
+
+
 def formy_aliasow(con):
-    """`alias_norm` → brzmienie do pokazania (AR-15). Dwa źródła, oba już pokazywane gdzie indziej:
-    słownik obiektów własnych (asset, brzmienie ustawione ręką) wygrywa z brzmieniem z karty
-    `OBJECT` (`queries.alias_header_forms` - ta sama kolumna, z której UI pokazuje nazwę z pliku).
-    Klucz zostaje kluczem: szukajka i zapis dalej pracują na `alias_norm`."""
-    return {**queries.alias_header_forms(con), **nazwy_slownika()}
+    """`alias_norm` → forma do pokazania dla KAŻDEGO klucza `object_alias` (AR-15, AR-63). Brzmienia
+    z dwóch źródeł już pokazywanych gdzie indziej - słownik obiektów własnych (asset, brzmienie
+    ustawione ręką) wygrywa z kartą `OBJECT` (`queries.alias_header_forms`) - a całość przechodzi
+    przez `forma_aliasu`, więc listwa dostaje tę samą formę co okno. Klucz zostaje kluczem:
+    szukajka i zapis dalej pracują na `alias_norm`."""
+    pretty = {**queries.alias_header_forms(con), **nazwy_slownika()}
+    klucze = {r[0] for r in con.execute("SELECT alias_norm FROM object_alias")}
+    return {**pretty, **{k: forma_aliasu(k, pretty) for k in klucze}}
 
 
 def aliasy_obiektu(canon, alias_norms, pretty=None):
@@ -80,12 +96,8 @@ def aliasy_obiektu(canon, alias_norms, pretty=None):
     musi widzieć aliasy). Źródła: `object_alias` (`alias_norms`) i równoważność `catalog_xref.json`
     czytana wstecz (`xref_aliases`).
 
-    Każdy alias dostaje najczytelniejszą formę, jaką znamy, bez zmyślania brzmienia:
-      * oznaczenie katalogowe → forma kanoniczna gramatyki (`CALDWELL3` → `C3`, `SH2184` → `Sh2-184`);
-      * nazwa ze słownika obiektów własnych albo z karty `OBJECT` → brzmienie z `pretty`
-        (`formy_aliasow`: asset słownika, a za nim `header.object_raw` - AR-15);
-      * reszta → `alias_norm`, bo żadnego brzmienia nie znamy (jak w `facet_model.search_hit`).
-    Aliasy TECHNICZNE odpadają: te, które są zapisem samego kanonu (`NGC4258`, `SH2131`,
+    Każdy alias dostaje formę z `forma_aliasu` (jedyny właściciel, AR-63) - tę samą, którą mówi
+    podpowiedź listwy facetów. Aliasy TECHNICZNE odpadają: te, które są zapisem samego kanonu (`NGC4258`, `SH2131`,
     `COLLINDER464` przy `Cr464`) - niczego userowi nie mówią. Duplikaty scala `klucz_szukania`
     (ten sam klucz z bazy i z xref, a także ta sama nazwa z ogonkami i bez nich: „Wielki Obłok
     Magellana" / „Wielki Oblok Magellana" to jedna nazwa w dwóch zapisach). Z dwóch zapisów
@@ -95,8 +107,7 @@ def aliasy_obiektu(canon, alias_norms, pretty=None):
     pretty = pretty or {}
     formy = {}
     for forma in (*xref_aliases(canon),
-                  *((catalog_canon(a, split=False) or pretty.get(a) or a)
-                    for a in sorted(alias_norms or ()))):
+                  *(forma_aliasu(a, pretty) for a in sorted(alias_norms or ()))):
         klucz = klucz_szukania(forma)
         if klucz and klucz != klucz_kanonu and catalog_canon(forma, split=False) != canon:
             zastana = formy.setdefault(klucz, forma)

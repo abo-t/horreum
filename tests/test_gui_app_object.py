@@ -2480,7 +2480,8 @@ def test_lista_pokazuje_kanon_katalog_i_aliasy_bez_technicznych(aliasy):
     poz = _pozycje(dlg)
     assert poz["NGC4258"] == "NGC4258  ·  NGC  ·  M106"          # `NGC4258` z nagłówka pominięty
     assert poz["NGC7023"] == "NGC7023  ·  NGC  ·  C4, LDN1174"     # równoważność z assetu
-    assert poz["Sh2-131"] == "Sh2-131  ·  Sh2  ·  ELEPHANTSTRUNKNEBULA"
+    # AR-63: nazwa potoczna bez zeznania karty mówi brzmieniem z `_COMMON`, nie kluczem.
+    assert poz["Sh2-131"] == "Sh2-131  ·  Sh2  ·  Elephant's Trunk Nebula"
     # Obiekt własny: brzmienie ze słownika zamiast `alias_norm`, pusty katalog jako `-`.
     assert poz["LMC"] == "LMC  ·  -  ·  Large Magellanic Cloud"
     assert poz["NGC7000"] == "NGC7000  ·  NGC"                     # bez aliasów - bez ogona

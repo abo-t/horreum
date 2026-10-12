@@ -110,25 +110,29 @@ TRANSFERABLE_OBJECT_SOURCES = STICKY_OBJECT_SOURCES | WEAK_OBJECT_SOURCES
 # że ktoś dopisał rodzaj bez powiedzenia o tym drugiej stronie.
 OBJECT_KINDS = frozenset({"deep_sky", "solar_system", "comet", "region", "own"})
 
-# Nazwy potoczne → oznaczenie katalogowe (przed xref; np. Heart→IC1805, Bode's Galaxy→M81→NGC3031).
-# Klucze dopasowywane przez `norm_alnum` (apostrof/spacja/„the"/deskryptor nieistotne).
+# Nazwy potoczne → (oznaczenie katalogowe przed xref, brzmienie do pokazania); np. Heart→IC1805,
+# Bode's Galaxy→M81→NGC3031. Klucze dopasowywane przez `norm_alnum` (apostrof/spacja/„the"/
+# deskryptor nieistotne). Brzmienie czyta wyłącznie pokaz aliasu (`common_name_form`, AR-63): baza
+# trzyma sam klucz, a karta `OBJECT` z oryginałem bywa już naprawiona writebackiem.
 _COMMON = {
-    "ROSETTE": "NGC2237",          # spec §3.5
-    "HEART": "IC1805",
-    "SOUL": "IC1848",
-    "PELICAN": "IC5070",
-    "NORTHAMERICA": "NGC7000",
-    "ELEPHANTSTRUNK": "Sh2-131",   # firsthand: realny light w archiwum
-    "BODES": "M81",                # „Bode's Galaxy" → M81 → (xref) NGC3031
-    # Etap 6.x — braki wykryte firsthand (scalają z rodzeństwem katalogowym, nie rozbijają):
-    "CIGAR": "M82",                # „Cigar Galaxy" → M82 → (xref) NGC3034 (scala z „M 82")
-    "FLAMINGSTAR": "IC405",        # „Flaming Star Nebula" (folder Sh2-229, brak rodzeństwa katalog.)
-    "BUBBLE": "NGC7635",           # „Bubble Nebula" (scala z „NGC 7635")
+    "ROSETTE": ("NGC2237", "Rosette Nebula"),          # spec §3.5
+    "HEART": ("IC1805", "Heart Nebula"),
+    "SOUL": ("IC1848", "Soul Nebula"),
+    "PELICAN": ("IC5070", "Pelican Nebula"),
+    "NORTHAMERICA": ("NGC7000", "North America Nebula"),
+    "ELEPHANTSTRUNK": ("Sh2-131", "Elephant's Trunk Nebula"),   # firsthand: realny light w archiwum
+    "BODES": ("M81", "Bode's Galaxy"),                 # M81 → (xref) NGC3031
+    # Etap 6.x - braki wykryte firsthand (scalają z rodzeństwem katalogowym, nie rozbijają):
+    "CIGAR": ("M82", "Cigar Galaxy"),                  # M82 → (xref) NGC3034 (scala z „M 82")
+    "FLAMINGSTAR": ("IC405", "Flaming Star Nebula"),   # folder Sh2-229, brak rodzeństwa katalog.
+    "BUBBLE": ("NGC7635", "Bubble Nebula"),            # scala z „NGC 7635"
 }
 
 # Deskryptor na końcu nazwy potocznej (zdejmowany przed dopasowaniem) i przedrostek „the".
 _DESCRIPTOR = re.compile(r"\s+(NEBULA|GALAXY|CLUSTER|COMPLEX)$")
 _THE = re.compile(r"^THE\s+")
+# To samo na kluczu `alias_norm`, który nie ma już spacji (`BODESGALAXY`, `THEPELICANNEBULA`).
+_DESCRIPTOR_KLUCZA = re.compile(r"(NEBULA|GALAXY|CLUSTER|COMPLEX)$")
 
 
 @dataclass(frozen=True)
@@ -148,7 +152,22 @@ def _common_canon(raw):
     porównuje przez `norm_alnum`."""
     key = _THE.sub("", norm(raw))
     key = _DESCRIPTOR.sub("", key)
-    return _COMMON.get(norm_alnum(key))
+    wpis = _COMMON.get(norm_alnum(key))
+    return None if wpis is None else wpis[0]
+
+
+def common_name_form(alias_norm):
+    """Klucz aliasu nazwy potocznej (`BODESGALAXY`, `PELICAN`) → brzmienie z `_COMMON` albo None.
+    Ta sama droga co `_common_canon`, tylko od klucza: zdjęty „the” i deskryptor. Nazwa, której
+    `_COMMON` nie zna (`HEARTOFTHESOULNEBULA`), zostaje bez brzmienia - nie zmyślamy go."""
+    if not alias_norm:
+        return None
+    for klucz in (alias_norm, alias_norm[3:] if alias_norm.startswith("THE") else None):
+        if klucz:
+            wpis = _COMMON.get(_DESCRIPTOR_KLUCZA.sub("", klucz)) or _COMMON.get(klucz)
+            if wpis is not None:
+                return wpis[1]
+    return None
 
 
 def _own_stamp():

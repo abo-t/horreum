@@ -66,3 +66,55 @@ def test_mapa_brzmien_przezywa_przeladowanie_bez_niej(qapp):
     qapp.processEvents()
     assert "Large Magellanic Cloud" in rail._lists["object"].item(0).toolTip()
     rail.hide()
+
+
+# ── AR-63: jeden właściciel formy aliasu (`assign_dialog.forma_aliasu`) ────────────────────────────
+@pytest.mark.parametrize("klucz, forma", [
+    ("BODESGALAXY", "Bode's Galaxy"),               # deskryptor na końcu klucza
+    ("THEPELICANNEBULA", "Pelican Nebula"),         # „the” na początku
+    ("ELEPHANTSTRUNK", "Elephant's Trunk Nebula"),  # sam token
+    ("KSIEZYC", "Księżyc"),                         # ciało z ogonkami
+    ("JOWISZ", "Jowisz"),                           # ciało bez wyjątku
+    ("LEMMON", "Lemmon"),                           # token komety - słowo z kanonu komety
+    ("TSUCHINSHAN", "Tsuchinshan"),
+    ("SH2184", "Sh2-184"),                          # gramatyka katalogowa przed resztą
+    ("COLLINDER464", "Cr464"),
+    ("MUR", "MUR"),                                 # alias ręki bez zeznania - zostaje kluczem
+    ("HEARTOFTHESOULNEBULA", "HEARTOFTHESOULNEBULA"),   # `_COMMON` jej nie zna - nie zmyślamy
+])
+def test_forma_aliasu_z_wiedzy_w_kodzie(klucz, forma):
+    from horreum.gui.assign_dialog import forma_aliasu
+    assert forma_aliasu(klucz) == forma
+
+
+def test_brzmienie_z_pretty_wygrywa_z_wiedza_w_kodzie_ale_nie_z_gramatyka():
+    """Karta `OBJECT`/słownik (`pretty`) mówi, jak user podpisał klatki - ma pierwszeństwo przed
+    brzmieniem z `_COMMON`; oznaczenie katalogowe zostaje formą gramatyki (jak okno od AR-15)."""
+    from horreum.gui.assign_dialog import forma_aliasu
+    assert forma_aliasu("BODESGALAXY", {"BODESGALAXY": "Bodes galaxy"}) == "Bodes galaxy"
+    assert forma_aliasu("SH2184", {"SH2184": "SH2 184"}) == "Sh2-184"
+
+
+def test_listwa_i_okno_mowia_ta_sama_forma(tmp_path):
+    """Szew AR-63: mapa listwy (`formy_aliasow`) i lista okna (`aliasy_obiektu`) dają tę samą formę
+    każdego aliasu. Falsyfikator: `formy_aliasow` bez przejścia przez `forma_aliasu` - listwa
+    wraca do `ELEPHANTSTRUNKNEBULA`/`SH2184`, okno mówi brzmieniem."""
+    from horreum import db
+    from horreum.gui.assign_dialog import aliasy_obiektu, formy_aliasow
+    con = db.open_db(str(tmp_path / "h.db"))
+    aliasy = {"Sh2-131": [("ELEPHANTSTRUNKNEBULA", "common_name")],
+              "Moon": [("KSIEZYC", "solar")],
+              "NGC281": [("SH2184", "catalog_xref")],
+              "NGC7000": [("MUR", "user")]}
+    for canon, wpisy in aliasy.items():
+        oid = con.execute("INSERT INTO object(canon, kind) VALUES (?, 'deep_sky')", (canon,)).lastrowid
+        con.executemany("INSERT INTO object_alias(alias_norm, object_id, source) VALUES (?, ?, ?)",
+                        [(k, oid, s) for k, s in wpisy])
+    con.commit()
+    mapa = formy_aliasow(con)
+    for canon, wpisy in aliasy.items():
+        klucze = {k for k, _s in wpisy}
+        assert set(aliasy_obiektu(canon, klucze, mapa)) == {mapa[k] for k in klucze}
+    assert mapa["ELEPHANTSTRUNKNEBULA"] == "Elephant's Trunk Nebula"
+    assert mapa["SH2184"] == "Sh2-184"
+    con.close()

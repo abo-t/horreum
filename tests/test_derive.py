@@ -140,7 +140,8 @@ def test_parytet_import_z_dawcy(tmp_path, wolania):
 
 def test_poza_rdzeniem_nikt_nie_lancuchuje_pochodnych():
     """Strażnik nawrotu czwartej kopii: funkcje etapów pochodnych woła wyłącznie rdzeń (`derive`)
-    i pojedyncze komendy CLI (`main`, jedna gałąź = jeden etap). Falsyfikator: wpisz w
+    i pojedyncze komendy CLI (`_main`, jedna gałąź = jeden etap; `main` to od AR-69 obwódka
+    odmowy bazy z nowszego Horreum i zwolnienia NIE ma). Falsyfikator: wpisz w
     `import_fitsmirror.run_import` `grouper.run_grouper(con, now)` → test wskazuje plik i funkcję."""
     naruszenia = []
     for src in sorted(PKG.rglob("*.py")):
@@ -151,7 +152,7 @@ def test_poza_rdzeniem_nikt_nie_lancuchuje_pochodnych():
         for fn in ast.walk(tree):
             if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
-            if rel == "cli.py" and fn.name == "main":
+            if rel == "cli.py" and fn.name == "_main":
                 continue
             for node in ast.walk(fn):
                 if isinstance(node, ast.Call):

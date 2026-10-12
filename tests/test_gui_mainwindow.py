@@ -843,6 +843,70 @@ def test_otwarcie_bazy_NAZYWA_FAZY_po_kolei(qapp, tmp_path):
         win.close()
 
 
+def _nowsza_baza(tmp_path):
+    """Baza s8 z numerem schematu o jeden WYŻSZYM niż zna ten kod (AR-69)."""
+    path = _seeded_db(tmp_path, name="nowsza.db")
+    con = db.connect(path)
+    con.execute(f"PRAGMA user_version = {db.SCHEMA_VERSION + 1}")
+    con.close()
+    return path
+
+
+def test_baza_z_nowszego_horreum_okno_odmawia_i_zostaje_przy_swojej(qapp, tmp_path, monkeypatch):
+    """AR-69: „Otwórz bazę…” na bazie z nowszego Horreum mówi odmowę oknem komunikatu, a okno
+    zostaje przy bazie, którą miało - dotąd wyjątek ginął w slocie menu (w wydaniu bez konsoli:
+    nic na ekranie), a otwarty uchwyt trzymał plik. Nowsza ścieżka NIE zostaje zapamiętana jako
+    ostatnia baza, faza otwierania gaśnie."""
+    from PySide6.QtWidgets import QMessageBox
+
+    ostrzezenia = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a: ostrzezenia.append(a[2]))
+    zapamietane = []
+    win = MainWindow(on_db_changed=zapamietane.append)
+    try:
+        swoja = _seeded_db(tmp_path)
+        win.open_path(swoja)
+        con = win.con
+        nowsza = _nowsza_baza(tmp_path)
+        win.open_path(nowsza)
+        (zdanie,) = ostrzezenia
+        assert "nowsza.db" in zdanie and f"v{db.SCHEMA_VERSION + 1}" in zdanie
+        assert f"v{db.SCHEMA_VERSION}" in zdanie and "nietknięta" in zdanie
+        assert win.con is con and win.db_path == swoja and zapamietane == [swoja]
+        assert win.con.execute("SELECT count(*) FROM frame").fetchone()[0] > 0
+        assert win.phase_label.text() == ""
+    finally:
+        win.close()
+
+
+def test_start_z_zapamietana_nowsza_baza_stoi_bez_bazy(qapp, tmp_path, monkeypatch):
+    """AR-69, ścieżka startu: `main` otwiera zapamiętaną bazę przed `app.exec()`, więc odmowa
+    jako wyjątek wywracała program przy KAŻDYM uruchomieniu, zanim cokolwiek pokazał. Teraz okno
+    stoi bez bazy, z pustym stanem „Brak bazy”, a odmowa padła oknem komunikatu."""
+    from PySide6.QtWidgets import QMessageBox
+    from horreum.gui import app as app_mod, i18n
+
+    ostrzezenia = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a: ostrzezenia.append(a[2]))
+    okna = []
+    prawdziwy_show = app_mod.MainWindow.show
+
+    def _show(self):
+        okna.append(self)
+        return prawdziwy_show(self)
+
+    monkeypatch.setattr(app_mod.MainWindow, "show", _show)
+    monkeypatch.setattr(app_mod.QApplication, "exec", lambda self: 0)
+    try:
+        assert app_mod.main([_nowsza_baza(tmp_path)]) == 0
+        (win,) = okna
+        assert len(ostrzezenia) == 1
+        assert win.con is None and win.empty_note.text() == i18n.t("main.no_db")
+    finally:
+        for w in okna:
+            w.close()
+
+
 def test_start_aplikacji_POKAZUJE_OKNO_ZANIM_czyta_baze(qapp, tmp_path, monkeypatch):
     """F-1, cała naprawa siedzi w KOLEJNOŚCI: do tej zmiany `MainWindow(start)` otwierał bazę
     i montował cztery widoki W KONSTRUKTORZE, a `show()` szedł dopiero po nim — 4,65 s czarnego

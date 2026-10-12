@@ -77,6 +77,18 @@ def _positive_float(text):
 
 
 def main(argv=None):
+    """Wejście CLI (`horreum = horreum.cli:main`). Odmowa bazy z nowszego Horreum
+    (`db.SchemaTooNew`, AR-69) jest tu zdaniem i kodem 2, nie śladem stosu: każda komenda,
+    która pisze, otwiera bazę przez `db.open_db`, a czytające (`plan`, `human-facts`) rzucają
+    ten sam wyjątek same - jedno miejsce na jego zdanie zamiast dwudziestu kilku."""
+    try:
+        return _main(argv)
+    except db.SchemaTooNew as exc:
+        print(f"Horreum: ODMOWA -- {exc}")
+        return 2
+
+
+def _main(argv=None):
     # Konsola Windows bywa cp1250; `delta` wypisuje surowe object_raw (dane usera — mogą mieć znaki
     # spoza cp1250). Przełącz stdout na UTF-8 (best-effort), by `print` nie wywalił się na nazwie
     # obiektu PO odczycie z bazy. Dla wyjścia ASCII (scan/group) bajty bez zmian.
@@ -532,6 +544,8 @@ def main(argv=None):
         version = db._user_version(con)
         if version != db.SCHEMA_VERSION:
             con.close()
+            if version > db.SCHEMA_VERSION:              # `init` nic tu nie pomoże (AR-69)
+                raise db.SchemaTooNew(version)
             print(f"Horreum plan: baza {args.db} ma schemat v{version}, kod oczekuje "
                   f"v{db.SCHEMA_VERSION} — uruchom `horreum init {args.db}` (plan nie migruje).")
             return 2
@@ -753,8 +767,14 @@ def main(argv=None):
         from . import audit                                # read-only, bez astropy
         # `connect`, NIE `open_db`: pomiar nie ma prawa zmigrować mierzonej bazy. Spis biegnie
         # PRZED etapem i PO nim, często na żywym archiwum — otwarcie ze skutkiem ubocznym
-        # kazałoby liczyć na bazie innej niż ta, o którą pytamy.
+        # kazałoby liczyć na bazie innej niż ta, o którą pytamy. Baza NOWSZA od kodu = odmowa
+        # (AR-69): spis nie zna faktów ręki z nowszych migracji, więc „ubytków: BRAK” byłoby
+        # zdaniem o bazie, której ten program nie umie policzyć.
         con = db.connect(args.db)
+        version = db._user_version(con)
+        if version > db.SCHEMA_VERSION:
+            con.close()
+            raise db.SchemaTooNew(version)
         spis = audit.human_facts_census(con)
         spadki, rozbior = {}, None
         if args.baseline:

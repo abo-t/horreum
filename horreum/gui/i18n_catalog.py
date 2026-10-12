@@ -1732,6 +1732,14 @@ CATALOG = {
         "en": "No database — open or create one (File menu).",
     },
     "main.db_loaded": {"pl": "Baza: {path}", "en": "Database: {path}"},
+    # AR-69: baza zapisana nowszym Horreum - odmowa, zanim program cokolwiek w niej zmieni.
+    "main.db_too_new": {
+        "pl": "Baza {name} pochodzi z nowszej wersji Horreum (schemat v{found}), a ten program "
+              "zna schemat do v{supported}.\n\nZaktualizuj Horreum. Baza zostaje nietknięta.",
+        "en": "Database {name} comes from a newer version of Horreum (schema v{found}), and this "
+              "program knows schemas up to v{supported}.\n\nUpdate Horreum. The database is left "
+              "untouched.",
+    },
 
     # --- FAZY DŁUGICH OPERACJI (F-1) — czasownik w pierwszej osobie ---
     # „Czytam bazę…", nie „Ładowanie": user pytał, czy aplikacja COŚ ROBI, więc odpowiedź ma być

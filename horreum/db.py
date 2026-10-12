@@ -166,6 +166,21 @@ SCHEMA_VERSION = MIGRATIONS[-1][0]
 _KNOWN_VERSIONS = frozenset({0} | {v for v, _ in MIGRATIONS})
 
 
+class SchemaTooNew(RuntimeError):
+    """Baza zapisana nowszym Horreum, niż ten program (`user_version` > `SCHEMA_VERSION`).
+
+    DLACZEGO ODMOWA (AR-69): starszy kod nie zna kolumn i tabel nowszych migracji, więc czytałby
+    bazę po swojemu (np. planer bez piksela wpisanego ręką) i pisałby obok faktów, których nie
+    widzi - ręka zapisana nowszą wersją przestałaby być nietykalna. Odmowa pada, zanim program
+    cokolwiek w bazie zmieni; `found` niesie wersję bazy dla zdania w CLI i w oknie."""
+
+    def __init__(self, found):
+        self.found = found
+        super().__init__(
+            f"baza ma schemat v{found} z nowszej wersji Horreum, a ten program zna schemat "
+            f"do v{SCHEMA_VERSION} - zaktualizuj Horreum; baza zostaje nietknięta")
+
+
 def connect(path):
     """Otwórz bazę Horreum z FK ON i Row factory. `path` = plik albo ':memory:'.
 
@@ -200,8 +215,11 @@ def migrate(con):
 
     EXPECT: baza o wersji SPOZA łańcucha (np. v1 sprzed przejścia fitsmirror) → jawny błąd,
     nie cicha pół-migracja (0002 to pełny initial — na v1 wybuchłby w połowie skryptu).
-    Świeżą bazę tworzy migracja; konwertera starej NIE ma (brief przejścia, rama ŚWIEŻA-BAZA)."""
+    Świeżą bazę tworzy migracja; konwertera starej NIE ma (brief przejścia, rama ŚWIEŻA-BAZA).
+    Baza NOWSZA od kodu → `SchemaTooNew` przed jakąkolwiek migracją (AR-69)."""
     current = _user_version(con)
+    if current > SCHEMA_VERSION:
+        raise SchemaTooNew(current)
     if current not in _KNOWN_VERSIONS and current < SCHEMA_VERSION:
         raise RuntimeError(
             f"baza w wersji v{current} sprzed przejścia fitsmirror — brak ścieżki migracji; "
@@ -244,7 +262,15 @@ def _apply_migration(con, version, sql):
 
 
 def open_db(path):
-    """Otwórz + zmigruj. Główne wejście dla CLI/skanu."""
+    """Otwórz + zmigruj. Główne wejście dla CLI/skanu.
+
+    Każdy błąd migracji (odmowa `SchemaTooNew`, baza spoza łańcucha, awaria skryptu) zamyka
+    połączenie przed rzutem - na Windows otwarty uchwyt trzymałby plik bazy, a wołający, który
+    odmowę łapie (okno GUI), nie dostaje połączenia, które mógłby zamknąć."""
     con = connect(path)
-    migrate(con)
+    try:
+        migrate(con)
+    except BaseException:
+        con.close()
+        raise
     return con

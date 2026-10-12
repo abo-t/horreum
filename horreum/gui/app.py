@@ -4137,17 +4137,30 @@ class MainWindow(QMainWindow):
         `pf4` (16 648 klatek): otwarcie i migracja bazy, potem montaż czterech widoków. Faza idzie
         na ŚRODEK okna, nie na pasek statusu: przy starcie w oknie nie ma jeszcze nic innego,
         a pasek statusu na dole jest ostatnim miejscem, w które user patrzy, gdy pyta „czy to
-        w ogóle wstało"."""
-        with busy.busy(self._say_phase, i18n.t("busy.open_db", name=Path(path).name)) as faza:
-            new_con = db.open_db(path)
-            old = self.con
-            self.con = new_con
-            self.db_path = path
-            faza.say(i18n.t("busy.mount_views"))
-            self._mount_views()
-            self._sync_db_state()
-            if old is not None:
-                old.close()
+        w ogóle wstało".
+
+        ODMOWA BAZY Z NOWSZEGO HORREUM (AR-69): `open_db` rzuca `db.SchemaTooNew`, zanim
+        cokolwiek w bazie zmieni. Okno zostaje przy dotychczasowej bazie (przy starcie - bez
+        bazy) i mówi to oknem komunikatu. Bez tego start z zapamiętaną nowszą bazą kończył się
+        śladem stosu przed `app.exec()` przy KAŻDYM uruchomieniu. Ścieżka zostaje zapamiętana:
+        po aktualizacji programu ta sama baza otworzy się sama."""
+        try:
+            with busy.busy(self._say_phase, i18n.t("busy.open_db", name=Path(path).name)) as faza:
+                new_con = db.open_db(path)
+                old = self.con
+                self.con = new_con
+                self.db_path = path
+                faza.say(i18n.t("busy.mount_views"))
+                self._mount_views()
+                self._sync_db_state()
+                if old is not None:
+                    old.close()
+        except db.SchemaTooNew as exc:              # rzuca wyłącznie `open_db` - nic nie przejęte
+            self._end_phase()
+            QMessageBox.warning(self, i18n.t("dialog.open_db_title"), i18n.t(
+                "main.db_too_new", name=Path(path).name, found=exc.found,
+                supported=db.SCHEMA_VERSION))
+            return
         self._end_phase()
         if self._on_db_changed is not None:        # zapamiętaj ostatnią bazę (trwałe ustawienia)
             self._on_db_changed(path)

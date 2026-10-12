@@ -1,4 +1,6 @@
 """Połączenie + runner migracji (user_version, idempotencja, FK, jawny błąd dla bazy v1)."""
+import hashlib
+
 import pytest
 
 from horreum import db
@@ -58,6 +60,65 @@ def test_przedpotopowa_baza_v1_jawny_blad(tmp_path):
     with pytest.raises(RuntimeError, match="sprzed przejścia"):
         db.migrate(con)
     con.close()
+
+
+def _baza_z_nowszego_horreum(path):
+    """Pełna baza tego kodu z numerem o jeden WYŻSZYM - tak wygląda baza po migracji, której
+    ten program jeszcze nie zna (AR-69)."""
+    con = db.open_db(path)
+    con.execute(f"PRAGMA user_version = {db.SCHEMA_VERSION + 1}")
+    con.close()
+
+
+def test_baza_z_nowszego_horreum_odmowa_przed_migracja(tmp_path):
+    """AR-69: dawniej `migrate` odmawiał tylko wersji spoza łańcucha NIŻSZEJ od własnej, więc
+    wydanie v30 otwierało bazę v31 bez słowa. Odmowa pada, zanim cokolwiek się zmieni: numer
+    i schemat zostają takie, jakie zapisał nowszy program.
+    Falsyfikator: zdejmij warunek `current > SCHEMA_VERSION` → `migrate` przejdzie bez błędu."""
+    path = str(tmp_path / "nowsza.db")
+    _baza_z_nowszego_horreum(path)
+    con = db.connect(path)
+    schemat = con.execute("SELECT type, name, sql FROM sqlite_master ORDER BY name").fetchall()
+    with pytest.raises(db.SchemaTooNew, match="zaktualizuj Horreum") as odmowa:
+        db.migrate(con)
+    assert odmowa.value.found == db.SCHEMA_VERSION + 1
+    assert db._user_version(con) == db.SCHEMA_VERSION + 1
+    assert con.execute("SELECT type, name, sql FROM sqlite_master ORDER BY name").fetchall() \
+        == schemat
+    con.close()
+
+
+def test_open_db_zamyka_polaczenie_przy_odmowie_i_nie_rusza_pliku(tmp_path):
+    """Odmowa w `open_db` nie zostawia otwartego uchwytu: okno GUI łapie wyjątek i nie ma czego
+    zamknąć, a na Windows otwarte połączenie trzyma plik bazy. Dowód z dysku: plik da się
+    przenieść zaraz po odmowie. Falsyfikator: zdejmij `con.close()` z `open_db` → `PermissionError`
+    na Windows.
+
+    Druga połowa dowodu to zdanie „baza zostaje nietknięta” z komunikatu: `connect` ustawia
+    `journal_mode = WAL`, ale baza Horreum jest w WAL od pierwszego otwarcia, więc PRAGMA niczego
+    nie zapisuje - plik ma po odmowie ten sam odcisk co do bajtu (bramka `kimi` Z1, sesja bu)."""
+    path = tmp_path / "nowsza.db"
+    _baza_z_nowszego_horreum(str(path))
+    przed = hashlib.sha1(path.read_bytes()).hexdigest()
+    with pytest.raises(db.SchemaTooNew):
+        db.open_db(str(path))
+    assert hashlib.sha1(path.read_bytes()).hexdigest() == przed
+    path.rename(tmp_path / "przeniesiona.db")
+
+
+@pytest.mark.parametrize("komenda", [["init", "{db}"], ["human-facts", "{db}"], ["plan", "{db}"]])
+def test_cli_odmawia_bazy_z_nowszego_horreum_zdaniem_i_kodem_2(tmp_path, capsys, komenda):
+    """CLI mówi odmowę jednym zdaniem i kodem 2, nie śladem stosu - także w komendach, które
+    czytają bez migracji (`plan` radził dotąd `horreum init`, a `human-facts` liczył fakty ręki
+    bazy, której schematu nie zna)."""
+    from horreum import cli
+
+    path = str(tmp_path / "nowsza.db")
+    _baza_z_nowszego_horreum(path)
+    assert cli.main([a.format(db=path) for a in komenda]) == 2
+    out = capsys.readouterr().out
+    assert "ODMOWA" in out and f"v{db.SCHEMA_VERSION + 1}" in out and "zaktualizuj Horreum" in out
+    assert "init" not in out
 
 
 def _kolumny(con, tabela):

@@ -1520,8 +1520,12 @@ def check_criteria(con, summary, out, cal=None, cal_idempotent=None, lin=None, l
         czasowa_ok = _check_nearest_in_time(con)
         crit("§5.12 reguła czasowa: każdy link flat automatu = aktywny master o min |Δczasu| "
              "w profilu", czasowa_ok)
-        crit("§5.12 ręka ⊆ aktywne mastery klasy i kamery lightu",
-             _check_hand_links_active(con) == 0)
+        reka = _check_hand_links_active(con)
+        crit("§5.12 ręka ⊆ aktywne mastery klasy i kamery lightu"
+             + (f" - naruszenia {reka}" if reka else ""), not reka)
+        obce = _check_foreign_links_active(con)
+        crit("§5.12 ogniwa spoza automatu i ręki (`wbpp`) ⊆ aktywne mastery klasy"
+             + (f" - naruszenia {obce}" if obce else ""), not obce)
         if full:
             crit_k("§5.12 lighty z darkiem", EXP_LINEAGE_DARK, lin.linked.get("dark", 0))
             crit_k("§5.12 lighty z flatem", EXP_LINEAGE_FLAT, lin.linked.get("flat", 0))
@@ -1567,15 +1571,38 @@ def _check_nearest_in_time(con):
 
 def _check_hand_links_active(con):
     """Wskazania RĘKI osi kalibracji (`asserted_by='user'`) - osobne kryterium, bo reguła czasu ich
-    nie obejmuje: ręka ⊆ aktywne mastery klasy relacji i kamery lightu. Zwraca liczbę wierszy, które
-    tę granicę łamią (0 = zielono); wycofanie mastera PO geście to stan do pokazania, nie błąd
-    klingi, ale bramka ma go nazwać."""
-    return con.execute(
-        "SELECT count(*) FROM calibration c JOIN frame m ON m.id = c.master_frame_id "
+    nie obejmuje: ręka ⊆ aktywne mastery klasy relacji i kamery lightu. Zwraca `{powód: liczba}`
+    wierszy, które tę granicę łamią (pusty = zielono), każdy wiersz pod PIERWSZYM pasującym powodem:
+    `nie_light` (klatka zmieniła rodzaj PO geście) · `klasa` · `nagrobek` (master wycofany albo zastąpiony
+    PO geście) · `light_bez_kamery` · `kamera` - ta sama kolejność bram co klinga.
+    Gałąź `light_bez_kamery` jest jawna (AR-113): klinga takiego gestu nie zapisze
+    (`repo.KalibratorOdrzucony('camera')`), więc wiersz z niej to light, który stracił kamerę PO
+    geście - stan do pokazania jak nagrobek mastera, nie błąd klingi, ale bramka ma go nazwać."""
+    return dict(con.execute(
+        "SELECT CASE WHEN l.kind IS NOT 'light' THEN 'nie_light' "
+        "            WHEN m.kind IS NOT 'master_' || c.relation THEN 'klasa' "
+        "            WHEN m.retired_at IS NOT NULL OR m.superseded_by IS NOT NULL THEN 'nagrobek' "
+        "            WHEN l.camera_id IS NULL THEN 'light_bez_kamery' "
+        "            WHEN l.camera_id IS NOT m.camera_id THEN 'kamera' END AS powod, count(*) "
+        "FROM calibration c JOIN frame m ON m.id = c.master_frame_id "
         "JOIN frame l ON l.id = c.light_frame_id WHERE c.asserted_by = 'user' "
-        "AND (m.kind <> 'master_' || c.relation OR m.retired_at IS NOT NULL "
-        "     OR m.superseded_by IS NOT NULL OR l.camera_id IS NULL "
-        "     OR l.camera_id IS NOT m.camera_id)").fetchone()[0]
+        "GROUP BY powod HAVING powod IS NOT NULL").fetchall())
+
+
+def _check_foreign_links_active(con):
+    """Ogniwa źródeł spoza automatu (`repo.CALIBRATION_AUTO_SOURCES`) i ręki - dziś legacy `wbpp`
+    (0009: „user/wbpp przebijają”), populacja 0 na `pf4` - nie podlegały żadnemu kryterium (AR-113).
+    Granica: aktywny master klasy relacji; kamery nie żądamy, bo takie ogniwo zeznaje cudzy program,
+    nie gest przez klingę z jej bramką kamery. Zwraca `{powód: liczba}` (`klasa` · `nagrobek`)."""
+    from horreum import repo
+    znane = (*repo.CALIBRATION_AUTO_SOURCES, "user")
+    return dict(con.execute(
+        "SELECT CASE WHEN m.kind IS NOT 'master_' || c.relation THEN 'klasa' "
+        "            WHEN m.retired_at IS NOT NULL OR m.superseded_by IS NOT NULL THEN 'nagrobek' "
+        "       END AS powod, count(*) "
+        "FROM calibration c JOIN frame m ON m.id = c.master_frame_id "
+        f"WHERE c.asserted_by NOT IN ({','.join('?' * len(znane))}) "
+        "GROUP BY powod HAVING powod IS NOT NULL", znane).fetchall())
 
 
 # ── (S) SUBSET: realny skan małego katalogu (czytniki + sha1 na realnych bajtach) ────────────────

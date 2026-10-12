@@ -673,10 +673,28 @@ def test_wyrocznia_akceptacji_pomija_reke_i_nagrobki(con):
                           now=NOW, actor="user:local", asserted_by="user", confidence="user",
                           expected=(daleko, "user"))
     assert acc._check_nearest_in_time(con) is True
-    assert acc._check_hand_links_active(con) == 0
+    assert acc._check_hand_links_active(con) == {}
     con.execute("UPDATE frame SET retired_at = ? WHERE id = ?", (NOW, oiii))
     con.commit()
-    assert acc._check_hand_links_active(con) == 1
+    assert acc._check_hand_links_active(con) == {"nagrobek": 1}
+    # AR-113: light, który stracił kamerę PO geście, ma własny powód (klinga go nie zapisze).
+    con.execute("UPDATE frame SET retired_at = NULL WHERE id = ?", (oiii,))
+    con.execute("UPDATE frame SET camera_id = NULL WHERE id = ?", (reka,))
+    con.commit()
+    assert acc._check_hand_links_active(con) == {"light_bez_kamery": 1}
+    # Z2 bramki: klatka przeliczona na inny rodzaj PO geście - pierwsza brama klingi (`not_light`).
+    con.execute("UPDATE frame SET kind = 'dark' WHERE id = ?", (reka,))
+    con.commit()
+    assert acc._check_hand_links_active(con) == {"nie_light": 1}
+    # AR-113: ogniwo cudzego programu (legacy `wbpp`) - aktywny master klasy, bez wymogu kamery.
+    assert acc._check_foreign_links_active(con) == {}
+    con.execute("UPDATE calibration SET asserted_by = 'wbpp' WHERE light_frame_id = ?", (auto,))
+    con.commit()
+    assert acc._check_foreign_links_active(con) == {}
+    con.execute("UPDATE frame SET superseded_by = ? WHERE id = ?", (oiii, daleko))
+    con.commit()
+    assert acc._check_foreign_links_active(con) == {"nagrobek": 1}
+    assert acc._check_nearest_in_time(con) is True         # `wbpp` poza regułą czasu automatu
 
 
 def test_spis_reki_wyjasnia_zdjecie_gestem_przywroc_automat(con):

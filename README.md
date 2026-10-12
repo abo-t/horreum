@@ -5,9 +5,9 @@
 Standalone catalog manager for a deep‑sky astrophotography library (light frames and masters),
 working over any file tree.
 
-![Horreum main window — the Collections view: a faceted, queryable catalog over a FITS/XISF archive](doc/horreum-gui.png)
+![Horreum main window - the Home screen: four ways in (Receive, Find, Release to WBPP, Fix) above object folders with hours and calibration coverage](doc/horreum-gui.png)
 
-*The Collections view — faceted axes (object, filter, kind, telescope, night) over the whole archive, dark theme.*
+*The Home screen (Polish UI) - four ways in (receive a night, find frames, release an object to WBPP, fix what the automation was unsure of) above the objects with the most hours, dark theme.*
 
 Horreum inverts the classic *"folder = truth"* model: a **SQLite database is the authority**, and a
 file's **`sha1` content hash is its identity** — surviving renames and moves. Every identity change is
@@ -37,9 +37,9 @@ responses may take a while (that's expected, not neglect). See [CONTRIBUTING.md]
 
 Samodzielny menedżer biblioteki astrofotograficznej (suby i mastery) dla dowolnego drzewa plików.
 
-![Horreum — główne okno, widok Zbiory: przeszukiwalny katalog z facetami nad archiwum FITS/XISF](doc/horreum-gui.png)
+![Horreum - główne okno, ekran Dom: cztery drogi (Przyjmij, Znajdź, Wydaj do WBPP, Popraw) nad teczkami obiektów z godzinami i pokryciem kalibracji](doc/horreum-gui.png)
 
-*Widok „Zbiory" — osie-facety (obiekt, filtr, rodzaj, teleskop, noc) nad całym archiwum; motyw ciemny.*
+*Ekran „Dom" - cztery drogi (Przyjmij, Znajdź, Wydaj do WBPP, Popraw) nad teczkami obiektów z największą liczbą godzin; motyw ciemny.*
 
 > **Status:** wczesny rozwój. Schemat i API mogą się jeszcze zmieniać.
 >
@@ -100,20 +100,23 @@ horreum --help               # linia poleceń
 
 ## Szybki start
 
-1. **Nowa baza** — wskaż plik `.db` (pusty powstanie z migracjami).
-2. **Skanuj** drzewo z plikami FITS/XISF/RAW — baza wciąga nagłówki (append-only, `sha1` = tożsamość).
-3. **Grupuj** — Horreum wyprowadza osie teleskopu i konfiguracji.
-4. **Rozwiąż** — resolver rozpoznaje obiekty (katalogi krzyżowe, nazwy potoczne, ciała Układu,
-   regiony po współrzędnych, propozycje z nazwy folderu).
-5. **Przegląd** — co wymaga ręcznej decyzji, trafia na listę. Stamtąd nazwiesz klatki ręką,
-   potwierdzisz propozycję z folderu albo dopiszesz kartę `OBJECT` wprost do pliku; każdą własną
-   decyzję da się cofnąć. Kopia, której nie dało się odczytać, mówi, co zawiodło: dysk (dostęp),
-   plik (nagłówek) czy program (baza).
+1. **Nowa baza** - wskaż plik `.db` (pusty powstanie z migracjami). Program startuje na ekranie
+   **Dom** z czterema drogami.
+2. **Przyjmij** - wskaż katalog archiwum z plikami FITS/XISF/RAW. Baza wciąga nagłówki (pliki są
+   tylko czytane, `sha1` = tożsamość), wyprowadza osie teleskopu i stanowiska oraz rozpoznaje
+   obiekty (katalogi krzyżowe, nazwy potoczne, ciała Układu, regiony po współrzędnych). Raport
+   „Co przyszło" mówi, co wjechało i czego program nie rozpoznał.
+3. **Znajdź** - jedno pole: nazwa obiektu i warunki (`noc:`, `filtr:`, `teleskop:`, `zestaw:`,
+   `uwagi:`), a pod tabelą czasowniki na zaznaczeniu.
+4. **Wydaj do WBPP** - komplet obiektu (lighty, mastery, surowe flaty) jako linki w folderze roboczym;
+   po obróbce **Wciągnij z WBPP…** kopiuje nowe mastery i stosy do archiwum z rodowodem.
+5. **Popraw** - lista zadań, których automat nie był pewny: nazwiesz klatki ręką, potwierdzisz
+   propozycję z folderu, dopiszesz kartę `OBJECT` wprost do pliku albo **Zmień obiekt…** przeniesie
+   plik do folderu obiektu razem z kartą. Każdą własną decyzję da się cofnąć.
 
-Poza tą drogą: **Stosy** (gotowe obrazy po integracji wchodzą do biblioteki razem z rodowodem —
-z czego powstały), **Planer** (co warto sfotografować dziś, z pokryciem materiału), **Wydaj na
-stół** (drzewo linków/kopii pod WBPP) i **Uporządkuj nazwy plików** (zmiana nazw z faktów
-nagłówka — z podglądem i cofnięciem).
+W **Więcej…**: **Planer** (co warto sfotografować dziś, z pokryciem materiału), **Zbiory klasyczne**
+(pełna tabela z osiami-facetami i perspektywami) oraz **Nazwy plików…** (zmiana nazw z faktów
+nagłówka - z podglądem i cofnięciem).
 
 ## Budowanie wersji zamrożonej
 

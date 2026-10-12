@@ -6,6 +6,8 @@ schemat i API mogą się jeszcze zmieniać.
 
 ## [Niewydane]
 
+## [0.11.0] - 2026-10-12
+
 Wydanie o **całej drodze jednego obiektu** - od nocy na dysku do gotowego stosu w archiwum. Dotąd
 Horreum był przede wszystkim katalogiem: materiał do obróbki składałeś z perspektyw, a wyniki WBPP
 przenosiłeś do archiwum sam. Teraz program startuje na ekranie Dom z czterema drogami: **Przyjmij**
@@ -331,6 +333,18 @@ odmawia bazy z nowszego schematu, a starsze wydania otworzą ją bez słowa.
 
 - **Okno mieści się na niższym ekranie.** Listwa filtrów w Zbiorach klasycznych przewija się zamiast
   wymuszać wysokość okna, więc Horreum da się zmniejszyć w pionie znacznie bardziej niż dotąd.
+
+- **Zepsuta baza nie wywraca programu.** Plik, który nie jest bazą Horreum, obcięta kopia albo
+  katalog wskazany zamiast pliku dają okno „Nie udało się otworzyć bazy” z powodem - zarówno
+  w „Otwórz bazę…”, jak i przy starcie z zapamiętaną bazą. Okno zostaje przy dotychczasowej bazie
+  albo startuje bez bazy, a pliku nie trzyma otwartego, więc od razu da się go przenieść albo
+  usunąć. Wersja w jednym pliku dotąd po prostu nic nie pokazywała.
+
+- **Plik chwilowo zajęty nie blokuje przeniesienia.** Gdy przy „Zmień obiekt…”, „Uzgodnij pliki…”
+  albo zmianie nazw plik trzyma przez moment inny program (Eksplorator, indeksowanie, antywirus),
+  Horreum czeka chwilę i próbuje ponownie, zamiast od razu zgłosić pozycję jako zablokowaną. Gdy
+  plik dalej jest zajęty, powód mówi „plik zajęty przez inny program - spróbuj ponownie za chwilę”
+  zamiast surowego komunikatu systemu.
 
 ### Wiersz poleceń
 
@@ -1206,6 +1220,7 @@ Fundament: przejście na model „baza = autorytet, `sha1` = tożsamość".
 - **Import zasilający** świeżej bazy z bazy‑dawcy (read‑only).
 - **CLI**: `init` / `scan` / `group` / `resolve` / `delta`.
 
+[0.11.0]: https://github.com/abo-t/horreum/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/abo-t/horreum/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/abo-t/horreum/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/abo-t/horreum/compare/v0.8.0...v0.9.0

@@ -396,6 +396,8 @@ Pogrubiona liczba to robota; szare wiersze to historia albo stan bez roboty.
 | **Stanowiska bez nazwy** | miejsce ma tylko współrzędne | **Oś obserwatorium** |
 | **Duplikaty (>1 kopia)** | ta sama klatka leży w kilku miejscach | perspektywa **Duplikaty** |
 | **Zniknięte z dysku** | żadnej kopii klatki nie ma już na dysku | perspektywa **Zniknięte** |
+| **Plik nie zgadza się z obiektem** | plik leży w folderze innego obiektu albo jego karta `OBJECT` mówi co innego niż baza | perspektywa o tej nazwie, gest **Uzgodnij pliki…** |
+| **Przerwane zmiany obiektu** | **Zmień obiekt…** albo **Uzgodnij pliki…** nie doszło do końca | okno przerwanego przebiegu z **Dokończ** i **Cofnij** |
 
 Z podstrony wracasz strzałką **← Porządki**.
 
@@ -477,11 +479,39 @@ Nie musisz iść przez kolejkę. Zaznacz klatki w **Znajdź** i użyj menu **Obi
 - **Przypisz obiekt…** - to samo okno co wyżej,
 - **→ NAZWA** - skrót do nazw użytych ostatnio, przypisuje od razu, bez okna,
 - **Cofnij przypisanie** - zdejmuje nazwę postawioną ręką albo przez folder,
-- **Przywróć cofnięte przypisanie** - odwraca to zdjęcie.
+- **Przywróć cofnięte przypisanie** - odwraca to zdjęcie,
+- **Zmień obiekt…** - zmienia obiekt razem z plikiem (opis niżej).
 
 > **Cofnięcie nie kasuje faktów z plików.** Nazwa odczytana z nagłówka albo z pozycji na niebie
 > zostaje. Cofnięcie zostaje też cofnięciem: klatka nie dostanie nazwy z powrotem przy kolejnym
 > przyjęciu, tylko poczeka w kolejce na Twoją decyzję.
+
+#### Zmień obiekt… - obiekt, folder i karta razem
+
+**Przypisz obiekt…** zmienia tylko bazę. **Zmień obiekt…** robi trzy rzeczy naraz: przepina obiekt
+w bazie, przenosi plik do folderu nowego obiektu w archiwum i wpisuje do pliku kartę `OBJECT`.
+Każdy plik przechodzi całość albo nic - nie zostaje plik w nowym folderze ze starą kartą.
+
+1. Zaznacz klatki, w menu **Obiekt** kliknij **Zmień obiekt…** i wybierz nowy obiekt.
+   Sam wybór niczego nie zapisuje.
+2. Okno **Zmień obiekt** pokazuje plan: ścieżkę dziś i po zmianie, kartę przed i po, katalogi do
+   założenia i puste katalogi do usunięcia. Klatki, których gest nie ruszy, stoją osobno z powodem.
+3. Kliknij **Zmień obiekt (N)**. Wynik mówi, ile plików przeszło do folderu obiektu.
+
+W nazwie pliku zmienia się tylko człon obiektu na początku, reszta zostaje znak w znak. Nazwa, która
+obiektem się nie zaczyna (np. nazwa z aparatu), zostaje cała.
+
+**Cofnij** w tym samym oknie przywraca karty, pliki, katalogi i obiekt. Po zamknięciu okna cofnięcie
+robi wiersz poleceń: `horreum object-change undo` z numerem przebiegu.
+
+**Uzgodnij pliki…** to ten sam gest bez zmiany obiektu: obiekt w bazie zostaje, plik dogania go
+folderem i kartą. Klatki do uzgodnienia zbiera wiersz Porządków **Plik nie zgadza się z obiektem** -
+zaznacz je w perspektywie i prawym klikiem wybierz **Uzgodnij pliki…**.
+
+> **Plik zajęty przez inny program.** Gdy plik trzyma podgląd, Eksplorator albo antywirus, Horreum
+> chwilę czeka i próbuje ponownie. Jeśli plik dalej jest zajęty, ta jedna pozycja kończy się
+> powodem „plik zajęty przez inny program” i zostaje nietknięta, a reszta przebiegu idzie dalej.
+> Zamknij program, który trzyma plik, i powtórz gest na tej klatce (nowy podgląd).
 
 W **Zbiory klasyczne** obok stoi menu **Klatka**: **Wycofaj klatkę…** (klatka, której wszystkie kopie
 zniknęły z dysku, schodzi z oczu) i **Przywróć klatkę**.
@@ -801,14 +831,15 @@ w bazie (`saved_query`).
 
 **CLI** (`horreum/cli.py`, dla zaawansowanych): `init`, `scan`, `stacks`, `group`, `resolve`,
 `calibrate`, `lineage`, `stack-lineage`, `delta`, `rename` (DRY domyślnie, `--apply`/`--undo`),
-`project` (drzewo pod WBPP, DRY domyślnie), `presence`, `human-facts`, `plan`, `target`.
+`project` (drzewo pod WBPP, DRY domyślnie), `presence`, `human-facts`, `plan`, `target`,
+`object-change finish|undo` (przebieg „Zmień obiekt…” po numerze ze zdania wyniku).
 
 **Dystrybucja:** onefile - `dist\horreum-gui.exe` z `packaging\build.ps1 -Onefile`, publikowany jako
 `Horreum-<wersja>-windows-x64.exe`. Numer wersji ma jednego właściciela (`pyproject.toml`), widać go
 w tytule okna (bramka `tests/test_version.py`).
 
-**Status dokumentu:** przepisany 2026-10-11 według czterech czasowników Domu; opisuje kod
-z wersją `pyproject.toml` 0.10.0 i schematem bazy v33. Z poprzedniej wersji wypadły: wiersz Porządków
+**Status dokumentu:** przepisany 2026-10-11 według czterech czasowników Domu, uzupełniony 2026-10-12
+o **Zmień obiekt…** i **Uzgodnij pliki…**; opisuje wydanie 0.11.0 ze schematem bazy v36. Z poprzedniej wersji wypadły: wiersz Porządków
 „XISF (nagłówki tylko do odczytu)” (zdjęty z `_TASKS`) oraz układ „Krok 1..6”. Nadal bez
 opisu krok po kroku: panel **Popraw nagłówki…** (makra), **Uporządkuj nazwy plików…**, **Wydaj na
 stół…**, panel **Rodowód…** w pełni (odniesienie czasu RAW, wybór innej nocy), Planer w pełni
